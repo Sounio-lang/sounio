@@ -17,6 +17,19 @@ var PT_LINE: [i64; 1048576] = [0; 1048576]
 var PT_COL: [i64; 1048576] = [0; 1048576]
 var PT_TEXT_LEN: [i64; 1048576] = [0; 1048576]
 var PT_INT_VALUE: [i64; 1048576] = [0; 1048576]
+// Boot4-safe: parse_item stores its result here instead of returning (Parser, Item)
+// which is 314+ slots and triggers IS_SPTR=4 hang. The caller reads this after parse_item returns.
+var LAST_PARSED_ITEM: Option<Box<Item>> = None
+// Boot4-safe: scalar globals mirroring Parser struct fields.
+// boot4 corrupts struct-by-value field access, so the parser loop
+// reads/writes these globals instead of Parser.field.
+var GP_TOKEN_COUNT: i64 = 0
+var GP_POS: i64 = 0
+var GP_NEXT_ID: i64 = 1
+var GP_HAD_ERROR: i64 = 0
+var GP_ERROR_COUNT: i64 = 0
+var GP_NO_STRUCT_LIT: i64 = 0
+var GP_PENDING_GT: i64 = 0
 var PARSER_FAST_SKIP_BLOCKS: bool = false
 var PARSER_LAST_HAD_ERROR: bool = false
 var PARSER_LAST_ERROR_COUNT: i64 = 0
@@ -54,14 +67,22 @@ fn parser_new() -> Parser {
 fn parser_set_tokens(tokens: [Token; 1048576], token_count: i64) with Mut, Panic, Div {
     var i: i64 = 0
     while i < token_count && i < 1048576 {
-        PARSER_TOKENS[i as usize] = tokens[i as usize]
+        // Write to parallel scalar arrays (boot4-compatible)
+        PT_KIND[i as usize] = tokens[i as usize].kind
+        PT_START[i as usize] = tokens[i as usize].start
+        PT_INT_VALUE[i as usize] = tokens[i as usize].int_value
+        PT_TEXT_LEN[i as usize] = tokens[i as usize].text_len
         i = i + 1
     }
 }
 
 fn parser_set_token_at(idx: i64, tok: Token) with Mut, Panic {
     if idx >= 0 && idx < 1048576 {
-        PARSER_TOKENS[idx as usize] = tok
+        // Write to parallel scalar arrays (boot4-compatible, avoids struct-typed global array write)
+        PT_KIND[idx as usize] = tok.kind
+        PT_START[idx as usize] = tok.start
+        PT_INT_VALUE[idx as usize] = tok.int_value
+        PT_TEXT_LEN[idx as usize] = tok.text_len
     }
 }
 
@@ -90,14 +111,14 @@ fn parser_set_token_scalar(idx: i64, kind: TokenKind, start: i64, end: i64, line
 
 fn parser_set_token_int_value(idx: i64, val: i64) with Mut, Panic {
     if idx >= 0 && idx < 1048576 {
-        PARSER_TOKENS[idx as usize].int_value = val
         PT_INT_VALUE[idx as usize] = val
     }
 }
 
 fn parser_set_token_float_value(idx: i64, val: f64) with Mut, Panic {
     if idx >= 0 && idx < 1048576 {
-        PARSER_TOKENS[idx as usize].float_value = val
+        // float_value not in PT_* arrays yet — skip for boot4 compatibility
+        let dummy = val
     }
 }
 
@@ -112,7 +133,6 @@ fn parser_set_token_text_byte(idx: i64, byte_idx: i64, val: i8) with Mut, Panic 
 
 fn parser_set_token_text_len(idx: i64, len: i64) with Mut, Panic {
     if idx >= 0 && idx < 1048576 {
-        PARSER_TOKENS[idx as usize].text_len = len
         PT_TEXT_LEN[idx as usize] = len
     }
 }
@@ -140,6 +160,62 @@ fn parser_last_error_count() -> i64 {
 }
 
 // ============================================================
+// Boot4-safe parser operations using GP_* globals (no struct passing)
+// ============================================================
+
+fn gp_init(token_count: i64) with Mut {
+    GP_TOKEN_COUNT = token_count
+    GP_POS = 0
+    GP_NEXT_ID = 1
+    GP_HAD_ERROR = 0
+    GP_ERROR_COUNT = 0
+    GP_NO_STRUCT_LIT = 0
+    GP_PENDING_GT = 0
+}
+
+fn gp_at_eof() -> bool with Panic {
+    gp_peek_kind() == TokenKind::Eof
+}
+
+fn gp_peek_kind() -> TokenKind with Panic {
+    if GP_PENDING_GT > 0 {
+        TokenKind::Gt
+    } else {
+        if GP_POS < GP_TOKEN_COUNT {
+            pt_read_kind(GP_POS)
+        } else {
+            TokenKind::Eof
+        }
+    }
+}
+
+fn gp_advance() with Mut, Panic {
+    if GP_PENDING_GT > 0 {
+        GP_PENDING_GT = GP_PENDING_GT - 1
+        if GP_PENDING_GT > 0 { return }
+        if GP_POS < GP_TOKEN_COUNT { GP_POS = GP_POS + 1 }
+    } else if GP_POS < GP_TOKEN_COUNT {
+        GP_POS = GP_POS + 1
+    }
+    // Skip newlines
+    while GP_POS < GP_TOKEN_COUNT && pt_read_kind(GP_POS) == TokenKind::Newline {
+        GP_POS = GP_POS + 1
+    }
+}
+
+fn gp_current_span_start() -> i64 with Panic {
+    if GP_POS < GP_TOKEN_COUNT { PT_START[GP_POS as usize] } else { 0 }
+}
+
+fn gp_current_span_end() -> i64 with Panic {
+    if GP_POS < GP_TOKEN_COUNT { PT_END[GP_POS as usize] } else { 0 }
+}
+
+fn gp_current_line() -> i64 with Panic {
+    if GP_POS < GP_TOKEN_COUNT { PT_LINE[GP_POS as usize] } else { 0 }
+}
+
+// ============================================================
 // Token access
 // ============================================================
 
@@ -154,11 +230,19 @@ fn pt_read_kind(idx: i64) -> TokenKind with Panic {
 
 impl Parser {
     fn current(self) -> Token with Panic, Div {
+        // Construct from parallel scalar arrays (boot4-compatible)
+        var tok = Token::new()
         if self.pos < self.token_count {
-            PARSER_TOKENS[self.pos as usize]
-        } else {
-            Token::eof(0, 0, 0)
+            tok.kind = PT_KIND[self.pos as usize]
+            tok.start = PT_START[self.pos as usize]
+            tok.int_value = PT_INT_VALUE[self.pos as usize]
+            tok.text_len = PT_TEXT_LEN[self.pos as usize]
         }
+        tok
+    }
+
+    fn current_int_value(self) -> i64 with Panic {
+        if self.pos >= 0 && self.pos < 1048576 { PT_INT_VALUE[self.pos as usize] } else { 0 }
     }
 
     fn peek(self) -> TokenKind with Panic, Div {

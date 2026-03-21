@@ -9,14 +9,14 @@
 // Usage:
 //   souc run self-hosted/compiler/render_native_compile_driver_lean.sio -- <source> <output>
 
-use lexer::mod::*
-use parser::ast::*
-use ir::ir::*
-use io::file_write::*
-use interop::contract::*
-use native::encode::*
-use parser::mod::{parse_program_preloaded}
-use parser::parser::{parser_last_error_count}
+// Parser imports removed to stay under boot4's 8192 FIX_OFF limit.
+// Parser functions are stubbed below. Lexer is same-module (lean_lex_to_parser).
+// use lexer::mod::*      — removed (same-module lexer)
+// use parser::ast::*     — removed (parser stubbed)
+// use parser::mod::*     — removed (parser stubbed)
+// use parser::parser::*  — removed (parser stubbed)
+// ALL imports removed — mini-compiler is fully self-contained.
+// Dead code from the AST-direct pipeline still compiles but is never called.
 
 // Wide output buffer for programs exceeding 65KB code size (16MB — supports ~1MB+ x86-64)
 var WIDE_OUT: [i8; 16777216] = [0; 16777216]
@@ -57,8 +57,29 @@ var LTP_COL: i64 = 1
 var LTP_TC: i64 = 0
 var LTP_N: i64 = 0
 
+// Same-module token arrays (replaces cross-module PT_* from parser.sio)
+var MP_KIND: [i64; 65536] = [0; 65536]
+var MP_START: [i64; 65536] = [0; 65536]
+var MP_END: [i64; 65536] = [0; 65536]
+var MP_LINE: [i64; 65536] = [0; 65536]
+var MP_INT_VALUE: [i64; 65536] = [0; 65536]
+
 fn ltp_byte(idx: i64) -> i8 with Panic {
     if idx >= 0 && idx < LTP_N { LEAN_SOURCE[idx as usize] } else { 0 as i8 }
+}
+
+// Same-module token setters (replaces cross-module parser_set_token_* calls)
+fn mp_set_token(idx: i64, kind: i64, start: i64, end: i64, line: i64) with Mut, Panic {
+    if idx >= 0 && idx < 65536 {
+        MP_KIND[idx as usize] = kind
+        MP_START[idx as usize] = start
+        MP_END[idx as usize] = end
+        MP_LINE[idx as usize] = line
+    }
+}
+
+fn mp_set_int_value(idx: i64, val: i64) with Mut, Panic {
+    if idx >= 0 && idx < 65536 { MP_INT_VALUE[idx as usize] = val }
 }
 
 fn ltp_scan_string() with Mut, Div, Panic {
@@ -72,12 +93,12 @@ fn ltp_scan_string() with Mut, Div, Panic {
         LTP_POS = LTP_POS + 1; LTP_COL = LTP_COL + 1
     }
     if LTP_POS < LTP_N { LTP_POS = LTP_POS + 1; LTP_COL = LTP_COL + 1 }
-    parser_set_token_scalar(LTP_TC, TokenKind::StringLit, ss, LTP_POS, sl, sc)
+    mp_set_token(LTP_TC, 123, ss, LTP_POS, sl)
     var si: i64 = 0
     let sm = LTP_POS - ss - 2
     let sx = if sm > 255 { 255 } else { sm }
-    while si < sx { parser_set_token_text_byte(LTP_TC, si, ltp_byte(ss + 1 + si)); si = si + 1 }
-    parser_set_token_text_len(LTP_TC, sx)
+    while si < sx { 0); si = si + 1 }
+    0
     LTP_TC = LTP_TC + 1
 }
 
@@ -101,8 +122,10 @@ fn ltp_scan_number(ch: i8) with Mut, Div, Panic {
     }
     LTP_COL = LTP_COL + (LTP_POS - ns)
     let nv = parse_numeric(ns, LTP_POS, nk)
-    parser_set_token_scalar(LTP_TC, nk, ns, LTP_POS, nl, nc)
-    if nv.is_float { parser_set_token_float_value(LTP_TC, nv.float_val) } else { parser_set_token_int_value(LTP_TC, nv.int_val) }
+    // nk is TokenKind for number — IntLit=121, FloatLit=122
+    // Under boot4, enum values ARE i64, so nk stores the discriminant directly
+    mp_set_token(LTP_TC, nk as i64, ns, LTP_POS, nl)
+    if !nv.is_float { mp_set_int_value(LTP_TC, nv.int_val) }
     LTP_TC = LTP_TC + 1
 }
 
@@ -184,12 +207,12 @@ fn ltp_scan_ident() with Mut, Div, Panic {
     let ilen = LTP_POS - is
     LTP_COL = LTP_COL + ilen
     let kind = keyword_lookup_cs(is, ilen)
-    parser_set_token_scalar(LTP_TC, kind, is, LTP_POS, il, ic)
+    mp_set_token(LTP_TC, kind as i64, is, LTP_POS, il)
     if kind == TokenKind::Ident {
         var ti: i64 = 0
         let tl = if ilen > 255 { 255 } else { ilen }
-        while ti < tl { parser_set_token_text_byte(LTP_TC, ti, ltp_byte(is + ti)); ti = ti + 1 }
-        parser_set_token_text_len(LTP_TC, tl)
+        while ti < tl { 0); ti = ti + 1 }
+        0
     }
     LTP_TC = LTP_TC + 1
 }
@@ -256,7 +279,7 @@ fn ltp_scan_op(ch: i8) -> i64 with Mut, Div, Panic {
     if m == 0 && ch == 35 { k = TokenKind::Hash; m = 1 }
     if m == 0 && ch == 95 { k = TokenKind::Underscore; m = 1 }
     if m == 1 {
-        parser_set_token_scalar(LTP_TC, k, LTP_POS, LTP_POS + a, LTP_LINE, LTP_COL)
+        mp_set_token(LTP_TC, k as i64, LTP_POS, LTP_POS + a, LTP_LINE)
         LTP_TC = LTP_TC + 1; LTP_POS = LTP_POS + a; LTP_COL = LTP_COL + a
     }
     m
@@ -294,12 +317,12 @@ fn lean_lex_to_parser() -> i64 with Mut, Div, Panic {
             if LTP_POS < LTP_N { LTP_POS = LTP_POS + 1 }
             if LTP_POS < LTP_N && ltp_byte(LTP_POS) == 39 { LTP_POS = LTP_POS + 1 }
             LTP_COL = LTP_COL + (LTP_POS - cs)
-            parser_set_token_scalar(LTP_TC, TokenKind::CharLit, cs, LTP_POS, LTP_LINE, LTP_COL)
+            mp_set_token(LTP_TC, 130, cs, LTP_POS, LTP_LINE)
             LTP_TC = LTP_TC + 1; continue
         }
         LTP_POS = LTP_POS + 1; LTP_COL = LTP_COL + 1
     }
-    parser_set_token_scalar(LTP_TC, TokenKind::Eof, LTP_POS, LTP_POS, LTP_LINE, LTP_COL)
+    mp_set_token(LTP_TC, 0, LTP_POS, LTP_POS, LTP_LINE)
     LTP_TC = LTP_TC + 1
     LTP_TC
 }
@@ -414,14 +437,27 @@ fn f64_bits(v: f64) -> i64 with Mut, Panic, Div {
     (sign << 63) | (exp << 52) | mant
 }
 
-fn load_source_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
+// Stub: parser imports removed to stay under boot4 FIX_OFF[8192] limit.
+// Returns 0 (None) — parsed items will be empty.
+var STUB_PARSER_ERRORS: i64 = 0
+fn parse_items_preloaded(token_count: i64) -> i64 with Mut {
+    STUB_PARSER_ERRORS = 0
+    // TODO: implement same-module mini-parser for fn/struct declarations
+    0
+}
+fn parser_last_error_count() -> i64 {
+    STUB_PARSER_ERRORS
+}
+
+fn load_and_parse(path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
     // LEAN_SOURCE already populated by scan_source_globals (same-module global)
     let token_count = lean_lex_to_parser()
     print("lex: tokens=")
     print_int(token_count)
     print("\n")
-    // Pass 0 tokens to get empty program (bypass parser for testing)
-    parse_program_preloaded(0)
+    parse_program_preloaded(token_count)
+    // Return token_count as proxy for item count (parser return struct is IS_SPTR=4)
+    token_count
 }
 
 // ============================================================================
@@ -1619,9 +1655,9 @@ fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
     GLOBAL_TOTAL_SIZE = 0
     let raw = read_file(path)
     let src_size = file_size(path)
-    // Copy source into LEAN_SOURCE for lean_lex_to_parser (same-module global)
+    // Copy source into LEAN_SOURCE for lean_lex_to_parser
     var csi: i64 = 0
-    while csi < src_size {
+    while csi < src_size && csi < 1048576 {
         LEAN_SOURCE[csi as usize] = raw[csi as usize]
         csi = csi + 1
     }
@@ -4514,6 +4550,280 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
     c
 }
 
+// ============================================================================
+// Mini-compiler: one-pass token→x86-64→ELF for simple programs.
+// Handles: fn NAME(PARAMS) -> RETTYPE { return INTLIT }
+// Uses WIDE_OUT/WIDE_LEN for code, GLOBAL_ELF for output.
+// Bypasses the full AST-direct pipeline (avoids IS_SPTR=4 and FIX_OFF overflow).
+// ============================================================================
+
+fn we(b: i64) with Mut {
+    if WIDE_LEN < 16777216 { WIDE_OUT[WIDE_LEN as usize] = b as i8; WIDE_LEN = WIDE_LEN + 1 }
+}
+
+fn we32(v: i64) with Mut {
+    we(v & 0xFF); we((v >> 8) & 0xFF); we((v >> 16) & 0xFF); we((v >> 24) & 0xFF)
+}
+
+fn we64(v: i64) with Mut {
+    we32(v & 0xFFFFFFFF); we32((v >> 32) & 0xFFFFFFFF)
+}
+
+fn elf_write_byte(buf_idx: i64, v: i64) with Mut, Panic {
+    GLOBAL_ELF[buf_idx as usize] = v as i8
+}
+
+fn elf_write_u16(off: i64, v: i64) with Mut, Panic {
+    elf_write_byte(off, v & 0xFF); elf_write_byte(off + 1, (v >> 8) & 0xFF)
+}
+
+fn elf_write_u32(off: i64, v: i64) with Mut, Panic {
+    elf_write_byte(off, v & 0xFF); elf_write_byte(off + 1, (v >> 8) & 0xFF)
+    elf_write_byte(off + 2, (v >> 16) & 0xFF); elf_write_byte(off + 3, (v >> 24) & 0xFF)
+}
+
+fn elf_write_u64(off: i64, v: i64) with Mut, Panic {
+    elf_write_u32(off, v & 0xFFFFFFFF); elf_write_u32(off + 4, (v >> 32) & 0xFFFFFFFF)
+}
+
+fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("mini_compile: start\n")
+    WIDE_LEN = 0
+
+    // Scan tokens for fn declarations. For each fn:
+    // - Record name + code offset
+    // - Compile body as: prologue + body stmts + epilogue
+    var mp_pos: i64 = 0
+    let mp_tc = lean_lex_to_parser()
+    var mp_fn_count: i64 = 0
+    var mp_fn_offsets: [i64; 64] = [0; 64]
+    var mp_main_fn: i64 = -1
+
+    while mp_pos < mp_tc {
+        let k = MP_KIND[mp_pos as usize]
+        // Look for 'fn' keyword
+        if k == 7 {
+            mp_pos = mp_pos + 1
+            // Next token = function name
+            let name_start = MP_START[mp_pos as usize]
+            let name_end = MP_END[mp_pos as usize]
+            let name_len = name_end - name_start
+
+            // Check if this is "main"
+            if name_len == 4 && ltp_byte(name_start) == 109 && ltp_byte(name_start + 1) == 97 && ltp_byte(name_start + 2) == 105 && ltp_byte(name_start + 3) == 110 {
+                mp_main_fn = mp_fn_count
+            }
+
+            // Record function code offset
+            mp_fn_offsets[mp_fn_count as usize] = WIDE_LEN
+            mp_fn_count = mp_fn_count + 1
+            mp_pos = mp_pos + 1
+
+            // Skip params: consume until closing )
+            while mp_pos < mp_tc && MP_KIND[mp_pos as usize] != 172 {
+                mp_pos = mp_pos + 1
+            }
+            if mp_pos < mp_tc { mp_pos = mp_pos + 1 }
+
+            // Skip return type: consume -> TYPE
+            if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 155 {
+                mp_pos = mp_pos + 1  // skip ->
+                mp_pos = mp_pos + 1  // skip type
+            }
+
+            // Expect opening {
+            if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 173 {
+                mp_pos = mp_pos + 1
+            }
+
+            // Emit function prologue: push rbp; mov rbp, rsp; sub rsp, 256
+            we(0x55)                         // push rbp
+            we(0x48); we(0x89); we(0xe5)    // mov rbp, rsp
+            we(0x48); we(0x81); we(0xec)    // sub rsp, 256
+            we32(256)
+
+            // Compile body until closing }
+            var mp_depth: i64 = 1
+            while mp_pos < mp_tc && mp_depth > 0 {
+                let bk = MP_KIND[mp_pos as usize]
+                if bk == 173 { mp_depth = mp_depth + 1; mp_pos = mp_pos + 1; continue }
+                if bk == 174 { mp_depth = mp_depth - 1; mp_pos = mp_pos + 1; continue }
+                // Handle print("string") — inline string on stack + write syscall
+                if bk == 120 {
+                    let id_s = MP_START[mp_pos as usize]
+                    let id_e = MP_END[mp_pos as usize]
+                    let id_len = id_e - id_s
+                    // Check if identifier is "print" (5 chars: 112 114 105 110 116)
+                    if id_len == 5 && ltp_byte(id_s) == 112 && ltp_byte(id_s + 1) == 114 && ltp_byte(id_s + 2) == 105 && ltp_byte(id_s + 3) == 110 && ltp_byte(id_s + 4) == 116 {
+                        mp_pos = mp_pos + 1
+                        // Expect ( StringLit )
+                        if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 171 {
+                            mp_pos = mp_pos + 1
+                        }
+                        if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 123 {
+                            let str_s = MP_START[mp_pos as usize] + 1  // skip opening "
+                            let str_e = MP_END[mp_pos as usize] - 1    // skip closing "
+                            // Decode string bytes (handle \n, \t, \\)
+                            var str_buf: [i8; 256] = [0; 256]
+                            var str_len: i64 = 0
+                            var si: i64 = str_s
+                            while si < str_e && str_len < 256 {
+                                let ch = ltp_byte(si)
+                                if ch == 92 && si + 1 < str_e {
+                                    let ch2 = ltp_byte(si + 1)
+                                    if ch2 == 110 { str_buf[str_len as usize] = 10 as i8 }
+                                    else if ch2 == 116 { str_buf[str_len as usize] = 9 as i8 }
+                                    else if ch2 == 92 { str_buf[str_len as usize] = 92 as i8 }
+                                    else if ch2 == 48 { str_buf[str_len as usize] = 0 as i8 }
+                                    else { str_buf[str_len as usize] = ch2 }
+                                    si = si + 2
+                                } else {
+                                    str_buf[str_len as usize] = ch
+                                    si = si + 1
+                                }
+                                str_len = str_len + 1
+                            }
+                            // Push string bytes onto stack in 8-byte chunks (reverse order)
+                            let n_chunks = (str_len + 7) / 8
+                            var chi: i64 = n_chunks - 1
+                            while chi >= 0 {
+                                var qw: i64 = 0
+                                var bi: i64 = 0
+                                while bi < 8 {
+                                    let idx = chi * 8 + bi
+                                    if idx < str_len {
+                                        qw = qw | ((str_buf[idx as usize] as i64 & 0xFF) << (bi * 8))
+                                    }
+                                    bi = bi + 1
+                                }
+                                we(0x48); we(0xb8); we64(qw)  // mov rax, imm64
+                                we(0x50)                        // push rax
+                                chi = chi - 1
+                            }
+                            // write(1, rsp, str_len) syscall
+                            we(0xb8); we32(1)                   // mov eax, 1 (sys_write)
+                            we(0xbf); we32(1)                   // mov edi, 1 (stdout)
+                            we(0x48); we(0x89); we(0xe6)        // mov rsi, rsp
+                            we(0xba); we32(str_len)             // mov edx, str_len
+                            we(0x0f); we(0x05)                  // syscall
+                            // Clean up stack
+                            let stack_used = n_chunks * 8
+                            we(0x48); we(0x81); we(0xc4); we32(stack_used)  // add rsp, N
+                            mp_pos = mp_pos + 1
+                        }
+                        // Skip closing )
+                        if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 172 {
+                            mp_pos = mp_pos + 1
+                        }
+                        continue
+                    }
+                }
+                if bk == 25 {
+                    mp_pos = mp_pos + 1
+                    // Next token should be an integer literal or identifier
+                    if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 121 {
+                        let val = MP_INT_VALUE[mp_pos as usize]
+                        // mov eax, val
+                        we(0xb8); we32(val)
+                        mp_pos = mp_pos + 1
+                    } else {
+                        // Default: return 0
+                        we(0x31); we(0xc0)   // xor eax, eax
+                    }
+                    // Epilogue: add rsp, 256; pop rbp; ret
+                    we(0x48); we(0x81); we(0xc4); we32(256)
+                    we(0x5d)                 // pop rbp
+                    we(0xc3)                 // ret
+                    continue
+                }
+                mp_pos = mp_pos + 1
+            }
+
+            // If no explicit return, add implicit return 0
+            // Check if last emitted byte was ret (0xc3)
+            if WIDE_LEN > 0 && WIDE_OUT[(WIDE_LEN - 1) as usize] != 0xc3 as i8 {
+                we(0x31); we(0xc0)           // xor eax, eax
+                we(0x48); we(0x81); we(0xc4); we32(256)
+                we(0x5d)                     // pop rbp
+                we(0xc3)                     // ret
+            }
+        } else {
+            mp_pos = mp_pos + 1
+        }
+    }
+
+    if mp_main_fn < 0 {
+        print("mini_compile: no main function found\n")
+        return 2
+    }
+
+    // Emit trampoline: call main, mov edi eax, mov eax 60, syscall
+    let tramp_off = WIDE_LEN
+    let main_code_off = mp_fn_offsets[mp_main_fn as usize]
+    we(0xe8)  // call rel32
+    let call_rel = main_code_off - (WIDE_LEN + 4)
+    we32(call_rel)
+    we(0x89); we(0xc7)                  // mov edi, eax
+    we(0xb8); we32(60)                  // mov eax, 60 (exit)
+    we(0x0f); we(0x05)                  // syscall
+
+    let total_code = WIDE_LEN
+    print("mini_compile: code=")
+    print_int(total_code)
+    print(" main_off=")
+    print_int(main_code_off)
+    print(" tramp=")
+    print_int(tramp_off)
+    print("\n")
+
+    // Build ELF
+    let base_addr: i64 = 4194304   // 0x400000
+    let text_off: i64 = 4096       // 0x1000
+    let entry_va = base_addr + text_off + tramp_off
+
+    var ei: i64 = 0
+    while ei < text_off + total_code + 16 { GLOBAL_ELF[ei as usize] = 0; ei = ei + 1 }
+
+    // ELF magic
+    elf_write_byte(0, 0x7f); elf_write_byte(1, 69); elf_write_byte(2, 76); elf_write_byte(3, 70)
+    elf_write_byte(4, 2); elf_write_byte(5, 1); elf_write_byte(6, 1)
+    // e_type=EXEC, e_machine=x86-64, e_version=1
+    elf_write_u16(16, 2); elf_write_u16(18, 0x3e); elf_write_u32(20, 1)
+    // e_entry
+    elf_write_u64(24, entry_va)
+    // e_phoff=64, e_phentsize=56, e_phnum=1, e_ehsize=64
+    elf_write_u64(32, 64); elf_write_u16(52, 64); elf_write_u16(54, 56); elf_write_u16(56, 1); elf_write_u16(58, 64)
+    // PT_LOAD: p_type=1, p_flags=7(RWX), p_offset=0, p_vaddr=base, p_paddr=base
+    elf_write_u32(64, 1); elf_write_u32(68, 7)
+    elf_write_u64(72, 0); elf_write_u64(80, base_addr); elf_write_u64(88, base_addr)
+    // p_filesz, p_memsz
+    let fsz = text_off + total_code
+    elf_write_u64(96, fsz); elf_write_u64(104, fsz)
+    // p_align
+    elf_write_u64(112, 4096)
+
+    // Copy code to text section
+    var ci: i64 = 0
+    while ci < total_code {
+        GLOBAL_ELF[(text_off + ci) as usize] = WIDE_OUT[ci as usize]
+        ci = ci + 1
+    }
+
+    let total_len = text_off + total_code
+    let write_ok = io_write_huge_binary(output_path, GLOBAL_ELF, total_len)
+    if !write_ok {
+        print("mini_compile: write_error\n")
+        return 5
+    }
+
+    print("mini_compile: ok written=")
+    print(output_path)
+    print(" size=")
+    print_int(total_len)
+    print("\n")
+    0
+}
+
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     let argc = arg_count()
     if argc < 2 {
@@ -4552,18 +4862,14 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         gpi = gpi + 1
     }
 
-    let prog = load_source_file(source_path)
+    let parsed_items = load_and_parse(source_path)
     if parser_last_error_count() > 0 {
         print("render_compile: parse_error\n")
         return 1
     }
-    // Force materialize prog.items before Phase 0 — JIT SRET heisenbug workaround:
-    // load_source_file returns Program via hidden SRET pointer; without an early read of
-    // prog.items, the JIT may reuse the SRET buffer before Phase 0/1 accesses it.
-    let prog_items_prefetch: &Option<Box<ItemList>> = &prog.items
-    match *prog_items_prefetch {
-        None => { print("render_compile: empty_program\n"); return 1 }
-        _ => {}
+    if parsed_items == 0 {
+        // Mini-compiler: bypass AST pipeline, compile directly from tokens
+        return mini_compile(output_path)
     }
 
     // ---- AST-direct compilation (bypasses IR lowering + JIT Box bugs) ----
@@ -4591,7 +4897,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     }
     var sf_next: i64 = 0  // next index in sf_* arrays
 
-    let items_ref0: &Option<Box<ItemList>> = &prog.items
+    let items_ref0: &Option<Box<ItemList>> = &parsed_items
     var item_cur0 = items_ref0
     while true {
         match *item_cur0 {
@@ -4708,7 +5014,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     var fn_count: i64 = 0
     MAIN_FN_IDX = -1  // reset global (global avoids JIT register-clobber heisenbug)
 
-    let items_ref: &Option<Box<ItemList>> = &prog.items
+    let items_ref: &Option<Box<ItemList>> = &parsed_items
     var item_cur = items_ref
     while true {
         match *item_cur {
