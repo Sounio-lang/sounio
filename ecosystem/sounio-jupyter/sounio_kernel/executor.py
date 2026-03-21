@@ -161,24 +161,27 @@ class CellExecutor:
 
         Priority:
         1. SOUC environment variable
-        2. Default location in sounio repo
-        3. souc in PATH
+        2. Repository-root artifact path
+        3. Current working directory artifact path
+        4. souc in PATH
         """
+        repo_root = Path(__file__).resolve().parents[3]
+
         # Check SOUC env var
         if "SOUC" in os.environ:
             souc = os.environ["SOUC"]
             if os.path.isfile(souc) and os.access(souc, os.X_OK):
                 return souc
 
-        # Check default location (assumes kernel runs from sounio repo)
-        default_souc = "./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
-        if os.path.isfile(default_souc) and os.access(default_souc, os.X_OK):
-            return os.path.abspath(default_souc)
+        # Check repository-root location independent of caller cwd.
+        repo_souc = repo_root / "artifacts" / "omega" / "souc-bin" / "souc-linux-x86_64-jit"
+        if repo_souc.is_file() and os.access(repo_souc, os.X_OK):
+            return str(repo_souc)
 
-        # Check in /home/demetrios/RustroverProjects/sounio
-        repo_souc = "/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
-        if os.path.isfile(repo_souc) and os.access(repo_souc, os.X_OK):
-            return repo_souc
+        # Check current working directory (legacy behavior).
+        default_souc = Path("artifacts/omega/souc-bin/souc-linux-x86_64-jit")
+        if default_souc.is_file() and os.access(default_souc, os.X_OK):
+            return str(default_souc.resolve())
 
         # Check PATH
         try:
@@ -200,20 +203,23 @@ class CellExecutor:
 
         Priority:
         1. SOUNIO_STDLIB_PATH environment variable
-        2. Default location in sounio repo
+        2. Repository-root stdlib path
+        3. Current working directory stdlib path
         """
+        repo_root = Path(__file__).resolve().parents[3]
+
         # Check env var
         if "SOUNIO_STDLIB_PATH" in os.environ:
             return os.environ["SOUNIO_STDLIB_PATH"]
 
-        # Check default location
-        default_stdlib = "./stdlib"
-        if os.path.isdir(default_stdlib):
-            return os.path.abspath(default_stdlib)
+        # Check repository-root location independent of caller cwd.
+        repo_stdlib = repo_root / "stdlib"
+        if repo_stdlib.is_dir():
+            return str(repo_stdlib)
 
-        # Check in /home/demetrios/RustroverProjects/sounio
-        repo_stdlib = "/home/demetrios/RustroverProjects/sounio/stdlib"
-        if os.path.isdir(repo_stdlib):
-            return repo_stdlib
+        # Check current working directory (legacy behavior).
+        default_stdlib = Path("stdlib")
+        if default_stdlib.is_dir():
+            return str(default_stdlib.resolve())
 
         return None

@@ -184,7 +184,12 @@ if [ "$ptx_rc" -ne 0 ]; then
   echo "error: PTX opcode smoke failed (exit=$ptx_rc)" >&2
   exit "$ptx_rc"
 fi
-if ! printf '%s\n' "$ptx_output" | grep -qF "PTX_OPCODE_SMOKE_PASS"; then
+if command -v rg >/dev/null 2>&1; then
+  if ! printf '%s\n' "$ptx_output" | rg -qF "PTX_OPCODE_SMOKE_PASS"; then
+    echo "error: missing PTX opcode smoke pass marker" >&2
+    exit 2
+  fi
+elif ! printf '%s\n' "$ptx_output" | grep -qF "PTX_OPCODE_SMOKE_PASS"; then
   echo "error: missing PTX opcode smoke pass marker" >&2
   exit 2
 fi
@@ -198,7 +203,12 @@ if [ "$metal_rc" -ne 0 ]; then
   echo "error: Metal opcode smoke failed (exit=$metal_rc)" >&2
   exit "$metal_rc"
 fi
-if ! printf '%s\n' "$metal_output" | grep -qF "METAL_OPCODE_SMOKE_PASS"; then
+if command -v rg >/dev/null 2>&1; then
+  if ! printf '%s\n' "$metal_output" | rg -qF "METAL_OPCODE_SMOKE_PASS"; then
+    echo "error: missing Metal opcode smoke pass marker" >&2
+    exit 2
+  fi
+elif ! printf '%s\n' "$metal_output" | grep -qF "METAL_OPCODE_SMOKE_PASS"; then
   echo "error: missing Metal opcode smoke pass marker" >&2
   exit 2
 fi
