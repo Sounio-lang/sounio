@@ -64,6 +64,11 @@ var MP_END: [i64; 65536] = [0; 65536]
 var MP_LINE: [i64; 65536] = [0; 65536]
 var MP_INT_VALUE: [i64; 65536] = [0; 65536]
 
+// Float literal decomposition (integer-part and fractional numerator/denominator)
+var MP_FLOAT_INT: [i64; 65536] = [0; 65536]    // integer part
+var MP_FLOAT_FRAC: [i64; 65536] = [0; 65536]   // fractional numerator
+var MP_FLOAT_DENOM: [i64; 65536] = [0; 65536]  // fractional denominator (10^digits)
+
 fn ltp_byte(idx: i64) -> i8 with Panic {
     if idx >= 0 && idx < LTP_N { LEAN_SOURCE[idx as usize] } else { 0 as i8 }
 }
@@ -1647,6 +1652,259 @@ fn populate_lean_source(path: string) with IO, Mut, Panic, Div {
     LEAN_SOURCE_LEN = src_size
 }
 
+
+// ============================================================================
+// Import resolution: scan LEAN_SOURCE for `use` lines, read imported files,
+// append content to LEAN_SOURCE. Handles transitive imports and dedup.
+// ============================================================================
+
+fn imp_src_byte(idx: i64) -> i8 with Panic {
+    if idx >= 0 && idx < LEAN_SOURCE_LEN { LEAN_SOURCE[idx as usize] } else { 0 as i8 }
+}
+
+fn mc_imp_init_base_dir(path: string) with IO, Mut, Panic, Div {
+    let plen = str_len(path)
+    var last_slash: i64 = -1
+    var i: i64 = 0
+    while i < plen && i < 510 {
+        let c = str_char_at(path, i)
+        if c == 47 { last_slash = i }
+        i = i + 1
+    }
+    if last_slash >= 0 {
+        var j: i64 = 0
+        while j <= last_slash && j < 510 {
+            MC_IMP_BASE_DIR[j as usize] = str_char_at(path, j) as i8
+            j = j + 1
+        }
+        MC_IMP_BASE_DIR_LEN = last_slash + 1
+    } else {
+        MC_IMP_BASE_DIR_LEN = 0
+    }
+}
+
+fn mc_imp_build_fname(path_start: i64, path_len: i64) -> i64 with IO, Mut, Panic, Div {
+    var bi: i64 = 0
+    var seg_end: i64 = 0
+    while seg_end < path_len {
+        if imp_src_byte(path_start + seg_end) as i64 == 58 { break }
+        seg_end = seg_end + 1
+    }
+    var is_self_hosted = false
+    if seg_end == 11 {
+        if imp_src_byte(path_start) as i64 == 115 && imp_src_byte(path_start + 1) as i64 == 101 && imp_src_byte(path_start + 2) as i64 == 108 && imp_src_byte(path_start + 3) as i64 == 102 { is_self_hosted = true }
+    }
+    var is_stdlib = false
+    if seg_end == 6 {
+        if imp_src_byte(path_start) as i64 == 115 && imp_src_byte(path_start + 1) as i64 == 116 && imp_src_byte(path_start + 2) as i64 == 100 && imp_src_byte(path_start + 3) as i64 == 108 && imp_src_byte(path_start + 4) as i64 == 105 && imp_src_byte(path_start + 5) as i64 == 98 { is_stdlib = true }
+    }
+    if is_self_hosted {
+        MC_IMP_FNAME[0] = 115; MC_IMP_FNAME[1] = 101; MC_IMP_FNAME[2] = 108; MC_IMP_FNAME[3] = 102
+        MC_IMP_FNAME[4] = 45; MC_IMP_FNAME[5] = 104; MC_IMP_FNAME[6] = 111; MC_IMP_FNAME[7] = 115
+        MC_IMP_FNAME[8] = 116; MC_IMP_FNAME[9] = 101; MC_IMP_FNAME[10] = 100; MC_IMP_FNAME[11] = 47
+        bi = 12
+        var pi: i64 = seg_end
+        if pi + 1 < path_len && imp_src_byte(path_start + pi) as i64 == 58 && imp_src_byte(path_start + pi + 1) as i64 == 58 { pi = pi + 2 }
+        while pi < path_len && bi < 500 {
+            let c = imp_src_byte(path_start + pi) as i64
+            if c == 58 && pi + 1 < path_len && imp_src_byte(path_start + pi + 1) as i64 == 58 {
+                if pi + 2 >= path_len { break }
+                let af = imp_src_byte(path_start + pi + 2) as i64
+                if af == 42 || af == 123 { break }
+                MC_IMP_FNAME[bi as usize] = 47; bi = bi + 1; pi = pi + 2
+            } else if c == 32 || c == 9 || c == 10 || c == 13 || c == 59 || c == 123 { break
+            } else { MC_IMP_FNAME[bi as usize] = c as i8; bi = bi + 1; pi = pi + 1 }
+        }
+    } else if is_stdlib {
+        MC_IMP_FNAME[0] = 115; MC_IMP_FNAME[1] = 116; MC_IMP_FNAME[2] = 100; MC_IMP_FNAME[3] = 108
+        MC_IMP_FNAME[4] = 105; MC_IMP_FNAME[5] = 98; MC_IMP_FNAME[6] = 47
+        bi = 7
+        var pi2: i64 = seg_end
+        if pi2 + 1 < path_len && imp_src_byte(path_start + pi2) as i64 == 58 && imp_src_byte(path_start + pi2 + 1) as i64 == 58 { pi2 = pi2 + 2 }
+        while pi2 < path_len && bi < 500 {
+            let c2 = imp_src_byte(path_start + pi2) as i64
+            if c2 == 58 && pi2 + 1 < path_len && imp_src_byte(path_start + pi2 + 1) as i64 == 58 {
+                if pi2 + 2 >= path_len { break }
+                let af2 = imp_src_byte(path_start + pi2 + 2) as i64
+                if af2 == 42 || af2 == 123 { break }
+                MC_IMP_FNAME[bi as usize] = 47; bi = bi + 1; pi2 = pi2 + 2
+            } else if c2 == 32 || c2 == 9 || c2 == 10 || c2 == 13 || c2 == 59 || c2 == 123 { break
+            } else { MC_IMP_FNAME[bi as usize] = c2 as i8; bi = bi + 1; pi2 = pi2 + 1 }
+        }
+    } else {
+        var di: i64 = 0
+        while di < MC_IMP_BASE_DIR_LEN && bi < 500 { MC_IMP_FNAME[bi as usize] = MC_IMP_BASE_DIR[di as usize]; bi = bi + 1; di = di + 1 }
+        var pi3: i64 = 0
+        while pi3 < path_len && bi < 500 {
+            let c3 = imp_src_byte(path_start + pi3) as i64
+            if c3 == 58 && pi3 + 1 < path_len && imp_src_byte(path_start + pi3 + 1) as i64 == 58 {
+                if pi3 + 2 >= path_len { break }
+                let af3 = imp_src_byte(path_start + pi3 + 2) as i64
+                if af3 == 42 || af3 == 123 { break }
+                MC_IMP_FNAME[bi as usize] = 47; bi = bi + 1; pi3 = pi3 + 2
+            } else if c3 == 32 || c3 == 9 || c3 == 10 || c3 == 13 || c3 == 59 || c3 == 123 { break
+            } else { MC_IMP_FNAME[bi as usize] = c3 as i8; bi = bi + 1; pi3 = pi3 + 1 }
+        }
+    }
+    MC_IMP_FNAME[bi as usize] = 46; bi = bi + 1
+    MC_IMP_FNAME[bi as usize] = 115; bi = bi + 1
+    MC_IMP_FNAME[bi as usize] = 105; bi = bi + 1
+    MC_IMP_FNAME[bi as usize] = 111; bi = bi + 1
+    MC_IMP_FNAME[bi as usize] = 0
+    bi
+}
+
+fn mc_imp_already_loaded(fname_len: i64) -> bool with Mut, Panic {
+    var ci: i64 = 0
+    while ci < MC_IMP_COUNT {
+        let poff = MC_IMP_PATH_OFF[ci as usize]
+        let plen = MC_IMP_PATH_LEN[ci as usize]
+        if plen == fname_len {
+            var same: i64 = 1
+            var mi: i64 = 0
+            while mi < fname_len {
+                if MC_IMP_PATH_BUF[(poff + mi) as usize] != MC_IMP_FNAME[mi as usize] { same = 0 }
+                mi = mi + 1
+            }
+            if same == 1 { return true }
+        }
+        ci = ci + 1
+    }
+    false
+}
+
+fn mc_imp_record_loaded(fname_len: i64) with Mut, Panic {
+    if MC_IMP_COUNT >= 128 { return }
+    if MC_IMP_PATH_BUF_POS + fname_len >= 8192 { return }
+    let pstart = MC_IMP_PATH_BUF_POS
+    var i: i64 = 0
+    while i < fname_len { MC_IMP_PATH_BUF[(pstart + i) as usize] = MC_IMP_FNAME[i as usize]; i = i + 1 }
+    MC_IMP_PATH_OFF[MC_IMP_COUNT as usize] = pstart
+    MC_IMP_PATH_LEN[MC_IMP_COUNT as usize] = fname_len
+    MC_IMP_COUNT = MC_IMP_COUNT + 1
+    MC_IMP_PATH_BUF_POS = MC_IMP_PATH_BUF_POS + fname_len
+}
+
+fn mc_imp_append_file(fname_len: i64) with IO, Mut, Panic, Div {
+    let fpath = str_from_bytes(MC_IMP_FNAME, fname_len)
+    let fsz = file_size(fpath)
+    if fsz <= 0 {
+        print("  import: file not found: ")
+        print(fpath)
+        print("\n")
+        return
+    }
+    let fraw = read_file(fpath)
+    if LEAN_SOURCE_LEN > 0 && LEAN_SOURCE_LEN < 1048576 {
+        LEAN_SOURCE[LEAN_SOURCE_LEN as usize] = 10
+        LEAN_SOURCE_LEN = LEAN_SOURCE_LEN + 1
+    }
+    var ci: i64 = 0
+    while ci < fsz && LEAN_SOURCE_LEN < 1048576 {
+        LEAN_SOURCE[LEAN_SOURCE_LEN as usize] = fraw[ci as usize]
+        LEAN_SOURCE_LEN = LEAN_SOURCE_LEN + 1
+        ci = ci + 1
+    }
+    print("  import: ")
+    print(fpath)
+    print(" (+")
+    print_int(fsz)
+    print(" bytes, total=")
+    print_int(LEAN_SOURCE_LEN)
+    print(")\n")
+}
+
+fn mc_resolve_imports() with IO, Mut, Panic, Div {
+    MC_IMP_COUNT = 0
+    MC_IMP_PATH_BUF_POS = 0
+    var pos: i64 = 0
+    while pos < LEAN_SOURCE_LEN {
+        let c = imp_src_byte(pos) as i64
+        if c == 117 {
+            var at_line_start: i64 = 0
+            if pos == 0 { at_line_start = 1 }
+            else if imp_src_byte(pos - 1) as i64 == 10 { at_line_start = 1 }
+            if at_line_start == 1 && pos + 4 <= LEAN_SOURCE_LEN {
+                let c1 = imp_src_byte(pos + 1) as i64
+                let c2 = imp_src_byte(pos + 2) as i64
+                let c3 = imp_src_byte(pos + 3) as i64
+                if c1 == 115 && c2 == 101 && (c3 == 32 || c3 == 9) {
+                    var p2: i64 = pos + 4
+                    while p2 < LEAN_SOURCE_LEN && (imp_src_byte(p2) as i64 == 32 || imp_src_byte(p2) as i64 == 9) { p2 = p2 + 1 }
+                    let path_start = p2
+                    while p2 < LEAN_SOURCE_LEN {
+                        let cc = imp_src_byte(p2) as i64
+                        if cc == 10 || cc == 59 { break }
+                        p2 = p2 + 1
+                    }
+                    let path_len = p2 - path_start
+                    if path_len > 0 && path_len < 480 {
+                        let fname_len = mc_imp_build_fname(path_start, path_len)
+                        if !mc_imp_already_loaded(fname_len) {
+                            mc_imp_record_loaded(fname_len)
+                            mc_imp_append_file(fname_len)
+                        }
+                    }
+                }
+            }
+        }
+        pos = pos + 1
+    }
+}
+
+fn mc_scan_lean_globals(start: i64, end: i64) with IO, Mut, Panic, Div {
+    var pos: i64 = start
+    while pos < end - 4 {
+        var at_line_start = false
+        if pos == 0 { at_line_start = true }
+        else if (imp_src_byte(pos - 1) as i64) == 10 { at_line_start = true }
+        if at_line_start && (imp_src_byte(pos) as i64) == 118 && (imp_src_byte(pos + 1) as i64) == 97 && (imp_src_byte(pos + 2) as i64) == 114 && (imp_src_byte(pos + 3) as i64) == 32 {
+            var np = pos + 4
+            while np < end && (imp_src_byte(np) as i64) == 32 { np = np + 1 }
+            var name_start = np
+            while np < end && (imp_src_byte(np) as i64) != 58 && (imp_src_byte(np) as i64) != 32 && (imp_src_byte(np) as i64) != 10 { np = np + 1 }
+            var name_len = np - name_start
+            if name_len > 0 && name_len < 128 && GLOBAL_COUNT < 256 {
+                var gn = ir_empty_name()
+                var ni: i64 = 0
+                while ni < name_len && ni < 128 { gn.buf[ni as usize] = LEAN_SOURCE[(name_start + ni) as usize]; ni = ni + 1 }
+                gn.len = name_len
+                while np < end && (imp_src_byte(np) as i64) == 32 { np = np + 1 }
+                if np < end && (imp_src_byte(np) as i64) == 58 {
+                    np = np + 1
+                    while np < end && (imp_src_byte(np) as i64) == 32 { np = np + 1 }
+                    var elem_size: i64 = 8
+                    var total_size: i64 = 8
+                    var is_f64_elem: i64 = 0
+                    if np + 2 < end && (imp_src_byte(np) as i64) == 102 && (imp_src_byte(np + 1) as i64) == 54 && (imp_src_byte(np + 2) as i64) == 52 { is_f64_elem = 1 }
+                    if np < end && (imp_src_byte(np) as i64) == 91 {
+                        np = np + 1
+                        while np < end && (imp_src_byte(np) as i64) == 32 { np = np + 1 }
+                        if np + 1 < end && (imp_src_byte(np) as i64) == 105 && (imp_src_byte(np + 1) as i64) == 56 { elem_size = 1 }
+                        if np + 2 < end && (imp_src_byte(np) as i64) == 102 && (imp_src_byte(np + 1) as i64) == 54 && (imp_src_byte(np + 2) as i64) == 52 { is_f64_elem = 1 }
+                        while np < end && (imp_src_byte(np) as i64) != 59 { np = np + 1 }
+                        if np < end { np = np + 1 }
+                        while np < end && (imp_src_byte(np) as i64) == 32 { np = np + 1 }
+                        var arr_size: i64 = 0
+                        while np < end && (imp_src_byte(np) as i64) >= 48 && (imp_src_byte(np) as i64) <= 57 { arr_size = arr_size * 10 + ((imp_src_byte(np) as i64) - 48); np = np + 1 }
+                        if arr_size > 0 { total_size = arr_size * elem_size; if total_size <= 8 { total_size = 16 } }
+                    }
+                    total_size = ((total_size + 7) / 8) * 8
+                    let gi = GLOBAL_COUNT
+                    GLOBAL_NAMES[gi as usize] = gn
+                    GLOBAL_OFFSETS[gi as usize] = GLOBAL_TOTAL_SIZE
+                    GLOBAL_SIZES[gi as usize] = total_size
+                    GLOBAL_ELEM_SIZES[gi as usize] = elem_size
+                    GLOBAL_IS_FLOAT[gi as usize] = is_f64_elem
+                    GLOBAL_COUNT = GLOBAL_COUNT + 1
+                    GLOBAL_TOTAL_SIZE = GLOBAL_TOTAL_SIZE + total_size
+                }
+            }
+        }
+        pos = pos + 1
+    }
+}
+
 fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
     GLOBAL_COUNT = 0
     GLOBAL_TOTAL_SIZE = 0
@@ -1659,6 +1917,21 @@ fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
         csi = csi + 1
     }
     LEAN_SOURCE_LEN = src_size
+    // Resolve imports: scan for `use` lines, read and append imported files
+    mc_imp_init_base_dir(path)
+    let pre_import_len = LEAN_SOURCE_LEN
+    mc_resolve_imports()
+    if LEAN_SOURCE_LEN > pre_import_len {
+        print("scan_source_globals: imports added ")
+        print_int(LEAN_SOURCE_LEN - pre_import_len)
+        print(" bytes (")
+        print_int(MC_IMP_COUNT)
+        print(" files)\n")
+    }
+    // Scan imported file globals (the main file globals are scanned below from raw)
+    if LEAN_SOURCE_LEN > pre_import_len {
+        mc_scan_lean_globals(pre_import_len, LEAN_SOURCE_LEN)
+    }
     var pos: i64 = 0
     while pos < src_size - 4 {
         // Check for line starting with "var " (v=118, a=97, r=114, space=32)
@@ -4670,7 +4943,7 @@ fn mc_kw_lookup(start: i64, len: i64) -> i64 with Panic {
         // return
         if b0 == 114 && b1 == 101 && b2 == 116 && b3 == 117 && b4 == 114 && b5 == 110 { return 25 }
         // struct
-        if b0 == 115 && b1 == 116 && b2 == 114 && b3 == 117 && b4 == 99 && b5 == 116 { return 120 }
+        if b0 == 115 && b1 == 116 && b2 == 114 && b3 == 117 && b4 == 99 && b5 == 116 { return 200 }
         // module
         if b0 == 109 && b1 == 111 && b2 == 100 && b3 == 117 && b4 == 108 && b5 == 101 { return 120 }
         // linear
@@ -4722,6 +4995,35 @@ fn mc_parse_int(start: i64, end: i64) -> i64 with Panic {
         }
     }
     if neg { 0 - val } else { val }
+}
+
+// Parse float literal parts from source bytes into arrays (boot4-safe, no f64 ops).
+// Stores integer part, fractional numerator, and denominator separately.
+// Actual IEEE 754 conversion happens at codegen time via x86-64 SSE2.
+fn mc_parse_float_parts(tc: i64, start: i64, end: i64) with Panic, Mut {
+    var int_part: i64 = 0
+    var p: i64 = start
+    while p < end && mc_src_byte(p) != 46 {
+        let c = mc_src_byte(p) as i64
+        if c >= 48 && c <= 57 { int_part = int_part * 10 + (c - 48) }
+        p = p + 1
+    }
+    if p < end && mc_src_byte(p) == 46 { p = p + 1 }
+    var frac_val: i64 = 0
+    var frac_digits: i64 = 0
+    while p < end {
+        let c = mc_src_byte(p) as i64
+        if c >= 48 && c <= 57 { frac_val = frac_val * 10 + (c - 48); frac_digits = frac_digits + 1 }
+        else if c == 95 { 0 }
+        else { break }
+        p = p + 1
+    }
+    var divisor: i64 = 1
+    var di: i64 = 0
+    while di < frac_digits { divisor = divisor * 10; di = di + 1 }
+    MP_FLOAT_INT[tc as usize] = int_part
+    MP_FLOAT_FRAC[tc as usize] = frac_val
+    MP_FLOAT_DENOM[tc as usize] = divisor
 }
 
 // Boot4-safe lexer: writes to MP_KIND/MP_START/MP_END/MP_INT_VALUE
@@ -4782,7 +5084,7 @@ fn mc_lex() -> i64 with Mut, Panic, Div {
                     MP_KIND[tc as usize] = 122  // FloatLit
                     MP_START[tc as usize] = ns
                     MP_END[tc as usize] = p
-                    MP_INT_VALUE[tc as usize] = 0
+                    mc_parse_float_parts(tc, ns, p)
                     tc = tc + 1
                     continue
                 }
@@ -4936,8 +5238,15 @@ var MC_PARAM_TOTAL: i64 = 0
 var MC_LOC_NAME_START: [i64; 512] = [0; 512]
 var MC_LOC_NAME_LEN: [i64; 512] = [0; 512]
 var MC_LOC_SLOT: [i64; 512] = [0; 512]
+var MC_LOC_IS_F64: [i64; 512] = [0; 512]   // 1 if local is f64, 0 if i64
 var MC_LOC_COUNT: i64 = 0
 var MC_NEXT_SLOT: i64 = 0
+
+// f64 expression type propagation: set by codegen, read by callers
+var MC_EXPR_IS_F64: i64 = 0
+
+// print_f64 helper offset
+var MC_PRINT_F64_OFF: i64 = 0
 
 // Call fixup table: sentinel bytes to patch with real offsets
 var MC_CALL_FIX_OFF: [i64; 2048] = [0; 2048]    // WIDE_LEN position of rel32
@@ -4950,6 +5259,47 @@ var MC_LOOP_DEPTH: i64 = 0
 var MC_BREAK_FIX_OFF: [i64; 256] = [0; 256]
 var MC_BREAK_FIX_DEPTH: [i64; 256] = [0; 256]
 var MC_BREAK_FIX_COUNT: i64 = 0
+
+// --- Import resolution state ---
+// Scratch buffer for constructing import file paths (e.g. "self-hosted/lexer/cursor.sio")
+var MC_IMP_FNAME: [i8; 512] = [0; 512]
+// Dedup registry: store loaded file path bytes in MC_IMP_PATH_BUF, track offsets/lengths
+var MC_IMP_PATH_BUF: [i8; 8192] = [0; 8192]
+var MC_IMP_PATH_OFF: [i64; 128] = [0; 128]   // byte offset into MC_IMP_PATH_BUF for each loaded path
+var MC_IMP_PATH_LEN: [i64; 128] = [0; 128]   // byte length of each loaded path
+var MC_IMP_COUNT: i64 = 0                      // number of loaded imports
+var MC_IMP_PATH_BUF_POS: i64 = 0             // next free position in MC_IMP_PATH_BUF
+// Base directory of the source file (for relative import resolution)
+var MC_IMP_BASE_DIR: [i8; 512] = [0; 512]
+var MC_IMP_BASE_DIR_LEN: i64 = 0
+
+// --- Struct registry (populated in mc_scan_structs, before mc_scan_functions) ---
+// Up to 64 structs, each with up to 32 fields.
+var MC_ST_COUNT: i64 = 0
+var MC_ST_NAME_START: [i64; 64] = [0; 64]    // source offset of struct name
+var MC_ST_NAME_LEN: [i64; 64] = [0; 64]      // length of struct name
+var MC_ST_FIELD_COUNT: [i64; 64] = [0; 64]   // number of fields
+var MC_ST_FLAT_SIZE: [i64; 64] = [0; 64]     // total 8-byte slots (sum of field flat sizes)
+// Per-field storage: flat, indexed by MC_ST_FIELD_BASE[struct_idx] + field_idx
+var MC_ST_FIELD_BASE: [i64; 64] = [0; 64]    // index into MC_SF_* arrays
+var MC_SF_NAME_START: [i64; 512] = [0; 512]  // source offset of field name
+var MC_SF_NAME_LEN: [i64; 512] = [0; 512]    // length of field name
+var MC_SF_OFFSET: [i64; 512] = [0; 512]      // slot offset of field within struct
+var MC_SF_FLAT_SIZE: [i64; 512] = [0; 512]   // flat size of field (1 for scalars, N for nested structs)
+var MC_SF_TYPE_STRUCT: [i64; 512] = [0; 512]  // struct index if field is a struct type, else -1 (set at scan time)
+var MC_SF_TOTAL: i64 = 0
+
+// --- Local variable type tracking (parallel to MC_LOC_*) ---
+// -1 = scalar (i64/bool/etc), >=0 = struct index
+var MC_LOC_TYPE: [i64; 512] = [0; 512]  // set to -1 by mc_add_local, >=0 by mc_add_local_struct
+
+// --- Function parameter type tracking (parallel to MC_PARAM_*) ---
+// -1 = scalar, >=0 = struct index
+var MC_PARAM_TYPE: [i64; 1024] = [0; 1024]  // set per-param in mc_scan_functions
+
+// --- Function return type tracking ---
+// -1 = scalar, >=0 = struct index
+var MC_FN_RET_TYPE: [i64; 256] = [0; 256]  // set per-fn in mc_scan_functions
 
 // Frame size: fixed 4096 bytes (512 slots * 8)
 fn MC_FRAME_SIZE() -> i64 { 4096 }
@@ -5002,6 +5352,7 @@ fn MC_TK_DOT() -> i64 { 180 }
 fn MC_TK_MINUS_EQ() -> i64 { 152 }
 fn MC_TK_PLUS_EQ() -> i64 { 151 }
 fn MC_TK_STAR_EQ() -> i64 { 153 }
+fn MC_TK_STRUCT() -> i64 { 200 }  // synthetic token kind for struct keyword
 
 // --- Token access helpers ---
 fn mc_peek() -> i64 with Panic {
@@ -5080,6 +5431,28 @@ fn mc_emit_load_rcx(slot: i64) with Mut {
     we32(disp)
 }
 
+// --- SSE2 store/load helpers for f64 (xmm0 ↔ stack slot) ---
+// movsd [rbp+disp], xmm0  =  F2 0F 11 85 <disp32>
+fn mc_emit_store_xmm0(slot: i64) with Mut {
+    let disp = 0 - ((slot + 1) * 8)
+    we(0xF2); we(0x0F); we(0x11); we(0x85)
+    we32(disp)
+}
+
+// movsd xmm0, [rbp+disp]  =  F2 0F 10 85 <disp32>
+fn mc_emit_load_xmm0(slot: i64) with Mut {
+    let disp = 0 - ((slot + 1) * 8)
+    we(0xF2); we(0x0F); we(0x10); we(0x85)
+    we32(disp)
+}
+
+// movsd xmm1, [rbp+disp]  =  F2 0F 10 8D <disp32>
+fn mc_emit_load_xmm1(slot: i64) with Mut {
+    let disp = 0 - ((slot + 1) * 8)
+    we(0xF2); we(0x0F); we(0x10); we(0x8D)
+    we32(disp)
+}
+
 // --- Local variable management ---
 fn mc_locals_reset() with Mut {
     MC_LOC_COUNT = 0
@@ -5092,6 +5465,21 @@ fn mc_add_local(ns: i64, nl: i64) -> i64 with Mut, Panic {
     MC_LOC_NAME_START[idx as usize] = ns
     MC_LOC_NAME_LEN[idx as usize] = nl
     MC_LOC_SLOT[idx as usize] = slot
+    MC_LOC_IS_F64[idx as usize] = 0
+    MC_LOC_TYPE[idx as usize] = -1
+    MC_LOC_COUNT = MC_LOC_COUNT + 1
+    slot
+}
+
+// Add local with f64 type flag
+fn mc_add_local_f64(ns: i64, nl: i64) -> i64 with Mut, Panic {
+    let idx = MC_LOC_COUNT
+    let slot = mc_alloc_slot()
+    MC_LOC_NAME_START[idx as usize] = ns
+    MC_LOC_NAME_LEN[idx as usize] = nl
+    MC_LOC_SLOT[idx as usize] = slot
+    MC_LOC_IS_F64[idx as usize] = 1
+    MC_LOC_TYPE[idx as usize] = -1  // not a struct
     MC_LOC_COUNT = MC_LOC_COUNT + 1
     slot
 }
@@ -5107,6 +5495,18 @@ fn mc_find_local(ns: i64, nl: i64) -> i64 with Panic {
     -1
 }
 
+// Check if a local variable is f64 (by name match)
+fn mc_local_is_f64(ns: i64, nl: i64) -> i64 with Panic {
+    var i: i64 = MC_LOC_COUNT - 1
+    while i >= 0 {
+        if mc_src_eq_range(ns, nl, MC_LOC_NAME_START[i as usize], MC_LOC_NAME_LEN[i as usize]) {
+            return MC_LOC_IS_F64[i as usize]
+        }
+        i = i - 1
+    }
+    0
+}
+
 // --- Function lookup ---
 fn mc_find_fn(ns: i64, nl: i64) -> i64 with Panic {
     var i: i64 = 0
@@ -5117,6 +5517,113 @@ fn mc_find_fn(ns: i64, nl: i64) -> i64 with Panic {
         i = i + 1
     }
     -1
+}
+
+// --- Struct lookup by name ---
+fn mc_find_struct(ns: i64, nl: i64) -> i64 with Panic {
+    var i: i64 = 0
+    while i < MC_ST_COUNT {
+        if mc_src_eq_range(ns, nl, MC_ST_NAME_START[i as usize], MC_ST_NAME_LEN[i as usize]) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// --- Struct field lookup: returns field index within struct, or -1 ---
+fn mc_find_struct_field(st_idx: i64, fs: i64, fl: i64) -> i64 with Panic {
+    let base = MC_ST_FIELD_BASE[st_idx as usize]
+    let count = MC_ST_FIELD_COUNT[st_idx as usize]
+    var i: i64 = 0
+    while i < count {
+        if mc_src_eq_range(fs, fl, MC_SF_NAME_START[(base + i) as usize], MC_SF_NAME_LEN[(base + i) as usize]) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// --- Add multi-slot local for struct ---
+fn mc_add_local_struct(ns: i64, nl: i64, st_idx: i64) -> i64 with Mut, Panic {
+    let idx = MC_LOC_COUNT
+    let flat = MC_ST_FLAT_SIZE[st_idx as usize]
+    let slot = MC_NEXT_SLOT
+    MC_NEXT_SLOT = MC_NEXT_SLOT + flat
+    MC_LOC_NAME_START[idx as usize] = ns
+    MC_LOC_NAME_LEN[idx as usize] = nl
+    MC_LOC_SLOT[idx as usize] = slot
+    MC_LOC_TYPE[idx as usize] = st_idx
+    MC_LOC_IS_F64[idx as usize] = 0
+    MC_LOC_COUNT = MC_LOC_COUNT + 1
+    slot
+}
+
+// --- Get local type (struct index or -1 for scalar) ---
+fn mc_find_local_type(ns: i64, nl: i64) -> i64 with Panic {
+    var i: i64 = MC_LOC_COUNT - 1
+    while i >= 0 {
+        if mc_src_eq_range(ns, nl, MC_LOC_NAME_START[i as usize], MC_LOC_NAME_LEN[i as usize]) {
+            return MC_LOC_TYPE[i as usize]
+        }
+        i = i - 1
+    }
+    -1
+}
+
+// --- Resolve type name to struct index (-1 if scalar) ---
+fn mc_type_name_to_struct(ts: i64, tl: i64) -> i64 with Panic {
+    if mc_src_eq_at(ts, tl, "i64") { return -1 }
+    if mc_src_eq_at(ts, tl, "i32") { return -1 }
+    if mc_src_eq_at(ts, tl, "i8") { return -1 }
+    if mc_src_eq_at(ts, tl, "bool") { return -1 }
+    if mc_src_eq_at(ts, tl, "f64") { return -1 }
+    if mc_src_eq_at(ts, tl, "string") { return -1 }
+    mc_find_struct(ts, tl)
+}
+
+// --- Emit lea rax, [rbp - disp] for a given slot ---
+fn mc_emit_lea_slot(slot: i64) with Mut {
+    let disp = 0 - ((slot + 1) * 8)
+    we(0x48); we(0x8d); we(0x85)  // lea rax, [rbp + disp32]
+    we32(disp)
+}
+
+// --- Emit struct copy: copy flat_size qwords from [rax] to stack slots ---
+fn mc_emit_struct_copy_from_rax(dst_slot: i64, flat_size: i64) with Mut {
+    var i: i64 = 0
+    while i < flat_size {
+        if i == 0 {
+            we(0x48); we(0x8b); we(0x08)  // mov rcx, [rax]
+        } else {
+            let off = i * 8
+            we(0x48); we(0x8b); we(0x88)  // mov rcx, [rax + disp32]
+            we32(off)
+        }
+        let ddisp = 0 - ((dst_slot + 1 + i) * 8)
+        we(0x48); we(0x89); we(0x8d)  // mov [rbp + ddisp], rcx
+        we32(ddisp)
+        i = i + 1
+    }
+}
+
+// --- Emit struct copy: copy flat_size qwords from stack to [rdi] ---
+fn mc_emit_struct_copy_to_ptr(src_slot: i64, flat_size: i64) with Mut {
+    var i: i64 = 0
+    while i < flat_size {
+        let sdisp = 0 - ((src_slot + 1 + i) * 8)
+        we(0x48); we(0x8b); we(0x85)  // mov rax, [rbp + sdisp]
+        we32(sdisp)
+        if i == 0 {
+            we(0x48); we(0x89); we(0x07)  // mov [rdi], rax
+        } else {
+            let off = i * 8
+            we(0x48); we(0x89); we(0x87)  // mov [rdi + disp32], rax
+            we32(off)
+        }
+        i = i + 1
+    }
 }
 
 // --- Emit print_int helper (itoa + sys_write) ---
@@ -5192,6 +5699,88 @@ fn mc_emit_print_int_helper() with Mut {
     we(0xc9); we(0xc3)
 }
 
+// --- Emit print_f64 helper ---
+// Calling convention: f64 bit pattern passed in rdi
+// Prints: ['-']<integer_part>'.'<6 fractional digits>'\n'
+fn mc_emit_print_f64_helper() with Mut {
+    MC_PRINT_F64_OFF = WIDE_LEN
+    we(0x55)
+    we(0x48); we(0x89); we(0xe5)
+    we(0x48); we(0x83); we(0xec); we(0x50)
+    we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC7)
+    we(0x66); we(0x48); we(0x0F); we(0x7E); we(0xC0)
+    we(0x48); we(0x85); we(0xc0)
+    let skip_neg_off = WIDE_LEN
+    we(0x79); we(0x00)
+    we(0xc6); we(0x45); we(0xff); we(0x2d)
+    we(0x48); we(0x8d); we(0x75); we(0xff)
+    we(0xba); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0xbf); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0xb8); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0x0f); we(0x05)
+    we(0x48); we(0x25)
+    we(0xff); we(0xff); we(0xff); we(0xff); we(0xff); we(0xff); we(0xff); we(0x7f)
+    we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC0)
+    let skip_neg_target = WIDE_LEN
+    WIDE_OUT[(skip_neg_off + 1) as usize] = ((skip_neg_target - (skip_neg_off + 2)) & 0xFF) as i8
+    we(0xF2); we(0x48); we(0x0F); we(0x2C); we(0xC0)
+    we(0xF2); we(0x0F); we(0x11); we(0x45); we(0xF0)
+    we(0x48); we(0x89); we(0x45); we(0xE8)
+    we(0x48); we(0x89); we(0xc7)
+    we(0xe8)
+    let int_call_rel = MC_PRINT_INT_OFF - (WIDE_LEN + 4)
+    we32(int_call_rel)
+    we(0xc6); we(0x45); we(0xfe); we(0x2e)
+    we(0x48); we(0x8d); we(0x75); we(0xfe)
+    we(0xba); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0xbf); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0xb8); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0x0f); we(0x05)
+    we(0xF2); we(0x0F); we(0x10); we(0x45); we(0xF0)
+    we(0x48); we(0x8B); we(0x45); we(0xE8)
+    we(0xF2); we(0x48); we(0x0F); we(0x2A); we(0xC8)
+    we(0xF2); we(0x0F); we(0x5C); we(0xC1)
+    we(0x48); we(0xb8)
+    we(0x00); we(0x00); we(0x00); we(0x00); we(0x00); we(0x35); we(0x24); we(0x41)
+    we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xD0)
+    we(0xF2); we(0x0F); we(0x59); we(0xC2)
+    we(0xF2); we(0x48); we(0x0F); we(0x2C); we(0xC8)
+    we(0x48); we(0x89); we(0xc8); we(0x31); we(0xd2)
+    we(0xb9); we(0xa0); we(0x86); we(0x01); we(0x00)
+    we(0x48); we(0xf7); we(0xf1); we(0x04); we(0x30)
+    we(0x88); we(0x45); we(0xf7)
+    we(0x48); we(0x89); we(0xd0); we(0x31); we(0xd2)
+    we(0xb9); we(0x10); we(0x27); we(0x00); we(0x00)
+    we(0x48); we(0xf7); we(0xf1); we(0x04); we(0x30)
+    we(0x88); we(0x45); we(0xf8)
+    we(0x48); we(0x89); we(0xd0); we(0x31); we(0xd2)
+    we(0xb9); we(0xe8); we(0x03); we(0x00); we(0x00)
+    we(0x48); we(0xf7); we(0xf1); we(0x04); we(0x30)
+    we(0x88); we(0x45); we(0xf9)
+    we(0x48); we(0x89); we(0xd0); we(0x31); we(0xd2)
+    we(0xb9); we(0x64); we(0x00); we(0x00); we(0x00)
+    we(0x48); we(0xf7); we(0xf1); we(0x04); we(0x30)
+    we(0x88); we(0x45); we(0xfa)
+    we(0x48); we(0x89); we(0xd0); we(0x31); we(0xd2)
+    we(0xb9); we(0x0a); we(0x00); we(0x00); we(0x00)
+    we(0x48); we(0xf7); we(0xf1); we(0x04); we(0x30)
+    we(0x88); we(0x45); we(0xfb)
+    we(0x80); we(0xc2); we(0x30)
+    we(0x88); we(0x55); we(0xfc)
+    we(0x48); we(0x8d); we(0x75); we(0xf7)
+    we(0xba); we(0x06); we(0x00); we(0x00); we(0x00)
+    we(0xbf); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0xb8); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0x0f); we(0x05)
+    we(0xc6); we(0x45); we(0xfd); we(0x0a)
+    we(0x48); we(0x8d); we(0x75); we(0xfd)
+    we(0xba); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0xbf); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0xb8); we(0x01); we(0x00); we(0x00); we(0x00)
+    we(0x0f); we(0x05)
+    we(0xc9); we(0xc3)
+}
+
 // --- Emit inline string print (push to stack + sys_write) ---
 fn mc_emit_print_str(str_start: i64, str_end: i64) with Mut, Panic, Div {
     // Decode string bytes (handle \n, \t, \\, \0)
@@ -5258,6 +5847,31 @@ fn mc_parse_primary() with Mut, Panic, Div {
         mc_advance()
         // mov rax, imm64
         we(0x48); we(0xb8); we64(val)
+        MC_EXPR_IS_F64 = 0
+        return 0
+    }
+
+    // Float literal: emit runtime SSE2 conversion from integer parts
+    if k == MC_TK_FLOAT() {
+        let fl_int = MP_FLOAT_INT[MC_POS as usize]
+        let fl_frac = MP_FLOAT_FRAC[MC_POS as usize]
+        let fl_denom = MP_FLOAT_DENOM[MC_POS as usize]
+        mc_advance()
+        // Emit: cvtsi2sd xmm0, int_part
+        we(0x48); we(0xb8); we64(fl_int)  // mov rax, int_part
+        we(0xF2); we(0x48); we(0x0F); we(0x2A); we(0xC0)  // cvtsi2sd xmm0, rax
+        // Emit: cvtsi2sd xmm1, frac_val; cvtsi2sd xmm2, denom; divsd xmm1, xmm2; addsd xmm0, xmm1
+        if fl_frac > 0 {
+            we(0x48); we(0xb8); we64(fl_frac)  // mov rax, frac_val
+            we(0xF2); we(0x48); we(0x0F); we(0x2A); we(0xC8)  // cvtsi2sd xmm1, rax
+            we(0x48); we(0xb8); we64(fl_denom)  // mov rax, denom
+            we(0xF2); we(0x48); we(0x0F); we(0x2A); we(0xD0)  // cvtsi2sd xmm2, rax
+            we(0xF2); we(0x0F); we(0x5E); we(0xCA)  // divsd xmm1, xmm2
+            we(0xF2); we(0x0F); we(0x58); we(0xC1)  // addsd xmm0, xmm1
+        }
+        // movq rax, xmm0 — store f64 bits in rax
+        we(0x66); we(0x48); we(0x0F); we(0x7E); we(0xC0)
+        MC_EXPR_IS_F64 = 1
         return 0
     }
 
@@ -5265,11 +5879,13 @@ fn mc_parse_primary() with Mut, Panic, Div {
     if k == MC_TK_TRUE() {
         mc_advance()
         we(0x48); we(0xb8); we64(1)
+        MC_EXPR_IS_F64 = 0
         return 0
     }
     if k == MC_TK_FALSE() {
         mc_advance()
         we(0x48); we(0xb8); we64(0)
+        MC_EXPR_IS_F64 = 0
         return 0
     }
 
@@ -5330,8 +5946,15 @@ fn mc_parse_primary() with Mut, Panic, Div {
     if k == MC_TK_MINUS() {
         mc_advance()
         mc_parse_primary()
-        // neg rax
-        we(0x48); we(0xf7); we(0xd8)
+        if MC_EXPR_IS_F64 == 1 {
+            // f64 negate: flip sign bit (xor rax, 0x8000000000000000)
+            we(0x48); we(0xb9)
+            we(0x00); we(0x00); we(0x00); we(0x00); we(0x00); we(0x00); we(0x00); we(0x80)
+            we(0x48); we(0x31); we(0xc8)  // xor rax, rcx
+        } else {
+            // neg rax
+            we(0x48); we(0xf7); we(0xd8)
+        }
         return 0
     }
 
@@ -5352,7 +5975,7 @@ fn mc_parse_primary() with Mut, Panic, Div {
         return 0
     }
 
-    // Identifier: variable ref or function call
+    // Identifier: variable ref, function call, or struct literal
     if k == MC_TK_IDENT() {
         let id_s = MP_START[MC_POS as usize]
         let id_e = MP_END[MC_POS as usize]
@@ -5366,10 +5989,51 @@ fn mc_parse_primary() with Mut, Panic, Div {
             return 0
         }
 
+        // Check for struct literal: ident followed by { where ident is a struct name
+        if mc_peek() == MC_TK_LBRACE() {
+            let st_idx = mc_find_struct(id_s, id_len)
+            if st_idx >= 0 {
+                mc_advance()  // consume {
+                // Allocate temp stack space for the struct
+                let tmp_slot = MC_NEXT_SLOT
+                let flat = MC_ST_FLAT_SIZE[st_idx as usize]
+                MC_NEXT_SLOT = MC_NEXT_SLOT + flat
+                // Parse field: value pairs and store each field
+                while mc_peek() != MC_TK_RBRACE() && mc_peek() != MC_TK_EOF() {
+                    let fs = MP_START[MC_POS as usize]
+                    let fe = MP_END[MC_POS as usize]
+                    let fl = fe - fs
+                    mc_advance()  // consume field name
+                    mc_expect(MC_TK_COLON())
+                    mc_parse_expr()
+                    // Find field offset and store
+                    let fi = mc_find_struct_field(st_idx, fs, fl)
+                    if fi >= 0 {
+                        let fbase = MC_ST_FIELD_BASE[st_idx as usize]
+                        let foff = MC_SF_OFFSET[(fbase + fi) as usize]
+                        mc_emit_store_rax(tmp_slot + foff)
+                    }
+                    if mc_peek() == MC_TK_COMMA() { mc_advance() }
+                }
+                mc_expect(MC_TK_RBRACE())
+                // Leave pointer to struct in rax
+                mc_emit_lea_slot(tmp_slot)
+                // Set expression type to struct
+                MC_EXPR_IS_F64 = 0
+                return 0
+            }
+        }
+
         // Variable reference
         let slot = mc_find_local(id_s, id_len)
         if slot >= 0 {
-            mc_emit_load_rax(slot)
+            let lt = mc_find_local_type(id_s, id_len)
+            if lt >= 0 {
+                // Struct variable: load pointer to first slot
+                mc_emit_lea_slot(slot)
+            } else {
+                mc_emit_load_rax(slot)
+            }
         } else {
             // Unknown variable — emit 0 with warning
             print("mc: unknown var '")
@@ -5433,6 +6097,33 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
         let rel = MC_PRINT_INT_OFF - (WIDE_LEN + 4)
         we32(rel)
         we(0x48); we(0x31); we(0xc0)
+        MC_EXPR_IS_F64 = 0
+        return 0
+    }
+
+    // print_f64(expr) — f64 bit pattern in rax, pass to helper via rdi
+    if mc_src_eq_at(name_s, name_len, "print_f64") {
+        mc_parse_expr()
+        mc_expect(MC_TK_RPAREN())
+        // mov rdi, rax; call print_f64_helper
+        we(0x48); we(0x89); we(0xc7)
+        we(0xe8)
+        let f64_rel = MC_PRINT_F64_OFF - (WIDE_LEN + 4)
+        we32(f64_rel)
+        we(0x48); we(0x31); we(0xc0)
+        MC_EXPR_IS_F64 = 0
+        return 0
+    }
+
+    // sqrt(expr) — sqrtsd xmm0, xmm0 on f64 bit pattern
+    if mc_src_eq_at(name_s, name_len, "sqrt") {
+        mc_parse_expr()
+        mc_expect(MC_TK_RPAREN())
+        // rax has f64 bits; movq xmm0, rax; sqrtsd xmm0, xmm0; movq rax, xmm0
+        we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC0)  // movq xmm0, rax
+        we(0xF2); we(0x0F); we(0x51); we(0xC0)             // sqrtsd xmm0, xmm0
+        we(0x66); we(0x48); we(0x0F); we(0x7E); we(0xC0)  // movq rax, xmm0
+        MC_EXPR_IS_F64 = 1
         return 0
     }
 
@@ -5580,6 +6271,43 @@ fn mc_parse_expr() with Mut, Panic, Div {
 
 fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
     mc_parse_primary()
+    // Handle postfix dot access (highest precedence)
+    while mc_peek() == MC_TK_DOT() {
+        mc_advance()
+        let fs = MP_START[MC_POS as usize]
+        let fe = MP_END[MC_POS as usize]
+        let fl = fe - fs
+        mc_advance()
+        // Brute-force: find field across all structs
+        var dot_off: i64 = -1
+        var dot_flat: i64 = 1
+        var dsi: i64 = 0
+        while dsi < MC_ST_COUNT {
+            let dfi = mc_find_struct_field(dsi, fs, fl)
+            if dfi >= 0 {
+                let dfb = MC_ST_FIELD_BASE[dsi as usize]
+                dot_off = MC_SF_OFFSET[(dfb + dfi) as usize]
+                dot_flat = MC_SF_FLAT_SIZE[(dfb + dfi) as usize]
+                dsi = MC_ST_COUNT
+            }
+            dsi = dsi + 1
+        }
+        if dot_off >= 0 {
+            if dot_flat == 1 {
+                if dot_off == 0 {
+                    we(0x48); we(0x8b); we(0x00)  // mov rax, [rax]
+                } else {
+                    we(0x48); we(0x8b); we(0x80)  // mov rax, [rax + disp32]
+                    we32(dot_off * 8)
+                }
+            } else {
+                if dot_off > 0 {
+                    we(0x48); we(0x8d); we(0x80)  // lea rax, [rax + disp32]
+                    we32(dot_off * 8)
+                }
+            }
+        }
+    }
     // Pratt operator loop
     while true {
         let op = mc_peek()
@@ -5587,9 +6315,10 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
         if prec == 0 || prec < min_prec { break }
         mc_advance()
 
-        // Save left operand
+        // Save left operand and its type
         let left_slot = mc_alloc_slot()
         mc_emit_store_rax(left_slot)
+        var mc_left_is_f64 = MC_EXPR_IS_F64
 
         // Parse right operand with higher precedence
         mc_parse_expr_prec(prec + 1)
@@ -5600,7 +6329,38 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
         mc_emit_load_rax(left_slot)
 
         // Emit binary operation: rax = rax OP rcx
-        if op == MC_TK_PLUS() {
+        // Check if this is f64 arithmetic (left_was_f64 saved before right parse)
+        if mc_left_is_f64 == 1 && (op == MC_TK_PLUS() || op == MC_TK_MINUS() || op == MC_TK_STAR() || op == MC_TK_SLASH()) {
+            // f64 path: bits in rax (left) and rcx (right)
+            // movq xmm0, rax; movq xmm1, rcx
+            we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC0)
+            we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC9)
+            if op == MC_TK_PLUS() {
+                we(0xF2); we(0x0F); we(0x58); we(0xC1)  // addsd xmm0, xmm1
+            } else if op == MC_TK_MINUS() {
+                we(0xF2); we(0x0F); we(0x5C); we(0xC1)  // subsd xmm0, xmm1
+            } else if op == MC_TK_STAR() {
+                we(0xF2); we(0x0F); we(0x59); we(0xC1)  // mulsd xmm0, xmm1
+            } else if op == MC_TK_SLASH() {
+                we(0xF2); we(0x0F); we(0x5E); we(0xC1)  // divsd xmm0, xmm1
+            }
+            // movq rax, xmm0
+            we(0x66); we(0x48); we(0x0F); we(0x7E); we(0xC0)
+            MC_EXPR_IS_F64 = 1
+        } else if mc_left_is_f64 == 1 && (op == MC_TK_EQEQ() || op == MC_TK_BANGEQ() || op == MC_TK_LT() || op == MC_TK_GT() || op == MC_TK_LTEQ() || op == MC_TK_GTEQ()) {
+            // f64 comparison: ucomisd xmm0, xmm1 then setCC
+            we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC0)
+            we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC9)
+            we(0x66); we(0x0F); we(0x2E); we(0xC1)  // ucomisd xmm0, xmm1
+            if op == MC_TK_EQEQ() { we(0x0f); we(0x94); we(0xc0) }
+            else if op == MC_TK_BANGEQ() { we(0x0f); we(0x95); we(0xc0) }
+            else if op == MC_TK_LT() { we(0x0f); we(0x92); we(0xc0) }
+            else if op == MC_TK_GT() { we(0x0f); we(0x97); we(0xc0) }
+            else if op == MC_TK_LTEQ() { we(0x0f); we(0x96); we(0xc0) }
+            else if op == MC_TK_GTEQ() { we(0x0f); we(0x93); we(0xc0) }
+            we(0x48); we(0x0f); we(0xb6); we(0xc0)  // movzx rax, al
+            MC_EXPR_IS_F64 = 0
+        } else if op == MC_TK_PLUS() {
             we(0x48); we(0x01); we(0xc8)  // add rax, rcx
         } else if op == MC_TK_MINUS() {
             we(0x48); we(0x29); we(0xc8)  // sub rax, rcx
@@ -5670,15 +6430,39 @@ fn mc_parse_stmt() with Mut, Panic, Div {
         let ne = MP_END[MC_POS as usize]
         let nl = ne - ns
         mc_advance()  // consume ident
-        // Optional type annotation: : TYPE
+        // Optional type annotation: : TYPE — detect f64 and struct
+        var let_is_f64: i64 = 0
+        var let_st: i64 = -1
         if mc_peek() == MC_TK_COLON() {
             mc_advance()
+            if mc_peek() == MC_TK_IDENT() {
+                let ts = MP_START[MC_POS as usize]
+                let tl = MP_END[MC_POS as usize] - ts
+                if mc_src_eq_at(ts, tl, "f64") { let_is_f64 = 1 }
+                else { let_st = mc_type_name_to_struct(ts, tl) }
+            }
             mc_skip_type()
         }
         mc_expect(MC_TK_EQ())
+        // If no type annotation, peek for struct literal: StructName {
+        if let_st < 0 && let_is_f64 == 0 && mc_peek() == MC_TK_IDENT() {
+            let rhs_s = MP_START[MC_POS as usize]
+            let rhs_l = MP_END[MC_POS as usize] - rhs_s
+            if MC_POS + 1 < MC_TC && MP_KIND[(MC_POS + 1) as usize] == MC_TK_LBRACE() {
+                let_st = mc_find_struct(rhs_s, rhs_l)
+            }
+        }
         mc_parse_expr()
-        let slot = mc_add_local(ns, nl)
-        mc_emit_store_rax(slot)
+        if let_st >= 0 {
+            let slot = mc_add_local_struct(ns, nl, let_st)
+            mc_emit_struct_copy_from_rax(slot, MC_ST_FLAT_SIZE[let_st as usize])
+        } else if let_is_f64 == 1 || MC_EXPR_IS_F64 == 1 {
+            let slot = mc_add_local_f64(ns, nl)
+            mc_emit_store_rax(slot)
+        } else {
+            let slot = mc_add_local(ns, nl)
+            mc_emit_store_rax(slot)
+        }
         return 0
     }
 
@@ -5689,15 +6473,38 @@ fn mc_parse_stmt() with Mut, Panic, Div {
         let ne = MP_END[MC_POS as usize]
         let nl = ne - ns
         mc_advance()  // consume ident
-        // Optional type annotation
+        // Optional type annotation — detect f64 and struct
+        var var_is_f64: i64 = 0
+        var var_st: i64 = -1
         if mc_peek() == MC_TK_COLON() {
             mc_advance()
+            if mc_peek() == MC_TK_IDENT() {
+                let ts = MP_START[MC_POS as usize]
+                let tl = MP_END[MC_POS as usize] - ts
+                if mc_src_eq_at(ts, tl, "f64") { var_is_f64 = 1 }
+                else { var_st = mc_type_name_to_struct(ts, tl) }
+            }
             mc_skip_type()
         }
         mc_expect(MC_TK_EQ())
+        if var_st < 0 && var_is_f64 == 0 && mc_peek() == MC_TK_IDENT() {
+            let rhs_s = MP_START[MC_POS as usize]
+            let rhs_l = MP_END[MC_POS as usize] - rhs_s
+            if MC_POS + 1 < MC_TC && MP_KIND[(MC_POS + 1) as usize] == MC_TK_LBRACE() {
+                var_st = mc_find_struct(rhs_s, rhs_l)
+            }
+        }
         mc_parse_expr()
-        let slot = mc_add_local(ns, nl)
-        mc_emit_store_rax(slot)
+        if var_st >= 0 {
+            let slot = mc_add_local_struct(ns, nl, var_st)
+            mc_emit_struct_copy_from_rax(slot, MC_ST_FLAT_SIZE[var_st as usize])
+        } else if var_is_f64 == 1 || MC_EXPR_IS_F64 == 1 {
+            let slot = mc_add_local_f64(ns, nl)
+            mc_emit_store_rax(slot)
+        } else {
+            let slot = mc_add_local(ns, nl)
+            mc_emit_store_rax(slot)
+        }
         return 0
     }
 
@@ -5801,6 +6608,34 @@ fn mc_parse_stmt() with Mut, Panic, Div {
         let id_e = MP_END[MC_POS as usize]
         let id_len = id_e - id_s
         mc_advance()
+
+        // Field assignment: ident.field[.field...] = expr
+        if mc_peek() == MC_TK_DOT() {
+            var dot_total_off: i64 = 0
+            while mc_peek() == MC_TK_DOT() {
+                mc_advance()
+                let dfs = MP_START[MC_POS as usize]
+                let dfl = MP_END[MC_POS as usize] - dfs
+                mc_advance()
+                var dsi: i64 = 0
+                while dsi < MC_ST_COUNT {
+                    let dfi = mc_find_struct_field(dsi, dfs, dfl)
+                    if dfi >= 0 {
+                        let dfb = MC_ST_FIELD_BASE[dsi as usize]
+                        dot_total_off = dot_total_off + MC_SF_OFFSET[(dfb + dfi) as usize]
+                        dsi = MC_ST_COUNT
+                    }
+                    dsi = dsi + 1
+                }
+            }
+            mc_expect(MC_TK_EQ())
+            mc_parse_expr()
+            let slot = mc_find_local(id_s, id_len)
+            if slot >= 0 {
+                mc_emit_store_rax(slot + dot_total_off)
+            }
+            return 0
+        }
 
         // Assignment: ident = expr
         if mc_peek() == MC_TK_EQ() {
@@ -5930,6 +6765,83 @@ fn mc_parse_block_body() with Mut, Panic, Div {
     }
 }
 
+// --- Pass 0: Scan struct declarations ---
+fn mc_scan_structs() with Mut, Panic, Div {
+    MC_POS = 0
+    MC_ST_COUNT = 0
+    MC_SF_TOTAL = 0
+    while MC_POS < MC_TC {
+        let k = mc_peek()
+        if k == MC_TK_STRUCT() {
+            mc_advance()
+            // Struct name
+            let ns = MP_START[MC_POS as usize]
+            let ne = MP_END[MC_POS as usize]
+            let nl = ne - ns
+            let si = MC_ST_COUNT
+            MC_ST_NAME_START[si as usize] = ns
+            MC_ST_NAME_LEN[si as usize] = nl
+            MC_ST_FIELD_BASE[si as usize] = MC_SF_TOTAL
+            mc_advance()  // consume name
+            mc_expect(MC_TK_LBRACE())
+            var fc: i64 = 0
+            var flat_off: i64 = 0
+            while mc_peek() != MC_TK_RBRACE() && mc_peek() != MC_TK_EOF() {
+                // field_name : type ,
+                let fs = MP_START[MC_POS as usize]
+                let fe = MP_END[MC_POS as usize]
+                let fl = fe - fs
+                mc_advance()  // consume field name
+                let fi = MC_SF_TOTAL
+                MC_SF_NAME_START[fi as usize] = fs
+                MC_SF_NAME_LEN[fi as usize] = fl
+                MC_SF_OFFSET[fi as usize] = flat_off
+                // Parse : type
+                var field_struct: i64 = -1
+                var field_flat: i64 = 1
+                if mc_peek() == MC_TK_COLON() {
+                    mc_advance()
+                    // Read type name token
+                    if mc_peek() == MC_TK_IDENT() || mc_peek() == MC_TK_STRUCT() {
+                        let ts = MP_START[MC_POS as usize]
+                        let te = MP_END[MC_POS as usize]
+                        let tl = te - ts
+                        // Look up if it's a previously declared struct
+                        field_struct = mc_find_struct(ts, tl)
+                        if field_struct >= 0 {
+                            field_flat = MC_ST_FLAT_SIZE[field_struct as usize]
+                        }
+                        mc_advance()
+                    } else {
+                        // Skip other type tokens (scalars etc)
+                        mc_skip_type()
+                    }
+                }
+                MC_SF_FLAT_SIZE[fi as usize] = field_flat
+                MC_SF_TYPE_STRUCT[fi as usize] = field_struct
+                MC_SF_TOTAL = MC_SF_TOTAL + 1
+                flat_off = flat_off + field_flat
+                fc = fc + 1
+                if mc_peek() == MC_TK_COMMA() { mc_advance() }
+            }
+            mc_expect(MC_TK_RBRACE())
+            MC_ST_FIELD_COUNT[si as usize] = fc
+            MC_ST_FLAT_SIZE[si as usize] = flat_off
+            MC_ST_COUNT = MC_ST_COUNT + 1
+            print("mc: struct ")
+            var pi: i64 = 0
+            while pi < nl && pi < 32 { print_char(ltp_byte(ns + pi) as i64); pi = pi + 1 }
+            print(" fields=")
+            print_int(fc)
+            print(" flat=")
+            print_int(flat_off)
+            print("\n")
+        } else {
+            mc_advance()
+        }
+    }
+}
+
 // --- Pass 1: Scan all fn declarations, collect names + body token positions ---
 fn mc_scan_functions() with Mut, Panic, Div {
     MC_POS = 0
@@ -5964,21 +6876,37 @@ fn mc_scan_functions() with Mut, Panic, Div {
                 mc_advance()  // consume param name
                 MC_PARAM_NAME_START[MC_PARAM_TOTAL as usize] = ps
                 MC_PARAM_NAME_LEN[MC_PARAM_TOTAL as usize] = pl
-                MC_PARAM_TOTAL = MC_PARAM_TOTAL + 1
-                pc = pc + 1
-                // Skip : type
+                // Parse : type and resolve struct
+                var param_st: i64 = -1
                 if mc_peek() == MC_TK_COLON() {
                     mc_advance()
+                    // Check if type name is a struct
+                    if mc_peek() == MC_TK_IDENT() || mc_peek() == MC_TK_STRUCT() {
+                        let ts = MP_START[MC_POS as usize]
+                        let te = MP_END[MC_POS as usize]
+                        let tl = te - ts
+                        param_st = mc_type_name_to_struct(ts, tl)
+                    }
                     mc_skip_type()
                 }
+                MC_PARAM_TYPE[MC_PARAM_TOTAL as usize] = param_st
+                MC_PARAM_TOTAL = MC_PARAM_TOTAL + 1
+                pc = pc + 1
                 if mc_peek() == MC_TK_COMMA() { mc_advance() }
             }
             mc_expect(MC_TK_RPAREN())
             MC_FN_PARAM_COUNT[fi as usize] = pc
 
-            // Skip -> return_type
+            // Parse -> return_type (and resolve struct)
+            MC_FN_RET_TYPE[fi as usize] = -1
             if mc_peek() == MC_TK_ARROW() {
                 mc_advance()
+                if mc_peek() == MC_TK_IDENT() || mc_peek() == MC_TK_STRUCT() {
+                    let rts = MP_START[MC_POS as usize]
+                    let rte = MP_END[MC_POS as usize]
+                    let rtl = rte - rts
+                    MC_FN_RET_TYPE[fi as usize] = mc_type_name_to_struct(rts, rtl)
+                }
                 mc_skip_type()
             }
 
@@ -6002,6 +6930,20 @@ fn mc_scan_functions() with Mut, Panic, Div {
                     let bk = mc_peek()
                     if bk == MC_TK_LBRACE() { depth = depth + 1 }
                     if bk == MC_TK_RBRACE() { depth = depth - 1 }
+                    mc_advance()
+                }
+            }
+        } else if k == MC_TK_STRUCT() {
+            // Skip struct declaration (already parsed in mc_scan_structs)
+            mc_advance()  // struct
+            if mc_peek() == MC_TK_IDENT() { mc_advance() }  // name
+            if mc_peek() == MC_TK_LBRACE() {
+                mc_advance()
+                var sd: i64 = 1
+                while MC_POS < MC_TC && sd > 0 {
+                    let sk = mc_peek()
+                    if sk == MC_TK_LBRACE() { sd = sd + 1 }
+                    if sk == MC_TK_RBRACE() { sd = sd - 1 }
                     mc_advance()
                 }
             }
@@ -6034,15 +6976,30 @@ fn mc_compile_functions() with Mut, Panic, Div {
         while pi < param_count {
             let ps = MC_PARAM_NAME_START[(param_base + pi) as usize]
             let pl = MC_PARAM_NAME_LEN[(param_base + pi) as usize]
-            let slot = mc_add_local(ps, pl)
-            // Move from ABI register to stack slot
-            if pi == 0 { we(0x48); we(0x89); we(0xf8) }       // mov rax, rdi
-            else if pi == 1 { we(0x48); we(0x89); we(0xf0) }  // mov rax, rsi
-            else if pi == 2 { we(0x48); we(0x89); we(0xd0) }  // mov rax, rdx
-            else if pi == 3 { we(0x48); we(0x89); we(0xc8) }  // mov rax, rcx
-            else if pi == 4 { we(0x4c); we(0x89); we(0xc0) }  // mov rax, r8
-            else if pi == 5 { we(0x4c); we(0x89); we(0xc8) }  // mov rax, r9
-            mc_emit_store_rax(slot)
+            let pst = MC_PARAM_TYPE[(param_base + pi) as usize]
+            if pst >= 0 {
+                // Struct parameter: register holds pointer to struct data
+                let slot = mc_add_local_struct(ps, pl, pst)
+                // Move pointer from ABI register into rax
+                if pi == 0 { we(0x48); we(0x89); we(0xf8) }       // mov rax, rdi
+                else if pi == 1 { we(0x48); we(0x89); we(0xf0) }  // mov rax, rsi
+                else if pi == 2 { we(0x48); we(0x89); we(0xd0) }  // mov rax, rdx
+                else if pi == 3 { we(0x48); we(0x89); we(0xc8) }  // mov rax, rcx
+                else if pi == 4 { we(0x4c); we(0x89); we(0xc0) }  // mov rax, r8
+                else if pi == 5 { we(0x4c); we(0x89); we(0xc8) }  // mov rax, r9
+                // Copy struct fields from [rax] to local stack slots
+                mc_emit_struct_copy_from_rax(slot, MC_ST_FLAT_SIZE[pst as usize])
+            } else {
+                // Scalar parameter
+                let slot = mc_add_local(ps, pl)
+                if pi == 0 { we(0x48); we(0x89); we(0xf8) }       // mov rax, rdi
+                else if pi == 1 { we(0x48); we(0x89); we(0xf0) }  // mov rax, rsi
+                else if pi == 2 { we(0x48); we(0x89); we(0xd0) }  // mov rax, rdx
+                else if pi == 3 { we(0x48); we(0x89); we(0xc8) }  // mov rax, rcx
+                else if pi == 4 { we(0x4c); we(0x89); we(0xc0) }  // mov rax, r8
+                else if pi == 5 { we(0x4c); we(0x89); we(0xc8) }  // mov rax, r9
+                mc_emit_store_rax(slot)
+            }
             pi = pi + 1
         }
 
@@ -6116,6 +7073,15 @@ fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
 
     // Emit print_int helper at start of code section
     mc_emit_print_int_helper()
+
+    // Emit print_f64 helper
+    mc_emit_print_f64_helper()
+
+    // Pass 0: scan struct declarations
+    mc_scan_structs()
+    print("mini_compile: structs=")
+    print_int(MC_ST_COUNT)
+    print("\n")
 
     // Pass 1: scan all function declarations
     mc_scan_functions()
