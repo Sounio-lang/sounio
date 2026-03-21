@@ -451,13 +451,10 @@ fn parser_last_error_count() -> i64 {
 
 fn load_and_parse(path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
     // LEAN_SOURCE already populated by scan_source_globals (same-module global)
-    let token_count = lean_lex_to_parser()
-    print("lex: tokens=")
-    print_int(token_count)
-    print("\n")
-    parse_program_preloaded(token_count)
-    // Return token_count as proxy for item count (parser return struct is IS_SPTR=4)
-    token_count
+    // Skip lean_lex_to_parser() — it uses TokenKind enum which boot4 miscompiles.
+    // Mini-compiler has its own boot4-safe lexer (mc_lex).
+    print("load_and_parse: skipping to mini-compiler\n")
+    0
 }
 
 // ============================================================================
@@ -4586,182 +4583,1564 @@ fn elf_write_u64(off: i64, v: i64) with Mut, Panic {
     elf_write_u32(off, v & 0xFFFFFFFF); elf_write_u32(off + 4, (v >> 32) & 0xFFFFFFFF)
 }
 
+// ============================================================================
+// Boot4-safe lexer: avoids TokenKind enum entirely, uses raw integer constants.
+// Writes to MP_KIND/MP_START/MP_END/MP_INT_VALUE arrays.
+// Token kind values match the TokenKind enum discriminant numbering.
+// ============================================================================
+
+fn mc_is_ws(ch: i8) -> bool { ch == 32 || ch == 9 || ch == 13 || ch == 10 }
+fn mc_is_digit(ch: i8) -> bool { ch >= 48 && ch <= 57 }
+fn mc_is_alpha(ch: i8) -> bool {
+    (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch == 95
+}
+fn mc_is_alnum(ch: i8) -> bool { mc_is_alpha(ch) || mc_is_digit(ch) }
+
+fn mc_src_byte(idx: i64) -> i8 with Panic {
+    if idx >= 0 && idx < LEAN_SOURCE_LEN { LEAN_SOURCE[idx as usize] } else { 0 as i8 }
+}
+
+// Keyword lookup: returns token kind integer directly (no enum)
+// 0=Eof, 7=Fn, 8=Let, 9=Var, 17=If, 18=Else, 21=While, 23=Break,
+// 24=Continue, 25=Return, 27=As, 32=True, 33=False, 42=With, 120=Ident
+fn mc_kw_lookup(start: i64, len: i64) -> i64 with Panic {
+    let b0 = mc_src_byte(start)
+    let b1 = if len > 1 { mc_src_byte(start + 1) } else { 0 as i8 }
+    let b2 = if len > 2 { mc_src_byte(start + 2) } else { 0 as i8 }
+    let b3 = if len > 3 { mc_src_byte(start + 3) } else { 0 as i8 }
+    let b4 = if len > 4 { mc_src_byte(start + 4) } else { 0 as i8 }
+    let b5 = if len > 5 { mc_src_byte(start + 5) } else { 0 as i8 }
+    let b6 = if len > 6 { mc_src_byte(start + 6) } else { 0 as i8 }
+    let b7 = if len > 7 { mc_src_byte(start + 7) } else { 0 as i8 }
+    if len == 2 {
+        // fn
+        if b0 == 102 && b1 == 110 { return 7 }
+        // if
+        if b0 == 105 && b1 == 102 { return 17 }
+        // as
+        if b0 == 97 && b1 == 115 { return 27 }
+        // in
+        if b0 == 105 && b1 == 110 { return 120 }
+    }
+    if len == 3 {
+        // let
+        if b0 == 108 && b1 == 101 && b2 == 116 { return 8 }
+        // var
+        if b0 == 118 && b1 == 97 && b2 == 114 { return 9 }
+        // for
+        if b0 == 102 && b1 == 111 && b2 == 114 { return 21 }
+        // use
+        if b0 == 117 && b1 == 115 && b2 == 101 { return 120 }
+        // pub
+        if b0 == 112 && b1 == 117 && b2 == 98 { return 120 }
+    }
+    if len == 4 {
+        // else
+        if b0 == 101 && b1 == 108 && b2 == 115 && b3 == 101 { return 18 }
+        // true
+        if b0 == 116 && b1 == 114 && b2 == 117 && b3 == 101 { return 32 }
+        // with
+        if b0 == 119 && b1 == 105 && b2 == 116 && b3 == 104 { return 42 }
+        // type
+        if b0 == 116 && b1 == 121 && b2 == 112 && b3 == 101 { return 120 }
+        // impl
+        if b0 == 105 && b1 == 109 && b2 == 112 && b3 == 108 { return 120 }
+        // enum
+        if b0 == 101 && b1 == 110 && b2 == 117 && b3 == 109 { return 120 }
+        // loop
+        if b0 == 108 && b1 == 111 && b2 == 111 && b3 == 112 { return 21 }
+        // None
+        if b0 == 78 && b1 == 111 && b2 == 110 && b3 == 101 { return 120 }
+        // Some
+        if b0 == 83 && b1 == 111 && b2 == 109 && b3 == 101 { return 120 }
+    }
+    if len == 5 {
+        // while
+        if b0 == 119 && b1 == 104 && b2 == 105 && b3 == 108 && b4 == 101 { return 21 }
+        // break
+        if b0 == 98 && b1 == 114 && b2 == 101 && b3 == 97 && b4 == 107 { return 23 }
+        // false
+        if b0 == 102 && b1 == 97 && b2 == 108 && b3 == 115 && b4 == 101 { return 33 }
+        // match
+        if b0 == 109 && b1 == 97 && b2 == 116 && b3 == 99 && b4 == 104 { return 120 }
+        // const
+        if b0 == 99 && b1 == 111 && b2 == 110 && b3 == 115 && b4 == 116 { return 120 }
+    }
+    if len == 6 {
+        // return
+        if b0 == 114 && b1 == 101 && b2 == 116 && b3 == 117 && b4 == 114 && b5 == 110 { return 25 }
+        // struct
+        if b0 == 115 && b1 == 116 && b2 == 114 && b3 == 117 && b4 == 99 && b5 == 116 { return 120 }
+        // module
+        if b0 == 109 && b1 == 111 && b2 == 100 && b3 == 117 && b4 == 108 && b5 == 101 { return 120 }
+        // linear
+        if b0 == 108 && b1 == 105 && b2 == 110 && b3 == 101 && b4 == 97 && b5 == 114 { return 120 }
+    }
+    if len == 8 {
+        // continue
+        if b0 == 99 && b1 == 111 && b2 == 110 && b3 == 116 && b4 == 105 && b5 == 110 && b6 == 117 && b7 == 101 { return 24 }
+    }
+    120  // Ident
+}
+
+// Parse integer literal from source bytes
+fn mc_parse_int(start: i64, end: i64) -> i64 with Panic {
+    var val: i64 = 0
+    var p: i64 = start
+    var neg = false
+    if p < end && mc_src_byte(p) == 45 { neg = true; p = p + 1 }
+    // Check for hex: 0x
+    if p + 1 < end && mc_src_byte(p) == 48 && (mc_src_byte(p + 1) == 120 || mc_src_byte(p + 1) == 88) {
+        p = p + 2
+        while p < end {
+            let c = mc_src_byte(p) as i64
+            if c >= 48 && c <= 57 { val = val * 16 + (c - 48) }
+            else if c >= 97 && c <= 102 { val = val * 16 + (c - 87) }
+            else if c >= 65 && c <= 70 { val = val * 16 + (c - 55) }
+            else if c == 95 { 0 }
+            else { break }
+            p = p + 1
+        }
+    }
+    // Check for binary: 0b
+    else if p + 1 < end && mc_src_byte(p) == 48 && (mc_src_byte(p + 1) == 98 || mc_src_byte(p + 1) == 66) {
+        p = p + 2
+        while p < end {
+            let c = mc_src_byte(p) as i64
+            if c == 48 || c == 49 { val = val * 2 + (c - 48) }
+            else if c == 95 { 0 }
+            else { break }
+            p = p + 1
+        }
+    } else {
+        while p < end {
+            let c = mc_src_byte(p) as i64
+            if c >= 48 && c <= 57 { val = val * 10 + (c - 48) }
+            else if c == 95 { 0 }
+            else { break }
+            p = p + 1
+        }
+    }
+    if neg { 0 - val } else { val }
+}
+
+// Boot4-safe lexer: writes to MP_KIND/MP_START/MP_END/MP_INT_VALUE
+fn mc_lex() -> i64 with Mut, Panic, Div {
+    var p: i64 = 0
+    var tc: i64 = 0
+    let n = LEAN_SOURCE_LEN
+    while p < n {
+        let ch = mc_src_byte(p)
+        // Whitespace
+        if ch == 32 || ch == 9 || ch == 13 || ch == 10 { p = p + 1; continue }
+        // Line comment: //
+        if ch == 47 && p + 1 < n && mc_src_byte(p + 1) == 47 {
+            p = p + 2
+            while p < n && mc_src_byte(p) != 10 { p = p + 1 }
+            continue
+        }
+        // Block comment: /* ... */
+        if ch == 47 && p + 1 < n && mc_src_byte(p + 1) == 42 {
+            var depth: i64 = 1
+            p = p + 2
+            while p + 1 < n && depth > 0 {
+                if mc_src_byte(p) == 47 && mc_src_byte(p + 1) == 42 { depth = depth + 1; p = p + 2; continue }
+                if mc_src_byte(p) == 42 && mc_src_byte(p + 1) == 47 { depth = depth - 1; p = p + 2; continue }
+                p = p + 1
+            }
+            continue
+        }
+        // String literal
+        if ch == 34 {
+            let ss = p
+            p = p + 1
+            while p < n && mc_src_byte(p) != 34 {
+                if mc_src_byte(p) == 92 { p = p + 1 }
+                p = p + 1
+            }
+            if p < n { p = p + 1 }
+            MP_KIND[tc as usize] = 123  // StringLit
+            MP_START[tc as usize] = ss
+            MP_END[tc as usize] = p
+            MP_INT_VALUE[tc as usize] = 0
+            tc = tc + 1
+            continue
+        }
+        // Number literal
+        if mc_is_digit(ch) {
+            let ns = p
+            // Check for hex/bin prefix
+            if ch == 48 && p + 1 < n && (mc_src_byte(p + 1) == 120 || mc_src_byte(p + 1) == 88 || mc_src_byte(p + 1) == 98 || mc_src_byte(p + 1) == 66) {
+                p = p + 2
+                while p < n && (mc_is_alnum(mc_src_byte(p)) || mc_src_byte(p) == 95) { p = p + 1 }
+            } else {
+                while p < n && (mc_is_digit(mc_src_byte(p)) || mc_src_byte(p) == 95) { p = p + 1 }
+                // Check for float (e.g. 1.5)
+                if p < n && mc_src_byte(p) == 46 && p + 1 < n && mc_is_digit(mc_src_byte(p + 1)) {
+                    p = p + 1
+                    while p < n && (mc_is_digit(mc_src_byte(p)) || mc_src_byte(p) == 95) { p = p + 1 }
+                    MP_KIND[tc as usize] = 122  // FloatLit
+                    MP_START[tc as usize] = ns
+                    MP_END[tc as usize] = p
+                    MP_INT_VALUE[tc as usize] = 0
+                    tc = tc + 1
+                    continue
+                }
+            }
+            MP_KIND[tc as usize] = 121  // IntLit
+            MP_START[tc as usize] = ns
+            MP_END[tc as usize] = p
+            MP_INT_VALUE[tc as usize] = mc_parse_int(ns, p)
+            tc = tc + 1
+            continue
+        }
+        // Identifier / keyword
+        if mc_is_alpha(ch) {
+            let is = p
+            while p < n && mc_is_alnum(mc_src_byte(p)) { p = p + 1 }
+            let ilen = p - is
+            let kind = mc_kw_lookup(is, ilen)
+            MP_KIND[tc as usize] = kind
+            MP_START[tc as usize] = is
+            MP_END[tc as usize] = p
+            MP_INT_VALUE[tc as usize] = 0
+            tc = tc + 1
+            continue
+        }
+        // Operators and punctuation (multi-char first)
+        let c1 = if p + 1 < n { mc_src_byte(p + 1) } else { 0 as i8 }
+        var matched: i64 = 0
+        // ==
+        if matched == 0 && ch == 61 && c1 == 61 { MP_KIND[tc as usize] = 143; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // !=
+        if matched == 0 && ch == 33 && c1 == 61 { MP_KIND[tc as usize] = 144; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // <=
+        if matched == 0 && ch == 60 && c1 == 61 { MP_KIND[tc as usize] = 145; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // >=
+        if matched == 0 && ch == 62 && c1 == 61 { MP_KIND[tc as usize] = 146; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // &&
+        if matched == 0 && ch == 38 && c1 == 38 { MP_KIND[tc as usize] = 147; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // ||
+        if matched == 0 && ch == 124 && c1 == 124 { MP_KIND[tc as usize] = 148; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // ->
+        if matched == 0 && ch == 45 && c1 == 62 { MP_KIND[tc as usize] = 155; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // =>
+        if matched == 0 && ch == 61 && c1 == 62 { MP_KIND[tc as usize] = 156; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // ::
+        if matched == 0 && ch == 58 && c1 == 58 { MP_KIND[tc as usize] = 159; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // &!
+        if matched == 0 && ch == 38 && c1 == 33 { MP_KIND[tc as usize] = 160; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // +=
+        if matched == 0 && ch == 43 && c1 == 61 { MP_KIND[tc as usize] = 151; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // -=
+        if matched == 0 && ch == 45 && c1 == 61 { MP_KIND[tc as usize] = 152; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // *=
+        if matched == 0 && ch == 42 && c1 == 61 { MP_KIND[tc as usize] = 153; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // <<
+        if matched == 0 && ch == 60 && c1 == 60 { MP_KIND[tc as usize] = 149; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // >>
+        if matched == 0 && ch == 62 && c1 == 62 { MP_KIND[tc as usize] = 150; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        // ++
+        if matched == 0 && ch == 43 && c1 == 43 { MP_KIND[tc as usize] = 161; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
+        if matched == 1 { continue }
+        // Single-char operators
+        var sk: i64 = 0
+        if ch == 43 { sk = 129 }       // +
+        else if ch == 45 { sk = 130 }  // -
+        else if ch == 42 { sk = 131 }  // *
+        else if ch == 47 { sk = 132 }  // /
+        else if ch == 37 { sk = 133 }  // %
+        else if ch == 61 { sk = 134 }  // =
+        else if ch == 60 { sk = 135 }  // <
+        else if ch == 62 { sk = 136 }  // >
+        else if ch == 33 { sk = 137 }  // !
+        else if ch == 38 { sk = 138 }  // &
+        else if ch == 124 { sk = 139 } // |
+        else if ch == 94 { sk = 140 }  // ^
+        else if ch == 126 { sk = 141 } // ~
+        else if ch == 40 { sk = 171 }  // (
+        else if ch == 41 { sk = 172 }  // )
+        else if ch == 123 { sk = 173 } // {
+        else if ch == 125 { sk = 174 } // }
+        else if ch == 91 { sk = 175 }  // [
+        else if ch == 93 { sk = 176 }  // ]
+        else if ch == 59 { sk = 177 }  // ;
+        else if ch == 58 { sk = 178 }  // :
+        else if ch == 44 { sk = 179 }  // ,
+        else if ch == 46 { sk = 180 }  // .
+        else if ch == 64 { sk = 181 }  // @
+        else if ch == 35 { sk = 182 }  // #
+        if sk > 0 {
+            MP_KIND[tc as usize] = sk
+            MP_START[tc as usize] = p
+            MP_END[tc as usize] = p + 1
+            MP_INT_VALUE[tc as usize] = 0
+            tc = tc + 1
+            p = p + 1
+            continue
+        }
+        // Char literal
+        if ch == 39 {
+            let cs = p
+            p = p + 1
+            if p < n && mc_src_byte(p) == 92 { p = p + 1 }
+            if p < n { p = p + 1 }
+            if p < n && mc_src_byte(p) == 39 { p = p + 1 }
+            MP_KIND[tc as usize] = 124  // CharLit
+            MP_START[tc as usize] = cs
+            MP_END[tc as usize] = p
+            tc = tc + 1
+            continue
+        }
+        // Unknown: skip
+        p = p + 1
+    }
+    // EOF token
+    MP_KIND[tc as usize] = 0
+    MP_START[tc as usize] = p
+    MP_END[tc as usize] = p
+    MP_INT_VALUE[tc as usize] = 0
+    tc = tc + 1
+    tc
+}
+
+// ============================================================================
+// Mini-compiler v2: single-pass token→x86-64 with full expression support.
+// Recursive descent parser reads from MP_KIND/MP_START/MP_END/MP_INT_VALUE.
+// Each parse function directly emits x86-64 via we()/we32()/we64().
+// Local variables tracked via MC_LOCAL_* arrays (name → stack slot).
+// Function offsets stored in MC_FN_OFF[] for call patching.
+// ============================================================================
+
+// --- Mini-compiler global state ---
+var MC_POS: i64 = 0       // current token position in MP_* arrays
+var MC_TC: i64 = 0        // total token count
+
+// Function registry (pass 1 collects, pass 2 compiles)
+var MC_FN_NAME_START: [i64; 256] = [0; 256]  // source offset of fn name
+var MC_FN_NAME_LEN: [i64; 256] = [0; 256]    // length of fn name
+var MC_FN_OFF: [i64; 256] = [0; 256]          // WIDE_LEN offset of fn code
+var MC_FN_BODY_TOK: [i64; 256] = [0; 256]    // token index of opening { of body
+var MC_FN_PARAM_COUNT: [i64; 256] = [0; 256]
+var MC_FN_PARAM_BASE: [i64; 256] = [0; 256]  // index into MC_PARAM_* arrays
+var MC_FN_COUNT: i64 = 0
+var MC_MAIN_FN: i64 = -1
+var MC_PRINT_INT_OFF: i64 = 0  // WIDE_LEN offset of print_int helper
+
+// Parameter name storage (flat, indexed by MC_FN_PARAM_BASE + i)
+var MC_PARAM_NAME_START: [i64; 1024] = [0; 1024]
+var MC_PARAM_NAME_LEN: [i64; 1024] = [0; 1024]
+var MC_PARAM_TOTAL: i64 = 0
+
+// Local variable registry (per-function, reset before each fn body)
+var MC_LOC_NAME_START: [i64; 512] = [0; 512]
+var MC_LOC_NAME_LEN: [i64; 512] = [0; 512]
+var MC_LOC_SLOT: [i64; 512] = [0; 512]
+var MC_LOC_COUNT: i64 = 0
+var MC_NEXT_SLOT: i64 = 0
+
+// Call fixup table: sentinel bytes to patch with real offsets
+var MC_CALL_FIX_OFF: [i64; 2048] = [0; 2048]    // WIDE_LEN position of rel32
+var MC_CALL_FIX_TARGET: [i64; 2048] = [0; 2048]  // fn index
+var MC_CALL_FIX_COUNT: i64 = 0
+
+// While loop state (stack for nesting)
+var MC_LOOP_TOP_STACK: [i64; 32] = [0; 32]
+var MC_LOOP_DEPTH: i64 = 0
+var MC_BREAK_FIX_OFF: [i64; 256] = [0; 256]
+var MC_BREAK_FIX_DEPTH: [i64; 256] = [0; 256]
+var MC_BREAK_FIX_COUNT: i64 = 0
+
+// Frame size: fixed 4096 bytes (512 slots * 8)
+fn MC_FRAME_SIZE() -> i64 { 4096 }
+
+// --- Token kind constants (from TokenKind enum discriminant numbering) ---
+fn MC_TK_EOF() -> i64 { 0 }
+fn MC_TK_FN() -> i64 { 7 }
+fn MC_TK_LET() -> i64 { 8 }
+fn MC_TK_VAR() -> i64 { 9 }
+fn MC_TK_IF() -> i64 { 17 }
+fn MC_TK_ELSE() -> i64 { 18 }
+fn MC_TK_WHILE() -> i64 { 21 }
+fn MC_TK_BREAK() -> i64 { 23 }
+fn MC_TK_CONTINUE() -> i64 { 24 }
+fn MC_TK_RETURN() -> i64 { 25 }
+fn MC_TK_AS() -> i64 { 27 }
+fn MC_TK_TRUE() -> i64 { 32 }
+fn MC_TK_FALSE() -> i64 { 33 }
+fn MC_TK_WITH() -> i64 { 42 }
+fn MC_TK_IDENT() -> i64 { 120 }
+fn MC_TK_INT() -> i64 { 121 }
+fn MC_TK_FLOAT() -> i64 { 122 }
+fn MC_TK_STR() -> i64 { 123 }
+fn MC_TK_PLUS() -> i64 { 129 }
+fn MC_TK_MINUS() -> i64 { 130 }
+fn MC_TK_STAR() -> i64 { 131 }
+fn MC_TK_SLASH() -> i64 { 132 }
+fn MC_TK_PERCENT() -> i64 { 133 }
+fn MC_TK_EQ() -> i64 { 134 }
+fn MC_TK_LT() -> i64 { 135 }
+fn MC_TK_GT() -> i64 { 136 }
+fn MC_TK_BANG() -> i64 { 137 }
+fn MC_TK_EQEQ() -> i64 { 143 }
+fn MC_TK_BANGEQ() -> i64 { 144 }
+fn MC_TK_LTEQ() -> i64 { 145 }
+fn MC_TK_GTEQ() -> i64 { 146 }
+fn MC_TK_AMPAMP() -> i64 { 147 }
+fn MC_TK_PIPEPIPE() -> i64 { 148 }
+fn MC_TK_ARROW() -> i64 { 155 }
+fn MC_TK_LPAREN() -> i64 { 171 }
+fn MC_TK_RPAREN() -> i64 { 172 }
+fn MC_TK_LBRACE() -> i64 { 173 }
+fn MC_TK_RBRACE() -> i64 { 174 }
+fn MC_TK_LBRACKET() -> i64 { 175 }
+fn MC_TK_RBRACKET() -> i64 { 176 }
+fn MC_TK_SEMI() -> i64 { 177 }
+fn MC_TK_COLON() -> i64 { 178 }
+fn MC_TK_COMMA() -> i64 { 179 }
+fn MC_TK_DOT() -> i64 { 180 }
+fn MC_TK_MINUS_EQ() -> i64 { 152 }
+fn MC_TK_PLUS_EQ() -> i64 { 151 }
+fn MC_TK_STAR_EQ() -> i64 { 153 }
+
+// --- Token access helpers ---
+fn mc_peek() -> i64 with Panic {
+    if MC_POS >= MC_TC { return MC_TK_EOF() }
+    MP_KIND[MC_POS as usize]
+}
+
+fn mc_advance() with Mut, Panic {
+    if MC_POS < MC_TC { MC_POS = MC_POS + 1 }
+}
+
+fn mc_expect(kind: i64) with Mut, Panic {
+    if mc_peek() != kind {
+        print("mc_expect: expected tk=")
+        print_int(kind)
+        print(" got=")
+        print_int(mc_peek())
+        print(" at pos=")
+        print_int(MC_POS)
+        print("\n")
+    }
+    mc_advance()
+}
+
+fn mc_match_tk(kind: i64) -> bool with Mut, Panic {
+    if mc_peek() == kind { mc_advance(); return true }
+    false
+}
+
+// Compare source bytes at token pos with a known string
+fn mc_src_eq_at(src_start: i64, src_len: i64, target: string) -> bool with Mut, Panic, Div {
+    if src_len != str_len(target) { return false }
+    var i: i64 = 0
+    while i < src_len {
+        let a = ltp_byte(src_start + i) as i64
+        let b = str_char_at(target, i) as i64
+        if a != b { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Compare source bytes of two token ranges
+fn mc_src_eq_range(s1: i64, l1: i64, s2: i64, l2: i64) -> bool with Panic {
+    if l1 != l2 { return false }
+    var i: i64 = 0
+    while i < l1 {
+        if ltp_byte(s1 + i) != ltp_byte(s2 + i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+// --- Stack slot helpers ---
+fn mc_alloc_slot() -> i64 with Mut {
+    let s = MC_NEXT_SLOT
+    MC_NEXT_SLOT = MC_NEXT_SLOT + 1
+    s
+}
+
+fn mc_emit_store_rax(slot: i64) with Mut {
+    let disp = 0 - ((slot + 1) * 8)
+    we(0x48); we(0x89); we(0x85)
+    we32(disp)
+}
+
+fn mc_emit_load_rax(slot: i64) with Mut {
+    let disp = 0 - ((slot + 1) * 8)
+    we(0x48); we(0x8B); we(0x85)
+    we32(disp)
+}
+
+fn mc_emit_load_rcx(slot: i64) with Mut {
+    let disp = 0 - ((slot + 1) * 8)
+    we(0x48); we(0x8B); we(0x8D)
+    we32(disp)
+}
+
+// --- Local variable management ---
+fn mc_locals_reset() with Mut {
+    MC_LOC_COUNT = 0
+    MC_NEXT_SLOT = 0
+}
+
+fn mc_add_local(ns: i64, nl: i64) -> i64 with Mut, Panic {
+    let idx = MC_LOC_COUNT
+    let slot = mc_alloc_slot()
+    MC_LOC_NAME_START[idx as usize] = ns
+    MC_LOC_NAME_LEN[idx as usize] = nl
+    MC_LOC_SLOT[idx as usize] = slot
+    MC_LOC_COUNT = MC_LOC_COUNT + 1
+    slot
+}
+
+fn mc_find_local(ns: i64, nl: i64) -> i64 with Panic {
+    var i: i64 = MC_LOC_COUNT - 1
+    while i >= 0 {
+        if mc_src_eq_range(ns, nl, MC_LOC_NAME_START[i as usize], MC_LOC_NAME_LEN[i as usize]) {
+            return MC_LOC_SLOT[i as usize]
+        }
+        i = i - 1
+    }
+    -1
+}
+
+// --- Function lookup ---
+fn mc_find_fn(ns: i64, nl: i64) -> i64 with Panic {
+    var i: i64 = 0
+    while i < MC_FN_COUNT {
+        if mc_src_eq_range(ns, nl, MC_FN_NAME_START[i as usize], MC_FN_NAME_LEN[i as usize]) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// --- Emit print_int helper (itoa + sys_write) ---
+fn mc_emit_print_int_helper() with Mut {
+    MC_PRINT_INT_OFF = WIDE_LEN
+    // push rbp; mov rbp, rsp; sub rsp, 48
+    we(0x55)
+    we(0x48); we(0x89); we(0xe5)
+    we(0x48); we(0x83); we(0xec); we(0x30)
+    // mov rax, rdi
+    we(0x48); we(0x89); we(0xf8)
+    // lea r8, [rbp-1]
+    we(0x4c); we(0x8d); we(0x45); we(0xff)
+    // xor r9d, r9d
+    we(0x45); we(0x31); we(0xc9)
+    // test rax, rax
+    we(0x48); we(0x85); we(0xc0)
+    // jns +6
+    we(0x79); we(0x06)
+    // neg rax
+    we(0x48); we(0xf7); we(0xd8)
+    // mov r9b, 1
+    we(0x41); we(0xb1); we(0x01)
+    // test rax, rax; jnz +9
+    we(0x48); we(0x85); we(0xc0)
+    we(0x75); we(0x09)
+    // mov byte [r8], '0'
+    we(0x41); we(0xc6); we(0x00); we(0x30)
+    // dec r8
+    we(0x49); we(0xff); we(0xc8)
+    // jmp do_write (+38)
+    we(0xeb); we(0x26)
+    // itoa_loop:
+    // xor edx, edx
+    we(0x31); we(0xd2)
+    // mov rcx, 10
+    we(0x48); we(0xc7); we(0xc1); we(0x0a); we(0x00); we(0x00); we(0x00)
+    // div rcx
+    we(0x48); we(0xf7); we(0xf1)
+    // add dl, '0'
+    we(0x80); we(0xc2); we(0x30)
+    // mov [r8], dl
+    we(0x41); we(0x88); we(0x10)
+    // dec r8
+    we(0x49); we(0xff); we(0xc8)
+    // test rax, rax
+    we(0x48); we(0x85); we(0xc0)
+    // jnz itoa_loop (-26)
+    we(0x75); we(0xe6)
+    // test r9b, r9b
+    we(0x45); we(0x84); we(0xc9)
+    // jz +7
+    we(0x74); we(0x07)
+    // mov byte [r8], '-'
+    we(0x41); we(0xc6); we(0x00); we(0x2d)
+    // dec r8
+    we(0x49); we(0xff); we(0xc8)
+    // do_write:
+    // inc r8
+    we(0x49); we(0xff); we(0xc0)
+    // mov rsi, r8
+    we(0x4c); we(0x89); we(0xc6)
+    // mov rdx, rbp; sub rdx, r8 (len = rbp - r8)
+    we(0x48); we(0x89); we(0xea)
+    we(0x4c); we(0x29); we(0xc2)
+    // mov edi, 1
+    we(0xbf); we(0x01); we(0x00); we(0x00); we(0x00)
+    // mov eax, 1
+    we(0xb8); we(0x01); we(0x00); we(0x00); we(0x00)
+    // syscall
+    we(0x0f); we(0x05)
+    // leave; ret
+    we(0xc9); we(0xc3)
+}
+
+// --- Emit inline string print (push to stack + sys_write) ---
+fn mc_emit_print_str(str_start: i64, str_end: i64) with Mut, Panic, Div {
+    // Decode string bytes (handle \n, \t, \\, \0)
+    var str_buf: [i8; 512] = [0; 512]
+    var str_len: i64 = 0
+    var si: i64 = str_start
+    while si < str_end && str_len < 512 {
+        let ch = ltp_byte(si)
+        if ch == 92 as i8 && si + 1 < str_end {
+            let ch2 = ltp_byte(si + 1)
+            if ch2 == 110 as i8 { str_buf[str_len as usize] = 10 as i8 }
+            else if ch2 == 116 as i8 { str_buf[str_len as usize] = 9 as i8 }
+            else if ch2 == 92 as i8 { str_buf[str_len as usize] = 92 as i8 }
+            else if ch2 == 48 as i8 { str_buf[str_len as usize] = 0 as i8 }
+            else if ch2 == 34 as i8 { str_buf[str_len as usize] = 34 as i8 }
+            else { str_buf[str_len as usize] = ch2 }
+            si = si + 2
+        } else {
+            str_buf[str_len as usize] = ch
+            si = si + 1
+        }
+        str_len = str_len + 1
+    }
+    if str_len == 0 { return 0 }
+    // Push string bytes onto stack in 8-byte chunks (reverse order)
+    let n_chunks = (str_len + 7) / 8
+    var chi: i64 = n_chunks - 1
+    while chi >= 0 {
+        var qw: i64 = 0
+        var bi: i64 = 0
+        while bi < 8 {
+            let idx = chi * 8 + bi
+            if idx < str_len {
+                qw = qw | ((str_buf[idx as usize] as i64 & 0xFF) << (bi * 8))
+            }
+            bi = bi + 1
+        }
+        we(0x48); we(0xb8); we64(qw)  // mov rax, imm64
+        we(0x50)                        // push rax
+        chi = chi - 1
+    }
+    // write(1, rsp, str_len)
+    we(0xb8); we32(1)                   // mov eax, 1
+    we(0xbf); we32(1)                   // mov edi, 1
+    we(0x48); we(0x89); we(0xe6)        // mov rsi, rsp
+    we(0xba); we32(str_len)             // mov edx, str_len
+    we(0x0f); we(0x05)                  // syscall
+    // Clean up stack
+    let stack_used = n_chunks * 8
+    we(0x48); we(0x81); we(0xc4); we32(stack_used)
+}
+
+// --- Expression parser: emits code leaving result in rax ---
+
+// Forward-declare: mc_parse_expr is recursive through mc_parse_primary
+// (Sounio supports forward refs to functions in the same module.)
+
+fn mc_parse_primary() with Mut, Panic, Div {
+    let k = mc_peek()
+
+    // Integer literal
+    if k == MC_TK_INT() {
+        let val = MP_INT_VALUE[MC_POS as usize]
+        mc_advance()
+        // mov rax, imm64
+        we(0x48); we(0xb8); we64(val)
+        return 0
+    }
+
+    // true / false
+    if k == MC_TK_TRUE() {
+        mc_advance()
+        we(0x48); we(0xb8); we64(1)
+        return 0
+    }
+    if k == MC_TK_FALSE() {
+        mc_advance()
+        we(0x48); we(0xb8); we64(0)
+        return 0
+    }
+
+    // String literal
+    if k == MC_TK_STR() {
+        let ss = MP_START[MC_POS as usize] + 1  // skip opening "
+        let se = MP_END[MC_POS as usize] - 1    // skip closing "
+        mc_advance()
+        // Embed string inline: jmp over, then data, then lea rax, [rip+data]
+        // First decode string bytes to get length
+        var sb: [i8; 512] = [0; 512]
+        var sl: i64 = 0
+        var di: i64 = ss
+        while di < se && sl < 512 {
+            let dc = ltp_byte(di)
+            if dc == 92 as i8 && di + 1 < se {
+                let dc2 = ltp_byte(di + 1)
+                if dc2 == 110 as i8 { sb[sl as usize] = 10 as i8 }
+                else if dc2 == 116 as i8 { sb[sl as usize] = 9 as i8 }
+                else if dc2 == 92 as i8 { sb[sl as usize] = 92 as i8 }
+                else if dc2 == 48 as i8 { sb[sl as usize] = 0 as i8 }
+                else if dc2 == 34 as i8 { sb[sl as usize] = 34 as i8 }
+                else { sb[sl as usize] = dc2 }
+                di = di + 2
+            } else {
+                sb[sl as usize] = dc
+                di = di + 1
+            }
+            sl = sl + 1
+        }
+        // jmp over data+null: EB <len+1>
+        let jmp_off = WIDE_LEN
+        we(0xeb); we(0x00)  // placeholder
+        let data_start = WIDE_LEN
+        var wi: i64 = 0
+        while wi < sl { we(sb[wi as usize] as i64 & 0xFF); wi = wi + 1 }
+        we(0x00)  // null terminator
+        let data_end = WIDE_LEN
+        // Patch jmp
+        let jmp_dist = data_end - (jmp_off + 2)
+        WIDE_OUT[(jmp_off + 1) as usize] = (jmp_dist & 0xFF) as i8
+        // lea rax, [rip + rel32] pointing to data_start
+        we(0x48); we(0x8d); we(0x05)
+        let rip_rel = data_start - (WIDE_LEN + 4)
+        we32(rip_rel)
+        return 0
+    }
+
+    // Parenthesized expression
+    if k == MC_TK_LPAREN() {
+        mc_advance()
+        mc_parse_expr()
+        mc_expect(MC_TK_RPAREN())
+        return 0
+    }
+
+    // Unary minus
+    if k == MC_TK_MINUS() {
+        mc_advance()
+        mc_parse_primary()
+        // neg rax
+        we(0x48); we(0xf7); we(0xd8)
+        return 0
+    }
+
+    // Unary not (!)
+    if k == MC_TK_BANG() {
+        mc_advance()
+        mc_parse_primary()
+        // test rax, rax; sete al; movzx rax, al
+        we(0x48); we(0x85); we(0xc0)
+        we(0x0f); we(0x94); we(0xc0)
+        we(0x48); we(0x0f); we(0xb6); we(0xc0)
+        return 0
+    }
+
+    // If expression (value-producing)
+    if k == MC_TK_IF() {
+        mc_parse_if_expr()
+        return 0
+    }
+
+    // Identifier: variable ref or function call
+    if k == MC_TK_IDENT() {
+        let id_s = MP_START[MC_POS as usize]
+        let id_e = MP_END[MC_POS as usize]
+        let id_len = id_e - id_s
+        mc_advance()
+
+        // Check for function call: ident followed by (
+        if mc_peek() == MC_TK_LPAREN() {
+            mc_advance()  // consume (
+            mc_emit_call(id_s, id_len)
+            return 0
+        }
+
+        // Variable reference
+        let slot = mc_find_local(id_s, id_len)
+        if slot >= 0 {
+            mc_emit_load_rax(slot)
+        } else {
+            // Unknown variable — emit 0 with warning
+            print("mc: unknown var '")
+            var vi: i64 = 0
+            while vi < id_len && vi < 32 {
+                print_char(ltp_byte(id_s + vi) as i64)
+                vi = vi + 1
+            }
+            print("'\n")
+            we(0x48); we(0x31); we(0xc0)  // xor rax, rax
+        }
+        return 0
+    }
+
+    // Fallback: skip token, emit 0
+    mc_advance()
+    we(0x48); we(0x31); we(0xc0)
+    0
+}
+
+// Emit a function call. Arguments already consumed up to but not including ).
+fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
+    // Special builtins
+    // print(str_expr)
+    if mc_src_eq_at(name_s, name_len, "print") {
+        // Check if argument is a string literal for inline optimization
+        if mc_peek() == MC_TK_STR() {
+            let ss = MP_START[MC_POS as usize] + 1
+            let se = MP_END[MC_POS as usize] - 1
+            mc_advance()
+            mc_emit_print_str(ss, se)
+        } else {
+            // Runtime print: evaluate expr, rax = pointer to null-terminated string
+            mc_parse_expr()
+            // mov rsi, rax; inline strlen; sys_write
+            we(0x48); we(0x89); we(0xc6)  // mov rsi, rax
+            we(0x48); we(0x89); we(0xc7)  // mov rdi, rax
+            we(0x31); we(0xc9)            // xor ecx, ecx
+            // loop: cmp byte [rdi+rcx], 0; je done; inc rcx; jmp loop
+            we(0x80); we(0x3c); we(0x0f); we(0x00)
+            we(0x74); we(0x04)
+            we(0x48); we(0xff); we(0xc1)
+            we(0xeb); we(0xf5)
+            we(0x48); we(0x89); we(0xca)  // mov rdx, rcx
+            we(0xbf); we32(1)
+            we(0xb8); we32(1)
+            we(0x0f); we(0x05)
+        }
+        mc_expect(MC_TK_RPAREN())
+        we(0x48); we(0x31); we(0xc0)  // xor rax, rax (return 0)
+        return 0
+    }
+
+    // print_int(expr)
+    if mc_src_eq_at(name_s, name_len, "print_int") {
+        mc_parse_expr()
+        mc_expect(MC_TK_RPAREN())
+        // mov rdi, rax; call print_int_helper
+        we(0x48); we(0x89); we(0xc7)
+        we(0xe8)
+        let rel = MC_PRINT_INT_OFF - (WIDE_LEN + 4)
+        we32(rel)
+        we(0x48); we(0x31); we(0xc0)
+        return 0
+    }
+
+    // exit(expr) — mov edi, eax; mov eax, 60; syscall
+    if mc_src_eq_at(name_s, name_len, "exit") {
+        mc_parse_expr()
+        mc_expect(MC_TK_RPAREN())
+        we(0x89); we(0xc7)    // mov edi, eax
+        we(0xb8); we32(60)    // mov eax, 60
+        we(0x0f); we(0x05)    // syscall
+        return 0
+    }
+
+    // General function call: evaluate args into rdi, rsi, rdx, rcx, r8, r9
+    var arg_slots: [i64; 8] = [0; 8]
+    var arg_count: i64 = 0
+    if mc_peek() != MC_TK_RPAREN() {
+        // Parse first argument
+        mc_parse_expr()
+        let s0 = mc_alloc_slot()
+        mc_emit_store_rax(s0)
+        arg_slots[0 as usize] = s0
+        arg_count = 1
+        // Parse subsequent arguments
+        while mc_peek() == MC_TK_COMMA() {
+            mc_advance()
+            mc_parse_expr()
+            let sn = mc_alloc_slot()
+            mc_emit_store_rax(sn)
+            arg_slots[arg_count as usize] = sn
+            arg_count = arg_count + 1
+        }
+    }
+    mc_expect(MC_TK_RPAREN())
+
+    // Load args into ABI registers
+    if arg_count > 0 { mc_emit_load_rax(arg_slots[0 as usize]); we(0x48); we(0x89); we(0xc7) }  // mov rdi, rax
+    if arg_count > 1 { mc_emit_load_rax(arg_slots[1 as usize]); we(0x48); we(0x89); we(0xc6) }  // mov rsi, rax
+    if arg_count > 2 { mc_emit_load_rax(arg_slots[2 as usize]); we(0x48); we(0x89); we(0xc2) }  // mov rdx, rax
+    if arg_count > 3 { mc_emit_load_rax(arg_slots[3 as usize]); we(0x48); we(0x89); we(0xc1) }  // mov rcx, rax
+    if arg_count > 4 {
+        mc_emit_load_rax(arg_slots[4 as usize])
+        we(0x49); we(0x89); we(0xc0)  // mov r8, rax
+    }
+    if arg_count > 5 {
+        mc_emit_load_rax(arg_slots[5 as usize])
+        we(0x49); we(0x89); we(0xc1)  // mov r9, rax
+    }
+
+    // Find target function
+    let fn_idx = mc_find_fn(name_s, name_len)
+    if fn_idx >= 0 {
+        // call rel32 — emit sentinel, will be patched
+        we(0xe8)
+        MC_CALL_FIX_OFF[MC_CALL_FIX_COUNT as usize] = WIDE_LEN
+        MC_CALL_FIX_TARGET[MC_CALL_FIX_COUNT as usize] = fn_idx
+        MC_CALL_FIX_COUNT = MC_CALL_FIX_COUNT + 1
+        we32(0)  // placeholder
+    } else {
+        // Unknown function — emit warning + nop call
+        print("mc: unknown fn '")
+        var fi: i64 = 0
+        while fi < name_len && fi < 32 {
+            print_char(ltp_byte(name_s + fi) as i64)
+            fi = fi + 1
+        }
+        print("'\n")
+        we(0x48); we(0x31); we(0xc0)  // xor rax, rax
+    }
+    0
+}
+
+// If expression: if cond { body } [else { body }]
+fn mc_parse_if_expr() with Mut, Panic, Div {
+    mc_expect(MC_TK_IF())
+    // Parse condition
+    mc_parse_expr()
+    // test rax, rax; jz else_branch
+    we(0x48); we(0x85); we(0xc0)
+    we(0x0f); we(0x84)   // jz rel32
+    let else_fix = WIDE_LEN
+    we32(0)  // placeholder
+
+    // Then branch
+    mc_expect(MC_TK_LBRACE())
+    mc_parse_block_body()
+    mc_expect(MC_TK_RBRACE())
+
+    // Check for else
+    if mc_peek() == MC_TK_ELSE() {
+        mc_advance()
+        // jmp over_else
+        we(0xe9)
+        let end_fix = WIDE_LEN
+        we32(0)
+        // Patch else_fix to here
+        let else_target = WIDE_LEN
+        let else_disp = else_target - (else_fix + 4)
+        WIDE_OUT[else_fix as usize] = (else_disp & 0xFF) as i8
+        WIDE_OUT[(else_fix + 1) as usize] = ((else_disp >> 8) & 0xFF) as i8
+        WIDE_OUT[(else_fix + 2) as usize] = ((else_disp >> 16) & 0xFF) as i8
+        WIDE_OUT[(else_fix + 3) as usize] = ((else_disp >> 24) & 0xFF) as i8
+
+        if mc_peek() == MC_TK_IF() {
+            // else if
+            mc_parse_if_expr()
+        } else {
+            mc_expect(MC_TK_LBRACE())
+            mc_parse_block_body()
+            mc_expect(MC_TK_RBRACE())
+        }
+        // Patch end_fix to here
+        let end_target = WIDE_LEN
+        let end_disp = end_target - (end_fix + 4)
+        WIDE_OUT[end_fix as usize] = (end_disp & 0xFF) as i8
+        WIDE_OUT[(end_fix + 1) as usize] = ((end_disp >> 8) & 0xFF) as i8
+        WIDE_OUT[(end_fix + 2) as usize] = ((end_disp >> 16) & 0xFF) as i8
+        WIDE_OUT[(end_fix + 3) as usize] = ((end_disp >> 24) & 0xFF) as i8
+    } else {
+        // No else: patch else_fix to here
+        let no_else_target = WIDE_LEN
+        let no_else_disp = no_else_target - (else_fix + 4)
+        WIDE_OUT[else_fix as usize] = (no_else_disp & 0xFF) as i8
+        WIDE_OUT[(else_fix + 1) as usize] = ((no_else_disp >> 8) & 0xFF) as i8
+        WIDE_OUT[(else_fix + 2) as usize] = ((no_else_disp >> 16) & 0xFF) as i8
+        WIDE_OUT[(else_fix + 3) as usize] = ((no_else_disp >> 24) & 0xFF) as i8
+    }
+    0
+}
+
+// Operator precedence
+fn mc_binop_prec(k: i64) -> i64 {
+    if k == MC_TK_PIPEPIPE() { return 1 }
+    if k == MC_TK_AMPAMP() { return 2 }
+    if k == MC_TK_EQEQ() || k == MC_TK_BANGEQ() { return 3 }
+    if k == MC_TK_LT() || k == MC_TK_GT() || k == MC_TK_LTEQ() || k == MC_TK_GTEQ() { return 4 }
+    if k == MC_TK_PLUS() || k == MC_TK_MINUS() { return 5 }
+    if k == MC_TK_STAR() || k == MC_TK_SLASH() || k == MC_TK_PERCENT() { return 6 }
+    0
+}
+
+fn mc_parse_expr() with Mut, Panic, Div {
+    mc_parse_expr_prec(1)
+}
+
+fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
+    mc_parse_primary()
+    // Pratt operator loop
+    while true {
+        let op = mc_peek()
+        let prec = mc_binop_prec(op)
+        if prec == 0 || prec < min_prec { break }
+        mc_advance()
+
+        // Save left operand
+        let left_slot = mc_alloc_slot()
+        mc_emit_store_rax(left_slot)
+
+        // Parse right operand with higher precedence
+        mc_parse_expr_prec(prec + 1)
+
+        // rax = right, [left_slot] = left
+        // mov rcx, rax (right); load rax, left
+        we(0x48); we(0x89); we(0xc1)  // mov rcx, rax
+        mc_emit_load_rax(left_slot)
+
+        // Emit binary operation: rax = rax OP rcx
+        if op == MC_TK_PLUS() {
+            we(0x48); we(0x01); we(0xc8)  // add rax, rcx
+        } else if op == MC_TK_MINUS() {
+            we(0x48); we(0x29); we(0xc8)  // sub rax, rcx
+        } else if op == MC_TK_STAR() {
+            we(0x48); we(0x0f); we(0xaf); we(0xc1)  // imul rax, rcx
+        } else if op == MC_TK_SLASH() {
+            // cqo; idiv rcx
+            we(0x48); we(0x99)
+            we(0x48); we(0xf7); we(0xf9)
+        } else if op == MC_TK_PERCENT() {
+            // cqo; idiv rcx; mov rax, rdx
+            we(0x48); we(0x99)
+            we(0x48); we(0xf7); we(0xf9)
+            we(0x48); we(0x89); we(0xd0)
+        } else if op == MC_TK_EQEQ() {
+            we(0x48); we(0x39); we(0xc8)  // cmp rax, rcx
+            we(0x0f); we(0x94); we(0xc0)  // sete al
+            we(0x48); we(0x0f); we(0xb6); we(0xc0)  // movzx rax, al
+        } else if op == MC_TK_BANGEQ() {
+            we(0x48); we(0x39); we(0xc8)
+            we(0x0f); we(0x95); we(0xc0)  // setne al
+            we(0x48); we(0x0f); we(0xb6); we(0xc0)
+        } else if op == MC_TK_LT() {
+            we(0x48); we(0x39); we(0xc8)
+            we(0x0f); we(0x9c); we(0xc0)  // setl al
+            we(0x48); we(0x0f); we(0xb6); we(0xc0)
+        } else if op == MC_TK_GT() {
+            we(0x48); we(0x39); we(0xc8)
+            we(0x0f); we(0x9f); we(0xc0)  // setg al
+            we(0x48); we(0x0f); we(0xb6); we(0xc0)
+        } else if op == MC_TK_LTEQ() {
+            we(0x48); we(0x39); we(0xc8)
+            we(0x0f); we(0x9e); we(0xc0)  // setle al
+            we(0x48); we(0x0f); we(0xb6); we(0xc0)
+        } else if op == MC_TK_GTEQ() {
+            we(0x48); we(0x39); we(0xc8)
+            we(0x0f); we(0x9d); we(0xc0)  // setge al
+            we(0x48); we(0x0f); we(0xb6); we(0xc0)
+        } else if op == MC_TK_AMPAMP() {
+            // Logical AND: both non-zero → 1
+            we(0x48); we(0x85); we(0xc0)  // test rax, rax
+            we(0x0f); we(0x95); we(0xc0)  // setne al
+            we(0x48); we(0x85); we(0xc9)  // test rcx, rcx
+            we(0x0f); we(0x95); we(0xc1)  // setne cl
+            we(0x20); we(0xc8)            // and al, cl
+            we(0x48); we(0x0f); we(0xb6); we(0xc0)
+        } else if op == MC_TK_PIPEPIPE() {
+            // Logical OR: either non-zero → 1
+            we(0x48); we(0x09); we(0xc8)  // or rax, rcx
+            we(0x48); we(0x85); we(0xc0)  // test rax, rax
+            we(0x0f); we(0x95); we(0xc0)  // setne al
+            we(0x48); we(0x0f); we(0xb6); we(0xc0)
+        }
+    }
+    0
+}
+
+// --- Statement parser ---
+
+fn mc_parse_stmt() with Mut, Panic, Div {
+    let k = mc_peek()
+
+    // let binding
+    if k == MC_TK_LET() {
+        mc_advance()
+        let ns = MP_START[MC_POS as usize]
+        let ne = MP_END[MC_POS as usize]
+        let nl = ne - ns
+        mc_advance()  // consume ident
+        // Optional type annotation: : TYPE
+        if mc_peek() == MC_TK_COLON() {
+            mc_advance()
+            mc_skip_type()
+        }
+        mc_expect(MC_TK_EQ())
+        mc_parse_expr()
+        let slot = mc_add_local(ns, nl)
+        mc_emit_store_rax(slot)
+        return 0
+    }
+
+    // var binding
+    if k == MC_TK_VAR() {
+        mc_advance()
+        let ns = MP_START[MC_POS as usize]
+        let ne = MP_END[MC_POS as usize]
+        let nl = ne - ns
+        mc_advance()  // consume ident
+        // Optional type annotation
+        if mc_peek() == MC_TK_COLON() {
+            mc_advance()
+            mc_skip_type()
+        }
+        mc_expect(MC_TK_EQ())
+        mc_parse_expr()
+        let slot = mc_add_local(ns, nl)
+        mc_emit_store_rax(slot)
+        return 0
+    }
+
+    // return
+    if k == MC_TK_RETURN() {
+        mc_advance()
+        if mc_peek() != MC_TK_RBRACE() && mc_peek() != MC_TK_EOF() {
+            mc_parse_expr()
+        } else {
+            we(0x48); we(0x31); we(0xc0)  // xor rax, rax
+        }
+        // Epilogue: mov rsp, rbp; pop rbp; ret
+        we(0x48); we(0x89); we(0xec)
+        we(0x5d)
+        we(0xc3)
+        return 0
+    }
+
+    // while loop
+    if k == MC_TK_WHILE() {
+        mc_advance()
+        let loop_top = WIDE_LEN
+        // Push loop state
+        MC_LOOP_TOP_STACK[MC_LOOP_DEPTH as usize] = loop_top
+        MC_LOOP_DEPTH = MC_LOOP_DEPTH + 1
+        let saved_break_count = MC_BREAK_FIX_COUNT
+
+        mc_parse_expr()
+        // test rax, rax; jz end
+        we(0x48); we(0x85); we(0xc0)
+        we(0x0f); we(0x84)
+        let end_fix = WIDE_LEN
+        we32(0)
+
+        mc_expect(MC_TK_LBRACE())
+        mc_parse_block_body()
+        mc_expect(MC_TK_RBRACE())
+
+        // jmp loop_top
+        we(0xe9)
+        let back_disp = loop_top - (WIDE_LEN + 4)
+        we32(back_disp)
+
+        // Patch end_fix
+        let end_off = WIDE_LEN
+        let end_disp = end_off - (end_fix + 4)
+        WIDE_OUT[end_fix as usize] = (end_disp & 0xFF) as i8
+        WIDE_OUT[(end_fix + 1) as usize] = ((end_disp >> 8) & 0xFF) as i8
+        WIDE_OUT[(end_fix + 2) as usize] = ((end_disp >> 16) & 0xFF) as i8
+        WIDE_OUT[(end_fix + 3) as usize] = ((end_disp >> 24) & 0xFF) as i8
+
+        // Patch break fixups for this loop level
+        var bi: i64 = saved_break_count
+        while bi < MC_BREAK_FIX_COUNT {
+            let bf = MC_BREAK_FIX_OFF[bi as usize]
+            let bd = end_off - (bf + 4)
+            WIDE_OUT[bf as usize] = (bd & 0xFF) as i8
+            WIDE_OUT[(bf + 1) as usize] = ((bd >> 8) & 0xFF) as i8
+            WIDE_OUT[(bf + 2) as usize] = ((bd >> 16) & 0xFF) as i8
+            WIDE_OUT[(bf + 3) as usize] = ((bd >> 24) & 0xFF) as i8
+            bi = bi + 1
+        }
+        MC_BREAK_FIX_COUNT = saved_break_count
+
+        MC_LOOP_DEPTH = MC_LOOP_DEPTH - 1
+        return 0
+    }
+
+    // break
+    if k == MC_TK_BREAK() {
+        mc_advance()
+        we(0xe9)
+        MC_BREAK_FIX_OFF[MC_BREAK_FIX_COUNT as usize] = WIDE_LEN
+        MC_BREAK_FIX_COUNT = MC_BREAK_FIX_COUNT + 1
+        we32(0)
+        return 0
+    }
+
+    // continue
+    if k == MC_TK_CONTINUE() {
+        mc_advance()
+        if MC_LOOP_DEPTH > 0 {
+            let lt = MC_LOOP_TOP_STACK[(MC_LOOP_DEPTH - 1) as usize]
+            we(0xe9)
+            let cd = lt - (WIDE_LEN + 4)
+            we32(cd)
+        }
+        return 0
+    }
+
+    // if statement
+    if k == MC_TK_IF() {
+        mc_parse_if_expr()
+        return 0
+    }
+
+    // Expression statement (including assignment)
+    // Could be: ident = expr, ident(args), or bare expression
+    if k == MC_TK_IDENT() {
+        let id_s = MP_START[MC_POS as usize]
+        let id_e = MP_END[MC_POS as usize]
+        let id_len = id_e - id_s
+        mc_advance()
+
+        // Assignment: ident = expr
+        if mc_peek() == MC_TK_EQ() {
+            mc_advance()
+            mc_parse_expr()
+            let slot = mc_find_local(id_s, id_len)
+            if slot >= 0 {
+                mc_emit_store_rax(slot)
+            }
+            return 0
+        }
+
+        // Compound assignment: ident += expr
+        if mc_peek() == MC_TK_PLUS_EQ() {
+            mc_advance()
+            mc_parse_expr()
+            let slot = mc_find_local(id_s, id_len)
+            if slot >= 0 {
+                we(0x48); we(0x89); we(0xc1)  // mov rcx, rax
+                mc_emit_load_rax(slot)
+                we(0x48); we(0x01); we(0xc8)  // add rax, rcx
+                mc_emit_store_rax(slot)
+            }
+            return 0
+        }
+        if mc_peek() == MC_TK_MINUS_EQ() {
+            mc_advance()
+            mc_parse_expr()
+            let slot = mc_find_local(id_s, id_len)
+            if slot >= 0 {
+                we(0x48); we(0x89); we(0xc1)
+                mc_emit_load_rax(slot)
+                we(0x48); we(0x29); we(0xc8)
+                mc_emit_store_rax(slot)
+            }
+            return 0
+        }
+        if mc_peek() == MC_TK_STAR_EQ() {
+            mc_advance()
+            mc_parse_expr()
+            let slot = mc_find_local(id_s, id_len)
+            if slot >= 0 {
+                we(0x48); we(0x89); we(0xc1)
+                mc_emit_load_rax(slot)
+                we(0x48); we(0x0f); we(0xaf); we(0xc1)
+                mc_emit_store_rax(slot)
+            }
+            return 0
+        }
+
+        // Function call: ident(args) — may have trailing binops (e.g. fib(n-1) + fib(n-2))
+        if mc_peek() == MC_TK_LPAREN() {
+            mc_advance()
+            mc_emit_call(id_s, id_len)
+            // rax = call result; fall through to trailing binop check
+        } else {
+            // Bare expression — the ident was already consumed, emit variable load
+            let slot = mc_find_local(id_s, id_len)
+            if slot >= 0 {
+                mc_emit_load_rax(slot)
+            } else {
+                we(0x48); we(0x31); we(0xc0)
+            }
+        }
+        // Check for trailing binops (handles: fib(n-1) + fib(n-2), x + 1, etc.)
+        while true {
+            let op = mc_peek()
+            let prec = mc_binop_prec(op)
+            if prec == 0 { break }
+            mc_advance()
+            let ls = mc_alloc_slot()
+            mc_emit_store_rax(ls)
+            mc_parse_expr_prec(prec + 1)
+            we(0x48); we(0x89); we(0xc1)
+            mc_emit_load_rax(ls)
+            if op == MC_TK_PLUS() { we(0x48); we(0x01); we(0xc8) }
+            else if op == MC_TK_MINUS() { we(0x48); we(0x29); we(0xc8) }
+            else if op == MC_TK_STAR() { we(0x48); we(0x0f); we(0xaf); we(0xc1) }
+            else if op == MC_TK_SLASH() { we(0x48); we(0x99); we(0x48); we(0xf7); we(0xf9) }
+            else if op == MC_TK_PERCENT() { we(0x48); we(0x99); we(0x48); we(0xf7); we(0xf9); we(0x48); we(0x89); we(0xd0) }
+            else if op == MC_TK_EQEQ() { we(0x48); we(0x39); we(0xc8); we(0x0f); we(0x94); we(0xc0); we(0x48); we(0x0f); we(0xb6); we(0xc0) }
+            else if op == MC_TK_BANGEQ() { we(0x48); we(0x39); we(0xc8); we(0x0f); we(0x95); we(0xc0); we(0x48); we(0x0f); we(0xb6); we(0xc0) }
+            else if op == MC_TK_LT() { we(0x48); we(0x39); we(0xc8); we(0x0f); we(0x9c); we(0xc0); we(0x48); we(0x0f); we(0xb6); we(0xc0) }
+            else if op == MC_TK_GT() { we(0x48); we(0x39); we(0xc8); we(0x0f); we(0x9f); we(0xc0); we(0x48); we(0x0f); we(0xb6); we(0xc0) }
+            else if op == MC_TK_LTEQ() { we(0x48); we(0x39); we(0xc8); we(0x0f); we(0x9e); we(0xc0); we(0x48); we(0x0f); we(0xb6); we(0xc0) }
+            else if op == MC_TK_GTEQ() { we(0x48); we(0x39); we(0xc8); we(0x0f); we(0x9d); we(0xc0); we(0x48); we(0x0f); we(0xb6); we(0xc0) }
+            else if op == MC_TK_AMPAMP() {
+                we(0x48); we(0x85); we(0xc0); we(0x0f); we(0x95); we(0xc0)
+                we(0x48); we(0x85); we(0xc9); we(0x0f); we(0x95); we(0xc1)
+                we(0x20); we(0xc8); we(0x48); we(0x0f); we(0xb6); we(0xc0)
+            }
+            else if op == MC_TK_PIPEPIPE() {
+                we(0x48); we(0x09); we(0xc8); we(0x48); we(0x85); we(0xc0)
+                we(0x0f); we(0x95); we(0xc0); we(0x48); we(0x0f); we(0xb6); we(0xc0)
+            }
+        }
+        return 0
+    }
+
+    // Default: try to parse as expression
+    mc_parse_expr()
+    0
+}
+
+// Skip a type annotation (consumes tokens until next = or { or , or ) )
+fn mc_skip_type() with Mut, Panic {
+    var depth: i64 = 0
+    while MC_POS < MC_TC {
+        let tk = mc_peek()
+        if tk == MC_TK_LPAREN() || tk == MC_TK_LBRACKET() || tk == MC_TK_LT() { depth = depth + 1; mc_advance(); continue }
+        if tk == MC_TK_RPAREN() || tk == MC_TK_RBRACKET() || tk == MC_TK_GT() {
+            if depth > 0 { depth = depth - 1; mc_advance(); continue }
+            break
+        }
+        if depth == 0 {
+            if tk == MC_TK_EQ() || tk == MC_TK_LBRACE() || tk == MC_TK_COMMA() { break }
+            if tk == MC_TK_WITH() { break }
+        }
+        mc_advance()
+    }
+}
+
+// Parse block body (between { and }) — handles multiple statements
+fn mc_parse_block_body() with Mut, Panic, Div {
+    while mc_peek() != MC_TK_RBRACE() && mc_peek() != MC_TK_EOF() {
+        mc_parse_stmt()
+    }
+}
+
+// --- Pass 1: Scan all fn declarations, collect names + body token positions ---
+fn mc_scan_functions() with Mut, Panic, Div {
+    MC_POS = 0
+    MC_FN_COUNT = 0
+    MC_PARAM_TOTAL = 0
+    while MC_POS < MC_TC {
+        let k = mc_peek()
+        if k == MC_TK_FN() {
+            mc_advance()
+            // Function name
+            let ns = MP_START[MC_POS as usize]
+            let ne = MP_END[MC_POS as usize]
+            let nl = ne - ns
+            let fi = MC_FN_COUNT
+
+            MC_FN_NAME_START[fi as usize] = ns
+            MC_FN_NAME_LEN[fi as usize] = nl
+            MC_FN_OFF[fi as usize] = 0  // will be set in pass 2
+            MC_FN_PARAM_BASE[fi as usize] = MC_PARAM_TOTAL
+            mc_advance()  // consume name
+
+            // Check if this is main
+            if mc_src_eq_at(ns, nl, "main") { MC_MAIN_FN = fi }
+
+            // Parse params: ( name: type, ... )
+            mc_expect(MC_TK_LPAREN())
+            var pc: i64 = 0
+            while mc_peek() != MC_TK_RPAREN() && mc_peek() != MC_TK_EOF() {
+                let ps = MP_START[MC_POS as usize]
+                let pe = MP_END[MC_POS as usize]
+                let pl = pe - ps
+                mc_advance()  // consume param name
+                MC_PARAM_NAME_START[MC_PARAM_TOTAL as usize] = ps
+                MC_PARAM_NAME_LEN[MC_PARAM_TOTAL as usize] = pl
+                MC_PARAM_TOTAL = MC_PARAM_TOTAL + 1
+                pc = pc + 1
+                // Skip : type
+                if mc_peek() == MC_TK_COLON() {
+                    mc_advance()
+                    mc_skip_type()
+                }
+                if mc_peek() == MC_TK_COMMA() { mc_advance() }
+            }
+            mc_expect(MC_TK_RPAREN())
+            MC_FN_PARAM_COUNT[fi as usize] = pc
+
+            // Skip -> return_type
+            if mc_peek() == MC_TK_ARROW() {
+                mc_advance()
+                mc_skip_type()
+            }
+
+            // Skip with EFFECTS
+            if mc_peek() == MC_TK_WITH() {
+                mc_advance()
+                while mc_peek() == MC_TK_IDENT() || mc_peek() == MC_TK_COMMA() {
+                    mc_advance()
+                }
+            }
+
+            // Record body token position
+            MC_FN_BODY_TOK[fi as usize] = MC_POS  // should be at {
+            MC_FN_COUNT = MC_FN_COUNT + 1
+
+            // Skip body (brace-balanced)
+            if mc_peek() == MC_TK_LBRACE() {
+                mc_advance()
+                var depth: i64 = 1
+                while MC_POS < MC_TC && depth > 0 {
+                    let bk = mc_peek()
+                    if bk == MC_TK_LBRACE() { depth = depth + 1 }
+                    if bk == MC_TK_RBRACE() { depth = depth - 1 }
+                    mc_advance()
+                }
+            }
+        } else {
+            // Skip non-fn top-level items (var declarations, use, etc.)
+            mc_advance()
+        }
+    }
+}
+
+// --- Pass 2: Compile each function body ---
+fn mc_compile_functions() with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < MC_FN_COUNT {
+        MC_FN_OFF[fi as usize] = WIDE_LEN
+
+        // Reset locals
+        mc_locals_reset()
+
+        // Prologue: push rbp; mov rbp, rsp; sub rsp, FRAME_SIZE
+        we(0x55)
+        we(0x48); we(0x89); we(0xe5)
+        we(0x48); we(0x81); we(0xec)
+        we32(MC_FRAME_SIZE())
+
+        // Spill parameters into local slots
+        let param_base = MC_FN_PARAM_BASE[fi as usize]
+        let param_count = MC_FN_PARAM_COUNT[fi as usize]
+        var pi: i64 = 0
+        while pi < param_count {
+            let ps = MC_PARAM_NAME_START[(param_base + pi) as usize]
+            let pl = MC_PARAM_NAME_LEN[(param_base + pi) as usize]
+            let slot = mc_add_local(ps, pl)
+            // Move from ABI register to stack slot
+            if pi == 0 { we(0x48); we(0x89); we(0xf8) }       // mov rax, rdi
+            else if pi == 1 { we(0x48); we(0x89); we(0xf0) }  // mov rax, rsi
+            else if pi == 2 { we(0x48); we(0x89); we(0xd0) }  // mov rax, rdx
+            else if pi == 3 { we(0x48); we(0x89); we(0xc8) }  // mov rax, rcx
+            else if pi == 4 { we(0x4c); we(0x89); we(0xc0) }  // mov rax, r8
+            else if pi == 5 { we(0x4c); we(0x89); we(0xc8) }  // mov rax, r9
+            mc_emit_store_rax(slot)
+            pi = pi + 1
+        }
+
+        // Position at body start (should be { token)
+        MC_POS = MC_FN_BODY_TOK[fi as usize]
+        mc_expect(MC_TK_LBRACE())
+
+        // Compile body statements
+        mc_parse_block_body()
+        mc_expect(MC_TK_RBRACE())
+
+        // Implicit epilogue (if not already returned)
+        // Check if last emitted byte was ret
+        if WIDE_LEN == 0 || WIDE_OUT[(WIDE_LEN - 1) as usize] != (0xc3 as i8) {
+            // Don't zero rax — last expression value is the implicit return
+            // mov rsp, rbp; pop rbp; ret
+            we(0x48); we(0x89); we(0xec)
+            we(0x5d)
+            we(0xc3)
+        }
+
+        print("mc: fn ")
+        var ni: i64 = 0
+        let nns = MC_FN_NAME_START[fi as usize]
+        let nnl = MC_FN_NAME_LEN[fi as usize]
+        while ni < nnl && ni < 32 {
+            print_char(ltp_byte(nns + ni) as i64)
+            ni = ni + 1
+        }
+        print(" off=")
+        print_int(MC_FN_OFF[fi as usize])
+        print(" sz=")
+        print_int(WIDE_LEN - MC_FN_OFF[fi as usize])
+        print("\n")
+
+        fi = fi + 1
+    }
+}
+
+// --- Patch call fixups ---
+fn mc_patch_calls() with Mut, Panic {
+    var i: i64 = 0
+    while i < MC_CALL_FIX_COUNT {
+        let fix_off = MC_CALL_FIX_OFF[i as usize]
+        let fn_idx = MC_CALL_FIX_TARGET[i as usize]
+        let target = MC_FN_OFF[fn_idx as usize]
+        let disp = target - (fix_off + 4)
+        WIDE_OUT[fix_off as usize] = (disp & 0xFF) as i8
+        WIDE_OUT[(fix_off + 1) as usize] = ((disp >> 8) & 0xFF) as i8
+        WIDE_OUT[(fix_off + 2) as usize] = ((disp >> 16) & 0xFF) as i8
+        WIDE_OUT[(fix_off + 3) as usize] = ((disp >> 24) & 0xFF) as i8
+        i = i + 1
+    }
+}
+
+// --- Main entry point ---
 fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     print("mini_compile: start\n")
     WIDE_LEN = 0
+    MC_CALL_FIX_COUNT = 0
+    MC_BREAK_FIX_COUNT = 0
+    MC_LOOP_DEPTH = 0
+    // Ensure LTP_N is set for ltp_byte() (used by string comparison helpers)
+    LTP_N = LEAN_SOURCE_LEN
 
-    // Scan tokens for fn declarations. For each fn:
-    // - Record name + code offset
-    // - Compile body as: prologue + body stmts + epilogue
-    var mp_pos: i64 = 0
-    let mp_tc = lean_lex_to_parser()
-    var mp_fn_count: i64 = 0
-    var mp_fn_offsets: [i64; 64] = [0; 64]
-    var mp_main_fn: i64 = -1
+    // Lex source into MP_* arrays using boot4-safe lexer (no TokenKind enum)
+    MC_TC = mc_lex()
+    print("mini_compile: tokens=")
+    print_int(MC_TC)
+    print("\n")
 
-    while mp_pos < mp_tc {
-        let k = MP_KIND[mp_pos as usize]
-        // Look for 'fn' keyword
-        if k == 7 {
-            mp_pos = mp_pos + 1
-            // Next token = function name
-            let name_start = MP_START[mp_pos as usize]
-            let name_end = MP_END[mp_pos as usize]
-            let name_len = name_end - name_start
+    // Emit print_int helper at start of code section
+    mc_emit_print_int_helper()
 
-            // Check if this is "main"
-            if name_len == 4 && ltp_byte(name_start) == 109 && ltp_byte(name_start + 1) == 97 && ltp_byte(name_start + 2) == 105 && ltp_byte(name_start + 3) == 110 {
-                mp_main_fn = mp_fn_count
-            }
+    // Pass 1: scan all function declarations
+    mc_scan_functions()
+    print("mini_compile: fn_count=")
+    print_int(MC_FN_COUNT)
+    print(" main=")
+    print_int(MC_MAIN_FN)
+    print("\n")
 
-            // Record function code offset
-            mp_fn_offsets[mp_fn_count as usize] = WIDE_LEN
-            mp_fn_count = mp_fn_count + 1
-            mp_pos = mp_pos + 1
-
-            // Skip params: consume until closing )
-            while mp_pos < mp_tc && MP_KIND[mp_pos as usize] != 172 {
-                mp_pos = mp_pos + 1
-            }
-            if mp_pos < mp_tc { mp_pos = mp_pos + 1 }
-
-            // Skip return type: consume -> TYPE
-            if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 155 {
-                mp_pos = mp_pos + 1  // skip ->
-                mp_pos = mp_pos + 1  // skip type
-            }
-
-            // Expect opening {
-            if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 173 {
-                mp_pos = mp_pos + 1
-            }
-
-            // Emit function prologue: push rbp; mov rbp, rsp; sub rsp, 256
-            we(0x55)                         // push rbp
-            we(0x48); we(0x89); we(0xe5)    // mov rbp, rsp
-            we(0x48); we(0x81); we(0xec)    // sub rsp, 256
-            we32(256)
-
-            // Compile body until closing }
-            var mp_depth: i64 = 1
-            while mp_pos < mp_tc && mp_depth > 0 {
-                let bk = MP_KIND[mp_pos as usize]
-                if bk == 173 { mp_depth = mp_depth + 1; mp_pos = mp_pos + 1; continue }
-                if bk == 174 { mp_depth = mp_depth - 1; mp_pos = mp_pos + 1; continue }
-                // Handle print("string") — inline string on stack + write syscall
-                if bk == 120 {
-                    let id_s = MP_START[mp_pos as usize]
-                    let id_e = MP_END[mp_pos as usize]
-                    let id_len = id_e - id_s
-                    // Check if identifier is "print" (5 chars: 112 114 105 110 116)
-                    if id_len == 5 && ltp_byte(id_s) == 112 && ltp_byte(id_s + 1) == 114 && ltp_byte(id_s + 2) == 105 && ltp_byte(id_s + 3) == 110 && ltp_byte(id_s + 4) == 116 {
-                        mp_pos = mp_pos + 1
-                        // Expect ( StringLit )
-                        if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 171 {
-                            mp_pos = mp_pos + 1
-                        }
-                        if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 123 {
-                            let str_s = MP_START[mp_pos as usize] + 1  // skip opening "
-                            let str_e = MP_END[mp_pos as usize] - 1    // skip closing "
-                            // Decode string bytes (handle \n, \t, \\)
-                            var str_buf: [i8; 256] = [0; 256]
-                            var str_len: i64 = 0
-                            var si: i64 = str_s
-                            while si < str_e && str_len < 256 {
-                                let ch = ltp_byte(si)
-                                if ch == 92 && si + 1 < str_e {
-                                    let ch2 = ltp_byte(si + 1)
-                                    if ch2 == 110 { str_buf[str_len as usize] = 10 as i8 }
-                                    else if ch2 == 116 { str_buf[str_len as usize] = 9 as i8 }
-                                    else if ch2 == 92 { str_buf[str_len as usize] = 92 as i8 }
-                                    else if ch2 == 48 { str_buf[str_len as usize] = 0 as i8 }
-                                    else { str_buf[str_len as usize] = ch2 }
-                                    si = si + 2
-                                } else {
-                                    str_buf[str_len as usize] = ch
-                                    si = si + 1
-                                }
-                                str_len = str_len + 1
-                            }
-                            // Push string bytes onto stack in 8-byte chunks (reverse order)
-                            let n_chunks = (str_len + 7) / 8
-                            var chi: i64 = n_chunks - 1
-                            while chi >= 0 {
-                                var qw: i64 = 0
-                                var bi: i64 = 0
-                                while bi < 8 {
-                                    let idx = chi * 8 + bi
-                                    if idx < str_len {
-                                        qw = qw | ((str_buf[idx as usize] as i64 & 0xFF) << (bi * 8))
-                                    }
-                                    bi = bi + 1
-                                }
-                                we(0x48); we(0xb8); we64(qw)  // mov rax, imm64
-                                we(0x50)                        // push rax
-                                chi = chi - 1
-                            }
-                            // write(1, rsp, str_len) syscall
-                            we(0xb8); we32(1)                   // mov eax, 1 (sys_write)
-                            we(0xbf); we32(1)                   // mov edi, 1 (stdout)
-                            we(0x48); we(0x89); we(0xe6)        // mov rsi, rsp
-                            we(0xba); we32(str_len)             // mov edx, str_len
-                            we(0x0f); we(0x05)                  // syscall
-                            // Clean up stack
-                            let stack_used = n_chunks * 8
-                            we(0x48); we(0x81); we(0xc4); we32(stack_used)  // add rsp, N
-                            mp_pos = mp_pos + 1
-                        }
-                        // Skip closing )
-                        if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 172 {
-                            mp_pos = mp_pos + 1
-                        }
-                        continue
-                    }
-                }
-                if bk == 25 {
-                    mp_pos = mp_pos + 1
-                    // Next token should be an integer literal or identifier
-                    if mp_pos < mp_tc && MP_KIND[mp_pos as usize] == 121 {
-                        let val = MP_INT_VALUE[mp_pos as usize]
-                        // mov eax, val
-                        we(0xb8); we32(val)
-                        mp_pos = mp_pos + 1
-                    } else {
-                        // Default: return 0
-                        we(0x31); we(0xc0)   // xor eax, eax
-                    }
-                    // Epilogue: add rsp, 256; pop rbp; ret
-                    we(0x48); we(0x81); we(0xc4); we32(256)
-                    we(0x5d)                 // pop rbp
-                    we(0xc3)                 // ret
-                    continue
-                }
-                mp_pos = mp_pos + 1
-            }
-
-            // If no explicit return, add implicit return 0
-            // Check if last emitted byte was ret (0xc3)
-            if WIDE_LEN > 0 && WIDE_OUT[(WIDE_LEN - 1) as usize] != 0xc3 as i8 {
-                we(0x31); we(0xc0)           // xor eax, eax
-                we(0x48); we(0x81); we(0xc4); we32(256)
-                we(0x5d)                     // pop rbp
-                we(0xc3)                     // ret
-            }
-        } else {
-            mp_pos = mp_pos + 1
-        }
-    }
-
-    if mp_main_fn < 0 {
+    if MC_MAIN_FN < 0 {
         print("mini_compile: no main function found\n")
         return 2
     }
 
-    // Emit trampoline: call main, mov edi eax, mov eax 60, syscall
+    // Pass 2: compile each function body
+    mc_compile_functions()
+
+    // Patch all call fixups
+    mc_patch_calls()
+
+    // Emit trampoline: call main, mov edi eax, exit syscall
     let tramp_off = WIDE_LEN
-    let main_code_off = mp_fn_offsets[mp_main_fn as usize]
-    we(0xe8)  // call rel32
-    let call_rel = main_code_off - (WIDE_LEN + 4)
+    let main_off = MC_FN_OFF[MC_MAIN_FN as usize]
+    we(0xe8)
+    let call_rel = main_off - (WIDE_LEN + 4)
     we32(call_rel)
     we(0x89); we(0xc7)                  // mov edi, eax
     we(0xb8); we32(60)                  // mov eax, 60 (exit)
@@ -4770,8 +6149,6 @@ fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     let total_code = WIDE_LEN
     print("mini_compile: code=")
     print_int(total_code)
-    print(" main_off=")
-    print_int(main_code_off)
     print(" tramp=")
     print_int(tramp_off)
     print("\n")
@@ -4784,22 +6161,16 @@ fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     var ei: i64 = 0
     while ei < text_off + total_code + 16 { GLOBAL_ELF[ei as usize] = 0; ei = ei + 1 }
 
-    // ELF magic
+    // ELF header
     elf_write_byte(0, 0x7f); elf_write_byte(1, 69); elf_write_byte(2, 76); elf_write_byte(3, 70)
     elf_write_byte(4, 2); elf_write_byte(5, 1); elf_write_byte(6, 1)
-    // e_type=EXEC, e_machine=x86-64, e_version=1
     elf_write_u16(16, 2); elf_write_u16(18, 0x3e); elf_write_u32(20, 1)
-    // e_entry
     elf_write_u64(24, entry_va)
-    // e_phoff=64, e_phentsize=56, e_phnum=1, e_ehsize=64
     elf_write_u64(32, 64); elf_write_u16(52, 64); elf_write_u16(54, 56); elf_write_u16(56, 1); elf_write_u16(58, 64)
-    // PT_LOAD: p_type=1, p_flags=7(RWX), p_offset=0, p_vaddr=base, p_paddr=base
     elf_write_u32(64, 1); elf_write_u32(68, 7)
     elf_write_u64(72, 0); elf_write_u64(80, base_addr); elf_write_u64(88, base_addr)
-    // p_filesz, p_memsz
     let fsz = text_off + total_code
     elf_write_u64(96, fsz); elf_write_u64(104, fsz)
-    // p_align
     elf_write_u64(112, 4096)
 
     // Copy code to text section
@@ -4810,11 +6181,8 @@ fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     }
 
     let total_len = text_off + total_code
-    let write_ok = io_write_huge_binary(output_path, GLOBAL_ELF, total_len)
-    if !write_ok {
-        print("mini_compile: write_error\n")
-        return 5
-    }
+    // Use write_file (boot4-compatible) instead of io_write_huge_binary
+    let write_ok = write_file(output_path, GLOBAL_ELF, total_len)
 
     print("mini_compile: ok written=")
     print(output_path)
