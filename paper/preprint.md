@@ -360,15 +360,15 @@ Epistemic shadow lanes demonstrate that first-order GUM uncertainty propagation 
 
 [4] E. O. Lebigot, "Uncertainties: a Python package for calculations with uncertainties," https://uncertainties.readthedocs.io/.
 
-[5] M. Giordano, "Measurements.jl: Uncertainty propagation with linear error theory and real and complex numbers," J. Open Source Software, 2016.
+[5] M. Giordano, "Uncertainty propagation with functionally correlated quantities," arXiv:1610.08716, 2016.
 
 [6] https://github.com/lmfit/uncertainties/issues/57 (1,400x overhead on 100K vectors).
 
 [7] https://github.com/JuliaPhysics/Measurements.jl/issues/25 (50x overhead on 1000x1000 arrays).
 
-[8] A. Dawar et al., "Stream-K++: Adaptive GPU GEMM Kernel Scheduling," arXiv:2408.11417, 2024.
+[8] H. Sadasivan et al., "Stream-K++: Adaptive GPU GEMM Kernel Scheduling and Selection using Bloom Filters," arXiv:2408.11417, 2024.
 
-[9] "KernelFoundry: Hardware-aware evolutionary GPU kernel optimization," arXiv:2603.12440, 2025.
+[9] N. Wiedemann et al., "KernelFoundry: Hardware-aware evolutionary GPU kernel optimization," arXiv:2603.12440, 2026.
 
 [10] P. Tillet, H. T. Kung, and D. Cox, "Triton: An intermediate language and compiler for tiled neural network computations," in Proc. MAPL@PLDI, 2019.
 
@@ -382,8 +382,8 @@ Epistemic shadow lanes demonstrate that first-order GUM uncertainty propagation 
 
 [15] B. D. Hall, "GTC: The GUM Tree Calculator," Measurement Standards Laboratory of New Zealand.
 
-[16] A. Gray, M. De Angelis, and S. Ferson, "The creation of Puffin, the automatic uncertainty compiler," Int. J. Approximate Reasoning, 2023.
+[16] A. Gray, M. De Angelis, and S. Ferson, "Towards an automatic uncertainty compiler," Int. J. Approximate Reasoning, 2023.
 
-[17] E. Goldstein et al., "LithOS: An operating system for efficient machine learning on GPUs," in Proc. SOSP, 2025.
+[17] P. H. Coppock et al., "LithOS: An operating system for efficient machine learning on GPUs," in Proc. SOSP, 2025.
 
 [18] JCGM 101:2008, "Supplement 1 to the GUM — Propagation of distributions using a Monte Carlo method," 2008.
