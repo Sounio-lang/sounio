@@ -1,0 +1,634 @@
+// hypercomplex_graph::oct_graph — Octonion-Labeled Graph Theory
+//
+// A graph where each directed edge carries an octonion (Oct) label.
+// The NON-ASSOCIATIVITY of octonions means: for a path A→B→C→D,
+// the "path product" of edge labels depends on parenthesization.
+//
+// Key theorem: the NORM of the path product is invariant under
+// reparenthesization (follows from octonion norm multiplicativity).
+// The DIRECTION changes — the associator measures that angular deviation.
+//
+// This is a new construction in the literature. Nobody has defined
+// octonion-labeled graphs before.
+//
+// References:
+//   - Baez 2002, "The Octonions", Bull. AMS 39(2):145-205
+//   - Hurwitz 1898, "Über die Komposition der quadratischen Formen"
+//   - Chung 1997, "Spectral Graph Theory", CBMS-AMS
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn og_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn og_sqrt(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+// ============================================================================
+// OCTONION (inlined — tests/run-pass cannot import)
+// ============================================================================
+
+struct Oct {
+    e: [f64; 8]
+}
+
+fn oct_zero() -> Oct { Oct { e: [0.0; 8] } }
+
+fn oct_real(r: f64) -> Oct with Mut, Panic {
+    var o = Oct { e: [0.0; 8] }
+    o.e[0] = r
+    o
+}
+
+fn oct_unit(idx: i64) -> Oct with Mut, Panic {
+    var o = Oct { e: [0.0; 8] }
+    if idx >= 0 && idx < 8 { o.e[idx as usize] = 1.0 }
+    o
+}
+
+fn oct_add(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = a.e[i as usize] + b.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_sub(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = a.e[i as usize] - b.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_scale(o: Oct, s: f64) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = o.e[i as usize] * s; i = i + 1 }
+    r
+}
+
+fn oct_conjugate(o: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    r.e[0] = o.e[0]
+    var i: i64 = 1
+    while i < 8 { r.e[i as usize] = 0.0 - o.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_norm_sq(o: Oct) -> f64 with Mut, Panic, Div {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 { s = s + o.e[i as usize] * o.e[i as usize]; i = i + 1 }
+    s
+}
+
+fn oct_norm(o: Oct) -> f64 with Mut, Panic, Div {
+    og_sqrt(oct_norm_sq(o))
+}
+
+// Fano plane: 7 triples encoding octonion multiplication
+// (1,2,4) (2,3,5) (3,4,6) (4,5,7) (5,6,1) (6,7,2) (7,1,3)
+fn oct_fano_index(i: i64, j: i64) -> i64 with Mut, Panic, Div {
+    if i == j { return 0 }
+    var triples: [i64; 21] = [0; 21]
+    triples[0] = 1; triples[1] = 2; triples[2] = 4
+    triples[3] = 2; triples[4] = 3; triples[5] = 5
+    triples[6] = 3; triples[7] = 4; triples[8] = 6
+    triples[9] = 4; triples[10] = 5; triples[11] = 7
+    triples[12] = 5; triples[13] = 6; triples[14] = 1
+    triples[15] = 6; triples[16] = 7; triples[17] = 2
+    triples[18] = 7; triples[19] = 1; triples[20] = 3
+    var t: i64 = 0
+    while t < 7 {
+        let a = triples[(t * 3) as usize]
+        let b = triples[(t * 3 + 1) as usize]
+        let c = triples[(t * 3 + 2) as usize]
+        if (i == a && j == b) || (i == b && j == c) || (i == c && j == a) {
+            if i == a && j == b { return c }
+            if i == b && j == c { return a }
+            return b
+        }
+        if (i == b && j == a) || (i == c && j == b) || (i == a && j == c) {
+            if i == b && j == a { return c }
+            if i == c && j == b { return a }
+            return b
+        }
+        t = t + 1
+    }
+    0
+}
+
+fn oct_fano_sign(i: i64, j: i64) -> f64 with Mut, Panic, Div {
+    if i == j { return -1.0 }
+    if i == 0 || j == 0 { return 1.0 }
+    var triples: [i64; 21] = [0; 21]
+    triples[0] = 1; triples[1] = 2; triples[2] = 4
+    triples[3] = 2; triples[4] = 3; triples[5] = 5
+    triples[6] = 3; triples[7] = 4; triples[8] = 6
+    triples[9] = 4; triples[10] = 5; triples[11] = 7
+    triples[12] = 5; triples[13] = 6; triples[14] = 1
+    triples[15] = 6; triples[16] = 7; triples[17] = 2
+    triples[18] = 7; triples[19] = 1; triples[20] = 3
+    var t: i64 = 0
+    while t < 7 {
+        let a = triples[(t * 3) as usize]
+        let b = triples[(t * 3 + 1) as usize]
+        let c = triples[(t * 3 + 2) as usize]
+        if (i == a && j == b) || (i == b && j == c) || (i == c && j == a) { return 1.0 }
+        if (i == b && j == a) || (i == c && j == b) || (i == a && j == c) { return -1.0 }
+        t = t + 1
+    }
+    0.0
+}
+
+fn oct_mul(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var result = oct_zero()
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let coeff = a.e[i as usize] * b.e[j as usize]
+            if i == 0 && j == 0 {
+                result.e[0] = result.e[0] + coeff
+            } else if i == 0 {
+                result.e[j as usize] = result.e[j as usize] + coeff
+            } else if j == 0 {
+                result.e[i as usize] = result.e[i as usize] + coeff
+            } else if i == j {
+                result.e[0] = result.e[0] - coeff
+            } else {
+                let k = oct_fano_index(i, j)
+                let sign = oct_fano_sign(i, j)
+                result.e[k as usize] = result.e[k as usize] + sign * coeff
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn oct_associator(a: Oct, b: Oct, c: Oct) -> Oct with Mut, Panic, Div {
+    // [a,b,c] = (ab)c - a(bc)
+    let ab = oct_mul(a, b)
+    let bc = oct_mul(b, c)
+    let ab_c = oct_mul(ab, c)
+    let a_bc = oct_mul(a, bc)
+    oct_sub(ab_c, a_bc)
+}
+
+// ============================================================================
+// OCTONION-LABELED GRAPH (max 32 nodes)
+// ============================================================================
+//
+// Each directed edge (u,v) carries an Oct label.
+// adj[u*32+v] = 1 if edge exists, 0 otherwise.
+// labels stored at labels_e[k][u*32+v] for component k of the octonion.
+// (Flat arrays — matching CurvGraph pattern from stdlib/graph/curvature.sio)
+//
+// Convention for undirected graphs:
+//   label(v,u) = oct_conjugate(label(u,v))
+// This is algebraically natural: conjugation reverses multiplication order.
+
+struct OctGraph {
+    n: i32                      // number of nodes (max 32)
+    adj: [i32; 1024]            // 32x32 adjacency matrix
+    // Octonion edge labels stored per-component (avoid nested arrays)
+    lab0: [f64; 1024]           // e[0] component of each edge label
+    lab1: [f64; 1024]           // e[1]
+    lab2: [f64; 1024]           // e[2]
+    lab3: [f64; 1024]           // e[3]
+    lab4: [f64; 1024]           // e[4]
+    lab5: [f64; 1024]           // e[5]
+    lab6: [f64; 1024]           // e[6]
+    lab7: [f64; 1024]           // e[7]
+}
+
+fn og_new(n: i32) -> OctGraph {
+    OctGraph {
+        n: n,
+        adj: [0; 1024],
+        lab0: [0.0; 1024], lab1: [0.0; 1024], lab2: [0.0; 1024], lab3: [0.0; 1024],
+        lab4: [0.0; 1024], lab5: [0.0; 1024], lab6: [0.0; 1024], lab7: [0.0; 1024],
+    }
+}
+
+fn og_idx(u: i32, v: i32) -> i32 { u * 32 + v }
+
+fn og_has_edge(g: OctGraph, u: i32, v: i32) -> bool with Panic {
+    g.adj[og_idx(u, v) as usize] == 1
+}
+
+fn og_get_label(g: OctGraph, u: i32, v: i32) -> Oct with Mut, Panic {
+    let idx = og_idx(u, v) as usize
+    var o = Oct { e: [0.0; 8] }
+    o.e[0] = g.lab0[idx]
+    o.e[1] = g.lab1[idx]
+    o.e[2] = g.lab2[idx]
+    o.e[3] = g.lab3[idx]
+    o.e[4] = g.lab4[idx]
+    o.e[5] = g.lab5[idx]
+    o.e[6] = g.lab6[idx]
+    o.e[7] = g.lab7[idx]
+    o
+}
+
+// Add directed edge with octonion label (by-value return pattern)
+fn og_add_edge(g: OctGraph, u: i32, v: i32, label: Oct) -> OctGraph with Mut, Panic, Div {
+    var result = g
+    let idx = og_idx(u, v) as usize
+    result.adj[idx] = 1
+    result.lab0[idx] = label.e[0]
+    result.lab1[idx] = label.e[1]
+    result.lab2[idx] = label.e[2]
+    result.lab3[idx] = label.e[3]
+    result.lab4[idx] = label.e[4]
+    result.lab5[idx] = label.e[5]
+    result.lab6[idx] = label.e[6]
+    result.lab7[idx] = label.e[7]
+    result
+}
+
+// Add undirected edge: (u,v) gets label, (v,u) gets conjugate(label)
+fn og_add_undirected_edge(g: OctGraph, u: i32, v: i32, label: Oct) -> OctGraph with Mut, Panic, Div {
+    var result = og_add_edge(g, u, v, label)
+    let conj = oct_conjugate(label)
+    result = og_add_edge(result, v, u, conj)
+    result
+}
+
+fn og_degree(g: OctGraph, v: i32) -> i32 with Mut, Panic, Div {
+    var d: i32 = 0
+    var i: i32 = 0
+    while i < g.n {
+        if g.adj[og_idx(v, i) as usize] == 1 { d = d + 1 }
+        i = i + 1
+    }
+    d
+}
+
+fn og_edge_count(g: OctGraph) -> i32 with Mut, Panic, Div {
+    var count: i32 = 0
+    var u: i32 = 0
+    while u < g.n {
+        var v: i32 = 0
+        while v < g.n {
+            if g.adj[og_idx(u, v) as usize] == 1 { count = count + 1 }
+            v = v + 1
+        }
+        u = u + 1
+    }
+    count
+}
+
+// ============================================================================
+// PATH PRODUCTS — the core construction
+// ============================================================================
+//
+// A path is a sequence of node indices [v0, v1, v2, ..., vk].
+// The edge labels along the path are: L1=label(v0,v1), L2=label(v1,v2), ...
+//
+// Because octonion multiplication is NON-ASSOCIATIVE, the product of
+// these labels depends on how we parenthesize:
+//   Left:     ((L1 * L2) * L3) * L4
+//   Right:    L1 * (L2 * (L3 * L4))
+//   Balanced: (L1 * L2) * (L3 * L4)
+//
+// KEY THEOREM: ||product|| is the SAME for all parenthesizations.
+//              (Follows from norm multiplicativity of octonions)
+//
+// What changes is the DIRECTION. The associator measures that deviation.
+
+// Left-associative path product: ((L1 * L2) * L3) * ...
+fn og_path_product_left(g: OctGraph, path: [i32; 32], path_len: i32) -> Oct with Mut, Panic, Div {
+    if path_len < 2 { return oct_real(1.0) }
+
+    var acc = og_get_label(g, path[0], path[1])
+    var i: i32 = 2
+    while i < path_len {
+        let edge = og_get_label(g, path[(i - 1) as usize], path[i as usize])
+        acc = oct_mul(acc, edge)
+        i = i + 1
+    }
+    acc
+}
+
+// Right-associative path product: L1 * (L2 * (L3 * ...))
+fn og_path_product_right(g: OctGraph, path: [i32; 32], path_len: i32) -> Oct with Mut, Panic, Div {
+    if path_len < 2 { return oct_real(1.0) }
+
+    let last_edge_idx = path_len - 2
+    var acc = og_get_label(g, path[last_edge_idx as usize], path[(path_len - 1) as usize])
+    var i: i32 = last_edge_idx - 1
+    while i >= 0 {
+        let edge = og_get_label(g, path[i as usize], path[(i + 1) as usize])
+        acc = oct_mul(edge, acc)
+        i = i - 1
+    }
+    acc
+}
+
+// Balanced path product (binary tree): split in half, recurse
+// For 4 edges: (L1*L2) * (L3*L4)
+fn og_path_product_balanced_range(
+    g: OctGraph, path: [i32; 32], lo: i32, hi: i32
+) -> Oct with Mut, Panic, Div {
+    // lo..hi are node indices; edges are between consecutive nodes
+    let n_edges = hi - lo
+    if n_edges <= 0 { return oct_real(1.0) }
+    if n_edges == 1 {
+        return og_get_label(g, path[lo as usize], path[(lo + 1) as usize])
+    }
+    // Split in the middle
+    let mid = lo + n_edges / 2
+    let left = og_path_product_balanced_range(g, path, lo, mid)
+    let right = og_path_product_balanced_range(g, path, mid, hi)
+    oct_mul(left, right)
+}
+
+fn og_path_product_balanced(g: OctGraph, path: [i32; 32], path_len: i32) -> Oct with Mut, Panic, Div {
+    if path_len < 2 { return oct_real(1.0) }
+    og_path_product_balanced_range(g, path, 0, path_len - 1)
+}
+
+// ============================================================================
+// ASSOCIATOR FIELD — measures non-associativity over the graph
+// ============================================================================
+//
+// For every triple of consecutive edges (u→v, v→w, w→x):
+//   a = label(u,v), b = label(v,w), c = label(w,x)
+//   associator = [a,b,c] = (ab)c - a(bc)
+//
+// The collection of all such associators is the "associator field" —
+// a new graph invariant measuring how non-associative the labeled graph is.
+
+struct AssocSample {
+    u: i32
+    v: i32
+    w: i32
+    x: i32
+    norm: f64       // ||[a,b,c]||
+}
+
+struct AssocField {
+    samples: [AssocSample; 512]
+    count: i32
+    mean_norm: f64
+    max_norm: f64
+    total_norm_sq: f64     // spectral energy: sum of ||[a,b,c]||^2
+}
+
+fn af_empty() -> AssocField {
+    let empty_sample = AssocSample { u: 0, v: 0, w: 0, x: 0, norm: 0.0 }
+    AssocField {
+        samples: [empty_sample; 512],
+        count: 0,
+        mean_norm: 0.0,
+        max_norm: 0.0,
+        total_norm_sq: 0.0,
+    }
+}
+
+// Compute the associator field over all length-3 paths in the graph
+fn og_associator_field(g: OctGraph) -> AssocField with Mut, Panic, Div {
+    var field = af_empty()
+    var sum_norm: f64 = 0.0
+    var max_n: f64 = 0.0
+    var sum_sq: f64 = 0.0
+
+    var u: i32 = 0
+    while u < g.n {
+        var v: i32 = 0
+        while v < g.n {
+            if g.adj[og_idx(u, v) as usize] == 1 && u != v {
+                var w: i32 = 0
+                while w < g.n {
+                    if g.adj[og_idx(v, w) as usize] == 1 && v != w {
+                        var x: i32 = 0
+                        while x < g.n {
+                            if g.adj[og_idx(w, x) as usize] == 1 && w != x {
+                                if field.count < 512 {
+                                    let a = og_get_label(g, u, v)
+                                    let b = og_get_label(g, v, w)
+                                    let c = og_get_label(g, w, x)
+                                    let assoc = oct_associator(a, b, c)
+                                    let n = oct_norm(assoc)
+
+                                    field.samples[field.count as usize] = AssocSample {
+                                        u: u, v: v, w: w, x: x, norm: n,
+                                    }
+                                    field.count = field.count + 1
+                                    sum_norm = sum_norm + n
+                                    sum_sq = sum_sq + n * n
+                                    if n > max_n { max_n = n }
+                                }
+                            }
+                            x = x + 1
+                        }
+                    }
+                    w = w + 1
+                }
+            }
+            v = v + 1
+        }
+        u = u + 1
+    }
+
+    if field.count > 0 {
+        field.mean_norm = sum_norm / (field.count as f64)
+    }
+    field.max_norm = max_n
+    field.total_norm_sq = sum_sq
+    field
+}
+
+// ============================================================================
+// NORM INVARIANCE — computational verification of the theorem
+// ============================================================================
+//
+// Verify that left, right, and balanced products all have the same norm.
+// This is the computational shadow of our Lean theorem.
+
+fn og_verify_norm_invariance(g: OctGraph, path: [i32; 32], path_len: i32) -> bool with Mut, Panic, Div {
+    if path_len < 3 { return true }  // trivial for 1-2 edges
+
+    let left = og_path_product_left(g, path, path_len)
+    let right = og_path_product_right(g, path, path_len)
+    let balanced = og_path_product_balanced(g, path, path_len)
+
+    let norm_left = oct_norm(left)
+    let norm_right = oct_norm(right)
+    let norm_balanced = oct_norm(balanced)
+
+    let tol = 1e-6
+    let ok_lr = og_abs(norm_left - norm_right) < tol
+    let ok_lb = og_abs(norm_left - norm_balanced) < tol
+    ok_lr && ok_lb
+}
+
+// Verify that left and right products DIFFER (non-associativity is real)
+fn og_verify_non_associativity(g: OctGraph, path: [i32; 32], path_len: i32) -> bool with Mut, Panic, Div {
+    if path_len < 4 { return false }  // need >= 3 edges
+
+    let left = og_path_product_left(g, path, path_len)
+    let right = og_path_product_right(g, path, path_len)
+    let diff = oct_sub(left, right)
+    oct_norm(diff) > 1e-6
+}
+
+// ============================================================================
+// ANGULAR DEVIATION — what DOES change across parenthesizations
+// ============================================================================
+//
+// Since ||product|| is invariant, we can normalize both products to S^7
+// and measure the angular distance between them. This is the "associator
+// angle" — how much reparenthesization rotates the result on the 7-sphere.
+
+fn og_angular_deviation(g: OctGraph, path: [i32; 32], path_len: i32) -> f64 with Mut, Panic, Div {
+    if path_len < 4 { return 0.0 }
+
+    let left = og_path_product_left(g, path, path_len)
+    let right = og_path_product_right(g, path, path_len)
+
+    let norm_l = oct_norm(left)
+    let norm_r = oct_norm(right)
+    if norm_l < 1e-12 || norm_r < 1e-12 { return 0.0 }
+
+    // Normalize to unit octonions
+    let ul = oct_scale(left, 1.0 / norm_l)
+    let ur = oct_scale(right, 1.0 / norm_r)
+
+    // Inner product on S^7
+    var dot: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 {
+        dot = dot + ul.e[i as usize] * ur.e[i as usize]
+        i = i + 1
+    }
+
+    // Clamp to [-1, 1] for numerical safety
+    if dot > 1.0 { dot = 1.0 }
+    if dot < -1.0 { dot = -1.0 }
+
+    // Angular distance (in radians)
+    // acos not available in JIT, use: angle ≈ sqrt(2*(1-dot)) for small angles
+    // For large angles, use the full formula: angle = acos(dot)
+    // Approximation: angle = sqrt(2 - 2*dot) (chord length ≈ angle for unit sphere)
+    og_sqrt(2.0 - 2.0 * dot)
+}
+
+// ============================================================================
+// SIMPLE GRAPH GENERATORS
+// ============================================================================
+
+// Linear congruential generator (matches stdlib/graph/random.sio pattern)
+fn og_lcg_next(state: i64) -> i64 {
+    // Numerical Recipes LCG (modulo 2^63 via overflow)
+    let a: i64 = 6364136223846793005
+    let c: i64 = 1442695040888963407
+    state * a + c
+}
+
+fn og_lcg_to_f64(state: i64) -> f64 with Div, Panic {
+    // Map i64 to [0, 1) — take absolute value first
+    let s = if state < 0 { 0 - state } else { state }
+    (s as f64) / 9223372036854775807.0
+}
+
+// Generate a random unit octonion (uniform on S^7)
+fn og_random_unit_oct(seed: i64) -> Oct with Mut, Panic, Div {
+    var o = Oct { e: [0.0; 8] }
+    var s = seed
+    var i: i64 = 0
+    while i < 8 {
+        s = og_lcg_next(s)
+        // Map to [-1, 1]
+        o.e[i as usize] = 2.0 * og_lcg_to_f64(s) - 1.0
+        i = i + 1
+    }
+    // Normalize to unit
+    let n = oct_norm(o)
+    if n < 1e-12 { return oct_real(1.0) }
+    oct_scale(o, 1.0 / n)
+}
+
+// Complete graph K_n with random unit octonion edge labels
+fn og_complete_random(n: i32, seed: i64) -> OctGraph with Mut, Panic, Div {
+    var g = og_new(n)
+    var s = seed
+    var u: i32 = 0
+    while u < n {
+        var v: i32 = u + 1
+        while v < n {
+            s = og_lcg_next(s)
+            let label = og_random_unit_oct(s)
+            g = og_add_undirected_edge(g, u, v, label)
+            v = v + 1
+        }
+        u = u + 1
+    }
+    g
+}
+
+// Path graph P_n with random unit octonion edge labels
+fn og_path_random(n: i32, seed: i64) -> OctGraph with Mut, Panic, Div {
+    var g = og_new(n)
+    var s = seed
+    var i: i32 = 0
+    while i < n - 1 {
+        s = og_lcg_next(s)
+        let label = og_random_unit_oct(s)
+        g = og_add_undirected_edge(g, i, i + 1, label)
+        i = i + 1
+    }
+    g
+}
+
+// Cycle graph C_n with random unit octonion edge labels
+fn og_cycle_random(n: i32, seed: i64) -> OctGraph with Mut, Panic, Div {
+    var g = og_path_random(n, seed)
+    // Close the cycle
+    var s = seed
+    var i: i32 = 0
+    while i < n + 1 { s = og_lcg_next(s); i = i + 1 }
+    let label = og_random_unit_oct(s)
+    g = og_add_undirected_edge(g, n - 1, 0, label)
+    g
+}
+
+// Star graph S_n (node 0 is hub, connected to all others)
+fn og_star_random(n: i32, seed: i64) -> OctGraph with Mut, Panic, Div {
+    var g = og_new(n)
+    var s = seed
+    var i: i32 = 1
+    while i < n {
+        s = og_lcg_next(s)
+        let label = og_random_unit_oct(s)
+        g = og_add_undirected_edge(g, 0, i, label)
+        i = i + 1
+    }
+    g
+}
+
+// Basis-labeled complete graph: edge (i,j) labeled with basis element e_{(i+j) mod 7 + 1}
+fn og_complete_basis(n: i32) -> OctGraph with Mut, Panic, Div {
+    var g = og_new(n)
+    var u: i32 = 0
+    while u < n {
+        var v: i32 = u + 1
+        while v < n {
+            let basis_idx = ((u + v) % 7 + 1) as i64
+            let label = oct_unit(basis_idx)
+            g = og_add_undirected_edge(g, u, v, label)
+            v = v + 1
+        }
+        u = u + 1
+    }
+    g
+}

@@ -1,0 +1,202 @@
+//! stdlib/neuro/ct.sio — Structural CT/MRI Morphometry Pipeline
+//!
+//! CT and structural MRI provide ANATOMICAL information:
+//! cortical thickness, volume, surface area, curvature.
+//!
+//! Input: per-ROI morphometric features from FreeSurfer/FSL
+//!        (e.g., aparc.stats → thickness, area, volume per region)
+//!
+//! Unlike fMRI/EEG/MEG (which measure functional connectivity),
+//! structural imaging measures the SUBSTRATE on which functional
+//! networks operate. The ORC phase classification applies to
+//! structural covariance networks: edges connect regions whose
+//! morphometric features covary across subjects.
+//!
+//! For the Sounio pipeline, structural data provides:
+//!   - The graph SUBSTRATE (which regions are physically connected)
+//!   - Morphometric FEATURES per ROI (for sedenion encoding)
+//!   - Structural covariance NETWORK (for ORC phase classification)
+//!
+//! The sedenion encoding for structural data:
+//!   e0-e7:  8 morphometric features per ROI
+//!           (thickness, area, volume, curvature, sulcal_depth,
+//!            folding_index, gray_matter_vol, white_matter_vol)
+//!   e8-e15: 8 inter-regional structural covariance features
+//!           (correlation of morphometry between ROI pairs)
+//!
+//! Clinical relevance:
+//!   ENIGMA-MDD (Schmaal 2017): cortical thinning in depression
+//!   ENIGMA-SCZ: volume reductions in schizophrenia
+//!   ENIGMA-ASD: atypical surface area patterns
+//!
+//! References:
+//!   Schmaal et al. (2017): Cortical abnormalities in MDD (ENIGMA)
+//!   Desikan et al. (2006): FreeSurfer parcellation atlas
+
+/// Per-ROI morphometric features from structural imaging.
+pub struct MorphometricROI {
+    thickness: f64,       // cortical thickness (mm)
+    surface_area: f64,    // surface area (mm²)
+    volume: f64,          // gray matter volume (mm³)
+    mean_curvature: f64,  // mean surface curvature (1/mm)
+    sulcal_depth: f64,    // sulcal depth (mm)
+    folding_index: f64,   // gyrification index
+    gm_volume: f64,       // gray matter volume (voxel-based)
+    wm_volume: f64,       // white matter volume (voxel-based)
+}
+
+/// Structural covariance network.
+///
+/// Edges represent statistical covariance of morphometric features
+/// ACROSS SUBJECTS (population-level), not within a single brain.
+/// This is conceptually different from fMRI/EEG connectivity
+/// (which is within-subject, within-session).
+pub struct StructuralCovariance {
+    // Covariance matrix of thickness across subjects (max 64×64)
+    thickness_cov: [f64; 4096],
+    // Binary adjacency
+    adj: [i32; 4096],
+    n_rois: i32,
+    threshold: f64,
+    // Per-ROI morphometric data (population means)
+    roi_data: [MorphometricROI; 64],
+}
+
+/// Create empty structural covariance network.
+pub fn struct_cov_new(n_rois: i32, thresh: f64) -> StructuralCovariance {
+    let empty_roi = MorphometricROI {
+        thickness: 0.0, surface_area: 0.0, volume: 0.0,
+        mean_curvature: 0.0, sulcal_depth: 0.0, folding_index: 0.0,
+        gm_volume: 0.0, wm_volume: 0.0,
+    }
+    StructuralCovariance {
+        thickness_cov: [0.0; 4096],
+        adj: [0; 4096],
+        n_rois: n_rois,
+        threshold: thresh,
+        roi_data: [empty_roi; 64],
+    }
+}
+
+/// Set structural covariance between two ROIs.
+pub fn struct_set_cov(sc: StructuralCovariance, i: i32, j: i32, cov: f64) -> StructuralCovariance with Mut, Panic {
+    var s = sc
+    if i >= 0 && i < s.n_rois && j >= 0 && j < s.n_rois {
+        s.thickness_cov[(i * 64 + j) as usize] = cov
+        s.thickness_cov[(j * 64 + i) as usize] = cov
+    }
+    s
+}
+
+/// Set morphometric data for a single ROI.
+pub fn struct_set_roi(sc: StructuralCovariance, idx: i32, roi: MorphometricROI) -> StructuralCovariance with Mut, Panic {
+    var s = sc
+    if idx >= 0 && idx < s.n_rois {
+        s.roi_data[idx as usize] = roi
+    }
+    s
+}
+
+/// Threshold structural covariance to binary adjacency.
+pub fn struct_threshold(sc: StructuralCovariance) -> StructuralCovariance with Mut, Div, Panic {
+    var s = sc
+    var i: i32 = 0
+    while i < s.n_rois {
+        var j: i32 = 0
+        while j < s.n_rois {
+            if i != j {
+                let c = s.thickness_cov[(i * 64 + j) as usize]
+                let ac = if c < 0.0 { 0.0 - c } else { c }
+                s.adj[(i * 64 + j) as usize] = if ac > s.threshold { 1 } else { 0 }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    s
+}
+
+/// Encode structural morphometry as a sedenion.
+///
+/// For a single ROI:
+///   e0-e7:  8 morphometric features (thickness, area, volume, ...)
+///   e8-e15: 8 features from the structurally covarying neighbor
+///           (the ROI with highest covariance to this one)
+///
+/// This captures both the LOCAL morphometry and the NETWORK
+/// context of each brain region.
+pub fn morphometry_to_sedenion(sc: StructuralCovariance, roi_idx: i32) -> [f64; 16] with Mut, Div, Panic {
+    var s: [f64; 16] = [0.0; 16]
+    if roi_idx < 0 || roi_idx >= sc.n_rois { return s }
+
+    let roi = sc.roi_data[roi_idx as usize]
+
+    // Octonion half: this ROI's morphometry
+    s[0] = roi.thickness
+    s[1] = roi.surface_area / 1000.0   // scale to comparable range
+    s[2] = roi.volume / 10000.0
+    s[3] = roi.mean_curvature * 100.0
+    s[4] = roi.sulcal_depth
+    s[5] = roi.folding_index
+    s[6] = roi.gm_volume / 10000.0
+    s[7] = roi.wm_volume / 10000.0
+
+    // Sedenion half: strongest covarying neighbor's morphometry
+    var max_cov: f64 = 0.0
+    var max_j: i32 = 0
+    var j: i32 = 0
+    while j < sc.n_rois {
+        if j != roi_idx {
+            let c = sc.thickness_cov[(roi_idx * 64 + j) as usize]
+            let ac = if c < 0.0 { 0.0 - c } else { c }
+            if ac > max_cov { max_cov = ac; max_j = j }
+        }
+        j = j + 1
+    }
+
+    let neighbor = sc.roi_data[max_j as usize]
+    s[8] = neighbor.thickness
+    s[9] = neighbor.surface_area / 1000.0
+    s[10] = neighbor.volume / 10000.0
+    s[11] = neighbor.mean_curvature * 100.0
+    s[12] = neighbor.sulcal_depth
+    s[13] = neighbor.folding_index
+    s[14] = neighbor.gm_volume / 10000.0
+    s[15] = neighbor.wm_volume / 10000.0
+
+    // Normalize
+    var norm_sq: f64 = 0.0
+    var k = 0
+    while k < 16 { norm_sq = norm_sq + s[k] * s[k]; k = k + 1 }
+    let norm = sqrt_approx(norm_sq)
+    if norm > 0.001 {
+        k = 0
+        while k < 16 { s[k] = s[k] / norm; k = k + 1 }
+    }
+    s
+}
+
+/// Compute η for the structural covariance network.
+pub fn struct_eta(sc: StructuralCovariance) -> f64 with Mut, Div, Panic {
+    if sc.n_rois < 2 { return 0.0 }
+    var total: i64 = 0
+    var i: i32 = 0
+    while i < sc.n_rois {
+        var j: i32 = 0
+        while j < sc.n_rois {
+            if sc.adj[(i * 64 + j) as usize] == 1 { total = total + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let mk = (total as f64) / (sc.n_rois as f64)
+    mk * mk / (sc.n_rois as f64)
+}
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 15 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}

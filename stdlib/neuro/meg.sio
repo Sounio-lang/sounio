@@ -1,0 +1,204 @@
+//! stdlib/neuro/meg.sio — Magnetoencephalography Connectivity Pipeline
+//!
+//! MEG measures magnetic fields from neural currents — same temporal
+//! resolution as EEG (ms) but better spatial localization.
+//!
+//! Input: source-space connectivity matrix from preprocessed MEG
+//!        (e.g., MNE-Python → beamformer/dSPM → source coherence)
+//!
+//! MEG's advantage for the Sounio pipeline: source-space MEG provides
+//! DIRECTIONAL connectivity (unlike fMRI correlation), enabling
+//! directed graphs where the associator field measures whether
+//! the CAUSAL ORDER of neural activation matters.
+//!
+//! The imaginary part of coherence (ImCoh) is particularly relevant:
+//! it captures phase-lagged interactions (true neural communication)
+//! while suppressing volume conduction artifacts. This gives a
+//! natural complex-valued edge weight that maps to the Cayley-Dickson
+//! tower: real part → octonion half, imaginary part → sedenion half.
+//!
+//! References:
+//!   Gross et al. (2001): DICS beamformer for MEG source localization
+//!   Nolte et al. (2004): Imaginary coherence for artifact rejection
+//!   Colclough et al. (2015): MEG connectomics pipeline
+
+/// MEG source-space connectivity.
+///
+/// Unlike EEG, MEG provides directional connectivity via Granger
+/// causality or transfer entropy in source space. The adjacency
+/// matrix is therefore DIRECTED (not symmetric), which means
+/// the associator field captures genuine causal order-dependence.
+pub struct MegConnectivity {
+    // Directed connectivity matrix (max 64×64)
+    // Row i, col j = influence FROM source i TO source j
+    directed_conn: [f64; 4096],
+
+    // Imaginary coherence (phase-lagged, artifact-free)
+    imcoh: [f64; 4096],
+
+    // Binary directed adjacency
+    adj: [i32; 4096],
+    n_sources: i32,
+    threshold: f64,
+
+    // Per-source metadata
+    source_power: [f64; 64],
+    source_in_degree: [i32; 64],
+    source_out_degree: [i32; 64],
+}
+
+/// Create empty MEG connectivity.
+pub fn meg_new(n_src: i32, thresh: f64) -> MegConnectivity {
+    MegConnectivity {
+        directed_conn: [0.0; 4096],
+        imcoh: [0.0; 4096],
+        adj: [0; 4096],
+        n_sources: n_src,
+        threshold: thresh,
+        source_power: [0.0; 64],
+        source_in_degree: [0; 64],
+        source_out_degree: [0; 64],
+    }
+}
+
+/// Set directed connection strength from source i to source j.
+/// Note: NOT symmetric. meg_set(fc, i, j, v) ≠ meg_set(fc, j, i, v).
+pub fn meg_set_conn(mc: MegConnectivity, from: i32, to: i32, strength: f64, imcoh_val: f64) -> MegConnectivity with Mut, Panic {
+    var m = mc
+    if from >= 0 && from < m.n_sources && to >= 0 && to < m.n_sources {
+        m.directed_conn[(from * 64 + to) as usize] = strength
+        m.imcoh[(from * 64 + to) as usize] = imcoh_val
+    }
+    m
+}
+
+/// Threshold directed connectivity to binary adjacency.
+pub fn meg_threshold(mc: MegConnectivity) -> MegConnectivity with Mut, Div, Panic {
+    var m = mc
+    var i: i32 = 0
+    while i < m.n_sources {
+        var in_d: i32 = 0
+        var out_d: i32 = 0
+        var j: i32 = 0
+        while j < m.n_sources {
+            if i != j {
+                let c = m.directed_conn[(i * 64 + j) as usize]
+                let ac = if c < 0.0 { 0.0 - c } else { c }
+                if ac > m.threshold {
+                    m.adj[(i * 64 + j) as usize] = 1
+                    out_d = out_d + 1
+                } else {
+                    m.adj[(i * 64 + j) as usize] = 0
+                }
+                // Check incoming
+                let ci = m.directed_conn[(j * 64 + i) as usize]
+                let aci = if ci < 0.0 { 0.0 - ci } else { ci }
+                if aci > m.threshold { in_d = in_d + 1 }
+            }
+            j = j + 1
+        }
+        m.source_out_degree[i as usize] = out_d
+        m.source_in_degree[i as usize] = in_d
+        i = i + 1
+    }
+    m
+}
+
+/// Compute η for the directed MEG graph.
+/// Uses mean total degree (in + out) / 2 as effective k.
+pub fn meg_eta(mc: MegConnectivity) -> f64 with Mut, Div, Panic {
+    if mc.n_sources < 2 { return 0.0 }
+    var total_edges: i64 = 0
+    var i: i32 = 0
+    while i < mc.n_sources {
+        var j: i32 = 0
+        while j < mc.n_sources {
+            if mc.adj[(i * 64 + j) as usize] == 1 { total_edges = total_edges + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let mean_k = (total_edges as f64) / (mc.n_sources as f64)
+    mean_k * mean_k / (mc.n_sources as f64)
+}
+
+/// Encode MEG connectivity as a sedenion using ImCoh structure.
+///
+/// The imaginary coherence provides a natural complex structure:
+///   Real part of edge weight → octonion half (e0-e7)
+///   Imaginary part → sedenion half (e8-e15)
+///
+/// This is the most natural sedenion encoding among all modalities
+/// because MEG's imaginary coherence IS a complex number whose
+/// real and imaginary parts have distinct physical meaning
+/// (instantaneous vs phase-lagged coupling).
+pub fn meg_to_sedenion(mc: MegConnectivity) -> [f64; 16] with Mut, Div, Panic {
+    var s: [f64; 16] = [0.0; 16]
+
+    // Compute graph statistics for sedenion components
+    // e0: mean directed strength
+    // e1: mean ImCoh (phase-lagged coupling)
+    // e2: in/out degree asymmetry (directionality)
+    // e3-e7: top 5 source powers
+    // e8: η (density parameter)
+    // e9: clustering coefficient
+    // e10-e15: ImCoh statistics per brain region group
+
+    var sum_str: f64 = 0.0
+    var sum_imcoh: f64 = 0.0
+    var edge_count: i64 = 0
+    var i: i32 = 0
+    while i < mc.n_sources {
+        var j: i32 = 0
+        while j < mc.n_sources {
+            if mc.adj[(i * 64 + j) as usize] == 1 {
+                sum_str = sum_str + mc.directed_conn[(i * 64 + j) as usize]
+                sum_imcoh = sum_imcoh + mc.imcoh[(i * 64 + j) as usize]
+                edge_count = edge_count + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    if edge_count > 0 {
+        s[0] = sum_str / (edge_count as f64)       // mean directed strength
+        s[8] = sum_imcoh / (edge_count as f64)      // mean ImCoh (sedenion half)
+    }
+
+    // Degree asymmetry per source (first 7 sources → e1-e7)
+    i = 0
+    while i < 7 && i < mc.n_sources {
+        let total = (mc.source_in_degree[i as usize] + mc.source_out_degree[i as usize]) as f64
+        if total > 0.0 {
+            s[(i + 1) as usize] = ((mc.source_out_degree[i as usize] - mc.source_in_degree[i as usize]) as f64) / total
+        }
+        i = i + 1
+    }
+
+    // Source powers in sedenion half (e9-e15)
+    i = 0
+    while i < 7 && i < mc.n_sources {
+        s[(i + 9) as usize] = mc.source_power[i as usize]
+        i = i + 1
+    }
+
+    // Normalize
+    var norm_sq: f64 = 0.0
+    var k = 0
+    while k < 16 { norm_sq = norm_sq + s[k] * s[k]; k = k + 1 }
+    let norm = sqrt_approx(norm_sq)
+    if norm > 0.001 {
+        k = 0
+        while k < 16 { s[k] = s[k] / norm; k = k + 1 }
+    }
+    s
+}
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 15 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}

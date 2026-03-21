@@ -1,0 +1,190 @@
+//! stdlib/neuro/eeg.sio — EEG Connectivity Pipeline
+//!
+//! Transforms preprocessed EEG data into the Sounio neuroimaging stack:
+//!   EEG coherence/PLV matrix → connectivity graph → ORC + associator + sedenion
+//!
+//! Input: N×N connectivity matrix from preprocessed EEG
+//!        (e.g., MNE-Python → source-space → coherence/PLV/wPLI)
+//!
+//! EEG captures TEMPORAL dynamics that fMRI misses (ms resolution vs s).
+//! The associator field on EEG connectivity measures whether the ORDER
+//! of neural oscillation coupling matters — directly testing whether
+//! cognitive cascades are associative (flexible) or non-associative (rigid).
+//!
+//! Frequency bands and their clinical significance:
+//!   Delta (1-4 Hz):   deep sleep, brain injury markers
+//!   Theta (4-8 Hz):   working memory, emotional processing
+//!   Alpha (8-13 Hz):  resting state, attention gating
+//!   Beta (13-30 Hz):  motor planning, active cognition
+//!   Gamma (30-100 Hz): binding, consciousness, high-level processing
+//!
+//! The multi-band structure maps naturally to the Cayley-Dickson tower:
+//!   5 bands × 2 (real + imaginary coherence) = 10 components
+//!   + 6 inter-band coupling strengths = 16 components = one sedenion
+//!
+//! References:
+//!   Boller et al. (2023): Ricci curvature in aging brain FC
+//!   Sia et al. (2019): ORC community detection (ADHD-200)
+
+/// Standard EEG frequency band indices
+pub fn band_delta() -> i32 { 0 }    // 1-4 Hz
+pub fn band_theta() -> i32 { 1 }    // 4-8 Hz
+pub fn band_alpha() -> i32 { 2 }    // 8-13 Hz
+pub fn band_beta() -> i32 { 3 }     // 13-30 Hz
+pub fn band_gamma() -> i32 { 4 }    // 30-100 Hz
+
+/// EEG connectivity data for one frequency band.
+pub struct EegBandConnectivity {
+    // Coherence matrix (row-major, max 32×32 = 1024)
+    coherence: [f64; 1024],
+    // Phase-locking value matrix
+    plv: [f64; 1024],
+    // Binary adjacency after thresholding
+    adj: [i32; 1024],
+    n_channels: i32,
+    threshold: f64,
+    band_idx: i32,
+    // Band-specific power (per channel, for sedenion encoding)
+    band_power: [f64; 32],
+}
+
+/// Multi-band EEG connectivity: 5 frequency bands.
+///
+/// The sedenion encoding uses:
+///   e0-e4:   mean coherence per band (5 values)
+///   e5-e9:   mean PLV per band (5 values)
+///   e10-e15: inter-band coupling (6 unique pairs from 5 bands: C(5,2)=10,
+///            compressed to 6 strongest by clinical relevance:
+///            theta-alpha, alpha-beta, beta-gamma, theta-gamma,
+///            delta-theta, alpha-gamma)
+pub struct EegMultiBand {
+    bands: [EegBandConnectivity; 5],
+    n_channels: i32,
+    // Inter-band coupling (phase-amplitude coupling / cross-frequency)
+    // Stored as mean coupling strength per pair
+    interband: [f64; 10],    // C(5,2) = 10 unique pairs
+}
+
+/// Create empty single-band EEG connectivity.
+pub fn eeg_band_new(n_ch: i32, band: i32, thresh: f64) -> EegBandConnectivity {
+    EegBandConnectivity {
+        coherence: [0.0; 1024],
+        plv: [0.0; 1024],
+        adj: [0; 1024],
+        n_channels: n_ch,
+        threshold: thresh,
+        band_idx: band,
+        band_power: [0.0; 32],
+    }
+}
+
+/// Set coherence between two EEG channels for a given band.
+pub fn eeg_set_coherence(band: EegBandConnectivity, i: i32, j: i32, coh: f64, plv: f64) -> EegBandConnectivity with Mut, Panic {
+    var b = band
+    if i >= 0 && i < b.n_channels && j >= 0 && j < b.n_channels {
+        b.coherence[(i * 32 + j) as usize] = coh
+        b.coherence[(j * 32 + i) as usize] = coh
+        b.plv[(i * 32 + j) as usize] = plv
+        b.plv[(j * 32 + i) as usize] = plv
+    }
+    b
+}
+
+/// Threshold a single band's coherence matrix.
+pub fn eeg_threshold_band(band: EegBandConnectivity) -> EegBandConnectivity with Mut, Div, Panic {
+    var b = band
+    var i: i32 = 0
+    while i < b.n_channels {
+        var j: i32 = 0
+        while j < b.n_channels {
+            if i != j && b.coherence[(i * 32 + j) as usize] > b.threshold {
+                b.adj[(i * 32 + j) as usize] = 1
+            } else {
+                b.adj[(i * 32 + j) as usize] = 0
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    b
+}
+
+/// Compute η for a single EEG band.
+pub fn eeg_band_eta(band: EegBandConnectivity) -> f64 with Mut, Div, Panic {
+    if band.n_channels < 2 { return 0.0 }
+    var total_deg: i64 = 0
+    var i: i32 = 0
+    while i < band.n_channels {
+        var j: i32 = 0
+        while j < band.n_channels {
+            if band.adj[(i * 32 + j) as usize] == 1 { total_deg = total_deg + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let mk = (total_deg as f64) / (band.n_channels as f64)
+    mk * mk / (band.n_channels as f64)
+}
+
+/// Encode multi-band EEG as a sedenion.
+///
+/// e0-e4:   mean coherence per band (delta, theta, alpha, beta, gamma)
+/// e5-e9:   mean PLV per band
+/// e10-e15: inter-band coupling (top 6 clinically relevant pairs)
+///
+/// This encoding captures both within-band (associative) and
+/// cross-band (potentially non-associative) neural dynamics.
+pub fn eeg_to_sedenion(mb: EegMultiBand) -> [f64; 16] with Mut, Div, Panic {
+    var s: [f64; 16] = [0.0; 16]
+
+    var band: i32 = 0
+    while band < 5 {
+        // Mean coherence for this band
+        var sum_coh: f64 = 0.0
+        var sum_plv: f64 = 0.0
+        var count: i64 = 0
+        let b = mb.bands[band as usize]
+        var i: i32 = 0
+        while i < b.n_channels {
+            var j: i32 = i + 1
+            while j < b.n_channels {
+                sum_coh = sum_coh + b.coherence[(i * 32 + j) as usize]
+                sum_plv = sum_plv + b.plv[(i * 32 + j) as usize]
+                count = count + 1
+                j = j + 1
+            }
+            i = i + 1
+        }
+        if count > 0 {
+            s[band as usize] = sum_coh / (count as f64)
+            s[(band + 5) as usize] = sum_plv / (count as f64)
+        }
+        band = band + 1
+    }
+
+    // Inter-band coupling (first 6 of the 10 pairs)
+    var ib: i32 = 0
+    while ib < 6 && ib < 10 {
+        s[(ib + 10) as usize] = mb.interband[ib as usize]
+        ib = ib + 1
+    }
+
+    // Normalize to unit sedenion
+    var norm_sq: f64 = 0.0
+    var k = 0
+    while k < 16 { norm_sq = norm_sq + s[k] * s[k]; k = k + 1 }
+    let norm = sqrt_approx(norm_sq)
+    if norm > 0.001 {
+        k = 0
+        while k < 16 { s[k] = s[k] / norm; k = k + 1 }
+    }
+    s
+}
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 15 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}

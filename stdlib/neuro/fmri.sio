@@ -1,0 +1,203 @@
+//! stdlib/neuro/fmri.sio — Functional MRI Connectivity Pipeline
+//!
+//! Transforms preprocessed fMRI data into the Sounio neuroimaging stack:
+//!   fMRI correlation matrix → connectivity graph → ORC + associator + sedenion
+//!
+//! Input: N×N Pearson/partial correlation matrix from preprocessed fMRI
+//!        (e.g., fMRIPrep → Schaefer/AAL/CC200 parcellation → time series → corr)
+//!
+//! What Sounio computes (what no other tool does):
+//!   - ORC phase classification (hyperbolic/spherical/euclidean)
+//!   - Octonion associator field (order-dependence of neural cascades)
+//!   - Sedenion encoding (16-component algebraic fingerprint)
+//!   - Zero-divisor proximity (structural degeneracy measure)
+//!
+//! Typical parcellations:
+//!   AAL:  90 ROIs (Tzourio-Mazoyer 2002)
+//!   CC200: 200 ROIs (Craddock 2012) — used in ABIDE-I
+//!   Schaefer: 100/200/400/1000 ROIs (Schaefer 2018)
+//!   Power: 264 ROIs (Power 2011)
+//!
+//! References:
+//!   Agourakis & Gerenutti (2026), Papers 1-3: ORC phase transition theory
+//!   Chatterjee et al. (2022): ORC in ASD (ABIDE-I)
+//!   Boller et al. (2023): ORC in aging brain connectivity
+
+// Max ROIs supported (limited by fixed arrays in Sounio)
+// For CC200: N=200, adjacency = 200×200 = 40000 entries
+// We use 64 ROIs max for the algebraic pipeline (ORC + associator)
+// Full 200-ROI ORC requires the Julia/Python LP solver externally
+
+/// Preprocessed fMRI functional connectivity data.
+///
+/// The correlation matrix is stored as a flat array (row-major, N×N).
+/// Threshold converts continuous correlations to binary adjacency.
+pub struct FmriConnectivity {
+    // Correlation matrix (row-major, max 64×64 = 4096)
+    corr: [f64; 4096],
+    n_rois: i32,
+
+    // Binary adjacency after thresholding
+    adj: [i32; 4096],
+
+    // Threshold used for binarization
+    threshold: f64,
+
+    // Per-ROI metadata
+    roi_strength: [f64; 64],     // sum of correlations per ROI
+    roi_degree: [i32; 64],       // number of suprathreshold connections
+
+    // Subject metadata
+    subject_id: i64,
+    // Diagnostic group: 0=control, 1=ASD, 2=ADHD, 3=MDD, 4=SCZ
+    group: i32,
+    age: f64,
+}
+
+/// Create empty fMRI connectivity struct.
+pub fn fmri_new(n_rois: i32, threshold: f64) -> FmriConnectivity {
+    FmriConnectivity {
+        corr: [0.0; 4096],
+        n_rois: n_rois,
+        adj: [0; 4096],
+        threshold: threshold,
+        roi_strength: [0.0; 64],
+        roi_degree: [0; 64],
+        subject_id: 0,
+        group: 0,
+        age: 0.0,
+    }
+}
+
+/// Set a correlation value between two ROIs.
+pub fn fmri_set_corr(fc: FmriConnectivity, i: i32, j: i32, val: f64) -> FmriConnectivity with Mut, Panic {
+    var f = fc
+    if i >= 0 && i < f.n_rois && j >= 0 && j < f.n_rois {
+        f.corr[(i * 64 + j) as usize] = val
+        f.corr[(j * 64 + i) as usize] = val  // symmetric
+    }
+    f
+}
+
+/// Threshold the correlation matrix to produce binary adjacency.
+///
+/// Edges where |corr(i,j)| > threshold AND i ≠ j are set to 1.
+/// This is the standard approach for fMRI graph construction.
+pub fn fmri_threshold(fc: FmriConnectivity) -> FmriConnectivity with Mut, Div, Panic {
+    var f = fc
+    var i: i32 = 0
+    while i < f.n_rois {
+        var deg: i32 = 0
+        var strength: f64 = 0.0
+        var j: i32 = 0
+        while j < f.n_rois {
+            if i != j {
+                let c = f.corr[(i * 64 + j) as usize]
+                let ac = if c < 0.0 { 0.0 - c } else { c }
+                if ac > f.threshold {
+                    f.adj[(i * 64 + j) as usize] = 1
+                    deg = deg + 1
+                    strength = strength + ac
+                } else {
+                    f.adj[(i * 64 + j) as usize] = 0
+                }
+            }
+            j = j + 1
+        }
+        f.roi_degree[i as usize] = deg
+        f.roi_strength[i as usize] = strength
+        i = i + 1
+    }
+    f
+}
+
+/// Compute the density parameter η = ⟨k⟩²/N.
+///
+/// This single scalar predicts the geometric phase of the brain network
+/// via the phase transition formula η_c(N) = 3.75 − 14.62/√N.
+pub fn fmri_eta(fc: FmriConnectivity) -> f64 with Mut, Div, Panic {
+    if fc.n_rois < 2 { return 0.0 }
+    var total_deg: i64 = 0
+    var i: i32 = 0
+    while i < fc.n_rois {
+        total_deg = total_deg + (fc.roi_degree[i as usize] as i64)
+        i = i + 1
+    }
+    let mean_k = (total_deg as f64) / (fc.n_rois as f64)
+    mean_k * mean_k / (fc.n_rois as f64)
+}
+
+/// Compute the critical density η_c for this parcellation size.
+pub fn fmri_eta_c(fc: FmriConnectivity) -> f64 with Mut, Div, Panic {
+    if fc.n_rois < 2 { return 3.75 }
+    3.75 - 14.62 / sqrt_approx(fc.n_rois as f64)
+}
+
+/// Classify the geometric phase of this brain network.
+///
+/// Returns: 0=DEGENERATE, 1=SPHERICAL, 2=HYPERBOLIC, 3=EUCLIDEAN
+///
+/// Clinical prediction (from Papers 1-3):
+///   ADHD: η > η_c → SPHERICAL (excess short-range connectivity)
+///   ASD:  η near η_c → boundary (local over-connectivity, long-range under)
+///   MDD:  η < η_c, C > C* → HYPERBOLIC (bottlenecked, sparse)
+///   Control: variable (depends on parcellation and threshold)
+pub fn fmri_phase(fc: FmriConnectivity) -> i32 with Mut, Div, Panic {
+    let eta = fmri_eta(fc)
+    let eta_c = fmri_eta_c(fc)
+    let clustering = fmri_clustering(fc)
+    if eta > eta_c { return 1 }         // SPHERICAL
+    if clustering > 0.05 { return 2 }   // HYPERBOLIC
+    return 3                            // EUCLIDEAN
+}
+
+/// Global clustering coefficient of the thresholded brain graph.
+pub fn fmri_clustering(fc: FmriConnectivity) -> f64 with Mut, Div, Panic {
+    var triangles: i64 = 0
+    var triples: i64 = 0
+    var i: i32 = 0
+    while i < fc.n_rois {
+        var j: i32 = i + 1
+        while j < fc.n_rois {
+            if fc.adj[(i * 64 + j) as usize] == 1 {
+                // Count common neighbors
+                var k: i32 = 0
+                while k < fc.n_rois {
+                    if k != i && k != j {
+                        if fc.adj[(i * 64 + k) as usize] == 1 && fc.adj[(j * 64 + k) as usize] == 1 {
+                            triangles = triangles + 1
+                        }
+                        if fc.adj[(i * 64 + k) as usize] == 1 || fc.adj[(j * 64 + k) as usize] == 1 {
+                            triples = triples + 1
+                        }
+                    }
+                    k = k + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if triples > 0 { (triangles as f64) / (triples as f64) } else { 0.0 }
+}
+
+/// Distance to the phase boundary: η_c − η.
+///
+/// Positive = below boundary (hyperbolic side)
+/// Negative = above boundary (spherical side)
+/// Near zero = at the phase transition (critical regime)
+///
+/// Clinical: patients at the boundary may be most susceptible
+/// to geometric phase shifts from treatment or disease progression.
+pub fn fmri_phase_distance(fc: FmriConnectivity) -> f64 with Mut, Div, Panic {
+    fmri_eta_c(fc) - fmri_eta(fc)
+}
+
+// Helper
+fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 15 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
