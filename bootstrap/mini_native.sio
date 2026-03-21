@@ -45,6 +45,37 @@ var PATCH_COUNT: i64 = 0
 var ST: [i64; 2112] = [0; 2112]
 var ST_COUNT: i64 = 0
 
+// Enum registry: flat array, up to 64 enums
+// EN[i*34+0] = name hash
+// EN[i*34+1] = variant count
+// EN[i*34+2..33] = variant name hashes (up to 32 variants)
+var EN: [i64; 2176] = [0; 2176]
+var EN_COUNT: i64 = 0
+var MATCH_ENDS: [i64; 32] = [0; 32]
+
+fn en_find(hash: i64) -> i64 with Panic {
+    var i: i64 = 0
+    while i < EN_COUNT {
+        if EN[(i * 34) as usize] == hash { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// Look up EnumName::Variant → discriminant value
+fn en_variant_value(enum_hash: i64, variant_hash: i64) -> i64 with Panic {
+    let ei = en_find(enum_hash)
+    if ei < 0 { return -1 }
+    let base = ei * 34
+    let vc = EN[(base + 1) as usize]
+    var vi: i64 = 0
+    while vi < vc {
+        if EN[(base + 2 + vi) as usize] == variant_hash { return vi }
+        vi = vi + 1
+    }
+    return -1
+}
+
 fn st_find(hash: i64) -> i64 with Panic {
     var i: i64 = 0
     while i < ST_COUNT {
@@ -209,6 +240,8 @@ fn lex_all() with Mut, Panic {
         if c == 33 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 22; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
         if c == 60 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 25; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
         if c == 62 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 26; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
+        if c == 58 && p + 1 < SRC_LEN && sb(p + 1) == 58 { TK[TC as usize] = 51; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
+        if c == 61 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 52; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
         if c == 38 && p + 1 < SRC_LEN && sb(p + 1) == 38 { TK[TC as usize] = 30; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
         if c == 124 && p + 1 < SRC_LEN && sb(p + 1) == 124 { TK[TC as usize] = 31; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
         if c == 62 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 39; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
@@ -534,6 +567,20 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
         EP = EP + 1
+        // Enum::Variant — look up discriminant
+        if TK[EP as usize] == 51 {
+            EP = EP + 1  // skip ::
+            let vns = TS[EP as usize]
+            let vne = TE[EP as usize]
+            EP = EP + 1  // skip variant name
+            let eh = gl_name_hash(ns, ne)
+            let vh = gl_name_hash(vns, vne)
+            let disc = en_variant_value(eh, vh)
+            if disc >= 0 {
+                em(0x48); em(0xb8); em64(disc)
+            } else { em(0x31); em(0xc0) }
+            return
+        }
         // Function call: ident(args)
         if TK[EP as usize] == 6 {
             // Check for print("str") or print(variable)
@@ -1086,6 +1133,65 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
+    // match expr { pattern => body, ... }
+    // 48 = match keyword
+    if k == 48 {
+        EP = EP + 1
+        compile_or()  // scrutinee in rax
+        // Store scrutinee in a local var (not stack — return inside arm would break stack)
+        let match_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(match_slot)
+        if TK[EP as usize] == 8 { EP = EP + 1 }  // skip {
+        var arm_count: i64 = 0
+        while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+            var is_wildcard: i64 = 0
+            var disc: i64 = -1
+            if TK[EP as usize] == 3 {
+                let pns = TS[EP as usize]
+                let pne = TE[EP as usize]
+                if pne - pns == 1 && sb(pns) == 95 {
+                    is_wildcard = 1; EP = EP + 1
+                } else if TK[(EP + 1) as usize] == 51 {
+                    let eh = gl_name_hash(pns, pne)
+                    EP = EP + 2
+                    let vh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                    EP = EP + 1
+                    disc = en_variant_value(eh, vh)
+                } else { EP = EP + 1 }
+            } else if TK[EP as usize] == 4 {
+                disc = TV[EP as usize]; EP = EP + 1
+            } else { EP = EP + 1 }
+            if disc >= 0 {
+                // Compare scrutinee with discriminant
+                emit_load_var(match_slot)
+                em(0x50)
+                em(0x48); em(0xb8); em64(disc)
+                em(0x59)
+                em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+                em(0x0f); em(0x85); let skip_patch = CL; em32(0)  // jne skip
+                if TK[EP as usize] == 52 { EP = EP + 1 }  // skip =>
+                if TK[EP as usize] == 8 { EP = EP + 1 }
+                while TK[EP as usize] != 9 && TK[EP as usize] != 28 && TK[EP as usize] != 0 { compile_stmt() }
+                if TK[EP as usize] == 9 { EP = EP + 1 }
+                em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
+                arm_count = arm_count + 1
+                patch32(skip_patch, CL)
+            }
+            if is_wildcard == 1 {
+                if TK[EP as usize] == 52 { EP = EP + 1 }
+                if TK[EP as usize] == 8 { EP = EP + 1 }
+                while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                if TK[EP as usize] == 9 { EP = EP + 1 }
+            }
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+        }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        var ai: i64 = 0
+        while ai < arm_count { patch32(MATCH_ENDS[ai as usize], CL); ai = ai + 1 }
+        return
+    }
+
     // Expression statement
     compile_or()
 }
@@ -1135,6 +1241,36 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 if TK[p as usize] == 9 { p = p + 1 }
                 continue
             }
+        }
+        p = p + 1
+    }
+    // Also scan enums in the same pass
+    p = 0
+    EN_COUNT = 0
+    while p < TC {
+        if TK[p as usize] == 47 {
+            p = p + 1  // skip 'enum'
+            let en_ns = TS[p as usize]
+            let en_ne = TE[p as usize]
+            let eh = gl_name_hash(en_ns, en_ne)
+            let ei = EN_COUNT
+            let base = ei * 34
+            EN[base as usize] = eh
+            p = p + 1  // skip name
+            if TK[p as usize] == 8 { p = p + 1 }  // skip {
+            var vc: i64 = 0
+            while TK[p as usize] != 9 && TK[p as usize] != 0 {
+                if TK[p as usize] == 3 {
+                    let vh = gl_name_hash(TS[p as usize], TE[p as usize])
+                    EN[(base + 2 + vc) as usize] = vh
+                    vc = vc + 1
+                }
+                p = p + 1
+            }
+            EN[(base + 1) as usize] = vc
+            EN_COUNT = EN_COUNT + 1
+            if TK[p as usize] == 9 { p = p + 1 }
+            continue
         }
         p = p + 1
     }
