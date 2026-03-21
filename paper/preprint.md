@@ -4,7 +4,7 @@
 
 ## Abstract
 
-We introduce *epistemic shadow lanes*, a compiler technique that automatically generates GUM-compliant (JCGM 100:2008) measurement uncertainty propagation alongside every arithmetic instruction in GPU kernel code. For each value register in emitted PTX, the compiler produces three shadow registers — uncertainty variance, validity predicate, and provenance hash — that implement the law of propagation of uncertainty without programmer intervention. We present five GPU-specific optimizations that exploit epistemic metadata: (1) warp-level ballot voting on validity predicates to gate dual-path execution, (2) Shannon entropy of the uncertainty distribution for kernel variant selection, (3) provenance-aware topological DAG scheduling with automatic stream parallelism, (4) speculative skip guards for refinement kernels below an uncertainty threshold, and (5) provenance-weighted kernel fusion scoring. Across a pharmacokinetic case study involving four noisy sensors, the technique eliminates approximately 190 lines of manual variance mathematics per CUDA kernel while maintaining 2-3x overhead — compared to 10,000x for Monte Carlo methods. We situate this work against Enzyme's shadow registers for automatic differentiation and Uncertain\<T\>'s first-order uncertain types, arguing that GUM variance propagation through GPU tensor cores occupies an unaddressed point in the design space.
+We present a GPU compiler transformation that generates first-order GUM-style (JCGM 100:2008) uncertainty propagation alongside every arithmetic instruction in GPU kernel code, with optional correlated-input and second-order extensions. For each value register in emitted PTX, the compiler produces three shadow registers — uncertainty variance, validity predicate, and provenance bitset — that implement the law of propagation of uncertainty without programmer intervention. We study whether epistemic metadata can guide five GPU-specific execution-time optimizations without violating a specified uncertainty budget: (1) warp-level ballot voting on validity predicates to gate budget-bounded dual-path execution, (2) Shannon entropy of the uncertainty distribution for kernel variant selection, (3) provenance-aware topological DAG scheduling with automatic stream parallelism, (4) speculative guards for refinement kernels below an uncertainty threshold, and (5) provenance-weighted kernel fusion scoring. Across a pharmacokinetic case study involving four noisy sensors, the technique eliminates approximately 190 lines of manual variance mathematics per CUDA kernel. Overhead is characterized by an instruction count model (Section 3.3); hardware benchmarks are in progress. We situate this work against Enzyme's shadow registers for automatic differentiation and Uncertain\<T\>'s first-order uncertain types, arguing that GUM variance propagation through GPU tensor cores occupies an unaddressed point in the design space.
 
 ---
 
@@ -34,15 +34,15 @@ No prior work generates GUM-compliant variance propagation at the compiler level
 
 We present five techniques, implemented in the Sounio compiler, that are — to our knowledge — novel:
 
-1. **Epistemic shadow lanes** (Section 3): a compiler pass that, for each arithmetic instruction on a value register `%r_val`, emits GUM variance propagation on a shadow register `%r_eps`, validity conjunction on `%p_valid`, and provenance XOR-merge on `%r_prov`.
+1. **Epistemic shadow lanes** (Section 3): a compiler pass that, for each arithmetic instruction on a value register `%r_val`, emits GUM variance propagation on a shadow register `%r_eps`, validity conjunction on `%p_valid`, and provenance OR-merge on `%r_prov`. Provenance uses bitwise OR (monotonic union) — not XOR — ensuring idempotent accumulation ($\text{prov}(a) \mathbin{|} \text{prov}(a) = \text{prov}(a)$, unlike XOR which self-cancels).
 
-2. **Warp-vote epistemic fast-path** (Section 4.1): dual-path PTX where `vote.sync.ballot` on the validity predicate gates whether the warp executes full shadow propagation or a value-only fast path. No prior system uses warp-level ballot voting on epistemic predicates.
+2. **Warp-vote epistemic fast-path** (Section 4.1): dual-path PTX where `vote.sync.ballot` on the validity predicate gates whether the warp executes full shadow propagation or a *budget-bounded* fast path that computes conservative uncertainty upper bounds. No prior system uses warp-level ballot voting on epistemic predicates. Critically, the fast path still propagates uncertainty — it does not skip shadow computation entirely, because small uncertainty $\neq$ zero uncertainty.
 
-3. **Entropy-gated kernel dispatch** (Section 4.2): the host computes Shannon entropy $H(\epsilon)$ of the input uncertainty distribution and selects between kernel variants. No prior GPU compiler uses information-theoretic measures of data uncertainty for dispatch decisions.
+3. **Entropy-gated kernel dispatch** (Section 4.2): the host computes Shannon entropy $H(\epsilon)$ of the input uncertainty distribution and selects between kernel variants. No prior GPU compiler uses information-theoretic measures of data uncertainty for dispatch decisions. We note that entropy thresholds are currently calibrated for raw epsilon in $[0, 1]$; normalization to relative uncertainty ($\epsilon / |x|$) for unit-independence is straightforward but not yet implemented.
 
-4. **Provenance-aware DAG scheduling** (Section 4.3): kernels with disjoint provenance tags (determined by XOR-hash analysis) are assigned to separate CUDA streams. The compiler emits structured metadata; the host glue parses it and generates multi-stream launch code.
+4. **Provenance-aware DAG scheduling** (Section 4.3): kernels with disjoint provenance tags (determined by bitset intersection) are assigned to separate CUDA streams. The compiler emits structured metadata; the host glue parses it and generates multi-stream launch code.
 
-5. **Speculative epistemic execution** (Section 4.4): uncertainty-threshold guards that conditionally skip refinement kernels when aggregate uncertainty is below a configurable $\epsilon$.
+5. **Speculative epistemic execution** (Section 4.4): uncertainty-threshold guards that conditionally defer refinement kernels when aggregate uncertainty is below a configurable $\epsilon$. The threshold must be tied to a formal uncertainty budget to be scientifically meaningful — an ad hoc runtime convention is insufficient.
 
 ---
 
@@ -76,7 +76,7 @@ For each value register `%r_val` in the GpuKernelIr, the compiler allocates thre
 %r_val   — point estimate (the measurand)
 %r_eps   — variance u²(val)
 %p_valid — validity predicate (true if uncertainty is well-defined)
-%r_prov  — 64-bit XOR provenance hash
+%r_prov  — 64-bit OR provenance bitset (monotonic union)
 ```
 
 The shadow registers are allocated during the HLIR-to-GpuKernelIr lowering pass and propagated through all subsequent optimization passes (constant folding, dead code elimination, register allocation).
@@ -99,11 +99,11 @@ add.f64  %r_c_eps, %r_t1, %r_t2;
 // Validity conjunction
 and.pred  %p_c_valid, %p_a_valid, %p_b_valid;
 
-// Provenance merge (XOR is associative, commutative, self-inverse)
-xor.b64  %r_c_prov, %r_a_prov, %r_b_prov;
+// Provenance merge (OR is associative, commutative, idempotent)
+or.b64   %r_c_prov, %r_a_prov, %r_b_prov;
 ```
 
-A single source multiplication becomes 8 PTX instructions (1 value + 5 variance + 1 validity + 1 provenance). This is the source of the 2-3x overhead: the shadow computation is roughly twice the cost of the value computation for multiplicative operations, and less for additive operations (which need only 1 shadow add).
+A single source multiplication becomes 8 PTX instructions (1 value + 5 variance + 1 validity + 1 provenance). The shadow computation adds 7 instructions per multiply, 3 per add, and 9 per divide — a 4–10x instruction count overhead depending on the operation mix. Wall-clock overhead is expected to be lower than the instruction ratio due to instruction-level parallelism and operand reuse, but this must be verified with hardware benchmarks (Section 7.1).
 
 ### 3.3 Overhead Model
 
@@ -119,9 +119,9 @@ The same shadow lane logic targets three backends:
 
 | Backend | Shadow precision | Tensor core support | Provenance |
 |---------|-----------------|--------------------|-----------|
-| PTX (NVIDIA CUDA) | f64 native | WMMA m16n8k16 | 64-bit XOR |
-| Metal (Apple MSL) | f32 (no native f64) | N/A | 32-bit XOR |
-| SPIR-V (Vulkan) | f64 via extension | N/A | 64-bit XOR |
+| PTX (NVIDIA CUDA) | f64 native | WMMA m16n8k16 | 64-bit OR |
+| Metal (Apple MSL) | f32 (no native f64) | N/A | 32-bit OR |
+| SPIR-V (Vulkan) | f64 via extension | N/A | 64-bit OR |
 
 ---
 
@@ -129,7 +129,7 @@ The same shadow lane logic targets three backends:
 
 ### 4.1 Warp-Vote Epistemic Fast-Path
 
-**Observation.** In many scientific workloads, large regions of data are well-characterized (high confidence, low uncertainty). Only boundary or anomalous regions require full uncertainty tracking. If all 32 lanes in a warp have valid data with uncertainty below a threshold, the shadow computation can be skipped entirely.
+**Observation.** In many scientific workloads, large regions of data are well-characterized (high confidence, low uncertainty). Only boundary or anomalous regions require full uncertainty tracking. If all 32 lanes in a warp have valid data with uncertainty below a threshold, the shadow computation can be performed with reduced precision within a formal uncertainty budget.
 
 **Mechanism.** The compiler generates dual-path kernels:
 
@@ -151,16 +151,19 @@ FULL_PATH:
     bra MERGE;
 
 FAST_PATH:
-    // 1 instruction per multiply (value only)
+    // Budget-bounded uncertainty propagation
+    // eps_out = max(eps_a, eps_b) * 2.0 (conservative upper bound)
+    // Validity: AND of inputs (preserved)
+    // Provenance: OR of inputs (preserved)
     ...
 
 MERGE:
     // Reconvergence
 ```
 
-The fast path achieves approximately 1.3-1.5x speedup over the full path for well-characterized data. The ballot overhead (2 instructions per check point) is amortized over the loop body.
+**Semantic invariant.** The fast path does *not* skip shadow computation — small uncertainty is not zero uncertainty. Instead, it computes a conservative upper bound on the output variance ($\epsilon_{\text{out}} \leq 2 \max(\epsilon_a, \epsilon_b)$ for binary operations), which is a valid GUM-compliant overapproximation. This costs approximately 30% of full shadow overhead (the `budget_overhead` parameter in the divergence cost model), yielding a predicted speedup range of 1.3–1.7x depending on divergence percentage. The ballot overhead (2 instructions per check point) is amortized over the loop body.
 
-**Novelty claim.** `vote.sync.ballot` is a standard CUDA primitive used for reductions, stream compaction, and divergence management. Using it to evaluate *epistemic validity predicates* — "are all lanes' uncertainty values below a threshold?" — to gate *dual-path kernel execution* is, to our knowledge, a novel application.
+**Novelty claim.** `vote.sync.ballot` is a standard CUDA primitive used for reductions, stream compaction, and divergence management. Using it to evaluate *epistemic validity predicates* — "are all lanes' uncertainty values below a threshold?" — to gate *budget-bounded dual-path kernel execution* is, to our knowledge, a novel application.
 
 ### 4.2 Entropy-Gated Kernel Dispatch
 
@@ -241,23 +244,23 @@ We compare the code required to compute drug concentration with GUM uncertainty 
 
 ### 5.2 Overhead Comparison
 
-| Method | Overhead factor | GPU? | Analytical? |
-|--------|----------------|------|-------------|
-| Sounio shadow lanes | 2-3x | Yes | Yes (GUM) |
-| Manual CUDA C++ | 2-3x | Yes | Yes (if correct) |
-| Python `uncertainties` [4] | 1,400x | No | Yes |
-| Julia `Measurements.jl` [5] | 50-1,500x | No | Yes |
-| Monte Carlo ($10^4$ samples) | 10,000x | Yes | No |
-| Monte Carlo ($10^6$ samples) | 1,000,000x | Yes | No |
+| Method | Overhead factor | GPU? | Analytical? | Source |
+|--------|----------------|------|-------------|--------|
+| Sounio shadow lanes | 4–10x instr. count (model) | Yes | Yes (GUM) | Section 3.3 |
+| Manual CUDA C++ | Same (if correct) | Yes | Yes | Manual |
+| Python `uncertainties` [4] | ~1,400x (reported) | No | Yes | Issue tracker [6] |
+| Julia `Measurements.jl` [5] | ~50–1,500x (reported) | No | Yes | Issue tracker [7] |
+| Monte Carlo ($10^4$ samples) | $\sim$10,000x | Yes | No | By construction |
+| Monte Carlo ($10^6$ samples) | $\sim$1,000,000x | Yes | No | By construction |
 
-The 2-3x overhead of shadow lanes is within the range that scientific users routinely accept for debugging builds, assertions, or profiling instrumentation. Unlike Monte Carlo, it provides exact (first-order) results in a single pass.
+**Important caveats.** The shadow lane overhead (4–10x instruction count depending on operation mix) is a *model prediction* based on instruction counting (Section 3.3). Wall-clock overhead depends on instruction-level parallelism, register pressure, occupancy, and memory latency hiding — factors not captured by the instruction model. Hardware benchmarks are in progress (Section 7.1). The overheads reported for `uncertainties` and `Measurements.jl` come from user-filed issue reports, not controlled benchmarks; we cite them as motivation, not as rigorous comparisons. Unlike Monte Carlo, analytical propagation provides exact first-order results in a single pass.
 
 ### 5.3 Correctness
 
 The implementation passes 22 test cases verifying:
 
 - GUM algebraic properties: commutativity, scaling identity, quadrature, non-negativity
-- Provenance properties: XOR commutativity, associativity, bit-tagging
+- Provenance properties: OR idempotency, commutativity, associativity, bit-tagging
 - Sensor fusion: weighted mean uncertainty reduction below best individual source
 - Entropy dispatch: correct variant selection for concentrated vs. spread distributions
 - Per-module self-tests: 10/10 for each novelty module (fusion, speculative, DAG, warp-vote, entropy)
@@ -292,6 +295,8 @@ $$u^2(y) = (f'(x))^2 \cdot u^2(x) + \tfrac{1}{2} (f''(x))^2 \cdot u^4(x)$$
 
 A curvature threshold gates activation: the correction is applied only when $|f''(x)| \cdot u^2(x)$ exceeds a configurable tolerance, avoiding unnecessary computation for near-linear operations. For the benchmark $y = x^2$ at $x = 3.0, u(x) = 0.1$: the first-order variance is 0.36, the Hessian correction is 0.0002 (0.056% improvement), and the combined variance is 0.3602 — matching the analytical second-order Taylor expansion.
 
+**Assumption.** The second-order correction follows GUM Section E.3.2 and is valid under the assumption that input uncertainties are approximately normally distributed. For non-Gaussian inputs (highly skewed, multimodal, or heavy-tailed distributions), the Hessian term provides a curvature-aware *approximation* but not a rigorous statistical bound. Users with non-Gaussian measurement models should verify distributional assumptions or fall back to Monte Carlo propagation per GUM Supplement 1 (JCGM 101:2008) [18].
+
 **Covariance matrix GPU propagation (resolved).** The compiler now supports correlated inputs via an upper-triangular covariance shadow structure in shared memory. For $N$ correlated variables, the full GUM Eq. 13 propagation is:
 
 $$u^2(y) = \sum_i \left(\frac{\partial f}{\partial x_i}\right)^2 u^2(x_i) + 2 \sum_{i < j} \frac{\partial f}{\partial x_i} \frac{\partial f}{\partial x_j} u(x_i, x_j)$$
@@ -304,9 +309,15 @@ Storage is upper-triangular: $N(N+1)/2$ entries, capped at $N = 8$ variables (36
 - *Ballot overhead*: $P_b = n_b \cdot c_b / C_k$ where $n_b$ = number of ballots, $c_b$ = ballot cost in cycles (~2 on SM 8.x), $C_k$ = typical kernel cycles
 - *Reconvergence cost*: $P_r = L \cdot d/100 \cdot 0.01$ where $L$ = instruction distance between diverge and reconverge points
 
-The combined penalty $P = P_s + P_b + P_r$ feeds into a speedup estimator: for shadow lane overhead of 2.0x and 10% divergence, the predicted speedup is approximately 1.7x. The model populates the `estimated_speedup` field in `WarpVotePlan`, enabling cost-aware decisions about whether to apply the dual-path optimization.
+The combined penalty $P = P_s + P_b + P_r$ feeds into a speedup estimator. With budget-bounded fast-path overhead of 0.3x (30% of full shadow cost) and 10% divergence, the predicted speedup is approximately 1.5x. The model populates the `estimated_speedup` field in `WarpVotePlan`, enabling cost-aware decisions about whether to apply the dual-path optimization. We emphasize that these are *model predictions* based on instruction counting; actual speedup depends on register pressure, occupancy, and memory access patterns that require hardware measurement.
 
-### 7.1 Remaining Future Work
+### 7.1 Open Limitations
+
+**Validity predicate incompleteness.** The current validity lane propagates inherited validity via `and.pred` but does not check all operational domain constraints. Division already guards against near-zero denominators, but sqrt does not yet verify non-negativity of the radicand. A complete validity semantics would require per-operation domain predicates (e.g., $a \geq 0$ for $\sqrt{a}$, $a > 0$ for $\ln a$). The current validity predicate means "all ancestors were marked valid," not "the GUM computation is well-defined for this specific operation." This is a known gap.
+
+**Entropy dispatch scale-dependence.** The Shannon entropy thresholds for kernel variant selection are calibrated for raw epsilon values in $[0, 1]$. For inputs with different scales or physical units, the entropy values shift, potentially causing incorrect dispatch decisions. The correct fix is normalization to relative uncertainty ($\epsilon / |x|$) before histogramming, which we have not yet implemented.
+
+### 7.2 Remaining Future Work
 
 **Hardware benchmarks.** This preprint reports structural correctness and programmer effort reduction. Wall-clock benchmarks on NVIDIA Ampere (A5000, sm_86) and Ada Lovelace (L4, RTX 4000 Ada, sm_89) hardware are in progress and will be reported in the full paper.
 
