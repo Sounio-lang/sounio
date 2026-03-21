@@ -9,6 +9,16 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.preprint
 
 # Epistemic Shadow Lanes: Compiler-Generated Uncertainty Propagation for GPU Kernels
 
+**Demetrios C. Agourakis**
+
+Biomaterials and Regenerative Medicine Post-Graduate Program,
+Pontifícia Universidade Católica de São Paulo (PUC-SP), Sorocaba, SP, Brazil
+Faculdade São Leopoldo Mandic, Campinas, SP, Brazil
+
+D.C.A. ORCID: 0000-0002-8596-5097
+
+March 2026
+
 ---
 
 ## Abstract
