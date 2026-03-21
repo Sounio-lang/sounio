@@ -6,13 +6,15 @@
 
 ## Abstract
 
-**Purpose** — Second-order cybernetics has developed a rich theoretical vocabulary over seven decades, yet lacks a computational medium in which its core commitments can be expressed, composed, and tested. This paper presents an executable compositional formalization that integrates nine foundational frameworks into a single recursive architecture.
+**Purpose** — Second-order cybernetics lacks a shared computational medium in which its frameworks can be jointly formalized, composed, and tested. This paper presents an executable formalization integrating nine foundational theories into a single recursive architecture.
 
-**Design/methodology/approach** — Nine theory modules and one composition module in the Sounio programming language implement Spencer-Brown's Laws of Form, von Foerster's eigenform theory, observer-inclusion, Maturana and Varela's autopoiesis, Ashby's Law of Requisite Variety, structural coupling, Pask's conversation theory, Bateson's learning levels, and Maturana's languaging. Seven computable bridge functions wire these into a closed recursive loop. Structural invariants are verified through property-based testing across multiple parameterizations.
+**Design/methodology/approach** — Ten modules in the Sounio programming language implement Spencer-Brown's Laws of Form, von Foerster's eigenform theory, observer-inclusion, autopoiesis, Ashby's requisite variety, structural coupling, Pask's conversation theory, Bateson's learning levels, and Maturana's languaging. Seven bridge functions wire these into a closed recursive loop. Structural invariants are verified through property-based testing.
 
-**Findings** — All nine theories produce structurally consistent outputs when executed. The theories compose into one closed loop where each step produces inputs for the next. The system can observe itself, with measurable cost: observer drift increases monotonically with recursion depth. Five formal propositions are stated and computationally verified.
+**Findings** — All nine theories produce structurally consistent outputs. The theories compose into one closed loop where each step produces inputs for the next. The system supports instrumental self-observation with measurable cost: observer drift increases monotonically with recursion depth. Five formal propositions are computationally verified.
 
-**Originality/value** — Prior software traditions exist for individual frameworks, notably computational autopoiesis (McMullin, 2004) and Pask's THOUGHTSTICKER (Pangaro, 1987). To our knowledge, no prior work has unified nine second-order frameworks into a single recursive executable architecture with explicit observer-cost accounting and cross-module invariant testing. The bridges between frameworks are classified by epistemic status (canonical formalization, operative hypothesis, or interpretive mapping), making theoretical disagreements computationally testable.
+**Research limitations/implications** — The modules formalize mathematical cores, not full biological or social dynamics. Scalar values replace Pask's procedural representations; fixed-size arrays constrain practical scale.
+
+**Originality/value** — Prior traditions exist for individual frameworks (McMullin, 2004; Pangaro, 1987). No prior work has unified nine second-order frameworks into a single recursive executable architecture with explicit observer-cost accounting and cross-module invariant testing. Bridges are classified by epistemic status (canonical, operative hypothesis, or interpretive), making theoretical disagreements computationally testable.
 
 **Keywords:** second-order cybernetics, autopoiesis, eigenform, executable theory, recursive composition
 
@@ -20,9 +22,9 @@
 
 ## 1. Introduction
 
-Second-order cybernetics — the cybernetics of observing systems rather than observed systems (von Foerster, 1979) — has developed a rich theoretical vocabulary over seven decades. Its core commitments are well-articulated: observation is never passive (von Foerster, 1981); systems are self-producing (Maturana and Varela, 1980); understanding arises through dialogue (Pask, 1976); regulation requires sufficient internal complexity (Ashby, 1956). What second-order cybernetics has conspicuously lacked is a *computational medium* in which these commitments can be expressed, composed, and tested.
+Second-order cybernetics — the cybernetics of observing systems rather than observed systems (von Foerster, 1979) — has developed a rich theoretical vocabulary over seven decades. Its core commitments are well-articulated: observation is never passive (von Foerster, 1981); systems are self-producing (Maturana and Varela, 1980); understanding arises through dialogue (Pask, 1976); regulation requires sufficient internal complexity (Ashby, 1956). What second-order cybernetics has lacked is a shared *computational medium* in which its major frameworks can be jointly formalized, recursively composed, and comparatively tested.
 
-The field's primary modes of discourse remain natural language, hand-drawn diagrams, and verbal argument. When two theorists disagree about whether Pask's "conversation" is a special case of Maturana's "structural coupling," they argue from definitions. When a practitioner asks whether an organizational intervention has "requisite variety," they estimate qualitatively. There is no executable artifact that can be run to produce a numerical answer.
+The field's primary modes of discourse remain natural language, hand-drawn diagrams, and verbal argument. When two theorists disagree about whether Pask's "conversation" is a special case of Maturana's "structural coupling," they argue from definitions. When a practitioner asks whether an organizational intervention has "requisite variety," they estimate qualitatively. While executable systems exist for individual traditions (see Section 6), there is no widely adopted unified framework that composes these traditions into a single recursive architecture.
 
 This paper fills that gap. We present a library of ten modules in the Sounio programming language that implements nine foundational theories of second-order cybernetics as executable code. Each module is individually testable (type-checks, runs, produces correct values). More importantly, the modules *compose*: a tenth module wires the nine theories into one recursive loop where each theory produces inputs for the next, and the entire system can observe itself.
 
@@ -127,7 +129,7 @@ Our `AutopoieticSystem` stores production relations in a `relations: [i64; 256]`
 
 **Perturbation.** `perturb(sys, value, variance)` distributes environmental perturbation across active components, scaled by boundary permeability. Critically, perturbation affects *structure* (component values and variances) but never *organization* (the relations matrix). This is the formal distinction between structure and organization that Maturana and Varela insisted upon.
 
-**Verification.** A circular network 0→1→2→0 returns `is_alive = true`. A linear chain 0→1→2 (no cycle) returns `is_alive = false`. Deactivating a node in the circular network correctly returns `is_alive = false`. This is, to our knowledge, the first implementation that computationally verifies organizational closure via graph cycle detection.
+**Verification.** A circular network 0→1→2→0 returns `is_alive = true`. A linear chain 0→1→2 (no cycle) returns `is_alive = false`. Deactivating a node in the circular network correctly returns `is_alive = false`. This appears to be one of the first explicit graph-theoretic operationalizations of organizational closure via directed-cycle detection.
 
 ### 2.5 Law of Requisite Variety
 
@@ -207,7 +209,7 @@ Our `LanguagingPair` implements this with three mechanisms:
 
 ## 3. The Composition Layer: One Recursive Structure
 
-The tenth module, `second_order.sio`, bridges the nine theories into a single recursive loop. The loop contains nine transitions; seven are realized as explicit bridge functions (Table 2). The remaining two transitions — Distinction → Autopoiesis and Coupling → Conversation — are realized by the test harness passing outputs between modules, not by dedicated bridge functions, because the type transformation is trivial (the eigenform's value initializes the autopoietic components; the coupling's congruence is compared alongside the conversation's agreement).
+The tenth module, `second_order.sio`, bridges the nine theories into a single recursive loop. The loop contains nine transitions; seven are realized as explicit bridge functions (Table 2). The remaining two transitions — Distinction → Autopoiesis and Languaging → Observer — are passed directly by the test harness rather than dedicated bridge functions, because their type handoffs are trivial: the eigenform's value initializes the autopoietic component states, and the languaging domain stability feeds back into the observer's next measurement cycle.
 
 | Bridge | From → To | Function | Mechanism |
 |--------|-----------|----------|-----------|
@@ -472,7 +474,7 @@ These identifications are falsifiable. If a theorist disagrees that eigenform co
 
 ### 7.2.1 Formal Propositions
 
-We state five propositions that the implementation satisfies. These are modest formal claims, verified computationally across the test suites.
+The test suite corroborates the following five propositions under the library's semantics. These are modest formal claims about the implementation's structural behavior, not theorems about the external world.
 
 **Proposition 1** (Organizational closure). *`check_closure(sys)` returns true if and only if the active-component subgraph of `sys.relations` contains at least one directed cycle.*
 
