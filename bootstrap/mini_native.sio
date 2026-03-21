@@ -508,6 +508,36 @@ fn compile_primary() with IO, Mut, Panic, Div {
     if k == 36 { em(0x31); em(0xc0); EP = EP + 1; return }
     // Parenthesized
     if k == 6 { EP = EP + 1; compile_or(); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+    // Address-of: &ident → lea rax, [rbp - 8*slot] or mov rax, bss_addr
+    if k == 44 {
+        EP = EP + 1
+        // Skip ! in &! (exclusive ref — same codegen as shared ref)
+        if TK[EP as usize] == 32 { EP = EP + 1 }
+        let rns = TS[EP as usize]
+        let rne = TE[EP as usize]
+        EP = EP + 1
+        let slot = var_find(rns, rne)
+        if slot >= 0 {
+            // lea rax, [rbp - 8*slot]
+            let off = 0 - slot * 8
+            em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
+            em32(off)
+        } else {
+            let gi = gl_find(rns, rne)
+            if gi >= 0 {
+                let addr = GL_BSS_BASE + GL_OFF[gi as usize]
+                em(0x48); em(0xb8); em64(addr)  // mov rax, bss_addr
+            } else { em(0x31); em(0xc0) }
+        }
+        return
+    }
+    // Dereference: *expr → compile expr, then load from pointer
+    if k == 19 {
+        EP = EP + 1
+        compile_primary()
+        em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+        return
+    }
     // Unary minus
     if k == 18 {
         EP = EP + 1
