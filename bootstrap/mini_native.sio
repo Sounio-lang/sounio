@@ -38,6 +38,37 @@ var PATCH_OFF: [i64; 4096] = [0; 4096]
 var PATCH_FN: [i64; 4096] = [0; 4096]
 var PATCH_COUNT: i64 = 0
 
+// Struct registry: flat array, up to 32 structs
+// ST[i*66+0] = name hash
+// ST[i*66+1] = field count
+// ST[i*66+2..65] = field name hashes (up to 64 fields)
+var ST: [i64; 2112] = [0; 2112]
+var ST_COUNT: i64 = 0
+
+fn st_find(hash: i64) -> i64 with Panic {
+    var i: i64 = 0
+    while i < ST_COUNT {
+        if ST[(i * 66) as usize] == hash { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn st_field_offset(si: i64, field_hash: i64) -> i64 with Panic {
+    let base = si * 66
+    let fc = ST[(base + 1) as usize]
+    var fi: i64 = 0
+    while fi < fc {
+        if ST[(base + 2 + fi) as usize] == field_hash { return fi * 8 }
+        fi = fi + 1
+    }
+    return -1
+}
+
+fn st_total_size(si: i64) -> i64 with Panic {
+    return ST[(si * 66 + 1) as usize] * 8
+}
+
 // Global variable table: flat array, 4 fields per entry [hash, offset, esiz, alen]
 var GL: [i64; 256] = [0; 256]
 var GL_COUNT: i64 = 0
@@ -165,6 +196,11 @@ fn lex_all() with Mut, Panic {
             if src_match(s, l, "false") { k = 36 }
             if src_match(s, l, "as") { k = 37 }
             if src_match(s, l, "with") { k = 38 }
+            if src_match(s, l, "struct") { k = 46 }
+            if src_match(s, l, "enum") { k = 47 }
+            if src_match(s, l, "match") { k = 48 }
+            if src_match(s, l, "pub") { k = 49 }
+            if src_match(s, l, "linear") { k = 49 }
             TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TC = TC + 1; continue
         }
         // Two-char operators
@@ -198,6 +234,7 @@ fn lex_all() with Mut, Panic {
         if c == 58 { TK[TC as usize] = 43; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
         if c == 38 { TK[TC as usize] = 44; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
         if c == 124 { TK[TC as usize] = 45; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
+        if c == 46 { TK[TC as usize] = 50; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
         p = p + 1
     }
     TK[TC as usize] = 0; TC = TC + 1
@@ -605,11 +642,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
-            if argc >= 5 { em(0x41); em(0x58) }
-            if argc >= 4 { em(0x59) }
-            if argc >= 3 { em(0x5a) }
-            if argc >= 2 { em(0x5e) }
-            if argc >= 1 { em(0x5f) }
+            // Pop args into registers (reverse order). Params 7+ stay on stack.
+            // Stack currently has [arg1, arg2, ..., argN] (argN on top)
+            // Pop into registers for first 6, leave rest on stack for callee
+            if argc >= 6 { em(0x41); em(0x59) }   // pop r9  (arg 6)
+            if argc >= 5 { em(0x41); em(0x58) }   // pop r8  (arg 5)
+            if argc >= 4 { em(0x59) }               // pop rcx (arg 4)
+            if argc >= 3 { em(0x5a) }               // pop rdx (arg 3)
+            if argc >= 2 { em(0x5e) }               // pop rsi (arg 2)
+            if argc >= 1 { em(0x5f) }               // pop rdi (arg 1)
             em(0xe8)
             PATCH_OFF[PATCH_COUNT as usize] = CL
             PATCH_FN[PATCH_COUNT as usize] = fi
@@ -671,19 +712,47 @@ fn compile_primary() with IO, Mut, Panic, Div {
     em(0x31); em(0xc0)
 }
 
-// Postfix: `as` type casts (no-op for i64/usize, mask for i8)
+// Postfix: `as` type casts, `.field` access
 fn compile_postfix() with IO, Mut, Panic, Div {
     compile_primary()
-    while TK[EP as usize] == 37 {
-        EP = EP + 1  // skip 'as'
-        let tns = TS[EP as usize]
-        let tne = TE[EP as usize]
-        // as i8: mask to byte
-        if tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
-            em(0x48); em(0x0f); em(0xbe); em(0xc0)  // movsx rax, al (sign-extend byte)
+    var more: i64 = 1
+    while more == 1 {
+        if TK[EP as usize] == 37 {
+            EP = EP + 1  // skip 'as'
+            let tns = TS[EP as usize]
+            let tne = TE[EP as usize]
+            if tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
+                em(0x48); em(0x0f); em(0xbe); em(0xc0)  // as i8: movsx rax, al
+            }
+            EP = EP + 1
+            continue
         }
-        // as usize, as i64: no-op
-        EP = EP + 1
+        if TK[EP as usize] == 50 {
+            EP = EP + 1  // skip '.'
+            // rax = struct pointer/base. Load field by name.
+            let fns = TS[EP as usize]
+            let fne = TE[EP as usize]
+            let fh = gl_name_hash(fns, fne)
+            EP = EP + 1
+            // Search all structs for this field
+            var found: i64 = 0
+            var si: i64 = 0
+            while si < ST_COUNT && found == 0 {
+                let off = st_field_offset(si, fh)
+                if off >= 0 {
+                    // mov rax, [rax + off] — read field from struct pointer in rax
+                    if off == 0 {
+                        em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+                    } else {
+                        em(0x48); em(0x8b); em(0x80); em32(off)  // mov rax, [rax+off]
+                    }
+                    found = 1
+                }
+                si = si + 1
+            }
+            continue
+        }
+        more = 0
     }
 }
 
@@ -853,6 +922,43 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
+    // x.field = expr (struct field write)
+    if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
+        let ns = TS[EP as usize]
+        let ne = TE[EP as usize]
+        EP = EP + 2  // skip name and .
+        let fns = TS[EP as usize]
+        let fne = TE[EP as usize]
+        let fh = gl_name_hash(fns, fne)
+        EP = EP + 1  // skip field name
+        if TK[EP as usize] == 16 { EP = EP + 1 }  // skip =
+        compile_or()  // value in rax
+        em(0x50)  // push value
+        // Load struct base pointer
+        let slot = var_find(ns, ne)
+        if slot >= 0 { emit_load_var(slot) }
+        else {
+            let gi = gl_find(ns, ne)
+            if gi >= 0 {
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                em(0x48); em(0xb8); em64(addr)
+            }
+        }
+        // rax = struct pointer. Find field offset and store.
+        em(0x59)  // pop rcx (value)
+        var si: i64 = 0
+        while si < ST_COUNT {
+            let off = st_field_offset(si, fh)
+            if off >= 0 {
+                if off == 0 { em(0x48); em(0x89); em(0x08) }  // mov [rax], rcx
+                else { em(0x48); em(0x89); em(0x88); em32(off) }  // mov [rax+off], rcx
+                si = ST_COUNT  // break
+            }
+            si = si + 1
+        }
+        return
+    }
+
     // x = expr (local or global scalar assignment)
     if k == 3 && TK[(EP + 1) as usize] == 16 {
         let ns = TS[EP as usize]
@@ -993,8 +1099,48 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GL_BSS_SIZE = 0
     var p: i64 = 0
 
-    // Pass 0: register global variables (top-level 'var' before first 'fn')
-    // Also register globals BETWEEN functions (scan all top-level var)
+    // Pass 0a: register structs
+    ST_COUNT = 0
+    while p < TC {
+        if TK[p as usize] == 46 || TK[p as usize] == 49 {
+            // struct or pub/linear keyword — skip pub/linear prefix
+            if TK[p as usize] == 49 { p = p + 1 }
+            if TK[p as usize] == 46 {
+                p = p + 1  // skip 'struct'
+                let sn_ns = TS[p as usize]
+                let sn_ne = TE[p as usize]
+                let sh = gl_name_hash(sn_ns, sn_ne)
+                let si = ST_COUNT
+                let base = si * 66
+                ST[base as usize] = sh
+                p = p + 1  // skip name
+                if TK[p as usize] == 8 { p = p + 1 }  // skip {
+                var fc: i64 = 0
+                while TK[p as usize] != 9 && TK[p as usize] != 0 {
+                    if TK[p as usize] == 3 {
+                        let fh = gl_name_hash(TS[p as usize], TE[p as usize])
+                        ST[(base + 2 + fc) as usize] = fh
+                        fc = fc + 1
+                        p = p + 1
+                        // Skip : type
+                        if TK[p as usize] == 43 { p = p + 1; p = p + 1 }
+                        // Skip comma
+                        if TK[p as usize] == 28 { p = p + 1 }
+                        continue
+                    }
+                    p = p + 1
+                }
+                ST[(base + 1) as usize] = fc
+                ST_COUNT = ST_COUNT + 1
+                if TK[p as usize] == 9 { p = p + 1 }
+                continue
+            }
+        }
+        p = p + 1
+    }
+    p = 0
+
+    // Pass 0b: register global variables
     var depth: i64 = 0
     while p < TC {
         let tk = TK[p as usize]
@@ -1101,12 +1247,13 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em(0x55); em(0x48); em(0x89); em(0xe5)
         em(0x48); em(0x81); em(0xec); em32(512)
 
-        // Store parameters from registers to stack slots (System V ABI: rdi, rsi, rdx, rcx, r8)
+        // Store parameters from registers to stack slots (System V ABI: rdi,rsi,rdx,rcx,r8,r9)
         if VAR_COUNT >= 1 { em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF) }    // mov [rbp-8], rdi
         if VAR_COUNT >= 2 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }    // mov [rbp-16], rsi
         if VAR_COUNT >= 3 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }    // mov [rbp-24], rdx
         if VAR_COUNT >= 4 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }    // mov [rbp-32], rcx
         if VAR_COUNT >= 5 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }    // mov [rbp-40], r8
+        if VAR_COUNT >= 6 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }    // mov [rbp-48], r9
 
         // Compile body
         EP = p
