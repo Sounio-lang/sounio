@@ -9,14 +9,16 @@
 // Usage:
 //   souc run self-hosted/compiler/render_native_compile_driver_lean.sio -- <source> <output>
 
-// Parser imports removed to stay under boot4's 8192 FIX_OFF limit.
-// Parser functions are stubbed below. Lexer is same-module (lean_lex_to_parser).
-// use lexer::mod::*      — removed (same-module lexer)
-// use parser::ast::*     — removed (parser stubbed)
-// use parser::mod::*     — removed (parser stubbed)
-// use parser::parser::*  — removed (parser stubbed)
-// ALL imports removed — mini-compiler is fully self-contained.
-// Dead code from the AST-direct pipeline still compiles but is never called.
+// Imports: parser + IR + native encode for full AST-direct pipeline.
+// parser::mod provides parse_items_preloaded (boot4-safe: returns Option<Box<ItemList>>).
+use lexer::mod::*
+use parser::ast::*
+use parser::mod::*
+use parser::parser::*
+use ir::ir::*
+use io::file_write::*
+use interop::contract::*
+use native::encode::*
 
 // Wide output buffer for programs exceeding 65KB code size (16MB — supports ~1MB+ x86-64)
 var WIDE_OUT: [i8; 16777216] = [0; 16777216]
@@ -437,27 +439,14 @@ fn f64_bits(v: f64) -> i64 with Mut, Panic, Div {
     (sign << 63) | (exp << 52) | mant
 }
 
-// Stub: parser imports removed to stay under boot4 FIX_OFF[8192] limit.
-// Returns 0 (None) — parsed items will be empty.
-var STUB_PARSER_ERRORS: i64 = 0
-fn parse_items_preloaded(token_count: i64) -> i64 with Mut {
-    STUB_PARSER_ERRORS = 0
-    // TODO: implement same-module mini-parser for fn/struct declarations
-    0
-}
-fn parser_last_error_count() -> i64 {
-    STUB_PARSER_ERRORS
-}
-
-fn load_and_parse(path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
-    // LEAN_SOURCE already populated by scan_source_globals (same-module global)
-    // lean_lex_to_parser() is boot4-safe: writes directly to MP_* scalar arrays,
-    // no TokenKind enum, no Token structs, no struct-typed function arguments.
+// load_and_parse: lex source → call real parser → return Option<Box<ItemList>>
+// Uses parse_items_preloaded (imported from parser::mod) which returns ≤2 slots (boot4-safe).
+fn load_and_parse(path: string) -> Option<Box<ItemList>> with IO, Mut, Div, Panic, Alloc {
     let tc = lean_lex_to_parser()
-    print("load_and_parse: lexed tokens=")
+    print("lex: tokens=")
     print_int(tc)
     print("\n")
-    0
+    parse_items_preloaded(tc)
 }
 
 // ============================================================================
@@ -7604,9 +7593,12 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         print("render_compile: parse_error\n")
         return 1
     }
-    if parsed_items == 0 {
-        // Mini-compiler: bypass AST pipeline, compile directly from tokens
-        return mini_compile(output_path)
+    match parsed_items {
+        None => {
+            print("render_compile: empty_program (parser returned None)\n")
+            return mini_compile(output_path)
+        }
+        _ => {}
     }
 
     // ---- AST-direct compilation (bypasses IR lowering + JIT Box bugs) ----
