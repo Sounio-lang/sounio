@@ -175,6 +175,67 @@ fn ed_compute_histogram(epsilons: [f64; 256], count: i64, num_bins: i64) -> [i64
 }
 
 // ============================================================================
+// Function 3b: Compute histogram of NORMALIZED epsilon values (ε/|x|)
+// Fixes Bug 4: raw epsilon has units², making entropy scale-dependent.
+// Relative uncertainty ε/|x| is dimensionless; entropy is then unit-independent.
+// When |x| < 1e-15 (near-zero magnitude), use raw epsilon as fallback.
+// ============================================================================
+
+fn ed_compute_histogram_normalized(epsilons: [f64; 256], magnitudes: [f64; 256], count: i64, num_bins: i64) -> [i64; 16] with Mut, Panic, Div {
+    var bins: [i64; 16] = [0; 16]
+
+    if count <= 0 { return bins }
+    if num_bins <= 0 { return bins }
+    if num_bins > 16 { return bins }
+
+    // Build normalized array: rel_i = eps_i / |x_i|  (or eps_i if |x_i| near-zero)
+    var rel: [f64; 256] = [0.0; 256]
+    var k: i64 = 0
+    while k < count && k < 256 {
+        let eps = epsilons[k as usize]
+        let mag = magnitudes[k as usize]
+        var abs_mag = mag
+        if abs_mag < 0.0 { abs_mag = 0.0 - abs_mag }
+        if abs_mag > 1.0e-15 {
+            rel[k as usize] = eps / abs_mag
+        } else {
+            rel[k as usize] = eps   // fallback: raw eps
+        }
+        k = k + 1
+    }
+
+    // Find min and max of normalized values
+    var min_val = rel[0]
+    var max_val = rel[0]
+    var i: i64 = 1
+    while i < count && i < 256 {
+        let v = rel[i as usize]
+        if v < min_val { min_val = v }
+        if v > max_val { max_val = v }
+        i = i + 1
+    }
+
+    let range = max_val - min_val
+    if range <= 0.0 {
+        bins[0] = count
+        return bins
+    }
+
+    let bin_width = range / (num_bins as f64)
+    var j: i64 = 0
+    while j < count && j < 256 {
+        let v = rel[j as usize]
+        var bin_idx = ((v - min_val) / bin_width) as i64
+        if bin_idx >= num_bins { bin_idx = num_bins - 1 }
+        if bin_idx < 0 { bin_idx = 0 }
+        bins[bin_idx as usize] = bins[bin_idx as usize] + 1
+        j = j + 1
+    }
+
+    bins
+}
+
+// ============================================================================
 // Function 4: Shannon entropy from histogram
 // H = -Σ (count_i / total) * log2(count_i / total)
 // Skips bins with count == 0 (p*log(p) → 0 as p → 0).

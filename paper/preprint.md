@@ -316,7 +316,7 @@ The epistemic GPU stack comprises 9,122 lines of Sounio across 10 self-hosted mo
 
 ## 7. Resolved Limitations
 
-Three limitations identified in earlier versions of this work have been addressed:
+Three structural limitations identified in earlier versions of this work have been addressed (second-order GUM, covariance shadow, divergence cost model). Three additional bugs identified by peer review have since been resolved (see Section 7.1):
 
 **Second-order GUM propagation (resolved).** The shadow lane emitter now supports optional Hessian correction terms. For $y = f(x)$, the second-order variance is:
 
@@ -340,13 +340,23 @@ Storage is upper-triangular: $N(N+1)/2$ entries, capped at $N = 8$ correlated in
 
 The combined penalty $P = P_s + P_b + P_r$ feeds into a speedup estimator. With budget-bounded fast-path overhead of 0.3x (30% of full shadow cost) and 10% divergence, the predicted speedup is approximately 1.5x. The model populates the `estimated_speedup` field in `WarpVotePlan`, enabling cost-aware decisions about whether to apply the dual-path optimization. We emphasize that these are *model predictions* based on instruction counting; actual speedup depends on register pressure, occupancy, and memory access patterns that require hardware measurement.
 
-### 7.1 Open Limitations
+### 7.1 Resolved Since Initial Preprint
 
-**Validity predicate incompleteness.** The current validity lane propagates inherited validity via `and.pred` but does not check all operational domain constraints. Division already guards against near-zero denominators, but sqrt does not yet verify non-negativity of the radicand. A complete validity semantics would require per-operation domain predicates (e.g., $a \geq 0$ for $\sqrt{a}$, $a > 0$ for $\ln a$). The current validity predicate means "all ancestors were marked valid," not "the GUM computation is well-defined for this specific operation." This is a known gap.
+Three additional items identified in the initial preprint have now been resolved:
 
-**Entropy dispatch scale-dependence.** The Shannon entropy thresholds for kernel variant selection are calibrated for raw epsilon values in $[0, 1]$. For inputs with different scales or physical units, the entropy values shift, potentially causing incorrect dispatch decisions. The correct fix is normalization to relative uncertainty ($\epsilon / |x|$) before histogramming, which we have not yet implemented.
+**Sqrt domain validity (resolved).** `knowledge_sqrt_f64` now emits a `setp.ge.f64 %dp, %av, 0d0000000000000000` domain check and folds it into the validity predicate via `and.pred %lp, %ap, %dp`. Input values $a < 0$ set `%lp = false` before the sqrt executes; the `sqrt.rn.f64` instruction may produce NaN but the false validity predicate suppresses downstream propagation. Epsilon propagation uses $u(\sqrt{a}) = u(a)/(2\sqrt{a})$ with a near-zero guard: when $\sqrt{a} = 0$ exactly, `%le` receives `%ae` as a conservative upper bound to avoid division by zero.
 
-### 7.2 Remaining Future Work
+**Division domain validity (resolved).** The near-zero denominator guard now also *invalidates* the result, not merely clips the epsilon. The original code emitted `@%tp mov.f64 %le, 1.0` (cap epsilon) then propagated inherited validity only. The fix adds `not.pred %tp, %tp; and.pred %lp, %lp, %tp` after the clip: results with near-zero denominators are both clamped and marked invalid.
+
+**Entropy dispatch scale-dependence (resolved).** `ed_compute_histogram_normalized` normalizes epsilon values to relative uncertainty $\epsilon / |x|$ before histogramming. When $|x| < 10^{-15}$, raw epsilon is used as a conservative fallback. This makes Shannon entropy $H(\epsilon/|x|)$ dimensionless and independent of input scale or physical units. Callers using physical quantities (e.g., milligrams, meters) should use the normalized variant.
+
+### 7.2 Remaining Open Limitations
+
+**Logarithm domain validity.** `ln(a)` requires $a > 0$; the current emitter has no `knowledge_log_f64` intrinsic and no domain check. Future work.
+
+**Tiled covariance empirical characterization.** The `tc_propagate_tiled` function (N = 128, CUTLASS-style blocking) compiles and produces correct variance estimates against the N ≤ 8 monolithic reference, but has not been benchmarked for shared-memory pressure or occupancy on real hardware.
+
+### 7.3 Remaining Future Work
 
 **Hardware benchmarks.** This preprint reports structural correctness and programmer effort reduction. Wall-clock benchmarks on NVIDIA Ampere (A5000, sm_86) and Ada Lovelace (L4, RTX 4000 Ada, sm_89) hardware are in progress and will be reported in the full paper.
 

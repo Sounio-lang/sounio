@@ -345,6 +345,78 @@ fn tc_accumulate_tiles(tile_results: [f64; 16], tile_count: i64) -> TiledCovResu
 }
 
 // ============================================================================
+// Function 9: Full tiled pipeline — plan → iterate tiles → accumulate
+// Implements J . Sigma_N . J^T for N up to 128 via CUTLASS-style blocking.
+//
+// jacobian:   Jacobian row vector (128 elements, only first n used)
+// cov_full:   Upper-triangular covariance matrix (8256 elements = 128*129/2)
+// n:          Actual number of variables (≤ 128)
+// cfg:        Tile configuration (auto-tuned via tc_auto_tile_size)
+//
+// Algorithm:
+//   1. Build tile plan for the given (n, tile_size)
+//   2. For each upper-triangular tile (ti, tj):
+//      a. Copy the relevant slice of cov_full into a local tile buffer
+//      b. Call tc_propagate_tile for this tile
+//   3. Accumulate all tile contributions into a TiledCovResult
+// ============================================================================
+
+fn tc_propagate_tiled(jacobian: [f64; 128], cov_full: [f64; 8256], n: i64, cfg: TiledCovConfig) -> TiledCovResult with Mut, Panic, Div {
+    let plan = tc_build_plan(cfg)
+
+    var tile_results: [f64; 16] = [0.0; 16]
+    var tile_count: i64 = 0
+
+    // Iterate over all upper-triangular tiles
+    var tpd = plan.tiles_per_dim
+    var ti: i64 = 0
+    while ti < tpd {
+        var tj: i64 = ti
+        while tj < tpd {
+            if tile_count < 16 {
+                let tl = plan.tiles[tile_count as usize]
+
+                // Copy covariance sub-block for this tile into local buffer
+                var cov_tile: [f64; 2080] = [0.0; 2080]
+                var ri: i64 = 0
+                while ri < tl.size {
+                    var ci: i64 = ri
+                    while ci < tl.size {
+                        let g_row = tl.row_start + ri
+                        let g_col = tl.col_start + ci
+                        var global_idx: i64 = 0
+                        // Global upper-triangular index for (g_row, g_col) in N=n matrix
+                        if g_row <= g_col {
+                            global_idx = tc_tri_index(n, g_row, g_col)
+                        } else {
+                            global_idx = tc_tri_index(n, g_col, g_row)
+                        }
+                        if global_idx < 8256 {
+                            let local_idx = tc_tri_index(tl.size, ri, ci)
+                            if local_idx < 2080 {
+                                cov_tile[local_idx as usize] = cov_full[global_idx as usize]
+                            }
+                        }
+                        ci = ci + 1
+                    }
+                    ri = ri + 1
+                }
+
+                // Compute this tile's contribution to J . Sigma . J^T
+                let contrib = tc_propagate_tile(jacobian, cov_tile, tl, n)
+                tile_results[tile_count as usize] = contrib
+                tile_count = tile_count + 1
+            }
+
+            tj = tj + 1
+        }
+        ti = ti + 1
+    }
+
+    tc_accumulate_tiles(tile_results, tile_count)
+}
+
+// ============================================================================
 // Function 10: Top-level run
 // Build config, auto-select tile size, build plan, return.
 // ============================================================================
