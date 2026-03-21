@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.paper.preprint
+authority: repo_only
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.preprint
+-->
+
 # Epistemic Shadow Lanes: Compiler-Generated Uncertainty Propagation for GPU Kernels
 
 ---
@@ -111,7 +120,7 @@ For a kernel with $A$ additions, $M$ multiplications, and $D$ divisions, the ins
 
 $$\text{overhead} = \frac{A \cdot 4 + M \cdot 8 + D \cdot 10}{A + M + D}$$
 
-giving a range of 4x (addition-dominated) to 10x (division-dominated) in instruction count, which translates to approximately 2-3x in wall-clock time due to instruction-level parallelism, memory latency hiding, and the fact that shadow operations reuse operands already in registers.
+giving a range of 4x (addition-dominated) to 10x (division-dominated) in instruction count. This may yield substantially lower wall-clock overhead than the raw instruction ratio — shadow operations reuse operands already in registers, and GPU architectures hide latency through warp-level parallelism — but the magnitude of that reduction is architecture- and occupancy-dependent and requires hardware measurement (Section 7.2).
 
 ### 3.4 Multi-Backend Emission
 
@@ -151,8 +160,10 @@ FULL_PATH:
     bra MERGE;
 
 FAST_PATH:
-    // Budget-bounded uncertainty propagation
-    // eps_out = max(eps_a, eps_b) * 2.0 (conservative upper bound)
+    // Budget-bounded uncertainty propagation (operator-specific bounds)
+    // add/sub: u²_out ≤ 2·max(u²_a, u²_b)
+    // mul:     u²_out ≤ (M_a² + M_b²)·max(u²_a, u²_b)  [requires operand envelopes]
+    // div:     u²_out ≤ u²_a/m_b² + M_a²·u²_b/m_b⁴      [requires denom lower bound]
     // Validity: AND of inputs (preserved)
     // Provenance: OR of inputs (preserved)
     ...
@@ -161,7 +172,15 @@ MERGE:
     // Reconvergence
 ```
 
-**Semantic invariant.** The fast path does *not* skip shadow computation — small uncertainty is not zero uncertainty. Instead, it computes a conservative upper bound on the output variance ($\epsilon_{\text{out}} \leq 2 \max(\epsilon_a, \epsilon_b)$ for binary operations), which is a valid GUM-compliant overapproximation. This costs approximately 30% of full shadow overhead (the `budget_overhead` parameter in the divergence cost model), yielding a predicted speedup range of 1.3–1.7x depending on divergence percentage. The ballot overhead (2 instructions per check point) is amortized over the loop body.
+**Semantic invariant.** The fast path does *not* skip shadow computation — small uncertainty is not zero uncertainty. Instead, it uses operator-specific conservative bounds derived from operand envelopes. For addition/subtraction, $u^2_{\text{out}} \leq 2 \max(u^2_a, u^2_b)$. For multiplication, conservative bounds additionally require runtime or compile-time envelopes on operand magnitudes ($|a| \leq M_a$, $|b| \leq M_b$), giving $u^2_{\text{out}} \leq (M_a^2 + M_b^2) \max(u^2_a, u^2_b)$. For division, the bound requires a lower bound on the denominator ($|b| \geq m_b > 0$). These bounds are *sound with respect to a user-specified uncertainty budget* (Definition 1 below), not "GUM-compliant" in the metrological sense — the GUM provides the propagation law; the fast path is an optimization atop it.
+
+This costs approximately 30% of full shadow overhead (the `budget_overhead` parameter in the divergence cost model), yielding a predicted speedup range of 1.3–1.7x depending on divergence percentage. The ballot overhead (2 instructions per check point) is amortized over the loop body.
+
+**Definition 1 (Uncertainty Budget).** For a kernel output $y$, define the budget gap as:
+
+$$\Delta(y) = u^2_{\text{fast}}(y) - u^2_{\text{full}}(y)$$
+
+The fast path is *budget-sound* if $\Delta(y) \leq B$ for a user-specified absolute bound $B$, or equivalently $\Delta(y) / u^2_{\text{full}}(y) \leq \rho$ for a relative bound $\rho$. The budget is *local* (per-instruction): each operator's conservative bound overapproximates the full GUM result by at most a bounded factor. Composition across a kernel of $L$ instructions accumulates at most $L \cdot B_{\text{local}}$ total budget gap; tighter analysis via interval arithmetic is future work.
 
 **Novelty claim.** `vote.sync.ballot` is a standard CUDA primitive used for reductions, stream compaction, and divergence management. Using it to evaluate *epistemic validity predicates* — "are all lanes' uncertainty values below a threshold?" — to gate *budget-bounded dual-path kernel execution* is, to our knowledge, a novel application.
 
@@ -185,7 +204,7 @@ MERGE:
 
 ### 4.3 Provenance-Aware DAG Scheduling
 
-**Observation.** Kernels operating on data from *disjoint provenance sources* have no information-flow dependency and can execute concurrently on separate CUDA streams.
+**Observation.** After conventional dependence analysis has ruled out read/write and explicit dataflow dependencies, kernels operating on data from *disjoint provenance sources* are treated as candidates for concurrent scheduling on separate CUDA streams. Provenance disjointness is a *secondary scheduling heuristic* for identifying concurrency opportunities among otherwise independent kernels — it does not substitute for alias analysis or read/write-set analysis.
 
 **Mechanism.** The compiler:
 
@@ -222,7 +241,7 @@ Standard kernel fusion scores candidate pairs by parameter overlap and register 
 
 $$\text{score} = \text{base\_score} + 60 \times \text{popcount}(\text{prov}_A \oplus \text{prov}_B)$$
 
-Kernels with diverse provenance (many differing bits in the XOR) are more likely to benefit from fusion because their data originates from independent sources, reducing the risk of correlated uncertainty amplification.
+Kernels with higher provenance diversity (many differing bits in the XOR) are favored as fusion candidates, as a heuristic for reduced source overlap. We note that provenance diversity does not prove statistical independence — different origin bits suggest low overlap of measurement classes, but do not guarantee uncorrelated uncertainties. A more interpretable metric (e.g., Jaccard distance between bitsets) could normalize by union size; we use popcount for simplicity.
 
 ---
 
@@ -301,7 +320,7 @@ A curvature threshold gates activation: the correction is applied only when $|f'
 
 $$u^2(y) = \sum_i \left(\frac{\partial f}{\partial x_i}\right)^2 u^2(x_i) + 2 \sum_{i < j} \frac{\partial f}{\partial x_i} \frac{\partial f}{\partial x_j} u(x_i, x_j)$$
 
-Storage is upper-triangular: $N(N+1)/2$ entries, capped at $N = 8$ variables (36 entries, 288 bytes in f64) to fit within GPU shared memory alongside kernel data. The cross-term contribution $2 j_0 j_1 \sigma_{01}$ is computed per-element and added to the diagonal-only result.
+Storage is upper-triangular: $N(N+1)/2$ entries, capped at $N = 8$ correlated input sources (36 entries, 288 bytes in f64) to fit within GPU shared memory alongside kernel data. Here $N$ is the number of correlated *measurement sources* contributing to a single datum (e.g., $N = 4$ for four sensors measuring the same analyte), not the number of GPU registers or array elements. The cross-term contribution $2 j_0 j_1 \sigma_{01}$ is computed per-element and added to the diagonal-only result.
 
 **Warp divergence cost model (resolved).** An analytical cost model quantifies the penalty of the dual-path warp-vote mechanism. The model comprises three components:
 
@@ -321,13 +340,13 @@ The combined penalty $P = P_s + P_b + P_r$ feeds into a speedup estimator. With 
 
 **Hardware benchmarks.** This preprint reports structural correctness and programmer effort reduction. Wall-clock benchmarks on NVIDIA Ampere (A5000, sm_86) and Ada Lovelace (L4, RTX 4000 Ada, sm_89) hardware are in progress and will be reported in the full paper.
 
-**Higher-order covariance (resolved).** Tiled covariance propagation extends support to $N = 128$ correlated variables via CUTLASS-style upper-triangular tile blocking. The $N \times N$ covariance matrix is partitioned into $T \times T$ tiles (where $T$ auto-tunes per SM architecture: 64 on Hopper sm\_90, 48 on Ada Lovelace sm\_89, 32 on Ampere sm\_86). Each tile fits in shared memory independently; results accumulate via tree reduction. For $N = 64$: 3 upper-triangular tiles at 4,224 bytes each. For $N = 128$: 10 tiles. The per-tile J$\cdot\Sigma_{\text{tile}}\cdot$J$^\top$ computation reuses the same propagation kernel as the monolithic $N \leq 8$ case.
+**Higher-order covariance (implemented, pending empirical characterization).** Tiled covariance propagation extends support to $N = 128$ correlated variables via CUTLASS-style upper-triangular tile blocking. The $N \times N$ covariance matrix is partitioned into $T \times T$ tiles (where $T$ auto-tunes per SM architecture: 64 on Hopper sm\_90, 48 on Ada Lovelace sm\_89, 32 on Ampere sm\_86). Each tile fits in shared memory independently; results accumulate via tree reduction. For $N = 64$: 3 upper-triangular tiles at 4,224 bytes each. For $N = 128$: 10 tiles. The per-tile J$\cdot\Sigma_{\text{tile}}\cdot$J$^\top$ computation reuses the same propagation kernel as the monolithic $N \leq 8$ case. **Clarification:** $N$ here is the number of *correlated input uncertainty sources* per datum (e.g., $N = 4$ for blood draw + CT + MRI + assay), not the number of GPU registers or kernel dimensions. The covariance matrix is carried per logical measurement group, not per thread.
 
 ---
 
 ## 8. Conclusion
 
-Epistemic shadow lanes demonstrate that GUM-compliant uncertainty propagation through GPU kernels is a compiler problem, not a library problem. The transformation is mechanical, the overhead is modest, and the programmer effort reduction is total. The five optimizations we introduce — warp-vote fast-paths, entropy-gated dispatch, provenance-aware scheduling, speculative execution, and epistemic fusion scoring — show that uncertainty metadata is not merely overhead to be tolerated, but information that enables optimizations impossible in conventional GPU compilers.
+Epistemic shadow lanes demonstrate that first-order GUM uncertainty propagation through GPU kernels is a compiler problem, not a library problem. The transformation removes manual per-operation uncertainty propagation and metadata plumbing from GPU kernels; the instruction-count overhead is bounded by a moderate constant factor in the current model, though hardware characterization remains future work. The five optimizations we introduce — warp-vote fast-paths, entropy-gated dispatch, provenance-aware scheduling, speculative execution, and epistemic fusion scoring — show that uncertainty metadata is not merely overhead to be tolerated, but information that can guide execution-time decisions in ways unavailable to conventional GPU compilers.
 
 ---
 
