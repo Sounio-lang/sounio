@@ -2,9 +2,19 @@
 
 ---
 
+**Article classification:** Research paper
+
 ## Abstract
 
-We present an executable compositional formalization of second-order cybernetics in the Sounio programming language, integrating nine foundational frameworks into a single recursive architecture. Nine theory modules and one composition module implement Spencer-Brown's Laws of Form (1969), von Foerster's eigenform theory (1976), Luhmann's observer-inclusion (1984), Maturana and Varela's autopoiesis (1972), Ashby's Law of Requisite Variety (1956), structural coupling (Maturana and Varela, 1987), Pask's conversation theory (1975), Bateson's learning levels (1972), and Maturana's languaging (1988). The composition layer wires these into a closed loop — Observer → Eigenform → Distinction → Autopoiesis → Variety → Coupling → Conversation → Learning → Languaging → Observer — with each transition realized as a computable bridge function. We demonstrate three results: (1) all nine theories produce structurally consistent numerical outputs when executed, validated by 10 property-based invariant tests and 670 lines of runtime verification code; (2) the theories compose into one closed recursive structure where each step produces inputs for the next; and (3) the system can observe itself, with measurable cost (observer drift increases monotonically with recursion depth). The implementation comprises 2,393 lines of Sounio in 10 library modules, with 2,193 additional lines of tests and examples. Prior software traditions exist for computational autopoiesis (McMullin, 2004) and Conversation Theory (Pask's THOUGHTSTICKER; Pangaro, 2002). To our knowledge, no prior work has unified these nine second-order frameworks into a single recursive executable architecture with explicit observer-cost accounting and cross-module invariant testing.
+**Purpose** — Second-order cybernetics has developed a rich theoretical vocabulary over seven decades, yet lacks a computational medium in which its core commitments can be expressed, composed, and tested. This paper presents an executable compositional formalization that integrates nine foundational frameworks into a single recursive architecture.
+
+**Design/methodology/approach** — Nine theory modules and one composition module in the Sounio programming language implement Spencer-Brown's Laws of Form, von Foerster's eigenform theory, observer-inclusion, Maturana and Varela's autopoiesis, Ashby's Law of Requisite Variety, structural coupling, Pask's conversation theory, Bateson's learning levels, and Maturana's languaging. Seven computable bridge functions wire these into a closed recursive loop. Structural invariants are verified through property-based testing across multiple parameterizations.
+
+**Findings** — All nine theories produce structurally consistent outputs when executed. The theories compose into one closed loop where each step produces inputs for the next. The system can observe itself, with measurable cost: observer drift increases monotonically with recursion depth. Five formal propositions are stated and computationally verified.
+
+**Originality/value** — Prior software traditions exist for individual frameworks, notably computational autopoiesis (McMullin, 2004) and Pask's THOUGHTSTICKER (Pangaro, 1987). To our knowledge, no prior work has unified nine second-order frameworks into a single recursive executable architecture with explicit observer-cost accounting and cross-module invariant testing. The bridges between frameworks are classified by epistemic status (canonical formalization, operative hypothesis, or interpretive mapping), making theoretical disagreements computationally testable.
+
+**Keywords:** second-order cybernetics, autopoiesis, eigenform, executable theory, recursive composition
 
 ---
 
@@ -76,7 +86,7 @@ Our `Form` struct stores `value ∈ {UNMARKED, MARKED, AUTONOMOUS}`, a `children
 
 **Form composition.** Functions `form_add_child`, `form_contain`, and `form_pair` build compound expressions using the `children` array. The private function `recompute_from_children` implements Spencer-Brown's primary algebra: juxtaposition of sub-forms propagates AUTONOMOUS (highest priority), then MARKED, then UNMARKED. If the parent form has nonzero depth (it is inside a mark), the result is crossed.
 
-**Verification.** The calling axiom is verified by asserting `eval_form(form_mark(form_mark(form_void()))) == eval_form(form_mark(form_void()))`. The crossing axiom by `eval_form(form_cross(form_cross(form_marked()))) == MARKED`. The autonomous value by `solve_reentry(MARKED, 100) == AUTONOMOUS`. All pass at runtime.
+**Verification.** The calling axiom is verified by asserting `eval_form(form_mark(form_mark(form_void()))) == eval_form(form_mark(form_void()))`. The crossing axiom by `eval_form(form_cross(form_cross(form_marked()))) == MARKED`. The autonomous value by `solve_reentry(MARKED, 100) == AUTONOMOUS`. All pass at runtime. We note that Oksas (2025) recently identified errors in Spencer-Brown's re-entry calculations using ternary logic and XBOOLE software; our implementation uses Varela's three-valued extension rather than Spencer-Brown's original re-entry, sidestepping the errors Oksas identifies.
 
 ### 2.2 Eigenform Theory
 
@@ -406,17 +416,17 @@ The by-value return pattern (`var s = state; ... s`) makes every state transitio
 
 ## 6. Related Work
 
-**Computational autopoiesis.** There is a substantial tradition of computational autopoiesis, reviewed comprehensively by McMullin (2004). The lineage begins with Varela, Maturana, and Uribe's (1974) tessellation automaton — a 2D cellular model where "molecules" self-organize into bounded structures. Subsequent work (Suzuki and Ikegami, 2004; Oka et al., 2009) explored reaction-diffusion and particle-based models. McMullin's own SCL (Substrate-Conscious Language) implemented autopoietic dynamics in a spatial substrate. These are simulations of specific autopoietic *mechanisms* in particular physical substrates. Our work differs in level of abstraction: we implement the *theory* of organizational closure — production relations as a directed graph, closure as cycle existence — as abstract operations applicable to any system, not a specific spatial model. The DFS cycle detection in our `check_closure` formalizes the *definition* of autopoiesis; McMullin's tessellation automaton demonstrates a *realization* of it. The two approaches are complementary.
+**Computational autopoiesis.** There is a substantial tradition of computational autopoiesis, reviewed comprehensively by McMullin (2004). The lineage begins with Varela, Maturana, and Uribe's (1974) tessellation automaton — a 2D cellular model where "molecules" self-organize into bounded structures. Subsequent work (Suzuki and Ikegami, 2004; Oka *et al.*, 2009) explored reaction-diffusion and particle-based models. McMullin's own SCL (Substrate-Conscious Language) implemented autopoietic dynamics in a spatial substrate. These are simulations of specific autopoietic *mechanisms* in particular physical substrates. Our work differs in level of abstraction: we implement the *theory* of organizational closure — production relations as a directed graph, closure as cycle existence — as abstract operations applicable to any system, not a specific spatial model. The DFS cycle detection in our `check_closure` formalizes the *definition* of autopoiesis; McMullin's tessellation automaton demonstrates a *realization* of it. The two approaches are complementary.
 
 **Conversation Theory software.** Pask's own THOUGHTSTICKER system (Pask, 1975) and its successor CASTE were direct software implementations of Conversation Theory, used in educational contexts. Pangaro's thesis (1987) documents these as working systems capable of modeling Lp/Lp* procedural descriptions. Pangaro (2002) and Dubberly and Pangaro (2015) developed interaction models and design frameworks based on CT. Our conversation module does not attempt to replace THOUGHTSTICKER's procedural modeling — we acknowledge in §2.7 that our implementation uses scalar values, not Pask's procedural Lp/Lp*. Our contribution is different: we compose conversation with eight other frameworks (observer-inclusion, variety, learning levels, etc.) into a recursive architecture, which THOUGHTSTICKER does not attempt.
 
-**Algebraic cybernetics.** Kauffman (2003, 2005) provided mathematical formalization of eigenforms and Laws of Form, with explicit connections between them. Our work makes these formalizations executable — the algebraic identities are verified by running code, not by reading proofs. Kauffman's identification of eigenforms with distinctions (2005, §4) directly informs our `eigenform_as_distinction` bridge.
+**Algebraic cybernetics.** Kauffman (2003, 2005) provided mathematical formalization of eigenforms and Laws of Form, with explicit connections between them. More recently, Kauffman (2023) formally connected autopoiesis and eigenform via Gödelian coding, demonstrating that self-producing systems can be understood as fixed points of their own production operators. Miranda and Abades (2024) applied eigenbehavior concepts to ecosystem management using multi-agent simulation in *Kybernetes*, introducing the concept of "eigenperception." Our work makes these formalizations executable — the algebraic identities are verified by running code, not by reading proofs. Kauffman's identification of eigenforms with distinctions (2005, §4) directly informs our `eigenform_as_distinction` bridge; his autopoiesis-eigenform connection (2023) supports our composition of these two frameworks via the recursive loop.
 
 **Observer-dependent computation.** The concept of observer-dependent types appears in the quantum computing literature (Abramsky and Coecke, 2004) and in some dependent type theories. Our approach is simpler and more practical: the observer is a runtime value whose drift accumulates with each observation, enforced by the type system's requirement to accept the updated observer.
 
-**Agent-based modeling frameworks.** NetLogo (Wilensky, 1999), Mesa (Kazil et al., 2020), and Repast (North et al., 2013) are the dominant computational tools in applied cybernetics and systems science. These frameworks simulate *specific systems* — a population of agents following behavioral rules in an environment. Our work is complementary: it formalizes the *theory* applicable to any system, not the dynamics of a particular system. A NetLogo model of organizational autopoiesis would encode specific production rules; our module encodes the *definition* of organizational closure (cycle detection) and lets the user supply the production rules. The two approaches can be composed: an ABM could use our variety module to check whether its agents collectively satisfy Ashby's Law, or our conversation module to model agent-agent dialogue.
+**Agent-based modeling frameworks.** NetLogo (Wilensky, 1999), Mesa (Kazil *et al.*, 2020), and Repast (North *et al.*, 2013) are the dominant computational tools in applied cybernetics and systems science. These frameworks simulate *specific systems* — a population of agents following behavioral rules in an environment. Our work is complementary: it formalizes the *theory* applicable to any system, not the dynamics of a particular system. A NetLogo model of organizational autopoiesis would encode specific production rules; our module encodes the *definition* of organizational closure (cycle detection) and lets the user supply the production rules. The two approaches can be composed: an ABM could use our variety module to check whether its agents collectively satisfy Ashby's Law, or our conversation module to model agent-agent dialogue.
 
-**Summary.** Prior software traditions exist for individual cybernetic theories: computational autopoiesis (Varela et al., 1974; McMullin, 2004), Conversation Theory (THOUGHTSTICKER; Pangaro, 2002), and algebraic formalization of Laws of Form (Kauffman, 2005). Our contribution is not the first computational work in any single tradition, but the first *unified recursive composition* of nine frameworks into a single architecture with explicit observer-cost accounting, cross-module bridge functions, and property-based invariant verification.
+**Summary.** Prior software traditions exist for individual cybernetic theories: computational autopoiesis (Varela *et al.*, 1974; McMullin, 2004), Conversation Theory (THOUGHTSTICKER; Pangaro, 2002), and algebraic formalization of Laws of Form (Kauffman, 2005). Our contribution is not the first computational work in any single tradition, but the first *unified recursive composition* of nine frameworks into a single architecture with explicit observer-cost accounting, cross-module bridge functions, and property-based invariant verification.
 
 ---
 
@@ -466,7 +476,7 @@ We state five propositions that the implementation satisfies. These are modest f
 
 **Proposition 1** (Organizational closure). *`check_closure(sys)` returns true if and only if the active-component subgraph of `sys.relations` contains at least one directed cycle.*
 
-Verified by: circular network 0→1→2→0 returns true; linear chain 0→1→2 returns false; deactivating a cycle node changes true → false. DFS cycle detection is standard (Cormen et al., 2009).
+Verified by: circular network 0→1→2→0 returns true; linear chain 0→1→2 returns false; deactivating a cycle node changes true → false. DFS cycle detection is standard (Cormen *et al.*, 2009).
 
 **Proposition 2** (Observer variance monotonicity). *Under non-negative drift increments (`drift_rate ≥ 0`), the total variance returned by `make_observation` is monotonically non-decreasing across consecutive calls with the same measurement_variance.*
 
@@ -545,59 +555,65 @@ The code is available at `stdlib/cybernetic/` in the Sounio repository (10 modul
 
 ## References
 
-Ashby, W. R. (1956). *An Introduction to Cybernetics*. Chapman and Hall.
+Abramsky, S. and Coecke, B. (2004), "A categorical semantics of quantum protocols", in *Proceedings of the 19th Annual IEEE Symposium on Logic in Computer Science (LICS '04)*, IEEE, pp. 415-425.
 
-Bateson, G. (1972). *Steps to an Ecology of Mind*. University of Chicago Press.
+Ashby, W.R. (1956), *An Introduction to Cybernetics*, Chapman and Hall, London.
 
-Dubberly, H. and Pangaro, P. (2015). "Cybernetics and design: Conversations for action." *Cybernetics & Human Knowing*, 22(2-3), 73-82.
+Bateson, G. (1972), *Steps to an Ecology of Mind*, University of Chicago Press, Chicago, IL.
 
-Glanville, R. (1997). "The value of being unmanageable: Variety and creativity in cyberspace." In *Global Village '97*.
+Cormen, T.H., Leiserson, C.E., Rivest, R.L. and Stein, C. (2009), *Introduction to Algorithms*, 3rd ed., MIT Press, Cambridge, MA.
 
-Kauffman, L. H. (2003). "Eigenforms — objects as tokens for eigenbehaviors." *Cybernetics & Human Knowing*, 10(3-4), 73-89.
+Dubberly, H. and Pangaro, P. (2015), "Cybernetics and design: conversations for action", *Cybernetics & Human Knowing*, Vol. 22 No. 2-3, pp. 73-82.
 
-Kauffman, L. H. (2005). "Eigenform." *Kybernetes*, 34(1/2), 129-150.
+Glanville, R. (1997), "The value of being unmanageable: variety and creativity in cyberspace", in *Global Village '97*, Vienna.
 
-Luhmann, N. (1984). *Soziale Systeme*. Suhrkamp. [English: *Social Systems*, Stanford University Press, 1995.]
+Kauffman, L.H. (2003), "Eigenforms — objects as tokens for eigenbehaviors", *Cybernetics & Human Knowing*, Vol. 10 No. 3-4, pp. 73-89.
 
-Maturana, H. R. (1988). "Reality: The search for objectivity or the quest for a compelling argument." *Irish Journal of Psychology*, 9(1), 25-82.
+Kauffman, L.H. (2005), "Eigenform", *Kybernetes*, Vol. 34 No. 1/2, pp. 129-150.
 
-Maturana, H. R. and Varela, F. J. (1980). *Autopoiesis and Cognition: The Realization of the Living*. D. Reidel.
+Kauffman, L.H. (2023), "Autopoiesis and eigenform", *Computation*, Vol. 11 No. 12, p. 247.
 
-Maturana, H. R. and Varela, F. J. (1987). *The Tree of Knowledge*. Shambhala.
+Kazil, J., Masad, D. and Crooks, A. (2020), "Utilizing Python for agent-based modeling: the Mesa framework", in Thomson, R., Bisgin, H., Dancy, C. and Hyder, A. (Eds), *Social, Cultural, and Behavioral Modeling (SBP-BRiMS 2020)*, Springer, Cham, pp. 308-317.
 
-McMullin, B. (2004). "Thirty years of computational autopoiesis: A review." *Artificial Life*, 10(3), 277-295.
+Luhmann, N. (1995), *Social Systems*, Stanford University Press, Stanford, CA (originally published as *Soziale Systeme*, Suhrkamp, 1984).
 
-Pangaro, P. (2002). "New order from old: The rise of second-order cybernetics and its implications for machine intelligence." In *American Society for Cybernetics conference*.
+Maturana, H.R. (1988), "Reality: the search for objectivity or the quest for a compelling argument", *Irish Journal of Psychology*, Vol. 9 No. 1, pp. 25-82.
 
-Pask, G. (1975). *Conversation, Cognition and Learning*. Elsevier.
+Maturana, H.R. and Varela, F.J. (1980), *Autopoiesis and Cognition: The Realization of the Living*, D. Reidel, Dordrecht.
 
-Pask, G. (1976). "Conversation theory: Applications in education and epistemology." Elsevier.
+Maturana, H.R. and Varela, F.J. (1987), *The Tree of Knowledge: The Biological Roots of Human Understanding*, Shambhala, Boston, MA.
 
-Spencer-Brown, G. (1969). *Laws of Form*. Allen and Unwin.
+McMullin, B. (2004), "Thirty years of computational autopoiesis: a review", *Artificial Life*, Vol. 10 No. 3, pp. 277-295.
 
-Suzuki, K. and Ikegami, T. (2004). "Shapes and self-movement in protocell systems." *Artificial Life*, 10(2), 129-141.
+Miranda, M.D. and Abades, S. (2024), "Exploring the theoretical and practical implications of eigenbehavior at the intersection of second-order cybernetics and ecosystem management", *Kybernetes*, Vol. 53 No. 12, pp. 5843-5859.
 
-Varela, F. J. (1975). "A calculus for self-reference." *International Journal of General Systems*, 2(1), 5-24.
+North, M.J., Collier, N.T., Ozik, J. *et al.* (2013), "Complex adaptive systems modeling with Repast Simphony", *Complex Adaptive Systems Modeling*, Vol. 1 No. 3.
 
-Varela, F. J., Maturana, H. R., and Uribe, R. (1974). "Autopoiesis: The organization of living systems, its characterization and a model." *Biosystems*, 5(4), 187-196.
+Oka, M., Hashimoto, T. and Ikegami, T. (2009), "Self-organization of autopoietic dynamics in an artificial chemistry", *Artificial Life*, Vol. 15 No. 4, pp. 373-393.
 
-Oka, M., Hashimoto, T., and Ikegami, T. (2009). "Self-organization of autopoietic dynamics in an artificial chemistry." *Artificial Life*, 15(4), 373-393.
+Oksas, A. (2025), "Where George Spencer-Brown went wrong — re-entry recalculated", *Kybernetes*, Vol. 54 No. 8, pp. 4300-4327.
 
-Cormen, T. H., Leiserson, C. E., Rivest, R. L., and Stein, C. (2009). *Introduction to Algorithms*, 3rd ed. MIT Press.
+Pangaro, P. (1987), *Conversation Theory as a Tool for Educational Design*, PhD thesis, Brunel University, London.
 
-Pangaro, P. (1987). "Conversation theory as a tool for educational design." PhD thesis, Brunel University.
+Pangaro, P. (2002), "New order from old: the rise of second-order cybernetics and its implications for machine intelligence", in *Proceedings of the American Society for Cybernetics Conference*, Vancouver.
 
-von Foerster, H. (1979). "Cybernetics of cybernetics." In K. Krippendorff (Ed.), *Communication and Control in Society*. Gordon and Breach.
+Pask, G. (1975), *Conversation, Cognition and Learning*, Elsevier, Amsterdam.
 
-von Foerster, H. (1981). *Observing Systems*. Intersystems Publications.
+Pask, G. (1976), *Conversation Theory: Applications in Education and Epistemology*, Elsevier, Amsterdam.
 
-Wilensky, U. (1999). *NetLogo*. Center for Connected Learning and Computer-Based Modeling, Northwestern University.
+Spencer-Brown, G. (1969), *Laws of Form*, Allen and Unwin, London.
 
-Kazil, J., Masad, D., and Crooks, A. (2020). "Utilizing Python for agent-based modeling: The Mesa framework." In *Social, Cultural, and Behavioral Modeling* (SBP-BRiMS), Springer.
+Suzuki, K. and Ikegami, T. (2004), "Shapes and self-movement in protocell systems", *Artificial Life*, Vol. 10 No. 2, pp. 129-141.
 
-North, M. J., Collier, N. T., Ozik, J., et al. (2013). "Complex adaptive systems modeling with Repast Simphony." *Complex Adaptive Systems Modeling*, 1(3).
+Varela, F.J. (1975), "A calculus for self-reference", *International Journal of General Systems*, Vol. 2 No. 1, pp. 5-24.
 
-Abramsky, S. and Coecke, B. (2004). "A categorical semantics of quantum protocols." In *Proc. LICS*, IEEE.
+Varela, F.J., Maturana, H.R. and Uribe, R. (1974), "Autopoiesis: the organization of living systems, its characterization and a model", *Biosystems*, Vol. 5 No. 4, pp. 187-196.
+
+von Foerster, H. (1979), "Cybernetics of cybernetics", in Krippendorff, K. (Ed.), *Communication and Control in Society*, Gordon and Breach, New York, NY, pp. 5-8.
+
+von Foerster, H. (1981), *Observing Systems*, Intersystems Publications, Seaside, CA.
+
+Wilensky, U. (1999), *NetLogo*, Center for Connected Learning and Computer-Based Modeling, Northwestern University, Evanston, IL.
 
 ---
 
