@@ -1786,7 +1786,16 @@ fn mc_imp_record_loaded(fname_len: i64) with Mut, Panic {
 }
 
 fn mc_imp_append_file(fname_len: i64) with IO, Mut, Panic, Div {
-    let fpath = str_from_bytes(MC_IMP_FNAME, fname_len)
+    // Copy MC_IMP_FNAME into a local buffer for str_from_bytes
+    // (boot4 cannot pass global [i8;N] arrays as function arguments directly)
+    var local_fname: [i8; 512] = [0 as i8; 512]
+    var cfi: i64 = 0
+    while cfi < fname_len && cfi < 511 {
+        local_fname[cfi as usize] = MC_IMP_FNAME[cfi as usize]
+        cfi = cfi + 1
+    }
+    local_fname[fname_len as usize] = 0 as i8
+    let fpath = str_from_bytes(local_fname, fname_len)
     let fsz = file_size(fpath)
     if fsz <= 0 {
         print("  import: file not found: ")
@@ -1817,6 +1826,9 @@ fn mc_imp_append_file(fname_len: i64) with IO, Mut, Panic, Div {
 fn mc_resolve_imports() with IO, Mut, Panic, Div {
     MC_IMP_COUNT = 0
     MC_IMP_PATH_BUF_POS = 0
+    print("  resolve: start len=")
+    print_int(LEAN_SOURCE_LEN)
+    print("\n")
     var pos: i64 = 0
     while pos < LEAN_SOURCE_LEN {
         let c = imp_src_byte(pos) as i64
@@ -1829,6 +1841,9 @@ fn mc_resolve_imports() with IO, Mut, Panic, Div {
                 let c2 = imp_src_byte(pos + 2) as i64
                 let c3 = imp_src_byte(pos + 3) as i64
                 if c1 == 115 && c2 == 101 && (c3 == 32 || c3 == 9) {
+                    print("  resolve: use at ")
+                    print_int(pos)
+                    print("\n")
                     var p2: i64 = pos + 4
                     while p2 < LEAN_SOURCE_LEN && (imp_src_byte(p2) as i64 == 32 || imp_src_byte(p2) as i64 == 9) { p2 = p2 + 1 }
                     let path_start = p2
@@ -1839,9 +1854,18 @@ fn mc_resolve_imports() with IO, Mut, Panic, Div {
                     }
                     let path_len = p2 - path_start
                     if path_len > 0 && path_len < 480 {
+                        print("  resolve: build_fname ps=")
+                        print_int(path_start)
+                        print(" pl=")
+                        print_int(path_len)
+                        print("\n")
                         let fname_len = mc_imp_build_fname(path_start, path_len)
+                        print("  resolve: fname_len=")
+                        print_int(fname_len)
+                        print("\n")
                         if !mc_imp_already_loaded(fname_len) {
                             mc_imp_record_loaded(fname_len)
+                            print("  resolve: append\n")
                             mc_imp_append_file(fname_len)
                         }
                     }
@@ -1918,8 +1942,15 @@ fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
     }
     LEAN_SOURCE_LEN = src_size
     // Resolve imports: scan for `use` lines, read and append imported files
+    print("scan_source_globals: before init_base_dir\n")
     mc_imp_init_base_dir(path)
+    print("scan_source_globals: after init_base_dir, base_dir_len=")
+    print_int(MC_IMP_BASE_DIR_LEN)
+    print("\n")
     let pre_import_len = LEAN_SOURCE_LEN
+    print("scan_source_globals: before resolve_imports, src_len=")
+    print_int(LEAN_SOURCE_LEN)
+    print("\n")
     mc_resolve_imports()
     if LEAN_SOURCE_LEN > pre_import_len {
         print("scan_source_globals: imports added ")
@@ -5296,6 +5327,7 @@ var MC_LOC_TYPE: [i64; 512] = [0; 512]  // set to -1 by mc_add_local, >=0 by mc_
 // --- Function parameter type tracking (parallel to MC_PARAM_*) ---
 // -1 = scalar, >=0 = struct index
 var MC_PARAM_TYPE: [i64; 1024] = [0; 1024]  // set per-param in mc_scan_functions
+var MC_PARAM_IS_F64: [i64; 1024] = [0; 1024]  // 1 if param type is f64
 
 // --- Function return type tracking ---
 // -1 = scalar, >=0 = struct index
@@ -5712,16 +5744,20 @@ fn mc_emit_print_f64_helper() with Mut {
     we(0x48); we(0x85); we(0xc0)
     let skip_neg_off = WIDE_LEN
     we(0x79); we(0x00)
+    // Save rax (bit pattern) to [rbp-40] before syscall clobbers it
+    we(0x48); we(0x89); we(0x45); we(0xD8)
     we(0xc6); we(0x45); we(0xff); we(0x2d)
     we(0x48); we(0x8d); we(0x75); we(0xff)
     we(0xba); we(0x01); we(0x00); we(0x00); we(0x00)
     we(0xbf); we(0x01); we(0x00); we(0x00); we(0x00)
     we(0xb8); we(0x01); we(0x00); we(0x00); we(0x00)
     we(0x0f); we(0x05)
-    // mov rcx, 0x7FFFFFFFFFFFFFFF; and rax, rcx
+    // Reload bit pattern after syscall
+    we(0x48); we(0x8B); we(0x45); we(0xD8)
+    // Clear sign bit: mov rcx, 0x7FFFFFFFFFFFFFFF; and rax, rcx
     we(0x48); we(0xb9)
     we(0xff); we(0xff); we(0xff); we(0xff); we(0xff); we(0xff); we(0xff); we(0x7f)
-    we(0x48); we(0x21); we(0xc8)  // and rax, rcx
+    we(0x48); we(0x21); we(0xc8)
     we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC0)
     let skip_neg_target = WIDE_LEN
     WIDE_OUT[(skip_neg_off + 1) as usize] = ((skip_neg_target - (skip_neg_off + 2)) & 0xFF) as i8
@@ -6699,8 +6735,10 @@ fn mc_parse_stmt() with Mut, Panic, Div {
             let slot = mc_find_local(id_s, id_len)
             if slot >= 0 {
                 mc_emit_load_rax(slot)
+                MC_EXPR_IS_F64 = mc_local_is_f64(id_s, id_len)
             } else {
                 we(0x48); we(0x31); we(0xc0)
+                MC_EXPR_IS_F64 = 0
             }
         }
         // Check for trailing binops (handles: fib(n-1) + fib(n-2), x + 1, etc.)
@@ -6711,10 +6749,33 @@ fn mc_parse_stmt() with Mut, Panic, Div {
             mc_advance()
             let ls = mc_alloc_slot()
             mc_emit_store_rax(ls)
+            var stmt_left_f64 = MC_EXPR_IS_F64
             mc_parse_expr_prec(prec + 1)
             we(0x48); we(0x89); we(0xc1)
             mc_emit_load_rax(ls)
-            if op == MC_TK_PLUS() { we(0x48); we(0x01); we(0xc8) }
+            // f64 trailing binop path
+            if stmt_left_f64 == 1 && (op == MC_TK_PLUS() || op == MC_TK_MINUS() || op == MC_TK_STAR() || op == MC_TK_SLASH()) {
+                we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC0)
+                we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC9)
+                if op == MC_TK_PLUS() { we(0xF2); we(0x0F); we(0x58); we(0xC1) }
+                else if op == MC_TK_MINUS() { we(0xF2); we(0x0F); we(0x5C); we(0xC1) }
+                else if op == MC_TK_STAR() { we(0xF2); we(0x0F); we(0x59); we(0xC1) }
+                else if op == MC_TK_SLASH() { we(0xF2); we(0x0F); we(0x5E); we(0xC1) }
+                we(0x66); we(0x48); we(0x0F); we(0x7E); we(0xC0)
+                MC_EXPR_IS_F64 = 1
+            } else if stmt_left_f64 == 1 && (op == MC_TK_EQEQ() || op == MC_TK_BANGEQ() || op == MC_TK_LT() || op == MC_TK_GT() || op == MC_TK_LTEQ() || op == MC_TK_GTEQ()) {
+                we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC0)
+                we(0x66); we(0x48); we(0x0F); we(0x6E); we(0xC9)
+                we(0x66); we(0x0F); we(0x2E); we(0xC1)
+                if op == MC_TK_EQEQ() { we(0x0f); we(0x94); we(0xc0) }
+                else if op == MC_TK_BANGEQ() { we(0x0f); we(0x95); we(0xc0) }
+                else if op == MC_TK_LT() { we(0x0f); we(0x92); we(0xc0) }
+                else if op == MC_TK_GT() { we(0x0f); we(0x97); we(0xc0) }
+                else if op == MC_TK_LTEQ() { we(0x0f); we(0x96); we(0xc0) }
+                else if op == MC_TK_GTEQ() { we(0x0f); we(0x93); we(0xc0) }
+                we(0x48); we(0x0f); we(0xb6); we(0xc0)
+                MC_EXPR_IS_F64 = 0
+            } else if op == MC_TK_PLUS() { we(0x48); we(0x01); we(0xc8) }
             else if op == MC_TK_MINUS() { we(0x48); we(0x29); we(0xc8) }
             else if op == MC_TK_STAR() { we(0x48); we(0x0f); we(0xaf); we(0xc1) }
             else if op == MC_TK_SLASH() { we(0x48); we(0x99); we(0x48); we(0xf7); we(0xf9) }
@@ -6881,18 +6942,20 @@ fn mc_scan_functions() with Mut, Panic, Div {
                 MC_PARAM_NAME_LEN[MC_PARAM_TOTAL as usize] = pl
                 // Parse : type and resolve struct
                 var param_st: i64 = -1
+                var param_f64: i64 = 0
                 if mc_peek() == MC_TK_COLON() {
                     mc_advance()
-                    // Check if type name is a struct
                     if mc_peek() == MC_TK_IDENT() || mc_peek() == MC_TK_STRUCT() {
                         let ts = MP_START[MC_POS as usize]
                         let te = MP_END[MC_POS as usize]
                         let tl = te - ts
-                        param_st = mc_type_name_to_struct(ts, tl)
+                        if mc_src_eq_at(ts, tl, "f64") { param_f64 = 1 }
+                        else { param_st = mc_type_name_to_struct(ts, tl) }
                     }
                     mc_skip_type()
                 }
                 MC_PARAM_TYPE[MC_PARAM_TOTAL as usize] = param_st
+                MC_PARAM_IS_F64[MC_PARAM_TOTAL as usize] = param_f64
                 MC_PARAM_TOTAL = MC_PARAM_TOTAL + 1
                 pc = pc + 1
                 if mc_peek() == MC_TK_COMMA() { mc_advance() }
@@ -6993,8 +7056,14 @@ fn mc_compile_functions() with Mut, Panic, Div {
                 // Copy struct fields from [rax] to local stack slots
                 mc_emit_struct_copy_from_rax(slot, MC_ST_FLAT_SIZE[pst as usize])
             } else {
-                // Scalar parameter
-                let slot = mc_add_local(ps, pl)
+                // Scalar or f64 parameter
+                let param_is_float = MC_PARAM_IS_F64[(param_base + pi) as usize]
+                var slot: i64 = 0
+                if param_is_float == 1 {
+                    slot = mc_add_local_f64(ps, pl)
+                } else {
+                    slot = mc_add_local(ps, pl)
+                }
                 if pi == 0 { we(0x48); we(0x89); we(0xf8) }       // mov rax, rdi
                 else if pi == 1 { we(0x48); we(0x89); we(0xf0) }  // mov rax, rsi
                 else if pi == 2 { we(0x48); we(0x89); we(0xd0) }  // mov rax, rdx
