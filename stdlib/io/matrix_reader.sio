@@ -1,0 +1,267 @@
+// io::matrix_reader — Adjacency matrix storage and access
+//
+// Fixed-capacity 200x200 adjacency matrix for brain connectome data.
+// Designed for ABIDE-I CC200 parcellation (200 ROIs).
+//
+// Since Sounio's JIT cannot do file I/O (integer FFI silently terminates),
+// matrices are populated programmatically — either from hardcoded data
+// or from procedural generators that model connectome statistics.
+//
+// Reference:
+//   - ABIDE-I dataset: Di Martino et al., Mol Psychiatry 2014
+//   - CC200 atlas: Craddock et al., Hum Brain Mapp 2012
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn mr_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ============================================================================
+// ADJACENCY MATRIX — 200x200 flattened
+// ============================================================================
+
+pub struct AdjMatrix {
+    data: [f64; 40000]     // 200*200 flattened row-major
+    n: i64                 // actual dimension (max 200)
+}
+
+fn matrix_new(n: i64) -> AdjMatrix {
+    AdjMatrix { data: [0.0; 40000], n: n }
+}
+
+fn matrix_idx(n: i64, i: i64, j: i64) -> i64 { i * n + j }
+
+pub fn matrix_get(m: AdjMatrix, i: i64, j: i64) -> f64 with Panic {
+    m.data[matrix_idx(m.n, i, j) as usize]
+}
+
+pub fn matrix_set(m: AdjMatrix, i: i64, j: i64, val: f64) -> AdjMatrix with Mut, Panic {
+    var out = m
+    out.data[matrix_idx(m.n, i, j) as usize] = val
+    out
+}
+
+// Set symmetric: m[i,j] = m[j,i] = val
+pub fn matrix_set_sym(m: AdjMatrix, i: i64, j: i64, val: f64) -> AdjMatrix with Mut, Panic {
+    var out = m
+    out.data[matrix_idx(m.n, i, j) as usize] = val
+    out.data[matrix_idx(m.n, j, i) as usize] = val
+    out
+}
+
+// ============================================================================
+// MATRIX STATISTICS
+// ============================================================================
+
+// Count edges above threshold
+pub fn matrix_edge_count(m: AdjMatrix, threshold: f64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < m.n {
+        var j: i64 = i + 1
+        while j < m.n {
+            if matrix_get(m, i, j) > threshold {
+                count = count + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Node degree (number of edges above threshold)
+pub fn matrix_degree(m: AdjMatrix, node: i64, threshold: f64) -> i64 with Mut, Panic, Div {
+    var deg: i64 = 0
+    var j: i64 = 0
+    while j < m.n {
+        if j != node && matrix_get(m, node, j) > threshold {
+            deg = deg + 1
+        }
+        j = j + 1
+    }
+    deg
+}
+
+// Mean edge weight (above threshold)
+pub fn matrix_mean_weight(m: AdjMatrix, threshold: f64) -> f64 with Mut, Panic, Div {
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < m.n {
+        var j: i64 = i + 1
+        while j < m.n {
+            let w = matrix_get(m, i, j)
+            if w > threshold {
+                sum = sum + w
+                count = count + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if count > 0 { sum / (count as f64) } else { 0.0 }
+}
+
+// Density: fraction of possible edges that are above threshold
+pub fn matrix_density(m: AdjMatrix, threshold: f64) -> f64 with Mut, Panic, Div {
+    let edges = matrix_edge_count(m, threshold)
+    let possible = (m.n * (m.n - 1)) / 2
+    if possible > 0 { (edges as f64) / (possible as f64) } else { 0.0 }
+}
+
+// ============================================================================
+// THRESHOLD AND BINARIZE
+// ============================================================================
+
+// Return a new matrix with entries below threshold set to 0
+pub fn matrix_threshold(m: AdjMatrix, threshold: f64) -> AdjMatrix with Mut, Panic, Div {
+    var out = m
+    var i: i64 = 0
+    while i < m.n {
+        var j: i64 = 0
+        while j < m.n {
+            let idx = matrix_idx(m.n, i, j) as usize
+            if out.data[idx] < threshold {
+                out.data[idx] = 0.0
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// Binarize: entries above threshold become 1.0, rest become 0.0
+pub fn matrix_binarize(m: AdjMatrix, threshold: f64) -> AdjMatrix with Mut, Panic, Div {
+    var out = matrix_new(m.n)
+    var i: i64 = 0
+    while i < m.n {
+        var j: i64 = 0
+        while j < m.n {
+            if matrix_get(m, i, j) > threshold {
+                out.data[matrix_idx(m.n, i, j) as usize] = 1.0
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// PROCEDURAL CONNECTOME GENERATOR
+// ============================================================================
+//
+// Generates synthetic connectome matrices that model key statistical
+// properties of resting-state fMRI correlation matrices:
+// - Small-world topology (high clustering, short path length)
+// - Power-law degree distribution (hubs)
+// - Community structure (functional modules)
+// - Weight distribution resembling Fisher-z transformed correlations
+//
+// This enables computational experiments without external file I/O.
+
+// LCG for reproducible randomness
+fn mr_lcg(s: i64) -> i64 { s * 6364136223846793005 + 1442695040888963407 }
+
+fn mr_lcg_f64(s: i64) -> f64 with Div, Panic {
+    let v = if s < 0 { 0 - s } else { s }
+    (v as f64) / 9223372036854775807.0
+}
+
+// Generate synthetic connectome with modular small-world properties
+//   n:            number of nodes (max 200)
+//   n_modules:    number of functional modules (e.g. 5 = DMN, VIS, SM, FP, ATT)
+//   p_within:     connection probability within module (0.6-0.8 typical)
+//   p_between:    connection probability between modules (0.1-0.3 typical)
+//   seed:         random seed
+pub fn generate_connectome(
+    n: i64, n_modules: i64,
+    p_within: f64, p_between: f64,
+    seed: i64
+) -> AdjMatrix with Mut, Panic, Div {
+    var m = matrix_new(n)
+    var s = seed
+
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            s = mr_lcg(s)
+            let r = mr_lcg_f64(s)
+
+            // Determine module membership (equal-sized modules)
+            let mod_i = i * n_modules / n
+            let mod_j = j * n_modules / n
+            let same_module = mod_i == mod_j
+
+            // Connection probability depends on module membership
+            let p = if same_module { p_within } else { p_between }
+
+            if r < p {
+                // Generate edge weight: Fisher-z like (0.2 to 0.8)
+                s = mr_lcg(s)
+                let w = 0.2 + 0.6 * mr_lcg_f64(s)
+                m = matrix_set_sym(m, i, j, w)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    m
+}
+
+// Generate a "typical developing" (TD) connectome
+// Higher modularity, more balanced hub distribution
+pub fn generate_td_connectome(n: i64, seed: i64) -> AdjMatrix with Mut, Panic, Div {
+    generate_connectome(n, 5, 0.70, 0.15, seed)
+}
+
+// Generate an "ASD-like" connectome
+// Reduced modularity: more long-range connections, fewer within-module
+// This models the hypo-connectivity within modules / hyper-connectivity
+// between modules pattern reported in ASD literature.
+// Reference: Supekar et al., Brain Connect 2013
+pub fn generate_asd_connectome(n: i64, seed: i64) -> AdjMatrix with Mut, Panic, Div {
+    generate_connectome(n, 5, 0.55, 0.25, seed)
+}
+
+// ============================================================================
+// SMALL TEST MATRICES
+// ============================================================================
+
+// 6-node ring graph for basic testing
+pub fn make_test_ring6() -> AdjMatrix with Mut, Panic {
+    var m = matrix_new(6)
+    m = matrix_set_sym(m, 0, 1, 0.8)
+    m = matrix_set_sym(m, 1, 2, 0.7)
+    m = matrix_set_sym(m, 2, 3, 0.9)
+    m = matrix_set_sym(m, 3, 4, 0.6)
+    m = matrix_set_sym(m, 4, 5, 0.75)
+    m = matrix_set_sym(m, 5, 0, 0.85)
+    m
+}
+
+// 8-node two-community graph (4+4 with weak bridge)
+pub fn make_test_bimodular8() -> AdjMatrix with Mut, Panic {
+    var m = matrix_new(8)
+    // Community 1: nodes 0-3 (dense)
+    m = matrix_set_sym(m, 0, 1, 0.9)
+    m = matrix_set_sym(m, 0, 2, 0.8)
+    m = matrix_set_sym(m, 0, 3, 0.7)
+    m = matrix_set_sym(m, 1, 2, 0.85)
+    m = matrix_set_sym(m, 1, 3, 0.6)
+    m = matrix_set_sym(m, 2, 3, 0.75)
+    // Community 2: nodes 4-7 (dense)
+    m = matrix_set_sym(m, 4, 5, 0.85)
+    m = matrix_set_sym(m, 4, 6, 0.7)
+    m = matrix_set_sym(m, 4, 7, 0.65)
+    m = matrix_set_sym(m, 5, 6, 0.9)
+    m = matrix_set_sym(m, 5, 7, 0.8)
+    m = matrix_set_sym(m, 6, 7, 0.75)
+    // Bridge: one weak inter-community edge
+    m = matrix_set_sym(m, 3, 4, 0.3)
+    m
+}

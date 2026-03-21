@@ -1,0 +1,426 @@
+// hypercomplex_graph::orc — Ollivier-Ricci Curvature for Brain Networks
+//
+// Computes discrete Ricci curvature on graphs, following the Lin-Lu-Yau
+// (LLY) approximation of Ollivier-Ricci curvature. This is the main
+// geometric tool for Paper 4: Brain ORC + Associator Field.
+//
+// For a graph G and edge (u,v):
+//   ORC(u,v) = 1 - W_1(mu_u, mu_v) / d(u,v)
+//
+// where mu_u is the uniform distribution on neighbors of u and W_1 is
+// the Wasserstein-1 (earth mover's) distance.
+//
+// The LLY simplification avoids solving the full optimal transport:
+//   LLY(u,v) = 2/d_max - 2/(d_u * d_v) * |N(u) intersect N(v)|
+//            + 2/(d_max) * (1/d_u + 1/d_v - 2/(d_u*d_v))
+//
+// For this implementation we use the exact discrete LLY formula:
+//   kappa(u,v) = (2/d_u + 2/d_v - 2) + |triangle(u,v)|*(1/d_u + 1/d_v)
+//             where d_u = deg(u), d_v = deg(v), triangle = common neighbors
+//
+// Simplified LLY (Lin-Lu-Yau 2011):
+//   kappa(u,v) = |triangle(u,v)| * (1/d_u + 1/d_v) - (1 - 1/d_u - 1/d_v)
+//
+// Phase classification:
+//   kappa > 0  → sphere-like (positive curvature)
+//   kappa = 0  → flat (Euclidean-like)
+//   kappa < 0  → hyperbolic (negative curvature)
+//
+// References:
+//   - Ollivier, "Ricci curvature of Markov chains on metric spaces",
+//     J. Funct. Anal. 256(3), 2009
+//   - Lin, Lu, Yau, "Ricci curvature of graphs",
+//     Tohoku Math. J. 63(4), 2011
+//   - Sia, Jonckheere, Lux, "Ollivier-Ricci Curvature-Based Method to
+//     Community Detection in Complex Networks", Sci Rep 9, 2019
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn orc_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn orc_sqrt(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+fn orc_max_f64(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn orc_min_f64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+// ============================================================================
+// GRAPH REPRESENTATION — binary adjacency, max 200 nodes
+// ============================================================================
+// Uses the same flat-array pattern as AdjMatrix but stores binary adjacency
+// (i32) for efficient neighbor lookups. Separate from AdjMatrix to avoid
+// carrying weight data through curvature computations.
+
+pub struct BinGraph {
+    adj: [i32; 40000]       // 200*200 binary adjacency
+    n: i64                  // node count (max 200)
+}
+
+fn bg_new(n: i64) -> BinGraph {
+    BinGraph { adj: [0; 40000], n: n }
+}
+
+fn bg_idx(n: i64, i: i64, j: i64) -> i64 { i * n + j }
+
+pub fn bg_has_edge(g: BinGraph, u: i64, v: i64) -> bool with Panic {
+    g.adj[bg_idx(g.n, u, v) as usize] == 1
+}
+
+pub fn bg_set_edge(g: BinGraph, u: i64, v: i64) -> BinGraph with Mut, Panic {
+    var out = g
+    out.adj[bg_idx(g.n, u, v) as usize] = 1
+    out.adj[bg_idx(g.n, v, u) as usize] = 1
+    out
+}
+
+// Build binary graph from weighted matrix with threshold
+pub fn bg_from_matrix(data: [f64; 40000], n: i64, threshold: f64) -> BinGraph with Mut, Panic, Div {
+    var g = bg_new(n)
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            let w = data[(i * n + j) as usize]
+            if w > threshold {
+                g = bg_set_edge(g, i, j)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    g
+}
+
+// ============================================================================
+// DEGREE AND NEIGHBORS
+// ============================================================================
+
+pub fn bg_degree(g: BinGraph, v: i64) -> i64 with Mut, Panic, Div {
+    var d: i64 = 0
+    var j: i64 = 0
+    while j < g.n {
+        if g.adj[bg_idx(g.n, v, j) as usize] == 1 { d = d + 1 }
+        j = j + 1
+    }
+    d
+}
+
+// Count common neighbors: |N(u) intersect N(v)|
+pub fn bg_common_neighbors(g: BinGraph, u: i64, v: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var w: i64 = 0
+    while w < g.n {
+        if w != u && w != v {
+            let u_w = g.adj[bg_idx(g.n, u, w) as usize]
+            let v_w = g.adj[bg_idx(g.n, v, w) as usize]
+            if u_w == 1 && v_w == 1 {
+                count = count + 1
+            }
+        }
+        w = w + 1
+    }
+    count
+}
+
+// Count triangles through edge (u,v) — same as common neighbors when edge exists
+pub fn bg_triangles(g: BinGraph, u: i64, v: i64) -> i64 with Mut, Panic, Div {
+    bg_common_neighbors(g, u, v)
+}
+
+// ============================================================================
+// LIN-LU-YAU RICCI CURVATURE
+// ============================================================================
+//
+// For edge (u,v) with degrees d_u, d_v, and t = |triangles(u,v)|:
+//
+//   kappa_LLY(u,v) = t * (1/d_u + 1/d_v) + (1/d_u + 1/d_v - 1)
+//                   = (1/d_u + 1/d_v) * (t + 1) - 1
+//
+// This is the "lazy random walk" LLY formula. For the alpha=0 version:
+//   kappa(u,v) = (t/d_u + t/d_v) - 1 + 1/d_u + 1/d_v
+//
+// We implement the standard formulation from Lin-Lu-Yau 2011 Theorem 1.1.
+
+pub fn orc_lly_edge(g: BinGraph, u: i64, v: i64) -> f64 with Mut, Panic, Div {
+    let d_u = bg_degree(g, u)
+    let d_v = bg_degree(g, v)
+    if d_u == 0 || d_v == 0 { return 0.0 }
+
+    let t = bg_common_neighbors(g, u, v)
+
+    // LLY curvature: kappa(u,v) = t*(1/d_u + 1/d_v) + 1/d_u + 1/d_v - 1
+    let inv_du = 1.0 / (d_u as f64)
+    let inv_dv = 1.0 / (d_v as f64)
+    let tri_term = (t as f64) * (inv_du + inv_dv)
+    tri_term + inv_du + inv_dv - 1.0
+}
+
+// ============================================================================
+// CURVATURE DISTRIBUTION OVER ALL EDGES
+// ============================================================================
+
+// Store per-edge curvature values (max 4000 edges for a 200-node graph)
+pub struct OrcResult {
+    // Per-edge data (flattened: edge_u[k], edge_v[k], kappa[k])
+    edge_u: [i64; 4000]
+    edge_v: [i64; 4000]
+    kappa:  [f64; 4000]
+    n_edges: i64
+
+    // Distribution statistics
+    mean_kappa: f64
+    min_kappa: f64
+    max_kappa: f64
+    std_kappa: f64
+
+    // Phase counts
+    n_positive: i64     // kappa > epsilon
+    n_zero: i64         // |kappa| <= epsilon
+    n_negative: i64     // kappa < -epsilon
+}
+
+fn orc_result_empty() -> OrcResult {
+    OrcResult {
+        edge_u: [0; 4000], edge_v: [0; 4000], kappa: [0.0; 4000],
+        n_edges: 0,
+        mean_kappa: 0.0, min_kappa: 0.0, max_kappa: 0.0, std_kappa: 0.0,
+        n_positive: 0, n_zero: 0, n_negative: 0,
+    }
+}
+
+// Compute LLY curvature for all edges in the graph
+pub fn orc_compute(g: BinGraph) -> OrcResult with Mut, Panic, Div {
+    var result = orc_result_empty()
+    var sum_k: f64 = 0.0
+    var sum_k2: f64 = 0.0
+    var min_k: f64 = 1000.0
+    var max_k: f64 = 0.0 - 1000.0
+    let epsilon = 0.01
+
+    var u: i64 = 0
+    while u < g.n {
+        var v: i64 = u + 1
+        while v < g.n {
+            if bg_has_edge(g, u, v) && result.n_edges < 4000 {
+                let k = orc_lly_edge(g, u, v)
+                let idx = result.n_edges as usize
+                result.edge_u[idx] = u
+                result.edge_v[idx] = v
+                result.kappa[idx] = k
+                result.n_edges = result.n_edges + 1
+
+                sum_k = sum_k + k
+                sum_k2 = sum_k2 + k * k
+                if k < min_k { min_k = k }
+                if k > max_k { max_k = k }
+
+                if k > epsilon { result.n_positive = result.n_positive + 1 }
+                else if k < (0.0 - epsilon) { result.n_negative = result.n_negative + 1 }
+                else { result.n_zero = result.n_zero + 1 }
+            }
+            v = v + 1
+        }
+        u = u + 1
+    }
+
+    if result.n_edges > 0 {
+        let ne = result.n_edges as f64
+        result.mean_kappa = sum_k / ne
+        result.min_kappa = min_k
+        result.max_kappa = max_k
+        // std = sqrt(E[X^2] - E[X]^2)
+        let var_k = sum_k2 / ne - (sum_k / ne) * (sum_k / ne)
+        result.std_kappa = orc_sqrt(orc_abs(var_k))
+    }
+    result
+}
+
+// ============================================================================
+// PHASE CLASSIFICATION
+// ============================================================================
+//
+// Classify the curvature distribution into geometric phases:
+//   SPHERICAL (0):  majority positive curvature → densely connected core
+//   FLAT (1):       curvature near zero → lattice-like regularity
+//   HYPERBOLIC (2): majority negative curvature → tree-like, sparse
+//   MIXED (3):      no dominant phase → heterogeneous geometry
+//
+// The hypothesis for Paper 4:
+//   TD (typically developing) brains → more SPHERICAL (stronger communities)
+//   ASD brains → more MIXED or HYPERBOLIC (disrupted module boundaries)
+
+pub fn orc_phase_classify(result: OrcResult) -> i64 with Div, Panic {
+    if result.n_edges == 0 { return 3 }  // MIXED by default
+
+    let ne = result.n_edges as f64
+    let frac_pos = (result.n_positive as f64) / ne
+    let frac_neg = (result.n_negative as f64) / ne
+
+    // Dominant phase: >50% of edges
+    if frac_pos > 0.5 { return 0 }      // SPHERICAL
+    if frac_neg > 0.5 { return 2 }      // HYPERBOLIC
+
+    // Near-flat: mean curvature near zero AND low variance
+    if orc_abs(result.mean_kappa) < 0.05 && result.std_kappa < 0.1 {
+        return 1                          // FLAT
+    }
+
+    3  // MIXED
+}
+
+// ============================================================================
+// CURVATURE ENTROPY — measures phase heterogeneity
+// ============================================================================
+// Shannon entropy of the curvature distribution (binned into K bins).
+// High entropy = heterogeneous curvature = complex geometry.
+// Low entropy = uniform curvature = regular geometry.
+//
+// For brain networks, ASD may show HIGHER entropy (more geometric disorder).
+
+pub fn orc_curvature_entropy(result: OrcResult, n_bins: i64) -> f64 with Mut, Panic, Div {
+    if result.n_edges == 0 || n_bins <= 0 { return 0.0 }
+
+    // Bin curvature values into n_bins bins over [min_kappa, max_kappa]
+    var bins: [i64; 64] = [0; 64]
+    let actual_bins = if n_bins > 64 { 64 } else { n_bins }
+    let range = result.max_kappa - result.min_kappa
+    if range < 1e-12 { return 0.0 }  // all same curvature
+
+    var i: i64 = 0
+    while i < result.n_edges {
+        let k = result.kappa[i as usize]
+        var bin = ((k - result.min_kappa) / range * (actual_bins as f64)) as i64
+        if bin >= actual_bins { bin = actual_bins - 1 }
+        if bin < 0 { bin = 0 }
+        bins[bin as usize] = bins[bin as usize] + 1
+        i = i + 1
+    }
+
+    // Shannon entropy: H = -sum p_i * log(p_i)
+    // Use log2 approximation: log2(x) ~ (x - 1) * (1 + (x-1)/2 * ...)
+    // For practical purposes, count non-empty bins and use uniform proxy
+    var n_nonempty: i64 = 0
+    var entropy: f64 = 0.0
+    let ne = result.n_edges as f64
+
+    var b: i64 = 0
+    while b < actual_bins {
+        if bins[b as usize] > 0 {
+            n_nonempty = n_nonempty + 1
+            let p = (bins[b as usize] as f64) / ne
+            // log2(p) approximation using repeated squaring trick:
+            // -p*log2(p) = p * log2(1/p)
+            // For entropy calculation, we use: -p*ln(p) / ln(2)
+            // Approximate ln(p) via ln(1 + (p-1)) Taylor expansion
+            // Better approach: use the identity entropy = log2(n) - D_KL
+            // Simplest correct approach: just count bits
+            // We approximate -p*log2(p) using the relation for p = k/N:
+            //   -p*log2(p) = (k/N) * log2(N/k) = (k/N)*(log2(N) - log2(k))
+            // We approximate log2 via successive halving
+            entropy = entropy + p * orc_approx_log2_inv(p)
+        }
+        b = b + 1
+    }
+    entropy
+}
+
+// Approximate log2(1/p) for 0 < p <= 1 using Newton's method on 2^x = 1/p
+fn orc_approx_log2_inv(p: f64) -> f64 with Mut, Div, Panic {
+    if p <= 0.0 { return 0.0 }
+    if p >= 1.0 { return 0.0 }
+    // log2(1/p) = -log2(p)
+    // Use the identity: log2(x) = (ln x) / ln 2
+    // Approximate ln(x) for x in (0,1]: ln(x) = -sum_{k=1}^{inf} (1-x)^k / k
+    let inv = 1.0 / p
+    // For inv > 1: count powers of 2
+    var x = inv
+    var result: f64 = 0.0
+    // Integer part
+    while x >= 2.0 {
+        x = x / 2.0
+        result = result + 1.0
+    }
+    // Fractional part: x in [1, 2), log2(x) ~ (x - 1) - (x-1)^2/2 + ...
+    // Using 3-term Taylor: log2(x) ~ (x-1)/ln(2) - (x-1)^2/(2*ln2) + (x-1)^3/(3*ln2)
+    let d = x - 1.0
+    let ln2 = 0.693147
+    result = result + (d - d * d / 2.0 + d * d * d / 3.0) / ln2
+    result
+}
+
+// ============================================================================
+// NODE-LEVEL CURVATURE — average curvature at each node
+// ============================================================================
+
+pub struct NodeOrc {
+    kappa: [f64; 200]     // average edge curvature per node
+    n: i64
+}
+
+pub fn orc_node_curvature(g: BinGraph, edge_result: OrcResult) -> NodeOrc with Mut, Panic, Div {
+    var node = NodeOrc { kappa: [0.0; 200], n: g.n }
+    var count: [i64; 200] = [0; 200]
+
+    var i: i64 = 0
+    while i < edge_result.n_edges {
+        let u = edge_result.edge_u[i as usize]
+        let v = edge_result.edge_v[i as usize]
+        let k = edge_result.kappa[i as usize]
+
+        node.kappa[u as usize] = node.kappa[u as usize] + k
+        count[u as usize] = count[u as usize] + 1
+        node.kappa[v as usize] = node.kappa[v as usize] + k
+        count[v as usize] = count[v as usize] + 1
+
+        i = i + 1
+    }
+
+    // Average
+    var j: i64 = 0
+    while j < g.n {
+        if count[j as usize] > 0 {
+            node.kappa[j as usize] = node.kappa[j as usize] / (count[j as usize] as f64)
+        }
+        j = j + 1
+    }
+    node
+}
+
+// ============================================================================
+// CURVATURE COMPARISON — for ASD vs TD analysis
+// ============================================================================
+
+pub struct OrcComparison {
+    mean_diff: f64          // mean(kappa_A) - mean(kappa_B)
+    entropy_diff: f64       // entropy(A) - entropy(B)
+    phase_a: i64            // phase classification of A
+    phase_b: i64            // phase classification of B
+    frac_pos_diff: f64      // fraction positive curvature difference
+    frac_neg_diff: f64      // fraction negative curvature difference
+}
+
+pub fn orc_compare(a: OrcResult, b: OrcResult) -> OrcComparison with Mut, Panic, Div {
+    let ent_a = orc_curvature_entropy(a, 20)
+    let ent_b = orc_curvature_entropy(b, 20)
+
+    let frac_pos_a = if a.n_edges > 0 { (a.n_positive as f64) / (a.n_edges as f64) } else { 0.0 }
+    let frac_pos_b = if b.n_edges > 0 { (b.n_positive as f64) / (b.n_edges as f64) } else { 0.0 }
+    let frac_neg_a = if a.n_edges > 0 { (a.n_negative as f64) / (a.n_edges as f64) } else { 0.0 }
+    let frac_neg_b = if b.n_edges > 0 { (b.n_negative as f64) / (b.n_edges as f64) } else { 0.0 }
+
+    OrcComparison {
+        mean_diff: a.mean_kappa - b.mean_kappa,
+        entropy_diff: ent_a - ent_b,
+        phase_a: orc_phase_classify(a),
+        phase_b: orc_phase_classify(b),
+        frac_pos_diff: frac_pos_a - frac_pos_b,
+        frac_neg_diff: frac_neg_a - frac_neg_b,
+    }
+}

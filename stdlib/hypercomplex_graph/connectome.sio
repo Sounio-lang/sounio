@@ -1,0 +1,420 @@
+// hypercomplex_graph::connectome — Connectome to Octonion-Labeled Graph
+//
+// Converts adjacency matrices (from matrix_reader) into octonion-labeled
+// graphs (from oct_graph) for associator field analysis.
+//
+// The key bridge for Paper 4: real brain connectivity data → algebraic
+// structure (octonion labels) → geometric invariant (associator field).
+//
+// Labeling strategy:
+//   Each edge (u,v) in the connectome receives an octonion label based on
+//   two principles:
+//   1. The MAGNITUDE is the edge weight (functional connectivity strength)
+//   2. The DIRECTION (which octonion basis element) encodes topology:
+//      - Use the 7 imaginary basis elements cyclically: e_((u+v) mod 7 + 1)
+//      - This ensures different edges get different algebraic "colors"
+//      - The non-associativity of these labels reveals structural patterns
+//
+// For subgraph analysis (OctGraph is max 32 nodes), we extract
+// communities/ROI clusters from the full 200-node connectome and
+// build OctGraphs per community.
+//
+// References:
+//   - Baez 2002, "The Octonions"
+//   - Sporns 2011, "Networks of the Brain" (community structure)
+
+// ============================================================================
+// MATH HELPERS (inlined per Sounio convention)
+// ============================================================================
+
+fn cn_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn cn_sqrt(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+// ============================================================================
+// OCTONION (inlined — cannot import across modules in JIT)
+// ============================================================================
+
+struct Oct {
+    e: [f64; 8]
+}
+
+fn oct_zero() -> Oct { Oct { e: [0.0; 8] } }
+
+fn oct_unit(idx: i64) -> Oct with Mut, Panic {
+    var o = Oct { e: [0.0; 8] }
+    if idx >= 0 && idx < 8 { o.e[idx as usize] = 1.0 }
+    o
+}
+
+fn oct_scale(o: Oct, s: f64) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = o.e[i as usize] * s; i = i + 1 }
+    r
+}
+
+fn oct_sub(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = a.e[i as usize] - b.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_conjugate(o: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    r.e[0] = o.e[0]
+    var i: i64 = 1
+    while i < 8 { r.e[i as usize] = 0.0 - o.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_norm_sq(o: Oct) -> f64 with Mut, Panic, Div {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 { s = s + o.e[i as usize] * o.e[i as usize]; i = i + 1 }
+    s
+}
+
+fn oct_norm(o: Oct) -> f64 with Mut, Panic, Div { cn_sqrt(oct_norm_sq(o)) }
+
+fn oct_fano_index(i: i64, j: i64) -> i64 with Mut, Panic, Div {
+    if i == j { return 0 }
+    var t: [i64; 21] = [0; 21]
+    t[0]=1;t[1]=2;t[2]=4; t[3]=2;t[4]=3;t[5]=5; t[6]=3;t[7]=4;t[8]=6
+    t[9]=4;t[10]=5;t[11]=7; t[12]=5;t[13]=6;t[14]=1; t[15]=6;t[16]=7;t[17]=2
+    t[18]=7;t[19]=1;t[20]=3
+    var k: i64 = 0
+    while k < 7 {
+        let a=t[(k*3) as usize]; let b=t[(k*3+1) as usize]; let c=t[(k*3+2) as usize]
+        if (i==a&&j==b)||(i==b&&j==c)||(i==c&&j==a) {
+            if i==a&&j==b {return c}; if i==b&&j==c {return a}; return b
+        }
+        if (i==b&&j==a)||(i==c&&j==b)||(i==a&&j==c) {
+            if i==b&&j==a {return c}; if i==c&&j==b {return a}; return b
+        }
+        k=k+1
+    }
+    0
+}
+
+fn oct_fano_sign(i: i64, j: i64) -> f64 with Mut, Panic, Div {
+    if i==j {return -1.0}; if i==0||j==0 {return 1.0}
+    var t: [i64; 21] = [0; 21]
+    t[0]=1;t[1]=2;t[2]=4; t[3]=2;t[4]=3;t[5]=5; t[6]=3;t[7]=4;t[8]=6
+    t[9]=4;t[10]=5;t[11]=7; t[12]=5;t[13]=6;t[14]=1; t[15]=6;t[16]=7;t[17]=2
+    t[18]=7;t[19]=1;t[20]=3
+    var k: i64 = 0
+    while k < 7 {
+        let a=t[(k*3) as usize]; let b=t[(k*3+1) as usize]; let c=t[(k*3+2) as usize]
+        if (i==a&&j==b)||(i==b&&j==c)||(i==c&&j==a) {return 1.0}
+        if (i==b&&j==a)||(i==c&&j==b)||(i==a&&j==c) {return -1.0}
+        k=k+1
+    }
+    0.0
+}
+
+fn oct_mul(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var result = oct_zero()
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let coeff = a.e[i as usize] * b.e[j as usize]
+            if i==0&&j==0 { result.e[0] = result.e[0] + coeff }
+            else if i==0 { result.e[j as usize] = result.e[j as usize] + coeff }
+            else if j==0 { result.e[i as usize] = result.e[i as usize] + coeff }
+            else if i==j { result.e[0] = result.e[0] - coeff }
+            else {
+                let k = oct_fano_index(i, j)
+                let sign = oct_fano_sign(i, j)
+                result.e[k as usize] = result.e[k as usize] + sign * coeff
+            }
+            j=j+1
+        }
+        i=i+1
+    }
+    result
+}
+
+fn oct_associator(a: Oct, b: Oct, c: Oct) -> Oct with Mut, Panic, Div {
+    let ab = oct_mul(a, b)
+    let bc = oct_mul(b, c)
+    oct_sub(oct_mul(ab, c), oct_mul(a, bc))
+}
+
+// ============================================================================
+// OCTGRAPH (inlined, max 32 nodes for subgraph analysis)
+// ============================================================================
+
+struct OctGraph {
+    n: i32
+    adj: [i32; 1024]       // 32x32
+    lab0: [f64; 1024]
+    lab1: [f64; 1024]
+    lab2: [f64; 1024]
+    lab3: [f64; 1024]
+    lab4: [f64; 1024]
+    lab5: [f64; 1024]
+    lab6: [f64; 1024]
+    lab7: [f64; 1024]
+}
+
+fn og_new(n: i32) -> OctGraph {
+    OctGraph {
+        n: n, adj: [0; 1024],
+        lab0: [0.0; 1024], lab1: [0.0; 1024], lab2: [0.0; 1024], lab3: [0.0; 1024],
+        lab4: [0.0; 1024], lab5: [0.0; 1024], lab6: [0.0; 1024], lab7: [0.0; 1024],
+    }
+}
+
+fn og_idx(u: i32, v: i32) -> i32 { u * 32 + v }
+
+fn og_set_edge(g: OctGraph, u: i32, v: i32, label: Oct) -> OctGraph with Mut, Panic, Div {
+    var r = g
+    let idx = og_idx(u, v) as usize
+    r.adj[idx] = 1
+    r.lab0[idx]=label.e[0]; r.lab1[idx]=label.e[1]; r.lab2[idx]=label.e[2]; r.lab3[idx]=label.e[3]
+    r.lab4[idx]=label.e[4]; r.lab5[idx]=label.e[5]; r.lab6[idx]=label.e[6]; r.lab7[idx]=label.e[7]
+    r
+}
+
+fn og_add_undir(g: OctGraph, u: i32, v: i32, label: Oct) -> OctGraph with Mut, Panic, Div {
+    var r = og_set_edge(g, u, v, label)
+    r = og_set_edge(r, v, u, oct_conjugate(label))
+    r
+}
+
+fn og_get_label(g: OctGraph, u: i32, v: i32) -> Oct with Mut, Panic {
+    let idx = og_idx(u, v) as usize
+    var o = Oct { e: [0.0; 8] }
+    o.e[0]=g.lab0[idx]; o.e[1]=g.lab1[idx]; o.e[2]=g.lab2[idx]; o.e[3]=g.lab3[idx]
+    o.e[4]=g.lab4[idx]; o.e[5]=g.lab5[idx]; o.e[6]=g.lab6[idx]; o.e[7]=g.lab7[idx]
+    o
+}
+
+fn og_degree(g: OctGraph, v: i32) -> i32 with Mut, Panic, Div {
+    var d: i32 = 0
+    var i: i32 = 0
+    while i < g.n {
+        if g.adj[og_idx(v, i) as usize] == 1 { d = d + 1 }
+        i = i + 1
+    }
+    d
+}
+
+// ============================================================================
+// LABELING STRATEGIES
+// ============================================================================
+//
+// Strategy 1: Cyclic basis labeling
+//   edge (u,v) → w * e_{(u+v) mod 7 + 1}
+//   where w = edge weight (connectivity strength)
+//   This deterministically distributes all 7 imaginary basis elements.
+//
+// Strategy 2: Weight-to-magnitude labeling
+//   edge (u,v) → oct with ||oct|| = weight, direction from topology hash
+//
+// Strategy 3: Degree-dependent labeling
+//   edge (u,v) → direction depends on (deg(u), deg(v)) mod 7
+//   This encodes hub structure into the algebraic labels.
+
+// Cyclic basis label: weight * e_{(u+v) mod 7 + 1}
+pub fn label_cyclic(u: i64, v: i64, weight: f64) -> Oct with Mut, Panic, Div {
+    let basis = (u + v) % 7 + 1
+    oct_scale(oct_unit(basis), weight)
+}
+
+// Degree-dependent label: weight * e_{(deg_u + deg_v) mod 7 + 1}
+pub fn label_degree(deg_u: i64, deg_v: i64, weight: f64) -> Oct with Mut, Panic, Div {
+    let basis = (deg_u + deg_v) % 7 + 1
+    oct_scale(oct_unit(basis), weight)
+}
+
+// Mixed label: combines node indices and weight for richer algebra
+// Real part = weight, imaginary part from cyclic basis
+pub fn label_mixed(u: i64, v: i64, weight: f64) -> Oct with Mut, Panic, Div {
+    let basis = (u + v) % 7 + 1
+    var o = oct_unit(basis)
+    o.e[0] = weight    // real part = connectivity strength
+    // Normalize to preserve weight as magnitude
+    let n = oct_norm(o)
+    if n > 1e-12 {
+        oct_scale(o, weight / n)
+    } else {
+        o
+    }
+}
+
+// ============================================================================
+// MATRIX → OCTGRAPH CONVERSION
+// ============================================================================
+//
+// Convert a subgraph of the full adjacency matrix to an OctGraph.
+// Since OctGraph is limited to 32 nodes, we take a subset of nodes
+// (e.g., a community or ROI cluster).
+
+// Convert a subgraph of nodes [node_list[0..n_nodes]] from the full matrix
+// to an OctGraph with cyclic basis labeling.
+//   matrix_data: flattened 200x200 adjacency matrix
+//   matrix_n:    dimension of the matrix (max 200)
+//   node_list:   indices of nodes to include (max 32)
+//   n_nodes:     number of nodes in node_list
+//   threshold:   edge weight threshold
+pub fn matrix_to_octgraph(
+    matrix_data: [f64; 40000], matrix_n: i64,
+    node_list: [i32; 32], n_nodes: i32,
+    threshold: f64
+) -> OctGraph with Mut, Panic, Div {
+    var g = og_new(n_nodes)
+
+    var i: i32 = 0
+    while i < n_nodes {
+        var j: i32 = i + 1
+        while j < n_nodes {
+            let orig_u = node_list[i as usize] as i64
+            let orig_v = node_list[j as usize] as i64
+            let w = matrix_data[(orig_u * matrix_n + orig_v) as usize]
+
+            if w > threshold {
+                let label = label_cyclic(orig_u, orig_v, w)
+                g = og_add_undir(g, i, j, label)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    g
+}
+
+// Convert first n nodes (n <= 32) of matrix directly to OctGraph
+pub fn matrix_head_to_octgraph(
+    matrix_data: [f64; 40000], matrix_n: i64,
+    n_nodes: i32, threshold: f64
+) -> OctGraph with Mut, Panic, Div {
+    var nodes: [i32; 32] = [0; 32]
+    var i: i32 = 0
+    while i < n_nodes && i < 32 {
+        nodes[i as usize] = i
+        i = i + 1
+    }
+    matrix_to_octgraph(matrix_data, matrix_n, nodes, n_nodes, threshold)
+}
+
+// ============================================================================
+// ASSOCIATOR FIELD ON CONNECTOME SUBGRAPH
+// ============================================================================
+
+pub struct ConnectomeAssocField {
+    // Statistics over all length-3 paths
+    count: i32
+    mean_norm: f64
+    max_norm: f64
+    energy: f64              // sum of ||[a,b,c]||^2
+    zero_count: i32          // associators near zero (alternativity channels)
+    // Per-node associator density
+    node_density: [f64; 32]  // mean associator norm for triples through each node
+    node_triple_count: [i32; 32]
+}
+
+fn caf_empty() -> ConnectomeAssocField {
+    ConnectomeAssocField {
+        count: 0, mean_norm: 0.0, max_norm: 0.0, energy: 0.0, zero_count: 0,
+        node_density: [0.0; 32], node_triple_count: [0; 32],
+    }
+}
+
+// Compute associator field over the OctGraph
+pub fn connectome_assoc_field(g: OctGraph) -> ConnectomeAssocField with Mut, Panic, Div {
+    var field = caf_empty()
+    var sum_norm: f64 = 0.0
+    var max_n: f64 = 0.0
+
+    var u: i32 = 0
+    while u < g.n {
+        var v: i32 = 0
+        while v < g.n {
+            if g.adj[og_idx(u, v) as usize] == 1 && u != v {
+                var w: i32 = 0
+                while w < g.n {
+                    if g.adj[og_idx(v, w) as usize] == 1 && v != w && w != u {
+                        var x: i32 = 0
+                        while x < g.n {
+                            if g.adj[og_idx(w, x) as usize] == 1 && w != x && x != v {
+                                let a = og_get_label(g, u, v)
+                                let b = og_get_label(g, v, w)
+                                let c = og_get_label(g, w, x)
+                                let assoc = oct_associator(a, b, c)
+                                let n = oct_norm(assoc)
+
+                                field.count = field.count + 1
+                                sum_norm = sum_norm + n
+                                field.energy = field.energy + n * n
+                                if n > max_n { max_n = n }
+                                if n < 1e-9 { field.zero_count = field.zero_count + 1 }
+
+                                // Track per-node density (middle nodes v, w)
+                                field.node_density[v as usize] = field.node_density[v as usize] + n
+                                field.node_triple_count[v as usize] = field.node_triple_count[v as usize] + 1
+                                field.node_density[w as usize] = field.node_density[w as usize] + n
+                                field.node_triple_count[w as usize] = field.node_triple_count[w as usize] + 1
+                            }
+                            x = x + 1
+                        }
+                    }
+                    w = w + 1
+                }
+            }
+            v = v + 1
+        }
+        u = u + 1
+    }
+
+    if field.count > 0 {
+        field.mean_norm = sum_norm / (field.count as f64)
+    }
+    field.max_norm = max_n
+
+    // Normalize per-node density
+    var i: i32 = 0
+    while i < g.n {
+        if field.node_triple_count[i as usize] > 0 {
+            field.node_density[i as usize] = field.node_density[i as usize] / (field.node_triple_count[i as usize] as f64)
+        }
+        i = i + 1
+    }
+    field
+}
+
+// ============================================================================
+// CONNECTOME COMPARISON — ASD vs TD associator fields
+// ============================================================================
+
+pub struct AssocComparison {
+    mean_diff: f64          // mean_A - mean_B
+    max_diff: f64           // max_A - max_B
+    energy_diff: f64        // energy_A - energy_B
+    zero_frac_a: f64        // fraction of zero associators in A
+    zero_frac_b: f64        // fraction of zero associators in B
+}
+
+pub fn compare_assoc_fields(
+    a: ConnectomeAssocField, b: ConnectomeAssocField
+) -> AssocComparison with Div, Panic {
+    let zf_a = if a.count > 0 { (a.zero_count as f64) / (a.count as f64) } else { 0.0 }
+    let zf_b = if b.count > 0 { (b.zero_count as f64) / (b.count as f64) } else { 0.0 }
+
+    AssocComparison {
+        mean_diff: a.mean_norm - b.mean_norm,
+        max_diff: a.max_norm - b.max_norm,
+        energy_diff: a.energy - b.energy,
+        zero_frac_a: zf_a,
+        zero_frac_b: zf_b,
+    }
+}
