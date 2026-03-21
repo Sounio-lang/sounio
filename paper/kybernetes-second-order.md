@@ -4,7 +4,7 @@
 
 ## Abstract
 
-We present the first executable formalization of second-order cybernetics as a programming language library. Ten modules in the Sounio language implement nine foundational theories — Spencer-Brown's Laws of Form (1969), von Foerster's eigenform theory (1976), Luhmann's observer-inclusion (1984), Maturana and Varela's autopoiesis (1972), Ashby's Law of Requisite Variety (1956), Maturana and Varela's structural coupling, Pask's conversation theory (1975), Bateson's learning levels (1972), and Maturana's languaging (1988) — together with a composition layer that wires them into a single recursive structure. We demonstrate three results: (1) all nine theories produce correct numerical outputs when executed, verified by 30+ runtime assertions across 420 lines of proof code; (2) the theories compose into one closed loop — Observer → Eigenform → Distinction → Autopoiesis → Variety → Coupling → Conversation → Learning → Languaging → Observer — with each step producing inputs for the next; and (3) the system can observe itself, with measurable cost (observer drift increases monotonically with recursion depth). The implementation comprises 2,841 lines of Sounio across 16 files, with 10 property-based invariant tests, a multi-agent ring demonstration, and a practitioner-facing therapy session example. To our knowledge, no prior work has implemented second-order cybernetics as a unified, executable, and self-referential computational system.
+We present an executable compositional formalization of second-order cybernetics in the Sounio programming language, integrating nine foundational frameworks into a single recursive architecture. Nine theory modules and one composition module implement Spencer-Brown's Laws of Form (1969), von Foerster's eigenform theory (1976), Luhmann's observer-inclusion (1984), Maturana and Varela's autopoiesis (1972), Ashby's Law of Requisite Variety (1956), structural coupling (Maturana and Varela, 1987), Pask's conversation theory (1975), Bateson's learning levels (1972), and Maturana's languaging (1988). The composition layer wires these into a closed loop — Observer → Eigenform → Distinction → Autopoiesis → Variety → Coupling → Conversation → Learning → Languaging → Observer — with each transition realized as a computable bridge function. We demonstrate three results: (1) all nine theories produce structurally consistent numerical outputs when executed, validated by 10 property-based invariant tests and 670 lines of runtime verification code; (2) the theories compose into one closed recursive structure where each step produces inputs for the next; and (3) the system can observe itself, with measurable cost (observer drift increases monotonically with recursion depth). The implementation comprises 2,393 lines of Sounio in 10 library modules, with 2,193 additional lines of tests and examples. Prior software traditions exist for computational autopoiesis (McMullin, 2004) and Conversation Theory (Pask's THOUGHTSTICKER; Pangaro, 2002). To our knowledge, no prior work has unified these nine second-order frameworks into a single recursive executable architecture with explicit observer-cost accounting and cross-module invariant testing.
 
 ---
 
@@ -197,7 +197,7 @@ Our `LanguagingPair` implements this with three mechanisms:
 
 ## 3. The Composition Layer: One Recursive Structure
 
-The tenth module, `second_order.sio`, bridges the nine theories into a single recursive loop. Table 2 lists the seven bridge functions.
+The tenth module, `second_order.sio`, bridges the nine theories into a single recursive loop. The loop contains nine transitions; seven are realized as explicit bridge functions (Table 2). The remaining two transitions — Distinction → Autopoiesis and Coupling → Conversation — are realized by the test harness passing outputs between modules, not by dedicated bridge functions, because the type transformation is trivial (the eigenform's value initializes the autopoietic components; the coupling's congruence is compared alongside the conversation's agreement).
 
 | Bridge | From → To | Function | Mechanism |
 |--------|-----------|----------|-----------|
@@ -228,9 +228,9 @@ The `CyberneticState` struct aggregates the state of the full system: which dist
 
 ## 4. Verification
 
-### 4.1 Numerical Proofs
+### 4.1 Computational Verification
 
-`cybernetic_proof.sio` (420 lines) contains nine independent proofs, one per theory. Each proof constructs inputs, runs the theory's functions, and asserts numerical properties. Key results:
+`cybernetic_proof.sio` (419 lines) contains nine independent computational checks, one per theory. Each check constructs inputs, runs the theory's functions, and validates structural properties via runtime assertions. Key results:
 
 - Eigenform convergence: 17 iterations for `(x+42)/2` from x₀ = 0
 - Observer drift: monotonically increasing over 10 observations
@@ -255,9 +255,9 @@ The `CyberneticState` struct aggregates the state of the full system: which dist
 
 All 10 invariants pass (0 failures).
 
-### 4.3 Recursive Loop Proof
+### 4.3 Recursive Loop Verification
 
-`second_order_proof.sio` (252 lines) executes the full nine-step loop:
+`second_order_proof.sio` (251 lines) executes the full nine-step loop:
 
 - Step 1: Observer finds eigenform of (x+42)/2 → converges in 15 iterations, drift > 0
 - Step 2: Converged eigenform classified as MARKED (stable distinction)
@@ -281,15 +281,16 @@ All 10 invariants pass (0 failures).
 
 ## 5. Implementation
 
-The library comprises 2,841 lines of Sounio across 16 files:
+The library comprises 4,586 lines of Sounio across 16 files:
 
 | Category | Files | Lines |
 |----------|-------|-------|
-| Core modules | 9 | 1,925 |
-| Composition layer | 1 | 360 |
-| Numerical proofs | 2 | 672 |
+| Core theory modules | 9 | 2,045 |
+| Composition layer | 1 | 348 |
+| Runtime verification | 2 | 670 |
 | Invariant tests | 1 | 486 |
 | Multi-agent demo | 1 | 312 |
+| End-to-end demo | 1 | 457 |
 | Practitioner example | 1 | 268 |
 
 Sounio's effect system (`with Mut, Div, Panic`) tracks which operations are epistemically costly — a design choice that aligns with the theory's emphasis on the cost of observation. The by-value return pattern (each function returns a new struct rather than mutating in place) makes state transitions explicit, corresponding to the theoretical distinction between organization (invariant) and structure (changeable).
@@ -405,17 +406,17 @@ The by-value return pattern (`var s = state; ... s`) makes every state transitio
 
 ## 6. Related Work
 
-**Computational autopoiesis.** McMullin (2004) simulated autopoiesis in a 2D cellular automaton; Suzuki and Ikegami (2004) used reaction-diffusion systems. These are simulations of specific autopoietic *mechanisms*, not formalizations of the *theory* of autopoiesis. Our work implements the theory — organizational closure, production relations, structural perturbation — as abstract operations applicable to any system, not a specific physical model.
+**Computational autopoiesis.** There is a substantial tradition of computational autopoiesis, reviewed comprehensively by McMullin (2004). The lineage begins with Varela, Maturana, and Uribe's (1974) tessellation automaton — a 2D cellular model where "molecules" self-organize into bounded structures. Subsequent work (Suzuki and Ikegami, 2004; Oka et al., 2009) explored reaction-diffusion and particle-based models. McMullin's own SCL (Substrate-Conscious Language) implemented autopoietic dynamics in a spatial substrate. These are simulations of specific autopoietic *mechanisms* in particular physical substrates. Our work differs in level of abstraction: we implement the *theory* of organizational closure — production relations as a directed graph, closure as cycle existence — as abstract operations applicable to any system, not a specific spatial model. The DFS cycle detection in our `check_closure` formalizes the *definition* of autopoiesis; McMullin's tessellation automaton demonstrates a *realization* of it. The two approaches are complementary.
 
-**Cybernetic simulation frameworks.** Pangaro (2002) discussed software implementations of conversation theory; Glanville (1997) explored cybernetics and design. Dubberly and Pangaro (2015) created interaction models based on conversation theory. These are design frameworks and interaction models, not executable formalizations with numerical verification.
+**Conversation Theory software.** Pask's own THOUGHTSTICKER system (Pask, 1975) and its successor CASTE were direct software implementations of Conversation Theory, used in educational contexts. Pangaro's thesis (1987) documents these as working systems capable of modeling Lp/Lp* procedural descriptions. Pangaro (2002) and Dubberly and Pangaro (2015) developed interaction models and design frameworks based on CT. Our conversation module does not attempt to replace THOUGHTSTICKER's procedural modeling — we acknowledge in §2.7 that our implementation uses scalar values, not Pask's procedural Lp/Lp*. Our contribution is different: we compose conversation with eight other frameworks (observer-inclusion, variety, learning levels, etc.) into a recursive architecture, which THOUGHTSTICKER does not attempt.
 
-**Algebraic cybernetics.** Kauffman (2003, 2005) provided mathematical formalization of eigenforms and Laws of Form in papers. Our work makes these formalizations executable — the algebraic identities are verified by running code, not by reading proofs.
+**Algebraic cybernetics.** Kauffman (2003, 2005) provided mathematical formalization of eigenforms and Laws of Form, with explicit connections between them. Our work makes these formalizations executable — the algebraic identities are verified by running code, not by reading proofs. Kauffman's identification of eigenforms with distinctions (2005, §4) directly informs our `eigenform_as_distinction` bridge.
 
 **Observer-dependent computation.** The concept of observer-dependent types appears in the quantum computing literature (Abramsky and Coecke, 2004) and in some dependent type theories. Our approach is simpler and more practical: the observer is a runtime value whose drift accumulates with each observation, enforced by the type system's requirement to accept the updated observer.
 
 **Agent-based modeling frameworks.** NetLogo (Wilensky, 1999), Mesa (Kazil et al., 2020), and Repast (North et al., 2013) are the dominant computational tools in applied cybernetics and systems science. These frameworks simulate *specific systems* — a population of agents following behavioral rules in an environment. Our work is complementary: it formalizes the *theory* applicable to any system, not the dynamics of a particular system. A NetLogo model of organizational autopoiesis would encode specific production rules; our module encodes the *definition* of organizational closure (cycle detection) and lets the user supply the production rules. The two approaches can be composed: an ABM could use our variety module to check whether its agents collectively satisfy Ashby's Law, or our conversation module to model agent-agent dialogue.
 
-**No prior work, to our knowledge, implements all nine theories in a single framework, composes them into a recursive loop, or demonstrates computational self-observation with measurable cost.**
+**Summary.** Prior software traditions exist for individual cybernetic theories: computational autopoiesis (Varela et al., 1974; McMullin, 2004), Conversation Theory (THOUGHTSTICKER; Pangaro, 2002), and algebraic formalization of Laws of Form (Kauffman, 2005). Our contribution is not the first computational work in any single tradition, but the first *unified recursive composition* of nine frameworks into a single architecture with explicit observer-cost accounting, cross-module bridge functions, and property-based invariant verification.
 
 ---
 
@@ -445,7 +446,43 @@ The construction of the loop Observer → Eigenform → Distinction → ... → 
 
 - **`observe_self`: "The system can observe itself, at a cost."** See Section 7.3 for a detailed discussion of what this means and what it does not mean.
 
+**Epistemic status of the bridges.** The bridges are not claimed as canonical identifications in the historical literature. They fall into three categories:
+
+| Bridge | Status | Justification |
+|--------|--------|---------------|
+| `observe_eigenform` | **Canonical formalization** | Von Foerster explicitly defines eigenforms as products of recursive observation |
+| `assess_viability` | **Canonical formalization** | Ashby's Law is the standard prerequisite for organizational survival |
+| `eigenform_as_distinction` | **Operative bridge hypothesis** | Basin-boundary identification follows Kauffman (2005, §4) but is our operationalization |
+| `coupling_is_conversation` | **Operative bridge hypothesis** | Plausible but threshold-dependent; the boundary between coupling and conversation is a continuum |
+| `diagnose_conversation` | **Operative bridge hypothesis** | Novel meta-bridge linking Pask's stalls to Bateson's hierarchy |
+| `can_learn_in_language` | **Interpretive mapping** | Maturana claims learning occurs in languaging; our check of domain stability + double bind is one operationalization among several possible |
+| `observe_self` | **Partial realization** | Captures cost of self-observation but not full recursive self-application (see §7.3) |
+
 These identifications are falsifiable. If a theorist disagrees that eigenform convergence should be classified as MARKED (rather than, say, AUTONOMOUS), they can change `eigenform_as_distinction` and observe the consequences downstream. The recursive loop makes disagreements *testable* rather than merely debatable.
+
+### 3.1 Formal Propositions
+
+We state five propositions that the implementation satisfies. These are modest formal claims, verified computationally across the test suites.
+
+**Proposition 1** (Organizational closure). *`check_closure(sys)` returns true if and only if the active-component subgraph of `sys.relations` contains at least one directed cycle.*
+
+Verified by: circular network 0→1→2→0 returns true; linear chain 0→1→2 returns false; deactivating a cycle node changes true → false. DFS cycle detection is standard (Cormen et al., 2009).
+
+**Proposition 2** (Observer variance monotonicity). *Under non-negative drift increments (`drift_rate ≥ 0`), the total variance returned by `make_observation` is monotonically non-decreasing across consecutive calls with the same measurement_variance.*
+
+Verified by: 150 cases (3 drift rates × 50 observations), all monotone. Follows from: total_variance = measurement_variance + drift² + budget_penalty, where drift is cumulative and budget_penalty is non-negative.
+
+**Proposition 3** (Conversation boundedness). *If the adaptive trust weight is bounded in [0.1, 0.5] and updates are convex combinations, then `p_value` and `q_value` remain within the convex hull of their initial values for all rounds.*
+
+Verified by: three extreme-case runs (P=10/Q=90, P=0/Q=1000, P=−100/Q=100); shared_understanding always lies between initial extremes.
+
+**Proposition 4** (Self-observation cost). *`observe_self(state, obs)` strictly increases `recursion_depth` by 1, and if `obs.drift_rate > 0`, `observer_drift` is strictly positive after any call.*
+
+Verified by: second_order_proof.sio Step 9 (recursion_depth: 0→1→2, drift > 0).
+
+**Proposition 5** (Variety deficit correctness). *`has_requisite_variety(vs)` returns true if and only if H(R) ≥ H(E) − H(O), where H denotes Shannon entropy computed by `shannon_entropy` over the recorded frequency histograms.*
+
+Verified by: sufficient case (8 reg / 6 env / 2 outcome → deficit ≥ 0) and insufficient case (3 reg / 6 env / 2 outcome → deficit < 0).
 
 ### 7.3 What Self-Observation Costs — and What It Cannot Yet Do
 
@@ -541,6 +578,14 @@ Spencer-Brown, G. (1969). *Laws of Form*. Allen and Unwin.
 Suzuki, K. and Ikegami, T. (2004). "Shapes and self-movement in protocell systems." *Artificial Life*, 10(2), 129-141.
 
 Varela, F. J. (1975). "A calculus for self-reference." *International Journal of General Systems*, 2(1), 5-24.
+
+Varela, F. J., Maturana, H. R., and Uribe, R. (1974). "Autopoiesis: The organization of living systems, its characterization and a model." *Biosystems*, 5(4), 187-196.
+
+Oka, M., Hashimoto, T., and Ikegami, T. (2009). "Self-organization of autopoietic dynamics in an artificial chemistry." *Artificial Life*, 15(4), 373-393.
+
+Cormen, T. H., Leiserson, C. E., Rivest, R. L., and Stein, C. (2009). *Introduction to Algorithms*, 3rd ed. MIT Press.
+
+Pangaro, P. (1987). "Conversation theory as a tool for educational design." PhD thesis, Brunel University.
 
 von Foerster, H. (1979). "Cybernetics of cybernetics." In K. Krippendorff (Ed.), *Communication and Control in Society*. Gordon and Breach.
 
