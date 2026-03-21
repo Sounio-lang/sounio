@@ -5603,12 +5603,13 @@ fn mc_emit_lea_slot(slot: i64) with Mut {
 
 // --- Emit struct copy: copy flat_size qwords from [rax] to stack slots ---
 fn mc_emit_struct_copy_from_rax(dst_slot: i64, flat_size: i64) with Mut {
+    // Stack structs grow downward: field N is at [base - N*8]
     var i: i64 = 0
     while i < flat_size {
         if i == 0 {
             we(0x48); we(0x8b); we(0x08)  // mov rcx, [rax]
         } else {
-            let off = i * 8
+            let off = 0 - (i * 8)  // negative offset for downward growth
             we(0x48); we(0x8b); we(0x88)  // mov rcx, [rax + disp32]
             we32(off)
         }
@@ -6313,23 +6314,24 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
             dsi = dsi + 1
         }
         if dot_off >= 0 {
+            // Stack structs grow downward: field N is at [base - N*8]
+            let dot_disp = 0 - (dot_off * 8)
             if dot_flat == 1 {
                 if dot_off == 0 {
                     we(0x48); we(0x8b); we(0x00)  // mov rax, [rax]
                 } else {
                     we(0x48); we(0x8b); we(0x80)  // mov rax, [rax + disp32]
-                    we32(dot_off * 8)
+                    we32(dot_disp)
                 }
                 // Propagate f64 type from struct field
                 if dot_is_f64 == 1 {
                     MC_EXPR_IS_F64 = 1
-                    // rax has the IEEE 754 bit pattern; move to xmm0
                     we(0x66); we(0x48); we(0x0f); we(0x6e); we(0xc0)  // movq xmm0, rax
                 }
             } else {
                 if dot_off > 0 {
                     we(0x48); we(0x8d); we(0x80)  // lea rax, [rax + disp32]
-                    we32(dot_off * 8)
+                    we32(dot_disp)
                 }
             }
         }
@@ -6635,8 +6637,10 @@ fn mc_parse_stmt() with Mut, Panic, Div {
         let id_len = id_e - id_s
         mc_advance()
 
-        // Field assignment: ident.field[.field...] = expr
+        // Field access or assignment: ident.field[.field...]
         if mc_peek() == MC_TK_DOT() {
+            // Save position to detect assignment vs expression
+            let dot_save_pos = MC_POS
             var dot_total_off: i64 = 0
             while mc_peek() == MC_TK_DOT() {
                 mc_advance()
@@ -6654,12 +6658,21 @@ fn mc_parse_stmt() with Mut, Panic, Div {
                     dsi = dsi + 1
                 }
             }
-            mc_expect(MC_TK_EQ())
-            mc_parse_expr()
-            let slot = mc_find_local(id_s, id_len)
-            if slot >= 0 {
-                mc_emit_store_rax(slot + dot_total_off)
+            if mc_peek() == MC_TK_EQ() {
+                // Field assignment: ident.field = expr
+                mc_advance()
+                mc_parse_expr()
+                let slot = mc_find_local(id_s, id_len)
+                if slot >= 0 {
+                    mc_emit_store_rax(slot + dot_total_off)
+                }
+                return 0
             }
+            // Not assignment — rewind and parse as expression
+            MC_POS = MC_POS - 1  // back up
+            // Actually, reset to before dot and let expression parser handle it
+            MC_POS = dot_save_pos - 1  // rewind to ident
+            mc_parse_expr()
             return 0
         }
 
