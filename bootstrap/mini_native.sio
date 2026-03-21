@@ -76,72 +76,6 @@ fn en_variant_value(enum_hash: i64, variant_hash: i64) -> i64 with Panic {
     return -1
 }
 
-// Convert source float string to IEEE 754 f64 bit pattern using integer-only arithmetic
-// Handles: "3.14", "1.0", "0.001", "2.5e3", "1.0e-6"
-fn parse_f64_from_source(start: i64, end: i64) -> i64 with Panic {
-    var p: i64 = start
-    var neg: i64 = 0
-    if p < end && sb(p) == 45 { neg = 1; p = p + 1 }
-    // Integer part
-    var ipart: i64 = 0
-    while p < end && sb(p) >= 48 && sb(p) <= 57 { ipart = ipart * 10 + sb(p) - 48; p = p + 1 }
-    // Fractional part
-    var frac_num: i64 = 0
-    var frac_den: i64 = 1
-    if p < end && sb(p) == 46 {
-        p = p + 1
-        while p < end && sb(p) >= 48 && sb(p) <= 57 {
-            frac_num = frac_num * 10 + sb(p) - 48
-            frac_den = frac_den * 10
-            p = p + 1
-        }
-    }
-    // Exponent
-    var exp: i64 = 0
-    var exp_neg: i64 = 0
-    if p < end && (sb(p) == 101 || sb(p) == 69) {
-        p = p + 1
-        if p < end && sb(p) == 45 { exp_neg = 1; p = p + 1 }
-        else if p < end && sb(p) == 43 { p = p + 1 }
-        while p < end && sb(p) >= 48 && sb(p) <= 57 { exp = exp * 10 + sb(p) - 48; p = p + 1 }
-    }
-    // Build mantissa * 10^18 to preserve precision
-    // value = (ipart * frac_den + frac_num) / frac_den * 10^(±exp)
-    // We compute in fixed-point: mantissa = ipart * frac_den + frac_num, scale = frac_den
-    var mantissa: i64 = ipart * frac_den + frac_num
-    var scale: i64 = frac_den
-    // Apply exponent
-    var ei: i64 = 0
-    if exp_neg == 0 { while ei < exp { mantissa = mantissa * 10; ei = ei + 1 } }
-    else { while ei < exp { scale = scale * 10; ei = ei + 1 } }
-    // Now value = mantissa / scale
-    // Convert to IEEE 754 f64 using integer-only bit manipulation
-    // Special case: zero
-    if mantissa == 0 { if neg == 1 { return 0x8000000000000000 } else { return 0 } }
-    // Normalize: find the highest bit of mantissa
-    var m: i64 = mantissa
-    var s: i64 = scale
-    // Compute mantissa/scale as a 52-bit fraction with binary exponent
-    // Binary long division: divide m by s, collecting 53 bits
-    var bits: i64 = 0
-    var bexp: i64 = 1023  // IEEE bias
-    // Scale m >= s first
-    while m < s { m = m * 2; bexp = bexp - 1 }
-    while m >= s * 2 { s = s * 2; bexp = bexp + 1 }
-    // Now s <= m < 2*s. The implicit leading 1 bit.
-    // Collect 52 fraction bits
-    m = m - s  // remove the implicit 1
-    var bi: i64 = 0
-    while bi < 52 {
-        m = m * 2
-        if m >= s { bits = bits | (1 << (51 - bi)); m = m - s }
-        bi = bi + 1
-    }
-    // Assemble IEEE 754: sign(1) | exponent(11) | fraction(52)
-    var result: i64 = (neg << 63) | (bexp << 52) | bits
-    return result
-}
-
 fn st_find(hash: i64) -> i64 with Panic {
     var i: i64 = 0
     while i < ST_COUNT {
@@ -271,21 +205,6 @@ fn lex_all() with Mut, Panic {
                 }
             } else {
                 while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
-                // Check for float: decimal point followed by digit
-                if p < SRC_LEN && sb(p) == 46 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57 {
-                    p = p + 1  // skip .
-                    // Parse fractional part — store as i64 bit-pattern of f64
-                    // We use integer * 10^-frac_digits approximation via double
-                    // For now, store the source positions and let codegen handle it
-                    while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { p = p + 1 }
-                    // Skip optional exponent
-                    if p < SRC_LEN && (sb(p) == 101 || sb(p) == 69) {
-                        p = p + 1
-                        if p < SRC_LEN && (sb(p) == 43 || sb(p) == 45) { p = p + 1 }
-                        while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { p = p + 1 }
-                    }
-                    TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p; TC = TC + 1; continue
-                }
             }
             TK[TC as usize] = 4; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TC = TC + 1; continue
         }
@@ -582,19 +501,6 @@ fn compile_primary() with IO, Mut, Panic, Div {
         if v == 0 { em(0x31); em(0xc0) }
         else { em(0x48); em(0xb8); em64(v) }
         EP = EP + 1
-        return
-    }
-    // Float literal (token 53) — emit f64 bits, load via movsd from [rip]
-    // Strategy: embed 8-byte IEEE 754 value in code, load with movsd via memory
-    if k == 53 {
-        // Parse float from source at compile time using integer arithmetic
-        let fs = TS[EP as usize]
-        let fe = TE[EP as usize]
-        let fbits = parse_f64_from_source(fs, fe)
-        EP = EP + 1
-        // Emit: mov rax, imm64(bits); push rax; movsd xmm0, [rsp]; pop rax
-        // Then move f64 bits to rax for uniform i64 storage
-        em(0x48); em(0xb8); em64(fbits)  // mov rax, f64_bits
         return
     }
     // true=35, false=36
@@ -1504,6 +1410,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if TK[p as usize] == 8 { p = p + 1 }
 
         // Emit prologue: push rbp; mov rbp, rsp; sub rsp, 512
+        print_int(fn_idx)
+        print(" ")
         em(0x55); em(0x48); em(0x89); em(0xe5)
         em(0x48); em(0x81); em(0xec); em32(4096)
 
