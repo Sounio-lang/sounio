@@ -8,7 +8,7 @@
 
 **Purpose** — Second-order cybernetics lacks a shared computational medium in which its frameworks can be jointly formalized, composed, and tested. This paper presents an executable formalization integrating nine foundational theories into a single recursive architecture.
 
-**Design/methodology/approach** — Ten modules in the Sounio programming language implement Spencer-Brown's Laws of Form, von Foerster's eigenform theory, observer-inclusion, autopoiesis, Ashby's requisite variety, structural coupling, Pask's conversation theory, Bateson's learning levels, and Maturana's languaging. Seven bridge functions wire these into a closed recursive loop. Structural invariants are verified through property-based testing.
+**Design/methodology/approach** — Ten modules in the Sounio programming language implement Spencer-Brown's Laws of Form, von Foerster's eigenform theory, observer-inclusion, autopoiesis, Ashby's requisite variety, structural coupling, Pask's conversation theory, Bateson's learning levels, and Maturana's languaging. Six bridge functions wire these into a closed recursive loop. Structural invariants are verified through property-based testing.
 
 **Findings** — All nine theories produce structurally consistent outputs. The theories compose into one closed loop where each step produces inputs for the next. The system supports instrumental self-observation with measurable cost: observer drift increases monotonically with recursion depth. Five formal propositions are computationally verified.
 
@@ -61,7 +61,7 @@ Table I maps each theory to its core mathematical object, the Sounio data type t
 | Eigenform | von Foerster 1976 | Fixed point x* = Op(x*) | `EigenformResult` | `|Op(x*) - x*| < ε` after convergence |
 | | Kauffman 2003 | Stable attractor | `Eigenbehavior` | `convergence_rate < 1.0` (Banach) |
 | Observer-inclusion | von Foerster 1981 | Perturbed observer | `Observer` + `Observation` | Variance monotonically non-decreasing |
-| | Luhmann 1984 | Blind spot | `blind_spot(obs)` | `drift > 0` after any observation |
+| | Luhmann 1995 | Blind spot | `blind_spot(obs)` | `drift > 0` after any observation |
 | Autopoiesis | Maturana/Varela 1972 | Organizational closure | `AutopoieticSystem` | Circular network: alive. Linear: dead. |
 | Requisite variety | Ashby 1956 | H(R) ≥ H(E) − H(O) | `VarietySystem` | 8 reg / 6 env: sufficient. 3 reg / 6 env: insufficient. |
 | Structural coupling | Maturana/Varela 1987 | Behavioral congruence | `Coupling` | Pearson r > 0.95 for linearly related systems |
@@ -197,7 +197,7 @@ Our `LanguagingPair` implements this with three mechanisms:
 
 The tenth module, `second_order.sio`, bridges the nine theories into a single recursive structure operating at two distinct architectural levels:
 
-**Level A — The inter-theoretic loop.** Nine transitions link the frameworks in sequence: Observer → Eigenform → Distinction → Autopoiesis → Variety → Coupling → Conversation → Learning → Languaging → Observer. Seven are realized as explicit bridge functions (Table II). The remaining two — Distinction → Autopoiesis and Languaging → Observer — are passed directly by the test harness because their type handoffs are trivial.
+**Level A — The inter-theoretic loop.** Nine transitions link the frameworks in sequence: Observer → Eigenform → Distinction → Autopoiesis → Variety → Coupling → Conversation → Learning → Languaging → Observer. Six are realized as explicit Level A bridge functions (Table II); `observe_self` operates at Level B (see below). The remaining two Level A transitions — Distinction → Autopoiesis and Languaging → Observer — are passed directly by the test harness because their type handoffs are trivial.
 
 **Level B — The reflexive operator.** The function `observe_self(state, observer)` is *not* a transition within the Level A loop. It is a meta-operation applied to the aggregate state *after* the loop completes one full cycle. It applies an observer to the `CyberneticState` struct, increasing `recursion_depth` and accumulating drift. This distinction matters: the Level A loop computes the inter-theoretic composition; Level B asks what happens when the composed system observes its own output. The two levels can be iterated — run the loop, observe the result, run the loop again with the perturbed state — but they are architecturally separate.
 
@@ -209,7 +209,8 @@ The tenth module, `second_order.sio`, bridges the nine theories into a single re
 | 4 | Coupling → Conversation | `coupling_is_conversation` | congruence > θ₁ AND agreement > θ₂ |
 | 5 | Conversation → Learning | `diagnose_conversation` | Agreement level maps to L1/L2/L3 prescription |
 | 6 | Learning → Languaging | `can_learn_in_language` | Domain stability AND not double-bound |
-| 7 | Observer → Observer | `observe_self` | Recursive self-observation; drift increases |
+
+The Level B reflexive operator `observe_self` is architecturally separate from these six bridges (see Section 7.3).
 
 All thresholds are named constants parameterized for transparency (e.g., `CONVERSATION_CONGRUENCE_THRESHOLD = 0.5`, `DRIFT_VIABILITY_LIMIT = 5.0`; full list in the online supplement). The `CyberneticState` struct aggregates the full system state; the Level B operator `observe_self(state, observer)` applies an observer to this aggregate, producing a new state with `recursion_depth + 1` and measurably increased drift.
 
@@ -283,7 +284,7 @@ pub fn observe_self(state: CyberneticState, obs: Observer)
 }
 ```
 
-The effect annotation `with Mut, Div, Panic` records that this function mutates state, performs division, and may fail — the computational cost of observation made explicit. The by-value return (`var s = state; ... s`) ensures every state transition is explicit: organization is invariant across transitions; structure changes. Full code excerpts for all seven bridges are provided in the online supplement.
+The effect annotation `with Mut, Div, Panic` records that this function mutates state, performs division, and may fail — the computational cost of observation made explicit. The by-value return (`var s = state; ... s`) ensures every state transition is explicit: organization is invariant across transitions; structure changes. Full code excerpts for all six Level A bridges and the Level B operator are provided in the online supplement.
 
 ---
 
@@ -309,7 +310,7 @@ The modules formalize the *mathematical core* of each theory, not its full dynam
 
 ### 7.2 The Recursive Loop as Theoretical Claim
 
-The construction of the Level A loop is a theoretical claim: these nine theories are not independent but are aspects of a single recursive structure. Each bridge makes an ontological identification — `observe_eigenform` asserts that eigenform search IS observation (each iteration calls `make_observation`, accumulating drift); `eigenform_as_distinction` asserts that a converged eigenform creates a Spencer-Brown distinction (basin boundary = mark), following Kauffman (2005, §4); `assess_viability` asserts that autopoiesis requires requisite variety (Ashby's Law as the mathematical reason organizational closure is sustainable); `coupling_is_conversation` asserts that conversation is structural coupling through models (threshold-dependent; Table III); `diagnose_conversation` maps Pask's stalls to Bateson's hierarchy (L1/L2/L3 by severity); `can_learn_in_language` checks Maturana's claim that learning occurs within the consensual domain. The Level B operator `observe_self` is discussed in Section 7.3.
+The construction of the Level A loop is a theoretical claim: these nine theories are not independent but are aspects of a single recursive structure. Each bridge makes an ontological identification — `observe_eigenform` asserts that eigenform search IS observation (each iteration calls `make_observation`, accumulating drift); `eigenform_as_distinction` asserts that a converged eigenform creates a Spencer-Brown distinction (basin boundary = mark), following Kauffman (2005, §4); `assess_viability` asserts that autopoiesis requires requisite variety (Ashby's Law as the mathematical reason organizational closure is sustainable); `coupling_is_conversation` asserts that conversation is structural coupling through models (threshold-dependent; see online supplement); `diagnose_conversation` maps Pask's stalls to Bateson's hierarchy (L1/L2/L3 by severity); `can_learn_in_language` checks Maturana's claim that learning occurs within the consensual domain. The Level B operator `observe_self` is discussed in Section 7.3.
 
 **Epistemic status of the bridges.** The bridges are not claimed as canonical identifications in the historical literature. They fall into three categories:
 
@@ -321,7 +322,7 @@ The construction of the Level A loop is a theoretical claim: these nine theories
 | `coupling_is_conversation` | **Operative bridge hypothesis** | Plausible but threshold-dependent; the boundary between coupling and conversation is a continuum |
 | `diagnose_conversation` | **Operative bridge hypothesis** | Novel meta-bridge linking Pask's stalls to Bateson's hierarchy |
 | `can_learn_in_language` | **Interpretive mapping** | Maturana claims learning occurs in languaging; our check of domain stability + double bind is one operationalization among several possible |
-| `observe_self` | **Partial realization** | Captures cost of self-observation but not full recursive self-application (see §7.3) |
+| `observe_self` (Level B) | **Partial realization** | Captures cost of instrumental self-observation but not full recursive self-application (see §7.3) |
 
 These identifications are falsifiable. If a theorist disagrees that eigenform convergence should be classified as MARKED (rather than, say, AUTONOMOUS), they can change `eigenform_as_distinction` and observe the consequences downstream. The recursive loop makes disagreements *testable* rather than merely debatable.
 
