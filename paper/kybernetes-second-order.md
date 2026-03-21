@@ -109,7 +109,7 @@ Three sources of variance are always present in any observation:
 - Observer drift² (accumulated systematic bias)
 - Budget penalty (additional noise when precision budget is low)
 
-**Blind spots.** Luhmann (1984) extended von Foerster's principle: an observer cannot observe its own observation operation in the moment of observing. Our `blind_spot(observer)` returns the accumulated drift — the quantity the observer cannot self-correct.
+**Blind spots.** Luhmann (1995) extended von Foerster's principle: an observer cannot observe its own observation operation in the moment of observing. Our `blind_spot(observer)` returns the accumulated drift — the quantity the observer cannot self-correct.
 
 **Meta-observation.** `observe_observer(outer, inner)` implements second-order observation: the outer observer observes the inner observer's state. The resulting variance is strictly greater than the inner observer's self-reported variance, because the outer observer adds its own drift.
 
@@ -269,7 +269,7 @@ All 10 invariants pass (0 failures).
 
 `second_order_proof.sio` (251 lines) executes the full nine-step loop:
 
-- Step 1: Observer finds eigenform of (x+42)/2 → converges in 15 iterations, drift > 0
+- Step 1: Observer finds eigenform of (x+42)/2 → converges in 17 iterations, drift > 0
 - Step 2: Converged eigenform classified as MARKED (stable distinction)
 - Step 3: Distinction maintained through 10 autopoietic production cycles
 - Step 4: System is viable (alive AND has requisite variety)
@@ -470,7 +470,7 @@ The construction of the loop Observer → Eigenform → Distinction → ... → 
 
 These identifications are falsifiable. If a theorist disagrees that eigenform convergence should be classified as MARKED (rather than, say, AUTONOMOUS), they can change `eigenform_as_distinction` and observe the consequences downstream. The recursive loop makes disagreements *testable* rather than merely debatable.
 
-### 3.1 Formal Propositions
+### 7.2.1 Formal Propositions
 
 We state five propositions that the implementation satisfies. These are modest formal claims, verified computationally across the test suites.
 
@@ -510,7 +510,7 @@ The current implementation achieves (1) but not (2). Achieving (2) would require
 
 ### 7.4 Luhmann's Social Autopoiesis
 
-The paper cites Luhmann (1984) for observer-inclusion but does not implement his most distinctive contribution: the autopoiesis of *communication systems*. Luhmann argued that social systems are not composed of people but of communications, and that each functional subsystem (science, law, economy, art) is autopoietic with its own binary code (true/false, legal/illegal, payment/non-payment, beautiful/ugly).
+The paper cites Luhmann (1995) for observer-inclusion but does not implement his most distinctive contribution: the autopoiesis of *communication systems*. Luhmann argued that social systems are not composed of people but of communications, and that each functional subsystem (science, law, economy, art) is autopoietic with its own binary code (true/false, legal/illegal, payment/non-payment, beautiful/ugly).
 
 The current autopoiesis module implements biological autopoiesis in Maturana and Varela's sense: components are material entities, production relations are physical processes, organizational closure is circular self-production. Extending this to Luhmann's social autopoiesis would require:
 
@@ -565,13 +565,11 @@ Cormen, T.H., Leiserson, C.E., Rivest, R.L. and Stein, C. (2009), *Introduction 
 
 Dubberly, H. and Pangaro, P. (2015), "Cybernetics and design: conversations for action", *Cybernetics & Human Knowing*, Vol. 22 No. 2-3, pp. 73-82.
 
-Glanville, R. (1997), "The value of being unmanageable: variety and creativity in cyberspace", in *Global Village '97*, Vienna.
-
 Kauffman, L.H. (2003), "Eigenforms — objects as tokens for eigenbehaviors", *Cybernetics & Human Knowing*, Vol. 10 No. 3-4, pp. 73-90.
 
 Kauffman, L.H. (2005), "Eigenform", *Kybernetes*, Vol. 34 No. 1/2, pp. 129-150.
 
-Kauffman, L.H. (2023), "Autopoiesis and eigenform", *Computation*, Vol. 11 No. 12, p. 247.
+Kauffman, L.H. (2023), "Autopoiesis and eigenform", *Computation*, Vol. 11 No. 12, article 247, doi: 10.3390/computation11120247.
 
 Kazil, J., Masad, D. and Crooks, A. (2020), "Utilizing Python for agent-based modeling: the Mesa framework", in Thomson, R., Bisgin, H., Dancy, C. and Hyder, A. (Eds), *Social, Cultural, and Behavioral Modeling (SBP-BRiMS 2020)*, Springer, Cham, pp. 308-317.
 
@@ -587,7 +585,7 @@ McMullin, B. (2004), "Thirty years of computational autopoiesis: a review", *Art
 
 Miranda, M.D. and Abades, S. (2024), "Exploring the theoretical and practical implications of eigenbehavior at the intersection of second-order cybernetics and ecosystem management", *Kybernetes*, Vol. 53 No. 12, pp. 5843-5859.
 
-North, M.J., Collier, N.T., Ozik, J. *et al.* (2013), "Complex adaptive systems modeling with Repast Simphony", *Complex Adaptive Systems Modeling*, Vol. 1 No. 3.
+North, M.J., Collier, N.T., Ozik, J., Tatara, E.R., Macal, C.M., Bragen, M. and Sydelko, P. (2013), "Complex adaptive systems modeling with Repast Simphony", *Complex Adaptive Systems Modeling*, Vol. 1 No. 3.
 
 Oksas, A. (2025), "Where George Spencer-Brown went wrong — re-entry recalculated", *Kybernetes*, Vol. 54 No. 8, pp. 4300-4327.
 
@@ -670,4 +668,4 @@ If this converges, the system has found a *stable self-description* — a state 
 2. Implement `viability_step` as a named function (Sounio supports first-class function references but not closures over state — the state must be passed through the scalar encoding)
 3. Pass `viability_step` to `find_eigenform` and observe convergence
 
-The estimated implementation effort is ~150 lines. Success would demonstrate that second-order cybernetics is not merely *about* self-reference — it *is* self-reference, computed and verified.
+The estimated implementation effort is ~150 lines. Success would demonstrate that second-order cybernetics is not merely *about* self-reference — it *would be* self-reference, computed and verified.
