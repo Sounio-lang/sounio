@@ -116,6 +116,18 @@ var FLD_TYPE_NAME_LEN: [i64; 8192] = [0; 8192]  // length of field type name
 var FLD_BOX_INNER_SI: [i64; 8192] = [-1; 8192]  // for Option<Box<T>> fields: struct index of T
 var FLD_COUNT: i64 = 0
 
+// Enum registry: up to 256 enums, 2048 total variants
+var EN_NAME_OFF: [i64; 256] = [0; 256]
+var EN_NAME_LEN: [i64; 256] = [0; 256]
+var EN_FIRST_VARIANT: [i64; 256] = [0; 256]
+var EN_VARIANT_COUNT: [i64; 256] = [0; 256]
+var EN_COUNT: i64 = 0
+
+var EV_NAME_OFF: [i64; 2048] = [0; 2048]
+var EV_NAME_LEN: [i64; 2048] = [0; 2048]
+var EV_VALUE: [i64; 2048] = [0; 2048]
+var EV_COUNT: i64 = 0
+
 var FN_PARAM_TYPE_SI: [i64; 16384] = [-1; 16384] // struct type index for each fn param
 var LOCAL_IS_SPTR: [i64; 8192] = [0; 8192]       // 1 if local is pointer-to-struct
 var LOCAL_BOX_INNER_SI: [i64; 8192] = [-1; 8192] // for &Option<Box<T>>: struct index of T
@@ -231,6 +243,7 @@ fn ARM_INT() -> i64 { 0 }
 fn ARM_WILD() -> i64 { 1 }
 fn ARM_NONE() -> i64 { 2 }
 fn ARM_SOME() -> i64 { 3 }
+fn ARM_ENUM() -> i64 { 4 }
 
 // ============================================================================
 // Lexer helpers
@@ -559,6 +572,74 @@ fn find_struct_b4(name_off: i64, name_len: i64) -> i64 with Mut, Panic, Div {
     -1
 }
 
+// ============================================================================
+// Enum table helpers
+// ============================================================================
+
+fn find_enum_b4(name_off: i64, name_len: i64) -> i64 with Mut, Panic, Div {
+    var ei: i64 = 0
+    while ei < EN_COUNT {
+        if EN_NAME_LEN[ei as usize] == name_len {
+            var ok: i64 = 1
+            var i: i64 = 0
+            while i < name_len {
+                if POOL[(EN_NAME_OFF[ei as usize] + i) as usize] != POOL[(name_off + i) as usize] {
+                    ok = 0
+                }
+                i = i + 1
+            }
+            if ok == 1 { return ei }
+        }
+        ei = ei + 1
+    }
+    -1
+}
+
+fn find_enum_variant(ei: i64, vname_off: i64, vname_len: i64) -> i64 with Mut, Panic, Div {
+    let base = EN_FIRST_VARIANT[ei as usize]
+    let vc = EN_VARIANT_COUNT[ei as usize]
+    var vi: i64 = 0
+    while vi < vc {
+        let evi = base + vi
+        if EV_NAME_LEN[evi as usize] == vname_len {
+            var ok: i64 = 1
+            var k: i64 = 0
+            while k < vname_len {
+                if POOL[(EV_NAME_OFF[evi as usize] + k) as usize] != POOL[(vname_off + k) as usize] {
+                    ok = 0
+                }
+                k = k + 1
+            }
+            if ok == 1 { return EV_VALUE[evi as usize] }
+        }
+        vi = vi + 1
+    }
+    -1
+}
+
+// Look up "EnumName::Variant" from a qualified pool string (contains "::" separator).
+// Returns the variant's integer discriminant, or -1 if not found.
+fn en_lookup_qualified(pool_off: i64, pool_len: i64) -> i64 with Mut, Panic, Div {
+    // Find "::" in the pool string
+    var sep: i64 = -1
+    var i: i64 = 0
+    while i < pool_len - 1 {
+        if POOL[(pool_off + i) as usize] == 58 && POOL[(pool_off + i + 1) as usize] == 58 {
+            sep = i
+            i = pool_len  // break
+        }
+        i = i + 1
+    }
+    if sep < 0 { return -1 }
+    let enum_off = pool_off
+    let enum_len = sep
+    let var_off = pool_off + sep + 2
+    let var_len = pool_len - sep - 2
+    let ei = find_enum_b4(enum_off, enum_len)
+    if ei < 0 { return -1 }
+    find_enum_variant(ei, var_off, var_len)
+}
+
 fn find_field_b4(si: i64, fname_off: i64, fname_len: i64) -> i64 with Mut, Panic, Div {
     let fi_base = ST_FIELD_FIRST[si as usize]
     let fc = ST_FIELD_COUNT[si as usize]
@@ -798,10 +879,33 @@ fn parse_match_expr() -> i64 with Mut, Panic, Div {
             let plen = tok_ident_len()
             if pool_match(poff, plen, "_") {
                 ND_IVAL[arm as usize] = 1
+                advance()
             } else {
-                ND_IVAL[arm as usize] = 1
+                // Check for Enum::Variant pattern
+                advance()
+                if cur_kind() == 41 {
+                    // Ident followed by :: — parse as EnumName::Variant
+                    let enum_ei = find_enum_b4(poff, plen)
+                    advance()  // skip ::
+                    if cur_kind() == 1 {
+                        let voff = tok_pool_off()
+                        let vlen = tok_ident_len()
+                        advance()  // skip variant name
+                        if enum_ei >= 0 {
+                            let disc = find_enum_variant(enum_ei, voff, vlen)
+                            ND_IVAL[arm as usize] = 4
+                            ND_STR_OFF[arm as usize] = disc
+                        } else {
+                            ND_IVAL[arm as usize] = 1
+                        }
+                    } else {
+                        ND_IVAL[arm as usize] = 1
+                    }
+                } else {
+                    // Plain identifier — treat as wildcard
+                    ND_IVAL[arm as usize] = 1
+                }
             }
-            advance()
         } else {
             ND_IVAL[arm as usize] = 1
             advance()
@@ -1423,6 +1527,69 @@ fn skip_braces() with Mut, Panic, Div {
     }
 }
 
+fn parse_enum_decl() with Mut, Panic, Div {
+    advance()  // skip 'enum'
+    // Skip if already parsed (from pre_scan_enums)
+    let check_off = tok_pool_off()
+    let check_len = tok_ident_len()
+    let existing = find_enum_b4(check_off, check_len)
+    if existing >= 0 {
+        advance()
+        skip_braces()
+        return 0
+    }
+    let ei = EN_COUNT
+    EN_NAME_OFF[ei as usize] = tok_pool_off()
+    EN_NAME_LEN[ei as usize] = tok_ident_len()
+    advance()  // skip enum name
+    if cur_kind() == 33 { advance() }  // skip {
+    let ev_base = EV_COUNT
+    EN_FIRST_VARIANT[ei as usize] = ev_base
+    var vc: i64 = 0
+    while cur_kind() != 34 && cur_kind() != 0 {
+        if cur_kind() == 1 {
+            let voff = tok_pool_off()
+            let vlen = tok_ident_len()
+            EV_NAME_OFF[(ev_base + vc) as usize] = voff
+            EV_NAME_LEN[(ev_base + vc) as usize] = vlen
+            EV_VALUE[(ev_base + vc) as usize] = vc
+            vc = vc + 1
+            advance()
+            // Skip optional payload: (Type) or { ... }
+            if cur_kind() == 31 {
+                advance()
+                var pd: i64 = 1
+                while pd > 0 && cur_kind() != 0 {
+                    if cur_kind() == 31 { pd = pd + 1 }
+                    else if cur_kind() == 32 { pd = pd - 1 }
+                    if pd > 0 { advance() }
+                }
+                if cur_kind() == 32 { advance() }
+            }
+        }
+        if cur_kind() == 37 { advance() }  // skip comma
+    }
+    if cur_kind() == 34 { advance() }  // skip }
+    EN_VARIANT_COUNT[ei as usize] = vc
+    EV_COUNT = EV_COUNT + vc
+    EN_COUNT = EN_COUNT + 1
+}
+
+fn pre_scan_enums() with Mut, Panic, Div {
+    let saved_pos = POS
+    POS = 0
+    while cur_kind() != 0 {
+        if cur_kind() == 59 {
+            parse_enum_decl()
+        } else if cur_kind() == 33 {
+            skip_braces()
+        } else {
+            advance()
+        }
+    }
+    POS = saved_pos
+}
+
 fn parse_impl_body() with Mut, Panic, Div {
     // Get struct name from first identifier token
     var si: i64 = -1
@@ -1680,10 +1847,8 @@ fn parse_program() with Mut, Panic, Div {
         } else if k == 58 {
             parse_struct_decl()
         } else if k == 59 {
-            // enum: skip entire declaration
-            advance()
-            if cur_kind() == 1 { advance() }
-            skip_braces()
+            // enum: already parsed in pre_scan_enums, just skip
+            parse_enum_decl()
         } else if k == 60 {
             // impl: collect fn definitions inside
             advance()
@@ -2118,7 +2283,13 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                     FN_LEA_FIX_TARGET[FN_LEA_FIX_COUNT as usize] = fn_idx
                     FN_LEA_FIX_COUNT = FN_LEA_FIX_COUNT + 1
                 } else {
-                    emit_mov_rax_imm(0)
+                    // Check if it's an Enum::Variant qualified name
+                    let ev_disc = en_lookup_qualified(voff, vlen)
+                    if ev_disc >= 0 {
+                        emit_mov_rax_imm(ev_disc)
+                    } else {
+                        emit_mov_rax_imm(0)
+                    }
                 }
             }
         }
@@ -3822,6 +3993,14 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                         emit_store_rax(bslot2)
                     }
                 }
+            } else if arm_type == 4 {
+                // Enum variant: compare scrutinee with discriminant value
+                emit_load_rax(scr_slot)
+                let disc_val = ND_STR_OFF[arm as usize]
+                emit(0x48); emit(0xB9); emit_u64(disc_val)
+                emit(0x48); emit(0x39); emit(0xC8)   // cmp rax, rcx
+                emit(0x0F); emit(0x85)                // JNE skip
+                skip_pos = CODE_LEN; emit_u32(0)
             }
             compile_node(body)
             emit(0xE9)
@@ -4385,11 +4564,14 @@ fn main() -> i64 with IO, Mut, Panic, Div {
 
     print("parsing...\n")
     pre_scan_structs()
+    pre_scan_enums()
     parse_program()
     print("fns=")
     print_int(FN_COUNT)
     print(" structs=")
     print_int(ST_COUNT)
+    print(" enums=")
+    print_int(EN_COUNT)
     print(" nodes=")
     print_int(ND_COUNT)
     print("\n")
