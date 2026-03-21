@@ -19,6 +19,7 @@ var TC: i64 = 0
 // Code output
 var CD: [i8; 262144] = [0; 262144]
 var CL: i64 = 0
+var TRAMP_OFF: i64 = 0
 
 // ELF output
 var ELF: [i8; 262144] = [0; 262144]
@@ -269,6 +270,140 @@ fn emit_print(tok: i64) with Mut, Panic, Div {
     em(0x48); em(0x81); em(0xc4); em32(nq * 8)
 }
 
+// ─── Built-in function emitters ───
+
+// print_int: rax = value → emit decimal digits + write syscall
+fn emit_print_int() with Mut {
+    // sub rsp, 32; mov rcx, rsp+31 (end of buffer); mov byte [rcx], 10 (\n); dec rcx
+    // div loop: cdq; div 10; add dl, '0'; mov [rcx], dl; dec rcx; test rax,rax; jnz loop
+    // lea rsi, [rcx+1]; mov rdx, rsp+32-rsi; write(1, rsi, rdx); add rsp, 32
+    em(0x48); em(0x83); em(0xec); em(32)  // sub rsp, 32
+    em(0x48); em(0x8d); em(0x4c); em(0x24); em(31)  // lea rcx, [rsp+31]
+    em(0xc6); em(0x01); em(10)  // mov byte [rcx], '\n'
+    em(0x48); em(0xff); em(0xc9)  // dec rcx
+    // Handle negative: if rax < 0, negate, set r8=1
+    em(0x4d); em(0x31); em(0xc0)  // xor r8, r8
+    em(0x48); em(0x85); em(0xc0)  // test rax, rax
+    em(0x79); em(0x06)  // jns +6
+    em(0x48); em(0xf7); em(0xd8)  // neg rax
+    em(0x49); em(0xff); em(0xc0)  // inc r8
+    // div loop
+    let loop_top = CL
+    em(0x48); em(0x31); em(0xd2)  // xor rdx, rdx
+    em(0x48); em(0xc7); em(0xc6); em32(10)  // mov rsi, 10
+    em(0x48); em(0xf7); em(0xf6)  // div rsi (rax=quot, rdx=rem)
+    em(0x80); em(0xc2); em(48)   // add dl, '0'
+    em(0x88); em(0x11)            // mov [rcx], dl
+    em(0x48); em(0xff); em(0xc9)  // dec rcx
+    em(0x48); em(0x85); em(0xc0)  // test rax, rax
+    em(0x0f); em(0x85); em32(loop_top - (CL + 4))  // jnz loop_top
+    // If negative, add '-'
+    em(0x4d); em(0x85); em(0xc0)  // test r8, r8
+    em(0x74); em(0x06)  // jz +6
+    em(0xc6); em(0x01); em(45)  // mov byte [rcx], '-'
+    em(0x48); em(0xff); em(0xc9)  // dec rcx
+    // rcx points to last written byte-1; string starts at rcx+1
+    em(0x48); em(0xff); em(0xc1)  // inc rcx (start of string)
+    em(0x48); em(0x89); em(0xce)  // mov rsi, rcx (buf)
+    em(0x48); em(0x8d); em(0x54); em(0x24); em(32)  // lea rdx, [rsp+32]
+    em(0x48); em(0x29); em(0xca)  // sub rdx, rcx (len = end - start)
+    em(0xb8); em32(1)  // mov eax, 1 (sys_write)
+    em(0xbf); em32(1)  // mov edi, 1 (stdout)
+    em(0x0f); em(0x05)  // syscall
+    em(0x48); em(0x83); em(0xc4); em(32)  // add rsp, 32
+}
+
+// arg_count: load argc from the saved stack pointer
+// At program entry, [rsp] = argc, [rsp+8] = argv[0], etc.
+// We save rsp at entry in a global.
+var ENTRY_RSP_OFF: i64 = 0
+
+fn emit_arg_count() with Mut {
+    let argc_addr = 0x600000
+    em(0x48); em(0xb8); em64(argc_addr)
+    em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+}
+
+fn emit_get_arg() with Mut {
+    // rax = arg index. argv stored at BSS+8. argv[i] = [argv_base + i*8]
+    let argv_addr = 0x600000 + 8
+    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
+    em(0x48); em(0xb8); em64(argv_addr)
+    em(0x48); em(0x8b); em(0x00)  // mov rax, [rax] = argv base
+    em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+}
+
+fn emit_str_len() with Mut {
+    // rax = string ptr; count until null byte
+    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (ptr)
+    em(0x48); em(0x31); em(0xc0)  // xor rax, rax (count=0)
+    let top = CL
+    em(0x80); em(0x3c); em(0x01); em(0x00)  // cmp byte [rcx+rax], 0
+    em(0x74); em(0x04)  // je done (+4)
+    em(0x48); em(0xff); em(0xc0)  // inc rax
+    em(0xeb); em(0xf5 as i64 & 0xFF)  // jmp top (relative back)
+    // done: rax = length
+}
+
+fn emit_read_file() with Mut {
+    // Simpler: rax=path. open → save fd → mmap → read → close → return buf
+    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax
+    em(0x48); em(0x31); em(0xf6)  // xor rsi, rsi
+    em(0xb8); em32(2); em(0x0f); em(0x05)  // open → fd in rax
+    em(0x50)  // push fd
+    // mmap(NULL, 4MB, 3, 0x22, -1, 0)
+    em(0x48); em(0x31); em(0xff)  // rdi=0
+    em(0xbe); em32(0x400000)  // esi=4MB
+    em(0xba); em32(3)  // edx=PROT_RW
+    em(0x41); em(0xba); em32(0x22)  // r10d=MAP_PRIVATE|MAP_ANON
+    em(0x49); em(0xc7); em(0xc0); em32(-1)  // r8=-1
+    em(0x4d); em(0x31); em(0xc9)  // r9=0
+    em(0xb8); em32(9); em(0x0f); em(0x05)  // mmap → buf in rax
+    em(0x50)  // push buf; stack=[fd, buf]
+    // read(fd, buf, 4MB)
+    em(0x48); em(0x89); em(0xc6)  // mov rsi, rax (buf)
+    em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x08)  // mov rdi, [rsp+8] (fd)
+    em(0xba); em32(0x400000)  // edx=4MB
+    em(0xb8); em32(0); em(0x0f); em(0x05)  // read
+    // close(fd)
+    em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x08)  // mov rdi, [rsp+8] (fd)
+    em(0xb8); em32(3); em(0x0f); em(0x05)  // close
+    // return buf
+    em(0x58)  // pop rax (buf)
+    em(0x48); em(0x83); em(0xc4); em(0x08)  // add rsp, 8 (discard fd)
+}
+
+fn emit_file_size() with Mut {
+    // rax = path. stat(path, &statbuf) → statbuf.st_size at offset 48
+    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (path)
+    em(0x48); em(0x83); em(0xec); em(0x90 as i64 & 0xFF)  // sub rsp, 144 (struct stat)
+    em(0x48); em(0x89); em(0xe6)  // mov rsi, rsp (statbuf)
+    em(0xb8); em32(4)  // mov eax, 4 (sys_stat)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x8b); em(0x44); em(0x24); em(48)  // mov rax, [rsp+48] (st_size)
+    em(0x48); em(0x83); em(0xc4); em(0x90 as i64 & 0xFF)  // add rsp, 144
+}
+
+fn emit_write_file() with Mut {
+    // rdi = path, rsi = buf addr, rdx = len
+    // open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644) → write(fd, buf, len) → close(fd)
+    em(0x52)  // push rdx (len)
+    em(0x56)  // push rsi (buf)
+    em(0xbe); em32(0x241)  // mov esi, O_WRONLY|O_CREAT|O_TRUNC (0x41|0x200)
+    em(0xba); em32(0x1A4)  // mov edx, 0644
+    em(0xb8); em32(2)  // mov eax, 2 (sys_open)
+    em(0x0f); em(0x05)  // → fd in rax
+    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (fd)
+    em(0x5e)  // pop rsi (buf)
+    em(0x5a)  // pop rdx (len)
+    em(0xb8); em32(1)  // mov eax, 1 (sys_write)
+    em(0x0f); em(0x05)
+    // close(fd)
+    em(0xb8); em32(3)  // mov eax, 3 (sys_close)
+    em(0x0f); em(0x05)
+    em(0x48); em(0xb8); em64(1)  // return 1 (success)
+}
+
 // ─── Expression compiler (recursive descent) ───
 // Global parse position for expression parsing
 var EP: i64 = 0
@@ -319,22 +454,99 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EP = EP + 1
         // Function call: ident(args)
         if TK[EP as usize] == 6 {
-            // Check for print("str")
-            if ne - ns == 5 && sb(ns) == 112 && sb(ns+1) == 114 && sb(ns+2) == 105 && sb(ns+3) == 110 && sb(ns+4) == 116 {
+            // Check for print("str") or print(variable)
+            if src_match(ns, ne - ns, "print") {
                 EP = EP + 1
-                if TK[EP as usize] == 5 { emit_print(EP); EP = EP + 1 }
-                else { compile_or(); }
+                if TK[EP as usize] == 5 {
+                    emit_print(EP); EP = EP + 1
+                } else {
+                    // print(variable) — variable is a C string pointer
+                    compile_or()  // ptr in rax
+                    // strlen loop: mov rdi, rax; xor rcx, rcx; while [rdi+rcx]!=0 inc rcx
+                    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (ptr)
+                    em(0x48); em(0x31); em(0xc9)  // xor rcx, rcx
+                    let slp = CL
+                    em(0x80); em(0x3c); em(0x0f); em(0x00)  // cmp byte [rdi+rcx], 0
+                    em(0x74); em(0x04)  // je done
+                    em(0x48); em(0xff); em(0xc1)  // inc rcx
+                    em(0xeb); em(0xf5 as i64 & 0xFF)  // jmp loop
+                    // write(1, rdi, rcx)
+                    em(0x48); em(0x89); em(0xfe)  // mov rsi, rdi
+                    em(0x48); em(0x89); em(0xca)  // mov rdx, rcx (len)
+                    em(0xb8); em32(1); em(0xbf); em32(1)
+                    em(0x0f); em(0x05)
+                }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 em(0x31); em(0xc0)
                 return
             }
             // Check for print_int(expr)
-            if ne - ns == 9 && sb(ns) == 112 && sb(ns+1) == 114 && sb(ns+2) == 105 && sb(ns+3) == 110 && sb(ns+4) == 116 && sb(ns+5) == 95 && sb(ns+6) == 105 && sb(ns+7) == 110 && sb(ns+8) == 116 {
-                EP = EP + 1
-                compile_or()
+            if src_match(ns, ne - ns, "print_int") {
+                EP = EP + 1; compile_or()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                // TODO: inline decimal conversion
+                emit_print_int()
                 em(0x31); em(0xc0)
+                return
+            }
+            // Check for arg_count()
+            if src_match(ns, ne - ns, "arg_count") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_arg_count()
+                return
+            }
+            // Check for get_arg(N)
+            if src_match(ns, ne - ns, "get_arg") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_get_arg()
+                return
+            }
+            // Check for read_file(path)
+            if src_match(ns, ne - ns, "read_file") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_read_file()
+                return
+            }
+            // Check for file_size(path)
+            if src_match(ns, ne - ns, "file_size") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_file_size()
+                return
+            }
+            // Check for write_file(path, buf, len)
+            if src_match(ns, ne - ns, "write_file") {
+                EP = EP + 1
+                compile_or(); em(0x50)  // path
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or(); em(0x50)  // buf (ignored — uses global array addr)
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or()            // len in rax
+                em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (len)
+                em(0x5e)  // pop rsi (buf addr)
+                em(0x5f)  // pop rdi (path)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_write_file()
+                return
+            }
+            // Check for str_len(s)
+            if src_match(ns, ne - ns, "str_len") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_str_len()
+                return
+            }
+            // Check for str_char_at(s, i)
+            if src_match(ns, ne - ns, "str_char_at") {
+                EP = EP + 1
+                compile_or(); em(0x50)  // string
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or()  // index in rax
+                em(0x59)  // pop rcx (string ptr)
+                em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x01)  // movsx rax, byte [rcx + rax]
+                if TK[EP as usize] == 7 { EP = EP + 1 }
                 return
             }
             // User function call
@@ -773,8 +985,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     }
     p = 0
 
-    // Set BSS base address (fixed, after text segment)
+    // Set BSS base address. Reserve first 16 bytes for argc (offset 0) and argv (offset 8).
     GL_BSS_BASE = 0x600000
+    // Shift all global offsets up by 16 to make room for argc/argv at BSS+0 and BSS+8
+    var gi: i64 = 0
+    while gi < GL_COUNT { GL_OFF[gi as usize] = GL_OFF[gi as usize] + 16; gi = gi + 1 }
+    GL_BSS_SIZE = GL_BSS_SIZE + 16
 
     print("globals: "); print_int(GL_COUNT); print(" bss="); print_int(GL_BSS_SIZE); print("\n")
 
@@ -879,11 +1095,25 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     }
     if main_fn < 0 { print("error: no main\n"); return 1 }
 
-    // Trampoline: call main; mov edi, eax; mov eax, 60; syscall
+    // Trampoline: save argc/argv, call main, exit
+    TRAMP_OFF = CL
     let tramp = CL
+    // At entry: [rsp]=argc, [rsp+8]=argv[0], [rsp+16]=argv[1], ...
+    // Save argc at BSS+0, argv pointer at BSS+8
+    let argc_addr = 0x600000
+    let argv_addr = 0x600000 + 8
+    em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (argc)
+    em(0x48); em(0x83); em(0xe8); em(0x01)  // sub rax, 1 (skip program name)
+    em(0x48); em(0xb9); em64(argc_addr)
+    em(0x48); em(0x89); em(0x01)  // mov [rcx], rax (save argc-1)
+    em(0x48); em(0x8d); em(0x44); em(0x24); em(16)  // lea rax, [rsp+16] (argv+1)
+    em(0x48); em(0xb9); em64(argv_addr)
+    em(0x48); em(0x89); em(0x01)  // mov [rcx], rax (save argv ptr)
+    // call main
     em(0xe8)
     let rel = FN_OFF[main_fn as usize] - (CL + 4)
     em32(rel)
+    // exit(rax)
     em(0x89); em(0xc7)
     em(0xb8); em32(60)
     em(0x0f); em(0x05)
@@ -901,11 +1131,11 @@ fn elf_w64(off: i64, v: i64) with Mut, Panic { elf_w32(off, v); elf_w32(off+4, v
 
 // ─── ELF writer (2 LOAD segments: text RX + BSS RW) ───
 fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
-    let text_base: i64 = 0x400000
-    let text_off: i64 = 4096
-    let bss_base: i64 = 0x600000
-    let entry = text_base + text_off + CL - 14
-    let phnum: i64 = if GL_BSS_SIZE > 0 { 2 } else { 1 }
+    let text_base = 0x400000
+    let text_off = 4096
+    let bss_base = 0x600000
+    let entry = text_base + text_off + TRAMP_OFF
+    let phnum = if GL_BSS_SIZE > 0 { 2 } else { 1 }
 
     var i: i64 = 0
     while i < 4096 { ELF[i as usize] = 0; i = i + 1 }
@@ -922,7 +1152,7 @@ fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w16(58, 64)      // e_shentsize
 
     // PHDR 0: text (PT_LOAD, RX)
-    let ph0: i64 = 64
+    let ph0 = 64
     elf_w32(ph0, 1)       // p_type = PT_LOAD
     elf_w32(ph0+4, 5)     // p_flags = R+X
     elf_w64(ph0+8, 0)     // p_offset
@@ -935,7 +1165,7 @@ fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
 
     // PHDR 1: BSS (PT_LOAD, RW, zero-filled)
     if GL_BSS_SIZE > 0 {
-        let ph1: i64 = 120
+        let ph1 = 120
         elf_w32(ph1, 1)       // PT_LOAD
         elf_w32(ph1+4, 6)     // p_flags = R+W
         elf_w64(ph1+8, 0)     // p_offset (no file data)
