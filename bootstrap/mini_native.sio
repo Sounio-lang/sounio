@@ -38,34 +38,43 @@ var PATCH_OFF: [i64; 4096] = [0; 4096]
 var PATCH_FN: [i64; 4096] = [0; 4096]
 var PATCH_COUNT: i64 = 0
 
-// Global variable table: name, BSS offset, element size (1 or 8), array length (0=scalar)
-var GL_NS: [i64; 512] = [0; 512]
-var GL_NE: [i64; 512] = [0; 512]
-var GL_OFF: [i64; 512] = [0; 512]
-var GL_ESIZ: [i64; 512] = [0; 512]
-var GL_ALEN: [i64; 512] = [0; 512]
+// Global variable table: flat array, 4 fields per entry [hash, offset, esiz, alen]
+var GL: [i64; 256] = [0; 256]
 var GL_COUNT: i64 = 0
 var GL_BSS_SIZE: i64 = 0
 var GL_BSS_BASE: i64 = 0
 
+// Hash: pack name length + first 6 bytes into i64 (avoids sb()-based comparison during lookup)
+fn gl_name_hash(ns: i64, ne: i64) -> i64 with Panic {
+    // Hash: length + sum of (byte * position) — collision-resistant for same-prefix names
+    let l = ne - ns
+    var h: i64 = l * 1000003
+    var hi: i64 = 0
+    while hi < l {
+        h = h + (sb(ns + hi) & 0xFF) * (hi + 1) * 31
+        hi = hi + 1
+    }
+    h
+}
+
 fn gl_find(ns: i64, ne: i64) -> i64 with Panic {
+    let h = gl_name_hash(ns, ne)
     var i: i64 = 0
     while i < GL_COUNT {
-        if name_eq(GL_NS[i as usize], GL_NE[i as usize], ns, ne) { return i }
+        if GL[(i * 4 + 0) as usize] == h { return i }
         i = i + 1
     }
     -1
 }
 
 fn gl_add(ns: i64, ne: i64, esiz: i64, alen: i64) with Mut, Panic {
-    let sz = if alen > 0 { alen * esiz } else { 8 }
-    // Align to 8 bytes
+    var sz: i64 = 8
+    if alen > 0 { sz = alen * esiz }
     let aligned = (sz + 7) / 8 * 8
-    GL_NS[GL_COUNT as usize] = ns
-    GL_NE[GL_COUNT as usize] = ne
-    GL_OFF[GL_COUNT as usize] = GL_BSS_SIZE
-    GL_ESIZ[GL_COUNT as usize] = esiz
-    GL_ALEN[GL_COUNT as usize] = alen
+    GL[(GL_COUNT * 4 + 0) as usize] = gl_name_hash(ns, ne)
+    GL[(GL_COUNT * 4 + 1) as usize] = GL_BSS_SIZE
+    GL[(GL_COUNT * 4 + 2) as usize] = esiz
+    GL[(GL_COUNT * 4 + 3) as usize] = alen
     GL_COUNT = GL_COUNT + 1
     GL_BSS_SIZE = GL_BSS_SIZE + aligned
 }
@@ -580,8 +589,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
             let gi = gl_find(ns, ne)
             if gi >= 0 {
-                let base = GL_BSS_BASE + GL_OFF[gi as usize]
-                let esz = GL_ESIZ[gi as usize]
+                let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                let esz = GL[(gi * 4 + 2) as usize]
                 if esz == 8 {
                     // mov rcx, rax; mov rax, base; mov rax, [rax + rcx*8]
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
@@ -611,7 +620,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
-                let addr = GL_BSS_BASE + GL_OFF[gi as usize]
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 em(0x48); em(0xb8); em64(addr)  // mov rax, addr
                 em(0x48); em(0x8b); em(0x00)     // mov rax, [rax]
             } else { em(0x31); em(0xc0) }
@@ -815,7 +824,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
-                let addr = GL_BSS_BASE + GL_OFF[gi as usize]
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 // mov rcx, rax; mov rax, addr; mov [rax], rcx
                 em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (value)
                 em(0x48); em(0xb8); em64(addr)  // mov rax, addr
@@ -837,8 +846,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         compile_or()  // value in rax
         let gi = gl_find(ns, ne)
         if gi >= 0 {
-            let base = GL_BSS_BASE + GL_OFF[gi as usize]
-            let esz = GL_ESIZ[gi as usize]
+            let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+            let esz = GL[(gi * 4 + 2) as usize]
             // rax = value, stack = index
             em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
             em(0x59)  // pop rcx (index)
@@ -994,11 +1003,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     }
     p = 0
 
-    // Set BSS base address. Reserve first 16 bytes for argc (offset 0) and argv (offset 8).
-    GL_BSS_BASE = 0x600000
-    // Shift all global offsets up by 16 to make room for argc/argv at BSS+0 and BSS+8
-    var gi: i64 = 0
-    while gi < GL_COUNT { GL_OFF[gi as usize] = GL_OFF[gi as usize] + 16; gi = gi + 1 }
+    // BSS layout: [argc(8)] [argv(8)] [globals...]
+    // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0
+    GL_BSS_BASE = 0x600000 + 16
     GL_BSS_SIZE = GL_BSS_SIZE + 16
 
     print("globals: "); print_int(GL_COUNT); print(" bss="); print_int(GL_BSS_SIZE); print("\n")
@@ -1144,46 +1151,31 @@ fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
     let text_off = 4096
     let bss_base = 0x600000
     let entry = text_base + text_off + TRAMP_OFF
-    let phnum = if GL_BSS_SIZE > 0 { 2 } else { 1 }
-
     var i: i64 = 0
     while i < 4096 { ELF[i as usize] = 0; i = i + 1 }
 
+    let tsz = text_off + CL
+    // Total memory: from text_base to bss_base + GL_BSS_SIZE
+    let total_memsz = (bss_base - text_base) + GL_BSS_SIZE
+
     // ELF header (64 bytes)
     elf_w8(0, 0x7f); elf_w8(1, 69); elf_w8(2, 76); elf_w8(3, 70)
-    elf_w8(4, 2); elf_w8(5, 1); elf_w8(6, 1)  // 64-bit, LE, ELF v1
-    elf_w16(16, 2); elf_w16(18, 0x3e); elf_w32(20, 1)  // EXEC, x86-64, v1
-    elf_w64(24, entry)   // e_entry
-    elf_w64(32, 64)      // e_phoff
-    elf_w16(52, 64)      // e_ehsize
-    elf_w16(54, 56)      // e_phentsize
-    elf_w16(56, phnum)   // e_phnum
-    elf_w16(58, 64)      // e_shentsize
+    elf_w8(4, 2); elf_w8(5, 1); elf_w8(6, 1)
+    elf_w16(16, 2); elf_w16(18, 0x3e); elf_w32(20, 1)
+    elf_w64(24, entry)
+    elf_w64(32, 64)
+    elf_w16(52, 64); elf_w16(54, 56); elf_w16(56, 1); elf_w16(58, 64)
 
-    // PHDR 0: text (PT_LOAD, RX)
+    // Single LOAD segment: text(RX) + gap + BSS(RW) — all RWX
     let ph0 = 64
-    elf_w32(ph0, 1)       // p_type = PT_LOAD
-    elf_w32(ph0+4, 5)     // p_flags = R+X
-    elf_w64(ph0+8, 0)     // p_offset
-    elf_w64(ph0+16, text_base)  // p_vaddr
-    elf_w64(ph0+24, text_base)  // p_paddr
-    let tsz = text_off + CL
-    elf_w64(ph0+32, tsz)  // p_filesz
-    elf_w64(ph0+40, tsz)  // p_memsz
-    elf_w64(ph0+48, 0x1000)  // p_align
-
-    // PHDR 1: BSS (PT_LOAD, RW, zero-filled)
-    if GL_BSS_SIZE > 0 {
-        let ph1 = 120
-        elf_w32(ph1, 1)       // PT_LOAD
-        elf_w32(ph1+4, 6)     // p_flags = R+W
-        elf_w64(ph1+8, 0)     // p_offset (no file data)
-        elf_w64(ph1+16, bss_base)
-        elf_w64(ph1+24, bss_base)
-        elf_w64(ph1+32, 0)    // p_filesz = 0 (BSS)
-        elf_w64(ph1+40, GL_BSS_SIZE)  // p_memsz
-        elf_w64(ph1+48, 0x1000)
-    }
+    elf_w32(ph0, 1)                 // PT_LOAD
+    elf_w32(ph0+4, 7)               // p_flags = R+W+X
+    elf_w64(ph0+8, 0)               // p_offset
+    elf_w64(ph0+16, text_base)      // p_vaddr
+    elf_w64(ph0+24, text_base)      // p_paddr
+    elf_w64(ph0+32, tsz)            // p_filesz (text only)
+    elf_w64(ph0+40, total_memsz)    // p_memsz (text + gap + BSS)
+    elf_w64(ph0+48, 0x200000)       // p_align = 2MB (cover gap)
 
     // Copy code after header
     i = 0
