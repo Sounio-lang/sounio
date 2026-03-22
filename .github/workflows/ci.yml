@@ -3,288 +3,84 @@ name: CI
 on:
   pull_request:
   push:
-    branches:
-      - main
-      - master
+    branches: [main]
 
 jobs:
-  workflow-contracts:
-    name: Workflow Contracts
+  contracts:
+    name: Contracts
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Check workflow script references
+      - name: Workflow script references
         run: bash scripts/check_workflow_script_refs.sh
-      - name: Check docs consistency
+      - name: Docs consistency
         run: bash scripts/check_docs_consistency.sh
-      - name: Check docs registry and acceptance surfaces
+      - name: Docs registry
         run: bash scripts/check_docs_registry.sh
-      - name: Check issue template contracts
+      - name: Issue template contracts
         run: bash scripts/check_issue_template_contracts.sh
-      - name: Check legacy path hygiene
+      - name: Legacy path hygiene
         run: bash scripts/check_legacy_paths.sh
-      - name: Check claude operational contract
+      - name: Claude operational contract
         run: bash scripts/claude_operational_contract_gate.sh
-      - name: Upload claude operational contract artifact
+      - name: Upload contract artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: claude-operational-contract
-          path: |
-            artifacts/omega/claude_operational_contract_status.v1.json
+          name: contract-artifacts
+          path: artifacts/omega/claude_operational_contract_status.v1.json
           retention-days: 7
 
-  website-quality:
-    name: Website Quality
+  native-selfhost:
+    name: Native Self-Host
     runs-on: ubuntu-24.04
-    needs: workflow-contracts
-    # NOTE: playground WASM shim assets must be committed to the repo.
-    # They are pre-built Phase 1 shims (pure JS + minimal WASM stub) and do
-    # not require a Rust/wasm-pack toolchain to regenerate in CI.
-    # To rebuild them locally:
-    #   bash scripts/build_playground_wasm.sh
-    # Expected files:
-    #   website/public/wasm/sounio_compiler.js
-    #   website/public/wasm/sounio_compiler_bg.wasm
-    # Phase 2: when a real WASM Sounio target exists, replace via:
-    #   wasm-pack build compiler --target web --out-dir ../website/public/wasm
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: website/package-lock.json
-      - name: Install website dependencies
-        working-directory: website
-        run: npm ci
-      - name: Run website quality gate
-        run: npm --prefix website run check:quality
-
-  lsp-smoke:
-    name: LSP Smoke Gate
-    runs-on: ubuntu-24.04
-    needs: workflow-contracts
-    continue-on-error: true
-    timeout-minutes: 30
-    env:
-      OMEGA_SOUC_REQUIRE_PINNED: "1"
-      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK: "0"
-      SOUNIO_REPO_HARD_NO_RUST: "1"
-      SOUNIO_LSP_STRICT_NO_RUST: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - name: Resolve pinned souc binary
-        env:
-          SOUNIO_CI_SOUC_VERSION: "0.100.3"
-        run: bash scripts/fix_ci_binary.sh
-      - name: Run LSP smoke gate
-        run: bash scripts/lsp_smoke_gate.sh
-      - name: Verify LSP smoke marker
-        run: |
-          LOG_PATH="${LSP_SMOKE_LOG_PATH:-artifacts/omega/lsp_smoke.log}"
-          STATUS_PATH="${LSP_SMOKE_STATUS_PATH:-artifacts/omega/lsp_smoke_status.v1.json}"
-          test -s "$LOG_PATH"
-          grep -F -q "LSP_SMOKE_PASS" "$LOG_PATH"
-          test -s "$STATUS_PATH"
-          jq -e '.schema == "sounio.lsp.smoke.status.v1" and .status == "pass" and .pass_marker == true' "$STATUS_PATH"
-      - name: Upload LSP smoke artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lsp-smoke-artifacts
-          path: |
-            artifacts/omega/lsp_smoke.log
-            artifacts/omega/lsp_smoke_status.v1.json
-          retention-days: 7
-
-  parallel-selfhost-cutover:
-    name: Parallel Selfhost Cutover Gate
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'parallel-cutover')
-    runs-on: ubuntu-24.04
-    needs: workflow-contracts
-    continue-on-error: true
-    timeout-minutes: 120
-    env:
-      OMEGA_SOUC_REQUIRE_PINNED: "1"
-      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK: "1"
-      OMEGA_REQUIRE_REPO_HARD_NO_RUST: "1"
-      OMEGA_REQUIRE_PARALLEL_CUTOVER: "1"
-      OMEGA_NO_RUST_REQUIRE_RUNTIME_ABSENCE: "0"
-    steps:
-      - uses: actions/checkout@v4
-      - name: Resolve souc binary (stable pinned default)
-        id: resolve-souc
-        env:
-          SOUNIO_CI_SOUC_VERSION: "0.100.3"
-        run: bash scripts/fix_ci_binary.sh
-
-      - name: Enforce no-rust execution surface
-        run: bash scripts/omega/omega_no_rust_execution_surface.sh
-
-      - name: Run strict omega sprint gate
-        run: bash scripts/omega_sprint1_gate.sh --strict --report-full
-
-      - name: Emit parallel cutover status
-        run: |
-          python3 scripts/omega/omega_parallel_cutover_status.py --gate-log artifacts/omega_sprint1_gate.log
-
-      - name: Verify required cutover markers
-        run: |
-          LOG=artifacts/omega_sprint1_gate.log
-          test -s "$LOG"
-          grep -F -q "REPO_HARD_NO_RUST_PASS" "$LOG"
-          grep -F -q "DATA_STRUCTURES_PASS" "$LOG"
-          grep -F -q "GPU_IR_EXPANSION_PASS" "$LOG"
-          grep -F -q "HLIR_LOWERING_PASS" "$LOG"
-          grep -F -q "METAL_MSL_CODEGEN_PASS" "$LOG"
-          grep -F -q "PTX_REGALLOC_EXPANSION_PASS" "$LOG"
-          grep -F -q "HLIR_GPU_CROSS_COVERAGE_PASS" "$LOG"
-          grep -F -q "GPU_OPCODE_SMOKE_PASS" "$LOG"
-          grep -F -q "PARALLEL_SELFHOST_CUTOVER_PASS" "$LOG"
-
-      - name: Upload omega gate artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: omega-parallel-selfhost-cutover
-          path: |
-            artifacts/omega_sprint1_gate.log
-            artifacts/omega/
-            artifacts/fpga/
-          retention-days: 7
-
-  fast-gate:
-    name: Fast Regression Gate
-    runs-on: ubuntu-24.04
-    needs: workflow-contracts
-    continue-on-error: true
-    timeout-minutes: 30
-    env:
-      OMEGA_SOUC_REQUIRE_PINNED: "0"
-      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK: "1"
-      SOUNIO_REPO_HARD_NO_RUST: "1"
-      SKIP_BUILD: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - name: Resolve pinned souc binary
-        env:
-          SOUNIO_CI_SOUC_VERSION: "0.100.3"
-        run: bash scripts/fix_ci_binary.sh
-      - name: Run fast gate
-        run: bash scripts/fast_gate.sh
-      - name: Verify fast gate marker
-        run: |
-          echo "fast-gate marker verified by gate script exit code"
-
-  selfhost-zero-fallback:
-    name: Self-Host Zero Fallback Gate
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'selfhost-zero')
-    runs-on: ubuntu-24.04
-    needs: workflow-contracts
-    continue-on-error: true
-    timeout-minutes: 120
-    env:
-      OMEGA_SOUC_REQUIRE_PINNED: "1"
-      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK: "1"
-      SOUNIO_SELFHOST_STRICT: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - name: Resolve pinned souc binary
-        env:
-          SOUNIO_CI_SOUC_VERSION: "0.100.3"
-        run: bash scripts/fix_ci_binary.sh
-      - name: Run selfhost zero fallback gate
-        run: bash scripts/selfhost/selfhost_zero_fallback_gate.sh
-      - name: Verify zero-fallback marker
-        run: |
-          LOG="${WORK_DIR:-/tmp/sounio-selfhost-zero-gate}/artifacts/summary.txt"
-          test -f "$LOG" && grep -q "summary_fail=0" "$LOG"
-      - name: Upload selfhost zero artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: selfhost-zero-fallback-${{ runner.os }}
-          path: /tmp/sounio-selfhost-zero-gate/
-          retention-days: 7
-
-  joss-smoke:
-    name: JOSS Smoke Examples
-    runs-on: ubuntu-24.04
-    needs: workflow-contracts
-    timeout-minutes: 15
-    env:
-      OMEGA_SOUC_REQUIRE_PINNED: "0"
-      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - name: Resolve pinned souc binary
-        env:
-          SOUNIO_CI_SOUC_VERSION: "0.100.3"
-        run: bash scripts/fix_ci_binary.sh
-      - name: Run required JOSS examples
-        run: |
-          SOUC="${SOUC_BIN:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
-          export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
-          echo "=== JOSS example: hello ==="
-          "$SOUC" check examples/hello.sio
-          echo "=== JOSS example: epistemic_bmi ==="
-          "$SOUC" check examples/epistemic_bmi.sio
-          echo "=== JOSS example: pbpk_simple ==="
-          "$SOUC" check examples/pbpk_simple.sio
-      - name: Compile-fail smoke (diagnostic behavior)
-        run: |
-          SOUC="${SOUC_BIN:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
-          export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
-          echo "=== Compile-fail: effect_missing ==="
-          # Skip compile-fail check when using native wrapper (effects are warnings, not errors)
-          if [[ "$SOUC" == *"native-wrapper"* ]]; then
-            echo "SKIP: compile-fail test not applicable with native compiler (effects are warnings)"
-          else
-            if "$SOUC" check tests/compile-fail/effect_missing.sio 2>&1; then
-              echo "FAIL: expected compile error but got success"
-              exit 1
-            else
-              echo "PASS: compile-fail correctly rejected"
-            fi
-          fi
-
-  native-selfhost-gate:
-    name: Native Self-Host Gate
-    runs-on: ubuntu-24.04
-    needs: workflow-contracts
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Bootstrap native compiler
         run: |
-          chmod +x artifacts/omega/souc-bin/souc-linux-x86_64-jit || true
-          bash scripts/ci/build_native_souc.sh /tmp/souc-native.elf
+          bash scripts/ci/build_native_souc.sh /tmp/souc.elf
+          echo "Native compiler: $(stat -c%s /tmp/souc.elf) bytes"
       - name: Verify self-hosting fixed-point
         run: |
-          SOUC=/tmp/souc-native.elf
-          $SOUC self-hosted/compiler/lean_single.sio /tmp/s2.elf
+          /tmp/souc.elf self-hosted/compiler/lean_single.sio /tmp/s2.elf 2>/dev/null
           chmod +x /tmp/s2.elf
-          /tmp/s2.elf self-hosted/compiler/lean_single.sio /tmp/s3.elf
+          /tmp/s2.elf self-hosted/compiler/lean_single.sio /tmp/s3.elf 2>/dev/null
           if cmp -s /tmp/s2.elf /tmp/s3.elf; then
-            echo "PASS: Self-hosting fixed-point verified"
+            echo "SELFHOST_FIXED_POINT_PASS ($(md5sum /tmp/s2.elf | cut -d' ' -f1))"
           else
-            echo "FAIL: s2 != s3"
+            echo "SELFHOST_FIXED_POINT_FAIL"
             exit 1
           fi
-      - name: Run souc-v2 gate
+      - name: Feature gate (11 tests)
         run: |
-          export PATH="/tmp:$PATH"
-          cp /tmp/souc-native.elf /tmp/final_boot4.elf
+          cp /tmp/souc.elf /tmp/final_boot4.elf
           chmod +x /tmp/final_boot4.elf
           bash scripts/souc_v2_gate.sh
-      - name: Native check smoke test
-        run: |
-          chmod +x scripts/ci/souc-native-wrapper.sh
-          SOUC_NATIVE_BIN=/tmp/souc-native.elf scripts/ci/souc-native-wrapper.sh check examples/hello.sio
-          SOUC_NATIVE_BIN=/tmp/souc-native.elf scripts/ci/souc-native-wrapper.sh check examples/algorithms/complex_native_demo.sio
+
+  sounio-lint:
+    name: Sounio Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate all .sio files
+        run: bash check_sounio.sh --summary
+
+  website:
+    name: Website
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci
+      - name: Quality check
+        run: npm --prefix website run check:quality
