@@ -18,9 +18,8 @@ TARGETS=(
   "scripts/bootstrap/bootstrap_kernel_gate.sh"
   "scripts/e2e_gate.sh"
   "scripts/full_gate.sh"
-  ".github/workflows/full-gate.yml"
-  ".github/workflows/seed-policy-selfhost-strict.yml"
-  ".github/workflows/selfhost-regression.yml"
+  ".github/workflows/ci.yml"
+  ".github/workflows/release-gate.yml"
 )
 
 mkdir -p "$(dirname "$OUT_PATH")"

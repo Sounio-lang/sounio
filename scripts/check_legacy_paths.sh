@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 FILES=(
   ".github/workflows/ci.yml"
-  ".github/workflows/gpu-performance-validation.yml"
+  ".github/workflows/gpu-research.yml"
   "scripts/check_all_examples.sh"
   "scripts/run_glm_benchmarks.sh"
   "README.md"
