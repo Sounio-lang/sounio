@@ -154,6 +154,8 @@ fn gl_add(ns: i64, ne: i64, esiz: i64, alen: i64) with Mut, Panic {
 var VAR_NS: [i64; 64] = [0; 64]
 var VAR_NE: [i64; 64] = [0; 64]
 var VAR_SLOT: [i64; 64] = [0; 64]
+var VAR_ALEN: [i64; 64] = [0; 64]
+var VAR_ESIZ: [i64; 64] = [0; 64]
 var VAR_COUNT: i64 = 0
 var NEXT_SLOT: i64 = 1
 
@@ -310,9 +312,45 @@ fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
     VAR_NS[VAR_COUNT as usize] = ns
     VAR_NE[VAR_COUNT as usize] = ne
     VAR_SLOT[VAR_COUNT as usize] = slot
+    VAR_ALEN[VAR_COUNT as usize] = 0
+    VAR_ESIZ[VAR_COUNT as usize] = 8
     VAR_COUNT = VAR_COUNT + 1
     NEXT_SLOT = NEXT_SLOT + 1
     return slot
+}
+
+// Add a local array variable: allocate N slots, return base slot, store lea as value
+fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64) -> i64 with Mut, Panic {
+    let base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + alen
+    let ptr_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    VAR_NS[VAR_COUNT as usize] = ns
+    VAR_NE[VAR_COUNT as usize] = ne
+    VAR_SLOT[VAR_COUNT as usize] = ptr_slot
+    VAR_ALEN[VAR_COUNT as usize] = alen
+    VAR_ESIZ[VAR_COUNT as usize] = esiz
+    VAR_COUNT = VAR_COUNT + 1
+    return ptr_slot
+}
+
+// Find array info for a local variable by name
+fn var_find_alen(ns: i64, ne: i64) -> i64 with Panic {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) { return VAR_ALEN[i as usize] }
+        i = i - 1
+    }
+    return 0
+}
+
+fn var_find_esiz(ns: i64, ne: i64) -> i64 with Panic {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) { return VAR_ESIZ[i as usize] }
+        i = i - 1
+    }
+    return 8
 }
 
 // ─── Function lookup ───
@@ -869,10 +907,18 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // Local pointer subscript: ptr[idx] → load ptr from stack, add index
                 let slot = var_find(ns, ne)
                 if slot >= 0 {
+                    let lalen = var_find_alen(ns, ne)
+                    let lesiz = var_find_esiz(ns, ne)
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
                     emit_load_var(slot)  // load ptr into rax
-                    // Default: byte access (i8 array pointer from read_file)
-                    em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
+                    if lalen > 0 && lesiz == 8 {
+                        em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+                    } else if lalen > 0 && lesiz == 1 {
+                        em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
+                    } else {
+                        // Non-array local pointer (e.g. read_file result): byte access
+                        em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
+                    }
                 }
             }
             return
@@ -1111,26 +1157,64 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
         EP = EP + 1
-        // Skip : type annotation (handles simple types, array types [T; N], &T, &!T)
+        // Check for : type annotation
+        var is_arr: i64 = 0
+        var arr_len: i64 = 0
+        var arr_esiz: i64 = 8
         if TK[EP as usize] == 43 {
             EP = EP + 1  // skip :
             // Skip & or &!
             if TK[EP as usize] == 44 { EP = EP + 1 }
             if TK[EP as usize] == 32 { EP = EP + 1 }
-            // Array type: [T; N]
+            // Array type: [T; N] — detect and extract element type + length
             if TK[EP as usize] == 41 {
                 EP = EP + 1  // skip [
-                while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
+                // Element type
+                let etns = TS[EP as usize]
+                let etne = TE[EP as usize]
+                if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                EP = EP + 1  // skip element type
+                if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ;
+                arr_len = TV[EP as usize]
+                EP = EP + 1  // skip N
                 if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+                is_arr = 1
             } else {
                 EP = EP + 1  // skip type name
             }
         }
         // Skip = sign
         if TK[EP as usize] == 16 { EP = EP + 1 }
-        compile_or()
-        let slot = var_add(ns, ne)
-        emit_store_var(slot)
+        if is_arr == 1 && arr_len > 0 {
+            // Local array: allocate slots, skip initializer [0; N], store lea
+            // Skip [0; N] or [val; N] initializer
+            if TK[EP as usize] == 41 {
+                EP = EP + 1  // skip [
+                while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
+                if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+            }
+            let nslots = arr_len
+            if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz)
+            // Zero-init the array slots
+            let base = ptr_slot - nslots
+            var zi: i64 = 0
+            while zi < nslots {
+                em(0x48); em(0x31); em(0xc0)  // xor rax, rax
+                emit_store_var(base + zi)
+                zi = zi + 1
+            }
+            // Store lea (pointer to array start) in ptr_slot
+            // Array slots are base..base+nslots-1, addresses [rbp-base*8]..[rbp-(base+nslots-1)*8]
+            // Pointer must point to lowest address so arr[i] = [ptr + i*8] addresses upward
+            em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
+            em32(0 - (base + nslots - 1) * 8)
+            emit_store_var(ptr_slot)
+        } else {
+            compile_or()
+            let slot = var_add(ns, ne)
+            emit_store_var(slot)
+        }
         return
     }
 
@@ -1214,6 +1298,24 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
             } else {
                 em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl (byte store)
+            }
+        } else {
+            // Local array store: ptr[idx] = val
+            let lslot = var_find(ns, ne)
+            if lslot >= 0 {
+                let llalen = var_find_alen(ns, ne)
+                let lesiz = var_find_esiz(ns, ne)
+                em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+                em(0x59)  // pop rcx (index)
+                emit_load_var(lslot)  // load base ptr into rax
+                if llalen > 0 && lesiz == 8 {
+                    em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+                } else if llalen > 0 && lesiz == 1 {
+                    em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+                } else {
+                    // Non-array local pointer: byte store
+                    em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+                }
             }
         }
         return
