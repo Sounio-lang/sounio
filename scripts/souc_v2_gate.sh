@@ -4,10 +4,23 @@
 set -e
 PASS=0; FAIL=0; TOTAL=0
 cd "$(dirname "$0")/.."
-BOOT4=/tmp/final_boot4.elf
+BOOT4="${SOUC_BOOT4:-/tmp/final_boot4.elf}"
+
+# Try multiple bootstrap binary locations
+if [ ! -x "$BOOT4" ]; then
+    for candidate in \
+        artifacts/bootstrap/boot4.elf \
+        artifacts/bootstrap/final_boot4.elf \
+        bootstrap/stage0; do
+        if [ -x "$candidate" ]; then
+            BOOT4="$candidate"
+            break
+        fi
+    done
+fi
 
 if [ ! -x "$BOOT4" ]; then
-    echo "ERROR: $BOOT4 not found or not executable"
+    echo "ERROR: no bootstrap binary found"
     exit 1
 fi
 
