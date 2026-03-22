@@ -438,10 +438,10 @@ fn f64_bits(v: f64) -> i64 with Mut, Panic, Div {
 // Reads LEAN_SOURCE[0..source_len], tokenizes, populates PARSER_TOKENS via parser_set_token_at.
 // Avoids LexerState and complex structs that trigger boot4 IS_SPTR=4 codegen bugs.
 
-fn ltp_is_alpha(c: i64) -> bool { (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 }
-fn ltp_is_digit(c: i64) -> bool { c >= 48 && c <= 57 }
-fn ltp_is_alnum(c: i64) -> bool { ltp_is_alpha(c) || ltp_is_digit(c) }
-fn ltp_is_ws(c: i64) -> bool { c == 32 || c == 9 || c == 13 }
+fn ltp_is_alpha_i(c: i64) -> bool { (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 }
+fn ltp_is_digit_i(c: i64) -> bool { c >= 48 && c <= 57 }
+fn ltp_is_alnum_i(c: i64) -> bool { ltp_is_alpha_i(c) || ltp_is_digit_i(c) }
+fn ltp_is_ws_i(c: i64) -> bool { c == 32 || c == 9 || c == 13 }
 
 fn ltp_emit(idx: i64, kind: i64, start: i64, end: i64, line: i64, col: i64) with Mut, Panic {
     var tok = Token::new()
@@ -540,7 +540,7 @@ fn lex_to_parser(source_len: i64, file_id: i64) -> i64 with Mut, Div, Panic {
         let ch = LEAN_SOURCE[pos as usize] as i64
 
         // Skip whitespace (not newline)
-        if ltp_is_ws(ch) { pos = pos + 1; col = col + 1; continue }
+        if ltp_is_ws_i(ch) { pos = pos + 1; col = col + 1; continue }
 
         // Newline
         if ch == 10 { pos = pos + 1; line = line + 1; col = 1; continue }
@@ -570,10 +570,10 @@ fn lex_to_parser(source_len: i64, file_id: i64) -> i64 with Mut, Div, Panic {
         }
 
         // Identifier or keyword
-        if ltp_is_alpha(ch) {
+        if ltp_is_alpha_i(ch) {
             let start = pos
             let start_col = col
-            while pos < source_len && ltp_is_alnum(LEAN_SOURCE[pos as usize] as i64) { pos = pos + 1; col = col + 1 }
+            while pos < source_len && ltp_is_alnum_i(LEAN_SOURCE[pos as usize] as i64) { pos = pos + 1; col = col + 1 }
             let len = pos - start
             let kind = ltp_keyword(start, len)
             // For identifiers, also set text in token
@@ -594,7 +594,7 @@ fn lex_to_parser(source_len: i64, file_id: i64) -> i64 with Mut, Div, Panic {
         }
 
         // Integer literal
-        if ltp_is_digit(ch) {
+        if ltp_is_digit_i(ch) {
             let start = pos
             let start_col = col
             var kind: i64 = 121  // IntLit
@@ -605,7 +605,7 @@ fn lex_to_parser(source_len: i64, file_id: i64) -> i64 with Mut, Div, Panic {
                 else if next == 98 || next == 66 { kind = 127; pos = pos + 2; col = col + 2 }  // BinLit
                 else if next == 111 || next == 79 { kind = 128; pos = pos + 2; col = col + 2 }  // OctLit
             }
-            while pos < source_len && (ltp_is_alnum(LEAN_SOURCE[pos as usize] as i64) || (LEAN_SOURCE[pos as usize] as i64) == 46 || (LEAN_SOURCE[pos as usize] as i64) == 95) {
+            while pos < source_len && (ltp_is_alnum_i(LEAN_SOURCE[pos as usize] as i64) || (LEAN_SOURCE[pos as usize] as i64) == 46 || (LEAN_SOURCE[pos as usize] as i64) == 95) {
                 if (LEAN_SOURCE[pos as usize] as i64) == 46 { kind = 122 }  // FloatLit
                 pos = pos + 1; col = col + 1
             }
@@ -7750,7 +7750,12 @@ fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     // Ensure LTP_N is set for ltp_byte() (used by string comparison helpers)
     LTP_N = LEAN_SOURCE_LEN
 
-    // MP_* arrays already populated by lean_lex_to_parser() in load_and_parse()
+    // Lex source into MP_* token arrays
+    // NOTE: lean_lex_to_parser() populates MP_* arrays and sets LTP_TC.
+    // Under boot4, call it from main() before mini_compile — boot4 codegen
+    // for large functions (mini_compile is fn 207, ~2000 lines) has stack frame
+    // issues that crash on the while loop. Lexing from a separate, smaller
+    // function avoids this.
     MC_TC = LTP_TC
     print("mini_compile: tokens=")
     print_int(MC_TC)
@@ -7887,9 +7892,11 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         gpi = gpi + 1
     }
 
-    // Load + lex source (populates LEAN_SOURCE and MP_* token arrays)
-    let parsed_items = load_and_parse(source_path)
-    // Always use mini_compile — parser imports removed for boot4 compatibility
+    // Lex source into MP_* token arrays (must happen BEFORE mini_compile;
+    // boot4 codegen for very large functions crashes when lexing is inlined)
+    lean_lex_to_parser()
+
+    // Compile from token arrays
     return mini_compile(output_path)
 
     // ---- AST-direct compilation (bypasses IR lowering + JIT Box bugs) ----
