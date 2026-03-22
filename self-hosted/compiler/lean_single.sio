@@ -91,6 +91,28 @@ var MONO_COUNT: i64 = 0
 var MAN_BUF_S: [i64; 64] = [0; 64]
 var MAN_BUF_E: [i64; 64] = [0; 64]
 
+// ─── Phase 5: Effects checking ───
+// Bitmask per function: IO=1, Mut=2, Panic=4, Div=8, Alloc=16
+var FN_EFFECTS: [i64; 256] = [0; 256]
+var CURRENT_FN: i64 = 0
+
+// ─── Phase 6a: Unit tracking (compile-time only) ───
+// Unit hash per local variable (0 = no unit)
+var VAR_UNIT: [i64; 128] = [0; 128]
+
+// ─── Phase 6c: Linear type tracking ───
+// Per-struct: 1 if declared with 'linear' keyword, 0 otherwise
+var ST_LINEAR: [i64; 32] = [0; 32]
+// Per local variable: 1 if linear type, 0 otherwise
+var VAR_LINEAR: [i64; 128] = [0; 128]
+// Per local variable: use count (for linear checking)
+var VAR_USED: [i64; 128] = [0; 128]
+
+// ─── Phase 6b: Refinement type aliases ───
+// type Name = { x: T | predicate } — stored as name hash + predicate token range
+var REF_TYPE_HASH: [i64; 32] = [0; 32]
+var REF_TYPE_COUNT: i64 = 0
+
 fn en_find(hash: i64) -> i64 with Panic {
     var i: i64 = 0
     while i < EN_COUNT {
@@ -312,7 +334,8 @@ fn lex_all() with Mut, Panic {
             if src_match(s, l, "enum") { k = 47 }
             if src_match(s, l, "match") { k = 48 }
             if src_match(s, l, "pub") { k = 49 }
-            if src_match(s, l, "linear") { k = 49 }
+            if src_match(s, l, "linear") { k = 62 }
+            if src_match(s, l, "type") { k = 61 }
             if src_match(s, l, "Some") { k = 57 }
             if src_match(s, l, "None") { k = 58 }
             if src_match(s, l, "Ok") { k = 59 }
@@ -379,6 +402,9 @@ fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
     VAR_ESIZ[VAR_COUNT as usize] = 8
     VAR_IS_F64[VAR_COUNT as usize] = 0
     VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
+    VAR_UNIT[VAR_COUNT as usize] = 0
+    VAR_LINEAR[VAR_COUNT as usize] = 0
+    VAR_USED[VAR_COUNT as usize] = 0
     VAR_COUNT = VAR_COUNT + 1
     NEXT_SLOT = NEXT_SLOT + 1
     return slot
@@ -435,6 +461,28 @@ fn var_find_is_closure(ns: i64, ne: i64) -> i64 with Panic {
         i = i - 1
     }
     return 0
+}
+
+// Mark a variable as used (for linear type checking)
+fn var_mark_used(ns: i64, ne: i64) with Mut, Panic {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) {
+            VAR_USED[i as usize] = VAR_USED[i as usize] + 1
+            return
+        }
+        i = i - 1
+    }
+}
+
+// Find variable index by name (not slot, but index into VAR arrays)
+fn var_find_idx(ns: i64, ne: i64) -> i64 with Panic {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) { return i }
+        i = i - 1
+    }
+    return -1
 }
 
 // ─── Function lookup ───
@@ -649,11 +697,14 @@ var LOOP_DEPTH: i64 = 0
 // Break fixup table: code offsets of jmp rel32 placeholders
 var BREAK_PATCH: [i64; 64] = [0; 64]
 var BREAK_COUNT: i64 = 0
+// Track if last struct literal was a linear type
+var LAST_EXPR_IS_LINEAR: i64 = 0
 
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
 fn compile_primary() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
+    LAST_EXPR_IS_LINEAR = 0
     let k = TK[EP as usize]
     // Integer literal
     if k == 4 {
@@ -1208,6 +1259,20 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
             if fi >= 0 {
+                // Effects check: callee effects must be subset of caller effects
+                let callee_eff = FN_EFFECTS[fi as usize]
+                let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
+                if (callee_eff & ~caller_eff) != 0 {
+                    print("warning: effect violation: fn#")
+                    print_int(fi)
+                    print("(eff=")
+                    print_int(callee_eff)
+                    print(") called from fn#")
+                    print_int(CURRENT_FN)
+                    print("(eff=")
+                    print_int(caller_eff)
+                    print(")\n")
+                }
                 // Direct call: pop args into rdi,rsi,rdx,rcx,r8,r9
                 if argc >= 6 { em(0x41); em(0x59) }
                 if argc >= 5 { em(0x41); em(0x58) }
@@ -1273,6 +1338,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x48); em(0x8d); em(0x85)
                 em32(0 - (base_slot + fc - 1) * 8)
                 EXPR_IS_F64 = 0
+                // Track if this struct is linear
+                LAST_EXPR_IS_LINEAR = ST_LINEAR[si as usize]
                 return
             }
         }
@@ -1320,7 +1387,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         // Variable load (local first, then global)
         let slot = var_find(ns, ne)
-        if slot >= 0 { emit_load_var(slot); EXPR_IS_F64 = var_find_is_f64(ns, ne) }
+        if slot >= 0 {
+            emit_load_var(slot)
+            EXPR_IS_F64 = var_find_is_f64(ns, ne)
+            var_mark_used(ns, ne)
+        }
         else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
@@ -1747,6 +1818,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
             // Set closure flag if RHS was a closure expression
             VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
+            // Set linear flag if RHS was a linear struct literal
+            VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
         }
         return
     }
@@ -2191,7 +2264,7 @@ fn mono_pass() with IO, Mut, Panic, Div {
             continue
         }
         // pub/linear struct generics
-        if TK[p as usize] == 49 && p + 5 < TC && TK[(p + 1) as usize] == 46 && TK[(p + 3) as usize] == 23 && TK[(p + 5) as usize] == 24 {
+        if (TK[p as usize] == 49 || TK[p as usize] == 62) && p + 5 < TC && TK[(p + 1) as usize] == 46 && TK[(p + 3) as usize] == 23 && TK[(p + 5) as usize] == 24 {
             let gi = GEN_ST_COUNT
             GEN_ST_NS[gi as usize] = TS[(p + 2) as usize]
             GEN_ST_NE[gi as usize] = TE[(p + 2) as usize]
@@ -2369,8 +2442,8 @@ fn mono_pass() with IO, Mut, Panic, Div {
         // Re-scan for monomorphized struct declarations
         p = 0
         while p < TC {
-            if TK[p as usize] == 46 || TK[p as usize] == 49 {
-                if TK[p as usize] == 49 { p = p + 1 }
+            if TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 {
+                if TK[p as usize] == 49 || TK[p as usize] == 62 { p = p + 1 }
                 if TK[p as usize] == 46 {
                     p = p + 1
                     let rsn_ns = TS[p as usize]
@@ -2419,9 +2492,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // Pass 0a: register structs
     ST_COUNT = 0
     while p < TC {
-        if TK[p as usize] == 46 || TK[p as usize] == 49 {
-            // struct or pub/linear keyword — skip pub/linear prefix
-            if TK[p as usize] == 49 { p = p + 1 }
+        if TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 {
+            // struct or pub/linear keyword — skip pub/linear prefix, track linear
+            var is_linear_decl: i64 = 0
+            if TK[p as usize] == 62 { is_linear_decl = 1 }
+            if TK[p as usize] == 49 || TK[p as usize] == 62 { p = p + 1 }
             if TK[p as usize] == 46 {
                 p = p + 1  // skip 'struct'
                 let sn_ns = TS[p as usize]
@@ -2450,6 +2525,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     p = p + 1
                 }
                 ST[(base + 1) as usize] = fc
+                ST_LINEAR[si as usize] = is_linear_decl
                 ST_COUNT = ST_COUNT + 1
                 if TK[p as usize] == 9 { p = p + 1 }
                 continue
@@ -2561,6 +2637,73 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         p = p + 1
     }
 
+    // Pass 1b: scan effects clauses for each function
+    // For each fn at index fi, scan forward from its name token to find 'with' (38)
+    // and record effect bitmask: IO=1, Mut=2, Panic=4, Div=8, Alloc=16
+    p = 0
+    var eff_fi: i64 = 0
+    while p < TC {
+        if TK[p as usize] == 1 {
+            p = p + 1
+            // Skip generic templates
+            if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
+            // Scan forward to find { (start of body) — effects are between ) -> type with ... {
+            var eq: i64 = p + 1
+            while eq < TC && TK[eq as usize] != 8 { eq = eq + 1 }
+            // Now scan from p to eq for 'with' token (38)
+            var ew: i64 = p
+            while ew < eq {
+                if TK[ew as usize] == 38 {
+                    ew = ew + 1
+                    while ew < eq && (TK[ew as usize] == 3 || TK[ew as usize] == 28) {
+                        if TK[ew as usize] == 3 {
+                            let ens = TS[ew as usize]
+                            let ene = TE[ew as usize]
+                            if src_match(ens, ene - ens, "IO") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 1 }
+                            if src_match(ens, ene - ens, "Mut") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 2 }
+                            if src_match(ens, ene - ens, "Panic") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 4 }
+                            if src_match(ens, ene - ens, "Div") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 8 }
+                            if src_match(ens, ene - ens, "Alloc") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 16 }
+                        }
+                        ew = ew + 1
+                    }
+                    ew = eq  // done scanning
+                }
+                ew = ew + 1
+            }
+            if eff_fi < FN_COUNT { eff_fi = eff_fi + 1 }
+        }
+        p = p + 1
+    }
+    print("effects: scanned "); print_int(eff_fi); print(" functions\n")
+
+    // Pass 1c: scan top-level type aliases (token 61)
+    p = 0
+    var tdepth: i64 = 0
+    while p < TC {
+        let ttk = TK[p as usize]
+        if ttk == 8 { tdepth = tdepth + 1; p = p + 1; continue }
+        if ttk == 9 { tdepth = tdepth - 1; p = p + 1; continue }
+        if tdepth > 0 { p = p + 1; continue }
+        if ttk == 61 {
+            // type NAME = ...
+            p = p + 1
+            if p < TC && TK[p as usize] == 3 {
+                let tnh = gl_name_hash(TS[p as usize], TE[p as usize])
+                if REF_TYPE_COUNT < 32 {
+                    REF_TYPE_HASH[REF_TYPE_COUNT as usize] = tnh
+                    REF_TYPE_COUNT = REF_TYPE_COUNT + 1
+                }
+                p = p + 1
+            }
+            // Skip = and everything to next top-level declaration
+            while p < TC && TK[p as usize] != 1 && TK[p as usize] != 12 && TK[p as usize] != 46 && TK[p as usize] != 47 && TK[p as usize] != 61 && TK[p as usize] != 0 { p = p + 1 }
+            continue
+        }
+        p = p + 1
+    }
+    if REF_TYPE_COUNT > 0 { print("types: "); print_int(REF_TYPE_COUNT); print(" aliases\n") }
+
     // Pass 2: compile each function
     p = 0
     var fn_idx: i64 = 0
@@ -2577,8 +2720,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             continue
         }
 
-        // Record code offset
+        // Record code offset + set current function for effects checking
         FN_OFF[fn_idx as usize] = CL
+        CURRENT_FN = fn_idx
 
         // Reset local vars
         VAR_COUNT = 0
@@ -2640,6 +2784,30 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             compile_stmt()
         }
         p = EP
+
+        // Linear type check: warn if any linear variable was not used exactly once
+        var lci: i64 = 0
+        while lci < VAR_COUNT {
+            if VAR_LINEAR[lci as usize] == 1 {
+                if VAR_USED[lci as usize] == 0 {
+                    print("warning: linear var#")
+                    print_int(lci)
+                    print(" in fn#")
+                    print_int(fn_idx)
+                    print(" never used (must use exactly once)\n")
+                }
+                if VAR_USED[lci as usize] > 1 {
+                    print("warning: linear var#")
+                    print_int(lci)
+                    print(" in fn#")
+                    print_int(fn_idx)
+                    print(" used ")
+                    print_int(VAR_USED[lci as usize])
+                    print(" times (must use exactly once)\n")
+                }
+            }
+            lci = lci + 1
+        }
 
         // Implicit return 0
         if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
