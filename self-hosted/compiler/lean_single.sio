@@ -1076,18 +1076,47 @@ fn compile_postfix() with IO, Mut, Panic, Div {
         }
         if TK[EP as usize] == 50 {
             EP = EP + 1  // skip '.'
-            // rax = struct pointer/base. Load field by name.
             let fns = TS[EP as usize]
             let fne = TE[EP as usize]
             let fh = gl_name_hash(fns, fne)
+            // Method call: obj.method(args) → method(obj, args)
+            if TK[(EP + 1) as usize] == 6 {
+                let mfi = fn_find(fns, fne)
+                if mfi >= 0 {
+                    EP = EP + 1  // skip method name
+                    EP = EP + 1  // skip (
+                    // rax = self pointer. Push as first arg.
+                    em(0x50)  // push self
+                    var margc: i64 = 1
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or()
+                        em(0x50)
+                        margc = margc + 1
+                        if TK[EP as usize] == 28 { EP = EP + 1 }
+                    }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                    // Pop args into registers (reverse order)
+                    if margc >= 6 { em(0x41); em(0x59) }
+                    if margc >= 5 { em(0x41); em(0x58) }
+                    if margc >= 4 { em(0x59) }
+                    if margc >= 3 { em(0x5a) }
+                    if margc >= 2 { em(0x5e) }
+                    if margc >= 1 { em(0x5f) }
+                    em(0xe8)
+                    PATCH_OFF[PATCH_COUNT as usize] = CL
+                    PATCH_FN[PATCH_COUNT as usize] = mfi
+                    PATCH_COUNT = PATCH_COUNT + 1
+                    em32(0)
+                    continue
+                }
+            }
+            // Field access: rax = struct pointer, load field
             EP = EP + 1
-            // Search all structs for this field
             var found: i64 = 0
             var si: i64 = 0
             while si < ST_COUNT && found == 0 {
                 let off = st_field_offset(si, fh)
                 if off >= 0 {
-                    // mov rax, [rax + off] — read field from struct pointer in rax
                     if off == 0 {
                         em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
                     } else {
@@ -1804,8 +1833,20 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 let pne = TE[p as usize]
                 let pslot = var_add(pns, pne)
                 p = p + 1
-                // Skip : TYPE
-                if TK[p as usize] == 43 { p = p + 1; p = p + 1 }
+                // Skip : type annotation (handles &T, &!T, [T; N], simple T)
+                if TK[p as usize] == 43 {
+                    p = p + 1  // skip :
+                    if TK[p as usize] == 44 { p = p + 1 }  // skip &
+                    if TK[p as usize] == 32 { p = p + 1 }  // skip !
+                    if TK[p as usize] == 41 {
+                        // [T; N]
+                        p = p + 1
+                        while TK[p as usize] != 42 && TK[p as usize] != 0 { p = p + 1 }
+                        if TK[p as usize] == 42 { p = p + 1 }
+                    } else {
+                        p = p + 1  // skip type name
+                    }
+                }
             }
             if TK[p as usize] == 28 { p = p + 1 }
         }
