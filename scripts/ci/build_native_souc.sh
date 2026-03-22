@@ -9,6 +9,16 @@ cd "$ROOT_DIR"
 LEAN="$ROOT_DIR/self-hosted/compiler/lean_single.sio"
 OUT="${1:-/tmp/souc-native.elf}"
 
+# Strategy 0: Use pre-built native compiler (v1.0.0 self-hosted fixed-point)
+NATIVE_PREBUILT="$ROOT_DIR/artifacts/bootstrap/souc-native-v1.0.0.elf"
+if [ -x "$NATIVE_PREBUILT" ]; then
+    echo "Using pre-built native compiler..."
+    cp "$NATIVE_PREBUILT" "$OUT"
+    chmod +x "$OUT"
+    echo "Native compiler ready: $OUT ($(stat -c%s "$OUT") bytes)"
+    exit 0
+fi
+
 # Strategy 1: Use boot4.elf (pure native, no dependencies)
 for BOOT4_ELF in \
     "$ROOT_DIR/artifacts/bootstrap/boot4.elf" \
