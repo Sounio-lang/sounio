@@ -1,8 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.guide.sounio-style-guide
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-style-guide
+-->
+
 # Sounio Style Guide for LLMs
 
 Sounio looks like Rust but has DIFFERENT syntax and semantics. This guide covers style, patterns, and conventions.
 
-**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
+**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](../LLM_PROGRAMMING_GUIDE.md)
 
 ## 1. Basic Syntax
 

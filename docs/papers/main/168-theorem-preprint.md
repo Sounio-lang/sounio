@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.paper.168-theorem-preprint
+topic_id: repo.docs.papers.main.168-theorem-preprint
 authority: repo_only
-audience: researchers
+audience: users
 last_validated: 2026-03-07
-validated_by: A6
-source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.168-theorem-preprint
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.main.168-theorem-preprint
 -->
 
 # The 168 Theorem: PSL(2,7) Governs Non-Associativity and Zero-Divisor Structure in the Cayley–Dickson Tower

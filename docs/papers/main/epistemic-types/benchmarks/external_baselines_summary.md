@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.paper.epistemic-types.benchmarks.external-baselines-summary
+topic_id: repo.docs.papers.main.epistemic-types.benchmarks.external-baselines-summary
 authority: repo_only
-audience: researchers
+audience: users
 last_validated: 2026-03-07
-validated_by: A6
-source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.epistemic-types.benchmarks.external-baselines-summary
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.main.epistemic-types.benchmarks.external-baselines-summary
 -->
 
 # External Baseline Comparison Results

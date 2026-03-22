@@ -1,10 +1,19 @@
+<!-- docs:meta
+topic_id: repo.docs.guide.sounio-quick-start
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-quick-start
+-->
+
 # Sounio Quick Start for LLMs
 
-> **Other guides**: [Scientists' Quick Start](docs/QUICK_START_GUIDE.md) | [General Getting Started](docs/guide/getting-started.md) | [Conservative contract](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
+> **Other guides**: [Scientists' Quick Start](../QUICK_START_GUIDE.md) | [General Getting Started](getting-started.md) | [Conservative contract](MINIMUM_VIABLE_SOUNIO.md)
 
 **TL;DR**: Sounio is NOT Rust. No semicolons. Effects required. `&!` not `&mut`. Study real `.sio` files.
 
-**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
+**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](../LLM_PROGRAMMING_GUIDE.md)
 
 ## 30-Second Comparison
 

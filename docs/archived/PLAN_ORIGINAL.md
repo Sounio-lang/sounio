@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.archived.plan-original
+authority: archived
+audience: maintainers
+last_validated: 2026-03-07
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.plan-original
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `archived`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Sounio Original Plan (Canonical)
 
 This document captures the original execution plan from the start of this thread and maps it to the current implementation specs.

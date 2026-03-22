@@ -1,9 +1,9 @@
 <!-- docs:meta
 topic_id: repo.docs.release-policy
 authority: repo_only
-audience: contributors
-last_validated: 2026-03-21
-validated_by: A1
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.release-policy
 -->
 

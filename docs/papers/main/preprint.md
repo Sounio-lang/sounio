@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.paper.preprint
+topic_id: repo.docs.papers.main.preprint
 authority: repo_only
-audience: researchers
+audience: users
 last_validated: 2026-03-07
-validated_by: A6
-source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.preprint
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.main.preprint
 -->
 
 # Epistemic Shadow Lanes: Compiler-Generated Uncertainty Propagation for GPU Kernels

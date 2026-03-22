@@ -21,6 +21,8 @@ NC='\033[0m' # No Color
 VALIDATOR_SCRIPT="check_sounio.sh"
 MAX_ERRORS=0  # Fail CI if errors > 0
 SKIP_PATTERNS=("*.disabled" "*.backup" "*.old")  # Files to skip
+# Directories containing intentionally invalid Sounio (error tests, compile-fail tests)
+SKIP_DIRS=("tests/error_audit" "tests/compile-fail" "tests/ui" "archive")
 
 # Function to print section headers
 print_header() {
@@ -59,6 +61,13 @@ find_sounio_files() {
             fi
         done
         
+        # Check directory skip patterns
+        for dir_pattern in "${SKIP_DIRS[@]}"; do
+            if [[ "$file" == *"$dir_pattern"* ]]; then
+                skip=true
+                break
+            fi
+        done
         if [ "$skip" = false ]; then
             files+=("$file")
         fi

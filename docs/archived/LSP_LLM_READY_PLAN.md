@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.archived.lsp-llm-ready-plan
+authority: archived
+audience: maintainers
+last_validated: 2026-03-07
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.lsp-llm-ready-plan
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `archived`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Plano: LSP LLM-Ready para Sounio
 
 **Objetivo**: Transformar o LSP do Sounio em uma ferramenta completa que guia LLMs e desenvolvedores para programar com perfeição e qualidade.

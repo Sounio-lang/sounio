@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.guide.check-sounio-guide
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.check-sounio-guide
+-->
+
 # Sounio Code Validator Guide
 
 ## Overview

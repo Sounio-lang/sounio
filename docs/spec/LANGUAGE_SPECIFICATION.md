@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: website.docs.spec.language-spec
-authority: dual
+topic_id: repo.docs.spec.language-specification
+authority: repo_only
 audience: users
-last_validated: 2026-03-21
-validated_by: A1
-source_of_truth: docs/governance/topic-registry.v1.json#website.docs.spec.language-spec
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.language-specification
 -->
 
 # The Sounio Programming Language

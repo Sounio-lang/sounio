@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.paper.cpt-psp.outline
+topic_id: repo.docs.papers.main.cpt-psp.outline
 authority: repo_only
-audience: researchers
+audience: users
 last_validated: 2026-03-07
-validated_by: A6
-source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.cpt-psp.outline
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.main.cpt-psp.outline
 -->
 
 # Type-Safe Pharmacokinetic Modeling with Certified Uncertainty Propagation

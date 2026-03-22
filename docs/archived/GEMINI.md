@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.archived.gemini
+authority: archived
+audience: maintainers
+last_validated: 2026-03-07
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.gemini
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `archived`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Gemini Code Assistant Context
 
 This document provides a comprehensive overview of the Sounio project for the Gemini Code Assistant.

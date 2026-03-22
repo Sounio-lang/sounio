@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.papers.medrxiv-abstract
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.medrxiv-abstract
+-->
+
 # When Point Estimates Kill: A Framework for Uncertainty-Aware Warfarin Dosing That Detects Hemorrhage Risk Standard Tools Conceal
 
 **Authors**: Demetrios Chiuratto Agourakis
