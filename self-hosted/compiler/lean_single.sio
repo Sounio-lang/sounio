@@ -6,8 +6,14 @@
 //        /tmp/mini_native.elf input.sio output.elf
 
 // ─── Global buffers ───
-var SRC: [i8; 1048576] = [0; 1048576]
+var SRC: [i8; 2097152] = [0; 2097152]
 var SRC_LEN: i64 = 0
+// Import resolution
+var IMP_PATH: [i8; 4096] = [0; 4096]
+var IMP_LOADED: [i64; 64] = [0; 64]
+var IMP_COUNT: i64 = 0
+var BASE_DIR: [i8; 512] = [0; 512]
+var BASE_DIR_LEN: i64 = 0
 
 // Token parallel arrays (kind, start, end, int_value)
 var TK: [i64; 32768] = [0; 32768]
@@ -1709,6 +1715,106 @@ fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
     return 0
 }
 
+// ─── Import resolver ───
+// Hash IMP_PATH[0..len] for dedup
+fn imp_path_hash(len: i64) -> i64 with Panic {
+    var h: i64 = len * 1000003
+    var i: i64 = 0
+    while i < len {
+        let c = IMP_PATH[i as usize] as i64 & 0xFF
+        h = h + c * (i + 1) * 31
+        i = i + 1
+    }
+    return h
+}
+
+// Resolve and load use statements from SRC[0..SRC_LEN]
+fn resolve_imports() with IO, Mut, Panic, Div {
+    var pos: i64 = 0
+    while pos < SRC_LEN {
+        // Find start of line
+        let line_start = pos
+        // Check for "use " at line start (117=u, 115=s, 101=e, 32=space)
+        if pos + 4 < SRC_LEN && sb(pos) == 117 && sb(pos+1) == 115 && sb(pos+2) == 101 && sb(pos+3) == 32 {
+            pos = pos + 4  // skip "use "
+            // Extract module path until newline, semicolon, or ::*
+            var path_len: i64 = 0
+            var path_start: i64 = pos
+            while pos < SRC_LEN && sb(pos) != 10 && sb(pos) != 59 && sb(pos) != 13 {
+                if sb(pos) == 58 && pos + 1 < SRC_LEN && sb(pos+1) == 58 {
+                    if pos + 2 < SRC_LEN && sb(pos+2) == 42 {
+                        pos = pos + 3  // skip ::*
+                        break
+                    }
+                    if pos + 2 < SRC_LEN && sb(pos+2) == 123 {
+                        // Skip ::{...} until }
+                        while pos < SRC_LEN && sb(pos) != 125 && sb(pos) != 10 { pos = pos + 1 }
+                        if pos < SRC_LEN && sb(pos) == 125 { pos = pos + 1 }
+                        break
+                    }
+                }
+                pos = pos + 1
+            }
+            let path_end = pos
+            // Build filesystem path: convert :: to /
+            var fp_len: i64 = 0
+            // Check prefix: stdlib:: or self-hosted::
+            var pi: i64 = path_start
+            while pi < path_end {
+                let c = sb(pi)
+                if c == 58 && pi + 1 < path_end && sb(pi+1) == 58 {
+                    IMP_PATH[fp_len as usize] = 47  // /
+                    fp_len = fp_len + 1
+                    pi = pi + 2
+                } else if c == 42 || c == 123 || c == 125 || c == 32 {
+                    pi = pi + 1  // skip wildcards, braces, spaces
+                } else {
+                    IMP_PATH[fp_len as usize] = c as i8
+                    fp_len = fp_len + 1
+                    pi = pi + 1
+                }
+            }
+            // Append .sio if not already present
+            if fp_len > 4 && IMP_PATH[(fp_len-4) as usize] == 46 && IMP_PATH[(fp_len-3) as usize] == 115 {
+                // already has .sio — skip
+            } else {
+                IMP_PATH[fp_len as usize] = 46; fp_len = fp_len + 1   // .
+                IMP_PATH[fp_len as usize] = 115; fp_len = fp_len + 1  // s
+                IMP_PATH[fp_len as usize] = 105; fp_len = fp_len + 1  // i
+                IMP_PATH[fp_len as usize] = 111; fp_len = fp_len + 1  // o
+            }
+            IMP_PATH[fp_len as usize] = 0  // null terminate
+            // Dedup check
+            let ph = imp_path_hash(fp_len)
+            var already: i64 = 0
+            var di: i64 = 0
+            while di < IMP_COUNT {
+                if IMP_LOADED[di as usize] == ph { already = 1 }
+                di = di + 1
+            }
+            if already == 0 && IMP_COUNT < 64 {
+                IMP_LOADED[IMP_COUNT as usize] = ph
+                IMP_COUNT = IMP_COUNT + 1
+                // Try to read the file
+                let fsz = file_size(IMP_PATH)
+                if fsz > 0 && SRC_LEN + fsz < 2097152 {
+                    let raw = read_file(IMP_PATH)
+                    // Append newline separator
+                    SRC[SRC_LEN as usize] = 10; SRC_LEN = SRC_LEN + 1
+                    // Copy imported source
+                    var ci: i64 = 0
+                    while ci < fsz { SRC[(SRC_LEN + ci) as usize] = raw[ci as usize]; ci = ci + 1 }
+                    SRC_LEN = SRC_LEN + fsz
+                    print("import: "); print(IMP_PATH); print(" "); print_int(fsz); print(" bytes\n")
+                }
+            }
+        }
+        // Advance to next line
+        while pos < SRC_LEN && sb(pos) != 10 { pos = pos + 1 }
+        if pos < SRC_LEN { pos = pos + 1 }
+    }
+}
+
 fn main() -> i64 with IO, Mut, Panic, Div {
     let argc = arg_count()
     if argc < 2 { print("Usage: mini_native <source.sio> <output.elf>\n"); return 1 }
@@ -1717,9 +1823,11 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     let raw = read_file(src)
     let sz = file_size(src)
     var i: i64 = 0
-    while i < sz && i < 1048576 { SRC[i as usize] = raw[i as usize]; i = i + 1 }
+    while i < sz && i < 2097152 { SRC[i as usize] = raw[i as usize]; i = i + 1 }
     SRC_LEN = sz
     print("source: "); print(src); print(" "); print_int(sz); print(" bytes\n")
+    resolve_imports()
+    print("total source: "); print_int(SRC_LEN); print(" bytes\n")
     lex_all()
     print("tokens: "); print_int(TC); print("\n")
     let cr = compile_all()
