@@ -785,20 +785,30 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
-            // Pop args into registers (reverse order). Params 7+ stay on stack.
-            // Stack currently has [arg1, arg2, ..., argN] (argN on top)
-            // Pop into registers for first 6, leave rest on stack for callee
+            // Pop args into registers (reverse order)
             if argc >= 6 { em(0x41); em(0x59) }   // pop r9  (arg 6)
             if argc >= 5 { em(0x41); em(0x58) }   // pop r8  (arg 5)
             if argc >= 4 { em(0x59) }               // pop rcx (arg 4)
             if argc >= 3 { em(0x5a) }               // pop rdx (arg 3)
             if argc >= 2 { em(0x5e) }               // pop rsi (arg 2)
             if argc >= 1 { em(0x5f) }               // pop rdi (arg 1)
-            em(0xe8)
-            PATCH_OFF[PATCH_COUNT as usize] = CL
-            PATCH_FN[PATCH_COUNT as usize] = fi
-            PATCH_COUNT = PATCH_COUNT + 1
-            em32(0)
+            if fi >= 0 {
+                // Direct call: call rel32 (patched later)
+                em(0xe8)
+                PATCH_OFF[PATCH_COUNT as usize] = CL
+                PATCH_FN[PATCH_COUNT as usize] = fi
+                PATCH_COUNT = PATCH_COUNT + 1
+                em32(0)
+            } else {
+                // Indirect call: variable holds fn pointer → call rax
+                let vslot = var_find(ns, ne)
+                if vslot >= 0 {
+                    emit_load_var(vslot)
+                    em(0xff); em(0xd0)  // call rax
+                } else {
+                    em(0x31); em(0xc0)  // unknown fn — emit 0
+                }
+            }
             return
         }
         // Struct literal: StructName { field: val, ... }
@@ -880,7 +890,20 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     em(0x48); em(0x8b); em(0x00)  // scalar: mov rax, [rax] (dereference)
                 }
                 // array: rax = address (no dereference — used as pointer)
-            } else { em(0x31); em(0xc0) }
+            } else {
+                // Function reference: let f = some_fn (no parens)
+                let fri = fn_find(ns, ne)
+                if fri >= 0 {
+                    // lea rax, [rip + rel32] — address of function code
+                    em(0x48); em(0x8d); em(0x05)
+                    PATCH_OFF[PATCH_COUNT as usize] = CL
+                    PATCH_FN[PATCH_COUNT as usize] = fri
+                    PATCH_COUNT = PATCH_COUNT + 1
+                    em32(0)
+                } else {
+                    em(0x31); em(0xc0)
+                }
+            }
         }
         return
     }
