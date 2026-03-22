@@ -34,10 +34,18 @@ echo "[fast-gate] 7/13 cultural fidelity (user-facing text leakage)"
 python3 "$ROOT_DIR/scripts/cultural_fidelity_gate.py"
 
 echo "[fast-gate] 8/13 compiler unit tests (cargo test --lib)"
-(cd "$ROOT_DIR" && sounio_cargo test -p souc --lib)
+if [[ "$SKIP_BUILD" = "1" ]]; then
+  echo "[fast-gate] skipped (no-rust mode)"
+else
+  (cd "$ROOT_DIR" && sounio_cargo test -p souc --lib)
+fi
 
 echo "[fast-gate] 9/13 integration tests"
-(cd "$ROOT_DIR" && sounio_cargo test -p souc --tests)
+if [[ "$SKIP_BUILD" = "1" ]]; then
+  echo "[fast-gate] skipped (no-rust mode)"
+else
+  (cd "$ROOT_DIR" && sounio_cargo test -p souc --tests)
+fi
 
 echo "[fast-gate] 10/13 check canonical example"
 if [[ "$SKIP_BUILD" = "1" ]]; then

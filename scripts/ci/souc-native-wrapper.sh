@@ -24,6 +24,10 @@ CMD="${1:-help}"
 shift || true
 
 case "$CMD" in
+    --version|-v|version)
+        echo "souc-native 1.0.0 (self-hosted lean_single.sio)"
+        exit 0
+        ;;
     check)
         FILE="$1"
         TMP=$(mktemp /tmp/souc-check-XXXXXX.elf)

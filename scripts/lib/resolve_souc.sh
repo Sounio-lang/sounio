@@ -72,6 +72,20 @@ _sounio_resolve_bin() {
     command -v souc
     return 0
   fi
+  # Last resort: native compiler wrapper
+  local native_wrapper="$_SOUNIO_ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
+  if [[ -f "$native_wrapper" ]]; then
+    chmod +x "$native_wrapper"
+    local native_bin="/tmp/souc-native.elf"
+    if [[ ! -x "$native_bin" ]]; then
+      bash "$_SOUNIO_ROOT_DIR/scripts/ci/build_native_souc.sh" "$native_bin" 2>/dev/null || true
+    fi
+    if [[ -x "$native_bin" ]]; then
+      export SOUC_NATIVE_BIN="$native_bin"
+      echo "$native_wrapper"
+      return 0
+    fi
+  fi
   echo ""
   return 1
 }
