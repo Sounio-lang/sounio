@@ -21,8 +21,8 @@ SOUC_BIN="$({
   SOUNIO_SOUC_VARIANT="std" \
   OMEGA_SOUC_REQUIRE_PINNED="$OMEGA_SOUC_REQUIRE_PINNED" \
   OMEGA_SOUC_ALLOW_LOCAL_FALLBACK="$OMEGA_SOUC_ALLOW_LOCAL_FALLBACK" \
-    "$RESOLVER_SCRIPT" --print-path
-} )"
+    "$RESOLVER_SCRIPT" --print-path 2>/dev/null
+} || echo "")"
 
 if [[ ! -x "$SOUC_BIN" ]]; then
   echo "warn: resolved souc binary is not executable: $SOUC_BIN" >&2
@@ -52,6 +52,9 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   {
     echo "SOUC_BIN=$SOUC_BIN"
     echo "SOUNIO_SOUC_VERSION=$SOUNIO_CI_SOUC_VERSION"
+    if [[ -n "${SOUC_NATIVE_BIN:-}" ]]; then
+      echo "SOUC_NATIVE_BIN=$SOUC_NATIVE_BIN"
+    fi
   } >> "$GITHUB_ENV"
 else
   echo "SOUC_BIN=$SOUC_BIN"
