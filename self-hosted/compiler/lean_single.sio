@@ -156,6 +156,7 @@ var VAR_NE: [i64; 64] = [0; 64]
 var VAR_SLOT: [i64; 64] = [0; 64]
 var VAR_ALEN: [i64; 64] = [0; 64]
 var VAR_ESIZ: [i64; 64] = [0; 64]
+var VAR_IS_F64: [i64; 64] = [0; 64]
 var VAR_COUNT: i64 = 0
 var NEXT_SLOT: i64 = 1
 
@@ -316,6 +317,7 @@ fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
     VAR_SLOT[VAR_COUNT as usize] = slot
     VAR_ALEN[VAR_COUNT as usize] = 0
     VAR_ESIZ[VAR_COUNT as usize] = 8
+    VAR_IS_F64[VAR_COUNT as usize] = 0
     VAR_COUNT = VAR_COUNT + 1
     NEXT_SLOT = NEXT_SLOT + 1
     return slot
@@ -332,6 +334,7 @@ fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64) -> i64 with Mut, Panic {
     VAR_SLOT[VAR_COUNT as usize] = ptr_slot
     VAR_ALEN[VAR_COUNT as usize] = alen
     VAR_ESIZ[VAR_COUNT as usize] = esiz
+    VAR_IS_F64[VAR_COUNT as usize] = 0
     VAR_COUNT = VAR_COUNT + 1
     return ptr_slot
 }
@@ -353,6 +356,15 @@ fn var_find_esiz(ns: i64, ne: i64) -> i64 with Panic {
         i = i - 1
     }
     return 8
+}
+
+fn var_find_is_f64(ns: i64, ne: i64) -> i64 with Panic {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) { return VAR_IS_F64[i as usize] }
+        i = i - 1
+    }
+    return 0
 }
 
 // ─── Function lookup ───
@@ -548,12 +560,14 @@ fn emit_write_file() with Mut {
 // ─── Expression compiler (recursive descent) ───
 // Global parse position for expression parsing
 var EP: i64 = 0
+var EXPR_IS_F64: i64 = 0
 // Closure state save buffers (global to avoid stack overflow in recursive compile_primary)
 var CL_SAVE_NS: [i64; 64] = [0; 64]
 var CL_SAVE_NE: [i64; 64] = [0; 64]
 var CL_SAVE_SL: [i64; 64] = [0; 64]
 var CL_SAVE_AL: [i64; 64] = [0; 64]
 var CL_SAVE_ES: [i64; 64] = [0; 64]
+var CL_SAVE_F64: [i64; 64] = [0; 64]
 // Loop stack for continue/break (max 16 nested loops)
 var LOOP_TOP: [i64; 16] = [0; 16]
 var LOOP_END_PATCH: [i64; 16] = [0; 16]
@@ -572,11 +586,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
         if v == 0 { em(0x31); em(0xc0) }
         else { em(0x48); em(0xb8); em64(v) }
         EP = EP + 1
+        EXPR_IS_F64 = 0
         return
     }
     // true=35, false=36
-    if k == 35 { em(0x48); em(0xb8); em64(1); EP = EP + 1; return }
-    if k == 36 { em(0x31); em(0xc0); EP = EP + 1; return }
+    if k == 35 { em(0x48); em(0xb8); em64(1); EP = EP + 1; EXPR_IS_F64 = 0; return }
+    if k == 36 { em(0x31); em(0xc0); EP = EP + 1; EXPR_IS_F64 = 0; return }
     // Float literal (53): runtime conversion via SSE2
     if k == 53 {
         let fl_int = TV[EP as usize]
@@ -597,6 +612,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         // movq rax, xmm0 — store f64 bits in rax
         em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+        EXPR_IS_F64 = 1
         return
     }
     // Closure: |params| expr  or  |params| { stmts }
@@ -615,6 +631,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             CL_SAVE_SL[svi as usize] = VAR_SLOT[svi as usize]
             CL_SAVE_AL[svi as usize] = VAR_ALEN[svi as usize]
             CL_SAVE_ES[svi as usize] = VAR_ESIZ[svi as usize]
+            CL_SAVE_F64[svi as usize] = VAR_IS_F64[svi as usize]
             svi = svi + 1
         }
         // Reset state for closure body
@@ -682,8 +699,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
             VAR_SLOT[svi as usize] = CL_SAVE_SL[svi as usize]
             VAR_ALEN[svi as usize] = CL_SAVE_AL[svi as usize]
             VAR_ESIZ[svi as usize] = CL_SAVE_ES[svi as usize]
+            VAR_IS_F64[svi as usize] = CL_SAVE_F64[svi as usize]
             svi = svi + 1
         }
+        EXPR_IS_F64 = 0
         return
     }
     // Parenthesized
@@ -709,6 +728,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x48); em(0xb8); em64(addr)  // mov rax, bss_addr
             } else { em(0x31); em(0xc0) }
         }
+        EXPR_IS_F64 = 0
         return
     }
     // Dereference: *expr → compile expr, then load from pointer
@@ -716,13 +736,20 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EP = EP + 1
         compile_primary()
         em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+        EXPR_IS_F64 = 0
         return
     }
     // Unary minus
     if k == 18 {
         EP = EP + 1
         compile_primary()
-        em(0x48); em(0xf7); em(0xd8)  // neg rax
+        // EXPR_IS_F64 kept from inner expression (unary minus preserves type)
+        if EXPR_IS_F64 == 1 {
+            // f64 negate: flip sign bit (bit 63)
+            em(0x48); em(0x0f); em(0xba); em(0xf8); em(63)  // btc rax, 63
+        } else {
+            em(0x48); em(0xf7); em(0xd8)  // neg rax
+        }
         return
     }
     // Unary bitwise NOT ~
@@ -730,6 +757,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EP = EP + 1
         compile_primary()
         em(0x48); em(0xf7); em(0xd0)  // not rax
+        EXPR_IS_F64 = 0
         return
     }
     // Unary not !
@@ -739,6 +767,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x0f); em(0x94); em(0xc0)  // sete al
         em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
+        EXPR_IS_F64 = 0
         return
     }
     // String literal: embed in code section with jmp-over, return address via lea
@@ -777,6 +806,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em(0x48); em(0x8d); em(0x05)  // lea rax, [rip + disp32]
         em32(disp)
         EP = EP + 1
+        EXPR_IS_F64 = 0
         return
     }
     // Identifier or function call
@@ -796,6 +826,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if disc >= 0 {
                 em(0x48); em(0xb8); em64(disc)
             } else { em(0x31); em(0xc0) }
+            EXPR_IS_F64 = 0
             return
         }
         // Function call: ident(args)
@@ -824,6 +855,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 em(0x31); em(0xc0)
+                EXPR_IS_F64 = 0
                 return
             }
             // Check for print_int(expr)
@@ -832,6 +864,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_print_int()
                 em(0x31); em(0xc0)
+                EXPR_IS_F64 = 0
                 return
             }
             // Check for arg_count()
@@ -839,6 +872,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_arg_count()
+                EXPR_IS_F64 = 0
                 return
             }
             // Check for get_arg(N)
@@ -846,6 +880,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1; compile_or()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_get_arg()
+                EXPR_IS_F64 = 0
                 return
             }
             // Check for read_file(path)
@@ -853,6 +888,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1; compile_or()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_read_file()
+                EXPR_IS_F64 = 0
                 return
             }
             // Check for file_size(path)
@@ -860,6 +896,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1; compile_or()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_file_size()
+                EXPR_IS_F64 = 0
                 return
             }
             // Check for write_file(path, buf, len)
@@ -875,6 +912,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x5f)  // pop rdi (path)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_write_file()
+                EXPR_IS_F64 = 0
                 return
             }
             // Check for str_len(s)
@@ -882,6 +920,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1; compile_or()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_str_len()
+                EXPR_IS_F64 = 0
                 return
             }
             // Check for str_char_at(s, i)
@@ -893,27 +932,28 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x59)  // pop rcx (string ptr)
                 em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x01)  // movsx rax, byte [rcx + rax]
                 if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0
                 return
             }
             // f64 arithmetic builtins (SSE2) — hash-dispatched, no if-as-expression
             let bh = gl_name_hash(ns, ne)
             let bl = ne - ns
             // f64_add/sub/mul/div: 7 chars each
-            if bl == 7 && bh == 7078482 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x58); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 7 && bh == 7084000 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5c); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 7 && bh == 7085240 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x59); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 7 && bh == 7083783 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 7 && bh == 7078482 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x58); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 7 && bh == 7084000 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5c); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 7 && bh == 7085240 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x59); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 7 && bh == 7083783 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             // f64_neg: 7 chars
-            if bl == 7 && bh == 7081334 { EP = EP + 1; compile_or(); em(0x48); em(0x0f); em(0xba); em(0xf8); em(63); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 7 && bh == 7081334 { EP = EP + 1; compile_or(); em(0x48); em(0x0f); em(0xba); em(0xf8); em(63); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             // f64_lt/le/eq/gt/ge: 6 chars
-            if bl == 6 && bh == 6061460 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x92); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 6 && bh == 6058670 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x96); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 6 && bh == 6059817 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x94); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 6 && bh == 6060685 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x97); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 6 && bh == 6057895 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x93); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 6 && bh == 6061460 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x92); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 6 && bh == 6058670 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x96); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 6 && bh == 6059817 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x94); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 6 && bh == 6060685 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x97); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 6 && bh == 6057895 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x93); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
             // f64_to_i64 / i64_to_f64: 10 chars
-            if bl == 10 && bh == 10139623 { EP = EP + 1; compile_or(); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0); em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 10 && bh == 10138972 { EP = EP + 1; compile_or(); em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 10 && bh == 10139623 { EP = EP + 1; compile_or(); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0); em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 10 && bh == 10138972 { EP = EP + 1; compile_or(); em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             // User function call
             let fi = fn_find(ns, ne)
             EP = EP + 1
@@ -949,6 +989,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     em(0x31); em(0xc0)  // unknown fn — emit 0
                 }
             }
+            EXPR_IS_F64 = 0
             return
         }
         // Struct literal: StructName { field: val, ... }
@@ -981,6 +1022,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // lea rax, [rbp - (base_slot+fc-1)*8] — pointer to struct data (lowest addr)
                 em(0x48); em(0x8d); em(0x85)
                 em32(0 - (base_slot + fc - 1) * 8)
+                EXPR_IS_F64 = 0
                 return
             }
         }
@@ -1023,11 +1065,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     }
                 }
             }
+            EXPR_IS_F64 = 0
             return
         }
         // Variable load (local first, then global)
         let slot = var_find(ns, ne)
-        if slot >= 0 { emit_load_var(slot) }
+        if slot >= 0 { emit_load_var(slot); EXPR_IS_F64 = var_find_is_f64(ns, ne) }
         else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
@@ -1052,11 +1095,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     em(0x31); em(0xc0)
                 }
             }
+            EXPR_IS_F64 = 0
         }
         return
     }
     EP = EP + 1
     em(0x31); em(0xc0)
+    EXPR_IS_F64 = 0
 }
 
 // Postfix: `as` type casts, `.field` access
@@ -1137,13 +1182,28 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
     while TK[EP as usize] == 19 || TK[EP as usize] == 20 || TK[EP as usize] == 29 {
         let op = TK[EP as usize]
         EP = EP + 1
+        let left_f64 = EXPR_IS_F64
         emit_push()
         compile_postfix()
         em(0x59)  // pop rcx (lhs)
-        em(0x48); em(0x87); em(0xc1)  // xchg rax, rcx — rax=lhs, rcx=rhs
-        if op == 19 { em(0x48); em(0x0f); em(0xaf); em(0xc1) }  // imul rax, rcx
-        if op == 20 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9) }  // cqo; idiv rcx
-        if op == 29 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9); em(0x48); em(0x89); em(0xd0) }  // cqo; idiv rcx; mov rax, rdx
+        if left_f64 == 1 {
+            // f64: movq xmm0, rcx; movq xmm1, rax; SSE2 op; movq rax, xmm0
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)  // movq xmm0, rcx
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+            if op == 19 { em(0xf2); em(0x0f); em(0x59); em(0xc1) }  // mulsd xmm0, xmm1
+            if op == 20 { em(0xf2); em(0x0f); em(0x5e); em(0xc1) }  // divsd xmm0, xmm1
+            if op == 29 {
+                // modulo: no f64 path, fall back to integer
+                em(0x48); em(0x87); em(0xc1); em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9); em(0x48); em(0x89); em(0xd0)
+            }
+            em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
+            EXPR_IS_F64 = 1
+        } else {
+            em(0x48); em(0x87); em(0xc1)  // xchg rax, rcx — rax=lhs, rcx=rhs
+            if op == 19 { em(0x48); em(0x0f); em(0xaf); em(0xc1) }  // imul rax, rcx
+            if op == 20 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9) }  // cqo; idiv rcx
+            if op == 29 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9); em(0x48); em(0x89); em(0xd0) }  // cqo; idiv rcx; mov rax, rdx
+        }
     }
 }
 
@@ -1152,11 +1212,22 @@ fn compile_additive() with IO, Mut, Panic, Div {
     while TK[EP as usize] == 17 || TK[EP as usize] == 18 {
         let op = TK[EP as usize]
         EP = EP + 1
+        let left_f64 = EXPR_IS_F64
         emit_push()
         compile_multiplicative()
         em(0x59)  // pop rcx (lhs)
-        if op == 17 { em(0x48); em(0x01); em(0xc8) }  // add rax, rcx (commutative: rcx+rax = ok)
-        if op == 18 { em(0x48); em(0x87); em(0xc1); em(0x48); em(0x29); em(0xc8) }  // xchg; sub rax, rcx
+        if left_f64 == 1 {
+            // f64: movq xmm0, rcx; movq xmm1, rax; SSE2 op; movq rax, xmm0
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)  // movq xmm0, rcx
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+            if op == 17 { em(0xf2); em(0x0f); em(0x58); em(0xc1) }  // addsd xmm0, xmm1
+            if op == 18 { em(0xf2); em(0x0f); em(0x5c); em(0xc1) }  // subsd xmm0, xmm1
+            em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
+            EXPR_IS_F64 = 1
+        } else {
+            if op == 17 { em(0x48); em(0x01); em(0xc8) }  // add rax, rcx (commutative: rcx+rax = ok)
+            if op == 18 { em(0x48); em(0x87); em(0xc1); em(0x48); em(0x29); em(0xc8) }  // xchg; sub rax, rcx
+        }
     }
 }
 
@@ -1207,18 +1278,34 @@ fn compile_comparison() with IO, Mut, Panic, Div {
     compile_bitor()
     let op = TK[EP as usize]
     if op == 21 || op == 22 || op == 23 || op == 24 || op == 25 || op == 26 {
+        let left_f64 = EXPR_IS_F64
         EP = EP + 1
         emit_push()
         compile_bitor()
         em(0x59)  // pop rcx (lhs)
-        em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
-        if op == 21 { em(0x0f); em(0x94); em(0xc0) }  // sete al
-        if op == 22 { em(0x0f); em(0x95); em(0xc0) }  // setne al
-        if op == 23 { em(0x0f); em(0x9c); em(0xc0) }  // setl al
-        if op == 24 { em(0x0f); em(0x9f); em(0xc0) }  // setg al
-        if op == 25 { em(0x0f); em(0x9e); em(0xc0) }  // setle al
-        if op == 26 { em(0x0f); em(0x9d); em(0xc0) }  // setge al
+        if left_f64 == 1 {
+            // f64: movq xmm0, rcx (lhs); movq xmm1, rax (rhs); ucomisd xmm0, xmm1
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)  // movq xmm0, rcx
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+            em(0x66); em(0x0f); em(0x2e); em(0xc1)            // ucomisd xmm0, xmm1
+            // Use unsigned conditional sets for FP comparison
+            if op == 21 { em(0x0f); em(0x94); em(0xc0) }  // sete al (==)
+            if op == 22 { em(0x0f); em(0x95); em(0xc0) }  // setne al (!=)
+            if op == 23 { em(0x0f); em(0x92); em(0xc0) }  // setb al (<)
+            if op == 24 { em(0x0f); em(0x97); em(0xc0) }  // seta al (>)
+            if op == 25 { em(0x0f); em(0x96); em(0xc0) }  // setbe al (<=)
+            if op == 26 { em(0x0f); em(0x93); em(0xc0) }  // setae al (>=)
+        } else {
+            em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+            if op == 21 { em(0x0f); em(0x94); em(0xc0) }  // sete al
+            if op == 22 { em(0x0f); em(0x95); em(0xc0) }  // setne al
+            if op == 23 { em(0x0f); em(0x9c); em(0xc0) }  // setl al
+            if op == 24 { em(0x0f); em(0x9f); em(0xc0) }  // setg al
+            if op == 25 { em(0x0f); em(0x9e); em(0xc0) }  // setle al
+            if op == 26 { em(0x0f); em(0x9d); em(0xc0) }  // setge al
+        }
         em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
+        EXPR_IS_F64 = 0
     }
 }
 
@@ -1301,6 +1388,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         var is_arr: i64 = 0
         var arr_len: i64 = 0
         var arr_esiz: i64 = 8
+        var decl_is_f64: i64 = -1
         if TK[EP as usize] == 43 {
             EP = EP + 1  // skip :
             // Skip & or &!
@@ -1319,7 +1407,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 EP = EP + 1  // skip N
                 if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
                 is_arr = 1
+                decl_is_f64 = 0
             } else {
+                // Check if type is "f64"
+                let tns = TS[EP as usize]
+                let tne = TE[EP as usize]
+                if tne - tns == 3 && sb(tns) == 102 && sb(tns+1) == 54 && sb(tns+2) == 52 { decl_is_f64 = 1 }
+                else { decl_is_f64 = 0 }
                 EP = EP + 1  // skip type name
             }
         }
@@ -1354,6 +1448,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             compile_or()
             let slot = var_add(ns, ne)
             emit_store_var(slot)
+            // Set f64 flag: explicit type annotation takes priority, else infer from RHS
+            if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+            else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
+            else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
         }
         return
     }
