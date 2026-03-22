@@ -548,6 +548,12 @@ fn emit_write_file() with Mut {
 // ─── Expression compiler (recursive descent) ───
 // Global parse position for expression parsing
 var EP: i64 = 0
+// Closure state save buffers (global to avoid stack overflow in recursive compile_primary)
+var CL_SAVE_NS: [i64; 64] = [0; 64]
+var CL_SAVE_NE: [i64; 64] = [0; 64]
+var CL_SAVE_SL: [i64; 64] = [0; 64]
+var CL_SAVE_AL: [i64; 64] = [0; 64]
+var CL_SAVE_ES: [i64; 64] = [0; 64]
 // Loop stack for continue/break (max 16 nested loops)
 var LOOP_TOP: [i64; 16] = [0; 16]
 var LOOP_END_PATCH: [i64; 16] = [0; 16]
@@ -591,6 +597,93 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         // movq rax, xmm0 — store f64 bits in rax
         em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+        return
+    }
+    // Closure: |params| expr  or  |params| { stmts }
+    // Token 45 = | at expression start = closure (not bitwise OR)
+    if k == 45 {
+        EP = EP + 1  // skip opening |
+        // Save outer function state to global buffers
+        let save_vc = VAR_COUNT
+        let save_ns2 = NEXT_SLOT
+        let save_ld = LOOP_DEPTH
+        let save_bc = BREAK_COUNT
+        var svi: i64 = 0
+        while svi < save_vc {
+            CL_SAVE_NS[svi as usize] = VAR_NS[svi as usize]
+            CL_SAVE_NE[svi as usize] = VAR_NE[svi as usize]
+            CL_SAVE_SL[svi as usize] = VAR_SLOT[svi as usize]
+            CL_SAVE_AL[svi as usize] = VAR_ALEN[svi as usize]
+            CL_SAVE_ES[svi as usize] = VAR_ESIZ[svi as usize]
+            svi = svi + 1
+        }
+        // Reset state for closure body
+        VAR_COUNT = 0
+        NEXT_SLOT = 1
+        LOOP_DEPTH = 0
+        BREAK_COUNT = 0
+        // Parse closure parameters (between | ... |)
+        while TK[EP as usize] != 45 && TK[EP as usize] != 0 {
+            if TK[EP as usize] == 3 {
+                let pns = TS[EP as usize]
+                let pne = TE[EP as usize]
+                var_add(pns, pne)
+                EP = EP + 1
+                // Skip : type
+                if TK[EP as usize] == 43 { EP = EP + 1; EP = EP + 1 }
+            }
+            if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
+        }
+        if TK[EP as usize] == 45 { EP = EP + 1 }  // skip closing |
+        let nparams = VAR_COUNT
+        // Emit jmp over closure body
+        em(0xe9)
+        let jmp_patch = CL
+        em32(0)
+        // Emit closure function body
+        let cl_start = CL
+        // Prologue
+        em(0x55); em(0x48); em(0x89); em(0xe5)
+        em(0x48); em(0x81); em(0xec); em32(4096)
+        // Spill params from registers
+        if nparams >= 1 { em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF) }
+        if nparams >= 2 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }
+        if nparams >= 3 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }
+        if nparams >= 4 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }
+        if nparams >= 5 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }
+        if nparams >= 6 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }
+        // Compile body: either { stmts } or single expression
+        if TK[EP as usize] == 8 {
+            EP = EP + 1  // skip {
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }
+        } else {
+            compile_or()  // single expression result in rax
+        }
+        // Epilogue (implicit return rax)
+        if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
+            em(0x48); em(0x81); em(0xc4); em32(4096)
+            em(0x5d); em(0xc3)
+        }
+        // Patch jmp to skip over closure body
+        patch32(jmp_patch, CL)
+        // lea rax, [rip + offset_to_cl_start]
+        em(0x48); em(0x8d); em(0x05)
+        em32(cl_start - (CL + 4))
+        // Restore outer function state
+        VAR_COUNT = save_vc
+        NEXT_SLOT = save_ns2
+        LOOP_DEPTH = save_ld
+        BREAK_COUNT = save_bc
+        svi = 0
+        while svi < save_vc {
+            VAR_NS[svi as usize] = CL_SAVE_NS[svi as usize]
+            VAR_NE[svi as usize] = CL_SAVE_NE[svi as usize]
+            VAR_SLOT[svi as usize] = CL_SAVE_SL[svi as usize]
+            VAR_ALEN[svi as usize] = CL_SAVE_AL[svi as usize]
+            VAR_ESIZ[svi as usize] = CL_SAVE_ES[svi as usize]
+            svi = svi + 1
+        }
         return
     }
     // Parenthesized
