@@ -238,6 +238,7 @@ fn lex_all() with Mut, Panic {
             if src_match(s, l, "while") { k = 15 }
             if src_match(s, l, "continue") { k = 33 }
             if src_match(s, l, "break") { k = 34 }
+            if src_match(s, l, "for") { k = 54 }
             if src_match(s, l, "true") { k = 35 }
             if src_match(s, l, "false") { k = 36 }
             if src_match(s, l, "as") { k = 37 }
@@ -1268,6 +1269,57 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         em32(loop_top - (CL + 4))
         patch32(je_off, CL)
         // Patch all break jumps from this loop to point here
+        var bi: i64 = saved_bc
+        while bi < BREAK_COUNT { patch32(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
+        BREAK_COUNT = saved_bc
+        LOOP_DEPTH = LOOP_DEPTH - 1
+        return
+    }
+
+    // for IDENT in range(START, END) { body }
+    // Desugars to: var IDENT = START; while IDENT < END { body; IDENT = IDENT + 1 }
+    if k == 54 {
+        EP = EP + 1  // skip 'for'
+        let vns = TS[EP as usize]
+        let vne = TE[EP as usize]
+        EP = EP + 1  // skip loop var name
+        EP = EP + 1  // skip 'in'
+        EP = EP + 1  // skip 'range'
+        if TK[EP as usize] == 6 { EP = EP + 1 }  // skip (
+        compile_or()  // START in rax
+        let iter_slot = var_add(vns, vne)
+        emit_store_var(iter_slot)
+        if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
+        compile_or()  // END in rax
+        let end_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(end_slot)
+        if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+        // while iter < end
+        let loop_top = CL
+        LOOP_TOP[LOOP_DEPTH as usize] = loop_top
+        LOOP_DEPTH = LOOP_DEPTH + 1
+        let saved_bc = BREAK_COUNT
+        emit_load_var(iter_slot)
+        em(0x50)  // push iter
+        emit_load_var(end_slot)
+        em(0x59)  // pop rcx (iter)
+        em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+        em(0x0f); em(0x9c); em(0xc0)  // setl al
+        em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x84)
+        let je_off = CL; em32(0)
+        if TK[EP as usize] == 8 { EP = EP + 1 }  // skip {
+        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
+        // iter = iter + 1
+        emit_load_var(iter_slot)
+        em(0x48); em(0x83); em(0xc0); em(1)  // add rax, 1
+        emit_store_var(iter_slot)
+        em(0xe9)
+        em32(loop_top - (CL + 4))
+        patch32(je_off, CL)
         var bi: i64 = saved_bc
         while bi < BREAK_COUNT { patch32(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
         BREAK_COUNT = saved_bc
