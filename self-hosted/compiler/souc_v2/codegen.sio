@@ -1,0 +1,1561 @@
+// souc-v2/codegen.sio — All emit_* helpers, compile_* expression/statement functions,
+// compile_all top-level compiler, and patch32.
+// Imported after globals.sio and lexer.sio; no imports of its own.
+
+// ─── Emit helpers ───
+// mov rax, [rbp - 8*slot]
+fn emit_load_var(slot: i64) with Mut { em(0x48); em(0x8b); em(0x85); em32(0 - slot * 8) }
+// mov [rbp - 8*slot], rax
+fn emit_store_var(slot: i64) with Mut { em(0x48); em(0x89); em(0x85); em32(0 - slot * 8) }
+// push rax
+fn emit_push() with Mut { em(0x50) }
+// pop rcx
+fn emit_pop_rcx() with Mut { em(0x59) }
+// mov rax, imm64
+fn emit_imm64(v: i64) with Mut { em(0x48); em(0xb8); em64(v) }
+
+// ─── Emit print("string") ───
+fn emit_print(tok: i64) with Mut, Panic, Div {
+    let ss = TS[tok as usize] + 1
+    let se = TE[tok as usize] - 1
+    var slen: i64 = 0
+    var zi: i64 = 0
+    while zi < 32 { SQW[zi as usize] = 0; zi = zi + 1 }
+    var si: i64 = ss
+    while si < se {
+        let c = sb(si)
+        var byte: i64 = c
+        if c == 92 && si + 1 < se {
+            let c2 = sb(si + 1)
+            if c2 == 110 { byte = 10 }
+            else if c2 == 116 { byte = 9 }
+            else if c2 == 48 { byte = 0 }
+            else { byte = c2 }
+            si = si + 2
+        } else { si = si + 1 }
+        let qi = slen / 8
+        let bi = slen - qi * 8
+        SQW[qi as usize] = SQW[qi as usize] | (byte << (bi * 8))
+        slen = slen + 1
+    }
+    let nq = (slen + 7) / 8
+    var qi: i64 = nq - 1
+    while qi >= 0 { em(0x48); em(0xb8); em64(SQW[qi as usize]); em(0x50); qi = qi - 1 }
+    em(0xb8); em32(1); em(0xbf); em32(1)
+    em(0x48); em(0x89); em(0xe6)
+    em(0xba); em32(slen)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x81); em(0xc4); em32(nq * 8)
+}
+
+// ─── Built-in function emitters ───
+
+// print_int: rax = value -> emit decimal digits + write syscall
+fn emit_print_int() with Mut {
+    // sub rsp, 32; mov rcx, rsp+31 (end of buffer); mov byte [rcx], 10 (\n); dec rcx
+    // div loop: cdq; div 10; add dl, '0'; mov [rcx], dl; dec rcx; test rax,rax; jnz loop
+    // lea rsi, [rcx+1]; mov rdx, rsp+32-rsi; write(1, rsi, rdx); add rsp, 32
+    em(0x48); em(0x83); em(0xec); em(32)  // sub rsp, 32
+    em(0x48); em(0x8d); em(0x4c); em(0x24); em(31)  // lea rcx, [rsp+31]
+    em(0xc6); em(0x01); em(10)  // mov byte [rcx], '\n'
+    em(0x48); em(0xff); em(0xc9)  // dec rcx
+    // Handle negative: if rax < 0, negate, set r8=1
+    em(0x4d); em(0x31); em(0xc0)  // xor r8, r8
+    em(0x48); em(0x85); em(0xc0)  // test rax, rax
+    em(0x79); em(0x06)  // jns +6
+    em(0x48); em(0xf7); em(0xd8)  // neg rax
+    em(0x49); em(0xff); em(0xc0)  // inc r8
+    // div loop
+    let loop_top = CL
+    em(0x48); em(0x31); em(0xd2)  // xor rdx, rdx
+    em(0x48); em(0xc7); em(0xc6); em32(10)  // mov rsi, 10
+    em(0x48); em(0xf7); em(0xf6)  // div rsi (rax=quot, rdx=rem)
+    em(0x80); em(0xc2); em(48)   // add dl, '0'
+    em(0x88); em(0x11)            // mov [rcx], dl
+    em(0x48); em(0xff); em(0xc9)  // dec rcx
+    em(0x48); em(0x85); em(0xc0)  // test rax, rax
+    em(0x0f); em(0x85); em32(loop_top - (CL + 4))  // jnz loop_top
+    // If negative, add '-'
+    em(0x4d); em(0x85); em(0xc0)  // test r8, r8
+    em(0x74); em(0x06)  // jz +6
+    em(0xc6); em(0x01); em(45)  // mov byte [rcx], '-'
+    em(0x48); em(0xff); em(0xc9)  // dec rcx
+    // rcx points to last written byte-1; string starts at rcx+1
+    em(0x48); em(0xff); em(0xc1)  // inc rcx (start of string)
+    em(0x48); em(0x89); em(0xce)  // mov rsi, rcx (buf)
+    em(0x48); em(0x8d); em(0x54); em(0x24); em(32)  // lea rdx, [rsp+32]
+    em(0x48); em(0x29); em(0xca)  // sub rdx, rcx (len = end - start)
+    em(0xb8); em32(1)  // mov eax, 1 (sys_write)
+    em(0xbf); em32(1)  // mov edi, 1 (stdout)
+    em(0x0f); em(0x05)  // syscall
+    em(0x48); em(0x83); em(0xc4); em(32)  // add rsp, 32
+}
+
+fn emit_arg_count() with Mut {
+    let argc_addr = 0x600000
+    em(0x48); em(0xb8); em64(argc_addr)
+    em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+}
+
+fn emit_get_arg() with Mut {
+    // rax = arg index. argv stored at BSS+8. argv[i] = [argv_base + i*8]
+    let argv_addr = 0x600000 + 8
+    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
+    em(0x48); em(0xb8); em64(argv_addr)
+    em(0x48); em(0x8b); em(0x00)  // mov rax, [rax] = argv base
+    em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+}
+
+fn emit_str_len() with Mut {
+    // rax = string ptr; count until null byte
+    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (ptr)
+    em(0x48); em(0x31); em(0xc0)  // xor rax, rax (count=0)
+    let top = CL
+    em(0x80); em(0x3c); em(0x01); em(0x00)  // cmp byte [rcx+rax], 0
+    em(0x74); em(0x04)  // je done (+4)
+    em(0x48); em(0xff); em(0xc0)  // inc rax
+    em(0xeb); em(0xf5 as i64 & 0xFF)  // jmp top (relative back)
+    // done: rax = length
+}
+
+fn emit_read_file() with Mut {
+    // Simpler: rax=path. open -> save fd -> mmap -> read -> close -> return buf
+    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax
+    em(0x48); em(0x31); em(0xf6)  // xor rsi, rsi
+    em(0xb8); em32(2); em(0x0f); em(0x05)  // open -> fd in rax
+    em(0x50)  // push fd
+    // mmap(NULL, 4MB, 3, 0x22, -1, 0)
+    em(0x48); em(0x31); em(0xff)  // rdi=0
+    em(0xbe); em32(0x400000)  // esi=4MB
+    em(0xba); em32(3)  // edx=PROT_RW
+    em(0x41); em(0xba); em32(0x22)  // r10d=MAP_PRIVATE|MAP_ANON
+    em(0x49); em(0xc7); em(0xc0); em32(-1)  // r8=-1
+    em(0x4d); em(0x31); em(0xc9)  // r9=0
+    em(0xb8); em32(9); em(0x0f); em(0x05)  // mmap -> buf in rax
+    em(0x50)  // push buf; stack=[fd, buf]
+    // read(fd, buf, 4MB)
+    em(0x48); em(0x89); em(0xc6)  // mov rsi, rax (buf)
+    em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x08)  // mov rdi, [rsp+8] (fd)
+    em(0xba); em32(0x400000)  // edx=4MB
+    em(0xb8); em32(0); em(0x0f); em(0x05)  // read
+    // close(fd)
+    em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x08)  // mov rdi, [rsp+8] (fd)
+    em(0xb8); em32(3); em(0x0f); em(0x05)  // close
+    // return buf
+    em(0x58)  // pop rax (buf)
+    em(0x48); em(0x83); em(0xc4); em(0x08)  // add rsp, 8 (discard fd)
+}
+
+fn emit_file_size() with Mut {
+    // rax = path. stat(path, &statbuf) -> statbuf.st_size at offset 48
+    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (path)
+    em(0x48); em(0x83); em(0xec); em(0x90 as i64 & 0xFF)  // sub rsp, 144 (struct stat)
+    em(0x48); em(0x89); em(0xe6)  // mov rsi, rsp (statbuf)
+    em(0xb8); em32(4)  // mov eax, 4 (sys_stat)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x8b); em(0x44); em(0x24); em(48)  // mov rax, [rsp+48] (st_size)
+    em(0x48); em(0x83); em(0xc4); em(0x90 as i64 & 0xFF)  // add rsp, 144
+}
+
+fn emit_write_file() with Mut {
+    // rdi = path, rsi = buf addr, rdx = len
+    // open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644) -> write(fd, buf, len) -> close(fd)
+    em(0x52)  // push rdx (len)
+    em(0x56)  // push rsi (buf)
+    em(0xbe); em32(0x241)  // mov esi, O_WRONLY|O_CREAT|O_TRUNC (0x41|0x200)
+    em(0xba); em32(0x1A4)  // mov edx, 0644
+    em(0xb8); em32(2)  // mov eax, 2 (sys_open)
+    em(0x0f); em(0x05)  // -> fd in rax
+    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (fd)
+    em(0x5e)  // pop rsi (buf)
+    em(0x5a)  // pop rdx (len)
+    em(0xb8); em32(1)  // mov eax, 1 (sys_write)
+    em(0x0f); em(0x05)
+    // close(fd)
+    em(0xb8); em32(3)  // mov eax, 3 (sys_close)
+    em(0x0f); em(0x05)
+    em(0x48); em(0xb8); em64(1)  // return 1 (success)
+}
+
+// ─── Expression compiler (recursive descent) ───
+// Precedence (low->high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
+
+fn compile_primary() with IO, Mut, Panic, Div {
+    let k = TK[EP as usize]
+    // Integer literal
+    if k == 4 {
+        let v = TV[EP as usize]
+        if v == 0 { em(0x31); em(0xc0) }
+        else { em(0x48); em(0xb8); em64(v) }
+        EP = EP + 1
+        return
+    }
+    // true=35, false=36
+    if k == 35 { em(0x48); em(0xb8); em64(1); EP = EP + 1; return }
+    if k == 36 { em(0x31); em(0xc0); EP = EP + 1; return }
+    // Float literal (53): runtime conversion via SSE2
+    if k == 53 {
+        let fl_int = TV[EP as usize]
+        let fl_frac = TF[EP as usize]
+        let fl_denom = TD[EP as usize]
+        EP = EP + 1
+        // mov rax, int_part; cvtsi2sd xmm0, rax
+        em(0x48); em(0xb8); em64(fl_int)
+        em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
+        // If fractional part: frac/denom added to xmm0
+        if fl_frac > 0 {
+            em(0x48); em(0xb8); em64(fl_frac)
+            em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc8)  // cvtsi2sd xmm1, rax
+            em(0x48); em(0xb8); em64(fl_denom)
+            em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xd0)  // cvtsi2sd xmm2, rax
+            em(0xf2); em(0x0f); em(0x5e); em(0xca)            // divsd xmm1, xmm2
+            em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
+        }
+        // movq rax, xmm0 — store f64 bits in rax
+        em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+        return
+    }
+    // Closure: |params| expr  or  |params| { stmts }
+    // Token 45 = | at expression start = closure (not bitwise OR)
+    if k == 45 {
+        EP = EP + 1  // skip opening |
+        // Save outer function state to global buffers
+        let save_vc = VAR_COUNT
+        let save_ns2 = NEXT_SLOT
+        let save_ld = LOOP_DEPTH
+        let save_bc = BREAK_COUNT
+        var svi: i64 = 0
+        while svi < save_vc {
+            CL_SAVE_NS[svi as usize] = VAR_NS[svi as usize]
+            CL_SAVE_NE[svi as usize] = VAR_NE[svi as usize]
+            CL_SAVE_SL[svi as usize] = VAR_SLOT[svi as usize]
+            CL_SAVE_AL[svi as usize] = VAR_ALEN[svi as usize]
+            CL_SAVE_ES[svi as usize] = VAR_ESIZ[svi as usize]
+            svi = svi + 1
+        }
+        // Reset state for closure body
+        VAR_COUNT = 0
+        NEXT_SLOT = 1
+        LOOP_DEPTH = 0
+        BREAK_COUNT = 0
+        // Parse closure parameters (between | ... |)
+        while TK[EP as usize] != 45 && TK[EP as usize] != 0 {
+            if TK[EP as usize] == 3 {
+                let pns = TS[EP as usize]
+                let pne = TE[EP as usize]
+                var_add(pns, pne)
+                EP = EP + 1
+                // Skip : type
+                if TK[EP as usize] == 43 { EP = EP + 1; EP = EP + 1 }
+            }
+            if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
+        }
+        if TK[EP as usize] == 45 { EP = EP + 1 }  // skip closing |
+        let nparams = VAR_COUNT
+        // Emit jmp over closure body
+        em(0xe9)
+        let jmp_patch = CL
+        em32(0)
+        // Emit closure function body
+        let cl_start = CL
+        // Prologue
+        em(0x55); em(0x48); em(0x89); em(0xe5)
+        em(0x48); em(0x81); em(0xec); em32(4096)
+        // Spill params from registers
+        if nparams >= 1 { em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF) }
+        if nparams >= 2 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }
+        if nparams >= 3 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }
+        if nparams >= 4 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }
+        if nparams >= 5 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }
+        if nparams >= 6 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }
+        // Compile body: either { stmts } or single expression
+        if TK[EP as usize] == 8 {
+            EP = EP + 1  // skip {
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }
+        } else {
+            compile_or()  // single expression result in rax
+        }
+        // Epilogue (implicit return rax)
+        if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
+            em(0x48); em(0x81); em(0xc4); em32(4096)
+            em(0x5d); em(0xc3)
+        }
+        // Patch jmp to skip over closure body
+        patch32(jmp_patch, CL)
+        // lea rax, [rip + offset_to_cl_start]
+        em(0x48); em(0x8d); em(0x05)
+        em32(cl_start - (CL + 4))
+        // Restore outer function state
+        VAR_COUNT = save_vc
+        NEXT_SLOT = save_ns2
+        LOOP_DEPTH = save_ld
+        BREAK_COUNT = save_bc
+        svi = 0
+        while svi < save_vc {
+            VAR_NS[svi as usize] = CL_SAVE_NS[svi as usize]
+            VAR_NE[svi as usize] = CL_SAVE_NE[svi as usize]
+            VAR_SLOT[svi as usize] = CL_SAVE_SL[svi as usize]
+            VAR_ALEN[svi as usize] = CL_SAVE_AL[svi as usize]
+            VAR_ESIZ[svi as usize] = CL_SAVE_ES[svi as usize]
+            svi = svi + 1
+        }
+        return
+    }
+    // Parenthesized
+    if k == 6 { EP = EP + 1; compile_or(); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+    // Address-of: &ident -> lea rax, [rbp - 8*slot] or mov rax, bss_addr
+    if k == 44 {
+        EP = EP + 1
+        // Skip ! in &! (exclusive ref — same codegen as shared ref)
+        if TK[EP as usize] == 32 { EP = EP + 1 }
+        let rns = TS[EP as usize]
+        let rne = TE[EP as usize]
+        EP = EP + 1
+        let slot = var_find(rns, rne)
+        if slot >= 0 {
+            // lea rax, [rbp - 8*slot]
+            let off = 0 - slot * 8
+            em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
+            em32(off)
+        } else {
+            let gi = gl_find(rns, rne)
+            if gi >= 0 {
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                em(0x48); em(0xb8); em64(addr)  // mov rax, bss_addr
+            } else { em(0x31); em(0xc0) }
+        }
+        return
+    }
+    // Dereference: *expr -> compile expr, then load from pointer
+    if k == 19 {
+        EP = EP + 1
+        compile_primary()
+        em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+        return
+    }
+    // Unary minus
+    if k == 18 {
+        EP = EP + 1
+        compile_primary()
+        em(0x48); em(0xf7); em(0xd8)  // neg rax
+        return
+    }
+    // Unary bitwise NOT ~
+    if k == 55 {
+        EP = EP + 1
+        compile_primary()
+        em(0x48); em(0xf7); em(0xd0)  // not rax
+        return
+    }
+    // Unary not !
+    if k == 32 {
+        EP = EP + 1
+        compile_primary()
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x94); em(0xc0)  // sete al
+        em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
+        return
+    }
+    // String literal: embed in code section with jmp-over, return address via lea
+    if k == 5 {
+        let ss = TS[EP as usize] + 1
+        let se = TE[EP as usize] - 1
+        // Decode string bytes
+        var slen: i64 = 0
+        var zi: i64 = 0
+        while zi < 32 { SQW[zi as usize] = 0; zi = zi + 1 }
+        var si: i64 = ss
+        while si < se {
+            let ch = sb(si)
+            var byte: i64 = ch
+            if ch == 92 && si + 1 < se {
+                let c2 = sb(si + 1)
+                if c2 == 110 { byte = 10 }
+                else if c2 == 116 { byte = 9 }
+                else if c2 == 48 { byte = 0 }
+                else { byte = c2 }
+                si = si + 2
+            } else { si = si + 1 }
+            SQW[slen as usize] = byte
+            slen = slen + 1
+        }
+        // Emit: jmp over string data; string bytes; null terminator; lea rax, [rip - N]
+        em(0xeb)  // jmp rel8
+        let jmp_off = CL
+        em(slen + 1)  // skip slen + null terminator
+        let str_start = CL
+        var bi: i64 = 0
+        while bi < slen { em(SQW[bi as usize] & 0xFF); bi = bi + 1 }
+        em(0)  // null terminator
+        // lea rax, [rip - (CL - str_start)]
+        let disp = str_start - (CL + 7)
+        em(0x48); em(0x8d); em(0x05)  // lea rax, [rip + disp32]
+        em32(disp)
+        EP = EP + 1
+        return
+    }
+    // Identifier or function call
+    if k == 3 {
+        let ns = TS[EP as usize]
+        let ne = TE[EP as usize]
+        EP = EP + 1
+        // Enum::Variant — look up discriminant
+        if TK[EP as usize] == 51 {
+            EP = EP + 1  // skip ::
+            let vns = TS[EP as usize]
+            let vne = TE[EP as usize]
+            EP = EP + 1  // skip variant name
+            let eh = gl_name_hash(ns, ne)
+            let vh = gl_name_hash(vns, vne)
+            let disc = en_variant_value(eh, vh)
+            if disc >= 0 {
+                em(0x48); em(0xb8); em64(disc)
+            } else { em(0x31); em(0xc0) }
+            return
+        }
+        // Function call: ident(args)
+        if TK[EP as usize] == 6 {
+            // Check for print("str") or print(variable)
+            if src_match(ns, ne - ns, "print") {
+                EP = EP + 1
+                if TK[EP as usize] == 5 {
+                    emit_print(EP); EP = EP + 1
+                } else {
+                    // print(variable) — variable is a C string pointer
+                    compile_or()  // ptr in rax
+                    // strlen loop: mov rdi, rax; xor rcx, rcx; while [rdi+rcx]!=0 inc rcx
+                    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (ptr)
+                    em(0x48); em(0x31); em(0xc9)  // xor rcx, rcx
+                    let slp = CL
+                    em(0x80); em(0x3c); em(0x0f); em(0x00)  // cmp byte [rdi+rcx], 0
+                    em(0x74); em(0x04)  // je done
+                    em(0x48); em(0xff); em(0xc1)  // inc rcx
+                    em(0xeb); em(0xf5 as i64 & 0xFF)  // jmp loop
+                    // write(1, rdi, rcx)
+                    em(0x48); em(0x89); em(0xfe)  // mov rsi, rdi
+                    em(0x48); em(0x89); em(0xca)  // mov rdx, rcx (len)
+                    em(0xb8); em32(1); em(0xbf); em32(1)
+                    em(0x0f); em(0x05)
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                em(0x31); em(0xc0)
+                return
+            }
+            // Check for print_int(expr)
+            if src_match(ns, ne - ns, "print_int") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_print_int()
+                em(0x31); em(0xc0)
+                return
+            }
+            // Check for arg_count()
+            if src_match(ns, ne - ns, "arg_count") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_arg_count()
+                return
+            }
+            // Check for get_arg(N)
+            if src_match(ns, ne - ns, "get_arg") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_get_arg()
+                return
+            }
+            // Check for read_file(path)
+            if src_match(ns, ne - ns, "read_file") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_read_file()
+                return
+            }
+            // Check for file_size(path)
+            if src_match(ns, ne - ns, "file_size") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_file_size()
+                return
+            }
+            // Check for write_file(path, buf, len)
+            if src_match(ns, ne - ns, "write_file") {
+                EP = EP + 1
+                compile_or(); em(0x50)  // path
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or(); em(0x50)  // buf (ignored — uses global array addr)
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or()            // len in rax
+                em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (len)
+                em(0x5e)  // pop rsi (buf addr)
+                em(0x5f)  // pop rdi (path)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_write_file()
+                return
+            }
+            // Check for str_len(s)
+            if src_match(ns, ne - ns, "str_len") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_str_len()
+                return
+            }
+            // Check for str_char_at(s, i)
+            if src_match(ns, ne - ns, "str_char_at") {
+                EP = EP + 1
+                compile_or(); em(0x50)  // string
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or()  // index in rax
+                em(0x59)  // pop rcx (string ptr)
+                em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x01)  // movsx rax, byte [rcx + rax]
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                return
+            }
+            // f64 arithmetic builtins (SSE2) — hash-dispatched, no if-as-expression
+            let bh = gl_name_hash(ns, ne)
+            let bl = ne - ns
+            // f64_add/sub/mul/div: 7 chars each
+            if bl == 7 && bh == 7078482 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x58); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 7 && bh == 7084000 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5c); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 7 && bh == 7085240 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x59); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 7 && bh == 7083783 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            // f64_neg: 7 chars
+            if bl == 7 && bh == 7081334 { EP = EP + 1; compile_or(); em(0x48); em(0x0f); em(0xba); em(0xf8); em(63); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            // f64_lt/le/eq/gt/ge: 6 chars
+            if bl == 6 && bh == 6061460 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x92); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 6 && bh == 6058670 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x96); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 6 && bh == 6059817 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x94); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 6 && bh == 6060685 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x97); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 6 && bh == 6057895 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x93); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            // f64_to_i64 / i64_to_f64: 10 chars
+            if bl == 10 && bh == 10139623 { EP = EP + 1; compile_or(); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0); em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 10 && bh == 10138972 { EP = EP + 1; compile_or(); em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            // User function call
+            let fi = fn_find(ns, ne)
+            EP = EP + 1
+            var argc: i64 = 0
+            while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                compile_or()
+                em(0x50)
+                argc = argc + 1
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+            }
+            if TK[EP as usize] == 7 { EP = EP + 1 }
+            // Pop args into registers (reverse order)
+            if argc >= 6 { em(0x41); em(0x59) }   // pop r9  (arg 6)
+            if argc >= 5 { em(0x41); em(0x58) }   // pop r8  (arg 5)
+            if argc >= 4 { em(0x59) }               // pop rcx (arg 4)
+            if argc >= 3 { em(0x5a) }               // pop rdx (arg 3)
+            if argc >= 2 { em(0x5e) }               // pop rsi (arg 2)
+            if argc >= 1 { em(0x5f) }               // pop rdi (arg 1)
+            if fi >= 0 {
+                // Direct call: call rel32 (patched later)
+                em(0xe8)
+                PATCH_OFF[PATCH_COUNT as usize] = CL
+                PATCH_FN[PATCH_COUNT as usize] = fi
+                PATCH_COUNT = PATCH_COUNT + 1
+                em32(0)
+            } else {
+                // Indirect call: variable holds fn pointer -> call rax
+                let vslot = var_find(ns, ne)
+                if vslot >= 0 {
+                    emit_load_var(vslot)
+                    em(0xff); em(0xd0)  // call rax
+                } else {
+                    em(0x31); em(0xc0)  // unknown fn — emit 0
+                }
+            }
+            return
+        }
+        // Struct literal: StructName { field: val, ... }
+        if TK[EP as usize] == 8 {
+            let sh = gl_name_hash(ns, ne)
+            let si = st_find(sh)
+            if si >= 0 {
+                EP = EP + 1  // skip {
+                let fc = ST[(si * 66 + 1) as usize]
+                // Allocate fc consecutive stack slots for struct fields
+                let base_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + fc
+                // Parse field: value pairs
+                while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+                    if TK[EP as usize] == 3 {
+                        let fns = TS[EP as usize]
+                        let fne = TE[EP as usize]
+                        let fh = gl_name_hash(fns, fne)
+                        EP = EP + 1  // skip field name
+                        if TK[EP as usize] == 43 { EP = EP + 1 }  // skip :
+                        compile_or()  // value in rax
+                        let foff = st_field_offset(si, fh)
+                        if foff >= 0 {
+                            emit_store_var(base_slot + fc - 1 - foff / 8)
+                        }
+                    }
+                    if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
+                }
+                if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
+                // lea rax, [rbp - (base_slot+fc-1)*8] — pointer to struct data (lowest addr)
+                em(0x48); em(0x8d); em(0x85)
+                em32(0 - (base_slot + fc - 1) * 8)
+                return
+            }
+        }
+        // Array subscript: IDENT[expr]
+        if TK[EP as usize] == 41 {
+            EP = EP + 1  // skip [
+            compile_or()  // index in rax
+            if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // skip 'as usize'
+            if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+            let gi = gl_find(ns, ne)
+            if gi >= 0 {
+                let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                let esz = GL[(gi * 4 + 2) as usize]
+                if esz == 8 {
+                    // mov rcx, rax; mov rax, base; mov rax, [rax + rcx*8]
+                    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
+                    em(0x48); em(0xb8); em64(base)  // mov rax, base
+                    em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+                } else {
+                    // i8 array: movsx rax, byte [rax + rcx]
+                    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax
+                    em(0x48); em(0xb8); em64(base)  // mov rax, base
+                    em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
+                }
+            } else {
+                // Local pointer subscript: ptr[idx] -> load ptr from stack, add index
+                let slot = var_find(ns, ne)
+                if slot >= 0 {
+                    let lalen = var_find_alen(ns, ne)
+                    let lesiz = var_find_esiz(ns, ne)
+                    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
+                    emit_load_var(slot)  // load ptr into rax
+                    if lalen > 0 && lesiz == 8 {
+                        em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+                    } else if lalen > 0 && lesiz == 1 {
+                        em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
+                    } else {
+                        // Non-array local pointer (e.g. read_file result): byte access
+                        em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
+                    }
+                }
+            }
+            return
+        }
+        // Variable load (local first, then global)
+        let slot = var_find(ns, ne)
+        if slot >= 0 { emit_load_var(slot) }
+        else {
+            let gi = gl_find(ns, ne)
+            if gi >= 0 {
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                let alen = GL[(gi * 4 + 3) as usize]
+                em(0x48); em(0xb8); em64(addr)  // mov rax, addr
+                if alen == 0 {
+                    em(0x48); em(0x8b); em(0x00)  // scalar: mov rax, [rax] (dereference)
+                }
+                // array: rax = address (no dereference — used as pointer)
+            } else {
+                // Function reference: let f = some_fn (no parens)
+                let fri = fn_find(ns, ne)
+                if fri >= 0 {
+                    // lea rax, [rip + rel32] — address of function code
+                    em(0x48); em(0x8d); em(0x05)
+                    PATCH_OFF[PATCH_COUNT as usize] = CL
+                    PATCH_FN[PATCH_COUNT as usize] = fri
+                    PATCH_COUNT = PATCH_COUNT + 1
+                    em32(0)
+                } else {
+                    em(0x31); em(0xc0)
+                }
+            }
+        }
+        return
+    }
+    EP = EP + 1
+    em(0x31); em(0xc0)
+}
+
+// Postfix: `as` type casts, `.field` access
+fn compile_postfix() with IO, Mut, Panic, Div {
+    compile_primary()
+    var more: i64 = 1
+    while more == 1 {
+        if TK[EP as usize] == 37 {
+            EP = EP + 1  // skip 'as'
+            let tns = TS[EP as usize]
+            let tne = TE[EP as usize]
+            if tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
+                em(0x48); em(0x0f); em(0xbe); em(0xc0)  // as i8: movsx rax, al
+            }
+            EP = EP + 1
+            continue
+        }
+        if TK[EP as usize] == 50 {
+            EP = EP + 1  // skip '.'
+            let fns = TS[EP as usize]
+            let fne = TE[EP as usize]
+            let fh = gl_name_hash(fns, fne)
+            // Method call: obj.method(args) -> method(obj, args)
+            if TK[(EP + 1) as usize] == 6 {
+                let mfi = fn_find(fns, fne)
+                if mfi >= 0 {
+                    EP = EP + 1  // skip method name
+                    EP = EP + 1  // skip (
+                    // rax = self pointer. Push as first arg.
+                    em(0x50)  // push self
+                    var margc: i64 = 1
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or()
+                        em(0x50)
+                        margc = margc + 1
+                        if TK[EP as usize] == 28 { EP = EP + 1 }
+                    }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                    // Pop args into registers (reverse order)
+                    if margc >= 6 { em(0x41); em(0x59) }
+                    if margc >= 5 { em(0x41); em(0x58) }
+                    if margc >= 4 { em(0x59) }
+                    if margc >= 3 { em(0x5a) }
+                    if margc >= 2 { em(0x5e) }
+                    if margc >= 1 { em(0x5f) }
+                    em(0xe8)
+                    PATCH_OFF[PATCH_COUNT as usize] = CL
+                    PATCH_FN[PATCH_COUNT as usize] = mfi
+                    PATCH_COUNT = PATCH_COUNT + 1
+                    em32(0)
+                    continue
+                }
+            }
+            // Field access: rax = struct pointer, load field
+            EP = EP + 1
+            var found: i64 = 0
+            var si: i64 = 0
+            while si < ST_COUNT && found == 0 {
+                let off = st_field_offset(si, fh)
+                if off >= 0 {
+                    if off == 0 {
+                        em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+                    } else {
+                        em(0x48); em(0x8b); em(0x80); em32(off)  // mov rax, [rax+off]
+                    }
+                    found = 1
+                }
+                si = si + 1
+            }
+            continue
+        }
+        more = 0
+    }
+}
+
+fn compile_multiplicative() with IO, Mut, Panic, Div {
+    compile_postfix()
+    while TK[EP as usize] == 19 || TK[EP as usize] == 20 || TK[EP as usize] == 29 {
+        let op = TK[EP as usize]
+        EP = EP + 1
+        emit_push()
+        compile_postfix()
+        em(0x59)  // pop rcx (lhs)
+        em(0x48); em(0x87); em(0xc1)  // xchg rax, rcx — rax=lhs, rcx=rhs
+        if op == 19 { em(0x48); em(0x0f); em(0xaf); em(0xc1) }  // imul rax, rcx
+        if op == 20 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9) }  // cqo; idiv rcx
+        if op == 29 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9); em(0x48); em(0x89); em(0xd0) }  // cqo; idiv rcx; mov rax, rdx
+    }
+}
+
+fn compile_additive() with IO, Mut, Panic, Div {
+    compile_multiplicative()
+    while TK[EP as usize] == 17 || TK[EP as usize] == 18 {
+        let op = TK[EP as usize]
+        EP = EP + 1
+        emit_push()
+        compile_multiplicative()
+        em(0x59)  // pop rcx (lhs)
+        if op == 17 { em(0x48); em(0x01); em(0xc8) }  // add rax, rcx (commutative: rcx+rax = ok)
+        if op == 18 { em(0x48); em(0x87); em(0xc1); em(0x48); em(0x29); em(0xc8) }  // xchg; sub rax, rcx
+    }
+}
+
+// Shift: << (40), >> (39)
+fn compile_shift() with IO, Mut, Panic, Div {
+    compile_additive()
+    while TK[EP as usize] == 39 || TK[EP as usize] == 40 {
+        let op = TK[EP as usize]
+        EP = EP + 1
+        emit_push()
+        compile_additive()
+        // rax=rhs (shift amount), stack=lhs
+        em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (shift amount in cl)
+        em(0x58)  // pop rax (lhs)
+        if op == 40 { em(0x48); em(0xd3); em(0xe0) }  // shl rax, cl
+        if op == 39 { em(0x48); em(0xd3); em(0xf8) }  // sar rax, cl
+    }
+}
+
+// Bitwise AND: & (44)
+fn compile_bitand() with IO, Mut, Panic, Div {
+    compile_shift()
+    while TK[EP as usize] == 44 {
+        EP = EP + 1; emit_push(); compile_shift()
+        em(0x59); em(0x48); em(0x21); em(0xc8)  // pop rcx; and rax, rcx
+    }
+}
+
+// Bitwise XOR: ^ (56)
+fn compile_bitxor() with IO, Mut, Panic, Div {
+    compile_bitand()
+    while TK[EP as usize] == 56 {
+        EP = EP + 1; emit_push(); compile_bitand()
+        em(0x59); em(0x48); em(0x31); em(0xc8)  // pop rcx; xor rax, rcx
+    }
+}
+
+// Bitwise OR: | (45)
+fn compile_bitor() with IO, Mut, Panic, Div {
+    compile_bitxor()
+    while TK[EP as usize] == 45 {
+        EP = EP + 1; emit_push(); compile_bitxor()
+        em(0x59); em(0x48); em(0x09); em(0xc8)  // pop rcx; or rax, rcx
+    }
+}
+
+fn compile_comparison() with IO, Mut, Panic, Div {
+    compile_bitor()
+    let op = TK[EP as usize]
+    if op == 21 || op == 22 || op == 23 || op == 24 || op == 25 || op == 26 {
+        EP = EP + 1
+        emit_push()
+        compile_bitor()
+        em(0x59)  // pop rcx (lhs)
+        em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+        if op == 21 { em(0x0f); em(0x94); em(0xc0) }  // sete al
+        if op == 22 { em(0x0f); em(0x95); em(0xc0) }  // setne al
+        if op == 23 { em(0x0f); em(0x9c); em(0xc0) }  // setl al
+        if op == 24 { em(0x0f); em(0x9f); em(0xc0) }  // setg al
+        if op == 25 { em(0x0f); em(0x9e); em(0xc0) }  // setle al
+        if op == 26 { em(0x0f); em(0x9d); em(0xc0) }  // setge al
+        em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
+    }
+}
+
+// Logical AND: && (30) — short-circuit
+fn compile_and() with IO, Mut, Panic, Div {
+    compile_comparison()
+    while TK[EP as usize] == 30 {
+        EP = EP + 1
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x84)             // je short_false (rel32)
+        let patch = CL; em32(0)
+        compile_comparison()
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x95); em(0xc0)  // setne al
+        em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
+        em(0xe9); let end_patch = CL; em32(0)  // jmp end
+        // short_false: rax already 0
+        let here = CL
+        CD[patch as usize] = ((here - patch - 4) & 0xFF) as i8
+        CD[(patch+1) as usize] = (((here - patch - 4) >> 8) & 0xFF) as i8
+        CD[(patch+2) as usize] = (((here - patch - 4) >> 16) & 0xFF) as i8
+        CD[(patch+3) as usize] = (((here - patch - 4) >> 24) & 0xFF) as i8
+        em(0x31); em(0xc0)  // xor eax, eax
+        let end = CL
+        CD[end_patch as usize] = ((end - end_patch - 4) & 0xFF) as i8
+        CD[(end_patch+1) as usize] = (((end - end_patch - 4) >> 8) & 0xFF) as i8
+        CD[(end_patch+2) as usize] = (((end - end_patch - 4) >> 16) & 0xFF) as i8
+        CD[(end_patch+3) as usize] = (((end - end_patch - 4) >> 24) & 0xFF) as i8
+    }
+}
+
+// Logical OR: || (31) — short-circuit
+fn compile_or() with IO, Mut, Panic, Div {
+    compile_and()
+    while TK[EP as usize] == 31 {
+        EP = EP + 1
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x85)             // jne short_true (rel32)
+        let patch = CL; em32(0)
+        compile_and()
+        em(0xe9); let end_patch = CL; em32(0)  // jmp end
+        // short_true: result = 1
+        let here = CL
+        CD[patch as usize] = ((here - patch - 4) & 0xFF) as i8
+        CD[(patch+1) as usize] = (((here - patch - 4) >> 8) & 0xFF) as i8
+        CD[(patch+2) as usize] = (((here - patch - 4) >> 16) & 0xFF) as i8
+        CD[(patch+3) as usize] = (((here - patch - 4) >> 24) & 0xFF) as i8
+        em(0x48); em(0xb8); em64(1)
+        let end = CL
+        CD[end_patch as usize] = ((end - end_patch - 4) & 0xFF) as i8
+        CD[(end_patch+1) as usize] = (((end - end_patch - 4) >> 8) & 0xFF) as i8
+        CD[(end_patch+2) as usize] = (((end - end_patch - 4) >> 16) & 0xFF) as i8
+        CD[(end_patch+3) as usize] = (((end - end_patch - 4) >> 24) & 0xFF) as i8
+    }
+}
+
+// ─── Patch helper ───
+fn patch32(off: i64, target: i64) with Mut, Panic {
+    let rel = target - off - 4
+    CD[off as usize] = (rel & 0xFF) as i8
+    CD[(off+1) as usize] = ((rel >> 8) & 0xFF) as i8
+    CD[(off+2) as usize] = ((rel >> 16) & 0xFF) as i8
+    CD[(off+3) as usize] = ((rel >> 24) & 0xFF) as i8
+}
+
+// ─── Statement compiler ───
+fn compile_stmt() with IO, Mut, Panic, Div {
+    let k = TK[EP as usize]
+
+    // Skip semicolons
+    if k == 27 { EP = EP + 1; return }
+
+    // let x = expr / var x = expr (with optional : type)
+    if k == 11 || k == 12 {
+        EP = EP + 1
+        let ns = TS[EP as usize]
+        let ne = TE[EP as usize]
+        EP = EP + 1
+        // Check for : type annotation
+        var is_arr: i64 = 0
+        var arr_len: i64 = 0
+        var arr_esiz: i64 = 8
+        if TK[EP as usize] == 43 {
+            EP = EP + 1  // skip :
+            // Skip & or &!
+            if TK[EP as usize] == 44 { EP = EP + 1 }
+            if TK[EP as usize] == 32 { EP = EP + 1 }
+            // Array type: [T; N] — detect and extract element type + length
+            if TK[EP as usize] == 41 {
+                EP = EP + 1  // skip [
+                // Element type
+                let etns = TS[EP as usize]
+                let etne = TE[EP as usize]
+                if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                EP = EP + 1  // skip element type
+                if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ;
+                arr_len = TV[EP as usize]
+                EP = EP + 1  // skip N
+                if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+                is_arr = 1
+            } else {
+                EP = EP + 1  // skip type name
+            }
+        }
+        // Skip = sign
+        if TK[EP as usize] == 16 { EP = EP + 1 }
+        if is_arr == 1 && arr_len > 0 {
+            // Local array: allocate slots, skip initializer [0; N], store lea
+            // Skip [0; N] or [val; N] initializer
+            if TK[EP as usize] == 41 {
+                EP = EP + 1  // skip [
+                while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
+                if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+            }
+            let nslots = arr_len
+            if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz)
+            // Zero-init the array slots
+            let base = ptr_slot - nslots
+            var zi: i64 = 0
+            while zi < nslots {
+                em(0x48); em(0x31); em(0xc0)  // xor rax, rax
+                emit_store_var(base + zi)
+                zi = zi + 1
+            }
+            // Store lea (pointer to array start) in ptr_slot
+            // Array slots are base..base+nslots-1, addresses [rbp-base*8]..[rbp-(base+nslots-1)*8]
+            // Pointer must point to lowest address so arr[i] = [ptr + i*8] addresses upward
+            em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
+            em32(0 - (base + nslots - 1) * 8)
+            emit_store_var(ptr_slot)
+        } else {
+            compile_or()
+            let slot = var_add(ns, ne)
+            emit_store_var(slot)
+        }
+        return
+    }
+
+    // x.field = expr (struct field write)
+    if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
+        let ns = TS[EP as usize]
+        let ne = TE[EP as usize]
+        EP = EP + 2  // skip name and .
+        let fns = TS[EP as usize]
+        let fne = TE[EP as usize]
+        let fh = gl_name_hash(fns, fne)
+        EP = EP + 1  // skip field name
+        if TK[EP as usize] == 16 { EP = EP + 1 }  // skip =
+        compile_or()  // value in rax
+        em(0x50)  // push value
+        // Load struct base pointer
+        let slot = var_find(ns, ne)
+        if slot >= 0 { emit_load_var(slot) }
+        else {
+            let gi = gl_find(ns, ne)
+            if gi >= 0 {
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                em(0x48); em(0xb8); em64(addr)
+            }
+        }
+        // rax = struct pointer. Find field offset and store.
+        em(0x59)  // pop rcx (value)
+        var si: i64 = 0
+        while si < ST_COUNT {
+            let off = st_field_offset(si, fh)
+            if off >= 0 {
+                if off == 0 { em(0x48); em(0x89); em(0x08) }  // mov [rax], rcx
+                else { em(0x48); em(0x89); em(0x88); em32(off) }  // mov [rax+off], rcx
+                si = ST_COUNT  // break
+            }
+            si = si + 1
+        }
+        return
+    }
+
+    // x = expr (local or global scalar assignment)
+    if k == 3 && TK[(EP + 1) as usize] == 16 {
+        let ns = TS[EP as usize]
+        let ne = TE[EP as usize]
+        EP = EP + 2
+        compile_or()
+        let slot = var_find(ns, ne)
+        if slot >= 0 { emit_store_var(slot) }
+        else {
+            let gi = gl_find(ns, ne)
+            if gi >= 0 {
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                // mov rcx, rax; mov rax, addr; mov [rax], rcx
+                em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (value)
+                em(0x48); em(0xb8); em64(addr)  // mov rax, addr
+                em(0x48); em(0x89); em(0x08)    // mov [rax], rcx
+            }
+        }
+        return
+    }
+    // ARRAY[idx] = expr (global array write)
+    if k == 3 && TK[(EP + 1) as usize] == 41 {
+        let ns = TS[EP as usize]
+        let ne = TE[EP as usize]
+        EP = EP + 2  // skip name and [
+        compile_or()  // index in rax
+        if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // skip 'as usize'
+        if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+        if TK[EP as usize] == 16 { EP = EP + 1 }  // skip =
+        em(0x50)  // push index
+        compile_or()  // value in rax
+        let gi = gl_find(ns, ne)
+        if gi >= 0 {
+            let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+            let esz = GL[(gi * 4 + 2) as usize]
+            // rax = value, stack = index
+            em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+            em(0x59)  // pop rcx (index)
+            em(0x48); em(0xb8); em64(base)  // mov rax, base
+            if esz == 8 {
+                em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+            } else {
+                em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl (byte store)
+            }
+        } else {
+            // Local array store: ptr[idx] = val
+            let lslot = var_find(ns, ne)
+            if lslot >= 0 {
+                let llalen = var_find_alen(ns, ne)
+                let lesiz = var_find_esiz(ns, ne)
+                em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+                em(0x59)  // pop rcx (index)
+                emit_load_var(lslot)  // load base ptr into rax
+                if llalen > 0 && lesiz == 8 {
+                    em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+                } else if llalen > 0 && lesiz == 1 {
+                    em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+                } else {
+                    // Non-array local pointer: byte store
+                    em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+                }
+            }
+        }
+        return
+    }
+
+    // return expr
+    if k == 2 {
+        EP = EP + 1
+        if TK[EP as usize] != 9 { compile_or() }
+        else { em(0x31); em(0xc0) }
+        em(0x48); em(0x81); em(0xc4); em32(4096)
+        em(0x5d); em(0xc3)
+        return
+    }
+
+    // continue (33)
+    if k == 33 {
+        EP = EP + 1
+        if LOOP_DEPTH > 0 {
+            em(0xe9)
+            let rel = LOOP_TOP[(LOOP_DEPTH - 1) as usize] - (CL + 4)
+            em32(rel)
+        }
+        return
+    }
+
+    // break (34) — emit jmp rel32 placeholder, patched when while loop ends
+    if k == 34 {
+        EP = EP + 1
+        em(0xe9)  // jmp rel32
+        BREAK_PATCH[BREAK_COUNT as usize] = CL
+        BREAK_COUNT = BREAK_COUNT + 1
+        em32(0)  // placeholder — patched by while handler
+        return
+    }
+
+    // if expr { stmts } else if ... / else { stmts }
+    if k == 13 {
+        EP = EP + 1
+        compile_or()
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x84)
+        let je_off = CL; em32(0)
+        if TK[EP as usize] == 8 { EP = EP + 1 }
+        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        if TK[EP as usize] == 14 {
+            EP = EP + 1
+            em(0xe9)
+            let jmp_off = CL; em32(0)
+            patch32(je_off, CL)
+            // else if: recurse into compile_stmt which handles 'if'
+            if TK[EP as usize] == 13 {
+                compile_stmt()
+            } else {
+                if TK[EP as usize] == 8 { EP = EP + 1 }
+                while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                if TK[EP as usize] == 9 { EP = EP + 1 }
+            }
+            patch32(jmp_off, CL)
+        } else {
+            patch32(je_off, CL)
+        }
+        return
+    }
+
+    // while expr { stmts }
+    if k == 15 {
+        EP = EP + 1
+        let loop_top = CL
+        LOOP_TOP[LOOP_DEPTH as usize] = loop_top
+        LOOP_DEPTH = LOOP_DEPTH + 1
+        let saved_bc = BREAK_COUNT
+        compile_or()
+        em(0x48); em(0x85); em(0xc0)
+        em(0x0f); em(0x84)
+        let je_off = CL; em32(0)
+        if TK[EP as usize] == 8 { EP = EP + 1 }
+        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        em(0xe9)
+        em32(loop_top - (CL + 4))
+        patch32(je_off, CL)
+        // Patch all break jumps from this loop to point here
+        var bi: i64 = saved_bc
+        while bi < BREAK_COUNT { patch32(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
+        BREAK_COUNT = saved_bc
+        LOOP_DEPTH = LOOP_DEPTH - 1
+        return
+    }
+
+    // for IDENT in range(START, END) { body }
+    // Desugars to: var IDENT = START; while IDENT < END { body; IDENT = IDENT + 1 }
+    if k == 54 {
+        EP = EP + 1  // skip 'for'
+        let vns = TS[EP as usize]
+        let vne = TE[EP as usize]
+        EP = EP + 1  // skip loop var name
+        EP = EP + 1  // skip 'in'
+        EP = EP + 1  // skip 'range'
+        if TK[EP as usize] == 6 { EP = EP + 1 }  // skip (
+        compile_or()  // START in rax
+        let iter_slot = var_add(vns, vne)
+        emit_store_var(iter_slot)
+        if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
+        compile_or()  // END in rax
+        let end_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(end_slot)
+        if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+        // while iter < end
+        let loop_top = CL
+        LOOP_TOP[LOOP_DEPTH as usize] = loop_top
+        LOOP_DEPTH = LOOP_DEPTH + 1
+        let saved_bc = BREAK_COUNT
+        emit_load_var(iter_slot)
+        em(0x50)  // push iter
+        emit_load_var(end_slot)
+        em(0x59)  // pop rcx (iter)
+        em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+        em(0x0f); em(0x9c); em(0xc0)  // setl al
+        em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x84)
+        let je_off = CL; em32(0)
+        if TK[EP as usize] == 8 { EP = EP + 1 }  // skip {
+        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
+        // iter = iter + 1
+        emit_load_var(iter_slot)
+        em(0x48); em(0x83); em(0xc0); em(1)  // add rax, 1
+        emit_store_var(iter_slot)
+        em(0xe9)
+        em32(loop_top - (CL + 4))
+        patch32(je_off, CL)
+        var bi: i64 = saved_bc
+        while bi < BREAK_COUNT { patch32(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
+        BREAK_COUNT = saved_bc
+        LOOP_DEPTH = LOOP_DEPTH - 1
+        return
+    }
+
+    // match expr { pattern => body, ... }
+    // 48 = match keyword
+    if k == 48 {
+        EP = EP + 1
+        compile_or()  // scrutinee in rax
+        // Store scrutinee in a local var (not stack — return inside arm would break stack)
+        let match_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(match_slot)
+        if TK[EP as usize] == 8 { EP = EP + 1 }  // skip {
+        var arm_count: i64 = 0
+        while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+            var is_wildcard: i64 = 0
+            var disc: i64 = -1
+            if TK[EP as usize] == 3 {
+                let pns = TS[EP as usize]
+                let pne = TE[EP as usize]
+                if pne - pns == 1 && sb(pns) == 95 {
+                    is_wildcard = 1; EP = EP + 1
+                } else if TK[(EP + 1) as usize] == 51 {
+                    let eh = gl_name_hash(pns, pne)
+                    EP = EP + 2
+                    let vh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                    EP = EP + 1
+                    disc = en_variant_value(eh, vh)
+                } else { EP = EP + 1 }
+            } else if TK[EP as usize] == 4 {
+                disc = TV[EP as usize]; EP = EP + 1
+            } else { EP = EP + 1 }
+            if disc >= 0 {
+                // Compare scrutinee with discriminant
+                emit_load_var(match_slot)
+                em(0x50)
+                em(0x48); em(0xb8); em64(disc)
+                em(0x59)
+                em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+                em(0x0f); em(0x85); let skip_patch = CL; em32(0)  // jne skip
+                if TK[EP as usize] == 52 { EP = EP + 1 }  // skip =>
+                if TK[EP as usize] == 8 { EP = EP + 1 }
+                while TK[EP as usize] != 9 && TK[EP as usize] != 28 && TK[EP as usize] != 0 { compile_stmt() }
+                if TK[EP as usize] == 9 { EP = EP + 1 }
+                em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
+                arm_count = arm_count + 1
+                patch32(skip_patch, CL)
+            }
+            if is_wildcard == 1 {
+                if TK[EP as usize] == 52 { EP = EP + 1 }
+                if TK[EP as usize] == 8 { EP = EP + 1 }
+                while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                if TK[EP as usize] == 9 { EP = EP + 1 }
+            }
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+        }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        var ai: i64 = 0
+        while ai < arm_count { patch32(MATCH_ENDS[ai as usize], CL); ai = ai + 1 }
+        return
+    }
+
+    // Expression statement
+    compile_or()
+}
+
+// ─── Top-level compiler ───
+fn compile_all() -> i64 with IO, Mut, Panic, Div {
+    CL = 0
+    FN_COUNT = 0
+    PATCH_COUNT = 0
+    GL_COUNT = 0
+    GL_BSS_SIZE = 0
+    var p: i64 = 0
+
+    // Pass 0a: register structs
+    ST_COUNT = 0
+    while p < TC {
+        if TK[p as usize] == 46 || TK[p as usize] == 49 {
+            // struct or pub/linear keyword — skip pub/linear prefix
+            if TK[p as usize] == 49 { p = p + 1 }
+            if TK[p as usize] == 46 {
+                p = p + 1  // skip 'struct'
+                let sn_ns = TS[p as usize]
+                let sn_ne = TE[p as usize]
+                let sh = gl_name_hash(sn_ns, sn_ne)
+                let si = ST_COUNT
+                let base = si * 66
+                ST[base as usize] = sh
+                p = p + 1  // skip name
+                if TK[p as usize] == 8 { p = p + 1 }  // skip {
+                var fc: i64 = 0
+                while TK[p as usize] != 9 && TK[p as usize] != 0 {
+                    if TK[p as usize] == 3 {
+                        let fh = gl_name_hash(TS[p as usize], TE[p as usize])
+                        ST[(base + 2 + fc) as usize] = fh
+                        fc = fc + 1
+                        p = p + 1
+                        // Skip : type
+                        if TK[p as usize] == 43 { p = p + 1; p = p + 1 }
+                        // Skip comma
+                        if TK[p as usize] == 28 { p = p + 1 }
+                        continue
+                    }
+                    p = p + 1
+                }
+                ST[(base + 1) as usize] = fc
+                ST_COUNT = ST_COUNT + 1
+                if TK[p as usize] == 9 { p = p + 1 }
+                continue
+            }
+        }
+        p = p + 1
+    }
+    // Also scan enums in the same pass
+    p = 0
+    EN_COUNT = 0
+    while p < TC {
+        if TK[p as usize] == 47 {
+            p = p + 1  // skip 'enum'
+            let en_ns = TS[p as usize]
+            let en_ne = TE[p as usize]
+            let eh = gl_name_hash(en_ns, en_ne)
+            let ei = EN_COUNT
+            let base = ei * 34
+            EN[base as usize] = eh
+            p = p + 1  // skip name
+            if TK[p as usize] == 8 { p = p + 1 }  // skip {
+            var vc: i64 = 0
+            while TK[p as usize] != 9 && TK[p as usize] != 0 {
+                if TK[p as usize] == 3 {
+                    let vh = gl_name_hash(TS[p as usize], TE[p as usize])
+                    EN[(base + 2 + vc) as usize] = vh
+                    vc = vc + 1
+                }
+                p = p + 1
+            }
+            EN[(base + 1) as usize] = vc
+            EN_COUNT = EN_COUNT + 1
+            if TK[p as usize] == 9 { p = p + 1 }
+            continue
+        }
+        p = p + 1
+    }
+    p = 0
+
+    // Pass 0b: register global variables
+    var depth: i64 = 0
+    while p < TC {
+        let tk = TK[p as usize]
+        if tk == 8 { depth = depth + 1; p = p + 1; continue }
+        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if depth > 0 { p = p + 1; continue }
+        // Top-level var
+        if tk == 12 {
+            p = p + 1
+            let gns = TS[p as usize]
+            let gne = TE[p as usize]
+            p = p + 1
+            // Expect : type
+            if TK[p as usize] == 43 {
+                p = p + 1
+                let tns = TS[p as usize]
+                let tne = TE[p as usize]
+                // Check if [TYPE; N] array
+                if TK[p as usize] == 41 {
+                    // [TYPE; N]
+                    p = p + 1
+                    let etns = TS[p as usize]
+                    let etne = TE[p as usize]
+                    var esiz: i64 = 8
+                    if src_match(etns, etne - etns, "i8") { esiz = 1 }
+                    p = p + 1
+                    // Skip ;
+                    if TK[p as usize] == 27 { p = p + 1 }
+                    // Array length
+                    let alen = TV[p as usize]
+                    p = p + 1
+                    // Skip ]
+                    if TK[p as usize] == 42 { p = p + 1 }
+                    gl_add(gns, gne, esiz, alen)
+                } else {
+                    // Scalar: i64, i32, bool, string
+                    gl_add(gns, gne, 8, 0)
+                    p = p + 1
+                }
+            }
+            // Skip = initializer until next var or fn or EOF
+            while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 { p = p + 1 }
+            continue
+        }
+        p = p + 1
+    }
+    p = 0
+
+    // BSS layout: [argc(8)] [argv(8)] [globals...]
+    // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0
+    GL_BSS_BASE = 0x600000 + 16
+    GL_BSS_SIZE = GL_BSS_SIZE + 16
+
+    print("globals: "); print_int(GL_COUNT); print(" bss="); print_int(GL_BSS_SIZE); print("\n")
+
+    // Pass 1: register all function names
+    while p < TC {
+        if TK[p as usize] == 1 {
+            p = p + 1
+            FN_NS[FN_COUNT as usize] = TS[p as usize]
+            FN_NE[FN_COUNT as usize] = TE[p as usize]
+            FN_OFF[FN_COUNT as usize] = -1
+            FN_COUNT = FN_COUNT + 1
+        }
+        p = p + 1
+    }
+
+    // Pass 2: compile each function
+    p = 0
+    var fn_idx: i64 = 0
+    while p < TC {
+        if TK[p as usize] != 1 { p = p + 1; continue }
+        p = p + 1  // skip 'fn'
+
+        // Record code offset
+        FN_OFF[fn_idx as usize] = CL
+
+        // Reset local vars
+        VAR_COUNT = 0
+        NEXT_SLOT = 1
+        BREAK_COUNT = 0
+
+        // Register parameters
+        p = p + 1  // skip name
+        if TK[p as usize] == 6 { p = p + 1 }
+        while TK[p as usize] != 7 && TK[p as usize] != 0 {
+            if TK[p as usize] == 3 {
+                let pns = TS[p as usize]
+                let pne = TE[p as usize]
+                let pslot = var_add(pns, pne)
+                p = p + 1
+                // Skip : type annotation (handles &T, &!T, [T; N], simple T)
+                if TK[p as usize] == 43 {
+                    p = p + 1  // skip :
+                    if TK[p as usize] == 44 { p = p + 1 }  // skip &
+                    if TK[p as usize] == 32 { p = p + 1 }  // skip !
+                    if TK[p as usize] == 41 {
+                        // [T; N]
+                        p = p + 1
+                        while TK[p as usize] != 42 && TK[p as usize] != 0 { p = p + 1 }
+                        if TK[p as usize] == 42 { p = p + 1 }
+                    } else {
+                        p = p + 1  // skip type name
+                    }
+                }
+            }
+            if TK[p as usize] == 28 { p = p + 1 }
+        }
+        if TK[p as usize] == 7 { p = p + 1 }
+        // Skip -> type
+        if TK[p as usize] == 10 { p = p + 1; p = p + 1 }
+        // Skip 'with' effects clause (with=38, ident=3, comma=28)
+        if TK[p as usize] == 38 { p = p + 1; while TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 } }
+        if TK[p as usize] == 8 { p = p + 1 }
+
+        // Emit prologue: push rbp; mov rbp, rsp; sub rsp, 512
+        print_int(fn_idx)
+        print(" ")
+        em(0x55); em(0x48); em(0x89); em(0xe5)
+        em(0x48); em(0x81); em(0xec); em32(4096)
+
+        // Store parameters from registers to stack slots (System V ABI: rdi,rsi,rdx,rcx,r8,r9)
+        if VAR_COUNT >= 1 { em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF) }    // mov [rbp-8], rdi
+        if VAR_COUNT >= 2 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }    // mov [rbp-16], rsi
+        if VAR_COUNT >= 3 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }    // mov [rbp-24], rdx
+        if VAR_COUNT >= 4 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }    // mov [rbp-32], rcx
+        if VAR_COUNT >= 5 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }    // mov [rbp-40], r8
+        if VAR_COUNT >= 6 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }    // mov [rbp-48], r9
+
+        // Compile body
+        EP = p
+        var depth: i64 = 1
+        while EP < TC && depth > 0 {
+            if TK[EP as usize] == 9 { depth = depth - 1; if depth == 0 { EP = EP + 1; continue } else { EP = EP + 1; continue } }
+            compile_stmt()
+        }
+        p = EP
+
+        // Implicit return 0
+        if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
+            em(0x31); em(0xc0)
+            em(0x48); em(0x81); em(0xc4); em32(4096)
+            em(0x5d); em(0xc3)
+        }
+        fn_idx = fn_idx + 1
+    }
+
+    // Patch function calls
+    var pi: i64 = 0
+    while pi < PATCH_COUNT {
+        let off = PATCH_OFF[pi as usize]
+        let fi = PATCH_FN[pi as usize]
+        if fi >= 0 && fi < FN_COUNT {
+            let target = FN_OFF[fi as usize]
+            let rel = target - (off + 4)
+            CD[(off) as usize] = (rel & 0xFF) as i8
+            CD[(off + 1) as usize] = ((rel >> 8) & 0xFF) as i8
+            CD[(off + 2) as usize] = ((rel >> 16) & 0xFF) as i8
+            CD[(off + 3) as usize] = ((rel >> 24) & 0xFF) as i8
+        }
+        pi = pi + 1
+    }
+
+    // Find main
+    var main_fn: i64 = -1
+    var mi: i64 = 0
+    while mi < FN_COUNT {
+        let ms = FN_NS[mi as usize]
+        let me = FN_NE[mi as usize]
+        if me - ms == 4 && sb(ms) == 109 && sb(ms+1) == 97 && sb(ms+2) == 105 && sb(ms+3) == 110 { main_fn = mi }
+        mi = mi + 1
+    }
+    if main_fn < 0 { print("error: no main\n"); return 1 }
+
+    // Trampoline: save argc/argv, call main, exit
+    TRAMP_OFF = CL
+    let tramp = CL
+    // At entry: [rsp]=argc, [rsp+8]=argv[0], [rsp+16]=argv[1], ...
+    // Save argc at BSS+0, argv pointer at BSS+8
+    let argc_addr = 0x600000
+    let argv_addr = 0x600000 + 8
+    em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (argc)
+    em(0x48); em(0x83); em(0xe8); em(0x01)  // sub rax, 1 (skip program name)
+    em(0x48); em(0xb9); em64(argc_addr)
+    em(0x48); em(0x89); em(0x01)  // mov [rcx], rax (save argc-1)
+    em(0x48); em(0x8d); em(0x44); em(0x24); em(16)  // lea rax, [rsp+16] (argv+1)
+    em(0x48); em(0xb9); em64(argv_addr)
+    em(0x48); em(0x89); em(0x01)  // mov [rcx], rax (save argv ptr)
+    // call main
+    em(0xe8)
+    let rel = FN_OFF[main_fn as usize] - (CL + 4)
+    em32(rel)
+    // exit(rax)
+    em(0x89); em(0xc7)
+    em(0xb8); em32(60)
+    em(0x0f); em(0x05)
+
+    print("compile: fns="); print_int(FN_COUNT); print(" code="); print_int(CL)
+    print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT); print("\n")
+    0
+}

@@ -1,0 +1,143 @@
+// souc-v2/globals.sio — All global variable declarations and struct/enum/global lookup functions.
+// This file is imported first by main.sio; no imports of its own.
+
+// ─── Global buffers ───
+var SRC: [i8; 2097152] = [0; 2097152]
+var SRC_LEN: i64 = 0
+// Import resolution
+var IMP_PATH: [i8; 4096] = [0; 4096]
+var IMP_LOADED: [i64; 64] = [0; 64]
+var IMP_COUNT: i64 = 0
+var BASE_DIR: [i8; 512] = [0; 512]
+var BASE_DIR_LEN: i64 = 0
+
+// Token parallel arrays (kind, start, end, int_value)
+var TK: [i64; 32768] = [0; 32768]
+var TS: [i64; 32768] = [0; 32768]
+var TE: [i64; 32768] = [0; 32768]
+var TV: [i64; 32768] = [0; 32768]
+// Float literal extra: frac numerator and denominator (kind=53)
+var TF: [i64; 32768] = [0; 32768]
+var TD: [i64; 32768] = [0; 32768]
+var TC: i64 = 0
+
+// Code output
+var CD: [i8; 262144] = [0; 262144]
+var CL: i64 = 0
+var TRAMP_OFF: i64 = 0
+
+// ELF output
+var ELF: [i8; 262144] = [0; 262144]
+
+// String qword buffer (global to avoid boot4 local-array bug)
+var SQW: [i64; 32] = [0; 32]
+
+// Function table: name start/end in source, code offset
+var FN_NS: [i64; 256] = [0; 256]
+var FN_NE: [i64; 256] = [0; 256]
+var FN_OFF: [i64; 256] = [0; 256]
+var FN_COUNT: i64 = 0
+
+// Call patch table: code offset where rel32 needs patching, target fn index
+var PATCH_OFF: [i64; 4096] = [0; 4096]
+var PATCH_FN: [i64; 4096] = [0; 4096]
+var PATCH_COUNT: i64 = 0
+
+// Struct registry: flat array, up to 32 structs
+// ST[i*66+0] = name hash
+// ST[i*66+1] = field count
+// ST[i*66+2..65] = field name hashes (up to 64 fields)
+var ST: [i64; 2112] = [0; 2112]
+var ST_COUNT: i64 = 0
+
+// Enum registry: flat array, up to 64 enums
+// EN[i*34+0] = name hash
+// EN[i*34+1] = variant count
+// EN[i*34+2..33] = variant name hashes (up to 32 variants)
+var EN: [i64; 2176] = [0; 2176]
+var EN_COUNT: i64 = 0
+var MATCH_ENDS: [i64; 32] = [0; 32]
+
+fn en_find(hash: i64) -> i64 with Panic {
+    var i: i64 = 0
+    while i < EN_COUNT {
+        if EN[(i * 34) as usize] == hash { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// Look up EnumName::Variant -> discriminant value
+fn en_variant_value(enum_hash: i64, variant_hash: i64) -> i64 with Panic {
+    let ei = en_find(enum_hash)
+    if ei < 0 { return -1 }
+    let base = ei * 34
+    let vc = EN[(base + 1) as usize]
+    var vi: i64 = 0
+    while vi < vc {
+        if EN[(base + 2 + vi) as usize] == variant_hash { return vi }
+        vi = vi + 1
+    }
+    return -1
+}
+
+fn st_find(hash: i64) -> i64 with Panic {
+    var i: i64 = 0
+    while i < ST_COUNT {
+        if ST[(i * 66) as usize] == hash { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn st_field_offset(si: i64, field_hash: i64) -> i64 with Panic {
+    let base = si * 66
+    let fc = ST[(base + 1) as usize]
+    var fi: i64 = 0
+    while fi < fc {
+        if ST[(base + 2 + fi) as usize] == field_hash { return fi * 8 }
+        fi = fi + 1
+    }
+    return -1
+}
+
+fn st_total_size(si: i64) -> i64 with Panic {
+    return ST[(si * 66 + 1) as usize] * 8
+}
+
+// Global variable table: flat array, 4 fields per entry [hash, offset, esiz, alen]
+var GL: [i64; 256] = [0; 256]
+var GL_COUNT: i64 = 0
+var GL_BSS_SIZE: i64 = 0
+var GL_BSS_BASE: i64 = 0
+
+// Per-function local variable table (reset per function)
+var VAR_NS: [i64; 64] = [0; 64]
+var VAR_NE: [i64; 64] = [0; 64]
+var VAR_SLOT: [i64; 64] = [0; 64]
+var VAR_ALEN: [i64; 64] = [0; 64]
+var VAR_ESIZ: [i64; 64] = [0; 64]
+var VAR_COUNT: i64 = 0
+var NEXT_SLOT: i64 = 1
+
+// Token kinds: inlined as integers (boot4 doesn't init scalar globals)
+
+// ─── Expression compiler state ───
+// Global parse position for expression parsing
+var EP: i64 = 0
+// Closure state save buffers (global to avoid stack overflow in recursive compile_primary)
+var CL_SAVE_NS: [i64; 64] = [0; 64]
+var CL_SAVE_NE: [i64; 64] = [0; 64]
+var CL_SAVE_SL: [i64; 64] = [0; 64]
+var CL_SAVE_AL: [i64; 64] = [0; 64]
+var CL_SAVE_ES: [i64; 64] = [0; 64]
+// Loop stack for continue/break (max 16 nested loops)
+var LOOP_TOP: [i64; 16] = [0; 16]
+var LOOP_END_PATCH: [i64; 16] = [0; 16]
+var LOOP_DEPTH: i64 = 0
+// Break fixup table: code offsets of jmp rel32 placeholders
+var BREAK_PATCH: [i64; 64] = [0; 64]
+var BREAK_COUNT: i64 = 0
+
+// arg_count: entry RSP offset
+var ENTRY_RSP_OFF: i64 = 0

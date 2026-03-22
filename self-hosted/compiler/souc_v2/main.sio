@@ -1,0 +1,175 @@
+// souc-v2/main.sio — ELF writer, import resolver, and main() entry point.
+// Imports globals, lexer, and codegen modules (textual concatenation).
+
+use self-hosted::compiler::souc_v2::globals
+use self-hosted::compiler::souc_v2::lexer
+use self-hosted::compiler::souc_v2::codegen
+
+// ─── ELF byte writer helpers ───
+fn elf_w8(off: i64, v: i64) with Mut, Panic { ELF[off as usize] = (v & 0xFF) as i8 }
+fn elf_w16(off: i64, v: i64) with Mut, Panic { elf_w8(off, v); elf_w8(off+1, v >> 8) }
+fn elf_w32(off: i64, v: i64) with Mut, Panic { elf_w16(off, v); elf_w16(off+2, v >> 16) }
+fn elf_w64(off: i64, v: i64) with Mut, Panic { elf_w32(off, v); elf_w32(off+4, v >> 32) }
+
+// ─── ELF writer (2 LOAD segments: text RX + BSS RW) ───
+fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
+    let text_base = 0x400000
+    let text_off = 4096
+    let bss_base = 0x600000
+    let entry = text_base + text_off + TRAMP_OFF
+    var i: i64 = 0
+    while i < 4096 { ELF[i as usize] = 0; i = i + 1 }
+
+    let tsz = text_off + CL
+    // Total memory: from text_base to bss_base + GL_BSS_SIZE
+    let total_memsz = (bss_base - text_base) + GL_BSS_SIZE
+
+    // ELF header (64 bytes)
+    elf_w8(0, 0x7f); elf_w8(1, 69); elf_w8(2, 76); elf_w8(3, 70)
+    elf_w8(4, 2); elf_w8(5, 1); elf_w8(6, 1)
+    elf_w16(16, 2); elf_w16(18, 0x3e); elf_w32(20, 1)
+    elf_w64(24, entry)
+    elf_w64(32, 64)
+    elf_w16(52, 64); elf_w16(54, 56); elf_w16(56, 1); elf_w16(58, 64)
+
+    // Single LOAD segment: text(RX) + gap + BSS(RW) — all RWX
+    let ph0 = 64
+    elf_w32(ph0, 1)                 // PT_LOAD
+    elf_w32(ph0+4, 7)               // p_flags = R+W+X
+    elf_w64(ph0+8, 0)               // p_offset
+    elf_w64(ph0+16, text_base)      // p_vaddr
+    elf_w64(ph0+24, text_base)      // p_paddr
+    elf_w64(ph0+32, tsz)            // p_filesz (text only)
+    elf_w64(ph0+40, total_memsz)    // p_memsz (text + gap + BSS)
+    elf_w64(ph0+48, 0x200000)       // p_align = 2MB (cover gap)
+
+    // Copy code after header
+    i = 0
+    while i < CL { ELF[(text_off + i) as usize] = CD[i as usize]; i = i + 1 }
+
+    let ok = write_file(output, ELF, tsz)
+    print("elf: "); print(output); print(" "); print_int(tsz)
+    print(" bytes (bss="); print_int(GL_BSS_SIZE); print(")\n")
+    return 0
+}
+
+// ─── Import resolver ───
+// Hash IMP_PATH[0..len] for dedup
+fn imp_path_hash(len: i64) -> i64 with Panic {
+    var h: i64 = len * 1000003
+    var i: i64 = 0
+    while i < len {
+        let c = IMP_PATH[i as usize] as i64 & 0xFF
+        h = h + c * (i + 1) * 31
+        i = i + 1
+    }
+    return h
+}
+
+// Resolve and load use statements from SRC[0..SRC_LEN]
+fn resolve_imports() with IO, Mut, Panic, Div {
+    var pos: i64 = 0
+    while pos < SRC_LEN {
+        // Find start of line
+        let line_start = pos
+        // Check for "use " at line start (117=u, 115=s, 101=e, 32=space)
+        if pos + 4 < SRC_LEN && sb(pos) == 117 && sb(pos+1) == 115 && sb(pos+2) == 101 && sb(pos+3) == 32 {
+            pos = pos + 4  // skip "use "
+            // Extract module path until newline, semicolon, or ::*
+            var path_len: i64 = 0
+            var path_start: i64 = pos
+            while pos < SRC_LEN && sb(pos) != 10 && sb(pos) != 59 && sb(pos) != 13 {
+                if sb(pos) == 58 && pos + 1 < SRC_LEN && sb(pos+1) == 58 {
+                    if pos + 2 < SRC_LEN && sb(pos+2) == 42 {
+                        pos = pos + 3  // skip ::*
+                        break
+                    }
+                    if pos + 2 < SRC_LEN && sb(pos+2) == 123 {
+                        // Skip ::{...} until }
+                        while pos < SRC_LEN && sb(pos) != 125 && sb(pos) != 10 { pos = pos + 1 }
+                        if pos < SRC_LEN && sb(pos) == 125 { pos = pos + 1 }
+                        break
+                    }
+                }
+                pos = pos + 1
+            }
+            let path_end = pos
+            // Build filesystem path: convert :: to /
+            var fp_len: i64 = 0
+            // Check prefix: stdlib:: or self-hosted::
+            var pi: i64 = path_start
+            while pi < path_end {
+                let c = sb(pi)
+                if c == 58 && pi + 1 < path_end && sb(pi+1) == 58 {
+                    IMP_PATH[fp_len as usize] = 47  // /
+                    fp_len = fp_len + 1
+                    pi = pi + 2
+                } else if c == 42 || c == 123 || c == 125 || c == 32 {
+                    pi = pi + 1  // skip wildcards, braces, spaces
+                } else {
+                    IMP_PATH[fp_len as usize] = c as i8
+                    fp_len = fp_len + 1
+                    pi = pi + 1
+                }
+            }
+            // Append .sio if not already present
+            if fp_len > 4 && IMP_PATH[(fp_len-4) as usize] == 46 && IMP_PATH[(fp_len-3) as usize] == 115 {
+                // already has .sio — skip
+            } else {
+                IMP_PATH[fp_len as usize] = 46; fp_len = fp_len + 1   // .
+                IMP_PATH[fp_len as usize] = 115; fp_len = fp_len + 1  // s
+                IMP_PATH[fp_len as usize] = 105; fp_len = fp_len + 1  // i
+                IMP_PATH[fp_len as usize] = 111; fp_len = fp_len + 1  // o
+            }
+            IMP_PATH[fp_len as usize] = 0  // null terminate
+            // Dedup check
+            let ph = imp_path_hash(fp_len)
+            var already: i64 = 0
+            var di: i64 = 0
+            while di < IMP_COUNT {
+                if IMP_LOADED[di as usize] == ph { already = 1 }
+                di = di + 1
+            }
+            if already == 0 && IMP_COUNT < 64 {
+                IMP_LOADED[IMP_COUNT as usize] = ph
+                IMP_COUNT = IMP_COUNT + 1
+                // Try to read the file
+                let fsz = file_size(IMP_PATH)
+                if fsz > 0 && SRC_LEN + fsz < 2097152 {
+                    let raw = read_file(IMP_PATH)
+                    // Append newline separator
+                    SRC[SRC_LEN as usize] = 10; SRC_LEN = SRC_LEN + 1
+                    // Copy imported source
+                    var ci: i64 = 0
+                    while ci < fsz { SRC[(SRC_LEN + ci) as usize] = raw[ci as usize]; ci = ci + 1 }
+                    SRC_LEN = SRC_LEN + fsz
+                    print("import: "); print(IMP_PATH); print(" "); print_int(fsz); print(" bytes\n")
+                }
+            }
+        }
+        // Advance to next line
+        while pos < SRC_LEN && sb(pos) != 10 { pos = pos + 1 }
+        if pos < SRC_LEN { pos = pos + 1 }
+    }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    let argc = arg_count()
+    if argc < 2 { print("Usage: mini_native <source.sio> <output.elf>\n"); return 1 }
+    let src = get_arg(0)
+    let out = get_arg(1)
+    let raw = read_file(src)
+    let sz = file_size(src)
+    var i: i64 = 0
+    while i < sz && i < 2097152 { SRC[i as usize] = raw[i as usize]; i = i + 1 }
+    SRC_LEN = sz
+    print("source: "); print(src); print(" "); print_int(sz); print(" bytes\n")
+    resolve_imports()
+    print("total source: "); print_int(SRC_LEN); print(" bytes\n")
+    lex_all()
+    print("tokens: "); print_int(TC); print("\n")
+    let cr = compile_all()
+    if cr != 0 { return cr }
+    write_elf(out)
+    return 0
+}

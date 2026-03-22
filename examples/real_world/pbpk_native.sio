@@ -1,0 +1,270 @@
+// PBPK Drug Concentration Simulator — Native compile target for souc-v2
+// Demonstrates: structs, impl block, while loops, enums, match dispatch,
+//               break, function calls, struct field access
+//
+// Uses fixed-point integer arithmetic (scale factor 1000) to work around
+// the souc-v2 mini-compiler f64 operator bug.
+//
+// Compile: souc-v2-self.elf examples/real_world/pbpk_native.sio /tmp/pbpk.elf
+// Run:     /tmp/pbpk.elf
+
+enum Route {
+    Oral,
+    Intravenous
+}
+
+// Fixed-point drug parameters (values scaled by 1000)
+// dose_fp: dose in mg * 1000 (e.g. 500mg → 500000)
+// half_life_fp: half-life in hours * 1000 (e.g. 4h → 4000)
+// bioavail_fp: bioavailability * 1000 (e.g. 80% → 800)
+struct Drug {
+    dose_fp: i64,
+    half_life_fp: i64,
+    bioavail_fp: i64
+}
+
+// Fixed-point multiply: (a * b) / 1000
+// Both a and b are scaled by 1000, so a*b is scaled by 1000000;
+// divide by 1000 to get result scaled by 1000
+fn fp_mul(a: i64, b: i64) -> i64 {
+    return (a * b) / 1000
+}
+
+// Fixed-point divide: (a * 1000) / b
+fn fp_div(a: i64, b: i64) -> i64 {
+    if b == 0 { return 0 }
+    return (a * 1000) / b
+}
+
+// Approximate exp(-x) via Taylor series in fixed-point
+// x is in fixed-point (scaled by 1000), result also scaled by 1000
+// exp(-x) ≈ 1 - x + x²/2 - x³/6 + x⁴/24 - x⁵/120 + x⁶/720
+// For large x (>2000), use repeated halving: exp(-2x) = exp(-x)²
+fn approx_exp_neg_fp(x_fp: i64) -> i64 {
+    // For large arguments, use halving to keep Taylor accurate
+    if x_fp > 2000 {
+        // exp(-x) = exp(-x/2) * exp(-x/2)
+        let half = approx_exp_neg_fp(x_fp / 2)
+        return fp_mul(half, half)
+    }
+
+    // All values scaled by 1000
+    let one = 1000
+    let x2 = fp_mul(x_fp, x_fp)
+    let x3 = fp_mul(x2, x_fp)
+    let x4 = fp_mul(x3, x_fp)
+    let x5 = fp_mul(x4, x_fp)
+    let x6 = fp_mul(x5, x_fp)
+
+    // Taylor: 1 - x + x²/2 - x³/6 + x⁴/24 - x⁵/120 + x⁶/720
+    var result = one - x_fp + x2 / 2 - x3 / 6 + x4 / 24 - x5 / 120 + x6 / 720
+
+    // Clamp to [0, 1000]
+    if result < 0 { result = 0 }
+    if result > 1000 { result = 1000 }
+    return result
+}
+
+// Compute drug concentration at time t (fixed-point)
+// d: Drug struct, t_fp: time in fixed-point, route: 0=Oral, 1=IV
+// Returns concentration in fixed-point (mg * 1000)
+impl Drug {
+    fn concentration(d: Drug, t_fp: i64, route: i64) -> i64 {
+        // k = ln(2) / half_life ≈ 693 / half_life_fp (both in fp)
+        let k_fp = fp_div(693, d.half_life_fp)
+
+        // Effective dose depends on route
+        var eff_dose_fp: i64 = d.dose_fp
+        match route {
+            0 => { eff_dose_fp = fp_mul(d.dose_fp, d.bioavail_fp) }
+            1 => { eff_dose_fp = d.dose_fp }
+            _ => { eff_dose_fp = d.dose_fp }
+        }
+
+        // kt = k * t
+        let kt_fp = fp_mul(k_fp, t_fp)
+
+        // decay = exp(-kt)
+        let decay_fp = approx_exp_neg_fp(kt_fp)
+
+        // concentration = eff_dose * decay
+        let conc_fp = fp_mul(eff_dose_fp, decay_fp)
+        return conc_fp
+    }
+}
+
+// Print a single digit character
+fn print_digit(d: i64) {
+    if d == 0 { print("0") }
+    if d == 1 { print("1") }
+    if d == 2 { print("2") }
+    if d == 3 { print("3") }
+    if d == 4 { print("4") }
+    if d == 5 { print("5") }
+    if d == 6 { print("6") }
+    if d == 7 { print("7") }
+    if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+// Print an integer without trailing newline (print_int adds \n)
+fn print_int_inline(n: i64) {
+    var v = n
+    if v < 0 {
+        print("-")
+        v = 0 - v
+    }
+    if v == 0 {
+        print("0")
+        return
+    }
+    // Extract digits (max ~18 digits for i64)
+    // We'll handle up to 6 digits for our use case
+    if v >= 100000 { print_digit(v / 100000 % 10) }
+    if v >= 10000 { print_digit(v / 10000 % 10) }
+    if v >= 1000 { print_digit(v / 1000 % 10) }
+    if v >= 100 { print_digit(v / 100 % 10) }
+    if v >= 10 { print_digit(v / 10 % 10) }
+    print_digit(v % 10)
+}
+
+// Print a fixed-point value as "integer.decimal" with 1 decimal place
+fn print_fp(val: i64) {
+    var v = val
+    if v < 0 {
+        print("-")
+        v = 0 - v
+    }
+    let integer_part = v / 1000
+    let frac = (v - integer_part * 1000) / 100
+    print_int_inline(integer_part)
+    print(".")
+    print_digit(frac)
+}
+
+fn main() -> i64 {
+    // Create drug: 500mg dose, 4hr half-life, 80% oral bioavailability
+    // All values in fixed-point (scaled by 1000)
+    let drug = Drug {
+        dose_fp: 500000,
+        half_life_fp: 4000,
+        bioavail_fp: 800
+    }
+
+    let oral: i64 = 0
+    let iv: i64 = 1
+
+    print("=== PBPK Drug Concentration Simulator ===\n")
+    print("Drug: 500mg dose, 4h half-life, 80%% bioavail\n")
+    print("(Fixed-point arithmetic, scale=1000)\n\n")
+
+    // ── Oral route simulation ──
+    print("--- Oral Route ---\n")
+    var t: i64 = 0
+    while t < 12 {
+        let t_fp = t * 1000
+        let c_fp = concentration(drug, t_fp, oral)
+        print("  t=")
+        print_int_inline(t)
+        print("h: C=")
+        print_fp(c_fp)
+        print(" mg\n")
+        t = t + 1
+    }
+
+    // ── IV route simulation ──
+    print("\n--- IV Route ---\n")
+    t = 0
+    while t < 12 {
+        let t_fp = t * 1000
+        let c_fp = concentration(drug, t_fp, iv)
+        print("  t=")
+        print_int_inline(t)
+        print("h: C=")
+        print_fp(c_fp)
+        print(" mg\n")
+        t = t + 1
+    }
+
+    // ── Threshold analysis with break ──
+    print("\n--- Threshold Analysis ---\n")
+    var threshold_t: i64 = 0 - 1
+    t = 0
+    while t < 24 {
+        let t_fp = t * 1000
+        let c_fp = concentration(drug, t_fp, oral)
+        // 100 mg = 100000 in fixed-point
+        if c_fp < 100000 {
+            threshold_t = t
+            break
+        }
+        t = t + 1
+    }
+    print("Oral concentration drops below 100mg at t=")
+    print_int_inline(threshold_t)
+    print("h\n")
+
+    // ── Enum dispatch via match ──
+    print("\n--- Route Dispatch ---\n")
+    let route_val = Route::Oral
+    match route_val {
+        Route::Oral => {
+            print("Selected route: Oral (bioavailability=0.8)\n")
+        }
+        Route::Intravenous => {
+            print("Selected route: IV (bioavailability=1.0)\n")
+        }
+        _ => {
+            print("Selected route: Unknown\n")
+        }
+    }
+
+    // ── Peak concentration search ──
+    print("\n--- Peak Concentration (IV) ---\n")
+    var peak_c: i64 = 0
+    var peak_t: i64 = 0
+    t = 0
+    while t < 12 {
+        let t_fp = t * 1000
+        let c_fp = concentration(drug, t_fp, iv)
+        if c_fp > peak_c {
+            peak_c = c_fp
+            peak_t = t
+        }
+        t = t + 1
+    }
+    print("Peak: C=")
+    print_fp(peak_c)
+    print(" mg at t=")
+    print_int_inline(peak_t)
+    print("h\n")
+
+    // ── Verification ──
+    // At t=0, oral: C = dose * bioavail = 500 * 0.8 = 400mg
+    // In fixed-point: fp_mul(500000, 800) = (500000*800)/1000 = 400000
+    let c0 = concentration(drug, 0, oral)
+    print("\n--- Verification ---\n")
+    print("C(0) oral = ")
+    print_fp(c0)
+    print(" mg (expected: 400.0)\n")
+
+    // At t=0, IV: C = dose = 500mg
+    let c0_iv = concentration(drug, 0, iv)
+    print("C(0) IV   = ")
+    print_fp(c0_iv)
+    print(" mg (expected: 500.0)\n")
+
+    // Verify correctness
+    if c0 == 400000 {
+        if c0_iv == 500000 {
+            print("\nPASS\n")
+            return 0
+        }
+    }
+    print("\nFAIL: c0=")
+    print_int_inline(c0)
+    print(" c0_iv=")
+    print_int_inline(c0_iv)
+    print("\n")
+    return 1
+}
