@@ -25,8 +25,24 @@ SOUC_BIN="$({
 } )"
 
 if [[ ! -x "$SOUC_BIN" ]]; then
-  echo "error: resolved souc binary is not executable: $SOUC_BIN" >&2
-  exit 2
+  echo "warn: resolved souc binary is not executable: $SOUC_BIN" >&2
+  echo "Falling back to native compiler wrapper..."
+  WRAPPER="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
+  if [[ -f "$WRAPPER" ]]; then
+    chmod +x "$WRAPPER"
+    # Build the native compiler if needed
+    bash "$ROOT_DIR/scripts/ci/build_native_souc.sh" /tmp/souc-native.elf 2>/dev/null || true
+    if [[ -x /tmp/souc-native.elf ]]; then
+      SOUC_BIN="$WRAPPER"
+      export SOUC_NATIVE_BIN=/tmp/souc-native.elf
+    else
+      echo "error: native compiler build failed" >&2
+      exit 2
+    fi
+  else
+    echo "error: no fallback available" >&2
+    exit 2
+  fi
 fi
 
 SOUC_BIN="$(realpath "$SOUC_BIN")"
