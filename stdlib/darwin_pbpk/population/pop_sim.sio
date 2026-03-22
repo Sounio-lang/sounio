@@ -1,0 +1,543 @@
+// darwin_pbpk/population/pop_sim.sio — Virtual Population PBPK Simulation
+//
+// Generates a virtual population of N patients by sampling epistemic parameter
+// priors, runs the 14-compartment PBPK model for each, and reports prediction
+// intervals (P5, P25, P50, P75, P95) for AUC and Cmax.
+//
+// Method:
+//   1. LCG pseudo-random number generator (Numerical Recipes, seed=42)
+//   2. Marsaglia polar method for normal distribution sampling
+//   3. Each virtual patient gets independently sampled CL, fu, Kp values
+//   4. 14-compartment adaptive Tsit5 simulation per patient
+//   5. Selection sort on outputs for percentile extraction
+//
+// Clinical relevance:
+//   Population prediction intervals bracket the expected inter-individual
+//   variability driven by CYP3A4 polymorphism (CL CV=60%) and other
+//   epistemic parameter uncertainty. If the 90% prediction interval
+//   (P5-P95) is wide, dose individualization (TDM) is justified.
+//
+// References:
+//   JCGM 100:2008 §8 — Use of probability distributions for uncertainty
+//   FDA (2018) PBPK Guidance — Virtual population simulation requirements
+//   Ferron 1997 — CYP3A4 CL variability (CV=60%, n=24)
+//
+// Author: Demetrios Chiuratto Agourakis
+
+use tsit5_pbpk14::*
+
+// ============================================================================
+// PSEUDO-RANDOM NUMBER GENERATOR (LCG)
+// ============================================================================
+// Numerical Recipes LCG: next = (a * prev + c) mod 2^32
+// Period: 2^32. Sufficient for population sampling (not for cryptography).
+
+struct RNG {
+    state: i64,
+}
+
+fn rng_new(seed: i64) -> RNG {
+    RNG { state: seed }
+}
+
+// Returns next state and a uniform f64 in [0, 1)
+fn rng_next_uniform(rng: RNG) -> RNG {
+    // LCG: a=1664525, c=1013904223
+    let a = 1664525
+    let c = 1013904223
+    let m = 4294967296  // 2^32
+    let next = (a * rng.state + c) % m
+    // Ensure positive
+    let pos = if next < 0 { next + m } else { next }
+    RNG { state: pos }
+}
+
+fn rng_value(rng: RNG) -> f64 {
+    // Convert state to [0, 1) using as f64 cast
+    let s_f64 = rng.state as f64
+    return s_f64 / 4294967296.0
+}
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn ps_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = (y + x / y) * 0.5; i = i + 1 }
+    return y
+}
+
+fn ps_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ps_ln(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    var sx = x
+    var scale = 0
+    while sx > 2.0 { sx = sx / 2.718281828459045; scale = scale + 1 }
+    while sx < 0.5 { sx = sx * 2.718281828459045; scale = scale - 1 }
+    let u = (sx - 1.0) / (sx + 1.0)
+    let u2 = u * u
+    let result = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0
+                       + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+    var sf = 0.0
+    var si = 0
+    if scale > 0 { while si < scale { sf = sf + 1.0; si = si + 1 } }
+    if scale < 0 { var si2 = 0; while si2 < (0 - scale) { sf = sf - 1.0; si2 = si2 + 1 } }
+    return result + sf
+}
+
+fn ps_finite(x: f64) -> bool {
+    if x != x { return false }
+    return ps_abs(x) < 1.0e12
+}
+
+// ============================================================================
+// NORMAL DISTRIBUTION SAMPLING (Marsaglia Polar Method)
+// ============================================================================
+// Generates a standard normal variate z ~ N(0,1).
+// Then scale: x = mean + z * SD
+
+struct NormalSample {
+    value: f64,
+    rng: RNG,
+}
+
+fn sample_normal(rng: RNG, mean: f64, sd: f64) -> NormalSample with Mut, Div, Panic {
+    // Marsaglia polar method: generate two uniform in [-1,1], check s < 1
+    var r = rng
+    var u1 = 0.0
+    var u2 = 0.0
+    var s = 2.0  // force entry
+
+    var attempts = 0
+    while s >= 1.0 || s <= 0.0 {
+        r = rng_next_uniform(r)
+        u1 = rng_value(r) * 2.0 - 1.0
+        r = rng_next_uniform(r)
+        u2 = rng_value(r) * 2.0 - 1.0
+        s = u1 * u1 + u2 * u2
+        attempts = attempts + 1
+        if attempts > 100 {
+            // Fallback: use u1 directly as crude approximation
+            return NormalSample { value: mean + u1 * sd, rng: r }
+        }
+    }
+
+    let z = u1 * ps_sqrt(0.0 - 2.0 * ps_ln(s) / s)
+    NormalSample { value: mean + z * sd, rng: r }
+}
+
+// ============================================================================
+// PBPK SIMULATION (reused from epistemic_pbpk14.sio)
+// ============================================================================
+
+struct PopMetrics {
+    auc: f64,
+    cmax: f64,
+    success: bool,
+}
+
+fn pop_simulate(prm: PBPKParams14, dose_mg: f64, t_end: f64) -> PopMetrics with Mut, Div, Panic {
+    let c0 = dose_mg / prm.v_blood
+    var st = PBPKState14 {
+        blood: c0, liver: 0.0, kidney: 0.0, brain: 0.0, heart: 0.0,
+        lung: 0.0, muscle: 0.0, adipose: 0.0, gut: 0.0, skin: 0.0,
+        bone: 0.0, spleen: 0.0, pancreas: 0.0, other: 0.0
+    }
+    let cfg = default_ode_config()
+    var t = 0.0
+    var dt = cfg.dt_init
+    var nsteps = 0
+    var nreject = 0
+    var cmax = c0
+    var auc = 0.0
+    var c_prev = c0
+
+    while t < t_end && nsteps < cfg.max_steps {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        let result = tsit5_step_pbpk(st, t, dt_use, prm)
+        let err_norm = compute_error_norm_14(result.err, st, result.state_new, cfg.rtol, cfg.atol)
+        if err_norm <= 1.0 {
+            let c_now = result.state_new.blood
+            auc = auc + (c_prev + c_now) * 0.5 * dt_use
+            if c_now > cmax { cmax = c_now }
+            c_prev = c_now
+            t = t + dt_use
+            st = result.state_new
+            nsteps = nsteps + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        } else {
+            nreject = nreject + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        }
+        dt = max_f64(cfg.dt_min, min_f64(cfg.dt_max, dt))
+        if nreject > 10000 {
+            return PopMetrics { auc: 0.0, cmax: 0.0, success: false }
+        }
+    }
+
+    PopMetrics {
+        auc: auc, cmax: cmax,
+        success: t >= t_end - cfg.dt_min && ps_finite(auc),
+    }
+}
+
+// ============================================================================
+// SELECTION SORT (for percentile extraction)
+// ============================================================================
+
+fn sort_f64(arr: [f64; 64], n: i32) -> [f64; 64] with Mut {
+    var sorted = arr
+    var i = 0
+    while i < n {
+        var min_idx = i
+        var j = i + 1
+        while j < n {
+            if sorted[j] < sorted[min_idx] {
+                min_idx = j
+            }
+            j = j + 1
+        }
+        if min_idx != i {
+            let tmp = sorted[i]
+            sorted[i] = sorted[min_idx]
+            sorted[min_idx] = tmp
+        }
+        i = i + 1
+    }
+    return sorted
+}
+
+fn percentile(sorted: [f64; 64], n: i32, pct: f64) -> f64 {
+    if n <= 0 { return 0.0 }
+    let nf = n as f64
+    let rank = pct / 100.0 * (nf - 1.0)
+    // Floor index via truncation
+    var lo = 0
+    var rf = rank
+    while rf >= 1.0 && lo < n - 1 { rf = rf - 1.0; lo = lo + 1 }
+    let hi = if lo + 1 < n { lo + 1 } else { lo }
+    let lo_f = lo as f64
+    let f = rank - lo_f
+    return sorted[lo] * (1.0 - f) + sorted[hi] * f
+}
+
+// ============================================================================
+// RAPAMYCIN PARAMETERS + PRIORS
+// ============================================================================
+
+fn pop_rapamycin_params() -> PBPKParams14 {
+    var prm = default_pbpk_params()
+    prm.cl_hepatic = 12.4
+    prm.cl_renal = 0.3
+    prm.fu_plasma = 0.08
+    prm.rb_ratio = 0.58
+    prm.q_brain = 0.05
+    prm.kp_brain = 0.08
+    prm.kp_liver = 8.0
+    prm.kp_lung = 10.0
+    prm.kp_kidney = 4.0
+    prm.kp_heart = 3.5
+    prm.kp_gut = 5.0
+    prm.kp_spleen = 6.0
+    prm.kp_pancreas = 4.0
+    prm.kp_muscle = 3.5
+    prm.kp_adipose = 0.3
+    prm.kp_skin = 2.0
+    prm.kp_bone = 1.5
+    prm.kp_other = 0.5
+    return prm
+}
+
+// ============================================================================
+// MAIN — VIRTUAL POPULATION SIMULATION
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Virtual Population PBPK — Rapamycin (Sirolimus)")
+    println("  20 virtual patients, 14-compartment, adaptive Tsit5")
+    println("  Parameter sampling: N(mean, SD) from epistemic priors")
+    println("  Seed: 42 (reproducible)")
+    println("======================================================================")
+    println("")
+
+    let base_prm = pop_rapamycin_params()
+    let dose_mg = 5.0
+    let t_end = 168.0
+    let n_patients = 20
+
+    // Epistemic prior means and SDs
+    let cl_mean = 12.4
+    let cl_sd = 7.4       // CV=60%
+    let fu_mean = 0.08
+    let fu_sd = 0.02
+    let kp_brain_mean = 0.08
+    let kp_brain_sd = 0.025
+
+    var auc_arr: [f64; 64] = [0.0; 64]
+    var cmax_arr: [f64; 64] = [0.0; 64]
+    var n_success = 0
+    var n_failed = 0
+    var rng = rng_new(42)
+
+    println("  Running 20 virtual patients...")
+    println("")
+
+    var p = 0
+    while p < n_patients {
+        // Sample parameters
+        let s_cl = sample_normal(rng, cl_mean, cl_sd)
+        rng = s_cl.rng
+        let s_fu = sample_normal(rng, fu_mean, fu_sd)
+        rng = s_fu.rng
+        let s_kp = sample_normal(rng, kp_brain_mean, kp_brain_sd)
+        rng = s_kp.rng
+
+        // Clamp to physiological bounds
+        let cl_val = if s_cl.value > 1.0 { s_cl.value } else { 1.0 }
+        let fu_val = if s_fu.value > 0.01 { if s_fu.value < 1.0 { s_fu.value } else { 1.0 } } else { 0.01 }
+        let kp_val = if s_kp.value > 0.01 { s_kp.value } else { 0.01 }
+
+        // Apply to patient-specific parameters
+        var prm_i = base_prm
+        prm_i.cl_hepatic = cl_val
+        prm_i.fu_plasma = fu_val
+        prm_i.kp_brain = kp_val
+
+        // Run simulation
+        let mi = pop_simulate(prm_i, dose_mg, t_end)
+        if mi.success {
+            auc_arr[n_success] = mi.auc
+            cmax_arr[n_success] = mi.cmax
+            n_success = n_success + 1
+        } else {
+            n_failed = n_failed + 1
+        }
+
+        p = p + 1
+    }
+
+    println("  Completed:")
+    println("    Successful:")
+    println(n_success)
+    println("    Failed:")
+    println(n_failed)
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // ------------------------------------------------------------------
+    // TEST 1: Majority of patients simulated successfully
+    // ------------------------------------------------------------------
+    println("TEST 1: >= 80% of virtual patients simulated successfully")
+    let pct_success = if n_patients > 0 {
+        let ns_f = n_success as f64
+        let np_f = n_patients as f64
+        ns_f / np_f * 100.0
+    } else { 0.0 }
+    println("  Success rate:")
+    println(pct_success)
+    if pct_success >= 80.0 {
+        println("  [PASS]")
+        passed = passed + 1
+    } else {
+        println("  FAIL: too many failures")
+        failed = failed + 1
+    }
+    println("")
+
+    // Sort for percentiles
+    let auc_sorted = sort_f64(auc_arr, n_success)
+    let cmax_sorted = sort_f64(cmax_arr, n_success)
+
+    // Extract percentiles
+    let auc_p5 = percentile(auc_sorted, n_success, 5.0)
+    let auc_p25 = percentile(auc_sorted, n_success, 25.0)
+    let auc_p50 = percentile(auc_sorted, n_success, 50.0)
+    let auc_p75 = percentile(auc_sorted, n_success, 75.0)
+    let auc_p95 = percentile(auc_sorted, n_success, 95.0)
+
+    let cmax_p5 = percentile(cmax_sorted, n_success, 5.0)
+    let cmax_p50 = percentile(cmax_sorted, n_success, 50.0)
+    let cmax_p95 = percentile(cmax_sorted, n_success, 95.0)
+
+    // Compute mean + SD
+    var auc_sum = 0.0
+    var ai = 0
+    while ai < n_success { auc_sum = auc_sum + auc_arr[ai]; ai = ai + 1 }
+    let ns_f2 = n_success as f64
+    let auc_mean = auc_sum / ns_f2
+
+    var auc_var_sum = 0.0
+    var vi = 0
+    while vi < n_success {
+        let diff = auc_arr[vi] - auc_mean
+        auc_var_sum = auc_var_sum + diff * diff
+        vi = vi + 1
+    }
+    let auc_sd = ps_sqrt(auc_var_sum / ns_f2)
+    let auc_cv = auc_sd / auc_mean * 100.0
+
+    // ------------------------------------------------------------------
+    // Population prediction intervals
+    // ------------------------------------------------------------------
+    println("----------------------------------------------------------------------")
+    println("  POPULATION PREDICTION INTERVALS — AUC(0-168h)")
+    println("----------------------------------------------------------------------")
+    println("    P5  =")
+    println(auc_p5)
+    println("    P25 =")
+    println(auc_p25)
+    println("    P50 (median) =")
+    println(auc_p50)
+    println("    P75 =")
+    println(auc_p75)
+    println("    P95 =")
+    println(auc_p95)
+    println("")
+    println("    Mean =")
+    println(auc_mean)
+    println("    SD   =")
+    println(auc_sd)
+    println("    CV   =")
+    println(auc_cv)
+    println("")
+
+    println("----------------------------------------------------------------------")
+    println("  POPULATION PREDICTION INTERVALS — Cmax")
+    println("----------------------------------------------------------------------")
+    println("    P5  =")
+    println(cmax_p5)
+    println("    P50 =")
+    println(cmax_p50)
+    println("    P95 =")
+    println(cmax_p95)
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 2: 90% prediction interval (P5-P95) spans > 2-fold
+    // CL CV=60% → AUC should vary substantially across population
+    // ------------------------------------------------------------------
+    println("TEST 2: 90% PI spans > 2-fold (CYP3A4 variability)")
+    let pi_ratio = if auc_p5 > 1.0e-12 { auc_p95 / auc_p5 } else { 0.0 }
+    println("  P95/P5 ratio =")
+    println(pi_ratio)
+    if pi_ratio > 2.0 {
+        println("  [PASS] Wide PI reflects CYP3A4 inter-individual variability")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected P95/P5 > 2.0")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 3: Population CV(AUC) > 20%
+    // ------------------------------------------------------------------
+    println("TEST 3: Population CV(AUC) > 20%")
+    println("  CV =")
+    println(auc_cv)
+    if auc_cv > 20.0 {
+        println("  [PASS] Population variability correctly propagated")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected CV > 20%")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 4: Median AUC close to reference (within 2-fold)
+    // Reference from epistemic_pbpk14: AUC = 3.26 mg*h/L
+    // ------------------------------------------------------------------
+    println("TEST 4: Median AUC within 2-fold of reference (3.26)")
+    let ref_auc = 3.26
+    let fe_median = if auc_p50 > ref_auc { auc_p50 / ref_auc } else { ref_auc / auc_p50 }
+    println("  FE(median vs ref) =")
+    println(fe_median)
+    if fe_median < 2.0 {
+        println("  [PASS] Population median consistent with reference simulation")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected FE < 2.0")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 5: All AUC values positive
+    // ------------------------------------------------------------------
+    println("TEST 5: All AUC values positive")
+    var all_pos = true
+    var ci = 0
+    while ci < n_success {
+        if auc_arr[ci] <= 0.0 { all_pos = false }
+        ci = ci + 1
+    }
+    if all_pos {
+        println("  [PASS] All virtual patients have AUC > 0")
+        passed = passed + 1
+    } else {
+        println("  FAIL: some AUC <= 0")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 6: P5 > 0 and P95 < 20 (physiologically plausible range)
+    // ------------------------------------------------------------------
+    println("TEST 6: Prediction interval physiologically plausible")
+    println("  P5 =")
+    println(auc_p5)
+    println("  P95 =")
+    println(auc_p95)
+    if auc_p5 > 0.0 && auc_p95 < 20.0 {
+        println("  [PASS] PI within plausible pharmacokinetic range")
+        passed = passed + 1
+    } else {
+        println("  FAIL: PI outside expected range")
+        failed = failed + 1
+    }
+
+    // ================================================================
+    // SUMMARY
+    // ================================================================
+    println("")
+    println("======================================================================")
+    println("  VIRTUAL POPULATION — TEST SUMMARY")
+    println("======================================================================")
+    println("  Passed:")
+    println(passed)
+    println("  Failed:")
+    println(failed)
+    println("")
+    if failed == 0 {
+        println("  ALL 6 TESTS PASSED")
+        println("")
+        println("  Population PBPK simulation validated for rapamycin:")
+        println("    - 20 virtual patients sampled from epistemic priors")
+        println("    - CL CV=60% correctly propagates to AUC variability")
+        println("    - 90% prediction interval spans > 2-fold")
+        println("    - Median AUC consistent with reference simulation")
+        println("    - All values positive and physiologically plausible")
+        println("")
+        println("  Clinical implication:")
+        println("    Wide prediction interval confirms that fixed-dose rapamycin")
+        println("    regimens cannot guarantee therapeutic exposure. Therapeutic")
+        println("    Drug Monitoring (TDM) with individual CL estimation is the")
+        println("    recommended clinical strategy for this population.")
+    } else {
+        println("  SOME TESTS FAILED — see diagnostics above")
+    }
+    println("======================================================================")
+
+    return failed
+}
