@@ -157,8 +157,10 @@ var VAR_SLOT: [i64; 128] = [0; 128]
 var VAR_ALEN: [i64; 128] = [0; 128]
 var VAR_ESIZ: [i64; 128] = [0; 128]
 var VAR_IS_F64: [i64; 128] = [0; 128]
+var VAR_IS_CLOSURE: [i64; 128] = [0; 128]
 var VAR_COUNT: i64 = 0
 var NEXT_SLOT: i64 = 1
+var LAST_EXPR_IS_CLOSURE: i64 = 0
 
 // Token kinds: inlined as integers (boot4 doesn't init scalar globals)
 
@@ -322,6 +324,7 @@ fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
     VAR_ALEN[VAR_COUNT as usize] = 0
     VAR_ESIZ[VAR_COUNT as usize] = 8
     VAR_IS_F64[VAR_COUNT as usize] = 0
+    VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
     VAR_COUNT = VAR_COUNT + 1
     NEXT_SLOT = NEXT_SLOT + 1
     return slot
@@ -366,6 +369,15 @@ fn var_find_is_f64(ns: i64, ne: i64) -> i64 with Panic {
     var i: i64 = VAR_COUNT - 1
     while i >= 0 {
         if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) { return VAR_IS_F64[i as usize] }
+        i = i - 1
+    }
+    return 0
+}
+
+fn var_find_is_closure(ns: i64, ne: i64) -> i64 with Panic {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) { return VAR_IS_CLOSURE[i as usize] }
         i = i - 1
     }
     return 0
@@ -572,6 +584,10 @@ var CL_SAVE_SL: [i64; 128] = [0; 128]
 var CL_SAVE_AL: [i64; 128] = [0; 128]
 var CL_SAVE_ES: [i64; 128] = [0; 128]
 var CL_SAVE_F64: [i64; 128] = [0; 128]
+var CL_SAVE_ISCL: [i64; 128] = [0; 128]
+// Capture tracking for closures (max 16 captured variables)
+var CL_CAP_SLOT: [i64; 16] = [0; 16]
+var CL_CAP_COUNT: i64 = 0
 // Loop stack for continue/break (max 16 nested loops)
 var LOOP_TOP: [i64; 16] = [0; 16]
 var LOOP_END_PATCH: [i64; 16] = [0; 16]
@@ -583,6 +599,7 @@ var BREAK_COUNT: i64 = 0
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
 fn compile_primary() with IO, Mut, Panic, Div {
+    LAST_EXPR_IS_CLOSURE = 0
     let k = TK[EP as usize]
     // Integer literal
     if k == 4 {
@@ -621,9 +638,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
     }
     // Closure: |params| expr  or  |params| { stmts }
     // Token 45 = | at expression start = closure (not bitwise OR)
+    // Supports captured variables from outer scope via closure struct.
+    // All closures build a stack struct: [fn_ptr, cap_0, cap_1, ...]
+    // Closure function receives hidden first param (env_ptr) in rdi.
+    // User args shift to rsi, rdx, rcx, r8, r9 (max 5 user args).
     if k == 45 {
         EP = EP + 1  // skip opening |
-        // Save outer function state to global buffers
+        // Save outer function state
         let save_vc = VAR_COUNT
         let save_ns2 = NEXT_SLOT
         let save_ld = LOOP_DEPTH
@@ -636,61 +657,88 @@ fn compile_primary() with IO, Mut, Panic, Div {
             CL_SAVE_AL[svi as usize] = VAR_ALEN[svi as usize]
             CL_SAVE_ES[svi as usize] = VAR_ESIZ[svi as usize]
             CL_SAVE_F64[svi as usize] = VAR_IS_F64[svi as usize]
+            CL_SAVE_ISCL[svi as usize] = VAR_IS_CLOSURE[svi as usize]
             svi = svi + 1
         }
         // Reset state for closure body
         VAR_COUNT = 0
-        NEXT_SLOT = 1
+        NEXT_SLOT = 2  // slot 1 reserved for env_ptr (hidden rdi param)
         LOOP_DEPTH = 0
         BREAK_COUNT = 0
+        CL_CAP_COUNT = 0
         // Parse closure parameters (between | ... |)
+        // User params get slots 2, 3, ... (registers rsi, rdx, rcx, r8, r9)
         while TK[EP as usize] != 45 && TK[EP as usize] != 0 {
             if TK[EP as usize] == 3 {
                 let pns = TS[EP as usize]
                 let pne = TE[EP as usize]
                 var_add(pns, pne)
                 EP = EP + 1
-                // Skip : type
                 if TK[EP as usize] == 43 { EP = EP + 1; EP = EP + 1 }
             }
-            if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
+            if TK[EP as usize] == 28 { EP = EP + 1 }
         }
         if TK[EP as usize] == 45 { EP = EP + 1 }  // skip closing |
-        let nparams = VAR_COUNT
+        let nparams = VAR_COUNT  // user params only
+        // Register outer-scope vars as captures (those not shadowed by params)
+        var ci: i64 = 0
+        while ci < save_vc {
+            let ons = CL_SAVE_NS[ci as usize]
+            let one = CL_SAVE_NE[ci as usize]
+            let outer_slot = CL_SAVE_SL[ci as usize]
+            let existing = var_find(ons, one)
+            if existing < 0 {
+                var_add(ons, one)
+                CL_CAP_SLOT[CL_CAP_COUNT as usize] = outer_slot
+                CL_CAP_COUNT = CL_CAP_COUNT + 1
+            }
+            ci = ci + 1
+        }
         // Emit jmp over closure body
         em(0xe9)
         let jmp_patch = CL
         em32(0)
         // Emit closure function body
         let cl_start = CL
-        // Prologue
+        // Prologue: push rbp; mov rbp, rsp; sub rsp, 4096
         em(0x55); em(0x48); em(0x89); em(0xe5)
         em(0x48); em(0x81); em(0xec); em32(4096)
-        // Spill params from registers
-        if nparams >= 1 { em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF) }
-        if nparams >= 2 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }
-        if nparams >= 3 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }
-        if nparams >= 4 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }
-        if nparams >= 5 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }
-        if nparams >= 6 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }
-        // Compile body: either { stmts } or single expression
+        // Spill env_ptr (rdi) to slot 1: mov [rbp-8], rdi
+        em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF)
+        // Spill user params from shifted registers (rsi=slot2, rdx=slot3, ...)
+        if nparams >= 1 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }
+        if nparams >= 2 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }
+        if nparams >= 3 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }
+        if nparams >= 4 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }
+        if nparams >= 5 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }
+        // Load captured vars from env struct into local slots
+        // env struct layout: [fn_ptr, cap_0, cap_1, ...] at ascending addresses
+        // env_ptr points to fn_ptr; cap_i is at [env_ptr + (i+1)*8]
+        var capi: i64 = 0
+        while capi < CL_CAP_COUNT {
+            emit_load_var(1)  // rax = env_ptr
+            let cap_off = (capi + 1) * 8
+            em(0x48); em(0x8b); em(0x80); em32(cap_off)  // mov rax, [rax + cap_off]
+            emit_store_var(2 + nparams + capi)  // store in capture's local slot
+            capi = capi + 1
+        }
+        // Compile body
         if TK[EP as usize] == 8 {
-            EP = EP + 1  // skip {
+            EP = EP + 1
             while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
             if TK[EP as usize] == 9 { EP = EP + 1 }
         } else {
-            compile_or()  // single expression result in rax
+            compile_or()
         }
-        // Epilogue (implicit return rax)
+        // Epilogue
         if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
             em(0x48); em(0x81); em(0xc4); em32(4096)
             em(0x5d); em(0xc3)
         }
-        // Patch jmp to skip over closure body
+        // Patch jmp over closure body
         patch32(jmp_patch, CL)
-        // lea rax, [rip + offset_to_cl_start]
-        em(0x48); em(0x8d); em(0x05)
-        em32(cl_start - (CL + 4))
+        // Save capture count before restoring outer state
+        let saved_cap_count = CL_CAP_COUNT
         // Restore outer function state
         VAR_COUNT = save_vc
         NEXT_SLOT = save_ns2
@@ -704,9 +752,38 @@ fn compile_primary() with IO, Mut, Panic, Div {
             VAR_ALEN[svi as usize] = CL_SAVE_AL[svi as usize]
             VAR_ESIZ[svi as usize] = CL_SAVE_ES[svi as usize]
             VAR_IS_F64[svi as usize] = CL_SAVE_F64[svi as usize]
+            VAR_IS_CLOSURE[svi as usize] = CL_SAVE_ISCL[svi as usize]
             svi = svi + 1
         }
+        // --- Build closure struct on OUTER stack ---
+        // Stack layout: slot N is at [rbp - N*8]. Higher slot = lower address.
+        // We want a contiguous struct at ascending addresses:
+        //   ptr[0] = fn_ptr, ptr[8] = cap_0, ptr[16] = cap_1, ...
+        // Since ptr + 8 = higher address = lower slot number:
+        //   fn_ptr  at slot (struct_base + struct_size - 1)  ← lowest address = ptr[0]
+        //   cap_0   at slot (struct_base + struct_size - 2)  ← ptr[8]
+        //   cap_i   at slot (struct_base + struct_size - 2 - i)
+        // ptr = [rbp - (struct_base + struct_size - 1) * 8]
+        let struct_size = 1 + saved_cap_count
+        let struct_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + struct_size
+        let struct_top = struct_base + struct_size - 1
+        // Store fn_ptr at slot struct_top (ptr[0])
+        em(0x48); em(0x8d); em(0x05)
+        em32(cl_start - (CL + 4))  // lea rax, [rip + offset_to_cl_start]
+        emit_store_var(struct_top)
+        // Store captures: cap_i at slot (struct_top - 1 - i) → ptr[(i+1)*8]
+        var capj: i64 = 0
+        while capj < saved_cap_count {
+            emit_load_var(CL_CAP_SLOT[capj as usize])
+            emit_store_var(struct_top - 1 - capj)
+            capj = capj + 1
+        }
+        // lea rax, [rbp - struct_top*8] — pointer to closure struct
+        em(0x48); em(0x8d); em(0x85)
+        em32(0 - struct_top * 8)
         EXPR_IS_F64 = 0
+        LAST_EXPR_IS_CLOSURE = 1
         return
     }
     // None → 2-qword tagged union [tag=0, value=0]
@@ -1043,6 +1120,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if bl == 10 && bh == 10138972 { EP = EP + 1; compile_or(); em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             // User function call
             let fi = fn_find(ns, ne)
+            let call_vslot = var_find(ns, ne)
             EP = EP + 1
             var argc: i64 = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
@@ -1052,28 +1130,36 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
-            // Pop args into registers (reverse order)
-            if argc >= 6 { em(0x41); em(0x59) }   // pop r9  (arg 6)
-            if argc >= 5 { em(0x41); em(0x58) }   // pop r8  (arg 5)
-            if argc >= 4 { em(0x59) }               // pop rcx (arg 4)
-            if argc >= 3 { em(0x5a) }               // pop rdx (arg 3)
-            if argc >= 2 { em(0x5e) }               // pop rsi (arg 2)
-            if argc >= 1 { em(0x5f) }               // pop rdi (arg 1)
             if fi >= 0 {
-                // Direct call: call rel32 (patched later)
+                // Direct call: pop args into rdi,rsi,rdx,rcx,r8,r9
+                if argc >= 6 { em(0x41); em(0x59) }
+                if argc >= 5 { em(0x41); em(0x58) }
+                if argc >= 4 { em(0x59) }
+                if argc >= 3 { em(0x5a) }
+                if argc >= 2 { em(0x5e) }
+                if argc >= 1 { em(0x5f) }
                 em(0xe8)
                 PATCH_OFF[PATCH_COUNT as usize] = CL
                 PATCH_FN[PATCH_COUNT as usize] = fi
                 PATCH_COUNT = PATCH_COUNT + 1
                 em32(0)
             } else {
-                // Indirect call: variable holds fn pointer → call rax
-                let vslot = var_find(ns, ne)
-                if vslot >= 0 {
-                    emit_load_var(vslot)
-                    em(0xff); em(0xd0)  // call rax
+                // Indirect call through variable — uniform closure convention:
+                // All callable values are closure struct pointers [fn_ptr, cap_0, ...]
+                // Pop user args into shifted regs (rsi,rdx,rcx,r8,r9), max 5 user args
+                // rdi = closure struct ptr (env), fn_ptr loaded from [env]
+                if argc >= 5 { em(0x41); em(0x59) }  // pop r9
+                if argc >= 4 { em(0x41); em(0x58) }  // pop r8
+                if argc >= 3 { em(0x59) }              // pop rcx
+                if argc >= 2 { em(0x5a) }              // pop rdx
+                if argc >= 1 { em(0x5e) }              // pop rsi
+                if call_vslot >= 0 {
+                    emit_load_var(call_vslot)           // rax = closure struct ptr
+                    em(0x48); em(0x89); em(0xc7)        // mov rdi, rax (env_ptr)
+                    em(0x48); em(0x8b); em(0x00)        // mov rax, [rax] (fn_ptr)
+                    em(0xff); em(0xd0)                  // call rax
                 } else {
-                    em(0x31); em(0xc0)  // unknown fn — emit 0
+                    em(0x31); em(0xc0)  // unknown fn
                 }
             }
             EXPR_IS_F64 = 0
@@ -1170,14 +1256,57 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // array: rax = address (no dereference — used as pointer)
             } else {
                 // Function reference: let f = some_fn (no parens)
+                // Wrap in closure struct so indirect calls use uniform convention.
+                // Emit a wrapper fn that converts closure convention → normal convention:
+                //   rdi=env(ignored), rsi=arg0, rdx=arg1, ... → rdi=arg0, rsi=arg1, ...
+                // Then build a 1-slot struct [wrapper_addr] on the outer stack.
                 let fri = fn_find(ns, ne)
                 if fri >= 0 {
-                    // lea rax, [rip + rel32] — address of function code
-                    em(0x48); em(0x8d); em(0x05)
+                    // Emit jmp over wrapper
+                    em(0xe9)
+                    let wr_jmp_patch = CL
+                    em32(0)
+                    let wr_start = CL
+                    // Wrapper: shift args back (rsi→rdi, rdx→rsi, rcx→rdx, r8→rcx, r9→r8)
+                    em(0x48); em(0x89); em(0xf7)  // mov rdi, rsi
+                    em(0x48); em(0x89); em(0xd6)  // mov rsi, rdx
+                    em(0x48); em(0x89); em(0xca)  // mov rdx, rcx
+                    em(0x49); em(0x89); em(0xc0)  // mov r8, rax — save rax temporarily
+                    em(0x4c); em(0x89); em(0xc1)  // mov rcx, r8 (original r8 value is lost, use r10)
+                    // Actually we need: rcx = r8_old, r8 = r9_old
+                    // The registers at entry: rdi=env, rsi=a0, rdx=a1, rcx=a2, r8=a3, r9=a4
+                    // Target: rdi=a0, rsi=a1, rdx=a2, rcx=a3, r8=a4, r9=unused
+                    // Careful ordering to avoid clobbering:
+                    // 1. mov rdi, rsi (rdi clobbered, but we don't need env anymore)
+                    // 2. mov rsi, rdx
+                    // 3. mov rdx, rcx
+                    // 4. mov rcx, r8
+                    // 5. mov r8, r9
+                    // Each reads from a register before it's overwritten. Safe order. Let me redo:
+                    CL = wr_start  // rewind
+                    em(0x48); em(0x89); em(0xf7)        // mov rdi, rsi
+                    em(0x48); em(0x89); em(0xd6)        // mov rsi, rdx
+                    em(0x48); em(0x89); em(0xca)        // mov rdx, rcx
+                    em(0x4c); em(0x89); em(0xc1)        // mov rcx, r8
+                    em(0x4d); em(0x89); em(0xc8)        // mov r8, r9
+                    // jmp to real function (rel32, patched later)
+                    em(0xe9)
                     PATCH_OFF[PATCH_COUNT as usize] = CL
                     PATCH_FN[PATCH_COUNT as usize] = fri
                     PATCH_COUNT = PATCH_COUNT + 1
                     em32(0)
+                    // Patch jmp over wrapper
+                    patch32(wr_jmp_patch, CL)
+                    // Build 1-slot closure struct on stack: [wrapper_addr]
+                    let fn_struct_slot = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    em(0x48); em(0x8d); em(0x05)
+                    em32(wr_start - (CL + 4))  // lea rax, [rip + offset_to_wrapper]
+                    emit_store_var(fn_struct_slot)
+                    // lea rax, [rbp - fn_struct_slot*8] — pointer to struct
+                    em(0x48); em(0x8d); em(0x85)
+                    em32(0 - fn_struct_slot * 8)
+                    LAST_EXPR_IS_CLOSURE = 1
                 } else {
                     em(0x31); em(0xc0)
                 }
@@ -1539,6 +1668,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
             else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
             else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
+            // Set closure flag if RHS was a closure expression
+            VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
         }
         return
     }
@@ -1587,7 +1718,18 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         EP = EP + 2
         compile_or()
         let slot = var_find(ns, ne)
-        if slot >= 0 { emit_store_var(slot) }
+        if slot >= 0 {
+            emit_store_var(slot)
+            // Update closure flag on reassignment
+            var vi: i64 = VAR_COUNT - 1
+            while vi >= 0 {
+                if name_eq(VAR_NS[vi as usize], VAR_NE[vi as usize], ns, ne) {
+                    VAR_IS_CLOSURE[vi as usize] = LAST_EXPR_IS_CLOSURE
+                    vi = -1  // break
+                }
+                vi = vi - 1
+            }
+        }
         else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
