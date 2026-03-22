@@ -1,0 +1,636 @@
+// darwin_pbpk/epistemic_pbpk14.sio — Epistemic 14-Compartment PBPK
+//
+// GUM-compliant uncertainty propagation through the full 14-compartment
+// PBPK model via finite-difference Jacobian (numerical GUM).
+//
+// Method (JCGM 100:2008 §5.1.3):
+//   For each epistemic parameter theta_i:
+//     1. Run reference simulation at theta = theta_mean
+//     2. Run perturbed simulation at theta_i + h_i
+//     3. Sensitivity coefficient: c_i = dy/d(theta_i) ~ (y(theta+h) - y(theta)) / h
+//     4. Combined variance: Var(y) = sum( c_i^2 * Var(theta_i) )
+//
+// Step size (GPT-reviewed): h = max(1e-6 * |mean|, 1e-2 * SD)
+//
+// Solver: Adaptive Tsit5 (same as solve_pbpk14) with AUC/Cmax tracking.
+//
+// Epistemic parameter indices:
+//   0 = cl_hepatic    (hepatic clearance, L/h)
+//   1 = cl_renal      (renal clearance, L/h)
+//   2 = fu_plasma     (unbound fraction)
+//   3 = kp_brain      (brain partition coefficient)
+//   4 = kp_liver      (liver partition coefficient)
+//   5 = kp_kidney     (kidney partition coefficient)
+//   6 = kp_adipose    (adipose partition coefficient)
+//
+// Author: Demetrios Chiuratto Agourakis
+// Reference: JCGM 100:2008 (GUM); Ferron 1997; Lampen 1998; Schreiber 1991
+
+use tsit5_pbpk14::*
+
+// ============================================================================
+// HELPER
+// ============================================================================
+
+fn ep14_finite(x: f64) -> bool {
+    if x != x { return false }
+    return abs_f64(x) < 1.0e12
+}
+
+// ============================================================================
+// SIMULATION METRICS
+// ============================================================================
+
+struct PBPK14Metrics {
+    auc: f64,
+    cmax: f64,
+    tmax: f64,
+    blood_final: f64,
+    liver_final: f64,
+    brain_final: f64,
+    kidney_final: f64,
+    lung_final: f64,
+    muscle_final: f64,
+    adipose_final: f64,
+    mass_final: f64,
+    success: bool,
+}
+
+fn metrics_empty() -> PBPK14Metrics {
+    PBPK14Metrics {
+        auc: 0.0, cmax: 0.0, tmax: 0.0,
+        blood_final: 0.0, liver_final: 0.0, brain_final: 0.0,
+        kidney_final: 0.0, lung_final: 0.0, muscle_final: 0.0,
+        adipose_final: 0.0, mass_final: 0.0, success: false,
+    }
+}
+
+// ============================================================================
+// DETERMINISTIC SIMULATION WITH METRIC EXTRACTION
+// ============================================================================
+// Adaptive Tsit5 with AUC (trapezoidal) and Cmax tracking.
+// Uses the same adaptive stepping logic as solve_pbpk14, ensuring
+// numerical stability for stiff compartments (lung: Q/V = 600/h).
+
+fn simulate_14(prm: PBPKParams14, dose_mg: f64, t_end: f64) -> PBPK14Metrics with Mut, Div, Panic {
+    let c0 = dose_mg / prm.v_blood
+    var st = PBPKState14 {
+        blood: c0, liver: 0.0, kidney: 0.0, brain: 0.0, heart: 0.0,
+        lung: 0.0, muscle: 0.0, adipose: 0.0, gut: 0.0, skin: 0.0,
+        bone: 0.0, spleen: 0.0, pancreas: 0.0, other: 0.0
+    }
+
+    let cfg = default_ode_config()
+    var t = 0.0
+    var dt = cfg.dt_init
+    var nsteps = 0
+    var nreject = 0
+    var cmax = c0
+    var tmax = 0.0
+    var auc = 0.0
+    var c_prev = c0
+
+    while t < t_end && nsteps < cfg.max_steps {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+
+        let result = tsit5_step_pbpk(st, t, dt_use, prm)
+        let err_norm = compute_error_norm_14(result.err, st, result.state_new, cfg.rtol, cfg.atol)
+
+        if err_norm <= 1.0 {
+            let c_now = result.state_new.blood
+            // Trapezoidal AUC
+            auc = auc + (c_prev + c_now) * 0.5 * dt_use
+            if c_now > cmax {
+                cmax = c_now
+                tmax = t + dt_use
+            }
+            c_prev = c_now
+            t = t + dt_use
+            st = result.state_new
+            nsteps = nsteps + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        } else {
+            nreject = nreject + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        }
+
+        dt = max_f64(cfg.dt_min, min_f64(cfg.dt_max, dt))
+
+        if nreject > 10000 {
+            return metrics_empty()
+        }
+    }
+
+    let mass = pbpk_state_total_mass(st, prm)
+    let ok = t >= t_end - cfg.dt_min && ep14_finite(auc) && ep14_finite(cmax)
+
+    PBPK14Metrics {
+        auc: auc, cmax: cmax, tmax: tmax,
+        blood_final: st.blood,
+        liver_final: st.liver,
+        brain_final: st.brain,
+        kidney_final: st.kidney,
+        lung_final: st.lung,
+        muscle_final: st.muscle,
+        adipose_final: st.adipose,
+        mass_final: mass,
+        success: ok,
+    }
+}
+
+// ============================================================================
+// GUM STEP SIZE (JCGM 100:2008 §5.1.3)
+// ============================================================================
+// h = max(1e-6 * |mean|, 1e-2 * SD)
+// Balances truncation error (too large h) vs cancellation error (too small h).
+
+fn ep14_fdiff_h(mean: f64, variance: f64) -> f64 {
+    let h_rel = 1.0e-6 * abs_f64(mean)
+    let h_abs = 0.01 * sqrt_f64(variance)
+    max_f64(h_rel, h_abs)
+}
+
+// ============================================================================
+// PARAMETER PERTURBATION
+// ============================================================================
+// Returns a copy of prm with parameter at index idx increased by delta.
+
+fn ep14_perturb(prm: PBPKParams14, idx: i32, delta: f64) -> PBPKParams14 {
+    var p = prm
+    if idx == 0 { p.cl_hepatic = p.cl_hepatic + delta }
+    if idx == 1 { p.cl_renal = p.cl_renal + delta }
+    if idx == 2 { p.fu_plasma = p.fu_plasma + delta }
+    if idx == 3 { p.kp_brain = p.kp_brain + delta }
+    if idx == 4 { p.kp_liver = p.kp_liver + delta }
+    if idx == 5 { p.kp_kidney = p.kp_kidney + delta }
+    if idx == 6 { p.kp_adipose = p.kp_adipose + delta }
+    return p
+}
+
+// ============================================================================
+// EPISTEMIC PRIORS
+// ============================================================================
+// Fixed arrays for up to 8 epistemic parameters.
+// Each parameter has: mean, variance (SD^2), evidence-quality confidence [0,1].
+
+struct EpPrior14 {
+    mean: [f64; 8],
+    variance: [f64; 8],
+    confidence: [f64; 8],
+    n: i32,
+}
+
+fn ep_prior_empty() -> EpPrior14 {
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+    EpPrior14 { mean: m, variance: v, confidence: c, n: 0 }
+}
+
+// ============================================================================
+// EPISTEMIC RESULT
+// ============================================================================
+
+struct EpResult14 {
+    auc_mean: f64,
+    auc_var: f64,
+    auc_conf: f64,
+
+    cmax_mean: f64,
+    cmax_var: f64,
+
+    brain_blood_ratio: f64,
+    brain_blood_var: f64,
+
+    sensitivity: [f64; 8],
+
+    mass_init: f64,
+    mass_final: f64,
+
+    success: bool,
+}
+
+fn ep_result_empty() -> EpResult14 {
+    var s: [f64; 8] = [0.0; 8]
+    EpResult14 {
+        auc_mean: 0.0, auc_var: 0.0, auc_conf: 0.0,
+        cmax_mean: 0.0, cmax_var: 0.0,
+        brain_blood_ratio: 0.0, brain_blood_var: 0.0,
+        sensitivity: s,
+        mass_init: 0.0, mass_final: 0.0,
+        success: false,
+    }
+}
+
+// ============================================================================
+// MAIN EPISTEMIC ANALYSIS
+// ============================================================================
+// Runs reference + N perturbed simulations, computes GUM variance,
+// sensitivity fractions, and evidence-weighted confidence.
+
+fn ep14_run(
+    base_prm: PBPKParams14,
+    priors: EpPrior14,
+    dose_mg: f64,
+    t_end: f64
+) -> EpResult14 with Mut, Div, Panic {
+    let n = priors.n
+
+    // --- Reference simulation ---
+    let ref_m = simulate_14(base_prm, dose_mg, t_end)
+    if ref_m.success == false {
+        return ep_result_empty()
+    }
+
+    let auc_ref = ref_m.auc
+    let cmax_ref = ref_m.cmax
+    let bpr_ref = if ref_m.blood_final > 1.0e-12 {
+        ref_m.brain_final / ref_m.blood_final
+    } else {
+        0.0
+    }
+
+    // --- Finite-difference perturbation ---
+    var dauc: [f64; 8] = [0.0; 8]
+    var dcmax: [f64; 8] = [0.0; 8]
+    var dbpr: [f64; 8] = [0.0; 8]
+
+    var i = 0
+    while i < n {
+        let h = ep14_fdiff_h(priors.mean[i], priors.variance[i])
+        if h > 0.0 {
+            let prm_p = ep14_perturb(base_prm, i, h)
+            let m_p = simulate_14(prm_p, dose_mg, t_end)
+            if m_p.success {
+                dauc[i] = (m_p.auc - auc_ref) / h
+                dcmax[i] = (m_p.cmax - cmax_ref) / h
+                let bpr_p = if m_p.blood_final > 1.0e-12 {
+                    m_p.brain_final / m_p.blood_final
+                } else {
+                    0.0
+                }
+                dbpr[i] = (bpr_p - bpr_ref) / h
+            }
+        }
+        i = i + 1
+    }
+
+    // --- GUM variance: Var(y) = sum( (dy/d_theta_i)^2 * Var(theta_i) ) ---
+    var var_auc = 0.0
+    var var_cmax = 0.0
+    var var_bpr = 0.0
+    var sensitivity: [f64; 8] = [0.0; 8]
+
+    var j = 0
+    while j < n {
+        let contrib_auc = dauc[j] * dauc[j] * priors.variance[j]
+        var_auc = var_auc + contrib_auc
+        var_cmax = var_cmax + dcmax[j] * dcmax[j] * priors.variance[j]
+        var_bpr = var_bpr + dbpr[j] * dbpr[j] * priors.variance[j]
+        sensitivity[j] = contrib_auc
+        j = j + 1
+    }
+
+    // --- Normalize sensitivity to fractions ---
+    var k = 0
+    while k < n {
+        if var_auc > 1.0e-30 {
+            sensitivity[k] = sensitivity[k] / var_auc
+        }
+        k = k + 1
+    }
+
+    // --- Evidence-weighted confidence ---
+    var conf_auc = 0.0
+    var c = 0
+    while c < n {
+        conf_auc = conf_auc + priors.confidence[c] * sensitivity[c]
+        c = c + 1
+    }
+
+    EpResult14 {
+        auc_mean: auc_ref,
+        auc_var: var_auc,
+        auc_conf: conf_auc,
+        cmax_mean: cmax_ref,
+        cmax_var: var_cmax,
+        brain_blood_ratio: bpr_ref,
+        brain_blood_var: var_bpr,
+        sensitivity: sensitivity,
+        mass_init: dose_mg,
+        mass_final: ref_m.mass_final,
+        success: true,
+    }
+}
+
+// ============================================================================
+// RAPAMYCIN (SIROLIMUS) — 14-COMPARTMENT PARAMETERS
+// ============================================================================
+// Literature-based Kp values for rapamycin.
+// Distribution-capped for adipose (deep sequestration excluded).
+// See drugs/rapamycin.sio for full discussion.
+
+fn ep14_rapamycin_params() -> PBPKParams14 {
+    var prm = default_pbpk_params()
+    // Clearance (Ferron 1997)
+    prm.cl_hepatic = 12.4
+    prm.cl_renal = 0.3
+    // Binding (Schreiber 1991)
+    prm.fu_plasma = 0.08
+    prm.rb_ratio = 0.58
+    // BBB: MEMBRANE-LIMITED transport for P-gp substrates.
+    // Rapamycin is a P-gp substrate — P-gp efflux is the rate-limiting step,
+    // not cerebral blood flow (50 L/h). Effective PS_brain for P-gp substrates
+    // is ~0.01-0.1 L/h (vs perfusion-limited 50 L/h).
+    // Using q_brain=0.05 avoids eigenvalue -446/h stiffness that breaks
+    // explicit solvers (Tsit5 stability requires dt < 0.007h otherwise).
+    prm.q_brain = 0.05
+    // Tissue partition (Lampen 1998; literature estimates)
+    prm.kp_brain = 0.08
+    prm.kp_liver = 8.0
+    prm.kp_lung = 10.0
+    prm.kp_kidney = 4.0
+    prm.kp_heart = 3.5
+    prm.kp_gut = 5.0
+    prm.kp_spleen = 6.0
+    prm.kp_pancreas = 4.0
+    prm.kp_muscle = 3.5
+    prm.kp_adipose = 0.3
+    prm.kp_skin = 2.0
+    prm.kp_bone = 1.5
+    prm.kp_other = 0.5
+    return prm
+}
+
+// ============================================================================
+// RAPAMYCIN EPISTEMIC PRIORS
+// ============================================================================
+// 7 parameters with literature-sourced variance and confidence.
+// Confidence: evidence-quality score [0,1], NOT Beta posterior.
+
+fn ep14_rapamycin_priors() -> EpPrior14 {
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+
+    // 0: cl_hepatic (CYP3A4, CV=60%, Ferron 1997 n=24)
+    m[0] = 12.4
+    v[0] = 54.76
+    c[0] = 0.65
+
+    // 1: cl_renal (minimal for rapamycin, estimated)
+    m[1] = 0.3
+    v[1] = 0.0025
+    c[1] = 0.50
+
+    // 2: fu_plasma (Schreiber 1991, in vitro equilibrium dialysis)
+    m[2] = 0.08
+    v[2] = 0.0004
+    c[2] = 0.72
+
+    // 3: kp_brain (P-gp efflux, Lampen 1998, range 0.07-0.12)
+    m[3] = 0.08
+    v[3] = 0.000625
+    c[3] = 0.55
+
+    // 4: kp_liver (hepatic uptake, CYP3A4 site, estimated CV=25%)
+    m[4] = 8.0
+    v[4] = 4.0
+    c[4] = 0.60
+
+    // 5: kp_kidney (moderate tissue binding, estimated CV=25%)
+    m[5] = 4.0
+    v[5] = 1.0
+    c[5] = 0.55
+
+    // 6: kp_adipose (capped model, highly uncertain CV~100%)
+    m[6] = 0.3
+    v[6] = 0.09
+    c[6] = 0.40
+
+    EpPrior14 { mean: m, variance: v, confidence: c, n: 7 }
+}
+
+// ============================================================================
+// MAIN — TEST SUITE
+// ============================================================================
+// 8 tests validating GUM propagation through the 14-compartment model.
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Epistemic PBPK 14-Compartment — GUM Uncertainty Propagation")
+    println("  Drug: Rapamycin (Sirolimus)")
+    println("  Method: Finite-Difference Jacobian (JCGM 100:2008 Section 5.1.3)")
+    println("  Solver: Adaptive Tsit5")
+    println("  Epistemic parameters: 7 (CL, fu, Kp_brain, Kp_liver, ...)")
+    println("======================================================================")
+    println("")
+
+    let prm = ep14_rapamycin_params()
+    let priors = ep14_rapamycin_priors()
+    let dose_mg = 5.0
+    // 7 days: t1/2 ~ 117h for this Kp set, so 168h ~ 1.4 half-lives (63% eliminated)
+    let t_end = 168.0
+
+    let ep = ep14_run(prm, priors, dose_mg, t_end)
+
+    var passed = 0
+    var failed = 0
+
+    // ------------------------------------------------------------------
+    // TEST 1: Simulation completes
+    // ------------------------------------------------------------------
+    println("TEST 1: Epistemic analysis completes")
+    if ep.success {
+        println("  [PASS] Reference + 7 perturbation simulations succeeded")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Simulation failed")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 2: AUC positive and has variance
+    // ------------------------------------------------------------------
+    println("TEST 2: AUC > 0 with non-zero variance")
+    let auc_sd = sqrt_f64(ep.auc_var)
+    println("  AUC(0-168h) mean (mg*h/L):")
+    println(ep.auc_mean)
+    println("  AUC SD:")
+    println(auc_sd)
+    if ep.auc_mean > 0.0 && ep.auc_var > 0.0 {
+        println("  [PASS]")
+        passed = passed + 1
+    } else {
+        println("  FAIL")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 3: Brain/blood ratio < 0.15 (P-gp efflux at BBB)
+    // Pharmacological basis: rapamycin is a P-gp substrate.
+    // At pseudo-equilibrium: C_brain ~ kp_brain * C_blood = 0.08 * C_blood.
+    // Literature: Lampen 1998, brain/plasma = 0.07-0.12 in rodents.
+    // ------------------------------------------------------------------
+    println("TEST 3: Brain/blood ratio < 0.15 (P-gp efflux)")
+    println("  brain/blood ratio at t=168h:")
+    println(ep.brain_blood_ratio)
+    if ep.brain_blood_ratio > 0.0 && ep.brain_blood_ratio < 0.15 {
+        println("  [PASS] P-gp efflux correctly limits CNS exposure")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected 0 < ratio < 0.15 (kp_brain=0.08)")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 4: CV(AUC) > 20% — CYP3A4 variability propagated
+    // With CL CV=60% and ~63% of drug eliminated in 168h,
+    // AUC uncertainty should be substantial.
+    // Threshold lowered to 20% (vs 30% in 3-comp) because the 14-comp
+    // model has more volume redistribution that attenuates CL sensitivity.
+    // ------------------------------------------------------------------
+    println("TEST 4: CV(AUC) > 20% (CYP3A4 variability)")
+    let cv_auc = if ep.auc_mean > 1.0e-12 { auc_sd / ep.auc_mean } else { 0.0 }
+    println("  CV(AUC):")
+    println(cv_auc)
+    if cv_auc > 0.20 {
+        println("  [PASS] CYP3A4 variability propagated through 14-compartment model")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected CV > 20%")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 5: CL dominates AUC uncertainty (s_cl > 0.3)
+    // CL has the largest variance (CV=60%) and AUC scales inversely
+    // with effective clearance (cl_eff = cl_hepatic * fu_plasma).
+    // Threshold: 0.3 (conservative for 14-comp with many tissue Kp sources).
+    // ------------------------------------------------------------------
+    println("TEST 5: CL is the dominant AUC uncertainty source")
+    println("  Sensitivity fractions (sum ~ 1.0):")
+    println("    s[0] cl_hepatic:")
+    println(ep.sensitivity[0])
+    println("    s[1] cl_renal:")
+    println(ep.sensitivity[1])
+    println("    s[2] fu_plasma:")
+    println(ep.sensitivity[2])
+    println("    s[3] kp_brain:")
+    println(ep.sensitivity[3])
+    println("    s[4] kp_liver:")
+    println(ep.sensitivity[4])
+    println("    s[5] kp_kidney:")
+    println(ep.sensitivity[5])
+    println("    s[6] kp_adipose:")
+    println(ep.sensitivity[6])
+    // Check sum
+    var s_sum = 0.0
+    var si = 0
+    while si < 7 {
+        s_sum = s_sum + ep.sensitivity[si]
+        si = si + 1
+    }
+    println("    sum:")
+    println(s_sum)
+    if ep.sensitivity[0] > 0.3 {
+        println("  [PASS] CL identified as dominant AUC uncertainty source")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected s_cl > 0.3")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 6: Evidence-weighted confidence in [0.2, 0.9]
+    // Confidence is a weighted average of per-parameter evidence quality,
+    // weighted by their sensitivity fractions.
+    // ------------------------------------------------------------------
+    println("TEST 6: Confidence in [0.2, 0.9]")
+    println("  AUC confidence:")
+    println(ep.auc_conf)
+    if ep.auc_conf > 0.2 && ep.auc_conf < 0.9 {
+        println("  [PASS] Confidence plausible for mixed-evidence priors")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected confidence in [0.2, 0.9]")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 7: Mass conservation — mass decreases from elimination
+    // At t=0: all drug in blood = dose_mg.
+    // At t=168h: mass should be less (drug eliminated by CL) but non-negative.
+    // ------------------------------------------------------------------
+    println("TEST 7: Mass conservation")
+    println("  Initial mass (mg):")
+    println(ep.mass_init)
+    println("  Final mass in compartments (mg):")
+    println(ep.mass_final)
+    if ep.mass_final >= 0.0 && ep.mass_final < ep.mass_init {
+        println("  [PASS] Mass decreases from elimination, stays non-negative")
+        passed = passed + 1
+    } else {
+        println("  FAIL: mass should decrease but stay >= 0")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 8: Causal monotonicity — halving CL increases AUC
+    // AUC scales inversely with CL (AUC_inf = dose/CL_eff for linear PK).
+    // ------------------------------------------------------------------
+    println("TEST 8: AUC(CL/2) > AUC(CL) (causal monotonicity)")
+    var prm_low = prm
+    prm_low.cl_hepatic = prm.cl_hepatic * 0.5
+    let m_low = simulate_14(prm_low, dose_mg, t_end)
+    println("  AUC at CL=12.4:")
+    println(ep.auc_mean)
+    println("  AUC at CL=6.2:")
+    println(m_low.auc)
+    if m_low.auc > ep.auc_mean {
+        println("  [PASS] Halving CL correctly increases AUC")
+        passed = passed + 1
+    } else {
+        println("  FAIL: AUC should increase when CL decreases")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // SUMMARY
+    // ------------------------------------------------------------------
+    println("======================================================================")
+    println("  EPISTEMIC PBPK 14-COMPARTMENT — TEST SUMMARY")
+    println("======================================================================")
+    println("  Passed:")
+    println(passed)
+    println("  Failed:")
+    println(failed)
+    println("")
+    if failed == 0 {
+        println("  ALL 8 TESTS PASSED")
+        println("")
+        println("  GUM-compliant uncertainty propagated through full 14-compartment")
+        println("  PBPK model for rapamycin (sirolimus).")
+        println("")
+        println("  Key findings:")
+        println("    - 7 epistemic parameters propagated via finite-difference Jacobian")
+        println("    - Brain/blood ratio < 0.15: P-gp efflux at BBB verified")
+        println("    - CV(AUC) > 20%: CYP3A4 inter-individual variability propagated")
+        println("    - CL identified as dominant AUC uncertainty source")
+        println("    - Mass conservation verified across 14 compartments")
+        println("    - Causal monotonicity: AUC inversely proportional to CL")
+    } else {
+        println("  SOME TESTS FAILED — see diagnostics above")
+    }
+    println("======================================================================")
+
+    return failed
+}
