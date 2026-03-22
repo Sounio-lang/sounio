@@ -10,10 +10,13 @@ var SRC: [i8; 1048576] = [0; 1048576]
 var SRC_LEN: i64 = 0
 
 // Token parallel arrays (kind, start, end, int_value)
-var TK: [i64; 16384] = [0; 16384]
-var TS: [i64; 16384] = [0; 16384]
-var TE: [i64; 16384] = [0; 16384]
-var TV: [i64; 16384] = [0; 16384]
+var TK: [i64; 32768] = [0; 32768]
+var TS: [i64; 32768] = [0; 32768]
+var TE: [i64; 32768] = [0; 32768]
+var TV: [i64; 32768] = [0; 32768]
+// Float literal extra: frac numerator and denominator (kind=53)
+var TF: [i64; 32768] = [0; 32768]
+var TD: [i64; 32768] = [0; 32768]
 var TC: i64 = 0
 
 // Code output
@@ -175,7 +178,7 @@ fn name_eq(s1: i64, e1: i64, s2: i64, e2: i64) -> bool with Panic {
 fn lex_all() with Mut, Panic {
     TC = 0
     var p: i64 = 0
-    while p < SRC_LEN && TC < 16383 {
+    while p < SRC_LEN && TC < 32767 {
         let c = sb(p)
         // Whitespace
         if c == 32 || c == 9 || c == 13 || c == 10 { p = p + 1; continue }
@@ -205,6 +208,18 @@ fn lex_all() with Mut, Panic {
                 }
             } else {
                 while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
+            }
+            // Check for float: digits.digits (dot followed by digit, not .field)
+            if p < SRC_LEN && sb(p) == 46 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57 {
+                p = p + 1  // skip .
+                var frac: i64 = 0
+                var denom: i64 = 1
+                while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
+                    frac = frac * 10 + sb(p) - 48
+                    denom = denom * 10
+                    p = p + 1
+                }
+                TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom; TC = TC + 1; continue
             }
             TK[TC as usize] = 4; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TC = TC + 1; continue
         }
@@ -490,6 +505,9 @@ var EP: i64 = 0
 var LOOP_TOP: [i64; 16] = [0; 16]
 var LOOP_END_PATCH: [i64; 16] = [0; 16]
 var LOOP_DEPTH: i64 = 0
+// Break fixup table: code offsets of jmp rel32 placeholders
+var BREAK_PATCH: [i64; 64] = [0; 64]
+var BREAK_COUNT: i64 = 0
 
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
@@ -506,6 +524,28 @@ fn compile_primary() with IO, Mut, Panic, Div {
     // true=35, false=36
     if k == 35 { em(0x48); em(0xb8); em64(1); EP = EP + 1; return }
     if k == 36 { em(0x31); em(0xc0); EP = EP + 1; return }
+    // Float literal (53): runtime conversion via SSE2
+    if k == 53 {
+        let fl_int = TV[EP as usize]
+        let fl_frac = TF[EP as usize]
+        let fl_denom = TD[EP as usize]
+        EP = EP + 1
+        // mov rax, int_part; cvtsi2sd xmm0, rax
+        em(0x48); em(0xb8); em64(fl_int)
+        em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
+        // If fractional part: frac/denom added to xmm0
+        if fl_frac > 0 {
+            em(0x48); em(0xb8); em64(fl_frac)
+            em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc8)  // cvtsi2sd xmm1, rax
+            em(0x48); em(0xb8); em64(fl_denom)
+            em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xd0)  // cvtsi2sd xmm2, rax
+            em(0xf2); em(0x0f); em(0x5e); em(0xca)            // divsd xmm1, xmm2
+            em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
+        }
+        // movq rax, xmm0 — store f64 bits in rax
+        em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+        return
+    }
     // Parenthesized
     if k == 6 { EP = EP + 1; compile_or(); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
     // Address-of: &ident → lea rax, [rbp - 8*slot] or mov rax, bss_addr
@@ -525,7 +565,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         } else {
             let gi = gl_find(rns, rne)
             if gi >= 0 {
-                let addr = GL_BSS_BASE + GL_OFF[gi as usize]
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 em(0x48); em(0xb8); em64(addr)  // mov rax, bss_addr
             } else { em(0x31); em(0xc0) }
         }
@@ -753,6 +793,39 @@ fn compile_primary() with IO, Mut, Panic, Div {
             PATCH_COUNT = PATCH_COUNT + 1
             em32(0)
             return
+        }
+        // Struct literal: StructName { field: val, ... }
+        if TK[EP as usize] == 8 {
+            let sh = gl_name_hash(ns, ne)
+            let si = st_find(sh)
+            if si >= 0 {
+                EP = EP + 1  // skip {
+                let fc = ST[(si * 66 + 1) as usize]
+                // Allocate fc consecutive stack slots for struct fields
+                let base_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + fc
+                // Parse field: value pairs
+                while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+                    if TK[EP as usize] == 3 {
+                        let fns = TS[EP as usize]
+                        let fne = TE[EP as usize]
+                        let fh = gl_name_hash(fns, fne)
+                        EP = EP + 1  // skip field name
+                        if TK[EP as usize] == 43 { EP = EP + 1 }  // skip :
+                        compile_or()  // value in rax
+                        let foff = st_field_offset(si, fh)
+                        if foff >= 0 {
+                            emit_store_var(base_slot + fc - 1 - foff / 8)
+                        }
+                    }
+                    if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
+                }
+                if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
+                // lea rax, [rbp - (base_slot+fc-1)*8] — pointer to struct data (lowest addr)
+                em(0x48); em(0x8d); em(0x85)
+                em32(0 - (base_slot + fc - 1) * 8)
+                return
+            }
         }
         // Array subscript: IDENT[expr]
         if TK[EP as usize] == 41 {
@@ -1008,8 +1081,21 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
         EP = EP + 1
-        // Skip : type annotation
-        if TK[EP as usize] == 43 { EP = EP + 1; EP = EP + 1 }
+        // Skip : type annotation (handles simple types, array types [T; N], &T, &!T)
+        if TK[EP as usize] == 43 {
+            EP = EP + 1  // skip :
+            // Skip & or &!
+            if TK[EP as usize] == 44 { EP = EP + 1 }
+            if TK[EP as usize] == 32 { EP = EP + 1 }
+            // Array type: [T; N]
+            if TK[EP as usize] == 41 {
+                EP = EP + 1  // skip [
+                while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
+                if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+            } else {
+                EP = EP + 1  // skip type name
+            }
+        }
         // Skip = sign
         if TK[EP as usize] == 16 { EP = EP + 1 }
         compile_or()
@@ -1124,11 +1210,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
-    // break (34) — jump to end of loop (patch later)
+    // break (34) — emit jmp rel32 placeholder, patched when while loop ends
     if k == 34 {
         EP = EP + 1
-        // For now: emit a jmp that will be patched when while ends
-        // TODO: proper break patching (for now, skip)
+        em(0xe9)  // jmp rel32
+        BREAK_PATCH[BREAK_COUNT as usize] = CL
+        BREAK_COUNT = BREAK_COUNT + 1
+        em32(0)  // placeholder — patched by while handler
         return
     }
 
@@ -1168,6 +1256,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let loop_top = CL
         LOOP_TOP[LOOP_DEPTH as usize] = loop_top
         LOOP_DEPTH = LOOP_DEPTH + 1
+        let saved_bc = BREAK_COUNT
         compile_or()
         em(0x48); em(0x85); em(0xc0)
         em(0x0f); em(0x84)
@@ -1178,6 +1267,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         em(0xe9)
         em32(loop_top - (CL + 4))
         patch32(je_off, CL)
+        // Patch all break jumps from this loop to point here
+        var bi: i64 = saved_bc
+        while bi < BREAK_COUNT { patch32(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
+        BREAK_COUNT = saved_bc
         LOOP_DEPTH = LOOP_DEPTH - 1
         return
     }
@@ -1406,6 +1499,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // Reset local vars
         VAR_COUNT = 0
         NEXT_SLOT = 1
+        BREAK_COUNT = 0
 
         // Register parameters
         p = p + 1  // skip name
