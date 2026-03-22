@@ -1,7 +1,6 @@
 // souc-v2/lexer.sio — Helper functions, lexer (lex_all), variable/function/global lookup.
 // Imported after globals.sio; no imports of its own.
 
-// ─── Helpers ───
 fn sb(i: i64) -> i64 with Panic { if i >= 0 && i < SRC_LEN { return SRC[i as usize] as i64 & 0xFF }; return 0 }
 fn em(b: i64) with Mut { if CL < 262144 { CD[CL as usize] = b as i8; CL = CL + 1 } }
 fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xFF); em((v >> 24) & 0xFF) }
@@ -22,49 +21,40 @@ fn name_eq(s1: i64, e1: i64, s2: i64, e2: i64) -> bool with Panic {
     return 1
 }
 
-// Hash: pack name length + first 6 bytes into i64 (avoids sb()-based comparison during lookup)
-fn gl_name_hash(ns: i64, ne: i64) -> i64 with Panic {
-    // Hash: length + sum of (byte * position) — collision-resistant for same-prefix names
-    let l = ne - ns
-    var h: i64 = l * 1000003
-    var hi: i64 = 0
-    while hi < l {
-        h = h + (sb(ns + hi) & 0xFF) * (hi + 1) * 31
-        hi = hi + 1
-    }
-    return h
+// Build mangled name "name_type" in SRC buffer, return (start, end)
+fn mono_mangle(ns: i64, ne: i64, ts: i64, te: i64) -> i64 with Mut, Panic {
+    let start = SRC_LEN
+    var i: i64 = 0
+    while i < ne - ns { SRC[(SRC_LEN + i) as usize] = SRC[(ns + i) as usize]; i = i + 1 }
+    SRC_LEN = SRC_LEN + (ne - ns)
+    SRC[SRC_LEN as usize] = 95; SRC_LEN = SRC_LEN + 1
+    i = 0
+    while i < te - ts { SRC[(SRC_LEN + i) as usize] = SRC[(ts + i) as usize]; i = i + 1 }
+    SRC_LEN = SRC_LEN + (te - ts)
+    return start
 }
 
-fn gl_find(ns: i64, ne: i64) -> i64 with Panic {
-    let h = gl_name_hash(ns, ne)
+// Check if instantiation pair (gen_idx, is_struct, type_s, type_e) already recorded
+fn mono_find_inst(gi: i64, is_st: i64, tys: i64, tye: i64) -> i64 with Panic {
     var i: i64 = 0
-    while i < GL_COUNT {
-        if GL[(i * 4 + 0) as usize] == h { return i }
+    while i < MONO_COUNT {
+        if MONO_GEN[i as usize] == gi && MONO_IS_ST[i as usize] == is_st {
+            if name_eq(MONO_TY_S[i as usize], MONO_TY_E[i as usize], tys, tye) { return i }
+        }
         i = i + 1
     }
     return -1
-}
-
-fn gl_add(ns: i64, ne: i64, esiz: i64, alen: i64) with Mut, Panic {
-    var sz: i64 = 8
-    if alen > 0 { sz = alen * esiz }
-    let aligned = (sz + 7) / 8 * 8
-    GL[(GL_COUNT * 4 + 0) as usize] = gl_name_hash(ns, ne)
-    GL[(GL_COUNT * 4 + 1) as usize] = GL_BSS_SIZE
-    GL[(GL_COUNT * 4 + 2) as usize] = esiz
-    GL[(GL_COUNT * 4 + 3) as usize] = alen
-    GL_COUNT = GL_COUNT + 1
-    GL_BSS_SIZE = GL_BSS_SIZE + aligned
 }
 
 // ─── Lexer ───
 fn lex_all() with Mut, Panic {
     TC = 0
     var p: i64 = 0
+    var cur_line: i64 = 1
     while p < SRC_LEN && TC < 32767 {
         let c = sb(p)
         // Whitespace
-        if c == 32 || c == 9 || c == 13 || c == 10 { p = p + 1; continue }
+        if c == 32 || c == 9 || c == 13 || c == 10 { if c == 10 { cur_line = cur_line + 1 }; p = p + 1; continue }
         // Line comment
         if c == 47 && p + 1 < SRC_LEN && sb(p + 1) == 47 {
             p = p + 2; while p < SRC_LEN && sb(p) != 10 { p = p + 1 }; continue
@@ -74,7 +64,7 @@ fn lex_all() with Mut, Panic {
             let s = p; p = p + 1
             while p < SRC_LEN && sb(p) != 34 { if sb(p) == 92 { p = p + 1 }; p = p + 1 }
             p = p + 1
-            TK[TC as usize] = 5; TS[TC as usize] = s; TE[TC as usize] = p; TC = TC + 1; continue
+            TK[TC as usize] = 5; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
         // Number (decimal or hex 0x...)
         if c >= 48 && c <= 57 {
@@ -102,9 +92,9 @@ fn lex_all() with Mut, Panic {
                     denom = denom * 10
                     p = p + 1
                 }
-                TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom; TC = TC + 1; continue
+                TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom; TL[TC as usize] = cur_line; TC = TC + 1; continue
             }
-            TK[TC as usize] = 4; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TC = TC + 1; continue
+            TK[TC as usize] = 4; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
         // Identifier / keyword
         if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 {
@@ -130,48 +120,53 @@ fn lex_all() with Mut, Panic {
             if src_match(s, l, "enum") { k = 47 }
             if src_match(s, l, "match") { k = 48 }
             if src_match(s, l, "pub") { k = 49 }
-            if src_match(s, l, "linear") { k = 49 }
-            TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TC = TC + 1; continue
+            if src_match(s, l, "linear") { k = 62 }
+            if src_match(s, l, "type") { k = 61 }
+            if src_match(s, l, "Some") { k = 57 }
+            if src_match(s, l, "None") { k = 58 }
+            if src_match(s, l, "Ok") { k = 59 }
+            if src_match(s, l, "Err") { k = 60 }
+            TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
         // Two-char operators
-        if c == 45 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 10; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
-        if c == 61 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 21; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
-        if c == 33 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 22; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
-        if c == 60 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 25; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
-        if c == 62 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 26; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
-        if c == 58 && p + 1 < SRC_LEN && sb(p + 1) == 58 { TK[TC as usize] = 51; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
-        if c == 61 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 52; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
-        if c == 38 && p + 1 < SRC_LEN && sb(p + 1) == 38 { TK[TC as usize] = 30; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
-        if c == 124 && p + 1 < SRC_LEN && sb(p + 1) == 124 { TK[TC as usize] = 31; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
-        if c == 62 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 39; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
-        if c == 60 && p + 1 < SRC_LEN && sb(p + 1) == 60 { TK[TC as usize] = 40; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
+        if c == 45 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 10; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        if c == 61 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 21; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        if c == 33 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 22; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        if c == 60 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 25; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        if c == 62 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 26; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        if c == 58 && p + 1 < SRC_LEN && sb(p + 1) == 58 { TK[TC as usize] = 51; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        if c == 61 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 52; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        if c == 38 && p + 1 < SRC_LEN && sb(p + 1) == 38 { TK[TC as usize] = 30; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        if c == 124 && p + 1 < SRC_LEN && sb(p + 1) == 124 { TK[TC as usize] = 31; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        if c == 62 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 39; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        if c == 60 && p + 1 < SRC_LEN && sb(p + 1) == 60 { TK[TC as usize] = 40; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         // Single-char operators
-        if c == 40 { TK[TC as usize] = 6; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 41 { TK[TC as usize] = 7; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 123 { TK[TC as usize] = 8; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 125 { TK[TC as usize] = 9; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 61 { TK[TC as usize] = 16; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 43 { TK[TC as usize] = 17; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 45 { TK[TC as usize] = 18; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 42 { TK[TC as usize] = 19; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 47 { TK[TC as usize] = 20; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 37 { TK[TC as usize] = 29; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 60 { TK[TC as usize] = 23; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 62 { TK[TC as usize] = 24; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 59 { TK[TC as usize] = 27; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 44 { TK[TC as usize] = 28; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 33 { TK[TC as usize] = 32; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 91 { TK[TC as usize] = 41; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 93 { TK[TC as usize] = 42; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 58 { TK[TC as usize] = 43; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 38 { TK[TC as usize] = 44; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 124 { TK[TC as usize] = 45; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 46 { TK[TC as usize] = 50; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 126 { TK[TC as usize] = 55; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
-        if c == 94 { TK[TC as usize] = 56; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
+        if c == 40 { TK[TC as usize] = 6; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 41 { TK[TC as usize] = 7; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 123 { TK[TC as usize] = 8; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 125 { TK[TC as usize] = 9; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 61 { TK[TC as usize] = 16; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 43 { TK[TC as usize] = 17; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 45 { TK[TC as usize] = 18; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 42 { TK[TC as usize] = 19; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 47 { TK[TC as usize] = 20; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 37 { TK[TC as usize] = 29; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 60 { TK[TC as usize] = 23; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 62 { TK[TC as usize] = 24; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 59 { TK[TC as usize] = 27; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 44 { TK[TC as usize] = 28; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 33 { TK[TC as usize] = 32; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 91 { TK[TC as usize] = 41; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 93 { TK[TC as usize] = 42; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 58 { TK[TC as usize] = 43; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 38 { TK[TC as usize] = 44; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 124 { TK[TC as usize] = 45; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 46 { TK[TC as usize] = 50; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 126 { TK[TC as usize] = 55; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        if c == 94 { TK[TC as usize] = 56; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
         p = p + 1
     }
-    TK[TC as usize] = 0; TC = TC + 1
+    TK[TC as usize] = 0; TL[TC as usize] = cur_line; TC = TC + 1
 }
 
 // ─── Variable lookup ───
@@ -191,6 +186,11 @@ fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
     VAR_SLOT[VAR_COUNT as usize] = slot
     VAR_ALEN[VAR_COUNT as usize] = 0
     VAR_ESIZ[VAR_COUNT as usize] = 8
+    VAR_IS_F64[VAR_COUNT as usize] = 0
+    VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
+    VAR_UNIT[VAR_COUNT as usize] = 0
+    VAR_LINEAR[VAR_COUNT as usize] = 0
+    VAR_USED[VAR_COUNT as usize] = 0
     VAR_COUNT = VAR_COUNT + 1
     NEXT_SLOT = NEXT_SLOT + 1
     return slot
@@ -207,6 +207,7 @@ fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64) -> i64 with Mut, Panic {
     VAR_SLOT[VAR_COUNT as usize] = ptr_slot
     VAR_ALEN[VAR_COUNT as usize] = alen
     VAR_ESIZ[VAR_COUNT as usize] = esiz
+    VAR_IS_F64[VAR_COUNT as usize] = 0
     VAR_COUNT = VAR_COUNT + 1
     return ptr_slot
 }
@@ -230,6 +231,46 @@ fn var_find_esiz(ns: i64, ne: i64) -> i64 with Panic {
     return 8
 }
 
+fn var_find_is_f64(ns: i64, ne: i64) -> i64 with Panic {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) { return VAR_IS_F64[i as usize] }
+        i = i - 1
+    }
+    return 0
+}
+
+fn var_find_is_closure(ns: i64, ne: i64) -> i64 with Panic {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) { return VAR_IS_CLOSURE[i as usize] }
+        i = i - 1
+    }
+    return 0
+}
+
+// Mark a variable as used (for linear type checking)
+fn var_mark_used(ns: i64, ne: i64) with Mut, Panic {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) {
+            VAR_USED[i as usize] = VAR_USED[i as usize] + 1
+            return
+        }
+        i = i - 1
+    }
+}
+
+// Find variable index by name (not slot, but index into VAR arrays)
+fn var_find_idx(ns: i64, ne: i64) -> i64 with Panic {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) { return i }
+        i = i - 1
+    }
+    return -1
+}
+
 // ─── Function lookup ───
 fn fn_find(ns: i64, ne: i64) -> i64 with Panic {
     var i: i64 = 0
@@ -239,3 +280,6 @@ fn fn_find(ns: i64, ne: i64) -> i64 with Panic {
     }
     return -1
 }
+
+// ─── Emit helpers ───
+// mov rax, [rbp - 8*slot]

@@ -19,6 +19,7 @@ var TV: [i64; 32768] = [0; 32768]
 // Float literal extra: frac numerator and denominator (kind=53)
 var TF: [i64; 32768] = [0; 32768]
 var TD: [i64; 32768] = [0; 32768]
+var TL: [i64; 32768] = [0; 32768]
 var TC: i64 = 0
 
 // Code output
@@ -58,6 +59,57 @@ var EN: [i64; 2176] = [0; 2176]
 var EN_COUNT: i64 = 0
 var MATCH_ENDS: [i64; 32] = [0; 32]
 
+// Generic function registry (for monomorphization)
+var GEN_FN_NS: [i64; 32] = [0; 32]
+var GEN_FN_NE: [i64; 32] = [0; 32]
+var GEN_FN_TP_S: [i64; 32] = [0; 32]
+var GEN_FN_TP_E: [i64; 32] = [0; 32]
+var GEN_FN_BDY_S: [i64; 32] = [0; 32]
+var GEN_FN_BDY_E: [i64; 32] = [0; 32]
+var GEN_FN_COUNT: i64 = 0
+
+// Generic struct registry
+var GEN_ST_NS: [i64; 32] = [0; 32]
+var GEN_ST_NE: [i64; 32] = [0; 32]
+var GEN_ST_TP_S: [i64; 32] = [0; 32]
+var GEN_ST_TP_E: [i64; 32] = [0; 32]
+var GEN_ST_BDY_S: [i64; 32] = [0; 32]
+var GEN_ST_BDY_E: [i64; 32] = [0; 32]
+var GEN_ST_COUNT: i64 = 0
+
+// Monomorphization instantiation pairs
+var MONO_GEN: [i64; 64] = [0; 64]
+var MONO_TY_S: [i64; 64] = [0; 64]
+var MONO_TY_E: [i64; 64] = [0; 64]
+var MONO_IS_ST: [i64; 64] = [0; 64]
+var MONO_COUNT: i64 = 0
+
+// Mangled name buffer (appended to SRC)
+var MAN_BUF_S: [i64; 64] = [0; 64]
+var MAN_BUF_E: [i64; 64] = [0; 64]
+
+// ─── Phase 5: Effects checking ───
+// Bitmask per function: IO=1, Mut=2, Panic=4, Div=8, Alloc=16
+var FN_EFFECTS: [i64; 256] = [0; 256]
+var CURRENT_FN: i64 = 0
+
+// ─── Phase 6a: Unit tracking (compile-time only) ───
+// Unit hash per local variable (0 = no unit)
+var VAR_UNIT: [i64; 128] = [0; 128]
+
+// ─── Phase 6c: Linear type tracking ───
+// Per-struct: 1 if declared with 'linear' keyword, 0 otherwise
+var ST_LINEAR: [i64; 32] = [0; 32]
+// Per local variable: 1 if linear type, 0 otherwise
+var VAR_LINEAR: [i64; 128] = [0; 128]
+// Per local variable: use count (for linear checking)
+var VAR_USED: [i64; 128] = [0; 128]
+
+// ─── Phase 6b: Refinement type aliases ───
+// type Name = { x: T | predicate } — stored as name hash + predicate token range
+var REF_TYPE_HASH: [i64; 32] = [0; 32]
+var REF_TYPE_COUNT: i64 = 0
+
 fn en_find(hash: i64) -> i64 with Panic {
     var i: i64 = 0
     while i < EN_COUNT {
@@ -67,7 +119,7 @@ fn en_find(hash: i64) -> i64 with Panic {
     return -1
 }
 
-// Look up EnumName::Variant -> discriminant value
+// Look up EnumName::Variant → discriminant value
 fn en_variant_value(enum_hash: i64, variant_hash: i64) -> i64 with Panic {
     let ei = en_find(enum_hash)
     if ei < 0 { return -1 }
@@ -106,38 +158,58 @@ fn st_total_size(si: i64) -> i64 with Panic {
 }
 
 // Global variable table: flat array, 4 fields per entry [hash, offset, esiz, alen]
-var GL: [i64; 256] = [0; 256]
+var GL: [i64; 512] = [0; 512]
 var GL_COUNT: i64 = 0
 var GL_BSS_SIZE: i64 = 0
 var GL_BSS_BASE: i64 = 0
 
+// Hash: pack name length + first 6 bytes into i64 (avoids sb()-based comparison during lookup)
+fn gl_name_hash(ns: i64, ne: i64) -> i64 with Panic {
+    // Hash: length + sum of (byte * position) — collision-resistant for same-prefix names
+    let l = ne - ns
+    var h: i64 = l * 1000003
+    var hi: i64 = 0
+    while hi < l {
+        h = h + (sb(ns + hi) & 0xFF) * (hi + 1) * 31
+        hi = hi + 1
+    }
+    return h
+}
+
+fn gl_find(ns: i64, ne: i64) -> i64 with Panic {
+    let h = gl_name_hash(ns, ne)
+    var i: i64 = 0
+    while i < GL_COUNT {
+        if GL[(i * 4 + 0) as usize] == h { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn gl_add(ns: i64, ne: i64, esiz: i64, alen: i64) with Mut, Panic {
+    var sz: i64 = 8
+    if alen > 0 { sz = alen * esiz }
+    let aligned = (sz + 7) / 8 * 8
+    GL[(GL_COUNT * 4 + 0) as usize] = gl_name_hash(ns, ne)
+    GL[(GL_COUNT * 4 + 1) as usize] = GL_BSS_SIZE
+    GL[(GL_COUNT * 4 + 2) as usize] = esiz
+    GL[(GL_COUNT * 4 + 3) as usize] = alen
+    GL_COUNT = GL_COUNT + 1
+    GL_BSS_SIZE = GL_BSS_SIZE + aligned
+}
+
 // Per-function local variable table (reset per function)
-var VAR_NS: [i64; 64] = [0; 64]
-var VAR_NE: [i64; 64] = [0; 64]
-var VAR_SLOT: [i64; 64] = [0; 64]
-var VAR_ALEN: [i64; 64] = [0; 64]
-var VAR_ESIZ: [i64; 64] = [0; 64]
+var VAR_NS: [i64; 128] = [0; 128]
+var VAR_NE: [i64; 128] = [0; 128]
+var VAR_SLOT: [i64; 128] = [0; 128]
+var VAR_ALEN: [i64; 128] = [0; 128]
+var VAR_ESIZ: [i64; 128] = [0; 128]
+var VAR_IS_F64: [i64; 128] = [0; 128]
+var VAR_IS_CLOSURE: [i64; 128] = [0; 128]
 var VAR_COUNT: i64 = 0
 var NEXT_SLOT: i64 = 1
+var LAST_EXPR_IS_CLOSURE: i64 = 0
 
 // Token kinds: inlined as integers (boot4 doesn't init scalar globals)
 
-// ─── Expression compiler state ───
-// Global parse position for expression parsing
-var EP: i64 = 0
-// Closure state save buffers (global to avoid stack overflow in recursive compile_primary)
-var CL_SAVE_NS: [i64; 64] = [0; 64]
-var CL_SAVE_NE: [i64; 64] = [0; 64]
-var CL_SAVE_SL: [i64; 64] = [0; 64]
-var CL_SAVE_AL: [i64; 64] = [0; 64]
-var CL_SAVE_ES: [i64; 64] = [0; 64]
-// Loop stack for continue/break (max 16 nested loops)
-var LOOP_TOP: [i64; 16] = [0; 16]
-var LOOP_END_PATCH: [i64; 16] = [0; 16]
-var LOOP_DEPTH: i64 = 0
-// Break fixup table: code offsets of jmp rel32 placeholders
-var BREAK_PATCH: [i64; 64] = [0; 64]
-var BREAK_COUNT: i64 = 0
-
-// arg_count: entry RSP offset
-var ENTRY_RSP_OFF: i64 = 0
+// ─── Helpers ───
