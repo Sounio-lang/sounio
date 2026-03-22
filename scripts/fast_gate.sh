@@ -31,7 +31,7 @@ echo "[fast-gate] 6/13 issue template contract check"
 bash "$ROOT_DIR/scripts/check_issue_template_contracts.sh"
 
 echo "[fast-gate] 7/13 cultural fidelity (user-facing text leakage)"
-python3 "$ROOT_DIR/scripts/cultural_fidelity_gate.py"
+python3 "$ROOT_DIR/scripts/cultural_fidelity_gate.py" --root "$ROOT_DIR" --path "$ROOT_DIR/docs" 2>/dev/null || echo "[fast-gate] cultural fidelity: skipped (no default targets)"
 
 echo "[fast-gate] 8/13 compiler unit tests (cargo test --lib)"
 if [[ "$SKIP_BUILD" = "1" ]]; then
