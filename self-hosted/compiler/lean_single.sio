@@ -151,12 +151,12 @@ fn gl_add(ns: i64, ne: i64, esiz: i64, alen: i64) with Mut, Panic {
 }
 
 // Per-function local variable table (reset per function)
-var VAR_NS: [i64; 64] = [0; 64]
-var VAR_NE: [i64; 64] = [0; 64]
-var VAR_SLOT: [i64; 64] = [0; 64]
-var VAR_ALEN: [i64; 64] = [0; 64]
-var VAR_ESIZ: [i64; 64] = [0; 64]
-var VAR_IS_F64: [i64; 64] = [0; 64]
+var VAR_NS: [i64; 128] = [0; 128]
+var VAR_NE: [i64; 128] = [0; 128]
+var VAR_SLOT: [i64; 128] = [0; 128]
+var VAR_ALEN: [i64; 128] = [0; 128]
+var VAR_ESIZ: [i64; 128] = [0; 128]
+var VAR_IS_F64: [i64; 128] = [0; 128]
 var VAR_COUNT: i64 = 0
 var NEXT_SLOT: i64 = 1
 
@@ -257,6 +257,10 @@ fn lex_all() with Mut, Panic {
             if src_match(s, l, "match") { k = 48 }
             if src_match(s, l, "pub") { k = 49 }
             if src_match(s, l, "linear") { k = 49 }
+            if src_match(s, l, "Some") { k = 57 }
+            if src_match(s, l, "None") { k = 58 }
+            if src_match(s, l, "Ok") { k = 59 }
+            if src_match(s, l, "Err") { k = 60 }
             TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TC = TC + 1; continue
         }
         // Two-char operators
@@ -562,12 +566,12 @@ fn emit_write_file() with Mut {
 var EP: i64 = 0
 var EXPR_IS_F64: i64 = 0
 // Closure state save buffers (global to avoid stack overflow in recursive compile_primary)
-var CL_SAVE_NS: [i64; 64] = [0; 64]
-var CL_SAVE_NE: [i64; 64] = [0; 64]
-var CL_SAVE_SL: [i64; 64] = [0; 64]
-var CL_SAVE_AL: [i64; 64] = [0; 64]
-var CL_SAVE_ES: [i64; 64] = [0; 64]
-var CL_SAVE_F64: [i64; 64] = [0; 64]
+var CL_SAVE_NS: [i64; 128] = [0; 128]
+var CL_SAVE_NE: [i64; 128] = [0; 128]
+var CL_SAVE_SL: [i64; 128] = [0; 128]
+var CL_SAVE_AL: [i64; 128] = [0; 128]
+var CL_SAVE_ES: [i64; 128] = [0; 128]
+var CL_SAVE_F64: [i64; 128] = [0; 128]
 // Loop stack for continue/break (max 16 nested loops)
 var LOOP_TOP: [i64; 16] = [0; 16]
 var LOOP_END_PATCH: [i64; 16] = [0; 16]
@@ -705,6 +709,67 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EXPR_IS_F64 = 0
         return
     }
+    // None → 2-qword tagged union [tag=0, value=0]
+    if k == 58 {
+        EP = EP + 1
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 2
+        em(0x48); em(0x31); em(0xc0)  // xor rax, rax
+        emit_store_var(base)      // value = 0
+        emit_store_var(base + 1)  // tag = 0
+        em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp - (base+1)*8]
+        em32(0 - (base + 1) * 8)
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Some(expr) → 2-qword tagged union [tag=1, value=expr]
+    if k == 57 {
+        EP = EP + 1
+        if TK[EP as usize] == 6 { EP = EP + 1 }
+        compile_or()
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 2
+        emit_store_var(base)      // value at slot base
+        emit_imm64(1)
+        emit_store_var(base + 1)  // tag = 1 at slot base+1
+        em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp - (base+1)*8]
+        em32(0 - (base + 1) * 8)
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Ok(expr) → 2-qword tagged union [tag=0, payload=expr]
+    if k == 59 {
+        EP = EP + 1
+        if TK[EP as usize] == 6 { EP = EP + 1 }
+        compile_or()
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 2
+        emit_store_var(base)      // payload
+        em(0x48); em(0x31); em(0xc0)  // xor rax, rax → tag = 0
+        emit_store_var(base + 1)
+        em(0x48); em(0x8d); em(0x85)
+        em32(0 - (base + 1) * 8)
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Err(expr) → 2-qword tagged union [tag=1, payload=expr]
+    if k == 60 {
+        EP = EP + 1
+        if TK[EP as usize] == 6 { EP = EP + 1 }
+        compile_or()
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 2
+        emit_store_var(base)
+        emit_imm64(1)  // tag = 1
+        emit_store_var(base + 1)
+        em(0x48); em(0x8d); em(0x85)
+        em32(0 - (base + 1) * 8)
+        EXPR_IS_F64 = 0
+        return
+    }
     // Parenthesized
     if k == 6 { EP = EP + 1; compile_or(); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
     // Address-of: &ident → lea rax, [rbp - 8*slot] or mov rax, bss_addr
@@ -814,6 +879,28 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
         EP = EP + 1
+        // Box::new(expr) — heap allocate via mmap
+        if TK[EP as usize] == 51 && src_match(ns, ne - ns, "Box") {
+            EP = EP + 1  // skip ::
+            EP = EP + 1  // skip 'new'
+            if TK[EP as usize] == 6 { EP = EP + 1 }  // skip (
+            compile_or()  // value in rax
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            em(0x50)  // push value
+            // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)
+            em(0x48); em(0x31); em(0xff)           // xor rdi, rdi
+            em(0xbe); em32(4096)                    // mov esi, 4096
+            em(0xba); em32(3)                       // mov edx, 3 (PROT_RW)
+            em(0x41); em(0xba); em32(0x22)          // mov r10d, 0x22
+            em(0x49); em(0xc7); em(0xc0); em32(-1)  // mov r8, -1
+            em(0x4d); em(0x31); em(0xc9)           // xor r9, r9
+            em(0xb8); em32(9)                       // mov eax, 9 (SYS_mmap)
+            em(0x0f); em(0x05)                     // syscall
+            em(0x59)  // pop rcx (value)
+            em(0x48); em(0x89); em(0x08)  // mov [rax], rcx
+            EXPR_IS_F64 = 0
+            return
+        }
         // Enum::Variant — look up discriminant
         if TK[EP as usize] == 51 {
             EP = EP + 1  // skip ::
@@ -1710,7 +1797,60 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
             var is_wildcard: i64 = 0
             var disc: i64 = -1
-            if TK[EP as usize] == 3 {
+            var arm_is_tagged: i64 = 0
+            var bind_ns: i64 = 0
+            var bind_ne: i64 = 0
+            var has_binding: i64 = 0
+            let arm_tk = TK[EP as usize]
+            // Some(v) pattern — tag=1, bind inner value
+            if arm_tk == 57 {
+                EP = EP + 1
+                disc = 1
+                arm_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    bind_ns = TS[EP as usize]
+                    bind_ne = TE[EP as usize]
+                    has_binding = 1
+                    EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // None pattern — tag=0
+            if arm_tk == 58 {
+                EP = EP + 1
+                disc = 0
+                arm_is_tagged = 1
+            }
+            // Ok(v) pattern — tag=0, bind payload
+            if arm_tk == 59 {
+                EP = EP + 1
+                disc = 0
+                arm_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    bind_ns = TS[EP as usize]
+                    bind_ne = TE[EP as usize]
+                    has_binding = 1
+                    EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // Err(e) pattern — tag=1, bind payload
+            if arm_tk == 60 {
+                EP = EP + 1
+                disc = 1
+                arm_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    bind_ns = TS[EP as usize]
+                    bind_ne = TE[EP as usize]
+                    has_binding = 1
+                    EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            if arm_tk == 3 {
                 let pns = TS[EP as usize]
                 let pne = TE[EP as usize]
                 if pne - pns == 1 && sb(pns) == 95 {
@@ -1722,24 +1862,51 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     EP = EP + 1
                     disc = en_variant_value(eh, vh)
                 } else { EP = EP + 1 }
-            } else if TK[EP as usize] == 4 {
+            }
+            if arm_tk == 4 {
                 disc = TV[EP as usize]; EP = EP + 1
-            } else { EP = EP + 1 }
+            }
+            if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 { EP = EP + 1 }
             if disc >= 0 {
-                // Compare scrutinee with discriminant
-                emit_load_var(match_slot)
-                em(0x50)
-                em(0x48); em(0xb8); em64(disc)
-                em(0x59)
-                em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
-                em(0x0f); em(0x85); let skip_patch = CL; em32(0)  // jne skip
-                if TK[EP as usize] == 52 { EP = EP + 1 }  // skip =>
-                if TK[EP as usize] == 8 { EP = EP + 1 }
-                while TK[EP as usize] != 9 && TK[EP as usize] != 28 && TK[EP as usize] != 0 { compile_stmt() }
-                if TK[EP as usize] == 9 { EP = EP + 1 }
-                em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
-                arm_count = arm_count + 1
-                patch32(skip_patch, CL)
+                if arm_is_tagged == 1 {
+                    // Tagged union match: load tag from [scrutinee + 0]
+                    emit_load_var(match_slot)
+                    em(0x48); em(0x8b); em(0x00)  // mov rax, [rax] (tag)
+                    em(0x50)  // push tag
+                    em(0x48); em(0xb8); em64(disc)
+                    em(0x59)  // pop rcx (tag)
+                    em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+                    em(0x0f); em(0x85); let skip_patch = CL; em32(0)  // jne skip
+                    // Bind inner value if pattern has binding
+                    if has_binding == 1 {
+                        emit_load_var(match_slot)
+                        em(0x48); em(0x8b); em(0x40); em(0x08)  // mov rax, [rax + 8] (value)
+                        let bslot = var_add(bind_ns, bind_ne)
+                        emit_store_var(bslot)
+                    }
+                    if TK[EP as usize] == 52 { EP = EP + 1 }  // skip =>
+                    if TK[EP as usize] == 8 { EP = EP + 1 }
+                    while TK[EP as usize] != 9 && TK[EP as usize] != 28 && TK[EP as usize] != 0 { compile_stmt() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                    em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
+                    arm_count = arm_count + 1
+                    patch32(skip_patch, CL)
+                } else {
+                    // Plain enum/integer match: compare scrutinee directly
+                    emit_load_var(match_slot)
+                    em(0x50)
+                    em(0x48); em(0xb8); em64(disc)
+                    em(0x59)
+                    em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+                    em(0x0f); em(0x85); let skip_patch = CL; em32(0)  // jne skip
+                    if TK[EP as usize] == 52 { EP = EP + 1 }  // skip =>
+                    if TK[EP as usize] == 8 { EP = EP + 1 }
+                    while TK[EP as usize] != 9 && TK[EP as usize] != 28 && TK[EP as usize] != 0 { compile_stmt() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                    em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
+                    arm_count = arm_count + 1
+                    patch32(skip_patch, CL)
+                }
             }
             if is_wildcard == 1 {
                 if TK[EP as usize] == 52 { EP = EP + 1 }
