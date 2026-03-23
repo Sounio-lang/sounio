@@ -34,7 +34,7 @@
 
 #block(width: 100%, inset: (x: 1cm, y: 0.7cm), stroke: 0.5pt)[
   #text(weight: "bold")[Abstract.]
-  We study the number $T_k$ of ordered triples of imaginary basis elements with nonzero associator in the $2^k$-dimensional Cayley–Dickson algebra. It is classical that $T_3 = 168 = |"PSL"(2,7)|$ for the octonions. By exhaustive computation we establish $T_4 = 1848$, $T_5 = 15 thin 960$, and $T_6 = 130 thin 200$, and observe that $T_k = 168 (P_k - 4 P_(k-1))$ where $P_k = (2^k - 1)(2^(k-1) - 1)(2^(k-2) - 1) slash 21$ counts Fano subplanes in $"PG"(k-1, 2)$. This formula is verified at four levels ($k = 3, 4, 5, 6$). We derive that $T_k slash (2^k - 1)^3 arrow.r 1 slash 2$ as $k arrow.r infinity$: asymptotically, exactly half of all basis triples are non-associative. The associator norm dichotomy $||[e_i, e_j, e_k]|| in {0, 2}$ — previously known for octonions — is verified exhaustively through dimension 64. The number of Fano subplanes grows by a factor of 7 per Cayley–Dickson doubling, yielding a combinatorial scaling exponent $log_2 7 approx 2.807$ for the non-associative structure.
+  We study the number $T_k$ of ordered triples of imaginary basis elements with nonzero associator in the $2^k$-dimensional Cayley–Dickson algebra. It is classical that $T_3 = 168 = |"PSL"(2,7)|$ for the octonions. By exhaustive computation we establish $T_k$ for $k = 3, ..., 7$ (through dimension 128), and conjecture $T_k = 168 (P_k - 4 P_(k-1))$ where $P_k = (2^k - 1)(2^(k-1) - 1)(2^(k-2) - 1) slash 21$ counts Fano subplanes in $"PG"(k-1, 2)$. This formula is verified at five levels. We prove that the associator norm dichotomy $||[e_i, e_j, e_k]|| in {0, 2}$ holds for _all_ Cayley–Dickson algebras, as a consequence of the bivalence of the Cayley–Dickson sign function and the associativity of bitwise exclusive-or. We derive that $T_k slash (2^k - 1)^3 arrow.r 1 slash 2$ asymptotically: half of all basis triples are non-associative. The number of Fano subplanes grows by a factor of 7 per doubling, yielding a combinatorial scaling exponent $log_2 7 approx 2.807$.
 
   #v(0.3em)
   #text(weight: "bold")[Keywords:] Cayley–Dickson algebras, non-associativity, Fano plane, projective geometry, PSL(2,7)
@@ -56,11 +56,12 @@ A natural question arises: _does the 168-divisibility persist in higher Cayley�
 In this paper we address this gap. By exhaustive computation through $k = 6$ (dimension 64, requiring classification of $63^3 = 250 thin 047$ triples), we establish that $T_k$ is a multiple of 168 at every level tested, and conjecture a closed formula relating $T_k$ to the number of Fano subplanes in $"PG"(k-1, 2)$. We derive the asymptotic fraction of non-associative triples and identify a combinatorial scaling exponent for the Fano subplane structure.
 
 *Contributions.*
-+ $T_k$ computed exhaustively for $k = 3, 4, 5, 6$ (Theorem 1).
-+ A conjectured closed formula $T_k = 168(P_k - 4 P_(k-1))$ verified at four levels (Conjecture 2).
++ $T_k$ computed exhaustively for $k = 3, 4, 5, 6, 7$ (Theorem 1).
++ A conjectured closed formula $T_k = 168(P_k - 4 P_(k-1))$ verified at five levels (Conjecture 2).
 + Asymptotic analysis: $T_k slash N^3 arrow.r 1 slash 2$ (Proposition 3).
-+ The binary norm property $||[e_i, e_j, e_k]|| in {0, 2}$ verified through dimension 64 (Observation 4).
++ The binary norm property $||[e_i, e_j, e_k]|| in {0, 2}$ _proven_ for all $k$ (Theorem 4).
 + Fano subplane branching exponent $log_2 7 approx 2.807$ (Proposition 5).
++ A sign function method for computing $T_k$ without high-dimensional array operations (§4).
 
 = Preliminaries
 
@@ -85,7 +86,7 @@ with $P_2 = 0$, $P_3 = 1$, $P_4 = 15$, $P_5 = 155$, $P_6 = 1395$ #cite(<hirschfe
 We define $T_k$ as the number of ordered triples $(i, j, k)$ with $i, j, k in {1, ..., 2^k - 1}$ such that $[e_i, e_j, e_k] eq.not 0$ in $A_k$.
 
 #block(inset: (left: 0em), stroke: (left: 2pt + black), outset: (left: 0.5em))[
-  *Theorem 1.* _The nonzero basis associator counts for $k = 3, 4, 5, 6$ are:_
+  *Theorem 1.* _The nonzero basis associator counts for $k = 3, 4, 5, 6, 7$ are:_
 
   #figure(
     table(
@@ -97,15 +98,16 @@ We define $T_k$ as the number of ordered triples $(i, j, k)$ with $i, j, k in {1
       [4], [16], [15], [3 375], [1 848], [11],
       [5], [32], [31], [29 791], [15 960], [95],
       [6], [64], [63], [250 047], [130 200], [775],
+      [7], [128], [127], [2 048 383], [1 046 808], [6 231],
     ),
   )
 
-  _Each value is verified by exhaustive enumeration of all $N^3$ ordered triples._
+  _Each value is verified by exhaustive classification of all $N^3$ ordered triples._
 ]
 
-For $k = 3$, the result is classical (168 = number of ordered non-collinear triples in the Fano plane #cite(<baez2002>)). For $k = 4$, the value $T_4 = 1848 = 11 times 168$ was reported in #cite(<agourakis2026aaca>). The values $T_5$ and $T_6$ are new.
+For $k = 3$, the result is classical (168 = number of ordered non-collinear triples in the Fano plane #cite(<baez2002>)). For $k = 4$, the value $T_4 = 1848 = 11 times 168$ was reported in #cite(<agourakis2026aaca>). The values $T_5$, $T_6$, and $T_7$ are new.
 
-The computation for $k = 6$ requires classifying 250,047 ordered triples in a 64-dimensional algebra. Each associator computation involves four Cayley–Dickson multiplications (recursively through 6 levels of doubling). Two independent runs produced identical results.
+For $k lt.eq 6$, each associator is computed via four Cayley–Dickson multiplications (recursively through $k$ levels of doubling); two independent runs produced identical results for $k = 6$. For $k = 7$, we use the sign function method (§3.3): each triple is classified by four evaluations of $sigma$ (integer recursion), avoiding high-dimensional array operations entirely.
 
 == A conjectured closed formula
 
@@ -127,6 +129,7 @@ The computation for $k = 6$ requires classifying 250,047 ordered triples in a 64
     [4], [15], [1], [$168 times 11 = 1848$], [✓],
     [5], [155], [15], [$168 times 95 = 15 thin 960$], [✓],
     [6], [1395], [155], [$168 times 775 = 130 thin 200$], [✓],
+    [7], [11 811], [1395], [$168 times 6231 = 1 thin 046 thin 808$], [✓],
   ),
 )
 
@@ -143,15 +146,22 @@ The factor $P_k - 4 P_(k-1)$ admits a structural interpretation. Each Fano subpl
   Since $(2^k - 1)^3 approx 2^(3k)$, the ratio $T_k slash (2^k - 1)^3 arrow.r 2^(3k-1) slash 2^(3k) = 1 slash 2$. $square$
 ]
 
-This means that asymptotically, _exactly half_ of all ordered basis triples are non-associative. The convergence is visible from the data: the fraction is $0.490$ at $k=3$, $0.548$ at $k=4$, $0.536$ at $k=5$, and $0.521$ at $k=6$, approaching $0.500$ from above.
+This means that asymptotically, _exactly half_ of all ordered basis triples are non-associative. The convergence is visible from the data: the fraction is $0.490$ at $k=3$, $0.548$ at $k=4$, $0.536$ at $k=5$, $0.521$ at $k=6$, and $0.511$ at $k=7$, approaching $0.500$.
 
 == Norm dichotomy
 
 #block(inset: (left: 0em), stroke: (left: 2pt + black), outset: (left: 0.5em))[
-  *Observation 4.* _For $k = 3, 4, 5, 6$, the associator norm on imaginary basis elements satisfies $||[e_i, e_j, e_k]|| in {0, 2}$. No intermediate values are observed._
+  *Theorem 4.* _For any $k gt.eq 1$ and any nonzero $i, j, m in ZZ_2^k$: $quad ||[e_i, e_j, e_m]|| in {0, 2}$._
+
+  _Proof._ The Cayley–Dickson construction determines a sign function $sigma: (ZZ_2^k backslash {0})^2 arrow.r {+1, -1}$ such that $e_i dot e_j = sigma(i, j) dot e_(i xor j)$. Expanding the associator:
+
+  $ (e_i e_j) e_m = sigma(i, j) dot sigma(i xor j, m) dot e_((i xor j) xor m) $
+  $ e_i (e_j e_m) = sigma(j, m) dot sigma(i, j xor m) dot e_(i xor (j xor m)) $
+
+  Since $xor$ is associative on $ZZ_2^k$, both parenthesisations yield the same basis element $e_(i xor j xor m)$. Let $alpha = sigma(i,j) dot sigma(i xor j, m)$ and $beta = sigma(j,m) dot sigma(i, j xor m)$. Since $sigma$ is bivalent, $alpha, beta in {+1, -1}$, so $alpha - beta in {-2, 0, +2}$. Therefore $[e_i, e_j, e_m] = (alpha - beta) dot e_(i xor j xor m)$ and $||[e_i, e_j, e_m]|| in {0, 2}$. $square$
 ]
 
-For octonions ($k = 3$), this is a consequence of alternativity #cite(<agourakis2026aaca>). For $k gt.eq 4$, alternativity fails, and the persistence of the $ZZ_2$ dichotomy is not a priori guaranteed. The exhaustive verification at $k = 6$ (250,047 triples, all norms exactly 0 or 2) suggests this is a general property of the Cayley–Dickson construction, likely derivable from the bilinearity of the structure constants and the $plus.minus 1$ character of the Cayley–Dickson signs.
+*Remark.* The proof is dimension-independent: it uses only the bivalence of $sigma$ and the associativity of $xor$. No properties specific to the octonions (alternativity, norm multiplicativity) are required. The result applies to all Cayley–Dickson algebras, including those with zero divisors.
 
 == Fano subplane branching exponent
 
@@ -165,19 +175,21 @@ The codimension of the Fano subplane structure in the three-dimensional triple s
 
 = Computational methods
 
-All computations use Cayley–Dickson multiplication implemented recursively: $(a,b)(c,d) = (a c - overline(d) b, d a + b overline(c))$, building from real arithmetic through $k$ levels of doubling. For $k = 6$, each multiplication involves $2^6 = 64$ coordinates and recurses through 6 levels.
+Two methods are used. For $k lt.eq 6$, associators are computed via full Cayley–Dickson multiplication: $(a,b)(c,d) = (a c - overline(d) b, d a + b overline(c))$, recursing through $k$ levels. For $k = 7$ (and potentially higher), we use a _sign function method_ that avoids high-dimensional arrays entirely.
 
-The $k = 5$ computation (29,791 triples) requires approximately 2 minutes. The $k = 6$ computation (250,047 triples) requires approximately 57 minutes. Two independent implementations produced identical results for all values of $k$.
+== Sign function method
 
-Source code is available at #link("https://github.com/agourakis82/sounio")[github.com/agourakis82/sounio].
+By Theorem 4, determining whether $[e_i, e_j, e_m] eq.not 0$ requires only checking whether $alpha eq.not beta$, where $alpha = sigma(i,j) dot sigma(i xor j, m)$ and $beta = sigma(j,m) dot sigma(i, j xor m)$. The sign function $sigma$ is computed by integer recursion through $k$ levels (one comparison and one XOR per level), with no floating-point arithmetic and no array allocation. This reduces the per-triple cost from $O(2^k)$ (full multiplication) to $O(k)$ (sign recursion), enabling computation at dimensions where full multiplication is impractical.
+
+At $k = 7$ ($127^3 = 2 thin 048 thin 383$ triples), the sign function method classifies all triples using only integer operations. The method scales to arbitrary $k$ limited only by the $O(N^3) = O(2^(3k))$ enumeration cost.
+
+Source code (including the recursive sign function implementation) is available at #link("https://github.com/agourakis82/sounio")[github.com/agourakis82/sounio], implemented in the Sounio programming language #cite(<sounio2026>).
 
 = Open questions
 
 + *Prove Conjecture 2 for all $k gt.eq 3$.* The key step is establishing the octonionic/quasi-octonionic subplane decomposition: show that each Fano subplane in $A_k$ is either octonionic (contributing 168 nonzero associator triples) or quasi-octonionic (contributing 72), and that the quasi-octonionic count is $7 P_(k-1)$.
 
-+ *Prove that $||[e_i, e_j, e_k]|| in {0, 2}$ for all $k$.* The norm dichotomy is verified through $k = 6$ but not proven in general. A proof may follow from the structure of the Cayley–Dickson sign function.
-
-+ *Compute $T_7$.* The formula predicts $T_7 = 168 times 6231 = 1 thin 046 thin 808$. Exhaustive verification would require $127^3 approx 2 times 10^6$ associator evaluations in dimension 128, which is computationally feasible.
++ *Characterize the structure of the sign function.* Theorem 4 establishes that the norm dichotomy follows from the bivalence of $sigma$. Can the nonzero count $T_k$ be derived analytically from the properties of $sigma$, without exhaustive enumeration?
 
 + *Characterize the sub-class distribution.* For sedenions, the nonzero associator triples decompose by index range (oct-oct-oct, sed-sed-sed, cross) with each sub-count a multiple of 168 #cite(<agourakis2026aaca>). Does this hold for $k gt.eq 5$?
 

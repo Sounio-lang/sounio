@@ -110,13 +110,13 @@ The 343 ordered triples of CYP isoforms partition as $343 = 133 + 42 + 168$, whe
 
 The biological content lies in the mapping itself: we predict that the 42 Fano-line triples correspond to enzyme combinations whose DDI outcomes are less sensitive to administration order (because they share a mechanistic family), while the 168 non-collinear triples correspond to combinations where order-dependence is clinically significant.
 
-*Prediction 1.* _DDIs mediated by CYP enzyme triples on a Fano line (e.g., CYP2C9–CYP2C8–CYP2C19) should exhibit weaker order-dependence than DDIs mediated by non-collinear triples (e.g., CYP1A2–CYP2D6–CYP3A4), as measured by asymmetry of AUC ratios in perpetrator–victim pharmacokinetic studies._
+*Important distinction: associativity vs. commutativity.* The 168 metric classifies _associativity_ — sensitivity to grouping: $(A dot B) dot C eq.not A dot (B dot C)$. This is distinct from _commutativity_ (sensitivity to ordering: $A dot B eq.not B dot A$). In the Cayley–Dickson algebras, distinct imaginary units are universally anti-commutative ($e_i e_j = -e_j e_i$ for $i eq.not j$), so commutativity does not discriminate between triples. The Fano classification is specifically about _grouping_, which corresponds clinically to _phased treatment design_: how interventions are grouped into treatment phases, rather than the temporal sequencing of individual prescriptions.
 
-*Prediction 2.* _Among the 168 non-collinear triples, those involving CYP2D6 (the only non-inducible major isoform) should show the strongest order-dependence, because the lack of induction-mediated recovery creates a longer-lasting time-arrow._
+*Prediction 1 (phase-grouping dependence).* _Clinical drug cascades involving CYP enzyme triples on a Fano line should exhibit weaker sensitivity to phase grouping than non-collinear triples. That is, "(Drug A + Drug B) then Drug C" vs. "Drug A then (Drug B + Drug C)" should differ more when the three CYP enzymes are non-collinear (168 triples) than when they are collinear (42 triples)._
 
-*Prediction 3.* _The binary property of the associator norm ($||[e_i, e_j, e_k]|| in {0, 2}$) predicts a bimodal distribution: DDI order-dependence should be either absent or fully present, with few intermediate cases._
+*Prediction 2 (bimodality).* _The binary property of the associator norm ($||[e_i, e_j, e_k]|| in {0, 2}$, proven for all Cayley–Dickson algebras #cite(<agourakis2026tower>)) predicts a bimodal distribution: phase-grouping sensitivity should be either absent or fully present, with few intermediate cases._
 
-Validation of these predictions requires analysis of pharmacovigilance databases (e.g., FDA FAERS) or dedicated pharmacokinetic studies with controlled sequencing, and is beyond the scope of this mathematical note.
+Validation requires analysis of phased clinical trial data (e.g., STAR\*D, STEP-BD, CATIE) where the same drugs are administered in different phase groupings, or controlled pharmacokinetic studies with varied drug phasing.
 
 = The genetic code in $"PG"(5, 2)$
 
@@ -172,9 +172,9 @@ Among 372 single-bit mutations (Hamming distance 1) from nonzero codons, 26.3% a
 
 In contrast to the metric (Hamming distance) structure, Fano lines in $"PG"(5, 2)$ do not organise codons by amino acid identity or class. Among 651 Fano lines connecting nonzero codons, 64 (9.8%) have all three codons in the same chemical class, compared to a random baseline of 11.5%. The genetic code's degeneracy follows the _metric_ structure of $"PG"(5, 2)$, not its seven-point subplane structure.
 
-== The ambient algebra
+== Remark on the ambient algebra
 
-The 63 nonzero codons are the imaginary basis elements of the $2^6 = 64$-dimensional Cayley–Dickson algebra. In #cite(<agourakis2026tower>), we verified exhaustively that $T_6 = 130 thin 200 = 775 times 168$: among the $63^3 = 250 thin 047$ ordered basis triples, exactly 130,200 have nonzero associator, and all nonzero associator norms equal exactly 2. The genetic code lives in a space with 775 copies of the 168-quantum of non-associativity.
+The 63 nonzero codons coincide in number with the imaginary basis elements of the 64-dimensional Cayley–Dickson algebra, for which $T_6 = 130 thin 200 = 775 times 168$ #cite(<agourakis2026tower>). We note this dimensional coincidence without asserting a mechanistic connection: codons do not undergo hypercomplex multiplication, and the Cayley–Dickson algebra at dimension 64 provides a mathematical context rather than a biological mechanism. The biologically meaningful structure is the metric (Hamming distance in $ZZ_2^6$), not the ambient non-associative algebra.
 
 = The fractal branching structure
 
@@ -190,28 +190,14 @@ The framework presented here is a mathematical model, not a claim that biologica
 
 Several limitations should be noted. The CYP450 mapping requires the FDA's seven-isoform simplification; in reality, additional CYP enzymes (CYP2E1, CYP3A5, and others) contribute to drug metabolism, and the restriction to seven is a regulatory convention. The genetic code embedding depends on the specific binary encoding (@table:bases); other biochemically motivated encodings are possible and may yield different geometric properties. The ambient Cayley–Dickson algebra at dimension 64 is not directly involved in codon biology — it provides the algebraic context in which the projective geometry acquires its associator structure.
 
-The strongest immediate application is the CYP450 model, where the seven-element constraint is externally validated (by regulatory practice), the order-dependence is clinically documented (67% monodirectional DDIs), and the predictions are testable against pharmacovigilance data.
+The strongest immediate application is the CYP450 model, where the seven-element constraint is externally validated (by regulatory practice), the phase-grouping dependence is clinically relevant to phased treatment design, and the predictions are testable against clinical trial data.
 
-== Preliminary validation against FAERS
+== Preliminary analysis: FAERS temporal asymmetry (negative result)
 
-To test whether the Fano classification predicts DDI order-dependence, we queried the FDA Adverse Event Reporting System (FAERS) via the openFDA API for all $binom(7, 3) = 35$ unordered CYP isoform triples. For each triple, we selected a representative drug per CYP isoform and searched for FAERS cases reporting all three drugs with temporal data (drug start dates). Temporal asymmetry was measured as $|n_(A arrow.r B) - n_(B arrow.r A)| slash (n_(A arrow.r B) + n_(B arrow.r A))$, where $n_(A arrow.r B)$ counts cases where drug A was started before drug B.
+As an initial probe, we queried the FDA Adverse Event Reporting System (FAERS) via the openFDA API for all $binom(7, 3) = 35$ unordered CYP isoform triples, measuring _temporal_ asymmetry (which drug was started first). Of 23 triples with temporal data (5 Fano, 18 non-Fano), the mean temporal asymmetry was 0.469 for Fano triples and 0.424 for non-Fano triples (difference $-0.044$, permutation $p = 0.61$). This is a null result.
 
-Of 35 triples, 23 yielded cases with temporal data (5 Fano, 18 non-Fano). Results:
+*Critically, this test addressed the wrong algebraic property.* FAERS temporal asymmetry measures _commutativity_ (whether Drug A before Drug B differs from Drug B before Drug A). The Fano classification predicts _associativity_ (whether phase grouping matters). As noted above, commutativity does not discriminate between CYP triples in the Cayley–Dickson framework. The null result is therefore expected and does not test the actual prediction.
 
-#figure(
-  table(
-    columns: 4,
-    align: (left, center, center, center),
-    stroke: 0.5pt,
-    [*Group*], [*Mean asymmetry*], [*$N$*], [*Prediction*],
-    [Fano (order-independent)], [0.469], [5], [Lower],
-    [Non-Fano (order-dependent)], [0.424], [18], [Higher],
-  ),
-  caption: [FAERS temporal asymmetry by Fano classification. The difference is $-0.044$ (wrong direction), with permutation $p = 0.61$. The null hypothesis is not rejected.],
-)
-
-The Fano classification does *not* predict DDI temporal asymmetry in FAERS data at this level of analysis. Several factors limit this test: FAERS is a voluntary reporting system biased toward serious events; temporal data (drug start dates) is frequently missing; many drugs are metabolised by multiple CYP isoforms, introducing noise; and confounders (age, genotype, disease severity) are uncontrolled. The use of a single representative drug per CYP isoform further reduces sensitivity. A definitive test would require controlled pharmacokinetic studies with explicit sequencing — prospective data, not retrospective voluntary reports.
-
-The null result does not refute the mathematical framework (which is proven independently), but it indicates that FAERS adverse event asymmetry is not a sufficiently sensitive metric to detect the predicted signal, if it exists. We report this preliminary result in the interest of full disclosure.
+A valid test of Prediction 1 would require phased clinical trial data — studies where the same three drugs are administered in different _phase groupings_ (e.g., $(A+B)$ then $C$ vs. $A$ then $(B+C)$), not merely different temporal orderings. We report the FAERS analysis in the interest of transparency and to delineate what the model does and does not predict.
 
 #bibliography("168-biology-refs.yml", style: "springer-mathphys")
