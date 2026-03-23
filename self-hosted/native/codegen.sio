@@ -5148,42 +5148,14 @@ fn compile_to_pe_aarch64_preview(module: &IrModule, target_spec: NativeTargetSpe
         return native_compile_result_error(ERR_INVALID_TARGET(), "native_v2_aarch64_windows_missing_main")
     }
 
-    // AArch64 entry trampoline: VirtualAlloc(NULL, 512MB, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
-    // Win64 ARM64 ABI: X0-X7 args, X0 return, X19-X28 callee-saved
-    var out = c
-    out.entry_offset = out.code.len
-
-    // Call VirtualAlloc through IAT: [rip+disp32] → need to track position for patch
-    let va_patch_offset = out.code.len + 2   // offset of disp32 within the instruction
-    out.code = a64_emit_ldr_rip_u64(out.code, A64_X0, 0)  // placeholder disp32, will be patched
-
-    // Setup parameters for VirtualAlloc(NULL, 512MB, 0x3000, 0x04)
-    out.code = a64_emit_mov_imm64(out.code, A64_X0, 0)        // lpAddress = NULL
-    out.code = a64_emit_mov_imm64(out.code, A64_X1, 536870912) // dwSize = 512MB = 0x20000000
-    out.code = a64_emit_mov_imm64(out.code, A64_X2, 12288)     // flAllocationType = 0x3000
-    out.code = a64_emit_mov_imm64(out.code, A64_X3, 4)         // flProtect = 0x04
-    out.code = a64_emit_ldr_rip_u64(out.code, A64_X16, 0)      // load VirtualAlloc from IAT (will patch)
-    let va_call_patch = out.code.len - 4
-    out.code = a64_emit_blr(out.code, A64_X16)
-
-    // Call main()
-    let patch_offset = out.code.len
-    out.code = a64_emit_bl(out.code, 0)  // placeholder, will be patched
-    out = a64_preview_record_call_patch(out, patch_offset, main_idx)
-
-    // ExitProcess(rax) — rax has return value from main
-    // Move return value to X0 (already there from ABI)
-    let ep_patch_offset = out.code.len + 2
-    out.code = a64_emit_ldr_rip_u64(out.code, A64_X16, 0)      // load ExitProcess from IAT (will patch)
-    let ep_call_patch = out.code.len - 4
-    out.code = a64_emit_blr(out.code, A64_X16)
-
-    out = a64_preview_patch_calls(out)
-
-    // Compute PE section layout (same as x86_64)
+    // Compute PE section layout first (need absolute addresses for trampoline)
+    // We'll emit trampoline after knowing layout, then rebuild.
+    // For now, estimate code size and compute layout.
+    let est_trampoline_size: i64 = 128  // generous estimate for trampoline instructions
+    let pre_code_len = c.code.len + est_trampoline_size
     let text_rva = PE_SECTION_ALIGNMENT
-    let text_raw_size = pe_file_align(out.code.len)
-    let idata_rva = text_rva + pe_section_align(out.code.len)
+    let text_raw_size = pe_file_align(pre_code_len)
+    let idata_rva = text_rva + pe_section_align(pre_code_len)
 
     let idt_offset: i64 = 0
     let int_offset: i64 = 40
@@ -5194,41 +5166,46 @@ fn compile_to_pe_aarch64_preview(module: &IrModule, target_spec: NativeTargetSpe
     let dll_name_offset: i64 = 120
     let idata_total: i64 = 133
 
-    // Compute IAT relocations (AArch64 RIP-relative addressing)
-    // For ldr x16, [rip + disp20] we need to compute the displacement
-    if va_patch_offset >= 0 {
-        let disp = ((idata_rva + iat_offset) - (text_rva + va_patch_offset + 4)) / 8
-        // Truncate to 20-bit signed and encode in instruction
-        if disp >= -1048576 && disp < 1048576 {
-            let instr_offset = va_patch_offset - 2
-            let b0 = out.code[instr_offset as usize] as i64
-            let b1 = (out.code[(instr_offset + 1) as usize] as i64) << 8
-            let b2 = (out.code[(instr_offset + 2) as usize] as i64) << 16
-            let b3 = (out.code[(instr_offset + 3) as usize] as i64) << 24
-            let original = b0 | b1 | b2 | b3
-            let masked = original & 0xFF00001F
-            let encoded = masked | ((disp & 0xFFFFF) << 5)
-            out.code = patch_u32_le(out.code, instr_offset, encoded)
-        }
-    }
+    // PE64 default image base for ARM64
+    let image_base: i64 = 5368709120  // 0x140000000
+    let iat_va_virtualalloc = image_base + idata_rva + iat_offset
+    let iat_va_exitprocess = image_base + idata_rva + iat_offset + 8
 
-    if ep_call_patch >= 0 {
-        let disp = ((idata_rva + iat_offset + 8) - (text_rva + ep_call_patch + 4)) / 8
-        if disp >= -1048576 && disp < 1048576 {
-            let instr_offset = ep_call_patch - 2
-            let b0 = out.code[instr_offset as usize] as i64
-            let b1 = (out.code[(instr_offset + 1) as usize] as i64) << 8
-            let b2 = (out.code[(instr_offset + 2) as usize] as i64) << 16
-            let b3 = (out.code[(instr_offset + 3) as usize] as i64) << 24
-            let original = b0 | b1 | b2 | b3
-            let masked = original & 0xFF00001F
-            let encoded = masked | ((disp & 0xFFFFF) << 5)
-            out.code = patch_u32_le(out.code, instr_offset, encoded)
-        }
+    // AArch64 entry trampoline: VirtualAlloc + main + ExitProcess
+    // Win64 ARM64 ABI: X0-X7 args, X0 return, X19-X28 callee-saved
+    var out = c
+    out.entry_offset = out.code.len
+
+    // Setup VirtualAlloc(NULL, 512MB, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
+    out.code = a64_emit_mov_imm64(out.code, A64_X0, 0)          // lpAddress = NULL
+    out.code = a64_emit_mov_imm64(out.code, A64_X1, 536870912)  // dwSize = 512MB
+    out.code = a64_emit_mov_imm64(out.code, A64_X2, 12288)      // flAllocationType = 0x3000
+    out.code = a64_emit_mov_imm64(out.code, A64_X3, 4)          // flProtect = PAGE_READWRITE
+    // Load VirtualAlloc address from IAT via absolute address
+    out.code = a64_emit_mov_imm64(out.code, A64_X16, iat_va_virtualalloc)
+    out.code = a64_emit_ldr(out.code, A64_X16, A64_X16, 0)      // X16 = *IAT[VirtualAlloc]
+    out.code = a64_emit_blr(out.code, A64_X16)                   // call VirtualAlloc
+
+    // Call main()
+    let patch_offset = out.code.len
+    out.code = a64_emit_bl(out.code, 0)
+    out = a64_preview_record_call_patch(out, patch_offset, main_idx)
+
+    // ExitProcess(return_value) — X0 already has return value from main
+    out.code = a64_emit_mov_imm64(out.code, A64_X16, iat_va_exitprocess)
+    out.code = a64_emit_ldr(out.code, A64_X16, A64_X16, 0)      // X16 = *IAT[ExitProcess]
+    out.code = a64_emit_blr(out.code, A64_X16)                   // call ExitProcess
+
+    out = a64_preview_patch_calls(out)
+
+    // Pad code to match estimated size so IAT absolute addresses remain correct
+    while out.code.len < pre_code_len {
+        out.code = a64_emit_instr(out.code, 0xD503201F)  // NOP
     }
 
     // Build PE binary with ARM64 machine type
     var w = pe_writer_new_arm64()
+    w = pe_set_image_base(w, image_base)
     w = pe_set_entry_point(w, text_rva + out.entry_offset)
     w = pe_set_subsystem(w, PE_SUBSYSTEM_WINDOWS_CUI)
 
