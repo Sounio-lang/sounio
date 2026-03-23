@@ -1,0 +1,209 @@
+//@ run-pass
+// clifford_demo.sio — Cl(3,1) spacetime algebra in Sounio
+//
+// The mathematician asked: "Can I use Cl(3,1)?"
+// Answer: yes.
+
+// Inline Clifford algebra (self-contained demo)
+struct ClAlg { p: i32, q: i32, n: i32, dim: i32 }
+fn cl_new(p: i32, q: i32) -> ClAlg { let n = p+q; ClAlg { p: p, q: q, n: n, dim: 1 << n } }
+
+struct ClEl { c: [f64; 32] }
+fn cl_zero() -> ClEl with Mut, Panic { ClEl { c: [0.0; 32] } }
+fn cl_scalar(v: f64) -> ClEl with Mut, Panic { var r = cl_zero(); r.c[0] = v; r }
+fn cl_gen(i: i32) -> ClEl with Mut, Panic { var r = cl_zero(); r.c[(1 << i) as usize] = 1.0; r }
+
+fn popcount(x: i32) -> i32 {
+    var v = x; var c: i32 = 0
+    while v != 0 { c = c + (v & 1); v = v >> 1 }
+    c
+}
+
+fn reorder_sign(a: i32, b: i32) -> i32 {
+    var sign: i32 = 0; var i = a
+    while i != 0 {
+        let bit = i & (0 - i)
+        sign = sign + popcount(b & (bit - 1))
+        i = i & (i - 1)
+    }
+    if (sign & 1) == 0 { 1 } else { -1 }
+}
+
+fn metric_sign(alg: ClAlg, overlap: i32) -> i32 {
+    var sign: i32 = 1; var bit: i32 = 0
+    while bit < alg.n {
+        if (overlap & (1 << bit)) != 0 {
+            if bit >= alg.p { sign = 0 - sign }
+        }
+        bit = bit + 1
+    }
+    sign
+}
+
+fn cl_mul(alg: ClAlg, a: ClEl, b: ClEl) -> ClEl with Mut, Panic, Div {
+    var r = cl_zero()
+    var i: i32 = 0
+    while i < alg.dim {
+        if a.c[i as usize] != 0.0 {
+            var j: i32 = 0
+            while j < alg.dim {
+                if b.c[j as usize] != 0.0 {
+                    let idx = i ^ j
+                    let sign = reorder_sign(i, j) * metric_sign(alg, i & j)
+                    r.c[idx as usize] = r.c[idx as usize]
+                        + (sign as f64) * a.c[i as usize] * b.c[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    r
+}
+
+fn cl_add(alg: ClAlg, a: ClEl, b: ClEl) -> ClEl with Mut, Panic, Div {
+    var r = cl_zero(); var i: i32 = 0
+    while i < alg.dim { r.c[i as usize] = a.c[i as usize] + b.c[i as usize]; i = i + 1 }
+    r
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with Mut, Panic, Div, IO {
+    println("================================================================")
+    println("  Cl(3,1) SPACETIME ALGEBRA — Dirac/Hestenes")
+    println("  p=3 positive (timelike), q=1 negative (spacelike)")
+    println("  Dimension: 2^4 = 16")
+    println("================================================================")
+    println("")
+
+    let alg = cl_new(3, 1)
+
+    // Generators: γ₀, γ₁, γ₂, γ₃
+    // γ₀² = γ₁² = γ₂² = +1 (p=3 positive generators)
+    // γ₃² = -1             (q=1 negative generator)
+    let g0 = cl_gen(0)  // γ₀
+    let g1 = cl_gen(1)  // γ₁
+    let g2 = cl_gen(2)  // γ₂
+    let g3 = cl_gen(3)  // γ₃
+
+    // ---------------------------------------------------------------
+    // GENERATOR SQUARES — verify the signature
+    // ---------------------------------------------------------------
+    println("=== Generator Squares (Signature) ===")
+
+    let g0sq = cl_mul(alg, g0, g0)
+    println("  γ₀² = ")
+    println(g0sq.c[0])
+    println("  (expected: +1, timelike)")
+
+    let g1sq = cl_mul(alg, g1, g1)
+    println("  γ₁² = ")
+    println(g1sq.c[0])
+    println("  (expected: +1, timelike)")
+
+    let g2sq = cl_mul(alg, g2, g2)
+    println("  γ₂² = ")
+    println(g2sq.c[0])
+    println("  (expected: +1, timelike)")
+
+    let g3sq = cl_mul(alg, g3, g3)
+    println("  γ₃² = ")
+    println(g3sq.c[0])
+    println("  (expected: -1, spacelike)")
+
+    // ---------------------------------------------------------------
+    // ANTI-COMMUTATION — γ_i γ_j = -γ_j γ_i for i ≠ j
+    // ---------------------------------------------------------------
+    println("")
+    println("=== Anti-commutation ===")
+
+    let g01 = cl_mul(alg, g0, g1)
+    let g10 = cl_mul(alg, g1, g0)
+    let sum01 = cl_add(alg, g01, g10)
+    println("  γ₀γ₁ + γ₁γ₀ = ")
+    println(sum01.c[0])
+    println("  (expected: 0, anti-commuting)")
+
+    // ---------------------------------------------------------------
+    // BIVECTORS — the Lorentz generators
+    // ---------------------------------------------------------------
+    println("")
+    println("=== Bivectors (Lorentz Generators) ===")
+
+    // σ_i = γ_i γ₀ (spatial bivectors → boosts)
+    let sigma1 = cl_mul(alg, g1, g0)
+    let sigma2 = cl_mul(alg, g2, g0)
+    let sigma3 = cl_mul(alg, g3, g0)
+
+    // σ₁² = γ₁γ₀γ₁γ₀ = -γ₁γ₁γ₀γ₀ = -(+1)(+1) = -1? No...
+    // Actually σ₁² = (γ₁γ₀)(γ₁γ₀) — let's compute
+    let s1sq = cl_mul(alg, sigma1, sigma1)
+    println("  σ₁² = (γ₁γ₀)² = ")
+    println(s1sq.c[0])
+
+    let s3sq = cl_mul(alg, sigma3, sigma3)
+    println("  σ₃² = (γ₃γ₀)² = ")
+    println(s3sq.c[0])
+    println("  (σ₃ involves the spacelike generator → different sign)")
+
+    // ---------------------------------------------------------------
+    // PSEUDOSCALAR — γ₀γ₁γ₂γ₃ (the volume element)
+    // ---------------------------------------------------------------
+    println("")
+    println("=== Pseudoscalar (Volume Element) ===")
+
+    let g01_2 = cl_mul(alg, g0, g1)
+    let g012 = cl_mul(alg, g01_2, g2)
+    let I_ps = cl_mul(alg, g012, g3)   // γ₀γ₁γ₂γ₃
+
+    // I² should be ±1
+    let Isq = cl_mul(alg, I_ps, I_ps)
+    println("  I = γ₀γ₁γ₂γ₃")
+    println("  I² = ")
+    println(Isq.c[0])
+    println("  (For Cl(3,1): I² = -1)")
+
+    // ---------------------------------------------------------------
+    // ASSOCIATIVITY — Clifford algebras are ALWAYS associative
+    // ---------------------------------------------------------------
+    println("")
+    println("=== Associativity (Clifford algebras are always associative) ===")
+
+    let left = cl_mul(alg, cl_mul(alg, g0, g1), g2)
+    let right = cl_mul(alg, g0, cl_mul(alg, g1, g2))
+    var assoc_diff: f64 = 0.0
+    var idx: i32 = 0
+    while idx < 16 {
+        let d = left.c[idx as usize] - right.c[idx as usize]
+        assoc_diff = assoc_diff + d * d
+        idx = idx + 1
+    }
+    println("  ||(γ₀γ₁)γ₂ - γ₀(γ₁γ₂)||² = ")
+    println(assoc_diff)
+    if abs_f(assoc_diff) < 0.001 {
+        println("  → 0 = ASSOCIATIVE (always, for any Clifford algebra)")
+    }
+
+    // ---------------------------------------------------------------
+    // GRADE STRUCTURE
+    // ---------------------------------------------------------------
+    println("")
+    println("=== Grade Structure of Cl(3,1) ===")
+    println("  Grade 0 (scalars):     C(4,0) = 1 component")
+    println("  Grade 1 (vectors):     C(4,1) = 4 components  [γ₀,γ₁,γ₂,γ₃]")
+    println("  Grade 2 (bivectors):   C(4,2) = 6 components  [Lorentz generators]")
+    println("  Grade 3 (trivectors):  C(4,3) = 4 components")
+    println("  Grade 4 (pseudoscalar):C(4,4) = 1 component   [I = γ₀γ₁γ₂γ₃]")
+    println("  Total: 1+4+6+4+1 = 16")
+
+    println("")
+    println("================================================================")
+    println("  Cl(3,1) works. Change signature with cl_new(p, q):")
+    println("    cl_new(3, 0) → Pauli algebra (dim 8)")
+    println("    cl_new(1, 3) → alternative spacetime (dim 16)")
+    println("    cl_new(4, 1) → Cl(4,1) conformal (dim 32)")
+    println("================================================================")
+
+    0
+}

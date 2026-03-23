@@ -1,0 +1,236 @@
+//! stdlib/algebra/clifford.sio
+//!
+//! Clifford Algebras Cl(p,q) for Sounio
+//!
+//! Usage:
+//!   let alg = cl_new(3, 1)              // Cl(3,1) spacetime algebra, dim 16
+//!   let g0 = cl_basis(alg, 1)           // γ₀ (timelike, squares to +1)
+//!   let g1 = cl_basis(alg, 2)           // γ₁ (spacelike, squares to -1)
+//!   let g01 = cl_mul(alg, g0, g1)       // γ₀γ₁ (bivector)
+//!   let n = cl_norm_sq(alg, g01)        // ||γ₀γ₁||²
+//!
+//! Supported signatures:
+//!   Cl(0,1) = complex numbers           (dim 2)
+//!   Cl(0,2) = quaternions               (dim 4)
+//!   Cl(3,0) = Pauli algebra             (dim 8)
+//!   Cl(3,1) = spacetime algebra (Dirac) (dim 16)
+//!   Cl(1,3) = spacetime algebra (alt)   (dim 16)
+//!   Cl(p,q) for p+q ≤ 5                (dim ≤ 32)
+//!
+//! Basis elements are indexed by SUBSETS of {0, ..., p+q-1}.
+//! Each subset S maps to the product of generators: e_S = ∏_{i ∈ S} γ_i.
+//! The empty set = scalar 1. A singleton {i} = generator γ_i.
+//!
+//! The geometric product uses the signature:
+//!   γ_i² = +1 for i < p (positive/timelike)
+//!   γ_i² = -1 for i ≥ p (negative/spacelike)
+//!   γ_iγ_j = -γ_jγ_i for i ≠ j (anti-commutation)
+
+// ============================================================================
+// ALGEBRA DESCRIPTOR
+// ============================================================================
+
+pub struct ClAlgebra {
+    p: i32,       // number of positive generators (square to +1)
+    q: i32,       // number of negative generators (square to -1)
+    n: i32,       // p + q = number of generators
+    dim: i32,     // 2^n = dimension of the algebra
+}
+
+pub fn cl_new(p: i32, q: i32) -> ClAlgebra {
+    let n = p + q
+    ClAlgebra { p: p, q: q, n: n, dim: 1 << n }
+}
+
+// ============================================================================
+// ELEMENT TYPE
+// ============================================================================
+
+/// A Clifford algebra element: coefficients indexed by subsets of {0,...,n-1}.
+/// Subset S is encoded as a bitmask: bit i set ↔ γ_i ∈ S.
+/// Max dimension: 32 (n ≤ 5, 2^5 = 32).
+pub struct ClElement {
+    c: [f64; 32],   // coefficients: c[S] = coefficient of e_S
+}
+
+pub fn cl_zero() -> ClElement with Mut, Panic {
+    ClElement { c: [0.0; 32] }
+}
+
+/// Scalar element.
+pub fn cl_scalar(val: f64) -> ClElement with Mut, Panic {
+    var r = cl_zero()
+    r.c[0] = val   // empty set = scalar
+    r
+}
+
+/// Basis element e_S for subset S (given as bitmask).
+pub fn cl_basis_mask(mask: i32) -> ClElement with Mut, Panic {
+    var r = cl_zero()
+    r.c[mask as usize] = 1.0
+    r
+}
+
+/// Generator γ_i (= basis element for singleton {i}).
+pub fn cl_basis(alg: ClAlgebra, i: i32) -> ClElement with Mut, Panic {
+    cl_basis_mask(1 << i)
+}
+
+// ============================================================================
+// GEOMETRIC PRODUCT — the heart of Clifford algebra
+// ============================================================================
+
+/// Count bits set in an integer (popcount).
+fn popcount(x: i32) -> i32 {
+    var v = x
+    var count: i32 = 0
+    while v != 0 { count = count + (v & 1); v = v >> 1 }
+    count
+}
+
+/// Sign from reordering: to put generators of subset A before subset B
+/// into canonical order, count the number of transpositions needed.
+///
+/// For subsets A and B (as bitmasks), the sign is (-1)^k where k counts
+/// the pairs (i ∈ A, j ∈ B) with i > j.
+fn reorder_sign(a: i32, b: i32) -> i32 {
+    var sign: i32 = 0
+    var i = a
+    while i != 0 {
+        // Find lowest set bit of i
+        let bit = i & (0 - i)   // isolate lowest bit
+        // Count bits in b that are BELOW this bit
+        let below = b & (bit - 1)
+        sign = sign + popcount(below)
+        i = i & (i - 1)   // clear lowest bit
+    }
+    if (sign & 1) == 0 { 1 } else { -1 }
+}
+
+/// Sign from squaring generators in the overlap.
+/// When multiplying e_A * e_B, generators in A ∩ B square to ±1.
+/// The sign depends on the signature (p, q) and WHICH generators overlap.
+fn metric_sign(alg: ClAlgebra, overlap: i32) -> i32 {
+    var sign: i32 = 1
+    var bit: i32 = 0
+    while bit < alg.n {
+        if (overlap & (1 << bit)) != 0 {
+            // Generator bit is in the overlap → it squares
+            if bit < alg.p {
+                // Positive generator: γ_i² = +1 (no sign change)
+            } else {
+                // Negative generator: γ_i² = -1
+                sign = 0 - sign
+            }
+        }
+        bit = bit + 1
+    }
+    sign
+}
+
+/// Geometric product of two Clifford algebra elements.
+///
+/// e_A * e_B = reorder_sign(A,B) * metric_sign(A∩B) * e_{A△B}
+///
+/// where A△B = A XOR B is the symmetric difference (generators that
+/// appear in exactly one of A, B survive; those in both square away).
+pub fn cl_mul(alg: ClAlgebra, a: ClElement, b: ClElement) -> ClElement with Mut, Panic, Div {
+    var r = cl_zero()
+    var i: i32 = 0
+    while i < alg.dim {
+        if a.c[i as usize] != 0.0 {
+            var j: i32 = 0
+            while j < alg.dim {
+                if b.c[j as usize] != 0.0 {
+                    let result_idx = i ^ j           // symmetric difference
+                    let overlap = i & j              // generators that square
+                    let sign = reorder_sign(i, j) * metric_sign(alg, overlap)
+                    r.c[result_idx as usize] = r.c[result_idx as usize]
+                        + (sign as f64) * a.c[i as usize] * b.c[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    r
+}
+
+// ============================================================================
+// ARITHMETIC
+// ============================================================================
+
+pub fn cl_add(alg: ClAlgebra, a: ClElement, b: ClElement) -> ClElement with Mut, Panic, Div {
+    var r = cl_zero()
+    var i: i32 = 0
+    while i < alg.dim { r.c[i as usize] = a.c[i as usize] + b.c[i as usize]; i = i + 1 }
+    r
+}
+
+pub fn cl_sub(alg: ClAlgebra, a: ClElement, b: ClElement) -> ClElement with Mut, Panic, Div {
+    var r = cl_zero()
+    var i: i32 = 0
+    while i < alg.dim { r.c[i as usize] = a.c[i as usize] - b.c[i as usize]; i = i + 1 }
+    r
+}
+
+pub fn cl_scale(alg: ClAlgebra, a: ClElement, s: f64) -> ClElement with Mut, Panic, Div {
+    var r = cl_zero()
+    var i: i32 = 0
+    while i < alg.dim { r.c[i as usize] = a.c[i as usize] * s; i = i + 1 }
+    r
+}
+
+/// Reverse: reverses the order of generators in each basis blade.
+/// Rev(e_{i₁...iₖ}) = e_{iₖ...i₁} = (-1)^{k(k-1)/2} e_{i₁...iₖ}
+pub fn cl_reverse(alg: ClAlgebra, a: ClElement) -> ClElement with Mut, Panic, Div {
+    var r = cl_zero()
+    var i: i32 = 0
+    while i < alg.dim {
+        let grade = popcount(i)
+        let sign_exp = (grade * (grade - 1)) / 2
+        let sign = if (sign_exp & 1) == 0 { 1.0 } else { -1.0 }
+        r.c[i as usize] = a.c[i as usize] * sign
+        i = i + 1
+    }
+    r
+}
+
+/// Grade extraction: return only components of grade k.
+pub fn cl_grade(alg: ClAlgebra, a: ClElement, grade: i32) -> ClElement with Mut, Panic, Div {
+    var r = cl_zero()
+    var i: i32 = 0
+    while i < alg.dim {
+        if popcount(i) == grade {
+            r.c[i as usize] = a.c[i as usize]
+        }
+        i = i + 1
+    }
+    r
+}
+
+/// Scalar part (grade 0).
+pub fn cl_scalar_part(a: ClElement) -> f64 {
+    a.c[0]
+}
+
+/// Squared norm via the scalar part of a * reverse(a).
+pub fn cl_norm_sq(alg: ClAlgebra, a: ClElement) -> f64 with Mut, Panic, Div {
+    let rev_a = cl_reverse(alg, a)
+    let product = cl_mul(alg, a, rev_a)
+    product.c[0]
+}
+
+// ============================================================================
+// ALGEBRA PROPERTIES
+// ============================================================================
+
+/// Total dimension of the algebra.
+pub fn cl_dim(alg: ClAlgebra) -> i32 { alg.dim }
+
+/// Number of generators.
+pub fn cl_generators(alg: ClAlgebra) -> i32 { alg.n }
+
+/// Signature as (p, q).
+pub fn cl_signature_p(alg: ClAlgebra) -> i32 { alg.p }
+pub fn cl_signature_q(alg: ClAlgebra) -> i32 { alg.q }
