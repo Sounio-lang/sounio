@@ -7624,6 +7624,19 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
             }
         }
     }
+    // Handle postfix array index: expr[idx] — 175=LBracket, 176=RBracket, 27=As
+    if MP_KIND[MC_POS as usize] == 175 {
+        MC_POS = MC_POS + 1
+        we(0x50)  // push rax (base)
+        mc_parse_expr()  // index → rax
+        if MP_KIND[MC_POS as usize] == 27 { MC_POS = MC_POS + 1 }
+        if MP_KIND[MC_POS as usize] == 120 { MC_POS = MC_POS + 1 }
+        if MP_KIND[MC_POS as usize] == 176 { MC_POS = MC_POS + 1 }
+        we(0x48); we(0xC1); we(0xE0); we(0x03)  // shl rax, 3
+        we(0x59)  // pop rcx (base)
+        we(0x48); we(0x01); we(0xC8)  // add rax, rcx
+        we(0x48); we(0x8B); we(0x00)  // mov rax, [rax]
+    }
     // Pratt operator loop
     while true {
         let op = MP_KIND[MC_POS as usize]
@@ -8361,6 +8374,67 @@ fn mc_stmt_ident() with Mut, Panic, Div {
         return 0
     }
 
+    // Array index: ident[idx] = expr  OR  ident[idx] (read)
+    // 175=LBracket, 176=RBracket, 27=As keyword
+    if MP_KIND[MC_POS as usize] == 175 {
+        MC_POS = MC_POS + 1  // skip [
+        mc_parse_expr()        // index → rax
+        if MP_KIND[MC_POS as usize] == 27 { MC_POS = MC_POS + 1 }   // skip 'as'
+        if MP_KIND[MC_POS as usize] == 120 { MC_POS = MC_POS + 1 }  // skip 'usize'
+        if MP_KIND[MC_POS as usize] == 176 { MC_POS = MC_POS + 1 }  // skip ]
+
+        let agi = mc_find_global_src(id_s, id_len)
+        var a_elem_sz: i64 = 8
+        if agi >= 0 { a_elem_sz = GLOBAL_ELEM_SIZES[agi as usize] }
+
+        if MP_KIND[MC_POS as usize] == 134 {
+            // Assignment: ident[idx] = expr
+            MC_POS = MC_POS + 1
+            we(0x50)  // push rax (index)
+            mc_parse_expr()  // value → rax
+            we(0x48); we(0x89); we(0xC2)  // mov rdx, rax (value)
+            we(0x58)  // pop rax (index)
+            if agi >= 0 {
+                let gaddr = MC_BSS_BASE() + GLOBAL_OFFSETS[agi as usize]
+                if a_elem_sz == 1 {
+                    we(0x48); we(0xB9)
+                    var k: i64 = 0
+                    while k < 8 { we((gaddr >> (k * 8)) & 0xFF); k = k + 1 }
+                    we(0x48); we(0x01); we(0xC1)  // add rcx, rax
+                    we(0x88); we(0x11)             // mov [rcx], dl
+                } else {
+                    we(0x48); we(0xC1); we(0xE0); we(0x03)  // shl rax, 3
+                    we(0x48); we(0xB9)
+                    var k: i64 = 0
+                    while k < 8 { we((gaddr >> (k * 8)) & 0xFF); k = k + 1 }
+                    we(0x48); we(0x01); we(0xC1)  // add rcx, rax
+                    we(0x48); we(0x89); we(0x11)  // mov [rcx], rdx
+                }
+            }
+        } else {
+            // Read: ident[idx] → rax
+            if agi >= 0 {
+                let gaddr = MC_BSS_BASE() + GLOBAL_OFFSETS[agi as usize]
+                if a_elem_sz == 1 {
+                    we(0x48); we(0xB9)
+                    var k: i64 = 0
+                    while k < 8 { we((gaddr >> (k * 8)) & 0xFF); k = k + 1 }
+                    we(0x48); we(0x01); we(0xC8)  // add rax, rcx
+                    we(0x48); we(0x0F); we(0xB6); we(0x00)  // movzx rax, byte [rax]
+                } else {
+                    we(0x48); we(0xC1); we(0xE0); we(0x03)  // shl rax, 3
+                    we(0x48); we(0xB9)
+                    var k: i64 = 0
+                    while k < 8 { we((gaddr >> (k * 8)) & 0xFF); k = k + 1 }
+                    we(0x48); we(0x01); we(0xC8)  // add rax, rcx
+                    we(0x48); we(0x8B); we(0x00)  // mov rax, [rax]
+                }
+            }
+        }
+        mc_stmt_trailing_binops()
+        return 0
+    }
+
     // Assignment: ident = expr
     if MP_KIND[MC_POS as usize] == 134 {
         MC_POS = MC_POS + 1
@@ -8369,7 +8443,6 @@ fn mc_stmt_ident() with Mut, Panic, Div {
         if slot >= 0 {
             mc_emit_store_rax(slot)
         } else {
-            // Try global variable assignment
             let gi = mc_find_global_src(id_s, id_len)
             if gi >= 0 {
                 mc_emit_store_global_scalar(gi)
