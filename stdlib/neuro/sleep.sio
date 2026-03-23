@@ -1,0 +1,390 @@
+//! stdlib/neuro/sleep.sio — Sleep Stage Coherence Models
+//!
+//! Generates neurophysiologically motivated EEG coherence matrices
+//! for each AASM sleep stage (Wake, N1, N2, N3, REM).
+//!
+//! These are SYNTHETIC models based on published sleep EEG literature:
+//!   - Wake: high alpha/beta coherence, low delta
+//!   - N1 (drowsy): alpha drops, theta rises
+//!   - N2 (light sleep): sleep spindles (sigma 12-15Hz in beta range)
+//!   - N3 (deep sleep): dominant delta, high-amplitude slow waves
+//!   - REM: wake-like gamma/beta, but with theta + phasic bursts
+//!
+//! The coherence matrix is 16×16 (16 channels: standard 10-20 subset)
+//! which maps naturally to the sedenion's 16 components.
+//!
+//! References:
+//!   Prerau et al. (2017): Sleep neurophysiology review
+//!   Boller et al. (2023): Ricci curvature captures aging in brain FC
+
+// ============================================================================
+// SLEEP STAGE ENUM
+// ============================================================================
+
+// Stage codes: 0=Wake, 1=N1, 2=N2, 3=N3, 4=REM
+pub fn stage_wake() -> i32 { 0 }
+pub fn stage_n1() -> i32 { 1 }
+pub fn stage_n2() -> i32 { 2 }
+pub fn stage_n3() -> i32 { 3 }
+pub fn stage_rem() -> i32 { 4 }
+
+// ============================================================================
+// COHERENCE MATRIX (16×16 = 256 entries, row-major)
+// ============================================================================
+
+pub struct SleepCoherence {
+    // 16×16 coherence matrix (symmetric, diagonal = 1.0)
+    coh: [f64; 256],
+    n: i32,
+    stage: i32,
+    // Per-channel power in 5 bands [ch * 5 + band]
+    band_power: [f64; 80],
+    // Global metrics
+    mean_coherence: f64,
+    clustering: f64,
+    density: f64,
+}
+
+pub fn sleep_coherence_new(stage: i32) -> SleepCoherence {
+    SleepCoherence {
+        coh: [0.0; 256],
+        n: 16,
+        stage: stage,
+        band_power: [0.0; 80],
+        mean_coherence: 0.0,
+        clustering: 0.0,
+        density: 0.0,
+    }
+}
+
+// ============================================================================
+// LCG RNG (deterministic, reproducible)
+// ============================================================================
+
+fn lcg(s: i64) -> i64 { s * 6364136223846793005 + 1442695040888963407 }
+fn lcg_f64(s: i64) -> f64 with Div, Panic {
+    let v = if s < 0 { 0 - s } else { s }
+    (v as f64) / 9223372036854775807.0
+}
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+// ============================================================================
+// SYNTHETIC COHERENCE GENERATORS
+// ============================================================================
+//
+// Each generator produces a 16×16 coherence matrix with properties
+// matching the neurophysiology of that sleep stage.
+//
+// Key parameters per stage (from literature):
+//   mean_coh: overall connectivity strength
+//   local_bias: how much nearby channels are more coherent
+//   noise: random variation
+
+/// Generate coherence matrix for a specific sleep stage.
+///
+/// The matrices differ in:
+///   - Overall connectivity density (η parameter)
+///   - Clustering coefficient (C parameter)
+///   - Band-specific power distribution
+///   - Hemispheric symmetry
+///
+/// These differences are what ORC phase classification detects.
+pub fn generate_stage_coherence(stage: i32, seed: i64) -> SleepCoherence with Mut, Panic, Div {
+    var sc = sleep_coherence_new(stage)
+
+    // Stage-specific parameters (neurophysiologically motivated)
+    // mean_coh: base coherence level
+    // cluster_strength: local triangle formation
+    // long_range: interhemispheric / distant connections
+    let mean_coh = if stage == 0 { 0.45 }       // Wake: moderate-high
+                   else if stage == 1 { 0.30 }   // N1: dropping
+                   else if stage == 2 { 0.35 }   // N2: spindle bursts
+                   else if stage == 3 { 0.55 }   // N3: high delta sync
+                   else { 0.40 }                  // REM: wake-like
+
+    let cluster_str = if stage == 0 { 0.25 }     // Wake: moderate clustering
+                      else if stage == 1 { 0.15 } // N1: low
+                      else if stage == 2 { 0.30 } // N2: spindle clusters
+                      else if stage == 3 { 0.45 } // N3: massive delta clusters
+                      else { 0.20 }                // REM: low-moderate
+
+    let long_range = if stage == 0 { 0.20 }       // Wake: good long-range
+                     else if stage == 1 { 0.10 }   // N1: fragmenting
+                     else if stage == 2 { 0.15 }   // N2: some spindle spread
+                     else if stage == 3 { 0.08 }   // N3: very local
+                     else { 0.25 }                  // REM: strong long-range
+
+    let noise_level = 0.05
+
+    // Generate coherence matrix
+    var s = seed
+    var u: i32 = 0
+    while u < 16 {
+        sc.coh[(u * 16 + u) as usize] = 1.0  // diagonal
+        var v: i32 = u + 1
+        while v < 16 {
+            // Distance: channels are laid out roughly as 10-20 positions
+            // Nearby channels (|u-v| <= 2) have higher coherence
+            let dist = v - u
+            let local_factor = if dist <= 2 { 1.0 + cluster_str }
+                              else if dist <= 4 { 1.0 }
+                              else if dist <= 8 { 0.5 + long_range }
+                              else { long_range }
+
+            // Hemispheric symmetry: channels 0-7 left, 8-15 right
+            // Homologous pairs (u, u+8) have extra coherence
+            let hemi_bonus = if u < 8 && v == u + 8 { 0.15 } else { 0.0 }
+
+            s = lcg(s)
+            let noise = (lcg_f64(s) - 0.5) * noise_level
+
+            var coh_val = mean_coh * local_factor + hemi_bonus + noise
+            if coh_val > 1.0 { coh_val = 1.0 }
+            if coh_val < 0.0 { coh_val = 0.0 }
+
+            sc.coh[(u * 16 + v) as usize] = coh_val
+            sc.coh[(v * 16 + u) as usize] = coh_val  // symmetric
+            v = v + 1
+        }
+        u = u + 1
+    }
+
+    // Band power per channel (5 bands × 16 channels)
+    // Delta=0, Theta=1, Alpha=2, Beta=3, Gamma=4
+    u = 0
+    while u < 16 {
+        s = lcg(s)
+        let ch_noise = lcg_f64(s) * 0.1
+
+        if stage == 0 {
+            // Wake: alpha dominant, some beta/gamma
+            sc.band_power[(u * 5 + 0) as usize] = 0.10 + ch_noise  // delta
+            sc.band_power[(u * 5 + 1) as usize] = 0.15 + ch_noise  // theta
+            sc.band_power[(u * 5 + 2) as usize] = 0.35 + ch_noise  // alpha
+            sc.band_power[(u * 5 + 3) as usize] = 0.25 + ch_noise  // beta
+            sc.band_power[(u * 5 + 4) as usize] = 0.15 + ch_noise  // gamma
+        } else if stage == 1 {
+            // N1: alpha dropping, theta rising
+            sc.band_power[(u * 5 + 0) as usize] = 0.15 + ch_noise
+            sc.band_power[(u * 5 + 1) as usize] = 0.30 + ch_noise
+            sc.band_power[(u * 5 + 2) as usize] = 0.20 + ch_noise
+            sc.band_power[(u * 5 + 3) as usize] = 0.20 + ch_noise
+            sc.band_power[(u * 5 + 4) as usize] = 0.10 + ch_noise
+        } else if stage == 2 {
+            // N2: sleep spindles (sigma in beta), K-complexes
+            sc.band_power[(u * 5 + 0) as usize] = 0.20 + ch_noise
+            sc.band_power[(u * 5 + 1) as usize] = 0.20 + ch_noise
+            sc.band_power[(u * 5 + 2) as usize] = 0.15 + ch_noise
+            sc.band_power[(u * 5 + 3) as usize] = 0.30 + ch_noise  // spindles
+            sc.band_power[(u * 5 + 4) as usize] = 0.10 + ch_noise
+        } else if stage == 3 {
+            // N3: delta dominant (>75% power)
+            sc.band_power[(u * 5 + 0) as usize] = 0.55 + ch_noise  // massive delta
+            sc.band_power[(u * 5 + 1) as usize] = 0.15 + ch_noise
+            sc.band_power[(u * 5 + 2) as usize] = 0.10 + ch_noise
+            sc.band_power[(u * 5 + 3) as usize] = 0.10 + ch_noise
+            sc.band_power[(u * 5 + 4) as usize] = 0.05 + ch_noise
+        } else {
+            // REM: mixed, theta + beta + gamma, like wake but with theta
+            sc.band_power[(u * 5 + 0) as usize] = 0.10 + ch_noise
+            sc.band_power[(u * 5 + 1) as usize] = 0.25 + ch_noise  // theta prominent
+            sc.band_power[(u * 5 + 2) as usize] = 0.15 + ch_noise
+            sc.band_power[(u * 5 + 3) as usize] = 0.25 + ch_noise
+            sc.band_power[(u * 5 + 4) as usize] = 0.20 + ch_noise  // gamma for dreams
+        }
+        u = u + 1
+    }
+
+    // Compute global metrics
+    var sum_coh: f64 = 0.0
+    var edge_count: i32 = 0
+    u = 0
+    while u < 16 {
+        var v: i32 = u + 1
+        while v < 16 {
+            sum_coh = sum_coh + sc.coh[(u * 16 + v) as usize]
+            if sc.coh[(u * 16 + v) as usize] > 0.3 { edge_count = edge_count + 1 }
+            v = v + 1
+        }
+        u = u + 1
+    }
+    let n_pairs = 16 * 15 / 2
+    sc.mean_coherence = sum_coh / (n_pairs as f64)
+    sc.density = (edge_count as f64) / (n_pairs as f64)
+
+    // Compute clustering (fraction of triangles among edges > 0.3)
+    var triangles: i32 = 0
+    var possible: i32 = 0
+    u = 0
+    while u < 16 {
+        var v: i32 = u + 1
+        while v < 16 {
+            if sc.coh[(u * 16 + v) as usize] > 0.3 {
+                var w: i32 = v + 1
+                while w < 16 {
+                    if sc.coh[(u * 16 + w) as usize] > 0.3 {
+                        possible = possible + 1
+                        if sc.coh[(v * 16 + w) as usize] > 0.3 {
+                            triangles = triangles + 1
+                        }
+                    }
+                    w = w + 1
+                }
+            }
+            v = v + 1
+        }
+        u = u + 1
+    }
+    sc.clustering = if possible > 0 { (triangles as f64) / (possible as f64) } else { 0.0 }
+
+    sc
+}
+
+// ============================================================================
+// SEDENION ENCODING OF SLEEP EEG
+// ============================================================================
+
+/// Encode a sleep coherence matrix as a sedenion.
+///
+/// The 16 components:
+///   e0-e4:   mean band power (delta, theta, alpha, beta, gamma)
+///   e5-e9:   mean band coherence (same 5 bands, averaged over channel pairs)
+///   e10:     overall mean coherence
+///   e11:     clustering coefficient
+///   e12:     density
+///   e13:     hemispheric asymmetry (L-R power difference)
+///   e14:     anterior-posterior gradient
+///   e15:     stage-invariant noise term
+pub fn sleep_to_sedenion(sc: SleepCoherence) -> [f64; 16] with Mut, Panic, Div {
+    var s: [f64; 16] = [0.0; 16]
+
+    // e0-e4: mean band power across channels
+    var band: i32 = 0
+    while band < 5 {
+        var sum: f64 = 0.0
+        var ch: i32 = 0
+        while ch < 16 {
+            sum = sum + sc.band_power[(ch * 5 + band) as usize]
+            ch = ch + 1
+        }
+        s[band as usize] = sum / 16.0
+        band = band + 1
+    }
+
+    // e5-e9: band coherence approximation
+    // Use overall coherence scaled by band power ratio
+    band = 0
+    while band < 5 {
+        s[(band + 5) as usize] = sc.mean_coherence * s[band as usize]
+        band = band + 1
+    }
+
+    // e10-e12: graph metrics
+    s[10] = sc.mean_coherence
+    s[11] = sc.clustering
+    s[12] = sc.density
+
+    // e13: hemispheric asymmetry
+    var left_power: f64 = 0.0
+    var right_power: f64 = 0.0
+    var ch: i32 = 0
+    while ch < 8 {
+        var b: i32 = 0
+        while b < 5 {
+            left_power = left_power + sc.band_power[(ch * 5 + b) as usize]
+            right_power = right_power + sc.band_power[((ch + 8) * 5 + b) as usize]
+            b = b + 1
+        }
+        ch = ch + 1
+    }
+    let total = left_power + right_power
+    s[13] = if total > 0.001 { (left_power - right_power) / total } else { 0.0 }
+
+    // e14: anterior-posterior gradient (front vs back channels)
+    var front: f64 = 0.0
+    var back: f64 = 0.0
+    ch = 0
+    while ch < 4 {
+        var b: i32 = 0
+        while b < 5 {
+            front = front + sc.band_power[(ch * 5 + b) as usize]
+            back = back + sc.band_power[((ch + 12) * 5 + b) as usize]
+            b = b + 1
+        }
+        ch = ch + 1
+    }
+    let fb_total = front + back
+    s[14] = if fb_total > 0.001 { (front - back) / fb_total } else { 0.0 }
+
+    // e15: fixed noise floor
+    s[15] = 0.01
+
+    // Normalize to unit norm
+    var norm_sq: f64 = 0.0
+    var i: i32 = 0
+    while i < 16 { norm_sq = norm_sq + s[i as usize] * s[i as usize]; i = i + 1 }
+    let norm = sqrt_f64(norm_sq)
+    if norm > 0.001 {
+        i = 0
+        while i < 16 { s[i as usize] = s[i as usize] / norm; i = i + 1 }
+    }
+
+    s
+}
+
+// ============================================================================
+// ORC PHASE CLASSIFICATION (simplified, self-contained)
+// ============================================================================
+
+/// Compute η = ⟨k⟩²/N for the coherence graph (threshold > 0.3).
+pub fn sleep_eta(sc: SleepCoherence) -> f64 with Mut, Panic, Div {
+    var edges: i32 = 0
+    var u: i32 = 0
+    while u < 16 {
+        var v: i32 = u + 1
+        while v < 16 {
+            if sc.coh[(u * 16 + v) as usize] > 0.3 { edges = edges + 1 }
+            v = v + 1
+        }
+        u = u + 1
+    }
+    let mean_k = (2.0 * (edges as f64)) / 16.0
+    mean_k * mean_k / 16.0
+}
+
+/// Critical density η_c(N) = 3.75 - 14.62/√N
+pub fn sleep_eta_c() -> f64 with Mut, Panic, Div {
+    3.75 - 14.62 / sqrt_f64(16.0)
+}
+
+/// Phase classification: 0=DEGENERATE, 1=SPHERICAL, 2=HYPERBOLIC, 3=EUCLIDEAN
+pub fn sleep_phase(sc: SleepCoherence) -> i32 with Mut, Panic, Div {
+    let eta = sleep_eta(sc)
+    let eta_c = sleep_eta_c()
+    let c_star = 0.05
+
+    if eta > eta_c { return 1 }  // SPHERICAL
+    if sc.clustering > c_star { return 2 }  // HYPERBOLIC
+    return 3  // EUCLIDEAN
+}
+
+/// Generate a full sleep cycle: Wake → N1 → N2 → N3 → N2 → REM
+/// Returns 6 coherence matrices representing one cycle.
+pub fn generate_sleep_cycle(base_seed: i64) -> [SleepCoherence; 6] with Mut, Panic, Div {
+    var cycle: [SleepCoherence; 6] = [sleep_coherence_new(0); 6]
+    cycle[0] = generate_stage_coherence(0, base_seed)            // Wake
+    cycle[1] = generate_stage_coherence(1, base_seed + 1000)     // N1
+    cycle[2] = generate_stage_coherence(2, base_seed + 2000)     // N2
+    cycle[3] = generate_stage_coherence(3, base_seed + 3000)     // N3
+    cycle[4] = generate_stage_coherence(2, base_seed + 4000)     // N2 again
+    cycle[5] = generate_stage_coherence(4, base_seed + 5000)     // REM
+    cycle
+}

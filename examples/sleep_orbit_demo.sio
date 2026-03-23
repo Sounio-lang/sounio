@@ -1,0 +1,424 @@
+//@ run-pass
+// sleep_orbit_demo.sio — THE EXPERIMENT
+//
+// Consciousness as Bounded Sedenion Orbit
+//
+// One sleep cycle: Wake → N1 → N2 → N3 → N2 → REM
+// For each stage:
+//   1. Generate coherence matrix (synthetic, neurophysiologically motivated)
+//   2. Encode as sedenion (16 EEG features → 16 components)
+//   3. Run Mandelbrot iteration z² + c
+//   4. Compute η and ORC phase classification
+//   5. Compare: bounded orbit ↔ conscious state?
+//
+// PREDICTION:
+//   Conscious (Wake, REM): bounded orbit, spherical phase
+//   Unconscious (N3): escaped orbit OR maximal ZD proximity, hyperbolic
+//   Transitional (N1, N2): intermediate
+
+// ============================================================================
+// MATH + SEDENION (Cayley-Dickson: C → H → O → S)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+fn q_mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] with Mut, Panic, Div {
+    var r: [f64; 4] = [0.0; 4]
+    r[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3]
+    r[1] = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2]
+    r[2] = a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1]
+    r[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0]
+    r
+}
+fn q_add(a: [f64; 4], b: [f64; 4]) -> [f64; 4] with Mut, Panic {
+    [a[0]+b[0], a[1]+b[1], a[2]+b[2], a[3]+b[3]]
+}
+fn q_conj(a: [f64; 4]) -> [f64; 4] with Mut, Panic {
+    [a[0], 0.0-a[1], 0.0-a[2], 0.0-a[3]]
+}
+fn q_sub(a: [f64; 4], b: [f64; 4]) -> [f64; 4] with Mut, Panic {
+    [a[0]-b[0], a[1]-b[1], a[2]-b[2], a[3]-b[3]]
+}
+
+fn o_mul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var aq: [f64; 4] = [a[0],a[1],a[2],a[3]]
+    var bq: [f64; 4] = [a[4],a[5],a[6],a[7]]
+    var cq: [f64; 4] = [b[0],b[1],b[2],b[3]]
+    var dq: [f64; 4] = [b[4],b[5],b[6],b[7]]
+    let real = q_sub(q_mul(aq, cq), q_mul(q_conj(dq), bq))
+    let imag = q_add(q_mul(dq, aq), q_mul(bq, q_conj(cq)))
+    [real[0],real[1],real[2],real[3],imag[0],imag[1],imag[2],imag[3]]
+}
+fn o_add(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic {
+    [a[0]+b[0],a[1]+b[1],a[2]+b[2],a[3]+b[3],a[4]+b[4],a[5]+b[5],a[6]+b[6],a[7]+b[7]]
+}
+fn o_conj(a: [f64; 8]) -> [f64; 8] with Mut, Panic {
+    [a[0], 0.0-a[1], 0.0-a[2], 0.0-a[3], 0.0-a[4], 0.0-a[5], 0.0-a[6], 0.0-a[7]]
+}
+fn o_sub(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic {
+    [a[0]-b[0],a[1]-b[1],a[2]-b[2],a[3]-b[3],a[4]-b[4],a[5]-b[5],a[6]-b[6],a[7]-b[7]]
+}
+
+fn s_mul(p: [f64; 16], q: [f64; 16]) -> [f64; 16] with Mut, Panic, Div {
+    var a: [f64; 8] = [p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]]
+    var b: [f64; 8] = [p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]]
+    var c: [f64; 8] = [q[0],q[1],q[2],q[3],q[4],q[5],q[6],q[7]]
+    var d: [f64; 8] = [q[8],q[9],q[10],q[11],q[12],q[13],q[14],q[15]]
+    let real = o_sub(o_mul(a, c), o_mul(o_conj(d), b))
+    let imag = o_add(o_mul(d, a), o_mul(b, o_conj(c)))
+    [real[0],real[1],real[2],real[3],real[4],real[5],real[6],real[7],
+     imag[0],imag[1],imag[2],imag[3],imag[4],imag[5],imag[6],imag[7]]
+}
+
+fn s_add(a: [f64; 16], b: [f64; 16]) -> [f64; 16] with Mut, Panic, Div {
+    var r: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 { r[i] = a[i] + b[i]; i = i + 1 }
+    r
+}
+
+fn s_norm_sq(a: [f64; 16]) -> f64 with Mut, Panic, Div {
+    var s: f64 = 0.0
+    var i = 0
+    while i < 16 { s = s + a[i] * a[i]; i = i + 1 }
+    s
+}
+
+fn s_norm(a: [f64; 16]) -> f64 with Mut, Panic, Div { sqrt_f64(s_norm_sq(a)) }
+
+// ============================================================================
+// LCG + SLEEP COHERENCE (inlined from sleep.sio for JIT self-containment)
+// ============================================================================
+
+fn lcg(s: i64) -> i64 { s * 6364136223846793005 + 1442695040888963407 }
+fn lcg_f64(s: i64) -> f64 with Div, Panic {
+    let v = if s < 0 { 0 - s } else { s }
+    (v as f64) / 9223372036854775807.0
+}
+
+struct SleepStage {
+    coh: [f64; 256],
+    band_power: [f64; 80],
+    stage: i32,
+    mean_coh: f64,
+    clustering: f64,
+    density: f64,
+}
+
+fn gen_stage(stage: i32, seed: i64) -> SleepStage with Mut, Panic, Div {
+    var sc = SleepStage {
+        coh: [0.0; 256], band_power: [0.0; 80], stage: stage,
+        mean_coh: 0.0, clustering: 0.0, density: 0.0,
+    }
+
+    let base_coh = if stage==0 {0.45} else if stage==1 {0.30} else if stage==2 {0.35} else if stage==3 {0.55} else {0.40}
+    let cluster = if stage==0 {0.25} else if stage==1 {0.15} else if stage==2 {0.30} else if stage==3 {0.45} else {0.20}
+    let lr = if stage==0 {0.20} else if stage==1 {0.10} else if stage==2 {0.15} else if stage==3 {0.08} else {0.25}
+
+    var s = seed
+    var u: i32 = 0
+    while u < 16 {
+        sc.coh[(u*16+u) as usize] = 1.0
+        var v: i32 = u+1
+        while v < 16 {
+            let dist = v - u
+            let local_f = if dist <= 2 { 1.0 + cluster } else if dist <= 4 { 1.0 } else { 0.5 + lr }
+            let hemi = if u < 8 && v == u + 8 { 0.15 } else { 0.0 }
+            s = lcg(s)
+            let noise = (lcg_f64(s) - 0.5) * 0.05
+            var cv = base_coh * local_f + hemi + noise
+            if cv > 1.0 { cv = 1.0 }
+            if cv < 0.0 { cv = 0.0 }
+            sc.coh[(u*16+v) as usize] = cv
+            sc.coh[(v*16+u) as usize] = cv
+            v = v+1
+        }
+
+        // Band power
+        s = lcg(s)
+        let cn = lcg_f64(s) * 0.1
+        if stage == 0 {
+            sc.band_power[(u*5+0) as usize]=0.10+cn; sc.band_power[(u*5+1) as usize]=0.15+cn
+            sc.band_power[(u*5+2) as usize]=0.35+cn; sc.band_power[(u*5+3) as usize]=0.25+cn
+            sc.band_power[(u*5+4) as usize]=0.15+cn
+        } else if stage == 1 {
+            sc.band_power[(u*5+0) as usize]=0.15+cn; sc.band_power[(u*5+1) as usize]=0.30+cn
+            sc.band_power[(u*5+2) as usize]=0.20+cn; sc.band_power[(u*5+3) as usize]=0.20+cn
+            sc.band_power[(u*5+4) as usize]=0.10+cn
+        } else if stage == 2 {
+            sc.band_power[(u*5+0) as usize]=0.20+cn; sc.band_power[(u*5+1) as usize]=0.20+cn
+            sc.band_power[(u*5+2) as usize]=0.15+cn; sc.band_power[(u*5+3) as usize]=0.30+cn
+            sc.band_power[(u*5+4) as usize]=0.10+cn
+        } else if stage == 3 {
+            sc.band_power[(u*5+0) as usize]=0.55+cn; sc.band_power[(u*5+1) as usize]=0.15+cn
+            sc.band_power[(u*5+2) as usize]=0.10+cn; sc.band_power[(u*5+3) as usize]=0.10+cn
+            sc.band_power[(u*5+4) as usize]=0.05+cn
+        } else {
+            sc.band_power[(u*5+0) as usize]=0.10+cn; sc.band_power[(u*5+1) as usize]=0.25+cn
+            sc.band_power[(u*5+2) as usize]=0.15+cn; sc.band_power[(u*5+3) as usize]=0.25+cn
+            sc.band_power[(u*5+4) as usize]=0.20+cn
+        }
+        u = u+1
+    }
+
+    // Compute metrics
+    var sum_coh: f64 = 0.0
+    var edges: i32 = 0
+    u = 0
+    while u < 16 {
+        var v: i32 = u+1
+        while v < 16 {
+            sum_coh = sum_coh + sc.coh[(u*16+v) as usize]
+            if sc.coh[(u*16+v) as usize] > 0.3 { edges = edges + 1 }
+            v = v+1
+        }
+        u = u+1
+    }
+    sc.mean_coh = sum_coh / 120.0
+    sc.density = (edges as f64) / 120.0
+
+    // Clustering
+    var tri: i32 = 0
+    var pos: i32 = 0
+    u = 0
+    while u < 16 {
+        var v: i32 = u+1
+        while v < 16 {
+            if sc.coh[(u*16+v) as usize] > 0.3 {
+                var w: i32 = v+1
+                while w < 16 {
+                    if sc.coh[(u*16+w) as usize] > 0.3 {
+                        pos = pos + 1
+                        if sc.coh[(v*16+w) as usize] > 0.3 { tri = tri + 1 }
+                    }
+                    w = w+1
+                }
+            }
+            v = v+1
+        }
+        u = u+1
+    }
+    sc.clustering = if pos > 0 { (tri as f64) / (pos as f64) } else { 0.0 }
+
+    sc
+}
+
+// ============================================================================
+// SEDENION ENCODING
+// ============================================================================
+
+fn stage_to_sedenion(sc: SleepStage) -> [f64; 16] with Mut, Panic, Div {
+    var s: [f64; 16] = [0.0; 16]
+
+    // e0-e4: mean band power
+    var band: i32 = 0
+    while band < 5 {
+        var sum: f64 = 0.0
+        var ch: i32 = 0
+        while ch < 16 { sum = sum + sc.band_power[(ch*5+band) as usize]; ch = ch+1 }
+        s[band as usize] = sum / 16.0
+        band = band+1
+    }
+
+    // e5-e9: band coherence
+    band = 0
+    while band < 5 { s[(band+5) as usize] = sc.mean_coh * s[band as usize]; band = band+1 }
+
+    // e10-e14: graph metrics
+    s[10] = sc.mean_coh
+    s[11] = sc.clustering
+    s[12] = sc.density
+    s[13] = 0.0  // hemispheric asymmetry (simplified)
+    s[14] = 0.0  // AP gradient (simplified)
+    s[15] = 0.01 // noise
+
+    // Normalize
+    var nsq: f64 = 0.0
+    var i: i32 = 0
+    while i < 16 { nsq = nsq + s[i as usize] * s[i as usize]; i = i+1 }
+    let n = sqrt_f64(nsq)
+    if n > 0.001 { i = 0; while i < 16 { s[i as usize] = s[i as usize] / n; i = i+1 } }
+
+    // Scale to target norm (inside Mandelbrot set for bounded orbits)
+    let target = 0.4
+    i = 0
+    while i < 16 { s[i as usize] = s[i as usize] * target; i = i+1 }
+
+    s
+}
+
+// ============================================================================
+// MANDELBROT ORBIT
+// ============================================================================
+
+struct OrbitResult {
+    escape_time: i32,
+    final_norm: f64,
+    max_norm: f64,
+    bounded: bool,
+    // Zero-divisor proximity at final state
+    zd_proximity: f64,
+}
+
+fn mandelbrot_orbit(c: [f64; 16], max_iter: i32) -> OrbitResult with Mut, Panic, Div {
+    var z: [f64; 16] = [0.0; 16]
+    var max_n: f64 = 0.0
+    var n = 0
+    while n < max_iter {
+        z = s_add(s_mul(z, z), c)
+        let zn = s_norm(z)
+        if zn > max_n { max_n = zn }
+        if zn > 10.0 {
+            return OrbitResult {
+                escape_time: n, final_norm: zn, max_norm: max_n,
+                bounded: false, zd_proximity: 0.0,
+            }
+        }
+        n = n + 1
+    }
+
+    // Compute ZD proximity: |oct_norm - sed_norm| / total_norm
+    var oct_nsq: f64 = 0.0
+    var sed_nsq: f64 = 0.0
+    var inner: f64 = 0.0
+    var i: i32 = 0
+    while i < 8 {
+        oct_nsq = oct_nsq + z[i] * z[i]
+        sed_nsq = sed_nsq + z[i+8] * z[i+8]
+        inner = inner + z[i] * z[i+8]
+        i = i + 1
+    }
+    let on = sqrt_f64(oct_nsq)
+    let sn = sqrt_f64(sed_nsq)
+    let norm_imbal = if on + sn > 0.001 { abs_f64(on - sn) / (on + sn) } else { 1.0 }
+    let ortho = if on * sn > 0.001 { abs_f64(inner) / (on * sn) } else { 1.0 }
+    let zd_prox = sqrt_f64(norm_imbal * norm_imbal + ortho * ortho)
+
+    let fn_norm = s_norm(z)
+    OrbitResult {
+        escape_time: max_iter, final_norm: fn_norm, max_norm: max_n,
+        bounded: true, zd_proximity: zd_prox,
+    }
+}
+
+// ============================================================================
+// ORC PHASE (simplified)
+// ============================================================================
+
+fn compute_eta(sc: SleepStage) -> f64 with Mut, Panic, Div {
+    var edges: i32 = 0
+    var u: i32 = 0
+    while u < 16 {
+        var v: i32 = u+1
+        while v < 16 {
+            if sc.coh[(u*16+v) as usize] > 0.3 { edges = edges + 1 }
+            v = v+1
+        }
+        u = u+1
+    }
+    let mk = 2.0 * (edges as f64) / 16.0
+    mk * mk / 16.0
+}
+
+// ============================================================================
+// PRINT HELPERS
+// ============================================================================
+
+fn pr_f64(x: f64) with IO, Mut, Panic, Div {
+    if x < 0.0 { print("-"); pr_f64(0.0 - x); return }
+    let ip = x as i64
+    let fp = ((x - (ip as f64)) * 10000.0 + 0.5) as i64
+    print(ip); print(".")
+    if fp < 10 { print("000") }
+    else if fp < 100 { print("00") }
+    else if fp < 1000 { print("0") }
+    print(fp)
+}
+
+fn stage_name(s: i32) with IO {
+    if s == 0 { print("Wake ") }
+    else if s == 1 { print("N1   ") }
+    else if s == 2 { print("N2   ") }
+    else if s == 3 { print("N3   ") }
+    else { print("REM  ") }
+}
+
+// ============================================================================
+// MAIN — THE EXPERIMENT
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("================================================================")
+    println("  CONSCIOUSNESS AS BOUNDED SEDENION ORBIT")
+    println("  Sleep cycle: Wake → N1 → N2 → N3 → N2 → REM")
+    println("  Real Cayley-Dickson z² + c, 20 iterations per stage")
+    println("================================================================")
+    println("")
+
+    let max_iter = 20
+    let eta_c = 3.75 - 14.62 / sqrt_f64(16.0)
+
+    println("  η_c(16) = 3.75 - 14.62/√16 = ")
+    print("  "); pr_f64(eta_c); println("")
+    println("")
+
+    // Sleep cycle: Wake(0), N1(1), N2(2), N3(3), N2(2), REM(4)
+    let stages: [i32; 6] = [0, 1, 2, 3, 2, 4]
+    let seeds: [i64; 6] = [42, 1042, 2042, 3042, 4042, 5042]
+
+    println("  Stage | η       | C       | Phase    | Orbit   | ||z_T|| | ZD prox | Conscious?")
+    println("  ------|---------|---------|----------|---------|---------|---------|----------")
+
+    var step: i32 = 0
+    while step < 6 {
+        let stage = stages[step as usize]
+        let sc = gen_stage(stage, seeds[step as usize])
+        let c = stage_to_sedenion(sc)
+        let orbit = mandelbrot_orbit(c, max_iter)
+        let eta = compute_eta(sc)
+
+        let phase = if eta > eta_c { 1 } else if sc.clustering > 0.05 { 2 } else { 3 }
+
+        print("  ")
+        stage_name(stage)
+        print(" | ")
+        pr_f64(eta); print(" | ")
+        pr_f64(sc.clustering); print(" | ")
+        if phase == 1 { print("SPHERCL ") }
+        else if phase == 2 { print("HYPERBL ") }
+        else { print("EUCLID  ") }
+        print(" | ")
+        if orbit.bounded { print("BOUNDED") } else { print("ESCAPE ") }
+        print(" | ")
+        pr_f64(orbit.final_norm); print(" | ")
+        pr_f64(orbit.zd_proximity); print(" | ")
+
+        // Conscious = (Wake or REM), Unconscious = N3
+        let conscious = stage == 0 || stage == 4
+        let unconscious = stage == 3
+        if conscious { println("YES") }
+        else if unconscious { println("NO") }
+        else { println("TRANS") }
+
+        step = step + 1
+    }
+
+    println("")
+    println("================================================================")
+    println("  PREDICTIONS:")
+    println("  1. Conscious (Wake,REM) → bounded orbit + spherical phase")
+    println("  2. Unconscious (N3) → escaped OR max ZD proximity")
+    println("  3. η should peak at N3 (max delta coherence)")
+    println("  4. ZD proximity should be LOWEST at N3")
+    println("     (approaching zero-divisor = approaching unconsciousness)")
+    println("================================================================")
+
+    0
+}
