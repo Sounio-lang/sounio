@@ -877,20 +877,32 @@ impl Parser {
         let start = self.current_span()
         let name = self.current_name()
 
-        // Check for path: Foo::Bar::baz
+        // Check for path: Foo::Bar::baz or turbofish: foo::<T>(args)
         if self.peek_ahead(1) == TokenKind::ColonColon {
             let pair = self.parse_type_path()
-            let p1 = pair.0
+            var p1 = pair.0
             let path = pair.1
+
+            // Turbofish: ident_or_path followed by ::<T, U>
+            // parse_type_path stops when :: is not followed by Ident,
+            // so ::<T> leaves us at the :: token.
+            var turbofish_args: Option<Box<TypeExprList>> = None
+            if p1.peek() == TokenKind::ColonColon && p1.peek_ahead(1) == TokenKind::Lt {
+                p1 = p1.advance()  // skip ::
+                let ta_pair = p1.parse_type_args()
+                p1 = ta_pair.0
+                turbofish_args = Some(Box::new(ta_pair.1))
+            }
 
             if !p1.no_struct_lit && p1.peek() == TokenKind::LBrace {
                 // Struct literal: Foo { x: 1, y: 2 }
                 p1.parse_struct_literal(path, start)
             } else {
-                // Path expression: Foo::Bar
+                // Path expression: Foo::Bar or turbofish path
                 let span = p1.span_from(start)
                 var e = mk_expr(ExprKind::ExprPath, span)
                 e.path = path
+                e.type_args = turbofish_args
                 (p1, e)
             }
         } else if !self.no_struct_lit && self.peek_ahead(1) == TokenKind::LBrace {
@@ -988,6 +1000,9 @@ impl Parser {
         p = p.expect(TokenKind::RParen)
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprCall, span)
+        // Propagate turbofish type args from callee path to call expression
+        // (callee.type_args is set by parse_ident_expr for foo::<T>(...) syntax)
+        e.type_args = callee.type_args
         e.left = Some(Box::new(callee))
         e.args = args_opt
         e = rewrite_hardware_publish_call(e)
