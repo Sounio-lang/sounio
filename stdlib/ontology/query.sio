@@ -1,207 +1,566 @@
-// stdlib/ontology/query.sio — SPARQL-like query engine
+// stdlib/ontology/query.sio
 //
-// Pattern-matching query over an OntCache triple store.
-// Variables represented as -1 in subject/predicate/object positions.
+// SPARQL-like Query Interface
+//
+// Provides pattern matching and query capabilities for ontologies.
 
 // ============================================================================
-// TYPES (duplicated from cache.sio for standalone compilation)
+// QUERY TERM TYPES
 // ============================================================================
 
-struct Triple {
-    subj: i32,
-    pred: i32,
-    obj: i32
+// Term type constants
+pub const TERM_VARIABLE: i64 = 0
+pub const TERM_IRI: i64 = 1
+pub const TERM_LITERAL: i64 = 2
+
+// Query term (variable, IRI, or literal)
+pub struct QueryTerm {
+    pub term_type: i64,
+    pub variable_id: i64,
+    pub iri_id: i64,
+    pub literal_id: i64,
+    pub literal_value: f64,
 }
 
-struct OntCache {
-    triples: [Triple; 512],
-    count: i32,
-    subj_idx: [i32; 512],
-    pred_idx: [i32; 512]
+pub fn queryterm_variable(var_id: i64) -> QueryTerm {
+    QueryTerm {
+        term_type: TERM_VARIABLE,
+        variable_id: var_id,
+        iri_id: 0,
+        literal_id: 0,
+        literal_value: 0.0,
+    }
 }
 
-struct QueryPattern {
-    subj: i32,      // -1 = variable
-    pred: i32,      // -1 = variable
-    obj: i32        // -1 = variable
+pub fn queryterm_iri(iri_id: i64) -> QueryTerm {
+    QueryTerm {
+        term_type: TERM_IRI,
+        variable_id: 0,
+        iri_id: iri_id,
+        literal_id: 0,
+        literal_value: 0.0,
+    }
 }
 
-struct QueryResult {
-    bindings: [i32; 32],
-    count: i32
+pub fn queryterm_literal(lit_id: i64, lit_value: f64) -> QueryTerm {
+    QueryTerm {
+        term_type: TERM_LITERAL,
+        variable_id: 0,
+        iri_id: 0,
+        literal_id: lit_id,
+        literal_value: lit_value,
+    }
 }
 
 // ============================================================================
-// QUERY ENGINE
+// TRIPLE PATTERN
 // ============================================================================
 
-// Match a single pattern against the cache.
-// Variable positions (-1) match anything and produce bindings.
-// Bindings are stored as [subj, pred, obj] triples in results.
-fn query_match(cache: OntCache, pattern: QueryPattern, results: &![QueryResult; 64], count: &!i32) with Mut, Div, Panic {
-    *count = 0
-    var i: i32 = 0
-    while i < cache.count {
-        let t = cache.triples[i]
+// Triple pattern for matching (subject, predicate, object)
+pub struct TriplePattern {
+    pub subject: QueryTerm,
+    pub predicate: QueryTerm,
+    pub object: QueryTerm,
+}
 
-        // Check subject match
-        var subj_ok = false
-        if pattern.subj < 0 {
-            subj_ok = true
-        } else if pattern.subj == t.subj {
-            subj_ok = true
+pub fn triple_pattern_new(subject: QueryTerm, predicate: QueryTerm, object: QueryTerm) -> TriplePattern {
+    TriplePattern {
+        subject: subject,
+        predicate: predicate,
+        object: object,
+    }
+}
+
+// ============================================================================
+// VARIABLE BINDING
+// ============================================================================
+
+// Single variable binding
+pub struct Binding {
+    pub variable_id: i64,
+    pub is_iri: bool,
+    pub iri_value: i64,
+    pub is_literal: bool,
+    pub literal_id: i64,
+    pub literal_value: f64,
+}
+
+pub fn binding_iri(var_id: i64, iri_id: i64) -> Binding {
+    Binding {
+        variable_id: var_id,
+        is_iri: true,
+        iri_value: iri_id,
+        is_literal: false,
+        literal_id: 0,
+        literal_value: 0.0,
+    }
+}
+
+pub fn binding_literal(var_id: i64, lit_id: i64, lit_value: f64) -> Binding {
+    Binding {
+        variable_id: var_id,
+        is_iri: false,
+        iri_value: 0,
+        is_literal: true,
+        literal_id: lit_id,
+        literal_value: lit_value,
+    }
+}
+
+// ============================================================================
+// SOLUTION ROW
+// ============================================================================
+
+// Solution row containing multiple bindings
+pub struct SolutionRow {
+    pub bindings: Vec<Binding>,
+}
+
+pub fn solution_row_new() -> SolutionRow {
+    SolutionRow {
+        bindings: vec![],
+    }
+}
+
+pub fn solution_row_add(row: &SolutionRow, binding: Binding) {
+    row.bindings.push(binding)
+}
+
+pub fn solution_row_get(row: &SolutionRow, var_id: i64) -> i64 {
+    let n = row.bindings.len()
+    for i in 0..n {
+        if row.bindings[i].variable_id == var_id {
+            if row.bindings[i].is_iri {
+                return row.bindings[i].iri_value
+            } else {
+                return row.bindings[i].literal_id
+            }
+        }
+    }
+    0 - 1
+}
+
+pub fn solution_row_has(row: &SolutionRow, var_id: i64) -> bool {
+    let n = row.bindings.len()
+    for i in 0..n {
+        if row.bindings[i].variable_id == var_id {
+            return true
+        }
+    }
+    false
+}
+
+// ============================================================================
+// FILTER TYPES
+// ============================================================================
+
+// Filter operation constants
+pub const FILTER_EQUALS: i64 = 0
+pub const FILTER_NOT_EQUALS: i64 = 1
+pub const FILTER_LESS_THAN: i64 = 2
+pub const FILTER_GREATER_THAN: i64 = 3
+pub const FILTER_BOUND: i64 = 4
+pub const FILTER_IS_IRI: i64 = 5
+pub const FILTER_IS_LITERAL: i64 = 6
+
+// Filter expression
+pub struct Filter {
+    pub filter_type: i64,
+    pub variable_id: i64,
+    pub compare_value: i64,
+    pub compare_float: f64,
+}
+
+pub fn filter_equals(var_id: i64, value: i64) -> Filter {
+    Filter {
+        filter_type: FILTER_EQUALS,
+        variable_id: var_id,
+        compare_value: value,
+        compare_float: 0.0,
+    }
+}
+
+pub fn filter_bound(var_id: i64) -> Filter {
+    Filter {
+        filter_type: FILTER_BOUND,
+        variable_id: var_id,
+        compare_value: 0,
+        compare_float: 0.0,
+    }
+}
+
+pub fn filter_is_iri(var_id: i64) -> Filter {
+    Filter {
+        filter_type: FILTER_IS_IRI,
+        variable_id: var_id,
+        compare_value: 0,
+        compare_float: 0.0,
+    }
+}
+
+// ============================================================================
+// SPARQL QUERY
+// ============================================================================
+
+// SPARQL-like query structure
+pub struct SparqlQuery {
+    pub select_vars: Vec<i64>,
+    pub patterns: Vec<TriplePattern>,
+    pub filters: Vec<Filter>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+pub fn sparql_new() -> SparqlQuery {
+    SparqlQuery {
+        select_vars: vec![],
+        patterns: vec![],
+        filters: vec![],
+        limit: 0 - 1,
+        offset: 0,
+    }
+}
+
+pub fn sparql_select(q: &SparqlQuery, var_id: i64) {
+    q.select_vars.push(var_id)
+}
+
+pub fn sparql_add_pattern(q: &SparqlQuery, pattern: TriplePattern) {
+    q.patterns.push(pattern)
+}
+
+pub fn sparql_add_filter(q: &SparqlQuery, filter: Filter) {
+    q.filters.push(filter)
+}
+
+pub fn sparql_set_limit(q: &SparqlQuery, limit: i64) {
+    q.limit = limit
+}
+
+pub fn sparql_set_offset(q: &SparqlQuery, offset: i64) {
+    q.offset = offset
+}
+
+// ============================================================================
+// QUERY RESULT
+// ============================================================================
+
+// Query result containing solution rows
+pub struct SparqlResult {
+    pub solutions: Vec<SolutionRow>,
+    pub total_matches: i64,
+    pub execution_time_us: i64,
+}
+
+pub fn sparql_result_new() -> SparqlResult {
+    SparqlResult {
+        solutions: vec![],
+        total_matches: 0,
+        execution_time_us: 0,
+    }
+}
+
+pub fn sparql_result_add(result: &SparqlResult, row: SolutionRow) {
+    result.solutions.push(row)
+    result.total_matches = result.total_matches + 1
+}
+
+pub fn sparql_result_count(result: &SparqlResult) -> i64 {
+    result.solutions.len() as i64
+}
+
+// ============================================================================
+// TRIPLE STORE (SIMPLE)
+// ============================================================================
+
+// Simple triple for storage
+pub struct Triple {
+    pub subject: i64,
+    pub predicate: i64,
+    pub object_iri: i64,
+    pub object_literal: i64,
+    pub object_value: f64,
+    pub is_object_literal: bool,
+}
+
+pub fn triple_iri(s: i64, p: i64, o: i64) -> Triple {
+    Triple {
+        subject: s,
+        predicate: p,
+        object_iri: o,
+        object_literal: 0,
+        object_value: 0.0,
+        is_object_literal: false,
+    }
+}
+
+pub fn triple_literal(s: i64, p: i64, lit_id: i64, lit_value: f64) -> Triple {
+    Triple {
+        subject: s,
+        predicate: p,
+        object_iri: 0,
+        object_literal: lit_id,
+        object_value: lit_value,
+        is_object_literal: true,
+    }
+}
+
+// Simple triple store
+pub struct TripleStore {
+    pub triples: Vec<Triple>,
+}
+
+pub fn triple_store_new() -> TripleStore {
+    TripleStore {
+        triples: vec![],
+    }
+}
+
+pub fn triple_store_add(store: &TripleStore, triple: Triple) {
+    store.triples.push(triple)
+}
+
+pub fn triple_store_count(store: &TripleStore) -> i64 {
+    store.triples.len()
+}
+
+// ============================================================================
+// QUERY EXECUTION
+// ============================================================================
+
+// Check if a triple matches a pattern given current bindings
+fn matches_pattern(triple: &Triple, pattern: &TriplePattern, bindings: &SolutionRow) -> bool {
+    // Check subject
+    if pattern.subject.term_type == TERM_IRI {
+        if triple.subject != pattern.subject.iri_id {
+            return false
+        }
+    } else if pattern.subject.term_type == TERM_VARIABLE {
+        let var_id = pattern.subject.variable_id
+        if solution_row_has(bindings, var_id) {
+            if solution_row_get(bindings, var_id) != triple.subject {
+                return false
+            }
+        }
+    }
+
+    // Check predicate
+    if pattern.predicate.term_type == TERM_IRI {
+        if triple.predicate != pattern.predicate.iri_id {
+            return false
+        }
+    } else if pattern.predicate.term_type == TERM_VARIABLE {
+        let var_id = pattern.predicate.variable_id
+        if solution_row_has(bindings, var_id) {
+            if solution_row_get(bindings, var_id) != triple.predicate {
+                return false
+            }
+        }
+    }
+
+    // Check object
+    if pattern.object.term_type == TERM_IRI {
+        if triple.is_object_literal {
+            return false
+        }
+        if triple.object_iri != pattern.object.iri_id {
+            return false
+        }
+    } else if pattern.object.term_type == TERM_LITERAL {
+        if !triple.is_object_literal {
+            return false
+        }
+        if triple.object_literal != pattern.object.literal_id {
+            return false
+        }
+    } else if pattern.object.term_type == TERM_VARIABLE {
+        let var_id = pattern.object.variable_id
+        if solution_row_has(bindings, var_id) {
+            let expected = solution_row_get(bindings, var_id)
+            if triple.is_object_literal {
+                if expected != triple.object_literal {
+                    return false
+                }
+            } else {
+                if expected != triple.object_iri {
+                    return false
+                }
+            }
+        }
+    }
+
+    true
+}
+
+// Extend bindings with new values from matched triple
+fn extend_bindings(triple: &Triple, pattern: &TriplePattern, bindings: &SolutionRow) -> SolutionRow {
+    var new_row = solution_row_new()
+
+    // Copy existing bindings
+    let n = bindings.bindings.len()
+    for i in 0..n {
+        new_row.bindings.push(Binding {
+            variable_id: bindings.bindings[i].variable_id,
+            is_iri: bindings.bindings[i].is_iri,
+            iri_value: bindings.bindings[i].iri_value,
+            is_literal: bindings.bindings[i].is_literal,
+            literal_id: bindings.bindings[i].literal_id,
+            literal_value: bindings.bindings[i].literal_value,
+        })
+    }
+
+    // Add new bindings for unbound variables
+    if pattern.subject.term_type == TERM_VARIABLE {
+        if !solution_row_has(&new_row, pattern.subject.variable_id) {
+            solution_row_add(&new_row, binding_iri(pattern.subject.variable_id, triple.subject))
+        }
+    }
+
+    if pattern.predicate.term_type == TERM_VARIABLE {
+        if !solution_row_has(&new_row, pattern.predicate.variable_id) {
+            solution_row_add(&new_row, binding_iri(pattern.predicate.variable_id, triple.predicate))
+        }
+    }
+
+    if pattern.object.term_type == TERM_VARIABLE {
+        if !solution_row_has(&new_row, pattern.object.variable_id) {
+            if triple.is_object_literal {
+                solution_row_add(&new_row, binding_literal(
+                    pattern.object.variable_id,
+                    triple.object_literal,
+                    triple.object_value
+                ))
+            } else {
+                solution_row_add(&new_row, binding_iri(pattern.object.variable_id, triple.object_iri))
+            }
+        }
+    }
+
+    new_row
+}
+
+// Execute SPARQL query on triple store
+pub fn sparql_execute(store: &TripleStore, sq: &SparqlQuery) -> SparqlResult {
+    var result = sparql_result_new()
+
+    // Start with empty binding
+    var current_solutions: Vec<SolutionRow> = vec![]
+    current_solutions.push(solution_row_new())
+
+    // Match each pattern
+    let n_patterns = sq.patterns.len()
+    for p in 0..n_patterns {
+        var next_solutions: Vec<SolutionRow> = vec![]
+
+        let n_solutions = current_solutions.len()
+        let n_triples = store.triples.len()
+
+        for s in 0..n_solutions {
+            for t in 0..n_triples {
+                if matches_pattern(&store.triples[t], &sq.patterns[p], &current_solutions[s]) {
+                    let extended = extend_bindings(&store.triples[t], &sq.patterns[p], &current_solutions[s])
+                    next_solutions.push(extended)
+                }
+            }
         }
 
-        // Check predicate match
-        var pred_ok = false
-        if pattern.pred < 0 {
-            pred_ok = true
-        } else if pattern.pred == t.pred {
-            pred_ok = true
-        }
+        current_solutions = next_solutions
+    }
 
-        // Check object match
-        var obj_ok = false
-        if pattern.obj < 0 {
-            obj_ok = true
-        } else if pattern.obj == t.obj {
-            obj_ok = true
-        }
+    // Apply filters (simplified)
+    let n_filters = sq.filters.len()
+    let n_sols = current_solutions.len()
 
-        if subj_ok {
-            if pred_ok {
-                if obj_ok {
-                    let c = *count
-                    if c < 64 {
-                        // Store bindings: positions 0,1,2 = subj, pred, obj
-                        var bindings = [0; 32]
-                        bindings[0] = t.subj
-                        bindings[1] = t.pred
-                        bindings[2] = t.obj
-                        results[c] = QueryResult { bindings: bindings, count: 3 }
-                        *count = c + 1
+    for s in 0..n_sols {
+        var passes = true
+
+        for f in 0..n_filters {
+            let filter = &sq.filters[f]
+
+            if filter.filter_type == FILTER_BOUND {
+                if !solution_row_has(&current_solutions[s], filter.variable_id) {
+                    passes = false
+                }
+            } else if filter.filter_type == FILTER_EQUALS {
+                if solution_row_has(&current_solutions[s], filter.variable_id) {
+                    let val = solution_row_get(&current_solutions[s], filter.variable_id)
+                    if val != filter.compare_value {
+                        passes = false
                     }
+                } else {
+                    passes = false
                 }
             }
         }
-        i = i + 1
-    }
-}
 
-// Count matches without storing results
-fn query_count(cache: OntCache, pattern: QueryPattern) -> i32 {
-    var n: i32 = 0
-    var i: i32 = 0
-    while i < cache.count {
-        let t = cache.triples[i]
-
-        var subj_ok = false
-        if pattern.subj < 0 {
-            subj_ok = true
-        } else if pattern.subj == t.subj {
-            subj_ok = true
-        }
-
-        var pred_ok = false
-        if pattern.pred < 0 {
-            pred_ok = true
-        } else if pattern.pred == t.pred {
-            pred_ok = true
-        }
-
-        var obj_ok = false
-        if pattern.obj < 0 {
-            obj_ok = true
-        } else if pattern.obj == t.obj {
-            obj_ok = true
-        }
-
-        if subj_ok {
-            if pred_ok {
-                if obj_ok {
-                    n = n + 1
-                }
+        if passes {
+            // Copy solution
+            var row = solution_row_new()
+            let n_bindings = current_solutions[s].bindings.len()
+            for b in 0..n_bindings {
+                row.bindings.push(Binding {
+                    variable_id: current_solutions[s].bindings[b].variable_id,
+                    is_iri: current_solutions[s].bindings[b].is_iri,
+                    iri_value: current_solutions[s].bindings[b].iri_value,
+                    is_literal: current_solutions[s].bindings[b].is_literal,
+                    literal_id: current_solutions[s].bindings[b].literal_id,
+                    literal_value: current_solutions[s].bindings[b].literal_value,
+                })
             }
+            sparql_result_add(&result, row)
         }
-        i = i + 1
     }
-    n
-}
 
-// Helper: create pattern with all wildcards
-fn pattern_all_wild() -> QueryPattern {
-    QueryPattern { subj: -1, pred: -1, obj: -1 }
-}
-
-// Helper: create pattern matching a specific subject
-fn pattern_subj(s: i32) -> QueryPattern {
-    QueryPattern { subj: s, pred: -1, obj: -1 }
-}
-
-// Helper: create pattern matching a specific predicate
-fn pattern_pred(p: i32) -> QueryPattern {
-    QueryPattern { subj: -1, pred: p, obj: -1 }
-}
-
-// Helper: create exact pattern
-fn pattern_exact(s: i32, p: i32, o: i32) -> QueryPattern {
-    QueryPattern { subj: s, pred: p, obj: o }
+    result
 }
 
 // ============================================================================
 // TESTS
 // ============================================================================
 
-fn make_test_cache() -> OntCache {
-    var triples = [Triple { subj: 0, pred: 0, obj: 0 }; 512]
-    var subj_idx = [0; 512]
-    var pred_idx = [0; 512]
-    var c = OntCache {
-        triples: triples,
-        count: 0,
-        subj_idx: subj_idx,
-        pred_idx: pred_idx
-    }
-    // Add some triples: (1, isA, 10), (2, isA, 10), (1, hasName, 20)
-    c.triples[0] = Triple { subj: 1, pred: 100, obj: 10 }
-    c.subj_idx[0] = 1
-    c.pred_idx[0] = 100
-    c.triples[1] = Triple { subj: 2, pred: 100, obj: 10 }
-    c.subj_idx[1] = 2
-    c.pred_idx[1] = 100
-    c.triples[2] = Triple { subj: 1, pred: 200, obj: 20 }
-    c.subj_idx[2] = 1
-    c.pred_idx[2] = 200
-    c.count = 3
-    c
+fn test_queryterm() -> bool {
+    let v = queryterm_variable(1)
+    let iri = queryterm_iri(100)
+
+    v.term_type == TERM_VARIABLE && iri.term_type == TERM_IRI
 }
 
-fn test_query_all_wild() -> bool {
-    let c = make_test_cache()
-    let p = pattern_all_wild()
-    query_count(c, p) == 3
+fn test_triple_pattern() -> bool {
+    let s = queryterm_variable(0)
+    let p = queryterm_iri(1)
+    let o = queryterm_variable(2)
+
+    let pattern = triple_pattern_new(s, p, o)
+    pattern.predicate.iri_id == 1
 }
 
-fn test_query_by_subj() -> bool {
-    let c = make_test_cache()
-    let p = pattern_subj(1)
-    query_count(c, p) == 2
+fn test_solution_row() -> bool {
+    var row = solution_row_new()
+    solution_row_add(&row, binding_iri(1, 100))
+
+    solution_row_has(&row, 1) && solution_row_get(&row, 1) == 100
 }
 
-fn test_query_by_pred() -> bool {
-    let c = make_test_cache()
-    let p = pattern_pred(100)
-    query_count(c, p) == 2
-}
+fn test_sparql_execution() -> bool {
+    // Create a simple triple store
+    var store = triple_store_new()
 
-fn test_query_exact() -> bool {
-    let c = make_test_cache()
-    let p = pattern_exact(2, 100, 10)
-    query_count(c, p) == 1
-}
+    // Add triples: john rdf:type Person, jane rdf:type Person
+    triple_store_add(&store, triple_iri(100, 1, 10))  // john type Person
+    triple_store_add(&store, triple_iri(101, 1, 10))  // jane type Person
+    triple_store_add(&store, triple_iri(102, 1, 11))  // fido type Dog
 
-fn test_query_no_match() -> bool {
-    let c = make_test_cache()
-    let p = pattern_exact(99, 99, 99)
-    query_count(c, p) == 0
-}
+    // Query: ?x rdf:type Person
+    var sq = sparql_new()
+    sparql_select(&sq, 0)
+
+    let pattern = triple_pattern_new(
+        queryterm_variable(0),
+        queryterm_iri(1),
+        queryterm_iri(10)
+    )
+    sparql_add_pattern(&sq, pattern)
+
+    let result = sparql_execute(&store, &sq)
+
+    // Should find john and jane

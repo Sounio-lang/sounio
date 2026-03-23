@@ -1,329 +1,407 @@
-// stdlib/fractal/multifractal.sio
-//
-// Multifractal analysis — Sounio
-//
-// Detrended Fluctuation Analysis (DFA) and Hurst exponent estimation.
-// Multifractal DFA (MF-DFA) for characterizing scaling behavior.
+//! stdlib/fractal/multifractal.sio
+//!
+//! Multifractal Analysis with Uncertainty Propagation
+//!
+//! Multifractal analysis extends fractal dimension to characterize
+//! heterogeneous structures with multiple scaling behaviors.
 
 // ============================================================================
-// Helpers
+// HELPER FUNCTIONS
 // ============================================================================
 
-fn mf_abs(x: f64) -> f64 {
+fn abs_f64(x: f64) -> f64 {
     if x < 0.0 { 0.0 - x } else { x }
 }
 
-fn mf_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+fn sqrt_f64(x: f64) -> f64 {
     if x <= 0.0 { return 0.0 }
     var y = x
-    var i = 0
-    while i < 15 {
-        y = 0.5 * (y + x / y)
-        i = i + 1
-    }
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
     y
 }
 
-fn mf_ln(x: f64) -> f64 with Mut, Div, Panic {
-    if x <= 0.0 { return -50.0 }
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
     var v = x
-    var adjust = 0.0
-    while v > 2.0 {
-        v = v / 2.0
-        adjust = adjust + 0.6931471805599453
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
     }
-    while v < 0.5 {
-        v = v * 2.0
-        adjust = adjust - 0.6931471805599453
-    }
-    let u = (v - 1.0) / (v + 1.0)
-    let u2 = u * u
-    var term = u
-    var sum = u
-    var k = 1
-    while k <= 20 {
-        term = term * u2
-        sum = sum + term / (2 * k + 1) as f64
-        k = k + 1
-    }
-    2.0 * sum + adjust
+    result + (k as f64) * ln2
 }
 
-fn mf_pow(base: f64, exp: f64) -> f64 with Mut, Div, Panic {
-    // base^exp = exp(exp * ln(base))
-    if base <= 0.0 { return 0.0 }
-    let lnb = mf_ln(base)
-    // Inline exp
-    var xc = exp * lnb
-    if xc > 20.0 { xc = 20.0 }
-    if xc < -20.0 { xc = -20.0 }
+fn pow_f64(x: f64, y: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    exp_f64(y * ln_f64(x))
+}
+
+fn exp_f64(x: f64) -> f64 {
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < -700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
     var result = 1.0
     var term = 1.0
-    var i = 1
-    while i <= 30 {
-        term = term * xc / i as f64
+    for i in 1..=15 {
+        term = term * r / (i as f64)
         result = result + term
-        i = i + 1
     }
-    if result < 1.0e-15 { result = 1.0e-15 }
+    if k >= 0 { for _ in 0..k { result = result * 2.0 } }
+    else { for _ in 0..(-k) { result = result / 2.0 } }
     result
 }
 
+fn min_f64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn max_f64(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
 // ============================================================================
-// Cumulative sum (profile) of mean-subtracted signal
-// Y(i) = sum_{k=1}^{i} (x_k - mean)
+// TYPES
 // ============================================================================
 
-fn mf_cumsum(data: &[f64; 256], n: i32, profile: &![f64; 256]) with Mut, Div, Panic {
-    // Compute mean
-    var sum = 0.0
-    var i = 0
-    while i < n {
-        sum = sum + data[i]
-        i = i + 1
-    }
-    let mean = if n > 0 { sum / n as f64 } else { 0.0 }
+// Multifractal spectrum result
+pub struct MultifractalSpectrum {
+    pub alpha: Vec<f64>,
+    pub alpha_std: Vec<f64>,
+    pub f_alpha: Vec<f64>,
+    pub f_alpha_std: Vec<f64>,
+    pub q_values: Vec<f64>,
+    pub d_q: Vec<f64>,
+    pub d_q_std: Vec<f64>,
+    pub spectrum_width: f64,
+    pub f_max: f64,
+}
 
-    // Cumulative sum
-    var cumul = 0.0
-    i = 0
-    while i < n {
-        cumul = cumul + (data[i] - mean)
-        profile[i] = cumul
-        i = i + 1
-    }
+// 3D measure grid
+pub struct MeasureGrid {
+    pub data: Vec<f64>,
+    pub size_x: i64,
+    pub size_y: i64,
+    pub size_z: i64,
+}
+
+// Regression result
+struct RegressionResult {
+    pub slope: f64,
+    pub var_slope: f64,
 }
 
 // ============================================================================
-// Linear detrend within a segment: fit y = a + b*x, return variance of residuals
+// BOX PROBABILITIES
 // ============================================================================
 
-fn mf_detrend_variance(profile: &[f64; 256], start: i32, seg_len: i32) -> f64 with Mut, Div, Panic {
-    if seg_len < 2 { return 0.0 }
+// Compute box probabilities for a measure grid at given scale
+fn box_probabilities(grid: &MeasureGrid, scale: i64) -> Vec<f64> {
+    let nx = (grid.size_x + scale - 1) / scale
+    let ny = (grid.size_y + scale - 1) / scale
+    let nz = (grid.size_z + scale - 1) / scale
 
-    // Linear regression: y = a + b*x
-    // b = (n*sum(xy) - sum(x)*sum(y)) / (n*sum(x^2) - (sum(x))^2)
-    var sx = 0.0
-    var sy = 0.0
-    var sxy = 0.0
-    var sx2 = 0.0
-    var i = 0
-    while i < seg_len {
-        let x = i as f64
-        let y = profile[start + i]
-        sx = sx + x
-        sy = sy + y
-        sxy = sxy + x * y
-        sx2 = sx2 + x * x
-        i = i + 1
-    }
+    var masses: Vec<f64> = vec![]
+    var total_mass: f64 = 0.0
 
-    let nf = seg_len as f64
-    let denom = nf * sx2 - sx * sx
-    if mf_abs(denom) < 1.0e-15 { return 0.0 }
-
-    let b = (nf * sxy - sx * sy) / denom
-    let a = (sy - b * sx) / nf
-
-    // Variance of residuals
-    var var_sum = 0.0
-    i = 0
-    while i < seg_len {
-        let fitted = a + b * i as f64
-        let resid = profile[start + i] - fitted
-        var_sum = var_sum + resid * resid
-        i = i + 1
-    }
-    var_sum / nf
-}
-
-// ============================================================================
-// DFA fluctuation function F(s) for a given segment size s
-// F(s) = sqrt( (1/N_s) * sum of segment variances )
-// ============================================================================
-
-fn mf_dfa_fluctuation(profile: &[f64; 256], n: i32, seg_len: i32) -> f64 with Mut, Div, Panic {
-    if seg_len < 2 { return 0.0 }
-    let n_seg = n / seg_len
-    if n_seg <= 0 { return 0.0 }
-
-    var sum_var = 0.0
-    var s = 0
-    while s < n_seg {
-        let start = s * seg_len
-        sum_var = sum_var + mf_detrend_variance(profile, start, seg_len)
-        s = s + 1
-    }
-
-    mf_sqrt(sum_var / n_seg as f64)
-}
-
-// ============================================================================
-// MF-DFA: generalized fluctuation function for order q
-// F_q(s) = [ (1/N_s) * sum( F_s^q ) ]^(1/q)
-// For q=2, this is standard DFA.
-// ============================================================================
-
-fn mf_dfa(data: &[f64; 256], n: i32, q: f64) -> f64 with Mut, Div, Panic {
-    if n < 8 { return 0.0 }
-
-    // Compute profile
-    var profile: [f64; 256] = [0.0; 256]
-    mf_cumsum(data, n, &!profile)
-
-    // Use segment size = n/4 as representative scale
-    let seg_len = n / 4
-    if seg_len < 2 { return 0.0 }
-    let n_seg = n / seg_len
-    if n_seg <= 0 { return 0.0 }
-
-    if mf_abs(q) < 1.0e-10 {
-        // q ≈ 0: geometric mean of variances
-        var log_sum = 0.0
-        var s = 0
-        while s < n_seg {
-            let start = s * seg_len
-            let v = mf_detrend_variance(&profile, start, seg_len)
-            if v > 1.0e-30 {
-                log_sum = log_sum + mf_ln(v)
-            }
-            s = s + 1
-        }
-        return mf_sqrt(mf_pow(2.71828182845904523, log_sum / n_seg as f64))
-    }
-
-    // General q
-    var sum_fq = 0.0
-    var s = 0
-    while s < n_seg {
-        let start = s * seg_len
-        let v = mf_detrend_variance(&profile, start, seg_len)
-        if v > 1.0e-30 {
-            sum_fq = sum_fq + mf_pow(v, q / 2.0)
-        }
-        s = s + 1
-    }
-
-    let avg = sum_fq / n_seg as f64
-    if avg < 1.0e-30 { return 0.0 }
-    mf_pow(avg, 1.0 / q)
-}
-
-// ============================================================================
-// Hurst exponent estimation via DFA
-// H = slope of log(F(s)) vs log(s) over multiple scales
-// H ~ 0.5: random walk, H > 0.5: persistent, H < 0.5: anti-persistent
-// ============================================================================
-
-fn mf_hurst_exponent(data: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
-    if n < 16 { return 0.5 }
-
-    // Compute profile
-    var profile: [f64; 256] = [0.0; 256]
-    mf_cumsum(data, n, &!profile)
-
-    // Use 4 scales: n/16, n/8, n/4, n/2
-    var log_s: [f64; 4] = [0.0; 4]
-    var log_f: [f64; 4] = [0.0; 4]
-    var n_scales = 0
-
-    var scale = 4
-    while scale <= 7 {
-        // seg_len = n / 2^scale -> but we use n/16, n/8, n/4, n/2
-        var seg_len = n / 2
-        if scale == 4 { seg_len = n / 16 }
-        if scale == 5 { seg_len = n / 8 }
-        if scale == 6 { seg_len = n / 4 }
-        if scale == 7 { seg_len = n / 2 }
-
-        if seg_len >= 4 {
-            let f_s = mf_dfa_fluctuation(&profile, n, seg_len)
-            if f_s > 1.0e-30 {
-                log_s[n_scales] = mf_ln(seg_len as f64)
-                log_f[n_scales] = mf_ln(f_s)
-                n_scales = n_scales + 1
+    for bx in 0..nx {
+        for by in 0..ny {
+            for bz in 0..nz {
+                var box_mass: f64 = 0.0
+                for dx in 0..scale {
+                    for dy in 0..scale {
+                        for dz in 0..scale {
+                            let x = bx * scale + dx
+                            let y = by * scale + dy
+                            let z = bz * scale + dz
+                            if x < grid.size_x && y < grid.size_y && z < grid.size_z {
+                                let idx = ((z as i64) * (grid.size_y as i64) + (y as i64)) * (grid.size_x as i64) + (x as i64)
+                                if idx < grid.data.len() {
+                                    box_mass = box_mass + grid.data[idx]
+                                }
+                            }
+                        }
+                    }
+                }
+                masses.push(box_mass)
+                total_mass = total_mass + box_mass
             }
         }
-        scale = scale + 1
     }
 
-    if n_scales < 2 { return 0.5 }
-
-    // Linear regression: log_f = H * log_s + c
-    var sx = 0.0
-    var sy = 0.0
-    var sxy = 0.0
-    var sx2 = 0.0
-    var i = 0
-    while i < n_scales {
-        sx = sx + log_s[i]
-        sy = sy + log_f[i]
-        sxy = sxy + log_s[i] * log_f[i]
-        sx2 = sx2 + log_s[i] * log_s[i]
-        i = i + 1
+    // Normalize to probabilities
+    if total_mass > 0.0 {
+        for i in 0..masses.len() {
+            masses[i] = masses[i] / total_mass
+        }
     }
-    let nf = n_scales as f64
-    let denom = nf * sx2 - sx * sx
-    if mf_abs(denom) < 1.0e-15 { return 0.5 }
 
-    let h = (nf * sxy - sx * sy) / denom
-
-    // Clamp to reasonable range
-    if h < 0.0 { return 0.0 }
-    if h > 2.0 { return 2.0 }
-    h
+    masses
 }
 
 // ============================================================================
-// Tests
+// MULTIFRACTAL SPECTRUM
 // ============================================================================
 
-fn test_dfa_constant() -> bool with Mut, Div, Panic {
-    // Constant signal: fluctuation should be near 0
-    var data: [f64; 256] = [0.0; 256]
-    var i = 0
-    while i < 64 {
-        data[i] = 5.0
-        i = i + 1
+// Compute the multifractal f(α) spectrum
+pub fn multifractal_spectrum(
+    data: &MeasureGrid,
+    q_min: f64,
+    q_max: f64,
+    n_q: i64,
+    scales: &Vec<i64>,
+) -> MultifractalSpectrum {
+    // Generate q values
+    var q_values: Vec<f64> = vec![]
+    let q_step = (q_max - q_min) / ((n_q - 1) as f64)
+    for i in 0..n_q {
+        q_values.push(q_min + (i as f64) * q_step)
     }
-    let f = mf_dfa(&data, 64, 2.0)
-    f < 0.1
+
+    var alpha_vec: Vec<f64> = vec![]
+    var alpha_std_vec: Vec<f64> = vec![]
+    var f_alpha_vec: Vec<f64> = vec![]
+    var f_alpha_std_vec: Vec<f64> = vec![]
+    var d_q_vec: Vec<f64> = vec![]
+    var d_q_std_vec: Vec<f64> = vec![]
+
+    for i in 0..q_values.len() {
+        let q = q_values[i]
+
+        // Compute alpha(q) and f(q) using linear regression over scales
+        var log_scales: Vec<f64> = vec![]
+        var alpha_sums: Vec<f64> = vec![]
+        var f_sums: Vec<f64> = vec![]
+        var tau_sums: Vec<f64> = vec![]
+
+        for j in 0..scales.len() {
+            let scale = scales[j]
+            let probs = box_probabilities(data, scale)
+
+            if probs.len() == 0 { continue }
+
+            // Compute partition function terms
+            var sum_pq: f64 = 0.0
+            for k in 0..probs.len() {
+                if probs[k] > 0.0 {
+                    sum_pq = sum_pq + pow_f64(probs[k], q)
+                }
+            }
+
+            if sum_pq <= 0.0 { continue }
+
+            // Compute normalized measures μᵢ(q)
+            var alpha_sum: f64 = 0.0
+            var f_sum: f64 = 0.0
+
+            for k in 0..probs.len() {
+                if probs[k] > 0.0 {
+                    let mu_i = pow_f64(probs[k], q) / sum_pq
+                    if mu_i > 0.0 {
+                        alpha_sum = alpha_sum + mu_i * ln_f64(probs[k])
+                        f_sum = f_sum + mu_i * ln_f64(mu_i)
+                    }
+                }
+            }
+
+            log_scales.push(ln_f64(scale as f64))
+            alpha_sums.push(alpha_sum)
+            f_sums.push(f_sum)
+            tau_sums.push(ln_f64(sum_pq))
+        }
+
+        // Linear regression for alpha(q), f(q), and tau(q)
+        let alpha_reg = if log_scales.len() >= 2 {
+            regress_slope(&log_scales, &alpha_sums)
+        } else {
+            RegressionResult { slope: 0.0, var_slope: 1.0 }
+        }
+
+        let f_reg = if log_scales.len() >= 2 {
+            regress_slope(&log_scales, &f_sums)
+        } else {
+            RegressionResult { slope: 0.0, var_slope: 1.0 }
+        }
+
+        let tau_reg = if log_scales.len() >= 2 {
+            regress_slope(&log_scales, &tau_sums)
+        } else {
+            RegressionResult { slope: 0.0, var_slope: 1.0 }
+        }
+
+        // D_q = tau(q) / (q - 1) for q != 1
+        let d_q = if abs_f64(q - 1.0) > 0.01 {
+            tau_reg.slope / (q - 1.0)
+        } else {
+            alpha_reg.slope
+        }
+
+        let d_q_var = if abs_f64(q - 1.0) > 0.01 {
+            tau_reg.var_slope / ((q - 1.0) * (q - 1.0))
+        } else {
+            alpha_reg.var_slope
+        }
+
+        alpha_vec.push(alpha_reg.slope)
+        alpha_std_vec.push(sqrt_f64(alpha_reg.var_slope))
+        f_alpha_vec.push(f_reg.slope)
+        f_alpha_std_vec.push(sqrt_f64(f_reg.var_slope))
+        d_q_vec.push(d_q)
+        d_q_std_vec.push(sqrt_f64(d_q_var))
+    }
+
+    // Compute spectrum width (alpha_max - alpha_min)
+    var alpha_min = 1000000.0
+    var alpha_max = -1000000.0
+    var f_max_val = -1000000.0
+
+    for i in 0..alpha_vec.len() {
+        alpha_min = min_f64(alpha_min, alpha_vec[i])
+        alpha_max = max_f64(alpha_max, alpha_vec[i])
+        f_max_val = max_f64(f_max_val, f_alpha_vec[i])
+    }
+
+    let spectrum_width = alpha_max - alpha_min
+
+    MultifractalSpectrum {
+        alpha: alpha_vec,
+        alpha_std: alpha_std_vec,
+        f_alpha: f_alpha_vec,
+        f_alpha_std: f_alpha_std_vec,
+        q_values: q_values,
+        d_q: d_q_vec,
+        d_q_std: d_q_std_vec,
+        spectrum_width: spectrum_width,
+        f_max: f_max_val,
+    }
 }
 
-fn test_hurst_random_walk() -> bool with Mut, Div, Panic {
-    // Simple deterministic "random-like" signal
-    var data: [f64; 256] = [0.0; 256]
-    var i = 0
-    var val = 0.0
-    while i < 128 {
-        // Pseudo-random increments
-        val = val + ((i * 7 + 3) % 11) as f64 - 5.0
-        data[i] = val
-        i = i + 1
+// Compute generalized dimension D_q for a specific q
+pub fn generalized_dimension(
+    data: &MeasureGrid,
+    q: f64,
+    scales: &Vec<i64>,
+) -> f64 {
+    var log_scales: Vec<f64> = vec![]
+    var tau_sums: Vec<f64> = vec![]
+
+    for i in 0..scales.len() {
+        let scale = scales[i]
+        let probs = box_probabilities(data, scale)
+
+        if probs.len() == 0 { continue }
+
+        // Compute partition function
+        var sum_pq: f64 = 0.0
+        for j in 0..probs.len() {
+            if probs[j] > 0.0 {
+                sum_pq = sum_pq + pow_f64(probs[j], q)
+            }
+        }
+
+        if sum_pq > 0.0 {
+            log_scales.push(ln_f64(scale as f64))
+            tau_sums.push(ln_f64(sum_pq))
+        }
     }
-    let h = mf_hurst_exponent(&data, 128)
-    // Should be some positive value
-    h > 0.0 && h < 2.0
+
+    let tau_reg = if log_scales.len() >= 2 {
+        regress_slope(&log_scales, &tau_sums)
+    } else {
+        return 0.0
+    }
+
+    // D_q = τ(q) / (q - 1)
+    if abs_f64(q - 1.0) > 0.01 {
+        tau_reg.slope / (q - 1.0)
+    } else {
+        tau_reg.slope
+    }
 }
 
-fn test_dfa_q2_positive() -> bool with Mut, Div, Panic {
-    var data: [f64; 256] = [0.0; 256]
-    var i = 0
-    while i < 32 {
-        data[i] = (i % 5) as f64
-        i = i + 1
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// Linear regression returning slope and variance
+fn regress_slope(x: &Vec<f64>, y: &Vec<f64>) -> RegressionResult {
+    let n = x.len()
+    if n < 2 {
+        return RegressionResult { slope: 0.0, var_slope: 1.0 }
     }
-    let f = mf_dfa(&data, 32, 2.0)
-    f >= 0.0
+
+    var sum_x = 0.0
+    var sum_y = 0.0
+    var sum_xy = 0.0
+    var sum_x2 = 0.0
+
+    for i in 0..n {
+        sum_x = sum_x + x[i]
+        sum_y = sum_y + y[i]
+        sum_xy = sum_xy + x[i] * y[i]
+        sum_x2 = sum_x2 + x[i] * x[i]
+    }
+
+    let nf = n as f64
+    let denom = nf * sum_x2 - sum_x * sum_x
+
+    if abs_f64(denom) < 1e-10 {
+        return RegressionResult { slope: 0.0, var_slope: 1.0 }
+    }
+
+    let slope = (nf * sum_xy - sum_x * sum_y) / denom
+    let intercept = (sum_y - slope * sum_x) / nf
+
+    // Compute residual variance
+    var ss_res = 0.0
+    for i in 0..n {
+        let pred = intercept + slope * x[i]
+        let residual = y[i] - pred
+        ss_res = ss_res + residual * residual
+    }
+
+    let mse = if n > 2 { ss_res / (nf - 2.0) } else { ss_res }
+    let var_slope = if denom > 0.0 { mse * nf / denom } else { 1.0 }
+
+    RegressionResult {
+        slope: slope,
+        var_slope: var_slope,
+    }
 }
 
-fn test_cumsum_sums() -> bool with Mut, Div, Panic {
-    var data: [f64; 256] = [0.0; 256]
-    data[0] = 1.0
-    data[1] = 2.0
-    data[2] = 3.0
-    // mean = 2.0, cumsum: -1, -1, 0
-    var profile: [f64; 256] = [0.0; 256]
-    mf_cumsum(&data, 3, &!profile)
-    mf_abs(profile[0] - (-1.0)) < 0.01 && mf_abs(profile[2]) < 0.01
+// Check if the structure is truly multifractal (spectrum width > threshold)
+pub fn is_multifractal(spectrum: &MultifractalSpectrum, threshold: f64) -> bool {
+    spectrum.spectrum_width > threshold
 }
+
+// Get capacity dimension D_0 from spectrum
+pub fn capacity_dimension(spectrum: &MultifractalSpectrum) -> f64 {
+    for i in 0..spectrum.q_values.len() {
+        if abs_f64(spectrum.q_values[i]) < 0.01 {
+            return spectrum.d_q[i]
+        }
+    }
+    0.0
+}
+
+// Get information dimension D_1 from spectrum
+pub fn information_dimension(spectrum: &MultifractalSpectrum) -> f64 {
+    for i in 0..spectrum.q_values.len() {
+        if abs_f64(spectrum.q_values[i] - 1.0) < 0.01 {
+            return spectrum.d_q[i]
+        }
+    }
+    0.0
+}
+
+// Get correlation dimension D_2 from spectrum
+pub fn correlation_dimension(spectrum: &MultifractalSpectrum) -> f64 {
+    for i in 0..spectrum.q_values.len() {
+        if abs_f64(spectrum.q_values[i] - 2.0) < 0.01 {
+            return spectrum.d_q[i]
+        }
+    }

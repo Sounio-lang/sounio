@@ -1,189 +1,338 @@
-// stdlib/ontology/cache.sio — Ontology triple cache
+// stdlib/ontology/cache.sio
 //
-// In-memory RDF-like triple store with subject and predicate indices.
-// Fixed-capacity: 512 triples, O(n) scan with index hints.
+// Ontology Cache
+//
+// Provides caching for ontology data to minimize memory usage
+// and support lazy loading of large ontologies.
 
 // ============================================================================
-// TYPES
+// CACHE ENTRY STATES
 // ============================================================================
 
-struct Triple {
-    subj: i32,
-    pred: i32,
-    obj: i32
+pub const CACHE_EMPTY: i64 = 0
+pub const CACHE_LOADED: i64 = 1
+pub const CACHE_EVICTED: i64 = 2
+
+// ============================================================================
+// CACHE ENTRY
+// ============================================================================
+
+// Entry in the cache with LRU tracking
+pub struct CacheEntry {
+    pub iri_id: i64,
+    pub state: i64,
+    pub last_access: i64,
+    pub access_count: i64,
+    pub size_bytes: i64,
 }
 
-struct OntCache {
-    triples: [Triple; 512],
-    count: i32,
-    subj_idx: [i32; 512],
-    pred_idx: [i32; 512]
-}
-
-// ============================================================================
-// CONSTRUCTORS
-// ============================================================================
-
-fn triple_new(s: i32, p: i32, o: i32) -> Triple {
-    Triple { subj: s, pred: p, obj: o }
-}
-
-fn cache_new() -> OntCache {
-    var triples = [Triple { subj: 0, pred: 0, obj: 0 }; 512]
-    var subj_idx = [0; 512]
-    var pred_idx = [0; 512]
-    OntCache {
-        triples: triples,
-        count: 0,
-        subj_idx: subj_idx,
-        pred_idx: pred_idx
+pub fn cache_entry_new(iri_id: i64) -> CacheEntry {
+    CacheEntry {
+        iri_id: iri_id,
+        state: CACHE_EMPTY,
+        last_access: 0,
+        access_count: 0,
+        size_bytes: 0,
     }
 }
 
+pub fn cache_entry_mark_loaded(entry: &CacheEntry, size: i64, time: i64) {
+    entry.state = CACHE_LOADED
+    entry.size_bytes = size
+    entry.last_access = time
+    entry.access_count = entry.access_count + 1
+}
+
+pub fn cache_entry_touch(entry: &CacheEntry, time: i64) {
+    entry.last_access = time
+    entry.access_count = entry.access_count + 1
+}
+
+pub fn cache_entry_evict(entry: &CacheEntry) {
+    entry.state = CACHE_EVICTED
+}
+
 // ============================================================================
-// OPERATIONS
+// ONTOLOGY CACHE
 // ============================================================================
 
-// Add a triple to the cache (returns updated cache by value)
-fn cache_add(c: OntCache, s: i32, p: i32, o: i32) -> OntCache {
-    var result = c
-    if result.count >= 512 {
-        return result
+// Cache for ontology concepts and properties
+pub struct OntologyCache {
+    pub entries: Vec<CacheEntry>,
+    pub max_size_bytes: i64,
+    pub current_size_bytes: i64,
+    pub clock: i64,
+    pub hit_count: i64,
+    pub miss_count: i64,
+}
+
+pub fn ontology_cache_new(max_size: i64) -> OntologyCache {
+    OntologyCache {
+        entries: vec![],
+        max_size_bytes: max_size,
+        current_size_bytes: 0,
+        clock: 0,
+        hit_count: 0,
+        miss_count: 0,
     }
+}
 
-    // Check for duplicates
-    var i: i32 = 0
-    while i < result.count {
-        let t = result.triples[i]
-        if t.subj == s {
-            if t.pred == p {
-                if t.obj == o {
-                    return result
-                }
-            }
+// Default cache with 100MB limit
+pub fn ontology_cache_default() -> OntologyCache {
+    ontology_cache_new(104857600)
+}
+
+// Find entry by IRI ID
+pub fn cache_find(cache: &OntologyCache, iri_id: i64) -> i64 {
+    let n = cache.entries.len()
+    for i in 0..n {
+        if cache.entries[i].iri_id == iri_id {
+            return i as i64
         }
-        i = i + 1
     }
-
-    let idx = result.count
-    result.triples[idx] = Triple { subj: s, pred: p, obj: o }
-    result.subj_idx[idx] = s
-    result.pred_idx[idx] = p
-    result.count = result.count + 1
-    result
+    0 - 1
 }
 
-// Look up triples by subject, writing matches into output arrays
-fn cache_lookup_subj(c: OntCache, subj: i32, out: &![Triple; 64], out_count: &!i32) with Mut, Div, Panic {
-    *out_count = 0
-    var i: i32 = 0
-    while i < c.count {
-        if c.subj_idx[i] == subj {
-            let oc = *out_count
-            if oc < 64 {
-                out[oc] = c.triples[i]
-                *out_count = oc + 1
-            }
-        }
-        i = i + 1
-    }
-}
-
-// Look up triples by predicate
-fn cache_lookup_pred(c: OntCache, pred: i32, out: &![Triple; 64], out_count: &!i32) with Mut, Div, Panic {
-    *out_count = 0
-    var i: i32 = 0
-    while i < c.count {
-        if c.pred_idx[i] == pred {
-            let oc = *out_count
-            if oc < 64 {
-                out[oc] = c.triples[i]
-                *out_count = oc + 1
-            }
-        }
-        i = i + 1
-    }
-}
-
-// Look up triples by subject and predicate
-fn cache_lookup_sp(c: OntCache, subj: i32, pred: i32, out: &![Triple; 64], out_count: &!i32) with Mut, Div, Panic {
-    *out_count = 0
-    var i: i32 = 0
-    while i < c.count {
-        if c.subj_idx[i] == subj {
-            if c.pred_idx[i] == pred {
-                let oc = *out_count
-                if oc < 64 {
-                    out[oc] = c.triples[i]
-                    *out_count = oc + 1
-                }
-            }
-        }
-        i = i + 1
-    }
-}
-
-// Return number of triples in cache
-fn cache_count(c: OntCache) -> i32 {
-    c.count
-}
-
-// Check if a specific triple exists
-fn cache_contains(c: OntCache, s: i32, p: i32, o: i32) -> bool {
-    var i: i32 = 0
-    while i < c.count {
-        let t = c.triples[i]
-        if t.subj == s {
-            if t.pred == p {
-                if t.obj == o {
-                    return true
-                }
-            }
-        }
-        i = i + 1
+// Check if entry is cached
+pub fn cache_contains(cache: &OntologyCache, iri_id: i64) -> bool {
+    let idx = cache_find(cache, iri_id)
+    if idx >= 0 {
+        return cache.entries[idx as i64].state == CACHE_LOADED
     }
     false
+}
+
+// Add or update cache entry
+pub fn cache_put(cache: &OntologyCache, iri_id: i64, size: i64) -> bool {
+    cache.clock = cache.clock + 1
+
+    let idx = cache_find(cache, iri_id)
+    if idx >= 0 {
+        // Already exists - update
+        cache_entry_mark_loaded(&cache.entries[idx as i64], size, cache.clock)
+        cache.hit_count = cache.hit_count + 1
+        return true
+    }
+
+    // Need to add new entry
+    // First check if we need to evict
+    while cache.current_size_bytes + size > cache.max_size_bytes {
+        if !cache_evict_lru(cache) {
+            // Cannot evict anything
+            return false
+        }
+    }
+
+    // Add new entry
+    var entry = cache_entry_new(iri_id)
+    cache_entry_mark_loaded(&entry, size, cache.clock)
+    cache.entries.push(entry)
+    cache.current_size_bytes = cache.current_size_bytes + size
+    cache.miss_count = cache.miss_count + 1
+
+    true
+}
+
+// Get cache entry (updates access time)
+pub fn cache_get(cache: &OntologyCache, iri_id: i64) -> bool {
+    cache.clock = cache.clock + 1
+
+    let idx = cache_find(cache, iri_id)
+    if idx >= 0 && cache.entries[idx as i64].state == CACHE_LOADED {
+        cache_entry_touch(&cache.entries[idx as i64], cache.clock)
+        cache.hit_count = cache.hit_count + 1
+        return true
+    }
+
+    cache.miss_count = cache.miss_count + 1
+    false
+}
+
+// Evict least recently used entry
+fn cache_evict_lru(cache: &OntologyCache) -> bool {
+    let n = cache.entries.len()
+    if n == 0 {
+        return false
+    }
+
+    var oldest_time: i64 = cache.clock + 1
+    var oldest_idx: i64 = 0 - 1
+
+    for i in 0..n {
+        if cache.entries[i].state == CACHE_LOADED {
+            if cache.entries[i].last_access < oldest_time {
+                oldest_time = cache.entries[i].last_access
+                oldest_idx = i as i64
+            }
+        }
+    }
+
+    if oldest_idx < 0 {
+        return false
+    }
+
+    let freed = cache.entries[oldest_idx as i64].size_bytes
+    cache_entry_evict(&cache.entries[oldest_idx as i64])
+    cache.current_size_bytes = cache.current_size_bytes - freed
+
+    true
+}
+
+// Clear entire cache
+pub fn cache_clear(cache: &OntologyCache) {
+    let n = cache.entries.len()
+    for i in 0..n {
+        cache_entry_evict(&cache.entries[i])
+    }
+    cache.current_size_bytes = 0
+}
+
+// Get cache statistics
+pub fn cache_hit_rate(cache: &OntologyCache) -> f64 {
+    let total = cache.hit_count + cache.miss_count
+    if total == 0 {
+        return 0.0
+    }
+    (cache.hit_count as f64) / (total as f64)
+}
+
+pub fn cache_utilization(cache: &OntologyCache) -> f64 {
+    if cache.max_size_bytes == 0 {
+        return 0.0
+    }
+    (cache.current_size_bytes as f64) / (cache.max_size_bytes as f64)
+}
+
+// ============================================================================
+// LAZY LOADER
+// ============================================================================
+
+// Lazy loading state
+pub const LAZY_NOT_LOADED: i64 = 0
+pub const LAZY_LOADING: i64 = 1
+pub const LAZY_LOADED: i64 = 2
+pub const LAZY_ERROR: i64 = 3
+
+// Lazy-loaded ontology reference
+pub struct LazyOntology {
+    pub ontology_iri: i64,
+    pub state: i64,
+    pub load_time_ms: i64,
+    pub concept_count: i64,
+    pub property_count: i64,
+}
+
+pub fn lazy_ontology_new(iri: i64) -> LazyOntology {
+    LazyOntology {
+        ontology_iri: iri,
+        state: LAZY_NOT_LOADED,
+        load_time_ms: 0,
+        concept_count: 0,
+        property_count: 0,
+    }
+}
+
+pub fn lazy_ontology_is_loaded(ont: &LazyOntology) -> bool {
+    ont.state == LAZY_LOADED
+}
+
+pub fn lazy_ontology_needs_loading(ont: &LazyOntology) -> bool {
+    ont.state == LAZY_NOT_LOADED
+}
+
+pub fn lazy_ontology_mark_loading(ont: &LazyOntology) {
+    ont.state = LAZY_LOADING
+}
+
+pub fn lazy_ontology_mark_loaded(ont: &LazyOntology, concepts: i64, properties: i64, time_ms: i64) {
+    ont.state = LAZY_LOADED
+    ont.concept_count = concepts
+    ont.property_count = properties
+    ont.load_time_ms = time_ms
+}
+
+pub fn lazy_ontology_mark_error(ont: &LazyOntology) {
+    ont.state = LAZY_ERROR
+}
+
+// ============================================================================
+// PREFETCH HINTS
+// ============================================================================
+
+// Hint for prefetching related concepts
+pub struct PrefetchHint {
+    pub base_iri: i64,
+    pub hint_type: i64,
+    pub depth: i64,
+}
+
+pub const HINT_SUBCLASSES: i64 = 0
+pub const HINT_SUPERCLASSES: i64 = 1
+pub const HINT_SIBLINGS: i64 = 2
+pub const HINT_RELATED: i64 = 3
+
+pub fn prefetch_hint_new(base: i64, hint_type: i64, depth: i64) -> PrefetchHint {
+    PrefetchHint {
+        base_iri: base,
+        hint_type: hint_type,
+        depth: depth,
+    }
+}
+
+pub fn prefetch_subclasses(base: i64, depth: i64) -> PrefetchHint {
+    prefetch_hint_new(base, HINT_SUBCLASSES, depth)
+}
+
+pub fn prefetch_superclasses(base: i64, depth: i64) -> PrefetchHint {
+    prefetch_hint_new(base, HINT_SUPERCLASSES, depth)
 }
 
 // ============================================================================
 // TESTS
 // ============================================================================
 
-fn test_cache_empty() -> bool {
-    let c = cache_new()
-    cache_count(c) == 0
+fn test_cache_entry() -> bool {
+    var entry = cache_entry_new(100)
+    cache_entry_mark_loaded(&entry, 1024, 1)
+
+    entry.state == CACHE_LOADED && entry.size_bytes == 1024
 }
 
-fn test_cache_add_one() -> bool {
-    let c = cache_new()
-    let c2 = cache_add(c, 1, 2, 3)
-    cache_count(c2) == 1
+fn test_cache_put_get() -> bool {
+    var cache = ontology_cache_new(10000)
+
+    cache_put(&cache, 1, 100)
+    cache_put(&cache, 2, 200)
+
+    cache_contains(&cache, 1) && cache_contains(&cache, 2) && !cache_contains(&cache, 3)
 }
 
-fn test_cache_add_dup() -> bool {
-    let c = cache_new()
-    let c2 = cache_add(c, 1, 2, 3)
-    let c3 = cache_add(c2, 1, 2, 3)
-    cache_count(c3) == 1
+fn test_cache_eviction() -> bool {
+    var cache = ontology_cache_new(500)
+
+    // Add entries that will fill the cache
+    cache_put(&cache, 1, 200)
+    cache_put(&cache, 2, 200)
+    // Access first one to make it more recently used
+    cache_get(&cache, 1)
+    // Adding this should evict entry 2 (LRU)
+    cache_put(&cache, 3, 200)
+
+    cache_contains(&cache, 1) && !cache_contains(&cache, 2) && cache_contains(&cache, 3)
 }
 
-fn test_cache_add_multi() -> bool {
-    let c = cache_new()
-    let c2 = cache_add(c, 1, 2, 3)
-    let c3 = cache_add(c2, 4, 5, 6)
-    let c4 = cache_add(c3, 1, 7, 8)
-    cache_count(c4) == 3
+fn test_lazy_ontology() -> bool {
+    var ont = lazy_ontology_new(100)
+
+    lazy_ontology_needs_loading(&ont)
 }
 
-fn test_cache_contains() -> bool {
-    let c = cache_new()
-    let c2 = cache_add(c, 10, 20, 30)
-    let c3 = cache_add(c2, 40, 50, 60)
-    cache_contains(c3, 10, 20, 30)
-}
+fn test_cache_stats() -> bool {
+    var cache = ontology_cache_new(10000)
 
-fn test_cache_not_contains() -> bool {
-    let c = cache_new()
-    let c2 = cache_add(c, 10, 20, 30)
-    cache_contains(c2, 10, 20, 99) == false
-}
+    cache_put(&cache, 1, 100)
+    cache_get(&cache, 1)  // hit
+    cache_get(&cache, 2)  // miss
+
+    let hit_rate = cache_hit_rate(&cache)
+    // 2 hits (put + get for 1), 1 miss (get for 2) = 2/3 = 0.666
