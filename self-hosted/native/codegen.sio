@@ -12,6 +12,7 @@ use native::encode::*
 use native::aarch64::*
 use native::elf::*
 use native::macho::*
+use native::pe_coff::*
 use native::reloc::*
 use native::frame::*
 use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code}
@@ -41,6 +42,7 @@ fn ARCH_RISCV64() -> i64 { native_policy_arch_riscv64() }
 fn OS_UNKNOWN() -> i64 { native_policy_os_unknown() }
 fn OS_LINUX() -> i64 { native_policy_os_linux() }
 fn OS_MACOS() -> i64 { native_policy_os_macos() }
+fn OS_WINDOWS() -> i64 { native_policy_os_windows() }
 
 fn MATRIX_AUTO() -> i64 { 0 }
 fn MATRIX_OFF() -> i64 { 1 }
@@ -53,6 +55,7 @@ fn MATRIX_AME() -> i64 { 6 }
 fn FORMAT_NONE() -> i64 { 0 }
 fn FORMAT_ELF64() -> i64 { 1 }
 fn FORMAT_MACHO64() -> i64 { 2 }
+fn FORMAT_PE64() -> i64 { 3 }
 
 fn ERR_OK() -> i64 { 0 }
 fn ERR_BACKEND_NOT_IMPLEMENTED() -> i64 { 1 }
@@ -735,6 +738,12 @@ fn native_target_parse(raw: string) -> NativeTargetParse {
     }
     if str_eq(raw, "riscv64-linux") {
         return NativeTargetParse { ok: true, arch_id: ARCH_RISCV64(), os_id: OS_LINUX(), canonical: "riscv64-linux" }
+    }
+    if str_eq(raw, "x86_64-windows") {
+        return NativeTargetParse { ok: true, arch_id: ARCH_X86_64(), os_id: OS_WINDOWS(), canonical: "x86_64-windows" }
+    }
+    if str_eq(raw, "aarch64-windows") {
+        return NativeTargetParse { ok: true, arch_id: ARCH_AARCH64(), os_id: OS_WINDOWS(), canonical: "aarch64-windows" }
     }
     native_target_parse_invalid()
 }
@@ -4243,6 +4252,134 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
     c
 }
 
+// ============================================================================
+// Windows x86-64 entry trampoline
+// ============================================================================
+
+// IAT slot indices within the .idata section (8 bytes each)
+fn PE_IAT_SLOT_VIRTUALALLOC() -> i64 { 0 }
+fn PE_IAT_SLOT_EXITPROCESS() -> i64 { 8 }
+fn PE_IAT_SLOT_COUNT() -> i64 { 2 }
+fn PE_IAT_SIZE() -> i64 { 24 }  // 2 entries * 8 bytes + 8 byte null terminator
+
+// Tracks code positions where IAT call displacements need patching
+struct PeIatPatchInfo {
+    virtualalloc_disp_offset: i64,   // code offset of disp32 in call [rip+disp32] for VirtualAlloc
+    exitprocess_disp_offset: i64,    // code offset of disp32 in call [rip+disp32] for ExitProcess
+    exitprocess_avx_disp_offset: i64, // code offset of disp32 for AVX abort ExitProcess call
+}
+
+fn pe_iat_patch_info_empty() -> PeIatPatchInfo {
+    PeIatPatchInfo {
+        virtualalloc_disp_offset: -1,
+        exitprocess_disp_offset: -1,
+        exitprocess_avx_disp_offset: -1,
+    }
+}
+
+fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> (NativeCompiler, PeIatPatchInfo) with Mut, Panic, Div {
+    var c = nc
+    var patches = pe_iat_patch_info_empty()
+
+    // Record trampoline offset (this is the PE entry point)
+    c.entry_offset = c.code.len
+
+    // Win64 ABI: VirtualAlloc(lpAddress=NULL, dwSize=512MB, flAllocationType=MEM_COMMIT|MEM_RESERVE, flProtect=PAGE_READWRITE)
+    // Parameters: rcx=NULL, rdx=512MB, r8=0x3000, r9=0x04
+    c.code = emit_sub_rsp_imm32(c.code, 40)      // 32-byte shadow space + 8 for alignment
+    c.code = emit_mov_reg_imm(c.code, 1, 0)      // rcx = NULL (lpAddress)
+    c.code = emit_mov_reg_imm(c.code, 2, 536870912) // rdx = 512MB (dwSize)
+    c.code = emit_mov_r8_imm32(c.code, 12288)    // r8 = 0x3000 (MEM_COMMIT | MEM_RESERVE)
+    c.code = emit_mov_r9_imm32(c.code, 4)        // r9 = 0x04 (PAGE_READWRITE)
+    // call [rip+disp32] — VirtualAlloc via IAT (disp32 = placeholder, patched later)
+    patches.virtualalloc_disp_offset = c.code.len + 2  // offset of the disp32 within code
+    c.code = emit_call_mem_rip_disp32(c.code, 0)
+    c.code = emit_add_rsp_imm32(c.code, 40)      // clean up shadow space
+
+    // rax now holds the base address of the 512MB allocation (or NULL on failure)
+    // Publish the RuntimeContext pointer into the .data slot.
+    let ctx_slot_disp = c.code.len + 3
+    c.code = emit_mov_rip_disp32_rax(c.code, 0)
+    c.relocs = add_data_section_reloc(c.relocs, ctx_slot_disp, c.runtime_context_slot_offset)
+
+    // Managed handle table lives immediately after the fixed-size RuntimeContext.
+    c.code = emit_mov_reg_imm(c.code, 1, runtime_context_size())
+    c.code = emit_add_reg_reg(c.code, 0, 1)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_collector_epoch(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_last_gc_stats(), 0)
+
+    // Heap allocation starts after the RuntimeContext and fixed-capacity handle table.
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
+    c.code = emit_mov_reg_imm(c.code, 1, native_v2_handle_table_bytes())
+    c.code = emit_add_reg_reg(c.code, 0, 1)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_base())
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+
+    // heap_limit = heap_base + (alloc_size - runtime_context_size - handle_table_bytes)
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
+    c.code = emit_mov_reg_imm(c.code, 1, 536870912 - runtime_context_size() - native_v2_handle_table_bytes())
+    c.code = emit_add_reg_reg(c.code, 0, 1)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
+
+    // No argc/argv on Windows PE minimal entry (would require GetCommandLineW + CommandLineToArgvW)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_argc(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_argv_ptr(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_stdout_fd(), 1)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_stderr_fd(), 2)
+
+    // AVX10.2-aware capability guard (CPUID is OS-independent)
+    c.code = emit_avx10_detect(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let avx_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)           // JNZ past the no-vector abort block
+    // No-vector abort: call ExitProcess(200) via IAT
+    c.code = emit_sub_rsp_imm32(c.code, 40)
+    c.code = emit_mov_reg_imm(c.code, 1, 200)    // rcx = 200 (exit code: no vector support)
+    patches.exitprocess_avx_disp_offset = c.code.len + 2
+    c.code = emit_call_mem_rip_disp32(c.code, 0)  // call [rip+disp32] to ExitProcess
+    // (ExitProcess does not return, but add cleanup for safety)
+    c.code = emit_add_rsp_imm32(c.code, 40)
+    let avx_ok = c.code.len
+    c.code = patch_u32_le(c.code, avx_jnz + 2, avx_ok - (avx_jnz + 6))
+    c.code = emit_mov_rax_preg(c.code, 15)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_simd_capability_mask())
+    if c.descriptor_data_offset >= 0 {
+        c = emit_store_runtime_context_data_ptr(c, runtime_context_field_descriptor_table(), c.descriptor_data_offset)
+    }
+    c = emit_store_runtime_context_imm(c, runtime_context_field_descriptor_count(), c.descriptor_count)
+    if c.gc_state_data_offset >= 0 {
+        c = emit_store_runtime_context_data_ptr(c, runtime_context_field_gc_state(), c.gc_state_data_offset)
+    }
+    if c.stack_map_data_offset >= 0 {
+        c = emit_store_runtime_context_data_ptr(c, runtime_context_field_stack_maps(), c.stack_map_data_offset)
+    }
+    if c.deopt_state_data_offset >= 0 {
+        c = emit_store_runtime_context_data_ptr(c, runtime_context_field_deopt_state(), c.deopt_state_data_offset)
+    }
+
+    // call main (placeholder, will be relocated)
+    let call_pos = c.code.len
+    c.code = emit_call_rel32_placeholder(c.code)
+    c.relocs = add_call_reloc(c.relocs, call_pos + 1, main_fn_index)
+
+    // ExitProcess(main_return_value): mov rcx, rax; call [rip+disp32]
+    c.code = emit_mov_rcx_rax(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 40)      // shadow space
+    patches.exitprocess_disp_offset = c.code.len + 2
+    c.code = emit_call_mem_rip_disp32(c.code, 0)  // call [rip+disp32] to ExitProcess
+    c.code = emit_add_rsp_imm32(c.code, 40)
+
+    // ud2 (should never reach here — ExitProcess does not return)
+    c.code = emit_ud2(c.code)
+
+    (c, patches)
+}
+
 // macOS x86-64 syscall numbers (BSD layer = 0x2000000 + unix_num)
 fn MACOS_SYS_EXIT() -> i64 { 33554433 }       // 0x2000001
 fn MACOS_SYS_WRITE() -> i64 { 33554436 }      // 0x2000004
@@ -4825,6 +4962,163 @@ fn compile_to_macho_x86_64(module: &IrModule, target_spec: NativeTargetSpec) -> 
     native_compile_result_ok_narrow(macho.buf, macho.buf_len, FORMAT_MACHO64())
 }
 
+// ============================================================================
+// Windows PE/COFF x86-64 compilation
+// ============================================================================
+
+fn pe_make_name_buf(s: string) -> [i8; 128] with Mut, Panic, Div {
+    var buf: [i8; 128] = [0; 128]
+    let len = str_len(s)
+    var i = 0
+    while i < len && i < 128 {
+        buf[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    buf
+}
+
+fn compile_to_pe_x86_64(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
+    let _target = target_spec
+
+    // Phase 1: Compile all functions (same codegen as Linux/macOS)
+    var nc = compiler_new()
+    let err = compile_module_v2_mut(&! nc, module)
+    if str_len(err) > 0 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + err)
+    }
+    var final_data = nc.data
+    if final_data.len < runtime_context_global_slot_size() {
+        final_data.len = runtime_context_global_slot_size()
+        nc.data = final_data
+    }
+    let main_idx = find_main_index(module)
+    if main_idx < 0 {
+        return native_compile_result_error(ERR_INVALID_TARGET(), "pe_x86_64_missing_main")
+    }
+
+    // Phase 2: Emit Windows entry trampoline (VirtualAlloc + main + ExitProcess)
+    let tramp = emit_entry_trampoline_windows_x86(nc, main_idx)
+    nc = tramp.0
+    let patches = tramp.1
+
+    // Phase 3: Compute PE section layout
+    // Section layout: headers | .text (code) | .idata (imports)
+    // All section RVAs are aligned to PE_SECTION_ALIGNMENT (0x1000)
+    let text_rva = PE_SECTION_ALIGNMENT             // 0x1000
+    let text_raw_size = pe_file_align(nc.code.len)
+    let idata_rva = text_rva + pe_section_align(nc.code.len)
+
+    // .idata section layout:
+    //   [0..19]   Import descriptor for kernel32.dll
+    //   [20..39]  Null terminator descriptor
+    //   [40..63]  Import Lookup Table (INT): VirtualAlloc, ExitProcess, null = 3*8
+    //   [64..87]  Import Address Table (IAT): VirtualAlloc, ExitProcess, null = 3*8
+    //   [88..]    Hint/Name: "VirtualAlloc\0" (2+12+1+1=16), "ExitProcess\0" (2+11+1=14+pad=16)
+    //   [120..]   DLL name: "kernel32.dll\0" (13 bytes)
+    let idt_offset: i64 = 0
+    let int_offset: i64 = 40                        // after 2 descriptors (2*20)
+    let iat_offset: i64 = 64                        // after INT (3*8=24)
+    let hnt_offset: i64 = 88                        // after IAT (3*8=24)
+    // Hint/name entries: VirtualAlloc = hint 0, 12 chars + hint(2) + null(1) + pad(1) = 16 bytes
+    //                    ExitProcess = hint 0, 11 chars + hint(2) + null(1) = 14, pad to 16
+    let hnt_virtualalloc_offset: i64 = 88
+    let hnt_exitprocess_offset: i64 = 104           // 88 + 16
+    let dll_name_offset: i64 = 120                  // 104 + 16
+    let idata_total: i64 = 133                      // 120 + 13 ("kernel32.dll\0")
+
+    // IAT slot RVAs (absolute virtual addresses for INT/IAT entries)
+    let iat_virtualalloc_rva = idata_rva + iat_offset
+    let iat_exitprocess_rva = idata_rva + iat_offset + 8
+
+    // Phase 4: Patch IAT call displacements in the trampoline code
+    // Each `call [rip+disp32]` needs: disp32 = IAT_RVA - (text_RVA + instruction_end_offset)
+    // instruction_end_offset = disp_offset + 4 (the disp32 is at disp_offset, instruction ends 4 bytes later)
+    if patches.virtualalloc_disp_offset >= 0 {
+        let call_end = patches.virtualalloc_disp_offset + 4
+        let disp = (idata_rva + iat_offset) - (text_rva + call_end)
+        nc.code = patch_u32_le(nc.code, patches.virtualalloc_disp_offset, disp)
+    }
+    if patches.exitprocess_disp_offset >= 0 {
+        let call_end = patches.exitprocess_disp_offset + 4
+        let disp = (idata_rva + iat_offset + 8) - (text_rva + call_end)
+        nc.code = patch_u32_le(nc.code, patches.exitprocess_disp_offset, disp)
+    }
+    if patches.exitprocess_avx_disp_offset >= 0 {
+        let call_end = patches.exitprocess_avx_disp_offset + 4
+        let disp = (idata_rva + iat_offset + 8) - (text_rva + call_end)
+        nc.code = patch_u32_le(nc.code, patches.exitprocess_avx_disp_offset, disp)
+    }
+
+    // Phase 5: Build PE binary
+    var w = pe_writer_new()
+    w = pe_set_entry_point(w, text_rva + nc.entry_offset)
+    w = pe_set_subsystem(w, PE_SUBSYSTEM_WINDOWS_CUI)
+
+    // Register sections in the PeWriter
+    let headers_size = pe_compute_headers_size(2)    // 2 sections: .text + .idata
+    w = pe_add_text_section(w, text_rva, nc.code.len, headers_size, text_raw_size)
+    let idata_raw_offset = headers_size + text_raw_size
+    let idata_raw_size = pe_file_align(idata_total)
+    w = pe_add_idata_section(w, idata_rva, idata_total, idata_raw_offset, idata_raw_size)
+
+    // Set import data directory (points to import descriptor table in .idata)
+    w = pe_set_data_directory(w, PE_DIR_IMPORT, idata_rva + idt_offset, 40)  // 2 descriptors * 20
+    // Set IAT data directory
+    w = pe_set_data_directory(w, PE_DIR_IAT, idata_rva + iat_offset, 24)     // 3 entries * 8
+
+    // Build the PE: headers + .text section
+    w = pe_build_executable(w, nc.code.bytes, nc.code.len)
+
+    // Phase 6: Manually emit .idata section data after .text
+    // Pad to idata_raw_offset if needed
+    while w.buf_len < idata_raw_offset {
+        w = pe_emit_byte(w, 0)
+    }
+
+    // Import descriptor for kernel32.dll
+    let k32_desc = pe_make_import_descriptor(
+        idata_rva + int_offset,              // OriginalFirstThunk = INT RVA
+        idata_rva + dll_name_offset,         // Name = DLL name RVA
+        idata_rva + iat_offset               // FirstThunk = IAT RVA
+    )
+    w = pe_emit_import_descriptor(w, k32_desc)
+
+    // Null terminator descriptor
+    w = pe_emit_zeros(w, PE_IMPORT_DESC_SIZE)
+
+    // Import Lookup Table (INT): RVA pointers to hint/name entries
+    w = pe_emit_u64(w, idata_rva + hnt_virtualalloc_offset)  // VirtualAlloc
+    w = pe_emit_u64(w, idata_rva + hnt_exitprocess_offset)   // ExitProcess
+    w = pe_emit_u64(w, 0)                                     // null terminator
+
+    // Import Address Table (IAT): same as INT initially (loader overwrites at runtime)
+    w = pe_emit_u64(w, idata_rva + hnt_virtualalloc_offset)  // VirtualAlloc
+    w = pe_emit_u64(w, idata_rva + hnt_exitprocess_offset)   // ExitProcess
+    w = pe_emit_u64(w, 0)                                     // null terminator
+
+    // Hint/Name entry: VirtualAlloc (hint=0)
+    let va_name = pe_make_name_buf("VirtualAlloc")
+    w = pe_emit_hint_name(w, 0, va_name, 12)
+
+    // Hint/Name entry: ExitProcess (hint=0)
+    let ep_name = pe_make_name_buf("ExitProcess")
+    w = pe_emit_hint_name(w, 0, ep_name, 11)
+
+    // DLL name: "kernel32.dll\0"
+    let dll_name = pe_make_name_buf("kernel32.dll")
+    var di = 0
+    while di < 12 {
+        w = pe_emit_byte(w, dll_name[di as usize] as i64)
+        di = di + 1
+    }
+    w = pe_emit_byte(w, 0)  // null terminator
+
+    // Pad .idata to file alignment
+    w = pe_emit_pad_to(w, PE_FILE_ALIGNMENT)
+
+    native_compile_result_ok(w.buf, w.buf_len, FORMAT_PE64())
+}
+
 fn compile_native_v2_preview(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
     if target_spec.matrix_mode < 0 {
         return native_compile_result_error(ERR_INVALID_MATRIX(), "invalid_matrix")
@@ -4844,6 +5138,14 @@ fn compile_native_v2_preview(module: &IrModule, target_spec: NativeTargetSpec) -
 
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
         return compile_to_macho_arm64_preview(module, target_spec)
+    }
+
+    if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_WINDOWS() {
+        return compile_to_pe_x86_64(module, target_spec)
+    }
+
+    if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_WINDOWS() {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_contract_only:aarch64-windows")
     }
 
     if target_spec.arch_id == ARCH_RISCV64() && target_spec.os_id == OS_LINUX() {
@@ -4886,6 +5188,14 @@ fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCom
 
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
         return compile_to_macho_arm64_preview(module, target_spec)
+    }
+
+    if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_WINDOWS() {
+        return compile_to_pe_x86_64(module, target_spec)
+    }
+
+    if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_WINDOWS() {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_contract_only:aarch64-windows")
     }
 
     if target_spec.arch_id == ARCH_RISCV64() && target_spec.os_id == OS_LINUX() {
