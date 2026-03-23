@@ -148,6 +148,189 @@ struct Checker {
     impl_registry: ImplRegistry,
 }
 
+// Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
+struct InferBuf {
+    args: [TypeEntry; 8],
+}
+
+// Wrapper struct for collecting type parameter names (avoids &![T;N] JIT bug)
+struct TypeParamBuf {
+    names: [Name; 8],
+    count: i64,
+}
+
+fn empty_type_param_buf() -> TypeParamBuf {
+    TypeParamBuf {
+        names: [Name { buf: [0; 128], len: 0 }; 8],
+        count: 0,
+    }
+}
+
+// Collect type parameter names from TypeParamDefList.
+// Returns (count, names_array) with up to 8 type params.
+fn collect_type_params(opt: Option<Box<TypeParamDefList>>) -> (i64, [Name; 8]) with Mut, Panic, Div {
+    let buf = collect_type_params_rec(opt, empty_type_param_buf())
+    (buf.count, buf.names)
+}
+
+fn collect_type_params_rec(opt: Option<Box<TypeParamDefList>>, acc: TypeParamBuf) -> TypeParamBuf with Mut, Panic, Div {
+    match opt {
+        None => acc
+        Some(node) => {
+            var buf = acc
+            if buf.count < 8 {
+                buf.names[buf.count] = (*node).head.name
+                buf.count = buf.count + 1
+            }
+            collect_type_params_rec((*node).tail, buf)
+        }
+    }
+}
+
+// Build a mangled name for a monomorphized generic struct.
+// e.g. Pair + [i64] => Pair__i64, Map + [i64, f64] => Map__i64__f64
+fn mangle_generic_name(base: Name, args: TypeEntryList) -> Name with Mut, Panic, Div {
+    var result = Name { buf: [0; 128], len: 0 }
+    // Copy base name
+    var i: i64 = 0
+    while i < base.len && i < 120 {
+        result.buf[i as usize] = base.buf[i as usize]
+        i = i + 1
+    }
+    result.len = i
+    // Append type argument names
+    mangle_append_args(&! result, args)
+    result
+}
+
+fn mangle_append_args(result: &! Name, args: TypeEntryList) with Mut, Panic, Div {
+    // Append "__"
+    if (*result).len < 126 {
+        (*result).buf[(*result).len as usize] = 95  // '_'
+        (*result).len = (*result).len + 1
+        (*result).buf[(*result).len as usize] = 95  // '_'
+        (*result).len = (*result).len + 1
+    }
+    // Append the type name for head
+    mangle_append_type_name(result, args.head)
+    // Recurse for tail
+    match args.tail {
+        None => {}
+        Some(rest) => mangle_append_args(result, *rest)
+    }
+}
+
+fn mangle_append_type_name(result: &! Name, ty: TypeEntry) with Mut, Panic, Div {
+    // For named types, copy the name; for primitives, use canonical short names
+    if ty.kind == TypeKind::TyI8 {
+        mangle_append_literal(result, 105, 56, 0, 0, 2)  // "i8"
+    } else if ty.kind == TypeKind::TyI32 {
+        mangle_append_literal(result, 105, 51, 50, 0, 3)  // "i32"
+    } else if ty.kind == TypeKind::TyI64 {
+        mangle_append_literal(result, 105, 54, 52, 0, 3)  // "i64"
+    } else if ty.kind == TypeKind::TyU8 {
+        mangle_append_literal(result, 117, 56, 0, 0, 2)  // "u8"
+    } else if ty.kind == TypeKind::TyU32 {
+        mangle_append_literal(result, 117, 51, 50, 0, 3)  // "u32"
+    } else if ty.kind == TypeKind::TyU64 {
+        mangle_append_literal(result, 117, 54, 52, 0, 3)  // "u64"
+    } else if ty.kind == TypeKind::TyF32 {
+        mangle_append_literal(result, 102, 51, 50, 0, 3)  // "f32"
+    } else if ty.kind == TypeKind::TyF64 {
+        mangle_append_literal(result, 102, 54, 52, 0, 3)  // "f64"
+    } else if ty.kind == TypeKind::TyBool {
+        mangle_append_literal(result, 98, 111, 111, 108, 4)  // "bool"
+    } else if ty.kind == TypeKind::TyNamed {
+        // Copy the type's name
+        var j: i64 = 0
+        while j < ty.name.len && (*result).len < 128 {
+            (*result).buf[(*result).len as usize] = ty.name.buf[j as usize]
+            (*result).len = (*result).len + 1
+            j = j + 1
+        }
+    } else {
+        // Fallback: append "T"
+        if (*result).len < 128 {
+            (*result).buf[(*result).len as usize] = 84  // 'T'
+            (*result).len = (*result).len + 1
+        }
+    }
+}
+
+fn mangle_append_literal(result: &! Name, c0: i8, c1: i8, c2: i8, c3: i8, len: i64) with Mut, Panic, Div {
+    if len >= 1 && (*result).len < 128 {
+        (*result).buf[(*result).len as usize] = c0
+        (*result).len = (*result).len + 1
+    }
+    if len >= 2 && (*result).len < 128 {
+        (*result).buf[(*result).len as usize] = c1
+        (*result).len = (*result).len + 1
+    }
+    if len >= 3 && (*result).len < 128 {
+        (*result).buf[(*result).len as usize] = c2
+        (*result).len = (*result).len + 1
+    }
+    if len >= 4 && (*result).len < 128 {
+        (*result).buf[(*result).len as usize] = c3
+        (*result).len = (*result).len + 1
+    }
+}
+
+// Substitute type parameters in a field list to produce a monomorphized field list.
+// For each field, if its type is TyNamed and matches a type parameter name,
+// replace it with the corresponding concrete type argument.
+fn monomorphize_fields(
+    fields: Option<Box<FieldInfoList>>,
+    tp_count: i64,
+    tp_names: [Name; 8],
+    args: TypeEntryList,
+) -> (Option<Box<FieldInfoList>>, i64) with Mut, Panic, Div, Alloc {
+    match fields {
+        None => (None, 0)
+        Some(fl) => {
+            let head = (*fl).head
+            let new_ty = substitute_type_param(head.ty, tp_count, tp_names, args)
+            let new_head = FieldInfo { name: head.name, ty: new_ty }
+            let rest = monomorphize_fields((*fl).tail, tp_count, tp_names, args)
+            (Some(Box::new(FieldInfoList { head: new_head, tail: rest.0 })), 1 + rest.1)
+        }
+    }
+}
+
+// If ty is a TyNamed whose name matches a type parameter, replace with the concrete type.
+fn substitute_type_param(
+    ty: TypeEntry,
+    tp_count: i64,
+    tp_names: [Name; 8],
+    args: TypeEntryList,
+) -> TypeEntry with Mut, Panic, Div {
+    if ty.kind == TypeKind::TyNamed {
+        // Check if this name matches any type parameter
+        var idx: i64 = 0
+        while idx < tp_count {
+            if name_eq(ty.name, tp_names[idx]) {
+                // Found match — return the corresponding type argument
+                return type_entry_list_nth(args, idx)
+            }
+            idx = idx + 1
+        }
+    }
+    // Not a type param reference — return as-is
+    ty
+}
+
+// Get the nth element of a TypeEntryList (0-indexed).
+fn type_entry_list_nth(list: TypeEntryList, n: i64) -> TypeEntry with Mut, Panic, Div {
+    if n == 0 {
+        list.head
+    } else {
+        match list.tail {
+            None => list.head  // fallback: return head if out of bounds
+            Some(rest) => type_entry_list_nth(*rest, n - 1)
+        }
+    }
+}
+
 fn checker_new() -> Checker with Mut, Panic, Div {
     Checker {
         env: type_env_new(),
@@ -5453,7 +5636,7 @@ impl Checker {
             return (c.exit_type_depth(), ty_error())
         }
         let result = match te.kind {
-            TypeNamed => c.lower_named_type(te.path)
+            TypeNamed => c.lower_named_type_with_args(te.path, te.type_args)
             TypeUnit => (c, ty_unit())
             TypeNever => (c, ty_never())
             TypeInfer => (c, ty_unknown())
@@ -5512,6 +5695,54 @@ impl Checker {
                 (c, ty_chan(proto))
             }
             None => (self, ty_session_end())
+        }
+    }
+
+    fn lower_named_type_with_args(self, path: AstPath, type_args: Option<Box<TypeExprList>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match type_args {
+            None => self.lower_named_type(path)
+            Some(args) => {
+                let name = checker_copy_string_list_to_name(path.segments)
+                let tmpl_idx = self.structs.find(name)
+                if tmpl_idx >= 0 {
+                    let tmpl = self.structs.get(tmpl_idx)
+                    if tmpl.is_generic_template {
+                        // Lower the type arguments
+                        let args_result = self.lower_type_expr_list(*args)
+                        var c = args_result.0
+                        let lowered_args = args_result.1
+
+                        // Build mangled name: Name__arg1__arg2
+                        let mangled = mangle_generic_name(name, lowered_args)
+
+                        // Check if already monomorphized
+                        let existing_idx = c.structs.find(mangled)
+                        if existing_idx >= 0 {
+                            (c, ty_named(mangled))
+                        } else {
+                            // Monomorphize: substitute type params in fields
+                            let mono_fields = monomorphize_fields(tmpl.fields, tmpl.type_param_count, tmpl.type_param_names, lowered_args)
+                            let mono_info = StructInfo {
+                                name: mangled,
+                                fields: mono_fields.0,
+                                field_count: mono_fields.1,
+                                is_linear: tmpl.is_linear,
+                                type_param_count: 0,
+                                type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
+                                is_generic_template: false,
+                            }
+                            c.structs = c.structs.add(mono_info)
+                            (c, ty_named(mangled))
+                        }
+                    } else {
+                        // Non-generic struct used with type args — fall through to named
+                        self.lower_named_type(path)
+                    }
+                } else {
+                    // Not a struct — try standard named type resolution
+                    self.lower_named_type(path)
+                }
+            }
         }
     }
 
@@ -7657,6 +7888,12 @@ impl Checker {
     fn collect_struct_def(self, name: Name, opt: Option<Box<StructDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(sd) => {
+                // Extract type parameters if present
+                let tp_result = collect_type_params((*sd).type_params)
+                let tp_count = tp_result.0
+                let tp_names = tp_result.1
+                let is_generic = tp_count > 0
+
                 let pair = self.collect_field_defs((*sd).fields)
                 var c = pair.0
                 let fields = pair.1
@@ -7666,6 +7903,9 @@ impl Checker {
                     fields: fields,
                     field_count: field_count,
                     is_linear: (*sd).is_linear,
+                    type_param_count: tp_count,
+                    type_param_names: tp_names,
+                    is_generic_template: is_generic,
                 }
                 c.structs = c.structs.add(info)
                 c
@@ -7736,13 +7976,17 @@ impl Checker {
     }
 
     fn collect_variant_list(self, vdl: VariantDefList) -> (Checker, VariantInfoList, i64) with Mut, Panic, Div, Alloc, IO {
-        let head_info = VariantInfo { name: vdl.head.name }
+        // Collect variant fields (if any) using the same mechanism as struct fields
+        let fields_result = self.collect_field_defs(vdl.head.fields)
+        var c = fields_result.0
+        let v_fields = fields_result.1
+        let head_info = VariantInfo { name: vdl.head.name, fields: v_fields }
         let head_list = VariantInfoList { head: head_info, tail: None }
         match vdl.tail {
-            None => (self, head_list, 1)
+            None => (c, head_list, 1)
             Some(rest) => {
-                let rest_result = self.collect_variant_list(*rest)
-                let c = rest_result.0
+                let rest_result = c.collect_variant_list(*rest)
+                c = rest_result.0
                 let rest_list = rest_result.1
                 let rest_count = rest_result.2
                 (c, VariantInfoList { head: head_info, tail: Some(Box::new(rest_list)) }, 1 + rest_count)
@@ -11393,13 +11637,22 @@ impl Checker {
         match opt {
             Some(list) => {
                 var c = self
-                // Look up the field type from the struct definition
+                // Look up the field type from either a struct or enum variant
                 var field_ty = ty_unknown()
                 if scrut_ty.kind == TypeKind::TyNamed {
+                    // First try: look up as struct
                     let struct_idx = c.structs.find(scrut_ty.name)
                     if struct_idx >= 0 {
                         let si = c.structs.get(struct_idx)
                         field_ty = field_info_list_find(si.fields, (*list).head.name)
+                    } else {
+                        // Second try: look up as enum — find which variant has this field
+                        let enum_idx = c.enums.find(scrut_ty.name)
+                        if enum_idx >= 0 {
+                            let ei = c.enums.get(enum_idx)
+                            // Search all variants for one that has this field
+                            field_ty = variant_fields_find_field(ei.variants, (*list).head.name)
+                        }
                     }
                 }
                 c = c.bind_pattern((*list).head.pattern, field_ty)
@@ -11533,12 +11786,99 @@ impl Checker {
         let struct_idx = self.structs.find(struct_name)
         if struct_idx >= 0 {
             let si = self.structs.get(struct_idx)
-            var c = self.check_struct_field_inits(e.fields, si, e.span)
-            (c, ty_named(struct_name))
+            if si.is_generic_template {
+                // Generic struct: infer type params from field initializers
+                self.check_generic_struct_lit(e, si)
+            } else {
+                var c = self.check_struct_field_inits(e.fields, si, e.span)
+                (c, ty_named(struct_name))
+            }
         } else {
             var c = self.report_error_at(e.span, 15, 0, 0, 0)
             c = c.check_struct_field_inits_no_type(e.fields)
             (c, ty_error())
+        }
+    }
+
+    fn check_generic_struct_lit(self, e: Expr, tmpl: StructInfo) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        // Infer type arguments from field initializers, then monomorphize.
+        var inferred = InferBuf { args: [ty_error(); 8] }
+        let pair = self.infer_type_params_from_fields(e.fields, tmpl, inferred)
+        var c = pair.0
+        inferred = pair.1
+        c.finalize_generic_struct_lit(e, tmpl, inferred.args)
+    }
+
+    fn infer_type_params_from_fields(self, opt: Option<Box<StructFieldList>>, tmpl: StructInfo, acc: InferBuf) -> (Checker, InferBuf) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            None => (self, acc)
+            Some(fl) => {
+                let field_name = (*fl).head.name
+                let tmpl_field_ty = field_info_list_find(tmpl.fields, field_name)
+                let pair = self.check_expr((*fl).head.value)
+                var c = pair.0
+                let init_ty = pair.1
+
+                // If this template field type references a type parameter, record the inferred type
+                var buf = acc
+                if tmpl_field_ty.kind == TypeKind::TyNamed {
+                    var pi: i64 = 0
+                    while pi < tmpl.type_param_count {
+                        if name_eq(tmpl_field_ty.name, tmpl.type_param_names[pi]) {
+                            buf.args[pi] = init_ty
+                            pi = tmpl.type_param_count  // break
+                        } else {
+                            pi = pi + 1
+                        }
+                    }
+                }
+                c.infer_type_params_from_fields((*fl).tail, tmpl, buf)
+            }
+        }
+    }
+
+    fn finalize_generic_struct_lit(self, e: Expr, tmpl: StructInfo, inferred_args: [TypeEntry; 8]) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        // Build the TypeEntryList from inferred args
+        var args_list_opt: Option<Box<TypeEntryList>> = None
+        var ai: i64 = tmpl.type_param_count - 1
+        while ai >= 0 {
+            args_list_opt = Some(Box::new(TypeEntryList { head: inferred_args[ai], tail: args_list_opt }))
+            ai = ai - 1
+        }
+
+        match args_list_opt {
+            None => (self, ty_error())
+            Some(args_box) => {
+                let args = *args_box
+                // Build mangled name
+                let mangled = mangle_generic_name(tmpl.name, args)
+
+                // Check if already monomorphized
+                var c = self
+                let existing_idx = c.structs.find(mangled)
+                if existing_idx < 0 {
+                    // Monomorphize
+                    let mono_fields = monomorphize_fields(tmpl.fields, tmpl.type_param_count, tmpl.type_param_names, args)
+                    let mono_info = StructInfo {
+                        name: mangled,
+                        fields: mono_fields.0,
+                        field_count: mono_fields.1,
+                        is_linear: tmpl.is_linear,
+                        type_param_count: 0,
+                        type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
+                        is_generic_template: false,
+                    }
+                    c.structs = c.structs.add(mono_info)
+                }
+
+                // Now validate fields against the monomorphized struct
+                let mono_idx = c.structs.find(mangled)
+                if mono_idx >= 0 {
+                    let mono_si = c.structs.get(mono_idx)
+                    c = c.check_struct_field_inits(e.fields, mono_si, e.span)
+                }
+                (c, ty_named(mangled))
+            }
         }
     }
 

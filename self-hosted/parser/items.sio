@@ -426,6 +426,26 @@ impl Parser {
 
         let name = p.current_name()
         p = p.expect_ident()
+
+        // Parse optional type parameters: struct Foo<T, U> { ... }
+        var type_params_opt: Option<Box<TypeParamDefList>> = None
+        if p.peek() == TokenKind::Lt {
+            p = p.advance()  // skip '<'
+            var rev_tparams: Option<Box<TypeParamDefList>> = None
+            while p.peek() != TokenKind::Gt && p.peek() != TokenKind::Eof {
+                let tp_span = p.current_span()
+                let tp_name = p.current_name()
+                p = p.expect_ident()
+                let tpd = TypeParamDef { name: tp_name, span: p.span_from(tp_span) }
+                rev_tparams = Some(Box::new(TypeParamDefList { head: tpd, tail: rev_tparams }))
+                if p.peek() == TokenKind::Comma {
+                    p = p.advance()
+                }
+            }
+            p = p.expect(TokenKind::Gt)
+            type_params_opt = reverse_type_param_def_list_opt(rev_tparams)
+        }
+
         p = p.expect(TokenKind::LBrace)
 
         // Parse fields
@@ -452,7 +472,7 @@ impl Parser {
         p = p.expect(TokenKind::RBrace)
         let fields_opt = reverse_field_def_list_opt(rev_fields_opt)
         let span = p.span_from(start)
-        let sdef = StructDef { name: name, fields: fields_opt, is_linear: is_linear, is_affine: is_affine, span: span }
+        let sdef = StructDef { name: name, type_params: type_params_opt, fields: fields_opt, is_linear: is_linear, is_affine: is_affine, span: span }
 
         (p, Item {
             kind: ItemKind::ItemStruct,
@@ -503,9 +523,32 @@ impl Parser {
             let v_start = p.current_span()
             let v_name = p.current_name()
             p = p.expect_ident()
-            let v_span = p.span_from(v_start)
 
-            let variant = VariantDef { name: v_name, span: v_span }
+            // Parse optional variant fields: Variant { field1: Type1, field2: Type2 }
+            var v_fields: Option<Box<FieldDefList>> = None
+            if p.peek() == TokenKind::LBrace {
+                p = p.advance()  // skip {
+                var rev_fields: Option<Box<FieldDefList>> = None
+                while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+                    let f_name = p.current_name()
+                    p = p.expect_ident()
+                    p = p.expect(TokenKind::Colon)
+                    let ty_pair = p.parse_type()
+                    p = ty_pair.0
+                    let f_ty = ty_pair.1
+                    let f_span = p.span_from(v_start)
+                    let fdef = FieldDef { name: f_name, ty: f_ty, span: f_span }
+                    rev_fields = Some(Box::new(FieldDefList { head: fdef, tail: rev_fields }))
+                    if p.peek() == TokenKind::Comma {
+                        p = p.advance()
+                    }
+                }
+                p = p.expect(TokenKind::RBrace)
+                v_fields = reverse_field_def_list_opt(rev_fields)
+            }
+
+            let v_span = p.span_from(v_start)
+            let variant = VariantDef { name: v_name, fields: v_fields, span: v_span }
 
             rev_variants_opt = Some(Box::new(VariantDefList { head: variant, tail: rev_variants_opt }))
 
@@ -2768,6 +2811,24 @@ fn reverse_field_def_list_loop(
             let next = (*node).tail
             let rev_node = FieldDefList { head: (*node).head, tail: acc }
             reverse_field_def_list_loop(next, Some(Box::new(rev_node)))
+        },
+    }
+}
+
+fn reverse_type_param_def_list_opt(list: Option<Box<TypeParamDefList>>) -> Option<Box<TypeParamDefList>> with Mut, Alloc {
+    reverse_type_param_def_list_loop(list, None)
+}
+
+fn reverse_type_param_def_list_loop(
+    current: Option<Box<TypeParamDefList>>,
+    acc: Option<Box<TypeParamDefList>>,
+) -> Option<Box<TypeParamDefList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = TypeParamDefList { head: (*node).head, tail: acc }
+            reverse_type_param_def_list_loop(next, Some(Box::new(rev_node)))
         },
     }
 }
