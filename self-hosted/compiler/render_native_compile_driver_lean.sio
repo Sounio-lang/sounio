@@ -65,7 +65,6 @@ var SC_PC: i64 = 0  // param count
 var SC_DEPTH: i64 = 0  // brace depth
 var SC_ID_S: i64 = 0  // ident start (for stmt helpers)
 var SC_ID_LEN: i64 = 0  // ident len (for stmt helpers)
-var MC_OUTPUT_PATH: string = ""  // output ELF path (set by mini_compile)
 
 // Same-module token arrays (replaces cross-module PT_* from parser.sio)
 var MP_KIND: [i64; 65536] = [0; 65536]
@@ -7114,10 +7113,7 @@ fn mc_parse_primary() with Mut, Panic, Div {
         let slot = mc_find_local(id_s, id_len)
         if slot >= 0 {
             let lt = mc_find_local_type(id_s, id_len)
-            if lt == -2 {
-                // Local array: load base address
-                mc_emit_lea_slot(slot)
-            } else if lt >= 0 {
+            if lt == -2 { mc_emit_lea_slot(slot) } else if lt >= 0 {
                 // Struct variable: load pointer to first slot
                 mc_emit_lea_slot(slot)
             } else {
@@ -7289,67 +7285,30 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
         return 0
     }
 
-    // print_char(expr) — write(1, &byte, 1)
+
     if mc_src_eq_at(name_s, name_len, "print_char") {
         mc_parse_expr()
         MC_POS = MC_POS + 1
-        // push byte onto stack, write from rsp
-        we(0x50)  // push rax
-        we(0xb8); we32(1)           // mov eax, 1 (SYS_WRITE)
-        we(0xbf); we32(1)           // mov edi, 1 (stdout)
-        we(0x48); we(0x89); we(0xe6) // mov rsi, rsp
-        we(0xba); we32(1)           // mov edx, 1 (1 byte)
-        we(0x0f); we(0x05)          // syscall
-        we(0x58)  // pop rax (cleanup)
-        we(0x48); we(0x31); we(0xc0) // xor rax, rax
+        we(0x50)
+        we(0xb8); we32(1)
+        we(0xbf); we32(1)
+        we(0x48); we(0x89); we(0xe6)
+        we(0xba); we32(1)
+        we(0x0f); we(0x05)
+        we(0x58)
+        we(0x48); we(0x31); we(0xc0)
         return 0
     }
-
-    // file_size(path_expr) — stat(path, &buf); return buf.st_size
     if mc_src_eq_at(name_s, name_len, "file_size") {
         mc_parse_expr()
         MC_POS = MC_POS + 1
-        // rax = path string pointer
-        // sub rsp, 256; mov rdi, rax; lea rsi, [rsp]; mov eax, 4 (SYS_STAT); syscall
-        we(0x48); we(0x89); we(0xc7) // mov rdi, rax (path)
-        we(0x48); we(0x81); we(0xec); we32(256) // sub rsp, 256
-        we(0x48); we(0x89); we(0xe6) // mov rsi, rsp (stat buf)
-        we(0xb8); we32(4)            // mov eax, 4 (SYS_STAT)
-        we(0x0f); we(0x05)           // syscall
-        // st_size is at offset 48 in stat struct
-        we(0x48); we(0x8B); we(0x44); we(0x24); we(48) // mov rax, [rsp+48]
-        we(0x48); we(0x81); we(0xc4); we32(256) // add rsp, 256
-        MC_EXPR_IS_F64 = 0
-        return 0
-    }
-
-    // read_file(path_expr) — open, stat, read, close; returns pointer to data on stack
-    // Note: simplified — returns pointer to heap-allocated buffer
-    // For now: open(path, O_RDONLY), read into stack buffer, return rsp
-    if mc_src_eq_at(name_s, name_len, "read_file") {
-        mc_parse_expr()
-        MC_POS = MC_POS + 1
-        // rax = path; save it
-        we(0x48); we(0x89); we(0xc7) // mov rdi, rax (path for open)
-        we(0x48); we(0x31); we(0xf6) // xor rsi, rsi (O_RDONLY=0)
-        we(0x48); we(0x31); we(0xd2) // xor rdx, rdx (mode=0)
-        we(0xb8); we32(2)            // mov eax, 2 (SYS_OPEN)
-        we(0x0f); we(0x05)           // syscall → fd in rax
-        // Save fd, allocate stack buffer, read
-        we(0x48); we(0x89); we(0xc7) // mov rdi, rax (fd)
-        we(0x48); we(0x81); we(0xec); we32(1048576) // sub rsp, 1MB
-        we(0x48); we(0x89); we(0xe6) // mov rsi, rsp (buffer)
-        we(0xba); we32(1048576)      // mov edx, 1048576
-        we(0xb8); we32(0)            // mov eax, 0 (SYS_READ)
-        we(0x0f); we(0x05)           // syscall → bytes_read in rax
-        // Null-terminate
-        we(0x48); we(0x89); we(0xC1) // mov rcx, rax
-        we(0xC6); we(0x04); we(0x0C); we(0x00) // mov byte [rsp+rcx], 0
-        // Close fd (rdi still has it from before)
-        we(0xb8); we32(3)            // mov eax, 3 (SYS_CLOSE)
-        we(0x0f); we(0x05)           // syscall
-        // Return pointer to buffer
-        we(0x48); we(0x89); we(0xe0) // mov rax, rsp
+        we(0x48); we(0x89); we(0xc7)
+        we(0x48); we(0x81); we(0xec); we32(256)
+        we(0x48); we(0x89); we(0xe6)
+        we(0xb8); we32(4)
+        we(0x0f); we(0x05)
+        we(0x48); we(0x8B); we(0x44); we(0x24); we(48)
+        we(0x48); we(0x81); we(0xc4); we32(256)
         MC_EXPR_IS_F64 = 0
         return 0
     }
@@ -7519,26 +7478,24 @@ fn mc_parse_match_expr() with Mut, Panic, Div {
             if arm_l == 1 && (LEAN_SOURCE[(arm_s) as usize] as i64) == 95 {
                 is_wildcard = true
                 MC_POS = MC_POS + 1  // consume _
-            } else if MP_KIND[(MC_POS + 1) as usize] == 159 {
-                // Enum::Variant pattern: EnumName::VariantName
-                MC_POS = MC_POS + 1  // consume enum name
-                MC_POS = MC_POS + 1  // consume ::
-                let pv_s = MP_START[MC_POS as usize]
-                let pv_l = MP_END[MC_POS as usize] - pv_s
-                MC_POS = MC_POS + 1  // consume variant name
-                let pen_idx = mc_find_enum(arm_s, arm_l)
-                if pen_idx >= 0 {
-                    arm_value = mc_find_enum_variant(pen_idx, pv_s, pv_l)
-                }
             } else {
-                // Bare variant name: search all enums
-                MC_POS = MC_POS + 1  // consume variant name
-                var found_ev: i64 = 0
-                var evi: i64 = 0
-                while evi < MC_EN_COUNT && found_ev == 0 {
-                    let ev = mc_find_enum_variant(evi, arm_s, arm_l)
-                    if ev >= 0 { arm_value = ev; found_ev = 1 }
-                    evi = evi + 1
+                if MP_KIND[(MC_POS + 1) as usize] == 159 {
+                    MC_POS = MC_POS + 1
+                    MC_POS = MC_POS + 1
+                    let pv_s = MP_START[MC_POS as usize]
+                    let pv_l = MP_END[MC_POS as usize] - pv_s
+                    MC_POS = MC_POS + 1
+                    let pen_idx = mc_find_enum(arm_s, arm_l)
+                    if pen_idx >= 0 { arm_value = mc_find_enum_variant(pen_idx, pv_s, pv_l) }
+                } else {
+                    MC_POS = MC_POS + 1
+                    var found_ev: i64 = 0
+                    var evi: i64 = 0
+                    while evi < MC_EN_COUNT && found_ev == 0 {
+                        let ev = mc_find_enum_variant(evi, arm_s, arm_l)
+                        if ev >= 0 { arm_value = ev; found_ev = 1 }
+                        evi = evi + 1
+                    }
                 }
             }
         } else if arm_k == 201 {
@@ -7715,6 +7672,18 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
         we(0x59)  // pop rcx (base)
         we(0x48); we(0x01); we(0xC8)  // add rax, rcx
         we(0x48); we(0x8B); we(0x00)  // mov rax, [rax]
+    }
+    if MP_KIND[MC_POS as usize] == 175 {
+        MC_POS = MC_POS + 1
+        we(0x50)
+        mc_parse_expr()
+        if MP_KIND[MC_POS as usize] == 27 { MC_POS = MC_POS + 1 }
+        if MP_KIND[MC_POS as usize] == 120 { MC_POS = MC_POS + 1 }
+        if MP_KIND[MC_POS as usize] == 176 { MC_POS = MC_POS + 1 }
+        we(0x48); we(0xC1); we(0xE0); we(0x03)
+        we(0x59)
+        we(0x48); we(0x01); we(0xC8)
+        we(0x48); we(0x8B); we(0x00)
     }
     // Pratt operator loop
     while true {
@@ -8013,78 +7982,18 @@ fn mc_stmt_var() with Mut, Panic, Div {
     // Optional type annotation — detect f64 and struct
     var var_is_f64: i64 = 0
     var var_st: i64 = -1
-    var var_is_array: i64 = 0
-    var var_arr_count: i64 = 0
-    var var_arr_elem_sz: i64 = 8
     if MP_KIND[MC_POS as usize] == 178 {
         MC_POS = MC_POS + 1
         let tk_at = MP_KIND[MC_POS as usize]
-        if tk_at == 175 {
-            // Array type: [T; N]
-            var_is_array = 1
-            MC_POS = MC_POS + 1  // skip [
-            // Check element type
-            if MP_KIND[MC_POS as usize] == 120 {
-                let ets = MP_START[MC_POS as usize]
-                let etl = MP_END[MC_POS as usize] - ets
-                if mc_src_eq_at(ets, etl, "i8") { var_arr_elem_sz = 1 }
-            }
-            // Skip to ;
-            while MC_POS < MC_TC && MP_KIND[MC_POS as usize] != 177 { MC_POS = MC_POS + 1 }
-            MC_POS = MC_POS + 1  // skip ;
-            // Parse N
-            if MP_KIND[MC_POS as usize] == 121 {
-                var_arr_count = MP_INT_VALUE[MC_POS as usize]
-            }
-            // Skip rest of type and ]
-            while MC_POS < MC_TC && MP_KIND[MC_POS as usize] != 176 { MC_POS = MC_POS + 1 }
-            MC_POS = MC_POS + 1  // skip ]
-        } else {
-            if tk_at == 120 || tk_at == 201 {
-                let ts = MP_START[MC_POS as usize]
-                let tl = MP_END[MC_POS as usize] - ts
-                if mc_src_eq_at(ts, tl, "f64") { var_is_f64 = 1 }
-                else { var_st = mc_type_name_to_struct(ts, tl) }
-            }
-            mc_skip_type()
+        if tk_at == 120 || tk_at == 201 {
+            let ts = MP_START[MC_POS as usize]
+            let tl = MP_END[MC_POS as usize] - ts
+            if mc_src_eq_at(ts, tl, "f64") { var_is_f64 = 1 }
+            else { var_st = mc_type_name_to_struct(ts, tl) }
         }
+        mc_skip_type()
     }
-    MC_POS = MC_POS + 1  // skip =
-    if var_is_array == 1 {
-        // Allocate slots for array
-        let arr_slots = if var_arr_elem_sz == 1 { (var_arr_count + 7) / 8 } else { var_arr_count }
-        let base_slot = MC_NEXT_SLOT
-        MC_NEXT_SLOT = MC_NEXT_SLOT + arr_slots
-        // Register as local (type=-2 marks array, slot=base)
-        let idx = MC_LOC_COUNT
-        MC_LOC_NAME_START[idx as usize] = ns
-        MC_LOC_NAME_LEN[idx as usize] = nl
-        MC_LOC_SLOT[idx as usize] = base_slot
-        MC_LOC_IS_F64[idx as usize] = 0
-        MC_LOC_TYPE[idx as usize] = -2  // -2 = local array
-        MC_LOC_COUNT = MC_LOC_COUNT + 1
-        // Zero-initialize
-        var zi: i64 = 0
-        while zi < arr_slots {
-            we(0x48); we(0x31); we(0xC0)  // xor rax, rax
-            mc_emit_store_rax(base_slot + zi)
-            zi = zi + 1
-        }
-        // Skip initializer expression [0; N] or [expr; N]
-        if MP_KIND[MC_POS as usize] == 175 {
-            // Skip tokens until matching ]
-            var depth: i64 = 1
-            MC_POS = MC_POS + 1
-            while MC_POS < MC_TC && depth > 0 {
-                if MP_KIND[MC_POS as usize] == 175 { depth = depth + 1 }
-                if MP_KIND[MC_POS as usize] == 176 { depth = depth - 1 }
-                MC_POS = MC_POS + 1
-            }
-        } else {
-            mc_parse_expr()
-        }
-        return 0
-    }
+    MC_POS = MC_POS + 1
     if var_st < 0 && var_is_f64 == 0 && MP_KIND[MC_POS as usize] == 120 {
         let rhs_s = MP_START[MC_POS as usize]
         let rhs_l = MP_END[MC_POS as usize] - rhs_s
@@ -8549,18 +8458,6 @@ fn mc_stmt_ident() with Mut, Panic, Div {
                     we(0x48); we(0x01); we(0xC1)  // add rcx, rax
                     we(0x48); we(0x89); we(0x11)  // mov [rcx], rdx
                 }
-            } else {
-                // Local array store: base at stack slot
-                let la_slot = mc_find_local(id_s, id_len)
-                if la_slot >= 0 {
-                    // rax=index, rdx=value
-                    we(0x48); we(0xC1); we(0xE0); we(0x03)  // shl rax, 3
-                    we(0x50)  // push rax (scaled index)
-                    mc_emit_lea_slot(la_slot)  // rax = base address
-                    we(0x59)  // pop rcx (scaled index)
-                    we(0x48); we(0x01); we(0xC8)  // add rax, rcx
-                    we(0x48); we(0x89); we(0x10)  // mov [rax], rdx
-                }
             }
         } else {
             // Read: ident[idx] → rax
@@ -9015,270 +8912,127 @@ fn mc_scan_functions() with Mut, Panic, Div {
 // --- Pass 2: Compile each function body ---
 fn mc_compile_functions() with Mut, Panic, Div {
     print("CF\n")
-    // ZERO we() calls — direct WIDE_OUT writes bypass boot4 register corruption
-    MC_FN_OFF[0] = WIDE_LEN
-    mc_locals_reset()
-    // Prologue: push rbp; mov rbp,rsp; sub rsp,4096 — 11 bytes direct
-    SC_NS = WIDE_LEN
-    WIDE_OUT[SC_NS as usize] = 0x55
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x48
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x89
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0xe5
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x48
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x81
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0xec
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x00
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x10
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x00
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x00
-    SC_NS = SC_NS + 1
-    WIDE_LEN = SC_NS
-    // Compile body (hello.sio main has 0 params)
-    MC_POS = MC_FN_BODY_TOK[0]
-    MC_POS = MC_POS + 1
-    // HARDCODED: return 0 → xor rax,rax + epilogue
-    SC_NS = WIDE_LEN
-    WIDE_OUT[SC_NS as usize] = 0x48
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x31
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0xc0
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x48
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x89
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0xec
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x5d
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0xc3
-    SC_NS = SC_NS + 1
-    WIDE_LEN = SC_NS
-    // Patch call fixups (none for hello.sio but safe to call)
-    mc_patch_calls()
-    // Trampoline: call main, mov edi eax, exit syscall — direct writes
-    SC_FI = WIDE_LEN
-    let main_off = MC_FN_OFF[0]
-    let call_rel = main_off - (WIDE_LEN + 1 + 4)
-    SC_NS = WIDE_LEN
-    WIDE_OUT[SC_NS as usize] = 0xe8
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = (call_rel & 0xFF) as i8
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = ((call_rel >> 8) & 0xFF) as i8
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = ((call_rel >> 16) & 0xFF) as i8
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = ((call_rel >> 24) & 0xFF) as i8
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x89
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0xc7
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0xb8
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 60
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x00
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x00
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x00
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x0f
-    SC_NS = SC_NS + 1
-    WIDE_OUT[SC_NS as usize] = 0x05
-    SC_NS = SC_NS + 1
-    WIDE_LEN = SC_NS
-    SC_PC = WIDE_LEN
-    print("CF: tramp=")
-    print_int(SC_FI)
-    print(" code=")
-    print_int(SC_PC)
-    print("\n")
-    // Build ELF — uses elf_write_* (separate fns, not we())
-    let base_addr: i64 = 4194304
-    let text_off: i64 = 4096
-    let entry_va = base_addr + text_off + SC_FI
-    // GLOBAL_ELF already zero-initialized — skip zero-fill loop
-    GLOBAL_ELF[0 as usize] = 0x7f as i8
-    GLOBAL_ELF[1 as usize] = 69 as i8
-    GLOBAL_ELF[2 as usize] = 76 as i8
-    GLOBAL_ELF[3 as usize] = 70 as i8
-    GLOBAL_ELF[4 as usize] = 2 as i8
-    GLOBAL_ELF[5 as usize] = 1 as i8
-    GLOBAL_ELF[6 as usize] = 1 as i8
-    GLOBAL_ELF[16 as usize] = (2 & 0xFF) as i8
-    GLOBAL_ELF[(16 + 1) as usize] = ((2 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[18 as usize] = (0x3e & 0xFF) as i8
-    GLOBAL_ELF[(18 + 1) as usize] = ((0x3e >> 8) & 0xFF) as i8
-    GLOBAL_ELF[20 as usize] = (1 & 0xFF) as i8
-    GLOBAL_ELF[(20 + 1) as usize] = ((1 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(20 + 2) as usize] = ((1 >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(20 + 3) as usize] = ((1 >> 24) & 0xFF) as i8
-    GLOBAL_ELF[24 as usize] = (entry_va & 0xFF) as i8
-    GLOBAL_ELF[(24 + 1) as usize] = ((entry_va >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(24 + 2) as usize] = ((entry_va >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(24 + 3) as usize] = ((entry_va >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(24 + 4) as usize] = ((entry_va >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(24 + 5) as usize] = ((entry_va >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(24 + 6) as usize] = ((entry_va >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(24 + 7) as usize] = ((entry_va >> 56) & 0xFF) as i8
-    GLOBAL_ELF[32 as usize] = (64 & 0xFF) as i8
-    GLOBAL_ELF[(32 + 1) as usize] = ((64 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(32 + 2) as usize] = ((64 >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(32 + 3) as usize] = ((64 >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(32 + 4) as usize] = ((64 >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(32 + 5) as usize] = ((64 >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(32 + 6) as usize] = ((64 >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(32 + 7) as usize] = ((64 >> 56) & 0xFF) as i8
-    GLOBAL_ELF[52 as usize] = (64 & 0xFF) as i8
-    GLOBAL_ELF[(52 + 1) as usize] = ((64 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[54 as usize] = (56 & 0xFF) as i8
-    GLOBAL_ELF[(54 + 1) as usize] = ((56 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[56 as usize] = (2 & 0xFF) as i8
-    GLOBAL_ELF[(56 + 1) as usize] = ((2 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[58 as usize] = (64 & 0xFF) as i8
-    GLOBAL_ELF[(58 + 1) as usize] = ((64 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[64 as usize] = (1 & 0xFF) as i8
-    GLOBAL_ELF[(64 + 1) as usize] = ((1 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(64 + 2) as usize] = ((1 >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(64 + 3) as usize] = ((1 >> 24) & 0xFF) as i8
-    GLOBAL_ELF[68 as usize] = (7 & 0xFF) as i8
-    GLOBAL_ELF[(68 + 1) as usize] = ((7 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(68 + 2) as usize] = ((7 >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(68 + 3) as usize] = ((7 >> 24) & 0xFF) as i8
-    GLOBAL_ELF[72 as usize] = (0 & 0xFF) as i8
-    GLOBAL_ELF[(72 + 1) as usize] = ((0 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(72 + 2) as usize] = ((0 >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(72 + 3) as usize] = ((0 >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(72 + 4) as usize] = ((0 >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(72 + 5) as usize] = ((0 >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(72 + 6) as usize] = ((0 >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(72 + 7) as usize] = ((0 >> 56) & 0xFF) as i8
-    GLOBAL_ELF[80 as usize] = (base_addr & 0xFF) as i8
-    GLOBAL_ELF[(80 + 1) as usize] = ((base_addr >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(80 + 2) as usize] = ((base_addr >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(80 + 3) as usize] = ((base_addr >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(80 + 4) as usize] = ((base_addr >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(80 + 5) as usize] = ((base_addr >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(80 + 6) as usize] = ((base_addr >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(80 + 7) as usize] = ((base_addr >> 56) & 0xFF) as i8
-    GLOBAL_ELF[88 as usize] = (base_addr & 0xFF) as i8
-    GLOBAL_ELF[(88 + 1) as usize] = ((base_addr >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(88 + 2) as usize] = ((base_addr >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(88 + 3) as usize] = ((base_addr >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(88 + 4) as usize] = ((base_addr >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(88 + 5) as usize] = ((base_addr >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(88 + 6) as usize] = ((base_addr >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(88 + 7) as usize] = ((base_addr >> 56) & 0xFF) as i8
-    let fsz = text_off + SC_PC
-    GLOBAL_ELF[96 as usize] = (fsz & 0xFF) as i8
-    GLOBAL_ELF[(96 + 1) as usize] = ((fsz >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(96 + 2) as usize] = ((fsz >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(96 + 3) as usize] = ((fsz >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(96 + 4) as usize] = ((fsz >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(96 + 5) as usize] = ((fsz >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(96 + 6) as usize] = ((fsz >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(96 + 7) as usize] = ((fsz >> 56) & 0xFF) as i8
-    GLOBAL_ELF[104 as usize] = (fsz & 0xFF) as i8
-    GLOBAL_ELF[(104 + 1) as usize] = ((fsz >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(104 + 2) as usize] = ((fsz >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(104 + 3) as usize] = ((fsz >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(104 + 4) as usize] = ((fsz >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(104 + 5) as usize] = ((fsz >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(104 + 6) as usize] = ((fsz >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(104 + 7) as usize] = ((fsz >> 56) & 0xFF) as i8
-    GLOBAL_ELF[112 as usize] = (4096 & 0xFF) as i8
-    GLOBAL_ELF[(112 + 1) as usize] = ((4096 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(112 + 2) as usize] = ((4096 >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(112 + 3) as usize] = ((4096 >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(112 + 4) as usize] = ((4096 >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(112 + 5) as usize] = ((4096 >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(112 + 6) as usize] = ((4096 >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(112 + 7) as usize] = ((4096 >> 56) & 0xFF) as i8
-    let bss_base: i64 = 0x700000
-    let bss_size = GLOBAL_TOTAL_SIZE + 4096
-    GLOBAL_ELF[120 as usize] = (1 & 0xFF) as i8
-    GLOBAL_ELF[(120 + 1) as usize] = ((1 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(120 + 2) as usize] = ((1 >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(120 + 3) as usize] = ((1 >> 24) & 0xFF) as i8
-    GLOBAL_ELF[124 as usize] = (6 & 0xFF) as i8
-    GLOBAL_ELF[(124 + 1) as usize] = ((6 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(124 + 2) as usize] = ((6 >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(124 + 3) as usize] = ((6 >> 24) & 0xFF) as i8
-    GLOBAL_ELF[128 as usize] = (fsz & 0xFF) as i8
-    GLOBAL_ELF[(128 + 1) as usize] = ((fsz >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(128 + 2) as usize] = ((fsz >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(128 + 3) as usize] = ((fsz >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(128 + 4) as usize] = ((fsz >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(128 + 5) as usize] = ((fsz >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(128 + 6) as usize] = ((fsz >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(128 + 7) as usize] = ((fsz >> 56) & 0xFF) as i8
-    GLOBAL_ELF[136 as usize] = (bss_base & 0xFF) as i8
-    GLOBAL_ELF[(136 + 1) as usize] = ((bss_base >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(136 + 2) as usize] = ((bss_base >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(136 + 3) as usize] = ((bss_base >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(136 + 4) as usize] = ((bss_base >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(136 + 5) as usize] = ((bss_base >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(136 + 6) as usize] = ((bss_base >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(136 + 7) as usize] = ((bss_base >> 56) & 0xFF) as i8
-    GLOBAL_ELF[144 as usize] = (bss_base & 0xFF) as i8
-    GLOBAL_ELF[(144 + 1) as usize] = ((bss_base >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(144 + 2) as usize] = ((bss_base >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(144 + 3) as usize] = ((bss_base >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(144 + 4) as usize] = ((bss_base >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(144 + 5) as usize] = ((bss_base >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(144 + 6) as usize] = ((bss_base >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(144 + 7) as usize] = ((bss_base >> 56) & 0xFF) as i8
-    GLOBAL_ELF[152 as usize] = (0 & 0xFF) as i8
-    GLOBAL_ELF[(152 + 1) as usize] = ((0 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(152 + 2) as usize] = ((0 >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(152 + 3) as usize] = ((0 >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(152 + 4) as usize] = ((0 >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(152 + 5) as usize] = ((0 >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(152 + 6) as usize] = ((0 >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(152 + 7) as usize] = ((0 >> 56) & 0xFF) as i8
-    GLOBAL_ELF[160 as usize] = (bss_size & 0xFF) as i8
-    GLOBAL_ELF[(160 + 1) as usize] = ((bss_size >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(160 + 2) as usize] = ((bss_size >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(160 + 3) as usize] = ((bss_size >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(160 + 4) as usize] = ((bss_size >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(160 + 5) as usize] = ((bss_size >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(160 + 6) as usize] = ((bss_size >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(160 + 7) as usize] = ((bss_size >> 56) & 0xFF) as i8
-    GLOBAL_ELF[168 as usize] = (4096 & 0xFF) as i8
-    GLOBAL_ELF[(168 + 1) as usize] = ((4096 >> 8) & 0xFF) as i8
-    GLOBAL_ELF[(168 + 2) as usize] = ((4096 >> 16) & 0xFF) as i8
-    GLOBAL_ELF[(168 + 3) as usize] = ((4096 >> 24) & 0xFF) as i8
-    GLOBAL_ELF[(168 + 4) as usize] = ((4096 >> 32) & 0xFF) as i8
-    GLOBAL_ELF[(168 + 5) as usize] = ((4096 >> 40) & 0xFF) as i8
-    GLOBAL_ELF[(168 + 6) as usize] = ((4096 >> 48) & 0xFF) as i8
-    GLOBAL_ELF[(168 + 7) as usize] = ((4096 >> 56) & 0xFF) as i8
-    // Copy code to text section
-    var ci: i64 = 0
-    while ci < SC_PC {
-        GLOBAL_ELF[(text_off + ci) as usize] = WIDE_OUT[ci as usize]
-        ci = ci + 1
+    var fi: i64 = 0
+    while fi < MC_FN_COUNT {
+        print("CF:")
+        MC_FN_OFF[fi as usize] = WIDE_LEN
+
+        // Reset locals
+        mc_locals_reset()
+
+        // Prologue: push rbp; mov rbp, rsp; sub rsp, FRAME_SIZE
+        we(0x55)
+        we(0x48)
+        we(0x89)
+        we(0xe5)
+        we(0x48)
+        we(0x81)
+        we(0xec)
+        we32(MC_FRAME_SIZE())
+
+        // Spill parameters into local slots
+        let param_base = MC_FN_PARAM_BASE[fi as usize]
+        let param_count = MC_FN_PARAM_COUNT[fi as usize]
+        var pi: i64 = 0
+        while pi < param_count {
+            let ps = MC_PARAM_NAME_START[(param_base + pi) as usize]
+            let pl = MC_PARAM_NAME_LEN[(param_base + pi) as usize]
+            let pst = MC_PARAM_TYPE[(param_base + pi) as usize]
+            if pst >= 0 {
+                // Struct parameter: register holds pointer to struct data
+                let slot = mc_add_local_struct(ps, pl, pst)
+                // Move pointer from ABI register into rax
+                if pi == 0 { we(0x48)
+                we(0x89)
+                we(0xf8) }       // mov rax, rdi
+                else if pi == 1 { we(0x48)
+                we(0x89)
+                we(0xf0) }  // mov rax, rsi
+                else if pi == 2 { we(0x48)
+                we(0x89)
+                we(0xd0) }  // mov rax, rdx
+                else if pi == 3 { we(0x48)
+                we(0x89)
+                we(0xc8) }  // mov rax, rcx
+                else if pi == 4 { we(0x4c)
+                we(0x89)
+                we(0xc0) }  // mov rax, r8
+                else if pi == 5 { we(0x4c)
+                we(0x89)
+                we(0xc8) }  // mov rax, r9
+                // Copy struct fields from [rax] to local stack slots
+                mc_emit_struct_copy_from_rax(slot, MC_ST_FLAT_SIZE[pst as usize])
+            } else {
+                // Scalar or f64 parameter
+                let param_is_float = MC_PARAM_IS_F64[(param_base + pi) as usize]
+                var slot: i64 = 0
+                if param_is_float == 1 {
+                    slot = mc_add_local_f64(ps, pl)
+                } else {
+                    slot = mc_add_local(ps, pl)
+                }
+                if pi == 0 { we(0x48)
+                we(0x89)
+                we(0xf8) }       // mov rax, rdi
+                else if pi == 1 { we(0x48)
+                we(0x89)
+                we(0xf0) }  // mov rax, rsi
+                else if pi == 2 { we(0x48)
+                we(0x89)
+                we(0xd0) }  // mov rax, rdx
+                else if pi == 3 { we(0x48)
+                we(0x89)
+                we(0xc8) }  // mov rax, rcx
+                else if pi == 4 { we(0x4c)
+                we(0x89)
+                we(0xc0) }  // mov rax, r8
+                else if pi == 5 { we(0x4c)
+                we(0x89)
+                we(0xc8) }  // mov rax, r9
+                mc_emit_store_rax(slot)
+            }
+            pi = pi + 1
+        }
+
+        // Position at body start (should be { token)
+        MC_POS = MC_FN_BODY_TOK[fi as usize]
+        MC_POS = MC_POS + 1
+
+        // Compile body statements
+        mc_parse_block_body()
+        MC_POS = MC_POS + 1
+
+        // Implicit epilogue (if not already returned)
+        // Check if last emitted byte was ret
+        if WIDE_LEN == 0 || WIDE_OUT[(WIDE_LEN - 1) as usize] != (0xc3 as i8) {
+            // Don't zero rax — last expression value is the implicit return
+            // mov rsp, rbp; pop rbp; ret
+            we(0x48)
+            we(0x89)
+            we(0xec)
+            we(0x5d)
+            we(0xc3)
+        }
+
+        print("mc: fn ")
+        var ni: i64 = 0
+        let nns = MC_FN_NAME_START[fi as usize]
+        let nnl = MC_FN_NAME_LEN[fi as usize]
+        while ni < nnl && ni < 32 {
+            print_char((LEAN_SOURCE[(nns + ni) as usize] as i64) as i64)
+            ni = ni + 1
+        }
+        print(" off=")
+        print_int(MC_FN_OFF[fi as usize])
+        print(" sz=")
+        print_int(WIDE_LEN - MC_FN_OFF[fi as usize])
+        print("\n")
+
+        fi = fi + 1
     }
-    let total_len = text_off + SC_PC
-    // Write ELF
-    let write_ok = write_file(MC_OUTPUT_PATH, GLOBAL_ELF, total_len)
-    print("CF: written=")
-    print_int(total_len)
-    print("\n")
 }
+
+// --- Patch call fixups ---
 fn mc_patch_calls() with Mut, Panic {
     var i: i64 = 0
     while i < MC_CALL_FIX_COUNT {
@@ -9458,10 +9212,115 @@ fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
         return 2
     }
 
-    MC_OUTPUT_PATH = output_path
+    // Pass 2: compile each function body
     mc_compile_functions()
+
+    // Patch all call fixups
+    mc_patch_calls()
+
+    // Emit trampoline: call main, mov edi eax, exit syscall
+    let tramp_off = WIDE_LEN
+    let main_off = MC_FN_OFF[MC_MAIN_FN as usize]
+    we(0xe8)
+    let call_rel = main_off - (WIDE_LEN + 4)
+    we32(call_rel)
+    we(0x89)
+    we(0xc7)                  // mov edi, eax
+    we(0xb8); we32(60)                  // mov eax, 60 (exit)
+    we(0x0f)
+    we(0x05)                  // syscall
+
+    let total_code = WIDE_LEN
+    print("mini_compile: code=")
+    print_int(total_code)
+    print(" tramp=")
+    print_int(tramp_off)
+    print("\n")
+
+    // Build ELF
+    let base_addr: i64 = 4194304   // 0x400000
+    let text_off: i64 = 4096       // 0x1000
+    let entry_va = base_addr + text_off + tramp_off
+
+    var ei: i64 = 0
+    while ei < text_off + total_code + 16 { GLOBAL_ELF[ei as usize] = 0; ei = ei + 1 }
+
+    // ELF header
+    elf_write_byte(0, 0x7f)
+    elf_write_byte(1, 69)
+    elf_write_byte(2, 76)
+    elf_write_byte(3, 70)
+    elf_write_byte(4, 2)
+    elf_write_byte(5, 1)
+    elf_write_byte(6, 1)
+    elf_write_u16(16, 2)
+    elf_write_u16(18, 0x3e)
+    elf_write_u32(20, 1)
+    elf_write_u64(24, entry_va)
+    elf_write_u64(32, 64)
+    elf_write_u16(52, 64)
+    elf_write_u16(54, 56)
+    elf_write_u16(56, 2)       // e_phnum = 2 (text + BSS)
+    elf_write_u16(58, 64)
+    // phdr 0: PT_LOAD for text (RWX)
+    elf_write_u32(64, 1)       // p_type = PT_LOAD
+    elf_write_u32(68, 7)       // p_flags = RWX
+    elf_write_u64(72, 0)       // p_offset
+    elf_write_u64(80, base_addr)
+    elf_write_u64(88, base_addr)
+    let fsz = text_off + total_code
+    elf_write_u64(96, fsz)
+    elf_write_u64(104, fsz)
+    elf_write_u64(112, 4096)
+    // phdr 1: PT_LOAD for BSS (RW, zero-initialized by kernel)
+    let bss_base: i64 = 0x700000
+    let bss_size = GLOBAL_TOTAL_SIZE + 4096
+    elf_write_u32(120, 1)      // p_type = PT_LOAD
+    elf_write_u32(124, 6)      // p_flags = RW
+    elf_write_u64(128, fsz)    // p_offset (past text)
+    elf_write_u64(136, bss_base)
+    elf_write_u64(144, bss_base)
+    elf_write_u64(152, 0)      // p_filesz = 0 (BSS)
+    elf_write_u64(160, bss_size)
+    elf_write_u64(168, 4096)   // p_align
+
+    // Copy code to text section
+    var ci: i64 = 0
+    while ci < total_code {
+        GLOBAL_ELF[(text_off + ci) as usize] = WIDE_OUT[ci as usize]
+        ci = ci + 1
+    }
+
+    let total_len = text_off + total_code
+
+    // Detect output format from filename extension
+    let out_len = str_len(output_path)
+    var is_pe: i64 = 0
+    if out_len >= 4 {
+        if str_char_at(output_path, out_len - 4) == 46 {
+            let e1 = str_char_at(output_path, out_len - 3)
+            let e2 = str_char_at(output_path, out_len - 2)
+            let e3 = str_char_at(output_path, out_len - 1)
+            if (e1 == 101 || e1 == 69) && (e2 == 120 || e2 == 88) && (e3 == 101 || e3 == 69) {
+                is_pe = 1
+            }
+        }
+    }
+
+    if is_pe == 1 {
+        // Minimal PE output
+        mc_write_pe(output_path, total_code, tramp_off)
+    } else {
+        let write_ok = write_file(output_path, GLOBAL_ELF, total_len)
+    }
+
+    print("mini_compile: ok written=")
+    print(output_path)
+    print(" size=")
+    print_int(total_len)
+    print("\n")
     0
-}}
+}
 
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     let argc = arg_count()
