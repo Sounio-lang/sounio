@@ -5757,6 +5757,7 @@ var MC_NEXT_SLOT: i64 = 0
 
 // f64 expression type propagation: set by codegen, read by callers
 var MC_EXPR_IS_F64: i64 = 0
+var MC_EXPR_IS_LOCAL_ARR: i64 = 0
 
 // print_f64 helper offset
 var MC_PRINT_F64_OFF: i64 = 0
@@ -7113,7 +7114,7 @@ fn mc_parse_primary() with Mut, Panic, Div {
         let slot = mc_find_local(id_s, id_len)
         if slot >= 0 {
             let lt = mc_find_local_type(id_s, id_len)
-            if lt == -2 { mc_emit_lea_slot(slot) } else if lt >= 0 {
+            if lt == -2 { mc_emit_lea_slot(slot); MC_EXPR_IS_LOCAL_ARR = 1 } else if lt >= 0 {
                 // Struct variable: load pointer to first slot
                 mc_emit_lea_slot(slot)
             } else {
@@ -7661,16 +7662,26 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
         }
     }
     // Handle postfix array index: expr[idx] — 175=LBracket, 176=RBracket, 27=As
+    // Stack-safe: use temp slot instead of push (push corrupts stack arrays)
     if MP_KIND[MC_POS as usize] == 175 {
+        let was_local_arr = MC_EXPR_IS_LOCAL_ARR
+        MC_EXPR_IS_LOCAL_ARR = 0
         MC_POS = MC_POS + 1
-        we(0x50)  // push rax (base)
+        let arr_base_slot = mc_alloc_slot()
+        mc_emit_store_rax(arr_base_slot)  // save base to named slot
         mc_parse_expr()  // index → rax
         if MP_KIND[MC_POS as usize] == 27 { MC_POS = MC_POS + 1 }
         if MP_KIND[MC_POS as usize] == 120 { MC_POS = MC_POS + 1 }
         if MP_KIND[MC_POS as usize] == 176 { MC_POS = MC_POS + 1 }
-        we(0x48); we(0xC1); we(0xE0); we(0x03)  // shl rax, 3
-        we(0x59)  // pop rcx (base)
-        we(0x48); we(0x01); we(0xC8)  // add rax, rcx
+        we(0x48); we(0xC1); we(0xE0); we(0x03)  // shl rax, 3 (index*8)
+        we(0x48); we(0x89); we(0xC1)  // mov rcx, rax (scaled index → rcx)
+        mc_emit_load_rax(arr_base_slot)  // rax = base address
+        if was_local_arr == 1 {
+            // Contragradiant: stack slots ↓, pointers ↑ — subtract
+            we(0x48); we(0x29); we(0xC8)  // sub rax, rcx
+        } else {
+            we(0x48); we(0x01); we(0xC8)  // add rax, rcx
+        }
         we(0x48); we(0x8B); we(0x00)  // mov rax, [rax]
     }
     if MP_KIND[MC_POS as usize] == 175 {
@@ -7993,7 +8004,43 @@ fn mc_stmt_var() with Mut, Panic, Div {
         }
         mc_skip_type()
     }
-    MC_POS = MC_POS + 1
+    MC_POS = MC_POS + 1  // skip =
+    // Detect local array initializer: [val; N]
+    if var_st < 0 && var_is_f64 == 0 && MP_KIND[MC_POS as usize] == 175 {
+        // Scan for ; inside brackets to get count
+        var arr_depth: i64 = 1
+        var arr_semi_pos: i64 = -1
+        var arr_count: i64 = 4
+        var ap: i64 = MC_POS + 1
+        while ap < MC_TC && arr_depth > 0 {
+            if MP_KIND[ap as usize] == 175 { arr_depth = arr_depth + 1 }
+            if MP_KIND[ap as usize] == 176 { arr_depth = arr_depth - 1 }
+            if arr_depth == 1 && MP_KIND[ap as usize] == 177 { arr_semi_pos = ap }
+            ap = ap + 1
+        }
+        if arr_semi_pos >= 0 && arr_semi_pos + 1 < MC_TC && MP_KIND[(arr_semi_pos + 1) as usize] == 121 {
+            arr_count = MP_INT_VALUE[(arr_semi_pos + 1) as usize]
+        }
+        let arr_slots = arr_count
+        let base_slot = MC_NEXT_SLOT
+        MC_NEXT_SLOT = MC_NEXT_SLOT + arr_slots
+        let idx = MC_LOC_COUNT
+        MC_LOC_NAME_START[idx as usize] = ns
+        MC_LOC_NAME_LEN[idx as usize] = nl
+        MC_LOC_SLOT[idx as usize] = base_slot
+        MC_LOC_IS_F64[idx as usize] = 0
+        MC_LOC_TYPE[idx as usize] = -2  // marks local array
+        MC_LOC_COUNT = MC_LOC_COUNT + 1
+        // Zero-initialize all slots
+        var zi: i64 = 0
+        while zi < arr_slots {
+            we(0x48); we(0x31); we(0xC0)  // xor rax, rax
+            mc_emit_store_rax(base_slot + zi)
+            zi = zi + 1
+        }
+        MC_POS = ap  // skip past [val; N]
+        return 0
+    }
     if var_st < 0 && var_is_f64 == 0 && MP_KIND[MC_POS as usize] == 120 {
         let rhs_s = MP_START[MC_POS as usize]
         let rhs_l = MP_END[MC_POS as usize] - rhs_s
@@ -8456,6 +8503,19 @@ fn mc_stmt_ident() with Mut, Panic, Div {
                     var k: i64 = 0
                     while k < 8 { we((gaddr >> (k * 8)) & 0xFF); k = k + 1 }
                     we(0x48); we(0x01); we(0xC1)  // add rcx, rax
+                    we(0x48); we(0x89); we(0x11)  // mov [rcx], rdx
+                }
+            } else {
+                // Local array store: contragradiant sub
+                let la_slot2 = mc_find_local(id_s, id_len)
+                if la_slot2 >= 0 {
+                    let idx_tmp2 = mc_alloc_slot()
+                    we(0x48); we(0xC1); we(0xE0); we(0x03)  // shl rax, 3
+                    mc_emit_store_rax(idx_tmp2)
+                    mc_emit_lea_slot(la_slot2)
+                    we(0x48); we(0x89); we(0xC1)  // mov rcx, rax (base)
+                    mc_emit_load_rax(idx_tmp2)
+                    we(0x48); we(0x29); we(0xC1)  // sub rcx, rax
                     we(0x48); we(0x89); we(0x11)  // mov [rcx], rdx
                 }
             }
