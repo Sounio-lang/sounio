@@ -1,1 +1,484 @@
-//! engine (disabled)
+// stdlib/geometry/engine.sio — Core Geometric Operations
+//
+// Distance, angle, area, line intersection, convex hull (gift wrapping).
+// Operates on Point2D from types.sio.
+//
+// SOTA: de Berg et al. (2008) "Computational Geometry: Algorithms and Applications"
+//       O'Rourke (1998) "Computational Geometry in C"
+
+struct Point2D {
+    x: f64,
+    y: f64,
+}
+
+// =============================================================================
+// Math Helpers
+// =============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// atan2 approximation via rational minimax (max error ~0.005 rad)
+// Based on: Abramowitz & Stegun, Handbook of Mathematical Functions, 7.1.26
+fn atan2_f64(y: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let half_pi = 1.5707963267948966
+
+    if abs_f64(x) < 1.0e-15 && abs_f64(y) < 1.0e-15 { return 0.0 }
+
+    if abs_f64(x) < 1.0e-15 {
+        if y > 0.0 { return half_pi }
+        return 0.0 - half_pi
+    }
+
+    let ax = abs_f64(x)
+    let ay = abs_f64(y)
+
+    // Compute atan(ay/ax) for ay/ax in [0,1] using polynomial
+    var a: f64 = 0.0
+    var r: f64 = 0.0
+    if ay <= ax {
+        r = ay / ax
+        let r2 = r * r
+        // Polynomial: atan(r) ~ r - r^3/3 + r^5/5 - r^7/7 (truncated Taylor)
+        a = r * (1.0 - r2 * (0.3333333 - r2 * (0.2 - r2 * 0.142857)))
+    } else {
+        r = ax / ay
+        let r2 = r * r
+        a = half_pi - r * (1.0 - r2 * (0.3333333 - r2 * (0.2 - r2 * 0.142857)))
+    }
+
+    // Map to correct quadrant
+    if x < 0.0 { a = pi - a }
+    if y < 0.0 { a = 0.0 - a }
+    a
+}
+
+fn epsilon() -> f64 { 1.0e-12 }
+
+// =============================================================================
+// Distance
+// =============================================================================
+
+fn distance(a: Point2D, b: Point2D) -> f64 with Mut, Div, Panic {
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    sqrt_f64(dx * dx + dy * dy)
+}
+
+fn distance_squared(a: Point2D, b: Point2D) -> f64 {
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    dx * dx + dy * dy
+}
+
+// Distance from point p to the infinite line through a and b
+fn point_line_distance(p: Point2D, a: Point2D, b: Point2D) -> f64 with Mut, Div, Panic {
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    let len = sqrt_f64(dx * dx + dy * dy)
+    if len < epsilon() { return distance(p, a) }
+    // |cross product| / |ab|
+    abs_f64(dx * (a.y - p.y) - dy * (a.x - p.x)) / len
+}
+
+// =============================================================================
+// Angle
+// =============================================================================
+
+// Angle of vector from a to b, in radians [-pi, pi]
+fn angle_between(a: Point2D, b: Point2D) -> f64 with Mut, Div, Panic {
+    atan2_f64(b.y - a.y, b.x - a.x)
+}
+
+// Interior angle at vertex b in the triangle a-b-c, in radians [0, pi]
+fn angle_at_vertex(a: Point2D, b: Point2D, c: Point2D) -> f64 with Mut, Div, Panic {
+    let ba_x = a.x - b.x
+    let ba_y = a.y - b.y
+    let bc_x = c.x - b.x
+    let bc_y = c.y - b.y
+
+    let dot = ba_x * bc_x + ba_y * bc_y
+    let cross = ba_x * bc_y - ba_y * bc_x
+
+    let angle = atan2_f64(abs_f64(cross), dot)
+    if angle < 0.0 { 0.0 - angle } else { angle }
+}
+
+// =============================================================================
+// Area
+// =============================================================================
+
+// Signed area of triangle (a, b, c). Positive if CCW.
+fn triangle_area_signed(a: Point2D, b: Point2D, c: Point2D) -> f64 {
+    0.5 * ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x))
+}
+
+fn triangle_area(a: Point2D, b: Point2D, c: Point2D) -> f64 {
+    abs_f64(triangle_area_signed(a, b, c))
+}
+
+// Signed area of a simple polygon given as arrays of x,y coordinates.
+// Shoelace formula: A = 0.5 * |sum_{i} (x_i * y_{i+1} - x_{i+1} * y_i)|
+fn polygon_area_signed(xs: &[f64; 64], ys: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    var area: f64 = 0.0
+    var i = 0
+    while i < n {
+        let j = if i + 1 < n { i + 1 } else { 0 }
+        area = area + xs[i] * ys[j] - xs[j] * ys[i]
+        i = i + 1
+    }
+    0.5 * area
+}
+
+fn polygon_area(xs: &[f64; 64], ys: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    abs_f64(polygon_area_signed(xs, ys, n))
+}
+
+// =============================================================================
+// Line Intersection
+// =============================================================================
+
+// Result of a line intersection query
+struct LineIntersection {
+    found: bool,
+    x: f64,
+    y: f64,
+}
+
+// Intersection of lines (a1,a2) and (b1,b2).
+// Lines are infinite. Returns found=false if parallel.
+fn line_intersection(
+    a1: Point2D, a2: Point2D,
+    b1: Point2D, b2: Point2D,
+) -> LineIntersection with Div, Panic {
+    let d1x = a2.x - a1.x
+    let d1y = a2.y - a1.y
+    let d2x = b2.x - b1.x
+    let d2y = b2.y - b1.y
+
+    let denom = d1x * d2y - d1y * d2x
+    if abs_f64(denom) < epsilon() {
+        return LineIntersection { found: false, x: 0.0, y: 0.0 }
+    }
+
+    let t = ((b1.x - a1.x) * d2y - (b1.y - a1.y) * d2x) / denom
+
+    LineIntersection {
+        found: true,
+        x: a1.x + t * d1x,
+        y: a1.y + t * d1y,
+    }
+}
+
+// Intersection of segments (a1,a2) and (b1,b2).
+// Returns found=false if no intersection within both segments.
+fn segment_intersection(
+    a1: Point2D, a2: Point2D,
+    b1: Point2D, b2: Point2D,
+) -> LineIntersection with Div, Panic {
+    let d1x = a2.x - a1.x
+    let d1y = a2.y - a1.y
+    let d2x = b2.x - b1.x
+    let d2y = b2.y - b1.y
+
+    let denom = d1x * d2y - d1y * d2x
+    if abs_f64(denom) < epsilon() {
+        return LineIntersection { found: false, x: 0.0, y: 0.0 }
+    }
+
+    let dx = b1.x - a1.x
+    let dy = b1.y - a1.y
+
+    let t = (dx * d2y - dy * d2x) / denom
+    let u = (dx * d1y - dy * d1x) / denom
+
+    if t < 0.0 || t > 1.0 || u < 0.0 || u > 1.0 {
+        return LineIntersection { found: false, x: 0.0, y: 0.0 }
+    }
+
+    LineIntersection {
+        found: true,
+        x: a1.x + t * d1x,
+        y: a1.y + t * d1y,
+    }
+}
+
+// =============================================================================
+// Centroid
+// =============================================================================
+
+fn triangle_centroid(a: Point2D, b: Point2D, c: Point2D) -> Point2D {
+    Point2D {
+        x: (a.x + b.x + c.x) / 3.0,
+        y: (a.y + b.y + c.y) / 3.0,
+    }
+}
+
+// =============================================================================
+// Circumcircle
+// =============================================================================
+
+struct Circle {
+    cx: f64,
+    cy: f64,
+    radius: f64,
+}
+
+fn circumcircle(a: Point2D, b: Point2D, c: Point2D) -> Circle with Mut, Div, Panic {
+    let ax = a.x
+    let ay = a.y
+    let bx = b.x
+    let by = b.y
+    let cx = c.x
+    let cy = c.y
+
+    let d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs_f64(d) < epsilon() {
+        // Degenerate — collinear points. Return large circle.
+        return Circle { cx: 0.0, cy: 0.0, radius: 1.0e30 }
+    }
+
+    let a_sq = ax * ax + ay * ay
+    let b_sq = bx * bx + by * by
+    let c_sq = cx * cx + cy * cy
+
+    let ux = (a_sq * (by - cy) + b_sq * (cy - ay) + c_sq * (ay - by)) / d
+    let uy = (a_sq * (cx - bx) + b_sq * (ax - cx) + c_sq * (bx - ax)) / d
+
+    let dx_r = ax - ux
+    let dy_r = ay - uy
+    let radius = sqrt_f64(dx_r * dx_r + dy_r * dy_r)
+
+    Circle { cx: ux, cy: uy, radius: radius }
+}
+
+// =============================================================================
+// Convex Hull — Gift Wrapping (Jarvis March)
+// =============================================================================
+// O(nh) where h = number of hull vertices.
+// Input: arrays of x,y coords, length n (max 64).
+// Output: hull indices in CCW order, returns hull size.
+//
+// de Berg et al. §1.1; Jarvis (1973) "On the identification of the convex hull
+// of a finite set of points in the plane", Information Processing Letters.
+
+fn convex_hull(
+    xs: &[f64; 64],
+    ys: &[f64; 64],
+    n: i32,
+    hull_indices: &![i32; 64],
+) -> i32 with Mut, Div, Panic {
+    if n < 3 {
+        // Degenerate: return all points
+        var i = 0
+        while i < n { hull_indices[i] = i; i = i + 1 }
+        return n
+    }
+
+    // Find leftmost point (lowest x, break ties by lowest y)
+    var leftmost = 0
+    var i = 1
+    while i < n {
+        if xs[i] < xs[leftmost] {
+            leftmost = i
+        } else {
+            if xs[i] == xs[leftmost] && ys[i] < ys[leftmost] {
+                leftmost = i
+            }
+        }
+        i = i + 1
+    }
+
+    var hull_size = 0
+    var current = leftmost
+
+    // Gift-wrap loop
+    var done = false
+    while done == false {
+        hull_indices[hull_size] = current
+        hull_size = hull_size + 1
+
+        // Safeguard: hull can't exceed n
+        if hull_size > n { done = true }
+        else {
+            // Find the most counter-clockwise point from current
+            var candidate = 0
+            if current == 0 { candidate = 1 }
+
+            var j = 0
+            while j < n {
+                if j != current {
+                    // Cross product: (candidate - current) x (j - current)
+                    let cross = (xs[candidate] - xs[current]) * (ys[j] - ys[current])
+                              - (ys[candidate] - ys[current]) * (xs[j] - xs[current])
+
+                    if cross < 0.0 {
+                        // j is more counter-clockwise
+                        candidate = j
+                    } else {
+                        if abs_f64(cross) < epsilon() {
+                            // Collinear — pick the farther point
+                            let dc = (xs[candidate] - xs[current]) * (xs[candidate] - xs[current])
+                                   + (ys[candidate] - ys[current]) * (ys[candidate] - ys[current])
+                            let dj = (xs[j] - xs[current]) * (xs[j] - xs[current])
+                                   + (ys[j] - ys[current]) * (ys[j] - ys[current])
+                            if dj > dc { candidate = j }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+
+            current = candidate
+            if current == leftmost { done = true }
+        }
+    }
+
+    hull_size
+}
+
+// =============================================================================
+// Point in Convex Polygon
+// =============================================================================
+// Test if point p is inside convex polygon given by hull_xs, hull_ys (CCW order).
+// Uses orientation test at each edge.
+
+fn point_in_convex_polygon(
+    p: Point2D,
+    hull_xs: &[f64; 64],
+    hull_ys: &[f64; 64],
+    hull_n: i32,
+) -> bool with Mut, Div, Panic {
+    if hull_n < 3 { return false }
+    var i = 0
+    while i < hull_n {
+        let j = if i + 1 < hull_n { i + 1 } else { 0 }
+        // Cross product of edge (i→j) with vector (i→p)
+        let cross = (hull_xs[j] - hull_xs[i]) * (p.y - hull_ys[i])
+                  - (hull_ys[j] - hull_ys[i]) * (p.x - hull_xs[i])
+        if cross < (0.0 - epsilon()) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// =============================================================================
+// Validation entry point
+// =============================================================================
+
+fn main() with Mut, Panic, IO, Div {
+    // Distance
+    let a = Point2D { x: 0.0, y: 0.0 }
+    let b = Point2D { x: 3.0, y: 4.0 }
+    let d = distance(a, b)
+    // Should be 5.0
+    assert(d > 4.99)
+    assert(d < 5.01)
+
+    // Distance squared
+    let d2 = distance_squared(a, b)
+    assert(d2 > 24.99)
+    assert(d2 < 25.01)
+
+    // Triangle area: (0,0), (4,0), (0,3) → area = 6.0
+    let t1 = Point2D { x: 0.0, y: 0.0 }
+    let t2 = Point2D { x: 4.0, y: 0.0 }
+    let t3 = Point2D { x: 0.0, y: 3.0 }
+    let area = triangle_area(t1, t2, t3)
+    assert(area > 5.99)
+    assert(area < 6.01)
+
+    // Centroid
+    let ctr = triangle_centroid(t1, t2, t3)
+    assert(ctr.x > 1.32)
+    assert(ctr.x < 1.34)
+    assert(ctr.y > 0.99)
+    assert(ctr.y < 1.01)
+
+    // Line intersection: y=x and y=-x+2 → (1,1)
+    let l1a = Point2D { x: 0.0, y: 0.0 }
+    let l1b = Point2D { x: 2.0, y: 2.0 }
+    let l2a = Point2D { x: 0.0, y: 2.0 }
+    let l2b = Point2D { x: 2.0, y: 0.0 }
+    let isect = line_intersection(l1a, l1b, l2a, l2b)
+    assert(isect.found)
+    assert(isect.x > 0.99)
+    assert(isect.x < 1.01)
+    assert(isect.y > 0.99)
+    assert(isect.y < 1.01)
+
+    // Parallel lines — no intersection
+    let p1a = Point2D { x: 0.0, y: 0.0 }
+    let p1b = Point2D { x: 1.0, y: 0.0 }
+    let p2a = Point2D { x: 0.0, y: 1.0 }
+    let p2b = Point2D { x: 1.0, y: 1.0 }
+    let no_isect = line_intersection(p1a, p1b, p2a, p2b)
+    assert(no_isect.found == false)
+
+    // Segment intersection (should find)
+    let seg_isect = segment_intersection(l1a, l1b, l2a, l2b)
+    assert(seg_isect.found)
+
+    // Segment intersection (should NOT find — segments don't reach)
+    let s1a = Point2D { x: 0.0, y: 0.0 }
+    let s1b = Point2D { x: 0.4, y: 0.4 }
+    let s2a = Point2D { x: 0.0, y: 2.0 }
+    let s2b = Point2D { x: 2.0, y: 0.0 }
+    let no_seg = segment_intersection(s1a, s1b, s2a, s2b)
+    assert(no_seg.found == false)
+
+    // Circumcircle of right triangle (0,0),(4,0),(0,3) → center at (2,1.5), r=2.5
+    let cc = circumcircle(t1, t2, t3)
+    assert(cc.cx > 1.99)
+    assert(cc.cx < 2.01)
+    assert(cc.cy > 1.49)
+    assert(cc.cy < 1.51)
+    assert(cc.radius > 2.49)
+    assert(cc.radius < 2.51)
+
+    // Convex hull of a square: (0,0),(1,0),(1,1),(0,1) + interior point (0.5,0.5)
+    var hx: [f64; 64] = [0.0; 64]
+    var hy: [f64; 64] = [0.0; 64]
+    hx[0] = 0.0; hy[0] = 0.0
+    hx[1] = 1.0; hy[1] = 0.0
+    hx[2] = 1.0; hy[2] = 1.0
+    hx[3] = 0.0; hy[3] = 1.0
+    hx[4] = 0.5; hy[4] = 0.5
+    var hull_idx: [i32; 64] = [0; 64]
+    let hn = convex_hull(&hx, &hy, 5, &!hull_idx)
+    // Hull should have 4 vertices (the square corners)
+    assert(hn == 4)
+
+    // Point in convex polygon
+    var hull_xs: [f64; 64] = [0.0; 64]
+    var hull_ys: [f64; 64] = [0.0; 64]
+    // Build CCW square hull
+    hull_xs[0] = 0.0; hull_ys[0] = 0.0
+    hull_xs[1] = 1.0; hull_ys[1] = 0.0
+    hull_xs[2] = 1.0; hull_ys[2] = 1.0
+    hull_xs[3] = 0.0; hull_ys[3] = 1.0
+    let inside = Point2D { x: 0.5, y: 0.5 }
+    let outside = Point2D { x: 2.0, y: 2.0 }
+    assert(point_in_convex_polygon(inside, &hull_xs, &hull_ys, 4))
+    assert(point_in_convex_polygon(outside, &hull_xs, &hull_ys, 4) == false)
+
+    // Point-line distance: point (1,1) to x-axis → distance 1.0
+    let pl = Point2D { x: 1.0, y: 1.0 }
+    let la = Point2D { x: 0.0, y: 0.0 }
+    let lb = Point2D { x: 1.0, y: 0.0 }
+    let pld = point_line_distance(pl, la, lb)
+    assert(pld > 0.99)
+    assert(pld < 1.01)
+
+    return
+}

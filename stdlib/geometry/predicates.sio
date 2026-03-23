@@ -1,1 +1,232 @@
-//! predicates (disabled)
+// stdlib/geometry/predicates.sio — Robust Geometric Predicates
+//
+// Foundational computational geometry predicates: orientation, collinearity,
+// in-circle test. These are the building blocks for triangulations, convex
+// hulls, and Boolean operations on polygons.
+//
+// SOTA: Shewchuk (1997) "Adaptive Precision Floating-Point Arithmetic and
+//       Fast Robust Geometric Predicates", Discrete & Computational Geometry.
+//       Exact arithmetic not yet implemented — uses epsilon-based robustness.
+//
+// All predicates operate on Point2D from types.sio.
+
+struct Point2D {
+    x: f64,
+    y: f64,
+}
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+// Tolerance for floating-point comparisons.
+// Shewchuk's exact predicates would eliminate this, but they require
+// error-free transformations (TwoSum, TwoProduct) not yet in the compiler.
+fn predicate_epsilon() -> f64 { 1.0e-12 }
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// =============================================================================
+// Orientation Test (CCW)
+// =============================================================================
+// Given triangle (a, b, c), compute the signed area of the parallelogram:
+//   orient2d(a, b, c) = (b.x - a.x)*(c.y - a.y) - (b.y - a.y)*(c.x - a.x)
+//
+//   > 0  →  counter-clockwise (left turn)
+//   < 0  →  clockwise (right turn)
+//   = 0  →  collinear
+//
+// This is the 2x2 determinant:
+//   | b.x - a.x   c.x - a.x |
+//   | b.y - a.y   c.y - a.y |
+
+fn orient2d(a: Point2D, b: Point2D, c: Point2D) -> f64 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+// Returns 1 for CCW, -1 for CW, 0 for collinear
+fn orientation(a: Point2D, b: Point2D, c: Point2D) -> i32 {
+    let det = orient2d(a, b, c)
+    let eps = predicate_epsilon()
+    if det > eps { return 1 }
+    if det < (0.0 - eps) { return -1 }
+    return 0
+}
+
+// True if a, b, c are counter-clockwise
+fn is_ccw(a: Point2D, b: Point2D, c: Point2D) -> bool {
+    orient2d(a, b, c) > predicate_epsilon()
+}
+
+// True if a, b, c are clockwise
+fn is_cw(a: Point2D, b: Point2D, c: Point2D) -> bool {
+    orient2d(a, b, c) < (0.0 - predicate_epsilon())
+}
+
+// =============================================================================
+// Collinearity
+// =============================================================================
+
+fn is_collinear(a: Point2D, b: Point2D, c: Point2D) -> bool {
+    abs_f64(orient2d(a, b, c)) <= predicate_epsilon()
+}
+
+// Test if point p lies on segment (a, b).
+// Requires collinearity AND that p is within the bounding box of (a, b).
+fn point_on_segment(p: Point2D, a: Point2D, b: Point2D) -> bool {
+    let eps = predicate_epsilon()
+    if abs_f64(orient2d(a, b, p)) > eps { return false }
+    // Check bounding box
+    let min_x = if a.x < b.x { a.x } else { b.x }
+    let max_x = if a.x > b.x { a.x } else { b.x }
+    let min_y = if a.y < b.y { a.y } else { b.y }
+    let max_y = if a.y > b.y { a.y } else { b.y }
+    p.x >= min_x - eps && p.x <= max_x + eps && p.y >= min_y - eps && p.y <= max_y + eps
+}
+
+// =============================================================================
+// In-Circle Test
+// =============================================================================
+// Given triangle (a, b, c) in CCW order, test if point d lies inside
+// the circumscribed circle.
+//
+// Computed as the sign of the 4x4 determinant (reduced to 3x3):
+//   | a.x - d.x   a.y - d.y   (a.x-d.x)^2 + (a.y-d.y)^2 |
+//   | b.x - d.x   b.y - d.y   (b.x-d.x)^2 + (b.y-d.y)^2 |
+//   | c.x - d.x   c.y - d.y   (c.x-d.x)^2 + (c.y-d.y)^2 |
+//
+//   > 0  →  d is inside circumcircle (assuming a,b,c CCW)
+//   < 0  →  d is outside
+//   = 0  →  d is on the circle (co-circular)
+
+fn incircle(a: Point2D, b: Point2D, c: Point2D, d: Point2D) -> f64 {
+    let adx = a.x - d.x
+    let ady = a.y - d.y
+    let bdx = b.x - d.x
+    let bdy = b.y - d.y
+    let cdx = c.x - d.x
+    let cdy = c.y - d.y
+
+    let ad_sq = adx * adx + ady * ady
+    let bd_sq = bdx * bdx + bdy * bdy
+    let cd_sq = cdx * cdx + cdy * cdy
+
+    // 3x3 determinant expansion
+    adx * (bdy * cd_sq - cdy * bd_sq)
+    - ady * (bdx * cd_sq - cdx * bd_sq)
+    + ad_sq * (bdx * cdy - cdx * bdy)
+}
+
+// True if d is strictly inside the circumcircle of CCW triangle (a,b,c)
+fn is_inside_circumcircle(a: Point2D, b: Point2D, c: Point2D, d: Point2D) -> bool {
+    incircle(a, b, c, d) > predicate_epsilon()
+}
+
+// True if d is on the circumcircle of CCW triangle (a,b,c)
+fn is_cocircular(a: Point2D, b: Point2D, c: Point2D, d: Point2D) -> bool {
+    abs_f64(incircle(a, b, c, d)) <= predicate_epsilon()
+}
+
+// =============================================================================
+// Segment Intersection
+// =============================================================================
+// Test if segments (a,b) and (c,d) properly intersect (cross each other).
+// Does not count shared endpoints or collinear overlap.
+
+fn segments_intersect(a: Point2D, b: Point2D, c: Point2D, d: Point2D) -> bool {
+    let d1 = orientation(c, d, a)
+    let d2 = orientation(c, d, b)
+    let d3 = orientation(a, b, c)
+    let d4 = orientation(a, b, d)
+
+    // General case: segments straddle each other
+    if d1 != d2 && d3 != d4 { return true }
+
+    // Special cases: collinear overlap
+    if d1 == 0 && point_on_segment(a, c, d) { return true }
+    if d2 == 0 && point_on_segment(b, c, d) { return true }
+    if d3 == 0 && point_on_segment(c, a, b) { return true }
+    if d4 == 0 && point_on_segment(d, a, b) { return true }
+
+    return false
+}
+
+// =============================================================================
+// Left-of / Right-of Halfplane Tests
+// =============================================================================
+// Useful for point-in-polygon (winding number) and BSP trees.
+
+// True if p is strictly left of the directed line from a to b
+fn is_left_of(p: Point2D, a: Point2D, b: Point2D) -> bool {
+    orient2d(a, b, p) > predicate_epsilon()
+}
+
+// True if p is strictly right of the directed line from a to b
+fn is_right_of(p: Point2D, a: Point2D, b: Point2D) -> bool {
+    orient2d(a, b, p) < (0.0 - predicate_epsilon())
+}
+
+// =============================================================================
+// Validation entry point
+// =============================================================================
+
+fn main() with Mut, Panic, IO {
+    // Orientation test: triangle (0,0), (1,0), (0,1) is CCW
+    let a = Point2D { x: 0.0, y: 0.0 }
+    let b = Point2D { x: 1.0, y: 0.0 }
+    let c = Point2D { x: 0.0, y: 1.0 }
+
+    let det = orient2d(a, b, c)
+    // det should be 1.0 (positive = CCW)
+    assert(det > 0.5)
+    assert(is_ccw(a, b, c))
+
+    // Reverse order should be CW
+    assert(is_cw(a, c, b))
+
+    // Collinearity: (0,0), (1,1), (2,2)
+    let p1 = Point2D { x: 0.0, y: 0.0 }
+    let p2 = Point2D { x: 1.0, y: 1.0 }
+    let p3 = Point2D { x: 2.0, y: 2.0 }
+    assert(is_collinear(p1, p2, p3))
+
+    // In-circle test: equilateral-ish triangle, center should be inside
+    let t1 = Point2D { x: 0.0, y: 0.0 }
+    let t2 = Point2D { x: 4.0, y: 0.0 }
+    let t3 = Point2D { x: 2.0, y: 3.0 }
+    let center = Point2D { x: 2.0, y: 1.0 }
+    assert(is_inside_circumcircle(t1, t2, t3, center))
+
+    // Point far outside should not be in circumcircle
+    let far = Point2D { x: 100.0, y: 100.0 }
+    assert(is_inside_circumcircle(t1, t2, t3, far) == false)
+
+    // Segment intersection: crossing segments
+    let s1a = Point2D { x: 0.0, y: 0.0 }
+    let s1b = Point2D { x: 2.0, y: 2.0 }
+    let s2a = Point2D { x: 0.0, y: 2.0 }
+    let s2b = Point2D { x: 2.0, y: 0.0 }
+    assert(segments_intersect(s1a, s1b, s2a, s2b))
+
+    // Parallel non-intersecting segments
+    let s3a = Point2D { x: 0.0, y: 0.0 }
+    let s3b = Point2D { x: 1.0, y: 0.0 }
+    let s4a = Point2D { x: 0.0, y: 1.0 }
+    let s4b = Point2D { x: 1.0, y: 1.0 }
+    assert(segments_intersect(s3a, s3b, s4a, s4b) == false)
+
+    // Point on segment
+    let mid = Point2D { x: 0.5, y: 0.0 }
+    assert(point_on_segment(mid, s3a, s3b))
+
+    // Halfplane tests
+    let origin = Point2D { x: 0.0, y: 0.0 }
+    let east = Point2D { x: 1.0, y: 0.0 }
+    let north = Point2D { x: 0.0, y: 1.0 }
+    assert(is_left_of(north, origin, east))
+    assert(is_right_of(north, origin, east) == false)
+
+    return
+}

@@ -910,3 +910,457 @@ fn prop_eq_check(a: Prop, b: Prop) -> bool {
 fn prop_tag_name(tag: i32) -> i32 {
     return tag
 }
+
+// ============================================================================
+// CHECKED INFERENCE RULES
+//
+// Unlike the unchecked constructors above, these functions validate that
+// the propositions structurally match before building the proof witness.
+// Return proof_id >= 0 on success, -1 on failure.
+// ============================================================================
+
+// Result type for checked inference
+struct InferResult {
+    proof_id: i64,
+    ok: bool,
+}
+
+fn infer_ok(id: i64) -> InferResult {
+    return InferResult { proof_id: id, ok: true }
+}
+
+fn infer_fail() -> InferResult {
+    return InferResult { proof_id: 0 - 1, ok: false }
+}
+
+// --------------------------------------------------------------------------
+// 1. Modus Ponens (checked): From proof of P and proof of P -> Q, derive Q
+//    Validates: impl_proof proves PROP_IMPLIES, antecedent's prop matches p_proof's prop
+// --------------------------------------------------------------------------
+fn checked_modus_ponens(ctx: &! ProofContext, p_proof_id: i64, impl_proof_id: i64) -> InferResult {
+    let p_prf = ctx_get_proof(ctx, p_proof_id)
+    let impl_prf = ctx_get_proof(ctx, impl_proof_id)
+
+    // impl_proof must be valid
+    if impl_prf.tag < 0 { return infer_fail() }
+    if p_prf.tag < 0 { return infer_fail() }
+
+    // impl_proof must prove an implication
+    let impl_prop = ctx_get_prop(ctx, impl_prf.prop_id)
+    if impl_prop.tag != PROP_IMPLIES { return infer_fail() }
+
+    // The antecedent (left_id) must reference the same proposition as p_proof
+    let ante_prop = ctx_get_prop(ctx, impl_prop.left_id)
+    let p_prop = ctx_get_prop(ctx, p_prf.prop_id)
+    if prop_eq_check(ante_prop, p_prop) == false { return infer_fail() }
+
+    // Derive the consequent
+    let q_prop_id = impl_prop.right_id
+    let conf = min_f64(impl_prf.confidence, p_prf.confidence)
+    let prf = Proof {
+        tag: PROOF_IMPL_ELIM,
+        prop_id: q_prop_id,
+        sub1_id: impl_proof_id,
+        sub2_id: p_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    let id = ctx_proof(ctx, prf)
+    return infer_ok(id)
+}
+
+// --------------------------------------------------------------------------
+// 2. Conjunction Introduction (checked): From proofs of P and Q, derive P /\ Q
+//    Allocates the conjunction prop and validates both sub-proofs are valid.
+// --------------------------------------------------------------------------
+fn checked_and_intro(ctx: &! ProofContext, p_proof_id: i64, q_proof_id: i64) -> InferResult {
+    let p_prf = ctx_get_proof(ctx, p_proof_id)
+    let q_prf = ctx_get_proof(ctx, q_proof_id)
+    if p_prf.tag < 0 { return infer_fail() }
+    if q_prf.tag < 0 { return infer_fail() }
+
+    // Build P /\ Q proposition from the sub-proof propositions
+    let pq_prop_id = ctx_prop(ctx, prop_and(p_prf.prop_id, q_prf.prop_id))
+    if pq_prop_id < 0 { return infer_fail() }
+
+    let conf = min_f64(p_prf.confidence, q_prf.confidence)
+    let prf = Proof {
+        tag: PROOF_AND_INTRO,
+        prop_id: pq_prop_id,
+        sub1_id: p_proof_id,
+        sub2_id: q_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    let id = ctx_proof(ctx, prf)
+    return infer_ok(id)
+}
+
+// --------------------------------------------------------------------------
+// 3a. Conjunction Elimination Left (checked): From proof of P /\ Q, derive P
+//     Validates: the proof witnesses a PROP_AND.
+// --------------------------------------------------------------------------
+fn checked_and_elim_left(ctx: &! ProofContext, pq_proof_id: i64) -> InferResult {
+    let pq_prf = ctx_get_proof(ctx, pq_proof_id)
+    if pq_prf.tag < 0 { return infer_fail() }
+
+    let pq_prop = ctx_get_prop(ctx, pq_prf.prop_id)
+    if pq_prop.tag != PROP_AND { return infer_fail() }
+
+    // left_id is the P proposition
+    let p_prop_id = pq_prop.left_id
+    let prf = Proof {
+        tag: PROOF_AND_ELIM_L,
+        prop_id: p_prop_id,
+        sub1_id: pq_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: pq_prf.confidence, witness: 0,
+    }
+    let id = ctx_proof(ctx, prf)
+    return infer_ok(id)
+}
+
+// --------------------------------------------------------------------------
+// 3b. Conjunction Elimination Right (checked): From proof of P /\ Q, derive Q
+//     Validates: the proof witnesses a PROP_AND.
+// --------------------------------------------------------------------------
+fn checked_and_elim_right(ctx: &! ProofContext, pq_proof_id: i64) -> InferResult {
+    let pq_prf = ctx_get_proof(ctx, pq_proof_id)
+    if pq_prf.tag < 0 { return infer_fail() }
+
+    let pq_prop = ctx_get_prop(ctx, pq_prf.prop_id)
+    if pq_prop.tag != PROP_AND { return infer_fail() }
+
+    // right_id is the Q proposition
+    let q_prop_id = pq_prop.right_id
+    let prf = Proof {
+        tag: PROOF_AND_ELIM_R,
+        prop_id: q_prop_id,
+        sub1_id: pq_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: pq_prf.confidence, witness: 0,
+    }
+    let id = ctx_proof(ctx, prf)
+    return infer_ok(id)
+}
+
+// --------------------------------------------------------------------------
+// 4. Reflexivity (checked): For any term a, derive a = a
+//    Always succeeds (axiom of equality).
+// --------------------------------------------------------------------------
+fn checked_refl(ctx: &! ProofContext, a: i64) -> InferResult {
+    let eq_prop_id = ctx_prop(ctx, prop_eq(a, a))
+    if eq_prop_id < 0 { return infer_fail() }
+    let prf = Proof {
+        tag: PROOF_REFL,
+        prop_id: eq_prop_id,
+        sub1_id: 0, sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: 1.0, witness: a,
+    }
+    let id = ctx_proof(ctx, prf)
+    return infer_ok(id)
+}
+
+// --------------------------------------------------------------------------
+// 5. Symmetry (checked): From proof of a = b, derive b = a
+//    Validates: the proof witnesses a PROP_EQ.
+// --------------------------------------------------------------------------
+fn checked_sym(ctx: &! ProofContext, eq_proof_id: i64) -> InferResult {
+    let eq_prf = ctx_get_proof(ctx, eq_proof_id)
+    if eq_prf.tag < 0 { return infer_fail() }
+
+    let eq_prop = ctx_get_prop(ctx, eq_prf.prop_id)
+    if eq_prop.tag != PROP_EQ { return infer_fail() }
+
+    // Build b = a
+    let ba_prop_id = ctx_prop(ctx, prop_eq(eq_prop.eq_rhs, eq_prop.eq_lhs))
+    if ba_prop_id < 0 { return infer_fail() }
+
+    let prf = Proof {
+        tag: PROOF_SYM,
+        prop_id: ba_prop_id,
+        sub1_id: eq_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: eq_prf.confidence, witness: 0,
+    }
+    let id = ctx_proof(ctx, prf)
+    return infer_ok(id)
+}
+
+// --------------------------------------------------------------------------
+// 6. Transitivity (checked): From proofs of a = b and b = c, derive a = c
+//    Validates: both proofs witness PROP_EQ, and the middle terms match.
+// --------------------------------------------------------------------------
+fn checked_trans(ctx: &! ProofContext, ab_proof_id: i64, bc_proof_id: i64) -> InferResult {
+    let ab_prf = ctx_get_proof(ctx, ab_proof_id)
+    let bc_prf = ctx_get_proof(ctx, bc_proof_id)
+    if ab_prf.tag < 0 { return infer_fail() }
+    if bc_prf.tag < 0 { return infer_fail() }
+
+    let ab_prop = ctx_get_prop(ctx, ab_prf.prop_id)
+    let bc_prop = ctx_get_prop(ctx, bc_prf.prop_id)
+    if ab_prop.tag != PROP_EQ { return infer_fail() }
+    if bc_prop.tag != PROP_EQ { return infer_fail() }
+
+    // Middle terms must match: ab.rhs == bc.lhs
+    if ab_prop.eq_rhs != bc_prop.eq_lhs { return infer_fail() }
+
+    // Build a = c
+    let ac_prop_id = ctx_prop(ctx, prop_eq(ab_prop.eq_lhs, bc_prop.eq_rhs))
+    if ac_prop_id < 0 { return infer_fail() }
+
+    let conf = min_f64(ab_prf.confidence, bc_prf.confidence)
+    let prf = Proof {
+        tag: PROOF_TRANS,
+        prop_id: ac_prop_id,
+        sub1_id: ab_proof_id,
+        sub2_id: bc_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    let id = ctx_proof(ctx, prf)
+    return infer_ok(id)
+}
+
+// --------------------------------------------------------------------------
+// 7. Substitution (checked): From proof of a = b and proof of P(a), derive P(b)
+//    Validates: eq_proof witnesses PROP_EQ, pa_proof is valid.
+//    The caller provides the target proposition P(b) as pb_prop_id.
+//    We verify that it exists in the arena.
+// --------------------------------------------------------------------------
+fn checked_subst(ctx: &! ProofContext, eq_proof_id: i64, pa_proof_id: i64, pb_prop_id: i64) -> InferResult {
+    let eq_prf = ctx_get_proof(ctx, eq_proof_id)
+    let pa_prf = ctx_get_proof(ctx, pa_proof_id)
+    if eq_prf.tag < 0 { return infer_fail() }
+    if pa_prf.tag < 0 { return infer_fail() }
+
+    let eq_prop = ctx_get_prop(ctx, eq_prf.prop_id)
+    if eq_prop.tag != PROP_EQ { return infer_fail() }
+
+    // Validate pb_prop_id is in range
+    if pb_prop_id < 0 { return infer_fail() }
+    let pb_prop = ctx_get_prop(ctx, pb_prop_id)
+    // Basic sanity: pb_prop must be a real proposition (not a fallback PROP_FALSE from out-of-range)
+    if pb_prop_id >= ctx.arena.count { return infer_fail() }
+
+    let conf = min_f64(eq_prf.confidence, pa_prf.confidence)
+    let prf = Proof {
+        tag: PROOF_SUBST,
+        prop_id: pb_prop_id,
+        sub1_id: eq_proof_id,
+        sub2_id: pa_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    let id = ctx_proof(ctx, prf)
+    return infer_ok(id)
+}
+
+// ============================================================================
+// TESTS — Checked inference rules
+// ============================================================================
+
+// Test: checked_refl proves a = a, verified
+fn test_checked_refl(ctx: &! ProofContext) -> bool {
+    let r = checked_refl(ctx, 42)
+    if r.ok == false { return false }
+    let v = verify(ctx, r.proof_id)
+    if v.is_valid == false { return false }
+    if v.confidence < 1.0 { return false }
+    // Confirm proposition is 42 = 42
+    let prf = ctx_get_proof(ctx, r.proof_id)
+    let prop = ctx_get_prop(ctx, prf.prop_id)
+    if prop.tag != PROP_EQ { return false }
+    if prop.eq_lhs != 42 { return false }
+    if prop.eq_rhs != 42 { return false }
+    return true
+}
+
+// Test: checked_sym flips a = b to b = a
+fn test_checked_sym(ctx: &! ProofContext) -> bool {
+    // Axiom: 10 = 20
+    let eq_id = ctx_prop(ctx, prop_eq(10, 20))
+    let ab = trusted(ctx, 1, eq_id, 1.0)
+
+    let r = checked_sym(ctx, ab)
+    if r.ok == false { return false }
+    let v = verify(ctx, r.proof_id)
+    if v.is_valid == false { return false }
+    // Confirm proposition is 20 = 10
+    let prf = ctx_get_proof(ctx, r.proof_id)
+    let prop = ctx_get_prop(ctx, prf.prop_id)
+    if prop.tag != PROP_EQ { return false }
+    if prop.eq_lhs != 20 { return false }
+    if prop.eq_rhs != 10 { return false }
+    return true
+}
+
+// Test: checked_trans chains a=b, b=c into a=c
+fn test_checked_trans(ctx: &! ProofContext) -> bool {
+    // a=b: 1=2
+    let ab_prop = ctx_prop(ctx, prop_eq(1, 2))
+    let ab = trusted(ctx, 1, ab_prop, 1.0)
+    // b=c: 2=3
+    let bc_prop = ctx_prop(ctx, prop_eq(2, 3))
+    let bc = trusted(ctx, 2, bc_prop, 1.0)
+
+    let r = checked_trans(ctx, ab, bc)
+    if r.ok == false { return false }
+    let v = verify(ctx, r.proof_id)
+    if v.is_valid == false { return false }
+    // Confirm: 1 = 3
+    let prf = ctx_get_proof(ctx, r.proof_id)
+    let prop = ctx_get_prop(ctx, prf.prop_id)
+    if prop.eq_lhs != 1 { return false }
+    if prop.eq_rhs != 3 { return false }
+    return true
+}
+
+// Test: checked_trans rejects mismatched middle terms
+fn test_checked_trans_rejects(ctx: &! ProofContext) -> bool {
+    // a=b: 1=2
+    let ab_prop = ctx_prop(ctx, prop_eq(1, 2))
+    let ab = trusted(ctx, 1, ab_prop, 1.0)
+    // c=d: 5=6 (middle doesn't match)
+    let cd_prop = ctx_prop(ctx, prop_eq(5, 6))
+    let cd = trusted(ctx, 2, cd_prop, 1.0)
+
+    let r = checked_trans(ctx, ab, cd)
+    // Must fail: 2 != 5
+    if r.ok == true { return false }
+    return true
+}
+
+// Test: checked_modus_ponens derives Q from P and P->Q
+fn test_checked_mp(ctx: &! ProofContext) -> bool {
+    // P: custom(100)
+    let p_prop_id = ctx_prop(ctx, prop_custom(100))
+    let p_prf = trusted(ctx, 1, p_prop_id, 1.0)
+
+    // Q: custom(200)
+    let q_prop_id = ctx_prop(ctx, prop_custom(200))
+
+    // P -> Q: implies(p_prop_id, q_prop_id)
+    let impl_prop_id = ctx_prop(ctx, prop_implies(p_prop_id, q_prop_id))
+    let impl_prf = trusted(ctx, 2, impl_prop_id, 1.0)
+
+    let r = checked_modus_ponens(ctx, p_prf, impl_prf)
+    if r.ok == false { return false }
+    let v = verify(ctx, r.proof_id)
+    if v.is_valid == false { return false }
+    // Result should prove q_prop_id
+    let result_prf = ctx_get_proof(ctx, r.proof_id)
+    if result_prf.prop_id != q_prop_id { return false }
+    return true
+}
+
+// Test: checked_modus_ponens rejects wrong antecedent
+fn test_checked_mp_rejects(ctx: &! ProofContext) -> bool {
+    // P: custom(100)
+    let p_prop_id = ctx_prop(ctx, prop_custom(100))
+    let p_prf = trusted(ctx, 1, p_prop_id, 1.0)
+
+    // R: custom(300) — different from P
+    let r_prop_id = ctx_prop(ctx, prop_custom(300))
+    let q_prop_id = ctx_prop(ctx, prop_custom(200))
+
+    // R -> Q (not P -> Q)
+    let impl_prop_id = ctx_prop(ctx, prop_implies(r_prop_id, q_prop_id))
+    let impl_prf = trusted(ctx, 2, impl_prop_id, 1.0)
+
+    let r = checked_modus_ponens(ctx, p_prf, impl_prf)
+    // Must fail: P != R
+    if r.ok == true { return false }
+    return true
+}
+
+// Test: checked_and_intro + checked_and_elim round-trip
+fn test_checked_and_roundtrip(ctx: &! ProofContext) -> bool {
+    // P: custom(10)
+    let p_prop_id = ctx_prop(ctx, prop_custom(10))
+    let p_prf = trusted(ctx, 1, p_prop_id, 1.0)
+    // Q: custom(20)
+    let q_prop_id = ctx_prop(ctx, prop_custom(20))
+    let q_prf = trusted(ctx, 2, q_prop_id, 1.0)
+
+    // P /\ Q
+    let r_and = checked_and_intro(ctx, p_prf, q_prf)
+    if r_and.ok == false { return false }
+
+    // Elim left => P
+    let r_left = checked_and_elim_left(ctx, r_and.proof_id)
+    if r_left.ok == false { return false }
+    let left_prf = ctx_get_proof(ctx, r_left.proof_id)
+    if left_prf.prop_id != p_prop_id { return false }
+
+    // Elim right => Q
+    let r_right = checked_and_elim_right(ctx, r_and.proof_id)
+    if r_right.ok == false { return false }
+    let right_prf = ctx_get_proof(ctx, r_right.proof_id)
+    if right_prf.prop_id != q_prop_id { return false }
+
+    return true
+}
+
+// Test: checked_subst applies equality to rewrite
+fn test_checked_subst(ctx: &! ProofContext) -> bool {
+    // a = b: 10 = 20
+    let eq_prop_id = ctx_prop(ctx, prop_eq(10, 20))
+    let eq_prf = trusted(ctx, 1, eq_prop_id, 1.0)
+
+    // P(a): custom predicate about a (use custom(10) as stand-in)
+    let pa_prop_id = ctx_prop(ctx, prop_custom(10))
+    let pa_prf = trusted(ctx, 2, pa_prop_id, 1.0)
+
+    // P(b): custom(20) — the rewritten proposition
+    let pb_prop_id = ctx_prop(ctx, prop_custom(20))
+
+    let r = checked_subst(ctx, eq_prf, pa_prf, pb_prop_id)
+    if r.ok == false { return false }
+    let v = verify(ctx, r.proof_id)
+    if v.is_valid == false { return false }
+    let result_prf = ctx_get_proof(ctx, r.proof_id)
+    if result_prf.prop_id != pb_prop_id { return false }
+    return true
+}
+
+// Test: confidence propagation through chain
+fn test_confidence_chain(ctx: &! ProofContext) -> bool {
+    // P at 0.8 confidence
+    let p_prop_id = ctx_prop(ctx, prop_custom(100))
+    let p_prf = trusted(ctx, 1, p_prop_id, 0.8)
+    // Q at 0.9 confidence
+    let q_prop_id = ctx_prop(ctx, prop_custom(200))
+    let q_prf = trusted(ctx, 2, q_prop_id, 0.9)
+
+    // P /\ Q should get min(0.8, 0.9) = 0.8
+    let r = checked_and_intro(ctx, p_prf, q_prf)
+    if r.ok == false { return false }
+    let v = verify(ctx, r.proof_id)
+    if v.is_valid == false { return false }
+    // confidence should be 0.8
+    let c = proof_confidence(ctx, r.proof_id)
+    if c > 0.81 { return false }
+    if c < 0.79 { return false }
+    return true
+}
+
+// Master test runner
+fn test_kernel_inference() -> i32 {
+    var ctx = proof_context_new()
+    var pass = 0
+    var fail = 0
+
+    if test_checked_refl(&! ctx) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_checked_sym(&! ctx) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_checked_trans(&! ctx) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_checked_trans_rejects(&! ctx) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_checked_mp(&! ctx) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_checked_mp_rejects(&! ctx) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_checked_and_roundtrip(&! ctx) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_checked_subst(&! ctx) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_confidence_chain(&! ctx) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Return number of failures (0 = all pass)
+    return fail
+}

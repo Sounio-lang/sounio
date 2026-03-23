@@ -1,1 +1,364 @@
-//! sedenion_imaging (disabled — pending sedenion_set_component implementation)
+//! stdlib/medical/sedenion_imaging.sio — Multi-Modal Neuroimaging Sedenion Encoding
+//!
+//! Encodes fMRI BOLD and CT Hounsfield signals into sedenion (S = R^16)
+//! representations, then fuses them via sedenion algebra.
+//!
+//! fMRI BOLD encoding (16 ROIs -> 16 sedenion components):
+//!   Each ROI's BOLD activation maps to one sedenion component.
+//!   Temporal correlation structure is captured via connectivity-weighted
+//!   encoding.
+//!
+//! CT Hounsfield encoding (16 tissue regions -> 16 components):
+//!   Hounsfield units normalised to [-1, 1] range map to sedenion
+//!   components. Tissue density variations become algebraic structure.
+//!
+//! Multi-modal fusion via sedenion product:
+//!   fMRI_sed * CT_sed captures cross-modal interactions.
+//!   Non-commutativity: fMRI*CT != CT*fMRI (temporal vs structural primacy).
+//!   Non-associativity: (fMRI*CT)*PET != fMRI*(CT*PET) (order matters).
+//!
+//! Uses CDElement (bits=4, dim=16) for mutable component access.
+//!
+//! References:
+//!   Logothetis (2008): fMRI BOLD signal basis
+//!   Hounsfield (1973): CT attenuation coefficients
+//!   Calhoun & Sui (2016): multimodal data fusion review
+
+use algebra::cayley_dickson::{CDElement, cd_zero, cd_mul, cd_add,
+                               cd_sub, cd_scale, cd_norm_sq, cd_norm}
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn SED_BITS() -> i32 { 4 }      // 2^4 = 16 components
+fn NUM_ROIS() -> i32 { 16 }     // standard ROI count
+
+// Hounsfield unit reference values (HU)
+fn HU_AIR() -> f64 { -1000.0 }
+fn HU_WATER() -> f64 { 0.0 }
+fn HU_BONE() -> f64 { 1000.0 }
+fn HU_BRAIN_GM() -> f64 { 37.0 }   // grey matter
+fn HU_BRAIN_WM() -> f64 { 30.0 }   // white matter
+fn HU_CSF() -> f64 { 15.0 }        // cerebrospinal fluid
+fn HU_BLOOD() -> f64 { 55.0 }
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn img_sqrt(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+fn img_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn img_clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo }
+    else if x > hi { hi }
+    else { x }
+}
+
+// ============================================================================
+// fMRI BOLD STRUCTURES
+// ============================================================================
+
+/// fMRI BOLD activation for 16 ROIs.
+/// activation[i] = mean BOLD signal in ROI i (arbitrary units, typically 0-10).
+/// correlation[i*16+j] = temporal correlation between ROI i and ROI j.
+pub struct FmriBoldData {
+    activation: [f64; 16],
+    correlation: [f64; 256],
+    n_rois: i32,
+    tr: f64,            // repetition time in seconds
+    n_volumes: i32,     // number of time points
+}
+
+/// Create empty fMRI data.
+pub fn fmri_new(n_rois: i32, tr: f64, n_vols: i32) -> FmriBoldData {
+    FmriBoldData {
+        activation: [0.0; 16],
+        correlation: [0.0; 256],
+        n_rois: n_rois,
+        tr: tr,
+        n_volumes: n_vols,
+    }
+}
+
+/// Set activation for a single ROI.
+pub fn fmri_set_activation(data: FmriBoldData, roi: i32, val: f64) -> FmriBoldData with Mut, Panic {
+    var d = data
+    if roi >= 0 && roi < d.n_rois {
+        d.activation[roi as usize] = val
+    }
+    d
+}
+
+/// Set temporal correlation between two ROIs (symmetric).
+pub fn fmri_set_correlation(data: FmriBoldData, i: i32, j: i32, val: f64) -> FmriBoldData with Mut, Panic {
+    var d = data
+    if i >= 0 && i < d.n_rois && j >= 0 && j < d.n_rois {
+        d.correlation[(i * 16 + j) as usize] = val
+        d.correlation[(j * 16 + i) as usize] = val
+    }
+    d
+}
+
+// ============================================================================
+// CT HOUNSFIELD STRUCTURES
+// ============================================================================
+
+/// CT scan data: Hounsfield units for 16 tissue regions.
+/// Each region represents an anatomical ROI whose mean HU is recorded.
+pub struct CtHounsfieldData {
+    hu_values: [f64; 16],
+    n_regions: i32,
+    // Tissue classification: 0=air, 1=CSF, 2=GM, 3=WM, 4=bone, 5=blood
+    tissue_type: [i32; 16],
+}
+
+/// Create empty CT data.
+pub fn ct_new(n_regions: i32) -> CtHounsfieldData {
+    CtHounsfieldData {
+        hu_values: [0.0; 16],
+        n_regions: n_regions,
+        tissue_type: [0; 16],
+    }
+}
+
+/// Set HU value for a region.
+pub fn ct_set_hu(data: CtHounsfieldData, region: i32, hu: f64, ttype: i32) -> CtHounsfieldData with Mut, Panic {
+    var d = data
+    if region >= 0 && region < d.n_regions {
+        d.hu_values[region as usize] = hu
+        d.tissue_type[region as usize] = ttype
+    }
+    d
+}
+
+// ============================================================================
+// fMRI BOLD -> SEDENION ENCODING
+// ============================================================================
+
+/// Encode fMRI BOLD signal as a sedenion.
+/// Each ROI activation is weighted by its mean functional connectivity.
+/// Components: e_i = activation_i * (1 + mean_correlation_i)
+pub fn fmri_to_sedenion(data: FmriBoldData) -> CDElement with Mut, Panic, Div {
+    var s = cd_zero(SED_BITS())
+    var i: i32 = 0
+    while i < data.n_rois && i < 16 {
+        // Mean correlation of this ROI with all others
+        var mean_corr: f64 = 0.0
+        var count: i32 = 0
+        var j: i32 = 0
+        while j < data.n_rois {
+            if j != i {
+                mean_corr = mean_corr + img_abs(data.correlation[(i * 16 + j) as usize])
+                count = count + 1
+            }
+            j = j + 1
+        }
+        if count > 0 { mean_corr = mean_corr / (count as f64) }
+        // Connectivity-weighted activation
+        s.c[i as usize] = data.activation[i as usize] * (1.0 + mean_corr)
+        i = i + 1
+    }
+    s
+}
+
+/// Encode and normalise fMRI to unit sedenion.
+pub fn fmri_to_sedenion_normalized(data: FmriBoldData) -> CDElement with Mut, Panic, Div {
+    let s = fmri_to_sedenion(data)
+    img_sed_normalize(s)
+}
+
+// ============================================================================
+// CT HOUNSFIELD -> SEDENION ENCODING
+// ============================================================================
+
+/// Normalise Hounsfield units to [-1, 1] range.
+/// Uses brain-relevant window: [-100, 200] HU for soft tissue.
+fn hu_normalize(hu: f64) -> f64 {
+    let lo = -100.0
+    let hi = 200.0
+    let clamped = img_clamp(hu, lo, hi)
+    // Map [lo, hi] -> [-1, 1]
+    2.0 * (clamped - lo) / (hi - lo) - 1.0
+}
+
+/// Encode CT Hounsfield data as a sedenion.
+/// Each region's normalised HU maps to one component.
+/// Tissue type weighting emphasises diagnostically relevant regions.
+pub fn ct_to_sedenion(data: CtHounsfieldData) -> CDElement with Mut, Panic, Div {
+    var s = cd_zero(SED_BITS())
+    var i: i32 = 0
+    while i < data.n_regions && i < 16 {
+        let norm_hu = hu_normalize(data.hu_values[i as usize])
+        // Weight by tissue diagnostic relevance
+        let weight = if data.tissue_type[i as usize] == 2 { 1.5 }   // GM: high relevance
+                     else if data.tissue_type[i as usize] == 3 { 1.3 } // WM
+                     else if data.tissue_type[i as usize] == 5 { 1.4 } // blood (hemorrhage)
+                     else if data.tissue_type[i as usize] == 1 { 1.2 } // CSF
+                     else { 1.0 }
+        s.c[i as usize] = norm_hu * weight
+        i = i + 1
+    }
+    s
+}
+
+/// Encode and normalise CT to unit sedenion.
+pub fn ct_to_sedenion_normalized(data: CtHounsfieldData) -> CDElement with Mut, Panic, Div {
+    let s = ct_to_sedenion(data)
+    img_sed_normalize(s)
+}
+
+// ============================================================================
+// MULTI-MODAL FUSION
+// ============================================================================
+
+/// Result of multi-modal sedenion fusion.
+pub struct FusionResult {
+    fmri_sed: CDElement,
+    ct_sed: CDElement,
+    fused: CDElement,
+    fmri_norm: f64,
+    ct_norm: f64,
+    fused_norm: f64,
+    // Commutator norm: measures non-commutativity of the modalities
+    commutator_norm: f64,
+}
+
+/// Fuse fMRI and CT via sedenion product.
+/// The product fMRI * CT encodes cross-modal interactions.
+/// Non-commutativity: fMRI*CT != CT*fMRI.
+pub fn fuse_fmri_ct(fmri: FmriBoldData, ct: CtHounsfieldData) -> FusionResult with Mut, Panic, Div {
+    let f_sed = fmri_to_sedenion_normalized(fmri)
+    let c_sed = ct_to_sedenion_normalized(ct)
+
+    // Forward product: fMRI * CT
+    let fwd = cd_mul(f_sed, c_sed)
+    // Reverse product: CT * fMRI
+    let rev = cd_mul(c_sed, f_sed)
+    // Commutator: fwd - rev (measures asymmetry)
+    let comm = cd_sub(fwd, rev)
+    let comm_nsq = cd_norm_sq(comm)
+    let comm_norm = img_sqrt(comm_nsq)
+
+    FusionResult {
+        fmri_sed: f_sed,
+        ct_sed: c_sed,
+        fused: fwd,
+        fmri_norm: img_sqrt(cd_norm_sq(f_sed)),
+        ct_norm: img_sqrt(cd_norm_sq(c_sed)),
+        fused_norm: img_sqrt(cd_norm_sq(fwd)),
+        commutator_norm: comm_norm,
+    }
+}
+
+/// Fuse two arbitrary modality sedenions.
+/// Symmetric fusion: (a*b + b*a) / 2 (Jordan product, always commutative).
+pub fn fuse_symmetric(a: CDElement, b: CDElement) -> CDElement with Mut, Panic, Div {
+    let ab = cd_mul(a, b)
+    let ba = cd_mul(b, a)
+    let sum = cd_add(ab, ba)
+    cd_scale(sum, 0.5)
+}
+
+/// Asymmetric fusion: a*b (preserves modality ordering).
+pub fn fuse_asymmetric(a: CDElement, b: CDElement) -> CDElement with Mut, Panic, Div {
+    cd_mul(a, b)
+}
+
+/// Three-modality fusion with associator diagnostic.
+/// Returns (fused, associator_norm).
+/// associator_norm > 0 means the fusion is order-dependent beyond pairwise.
+pub fn fuse_three_modal(a: CDElement, b: CDElement, c: CDElement) -> CDElement with Mut, Panic, Div {
+    // (a * b) * c
+    cd_mul(cd_mul(a, b), c)
+}
+
+/// Compute associator norm for three modalities: ||(a*b)*c - a*(b*c)||
+pub fn three_modal_associator_norm(a: CDElement, b: CDElement, c: CDElement) -> f64 with Mut, Panic, Div {
+    let left = cd_mul(cd_mul(a, b), c)
+    let right = cd_mul(a, cd_mul(b, c))
+    let assoc = cd_sub(left, right)
+    img_sqrt(cd_norm_sq(assoc))
+}
+
+// ============================================================================
+// NORMALISATION
+// ============================================================================
+
+/// Normalise a CDElement to unit norm.
+fn img_sed_normalize(s: CDElement) -> CDElement with Mut, Panic, Div {
+    let nsq = cd_norm_sq(s)
+    if nsq < 1e-30 { return s }
+    let n = img_sqrt(nsq)
+    cd_scale(s, 1.0 / n)
+}
+
+// ============================================================================
+// DEMO / SELF-TEST
+// ============================================================================
+
+fn main() with Mut, Panic, Div {
+    // --- fMRI data ---
+    var fmri = fmri_new(16, 2.0, 200)
+    var i: i32 = 0
+    while i < 16 {
+        // Synthetic BOLD activation: regions 3,4,5 (default mode) higher
+        let act = if i >= 3 && i <= 5 { 5.0 + 0.5 * (i as f64) }
+                  else { 2.0 + 0.3 * (i as f64) }
+        fmri.activation[i as usize] = act
+        // Correlations: nearby ROIs more correlated
+        var j: i32 = i + 1
+        while j < 16 {
+            let dist = j - i
+            let corr = if dist <= 2 { 0.8 }
+                       else if dist <= 4 { 0.5 }
+                       else { 0.2 }
+            fmri.correlation[(i * 16 + j) as usize] = corr
+            fmri.correlation[(j * 16 + i) as usize] = corr
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // --- CT data ---
+    var ct = ct_new(16)
+    i = 0
+    while i < 16 {
+        // Alternate between GM and WM with some variation
+        let hu = if i < 8 { HU_BRAIN_GM() + 2.0 * (i as f64) }
+                 else { HU_BRAIN_WM() + 1.5 * ((i - 8) as f64) }
+        ct.hu_values[i as usize] = hu
+        ct.tissue_type[i as usize] = if i < 8 { 2 } else { 3 }
+        i = i + 1
+    }
+
+    // --- Encode each modality ---
+    let f_sed = fmri_to_sedenion_normalized(fmri)
+    let c_sed = ct_to_sedenion_normalized(ct)
+    println("fMRI sedenion norm: ", img_sqrt(cd_norm_sq(f_sed)))
+    println("CT sedenion norm: ", img_sqrt(cd_norm_sq(c_sed)))
+
+    // --- Fuse ---
+    let result = fuse_fmri_ct(fmri, ct)
+    println("Fused norm: ", result.fused_norm)
+    println("Commutator norm (non-commutativity): ", result.commutator_norm)
+
+    // --- Three-modal associator (using fMRI, CT, fMRI as third for demo) ---
+    let assoc_n = three_modal_associator_norm(f_sed, c_sed, f_sed)
+    println("Associator norm (3-modal): ", assoc_n)
+
+    // --- Symmetric (Jordan) fusion ---
+    let jordan = fuse_symmetric(f_sed, c_sed)
+    let jordan_norm = img_sqrt(cd_norm_sq(jordan))
+    println("Jordan fusion norm: ", jordan_norm)
+}

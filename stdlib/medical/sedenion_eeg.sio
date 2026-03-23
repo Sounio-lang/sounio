@@ -1,1 +1,479 @@
-//! sedenion_eeg (disabled — pending sedenion_set_component implementation)
+//! stdlib/medical/sedenion_eeg.sio — EEG-to-Sedenion Encoding Pipeline
+//!
+//! Maps 16-channel EEG data into the sedenion (S = R^16) via CDElement.
+//! Each sedenion component encodes a neurophysiological feature:
+//!
+//!   e0-e4:   band power (delta, theta, alpha, beta, gamma)
+//!   e5-e9:   band coherence (mean pairwise per band)
+//!   e10-e15: inter-band coupling (6 clinically relevant pairs:
+//!            theta-alpha, alpha-beta, beta-gamma, theta-gamma,
+//!            delta-theta, alpha-gamma)
+//!
+//! Band-specific encoding uses the 10-20 system's 16-channel subset.
+//! Coherence matrices (16x16) are summarised per band, then fused
+//! into a single sedenion whose algebraic products capture cross-band
+//! interactions (non-associativity = order-dependent coupling).
+//!
+//! Uses CDElement (bits=4, dim=16) from cayley_dickson.sio for mutation
+//! via array indexing (workaround for Sedenion64 named-field limitation).
+//!
+//! References:
+//!   Nunez & Srinivasan (2006): EEG coherence theory
+//!   Boller et al. (2023): Ricci curvature in aging brain FC
+//!   Prerau et al. (2017): Sleep neurophysiology
+
+use algebra::cayley_dickson::{CDElement, cd_zero, cd_mul, cd_add,
+                               cd_sub, cd_scale, cd_norm_sq, cd_norm}
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+// Frequency band indices
+fn BAND_DELTA() -> i32 { 0 }   // 1-4 Hz
+fn BAND_THETA() -> i32 { 1 }   // 4-8 Hz
+fn BAND_ALPHA() -> i32 { 2 }   // 8-13 Hz
+fn BAND_BETA() -> i32 { 3 }    // 13-30 Hz
+fn BAND_GAMMA() -> i32 { 4 }   // 30-100 Hz
+fn NUM_BANDS() -> i32 { 5 }
+fn NUM_CHANNELS() -> i32 { 16 }
+fn SED_BITS() -> i32 { 4 }     // 2^4 = 16 components
+
+// ============================================================================
+// EEG DATA STRUCTURES
+// ============================================================================
+
+/// Single-band EEG data for 16 channels.
+/// Coherence matrix is 16x16 = 256 entries (row-major, symmetric).
+/// Band power is per-channel (16 entries).
+pub struct EegBandData {
+    coherence: [f64; 256],
+    band_power: [f64; 16],
+    n_channels: i32,
+    band_idx: i32,
+}
+
+/// Multi-band EEG: 5 frequency bands plus inter-band coupling.
+pub struct EegMultiBandData {
+    // Per-band coherence and power
+    delta: EegBandData,
+    theta: EegBandData,
+    alpha: EegBandData,
+    beta: EegBandData,
+    gamma: EegBandData,
+    // Inter-band coupling strengths (10 unique pairs from C(5,2))
+    interband: [f64; 10],
+    n_channels: i32,
+}
+
+/// Result of sedenion encoding with diagnostic metadata.
+pub struct EegSedenionResult {
+    sed: CDElement,
+    norm: f64,
+    dominant_band: i32,
+    mean_coherence: f64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+/// Create empty single-band data.
+pub fn eeg_band_data_new(n_ch: i32, band: i32) -> EegBandData {
+    EegBandData {
+        coherence: [0.0; 256],
+        band_power: [0.0; 16],
+        n_channels: n_ch,
+        band_idx: band,
+    }
+}
+
+/// Create empty multi-band data.
+pub fn eeg_multiband_new(n_ch: i32) -> EegMultiBandData {
+    EegMultiBandData {
+        delta: eeg_band_data_new(n_ch, 0),
+        theta: eeg_band_data_new(n_ch, 1),
+        alpha: eeg_band_data_new(n_ch, 2),
+        beta: eeg_band_data_new(n_ch, 3),
+        gamma: eeg_band_data_new(n_ch, 4),
+        interband: [0.0; 10],
+        n_channels: n_ch,
+    }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn eeg_sqrt(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+fn eeg_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// BAND DATA SETTERS
+// ============================================================================
+
+/// Set coherence between channels i and j (symmetric).
+pub fn eeg_band_set_coherence(bd: EegBandData, i: i32, j: i32, val: f64) -> EegBandData with Mut, Panic {
+    var b = bd
+    if i >= 0 && i < b.n_channels && j >= 0 && j < b.n_channels {
+        b.coherence[(i * 16 + j) as usize] = val
+        b.coherence[(j * 16 + i) as usize] = val
+    }
+    b
+}
+
+/// Set band power for a single channel.
+pub fn eeg_band_set_power(bd: EegBandData, ch: i32, power: f64) -> EegBandData with Mut, Panic {
+    var b = bd
+    if ch >= 0 && ch < b.n_channels {
+        b.band_power[ch as usize] = power
+    }
+    b
+}
+
+// ============================================================================
+// MEAN COHERENCE PER BAND
+// ============================================================================
+
+/// Compute mean upper-triangular coherence for a band.
+fn band_mean_coherence(bd: EegBandData) -> f64 with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var count: i32 = 0
+    var i: i32 = 0
+    while i < bd.n_channels {
+        var j: i32 = i + 1
+        while j < bd.n_channels {
+            sum = sum + bd.coherence[(i * 16 + j) as usize]
+            count = count + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if count > 0 { sum / (count as f64) } else { 0.0 }
+}
+
+/// Compute mean band power across channels.
+fn band_mean_power(bd: EegBandData) -> f64 with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var i: i32 = 0
+    while i < bd.n_channels {
+        sum = sum + bd.band_power[i as usize]
+        i = i + 1
+    }
+    if bd.n_channels > 0 { sum / (bd.n_channels as f64) } else { 0.0 }
+}
+
+// ============================================================================
+// CORE ENCODING: 16 EEG CHANNELS -> SEDENION
+// ============================================================================
+
+/// Encode 16-channel band power directly as sedenion components.
+/// Each channel maps to one sedenion component (e0..e15).
+/// This is the simplest encoding: channel i -> component i.
+pub fn eeg_channels_to_sedenion(powers: [f64; 16]) -> CDElement with Mut, Panic, Div {
+    var s = cd_zero(SED_BITS())
+    var i: i32 = 0
+    while i < 16 {
+        s.c[i as usize] = powers[i as usize]
+        i = i + 1
+    }
+    s
+}
+
+/// Normalise a CDElement to unit norm.
+pub fn eeg_sed_normalize(s: CDElement) -> CDElement with Mut, Panic, Div {
+    let nsq = cd_norm_sq(s)
+    if nsq < 1e-30 { return s }
+    let n = eeg_sqrt(nsq)
+    cd_scale(s, 1.0 / n)
+}
+
+// ============================================================================
+// BAND-SPECIFIC ENCODING: DELTA, THETA, ALPHA, BETA, GAMMA
+// ============================================================================
+
+/// Encode a single frequency band as a sedenion.
+/// Components 0..15 = coherence-weighted channel power.
+/// Weighting: power_i * mean_coherence_of_channel_i.
+pub fn eeg_band_to_sedenion(bd: EegBandData) -> CDElement with Mut, Panic, Div {
+    var s = cd_zero(SED_BITS())
+    var ch: i32 = 0
+    while ch < bd.n_channels {
+        // Mean coherence of this channel with all others
+        var ch_coh: f64 = 0.0
+        var count: i32 = 0
+        var j: i32 = 0
+        while j < bd.n_channels {
+            if j != ch {
+                ch_coh = ch_coh + bd.coherence[(ch * 16 + j) as usize]
+                count = count + 1
+            }
+            j = j + 1
+        }
+        let mean_ch_coh = if count > 0 { ch_coh / (count as f64) } else { 0.0 }
+        // Weighted: power * coherence
+        s.c[ch as usize] = bd.band_power[ch as usize] * (1.0 + mean_ch_coh)
+        ch = ch + 1
+    }
+    s
+}
+
+// ============================================================================
+// MULTI-BAND ENCODING: EEG -> SEDENION
+// ============================================================================
+
+/// Encode full multi-band EEG as a single sedenion (CDElement, bits=4).
+///
+///   e0-e4:   mean band power (delta, theta, alpha, beta, gamma)
+///   e5-e9:   mean band coherence (same 5 bands)
+///   e10-e15: inter-band coupling (6 clinically relevant pairs:
+///            0=theta-alpha, 1=alpha-beta, 2=beta-gamma,
+///            3=theta-gamma, 4=delta-theta, 5=alpha-gamma)
+///
+/// The sedenion is normalised to unit norm.
+pub fn eeg_multiband_to_sedenion(mb: EegMultiBandData) -> CDElement with Mut, Panic, Div {
+    var s = cd_zero(SED_BITS())
+
+    // e0-e4: mean band power
+    s.c[0] = band_mean_power(mb.delta)
+    s.c[1] = band_mean_power(mb.theta)
+    s.c[2] = band_mean_power(mb.alpha)
+    s.c[3] = band_mean_power(mb.beta)
+    s.c[4] = band_mean_power(mb.gamma)
+
+    // e5-e9: mean band coherence
+    s.c[5] = band_mean_coherence(mb.delta)
+    s.c[6] = band_mean_coherence(mb.theta)
+    s.c[7] = band_mean_coherence(mb.alpha)
+    s.c[8] = band_mean_coherence(mb.beta)
+    s.c[9] = band_mean_coherence(mb.gamma)
+
+    // e10-e15: inter-band coupling (first 6 of 10 pairs)
+    // Pair ordering: theta-alpha, alpha-beta, beta-gamma,
+    //                theta-gamma, delta-theta, alpha-gamma
+    var ib: i32 = 0
+    while ib < 6 {
+        s.c[(ib + 10) as usize] = mb.interband[ib as usize]
+        ib = ib + 1
+    }
+
+    // Normalise to unit sedenion
+    eeg_sed_normalize(s)
+}
+
+/// Encode multi-band EEG with full diagnostic metadata.
+pub fn eeg_multiband_encode(mb: EegMultiBandData) -> EegSedenionResult with Mut, Panic, Div {
+    let s = eeg_multiband_to_sedenion(mb)
+    let n = eeg_sqrt(cd_norm_sq(s))
+
+    // Find dominant band (highest mean power)
+    var powers: [f64; 5] = [0.0; 5]
+    powers[0] = band_mean_power(mb.delta)
+    powers[1] = band_mean_power(mb.theta)
+    powers[2] = band_mean_power(mb.alpha)
+    powers[3] = band_mean_power(mb.beta)
+    powers[4] = band_mean_power(mb.gamma)
+
+    var dom: i32 = 0
+    var max_p: f64 = powers[0]
+    var b: i32 = 1
+    while b < 5 {
+        if powers[b as usize] > max_p {
+            max_p = powers[b as usize]
+            dom = b
+        }
+        b = b + 1
+    }
+
+    // Overall mean coherence (average across bands)
+    let mc = (band_mean_coherence(mb.delta) + band_mean_coherence(mb.theta)
+            + band_mean_coherence(mb.alpha) + band_mean_coherence(mb.beta)
+            + band_mean_coherence(mb.gamma)) / 5.0
+
+    EegSedenionResult {
+        sed: s,
+        norm: n,
+        dominant_band: dom,
+        mean_coherence: mc,
+    }
+}
+
+// ============================================================================
+// COHERENCE MATRIX -> SEDENION REPRESENTATION
+// ============================================================================
+
+/// Encode a 16x16 coherence matrix directly as a sedenion.
+/// Uses eigenvalue-like summary: each component i = sum of row i (minus diagonal).
+/// This preserves the graph-theoretic degree structure.
+pub fn eeg_coherence_to_sedenion(coh: [f64; 256], n: i32) -> CDElement with Mut, Panic, Div {
+    var s = cd_zero(SED_BITS())
+    var i: i32 = 0
+    while i < n && i < 16 {
+        var row_sum: f64 = 0.0
+        var j: i32 = 0
+        while j < n && j < 16 {
+            if i != j {
+                row_sum = row_sum + coh[(i * 16 + j) as usize]
+            }
+            j = j + 1
+        }
+        s.c[i as usize] = row_sum
+        i = i + 1
+    }
+    // Normalise
+    eeg_sed_normalize(s)
+}
+
+/// Compute the sedenion difference between two coherence states.
+/// Useful for tracking EEG evolution (e.g., pre- vs post-treatment).
+pub fn eeg_sedenion_diff(a: CDElement, b: CDElement) -> CDElement with Mut, Panic, Div {
+    cd_sub(a, b)
+}
+
+/// Compute the sedenion product of two EEG encodings.
+/// Non-commutativity of the sedenion product captures order-dependent
+/// cross-modal interactions. Non-associativity means (A*B)*C != A*(B*C),
+/// reflecting the irreducibility of multi-band neural coupling order.
+pub fn eeg_sedenion_product(a: CDElement, b: CDElement) -> CDElement with Mut, Panic, Div {
+    cd_mul(a, b)
+}
+
+// ============================================================================
+// BAND-PAIR COUPLING (inter-band)
+// ============================================================================
+
+/// Compute inter-band coupling from two band coherence matrices.
+/// Coupling = correlation of upper-triangular coherence vectors.
+pub fn eeg_interband_coupling(a: EegBandData, b: EegBandData) -> f64 with Mut, Panic, Div {
+    let n = a.n_channels
+    var sum_ab: f64 = 0.0
+    var sum_a: f64 = 0.0
+    var sum_b: f64 = 0.0
+    var sum_aa: f64 = 0.0
+    var sum_bb: f64 = 0.0
+    var count: i32 = 0
+    var i: i32 = 0
+    while i < n {
+        var j: i32 = i + 1
+        while j < n {
+            let va = a.coherence[(i * 16 + j) as usize]
+            let vb = b.coherence[(i * 16 + j) as usize]
+            sum_ab = sum_ab + va * vb
+            sum_a = sum_a + va
+            sum_b = sum_b + vb
+            sum_aa = sum_aa + va * va
+            sum_bb = sum_bb + vb * vb
+            count = count + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if count == 0 { return 0.0 }
+    let cf = count as f64
+    let num = sum_ab - (sum_a * sum_b) / cf
+    let den_a = sum_aa - (sum_a * sum_a) / cf
+    let den_b = sum_bb - (sum_b * sum_b) / cf
+    let den = eeg_sqrt(eeg_abs(den_a) * eeg_abs(den_b))
+    if den < 1e-15 { 0.0 } else { num / den }
+}
+
+// ============================================================================
+// EEG GRAPH METRICS
+// ============================================================================
+
+/// Compute eta = <k>^2 / N for a coherence matrix (threshold > thresh).
+pub fn eeg_eta(coh: [f64; 256], n: i32, thresh: f64) -> f64 with Mut, Panic, Div {
+    var edges: i32 = 0
+    var i: i32 = 0
+    while i < n {
+        var j: i32 = i + 1
+        while j < n {
+            if coh[(i * 16 + j) as usize] > thresh { edges = edges + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let mean_k = (2.0 * (edges as f64)) / (n as f64)
+    mean_k * mean_k / (n as f64)
+}
+
+// ============================================================================
+// DEMO / SELF-TEST
+// ============================================================================
+
+fn main() with Mut, Panic, Div {
+    // Create synthetic 16-channel EEG data
+    var mb = eeg_multiband_new(16)
+
+    // Populate delta band with synthetic power and coherence
+    var ch: i32 = 0
+    while ch < 16 {
+        mb.delta.band_power[ch as usize] = 0.3 + 0.02 * (ch as f64)
+        mb.theta.band_power[ch as usize] = 0.15 + 0.01 * (ch as f64)
+        mb.alpha.band_power[ch as usize] = 0.25 + 0.015 * (ch as f64)
+        mb.beta.band_power[ch as usize] = 0.2 + 0.01 * (ch as f64)
+        mb.gamma.band_power[ch as usize] = 0.1 + 0.005 * (ch as f64)
+        ch = ch + 1
+    }
+
+    // Populate coherence (nearby channels more coherent)
+    var i: i32 = 0
+    while i < 16 {
+        var j: i32 = i + 1
+        while j < 16 {
+            let dist = j - i
+            let base_coh = if dist <= 2 { 0.7 }
+                           else if dist <= 4 { 0.4 }
+                           else { 0.2 }
+            mb.delta.coherence[(i * 16 + j) as usize] = base_coh
+            mb.delta.coherence[(j * 16 + i) as usize] = base_coh
+            mb.alpha.coherence[(i * 16 + j) as usize] = base_coh * 0.9
+            mb.alpha.coherence[(j * 16 + i) as usize] = base_coh * 0.9
+            mb.theta.coherence[(i * 16 + j) as usize] = base_coh * 0.6
+            mb.theta.coherence[(j * 16 + i) as usize] = base_coh * 0.6
+            mb.beta.coherence[(i * 16 + j) as usize] = base_coh * 0.5
+            mb.beta.coherence[(j * 16 + i) as usize] = base_coh * 0.5
+            mb.gamma.coherence[(i * 16 + j) as usize] = base_coh * 0.3
+            mb.gamma.coherence[(j * 16 + i) as usize] = base_coh * 0.3
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Set inter-band coupling
+    mb.interband[0] = 0.6    // theta-alpha
+    mb.interband[1] = 0.5    // alpha-beta
+    mb.interband[2] = 0.4    // beta-gamma
+    mb.interband[3] = 0.3    // theta-gamma
+    mb.interband[4] = 0.7    // delta-theta
+    mb.interband[5] = 0.2    // alpha-gamma
+
+    // Encode
+    let result = eeg_multiband_encode(mb)
+    println("EEG sedenion norm: ", result.norm)
+    println("Dominant band: ", result.dominant_band)
+    println("Mean coherence: ", result.mean_coherence)
+
+    // Coherence matrix encoding
+    let coh_sed = eeg_coherence_to_sedenion(mb.delta.coherence, 16)
+    let coh_norm = eeg_sqrt(cd_norm_sq(coh_sed))
+    println("Delta coherence sedenion norm: ", coh_norm)
+
+    // Channel-direct encoding
+    let ch_sed = eeg_channels_to_sedenion(mb.alpha.band_power)
+    let ch_norm = eeg_sqrt(cd_norm_sq(ch_sed))
+    println("Alpha channel sedenion norm: ", ch_norm)
+
+    // Eta for delta band coherence graph
+    let eta = eeg_eta(mb.delta.coherence, 16, 0.3)
+    println("Delta eta (thresh=0.3): ", eta)
+}
