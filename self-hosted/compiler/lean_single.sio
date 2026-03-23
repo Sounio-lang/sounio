@@ -41,8 +41,8 @@ var TARGET_ARCH: i64 = 0
 // PE: offset within CD[] of the ExitProcess call [rip+disp32]'s disp32 field
 var PE_EXIT_CALL_OFF: i64 = -1
 
-// String qword buffer (global to avoid boot4 local-array bug)
-var SQW: [i64; 32] = [0; 32]
+// Shared string scratch buffer: used both as packed qwords and as decoded bytes.
+var SQW: [i64; 256] = [0; 256]
 
 // Function table: name start/end in source, code offset
 var FN_NS: [i64; 256] = [0; 256]
@@ -115,6 +115,18 @@ var ST_LINEAR: [i64; 32] = [0; 32]
 var VAR_LINEAR: [i64; 128] = [0; 128]
 // Per local variable: use count (for linear checking)
 var VAR_USED: [i64; 128] = [0; 128]
+var VAR_TY: [i64; 128] = [0; 128]
+var VAR_TY_HASH: [i64; 128] = [0; 128]
+var GL_TY: [i64; 128] = [0; 128]
+var GL_TY_HASH: [i64; 128] = [0; 128]
+var FN_RET_TY: [i64; 256] = [0; 256]
+var FN_RET_HASH: [i64; 256] = [0; 256]
+var FN_ARITY: [i64; 256] = [0; 256]
+var TYPECHECK_FAILED: i64 = 0
+var SCAN_TY: i64 = 0
+var SCAN_TY_HASH: i64 = 0
+var SCAN_TY_ESIZ: i64 = 8
+var SCAN_TY_NEXT: i64 = 0
 
 // ─── Phase 6b: Refinement type aliases ───
 // type Name = { x: T | predicate } — stored as name hash + predicate token range
@@ -344,6 +356,129 @@ fn name_eq(s1: i64, e1: i64, s2: i64, e2: i64) -> bool with Panic {
     return 1
 }
 
+fn ty_is_numeric(k: i64) -> bool { return k == 1 || k == 2 }
+
+fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool {
+    if k1 == 0 || k2 == 0 { return true }
+    if k1 == 1 && k2 == 4 { return true }
+    if k1 == 4 && k2 == 1 { return true }
+    if k1 != k2 { return false }
+    if k1 == 6 || k1 == 7 || k1 == 8 { return h1 == h2 }
+    return true
+}
+
+fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
+    TYPECHECK_FAILED = 1
+    print("type error line ")
+    print_int(TL[tok as usize])
+    print(": ")
+    print(msg)
+    print("\n")
+    return 0
+}
+
+fn scan_type(p0: i64) with Mut, Panic {
+    var p = p0
+    SCAN_TY = 0
+    SCAN_TY_HASH = 0
+    SCAN_TY_ESIZ = 8
+    if TK[p as usize] == 44 { p = p + 1 }
+    if TK[p as usize] == 32 { p = p + 1 }
+    if TK[p as usize] == 6 && TK[(p + 1) as usize] == 7 {
+        SCAN_TY = 5
+        SCAN_TY_NEXT = p + 2
+        return
+    }
+    if TK[p as usize] == 41 {
+        p = p + 1
+        let ens = TS[p as usize]
+        let ene = TE[p as usize]
+        SCAN_TY = 8
+        if src_match(ens, ene - ens, "i8") {
+            SCAN_TY_HASH = 1
+            SCAN_TY_ESIZ = 1
+        } else {
+            SCAN_TY_HASH = 8
+            SCAN_TY_ESIZ = 8
+        }
+        p = p + 1
+        if TK[p as usize] == 27 { p = p + 1 }
+        if TK[p as usize] == 4 { p = p + 1 }
+        if TK[p as usize] == 42 { p = p + 1 }
+        SCAN_TY_NEXT = p
+        return
+    }
+    if TK[p as usize] == 3 {
+        let ns = TS[p as usize]
+        let ne = TE[p as usize]
+        if src_match(ns, ne - ns, "i8") {
+            SCAN_TY = 1
+        } else {
+            if src_match(ns, ne - ns, "i32") {
+                SCAN_TY = 1
+            } else {
+                if src_match(ns, ne - ns, "u32") {
+                    SCAN_TY = 1
+                } else {
+                    if src_match(ns, ne - ns, "i64") {
+                        SCAN_TY = 1
+                    } else {
+                        if src_match(ns, ne - ns, "u64") {
+                            SCAN_TY = 1
+                        } else {
+                            if src_match(ns, ne - ns, "usize") {
+                                SCAN_TY = 1
+                            } else {
+                                if src_match(ns, ne - ns, "f32") {
+                                    SCAN_TY = 2
+                                } else {
+                                    if src_match(ns, ne - ns, "f64") {
+                                        SCAN_TY = 2
+                                    } else {
+                                        if src_match(ns, ne - ns, "str") {
+                                            SCAN_TY = 3
+                                        } else {
+                                            if src_match(ns, ne - ns, "string") {
+                                                SCAN_TY = 3
+                                            } else {
+                                                if src_match(ns, ne - ns, "bool") {
+                                                    SCAN_TY = 4
+                                                } else {
+                                                    let h = gl_name_hash(ns, ne)
+                                                    if st_find(h) >= 0 {
+                                                        SCAN_TY = 6
+                                                        SCAN_TY_HASH = h
+                                                    } else {
+                                                        if en_find(h) >= 0 {
+                                                            SCAN_TY = 7
+                                                            SCAN_TY_HASH = h
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        p = p + 1
+        if TK[p as usize] == 23 {
+            var gd: i64 = 1
+            p = p + 1
+            while p < TC && gd > 0 {
+                if TK[p as usize] == 23 { gd = gd + 1 }
+                if TK[p as usize] == 24 { gd = gd - 1 }
+                p = p + 1
+            }
+        }
+    }
+    SCAN_TY_NEXT = p
+}
+
 // Build mangled name "name_type" in SRC buffer, return (start, end)
 fn mono_mangle(ns: i64, ne: i64, ts: i64, te: i64) -> i64 with Mut, Panic {
     let start = SRC_LEN
@@ -514,6 +649,8 @@ fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
     VAR_UNIT[VAR_COUNT as usize] = 0
     VAR_LINEAR[VAR_COUNT as usize] = 0
     VAR_USED[VAR_COUNT as usize] = 0
+    VAR_TY[VAR_COUNT as usize] = 0
+    VAR_TY_HASH[VAR_COUNT as usize] = 0
     VAR_COUNT = VAR_COUNT + 1
     NEXT_SLOT = NEXT_SLOT + 1
     return slot
@@ -531,6 +668,8 @@ fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64) -> i64 with Mut, Panic {
     VAR_ALEN[VAR_COUNT as usize] = alen
     VAR_ESIZ[VAR_COUNT as usize] = esiz
     VAR_IS_F64[VAR_COUNT as usize] = 0
+    VAR_TY[VAR_COUNT as usize] = 8
+    VAR_TY_HASH[VAR_COUNT as usize] = esiz
     VAR_COUNT = VAR_COUNT + 1
     return ptr_slot
 }
@@ -622,7 +761,7 @@ fn emit_print(tok: i64) with Mut, Panic, Div {
     let se = TE[tok as usize] - 1
     var slen: i64 = 0
     var zi: i64 = 0
-    while zi < 32 { SQW[zi as usize] = 0; zi = zi + 1 }
+    while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
     var si: i64 = ss
     while si < se {
         let c = sb(si)
@@ -914,6 +1053,12 @@ fn emit_write_file() with Mut {
 // Global parse position for expression parsing
 var EP: i64 = 0
 var EXPR_IS_F64: i64 = 0
+var EXPR_TY: i64 = 0
+var EXPR_TY_HASH: i64 = 0
+var LAST_STMT_TY: i64 = 0
+var LAST_STMT_TY_HASH: i64 = 0
+var CURRENT_RET_TY: i64 = 0
+var CURRENT_RET_HASH: i64 = 0
 // Closure state save buffers (global to avoid stack overflow in recursive compile_primary)
 var CL_SAVE_NS: [i64; 128] = [0; 128]
 var CL_SAVE_NE: [i64; 128] = [0; 128]
@@ -940,6 +1085,8 @@ var LAST_EXPR_IS_LINEAR: i64 = 0
 fn compile_primary() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
     LAST_EXPR_IS_LINEAR = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = 0
     let k = TK[EP as usize]
     // Integer literal
     if k == 4 {
@@ -948,11 +1095,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
         else { em(0x48); em(0xb8); em64(v) }
         EP = EP + 1
         EXPR_IS_F64 = 0
+        EXPR_TY = 1
         return
     }
     // true=35, false=36
-    if k == 35 { em(0x48); em(0xb8); em64(1); EP = EP + 1; EXPR_IS_F64 = 0; return }
-    if k == 36 { em(0x31); em(0xc0); EP = EP + 1; EXPR_IS_F64 = 0; return }
+    if k == 35 { em(0x48); em(0xb8); em64(1); EP = EP + 1; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
+    if k == 36 { em(0x31); em(0xc0); EP = EP + 1; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
     // Float literal (53): runtime conversion via SSE2
     if k == 53 {
         let fl_int = TV[EP as usize]
@@ -974,6 +1122,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // movq rax, xmm0 — store f64 bits in rax
         em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
         EXPR_IS_F64 = 1
+        EXPR_TY = 2
         return
     }
     // Closure: |params| expr  or  |params| { stmts }
@@ -1123,6 +1272,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em(0x48); em(0x8d); em(0x85)
         em32(0 - struct_top * 8)
         EXPR_IS_F64 = 0
+        EXPR_TY = 9
         LAST_EXPR_IS_CLOSURE = 1
         return
     }
@@ -1223,8 +1373,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
     }
     // Unary minus
     if k == 18 {
+        let op_tok = EP
         EP = EP + 1
         compile_primary()
+        if EXPR_TY != 0 && ty_is_numeric(EXPR_TY) == false { tc_error(op_tok, "unary - requires numeric operand") }
         // EXPR_IS_F64 kept from inner expression (unary minus preserves type)
         if EXPR_IS_F64 == 1 {
             // f64 negate: flip sign bit (bit 63)
@@ -1236,20 +1388,26 @@ fn compile_primary() with IO, Mut, Panic, Div {
     }
     // Unary bitwise NOT ~
     if k == 55 {
+        let op_tok = EP
         EP = EP + 1
         compile_primary()
+        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(op_tok, "bitwise not requires integer operand") }
         em(0x48); em(0xf7); em(0xd0)  // not rax
         EXPR_IS_F64 = 0
+        EXPR_TY = 1
         return
     }
     // Unary not !
     if k == 32 {
+        let op_tok = EP
         EP = EP + 1
         compile_primary()
+        if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(op_tok, "logical not requires bool operand") }
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x0f); em(0x94); em(0xc0)  // sete al
         em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
         EXPR_IS_F64 = 0
+        EXPR_TY = 4
         return
     }
     // String literal: embed in code section with jmp-over, return address via lea
@@ -1259,7 +1417,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // Decode string bytes
         var slen: i64 = 0
         var zi: i64 = 0
-        while zi < 32 { SQW[zi as usize] = 0; zi = zi + 1 }
+        while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
         var si: i64 = ss
         while si < se {
             let ch = sb(si)
@@ -1289,6 +1447,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em32(disp)
         EP = EP + 1
         EXPR_IS_F64 = 0
+        EXPR_TY = 3
         return
     }
     // Identifier or function call
@@ -1331,6 +1490,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x48); em(0xb8); em64(disc)
             } else { em(0x31); em(0xc0) }
             EXPR_IS_F64 = 0
+            EXPR_TY = 7
+            EXPR_TY_HASH = eh
             return
         }
         // Generic call/struct: IDENT < TYPE > ( or IDENT < TYPE > {
@@ -1383,6 +1544,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 em(0x31); em(0xc0)
                 EXPR_IS_F64 = 0
+                EXPR_TY = 1
                 return
             }
             // Check for print_int(expr)
@@ -1392,6 +1554,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 emit_print_int()
                 em(0x31); em(0xc0)
                 EXPR_IS_F64 = 0
+                EXPR_TY = 1
                 return
             }
             // Check for print_f64(expr)
@@ -1401,6 +1564,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 emit_print_f64()
                 em(0x31); em(0xc0)
                 EXPR_IS_F64 = 0
+                EXPR_TY = 1
                 return
             }
             // Check for arg_count()
@@ -1409,6 +1573,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_arg_count()
                 EXPR_IS_F64 = 0
+                EXPR_TY = 1
                 return
             }
             // Check for get_arg(N)
@@ -1417,6 +1582,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_get_arg()
                 EXPR_IS_F64 = 0
+                EXPR_TY = 3
                 return
             }
             // Check for read_file(path)
@@ -1425,6 +1591,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_read_file()
                 EXPR_IS_F64 = 0
+                EXPR_TY = 3
                 return
             }
             // Check for file_size(path)
@@ -1433,6 +1600,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_file_size()
                 EXPR_IS_F64 = 0
+                EXPR_TY = 1
                 return
             }
             // Check for write_file(path, buf, len)
@@ -1449,6 +1617,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_write_file()
                 EXPR_IS_F64 = 0
+                EXPR_TY = 1
                 return
             }
             // Check for str_len(s)
@@ -1457,6 +1626,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_str_len()
                 EXPR_IS_F64 = 0
+                EXPR_TY = 1
                 return
             }
             // Check for str_char_at(s, i)
@@ -1469,30 +1639,32 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x01)  // movsx rax, byte [rcx + rax]
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0
+                EXPR_TY = 1
                 return
             }
             // f64 arithmetic builtins (SSE2) — hash-dispatched, no if-as-expression
             let bh = gl_name_hash(ns, ne)
             let bl = ne - ns
             // f64_add/sub/mul/div: 7 chars each
-            if bl == 7 && bh == 7078482 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x58); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
-            if bl == 7 && bh == 7084000 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5c); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
-            if bl == 7 && bh == 7085240 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x59); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
-            if bl == 7 && bh == 7083783 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 7 && bh == 7078482 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x58); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
+            if bl == 7 && bh == 7084000 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5c); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
+            if bl == 7 && bh == 7085240 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x59); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
+            if bl == 7 && bh == 7083783 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
             // f64_neg: 7 chars
-            if bl == 7 && bh == 7081334 { EP = EP + 1; compile_or(); em(0x48); em(0x0f); em(0xba); em(0xf8); em(63); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 7 && bh == 7081334 { EP = EP + 1; compile_or(); em(0x48); em(0x0f); em(0xba); em(0xf8); em(63); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
             // f64_lt/le/eq/gt/ge: 6 chars
-            if bl == 6 && bh == 6061460 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x92); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
-            if bl == 6 && bh == 6058670 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x96); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
-            if bl == 6 && bh == 6059817 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x94); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
-            if bl == 6 && bh == 6060685 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x97); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
-            if bl == 6 && bh == 6057895 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x93); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 6 && bh == 6061460 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x92); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
+            if bl == 6 && bh == 6058670 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x96); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
+            if bl == 6 && bh == 6059817 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x94); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
+            if bl == 6 && bh == 6060685 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x97); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
+            if bl == 6 && bh == 6057895 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x93); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
             // f64_to_i64 / i64_to_f64: 10 chars
-            if bl == 10 && bh == 10139623 { EP = EP + 1; compile_or(); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0); em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
-            if bl == 10 && bh == 10138972 { EP = EP + 1; compile_or(); em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 10 && bh == 10139623 { EP = EP + 1; compile_or(); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0); em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; EXPR_TY = 1; return }
+            if bl == 10 && bh == 10138972 { EP = EP + 1; compile_or(); em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
             // User function call
             let fi = fn_find(ns, ne)
             let call_vslot = var_find(ns, ne)
+            let call_tok = EP - 1
             EP = EP + 1
             var argc: i64 = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
@@ -1503,6 +1675,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
             if fi >= 0 {
+                if FN_ARITY[fi as usize] != argc { tc_error(call_tok, "wrong number of arguments") }
                 // Effects check: callee effects must be subset of caller effects
                 let callee_eff = FN_EFFECTS[fi as usize]
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
@@ -1529,6 +1702,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 PATCH_FN[PATCH_COUNT as usize] = fi
                 PATCH_COUNT = PATCH_COUNT + 1
                 em32(0)
+                EXPR_TY = FN_RET_TY[fi as usize]
+                EXPR_TY_HASH = FN_RET_HASH[fi as usize]
             } else {
                 // Indirect call through variable — uniform closure convention:
                 // All callable values are closure struct pointers [fn_ptr, cap_0, ...]
@@ -1585,6 +1760,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x48); em(0x8d); em(0x85)
                 em32(0 - (base_slot + fc - 1) * 8)
                 EXPR_IS_F64 = 0
+                EXPR_TY = 6
+                EXPR_TY_HASH = sh
                 // Track if this struct is linear
                 LAST_EXPR_IS_LINEAR = ST_LINEAR[si as usize]
                 return
@@ -1611,6 +1788,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     em(0x48); em(0xb8); em64(base)  // mov rax, base
                     em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
                 }
+                if esz == 1 { EXPR_TY = 1 }
             } else {
                 // Local pointer subscript: ptr[idx] → load ptr from stack, add index
                 let slot = var_find(ns, ne)
@@ -1623,9 +1801,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
                     } else if lalen > 0 && lesiz == 1 {
                         em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
+                        EXPR_TY = 1
                     } else {
                         // Non-array local pointer (e.g. read_file result): byte access
                         em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
+                        EXPR_TY = 1
                     }
                 }
             }
@@ -1635,8 +1815,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // Variable load (local first, then global)
         let slot = var_find(ns, ne)
         if slot >= 0 {
+            let vi = var_find_idx(ns, ne)
             emit_load_var(slot)
             EXPR_IS_F64 = var_find_is_f64(ns, ne)
+            if vi >= 0 {
+                EXPR_TY = VAR_TY[vi as usize]
+                EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
+            }
             var_mark_used(ns, ne)
         }
         else {
@@ -1648,6 +1833,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if alen == 0 {
                     em(0x48); em(0x8b); em(0x00)  // scalar: mov rax, [rax] (dereference)
                 }
+                EXPR_TY = GL_TY[gi as usize]
+                EXPR_TY_HASH = GL_TY_HASH[gi as usize]
                 // array: rax = address (no dereference — used as pointer)
             } else {
                 // Function reference: let f = some_fn (no parens)
@@ -1702,6 +1889,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     em(0x48); em(0x8d); em(0x85)
                     em32(0 - fn_struct_slot * 8)
                     LAST_EXPR_IS_CLOSURE = 1
+                    EXPR_TY = 9
                 } else {
                     print("warning: unknown identifier at line ")
                     print_int(TL[(EP - 1) as usize])
@@ -1725,12 +1913,16 @@ fn compile_postfix() with IO, Mut, Panic, Div {
     while more == 1 {
         if TK[EP as usize] == 37 {
             EP = EP + 1  // skip 'as'
+            let tp = EP
             let tns = TS[EP as usize]
             let tne = TE[EP as usize]
             if tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
                 em(0x48); em(0x0f); em(0xbe); em(0xc0)  // as i8: movsx rax, al
             }
-            EP = EP + 1
+            scan_type(tp)
+            EXPR_TY = SCAN_TY
+            EXPR_TY_HASH = SCAN_TY_HASH
+            EP = SCAN_TY_NEXT
             continue
         }
         if TK[EP as usize] == 50 {
@@ -1766,6 +1958,8 @@ fn compile_postfix() with IO, Mut, Panic, Div {
                     PATCH_FN[PATCH_COUNT as usize] = mfi
                     PATCH_COUNT = PATCH_COUNT + 1
                     em32(0)
+                    EXPR_TY = FN_RET_TY[mfi as usize]
+                    EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
                     continue
                 }
             }
@@ -1785,6 +1979,8 @@ fn compile_postfix() with IO, Mut, Panic, Div {
                 }
                 si = si + 1
             }
+            EXPR_TY = 0
+            EXPR_TY_HASH = 0
             continue
         }
         more = 0
@@ -1794,11 +1990,23 @@ fn compile_postfix() with IO, Mut, Panic, Div {
 fn compile_multiplicative() with IO, Mut, Panic, Div {
     compile_postfix()
     while TK[EP as usize] == 19 || TK[EP as usize] == 20 || TK[EP as usize] == 29 {
+        let op_tok = EP
         let op = TK[EP as usize]
         EP = EP + 1
         let left_f64 = EXPR_IS_F64
+        let left_ty = EXPR_TY
         emit_push()
         compile_postfix()
+        let right_ty = EXPR_TY
+        if left_ty != 0 && right_ty != 0 {
+            if op == 29 {
+                if left_ty != 1 || right_ty != 1 { tc_error(op_tok, "modulo requires integer operands") }
+            } else {
+                if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false || left_ty != right_ty {
+                    tc_error(op_tok, "arithmetic operands must have matching numeric types")
+                }
+            }
+        }
         em(0x59)  // pop rcx (lhs)
         if left_f64 == 1 {
             // f64: movq xmm0, rcx; movq xmm1, rax; SSE2 op; movq rax, xmm0
@@ -1812,23 +2020,34 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             }
             em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
             EXPR_IS_F64 = 1
+            EXPR_TY = 2
         } else {
             em(0x48); em(0x87); em(0xc1)  // xchg rax, rcx — rax=lhs, rcx=rhs
             if op == 19 { em(0x48); em(0x0f); em(0xaf); em(0xc1) }  // imul rax, rcx
             if op == 20 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9) }  // cqo; idiv rcx
             if op == 29 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9); em(0x48); em(0x89); em(0xd0) }  // cqo; idiv rcx; mov rax, rdx
+            EXPR_TY = 1
         }
+        EXPR_TY_HASH = 0
     }
 }
 
 fn compile_additive() with IO, Mut, Panic, Div {
     compile_multiplicative()
     while TK[EP as usize] == 17 || TK[EP as usize] == 18 {
+        let op_tok = EP
         let op = TK[EP as usize]
         EP = EP + 1
         let left_f64 = EXPR_IS_F64
+        let left_ty = EXPR_TY
         emit_push()
         compile_multiplicative()
+        let right_ty = EXPR_TY
+        if left_ty != 0 && right_ty != 0 {
+            if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false || left_ty != right_ty {
+                tc_error(op_tok, "arithmetic operands must have matching numeric types")
+            }
+        }
         em(0x59)  // pop rcx (lhs)
         if left_f64 == 1 {
             // f64: movq xmm0, rcx; movq xmm1, rax; SSE2 op; movq rax, xmm0
@@ -1838,10 +2057,13 @@ fn compile_additive() with IO, Mut, Panic, Div {
             if op == 18 { em(0xf2); em(0x0f); em(0x5c); em(0xc1) }  // subsd xmm0, xmm1
             em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
             EXPR_IS_F64 = 1
+            EXPR_TY = 2
         } else {
             if op == 17 { em(0x48); em(0x01); em(0xc8) }  // add rax, rcx (commutative: rcx+rax = ok)
             if op == 18 { em(0x48); em(0x87); em(0xc1); em(0x48); em(0x29); em(0xc8) }  // xchg; sub rax, rcx
+            EXPR_TY = 1
         }
+        EXPR_TY_HASH = 0
     }
 }
 
@@ -1849,15 +2071,22 @@ fn compile_additive() with IO, Mut, Panic, Div {
 fn compile_shift() with IO, Mut, Panic, Div {
     compile_additive()
     while TK[EP as usize] == 39 || TK[EP as usize] == 40 {
+        let op_tok = EP
         let op = TK[EP as usize]
         EP = EP + 1
+        let left_ty = EXPR_TY
         emit_push()
         compile_additive()
+        let right_ty = EXPR_TY
+        if left_ty != 0 && left_ty != 1 { tc_error(op_tok, "shift requires integer operands") }
+        if right_ty != 0 && right_ty != 1 { tc_error(op_tok, "shift requires integer operands") }
         // rax=rhs (shift amount), stack=lhs
         em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (shift amount in cl)
         em(0x58)  // pop rax (lhs)
         if op == 40 { em(0x48); em(0xd3); em(0xe0) }  // shl rax, cl
         if op == 39 { em(0x48); em(0xd3); em(0xf8) }  // sar rax, cl
+        EXPR_TY = 1
+        EXPR_TY_HASH = 0
     }
 }
 
@@ -1865,8 +2094,14 @@ fn compile_shift() with IO, Mut, Panic, Div {
 fn compile_bitand() with IO, Mut, Panic, Div {
     compile_shift()
     while TK[EP as usize] == 44 {
+        let op_tok = EP
+        let left_ty = EXPR_TY
         EP = EP + 1; emit_push(); compile_shift()
+        if left_ty != 0 && left_ty != 1 { tc_error(op_tok, "bitwise and requires integer operands") }
+        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(op_tok, "bitwise and requires integer operands") }
         em(0x59); em(0x48); em(0x21); em(0xc8)  // pop rcx; and rax, rcx
+        EXPR_TY = 1
+        EXPR_TY_HASH = 0
     }
 }
 
@@ -1874,8 +2109,14 @@ fn compile_bitand() with IO, Mut, Panic, Div {
 fn compile_bitxor() with IO, Mut, Panic, Div {
     compile_bitand()
     while TK[EP as usize] == 56 {
+        let op_tok = EP
+        let left_ty = EXPR_TY
         EP = EP + 1; emit_push(); compile_bitand()
+        if left_ty != 0 && left_ty != 1 { tc_error(op_tok, "bitwise xor requires integer operands") }
+        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(op_tok, "bitwise xor requires integer operands") }
         em(0x59); em(0x48); em(0x31); em(0xc8)  // pop rcx; xor rax, rcx
+        EXPR_TY = 1
+        EXPR_TY_HASH = 0
     }
 }
 
@@ -1883,8 +2124,14 @@ fn compile_bitxor() with IO, Mut, Panic, Div {
 fn compile_bitor() with IO, Mut, Panic, Div {
     compile_bitxor()
     while TK[EP as usize] == 45 {
+        let op_tok = EP
+        let left_ty = EXPR_TY
         EP = EP + 1; emit_push(); compile_bitxor()
+        if left_ty != 0 && left_ty != 1 { tc_error(op_tok, "bitwise or requires integer operands") }
+        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(op_tok, "bitwise or requires integer operands") }
         em(0x59); em(0x48); em(0x09); em(0xc8)  // pop rcx; or rax, rcx
+        EXPR_TY = 1
+        EXPR_TY_HASH = 0
     }
 }
 
@@ -1892,10 +2139,26 @@ fn compile_comparison() with IO, Mut, Panic, Div {
     compile_bitor()
     let op = TK[EP as usize]
     if op == 21 || op == 22 || op == 23 || op == 24 || op == 25 || op == 26 {
+        let op_tok = EP
         let left_f64 = EXPR_IS_F64
+        let left_ty = EXPR_TY
+        let left_hash = EXPR_TY_HASH
         EP = EP + 1
         emit_push()
         compile_bitor()
+        let right_ty = EXPR_TY
+        let right_hash = EXPR_TY_HASH
+        if op == 21 || op == 22 {
+            if ty_eq(left_ty, left_hash, right_ty, right_hash) == false {
+                tc_error(op_tok, "comparison operands must have the same type")
+            }
+        } else {
+            if left_ty != 0 && right_ty != 0 {
+                if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false || left_ty != right_ty {
+                    tc_error(op_tok, "ordered comparison requires matching numeric operands")
+                }
+            }
+        }
         em(0x59)  // pop rcx (lhs)
         if left_f64 == 1 {
             // f64: movq xmm0, rcx (lhs); movq xmm1, rax (rhs); ucomisd xmm0, xmm1
@@ -1920,6 +2183,8 @@ fn compile_comparison() with IO, Mut, Panic, Div {
         }
         em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
         EXPR_IS_F64 = 0
+        EXPR_TY = 4
+        EXPR_TY_HASH = 0
     }
 }
 
@@ -1927,11 +2192,15 @@ fn compile_comparison() with IO, Mut, Panic, Div {
 fn compile_and() with IO, Mut, Panic, Div {
     compile_comparison()
     while TK[EP as usize] == 30 {
+        let op_tok = EP
+        let left_ty = EXPR_TY
         EP = EP + 1
+        if left_ty != 0 && left_ty != 4 { tc_error(op_tok, "logical and requires bool operands") }
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x0f); em(0x84)             // je short_false (rel32)
         let patch = CL; em32(0)
         compile_comparison()
+        if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(op_tok, "logical and requires bool operands") }
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x0f); em(0x95); em(0xc0)  // setne al
         em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
@@ -1948,6 +2217,8 @@ fn compile_and() with IO, Mut, Panic, Div {
         CD[(end_patch+1) as usize] = (((end - end_patch - 4) >> 8) & 0xFF) as i8
         CD[(end_patch+2) as usize] = (((end - end_patch - 4) >> 16) & 0xFF) as i8
         CD[(end_patch+3) as usize] = (((end - end_patch - 4) >> 24) & 0xFF) as i8
+        EXPR_TY = 4
+        EXPR_TY_HASH = 0
     }
 }
 
@@ -1955,11 +2226,15 @@ fn compile_and() with IO, Mut, Panic, Div {
 fn compile_or() with IO, Mut, Panic, Div {
     compile_and()
     while TK[EP as usize] == 31 {
+        let op_tok = EP
+        let left_ty = EXPR_TY
         EP = EP + 1
+        if left_ty != 0 && left_ty != 4 { tc_error(op_tok, "logical or requires bool operands") }
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x0f); em(0x85)             // jne short_true (rel32)
         let patch = CL; em32(0)
         compile_and()
+        if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(op_tok, "logical or requires bool operands") }
         em(0xe9); let end_patch = CL; em32(0)  // jmp end
         // short_true: result = 1
         let here = CL
@@ -1973,6 +2248,8 @@ fn compile_or() with IO, Mut, Panic, Div {
         CD[(end_patch+1) as usize] = (((end - end_patch - 4) >> 8) & 0xFF) as i8
         CD[(end_patch+2) as usize] = (((end - end_patch - 4) >> 16) & 0xFF) as i8
         CD[(end_patch+3) as usize] = (((end - end_patch - 4) >> 24) & 0xFF) as i8
+        EXPR_TY = 4
+        EXPR_TY_HASH = 0
     }
 }
 
@@ -2004,6 +2281,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         var arr_len: i64 = 0
         var arr_esiz: i64 = 8
         var decl_is_f64: i64 = -1
+        var decl_ty: i64 = 0
+        var decl_ty_hash: i64 = 0
         if TK[EP as usize] == 43 {
             EP = EP + 1  // skip :
             // Skip & or &!
@@ -2022,14 +2301,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 EP = EP + 1  // skip N
                 if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
                 is_arr = 1
+                decl_ty = 8
+                decl_ty_hash = arr_esiz
                 decl_is_f64 = 0
             } else {
-                // Check if type is "f64"
-                let tns = TS[EP as usize]
-                let tne = TE[EP as usize]
-                if tne - tns == 3 && sb(tns) == 102 && sb(tns+1) == 54 && sb(tns+2) == 52 { decl_is_f64 = 1 }
+                scan_type(EP)
+                decl_ty = SCAN_TY
+                decl_ty_hash = SCAN_TY_HASH
+                if decl_ty == 2 { decl_is_f64 = 1 }
                 else { decl_is_f64 = 0 }
-                EP = EP + 1  // skip type name
+                EP = SCAN_TY_NEXT
             }
         }
         // Skip = sign
@@ -2062,11 +2343,22 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         } else {
             compile_or()
             let slot = var_add(ns, ne)
+            let vix = VAR_COUNT - 1
+            if decl_ty != 0 && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
+                tc_error(EP - 1, "initializer type does not match declaration")
+            }
             emit_store_var(slot)
             // Set f64 flag: explicit type annotation takes priority, else infer from RHS
             if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
             else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
             else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
+            if decl_ty != 0 {
+                VAR_TY[vix as usize] = decl_ty
+                VAR_TY_HASH[vix as usize] = decl_ty_hash
+            } else {
+                VAR_TY[vix as usize] = EXPR_TY
+                VAR_TY_HASH[vix as usize] = EXPR_TY_HASH
+            }
             // Set closure flag if RHS was a closure expression
             VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
             // Set linear flag if RHS was a linear struct literal
@@ -2118,8 +2410,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let ne = TE[EP as usize]
         EP = EP + 2
         compile_or()
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
         let slot = var_find(ns, ne)
         if slot >= 0 {
+            let ty_vi = var_find_idx(ns, ne)
+            if ty_vi >= 0 {
+                if ty_eq(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize], rhs_ty, rhs_ty_hash) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
+            }
             emit_store_var(slot)
             // Update closure flag on reassignment
             var vi: i64 = VAR_COUNT - 1
@@ -2134,6 +2434,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
+                if ty_eq(GL_TY[gi as usize], GL_TY_HASH[gi as usize], rhs_ty, rhs_ty_hash) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
                 let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 // mov rcx, rax; mov rax, addr; mov [rax], rcx
                 em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (value)
@@ -2192,8 +2495,17 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // return expr
     if k == 2 {
         EP = EP + 1
-        if TK[EP as usize] != 9 { compile_or() }
-        else { em(0x31); em(0xc0) }
+        if TK[EP as usize] != 9 {
+            compile_or()
+        }
+        else {
+            em(0x31); em(0xc0)
+            EXPR_TY = 5
+            EXPR_TY_HASH = 0
+        }
+        if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, EXPR_TY, EXPR_TY_HASH) == false {
+            tc_error(EP - 1, "return type does not match function signature")
+        }
         em(0x48); em(0x81); em(0xc4); em32(4096)
         em(0x5d); em(0xc3)
         return
@@ -2224,6 +2536,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     if k == 13 {
         EP = EP + 1
         compile_or()
+        if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(EP - 1, "if condition must be bool") }
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x0f); em(0x84)
         let je_off = CL; em32(0)
@@ -2258,6 +2571,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         LOOP_DEPTH = LOOP_DEPTH + 1
         let saved_bc = BREAK_COUNT
         compile_or()
+        if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(EP - 1, "while condition must be bool") }
         em(0x48); em(0x85); em(0xc0)
         em(0x0f); em(0x84)
         let je_off = CL; em32(0)
@@ -2286,10 +2600,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         EP = EP + 1  // skip 'range'
         if TK[EP as usize] == 6 { EP = EP + 1 }  // skip (
         compile_or()  // START in rax
+        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(EP - 1, "for range start must be integer") }
         let iter_slot = var_add(vns, vne)
+        VAR_TY[(VAR_COUNT - 1) as usize] = 1
+        VAR_TY_HASH[(VAR_COUNT - 1) as usize] = 0
         emit_store_var(iter_slot)
         if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
         compile_or()  // END in rax
+        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(EP - 1, "for range end must be integer") }
         let end_slot = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + 1
         emit_store_var(end_slot)
@@ -2468,6 +2786,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // Expression statement
     compile_or()
     LAST_STMT_HAS_VALUE = 1
+    LAST_STMT_TY = EXPR_TY
+    LAST_STMT_TY_HASH = EXPR_TY_HASH
 }
 
 // ─── Top-level compiler ───
@@ -2742,6 +3062,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     PATCH_COUNT = 0
     GL_COUNT = 0
     GL_BSS_SIZE = 0
+    TYPECHECK_FAILED = 0
     var p: i64 = 0
 
     // Pass 0a: register structs
@@ -2857,11 +3178,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     p = p + 1
                     // Skip ]
                     if TK[p as usize] == 42 { p = p + 1 }
+                    let gix = GL_COUNT
                     gl_add(gns, gne, esiz, alen)
+                    GL_TY[gix as usize] = 8
+                    GL_TY_HASH[gix as usize] = esiz
                 } else {
                     // Scalar: i64, i32, bool, string
+                    scan_type(p)
+                    let gix = GL_COUNT
                     gl_add(gns, gne, 8, 0)
-                    p = p + 1
+                    GL_TY[gix as usize] = SCAN_TY
+                    GL_TY_HASH[gix as usize] = SCAN_TY_HASH
+                    p = SCAN_TY_NEXT
                 }
             }
             // Skip = initializer until next var or fn or EOF
@@ -2892,6 +3220,44 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             FN_NE[FN_COUNT as usize] = TE[p as usize]
             FN_OFF[FN_COUNT as usize] = -1
             FN_COUNT = FN_COUNT + 1
+        }
+        p = p + 1
+    }
+
+    p = 0
+    var sig_fi: i64 = 0
+    while p < TC {
+        if TK[p as usize] == 1 {
+            p = p + 1
+            if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
+            FN_ARITY[sig_fi as usize] = 0
+            FN_RET_TY[sig_fi as usize] = 5
+            FN_RET_HASH[sig_fi as usize] = 0
+            var q: i64 = p + 1
+            if TK[q as usize] == 6 { q = q + 1 }
+            while TK[q as usize] != 7 && TK[q as usize] != 0 {
+                if TK[q as usize] == 3 {
+                    FN_ARITY[sig_fi as usize] = FN_ARITY[sig_fi as usize] + 1
+                    q = q + 1
+                    if TK[q as usize] == 43 {
+                        q = q + 1
+                        scan_type(q)
+                        q = SCAN_TY_NEXT
+                    }
+                } else {
+                    q = q + 1
+                }
+                if TK[q as usize] == 28 { q = q + 1 }
+            }
+            if TK[q as usize] == 7 { q = q + 1 }
+            if TK[q as usize] == 10 {
+                q = q + 1
+                scan_type(q)
+                FN_RET_TY[sig_fi as usize] = SCAN_TY
+                FN_RET_HASH[sig_fi as usize] = SCAN_TY_HASH
+                q = SCAN_TY_NEXT
+            }
+            if sig_fi < FN_COUNT { sig_fi = sig_fi + 1 }
         }
         p = p + 1
     }
@@ -2982,12 +3348,16 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // Record code offset + set current function for effects checking
         FN_OFF[fn_idx as usize] = CL
         CURRENT_FN = fn_idx
+        CURRENT_RET_TY = FN_RET_TY[fn_idx as usize]
+        CURRENT_RET_HASH = FN_RET_HASH[fn_idx as usize]
 
         // Reset local vars
         VAR_COUNT = 0
         NEXT_SLOT = 1
         BREAK_COUNT = 0
         LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
 
         // Register parameters
         p = p + 1  // skip name
@@ -3001,16 +3371,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 // Skip : type annotation (handles &T, &!T, [T; N], simple T)
                 if TK[p as usize] == 43 {
                     p = p + 1  // skip :
-                    if TK[p as usize] == 44 { p = p + 1 }  // skip &
-                    if TK[p as usize] == 32 { p = p + 1 }  // skip !
-                    if TK[p as usize] == 41 {
-                        // [T; N]
-                        p = p + 1
-                        while TK[p as usize] != 42 && TK[p as usize] != 0 { p = p + 1 }
-                        if TK[p as usize] == 42 { p = p + 1 }
-                    } else {
-                        p = p + 1  // skip type name
-                    }
+                    scan_type(p)
+                    VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
+                    VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                    if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                    p = SCAN_TY_NEXT
                 }
             }
             if TK[p as usize] == 28 { p = p + 1 }
@@ -3071,6 +3436,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
         // Implicit return 0
         if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
+            if LAST_STMT_HAS_VALUE == 1 {
+                if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                    tc_error(EP - 1, "tail expression type does not match function signature")
+                }
+            }
             if LAST_STMT_HAS_VALUE == 0 {
                 em(0x31); em(0xc0)
             }
@@ -3078,6 +3448,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             em(0x5d); em(0xc3)
         }
         fn_idx = fn_idx + 1
+    }
+
+    if TYPECHECK_FAILED != 0 {
+        print("typecheck: failed\n")
+        return 1
     }
 
     // Patch function calls
