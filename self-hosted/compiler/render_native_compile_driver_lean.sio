@@ -49,6 +49,8 @@ var MAIN_FN_IDX: i64 = -1
 // Source buffer for lexer (same-module global — avoids cross-module BSS NULL pointer bug)
 var LEAN_SOURCE: [i8; 1048576] = [0; 1048576]
 var LEAN_SOURCE_LEN: i64 = 0
+var READ_BUF: [i8; 2097152] = [0; 2097152]
+var READ_BUF_LEN: i64 = 0
 // Boot4-safe lexer state (all same-module globals)
 var LTP_POS: i64 = 0
 var LTP_LINE: i64 = 1
@@ -2059,7 +2061,13 @@ fn scan_byte(buf: [i8; 1048576], pos: i64) -> i64 with Mut, Panic {
 
 // Tiny function: populate LEAN_SOURCE from read_file result (keeps frame small)
 fn populate_lean_source(path: string) with IO, Mut, Panic, Div {
-    let bytes = read_file_into_lean_source(path)
+    let bytes = read_into_read_buf(path)
+    // Copy from READ_BUF (global) to LEAN_SOURCE (global) — boot4-safe
+    var csi: i64 = 0
+    while csi < bytes && csi < 2097152 {
+        LEAN_SOURCE[csi as usize] = READ_BUF[csi as usize]
+        csi = csi + 1
+    }
     LEAN_SOURCE_LEN = bytes
 }
 
@@ -7357,21 +7365,23 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
         return 0
     }
 
-    // read_file_into_lean_source(path) -> bytes read (SYS_READ into LEAN_SOURCE BSS)
-    if mc_src_eq_at(name_s, name_len, "read_file_into_lean_source") {
+    // read_into_read_buf(path) -> bytes read into READ_BUF global
+    if mc_src_eq_at(name_s, name_len, "read_into_read_buf") {
         mc_parse_expr()
         MC_POS = MC_POS + 1
+        // open(path, O_RDONLY)
         we(0x48); we(0x89); we(0xc7)
         we(0x48); we(0x31); we(0xf6)
         we(0x48); we(0x31); we(0xd2)
         we(0xb8); we32(2)
         we(0x0f); we(0x05)
         we(0x48); we(0x89); we(0xc7)
-        let ls_gi = mc_find_global_src_name("LEAN_SOURCE", 11)
-        let ls_addr = MC_BSS_BASE() + (if ls_gi >= 0 { GLOBAL_OFFSETS[ls_gi as usize] } else { 0 })
+        // read(fd, READ_BUF_addr, 2MB) — READ_BUF is at known global offset
+        let rb_gi = mc_find_global_src_name("READ_BUF", 8)
+        let rb_addr = MC_BSS_BASE() + (if rb_gi >= 0 { GLOBAL_OFFSETS[rb_gi as usize] } else { 0 })
         we(0x48); we(0xBE)
         var lk: i64 = 0
-        while lk < 8 { we((ls_addr >> (lk * 8)) & 0xFF); lk = lk + 1 }
+        while lk < 8 { we((rb_addr >> (lk * 8)) & 0xFF); lk = lk + 1 }
         we(0xba); we32(2097152)
         we(0xb8); we32(0)
         we(0x0f); we(0x05)
