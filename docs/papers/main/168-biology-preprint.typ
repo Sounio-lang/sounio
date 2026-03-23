@@ -189,6 +189,28 @@ The framework presented here is a mathematical model, not a claim that biologica
 
 Several limitations should be noted. The CYP450 mapping requires the FDA's seven-isoform simplification; in reality, additional CYP enzymes (CYP2E1, CYP3A5, and others) contribute to drug metabolism, and the restriction to seven is a regulatory convention. The genetic code embedding depends on the specific binary encoding (@table:bases); other biochemically motivated encodings are possible and may yield different geometric properties. The ambient Cayley–Dickson algebra at dimension 64 is not directly involved in codon biology — it provides the algebraic context in which the projective geometry acquires its associator structure.
 
-The strongest immediate application is the CYP450 model, where the seven-element constraint is externally validated (by regulatory practice), the order-dependence is clinically documented (67% monodirectional DDIs), and the predictions are testable against pharmacovigilance data. We encourage validation using the FDA Adverse Event Reporting System (FAERS) or controlled pharmacokinetic studies with varied drug sequencing.
+The strongest immediate application is the CYP450 model, where the seven-element constraint is externally validated (by regulatory practice), the order-dependence is clinically documented (67% monodirectional DDIs), and the predictions are testable against pharmacovigilance data.
+
+== Preliminary validation against FAERS
+
+To test whether the Fano classification predicts DDI order-dependence, we queried the FDA Adverse Event Reporting System (FAERS) via the openFDA API for all $binom(7, 3) = 35$ unordered CYP isoform triples. For each triple, we selected a representative drug per CYP isoform and searched for FAERS cases reporting all three drugs with temporal data (drug start dates). Temporal asymmetry was measured as $|n_(A arrow.r B) - n_(B arrow.r A)| slash (n_(A arrow.r B) + n_(B arrow.r A))$, where $n_(A arrow.r B)$ counts cases where drug A was started before drug B.
+
+Of 35 triples, 23 yielded cases with temporal data (5 Fano, 18 non-Fano). Results:
+
+#figure(
+  table(
+    columns: 4,
+    align: (left, center, center, center),
+    stroke: 0.5pt,
+    [*Group*], [*Mean asymmetry*], [*$N$*], [*Prediction*],
+    [Fano (order-independent)], [0.469], [5], [Lower],
+    [Non-Fano (order-dependent)], [0.424], [18], [Higher],
+  ),
+  caption: [FAERS temporal asymmetry by Fano classification. The difference is $-0.044$ (wrong direction), with permutation $p = 0.61$. The null hypothesis is not rejected.],
+)
+
+The Fano classification does *not* predict DDI temporal asymmetry in FAERS data at this level of analysis. Several factors limit this test: FAERS is a voluntary reporting system biased toward serious events; temporal data (drug start dates) is frequently missing; many drugs are metabolised by multiple CYP isoforms, introducing noise; and confounders (age, genotype, disease severity) are uncontrolled. The use of a single representative drug per CYP isoform further reduces sensitivity. A definitive test would require controlled pharmacokinetic studies with explicit sequencing — prospective data, not retrospective voluntary reports.
+
+The null result does not refute the mathematical framework (which is proven independently), but it indicates that FAERS adverse event asymmetry is not a sufficiently sensitive metric to detect the predicted signal, if it exists. We report this preliminary result in the interest of full disclosure.
 
 #bibliography("168-biology-refs.yml", style: "springer-mathphys")
