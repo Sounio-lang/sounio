@@ -1,0 +1,429 @@
+// stdlib/algebra/jordan.sio — Exceptional Jordan Algebra J₃(O)
+//
+// The Albert algebra: 3×3 Hermitian octonionic matrices.
+// 27-dimensional. Jordan product X ∘ Y = (XY + YX) / 2.
+// Automorphism group: F₄ (52-dimensional exceptional Lie group).
+//
+// This is the ONLY exceptional simple Jordan algebra (Jordan-von Neumann-Wigner 1934).
+// It connects octonions to quantum mechanics via the algebra of observables.
+//
+// Layout: [f64; 27]
+//   [0..2]   = diagonal reals (α, β, γ)
+//   [3..10]  = octonion a (entry 01)
+//   [11..18] = octonion b (entry 02)
+//   [19..26] = octonion c (entry 12)
+//
+// Hermitian condition:
+//   | α    a    b̄  |       a = entry(0,1)
+//   | ā    β    c  |       b = entry(0,2),  b̄ = oct_conj(b)
+//   | b    c̄    γ  |       c = entry(1,2)
+
+pub struct J3O {
+    c: [f64; 27]
+}
+
+// ============================================================
+// Octonion helpers (inline, using Cayley-Dickson sign function)
+// ============================================================
+
+fn oct_sigma(a: i32, b: i32) -> i32 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    let half = 4
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & 3
+    let b_lo = b & 3
+    if a_hi == 0 && b_hi == 0 {
+        // quaternion level
+        if a_lo == 0 || b_lo == 0 { return 1 }
+        let half2 = 2
+        let a2 = if a_lo >= half2 { 1 } else { 0 }
+        let b2 = if b_lo >= half2 { 1 } else { 0 }
+        let al2 = a_lo & 1
+        let bl2 = b_lo & 1
+        if a2 == 0 && b2 == 0 { return -1 }
+        if a2 == 0 && b2 == 1 { return if bl2 == 0 { 1 } else { -1 } }
+        if a2 == 1 && b2 == 0 { return if al2 == 0 { 1 } else { -1 } }
+        return if bl2 == 0 { -1 } else { 1 }
+    }
+    if a_hi == 0 && b_hi == 1 { return oct_sigma(b_lo, a_lo) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return oct_sigma(a_lo, b_lo) }
+        return 0 - oct_sigma(a_lo, b_lo)
+    }
+    // a_hi == 1 && b_hi == 1
+    if b_lo == 0 { return 0 - oct_sigma(b_lo, a_lo) }
+    return oct_sigma(b_lo, a_lo)
+}
+
+fn oct_mul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var result: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i: i32 = 0
+    while i < 8 {
+        if a[i] != 0.0 {
+            var j: i32 = 0
+            while j < 8 {
+                if b[j] != 0.0 {
+                    let idx = i ^ j
+                    let s = oct_sigma(i, j)
+                    let sf = if s > 0 { 1.0 } else { -1.0 }
+                    result[idx] = result[idx] + sf * a[i] * b[j]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn oct_conj(a: [f64; 8]) -> [f64; 8] with Mut {
+    var r: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    r[0] = a[0]
+    var i: i32 = 1
+    while i < 8 { r[i] = 0.0 - a[i]; i = i + 1 }
+    r
+}
+
+fn oct_add(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut {
+    var r: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i: i32 = 0
+    while i < 8 { r[i] = a[i] + b[i]; i = i + 1 }
+    r
+}
+
+fn oct_scale(s: f64, a: [f64; 8]) -> [f64; 8] with Mut {
+    var r: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i: i32 = 0
+    while i < 8 { r[i] = s * a[i]; i = i + 1 }
+    r
+}
+
+fn oct_norm_sq(a: [f64; 8]) -> f64 with Mut {
+    var s: f64 = 0.0
+    var i: i32 = 0
+    while i < 8 { s = s + a[i] * a[i]; i = i + 1 }
+    s
+}
+
+fn oct_real(a: [f64; 8]) -> f64 { a[0] }
+
+fn oct_zero() -> [f64; 8] { [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] }
+
+// ============================================================
+// J₃(O) constructors and accessors
+// ============================================================
+
+// Extract diagonal reals
+fn j3o_alpha(x: J3O) -> f64 { x.c[0] }
+fn j3o_beta(x: J3O) -> f64 { x.c[1] }
+fn j3o_gamma(x: J3O) -> f64 { x.c[2] }
+
+// Extract octonion entries
+fn j3o_a(x: J3O) -> [f64; 8] with Mut {
+    var r: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i: i32 = 0
+    while i < 8 { r[i] = x.c[3 + i]; i = i + 1 }
+    r
+}
+
+fn j3o_b(x: J3O) -> [f64; 8] with Mut {
+    var r: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i: i32 = 0
+    while i < 8 { r[i] = x.c[11 + i]; i = i + 1 }
+    r
+}
+
+fn j3o_c(x: J3O) -> [f64; 8] with Mut {
+    var r: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i: i32 = 0
+    while i < 8 { r[i] = x.c[19 + i]; i = i + 1 }
+    r
+}
+
+// Zero element
+pub fn j3o_zero() -> J3O with Mut {
+    var c: [f64; 27] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0]
+    J3O { c: c }
+}
+
+// Identity element (3×3 identity matrix)
+pub fn j3o_identity() -> J3O with Mut {
+    var x = j3o_zero()
+    x.c[0] = 1.0
+    x.c[1] = 1.0
+    x.c[2] = 1.0
+    x
+}
+
+// Diagonal element diag(α, β, γ)
+pub fn j3o_diag(alpha: f64, beta: f64, gamma: f64) -> J3O with Mut {
+    var x = j3o_zero()
+    x.c[0] = alpha
+    x.c[1] = beta
+    x.c[2] = gamma
+    x
+}
+
+// From components
+pub fn j3o_new(alpha: f64, beta: f64, gamma: f64,
+               a: [f64; 8], b: [f64; 8], c: [f64; 8]) -> J3O with Mut {
+    var x = j3o_zero()
+    x.c[0] = alpha
+    x.c[1] = beta
+    x.c[2] = gamma
+    var i: i32 = 0
+    while i < 8 {
+        x.c[3 + i] = a[i]
+        x.c[11 + i] = b[i]
+        x.c[19 + i] = c[i]
+        i = i + 1
+    }
+    x
+}
+
+// ============================================================
+// Trace, norm, determinant
+// ============================================================
+
+// Trace: tr(X) = α + β + γ
+pub fn j3o_trace(x: J3O) -> f64 {
+    x.c[0] + x.c[1] + x.c[2]
+}
+
+// Inner product: (X, Y) = tr(X ∘ Y)
+// For diagonal: just sum of products of diagonals + 2*Re(a·a' + b·b' + c·c')
+pub fn j3o_inner(x: J3O, y: J3O) -> f64 with Mut, Panic, Div {
+    let xx = j3o_jordan_product(x, y)
+    j3o_trace(xx)
+}
+
+// Frobenius norm squared: ||X||² = tr(X²) = α² + β² + γ² + 2(|a|² + |b|² + |c|²)
+pub fn j3o_norm_sq(x: J3O) -> f64 with Mut {
+    let a = j3o_a(x)
+    let b = j3o_b(x)
+    let c = j3o_c(x)
+    let alpha = x.c[0]
+    let beta = x.c[1]
+    let gamma = x.c[2]
+    alpha * alpha + beta * beta + gamma * gamma
+        + 2.0 * (oct_norm_sq(a) + oct_norm_sq(b) + oct_norm_sq(c))
+}
+
+// Freudenthal determinant (cubic form):
+//   det(X) = αβγ - α|c|² - β|b|² - γ|a|² + 2·Re(a · c · b̄)
+//
+// Note: Re((a·c)·b̄) = Re(a·(c·b̄)) because Re([x,y,z]) = 0 for all octonions.
+// The cubic form is well-defined despite non-associativity.
+pub fn j3o_determinant(x: J3O) -> f64 with Mut, Panic, Div {
+    let alpha = x.c[0]
+    let beta = x.c[1]
+    let gamma = x.c[2]
+    let a = j3o_a(x)
+    let b = j3o_b(x)
+    let c = j3o_c(x)
+
+    let cubic = alpha * beta * gamma
+    let quad = alpha * oct_norm_sq(c) + beta * oct_norm_sq(b) + gamma * oct_norm_sq(a)
+
+    // Triple product: Re(a · c · conj(b))
+    // Parenthesization doesn't matter for real part
+    let ac = oct_mul(a, c)
+    let b_conj = oct_conj(b)
+    let acb = oct_mul(ac, b_conj)
+    let triple = oct_real(acb)
+
+    cubic - quad + 2.0 * triple
+}
+
+// ============================================================
+// Jordan product: X ∘ Y = (XY + YX) / 2
+//
+// For 3×3 Hermitian octonionic matrices, the matrix product XY
+// is computed entry-by-entry using octonionic multiplication.
+// The result is symmetrized to maintain Hermiticity.
+// ============================================================
+
+pub fn j3o_jordan_product(x: J3O, y: J3O) -> J3O with Mut, Panic, Div {
+    let xa = j3o_a(x)
+    let xb = j3o_b(x)
+    let xc = j3o_c(x)
+    let ya = j3o_a(y)
+    let yb = j3o_b(y)
+    let yc = j3o_c(y)
+    let x0 = x.c[0]
+    let x1 = x.c[1]
+    let x2 = x.c[2]
+    let y0 = y.c[0]
+    let y1 = y.c[1]
+    let y2 = y.c[2]
+
+    // Matrix product Z = XY:
+    //   X = | x0   xa   xb̄  |    Y = | y0   ya   yb̄  |
+    //       | xā   x1   xc  |        | yā   y1   yc  |
+    //       | xb   xc̄   x2  |        | yb   yc̄   y2  |
+    //
+    // Z_{00} = x0·y0 + xa·yā + xb̄·yb   (real part of Hermitian product)
+    // Z_{01} = x0·ya + xa·y1 + xb̄·yc    (octonion)
+    // Z_{02} = x0·yb̄ + xa·yc + xb̄·y2   (octonion, conjugated for Hermiticity)
+    // Z_{11} = xā·ya + x1·y1 + xc·yc̄   (real)
+    // Z_{12} = xā·yb̄ + x1·yc + xc·y2   (octonion)
+    // Z_{22} = xb·yb̄ + xc̄·yc + x2·y2  (real)
+
+    let xa_conj = oct_conj(xa)
+    let xb_conj = oct_conj(xb)
+    let xc_conj = oct_conj(xc)
+    let ya_conj = oct_conj(ya)
+    let yb_conj = oct_conj(yb)
+    let yc_conj = oct_conj(yc)
+
+    // Diagonal entries of XY (real parts only needed for Jordan product diagonal)
+    // Z_{00} = x0*y0 + Re(xa · ya_conj) + Re(xb_conj · yb)
+    let d00 = x0 * y0 + oct_real(oct_mul(xa, ya_conj)) + oct_real(oct_mul(xb_conj, yb))
+
+    // Z_{11} = Re(xa_conj · ya) + x1*y1 + Re(xc · yc_conj)
+    let d11 = oct_real(oct_mul(xa_conj, ya)) + x1 * y1 + oct_real(oct_mul(xc, yc_conj))
+
+    // Z_{22} = Re(xb · yb_conj) + Re(xc_conj · yc) + x2*y2
+    let d22 = oct_real(oct_mul(xb, yb_conj)) + oct_real(oct_mul(xc_conj, yc)) + x2 * y2
+
+    // Off-diagonal entries of XY (octonion-valued)
+    // Z_{01} = x0*ya + xa*y1 + xb_conj · yc
+    let z01 = oct_add(oct_add(oct_scale(x0, ya), oct_scale(y1, xa)), oct_mul(xb_conj, yc))
+
+    // Z_{02} = x0*yb_conj + xa · yc + xb_conj*y2
+    //        (this is Z_{02}, will be conjugated for the (2,0) entry)
+    let z02 = oct_add(oct_add(oct_scale(x0, yb_conj), oct_mul(xa, yc)), oct_scale(y2, xb_conj))
+
+    // Z_{12} = xa_conj · yb_conj + x1*yc + xc*y2
+    let z12 = oct_add(oct_add(oct_mul(xa_conj, yb_conj), oct_scale(x1, yc)), oct_scale(y2, xc))
+
+    // Now compute YX similarly for the symmetric part
+    // YX_{00} = y0*x0 + ya·xa_conj + yb_conj·xb
+    let d00_r = y0 * x0 + oct_real(oct_mul(ya, xa_conj)) + oct_real(oct_mul(yb_conj, xb))
+    let d11_r = oct_real(oct_mul(ya_conj, xa)) + y1 * x1 + oct_real(oct_mul(yc, xc_conj))
+    let d22_r = oct_real(oct_mul(yb, xb_conj)) + oct_real(oct_mul(yc_conj, xc)) + y2 * x2
+
+    let w01 = oct_add(oct_add(oct_scale(y0, xa), oct_scale(x1, ya)), oct_mul(yb_conj, xc))
+    let w02 = oct_add(oct_add(oct_scale(y0, xb_conj), oct_mul(ya, xc)), oct_scale(x2, yb_conj))
+    let w12 = oct_add(oct_add(oct_mul(ya_conj, xb_conj), oct_scale(y1, xc)), oct_scale(x2, yc))
+
+    // Jordan product: (XY + YX) / 2
+    let alpha = (d00 + d00_r) / 2.0
+    let beta = (d11 + d11_r) / 2.0
+    let gamma = (d22 + d22_r) / 2.0
+    let a_out = oct_scale(0.5, oct_add(z01, w01))
+    let b_out_conj = oct_scale(0.5, oct_add(z02, w02))
+    let c_out = oct_scale(0.5, oct_add(z12, w12))
+
+    // b entry: z02 is the conjugated entry, so b = conj(b_out_conj)
+    let b_out = oct_conj(b_out_conj)
+
+    j3o_new(alpha, beta, gamma, a_out, b_out, c_out)
+}
+
+// ============================================================
+// Adjoint (sharp map): X# such that X ∘ X# = det(X) · I
+// ============================================================
+
+pub fn j3o_adjoint(x: J3O) -> J3O with Mut, Panic, Div {
+    let alpha = x.c[0]
+    let beta = x.c[1]
+    let gamma = x.c[2]
+    let a = j3o_a(x)
+    let b = j3o_b(x)
+    let c = j3o_c(x)
+    let b_conj = oct_conj(b)
+
+    // X# diagonal:
+    //   α# = βγ - |c|²
+    //   β# = αγ - |b|²
+    //   γ# = αβ - |a|²
+    let alpha_s = beta * gamma - oct_norm_sq(c)
+    let beta_s = alpha * gamma - oct_norm_sq(b)
+    let gamma_s = alpha * beta - oct_norm_sq(a)
+
+    // X# off-diagonal:
+    //   a# = c̄ · b̄ - γ · a       (= conj(c) · conj(b) - γa)
+    //   b# = ā · c̄ - β · b       (= conj(a) · conj(c) - βb)
+    //   c# = b · a - α · c        (need careful parenthesization)
+    let a_conj = oct_conj(a)
+    let c_conj = oct_conj(c)
+
+    let a_s = oct_add(oct_mul(c_conj, b_conj), oct_scale(0.0 - gamma, a))
+    let b_s = oct_add(oct_mul(a_conj, c_conj), oct_scale(0.0 - beta, b))
+    let c_s = oct_add(oct_mul(b, a), oct_scale(0.0 - alpha, c))
+
+    j3o_new(alpha_s, beta_s, gamma_s, a_s, b_s, c_s)
+}
+
+// ============================================================
+// Addition and scalar multiplication
+// ============================================================
+
+pub fn j3o_add(x: J3O, y: J3O) -> J3O with Mut {
+    var r = j3o_zero()
+    var i: i32 = 0
+    while i < 27 { r.c[i] = x.c[i] + y.c[i]; i = i + 1 }
+    r
+}
+
+pub fn j3o_scale(s: f64, x: J3O) -> J3O with Mut {
+    var r = j3o_zero()
+    var i: i32 = 0
+    while i < 27 { r.c[i] = s * x.c[i]; i = i + 1 }
+    r
+}
+
+pub fn j3o_sub(x: J3O, y: J3O) -> J3O with Mut {
+    j3o_add(x, j3o_scale(-1.0, y))
+}
+
+// ============================================================
+// Properties
+// ============================================================
+
+// The characteristic polynomial: t³ - tr(X)t² + S(X)t - det(X) = 0
+// where S(X) = (tr(X)² - tr(X²)) / 2
+
+pub fn j3o_quadratic_trace(x: J3O) -> f64 with Mut, Panic, Div {
+    let tr = j3o_trace(x)
+    let x2 = j3o_jordan_product(x, x)
+    let tr2 = j3o_trace(x2)
+    (tr * tr - tr2) / 2.0
+}
+
+// Power associativity: X^n is well-defined (Jordan algebras are power-associative)
+pub fn j3o_square(x: J3O) -> J3O with Mut, Panic, Div {
+    j3o_jordan_product(x, x)
+}
+
+pub fn j3o_cube(x: J3O) -> J3O with Mut, Panic, Div {
+    j3o_jordan_product(x, j3o_jordan_product(x, x))
+}
+
+// Cayley-Hamilton: X³ - tr(X)·X² + S(X)·X - det(X)·I = 0
+// This is a THEOREM for J₃(O). We can verify it computationally.
+pub fn j3o_cayley_hamilton_residual(x: J3O) -> f64 with Mut, Panic, Div {
+    let tr = j3o_trace(x)
+    let s = j3o_quadratic_trace(x)
+    let det = j3o_determinant(x)
+    let id = j3o_identity()
+
+    // X³ - tr(X)·X² + S(X)·X - det(X)·I
+    let x2 = j3o_square(x)
+    let x3 = j3o_cube(x)
+    let residual = j3o_add(
+        j3o_add(
+            j3o_sub(x3, j3o_scale(tr, x2)),
+            j3o_scale(s, x)
+        ),
+        j3o_scale(0.0 - det, id)
+    )
+
+    // Return norm of residual (should be ~0 for exact Cayley-Hamilton)
+    j3o_norm_sq(residual)
+}

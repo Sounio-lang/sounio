@@ -1,0 +1,361 @@
+//@ run-pass
+// Exceptional Jordan Algebra J₃(O) — the Albert algebra
+//
+// Demonstrates:
+// 1. Construction of 3×3 Hermitian octonionic matrices
+// 2. Jordan product X ∘ Y = (XY + YX) / 2
+// 3. Trace, determinant (Freudenthal cubic form)
+// 4. Cayley-Hamilton theorem verification
+// 5. Connection to F₄ (automorphism group)
+
+pub struct J3O { c: [f64; 27] }
+
+// --- Octonion helpers (self-contained) ---
+
+fn oct_sigma(a: i32, b: i32) -> i32 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    let half = 4
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & 3
+    let b_lo = b & 3
+    if a_hi == 0 && b_hi == 0 {
+        if a_lo == 0 || b_lo == 0 { return 1 }
+        let half2 = 2
+        let a2 = if a_lo >= half2 { 1 } else { 0 }
+        let b2 = if b_lo >= half2 { 1 } else { 0 }
+        let al2 = a_lo & 1
+        let bl2 = b_lo & 1
+        if a2 == 0 && b2 == 0 { return -1 }
+        if a2 == 0 && b2 == 1 { return if bl2 == 0 { 1 } else { -1 } }
+        if a2 == 1 && b2 == 0 { return if al2 == 0 { 1 } else { -1 } }
+        return if bl2 == 0 { -1 } else { 1 }
+    }
+    if a_hi == 0 && b_hi == 1 { return oct_sigma(b_lo, a_lo) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return oct_sigma(a_lo, b_lo) }
+        return 0 - oct_sigma(a_lo, b_lo)
+    }
+    if b_lo == 0 { return 0 - oct_sigma(b_lo, a_lo) }
+    return oct_sigma(b_lo, a_lo)
+}
+
+fn oct_mul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var r: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i: i32 = 0
+    while i < 8 {
+        if a[i] != 0.0 {
+            var j: i32 = 0
+            while j < 8 {
+                if b[j] != 0.0 {
+                    let idx = i ^ j
+                    let s = oct_sigma(i, j)
+                    let sf = if s > 0 { 1.0 } else { -1.0 }
+                    r[idx] = r[idx] + sf * a[i] * b[j]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    r
+}
+
+fn oct_conj(a: [f64; 8]) -> [f64; 8] with Mut {
+    var r: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    r[0] = a[0]
+    var i: i32 = 1
+    while i < 8 { r[i] = 0.0 - a[i]; i = i + 1 }
+    r
+}
+
+fn oct_add(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut {
+    var r: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i: i32 = 0
+    while i < 8 { r[i] = a[i] + b[i]; i = i + 1 }
+    r
+}
+
+fn oct_scale(s: f64, a: [f64; 8]) -> [f64; 8] with Mut {
+    var r: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i: i32 = 0
+    while i < 8 { r[i] = s * a[i]; i = i + 1 }
+    r
+}
+
+fn oct_norm_sq(a: [f64; 8]) -> f64 with Mut {
+    var s: f64 = 0.0
+    var i: i32 = 0
+    while i < 8 { s = s + a[i] * a[i]; i = i + 1 }
+    s
+}
+
+fn oct_zero() -> [f64; 8] { [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] }
+
+fn oct_basis(idx: i32) -> [f64; 8] with Mut {
+    var r = oct_zero()
+    r[idx] = 1.0
+    r
+}
+
+// --- J₃(O) core ---
+
+fn j3o_zero() -> J3O with Mut {
+    J3O { c: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0] }
+}
+
+fn j3o_identity() -> J3O with Mut {
+    var x = j3o_zero()
+    x.c[0] = 1.0
+    x.c[1] = 1.0
+    x.c[2] = 1.0
+    x
+}
+
+fn j3o_new(alpha: f64, beta: f64, gamma: f64,
+           a: [f64; 8], b: [f64; 8], c: [f64; 8]) -> J3O with Mut {
+    var x = j3o_zero()
+    x.c[0] = alpha
+    x.c[1] = beta
+    x.c[2] = gamma
+    var i: i32 = 0
+    while i < 8 {
+        x.c[3 + i] = a[i]
+        x.c[11 + i] = b[i]
+        x.c[19 + i] = c[i]
+        i = i + 1
+    }
+    x
+}
+
+fn j3o_a(x: J3O) -> [f64; 8] with Mut {
+    var r = oct_zero()
+    var i: i32 = 0
+    while i < 8 { r[i] = x.c[3 + i]; i = i + 1 }
+    r
+}
+
+fn j3o_b(x: J3O) -> [f64; 8] with Mut {
+    var r = oct_zero()
+    var i: i32 = 0
+    while i < 8 { r[i] = x.c[11 + i]; i = i + 1 }
+    r
+}
+
+fn j3o_c(x: J3O) -> [f64; 8] with Mut {
+    var r = oct_zero()
+    var i: i32 = 0
+    while i < 8 { r[i] = x.c[19 + i]; i = i + 1 }
+    r
+}
+
+fn j3o_trace(x: J3O) -> f64 { x.c[0] + x.c[1] + x.c[2] }
+
+fn j3o_norm_sq(x: J3O) -> f64 with Mut {
+    var s: f64 = 0.0
+    var i: i32 = 0
+    while i < 27 { s = s + x.c[i] * x.c[i]; i = i + 1 }
+    s
+}
+
+fn j3o_add(x: J3O, y: J3O) -> J3O with Mut {
+    var r = j3o_zero()
+    var i: i32 = 0
+    while i < 27 { r.c[i] = x.c[i] + y.c[i]; i = i + 1 }
+    r
+}
+
+fn j3o_scale(s: f64, x: J3O) -> J3O with Mut {
+    var r = j3o_zero()
+    var i: i32 = 0
+    while i < 27 { r.c[i] = s * x.c[i]; i = i + 1 }
+    r
+}
+
+fn j3o_sub(x: J3O, y: J3O) -> J3O with Mut {
+    j3o_add(x, j3o_scale(-1.0, y))
+}
+
+fn j3o_determinant(x: J3O) -> f64 with Mut, Panic, Div {
+    let alpha = x.c[0]
+    let beta = x.c[1]
+    let gamma = x.c[2]
+    let a = j3o_a(x)
+    let b = j3o_b(x)
+    let c = j3o_c(x)
+    let cubic = alpha * beta * gamma
+    let quad = alpha * oct_norm_sq(c) + beta * oct_norm_sq(b) + gamma * oct_norm_sq(a)
+    let ac = oct_mul(a, c)
+    let acb = oct_mul(ac, oct_conj(b))
+    let triple = acb[0]
+    cubic - quad + 2.0 * triple
+}
+
+fn j3o_jordan_product(x: J3O, y: J3O) -> J3O with Mut, Panic, Div {
+    let xa = j3o_a(x)
+    let xb = j3o_b(x)
+    let xc = j3o_c(x)
+    let ya = j3o_a(y)
+    let yb = j3o_b(y)
+    let yc = j3o_c(y)
+    let x0 = x.c[0]
+    let x1 = x.c[1]
+    let x2 = x.c[2]
+    let y0 = y.c[0]
+    let y1 = y.c[1]
+    let y2 = y.c[2]
+
+    let xa_c = oct_conj(xa)
+    let xb_c = oct_conj(xb)
+    let xc_c = oct_conj(xc)
+    let ya_c = oct_conj(ya)
+    let yb_c = oct_conj(yb)
+    let yc_c = oct_conj(yc)
+
+    // XY diagonal
+    let d00 = x0 * y0 + oct_mul(xa, ya_c)[0] + oct_mul(xb_c, yb)[0]
+    let d11 = oct_mul(xa_c, ya)[0] + x1 * y1 + oct_mul(xc, yc_c)[0]
+    let d22 = oct_mul(xb, yb_c)[0] + oct_mul(xc_c, yc)[0] + x2 * y2
+
+    // XY off-diagonal
+    let z01 = oct_add(oct_add(oct_scale(x0, ya), oct_scale(y1, xa)), oct_mul(xb_c, yc))
+    let z02 = oct_add(oct_add(oct_scale(x0, yb_c), oct_mul(xa, yc)), oct_scale(y2, xb_c))
+    let z12 = oct_add(oct_add(oct_mul(xa_c, yb_c), oct_scale(x1, yc)), oct_scale(y2, xc))
+
+    // YX diagonal
+    let e00 = y0 * x0 + oct_mul(ya, xa_c)[0] + oct_mul(yb_c, xb)[0]
+    let e11 = oct_mul(ya_c, xa)[0] + y1 * x1 + oct_mul(yc, xc_c)[0]
+    let e22 = oct_mul(yb, xb_c)[0] + oct_mul(yc_c, xc)[0] + y2 * x2
+
+    // YX off-diagonal
+    let w01 = oct_add(oct_add(oct_scale(y0, xa), oct_scale(x1, ya)), oct_mul(yb_c, xc))
+    let w02 = oct_add(oct_add(oct_scale(y0, xb_c), oct_mul(ya, xc)), oct_scale(x2, yb_c))
+    let w12 = oct_add(oct_add(oct_mul(ya_c, xb_c), oct_scale(y1, xc)), oct_scale(x2, yc))
+
+    // (XY + YX) / 2
+    let a_out = oct_scale(0.5, oct_add(z01, w01))
+    let b_out = oct_conj(oct_scale(0.5, oct_add(z02, w02)))
+    let c_out = oct_scale(0.5, oct_add(z12, w12))
+
+    j3o_new((d00 + e00) / 2.0, (d11 + e11) / 2.0, (d22 + e22) / 2.0,
+            a_out, b_out, c_out)
+}
+
+fn j3o_square(x: J3O) -> J3O with Mut, Panic, Div { j3o_jordan_product(x, x) }
+fn j3o_cube(x: J3O) -> J3O with Mut, Panic, Div { j3o_jordan_product(x, j3o_square(x)) }
+
+fn j3o_quadratic_trace(x: J3O) -> f64 with Mut, Panic, Div {
+    let tr = j3o_trace(x)
+    let tr2 = j3o_trace(j3o_square(x))
+    (tr * tr - tr2) / 2.0
+}
+
+// ============================================================
+// Main — demonstrate the Albert algebra
+// ============================================================
+
+fn abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with Mut, Panic, Div, IO {
+    println("=== J₃(O): The Exceptional Jordan Algebra ===")
+    println("27 dimensions. Automorphism group F₄.")
+    println("The ONLY exceptional simple Jordan algebra.")
+    println("")
+
+    // Test 1: Identity
+    let id = j3o_identity()
+    println("Identity trace: ")
+    println(j3o_trace(id))
+    println("Identity det: ")
+    println(j3o_determinant(id))
+    println("")
+
+    // Test 2: Diagonal element
+    let d = j3o_new(2.0, 3.0, 5.0, oct_zero(), oct_zero(), oct_zero())
+    println("Diagonal(2,3,5) trace: ")
+    println(j3o_trace(d))
+    println("Diagonal(2,3,5) det: ")
+    println(j3o_determinant(d))
+    println("  (expected: 2*3*5 = 30)")
+    println("")
+
+    // Test 3: Jordan product with identity
+    let did = j3o_jordan_product(d, id)
+    println("D ∘ I trace: ")
+    println(j3o_trace(did))
+    println("  (should equal trace(D) = 10)")
+    println("")
+
+    // Test 4: Element with octonionic off-diagonal
+    let e1 = oct_basis(1)
+    let e2 = oct_basis(2)
+    let e4 = oct_basis(4)
+    let x = j3o_new(1.0, 2.0, 3.0, e1, e2, e4)
+    println("X = diag(1,2,3) + e1·E₀₁ + e2·E₀₂ + e4·E₁₂")
+    println("  trace(X) = ")
+    println(j3o_trace(x))
+    println("  det(X) = ")
+    println(j3o_determinant(x))
+    println("")
+
+    // Test 5: CAYLEY-HAMILTON THEOREM
+    // X³ - tr(X)·X² + S(X)·X - det(X)·I = 0
+    println("=== Cayley-Hamilton Verification ===")
+    let tr = j3o_trace(x)
+    let s = j3o_quadratic_trace(x)
+    let det = j3o_determinant(x)
+
+    let x2 = j3o_square(x)
+    let x3 = j3o_cube(x)
+
+    let residual = j3o_add(
+        j3o_add(
+            j3o_sub(x3, j3o_scale(tr, x2)),
+            j3o_scale(s, x)
+        ),
+        j3o_scale(0.0 - det, id)
+    )
+
+    let res_norm = j3o_norm_sq(residual)
+    println("||X³ - tr(X)·X² + S(X)·X - det(X)·I||² = ")
+    println(res_norm)
+    if abs(res_norm) < 0.0001 {
+        println("CAYLEY-HAMILTON VERIFIED!")
+    } else {
+        println("CAYLEY-HAMILTON FAILED")
+    }
+    println("")
+
+    // Test 6: Commutativity of Jordan product
+    let y = j3o_new(3.0, 1.0, 2.0, e2, e4, e1)
+    let xy = j3o_jordan_product(x, y)
+    let yx = j3o_jordan_product(y, x)
+    let diff = j3o_sub(xy, yx)
+    let comm_norm = j3o_norm_sq(diff)
+    println("=== Commutativity Check ===")
+    println("||X∘Y - Y∘X||² = ")
+    println(comm_norm)
+    if abs(comm_norm) < 0.0001 {
+        println("JORDAN PRODUCT IS COMMUTATIVE!")
+    }
+    println("")
+
+    // Test 7: NON-associativity of Jordan product
+    let z = j3o_new(2.0, 2.0, 1.0, e4, e1, e2)
+    let xy_z = j3o_jordan_product(j3o_jordan_product(x, y), z)
+    let x_yz = j3o_jordan_product(x, j3o_jordan_product(y, z))
+    let assoc = j3o_sub(xy_z, x_yz)
+    let assoc_norm = j3o_norm_sq(assoc)
+    println("=== Non-Associativity Check ===")
+    println("||(X∘Y)∘Z - X∘(Y∘Z)||² = ")
+    println(assoc_norm)
+    if abs(assoc_norm) > 0.0001 {
+        println("JORDAN PRODUCT IS NON-ASSOCIATIVE!")
+        println("(This is what makes J₃(O) EXCEPTIONAL.)")
+    }
+
+    0
+}
