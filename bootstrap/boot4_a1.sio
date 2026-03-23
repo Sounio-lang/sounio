@@ -1,0 +1,4624 @@
+// boot4.sio — Extended single-file Sounio→x86-64 ELF compiler
+// Extends micro_bootstrap with: structs, match, pointer deref, use-skip, fat arrow, None/Some
+
+fn load_source(path: string) -> i64 with IO, Mut, Panic, Div {
+    let data = read_file(path)
+    let sz = file_size(path)
+    var i: i64 = 0
+    while i < sz && i < 2097152 {
+        SRC[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    SRC_LEN = sz
+    sz
+}
+
+fn source_byte(idx: i64) -> i64 { SRC[idx as usize] as i64 }
+
+// ============================================================================
+// Global state
+// ============================================================================
+
+var SRC: [i8; 2097152] = [0; 2097152]
+var SRC_LEN: i64 = 0
+var SRC_BUF: i64 = 0
+
+var TK_KIND: [i64; 524288] = [0; 524288]
+var TK_START: [i64; 524288] = [0; 524288]
+var TK_END: [i64; 524288] = [0; 524288]
+var TK_IVAL: [i64; 524288] = [0; 524288]
+var TK_COUNT: i64 = 0
+
+var POOL: [i8; 524288] = [0; 524288]
+var POOL_POS: i64 = 0
+
+var ND_KIND: [i64; 262144] = [0; 262144]
+var ND_IVAL: [i64; 262144] = [0; 262144]
+var ND_LEFT: [i64; 262144] = [-1; 262144]
+var ND_RIGHT: [i64; 262144] = [-1; 262144]
+var ND_EXTRA: [i64; 262144] = [-1; 262144]
+var ND_EXTRA2: [i64; 262144] = [-1; 262144]
+var ND_STR_OFF: [i64; 262144] = [0; 262144]
+var ND_STR_LEN: [i64; 262144] = [0; 262144]
+var ND_COUNT: i64 = 0
+
+var FN_NAME_OFF: [i64; 2048] = [0; 2048]
+var FN_NAME_LEN: [i64; 2048] = [0; 2048]
+var FN_PARAM_COUNT: [i64; 2048] = [0; 2048]
+var FN_BODY_NODE: [i64; 2048] = [-1; 2048]
+var FN_COUNT: i64 = 0
+
+var FN_PARAM_NAME_OFF: [i64; 16384] = [0; 16384]
+var FN_PARAM_NAME_LEN: [i64; 16384] = [0; 16384]
+var FN_PARAM_BASE: [i64; 2048] = [0; 2048]
+
+var LOCAL_NAME_OFF: [i64; 8192] = [0; 8192]
+var LOCAL_NAME_LEN: [i64; 8192] = [0; 8192]
+var LOCAL_SLOT: [i64; 8192] = [0; 8192]
+var LOCAL_STRUCT_IDX: [i64; 8192] = [-1; 8192]
+var LOCAL_COUNT: i64 = 0
+var NEXT_SLOT: i64 = 0
+var LAST_LOCAL_SI: i64 = -1
+
+// Global scratch pool for match fixup positions (avoids local array stack direction bug)
+// 8 nesting levels x 64 arms = 512 entries
+var MFPOOL: [i64; 512] = [0; 512]
+var MFDEPTH: i64 = 0
+
+var CODE: [i8; 4194304] = [0; 4194304]
+var CODE_LEN: i64 = 0
+var PRINT_INT_OFF: i64 = 0
+
+var FN_CODE_OFF: [i64; 2048] = [0; 2048]
+var FN_IMPL_SI: [i64; 2048] = [-1; 2048]
+var FN_RET_SI: [i64; 2048] = [-1; 2048]
+var FN_RET_BOX_INNER_SI: [i64; 2048] = [-1; 2048]  // for fns returning Option<Box<T>>: T's index
+var CURRENT_FN_RET_SI: i64 = -1
+var CURRENT_IMPL_SI: i64 = -1
+
+var FIX_OFF: [i64; 8192] = [0; 8192]
+var FIX_TARGET: [i64; 8192] = [0; 8192]
+var FIX_COUNT: i64 = 0
+
+// Sprint 229: LEA fixups for function references (fn as first-class value)
+var FN_LEA_FIX_OFF: [i64; 256] = [0; 256]
+var FN_LEA_FIX_TARGET: [i64; 256] = [0; 256]
+var FN_LEA_FIX_COUNT: i64 = 0
+
+var POS: i64 = 0
+var LOOP_TOP: i64 = 0
+var BREAK_FIXUP_OFF: [i64; 64] = [0; 64]
+var BREAK_FIXUP_COUNT: i64 = 0
+
+var MB_GL_NS: [i64; 1024] = [0; 1024]
+var MB_GL_NE: [i64; 1024] = [0; 1024]
+var MB_GL_OFF: [i64; 1024] = [0; 1024]
+var MB_GL_SZ: [i64; 1024] = [0; 1024]
+var MB_GL_ELEM_SI: [i64; 1024] = [-1; 1024]  // struct type index for struct-array elements
+var MB_GL_COUNT: i64 = 0
+var MB_BSS_TOTAL: i64 = 0
+var OVERSIZED_BSS_OFF: i64 = 0   // cumulative BSS bytes claimed for oversized struct locals
+var MB_SRC_BUF_GADDR: i64 = 0
+var MB_SRC_LEN_GADDR: i64 = 0
+
+var ST_NAME_OFF: [i64; 1024] = [0; 1024]
+var ST_NAME_LEN: [i64; 1024] = [0; 1024]
+var ST_FIELD_COUNT: [i64; 1024] = [0; 1024]
+var ST_FIELD_FIRST: [i64; 1024] = [0; 1024]
+var ST_COUNT: i64 = 0
+
+var FLD_NAME_OFF: [i64; 8192] = [0; 8192]
+var FLD_NAME_LEN: [i64; 8192] = [0; 8192]
+var FLD_TYPE_SI: [i64; 8192] = [-1; 8192]       // struct type index for each field (-1 if scalar)
+var FLD_SLOT_COUNT: [i64; 8192] = [0; 8192]     // number of 8-byte slots per field (set during parsing)
+var FLD_TYPE_NAME_OFF: [i64; 8192] = [0; 8192]  // pool offset of field type name (for re-resolution)
+var FLD_TYPE_NAME_LEN: [i64; 8192] = [0; 8192]  // length of field type name
+var FLD_BOX_INNER_SI: [i64; 8192] = [-1; 8192]  // for Option<Box<T>> fields: struct index of T
+var FLD_COUNT: i64 = 0
+
+// Enum registry: up to 256 enums, 2048 total variants
+var EN_NAME_OFF: [i64; 256] = [0; 256]
+var EN_NAME_LEN: [i64; 256] = [0; 256]
+var EN_FIRST_VARIANT: [i64; 256] = [0; 256]
+var EN_VARIANT_COUNT: [i64; 256] = [0; 256]
+var EN_COUNT: i64 = 0
+
+var EV_NAME_OFF: [i64; 2048] = [0; 2048]
+var EV_NAME_LEN: [i64; 2048] = [0; 2048]
+var EV_VALUE: [i64; 2048] = [0; 2048]
+var EV_COUNT: i64 = 0
+
+var FN_PARAM_TYPE_SI: [i64; 16384] = [-1; 16384] // struct type index for each fn param
+var LOCAL_IS_SPTR: [i64; 8192] = [0; 8192]       // 1 if local is pointer-to-struct
+var LOCAL_BOX_INNER_SI: [i64; 8192] = [-1; 8192] // for &Option<Box<T>>: struct index of T
+var LAST_LOCAL_IS_SPTR: i64 = 0
+var LAST_LOCAL_BOX_INNER: i64 = -1
+var LAST_FOUND_SLOT: i64 = -1
+var LAST_FIELD_TYPE_SI: i64 = -1
+var LAST_FIELD_SLOT_COUNT: i64 = 1  // slot count of last found field (1=scalar, >1=sub-struct)
+var LAST_FIELD_LAYOUT: i64 = 0  // 0=stack(negative offsets), 1=BSS/heap(positive offsets)
+
+// Enum variant tables for resolving EnumName::Variant → discriminant integer
+var EN_NAME_OFF: [i64; 256] = [0; 256]     // enum name pool offset
+var EN_NAME_LEN: [i64; 256] = [0; 256]     // enum name pool length
+var EN_VAR_BASE: [i64; 256] = [0; 256]     // first variant index in EV_ arrays
+var EN_VAR_COUNT: [i64; 256] = [0; 256]    // number of variants
+var EN_COUNT: i64 = 0
+
+var EV_NAME_OFF: [i64; 4096] = [0; 4096]   // variant name pool offset
+var EV_NAME_LEN: [i64; 4096] = [0; 4096]   // variant name pool length
+var EV_DISC: [i64; 4096] = [0; 4096]       // discriminant value
+var EV_COUNT: i64 = 0
+
+// Qualified name lookup: "EnumName::Variant" → discriminant
+// Returns -1 if not found, else discriminant value (which may be 0!)
+// Uses a separate found flag in EV_LOOKUP_FOUND.
+var EV_LOOKUP_FOUND: i64 = 0
+
+var ELF: [i8; 4194304] = [0; 4194304]
+var ELF_LEN: i64 = 0
+
+// Import resolution globals — REMOVED for boot3 compatibility (A1 bootstrap chain)
+// Pre-concatenate source files manually instead of using use-imports.
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+fn TK_EOF() -> i64 { 0 }
+fn TK_IDENT() -> i64 { 1 }
+fn TK_INT() -> i64 { 2 }
+fn TK_STR() -> i64 { 3 }
+fn TK_PLUS() -> i64 { 10 }
+fn TK_MINUS() -> i64 { 11 }
+fn TK_STAR() -> i64 { 12 }
+fn TK_SLASH() -> i64 { 13 }
+fn TK_PERCENT() -> i64 { 14 }
+fn TK_AMP() -> i64 { 15 }
+fn TK_PIPE() -> i64 { 16 }
+fn TK_CARET() -> i64 { 17 }
+fn TK_SHL() -> i64 { 18 }
+fn TK_SHR() -> i64 { 19 }
+fn TK_AMPAMP() -> i64 { 20 }
+fn TK_PIPEPIPE() -> i64 { 21 }
+fn TK_BANG() -> i64 { 22 }
+fn TK_EQ() -> i64 { 23 }
+fn TK_NE() -> i64 { 24 }
+fn TK_LT() -> i64 { 25 }
+fn TK_LE() -> i64 { 26 }
+fn TK_GT() -> i64 { 27 }
+fn TK_GE() -> i64 { 28 }
+fn TK_ASSIGN() -> i64 { 30 }
+fn TK_LPAREN() -> i64 { 31 }
+fn TK_RPAREN() -> i64 { 32 }
+fn TK_LBRACE() -> i64 { 33 }
+fn TK_RBRACE() -> i64 { 34 }
+fn TK_LBRACKET() -> i64 { 35 }
+fn TK_RBRACKET() -> i64 { 36 }
+fn TK_COMMA() -> i64 { 37 }
+fn TK_COLON() -> i64 { 38 }
+fn TK_SEMI() -> i64 { 39 }
+fn TK_DOT() -> i64 { 40 }
+fn TK_ARROW() -> i64 { 42 }
+fn TK_FN() -> i64 { 50 }
+fn TK_LET() -> i64 { 51 }
+fn TK_VAR() -> i64 { 52 }
+fn TK_IF() -> i64 { 53 }
+fn TK_ELSE() -> i64 { 54 }
+fn TK_WHILE() -> i64 { 55 }
+fn TK_RETURN() -> i64 { 56 }
+fn TK_TRUE() -> i64 { 61 }
+fn TK_FALSE() -> i64 { 62 }
+fn TK_BREAK() -> i64 { 63 }
+fn TK_CONTINUE() -> i64 { 64 }
+fn TK_AS() -> i64 { 65 }
+fn TK_WITH() -> i64 { 66 }
+fn TK_SOME() -> i64 { 67 }
+fn TK_NONE() -> i64 { 68 }
+fn TK_STRUCT() -> i64 { 58 }
+fn TK_MATCH() -> i64 { 57 }
+fn TK_AMPBANG() -> i64 { 70 }
+fn TK_FAT_ARROW() -> i64 { 79 }
+
+fn NK_INT() -> i64 { 1 }
+fn NK_IDENT() -> i64 { 2 }
+fn NK_STR() -> i64 { 3 }
+fn NK_BOOL() -> i64 { 4 }
+fn NK_BINOP() -> i64 { 10 }
+fn NK_UNARY() -> i64 { 11 }
+fn NK_CALL() -> i64 { 12 }
+fn NK_INDEX() -> i64 { 13 }
+fn NK_FIELD() -> i64 { 14 }
+fn NK_CAST() -> i64 { 16 }
+fn NK_IF() -> i64 { 30 }
+fn NK_WHILE() -> i64 { 31 }
+fn NK_BLOCK() -> i64 { 33 }
+fn NK_RETURN() -> i64 { 34 }
+fn NK_BREAK() -> i64 { 35 }
+fn NK_CONTINUE_NODE() -> i64 { 36 }
+fn NK_LET() -> i64 { 40 }
+fn NK_VAR() -> i64 { 41 }
+fn NK_ASSIGN() -> i64 { 42 }
+fn NK_EXPR_STMT() -> i64 { 43 }
+fn NK_MATCH() -> i64 { 44 }
+fn NK_ARM() -> i64 { 45 }
+fn NK_DEREF() -> i64 { 46 }
+fn NK_STRUCT_LIT() -> i64 { 47 }
+fn NK_STRUCT_FI() -> i64 { 48 }
+fn NK_ADDR() -> i64 { 49 }
+fn NK_ARRAY_LIT() -> i64 { 50 }
+fn NK_METHOD_CALL() -> i64 { 51 }
+
+fn ARM_INT() -> i64 { 0 }
+fn ARM_WILD() -> i64 { 1 }
+fn ARM_NONE() -> i64 { 2 }
+fn ARM_SOME() -> i64 { 3 }
+fn ARM_ENUM() -> i64 { 4 }
+
+// ============================================================================
+// Lexer helpers
+// ============================================================================
+
+fn src_byte(pos: i64) -> i64 with Panic {
+    if pos < 0 || pos >= SRC_LEN { return 0 }
+    source_byte(pos)
+}
+
+fn is_ws(ch: i64) -> bool {
+    ch == 32 || ch == 9 || ch == 10 || ch == 13
+}
+
+fn is_digit(ch: i64) -> bool {
+    ch >= 48 && ch <= 57
+}
+
+fn is_alpha(ch: i64) -> bool {
+    (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch == 95
+}
+
+fn is_alnum(ch: i64) -> bool {
+    is_alpha(ch) || is_digit(ch)
+}
+
+fn pool_add(b: i64) with Mut, Panic {
+    POOL[POOL_POS as usize] = b as i8
+    POOL_POS = POOL_POS + 1
+}
+
+fn pool_concat_colon(a_off: i64, a_len: i64, b_off: i64, b_len: i64) -> i64 with Mut, Panic {
+    let start = POOL_POS
+    var i: i64 = 0
+    while i < a_len { pool_add(POOL[(a_off + i) as usize] as i64); i = i + 1 }
+    pool_add(58); pool_add(58)
+    i = 0
+    while i < b_len { pool_add(POOL[(b_off + i) as usize] as i64); i = i + 1 }
+    start
+}
+
+fn pool_match(off: i64, len: i64, target: string) -> bool with Mut, Panic, Div {
+    if len != str_len(target) { return false }
+    var i: i64 = 0
+    while i < len {
+        let a = POOL[(off + i) as usize] as i64
+        let b = str_char_at(target, i) as i64
+        if a != b { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn classify_keyword(off: i64, len: i64) -> i64 with Mut, Panic, Div {
+    if len == 2 {
+        if pool_match(off, len, "fn") { return 50 }
+        if pool_match(off, len, "if") { return 53 }
+        if pool_match(off, len, "as") { return 65 }
+    } else if len == 3 {
+        if pool_match(off, len, "let") { return 51 }
+        if pool_match(off, len, "var") { return 52 }
+        if pool_match(off, len, "for") { return 55 }
+    } else if len == 4 {
+        if pool_match(off, len, "else") { return 54 }
+        if pool_match(off, len, "true") { return 61 }
+        if pool_match(off, len, "with") { return 66 }
+        if pool_match(off, len, "None") { return 68 }
+        if pool_match(off, len, "Some") { return 67 }
+        if pool_match(off, len, "self") { return 1 }
+        if pool_match(off, len, "Self") { return 1 }
+        if pool_match(off, len, "type") { return 1 }
+        if pool_match(off, len, "impl") { return 60 }
+        if pool_match(off, len, "enum") { return 59 }
+        if pool_match(off, len, "loop") { return 55 }
+    } else if len == 5 {
+        if pool_match(off, len, "while") { return 55 }
+        if pool_match(off, len, "break") { return 63 }
+        if pool_match(off, len, "false") { return 62 }
+        if pool_match(off, len, "match") { return 57 }
+    } else if len == 6 {
+        if pool_match(off, len, "return") { return 56 }
+        if pool_match(off, len, "struct") { return 58 }
+        if pool_match(off, len, "module") { return 1 }
+        if pool_match(off, len, "linear") { return 1 }
+    } else if len == 8 {
+        if pool_match(off, len, "continue") { return 64 }
+    }
+    0
+}
+
+// ============================================================================
+// Lexer
+// ============================================================================
+
+fn add_token(kind: i64, start: i64, end: i64, ival: i64) with Mut, Panic {
+    let idx = TK_COUNT
+    TK_KIND[idx as usize] = kind
+    TK_START[idx as usize] = start
+    TK_END[idx as usize] = end
+    TK_IVAL[idx as usize] = ival
+    TK_COUNT = TK_COUNT + 1
+}
+
+fn lex() with Mut, Panic, Div {
+    var p: i64 = 0
+    while p < SRC_LEN {
+        let ch = src_byte(p)
+        if is_ws(ch) {
+            p = p + 1
+            continue
+        }
+        if ch == 47 && src_byte(p + 1) == 47 {
+            p = p + 2
+            while p < SRC_LEN && src_byte(p) != 10 {
+                p = p + 1
+            }
+            continue
+        }
+        if is_digit(ch) {
+            let start = p
+            var val: i64 = 0
+            if ch == 48 && p + 1 < SRC_LEN && src_byte(p + 1) == 120 {
+                p = p + 2
+                while p < SRC_LEN {
+                    let hc = src_byte(p)
+                    if hc >= 48 && hc <= 57 {
+                        val = val * 16 + (hc - 48)
+                        p = p + 1
+                    } else if hc >= 65 && hc <= 70 {
+                        val = val * 16 + (hc - 55)
+                        p = p + 1
+                    } else if hc >= 97 && hc <= 102 {
+                        val = val * 16 + (hc - 87)
+                        p = p + 1
+                    } else {
+                        break
+                    }
+                }
+            } else {
+                while p < SRC_LEN && is_digit(src_byte(p)) {
+                    val = val * 10 + (src_byte(p) - 48)
+                    p = p + 1
+                }
+                // Float literal: consume .digits[eE[+-]digits] — emit as TK_INT(0)
+                if p < SRC_LEN && src_byte(p) == 46 && p + 1 < SRC_LEN && is_digit(src_byte(p + 1)) {
+                    p = p + 1
+                    while p < SRC_LEN && is_digit(src_byte(p)) { p = p + 1 }
+                    if p < SRC_LEN && (src_byte(p) == 101 || src_byte(p) == 69) {
+                        p = p + 1
+                        if p < SRC_LEN && (src_byte(p) == 43 || src_byte(p) == 45) { p = p + 1 }
+                        while p < SRC_LEN && is_digit(src_byte(p)) { p = p + 1 }
+                    }
+                    val = 0
+                }
+            }
+            add_token(2, start, p, val)
+            continue
+        }
+        if is_alpha(ch) {
+            let start = p
+            let pool_start = POOL_POS
+            while p < SRC_LEN && is_alnum(src_byte(p)) {
+                pool_add(src_byte(p))
+                p = p + 1
+            }
+            let ilen = p - start
+            let kw = classify_keyword(pool_start, ilen)
+            if kw != 0 {
+                add_token(kw, start, p, pool_start)
+            } else {
+                add_token(1, start, p, pool_start)
+            }
+            continue
+        }
+        if ch == 34 {
+            p = p + 1
+            let start = p
+            let pool_start = POOL_POS
+            while p < SRC_LEN && src_byte(p) != 34 {
+                if src_byte(p) == 92 {
+                    p = p + 1
+                    let esc = src_byte(p)
+                    if esc == 110 { pool_add(10) }
+                    else if esc == 116 { pool_add(9) }
+                    else if esc == 92 { pool_add(92) }
+                    else if esc == 34 { pool_add(34) }
+                    else if esc == 48 { pool_add(0) }
+                    else { pool_add(esc) }
+                } else {
+                    pool_add(src_byte(p))
+                }
+                p = p + 1
+            }
+            let slen = POOL_POS - pool_start
+            p = p + 1
+            add_token(3, start, p, pool_start)
+            TK_END[(TK_COUNT - 1) as usize] = slen
+            continue
+        }
+        let ch2 = src_byte(p + 1)
+        if ch == 38 && ch2 == 38 { add_token(20, p, p + 2, 0); p = p + 2; continue }
+        if ch == 124 && ch2 == 124 { add_token(21, p, p + 2, 0); p = p + 2; continue }
+        if ch == 61 && ch2 == 61 { add_token(23, p, p + 2, 0); p = p + 2; continue }
+        if ch == 33 && ch2 == 61 { add_token(24, p, p + 2, 0); p = p + 2; continue }
+        if ch == 60 && ch2 == 61 { add_token(26, p, p + 2, 0); p = p + 2; continue }
+        if ch == 62 && ch2 == 61 { add_token(28, p, p + 2, 0); p = p + 2; continue }
+        if ch == 60 && ch2 == 60 { add_token(18, p, p + 2, 0); p = p + 2; continue }
+        if ch == 62 && ch2 == 62 { add_token(19, p, p + 2, 0); p = p + 2; continue }
+        if ch == 45 && ch2 == 62 { add_token(42, p, p + 2, 0); p = p + 2; continue }
+        if ch == 38 && ch2 == 33 { add_token(70, p, p + 2, 0); p = p + 2; continue }
+        if ch == 58 && ch2 == 58 { add_token(41, p, p + 2, 0); p = p + 2; continue }
+        if ch == 46 && ch2 == 46 { add_token(43, p, p + 2, 0); p = p + 2; continue }
+        // => fat arrow (must come before single =)
+        if ch == 61 && ch2 == 62 { add_token(79, p, p + 2, 0); p = p + 2; continue }
+        if ch == 43 { add_token(10, p, p + 1, 0); p = p + 1; continue }
+        if ch == 45 { add_token(11, p, p + 1, 0); p = p + 1; continue }
+        if ch == 42 { add_token(12, p, p + 1, 0); p = p + 1; continue }
+        if ch == 47 { add_token(13, p, p + 1, 0); p = p + 1; continue }
+        if ch == 37 { add_token(14, p, p + 1, 0); p = p + 1; continue }
+        if ch == 38 { add_token(15, p, p + 1, 0); p = p + 1; continue }
+        if ch == 124 { add_token(16, p, p + 1, 0); p = p + 1; continue }
+        if ch == 94 { add_token(17, p, p + 1, 0); p = p + 1; continue }
+        if ch == 33 { add_token(22, p, p + 1, 0); p = p + 1; continue }
+        if ch == 61 { add_token(30, p, p + 1, 0); p = p + 1; continue }
+        if ch == 40 { add_token(31, p, p + 1, 0); p = p + 1; continue }
+        if ch == 41 { add_token(32, p, p + 1, 0); p = p + 1; continue }
+        if ch == 123 { add_token(33, p, p + 1, 0); p = p + 1; continue }
+        if ch == 125 { add_token(34, p, p + 1, 0); p = p + 1; continue }
+        if ch == 91 { add_token(35, p, p + 1, 0); p = p + 1; continue }
+        if ch == 93 { add_token(36, p, p + 1, 0); p = p + 1; continue }
+        if ch == 44 { add_token(37, p, p + 1, 0); p = p + 1; continue }
+        if ch == 58 { add_token(38, p, p + 1, 0); p = p + 1; continue }
+        if ch == 59 { add_token(39, p, p + 1, 0); p = p + 1; continue }
+        if ch == 46 { add_token(40, p, p + 1, 0); p = p + 1; continue }
+        if ch == 60 { add_token(25, p, p + 1, 0); p = p + 1; continue }
+        if ch == 62 { add_token(27, p, p + 1, 0); p = p + 1; continue }
+        p = p + 1
+    }
+    add_token(0, SRC_LEN, SRC_LEN, 0)
+}
+
+// ============================================================================
+// Parser helpers
+// ============================================================================
+
+fn cur_kind() -> i64 with Panic {
+    TK_KIND[POS as usize]
+}
+
+fn cur_ival() -> i64 with Panic {
+    TK_IVAL[POS as usize]
+}
+
+fn cur_start() -> i64 with Panic {
+    TK_START[POS as usize]
+}
+
+fn cur_end() -> i64 with Panic {
+    TK_END[POS as usize]
+}
+
+fn advance() with Mut, Panic {
+    POS = POS + 1
+}
+
+fn expect(kind: i64) with Mut, Panic {
+    if cur_kind() != kind {
+        print("parse error: expected ")
+        print_int(kind)
+        print(" got ")
+        print_int(cur_kind())
+        print(" at ")
+        print_int(POS)
+        print("\n")
+    }
+    advance()
+}
+
+fn new_node(kind: i64, ival: i64) -> i64 with Mut, Panic {
+    let idx = ND_COUNT
+    if idx >= 262144 {
+        print("NODE OVERFLOW idx=")
+        print_int(idx)
+        print("\n")
+    }
+    ND_KIND[idx as usize] = kind
+    ND_IVAL[idx as usize] = ival
+    ND_LEFT[idx as usize] = -1
+    ND_RIGHT[idx as usize] = -1
+    ND_EXTRA[idx as usize] = -1
+    ND_EXTRA2[idx as usize] = -1
+    ND_STR_OFF[idx as usize] = 0
+    ND_STR_LEN[idx as usize] = 0
+    ND_COUNT = ND_COUNT + 1
+    idx
+}
+
+fn tok_pool_off() -> i64 with Panic {
+    TK_IVAL[POS as usize]
+}
+
+fn tok_ident_len() -> i64 with Panic {
+    TK_END[POS as usize] - TK_START[POS as usize]
+}
+
+// ============================================================================
+// Struct table helpers
+// ============================================================================
+
+fn find_struct_b4(name_off: i64, name_len: i64) -> i64 with Mut, Panic, Div {
+    var si: i64 = 0
+    while si < ST_COUNT {
+        if ST_NAME_LEN[si as usize] == name_len {
+            var ok: i64 = 1
+            var i: i64 = 0
+            while i < name_len {
+                if POOL[(ST_NAME_OFF[si as usize] + i) as usize] != POOL[(name_off + i) as usize] {
+                    ok = 0
+                }
+                i = i + 1
+            }
+            if ok == 1 { return si }
+        }
+        si = si + 1
+    }
+    -1
+}
+
+// ============================================================================
+// Enum table helpers
+// ============================================================================
+
+fn find_enum_b4(name_off: i64, name_len: i64) -> i64 with Mut, Panic, Div {
+    var ei: i64 = 0
+    while ei < EN_COUNT {
+        if EN_NAME_LEN[ei as usize] == name_len {
+            var ok: i64 = 1
+            var i: i64 = 0
+            while i < name_len {
+                if POOL[(EN_NAME_OFF[ei as usize] + i) as usize] != POOL[(name_off + i) as usize] {
+                    ok = 0
+                }
+                i = i + 1
+            }
+            if ok == 1 { return ei }
+        }
+        ei = ei + 1
+    }
+    -1
+}
+
+fn find_enum_variant(ei: i64, vname_off: i64, vname_len: i64) -> i64 with Mut, Panic, Div {
+    let base = EN_FIRST_VARIANT[ei as usize]
+    let vc = EN_VARIANT_COUNT[ei as usize]
+    var vi: i64 = 0
+    while vi < vc {
+        let evi = base + vi
+        if EV_NAME_LEN[evi as usize] == vname_len {
+            var ok: i64 = 1
+            var k: i64 = 0
+            while k < vname_len {
+                if POOL[(EV_NAME_OFF[evi as usize] + k) as usize] != POOL[(vname_off + k) as usize] {
+                    ok = 0
+                }
+                k = k + 1
+            }
+            if ok == 1 { return EV_VALUE[evi as usize] }
+        }
+        vi = vi + 1
+    }
+    -1
+}
+
+// Look up "EnumName::Variant" from a qualified pool string (contains "::" separator).
+// Returns the variant's integer discriminant, or -1 if not found.
+fn en_lookup_qualified(pool_off: i64, pool_len: i64) -> i64 with Mut, Panic, Div {
+    // Find "::" in the pool string
+    var sep: i64 = -1
+    var i: i64 = 0
+    while i < pool_len - 1 {
+        if POOL[(pool_off + i) as usize] == 58 && POOL[(pool_off + i + 1) as usize] == 58 {
+            sep = i
+            i = pool_len  // break
+        }
+        i = i + 1
+    }
+    if sep < 0 { return -1 }
+    let enum_off = pool_off
+    let enum_len = sep
+    let var_off = pool_off + sep + 2
+    let var_len = pool_len - sep - 2
+    let ei = find_enum_b4(enum_off, enum_len)
+    if ei < 0 { return -1 }
+    find_enum_variant(ei, var_off, var_len)
+}
+
+fn find_field_b4(si: i64, fname_off: i64, fname_len: i64) -> i64 with Mut, Panic, Div {
+    let fi_base = ST_FIELD_FIRST[si as usize]
+    let fc = ST_FIELD_COUNT[si as usize]
+    var j: i64 = 0
+    while j < fc {
+        let fj = fi_base + j
+        if FLD_NAME_LEN[fj as usize] == fname_len {
+            var ok: i64 = 1
+            var k: i64 = 0
+            while k < fname_len {
+                if POOL[(FLD_NAME_OFF[fj as usize] + k) as usize] != POOL[(fname_off + k) as usize] {
+                    ok = 0
+                }
+                k = k + 1
+            }
+            if ok == 1 { return j }
+        }
+        j = j + 1
+    }
+    -1
+}
+
+fn struct_total_slots(si: i64) -> i64 with Mut, Panic, Div {
+    let fc = ST_FIELD_COUNT[si as usize]
+    let fi_base = ST_FIELD_FIRST[si as usize]
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < fc {
+        total = total + FLD_SLOT_COUNT[(fi_base + i) as usize]
+        i = i + 1
+    }
+    total
+}
+
+fn find_field_slot_offset(si: i64, fname_off: i64, fname_len: i64) -> i64 with Mut, Panic, Div {
+    let fc = ST_FIELD_COUNT[si as usize]
+    let fi_base = ST_FIELD_FIRST[si as usize]
+    var slot_off: i64 = 0
+    var i: i64 = 0
+    while i < fc {
+        let fj = fi_base + i
+        if FLD_NAME_LEN[fj as usize] == fname_len {
+            var ok: i64 = 1
+            var k: i64 = 0
+            while k < fname_len {
+                if POOL[(FLD_NAME_OFF[fj as usize] + k) as usize] != POOL[(fname_off + k) as usize] { ok = 0 }
+                k = k + 1
+            }
+            if ok == 1 {
+                LAST_FIELD_TYPE_SI = FLD_TYPE_SI[fj as usize]
+                LAST_FIELD_SLOT_COUNT = FLD_SLOT_COUNT[fj as usize]
+                return slot_off
+            }
+        }
+        slot_off = slot_off + FLD_SLOT_COUNT[fj as usize]
+        i = i + 1
+    }
+    LAST_FIELD_TYPE_SI = -1
+    LAST_FIELD_SLOT_COUNT = 1
+    -1
+}
+
+// ============================================================================
+// Parser: type skipping
+// ============================================================================
+
+fn skip_type_expr() with Mut, Panic, Div {
+    if cur_kind() == 15 {
+        advance()
+        skip_type_expr()
+    } else if cur_kind() == 70 {
+        advance()
+        skip_type_expr()
+    } else if cur_kind() == 35 {
+        advance()
+        skip_type_expr()
+        if cur_kind() == 39 { advance() }
+        if cur_kind() == 2 { advance() }
+        if cur_kind() == 36 { advance() }
+    } else if cur_kind() == 31 {
+        advance()
+        while cur_kind() != 32 && cur_kind() != 0 {
+            skip_type_expr()
+            if cur_kind() == 37 { advance() }
+        }
+        if cur_kind() == 32 { advance() }
+    } else if cur_kind() == 50 {
+        // Sprint 229: fn(T1, T2, ...) -> U  function type
+        advance()
+        if cur_kind() == 31 {
+            advance()
+            while cur_kind() != 32 && cur_kind() != 0 {
+                skip_type_expr()
+                if cur_kind() == 37 { advance() }
+            }
+            if cur_kind() == 32 { advance() }
+        }
+        // -> ReturnType
+        if cur_kind() == 42 { advance(); skip_type_expr() }
+    } else if cur_kind() == 1 || cur_kind() >= 50 {
+        advance()
+        // Consume :: path extensions (e.g. TokenKind::Eof, std::vec::Vec)
+        while cur_kind() == 41 {
+            advance()
+            if cur_kind() == 1 { advance() }
+        }
+        if cur_kind() == 25 {
+            advance()
+            var depth: i64 = 1
+            while depth > 0 && cur_kind() != 0 {
+                if cur_kind() == 25 { depth = depth + 1 }
+                else if cur_kind() == 27 { depth = depth - 1 }
+                else if cur_kind() == 19 { depth = depth - 2 }  // '>>' lexed as SHR = two closing >
+                if depth > 0 { advance() }
+            }
+            if cur_kind() == 27 { advance() }
+            else if cur_kind() == 19 { advance() }  // consume '>>' as closing outer >
+        }
+    } else if cur_kind() == 2 {
+        advance()
+    }
+}
+
+fn skip_type_annotation() with Mut, Panic, Div {
+    if cur_kind() == 38 {
+        advance()
+        skip_type_expr()
+    }
+}
+
+// ============================================================================
+// Parser: expressions
+// ============================================================================
+
+fn binop_prec(kind: i64) -> i64 {
+    if kind == 21 { 1 }
+    else if kind == 20 { 2 }
+    else if kind == 16 { 3 }
+    else if kind == 17 { 4 }
+    else if kind == 15 { 5 }
+    else if kind == 23 || kind == 24 { 6 }
+    else if kind == 25 || kind == 26 || kind == 27 || kind == 28 { 7 }
+    else if kind == 18 || kind == 19 { 8 }
+    else if kind == 10 || kind == 11 { 9 }
+    else if kind == 12 || kind == 13 || kind == 14 { 10 }
+    else { 0 }
+}
+
+fn tok_to_binop(kind: i64) -> i64 {
+    if kind == 10 { 0 }
+    else if kind == 11 { 1 }
+    else if kind == 12 { 2 }
+    else if kind == 13 { 3 }
+    else if kind == 14 { 4 }
+    else if kind == 23 { 5 }
+    else if kind == 24 { 6 }
+    else if kind == 25 { 7 }
+    else if kind == 26 { 8 }
+    else if kind == 27 { 9 }
+    else if kind == 28 { 10 }
+    else if kind == 20 { 11 }
+    else if kind == 21 { 12 }
+    else if kind == 15 { 13 }
+    else if kind == 16 { 14 }
+    else if kind == 17 { 15 }
+    else if kind == 18 { 16 }
+    else if kind == 19 { 17 }
+    else { -1 }
+}
+
+fn parse_block() -> i64 with Mut, Panic, Div {
+    expect(33)
+    let block_node = new_node(33, 0)
+    var first: i64 = -1
+    var last: i64 = -1
+    while cur_kind() != 34 && cur_kind() != 0 {
+        let stmt = parse_stmt()
+        if first == -1 {
+            first = stmt
+        } else {
+            ND_RIGHT[last as usize] = stmt
+        }
+        last = stmt
+        if cur_kind() == 39 { advance() }
+    }
+    expect(34)
+    ND_LEFT[block_node as usize] = first
+    block_node
+}
+
+fn parse_args() -> i64 with Mut, Panic, Div {
+    var first: i64 = -1
+    var last: i64 = -1
+    while cur_kind() != 32 && cur_kind() != 0 {
+        let arg = parse_expr(0)
+        if first == -1 {
+            first = arg
+        } else {
+            ND_EXTRA[last as usize] = arg
+        }
+        last = arg
+        if cur_kind() == 37 { advance() }
+    }
+    first
+}
+
+fn parse_match_expr() -> i64 with Mut, Panic, Div {
+    advance()
+    let scr = parse_expr(0)
+    let match_node = new_node(44, 0)
+    ND_LEFT[match_node as usize] = scr
+    if cur_kind() == 33 { advance() }
+    var first_arm: i64 = -1
+    var last_arm: i64 = -1
+    while cur_kind() != 34 && cur_kind() != 0 {
+        let arm = new_node(45, 0)
+        let pk = cur_kind()
+        if pk == 2 {
+            ND_IVAL[arm as usize] = 0
+            ND_STR_OFF[arm as usize] = cur_ival()
+            advance()
+        } else if pk == 68 {
+            ND_IVAL[arm as usize] = 2
+            advance()
+        } else if pk == 67 {
+            ND_IVAL[arm as usize] = 3
+            advance()
+            if cur_kind() == 31 {
+                advance()
+                ND_STR_OFF[arm as usize] = tok_pool_off()
+                ND_STR_LEN[arm as usize] = tok_ident_len()
+                advance()
+                if cur_kind() == 32 { advance() }
+            }
+        } else if pk == 1 {
+            let poff = tok_pool_off()
+            let plen = tok_ident_len()
+            if pool_match(poff, plen, "_") {
+                ND_IVAL[arm as usize] = 1
+                advance()
+            } else {
+                // Check for Enum::Variant pattern
+                advance()
+                if cur_kind() == 41 {
+                    // Ident followed by :: — parse as EnumName::Variant
+                    let enum_ei = find_enum_b4(poff, plen)
+                    advance()  // skip ::
+                    if cur_kind() == 1 {
+                        let voff = tok_pool_off()
+                        let vlen = tok_ident_len()
+                        advance()  // skip variant name
+                        if enum_ei >= 0 {
+                            let disc = find_enum_variant(enum_ei, voff, vlen)
+                            ND_IVAL[arm as usize] = 4
+                            ND_STR_OFF[arm as usize] = disc
+                        } else {
+                            ND_IVAL[arm as usize] = 1
+                        }
+                    } else {
+                        ND_IVAL[arm as usize] = 1
+                    }
+                } else {
+                    // Plain identifier — treat as wildcard
+                    ND_IVAL[arm as usize] = 1
+                }
+            }
+        } else {
+            ND_IVAL[arm as usize] = 1
+            advance()
+        }
+        if cur_kind() == 79 { advance() }
+        if cur_kind() == 33 {
+            let b2 = parse_block()
+            ND_EXTRA[arm as usize] = b2
+        } else {
+            let e2 = parse_expr(0)
+            ND_EXTRA[arm as usize] = e2
+        }
+        if cur_kind() == 37 { advance() }
+        if first_arm == -1 {
+            first_arm = arm
+        } else {
+            ND_RIGHT[last_arm as usize] = arm
+        }
+        last_arm = arm
+    }
+    if cur_kind() == 34 { advance() }
+    ND_EXTRA[match_node as usize] = first_arm
+    match_node
+}
+
+fn parse_struct_literal(ident_node: i64, si: i64) -> i64 with Mut, Panic, Div {
+    if cur_kind() == 33 { advance() }
+    let slit = new_node(47, si)
+    var first_fi: i64 = -1
+    var last_fi: i64 = -1
+    while cur_kind() != 34 && cur_kind() != 0 {
+        if cur_kind() == 1 {
+            let fn_off = tok_pool_off()
+            let fn_len = tok_ident_len()
+            advance()
+            if cur_kind() == 38 { advance() }
+            let fval = parse_expr(0)
+            let fi_idx = find_field_slot_offset(si, fn_off, fn_len)
+            let fnode3 = new_node(48, fi_idx)
+            ND_LEFT[fnode3 as usize] = fval
+            if first_fi == -1 { first_fi = fnode3 } else { ND_RIGHT[last_fi as usize] = fnode3 }
+            last_fi = fnode3
+            if cur_kind() == 37 { advance() }
+        } else {
+            advance()
+        }
+    }
+    if cur_kind() == 34 { advance() }
+    ND_EXTRA[slit as usize] = first_fi
+    slit
+}
+
+fn parse_expr(min_prec: i64) -> i64 with Mut, Panic, Div {
+    var left: i64 = -1
+    let k = cur_kind()
+
+    if k == 2 {
+        left = new_node(1, cur_ival())
+        advance()
+    } else if k == 3 {
+        left = new_node(3, 0)
+        ND_STR_OFF[left as usize] = cur_ival()
+        ND_STR_LEN[left as usize] = cur_end()
+        advance()
+    } else if k == 61 {
+        left = new_node(4, 1)
+        advance()
+    } else if k == 62 {
+        left = new_node(4, 0)
+        advance()
+    } else if k == 68 {
+        left = new_node(1, 0)
+        advance()
+    } else if k == 67 {
+        advance()
+        if cur_kind() == 31 {
+            advance()
+            left = parse_expr(0)
+            if cur_kind() == 32 { advance() }
+        } else {
+            left = new_node(1, 0)
+        }
+    } else if k == 1 {
+        let off = tok_pool_off()
+        let ilen = tok_ident_len()
+        left = new_node(2, 0)
+        ND_STR_OFF[left as usize] = off
+        ND_STR_LEN[left as usize] = ilen
+        advance()
+        // Consume :: path — build qualified name "A::B" for static method calls
+        while cur_kind() == 41 {
+            advance()  // skip ::
+            if cur_kind() == 1 {
+                let seg_off = tok_pool_off()
+                let seg_len = tok_ident_len()
+                // build "prev::seg" in pool; update left node to use qualified name
+                let q_off = pool_concat_colon(ND_STR_OFF[left as usize], ND_STR_LEN[left as usize], seg_off, seg_len)
+                let q_len = ND_STR_LEN[left as usize] + 2 + seg_len
+                ND_STR_OFF[left as usize] = q_off
+                ND_STR_LEN[left as usize] = q_len
+                advance()
+            }
+        }
+        if cur_kind() == 31 {
+            advance()
+            let args = parse_args()
+            expect(32)
+            let call_node = new_node(12, 0)
+            ND_LEFT[call_node as usize] = left
+            ND_EXTRA[call_node as usize] = args
+            left = call_node
+        } else if cur_kind() == 33 {
+            let si_check = find_struct_b4(off, ilen)
+            if si_check >= 0 {
+                left = parse_struct_literal(left, si_check)
+            }
+        }
+    } else if k == 31 {
+        advance()
+        left = parse_expr(0)
+        // Handle tuple expressions: (a, b, c) — keep first, skip rest
+        while cur_kind() == 37 {
+            advance()
+            parse_expr(0)
+        }
+        expect(32)
+    } else if k == 11 {
+        advance()
+        let operand = parse_expr(10)
+        left = new_node(11, 1)
+        ND_LEFT[left as usize] = operand
+    } else if k == 22 {
+        advance()
+        let operand = parse_expr(10)
+        left = new_node(11, 0)
+        ND_LEFT[left as usize] = operand
+    } else if k == 12 {
+        advance()
+        let operand = parse_expr(11)
+        left = new_node(46, 0)
+        ND_LEFT[left as usize] = operand
+    } else if k == 15 {
+        advance()
+        let operand = parse_expr(18)
+        left = new_node(49, 0)
+        ND_LEFT[left as usize] = operand
+    } else if k == 57 {
+        left = parse_match_expr()
+    } else if k == 33 {
+        left = parse_block()
+    } else if k == 53 {
+        left = parse_if_expr()
+    } else if k == 55 {
+        left = parse_while_expr()
+    } else if k == 35 {
+        advance()
+        let fill_val = parse_expr(0)
+        var arr_count: i64 = 1
+        if cur_kind() == 39 {
+            advance()
+            if cur_kind() == 2 {
+                arr_count = cur_ival()
+                advance()
+            }
+        }
+        if cur_kind() == 36 { advance() }
+        left = new_node(50, arr_count)
+        ND_LEFT[left as usize] = fill_val
+    } else {
+        left = new_node(1, 0)
+        advance()
+    }
+
+    var postfix_done: i64 = 0
+    while postfix_done == 0 {
+        if cur_kind() == 65 {
+            advance()
+            if cur_kind() == 1 || cur_kind() >= 50 {
+                advance()
+            }
+        } else if cur_kind() == 35 {
+            advance()
+            let idx_expr = parse_expr(0)
+            if cur_kind() == 36 { advance() }
+            let inode = new_node(13, 0)
+            ND_LEFT[inode as usize] = left
+            ND_RIGHT[inode as usize] = idx_expr
+            left = inode
+        } else if cur_kind() == 40 {
+            advance()
+            let fname_off2 = tok_pool_off()
+            let fname_len2 = tok_ident_len()
+            advance()
+            if cur_kind() == 31 {
+                advance()
+                let mc_args = parse_args()
+                if cur_kind() == 32 { advance() }
+                let mcnode = new_node(51, 0)
+                ND_LEFT[mcnode as usize] = left
+                ND_STR_OFF[mcnode as usize] = fname_off2
+                ND_STR_LEN[mcnode as usize] = fname_len2
+                ND_EXTRA[mcnode as usize] = mc_args
+                left = mcnode
+            } else {
+                let fnode2 = new_node(14, 0)
+                ND_LEFT[fnode2 as usize] = left
+                ND_STR_OFF[fnode2 as usize] = fname_off2
+                ND_STR_LEN[fnode2 as usize] = fname_len2
+                left = fnode2
+            }
+        } else {
+            postfix_done = 1
+        }
+    }
+
+    while true {
+        let op_kind = cur_kind()
+        let prec = binop_prec(op_kind)
+        if prec == 0 || prec < min_prec { break }
+        // Don't consume * as binary mul after addr-of or deref: *b on next line is next stmt
+        if op_kind == 12 && (ND_KIND[left as usize] == 49 || ND_KIND[left as usize] == 46) { break }
+        let binop_code = tok_to_binop(op_kind)
+        advance()
+        let right = parse_expr(prec + 1)
+        let bin_node = new_node(10, binop_code)
+        ND_LEFT[bin_node as usize] = left
+        ND_RIGHT[bin_node as usize] = right
+        left = bin_node
+    }
+
+    left
+}
+
+fn parse_if_expr() -> i64 with Mut, Panic, Div {
+    expect(53)
+    let cond = parse_expr(0)
+    let then_block = parse_block()
+    let if_node = new_node(30, 0)
+    ND_LEFT[if_node as usize] = cond
+    ND_EXTRA[if_node as usize] = then_block
+    if cur_kind() == 54 {
+        advance()
+        if cur_kind() == 53 {
+            let else_part = parse_if_expr()
+            ND_EXTRA2[if_node as usize] = else_part
+        } else {
+            let else_block = parse_block()
+            ND_EXTRA2[if_node as usize] = else_block
+        }
+    }
+    if_node
+}
+
+fn parse_while_expr() -> i64 with Mut, Panic, Div {
+    expect(55)
+    let cond = parse_expr(0)
+    let body = parse_block()
+    let wh_node = new_node(31, 0)
+    ND_LEFT[wh_node as usize] = cond
+    ND_EXTRA[wh_node as usize] = body
+    wh_node
+}
+
+// ============================================================================
+// Parser: statements
+// ============================================================================
+
+fn parse_stmt() -> i64 with Mut, Panic, Div {
+    let k = cur_kind()
+    if k == 51 || k == 52 {
+        let is_var = k == 52
+        advance()
+        let name_off = tok_pool_off()
+        let name_len = tok_ident_len()
+        advance()
+        var struct_si: i64 = -1
+        var is_ref_type: i64 = 0  // 1 if type annotation had & prefix
+        var box_inner_hint: i64 = -1
+        if cur_kind() == 38 {
+            advance()
+            // Skip leading & or &! in type annotations
+            if cur_kind() == 15 { advance(); is_ref_type = 1 }
+            else if cur_kind() == 70 { advance(); is_ref_type = 1 }
+            if cur_kind() == 1 {
+                let toff = tok_pool_off()
+                let tlen = tok_ident_len()
+                struct_si = find_struct_b4(toff, tlen)
+                // If type is &StructName, treat as pointer-to-struct (not value)
+                if struct_si >= 0 && is_ref_type == 1 {
+                    // Store struct_si in box_inner_hint for type tracking,
+                    // but clear struct_si so codegen doesn't allocate full struct
+                    box_inner_hint = struct_si
+                    struct_si = -1
+                }
+                // Detect Option<Box<T>> or Box<T> in type annotation
+                if struct_si < 0 && box_inner_hint < 0 {
+                    if pool_match(toff, tlen, "Option") || pool_match(toff, tlen, "Box") {
+                        box_inner_hint = extract_option_box_inner_at()
+                    }
+                }
+            }
+            skip_type_expr()
+        }
+        expect(30)
+        let init = parse_expr(0)
+        var node_kind: i64 = 40
+        if is_var { node_kind = 41 }
+        let node = new_node(node_kind, struct_si)
+        ND_STR_OFF[node as usize] = name_off
+        ND_STR_LEN[node as usize] = name_len
+        ND_LEFT[node as usize] = init
+        ND_EXTRA2[node as usize] = box_inner_hint
+        return node
+    }
+    if k == 56 {
+        advance()
+        let val = if cur_kind() != 34 && cur_kind() != 39 { parse_expr(0) } else { -1 }
+        let node = new_node(34, 0)
+        ND_LEFT[node as usize] = val
+        return node
+    }
+    if k == 63 {
+        advance()
+        return new_node(35, 0)
+    }
+    if k == 64 {
+        advance()
+        return new_node(36, 0)
+    }
+    if k == 53 {
+        return parse_if_expr()
+    }
+    if k == 55 {
+        return parse_while_expr()
+    }
+    // Special case: *lval = rhs (deref-assign at statement level)
+    // Must handle before parse_expr to avoid Pratt loop consuming *lval
+    // when &expr on previous line has no statement separator
+    if k == 12 {
+        advance()
+        let lval = parse_expr(18)
+        if cur_kind() == 30 {
+            advance()
+            let rhs2 = parse_expr(0)
+            let dn = new_node(46, 0)
+            ND_LEFT[dn as usize] = lval
+            let asgn2 = new_node(42, 0)
+            ND_LEFT[asgn2 as usize] = dn
+            ND_EXTRA[asgn2 as usize] = rhs2
+            return asgn2
+        }
+        let dn2 = new_node(46, 0)
+        ND_LEFT[dn2 as usize] = lval
+        let es2 = new_node(43, 0)
+        ND_LEFT[es2 as usize] = dn2
+        return es2
+    }
+    let expr = parse_expr(0)
+    if cur_kind() == 30 {
+        advance()
+        let rhs = parse_expr(0)
+        let asgn = new_node(42, 0)
+        ND_LEFT[asgn as usize] = expr
+        ND_EXTRA[asgn as usize] = rhs
+        return asgn
+    }
+    let es = new_node(43, 0)
+    ND_LEFT[es as usize] = expr
+    es
+}
+
+// ============================================================================
+// Parser: top-level
+// ============================================================================
+
+fn skip_effects() with Mut, Panic, Div {
+    if cur_kind() == 66 {
+        advance()
+        while cur_kind() == 1 || cur_kind() >= 50 {
+            advance()
+            if cur_kind() == 37 { advance() }
+        }
+    }
+}
+
+fn skip_return_type() with Mut, Panic, Div {
+    if cur_kind() == 42 {
+        advance()
+        skip_type_expr()
+    }
+}
+
+fn parse_fn_def() with Mut, Panic, Div {
+    expect(50)
+    let fn_idx = FN_COUNT
+    let name_off = tok_pool_off()
+    let name_len = tok_ident_len()
+    FN_NAME_OFF[fn_idx as usize] = name_off
+    FN_NAME_LEN[fn_idx as usize] = name_len
+    advance()
+
+    expect(31)
+    var pcount: i64 = 0
+    let pbase = fn_idx * 8
+    FN_PARAM_BASE[fn_idx as usize] = pbase
+    while cur_kind() != 32 && cur_kind() != 0 {
+        let poff = tok_pool_off()
+        let plen = tok_ident_len()
+        FN_PARAM_NAME_OFF[(pbase + pcount) as usize] = poff
+        FN_PARAM_NAME_LEN[(pbase + pcount) as usize] = plen
+        advance()
+        var psi: i64 = -1
+        if cur_kind() == 38 {
+            advance()
+            if cur_kind() == 1 {
+                let ptoff = tok_pool_off()
+                let ptlen = tok_ident_len()
+                psi = find_struct_b4(ptoff, ptlen)
+            }
+            skip_type_expr()
+        } else if pcount == 0 {
+            psi = FN_IMPL_SI[fn_idx as usize]
+        }
+        FN_PARAM_TYPE_SI[(pbase + pcount) as usize] = psi
+        pcount = pcount + 1
+        if cur_kind() == 37 { advance() }
+    }
+    expect(32)
+    FN_PARAM_COUNT[fn_idx as usize] = pcount
+
+    // Parse return type: record struct return type in FN_RET_SI
+    if cur_kind() == 42 {
+        advance()
+        if cur_kind() == 1 {
+            let rt_off = tok_pool_off()
+            let rt_len = tok_ident_len()
+            let rt_si = find_struct_b4(rt_off, rt_len)
+            FN_RET_SI[fn_idx as usize] = rt_si
+            // Detect Option<Box<T>> or Box<T> return type
+            if rt_si < 0 {
+                if pool_match(rt_off, rt_len, "Option") || pool_match(rt_off, rt_len, "Box") {
+                    FN_RET_BOX_INNER_SI[fn_idx as usize] = extract_option_box_inner_at()
+                }
+            }
+        }
+        skip_type_expr()
+    }
+    skip_effects()
+
+    let body = parse_block()
+    FN_BODY_NODE[fn_idx as usize] = body
+    FN_COUNT = FN_COUNT + 1
+}
+
+// Extract T from Option<Box<T>> or Box<T> type expression.
+// Assumes current token is already past Option/Box ident.
+// Peeks ahead, does NOT consume tokens (saves/restores POS).
+fn extract_option_box_inner_at() -> i64 with Mut, Panic, Div {
+    let save_pos = POS
+    advance()  // skip Option or Box
+    var result: i64 = -1
+    if cur_kind() == 25 {
+        advance()  // skip <
+        if cur_kind() == 1 {
+            let inner_off = tok_pool_off()
+            let inner_len = tok_ident_len()
+            if pool_match(inner_off, inner_len, "Box") {
+                advance()  // skip Box
+                if cur_kind() == 25 {
+                    advance()  // skip <
+                    if cur_kind() == 1 {
+                        let si_off = tok_pool_off()
+                        let si_len = tok_ident_len()
+                        result = find_struct_b4(si_off, si_len)
+                    }
+                }
+            } else {
+                result = find_struct_b4(inner_off, inner_len)
+            }
+        }
+    }
+    POS = save_pos
+    result
+}
+
+fn parse_struct_decl() with Mut, Panic, Div {
+    advance()
+    // Skip if already parsed (from pre_scan_structs)
+    let check_off = tok_pool_off()
+    let check_len = tok_ident_len()
+    let existing = find_struct_b4(check_off, check_len)
+    if existing >= 0 {
+        // Already parsed — skip the struct body
+        advance()
+        skip_braces()
+        return 0
+    }
+    let si = ST_COUNT
+    ST_NAME_OFF[si as usize] = tok_pool_off()
+    ST_NAME_LEN[si as usize] = tok_ident_len()
+    advance()
+    if cur_kind() == 33 { advance() }
+    let fi_base = FLD_COUNT
+    ST_FIELD_FIRST[si as usize] = fi_base
+    var fc: i64 = 0
+    while cur_kind() != 34 && cur_kind() != 0 {
+        if cur_kind() == 1 {
+            FLD_NAME_OFF[(fi_base + fc) as usize] = tok_pool_off()
+            FLD_NAME_LEN[(fi_base + fc) as usize] = tok_ident_len()
+            fc = fc + 1
+            advance()
+            var fld_si: i64 = -1
+            var fld_slots: i64 = 1
+            if cur_kind() == 38 {
+                advance()
+                if cur_kind() == 35 {
+                    // Array type: [elem; count]
+                    advance()
+                    // Read element type
+                    var elem_si: i64 = -1
+                    var elem_bytes: i64 = 8
+                    if cur_kind() == 1 {
+                        let etoff = tok_pool_off()
+                        let etlen = tok_ident_len()
+                        elem_si = find_struct_b4(etoff, etlen)
+                        if elem_si < 0 {
+                            // Check if i8/u8 (1 byte) or i16/u16 (2 bytes) etc.
+                            if etlen == 2 {
+                                let c0 = POOL[(etoff) as usize]
+                                let c1 = POOL[(etoff + 1) as usize]
+                                if c0 == 105 && c1 == 56 { elem_bytes = 1 }
+                                if c0 == 117 && c1 == 56 { elem_bytes = 1 }
+                            }
+                        }
+                    }
+                    skip_type_expr()
+                    // Now at ';'
+                    if cur_kind() == 39 { advance() }
+                    // Read array length
+                    var arr_len: i64 = 0
+                    if cur_kind() == 2 {
+                        arr_len = cur_ival()
+                        advance()
+                    }
+                    if cur_kind() == 36 { advance() }
+                    // Compute slot count
+                    if elem_si >= 0 {
+                        fld_slots = arr_len * struct_total_slots(elem_si)
+                    } else {
+                        fld_slots = (arr_len * elem_bytes + 7) / 8
+                    }
+                    if fld_slots < 1 { fld_slots = 1 }
+                } else {
+                    var box_inner: i64 = -1
+                    if cur_kind() == 1 {
+                        let ftoff = tok_pool_off()
+                        let ftlen = tok_ident_len()
+                        FLD_TYPE_NAME_OFF[(fi_base + fc - 1) as usize] = ftoff
+                        FLD_TYPE_NAME_LEN[(fi_base + fc - 1) as usize] = ftlen
+                        fld_si = find_struct_b4(ftoff, ftlen)
+                        if fld_si >= 0 {
+                            fld_slots = struct_total_slots(fld_si)
+                        }
+                        // Detect Option<Box<StructName>> pattern
+                        if fld_si < 0 && (pool_match(ftoff, ftlen, "Option") || pool_match(ftoff, ftlen, "Box")) {
+                            // Peek ahead for <Box<StructName>> or <StructName>
+                            let save_pos = POS
+                            advance()  // skip Option/Box
+                            if cur_kind() == 25 {
+                                advance()  // skip <
+                                if cur_kind() == 1 {
+                                    let inner_off = tok_pool_off()
+                                    let inner_len = tok_ident_len()
+                                    if pool_match(inner_off, inner_len, "Box") {
+                                        advance()  // skip Box
+                                        if cur_kind() == 25 {
+                                            advance()  // skip <
+                                            if cur_kind() == 1 {
+                                                let si_off = tok_pool_off()
+                                                let si_len = tok_ident_len()
+                                                box_inner = find_struct_b4(si_off, si_len)
+                                            }
+                                        }
+                                    } else {
+                                        box_inner = find_struct_b4(inner_off, inner_len)
+                                    }
+                                }
+                            }
+                            POS = save_pos  // restore position for skip_type_expr
+                        }
+                    }
+                    skip_type_expr()
+                    FLD_BOX_INNER_SI[(fi_base + fc - 1) as usize] = box_inner
+                }
+            }
+            FLD_TYPE_SI[(fi_base + fc - 1) as usize] = fld_si
+            FLD_SLOT_COUNT[(fi_base + fc - 1) as usize] = fld_slots
+            if cur_kind() == 37 { advance() }
+        } else {
+            advance()
+        }
+    }
+    if cur_kind() == 34 { advance() }
+    ST_FIELD_COUNT[si as usize] = fc
+    FLD_COUNT = FLD_COUNT + fc
+    ST_COUNT = ST_COUNT + 1
+}
+
+fn skip_braces() with Mut, Panic, Div {
+    if cur_kind() == 33 {
+        advance()
+        var depth: i64 = 1
+        while depth > 0 && cur_kind() != 0 {
+            if cur_kind() == 33 { depth = depth + 1 }
+            else if cur_kind() == 34 { depth = depth - 1 }
+            if depth > 0 { advance() }
+        }
+        if cur_kind() == 34 { advance() }
+    }
+}
+
+fn parse_enum_decl() with Mut, Panic, Div {
+    advance()  // skip 'enum'
+    // Skip if already parsed (from pre_scan_enums)
+    let check_off = tok_pool_off()
+    let check_len = tok_ident_len()
+    let existing = find_enum_b4(check_off, check_len)
+    if existing >= 0 {
+        advance()
+        skip_braces()
+        return 0
+    }
+    let ei = EN_COUNT
+    EN_NAME_OFF[ei as usize] = tok_pool_off()
+    EN_NAME_LEN[ei as usize] = tok_ident_len()
+    advance()  // skip enum name
+    if cur_kind() == 33 { advance() }  // skip {
+    let ev_base = EV_COUNT
+    EN_FIRST_VARIANT[ei as usize] = ev_base
+    var vc: i64 = 0
+    while cur_kind() != 34 && cur_kind() != 0 {
+        if cur_kind() == 1 {
+            let voff = tok_pool_off()
+            let vlen = tok_ident_len()
+            EV_NAME_OFF[(ev_base + vc) as usize] = voff
+            EV_NAME_LEN[(ev_base + vc) as usize] = vlen
+            EV_VALUE[(ev_base + vc) as usize] = vc
+            vc = vc + 1
+            advance()
+            // Skip optional payload: (Type) or { ... }
+            if cur_kind() == 31 {
+                advance()
+                var pd: i64 = 1
+                while pd > 0 && cur_kind() != 0 {
+                    if cur_kind() == 31 { pd = pd + 1 }
+                    else if cur_kind() == 32 { pd = pd - 1 }
+                    if pd > 0 { advance() }
+                }
+                if cur_kind() == 32 { advance() }
+            }
+        }
+        if cur_kind() == 37 { advance() }  // skip comma
+    }
+    if cur_kind() == 34 { advance() }  // skip }
+    EN_VARIANT_COUNT[ei as usize] = vc
+    EV_COUNT = EV_COUNT + vc
+    EN_COUNT = EN_COUNT + 1
+}
+
+fn pre_scan_enums() with Mut, Panic, Div {
+    let saved_pos = POS
+    POS = 0
+    while cur_kind() != 0 {
+        if cur_kind() == 59 {
+            parse_enum_decl()
+        } else if cur_kind() == 33 {
+            skip_braces()
+        } else {
+            advance()
+        }
+    }
+    POS = saved_pos
+}
+
+fn parse_impl_body() with Mut, Panic, Div {
+    // Get struct name from first identifier token
+    var si: i64 = -1
+    if cur_kind() == 1 {
+        let noff = tok_pool_off()
+        let nlen = tok_ident_len()
+        si = find_struct_b4(noff, nlen)
+        advance()
+    }
+    // Skip generics and 'for Type' clauses until we reach '{'
+    while cur_kind() != 33 && cur_kind() != 0 {
+        if cur_kind() == 25 {
+            advance()
+            var d: i64 = 1
+            while d > 0 && cur_kind() != 0 {
+                if cur_kind() == 25 { d = d + 1 }
+                else if cur_kind() == 27 { d = d - 1 }
+                else if cur_kind() == 19 { d = d - 2 }  // '>>' = two closing >
+                if d > 0 { advance() }
+            }
+            if cur_kind() == 27 { advance() }
+            else if cur_kind() == 19 { advance() }
+        } else {
+            advance()
+        }
+    }
+    if cur_kind() == 33 { advance() }
+    // Parse function definitions inside the impl block
+    while cur_kind() != 34 && cur_kind() != 0 {
+        if cur_kind() == 50 {
+            FN_IMPL_SI[FN_COUNT as usize] = si
+            let fn_before = FN_COUNT
+            parse_fn_def()
+            // Qualify: rename "method" → "StructName::method" so static calls resolve correctly
+            if si >= 0 {
+                let sn_off = ST_NAME_OFF[si as usize]
+                let sn_len = ST_NAME_LEN[si as usize]
+                let mn_off = FN_NAME_OFF[fn_before as usize]
+                let mn_len = FN_NAME_LEN[fn_before as usize]
+                let q_off = pool_concat_colon(sn_off, sn_len, mn_off, mn_len)
+                FN_NAME_OFF[fn_before as usize] = q_off
+                FN_NAME_LEN[fn_before as usize] = sn_len + 2 + mn_len
+            }
+        } else if cur_kind() == 33 {
+            skip_braces()
+        } else {
+            advance()
+        }
+    }
+    if cur_kind() == 34 { advance() }
+}
+
+// ============================================================================
+// Import resolution — REMOVED for A1 bootstrap chain (boot3 compatibility)
+// Pre-concatenate source files manually if multi-file compilation is needed.
+// ============================================================================
+
+// Two-pass struct collection: scan all tokens for struct declarations
+// to build the struct table BEFORE parsing function bodies.
+// This ensures forward-referenced struct types (e.g., ItemList from imports)
+// are available during type annotation parsing.
+fn pre_scan_structs() with Mut, Panic, Div {
+    let saved_pos = POS
+    POS = 0
+    while cur_kind() != 0 {
+        if cur_kind() == 58 {
+            parse_struct_decl()
+        } else if cur_kind() == 33 {
+            skip_braces()
+        } else {
+            advance()
+        }
+    }
+    POS = saved_pos
+    // Second pass: re-resolve unresolved field types now that all structs are known.
+    // Run multiple iterations to handle transitive dependencies.
+    var changed: i64 = 1
+    var iter: i64 = 0
+    while changed > 0 && iter < 10 {
+        changed = 0
+        var fi: i64 = 0
+        while fi < FLD_COUNT {
+            let ftype = FLD_TYPE_SI[fi as usize]
+            if ftype < 0 && FLD_TYPE_NAME_LEN[fi as usize] > 0 {
+                let tn_off = FLD_TYPE_NAME_OFF[fi as usize]
+                let tn_len = FLD_TYPE_NAME_LEN[fi as usize]
+                let resolved_si = find_struct_b4(tn_off, tn_len)
+                if resolved_si >= 0 {
+                    FLD_TYPE_SI[fi as usize] = resolved_si
+                    let new_slots = struct_total_slots(resolved_si)
+                    if FLD_SLOT_COUNT[fi as usize] != new_slots {
+                        FLD_SLOT_COUNT[fi as usize] = new_slots
+                        changed = changed + 1
+                    }
+                }
+            } else if ftype >= 0 {
+                let new_slots = struct_total_slots(ftype)
+                if FLD_SLOT_COUNT[fi as usize] != new_slots {
+                    FLD_SLOT_COUNT[fi as usize] = new_slots
+                    changed = changed + 1
+                }
+            }
+            fi = fi + 1
+        }
+        iter = iter + 1
+    }
+}
+
+fn skip_to_next_top_level() with Mut, Panic, Div {
+    while cur_kind() != 0 && cur_kind() != 50 && cur_kind() != 58 && cur_kind() != 51 && cur_kind() != 52 && cur_kind() != 59 && cur_kind() != 60 {
+        if cur_kind() == 33 {
+            skip_braces()
+        } else {
+            advance()
+        }
+    }
+}
+
+fn parse_program() with Mut, Panic, Div {
+    while cur_kind() != 0 {
+        let k = cur_kind()
+        if k == 50 {
+            parse_fn_def()
+        } else if k == 58 {
+            parse_struct_decl()
+        } else if k == 59 {
+            // enum: already parsed in pre_scan_enums, just skip
+            parse_enum_decl()
+        } else if k == 60 {
+            // impl: collect fn definitions inside
+            advance()
+            parse_impl_body()
+        } else if k == 51 || k == 52 {
+            while cur_kind() != 0 && cur_kind() != 50 && cur_kind() != 58 && cur_kind() != 59 && cur_kind() != 60 {
+                advance()
+            }
+        } else if k == 1 {
+            let koff = tok_pool_off()
+            let klen = tok_ident_len()
+            if pool_match(koff, klen, "use") {
+                advance()
+                while cur_kind() != 0 && cur_kind() != 50 && cur_kind() != 58 && cur_kind() != 39 {
+                    advance()
+                }
+                if cur_kind() == 39 { advance() }
+            } else {
+                skip_to_next_top_level()
+            }
+        } else {
+            skip_to_next_top_level()
+        }
+    }
+}
+
+// ============================================================================
+// Codegen helpers
+// ============================================================================
+
+fn emit(b: i64) with Mut, Panic {
+    if CODE_LEN >= 4194304 { return }  // silently drop when buffer full
+    CODE[CODE_LEN as usize] = b as i8
+    CODE_LEN = CODE_LEN + 1
+}
+
+fn emit_u32(v: i64) with Mut, Panic {
+    emit(v & 0xFF)
+    emit((v >> 8) & 0xFF)
+    emit((v >> 16) & 0xFF)
+    emit((v >> 24) & 0xFF)
+}
+
+fn emit_u64(v: i64) with Mut, Panic {
+    emit_u32(v)
+    emit_u32(v >> 32)
+}
+
+fn emit_mov_rax_imm(val: i64) with Mut, Panic {
+    emit(0x48); emit(0xB8)
+    emit_u64(val)
+}
+
+fn emit_store_rax(slot: i64) with Mut, Panic {
+    let disp = 0 - ((slot + 1) * 8)
+    emit(0x48); emit(0x89); emit(0x85)
+    emit_u32(disp)
+}
+
+fn emit_load_rax(slot: i64) with Mut, Panic {
+    let disp = 0 - ((slot + 1) * 8)
+    emit(0x48); emit(0x8B); emit(0x85)
+    emit_u32(disp)
+}
+
+fn emit_lea_rax(slot: i64) with Mut, Panic {
+    let disp = 0 - ((slot + 1) * 8)
+    emit(0x48); emit(0x8D); emit(0x85)
+    emit_u32(disp)
+}
+
+fn emit_load_rcx(slot: i64) with Mut, Panic {
+    let disp = 0 - ((slot + 1) * 8)
+    emit(0x48); emit(0x8B); emit(0x8D)
+    emit_u32(disp)
+}
+
+var PROLOGUE_PATCH_OFF: i64 = 0  // CODE offset of frame size placeholder
+
+fn emit_prologue() with Mut, Panic {
+    emit(0x55)
+    emit(0x48); emit(0x89); emit(0xE5)
+    emit(0x48); emit(0x81); emit(0xEC)
+    PROLOGUE_PATCH_OFF = CODE_LEN
+    emit_u32(0)  // placeholder — patched after function body is compiled
+}
+
+fn emit_epilogue() with Mut, Panic {
+    emit(0x48); emit(0x89); emit(0xEC)
+    emit(0x5D)
+    emit(0xC3)
+}
+
+fn emit_print_int_helper() with Mut, Panic {
+    PRINT_INT_OFF = CODE_LEN
+    emit(0x55)
+    emit(0x48); emit(0x89); emit(0xE5)
+    emit(0x48); emit(0x83); emit(0xEC); emit(0x30)
+    emit(0x48); emit(0x89); emit(0xF8)
+    emit(0x4C); emit(0x8D); emit(0x45); emit(0xFF)
+    emit(0x45); emit(0x31); emit(0xC9)
+    emit(0x48); emit(0x85); emit(0xC0)
+    emit(0x79); emit(0x06)
+    emit(0x48); emit(0xF7); emit(0xD8)
+    emit(0x41); emit(0xB1); emit(0x01)
+    emit(0x48); emit(0x85); emit(0xC0)
+    emit(0x75); emit(0x09)
+    emit(0x41); emit(0xC6); emit(0x00); emit(0x30)
+    emit(0x49); emit(0xFF); emit(0xC8)
+    emit(0xEB); emit(0x26)
+    emit(0x31); emit(0xD2)
+    emit(0x48); emit(0xC7); emit(0xC1); emit(0x0A); emit(0x00); emit(0x00); emit(0x00)
+    emit(0x48); emit(0xF7); emit(0xF1)
+    emit(0x80); emit(0xC2); emit(0x30)
+    emit(0x41); emit(0x88); emit(0x10)
+    emit(0x49); emit(0xFF); emit(0xC8)
+    emit(0x48); emit(0x85); emit(0xC0)
+    emit(0x75); emit(0xE6)
+    emit(0x45); emit(0x84); emit(0xC9)
+    emit(0x74); emit(0x07)
+    emit(0x41); emit(0xC6); emit(0x00); emit(0x2D)
+    emit(0x49); emit(0xFF); emit(0xC8)
+    emit(0x49); emit(0xFF); emit(0xC0)
+    emit(0x4C); emit(0x89); emit(0xC6)
+    emit(0x48); emit(0x89); emit(0xEA)
+    emit(0x4C); emit(0x29); emit(0xC2)
+    emit(0xBF); emit(0x01); emit(0x00); emit(0x00); emit(0x00)
+    emit(0xB8); emit(0x01); emit(0x00); emit(0x00); emit(0x00)
+    emit(0x0F); emit(0x05)
+    emit(0xC9)
+    emit(0xC3)
+}
+
+// ============================================================================
+// Codegen: local variable management
+// ============================================================================
+
+fn locals_reset() with Mut {
+    LOCAL_COUNT = 0
+    NEXT_SLOT = 0
+}
+
+fn alloc_slot() -> i64 with Mut {
+    let s = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    s
+}
+
+fn add_local(off: i64, len: i64) -> i64 with Mut, Panic {
+    let idx = LOCAL_COUNT
+    let slot = alloc_slot()
+    LOCAL_NAME_OFF[idx as usize] = off
+    LOCAL_NAME_LEN[idx as usize] = len
+    LOCAL_SLOT[idx as usize] = slot
+    LOCAL_STRUCT_IDX[idx as usize] = -1
+    LOCAL_IS_SPTR[idx as usize] = 0
+    LOCAL_COUNT = LOCAL_COUNT + 1
+    slot
+}
+
+fn add_local_struct(off: i64, len: i64, si: i64, fc: i64) -> i64 with Mut, Panic {
+    let idx = LOCAL_COUNT
+    LOCAL_NAME_OFF[idx as usize] = off
+    LOCAL_NAME_LEN[idx as usize] = len
+    LOCAL_STRUCT_IDX[idx as usize] = si
+    LOCAL_COUNT = LOCAL_COUNT + 1
+    if fc > 64 {
+        // Oversized struct: 1-slot thin pointer (is_sptr=4); backing store is BSS
+        let slot = alloc_slot()
+        LOCAL_SLOT[idx as usize] = slot
+        LOCAL_IS_SPTR[idx as usize] = 4
+        slot
+    } else {
+        let base = NEXT_SLOT
+        LOCAL_SLOT[idx as usize] = base
+        LOCAL_IS_SPTR[idx as usize] = 0
+        var ai: i64 = 0
+        while ai < fc { let ds = alloc_slot(); ai = ai + 1 }
+        base
+    }
+}
+
+fn add_local_sptr(off: i64, len: i64, si: i64) -> i64 with Mut, Panic {
+    let idx = LOCAL_COUNT
+    let slot = alloc_slot()
+    LOCAL_NAME_OFF[idx as usize] = off
+    LOCAL_NAME_LEN[idx as usize] = len
+    LOCAL_SLOT[idx as usize] = slot
+    LOCAL_STRUCT_IDX[idx as usize] = si
+    LOCAL_IS_SPTR[idx as usize] = 1
+    LOCAL_COUNT = LOCAL_COUNT + 1
+    slot
+}
+
+fn find_local(off: i64, len: i64) -> i64 with Mut, Panic, Div {
+    LAST_LOCAL_SI = -1
+    LAST_LOCAL_BOX_INNER = -1
+    LAST_LOCAL_IS_SPTR = 0
+    LAST_FOUND_SLOT = -1
+    var i: i64 = LOCAL_COUNT - 1
+    while i >= 0 {
+        let lo = LOCAL_NAME_OFF[i as usize]
+        let ll = LOCAL_NAME_LEN[i as usize]
+        if ll == len {
+            var ok: i64 = 1
+            var j: i64 = 0
+            while j < len {
+                if POOL[(lo + j) as usize] != POOL[(off + j) as usize] { ok = 0 }
+                j = j + 1
+            }
+            if ok == 1 {
+                LAST_LOCAL_SI = LOCAL_STRUCT_IDX[i as usize]
+                LAST_LOCAL_IS_SPTR = LOCAL_IS_SPTR[i as usize]
+                LAST_LOCAL_BOX_INNER = LOCAL_BOX_INNER_SI[i as usize]
+                LAST_FOUND_SLOT = LOCAL_SLOT[i as usize]
+                return LOCAL_SLOT[i as usize]
+            }
+        }
+        i = i - 1
+    }
+    -1
+}
+
+fn find_fn_by_name(off: i64, len: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FN_COUNT {
+        let fo = FN_NAME_OFF[i as usize]
+        let fl = FN_NAME_LEN[i as usize]
+        if fl == len {
+            var ok: i64 = 1
+            var j: i64 = 0
+            while j < len {
+                if POOL[(fo + j) as usize] != POOL[(off + j) as usize] { ok = 0; break }
+                j = j + 1
+            }
+            if ok == 1 { return i }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// Look up enum variant by qualified name "EnumName::Variant" in pool at (off, len).
+// Sets EV_LOOKUP_FOUND=1 and returns discriminant if found, else sets EV_LOOKUP_FOUND=0 and returns 0.
+fn find_enum_variant(off: i64, len: i64) -> i64 with Mut, Panic, Div {
+    EV_LOOKUP_FOUND = 0
+    // Find "::" separator in the qualified name
+    var sep: i64 = -1
+    var si: i64 = 0
+    while si < len - 1 {
+        if POOL[(off + si) as usize] == 58 && POOL[(off + si + 1) as usize] == 58 {
+            sep = si
+            break
+        }
+        si = si + 1
+    }
+    if sep < 0 { return 0 }
+    // enum_name = pool[off..off+sep], variant_name = pool[off+sep+2..off+len]
+    let en_off = off
+    let en_len = sep
+    let vn_off = off + sep + 2
+    let vn_len = len - sep - 2
+    if en_len <= 0 || vn_len <= 0 { return 0 }
+    // Find enum by name
+    var ei: i64 = 0
+    while ei < EN_COUNT {
+        let eo = EN_NAME_OFF[ei as usize]
+        let el = EN_NAME_LEN[ei as usize]
+        if el == en_len {
+            var ok: i64 = 1
+            var j: i64 = 0
+            while j < en_len {
+                if POOL[(eo + j) as usize] != POOL[(en_off + j) as usize] { ok = 0; break }
+                j = j + 1
+            }
+            if ok == 1 {
+                // Found enum; search variants
+                let base = EN_VAR_BASE[ei as usize]
+                let count = EN_VAR_COUNT[ei as usize]
+                var vi: i64 = 0
+                while vi < count {
+                    let vo = EV_NAME_OFF[(base + vi) as usize]
+                    let vl = EV_NAME_LEN[(base + vi) as usize]
+                    if vl == vn_len {
+                        var ok2: i64 = 1
+                        var k: i64 = 0
+                        while k < vn_len {
+                            if POOL[(vo + k) as usize] != POOL[(vn_off + k) as usize] { ok2 = 0; break }
+                            k = k + 1
+                        }
+                        if ok2 == 1 {
+                            EV_LOOKUP_FOUND = 1
+                            return EV_DISC[(base + vi) as usize]
+                        }
+                    }
+                    vi = vi + 1
+                }
+            }
+        }
+        ei = ei + 1
+    }
+    0
+}
+
+// ============================================================================
+// Global variable collection
+// ============================================================================
+
+fn mb_collect_globals() with Mut, Panic, Div {
+    var ti: i64 = 0
+    var depth: i64 = 0
+    while ti < TK_COUNT {
+        let k = TK_KIND[ti as usize]
+        if k == 0 { break }
+        if k == 33 { depth = depth + 1 }
+        else if k == 34 { depth = depth - 1 }
+        else if k == 52 && depth == 0 {
+            ti = ti + 1
+            let ns = TK_START[ti as usize]
+            let ne = TK_END[ti as usize]
+            let gi = MB_GL_COUNT
+            MB_GL_NS[gi as usize] = ns
+            MB_GL_NE[gi as usize] = ne
+            MB_GL_OFF[gi as usize] = MB_BSS_TOTAL
+            ti = ti + 1
+            var sz: i64 = 8
+            var count: i64 = 1
+            if TK_KIND[ti as usize] == 38 {
+                ti = ti + 1
+                if TK_KIND[ti as usize] == 35 {
+                    ti = ti + 1
+                    if TK_KIND[ti as usize] == 1 {
+                        let tns = TK_START[ti as usize]
+                        let tne = TK_END[ti as usize]
+                        if tne - tns == 2 {
+                            let b0 = source_byte(tns)
+                            let b1 = source_byte(tns + 1)
+                            if b0 == 105 && b1 == 56 { sz = 1 }
+                            if b0 == 117 && b1 == 56 { sz = 1 }
+                        }
+                        // Check if element type is a struct — use struct_total_slots for elem size
+                        if sz == 8 {
+                            let etype_pool_off = POOL_POS
+                            var ei: i64 = 0
+                            while ei < tne - tns {
+                                pool_add(source_byte(tns + ei))
+                                ei = ei + 1
+                            }
+                            let etype_pool_len = tne - tns
+                            let etype_si = find_struct_b4(etype_pool_off, etype_pool_len)
+                            if etype_si >= 0 {
+                                sz = struct_total_slots(etype_si) * 8
+                                MB_GL_ELEM_SI[gi as usize] = etype_si
+                            }
+                        }
+                        ti = ti + 1
+                    }
+                    if TK_KIND[ti as usize] == 39 { ti = ti + 1 }
+                    if TK_KIND[ti as usize] == 2 {
+                        count = TK_IVAL[ti as usize]
+                        ti = ti + 1
+                    }
+                    if TK_KIND[ti as usize] == 36 { ti = ti + 1 }
+                } else {
+                    if TK_KIND[ti as usize] == 1 || TK_KIND[ti as usize] >= 50 { ti = ti + 1 }
+                }
+            }
+            MB_GL_SZ[gi as usize] = sz
+            MB_BSS_TOTAL = MB_BSS_TOTAL + count * sz
+            let rem = MB_BSS_TOTAL - (MB_BSS_TOTAL / 8) * 8
+            if rem != 0 { MB_BSS_TOTAL = MB_BSS_TOTAL + (8 - rem) }
+            MB_GL_COUNT = MB_GL_COUNT + 1
+        }
+        ti = ti + 1
+    }
+}
+
+fn mb_find_global(pool_off: i64, pool_len: i64) -> i64 with Mut, Panic, Div {
+    var gi: i64 = 0
+    while gi < MB_GL_COUNT {
+        let ns = MB_GL_NS[gi as usize]
+        let ne = MB_GL_NE[gi as usize]
+        if pool_len == ne - ns {
+            var ok: i64 = 1
+            var ci: i64 = 0
+            while ci < pool_len {
+                let pb = POOL[(pool_off + ci) as usize] as i64
+                let sb = source_byte(ns + ci)
+                if pb != sb { ok = 0 }
+                ci = ci + 1
+            }
+            if ok == 1 { return gi }
+        }
+        gi = gi + 1
+    }
+    0 - 1
+}
+
+fn mb_resolve_src_globals() with Mut, Panic, Div {
+    var gi: i64 = 0
+    while gi < MB_GL_COUNT {
+        let ns = MB_GL_NS[gi as usize]
+        let ne = MB_GL_NE[gi as usize]
+        if ne - ns == 7 {
+            let b0 = source_byte(ns)
+            let b1 = source_byte(ns + 1)
+            let b2 = source_byte(ns + 2)
+            let b3 = source_byte(ns + 3)
+            let b4 = source_byte(ns + 4)
+            let b5 = source_byte(ns + 5)
+            let b6 = source_byte(ns + 6)
+            if b0 == 83 && b1 == 82 && b2 == 67 && b3 == 95 && b4 == 66 && b5 == 85 && b6 == 70 {
+                MB_SRC_BUF_GADDR = 0x700000 + MB_GL_OFF[gi as usize]
+            }
+            if b0 == 83 && b1 == 82 && b2 == 67 && b3 == 95 && b4 == 76 && b5 == 69 && b6 == 78 {
+                MB_SRC_LEN_GADDR = 0x700000 + MB_GL_OFF[gi as usize]
+            }
+        }
+        gi = gi + 1
+    }
+}
+
+// ============================================================================
+// Codegen: compile AST nodes
+// ============================================================================
+
+fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
+    if node == -1 {
+        emit_mov_rax_imm(0)
+        return 0
+    }
+    if node < 0 || node >= 131072 {
+        print("BAD NODE node=")
+        print_int(node)
+        print("\n")
+        return 0
+    }
+    let kind = ND_KIND[node as usize]
+    let ival = ND_IVAL[node as usize]
+
+    if kind == 1 {
+        emit_mov_rax_imm(ival)
+        return 0
+    }
+    if kind == 4 {
+        emit_mov_rax_imm(ival)
+        return 0
+    }
+    if kind == 3 {
+        let soff = ND_STR_OFF[node as usize]
+        let slen = ND_STR_LEN[node as usize]
+        emit(0xEB)
+        let jmp_pos = CODE_LEN
+        emit(0x00)
+        let str_addr = CODE_LEN
+        var si: i64 = 0
+        while si < slen {
+            emit(POOL[(soff + si) as usize] as i64)
+            si = si + 1
+        }
+        emit(0)
+        let dist = CODE_LEN - jmp_pos - 1
+        CODE[jmp_pos as usize] = dist as i8
+        emit(0x48); emit(0x8D); emit(0x05)
+        let rel = str_addr - (CODE_LEN + 4)
+        emit_u32(rel)
+        return 0
+    }
+    if kind == 2 {
+        let voff = ND_STR_OFF[node as usize]
+        let vlen = ND_STR_LEN[node as usize]
+        let slot = find_local(voff, vlen)
+        if slot >= 0 {
+            emit_load_rax(slot)
+        } else {
+            let gi = mb_find_global(voff, vlen)
+            if gi >= 0 {
+                let gaddr = 0x700000 + MB_GL_OFF[gi as usize]
+                emit(0x48); emit(0xB9); emit_u64(gaddr)
+                if MB_GL_SZ[gi as usize] == 1 {
+                    emit(0x48); emit(0x0F); emit(0xB6); emit(0x01)
+                } else {
+                    emit(0x48); emit(0x8B); emit(0x01)
+                }
+            } else {
+                // Sprint 229: Check if identifier is a function name (fn as first-class value)
+                let fn_idx = find_fn_by_name(voff, vlen)
+                if fn_idx >= 0 {
+                    // LEA rax, [RIP + disp32] — load function address
+                    emit(0x48); emit(0x8D); emit(0x05)
+                    let lea_fix_pos = CODE_LEN
+                    emit_u32(0)
+                    FN_LEA_FIX_OFF[FN_LEA_FIX_COUNT as usize] = lea_fix_pos
+                    FN_LEA_FIX_TARGET[FN_LEA_FIX_COUNT as usize] = fn_idx
+                    FN_LEA_FIX_COUNT = FN_LEA_FIX_COUNT + 1
+                } else {
+                    // Check if it's an Enum::Variant qualified name
+                    let ev_disc = en_lookup_qualified(voff, vlen)
+                    if ev_disc >= 0 {
+                        emit_mov_rax_imm(ev_disc)
+                    } else {
+                        emit_mov_rax_imm(0)
+                    }
+                }
+            }
+        }
+        return 0
+    }
+    if kind == 46 {
+        let deref_inner = ND_LEFT[node as usize]
+        // Propagate struct type for chained field access: (*ptr).field
+        if ND_KIND[deref_inner as usize] == 2 {
+            let d_off = ND_STR_OFF[deref_inner as usize]
+            let d_len = ND_STR_LEN[deref_inner as usize]
+            find_local(d_off, d_len)
+            let inner_si = LAST_LOCAL_SI
+            if inner_si >= 0 {
+                LAST_FIELD_TYPE_SI = inner_si
+            }
+        }
+        compile_node(deref_inner)
+        emit(0x48); emit(0x8B); emit(0x00)   // mov rax, [rax]
+        return 0
+    }
+    // NK_ADDR: &expr — emit address of inner expression
+    // Handles: &local_var → lea rax, [rbp - (slot+1)*8]
+    //          &struct.field → lea rax, [rbp - (base_slot+fi+1)*8]
+    //          &global → rip-relative lea
+    if kind == 49 {
+        let inner = ND_LEFT[node as usize]
+        let ik = ND_KIND[inner as usize]
+        if ik == 2 {
+            let voff2 = ND_STR_OFF[inner as usize]
+            let vlen2 = ND_STR_LEN[inner as usize]
+            let slot2 = find_local(voff2, vlen2)
+            if slot2 >= 0 {
+                emit_lea_rax(slot2)
+            } else {
+                let gi2 = mb_find_global(voff2, vlen2)
+                if gi2 >= 0 {
+                    let gaddr2 = 0x700000 + MB_GL_OFF[gi2 as usize]
+                    emit(0x48); emit(0xB8); emit_u64(gaddr2)
+                } else {
+                    emit_mov_rax_imm(0)
+                }
+            }
+        } else if ik == 14 {
+            let obj2 = ND_LEFT[inner as usize]
+            let fn2 = ND_STR_OFF[inner as usize]
+            let fl2 = ND_STR_LEN[inner as usize]
+            let vo2 = ND_STR_OFF[obj2 as usize]
+            let vl2 = ND_STR_LEN[obj2 as usize]
+            let bs2 = find_local(vo2, vl2)
+            let si3 = LAST_LOCAL_SI
+            if bs2 >= 0 && si3 >= 0 {
+                let fi2 = find_field_slot_offset(si3, fn2, fl2)
+                if fi2 >= 0 {
+                    emit_lea_rax(bs2 + fi2)
+                    // Propagate Box inner type for Option<Box<T>> fields
+                    let raw_fi2 = find_field_b4(si3, fn2, fl2)
+                    if raw_fi2 >= 0 {
+                        let fbase2 = ST_FIELD_FIRST[si3 as usize]
+                        let bi2 = FLD_BOX_INNER_SI[(fbase2 + raw_fi2) as usize]
+                        if bi2 >= 0 {
+                            LAST_FIELD_TYPE_SI = bi2
+                        }
+                    }
+                } else {
+                    emit_mov_rax_imm(0)
+                }
+            } else {
+                emit_mov_rax_imm(0)
+            }
+        } else {
+            compile_node(inner)
+        }
+        return 0
+    }
+    if kind == 14 {
+        let obj = ND_LEFT[node as usize]
+        let fname_off = ND_STR_OFF[node as usize]
+        let fname_len = ND_STR_LEN[node as usize]
+        LAST_FIELD_TYPE_SI = -1
+        LAST_FIELD_LAYOUT = 0
+        let obj_nk = ND_KIND[obj as usize]
+        // Special case: (*ptr).field — compile inner of DEREF (skip the extra load),
+        // then access field at [rax + offset]. The ptr IS the struct address.
+        if obj_nk == 46 {
+            let deref_inner2 = ND_LEFT[obj as usize]
+            // Try to get struct type from inner expression
+            var known_si: i64 = -1
+            if ND_KIND[deref_inner2 as usize] == 2 {
+                let di_off = ND_STR_OFF[deref_inner2 as usize]
+                let di_len = ND_STR_LEN[deref_inner2 as usize]
+                find_local(di_off, di_len)
+                known_si = LAST_LOCAL_SI
+                // Also check LOCAL_BOX_INNER_SI for match bindings
+                if known_si < 0 && LAST_LOCAL_BOX_INNER >= 0 {
+                    known_si = LAST_LOCAL_BOX_INNER
+                }
+            }
+            compile_node(deref_inner2)  // rax = ptr to struct data
+            // Use known struct type, or fallback to searching all structs
+            var dfi: i64 = -1
+            if known_si >= 0 {
+                dfi = find_field_slot_offset(known_si, fname_off, fname_len)
+            }
+            // Try CURRENT_IMPL_SI as priority hint
+            if dfi < 0 && CURRENT_IMPL_SI >= 0 {
+                dfi = find_field_slot_offset(CURRENT_IMPL_SI, fname_off, fname_len)
+            }
+            if dfi < 0 {
+                var dsi: i64 = 0
+                while dsi < ST_COUNT && dfi < 0 {
+                    dfi = find_field_slot_offset(dsi, fname_off, fname_len)
+                    if dfi < 0 { dsi = dsi + 1 }
+                }
+            }
+            if dfi >= 0 {
+                let dfld_si = LAST_FIELD_TYPE_SI
+                let ddisp = dfi * 8
+                if dfld_si >= 0 {
+                    if ddisp > 0 {
+                        emit(0x48); emit(0x8D); emit(0x80); emit_u32(ddisp)
+                    }
+                } else {
+                    if ddisp == 0 {
+                        emit(0x48); emit(0x8B); emit(0x00)
+                    } else {
+                        emit(0x48); emit(0x8B); emit(0x80); emit_u32(ddisp)
+                    }
+                }
+                LAST_FIELD_TYPE_SI = dfld_si
+            } else {
+                emit_mov_rax_imm(0)
+            }
+            return 0
+        }
+        if obj_nk == 2 {
+            let voff = ND_STR_OFF[obj as usize]
+            let vlen = ND_STR_LEN[obj as usize]
+            let base_slot = find_local(voff, vlen)
+            let si2 = LAST_LOCAL_SI
+            let is_sptr = LAST_LOCAL_IS_SPTR
+            if base_slot >= 0 && si2 >= 0 {
+                let fi = find_field_slot_offset(si2, fname_off, fname_len)
+                let fld_si = LAST_FIELD_TYPE_SI
+                // Propagate FLD_BOX_INNER_SI for Option<Box<T>> fields
+                if fld_si < 0 {
+                    let raw_fi_check = find_field_b4(si2, fname_off, fname_len)
+                    if raw_fi_check >= 0 {
+                        let fb_check = ST_FIELD_FIRST[si2 as usize]
+                        let bi_check = FLD_BOX_INNER_SI[(fb_check + raw_fi_check) as usize]
+                        if bi_check >= 0 {
+                            LAST_FIELD_TYPE_SI = bi_check
+                        }
+                    }
+                }
+                if fi >= 0 {
+                    if is_sptr == 4 {
+                        // BSS/heap thin pointer (oversized struct): positive offsets from ptr
+                        LAST_FIELD_LAYOUT = 1
+                        emit_load_rax(base_slot)
+                        let fdisp_o = fi * 8
+                        // Use sub-struct test: fld_si >= 0 OR slot_count > 1 (e.g. FLD_TYPE_SI unresolved but still multi-slot)
+                        if fld_si >= 0 || LAST_FIELD_SLOT_COUNT > 1 {
+                            if fdisp_o > 0 { emit(0x48); emit(0x8D); emit(0x80); emit_u32(fdisp_o) }
+                        } else {
+                            if fdisp_o == 0 { emit(0x48); emit(0x8B); emit(0x00) }
+                            else { emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp_o) }
+                        }
+                    } else if is_sptr == 2 {
+                        // Heap pointer (Box): positive offsets
+                        LAST_FIELD_LAYOUT = 1
+                        emit_load_rax(base_slot)
+                        let fdisp_h = fi * 8
+                        if fld_si >= 0 {
+                            if fdisp_h > 0 { emit(0x48); emit(0x8D); emit(0x80); emit_u32(fdisp_h) }
+                        } else {
+                            if fdisp_h == 0 { emit(0x48); emit(0x8B); emit(0x00) }
+                            else { emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp_h) }
+                        }
+                    } else if is_sptr == 1 {
+                        // Stack pointer (&T): negative offsets
+                        LAST_FIELD_LAYOUT = 0
+                        emit_load_rax(base_slot)
+                        let fdisp = 0 - (fi * 8)
+                        emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp)
+                    } else if fld_si >= 0 {
+                        emit_lea_rax(base_slot + fi)
+                    } else {
+                        emit_load_rax(base_slot + fi)
+                    }
+                } else { emit_mov_rax_imm(0) }
+            } else { emit_mov_rax_imm(0) }
+        } else {
+            compile_node(obj)
+            let lft_si = LAST_FIELD_TYPE_SI
+            let lft_layout = LAST_FIELD_LAYOUT
+            LAST_FIELD_TYPE_SI = -1
+            if lft_si >= 0 {
+                let fi2 = find_field_slot_offset(lft_si, fname_off, fname_len)
+                let fld_si2 = LAST_FIELD_TYPE_SI
+                if fi2 >= 0 {
+                    let fdisp2 = if lft_layout == 1 { fi2 * 8 } else { 0 - (fi2 * 8) }
+                    if fld_si2 >= 0 {
+                        // sub-struct field: return address (LEA or keep rax)
+                        LAST_FIELD_LAYOUT = lft_layout
+                        if fdisp2 == 0 {
+                            // rax already at sub-struct base
+                        } else {
+                            emit(0x48); emit(0x8D); emit(0x80); emit_u32(fdisp2)
+                        }
+                    } else {
+                        if fdisp2 == 0 {
+                            emit(0x48); emit(0x8B); emit(0x00)
+                        } else {
+                            emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp2)
+                        }
+                    }
+                } else { emit_mov_rax_imm(0) }
+            } else {
+                // Fallback: try CURRENT_IMPL_SI first, then search all structs
+                var found_fi: i64 = -1
+                if CURRENT_IMPL_SI >= 0 {
+                    found_fi = find_field_slot_offset(CURRENT_IMPL_SI, fname_off, fname_len)
+                }
+                if found_fi < 0 {
+                    var search_si: i64 = 0
+                    while search_si < ST_COUNT && found_fi < 0 {
+                        found_fi = find_field_slot_offset(search_si, fname_off, fname_len)
+                        if found_fi < 0 { search_si = search_si + 1 }
+                    }
+                }
+                if found_fi >= 0 {
+                    let fld_si3 = LAST_FIELD_TYPE_SI
+                    let fdisp3 = found_fi * 8
+                    if fld_si3 >= 0 {
+                        if fdisp3 == 0 {
+                            // rax at sub-struct base
+                        } else {
+                            emit(0x48); emit(0x8D); emit(0x80); emit_u32(fdisp3)
+                        }
+                    } else {
+                        if fdisp3 == 0 {
+                            emit(0x48); emit(0x8B); emit(0x00)
+                        } else {
+                            emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp3)
+                        }
+                    }
+                    LAST_FIELD_TYPE_SI = fld_si3
+                } else {
+                    emit_mov_rax_imm(0)
+                }
+            }
+        }
+        return 0
+    }
+    if kind == 10 {
+        let left = ND_LEFT[node as usize]
+        let right = ND_RIGHT[node as usize]
+        compile_node(right)
+        let tmp = alloc_slot()
+        emit_store_rax(tmp)
+        compile_node(left)
+        emit_load_rcx(tmp)
+        if ival == 0 { emit(0x48); emit(0x01); emit(0xC8) }
+        else if ival == 1 { emit(0x48); emit(0x29); emit(0xC8) }
+        else if ival == 2 { emit(0x48); emit(0x0F); emit(0xAF); emit(0xC1) }
+        else if ival == 3 {
+            emit(0x48); emit(0x99)
+            emit(0x48); emit(0xF7); emit(0xF9)
+        }
+        else if ival == 4 {
+            emit(0x48); emit(0x99)
+            emit(0x48); emit(0xF7); emit(0xF9)
+            emit(0x48); emit(0x89); emit(0xD0)
+        }
+        else if ival == 5 {
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x94); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 6 {
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x95); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 7 {
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x9C); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 8 {
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x9E); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 9 {
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x9F); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 10 {
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x9D); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 13 { emit(0x48); emit(0x21); emit(0xC8) }
+        else if ival == 14 { emit(0x48); emit(0x09); emit(0xC8) }
+        else if ival == 15 { emit(0x48); emit(0x31); emit(0xC8) }
+        else if ival == 16 {
+            emit(0x48); emit(0xD3); emit(0xE0)
+        }
+        else if ival == 17 {
+            emit(0x48); emit(0xD3); emit(0xF8)
+        }
+        else if ival == 11 {
+            emit(0x48); emit(0x85); emit(0xC0)
+            emit(0x0F); emit(0x95); emit(0xC0)
+            emit(0x48); emit(0x85); emit(0xC9)
+            emit(0x0F); emit(0x95); emit(0xC1)
+            emit(0x20); emit(0xC8)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 12 {
+            emit(0x48); emit(0x09); emit(0xC8)
+            emit(0x48); emit(0x85); emit(0xC0)
+            emit(0x0F); emit(0x95); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        return 0
+    }
+    if kind == 11 {
+        let operand = ND_LEFT[node as usize]
+        compile_node(operand)
+        if ival == 1 {
+            emit(0x48); emit(0xF7); emit(0xD8)
+        } else {
+            emit(0x48); emit(0x85); emit(0xC0)
+            emit(0x0F); emit(0x94); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        return 0
+    }
+    if kind == 13 {
+        let arr_nd = ND_LEFT[node as usize]
+        let idx_nd = ND_RIGHT[node as usize]
+        let avoff = ND_STR_OFF[arr_nd as usize]
+        let avlen = ND_STR_LEN[arr_nd as usize]
+        var asz: i64 = 1
+        if ND_KIND[arr_nd as usize] == 14 {
+            // Field array: obj.field[idx] — compute &obj.field[0] into rcx
+            let fobj_nd_r = ND_LEFT[arr_nd as usize]
+            let fobj_off_r = ND_STR_OFF[fobj_nd_r as usize]
+            let fobj_len_r = ND_STR_LEN[fobj_nd_r as usize]
+            let fld_off_r = ND_STR_OFF[arr_nd as usize]
+            let fld_len_r = ND_STR_LEN[arr_nd as usize]
+            let farr_slot = find_local(fobj_off_r, fobj_len_r)
+            let farr_si = LAST_LOCAL_SI
+            let farr_sptr = LAST_LOCAL_IS_SPTR
+            if farr_slot >= 0 && farr_si >= 0 && farr_sptr == 4 {
+                let ffi_r = find_field_slot_offset(farr_si, fld_off_r, fld_len_r)
+                if ffi_r >= 0 {
+                    emit_load_rax(farr_slot)
+                    emit(0x48); emit(0x8D); emit(0x88); emit_u32(ffi_r * 8)
+                    asz = 8
+                } else { emit(0x48); emit(0x31); emit(0xC9) }
+            } else if farr_slot >= 0 && farr_si >= 0 {
+                let ffi_r2 = find_field_slot_offset(farr_si, fld_off_r, fld_len_r)
+                if ffi_r2 >= 0 {
+                    let fadisp = 0 - ((farr_slot + ffi_r2 + 1) * 8)
+                    emit(0x48); emit(0x8D); emit(0x8D); emit_u32(fadisp)
+                    asz = 8
+                } else { emit(0x48); emit(0x31); emit(0xC9) }
+            } else { emit(0x48); emit(0x31); emit(0xC9) }
+        } else {
+        var idx_gl_elem_si: i64 = -1
+        let aslot = find_local(avoff, avlen)
+        if aslot >= 0 {
+            let adisp = 0 - ((aslot + 1) * 8)
+            emit(0x48); emit(0x8B); emit(0x8D); emit_u32(adisp)
+        } else {
+            let agi = mb_find_global(avoff, avlen)
+            if agi >= 0 {
+                let gaaddr = 0x700000 + MB_GL_OFF[agi as usize]
+                emit(0x48); emit(0xB9); emit_u64(gaaddr)
+                asz = MB_GL_SZ[agi as usize]
+                idx_gl_elem_si = MB_GL_ELEM_SI[agi as usize]
+            } else {
+                emit(0x48); emit(0x31); emit(0xC9)
+            }
+        }
+        }
+        let idx_save = alloc_slot()
+        emit(0x48); emit(0x89); emit(0x8D); emit_u32(0 - ((idx_save + 1) * 8))
+        compile_node(idx_nd)
+        emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((idx_save + 1) * 8))
+        if asz == 1 {
+            emit(0x48); emit(0x01); emit(0xC1)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0x01)
+        } else if asz > 8 {
+            // Struct-typed array element: compute base + idx * asz, return pointer
+            // imul rax, asz  (48 69 C0 imm32)
+            emit(0x48); emit(0x69); emit(0xC0); emit_u32(asz)
+            // add rcx, rax
+            emit(0x48); emit(0x01); emit(0xC1)
+            // mov rax, rcx  (return pointer to element)
+            emit(0x48); emit(0x89); emit(0xC8)
+            // Set LAST_FIELD_TYPE_SI so NK_FIELD can use it
+            if idx_gl_elem_si >= 0 {
+                LAST_FIELD_TYPE_SI = idx_gl_elem_si
+                LAST_FIELD_LAYOUT = 1  // positive offsets (BSS/heap-style)
+            }
+        } else {
+            emit(0x48); emit(0xC1); emit(0xE0); emit(0x03)
+            emit(0x48); emit(0x01); emit(0xC1)
+            emit(0x48); emit(0x8B); emit(0x01)
+        }
+        return 0
+    }
+    if kind == 12 {
+        let callee = ND_LEFT[node as usize]
+        let c_off = ND_STR_OFF[callee as usize]
+        let c_len = ND_STR_LEN[callee as usize]
+
+        // Box::new(struct_lit_or_value) — bump-allocate and store
+        if c_len >= 8 && POOL[(c_off) as usize] == 66 && POOL[(c_off + 1) as usize] == 111 && POOL[(c_off + 2) as usize] == 120 && POOL[(c_off + 3) as usize] == 58 && POOL[(c_off + 4) as usize] == 58 && POOL[(c_off + 5) as usize] == 110 && POOL[(c_off + 6) as usize] == 101 && POOL[(c_off + 7) as usize] == 119 {
+            // "Box::new"
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 {
+                let a_nk = ND_KIND[arg0 as usize]
+                if a_nk == 47 {
+                    // Struct literal: compile into temp slots, then bump-alloc + copy
+                    let slit_si = ND_IVAL[arg0 as usize]
+                    var alloc_size: i64 = 8
+                    if slit_si >= 0 { alloc_size = struct_total_slots(slit_si) * 8 }
+                    let tmp_slot = NEXT_SLOT
+                    compile_struct_lit_into(arg0, tmp_slot)
+                    let fc_box = if slit_si >= 0 { struct_total_slots(slit_si) } else { 1 }
+                    var dummy_i: i64 = 0
+                    while dummy_i < fc_box { alloc_slot(); dummy_i = dummy_i + 1 }
+                    // Bump allocate: rax = HEAP_PTR; HEAP_PTR += alloc_size
+                    emit(0x48); emit(0xB9); emit_u64(0x700200)      // movabs rcx, HEAP_PTR_addr
+                    emit(0x48); emit(0x8B); emit(0x01)               // mov rax, [rcx]
+                    emit(0x48); emit(0x8D); emit(0x90); emit_u32(alloc_size) // lea rdx, [rax + alloc_size]
+                    emit(0x48); emit(0x89); emit(0x11)               // mov [rcx], rdx (update HEAP_PTR)
+                    // rax = allocated address. Copy struct from stack to heap.
+                    let ptr_save = alloc_slot()
+                    emit_store_rax(ptr_save)
+                    var ci_box: i64 = 0
+                    while ci_box < fc_box {
+                        emit_load_rax(tmp_slot + ci_box)
+                        emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((ptr_save + 1) * 8)) // mov rcx, [rbp-ptr_save]
+                        emit(0x48); emit(0x89); emit(0x81); emit_u32(ci_box * 8) // mov [rcx + ci_box*8], rax
+                        ci_box = ci_box + 1
+                    }
+                    emit_load_rax(ptr_save) // return pointer
+                    LAST_FIELD_TYPE_SI = slit_si  // propagate struct type for let/var handler
+                } else {
+                    // Non-struct: just allocate 8 bytes and store
+                    compile_node(arg0)
+                    let val_save = alloc_slot()
+                    emit_store_rax(val_save)
+                    emit(0x48); emit(0xB9); emit_u64(0x700200)
+                    emit(0x48); emit(0x8B); emit(0x01)
+                    emit(0x48); emit(0x8D); emit(0x50); emit(0x08)   // lea rdx, [rax+8]
+                    emit(0x48); emit(0x89); emit(0x11)
+                    emit_load_rcx(val_save)
+                    emit(0x48); emit(0x89); emit(0x08)               // mov [rax], rcx
+                }
+            } else {
+                emit_mov_rax_imm(0)
+            }
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "str_len") {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }
+            emit(0x48); emit(0x89); emit(0xC7)
+            emit(0x48); emit(0x31); emit(0xC9)
+            emit(0x80); emit(0x3C); emit(0x0F); emit(0x00)
+            emit(0x74); emit(0x05)
+            emit(0x48); emit(0xFF); emit(0xC1)
+            emit(0xEB); emit(0 - 11)
+            emit(0x48); emit(0x89); emit(0xC8)
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "str_char_at") {
+            let arg0 = ND_EXTRA[node as usize]
+            var arg1: i64 = -1
+            if arg0 != -1 { arg1 = ND_EXTRA[arg0 as usize] }
+            let s0 = alloc_slot()
+            let s1 = alloc_slot()
+            if arg0 != -1 { compile_node(arg0); emit_store_rax(s0) }
+            if arg1 != -1 { compile_node(arg1); emit_store_rax(s1) }
+            emit_load_rax(s0)
+            emit(0x48); emit(0x89); emit(0xC7)
+            emit_load_rax(s1)
+            emit(0x48); emit(0x89); emit(0xC6)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0x04); emit(0x37)
+            return 0
+        }
+
+        // str_from_bytes(buf, len) → null-terminate and return buf pointer
+        if pool_match(c_off, c_len, "str_from_bytes") {
+            let sfb_arg0 = ND_EXTRA[node as usize]
+            var sfb_arg1: i64 = -1
+            if sfb_arg0 != -1 { sfb_arg1 = ND_EXTRA[sfb_arg0 as usize] }
+            let sfb_s0 = alloc_slot()
+            let sfb_s1 = alloc_slot()
+            if sfb_arg0 != -1 { compile_node(sfb_arg0); emit_store_rax(sfb_s0) }
+            if sfb_arg1 != -1 { compile_node(sfb_arg1); emit_store_rax(sfb_s1) }
+            // buf[len] = 0 (null-terminate)
+            emit_load_rax(sfb_s0)  // rax = buf pointer
+            emit_load_rcx(sfb_s1)  // rcx = len
+            emit(0xC6); emit(0x04); emit(0x08); emit(0x00)  // mov byte [rax+rcx], 0
+            // return buf pointer
+            emit_load_rax(sfb_s0)
+            return 0
+        }
+
+        // str_eq(a, b) → compare null-terminated strings, return 1 if equal
+        if pool_match(c_off, c_len, "str_eq") {
+            let seq_arg0 = ND_EXTRA[node as usize]
+            var seq_arg1: i64 = -1
+            if seq_arg0 != -1 { seq_arg1 = ND_EXTRA[seq_arg0 as usize] }
+            let seq_s0 = alloc_slot()
+            let seq_s1 = alloc_slot()
+            if seq_arg0 != -1 { compile_node(seq_arg0); emit_store_rax(seq_s0) }
+            if seq_arg1 != -1 { compile_node(seq_arg1); emit_store_rax(seq_s1) }
+            emit_load_rax(seq_s0)
+            emit(0x48); emit(0x89); emit(0xC7)  // mov rdi, rax
+            emit_load_rax(seq_s1)
+            emit(0x48); emit(0x89); emit(0xC6)  // mov rsi, rax
+            emit(0x31); emit(0xC0)              // xor eax, eax (result = 0 = not equal)
+            // loop: compare bytes
+            emit(0x8A); emit(0x0F)              // mov cl, [rdi]
+            emit(0x3A); emit(0x0E)              // cmp cl, [rsi]
+            emit(0x75); emit(0x0A)              // jne done (not equal)
+            emit(0x84); emit(0xC9)              // test cl, cl
+            emit(0x74); emit(0x04)              // je equal (both null)
+            emit(0x48); emit(0xFF); emit(0xC7)  // inc rdi
+            emit(0x48); emit(0xFF); emit(0xC6)  // inc rsi
+            emit(0xEB); emit(0xEE)              // jmp loop
+            // equal:
+            emit(0xB0); emit(0x01)              // mov al, 1
+            // done:
+            return 0
+        }
+
+        // read_byte(ptr, idx) → return byte at ptr[idx]
+        if pool_match(c_off, c_len, "read_byte") {
+            let rb_arg0 = ND_EXTRA[node as usize]
+            var rb_arg1: i64 = -1
+            if rb_arg0 != -1 { rb_arg1 = ND_EXTRA[rb_arg0 as usize] }
+            let rb_s0 = alloc_slot()
+            let rb_s1 = alloc_slot()
+            if rb_arg0 != -1 { compile_node(rb_arg0); emit_store_rax(rb_s0) }
+            if rb_arg1 != -1 { compile_node(rb_arg1); emit_store_rax(rb_s1) }
+            emit_load_rax(rb_s0)
+            emit(0x48); emit(0x89); emit(0xC7)  // mov rdi, rax
+            emit_load_rax(rb_s1)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0x04); emit(0x07)  // movzx rax, byte [rdi+rax]
+            return 0
+        }
+
+        // print_char(ch) → write single byte to stdout
+        if pool_match(c_off, c_len, "print_char") {
+            let pc_arg = ND_EXTRA[node as usize]
+            if pc_arg != -1 { compile_node(pc_arg) }
+            let pc_s = alloc_slot()
+            emit_store_rax(pc_s)
+            emit_lea_rax(pc_s)
+            emit(0x48); emit(0x89); emit(0xC6)  // mov rsi, rax
+            emit(0xBA); emit_u32(1)              // mov edx, 1
+            emit(0xBF); emit_u32(1)              // mov edi, 1
+            emit(0xB8); emit_u32(1)              // mov eax, SYS_write
+            emit(0x0F); emit(0x05)               // syscall
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "print") {
+            let arg = ND_EXTRA[node as usize]
+            if arg != -1 {
+                compile_node(arg)
+                // rax = pointer to string; compute strlen at runtime
+                emit(0x48); emit(0x89); emit(0xC6)  // mov rsi, rax  (save ptr)
+                // inline strlen: rdi = ptr, rcx = 0, scan until null
+                emit(0x48); emit(0x89); emit(0xC7)  // mov rdi, rax
+                emit(0x31); emit(0xC9)              // xor ecx, ecx
+                // loop: cmp byte [rdi+rcx], 0; je done; inc rcx; jmp loop
+                emit(0x80); emit(0x3C); emit(0x0F); emit(0x00)  // cmp byte [rdi+rcx], 0
+                emit(0x74); emit(0x04)              // je +4
+                emit(0x48); emit(0xFF); emit(0xC1)  // inc rcx
+                emit(0xEB); emit(0xF5)              // jmp -11
+                emit(0x48); emit(0x89); emit(0xCA)  // mov rdx, rcx  (length)
+                emit(0xBF); emit_u32(1)             // mov edi, 1
+                emit(0xB8); emit_u32(1)             // mov eax, 1
+                emit(0x0F); emit(0x05)              // syscall
+            }
+            emit_mov_rax_imm(0)
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "print_int") {
+            let arg = ND_EXTRA[node as usize]
+            if arg != -1 {
+                compile_node(arg)
+            }
+            emit(0x48); emit(0x89); emit(0xC7)
+            emit(0xE8)
+            let rel = PRINT_INT_OFF - (CODE_LEN + 4)
+            emit_u32(rel)
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "exit") {
+            let arg = ND_EXTRA[node as usize]
+            if arg != -1 {
+                compile_node(arg)
+            }
+            emit(0x48); emit(0x89); emit(0xC7)
+            emit(0x48); emit(0xC7); emit(0xC0); emit_u32(60)
+            emit(0x0F); emit(0x05)
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "arg_count") {
+            emit(0x48); emit(0xB8); emit_u64(0x700000)
+            emit(0x48); emit(0x8B); emit(0x00)
+            emit(0x48); emit(0x8B); emit(0x00)
+            emit(0x48); emit(0xFF); emit(0xC8)
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "get_arg") {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }
+            emit(0x48); emit(0x83); emit(0xC0); emit(2)
+            emit(0x48); emit(0x89); emit(0xC2)
+            emit(0x48); emit(0xB9); emit_u64(0x700000)
+            emit(0x48); emit(0x8B); emit(0x09)
+            emit(0x48); emit(0x8B); emit(0x04); emit(0xD1)
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "file_size") {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }
+            emit(0x48); emit(0x89); emit(0xC7)
+            emit(0x48); emit(0x31); emit(0xF6)
+            emit(0x48); emit(0x31); emit(0xD2)
+            emit(0xB8); emit_u32(2)
+            emit(0x0F); emit(0x05)
+            emit(0x48); emit(0x89); emit(0xC7)
+            emit(0x48); emit(0x81); emit(0xEC); emit_u32(176)
+            emit(0x48); emit(0x89); emit(0xE6)
+            emit(0x57)
+            emit(0xB8); emit_u32(5)
+            emit(0x0F); emit(0x05)
+            emit(0x48); emit(0x8B); emit(0x44); emit(0x24); emit(56)
+            emit(0x50)
+            emit(0x48); emit(0x8B); emit(0x7C); emit(0x24); emit(8)
+            emit(0xB8); emit_u32(3)
+            emit(0x0F); emit(0x05)
+            emit(0x58)
+            emit(0x48); emit(0x81); emit(0xC4); emit_u32(184)
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "read_file") {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }
+            emit(0x50)
+            emit(0x48); emit(0x31); emit(0xFF)
+            emit(0x48); emit(0xBE); emit_u64(1048576)
+            emit(0xBA); emit_u32(3)
+            emit(0x41); emit(0xBA); emit_u32(0x22)
+            emit(0x49); emit(0xC7); emit(0xC0); emit_u32(0 - 1)
+            emit(0x4D); emit(0x31); emit(0xC9)
+            emit(0xB8); emit_u32(9)
+            emit(0x0F); emit(0x05)
+            emit(0x50)
+            emit(0x48); emit(0x8B); emit(0x7C); emit(0x24); emit(8)
+            emit(0x48); emit(0x31); emit(0xF6)
+            emit(0x48); emit(0x31); emit(0xD2)
+            emit(0xB8); emit_u32(2)
+            emit(0x0F); emit(0x05)
+            emit(0x50)
+            emit(0x48); emit(0x8B); emit(0x3C); emit(0x24)
+            emit(0x48); emit(0x8B); emit(0x74); emit(0x24); emit(8)
+            emit(0x48); emit(0xBA); emit_u64(1048576)
+            emit(0xB8); emit_u32(0)
+            emit(0x0F); emit(0x05)
+            emit(0x5F)
+            emit(0xB8); emit_u32(3)
+            emit(0x0F); emit(0x05)
+            emit(0x58)
+            emit(0x48); emit(0x83); emit(0xC4); emit(8)
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "write_file") {
+            var wf_argc: i64 = 0
+            var wf_node = ND_EXTRA[node as usize]
+            while wf_node != -1 && wf_argc < 3 {
+                if wf_argc == 1 && ND_KIND[wf_node as usize] == 2 {
+                    let wf_voff = ND_STR_OFF[wf_node as usize]
+                    let wf_vlen = ND_STR_LEN[wf_node as usize]
+                    let wf_gi = mb_find_global(wf_voff, wf_vlen)
+                    if wf_gi >= 0 {
+                        let wf_gaddr = 0x700000 + MB_GL_OFF[wf_gi as usize]
+                        emit_mov_rax_imm(wf_gaddr)
+                    } else {
+                        compile_node(wf_node)
+                    }
+                } else {
+                    compile_node(wf_node)
+                }
+                emit(0x50)
+                wf_argc = wf_argc + 1
+                wf_node = ND_EXTRA[wf_node as usize]
+            }
+            emit(0x59)
+            emit(0x5E)
+            emit(0x5F)
+            emit(0x51); emit(0x56)
+            emit(0x48); emit(0xBE); emit_u64(0x241)
+            emit(0xBA); emit_u32(420)
+            emit(0xB8); emit_u32(2)
+            emit(0x0F); emit(0x05)
+            emit(0x48); emit(0x89); emit(0xC7)
+            emit(0x57)
+            emit(0x48); emit(0x8B); emit(0x74); emit(0x24); emit(8)
+            emit(0x48); emit(0x8B); emit(0x54); emit(0x24); emit(16)
+            emit(0xB8); emit_u32(1)
+            emit(0x0F); emit(0x05)
+            emit(0x5F)
+            emit(0xB8); emit_u32(3)
+            emit(0x0F); emit(0x05)
+            emit(0x48); emit(0x83); emit(0xC4); emit(16)
+            emit_mov_rax_imm(0)
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "load_source") && MB_SRC_BUF_GADDR != 0 {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }
+            emit(0x48); emit(0x89); emit(0xC7)
+            emit(0x48); emit(0x31); emit(0xF6)
+            emit(0x48); emit(0x31); emit(0xD2)
+            emit(0xB8); emit_u32(2)
+            emit(0x0F); emit(0x05)
+            emit(0x50)
+            emit(0x48); emit(0x31); emit(0xFF)
+            emit(0x48); emit(0xBE); emit_u64(1048576)
+            emit(0xBA); emit_u32(3)
+            emit(0x41); emit(0xBA); emit_u32(0x22)
+            emit(0x49); emit(0xC7); emit(0xC0); emit_u32(0 - 1)
+            emit(0x4D); emit(0x31); emit(0xC9)
+            emit(0xB8); emit_u32(9)
+            emit(0x0F); emit(0x05)
+            emit(0x50)
+            emit(0x48); emit(0x8B); emit(0x7C); emit(0x24); emit(8)
+            emit(0x48); emit(0x8B); emit(0x74); emit(0x24); emit(0)
+            emit(0x48); emit(0xBA); emit_u64(1048576)
+            emit(0xB8); emit_u32(0)
+            emit(0x0F); emit(0x05)
+            emit(0x50)
+            emit(0x48); emit(0x8B); emit(0x7C); emit(0x24); emit(16)
+            emit(0xB8); emit_u32(3)
+            emit(0x0F); emit(0x05)
+            emit(0x58)
+            emit(0x59)
+            emit(0x5A)
+            emit(0x48); emit(0xBA); emit_u64(MB_SRC_BUF_GADDR)
+            emit(0x48); emit(0x89); emit(0x0A)
+            emit(0x48); emit(0xBA); emit_u64(MB_SRC_LEN_GADDR)
+            emit(0x48); emit(0x89); emit(0x02)
+            return 0
+        }
+
+        if pool_match(c_off, c_len, "source_byte") && MB_SRC_BUF_GADDR != 0 {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }
+            emit(0x48); emit(0xB9); emit_u64(MB_SRC_BUF_GADDR)
+            emit(0x48); emit(0x8B); emit(0x09)
+            emit(0x48); emit(0x01); emit(0xC1)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0x01)
+            return 0
+        }
+
+        var argc: i64 = 0
+        var arg_node = ND_EXTRA[node as usize]
+        var arg_slot0: i64 = 0
+        var arg_slot1: i64 = 0
+        var arg_slot2: i64 = 0
+        var arg_slot3: i64 = 0
+        while arg_node != -1 && argc < 4 {
+            // For direct struct local args (NK_IDENT), pass address instead of value
+            var did_lea: i64 = 0
+            if ND_KIND[arg_node as usize] == 2 {
+                let av_off = ND_STR_OFF[arg_node as usize]
+                let av_len = ND_STR_LEN[arg_node as usize]
+                let av_slot = find_local(av_off, av_len)
+                if av_slot >= 0 && LAST_LOCAL_SI >= 0 && LAST_LOCAL_IS_SPTR == 0 {
+                    emit_lea_rax(av_slot)
+                    did_lea = 1
+                }
+            }
+            if did_lea == 0 && ND_KIND[arg_node as usize] == 14 {
+                // NK_FIELD arg: if sub-struct of is_sptr=4 parent, copy to stack (negative-offset convention)
+                let fa_obj2 = ND_LEFT[arg_node as usize]
+                let fa_foff2 = ND_STR_OFF[arg_node as usize]
+                let fa_flen2 = ND_STR_LEN[arg_node as usize]
+                if ND_KIND[fa_obj2 as usize] == 2 {
+                    let fa_ooff2 = ND_STR_OFF[fa_obj2 as usize]
+                    let fa_olen2 = ND_STR_LEN[fa_obj2 as usize]
+                    let fa_oslot2 = find_local(fa_ooff2, fa_olen2)
+                    let fa_osi2 = LAST_LOCAL_SI
+                    let fa_osptr2 = LAST_LOCAL_IS_SPTR
+                    if fa_oslot2 >= 0 && fa_osi2 >= 0 && fa_osptr2 == 4 {
+                        let fa_fi2 = find_field_slot_offset(fa_osi2, fa_foff2, fa_flen2)
+                        let fa_fsi2 = LAST_FIELD_TYPE_SI
+                        if fa_fi2 >= 0 && fa_fsi2 >= 0 {
+                            let fa_fc2 = struct_total_slots(fa_fsi2)
+                            if fa_fc2 > 0 && fa_fc2 <= 64 {
+                                let cp_base2 = NEXT_SLOT
+                                var cpi2: i64 = 0
+                                while cpi2 < fa_fc2 { alloc_slot(); cpi2 = cpi2 + 1 }
+                                let bss_save2 = alloc_slot()
+                                emit_load_rax(fa_oslot2)
+                                emit_store_rax(bss_save2)
+                                cpi2 = 0
+                                while cpi2 < fa_fc2 {
+                                    emit_load_rax(bss_save2)
+                                    emit(0x48); emit(0x8B); emit(0x80); emit_u32((fa_fi2 + cpi2) * 8)
+                                    emit_store_rax(cp_base2 + cpi2)
+                                    cpi2 = cpi2 + 1
+                                }
+                                emit_lea_rax(cp_base2)
+                                did_lea = 1
+                            }
+                        }
+                    }
+                }
+            }
+            if did_lea == 0 {
+                compile_node(arg_node)
+            }
+            let s = alloc_slot()
+            emit_store_rax(s)
+            if argc == 0 { arg_slot0 = s }
+            else if argc == 1 { arg_slot1 = s }
+            else if argc == 2 { arg_slot2 = s }
+            else { arg_slot3 = s }
+            argc = argc + 1
+            arg_node = ND_EXTRA[arg_node as usize]
+        }
+        if argc > 0 {
+            emit_load_rax(arg_slot0)
+            emit(0x48); emit(0x89); emit(0xC7)
+        }
+        if argc > 1 {
+            emit_load_rax(arg_slot1)
+            emit(0x48); emit(0x89); emit(0xC6)
+        }
+        if argc > 2 {
+            emit_load_rax(arg_slot2)
+            emit(0x48); emit(0x89); emit(0xC2)
+        }
+        if argc > 3 {
+            emit_load_rax(arg_slot3)
+            emit(0x48); emit(0x89); emit(0xC1)
+        }
+
+        let fn_idx = find_fn_by_name(c_off, c_len)
+        if fn_idx >= 0 {
+            // Direct call — CALL rel32 with fixup
+            emit(0xE8)
+            let fix_pos = CODE_LEN
+            emit_u32(0)
+            FIX_OFF[FIX_COUNT as usize] = fix_pos
+            FIX_TARGET[FIX_COUNT as usize] = fn_idx
+            FIX_COUNT = FIX_COUNT + 1
+        } else {
+            // Sprint 229: Indirect call — callee is a local variable holding fn pointer
+            let callee_slot = find_local(c_off, c_len)
+            if callee_slot >= 0 {
+                emit_load_rax(callee_slot)
+                emit(0xFF); emit(0xD0)  // CALL rax
+            } else {
+                // Unknown callee — print name bytes
+                print("WARN_FN '")
+                var wi: i64 = 0
+                while wi < c_len && wi < 40 {
+                    print_int(POOL[(c_off + wi) as usize])
+                    print(" ")
+                    wi = wi + 1
+                }
+                print("'\n")
+                emit(0xE8)
+                emit_u32(0)
+            }
+        }
+        return 0
+    }
+    // Kinds >= 30: dispatch to helper functions (boot3 256-local limit)
+    if kind == 33 || kind == 40 || kind == 41 || kind == 42 {
+        return compile_node_ctrl(node, kind, ival)
+    }
+    if kind >= 30 {
+        return compile_node_stmt(node, kind, ival)
+    }
+    0
+}
+
+// compile_node_ctrl: handles NK_BLOCK(33), NK_IF(40), NK_IF_ELSE(41), NK_WHILE(42)
+// Split from compile_node for boot3 256-local limit.
+fn compile_node_ctrl(node: i64, kind: i64, ival: i64) -> i64 with Mut, Panic, Div {
+    if kind == 33 {
+        var stmt = ND_LEFT[node as usize]
+        while stmt != -1 {
+            let next_s = ND_RIGHT[stmt as usize]
+            // Trailing struct return: last stmt is NK_EXPR_STMT(NK_IDENT of struct local)
+            // in a struct-returning function — emit SRET stores instead of normal load
+            if next_s == -1 && CURRENT_FN_RET_SI >= 0 && ND_KIND[stmt as usize] == 43 {
+                let inner = ND_LEFT[stmt as usize]
+                if inner != -1 {
+                    let ink = ND_KIND[inner as usize]
+                    if ink == 2 {
+                        // Trailing NK_IDENT of struct local → SRET stores (or thin ptr return)
+                        let soff = ND_STR_OFF[inner as usize]
+                        let slen = ND_STR_LEN[inner as usize]
+                        let sslot = find_local(soff, slen)
+                        let ssi = LAST_LOCAL_SI
+                        let ssptr = LAST_LOCAL_IS_SPTR
+                        if sslot >= 0 && ssi >= 0 {
+                            if ssptr == 4 {
+                                // Oversized: return BSS ptr directly in rax
+                                emit_load_rax(sslot)
+                                return 0
+                            }
+                            let sfc = struct_total_slots(ssi)
+                            emit_stack_to_sret_copy(sslot, sfc)
+                            emit_mov_rax_imm(0)
+                            return 0
+                        }
+                    } else if ink == 47 {
+                        // Trailing NK_STRUCT_LIT → SRET stores (or BSS ptr for oversized)
+                        let sret_fc = if CURRENT_FN_RET_SI >= 0 { struct_total_slots(CURRENT_FN_RET_SI) } else { 0 }
+                        if sret_fc > 64 {
+                            let bss_addr_r = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+                            OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + sret_fc * 8
+                            let ptr_slot_r = alloc_slot()
+                            emit_mov_rax_imm(bss_addr_r)
+                            emit_store_rax(ptr_slot_r)
+                            compile_struct_lit_into_ptr(inner, ptr_slot_r, 0)
+                            emit_load_rax(ptr_slot_r)
+                            return 0
+                        }
+                        compile_sret_from_struct_lit(inner, 0)
+                        emit_mov_rax_imm(0)
+                        return 0
+                    } else if ink == 12 || ink == 51 {
+                        // Trailing function call returning struct — callee writes SRET_BUF
+                        compile_node(stmt)
+                        return 0
+                    }
+                }
+            }
+            compile_node(stmt)
+            stmt = next_s
+        }
+        return 0
+    }
+    if kind == 40 || kind == 41 {
+        let name_off = ND_STR_OFF[node as usize]
+        let name_len = ND_STR_LEN[node as usize]
+        let init = ND_LEFT[node as usize]
+        var struct_si = ND_IVAL[node as usize]
+        let box_inner_hint = ND_EXTRA2[node as usize]  // from &Option<Box<T>> annotation
+        // Infer struct type from callee return type when no type annotation
+        if struct_si < 0 && init != -1 {
+            let init_nk_infer = ND_KIND[init as usize]
+            if init_nk_infer == 12 || init_nk_infer == 51 {
+                let callee_node = ND_LEFT[init as usize]
+                let call_off_infer = ND_STR_OFF[callee_node as usize]
+                let call_len_infer = ND_STR_LEN[callee_node as usize]
+                let call_fn_infer = find_fn_by_name(call_off_infer, call_len_infer)
+                if call_fn_infer >= 0 {
+                    let ret_si_infer = FN_RET_SI[call_fn_infer as usize]
+                    if ret_si_infer >= 0 {
+                        struct_si = ret_si_infer
+                    }
+                }
+            } else if init_nk_infer == 47 {
+                // NK_STRUCT_LIT: struct index stored in IVAL
+                let slit_si_infer = ND_IVAL[init as usize]
+                if slit_si_infer >= 0 {
+                    struct_si = slit_si_infer
+                }
+            }
+        }
+        if struct_si >= 0 && init != -1 && ND_KIND[init as usize] == 47 {
+            let fc2 = struct_total_slots(struct_si)
+            let bslot2 = add_local_struct(name_off, name_len, struct_si, fc2)
+            if fc2 > 64 {
+                // Oversized: claim BSS, store ptr in bslot2, write struct lit fields to BSS
+                let bss_addr = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+                OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + fc2 * 8
+                emit_mov_rax_imm(bss_addr)
+                emit_store_rax(bslot2)
+                compile_struct_lit_into_ptr(init, bslot2, 0)
+            } else {
+                compile_struct_lit_into(init, bslot2)
+            }
+            return 0
+        }
+        if init != -1 && ND_KIND[init as usize] == 50 {
+            let arr_count = ND_IVAL[init as usize]
+            let ptr_slot = add_local(name_off, name_len)
+            // For large arrays (> 256 elements), use a loop-based init to avoid code bloat
+            if arr_count > 256 {
+                // Use BSS allocation to avoid ptr_slot corruption by stack data
+                // Stack approach put data at slot S+1 while ptr_slot is at S;
+                // writing data[8] overwrites ptr_slot (1 slot = 8 bytes offset).
+                let arr_bss_addr = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+                OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + arr_count
+                // Align OVERSIZED_BSS_OFF to 8 bytes
+                let arr_rem = OVERSIZED_BSS_OFF - (OVERSIZED_BSS_OFF / 8) * 8
+                if arr_rem != 0 { OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + (8 - arr_rem) }
+                // Store BSS base address in ptr_slot
+                emit_mov_rax_imm(arr_bss_addr)
+                emit_store_rax(ptr_slot)
+                // BSS is zero-initialized by OS; only emit fill loop for non-zero fill
+                let fill_nd2 = ND_LEFT[init as usize]
+                let fill_nk2 = ND_KIND[fill_nd2 as usize]
+                let fill_v2 = ND_IVAL[fill_nd2 as usize]
+                if fill_nk2 != 4 || fill_v2 != 0 {
+                    // compile fill value into al (rax low byte)
+                    compile_node(fill_nd2)
+                    // mov rdi, arr_bss_addr  (48 BF imm64)
+                    emit(0x48); emit(0xBF); emit_u64(arr_bss_addr)
+                    // xor rcx, rcx
+                    emit(0x48); emit(0x31); emit(0xC9)
+                    // loop: mov byte [rdi+rcx], al  (88 04 0F)
+                    let loop_st2 = CODE_LEN
+                    emit(0x88); emit(0x04); emit(0x0F)
+                    // inc rcx  (48 FF C1)
+                    emit(0x48); emit(0xFF); emit(0xC1)
+                    // cmp rcx, arr_count  (48 81 F9 imm32)
+                    emit(0x48); emit(0x81); emit(0xF9); emit_u32(arr_count)
+                    // jl loop_st2  (7C rel8)
+                    let jl_off2 = CODE_LEN
+                    let jl_rel2 = loop_st2 - (jl_off2 + 2)
+                    emit(0x7C); emit(jl_rel2)
+                }
+            } else {
+                var ai: i64 = 0
+                while ai < arr_count {
+                    alloc_slot()
+                    ai = ai + 1
+                }
+                let data_disp = 0 - ((ptr_slot + 2) * 8)
+                emit(0x48); emit(0x8D); emit(0x85); emit_u32(data_disp)
+                emit_store_rax(ptr_slot)
+                var zi: i64 = 0
+                while zi < arr_count {
+                    let zdisp = 0 - ((ptr_slot + 2 + zi) * 8)
+                    compile_node(ND_LEFT[init as usize])
+                    emit(0x48); emit(0x89); emit(0x85); emit_u32(zdisp)
+                    zi = zi + 1
+                }
+            }
+        } else {
+            if struct_si >= 0 {
+                let fc3 = struct_total_slots(struct_si)
+                let bslot3 = add_local_struct(name_off, name_len, struct_si, fc3)
+                if init != -1 {
+                    let init_nk3 = ND_KIND[init as usize]
+                    if fc3 > 64 {
+                        // Oversized struct thin ptr — just copy pointer or receive from callee
+                        if init_nk3 == 2 {
+                            let src_off3 = ND_STR_OFF[init as usize]
+                            let src_len3 = ND_STR_LEN[init as usize]
+                            let src_slot3 = find_local(src_off3, src_len3)
+                            if src_slot3 >= 0 {
+                                emit_load_rax(src_slot3)
+                                emit_store_rax(bslot3)
+                            }
+                        } else if init_nk3 == 47 {
+                            // Struct literal for oversized: claim BSS, write fields via ptr
+                            let bss_addr3 = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+                            OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + fc3 * 8
+                            emit_mov_rax_imm(bss_addr3)
+                            emit_store_rax(bslot3)
+                            compile_struct_lit_into_ptr(init, bslot3, 0)
+                        } else {
+                            // Function call or other expr: callee returns thin ptr in rax
+                            compile_node(init)
+                            emit_store_rax(bslot3)
+                        }
+                    } else if init_nk3 == 2 {
+                        let src_off3 = ND_STR_OFF[init as usize]
+                        let src_len3 = ND_STR_LEN[init as usize]
+                        let src_slot3 = find_local(src_off3, src_len3)
+                        let src_sptr3 = LAST_LOCAL_IS_SPTR
+                        let src_si3 = LAST_LOCAL_SI
+                        if src_slot3 >= 0 && src_sptr3 == 1 {
+                            // Pointer-to-struct: copy from [ptr - fi*8]
+                            emit_load_rax(src_slot3)
+                            let ptr_tmp3 = alloc_slot()
+                            emit_store_rax(ptr_tmp3)
+                            var ci3: i64 = 0
+                            while ci3 < fc3 {
+                                emit_load_rax(ptr_tmp3)
+                                let fdisp3 = 0 - (ci3 * 8)
+                                emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp3)
+                                emit_store_rax(bslot3 + ci3)
+                                ci3 = ci3 + 1
+                            }
+                        } else if src_slot3 >= 0 && src_si3 >= 0 {
+                            // Plain struct local: field-by-field copy
+                            var cci3: i64 = 0
+                            while cci3 < fc3 {
+                                emit_load_rax(src_slot3 + cci3)
+                                emit_store_rax(bslot3 + cci3)
+                                cci3 = cci3 + 1
+                            }
+                        } else {
+                            compile_node(init)
+                            emit_store_rax(bslot3)
+                        }
+                    } else if init_nk3 == 12 || init_nk3 == 51 {
+                        // Function call returning struct: callee writes to SRET_BUF; copy from there
+                        compile_node(init)
+                        if fc3 <= 64 {
+                            emit_sret_to_stack_copy(bslot3, fc3)
+                        } else {
+                            // Struct too large for SRET buffer — treat as scalar
+                            emit_store_rax(bslot3)
+                        }
+                    } else {
+                        compile_node(init)
+                        emit_store_rax(bslot3)
+                    }
+                }
+            } else {
+                if init != -1 { compile_node(init) }
+                let box_si = LAST_FIELD_TYPE_SI
+                LAST_FIELD_TYPE_SI = -1
+                if box_si >= 0 {
+                    // Box::new result: track as heap-pointer-to-struct (is_sptr=2)
+                    let slot = add_local_sptr(name_off, name_len, box_si)
+                    LOCAL_IS_SPTR[LOCAL_COUNT as usize - 1] = 2
+                    if init != -1 { emit_store_rax(slot) }
+                } else {
+                    // Check if init is an ident that's a struct pointer — inherit type
+                    var inherit_si: i64 = -1
+                    var inherit_sptr: i64 = 0
+                    if init != -1 && ND_KIND[init as usize] == 2 {
+                        let ioff = ND_STR_OFF[init as usize]
+                        let ilen2 = ND_STR_LEN[init as usize]
+                        find_local(ioff, ilen2)
+                        if LAST_LOCAL_SI >= 0 && LAST_LOCAL_IS_SPTR > 0 {
+                            inherit_si = LAST_LOCAL_SI
+                            inherit_sptr = LAST_LOCAL_IS_SPTR
+                        }
+                    }
+                    if inherit_si >= 0 {
+                        let slot = add_local_sptr(name_off, name_len, inherit_si)
+                        LOCAL_IS_SPTR[LOCAL_COUNT as usize - 1] = inherit_sptr
+                        if init != -1 { emit_store_rax(slot) }
+                    } else {
+                        let slot = add_local(name_off, name_len)
+                        if init != -1 { emit_store_rax(slot) }
+                    }
+                }
+            }
+        }
+        // Set LOCAL_BOX_INNER_SI for the just-created local
+        if LOCAL_COUNT > 0 {
+            var final_bi: i64 = box_inner_hint
+            // Also inherit from source ident's LOCAL_BOX_INNER_SI
+            if final_bi < 0 && init != -1 && ND_KIND[init as usize] == 2 {
+                let bi_off = ND_STR_OFF[init as usize]
+                let bi_len = ND_STR_LEN[init as usize]
+                find_local(bi_off, bi_len)
+                if LAST_LOCAL_BOX_INNER >= 0 {
+                    final_bi = LAST_LOCAL_BOX_INNER
+                }
+            }
+            // Also check LAST_FIELD_TYPE_SI from &struct.field
+            if final_bi < 0 && LAST_FIELD_TYPE_SI >= 0 {
+                final_bi = LAST_FIELD_TYPE_SI
+            }
+            // Also check FN_RET_BOX_INNER_SI for function call return types
+            if final_bi < 0 && init != -1 {
+                let init_nk_bi = ND_KIND[init as usize]
+                if init_nk_bi == 12 {
+                    // Regular call: name in ND_LEFT
+                    let callee_bi = ND_LEFT[init as usize]
+                    if callee_bi != -1 {
+                        let cbi_off = ND_STR_OFF[callee_bi as usize]
+                        let cbi_len = ND_STR_LEN[callee_bi as usize]
+                        let cbi_fn = find_fn_by_name(cbi_off, cbi_len)
+                        if cbi_fn >= 0 {
+                            final_bi = FN_RET_BOX_INNER_SI[cbi_fn as usize]
+                        }
+                    }
+                } else if init_nk_bi == 51 {
+                    // Method call: name in ND_STR_OFF[init], qualify with all structs
+                    let mbi_off = ND_STR_OFF[init as usize]
+                    let mbi_len = ND_STR_LEN[init as usize]
+                    var mbi_si: i64 = 0
+                    while mbi_si < ST_COUNT && final_bi < 0 {
+                        let msn_off = ST_NAME_OFF[mbi_si as usize]
+                        let msn_len = ST_NAME_LEN[mbi_si as usize]
+                        let mq_off = pool_concat_colon(msn_off, msn_len, mbi_off, mbi_len)
+                        let mq_len = msn_len + 2 + mbi_len
+                        let mbi_fn = find_fn_by_name(mq_off, mq_len)
+                        if mbi_fn >= 0 {
+                            final_bi = FN_RET_BOX_INNER_SI[mbi_fn as usize]
+                        }
+                        mbi_si = mbi_si + 1
+                    }
+                }
+            }
+            if final_bi >= 0 {
+                LOCAL_BOX_INNER_SI[(LOCAL_COUNT - 1) as usize] = final_bi
+            }
+        }
+        LAST_FIELD_TYPE_SI = -1
+        return 0
+    }
+    if kind == 42 {
+        let target = ND_LEFT[node as usize]
+        let rhs = ND_EXTRA[node as usize]
+        let tk2 = ND_KIND[target as usize]
+        if tk2 == 2 {
+            let voff2 = ND_STR_OFF[target as usize]
+            let vlen2 = ND_STR_LEN[target as usize]
+            let slot2 = find_local(voff2, vlen2)
+            let dst_si2 = LAST_LOCAL_SI
+            let rhs_nk2 = ND_KIND[rhs as usize]
+            compile_node(rhs)
+            let fc_asgn_check = if dst_si2 >= 0 { struct_total_slots(dst_si2) } else { 0 }
+            if slot2 >= 0 && dst_si2 >= 0 && fc_asgn_check <= 64 && (rhs_nk2 == 12 || rhs_nk2 == 51) {
+                // Struct-returning call assigned to struct local — copy from SRET_BUF
+                let fc_asgn = fc_asgn_check
+                emit_sret_to_stack_copy(slot2, fc_asgn)
+            } else if slot2 >= 0 {
+                emit_store_rax(slot2)
+            } else {
+                let gi2 = mb_find_global(voff2, vlen2)
+                if gi2 >= 0 {
+                    let gaddr2 = 0x700000 + MB_GL_OFF[gi2 as usize]
+                    let gsave2 = alloc_slot()
+                    emit_store_rax(gsave2)
+                    emit(0x48); emit(0xB9); emit_u64(gaddr2)
+                    emit_load_rax(gsave2)
+                    if MB_GL_SZ[gi2 as usize] == 1 {
+                        emit(0x88); emit(0x01)
+                    } else {
+                        emit(0x48); emit(0x89); emit(0x01)
+                    }
+                }
+            }
+        } else if tk2 == 13 {
+            // For struct-typed array elements, compile RHS to get a pointer
+            // (not a value) so rep movsq can copy from it.
+            var rhs_is_struct_local: i64 = 0
+            if ND_KIND[rhs as usize] == 2 {
+                let rhs_off = ND_STR_OFF[rhs as usize]
+                let rhs_len = ND_STR_LEN[rhs as usize]
+                let rhs_slot = find_local(rhs_off, rhs_len)
+                if rhs_slot >= 0 && LAST_LOCAL_SI >= 0 && LAST_LOCAL_IS_SPTR == 0 {
+                    // Local multi-slot struct: emit LEA instead of LOAD
+                    emit_lea_rax(rhs_slot)
+                    rhs_is_struct_local = 1
+                } else if rhs_slot >= 0 && LAST_LOCAL_IS_SPTR == 1 {
+                    // IS_SPTR=1: already a pointer, just load it
+                    emit_load_rax(rhs_slot)
+                    rhs_is_struct_local = 1
+                } else if rhs_slot >= 0 && LAST_LOCAL_IS_SPTR == 4 {
+                    // IS_SPTR=4: BSS pointer, just load it
+                    emit_load_rax(rhs_slot)
+                    rhs_is_struct_local = 1
+                }
+            }
+            if rhs_is_struct_local == 0 {
+                compile_node(rhs)
+            }
+            let val_save = alloc_slot()
+            emit_store_rax(val_save)
+            let arr_nd2 = ND_LEFT[target as usize]
+            let idx_nd2 = ND_RIGHT[target as usize]
+            let avoff2 = ND_STR_OFF[arr_nd2 as usize]
+            let avlen2 = ND_STR_LEN[arr_nd2 as usize]
+            var asz2: i64 = 1
+            var asgn_gl_elem_si: i64 = -1
+            // Check if RHS is a struct ident (for multi-slot copy)
+            var rhs_struct_slot: i64 = -1
+            var rhs_struct_fc: i64 = 0
+            if ND_KIND[rhs as usize] == 2 {
+                let rhs_id_off = ND_STR_OFF[rhs as usize]
+                let rhs_id_len = ND_STR_LEN[rhs as usize]
+                let rhs_local = find_local(rhs_id_off, rhs_id_len)
+                if rhs_local >= 0 && LAST_LOCAL_SI >= 0 && LAST_LOCAL_IS_SPTR == 0 {
+                    rhs_struct_slot = rhs_local
+                    rhs_struct_fc = struct_total_slots(LAST_LOCAL_SI)
+                }
+            }
+            // Compile RHS for scalar case (struct multi-slot handled separately below)
+            if rhs_struct_fc <= 1 {
+                compile_node(rhs)
+            }
+            let val_save = alloc_slot()
+            if rhs_struct_fc <= 1 {
+                emit_store_rax(val_save)
+            }
+            if ND_KIND[arr_nd2 as usize] == 14 {
+                // Field array write: obj.field[idx] = val
+                let fobj_nd_w = ND_LEFT[arr_nd2 as usize]
+                let fobj_off_w = ND_STR_OFF[fobj_nd_w as usize]
+                let fobj_len_w = ND_STR_LEN[fobj_nd_w as usize]
+                let fld_off_w = ND_STR_OFF[arr_nd2 as usize]
+                let fld_len_w = ND_STR_LEN[arr_nd2 as usize]
+                let warr_slot = find_local(fobj_off_w, fobj_len_w)
+                let warr_si = LAST_LOCAL_SI
+                let warr_sptr = LAST_LOCAL_IS_SPTR
+                if warr_slot >= 0 && warr_si >= 0 && warr_sptr == 4 {
+                    let ffi_w = find_field_slot_offset(warr_si, fld_off_w, fld_len_w)
+                    if ffi_w >= 0 {
+                        emit_load_rax(warr_slot)
+                        emit(0x48); emit(0x8D); emit(0x88); emit_u32(ffi_w * 8)
+                        asz2 = 8
+                    } else { emit(0x48); emit(0x31); emit(0xC9) }
+                } else if warr_slot >= 0 && warr_si >= 0 {
+                    let ffi_w2 = find_field_slot_offset(warr_si, fld_off_w, fld_len_w)
+                    if ffi_w2 >= 0 {
+                        let wadisp = 0 - ((warr_slot + ffi_w2 + 1) * 8)
+                        emit(0x48); emit(0x8D); emit(0x8D); emit_u32(wadisp)
+                        asz2 = 8
+                    } else { emit(0x48); emit(0x31); emit(0xC9) }
+                } else { emit(0x48); emit(0x31); emit(0xC9) }
+            } else {
+            let aslot2 = find_local(avoff2, avlen2)
+            if aslot2 >= 0 {
+                let adisp2 = 0 - ((aslot2 + 1) * 8)
+                emit(0x48); emit(0x8B); emit(0x8D); emit_u32(adisp2)
+            } else {
+                let agi2 = mb_find_global(avoff2, avlen2)
+                if agi2 >= 0 {
+                    let gaaddr2 = 0x700000 + MB_GL_OFF[agi2 as usize]
+                    emit(0x48); emit(0xB9); emit_u64(gaaddr2)
+                    asz2 = MB_GL_SZ[agi2 as usize]
+                    asgn_gl_elem_si = MB_GL_ELEM_SI[agi2 as usize]
+                } else {
+                    emit(0x48); emit(0x31); emit(0xC9)
+                }
+            }
+            }
+            let base_save = alloc_slot()
+            emit(0x48); emit(0x89); emit(0x8D); emit_u32(0 - ((base_save + 1) * 8))
+            compile_node(idx_nd2)
+            emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((base_save + 1) * 8))
+            if asz2 == 1 {
+                // Byte array: base + index
+                emit(0x48); emit(0x01); emit(0xC1)
+            } else if asz2 == 8 {
+                // i64 array: index * 8
+                emit(0x48); emit(0xC1); emit(0xE0); emit(0x03)
+                emit(0x48); emit(0x01); emit(0xC1)
+            } else {
+                // Struct-typed array: index * asz2
+                emit(0x48); emit(0x69); emit(0xC0); emit_u32(asz2)  // imul rax, rax, asz2
+                emit(0x48); emit(0x01); emit(0xC1)                   // add rcx, rax
+            }
+            emit(0x48); emit(0x8B); emit(0x95); emit_u32(0 - ((val_save + 1) * 8))
+            if asz2 == 1 {
+                emit(0x88); emit(0x11)                    // mov [rcx], dl (byte)
+            } else if asz2 > 8 {
+                // Struct copy: rdx = source ptr, rcx = target addr
+                // Copy asz2/8 qwords using rep movsq
+                let dest_save = alloc_slot()
+                emit(0x48); emit(0x89); emit(0x8D); emit_u32(0 - ((dest_save + 1) * 8))  // save rcx (dest)
+                emit(0x48); emit(0x89); emit(0xD6)        // mov rsi, rdx (source)
+                emit(0x48); emit(0x89); emit(0xCF)        // mov rdi, rcx (dest)
+                emit(0x48); emit(0xC7); emit(0xC1); emit_u32(asz2 / 8) // mov rcx, count
+                emit(0xF3); emit(0x48); emit(0xA5)        // rep movsq
+            } else {
+                emit(0x48); emit(0x89); emit(0x11)        // mov [rcx], rdx (qword)
+            }
+        } else if tk2 == 46 {
+            // *ptr = value — store through pointer
+            compile_node(rhs)
+            let vs = alloc_slot()
+            emit_store_rax(vs)
+            compile_node(ND_LEFT[target as usize])
+            emit_load_rcx(vs)
+            emit(0x48); emit(0x89); emit(0x08)
+        } else if tk2 == 14 {
+            compile_node(rhs)
+            let val_s = alloc_slot()
+            emit_store_rax(val_s)
+            let obj_nd = ND_LEFT[target as usize]
+            let fn_off2 = ND_STR_OFF[target as usize]
+            let fn_len2 = ND_STR_LEN[target as usize]
+            let v_off2 = ND_STR_OFF[obj_nd as usize]
+            let v_len2 = ND_STR_LEN[obj_nd as usize]
+            let bs2 = find_local(v_off2, v_len2)
+            let lsi2 = LAST_LOCAL_SI
+            let is_sptr_w = LAST_LOCAL_IS_SPTR
+            if bs2 >= 0 && lsi2 >= 0 {
+                let fi3 = find_field_slot_offset(lsi2, fn_off2, fn_len2)
+                let fld_si3 = LAST_FIELD_TYPE_SI
+                if fi3 >= 0 {
+                    if is_sptr_w == 4 {
+                        // Oversized thin ptr: write to BSS[fi3*8]
+                        let rhs_nk_w = ND_KIND[rhs as usize]
+                        if fld_si3 >= 0 && (rhs_nk_w == 12 || rhs_nk_w == 51) {
+                            let rhs_fc_w = struct_total_slots(fld_si3)
+                            if rhs_fc_w > 0 && rhs_fc_w <= 64 {
+                                // SRET: copy rhs_fc_w slots from SRET_BUF to BSS[fi3*8..]
+                                var sfc_w: i64 = 0
+                                while sfc_w < rhs_fc_w {
+                                    emit(0x48); emit(0xB9); emit_u64(0x700000 + sfc_w * 8)
+                                    emit(0x48); emit(0x8B); emit(0x00)
+                                    emit_load_rcx(bs2)
+                                    emit(0x48); emit(0x89); emit(0x81); emit_u32((fi3 + sfc_w) * 8)
+                                    sfc_w = sfc_w + 1
+                                }
+                            } else {
+                                emit_load_rcx(bs2)
+                                emit_load_rax(val_s)
+                                emit(0x48); emit(0x89); emit(0x81); emit_u32(fi3 * 8)
+                            }
+                        } else {
+                            // Scalar or ident: store val_s directly
+                            emit_load_rcx(bs2)
+                            emit_load_rax(val_s)
+                            emit(0x48); emit(0x89); emit(0x81); emit_u32(fi3 * 8)
+                        }
+                    } else {
+                        emit_load_rax(val_s)
+                        emit_store_rax(bs2 + fi3)
+                    }
+                }
+            } else if ND_KIND[obj_nd as usize] == 13 {
+                // arr[idx].field = val — struct array field write
+                // Compile NK_INDEX to get pointer to element
+                compile_node(obj_nd)
+                let elem_ptr_save = alloc_slot()
+                emit_store_rax(elem_ptr_save)
+                // Use LAST_FIELD_TYPE_SI set by NK_INDEX for struct arrays
+                let idx_elem_si = LAST_FIELD_TYPE_SI
+                if idx_elem_si >= 0 {
+                    let fi_aw = find_field_slot_offset(idx_elem_si, fn_off2, fn_len2)
+                    if fi_aw >= 0 {
+                        emit_load_rcx(elem_ptr_save)
+                        emit_load_rax(val_s)
+                        emit(0x48); emit(0x89); emit(0x81); emit_u32(fi_aw * 8)
+                    }
+                }
+            }
+        }
+        return 0
+    }
+    0
+}
+
+// compile_node_stmt: handles NK_EXPR_STMT(43), NK_RETURN(34), NK_LET(30), NK_VAR(31),
+// NK_BREAK(35), NK_CONTINUE(36), NK_ASSIGN(44), NK_MATCH(51)
+// Split from compile_node for boot3 256-local limit.
+fn compile_node_stmt(node: i64, kind: i64, ival: i64) -> i64 with Mut, Panic, Div {
+    if kind == 43 {
+        let expr = ND_LEFT[node as usize]
+        compile_node(expr)
+        return 0
+    }
+    if kind == 34 {
+        let val = ND_LEFT[node as usize]
+        if val != -1 {
+            let val_nk = ND_KIND[val as usize]
+            if val_nk == 2 {
+                // NK_IDENT: check if struct local → SRET stores (or thin ptr return)
+                let rv_off = ND_STR_OFF[val as usize]
+                let rv_len = ND_STR_LEN[val as usize]
+                let rv_slot = find_local(rv_off, rv_len)
+                let rv_si = LAST_LOCAL_SI
+                let rv_sptr = LAST_LOCAL_IS_SPTR
+                if rv_slot >= 0 && rv_si >= 0 {
+                    if rv_sptr == 4 {
+                        // Oversized: return BSS ptr directly in rax
+                        emit_load_rax(rv_slot)
+                        emit_epilogue()
+                        return 0
+                    }
+                    let rv_fc = struct_total_slots(rv_si)
+                    emit_stack_to_sret_copy(rv_slot, rv_fc)
+                    emit_mov_rax_imm(0)
+                    emit_epilogue()
+                    return 0
+                }
+            } else if val_nk == 47 && CURRENT_FN_RET_SI >= 0 {
+                // NK_STRUCT_LIT: write fields to SRET_BUF (or BSS for oversized)
+                let rv_fc2 = struct_total_slots(CURRENT_FN_RET_SI)
+                if rv_fc2 > 64 {
+                    let bss_addr_rv = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+                    OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + rv_fc2 * 8
+                    let ptr_slot_rv = alloc_slot()
+                    emit_mov_rax_imm(bss_addr_rv)
+                    emit_store_rax(ptr_slot_rv)
+                    compile_struct_lit_into_ptr(val, ptr_slot_rv, 0)
+                    emit_load_rax(ptr_slot_rv)
+                    emit_epilogue()
+                    return 0
+                }
+                compile_sret_from_struct_lit(val, 0)
+                emit_mov_rax_imm(0)
+                emit_epilogue()
+                return 0
+            }
+        }
+        compile_node(val)
+        emit_epilogue()
+        return 0
+    }
+    if kind == 30 {
+        let cond = ND_LEFT[node as usize]
+        let then_body = ND_EXTRA[node as usize]
+        let else_body = ND_EXTRA2[node as usize]
+        compile_node(cond)
+        emit(0x48); emit(0x85); emit(0xC0)
+        emit(0x0F); emit(0x84)
+        let je_pos = CODE_LEN
+        emit_u32(0)
+        compile_node(then_body)
+        if else_body != -1 {
+            emit(0xE9)
+            let jmp_pos = CODE_LEN
+            emit_u32(0)
+            let else_off = CODE_LEN - je_pos - 4
+            CODE[je_pos as usize] = (else_off & 0xFF) as i8
+            CODE[(je_pos + 1) as usize] = ((else_off >> 8) & 0xFF) as i8
+            CODE[(je_pos + 2) as usize] = ((else_off >> 16) & 0xFF) as i8
+            CODE[(je_pos + 3) as usize] = ((else_off >> 24) & 0xFF) as i8
+            compile_node(else_body)
+            let end_off = CODE_LEN - jmp_pos - 4
+            CODE[jmp_pos as usize] = (end_off & 0xFF) as i8
+            CODE[(jmp_pos + 1) as usize] = ((end_off >> 8) & 0xFF) as i8
+            CODE[(jmp_pos + 2) as usize] = ((end_off >> 16) & 0xFF) as i8
+            CODE[(jmp_pos + 3) as usize] = ((end_off >> 24) & 0xFF) as i8
+        } else {
+            let skip_off = CODE_LEN - je_pos - 4
+            CODE[je_pos as usize] = (skip_off & 0xFF) as i8
+            CODE[(je_pos + 1) as usize] = ((skip_off >> 8) & 0xFF) as i8
+            CODE[(je_pos + 2) as usize] = ((skip_off >> 16) & 0xFF) as i8
+            CODE[(je_pos + 3) as usize] = ((skip_off >> 24) & 0xFF) as i8
+        }
+        return 0
+    }
+    if kind == 31 {
+        let cond = ND_LEFT[node as usize]
+        let body = ND_EXTRA[node as usize]
+        let prev_loop_top = LOOP_TOP
+        let prev_break_count = BREAK_FIXUP_COUNT
+        let loop_top = CODE_LEN
+        LOOP_TOP = loop_top
+        compile_node(cond)
+        emit(0x48); emit(0x85); emit(0xC0)
+        emit(0x0F); emit(0x84)
+        let je_pos = CODE_LEN
+        emit_u32(0)
+        compile_node(body)
+        emit(0xE9)
+        let jmp_rel = loop_top - (CODE_LEN + 4)
+        emit_u32(jmp_rel)
+        let loop_exit = CODE_LEN
+        let exit_off = loop_exit - je_pos - 4
+        CODE[je_pos as usize] = (exit_off & 0xFF) as i8
+        CODE[(je_pos + 1) as usize] = ((exit_off >> 8) & 0xFF) as i8
+        CODE[(je_pos + 2) as usize] = ((exit_off >> 16) & 0xFF) as i8
+        CODE[(je_pos + 3) as usize] = ((exit_off >> 24) & 0xFF) as i8
+        var bfi: i64 = prev_break_count
+        while bfi < BREAK_FIXUP_COUNT {
+            let bpos = BREAK_FIXUP_OFF[bfi as usize]
+            let brel = loop_exit - bpos - 4
+            CODE[bpos as usize] = (brel & 0xFF) as i8
+            CODE[(bpos + 1) as usize] = ((brel >> 8) & 0xFF) as i8
+            CODE[(bpos + 2) as usize] = ((brel >> 16) & 0xFF) as i8
+            CODE[(bpos + 3) as usize] = ((brel >> 24) & 0xFF) as i8
+            bfi = bfi + 1
+        }
+        BREAK_FIXUP_COUNT = prev_break_count
+        LOOP_TOP = prev_loop_top
+        return 0
+    }
+    if kind == 35 {
+        emit(0xE9)
+        let brk_pos = CODE_LEN
+        emit_u32(0)
+        let bfi = BREAK_FIXUP_COUNT
+        BREAK_FIXUP_OFF[bfi as usize] = brk_pos
+        BREAK_FIXUP_COUNT = BREAK_FIXUP_COUNT + 1
+        return 0
+    }
+    if kind == 36 {
+        if LOOP_TOP > 0 {
+            emit(0xE9)
+            let cont_rel = LOOP_TOP - (CODE_LEN + 4)
+            emit_u32(cont_rel)
+        }
+        return 0
+    }
+    if kind == 44 {
+        // Determine Box inner type from scrutinee for Some bindings
+        var match_box_si: i64 = -1
+        let scr_nd = ND_LEFT[node as usize]
+        // Common pattern: match *ptr { Some(x) => ... } where ptr is &Option<Box<T>>
+        // Scrutinee is DEREF(ident) → check if ident's struct type has an Option<Box<T>> field
+        // OR scrutinee is a field access → check field's FLD_BOX_INNER_SI
+        if ND_KIND[scr_nd as usize] == 46 {
+            let scr_inner = ND_LEFT[scr_nd as usize]
+            if ND_KIND[scr_inner as usize] == 2 {
+                let sc_off = ND_STR_OFF[scr_inner as usize]
+                let sc_len = ND_STR_LEN[scr_inner as usize]
+                find_local(sc_off, sc_len)
+                let scr_si = LAST_LOCAL_SI
+                // Check LOCAL_BOX_INNER_SI first (from type annotation)
+                if LAST_LOCAL_BOX_INNER >= 0 {
+                    match_box_si = LAST_LOCAL_BOX_INNER
+                } else if scr_si >= 0 && LAST_LOCAL_IS_SPTR == 2 {
+                    match_box_si = scr_si
+                }
+            }
+        } else if ND_KIND[scr_nd as usize] == 14 {
+            // Field access: check FLD_BOX_INNER_SI
+            let f_obj = ND_LEFT[scr_nd as usize]
+            let f_off = ND_STR_OFF[scr_nd as usize]
+            let f_len = ND_STR_LEN[scr_nd as usize]
+            if ND_KIND[f_obj as usize] == 2 {
+                let fo_off = ND_STR_OFF[f_obj as usize]
+                let fo_len = ND_STR_LEN[f_obj as usize]
+                find_local(fo_off, fo_len)
+                let fo_si = LAST_LOCAL_SI
+                if fo_si >= 0 {
+                    let fi_idx = find_field_b4(fo_si, f_off, f_len)
+                    if fi_idx >= 0 {
+                        let fld_base = ST_FIELD_FIRST[fo_si as usize]
+                        match_box_si = FLD_BOX_INNER_SI[(fld_base + fi_idx) as usize]
+                    }
+                }
+            }
+        } else if ND_KIND[scr_nd as usize] == 2 {
+            // Plain ident: if it's a Box pointer, use its type
+            let sc2_off = ND_STR_OFF[scr_nd as usize]
+            let sc2_len = ND_STR_LEN[scr_nd as usize]
+            find_local(sc2_off, sc2_len)
+            if LAST_LOCAL_SI >= 0 && LAST_LOCAL_IS_SPTR == 2 {
+                match_box_si = LAST_LOCAL_SI
+            }
+        }
+        // Check if scrutinee is a function/method call with known Box return type
+        if match_box_si < 0 {
+            let scr_nk = ND_KIND[scr_nd as usize]
+            if scr_nk == 12 {
+                let scr_callee = ND_LEFT[scr_nd as usize]
+                if scr_callee != -1 {
+                    let scf_off = ND_STR_OFF[scr_callee as usize]
+                    let scf_len = ND_STR_LEN[scr_callee as usize]
+                    let scf_fn = find_fn_by_name(scf_off, scf_len)
+                    if scf_fn >= 0 {
+                        match_box_si = FN_RET_BOX_INNER_SI[scf_fn as usize]
+                    }
+                }
+            } else if scr_nk == 51 {
+                let scm_off = ND_STR_OFF[scr_nd as usize]
+                let scm_len = ND_STR_LEN[scr_nd as usize]
+                var scm_si: i64 = 0
+                while scm_si < ST_COUNT && match_box_si < 0 {
+                    let scmsn_off = ST_NAME_OFF[scm_si as usize]
+                    let scmsn_len = ST_NAME_LEN[scm_si as usize]
+                    let scmq_off = pool_concat_colon(scmsn_off, scmsn_len, scm_off, scm_len)
+                    let scmq_len = scmsn_len + 2 + scm_len
+                    let scm_fn = find_fn_by_name(scmq_off, scmq_len)
+                    if scm_fn >= 0 && FN_RET_BOX_INNER_SI[scm_fn as usize] >= 0 {
+                        match_box_si = FN_RET_BOX_INNER_SI[scm_fn as usize]
+                    }
+                    scm_si = scm_si + 1
+                }
+            }
+        }
+        compile_node(scr_nd)
+        // Also check LAST_FIELD_TYPE_SI set during scrutinee compilation
+        if match_box_si < 0 && LAST_FIELD_TYPE_SI >= 0 {
+            match_box_si = LAST_FIELD_TYPE_SI
+        }
+        LAST_FIELD_TYPE_SI = -1
+        let scr_slot = alloc_slot()
+        emit_store_rax(scr_slot)
+        // Use global MFPOOL for fixup positions (avoids local array stack-direction bug)
+        let mf_base = MFDEPTH
+        MFDEPTH = mf_base + 64
+        var efc: i64 = 0
+        var arm = ND_EXTRA[node as usize]
+        while arm != -1 {
+            let arm_type = ND_IVAL[arm as usize]
+            let body = ND_EXTRA[arm as usize]
+            let next_arm = ND_RIGHT[arm as usize]
+            var skip_pos: i64 = -1
+            if arm_type == 0 {
+                emit_load_rax(scr_slot)
+                let pat_val = ND_STR_OFF[arm as usize]
+                emit(0x48); emit(0xB9); emit_u64(pat_val)
+                emit(0x48); emit(0x39); emit(0xC8)
+                emit(0x0F); emit(0x85)
+                skip_pos = CODE_LEN; emit_u32(0)
+            } else if arm_type == 2 {
+                // None (parser assigns 2 to None/tk68): skip if non-zero
+                emit_load_rax(scr_slot)
+                emit(0x48); emit(0x85); emit(0xC0)   // test rax, rax
+                emit(0x0F); emit(0x85)                // JNE skip (skip if non-zero/Some)
+                skip_pos = CODE_LEN; emit_u32(0)
+            } else if arm_type == 3 {
+                // Some (parser assigns 3 to Some/tk67): skip if zero
+                emit_load_rax(scr_slot)
+                emit(0x48); emit(0x85); emit(0xC0)   // test rax, rax
+                emit(0x0F); emit(0x84)                // JE skip (skip if zero/None)
+                skip_pos = CODE_LEN; emit_u32(0)
+                // Extract Some binding: scrutinee IS the Box pointer
+                let boff2 = ND_STR_OFF[arm as usize]
+                let blen2 = ND_STR_LEN[arm as usize]
+                if blen2 > 0 {
+                    emit_load_rax(scr_slot)
+                    if match_box_si >= 0 {
+                        let bslot2 = add_local_sptr(boff2, blen2, match_box_si)
+                        LOCAL_IS_SPTR[LOCAL_COUNT as usize - 1] = 2  // heap pointer
+                        emit_store_rax(bslot2)
+                    } else {
+                        let bslot2 = add_local(boff2, blen2)
+                        emit_store_rax(bslot2)
+                    }
+                }
+            } else if arm_type == 4 {
+                // Enum variant: compare scrutinee with discriminant value
+                emit_load_rax(scr_slot)
+                let disc_val = ND_STR_OFF[arm as usize]
+                emit(0x48); emit(0xB9); emit_u64(disc_val)
+                emit(0x48); emit(0x39); emit(0xC8)   // cmp rax, rcx
+                emit(0x0F); emit(0x85)                // JNE skip
+                skip_pos = CODE_LEN; emit_u32(0)
+            }
+            compile_node(body)
+            emit(0xE9)
+            MFPOOL[(mf_base + efc) as usize] = CODE_LEN
+            efc = efc + 1
+            emit_u32(0)
+            if skip_pos >= 0 {
+                let skip_off = CODE_LEN - skip_pos - 4
+                CODE[skip_pos as usize] = (skip_off & 0xFF) as i8
+                CODE[(skip_pos + 1) as usize] = ((skip_off >> 8) & 0xFF) as i8
+                CODE[(skip_pos + 2) as usize] = ((skip_off >> 16) & 0xFF) as i8
+                CODE[(skip_pos + 3) as usize] = ((skip_off >> 24) & 0xFF) as i8
+            }
+            arm = next_arm
+        }
+        let end_pos = CODE_LEN
+        var ei: i64 = 0
+        while ei < efc {
+            let ep = MFPOOL[(mf_base + ei) as usize]
+            let rel = end_pos - ep - 4
+            CODE[ep as usize] = (rel & 0xFF) as i8
+            CODE[(ep + 1) as usize] = ((rel >> 8) & 0xFF) as i8
+            CODE[(ep + 2) as usize] = ((rel >> 16) & 0xFF) as i8
+            CODE[(ep + 3) as usize] = ((rel >> 24) & 0xFF) as i8
+            ei = ei + 1
+        }
+        MFDEPTH = mf_base
+        return 0
+    }
+    if kind == 51 {
+        // NK_METHOD_CALL: obj.method(args) — dispatch via StructType::method(ptr_to_obj, args)
+        let mc_obj = ND_LEFT[node as usize]
+        let meth_off = ND_STR_OFF[node as usize]
+        let meth_len = ND_STR_LEN[node as usize]
+        let mc_obj_nk = ND_KIND[mc_obj as usize]
+        var mc_obj_si: i64 = -1
+        var mc_self_slot: i64 = -1
+        if mc_obj_nk == 2 {
+            let mc_voff = ND_STR_OFF[mc_obj as usize]
+            let mc_vlen = ND_STR_LEN[mc_obj as usize]
+            let mc_base = find_local(mc_voff, mc_vlen)
+            mc_obj_si = LAST_LOCAL_SI
+            let mc_is_sptr = LAST_LOCAL_IS_SPTR
+            if mc_base >= 0 && mc_obj_si >= 0 {
+                let mc_fc0 = struct_total_slots(mc_obj_si)
+                if mc_is_sptr == 4 && mc_fc0 > 0 && mc_fc0 <= 64 {
+                    // Oversized local passed as self: load BSS ptr, copy fields to stack
+                    let mc_cp0 = NEXT_SLOT
+                    var mc_cpi0: i64 = 0
+                    while mc_cpi0 < mc_fc0 { alloc_slot(); mc_cpi0 = mc_cpi0 + 1 }
+                    let mc_bss0 = alloc_slot()
+                    emit_load_rax(mc_base)
+                    emit_store_rax(mc_bss0)
+                    mc_cpi0 = 0
+                    while mc_cpi0 < mc_fc0 {
+                        emit_load_rax(mc_bss0)
+                        emit(0x48); emit(0x8B); emit(0x80); emit_u32(mc_cpi0 * 8)
+                        emit_store_rax(mc_cp0 + mc_cpi0)
+                        mc_cpi0 = mc_cpi0 + 1
+                    }
+                    mc_self_slot = alloc_slot()
+                    emit_lea_rax(mc_cp0)
+                    emit_store_rax(mc_self_slot)
+                } else {
+                    mc_self_slot = alloc_slot()
+                    emit_lea_rax(mc_base)
+                    emit_store_rax(mc_self_slot)
+                }
+            }
+        } else if mc_obj_nk == 14 {
+            // NK_FIELD: check if sub-struct of is_sptr=4 parent → copy to stack
+            let mc_fa_obj = ND_LEFT[mc_obj as usize]
+            let mc_fa_foff = ND_STR_OFF[mc_obj as usize]
+            let mc_fa_flen = ND_STR_LEN[mc_obj as usize]
+            var mc_copied: i64 = 0
+            if ND_KIND[mc_fa_obj as usize] == 2 {
+                let mc_fo_off = ND_STR_OFF[mc_fa_obj as usize]
+                let mc_fo_len = ND_STR_LEN[mc_fa_obj as usize]
+                let mc_fo_slot = find_local(mc_fo_off, mc_fo_len)
+                let mc_fo_si = LAST_LOCAL_SI
+                let mc_fo_sptr = LAST_LOCAL_IS_SPTR
+                if mc_fo_slot >= 0 && mc_fo_si >= 0 && mc_fo_sptr == 4 {
+                    let mc_fi = find_field_slot_offset(mc_fo_si, mc_fa_foff, mc_fa_flen)
+                    var mc_fsi = LAST_FIELD_TYPE_SI
+                    // FLD_TYPE_SI may be unresolved (-1); infer field type from method name
+                    if mc_fi >= 0 && mc_fsi < 0 {
+                        var try_si2: i64 = 0
+                        while try_si2 < ST_COUNT && mc_fsi < 0 {
+                            let try_sn_off2 = ST_NAME_OFF[try_si2 as usize]
+                            let try_sn_len2 = ST_NAME_LEN[try_si2 as usize]
+                            let try_q_off2 = pool_concat_colon(try_sn_off2, try_sn_len2, meth_off, meth_len)
+                            let try_q_len2 = try_sn_len2 + 2 + meth_len
+                            if find_fn_by_name(try_q_off2, try_q_len2) >= 0 {
+                                mc_fsi = try_si2
+                            }
+                            try_si2 = try_si2 + 1
+                        }
+                    }
+                    if mc_fi >= 0 && mc_fsi >= 0 {
+                        let mc_ffc = struct_total_slots(mc_fsi)
+                        if mc_ffc > 0 && mc_ffc <= 64 {
+                            let mc_cp_base = NEXT_SLOT
+                            var mc_cpi: i64 = 0
+                            while mc_cpi < mc_ffc { alloc_slot(); mc_cpi = mc_cpi + 1 }
+                            let mc_bss_save = alloc_slot()
+                            emit_load_rax(mc_fo_slot)
+                            emit_store_rax(mc_bss_save)
+                            mc_cpi = 0
+                            while mc_cpi < mc_ffc {
+                                emit_load_rax(mc_bss_save)
+                                emit(0x48); emit(0x8B); emit(0x80); emit_u32((mc_fi + mc_cpi) * 8)
+                                emit_store_rax(mc_cp_base + mc_cpi)
+                                mc_cpi = mc_cpi + 1
+                            }
+                            mc_obj_si = mc_fsi
+                            mc_self_slot = alloc_slot()
+                            emit_lea_rax(mc_cp_base)
+                            emit_store_rax(mc_self_slot)
+                            mc_copied = 1
+                        }
+                    }
+                }
+            }
+            if mc_copied == 0 {
+                compile_node(mc_obj)
+                mc_obj_si = LAST_FIELD_TYPE_SI
+                mc_self_slot = alloc_slot()
+                emit_store_rax(mc_self_slot)
+            }
+        } else {
+            compile_node(mc_obj)
+            mc_obj_si = LAST_FIELD_TYPE_SI
+            mc_self_slot = alloc_slot()
+            emit_store_rax(mc_self_slot)
+        }
+        var mc_q_off: i64 = meth_off
+        var mc_q_len: i64 = meth_len
+        if mc_obj_si >= 0 {
+            let mc_sn_off = ST_NAME_OFF[mc_obj_si as usize]
+            let mc_sn_len = ST_NAME_LEN[mc_obj_si as usize]
+            mc_q_off = pool_concat_colon(mc_sn_off, mc_sn_len, meth_off, meth_len)
+            mc_q_len = mc_sn_len + 2 + meth_len
+        }
+        var mc_argc: i64 = 1
+        var mc_as0: i64 = mc_self_slot
+        var mc_as1: i64 = -1
+        var mc_as2: i64 = -1
+        var mc_as3: i64 = -1
+        var mc_an = ND_EXTRA[node as usize]
+        while mc_an != -1 && mc_argc < 4 {
+            compile_node(mc_an)
+            let mc_s = alloc_slot()
+            emit_store_rax(mc_s)
+            if mc_argc == 1 { mc_as1 = mc_s }
+            else if mc_argc == 2 { mc_as2 = mc_s }
+            else { mc_as3 = mc_s }
+            mc_argc = mc_argc + 1
+            mc_an = ND_EXTRA[mc_an as usize]
+        }
+        if mc_as0 >= 0 { emit_load_rax(mc_as0); emit(0x48); emit(0x89); emit(0xC7) }
+        if mc_as1 >= 0 { emit_load_rax(mc_as1); emit(0x48); emit(0x89); emit(0xC6) }
+        if mc_as2 >= 0 { emit_load_rax(mc_as2); emit(0x48); emit(0x89); emit(0xC2) }
+        if mc_as3 >= 0 { emit_load_rax(mc_as3); emit(0x48); emit(0x89); emit(0xC1) }
+        var mc_fn_idx = find_fn_by_name(mc_q_off, mc_q_len)
+        // Fallback: if method not found, try all structs as potential receivers
+        if mc_fn_idx < 0 {
+            var try_si: i64 = 0
+            while try_si < ST_COUNT && mc_fn_idx < 0 {
+                let try_sn_off = ST_NAME_OFF[try_si as usize]
+                let try_sn_len = ST_NAME_LEN[try_si as usize]
+                let try_q_off = pool_concat_colon(try_sn_off, try_sn_len, meth_off, meth_len)
+                let try_q_len = try_sn_len + 2 + meth_len
+                mc_fn_idx = find_fn_by_name(try_q_off, try_q_len)
+                try_si = try_si + 1
+            }
+        }
+        emit(0xE8)
+        let mc_fix_pos = CODE_LEN
+        emit_u32(0)
+        if mc_fn_idx >= 0 {
+            FIX_OFF[FIX_COUNT as usize] = mc_fix_pos
+            FIX_TARGET[FIX_COUNT as usize] = mc_fn_idx
+            FIX_COUNT = FIX_COUNT + 1
+        }
+        return 0
+    }
+    0
+}
+
+// Emit a rep movsq copy from SRET_BUF (0x700000) to stack slot bslot, count qwords.
+fn emit_sret_to_stack_copy(bslot: i64, count: i64) with Mut, Panic, Div {
+    if count <= 64 {
+        var i: i64 = 0
+        while i < count {
+            emit(0x48); emit(0xB9); emit_u64(0x700000 + i * 8)
+            emit(0x48); emit(0x8B); emit(0x01)
+            emit_store_rax(bslot + i)
+            i = i + 1
+        }
+    } else {
+        emit(0x48); emit(0xBE); emit_u64(0x700000)
+        let dest_disp = 0 - ((bslot + 1) * 8)
+        emit(0x48); emit(0x8D); emit(0xBD); emit_u32(dest_disp)
+        emit(0x48); emit(0xB9); emit_u64(count)
+        emit(0xF3); emit(0x48); emit(0xA5)
+    }
+}
+
+// Emit a rep movsq copy from stack slot bslot to SRET_BUF (0x700000), count qwords.
+fn emit_stack_to_sret_copy(bslot: i64, count: i64) with Mut, Panic, Div {
+    if count <= 64 {
+        var i: i64 = 0
+        while i < count {
+            emit_load_rax(bslot + i)
+            emit(0x48); emit(0xB9); emit_u64(0x700000 + i * 8)
+            emit(0x48); emit(0x89); emit(0x01)
+            i = i + 1
+        }
+    } else {
+        let src_disp = 0 - ((bslot + 1) * 8)
+        emit(0x48); emit(0x8D); emit(0xB5); emit_u32(src_disp)
+        emit(0x48); emit(0xBF); emit_u64(0x700000)
+        emit(0x48); emit(0xB9); emit_u64(count)
+        emit(0xF3); emit(0x48); emit(0xA5)
+    }
+}
+
+// Emit SRET stores from a NK_STRUCT_LIT node directly to SRET_BUF (0x700000 + fi*8).
+// Used for trailing struct literal expressions in struct-returning functions.
+fn compile_sret_from_struct_lit(node: i64, base_fi: i64) with Mut, Panic, Div {
+    var fni = ND_EXTRA[node as usize]
+    while fni != -1 {
+        let fi = ND_IVAL[fni as usize]
+        let fval = ND_LEFT[fni as usize]
+        if fi >= 0 {
+            if ND_KIND[fval as usize] == 47 {
+                compile_sret_from_struct_lit(fval, base_fi + fi)
+            } else {
+                compile_node(fval)
+                emit(0x48); emit(0xB9); emit_u64(0x700000 + (base_fi + fi) * 8)
+                emit(0x48); emit(0x89); emit(0x01)
+            }
+        }
+        fni = ND_RIGHT[fni as usize]
+    }
+}
+
+// Recursively initialize struct fields from a NK_STRUCT_LIT node into bslot..bslot+n stack slots.
+// Handles nested struct literals by recursing rather than calling compile_node.
+fn compile_struct_lit_into(node: i64, bslot: i64) with Mut, Panic, Div {
+    var fni = ND_EXTRA[node as usize]
+    while fni != -1 {
+        let fi = ND_IVAL[fni as usize]
+        let fval = ND_LEFT[fni as usize]
+        if fi >= 0 {
+            if ND_KIND[fval as usize] == 47 {
+                compile_struct_lit_into(fval, bslot + fi)
+            } else {
+                compile_node(fval)
+                emit_store_rax(bslot + fi)
+            }
+        }
+        fni = ND_RIGHT[fni as usize]
+    }
+}
+
+// Emit stores from NK_STRUCT_LIT into a BSS/heap thin pointer (is_sptr=4).
+// ptr_slot is a 1-slot local holding the base address.
+// base_fi is the cumulative slot offset for nested structs.
+fn compile_struct_lit_into_ptr(node: i64, ptr_slot: i64, base_fi: i64) with Mut, Panic, Div {
+    var fni = ND_EXTRA[node as usize]
+    while fni != -1 {
+        let fi = ND_IVAL[fni as usize]
+        let fval = ND_LEFT[fni as usize]
+        if fi >= 0 {
+            let fval_nk = ND_KIND[fval as usize]
+            if fval_nk == 47 {
+                // Nested struct literal: recurse with adjusted base
+                compile_struct_lit_into_ptr(fval, ptr_slot, base_fi + fi)
+            } else if fval_nk == 12 || fval_nk == 51 {
+                // Function call: check if it returns a struct via SRET
+                var call_fc: i64 = 0
+                let callee_nd2 = ND_LEFT[fval as usize]
+                let call_off2 = ND_STR_OFF[callee_nd2 as usize]
+                let call_len2 = ND_STR_LEN[callee_nd2 as usize]
+                let call_fn2 = find_fn_by_name(call_off2, call_len2)
+                if call_fn2 >= 0 {
+                    let ret_si2 = FN_RET_SI[call_fn2 as usize]
+                    if ret_si2 >= 0 { call_fc = struct_total_slots(ret_si2) }
+                }
+                compile_node(fval)
+                if call_fc > 0 && call_fc <= 64 {
+                    // SRET: data is in SRET_BUF; copy fc slots to BSS ptr + field offset
+                    var si2: i64 = 0
+                    while si2 < call_fc {
+                        emit(0x48); emit(0xB9); emit_u64(0x700000 + si2 * 8)
+                        emit(0x48); emit(0x8B); emit(0x01)
+                        emit_load_rcx(ptr_slot)
+                        emit(0x48); emit(0x89); emit(0x81); emit_u32((base_fi + fi + si2) * 8)
+                        si2 = si2 + 1
+                    }
+                } else {
+                    // Scalar or oversized return: write rax to field slot
+                    emit_load_rcx(ptr_slot)
+                    emit(0x48); emit(0x89); emit(0x81); emit_u32((base_fi + fi) * 8)
+                }
+            } else {
+                compile_node(fval)
+                // rax = value; rcx = ptr; mov [rcx + (base_fi+fi)*8], rax
+                emit_load_rcx(ptr_slot)
+                emit(0x48); emit(0x89); emit(0x81); emit_u32((base_fi + fi) * 8)
+            }
+        }
+        fni = ND_RIGHT[fni as usize]
+    }
+}
+
+fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
+    FN_CODE_OFF[fn_idx as usize] = CODE_LEN
+    locals_reset()
+    emit_prologue()
+
+    let pcount = FN_PARAM_COUNT[fn_idx as usize]
+    let pbase = FN_PARAM_BASE[fn_idx as usize]
+    if pcount > 0 {
+        let p0si = FN_PARAM_TYPE_SI[pbase as usize]
+        var s0: i64 = 0
+        if p0si >= 0 {
+            s0 = add_local_sptr(FN_PARAM_NAME_OFF[pbase as usize], FN_PARAM_NAME_LEN[pbase as usize], p0si)
+            if struct_total_slots(p0si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
+        } else {
+            s0 = add_local(FN_PARAM_NAME_OFF[pbase as usize], FN_PARAM_NAME_LEN[pbase as usize])
+        }
+        emit(0x48); emit(0x89); emit(0xBD)
+        emit_u32(0 - ((s0 + 1) * 8))
+    }
+    if pcount > 1 {
+        let p1si = FN_PARAM_TYPE_SI[(pbase + 1) as usize]
+        var s1: i64 = 0
+        if p1si >= 0 {
+            s1 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 1) as usize], FN_PARAM_NAME_LEN[(pbase + 1) as usize], p1si)
+            if struct_total_slots(p1si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
+        } else {
+            s1 = add_local(FN_PARAM_NAME_OFF[(pbase + 1) as usize], FN_PARAM_NAME_LEN[(pbase + 1) as usize])
+        }
+        emit(0x48); emit(0x89); emit(0xB5)
+        emit_u32(0 - ((s1 + 1) * 8))
+    }
+    if pcount > 2 {
+        let p2si = FN_PARAM_TYPE_SI[(pbase + 2) as usize]
+        var s2: i64 = 0
+        if p2si >= 0 {
+            s2 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 2) as usize], FN_PARAM_NAME_LEN[(pbase + 2) as usize], p2si)
+            if struct_total_slots(p2si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
+        } else {
+            s2 = add_local(FN_PARAM_NAME_OFF[(pbase + 2) as usize], FN_PARAM_NAME_LEN[(pbase + 2) as usize])
+        }
+        emit(0x48); emit(0x89); emit(0x95)
+        emit_u32(0 - ((s2 + 1) * 8))
+    }
+    if pcount > 3 {
+        let p3si = FN_PARAM_TYPE_SI[(pbase + 3) as usize]
+        var s3: i64 = 0
+        if p3si >= 0 {
+            s3 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 3) as usize], FN_PARAM_NAME_LEN[(pbase + 3) as usize], p3si)
+            if struct_total_slots(p3si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
+        } else {
+            s3 = add_local(FN_PARAM_NAME_OFF[(pbase + 3) as usize], FN_PARAM_NAME_LEN[(pbase + 3) as usize])
+        }
+        emit(0x48); emit(0x89); emit(0x8D)
+        emit_u32(0 - ((s3 + 1) * 8))
+    }
+    let body = FN_BODY_NODE[fn_idx as usize]
+    CURRENT_FN_RET_SI = FN_RET_SI[fn_idx as usize]
+    CURRENT_IMPL_SI = FN_IMPL_SI[fn_idx as usize]
+    compile_node(body)
+    CURRENT_FN_RET_SI = -1
+    CURRENT_IMPL_SI = -1
+    emit_epilogue()
+    // Patch prologue frame size: NEXT_SLOT * 8, rounded up to 16-byte alignment
+    let frame_bytes = ((NEXT_SLOT + 1) / 2) * 16
+    let frame_min = if frame_bytes < 256 { 256 } else { frame_bytes }
+    let pp = PROLOGUE_PATCH_OFF
+    CODE[pp as usize] = (frame_min & 0xFF) as i8
+    CODE[(pp + 1) as usize] = ((frame_min >> 8) & 0xFF) as i8
+    CODE[(pp + 2) as usize] = ((frame_min >> 16) & 0xFF) as i8
+    CODE[(pp + 3) as usize] = ((frame_min >> 24) & 0xFF) as i8
+}
+
+// ============================================================================
+// ELF writer
+// ============================================================================
+
+fn elf_emit(b: i64) with Mut, Panic {
+    if ELF_LEN >= 4194304 { return }
+    ELF[ELF_LEN as usize] = b as i8
+    ELF_LEN = ELF_LEN + 1
+}
+
+fn elf_emit_u16(v: i64) with Mut, Panic {
+    elf_emit(v & 0xFF)
+    elf_emit((v >> 8) & 0xFF)
+}
+
+fn elf_emit_u32(v: i64) with Mut, Panic {
+    elf_emit(v & 0xFF)
+    elf_emit((v >> 8) & 0xFF)
+    elf_emit((v >> 16) & 0xFF)
+    elf_emit((v >> 24) & 0xFF)
+}
+
+fn elf_emit_u64(v: i64) with Mut, Panic {
+    elf_emit_u32(v)
+    elf_emit_u32(v >> 32)
+}
+
+fn write_elf(entry_fn: i64) with Mut, Panic, Div {
+    let base_addr: i64 = 0x400000
+    let text_off: i64 = 4096
+
+    elf_emit(0x7F); elf_emit(0x45); elf_emit(0x4C); elf_emit(0x46)
+    elf_emit(2)
+    elf_emit(1)
+    elf_emit(1)
+    elf_emit(0)
+    var pi: i64 = 0
+    while pi < 8 { elf_emit(0); pi = pi + 1 }
+    elf_emit_u16(2)
+    elf_emit_u16(0x3E)
+    elf_emit_u32(1)
+    elf_emit_u64(base_addr + text_off)
+    elf_emit_u64(64)
+    elf_emit_u64(0)
+    elf_emit_u32(0)
+    elf_emit_u16(64)
+    elf_emit_u16(56)
+    elf_emit_u16(2)
+    elf_emit_u16(0)
+    elf_emit_u16(0)
+    elf_emit_u16(0)
+
+    let real_code_len = if CODE_LEN > 4194304 { 4194304 } else { CODE_LEN }
+    let total_size = text_off + real_code_len
+    elf_emit_u32(1)
+    elf_emit_u32(5)
+    elf_emit_u64(0)
+    elf_emit_u64(base_addr)
+    elf_emit_u64(base_addr)
+    elf_emit_u64(total_size)
+    elf_emit_u64(total_size)
+    elf_emit_u64(0x1000)
+
+    let bss_size = if MB_BSS_TOTAL > 0 { MB_BSS_TOTAL + OVERSIZED_BSS_OFF + 4096 } else { OVERSIZED_BSS_OFF + 4096 }
+    elf_emit_u32(1)
+    elf_emit_u32(6)
+    elf_emit_u64(total_size)
+    elf_emit_u64(0x700000)
+    elf_emit_u64(0x700000)
+    elf_emit_u64(0)
+    elf_emit_u64(bss_size)
+    elf_emit_u64(0x1000)
+
+    while ELF_LEN < text_off {
+        elf_emit(0)
+    }
+
+    let main_off = FN_CODE_OFF[entry_fn as usize]
+    // Trampoline: save rsp, mmap heap, store HEAP_PTR, call main, exit
+    // save rsp to [0x700000]
+    elf_emit(0x48); elf_emit(0xBA); elf_emit_u64(0x700000)    // movabs rdx, 0x700000
+    elf_emit(0x48); elf_emit(0x89); elf_emit(0x22)            // mov [rdx], rsp
+    // mmap(NULL, 16MB, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    elf_emit(0x48); elf_emit(0x31); elf_emit(0xFF)            // xor rdi, rdi
+    elf_emit(0x48); elf_emit(0xBE); elf_emit_u64(16777216)    // movabs rsi, 16MB
+    elf_emit(0xBA); elf_emit_u32(3)                            // mov edx, 3
+    elf_emit(0x49); elf_emit(0xC7); elf_emit(0xC2); elf_emit_u32(0x22) // mov r10d, 0x22
+    elf_emit(0x49); elf_emit(0xC7); elf_emit(0xC0); elf_emit_u32(0xFFFFFFFF) // mov r8d, -1
+    elf_emit(0x4D); elf_emit(0x31); elf_emit(0xC9)            // xor r9, r9
+    elf_emit(0xB8); elf_emit_u32(9)                            // mov eax, SYS_mmap
+    elf_emit(0x0F); elf_emit(0x05)                             // syscall
+    // store result in HEAP_PTR at BSS offset 512 (0x700000 + 512 = 0x700200)
+    elf_emit(0x48); elf_emit(0xB9); elf_emit_u64(0x700200)    // movabs rcx, 0x700200
+    elf_emit(0x48); elf_emit(0x89); elf_emit(0x01)            // mov [rcx], rax
+    // call main
+    let trampoline_pre = 13 + 13 + 5 + 7 + 7 + 3 + 5 + 2 + 10 + 3  // bytes before call
+    let trampoline_size = trampoline_pre + 5 + 3 + 7 + 2
+    let code_start = trampoline_size
+    let main_abs = code_start + main_off
+    let actual_call_rel = main_abs - (trampoline_pre + 5)
+    elf_emit(0xE8); elf_emit_u32(actual_call_rel)
+    elf_emit(0x48); elf_emit(0x89); elf_emit(0xC7)
+    elf_emit(0x48); elf_emit(0xC7); elf_emit(0xC0)
+    elf_emit_u32(60)
+    elf_emit(0x0F); elf_emit(0x05)
+
+    var ci: i64 = 0
+    while ci < real_code_len {
+        elf_emit(CODE[ci as usize] as i64)
+        ci = ci + 1
+    }
+}
+
+fn patch_calls(trampoline_size: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FIX_COUNT {
+        let fix_off = FIX_OFF[i as usize]
+        let target_fn = FIX_TARGET[i as usize]
+        let target_off = FN_CODE_OFF[target_fn as usize]
+        let rel = target_off - (fix_off + 4)
+        CODE[fix_off as usize] = (rel & 0xFF) as i8
+        CODE[(fix_off + 1) as usize] = ((rel >> 8) & 0xFF) as i8
+        CODE[(fix_off + 2) as usize] = ((rel >> 16) & 0xFF) as i8
+        CODE[(fix_off + 3) as usize] = ((rel >> 24) & 0xFF) as i8
+        i = i + 1
+    }
+    // Sprint 229: Patch LEA fixups for function references
+    var j: i64 = 0
+    while j < FN_LEA_FIX_COUNT {
+        let lea_off = FN_LEA_FIX_OFF[j as usize]
+        let lea_target = FN_LEA_FIX_TARGET[j as usize]
+        let target_code_off = FN_CODE_OFF[lea_target as usize]
+        let lea_rel = target_code_off - (lea_off + 4)
+        CODE[lea_off as usize] = (lea_rel & 0xFF) as i8
+        CODE[(lea_off + 1) as usize] = ((lea_rel >> 8) & 0xFF) as i8
+        CODE[(lea_off + 2) as usize] = ((lea_rel >> 16) & 0xFF) as i8
+        CODE[(lea_off + 3) as usize] = ((lea_rel >> 24) & 0xFF) as i8
+        j = j + 1
+    }
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    let argc = arg_count()
+    if argc < 2 {
+        print("Usage: boot4 <source.sio> <output>")
+        return 1
+    }
+    let src_path = get_arg(0)
+    let out_path = get_arg(1)
+
+    let size = load_source(src_path)
+    SRC_LEN = size
+    print("loaded size=")
+    print_int(size)
+    print("\n")
+
+    // Import scanning removed for A1 bootstrap — single-file only
+    print("lexing...\n")
+    lex()
+    print("tokens=")
+    print_int(TK_COUNT)
+    print("\n")
+
+    print("parsing...\n")
+    pre_scan_structs()
+    pre_scan_enums()
+    parse_program()
+    print("enums=")
+    print_int(EN_COUNT)
+    print(" variants=")
+    print_int(EV_COUNT)
+    print("\n")
+    print("fns=")
+    print_int(FN_COUNT)
+    print(" structs=")
+    print_int(ST_COUNT)
+    print(" enums=")
+    print_int(EN_COUNT)
+    print(" nodes=")
+    print_int(ND_COUNT)
+    print("\n")
+
+    var main_fn: i64 = -1
+    var fi: i64 = 0
+    while fi < FN_COUNT {
+        let fo = FN_NAME_OFF[fi as usize]
+        let fl = FN_NAME_LEN[fi as usize]
+        if pool_match(fo, fl, "main") {
+            main_fn = fi
+        }
+        fi = fi + 1
+    }
+
+    if main_fn == -1 {
+        print("error: no main function found")
+        return 1
+    }
+
+    // Reserve 512 bytes (64 × 8) at BSS offset 0 as the SRET scratch buffer.
+    // Target program struct-returning functions write fields to 0x700000 + 0..511.
+    // HEAP_PTR at BSS offset 512, HEAP_END at 520.
+    // User globals start at BSS offset 528.
+    MB_BSS_TOTAL = 528
+
+    mb_collect_globals()
+    mb_resolve_src_globals()
+    print("globals=")
+    print_int(MB_GL_COUNT)
+    print(" bss=")
+    print_int(MB_BSS_TOTAL)
+    print("\n")
+
+    emit_print_int_helper()
+
+    var ci: i64 = 0
+    while ci < FN_COUNT {
+        print("fn ")
+        print_int(ci)
+        print(" ")
+        compile_fn(ci)
+        ci = ci + 1
+    }
+
+    print("patching...\n")
+    patch_calls(17)
+
+    print("patching...")
+    print(" FIX_COUNT=")
+    print_int(FIX_COUNT)
+    print("\n")
+    print("writing elf main_fn=")
+    print_int(main_fn)
+    print(" CODE_LEN=")
+    print_int(CODE_LEN)
+    print("\n")
+    write_elf(main_fn)
+
+    print("ELF_LEN=")
+    print_int(ELF_LEN)
+    print("\n")
+    let wr = write_file(out_path, ELF, ELF_LEN)
+    print("ok\n")
+    0
+}
