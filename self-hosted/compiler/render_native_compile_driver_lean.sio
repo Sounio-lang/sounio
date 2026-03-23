@@ -5766,6 +5766,7 @@ var MC_NEXT_SLOT: i64 = 0
 
 // f64 expression type propagation: set by codegen, read by callers
 var MC_EXPR_IS_F64: i64 = 0
+var MC_EXPR_ELEM_SZ: i64 = 8  // element size for postfix [idx]: 1=byte, 8=qword
 var MC_EXPR_IS_LOCAL_ARR: i64 = 0
 
 // print_f64 helper offset
@@ -7164,6 +7165,7 @@ fn mc_parse_primary() with Mut, Panic, Div {
                         we(goff & 0xFF); we((goff >> 8) & 0xFF)
                         we((goff >> 16) & 0xFF); we((goff >> 24) & 0xFF)
                     }
+                    MC_EXPR_ELEM_SZ = GLOBAL_ELEM_SIZES[gi as usize]
                 } else {
                     // Scalar global — load value
                     mc_emit_load_global_scalar(gi)
@@ -7893,16 +7895,24 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
         if MP_KIND[MC_POS as usize] == 27 { MC_POS = MC_POS + 1 }
         if MP_KIND[MC_POS as usize] == 120 { MC_POS = MC_POS + 1 }
         if MP_KIND[MC_POS as usize] == 176 { MC_POS = MC_POS + 1 }
-        we(0x48); we(0xC1); we(0xE0); we(0x03)  // shl rax, 3 (index*8)
+        let elem_sz = MC_EXPR_ELEM_SZ
+        if elem_sz == 8 {
+            we(0x48); we(0xC1); we(0xE0); we(0x03)  // shl rax, 3 (index*8)
+        }
+        // else: elem_sz==1, index is already byte offset
         we(0x48); we(0x89); we(0xC1)  // mov rcx, rax (scaled index → rcx)
         mc_emit_load_rax(arr_base_slot)  // rax = base address
         if was_local_arr == 1 {
-            // Contragradiant: stack slots ↓, pointers ↑ — subtract
             we(0x48); we(0x29); we(0xC8)  // sub rax, rcx
         } else {
             we(0x48); we(0x01); we(0xC8)  // add rax, rcx
         }
-        we(0x48); we(0x8B); we(0x00)  // mov rax, [rax]
+        if elem_sz == 1 {
+            we(0x48); we(0x0F); we(0xB6); we(0x00)  // movzx rax, byte [rax]
+        } else {
+            we(0x48); we(0x8B); we(0x00)  // mov rax, [rax]
+        }
+        MC_EXPR_ELEM_SZ = 8  // reset
     }
     if MP_KIND[MC_POS as usize] == 175 {
         MC_POS = MC_POS + 1
