@@ -8313,20 +8313,42 @@ fn mc_parse_stmt() with Mut, Panic, Div {
 
 // Skip a type annotation (consumes tokens until next = or { or , or ) )
 fn mc_skip_type() with Mut, Panic {
-    var depth: i64 = 0
+    SC_DEPTH = 0
     while MC_POS < MC_TC {
         let tk = MP_KIND[MC_POS as usize]
-        if tk == 171 || tk == 175 || tk == 135 { depth = depth + 1
-        MC_POS = MC_POS + 1
-        continue }
-        if tk == 172 || tk == 176 || tk == 136 {
-            if depth > 0 { depth = depth - 1
+        // Opening brackets: ( [ <
+        if tk == 171 { SC_DEPTH = SC_DEPTH + 1
             MC_POS = MC_POS + 1
             continue }
+        if tk == 175 { SC_DEPTH = SC_DEPTH + 1
+            MC_POS = MC_POS + 1
+            continue }
+        if tk == 135 { SC_DEPTH = SC_DEPTH + 1
+            MC_POS = MC_POS + 1
+            continue }
+        // Closing brackets: ) ] >
+        if tk == 172 {
+            if SC_DEPTH > 0 { SC_DEPTH = SC_DEPTH - 1
+                MC_POS = MC_POS + 1
+                continue }
             break
         }
-        if depth == 0 {
-            if tk == 134 || tk == 173 || tk == 179 { break }
+        if tk == 176 {
+            if SC_DEPTH > 0 { SC_DEPTH = SC_DEPTH - 1
+                MC_POS = MC_POS + 1
+                continue }
+            break
+        }
+        if tk == 136 {
+            if SC_DEPTH > 0 { SC_DEPTH = SC_DEPTH - 1
+                MC_POS = MC_POS + 1
+                continue }
+            break
+        }
+        if SC_DEPTH == 0 {
+            if tk == 134 { break }
+            if tk == 173 { break }
+            if tk == 179 { break }
             if tk == 42 { break }
         }
         MC_POS = MC_POS + 1
@@ -8526,17 +8548,25 @@ fn mc_scan_fn_params() with Mut, Panic, Div {
     }
 }
 
-fn mc_scan_fn_return_and_effects() with Mut, Panic, Div {
+fn mc_scan_fn_return_and_effects() with Mut, Panic {
+    print("R")
     if MP_KIND[MC_POS as usize] == 155 {
+        print(">")
         MC_POS = MC_POS + 1
-        if MP_KIND[MC_POS as usize] == 120 || MP_KIND[MC_POS as usize] == 200 {
+        let rtk = MP_KIND[MC_POS as usize]
+        if rtk == 120 {
+            MC_FN_RET_TYPE[SC_FI as usize] = mc_type_name_to_struct(MP_START[MC_POS as usize], MP_END[MC_POS as usize] - MP_START[MC_POS as usize])
+        }
+        if rtk == 200 {
             MC_FN_RET_TYPE[SC_FI as usize] = mc_type_name_to_struct(MP_START[MC_POS as usize], MP_END[MC_POS as usize] - MP_START[MC_POS as usize])
         }
         mc_skip_type()
     }
     if MP_KIND[MC_POS as usize] == 42 {
         MC_POS = MC_POS + 1
-        while MP_KIND[MC_POS as usize] == 120 || MP_KIND[MC_POS as usize] == 179 {
+        while MC_POS < MC_TC {
+            let etk = MP_KIND[MC_POS as usize]
+            if etk != 120 && etk != 179 { break }
             MC_POS = MC_POS + 1
         }
     }
@@ -8557,65 +8587,54 @@ fn mc_skip_braces() with Mut, Panic {
 
 // --- Pass 1: Scan all fn declarations — boot4-safe (uses SC_ globals to avoid frame overflow) ---
 fn mc_scan_functions() with Mut, Panic, Div {
-    print("SF_ENTER\n")
     MC_POS = 0
     MC_FN_COUNT = 0
     MC_PARAM_TOTAL = 0
-    print("SF_LOOP\n")
+    print("SF\n")
     while MC_POS < MC_TC {
-        print("*")
+        print(".")
         if MP_KIND[MC_POS as usize] == 7 {
             MC_POS = MC_POS + 1
+            print("A")
             SC_NS = MP_START[MC_POS as usize]
+            print("B")
             SC_NE = MP_END[MC_POS as usize]
             SC_NL = SC_NE - SC_NS
             SC_FI = MC_FN_COUNT
+            print("C")
             MC_FN_NAME_START[SC_FI as usize] = SC_NS
             MC_FN_NAME_LEN[SC_FI as usize] = SC_NL
             MC_FN_OFF[SC_FI as usize] = 0
             MC_FN_PARAM_BASE[SC_FI as usize] = MC_PARAM_TOTAL
             MC_POS = MC_POS + 1
+            print("D")
             if mc_src_eq_at(SC_NS, SC_NL, "main") { MC_MAIN_FN = SC_FI }
-            MC_POS = MC_POS + 1  // skip (
+            print("E")
+            MC_POS = MC_POS + 1
             SC_PC = 0
+            print("F")
             mc_scan_fn_params()
-            MC_POS = MC_POS + 1  // skip )
+            print("G")
+            MC_POS = MC_POS + 1
             MC_FN_PARAM_COUNT[SC_FI as usize] = SC_PC
             MC_FN_RET_TYPE[SC_FI as usize] = -1
-            mc_scan_fn_return_and_effects()
+            // Skip to body { — just advance until we hit { (boot4 frame too small for full parsing)
+            while MC_POS < MC_TC {
+                if MP_KIND[MC_POS as usize] == 173 { break }
+                MC_POS = MC_POS + 1
+            }
+            print("I")
             MC_FN_BODY_TOK[SC_FI as usize] = MC_POS
             MC_FN_COUNT = MC_FN_COUNT + 1
+            print("J")
             mc_skip_braces()
-        } else if k == 200 {
-            // Skip struct declaration (already parsed in mc_scan_structs)
-            MC_POS = MC_POS + 1  // struct
-            if MP_KIND[MC_POS as usize] == 120 { MC_POS = MC_POS + 1 }  // name
-            if MP_KIND[MC_POS as usize] == 173 {
-                MC_POS = MC_POS + 1
-                var sd: i64 = 1
-                while MC_POS < MC_TC && sd > 0 {
-                    let sk = MP_KIND[MC_POS as usize]
-                    if sk == 173 { sd = sd + 1 }
-                    if sk == 174 { sd = sd - 1 }
-                    MC_POS = MC_POS + 1
-                }
-            }
-        } else if k == 201 {
-            // Skip enum declaration (already parsed in mc_scan_enums)
-            MC_POS = MC_POS + 1  // enum
-            if MP_KIND[MC_POS as usize] == 120 || MP_KIND[MC_POS as usize] == 201 { MC_POS = MC_POS + 1 }  // name
-            if MP_KIND[MC_POS as usize] == 173 {
-                MC_POS = MC_POS + 1
-                var ed: i64 = 1
-                while MC_POS < MC_TC && ed > 0 {
-                    let ek = MP_KIND[MC_POS as usize]
-                    if ek == 173 { ed = ed + 1 }
-                    if ek == 174 { ed = ed - 1 }
-                    MC_POS = MC_POS + 1
-                }
-            }
+            print("K")
+        } else if MP_KIND[MC_POS as usize] == 200 || MP_KIND[MC_POS as usize] == 201 {
+            // Skip struct/enum declaration — advance past name + braces
+            MC_POS = MC_POS + 1
+            if MP_KIND[MC_POS as usize] == 120 { MC_POS = MC_POS + 1 }
+            mc_skip_braces()
         } else {
-            // Skip non-fn top-level items (var declarations, use, etc.)
             MC_POS = MC_POS + 1
         }
     }
