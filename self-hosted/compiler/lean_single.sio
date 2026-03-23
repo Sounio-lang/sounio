@@ -527,7 +527,7 @@ fn lex_all() with Mut, Panic {
     while p < SRC_LEN && TC < 65535 {
         let c = sb(p)
         // Whitespace
-        if c == 32 || c == 9 || c == 13 || c == 10 { if c == 10 { cur_line = cur_line + 1 }; p = p + 1; continue }
+        if c == 1 || c == 2 || c == 32 || c == 9 || c == 13 || c == 10 { if c == 10 { cur_line = cur_line + 1 }; p = p + 1; continue }
         // Line comment
         if c == 47 && p + 1 < SRC_LEN && sb(p + 1) == 47 {
             p = p + 2; while p < SRC_LEN && sb(p) != 10 { p = p + 1 }; continue
@@ -3157,8 +3157,19 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             p = p + 1  // skip name
             if TK[p as usize] == 8 { p = p + 1 }  // skip {
             var vc: i64 = 0
-            while TK[p as usize] != 9 && TK[p as usize] != 0 {
-                if TK[p as usize] == 3 {
+            var inner_depth: i64 = 0
+            while p < TC && (TK[p as usize] != 9 || inner_depth > 0) {
+                if TK[p as usize] == 8 {
+                    inner_depth = inner_depth + 1
+                    p = p + 1
+                    continue
+                }
+                if TK[p as usize] == 9 {
+                    inner_depth = inner_depth - 1
+                    p = p + 1
+                    continue
+                }
+                if inner_depth == 0 && TK[p as usize] == 3 {
                     let vh = gl_name_hash(TS[p as usize], TE[p as usize])
                     EN[(base + 2 + vc) as usize] = vh
                     vc = vc + 1
@@ -5552,12 +5563,42 @@ fn imp_path_hash(len: i64) -> i64 with Panic {
     return h
 }
 
+fn set_base_dir_from_src_path(ps: i64, pe: i64) with Mut, Panic {
+    var last_slash: i64 = -1
+    var i: i64 = ps
+    while i < pe {
+        if sb(i) == 47 { last_slash = i }
+        i = i + 1
+    }
+    BASE_DIR_LEN = 0
+    if last_slash < 0 {
+        BASE_DIR[0 as usize] = 46
+        BASE_DIR_LEN = 1
+    } else {
+        i = ps
+        while i < last_slash && BASE_DIR_LEN < 511 {
+            BASE_DIR[BASE_DIR_LEN as usize] = sb(i) as i8
+            BASE_DIR_LEN = BASE_DIR_LEN + 1
+            i = i + 1
+        }
+    }
+    BASE_DIR[BASE_DIR_LEN as usize] = 0
+}
+
 // Resolve and load use statements from SRC[0..SRC_LEN]
 fn resolve_imports() with IO, Mut, Panic, Div {
     var pos: i64 = 0
     while pos < SRC_LEN {
-        // Find start of line
-        let line_start = pos
+        if sb(pos) == 1 {
+            var marker_s: i64 = pos + 1
+            var marker_e: i64 = marker_s
+            while marker_e < SRC_LEN && sb(marker_e) != 2 { marker_e = marker_e + 1 }
+            if marker_e < SRC_LEN {
+                set_base_dir_from_src_path(marker_s, marker_e)
+                pos = marker_e + 1
+                continue
+            }
+        }
         // Check for "use " at line start (117=u, 115=s, 101=e, 32=space)
         if pos + 4 < SRC_LEN && sb(pos) == 117 && sb(pos+1) == 115 && sb(pos+2) == 101 && sb(pos+3) == 32 {
             pos = pos + 4  // skip "use "
@@ -5683,10 +5724,21 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 IMP_LOADED[IMP_COUNT as usize] = ph
                 IMP_COUNT = IMP_COUNT + 1
                 // Try to read the file
-                if fsz > 0 && SRC_LEN + fsz < 2097152 {
+                if fsz > 0 && SRC_LEN + fp_len + fsz + 3 < 2097152 {
                     let raw = read_file(IMP_PATH)
                     // Append newline separator
-                    SRC[SRC_LEN as usize] = 10; SRC_LEN = SRC_LEN + 1
+                    SRC[SRC_LEN as usize] = 10
+                    SRC_LEN = SRC_LEN + 1
+                    SRC[SRC_LEN as usize] = 1
+                    SRC_LEN = SRC_LEN + 1
+                    var pi2: i64 = 0
+                    while pi2 < fp_len {
+                        SRC[(SRC_LEN + pi2) as usize] = IMP_PATH[pi2 as usize]
+                        pi2 = pi2 + 1
+                    }
+                    SRC_LEN = SRC_LEN + fp_len
+                    SRC[SRC_LEN as usize] = 2
+                    SRC_LEN = SRC_LEN + 1
                     // Copy imported source
                     var ci: i64 = 0
                     while ci < fsz { SRC[(SRC_LEN + ci) as usize] = raw[ci as usize]; ci = ci + 1 }
