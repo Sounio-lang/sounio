@@ -7314,6 +7314,37 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
         return 0
     }
 
+    // arg_count() → number of CLI arguments (excluding program name)
+    if mc_src_eq_at(name_s, name_len, "arg_count") {
+        MC_POS = MC_POS + 1  // skip )
+        let argc_addr2 = MC_BSS_BASE() + GLOBAL_TOTAL_SIZE
+        we(0x48); we(0xA1)  // movabs rax, [argc_addr]
+        var bk: i64 = 0
+        while bk < 8 { we((argc_addr2 >> (bk * 8)) & 0xFF); bk = bk + 1 }
+        // Subtract 1 (program name)
+        we(0x48); we(0xFF); we(0xC8)  // dec rax
+        MC_EXPR_IS_F64 = 0
+        return 0
+    }
+
+    // get_arg(idx) → string pointer to argv[idx+1]
+    if mc_src_eq_at(name_s, name_len, "get_arg") {
+        mc_parse_expr()
+        MC_POS = MC_POS + 1
+        // rax = index; load argv_base, then argv[idx+1]
+        we(0x48); we(0xFF); we(0xC0)  // inc rax (skip program name)
+        we(0x48); we(0xC1); we(0xE0); we(0x03)  // shl rax, 3 (index * 8)
+        we(0x48); we(0x89); we(0xC1)  // mov rcx, rax (scaled offset)
+        let argv_addr2 = MC_BSS_BASE() + GLOBAL_TOTAL_SIZE + 8
+        we(0x48); we(0xA1)  // movabs rax, [argv_addr]
+        var bk: i64 = 0
+        while bk < 8 { we((argv_addr2 >> (bk * 8)) & 0xFF); bk = bk + 1 }
+        we(0x48); we(0x01); we(0xC8)  // add rax, rcx
+        we(0x48); we(0x8B); we(0x00)  // mov rax, [rax] (argv[idx+1])
+        MC_EXPR_IS_F64 = 0
+        return 0
+    }
+
     // read_file(path) → pointer to null-terminated content (stack-allocated 1MB buffer)
     if mc_src_eq_at(name_s, name_len, "read_file") {
         mc_parse_expr()
@@ -9427,17 +9458,32 @@ fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     // Patch all call fixups
     mc_patch_calls()
 
-    // Emit trampoline: call main, mov edi eax, exit syscall
+    // Emit trampoline: save argc/argv, call main, exit
     let tramp_off = WIDE_LEN
     let main_off = MC_FN_OFF[MC_MAIN_FN as usize]
+    // At ELF entry: [rsp]=argc, [rsp+8..]=argv[]
+    // Save argc to BSS (MC_BSS_BASE - 16) and argv_base to BSS (MC_BSS_BASE - 8)
+    let argc_addr = MC_BSS_BASE() + GLOBAL_TOTAL_SIZE
+    let argv_addr = MC_BSS_BASE() + GLOBAL_TOTAL_SIZE + 8
+    // mov rax, [rsp] (argc)
+    we(0x48); we(0x8B); we(0x04); we(0x24)
+    // movabs [argc_addr], rax
+    we(0x48); we(0xA3)
+    var ak: i64 = 0
+    while ak < 8 { we((argc_addr >> (ak * 8)) & 0xFF); ak = ak + 1 }
+    // lea rax, [rsp+8] (argv base)
+    we(0x48); we(0x8D); we(0x44); we(0x24); we(0x08)
+    // movabs [argv_addr], rax
+    we(0x48); we(0xA3)
+    ak = 0
+    while ak < 8 { we((argv_addr >> (ak * 8)) & 0xFF); ak = ak + 1 }
+    // call main
     we(0xe8)
     let call_rel = main_off - (WIDE_LEN + 4)
     we32(call_rel)
-    we(0x89)
-    we(0xc7)                  // mov edi, eax
-    we(0xb8); we32(60)                  // mov eax, 60 (exit)
-    we(0x0f)
-    we(0x05)                  // syscall
+    we(0x89); we(0xc7)       // mov edi, eax
+    we(0xb8); we32(60)       // mov eax, 60 (exit)
+    we(0x0f); we(0x05)       // syscall
 
     let total_code = WIDE_LEN
     print("mini_compile: code=")
