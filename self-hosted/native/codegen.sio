@@ -1557,6 +1557,57 @@ fn native_v2_emit_runtime_metadata(nc: NativeCompiler) -> NativeCompiler with Mu
     c
 }
 
+// OS-dispatch helper: replaces the pattern "mov rax, 1; syscall" for sys_write.
+// Precondition: RDI=fd (ignored on Windows), RSI=buffer, RDX=length.
+// On Linux/macOS: emits mov rax,1; syscall (or macOS syscall number).
+// On Windows: emits Win64 WriteFile call using function pointer from RuntimeContext.
+//
+// The dispatch is done at code-generation time based on target OS, not at runtime.
+// For the v2 pipeline, builtins are always compiled for the target OS.
+// This helper is used by all write-based builtins (print_int, print_char, print_str, etc.)
+fn emit_write_syscall_for_target(nc: NativeCompiler, os_id: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    if os_id == 3 {
+        // Windows: WriteFile(hFile, lpBuffer, nBytes, lpWritten, lpOverlapped)
+        // On entry: RDI=fd (ignored), RSI=buffer, RDX=length
+        // Win64 ABI: RCX=hFile, RDX=lpBuffer, R8=nBytes, R9=&written, [rsp+32]=NULL
+        c.code = emit_push_rsi(c.code)
+        c.code = emit_push_rdx(c.code)
+        c.code = emit_sub_rsp_imm32(c.code, 56)  // 32 shadow + 8 written + 8 overlapped + 8 align
+
+        // R8 = length (save from RDX before it's overwritten)
+        c.code = emit_mov_rax_mem_rsp_disp8(c.code, 56)  // rax = saved RDX (length)
+        c.code = emit_mov_r8_rax(c.code)                  // r8 = length
+
+        // RDX = buffer (saved RSI)
+        c.code = emit_mov_rax_mem_rsp_disp8(c.code, 64)  // rax = saved RSI (buffer)
+        c.code = emit_mov_rdx_rax(c.code)                 // rdx = buffer
+
+        // RCX = stdout handle from RuntimeContext
+        c = emit_load_runtime_context_field_rax(c, runtime_context_field_win_stdout_handle())
+        c.code = emit_mov_rcx_rax(c.code)
+
+        // R9 = &lpNumberOfBytesWritten (use stack at rsp+32)
+        c.code = emit_lea_r9_rsp_disp8(c.code, 32)
+
+        // [rsp+40] = lpOverlapped = NULL
+        c.code = emit_mov_qword_rsp_disp8_zero(c.code, 40)
+
+        // Call WriteFile through RuntimeContext function pointer
+        c = emit_load_runtime_context_field_rax(c, runtime_context_field_win_write_fn_ptr())
+        c.code = emit_call_rax(c.code)
+
+        c.code = emit_add_rsp_imm32(c.code, 56)
+        c.code = emit_pop_rdx(c.code)
+        c.code = emit_pop_rsi(c.code)
+        return c
+    }
+    // Linux/macOS: standard syscall (rdi=fd, rsi=buf, rdx=len, rax=1)
+    c.code = emit_mov_rax_imm(c.code, 1)
+    c.code = emit_syscall(c.code)
+    c
+}
+
 fn emit_builtin_print_int(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_push_rbp(c.code)
@@ -1599,8 +1650,7 @@ fn emit_builtin_print_int(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c.code = emit_inc_rsi(c.code)
     c.code = emit_mov_reg_reg(c.code, 2, 1)           // mov rdx, rcx
     c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
-    c.code = emit_mov_rax_imm(c.code, 1)
-    c.code = emit_syscall(c.code)
+    c = emit_write_syscall_for_target(c, c.target_os_id)
     c.code = emit_mov_rsp_rbp(c.code)
     c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
@@ -1613,8 +1663,7 @@ fn emit_builtin_print_char(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c.code = emit_mov_rsi_rsp(c.code)
     c.code = emit_mov_reg_imm(c.code, 2, 1)           // mov rdx, 1
     c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
-    c.code = emit_mov_rax_imm(c.code, 1)              // mov rax, 1
-    c.code = emit_syscall(c.code)
+    c = emit_write_syscall_for_target(c, c.target_os_id)
     c.code = emit_add_rsp_8(c.code)
     c.code = emit_ret(c.code)
     c
@@ -1636,8 +1685,7 @@ fn emit_builtin_print_str(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     // done_scan:
     c.code = emit_mov_reg_reg(c.code, 2, 1)           // mov rdx, rcx
     c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
-    c.code = emit_mov_rax_imm(c.code, 1)
-    c.code = emit_syscall(c.code)
+    c = emit_write_syscall_for_target(c, c.target_os_id)
     c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
     c
@@ -4263,14 +4311,19 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
 // IAT slot indices within the .idata section (8 bytes each)
 fn PE_IAT_SLOT_VIRTUALALLOC() -> i64 { 0 }
 fn PE_IAT_SLOT_EXITPROCESS() -> i64 { 8 }
-fn PE_IAT_SLOT_COUNT() -> i64 { 2 }
-fn PE_IAT_SIZE() -> i64 { 24 }  // 2 entries * 8 bytes + 8 byte null terminator
+fn PE_IAT_SLOT_GETSTDHANDLE() -> i64 { 16 }
+fn PE_IAT_SLOT_WRITEFILE() -> i64 { 24 }
+fn PE_IAT_SLOT_COUNT() -> i64 { 4 }
+fn PE_IAT_SIZE() -> i64 { 40 }  // 4 entries * 8 bytes + 8 byte null terminator
 
 // Tracks code positions where IAT call displacements need patching
 struct PeIatPatchInfo {
-    virtualalloc_disp_offset: i64,   // code offset of disp32 in call [rip+disp32] for VirtualAlloc
-    exitprocess_disp_offset: i64,    // code offset of disp32 in call [rip+disp32] for ExitProcess
-    exitprocess_avx_disp_offset: i64, // code offset of disp32 for AVX abort ExitProcess call
+    virtualalloc_disp_offset: i64,
+    exitprocess_disp_offset: i64,
+    exitprocess_avx_disp_offset: i64,
+    getstdhandle_disp_offset: i64,
+    getstdhandle_stderr_disp_offset: i64,
+    writefile_load_disp_offset: i64,
 }
 
 fn pe_iat_patch_info_empty() -> PeIatPatchInfo {
@@ -4278,6 +4331,9 @@ fn pe_iat_patch_info_empty() -> PeIatPatchInfo {
         virtualalloc_disp_offset: -1,
         exitprocess_disp_offset: -1,
         exitprocess_avx_disp_offset: -1,
+        getstdhandle_disp_offset: -1,
+        getstdhandle_stderr_disp_offset: -1,
+        writefile_load_disp_offset: -1,
     }
 }
 
@@ -4335,6 +4391,31 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
     c = emit_store_runtime_context_imm(c, runtime_context_field_argv_ptr(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_stdout_fd(), 1)
     c = emit_store_runtime_context_imm(c, runtime_context_field_stderr_fd(), 2)
+
+    // Store OS ID for runtime dispatch in builtins
+    c = emit_store_runtime_context_imm(c, runtime_context_field_os_id(), 3)  // 3 = Windows
+
+    // GetStdHandle(STD_OUTPUT_HANDLE = -11) → stdout HANDLE
+    c.code = emit_sub_rsp_imm32(c.code, 40)
+    c.code = emit_mov_reg_imm(c.code, 1, -11)   // rcx = -11 (STD_OUTPUT_HANDLE)
+    patches.getstdhandle_disp_offset = c.code.len + 2
+    c.code = emit_call_mem_rip_disp32(c.code, 0)
+    c.code = emit_add_rsp_imm32(c.code, 40)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_win_stdout_handle())
+
+    // GetStdHandle(STD_ERROR_HANDLE = -12) → stderr HANDLE
+    c.code = emit_sub_rsp_imm32(c.code, 40)
+    c.code = emit_mov_reg_imm(c.code, 1, -12)   // rcx = -12 (STD_ERROR_HANDLE)
+    patches.getstdhandle_stderr_disp_offset = c.code.len + 2
+    c.code = emit_call_mem_rip_disp32(c.code, 0)
+    c.code = emit_add_rsp_imm32(c.code, 40)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_win_stderr_handle())
+
+    // Load WriteFile function pointer from IAT and store in RuntimeContext
+    // This allows builtins to call WriteFile without knowing IAT displacement
+    patches.writefile_load_disp_offset = c.code.len + 2
+    c.code = emit_mov_rax_rip_disp32(c.code, 0)  // mov rax, [rip+disp32] — load from IAT
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_win_write_fn_ptr())
 
     // AVX10.2-aware capability guard (CPUID is OS-independent)
     c.code = emit_avx10_detect(c.code)
@@ -4984,8 +5065,9 @@ fn pe_make_name_buf(s: string) -> [i8; 128] with Mut, Panic, Div {
 fn compile_to_pe_x86_64(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
     let _target = target_spec
 
-    // Phase 1: Compile all functions (same codegen as Linux/macOS)
+    // Phase 1: Compile all functions with target_os_id=Windows for builtin dispatch
     var nc = compiler_new()
+    nc.target_os_id = OS_WINDOWS()
     let err = compile_module_v2_mut(&! nc, module)
     if str_len(err) > 0 {
         return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + err)
@@ -5000,7 +5082,7 @@ fn compile_to_pe_x86_64(module: &IrModule, target_spec: NativeTargetSpec) -> Nat
         return native_compile_result_error(ERR_INVALID_TARGET(), "pe_x86_64_missing_main")
     }
 
-    // Phase 2: Emit Windows entry trampoline (VirtualAlloc + main + ExitProcess)
+    // Phase 2: Emit Windows entry trampoline (VirtualAlloc + GetStdHandle + main + ExitProcess)
     let tramp = emit_entry_trampoline_windows_x86(nc, main_idx)
     nc = tramp.0
     let patches = tramp.1
@@ -5012,45 +5094,54 @@ fn compile_to_pe_x86_64(module: &IrModule, target_spec: NativeTargetSpec) -> Nat
     let text_raw_size = pe_file_align(nc.code.len)
     let idata_rva = text_rva + pe_section_align(nc.code.len)
 
-    // .idata section layout:
-    //   [0..19]   Import descriptor for kernel32.dll
-    //   [20..39]  Null terminator descriptor
-    //   [40..63]  Import Lookup Table (INT): VirtualAlloc, ExitProcess, null = 3*8
-    //   [64..87]  Import Address Table (IAT): VirtualAlloc, ExitProcess, null = 3*8
-    //   [88..]    Hint/Name: "VirtualAlloc\0" (2+12+1+1=16), "ExitProcess\0" (2+11+1=14+pad=16)
-    //   [120..]   DLL name: "kernel32.dll\0" (13 bytes)
+    // .idata section layout (4 imports: VirtualAlloc, ExitProcess, GetStdHandle, WriteFile):
+    //   [0..19]    Import descriptor for kernel32.dll
+    //   [20..39]   Null terminator descriptor
+    //   [40..79]   INT: 4 entries + null = 5*8 = 40 bytes
+    //   [80..119]  IAT: 4 entries + null = 5*8 = 40 bytes
+    //   [120..]    Hint/Name entries (16 bytes each, padded)
+    //   [184..]    DLL name: "kernel32.dll\0" (13 bytes)
     let idt_offset: i64 = 0
-    let int_offset: i64 = 40                        // after 2 descriptors (2*20)
-    let iat_offset: i64 = 64                        // after INT (3*8=24)
-    let hnt_offset: i64 = 88                        // after IAT (3*8=24)
-    // Hint/name entries: VirtualAlloc = hint 0, 12 chars + hint(2) + null(1) + pad(1) = 16 bytes
-    //                    ExitProcess = hint 0, 11 chars + hint(2) + null(1) = 14, pad to 16
-    let hnt_virtualalloc_offset: i64 = 88
-    let hnt_exitprocess_offset: i64 = 104           // 88 + 16
-    let dll_name_offset: i64 = 120                  // 104 + 16
-    let idata_total: i64 = 133                      // 120 + 13 ("kernel32.dll\0")
-
-    // IAT slot RVAs (absolute virtual addresses for INT/IAT entries)
-    let iat_virtualalloc_rva = idata_rva + iat_offset
-    let iat_exitprocess_rva = idata_rva + iat_offset + 8
+    let int_offset: i64 = 40                        // after 2 descriptors
+    let iat_offset: i64 = 80                        // after INT (5*8=40)
+    let hnt_virtualalloc_offset: i64 = 120          // after IAT (5*8=40)
+    let hnt_exitprocess_offset: i64 = 136           // 120 + 16
+    let hnt_getstdhandle_offset: i64 = 152          // 136 + 16
+    let hnt_writefile_offset: i64 = 168             // 152 + 16
+    let dll_name_offset: i64 = 184                  // 168 + 16
+    let idata_total: i64 = 197                      // 184 + 13
 
     // Phase 4: Patch IAT call displacements in the trampoline code
-    // Each `call [rip+disp32]` needs: disp32 = IAT_RVA - (text_RVA + instruction_end_offset)
-    // instruction_end_offset = disp_offset + 4 (the disp32 is at disp_offset, instruction ends 4 bytes later)
+    // Each `call [rip+disp32]` or `mov rax,[rip+disp32]`: disp32 = IAT_slot_RVA - (text_RVA + instr_end)
     if patches.virtualalloc_disp_offset >= 0 {
         let call_end = patches.virtualalloc_disp_offset + 4
-        let disp = (idata_rva + iat_offset) - (text_rva + call_end)
+        let disp = (idata_rva + iat_offset + PE_IAT_SLOT_VIRTUALALLOC()) - (text_rva + call_end)
         nc.code = patch_u32_le(nc.code, patches.virtualalloc_disp_offset, disp)
     }
     if patches.exitprocess_disp_offset >= 0 {
         let call_end = patches.exitprocess_disp_offset + 4
-        let disp = (idata_rva + iat_offset + 8) - (text_rva + call_end)
+        let disp = (idata_rva + iat_offset + PE_IAT_SLOT_EXITPROCESS()) - (text_rva + call_end)
         nc.code = patch_u32_le(nc.code, patches.exitprocess_disp_offset, disp)
     }
     if patches.exitprocess_avx_disp_offset >= 0 {
         let call_end = patches.exitprocess_avx_disp_offset + 4
-        let disp = (idata_rva + iat_offset + 8) - (text_rva + call_end)
+        let disp = (idata_rva + iat_offset + PE_IAT_SLOT_EXITPROCESS()) - (text_rva + call_end)
         nc.code = patch_u32_le(nc.code, patches.exitprocess_avx_disp_offset, disp)
+    }
+    if patches.getstdhandle_disp_offset >= 0 {
+        let call_end = patches.getstdhandle_disp_offset + 4
+        let disp = (idata_rva + iat_offset + PE_IAT_SLOT_GETSTDHANDLE()) - (text_rva + call_end)
+        nc.code = patch_u32_le(nc.code, patches.getstdhandle_disp_offset, disp)
+    }
+    if patches.getstdhandle_stderr_disp_offset >= 0 {
+        let call_end = patches.getstdhandle_stderr_disp_offset + 4
+        let disp = (idata_rva + iat_offset + PE_IAT_SLOT_GETSTDHANDLE()) - (text_rva + call_end)
+        nc.code = patch_u32_le(nc.code, patches.getstdhandle_stderr_disp_offset, disp)
+    }
+    if patches.writefile_load_disp_offset >= 0 {
+        let call_end = patches.writefile_load_disp_offset + 4
+        let disp = (idata_rva + iat_offset + PE_IAT_SLOT_WRITEFILE()) - (text_rva + call_end)
+        nc.code = patch_u32_le(nc.code, patches.writefile_load_disp_offset, disp)
     }
 
     // Phase 5: Build PE binary
@@ -5058,66 +5149,66 @@ fn compile_to_pe_x86_64(module: &IrModule, target_spec: NativeTargetSpec) -> Nat
     w = pe_set_entry_point(w, text_rva + nc.entry_offset)
     w = pe_set_subsystem(w, PE_SUBSYSTEM_WINDOWS_CUI)
 
-    // Register sections in the PeWriter
-    let headers_size = pe_compute_headers_size(2)    // 2 sections: .text + .idata
+    let headers_size = pe_compute_headers_size(2)
     w = pe_add_text_section(w, text_rva, nc.code.len, headers_size, text_raw_size)
     let idata_raw_offset = headers_size + text_raw_size
     let idata_raw_size = pe_file_align(idata_total)
     w = pe_add_idata_section(w, idata_rva, idata_total, idata_raw_offset, idata_raw_size)
 
-    // Set import data directory (points to import descriptor table in .idata)
-    w = pe_set_data_directory(w, PE_DIR_IMPORT, idata_rva + idt_offset, 40)  // 2 descriptors * 20
-    // Set IAT data directory
-    w = pe_set_data_directory(w, PE_DIR_IAT, idata_rva + iat_offset, 24)     // 3 entries * 8
+    w = pe_set_data_directory(w, PE_DIR_IMPORT, idata_rva + idt_offset, 40)
+    w = pe_set_data_directory(w, PE_DIR_IAT, idata_rva + iat_offset, PE_IAT_SIZE())
 
-    // Build the PE: headers + .text section
     w = pe_build_executable(w, nc.code.bytes, nc.code.len)
 
-    // Phase 6: Manually emit .idata section data after .text
-    // Pad to idata_raw_offset if needed
+    // Phase 6: Emit .idata section
     while w.buf_len < idata_raw_offset {
         w = pe_emit_byte(w, 0)
     }
 
-    // Import descriptor for kernel32.dll
     let k32_desc = pe_make_import_descriptor(
-        idata_rva + int_offset,              // OriginalFirstThunk = INT RVA
-        idata_rva + dll_name_offset,         // Name = DLL name RVA
-        idata_rva + iat_offset               // FirstThunk = IAT RVA
+        idata_rva + int_offset,
+        idata_rva + dll_name_offset,
+        idata_rva + iat_offset
     )
     w = pe_emit_import_descriptor(w, k32_desc)
-
-    // Null terminator descriptor
     w = pe_emit_zeros(w, PE_IMPORT_DESC_SIZE)
 
-    // Import Lookup Table (INT): RVA pointers to hint/name entries
-    w = pe_emit_u64(w, idata_rva + hnt_virtualalloc_offset)  // VirtualAlloc
-    w = pe_emit_u64(w, idata_rva + hnt_exitprocess_offset)   // ExitProcess
-    w = pe_emit_u64(w, 0)                                     // null terminator
+    // INT: 4 entries + null terminator
+    w = pe_emit_u64(w, idata_rva + hnt_virtualalloc_offset)
+    w = pe_emit_u64(w, idata_rva + hnt_exitprocess_offset)
+    w = pe_emit_u64(w, idata_rva + hnt_getstdhandle_offset)
+    w = pe_emit_u64(w, idata_rva + hnt_writefile_offset)
+    w = pe_emit_u64(w, 0)
 
-    // Import Address Table (IAT): same as INT initially (loader overwrites at runtime)
-    w = pe_emit_u64(w, idata_rva + hnt_virtualalloc_offset)  // VirtualAlloc
-    w = pe_emit_u64(w, idata_rva + hnt_exitprocess_offset)   // ExitProcess
-    w = pe_emit_u64(w, 0)                                     // null terminator
+    // IAT: same as INT (loader patches at runtime)
+    w = pe_emit_u64(w, idata_rva + hnt_virtualalloc_offset)
+    w = pe_emit_u64(w, idata_rva + hnt_exitprocess_offset)
+    w = pe_emit_u64(w, idata_rva + hnt_getstdhandle_offset)
+    w = pe_emit_u64(w, idata_rva + hnt_writefile_offset)
+    w = pe_emit_u64(w, 0)
 
-    // Hint/Name entry: VirtualAlloc (hint=0)
+    // Hint/Name entries (each padded to 16 bytes)
     let va_name = pe_make_name_buf("VirtualAlloc")
     w = pe_emit_hint_name(w, 0, va_name, 12)
 
-    // Hint/Name entry: ExitProcess (hint=0)
     let ep_name = pe_make_name_buf("ExitProcess")
     w = pe_emit_hint_name(w, 0, ep_name, 11)
 
-    // DLL name: "kernel32.dll\0"
+    let gsh_name = pe_make_name_buf("GetStdHandle")
+    w = pe_emit_hint_name(w, 0, gsh_name, 12)
+
+    let wf_name = pe_make_name_buf("WriteFile")
+    w = pe_emit_hint_name(w, 0, wf_name, 9)
+
+    // DLL name
     let dll_name = pe_make_name_buf("kernel32.dll")
     var di = 0
     while di < 12 {
         w = pe_emit_byte(w, dll_name[di as usize] as i64)
         di = di + 1
     }
-    w = pe_emit_byte(w, 0)  // null terminator
+    w = pe_emit_byte(w, 0)
 
-    // Pad .idata to file alignment
     w = pe_emit_pad_to(w, PE_FILE_ALIGNMENT)
 
     native_compile_result_ok(w.buf, w.buf_len, FORMAT_PE64())
