@@ -1,76 +1,30 @@
-//! stdlib/onn/loss.sio - loss_Octonion Loss Functions
+//! stdlib/onn/loss.sio - Octonion Loss Functions
 //!
 //! Loss functions for training octonion neural networks.
 //! Losses are scalar-valued (real numbers) computed from octonion predictions and targets.
+//!
+//! Comparison metric: norm-squared distance |pred - target|^2 = sum_i (pred_i - target_i)^2
+//! Or: component-wise differences with L2/L1 norms.
+//!
+//! All losses support both forward (computation) and backward (gradient) passes.
 
-struct loss_Octonion {
-    w: f32,
-    x: f32,
-    y: f32,
-    z: f32,
-    t: f32,
-    u: f32,
-    v: f32,
-    s: f32,
-}
-
-// ============================================================================
-// Helper math functions
-// ============================================================================
-
-fn loss_sqrt(x: f32) -> f32 {
-    if x <= 0.0 { return 0.0 }
-    var guess = x / 2.0
-    if guess < 0.001 { guess = 0.001 }
-    var i = 0
-    while i < 10 {
-        guess = (guess + x / guess) / 2.0
-        i = i + 1
-    }
-    guess
-}
-
-fn loss_exp(x: f32) -> f32 {
-    if x > 100.0 { return 1000000000.0 }
-    if x < -100.0 { return 0.0 }
-    var result = 1.0
-    var term = 1.0
-    var i = 1
-    while i < 20 {
-        term = term * x / (i as f32)
-        result = result + term
-        i = i + 1
-    }
-    result
-}
-
-fn loss_log(x: f32) -> f32 {
-    if x <= 0.0 { return -1000000000.0 }
-    let z = (x - 1.0) / (x + 1.0)
-    var result = 0.0
-    var z_power = z
-    var n = 0
-    while n < 10 {
-        result = result + z_power / (2.0 * (n as f32) + 1.0)
-        z_power = z_power * z * z
-        n = n + 1
-    }
-    result * 2.0
-}
-
-// ============================================================================
-// Loss Functions (forward pass only)
-// ============================================================================
+use std::onn::{Octonion};
 
 // Mean Squared Error (MSE) loss
 // MSE = (1/n) * sum_i |pred_i - target_i|^2
-fn oct_mse_loss(predictions: &[loss_Octonion], targets: &[loss_Octonion]) -> f32 {
+// where |o|^2 = w^2 + x^2 + ... + s^2 for octonion o
+fn oct_mse_loss(
+    predictions: &[Octonion],
+    targets: &[Octonion]
+) -> f32 {
     let n = predictions.len()
     var sum_sq_error = 0.0
-    var i = 0
-    while i < n {
+
+    for i in 0..n {
         let pred = predictions[i]
         let target = targets[i]
+
+        // Compute error: pred - target
         let dw = pred.w - target.w
         let dx = pred.x - target.x
         let dy = pred.y - target.y
@@ -79,21 +33,61 @@ fn oct_mse_loss(predictions: &[loss_Octonion], targets: &[loss_Octonion]) -> f32
         let du = pred.u - target.u
         let dv = pred.v - target.v
         let ds = pred.s - target.s
+
+        // Accumulate squared norm
         sum_sq_error = sum_sq_error + (dw*dw + dx*dx + dy*dy + dz*dz + dt*dt + du*du + dv*dv + ds*ds)
-        i = i + 1
     }
-    sum_sq_error / (n as f32)
+
+    sum_sq_error / n as f32
+}
+
+// MSE backward: gradient w.r.t. predictions
+// grad = (2/n) * (pred - target)
+fn oct_mse_backward(
+    predictions: &[Octonion],
+    targets: &[Octonion]
+) -> [Octonion] {
+    let n = predictions.len()
+    let scale = 2.0 / n as f32
+
+    var gradients: [Octonion] = []
+
+    for i in 0..n {
+        let pred = predictions[i]
+        let target = targets[i]
+
+        let grad = Octonion {
+            w: (pred.w - target.w) * scale,
+            x: (pred.x - target.x) * scale,
+            y: (pred.y - target.y) * scale,
+            z: (pred.z - target.z) * scale,
+            t: (pred.t - target.t) * scale,
+            u: (pred.u - target.u) * scale,
+            v: (pred.v - target.v) * scale,
+            s: (pred.s - target.s) * scale
+        }
+
+        gradients_append(grad)
+    }
+
+    gradients
 }
 
 // Mean Absolute Error (L1) loss
 // MAE = (1/n) * sum_i |pred_i - target_i|
-fn oct_mae_loss(predictions: &[loss_Octonion], targets: &[loss_Octonion]) -> f32 {
+// where |o| = sqrt(sum_j o_j^2)
+fn oct_mae_loss(
+    predictions: &[Octonion],
+    targets: &[Octonion]
+) -> f32 {
     let n = predictions.len()
     var sum_abs_error = 0.0
-    var i = 0
-    while i < n {
+
+    for i in 0..n {
         let pred = predictions[i]
         let target = targets[i]
+
+        // Compute error octonion
         let dw = pred.w - target.w
         let dx = pred.x - target.x
         let dy = pred.y - target.y
@@ -102,19 +96,209 @@ fn oct_mae_loss(predictions: &[loss_Octonion], targets: &[loss_Octonion]) -> f32
         let du = pred.u - target.u
         let dv = pred.v - target.v
         let ds = pred.s - target.s
-        let norm = loss_sqrt(dw*dw + dx*dx + dy*dy + dz*dz + dt*dt + du*du + dv*dv + ds*ds)
+
+        // Compute norm
+        let norm = sqrt(dw*dw + dx*dx + dy*dy + dz*dz + dt*dt + du*du + dv*dv + ds*ds)
         sum_abs_error = sum_abs_error + norm
-        i = i + 1
     }
-    sum_abs_error / (n as f32)
+
+    sum_abs_error / n as f32
 }
 
-// loss_Octonion norm squared: |o|^2 = w^2 + x^2 + ... + s^2
-fn oct_norm_squared(o: loss_Octonion) -> f32 {
-    o.w*o.w + o.x*o.x + o.y*o.y + o.z*o.z + o.t*o.t + o.u*o.u + o.v*o.v + o.s*o.s
+// MAE backward: gradient w.r.t. predictions
+// grad = (1/n) * (pred - target) / |pred - target|
+// Handle numerical stability: if |pred - target| < eps, grad = 0
+fn oct_mae_backward(
+    predictions: &[Octonion],
+    targets: &[Octonion],
+    epsilon: f32
+) -> [Octonion] {
+    let n = predictions.len()
+    let scale = 1.0 / n as f32
+    let eps = epsilon
+
+    var gradients: [Octonion] = []
+
+    for i in 0..n {
+        let pred = predictions[i]
+        let target = targets[i]
+
+        let dw = pred.w - target.w
+        let dx = pred.x - target.x
+        let dy = pred.y - target.y
+        let dz = pred.z - target.z
+        let dt = pred.t - target.t
+        let du = pred.u - target.u
+        let dv = pred.v - target.v
+        let ds = pred.s - target.s
+
+        let norm_sq = dw*dw + dx*dx + dy*dy + dz*dz + dt*dt + du*du + dv*dv + ds*ds
+        let norm = sqrt(norm_sq)
+
+        var grad = Octonion { w: 0.0, x: 0.0, y: 0.0, z: 0.0, t: 0.0, u: 0.0, v: 0.0, s: 0.0 }
+        if norm > eps {
+            let inv_norm = 1.0 / norm
+            grad = Octonion {
+                w: dw * inv_norm * scale,
+                x: dx * inv_norm * scale,
+                y: dy * inv_norm * scale,
+                z: dz * inv_norm * scale,
+                t: dt * inv_norm * scale,
+                u: du * inv_norm * scale,
+                v: dv * inv_norm * scale,
+                s: ds * inv_norm * scale
+            }
+        }
+
+        gradients_append(grad)
+    }
+
+    gradients
 }
 
-// loss_Octonion norm: |o| = sqrt(sum components^2)
-fn oct_norm(o: loss_Octonion) -> f32 {
-    loss_sqrt(oct_norm_squared(o))
+// Cross-Entropy loss for octonion classification
+// Assumes predictions are octonion logits, targets are octonion class embeddings
+// Loss = -log(softmax(pred @ target)) per sample
+// Simplified: use norm-squared similarity for logit computation
+fn oct_cross_entropy_loss(
+    logits: &[Octonion],          // [num_samples][num_classes] flattened
+    targets: &[i32],               // [num_samples] class indices
+    num_classes: i32
+) -> f32 {
+    let num_samples = targets.len()
+    var total_loss = 0.0
+
+    for i in 0..num_samples {
+        let target_class = targets[i]
+
+        // Compute softmax over classes for sample i
+        var max_logit = -1e9
+        var class_logits: [f32] = []
+
+        for c in 0..num_classes {
+            let logit_idx = i * num_classes as usize + c as usize
+            let pred_oct = logits[logit_idx]
+            // Use norm-squared as scalar logit
+            let logit = pred_oct.w*pred_oct.w + pred_oct.x*pred_oct.x + pred_oct.y*pred_oct.y + pred_oct.z*pred_oct.z
+                      + pred_oct.t*pred_oct.t + pred_oct.u*pred_oct.u + pred_oct.v*pred_oct.v + pred_oct.s*pred_oct.s
+            if logit > max_logit { max_logit = logit }
+            class_logits_append(logit)
+        }
+
+        // Softmax with numerical stability
+        var exp_logits: [f32] = []
+        var sum_exp = 0.0
+        for logit in class_logits {
+            let exp_val = exp(logit - max_logit)
+            exp_logits_append(exp_val)
+            sum_exp = sum_exp + exp_val
+        }
+
+        // Cross-entropy: -log(softmax[target_class])
+        let prob_target = exp_logits[target_class as usize] / sum_exp
+        let loss = -log(prob_target + 1e-9)  // Add epsilon for stability
+        total_loss = total_loss + loss
+    }
+
+    total_loss / num_samples as f32
+}
+
+// Cross-entropy backward
+fn oct_cross_entropy_backward(
+    logits: &[Octonion],
+    targets: &[i32],
+    num_classes: i32
+) -> [Octonion] {
+    let num_samples = targets.len()
+    var gradients: [Octonion] = []
+
+    for i in 0..num_samples {
+        let target_class = targets[i]
+
+        // Compute softmax
+        var class_logits: [f32] = []
+        var max_logit = -1e9
+
+        for c in 0..num_classes {
+            let logit_idx = i * num_classes as usize + c as usize
+            let pred_oct = logits[logit_idx]
+            let logit = pred_oct.w*pred_oct.w + pred_oct.x*pred_oct.x + pred_oct.y*pred_oct.y + pred_oct.z*pred_oct.z
+                      + pred_oct.t*pred_oct.t + pred_oct.u*pred_oct.u + pred_oct.v*pred_oct.v + pred_oct.s*pred_oct.s
+            if logit > max_logit { max_logit = logit }
+            class_logits_append(logit)
+        }
+
+        var exp_logits: [f32] = []
+        var sum_exp = 0.0
+        for logit in class_logits {
+            let exp_val = exp(logit - max_logit)
+            exp_logits_append(exp_val)
+            sum_exp = sum_exp + exp_val
+        }
+
+        // Gradient: softmax(logit) - one_hot(target_class)
+        // For octonion logits: grad = 2 * logit_value * (softmax - onehot)
+        for c in 0..num_classes {
+            let logit_idx = i * num_classes as usize + c as usize
+            let pred_oct = logits[logit_idx]
+            let softmax_c = exp_logits[c as usize] / sum_exp
+            let one_hot = if c == target_class { 1.0 } else { 0.0 }
+            let grad_scale = (softmax_c - one_hot) * 2.0 / num_samples as f32
+
+            let grad = Octonion {
+                w: pred_oct.w * grad_scale,
+                x: pred_oct.x * grad_scale,
+                y: pred_oct.y * grad_scale,
+                z: pred_oct.z * grad_scale,
+                t: pred_oct.t * grad_scale,
+                u: pred_oct.u * grad_scale,
+                v: pred_oct.v * grad_scale,
+                s: pred_oct.s * grad_scale
+            }
+
+            gradients_append(grad)
+        }
+    }
+
+    gradients
+}
+
+// Helper: loss_sqrt(x)
+fn loss_sqrt(x: f32) -> f32 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    for i in 0..10 {
+        guess = (guess + x / guess) / 2.0
+    }
+    guess
+}
+
+// Helper: loss_exp(x) via Taylor series
+fn loss_exp(x: f32) -> f32 {
+    if x > 100.0 { return 1e9 }  // Avoid overflow
+    if x < -100.0 { return 0.0 }
+
+    var result = 1.0
+    var term = 1.0
+    for i in 1..20 {
+        term = term * x / i as f32
+        result = result + term
+    }
+    result
+}
+
+// Helper: log(x)
+fn loss_log(x: f32) -> f32 {
+    if x <= 0.0 { return -1e9 }
+
+    // Use natural log approximation via Taylor series
+    // log(x) = 2 * sum_{n=0}^inf ((x-1)/(x+1))^(2n+1) / (2n+1)
+    let z = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var z_power = z
+    for n in 0..10 {
+        result = result + z_power / (2.0 * n as f32 + 1.0)
+        z_power = z_power * z * z
+    }
+    result * 2.0
 }

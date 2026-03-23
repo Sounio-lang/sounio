@@ -1,172 +1,232 @@
-// stdlib/onn/conv.sio
-//
-// Octonion Neural Network — 1D Convolution — Sounio
-//
-// 1D octonion convolution layer for sequence processing.
-// Each position has 8 octonion components.
-// Max sequence length: 32 positions (32 * 8 = 256 values)
-// Max kernel size: 8
+//! stdlib/onn/conv.sio - Octonion Convolution Layers
+//!
+//! 2D convolution and pooling layers for octonion neural networks.
+//! Uses octonion multiplication (Cayley-Dickson, 120 FLOPs per product)
+//! for kernel-input convolutions.
+//!
+//! Forward: out = kernel * input + bias (spatial 2D convolution)
+//! Backward: Uses local linearization for non-associative backprop
+//! Pooling: Max-pooling by norm-squared (|o|^2 = sum e_i^2)
 
-// ============================================================================
-// Helpers
-// ============================================================================
+use std::onn::{Octonion, OctConv2dLayer};
 
-fn conv_abs(x: f64) -> f64 {
-    if x < 0.0 { 0.0 - x } else { x }
+// Forward pass for octonion 2D convolution
+// out[oc][oh][ow] = sum_ic sum_kh sum_kw input[ic][ih+kh][iw+kw] * kernel[oc][ic][kh][kw] + bias[oc]
+// Forward pass delegates to GPU kernel via intrinsic
+fn oct_conv2d_forward(
+    layer: &OctConv2dLayer,
+    kernel: &[Octonion],
+    input: &[Octonion],
+    bias: &[Octonion]
+) -> [Octonion] {
+    // Kernel shape: [out_channels][in_channels][kernel_h][kernel_w]
+    // Input shape: [batch][in_channels][height][width]
+    // Output shape: [batch][out_channels][out_height][out_width]
+    // Delegates to GPU OctonionConv2dFwd intrinsic
+    oct_conv2d_fwd(layer, kernel, input, bias)
 }
 
-// Octonion multiplication (inline for conv)
-fn conv_oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, Panic {
-    out[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3] - a[4]*b[4] - a[5]*b[5] - a[6]*b[6] - a[7]*b[7]
-    out[1] = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2] + a[4]*b[5] - a[5]*b[4] - a[6]*b[7] + a[7]*b[6]
-    out[2] = a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1] + a[4]*b[6] + a[5]*b[7] - a[6]*b[4] - a[7]*b[5]
-    out[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0] + a[4]*b[7] - a[5]*b[6] + a[6]*b[5] - a[7]*b[4]
-    out[4] = a[0]*b[4] - a[1]*b[5] - a[2]*b[6] - a[3]*b[7] + a[4]*b[0] + a[5]*b[1] + a[6]*b[2] + a[7]*b[3]
-    out[5] = a[0]*b[5] + a[1]*b[4] - a[2]*b[7] + a[3]*b[6] - a[4]*b[1] + a[5]*b[0] - a[6]*b[3] + a[7]*b[2]
-    out[6] = a[0]*b[6] + a[1]*b[7] + a[2]*b[4] - a[3]*b[5] - a[4]*b[2] + a[5]*b[3] + a[6]*b[0] - a[7]*b[1]
-    out[7] = a[0]*b[7] - a[1]*b[6] + a[2]*b[5] + a[3]*b[4] - a[4]*b[3] - a[5]*b[2] + a[6]*b[1] + a[7]*b[0]
+// Backward pass for octonion 2D convolution
+// Returns (grad_input, grad_kernel, grad_bias)
+// Uses adjoint of bilinear multiplication: (a * b)* = b* * a* (quaternion-like conjugate adjoints)
+// Non-associativity handled via local linearization: compute Jacobians at forward values
+fn oct_conv2d_backward(
+    layer: &OctConv2dLayer,
+    kernel: &[Octonion],
+    input: &[Octonion],
+    grad_output: &[Octonion]
+) -> ([Octonion], [Octonion], [Octonion]) {
+    oct_conv2d_bwd(layer, kernel, input, grad_output)
 }
 
-// ============================================================================
-// 1D Octonion Convolution Layer
-// kernel: conv weights, kernel[k_pos * 8 + comp]
-// bias: octonion bias, bias[comp]
-// kernel_size: number of positions in kernel (max 8)
-// ============================================================================
+// Max pooling over octonions by norm-squared
+// Selects octonion with maximum |o|^2 = w^2 + x^2 + y^2 + z^2 + t^2 + u^2 + v^2 + s^2
+// in each kernel window. Returns (output, indices).
+// Indices stored as flattened offsets within kernel for backprop routing.
+fn oct_maxpool2d_forward(
+    input: &[Octonion],
+    batch_size: i32,
+    channels: i32,
+    height: i32,
+    width: i32,
+    kernel_size: i32,
+    stride: i32,
+    padding: i32
+) -> ([Octonion], [i32]) {
+    var output: [Octonion] = []
+    var indices: [i32] = []
 
-struct OnnConv1d {
-    kernel: [f64; 64],    // kernel_size * 8 components (max kernel_size=8)
-    bias: [f64; 8],       // octonion bias
-    kernel_size: i32,     // kernel width
-}
+    let out_h = ((height + 2 * padding - kernel_size) / stride) + 1
+    let out_w = ((width + 2 * padding - kernel_size) / stride) + 1
 
-fn onn_conv1d_new(kernel_size: i32) -> OnnConv1d {
-    OnnConv1d {
-        kernel: [0.0; 64],
-        bias: [0.0; 8],
-        kernel_size: kernel_size,
-    }
-}
+    for b in 0..batch_size {
+        for c in 0..channels {
+            for oh in 0..out_h {
+                for ow in 0..out_w {
+                    let ih_start = oh * stride - padding
+                    let iw_start = ow * stride - padding
 
-fn onn_conv1d_init(layer: &!OnnConv1d, scale: f64) with Mut, Div, Panic {
-    var i = 0
-    let total = layer.kernel_size * 8
-    while i < total && i < 64 {
-        let v = ((i % 13) - 6) as f64 / 6.0
-        layer.kernel[i] = scale * v
-        i = i + 1
-    }
-}
+                    var max_norm_sq = 0.0
+                    var max_idx = 0
+                    var max_octonion = Octonion { w: 0.0, x: 0.0, y: 0.0, z: 0.0, t: 0.0, u: 0.0, v: 0.0, s: 0.0 }
 
-// ============================================================================
-// Forward pass: valid convolution (no padding)
-// input: [seq_len * 8] octonion sequence
-// output: [(seq_len - kernel_size + 1) * 8] output sequence
-// seq_len: number of input positions
-// Returns: number of output positions
-// ============================================================================
+                    for kh in 0..kernel_size {
+                        let ih = ih_start + kh
+                        if ih < 0 || ih >= height { continue }
+                        for kw in 0..kernel_size {
+                            let iw = iw_start + kw
+                            if iw < 0 || iw >= width { continue }
 
-fn onn_conv1d_forward(
-    layer: &OnnConv1d,
-    input: &[f64; 256],
-    seq_len: i32,
-    output: &![f64; 256]
-) -> i32 with Mut, Div, Panic {
-    let out_len = seq_len - layer.kernel_size + 1
-    if out_len <= 0 { return 0 }
+                            let input_idx = b * channels * height * width
+                                          + c * height * width
+                                          + ih * width
+                                          + iw
+                            let oct = input[input_idx]
+                            let norm_sq = oct.w * oct.w + oct.x * oct.x + oct.y * oct.y + oct.z * oct.z
+                                        + oct.t * oct.t + oct.u * oct.u + oct.v * oct.v + oct.s * oct.s
 
-    var pos = 0
-    while pos < out_len && pos * 8 < 256 {
-        // Initialize with bias
-        var c = 0
-        while c < 8 {
-            let oidx = pos * 8 + c
-            if oidx < 256 {
-                output[oidx] = layer.bias[c]
+                            if norm_sq > max_norm_sq {
+                                max_norm_sq = norm_sq
+                                max_octonion = oct
+                                max_idx = kh * kernel_size + kw
+                            }
+                        }
+                    }
+
+                    output_append(max_octonion)
+                    indices_append(max_idx)
+                }
             }
-            c = c + 1
+        }
+    }
+
+    (output, indices)
+}
+
+// Max pooling backward: route gradients only to max element position
+fn oct_maxpool2d_backward(
+    grad_output: &[Octonion],
+    indices: &[i32],
+    batch_size: i32,
+    channels: i32,
+    height: i32,
+    width: i32,
+    kernel_size: i32,
+    stride: i32,
+    padding: i32
+) -> [Octonion] {
+    var grad_input: [Octonion] = []
+    for i in 0..(batch_size * channels * height * width) {
+        grad_input_append(Octonion { w: 0.0, x: 0.0, y: 0.0, z: 0.0, t: 0.0, u: 0.0, v: 0.0, s: 0.0 })
+    }
+
+    let out_h = ((height + 2 * padding - kernel_size) / stride) + 1
+    let out_w = ((width + 2 * padding - kernel_size) / stride) + 1
+    var grad_idx = 0
+
+    for b in 0..batch_size {
+        for c in 0..channels {
+            for oh in 0..out_h {
+                for ow in 0..out_w {
+                    let ih_start = oh * stride - padding
+                    let iw_start = ow * stride - padding
+                    let max_idx = indices[grad_idx]
+                    let max_kh = max_idx / kernel_size
+                    let max_kw = max_idx % kernel_size
+
+                    let ih = ih_start + max_kh
+                    let iw = iw_start + max_kw
+
+                    if ih >= 0 && ih < height && iw >= 0 && iw < width {
+                        let input_idx = b * channels * height * width + c * height * width + ih * width + iw
+                        grad_input[input_idx] = grad_output[grad_idx]
+                    }
+
+                    grad_idx = grad_idx + 1
+                }
+            }
+        }
+    }
+
+    grad_input
+}
+
+// Xavier/Glorot initialization for conv kernels
+// Scale per component: sqrt(2 / (fan_in + fan_out))
+// fan_in = in_channels * kernel_h * kernel_w
+// fan_out = out_channels
+fn oct_conv_xavier_init(
+    in_channels: i32,
+    out_channels: i32,
+    kernel_h: i32,
+    kernel_w: i32,
+    seed: i32
+) -> [Octonion] {
+    let fan_in = in_channels * kernel_h * kernel_w
+    let fan_out = out_channels
+    let scale = sqrt(2.0 / (fan_in + fan_out) as f32)
+
+    var kernel: [Octonion] = []
+    var rng_state = seed
+
+    let total_params = out_channels * in_channels * kernel_h * kernel_w
+    for i in 0..total_params {
+        var components: [f32] = []
+        for j in 0..8 {
+            rng_state = (rng_state * 1103515245 + 12345) % 2147483648
+            let val = ((rng_state % 1000) as f32 / 500.0 - 1.0) * scale
+            components_append(val)
         }
 
-        // Convolve: sum over kernel positions
-        var k = 0
-        while k < layer.kernel_size {
-            let in_pos = pos + k
+        let oct = Octonion {
+            w: components[0], x: components[1], y: components[2], z: components[3],
+            t: components[4], u: components[5], v: components[6], s: components[7]
+        }
+        kernel_append(oct)
+    }
 
-            // Extract kernel octonion at position k
-            var kern: [f64; 8] = [0.0; 8]
-            var kc = 0
-            while kc < 8 {
-                let kidx = k * 8 + kc
-                if kidx < 64 {
-                    kern[kc] = layer.kernel[kidx]
-                }
-                kc = kc + 1
-            }
+    kernel
+}
 
-            // Extract input octonion at position in_pos
-            var inp: [f64; 8] = [0.0; 8]
-            var ic = 0
-            while ic < 8 {
-                let iidx = in_pos * 8 + ic
-                if iidx < 256 {
-                    inp[ic] = input[iidx]
-                }
-                ic = ic + 1
-            }
+// He initialization for ReLU-based conv networks
+// Scale per component: sqrt(2 / fan_in)
+fn oct_conv_he_init(
+    in_channels: i32,
+    out_channels: i32,
+    kernel_h: i32,
+    kernel_w: i32,
+    seed: i32
+) -> [Octonion] {
+    let fan_in = in_channels * kernel_h * kernel_w
+    let scale = sqrt(2.0 / fan_in as f32)
 
-            // Octonion multiply
-            var prod: [f64; 8] = [0.0; 8]
-            conv_oct_mul(&kern, &inp, &!prod)
+    var kernel: [Octonion] = []
+    var rng_state = seed
 
-            // Accumulate
-            c = 0
-            while c < 8 {
-                let oidx = pos * 8 + c
-                if oidx < 256 {
-                    output[oidx] = output[oidx] + prod[c]
-                }
-                c = c + 1
-            }
-
-            k = k + 1
+    let total_params = out_channels * in_channels * kernel_h * kernel_w
+    for i in 0..total_params {
+        var components: [f32] = []
+        for j in 0..8 {
+            rng_state = (rng_state * 1103515245 + 12345) % 2147483648
+            let val = ((rng_state % 1000) as f32 / 500.0 - 1.0) * scale
+            components_append(val)
         }
 
-        pos = pos + 1
+        let oct = Octonion {
+            w: components[0], x: components[1], y: components[2], z: components[3],
+            t: components[4], u: components[5], v: components[6], s: components[7]
+        }
+        kernel_append(oct)
     }
-    out_len
+
+    kernel
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-fn test_conv1d_output_length() -> bool with Mut, Div, Panic {
-    let layer = onn_conv1d_new(3)
-    var input: [f64; 256] = [0.0; 256]
-    var output: [f64; 256] = [0.0; 256]
-    // seq_len=10, kernel=3 => output=8
-    let out_len = onn_conv1d_forward(&layer, &input, 10, &!output)
-    out_len == 8
-}
-
-fn test_conv1d_zero_kernel() -> bool with Mut, Div, Panic {
-    // Zero kernel + zero bias => zero output
-    let layer = onn_conv1d_new(3)
-    var input: [f64; 256] = [0.0; 256]
-    input[0] = 1.0
-    input[8] = 2.0
-    var output: [f64; 256] = [0.0; 256]
-    let out_len = onn_conv1d_forward(&layer, &input, 5, &!output)
-    conv_abs(output[0]) < 0.01 && out_len == 3
-}
-
-fn test_conv1d_bias_only() -> bool with Mut, Div, Panic {
-    // Zero kernel, nonzero bias
-    var layer = onn_conv1d_new(1)
-    layer.bias[0] = 7.0
-    var input: [f64; 256] = [0.0; 256]
-    var output: [f64; 256] = [0.0; 256]
-    let out_len = onn_conv1d_forward(&layer, &input, 4, &!output)
-    // Each output position should have bias[0] = 7.0
-    conv_abs(output[0] - 7.0) < 0.01 && conv_abs(output[8] - 7.0) < 0.01 && out_len == 4
+fn conv_sqrt(x: f32) -> f32 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    for i in 0..10 {
+        guess = (guess + x / guess) / 2.0
+    }
+    guess
 }
