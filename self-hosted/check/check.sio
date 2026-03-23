@@ -143,6 +143,9 @@ struct Checker {
     effect_ops: EffectOpTable,
     handler_depth: i64,
     current_handler_op_id: i64,
+    ownership: OwnContext,
+    trait_registry: TraitRegistry,
+    impl_registry: ImplRegistry,
 }
 
 fn checker_new() -> Checker with Mut, Panic, Div {
@@ -214,6 +217,9 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         effect_ops: effect_op_table_new(),
         handler_depth: 0,
         current_handler_op_id: -1,
+        ownership: own_context_new(),
+        trait_registry: trait_registry_new(),
+        impl_registry: impl_register_builtins(impl_registry_new()),
     }
 }
 
@@ -6246,6 +6252,7 @@ impl Checker {
             ItemUnit => self.collect_unit_decl(item.name)
             ItemEffect => self.collect_item_effect(item.effect_def)
             ItemSession => self  // Session protocol registered in collect pass (no-op for now)
+            ItemTrait => self.collect_trait_def(item.name, item.trait_def)
         }
     }
 
@@ -7744,6 +7751,40 @@ impl Checker {
     }
 
     // --------------------------------------------------------
+    // Collect trait definitions
+    // --------------------------------------------------------
+
+    fn collect_trait_def(self, name: Name, opt: Option<Box<TraitDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(td) => {
+                // Register trait in the trait registry (sequential ID from count)
+                var c = self
+                let trait_id = c.trait_registry.count + 100  // offset past builtins
+                var tdef = trait_def_new(trait_id)
+                // Collect method signatures from the trait body
+                c = c.collect_trait_methods((*td).methods, trait_id)
+                c.trait_registry = trait_register(c.trait_registry, tdef)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_trait_methods(self, methods: Option<Box<ItemList>>, trait_id: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match methods {
+            None => self
+            Some(list) => {
+                var c = self
+                let item = (*list).head
+                if item.kind == ItemKind::ItemFn {
+                    c = c.collect_fn_def(item.name, item.fn_def)
+                }
+                c.collect_trait_methods((*list).tail, trait_id)
+            }
+        }
+    }
+
+    // --------------------------------------------------------
     // Collect impl methods
     // --------------------------------------------------------
 
@@ -7871,6 +7912,7 @@ impl Checker {
             ItemUnit => self  // Already handled in collect pass
             ItemEffect => self  // Already handled in collect pass
             ItemSession => self  // Session protocol declaration — type-checking is structural
+            ItemTrait => self  // Trait methods already collected in pass 1
         }
     }
 
@@ -7894,6 +7936,7 @@ impl Checker {
                 }
                 c.env = c.env.push_scope()
                 c.borrows = c.borrows.push_scope()
+                c.ownership = own_enter_scope(c.ownership)
                 c = c.push_const_scope()
                 c = c.bind_fn_params((*fd).params)
                 let pair = c.check_block((*fd).body)
@@ -7906,8 +7949,18 @@ impl Checker {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
+                // Check linear types consumed at function exit
+                let own_errors = own_check_linear_at_end(c.ownership)
+                if own_errors.error_count > 0 {
+                    var ei: i64 = 0
+                    while ei < own_errors.error_count {
+                        c = c.report_error_at((*fd).span, 40, 0, 0, 0)
+                        ei = ei + 1
+                    }
+                }
                 c = c.pop_const_scope()
                 c.borrows = c.borrows.pop_scope()
+                c.ownership = own_exit_scope(c.ownership)
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
                 // Restore outer effects context
@@ -8124,6 +8177,9 @@ impl Checker {
         // Track variable for borrow checking (linear if struct is declared linear)
         let lin = c.is_linear_type(bind_ty)
         c.borrows = c.borrows.track(s.name, lin)
+        if lin {
+            c.ownership = own_declare_var(c.ownership, s.name, OwnTypeKind::TyLinear)
+        }
         (c, ty_unit())
     }
 
@@ -8175,6 +8231,10 @@ impl Checker {
         // Track variable for borrow checking (linear if struct is declared linear)
         let lin = c.is_linear_type(bind_ty)
         c.borrows = c.borrows.track(s.name, lin)
+        // Register in ownership context for state tracking
+        if lin {
+            c.ownership = own_declare_var(c.ownership, s.name, OwnTypeKind::TyLinear)
+        }
         (c, ty_unit())
     }
 
@@ -8360,6 +8420,9 @@ impl Checker {
                         if consume_result.1 != 0 {
                             c2 = c2.report_error_at(e.span, consume_result.1, 0, 0, 0)
                         }
+                        // Ownership state machine: transfer (move) the linear value
+                        let own_result = own_transfer(c2.ownership, e.name)
+                        c2.ownership = own_result.0
                     }
                 }
                 (c2, ident_ty)
@@ -8912,6 +8975,21 @@ impl Checker {
                 let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                (c, ty_error())
+            }
+        } else if base_ty.kind == TypeKind::TyString {
+            // String methods: .as_bytes() -> &[i8], .len() -> i64
+            let call_start_borrows = c.borrows
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            // "as_bytes" = [97,115,95,98,121,116,101,115]
+            if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
+                (c, ty_ref(ty_i8()))
+            // "len" = [108,101,110]
+            } else if name_matches_str3(e.name, 108, 101, 110) {
+                (c, ty_i64())
+            } else {
+                c = c.report_error_at(e.span, 11, 0, 0, 0)
                 (c, ty_error())
             }
         } else if is_error_or_unknown(base_ty) {
@@ -10989,20 +11067,12 @@ impl Checker {
                 }
 
                 if arg_expr.kind == ExprKind::ExprIdent && implicit_release_kind != 0 {
-                    let current_pair = c.borrow_state_and_shared_count(arg_expr.name)
-                    let before_idx = call_start_borrows.find(arg_expr.name)
-                    let before_pair = if before_idx >= 0 {
-                        let before_entry = call_start_borrows.entries[before_idx]
-                        (before_entry.state, before_entry.shared_count)
-                    } else {
-                        (0, 0)
-                    }
-
-                    if implicit_release_kind == 1 {
-                        if current_pair.1 > before_pair.1 {
-                            c.borrows = c.borrows.release_borrow(arg_expr.name)
-                        }
-                    } else if current_pair.0 == 2 && before_pair.0 != 2 {
+                    // Release borrows unconditionally after call returns.
+                    // Previous logic used state delta (before_pair vs current_pair)
+                    // which failed when consecutive calls borrow the same variable
+                    // (the second call saw before_pair.0 == 2 from the first call's
+                    // un-released borrow, and skipped the release).
+                    if implicit_release_kind == 1 || implicit_release_kind == 2 {
                         c.borrows = c.borrows.release_borrow(arg_expr.name)
                     }
                 }
@@ -11011,22 +11081,8 @@ impl Checker {
                    (arg_expr.un_op == UnaryOp::OpRef || arg_expr.un_op == UnaryOp::OpRefMut) {
                     let borrow_name = unary_operand_name(arg_expr.left)
                     if !name_is_empty(borrow_name) {
-                        let current_pair = c.borrow_state_and_shared_count(borrow_name)
-                        let before_idx = call_start_borrows.find(borrow_name)
-                        let before_pair = if before_idx >= 0 {
-                            let before_entry = call_start_borrows.entries[before_idx]
-                            (before_entry.state, before_entry.shared_count)
-                        } else {
-                            (0, 0)
-                        }
-
-                        if arg_expr.un_op == UnaryOp::OpRef {
-                            if current_pair.1 > before_pair.1 {
-                                c.borrows = c.borrows.release_borrow(borrow_name)
-                            }
-                        } else if current_pair.0 == 2 && before_pair.0 != 2 {
-                            c.borrows = c.borrows.release_borrow(borrow_name)
-                        }
+                        // Unconditionally release call-site borrows after call returns
+                        c.borrows = c.borrows.release_borrow(borrow_name)
                     }
                 }
 
