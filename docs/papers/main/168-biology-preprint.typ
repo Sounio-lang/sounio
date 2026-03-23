@@ -1,6 +1,6 @@
 #set document(
   title: "PG(k−1, 2) Geometry as a Mathematical Framework for Order-Dependent Processes in Biology",
-  author: ("Demetrios C. Agourakis",),
+  author: ("Demetrios C. Agourakis", "Marli Gerenutti"),
   date: datetime(year: 2026, month: 3, day: 23),
 )
 
@@ -14,20 +14,21 @@
   #text(16pt, weight: "bold")[$"PG"(k-1, 2)$ Geometry as a Mathematical Framework\ for Order-Dependent Processes in Biology:\ Drug Metabolism and the Genetic Code]
 
   #v(1em)
-  #text(12pt)[Demetrios C. Agourakis]
+  #text(12pt)[Demetrios C. Agourakis#super[\*] #h(1em) Marli Gerenutti]
 
   #v(0.5em)
   #text(9pt)[
     Biomaterials and Regenerative Medicine Post-Graduate Program,\
     Pontifícia Universidade Católica de São Paulo (PUC-SP), Sorocaba, SP, Brazil\
-    ORCID: 0009-0001-8671-8878
+    Faculdade São Leopoldo Mandic, Campinas, SP, Brazil\
+    D.C.A. ORCID: 0009-0001-8671-8878
   ]
 
   #v(0.5em)
   #text(9pt)[March 2026]
 
   #v(0.3em)
-  #text(8pt)[Correspondence: demetrios\@agourakis.med.br]
+  #text(8pt)[\*Correspondence: demetrios\@agourakis.med.br]
 ]
 
 #v(1em)
