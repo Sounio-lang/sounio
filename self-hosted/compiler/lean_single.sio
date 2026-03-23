@@ -10,6 +10,7 @@ var SRC: [i8; 2097152] = [0; 2097152]
 var SRC_LEN: i64 = 0
 // Import resolution
 var IMP_PATH: [i8; 4096] = [0; 4096]
+var IMP_RAW_PATH: [i8; 4096] = [0; 4096]
 var IMP_LOADED: [i64; 64] = [0; 64]
 var IMP_COUNT: i64 = 0
 var BASE_DIR: [i8; 512] = [0; 512]
@@ -5508,15 +5509,17 @@ fn resolve_imports() with IO, Mut, Panic, Div {
         if pos + 4 < SRC_LEN && sb(pos) == 117 && sb(pos+1) == 115 && sb(pos+2) == 101 && sb(pos+3) == 32 {
             pos = pos + 4  // skip "use "
             // Extract module path until newline, semicolon, or ::*
-            var path_len: i64 = 0
             var path_start: i64 = pos
+            var path_end: i64 = pos
             while pos < SRC_LEN && sb(pos) != 10 && sb(pos) != 59 && sb(pos) != 13 {
                 if sb(pos) == 58 && pos + 1 < SRC_LEN && sb(pos+1) == 58 {
                     if pos + 2 < SRC_LEN && sb(pos+2) == 42 {
+                        path_end = pos
                         pos = pos + 3  // skip ::*
                         break
                     }
                     if pos + 2 < SRC_LEN && sb(pos+2) == 123 {
+                        path_end = pos
                         // Skip ::{...} until }
                         while pos < SRC_LEN && sb(pos) != 125 && sb(pos) != 10 { pos = pos + 1 }
                         if pos < SRC_LEN && sb(pos) == 125 { pos = pos + 1 }
@@ -5524,8 +5527,8 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     }
                 }
                 pos = pos + 1
+                path_end = pos
             }
-            let path_end = pos
             // Build filesystem path: convert :: to /
             var fp_len: i64 = 0
             // Check prefix: stdlib:: or self-hosted::
@@ -5553,7 +5556,68 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 IMP_PATH[fp_len as usize] = 105; fp_len = fp_len + 1  // i
                 IMP_PATH[fp_len as usize] = 111; fp_len = fp_len + 1  // o
             }
+            let raw_len = fp_len
+            var raw_i: i64 = 0
+            while raw_i < raw_len {
+                IMP_RAW_PATH[raw_i as usize] = IMP_PATH[raw_i as usize]
+                raw_i = raw_i + 1
+            }
+            IMP_RAW_PATH[raw_len as usize] = 0
+            var needs_base_dir: i64 = 1
+            if fp_len > 0 && IMP_PATH[0 as usize] as i64 == 47 { needs_base_dir = 0 }
+            if fp_len >= 7 {
+                if IMP_PATH[0 as usize] as i64 == 115 && IMP_PATH[1 as usize] as i64 == 116 && IMP_PATH[2 as usize] as i64 == 100 && IMP_PATH[3 as usize] as i64 == 108 && IMP_PATH[4 as usize] as i64 == 105 && IMP_PATH[5 as usize] as i64 == 98 && IMP_PATH[6 as usize] as i64 == 47 {
+                    needs_base_dir = 0
+                }
+            }
+            if fp_len >= 12 {
+                if IMP_PATH[0 as usize] as i64 == 115 && IMP_PATH[1 as usize] as i64 == 101 && IMP_PATH[2 as usize] as i64 == 108 && IMP_PATH[3 as usize] as i64 == 102 && IMP_PATH[4 as usize] as i64 == 45 && IMP_PATH[5 as usize] as i64 == 104 && IMP_PATH[6 as usize] as i64 == 111 && IMP_PATH[7 as usize] as i64 == 115 && IMP_PATH[8 as usize] as i64 == 116 && IMP_PATH[9 as usize] as i64 == 101 && IMP_PATH[10 as usize] as i64 == 100 && IMP_PATH[11 as usize] as i64 == 47 {
+                    needs_base_dir = 0
+                }
+            }
+            if needs_base_dir == 1 && BASE_DIR_LEN > 0 {
+                var sj: i64 = fp_len - 1
+                while sj >= 0 {
+                    IMP_PATH[(BASE_DIR_LEN + 1 + sj) as usize] = IMP_PATH[sj as usize]
+                    sj = sj - 1
+                }
+                var bj: i64 = 0
+                while bj < BASE_DIR_LEN {
+                    IMP_PATH[bj as usize] = BASE_DIR[bj as usize]
+                    bj = bj + 1
+                }
+                IMP_PATH[BASE_DIR_LEN as usize] = 47
+                fp_len = BASE_DIR_LEN + 1 + fp_len
+            }
             IMP_PATH[fp_len as usize] = 0  // null terminate
+            var fsz: i64 = file_size(IMP_PATH)
+            if fsz <= 0 && needs_base_dir == 1 {
+                fp_len = raw_len
+                raw_i = 0
+                while raw_i < raw_len {
+                    IMP_PATH[raw_i as usize] = IMP_RAW_PATH[raw_i as usize]
+                    raw_i = raw_i + 1
+                }
+                IMP_PATH[fp_len as usize] = 0
+                fsz = file_size(IMP_PATH)
+                if fsz <= 0 {
+                    IMP_PATH[0 as usize] = 115
+                    IMP_PATH[1 as usize] = 116
+                    IMP_PATH[2 as usize] = 100
+                    IMP_PATH[3 as usize] = 108
+                    IMP_PATH[4 as usize] = 105
+                    IMP_PATH[5 as usize] = 98
+                    IMP_PATH[6 as usize] = 47
+                    raw_i = 0
+                    while raw_i < raw_len {
+                        IMP_PATH[(7 + raw_i) as usize] = IMP_RAW_PATH[raw_i as usize]
+                        raw_i = raw_i + 1
+                    }
+                    fp_len = 7 + raw_len
+                    IMP_PATH[fp_len as usize] = 0
+                    fsz = file_size(IMP_PATH)
+                }
+            }
             // Dedup check
             let ph = imp_path_hash(fp_len)
             var already: i64 = 0
@@ -5566,7 +5630,6 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 IMP_LOADED[IMP_COUNT as usize] = ph
                 IMP_COUNT = IMP_COUNT + 1
                 // Try to read the file
-                let fsz = file_size(IMP_PATH)
                 if fsz > 0 && SRC_LEN + fsz < 2097152 {
                     let raw = read_file(IMP_PATH)
                     // Append newline separator
@@ -5590,6 +5653,26 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     if argc < 2 { print("Usage: mini_native <source.sio> <output> [--target x86_64-windows]\n"); return 1 }
     let src = get_arg(0)
     let out = get_arg(1)
+    let src_len = str_len(src)
+    BASE_DIR_LEN = 0
+    var src_i: i64 = 0
+    var last_slash: i64 = -1
+    while src_i < src_len {
+        if str_char_at(src, src_i) == 47 { last_slash = src_i }
+        src_i = src_i + 1
+    }
+    if last_slash < 0 {
+        BASE_DIR[0 as usize] = 46
+        BASE_DIR_LEN = 1
+    } else {
+        src_i = 0
+        while src_i < last_slash && src_i < 511 {
+            BASE_DIR[src_i as usize] = str_char_at(src, src_i) as i8
+            src_i = src_i + 1
+        }
+        BASE_DIR_LEN = src_i
+    }
+    BASE_DIR[BASE_DIR_LEN as usize] = 0
 
     // Parse optional --target flag
     if argc >= 4 {
