@@ -34,7 +34,9 @@ var CL_BODY_COUNT: i64 = 0
 var GLOBAL_ELF: [i8; 16777216] = [0; 16777216]
 
 // Global variable registry (file-scope var declarations)
-var GLOBAL_NAMES: [Name; 256] = [ir_empty_name(); 256]
+// Name data stored as parallel scalar arrays (boot4 can't do struct field writes)
+var GLOBAL_NAME_BUF: [i8; 32768] = [0; 32768]   // 256 × 128 bytes per name
+var GLOBAL_NAME_LEN: [i64; 256] = [0; 256]
 var GLOBAL_OFFSETS: [i64; 256] = [0; 256]      // byte offset from global_base
 var GLOBAL_SIZES: [i64; 256] = [0; 256]        // total byte size of this global
 var GLOBAL_ELEM_SIZES: [i64; 256] = [0; 256]   // element size (1 for i8, 8 for i64, 8 for scalar)
@@ -61,6 +63,8 @@ var SC_NL: i64 = 0  // name len
 var SC_FI: i64 = 0  // function index
 var SC_PC: i64 = 0  // param count
 var SC_DEPTH: i64 = 0  // brace depth
+var SC_ID_S: i64 = 0  // ident start (for stmt helpers)
+var SC_ID_LEN: i64 = 0  // ident len (for stmt helpers)
 
 // Same-module token arrays (replaces cross-module PT_* from parser.sio)
 var MP_KIND: [i64; 65536] = [0; 65536]
@@ -1966,11 +1970,21 @@ fn emit_load_global_base(code: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     c
 }
 
-// Lookup global by name, return index or -1
-fn global_lookup(name: Name) -> i64 with Mut, Panic, Div {
+// Lookup global by name (using flat buffer), return index or -1
+fn global_lookup_bytes(name_off: i64, name_len2: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < GLOBAL_COUNT {
-        if ir_name_eq(GLOBAL_NAMES[i as usize], name) { return i }
+        let gl = GLOBAL_NAME_LEN[i as usize]
+        if gl == name_len2 {
+            let base = i * 128
+            var match2: i64 = 1
+            var j: i64 = 0
+            while j < gl {
+                if GLOBAL_NAME_BUF[(base + j) as usize] != POOL[(name_off + j) as usize] { match2 = 0 }
+                j = j + 1
+            }
+            if match2 == 1 { return i }
+        }
         i = i + 1
     }
     -1
@@ -2291,10 +2305,10 @@ fn mc_scan_lean_globals(start: i64, end: i64) with IO, Mut, Panic, Div {
             while np < end { let b = imp_src_byte(np) as i64; if b == 58 || b == 32 || b == 10 { break }; np = np + 1 }
             var name_len = np - name_start
             if name_len > 0 && name_len < 128 && GLOBAL_COUNT < 256 {
-                var gn = ir_empty_name()
+                // Copy name bytes into flat buffer (boot4-safe: no struct field writes)
+                let gn_base = GLOBAL_COUNT * 128
                 var ni: i64 = 0
-                while ni < name_len && ni < 128 { gn.buf[ni as usize] = LEAN_SOURCE[(name_start + ni) as usize]; ni = ni + 1 }
-                gn.len = name_len
+                while ni < name_len && ni < 128 { GLOBAL_NAME_BUF[(gn_base + ni) as usize] = LEAN_SOURCE[(name_start + ni) as usize]; ni = ni + 1 }
                 while np < end { if (imp_src_byte(np) as i64) != 32 { break }; np = np + 1 }
                 if np < end && (imp_src_byte(np) as i64) == 58 {
                     np = np + 1
@@ -2318,7 +2332,7 @@ fn mc_scan_lean_globals(start: i64, end: i64) with IO, Mut, Panic, Div {
                     }
                     total_size = ((total_size + 7) / 8) * 8
                     let gi = GLOBAL_COUNT
-                    GLOBAL_NAMES[gi as usize] = gn
+                    GLOBAL_NAME_LEN[gi as usize] = name_len
                     GLOBAL_OFFSETS[gi as usize] = GLOBAL_TOTAL_SIZE
                     GLOBAL_SIZES[gi as usize] = total_size
                     GLOBAL_ELEM_SIZES[gi as usize] = elem_size
@@ -2376,13 +2390,13 @@ fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
             }
             var name_len = np - name_start
             if name_len > 0 && name_len < 128 && GLOBAL_COUNT < 256 {
-                var gn = ir_empty_name()
+                // Copy name bytes into flat buffer (boot4-safe: no struct field writes)
+                let gn_base = GLOBAL_COUNT * 128
                 var ni: i64 = 0
                 while ni < name_len && ni < 128 {
-                    gn.buf[ni as usize] = raw[(name_start + ni) as usize]
+                    GLOBAL_NAME_BUF[(gn_base + ni) as usize] = raw[(name_start + ni) as usize]
                     ni = ni + 1
                 }
-                gn.len = name_len
                 // Skip to colon
                 while np < src_size { if scan_byte(raw, np) != 32 { break }; np = np + 1 }
                 if np < src_size && scan_byte(raw, np) == 58 {
@@ -2428,7 +2442,7 @@ fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
                     // Round up to 8 bytes
                     total_size = ((total_size + 7) / 8) * 8
                     let gi = GLOBAL_COUNT
-                    GLOBAL_NAMES[gi as usize] = gn
+                    GLOBAL_NAME_LEN[gi as usize] = name_len
                     GLOBAL_OFFSETS[gi as usize] = GLOBAL_TOTAL_SIZE
                     GLOBAL_SIZES[gi as usize] = total_size
                     GLOBAL_ELEM_SIZES[gi as usize] = elem_size
@@ -5128,7 +5142,7 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
     // Register global variables with special negative slots (slot = -2000 - global_idx)
     var gi: i64 = 0
     while gi < GLOBAL_COUNT && local_count < 512 {
-        local_names[local_count as usize] = GLOBAL_NAMES[gi as usize]
+        local_names[local_count as usize] = ir_empty_name()  // globals use MC_ path, not AST path
         local_slots[local_count as usize] = 0 - 2000 - gi
         // Type: 2 for arrays (> 8 bytes), 0 for scalars
         if GLOBAL_SIZES[gi as usize] > 8 {
@@ -6052,6 +6066,61 @@ fn mc_find_fn(ns: i64, nl: i64) -> i64 with Panic {
         i = i + 1
     }
     -1
+}
+
+// --- Global variable lookup by source position ---
+fn mc_find_global_src(ns: i64, nl: i64) -> i64 with Panic {
+    var i: i64 = 0
+    while i < GLOBAL_COUNT {
+        let gl = GLOBAL_NAME_LEN[i as usize]
+        if gl == nl {
+            let base = i * 128
+            var ok: i64 = 1
+            var j: i64 = 0
+            while j < gl {
+                if GLOBAL_NAME_BUF[(base + j) as usize] != LEAN_SOURCE[(ns + j) as usize] { ok = 0 }
+                j = j + 1
+            }
+            if ok == 1 { return i }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// BSS_BASE for globals: fixed at 0x700000 (same as boot4)
+fn MC_BSS_BASE() -> i64 { 0x700000 }
+
+fn mc_emit_load_global_scalar(gi: i64) with Mut, Panic {
+    let addr = MC_BSS_BASE() + GLOBAL_OFFSETS[gi as usize]
+    // movabs rax, addr
+    we(0x48); we(0xB8)
+    var k: i64 = 0
+    while k < 8 { we((addr >> (k * 8)) & 0xFF); k = k + 1 }
+    // mov rax, [rax]
+    we(0x48); we(0x8B); we(0x00)
+}
+
+fn mc_emit_store_global_scalar(gi: i64) with Mut, Panic {
+    let addr = MC_BSS_BASE() + GLOBAL_OFFSETS[gi as usize]
+    // push rax (save value)
+    we(0x50)
+    // movabs rcx, addr
+    we(0x48); we(0xB9)
+    var k: i64 = 0
+    while k < 8 { we((addr >> (k * 8)) & 0xFF); k = k + 1 }
+    // pop rax (restore value)
+    we(0x58)
+    // mov [rcx], rax
+    we(0x48); we(0x89); we(0x01)
+}
+
+fn mc_emit_load_global_base() with Mut, Panic {
+    // movabs rax, MC_BSS_BASE
+    we(0x48); we(0xB8)
+    let addr = MC_BSS_BASE()
+    var k: i64 = 0
+    while k < 8 { we((addr >> (k * 8)) & 0xFF); k = k + 1 }
 }
 
 // --- Struct lookup by name ---
@@ -7052,17 +7121,37 @@ fn mc_parse_primary() with Mut, Panic, Div {
             }
             MC_EXPR_IS_F64 = mc_local_is_f64(id_s, id_len)
         } else {
-            // Unknown variable — emit 0 with warning
-            print("mc: unknown var '")
-            var vi: i64 = 0
-            while vi < id_len && vi < 32 {
-                print_char((LEAN_SOURCE[(id_s + vi) as usize] as i64) as i64)
-                vi = vi + 1
+            // Try global variable lookup
+            let gi = mc_find_global_src(id_s, id_len)
+            if gi >= 0 {
+                let gsz = GLOBAL_SIZES[gi as usize]
+                if gsz > 8 {
+                    // Array global — load base address
+                    mc_emit_load_global_base()
+                    let goff = GLOBAL_OFFSETS[gi as usize]
+                    if goff > 0 {
+                        we(0x48); we(0x05)
+                        we(goff & 0xFF); we((goff >> 8) & 0xFF)
+                        we((goff >> 16) & 0xFF); we((goff >> 24) & 0xFF)
+                    }
+                } else {
+                    // Scalar global — load value
+                    mc_emit_load_global_scalar(gi)
+                }
+                MC_EXPR_IS_F64 = GLOBAL_IS_FLOAT[gi as usize]
+            } else {
+                // Unknown variable — emit 0 with warning
+                print("mc: unknown var '")
+                var vi: i64 = 0
+                while vi < id_len && vi < 32 {
+                    print_char((LEAN_SOURCE[(id_s + vi) as usize] as i64) as i64)
+                    vi = vi + 1
+                }
+                print("'\n")
+                we(0x48)
+                we(0x31)
+                we(0xc0)  // xor rax, rax
             }
-            print("'\n")
-            we(0x48)
-            we(0x31)
-            we(0xc0)  // xor rax, rax
         }
         return 0
     }
@@ -7775,169 +7864,569 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
     0
 }
 
-// --- Statement parser ---
+// --- Statement helpers (extracted for boot4 code-size limit) ---
 
-fn mc_parse_stmt() with Mut, Panic, Div {
-    let k = MP_KIND[MC_POS as usize]
+fn mc_stmt_let() with Mut, Panic, Div {
+    MC_POS = MC_POS + 1
+    let ns = MP_START[MC_POS as usize]
+    let ne = MP_END[MC_POS as usize]
+    let nl = ne - ns
+    MC_POS = MC_POS + 1  // consume ident
+    // Optional type annotation: : TYPE — detect f64 and struct
+    var let_is_f64: i64 = 0
+    var let_st: i64 = -1
+    if MP_KIND[MC_POS as usize] == 178 {
+        MC_POS = MC_POS + 1
+        let tk_at = MP_KIND[MC_POS as usize]
+        if tk_at == 120 || tk_at == 201 {
+            let ts = MP_START[MC_POS as usize]
+            let tl = MP_END[MC_POS as usize] - ts
+            if mc_src_eq_at(ts, tl, "f64") { let_is_f64 = 1 }
+            else { let_st = mc_type_name_to_struct(ts, tl) }
+        }
+        mc_skip_type()
+    }
+    MC_POS = MC_POS + 1
+    // If no type annotation, peek for struct literal: StructName {
+    if let_st < 0 && let_is_f64 == 0 && MP_KIND[MC_POS as usize] == 120 {
+        let rhs_s = MP_START[MC_POS as usize]
+        let rhs_l = MP_END[MC_POS as usize] - rhs_s
+        if MC_POS + 1 < MC_TC && MP_KIND[(MC_POS + 1) as usize] == 173 {
+            let_st = mc_find_struct(rhs_s, rhs_l)
+        }
+    }
+    mc_parse_expr()
+    if let_st >= 0 {
+        let slot = mc_add_local_struct(ns, nl, let_st)
+        mc_emit_struct_copy_from_rax(slot, MC_ST_FLAT_SIZE[let_st as usize])
+    } else if let_is_f64 == 1 {
+        let slot = mc_add_local_f64(ns, nl)
+        mc_emit_store_rax(slot)
+    } else if MC_EXPR_IS_F64 == 1 {
+        let slot = mc_add_local_f64(ns, nl)
+        mc_emit_store_rax(slot)
+    } else {
+        let slot = mc_add_local(ns, nl)
+        mc_emit_store_rax(slot)
+    }
+    0
+}
 
-    // let binding
-    if k == 8 {
+fn mc_stmt_var() with Mut, Panic, Div {
+    MC_POS = MC_POS + 1
+    let ns = MP_START[MC_POS as usize]
+    let ne = MP_END[MC_POS as usize]
+    let nl = ne - ns
+    MC_POS = MC_POS + 1  // consume ident
+    // Optional type annotation — detect f64 and struct
+    var var_is_f64: i64 = 0
+    var var_st: i64 = -1
+    if MP_KIND[MC_POS as usize] == 178 {
         MC_POS = MC_POS + 1
-        let ns = MP_START[MC_POS as usize]
-        let ne = MP_END[MC_POS as usize]
-        let nl = ne - ns
-        MC_POS = MC_POS + 1  // consume ident
-        // Optional type annotation: : TYPE — detect f64 and struct
-        var let_is_f64: i64 = 0
-        var let_st: i64 = -1
-        if MP_KIND[MC_POS as usize] == 178 {
-            MC_POS = MC_POS + 1
-            if MP_KIND[MC_POS as usize] == 120 || MP_KIND[MC_POS as usize] == 201 {
-                let ts = MP_START[MC_POS as usize]
-                let tl = MP_END[MC_POS as usize] - ts
-                if mc_src_eq_at(ts, tl, "f64") { let_is_f64 = 1 }
-                else { let_st = mc_type_name_to_struct(ts, tl) }
-            }
-            mc_skip_type()
+        let tk_at = MP_KIND[MC_POS as usize]
+        if tk_at == 120 || tk_at == 201 {
+            let ts = MP_START[MC_POS as usize]
+            let tl = MP_END[MC_POS as usize] - ts
+            if mc_src_eq_at(ts, tl, "f64") { var_is_f64 = 1 }
+            else { var_st = mc_type_name_to_struct(ts, tl) }
         }
-        MC_POS = MC_POS + 1
-        // If no type annotation, peek for struct literal: StructName {
-        if let_st < 0 && let_is_f64 == 0 && MP_KIND[MC_POS as usize] == 120 {
-            let rhs_s = MP_START[MC_POS as usize]
-            let rhs_l = MP_END[MC_POS as usize] - rhs_s
-            if MC_POS + 1 < MC_TC && MP_KIND[(MC_POS + 1) as usize] == 173 {
-                let_st = mc_find_struct(rhs_s, rhs_l)
-            }
+        mc_skip_type()
+    }
+    MC_POS = MC_POS + 1
+    if var_st < 0 && var_is_f64 == 0 && MP_KIND[MC_POS as usize] == 120 {
+        let rhs_s = MP_START[MC_POS as usize]
+        let rhs_l = MP_END[MC_POS as usize] - rhs_s
+        if MC_POS + 1 < MC_TC && MP_KIND[(MC_POS + 1) as usize] == 173 {
+            var_st = mc_find_struct(rhs_s, rhs_l)
         }
+    }
+    mc_parse_expr()
+    if var_st >= 0 {
+        let slot = mc_add_local_struct(ns, nl, var_st)
+        mc_emit_struct_copy_from_rax(slot, MC_ST_FLAT_SIZE[var_st as usize])
+    } else if var_is_f64 == 1 {
+        let slot = mc_add_local_f64(ns, nl)
+        mc_emit_store_rax(slot)
+    } else if MC_EXPR_IS_F64 == 1 {
+        let slot = mc_add_local_f64(ns, nl)
+        mc_emit_store_rax(slot)
+    } else {
+        let slot = mc_add_local(ns, nl)
+        mc_emit_store_rax(slot)
+    }
+    0
+}
+
+fn mc_stmt_return() with Mut, Panic, Div {
+    MC_POS = MC_POS + 1
+    let ret_tk = MP_KIND[MC_POS as usize]
+    if ret_tk != 174 && ret_tk != 0 {
         mc_parse_expr()
-        if let_st >= 0 {
-            let slot = mc_add_local_struct(ns, nl, let_st)
-            mc_emit_struct_copy_from_rax(slot, MC_ST_FLAT_SIZE[let_st as usize])
-        } else if let_is_f64 == 1 || MC_EXPR_IS_F64 == 1 {
-            let slot = mc_add_local_f64(ns, nl)
-            mc_emit_store_rax(slot)
-        } else {
-            let slot = mc_add_local(ns, nl)
-            mc_emit_store_rax(slot)
+    } else {
+        we(0x48)
+        we(0x31)
+        we(0xc0)  // xor rax, rax
+    }
+    // Epilogue: mov rsp, rbp; pop rbp; ret
+    we(0x48)
+    we(0x89)
+    we(0xec)
+    we(0x5d)
+    we(0xc3)
+    0
+}
+
+fn mc_stmt_while() with Mut, Panic, Div {
+    MC_POS = MC_POS + 1
+    let loop_top = WIDE_LEN
+    // Push loop state
+    MC_LOOP_TOP_STACK[MC_LOOP_DEPTH as usize] = loop_top
+    MC_LOOP_DEPTH = MC_LOOP_DEPTH + 1
+    let saved_break_count = MC_BREAK_FIX_COUNT
+
+    mc_parse_expr()
+    // test rax, rax; jz end
+    we(0x48)
+    we(0x85)
+    we(0xc0)
+    we(0x0f)
+    we(0x84)
+    let end_fix = WIDE_LEN
+    we32(0)
+
+    MC_POS = MC_POS + 1
+    mc_parse_block_body()
+    MC_POS = MC_POS + 1
+
+    // jmp loop_top
+    we(0xe9)
+    let back_disp = loop_top - (WIDE_LEN + 4)
+    we32(back_disp)
+
+    // Patch end_fix
+    let end_off = WIDE_LEN
+    let end_disp = end_off - (end_fix + 4)
+    WIDE_OUT[end_fix as usize] = (end_disp & 0xFF) as i8
+    WIDE_OUT[(end_fix + 1) as usize] = ((end_disp >> 8) & 0xFF) as i8
+    WIDE_OUT[(end_fix + 2) as usize] = ((end_disp >> 16) & 0xFF) as i8
+    WIDE_OUT[(end_fix + 3) as usize] = ((end_disp >> 24) & 0xFF) as i8
+
+    // Patch break fixups for this loop level
+    var bi: i64 = saved_break_count
+    while bi < MC_BREAK_FIX_COUNT {
+        let bf = MC_BREAK_FIX_OFF[bi as usize]
+        let bd = end_off - (bf + 4)
+        WIDE_OUT[bf as usize] = (bd & 0xFF) as i8
+        WIDE_OUT[(bf + 1) as usize] = ((bd >> 8) & 0xFF) as i8
+        WIDE_OUT[(bf + 2) as usize] = ((bd >> 16) & 0xFF) as i8
+        WIDE_OUT[(bf + 3) as usize] = ((bd >> 24) & 0xFF) as i8
+        bi = bi + 1
+    }
+    MC_BREAK_FIX_COUNT = saved_break_count
+
+    MC_LOOP_DEPTH = MC_LOOP_DEPTH - 1
+    0
+}
+
+fn mc_stmt_field_access() with Mut, Panic, Div {
+    // SC_ID_S, SC_ID_LEN set by caller
+    let id_s = SC_ID_S
+    let id_len = SC_ID_LEN
+    // Save position to detect assignment vs expression
+    let dot_save_pos = MC_POS
+    var dot_total_off: i64 = 0
+    while MP_KIND[MC_POS as usize] == 180 {
+        MC_POS = MC_POS + 1
+        let dfs = MP_START[MC_POS as usize]
+        let dfl = MP_END[MC_POS as usize] - dfs
+        MC_POS = MC_POS + 1
+        var dsi: i64 = 0
+        while dsi < MC_ST_COUNT {
+            let dfi = mc_find_struct_field(dsi, dfs, dfl)
+            if dfi >= 0 {
+                let dfb = MC_ST_FIELD_BASE[dsi as usize]
+                dot_total_off = dot_total_off + MC_SF_OFFSET[(dfb + dfi) as usize]
+                dsi = MC_ST_COUNT
+            }
+            dsi = dsi + 1
+        }
+    }
+    if MP_KIND[MC_POS as usize] == 134 {
+        // Field assignment: ident.field = expr
+        MC_POS = MC_POS + 1
+        mc_parse_expr()
+        let slot = mc_find_local(id_s, id_len)
+        if slot >= 0 {
+            mc_emit_store_rax(slot + dot_total_off)
         }
         return 0
     }
+    // Not assignment — rewind and parse as expression
+    MC_POS = dot_save_pos - 1  // rewind to ident
+    mc_parse_expr()
+    0
+}
 
-    // var binding
-    if k == 9 {
-        MC_POS = MC_POS + 1
-        let ns = MP_START[MC_POS as usize]
-        let ne = MP_END[MC_POS as usize]
-        let nl = ne - ns
-        MC_POS = MC_POS + 1  // consume ident
-        // Optional type annotation — detect f64 and struct
-        var var_is_f64: i64 = 0
-        var var_st: i64 = -1
-        if MP_KIND[MC_POS as usize] == 178 {
-            MC_POS = MC_POS + 1
-            if MP_KIND[MC_POS as usize] == 120 || MP_KIND[MC_POS as usize] == 201 {
-                let ts = MP_START[MC_POS as usize]
-                let tl = MP_END[MC_POS as usize] - ts
-                if mc_src_eq_at(ts, tl, "f64") { var_is_f64 = 1 }
-                else { var_st = mc_type_name_to_struct(ts, tl) }
-            }
-            mc_skip_type()
-        }
-        MC_POS = MC_POS + 1
-        if var_st < 0 && var_is_f64 == 0 && MP_KIND[MC_POS as usize] == 120 {
-            let rhs_s = MP_START[MC_POS as usize]
-            let rhs_l = MP_END[MC_POS as usize] - rhs_s
-            if MC_POS + 1 < MC_TC && MP_KIND[(MC_POS + 1) as usize] == 173 {
-                var_st = mc_find_struct(rhs_s, rhs_l)
-            }
-        }
-        mc_parse_expr()
-        if var_st >= 0 {
-            let slot = mc_add_local_struct(ns, nl, var_st)
-            mc_emit_struct_copy_from_rax(slot, MC_ST_FLAT_SIZE[var_st as usize])
-        } else if var_is_f64 == 1 || MC_EXPR_IS_F64 == 1 {
-            let slot = mc_add_local_f64(ns, nl)
-            mc_emit_store_rax(slot)
-        } else {
-            let slot = mc_add_local(ns, nl)
-            mc_emit_store_rax(slot)
-        }
-        return 0
-    }
-
-    // return
-    if k == 25 {
-        MC_POS = MC_POS + 1
-        if MP_KIND[MC_POS as usize] != 174 && MP_KIND[MC_POS as usize] != 0 {
-            mc_parse_expr()
-        } else {
-            we(0x48)
-            we(0x31)
-            we(0xc0)  // xor rax, rax
-        }
-        // Epilogue: mov rsp, rbp; pop rbp; ret
+fn mc_stmt_compound_assign() with Mut, Panic, Div {
+    // SC_ID_S, SC_ID_LEN set by caller
+    let id_s = SC_ID_S
+    let id_len = SC_ID_LEN
+    let op = MP_KIND[MC_POS as usize]
+    MC_POS = MC_POS + 1
+    mc_parse_expr()
+    let slot = mc_find_local(id_s, id_len)
+    if slot >= 0 {
         we(0x48)
         we(0x89)
-        we(0xec)
-        we(0x5d)
-        we(0xc3)
-        return 0
+        we(0xc1)  // mov rcx, rax
+        mc_emit_load_rax(slot)
+        if op == 151 {
+            // +=
+            we(0x48)
+            we(0x01)
+            we(0xc8)  // add rax, rcx
+        } else if op == 152 {
+            // -=
+            we(0x48)
+            we(0x29)
+            we(0xc8)  // sub rax, rcx
+        } else if op == 153 {
+            // *=
+            we(0x48)
+            we(0x0f)
+            we(0xaf)
+            we(0xc1)  // imul rax, rcx
+        }
+        mc_emit_store_rax(slot)
     }
+    0
+}
 
-    // while loop
-    if k == 21 {
-        MC_POS = MC_POS + 1
-        let loop_top = WIDE_LEN
-        // Push loop state
-        MC_LOOP_TOP_STACK[MC_LOOP_DEPTH as usize] = loop_top
-        MC_LOOP_DEPTH = MC_LOOP_DEPTH + 1
-        let saved_break_count = MC_BREAK_FIX_COUNT
+fn mc_stmt_trailing_binops_f64(op: i64) with Mut, Panic {
+    // movq xmm0, rax; movq xmm1, rcx
+    we(0x66)
+    we(0x48)
+    we(0x0F)
+    we(0x6E)
+    we(0xC0)
+    we(0x66)
+    we(0x48)
+    we(0x0F)
+    we(0x6E)
+    we(0xC9)
+    if op == 129 { we(0xF2)
+    we(0x0F)
+    we(0x58)
+    we(0xC1) }
+    else if op == 130 { we(0xF2)
+    we(0x0F)
+    we(0x5C)
+    we(0xC1) }
+    else if op == 131 { we(0xF2)
+    we(0x0F)
+    we(0x59)
+    we(0xC1) }
+    else if op == 132 { we(0xF2)
+    we(0x0F)
+    we(0x5E)
+    we(0xC1) }
+    // movq rax, xmm0
+    we(0x66)
+    we(0x48)
+    we(0x0F)
+    we(0x7E)
+    we(0xC0)
+    MC_EXPR_IS_F64 = 1
+    0
+}
 
-        mc_parse_expr()
-        // test rax, rax; jz end
+fn mc_stmt_trailing_cmp_f64(op: i64) with Mut, Panic {
+    // movq xmm0, rax; movq xmm1, rcx; ucomisd xmm0, xmm1
+    we(0x66)
+    we(0x48)
+    we(0x0F)
+    we(0x6E)
+    we(0xC0)
+    we(0x66)
+    we(0x48)
+    we(0x0F)
+    we(0x6E)
+    we(0xC9)
+    we(0x66)
+    we(0x0F)
+    we(0x2E)
+    we(0xC1)
+    if op == 143 { we(0x0f)
+    we(0x94)
+    we(0xc0) }
+    else if op == 144 { we(0x0f)
+    we(0x95)
+    we(0xc0) }
+    else if op == 135 { we(0x0f)
+    we(0x92)
+    we(0xc0) }
+    else if op == 136 { we(0x0f)
+    we(0x97)
+    we(0xc0) }
+    else if op == 145 { we(0x0f)
+    we(0x96)
+    we(0xc0) }
+    else if op == 146 { we(0x0f)
+    we(0x93)
+    we(0xc0) }
+    we(0x48)
+    we(0x0f)
+    we(0xb6)
+    we(0xc0)
+    MC_EXPR_IS_F64 = 0
+    0
+}
+
+fn mc_stmt_trailing_binop_int(op: i64) with Mut, Panic {
+    if op == 129 { we(0x48)
+    we(0x01)
+    we(0xc8) }
+    else if op == 130 { we(0x48)
+    we(0x29)
+    we(0xc8) }
+    else if op == 131 { we(0x48)
+    we(0x0f)
+    we(0xaf)
+    we(0xc1) }
+    else if op == 132 { we(0x48)
+    we(0x99)
+    we(0x48)
+    we(0xf7)
+    we(0xf9) }
+    else if op == 133 { we(0x48)
+    we(0x99)
+    we(0x48)
+    we(0xf7)
+    we(0xf9)
+    we(0x48)
+    we(0x89)
+    we(0xd0) }
+    else if op == 143 { we(0x48)
+    we(0x39)
+    we(0xc8)
+    we(0x0f)
+    we(0x94)
+    we(0xc0)
+    we(0x48)
+    we(0x0f)
+    we(0xb6)
+    we(0xc0) }
+    else if op == 144 { we(0x48)
+    we(0x39)
+    we(0xc8)
+    we(0x0f)
+    we(0x95)
+    we(0xc0)
+    we(0x48)
+    we(0x0f)
+    we(0xb6)
+    we(0xc0) }
+    else if op == 135 { we(0x48)
+    we(0x39)
+    we(0xc8)
+    we(0x0f)
+    we(0x9c)
+    we(0xc0)
+    we(0x48)
+    we(0x0f)
+    we(0xb6)
+    we(0xc0) }
+    else if op == 136 { we(0x48)
+    we(0x39)
+    we(0xc8)
+    we(0x0f)
+    we(0x9f)
+    we(0xc0)
+    we(0x48)
+    we(0x0f)
+    we(0xb6)
+    we(0xc0) }
+    else if op == 145 { we(0x48)
+    we(0x39)
+    we(0xc8)
+    we(0x0f)
+    we(0x9e)
+    we(0xc0)
+    we(0x48)
+    we(0x0f)
+    we(0xb6)
+    we(0xc0) }
+    else if op == 146 { we(0x48)
+    we(0x39)
+    we(0xc8)
+    we(0x0f)
+    we(0x9d)
+    we(0xc0)
+    we(0x48)
+    we(0x0f)
+    we(0xb6)
+    we(0xc0) }
+    else if op == 147 {
         we(0x48)
         we(0x85)
         we(0xc0)
         we(0x0f)
-        we(0x84)
-        let end_fix = WIDE_LEN
-        we32(0)
+        we(0x95)
+        we(0xc0)
+        we(0x48)
+        we(0x85)
+        we(0xc9)
+        we(0x0f)
+        we(0x95)
+        we(0xc1)
+        we(0x20)
+        we(0xc8)
+        we(0x48)
+        we(0x0f)
+        we(0xb6)
+        we(0xc0)
+    }
+    else if op == 148 {
+        we(0x48)
+        we(0x09)
+        we(0xc8)
+        we(0x48)
+        we(0x85)
+        we(0xc0)
+        we(0x0f)
+        we(0x95)
+        we(0xc0)
+        we(0x48)
+        we(0x0f)
+        we(0xb6)
+        we(0xc0)
+    }
+    0
+}
 
+fn mc_stmt_trailing_binops() with Mut, Panic, Div {
+    while true {
+        let op = MP_KIND[MC_POS as usize]
+        let prec = mc_binop_prec(op)
+        if prec == 0 { break }
         MC_POS = MC_POS + 1
-        mc_parse_block_body()
-        MC_POS = MC_POS + 1
-
-        // jmp loop_top
-        we(0xe9)
-        let back_disp = loop_top - (WIDE_LEN + 4)
-        we32(back_disp)
-
-        // Patch end_fix
-        let end_off = WIDE_LEN
-        let end_disp = end_off - (end_fix + 4)
-        WIDE_OUT[end_fix as usize] = (end_disp & 0xFF) as i8
-        WIDE_OUT[(end_fix + 1) as usize] = ((end_disp >> 8) & 0xFF) as i8
-        WIDE_OUT[(end_fix + 2) as usize] = ((end_disp >> 16) & 0xFF) as i8
-        WIDE_OUT[(end_fix + 3) as usize] = ((end_disp >> 24) & 0xFF) as i8
-
-        // Patch break fixups for this loop level
-        var bi: i64 = saved_break_count
-        while bi < MC_BREAK_FIX_COUNT {
-            let bf = MC_BREAK_FIX_OFF[bi as usize]
-            let bd = end_off - (bf + 4)
-            WIDE_OUT[bf as usize] = (bd & 0xFF) as i8
-            WIDE_OUT[(bf + 1) as usize] = ((bd >> 8) & 0xFF) as i8
-            WIDE_OUT[(bf + 2) as usize] = ((bd >> 16) & 0xFF) as i8
-            WIDE_OUT[(bf + 3) as usize] = ((bd >> 24) & 0xFF) as i8
-            bi = bi + 1
+        let ls = mc_alloc_slot()
+        mc_emit_store_rax(ls)
+        var stmt_left_f64 = MC_EXPR_IS_F64
+        mc_parse_expr_prec(prec + 1)
+        we(0x48)
+        we(0x89)
+        we(0xc1)
+        mc_emit_load_rax(ls)
+        // f64 arithmetic path — boot4-safe: no && with ||
+        var did_f64: i64 = 0
+        if stmt_left_f64 == 1 {
+            if op == 129 { mc_stmt_trailing_binops_f64(op)
+            did_f64 = 1 }
+            if op == 130 { mc_stmt_trailing_binops_f64(op)
+            did_f64 = 1 }
+            if op == 131 { mc_stmt_trailing_binops_f64(op)
+            did_f64 = 1 }
+            if op == 132 { mc_stmt_trailing_binops_f64(op)
+            did_f64 = 1 }
+            if op == 143 { mc_stmt_trailing_cmp_f64(op)
+            did_f64 = 1 }
+            if op == 144 { mc_stmt_trailing_cmp_f64(op)
+            did_f64 = 1 }
+            if op == 135 { mc_stmt_trailing_cmp_f64(op)
+            did_f64 = 1 }
+            if op == 136 { mc_stmt_trailing_cmp_f64(op)
+            did_f64 = 1 }
+            if op == 145 { mc_stmt_trailing_cmp_f64(op)
+            did_f64 = 1 }
+            if op == 146 { mc_stmt_trailing_cmp_f64(op)
+            did_f64 = 1 }
         }
-        MC_BREAK_FIX_COUNT = saved_break_count
+        if did_f64 == 0 {
+            mc_stmt_trailing_binop_int(op)
+        }
+    }
+    0
+}
 
-        MC_LOOP_DEPTH = MC_LOOP_DEPTH - 1
+fn mc_stmt_ident() with Mut, Panic, Div {
+    // SC_ID_S, SC_ID_LEN set by caller
+    let id_s = SC_ID_S
+    let id_len = SC_ID_LEN
+    MC_POS = MC_POS + 1
+
+    // Field access or assignment: ident.field[.field...]
+    if MP_KIND[MC_POS as usize] == 180 {
+        mc_stmt_field_access()
         return 0
     }
 
-    // break
+    // Assignment: ident = expr
+    if MP_KIND[MC_POS as usize] == 134 {
+        MC_POS = MC_POS + 1
+        mc_parse_expr()
+        let slot = mc_find_local(id_s, id_len)
+        if slot >= 0 {
+            mc_emit_store_rax(slot)
+        } else {
+            // Try global variable assignment
+            let gi = mc_find_global_src(id_s, id_len)
+            if gi >= 0 {
+                mc_emit_store_global_scalar(gi)
+            }
+        }
+        return 0
+    }
+
+    // Compound assignment: ident += expr, -=, *=
+    if MP_KIND[MC_POS as usize] == 151 {
+        mc_stmt_compound_assign()
+        return 0
+    }
+    if MP_KIND[MC_POS as usize] == 152 {
+        mc_stmt_compound_assign()
+        return 0
+    }
+    if MP_KIND[MC_POS as usize] == 153 {
+        mc_stmt_compound_assign()
+        return 0
+    }
+
+    // Function call: ident(args)
+    if MP_KIND[MC_POS as usize] == 171 {
+        MC_POS = MC_POS + 1
+        mc_emit_call(id_s, id_len)
+        // rax = call result; fall through to trailing binop check
+    } else {
+        // Bare expression — the ident was already consumed, emit variable load
+        let slot = mc_find_local(id_s, id_len)
+        if slot >= 0 {
+            mc_emit_load_rax(slot)
+            MC_EXPR_IS_F64 = mc_local_is_f64(id_s, id_len)
+        } else {
+            we(0x48)
+            we(0x31)
+            we(0xc0)
+            MC_EXPR_IS_F64 = 0
+        }
+    }
+    // Check for trailing binops
+    mc_stmt_trailing_binops()
+    0
+}
+
+// --- Statement parser ---
+
+fn mc_parse_stmt() with Mut, Panic, Div {
+    let k = MP_KIND[MC_POS as usize]
+    if k == 8 { mc_stmt_let()
+    return 0 }
+    if k == 9 { mc_stmt_var()
+    return 0 }
+    if k == 25 { mc_stmt_return()
+    return 0 }
+    if k == 21 { mc_stmt_while()
+    return 0 }
     if k == 23 {
         MC_POS = MC_POS + 1
         we(0xe9)
@@ -7946,8 +8435,6 @@ fn mc_parse_stmt() with Mut, Panic, Div {
         we32(0)
         return 0
     }
-
-    // continue
     if k == 24 {
         MC_POS = MC_POS + 1
         if MC_LOOP_DEPTH > 0 {
@@ -7958,355 +8445,16 @@ fn mc_parse_stmt() with Mut, Panic, Div {
         }
         return 0
     }
-
-    // if statement
-    if k == 17 {
-        mc_parse_if_expr()
-        return 0
-    }
-
-    // match statement/expression
-    if k == 202 {
-        mc_parse_match_expr()
-        return 0
-    }
-
-    // Expression statement (including assignment)
-    // Could be: ident = expr, ident(args), or bare expression
+    if k == 17 { mc_parse_if_expr()
+    return 0 }
+    if k == 202 { mc_parse_match_expr()
+    return 0 }
     if k == 120 {
-        let id_s = MP_START[MC_POS as usize]
-        let id_e = MP_END[MC_POS as usize]
-        let id_len = id_e - id_s
-        MC_POS = MC_POS + 1
-
-        // Field access or assignment: ident.field[.field...]
-        if MP_KIND[MC_POS as usize] == 180 {
-            // Save position to detect assignment vs expression
-            let dot_save_pos = MC_POS
-            var dot_total_off: i64 = 0
-            while MP_KIND[MC_POS as usize] == 180 {
-                MC_POS = MC_POS + 1
-                let dfs = MP_START[MC_POS as usize]
-                let dfl = MP_END[MC_POS as usize] - dfs
-                MC_POS = MC_POS + 1
-                var dsi: i64 = 0
-                while dsi < MC_ST_COUNT {
-                    let dfi = mc_find_struct_field(dsi, dfs, dfl)
-                    if dfi >= 0 {
-                        let dfb = MC_ST_FIELD_BASE[dsi as usize]
-                        dot_total_off = dot_total_off + MC_SF_OFFSET[(dfb + dfi) as usize]
-                        dsi = MC_ST_COUNT
-                    }
-                    dsi = dsi + 1
-                }
-            }
-            if MP_KIND[MC_POS as usize] == 134 {
-                // Field assignment: ident.field = expr
-                MC_POS = MC_POS + 1
-                mc_parse_expr()
-                let slot = mc_find_local(id_s, id_len)
-                if slot >= 0 {
-                    mc_emit_store_rax(slot + dot_total_off)
-                }
-                return 0
-            }
-            // Not assignment — rewind and parse as expression
-            MC_POS = MC_POS - 1  // back up
-            // Actually, reset to before dot and let expression parser handle it
-            MC_POS = dot_save_pos - 1  // rewind to ident
-            mc_parse_expr()
-            return 0
-        }
-
-        // Assignment: ident = expr
-        if MP_KIND[MC_POS as usize] == 134 {
-            MC_POS = MC_POS + 1
-            mc_parse_expr()
-            let slot = mc_find_local(id_s, id_len)
-            if slot >= 0 {
-                mc_emit_store_rax(slot)
-            }
-            return 0
-        }
-
-        // Compound assignment: ident += expr
-        if MP_KIND[MC_POS as usize] == 151 {
-            MC_POS = MC_POS + 1
-            mc_parse_expr()
-            let slot = mc_find_local(id_s, id_len)
-            if slot >= 0 {
-                we(0x48)
-                we(0x89)
-                we(0xc1)  // mov rcx, rax
-                mc_emit_load_rax(slot)
-                we(0x48)
-                we(0x01)
-                we(0xc8)  // add rax, rcx
-                mc_emit_store_rax(slot)
-            }
-            return 0
-        }
-        if MP_KIND[MC_POS as usize] == 152 {
-            MC_POS = MC_POS + 1
-            mc_parse_expr()
-            let slot = mc_find_local(id_s, id_len)
-            if slot >= 0 {
-                we(0x48)
-                we(0x89)
-                we(0xc1)
-                mc_emit_load_rax(slot)
-                we(0x48)
-                we(0x29)
-                we(0xc8)
-                mc_emit_store_rax(slot)
-            }
-            return 0
-        }
-        if MP_KIND[MC_POS as usize] == 153 {
-            MC_POS = MC_POS + 1
-            mc_parse_expr()
-            let slot = mc_find_local(id_s, id_len)
-            if slot >= 0 {
-                we(0x48)
-                we(0x89)
-                we(0xc1)
-                mc_emit_load_rax(slot)
-                we(0x48)
-                we(0x0f)
-                we(0xaf)
-                we(0xc1)
-                mc_emit_store_rax(slot)
-            }
-            return 0
-        }
-
-        // Function call: ident(args) — may have trailing binops (e.g. fib(n-1) + fib(n-2))
-        if MP_KIND[MC_POS as usize] == 171 {
-            MC_POS = MC_POS + 1
-            mc_emit_call(id_s, id_len)
-            // rax = call result; fall through to trailing binop check
-        } else {
-            // Bare expression — the ident was already consumed, emit variable load
-            let slot = mc_find_local(id_s, id_len)
-            if slot >= 0 {
-                mc_emit_load_rax(slot)
-                MC_EXPR_IS_F64 = mc_local_is_f64(id_s, id_len)
-            } else {
-                we(0x48)
-                we(0x31)
-                we(0xc0)
-                MC_EXPR_IS_F64 = 0
-            }
-        }
-        // Check for trailing binops (handles: fib(n-1) + fib(n-2), x + 1, etc.)
-        while true {
-            let op = MP_KIND[MC_POS as usize]
-            let prec = mc_binop_prec(op)
-            if prec == 0 { break }
-            MC_POS = MC_POS + 1
-            let ls = mc_alloc_slot()
-            mc_emit_store_rax(ls)
-            var stmt_left_f64 = MC_EXPR_IS_F64
-            mc_parse_expr_prec(prec + 1)
-            we(0x48)
-            we(0x89)
-            we(0xc1)
-            mc_emit_load_rax(ls)
-            // f64 trailing binop path
-            if stmt_left_f64 == 1 && (op == 129 || op == 130 || op == 131 || op == 132) {
-                we(0x66)
-                we(0x48)
-                we(0x0F)
-                we(0x6E)
-                we(0xC0)
-                we(0x66)
-                we(0x48)
-                we(0x0F)
-                we(0x6E)
-                we(0xC9)
-                if op == 129 { we(0xF2)
-                we(0x0F)
-                we(0x58)
-                we(0xC1) }
-                else if op == 130 { we(0xF2)
-                we(0x0F)
-                we(0x5C)
-                we(0xC1) }
-                else if op == 131 { we(0xF2)
-                we(0x0F)
-                we(0x59)
-                we(0xC1) }
-                else if op == 132 { we(0xF2)
-                we(0x0F)
-                we(0x5E)
-                we(0xC1) }
-                we(0x66)
-                we(0x48)
-                we(0x0F)
-                we(0x7E)
-                we(0xC0)
-                MC_EXPR_IS_F64 = 1
-            } else if stmt_left_f64 == 1 && (op == 143 || op == 144 || op == 135 || op == 136 || op == 145 || op == 146) {
-                we(0x66)
-                we(0x48)
-                we(0x0F)
-                we(0x6E)
-                we(0xC0)
-                we(0x66)
-                we(0x48)
-                we(0x0F)
-                we(0x6E)
-                we(0xC9)
-                we(0x66)
-                we(0x0F)
-                we(0x2E)
-                we(0xC1)
-                if op == 143 { we(0x0f)
-                we(0x94)
-                we(0xc0) }
-                else if op == 144 { we(0x0f)
-                we(0x95)
-                we(0xc0) }
-                else if op == 135 { we(0x0f)
-                we(0x92)
-                we(0xc0) }
-                else if op == 136 { we(0x0f)
-                we(0x97)
-                we(0xc0) }
-                else if op == 145 { we(0x0f)
-                we(0x96)
-                we(0xc0) }
-                else if op == 146 { we(0x0f)
-                we(0x93)
-                we(0xc0) }
-                we(0x48)
-                we(0x0f)
-                we(0xb6)
-                we(0xc0)
-                MC_EXPR_IS_F64 = 0
-            } else if op == 129 { we(0x48)
-            we(0x01)
-            we(0xc8) }
-            else if op == 130 { we(0x48)
-            we(0x29)
-            we(0xc8) }
-            else if op == 131 { we(0x48)
-            we(0x0f)
-            we(0xaf)
-            we(0xc1) }
-            else if op == 132 { we(0x48)
-            we(0x99)
-            we(0x48)
-            we(0xf7)
-            we(0xf9) }
-            else if op == 133 { we(0x48)
-            we(0x99)
-            we(0x48)
-            we(0xf7)
-            we(0xf9)
-            we(0x48)
-            we(0x89)
-            we(0xd0) }
-            else if op == 143 { we(0x48)
-            we(0x39)
-            we(0xc8)
-            we(0x0f)
-            we(0x94)
-            we(0xc0)
-            we(0x48)
-            we(0x0f)
-            we(0xb6)
-            we(0xc0) }
-            else if op == 144 { we(0x48)
-            we(0x39)
-            we(0xc8)
-            we(0x0f)
-            we(0x95)
-            we(0xc0)
-            we(0x48)
-            we(0x0f)
-            we(0xb6)
-            we(0xc0) }
-            else if op == 135 { we(0x48)
-            we(0x39)
-            we(0xc8)
-            we(0x0f)
-            we(0x9c)
-            we(0xc0)
-            we(0x48)
-            we(0x0f)
-            we(0xb6)
-            we(0xc0) }
-            else if op == 136 { we(0x48)
-            we(0x39)
-            we(0xc8)
-            we(0x0f)
-            we(0x9f)
-            we(0xc0)
-            we(0x48)
-            we(0x0f)
-            we(0xb6)
-            we(0xc0) }
-            else if op == 145 { we(0x48)
-            we(0x39)
-            we(0xc8)
-            we(0x0f)
-            we(0x9e)
-            we(0xc0)
-            we(0x48)
-            we(0x0f)
-            we(0xb6)
-            we(0xc0) }
-            else if op == 146 { we(0x48)
-            we(0x39)
-            we(0xc8)
-            we(0x0f)
-            we(0x9d)
-            we(0xc0)
-            we(0x48)
-            we(0x0f)
-            we(0xb6)
-            we(0xc0) }
-            else if op == 147 {
-                we(0x48)
-                we(0x85)
-                we(0xc0)
-                we(0x0f)
-                we(0x95)
-                we(0xc0)
-                we(0x48)
-                we(0x85)
-                we(0xc9)
-                we(0x0f)
-                we(0x95)
-                we(0xc1)
-                we(0x20)
-                we(0xc8)
-                we(0x48)
-                we(0x0f)
-                we(0xb6)
-                we(0xc0)
-            }
-            else if op == 148 {
-                we(0x48)
-                we(0x09)
-                we(0xc8)
-                we(0x48)
-                we(0x85)
-                we(0xc0)
-                we(0x0f)
-                we(0x95)
-                we(0xc0)
-                we(0x48)
-                we(0x0f)
-                we(0xb6)
-                we(0xc0)
-            }
-        }
+        SC_ID_S = MP_START[MC_POS as usize]
+        SC_ID_LEN = MP_END[MC_POS as usize] - SC_ID_S
+        mc_stmt_ident()
         return 0
     }
-
-    // Default: try to parse as expression
     mc_parse_expr()
     0
 }
@@ -8780,6 +8928,117 @@ fn mc_patch_calls() with Mut, Panic {
 }
 
 // --- Main entry point ---
+// Minimal PE writer for mini_compile output
+// Produces a Windows x86_64 console executable with inline code
+fn mc_write_pe(output_path: string, code_len: i64, entry_off: i64) with IO, Mut, Panic, Div {
+    // PE layout: DOS header (64) + PE sig (4) + COFF header (20) + Optional header (112+128=240)
+    //          + Section headers (40 each, 1 section)
+    // Total headers ≈ 368, aligned to 512
+    let headers_size: i64 = 512      // file-aligned
+    let section_align: i64 = 4096
+    let file_align: i64 = 512
+    let image_base: i64 = 0x400000
+    let text_rva: i64 = 4096
+    // Round code to file alignment
+    let text_raw_size = ((code_len + file_align - 1) / file_align) * file_align
+    let text_virt_size = code_len
+    let image_size = text_rva + ((text_virt_size + section_align - 1) / section_align) * section_align
+
+    var pe_pos: i64 = 0
+    // DOS stub (64 bytes)
+    GLOBAL_ELF[0 as usize] = 0x4D as i8  // M
+    GLOBAL_ELF[1 as usize] = 0x5A as i8  // Z
+    // e_lfanew at offset 60: pointer to PE signature
+    GLOBAL_ELF[60 as usize] = 64 as i8
+    pe_pos = 64
+
+    // PE signature: "PE\0\0"
+    GLOBAL_ELF[64 as usize] = 80 as i8    // P
+    GLOBAL_ELF[65 as usize] = 69 as i8    // E
+    pe_pos = 68
+
+    // COFF header (20 bytes)
+    mc_pe_write_u16(68, 0x8664)            // Machine: AMD64
+    mc_pe_write_u16(70, 1)                 // NumberOfSections: 1
+    mc_pe_write_u32(76, 0)                 // SizeOfOptionalHeader will be set
+    mc_pe_write_u16(76, 240)               // SizeOfOptionalHeader
+    mc_pe_write_u16(78, 0x22)              // Characteristics: EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+
+    // Optional header (PE32+)
+    let opt_start: i64 = 88
+    mc_pe_write_u16(opt_start, 0x020B)     // PE32+ magic
+    GLOBAL_ELF[(opt_start + 16) as usize] = ((text_rva + entry_off) & 0xFF) as i8
+    GLOBAL_ELF[(opt_start + 17) as usize] = (((text_rva + entry_off) >> 8) & 0xFF) as i8
+    GLOBAL_ELF[(opt_start + 18) as usize] = (((text_rva + entry_off) >> 16) & 0xFF) as i8
+    GLOBAL_ELF[(opt_start + 19) as usize] = (((text_rva + entry_off) >> 24) & 0xFF) as i8
+    // ImageBase
+    mc_pe_write_u64(opt_start + 24, image_base)
+    // SectionAlignment, FileAlignment
+    mc_pe_write_u32(opt_start + 32, section_align)
+    mc_pe_write_u32(opt_start + 36, file_align)
+    // OS version 6.0, subsystem version 6.0
+    mc_pe_write_u16(opt_start + 40, 6)
+    mc_pe_write_u16(opt_start + 44, 6)
+    // SizeOfImage
+    mc_pe_write_u32(opt_start + 56, image_size)
+    // SizeOfHeaders
+    mc_pe_write_u32(opt_start + 60, headers_size)
+    // Subsystem: 3 = WINDOWS_CUI (console)
+    mc_pe_write_u16(opt_start + 68, 3)
+    // DllCharacteristics: NX_COMPAT | DYNAMIC_BASE | TERMINAL_SERVER_AWARE
+    mc_pe_write_u16(opt_start + 70, 0x8160)
+    // Stack/Heap sizes
+    mc_pe_write_u64(opt_start + 72, 1048576)    // SizeOfStackReserve
+    mc_pe_write_u64(opt_start + 80, 4096)       // SizeOfStackCommit
+    mc_pe_write_u64(opt_start + 88, 1048576)    // SizeOfHeapReserve
+    mc_pe_write_u64(opt_start + 96, 4096)       // SizeOfHeapCommit
+    // NumberOfRvaAndSizes = 16
+    mc_pe_write_u32(opt_start + 108, 16)
+
+    // Section header: .text
+    let sec_start: i64 = opt_start + 240      // after data directories (16 × 8 = 128)
+    GLOBAL_ELF[sec_start as usize] = 46 as i8      // .
+    GLOBAL_ELF[(sec_start + 1) as usize] = 116 as i8 // t
+    GLOBAL_ELF[(sec_start + 2) as usize] = 101 as i8 // e
+    GLOBAL_ELF[(sec_start + 3) as usize] = 120 as i8 // x
+    GLOBAL_ELF[(sec_start + 4) as usize] = 116 as i8 // t
+    mc_pe_write_u32(sec_start + 8, text_virt_size)
+    mc_pe_write_u32(sec_start + 12, text_rva)
+    mc_pe_write_u32(sec_start + 16, text_raw_size)
+    mc_pe_write_u32(sec_start + 20, headers_size)   // PointerToRawData
+    mc_pe_write_u32(sec_start + 36, 0x60000020)     // CNT_CODE | MEM_EXECUTE | MEM_READ
+
+    // Copy code to file offset = headers_size
+    var ci: i64 = 0
+    while ci < code_len {
+        GLOBAL_ELF[(headers_size + ci) as usize] = WIDE_OUT[ci as usize]
+        ci = ci + 1
+    }
+
+    let total_len = headers_size + text_raw_size
+    write_file(output_path, GLOBAL_ELF, total_len)
+    print("mini_compile: PE written, size=")
+    print_int(total_len)
+    print("\n")
+}
+
+fn mc_pe_write_u16(off: i64, val: i64) with Mut, Panic {
+    GLOBAL_ELF[off as usize] = (val & 0xFF) as i8
+    GLOBAL_ELF[(off + 1) as usize] = ((val >> 8) & 0xFF) as i8
+}
+
+fn mc_pe_write_u32(off: i64, val: i64) with Mut, Panic {
+    GLOBAL_ELF[off as usize] = (val & 0xFF) as i8
+    GLOBAL_ELF[(off + 1) as usize] = ((val >> 8) & 0xFF) as i8
+    GLOBAL_ELF[(off + 2) as usize] = ((val >> 16) & 0xFF) as i8
+    GLOBAL_ELF[(off + 3) as usize] = ((val >> 24) & 0xFF) as i8
+}
+
+fn mc_pe_write_u64(off: i64, val: i64) with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 { GLOBAL_ELF[(off + i) as usize] = ((val >> (i * 8)) & 0xFF) as i8; i = i + 1 }
+}
+
 fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     print("mini_compile: start\n")
     WIDE_LEN = 0
@@ -8880,17 +9139,29 @@ fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     elf_write_u64(32, 64)
     elf_write_u16(52, 64)
     elf_write_u16(54, 56)
-    elf_write_u16(56, 1)
+    elf_write_u16(56, 2)       // e_phnum = 2 (text + BSS)
     elf_write_u16(58, 64)
-    elf_write_u32(64, 1)
-    elf_write_u32(68, 7)
-    elf_write_u64(72, 0)
+    // phdr 0: PT_LOAD for text (RWX)
+    elf_write_u32(64, 1)       // p_type = PT_LOAD
+    elf_write_u32(68, 7)       // p_flags = RWX
+    elf_write_u64(72, 0)       // p_offset
     elf_write_u64(80, base_addr)
     elf_write_u64(88, base_addr)
     let fsz = text_off + total_code
     elf_write_u64(96, fsz)
     elf_write_u64(104, fsz)
     elf_write_u64(112, 4096)
+    // phdr 1: PT_LOAD for BSS (RW, zero-initialized by kernel)
+    let bss_base: i64 = 0x700000
+    let bss_size = GLOBAL_TOTAL_SIZE + 4096
+    elf_write_u32(120, 1)      // p_type = PT_LOAD
+    elf_write_u32(124, 6)      // p_flags = RW
+    elf_write_u64(128, fsz)    // p_offset (past text)
+    elf_write_u64(136, bss_base)
+    elf_write_u64(144, bss_base)
+    elf_write_u64(152, 0)      // p_filesz = 0 (BSS)
+    elf_write_u64(160, bss_size)
+    elf_write_u64(168, 4096)   // p_align
 
     // Copy code to text section
     var ci: i64 = 0
@@ -8900,8 +9171,27 @@ fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     }
 
     let total_len = text_off + total_code
-    // Use write_file (boot4-compatible) instead of io_write_huge_binary
-    let write_ok = write_file(output_path, GLOBAL_ELF, total_len)
+
+    // Detect output format from filename extension
+    let out_len = str_len(output_path)
+    var is_pe: i64 = 0
+    if out_len >= 4 {
+        if str_char_at(output_path, out_len - 4) == 46 {
+            let e1 = str_char_at(output_path, out_len - 3)
+            let e2 = str_char_at(output_path, out_len - 2)
+            let e3 = str_char_at(output_path, out_len - 1)
+            if (e1 == 101 || e1 == 69) && (e2 == 120 || e2 == 88) && (e3 == 101 || e3 == 69) {
+                is_pe = 1
+            }
+        }
+    }
+
+    if is_pe == 1 {
+        // Minimal PE output
+        mc_write_pe(output_path, total_code, tramp_off)
+    } else {
+        let write_ok = write_file(output_path, GLOBAL_ELF, total_len)
+    }
 
     print("mini_compile: ok written=")
     print(output_path)
@@ -8936,7 +9226,12 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     print("\n")
     var gpi: i64 = 0
     while gpi < GLOBAL_COUNT {
-        let gns = str_from_bytes(GLOBAL_NAMES[gpi as usize].buf, GLOBAL_NAMES[gpi as usize].len)
+        let gn_base = gpi * 128
+        let gn_len = GLOBAL_NAME_LEN[gpi as usize]
+        var gn_tmp: [i8; 128] = [0; 128]
+        var gni: i64 = 0
+        while gni < gn_len && gni < 128 { gn_tmp[gni as usize] = GLOBAL_NAME_BUF[(gn_base + gni) as usize]; gni = gni + 1 }
+        let gns = str_from_bytes(gn_tmp, gn_len)
         print("  global: ")
         print(gns)
         print(" off=")
