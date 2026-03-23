@@ -1,0 +1,245 @@
+//! stdlib/algebra/cayley_dickson.sio
+//!
+//! Parameterized Cayley-Dickson Algebras for Sounio
+//!
+//! Usage:
+//!   let k = 3                          // octonions (dim 8)
+//!   let a = cd_basis(k, 1)             // e_1
+//!   let b = cd_basis(k, 2)             // e_2
+//!   let c = cd_mul(a, b)               // e_1 * e_2 = ±e_3 (Fano-dependent)
+//!   let n = cd_norm(c)                 // ||c|| = 1.0
+//!   let assoc = cd_associator(a, b, cd_basis(k, 4))  // [e_1, e_2, e_4]
+//!
+//! Supported algebras (by k):
+//!   k=1: complex numbers      (dim 2,  associative, commutative)
+//!   k=2: quaternions           (dim 4,  associative, non-commutative)
+//!   k=3: octonions             (dim 8,  non-associative, alternative)
+//!   k=4: sedenions             (dim 16, non-associative, has zero divisors)
+//!   k=5: trigintaduonions      (dim 32, non-associative)
+//!   k=6: 64-dim CD algebra     (dim 64, genetic code dimension)
+//!
+//! The sign function σ(i,j,k) is the universal computational kernel.
+//! No separate multiplication table needed — everything derives from σ.
+//!
+//! Theorem (Agourakis 2026): ||[e_i, e_j, e_k]|| ∈ {0, 2} for ALL k.
+
+// ============================================================================
+// THE SIGN FUNCTION — heart of the Cayley-Dickson construction
+// ============================================================================
+
+/// Cayley-Dickson sign: e_a * e_b = sigma(a, b, bits) * e_{a XOR b}
+/// Returns +1 or -1. Works for any dimension 2^bits.
+pub fn cd_sigma(a: i32, b: i32, bits: i32) -> i32 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return -1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    // a_hi == 1 && b_hi == 1
+    if b_lo == 0 { return 0 - cd_sigma(0, a_lo, bits - 1) }
+    cd_sigma(b_lo, a_lo, bits - 1)
+}
+
+// ============================================================================
+// ELEMENT TYPE — coefficients in a fixed-size array
+// ============================================================================
+
+/// A Cayley-Dickson element with up to 64 components (k ≤ 6).
+/// The actual dimension is 2^bits. Unused components are zero.
+pub struct CDElement {
+    c: [f64; 64],   // coefficients: c[0] = real part, c[i] = e_i coefficient
+    bits: i32,      // k: algebra parameter (dimension = 2^k)
+}
+
+/// Create the zero element in the k-dimensional CD algebra.
+pub fn cd_zero(k: i32) -> CDElement with Mut, Panic {
+    CDElement { c: [0.0; 64], bits: k }
+}
+
+/// Create the real unit (e_0 = 1) in the k-dimensional CD algebra.
+pub fn cd_one(k: i32) -> CDElement with Mut, Panic {
+    var r = cd_zero(k)
+    r.c[0] = 1.0
+    r
+}
+
+/// Create a basis element e_idx in the k-dimensional CD algebra.
+pub fn cd_basis(k: i32, idx: i32) -> CDElement with Mut, Panic {
+    var r = cd_zero(k)
+    if idx >= 0 && idx < (1 << k) {
+        r.c[idx as usize] = 1.0
+    }
+    r
+}
+
+/// Create an element from a scalar (real number).
+pub fn cd_scalar(k: i32, val: f64) -> CDElement with Mut, Panic {
+    var r = cd_zero(k)
+    r.c[0] = val
+    r
+}
+
+// ============================================================================
+// ARITHMETIC — all derived from the sign function
+// ============================================================================
+
+/// Addition: component-wise.
+pub fn cd_add(a: CDElement, b: CDElement) -> CDElement with Mut, Panic, Div {
+    let n = 1 << a.bits
+    var r = cd_zero(a.bits)
+    var i: i32 = 0
+    while i < n { r.c[i as usize] = a.c[i as usize] + b.c[i as usize]; i = i + 1 }
+    r
+}
+
+/// Subtraction: component-wise.
+pub fn cd_sub(a: CDElement, b: CDElement) -> CDElement with Mut, Panic, Div {
+    let n = 1 << a.bits
+    var r = cd_zero(a.bits)
+    var i: i32 = 0
+    while i < n { r.c[i as usize] = a.c[i as usize] - b.c[i as usize]; i = i + 1 }
+    r
+}
+
+/// Scalar multiplication.
+pub fn cd_scale(a: CDElement, s: f64) -> CDElement with Mut, Panic, Div {
+    let n = 1 << a.bits
+    var r = cd_zero(a.bits)
+    var i: i32 = 0
+    while i < n { r.c[i as usize] = a.c[i as usize] * s; i = i + 1 }
+    r
+}
+
+/// Cayley-Dickson multiplication: the general formula.
+///
+/// (a * b)[idx] = Σ_{i XOR j = idx} σ(i, j, k) * a[i] * b[j]
+///
+/// For each output component idx, we sum over all pairs (i, j)
+/// such that i XOR j = idx, weighted by the sign function.
+pub fn cd_mul(a: CDElement, b: CDElement) -> CDElement with Mut, Panic, Div {
+    let n = 1 << a.bits
+    var r = cd_zero(a.bits)
+    var i: i32 = 0
+    while i < n {
+        if a.c[i as usize] != 0.0 {
+            var j: i32 = 0
+            while j < n {
+                if b.c[j as usize] != 0.0 {
+                    let idx = i ^ j
+                    let sign = cd_sigma(i, j, a.bits)
+                    r.c[idx as usize] = r.c[idx as usize]
+                        + (sign as f64) * a.c[i as usize] * b.c[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    r
+}
+
+/// Conjugation: negate all imaginary parts.
+pub fn cd_conj(a: CDElement) -> CDElement with Mut, Panic, Div {
+    let n = 1 << a.bits
+    var r = cd_zero(a.bits)
+    r.c[0] = a.c[0]
+    var i: i32 = 1
+    while i < n { r.c[i as usize] = 0.0 - a.c[i as usize]; i = i + 1 }
+    r
+}
+
+/// Squared norm: sum of squares of all coefficients.
+pub fn cd_norm_sq(a: CDElement) -> f64 with Mut, Panic, Div {
+    let n = 1 << a.bits
+    var s: f64 = 0.0
+    var i: i32 = 0
+    while i < n { s = s + a.c[i as usize] * a.c[i as usize]; i = i + 1 }
+    s
+}
+
+/// Norm: sqrt of squared norm.
+pub fn cd_norm(a: CDElement) -> f64 with Mut, Panic, Div {
+    let nsq = cd_norm_sq(a)
+    if nsq <= 0.0 { return 0.0 }
+    var r = nsq
+    var i = 0
+    while i < 25 { r = 0.5 * (r + nsq / r); i = i + 1 }
+    r
+}
+
+// ============================================================================
+// ASSOCIATOR — the core algebraic diagnostic
+// ============================================================================
+
+/// Associator: [a, b, c] = (a*b)*c - a*(b*c)
+pub fn cd_associator(a: CDElement, b: CDElement, c: CDElement) -> CDElement with Mut, Panic, Div {
+    let left = cd_mul(cd_mul(a, b), c)
+    let right = cd_mul(a, cd_mul(b, c))
+    cd_sub(left, right)
+}
+
+// ============================================================================
+// CLASSIFICATION — using the sign function directly (fast path)
+// ============================================================================
+
+/// Classify a basis triple: is [e_i, e_j, e_k] nonzero?
+/// Returns true if the associator is nonzero (non-associative triple).
+/// Uses only the sign function — O(1) per triple, no array operations.
+pub fn cd_basis_nonassociative(i: i32, j: i32, k: i32, bits: i32) -> bool with Mut, Panic, Div {
+    let alpha = cd_sigma(i, j, bits) * cd_sigma(i ^ j, k, bits)
+    let beta = cd_sigma(j, k, bits) * cd_sigma(i, j ^ k, bits)
+    alpha != beta
+}
+
+/// Count all nonzero basis associator triples: T_k.
+pub fn cd_count_nonassociative(bits: i32) -> i32 with Mut, Panic, Div {
+    let n = (1 << bits) - 1
+    var count: i32 = 0
+    var i: i32 = 1
+    while i <= n {
+        var j: i32 = 1
+        while j <= n {
+            var k: i32 = 1
+            while k <= n {
+                if cd_basis_nonassociative(i, j, k, bits) { count = count + 1 }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// ALGEBRA PROPERTIES — what the mathematician wants to know
+// ============================================================================
+
+/// Is this algebra commutative? (Only for k ≤ 1: reals and complexes.)
+pub fn cd_is_commutative(bits: i32) -> bool { bits <= 1 }
+
+/// Is this algebra associative? (Only for k ≤ 2: reals, complexes, quaternions.)
+pub fn cd_is_associative(bits: i32) -> bool { bits <= 2 }
+
+/// Is this algebra alternative? (Only for k ≤ 3: through octonions.)
+pub fn cd_is_alternative(bits: i32) -> bool { bits <= 3 }
+
+/// Is this algebra a division algebra? (Only for k ≤ 3: through octonions.)
+pub fn cd_is_division(bits: i32) -> bool { bits <= 3 }
+
+/// Dimension of the algebra.
+pub fn cd_dim(bits: i32) -> i32 { 1 << bits }
+
+/// Name of the algebra.
+pub fn cd_name(bits: i32) -> i32 {
+    // Returns an identifier: 0=R, 1=C, 2=H, 3=O, 4=S, 5=T, 6=CD64
+    if bits <= 6 { bits } else { 7 }
+}
