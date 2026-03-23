@@ -5119,6 +5119,160 @@ fn compile_to_pe_x86_64(module: &IrModule, target_spec: NativeTargetSpec) -> Nat
     native_compile_result_ok(w.buf, w.buf_len, FORMAT_PE64())
 }
 
+fn compile_to_pe_aarch64_preview(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
+    let _target = target_spec
+    let built = native_v2_build_machine_module(module, true)
+    if !built.supported {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + built.unsupported_detail)
+    }
+
+    var c = a64_preview_compiler_new()
+    c.fn_count = module.fn_count
+
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        let pair = a64_preview_compile_function(c, module.functions[fi as usize], built.functions[fi as usize], fi)
+        c = pair.0
+        if str_len(pair.1) > 0 {
+            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + pair.1)
+        }
+        fi = fi + 1
+    }
+
+    let main_idx = find_main_index(module)
+    if main_idx < 0 {
+        return native_compile_result_error(ERR_INVALID_TARGET(), "native_v2_aarch64_windows_missing_main")
+    }
+
+    // AArch64 entry trampoline: VirtualAlloc(NULL, 512MB, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
+    // Win64 ARM64 ABI: X0-X7 args, X0 return, X19-X28 callee-saved
+    var out = c
+    out.entry_offset = out.code.len
+
+    // Call VirtualAlloc through IAT: [rip+disp32] → need to track position for patch
+    let va_patch_offset = out.code.len + 2   // offset of disp32 within the instruction
+    out.code = a64_emit_ldr_rip_u64(out.code, A64_X0, 0)  // placeholder disp32, will be patched
+
+    // Setup parameters for VirtualAlloc(NULL, 512MB, 0x3000, 0x04)
+    out.code = a64_emit_mov_imm64(out.code, A64_X0, 0)        // lpAddress = NULL
+    out.code = a64_emit_mov_imm64(out.code, A64_X1, 536870912) // dwSize = 512MB = 0x20000000
+    out.code = a64_emit_mov_imm64(out.code, A64_X2, 12288)     // flAllocationType = 0x3000
+    out.code = a64_emit_mov_imm64(out.code, A64_X3, 4)         // flProtect = 0x04
+    out.code = a64_emit_ldr_rip_u64(out.code, A64_X16, 0)      // load VirtualAlloc from IAT (will patch)
+    let va_call_patch = out.code.len - 4
+    out.code = a64_emit_blr(out.code, A64_X16)
+
+    // Call main()
+    let patch_offset = out.code.len
+    out.code = a64_emit_bl(out.code, 0)  // placeholder, will be patched
+    out = a64_preview_record_call_patch(out, patch_offset, main_idx)
+
+    // ExitProcess(rax) — rax has return value from main
+    // Move return value to X0 (already there from ABI)
+    let ep_patch_offset = out.code.len + 2
+    out.code = a64_emit_ldr_rip_u64(out.code, A64_X16, 0)      // load ExitProcess from IAT (will patch)
+    let ep_call_patch = out.code.len - 4
+    out.code = a64_emit_blr(out.code, A64_X16)
+
+    out = a64_preview_patch_calls(out)
+
+    // Compute PE section layout (same as x86_64)
+    let text_rva = PE_SECTION_ALIGNMENT
+    let text_raw_size = pe_file_align(out.code.len)
+    let idata_rva = text_rva + pe_section_align(out.code.len)
+
+    let idt_offset: i64 = 0
+    let int_offset: i64 = 40
+    let iat_offset: i64 = 64
+    let hnt_offset: i64 = 88
+    let hnt_virtualalloc_offset: i64 = 88
+    let hnt_exitprocess_offset: i64 = 104
+    let dll_name_offset: i64 = 120
+    let idata_total: i64 = 133
+
+    // Compute IAT relocations (AArch64 RIP-relative addressing)
+    // For ldr x16, [rip + disp20] we need to compute the displacement
+    if va_patch_offset >= 0 {
+        let disp = ((idata_rva + iat_offset) - (text_rva + va_patch_offset + 4)) / 8
+        // Truncate to 20-bit signed and encode in instruction
+        if disp >= -1048576 && disp < 1048576 {
+            let instr_offset = va_patch_offset - 2
+            let original = out.code[instr_offset as usize] as i64 | ((out.code[(instr_offset + 1) as usize] as i64) << 8) |
+                           ((out.code[(instr_offset + 2) as usize] as i64) << 16) | ((out.code[(instr_offset + 3) as usize] as i64) << 24)
+            let masked = original & 0xFF00001F
+            let encoded = masked | ((disp & 0xFFFFF) << 5)
+            out.code = patch_u32_le(out.code, instr_offset, encoded)
+        }
+    }
+
+    if ep_call_patch >= 0 {
+        let disp = ((idata_rva + iat_offset + 8) - (text_rva + ep_call_patch + 4)) / 8
+        if disp >= -1048576 && disp < 1048576 {
+            let instr_offset = ep_call_patch - 2
+            let original = out.code[instr_offset as usize] as i64 | ((out.code[(instr_offset + 1) as usize] as i64) << 8) |
+                           ((out.code[(instr_offset + 2) as usize] as i64) << 16) | ((out.code[(instr_offset + 3) as usize] as i64) << 24)
+            let masked = original & 0xFF00001F
+            let encoded = masked | ((disp & 0xFFFFF) << 5)
+            out.code = patch_u32_le(out.code, instr_offset, encoded)
+        }
+    }
+
+    // Build PE binary with ARM64 machine type
+    var w = pe_writer_new_arm64()
+    w = pe_set_entry_point(w, text_rva + out.entry_offset)
+    w = pe_set_subsystem(w, PE_SUBSYSTEM_WINDOWS_CUI)
+
+    let headers_size = pe_compute_headers_size(2)
+    w = pe_add_text_section(w, text_rva, out.code.len, headers_size, text_raw_size)
+    let idata_raw_offset = headers_size + text_raw_size
+    let idata_raw_size = pe_file_align(idata_total)
+    w = pe_add_idata_section(w, idata_rva, idata_total, idata_raw_offset, idata_raw_size)
+
+    w = pe_set_data_directory(w, PE_DIR_IMPORT, idata_rva + idt_offset, 40)
+    w = pe_set_data_directory(w, PE_DIR_IAT, idata_rva + iat_offset, 24)
+
+    w = pe_build_executable(w, out.code.bytes, out.code.len)
+
+    // Emit .idata section
+    while w.buf_len < idata_raw_offset {
+        w = pe_emit_byte(w, 0)
+    }
+
+    let k32_desc = pe_make_import_descriptor(
+        idata_rva + int_offset,
+        idata_rva + dll_name_offset,
+        idata_rva + iat_offset
+    )
+    w = pe_emit_import_descriptor(w, k32_desc)
+    w = pe_emit_zeros(w, PE_IMPORT_DESC_SIZE)
+
+    w = pe_emit_u64(w, idata_rva + hnt_virtualalloc_offset)
+    w = pe_emit_u64(w, idata_rva + hnt_exitprocess_offset)
+    w = pe_emit_u64(w, 0)
+
+    w = pe_emit_u64(w, idata_rva + hnt_virtualalloc_offset)
+    w = pe_emit_u64(w, idata_rva + hnt_exitprocess_offset)
+    w = pe_emit_u64(w, 0)
+
+    let va_name = pe_make_name_buf("VirtualAlloc")
+    w = pe_emit_hint_name(w, 0, va_name, 12)
+
+    let ep_name = pe_make_name_buf("ExitProcess")
+    w = pe_emit_hint_name(w, 0, ep_name, 11)
+
+    let dll_name = pe_make_name_buf("kernel32.dll")
+    var di = 0
+    while di < 12 {
+        w = pe_emit_byte(w, dll_name[di as usize] as i64)
+        di = di + 1
+    }
+    w = pe_emit_byte(w, 0)
+
+    w = pe_emit_pad_to(w, PE_FILE_ALIGNMENT)
+
+    native_compile_result_ok(w.buf, w.buf_len, FORMAT_PE64())
+}
+
 fn compile_native_v2_preview(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
     if target_spec.matrix_mode < 0 {
         return native_compile_result_error(ERR_INVALID_MATRIX(), "invalid_matrix")
@@ -5145,7 +5299,7 @@ fn compile_native_v2_preview(module: &IrModule, target_spec: NativeTargetSpec) -
     }
 
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_WINDOWS() {
-        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_contract_only:aarch64-windows")
+        return compile_to_pe_aarch64_preview(module, target_spec)
     }
 
     if target_spec.arch_id == ARCH_RISCV64() && target_spec.os_id == OS_LINUX() {
@@ -5195,7 +5349,7 @@ fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCom
     }
 
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_WINDOWS() {
-        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_contract_only:aarch64-windows")
+        return compile_to_pe_aarch64_preview(module, target_spec)
     }
 
     if target_spec.arch_id == ARCH_RISCV64() && target_spec.os_id == OS_LINUX() {
