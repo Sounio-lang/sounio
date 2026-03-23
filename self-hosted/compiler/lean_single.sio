@@ -376,6 +376,10 @@ fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     return 0
 }
 
+fn tc_undefined_var(tok: i64) -> i64 with IO, Mut, Panic {
+    return tc_error(tok, "undefined variable")
+}
+
 fn scan_type(p0: i64) with Mut, Panic {
     var p = p0
     SCAN_TY = 0
@@ -1454,6 +1458,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         var ns: i64 = TS[EP as usize]
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
+        let name_tok = EP - 1
         // Box::new(expr) — heap allocate via mmap
         if TK[EP as usize] == 51 && src_match(ns, ne - ns, "Box") {
             EP = EP + 1  // skip ::
@@ -1719,9 +1724,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     em(0x48); em(0x8b); em(0x00)        // mov rax, [rax] (fn_ptr)
                     em(0xff); em(0xd0)                  // call rax
                 } else {
-                    print("warning: unknown function at line ")
-                    print_int(TL[EP as usize])
-                    print("\n")
+                    tc_undefined_var(call_tok)
                     em(0x31); em(0xc0)  // unknown fn
                 }
             }
@@ -1806,6 +1809,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
                         EXPR_TY = 1
                     }
+                } else {
+                    tc_undefined_var(name_tok)
+                    em(0x31); em(0xc0)
+                    EXPR_TY = 0
+                    EXPR_TY_HASH = 0
                 }
             }
             EXPR_IS_F64 = 0
@@ -1890,9 +1898,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     LAST_EXPR_IS_CLOSURE = 1
                     EXPR_TY = 9
                 } else {
-                    print("warning: unknown identifier at line ")
-                    print_int(TL[(EP - 1) as usize])
-                    print("\n")
+                    tc_undefined_var(name_tok)
                     em(0x31); em(0xc0)
                 }
             }
@@ -2368,6 +2374,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // x.field = expr (struct field write)
     if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
+        let name_tok = EP
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
         EP = EP + 2  // skip name and .
@@ -2386,6 +2393,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             if gi >= 0 {
                 let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 em(0x48); em(0xb8); em64(addr)
+            } else {
+                tc_undefined_var(name_tok)
+                em(0x31); em(0xc0)
             }
         }
         // rax = struct pointer. Find field offset and store.
@@ -2405,6 +2415,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // x = expr (local or global scalar assignment)
     if k == 3 && TK[(EP + 1) as usize] == 16 {
+        let name_tok = EP
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
         EP = EP + 2
@@ -2441,12 +2452,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (value)
                 em(0x48); em(0xb8); em64(addr)  // mov rax, addr
                 em(0x48); em(0x89); em(0x08)    // mov [rax], rcx
+            } else {
+                tc_undefined_var(name_tok)
             }
         }
         return
     }
     // ARRAY[idx] = expr (global array write)
     if k == 3 && TK[(EP + 1) as usize] == 41 {
+        let name_tok = EP
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
         EP = EP + 2  // skip name and [
@@ -2486,6 +2500,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     // Non-array local pointer: byte store
                     em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
                 }
+            } else {
+                tc_undefined_var(name_tok)
+                em(0x59)  // discard pushed index
             }
         }
         return
@@ -4417,6 +4434,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         var ns: i64 = TS[EP as usize]
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
+        let name_tok = EP - 1
         // Box::new(expr)
         if TK[EP as usize] == 51 && src_match(ns, ne - ns, "Box") {
             EP = EP + 1; EP = EP + 1
@@ -4614,7 +4632,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     em32(0xF9400009)  // ldr x9, [x0] (fn_ptr)
                     em32(0xD63F0120)  // blr x9
                 } else {
-                    print("warning: unknown function in ARM64\n")
+                    tc_undefined_var(name_tok)
                     em32(0xD2800000)
                 }
             }
@@ -4673,6 +4691,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_load_var_a64(slot)
                     if lalen > 0 && lesiz == 8 { em32(0xF8697800) }
                     else { em32(0x38A96800) }
+                } else {
+                    tc_undefined_var(name_tok)
+                    em32(0xD2800000)
                 }
             }
             EXPR_IS_F64 = 0
@@ -4694,7 +4715,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             } else {
                 let fri = fn_find(ns, ne)
                 if fri >= 0 { em32(0xD2800000); LAST_EXPR_IS_CLOSURE = 1 }
-                else { print("warning: unknown ident in ARM64\n"); em32(0xD2800000) }
+                else { tc_undefined_var(name_tok); em32(0xD2800000) }
             }
             EXPR_IS_F64 = 0
         }
@@ -4990,6 +5011,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     }
     // x.field = expr
     if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
+        let name_tok = EP
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
         EP = EP + 2
         let fns = TS[EP as usize]; let fne = TE[EP as usize]
@@ -5003,6 +5025,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         else {
             let gi = gl_find(ns, ne)
             if gi >= 0 { emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+            else { tc_undefined_var(name_tok); em32(0xD2800000) }
         }
         emit_pop_x1_a64()
         var si: i64 = 0
@@ -5015,6 +5038,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     }
     // x = expr
     if k == 3 && TK[(EP + 1) as usize] == 16 {
+        let name_tok = EP
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
         EP = EP + 2
         compile_or_a64()
@@ -5033,12 +5057,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 em32(0xAA0003E1)
                 emit_imm64_a64(addr)
                 em32(0xF9000001)
+            } else {
+                tc_undefined_var(name_tok)
             }
         }
         return
     }
     // ARRAY[idx] = expr
     if k == 3 && TK[(EP + 1) as usize] == 41 {
+        let name_tok = EP
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
         EP = EP + 2
         compile_or_a64()
@@ -5066,6 +5093,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 emit_load_var_a64(lslot)
                 if llalen > 0 && lesiz == 8 { em32(0xF821780A) }
                 else { em32(0x3821680A) }
+            } else {
+                tc_undefined_var(name_tok)
+                emit_pop_x1_a64()
             }
         }
         return
