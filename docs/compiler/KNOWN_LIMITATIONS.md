@@ -47,36 +47,64 @@ Updated February 2026 after full-project audit.
 
 ### Known Bugs
 
-**Implicit `var` return with `i32` type**: When a function's return type is `i32` and its last expression is a `var` variable (implicit return), the type checker may report `expected I32, found I64`. Workaround: use explicit `return x` instead of trailing `x`. Does not affect `f64` returns or explicit `return` statements.
-
-**Effect checker `Div` propagation**: The effect checker requires `Div` for any operation involving division. It also requires `Panic` alongside `Div` (divide-by-zero potential), and for array access (out-of-bounds potential) and `as` casts. These are strict but correct.
-
-**`&![T; N]` mutable ref mutation in interpreter**: When passing a bare array variable by `&!` reference to a function (`fn f(arr: &![i64; 10000], ...) with Mut`), mutations inside the function are not visible to the caller in the runtime interpreter. Workaround: wrap the array in a struct and pass `&! StructWithArray`. Struct mutable refs propagate mutations correctly.
+**`&![T; N]` mutable ref mutation in interpreter** (JIT only): When passing a bare array variable by `&!` reference to a function (`fn f(arr: &![i64; 10000], ...) with Mut`), mutations inside the function are not visible to the caller in the Cranelift JIT runtime. Workaround: wrap the array in a struct and pass `&! StructWithArray`, or use explicit deref `(*arr)[i] = v`. Native compilation is unaffected.
 
 ```sio
 // Works — struct wrapper pattern
 struct SortBuf { data: [i64; 10000] }
 fn sort(b: &! SortBuf) with Mut { b.data[0] = 99 }
 
-// Broken — bare array mut ref
+// Works — explicit deref
+fn sort_deref(arr: &![i64; 10000]) with Mut { (*arr)[0] = 99 }
+
+// Broken (JIT only) — bare array index
 fn sort_broken(arr: &![i64; 10000]) with Mut { arr[0] = 99 }
 ```
 
-**`extern "C"` FFI limited to math functions**: Only these `extern "C"` functions are supported in `$SOUC run`:
-- Single-arg (f64→f64): `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `floor`, `ceil`, `atan`, `sinh`, `cosh`, `tanh`, `asin`, `acos`, `cbrt`, `round`, `log2`, `log10`
-- Two-arg (f64,f64→f64): `pow`, `atan2`
-- Integer FFI (`malloc`, `getpid`, etc.) silently terminates the program. Workaround: use large fixed-size struct arrays instead of dynamic allocation.
+**`extern "C"` FFI limited to math functions** (JIT only): Only f64-typed extern functions are supported in `$SOUC run`. Integer FFI (`malloc`, `getpid`, etc.) silently terminates due to Cranelift JIT's return register handling (reads XMM0 instead of RAX for integer returns). Native compilation handles integer FFI correctly.
+
+### Fixed in Self-Hosted Compiler (activate on $SOUC rebuild)
+
+The following bugs have been fixed in the self-hosted source but require a rebuilt `$SOUC` binary to take effect:
+
+**Implicit `var`/`let` with `i32` type** (fixed): Integer literal narrowing now allows `var x: i32 = 5` without "expected I32, found I64" errors. Literals are compatible with annotated smaller integer types (i32, i8).
+
+**`Option::None` type inference** (fixed): Bidirectional type inference now propagates the expected type for enum variant paths. `let x: Option<i32> = Option::None` correctly infers `Option<i32>`.
+
+**Unit type declarations** (fixed): The resolver now registers `unit` declarations as `SymUnit` (was incorrectly using `SymTypeAlias`).
+
+**String methods** (fixed): `.as_bytes()` and `.len()` are now supported on `string` types in the type checker.
+
+**Turbofish syntax** (added): `func::<T, U>(args)` explicit generic type arguments are now parsed and propagated to call expressions.
+
+**Trait definitions** (added): `trait Name { fn method(); ... }` syntax is now parsed and trait definitions are collected into the `TraitRegistry`. Builtin trait implementations (Copy, Drop, Eq, Ord, Hash, Add, Sub, Mul, Div, Display, Debug) are pre-registered for primitive types.
+
+**Borrow release at call boundaries** (fixed): Borrows taken for function call arguments are now unconditionally released after the call returns, fixing false positive errors on consecutive calls borrowing the same variable.
+
+**Ownership state machine** (wired): The `OwnContext` ownership tracker (2836 lines, 72+ functions) is now integrated into the `Checker` — linear variable registration, ownership transfer on use, and linear-at-end checking at function exit.
+
+**Effect propagation** (verified): Call-site effect checking (`check_callee_effects`) validates that callee effects are a subset of the caller's declared effects, reporting E035 on violations.
 
 ### Pruned/Experimental Modules
 
-The following stdlib modules exist but are stubs or incomplete. They are not part of the default experience:
+The following stdlib modules are stubs or incomplete:
 
 - `stdlib/gpu/` - requires CUDA runtime (behind `--features gpu`)
-- `stdlib/crypto/` - stub
+- `stdlib/crypto/` - requires integer FFI (JIT limitation)
+- `stdlib/compress/` - requires integer FFI (JIT limitation)
 - `stdlib/ffi/` - stub
-- `stdlib/compress/` - stub
 - `stdlib/autodiff/` - framework only
 - `stdlib/interop/` - stub
+- `stdlib/text/`, `stdlib/time/`, `stdlib/os/` - disabled (require type conversion from Rust unsigned types)
+
+### Recently Activated Modules
+
+- `stdlib/prob/` - Beta, Normal, MCMC, random distributions (4 modules activated)
+- `stdlib/onn/` - Octonion neural network: activation, attention, conv, linear, loss, normalization, optimizer, training (8 modules)
+- `stdlib/ontology/` - LOINC, biomedical module, namespaces (3 modules)
+- `stdlib/heliobiology/units.sio` - space weather units
+- `stdlib/ode/tsit5_multicomp.sio` - multi-compartment adaptive Tsit5 solver
+- `stdlib/medlang/` - full MedLang DSL (lexer, parser, AST, codegen, PK models, population, dosing) — all active
 
 ### Optional External Dependencies
 
@@ -89,8 +117,8 @@ The following stdlib modules exist but are stubs or incomplete. They are not par
 ### Platform Support
 
 - **Linux x86-64**: Primary supported platform
-- **macOS**: Mach-O backend available, not regularly tested
-- **Windows**: Not yet supported
+- **macOS**: Mach-O backend implemented (2,512 lines, x86-64 + ARM64), not yet wired into codegen driver
+- **Windows**: PE/COFF backend implemented (3,508 lines, x86-64 + ARM64), not yet wired into codegen driver
 
 ---
 
