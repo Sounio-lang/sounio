@@ -723,14 +723,14 @@ fn emit_print_f64() with Mut {
 var ENTRY_RSP_OFF: i64 = 0
 
 fn emit_arg_count() with Mut {
-    let argc_addr = 0x600000
+    let argc_addr = GL_BSS_BASE - 16   // argc at BSS base (before globals)
     em(0x48); em(0xb8); em64(argc_addr)
     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
 }
 
 fn emit_get_arg() with Mut {
     // rax = arg index. argv stored at BSS+8. argv[i] = [argv_base + i*8]
-    let argv_addr = 0x600000 + 8
+    let argv_addr = GL_BSS_BASE - 8    // argv at BSS base + 8
     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
     em(0x48); em(0xb8); em64(argv_addr)
     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax] = argv base
@@ -2770,7 +2770,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
     // BSS layout: [argc(8)] [argv(8)] [globals...]
     // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0
-    GL_BSS_BASE = 0x600000 + 16
+    if TARGET_OS == 2 {
+        GL_BSS_BASE = 0x100008000 + 16    // macOS: __DATA segment at 0x100008000
+    } else {
+        GL_BSS_BASE = 0x600000 + 16       // Linux/Windows: BSS at 0x600000
+    }
     GL_BSS_SIZE = GL_BSS_SIZE + 16
 
     print("globals: "); print_int(GL_COUNT); print(" bss="); print_int(GL_BSS_SIZE); print("\n")
@@ -3016,9 +3020,28 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em(0xFF); em(0x15); em32(0)  // placeholder disp32
         // ud2 (should never reach)
         em(0x0F); em(0x0B)
+    } else if TARGET_OS == 2 {
+        // macOS x86_64 trampoline
+        // macOS entry: same argc/argv layout as Linux
+        let argc_addr = 0x100008000  // __DATA segment base
+        let argv_addr = 0x100008000 + 8
+        em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (argc)
+        em(0x48); em(0x83); em(0xe8); em(0x01)  // sub rax, 1
+        em(0x48); em(0xb9); em64(argc_addr)
+        em(0x48); em(0x89); em(0x01)  // mov [rcx], rax
+        em(0x48); em(0x8d); em(0x44); em(0x24); em(16)  // lea rax, [rsp+16]
+        em(0x48); em(0xb9); em64(argv_addr)
+        em(0x48); em(0x89); em(0x01)  // mov [rcx], rax
+        // call main
+        em(0xe8)
+        let mrel = FN_OFF[main_fn as usize] - (CL + 4)
+        em32(mrel)
+        // macOS exit: syscall 0x2000001
+        em(0x89); em(0xc7)                     // mov edi, eax
+        em(0x48); em(0xb8); em64(0x2000001)    // mov rax, 0x2000001
+        em(0x0f); em(0x05)                     // syscall
     } else {
         // Linux trampoline
-        // At entry: [rsp]=argc, [rsp+8]=argv[0], [rsp+16]=argv[1], ...
         let argc_addr = 0x600000
         let argv_addr = 0x600000 + 8
         em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (argc)
@@ -3032,7 +3055,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em(0xe8)
         let rel = FN_OFF[main_fn as usize] - (CL + 4)
         em32(rel)
-        // exit(rax)
+        // exit(rax): Linux syscall 60
         em(0x89); em(0xc7)
         em(0xb8); em32(60)
         em(0x0f); em(0x05)
@@ -3271,6 +3294,137 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
     return 0
 }
 
+// ─── Mach-O x86_64 writer ───
+// Builds a macOS Mach-O 64-bit executable.
+// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(4GB+0x8000, BSS)
+fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
+    let vm_base: i64 = 4294967296       // 0x100000000
+    let page_size: i64 = 4096
+    let text_vm = vm_base               // __TEXT vmaddr
+    let data_vm = vm_base + 0x8000      // __DATA vmaddr (BSS)
+
+    // Mach-O header: 32 bytes
+    // Load commands: __PAGEZERO(72) + __TEXT(72+section*80=152) + __DATA(72+section*80=152) + LC_MAIN(24)
+    let hdr_size = 32
+    let lc_pagezero_size = 72
+    let lc_text_size = 72 + 80          // segment + 1 section (__text)
+    let lc_data_size = 72 + 80          // segment + 1 section (__bss)
+    let lc_main_size = 24
+    let ncmds = 4
+    let sizeofcmds = lc_pagezero_size + lc_text_size + lc_data_size + lc_main_size
+
+    let text_file_off = ((hdr_size + sizeofcmds + page_size - 1) / page_size) * page_size
+    let text_file_size = ((CL + page_size - 1) / page_size) * page_size
+    let total_file_size = text_file_off + text_file_size
+    let text_seg_vmsize = text_file_off + text_file_size  // covers headers + code
+
+    print("macho_build: code="); print_int(CL); print(" text_off="); print_int(text_file_off); print("\n")
+
+    var i: i64 = 0
+    while i < 262144 { ELF[i as usize] = 0; i = i + 1 }
+
+    // Mach-O header (32 bytes)
+    elf_w32(0, 0xFEEDFACF)               // magic (64-bit)
+    elf_w32(4, 0x01000007)                // cputype = x86_64
+    elf_w32(8, 0x80000003)                // cpusubtype = ALL | LIB64
+    elf_w32(12, 2)                        // filetype = MH_EXECUTE
+    elf_w32(16, ncmds)                    // ncmds
+    elf_w32(20, sizeofcmds)              // sizeofcmds
+    elf_w32(24, 0x00200085)               // flags: NOUNDEFS | DYLDLINK | TWOLEVEL | PIE
+
+    // LC_SEGMENT_64 __PAGEZERO (72 bytes at offset 32)
+    var off = hdr_size
+    elf_w32(off, 25)                      // cmd = LC_SEGMENT_64
+    elf_w32(off+4, lc_pagezero_size)      // cmdsize
+    // segname "__PAGEZERO" at off+8 (16 bytes)
+    elf_w8(off+8, 95); elf_w8(off+9, 95)  // __
+    elf_w8(off+10, 80); elf_w8(off+11, 65); elf_w8(off+12, 71); elf_w8(off+13, 69)  // PAGE
+    elf_w8(off+14, 90); elf_w8(off+15, 69); elf_w8(off+16, 82); elf_w8(off+17, 79)  // ZERO
+    elf_w64(off+24, 0)                    // vmaddr
+    elf_w64(off+32, vm_base)              // vmsize = 4GB
+    elf_w64(off+40, 0)                    // fileoff
+    elf_w64(off+48, 0)                    // filesize
+    elf_w32(off+56, 0)                    // maxprot
+    elf_w32(off+60, 0)                    // initprot
+    elf_w32(off+64, 0)                    // nsects
+    elf_w32(off+68, 0)                    // flags
+
+    // LC_SEGMENT_64 __TEXT + __text section (152 bytes)
+    off = hdr_size + lc_pagezero_size
+    elf_w32(off, 25)                      // cmd = LC_SEGMENT_64
+    elf_w32(off+4, lc_text_size)          // cmdsize
+    // segname "__TEXT"
+    elf_w8(off+8, 95); elf_w8(off+9, 95)
+    elf_w8(off+10, 84); elf_w8(off+11, 69); elf_w8(off+12, 88); elf_w8(off+13, 84)
+    elf_w64(off+24, text_vm)              // vmaddr
+    elf_w64(off+32, text_seg_vmsize)      // vmsize
+    elf_w64(off+40, 0)                    // fileoff
+    elf_w64(off+48, total_file_size)      // filesize
+    elf_w32(off+56, 7)                    // maxprot = rwx
+    elf_w32(off+60, 5)                    // initprot = r-x
+    elf_w32(off+64, 1)                    // nsects = 1
+    elf_w32(off+68, 0)                    // flags
+
+    // __text section header (80 bytes at off+72)
+    let sec = off + 72
+    // sectname "__text"
+    elf_w8(sec, 95); elf_w8(sec+1, 95)
+    elf_w8(sec+2, 116); elf_w8(sec+3, 101); elf_w8(sec+4, 120); elf_w8(sec+5, 116)  // text
+    // segname "__TEXT"
+    elf_w8(sec+16, 95); elf_w8(sec+17, 95)
+    elf_w8(sec+18, 84); elf_w8(sec+19, 69); elf_w8(sec+20, 88); elf_w8(sec+21, 84)
+    elf_w64(sec+32, text_vm + text_file_off)  // addr
+    elf_w64(sec+40, CL)                       // size
+    elf_w32(sec+48, text_file_off)            // offset
+    elf_w32(sec+52, 0)                        // align (2^0 = 1)
+    elf_w32(sec+56, 0)                        // reloff
+    elf_w32(sec+60, 0)                        // nreloc
+    elf_w32(sec+64, 0x80000400)               // flags: PURE_INSTRUCTIONS | SOME_INSTRUCTIONS
+
+    // LC_SEGMENT_64 __DATA + __bss section (152 bytes)
+    off = hdr_size + lc_pagezero_size + lc_text_size
+    elf_w32(off, 25)                      // cmd = LC_SEGMENT_64
+    elf_w32(off+4, lc_data_size)          // cmdsize
+    // segname "__DATA"
+    elf_w8(off+8, 95); elf_w8(off+9, 95)
+    elf_w8(off+10, 68); elf_w8(off+11, 65); elf_w8(off+12, 84); elf_w8(off+13, 65)
+    elf_w64(off+24, data_vm)              // vmaddr
+    elf_w64(off+32, ((GL_BSS_SIZE + page_size - 1) / page_size) * page_size)  // vmsize
+    elf_w64(off+40, 0)                    // fileoff
+    elf_w64(off+48, 0)                    // filesize = 0 (BSS)
+    elf_w32(off+56, 7)                    // maxprot = rwx
+    elf_w32(off+60, 3)                    // initprot = rw-
+    elf_w32(off+64, 1)                    // nsects = 1
+    elf_w32(off+68, 0)                    // flags
+
+    // __bss section header (80 bytes at off+72)
+    let bsec = off + 72
+    elf_w8(bsec, 95); elf_w8(bsec+1, 95)
+    elf_w8(bsec+2, 98); elf_w8(bsec+3, 115); elf_w8(bsec+4, 115)  // bss
+    elf_w8(bsec+16, 95); elf_w8(bsec+17, 95)
+    elf_w8(bsec+18, 68); elf_w8(bsec+19, 65); elf_w8(bsec+20, 84); elf_w8(bsec+21, 65)
+    elf_w64(bsec+32, data_vm)                 // addr
+    elf_w64(bsec+40, GL_BSS_SIZE)             // size
+    elf_w32(bsec+48, 0)                       // offset = 0 (BSS)
+    elf_w32(bsec+64, 1)                       // flags: S_ZEROFILL
+
+    // LC_MAIN (24 bytes)
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size
+    elf_w32(off, 0x80000028)              // cmd = LC_MAIN
+    elf_w32(off+4, lc_main_size)          // cmdsize
+    elf_w64(off+8, text_file_off + TRAMP_OFF)  // entryoff (file offset of entry)
+    elf_w64(off+16, 0)                    // stacksize (0 = default)
+
+    // Copy code at text_file_off
+    i = 0
+    while i < CL { ELF[(text_file_off + i) as usize] = CD[i as usize]; i = i + 1 }
+
+    let ok = write_file(output, ELF, total_file_size)
+    print("macho: "); print(output); print(" "); print_int(total_file_size)
+    print(" bytes\n")
+    return 0
+}
+
 // ─── Import resolver ───
 // Hash IMP_PATH[0..len] for dedup
 fn imp_path_hash(len: i64) -> i64 with Panic {
@@ -3386,7 +3540,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             // Can't use str_eq (not available in lean), use char comparison
         }
     }
-    // Simple check: if output ends with .exe, target Windows
+    // Detect target from output extension: .exe → Windows, .macho → macOS
     let out_len = str_len(out)
     if out_len > 4 {
         let c3 = str_char_at(out, out_len - 4)
@@ -3394,9 +3548,21 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         let c1 = str_char_at(out, out_len - 2)
         let c0 = str_char_at(out, out_len - 1)
         if c3 == 46 && (c2 == 101 || c2 == 69) && (c1 == 120 || c1 == 88) && (c0 == 101 || c0 == 69) {
-            // .exe or .EXE
             TARGET_OS = 3
             print("target: x86_64-windows\n")
+        }
+    }
+    if out_len > 6 {
+        // Check for .macho suffix
+        let m5 = str_char_at(out, out_len - 6)
+        let m4 = str_char_at(out, out_len - 5)
+        let m3 = str_char_at(out, out_len - 4)
+        let m2 = str_char_at(out, out_len - 3)
+        let m1 = str_char_at(out, out_len - 2)
+        let m0 = str_char_at(out, out_len - 1)
+        if m5 == 46 && m4 == 109 && m3 == 97 && m2 == 99 && m1 == 104 && m0 == 111 {
+            TARGET_OS = 2
+            print("target: x86_64-macos\n")
         }
     }
 
@@ -3414,6 +3580,8 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     if cr != 0 { return cr }
     if TARGET_OS == 3 {
         write_pe(out)
+    } else if TARGET_OS == 2 {
+        write_macho_x86(out)
     } else {
         write_elf(out)
     }
