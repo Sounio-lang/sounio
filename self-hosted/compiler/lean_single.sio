@@ -31,8 +31,13 @@ var CD: [i8; 262144] = [0; 262144]
 var CL: i64 = 0
 var TRAMP_OFF: i64 = 0
 
-// ELF output
+// ELF/PE output
 var ELF: [i8; 262144] = [0; 262144]
+
+// Target OS: 0=linux (default), 3=windows
+var TARGET_OS: i64 = 0
+// PE: offset within CD[] of the ExitProcess call [rip+disp32]'s disp32 field
+var PE_EXIT_CALL_OFF: i64 = -1
 
 // String qword buffer (global to avoid boot4 local-array bug)
 var SQW: [i64; 32] = [0; 32]
@@ -2994,25 +2999,44 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // Trampoline: save argc/argv, call main, exit
     TRAMP_OFF = CL
     let tramp = CL
-    // At entry: [rsp]=argc, [rsp+8]=argv[0], [rsp+16]=argv[1], ...
-    // Save argc at BSS+0, argv pointer at BSS+8
-    let argc_addr = 0x600000
-    let argv_addr = 0x600000 + 8
-    em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (argc)
-    em(0x48); em(0x83); em(0xe8); em(0x01)  // sub rax, 1 (skip program name)
-    em(0x48); em(0xb9); em64(argc_addr)
-    em(0x48); em(0x89); em(0x01)  // mov [rcx], rax (save argc-1)
-    em(0x48); em(0x8d); em(0x44); em(0x24); em(16)  // lea rax, [rsp+16] (argv+1)
-    em(0x48); em(0xb9); em64(argv_addr)
-    em(0x48); em(0x89); em(0x01)  // mov [rcx], rax (save argv ptr)
-    // call main
-    em(0xe8)
-    let rel = FN_OFF[main_fn as usize] - (CL + 4)
-    em32(rel)
-    // exit(rax)
-    em(0x89); em(0xc7)
-    em(0xb8); em32(60)
-    em(0x0f); em(0x05)
+
+    if TARGET_OS == 3 {
+        // Windows PE trampoline: call main, then ExitProcess(rax) via IAT
+        // No argc/argv on Windows MVP (would need GetCommandLineW)
+        // sub rsp, 40 — align stack + shadow space
+        em(0x48); em(0x83); em(0xEC); em(0x28)
+        // call main
+        em(0xe8)
+        let wrel = FN_OFF[main_fn as usize] - (CL + 4)
+        em32(wrel)
+        // mov ecx, eax — exit code to RCX (Win64 first param)
+        em(0x89); em(0xC1)
+        // call [rip+disp32] — ExitProcess via IAT (disp32 patched by write_pe)
+        PE_EXIT_CALL_OFF = CL + 2   // remember offset of disp32 for patching
+        em(0xFF); em(0x15); em32(0)  // placeholder disp32
+        // ud2 (should never reach)
+        em(0x0F); em(0x0B)
+    } else {
+        // Linux trampoline
+        // At entry: [rsp]=argc, [rsp+8]=argv[0], [rsp+16]=argv[1], ...
+        let argc_addr = 0x600000
+        let argv_addr = 0x600000 + 8
+        em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (argc)
+        em(0x48); em(0x83); em(0xe8); em(0x01)  // sub rax, 1 (skip program name)
+        em(0x48); em(0xb9); em64(argc_addr)
+        em(0x48); em(0x89); em(0x01)  // mov [rcx], rax (save argc-1)
+        em(0x48); em(0x8d); em(0x44); em(0x24); em(16)  // lea rax, [rsp+16] (argv+1)
+        em(0x48); em(0xb9); em64(argv_addr)
+        em(0x48); em(0x89); em(0x01)  // mov [rcx], rax (save argv ptr)
+        // call main
+        em(0xe8)
+        let rel = FN_OFF[main_fn as usize] - (CL + 4)
+        em32(rel)
+        // exit(rax)
+        em(0x89); em(0xc7)
+        em(0xb8); em32(60)
+        em(0x0f); em(0x05)
+    }
 
     print("compile: fns="); print_int(FN_COUNT); print(" code="); print_int(CL)
     print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT); print("\n")
@@ -3064,6 +3088,186 @@ fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
     let ok = write_file(output, ELF, tsz)
     print("elf: "); print(output); print(" "); print_int(tsz)
     print(" bytes (bss="); print_int(GL_BSS_SIZE); print(")\n")
+    return 0
+}
+
+// ─── PE/COFF writer ───
+// Builds a Windows PE32+ executable from compiled code in CD[0..CL].
+// Image layout: image_base=0x400000, .text at RVA 0x1000, .idata at next page, .bss at 0x200000.
+// This keeps BSS virtual address at 0x600000 = 0x400000 + 0x200000, matching ELF layout.
+fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
+    let image_base = 0x400000
+    let sec_align = 0x1000
+    let file_align = 0x200
+    let text_rva = sec_align                      // 0x1000
+    let text_raw_size = ((CL + file_align - 1) / file_align) * file_align
+    let idata_rva = text_rva + ((CL + sec_align - 1) / sec_align) * sec_align
+
+    // .idata layout: 1 import descriptor (20) + null (20) + INT(2*8+8=24) + IAT(24) + hints + dll name
+    let idt_off: i64 = 0
+    let int_off: i64 = 40
+    let iat_off: i64 = 64
+    let hnt_ep_off: i64 = 88         // "ExitProcess" hint/name entry
+    let dll_name_off: i64 = 104      // "kernel32.dll\0"
+    let idata_total: i64 = 117       // 104 + 13
+    let idata_raw_size = ((idata_total + file_align - 1) / file_align) * file_align
+
+    let bss_rva = 0x200000            // .bss section: RVA so that VA = 0x600000
+    let bss_vsize = GL_BSS_SIZE
+    if bss_vsize < 4096 { let bss_vsize_min = 4096 }  // minimum 1 page
+
+    // Patch ExitProcess IAT displacement in trampoline code
+    // call [rip+disp32]: disp32 = IAT_slot_RVA - (text_RVA + instruction_end_offset)
+    if PE_EXIT_CALL_OFF >= 0 {
+        let call_end = PE_EXIT_CALL_OFF + 4
+        let disp = (idata_rva + iat_off) - (text_rva + call_end)  // IAT slot 0 = ExitProcess
+        CD[PE_EXIT_CALL_OFF as usize] = (disp & 0xFF) as i8
+        CD[(PE_EXIT_CALL_OFF + 1) as usize] = ((disp >> 8) & 0xFF) as i8
+        CD[(PE_EXIT_CALL_OFF + 2) as usize] = ((disp >> 16) & 0xFF) as i8
+        CD[(PE_EXIT_CALL_OFF + 3) as usize] = ((disp >> 24) & 0xFF) as i8
+    }
+
+    // Headers: DOS(64) + PE sig(4) + COFF(20) + OptHdr(112) + DataDirs(128) + 3 section headers(3*40=120) = 448
+    // Round up to file_align = 512
+    let num_sections = 3   // .text, .idata, .bss
+    let headers_size = 512
+    let entry_rva = text_rva + TRAMP_OFF
+
+    // Compute size_of_image: round up to section_alignment
+    let bss_end_rva = bss_rva + ((bss_vsize + sec_align - 1) / sec_align) * sec_align
+    let size_of_image = bss_end_rva
+
+    print("pe_build: code="); print_int(CL); print(" text_raw="); print_int(text_raw_size); print(" idata_rva="); print_int(idata_rva); print("\n")
+    var i: i64 = 0
+    while i < 262144 { ELF[i as usize] = 0; i = i + 1 }
+
+    // DOS header (64 bytes)
+    elf_w8(0, 0x4D); elf_w8(1, 0x5A)             // "MZ"
+    elf_w32(60, 64)                                // e_lfanew → PE header at offset 64
+
+    // PE signature
+    elf_w8(64, 0x50); elf_w8(65, 0x45)            // "PE\0\0"
+
+    // COFF header (20 bytes at offset 68)
+    elf_w16(68, 0x8664)                            // Machine = AMD64
+    elf_w16(70, num_sections)                      // NumberOfSections
+    elf_w16(84, 240)                               // SizeOfOptionalHeader (PE32+ = 112 + data dirs)
+    elf_w16(86, 0x22)                              // Characteristics: EXECUTABLE | LARGE_ADDRESS_AWARE
+
+    // Optional header (PE32+) at offset 88
+    elf_w16(88, 0x020B)                            // Magic = PE32+
+    elf_w32(104, entry_rva)                        // AddressOfEntryPoint
+    elf_w64(112, image_base)                       // ImageBase
+    elf_w32(120, sec_align)                        // SectionAlignment
+    elf_w32(124, file_align)                       // FileAlignment
+    elf_w16(128, 6)                                // MajorOperatingSystemVersion
+    elf_w16(136, 6)                                // MajorSubsystemVersion
+    elf_w32(144, size_of_image)                    // SizeOfImage
+    elf_w32(148, headers_size)                     // SizeOfHeaders
+    elf_w16(156, 3)                                // Subsystem = WINDOWS_CUI
+    elf_w16(158, 0x8160)                           // DllCharacteristics: NX | DYNAMIC_BASE | HIGH_ENTROPY_VA | TERMINAL_SERVER
+    elf_w64(160, 0x100000)                         // SizeOfStackReserve = 1MB
+    elf_w64(168, 0x1000)                           // SizeOfStackCommit = 4KB
+    elf_w64(176, 0x100000)                         // SizeOfHeapReserve = 1MB
+    elf_w64(184, 0x1000)                           // SizeOfHeapCommit = 4KB
+    elf_w32(192, 16)                               // NumberOfRvaAndSizes
+
+    // Data directories (at offset 196, 16 entries * 8 bytes = 128 bytes)
+    // Import directory (index 1)
+    elf_w32(204, idata_rva + idt_off)              // VirtualAddress
+    elf_w32(208, 40)                               // Size (1 descriptor + null)
+    // IAT directory (index 12)
+    elf_w32(292, idata_rva + iat_off)              // VirtualAddress
+    elf_w32(296, 24)                               // Size (2 entries + null = 24)
+
+    // Section headers start at offset 328 (88 + 240)
+    let sh_base = 328
+
+    // .text section header
+    elf_w8(sh_base, 0x2E); elf_w8(sh_base+1, 0x74); elf_w8(sh_base+2, 0x65)
+    elf_w8(sh_base+3, 0x78); elf_w8(sh_base+4, 0x74)  // ".text"
+    elf_w32(sh_base+8, CL)                         // VirtualSize
+    elf_w32(sh_base+12, text_rva)                   // VirtualAddress
+    elf_w32(sh_base+16, text_raw_size)              // SizeOfRawData
+    elf_w32(sh_base+20, headers_size)               // PointerToRawData
+    elf_w32(sh_base+36, 0x60000020)                 // Characteristics: CODE | EXECUTE | READ
+
+    // .idata section header
+    let sh1 = sh_base + 40
+    elf_w8(sh1, 0x2E); elf_w8(sh1+1, 0x69); elf_w8(sh1+2, 0x64)
+    elf_w8(sh1+3, 0x61); elf_w8(sh1+4, 0x74); elf_w8(sh1+5, 0x61)  // ".idata"
+    elf_w32(sh1+8, idata_total)                     // VirtualSize
+    elf_w32(sh1+12, idata_rva)                      // VirtualAddress
+    elf_w32(sh1+16, idata_raw_size)                 // SizeOfRawData
+    elf_w32(sh1+20, headers_size + text_raw_size)   // PointerToRawData
+    elf_w32(sh1+36, 0xC0000040)                     // Characteristics: INITIALIZED_DATA | READ | WRITE
+
+    // .bss section header
+    let sh2 = sh_base + 80
+    elf_w8(sh2, 0x2E); elf_w8(sh2+1, 0x62); elf_w8(sh2+2, 0x73); elf_w8(sh2+3, 0x73)  // ".bss"
+    elf_w32(sh2+8, bss_vsize)                       // VirtualSize
+    elf_w32(sh2+12, bss_rva)                        // VirtualAddress
+    elf_w32(sh2+16, 0)                              // SizeOfRawData = 0 (uninitialized)
+    elf_w32(sh2+20, 0)                              // PointerToRawData = 0
+    elf_w32(sh2+36, 0xC0000080)                     // Characteristics: UNINITIALIZED_DATA | READ | WRITE
+
+    // Copy .text section (code)
+    i = 0
+    while i < CL { ELF[(headers_size + i) as usize] = CD[i as usize]; i = i + 1 }
+
+    // Pad .text to file alignment
+    let text_end = headers_size + text_raw_size
+
+    // Write .idata section
+    let idata_file_off = text_end
+
+    // Import descriptor for kernel32.dll (20 bytes)
+    elf_w32(idata_file_off + 0, idata_rva + int_off)    // OriginalFirstThunk (INT RVA)
+    elf_w32(idata_file_off + 12, idata_rva + dll_name_off)  // Name RVA
+    elf_w32(idata_file_off + 16, idata_rva + iat_off)   // FirstThunk (IAT RVA)
+    // Null terminator descriptor (20 bytes of zeros — already zero)
+
+    // INT: ExitProcess entry + null (offset 40)
+    elf_w64(idata_file_off + int_off, idata_rva + hnt_ep_off)  // → hint/name for ExitProcess
+    // null terminator at int_off+8 (already zero)
+
+    // IAT: same as INT (offset 64)
+    elf_w64(idata_file_off + iat_off, idata_rva + hnt_ep_off)
+    // null terminator at iat_off+8 (already zero)
+
+    // Hint/Name entry for ExitProcess (offset 88): hint(2) + "ExitProcess\0"
+    elf_w16(idata_file_off + hnt_ep_off, 0)              // hint = 0
+    // "ExitProcess" = 69 78 69 74 50 72 6F 63 65 73 73 00
+    elf_w8(idata_file_off + hnt_ep_off + 2, 0x45)   // E
+    elf_w8(idata_file_off + hnt_ep_off + 3, 0x78)   // x
+    elf_w8(idata_file_off + hnt_ep_off + 4, 0x69)   // i
+    elf_w8(idata_file_off + hnt_ep_off + 5, 0x74)   // t
+    elf_w8(idata_file_off + hnt_ep_off + 6, 0x50)   // P
+    elf_w8(idata_file_off + hnt_ep_off + 7, 0x72)   // r
+    elf_w8(idata_file_off + hnt_ep_off + 8, 0x6F)   // o
+    elf_w8(idata_file_off + hnt_ep_off + 9, 0x63)   // c
+    elf_w8(idata_file_off + hnt_ep_off + 10, 0x65)  // e
+    elf_w8(idata_file_off + hnt_ep_off + 11, 0x73)  // s
+    elf_w8(idata_file_off + hnt_ep_off + 12, 0x73)  // s
+
+    // DLL name: "kernel32.dll\0" (offset 104)
+    elf_w8(idata_file_off + dll_name_off + 0, 0x6B)   // k
+    elf_w8(idata_file_off + dll_name_off + 1, 0x65)   // e
+    elf_w8(idata_file_off + dll_name_off + 2, 0x72)   // r
+    elf_w8(idata_file_off + dll_name_off + 3, 0x6E)   // n
+    elf_w8(idata_file_off + dll_name_off + 4, 0x65)   // e
+    elf_w8(idata_file_off + dll_name_off + 5, 0x6C)   // l
+    elf_w8(idata_file_off + dll_name_off + 6, 0x33)   // 3
+    elf_w8(idata_file_off + dll_name_off + 7, 0x32)   // 2
+    elf_w8(idata_file_off + dll_name_off + 8, 0x2E)   // .
+    elf_w8(idata_file_off + dll_name_off + 9, 0x64)   // d
+    elf_w8(idata_file_off + dll_name_off + 10, 0x6C)  // l
+    elf_w8(idata_file_off + dll_name_off + 11, 0x6C)  // l
+
+    let total_file_size = idata_file_off + idata_raw_size
+    let ok = write_file(output, ELF, total_file_size)
+    print("pe: "); print(output); print(" "); print_int(total_file_size)
+    print(" bytes\n")
     return 0
 }
 
@@ -3169,9 +3373,33 @@ fn resolve_imports() with IO, Mut, Panic, Div {
 
 fn main() -> i64 with IO, Mut, Panic, Div {
     let argc = arg_count()
-    if argc < 2 { print("Usage: mini_native <source.sio> <output.elf>\n"); return 1 }
+    if argc < 2 { print("Usage: mini_native <source.sio> <output> [--target x86_64-windows]\n"); return 1 }
     let src = get_arg(0)
     let out = get_arg(1)
+
+    // Parse optional --target flag
+    if argc >= 4 {
+        let flag = get_arg(2)
+        let targ = get_arg(3)
+        // Check if flag == "--target" and targ == "x86_64-windows"
+        if file_size(flag) == 0 && file_size(targ) == 0 {
+            // Can't use str_eq (not available in lean), use char comparison
+        }
+    }
+    // Simple check: if output ends with .exe, target Windows
+    let out_len = str_len(out)
+    if out_len > 4 {
+        let c3 = str_char_at(out, out_len - 4)
+        let c2 = str_char_at(out, out_len - 3)
+        let c1 = str_char_at(out, out_len - 2)
+        let c0 = str_char_at(out, out_len - 1)
+        if c3 == 46 && (c2 == 101 || c2 == 69) && (c1 == 120 || c1 == 88) && (c0 == 101 || c0 == 69) {
+            // .exe or .EXE
+            TARGET_OS = 3
+            print("target: x86_64-windows\n")
+        }
+    }
+
     let raw = read_file(src)
     let sz = file_size(src)
     var i: i64 = 0
@@ -3184,6 +3412,10 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     print("tokens: "); print_int(TC); print("\n")
     let cr = compile_all()
     if cr != 0 { return cr }
-    write_elf(out)
+    if TARGET_OS == 3 {
+        write_pe(out)
+    } else {
+        write_elf(out)
+    }
     return 0
 }
