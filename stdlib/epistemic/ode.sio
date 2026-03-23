@@ -1,10 +1,28 @@
 // stdlib/epistemic/ode.sio
 //
-// Epistemic ODE Solvers — Sounio
+// General-Purpose Epistemic ODE Solver — Sounio
 //
-// Every integration step propagates uncertainty.
-// State vectors use fixed arrays [f64; 64].
-// Supports RK4 and adaptive RK45 with uncertainty propagation.
+// Architecture:
+//   - Fixed arrays throughout (max 14 compartments for PBPK, 64 ceiling)
+//   - Index-based RHS dispatch (no closures in Sounio)
+//   - GUM uncertainty propagation via numerical Jacobian (delta method)
+//   - RK4 fixed-step + adaptive RK45 (Dormand-Prince)
+//   - Supports multi-compartment systems up to 14 state variables
+//
+// Usage:
+//   1. Create an ODESystem with a system_id
+//   2. Register your RHS by adding a branch in ode_rhs_dispatch
+//   3. Call solve_ode() or solve_ode_adaptive()
+//
+// Built-in systems:
+//   SYSTEM_EXP_DECAY  (1) — single exponential decay
+//   SYSTEM_PBPK_14    (2) — 14-compartment PBPK (rapamycin/CYP3A4)
+//   SYSTEM_LINEAR_2   (3) — generic 2-compartment linear PK
+//   SYSTEM_LINEAR_3   (4) — generic 3-compartment linear PK
+//
+// User-defined systems: IDs 100+. Add branches to ode_rhs_dispatch.
+//
+// Reference: GUM (JCGM 100:2008) §5.1.2 — law of propagation of uncertainty
 
 // ============================================================================
 // Helpers
@@ -33,9 +51,22 @@ fn ode_min(a: f64, b: f64) -> f64 {
     if a < b { a } else { b }
 }
 
+fn ode_exp(x: f64) -> f64 with Mut, Div, Panic {
+    // Taylor series exp() — 20 terms, good for |x| < 20
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 20 {
+        term = term * x / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    result
+}
+
 // ============================================================================
 // State Vector: value + variance for each component
-// Max 64 components
+// Max 64 components (14 typical for PBPK)
 // ============================================================================
 
 struct EState {
@@ -71,33 +102,104 @@ fn estate_std(s: &EState, idx: i64) -> f64 with Mut, Div, Panic {
     ode_sqrt(estate_get_variance(s, idx))
 }
 
+// Copy values from src into dst (up to n components)
+fn estate_copy(dst: &!EState, src: &EState) with Mut, Div, Panic {
+    var i = 0
+    while i < src.n {
+        if i < 64 {
+            dst.values[i] = src.values[i]
+            dst.variances[i] = src.variances[i]
+        }
+        i = i + 1
+    }
+    dst.n = src.n
+}
+
+// dst.values[i] = a.values[i] + scale * b.values[i]  (values only, no variance)
+fn estate_axpy(dst: &!EState, a: &EState, scale: f64, b: &EState) with Mut, Div, Panic {
+    let n = a.n
+    var i = 0
+    while i < n {
+        if i < 64 {
+            dst.values[i] = a.values[i] + scale * b.values[i]
+        }
+        i = i + 1
+    }
+    dst.n = n
+}
+
 // ============================================================================
-// ODE System definition via function pointer style
-// We represent the RHS as a flat array: dy/dt = f(t, y)
-// User provides derivatives via callback pattern (fill output array)
+// ODE Parameters: up to 64 named parameters with uncertainty
+// Expanded from 16 to support 14-compartment PBPK
 // ============================================================================
 
-// Parameters for the ODE system
 struct ODEParams {
-    params: [f64; 16],
-    param_variances: [f64; 16],
+    params: [f64; 64],
+    param_variances: [f64; 64],
     n_params: i64,
 }
 
 fn ode_params_new() -> ODEParams {
     ODEParams {
-        params: [0.0; 16],
-        param_variances: [0.0; 16],
+        params: [0.0; 64],
+        param_variances: [0.0; 64],
         n_params: 0,
     }
 }
 
 fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) {
-    if idx >= 0 && idx < 16 {
+    if idx >= 0 && idx < 64 {
         p.params[idx] = val
         p.param_variances[idx] = var_
         if idx >= p.n_params { p.n_params = idx + 1 }
     }
+}
+
+fn ode_params_get(p: &ODEParams, idx: i64) -> f64 {
+    if idx >= 0 && idx < 64 { p.params[idx] } else { 0.0 }
+}
+
+fn ode_params_get_variance(p: &ODEParams, idx: i64) -> f64 {
+    if idx >= 0 && idx < 64 { p.param_variances[idx] } else { 0.0 }
+}
+
+// ============================================================================
+// ODE System: identifies which RHS to dispatch to
+// ============================================================================
+
+// System ID constants
+// SYSTEM_EXP_DECAY  = 1
+// SYSTEM_PBPK_14    = 2
+// SYSTEM_LINEAR_2   = 3
+// SYSTEM_LINEAR_3   = 4
+// User-defined: 100+
+
+struct ODESystem {
+    system_id: i64,
+    n_dims: i64,
+}
+
+fn ode_system_new(system_id: i64, n_dims: i64) -> ODESystem {
+    ODESystem {
+        system_id: system_id,
+        n_dims: n_dims,
+    }
+}
+
+fn ode_system_exp_decay() -> ODESystem {
+    ODESystem { system_id: 1, n_dims: 1 }
+}
+
+fn ode_system_pbpk_14() -> ODESystem {
+    ODESystem { system_id: 2, n_dims: 14 }
+}
+
+fn ode_system_linear_2() -> ODESystem {
+    ODESystem { system_id: 3, n_dims: 2 }
+}
+
+fn ode_system_linear_3() -> ODESystem {
+    ODESystem { system_id: 4, n_dims: 3 }
 }
 
 // ============================================================================
@@ -132,13 +234,22 @@ fn solver_options_fixed(dt: f64, max_steps: i64) -> SolverOptions {
     }
 }
 
+fn solver_options_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -> SolverOptions {
+    SolverOptions {
+        dt: dt_init,
+        rtol: rtol,
+        atol: atol,
+        max_steps: max_steps,
+        adaptive: true,
+    }
+}
+
 // ============================================================================
 // ODE Solution: trajectory storage
 // Max 1024 time points, max 64 state dimensions
 // ============================================================================
 
 struct ODESolution {
-    // Time points
     times: [f64; 1024],
     // State values at each time: values[step * 64 + dim]
     values: [f64; 4096],
@@ -147,6 +258,8 @@ struct ODESolution {
     n_steps: i64,
     n_dims: i64,
     total_error: f64,
+    n_rhs_evals: i64,
+    n_rejected: i64,
 }
 
 fn ode_solution_new(n_dims: i64) -> ODESolution {
@@ -157,6 +270,8 @@ fn ode_solution_new(n_dims: i64) -> ODESolution {
         n_steps: 0,
         n_dims: n_dims,
         total_error: 0.0,
+        n_rhs_evals: 0,
+        n_rejected: 0,
     }
 }
 
@@ -187,32 +302,530 @@ fn solution_get_variance(sol: &ODESolution, step: i64, dim: i64) -> f64 {
     sol.variances[step * 64 + dim]
 }
 
+fn solution_get_std(sol: &ODESolution, step: i64, dim: i64) -> f64 with Mut, Div, Panic {
+    ode_sqrt(sol.variances[step * 64 + dim])
+}
+
 // ============================================================================
-// RK4 Fixed-Step Integrator
+// Built-in RHS: Exponential Decay (system_id = 1)
+// dy[0]/dt = -p[0] * y[0]
+// params[0] = k (decay rate)
 // ============================================================================
 
-// Exponential decay system: dy/dt = -k * y
-// This is a built-in demo RHS. For general use, users provide derivatives arrays.
 fn rhs_exp_decay(
     t: f64,
     y: &EState,
     p: &ODEParams,
     out: &!EState
 ) with Mut, Div, Panic {
-    // dy[0]/dt = -p[0] * y[0]
     let k = p.params[0]
     out.values[0] = (0.0 - k) * y.values[0]
     out.n = y.n
 }
 
-// Single RK4 step for the exponential decay system
-fn rk4_step_exp_decay(
+// ============================================================================
+// Built-in RHS: 14-Compartment PBPK (system_id = 2)
+//
+// Rapamycin (sirolimus) metabolized by CYP3A4
+// Perfusion-limited model with well-stirred liver clearance
+//
+// State variables (14 compartments):
+//   y[0]  = C_plasma    (venous plasma)
+//   y[1]  = C_liver     (liver)
+//   y[2]  = C_gut       (gut / GI tract)
+//   y[3]  = C_kidney    (kidney)
+//   y[4]  = C_lung      (lung)
+//   y[5]  = C_heart     (heart)
+//   y[6]  = C_brain     (brain)
+//   y[7]  = C_muscle    (muscle)
+//   y[8]  = C_skin      (skin)
+//   y[9]  = C_fat       (adipose)
+//   y[10] = C_spleen    (spleen)
+//   y[11] = C_bone      (bone)
+//   y[12] = C_rest      (rest of body)
+//   y[13] = A_gut_lumen (amount in gut lumen, for oral dosing)
+//
+// Parameters (packed into ODEParams.params[]):
+//   p[0]  = Q_cardiac   (cardiac output, L/h)
+//   p[1]  = V_plasma    (plasma volume, L)
+//   p[2]  = Q_liver     (hepatic blood flow fraction * Q_cardiac)
+//   p[3]  = Q_gut       (gut blood flow, L/h)
+//   p[4]  = Q_kidney    (renal blood flow, L/h)
+//   p[5]  = Q_lung      (pulmonary flow = Q_cardiac)
+//   p[6]  = Q_heart     (coronary flow, L/h)
+//   p[7]  = Q_brain     (cerebral flow, L/h)
+//   p[8]  = Q_muscle    (muscle flow, L/h)
+//   p[9]  = Q_skin      (skin flow, L/h)
+//   p[10] = Q_fat       (adipose flow, L/h)
+//   p[11] = Q_spleen    (splenic flow, L/h)
+//   p[12] = Q_bone      (bone flow, L/h)
+//   p[13] = Q_rest      (rest flow, L/h)
+//   p[14] = V_liver     (L)
+//   p[15] = V_gut       (L)
+//   p[16] = V_kidney    (L)
+//   p[17] = V_lung      (L)
+//   p[18] = V_heart     (L)
+//   p[19] = V_brain     (L)
+//   p[20] = V_muscle    (L)
+//   p[21] = V_skin      (L)
+//   p[22] = V_fat       (L)
+//   p[23] = V_spleen    (L)
+//   p[24] = V_bone      (L)
+//   p[25] = V_rest      (L)
+//   p[26] = Kp_liver    (tissue:plasma partition)
+//   p[27] = Kp_gut
+//   p[28] = Kp_kidney
+//   p[29] = Kp_lung
+//   p[30] = Kp_heart
+//   p[31] = Kp_brain
+//   p[32] = Kp_muscle
+//   p[33] = Kp_skin
+//   p[34] = Kp_fat
+//   p[35] = Kp_spleen
+//   p[36] = Kp_bone
+//   p[37] = Kp_rest
+//   p[38] = CL_hepatic  (hepatic intrinsic clearance, L/h)
+//   p[39] = CL_renal    (renal clearance, L/h)
+//   p[40] = ka          (oral absorption rate, 1/h)
+//   p[41] = F_oral      (oral bioavailability, 0-1)
+//   p[42] = fu_plasma   (fraction unbound in plasma)
+//   p[43] = BP_ratio    (blood:plasma ratio)
+// ============================================================================
+
+fn rhs_pbpk_14(
+    t: f64,
+    y: &EState,
+    p: &ODEParams,
+    out: &!EState
+) with Mut, Div, Panic {
+    // Extract state
+    let c_plasma = y.values[0]
+    let c_liver  = y.values[1]
+    let c_gut    = y.values[2]
+    let c_kidney = y.values[3]
+    let c_lung   = y.values[4]
+    let c_heart  = y.values[5]
+    let c_brain  = y.values[6]
+    let c_muscle = y.values[7]
+    let c_skin   = y.values[8]
+    let c_fat    = y.values[9]
+    let c_spleen = y.values[10]
+    let c_bone   = y.values[11]
+    let c_rest   = y.values[12]
+    let a_lumen  = y.values[13]
+
+    // Extract flows
+    let q_card   = p.params[0]
+    let v_plasma = p.params[1]
+    let q_liver  = p.params[2]
+    let q_gut    = p.params[3]
+    let q_kidney = p.params[4]
+    let q_lung   = p.params[5]
+    let q_heart  = p.params[6]
+    let q_brain  = p.params[7]
+    let q_muscle = p.params[8]
+    let q_skin   = p.params[9]
+    let q_fat    = p.params[10]
+    let q_spleen = p.params[11]
+    let q_bone   = p.params[12]
+    let q_rest   = p.params[13]
+
+    // Extract volumes
+    let v_liver  = p.params[14]
+    let v_gut    = p.params[15]
+    let v_kidney = p.params[16]
+    let v_lung   = p.params[17]
+    let v_heart  = p.params[18]
+    let v_brain  = p.params[19]
+    let v_muscle = p.params[20]
+    let v_skin   = p.params[21]
+    let v_fat    = p.params[22]
+    let v_spleen = p.params[23]
+    let v_bone   = p.params[24]
+    let v_rest   = p.params[25]
+
+    // Extract partition coefficients
+    let kp_liver  = p.params[26]
+    let kp_gut    = p.params[27]
+    let kp_kidney = p.params[28]
+    let kp_lung   = p.params[29]
+    let kp_heart  = p.params[30]
+    let kp_brain  = p.params[31]
+    let kp_muscle = p.params[32]
+    let kp_skin   = p.params[33]
+    let kp_fat    = p.params[34]
+    let kp_spleen = p.params[35]
+    let kp_bone   = p.params[36]
+    let kp_rest   = p.params[37]
+
+    // Clearance and absorption
+    let cl_hep   = p.params[38]
+    let cl_renal = p.params[39]
+    let ka       = p.params[40]
+    let f_oral   = p.params[41]
+    let fu       = p.params[42]
+    let bp       = p.params[43]
+
+    // Venous concentrations leaving each tissue (well-stirred: C_v = C_tissue / Kp)
+    let cv_liver  = c_liver  / kp_liver
+    let cv_gut    = c_gut    / kp_gut
+    let cv_kidney = c_kidney / kp_kidney
+    let cv_lung   = c_lung   / kp_lung
+    let cv_heart  = c_heart  / kp_heart
+    let cv_brain  = c_brain  / kp_brain
+    let cv_muscle = c_muscle / kp_muscle
+    let cv_skin   = c_skin   / kp_skin
+    let cv_fat    = c_fat    / kp_fat
+    let cv_spleen = c_spleen / kp_spleen
+    let cv_bone   = c_bone   / kp_bone
+    let cv_rest   = c_rest   / kp_rest
+
+    // Arterial concentration (from lung venous blood)
+    let c_arterial = cv_lung
+
+    // Mixed venous concentration (all organ outflows sum to cardiac output)
+    let c_venous = (q_liver * cv_liver + q_gut * cv_gut + q_kidney * cv_kidney
+                    + q_heart * cv_heart + q_brain * cv_brain + q_muscle * cv_muscle
+                    + q_skin * cv_skin + q_fat * cv_fat + q_spleen * cv_spleen
+                    + q_bone * cv_bone + q_rest * cv_rest) / q_card
+
+    // -- Derivatives --
+
+    // Gut lumen (oral dose absorption)
+    // dA_lumen/dt = -ka * A_lumen
+    out.values[13] = (0.0 - ka) * a_lumen
+
+    // Gut tissue: inflow from artery + absorption from lumen
+    // dC_gut/dt = (Q_gut * (C_art - C_gut/Kp) + ka * F * A_lumen) / V_gut
+    out.values[2] = (q_gut * (c_arterial - cv_gut) + ka * f_oral * a_lumen) / v_gut
+
+    // Liver: receives portal vein (from gut + spleen) + hepatic artery
+    // Well-stirred hepatic clearance: CL_int * fu * C_liver / Kp_liver
+    let q_portal = q_gut + q_spleen
+    let q_ha = q_liver - q_portal
+    out.values[1] = (q_ha * c_arterial + q_gut * cv_gut + q_spleen * cv_spleen
+                     - q_liver * cv_liver - cl_hep * fu * cv_liver) / v_liver
+
+    // Kidney: includes renal clearance
+    out.values[3] = (q_kidney * (c_arterial - cv_kidney) - cl_renal * fu * cv_kidney) / v_kidney
+
+    // Lung: receives all mixed venous blood, sends to arterial
+    out.values[4] = (q_lung * (c_venous - cv_lung)) / v_lung
+
+    // Heart
+    out.values[5] = (q_heart * (c_arterial - cv_heart)) / v_heart
+
+    // Brain
+    out.values[6] = (q_brain * (c_arterial - cv_brain)) / v_brain
+
+    // Muscle
+    out.values[7] = (q_muscle * (c_arterial - cv_muscle)) / v_muscle
+
+    // Skin
+    out.values[8] = (q_skin * (c_arterial - cv_skin)) / v_skin
+
+    // Fat (adipose)
+    out.values[9] = (q_fat * (c_arterial - cv_fat)) / v_fat
+
+    // Spleen
+    out.values[10] = (q_spleen * (c_arterial - cv_spleen)) / v_spleen
+
+    // Bone
+    out.values[11] = (q_bone * (c_arterial - cv_bone)) / v_bone
+
+    // Rest of body
+    out.values[12] = (q_rest * (c_arterial - cv_rest)) / v_rest
+
+    // Plasma (venous): dC_plasma/dt = (Q_card * (C_venous - C_plasma)) / V_plasma
+    // In a full-body PBPK the plasma compartment tracks venous plasma
+    out.values[0] = (q_card * (c_venous - c_plasma / bp)) / v_plasma
+
+    out.n = 14
+}
+
+// ============================================================================
+// Built-in RHS: 2-Compartment Linear PK (system_id = 3)
+// y[0] = central, y[1] = peripheral
+// p[0] = ka (absorption, unused for IV), p[1] = ke, p[2] = k12, p[3] = k21
+// ============================================================================
+
+fn rhs_linear_2(
+    t: f64,
+    y: &EState,
+    p: &ODEParams,
+    out: &!EState
+) with Mut, Div, Panic {
+    let ke  = p.params[1]
+    let k12 = p.params[2]
+    let k21 = p.params[3]
+    out.values[0] = (0.0 - ke - k12) * y.values[0] + k21 * y.values[1]
+    out.values[1] = k12 * y.values[0] - k21 * y.values[1]
+    out.n = 2
+}
+
+// ============================================================================
+// Built-in RHS: 3-Compartment Linear PK (system_id = 4)
+// y[0] = central, y[1] = peripheral_fast, y[2] = peripheral_slow
+// p[0] = ka, p[1] = ke, p[2] = k12, p[3] = k21, p[4] = k13, p[5] = k31
+// ============================================================================
+
+fn rhs_linear_3(
+    t: f64,
+    y: &EState,
+    p: &ODEParams,
+    out: &!EState
+) with Mut, Div, Panic {
+    let ke  = p.params[1]
+    let k12 = p.params[2]
+    let k21 = p.params[3]
+    let k13 = p.params[4]
+    let k31 = p.params[5]
+    out.values[0] = (0.0 - ke - k12 - k13) * y.values[0] + k21 * y.values[1] + k31 * y.values[2]
+    out.values[1] = k12 * y.values[0] - k21 * y.values[1]
+    out.values[2] = k13 * y.values[0] - k31 * y.values[2]
+    out.n = 3
+}
+
+// ============================================================================
+// RHS Dispatch: routes system_id to the correct RHS function
+//
+// To add a user-defined system: add an `if sys.system_id == YOUR_ID` branch.
+// ============================================================================
+
+fn ode_rhs_dispatch(
+    sys: &ODESystem,
+    t: f64,
+    y: &EState,
+    p: &ODEParams,
+    out: &!EState
+) with Mut, Div, Panic {
+    if sys.system_id == 1 {
+        rhs_exp_decay(t, y, p, out)
+    } else if sys.system_id == 2 {
+        rhs_pbpk_14(t, y, p, out)
+    } else if sys.system_id == 3 {
+        rhs_linear_2(t, y, p, out)
+    } else if sys.system_id == 4 {
+        rhs_linear_3(t, y, p, out)
+    } else {
+        // Unknown system: zero derivatives (safe fallback)
+        out.n = y.n
+    }
+}
+
+// ============================================================================
+// Numerical Jacobian: df_i/dy_j via finite differences
+// Used for GUM uncertainty propagation through RK4 steps
+//
+// Returns Jacobian as flat array [64*64]: J[i*64+j] = df_i/dy_j
+// ============================================================================
+
+struct Jacobian {
+    // J[i*64 + j] = df_i / dy_j
+    data: [f64; 4096],
+    n: i64,
+}
+
+fn jacobian_new(n: i64) -> Jacobian {
+    Jacobian {
+        data: [0.0; 4096],
+        n: n,
+    }
+}
+
+// Compute numerical Jacobian df/dy at point (t, y) using central differences
+fn compute_jacobian_state(
+    sys: &ODESystem,
+    t: f64,
+    y: &EState,
+    p: &ODEParams,
+    jac: &!Jacobian,
+    n_evals: &!i64
+) with Mut, Div, Panic {
+    let n = sys.n_dims
+    let eps = 1.0e-7
+    var f_plus = estate_new(n)
+    var f_minus = estate_new(n)
+    var y_pert = estate_new(n)
+
+    var j = 0
+    while j < n {
+        if j < 64 {
+            // Perturb y[j] positively
+            var k = 0
+            while k < n {
+                if k < 64 {
+                    y_pert.values[k] = y.values[k]
+                }
+                k = k + 1
+            }
+            y_pert.n = n
+            let h = ode_max(eps * ode_abs(y.values[j]), eps)
+            y_pert.values[j] = y.values[j] + h
+
+            ode_rhs_dispatch(sys, t, &y_pert, p, &!f_plus)
+
+            // Perturb y[j] negatively
+            y_pert.values[j] = y.values[j] - h
+
+            ode_rhs_dispatch(sys, t, &y_pert, p, &!f_minus)
+
+            // Central difference: df_i/dy_j = (f+(i) - f-(i)) / (2h)
+            let inv_2h = 1.0 / (2.0 * h)
+            var i = 0
+            while i < n {
+                if i < 64 {
+                    jac.data[i * 64 + j] = (f_plus.values[i] - f_minus.values[i]) * inv_2h
+                }
+                i = i + 1
+            }
+            *n_evals = *n_evals + 2
+        }
+        j = j + 1
+    }
+    jac.n = n
+}
+
+// Compute parameter Jacobian df/dp at point (t, y) using central differences
+// Returns: J_p[i*64 + k] = df_i / dp_k
+fn compute_jacobian_params(
+    sys: &ODESystem,
+    t: f64,
+    y: &EState,
+    p: &ODEParams,
+    jac_p: &!Jacobian,
+    n_evals: &!i64
+) with Mut, Div, Panic {
+    let n = sys.n_dims
+    let np = p.n_params
+    let eps = 1.0e-7
+    var f_plus = estate_new(n)
+    var f_minus = estate_new(n)
+    var p_pert = ode_params_new()
+
+    var k = 0
+    while k < np {
+        if k < 64 {
+            // Copy params
+            var m = 0
+            while m < np {
+                if m < 64 {
+                    p_pert.params[m] = p.params[m]
+                    p_pert.param_variances[m] = p.param_variances[m]
+                }
+                m = m + 1
+            }
+            p_pert.n_params = np
+
+            let h = ode_max(eps * ode_abs(p.params[k]), eps)
+
+            // Perturb p[k] positively
+            p_pert.params[k] = p.params[k] + h
+            ode_rhs_dispatch(sys, t, y, &p_pert, &!f_plus)
+
+            // Perturb p[k] negatively
+            p_pert.params[k] = p.params[k] - h
+            ode_rhs_dispatch(sys, t, y, &p_pert, &!f_minus)
+
+            let inv_2h = 1.0 / (2.0 * h)
+            var i = 0
+            while i < n {
+                if i < 64 {
+                    jac_p.data[i * 64 + k] = (f_plus.values[i] - f_minus.values[i]) * inv_2h
+                }
+                i = i + 1
+            }
+            *n_evals = *n_evals + 2
+        }
+        k = k + 1
+    }
+    jac_p.n = n
+}
+
+// ============================================================================
+// GUM Variance Propagation
+//
+// After an RK4 step y_{n+1} = Phi(y_n, p, dt), propagate variance:
+//
+//   Var(y_{n+1,i}) = sum_j (dPhi_i/dy_j)^2 * Var(y_{n,j})
+//                  + sum_k (dPhi_i/dp_k)^2 * Var(p_k)
+//
+// For RK4, the sensitivity dPhi/dy ~ I + dt * J + O(dt^2)
+// We use the first-order approximation: dPhi_i/dy_j ~ delta_ij + dt * J_ij
+// This is the standard GUM law of propagation (JCGM 100:2008 eq. 10)
+// ============================================================================
+
+fn propagate_variance_gum(
+    sys: &ODESystem,
     t: f64,
     state: &!EState,
     p: &ODEParams,
-    dt: f64
+    dt: f64,
+    n_evals: &!i64
 ) with Mut, Div, Panic {
-    let n = state.n
+    let n = sys.n_dims
+    var jac = jacobian_new(n)
+    var jac_p = jacobian_new(n)
+
+    compute_jacobian_state(sys, t, state, p, &!jac, n_evals)
+    compute_jacobian_params(sys, t, state, p, &!jac_p, n_evals)
+
+    // new_var[i] = sum_j (delta_ij + dt*J_ij)^2 * var_y[j]
+    //            + sum_k (dt * Jp_ik)^2 * var_p[k]
+    var new_var: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < n {
+        if i < 64 {
+            var vi = 0.0
+
+            // State contribution
+            var j = 0
+            while j < n {
+                if j < 64 {
+                    let sensitivity = if i == j { 1.0 + dt * jac.data[i * 64 + j] } else { dt * jac.data[i * 64 + j] }
+                    vi = vi + sensitivity * sensitivity * state.variances[j]
+                }
+                j = j + 1
+            }
+
+            // Parameter contribution
+            var k = 0
+            while k < p.n_params {
+                if k < 64 {
+                    let sp = dt * jac_p.data[i * 64 + k]
+                    vi = vi + sp * sp * p.param_variances[k]
+                }
+                k = k + 1
+            }
+
+            new_var[i] = ode_max(vi, 0.0)
+        }
+        i = i + 1
+    }
+
+    // Write back
+    i = 0
+    while i < n {
+        if i < 64 {
+            state.variances[i] = new_var[i]
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// General-Purpose RK4 Step
+// ============================================================================
+
+fn rk4_step(
+    sys: &ODESystem,
+    t: f64,
+    state: &!EState,
+    p: &ODEParams,
+    dt: f64,
+    n_evals: &!i64
+) with Mut, Div, Panic {
+    let n = sys.n_dims
     var k1 = estate_new(n)
     var k2 = estate_new(n)
     var k3 = estate_new(n)
@@ -220,59 +833,174 @@ fn rk4_step_exp_decay(
     var tmp = estate_new(n)
 
     // k1 = f(t, y)
-    rhs_exp_decay(t, state, p, &!k1)
+    ode_rhs_dispatch(sys, t, state, p, &!k1)
+    *n_evals = *n_evals + 1
 
     // k2 = f(t + dt/2, y + dt/2 * k1)
-    var i = 0
-    while i < n {
-        if i < 64 {
-            tmp.values[i] = state.values[i] + 0.5 * dt * k1.values[i]
-        }
-        i = i + 1
-    }
-    tmp.n = n
-    rhs_exp_decay(t + 0.5 * dt, &tmp, p, &!k2)
+    estate_axpy(&!tmp, state, 0.5 * dt, &k1)
+    ode_rhs_dispatch(sys, t + 0.5 * dt, &tmp, p, &!k2)
+    *n_evals = *n_evals + 1
 
     // k3 = f(t + dt/2, y + dt/2 * k2)
-    i = 0
-    while i < n {
-        if i < 64 {
-            tmp.values[i] = state.values[i] + 0.5 * dt * k2.values[i]
-        }
-        i = i + 1
-    }
-    rhs_exp_decay(t + 0.5 * dt, &tmp, p, &!k3)
+    estate_axpy(&!tmp, state, 0.5 * dt, &k2)
+    ode_rhs_dispatch(sys, t + 0.5 * dt, &tmp, p, &!k3)
+    *n_evals = *n_evals + 1
 
     // k4 = f(t + dt, y + dt * k3)
-    i = 0
-    while i < n {
-        if i < 64 {
-            tmp.values[i] = state.values[i] + dt * k3.values[i]
-        }
-        i = i + 1
-    }
-    rhs_exp_decay(t + dt, &tmp, p, &!k4)
+    estate_axpy(&!tmp, state, dt, &k3)
+    ode_rhs_dispatch(sys, t + dt, &tmp, p, &!k4)
+    *n_evals = *n_evals + 1
 
-    // y_new = y + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
-    i = 0
+    // y_{n+1} = y_n + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+    var i = 0
     while i < n {
         if i < 64 {
             let dy = (k1.values[i] + 2.0 * k2.values[i] + 2.0 * k3.values[i] + k4.values[i]) / 6.0
             state.values[i] = state.values[i] + dt * dy
-
-            // Propagate variance: Var(y_new) ~ Var(y) + dt^2 * (dk/dy)^2 * Var(y) + dt^2 * (dk/dp)^2 * Var(p)
-            // For exponential decay: dk/dy = -k, dk/dp = -y
-            let k_val = p.params[0]
-            let dvar_state = dt * dt * k_val * k_val * state.variances[i]
-            let dvar_param = dt * dt * state.values[i] * state.values[i] * p.param_variances[0]
-            state.variances[i] = state.variances[i] + dvar_state + dvar_param
         }
         i = i + 1
     }
+
+    // GUM variance propagation through this step
+    propagate_variance_gum(sys, t, state, p, dt, n_evals)
 }
 
-// Solve exponential decay ODE with RK4
-fn solve_exp_decay(
+// ============================================================================
+// General-Purpose RK45 (Dormand-Prince) Adaptive Step
+//
+// Embedded 4th/5th order pair for local error estimation.
+// Step size control: dt_new = dt * min(5, max(0.2, 0.9 * (tol/err)^0.2))
+//
+// Butcher tableau (Dormand-Prince):
+//   c2=1/5, c3=3/10, c4=4/5, c5=8/9, c6=1, c7=1
+//   (coefficients inlined below)
+// ============================================================================
+
+fn rk45_step(
+    sys: &ODESystem,
+    t: f64,
+    state: &!EState,
+    p: &ODEParams,
+    dt: f64,
+    err_out: &!f64,
+    n_evals: &!i64
+) with Mut, Div, Panic {
+    let n = sys.n_dims
+    var k1 = estate_new(n)
+    var k2 = estate_new(n)
+    var k3 = estate_new(n)
+    var k4 = estate_new(n)
+    var k5 = estate_new(n)
+    var k6 = estate_new(n)
+    var tmp = estate_new(n)
+
+    // Stage 1
+    ode_rhs_dispatch(sys, t, state, p, &!k1)
+    *n_evals = *n_evals + 1
+
+    // Stage 2: t + dt/5, y + dt*(1/5)*k1
+    estate_axpy(&!tmp, state, dt * 0.2, &k1)
+    ode_rhs_dispatch(sys, t + 0.2 * dt, &tmp, p, &!k2)
+    *n_evals = *n_evals + 1
+
+    // Stage 3: t + 3dt/10, y + dt*(3/40*k1 + 9/40*k2)
+    var i = 0
+    while i < n {
+        if i < 64 {
+            tmp.values[i] = state.values[i] + dt * (0.075 * k1.values[i] + 0.225 * k2.values[i])
+        }
+        i = i + 1
+    }
+    ode_rhs_dispatch(sys, t + 0.3 * dt, &tmp, p, &!k3)
+    *n_evals = *n_evals + 1
+
+    // Stage 4: t + 4dt/5, y + dt*(44/45*k1 - 56/15*k2 + 32/9*k3)
+    i = 0
+    while i < n {
+        if i < 64 {
+            tmp.values[i] = state.values[i] + dt * (0.977777777777778 * k1.values[i]
+                            - 3.73333333333333 * k2.values[i]
+                            + 3.55555555555556 * k3.values[i])
+        }
+        i = i + 1
+    }
+    ode_rhs_dispatch(sys, t + 0.8 * dt, &tmp, p, &!k4)
+    *n_evals = *n_evals + 1
+
+    // Stage 5: t + 8dt/9
+    i = 0
+    while i < n {
+        if i < 64 {
+            tmp.values[i] = state.values[i] + dt * (2.95259868922420 * k1.values[i]
+                            - 11.5959564945227 * k2.values[i]
+                            + 9.82289285169509 * k3.values[i]
+                            - 0.290809327846365 * k4.values[i])
+        }
+        i = i + 1
+    }
+    ode_rhs_dispatch(sys, t + 0.888888888888889 * dt, &tmp, p, &!k5)
+    *n_evals = *n_evals + 1
+
+    // Stage 6: t + dt
+    i = 0
+    while i < n {
+        if i < 64 {
+            tmp.values[i] = state.values[i] + dt * (2.84627525252526 * k1.values[i]
+                            - 10.7575757575758 * k2.values[i]
+                            + 8.90642271774548 * k3.values[i]
+                            + 0.278001721790970 * k4.values[i]
+                            - 0.273076923076923 * k5.values[i])
+        }
+        i = i + 1
+    }
+    ode_rhs_dispatch(sys, t + dt, &tmp, p, &!k6)
+    *n_evals = *n_evals + 1
+
+    // 5th-order solution (used as the step)
+    // b5 = [142/1105, 0, 6570212/46116585, 22482/69174, 8028/28325, -8192/34125]
+    // DP 5th-order weights (FSAL not used here for simplicity)
+    i = 0
+    while i < n {
+        if i < 64 {
+            state.values[i] = state.values[i] + dt * (
+                0.0917194570135880 * k1.values[i]
+                + 0.449236298109796 * k3.values[i]
+                + 0.651489067543612 * k4.values[i]
+                - 0.322376179245283 * k5.values[i]
+                + 0.130888888888889 * k6.values[i])
+        }
+        i = i + 1
+    }
+
+    // Error estimate: difference between 4th and 5th order solutions
+    // e_i = dt * sum_j (b5_j - b4_j) * k_j[i]
+    // Error coefficients (b5 - b4):
+    //   e1 = 1/360, e3 = -128/4275, e4 = -2197/75240, e5 = 1/50, e6 = 2/55
+    var max_err = 0.0
+    i = 0
+    while i < n {
+        if i < 64 {
+            let ei = dt * ode_abs(
+                0.00277777777777778 * k1.values[i]
+                - 0.0299415204678363 * k3.values[i]
+                - 0.0291998936510851 * k4.values[i]
+                + 0.02 * k5.values[i]
+                + 0.0363636363636364 * k6.values[i])
+            let sci = ode_abs(state.values[i]) + 1.0e-10
+            let rel = ei / sci
+            if rel > max_err { max_err = rel }
+        }
+        i = i + 1
+    }
+    *err_out = max_err
+}
+
+// ============================================================================
+// General-Purpose Solve: Fixed-Step RK4
+// ============================================================================
+
+fn solve_ode(
+    sys: ODESystem,
     y0: EState,
     p: ODEParams,
     t_start: f64,
@@ -280,25 +1008,236 @@ fn solve_exp_decay(
     opts: SolverOptions
 ) -> ODESolution with Mut, Div, Panic {
     var state = y0
-    var sol = ode_solution_new(state.n)
+    state.n = sys.n_dims
+    var sol = ode_solution_new(sys.n_dims)
     var t = t_start
     var step = 0
+    var n_evals = 0
 
     solution_record(&!sol, t, &state)
 
     while t < t_end && step < opts.max_steps {
         let dt = ode_min(opts.dt, t_end - t)
-        rk4_step_exp_decay(t, &!state, &p, dt)
-        t = t + dt
-        step = step + 1
-        solution_record(&!sol, t, &state)
+        if dt <= 0.0 { t = t_end }
+        else {
+            rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
+            t = t + dt
+            step = step + 1
+            solution_record(&!sol, t, &state)
+        }
     }
 
+    sol.n_rhs_evals = n_evals
     sol
 }
 
 // ============================================================================
-// Error assessment
+// General-Purpose Solve: Adaptive RK45 (Dormand-Prince)
+// ============================================================================
+
+fn solve_ode_adaptive(
+    sys: ODESystem,
+    y0: EState,
+    p: ODEParams,
+    t_start: f64,
+    t_end: f64,
+    opts: SolverOptions
+) -> ODESolution with Mut, Div, Panic {
+    var state = y0
+    state.n = sys.n_dims
+    var sol = ode_solution_new(sys.n_dims)
+    var t = t_start
+    var dt = opts.dt
+    var step = 0
+    var n_evals = 0
+    var n_rejected = 0
+
+    solution_record(&!sol, t, &state)
+
+    while t < t_end && step < opts.max_steps {
+        dt = ode_min(dt, t_end - t)
+        if dt <= 1.0e-15 { t = t_end }
+        else {
+            // Save state in case we reject
+            var saved = estate_new(sys.n_dims)
+            estate_copy(&!saved, &state)
+
+            var err = 0.0
+            rk45_step(&sys, t, &!state, &p, dt, &!err, &!n_evals)
+
+            let tol = opts.atol + opts.rtol * err
+            if err <= opts.rtol || dt <= 1.0e-12 {
+                // Accept step — propagate variance
+                propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
+                t = t + dt
+                step = step + 1
+                solution_record(&!sol, t, &state)
+
+                // Grow step size
+                if err > 1.0e-20 {
+                    let factor = ode_min(5.0, 0.9 * ode_pow_fifth(opts.rtol / err))
+                    dt = dt * ode_max(0.2, factor)
+                } else {
+                    dt = dt * 5.0
+                }
+            } else {
+                // Reject step — restore state and shrink dt
+                estate_copy(&!state, &saved)
+                let factor = ode_max(0.2, 0.9 * ode_pow_fifth(opts.rtol / err))
+                dt = dt * factor
+                n_rejected = n_rejected + 1
+            }
+        }
+    }
+
+    sol.n_rhs_evals = n_evals
+    sol.n_rejected = n_rejected
+    sol
+}
+
+// (tol/err)^0.2 = (tol/err)^(1/5) — via Newton's method for x^5 = ratio
+fn ode_pow_fifth(ratio: f64) -> f64 with Mut, Div, Panic {
+    if ratio <= 0.0 { return 0.2 }
+    // Initial guess
+    var x = 1.0
+    if ratio > 1.0 { x = ratio }
+    if ratio < 1.0 { x = ratio }
+    // Newton iterations for x^5 = ratio: x_{n+1} = x - (x^5 - ratio) / (5*x^4)
+    var iter = 0
+    while iter < 20 {
+        let x2 = x * x
+        let x4 = x2 * x2
+        let x5 = x4 * x
+        let f = x5 - ratio
+        let fp = 5.0 * x4
+        if fp > 1.0e-30 {
+            x = x - f / fp
+        }
+        if x < 1.0e-10 { x = 1.0e-10 }
+        iter = iter + 1
+    }
+    x
+}
+
+// ============================================================================
+// Convenience: Solve Exponential Decay (backward-compatible API)
+// ============================================================================
+
+fn solve_exp_decay(
+    y0: EState,
+    p: ODEParams,
+    t_start: f64,
+    t_end: f64,
+    opts: SolverOptions
+) -> ODESolution with Mut, Div, Panic {
+    // Migrate old 16-param ODEParams to 64-param
+    var p64 = ode_params_new()
+    var i = 0
+    while i < 16 {
+        p64.params[i] = p.params[i]
+        p64.param_variances[i] = p.param_variances[i]
+        i = i + 1
+    }
+    p64.n_params = p.n_params
+
+    let sys = ode_system_exp_decay()
+    solve_ode(sys, y0, p64, t_start, t_end, opts)
+}
+
+// ============================================================================
+// PBPK 14-Compartment Default Parameters (Rapamycin / CYP3A4)
+//
+// Sources:
+//   - Emoto et al. (2013) Drug Metab Dispos 41:1667-74 (rapamycin PK)
+//   - Rodgers & Rowland (2006) J Pharm Sci 95:1238-57 (Kp predictions)
+//   - Brown et al. (1997) Toxicol Ind Health 13:407-84 (human physiology)
+//   - ICRP Publication 89 (2002) (reference organ volumes and flows)
+// ============================================================================
+
+fn pbpk_14_default_params() -> ODEParams with Mut {
+    var p = ode_params_new()
+
+    // Cardiac output and plasma volume (70 kg human)
+    // p[0] = Q_cardiac (L/h), p[1] = V_plasma (L)
+    ode_params_set(&!p, 0, 348.0, 34.8 * 34.8)     // Q_cardiac +-10% CV
+    ode_params_set(&!p, 1, 3.0, 0.09)                // V_plasma +-10%
+
+    // Blood flows (L/h) — fractions of cardiac output
+    ode_params_set(&!p, 2, 80.5, 64.8)    // Q_liver (hepatic artery + portal)
+    ode_params_set(&!p, 3, 62.6, 39.3)    // Q_gut
+    ode_params_set(&!p, 4, 69.6, 48.4)    // Q_kidney
+    ode_params_set(&!p, 5, 348.0, 1211.0) // Q_lung = Q_cardiac
+    ode_params_set(&!p, 6, 17.4, 3.0)     // Q_heart
+    ode_params_set(&!p, 7, 46.6, 21.7)    // Q_brain
+    ode_params_set(&!p, 8, 52.2, 27.2)    // Q_muscle
+    ode_params_set(&!p, 9, 17.4, 3.0)     // Q_skin
+    ode_params_set(&!p, 10, 18.3, 3.3)    // Q_fat
+    ode_params_set(&!p, 11, 10.4, 1.1)    // Q_spleen
+    ode_params_set(&!p, 12, 17.4, 3.0)    // Q_bone
+    ode_params_set(&!p, 13, 17.4, 3.0)    // Q_rest
+
+    // Tissue volumes (L) — ICRP 89
+    ode_params_set(&!p, 14, 1.50, 0.0225) // V_liver
+    ode_params_set(&!p, 15, 1.20, 0.0144) // V_gut
+    ode_params_set(&!p, 16, 0.31, 0.0010) // V_kidney
+    ode_params_set(&!p, 17, 0.50, 0.0025) // V_lung
+    ode_params_set(&!p, 18, 0.33, 0.0011) // V_heart
+    ode_params_set(&!p, 19, 1.40, 0.0196) // V_brain
+    ode_params_set(&!p, 20, 29.0, 8.41)   // V_muscle
+    ode_params_set(&!p, 21, 3.30, 1.09)   // V_skin
+    ode_params_set(&!p, 22, 14.5, 21.0)   // V_fat
+    ode_params_set(&!p, 23, 0.15, 0.0002) // V_spleen
+    ode_params_set(&!p, 24, 4.00, 1.60)   // V_bone
+    ode_params_set(&!p, 25, 5.30, 2.81)   // V_rest
+
+    // Partition coefficients (Kp) — Rodgers-Rowland for rapamycin (lipophilic, logP~4.3)
+    ode_params_set(&!p, 26, 5.00, 2.50)   // Kp_liver
+    ode_params_set(&!p, 27, 3.00, 0.90)   // Kp_gut
+    ode_params_set(&!p, 28, 3.50, 1.22)   // Kp_kidney
+    ode_params_set(&!p, 29, 1.20, 0.14)   // Kp_lung
+    ode_params_set(&!p, 30, 2.00, 0.40)   // Kp_heart
+    ode_params_set(&!p, 31, 1.50, 0.22)   // Kp_brain
+    ode_params_set(&!p, 32, 1.80, 0.32)   // Kp_muscle
+    ode_params_set(&!p, 33, 2.50, 0.62)   // Kp_skin
+    ode_params_set(&!p, 34, 12.0, 14.4)   // Kp_fat (highly lipophilic)
+    ode_params_set(&!p, 35, 2.00, 0.40)   // Kp_spleen
+    ode_params_set(&!p, 36, 1.50, 0.22)   // Kp_bone
+    ode_params_set(&!p, 37, 2.00, 0.40)   // Kp_rest
+
+    // Clearance (L/h)
+    ode_params_set(&!p, 38, 10.2, 10.4)   // CL_hepatic (CYP3A4-mediated)
+    ode_params_set(&!p, 39, 1.20, 0.14)   // CL_renal
+
+    // Absorption and binding
+    ode_params_set(&!p, 40, 0.80, 0.064)  // ka (oral absorption rate, 1/h)
+    ode_params_set(&!p, 41, 0.27, 0.0073) // F_oral (oral bioavailability ~27%)
+    ode_params_set(&!p, 42, 0.075, 0.0006) // fu_plasma (fraction unbound ~7.5%)
+    ode_params_set(&!p, 43, 1.36, 0.018)  // BP_ratio (blood:plasma)
+
+    p
+}
+
+// Initial state for oral dosing of rapamycin
+fn pbpk_14_oral_dose(dose_mg: f64, dose_var: f64) -> EState with Mut {
+    var state = estate_new(14)
+    // All tissue concentrations start at 0
+    // Drug amount goes into gut lumen (compartment 13)
+    estate_set(&!state, 13, dose_mg, dose_var)
+    state
+}
+
+// Initial state for IV bolus of rapamycin
+fn pbpk_14_iv_dose(dose_mg: f64, dose_var: f64, v_plasma: f64) -> EState with Mut, Div, Panic {
+    var state = estate_new(14)
+    // IV: drug goes directly into plasma
+    let c0 = dose_mg / v_plasma
+    let c0_var = dose_var / (v_plasma * v_plasma)
+    estate_set(&!state, 0, c0, c0_var)
+    state
+}
+
+// ============================================================================
+// Error Assessment
 // ============================================================================
 
 struct ErrorAssessment {
@@ -336,4 +1275,54 @@ fn assess_error(sol: &ODESolution, dim: i64) -> ErrorAssessment with Mut, Div, P
         total_accumulated_error: ode_abs(var_end - var_start),
         uncertainty_growth_rate: growth,
     }
+}
+
+// ============================================================================
+// Uncertainty Budget Summary
+// For each dimension, compute: initial std, final std, growth ratio
+// ISO GUM compliant uncertainty budget (JCGM 100:2008 §8)
+// ============================================================================
+
+struct UncertaintyBudget {
+    dim_std_initial: [f64; 14],
+    dim_std_final: [f64; 14],
+    dim_growth_ratio: [f64; 14],
+    n_dims: i64,
+    max_growth_dim: i64,
+    max_growth_ratio: f64,
+}
+
+fn compute_uncertainty_budget(sol: &ODESolution) -> UncertaintyBudget with Mut, Div, Panic {
+    var budget = UncertaintyBudget {
+        dim_std_initial: [0.0; 14],
+        dim_std_final: [0.0; 14],
+        dim_growth_ratio: [0.0; 14],
+        n_dims: sol.n_dims,
+        max_growth_dim: 0,
+        max_growth_ratio: 0.0,
+    }
+
+    if sol.n_steps < 1 { return budget }
+
+    let last = sol.n_steps - 1
+    var i = 0
+    while i < sol.n_dims {
+        if i < 14 {
+            let v0 = solution_get_variance(sol, 0, i)
+            let vf = solution_get_variance(sol, last, i)
+            let s0 = ode_sqrt(v0)
+            let sf = ode_sqrt(vf)
+            budget.dim_std_initial[i] = s0
+            budget.dim_std_final[i] = sf
+            let ratio = if s0 > 1.0e-20 { sf / s0 } else { if sf > 1.0e-20 { 1.0e10 } else { 1.0 } }
+            budget.dim_growth_ratio[i] = ratio
+            if ratio > budget.max_growth_ratio {
+                budget.max_growth_ratio = ratio
+                budget.max_growth_dim = i
+            }
+        }
+        i = i + 1
+    }
+
+    budget
 }

@@ -34,8 +34,10 @@ var TRAMP_OFF: i64 = 0
 // ELF/PE output
 var ELF: [i8; 262144] = [0; 262144]
 
-// Target OS: 0=linux (default), 3=windows
+// Target OS: 0=linux (default), 2=macos, 3=windows
 var TARGET_OS: i64 = 0
+// Target arch: 0=x86_64 (default), 1=aarch64
+var TARGET_ARCH: i64 = 0
 // PE: offset within CD[] of the ExitProcess call [rip+disp32]'s disp32 field
 var PE_EXIT_CALL_OFF: i64 = -1
 
@@ -226,6 +228,105 @@ fn sb(i: i64) -> i64 with Panic { if i >= 0 && i < SRC_LEN { return SRC[i as usi
 fn em(b: i64) with Mut { if CL < 262144 { CD[CL as usize] = b as i8; CL = CL + 1 } }
 fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xFF); em((v >> 24) & 0xFF) }
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
+
+// Write 32-bit value at arbitrary offset in CD[] (for ARM64 branch patching)
+fn em32_at(off: i64, v: i64) with Mut, Panic {
+    CD[off as usize] = (v & 0xFF) as i8
+    CD[(off + 1) as usize] = ((v >> 8) & 0xFF) as i8
+    CD[(off + 2) as usize] = ((v >> 16) & 0xFF) as i8
+    CD[(off + 3) as usize] = ((v >> 24) & 0xFF) as i8
+}
+
+// Read 32-bit value from CD[] (for ARM64 branch patching)
+fn rd32_at(off: i64) -> i64 with Panic {
+    return (CD[off as usize] as i64 & 0xFF) |
+           ((CD[(off + 1) as usize] as i64 & 0xFF) << 8) |
+           ((CD[(off + 2) as usize] as i64 & 0xFF) << 16) |
+           ((CD[(off + 3) as usize] as i64 & 0xFF) << 24)
+}
+
+// ─── ARM64 emit helpers ───
+fn emit_load_var_a64(slot: i64) with Mut, Panic {
+    let off = slot * 8
+    if off <= 4095 {
+        // sub x9, x29, #off
+        em32(0xD1000000 | (off << 10) | (29 << 5) | 9)
+    } else {
+        // movz x9, #off (off <= 32768 for 512 slots)
+        em32(0xD2800000 | ((off & 0xFFFF) << 5) | 9)
+        // sub x9, x29, x9
+        em32(0xCB090000 | (29 << 5) | 9)
+    }
+    // ldr x0, [x9]
+    em32(0xF9400120)
+}
+
+fn emit_store_var_a64(slot: i64) with Mut, Panic {
+    let off = slot * 8
+    if off <= 4095 {
+        em32(0xD1000000 | (off << 10) | (29 << 5) | 9)
+    } else {
+        em32(0xD2800000 | ((off & 0xFFFF) << 5) | 9)
+        em32(0xCB090000 | (29 << 5) | 9)
+    }
+    // str x0, [x9]
+    em32(0xF9000120)
+}
+
+fn emit_push_a64() with Mut { em32(0xF81F0FE0) }  // str x0, [sp, #-16]!
+
+fn emit_pop_x1_a64() with Mut { em32(0xF8410FE1) }  // ldr x1, [sp], #16
+
+// Load 64-bit immediate into x0 via movz/movk chain
+fn emit_imm64_a64(v: i64) with Mut {
+    let v0 = v & 0xFFFF
+    let v1 = (v >> 16) & 0xFFFF
+    let v2 = (v >> 32) & 0xFFFF
+    let v3 = (v >> 48) & 0xFFFF
+    // movz x0, #v0
+    em32(0xD2800000 | (v0 << 5))
+    if v1 != 0 { em32(0xF2A00000 | (v1 << 5)) }        // movk x0, #v1, lsl #16
+    if v2 != 0 { em32(0xF2C00000 | (v2 << 5)) }        // movk x0, #v2, lsl #32
+    if v3 != 0 { em32(0xF2E00000 | (v3 << 5)) }        // movk x0, #v3, lsl #48
+}
+
+// Load 64-bit immediate into arbitrary register
+fn emit_imm64_reg_a64(rd: i64, v: i64) with Mut {
+    let v0 = v & 0xFFFF
+    let v1 = (v >> 16) & 0xFFFF
+    let v2 = (v >> 32) & 0xFFFF
+    let v3 = (v >> 48) & 0xFFFF
+    em32(0xD2800000 | (v0 << 5) | rd)
+    if v1 != 0 { em32(0xF2A00000 | (v1 << 5) | rd) }
+    if v2 != 0 { em32(0xF2C00000 | (v2 << 5) | rd) }
+    if v3 != 0 { em32(0xF2E00000 | (v3 << 5) | rd) }
+}
+
+// Patch ARM64 branch instruction at off to jump to target
+fn patch_branch_a64(off: i64, target: i64) with Mut, Panic {
+    let rel = (target - off) / 4
+    let insn = rd32_at(off)
+    let top = (insn >> 24) & 0xFF
+    if top == 0x14 || top == 0x94 || top == 0x17 || top == 0x97 {
+        // B or BL: 26-bit offset in bits [25:0]
+        em32_at(off, (insn & 0xFC000000) | (rel & 0x3FFFFFF))
+    } else {
+        // B.cond / CBZ / CBNZ: 19-bit offset in bits [23:5]
+        em32_at(off, (insn & 0xFF00001F) | ((rel & 0x7FFFF) << 5))
+    }
+}
+
+// ARM64 address-of variable: lea x0, [x29 - slot*8]
+fn emit_lea_var_a64(slot: i64) with Mut, Panic {
+    let off = slot * 8
+    if off <= 4095 {
+        // sub x0, x29, #off
+        em32(0xD1000000 | (off << 10) | (29 << 5) | 0)
+    } else {
+        em32(0xD2800000 | ((off & 0xFFFF) << 5) | 0)
+        em32(0xCB000000 | (29 << 5) | 0)  // sub x0, x29, x0
+    }
+}
 
 fn src_match(p: i64, l: i64, kw: string) -> bool with Panic {
     if l != str_len(kw) { return false }
@@ -3425,6 +3526,1584 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     return 0
 }
 
+// ═══ ARM64 (AArch64) Backend ═══
+
+// ─── ARM64 syscall helper ───
+fn emit_syscall_a64() with Mut {
+    if TARGET_OS == 2 {
+        em32(0xD4001001)  // svc #0x80 (macOS)
+    } else {
+        em32(0xD4000001)  // svc #0 (Linux)
+    }
+}
+
+// ─── ARM64 print("string") ───
+fn emit_print_a64(tok: i64) with Mut, Panic, Div {
+    let ss = TS[tok as usize] + 1
+    let se = TE[tok as usize] - 1
+    var slen: i64 = 0
+    var zi: i64 = 0
+    while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
+    var si: i64 = ss
+    while si < se {
+        let c = sb(si)
+        var byte: i64 = c
+        if c == 92 && si + 1 < se {
+            let c2 = sb(si + 1)
+            if c2 == 110 { byte = 10 }
+            else if c2 == 116 { byte = 9 }
+            else if c2 == 48 { byte = 0 }
+            else { byte = c2 }
+            si = si + 2
+        } else { si = si + 1 }
+        SQW[slen as usize] = byte
+        slen = slen + 1
+    }
+    // Emit: b skip; string_bytes (4-byte padded); skip: adr x1, -(pad_len); ...
+    let pad_len = (slen + 3) / 4 * 4
+    // b skip: offset = 1 + pad_len/4 instructions
+    let b_off = 1 + pad_len / 4
+    em32(0x14000000 | (b_off & 0x3FFFFFF))
+    let str_start = CL
+    // Emit string bytes
+    var bi: i64 = 0
+    while bi < pad_len {
+        if bi < slen { em(SQW[bi as usize] & 0xFF) }
+        else { em(0) }
+        bi = bi + 1
+    }
+    // skip: adr x1, -(pad_len) — point back at string data
+    let adr_off = 0 - pad_len
+    let adr_immlo = adr_off & 3
+    let adr_immhi = (adr_off >> 2) & 0x7FFFF
+    em32(0x10000000 | ((adr_immlo & 0x3) << 29) | ((adr_immhi & 0x7FFFF) << 5) | 1)
+    // mov x0, #1 (stdout fd)
+    em32(0xD2800020)  // movz x0, #1
+    // mov x2, #slen
+    em32(0xD2800000 | ((slen & 0xFFFF) << 5) | 2)  // movz x2, #slen
+    // syscall: write
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000004)  // x16 = write syscall (macOS)
+    } else {
+        em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)  // movz x8, #64 (Linux write)
+    }
+    emit_syscall_a64()
+}
+
+// ─── ARM64 print_int ───
+fn emit_print_int_a64() with Mut {
+    // x0 = value to print
+    // sub sp, sp, #64 for scratch buffer
+    em32(0xD1000000 | (64 << 10) | (31 << 5) | 31)  // sub sp, sp, #64
+    // store '\n' at sp+63
+    em32(0xD2800140 | 10)  // movz x10, #10
+    em32(0x39000000 | (63 << 10) | (31 << 5) | 10)  // strb w10, [sp, #63]
+    // x9 = sp + 62 (current write position)
+    em32(0x91000000 | (62 << 10) | (31 << 5) | 9)   // add x9, sp, #62
+    // x11 = 0 (negative flag)
+    em32(0xD2800000 | 11)  // movz x11, #0
+    // Check if negative: cmp x0, #0; b.ge skip_neg
+    em32(0xF100001F)  // cmp x0, #0
+    em32(0x5400000A | (2 << 5))  // b.ge +2 instructions (skip neg)
+    // neg x0, x0
+    em32(0xCB0003E0)
+    // x11 = 1
+    em32(0xD2800020 | 11)  // movz x11, #1
+    // div loop: x10 = 10 divisor
+    em32(0xD2800140 | 10)  // movz x10, #10
+    let loop_top = CL
+    // sdiv x12, x0, x10
+    em32(0x9AC00C00 | (10 << 16) | (0 << 5) | 12)   // sdiv x12, x0, x10
+    // msub x13, x12, x10, x0  (x13 = x0 - x12*x10 = remainder)
+    em32(0x9B000000 | (10 << 16) | (0 << 10) | (12 << 5) | 13)  // msub x13, x12, x10, x0
+    // add x13, x13, #48 ('0')
+    em32(0x91000000 | (48 << 10) | (13 << 5) | 13)
+    // strb w13, [x9, #0]
+    em32(0x39000000 | (0 << 10) | (9 << 5) | 13)
+    // x9 = x9 - 1
+    em32(0xD1000000 | (1 << 10) | (9 << 5) | 9)
+    // x0 = x12 (quotient)
+    em32(0xAA0C03E0)  // mov x0, x12
+    // cbnz x0, loop_top
+    let rel = (loop_top - CL) / 4
+    em32(0xB5000000 | ((rel & 0x7FFFF) << 5) | 0)
+    // If negative, store '-'
+    // cbz x11, skip_minus
+    em32(0xB4000000 | (3 << 5) | 11)  // cbz x11, +3 instructions
+    em32(0xD2800000 | (45 << 5) | 13)  // movz x13, #45 ('-')
+    em32(0x39000000 | (0 << 10) | (9 << 5) | 13)  // strb w13, [x9]
+    em32(0xD1000000 | (1 << 10) | (9 << 5) | 9)   // x9 = x9 - 1
+    // x1 = x9 + 1 (start of string)
+    em32(0x91000000 | (1 << 10) | (9 << 5) | 1)    // add x1, x9, #1
+    // x2 = sp + 64 - x1 (length)
+    em32(0x91000000 | (64 << 10) | (31 << 5) | 2)  // add x2, sp, #64
+    em32(0xCB010042)                                  // sub x2, x2, x1
+    // write(1, x1, x2)
+    em32(0xD2800020)  // movz x0, #1 (fd=stdout)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000004)
+    } else {
+        em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)  // movz x8, #64 (Linux write)
+    }
+    emit_syscall_a64()
+    // add sp, sp, #64
+    em32(0x91000000 | (64 << 10) | (31 << 5) | 31)
+}
+
+// ─── ARM64 print_f64 (stub — prints integer part only) ───
+fn emit_print_f64_a64() with Mut {
+    // x0 = f64 bits. Convert to integer part, print that.
+    em32(0x9E670000)  // fmov d0, x0
+    em32(0x9E780000)  // fcvtzs x0, d0
+    emit_print_int_a64()
+}
+
+// ─── ARM64 read_file ───
+fn emit_read_file_a64() with Mut {
+    // x0 = path (C string pointer)
+    emit_push_a64()
+    if TARGET_OS == 2 {
+        // macOS: open(path, O_RDONLY=0)
+        em32(0xD2800001)  // movz x1, #0
+        emit_imm64_reg_a64(16, 0x2000005)  // x16 = SYS_open
+    } else {
+        // Linux: openat(AT_FDCWD=-100, path, O_RDONLY=0)
+        em32(0xAA0003E1)  // mov x1, x0
+        emit_imm64_reg_a64(0, -100)  // x0 = AT_FDCWD
+        em32(0xD2800002)  // movz x2, #0
+        em32(0xD2800000 | ((56 & 0xFFFF) << 5) | 8)  // movz x8, #56
+    }
+    emit_syscall_a64()
+    // x0 = fd. Push it.
+    emit_push_a64()
+    // mmap(NULL, 4MB, 3, 0x22, -1, 0)
+    em32(0xD2800000)  // x0 = NULL
+    emit_imm64_reg_a64(1, 0x400000)  // x1 = 4MB
+    em32(0xD2800060 | 2)  // x2 = 3
+    em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)  // x3 = 0x22
+    emit_imm64_reg_a64(4, -1)  // x4 = -1
+    em32(0xD2800005)  // x5 = 0
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x20000C5)
+    } else {
+        em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8)  // x8 = 222 (mmap)
+    }
+    emit_syscall_a64()
+    // x0 = buf. Push it.
+    emit_push_a64()
+    // read(fd, buf, 4MB): x0=fd, x1=buf, x2=len
+    em32(0xAA0003E1)  // mov x1, x0 (buf)
+    em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #16] (fd)
+    emit_imm64_reg_a64(2, 0x400000)  // x2 = 4MB
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000003)
+    } else {
+        em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // x8 = 63 (read)
+    }
+    emit_syscall_a64()
+    // close(fd)
+    em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #16]
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000006)
+    } else {
+        em32(0xD2800000 | ((57 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    // Return buf
+    em32(0xF8410FE0)  // ldr x0, [sp], #16 (pop buf)
+    em32(0x91000000 | (16 << 10) | (31 << 5) | 31)  // add sp, sp, #16 (discard fd)
+}
+
+// ─── ARM64 write_file ───
+fn emit_write_file_a64() with Mut {
+    // On entry: stack=[buf, path] (path pushed first, buf second), x0=len
+    em32(0xAA0003E4)  // mov x4, x0 (save len)
+    em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 5)  // ldr x5, [sp, #16] (path)
+    em32(0xF9400000 | ((0/8) << 10) | (31 << 5) | 6)   // ldr x6, [sp, #0] (buf)
+    em32(0x91000000 | (32 << 10) | (31 << 5) | 31)      // add sp, sp, #32
+    // open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
+    em32(0xAA0503E0)  // mov x0, x5 (path)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(1, 0x601)
+        em32(0xD2800000 | ((0x1A4 & 0xFFFF) << 5) | 2)
+        emit_imm64_reg_a64(16, 0x2000005)
+    } else {
+        em32(0xAA0003E1)  // mov x1, x0
+        emit_imm64_reg_a64(0, -100)
+        emit_imm64_reg_a64(2, 0x241)
+        em32(0xD2800000 | ((0x1A4 & 0xFFFF) << 5) | 3)
+        em32(0xD2800000 | ((56 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    em32(0xAA0003E7)  // mov x7, x0 (save fd)
+    // write(fd, buf, len)
+    em32(0xAA0603E1)  // mov x1, x6
+    em32(0xAA0403E2)  // mov x2, x4
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000004)
+    } else {
+        em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    // close(fd)
+    em32(0xAA0703E0)  // mov x0, x7
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000006)
+    } else {
+        em32(0xD2800000 | ((57 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    em32(0xD2800020)  // movz x0, #1 (return 1)
+}
+
+// ─── ARM64 file_size ───
+fn emit_file_size_a64() with Mut {
+    // x0 = path
+    if TARGET_OS == 2 {
+        em32(0xD2800001)
+        emit_imm64_reg_a64(16, 0x2000005)
+    } else {
+        em32(0xAA0003E1)
+        emit_imm64_reg_a64(0, -100)
+        em32(0xD2800002)
+        em32(0xD2800000 | ((56 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    emit_push_a64()  // save fd
+    em32(0xD1000000 | (144 << 10) | (31 << 5) | 31)  // sub sp, sp, #144
+    em32(0x910003E1)  // mov x1, sp
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000153)
+    } else {
+        em32(0xD2800000 | ((80 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    em32(0xF9400000 | ((48/8) << 10) | (31 << 5) | 9)  // ldr x9, [sp, #48]
+    em32(0x91000000 | (144 << 10) | (31 << 5) | 31)     // add sp, sp, #144
+    em32(0xF8410FE0)  // pop fd
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000006)
+    } else {
+        em32(0xD2800000 | ((57 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    em32(0xAA0903E0)  // mov x0, x9
+}
+
+// ─── ARM64 arg_count ───
+fn emit_arg_count_a64() with Mut {
+    let argc_addr = GL_BSS_BASE - 16
+    emit_imm64_a64(argc_addr)
+    em32(0xF9400000)  // ldr x0, [x0]
+}
+
+// ─── ARM64 get_arg ───
+fn emit_get_arg_a64() with Mut {
+    let argv_addr = GL_BSS_BASE - 8
+    em32(0xAA0003E9)  // mov x9, x0
+    emit_imm64_a64(argv_addr)
+    em32(0xF9400000)  // ldr x0, [x0]
+    em32(0xF8697800)  // ldr x0, [x0, x9, lsl #3]
+}
+
+// ─── ARM64 str_len ───
+fn emit_str_len_a64() with Mut {
+    em32(0xAA0003E9)  // mov x9, x0
+    em32(0xD2800000)  // movz x0, #0
+    let top = CL
+    em32(0x38606920 | 10)  // ldrb w10, [x9, x0]
+    em32(0x34000000 | (3 << 5) | 10)  // cbz w10, +3
+    em32(0x91000400)  // add x0, x0, #1
+    let brel = (top - CL) / 4
+    em32(0x14000000 | (brel & 0x3FFFFFF))
+}
+
+// ─── ARM64 f64 binary op helper ───
+fn emit_f64_binop_a64(opcode: i64) with Mut {
+    em32(0x9E670020)  // fmov d0, x1 (LHS)
+    em32(0x9E670001)  // fmov d1, x0 (RHS)
+    em32(opcode)       // f64 op d0, d0, d1
+    em32(0x9E660000)  // fmov x0, d0
+}
+
+// ─── ARM64 expression compiler ───
+fn compile_primary_a64() with IO, Mut, Panic, Div {
+    LAST_EXPR_IS_CLOSURE = 0
+    LAST_EXPR_IS_LINEAR = 0
+    let k = TK[EP as usize]
+    // Integer literal
+    if k == 4 {
+        let v = TV[EP as usize]
+        if v == 0 { em32(0xD2800000) }
+        else { emit_imm64_a64(v) }
+        EP = EP + 1
+        EXPR_IS_F64 = 0
+        return
+    }
+    // true/false
+    if k == 35 { em32(0xD2800020); EP = EP + 1; EXPR_IS_F64 = 0; return }
+    if k == 36 { em32(0xD2800000); EP = EP + 1; EXPR_IS_F64 = 0; return }
+    // Float literal
+    if k == 53 {
+        let fl_int = TV[EP as usize]
+        let fl_frac = TF[EP as usize]
+        let fl_denom = TD[EP as usize]
+        EP = EP + 1
+        emit_imm64_a64(fl_int)
+        em32(0x9E620000)  // scvtf d0, x0
+        if fl_frac > 0 {
+            emit_imm64_a64(fl_frac)
+            em32(0x9E620001)  // scvtf d1, x0
+            emit_imm64_a64(fl_denom)
+            em32(0x9E620002)  // scvtf d2, x0
+            em32(0x1E601800 | (2 << 16) | (1 << 5) | 1)  // fdiv d1, d1, d2
+            em32(0x1E612800)  // fadd d0, d0, d1
+        }
+        em32(0x9E660000)  // fmov x0, d0
+        EXPR_IS_F64 = 1
+        return
+    }
+    // Closure stub
+    if k == 45 {
+        EP = EP + 1
+        while TK[EP as usize] != 45 && TK[EP as usize] != 0 { EP = EP + 1 }
+        if TK[EP as usize] == 45 { EP = EP + 1 }
+        if TK[EP as usize] == 8 {
+            EP = EP + 1
+            var cd: i64 = 1
+            while EP < TC && cd > 0 { if TK[EP as usize] == 8 { cd = cd + 1 }; if TK[EP as usize] == 9 { cd = cd - 1 }; EP = EP + 1 }
+        } else { EP = EP + 1 }
+        em32(0xD2800000)
+        EXPR_IS_F64 = 0
+        LAST_EXPR_IS_CLOSURE = 1
+        return
+    }
+    // None
+    if k == 58 {
+        EP = EP + 1
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 2
+        em32(0xD2800000)
+        emit_store_var_a64(base)
+        emit_store_var_a64(base + 1)
+        emit_lea_var_a64(base + 1)
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Some(expr)
+    if k == 57 {
+        EP = EP + 1
+        if TK[EP as usize] == 6 { EP = EP + 1 }
+        compile_or_a64()
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 2
+        emit_store_var_a64(base)
+        emit_imm64_a64(1)
+        emit_store_var_a64(base + 1)
+        emit_lea_var_a64(base + 1)
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Ok(expr)
+    if k == 59 {
+        EP = EP + 1
+        if TK[EP as usize] == 6 { EP = EP + 1 }
+        compile_or_a64()
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 2
+        emit_store_var_a64(base)
+        em32(0xD2800000)
+        emit_store_var_a64(base + 1)
+        emit_lea_var_a64(base + 1)
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Err(expr)
+    if k == 60 {
+        EP = EP + 1
+        if TK[EP as usize] == 6 { EP = EP + 1 }
+        compile_or_a64()
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 2
+        emit_store_var_a64(base)
+        emit_imm64_a64(1)
+        emit_store_var_a64(base + 1)
+        emit_lea_var_a64(base + 1)
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Parenthesized
+    if k == 6 { EP = EP + 1; compile_or_a64(); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+    // Address-of
+    if k == 44 {
+        EP = EP + 1
+        if TK[EP as usize] == 32 { EP = EP + 1 }
+        let rns = TS[EP as usize]
+        let rne = TE[EP as usize]
+        EP = EP + 1
+        let slot = var_find(rns, rne)
+        if slot >= 0 { emit_lea_var_a64(slot) }
+        else {
+            let gi = gl_find(rns, rne)
+            if gi >= 0 { emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+            else { em32(0xD2800000) }
+        }
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Dereference *expr
+    if k == 19 {
+        EP = EP + 1
+        compile_primary_a64()
+        em32(0xF9400000)  // ldr x0, [x0]
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Unary minus
+    if k == 18 {
+        EP = EP + 1
+        compile_primary_a64()
+        if EXPR_IS_F64 == 1 {
+            em32(0x9E670000); em32(0x1E614000); em32(0x9E660000)
+        } else {
+            em32(0xCB0003E0)  // neg x0, x0
+        }
+        return
+    }
+    // Unary bitwise NOT ~
+    if k == 55 {
+        EP = EP + 1
+        compile_primary_a64()
+        em32(0xAA2003E0)  // mvn x0, x0
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Unary not !
+    if k == 32 {
+        EP = EP + 1
+        compile_primary_a64()
+        em32(0xF100001F)  // cmp x0, #0
+        em32(0x9A9F17E0)  // cset x0, eq
+        EXPR_IS_F64 = 0
+        return
+    }
+    // String literal
+    if k == 5 {
+        let ss = TS[EP as usize] + 1
+        let se = TE[EP as usize] - 1
+        var slen: i64 = 0
+        var zi: i64 = 0
+        while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
+        var si: i64 = ss
+        while si < se {
+            let ch = sb(si)
+            var byte: i64 = ch
+            if ch == 92 && si + 1 < se {
+                let c2 = sb(si + 1)
+                if c2 == 110 { byte = 10 }
+                else if c2 == 116 { byte = 9 }
+                else if c2 == 48 { byte = 0 }
+                else { byte = c2 }
+                si = si + 2
+            } else { si = si + 1 }
+            SQW[slen as usize] = byte
+            slen = slen + 1
+        }
+        let total_bytes = slen + 1
+        let pad_len = (total_bytes + 3) / 4 * 4
+        let b_off = 1 + pad_len / 4
+        em32(0x14000000 | (b_off & 0x3FFFFFF))
+        let str_start = CL
+        var bi: i64 = 0
+        while bi < pad_len {
+            if bi < slen { em(SQW[bi as usize] & 0xFF) }
+            else if bi == slen { em(0) }
+            else { em(0) }
+            bi = bi + 1
+        }
+        let adr_off = 0 - pad_len
+        let adr_immlo = adr_off & 3
+        let adr_immhi = (adr_off >> 2) & 0x7FFFF
+        em32(0x10000000 | ((adr_immlo & 0x3) << 29) | ((adr_immhi & 0x7FFFF) << 5) | 0)
+        EP = EP + 1
+        EXPR_IS_F64 = 0
+        return
+    }
+    // Identifier or function call
+    if k == 3 {
+        var ns: i64 = TS[EP as usize]
+        var ne: i64 = TE[EP as usize]
+        EP = EP + 1
+        // Box::new(expr)
+        if TK[EP as usize] == 51 && src_match(ns, ne - ns, "Box") {
+            EP = EP + 1; EP = EP + 1
+            if TK[EP as usize] == 6 { EP = EP + 1 }
+            compile_or_a64()
+            if TK[EP as usize] == 7 { EP = EP + 1 }
+            emit_push_a64()
+            em32(0xD2800000)
+            emit_imm64_reg_a64(1, 4096)
+            em32(0xD2800060 | 2)
+            em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)
+            emit_imm64_reg_a64(4, -1)
+            em32(0xD2800005)
+            if TARGET_OS == 2 { emit_imm64_reg_a64(16, 0x20000C5) }
+            else { em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8) }
+            emit_syscall_a64()
+            emit_pop_x1_a64()
+            em32(0xF9000001)  // str x1, [x0]
+            EXPR_IS_F64 = 0
+            return
+        }
+        // Enum::Variant
+        if TK[EP as usize] == 51 {
+            EP = EP + 1
+            let vns = TS[EP as usize]
+            let vne = TE[EP as usize]
+            EP = EP + 1
+            let eh = gl_name_hash(ns, ne)
+            let vh = gl_name_hash(vns, vne)
+            let disc = en_variant_value(eh, vh)
+            if disc >= 0 { emit_imm64_a64(disc) }
+            else { em32(0xD2800000) }
+            EXPR_IS_F64 = 0
+            return
+        }
+        // Generic resolution
+        if TK[EP as usize] == 23 && EP + 2 < TC && TK[(EP + 1) as usize] == 3 && TK[(EP + 2) as usize] == 24 {
+            let g_tys = TS[(EP + 1) as usize]
+            let g_tye = TE[(EP + 1) as usize]
+            var g_gi: i64 = 0
+            var g_found: i64 = 0
+            while g_gi < GEN_FN_COUNT && g_found == 0 {
+                if name_eq(ns, ne, GEN_FN_NS[g_gi as usize], GEN_FN_NE[g_gi as usize]) {
+                    let g_mi = mono_find_inst(g_gi, 0, g_tys, g_tye)
+                    if g_mi >= 0 { ns = MAN_BUF_S[g_mi as usize]; ne = MAN_BUF_E[g_mi as usize]; g_found = 1 }
+                }
+                g_gi = g_gi + 1
+            }
+            g_gi = 0
+            while g_gi < GEN_ST_COUNT && g_found == 0 {
+                if name_eq(ns, ne, GEN_ST_NS[g_gi as usize], GEN_ST_NE[g_gi as usize]) {
+                    let g_mi = mono_find_inst(g_gi, 1, g_tys, g_tye)
+                    if g_mi >= 0 { ns = MAN_BUF_S[g_mi as usize]; ne = MAN_BUF_E[g_mi as usize]; g_found = 1 }
+                }
+                g_gi = g_gi + 1
+            }
+            if g_found == 1 { EP = EP + 3 }
+        }
+        // Function call
+        if TK[EP as usize] == 6 {
+            if src_match(ns, ne - ns, "print") {
+                EP = EP + 1
+                if TK[EP as usize] == 5 { emit_print_a64(EP); EP = EP + 1 }
+                else {
+                    compile_or_a64()
+                    em32(0xAA0003E9)
+                    em32(0xAA0003E1)
+                    em32(0xD2800000)
+                    let slp = CL
+                    em32(0x38606920 | 10)
+                    em32(0x34000000 | (3 << 5) | 10)
+                    em32(0x91000400)
+                    let brel2 = (slp - CL) / 4
+                    em32(0x14000000 | (brel2 & 0x3FFFFFF))
+                    em32(0xAA0003E2)
+                    em32(0xAA0903E1)
+                    em32(0xD2800020)
+                    if TARGET_OS == 2 { emit_imm64_reg_a64(16, 0x2000004) }
+                    else { em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8) }
+                    emit_syscall_a64()
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                em32(0xD2800000)
+                EXPR_IS_F64 = 0
+                return
+            }
+            if src_match(ns, ne - ns, "print_int") {
+                EP = EP + 1; compile_or_a64()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_print_int_a64()
+                em32(0xD2800000); EXPR_IS_F64 = 0; return
+            }
+            if src_match(ns, ne - ns, "print_f64") {
+                EP = EP + 1; compile_or_a64()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_print_f64_a64()
+                em32(0xD2800000); EXPR_IS_F64 = 0; return
+            }
+            if src_match(ns, ne - ns, "arg_count") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_arg_count_a64(); EXPR_IS_F64 = 0; return
+            }
+            if src_match(ns, ne - ns, "get_arg") {
+                EP = EP + 1; compile_or_a64()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_get_arg_a64(); EXPR_IS_F64 = 0; return
+            }
+            if src_match(ns, ne - ns, "read_file") {
+                EP = EP + 1; compile_or_a64()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_read_file_a64(); EXPR_IS_F64 = 0; return
+            }
+            if src_match(ns, ne - ns, "file_size") {
+                EP = EP + 1; compile_or_a64()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_file_size_a64(); EXPR_IS_F64 = 0; return
+            }
+            if src_match(ns, ne - ns, "write_file") {
+                EP = EP + 1
+                compile_or_a64(); emit_push_a64()
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or_a64(); emit_push_a64()
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or_a64()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_write_file_a64(); EXPR_IS_F64 = 0; return
+            }
+            if src_match(ns, ne - ns, "str_len") {
+                EP = EP + 1; compile_or_a64()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_str_len_a64(); EXPR_IS_F64 = 0; return
+            }
+            if src_match(ns, ne - ns, "str_char_at") {
+                EP = EP + 1
+                compile_or_a64(); emit_push_a64()
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or_a64()
+                emit_pop_x1_a64()
+                em32(0x38A06820)  // ldrsb x0, [x1, x0]
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0; return
+            }
+            // f64 builtins
+            let bh = gl_name_hash(ns, ne)
+            let bl = ne - ns
+            if bl == 7 && bh == 7078482 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 7 && bh == 7084000 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 7 && bh == 7085240 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 7 && bh == 7083783 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 7 && bh == 7081334 { EP = EP + 1; compile_or_a64(); em32(0x9E670000); em32(0x1E614000); em32(0x9E660000); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            if bl == 6 && bh == 6061460 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); em32(0x9E670020); em32(0x9E670001); em32(0x1E612020); em32(0x9A9F57E0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 6 && bh == 6058670 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); em32(0x9E670020); em32(0x9E670001); em32(0x1E612020); em32(0x9A9F87E0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 6 && bh == 6059817 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); em32(0x9E670020); em32(0x9E670001); em32(0x1E612020); em32(0x9A9F17E0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 6 && bh == 6060685 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); em32(0x9E670020); em32(0x9E670001); em32(0x1E612020); em32(0x9A9FC7E0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 6 && bh == 6057895 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); em32(0x9E670020); em32(0x9E670001); em32(0x1E612020); em32(0x9A9FB7E0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 10 && bh == 10139623 { EP = EP + 1; compile_or_a64(); em32(0x9E670000); em32(0x9E780000); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
+            if bl == 10 && bh == 10138972 { EP = EP + 1; compile_or_a64(); em32(0x9E620000); em32(0x9E660000); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
+            // User function call
+            let fi = fn_find(ns, ne)
+            let call_vslot = var_find(ns, ne)
+            EP = EP + 1
+            var argc: i64 = 0
+            while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                compile_or_a64()
+                emit_push_a64()
+                argc = argc + 1
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+            }
+            if TK[EP as usize] == 7 { EP = EP + 1 }
+            if fi >= 0 {
+                let callee_eff = FN_EFFECTS[fi as usize]
+                let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
+                if (callee_eff & ~caller_eff) != 0 { print("warning: effect violation in ARM64\n") }
+                if argc >= 8 { em32(0xF8410FE7) }
+                if argc >= 7 { em32(0xF8410FE6) }
+                if argc >= 6 { em32(0xF8410FE5) }
+                if argc >= 5 { em32(0xF8410FE4) }
+                if argc >= 4 { em32(0xF8410FE3) }
+                if argc >= 3 { em32(0xF8410FE2) }
+                if argc >= 2 { emit_pop_x1_a64() }
+                if argc >= 1 { em32(0xF8410FE0) }
+                PATCH_OFF[PATCH_COUNT as usize] = CL
+                PATCH_FN[PATCH_COUNT as usize] = fi
+                PATCH_COUNT = PATCH_COUNT + 1
+                em32(0x94000000)
+            } else {
+                if argc >= 5 { em32(0xF8410FE5) }
+                if argc >= 4 { em32(0xF8410FE4) }
+                if argc >= 3 { em32(0xF8410FE3) }
+                if argc >= 2 { em32(0xF8410FE2) }
+                if argc >= 1 { em32(0xF8410FE1) }
+                if call_vslot >= 0 {
+                    emit_load_var_a64(call_vslot)
+                    em32(0xF9400009)  // ldr x9, [x0] (fn_ptr)
+                    em32(0xD63F0120)  // blr x9
+                } else {
+                    print("warning: unknown function in ARM64\n")
+                    em32(0xD2800000)
+                }
+            }
+            EXPR_IS_F64 = 0
+            return
+        }
+        // Struct literal
+        if TK[EP as usize] == 8 {
+            let sh = gl_name_hash(ns, ne)
+            let si = st_find(sh)
+            if si >= 0 {
+                EP = EP + 1
+                let fc = ST[(si * 66 + 1) as usize]
+                let base_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + fc
+                while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+                    if TK[EP as usize] == 3 {
+                        let fns = TS[EP as usize]
+                        let fne = TE[EP as usize]
+                        let fh = gl_name_hash(fns, fne)
+                        EP = EP + 1
+                        if TK[EP as usize] == 43 { EP = EP + 1 }
+                        compile_or_a64()
+                        let foff = st_field_offset(si, fh)
+                        if foff >= 0 { emit_store_var_a64(base_slot + fc - 1 - foff / 8) }
+                    }
+                    if TK[EP as usize] == 28 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 9 { EP = EP + 1 }
+                emit_lea_var_a64(base_slot + fc - 1)
+                EXPR_IS_F64 = 0
+                LAST_EXPR_IS_LINEAR = ST_LINEAR[si as usize]
+                return
+            }
+        }
+        // Array subscript
+        if TK[EP as usize] == 41 {
+            EP = EP + 1
+            compile_or_a64()
+            if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            let gi = gl_find(ns, ne)
+            if gi >= 0 {
+                let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                let esz = GL[(gi * 4 + 2) as usize]
+                em32(0xAA0003E9)
+                emit_imm64_a64(base)
+                if esz == 8 { em32(0xF8697800) }
+                else { em32(0x38A96800) }
+            } else {
+                let slot = var_find(ns, ne)
+                if slot >= 0 {
+                    let lalen = var_find_alen(ns, ne)
+                    let lesiz = var_find_esiz(ns, ne)
+                    em32(0xAA0003E9)
+                    emit_load_var_a64(slot)
+                    if lalen > 0 && lesiz == 8 { em32(0xF8697800) }
+                    else { em32(0x38A96800) }
+                }
+            }
+            EXPR_IS_F64 = 0
+            return
+        }
+        // Variable load
+        let slot = var_find(ns, ne)
+        if slot >= 0 {
+            emit_load_var_a64(slot)
+            EXPR_IS_F64 = var_find_is_f64(ns, ne)
+            var_mark_used(ns, ne)
+        } else {
+            let gi = gl_find(ns, ne)
+            if gi >= 0 {
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                let alen = GL[(gi * 4 + 3) as usize]
+                emit_imm64_a64(addr)
+                if alen == 0 { em32(0xF9400000) }
+            } else {
+                let fri = fn_find(ns, ne)
+                if fri >= 0 { em32(0xD2800000); LAST_EXPR_IS_CLOSURE = 1 }
+                else { print("warning: unknown ident in ARM64\n"); em32(0xD2800000) }
+            }
+            EXPR_IS_F64 = 0
+        }
+        return
+    }
+    EP = EP + 1
+    em32(0xD2800000)
+    EXPR_IS_F64 = 0
+}
+
+// ─── ARM64 postfix ───
+fn compile_postfix_a64() with IO, Mut, Panic, Div {
+    compile_primary_a64()
+    var more: i64 = 1
+    while more == 1 {
+        if TK[EP as usize] == 37 {
+            EP = EP + 1
+            let tns = TS[EP as usize]
+            let tne = TE[EP as usize]
+            if tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
+                em32(0x93401C00)  // sxtb x0, w0
+            }
+            EP = EP + 1
+            continue
+        }
+        if TK[EP as usize] == 50 {
+            EP = EP + 1
+            let fns = TS[EP as usize]
+            let fne = TE[EP as usize]
+            let fh = gl_name_hash(fns, fne)
+            if TK[(EP + 1) as usize] == 6 {
+                let mfi = fn_find(fns, fne)
+                if mfi >= 0 {
+                    EP = EP + 1; EP = EP + 1
+                    emit_push_a64()
+                    var margc: i64 = 1
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64(); emit_push_a64()
+                        margc = margc + 1
+                        if TK[EP as usize] == 28 { EP = EP + 1 }
+                    }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                    if margc >= 8 { em32(0xF8410FE7) }
+                    if margc >= 7 { em32(0xF8410FE6) }
+                    if margc >= 6 { em32(0xF8410FE5) }
+                    if margc >= 5 { em32(0xF8410FE4) }
+                    if margc >= 4 { em32(0xF8410FE3) }
+                    if margc >= 3 { em32(0xF8410FE2) }
+                    if margc >= 2 { emit_pop_x1_a64() }
+                    if margc >= 1 { em32(0xF8410FE0) }
+                    PATCH_OFF[PATCH_COUNT as usize] = CL
+                    PATCH_FN[PATCH_COUNT as usize] = mfi
+                    PATCH_COUNT = PATCH_COUNT + 1
+                    em32(0x94000000)
+                    continue
+                }
+            }
+            EP = EP + 1
+            var found: i64 = 0
+            var si: i64 = 0
+            while si < ST_COUNT && found == 0 {
+                let off = st_field_offset(si, fh)
+                if off >= 0 {
+                    if off == 0 { em32(0xF9400000) }
+                    else { em32(0xF9400000 | ((off / 8) << 10) | (0 << 5) | 0) }
+                    found = 1
+                }
+                si = si + 1
+            }
+            continue
+        }
+        more = 0
+    }
+}
+
+// ─── ARM64 multiplicative ───
+fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
+    compile_postfix_a64()
+    while TK[EP as usize] == 19 || TK[EP as usize] == 20 || TK[EP as usize] == 29 {
+        let op = TK[EP as usize]
+        EP = EP + 1
+        let left_f64 = EXPR_IS_F64
+        emit_push_a64()
+        compile_postfix_a64()
+        emit_pop_x1_a64()
+        if left_f64 == 1 {
+            if op == 19 { emit_f64_binop_a64(0x1E610800) }
+            if op == 20 { emit_f64_binop_a64(0x1E611800) }
+            if op == 29 { em32(0x9B007C20) }
+            EXPR_IS_F64 = 1
+        } else {
+            if op == 19 { em32(0x9B007C20) }  // mul x0, x1, x0
+            if op == 20 { em32(0x9AC00C20) }  // sdiv x0, x1, x0
+            if op == 29 {
+                em32(0x9AC00C00 | (0 << 16) | (1 << 5) | 9)
+                em32(0x9B000000 | (0 << 16) | (1 << 10) | (9 << 5) | 0)
+            }
+        }
+    }
+}
+
+// ─── ARM64 additive ───
+fn compile_additive_a64() with IO, Mut, Panic, Div {
+    compile_multiplicative_a64()
+    while TK[EP as usize] == 17 || TK[EP as usize] == 18 {
+        let op = TK[EP as usize]
+        EP = EP + 1
+        let left_f64 = EXPR_IS_F64
+        emit_push_a64()
+        compile_multiplicative_a64()
+        emit_pop_x1_a64()
+        if left_f64 == 1 {
+            if op == 17 { emit_f64_binop_a64(0x1E612800) }
+            if op == 18 { emit_f64_binop_a64(0x1E613800) }
+            EXPR_IS_F64 = 1
+        } else {
+            if op == 17 { em32(0x8B000020) }
+            if op == 18 { em32(0xCB000020) }
+        }
+    }
+}
+
+// ─── ARM64 shift ───
+fn compile_shift_a64() with IO, Mut, Panic, Div {
+    compile_additive_a64()
+    while TK[EP as usize] == 39 || TK[EP as usize] == 40 {
+        let op = TK[EP as usize]
+        EP = EP + 1
+        emit_push_a64()
+        compile_additive_a64()
+        emit_pop_x1_a64()
+        if op == 40 { em32(0x9AC02020) }
+        if op == 39 { em32(0x9AC02820) }
+    }
+}
+
+// ─── ARM64 bitand ───
+fn compile_bitand_a64() with IO, Mut, Panic, Div {
+    compile_shift_a64()
+    while TK[EP as usize] == 44 {
+        EP = EP + 1; emit_push_a64(); compile_shift_a64()
+        emit_pop_x1_a64()
+        em32(0x8A010000)
+    }
+}
+
+// ─── ARM64 bitxor ───
+fn compile_bitxor_a64() with IO, Mut, Panic, Div {
+    compile_bitand_a64()
+    while TK[EP as usize] == 56 {
+        EP = EP + 1; emit_push_a64(); compile_bitand_a64()
+        emit_pop_x1_a64()
+        em32(0xCA010000)
+    }
+}
+
+// ─── ARM64 bitor ───
+fn compile_bitor_a64() with IO, Mut, Panic, Div {
+    compile_bitxor_a64()
+    while TK[EP as usize] == 45 {
+        EP = EP + 1; emit_push_a64(); compile_bitxor_a64()
+        emit_pop_x1_a64()
+        em32(0xAA010000)
+    }
+}
+
+// ─── ARM64 comparison ───
+fn compile_comparison_a64() with IO, Mut, Panic, Div {
+    compile_bitor_a64()
+    let op = TK[EP as usize]
+    if op == 21 || op == 22 || op == 23 || op == 24 || op == 25 || op == 26 {
+        let left_f64 = EXPR_IS_F64
+        EP = EP + 1
+        emit_push_a64()
+        compile_bitor_a64()
+        emit_pop_x1_a64()
+        if left_f64 == 1 {
+            em32(0x9E670020); em32(0x9E670001); em32(0x1E612020)
+            if op == 21 { em32(0x9A9F17E0) }
+            if op == 22 { em32(0x9A9F07E0) }
+            if op == 23 { em32(0x9A9F57E0) }
+            if op == 24 { em32(0x9A9FC7E0) }
+            if op == 25 { em32(0x9A9F87E0) }
+            if op == 26 { em32(0x9A9FB7E0) }
+        } else {
+            em32(0xEB00003F)
+            if op == 21 { em32(0x9A9F17E0) }
+            if op == 22 { em32(0x9A9F07E0) }
+            if op == 23 { em32(0x9A9FA7E0) }
+            if op == 24 { em32(0x9A9FC7E0) }
+            if op == 25 { em32(0x9A9FD7E0) }
+            if op == 26 { em32(0x9A9FB7E0) }
+        }
+        EXPR_IS_F64 = 0
+    }
+}
+
+// ─── ARM64 logical AND ───
+fn compile_and_a64() with IO, Mut, Panic, Div {
+    compile_comparison_a64()
+    while TK[EP as usize] == 30 {
+        EP = EP + 1
+        let cbz_off = CL
+        em32(0xB4000000)
+        compile_comparison_a64()
+        em32(0xF100001F); em32(0x9A9F07E0)
+        let b_off = CL
+        em32(0x14000000)
+        patch_branch_a64(cbz_off, CL)
+        em32(0xD2800000)
+        patch_branch_a64(b_off, CL)
+    }
+}
+
+// ─── ARM64 logical OR ───
+fn compile_or_a64() with IO, Mut, Panic, Div {
+    compile_and_a64()
+    while TK[EP as usize] == 31 {
+        EP = EP + 1
+        let cbnz_off = CL
+        em32(0xB5000000)
+        compile_and_a64()
+        let b_off = CL
+        em32(0x14000000)
+        patch_branch_a64(cbnz_off, CL)
+        emit_imm64_a64(1)
+        patch_branch_a64(b_off, CL)
+    }
+}
+
+// ─── ARM64 statement compiler ───
+fn compile_stmt_a64() with IO, Mut, Panic, Div {
+    let k = TK[EP as usize]
+    if k == 27 { EP = EP + 1; return }
+    // let/var
+    if k == 11 || k == 12 {
+        EP = EP + 1
+        let ns = TS[EP as usize]
+        let ne = TE[EP as usize]
+        EP = EP + 1
+        var is_arr: i64 = 0
+        var arr_len: i64 = 0
+        var arr_esiz: i64 = 8
+        var decl_is_f64: i64 = -1
+        if TK[EP as usize] == 43 {
+            EP = EP + 1
+            if TK[EP as usize] == 44 { EP = EP + 1 }
+            if TK[EP as usize] == 32 { EP = EP + 1 }
+            if TK[EP as usize] == 41 {
+                EP = EP + 1
+                let etns = TS[EP as usize]
+                let etne = TE[EP as usize]
+                if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                EP = EP + 1
+                if TK[EP as usize] == 27 { EP = EP + 1 }
+                arr_len = TV[EP as usize]; EP = EP + 1
+                if TK[EP as usize] == 42 { EP = EP + 1 }
+                is_arr = 1; decl_is_f64 = 0
+            } else {
+                let tns = TS[EP as usize]; let tne = TE[EP as usize]
+                if tne - tns == 3 && sb(tns) == 102 && sb(tns+1) == 54 && sb(tns+2) == 52 { decl_is_f64 = 1 }
+                else { decl_is_f64 = 0 }
+                EP = EP + 1
+            }
+        }
+        if TK[EP as usize] == 16 { EP = EP + 1 }
+        if is_arr == 1 && arr_len > 0 {
+            if TK[EP as usize] == 41 {
+                EP = EP + 1
+                while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
+                if TK[EP as usize] == 42 { EP = EP + 1 }
+            }
+            let nslots = arr_len
+            if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz)
+            let base = ptr_slot - nslots
+            var zi: i64 = 0
+            while zi < nslots { em32(0xD2800000); emit_store_var_a64(base + zi); zi = zi + 1 }
+            emit_lea_var_a64(base + nslots - 1)
+            emit_store_var_a64(ptr_slot)
+        } else {
+            compile_or_a64()
+            let slot = var_add(ns, ne)
+            emit_store_var_a64(slot)
+            if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+            else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
+            else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
+            VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
+            VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
+        }
+        return
+    }
+    // x.field = expr
+    if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
+        let ns = TS[EP as usize]; let ne = TE[EP as usize]
+        EP = EP + 2
+        let fns = TS[EP as usize]; let fne = TE[EP as usize]
+        let fh = gl_name_hash(fns, fne)
+        EP = EP + 1
+        if TK[EP as usize] == 16 { EP = EP + 1 }
+        compile_or_a64()
+        emit_push_a64()
+        let slot = var_find(ns, ne)
+        if slot >= 0 { emit_load_var_a64(slot) }
+        else {
+            let gi = gl_find(ns, ne)
+            if gi >= 0 { emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+        }
+        emit_pop_x1_a64()
+        var si: i64 = 0
+        while si < ST_COUNT {
+            let off = st_field_offset(si, fh)
+            if off >= 0 { em32(0xF9000000 | ((off / 8) << 10) | (0 << 5) | 1); si = ST_COUNT }
+            si = si + 1
+        }
+        return
+    }
+    // x = expr
+    if k == 3 && TK[(EP + 1) as usize] == 16 {
+        let ns = TS[EP as usize]; let ne = TE[EP as usize]
+        EP = EP + 2
+        compile_or_a64()
+        let slot = var_find(ns, ne)
+        if slot >= 0 {
+            emit_store_var_a64(slot)
+            var vi: i64 = VAR_COUNT - 1
+            while vi >= 0 {
+                if name_eq(VAR_NS[vi as usize], VAR_NE[vi as usize], ns, ne) { VAR_IS_CLOSURE[vi as usize] = LAST_EXPR_IS_CLOSURE; vi = -1 }
+                vi = vi - 1
+            }
+        } else {
+            let gi = gl_find(ns, ne)
+            if gi >= 0 {
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                em32(0xAA0003E1)
+                emit_imm64_a64(addr)
+                em32(0xF9000001)
+            }
+        }
+        return
+    }
+    // ARRAY[idx] = expr
+    if k == 3 && TK[(EP + 1) as usize] == 41 {
+        let ns = TS[EP as usize]; let ne = TE[EP as usize]
+        EP = EP + 2
+        compile_or_a64()
+        if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+        if TK[EP as usize] == 42 { EP = EP + 1 }
+        if TK[EP as usize] == 16 { EP = EP + 1 }
+        emit_push_a64()
+        compile_or_a64()
+        let gi = gl_find(ns, ne)
+        if gi >= 0 {
+            let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+            let esz = GL[(gi * 4 + 2) as usize]
+            em32(0xAA0003EA)
+            emit_pop_x1_a64()
+            emit_imm64_a64(base)
+            if esz == 8 { em32(0xF821780A) }
+            else { em32(0x3821680A) }
+        } else {
+            let lslot = var_find(ns, ne)
+            if lslot >= 0 {
+                let llalen = var_find_alen(ns, ne)
+                let lesiz = var_find_esiz(ns, ne)
+                em32(0xAA0003EA)
+                emit_pop_x1_a64()
+                emit_load_var_a64(lslot)
+                if llalen > 0 && lesiz == 8 { em32(0xF821780A) }
+                else { em32(0x3821680A) }
+            }
+        }
+        return
+    }
+    // return
+    if k == 2 {
+        EP = EP + 1
+        if TK[EP as usize] != 9 { compile_or_a64() }
+        else { em32(0xD2800000) }
+        em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
+        em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
+        em32(0xA8C17BFD)
+        em32(0xD65F03C0)
+        return
+    }
+    // continue
+    if k == 33 {
+        EP = EP + 1
+        if LOOP_DEPTH > 0 {
+            let rel = (LOOP_TOP[(LOOP_DEPTH - 1) as usize] - CL) / 4
+            em32(0x14000000 | (rel & 0x3FFFFFF))
+        }
+        return
+    }
+    // break
+    if k == 34 {
+        EP = EP + 1
+        BREAK_PATCH[BREAK_COUNT as usize] = CL
+        BREAK_COUNT = BREAK_COUNT + 1
+        em32(0x14000000)
+        return
+    }
+    // if/else
+    if k == 13 {
+        EP = EP + 1
+        compile_or_a64()
+        let cbz_off = CL
+        em32(0xB4000000)
+        if TK[EP as usize] == 8 { EP = EP + 1 }
+        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        if TK[EP as usize] == 14 {
+            EP = EP + 1
+            let b_end_off = CL
+            em32(0x14000000)
+            patch_branch_a64(cbz_off, CL)
+            if TK[EP as usize] == 13 { compile_stmt_a64() }
+            else {
+                if TK[EP as usize] == 8 { EP = EP + 1 }
+                while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                if TK[EP as usize] == 9 { EP = EP + 1 }
+            }
+            patch_branch_a64(b_end_off, CL)
+        } else { patch_branch_a64(cbz_off, CL) }
+        return
+    }
+    // while
+    if k == 15 {
+        EP = EP + 1
+        let loop_top = CL
+        LOOP_TOP[LOOP_DEPTH as usize] = loop_top
+        LOOP_DEPTH = LOOP_DEPTH + 1
+        let saved_bc = BREAK_COUNT
+        compile_or_a64()
+        let cbz_off = CL
+        em32(0xB4000000)
+        if TK[EP as usize] == 8 { EP = EP + 1 }
+        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        let rel = (loop_top - CL) / 4
+        em32(0x14000000 | (rel & 0x3FFFFFF))
+        patch_branch_a64(cbz_off, CL)
+        var bi: i64 = saved_bc
+        while bi < BREAK_COUNT { patch_branch_a64(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
+        BREAK_COUNT = saved_bc
+        LOOP_DEPTH = LOOP_DEPTH - 1
+        return
+    }
+    // for
+    if k == 54 {
+        EP = EP + 1
+        let vns = TS[EP as usize]; let vne = TE[EP as usize]
+        EP = EP + 1; EP = EP + 1; EP = EP + 1
+        if TK[EP as usize] == 6 { EP = EP + 1 }
+        compile_or_a64()
+        let iter_slot = var_add(vns, vne)
+        emit_store_var_a64(iter_slot)
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+        compile_or_a64()
+        let end_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var_a64(end_slot)
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        let loop_top = CL
+        LOOP_TOP[LOOP_DEPTH as usize] = loop_top
+        LOOP_DEPTH = LOOP_DEPTH + 1
+        let saved_bc = BREAK_COUNT
+        emit_load_var_a64(iter_slot); emit_push_a64()
+        emit_load_var_a64(end_slot); emit_pop_x1_a64()
+        em32(0xEB00003F); em32(0x9A9FA7E0)
+        let cbz_off = CL; em32(0xB4000000)
+        if TK[EP as usize] == 8 { EP = EP + 1 }
+        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        emit_load_var_a64(iter_slot); em32(0x91000400); emit_store_var_a64(iter_slot)
+        let rel = (loop_top - CL) / 4
+        em32(0x14000000 | (rel & 0x3FFFFFF))
+        patch_branch_a64(cbz_off, CL)
+        var bi: i64 = saved_bc
+        while bi < BREAK_COUNT { patch_branch_a64(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
+        BREAK_COUNT = saved_bc
+        LOOP_DEPTH = LOOP_DEPTH - 1
+        return
+    }
+    // match
+    if k == 48 {
+        EP = EP + 1
+        compile_or_a64()
+        let match_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var_a64(match_slot)
+        if TK[EP as usize] == 8 { EP = EP + 1 }
+        var arm_count: i64 = 0
+        while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+            var is_wildcard: i64 = 0
+            var disc: i64 = -1
+            var arm_is_tagged: i64 = 0
+            var bind_ns: i64 = 0; var bind_ne: i64 = 0; var has_binding: i64 = 0
+            let arm_tk = TK[EP as usize]
+            if arm_tk == 57 { EP = EP + 1; disc = 1; arm_is_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; bind_ns = TS[EP as usize]; bind_ne = TE[EP as usize]; has_binding = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+            if arm_tk == 58 { EP = EP + 1; disc = 0; arm_is_tagged = 1 }
+            if arm_tk == 59 { EP = EP + 1; disc = 0; arm_is_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; bind_ns = TS[EP as usize]; bind_ne = TE[EP as usize]; has_binding = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+            if arm_tk == 60 { EP = EP + 1; disc = 1; arm_is_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; bind_ns = TS[EP as usize]; bind_ne = TE[EP as usize]; has_binding = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+            if arm_tk == 3 {
+                let pns = TS[EP as usize]; let pne = TE[EP as usize]
+                if pne - pns == 1 && sb(pns) == 95 { is_wildcard = 1; EP = EP + 1 }
+                else if TK[(EP + 1) as usize] == 51 { let eh = gl_name_hash(pns, pne); EP = EP + 2; let vh = gl_name_hash(TS[EP as usize], TE[EP as usize]); EP = EP + 1; disc = en_variant_value(eh, vh) }
+                else { EP = EP + 1 }
+            }
+            if arm_tk == 4 { disc = TV[EP as usize]; EP = EP + 1 }
+            if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 { EP = EP + 1 }
+            if disc >= 0 {
+                if arm_is_tagged == 1 {
+                    emit_load_var_a64(match_slot); em32(0xF9400000); emit_push_a64()
+                    emit_imm64_a64(disc); emit_pop_x1_a64()
+                    em32(0xEB00003F)
+                    let skip_off = CL; em32(0x54000001)
+                    if has_binding == 1 { emit_load_var_a64(match_slot); em32(0xF9400400); let bslot = var_add(bind_ns, bind_ne); emit_store_var_a64(bslot) }
+                    if TK[EP as usize] == 52 { EP = EP + 1 }
+                    if TK[EP as usize] == 8 { EP = EP + 1 }
+                    while TK[EP as usize] != 9 && TK[EP as usize] != 28 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                    MATCH_ENDS[arm_count as usize] = CL; em32(0x14000000)
+                    arm_count = arm_count + 1
+                    patch_branch_a64(skip_off, CL)
+                } else {
+                    emit_load_var_a64(match_slot); emit_push_a64()
+                    emit_imm64_a64(disc); emit_pop_x1_a64()
+                    em32(0xEB00003F)
+                    let skip_off = CL; em32(0x54000001)
+                    if TK[EP as usize] == 52 { EP = EP + 1 }
+                    if TK[EP as usize] == 8 { EP = EP + 1 }
+                    while TK[EP as usize] != 9 && TK[EP as usize] != 28 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                    MATCH_ENDS[arm_count as usize] = CL; em32(0x14000000)
+                    arm_count = arm_count + 1
+                    patch_branch_a64(skip_off, CL)
+                }
+            }
+            if is_wildcard == 1 {
+                if TK[EP as usize] == 52 { EP = EP + 1 }
+                if TK[EP as usize] == 8 { EP = EP + 1 }
+                while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                if TK[EP as usize] == 9 { EP = EP + 1 }
+            }
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+        }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        var ai: i64 = 0
+        while ai < arm_count { patch_branch_a64(MATCH_ENDS[ai as usize], CL); ai = ai + 1 }
+        return
+    }
+    // Expression statement
+    compile_or_a64()
+}
+
+// ─── ARM64 top-level compiler ───
+fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
+    // Run all frontend passes via compile_all (which also emits x86_64 code, discarded)
+    let r = compile_all()
+    if r != 0 { return r }
+    // Reset code buffer and patches for ARM64 re-emission
+    CL = 0
+    PATCH_COUNT = 0
+    print("arm64: re-emitting pass 2\n")
+    // ARM64 Pass 2: compile each function
+    var p: i64 = 0
+    var fn_idx: i64 = 0
+    while p < TC {
+        if TK[p as usize] != 1 { p = p + 1; continue }
+        p = p + 1
+        if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 {
+            while p < TC && TK[p as usize] != 8 { p = p + 1 }
+            var gd: i64 = 1; p = p + 1
+            while p < TC && gd > 0 { if TK[p as usize] == 8 { gd = gd + 1 }; if TK[p as usize] == 9 { gd = gd - 1 }; p = p + 1 }
+            continue
+        }
+        FN_OFF[fn_idx as usize] = CL
+        CURRENT_FN = fn_idx
+        VAR_COUNT = 0; NEXT_SLOT = 1; BREAK_COUNT = 0
+        p = p + 1
+        if TK[p as usize] == 6 { p = p + 1 }
+        while TK[p as usize] != 7 && TK[p as usize] != 0 {
+            if TK[p as usize] == 3 {
+                let pns = TS[p as usize]; let pne = TE[p as usize]
+                let pslot = var_add(pns, pne)
+                p = p + 1
+                if TK[p as usize] == 43 {
+                    p = p + 1
+                    if TK[p as usize] == 44 { p = p + 1 }
+                    if TK[p as usize] == 32 { p = p + 1 }
+                    if TK[p as usize] == 41 { p = p + 1; while TK[p as usize] != 42 && TK[p as usize] != 0 { p = p + 1 }; if TK[p as usize] == 42 { p = p + 1 } }
+                    else { p = p + 1 }
+                }
+            }
+            if TK[p as usize] == 28 { p = p + 1 }
+        }
+        if TK[p as usize] == 7 { p = p + 1 }
+        if TK[p as usize] == 10 { p = p + 1; p = p + 1 }
+        if TK[p as usize] == 38 { p = p + 1; while TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 } }
+        if TK[p as usize] == 8 { p = p + 1 }
+        // ARM64 prologue
+        print_int(fn_idx); print(" ")
+        em32(0xA9BF7BFD)  // stp x29, x30, [sp, #-16]!
+        em32(0x910003FD)  // mov x29, sp
+        em32(0xD1000000 | (2048 << 10) | (31 << 5) | 31)  // sub sp, sp, #2048
+        em32(0xD1000000 | (2048 << 10) | (31 << 5) | 31)  // sub sp, sp, #2048
+        // Spill params
+        let nparams = VAR_COUNT
+        if nparams >= 1 { emit_store_var_a64(1) }
+        if nparams >= 2 { em32(0xAA0103E0); emit_store_var_a64(2) }
+        if nparams >= 3 { em32(0xAA0203E0); emit_store_var_a64(3) }
+        if nparams >= 4 { em32(0xAA0303E0); emit_store_var_a64(4) }
+        if nparams >= 5 { em32(0xAA0403E0); emit_store_var_a64(5) }
+        if nparams >= 6 { em32(0xAA0503E0); emit_store_var_a64(6) }
+        if nparams >= 7 { em32(0xAA0603E0); emit_store_var_a64(7) }
+        if nparams >= 8 { em32(0xAA0703E0); emit_store_var_a64(8) }
+        // Compile body
+        EP = p
+        var depth: i64 = 1
+        while EP < TC && depth > 0 {
+            if TK[EP as usize] == 9 { depth = depth - 1; if depth == 0 { EP = EP + 1; continue } else { EP = EP + 1; continue } }
+            compile_stmt_a64()
+        }
+        p = EP
+        // Linear check
+        var lci: i64 = 0
+        while lci < VAR_COUNT {
+            if VAR_LINEAR[lci as usize] == 1 && VAR_USED[lci as usize] == 0 { print("warning: linear var unused in ARM64 fn#"); print_int(fn_idx); print("\n") }
+            lci = lci + 1
+        }
+        // Implicit return
+        var needs_epilogue: i64 = 1
+        if CL >= 4 { if rd32_at(CL - 4) == 0xD65F03C0 { needs_epilogue = 0 } }
+        if needs_epilogue == 1 {
+            em32(0xD2800000)
+            em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
+            em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
+            em32(0xA8C17BFD)
+            em32(0xD65F03C0)
+        }
+        fn_idx = fn_idx + 1
+    }
+    // Patch BL instructions
+    var pi: i64 = 0
+    while pi < PATCH_COUNT {
+        let off = PATCH_OFF[pi as usize]
+        let fi = PATCH_FN[pi as usize]
+        if fi >= 0 && fi < FN_COUNT {
+            let target = FN_OFF[fi as usize]
+            let rel = (target - off) / 4
+            em32_at(off, 0x94000000 | (rel & 0x3FFFFFF))
+        }
+        pi = pi + 1
+    }
+    // Find main
+    var main_fn: i64 = -1
+    var mi: i64 = 0
+    while mi < FN_COUNT {
+        let ms = FN_NS[mi as usize]; let me = FN_NE[mi as usize]
+        if me - ms == 4 && sb(ms) == 109 && sb(ms+1) == 97 && sb(ms+2) == 105 && sb(ms+3) == 110 { main_fn = mi }
+        mi = mi + 1
+    }
+    if main_fn < 0 { print("error: no main\n"); return 1 }
+    // Trampoline
+    TRAMP_OFF = CL
+    if TARGET_OS == 2 {
+        let argc_addr = 0x100008000
+        let argv_addr = 0x100008000 + 8
+        em32(0xF94003E9)
+        em32(0xD1000529)
+        emit_imm64_reg_a64(10, argc_addr)
+        em32(0xF9000149)
+        em32(0x91000000 | (16 << 10) | (31 << 5) | 9)
+        emit_imm64_reg_a64(10, argv_addr)
+        em32(0xF9000149)
+        let mrel = (FN_OFF[main_fn as usize] - CL) / 4
+        em32(0x94000000 | (mrel & 0x3FFFFFF))
+        emit_imm64_reg_a64(16, 0x2000001)
+        em32(0xD4001001)
+    } else {
+        let argc_addr = 0x600000
+        let argv_addr = 0x600000 + 8
+        em32(0xF94003E9)
+        em32(0xD1000529)
+        emit_imm64_reg_a64(10, argc_addr)
+        em32(0xF9000149)
+        em32(0x91000000 | (16 << 10) | (31 << 5) | 9)
+        emit_imm64_reg_a64(10, argv_addr)
+        em32(0xF9000149)
+        let mrel = (FN_OFF[main_fn as usize] - CL) / 4
+        em32(0x94000000 | (mrel & 0x3FFFFFF))
+        em32(0xD2800000 | ((93 & 0xFFFF) << 5) | 8)
+        em32(0xD4000001)
+    }
+    print("arm64_compile: fns="); print_int(FN_COUNT); print(" code="); print_int(CL)
+    print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT); print("\n")
+    0
+}
+
+// ─── ARM64 ELF writer ───
+fn write_elf_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
+    let text_base = 0x400000
+    let text_off = 4096
+    let bss_base = 0x600000
+    let entry = text_base + text_off + TRAMP_OFF
+    var i: i64 = 0
+    while i < 4096 { ELF[i as usize] = 0; i = i + 1 }
+    let tsz = text_off + CL
+    let total_memsz = (bss_base - text_base) + GL_BSS_SIZE
+    // ELF header
+    elf_w8(0, 0x7f); elf_w8(1, 69); elf_w8(2, 76); elf_w8(3, 70)
+    elf_w8(4, 2); elf_w8(5, 1); elf_w8(6, 1)
+    elf_w16(16, 2); elf_w16(18, 0xB7); elf_w32(20, 1)
+    elf_w64(24, entry); elf_w64(32, 64)
+    elf_w16(52, 64); elf_w16(54, 56); elf_w16(56, 1); elf_w16(58, 64)
+    let ph0 = 64
+    elf_w32(ph0, 1); elf_w32(ph0+4, 7)
+    elf_w64(ph0+8, 0); elf_w64(ph0+16, text_base); elf_w64(ph0+24, text_base)
+    elf_w64(ph0+32, tsz); elf_w64(ph0+40, total_memsz); elf_w64(ph0+48, 0x200000)
+    i = 0
+    while i < CL { ELF[(text_off + i) as usize] = CD[i as usize]; i = i + 1 }
+    let ok = write_file(output, ELF, tsz)
+    print("elf_arm64: "); print(output); print(" "); print_int(tsz); print(" bytes (bss="); print_int(GL_BSS_SIZE); print(")\n")
+    return 0
+}
+
+// ─── ARM64 Mach-O writer ───
+fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
+    let vm_base: i64 = 4294967296
+    let page_size: i64 = 16384
+    let text_vm = vm_base
+    let data_vm = vm_base + 0x8000
+    let hdr_size = 32
+    let lc_pagezero_size = 72
+    let lc_text_size = 72 + 80
+    let lc_data_size = 72 + 80
+    let lc_main_size = 24
+    let ncmds = 4
+    let sizeofcmds = lc_pagezero_size + lc_text_size + lc_data_size + lc_main_size
+    let text_file_off = ((hdr_size + sizeofcmds + page_size - 1) / page_size) * page_size
+    let text_file_size = ((CL + page_size - 1) / page_size) * page_size
+    let total_file_size = text_file_off + text_file_size
+    let text_seg_vmsize = text_file_off + text_file_size
+    print("macho_arm64: code="); print_int(CL); print(" text_off="); print_int(text_file_off); print("\n")
+    var i: i64 = 0
+    while i < 262144 { ELF[i as usize] = 0; i = i + 1 }
+    // Header
+    elf_w32(0, 0xFEEDFACF); elf_w32(4, 0x0100000C); elf_w32(8, 0)
+    elf_w32(12, 2); elf_w32(16, ncmds); elf_w32(20, sizeofcmds); elf_w32(24, 0x00200085)
+    // __PAGEZERO
+    var off = hdr_size
+    elf_w32(off, 25); elf_w32(off+4, lc_pagezero_size)
+    elf_w8(off+8, 95); elf_w8(off+9, 95); elf_w8(off+10, 80); elf_w8(off+11, 65); elf_w8(off+12, 71); elf_w8(off+13, 69); elf_w8(off+14, 90); elf_w8(off+15, 69); elf_w8(off+16, 82); elf_w8(off+17, 79)
+    elf_w64(off+24, 0); elf_w64(off+32, vm_base)
+    // __TEXT
+    off = hdr_size + lc_pagezero_size
+    elf_w32(off, 25); elf_w32(off+4, lc_text_size)
+    elf_w8(off+8, 95); elf_w8(off+9, 95); elf_w8(off+10, 84); elf_w8(off+11, 69); elf_w8(off+12, 88); elf_w8(off+13, 84)
+    elf_w64(off+24, text_vm); elf_w64(off+32, text_seg_vmsize)
+    elf_w64(off+40, 0); elf_w64(off+48, total_file_size)
+    elf_w32(off+56, 7); elf_w32(off+60, 5); elf_w32(off+64, 1)
+    let sec = off + 72
+    elf_w8(sec, 95); elf_w8(sec+1, 95); elf_w8(sec+2, 116); elf_w8(sec+3, 101); elf_w8(sec+4, 120); elf_w8(sec+5, 116)
+    elf_w8(sec+16, 95); elf_w8(sec+17, 95); elf_w8(sec+18, 84); elf_w8(sec+19, 69); elf_w8(sec+20, 88); elf_w8(sec+21, 84)
+    elf_w64(sec+32, text_vm + text_file_off); elf_w64(sec+40, CL)
+    elf_w32(sec+48, text_file_off); elf_w32(sec+64, 0x80000400)
+    // __DATA
+    off = hdr_size + lc_pagezero_size + lc_text_size
+    elf_w32(off, 25); elf_w32(off+4, lc_data_size)
+    elf_w8(off+8, 95); elf_w8(off+9, 95); elf_w8(off+10, 68); elf_w8(off+11, 65); elf_w8(off+12, 84); elf_w8(off+13, 65)
+    elf_w64(off+24, data_vm); elf_w64(off+32, ((GL_BSS_SIZE + page_size - 1) / page_size) * page_size)
+    elf_w64(off+40, 0); elf_w64(off+48, 0)
+    elf_w32(off+56, 7); elf_w32(off+60, 3); elf_w32(off+64, 1)
+    let bsec = off + 72
+    elf_w8(bsec, 95); elf_w8(bsec+1, 95); elf_w8(bsec+2, 98); elf_w8(bsec+3, 115); elf_w8(bsec+4, 115)
+    elf_w8(bsec+16, 95); elf_w8(bsec+17, 95); elf_w8(bsec+18, 68); elf_w8(bsec+19, 65); elf_w8(bsec+20, 84); elf_w8(bsec+21, 65)
+    elf_w64(bsec+32, data_vm); elf_w64(bsec+40, GL_BSS_SIZE)
+    elf_w32(bsec+48, 0); elf_w32(bsec+64, 1)
+    // LC_MAIN
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size
+    elf_w32(off, 0x80000028); elf_w32(off+4, lc_main_size)
+    elf_w64(off+8, text_file_off + TRAMP_OFF); elf_w64(off+16, 0)
+    // Copy code
+    i = 0
+    while i < CL { ELF[(text_file_off + i) as usize] = CD[i as usize]; i = i + 1 }
+    let ok = write_file(output, ELF, total_file_size)
+    print("macho_arm64: "); print(output); print(" "); print_int(total_file_size); print(" bytes\n")
+    return 0
+}
+
 // ─── Import resolver ───
 // Hash IMP_PATH[0..len] for dedup
 fn imp_path_hash(len: i64) -> i64 with Panic {
@@ -3552,8 +5231,51 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print("target: x86_64-windows\n")
         }
     }
-    if out_len > 6 {
-        // Check for .macho suffix
+    // Check for .aarch64.elf suffix (12 chars) BEFORE .macho check
+    if out_len > 12 {
+        // Match ".aarch64.elf" at end
+        let a = str_char_at(out, out_len - 12)  // .
+        let b = str_char_at(out, out_len - 11)  // a
+        let c = str_char_at(out, out_len - 10)  // a
+        let d = str_char_at(out, out_len - 9)   // r
+        let e = str_char_at(out, out_len - 8)   // c
+        let f = str_char_at(out, out_len - 7)   // h
+        let g = str_char_at(out, out_len - 6)   // 6
+        let hh = str_char_at(out, out_len - 5)  // 4
+        let ii = str_char_at(out, out_len - 4)  // .
+        let jj = str_char_at(out, out_len - 3)  // e
+        let kk = str_char_at(out, out_len - 2)  // l
+        let ll = str_char_at(out, out_len - 1)  // f
+        if a == 46 && b == 97 && c == 97 && d == 114 && e == 99 && f == 104 && g == 54 && hh == 52 && ii == 46 && jj == 101 && kk == 108 && ll == 102 {
+            TARGET_ARCH = 1
+            TARGET_OS = 0
+            print("target: aarch64-linux\n")
+        }
+    }
+    // Check for .aarch64.macho suffix (14 chars)
+    if out_len > 14 {
+        let a2 = str_char_at(out, out_len - 14)   // .
+        let b2 = str_char_at(out, out_len - 13)   // a
+        let c2a = str_char_at(out, out_len - 12)   // a
+        let d2 = str_char_at(out, out_len - 11)   // r
+        let e2 = str_char_at(out, out_len - 10)   // c
+        let f2 = str_char_at(out, out_len - 9)    // h
+        let g2 = str_char_at(out, out_len - 8)    // 6
+        let h2 = str_char_at(out, out_len - 7)    // 4
+        let i2 = str_char_at(out, out_len - 6)    // .
+        let j2 = str_char_at(out, out_len - 5)    // m
+        let k2 = str_char_at(out, out_len - 4)    // a
+        let l2 = str_char_at(out, out_len - 3)    // c
+        let m2a = str_char_at(out, out_len - 2)   // h
+        let n2 = str_char_at(out, out_len - 1)    // o
+        if a2 == 46 && b2 == 97 && c2a == 97 && d2 == 114 && e2 == 99 && f2 == 104 && g2 == 54 && h2 == 52 && i2 == 46 && j2 == 109 && k2 == 97 && l2 == 99 && m2a == 104 && n2 == 111 {
+            TARGET_ARCH = 1
+            TARGET_OS = 2
+            print("target: aarch64-macos\n")
+        }
+    }
+    // Check for .macho suffix (only if not already detected as aarch64)
+    if TARGET_ARCH == 0 && out_len > 6 {
         let m5 = str_char_at(out, out_len - 6)
         let m4 = str_char_at(out, out_len - 5)
         let m3 = str_char_at(out, out_len - 4)
@@ -3576,9 +5298,20 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     print("total source: "); print_int(SRC_LEN); print(" bytes\n")
     lex_all()
     print("tokens: "); print_int(TC); print("\n")
-    let cr = compile_all()
+    var cr: i64 = 0
+    if TARGET_ARCH == 1 {
+        cr = compile_all_arm64()
+    } else {
+        cr = compile_all()
+    }
     if cr != 0 { return cr }
-    if TARGET_OS == 3 {
+    if TARGET_ARCH == 1 {
+        if TARGET_OS == 2 {
+            write_macho_arm64(out)
+        } else {
+            write_elf_arm64(out)
+        }
+    } else if TARGET_OS == 3 {
         write_pe(out)
     } else if TARGET_OS == 2 {
         write_macho_x86(out)
