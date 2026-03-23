@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>168 Explorer — Cayley-Dickson Non-Associativity Visualizer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace; overflow: hidden; }
+#ui {
+  position: absolute; top: 0; left: 0; width: 320px; height: 100vh;
+  background: rgba(10,10,20,0.92); padding: 20px; z-index: 10;
+  border-right: 1px solid #333; overflow-y: auto;
+}
+#ui h1 { font-size: 18px; color: #4fc3f7; margin-bottom: 8px; }
+#ui h2 { font-size: 13px; color: #888; margin-bottom: 16px; font-weight: normal; }
+.stat { margin: 6px 0; font-size: 13px; }
+.stat .label { color: #888; }
+.stat .value { color: #4fc3f7; font-weight: bold; }
+.stat .red { color: #ff5252; }
+.stat .green { color: #69f0ae; }
+.stat .gold { color: #ffd740; }
+.slider-group { margin: 16px 0; }
+.slider-group label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
+.slider-group input[type=range] { width: 100%; accent-color: #4fc3f7; }
+.toggle { margin: 8px 0; cursor: pointer; font-size: 13px; }
+.toggle input { margin-right: 8px; accent-color: #4fc3f7; }
+#info {
+  margin-top: 16px; padding: 12px; background: rgba(255,255,255,0.05);
+  border-radius: 4px; font-size: 12px; min-height: 80px;
+}
+#info .title { color: #ffd740; font-size: 13px; margin-bottom: 6px; }
+#canvas-container { position: absolute; top: 0; left: 320px; right: 0; bottom: 0; }
+canvas { width: 100%; height: 100%; display: block; }
+.legend { margin-top: 12px; font-size: 11px; }
+.legend-item { display: flex; align-items: center; margin: 3px 0; }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; display: inline-block; }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <h1>168 Explorer</h1>
+  <h2>Cayley-Dickson Non-Associativity</h2>
+
+  <div class="slider-group">
+    <label>Algebra dimension: k = <span id="k-display">3</span> (dim <span id="dim-display">8</span>)</label>
+    <input type="range" id="k-slider" min="3" max="5" value="3" step="1">
+  </div>
+
+  <div class="stat"><span class="label">Basis elements: </span><span class="value" id="n-elems">7</span></div>
+  <div class="stat"><span class="label">Total triples: </span><span class="value" id="n-total">343</span></div>
+  <div class="stat"><span class="label">Non-associative: </span><span class="value red" id="n-nonassoc">168</span></div>
+  <div class="stat"><span class="label">Associative: </span><span class="value green" id="n-assoc">175</span></div>
+  <div class="stat"><span class="label">T_k / 168: </span><span class="value gold" id="t-factor">1</span></div>
+  <div class="stat"><span class="label">Fano subplanes: </span><span class="value" id="n-planes">1</span></div>
+  <div class="stat"><span class="label">Octonionic: </span><span class="value green" id="n-oct">1</span></div>
+  <div class="stat"><span class="label">Quasi-octonionic: </span><span class="value red" id="n-quasi">0</span></div>
+
+  <div class="slider-group">
+    <label>Point size: <span id="size-display">3</span></label>
+    <input type="range" id="size-slider" min="1" max="8" value="3" step="0.5">
+  </div>
+
+  <div class="slider-group">
+    <label>Rotation speed: <span id="speed-display">0.3</span></label>
+    <input type="range" id="speed-slider" min="0" max="2" value="0.3" step="0.1">
+  </div>
+
+  <div class="toggle"><input type="checkbox" id="toggle-assoc" checked> Show associative (blue)</div>
+  <div class="toggle"><input type="checkbox" id="toggle-nonassoc" checked> Show non-associative (red)</div>
+  <div class="toggle"><input type="checkbox" id="toggle-autorotate" checked> Auto-rotate</div>
+
+  <div class="legend">
+    <div class="legend-item"><span class="legend-dot" style="background:#ff5252"></span> Non-associative (α ≠ β)</div>
+    <div class="legend-item"><span class="legend-dot" style="background:#448aff"></span> Associative (α = β)</div>
+    <div class="legend-item"><span class="legend-dot" style="background:#ffd740"></span> Selected triple</div>
+  </div>
+
+  <div id="info">
+    <div class="title">Click a point to inspect</div>
+    <div id="info-content">Hover or click any point in the 3D space to see the triple (i, j, k), its associator, and which Fano subplane it belongs to.</div>
+  </div>
+
+  <div style="margin-top:16px; font-size:10px; color:#555;">
+    Built with Sounio · The 168 Theorem<br>
+    Demetrios C. Agourakis © 2026
+  </div>
+</div>
+
+<div id="canvas-container"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─── Cayley-Dickson sign function (identical to Sounio's cd_sigma) ───
+function cdSigma(a, b, bits) {
+  if (a === 0 || b === 0) return 1;
+  if (bits <= 1) return -1;
+  const half = 1 << (bits - 1);
+  const aHi = a >= half ? 1 : 0;
+  const bHi = b >= half ? 1 : 0;
+  const aLo = a & (half - 1);
+  const bLo = b & (half - 1);
+  if (aHi === 0 && bHi === 0) return cdSigma(aLo, bLo, bits - 1);
+  if (aHi === 0 && bHi === 1) return cdSigma(bLo, aLo, bits - 1);
+  if (aHi === 1 && bHi === 0) return bLo === 0 ? cdSigma(aLo, bLo, bits - 1) : -cdSigma(aLo, bLo, bits - 1);
+  return bLo === 0 ? -cdSigma(bLo, aLo, bits - 1) : cdSigma(bLo, aLo, bits - 1);
+}
+
+function isNonAssociative(i, j, k, bits) {
+  const alpha = cdSigma(i, j, bits) * cdSigma(i ^ j, k, bits);
+  const beta = cdSigma(j, k, bits) * cdSigma(i, j ^ k, bits);
+  return alpha !== beta;
+}
+
+// ─── Compute triples for given k ───
+function computeTriples(k) {
+  const n = (1 << k) - 1;
+  const triples = [];
+  let naCount = 0;
+  let aCount = 0;
+
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= n; j++) {
+      for (let ki = 1; ki <= n; ki++) {
+        const na = isNonAssociative(i, j, ki, k);
+        if (na) naCount++; else aCount++;
+        triples.push({ i, j, k: ki, na });
+      }
+    }
+  }
+  return { triples, naCount, aCount, n };
+}
+
+// ─── Fano subplane count ───
+function P(k) {
+  if (k < 3) return 0;
+  return ((1 << k) - 1) * ((1 << (k-1)) - 1) * ((1 << (k-2)) - 1) / 21;
+}
+
+// ─── Three.js setup ───
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0f);
+
+const camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 1000);
+camera.position.set(12, 10, 12);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+container.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.3;
+
+// Ambient light
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(10, 10, 10);
+scene.add(dirLight);
+
+// ─── State ───
+let currentK = 3;
+let pointSize = 3;
+let showAssoc = true;
+let showNonAssoc = true;
+let pointsGroup = new THREE.Group();
+scene.add(pointsGroup);
+
+// Raycaster for click detection
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let currentData = null;
+
+// ─── Build point cloud ───
+function buildPoints(k) {
+  // Clear old
+  while (pointsGroup.children.length > 0) {
+    const child = pointsGroup.children[0];
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) child.material.dispose();
+    pointsGroup.remove(child);
+  }
+
+  const data = computeTriples(k);
+  currentData = data;
+  const n = data.n;
+
+  // Update UI
+  document.getElementById('k-display').textContent = k;
+  document.getElementById('dim-display').textContent = (1 << k);
+  document.getElementById('n-elems').textContent = n;
+  document.getElementById('n-total').textContent = n * n * n;
+  document.getElementById('n-nonassoc').textContent = data.naCount;
+  document.getElementById('n-assoc').textContent = data.aCount;
+  document.getElementById('t-factor').textContent = data.naCount / 168;
+  document.getElementById('n-planes').textContent = P(k);
+  document.getElementById('n-oct').textContent = P(k) - 7 * P(k-1);
+  document.getElementById('n-quasi').textContent = 7 * P(k-1);
+
+  // For k>3, subsample to keep rendering fast
+  let triples = data.triples;
+  let maxPoints = 50000;
+  if (triples.length > maxPoints) {
+    // Stratified sample: keep all NA, subsample A
+    const naTriples = triples.filter(t => t.na);
+    const aTriples = triples.filter(t => !t.na);
+    const aSampleSize = Math.min(aTriples.length, maxPoints - naTriples.length);
+    const aSubset = [];
+    const step = aTriples.length / aSampleSize;
+    for (let idx = 0; idx < aSampleSize; idx++) {
+      aSubset.push(aTriples[Math.floor(idx * step)]);
+    }
+    triples = [...naTriples, ...aSubset];
+  }
+
+  // Create geometry
+  const naPositions = [];
+  const aPositions = [];
+  const scale = 8.0 / n;
+
+  for (const t of triples) {
+    const x = (t.i - n/2) * scale;
+    const y = (t.j - n/2) * scale;
+    const z = (t.k - n/2) * scale;
+    if (t.na) naPositions.push(x, y, z);
+    else aPositions.push(x, y, z);
+  }
+
+  // Non-associative points (red)
+  if (naPositions.length > 0) {
+    const naGeom = new THREE.BufferGeometry();
+    naGeom.setAttribute('position', new THREE.Float32BufferAttribute(naPositions, 3));
+    const naMat = new THREE.PointsMaterial({
+      color: 0xff5252, size: pointSize * 0.01, sizeAttenuation: true,
+      transparent: true, opacity: 0.85
+    });
+    const naPoints = new THREE.Points(naGeom, naMat);
+    naPoints.userData = { type: 'na' };
+    pointsGroup.add(naPoints);
+  }
+
+  // Associative points (blue)
+  if (aPositions.length > 0) {
+    const aGeom = new THREE.BufferGeometry();
+    aGeom.setAttribute('position', new THREE.Float32BufferAttribute(aPositions, 3));
+    const aMat = new THREE.PointsMaterial({
+      color: 0x448aff, size: pointSize * 0.008, sizeAttenuation: true,
+      transparent: true, opacity: 0.5
+    });
+    const aPoints = new THREE.Points(aGeom, aMat);
+    aPoints.userData = { type: 'a' };
+    pointsGroup.add(aPoints);
+  }
+
+  // Axes
+  const axesSize = 5;
+  const axesMat = new THREE.LineBasicMaterial({ color: 0x333333 });
+  for (const [start, end, label] of [
+    [[-axesSize,0,0],[axesSize,0,0], 'i'],
+    [[0,-axesSize,0],[0,axesSize,0], 'j'],
+    [[0,0,-axesSize],[0,0,axesSize], 'k']
+  ]) {
+    const geom = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(...start), new THREE.Vector3(...end)
+    ]);
+    pointsGroup.add(new THREE.Line(geom, axesMat));
+  }
+
+  updateVisibility();
+}
+
+function updateVisibility() {
+  for (const child of pointsGroup.children) {
+    if (child.userData.type === 'na') child.visible = showNonAssoc;
+    if (child.userData.type === 'a') child.visible = showAssoc;
+  }
+}
+
+// ─── Event handlers ───
+document.getElementById('k-slider').addEventListener('input', (e) => {
+  currentK = parseInt(e.target.value);
+  const info = document.getElementById('info-content');
+  if (currentK > 4) {
+    info.textContent = `Computing k=${currentK}... (${((1<<currentK)-1)**3} triples)`;
+  }
+  setTimeout(() => buildPoints(currentK), 10);
+});
+
+document.getElementById('size-slider').addEventListener('input', (e) => {
+  pointSize = parseFloat(e.target.value);
+  document.getElementById('size-display').textContent = pointSize;
+  for (const child of pointsGroup.children) {
+    if (child.material && child.material.size !== undefined) {
+      child.material.size = pointSize * (child.userData.type === 'na' ? 0.01 : 0.008);
+    }
+  }
+});
+
+document.getElementById('speed-slider').addEventListener('input', (e) => {
+  controls.autoRotateSpeed = parseFloat(e.target.value);
+  document.getElementById('speed-display').textContent = e.target.value;
+});
+
+document.getElementById('toggle-assoc').addEventListener('change', (e) => {
+  showAssoc = e.target.checked;
+  updateVisibility();
+});
+
+document.getElementById('toggle-nonassoc').addEventListener('change', (e) => {
+  showNonAssoc = e.target.checked;
+  updateVisibility();
+});
+
+document.getElementById('toggle-autorotate').addEventListener('change', (e) => {
+  controls.autoRotate = e.target.checked;
+});
+
+// Click handler
+renderer.domElement.addEventListener('click', (event) => {
+  if (!currentData) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, camera);
+  raycaster.params.Points.threshold = 0.3;
+  const intersects = raycaster.intersectObjects(pointsGroup.children.filter(c => c.visible));
+
+  if (intersects.length > 0) {
+    const hit = intersects[0];
+    const idx = hit.index;
+    const pos = hit.object.geometry.attributes.position;
+    const n = currentData.n;
+    const scale = 8.0 / n;
+
+    // Reverse-map position to triple
+    const ti = Math.round(pos.getX(idx) / scale + n/2);
+    const tj = Math.round(pos.getY(idx) / scale + n/2);
+    const tk = Math.round(pos.getZ(idx) / scale + n/2);
+
+    const na = isNonAssociative(ti, tj, tk, currentK);
+    const alpha = cdSigma(ti, tj, currentK) * cdSigma(ti ^ tj, tk, currentK);
+    const beta = cdSigma(tj, tk, currentK) * cdSigma(ti, tj ^ tk, currentK);
+    const prodIdx = ti ^ tj ^ tk;
+
+    const infoEl = document.getElementById('info-content');
+    infoEl.innerHTML = `
+      <b>Triple:</b> (e<sub>${ti}</sub>, e<sub>${tj}</sub>, e<sub>${tk}</sub>)<br>
+      <b>Status:</b> <span style="color:${na ? '#ff5252' : '#448aff'}">${na ? 'NON-ASSOCIATIVE' : 'ASSOCIATIVE'}</span><br>
+      <b>α = σ(${ti},${tj})·σ(${ti^tj},${tk}) = ${alpha}</b><br>
+      <b>β = σ(${tj},${tk})·σ(${ti},${tj^tk}) = ${beta}</b><br>
+      <b>α - β = ${alpha - beta}</b> → ‖[a,b,c]‖ = ${Math.abs(alpha - beta)}<br>
+      <b>Product index:</b> ${ti}⊕${tj}⊕${tk} = ${prodIdx}<br>
+      <b>Linear indep:</b> ${(ti ^ tj) !== 0 && (tj ^ tk) !== 0 && (ti ^ tk) !== 0 && ti !== tj && tj !== tk && ti !== tk ? 'Yes (off Fano line)' : 'No (on Fano line or degenerate)'}
+    `;
+  }
+});
+
+// ─── Resize ───
+window.addEventListener('resize', () => {
+  camera.aspect = container.clientWidth / container.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(container.clientWidth, container.clientHeight);
+});
+
+// ─── Animate ───
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// ─── Init ───
+buildPoints(3);
+animate();
+</script>
+</body>
+</html>
