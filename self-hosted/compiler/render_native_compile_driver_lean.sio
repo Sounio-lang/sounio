@@ -7314,6 +7314,138 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
         return 0
     }
 
+    // read_file(path) → pointer to null-terminated content (stack-allocated 1MB buffer)
+    if mc_src_eq_at(name_s, name_len, "read_file") {
+        mc_parse_expr()
+        MC_POS = MC_POS + 1
+        // rax = path; open, read, close
+        we(0x48); we(0x89); we(0xc7)  // mov rdi, rax
+        we(0x48); we(0x31); we(0xf6)  // xor rsi, rsi (O_RDONLY)
+        we(0x48); we(0x31); we(0xd2)  // xor rdx, rdx
+        we(0xb8); we32(2)             // mov eax, 2 (SYS_OPEN)
+        we(0x0f); we(0x05)            // syscall → fd in rax
+        we(0x48); we(0x89); we(0xc7)  // mov rdi, rax (fd)
+        we(0x48); we(0x81); we(0xec); we32(1048576) // sub rsp, 1MB
+        we(0x48); we(0x89); we(0xe6)  // mov rsi, rsp
+        we(0xba); we32(1048576)       // mov edx, 1048576
+        we(0xb8); we32(0)             // mov eax, 0 (SYS_READ)
+        we(0x0f); we(0x05)            // syscall → bytes_read
+        // Null-terminate
+        we(0xC6); we(0x04); we(0x04); we(0x00) // mov byte [rsp+rax], 0
+        // Close fd
+        we(0xb8); we32(3)             // mov eax, 3 (SYS_CLOSE)
+        we(0x0f); we(0x05)            // syscall
+        we(0x48); we(0x89); we(0xe0)  // mov rax, rsp (return buffer ptr)
+        MC_EXPR_IS_F64 = 0
+        return 0
+    }
+
+    // write_file(path, buf, len) → bytes written
+    if mc_src_eq_at(name_s, name_len, "write_file") {
+        // Parse 3 args: path, buffer, length
+        mc_parse_expr()
+        let wf_path = mc_alloc_slot()
+        mc_emit_store_rax(wf_path)
+        MC_POS = MC_POS + 1  // skip comma
+        mc_parse_expr()
+        let wf_buf = mc_alloc_slot()
+        mc_emit_store_rax(wf_buf)
+        MC_POS = MC_POS + 1  // skip comma
+        mc_parse_expr()
+        let wf_len = mc_alloc_slot()
+        mc_emit_store_rax(wf_len)
+        MC_POS = MC_POS + 1  // skip )
+        // open(path, O_WRONLY|O_CREAT|O_TRUNC=577, 0644=420)
+        mc_emit_load_rax(wf_path)
+        we(0x48); we(0x89); we(0xc7)  // mov rdi, rax
+        we(0x48); we(0xc7); we(0xc6); we32(577)  // mov rsi, 577
+        we(0x48); we(0xc7); we(0xc2); we32(420)  // mov rdx, 420
+        we(0xb8); we32(2)             // mov eax, 2 (SYS_OPEN)
+        we(0x0f); we(0x05)            // syscall → fd
+        we(0x48); we(0x89); we(0xc7)  // mov rdi, rax (fd)
+        // write(fd, buf, len)
+        mc_emit_load_rax(wf_buf)
+        we(0x48); we(0x89); we(0xc6)  // mov rsi, rax (buf)
+        mc_emit_load_rax(wf_len)
+        we(0x48); we(0x89); we(0xc2)  // mov rdx, rax (len)
+        we(0xb8); we32(1)             // mov eax, 1 (SYS_WRITE)
+        we(0x0f); we(0x05)            // syscall
+        we(0x50)                      // push rax (bytes written)
+        // close(fd)
+        we(0xb8); we32(3)             // mov eax, 3 (SYS_CLOSE)
+        we(0x0f); we(0x05)            // syscall
+        we(0x58)                      // pop rax (restore bytes written)
+        MC_EXPR_IS_F64 = 0
+        return 0
+    }
+
+    // str_len(s) → length (inline strlen)
+    if mc_src_eq_at(name_s, name_len, "str_len") {
+        mc_parse_expr()
+        MC_POS = MC_POS + 1
+        // rax = string ptr; count bytes until 0
+        we(0x48); we(0x89); we(0xC7)  // mov rdi, rax
+        we(0x31); we(0xC9)            // xor ecx, ecx
+        // loop: cmp byte [rdi+rcx], 0; je done; inc rcx; jmp loop
+        we(0x80); we(0x3C); we(0x0F); we(0x00) // cmp byte [rdi+rcx], 0
+        we(0x74); we(0x04)            // je +4
+        we(0x48); we(0xFF); we(0xC1)  // inc rcx
+        we(0xEB); we(0xF5)            // jmp -11
+        we(0x48); we(0x89); we(0xC8)  // mov rax, rcx
+        MC_EXPR_IS_F64 = 0
+        return 0
+    }
+
+    // str_char_at(s, idx) → byte value at index
+    if mc_src_eq_at(name_s, name_len, "str_char_at") {
+        mc_parse_expr()
+        let sca_str = mc_alloc_slot()
+        mc_emit_store_rax(sca_str)
+        MC_POS = MC_POS + 1  // comma
+        mc_parse_expr()
+        MC_POS = MC_POS + 1  // )
+        // rax = index, sca_str = string ptr
+        we(0x48); we(0x89); we(0xC1)  // mov rcx, rax (index)
+        mc_emit_load_rax(sca_str)
+        we(0x48); we(0x0F); we(0xB6); we(0x04); we(0x08) // movzx rax, byte [rax+rcx]
+        MC_EXPR_IS_F64 = 0
+        return 0
+    }
+
+    // str_eq(a, b) → 1 if equal, 0 if not (inline strcmp)
+    if mc_src_eq_at(name_s, name_len, "str_eq") {
+        mc_parse_expr()
+        let seq_a = mc_alloc_slot()
+        mc_emit_store_rax(seq_a)
+        MC_POS = MC_POS + 1  // comma
+        mc_parse_expr()
+        MC_POS = MC_POS + 1  // )
+        // rax = b, seq_a = a
+        we(0x48); we(0x89); we(0xC6)  // mov rsi, rax (b)
+        mc_emit_load_rax(seq_a)
+        we(0x48); we(0x89); we(0xC7)  // mov rdi, rax (a)
+        // loop: movzx cl, [rdi]; movzx dl, [rsi]; cmp cl, dl; jne fail
+        //       test cl, cl; jz pass; inc rdi; inc rsi; jmp loop
+        // fail: xor eax, eax; jmp end; pass: mov eax, 1; end:
+        we(0x0F); we(0xB6); we(0x0F)  // movzx ecx, byte [rdi]
+        we(0x0F); we(0xB6); we(0x16)  // movzx edx, byte [rsi]
+        we(0x38); we(0xD1)            // cmp cl, dl
+        we(0x75); we(0x0C)            // jne fail (+12)
+        we(0x84); we(0xC9)            // test cl, cl
+        we(0x74); we(0x0C)            // jz pass (+12)
+        we(0x48); we(0xFF); we(0xC7)  // inc rdi
+        we(0x48); we(0xFF); we(0xC6)  // inc rsi
+        we(0xEB); we(0xEA)            // jmp loop (-22)
+        // fail:
+        we(0x31); we(0xC0)            // xor eax, eax
+        we(0xEB); we(0x05)            // jmp end (+5)
+        // pass:
+        we(0xB8); we32(1)             // mov eax, 1
+        // end:
+        MC_EXPR_IS_F64 = 0
+        return 0
+    }
+
     // General function call: evaluate args into rdi, rsi, rdx, rcx, r8, r9
     var arg_slots: [i64; 8] = [0; 8]
     var arg_count: i64 = 0
@@ -7695,6 +7827,23 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
         we(0x59)
         we(0x48); we(0x01); we(0xC8)
         we(0x48); we(0x8B); we(0x00)
+    }
+    // Handle 'as' cast: expr as i8, expr as i64, expr as usize, expr as f64
+    if MP_KIND[MC_POS as usize] == 27 {
+        MC_POS = MC_POS + 1  // skip 'as'
+        let cast_s = MP_START[MC_POS as usize]
+        let cast_l = MP_END[MC_POS as usize] - cast_s
+        if mc_src_eq_at(cast_s, cast_l, "i8") {
+            // Truncate to byte: movzx eax, al (zero-extend low byte)
+            we(0x0F); we(0xB6); we(0xC0)
+        } else if mc_src_eq_at(cast_s, cast_l, "f64") {
+            // i64 → f64: cvtsi2sd xmm0, rax; movq rax, xmm0
+            we(0xF2); we(0x48); we(0x0F); we(0x2A); we(0xC0)
+            we(0x66); we(0x48); we(0x0F); we(0x7E); we(0xC0)
+            MC_EXPR_IS_F64 = 1
+        }
+        // i64, usize, i32: identity (already 64-bit register)
+        MC_POS = MC_POS + 1  // skip type name
     }
     // Pratt operator loop
     while true {
