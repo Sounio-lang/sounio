@@ -66,8 +66,8 @@ var MP_FLOAT_INT: [i64; 65536] = [0; 65536]    // integer part
 var MP_FLOAT_FRAC: [i64; 65536] = [0; 65536]   // fractional numerator
 var MP_FLOAT_DENOM: [i64; 65536] = [0; 65536]  // fractional denominator (10^digits)
 
-fn ltp_byte(idx: i64) -> i8 with Panic {
-    if idx >= 0 && idx < LTP_N { LEAN_SOURCE[idx as usize] } else { 0 as i8 }
+fn ltp_byte(idx: i64) -> i64 with Panic {
+    if idx >= 0 && idx < LTP_N { LEAN_SOURCE[idx as usize] as i64 } else { 0 }
 }
 
 // Same-module token setters (replaces cross-module parser_set_token_* calls)
@@ -85,15 +85,15 @@ fn mp_set_int_value(idx: i64, val: i64) with Mut, Panic {
 }
 
 // Boot4-safe helpers (replaces imported is_digit/is_ident_start/is_ident_continue)
-fn ltp_is_digit(ch: i8) -> bool { ch >= 48 && ch <= 57 }
-fn ltp_is_hex_digit(ch: i8) -> bool {
+fn ltp_is_digit(ch: i64) -> bool { ch >= 48 && ch <= 57 }
+fn ltp_is_hex_digit(ch: i64) -> bool {
     (ch >= 48 && ch <= 57) || (ch >= 97 && ch <= 102) || (ch >= 65 && ch <= 70)
 }
-fn ltp_is_bin_digit(ch: i8) -> bool { ch == 48 || ch == 49 }
-fn ltp_is_alpha(ch: i8) -> bool {
+fn ltp_is_bin_digit(ch: i64) -> bool { ch == 48 || ch == 49 }
+fn ltp_is_alpha(ch: i64) -> bool {
     (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch == 95
 }
-fn ltp_is_alnum(ch: i8) -> bool { ltp_is_alpha(ch) || ltp_is_digit(ch) }
+fn ltp_is_alnum(ch: i64) -> bool { ltp_is_alpha(ch) || ltp_is_digit(ch) }
 
 fn ltp_scan_string() with Mut, Div, Panic {
     let ss = LTP_POS
@@ -110,22 +110,27 @@ fn ltp_scan_string() with Mut, Div, Panic {
     LTP_TC = LTP_TC + 1
 }
 
-fn ltp_scan_number(ch: i8) with Mut, Div, Panic {
+fn ltp_scan_number(ch: i64) with Mut, Div, Panic {
     let ns = LTP_POS
     let nl = LTP_LINE
     var nk: i64 = 121  // IntLit
-    if ch == 48 && LTP_POS + 1 < LTP_N && (ltp_byte(LTP_POS + 1) == 120 || ltp_byte(LTP_POS + 1) == 88) {
+    let nx_n = if LTP_POS + 1 < LTP_N { ltp_byte(LTP_POS + 1) } else { 0 }
+    if ch == 48 && (nx_n == 120 || nx_n == 88) {
         LTP_POS = LTP_POS + 2
-        while LTP_POS < LTP_N && (ltp_is_hex_digit(ltp_byte(LTP_POS)) || ltp_byte(LTP_POS) == 95) { LTP_POS = LTP_POS + 1 }
-    } else if ch == 48 && LTP_POS + 1 < LTP_N && (ltp_byte(LTP_POS + 1) == 98 || ltp_byte(LTP_POS + 1) == 66) {
+        while LTP_POS < LTP_N { let b = ltp_byte(LTP_POS); if !ltp_is_hex_digit(b) && b != 95 { break }; LTP_POS = LTP_POS + 1 }
+    } else if ch == 48 && (nx_n == 98 || nx_n == 66) {
         LTP_POS = LTP_POS + 2
-        while LTP_POS < LTP_N && (ltp_is_bin_digit(ltp_byte(LTP_POS)) || ltp_byte(LTP_POS) == 95) { LTP_POS = LTP_POS + 1 }
+        while LTP_POS < LTP_N { let b = ltp_byte(LTP_POS); if !ltp_is_bin_digit(b) && b != 95 { break }; LTP_POS = LTP_POS + 1 }
     } else {
-        while LTP_POS < LTP_N && (ltp_is_digit(ltp_byte(LTP_POS)) || ltp_byte(LTP_POS) == 95) { LTP_POS = LTP_POS + 1 }
-        if LTP_POS < LTP_N && ltp_byte(LTP_POS) == 46 && LTP_POS + 1 < LTP_N && ltp_is_digit(ltp_byte(LTP_POS + 1)) {
-            nk = 122  // FloatLit
-            LTP_POS = LTP_POS + 1
-            while LTP_POS < LTP_N && (ltp_is_digit(ltp_byte(LTP_POS)) || ltp_byte(LTP_POS) == 95) { LTP_POS = LTP_POS + 1 }
+        while LTP_POS < LTP_N { let b = ltp_byte(LTP_POS); if !ltp_is_digit(b) && b != 95 { break }; LTP_POS = LTP_POS + 1 }
+        if LTP_POS < LTP_N {
+            let dot_b = ltp_byte(LTP_POS)
+            let dot_nx = if LTP_POS + 1 < LTP_N { ltp_byte(LTP_POS + 1) } else { 0 }
+            if dot_b == 46 && ltp_is_digit(dot_nx) {
+                nk = 122  // FloatLit
+                LTP_POS = LTP_POS + 1
+                while LTP_POS < LTP_N { let b = ltp_byte(LTP_POS); if !ltp_is_digit(b) && b != 95 { break }; LTP_POS = LTP_POS + 1 }
+            }
         }
     }
     LTP_COL = LTP_COL + (LTP_POS - ns)
@@ -138,14 +143,14 @@ fn ltp_scan_number(ch: i8) with Mut, Div, Panic {
 // keyword_lookup_cs: look up keyword from LEAN_SOURCE at offset `start` with length `len`
 // Returns raw integer token kind matching MC_TK_* constants. Boot4-safe (no TokenKind enum).
 fn keyword_lookup_cs(start: i64, len: i64) -> i64 with Panic {
-    let b0 = if len > 0 { ltp_byte(start) } else { 0 as i8 }
-    let b1 = if len > 1 { ltp_byte(start + 1) } else { 0 as i8 }
-    let b2 = if len > 2 { ltp_byte(start + 2) } else { 0 as i8 }
-    let b3 = if len > 3 { ltp_byte(start + 3) } else { 0 as i8 }
-    let b4 = if len > 4 { ltp_byte(start + 4) } else { 0 as i8 }
-    let b5 = if len > 5 { ltp_byte(start + 5) } else { 0 as i8 }
-    let b6 = if len > 6 { ltp_byte(start + 6) } else { 0 as i8 }
-    let b7 = if len > 7 { ltp_byte(start + 7) } else { 0 as i8 }
+    let b0 = if len > 0 { ltp_byte(start) } else { 0 }
+    let b1 = if len > 1 { ltp_byte(start + 1) } else { 0 }
+    let b2 = if len > 2 { ltp_byte(start + 2) } else { 0 }
+    let b3 = if len > 3 { ltp_byte(start + 3) } else { 0 }
+    let b4 = if len > 4 { ltp_byte(start + 4) } else { 0 }
+    let b5 = if len > 5 { ltp_byte(start + 5) } else { 0 }
+    let b6 = if len > 6 { ltp_byte(start + 6) } else { 0 }
+    let b7 = if len > 7 { ltp_byte(start + 7) } else { 0 }
     // Length 2: fn=7, if=17, in=120(ident), as=27
     if len == 2 {
         if b0 == 102 && b1 == 110 { return 7 }
@@ -202,9 +207,16 @@ fn keyword_lookup_cs(start: i64, len: i64) -> i64 with Panic {
 }
 
 fn ltp_scan_ident() with Mut, Div, Panic {
+    print("I")
     let is = LTP_POS
     let il = LTP_LINE
-    while LTP_POS < LTP_N && ltp_is_alnum(ltp_byte(LTP_POS)) { LTP_POS = LTP_POS + 1 }
+    while LTP_POS < LTP_N {
+        let b = LEAN_SOURCE[LTP_POS as usize] as i64
+        let alnum = (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95 || (b >= 48 && b <= 57)
+        if !alnum { break }
+        LTP_POS = LTP_POS + 1
+    }
+    print("K")
     let ilen = LTP_POS - is
     LTP_COL = LTP_COL + ilen
     let kind = keyword_lookup_cs(is, ilen)
@@ -213,12 +225,12 @@ fn ltp_scan_ident() with Mut, Div, Panic {
     LTP_TC = LTP_TC + 1
 }
 
-fn ltp_scan_op(ch: i8) -> i64 with Mut, Div, Panic {
+fn ltp_scan_op(ch: i64) -> i64 with Mut, Div, Panic {
     var m: i64 = 0
     var k: i64 = 1  // 1 = Error
     var a: i64 = 1
-    let c1 = if LTP_POS + 1 < LTP_N { ltp_byte(LTP_POS + 1) } else { 0 as i8 }
-    let c2 = if LTP_POS + 2 < LTP_N { ltp_byte(LTP_POS + 2) } else { 0 as i8 }
+    let c1 = if LTP_POS + 1 < LTP_N { ltp_byte(LTP_POS + 1) } else { 0 }
+    let c2 = if LTP_POS + 2 < LTP_N { ltp_byte(LTP_POS + 2) } else { 0 }
     // 3-char operators (must check before 2-char)
     if m == 0 && ch == 60 && c1 == 60 && c2 == 61 { k = 167; a = 3; m = 1 }   // <<=  ShlEq
     if m == 0 && ch == 62 && c1 == 62 && c2 == 61 { k = 168; a = 3; m = 1 }   // >>=  ShrEq
@@ -282,21 +294,39 @@ fn ltp_scan_op(ch: i8) -> i64 with Mut, Div, Panic {
 
 fn lean_lex_to_parser() -> i64 with Mut, Div, Panic {
     LTP_N = LEAN_SOURCE_LEN
-    LTP_POS = 0; LTP_LINE = 1; LTP_COL = 1; LTP_TC = 0
+    LTP_POS = 0
+    LTP_LINE = 1
+    LTP_COL = 1
+    LTP_TC = 0
+    print("lex: globals set n=")
+    print_int(LTP_N)
+    print("\n")
     while LTP_POS < LTP_N {
+        print("[")
+        print_int(LTP_POS)
+        print(":")
+        print_int(ltp_byte(LTP_POS))
+        print("]")
         let ch = ltp_byte(LTP_POS)
         if ch == 32 || ch == 9 || ch == 13 { LTP_POS = LTP_POS + 1; LTP_COL = LTP_COL + 1; continue }
         if ch == 10 { LTP_POS = LTP_POS + 1; LTP_LINE = LTP_LINE + 1; LTP_COL = 1; continue }
-        if ch == 47 && LTP_POS + 1 < LTP_N && ltp_byte(LTP_POS + 1) == 47 {
+        let nx = if LTP_POS + 1 < LTP_N { ltp_byte(LTP_POS + 1) } else { 0 }
+        if ch == 47 && nx == 47 {
             LTP_POS = LTP_POS + 2
-            while LTP_POS < LTP_N && ltp_byte(LTP_POS) != 10 { LTP_POS = LTP_POS + 1 }
+            while LTP_POS < LTP_N {
+                if ltp_byte(LTP_POS) == 10 { break }
+                LTP_POS = LTP_POS + 1
+            }
             continue
         }
-        if ch == 47 && LTP_POS + 1 < LTP_N && ltp_byte(LTP_POS + 1) == 42 {
-            var depth: i64 = 1; LTP_POS = LTP_POS + 2
+        if ch == 47 && nx == 42 {
+            var depth: i64 = 1
+            LTP_POS = LTP_POS + 2
             while LTP_POS + 1 < LTP_N && depth > 0 {
-                if ltp_byte(LTP_POS) == 47 && ltp_byte(LTP_POS + 1) == 42 { depth = depth + 1; LTP_POS = LTP_POS + 2; continue }
-                if ltp_byte(LTP_POS) == 42 && ltp_byte(LTP_POS + 1) == 47 { depth = depth - 1; LTP_POS = LTP_POS + 2; continue }
+                let b0 = ltp_byte(LTP_POS)
+                let b1 = ltp_byte(LTP_POS + 1)
+                if b0 == 47 && b1 == 42 { depth = depth + 1; LTP_POS = LTP_POS + 2; continue }
+                if b0 == 42 && b1 == 47 { depth = depth - 1; LTP_POS = LTP_POS + 2; continue }
                 if ltp_byte(LTP_POS) == 10 { LTP_LINE = LTP_LINE + 1; LTP_COL = 1 }
                 LTP_POS = LTP_POS + 1
             }
@@ -655,11 +685,11 @@ fn lex_to_parser(source_len: i64, file_id: i64) -> i64 with Mut, Div, Panic {
                 let sc = LEAN_SOURCE[pos as usize] as i64
                 if sc == 92 && pos + 1 < source_len {
                     let esc = LEAN_SOURCE[(pos + 1) as usize] as i64
-                    if esc == 110 { if si < 256 { tok.text[si as usize] = 10 as i8; si = si + 1 } }
+                    if esc == 110 { if si < 256 { tok.text[si as usize] = 10; si = si + 1 } }
                     else if esc == 116 { if si < 256 { tok.text[si as usize] = 9 as i8; si = si + 1 } }
                     else if esc == 92 { if si < 256 { tok.text[si as usize] = 92 as i8; si = si + 1 } }
                     else if esc == 34 { if si < 256 { tok.text[si as usize] = 34 as i8; si = si + 1 } }
-                    else if esc == 48 { if si < 256 { tok.text[si as usize] = 0 as i8; si = si + 1 } }
+                    else if esc == 48 { if si < 256 { tok.text[si as usize] = 0; si = si + 1 } }
                     else { if si < 256 { tok.text[si as usize] = esc as i8; si = si + 1 } }
                     pos = pos + 2; col = col + 2
                 } else {
@@ -1955,7 +1985,7 @@ fn populate_lean_source(path: string) with IO, Mut, Panic, Div {
 // ============================================================================
 
 fn imp_src_byte(idx: i64) -> i8 with Panic {
-    if idx >= 0 && idx < LEAN_SOURCE_LEN { LEAN_SOURCE[idx as usize] } else { 0 as i8 }
+    if idx >= 0 && idx < LEAN_SOURCE_LEN { LEAN_SOURCE[idx as usize] } else { 0 }
 }
 
 fn mc_imp_init_base_dir(path: string) with IO, Mut, Panic, Div {
@@ -1997,7 +2027,7 @@ fn mc_imp_build_fname(path_start: i64, path_len: i64) -> i64 with IO, Mut, Panic
     if is_self_hosted {
         MC_IMP_FNAME[0 as usize] = 115 as i8; MC_IMP_FNAME[1 as usize] = 101 as i8; MC_IMP_FNAME[2 as usize] = 108 as i8; MC_IMP_FNAME[3 as usize] = 102 as i8
         MC_IMP_FNAME[4 as usize] = 45 as i8; MC_IMP_FNAME[5 as usize] = 104 as i8; MC_IMP_FNAME[6 as usize] = 111 as i8; MC_IMP_FNAME[7 as usize] = 115 as i8
-        MC_IMP_FNAME[8 as usize] = 116 as i8; MC_IMP_FNAME[9 as usize] = 101 as i8; MC_IMP_FNAME[10 as usize] = 100 as i8; MC_IMP_FNAME[11 as usize] = 47 as i8
+        MC_IMP_FNAME[8 as usize] = 116 as i8; MC_IMP_FNAME[9 as usize] = 101 as i8; MC_IMP_FNAME[10 as usize] = 100; MC_IMP_FNAME[11 as usize] = 47 as i8
         bi = 12
         var pi: i64 = seg_end
         if pi + 1 < path_len && imp_src_byte(path_start + pi) as i64 == 58 && imp_src_byte(path_start + pi + 1) as i64 == 58 { pi = pi + 2 }
@@ -2012,7 +2042,7 @@ fn mc_imp_build_fname(path_start: i64, path_len: i64) -> i64 with IO, Mut, Panic
             } else { MC_IMP_FNAME[bi as usize] = c as i8; bi = bi + 1; pi = pi + 1 }
         }
     } else if is_stdlib {
-        MC_IMP_FNAME[0 as usize] = 115 as i8; MC_IMP_FNAME[1 as usize] = 116 as i8; MC_IMP_FNAME[2 as usize] = 100 as i8; MC_IMP_FNAME[3 as usize] = 108 as i8
+        MC_IMP_FNAME[0 as usize] = 115 as i8; MC_IMP_FNAME[1 as usize] = 116 as i8; MC_IMP_FNAME[2 as usize] = 100; MC_IMP_FNAME[3 as usize] = 108 as i8
         MC_IMP_FNAME[4 as usize] = 105 as i8; MC_IMP_FNAME[5 as usize] = 98 as i8; MC_IMP_FNAME[6 as usize] = 47 as i8
         bi = 7
         var pi2: i64 = seg_end
@@ -2046,7 +2076,7 @@ fn mc_imp_build_fname(path_start: i64, path_len: i64) -> i64 with IO, Mut, Panic
     MC_IMP_FNAME[bi as usize] = 115 as i8; bi = bi + 1
     MC_IMP_FNAME[bi as usize] = 105 as i8; bi = bi + 1
     MC_IMP_FNAME[bi as usize] = 111 as i8; bi = bi + 1
-    MC_IMP_FNAME[bi as usize] = 0 as i8
+    MC_IMP_FNAME[bi as usize] = 0
     bi
 }
 
@@ -2084,13 +2114,13 @@ fn mc_imp_record_loaded(fname_len: i64) with Mut, Panic {
 fn mc_imp_append_file(fname_len: i64) with IO, Mut, Panic, Div {
     // Copy MC_IMP_FNAME into a local buffer for str_from_bytes
     // (boot4 cannot pass global [i8;N] arrays as function arguments directly)
-    var local_fname: [i8; 512] = [0 as i8; 512]
+    var local_fname: [i8; 512] = [0; 512]
     var cfi: i64 = 0
     while cfi < fname_len && cfi < 511 {
         local_fname[cfi as usize] = MC_IMP_FNAME[cfi as usize]
         cfi = cfi + 1
     }
-    local_fname[fname_len as usize] = 0 as i8
+    local_fname[fname_len as usize] = 0
     let fpath = str_from_bytes(local_fname, fname_len)
     let fsz = file_size(fpath)
     if fsz <= 0 {
@@ -2101,7 +2131,7 @@ fn mc_imp_append_file(fname_len: i64) with IO, Mut, Panic, Div {
     }
     let fraw = read_file(fpath)
     if LEAN_SOURCE_LEN > 0 && LEAN_SOURCE_LEN < 1048576 {
-        LEAN_SOURCE[LEAN_SOURCE_LEN as usize] = 10 as i8
+        LEAN_SOURCE[LEAN_SOURCE_LEN as usize] = 10
         LEAN_SOURCE_LEN = LEAN_SOURCE_LEN + 1
     }
     var ci: i64 = 0
@@ -3761,7 +3791,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
            callee_name.buf[0 as usize] == (112 as i8) &&
            callee_name.buf[1 as usize] == (114 as i8) &&
            callee_name.buf[2 as usize] == (105 as i8) &&
-           callee_name.buf[3 as usize] == (110 as i8) &&
+           callee_name.buf[3 as usize] == (110) &&
            callee_name.buf[4 as usize] == (116 as i8) {
             let pargs: &Option<Box<ExprList>> = &expr.args
             match *pargs {
@@ -5175,7 +5205,7 @@ fn mc_is_alpha(ch: i8) -> bool {
 fn mc_is_alnum(ch: i8) -> bool { mc_is_alpha(ch) || mc_is_digit(ch) }
 
 fn mc_src_byte(idx: i64) -> i8 with Panic {
-    if idx >= 0 && idx < LEAN_SOURCE_LEN { LEAN_SOURCE[idx as usize] } else { 0 as i8 }
+    if idx >= 0 && idx < LEAN_SOURCE_LEN { LEAN_SOURCE[idx as usize] } else { 0 }
 }
 
 // Keyword lookup: returns token kind integer directly (no enum)
@@ -5183,13 +5213,13 @@ fn mc_src_byte(idx: i64) -> i8 with Panic {
 // 24=Continue, 25=Return, 27=As, 32=True, 33=False, 42=With, 120=Ident
 fn mc_kw_lookup(start: i64, len: i64) -> i64 with Panic {
     let b0 = mc_src_byte(start)
-    let b1 = if len > 1 { mc_src_byte(start + 1) } else { 0 as i8 }
-    let b2 = if len > 2 { mc_src_byte(start + 2) } else { 0 as i8 }
-    let b3 = if len > 3 { mc_src_byte(start + 3) } else { 0 as i8 }
-    let b4 = if len > 4 { mc_src_byte(start + 4) } else { 0 as i8 }
-    let b5 = if len > 5 { mc_src_byte(start + 5) } else { 0 as i8 }
-    let b6 = if len > 6 { mc_src_byte(start + 6) } else { 0 as i8 }
-    let b7 = if len > 7 { mc_src_byte(start + 7) } else { 0 as i8 }
+    let b1 = if len > 1 { mc_src_byte(start + 1) } else { 0 }
+    let b2 = if len > 2 { mc_src_byte(start + 2) } else { 0 }
+    let b3 = if len > 3 { mc_src_byte(start + 3) } else { 0 }
+    let b4 = if len > 4 { mc_src_byte(start + 4) } else { 0 }
+    let b5 = if len > 5 { mc_src_byte(start + 5) } else { 0 }
+    let b6 = if len > 6 { mc_src_byte(start + 6) } else { 0 }
+    let b7 = if len > 7 { mc_src_byte(start + 7) } else { 0 }
     if len == 2 {
         // fn
         if b0 == 102 && b1 == 110 { return 7 }
@@ -5415,7 +5445,7 @@ fn mc_lex() -> i64 with Mut, Panic, Div {
             continue
         }
         // Operators and punctuation (multi-char first)
-        let c1 = if p + 1 < n { mc_src_byte(p + 1) } else { 0 as i8 }
+        let c1 = if p + 1 < n { mc_src_byte(p + 1) } else { 0 }
         var matched: i64 = 0
         // ==
         if matched == 0 && ch == 61 && c1 == 61 { MP_KIND[tc as usize] = 143; MP_START[tc as usize] = p; MP_END[tc as usize] = p + 2; tc = tc + 1; p = p + 2; matched = 1 }
@@ -6153,10 +6183,10 @@ fn mc_emit_print_str(str_start: i64, str_end: i64) with Mut, Panic, Div {
         let ch = ltp_byte(si)
         if ch == 92 as i8 && si + 1 < str_end {
             let ch2 = ltp_byte(si + 1)
-            if ch2 == 110 as i8 { str_buf[str_len as usize] = 10 as i8 }
+            if ch2 == 110 { str_buf[str_len as usize] = 10 }
             else if ch2 == 116 as i8 { str_buf[str_len as usize] = 9 as i8 }
             else if ch2 == 92 as i8 { str_buf[str_len as usize] = 92 as i8 }
-            else if ch2 == 48 as i8 { str_buf[str_len as usize] = 0 as i8 }
+            else if ch2 == 48 as i8 { str_buf[str_len as usize] = 0 }
             else if ch2 == 34 as i8 { str_buf[str_len as usize] = 34 as i8 }
             else { str_buf[str_len as usize] = ch2 }
             si = si + 2
@@ -6265,10 +6295,10 @@ fn mc_parse_primary() with Mut, Panic, Div {
             let dc = ltp_byte(di)
             if dc == 92 as i8 && di + 1 < se {
                 let dc2 = ltp_byte(di + 1)
-                if dc2 == 110 as i8 { sb[sl as usize] = 10 as i8 }
+                if dc2 == 110 { sb[sl as usize] = 10 }
                 else if dc2 == 116 as i8 { sb[sl as usize] = 9 as i8 }
                 else if dc2 == 92 as i8 { sb[sl as usize] = 92 as i8 }
-                else if dc2 == 48 as i8 { sb[sl as usize] = 0 as i8 }
+                else if dc2 == 48 as i8 { sb[sl as usize] = 0 }
                 else if dc2 == 34 as i8 { sb[sl as usize] = 34 as i8 }
                 else { sb[sl as usize] = dc2 }
                 di = di + 2
@@ -6703,7 +6733,7 @@ fn mc_parse_match_expr() with Mut, Panic, Div {
         if arm_k == MC_TK_IDENT() {
             let arm_s = MP_START[MC_POS as usize]
             let arm_l = MP_END[MC_POS as usize] - arm_s
-            if arm_l == 1 && ltp_byte(arm_s) == 95 as i8 {
+            if arm_l == 1 && ltp_byte(arm_s) == 95 {
                 is_wildcard = true
                 mc_advance()  // consume _
             } else {
@@ -7902,9 +7932,12 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         gpi = gpi + 1
     }
 
-    // Lex source into MP_* token arrays (must happen BEFORE mini_compile;
-    // boot4 codegen for very large functions crashes when lexing is inlined)
+    // Lex source into MP_* token arrays
+    print("render_compile: lex_start\n")
     lean_lex_to_parser()
+    print("render_compile: lex_done tc=")
+    print_int(LTP_TC)
+    print("\n")
 
     // Compile from token arrays
     return mini_compile(output_path)
