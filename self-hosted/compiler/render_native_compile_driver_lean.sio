@@ -7408,24 +7408,38 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
     if mc_src_eq_at(name_s, name_len, "read_file") {
         mc_parse_expr()
         MC_POS = MC_POS + 1
-        // rax = path; open, read, close
-        we(0x48); we(0x89); we(0xc7)  // mov rdi, rax
+        // Read into READ_BUF global (stable BSS address, not callee stack)
+        let rb_gi2 = mc_find_global_src_name("READ_BUF", 8)
+        let rb_addr2 = MC_BSS_BASE() + (if rb_gi2 >= 0 { GLOBAL_OFFSETS[rb_gi2 as usize] } else { 0 })
+        // open(path, O_RDONLY)
+        we(0x48); we(0x89); we(0xc7)  // mov rdi, rax (path)
         we(0x48); we(0x31); we(0xf6)  // xor rsi, rsi (O_RDONLY)
         we(0x48); we(0x31); we(0xd2)  // xor rdx, rdx
         we(0xb8); we32(2)             // mov eax, 2 (SYS_OPEN)
-        we(0x0f); we(0x05)            // syscall → fd in rax
+        we(0x0f); we(0x05)            // syscall → fd
         we(0x48); we(0x89); we(0xc7)  // mov rdi, rax (fd)
-        we(0x48); we(0x81); we(0xec); we32(1048576) // sub rsp, 1MB
-        we(0x48); we(0x89); we(0xe6)  // mov rsi, rsp
-        we(0xba); we32(1048576)       // mov edx, 1048576
+        // read(fd, READ_BUF, 2MB) — read into global BSS, not stack
+        we(0x48); we(0xBE)            // movabs rsi, rb_addr2
+        var lk2: i64 = 0
+        while lk2 < 8 { we((rb_addr2 >> (lk2 * 8)) & 0xFF); lk2 = lk2 + 1 }
+        we(0xba); we32(2097152)       // mov edx, 2MB
         we(0xb8); we32(0)             // mov eax, 0 (SYS_READ)
         we(0x0f); we(0x05)            // syscall → bytes_read
-        // Null-terminate
-        we(0xC6); we(0x04); we(0x04); we(0x00) // mov byte [rsp+rax], 0
-        // Close fd
+        we(0x50)                      // push rax (save bytes_read)
+        // Null-terminate at READ_BUF[bytes_read]
+        we(0x48); we(0xBE)            // movabs rsi, rb_addr2
+        var lk3: i64 = 0
+        while lk3 < 8 { we((rb_addr2 >> (lk3 * 8)) & 0xFF); lk3 = lk3 + 1 }
+        we(0x48); we(0x01); we(0xC6)  // add rsi, rax (rsi = &READ_BUF[bytes_read])
+        we(0xC6); we(0x06); we(0x00)  // mov byte [rsi], 0
+        // close(fd) — rdi still has fd
         we(0xb8); we32(3)             // mov eax, 3 (SYS_CLOSE)
         we(0x0f); we(0x05)            // syscall
-        we(0x48); we(0x89); we(0xe0)  // mov rax, rsp (return buffer ptr)
+        we(0x58)                      // pop rax (bytes_read → but return ptr)
+        // Return READ_BUF BSS address (global pointer — indexable from any frame)
+        we(0x48); we(0xB8)            // movabs rax, rb_addr2
+        var lk4: i64 = 0
+        while lk4 < 8 { we((rb_addr2 >> (lk4 * 8)) & 0xFF); lk4 = lk4 + 1 }
         MC_EXPR_IS_F64 = 0
         MC_EXPR_ELEM_SZ = 1  // read_file returns byte pointer
         return 0
