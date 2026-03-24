@@ -7634,6 +7634,30 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
         MC_CALL_FIX_TARGET[MC_CALL_FIX_COUNT as usize] = fn_idx
         MC_CALL_FIX_COUNT = MC_CALL_FIX_COUNT + 1
         we32(0)  // placeholder
+        // Struct return: copy callee data into caller-owned slots
+        let ret_si = MC_FN_RET_TYPE[fn_idx as usize]
+        if ret_si >= 0 {
+            let flat = MC_ST_FLAT_SIZE[ret_si as usize]
+            // rax = callee struct pointer; copy into new local slots
+            we(0x48); we(0x89); we(0xC2)  // mov rdx, rax (save src ptr)
+            let dst_base = MC_NEXT_SLOT
+            MC_NEXT_SLOT = MC_NEXT_SLOT + flat
+            var ci: i64 = 0
+            while ci < flat {
+                // mov rax, [rdx - ci*8] (contragradiant: callee fields go DOWN)
+                if ci == 0 {
+                    we(0x48); we(0x8B); we(0x02)  // mov rax, [rdx]
+                } else {
+                    we(0x48); we(0x8B); we(0x82)  // mov rax, [rdx + disp32]
+                    let d = 0 - (ci * 8)
+                    we(d & 0xFF); we((d >> 8) & 0xFF); we((d >> 16) & 0xFF); we((d >> 24) & 0xFF)
+                }
+                mc_emit_store_rax(dst_base + flat - 1 - ci)
+                ci = ci + 1
+            }
+            // lea rax, [rbp - (dst_base + flat - 1 + 1)*8] — new base
+            mc_emit_lea_slot(dst_base + flat - 1)
+        }
     } else {
         // Unknown function — emit warning + nop call
         print("mc: unknown fn '")
