@@ -212,6 +212,7 @@ var GL: [i64; 512] = [0; 512]
 var GL_COUNT: i64 = 0
 var GL_BSS_SIZE: i64 = 0
 var GL_BSS_BASE: i64 = 0
+var RET_AGG_BSS_OFF: i64 = 0
 
 // Hash: pack name length + first 6 bytes into i64 (avoids sb()-based comparison during lookup)
 fn gl_name_hash(ns: i64, ne: i64) -> i64 with Panic {
@@ -451,6 +452,21 @@ fn materialize_aggregate_expr_a64() with Mut, Panic, Div {
     }
 }
 
+fn stabilize_return_agg_a64(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
+    var nslots = ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH)
+    if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
+    if nslots <= 0 { return }
+    em32(0xAA0003EA)  // mov x10, x0 (src ptr)
+    emit_imm64_reg_a64(11, GL_BSS_BASE + RET_AGG_BSS_OFF)
+    var i: i64 = 0
+    while i < nslots {
+        em32(0xF9400000 | (i << 10) | (10 << 5) | 0)
+        em32(0xF9000000 | (i << 10) | (11 << 5) | 0)
+        i = i + 1
+    }
+    em32(0xAA0B03E0)  // mov x0, x11
+}
+
 // Load 64-bit immediate into arbitrary register
 fn emit_imm64_reg_a64(rd: i64, v: i64) with Mut {
     let v0 = v & 0xFFFF
@@ -531,6 +547,31 @@ fn arr_storage_slots(h: i64) -> i64 with Div {
     return alen
 }
 
+fn array_lit_count(p0: i64) -> i64 with Panic {
+    var p = p0 + 1
+    var br: i64 = 1
+    var pa: i64 = 0
+    var cu: i64 = 0
+    var commas: i64 = 0
+    var has_elem: i64 = 0
+    while p < TC && br > 0 {
+        let k = TK[p as usize]
+        if br == 1 && pa == 0 && cu == 0 {
+            if k == 28 { commas = commas + 1 }
+            else if k != 42 { has_elem = 1 }
+        }
+        if k == 6 { pa = pa + 1 }
+        if k == 7 { pa = pa - 1 }
+        if k == 8 { cu = cu + 1 }
+        if k == 9 { cu = cu - 1 }
+        if k == 41 { br = br + 1 }
+        if k == 42 { br = br - 1 }
+        p = p + 1
+    }
+    if has_elem == 0 { return 0 }
+    return commas + 1
+}
+
 fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic {
     if src_match(ns, ne - ns, "i8") { return 1 }
     if src_match(ns, ne - ns, "i32") { return 1 }
@@ -553,8 +594,25 @@ fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic {
 fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool {
     if k1 == 0 || k2 == 0 { return true }
     if k1 != k2 { return false }
-    if k1 == 6 || k1 == 7 || k1 == 8 { return h1 == h2 }
+    if k1 == 6 || k1 == 7 { return h1 == h2 }
+    if k1 == 8 {
+        let a1 = arr_hash_alen(h1)
+        let a2 = arr_hash_alen(h2)
+        if arr_hash_esiz(h1) != arr_hash_esiz(h2) { return false }
+        if arr_hash_elem_ty(h1) != arr_hash_elem_ty(h2) { return false }
+        if a1 == 0 || a2 == 0 { return true }
+        return h1 == h2
+    }
     return true
+}
+
+fn ret_agg_nslots(ty: i64, ty_hash: i64) -> i64 with Panic, Div {
+    if ty == 8 { return arr_storage_slots(ty_hash) }
+    if ty == 6 {
+        let si = st_find(ty_hash)
+        if si >= 0 { return st_total_size(si) / 8 }
+    }
+    return 0
 }
 
 fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
@@ -1171,6 +1229,22 @@ fn materialize_aggregate_expr_x86() with Mut, Panic, Div {
     }
 }
 
+fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
+    var nslots = ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH)
+    if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
+    if nslots <= 0 { return }
+    let dst = GL_BSS_BASE + RET_AGG_BSS_OFF
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
+    em(0x48); em(0xb9); em64(dst)  // mov rcx, dst ptr
+    var i: i64 = 0
+    while i < nslots {
+        em(0x48); em(0x8b); em(0x82); em32(i * 8)
+        em(0x48); em(0x89); em(0x81); em32(i * 8)
+        i = i + 1
+    }
+    em(0x48); em(0xb8); em64(dst)
+}
+
 // ─── Emit print("string") ───
 fn emit_print(tok: i64) with Mut, Panic, Div {
     let ss = TS[tok as usize] + 1
@@ -1586,6 +1660,37 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EXPR_TY_HASH = LAST_STMT_TY_HASH
         if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
         else { EXPR_IS_F64 = 0 }
+        return
+    }
+    if k == 41 {
+        let arr_count = array_lit_count(EP)
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + arr_count
+        EP = EP + 1
+        var idx: i64 = 0
+        var elem_ty: i64 = 0
+        var elem_hash: i64 = 0
+        while TK[EP as usize] != 42 && TK[EP as usize] != 0 {
+            compile_or()
+            if idx == 0 {
+                elem_ty = EXPR_TY
+                elem_hash = EXPR_TY_HASH
+            } else {
+                if ty_eq(elem_ty, elem_hash, EXPR_TY, EXPR_TY_HASH) == false {
+                    tc_error(EP - 1, "array literal elements must have the same type")
+                }
+            }
+            emit_store_var(base + arr_count - 1 - idx)
+            idx = idx + 1
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+        }
+        if TK[EP as usize] == 42 { EP = EP + 1 }
+        em(0x48); em(0x8d); em(0x85)
+        em32(0 - (base + arr_count - 1) * 8)
+        EXPR_IS_F64 = 0
+        EXPR_TY = 8
+        EXPR_TY_HASH = arr_ty_hash(arr_count, 8, elem_ty)
+        LAST_ALEN = arr_count
         return
     }
     // Closure: |params| expr  or  |params| { stmts }
@@ -2301,18 +2406,20 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let lesiz = var_find_esiz(ns, ne)
                     let lvi = var_find_idx(ns, ne)
                     var elem_ty = 1
+                    var is_arr_ty = 0
                     if lvi >= 0 {
                         elem_ty = arr_hash_elem_ty(VAR_TY_HASH[lvi as usize])
                         if elem_ty == 0 { elem_ty = 1 }
+                        if VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
                     }
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
                     emit_load_var(slot)  // load ptr into rax
-                    if lalen > 0 && lesiz == 8 {
+                    if is_arr_ty == 1 && lesiz == 8 {
                         em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
                         EXPR_TY = elem_ty
                         EXPR_TY_HASH = 0
                         if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
-                    } else if lalen > 0 && lesiz == 1 {
+                    } else if is_arr_ty == 1 && lesiz == 1 {
                         em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
                         EXPR_TY = 1
                         EXPR_TY_HASH = 0
@@ -3347,12 +3454,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             if lslot >= 0 {
                 let llalen = var_find_alen(ns, ne)
                 let lesiz = var_find_esiz(ns, ne)
+                let lvi = var_find_idx(ns, ne)
+                var is_arr_ty = 0
+                if lvi >= 0 && VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
                 em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
                 em(0x59)  // pop rcx (index)
                 emit_load_var(lslot)  // load base ptr into rax
-                if llalen > 0 && lesiz == 8 {
+                if is_arr_ty == 1 && lesiz == 8 {
                     em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
-                } else if llalen > 0 && lesiz == 1 {
+                } else if is_arr_ty == 1 && lesiz == 1 {
                     em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
                 } else {
                     // Non-array local pointer: byte store
@@ -3409,6 +3519,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         }
         if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, EXPR_TY, EXPR_TY_HASH) == false {
             tc_error(EP - 1, "return type does not match function signature")
+        }
+        if CURRENT_RET_TY == 8 || CURRENT_RET_TY == 6 || EXPR_TY == 8 || EXPR_TY == 6 {
+            stabilize_return_agg_x86(EXPR_TY, EXPR_TY_HASH)
         }
         em(0x48); em(0x81); em(0xc4); em32(4096)
         em(0x5d); em(0xc3)
@@ -4132,6 +4245,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     PATCH_COUNT = 0
     GL_COUNT = 0
     GL_BSS_SIZE = 0
+    RET_AGG_BSS_OFF = 0
     TYPECHECK_FAILED = 0
     var p: i64 = 0
 
@@ -4295,7 +4409,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     }
     p = 0
 
-    // BSS layout: [argc(8)] [argv(8)] [globals...]
+    // BSS layout: [argc(8)] [argv(8)] [globals...] [aggregate return scratch]
+    RET_AGG_BSS_OFF = GL_BSS_SIZE
+    GL_BSS_SIZE = GL_BSS_SIZE + 8192
     // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0
     if TARGET_OS == 2 {
         GL_BSS_BASE = 0x100008000 + 16    // macOS: __DATA segment at 0x100008000
@@ -4353,6 +4469,41 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 q = SCAN_TY_NEXT
             }
             if sig_fi < FN_COUNT { sig_fi = sig_fi + 1 }
+        }
+        p = p + 1
+    }
+
+    // Refine unsized array return signatures from direct top-level `return [ ... ]` literals.
+    p = 0
+    var ret_fi: i64 = 0
+    while p < TC {
+        if TK[p as usize] == 1 {
+            p = p + 1
+            if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
+            var q: i64 = p + 1
+            if TK[q as usize] == 6 { q = q + 1 }
+            while q < TC && TK[q as usize] != 8 { q = q + 1 }
+            if FN_RET_TY[ret_fi as usize] == 8 && arr_hash_alen(FN_RET_HASH[ret_fi as usize]) == 0 {
+                let ret_esiz = arr_hash_esiz(FN_RET_HASH[ret_fi as usize])
+                let ret_elem_ty = arr_hash_elem_ty(FN_RET_HASH[ret_fi as usize])
+                var bd: i64 = 0
+                if TK[q as usize] == 8 { bd = 1; q = q + 1 }
+                while q < TC && bd > 0 {
+                    if TK[q as usize] == 8 { bd = bd + 1; q = q + 1; continue }
+                    if TK[q as usize] == 9 { bd = bd - 1; q = q + 1; continue }
+                    if bd == 1 && TK[q as usize] == 2 && TK[(q + 1) as usize] == 41 {
+                        let ret_alen = array_lit_count(q + 1)
+                        if ret_alen > 0 {
+                            FN_RET_HASH[ret_fi as usize] = arr_ty_hash(ret_alen, ret_esiz, ret_elem_ty)
+                        }
+                        q = TC
+                        bd = 0
+                        continue
+                    }
+                    q = q + 1
+                }
+            }
+            if ret_fi < FN_COUNT { ret_fi = ret_fi + 1 }
         }
         p = p + 1
     }
@@ -4546,6 +4697,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             }
             if LAST_STMT_HAS_VALUE == 0 {
                 em(0x31); em(0xc0)
+            } else if CURRENT_RET_TY == 8 || CURRENT_RET_TY == 6 || LAST_STMT_TY == 8 || LAST_STMT_TY == 6 {
+                stabilize_return_agg_x86(LAST_STMT_TY, LAST_STMT_TY_HASH)
             }
             em(0x48); em(0x81); em(0xc4); em32(4096)
             em(0x5d); em(0xc3)
@@ -5405,6 +5558,36 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         else { EXPR_IS_F64 = 0 }
         return
     }
+    if k == 41 {
+        let arr_count = array_lit_count(EP)
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + arr_count
+        EP = EP + 1
+        var idx: i64 = 0
+        var elem_ty: i64 = 0
+        var elem_hash: i64 = 0
+        while TK[EP as usize] != 42 && TK[EP as usize] != 0 {
+            compile_or_a64()
+            if idx == 0 {
+                elem_ty = EXPR_TY
+                elem_hash = EXPR_TY_HASH
+            } else {
+                if ty_eq(elem_ty, elem_hash, EXPR_TY, EXPR_TY_HASH) == false {
+                    tc_error(EP - 1, "array literal elements must have the same type")
+                }
+            }
+            emit_store_var_a64(base + arr_count - 1 - idx)
+            idx = idx + 1
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+        }
+        if TK[EP as usize] == 42 { EP = EP + 1 }
+        emit_lea_var_a64(base + arr_count - 1)
+        EXPR_IS_F64 = 0
+        EXPR_TY = 8
+        EXPR_TY_HASH = arr_ty_hash(arr_count, 8, elem_ty)
+        LAST_ALEN = arr_count
+        return
+    }
     // Closure stub
     if k == 45 {
         EP = EP + 1
@@ -5889,19 +6072,25 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     let lesiz = var_find_esiz(ns, ne)
                     let lvi = var_find_idx(ns, ne)
                     var elem_ty = 1
+                    var is_arr_ty = 0
                     if lvi >= 0 {
                         elem_ty = arr_hash_elem_ty(VAR_TY_HASH[lvi as usize])
                         if elem_ty == 0 { elem_ty = 1 }
+                        if VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
                     }
                     em32(0xAA0003E9)
                     emit_load_var_a64(slot)
-                    if lalen > 0 && lesiz == 8 {
+                    if is_arr_ty == 1 && lesiz == 8 {
                         em32(0xF8697800)
                         EXPR_TY = elem_ty
                         EXPR_TY_HASH = 0
                         if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
-                    }
-                    else {
+                    } else if is_arr_ty == 1 && lesiz == 1 {
+                        em32(0x38A96800)
+                        EXPR_TY = 1
+                        EXPR_TY_HASH = 0
+                        EXPR_IS_F64 = 0
+                    } else {
                         em32(0x38A96800)
                         EXPR_TY = 1
                         EXPR_TY_HASH = 0
@@ -6507,10 +6696,13 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             if lslot >= 0 {
                 let llalen = var_find_alen(ns, ne)
                 let lesiz = var_find_esiz(ns, ne)
+                let lvi = var_find_idx(ns, ne)
+                var is_arr_ty = 0
+                if lvi >= 0 && VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
                 em32(0xAA0003EA)
                 emit_pop_x1_a64()
                 emit_load_var_a64(lslot)
-                if llalen > 0 && lesiz == 8 { em32(0xF821780A) }
+                if is_arr_ty == 1 && lesiz == 8 { em32(0xF821780A) }
                 else { em32(0x3821680A) }
             } else {
                 tc_undefined_var(name_tok)
@@ -6547,8 +6739,19 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // return
     if k == 2 {
         EP = EP + 1
-        if TK[EP as usize] != 9 { compile_or_a64() }
-        else { em32(0xD2800000) }
+        if TK[EP as usize] != 9 {
+            compile_or_a64()
+        } else {
+            em32(0xD2800000)
+            EXPR_TY = 5
+            EXPR_TY_HASH = 0
+        }
+        if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, EXPR_TY, EXPR_TY_HASH) == false {
+            tc_error(EP - 1, "return type does not match function signature")
+        }
+        if CURRENT_RET_TY == 8 || CURRENT_RET_TY == 6 || EXPR_TY == 8 || EXPR_TY == 6 {
+            stabilize_return_agg_a64(EXPR_TY, EXPR_TY_HASH)
+        }
         em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
         em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
         em32(0xA8C17BFD)
@@ -6875,6 +7078,8 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         }
         FN_OFF[fn_idx as usize] = CL
         CURRENT_FN = fn_idx
+        CURRENT_RET_TY = FN_RET_TY[fn_idx as usize]
+        CURRENT_RET_HASH = FN_RET_HASH[fn_idx as usize]
         VAR_COUNT = 0; NEXT_SLOT = 1; BREAK_COUNT = 0; LAST_STMT_HAS_VALUE = 0
         p = p + 1
         if TK[p as usize] == 6 { p = p + 1 }
@@ -6940,7 +7145,16 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         var needs_epilogue: i64 = 1
         if CL >= 4 { if rd32_at(CL - 4) == 0xD65F03C0 { needs_epilogue = 0 } }
         if needs_epilogue == 1 {
-            if LAST_STMT_HAS_VALUE == 0 { em32(0xD2800000) }
+            if LAST_STMT_HAS_VALUE == 1 {
+                if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                    tc_error(EP - 1, "tail expression type does not match function signature")
+                }
+            }
+            if LAST_STMT_HAS_VALUE == 0 {
+                em32(0xD2800000)
+            } else if CURRENT_RET_TY == 8 || CURRENT_RET_TY == 6 || LAST_STMT_TY == 8 || LAST_STMT_TY == 6 {
+                stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)
+            }
             em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
             em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
             em32(0xA8C17BFD)
