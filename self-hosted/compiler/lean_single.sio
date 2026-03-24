@@ -566,6 +566,23 @@ fn copy_agg_into_struct_slots_a64(dst_start: i64, field_ty: i64, field_hash: i64
     emit_store_var_a64(dst_start)
 }
 
+fn emit_copy_agg_to_ptr_a64(field_ty: i64, field_hash: i64) with Mut, Panic, Div {
+    var nslots: i64 = 0
+    if field_ty == 8 {
+        nslots = arr_storage_slots(field_hash)
+    } else if field_ty == 6 {
+        let si = st_find(field_hash)
+        if si >= 0 { nslots = st_total_size(si) / 8 }
+    }
+    if nslots <= 0 { return }
+    var i: i64 = 0
+    while i < nslots {
+        em32(0xF9400000 | (i << 10) | (10 << 5) | 11)
+        em32(0xF9000000 | (i << 10) | (0 << 5) | 11)
+        i = i + 1
+    }
+}
+
 fn fill_repeat_struct_array_slots_a64(dst_start: i64, field_hash: i64) with Mut, Panic, Div {
     let nslots = arr_storage_slots(field_hash)
     var i: i64 = 0
@@ -1458,6 +1475,23 @@ fn copy_agg_into_struct_slots_x86(dst_start: i64, field_ty: i64, field_hash: i64
     emit_store_var(dst_start)
 }
 
+fn emit_copy_agg_to_ptr_x86(field_ty: i64, field_hash: i64) with Mut, Panic, Div {
+    var nslots: i64 = 0
+    if field_ty == 8 {
+        nslots = arr_storage_slots(field_hash)
+    } else if field_ty == 6 {
+        let si = st_find(field_hash)
+        if si >= 0 { nslots = st_total_size(si) / 8 }
+    }
+    if nslots <= 0 { return }
+    var i: i64 = 0
+    while i < nslots {
+        em(0x48); em(0x8b); em(0x8a); em32(i * 8)
+        em(0x48); em(0x89); em(0x88); em32(i * 8)
+        i = i + 1
+    }
+}
+
 fn fill_repeat_struct_array_slots_x86(dst_start: i64, field_hash: i64) with Mut, Panic, Div {
     let nslots = arr_storage_slots(field_hash)
     var i: i64 = 0
@@ -2070,9 +2104,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em32(0)
         // Emit closure function body
         let cl_start = CL
-        // Prologue: push rbp; mov rbp, rsp; sub rsp, 32768
+        // Prologue: push rbp; mov rbp, rsp; sub rsp, 131072
         em(0x55); em(0x48); em(0x89); em(0xe5)
-        em(0x48); em(0x81); em(0xec); em32(32768)
+        em(0x48); em(0x81); em(0xec); em32(131072)
         // Spill env_ptr (rdi) to slot 1: mov [rbp-8], rdi
         em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF)
         // Spill user params from shifted registers (rsi=slot2, rdx=slot3, ...)
@@ -2108,7 +2142,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         // Epilogue
         if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
-            em(0x48); em(0x81); em(0xc4); em32(32768)
+            em(0x48); em(0x81); em(0xc4); em32(131072)
             em(0x5d); em(0xc3)
         }
         // Patch jmp over closure body
@@ -3898,6 +3932,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let name_tok = EP
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
+        let field_tok = EP + 2
         EP = EP + 2  // skip name and .
         let fns = TS[EP as usize]
         let fne = TE[EP as usize]
@@ -3905,8 +3940,20 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         EP = EP + 1  // skip field name
         if TK[EP as usize] == 16 { EP = EP + 1 }  // skip =
         compile_or()  // value in rax
-        em(0x50)  // push value
-        // Load struct base pointer
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
+        let si = resolve_field_struct_index(ns, ne, fh)
+        if si < 0 {
+            tc_error(field_tok, "unknown field access")
+            return
+        }
+        let off = st_field_offset(si, fh)
+        let fty = st_field_ty(si, fh)
+        let fhash = st_field_hash(si, fh)
+        if fty != 0 && ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
+            tc_error(EP - 1, "assignment type mismatch")
+        }
+        em(0x50)  // push value/src ptr
         let slot = var_find(ns, ne)
         if slot >= 0 { emit_load_var(slot) }
         else {
@@ -3919,17 +3966,12 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 em(0x31); em(0xc0)
             }
         }
-        // rax = struct pointer. Find field offset and store.
-        em(0x59)  // pop rcx (value)
-        var si: i64 = 0
-        while si < ST_COUNT {
-            let off = st_field_offset(si, fh)
-            if off >= 0 {
-                if off == 0 { em(0x48); em(0x89); em(0x08) }  // mov [rax], rcx
-                else { em(0x48); em(0x89); em(0x88); em32(off) }  // mov [rax+off], rcx
-                si = ST_COUNT  // break
-            }
-            si = si + 1
+        if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
+        em(0x5a)  // pop rdx (value/src ptr)
+        if fty == 8 || fty == 6 {
+            emit_copy_agg_to_ptr_x86(fty, fhash)
+        } else {
+            em(0x48); em(0x89); em(0x10)  // mov [rax], rdx
         }
         return
     }
@@ -4085,7 +4127,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         if CURRENT_RET_TY == 8 || CURRENT_RET_TY == 6 || EXPR_TY == 8 || EXPR_TY == 6 {
             stabilize_return_agg_x86(EXPR_TY, EXPR_TY_HASH)
         }
-        em(0x48); em(0x81); em(0xc4); em32(32768)
+        em(0x48); em(0x81); em(0xc4); em32(131072)
         em(0x5d); em(0xc3)
         return
     }
@@ -5212,11 +5254,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if TK[p as usize] == 38 { p = p + 1; while TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 } }
         if TK[p as usize] == 8 { p = p + 1 }
 
-        // Emit prologue: push rbp; mov rbp, rsp; sub rsp, 32768
+        // Emit prologue: push rbp; mov rbp, rsp; sub rsp, 131072
         print_int(fn_idx)
         print(" ")
         em(0x55); em(0x48); em(0x89); em(0xe5)
-        em(0x48); em(0x81); em(0xec); em32(32768)
+        em(0x48); em(0x81); em(0xec); em32(131072)
 
         // Store parameters from registers to stack slots (System V ABI: rdi,rsi,rdx,rcx,r8,r9)
         if VAR_COUNT >= 1 { em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF) }    // mov [rbp-8], rdi
@@ -5277,7 +5319,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             } else if CURRENT_RET_TY == 8 || CURRENT_RET_TY == 6 || LAST_STMT_TY == 8 || LAST_STMT_TY == 6 {
                 stabilize_return_agg_x86(LAST_STMT_TY, LAST_STMT_TY_HASH)
             }
-            em(0x48); em(0x81); em(0xc4); em32(32768)
+            em(0x48); em(0x81); em(0xc4); em32(131072)
             em(0x5d); em(0xc3)
         }
         fn_idx = fn_idx + 1
@@ -7314,12 +7356,26 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
         let name_tok = EP
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
+        let field_tok = EP + 2
         EP = EP + 2
         let fns = TS[EP as usize]; let fne = TE[EP as usize]
         let fh = gl_name_hash(fns, fne)
         EP = EP + 1
         if TK[EP as usize] == 16 { EP = EP + 1 }
         compile_or_a64()
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
+        let si = resolve_field_struct_index(ns, ne, fh)
+        if si < 0 {
+            tc_error(field_tok, "unknown field access")
+            return
+        }
+        let off = st_field_offset(si, fh)
+        let fty = st_field_ty(si, fh)
+        let fhash = st_field_hash(si, fh)
+        if fty != 0 && ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
+            tc_error(EP - 1, "assignment type mismatch")
+        }
         emit_push_a64()
         let slot = var_find(ns, ne)
         if slot >= 0 { emit_load_var_a64(slot) }
@@ -7328,12 +7384,16 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             if gi >= 0 { emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
             else { tc_undefined_var(name_tok); em32(0xD2800000) }
         }
+        if off != 0 {
+            emit_imm64_reg_a64(11, off)
+            em32(0x8B0B0000)  // add x0, x0, x11
+        }
         emit_pop_x1_a64()
-        var si: i64 = 0
-        while si < ST_COUNT {
-            let off = st_field_offset(si, fh)
-            if off >= 0 { em32(0xF9000000 | ((off / 8) << 10) | (0 << 5) | 1); si = ST_COUNT }
-            si = si + 1
+        if fty == 8 || fty == 6 {
+            em32(0xAA0103EA)  // mov x10, x1
+            emit_copy_agg_to_ptr_a64(fty, fhash)
+        } else {
+            em32(0xF9000001)  // str x1, [x0]
         }
         return
     }
