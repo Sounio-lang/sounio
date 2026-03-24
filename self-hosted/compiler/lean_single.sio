@@ -17,14 +17,14 @@ var BASE_DIR: [i8; 512] = [0; 512]
 var BASE_DIR_LEN: i64 = 0
 
 // Token parallel arrays (kind, start, end, int_value)
-var TK: [i64; 65536] = [0; 65536]
-var TS: [i64; 65536] = [0; 65536]
-var TE: [i64; 65536] = [0; 65536]
-var TV: [i64; 65536] = [0; 65536]
+var TK: [i64; 131072] = [0; 131072]
+var TS: [i64; 131072] = [0; 131072]
+var TE: [i64; 131072] = [0; 131072]
+var TV: [i64; 131072] = [0; 131072]
 // Float literal extra: frac numerator and denominator (kind=53)
-var TF: [i64; 65536] = [0; 65536]
-var TD: [i64; 65536] = [0; 65536]
-var TL: [i64; 65536] = [0; 65536]
+var TF: [i64; 131072] = [0; 131072]
+var TD: [i64; 131072] = [0; 131072]
+var TL: [i64; 131072] = [0; 131072]
 var TC: i64 = 0
 
 // Code output
@@ -52,8 +52,8 @@ var FN_OFF: [i64; 256] = [0; 256]
 var FN_COUNT: i64 = 0
 
 // Call patch table: code offset where rel32 needs patching, target fn index
-var PATCH_OFF: [i64; 4096] = [0; 4096]
-var PATCH_FN: [i64; 4096] = [0; 4096]
+var PATCH_OFF: [i64; 8192] = [0; 8192]
+var PATCH_FN: [i64; 8192] = [0; 8192]
 var PATCH_COUNT: i64 = 0
 
 // Struct registry: flat array, up to 32 structs
@@ -291,6 +291,42 @@ fn sb(i: i64) -> i64 with Panic { if i >= 0 && i < SRC_LEN { return SRC[i as usi
 fn em(b: i64) with Mut { if CL < 1048576 { CD[CL as usize] = b as i8; CL = CL + 1 } }
 fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xFF); em((v >> 24) & 0xFF) }
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
+
+fn emit_load_rsp_arg_x86(reg_idx: i64, disp: i64) with Mut {
+    if reg_idx == 0 { em(0x48); em(0x8b); em(0xbc); em(0x24); em32(disp); return }
+    if reg_idx == 1 { em(0x48); em(0x8b); em(0xb4); em(0x24); em32(disp); return }
+    if reg_idx == 2 { em(0x48); em(0x8b); em(0x94); em(0x24); em32(disp); return }
+    if reg_idx == 3 { em(0x48); em(0x8b); em(0x8c); em(0x24); em32(disp); return }
+    if reg_idx == 4 { em(0x4c); em(0x8b); em(0x84); em(0x24); em32(disp); return }
+    if reg_idx == 5 { em(0x4c); em(0x8b); em(0x8c); em(0x24); em32(disp); return }
+}
+
+fn emit_setup_direct_call_args_x86(argc: i64) with Mut {
+    if argc >= 1 { emit_load_rsp_arg_x86(0, (argc - 1) * 8) }
+    if argc >= 2 { emit_load_rsp_arg_x86(1, (argc - 2) * 8) }
+    if argc >= 3 { emit_load_rsp_arg_x86(2, (argc - 3) * 8) }
+    if argc >= 4 { emit_load_rsp_arg_x86(3, (argc - 4) * 8) }
+    if argc >= 5 { emit_load_rsp_arg_x86(4, (argc - 5) * 8) }
+    if argc >= 6 { emit_load_rsp_arg_x86(5, (argc - 6) * 8) }
+}
+
+fn emit_setup_closure_call_args_x86(argc: i64) with Mut {
+    if argc >= 1 { emit_load_rsp_arg_x86(1, (argc - 1) * 8) }
+    if argc >= 2 { emit_load_rsp_arg_x86(2, (argc - 2) * 8) }
+    if argc >= 3 { emit_load_rsp_arg_x86(3, (argc - 3) * 8) }
+    if argc >= 4 { emit_load_rsp_arg_x86(4, (argc - 4) * 8) }
+    if argc >= 5 { emit_load_rsp_arg_x86(5, (argc - 5) * 8) }
+}
+
+fn emit_drop_call_args_x86(argc: i64) with Mut {
+    let bytes = argc * 8
+    if bytes <= 0 { return }
+    if bytes < 128 {
+        em(0x48); em(0x83); em(0xc4); em(bytes)
+    } else {
+        em(0x48); em(0x81); em(0xc4); em32(bytes)
+    }
+}
 
 // Write 32-bit value at arbitrary offset in CD[] (for ARM64 branch patching)
 fn em32_at(off: i64, v: i64) with Mut, Panic {
@@ -943,7 +979,7 @@ fn lex_all() with Mut, Panic, Div {
     TC = 0
     var p: i64 = 0
     var cur_line: i64 = 1
-    while p < SRC_LEN && TC < 65535 {
+    while p < SRC_LEN && TC < 131071 {
         let c = sb(p)
         // Whitespace
         if c == 1 || c == 2 || c == 32 || c == 9 || c == 13 || c == 10 { if c == 10 { cur_line = cur_line + 1 }; p = p + 1; continue }
@@ -1486,6 +1522,43 @@ fn emit_assert_fail() with Mut {
     em(0x0f); em(0x05)
 }
 
+fn emit_sqrt_builtin_x86() with Mut {
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
+    em(0xf2); em(0x0f); em(0x51); em(0xc0)
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+}
+
+fn emit_exp_builtin_x86() with Mut {
+    em(0x48); em(0x83); em(0xec); em(16)
+    em(0x48); em(0x89); em(0x44); em(0x24); em(8)
+    em(0xdd); em(0x44); em(0x24); em(8)
+    em(0xd9); em(0xea)
+    em(0xde); em(0xc9)
+    em(0xd9); em(0xc0)
+    em(0xd9); em(0xfc)
+    em(0xd9); em(0xc9)
+    em(0xd8); em(0xe1)
+    em(0xd9); em(0xf0)
+    em(0xd9); em(0xe8)
+    em(0xde); em(0xc1)
+    em(0xd9); em(0xfd)
+    em(0xdd); em(0xd9)
+    em(0xdd); em(0x1c); em(0x24)
+    em(0x48); em(0x8b); em(0x04); em(0x24)
+    em(0x48); em(0x83); em(0xc4); em(16)
+}
+
+fn emit_log_builtin_x86() with Mut {
+    em(0x48); em(0x83); em(0xec); em(16)
+    em(0x48); em(0x89); em(0x44); em(0x24); em(8)
+    em(0xd9); em(0xed)
+    em(0xdd); em(0x44); em(0x24); em(8)
+    em(0xd9); em(0xf1)
+    em(0xdd); em(0x1c); em(0x24)
+    em(0x48); em(0x8b); em(0x04); em(0x24)
+    em(0x48); em(0x83); em(0xc4); em(16)
+}
+
 // ─── Built-in function emitters ───
 
 // print_int: rax = value → emit decimal digits + write syscall
@@ -1981,6 +2054,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
         if nparams >= 3 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }
         if nparams >= 4 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }
         if nparams >= 5 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }
+        var stack_param_idx: i64 = 6
+        while stack_param_idx <= nparams {
+            em(0x48); em(0x8b); em(0x85); em32(16 + (stack_param_idx - 6) * 8)
+            emit_store_var(1 + stack_param_idx)
+            stack_param_idx = stack_param_idx + 1
+        }
         // Load captured vars from env struct into local slots
         // env struct layout: [fn_ptr, cap_0, cap_1, ...] at ascending addresses
         // env_ptr points to fn_ptr; cap_i is at [env_ptr + (i+1)*8]
@@ -2155,6 +2234,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     if k == 19 {
         EP = EP + 1
         compile_primary()
+        compile_postfix_tail()
         em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
         EXPR_IS_F64 = 0
         return
@@ -2164,6 +2244,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let op_tok = EP
         EP = EP + 1
         compile_primary()
+        compile_postfix_tail()
         if EXPR_TY != 0 && ty_is_numeric(EXPR_TY) == false { tc_error(op_tok, "unary - requires numeric operand") }
         // EXPR_IS_F64 kept from inner expression (unary minus preserves type)
         if EXPR_IS_F64 == 1 {
@@ -2179,6 +2260,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let op_tok = EP
         EP = EP + 1
         compile_primary()
+        compile_postfix_tail()
         if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(op_tok, "bitwise not requires integer operand") }
         em(0x48); em(0xf7); em(0xd0)  // not rax
         EXPR_IS_F64 = 0
@@ -2190,6 +2272,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let op_tok = EP
         EP = EP + 1
         compile_primary()
+        compile_postfix_tail()
         if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(op_tok, "logical not requires bool operand") }
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x0f); em(0x94); em(0xc0)  // sete al
@@ -2475,6 +2558,69 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 1
                 return
             }
+            if src_match(ns, ne - ns, "sqrt") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 1, 0)
+                    EP = EP + 1
+                    em(0x31); em(0xc0)
+                } else {
+                    compile_or()
+                    if EXPR_TY != 0 && EXPR_TY != 2 { tc_error(name_tok, "sqrt requires f64 argument") }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 1, 2)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_sqrt_builtin_x86()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 1
+                EXPR_TY = 2
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "exp") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 1, 0)
+                    EP = EP + 1
+                    em(0x31); em(0xc0)
+                } else {
+                    compile_or()
+                    if EXPR_TY != 0 && EXPR_TY != 2 { tc_error(name_tok, "exp requires f64 argument") }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 1, 2)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_exp_builtin_x86()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 1
+                EXPR_TY = 2
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "log") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 1, 0)
+                    EP = EP + 1
+                    em(0x31); em(0xc0)
+                } else {
+                    compile_or()
+                    if EXPR_TY != 0 && EXPR_TY != 2 { tc_error(name_tok, "log requires f64 argument") }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 1, 2)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_log_builtin_x86()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 1
+                EXPR_TY = 2
+                EXPR_TY_HASH = 0
+                return
+            }
             // f64 arithmetic builtins (SSE2) — hash-dispatched, no if-as-expression
             let bh = gl_name_hash(ns, ne)
             let bl = ne - ns
@@ -2524,38 +2670,31 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     print_int(caller_eff)
                     print(")\n")
                 }
-                // Direct call: pop args into rdi,rsi,rdx,rcx,r8,r9
-                if argc >= 6 { em(0x41); em(0x59) }
-                if argc >= 5 { em(0x41); em(0x58) }
-                if argc >= 4 { em(0x59) }
-                if argc >= 3 { em(0x5a) }
-                if argc >= 2 { em(0x5e) }
-                if argc >= 1 { em(0x5f) }
+                emit_setup_direct_call_args_x86(argc)
                 em(0xe8)
                 PATCH_OFF[PATCH_COUNT as usize] = CL
                 PATCH_FN[PATCH_COUNT as usize] = fi
                 PATCH_COUNT = PATCH_COUNT + 1
                 em32(0)
+                emit_drop_call_args_x86(argc)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             } else {
                 // Indirect call through variable — uniform closure convention:
                 // All callable values are closure struct pointers [fn_ptr, cap_0, ...]
-                // Pop user args into shifted regs (rsi,rdx,rcx,r8,r9), max 5 user args
+                // Load user args into shifted regs (rsi,rdx,rcx,r8,r9), max 5 user args
                 // rdi = closure struct ptr (env), fn_ptr loaded from [env]
-                if argc >= 5 { em(0x41); em(0x59) }  // pop r9
-                if argc >= 4 { em(0x41); em(0x58) }  // pop r8
-                if argc >= 3 { em(0x59) }              // pop rcx
-                if argc >= 2 { em(0x5a) }              // pop rdx
-                if argc >= 1 { em(0x5e) }              // pop rsi
+                emit_setup_closure_call_args_x86(argc)
                 if call_vslot >= 0 {
                     emit_load_var(call_vslot)           // rax = closure struct ptr
                     em(0x48); em(0x89); em(0xc7)        // mov rdi, rax (env_ptr)
                     em(0x48); em(0x8b); em(0x00)        // mov rax, [rax] (fn_ptr)
                     em(0xff); em(0xd0)                  // call rax
+                    emit_drop_call_args_x86(argc)
                 } else {
                     tc_undefined_var(call_tok)
+                    emit_drop_call_args_x86(argc)
                     em(0x31); em(0xc0)  // unknown fn
                 }
             }
@@ -2793,6 +2932,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
 // Postfix: `as` type casts, `.field` access
 fn compile_postfix() with IO, Mut, Panic, Div {
     compile_primary()
+    compile_postfix_tail()
+}
+
+fn compile_postfix_tail() with IO, Mut, Panic, Div {
     var more: i64 = 1
     while more == 1 {
         if TK[EP as usize] == 37 {
@@ -2920,18 +3063,13 @@ fn compile_postfix() with IO, Mut, Panic, Div {
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                     if FN_ARITY[mfi as usize] != margc { tc_wrong_arity(method_tok, FN_ARITY[mfi as usize], margc) }
-                    // Pop args into registers (reverse order)
-                    if margc >= 6 { em(0x41); em(0x59) }
-                    if margc >= 5 { em(0x41); em(0x58) }
-                    if margc >= 4 { em(0x59) }
-                    if margc >= 3 { em(0x5a) }
-                    if margc >= 2 { em(0x5e) }
-                    if margc >= 1 { em(0x5f) }
+                    emit_setup_direct_call_args_x86(margc)
                     em(0xe8)
                     PATCH_OFF[PATCH_COUNT as usize] = CL
                     PATCH_FN[PATCH_COUNT as usize] = mfi
                     PATCH_COUNT = PATCH_COUNT + 1
                     em32(0)
+                    emit_drop_call_args_x86(margc)
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -4535,7 +4673,7 @@ fn mono_pass() with IO, Mut, Panic, Div {
         }
         m_ti = m_bs
         m_skip = 0
-        while m_ti < m_be && TC < 32760 {
+        while m_ti < m_be && TC < 131000 {
             m_tk = TK[m_ti as usize]
             m_tts = TS[m_ti as usize]
             m_tte = TE[m_ti as usize]
@@ -5049,6 +5187,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if VAR_COUNT >= 4 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }    // mov [rbp-32], rcx
         if VAR_COUNT >= 5 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }    // mov [rbp-40], r8
         if VAR_COUNT >= 6 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }    // mov [rbp-48], r9
+        var param_slot: i64 = 7
+        while param_slot <= VAR_COUNT {
+            em(0x48); em(0x8b); em(0x85); em32(16 + (param_slot - 7) * 8)
+            emit_store_var(param_slot)
+            param_slot = param_slot + 1
+        }
 
         // Compile body
         EP = p
@@ -6115,6 +6259,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     if k == 19 {
         EP = EP + 1
         compile_primary_a64()
+        compile_postfix_tail_a64()
         em32(0xF9400000)  // ldr x0, [x0]
         EXPR_IS_F64 = 0
         return
@@ -6123,6 +6268,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     if k == 18 {
         EP = EP + 1
         compile_primary_a64()
+        compile_postfix_tail_a64()
         if EXPR_IS_F64 == 1 {
             em32(0x9E670000); em32(0x1E614000); em32(0x9E660000)
         } else {
@@ -6134,6 +6280,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     if k == 55 {
         EP = EP + 1
         compile_primary_a64()
+        compile_postfix_tail_a64()
         em32(0xAA2003E0)  // mvn x0, x0
         EXPR_IS_F64 = 0
         return
@@ -6142,6 +6289,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     if k == 32 {
         EP = EP + 1
         compile_primary_a64()
+        compile_postfix_tail_a64()
         em32(0xF100001F)  // cmp x0, #0
         em32(0x9A9F17E0)  // cset x0, eq
         EXPR_IS_F64 = 0
@@ -6645,6 +6793,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
 // ─── ARM64 postfix ───
 fn compile_postfix_a64() with IO, Mut, Panic, Div {
     compile_primary_a64()
+    compile_postfix_tail_a64()
+}
+
+fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
     var more: i64 = 1
     while more == 1 {
         if TK[EP as usize] == 37 {
@@ -8034,6 +8186,40 @@ fn resolve_imports() with IO, Mut, Panic, Div {
     }
 }
 
+fn strip_extern_blocks() with Mut, Panic {
+    var r: i64 = 0
+    var w: i64 = 0
+    while r < SRC_LEN {
+        if r + 9 < SRC_LEN && sb(r) == 101 && sb(r + 1) == 120 && sb(r + 2) == 116 && sb(r + 3) == 101 && sb(r + 4) == 114 && sb(r + 5) == 110 && sb(r + 6) == 32 && sb(r + 7) == 34 && sb(r + 8) == 67 && sb(r + 9) == 34 {
+            while r < SRC_LEN && sb(r) != 123 {
+                if sb(r) == 10 {
+                    SRC[w as usize] = 10
+                    w = w + 1
+                }
+                r = r + 1
+            }
+            if r < SRC_LEN && sb(r) == 123 {
+                var depth: i64 = 1
+                r = r + 1
+                while r < SRC_LEN && depth > 0 {
+                    if sb(r) == 123 { depth = depth + 1 }
+                    if sb(r) == 125 { depth = depth - 1 }
+                    if sb(r) == 10 {
+                        SRC[w as usize] = 10
+                        w = w + 1
+                    }
+                    r = r + 1
+                }
+                continue
+            }
+        }
+        SRC[w as usize] = SRC[r as usize]
+        w = w + 1
+        r = r + 1
+    }
+    SRC_LEN = w
+}
+
 fn main() -> i64 with IO, Mut, Panic, Div {
     let argc = arg_count()
     if argc < 2 { print("Usage: mini_native <source.sio> <output> [--target x86_64-windows]\n"); return 1 }
@@ -8069,74 +8255,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             // Can't use str_eq (not available in lean), use char comparison
         }
     }
-    // Detect target from output extension: .exe → Windows, .macho → macOS
-    let out_len = str_len(out)
-    if out_len > 4 {
-        let c3 = str_char_at(out, out_len - 4)
-        let c2 = str_char_at(out, out_len - 3)
-        let c1 = str_char_at(out, out_len - 2)
-        let c0 = str_char_at(out, out_len - 1)
-        if c3 == 46 && (c2 == 101 || c2 == 69) && (c1 == 120 || c1 == 88) && (c0 == 101 || c0 == 69) {
-            TARGET_OS = 3
-            print("target: x86_64-windows\n")
-        }
-    }
-    // Check for .aarch64.elf suffix (12 chars) BEFORE .macho check
-    if out_len > 12 {
-        // Match ".aarch64.elf" at end
-        let a = str_char_at(out, out_len - 12)  // .
-        let b = str_char_at(out, out_len - 11)  // a
-        let c = str_char_at(out, out_len - 10)  // a
-        let d = str_char_at(out, out_len - 9)   // r
-        let e = str_char_at(out, out_len - 8)   // c
-        let f = str_char_at(out, out_len - 7)   // h
-        let g = str_char_at(out, out_len - 6)   // 6
-        let hh = str_char_at(out, out_len - 5)  // 4
-        let ii = str_char_at(out, out_len - 4)  // .
-        let jj = str_char_at(out, out_len - 3)  // e
-        let kk = str_char_at(out, out_len - 2)  // l
-        let ll = str_char_at(out, out_len - 1)  // f
-        if a == 46 && b == 97 && c == 97 && d == 114 && e == 99 && f == 104 && g == 54 && hh == 52 && ii == 46 && jj == 101 && kk == 108 && ll == 102 {
-            TARGET_ARCH = 1
-            TARGET_OS = 0
-            print("target: aarch64-linux\n")
-        }
-    }
-    // Check for .aarch64.macho suffix (14 chars)
-    if out_len > 14 {
-        let a2 = str_char_at(out, out_len - 14)   // .
-        let b2 = str_char_at(out, out_len - 13)   // a
-        let c2a = str_char_at(out, out_len - 12)   // a
-        let d2 = str_char_at(out, out_len - 11)   // r
-        let e2 = str_char_at(out, out_len - 10)   // c
-        let f2 = str_char_at(out, out_len - 9)    // h
-        let g2 = str_char_at(out, out_len - 8)    // 6
-        let h2 = str_char_at(out, out_len - 7)    // 4
-        let i2 = str_char_at(out, out_len - 6)    // .
-        let j2 = str_char_at(out, out_len - 5)    // m
-        let k2 = str_char_at(out, out_len - 4)    // a
-        let l2 = str_char_at(out, out_len - 3)    // c
-        let m2a = str_char_at(out, out_len - 2)   // h
-        let n2 = str_char_at(out, out_len - 1)    // o
-        if a2 == 46 && b2 == 97 && c2a == 97 && d2 == 114 && e2 == 99 && f2 == 104 && g2 == 54 && h2 == 52 && i2 == 46 && j2 == 109 && k2 == 97 && l2 == 99 && m2a == 104 && n2 == 111 {
-            TARGET_ARCH = 1
-            TARGET_OS = 2
-            print("target: aarch64-macos\n")
-        }
-    }
-    // Check for .macho suffix (only if not already detected as aarch64)
-    if TARGET_ARCH == 0 && out_len > 6 {
-        let m5 = str_char_at(out, out_len - 6)
-        let m4 = str_char_at(out, out_len - 5)
-        let m3 = str_char_at(out, out_len - 4)
-        let m2 = str_char_at(out, out_len - 3)
-        let m1 = str_char_at(out, out_len - 2)
-        let m0 = str_char_at(out, out_len - 1)
-        if m5 == 46 && m4 == 109 && m3 == 97 && m2 == 99 && m1 == 104 && m0 == 111 {
-            TARGET_OS = 2
-            print("target: x86_64-macos\n")
-        }
-    }
+    // Default target remains x86_64 Linux in the self-host path.
 
     let raw = read_file(src)
     let sz = file_size(src)
@@ -8145,6 +8264,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     SRC_LEN = sz
     print("source: "); print(src); print(" "); print_int(sz); print(" bytes\n")
     resolve_imports()
+    strip_extern_blocks()
     print("total source: "); print_int(SRC_LEN); print(" bytes\n")
     lex_all()
     print("tokens: "); print_int(TC); print("\n")
