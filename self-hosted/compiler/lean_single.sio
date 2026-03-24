@@ -1348,6 +1348,12 @@ fn emit_print_nl() with Mut {
     em(0x48); em(0x83); em(0xc4); em(8)
 }
 
+fn emit_assert_fail() with Mut {
+    em(0xbf); em32(1)
+    em(0xb8); em32(60)
+    em(0x0f); em(0x05)
+}
+
 // ─── Built-in function emitters ───
 
 // print_int: rax = value → emit decimal digits + write syscall
@@ -2192,7 +2198,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     emit_print(EP); EP = EP + 1
                 } else {
                     compile_or()
-                    emit_print_cstr()
+                    if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
+                        emit_print_f64()
+                    } else if EXPR_TY == 3 {
+                        emit_print_cstr()
+                    } else {
+                        emit_print_int()
+                    }
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 em(0x31); em(0xc0)
@@ -2238,6 +2250,19 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1; compile_or()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_print_f64()
+                em(0x31); em(0xc0)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                return
+            }
+            if src_match(ns, ne - ns, "assert") {
+                EP = EP + 1
+                compile_or()
+                if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(name_tok, "assert requires bool condition") }
+                em(0x48); em(0x85); em(0xc0)
+                em(0x75); em(12)
+                emit_assert_fail()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
                 em(0x31); em(0xc0)
                 EXPR_IS_F64 = 0
                 EXPR_TY = 5
@@ -5343,6 +5368,16 @@ fn emit_print_nl_a64() with Mut {
     em32(0x910043FF)  // add sp, sp, #16
 }
 
+fn emit_assert_fail_a64() with Mut {
+    em32(0xD2800020)  // movz x0, #1
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000001)
+    } else {
+        em32(0xD2800000 | ((93 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+}
+
 // ─── ARM64 print_int ───
 fn emit_print_int_a64() with Mut {
     // x0 = value to print
@@ -5949,7 +5984,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 5 { emit_print_a64(EP); EP = EP + 1 }
                 else {
                     compile_or_a64()
-                    emit_print_cstr_a64()
+                    if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
+                        emit_print_f64_a64()
+                    } else if EXPR_TY == 3 {
+                        emit_print_cstr_a64()
+                    } else {
+                        emit_print_int_a64()
+                    }
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 em32(0xD2800000)
@@ -5991,6 +6032,21 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_print_f64_a64()
                 em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
+            }
+            if src_match(ns, ne - ns, "assert") {
+                EP = EP + 1
+                compile_or_a64()
+                if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(name_tok, "assert requires bool condition") }
+                em32(0xF100001F)
+                let assert_ok_patch = CL
+                em32(0x54000001)
+                emit_assert_fail_a64()
+                patch_branch_a64(assert_ok_patch, CL)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                em32(0xD2800000)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                return
             }
             if src_match(ns, ne - ns, "arg_count") {
                 EP = EP + 1
