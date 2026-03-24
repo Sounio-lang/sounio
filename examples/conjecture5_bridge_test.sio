@@ -1,0 +1,315 @@
+//@ run-pass
+// THE BRIDGE TEST: Does the Pythagorean decomposition match full PK?
+//
+// 3-drug model: Citalopram + Bupropion + Codeine
+//   Citalopram: CYP2C19/CYP3A4 substrate
+//   Bupropion:  CYP2B6 substrate, POTENT CYP2D6 inhibitor
+//   Codeine:    CYP2D6 substrate (prodrug → morphine)
+//
+// The question: does the phasing effect on codeine's metabolism
+// decompose Pythagoreanly (no cross terms) or does full PK
+// predict synergy/antagonism (cross terms)?
+//
+// If Pythagorean matches full PK → the algebra captures the structure
+// If they differ → cross terms exist → Fano mapping fails here
+
+// ─── Parameters ───
+
+// Citalopram
+fn cit_ka() -> f64 { 1.0 }
+fn cit_vd() -> f64 { 840.0 }      // 12 L/kg * 70kg
+fn cit_cl_2c19() -> f64 { 15.0 }
+fn cit_cl_3a4() -> f64 { 10.0 }
+fn cit_dose() -> f64 { 20.0 }
+fn cit_f() -> f64 { 0.8 }
+fn cit_ki_2c19() -> f64 { 5.0 }   // weak auto-inhibition
+
+// Bupropion
+fn bup_ka() -> f64 { 0.6 }
+fn bup_vd() -> f64 { 1400.0 }     // 20 L/kg * 70kg
+fn bup_cl_2b6() -> f64 { 20.0 }
+fn bup_dose() -> f64 { 150.0 }
+fn bup_f() -> f64 { 0.5 }
+fn bup_ki_2d6() -> f64 { 0.06 }   // potent CYP2D6 inhibitor
+
+// Codeine (CYP2D6 prodrug)
+fn cod_ka() -> f64 { 1.5 }
+fn cod_vd() -> f64 { 245.0 }      // 3.5 L/kg * 70kg
+fn cod_cl_2d6() -> f64 { 12.0 }   // CYP2D6 metabolizes to morphine
+fn cod_cl_3a4() -> f64 { 8.0 }    // CYP3A4 metabolizes to norcodeine (inactive)
+fn cod_dose() -> f64 { 30.0 }
+fn cod_f() -> f64 { 0.5 }
+
+// ─── State: [cit_gut, cit_pla, bup_gut, bup_pla, cod_gut, cod_pla,
+//             morphine_pla, cyp2d6, cyp2c19] ───
+
+fn sqrt_f64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var g: f64 = x
+    var i: i32 = 0
+    while i < 20 { g = (g + x / g) * 0.5; i = i + 1 }
+    g
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn rhs3(t: f64, y: [f64; 9]) -> [f64; 9] with Mut, Panic, Div {
+    var dy: [f64; 9] = [0.0; 9]
+
+    let cit_gut = y[0]
+    let cit_pla = y[1]
+    let bup_gut = y[2]
+    let bup_pla = y[3]
+    let cod_gut = y[4]
+    let cod_pla = y[5]
+    let morphine = y[6]
+    let cyp2d6 = y[7]
+    let cyp2c19 = y[8]
+
+    // Citalopram
+    dy[0] = 0.0 - cit_ka() * cit_gut
+    let cit_cl = cit_cl_2c19() * cyp2c19 + cit_cl_3a4()
+    dy[1] = cit_ka() * cit_gut * cit_f() - (cit_cl / cit_vd()) * cit_pla
+
+    // Bupropion
+    dy[2] = 0.0 - bup_ka() * bup_gut
+    let bup_cl = bup_cl_2b6()
+    dy[3] = bup_ka() * bup_gut * bup_f() - (bup_cl / bup_vd()) * bup_pla
+
+    // Codeine — the KEY drug
+    dy[4] = 0.0 - cod_ka() * cod_gut
+    // CYP2D6 pathway: codeine → morphine (ACTIVE — this is what matters)
+    let cod_to_morphine = (cod_cl_2d6() * cyp2d6 / cod_vd()) * cod_pla
+    // CYP3A4 pathway: codeine → norcodeine (inactive)
+    let cod_to_norcodeine = (cod_cl_3a4() / cod_vd()) * cod_pla
+    dy[5] = cod_ka() * cod_gut * cod_f() - cod_to_morphine - cod_to_norcodeine
+
+    // Morphine (the efficacy marker — more morphine = more pain relief)
+    // Simple elimination: t1/2 ≈ 3h
+    let morphine_ke = 0.23  // elimination rate (1/h)
+    dy[6] = cod_to_morphine - morphine_ke * morphine
+
+    // CYP2D6: inhibited by bupropion
+    let bup_um = (bup_pla / bup_vd()) * 1000.0 / 240.0
+    let target_2d6 = 1.0 / (1.0 + bup_um / bup_ki_2d6())
+    dy[7] = (target_2d6 - cyp2d6) * 2.0
+
+    // CYP2C19: weakly inhibited by citalopram
+    let cit_um = (cit_pla / cit_vd()) * 1000.0 / 324.0
+    let target_2c19 = 1.0 / (1.0 + cit_um / cit_ki_2c19())
+    dy[8] = (target_2c19 - cyp2c19) * 2.0
+
+    dy
+}
+
+fn rk4_step3(t: f64, y: [f64; 9], dt: f64) -> [f64; 9] with Mut, Panic, Div {
+    let k1 = rhs3(t, y)
+    var y2: [f64; 9] = [0.0; 9]
+    var i: i32 = 0
+    while i < 9 { y2[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1 }
+    let k2 = rhs3(t + 0.5 * dt, y2)
+    var y3: [f64; 9] = [0.0; 9]
+    i = 0
+    while i < 9 { y3[i] = y[i] + 0.5 * dt * k2[i]; i = i + 1 }
+    let k3 = rhs3(t + 0.5 * dt, y3)
+    var y4: [f64; 9] = [0.0; 9]
+    i = 0
+    while i < 9 { y4[i] = y[i] + dt * k3[i]; i = i + 1 }
+    let k4 = rhs3(t + dt, y4)
+    var r: [f64; 9] = [0.0; 9]
+    i = 0
+    while i < 9 {
+        r[i] = y[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i])
+        i = i + 1
+    }
+    r
+}
+
+fn clamp9(y: [f64; 9]) -> [f64; 9] with Mut, Panic, Div {
+    var r: [f64; 9] = [0.0; 9]
+    var i: i32 = 0
+    while i < 9 { r[i] = y[i]; i = i + 1 }
+    i = 0
+    while i < 7 { if r[i] < 0.0 { r[i] = 0.0 }; i = i + 1 }
+    if r[7] < 0.01 { r[7] = 0.01 }
+    if r[7] > 1.0 { r[7] = 1.0 }
+    if r[8] < 0.01 { r[8] = 0.01 }
+    if r[8] > 1.0 { r[8] = 1.0 }
+    r
+}
+
+// Simulate with configurable start days for each drug
+fn sim3(cit_start: i32, bup_start: i32, cod_start: i32) -> [f64; 4] with Mut, Panic, Div {
+    // Returns: [codeine_auc, morphine_auc, mean_cyp2d6, mean_cyp2c19]
+    var y: [f64; 9] = [0.0; 9]
+    y[7] = 1.0
+    y[8] = 1.0
+
+    let dt: f64 = 0.25
+    let days: i32 = 28
+    let spd: i32 = 96
+
+    var cod_auc: f64 = 0.0
+    var morph_auc: f64 = 0.0
+    var cyp2d6_sum: f64 = 0.0
+    var cyp2c19_sum: f64 = 0.0
+    var steps: i32 = 0
+
+    var day: i32 = 0
+    while day < days {
+        if day >= cit_start { y[0] = y[0] + cit_dose() }
+        if day >= bup_start { y[2] = y[2] + bup_dose() }
+        if day >= cod_start { y[4] = y[4] + cod_dose() }
+
+        var step: i32 = 0
+        while step < spd {
+            y = rk4_step3((day * 24) as f64 + (step as f64) * dt, y, dt)
+            y = clamp9(y)
+            cod_auc = cod_auc + y[5] * dt
+            morph_auc = morph_auc + y[6] * dt
+            cyp2d6_sum = cyp2d6_sum + y[7]
+            cyp2c19_sum = cyp2c19_sum + y[8]
+            steps = steps + 1
+            step = step + 1
+        }
+        day = day + 1
+    }
+
+    var r: [f64; 4] = [0.0; 4]
+    r[0] = cod_auc
+    r[1] = morph_auc
+    r[2] = cyp2d6_sum / (steps as f64)
+    r[3] = cyp2c19_sum / (steps as f64)
+    r
+}
+
+fn main() -> i32 with Mut, Panic, Div, IO {
+    println("=== THE BRIDGE TEST: Pythagorean vs Full PK ===")
+    println("")
+    println("3-drug model: Citalopram + Bupropion + Codeine")
+    println("  Codeine → morphine via CYP2D6 (the efficacy pathway)")
+    println("  Bupropion inhibits CYP2D6 (blocks codeine activation)")
+    println("  Citalopram: weak CYP2C19 auto-inhibition only")
+    println("")
+    println("Metric: Morphine AUC (more = more pain relief)")
+    println("")
+
+    // ─── FULL PK: 4 phasing scenarios ───
+
+    // Scenario 1: All simultaneous (day 0)
+    println("--- Scenario 1: All simultaneous (day 0) ---")
+    let s1 = sim3(0, 0, 0)
+    println("  Morphine AUC:")
+    println(s1[1])
+    println("  CYP2D6:")
+    println(s1[2])
+
+    // Scenario 2: (Cit + Bup) day 0, Codeine day 14
+    println("--- Scenario 2: (Cit+Bup) then Codeine day 14 ---")
+    let s2 = sim3(0, 0, 14)
+    println("  Morphine AUC:")
+    println(s2[1])
+    println("  CYP2D6:")
+    println(s2[2])
+
+    // Scenario 3: Cit day 0, (Bup + Cod) day 14
+    println("--- Scenario 3: Cit then (Bup+Cod) day 14 ---")
+    let s3 = sim3(0, 14, 14)
+    println("  Morphine AUC:")
+    println(s3[1])
+    println("  CYP2D6:")
+    println(s3[2])
+
+    // Scenario 4: Codeine alone (baseline — no inhibition)
+    println("--- Scenario 4: Codeine alone (baseline) ---")
+    let s4 = sim3(999, 999, 0)
+    println("  Morphine AUC:")
+    println(s4[1])
+    println("  CYP2D6:")
+    println(s4[2])
+    println("")
+
+    // ─── THE TEST ───
+    println("=== THE BRIDGE TEST ===")
+    println("")
+
+    // The GROUPING EFFECT: how much does morphine AUC change
+    // between scenario 2 (group Cit+Bup first) and scenario 3 (group Bup+Cod first)?
+    let grouping_effect = s2[1] - s3[1]
+    println("Grouping effect on morphine AUC:")
+    println("  (Cit+Bup) then Cod  vs  Cit then (Bup+Cod):")
+    println(grouping_effect)
+    println("")
+
+    // PYTHAGOREAN PREDICTION:
+    // The pairwise effects are:
+    //   Effect of Bup on Cod (via CYP2D6 inhibition)
+    //   Effect of Cit on Cod (via CYP2C19 — minimal, since codeine doesn't use 2C19)
+    //   Effect of Cit on Bup (via CYP2C19 — minimal)
+    //
+    // The Pythagorean formula says:
+    //   Total grouping effect = sqrt(effect_bup_cod^2 + effect_cit_cod^2 + effect_cit_bup^2)
+    //
+    // Since Cit doesn't affect Cod or Bup significantly:
+    //   Total ≈ effect_bup_cod (the dominant pairwise effect)
+
+    // Compute pairwise: Bup+Cod without Cit
+    let pair_bc = sim3(999, 0, 0)  // bup+cod simultaneous, no cit
+    let pair_bc_stag = sim3(999, 0, 14)  // bup first, cod day 14
+    let bup_cod_effect = pair_bc[1] - pair_bc_stag[1]
+
+    // Pairwise: Cit+Cod without Bup
+    let pair_cc = sim3(0, 999, 0)  // cit+cod simultaneous, no bup
+    let pair_cc_stag = sim3(0, 999, 14)  // cit first, cod day 14
+    let cit_cod_effect = pair_cc[1] - pair_cc_stag[1]
+
+    // Pairwise: Cit+Bup without Cod (doesn't affect morphine directly)
+    // This is the "cross term" that should be zero if Pythagorean
+
+    println("Pairwise effects on morphine AUC:")
+    println("  Bup+Cod grouping effect:")
+    println(bup_cod_effect)
+    println("  Cit+Cod grouping effect:")
+    println(cit_cod_effect)
+    println("")
+
+    // Pythagorean prediction
+    let pyth = sqrt_f64(bup_cod_effect * bup_cod_effect + cit_cod_effect * cit_cod_effect)
+    println("Pythagorean prediction (root-sum-square of pairwise):")
+    println(pyth)
+    println("")
+
+    println("Full PK (3-drug ODE with all interactions):")
+    println(grouping_effect)
+    println("")
+
+    let diff = abs_f64(grouping_effect - pyth)
+    let rel = if abs_f64(pyth) > 0.001 { diff / abs_f64(pyth) * 100.0 } else { 0.0 }
+
+    println("Difference (Full PK - Pythagorean):")
+    println(diff)
+    println("Relative difference (%):")
+    println(rel)
+    println("")
+
+    if rel < 5.0 {
+        println("RESULT: Pythagorean prediction MATCHES full PK (< 5% difference)")
+        println("The cross terms are negligible.")
+        println("The Fano decomposition captures the structure.")
+        println("THE BRIDGE HOLDS.")
+    } else if rel < 20.0 {
+        println("RESULT: Pythagorean prediction is CLOSE but not exact")
+        println("Cross terms exist but are small.")
+        println("The Fano decomposition is approximate, not exact.")
+    } else {
+        println("RESULT: Pythagorean prediction FAILS")
+        println("Cross terms are significant.")
+        println("The Fano decomposition does NOT capture the full PK.")
+        println("The bridge does not hold at this level.")
+    }
+
+    0
+}
