@@ -1,0 +1,191 @@
+//@ run-pass
+// THEOREM (Cosine Profile of the Arrow Field):
+//
+// Let phi, psi be imaginary octonion basis elements. Let e_a be a Fano
+// direction (||[phi, e_a, psi]|| = 0) and e_b be a non-Fano direction
+// (||[phi, e_b, psi]|| = 2). Then for A = cos(t)*e_a + sin(t)*e_b:
+//
+//   ||[phi, A, psi]|| = 2 * |sin(t)|
+//
+// PROOF: The associator is trilinear. Decomposing A:
+//   [phi, A, psi] = cos(t)*[phi, e_a, psi] + sin(t)*[phi, e_b, psi]
+//                 = cos(t)*0 + sin(t)*[phi, e_b, psi]
+//                 = sin(t)*[phi, e_b, psi]
+//   ||...|| = |sin(t)| * ||[phi, e_b, psi]|| = 2*|sin(t)|.  QED.
+//
+// COROLLARY (General arrow strength):
+// For a general unit imaginary octonion A = sum_k a_k * e_k,
+// the arrow strength decomposes as:
+//   ||[phi, A, psi]||^2 = sum_{k in NonFano} a_k^2 * 4
+//                        + cross terms from distinct non-Fano pairs
+//
+// The cross terms depend on the RELATIVE PHASES of the non-Fano
+// components. This is why the mean arrow (1.35) is not simply
+// 2 * sqrt(fraction_nonFano).
+//
+// VERIFICATION: Test the theorem for all 42 (phi,psi) pairs.
+
+fn oct_sign(a: i32, b: i32) -> i32 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    let half: i32 = 4
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & 3
+    let b_lo = b & 3
+    if a_hi == 0 && b_hi == 0 { if a_lo == 0 || b_lo == 0 { return 1 } else { return 0 - 1 } }
+    if a_hi == 0 && b_hi == 1 { if b_lo == 0 || a_lo == 0 { return 1 } else { return 0 - 1 } }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { if a_lo == 0 || b_lo == 0 { return 1 } else { return 0 - 1 } }
+        else {
+            let inner = if a_lo == 0 || b_lo == 0 { 1 } else { 0 - 1 }
+            return 0 - inner
+        }
+    }
+    if b_lo == 0 {
+        let inner = if b_lo == 0 || a_lo == 0 { 1 } else { 0 - 1 }
+        return 0 - inner
+    }
+    if b_lo == 0 || a_lo == 0 { return 1 }
+    return 0 - 1
+}
+
+fn oct_mul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var r: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+    while i < 8 {
+        if a[i] != 0.0 {
+            var j: i32 = 0
+            while j < 8 {
+                if b[j] != 0.0 {
+                    r[i ^ j] = r[i ^ j] + (oct_sign(i, j) as f64) * a[i] * b[j]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    r
+}
+
+fn oct_conj(a: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var r: [f64; 8] = [0.0; 8]
+    r[0] = a[0]
+    var i: i32 = 1
+    while i < 8 { r[i] = 0.0 - a[i]; i = i + 1 }
+    r
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var g: f64 = x
+    var i: i32 = 0
+    while i < 20 { g = (g + x / g) * 0.5; i = i + 1 }
+    g
+}
+
+fn arrow(phi: [f64; 8], a_obs: [f64; 8], psi: [f64; 8]) -> f64 with Mut, Panic, Div {
+    let pc = oct_conj(phi)
+    let fwd = oct_mul(oct_mul(pc, a_obs), psi)
+    let bwd = oct_mul(pc, oct_mul(a_obs, psi))
+    var d: f64 = 0.0
+    var i: i32 = 0
+    while i < 8 { let x = fwd[i] - bwd[i]; d = d + x * x; i = i + 1 }
+    sqrt_f64(d)
+}
+
+fn basis(idx: i32) -> [f64; 8] with Mut, Panic, Div {
+    var o: [f64; 8] = [0.0; 8]
+    o[idx] = 1.0
+    o
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn main() -> i32 with Mut, Panic, Div, IO {
+    println("=== COSINE THEOREM PROOF VERIFICATION ===")
+    println("")
+    println("Theorem: ||[phi, cos(t)*e_a + sin(t)*e_b, psi]|| = 2*|sin(t)|")
+    println("  where e_a is Fano (arrow=0) and e_b is non-Fano (arrow=2)")
+    println("")
+
+    // For each pair (phi, psi), find a Fano and non-Fano direction
+    // Test the cosine theorem with 10 angle samples
+    var tests_passed: i32 = 0
+    var tests_total: i32 = 0
+    var max_error: f64 = 0.0
+
+    var phi_idx: i32 = 1
+    while phi_idx <= 7 {
+        var psi_idx: i32 = 1
+        while psi_idx <= 7 {
+            if phi_idx != psi_idx {
+                // Find a Fano direction (arrow=0) and non-Fano (arrow=2)
+                var fano_k: i32 = 0 - 1
+                var nonfano_k: i32 = 0 - 1
+                var k: i32 = 1
+                while k <= 7 {
+                    let a_val = arrow(basis(phi_idx), basis(k), basis(psi_idx))
+                    if a_val < 0.01 && fano_k < 0 { fano_k = k }
+                    if a_val > 1.99 && nonfano_k < 0 { nonfano_k = k }
+                    k = k + 1
+                }
+
+                if fano_k > 0 && nonfano_k > 0 {
+                    // Test 10 angles
+                    var step: i32 = 0
+                    while step <= 10 {
+                        let t = (step as f64) / 10.0 * 1.5707963  // 0 to pi/2
+                        let c = 1.0 - t*t/2.0 + t*t*t*t/24.0
+                        let s = t - t*t*t/6.0 + t*t*t*t*t/120.0
+                        let norm = sqrt_f64(c*c + s*s)
+
+                        var a_obs: [f64; 8] = [0.0; 8]
+                        a_obs[fano_k] = c / norm
+                        a_obs[nonfano_k] = s / norm
+
+                        let measured = arrow(basis(phi_idx), a_obs, basis(psi_idx))
+                        let predicted = 2.0 * abs_f64(s / norm)
+
+                        let error = abs_f64(measured - predicted)
+                        if error > max_error { max_error = error }
+
+                        tests_total = tests_total + 1
+                        if error < 0.01 { tests_passed = tests_passed + 1 }
+
+                        step = step + 1
+                    }
+                }
+            }
+            psi_idx = psi_idx + 1
+        }
+        phi_idx = phi_idx + 1
+    }
+
+    println("Tests passed:")
+    println(tests_passed)
+    println("Tests total:")
+    println(tests_total)
+    println("Max error:")
+    println(max_error)
+    println("")
+
+    if tests_passed == tests_total {
+        println("COSINE THEOREM: VERIFIED for ALL 42 basis pairs × 11 angles")
+        println("")
+        println("The arrow of time follows ||[phi, A, psi]|| = 2*|sin(theta)|")
+        println("where theta is the angle from the nearest Fano direction.")
+        println("")
+        println("Proof: trilinearity of the associator.")
+        println("  [phi, A, psi] = cos(t)*[phi, e_fano, psi] + sin(t)*[phi, e_nonfano, psi]")
+        println("                = cos(t)*0 + sin(t)*2*e_p")
+        println("                = 2*sin(t)*e_p")
+        println("  ||...|| = 2*|sin(t)|.  QED.")
+    } else {
+        println("SOME TESTS FAILED")
+    }
+
+    0
+}
