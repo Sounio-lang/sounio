@@ -522,6 +522,18 @@ fn name_eq(s1: i64, e1: i64, s2: i64, e2: i64) -> bool with Panic {
 
 fn ty_is_numeric(k: i64) -> bool { return k == 1 || k == 2 }
 
+fn tok_is_effect_name(p: i64) -> bool with Panic {
+    if TK[p as usize] != 3 { return false }
+    let ns = TS[p as usize]
+    let ne = TE[p as usize]
+    if src_match(ns, ne - ns, "IO") { return true }
+    if src_match(ns, ne - ns, "Mut") { return true }
+    if src_match(ns, ne - ns, "Panic") { return true }
+    if src_match(ns, ne - ns, "Div") { return true }
+    if src_match(ns, ne - ns, "Alloc") { return true }
+    return false
+}
+
 fn arr_ty_hash(alen: i64, esiz: i64, elem_ty: i64) -> i64 {
     var code: i64 = elem_ty * 2
     if esiz == 1 { code = code + 1 }
@@ -678,6 +690,37 @@ fn scan_type(p0: i64) with Mut, Panic {
     SCAN_TY_ALEN = 0
     if TK[p as usize] == 44 { p = p + 1 }
     if TK[p as usize] == 32 { p = p + 1 }
+    if TK[p as usize] == 1 {
+        p = p + 1
+        if TK[p as usize] == 6 {
+            p = p + 1
+            while TK[p as usize] != 7 && TK[p as usize] != 0 {
+                scan_type(p)
+                p = SCAN_TY_NEXT
+                if TK[p as usize] == 28 { p = p + 1 }
+            }
+            if TK[p as usize] == 7 { p = p + 1 }
+        }
+        if TK[p as usize] == 10 {
+            p = p + 1
+            scan_type(p)
+            p = SCAN_TY_NEXT
+        }
+        if TK[p as usize] == 38 {
+            p = p + 1
+            while tok_is_effect_name(p) {
+                p = p + 1
+                if TK[p as usize] == 28 && tok_is_effect_name(p + 1) {
+                    p = p + 1
+                } else {
+                    break
+                }
+            }
+        }
+        SCAN_TY = 9
+        SCAN_TY_NEXT = p
+        return
+    }
     if TK[p as usize] == 6 && TK[(p + 1) as usize] == 7 {
         SCAN_TY = 5
         SCAN_TY_NEXT = p + 2
@@ -1699,13 +1742,17 @@ fn compile_primary() with IO, Mut, Panic, Div {
     // All closures build a stack struct: [fn_ptr, cap_0, cap_1, ...]
     // Closure function receives hidden first param (env_ptr) in rdi.
     // User args shift to rsi, rdx, rcx, r8, r9 (max 5 user args).
-    if k == 45 {
-        EP = EP + 1  // skip opening |
+    if k == 45 || k == 31 {
+        var zero_param_closure: i64 = 0
+        if k == 31 { zero_param_closure = 1 }
+        EP = EP + 1  // skip opening | or ||
         // Save outer function state
         let save_vc = VAR_COUNT
         let save_ns2 = NEXT_SLOT
         let save_ld = LOOP_DEPTH
         let save_bc = BREAK_COUNT
+        let save_ret_ty = CURRENT_RET_TY
+        let save_ret_hash = CURRENT_RET_HASH
         var svi: i64 = 0
         while svi < save_vc {
             CL_SAVE_NS[svi as usize] = VAR_NS[svi as usize]
@@ -1725,17 +1772,45 @@ fn compile_primary() with IO, Mut, Panic, Div {
         CL_CAP_COUNT = 0
         // Parse closure parameters (between | ... |)
         // User params get slots 2, 3, ... (registers rsi, rdx, rcx, r8, r9)
-        while TK[EP as usize] != 45 && TK[EP as usize] != 0 {
-            if TK[EP as usize] == 3 {
-                let pns = TS[EP as usize]
-                let pne = TE[EP as usize]
-                var_add(pns, pne)
-                EP = EP + 1
-                if TK[EP as usize] == 43 { EP = EP + 1; EP = EP + 1 }
+        if zero_param_closure == 0 {
+            while TK[EP as usize] != 45 && TK[EP as usize] != 0 {
+                if TK[EP as usize] == 3 {
+                    let pns = TS[EP as usize]
+                    let pne = TE[EP as usize]
+                    let pslot = var_add(pns, pne)
+                    EP = EP + 1
+                    if TK[EP as usize] == 43 {
+                        EP = EP + 1
+                        scan_type(EP)
+                        VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
+                        VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                        if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                        if SCAN_TY == 8 {
+                            VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
+                            VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                        }
+                        if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
+                        EP = SCAN_TY_NEXT
+                    }
+                }
+                if TK[EP as usize] == 28 { EP = EP + 1 }
             }
-            if TK[EP as usize] == 28 { EP = EP + 1 }
+            if TK[EP as usize] == 45 { EP = EP + 1 }  // skip closing |
         }
-        if TK[EP as usize] == 45 { EP = EP + 1 }  // skip closing |
+        if TK[EP as usize] == 10 {
+            EP = EP + 1
+            scan_type(EP)
+            CURRENT_RET_TY = SCAN_TY
+            CURRENT_RET_HASH = SCAN_TY_HASH
+            EP = SCAN_TY_NEXT
+        } else {
+            CURRENT_RET_TY = 0
+            CURRENT_RET_HASH = 0
+        }
+        if TK[EP as usize] == 38 {
+            EP = EP + 1
+            while TK[EP as usize] == 3 || TK[EP as usize] == 28 { EP = EP + 1 }
+        }
         let nparams = VAR_COUNT  // user params only
         // Register outer-scope vars as captures (those not shadowed by params)
         var ci: i64 = 0
@@ -1801,6 +1876,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         NEXT_SLOT = save_ns2
         LOOP_DEPTH = save_ld
         BREAK_COUNT = save_bc
+        CURRENT_RET_TY = save_ret_ty
+        CURRENT_RET_HASH = save_ret_hash
         svi = 0
         while svi < save_vc {
             VAR_NS[svi as usize] = CL_SAVE_NS[svi as usize]
@@ -2451,6 +2528,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = VAR_TY[vi as usize]
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
                 if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
+                if EXPR_TY == 9 || VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
             }
             var_mark_used(ns, ne)
         }
@@ -4424,7 +4502,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
     // Pass 1: register all function names (skip generic templates)
     while p < TC {
-        if TK[p as usize] == 1 {
+        if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
             FN_NS[FN_COUNT as usize] = TS[p as usize]
@@ -4438,7 +4516,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     var sig_fi: i64 = 0
     while p < TC {
-        if TK[p as usize] == 1 {
+        if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
             FN_ARITY[sig_fi as usize] = 0
@@ -4477,7 +4555,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     var ret_fi: i64 = 0
     while p < TC {
-        if TK[p as usize] == 1 {
+        if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
             var q: i64 = p + 1
@@ -4514,7 +4592,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     var eff_fi: i64 = 0
     while p < TC {
-        if TK[p as usize] == 1 {
+        if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             // Skip generic templates
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
@@ -4579,7 +4657,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     var fn_idx: i64 = 0
     while p < TC {
-        if TK[p as usize] != 1 { p = p + 1; continue }
+        if TK[p as usize] != 1 || TK[(p + 1) as usize] != 3 { p = p + 1; continue }
         p = p + 1  // skip 'fn'
 
         // Skip generic function templates
@@ -4621,6 +4699,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                     VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                     if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                    if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
                     if SCAN_TY == 8 {
                         VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                         VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
@@ -5589,10 +5668,33 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         return
     }
     // Closure stub
-    if k == 45 {
+    if k == 45 || k == 31 {
         EP = EP + 1
-        while TK[EP as usize] != 45 && TK[EP as usize] != 0 { EP = EP + 1 }
-        if TK[EP as usize] == 45 { EP = EP + 1 }
+        if k == 45 {
+            while TK[EP as usize] != 45 && TK[EP as usize] != 0 {
+                if TK[EP as usize] == 3 {
+                    EP = EP + 1
+                    if TK[EP as usize] == 43 {
+                        EP = EP + 1
+                        scan_type(EP)
+                        EP = SCAN_TY_NEXT
+                    }
+                } else {
+                    EP = EP + 1
+                }
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+            }
+            if TK[EP as usize] == 45 { EP = EP + 1 }
+        }
+        if TK[EP as usize] == 10 {
+            EP = EP + 1
+            scan_type(EP)
+            EP = SCAN_TY_NEXT
+        }
+        if TK[EP as usize] == 38 {
+            EP = EP + 1
+            while TK[EP as usize] == 3 || TK[EP as usize] == 28 { EP = EP + 1 }
+        }
         if TK[EP as usize] == 8 {
             EP = EP + 1
             var cd: i64 = 1
@@ -7068,7 +7170,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     var p: i64 = 0
     var fn_idx: i64 = 0
     while p < TC {
-        if TK[p as usize] != 1 { p = p + 1; continue }
+        if TK[p as usize] != 1 || TK[(p + 1) as usize] != 3 { p = p + 1; continue }
         p = p + 1
         if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 {
             while p < TC && TK[p as usize] != 8 { p = p + 1 }
@@ -7094,6 +7196,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                     VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                     VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                     if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                    if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
                     if SCAN_TY == 8 {
                         VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                         VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
