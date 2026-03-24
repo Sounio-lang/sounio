@@ -74,3 +74,60 @@ fn ir_has_zero_divisors(alg: i64, cl_p: i64, cl_q: i64) -> bool {
     if alg == 5 && cl_p + cl_q >= 2 { return true }  // Clifford(p,q) for p+q >= 2
     return false
 }
+
+// ============================================================
+// PHASE D: Fano-level optimization (the 168 theorem in the IR)
+// ============================================================
+//
+// Even when the algebra is non-associative (k >= 3), SPECIFIC triples
+// of basis elements may be associative if they lie on a Fano line.
+// The optimizer can reassociate these triples safely.
+//
+// For octonions (k=3): 175 of 343 triples are associative (Fano lines).
+// For sedenions (k=4): the ratio grows toward 1/2 (Corollary C).
+//
+// The sign function determines which triples are Fano:
+//   alpha = sigma(i,j) * sigma(i^j, k)
+//   beta  = sigma(j,k) * sigma(i, j^k)
+//   Fano iff alpha == beta
+//
+// Based on: The 168 Theorem (Agourakis 2026), Theorem A + B.
+
+fn ir_cd_sigma(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return ir_cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return ir_cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return ir_cd_sigma(a_lo, b_lo, bits - 1) }
+        else { return 0 - ir_cd_sigma(a_lo, b_lo, bits - 1) }
+    }
+    if b_lo == 0 { return 0 - ir_cd_sigma(b_lo, a_lo, bits - 1) }
+    return ir_cd_sigma(b_lo, a_lo, bits - 1)
+}
+
+// Can the optimizer reassociate basis triple (i, j, k) at tower level bits?
+// Returns true if the triple is on a Fano line (associative even in non-assoc algebra).
+// This is the 168 theorem used as a compiler optimization predicate.
+fn ir_can_reassociate_triple(bits: i64, i: i64, j: i64, k: i64) -> bool with Mut, Panic, Div {
+    if bits < 3 { return true }  // R, C, H: always
+    if i == 0 || j == 0 || k == 0 { return true }  // identity: Theorem D
+    if i == j || j == k || i == k { return true }    // repeated: alternativity
+    let alpha = ir_cd_sigma(i, j, bits) * ir_cd_sigma(i ^ j, k, bits)
+    let beta = ir_cd_sigma(j, k, bits) * ir_cd_sigma(i, j ^ k, bits)
+    alpha == beta  // Fano line iff signs agree
+}
+
+// Artin's theorem: in an alternative algebra (k <= 3), any subexpression
+// involving at most 2 distinct variables is guaranteed associative.
+// The optimizer can freely reassociate such subexpressions.
+fn ir_artin_safe(alg: i64, n_distinct_vars: i64) -> bool {
+    if alg <= 2 { return true }                    // always (associative)
+    if alg == 3 && n_distinct_vars <= 2 { return true }  // Artin's theorem
+    return false
+}

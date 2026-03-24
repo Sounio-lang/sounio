@@ -1316,12 +1316,18 @@ struct EgSmallContext {
     best:       [i64; 64],
     unc_lo:     [i64; 64],
     unc_hi:     [i64; 64],
+    // Algebra kind for the expression context.
+    // When algebra_kind >= 3 (octonion+), reassociation is BLOCKED
+    // because (a*b)*c ≠ a*(b*c) in non-associative algebras.
+    // Set to 0 (Real) by default for backward compatibility.
+    algebra_kind: i64,
 }
 
 fn eg_small_init() -> EgSmallContext {
     EgSmallContext {
         nodes:      [eg_node_new(); 64],
         node_count: 0,
+        algebra_kind: 0,  // default: Real (associative)
         parent:     [EG_INVALID; 128],
         rank:       [0; 128],
         uf_size:    0,
@@ -1674,7 +1680,17 @@ fn eg_small_extract_epistemic(ctx: &! EgSmallContext, class_id: i64) -> EgNode w
 // Float associativity saturation (imperative scan, mirrors eg_apply_distributivity)
 // Applies: fadd(fadd(a,b),c) ↔ fadd(a,fadd(b,c)) and similar for fmul
 // 8 iterations max; terminates when no new merges
+//
+// PHASE C GUARD: When algebra_kind >= 3 (octonion+), reassociation is BLOCKED.
+// The e-graph must NOT merge (a*b)*c with a*(b*c) for non-associative algebras.
+// This preserves the programmer's parenthesization as required by the
+// Non-Associative Lambek Calculus (Lambek 1961).
 fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    // NON-ASSOCIATIVE GUARD: skip reassociation entirely for k >= 3
+    if ctx.algebra_kind >= 3 {
+        return 0  // no merges — parenthesization is sacred
+    }
+
     var total_merges: i64 = 0
     var iter: i64 = 0
     while iter < 8 {
