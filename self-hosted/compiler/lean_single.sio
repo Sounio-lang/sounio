@@ -444,6 +444,22 @@ fn stmt_is_array_store(p0: i64) -> bool with Panic {
     return TK[p as usize] == 16
 }
 
+fn stmt_is_deref_array_store(p0: i64) -> bool with Panic {
+    if TK[p0 as usize] != 6 { return false }
+    if TK[(p0 + 1) as usize] != 19 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 7 { return false }
+    if TK[(p0 + 4) as usize] != 41 { return false }
+    var p = p0 + 5
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    return TK[p as usize] == 16
+}
+
 fn scan_type(p0: i64) with Mut, Panic {
     var p = p0
     SCAN_TY = 0
@@ -575,7 +591,7 @@ fn mono_find_inst(gi: i64, is_st: i64, tys: i64, tye: i64) -> i64 with Panic {
 }
 
 // ─── Lexer ───
-fn lex_all() with Mut, Panic {
+fn lex_all() with Mut, Panic, Div {
     TC = 0
     var p: i64 = 0
     var cur_line: i64 = 1
@@ -597,6 +613,11 @@ fn lex_all() with Mut, Panic {
         // Number (decimal or hex 0x...)
         if c >= 48 && c <= 57 {
             let s = p; var v: i64 = 0
+            var frac: i64 = 0
+            var denom: i64 = 1
+            var is_float: i64 = 0
+            var exp_sign: i64 = 1
+            var exp_val: i64 = 0
             if c == 48 && p + 1 < SRC_LEN && (sb(p + 1) == 120 || sb(p + 1) == 88) {
                 p = p + 2
                 var hx: i64 = 1
@@ -612,14 +633,41 @@ fn lex_all() with Mut, Panic {
             }
             // Check for float: digits.digits (dot followed by digit, not .field)
             if p < SRC_LEN && sb(p) == 46 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57 {
+                is_float = 1
                 p = p + 1  // skip .
-                var frac: i64 = 0
-                var denom: i64 = 1
                 while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
                     frac = frac * 10 + sb(p) - 48
                     denom = denom * 10
                     p = p + 1
                 }
+            }
+            // Scientific notation: digits(.digits)?e[+/-]digits
+            if p < SRC_LEN && (sb(p) == 101 || sb(p) == 69) {
+                var ep = p + 1
+                var esign: i64 = 1
+                if ep < SRC_LEN && sb(ep) == 43 { ep = ep + 1 }
+                else if ep < SRC_LEN && sb(ep) == 45 { esign = 0 - 1; ep = ep + 1 }
+                if ep < SRC_LEN && sb(ep) >= 48 && sb(ep) <= 57 {
+                    is_float = 1
+                    exp_sign = esign
+                    p = ep
+                    while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
+                        exp_val = exp_val * 10 + sb(p) - 48
+                        p = p + 1
+                    }
+                }
+            }
+            if is_float == 1 {
+                var num = v * denom + frac
+                var scale = denom
+                while exp_val > 0 {
+                    if exp_sign == 1 { num = num * 10 }
+                    else { scale = scale * 10 }
+                    exp_val = exp_val - 1
+                }
+                v = num / scale
+                frac = num % scale
+                denom = scale
                 TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom; TL[TC as usize] = cur_line; TC = TC + 1; continue
             }
             TK[TC as usize] = 4; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TL[TC as usize] = cur_line; TC = TC + 1; continue
@@ -689,6 +737,26 @@ fn lex_all() with Mut, Panic {
         if c == 58 { TK[TC as usize] = 43; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
         if c == 38 { TK[TC as usize] = 44; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
         if c == 124 { TK[TC as usize] = 45; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
+        // ..= range inclusive (3-char, check first)
+        if c == 46 && p + 2 < SRC_LEN && sb(p + 1) == 46 && sb(p + 2) == 61 {
+            TK[TC as usize] = 64
+            TS[TC as usize] = p
+            TE[TC as usize] = p + 3
+            TL[TC as usize] = cur_line
+            TC = TC + 1
+            p = p + 3
+            continue
+        }
+        // .. range exclusive (2-char)
+        if c == 46 && p + 1 < SRC_LEN && sb(p + 1) == 46 {
+            TK[TC as usize] = 63
+            TS[TC as usize] = p
+            TE[TC as usize] = p + 2
+            TL[TC as usize] = cur_line
+            TC = TC + 1
+            p = p + 2
+            continue
+        }
         if c == 46 { TK[TC as usize] = 50; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
         if c == 126 { TK[TC as usize] = 55; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
         if c == 94 { TK[TC as usize] = 56; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1; continue }
@@ -1151,6 +1219,7 @@ var EP: i64 = 0
 var EXPR_IS_F64: i64 = 0
 var EXPR_TY: i64 = 0
 var EXPR_TY_HASH: i64 = 0
+var LAST_ALEN: i64 = 0
 var LAST_STMT_TY: i64 = 0
 var LAST_STMT_TY_HASH: i64 = 0
 var CURRENT_RET_TY: i64 = 0
@@ -1455,10 +1524,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EP = EP + 1
         let slot = var_find(rns, rne)
         if slot >= 0 {
-            // lea rax, [rbp - 8*slot]
-            let off = 0 - slot * 8
-            em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
-            em32(off)
+            let lalen = var_find_alen(rns, rne)
+            if lalen > 0 {
+                emit_load_var(slot)
+            } else {
+                // lea rax, [rbp - 8*slot]
+                let off = 0 - slot * 8
+                em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
+                em32(off)
+            }
         } else {
             let gi = gl_find(rns, rne)
             if gi >= 0 {
@@ -1583,6 +1657,25 @@ fn compile_primary() with IO, Mut, Panic, Div {
             em(0x48); em(0x89); em(0x08)  // mov [rax], rcx
             EXPR_IS_F64 = 0
             return
+        }
+        // Turbofish generic function: ident :: < TYPE > (
+        if TK[EP as usize] == 51 && EP + 3 < TC && TK[(EP + 1) as usize] == 23 && TK[(EP + 2) as usize] == 3 && TK[(EP + 3) as usize] == 24 {
+            let g_tys = TS[(EP + 2) as usize]
+            let g_tye = TE[(EP + 2) as usize]
+                EP = EP + 4
+                var g_gi: i64 = 0
+                var g_found: i64 = 0
+                while g_gi < GEN_FN_COUNT && g_found == 0 {
+                    if name_eq(ns, ne, GEN_FN_NS[g_gi as usize], GEN_FN_NE[g_gi as usize]) {
+                        let g_mi = mono_find_inst(g_gi, 0, g_tys, g_tye)
+                        if g_mi >= 0 {
+                            ns = MAN_BUF_S[g_mi as usize]
+                        ne = MAN_BUF_E[g_mi as usize]
+                        g_found = 1
+                    }
+                }
+                g_gi = g_gi + 1
+            }
         }
         // Enum::Variant — look up discriminant
         if TK[EP as usize] == 51 {
@@ -1945,6 +2038,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if vi >= 0 {
                 EXPR_TY = VAR_TY[vi as usize]
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
+                if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
             }
             var_mark_used(ns, ne)
         }
@@ -2063,6 +2157,48 @@ fn compile_postfix() with IO, Mut, Panic, Div {
             let fns = TS[EP as usize]
             let fne = TE[EP as usize]
             let fh = gl_name_hash(fns, fne)
+            // Built-in .len() — return compile-time array length
+            if src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 {
+                EP = EP + 1  // skip 'len'
+                EP = EP + 1  // skip (
+                EP = EP + 1  // skip )
+                // Emit: mov rax, LAST_ALEN (compile-time constant)
+                em(0x48)
+                em(0xb8)
+                em64(LAST_ALEN)
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                EXPR_IS_F64 = 0
+                continue
+            }
+            // Built-in .unwrap(reason) — extract .value field (offset 0) from struct
+            if src_match(fns, fne - fns, "unwrap") && TK[(EP + 1) as usize] == 6 {
+                EP = EP + 1  // skip 'unwrap'
+                EP = EP + 1  // skip (
+                // Skip all arguments until )
+                var uw_depth: i64 = 1
+                while uw_depth > 0 && EP < TC {
+                    if TK[EP as usize] == 6 { uw_depth = uw_depth + 1 }
+                    if TK[EP as usize] == 7 { uw_depth = uw_depth - 1 }
+                    if uw_depth > 0 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+                // rax = struct pointer. Load first field (.value at offset 0)
+                em(0x48)
+                em(0x8b)
+                em(0x00)  // mov rax, [rax]
+                // Try to determine type from struct
+                if EXPR_TY == 6 {
+                    let uw_si = st_find(EXPR_TY_HASH)
+                    if uw_si >= 0 {
+                        // Get type of first field (value)
+                        EXPR_TY = ST_FTY[(uw_si * 64) as usize]
+                        EXPR_TY_HASH = ST_FHASH[(uw_si * 64) as usize]
+                        if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
+                    }
+                }
+                continue
+            }
             // Method call: obj.method(args) → method(obj, args)
             if TK[(EP + 1) as usize] == 6 {
                 let mfi = fn_find(fns, fne)
@@ -2867,6 +3003,36 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
+    // (*ARRAY_PTR)[idx] = expr
+    if stmt_is_deref_array_store(EP) {
+        let name_tok = EP + 2
+        let ns = TS[(EP + 2) as usize]
+        let ne = TE[(EP + 2) as usize]
+        EP = EP + 5  // skip ( * name ) [
+        compile_or()  // index in rax
+        if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // skip 'as usize'
+        if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+        if TK[EP as usize] == 16 { EP = EP + 1 }  // skip =
+        em(0x50)  // push index
+        compile_or()  // value in rax
+        let lslot = var_find(ns, ne)
+        if lslot >= 0 {
+            let lesiz = var_find_esiz(ns, ne)
+            em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+            em(0x59)  // pop rcx (index)
+            emit_load_var(lslot)  // load array base ptr into rax
+            if lesiz == 8 {
+                em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+            } else {
+                em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+            }
+        } else {
+            tc_undefined_var(name_tok)
+            em(0x59)  // discard pushed index
+        }
+        return
+    }
+
     // return expr
     if k == 2 {
         EP = EP + 1
@@ -2965,6 +3131,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     }
 
     // for IDENT in range(START, END) { body }
+    // for IDENT in START..END { body }
+    // for IDENT in START..=END { body }   (inclusive)
     // Desugars to: var IDENT = START; while IDENT < END { body; IDENT = IDENT + 1 }
     if k == 54 {
         EP = EP + 1  // skip 'for'
@@ -2972,21 +3140,49 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let vne = TE[EP as usize]
         EP = EP + 1  // skip loop var name
         EP = EP + 1  // skip 'in'
-        EP = EP + 1  // skip 'range'
-        if TK[EP as usize] == 6 { EP = EP + 1 }  // skip (
-        compile_or()  // START in rax
-        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(EP - 1, "for range start must be integer") }
-        let iter_slot = var_add(vns, vne)
-        VAR_TY[(VAR_COUNT - 1) as usize] = 1
-        VAR_TY_HASH[(VAR_COUNT - 1) as usize] = 0
-        emit_store_var(iter_slot)
-        if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
-        compile_or()  // END in rax
-        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(EP - 1, "for range end must be integer") }
-        let end_slot = NEXT_SLOT
-        NEXT_SLOT = NEXT_SLOT + 1
-        emit_store_var(end_slot)
-        if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+        // Save slot base: both branches allocate iter at saved_next, end at saved_next+1
+        let saved_next = NEXT_SLOT
+        // Detect form: identifier followed by ( means range(START, END)
+        if TK[EP as usize] == 3 && TK[(EP + 1) as usize] == 6 && src_match(TS[EP as usize], TE[EP as usize] - TS[EP as usize], "range") {
+            // range(START, END) form
+            EP = EP + 1  // skip 'range'
+            EP = EP + 1  // skip (
+            compile_or()  // START in rax
+            if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(EP - 1, "for range start must be integer") }
+            let iter_slot_a = var_add(vns, vne)
+            VAR_TY[(VAR_COUNT - 1) as usize] = 1
+            VAR_TY_HASH[(VAR_COUNT - 1) as usize] = 0
+            emit_store_var(iter_slot_a)
+            if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
+            compile_or()  // END in rax
+            if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(EP - 1, "for range end must be integer") }
+            let end_slot_a = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(end_slot_a)
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+        } else {
+            // START..END or START..=END form
+            compile_or()  // START in rax
+            if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(EP - 1, "for range start must be integer") }
+            let iter_slot_r = var_add(vns, vne)
+            VAR_TY[(VAR_COUNT - 1) as usize] = 1
+            VAR_TY_HASH[(VAR_COUNT - 1) as usize] = 0
+            emit_store_var(iter_slot_r)
+            var is_inclusive: i64 = 0
+            if TK[EP as usize] == 64 { is_inclusive = 1 }
+            if TK[EP as usize] == 63 || TK[EP as usize] == 64 { EP = EP + 1 }
+            compile_or()  // END in rax
+            if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(EP - 1, "for range end must be integer") }
+            if is_inclusive != 0 {
+                em(0x48); em(0x83); em(0xc0); em(1)  // add rax, 1
+            }
+            let end_slot_r = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(end_slot_r)
+        }
+        // Both branches allocate: iter at saved_next, end at saved_next+1
+        let iter_slot = saved_next
+        let end_slot = saved_next + 1
         // while iter < end
         let loop_top = CL
         LOOP_TOP[LOOP_DEPTH as usize] = loop_top
@@ -3356,6 +3552,31 @@ fn mono_pass() with IO, Mut, Panic, Div {
                         MONO_COUNT = MONO_COUNT + 1
                     }
                     d_gi = GEN_ST_COUNT
+                }
+                d_gi = d_gi + 1
+            }
+        }
+        // Turbofish: IDENT :: < TYPE > (  — tokens: 3, 51, 23, 3, 24
+        if TK[p as usize] == 3 && p + 4 < TC && TK[(p + 1) as usize] == 51 && TK[(p + 2) as usize] == 23 && TK[(p + 4) as usize] == 24 {
+            d_cns = TS[p as usize]
+            d_cne = TE[p as usize]
+            d_tys = TS[(p + 3) as usize]
+            d_tye = TE[(p + 3) as usize]
+            d_gi = 0
+            while d_gi < GEN_FN_COUNT {
+                if name_eq(d_cns, d_cne, GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize]) {
+                    if mono_find_inst(d_gi, 0, d_tys, d_tye) < 0 {
+                        d_mi = MONO_COUNT
+                        MONO_GEN[d_mi as usize] = d_gi
+                        MONO_TY_S[d_mi as usize] = d_tys
+                        MONO_TY_E[d_mi as usize] = d_tye
+                        MONO_IS_ST[d_mi as usize] = 0
+                        d_ms = mono_mangle(GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize], d_tys, d_tye)
+                        MAN_BUF_S[d_mi as usize] = d_ms
+                        MAN_BUF_E[d_mi as usize] = SRC_LEN
+                        MONO_COUNT = MONO_COUNT + 1
+                    }
+                    d_gi = GEN_FN_COUNT
                 }
                 d_gi = d_gi + 1
             }
@@ -4855,7 +5076,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         let rne = TE[EP as usize]
         EP = EP + 1
         let slot = var_find(rns, rne)
-        if slot >= 0 { emit_lea_var_a64(slot) }
+        if slot >= 0 {
+            let lalen = var_find_alen(rns, rne)
+            if lalen > 0 { emit_load_var_a64(slot) }
+            else { emit_lea_var_a64(slot) }
+        }
         else {
             let gi = gl_find(rns, rne)
             if gi >= 0 { emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
@@ -5244,6 +5469,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if vi >= 0 {
                 EXPR_TY = VAR_TY[vi as usize]
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
+                if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
             }
             var_mark_used(ns, ne)
         } else {
@@ -5305,6 +5531,39 @@ fn compile_postfix_a64() with IO, Mut, Panic, Div {
             let fns = TS[EP as usize]
             let fne = TE[EP as usize]
             let fh = gl_name_hash(fns, fne)
+            // Built-in .len() — return compile-time array length (ARM64)
+            if src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 {
+                EP = EP + 1  // skip 'len'
+                EP = EP + 1  // skip (
+                EP = EP + 1  // skip )
+                emit_imm64_a64(LAST_ALEN)
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                EXPR_IS_F64 = 0
+                continue
+            }
+            // Built-in .unwrap(reason) — extract .value field (offset 0) from struct (ARM64)
+            if src_match(fns, fne - fns, "unwrap") && TK[(EP + 1) as usize] == 6 {
+                EP = EP + 1  // skip 'unwrap'
+                EP = EP + 1  // skip (
+                var uw_depth_a: i64 = 1
+                while uw_depth_a > 0 && EP < TC {
+                    if TK[EP as usize] == 6 { uw_depth_a = uw_depth_a + 1 }
+                    if TK[EP as usize] == 7 { uw_depth_a = uw_depth_a - 1 }
+                    if uw_depth_a > 0 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+                em32(0xF9400000)  // ldr x0, [x0]
+                if EXPR_TY == 6 {
+                    let uw_si_a = st_find(EXPR_TY_HASH)
+                    if uw_si_a >= 0 {
+                        EXPR_TY = ST_FTY[(uw_si_a * 64) as usize]
+                        EXPR_TY_HASH = ST_FHASH[(uw_si_a * 64) as usize]
+                        if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
+                    }
+                }
+                continue
+            }
             if TK[(EP + 1) as usize] == 6 {
                 let mfi = fn_find(fns, fne)
                 if mfi >= 0 {
@@ -5729,6 +5988,31 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         return
     }
+    // (*ARRAY_PTR)[idx] = expr
+    if stmt_is_deref_array_store(EP) {
+        let name_tok = EP + 2
+        let ns = TS[(EP + 2) as usize]; let ne = TE[(EP + 2) as usize]
+        EP = EP + 5
+        compile_or_a64()
+        if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+        if TK[EP as usize] == 42 { EP = EP + 1 }
+        if TK[EP as usize] == 16 { EP = EP + 1 }
+        emit_push_a64()
+        compile_or_a64()
+        let lslot = var_find(ns, ne)
+        if lslot >= 0 {
+            let lesiz = var_find_esiz(ns, ne)
+            em32(0xAA0003EA)
+            emit_pop_x1_a64()
+            emit_load_var_a64(lslot)
+            if lesiz == 8 { em32(0xF821780A) }
+            else { em32(0x3821680A) }
+        } else {
+            tc_undefined_var(name_tok)
+            emit_pop_x1_a64()
+        }
+        return
+    }
     // return
     if k == 2 {
         EP = EP + 1
@@ -5803,20 +6087,42 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         LOOP_DEPTH = LOOP_DEPTH - 1
         return
     }
-    // for
+    // for IDENT in range(START, END) / START..END / START..=END
     if k == 54 {
         EP = EP + 1
         let vns = TS[EP as usize]; let vne = TE[EP as usize]
-        EP = EP + 1; EP = EP + 1; EP = EP + 1
-        if TK[EP as usize] == 6 { EP = EP + 1 }
-        compile_or_a64()
-        let iter_slot = var_add(vns, vne)
-        emit_store_var_a64(iter_slot)
-        if TK[EP as usize] == 28 { EP = EP + 1 }
-        compile_or_a64()
-        let end_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-        emit_store_var_a64(end_slot)
-        if TK[EP as usize] == 7 { EP = EP + 1 }
+        EP = EP + 1  // skip loop var
+        EP = EP + 1  // skip 'in'
+        let saved_next_a = NEXT_SLOT
+        if TK[EP as usize] == 3 && TK[(EP + 1) as usize] == 6 && src_match(TS[EP as usize], TE[EP as usize] - TS[EP as usize], "range") {
+            // range(START, END) form
+            EP = EP + 1  // skip 'range'
+            EP = EP + 1  // skip (
+            compile_or_a64()
+            let iter_slot_a = var_add(vns, vne)
+            emit_store_var_a64(iter_slot_a)
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+            compile_or_a64()
+            let end_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var_a64(end_slot_a)
+            if TK[EP as usize] == 7 { EP = EP + 1 }
+        } else {
+            // START..END or START..=END form
+            compile_or_a64()
+            let iter_slot_b = var_add(vns, vne)
+            emit_store_var_a64(iter_slot_b)
+            var is_incl: i64 = 0
+            if TK[EP as usize] == 64 { is_incl = 1 }
+            if TK[EP as usize] == 63 || TK[EP as usize] == 64 { EP = EP + 1 }
+            compile_or_a64()
+            if is_incl != 0 {
+                em32(0x91000400)  // add x0, x0, #1
+            }
+            let end_slot_b = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var_a64(end_slot_b)
+        }
+        let iter_slot = saved_next_a
+        let end_slot = saved_next_a + 1
         let loop_top = CL
         LOOP_TOP[LOOP_DEPTH as usize] = loop_top
         LOOP_DEPTH = LOOP_DEPTH + 1
