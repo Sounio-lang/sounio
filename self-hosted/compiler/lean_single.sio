@@ -834,6 +834,32 @@ fn emit_print(tok: i64) with Mut, Panic, Div {
     em(0x48); em(0x81); em(0xc4); em32(nq * 8)
 }
 
+fn emit_print_cstr() with Mut {
+    // rax = C string pointer
+    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (ptr)
+    em(0x48); em(0x31); em(0xc9)  // xor rcx, rcx
+    let slp = CL
+    em(0x80); em(0x3c); em(0x0f); em(0x00)  // cmp byte [rdi+rcx], 0
+    em(0x74); em(0x04)  // je done
+    em(0x48); em(0xff); em(0xc1)  // inc rcx
+    em(0xeb); em(0xf5 as i64 & 0xFF)  // jmp loop
+    em(0x48); em(0x89); em(0xfe)  // mov rsi, rdi
+    em(0x48); em(0x89); em(0xca)  // mov rdx, rcx
+    em(0xb8); em32(1)
+    em(0xbf); em32(1)
+    em(0x0f); em(0x05)
+}
+
+fn emit_print_nl() with Mut {
+    em(0x6a); em(10)  // push '\n'
+    em(0xb8); em32(1)
+    em(0xbf); em32(1)
+    em(0x48); em(0x89); em(0xe6)
+    em(0xba); em32(1)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x83); em(0xc4); em(8)
+}
+
 // ─── Built-in function emitters ───
 
 // print_int: rax = value → emit decimal digits + write syscall
@@ -1571,26 +1597,36 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 5 {
                     emit_print(EP); EP = EP + 1
                 } else {
-                    // print(variable) — variable is a C string pointer
-                    compile_or()  // ptr in rax
-                    // strlen loop: mov rdi, rax; xor rcx, rcx; while [rdi+rcx]!=0 inc rcx
-                    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (ptr)
-                    em(0x48); em(0x31); em(0xc9)  // xor rcx, rcx
-                    let slp = CL
-                    em(0x80); em(0x3c); em(0x0f); em(0x00)  // cmp byte [rdi+rcx], 0
-                    em(0x74); em(0x04)  // je done
-                    em(0x48); em(0xff); em(0xc1)  // inc rcx
-                    em(0xeb); em(0xf5 as i64 & 0xFF)  // jmp loop
-                    // write(1, rdi, rcx)
-                    em(0x48); em(0x89); em(0xfe)  // mov rsi, rdi
-                    em(0x48); em(0x89); em(0xca)  // mov rdx, rcx (len)
-                    em(0xb8); em32(1); em(0xbf); em32(1)
-                    em(0x0f); em(0x05)
+                    compile_or()
+                    emit_print_cstr()
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 em(0x31); em(0xc0)
                 EXPR_IS_F64 = 0
-                EXPR_TY = 1
+                EXPR_TY = 5
+                return
+            }
+            if src_match(ns, ne - ns, "println") {
+                EP = EP + 1
+                if TK[EP as usize] == 5 {
+                    emit_print(EP)
+                    EP = EP + 1
+                    emit_print_nl()
+                } else {
+                    compile_or()
+                    if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
+                        emit_print_f64()
+                    } else if EXPR_TY == 3 {
+                        emit_print_cstr()
+                        emit_print_nl()
+                    } else {
+                        emit_print_int()
+                    }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                em(0x31); em(0xc0)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
                 return
             }
             // Check for print_int(expr)
@@ -1600,7 +1636,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 emit_print_int()
                 em(0x31); em(0xc0)
                 EXPR_IS_F64 = 0
-                EXPR_TY = 1
+                EXPR_TY = 5
                 return
             }
             // Check for print_f64(expr)
@@ -1610,7 +1646,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 emit_print_f64()
                 em(0x31); em(0xc0)
                 EXPR_IS_F64 = 0
-                EXPR_TY = 1
+                EXPR_TY = 5
                 return
             }
             // Check for arg_count()
@@ -4060,6 +4096,43 @@ fn emit_print_a64(tok: i64) with Mut, Panic, Div {
     emit_syscall_a64()
 }
 
+fn emit_print_cstr_a64() with Mut {
+    // x0 = C string pointer
+    em32(0xAA0003E9)  // mov x9, x0
+    em32(0xAA0003E1)  // mov x1, x0
+    em32(0xD280000A)  // movz x10, #0
+    let slp = CL
+    em32(0x38606920 | 10)  // ldrb w0, [x9, x10]
+    em32(0x34000000 | (3 << 5) | 0)  // cbz w0, done
+    em32(0x9100054A)  // add x10, x10, #1
+    let brel = (slp - CL) / 4
+    em32(0x14000000 | (brel & 0x3FFFFFF))
+    em32(0xAA0A03E2)  // mov x2, x10
+    em32(0xD2800020)  // movz x0, #1
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000004)
+    } else {
+        em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+}
+
+fn emit_print_nl_a64() with Mut {
+    em32(0xD1000000 | (16 << 10) | (31 << 5) | 31)  // sub sp, sp, #16
+    em32(0xD280014A)  // movz x10, #10
+    em32(0x390003EA)  // strb w10, [sp]
+    em32(0xD2800020)  // movz x0, #1
+    em32(0x910003E1)  // mov x1, sp
+    em32(0xD2800022)  // movz x2, #1
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000004)
+    } else {
+        em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    em32(0x910043FF)  // add sp, sp, #16
+}
+
 // ─── ARM64 print_int ───
 fn emit_print_int_a64() with Mut {
     // x0 = value to print
@@ -4573,38 +4646,48 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 5 { emit_print_a64(EP); EP = EP + 1 }
                 else {
                     compile_or_a64()
-                    em32(0xAA0003E9)
-                    em32(0xAA0003E1)
-                    em32(0xD2800000)
-                    let slp = CL
-                    em32(0x38606920 | 10)
-                    em32(0x34000000 | (3 << 5) | 10)
-                    em32(0x91000400)
-                    let brel2 = (slp - CL) / 4
-                    em32(0x14000000 | (brel2 & 0x3FFFFFF))
-                    em32(0xAA0003E2)
-                    em32(0xAA0903E1)
-                    em32(0xD2800020)
-                    if TARGET_OS == 2 { emit_imm64_reg_a64(16, 0x2000004) }
-                    else { em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8) }
-                    emit_syscall_a64()
+                    emit_print_cstr_a64()
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 em32(0xD2800000)
                 EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                return
+            }
+            if src_match(ns, ne - ns, "println") {
+                EP = EP + 1
+                if TK[EP as usize] == 5 {
+                    emit_print_a64(EP)
+                    EP = EP + 1
+                    emit_print_nl_a64()
+                } else {
+                    compile_or_a64()
+                    if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
+                        emit_print_f64_a64()
+                    } else if EXPR_TY == 3 {
+                        emit_print_cstr_a64()
+                        emit_print_nl_a64()
+                    } else {
+                        emit_print_int_a64()
+                    }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                em32(0xD2800000)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
                 return
             }
             if src_match(ns, ne - ns, "print_int") {
                 EP = EP + 1; compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_print_int_a64()
-                em32(0xD2800000); EXPR_IS_F64 = 0; return
+                em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
             if src_match(ns, ne - ns, "print_f64") {
                 EP = EP + 1; compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_print_f64_a64()
-                em32(0xD2800000); EXPR_IS_F64 = 0; return
+                em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
             if src_match(ns, ne - ns, "arg_count") {
                 EP = EP + 1
