@@ -2360,6 +2360,183 @@ fn patch32(off: i64, target: i64) with Mut, Panic {
     CD[(off+3) as usize] = ((rel >> 24) & 0xFF) as i8
 }
 
+var TUP_PAT_NEXT: i64 = 0
+var TUP_RHS_NEXT: i64 = 0
+
+fn tuple_bind_leaf_x86(ns: i64, ne: i64) with Mut, Panic, Div {
+    let slot = var_add(ns, ne)
+    let vix = VAR_COUNT - 1
+    emit_store_var(slot)
+    VAR_IS_F64[vix as usize] = EXPR_IS_F64
+    VAR_TY[vix as usize] = EXPR_TY
+    VAR_TY_HASH[vix as usize] = EXPR_TY_HASH
+    if VAR_TY[vix as usize] == 8 {
+        VAR_ALEN[vix as usize] = arr_hash_alen(VAR_TY_HASH[vix as usize])
+        VAR_ESIZ[vix as usize] = arr_hash_esiz(VAR_TY_HASH[vix as usize])
+    }
+    VAR_IS_CLOSURE[vix as usize] = LAST_EXPR_IS_CLOSURE
+    VAR_LINEAR[vix as usize] = LAST_EXPR_IS_LINEAR
+}
+
+fn tuple_bind_leaf_a64(ns: i64, ne: i64) with Mut, Panic, Div {
+    let slot = var_add(ns, ne)
+    let vix = VAR_COUNT - 1
+    emit_store_var_a64(slot)
+    VAR_IS_F64[vix as usize] = EXPR_IS_F64
+    VAR_TY[vix as usize] = EXPR_TY
+    VAR_TY_HASH[vix as usize] = EXPR_TY_HASH
+    if VAR_TY[vix as usize] == 8 {
+        VAR_ALEN[vix as usize] = arr_hash_alen(VAR_TY_HASH[vix as usize])
+        VAR_ESIZ[vix as usize] = arr_hash_esiz(VAR_TY_HASH[vix as usize])
+    }
+    VAR_IS_CLOSURE[vix as usize] = LAST_EXPR_IS_CLOSURE
+    VAR_LINEAR[vix as usize] = LAST_EXPR_IS_LINEAR
+}
+
+fn tuple_skip_value_x86() with IO, Mut, Panic, Div {
+    if TK[EP as usize] == 6 {
+        EP = EP + 1
+        while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+            tuple_skip_value_x86()
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+        }
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        EXPR_TY = 0
+        EXPR_TY_HASH = 0
+        EXPR_IS_F64 = 0
+        return
+    }
+    compile_or()
+}
+
+fn tuple_skip_value_a64() with IO, Mut, Panic, Div {
+    if TK[EP as usize] == 6 {
+        EP = EP + 1
+        while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+            tuple_skip_value_a64()
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+        }
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        EXPR_TY = 0
+        EXPR_TY_HASH = 0
+        EXPR_IS_F64 = 0
+        return
+    }
+    compile_or_a64()
+}
+
+fn tuple_bind_pattern_x86(pp0: i64, rp0: i64) with IO, Mut, Panic, Div {
+    var pp = pp0
+    var rp = rp0
+    if TK[pp as usize] != 6 || TK[rp as usize] != 6 {
+        tc_error(pp0, "tuple destructure shape mismatch")
+        TUP_PAT_NEXT = pp
+        TUP_RHS_NEXT = rp
+        return
+    }
+    pp = pp + 1
+    rp = rp + 1
+    while TK[pp as usize] != 7 && TK[pp as usize] != 0 {
+        if TK[pp as usize] == 6 {
+            if TK[rp as usize] != 6 {
+                tc_error(pp, "tuple destructure shape mismatch")
+                EP = rp
+                tuple_skip_value_x86()
+                rp = EP
+                while TK[pp as usize] != 7 && TK[pp as usize] != 0 { pp = pp + 1 }
+            } else {
+                tuple_bind_pattern_x86(pp, rp)
+                pp = TUP_PAT_NEXT
+                rp = TUP_RHS_NEXT
+            }
+        } else {
+            let pns = TS[pp as usize]
+            let pne = TE[pp as usize]
+            var is_wild: i64 = 0
+            if pne - pns == 1 && sb(pns) == 95 { is_wild = 1 }
+            pp = pp + 1
+            EP = rp
+            if is_wild == 1 {
+                tuple_skip_value_x86()
+                rp = EP
+            } else {
+                if TK[rp as usize] == 6 {
+                    tc_error(pp - 1, "tuple destructure shape mismatch")
+                    tuple_skip_value_x86()
+                    rp = EP
+                } else {
+                    compile_or()
+                    rp = EP
+                    tuple_bind_leaf_x86(pns, pne)
+                }
+            }
+        }
+        if TK[pp as usize] == 28 { pp = pp + 1 }
+        if TK[rp as usize] == 28 { rp = rp + 1 }
+    }
+    if TK[pp as usize] != 7 || TK[rp as usize] != 7 { tc_error(pp0, "tuple destructure arity mismatch") }
+    if TK[pp as usize] == 7 { pp = pp + 1 }
+    if TK[rp as usize] == 7 { rp = rp + 1 }
+    TUP_PAT_NEXT = pp
+    TUP_RHS_NEXT = rp
+}
+
+fn tuple_bind_pattern_a64(pp0: i64, rp0: i64) with IO, Mut, Panic, Div {
+    var pp = pp0
+    var rp = rp0
+    if TK[pp as usize] != 6 || TK[rp as usize] != 6 {
+        tc_error(pp0, "tuple destructure shape mismatch")
+        TUP_PAT_NEXT = pp
+        TUP_RHS_NEXT = rp
+        return
+    }
+    pp = pp + 1
+    rp = rp + 1
+    while TK[pp as usize] != 7 && TK[pp as usize] != 0 {
+        if TK[pp as usize] == 6 {
+            if TK[rp as usize] != 6 {
+                tc_error(pp, "tuple destructure shape mismatch")
+                EP = rp
+                tuple_skip_value_a64()
+                rp = EP
+                while TK[pp as usize] != 7 && TK[pp as usize] != 0 { pp = pp + 1 }
+            } else {
+                tuple_bind_pattern_a64(pp, rp)
+                pp = TUP_PAT_NEXT
+                rp = TUP_RHS_NEXT
+            }
+        } else {
+            let pns = TS[pp as usize]
+            let pne = TE[pp as usize]
+            var is_wild: i64 = 0
+            if pne - pns == 1 && sb(pns) == 95 { is_wild = 1 }
+            pp = pp + 1
+            EP = rp
+            if is_wild == 1 {
+                tuple_skip_value_a64()
+                rp = EP
+            } else {
+                if TK[rp as usize] == 6 {
+                    tc_error(pp - 1, "tuple destructure shape mismatch")
+                    tuple_skip_value_a64()
+                    rp = EP
+                } else {
+                    compile_or_a64()
+                    rp = EP
+                    tuple_bind_leaf_a64(pns, pne)
+                }
+            }
+        }
+        if TK[pp as usize] == 28 { pp = pp + 1 }
+        if TK[rp as usize] == 28 { rp = rp + 1 }
+    }
+    if TK[pp as usize] != 7 || TK[rp as usize] != 7 { tc_error(pp0, "tuple destructure arity mismatch") }
+    if TK[pp as usize] == 7 { pp = pp + 1 }
+    if TK[rp as usize] == 7 { rp = rp + 1 }
+    TUP_PAT_NEXT = pp
+    TUP_RHS_NEXT = rp
+}
+
 // ─── Statement compiler ───
 fn compile_stmt() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
@@ -2371,6 +2548,27 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // let x = expr / var x = expr (with optional : type)
     if k == 11 || k == 12 {
         EP = EP + 1
+        if TK[EP as usize] == 6 {
+            let pat_start = EP
+            var pat_p = EP
+            var pat_depth: i64 = 0
+            while pat_p < TC {
+                if TK[pat_p as usize] == 6 { pat_depth = pat_depth + 1 }
+                if TK[pat_p as usize] == 7 {
+                    pat_depth = pat_depth - 1
+                    pat_p = pat_p + 1
+                    if pat_depth == 0 { break }
+                    continue
+                }
+                pat_p = pat_p + 1
+            }
+            EP = pat_p
+            if TK[EP as usize] == 16 { EP = EP + 1 }
+            if TK[EP as usize] != 6 { tc_error(EP, "tuple destructuring requires tuple literal") }
+            tuple_bind_pattern_x86(pat_start, EP)
+            EP = TUP_RHS_NEXT
+            return
+        }
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
         EP = EP + 1
@@ -5204,6 +5402,27 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // let/var
     if k == 11 || k == 12 {
         EP = EP + 1
+        if TK[EP as usize] == 6 {
+            let pat_start = EP
+            var pat_p = EP
+            var pat_depth: i64 = 0
+            while pat_p < TC {
+                if TK[pat_p as usize] == 6 { pat_depth = pat_depth + 1 }
+                if TK[pat_p as usize] == 7 {
+                    pat_depth = pat_depth - 1
+                    pat_p = pat_p + 1
+                    if pat_depth == 0 { break }
+                    continue
+                }
+                pat_p = pat_p + 1
+            }
+            EP = pat_p
+            if TK[EP as usize] == 16 { EP = EP + 1 }
+            if TK[EP as usize] != 6 { tc_error(EP, "tuple destructuring requires tuple literal") }
+            tuple_bind_pattern_a64(pat_start, EP)
+            EP = TUP_RHS_NEXT
+            return
+        }
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
         EP = EP + 1
