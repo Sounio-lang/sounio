@@ -385,17 +385,42 @@ fn name_eq(s1: i64, e1: i64, s2: i64, e2: i64) -> bool with Panic {
 
 fn ty_is_numeric(k: i64) -> bool { return k == 1 || k == 2 }
 
-fn arr_ty_hash(alen: i64, esiz: i64) -> i64 {
-    return alen * 16 + esiz
+fn arr_ty_hash(alen: i64, esiz: i64, elem_ty: i64) -> i64 {
+    var code: i64 = elem_ty * 2
+    if esiz == 1 { code = code + 1 }
+    return alen * 32 + code
 }
 
 fn arr_hash_alen(h: i64) -> i64 with Div {
-    return h / 16
+    return h / 32
 }
 
 fn arr_hash_esiz(h: i64) -> i64 with Div {
-    if h % 16 == 1 { return 1 }
+    if h % 2 == 1 { return 1 }
     return 8
+}
+
+fn arr_hash_elem_ty(h: i64) -> i64 with Div {
+    return (h % 32) / 2
+}
+
+fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic {
+    if src_match(ns, ne - ns, "i8") { return 1 }
+    if src_match(ns, ne - ns, "i32") { return 1 }
+    if src_match(ns, ne - ns, "u32") { return 1 }
+    if src_match(ns, ne - ns, "i64") { return 1 }
+    if src_match(ns, ne - ns, "u64") { return 1 }
+    if src_match(ns, ne - ns, "usize") { return 1 }
+    if src_match(ns, ne - ns, "f32") { return 2 }
+    if src_match(ns, ne - ns, "f64") { return 2 }
+    if src_match(ns, ne - ns, "str") { return 3 }
+    if src_match(ns, ne - ns, "string") { return 3 }
+    if src_match(ns, ne - ns, "bool") { return 4 }
+    if src_match(ns, ne - ns, "unit") { return 5 }
+    let h = gl_name_hash(ns, ne)
+    if st_find(h) >= 0 { return 6 }
+    if en_find(h) >= 0 { return 7 }
+    return 0
 }
 
 fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool {
@@ -477,6 +502,7 @@ fn scan_type(p0: i64) with Mut, Panic {
         p = p + 1
         let ens = TS[p as usize]
         let ene = TE[p as usize]
+        let elem_ty = type_name_kind(ens, ene)
         SCAN_TY = 8
         if src_match(ens, ene - ens, "i8") {
             SCAN_TY_ESIZ = 1
@@ -490,7 +516,7 @@ fn scan_type(p0: i64) with Mut, Panic {
             p = p + 1
         }
         if TK[p as usize] == 42 { p = p + 1 }
-        SCAN_TY_HASH = arr_ty_hash(SCAN_TY_ALEN, SCAN_TY_ESIZ)
+        SCAN_TY_HASH = arr_ty_hash(SCAN_TY_ALEN, SCAN_TY_ESIZ, elem_ty)
         SCAN_TY_NEXT = p
         return
     }
@@ -795,7 +821,7 @@ fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
 }
 
 // Add a local array variable: allocate N slots, return base slot, store lea as value
-fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64) -> i64 with Mut, Panic {
+fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64, elem_ty: i64) -> i64 with Mut, Panic {
     let base = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + alen
     let ptr_slot = NEXT_SLOT
@@ -807,7 +833,7 @@ fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64) -> i64 with Mut, Panic {
     VAR_ESIZ[VAR_COUNT as usize] = esiz
     VAR_IS_F64[VAR_COUNT as usize] = 0
     VAR_TY[VAR_COUNT as usize] = 8
-    VAR_TY_HASH[VAR_COUNT as usize] = esiz
+    VAR_TY_HASH[VAR_COUNT as usize] = arr_ty_hash(alen, esiz, elem_ty)
     VAR_COUNT = VAR_COUNT + 1
     return ptr_slot
 }
@@ -1294,6 +1320,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let match_tok = EP
         compile_stmt()
         if LAST_STMT_HAS_VALUE == 0 { tc_error(match_tok, "match expression must yield a value") }
+        EXPR_TY = LAST_STMT_TY
+        EXPR_TY_HASH = LAST_STMT_TY_HASH
+        if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
+        else { EXPR_IS_F64 = 0 }
+        return
+    }
+    if k == 13 {
+        let if_tok = EP
+        compile_stmt()
+        if LAST_STMT_HAS_VALUE == 0 { tc_error(if_tok, "if expression must yield a value") }
         EXPR_TY = LAST_STMT_TY
         EXPR_TY_HASH = LAST_STMT_TY_HASH
         if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
@@ -1989,44 +2025,64 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if gi >= 0 {
                 let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 let esz = GL[(gi * 4 + 2) as usize]
+                var elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize])
+                if elem_ty == 0 { elem_ty = 1 }
                 if esz == 8 {
                     // mov rcx, rax; mov rax, base; mov rax, [rax + rcx*8]
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
                     em(0x48); em(0xb8); em64(base)  // mov rax, base
                     em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+                    EXPR_TY = elem_ty
+                    EXPR_TY_HASH = 0
+                    if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else {
                     // i8 array: movsx rax, byte [rax + rcx]
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax
                     em(0x48); em(0xb8); em64(base)  // mov rax, base
                     em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 0
                 }
-                if esz == 1 { EXPR_TY = 1 }
             } else {
                 // Local pointer subscript: ptr[idx] → load ptr from stack, add index
                 let slot = var_find(ns, ne)
                 if slot >= 0 {
                     let lalen = var_find_alen(ns, ne)
                     let lesiz = var_find_esiz(ns, ne)
+                    let lvi = var_find_idx(ns, ne)
+                    var elem_ty = 1
+                    if lvi >= 0 {
+                        elem_ty = arr_hash_elem_ty(VAR_TY_HASH[lvi as usize])
+                        if elem_ty == 0 { elem_ty = 1 }
+                    }
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
                     emit_load_var(slot)  // load ptr into rax
                     if lalen > 0 && lesiz == 8 {
                         em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+                        EXPR_TY = elem_ty
+                        EXPR_TY_HASH = 0
+                        if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     } else if lalen > 0 && lesiz == 1 {
                         em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
                         EXPR_TY = 1
+                        EXPR_TY_HASH = 0
+                        EXPR_IS_F64 = 0
                     } else {
                         // Non-array local pointer (e.g. read_file result): byte access
                         em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
                         EXPR_TY = 1
+                        EXPR_TY_HASH = 0
+                        EXPR_IS_F64 = 0
                     }
                 } else {
                     tc_undefined_var(name_tok)
                     em(0x31); em(0xc0)
                     EXPR_TY = 0
                     EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 0
                 }
             }
-            EXPR_IS_F64 = 0
             return
         }
         // Variable load (local first, then global)
@@ -2151,6 +2207,40 @@ fn compile_postfix() with IO, Mut, Panic, Div {
             EP = SCAN_TY_NEXT
             continue
         }
+        if TK[EP as usize] == 41 {
+            let base_ty = EXPR_TY
+            let base_hash = EXPR_TY_HASH
+            emit_push()
+            EP = EP + 1
+            compile_or()
+            if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (index)
+            em(0x59)  // pop rcx (base pointer)
+            if base_ty == 8 {
+                let esiz = arr_hash_esiz(base_hash)
+                var elem_ty = arr_hash_elem_ty(base_hash)
+                if elem_ty == 0 { elem_ty = 1 }
+                LAST_ALEN = arr_hash_alen(base_hash)
+                if esiz == 8 {
+                    em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8]
+                    EXPR_TY = elem_ty
+                    EXPR_TY_HASH = 0
+                    if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                } else {
+                    em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x11)  // movsx rax, byte [rcx + rdx]
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 0
+                }
+            } else {
+                em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x11)  // movsx rax, byte [rcx + rdx]
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                EXPR_IS_F64 = 0
+            }
+            continue
+        }
         if TK[EP as usize] == 50 {
             EP = EP + 1  // skip '.'
             let method_tok = EP
@@ -2253,6 +2343,7 @@ fn compile_postfix() with IO, Mut, Panic, Div {
                         }
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
+                        if EXPR_TY == 8 { LAST_ALEN = arr_hash_alen(EXPR_TY_HASH) }
                     } else {
                         tc_error(method_tok, "unknown field access")
                         em(0x31); em(0xc0)
@@ -2271,6 +2362,7 @@ fn compile_postfix() with IO, Mut, Panic, Div {
                     }
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
+                    if EXPR_TY == 8 { LAST_ALEN = arr_hash_alen(EXPR_TY_HASH) }
                     found = 1
                 }
                 si = si + 1
@@ -2787,6 +2879,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 // Element type
                 let etns = TS[EP as usize]
                 let etne = TE[EP as usize]
+                let arr_elem_ty = type_name_kind(etns, etne)
                 if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
                 EP = EP + 1  // skip element type
                 if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ;
@@ -2795,7 +2888,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
                 is_arr = 1
                 decl_ty = 8
-                decl_ty_hash = arr_ty_hash(arr_len, arr_esiz)
+                decl_ty_hash = arr_ty_hash(arr_len, arr_esiz, arr_elem_ty)
                 decl_is_f64 = 0
             } else {
                 scan_type(EP)
@@ -2818,7 +2911,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             }
             let nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
-            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz)
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
             let arr_vi = VAR_COUNT - 1
             VAR_TY[arr_vi as usize] = 8
             VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
@@ -3081,9 +3174,18 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x0f); em(0x84)
         let je_off = CL; em32(0)
+        LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        let then_has_value = LAST_STMT_HAS_VALUE
+        let then_ty = LAST_STMT_TY
+        let then_hash = LAST_STMT_TY_HASH
         if TK[EP as usize] == 9 { EP = EP + 1 }
+        LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
         if TK[EP as usize] == 14 {
             EP = EP + 1
             em(0xe9)
@@ -3093,13 +3195,37 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 13 {
                 compile_stmt()
             } else {
+                LAST_STMT_HAS_VALUE = 0
+                LAST_STMT_TY = 0
+                LAST_STMT_TY_HASH = 0
                 if TK[EP as usize] == 8 { EP = EP + 1 }
                 while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
                 if TK[EP as usize] == 9 { EP = EP + 1 }
             }
+            let else_has_value = LAST_STMT_HAS_VALUE
+            let else_ty = LAST_STMT_TY
+            let else_hash = LAST_STMT_TY_HASH
             patch32(jmp_off, CL)
+            if then_has_value == 1 && else_has_value == 1 && then_ty != 5 && else_ty != 5 {
+                if ty_eq(then_ty, then_hash, else_ty, else_hash) == false {
+                    tc_error(EP - 1, "if arm type does not match else arm")
+                }
+                LAST_STMT_HAS_VALUE = 1
+                LAST_STMT_TY = then_ty
+                LAST_STMT_TY_HASH = then_hash
+                EXPR_TY = then_ty
+                EXPR_TY_HASH = then_hash
+                if then_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+            } else {
+                LAST_STMT_HAS_VALUE = 0
+                LAST_STMT_TY = 0
+                LAST_STMT_TY_HASH = 0
+            }
         } else {
             patch32(je_off, CL)
+            LAST_STMT_HAS_VALUE = 0
+            LAST_STMT_TY = 0
+            LAST_STMT_TY_HASH = 0
         }
         return
     }
@@ -3866,6 +3992,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     p = p + 1
                     let etns = TS[p as usize]
                     let etne = TE[p as usize]
+                    let elem_ty = type_name_kind(etns, etne)
                     var esiz: i64 = 8
                     if src_match(etns, etne - etns, "i8") { esiz = 1 }
                     p = p + 1
@@ -3879,7 +4006,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     let gix = GL_COUNT
                     gl_add(gns, gne, esiz, alen)
                     GL_TY[gix as usize] = 8
-                    GL_TY_HASH[gix as usize] = esiz
+                    GL_TY_HASH[gix as usize] = arr_ty_hash(alen, esiz, elem_ty)
                 } else {
                     // Scalar: i64, i32, bool, string
                     scan_type(p)
@@ -4985,13 +5112,27 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         }
         em32(0x9E660000)  // fmov x0, d0
         EXPR_IS_F64 = 1
+        EXPR_TY = 2
         return
     }
     if k == 48 {
         let match_tok = EP
         compile_stmt_a64()
         if LAST_STMT_HAS_VALUE == 0 { tc_error(match_tok, "match expression must yield a value") }
-        EXPR_IS_F64 = 0
+        EXPR_TY = LAST_STMT_TY
+        EXPR_TY_HASH = LAST_STMT_TY_HASH
+        if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
+        else { EXPR_IS_F64 = 0 }
+        return
+    }
+    if k == 13 {
+        let if_tok = EP
+        compile_stmt_a64()
+        if LAST_STMT_HAS_VALUE == 0 { tc_error(if_tok, "if expression must yield a value") }
+        EXPR_TY = LAST_STMT_TY
+        EXPR_TY_HASH = LAST_STMT_TY_HASH
+        if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
+        else { EXPR_IS_F64 = 0 }
         return
     }
     // Closure stub
@@ -5439,25 +5580,55 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if gi >= 0 {
                 let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 let esz = GL[(gi * 4 + 2) as usize]
+                var elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize])
+                if elem_ty == 0 { elem_ty = 1 }
                 em32(0xAA0003E9)
                 emit_imm64_a64(base)
-                if esz == 8 { em32(0xF8697800) }
-                else { em32(0x38A96800) }
+                if esz == 8 {
+                    em32(0xF8697800)
+                    EXPR_TY = elem_ty
+                    EXPR_TY_HASH = 0
+                    if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                }
+                else {
+                    em32(0x38A96800)
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 0
+                }
             } else {
                 let slot = var_find(ns, ne)
                 if slot >= 0 {
                     let lalen = var_find_alen(ns, ne)
                     let lesiz = var_find_esiz(ns, ne)
+                    let lvi = var_find_idx(ns, ne)
+                    var elem_ty = 1
+                    if lvi >= 0 {
+                        elem_ty = arr_hash_elem_ty(VAR_TY_HASH[lvi as usize])
+                        if elem_ty == 0 { elem_ty = 1 }
+                    }
                     em32(0xAA0003E9)
                     emit_load_var_a64(slot)
-                    if lalen > 0 && lesiz == 8 { em32(0xF8697800) }
-                    else { em32(0x38A96800) }
+                    if lalen > 0 && lesiz == 8 {
+                        em32(0xF8697800)
+                        EXPR_TY = elem_ty
+                        EXPR_TY_HASH = 0
+                        if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                    }
+                    else {
+                        em32(0x38A96800)
+                        EXPR_TY = 1
+                        EXPR_TY_HASH = 0
+                        EXPR_IS_F64 = 0
+                    }
                 } else {
                     tc_undefined_var(name_tok)
                     em32(0xD2800000)
+                    EXPR_TY = 0
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 0
                 }
             }
-            EXPR_IS_F64 = 0
             return
         }
         // Variable load
@@ -5523,6 +5694,41 @@ fn compile_postfix_a64() with IO, Mut, Panic, Div {
             EXPR_TY_HASH = SCAN_TY_HASH
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             EP = SCAN_TY_NEXT
+            continue
+        }
+        if TK[EP as usize] == 41 {
+            let base_ty = EXPR_TY
+            let base_hash = EXPR_TY_HASH
+            emit_push_a64()
+            EP = EP + 1
+            compile_or_a64()
+            if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            em32(0xAA0003E9)  // mov x9, x0 (index)
+            emit_pop_x1_a64()
+            em32(0xAA0103E0)  // mov x0, x1 (base)
+            if base_ty == 8 {
+                let esiz = arr_hash_esiz(base_hash)
+                var elem_ty = arr_hash_elem_ty(base_hash)
+                if elem_ty == 0 { elem_ty = 1 }
+                LAST_ALEN = arr_hash_alen(base_hash)
+                if esiz == 8 {
+                    em32(0xF8697800)
+                    EXPR_TY = elem_ty
+                    EXPR_TY_HASH = 0
+                    if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                } else {
+                    em32(0x38A96800)
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 0
+                }
+            } else {
+                em32(0x38A96800)
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                EXPR_IS_F64 = 0
+            }
             continue
         }
         if TK[EP as usize] == 50 {
@@ -5610,6 +5816,7 @@ fn compile_postfix_a64() with IO, Mut, Panic, Div {
                         else { em32(0xF9400000 | ((off / 8) << 10) | (0 << 5) | 0) }
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
+                        if EXPR_TY == 8 { LAST_ALEN = arr_hash_alen(EXPR_TY_HASH) }
                     } else {
                         tc_error(method_tok, "unknown field access")
                         em32(0xD2800000)
@@ -5625,6 +5832,7 @@ fn compile_postfix_a64() with IO, Mut, Panic, Div {
                     else { em32(0xF9400000 | ((off / 8) << 10) | (0 << 5) | 0) }
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
+                    if EXPR_TY == 8 { LAST_ALEN = arr_hash_alen(EXPR_TY_HASH) }
                     found = 1
                 }
                 si = si + 1
@@ -5837,6 +6045,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 let etns = TS[EP as usize]
                 let etne = TE[EP as usize]
+                let arr_elem_ty = type_name_kind(etns, etne)
                 if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
                 EP = EP + 1
                 if TK[EP as usize] == 27 { EP = EP + 1 }
@@ -5844,7 +6053,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 42 { EP = EP + 1 }
                 is_arr = 1
                 decl_ty = 8
-                decl_ty_hash = arr_ty_hash(arr_len, arr_esiz)
+                decl_ty_hash = arr_ty_hash(arr_len, arr_esiz, arr_elem_ty)
                 decl_is_f64 = 0
             } else {
                 scan_type(EP)
@@ -5864,7 +6073,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             let nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
-            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz)
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
             let arr_vi = VAR_COUNT - 1
             VAR_TY[arr_vi as usize] = 8
             VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
@@ -6045,11 +6254,21 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     if k == 13 {
         EP = EP + 1
         compile_or_a64()
+        if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(EP - 1, "if condition must be bool") }
         let cbz_off = CL
         em32(0xB4000000)
+        LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        let then_has_value = LAST_STMT_HAS_VALUE
+        let then_ty = LAST_STMT_TY
+        let then_hash = LAST_STMT_TY_HASH
         if TK[EP as usize] == 9 { EP = EP + 1 }
+        LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
         if TK[EP as usize] == 14 {
             EP = EP + 1
             let b_end_off = CL
@@ -6057,12 +6276,38 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             patch_branch_a64(cbz_off, CL)
             if TK[EP as usize] == 13 { compile_stmt_a64() }
             else {
+                LAST_STMT_HAS_VALUE = 0
+                LAST_STMT_TY = 0
+                LAST_STMT_TY_HASH = 0
                 if TK[EP as usize] == 8 { EP = EP + 1 }
                 while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
                 if TK[EP as usize] == 9 { EP = EP + 1 }
             }
+            let else_has_value = LAST_STMT_HAS_VALUE
+            let else_ty = LAST_STMT_TY
+            let else_hash = LAST_STMT_TY_HASH
             patch_branch_a64(b_end_off, CL)
-        } else { patch_branch_a64(cbz_off, CL) }
+            if then_has_value == 1 && else_has_value == 1 && then_ty != 5 && else_ty != 5 {
+                if ty_eq(then_ty, then_hash, else_ty, else_hash) == false {
+                    tc_error(EP - 1, "if arm type does not match else arm")
+                }
+                LAST_STMT_HAS_VALUE = 1
+                LAST_STMT_TY = then_ty
+                LAST_STMT_TY_HASH = then_hash
+                EXPR_TY = then_ty
+                EXPR_TY_HASH = then_hash
+                if then_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+            } else {
+                LAST_STMT_HAS_VALUE = 0
+                LAST_STMT_TY = 0
+                LAST_STMT_TY_HASH = 0
+            }
+        } else {
+            patch_branch_a64(cbz_off, CL)
+            LAST_STMT_HAS_VALUE = 0
+            LAST_STMT_TY = 0
+            LAST_STMT_TY_HASH = 0
+        }
         return
     }
     // while
@@ -6154,6 +6399,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         var arm_count: i64 = 0
         var match_all_value: i64 = 1
         var match_arms: i64 = 0
+        var match_have_ty: i64 = 0
+        var match_ty: i64 = 0
+        var match_hash: i64 = 0
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
             var is_wildcard: i64 = 0
             var disc: i64 = -1
@@ -6190,7 +6438,17 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                         compile_stmt_a64()
                     }
                     match_arms = match_arms + 1
-                    if LAST_STMT_HAS_VALUE == 0 { match_all_value = 0 }
+                    if LAST_STMT_HAS_VALUE == 1 {
+                        if match_have_ty == 0 {
+                            match_have_ty = 1
+                            match_ty = LAST_STMT_TY
+                            match_hash = LAST_STMT_TY_HASH
+                        } else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                            tc_error(EP - 1, "match arm type does not match other arms")
+                        }
+                    } else {
+                        match_all_value = 0
+                    }
                     MATCH_ENDS[arm_count as usize] = CL; em32(0x14000000)
                     arm_count = arm_count + 1
                     patch_branch_a64(skip_off, CL)
@@ -6210,7 +6468,17 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                         compile_stmt_a64()
                     }
                     match_arms = match_arms + 1
-                    if LAST_STMT_HAS_VALUE == 0 { match_all_value = 0 }
+                    if LAST_STMT_HAS_VALUE == 1 {
+                        if match_have_ty == 0 {
+                            match_have_ty = 1
+                            match_ty = LAST_STMT_TY
+                            match_hash = LAST_STMT_TY_HASH
+                        } else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                            tc_error(EP - 1, "match arm type does not match other arms")
+                        }
+                    } else {
+                        match_all_value = 0
+                    }
                     MATCH_ENDS[arm_count as usize] = CL; em32(0x14000000)
                     arm_count = arm_count + 1
                     patch_branch_a64(skip_off, CL)
@@ -6228,19 +6496,38 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     compile_stmt_a64()
                 }
                 match_arms = match_arms + 1
-                if LAST_STMT_HAS_VALUE == 0 { match_all_value = 0 }
+                if LAST_STMT_HAS_VALUE == 1 {
+                    if match_have_ty == 0 {
+                        match_have_ty = 1
+                        match_ty = LAST_STMT_TY
+                        match_hash = LAST_STMT_TY_HASH
+                    } else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                        tc_error(EP - 1, "match arm type does not match other arms")
+                    }
+                } else {
+                    match_all_value = 0
+                }
             }
             if TK[EP as usize] == 28 { EP = EP + 1 }
         }
         if TK[EP as usize] == 9 { EP = EP + 1 }
         var ai: i64 = 0
         while ai < arm_count { patch_branch_a64(MATCH_ENDS[ai as usize], CL); ai = ai + 1 }
-        if match_arms > 0 && match_all_value == 1 { LAST_STMT_HAS_VALUE = 1 }
+        if match_arms > 0 && match_all_value == 1 && match_have_ty == 1 {
+            LAST_STMT_HAS_VALUE = 1
+            LAST_STMT_TY = match_ty
+            LAST_STMT_TY_HASH = match_hash
+            EXPR_TY = match_ty
+            EXPR_TY_HASH = match_hash
+            if match_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+        }
         return
     }
     // Expression statement
     compile_or_a64()
     LAST_STMT_HAS_VALUE = 1
+    LAST_STMT_TY = EXPR_TY
+    LAST_STMT_TY_HASH = EXPR_TY_HASH
 }
 
 // ─── ARM64 top-level compiler ───
