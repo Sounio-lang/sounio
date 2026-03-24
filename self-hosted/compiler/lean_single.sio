@@ -61,6 +61,9 @@ var PATCH_COUNT: i64 = 0
 // ST[i*66+1] = field count
 // ST[i*66+2..65] = field name hashes (up to 64 fields)
 var ST: [i64; 2112] = [0; 2112]
+// Per-struct field type metadata, indexed as si*64 + fi
+var ST_FTY: [i64; 2048] = [0; 2048]
+var ST_FHASH: [i64; 2048] = [0; 2048]
 var ST_COUNT: i64 = 0
 
 // Enum registry: flat array, up to 64 enums
@@ -176,6 +179,28 @@ fn st_field_offset(si: i64, field_hash: i64) -> i64 with Panic {
         fi = fi + 1
     }
     return -1
+}
+
+fn st_field_ty(si: i64, field_hash: i64) -> i64 with Panic {
+    let base = si * 66
+    let fc = ST[(base + 1) as usize]
+    var fi: i64 = 0
+    while fi < fc {
+        if ST[(base + 2 + fi) as usize] == field_hash { return ST_FTY[(si * 64 + fi) as usize] }
+        fi = fi + 1
+    }
+    return 0
+}
+
+fn st_field_hash(si: i64, field_hash: i64) -> i64 with Panic {
+    let base = si * 66
+    let fc = ST[(base + 1) as usize]
+    var fi: i64 = 0
+    while fi < fc {
+        if ST[(base + 2 + fi) as usize] == field_hash { return ST_FHASH[(si * 64 + fi) as usize] }
+        fi = fi + 1
+    }
+    return 0
 }
 
 fn st_total_size(si: i64) -> i64 with Panic {
@@ -1796,6 +1821,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em32(0)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
+                if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             } else {
                 // Indirect call through variable — uniform closure convention:
                 // All callable values are closure struct pointers [fn_ptr, cap_0, ...]
@@ -1816,7 +1842,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     em(0x31); em(0xc0)  // unknown fn
                 }
             }
-            EXPR_IS_F64 = 0
+            if fi < 0 { EXPR_IS_F64 = 0 }
             return
         }
         // Struct literal: StructName { field: val, ... }
@@ -2010,14 +2036,24 @@ fn compile_postfix() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 37 {
             EP = EP + 1  // skip 'as'
             let tp = EP
+            let src_is_f64 = EXPR_IS_F64
             let tns = TS[EP as usize]
             let tne = TE[EP as usize]
-            if tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
+            scan_type(tp)
+            if SCAN_TY == 1 && src_is_f64 == 1 {
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
+                em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0)
+            }
+            if SCAN_TY == 2 && src_is_f64 == 0 {
+                em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
+                em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+            }
+            if SCAN_TY == 1 && tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
                 em(0x48); em(0x0f); em(0xbe); em(0xc0)  // as i8: movsx rax, al
             }
-            scan_type(tp)
             EXPR_TY = SCAN_TY
             EXPR_TY_HASH = SCAN_TY_HASH
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             EP = SCAN_TY_NEXT
             continue
         }
@@ -2058,12 +2094,36 @@ fn compile_postfix() with IO, Mut, Panic, Div {
                     em32(0)
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
+                    if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     continue
                 }
             }
             // Field access: rax = struct pointer, load field
+            let base_ty = EXPR_TY
+            let base_hash = EXPR_TY_HASH
             EP = EP + 1
             var found: i64 = 0
+            EXPR_TY = 0
+            EXPR_TY_HASH = 0
+            if base_ty == 6 {
+                let bsi = st_find(base_hash)
+                if bsi >= 0 {
+                    let off = st_field_offset(bsi, fh)
+                    if off >= 0 {
+                        if off == 0 {
+                            em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+                        } else {
+                            em(0x48); em(0x8b); em(0x80); em32(off)  // mov rax, [rax+off]
+                        }
+                        EXPR_TY = st_field_ty(bsi, fh)
+                        EXPR_TY_HASH = st_field_hash(bsi, fh)
+                    } else {
+                        tc_error(method_tok, "unknown field access")
+                        em(0x31); em(0xc0)
+                    }
+                    found = 1
+                }
+            }
             var si: i64 = 0
             while si < ST_COUNT && found == 0 {
                 let off = st_field_offset(si, fh)
@@ -2073,12 +2133,13 @@ fn compile_postfix() with IO, Mut, Panic, Div {
                     } else {
                         em(0x48); em(0x8b); em(0x80); em32(off)  // mov rax, [rax+off]
                     }
+                    EXPR_TY = st_field_ty(si, fh)
+                    EXPR_TY_HASH = st_field_hash(si, fh)
                     found = 1
                 }
                 si = si + 1
             }
-            EXPR_TY = 0
-            EXPR_TY_HASH = 0
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             continue
         }
         more = 0
@@ -3417,10 +3478,20 @@ fn mono_pass() with IO, Mut, Panic, Div {
                         while TK[p as usize] != 9 && TK[p as usize] != 0 {
                             if TK[p as usize] == 3 {
                                 let rfh = gl_name_hash(TS[p as usize], TE[p as usize])
+                                let rffi = rfc
                                 ST[(rbase + 2 + rfc) as usize] = rfh
-                                rfc = rfc + 1
                                 p = p + 1
-                                if TK[p as usize] == 43 { p = p + 1; p = p + 1 }
+                                if TK[p as usize] == 43 {
+                                    p = p + 1
+                                    scan_type(p)
+                                    ST_FTY[(rsi * 64 + rffi) as usize] = SCAN_TY
+                                    ST_FHASH[(rsi * 64 + rffi) as usize] = SCAN_TY_HASH
+                                    p = SCAN_TY_NEXT
+                                } else {
+                                    ST_FTY[(rsi * 64 + rffi) as usize] = 0
+                                    ST_FHASH[(rsi * 64 + rffi) as usize] = 0
+                                }
+                                rfc = rfc + 1
                                 if TK[p as usize] == 28 { p = p + 1 }
                                 continue
                             }
@@ -3474,11 +3545,21 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 while TK[p as usize] != 9 && TK[p as usize] != 0 {
                     if TK[p as usize] == 3 {
                         let fh = gl_name_hash(TS[p as usize], TE[p as usize])
+                        let ffi = fc
                         ST[(base + 2 + fc) as usize] = fh
-                        fc = fc + 1
                         p = p + 1
                         // Skip : type
-                        if TK[p as usize] == 43 { p = p + 1; p = p + 1 }
+                        if TK[p as usize] == 43 {
+                            p = p + 1
+                            scan_type(p)
+                            ST_FTY[(si * 64 + ffi) as usize] = SCAN_TY
+                            ST_FHASH[(si * 64 + ffi) as usize] = SCAN_TY_HASH
+                            p = SCAN_TY_NEXT
+                        } else {
+                            ST_FTY[(si * 64 + ffi) as usize] = 0
+                            ST_FHASH[(si * 64 + ffi) as usize] = 0
+                        }
+                        fc = fc + 1
                         // Skip comma
                         if TK[p as usize] == 28 { p = p + 1 }
                         continue
@@ -5065,6 +5146,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 PATCH_FN[PATCH_COUNT as usize] = fi
                 PATCH_COUNT = PATCH_COUNT + 1
                 em32(0x94000000)
+                EXPR_TY = FN_RET_TY[fi as usize]
+                EXPR_TY_HASH = FN_RET_HASH[fi as usize]
+                if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             } else {
                 if argc >= 5 { em32(0xF8410FE5) }
                 if argc >= 4 { em32(0xF8410FE4) }
@@ -5075,12 +5159,16 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_load_var_a64(call_vslot)
                     em32(0xF9400009)  // ldr x9, [x0] (fn_ptr)
                     em32(0xD63F0120)  // blr x9
+                    EXPR_TY = 0
+                    EXPR_TY_HASH = 0
                 } else {
                     tc_undefined_var(name_tok)
                     em32(0xD2800000)
+                    EXPR_TY = 0
+                    EXPR_TY_HASH = 0
                 }
             }
-            EXPR_IS_F64 = 0
+            if fi < 0 { EXPR_IS_F64 = 0 }
             return
         }
         // Struct literal
@@ -5110,6 +5198,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 9 { EP = EP + 1 }
                 emit_lea_var_a64(base_slot + fc - 1)
                 EXPR_IS_F64 = 0
+                EXPR_TY = 6
+                EXPR_TY_HASH = sh
                 LAST_EXPR_IS_LINEAR = ST_LINEAR[si as usize]
                 return
             }
@@ -5150,6 +5240,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         if slot >= 0 {
             emit_load_var_a64(slot)
             EXPR_IS_F64 = var_find_is_f64(ns, ne)
+            let vi = var_find_idx(ns, ne)
+            if vi >= 0 {
+                EXPR_TY = VAR_TY[vi as usize]
+                EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
+            }
             var_mark_used(ns, ne)
         } else {
             let gi = gl_find(ns, ne)
@@ -5158,12 +5253,15 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let alen = GL[(gi * 4 + 3) as usize]
                 emit_imm64_a64(addr)
                 if alen == 0 { em32(0xF9400000) }
+                EXPR_TY = GL_TY[gi as usize]
+                EXPR_TY_HASH = GL_TY_HASH[gi as usize]
+                if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             } else {
                 let fri = fn_find(ns, ne)
-                if fri >= 0 { em32(0xD2800000); LAST_EXPR_IS_CLOSURE = 1 }
-                else { tc_undefined_var(name_tok); em32(0xD2800000) }
+                if fri >= 0 { em32(0xD2800000); LAST_EXPR_IS_CLOSURE = 1; EXPR_TY = 9; EXPR_TY_HASH = 0 }
+                else { tc_undefined_var(name_tok); em32(0xD2800000); EXPR_TY = 0; EXPR_TY_HASH = 0 }
             }
-            EXPR_IS_F64 = 0
+            if gi < 0 { EXPR_IS_F64 = 0 }
         }
         return
     }
@@ -5179,12 +5277,26 @@ fn compile_postfix_a64() with IO, Mut, Panic, Div {
     while more == 1 {
         if TK[EP as usize] == 37 {
             EP = EP + 1
+            let tp = EP
+            let src_is_f64 = EXPR_IS_F64
             let tns = TS[EP as usize]
             let tne = TE[EP as usize]
-            if tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
+            scan_type(tp)
+            if SCAN_TY == 1 && src_is_f64 == 1 {
+                em32(0x9E670000)
+                em32(0x9E780000)
+            }
+            if SCAN_TY == 2 && src_is_f64 == 0 {
+                em32(0x9E620000)
+                em32(0x9E660000)
+            }
+            if SCAN_TY == 1 && tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
                 em32(0x93401C00)  // sxtb x0, w0
             }
-            EP = EP + 1
+            EXPR_TY = SCAN_TY
+            EXPR_TY_HASH = SCAN_TY_HASH
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+            EP = SCAN_TY_NEXT
             continue
         }
         if TK[EP as usize] == 50 {
@@ -5218,21 +5330,47 @@ fn compile_postfix_a64() with IO, Mut, Panic, Div {
                     PATCH_FN[PATCH_COUNT as usize] = mfi
                     PATCH_COUNT = PATCH_COUNT + 1
                     em32(0x94000000)
+                    EXPR_TY = FN_RET_TY[mfi as usize]
+                    EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
+                    if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     continue
                 }
             }
+            let base_ty = EXPR_TY
+            let base_hash = EXPR_TY_HASH
             EP = EP + 1
             var found: i64 = 0
+            EXPR_TY = 0
+            EXPR_TY_HASH = 0
+            if base_ty == 6 {
+                let bsi = st_find(base_hash)
+                if bsi >= 0 {
+                    let off = st_field_offset(bsi, fh)
+                    if off >= 0 {
+                        if off == 0 { em32(0xF9400000) }
+                        else { em32(0xF9400000 | ((off / 8) << 10) | (0 << 5) | 0) }
+                        EXPR_TY = st_field_ty(bsi, fh)
+                        EXPR_TY_HASH = st_field_hash(bsi, fh)
+                    } else {
+                        tc_error(method_tok, "unknown field access")
+                        em32(0xD2800000)
+                    }
+                    found = 1
+                }
+            }
             var si: i64 = 0
             while si < ST_COUNT && found == 0 {
                 let off = st_field_offset(si, fh)
                 if off >= 0 {
                     if off == 0 { em32(0xF9400000) }
                     else { em32(0xF9400000 | ((off / 8) << 10) | (0 << 5) | 0) }
+                    EXPR_TY = st_field_ty(si, fh)
+                    EXPR_TY_HASH = st_field_hash(si, fh)
                     found = 1
                 }
                 si = si + 1
             }
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             continue
         }
         more = 0
