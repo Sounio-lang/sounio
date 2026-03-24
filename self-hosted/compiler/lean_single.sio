@@ -4224,11 +4224,21 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // Both branches allocate: iter at saved_next, end at saved_next+1
         let iter_slot = saved_next
         let end_slot = saved_next + 1
-        // while iter < end
-        let loop_top = CL
-        LOOP_TOP[LOOP_DEPTH as usize] = loop_top
+        // For-loop structure: jmp cond; incr: iter++; cond: cmp; jge end; body; jmp incr; end:
+        // This ensures 'continue' jumps to incr (not cond), so iter always increments.
+        em(0xe9)
+        let jmp_cond_off = CL; em32(0)  // jmp cond (patched below)
+        // incr: — continue target
+        let incr_addr = CL
+        LOOP_TOP[LOOP_DEPTH as usize] = incr_addr
         LOOP_DEPTH = LOOP_DEPTH + 1
         let saved_bc = BREAK_COUNT
+        emit_load_var(iter_slot)
+        em(0x48); em(0x83); em(0xc0); em(1)  // add rax, 1
+        emit_store_var(iter_slot)
+        // cond:
+        let cond_addr = CL
+        patch32(jmp_cond_off, cond_addr)
         emit_load_var(iter_slot)
         em(0x50)  // push iter
         emit_load_var(end_slot)
@@ -4238,16 +4248,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x0f); em(0x84)
-        let je_off = CL; em32(0)
+        let je_off = CL; em32(0)  // jz end
         if TK[EP as usize] == 8 { EP = EP + 1 }  // skip {
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
         if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
-        // iter = iter + 1
-        emit_load_var(iter_slot)
-        em(0x48); em(0x83); em(0xc0); em(1)  // add rax, 1
-        emit_store_var(iter_slot)
+        // jmp incr
         em(0xe9)
-        em32(loop_top - (CL + 4))
+        em32(incr_addr - (CL + 4))
+        // end:
         patch32(je_off, CL)
         var bi: i64 = saved_bc
         while bi < BREAK_COUNT { patch32(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
@@ -7565,10 +7573,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         let iter_slot = saved_next_a
         let end_slot = saved_next_a + 1
-        let loop_top = CL
-        LOOP_TOP[LOOP_DEPTH as usize] = loop_top
+        // For-loop: b cond; incr: iter++; cond: cmp; cbz end; body; b incr; end:
+        let jmp_cond_a = CL; em32(0x14000000)  // b cond (patched below)
+        let incr_addr_a = CL
+        LOOP_TOP[LOOP_DEPTH as usize] = incr_addr_a
         LOOP_DEPTH = LOOP_DEPTH + 1
         let saved_bc = BREAK_COUNT
+        emit_load_var_a64(iter_slot); em32(0x91000400); emit_store_var_a64(iter_slot)
+        let cond_addr_a = CL
+        patch_branch_a64(jmp_cond_a, cond_addr_a)
         emit_load_var_a64(iter_slot); emit_push_a64()
         emit_load_var_a64(end_slot); emit_pop_x1_a64()
         em32(0xEB00003F); em32(0x9A9FA7E0)
@@ -7576,9 +7589,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
         if TK[EP as usize] == 9 { EP = EP + 1 }
-        emit_load_var_a64(iter_slot); em32(0x91000400); emit_store_var_a64(iter_slot)
-        let rel = (loop_top - CL) / 4
-        em32(0x14000000 | (rel & 0x3FFFFFF))
+        let rel_bi = (incr_addr_a - CL) / 4
+        em32(0x14000000 | (rel_bi & 0x3FFFFFF))
         patch_branch_a64(cbz_off, CL)
         var bi: i64 = saved_bc
         while bi < BREAK_COUNT { patch_branch_a64(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
