@@ -56,6 +56,7 @@ var LOCAL_NAME_OFF: [i64; 8192] = [0; 8192]
 var LOCAL_NAME_LEN: [i64; 8192] = [0; 8192]
 var LOCAL_SLOT: [i64; 8192] = [0; 8192]
 var LOCAL_STRUCT_IDX: [i64; 8192] = [-1; 8192]
+var LOCAL_ARR_ELEM_SZ: [i64; 8192] = [0; 8192]
 var LOCAL_COUNT: i64 = 0
 var NEXT_SLOT: i64 = 0
 var LAST_LOCAL_SI: i64 = -1
@@ -94,6 +95,7 @@ var MB_GL_NS: [i64; 1024] = [0; 1024]
 var MB_GL_NE: [i64; 1024] = [0; 1024]
 var MB_GL_OFF: [i64; 1024] = [0; 1024]
 var MB_GL_SZ: [i64; 1024] = [0; 1024]
+var MB_GL_IS_ARRAY: [i64; 1024] = [0; 1024]
 var MB_GL_ELEM_SI: [i64; 1024] = [-1; 1024]  // struct type index for struct-array elements
 var MB_GL_COUNT: i64 = 0
 var MB_BSS_TOTAL: i64 = 0
@@ -129,9 +131,11 @@ var EV_VALUE: [i64; 2048] = [0; 2048]
 var EV_COUNT: i64 = 0
 
 var FN_PARAM_TYPE_SI: [i64; 16384] = [-1; 16384] // struct type index for each fn param
+var FN_PARAM_ARR_ELEM_SZ: [i64; 16384] = [0; 16384]
 var LOCAL_IS_SPTR: [i64; 8192] = [0; 8192]       // 1 if local is pointer-to-struct
 var LOCAL_BOX_INNER_SI: [i64; 8192] = [-1; 8192] // for &Option<Box<T>>: struct index of T
 var LAST_LOCAL_IS_SPTR: i64 = 0
+var LAST_LOCAL_ARR_ELEM_SZ: i64 = 0
 var LAST_LOCAL_BOX_INNER: i64 = -1
 var LAST_FOUND_SLOT: i64 = -1
 var LAST_FIELD_TYPE_SI: i64 = -1
@@ -773,6 +777,35 @@ fn skip_type_expr() with Mut, Panic, Div {
     }
 }
 
+fn peek_array_elem_size() -> i64 with Mut, Panic, Div {
+    let save_pos = POS
+    var sz: i64 = 0
+    if cur_kind() == 15 || cur_kind() == 70 {
+        advance()
+    }
+    if cur_kind() == 35 {
+        advance()
+        if cur_kind() == 1 {
+            let toff = tok_pool_off()
+            let tlen = tok_ident_len()
+            if pool_match(toff, tlen, "i8") || pool_match(toff, tlen, "u8") {
+                sz = 1
+            } else {
+                let tsi = find_struct_b4(toff, tlen)
+                if tsi >= 0 {
+                    sz = struct_total_slots(tsi) * 8
+                } else {
+                    sz = 8
+                }
+            }
+        } else {
+            sz = 8
+        }
+    }
+    POS = save_pos
+    sz
+}
+
 fn skip_type_annotation() with Mut, Panic, Div {
     if cur_kind() == 38 {
         advance()
@@ -1194,11 +1227,15 @@ fn parse_stmt() -> i64 with Mut, Panic, Div {
         var struct_si: i64 = -1
         var is_ref_type: i64 = 0  // 1 if type annotation had & prefix
         var box_inner_hint: i64 = -1
+        var arr_elem_sz: i64 = 0
         if cur_kind() == 38 {
             advance()
             // Skip leading & or &! in type annotations
             if cur_kind() == 15 { advance(); is_ref_type = 1 }
             else if cur_kind() == 70 { advance(); is_ref_type = 1 }
+            if cur_kind() == 35 {
+                arr_elem_sz = peek_array_elem_size()
+            }
             if cur_kind() == 1 {
                 let toff = tok_pool_off()
                 let tlen = tok_ident_len()
@@ -1227,6 +1264,7 @@ fn parse_stmt() -> i64 with Mut, Panic, Div {
         ND_STR_OFF[node as usize] = name_off
         ND_STR_LEN[node as usize] = name_len
         ND_LEFT[node as usize] = init
+        ND_EXTRA[node as usize] = arr_elem_sz
         ND_EXTRA2[node as usize] = box_inner_hint
         return node
     }
@@ -1328,8 +1366,12 @@ fn parse_fn_def() with Mut, Panic, Div {
         FN_PARAM_NAME_LEN[(pbase + pcount) as usize] = plen
         advance()
         var psi: i64 = -1
+        var parr_sz: i64 = 0
         if cur_kind() == 38 {
             advance()
+            if cur_kind() == 35 {
+                parr_sz = peek_array_elem_size()
+            }
             if cur_kind() == 1 {
                 let ptoff = tok_pool_off()
                 let ptlen = tok_ident_len()
@@ -1340,6 +1382,7 @@ fn parse_fn_def() with Mut, Panic, Div {
             psi = FN_IMPL_SI[fn_idx as usize]
         }
         FN_PARAM_TYPE_SI[(pbase + pcount) as usize] = psi
+        FN_PARAM_ARR_ELEM_SZ[(pbase + pcount) as usize] = parr_sz
         pcount = pcount + 1
         if cur_kind() == 37 { advance() }
     }
@@ -1883,6 +1926,20 @@ fn add_local(off: i64, len: i64) -> i64 with Mut, Panic {
     LOCAL_NAME_LEN[idx as usize] = len
     LOCAL_SLOT[idx as usize] = slot
     LOCAL_STRUCT_IDX[idx as usize] = -1
+    LOCAL_ARR_ELEM_SZ[idx as usize] = 0
+    LOCAL_IS_SPTR[idx as usize] = 0
+    LOCAL_COUNT = LOCAL_COUNT + 1
+    slot
+}
+
+fn add_local_array(off: i64, len: i64, elem_sz: i64) -> i64 with Mut, Panic {
+    let idx = LOCAL_COUNT
+    let slot = alloc_slot()
+    LOCAL_NAME_OFF[idx as usize] = off
+    LOCAL_NAME_LEN[idx as usize] = len
+    LOCAL_SLOT[idx as usize] = slot
+    LOCAL_STRUCT_IDX[idx as usize] = -1
+    LOCAL_ARR_ELEM_SZ[idx as usize] = elem_sz
     LOCAL_IS_SPTR[idx as usize] = 0
     LOCAL_COUNT = LOCAL_COUNT + 1
     slot
@@ -1893,6 +1950,7 @@ fn add_local_struct(off: i64, len: i64, si: i64, fc: i64) -> i64 with Mut, Panic
     LOCAL_NAME_OFF[idx as usize] = off
     LOCAL_NAME_LEN[idx as usize] = len
     LOCAL_STRUCT_IDX[idx as usize] = si
+    LOCAL_ARR_ELEM_SZ[idx as usize] = 0
     LOCAL_COUNT = LOCAL_COUNT + 1
     if fc > 64 {
         // Oversized struct: 1-slot thin pointer (is_sptr=4); backing store is BSS
@@ -1917,6 +1975,7 @@ fn add_local_sptr(off: i64, len: i64, si: i64) -> i64 with Mut, Panic {
     LOCAL_NAME_LEN[idx as usize] = len
     LOCAL_SLOT[idx as usize] = slot
     LOCAL_STRUCT_IDX[idx as usize] = si
+    LOCAL_ARR_ELEM_SZ[idx as usize] = 0
     LOCAL_IS_SPTR[idx as usize] = 1
     LOCAL_COUNT = LOCAL_COUNT + 1
     slot
@@ -1926,6 +1985,7 @@ fn find_local(off: i64, len: i64) -> i64 with Mut, Panic, Div {
     LAST_LOCAL_SI = -1
     LAST_LOCAL_BOX_INNER = -1
     LAST_LOCAL_IS_SPTR = 0
+    LAST_LOCAL_ARR_ELEM_SZ = 0
     LAST_FOUND_SLOT = -1
     var i: i64 = LOCAL_COUNT - 1
     while i >= 0 {
@@ -1941,6 +2001,7 @@ fn find_local(off: i64, len: i64) -> i64 with Mut, Panic, Div {
             if ok == 1 {
                 LAST_LOCAL_SI = LOCAL_STRUCT_IDX[i as usize]
                 LAST_LOCAL_IS_SPTR = LOCAL_IS_SPTR[i as usize]
+                LAST_LOCAL_ARR_ELEM_SZ = LOCAL_ARR_ELEM_SZ[i as usize]
                 LAST_LOCAL_BOX_INNER = LOCAL_BOX_INNER_SI[i as usize]
                 LAST_FOUND_SLOT = LOCAL_SLOT[i as usize]
                 return LOCAL_SLOT[i as usize]
@@ -2055,9 +2116,11 @@ fn mb_collect_globals() with Mut, Panic, Div {
             ti = ti + 1
             var sz: i64 = 8
             var count: i64 = 1
+            var is_array: i64 = 0
             if TK_KIND[ti as usize] == 38 {
                 ti = ti + 1
                 if TK_KIND[ti as usize] == 35 {
+                    is_array = 1
                     ti = ti + 1
                     if TK_KIND[ti as usize] == 1 {
                         let tns = TK_START[ti as usize]
@@ -2096,6 +2159,7 @@ fn mb_collect_globals() with Mut, Panic, Div {
                 }
             }
             MB_GL_SZ[gi as usize] = sz
+            MB_GL_IS_ARRAY[gi as usize] = is_array
             MB_BSS_TOTAL = MB_BSS_TOTAL + count * sz
             let rem = MB_BSS_TOTAL - (MB_BSS_TOTAL / 8) * 8
             if rem != 0 { MB_BSS_TOTAL = MB_BSS_TOTAL + (8 - rem) }
@@ -2206,11 +2270,15 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             let gi = mb_find_global(voff, vlen)
             if gi >= 0 {
                 let gaddr = 0x700000 + MB_GL_OFF[gi as usize]
-                emit(0x48); emit(0xB9); emit_u64(gaddr)
-                if MB_GL_SZ[gi as usize] == 1 {
-                    emit(0x48); emit(0x0F); emit(0xB6); emit(0x01)
+                if MB_GL_IS_ARRAY[gi as usize] == 1 {
+                    emit_mov_rax_imm(gaddr)
                 } else {
-                    emit(0x48); emit(0x8B); emit(0x01)
+                    emit(0x48); emit(0xB9); emit_u64(gaddr)
+                    if MB_GL_SZ[gi as usize] == 1 {
+                        emit(0x48); emit(0x0F); emit(0xB6); emit(0x01)
+                    } else {
+                        emit(0x48); emit(0x8B); emit(0x01)
+                    }
                 }
             } else {
                 // Sprint 229: Check if identifier is a function name (fn as first-class value)
@@ -2608,6 +2676,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         var idx_gl_elem_si: i64 = -1
         let aslot = find_local(avoff, avlen)
         if aslot >= 0 {
+            if LAST_LOCAL_ARR_ELEM_SZ > 0 { asz = LAST_LOCAL_ARR_ELEM_SZ }
             let adisp = 0 - ((aslot + 1) * 8)
             emit(0x48); emit(0x8B); emit(0x8D); emit_u32(adisp)
         } else {
@@ -3252,59 +3321,37 @@ fn compile_node_ctrl(node: i64, kind: i64, ival: i64) -> i64 with Mut, Panic, Di
         }
         if init != -1 && ND_KIND[init as usize] == 50 {
             let arr_count = ND_IVAL[init as usize]
-            let ptr_slot = add_local(name_off, name_len)
-            // For large arrays (> 256 elements), use a loop-based init to avoid code bloat
-            if arr_count > 256 {
-                // Use BSS allocation to avoid ptr_slot corruption by stack data
-                // Stack approach put data at slot S+1 while ptr_slot is at S;
-                // writing data[8] overwrites ptr_slot (1 slot = 8 bytes offset).
-                let arr_bss_addr = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
-                OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + arr_count
-                // Align OVERSIZED_BSS_OFF to 8 bytes
-                let arr_rem = OVERSIZED_BSS_OFF - (OVERSIZED_BSS_OFF / 8) * 8
-                if arr_rem != 0 { OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + (8 - arr_rem) }
-                // Store BSS base address in ptr_slot
-                emit_mov_rax_imm(arr_bss_addr)
-                emit_store_rax(ptr_slot)
-                // BSS is zero-initialized by OS; only emit fill loop for non-zero fill
-                let fill_nd2 = ND_LEFT[init as usize]
-                let fill_nk2 = ND_KIND[fill_nd2 as usize]
-                let fill_v2 = ND_IVAL[fill_nd2 as usize]
-                if fill_nk2 != 4 || fill_v2 != 0 {
-                    // compile fill value into al (rax low byte)
-                    compile_node(fill_nd2)
-                    // mov rdi, arr_bss_addr  (48 BF imm64)
-                    emit(0x48); emit(0xBF); emit_u64(arr_bss_addr)
-                    // xor rcx, rcx
-                    emit(0x48); emit(0x31); emit(0xC9)
-                    // loop: mov byte [rdi+rcx], al  (88 04 0F)
-                    let loop_st2 = CODE_LEN
+            var arr_elem_sz2: i64 = ND_EXTRA[node as usize]
+            if arr_elem_sz2 <= 0 { arr_elem_sz2 = 8 }
+            let ptr_slot = add_local_array(name_off, name_len, arr_elem_sz2)
+            let arr_bss_addr = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+            let arr_bytes = arr_count * arr_elem_sz2
+            OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + arr_bytes
+            let arr_rem = OVERSIZED_BSS_OFF - (OVERSIZED_BSS_OFF / 8) * 8
+            if arr_rem != 0 { OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + (8 - arr_rem) }
+            emit_mov_rax_imm(arr_bss_addr)
+            emit_store_rax(ptr_slot)
+            let fill_nd2 = ND_LEFT[init as usize]
+            let fill_nk2 = ND_KIND[fill_nd2 as usize]
+            let fill_v2 = ND_IVAL[fill_nd2 as usize]
+            if fill_nk2 != 4 || fill_v2 != 0 {
+                compile_node(fill_nd2)
+                emit(0x48); emit(0xBF); emit_u64(arr_bss_addr)
+                emit(0x48); emit(0x31); emit(0xC9)
+                let loop_st2 = CODE_LEN
+                if arr_elem_sz2 == 1 {
                     emit(0x88); emit(0x04); emit(0x0F)
-                    // inc rcx  (48 FF C1)
                     emit(0x48); emit(0xFF); emit(0xC1)
-                    // cmp rcx, arr_count  (48 81 F9 imm32)
                     emit(0x48); emit(0x81); emit(0xF9); emit_u32(arr_count)
-                    // jl loop_st2  (7C rel8)
-                    let jl_off2 = CODE_LEN
-                    let jl_rel2 = loop_st2 - (jl_off2 + 2)
-                    emit(0x7C); emit(jl_rel2)
+                } else {
+                    emit(0x48); emit(0x89); emit(0x04); emit(0xCF)
+                    emit(0x48); emit(0xFF); emit(0xC1)
+                    emit(0x48); emit(0x81); emit(0xF9); emit_u32(arr_count)
                 }
+                let jl_off2 = CODE_LEN
+                let jl_rel2 = loop_st2 - (jl_off2 + 2)
+                emit(0x7C); emit(jl_rel2)
             } else {
-                var ai: i64 = 0
-                while ai < arr_count {
-                    alloc_slot()
-                    ai = ai + 1
-                }
-                let data_disp = 0 - ((ptr_slot + 2) * 8)
-                emit(0x48); emit(0x8D); emit(0x85); emit_u32(data_disp)
-                emit_store_rax(ptr_slot)
-                var zi: i64 = 0
-                while zi < arr_count {
-                    let zdisp = 0 - ((ptr_slot + 2 + zi) * 8)
-                    compile_node(ND_LEFT[init as usize])
-                    emit(0x48); emit(0x89); emit(0x85); emit_u32(zdisp)
-                    zi = zi + 1
-                }
             }
         } else {
             if struct_si >= 0 {
@@ -3582,6 +3629,7 @@ fn compile_node_ctrl(node: i64, kind: i64, ival: i64) -> i64 with Mut, Panic, Di
             } else {
             let aslot2 = find_local(avoff2, avlen2)
             if aslot2 >= 0 {
+                if LAST_LOCAL_ARR_ELEM_SZ > 0 { asz2 = LAST_LOCAL_ARR_ELEM_SZ }
                 let adisp2 = 0 - ((aslot2 + 1) * 8)
                 emit(0x48); emit(0x8B); emit(0x8D); emit_u32(adisp2)
             } else {
@@ -4312,8 +4360,11 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
     let pbase = FN_PARAM_BASE[fn_idx as usize]
     if pcount > 0 {
         let p0si = FN_PARAM_TYPE_SI[pbase as usize]
+        let p0arr = FN_PARAM_ARR_ELEM_SZ[pbase as usize]
         var s0: i64 = 0
-        if p0si >= 0 {
+        if p0arr > 0 {
+            s0 = add_local_array(FN_PARAM_NAME_OFF[pbase as usize], FN_PARAM_NAME_LEN[pbase as usize], p0arr)
+        } else if p0si >= 0 {
             s0 = add_local_sptr(FN_PARAM_NAME_OFF[pbase as usize], FN_PARAM_NAME_LEN[pbase as usize], p0si)
             if struct_total_slots(p0si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
         } else {
@@ -4324,8 +4375,11 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
     }
     if pcount > 1 {
         let p1si = FN_PARAM_TYPE_SI[(pbase + 1) as usize]
+        let p1arr = FN_PARAM_ARR_ELEM_SZ[(pbase + 1) as usize]
         var s1: i64 = 0
-        if p1si >= 0 {
+        if p1arr > 0 {
+            s1 = add_local_array(FN_PARAM_NAME_OFF[(pbase + 1) as usize], FN_PARAM_NAME_LEN[(pbase + 1) as usize], p1arr)
+        } else if p1si >= 0 {
             s1 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 1) as usize], FN_PARAM_NAME_LEN[(pbase + 1) as usize], p1si)
             if struct_total_slots(p1si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
         } else {
@@ -4336,8 +4390,11 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
     }
     if pcount > 2 {
         let p2si = FN_PARAM_TYPE_SI[(pbase + 2) as usize]
+        let p2arr = FN_PARAM_ARR_ELEM_SZ[(pbase + 2) as usize]
         var s2: i64 = 0
-        if p2si >= 0 {
+        if p2arr > 0 {
+            s2 = add_local_array(FN_PARAM_NAME_OFF[(pbase + 2) as usize], FN_PARAM_NAME_LEN[(pbase + 2) as usize], p2arr)
+        } else if p2si >= 0 {
             s2 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 2) as usize], FN_PARAM_NAME_LEN[(pbase + 2) as usize], p2si)
             if struct_total_slots(p2si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
         } else {
@@ -4348,8 +4405,11 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
     }
     if pcount > 3 {
         let p3si = FN_PARAM_TYPE_SI[(pbase + 3) as usize]
+        let p3arr = FN_PARAM_ARR_ELEM_SZ[(pbase + 3) as usize]
         var s3: i64 = 0
-        if p3si >= 0 {
+        if p3arr > 0 {
+            s3 = add_local_array(FN_PARAM_NAME_OFF[(pbase + 3) as usize], FN_PARAM_NAME_LEN[(pbase + 3) as usize], p3arr)
+        } else if p3si >= 0 {
             s3 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 3) as usize], FN_PARAM_NAME_LEN[(pbase + 3) as usize], p3si)
             if struct_total_slots(p3si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
         } else {
