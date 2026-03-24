@@ -330,6 +330,40 @@ fn emit_imm64_a64(v: i64) with Mut {
     if v3 != 0 { em32(0xF2E00000 | (v3 << 5)) }        // movk x0, #v3, lsl #48
 }
 
+fn bind_array_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
+    let esiz = arr_hash_esiz(ty_hash)
+    let elem_ty = arr_hash_elem_ty(ty_hash)
+    let nslots = arr_storage_slots(ty_hash)
+    let ptr_slot = var_add_arr(ns, ne, nslots, esiz, elem_ty)
+    let arr_vi = VAR_COUNT - 1
+    let base = ptr_slot - nslots
+    VAR_TY[arr_vi as usize] = 8
+    VAR_TY_HASH[arr_vi as usize] = ty_hash
+    em32(0xAA0003EA)  // mov x10, x0
+    var i: i64 = 0
+    while i < nslots {
+        em32(0xF9400000 | (i << 10) | (10 << 5) | 0)  // ldr x0, [x10, #i*8]
+        emit_store_var_a64(base + nslots - 1 - i)
+        i = i + 1
+    }
+    emit_lea_var_a64(base + nslots - 1)
+    emit_store_var_a64(ptr_slot)
+}
+
+fn copy_array_into_local_slot_a64(slot: i64, ty_hash: i64) with Mut, Panic, Div {
+    let nslots = arr_storage_slots(ty_hash)
+    em32(0xAA0003EA)  // mov x10, x0 (src ptr)
+    emit_load_var_a64(slot)
+    em32(0xAA0003EB)  // mov x11, x0 (dst ptr)
+    var i: i64 = 0
+    while i < nslots {
+        em32(0xF9400000 | (i << 10) | (10 << 5) | 0)  // ldr x0, [x10, #i*8]
+        em32(0xF9000000 | (i << 10) | (11 << 5) | 0)  // str x0, [x11, #i*8]
+        i = i + 1
+    }
+    em32(0xAA0B03E0)  // mov x0, x11
+}
+
 // Load 64-bit immediate into arbitrary register
 fn emit_imm64_reg_a64(rd: i64, v: i64) with Mut {
     let v0 = v & 0xFFFF
@@ -402,6 +436,12 @@ fn arr_hash_esiz(h: i64) -> i64 with Div {
 
 fn arr_hash_elem_ty(h: i64) -> i64 with Div {
     return (h % 32) / 2
+}
+
+fn arr_storage_slots(h: i64) -> i64 with Div {
+    let alen = arr_hash_alen(h)
+    if arr_hash_esiz(h) == 1 { return (alen + 7) / 8 }
+    return alen
 }
 
 fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic {
@@ -918,6 +958,41 @@ fn emit_push() with Mut { em(0x50) }
 fn emit_pop_rcx() with Mut { em(0x59) }
 // mov rax, imm64
 fn emit_imm64(v: i64) with Mut { em(0x48); em(0xb8); em64(v) }
+
+fn bind_array_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
+    let esiz = arr_hash_esiz(ty_hash)
+    let elem_ty = arr_hash_elem_ty(ty_hash)
+    let nslots = arr_storage_slots(ty_hash)
+    let ptr_slot = var_add_arr(ns, ne, nslots, esiz, elem_ty)
+    let arr_vi = VAR_COUNT - 1
+    let base = ptr_slot - nslots
+    VAR_TY[arr_vi as usize] = 8
+    VAR_TY_HASH[arr_vi as usize] = ty_hash
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
+    var i: i64 = 0
+    while i < nslots {
+        em(0x48); em(0x8b); em(0x82); em32(i * 8)  // mov rax, [rdx + off]
+        emit_store_var(base + nslots - 1 - i)
+        i = i + 1
+    }
+    em(0x48); em(0x8d); em(0x85)
+    em32(0 - (base + nslots - 1) * 8)
+    emit_store_var(ptr_slot)
+}
+
+fn copy_array_into_local_slot_x86(slot: i64, ty_hash: i64) with Mut, Panic, Div {
+    let nslots = arr_storage_slots(ty_hash)
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
+    emit_load_var(slot)
+    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (dst ptr)
+    var i: i64 = 0
+    while i < nslots {
+        em(0x48); em(0x8b); em(0x82); em32(i * 8)  // mov rax, [rdx + off]
+        em(0x48); em(0x89); em(0x81); em32(i * 8)  // mov [rcx + off], rax
+        i = i + 1
+    }
+    em(0x48); em(0x89); em(0xc8)  // mov rax, rcx
+}
 
 // ─── Emit print("string") ───
 fn emit_print(tok: i64) with Mut, Panic, Div {
@@ -1698,17 +1773,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 51 && EP + 3 < TC && TK[(EP + 1) as usize] == 23 && TK[(EP + 2) as usize] == 3 && TK[(EP + 3) as usize] == 24 {
             let g_tys = TS[(EP + 2) as usize]
             let g_tye = TE[(EP + 2) as usize]
-                EP = EP + 4
-                var g_gi: i64 = 0
-                var g_found: i64 = 0
-                while g_gi < GEN_FN_COUNT && g_found == 0 {
-                    if name_eq(ns, ne, GEN_FN_NS[g_gi as usize], GEN_FN_NE[g_gi as usize]) {
-                        let g_mi = mono_find_inst(g_gi, 0, g_tys, g_tye)
-                        if g_mi >= 0 {
-                            ns = MAN_BUF_S[g_mi as usize]
-                        ne = MAN_BUF_E[g_mi as usize]
-                        g_found = 1
-                    }
+            EP = EP + 4
+            var g_gi: i64 = 0
+            var g_found: i64 = 0
+            while g_gi < GEN_FN_COUNT && g_found == 0 {
+                if name_eq(ns, ne, GEN_FN_NS[g_gi as usize], GEN_FN_NE[g_gi as usize]) {
+                    let g_mi = mono_find_inst(g_gi, 0, g_tys, g_tye)
+                    if g_mi >= 0 { ns = MAN_BUF_S[g_mi as usize]; ne = MAN_BUF_E[g_mi as usize]; g_found = 1 }
                 }
                 g_gi = g_gi + 1
             }
@@ -2901,14 +2972,12 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         }
         // Skip = sign
         if TK[EP as usize] == 16 { EP = EP + 1 }
-        if is_arr == 1 && arr_len > 0 {
+        if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 {
             // Local array: allocate slots, skip initializer [0; N], store lea
             // Skip [0; N] or [val; N] initializer
-            if TK[EP as usize] == 41 {
-                EP = EP + 1  // skip [
-                while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
-                if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
-            }
+            EP = EP + 1  // skip [
+            while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
+            if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
             let nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
             let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
@@ -2931,31 +3000,40 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             emit_store_var(ptr_slot)
         } else {
             compile_or()
-            let slot = var_add(ns, ne)
-            let vix = VAR_COUNT - 1
             if decl_ty != 0 && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
                 tc_error(EP - 1, "initializer type does not match declaration")
             }
-            emit_store_var(slot)
-            // Set f64 flag: explicit type annotation takes priority, else infer from RHS
-            if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
-            else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
-            else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
-            if decl_ty != 0 {
-                VAR_TY[vix as usize] = decl_ty
-                VAR_TY_HASH[vix as usize] = decl_ty_hash
+            if (decl_ty == 8) || (decl_ty == 0 && EXPR_TY == 8) {
+                var bind_hash = EXPR_TY_HASH
+                if decl_ty == 8 { bind_hash = decl_ty_hash }
+                bind_array_local_from_rax_x86(ns, ne, bind_hash)
+                let avix = VAR_COUNT - 1
+                VAR_IS_CLOSURE[avix as usize] = 0
+                VAR_LINEAR[avix as usize] = 0
             } else {
-                VAR_TY[vix as usize] = EXPR_TY
-                VAR_TY_HASH[vix as usize] = EXPR_TY_HASH
+                let slot = var_add(ns, ne)
+                let vix = VAR_COUNT - 1
+                emit_store_var(slot)
+                // Set f64 flag: explicit type annotation takes priority, else infer from RHS
+                if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
+                else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
+                if decl_ty != 0 {
+                    VAR_TY[vix as usize] = decl_ty
+                    VAR_TY_HASH[vix as usize] = decl_ty_hash
+                } else {
+                    VAR_TY[vix as usize] = EXPR_TY
+                    VAR_TY_HASH[vix as usize] = EXPR_TY_HASH
+                }
+                if VAR_TY[vix as usize] == 8 {
+                    VAR_ALEN[vix as usize] = arr_hash_alen(VAR_TY_HASH[vix as usize])
+                    VAR_ESIZ[vix as usize] = arr_hash_esiz(VAR_TY_HASH[vix as usize])
+                }
+                // Set closure flag if RHS was a closure expression
+                VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
+                // Set linear flag if RHS was a linear struct literal
+                VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
             }
-            if VAR_TY[vix as usize] == 8 {
-                VAR_ALEN[vix as usize] = arr_hash_alen(VAR_TY_HASH[vix as usize])
-                VAR_ESIZ[vix as usize] = arr_hash_esiz(VAR_TY_HASH[vix as usize])
-            }
-            // Set closure flag if RHS was a closure expression
-            VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
-            // Set linear flag if RHS was a linear struct literal
-            VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
         }
         return
     }
@@ -3018,7 +3096,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
             }
-            emit_store_var(slot)
+            if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 8 {
+                copy_array_into_local_slot_x86(slot, VAR_TY_HASH[ty_vi as usize])
+            } else {
+                emit_store_var(slot)
+            }
             // Update closure flag on reassignment
             var vi: i64 = VAR_COUNT - 1
             while vi >= 0 {
@@ -5335,6 +5417,21 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             EXPR_IS_F64 = 0
             return
         }
+        // Turbofish generic function: ident :: < TYPE > (
+        if TK[EP as usize] == 51 && EP + 3 < TC && TK[(EP + 1) as usize] == 23 && TK[(EP + 2) as usize] == 3 && TK[(EP + 3) as usize] == 24 {
+            let g_tys = TS[(EP + 2) as usize]
+            let g_tye = TE[(EP + 2) as usize]
+            EP = EP + 4
+            var g_gi: i64 = 0
+            var g_found: i64 = 0
+            while g_gi < GEN_FN_COUNT && g_found == 0 {
+                if name_eq(ns, ne, GEN_FN_NS[g_gi as usize], GEN_FN_NE[g_gi as usize]) {
+                    let g_mi = mono_find_inst(g_gi, 0, g_tys, g_tye)
+                    if g_mi >= 0 { ns = MAN_BUF_S[g_mi as usize]; ne = MAN_BUF_E[g_mi as usize]; g_found = 1 }
+                }
+                g_gi = g_gi + 1
+            }
+        }
         // Enum::Variant
         if TK[EP as usize] == 51 {
             EP = EP + 1
@@ -6065,12 +6162,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
         }
         if TK[EP as usize] == 16 { EP = EP + 1 }
-        if is_arr == 1 && arr_len > 0 {
-            if TK[EP as usize] == 41 {
-                EP = EP + 1
-                while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
-                if TK[EP as usize] == 42 { EP = EP + 1 }
-            }
+        if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 {
+            EP = EP + 1
+            while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
+            if TK[EP as usize] == 42 { EP = EP + 1 }
             let nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
             let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
@@ -6084,25 +6179,37 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             emit_store_var_a64(ptr_slot)
         } else {
             compile_or_a64()
-            let slot = var_add(ns, ne)
-            let vix = VAR_COUNT - 1
-            emit_store_var_a64(slot)
-            if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
-            else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
-            else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
-            if decl_ty != 0 {
-                VAR_TY[vix as usize] = decl_ty
-                VAR_TY_HASH[vix as usize] = decl_ty_hash
+            if decl_ty != 0 && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
+                tc_error(EP - 1, "initializer type does not match declaration")
+            }
+            if (decl_ty == 8) || (decl_ty == 0 && EXPR_TY == 8) {
+                var bind_hash = EXPR_TY_HASH
+                if decl_ty == 8 { bind_hash = decl_ty_hash }
+                bind_array_local_from_x0_a64(ns, ne, bind_hash)
+                let avix = VAR_COUNT - 1
+                VAR_IS_CLOSURE[avix as usize] = 0
+                VAR_LINEAR[avix as usize] = 0
             } else {
-                VAR_TY[vix as usize] = EXPR_TY
-                VAR_TY_HASH[vix as usize] = EXPR_TY_HASH
+                let slot = var_add(ns, ne)
+                let vix = VAR_COUNT - 1
+                emit_store_var_a64(slot)
+                if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
+                else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
+                if decl_ty != 0 {
+                    VAR_TY[vix as usize] = decl_ty
+                    VAR_TY_HASH[vix as usize] = decl_ty_hash
+                } else {
+                    VAR_TY[vix as usize] = EXPR_TY
+                    VAR_TY_HASH[vix as usize] = EXPR_TY_HASH
+                }
+                if VAR_TY[vix as usize] == 8 {
+                    VAR_ALEN[vix as usize] = arr_hash_alen(VAR_TY_HASH[vix as usize])
+                    VAR_ESIZ[vix as usize] = arr_hash_esiz(VAR_TY_HASH[vix as usize])
+                }
+                VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
+                VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
             }
-            if VAR_TY[vix as usize] == 8 {
-                VAR_ALEN[vix as usize] = arr_hash_alen(VAR_TY_HASH[vix as usize])
-                VAR_ESIZ[vix as usize] = arr_hash_esiz(VAR_TY_HASH[vix as usize])
-            }
-            VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
-            VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
         }
         return
     }
@@ -6139,9 +6246,21 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
         EP = EP + 2
         compile_or_a64()
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
         let slot = var_find(ns, ne)
         if slot >= 0 {
-            emit_store_var_a64(slot)
+            let ty_vi = var_find_idx(ns, ne)
+            if ty_vi >= 0 {
+                if ty_eq(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize], rhs_ty, rhs_ty_hash) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
+            }
+            if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 8 {
+                copy_array_into_local_slot_a64(slot, VAR_TY_HASH[ty_vi as usize])
+            } else {
+                emit_store_var_a64(slot)
+            }
             var vi: i64 = VAR_COUNT - 1
             while vi >= 0 {
                 if name_eq(VAR_NS[vi as usize], VAR_NE[vi as usize], ns, ne) { VAR_IS_CLOSURE[vi as usize] = LAST_EXPR_IS_CLOSURE; vi = -1 }
@@ -6150,6 +6269,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         } else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
+                if ty_eq(GL_TY[gi as usize], GL_TY_HASH[gi as usize], rhs_ty, rhs_ty_hash) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
                 let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 em32(0xAA0003E1)
                 emit_imm64_a64(addr)
