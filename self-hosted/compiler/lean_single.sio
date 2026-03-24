@@ -318,6 +318,33 @@ fn emit_setup_closure_call_args_x86(argc: i64) with Mut {
     if argc >= 5 { emit_load_rsp_arg_x86(5, (argc - 5) * 8) }
 }
 
+fn call_extra_stack_args_x86(argc: i64, regc: i64) -> i64 {
+    if argc > regc + 1 { return argc - regc }
+    return 0
+}
+
+fn emit_prepare_stack_call_args_x86(argc: i64, regc: i64) with Mut {
+    let extra = call_extra_stack_args_x86(argc, regc)
+    if extra <= 1 { return }
+    let scratch_bytes = extra * 8
+    if scratch_bytes < 128 {
+        em(0x48); em(0x83); em(0xec); em(scratch_bytes)
+    } else {
+        em(0x48); em(0x81); em(0xec); em32(scratch_bytes)
+    }
+    var i: i64 = 0
+    while i < extra {
+        em(0x48); em(0x8b); em(0x84); em(0x24); em32(scratch_bytes + i * 8)
+        let dst = (extra - 1 - i) * 8
+        if dst == 0 {
+            em(0x48); em(0x89); em(0x04); em(0x24)
+        } else {
+            em(0x48); em(0x89); em(0x84); em(0x24); em32(dst)
+        }
+        i = i + 1
+    }
+}
+
 fn emit_drop_call_args_x86(argc: i64) with Mut {
     let bytes = argc * 8
     if bytes <= 0 { return }
@@ -2671,12 +2698,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     print(")\n")
                 }
                 emit_setup_direct_call_args_x86(argc)
+                emit_prepare_stack_call_args_x86(argc, 6)
                 em(0xe8)
                 PATCH_OFF[PATCH_COUNT as usize] = CL
                 PATCH_FN[PATCH_COUNT as usize] = fi
                 PATCH_COUNT = PATCH_COUNT + 1
                 em32(0)
-                emit_drop_call_args_x86(argc)
+                emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -2686,15 +2714,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // Load user args into shifted regs (rsi,rdx,rcx,r8,r9), max 5 user args
                 // rdi = closure struct ptr (env), fn_ptr loaded from [env]
                 emit_setup_closure_call_args_x86(argc)
+                emit_prepare_stack_call_args_x86(argc, 5)
                 if call_vslot >= 0 {
                     emit_load_var(call_vslot)           // rax = closure struct ptr
                     em(0x48); em(0x89); em(0xc7)        // mov rdi, rax (env_ptr)
                     em(0x48); em(0x8b); em(0x00)        // mov rax, [rax] (fn_ptr)
                     em(0xff); em(0xd0)                  // call rax
-                    emit_drop_call_args_x86(argc)
+                    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
                 } else {
                     tc_undefined_var(call_tok)
-                    emit_drop_call_args_x86(argc)
+                    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
                     em(0x31); em(0xc0)  // unknown fn
                 }
             }
@@ -3064,12 +3093,13 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                     if FN_ARITY[mfi as usize] != margc { tc_wrong_arity(method_tok, FN_ARITY[mfi as usize], margc) }
                     emit_setup_direct_call_args_x86(margc)
+                    emit_prepare_stack_call_args_x86(margc, 6)
                     em(0xe8)
                     PATCH_OFF[PATCH_COUNT as usize] = CL
                     PATCH_FN[PATCH_COUNT as usize] = mfi
                     PATCH_COUNT = PATCH_COUNT + 1
                     em32(0)
-                    emit_drop_call_args_x86(margc)
+                    emit_drop_call_args_x86(margc + call_extra_stack_args_x86(margc, 6))
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -4951,7 +4981,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
     // BSS layout: [argc(8)] [argv(8)] [globals...] [aggregate return scratch]
     RET_AGG_BSS_OFF = GL_BSS_SIZE
-    GL_BSS_SIZE = GL_BSS_SIZE + 8192
+    GL_BSS_SIZE = GL_BSS_SIZE + 65536
     // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0
     if TARGET_OS == 2 {
         GL_BSS_BASE = 0x100008000 + 16    // macOS: __DATA segment at 0x100008000
