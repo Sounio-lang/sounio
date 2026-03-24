@@ -1,0 +1,188 @@
+// self-hosted/check/cayley_dickson.sio
+// Type-level Cayley-Dickson algebra checker
+//
+// Provides compile-time algebraic property tracking for CayleyDickson<k>:
+//   k=0: Real (associative, commutative, ordered)
+//   k=1: Complex (associative, commutative)
+//   k=2: Quaternion (associative, non-commutative)
+//   k=3: Octonion (alternative, non-associative) — requires NonAssoc effect
+//   k=4: Sedenion (power-associative, non-alternative, zero divisors)
+//   k≥5: Higher CD algebras (power-associative, zero divisors)
+//
+// Key theorems used at compile time:
+//   Artin's theorem: 2-variable subexpressions are always associative
+//   Fano check: for basis triples, associativity ↔ collinearity in PG(2,2)
+//   Binary norm: ||[e_i, e_j, e_k]|| ∈ {0, 2} for all k
+//
+// Error codes:
+//   E035: non-associative multiplication requires NonAssoc effect
+//   E036: unsafe reassociation of non-associative expression
+//   E037: Cayley-Dickson tower embedding violation
+
+// --- Algebraic property hierarchy ---
+// Each property implies the ones below it.
+// The compiler tracks the MINIMUM property level of an expression.
+
+let PROP_ASSOCIATIVE: i64 = 4      // full associativity (k ≤ 2)
+let PROP_ALTERNATIVE: i64 = 3      // alternative law (k = 3, octonions)
+let PROP_MOUFANG: i64 = 2          // Moufang identities (k = 3)
+let PROP_POWER_ASSOC: i64 = 1      // power-associative (k ≥ 4)
+let PROP_GENERAL: i64 = 0          // no constraints
+
+// --- Property from tower level ---
+
+fn cd_property_level(k: i64) -> i64 {
+    if k <= 2 { return PROP_ASSOCIATIVE }
+    if k == 3 { return PROP_ALTERNATIVE }  // octonions: alternative + Moufang
+    return PROP_POWER_ASSOC               // sedenions and beyond
+}
+
+// --- Can the compiler freely reassociate? ---
+
+fn cd_can_reassociate(k: i64) -> bool {
+    k <= 2  // only R, C, H
+}
+
+// --- Does the operation require NonAssoc effect? ---
+
+fn cd_requires_nonassoc(k: i64) -> bool {
+    k >= 3  // O, S, and beyond
+}
+
+// --- Does the algebra have zero divisors? ---
+
+fn cd_has_zero_divisors(k: i64) -> bool {
+    k >= 4  // S and beyond (Hurwitz: only R, C, H, O are normed division algebras)
+}
+
+// --- Is the algebra a normed division algebra? ---
+
+fn cd_is_division(k: i64) -> bool {
+    k <= 3  // R, C, H, O
+}
+
+// --- Dimension from tower level ---
+
+fn cd_dimension(k: i64) -> i64 {
+    1 << k  // 2^k
+}
+
+// --- Number of imaginary basis elements ---
+
+fn cd_imaginary_count(k: i64) -> i64 {
+    (1 << k) - 1  // 2^k - 1
+}
+
+// ============================================================
+// Compile-time sign function (for Fano checking)
+// ============================================================
+
+// The Cayley-Dickson sign function determines the multiplication table:
+//   e_i * e_j = sigma(i, j, k) * e_{i XOR j}
+// where sigma ∈ {+1, -1}.
+
+fn cd_sigma_ct(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_ct(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_ct(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_ct(a_lo, b_lo, bits - 1) }
+        else { return 0 - cd_sigma_ct(a_lo, b_lo, bits - 1) }
+    }
+    // both hi
+    if b_lo == 0 { return 0 - cd_sigma_ct(b_lo, a_lo, bits - 1) }
+    return cd_sigma_ct(b_lo, a_lo, bits - 1)
+}
+
+// ============================================================
+// Compile-time Fano check
+// ============================================================
+
+// For basis elements i, j, l at tower level k:
+// Returns true if the triple is associative (on a Fano line).
+// This is the 168 theorem at compile time.
+
+fn cd_is_fano_triple(k: i64, i: i64, j: i64, l: i64) -> bool {
+    if k < 3 { return true }  // R, C, H are always associative
+    if i == 0 || j == 0 || l == 0 { return true }  // identity is always associative (Theorem D)
+    if i == j || j == l || i == l { return true }    // repeated elements (alternativity)
+
+    // Compute associator sign: alpha vs beta
+    let alpha = cd_sigma_ct(i, j, k) * cd_sigma_ct(i ^ j, l, k)
+    let beta = cd_sigma_ct(j, l, k) * cd_sigma_ct(i, j ^ l, k)
+    alpha == beta  // Fano line ↔ alpha == beta ↔ associator is zero
+}
+
+// ============================================================
+// Artin's theorem optimization
+// ============================================================
+
+// In an alternative algebra (k=3, octonions), any subexpression
+// involving at most 2 distinct variables is guaranteed associative
+// by Artin's theorem. The compiler can freely reassociate such
+// subexpressions even when NonAssoc is declared.
+//
+// For k≥4 (sedenions, beyond), alternativity fails and Artin's
+// theorem does not apply. Even 2-variable expressions may be
+// non-associative.
+
+fn cd_artin_applies(k: i64) -> bool {
+    k <= 3  // Artin's theorem holds for alternative algebras (R, C, H, O)
+}
+
+// ============================================================
+// Widening rules for binary operations
+// ============================================================
+
+// CayleyDickson<k1> op CayleyDickson<k2> → CayleyDickson<max(k1,k2)>
+// This is the Cayley-Dickson tower embedding.
+
+fn cd_binary_result_level(k1: i64, k2: i64) -> i64 {
+    if k1 > k2 { return k1 }
+    return k2
+}
+
+// Can we implicitly coerce (widen) from level k1 to k2?
+fn cd_can_coerce(from_k: i64, to_k: i64) -> bool {
+    from_k <= to_k  // can embed R→C→H→O→S, never narrow
+}
+
+// ============================================================
+// Non-Associative Lambek Calculus (NL) connection
+// ============================================================
+
+// In the Non-Associative Lambek Calculus (Lambek 1961), expressions
+// are binary trees, not flat sequences. The type checker maintains
+// tree structure for non-associative expressions.
+//
+// Catalan number C_n counts parenthesizations of n+1 factors:
+//   C_1 = 1, C_2 = 2, C_3 = 5, C_4 = 14, ...
+//
+// The compiler PRESERVES the programmer's chosen parenthesization
+// when cd_can_reassociate(k) returns false.
+
+fn catalan(n: i64) -> i64 with Mut, Panic, Div {
+    // C_n = (2n)! / ((n+1)! * n!)
+    if n <= 0 { return 1 }
+    if n == 1 { return 1 }
+    if n == 2 { return 2 }
+    if n == 3 { return 5 }
+    if n == 4 { return 14 }
+    if n == 5 { return 42 }   // 42 — the number of Fano-line triples
+    if n == 6 { return 132 }
+    if n == 7 { return 429 }
+    // For larger n: use the recurrence C_n = C_{n-1} * 2(2n-1) / (n+1)
+    var c: i64 = 429
+    var i: i64 = 8
+    while i <= n {
+        c = c * (2 * (2 * i - 1)) / (i + 1)
+        i = i + 1
+    }
+    c
+}
