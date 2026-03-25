@@ -845,6 +845,101 @@ fn infer_measure_eps_scaled(value_tok: i64, unc_tok: i64) -> i64 with Panic, Div
     return eps_scaled
 }
 
+fn isqrt_i64(n: i64) -> i64 with Div {
+    if n <= 0 { return 0 }
+    var x = n
+    var y = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    return x
+}
+
+fn knowledge_eps_combine_independent(a: i64, b: i64) -> i64 with Panic, Div {
+    if a < 0 || b < 0 { return -1 }
+    let sum_sq = a * a + b * b
+    var root = isqrt_i64(sum_sq)
+    if root * root < sum_sq { root = root + 1 }
+    if root > 1000000 { root = 1000000 }
+    return root
+}
+
+fn knowledge_eps_combine_relative(a: i64, b: i64) -> i64 {
+    if a < 0 || b < 0 { return -1 }
+    let sum = a + b
+    if sum > 1000000 { return 1000000 }
+    return sum
+}
+
+fn knowledge_binary_result_hash(op: i64, left_ty: i64, left_hash: i64, right_ty: i64, right_hash: i64) -> i64 with Panic, Div {
+    let left_has = knowledge_hash_is(left_hash)
+    let right_has = knowledge_hash_is(right_hash)
+    if left_has == false && right_has == false { return 0 }
+    var inner_ty = left_ty
+    var inner_hash = left_hash
+    if left_has {
+        inner_ty = knowledge_hash_inner_ty(left_hash)
+        inner_hash = knowledge_hash_inner_hash(left_hash)
+    } else {
+        if right_has {
+            inner_ty = knowledge_hash_inner_ty(right_hash)
+            inner_hash = knowledge_hash_inner_hash(right_hash)
+        }
+    }
+    var left_eps: i64 = 0
+    if left_has { left_eps = knowledge_hash_eps(left_hash) }
+    var right_eps: i64 = 0
+    if right_has { right_eps = knowledge_hash_eps(right_hash) }
+    var eps: i64 = -1
+    if op == 17 || op == 18 || op == 29 {
+        eps = knowledge_eps_combine_independent(left_eps, right_eps)
+    } else {
+        eps = knowledge_eps_combine_relative(left_eps, right_eps)
+    }
+    return knowledge_hash_make(inner_ty, inner_hash, eps)
+}
+
+fn skip_call_arg_expr(p0: i64) -> i64 with Panic {
+    var p = p0
+    var paren_depth: i64 = 0
+    var bracket_depth: i64 = 0
+    var brace_depth: i64 = 0
+    while p < TC {
+        let k = TK[p as usize]
+        if k == 6 { paren_depth = paren_depth + 1 }
+        if k == 7 {
+            if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 { return p }
+            paren_depth = paren_depth - 1
+        }
+        if k == 41 { bracket_depth = bracket_depth + 1 }
+        if k == 42 { bracket_depth = bracket_depth - 1 }
+        if k == 8 { brace_depth = brace_depth + 1 }
+        if k == 9 {
+            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 { return p }
+            brace_depth = brace_depth - 1
+        }
+        if k == 28 && paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 { return p }
+        p = p + 1
+    }
+    return p
+}
+
+fn skip_signature_where_clause(p0: i64) -> i64 with Panic {
+    var p = p0
+    if TK[p as usize] == 3 {
+        let ns = TS[p as usize]
+        let ne = TE[p as usize]
+        if src_match(ns, ne - ns, "where") {
+            p = p + 1
+            while p < TC && TK[p as usize] != 8 && TK[p as usize] != 38 && TK[p as usize] != 0 {
+                p = p + 1
+            }
+        }
+    }
+    return p
+}
+
 fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic {
     if src_match(ns, ne - ns, "i8") { return 1 }
     if src_match(ns, ne - ns, "i32") { return 1 }
@@ -2070,6 +2165,224 @@ fn emit_log_builtin_x86() with Mut {
     em(0x48); em(0x83); em(0xc4); em(16)
 }
 
+fn emit_i64_to_f64_in_rax_x86() with Mut {
+    em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+}
+
+fn emit_f64_add_from_rcx_rax_x86() with Mut {
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)
+    em(0xf2); em(0x0f); em(0x58); em(0xc1)
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+}
+
+fn emit_f64_sub_from_rcx_rax_x86() with Mut {
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)
+    em(0xf2); em(0x0f); em(0x5c); em(0xc1)
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+}
+
+fn emit_f64_mul_from_rcx_rax_x86() with Mut {
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)
+    em(0xf2); em(0x0f); em(0x59); em(0xc1)
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+}
+
+fn emit_f64_div_from_rcx_rax_x86() with Mut {
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)
+    em(0xf2); em(0x0f); em(0x5e); em(0xc1)
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+}
+
+fn emit_load_operand_value_x86(slot: i64, ty: i64, ty_hash: i64, tok: i64) with IO, Mut, Panic, Div {
+    emit_load_var(slot)
+    if knowledge_hash_is(ty_hash) {
+        em(0x48); em(0x8b); em(0x00)
+        let inner_ty = knowledge_hash_inner_ty(ty_hash)
+        if inner_ty != 2 {
+            if ty_is_numeric(inner_ty) { emit_i64_to_f64_in_rax_x86() }
+            else {
+                tc_error(tok, "Knowledge arithmetic requires numeric inner type")
+                em(0x31); em(0xc0)
+            }
+        }
+        return
+    }
+    if ty != 2 {
+        if ty_is_numeric(ty) { emit_i64_to_f64_in_rax_x86() }
+        else {
+            tc_error(tok, "Knowledge arithmetic requires numeric operands")
+            em(0x31); em(0xc0)
+        }
+    }
+}
+
+fn emit_load_operand_variance_x86(slot: i64, ty_hash: i64) with Mut {
+    if knowledge_hash_is(ty_hash) {
+        emit_load_var(slot)
+        em(0x48); em(0x8b); em(0x40); em(8)
+        return
+    }
+    em(0x31); em(0xc0)
+}
+
+fn emit_load_operand_confidence_x86(slot: i64, ty_hash: i64) with Mut {
+    if knowledge_hash_is(ty_hash) {
+        emit_load_var(slot)
+        em(0x48); em(0x8b); em(0x40); em(16)
+        return
+    }
+    emit_imm64(4607182418800017408)
+}
+
+fn emit_min_positive_f64_bits_x86() with Mut {
+    em(0x48); em(0x39); em(0xc1)
+    em(0x48); em(0x0f); em(0x4e); em(0xc1)
+}
+
+fn compile_knowledge_addsub_x86(op_tok: i64, op: i64, left_ty: i64, left_hash: i64, right_ty: i64, right_hash: i64) with IO, Mut, Panic, Div {
+    let rhs_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(rhs_slot)
+    let lhs_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    em(0x58)
+    emit_store_var(lhs_slot)
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+
+    emit_load_operand_value_x86(lhs_slot, left_ty, left_hash, op_tok)
+    em(0x50)
+    emit_load_operand_value_x86(rhs_slot, right_ty, right_hash, op_tok)
+    em(0x59)
+    if op == 17 { emit_f64_add_from_rcx_rax_x86() } else { emit_f64_sub_from_rcx_rax_x86() }
+    emit_store_var(base_slot + 2)
+
+    emit_load_operand_variance_x86(lhs_slot, left_hash)
+    em(0x50)
+    emit_load_operand_variance_x86(rhs_slot, right_hash)
+    em(0x59)
+    emit_f64_add_from_rcx_rax_x86()
+    emit_store_var(base_slot + 1)
+
+    emit_load_operand_confidence_x86(lhs_slot, left_hash)
+    em(0x50)
+    emit_load_operand_confidence_x86(rhs_slot, right_hash)
+    em(0x59)
+    emit_min_positive_f64_bits_x86()
+    emit_store_var(base_slot)
+
+    em(0x48); em(0x8d); em(0x85)
+    em32(0 - (base_slot + 2) * 8)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_binary_result_hash(op, left_ty, left_hash, right_ty, right_hash)
+}
+
+fn compile_knowledge_muldiv_x86(op_tok: i64, op: i64, left_ty: i64, left_hash: i64, right_ty: i64, right_hash: i64) with IO, Mut, Panic, Div {
+    let rhs_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(rhs_slot)
+    let lhs_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    em(0x58)
+    emit_store_var(lhs_slot)
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+
+    emit_load_operand_value_x86(lhs_slot, left_ty, left_hash, op_tok)
+    em(0x50)
+    emit_load_operand_value_x86(rhs_slot, right_ty, right_hash, op_tok)
+    em(0x59)
+    if op == 19 { emit_f64_mul_from_rcx_rax_x86() } else { emit_f64_div_from_rcx_rax_x86() }
+    emit_store_var(base_slot + 2)
+
+    if op == 19 {
+        emit_load_operand_value_x86(lhs_slot, left_ty, left_hash, op_tok)
+        em(0x50)
+        emit_load_operand_value_x86(lhs_slot, left_ty, left_hash, op_tok)
+        em(0x59)
+        emit_f64_mul_from_rcx_rax_x86()
+        em(0x50)
+        emit_load_operand_variance_x86(rhs_slot, right_hash)
+        em(0x59)
+        emit_f64_mul_from_rcx_rax_x86()
+        em(0x50)
+
+        emit_load_operand_value_x86(rhs_slot, right_ty, right_hash, op_tok)
+        em(0x50)
+        emit_load_operand_value_x86(rhs_slot, right_ty, right_hash, op_tok)
+        em(0x59)
+        emit_f64_mul_from_rcx_rax_x86()
+        em(0x50)
+        emit_load_operand_variance_x86(lhs_slot, left_hash)
+        em(0x59)
+        emit_f64_mul_from_rcx_rax_x86()
+
+        em(0x59)
+        emit_f64_add_from_rcx_rax_x86()
+    } else {
+        emit_load_operand_variance_x86(lhs_slot, left_hash)
+        em(0x50)
+        emit_load_operand_value_x86(rhs_slot, right_ty, right_hash, op_tok)
+        em(0x50)
+        emit_load_operand_value_x86(rhs_slot, right_ty, right_hash, op_tok)
+        em(0x59)
+        emit_f64_mul_from_rcx_rax_x86()
+        em(0x59)
+        emit_f64_div_from_rcx_rax_x86()
+        em(0x50)
+
+        emit_load_operand_value_x86(lhs_slot, left_ty, left_hash, op_tok)
+        em(0x50)
+        emit_load_operand_value_x86(lhs_slot, left_ty, left_hash, op_tok)
+        em(0x59)
+        emit_f64_mul_from_rcx_rax_x86()
+        em(0x50)
+        emit_load_operand_variance_x86(rhs_slot, right_hash)
+        em(0x59)
+        emit_f64_mul_from_rcx_rax_x86()
+        em(0x50)
+
+        emit_load_operand_value_x86(rhs_slot, right_ty, right_hash, op_tok)
+        em(0x50)
+        emit_load_operand_value_x86(rhs_slot, right_ty, right_hash, op_tok)
+        em(0x59)
+        emit_f64_mul_from_rcx_rax_x86()
+        em(0x50)
+        emit_load_operand_value_x86(rhs_slot, right_ty, right_hash, op_tok)
+        em(0x50)
+        emit_load_operand_value_x86(rhs_slot, right_ty, right_hash, op_tok)
+        em(0x59)
+        emit_f64_mul_from_rcx_rax_x86()
+        em(0x59)
+        emit_f64_mul_from_rcx_rax_x86()
+
+        em(0x59)
+        emit_f64_div_from_rcx_rax_x86()
+        em(0x59)
+        emit_f64_add_from_rcx_rax_x86()
+    }
+    emit_store_var(base_slot + 1)
+
+    emit_load_operand_confidence_x86(lhs_slot, left_hash)
+    em(0x50)
+    emit_load_operand_confidence_x86(rhs_slot, right_hash)
+    em(0x59)
+    emit_min_positive_f64_bits_x86()
+    emit_store_var(base_slot)
+
+    em(0x48); em(0x8d); em(0x85)
+    em32(0 - (base_slot + 2) * 8)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_binary_result_hash(op, left_ty, left_hash, right_ty, right_hash)
+}
+
 // ─── Built-in function emitters ───
 
 // print_int: rax = value → emit decimal digits + write syscall
@@ -3105,6 +3418,51 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 compile_measure_call_x86(name_tok)
                 return
             }
+            if src_match(ns, ne - ns, "lift_knowledge") {
+                EP = EP + 1
+                if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or()
+                    while TK[EP as usize] == 28 {
+                        EP = EP + 1
+                        EP = skip_call_arg_expr(EP)
+                    }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 0
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "prove_robust") {
+                EP = EP + 1
+                if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or()
+                    while TK[EP as usize] == 28 {
+                        EP = EP + 1
+                        EP = skip_call_arg_expr(EP)
+                    }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 0
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "validate_manifest") {
+                EP = EP + 1
+                if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or()
+                    while TK[EP as usize] == 28 {
+                        EP = EP + 1
+                        EP = skip_call_arg_expr(EP)
+                    }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 0
+                EXPR_TY_HASH = 0
+                return
+            }
             // Check for arg_count()
             if src_match(ns, ne - ns, "arg_count") {
                 EP = EP + 1
@@ -3737,6 +4095,12 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_TY = 2
                     EXPR_TY_HASH = 0
                     EXPR_IS_F64 = 1
+                } else if src_match(fns, fne - fns, "uncertainty") {
+                    em(0x48); em(0x8b); em(0x40); em(8)
+                    emit_sqrt_builtin_x86()
+                    EXPR_TY = 2
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 1
                 } else if src_match(fns, fne - fns, "confidence") {
                     em(0x48); em(0x8b); em(0x40); em(16)
                     EXPR_TY = 2
@@ -3808,9 +4172,38 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         EP = EP + 1
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
+        let left_hash = EXPR_TY_HASH
         emit_push()
         compile_postfix()
         let right_ty = EXPR_TY
+        let right_hash = EXPR_TY_HASH
+        let left_has_knowledge = knowledge_hash_is(left_hash)
+        let right_has_knowledge = knowledge_hash_is(right_hash)
+        if left_has_knowledge || right_has_knowledge {
+            var left_inner_ty = left_ty
+            var left_inner_hash = left_hash
+            if left_has_knowledge {
+                left_inner_ty = knowledge_hash_inner_ty(left_hash)
+                left_inner_hash = knowledge_hash_inner_hash(left_hash)
+            }
+            var right_inner_ty = right_ty
+            var right_inner_hash = right_hash
+            if right_has_knowledge {
+                right_inner_ty = knowledge_hash_inner_ty(right_hash)
+                right_inner_hash = knowledge_hash_inner_hash(right_hash)
+            }
+            if op == 29 {
+                tc_error(op_tok, "modulo requires integer operands")
+            } else {
+                if left_inner_ty != 0 && right_inner_ty != 0 {
+                    if ty_is_numeric(left_inner_ty) == false || ty_is_numeric(right_inner_ty) == false || ty_eq(left_inner_ty, left_inner_hash, right_inner_ty, right_inner_hash) == false {
+                        tc_error(op_tok, "Knowledge arithmetic requires matching numeric operands")
+                    }
+                }
+            }
+            compile_knowledge_muldiv_x86(op_tok, op, left_ty, left_hash, right_ty, right_hash)
+            continue
+        }
         if left_ty != 0 && right_ty != 0 {
             if op == 29 {
                 if left_ty != 1 || right_ty != 1 { tc_error(op_tok, "modulo requires integer operands") }
@@ -3858,6 +4251,29 @@ fn compile_additive() with IO, Mut, Panic, Div {
         compile_multiplicative()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let left_has_knowledge = knowledge_hash_is(left_hash)
+        let right_has_knowledge = knowledge_hash_is(right_hash)
+        if left_has_knowledge || right_has_knowledge {
+            var left_inner_ty = left_ty
+            var left_inner_hash = left_hash
+            if left_has_knowledge {
+                left_inner_ty = knowledge_hash_inner_ty(left_hash)
+                left_inner_hash = knowledge_hash_inner_hash(left_hash)
+            }
+            var right_inner_ty = right_ty
+            var right_inner_hash = right_hash
+            if right_has_knowledge {
+                right_inner_ty = knowledge_hash_inner_ty(right_hash)
+                right_inner_hash = knowledge_hash_inner_hash(right_hash)
+            }
+            if left_inner_ty != 0 && right_inner_ty != 0 {
+                if ty_is_numeric(left_inner_ty) == false || ty_is_numeric(right_inner_ty) == false || ty_eq(left_inner_ty, left_inner_hash, right_inner_ty, right_inner_hash) == false {
+                    tc_error(op_tok, "Knowledge arithmetic requires matching numeric operands")
+                }
+            }
+            compile_knowledge_addsub_x86(op_tok, op, left_ty, left_hash, right_ty, right_hash)
+            continue
+        }
         if left_ty != 0 && right_ty != 0 {
             if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false {
                 tc_error(op_tok, "arithmetic operands must have matching numeric types")
@@ -5729,6 +6145,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 }
                 q = SCAN_TY_NEXT
             }
+            q = skip_signature_where_clause(q)
             if sig_fi < FN_COUNT { sig_fi = sig_fi + 1 }
         }
         p = p + 1
@@ -5910,6 +6327,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             scan_type(p)
             p = SCAN_TY_NEXT
         }
+        p = skip_signature_where_clause(p)
         // Skip 'with' effects clause (with=38, ident=3, comma=28)
         if TK[p as usize] == 38 { p = p + 1; while TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 } }
         if TK[p as usize] == 8 { p = p + 1 }
