@@ -28,11 +28,13 @@ configs:
 
 Instruction/completion dataset for **Sounio**, a self-hosted systems + scientific programming language for epistemic computing.
 
+Live dataset URL: <https://huggingface.co/datasets/chiuratto-AIgourakis/sounio-code-examples>
+
 ## Contents
 
-- `train.jsonl`: 332 examples
+- `train.jsonl`: 333 examples
 - `validation.jsonl`: 37 examples
-- Total: 369 examples extracted from `tests/run-pass` and `tests/compile-fail`
+- Total: 370 examples extracted from `tests/run-pass` and `tests/compile-fail`
 
 Each record contains:
 
