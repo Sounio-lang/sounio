@@ -106,8 +106,10 @@ var MAN_BUF_S: [i64; 64] = [0; 64]
 var MAN_BUF_E: [i64; 64] = [0; 64]
 
 // ─── Phase 5: Effects checking ───
-// Bitmask per function: IO=1, Mut=2, Panic=4, Div=8, Alloc=16
+// Bitmask per function: IO=1, Mut=2, Panic=4, Div=8, Alloc=16, Custom/Session=32
 var FN_EFFECTS: [i64; 256] = [0; 256]
+var FN_NAME_TOK: [i64; 256] = [0; 256]
+var FN_NEEDS_SESSION: [i64; 256] = [0; 256]
 var CURRENT_FN: i64 = 0
 
 // ─── Phase 6a: Unit tracking (compile-time only) ───
@@ -665,6 +667,12 @@ fn cli_arg_eq(raw: string, kw: string) -> bool with Panic {
     return true
 }
 
+fn name_is_lower(ns: i64, ne: i64) -> bool with Panic {
+    if ne <= ns { return false }
+    let c = sb(ns)
+    return c >= 97 && c <= 122
+}
+
 fn name_eq(s1: i64, e1: i64, s2: i64, e2: i64) -> bool with Panic {
     let l = e1 - s1
     if l != e2 - s2 { return false }
@@ -776,8 +784,15 @@ fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic {
 }
 
 fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div {
-    if k1 == 0 || k2 == 0 { return true }
+    if k1 == 0 || k2 == 0 {
+        if k1 == 0 && k2 == 0 && h1 != 0 && h2 != 0 { return h1 == h2 }
+        return true
+    }
     if k1 != k2 { return false }
+    if k1 == 2 {
+        if h1 != 0 && h2 != 0 { return h1 == h2 }
+        return true
+    }
     if k1 == 6 || k1 == 7 { return h1 == h2 }
     if k1 == 8 {
         let a1 = arr_hash_alen(h1)
@@ -816,6 +831,39 @@ fn tc_undefined_var(tok: i64) -> i64 with IO, Mut, Panic {
 fn tc_duplicate_fn(tok: i64) -> i64 with IO, Mut, Panic {
     tc_error(tok, "duplicate function name")
 }
+
+fn tc_missing_effect(tok: i64) -> i64 with IO, Mut, Panic {
+    tc_error(tok, "effect not declared in function signature")
+}
+
+fn scan_fn_param_type(fi: i64, arg_idx: i64) with Mut, Panic {
+    SCAN_TY = 0
+    SCAN_TY_HASH = 0
+    SCAN_TY_NEXT = 0
+    if fi < 0 || fi >= FN_COUNT { return }
+    var q = FN_NAME_TOK[fi as usize] + 1
+    if TK[q as usize] != 6 { return }
+    q = q + 1
+    var idx: i64 = 0
+    while TK[q as usize] != 7 && TK[q as usize] != 0 {
+        if TK[q as usize] == 3 {
+            q = q + 1
+            if TK[q as usize] == 43 {
+                q = q + 1
+                scan_type(q)
+                if idx == arg_idx { return }
+                q = SCAN_TY_NEXT
+                idx = idx + 1
+            }
+        } else {
+            q = q + 1
+        }
+        if TK[q as usize] == 28 { q = q + 1 }
+    }
+    SCAN_TY = 0
+    SCAN_TY_HASH = 0
+}
+
 
 fn print_effect_mask(mask: i64) with IO {
     if mask == 0 {
@@ -1111,6 +1159,19 @@ fn scan_type(p0: i64) with Mut, Panic {
     if TK[p as usize] == 3 {
         let ns = TS[p as usize]
         let ne = TE[p as usize]
+        var saw_generic: i64 = 0
+        var saw_epsilon_bound: i64 = 0
+        if src_match(ns, ne - ns, "chan") {
+            SCAN_TY = 0
+            SCAN_TY_HASH = 0
+            p = p + 1
+            if TK[p as usize] == 3 {
+                SCAN_TY_HASH = gl_name_hash(TS[p as usize], TE[p as usize])
+                p = p + 1
+            }
+            SCAN_TY_NEXT = p
+            return
+        }
         if src_match(ns, ne - ns, "i8") {
             SCAN_TY = 1
         } else {
@@ -1172,13 +1233,26 @@ fn scan_type(p0: i64) with Mut, Panic {
         }
         p = p + 1
         if TK[p as usize] == 23 {
+            saw_generic = 1
             var gd: i64 = 1
             p = p + 1
             while p < TC && gd > 0 {
+                if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "epsilon") {
+                    saw_epsilon_bound = 1
+                }
                 if TK[p as usize] == 23 { gd = gd + 1 }
                 if TK[p as usize] == 24 { gd = gd - 1 }
                 p = p + 1
             }
+        }
+        if saw_epsilon_bound != 0 {
+            SCAN_TY = -1
+            SCAN_TY_HASH = 0
+            SCAN_TY_NEXT = p
+            return
+        }
+        if saw_generic != 0 && SCAN_TY == 0 && SCAN_TY_HASH != 0 {
+            SCAN_TY_HASH = gl_name_hash(ns, TE[(p - 1) as usize])
         }
     }
     SCAN_TY_NEXT = p
@@ -2900,6 +2974,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
             var argc: i64 = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or()
+                if fi >= 0 {
+                    scan_fn_param_type(fi, argc)
+                    if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && ty_eq(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
+                        tc_error(call_tok, "type mismatch in call argument")
+                    }
+                }
                 materialize_aggregate_expr_x86()
                 em(0x50)
                 argc = argc + 1
@@ -3187,23 +3267,34 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 37 {
             EP = EP + 1  // skip 'as'
             let tp = EP
+            let src_ty = EXPR_TY
+            let src_hash = EXPR_TY_HASH
             let src_is_f64 = EXPR_IS_F64
             let tns = TS[EP as usize]
             let tne = TE[EP as usize]
             scan_type(tp)
-            if SCAN_TY == 1 && src_is_f64 == 1 {
+            var cast_ty = SCAN_TY
+            var cast_hash = SCAN_TY_HASH
+            if cast_ty == 0 && name_is_lower(tns, tne) {
+                cast_ty = 2
+                cast_hash = gl_name_hash(tns, tne)
+            }
+            if src_ty == 2 && cast_ty == 2 && src_hash != 0 && cast_hash != 0 && src_hash != cast_hash {
+                tc_error(tp, "incompatible unit dimensions")
+            }
+            if cast_ty == 1 && src_is_f64 == 1 {
                 em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
                 em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0)
             }
-            if SCAN_TY == 2 && src_is_f64 == 0 {
+            if cast_ty == 2 && src_is_f64 == 0 {
                 em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
                 em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
             }
-            if SCAN_TY == 1 && tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
+            if cast_ty == 1 && tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
                 em(0x48); em(0x0f); em(0xbe); em(0xc0)  // as i8: movsx rax, al
             }
-            EXPR_TY = SCAN_TY
-            EXPR_TY_HASH = SCAN_TY_HASH
+            EXPR_TY = cast_ty
+            EXPR_TY_HASH = cast_hash
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             EP = SCAN_TY_NEXT
             continue
@@ -3434,11 +3525,17 @@ fn compile_additive() with IO, Mut, Panic, Div {
         EP = EP + 1
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
+        let left_hash = EXPR_TY_HASH
         emit_push()
         compile_multiplicative()
         let right_ty = EXPR_TY
+        let right_hash = EXPR_TY_HASH
         if left_ty != 0 && right_ty != 0 {
-            if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false || left_ty != right_ty {
+            if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false {
+                tc_error(op_tok, "arithmetic operands must have matching numeric types")
+            }
+            if ty_eq(left_ty, left_hash, right_ty, right_hash) == false {
+                if left_ty == 2 && right_ty == 2 { tc_error(op_tok, "unit mismatch") }
                 tc_error(op_tok, "arithmetic operands must have matching numeric types")
             }
         }
@@ -3457,7 +3554,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
             if op == 18 { em(0x48); em(0x87); em(0xc1); em(0x48); em(0x29); em(0xc8) }  // xchg; sub rax, rcx
             EXPR_TY = 1
         }
-        EXPR_TY_HASH = 0
+        if left_ty == 2 { EXPR_TY_HASH = left_hash } else { EXPR_TY_HASH = 0 }
     }
 }
 
@@ -3555,7 +3652,7 @@ fn compile_comparison() with IO, Mut, Panic, Div {
             }
         } else {
             if left_ty != 0 && right_ty != 0 {
-                if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false || left_ty != right_ty {
+                if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false || ty_eq(left_ty, left_hash, right_ty, right_hash) == false {
                     tc_error(op_tok, "ordered comparison requires matching numeric operands")
                 }
             }
@@ -4011,6 +4108,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             // Skip & or &!
             if TK[EP as usize] == 44 { EP = EP + 1 }
             if TK[EP as usize] == 32 { EP = EP + 1 }
+            let ann_ns = TS[EP as usize]
+            let ann_ne = TE[EP as usize]
             // Array type: [T; N] — detect and extract element type + length
             if TK[EP as usize] == 41 {
                 EP = EP + 1  // skip [
@@ -4032,6 +4131,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 scan_type(EP)
                 decl_ty = SCAN_TY
                 decl_ty_hash = SCAN_TY_HASH
+                if decl_ty == -1 {
+                    tc_error(EP, "type mismatch")
+                    decl_ty = 0
+                    decl_ty_hash = 0
+                }
+                if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
+                    decl_ty = 2
+                    decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
+                }
                 if decl_ty == 2 { decl_is_f64 = 1 }
                 else { decl_is_f64 = 0 }
                 EP = SCAN_TY_NEXT
@@ -4091,7 +4199,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                 else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
                 else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
-                if decl_ty != 0 {
+                if decl_ty != 0 || decl_ty_hash != 0 {
                     VAR_TY[vix as usize] = decl_ty
                     VAR_TY_HASH[vix as usize] = decl_ty_hash
                 } else {
@@ -5251,6 +5359,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
+            FN_NAME_TOK[sig_fi as usize] = p
+            FN_NEEDS_SESSION[sig_fi as usize] = 0
             FN_ARITY[sig_fi as usize] = 0
             FN_RET_TY[sig_fi as usize] = 5
             FN_RET_HASH[sig_fi as usize] = 0
@@ -5262,7 +5372,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     q = q + 1
                     if TK[q as usize] == 43 {
                         q = q + 1
+                        if TK[q as usize] == 3 && src_match(TS[q as usize], TE[q as usize] - TS[q as usize], "chan") {
+                            FN_NEEDS_SESSION[sig_fi as usize] = 1
+                        }
                         scan_type(q)
+                        if SCAN_TY == -1 { tc_error(q, "type mismatch") }
                         q = SCAN_TY_NEXT
                     }
                 } else {
@@ -5273,7 +5387,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if TK[q as usize] == 7 { q = q + 1 }
             if TK[q as usize] == 10 {
                 q = q + 1
+                if TK[q as usize] == 3 && src_match(TS[q as usize], TE[q as usize] - TS[q as usize], "chan") {
+                    FN_NEEDS_SESSION[sig_fi as usize] = 1
+                }
                 scan_type(q)
+                if SCAN_TY == -1 { tc_error(q, "type mismatch") }
                 FN_RET_TY[sig_fi as usize] = SCAN_TY
                 FN_RET_HASH[sig_fi as usize] = SCAN_TY_HASH
                 q = SCAN_TY_NEXT
@@ -5340,11 +5458,13 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if TK[ew as usize] == 3 {
                             let ens = TS[ew as usize]
                             let ene = TE[ew as usize]
-                            if src_match(ens, ene - ens, "IO") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 1 }
-                            if src_match(ens, ene - ens, "Mut") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 2 }
-                            if src_match(ens, ene - ens, "Panic") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 4 }
-                            if src_match(ens, ene - ens, "Div") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 8 }
-                            if src_match(ens, ene - ens, "Alloc") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 16 }
+                            var matched_builtin: i64 = 0
+                            if src_match(ens, ene - ens, "IO") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 1; matched_builtin = 1 }
+                            if src_match(ens, ene - ens, "Mut") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 2; matched_builtin = 1 }
+                            if src_match(ens, ene - ens, "Panic") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 4; matched_builtin = 1 }
+                            if src_match(ens, ene - ens, "Div") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 8; matched_builtin = 1 }
+                            if src_match(ens, ene - ens, "Alloc") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 16; matched_builtin = 1 }
+                            if matched_builtin == 0 { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 32 }
                         }
                         ew = ew + 1
                     }
@@ -5357,6 +5477,13 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         p = p + 1
     }
     print("effects: scanned "); print_int(eff_fi); print(" functions\n")
+    var evi: i64 = 0
+    while evi < FN_COUNT {
+        if FN_NEEDS_SESSION[evi as usize] != 0 && (FN_EFFECTS[evi as usize] & 32) == 0 {
+            tc_missing_effect(FN_NAME_TOK[evi as usize])
+        }
+        evi = evi + 1
+    }
 
     // Pass 1c: scan top-level type aliases (token 61)
     p = 0
@@ -6831,6 +6958,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             var argc: i64 = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or_a64()
+                if fi >= 0 {
+                    scan_fn_param_type(fi, argc)
+                    if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && ty_eq(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
+                        tc_error(call_tok, "type mismatch in call argument")
+                    }
+                }
                 materialize_aggregate_expr_a64()
                 emit_push_a64()
                 argc = argc + 1
@@ -7078,23 +7211,34 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 37 {
             EP = EP + 1
             let tp = EP
+            let src_ty = EXPR_TY
+            let src_hash = EXPR_TY_HASH
             let src_is_f64 = EXPR_IS_F64
             let tns = TS[EP as usize]
             let tne = TE[EP as usize]
             scan_type(tp)
-            if SCAN_TY == 1 && src_is_f64 == 1 {
+            var cast_ty = SCAN_TY
+            var cast_hash = SCAN_TY_HASH
+            if cast_ty == 0 && name_is_lower(tns, tne) {
+                cast_ty = 2
+                cast_hash = gl_name_hash(tns, tne)
+            }
+            if src_ty == 2 && cast_ty == 2 && src_hash != 0 && cast_hash != 0 && src_hash != cast_hash {
+                tc_error(tp, "incompatible unit dimensions")
+            }
+            if cast_ty == 1 && src_is_f64 == 1 {
                 em32(0x9E670000)
                 em32(0x9E780000)
             }
-            if SCAN_TY == 2 && src_is_f64 == 0 {
+            if cast_ty == 2 && src_is_f64 == 0 {
                 em32(0x9E620000)
                 em32(0x9E660000)
             }
-            if SCAN_TY == 1 && tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
+            if cast_ty == 1 && tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
                 em32(0x93401C00)  // sxtb x0, w0
             }
-            EXPR_TY = SCAN_TY
-            EXPR_TY_HASH = SCAN_TY_HASH
+            EXPR_TY = cast_ty
+            EXPR_TY_HASH = cast_hash
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             EP = SCAN_TY_NEXT
             continue
@@ -7461,6 +7605,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             EP = EP + 1
             if TK[EP as usize] == 44 { EP = EP + 1 }
             if TK[EP as usize] == 32 { EP = EP + 1 }
+            let ann_ns = TS[EP as usize]
+            let ann_ne = TE[EP as usize]
             if TK[EP as usize] == 41 {
                 EP = EP + 1
                 let etns = TS[EP as usize]
@@ -7479,6 +7625,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 scan_type(EP)
                 decl_ty = SCAN_TY
                 decl_ty_hash = SCAN_TY_HASH
+                if decl_ty == -1 {
+                    tc_error(EP, "type mismatch")
+                    decl_ty = 0
+                    decl_ty_hash = 0
+                }
+                if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
+                    decl_ty = 2
+                    decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
+                }
                 if decl_ty == 2 { decl_is_f64 = 1 }
                 else { decl_is_f64 = 0 }
                 EP = SCAN_TY_NEXT
@@ -7525,7 +7680,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                 else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
                 else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
-                if decl_ty != 0 {
+                if decl_ty != 0 || decl_ty_hash != 0 {
                     VAR_TY[vix as usize] = decl_ty
                     VAR_TY_HASH[vix as usize] = decl_ty_hash
                 } else {
