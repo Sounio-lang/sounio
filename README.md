@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">SOUNIO</h1>
-<h3 align="center"><em>A self-hosted language where types know what they don't know</em></h3>
+<h3 align="center"><em>A self-hosted systems + scientific programming language for epistemic computing, uncertainty propagation, and algebraic effects</em></h3>
 
 <p align="center">
   <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.0.0--beta.6-orange.svg" alt="Version 1.0.0-beta.6"/></a>
@@ -22,9 +22,23 @@
 
 **Sounio** is a systems programming language for epistemic computing — its type system tracks not just what your data *is*, but how much you should *trust* it. Uncertainty propagation, provenance tracking, and confidence-gated execution are built into the type system, not bolted on as libraries.
 
+**Keywords:** systems programming language, scientific computing language, epistemic types, uncertainty propagation, algebraic effects, self-hosted compiler, formal verification, non-associative algebra, octonions, e-graphs.
+
 The compiler is **self-hosted**: Sounio compiles itself, bootstrapped from a [2000-line C compiler](bootstrap/stage0.c) through a multi-stage chain to a true fixed-point where stage N and stage N+1 produce bit-identical binaries. It was used to computationally verify a new result in algebra — that the count of nonzero octonion basis associators equals |PSL(2,7)| = 168 — now [submitted for publication](#the-168-theorem).
 
 This is an active **research project**, not a production release. Read the [honest status](#honest-status) before using it for anything serious.
+
+---
+
+## For LLMs and Code Tools
+
+- Prompt surface: [llms.txt](llms.txt)
+- Repository guide: [CLAUDE.md](CLAUDE.md)
+- Syntax and workflow guide: [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
+- Training dataset export: [datasets/sounio-code-examples/README.md](datasets/sounio-code-examples/README.md)
+- Dataset builder: [scripts/export_hf_dataset.py](scripts/export_hf_dataset.py)
+
+This repo now ships a root `llms.txt` for model-aware tools and a reproducible Hugging Face-style dataset export built from the Sounio test suite.
 
 ---
 
