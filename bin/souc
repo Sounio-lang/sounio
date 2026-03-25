@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+NATIVE_BIN="${SOUC_NATIVE_BIN:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  souc check <file.sio>
+  souc run <file.sio> [-- <program args...>]
+  souc compile <file.sio> -o <output>
+  souc build <file.sio> --backend native -o <output>
+  souc info
+  souc repl
+
+Notes:
+  - Native mode compiles to an ELF before execution.
+  - `build` is a compatibility alias for native compilation only.
+  - REPL is not yet supported in native mode.
+  - --show-ast and --show-types are not yet supported in native mode.
+EOF
+}
+
+require_native() {
+  if [[ ! -x "$NATIVE_BIN" ]]; then
+    echo "error: native compiler not found at $NATIVE_BIN" >&2
+    exit 1
+  fi
+}
+
+unsupported_flag() {
+  echo "error: $1 is not yet supported in native mode" >&2
+  exit 2
+}
+
+compile_quiet() {
+  local src="$1"
+  local out="$2"
+  local log="$3"
+  if "$NATIVE_BIN" "$src" "$out" >"$log" 2>&1; then
+    return 0
+  fi
+  cat "$log" >&2
+  return 1
+}
+
+parse_build_args() {
+  local src_ref="$1"
+  local out_ref="$2"
+  local backend_ref="$3"
+  shift 3
+
+  printf -v "$src_ref" '%s' ""
+  printf -v "$out_ref" '%s' "a.elf"
+  printf -v "$backend_ref" '%s' "native"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -o)
+        if [[ $# -lt 2 ]]; then
+          echo "error: missing output after -o" >&2
+          exit 2
+        fi
+        printf -v "$out_ref" '%s' "$2"
+        shift 2
+        ;;
+      --backend)
+        if [[ $# -lt 2 ]]; then
+          echo "error: missing backend after --backend" >&2
+          exit 2
+        fi
+        printf -v "$backend_ref" '%s' "$2"
+        shift 2
+        ;;
+      --backend=*)
+        printf -v "$backend_ref" '%s' "${1#--backend=}"
+        shift
+        ;;
+      --show-ast|--show-types)
+        unsupported_flag "$1"
+        ;;
+      -*)
+        echo "error: unsupported argument in native mode: $1" >&2
+        exit 2
+        ;;
+      *)
+        if [[ -z "${!src_ref}" ]]; then
+          printf -v "$src_ref" '%s' "$1"
+        else
+          echo "error: unexpected extra argument: $1" >&2
+          exit 2
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "${!src_ref}" ]]; then
+    echo "error: missing input .sio file" >&2
+    exit 2
+  fi
+}
+
+cmd="${1:-help}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+case "$cmd" in
+  help|-h|--help)
+    usage
+    ;;
+  version|-v|--version)
+    echo "souc native-wrapper v1.0.0-rc1"
+    ;;
+  info)
+    require_native
+    cat <<EOF
+souc native-wrapper v1.0.0-rc1
+native compiler: $NATIVE_BIN
+[+] Native self-hosted compiler
+[-] Cranelift JIT
+[-] LLVM backend
+[-] GPU codegen
+[-] REPL
+[-] --show-ast
+[-] --show-types
+EOF
+    ;;
+  repl)
+    echo "not yet supported in native mode" >&2
+    exit 1
+    ;;
+  check)
+    require_native
+    src="${1:-}"
+    if [[ -z "$src" ]]; then
+      usage >&2
+      exit 1
+    fi
+    shift || true
+    for extra in "$@"; do
+      case "$extra" in
+        --show-ast|--show-types)
+          unsupported_flag "$extra"
+          ;;
+        *)
+          echo "error: unsupported argument for check: $extra" >&2
+          exit 2
+          ;;
+      esac
+    done
+    tmp_out="$(mktemp /tmp/souc-check-XXXXXX.elf)"
+    tmp_log="$(mktemp /tmp/souc-check-XXXXXX.log)"
+    trap 'rm -f "$tmp_out" "$tmp_log"' EXIT
+    compile_quiet "$src" "$tmp_out" "$tmp_log"
+    rm -f "$tmp_out"
+    echo "All checks passed"
+    ;;
+  run)
+    require_native
+    src="${1:-}"
+    if [[ -z "$src" ]]; then
+      usage >&2
+      exit 1
+    fi
+    shift || true
+    if [[ "${1:-}" == "--" ]]; then
+      shift
+    fi
+    tmp_out="$(mktemp /tmp/souc-run-XXXXXX.elf)"
+    tmp_log="$(mktemp /tmp/souc-run-XXXXXX.log)"
+    trap 'rm -f "$tmp_out" "$tmp_log"' EXIT
+    compile_quiet "$src" "$tmp_out" "$tmp_log"
+    chmod +x "$tmp_out"
+    exec "$tmp_out" "$@"
+    ;;
+  compile)
+    require_native
+    src="${1:-}"
+    if [[ -z "$src" ]]; then
+      usage >&2
+      exit 1
+    fi
+    shift || true
+    out="a.elf"
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
+      usage
+      exit 0
+    fi
+    if [[ "${1:-}" == "-o" ]]; then
+      out="${2:-}"
+      if [[ -z "$out" ]]; then
+        echo "error: missing output after -o" >&2
+        exit 2
+      fi
+    elif [[ $# -ge 1 ]]; then
+      out="$1"
+    fi
+    "$NATIVE_BIN" "$src" "$out"
+    chmod +x "$out"
+    ;;
+  build)
+    require_native
+    parse_build_args src out backend "$@"
+    case "$backend" in
+      native|selfhosted-native|"")
+        ;;
+      llvm|gpu|cranelift|jit)
+        echo "error: backend '$backend' is not available in native-only mode" >&2
+        exit 2
+        ;;
+      *)
+        echo "error: unknown backend '$backend'" >&2
+        exit 2
+        ;;
+    esac
+    "$NATIVE_BIN" "$src" "$out"
+    chmod +x "$out"
+    ;;
+  *)
+    echo "error: unknown subcommand: $cmd" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

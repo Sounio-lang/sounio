@@ -34,7 +34,7 @@ _sounio_normalize_bool() {
 SOUNIO_REPO_HARD_NO_RUST="$(_sounio_normalize_bool "${SOUNIO_REPO_HARD_NO_RUST:-1}" "SOUNIO_REPO_HARD_NO_RUST")"
 SKIP_BUILD="$(_sounio_normalize_bool "${SKIP_BUILD:-$SOUNIO_REPO_HARD_NO_RUST}" "SKIP_BUILD")"
 
-# Resolve SOUC_BIN: explicit env → debug build → release build → PATH.
+# Resolve SOUC_BIN: explicit env → repo wrapper → PATH fallbacks.
 _sounio_resolve_bin() {
   local resolver="$_SOUNIO_ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh"
   if [[ -x "$resolver" ]]; then
@@ -53,9 +53,14 @@ _sounio_resolve_bin() {
     echo "$SOUC_BIN"
     return 0
   fi
-  local root_bin="$_SOUNIO_ROOT_DIR/souc"
+  local root_bin="$_SOUNIO_ROOT_DIR/bin/souc"
   if [[ -x "$root_bin" ]]; then
     echo "$root_bin"
+    return 0
+  fi
+  local compat_root_bin="$_SOUNIO_ROOT_DIR/souc"
+  if [[ -x "$compat_root_bin" ]]; then
+    echo "$compat_root_bin"
     return 0
   fi
   local debug_bin="$_SOUNIO_ROOT_DIR/target/debug/souc"
@@ -72,19 +77,12 @@ _sounio_resolve_bin() {
     command -v souc
     return 0
   fi
-  # Last resort: native compiler wrapper
+  # Last resort: legacy native wrapper
   local native_wrapper="$_SOUNIO_ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
   if [[ -f "$native_wrapper" ]]; then
     chmod +x "$native_wrapper"
-    local native_bin="/tmp/souc-native.elf"
-    if [[ ! -x "$native_bin" ]]; then
-      bash "$_SOUNIO_ROOT_DIR/scripts/ci/build_native_souc.sh" "$native_bin" 2>/dev/null || true
-    fi
-    if [[ -x "$native_bin" ]]; then
-      export SOUC_NATIVE_BIN="$native_bin"
-      echo "$native_wrapper"
-      return 0
-    fi
+    echo "$native_wrapper"
+    return 0
   fi
   echo ""
   return 1
@@ -94,7 +92,7 @@ _sounio_resolve_bin() {
 sounio_require_souc() {
   if [[ ! -x "$SOUC_BIN" ]]; then
     echo "error: souc binary not found at $SOUC_BIN" >&2
-    echo "hint: build with 'cargo build -p souc' or set SOUC_BIN=/path/to/souc" >&2
+    echo "hint: use ./bin/souc or set SOUC_BIN=/path/to/souc" >&2
     exit 1
   fi
 }

@@ -9,15 +9,18 @@ cd "$ROOT_DIR"
 LEAN="$ROOT_DIR/self-hosted/compiler/lean_single.sio"
 OUT="${1:-/tmp/souc-native.elf}"
 
-# Strategy 0: Use pre-built native compiler (v1.0.0 self-hosted fixed-point)
-NATIVE_PREBUILT="$ROOT_DIR/artifacts/bootstrap/souc-native-v1.0.0.elf"
+# Strategy 0: Use checked-in self-hosted native compiler
+for NATIVE_PREBUILT in \
+    "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64" \
+    "$ROOT_DIR/artifacts/bootstrap/souc-native-v1.0.0.elf"; do
 if [ -x "$NATIVE_PREBUILT" ]; then
-    echo "Using pre-built native compiler..."
+    echo "Using native compiler artifact..."
     cp "$NATIVE_PREBUILT" "$OUT"
     chmod +x "$OUT"
     echo "Native compiler ready: $OUT ($(stat -c%s "$OUT") bytes)"
     exit 0
 fi
+done
 
 # Strategy 1: Use boot4.elf (pure native, no dependencies)
 for BOOT4_ELF in \
@@ -39,18 +42,6 @@ for BOOT4_ELF in \
         echo "warn: $BOOT4_ELF bootstrap failed, trying next..."
     fi
 done
-
-# Strategy 2: Use JIT binary
-JIT="$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
-if [ -x "$JIT" ]; then
-    echo "Bootstrapping native compiler via JIT..."
-    "$JIT" run "$LEAN" -- "$LEAN" "$OUT" 2>/dev/null || true
-    if [ -f "$OUT" ] && [ -s "$OUT" ]; then
-        chmod +x "$OUT"
-        echo "Native compiler built: $OUT ($(stat -c%s "$OUT") bytes)"
-        exit 0
-    fi
-fi
 
 echo "error: no bootstrap binary available"
 exit 1
