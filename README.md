@@ -8,37 +8,33 @@
 <p align="center">
   <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.0.0--beta.6-orange.svg" alt="Version 1.0.0-beta.6"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-gold.svg" alt="Apache-2.0 License"/></a>
-  <a href="#standard-library"><img src="https://img.shields.io/badge/stdlib-219K%2B%20lines-blue.svg" alt="stdlib"/></a>
-  <a href="#formal-verification"><img src="https://img.shields.io/badge/verification-Lean%204-green.svg" alt="Lean 4"/></a>
-  <a href="#gpu-codegen"><img src="https://img.shields.io/badge/GPU-PTX%20codegen-76b900.svg" alt="GPU"/></a>
+  <a href="#honest-status"><img src="https://img.shields.io/badge/stdlib-57%25%20complete-blue.svg" alt="stdlib 57% complete"/></a>
 </p>
 
 <p align="center">
-  <a href="https://souniolang.org">Documentation</a> ·
   <a href="docs/MANIFESTO.md">Manifesto</a> ·
   <a href="#quick-taste">Examples</a> ·
+  <a href="#honest-status">Status</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 ---
 
-**Sounio** is a systems programming language for epistemic computing. Its compiler doesn't just check what your data *is* — it tracks how much you should *trust* it. Uncertainty propagation, provenance tracking, and confidence-gated execution are built into the type system, not bolted on as libraries.
+**Sounio** is a systems programming language for epistemic computing — its type system tracks not just what your data *is*, but how much you should *trust* it. Uncertainty propagation, provenance tracking, and confidence-gated execution are built into the type system, not bolted on as libraries.
 
-The compiler is **fully self-hosted**: Sounio compiles itself, bootstrapped from a [2000-line C compiler](bootstrap/stage0.c) to a complete toolchain. It was used to computationally verify a new result in algebra — that the count of nonzero octonion basis associators equals |PSL(2,7)| = 168 — now [submitted for publication](#the-168-theorem).
+The compiler is **self-hosted**: Sounio compiles itself, bootstrapped from a [2000-line C compiler](bootstrap/stage0.c) through a multi-stage chain to a true fixed-point where stage N and stage N+1 produce bit-identical binaries. It was used to computationally verify a new result in algebra — that the count of nonzero octonion basis associators equals |PSL(2,7)| = 168 — now [submitted for publication](#the-168-theorem).
+
+This is an active **research project**, not a production release. Read the [honest status](#honest-status) before using it for anything serious.
 
 ---
 
 ## What makes Sounio different
 
-**Epistemic types as first-class citizens.** Every scientific measurement has uncertainty. Most languages ignore this. Sounio's type system includes `Knowledge[T]` with built-in confidence (ε), provenance tracking, and automatic GUM-compliant uncertainty propagation. The compiler can enforce confidence thresholds at compile time — `Knowledge[f64, ε >= 0.82]` rejects under-confident data before any code runs. No equivalent system exists in any production language.
+**Epistemic types as first-class citizens.** Every scientific measurement has uncertainty. Most languages ignore this. Sounio's type system includes `Knowledge[T]` with built-in confidence, provenance tracking, and automatic GUM-compliant uncertainty propagation. The compiler can enforce confidence thresholds at compile time — a function requiring `ε >= 0.82` rejects under-confident data before any code runs. No equivalent system exists in any production language.
 
-**Self-hosted with a complete toolchain.** The compiler bootstrapped from C through a multi-stage chain (`stage0.c` → `boot2g.sio` → self-hosted) to a true fixed-point where Sounio compiles itself. The toolchain includes the compiler (`souc`), a language server (LSP), a source formatter, and a package manager.
+**Self-hosted compiler.** The compiler bootstrapped from C through a multi-stage chain (`stage0.c` → `boot2g.sio` → self-hosted) to a true fixed-point. The toolchain includes JIT execution (Cranelift), native x86-64 ELF emission, and an interactive REPL.
 
-**GPU codegen.** Sounio emits PTX for NVIDIA CUDA, with SPIR-V, Metal, and WGSL backends in active development. All backends are written in Sounio itself.
-
-**Formal verification.** A Lean 4 formalization in [`formal/`](formal/) proves properties of the epistemic type system — uncertainty non-negativity, confidence bounds, propagation correctness — with zero `sorry` statements across 27+ theorems.
-
-**96+ stdlib modules.** 219,000+ lines of Sounio across 678 files covering scientific computing: epistemic types, PK/PD modeling, fMRI pipelines, causal inference, Bayesian statistics, signal processing, graph metrics, and more.
+**Not a Rust/Julia dialect.** Own syntax (`&!` not `&mut`, `var` not `let mut`), own semantics (algebraic effects, linear types, dimensional analysis), own philosophy (epistemic computing for science).
 
 ---
 
@@ -104,23 +100,73 @@ linear struct FileHandle { fd: i32 }   // must be consumed exactly once
 
 ---
 
+## Honest Status
+
+This is an active research repository. Here's what actually works and what doesn't.
+
+### What WORKS (production-tested)
+
+| Component | Status | Evidence |
+|---|---|---|
+| **Epistemic core** | `Knowledge[T]` + GUM propagation + provenance | 52 files, tested, dissertation-grade |
+| **Self-hosted compiler** | Lexer, parser, checker, codegen — compiles itself | Fixed-point verified (stage2 == stage3) |
+| **Algebra** | Clifford Cl(p,q), Cayley-Dickson CD(k), Jordan J₃(O), octonions | Verified the 168 theorem |
+| **Ontology** | OWL2 model + reasoner + query engine | 40 tests passing |
+| **Native codegen** | x86-64 ELF emission from self-hosted lean driver | Bit-identical bootstrap chain |
+| **Core stdlib** | Stats, linalg, ODE solvers, signal processing, CSV, JSON | Gate: 81 pass / 0 fail / 5 skip |
+| **Optimizer** | 1000+ e-graph rewrite rules, GVN, LICM, load sinking | 1003 tests, all FAIL=0 |
+
+### What's SCAFFOLDING (looks big, mostly empty)
+
+| Component | Reality |
+|---|---|
+| **Theorem prover** | 9,600 lines — but NO inference logic, just arena + data structures |
+| **~70% of epistemic modules** | Function signatures with minimal bodies |
+| **Neural networks** (quaternion/octonion) | Compilation errors, won't run |
+| **Genomics** | 11 files are single-line stubs (disabled on parser limitations) |
+| **Async runtime** | 12 files, mostly <10 lines each |
+| **Geometry engine** | 100% disabled |
+
+### What's MISSING entirely
+
+| Gap | Detail |
+|---|---|
+| **`Knowledge<T>` is NOT generic** | Hardcoded as `Epistemic` struct (f64 only). Struct-level generics [in progress](docs/compiler/KNOWN_LIMITATIONS.md). |
+| **Epistemic ODE solver** | Only does exponential decay, not general RHS (needed for PBPK) |
+| **Ontology federation** | Has 8 hardcoded CURIEs, NOT 15M terms — federation is a stub |
+| **GPU entry point** | `gpu/lib.sio` is empty. PTX codegen exists but no end-to-end path. |
+| **Closure literals** | `\|x\| x + 1` not supported. Named fn refs work (`let f = square`). |
+| **Windows / macOS** | Linux x86-64 only. macOS Mach-O backend exists but untested. |
+
+### Stdlib by the numbers
+
+| Category | Files | Percentage |
+|---|---|---|
+| **Complete** (working, tested) | 402 | 57% |
+| **Partial** (some functions work) | 175 | 25% |
+| **Skeleton** (types only, no logic) | 95 | 13% |
+| **Stub** (1-line placeholder) | 38 | 5% |
+| **Total** | 710 | |
+
+---
+
 ## The 168 Theorem
 
-While developing Sounio's octonion multiplication backend (for the AVX-512 Fano-plane kernel), we discovered and proved a combinatorial fact that appears not to have been explicitly stated in the literature:
+While developing Sounio's octonion multiplication backend, we discovered and proved a combinatorial fact that appears not to have been explicitly stated in the literature:
 
-> *The number of ordered triples (i, j, k) ∈ {1,…,7}³ for which the octonion basis associator [eᵢ, eⱼ, eₖ] is nonzero is exactly 168 = |PSL(2,7)|.*
+> *The number of ordered triples (i, j, k) in {1,...,7}^3 for which the octonion basis associator [e_i, e_j, e_k] is nonzero is exactly 168 = |PSL(2,7)|.*
 
-The decomposition is 343 = 133 (repeated indices) + 42 (Fano-line triples) + **168** (non-collinear triples). We also report that sedenion nonzero associator counts are multiples of 168, and that the primitive zero-divisor pair count 336 = 2 × 168.
+The decomposition is 343 = 133 (repeated indices) + 42 (Fano-line triples) + **168** (non-collinear triples). We also report that sedenion nonzero associator counts are multiples of 168, and that the primitive zero-divisor pair count 336 = 2 x 168.
 
 The result was verified computationally in Sounio and independently reproduced in Python/NumPy.
 
-**Paper:** "The 168 Theorem: PSL(2,7) Governs Non-Associativity and Zero-Divisor Structure in the Cayley–Dickson Tower" — Agourakis & Gerenutti (2026). Submitted to *Advances in Applied Clifford Algebras*. <!-- TODO: Add DOI link when available -->
+**Paper:** "The 168 Theorem: PSL(2,7) Governs Non-Associativity and Zero-Divisor Structure in the Cayley-Dickson Tower" — Agourakis & Gerenutti (2026). Submitted to *Advances in Applied Clifford Algebras*.
 
 ---
 
 ## Get started
 
-The repo ships pre-built Linux x86_64 compiler binaries. No build step required.
+The repo ships a pre-built Linux x86-64 JIT binary. No build step required.
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
@@ -141,85 +187,7 @@ Native compilation via the self-hosted lean driver:
 $SOUC run self-hosted/compiler/render_native_compile_driver_lean.sio -- input.sio output.elf
 ```
 
-GPU compilation (requires the GPU profile binary):
-
-```bash
-export SOUC_GPU="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
-$SOUC_GPU build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
-```
-
 For detailed setup: [INSTALL.md](INSTALL.md) · [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
-
----
-
-## Standard Library
-
-96+ modules, 219K+ lines across 678 `.sio` files (including ~40 stub modules and 111 disabled files representing roadmap inventory). Gate status: 81 pass / 0 fail / 5 skip ([artifacts/stdlib/stdlib_reliability_status.v1.json](artifacts/stdlib/stdlib_reliability_status.v1.json)).
-
-| Module | What it does |
-|---|---|
-| `epistemic/` | Core `Knowledge[T]` types, GUM uncertainty propagation, provenance, autodiff |
-| `units/` | Compile-time dimensional analysis (GUM/ISO 17025, BIPM SI) |
-| `causal/` | Pearl's do-calculus, d-separation, PC algorithm, causal discovery |
-| `fmri/` | NIfTI parsing, motion correction, atlas parcellation (AAL, Desikan-Killiany) |
-| `medlang/` | PK/PD domain-specific language with PBPK modeling |
-| `hypercomplex_graph/` | Octonion-labeled graphs, Ollivier-Ricci curvature, connectomics |
-| `gpu/` | GPU kernel support (PTX, SPIR-V, Metal) |
-| `bayes/` | Bayesian inference, MCMC, variational methods |
-| `connectivity/` | Graph metrics, network neuroscience |
-| `signal/` | Signal processing, spectral analysis |
-| `optimize/` | Optimization: BFGS, Nelder-Mead, differential evolution |
-| `linalg/` | Linear algebra with uncertainty tracking |
-| `quantum/` | Quantum computing primitives, VQE |
-| `cybernetic/` | Second-order cybernetics (distinction, eigenform, autopoiesis) |
-| `data/` | DataFrames and tabular manipulation |
-| `ode/` | ODE solvers with error propagation |
-
----
-
-## GPU Codegen
-
-Sounio compiles GPU kernels from `.sio` source via dedicated codegen drivers in `self-hosted/gpu/`.
-
-```bash
-# Compile a kernel to PTX
-$SOUC_GPU build kernel.sio --backend gpu -o kernel.ptx
-```
-
-| Backend | Status | Implementation |
-|---|---|---|
-| PTX (NVIDIA CUDA) | Active | `self-hosted/gpu/ptx.sio`, `lower_to_ptx.sio`, `epistemic_ptx.sio` |
-| SPIR-V (Vulkan) | In development | `self-hosted/gpu/spirv.sio`, `spirv_render.sio` |
-| Metal (Apple) | In development | `self-hosted/gpu/metal.sio`, `metal_render.sio` |
-| WGSL (WebGPU) | In development | `self-hosted/gpu/wgsl_render.sio` |
-
----
-
-## Formal Verification
-
-The [`formal/`](formal/) directory contains Lean 4 formalizations of Sounio's type system properties:
-
-- **[Epistemic.lean](formal/Epistemic.lean)** — 27+ theorems proving uncertainty propagation correctness, confidence bounds, and subtyping relations. Zero `sorry` statements.
-- **[LinearTypes.lean](formal/LinearTypes.lean)** — Formal linear type system with usage multiplicity proofs.
-- **[OctonionGraph.lean](formal/OctonionGraph.lean)** — Path product norm invariance theorem for octonion-labeled graphs.
-
-The epistemic type invariants (uncertainty non-negativity, `ε ∈ [0,1]`, GUM propagation rules) are expressed as Lean 4 theorems and verified mechanically.
-
----
-
-## Current State
-
-This is an active research repository, not a "everything is production-ready" release. The safest public summary comes from the committed gate artifacts:
-
-- `souc check` works on canonical fixtures including `examples/hello.sio` and the vancomycin PK/PD tests
-- Stdlib gate: **81 pass / 0 fail / 5 skip** across 86 test lanes
-- Science pipeline: `fmri` and `darwin_pbpk` lanes pass
-- GPU profile: PTX emission via `--backend gpu`
-- Self-hosted compiler: `--check`, `--ir-dump`, `--ir-roundtrip`, `--native-compile`
-- 4 soft runtime regression probes remain in `soft` mode
-- The JIT binary reports `souc 1.0.0-beta.4`; source version is `1.0.0-beta.6`
-
-For the conservative contract: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
 
 ---
 
@@ -233,12 +201,11 @@ For the conservative contract: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/
 | `self-hosted/check/`, `types/` | Bidirectional type inference + algebraic effects |
 | `self-hosted/ir/` | IR lowering, optimization, e-graph equality saturation |
 | `self-hosted/native/` | x86-64 ELF emission |
-| `self-hosted/gpu/` | PTX, SPIR-V, Metal, WGSL codegen |
-| `self-hosted/compiler/` | Codegen drivers (lean, IR, GPU) |
+| `self-hosted/compiler/` | Codegen drivers (lean, IR) |
 | `stdlib/epistemic/` | `Knowledge[T]`, uncertainty (GUM), provenance |
 | `stdlib/units/` | Dimensional analysis |
-| `bootstrap/` | stage0 (C) → boot2g → boot1 → self-hosted chain |
-| `formal/` | Lean 4 proofs |
+| `bootstrap/` | stage0 (C) → boot2g → self-hosted chain |
+| `formal/` | Lean 4 proofs (epistemic type invariants) |
 | `tests/` | `run-pass/`, `compile-fail/`, `ui/`, `stdlib/` |
 
 ---
@@ -257,48 +224,21 @@ See [docs/MANIFESTO.md](docs/MANIFESTO.md) for the full philosophy.
 
 ## Known Limitations
 
-**Platform.** Pre-built binaries are Linux x86_64 only. macOS Mach-O backend exists but is not regularly tested. Windows is not yet supported.
+**Platform.** Pre-built binaries are Linux x86-64 only. macOS Mach-O backend exists but is not regularly tested. Windows is not supported.
 
-**JIT memory.** The Cranelift JIT compiling the self-hosted compiler itself grows to 14–35 GB RSS and is OOM-killed on most machines. `$SOUC run` works fine for normal programs; self-compilation uses the native bootstrap chain instead.
+**JIT memory.** The Cranelift JIT compiling the full self-hosted compiler grows to 14-35 GB RSS and is OOM-killed on most machines. `$SOUC run` works fine for normal programs; self-compilation uses the native bootstrap chain.
 
-**Native backend.** `native-v2` is a preview lane: x86-64 emits scalar-core ELFs with GC metadata; AArch64 is compile-only. The stable CLI exposes `--backend=native`.
+**No struct generics (yet).** `Knowledge<T>` is currently monomorphic (f64 only). Struct-level generics are the highest-priority language feature. Function-level generics work.
 
-**WASM.** The emitter exists (`self-hosted/wasm/`) but is not yet wired into the normal CLI flow.
+**No closure literals.** Named function references work (`let f = square`), but `|x| x + 1` lambda syntax is not supported.
 
-**No closure literals.** Named function references work (`let f = square`), but `|x| x + 1` lambda syntax is not supported. See [docs/compiler/KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md).
+**`&!` array mutation.** Bare `&![T; N]` mutable references don't propagate mutations in the JIT interpreter. Workaround: wrap in a struct.
 
-**`&!` array mutation.** Bare `&![T; N]` mutable references don't propagate mutations in the interpreter. Workaround: wrap in a struct. Struct `&!` refs work correctly.
+**FFI.** `extern "C"` is limited to math functions (`sqrt`, `sin`, `pow`). Integer FFI (`malloc`, `getpid`) silently terminates.
 
-**FFI.** `extern "C"` is limited to math functions (`sqrt`, `sin`, `pow`, etc.). Integer FFI (`malloc`, `getpid`) silently terminates. Use fixed-size struct arrays instead of dynamic allocation.
-
-**Optional dependencies.** LLVM 15+ for `--features llvm`, Z3 for SMT-backed refinement types, CUDA toolkit for GPU execution (codegen works without it).
+**GPU.** PTX codegen exists in `self-hosted/gpu/` but there is no end-to-end compilation path from the CLI. SPIR-V/Metal/WGSL files exist as stubs.
 
 Full list: [docs/compiler/KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)
-
----
-
-## Roadmap
-
-### Done
-- [x] Self-hosted compiler (true fixed-point)
-- [x] Epistemic type system (`Knowledge[T]`, confidence gating, provenance)
-- [x] PTX GPU codegen
-- [x] Lean 4 formal verification (27+ theorems, zero `sorry`)
-- [x] MedLang PK/PD DSL
-- [x] fMRI preprocessing pipeline
-- [x] Language Server Protocol (LSP)
-- [x] Package manager (manifest + resolver, no public registry yet)
-- [x] Interactive REPL
-- [x] Source formatter
-- [x] 96+ stdlib modules
-
-### Next
-- [ ] SPIR-V / Metal / WGSL backend completion
-- [ ] LLVM backend (alternative to Cranelift JIT)
-- [ ] WASM CLI integration
-- [ ] Distributed uncertainty propagation
-- [ ] Package registry (`siopkg publish`)
-- [ ] macOS / AArch64 regular testing
 
 ---
 
@@ -314,7 +254,7 @@ If you use Sounio in academic work:
   version   = {1.0.0-beta.6},
   doi       = {10.5281/zenodo.18726647},
   url       = {https://github.com/sounio-lang/sounio},
-  note      = {Self-hosted compiler with epistemic types, GPU codegen, and Lean 4 verification}
+  note      = {Self-hosted compiler with epistemic types and Lean 4 verification}
 }
 ```
 
