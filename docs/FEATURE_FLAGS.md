@@ -25,7 +25,7 @@ The checked compiler artifacts live under `artifacts/omega/souc-bin/`.
 Recommended verification:
 
 ```bash
-./artifacts/omega/souc-bin/souc-linux-x86_64-jit info
+./bin/souc info
 ./artifacts/omega/souc-bin/souc-linux-x86_64-gpu info
 ./artifacts/omega/souc-bin/souc-linux-x86_64-gpu build examples/gpu.sio --backend gpu -o /tmp/sounio-gpu.ptx
 ```

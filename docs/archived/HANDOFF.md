@@ -85,7 +85,7 @@ Validated coverage status:
 ## Current verification commands
 
 ```bash
-timeout 240 ./artifacts/omega/souc-bin/souc-linux-x86_64-jit run self-hosted/compiler/main.sio -- --self-test
+timeout 240 ./bin/souc run self-hosted/compiler/main.sio -- --self-test
 bash scripts/sprint43_chain_propagation_gate.sh
 bash scripts/sprint44_frontend_probe_gate.sh
 bash scripts/sprint50_layout_pgo_gate.sh

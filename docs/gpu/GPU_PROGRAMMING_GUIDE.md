@@ -497,7 +497,7 @@ Key functions: `gpu_sum`, `gpu_mean`, and `gpu_stats` which computes all fields 
 ### Type-checking only
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 
 $SOUC check examples/kernel_vec_add.sio
 $SOUC check examples/gpu.sio --show-ast
@@ -667,7 +667,7 @@ fn main() with GPU, IO {
 //   idx = gpu.thread_id.x + gpu.block_id.x * gpu.block_dim.x
 
 // Compile commands
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 
 $SOUC check file.sio
 $SOUC run self-hosted/compiler/main.sio -- \

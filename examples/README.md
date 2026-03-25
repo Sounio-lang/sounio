@@ -95,17 +95,17 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 
 ```bash
 # Set up the compiler binary
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 
 # Check syntax
 $SOUC check examples/arithmetic.sio
 
-# Run with JIT
+# Compile to a temp ELF and execute
 $SOUC run examples/async_demo.sio
 
-# Compile to native
-$SOUC build examples/autodiff/gradient.sio --backend native -o gradient
+# Compile to native ELF
+$SOUC compile examples/autodiff/gradient.sio -o gradient.elf
 
 # With GPU support (requires souc-linux-x86_64-gpu binary)
 SOUC_GPU=./artifacts/omega/souc-bin/souc-linux-x86_64-gpu

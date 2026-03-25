@@ -44,7 +44,7 @@ Driver-facing wrappers:
 ## How to verify syntax claims
 
 ```bash
-export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC_BIN="$(pwd)/bin/souc"
 "$SOUC_BIN" check examples/hello.sio
 ```
 

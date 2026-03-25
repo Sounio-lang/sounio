@@ -47,7 +47,7 @@ Useful GPU landmarks:
 For the default docs-facing JIT artifact:
 
 ```bash
-export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC_BIN="$(pwd)/bin/souc"
 "$SOUC_BIN" info
 ```
 

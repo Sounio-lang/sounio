@@ -32,7 +32,7 @@ This is an active **research project**, not a production release. Read the [hone
 
 **Epistemic types as first-class citizens.** Every scientific measurement has uncertainty. Most languages ignore this. Sounio's type system includes `Knowledge[T]` with built-in confidence, provenance tracking, and automatic GUM-compliant uncertainty propagation. The compiler can enforce confidence thresholds at compile time — a function requiring `ε >= 0.82` rejects under-confident data before any code runs. No equivalent system exists in any production language.
 
-**Self-hosted compiler.** The compiler bootstrapped from C through a multi-stage chain (`stage0.c` → `boot2g.sio` → self-hosted) to a true fixed-point. The toolchain includes JIT execution (Cranelift), native x86-64 ELF emission, and an interactive REPL.
+**Self-hosted compiler.** The compiler bootstrapped from C through a multi-stage chain (`stage0.c` → `boot2g.sio` → self-hosted) to a true fixed-point. The default workflow is now native-only: `bin/souc` compiles `.sio` sources to temporary or named ELFs via the self-hosted compiler and executes those binaries directly.
 
 **Not a Rust/Julia dialect.** Own syntax (`&!` not `&mut`, `var` not `let mut`), own semantics (algebraic effects, linear types, dimensional analysis), own philosophy (epistemic computing for science).
 
@@ -166,25 +166,20 @@ The result was verified computationally in Sounio and independently reproduced i
 
 ## Get started
 
-The repo ships a pre-built Linux x86-64 JIT binary. No build step required.
+The repo ships a pre-built Linux x86-64 self-hosted compiler artifact plus a native wrapper. No Rust build step is required for the default workflow.
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
 cd sounio
 
-export SOUC="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-$SOUC --version                              # souc 1.0.0-beta.4
+$SOUC --version                              # souc native-wrapper v1.0.0-rc1
 $SOUC check examples/hello.sio              # type-check
-$SOUC run examples/epistemic_bmi.sio        # run with JIT
-$SOUC repl                                   # interactive REPL
-```
-
-Native compilation via the self-hosted lean driver:
-
-```bash
-$SOUC run self-hosted/compiler/render_native_compile_driver_lean.sio -- input.sio output.elf
+$SOUC run examples/epistemic_bmi.sio        # compile + execute
+$SOUC compile examples/hello.sio -o hello.elf
+$SOUC repl                                   # not yet supported in native mode
 ```
 
 For detailed setup: [INSTALL.md](INSTALL.md) · [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
@@ -226,15 +221,15 @@ See [docs/MANIFESTO.md](docs/MANIFESTO.md) for the full philosophy.
 
 **Platform.** Pre-built binaries are Linux x86-64 only. macOS Mach-O backend exists but is not regularly tested. Windows is not supported.
 
-**JIT memory.** The Cranelift JIT compiling the full self-hosted compiler grows to 14-35 GB RSS and is OOM-killed on most machines. `$SOUC run` works fine for normal programs; self-compilation uses the native bootstrap chain.
+**Native startup cost.** `bin/souc run` performs a native compilation step before execution, so there is a small startup cost compared with an in-process executor.
 
 **No struct generics (yet).** `Knowledge<T>` is currently monomorphic (f64 only). Struct-level generics are the highest-priority language feature. Function-level generics work.
 
 **No closure literals.** Named function references work (`let f = square`), but `|x| x + 1` lambda syntax is not supported.
 
-**`&!` array mutation.** Bare `&![T; N]` mutable references don't propagate mutations in the JIT interpreter. Workaround: wrap in a struct.
+**No REPL/debug flags yet.** Native mode does not yet support `repl`, `--show-ast`, or `--show-types`.
 
-**FFI.** `extern "C"` is limited to math functions (`sqrt`, `sin`, `pow`). Integer FFI (`malloc`, `getpid`) silently terminates.
+**FFI.** `extern "C"` remains limited in scope, but the old JIT-only integer FFI failure mode is gone on the native path.
 
 **GPU.** PTX codegen exists in `self-hosted/gpu/` but there is no end-to-end compilation path from the CLI. SPIR-V/Metal/WGSL files exist as stubs.
 

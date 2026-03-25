@@ -16,7 +16,7 @@ This tutorial builds complete, runnable examples. The production implementations
 ## Prerequisites
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 $SOUC run examples/my_science.sio
 ```
 

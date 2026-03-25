@@ -76,10 +76,10 @@ These examples demonstrate Sounio's ability to solve real scientific problems th
 
 ## Running the Examples
 
-All examples use the checked JIT binary:
+All examples use the native wrapper:
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 $SOUC run examples/real_world/01_dose_uncertainty.sio
 $SOUC run examples/real_world/02_pbpk_oral_absorption.sio
 $SOUC run examples/real_world/03_trial_sample_size.sio

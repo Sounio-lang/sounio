@@ -19,7 +19,7 @@ This tutorial shows verified patterns from the test suite. The source files are:
 ## Prerequisites
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 $SOUC run tests/run-pass/closure_fn_ref.sio
 $SOUC run tests/run-pass/closure_higher_order.sio
 ```

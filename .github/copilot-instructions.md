@@ -6,9 +6,9 @@ Full syntax reference: `docs/LLM_PROGRAMMING_GUIDE.md`
 ## Compiler
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 $SOUC check file.sio        # type-check
-$SOUC run file.sio           # JIT execute
+$SOUC run file.sio          # compile to temp ELF, then execute
 ```
 
 ## Critical Syntax Differences from Rust

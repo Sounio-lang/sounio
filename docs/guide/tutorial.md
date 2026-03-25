@@ -31,7 +31,7 @@ A step-by-step guide to learning Sounio, the language for epistemic computing.
 git clone https://github.com/sounio-lang/sounio.git
 cd sounio
 
-export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC_BIN="$(pwd)/bin/souc"
 "$SOUC_BIN" info
 ```
 

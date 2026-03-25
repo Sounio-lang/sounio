@@ -16,7 +16,7 @@ The production implementation lives in [`stdlib/csv/parser.sio`](../../stdlib/cs
 ## Prerequisites
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 $SOUC run examples/my_csv_analysis.sio
 ```
 

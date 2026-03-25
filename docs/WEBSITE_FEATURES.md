@@ -18,7 +18,7 @@ an explicitly scoped implementation note.
 
 The website should distinguish two checked compiler artifacts:
 
-- default profile: `artifacts/omega/souc-bin/souc-linux-x86_64-jit`
+- default profile: `bin/souc`
 - GPU profile: `artifacts/omega/souc-bin/souc-linux-x86_64-gpu`
 
 What they prove today:

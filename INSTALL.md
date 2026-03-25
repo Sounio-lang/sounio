@@ -4,31 +4,26 @@ This guide describes the installation path that matches the current repository s
 
 ## Recommended Path For This Checkout
 
-This repository already contains signed Linux `x86_64` compiler artifacts under `artifacts/omega/souc-bin/`. If you are working directly from this checkout, use the checked-in JIT artifact first, then switch to the checked GPU artifact only when you need GPU-specific validation.
+This repository already contains the checked-in Linux `x86_64` self-hosted compiler artifact under `artifacts/self-hosted/`. If you are working directly from this checkout, use the native wrapper at `bin/souc`.
 
 ```bash
 cd /path/to/sounio
 
-export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC_BIN="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 "$SOUC_BIN" --version
-"$SOUC_BIN" info
-"$SOUC_BIN" sysroot stdlib-paths
+"$SOUC_BIN" check examples/hello.sio
+"$SOUC_BIN" run examples/hello.sio
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello.elf
 ```
 
-On this repo snapshot, the checked-in JIT binary reports:
+On this repo snapshot, `bin/souc` is a native-only wrapper:
 
-- `souc 1.0.0-beta.4`
-- Cranelift JIT enabled
-- LLVM, GPU, SMT, LSP, ontology, and package-manager features disabled in that specific artifact
-
-The separate checked GPU artifact reports:
-
-- `souc 1.0.0-beta.4`
-- GPU codegen enabled
-- Cranelift JIT disabled
-- public PTX emission via `build --backend gpu`
+- `check` compiles to a temporary ELF and discards it on success
+- `run` compiles to a temporary ELF, executes it, then cleans up
+- `compile` emits a named ELF
+- `repl` is not yet supported in native mode
 
 ## Validate The Checkout
 
@@ -68,10 +63,10 @@ This resolves a pinned release binary and falls back to a local executable only 
 
 ## Important Notes
 
-- Do not assume `cargo build` at the repo root is the default setup path. This checkout does not expose a top-level Cargo workspace.
+- Do not assume `cargo build` at the repo root is the default setup path.
 - Always set `SOUNIO_STDLIB_PATH` when you want deterministic stdlib resolution.
-- Use `souc sysroot stdlib-paths` to confirm where the compiler is searching.
-- Prefer `souc check` when validating examples and docs claims. Runtime and backend-dependent behavior varies by binary variant, including the JIT-versus-GPU split.
+- Prefer `souc check` when validating examples and docs claims.
+- Native mode does not yet support `repl`, `--show-ast`, or `--show-types`.
 
 ## What Is Verified Today
 

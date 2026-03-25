@@ -21,7 +21,7 @@ There are two views you need to hold at the same time:
 The checked artifacts used by the docs are:
 
 ```bash
-artifacts/omega/souc-bin/souc-linux-x86_64-jit
+bin/souc
 artifacts/omega/souc-bin/souc-linux-x86_64-gpu
 ```
 
@@ -146,7 +146,7 @@ These artifacts matter more than aspirational architecture diagrams when you are
 
 If you are new to the implementation:
 
-1. run `artifacts/omega/souc-bin/souc-linux-x86_64-jit info`
+1. run `bin/souc info`
 2. run `artifacts/omega/souc-bin/souc-linux-x86_64-gpu info` if the claim touches GPU codegen
 3. read `self-hosted/compiler/main.sio`
 4. inspect the relevant subsystem directory under `self-hosted/`

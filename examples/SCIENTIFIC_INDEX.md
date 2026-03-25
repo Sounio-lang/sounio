@@ -3,7 +3,7 @@
 Curated examples organized by research domain. All examples can be run with:
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 $SOUC run examples/<file>.sio
 ```
 

@@ -44,22 +44,23 @@ let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)  // epistemic
 
 ## Build & Run
 
-The compiler is **self-hosted** (written in Sounio). Use the checked JIT binary:
+The compiler is **self-hosted** (written in Sounio). Use the native wrapper:
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 
 $SOUC check examples/file.sio          # type-check
-$SOUC check file.sio --show-ast        # dump AST
-$SOUC check file.sio --show-types      # dump types
-$SOUC run examples/file.sio            # JIT execute
-$SOUC repl                             # interactive
+$SOUC run examples/file.sio            # compile to temp ELF, execute, clean up
+$SOUC compile file.sio -o output.elf   # direct native compilation
+$SOUC repl                             # not yet supported in native mode
 
-# Native compilation (via self-hosted lean driver)
-$SOUC run self-hosted/compiler/render_native_compile_driver_lean.sio -- input.sio output.elf
+# Debug flags not yet supported in native mode:
+#   --show-ast
+#   --show-types
 
 # Bootstrap chain
-bootstrap/stage0 bootstrap/boot2g.sio output.elf   # C bootstrap → native ELF
+./artifacts/self-hosted/souc-self-hosted-x86_64 self-hosted/compiler/lean_single.sio gen1.elf
+./gen1.elf self-hosted/compiler/lean_single.sio gen2.elf
 ```
 
 **Stdlib path** (when outside repo): `export SOUNIO_STDLIB_PATH=$(pwd)/stdlib`

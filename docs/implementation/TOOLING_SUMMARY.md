@@ -19,7 +19,7 @@ This document summarizes the current toolchain around Sounio as it actually ship
 For user-facing docs and ordinary verification, start with the checked JIT artifact:
 
 ```bash
-export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC_BIN="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 "$SOUC_BIN" --version

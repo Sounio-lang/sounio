@@ -53,7 +53,7 @@ Practical entry points:
 The checked public artifact used by the default website docs path is:
 
 ```bash
-artifacts/omega/souc-bin/souc-linux-x86_64-jit
+bin/souc
 ```
 
 On the current repository snapshot, `souc info` for that JIT artifact reports:

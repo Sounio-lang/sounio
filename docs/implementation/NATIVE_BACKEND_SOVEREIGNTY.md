@@ -65,7 +65,7 @@ The current state is a real x86 self-hosted preview lane with a narrow Machine I
 
 Primary checks:
 
-- `./artifacts/omega/souc-bin/souc-linux-x86_64-jit run self-hosted/compiler/main.sio -- --self-test`
+- `./bin/souc run self-hosted/compiler/main.sio -- --self-test`
 - `bash scripts/omega/omega_native_v2_shadow_gate.sh`
 
 The gate emits:

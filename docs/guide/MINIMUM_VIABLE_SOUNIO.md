@@ -20,7 +20,7 @@ Snapshot date: **2026-03-07**
 For user-facing docs, the safest entry point is the checked JIT artifact:
 
 ```bash
-export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC_BIN="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 "$SOUC_BIN" --version
@@ -115,7 +115,7 @@ Use these labels when describing support:
 Run from repository root:
 
 ```bash
-export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC_BIN="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 "$SOUC_BIN" check examples/hello.sio

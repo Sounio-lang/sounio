@@ -49,7 +49,7 @@ high-confidence internal workflows.
 ## 3) Linux setup (recommended)
 
 1. Use the checked JIT compiler artifact:
-   - `export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"`
+   - `export SOUC_BIN="$(pwd)/bin/souc"`
    - `"$SOUC_BIN" info`
    - `source scripts/lib/stage_native_runtime_bundle.sh`
    - `sounio_stage_native_runtime_bundle "$SOUC_BIN"`

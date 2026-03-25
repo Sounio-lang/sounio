@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.visual.rea
 
 # Sounio Visual Examples
 
-> **Setup:** `SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit` (all commands below use `$SOUC`)
+> **Setup:** `SOUC=./bin/souc` (all commands below use `$SOUC`)
 
 **Beautiful scientific visualization using ASCII art + ANSI colors**
 

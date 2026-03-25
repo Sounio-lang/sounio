@@ -23,7 +23,7 @@ For this checkout, the easiest path is the signed Linux `x86_64` JIT artifact al
 git clone https://github.com/sounio-lang/sounio.git
 cd sounio
 
-export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC_BIN="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 "$SOUC_BIN" --version

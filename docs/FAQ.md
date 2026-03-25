@@ -193,7 +193,7 @@ if a < b with_confidence 0.95 { }
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
 cd sounio
-export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC_BIN="$(pwd)/bin/souc"
 "$SOUC_BIN" info
 "$SOUC_BIN" check examples/hello.sio
 ```

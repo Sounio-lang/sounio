@@ -442,7 +442,7 @@ Commands for optimization:
 ### 8.3 Cranelift JIT
 
 ```bash
-export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUC_BIN="$(pwd)/bin/souc"
 "$SOUC_BIN" run examples/qnn_mnist.sio
 ```
 

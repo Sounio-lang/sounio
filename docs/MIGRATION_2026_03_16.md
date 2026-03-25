@@ -48,7 +48,7 @@ fn main() -> i64 { print_int(add(3, 4)); print("\n"); 0 }' > /tmp/t.sio
 ## Build (no Rust needed)
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 $SOUC check self-hosted/ir/ir.sio
 $SOUC run self-hosted/compiler/main.sio -- --self-test
 ```

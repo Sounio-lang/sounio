@@ -12,7 +12,7 @@ Exercises the full lifecycle over SNIO binary protocol:
   7. SESSION_DESTROY (msg 15)  → release session
   8. SHUTDOWN        (msg 4)   → stop server
 
-Strategy: file-based I/O to work around JIT stdout pipe buffering.
+Strategy: file-based I/O to keep protocol I/O deterministic.
 All request messages are pre-built into a stdin file, souc reads from
 the file, and stdout is captured to a temp file for parsing.
 
@@ -136,7 +136,7 @@ def build_request_sequence() -> bytes:
 
 
 def main():
-    souc = sys.argv[1] if len(sys.argv) > 1 else "artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+    souc = sys.argv[1] if len(sys.argv) > 1 else "bin/souc"
     serve_sio = sys.argv[2] if len(sys.argv) > 2 else "self-hosted/interop/serve_entry.sio"
 
     # Build all requests upfront
@@ -152,7 +152,7 @@ def main():
     print(f"[smoke] serve: {serve_sio}")
     print(f"[smoke] stdin:  {stdin_path} ({len(requests)} bytes)")
     print(f"[smoke] stdout: {stdout_path}")
-    print(f"[smoke] Starting server (JIT warmup may take 60s+)...")
+    print(f"[smoke] Starting server (native compile+run may take a moment)...")
 
     try:
         with open(stdin_path, "rb") as fin_handle, \

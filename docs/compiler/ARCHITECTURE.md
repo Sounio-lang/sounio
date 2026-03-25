@@ -419,7 +419,7 @@ Executable
    ```bash
    git clone https://github.com/sounio-lang/sounio.git
    cd sounio
-   ./artifacts/omega/souc-bin/souc-linux-x86_64-jit info
+   ./bin/souc info
    ```
 
 2. **Run tests**:
