@@ -125,8 +125,8 @@ var VAR_LINEAR: [i64; 128] = [0; 128]
 var VAR_USED: [i64; 128] = [0; 128]
 var VAR_TY: [i64; 128] = [0; 128]
 var VAR_TY_HASH: [i64; 128] = [0; 128]
-var GL_TY: [i64; 128] = [0; 128]
-var GL_TY_HASH: [i64; 128] = [0; 128]
+var GL_TY: [i64; 256] = [0; 256]
+var GL_TY_HASH: [i64; 256] = [0; 256]
 var FN_RET_TY: [i64; 256] = [0; 256]
 var FN_RET_HASH: [i64; 256] = [0; 256]
 var FN_ARITY: [i64; 256] = [0; 256]
@@ -234,7 +234,7 @@ fn st_total_size(si: i64) -> i64 with Panic, Div {
 }
 
 // Global variable table: flat array, 4 fields per entry [hash, offset, esiz, alen]
-var GL: [i64; 512] = [0; 512]
+var GL: [i64; 1024] = [0; 1024]
 var GL_COUNT: i64 = 0
 var GL_BSS_SIZE: i64 = 0
 var GL_BSS_BASE: i64 = 0
@@ -764,6 +764,64 @@ fn array_init_is_repeat(p0: i64) -> bool with Panic {
     return false
 }
 
+fn knowledge_hash_is(h: i64) -> bool {
+    return h < 0
+}
+
+fn knowledge_hash_make(inner_ty: i64, inner_hash: i64, eps_scaled: i64) -> i64 {
+    var eps_code: i64 = 1
+    if eps_scaled < -1 {
+        eps_code = 0
+    } else if eps_scaled >= 0 {
+        eps_code = eps_scaled + 2
+    }
+    let packed = eps_code + (inner_ty * 1048576) + (inner_hash * 67108864)
+    return 0 - packed
+}
+
+fn knowledge_hash_inner_ty(h: i64) -> i64 with Panic {
+    let packed = 0 - h
+    return (packed / 1048576) % 64
+}
+
+fn knowledge_hash_inner_hash(h: i64) -> i64 with Panic {
+    let packed = 0 - h
+    return packed / 67108864
+}
+
+fn knowledge_hash_eps(h: i64) -> i64 with Panic {
+    let packed = 0 - h
+    let eps_code = packed % 1048576
+    if eps_code == 0 { return -2 }
+    if eps_code == 1 { return -1 }
+    return eps_code - 2
+}
+
+fn knowledge_hash_invalid(h: i64) -> bool with Panic {
+    if knowledge_hash_is(h) == false { return false }
+    return knowledge_hash_eps(h) < -1
+}
+
+fn type_has_knowledge(ty: i64, ty_hash: i64) -> bool {
+    if ty != 0 { return false }
+    return knowledge_hash_is(ty_hash)
+}
+
+fn tok_scaled_million(p: i64) -> i64 with Panic {
+    if TK[p as usize] == 4 { return TV[p as usize] * 1000000 }
+    if TK[p as usize] == 53 {
+        var frac_scaled = TF[p as usize]
+        var denom = TD[p as usize]
+        while denom < 1000000 {
+            frac_scaled = frac_scaled * 10
+            denom = denom * 10
+        }
+        if denom != 1000000 { return -1 }
+        return TV[p as usize] * 1000000 + frac_scaled
+    }
+    return -1
+}
+
 fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic {
     if src_match(ns, ne - ns, "i8") { return 1 }
     if src_match(ns, ne - ns, "i32") { return 1 }
@@ -784,8 +842,22 @@ fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic {
 }
 
 fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div {
+    if k1 == 0 && k2 == 0 && h1 != 0 && h2 != 0 {
+        if knowledge_hash_is(h1) || knowledge_hash_is(h2) {
+            if knowledge_hash_is(h1) == false || knowledge_hash_is(h2) == false { return false }
+            if knowledge_hash_invalid(h1) || knowledge_hash_invalid(h2) { return false }
+            if ty_eq(knowledge_hash_inner_ty(h1), knowledge_hash_inner_hash(h1), knowledge_hash_inner_ty(h2), knowledge_hash_inner_hash(h2)) == false {
+                return false
+            }
+            let req_eps = knowledge_hash_eps(h1)
+            let got_eps = knowledge_hash_eps(h2)
+            if req_eps < 0 { return true }
+            if got_eps < 0 { return false }
+            return got_eps <= req_eps
+        }
+        return h1 == h2
+    }
     if k1 == 0 || k2 == 0 {
-        if k1 == 0 && k2 == 0 && h1 != 0 && h2 != 0 { return h1 == h2 }
         return true
     }
     if k1 != k2 { return false }
@@ -834,6 +906,10 @@ fn tc_duplicate_fn(tok: i64) -> i64 with IO, Mut, Panic {
 
 fn tc_missing_effect(tok: i64) -> i64 with IO, Mut, Panic {
     tc_error(tok, "effect not declared in function signature")
+}
+
+fn tc_epistemic_boundary(tok: i64) -> i64 with IO, Mut, Panic {
+    tc_error(tok, "P0003 type mismatch in Knowledge epsilon boundary")
 }
 
 fn scan_fn_param_type(fi: i64, arg_idx: i64) with Mut, Panic {
@@ -1160,7 +1236,6 @@ fn scan_type(p0: i64) with Mut, Panic {
         let ns = TS[p as usize]
         let ne = TE[p as usize]
         var saw_generic: i64 = 0
-        var saw_epsilon_bound: i64 = 0
         if src_match(ns, ne - ns, "chan") {
             SCAN_TY = 0
             SCAN_TY_HASH = 0
@@ -1231,25 +1306,55 @@ fn scan_type(p0: i64) with Mut, Panic {
                 }
             }
         }
+        if src_match(ns, ne - ns, "Knowledge") && TK[(p + 1) as usize] == 23 {
+            p = p + 2
+            scan_type(p)
+            let inner_ty = SCAN_TY
+            let inner_hash = SCAN_TY_HASH
+            var eps_scaled: i64 = -1
+            var invalid_eps: i64 = 0
+            p = SCAN_TY_NEXT
+            if TK[p as usize] == 28 {
+                p = p + 1
+                if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "epsilon") && TK[(p + 1) as usize] == 23 {
+                    p = p + 2
+                    if TK[p as usize] == 4 || TK[p as usize] == 53 {
+                        eps_scaled = tok_scaled_million(p)
+                        if eps_scaled < 0 || eps_scaled > 1000000 { invalid_eps = 1 }
+                        p = p + 1
+                    } else {
+                        invalid_eps = 1
+                    }
+                } else {
+                    invalid_eps = 1
+                }
+            }
+            if knowledge_hash_invalid(inner_hash) { invalid_eps = 1 }
+            if TK[p as usize] == 24 {
+                p = p + 1
+            } else {
+                invalid_eps = 1
+                if TK[p as usize] == 39 { p = p + 1 }
+            }
+            SCAN_TY = 0
+            if invalid_eps != 0 {
+                SCAN_TY_HASH = knowledge_hash_make(inner_ty, inner_hash, -2)
+            } else {
+                SCAN_TY_HASH = knowledge_hash_make(inner_ty, inner_hash, eps_scaled)
+            }
+            SCAN_TY_NEXT = p
+            return
+        }
         p = p + 1
         if TK[p as usize] == 23 {
             saw_generic = 1
             var gd: i64 = 1
             p = p + 1
             while p < TC && gd > 0 {
-                if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "epsilon") {
-                    saw_epsilon_bound = 1
-                }
                 if TK[p as usize] == 23 { gd = gd + 1 }
                 if TK[p as usize] == 24 { gd = gd - 1 }
                 p = p + 1
             }
-        }
-        if saw_epsilon_bound != 0 {
-            SCAN_TY = -1
-            SCAN_TY_HASH = 0
-            SCAN_TY_NEXT = p
-            return
         }
         if saw_generic != 0 && SCAN_TY == 0 && SCAN_TY_HASH != 0 {
             SCAN_TY_HASH = gl_name_hash(ns, TE[(p - 1) as usize])
@@ -2977,7 +3082,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
                     if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && ty_eq(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
-                        tc_error(call_tok, "type mismatch in call argument")
+                        if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
+                            tc_epistemic_boundary(call_tok)
+                        } else {
+                            tc_error(call_tok, "type mismatch in call argument")
+                        }
                     }
                 }
                 materialize_aggregate_expr_x86()
@@ -4131,8 +4240,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 scan_type(EP)
                 decl_ty = SCAN_TY
                 decl_ty_hash = SCAN_TY_HASH
-                if decl_ty == -1 {
-                    tc_error(EP, "type mismatch")
+                if knowledge_hash_invalid(decl_ty_hash) {
+                    tc_epistemic_boundary(EP)
                     decl_ty = 0
                     decl_ty_hash = 0
                 }
@@ -5376,7 +5485,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                             FN_NEEDS_SESSION[sig_fi as usize] = 1
                         }
                         scan_type(q)
-                        if SCAN_TY == -1 { tc_error(q, "type mismatch") }
+                        if knowledge_hash_invalid(SCAN_TY_HASH) { tc_epistemic_boundary(q) }
                         q = SCAN_TY_NEXT
                     }
                 } else {
@@ -5391,9 +5500,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     FN_NEEDS_SESSION[sig_fi as usize] = 1
                 }
                 scan_type(q)
-                if SCAN_TY == -1 { tc_error(q, "type mismatch") }
-                FN_RET_TY[sig_fi as usize] = SCAN_TY
-                FN_RET_HASH[sig_fi as usize] = SCAN_TY_HASH
+                if knowledge_hash_invalid(SCAN_TY_HASH) {
+                    tc_epistemic_boundary(q)
+                    FN_RET_TY[sig_fi as usize] = 0
+                    FN_RET_HASH[sig_fi as usize] = 0
+                } else {
+                    FN_RET_TY[sig_fi as usize] = SCAN_TY
+                    FN_RET_HASH[sig_fi as usize] = SCAN_TY_HASH
+                }
                 q = SCAN_TY_NEXT
             }
             if sig_fi < FN_COUNT { sig_fi = sig_fi + 1 }
@@ -6961,7 +7075,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
                     if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && ty_eq(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
-                        tc_error(call_tok, "type mismatch in call argument")
+                        if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
+                            tc_epistemic_boundary(call_tok)
+                        } else {
+                            tc_error(call_tok, "type mismatch in call argument")
+                        }
                     }
                 }
                 materialize_aggregate_expr_a64()
@@ -7625,8 +7743,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 scan_type(EP)
                 decl_ty = SCAN_TY
                 decl_ty_hash = SCAN_TY_HASH
-                if decl_ty == -1 {
-                    tc_error(EP, "type mismatch")
+                if knowledge_hash_invalid(decl_ty_hash) {
+                    tc_epistemic_boundary(EP)
                     decl_ty = 0
                     decl_ty_hash = 0
                 }
