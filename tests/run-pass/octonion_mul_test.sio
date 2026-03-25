@@ -1,0 +1,202 @@
+//@ run-pass
+// OCTONIONIC MULTIPLICATION — Full Verification
+// Uses global buffers (native compiler: only ONE &! per call site)
+
+fn cds(a: i64, b: i64, bits: i64) -> i64 with Mut, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let ahi = if a >= half { 1 } else { 0 }
+    let bhi = if b >= half { 1 } else { 0 }
+    let alo = a & (half - 1)
+    let blo = b & (half - 1)
+    if ahi == 0 && bhi == 0 { return cds(alo, blo, bits - 1) }
+    if ahi == 0 && bhi == 1 { return cds(blo, alo, bits - 1) }
+    if ahi == 1 && bhi == 0 {
+        if blo == 0 { return cds(alo, blo, bits - 1) }
+        return 0 - cds(alo, blo, bits - 1)
+    }
+    if blo == 0 { return 0 - cds(blo, alo, bits - 1) }
+    cds(blo, alo, bits - 1)
+}
+
+fn sigma(a: i64, b: i64) -> i64 with Mut, Div { cds(a, b, 3) }
+
+fn xor3(a: i64, b: i64) -> i64 {
+    let x0 = if (a & 1) == (b & 1) { 0 } else { 1 }
+    let x1 = if ((a >> 1) & 1) == ((b >> 1) & 1) { 0 } else { 1 }
+    let x2 = if ((a >> 2) & 1) == ((b >> 2) & 1) { 0 } else { 1 }
+    x0 + 2 * x1 + 4 * x2
+}
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Global octonion buffers (BSS-zeroed = [0.0; 64] for IEEE 754)
+var OA: [f64; 64] = [0.0; 64]
+var OB: [f64; 64] = [0.0; 64]
+var OC: [f64; 64] = [0.0; 64]
+var OD: [f64; 64] = [0.0; 64]
+var OE: [f64; 64] = [0.0; 64]
+
+fn clear8(arr: &![f64; 64]) with Mut {
+    var k: i64 = 0
+    while k < 8 { arr[k] = 0.0; k = k + 1 }
+}
+
+fn set_basis(arr: &![f64; 64], idx: i64) with Mut {
+    var k: i64 = 0
+    while k < 8 { arr[k] = 0.0; k = k + 1 }
+    arr[idx] = 1.0
+}
+
+// oct_mul: reads OA, OB; writes OC
+fn oct_mul_global() with Mut, Div {
+    var k: i64 = 0
+    while k < 8 { OC[k] = 0.0; k = k + 1 }
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let s = sigma(i, j)
+            var tgt: i64 = 0
+            if i == 0 { tgt = j }
+            else if j == 0 { tgt = i }
+            else { tgt = xor3(i, j) }
+            var sf: f64 = 1.0
+            if s < 0 { sf = 0.0 - 1.0 }
+            let v = sf * OA[i]
+            let w = v * OB[j]
+            OC[tgt] = OC[tgt] + w
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn oct_norm_global_c() -> f64 with Mut {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 { let v = OC[i]; s = s + v * v; i = i + 1 }
+    s
+}
+
+// Set global array to basis element (no &! — direct global access)
+fn set_oa_basis(idx: i64) with Mut {
+    OA[0] = 0.0; OA[1] = 0.0; OA[2] = 0.0; OA[3] = 0.0
+    OA[4] = 0.0; OA[5] = 0.0; OA[6] = 0.0; OA[7] = 0.0
+    OA[idx] = 1.0
+}
+
+fn set_ob_basis(idx: i64) with Mut {
+    OB[0] = 0.0; OB[1] = 0.0; OB[2] = 0.0; OB[3] = 0.0
+    OB[4] = 0.0; OB[5] = 0.0; OB[6] = 0.0; OB[7] = 0.0
+    OB[idx] = 1.0
+}
+
+// Compute |[e_ai, e_bi, e_ci]|² using globals OA..OE
+fn assoc_norm(ai: i64, bi: i64, ci: i64) -> f64 with Mut, Div {
+    // (ea*eb)*ec
+    set_oa_basis(ai)
+    set_ob_basis(bi)
+    oct_mul_global()
+    // OC = ea*eb. Copy to OA for next multiply.
+    var k: i64 = 0
+    while k < 8 { OA[k] = OC[k]; k = k + 1 }
+    set_ob_basis(ci)
+    oct_mul_global()
+    // OC = (ea*eb)*ec. Save in OE.
+    k = 0
+    while k < 8 { OE[k] = OC[k]; k = k + 1 }
+
+    // ea*(eb*ec)
+    set_oa_basis(bi)
+    set_ob_basis(ci)
+    oct_mul_global()
+    // OC = eb*ec. Copy to OB.
+    k = 0
+    while k < 8 { OB[k] = OC[k]; k = k + 1 }
+    set_oa_basis(ai)
+    oct_mul_global()
+    // OC = ea*(eb*ec) = rhs
+
+    // |assoc|² = |OE - OC|²
+    var norm: f64 = 0.0
+    k = 0
+    while k < 8 {
+        let d = OE[k] - OC[k]
+        norm = norm + d * d
+        k = k + 1
+    }
+    norm
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    println("=== OCTONIONIC MULTIPLICATION VERIFICATION ===")
+    println("")
+
+    // TEST 1: 7 Fano lines — associator = 0
+    var lines: [i64; 21] = [0; 21]
+    lines[0] = 1; lines[1] = 2; lines[2] = 3
+    lines[3] = 1; lines[4] = 4; lines[5] = 5
+    lines[6] = 2; lines[7] = 4; lines[8] = 6
+    lines[9] = 2; lines[10] = 5; lines[11] = 7
+    lines[12] = 3; lines[13] = 4; lines[14] = 7
+    lines[15] = 3; lines[16] = 6; lines[17] = 5
+    lines[18] = 1; lines[19] = 6; lines[20] = 7
+
+    var fano_pass: i64 = 0
+    var l: i64 = 0
+    while l < 7 {
+        let base = l * 3
+        let n = assoc_norm(lines[base], lines[base + 1], lines[base + 2])
+        if n < 0.001 { fano_pass = fano_pass + 1 }
+        l = l + 1
+    }
+    println("TEST 1: Fano lines (7), |assoc|^2 = 0")
+    println("  pass:")
+    println(fano_pass)
+    if fano_pass == 7 { println("  PASS") } else { println("  FAIL") }
+    println("")
+
+    // TEST 2: Non-Fano (1,2,4) — associator ≠ 0
+    let nf = assoc_norm(1, 2, 4)
+    println("TEST 2: Non-Fano [e1,e2,e4], |assoc|^2:")
+    println(nf)
+    if nf > 0.1 { println("  PASS: nonzero") } else { println("  FAIL") }
+    println("")
+
+    // TEST 3: Norm multiplicativity |ab|² = |a|²|b|²
+    OA[0] = 1.0; OA[1] = 2.0; OA[3] = 0.5; OA[7] = 1.5
+    OB[0] = 0.5; OB[2] = 1.0; OB[6] = 2.0
+    oct_mul_global()
+    // |OA|²
+    var na: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 { let v = OA[i]; na = na + v * v; i = i + 1 }
+    // |OB|²
+    var nb: f64 = 0.0
+    i = 0
+    while i < 8 { let v = OB[i]; nb = nb + v * v; i = i + 1 }
+    // |OC|² = |OA*OB|²
+    let nab = oct_norm_global_c()
+    let expect = na * nb
+    let d = nab - expect
+    let ad = abs_f64(d)
+    let rel = ad / expect
+    println("TEST 3: |ab|^2 = |a|^2 * |b|^2")
+    println("  expected:")
+    println(expect)
+    println("  actual:")
+    println(nab)
+    println("  rel err:")
+    println(rel)
+    if rel < 0.001 { println("  PASS") } else { println("  FAIL") }
+    println("")
+
+    if fano_pass == 7 && nf > 0.1 && rel < 0.001 {
+        println("=== ALL PASS: The octonions obey their algebra ===")
+    } else {
+        println("=== FAILURES ===")
+    }
+    0
+}
