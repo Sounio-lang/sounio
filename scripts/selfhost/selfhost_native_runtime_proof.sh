@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC_NATIVE="${SOUC_NATIVE:-/tmp/gen2.elf}"
+SOUC_NATIVE="${SOUC_NATIVE:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64}"
 MANIFEST_PATH="${MANIFEST_PATH:-tests/selfhost/native_runtime/manifest.tsv}"
 WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-native-runtime-proof}"
 ARTIFACT_DIR="$WORK_DIR/artifacts"

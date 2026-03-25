@@ -993,6 +993,11 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div {
         }
         return h1 == h2
     }
+    // Native lowering still uses raw i64 handles for some legacy boundaries:
+    // enum discriminants and untyped callable closure handles may flow into
+    // integer-typed parameters in older tests.
+    if k1 == 1 && k2 == 7 { return true }
+    if k1 == 1 && k2 == 9 { return true }
     if k1 == 0 || k2 == 0 {
         return true
     }
@@ -2662,6 +2667,8 @@ var CL_SAVE_AL: [i64; 128] = [0; 128]
 var CL_SAVE_ES: [i64; 128] = [0; 128]
 var CL_SAVE_F64: [i64; 128] = [0; 128]
 var CL_SAVE_ISCL: [i64; 128] = [0; 128]
+var CL_SAVE_TY: [i64; 128] = [0; 128]
+var CL_SAVE_TH: [i64; 128] = [0; 128]
 // Capture tracking for closures (max 16 captured variables)
 var CL_CAP_SLOT: [i64; 16] = [0; 16]
 var CL_CAP_COUNT: i64 = 0
@@ -2904,6 +2911,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
             CL_SAVE_ES[svi as usize] = VAR_ESIZ[svi as usize]
             CL_SAVE_F64[svi as usize] = VAR_IS_F64[svi as usize]
             CL_SAVE_ISCL[svi as usize] = VAR_IS_CLOSURE[svi as usize]
+            CL_SAVE_TY[svi as usize] = VAR_TY[svi as usize]
+            CL_SAVE_TH[svi as usize] = VAR_TY_HASH[svi as usize]
             svi = svi + 1
         }
         // Reset state for closure body
@@ -2963,6 +2972,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let existing = var_find(ons, one)
             if existing < 0 {
                 var_add(ons, one)
+                let cap_vi = VAR_COUNT - 1
+                VAR_ALEN[cap_vi as usize] = CL_SAVE_AL[ci as usize]
+                VAR_ESIZ[cap_vi as usize] = CL_SAVE_ES[ci as usize]
+                VAR_IS_F64[cap_vi as usize] = CL_SAVE_F64[ci as usize]
+                VAR_IS_CLOSURE[cap_vi as usize] = CL_SAVE_ISCL[ci as usize]
+                VAR_TY[cap_vi as usize] = CL_SAVE_TY[ci as usize]
+                VAR_TY_HASH[cap_vi as usize] = CL_SAVE_TH[ci as usize]
                 CL_CAP_SLOT[CL_CAP_COUNT as usize] = outer_slot
                 CL_CAP_COUNT = CL_CAP_COUNT + 1
             }
@@ -3035,6 +3051,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
             VAR_ESIZ[svi as usize] = CL_SAVE_ES[svi as usize]
             VAR_IS_F64[svi as usize] = CL_SAVE_F64[svi as usize]
             VAR_IS_CLOSURE[svi as usize] = CL_SAVE_ISCL[svi as usize]
+            VAR_TY[svi as usize] = CL_SAVE_TY[svi as usize]
+            VAR_TY_HASH[svi as usize] = CL_SAVE_TH[svi as usize]
             svi = svi + 1
         }
         // --- Build closure struct on OUTER stack ---
@@ -6199,28 +6217,40 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             // Scan forward to find { (start of body) — effects are between ) -> type with ... {
             var eq: i64 = p + 1
             while eq < TC && TK[eq as usize] != 8 { eq = eq + 1 }
-            // Now scan from p to eq for 'with' token (38)
-            var ew: i64 = p
-            while ew < eq {
-                if TK[ew as usize] == 38 {
-                    ew = ew + 1
-                    while ew < eq && (TK[ew as usize] == 3 || TK[ew as usize] == 28) {
-                        if TK[ew as usize] == 3 {
-                            let ens = TS[ew as usize]
-                            let ene = TE[ew as usize]
-                            var matched_builtin: i64 = 0
-                            if src_match(ens, ene - ens, "IO") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 1; matched_builtin = 1 }
-                            if src_match(ens, ene - ens, "Mut") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 2; matched_builtin = 1 }
-                            if src_match(ens, ene - ens, "Panic") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 4; matched_builtin = 1 }
-                            if src_match(ens, ene - ens, "Div") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 8; matched_builtin = 1 }
-                            if src_match(ens, ene - ens, "Alloc") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 16; matched_builtin = 1 }
-                            if matched_builtin == 0 { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 32 }
-                        }
-                        ew = ew + 1
-                    }
-                    ew = eq  // done scanning
-                }
+            // Scan only the function's own top-level `with`, not nested effect
+            // clauses inside function-typed parameters or return types.
+            var ew: i64 = p + 1
+            if TK[ew as usize] == 6 {
+                var depth: i64 = 1
                 ew = ew + 1
+                while ew < eq && depth > 0 {
+                    if TK[ew as usize] == 6 { depth = depth + 1 }
+                    if TK[ew as usize] == 7 { depth = depth - 1 }
+                    ew = ew + 1
+                }
+            }
+            if TK[ew as usize] == 10 {
+                ew = ew + 1
+                scan_type(ew)
+                ew = SCAN_TY_NEXT
+            }
+            ew = skip_signature_where_clause(ew)
+            if TK[ew as usize] == 38 {
+                ew = ew + 1
+                while ew < eq && (TK[ew as usize] == 3 || TK[ew as usize] == 28) {
+                    if TK[ew as usize] == 3 {
+                        let ens = TS[ew as usize]
+                        let ene = TE[ew as usize]
+                        var matched_builtin: i64 = 0
+                        if src_match(ens, ene - ens, "IO") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 1; matched_builtin = 1 }
+                        if src_match(ens, ene - ens, "Mut") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 2; matched_builtin = 1 }
+                        if src_match(ens, ene - ens, "Panic") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 4; matched_builtin = 1 }
+                        if src_match(ens, ene - ens, "Div") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 8; matched_builtin = 1 }
+                        if src_match(ens, ene - ens, "Alloc") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 16; matched_builtin = 1 }
+                        if matched_builtin == 0 { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 32 }
+                    }
+                    ew = ew + 1
+                }
             }
             if eff_fi < FN_COUNT { eff_fi = eff_fi + 1 }
         }
