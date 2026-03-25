@@ -37,4 +37,13 @@ lean_lib «SounioPreservation» where
 lean_lib «SounioCausality» where
 
 @[default_target]
+lean_lib «SounioCayleyDickson» where
+
+@[default_target]
+lean_lib «SounioSkewCategory» where
+
+@[default_target]
+lean_lib «SounioBidirectionalBridge» where
+
+@[default_target]
 lean_lib «SounioFormal» where

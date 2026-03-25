@@ -40,6 +40,7 @@ inductive Effect where
   | Exn        -- exceptions
   | Async      -- asynchronous computation
   | FFI        -- foreign function interface
+  | NonAssoc   -- non-associative algebraic operations (ID 14 in Sounio)
   deriving DecidableEq, Repr
 
 -- ================================================================
@@ -588,12 +589,12 @@ theorem rowDisjoint_union_inter (r1 r2 r3 : EffectRow)
 -- §17. maskAll — Handle All Effects
 -- ================================================================
 
-/-- Apply handlers for all 10 named effects in order. -/
+/-- Apply handlers for all 11 named effects in order. -/
 def maskAll (r : EffectRow) : EffectRow :=
-  mask (mask (mask (mask (mask
+  mask (mask (mask (mask (mask (mask
   (mask (mask (mask (mask (mask r
     .IO) .Mut) .Alloc) .Prob) .GPU)
-    .Epistemic) .Div) .Exn) .Async) .FFI
+    .Epistemic) .Div) .Exn) .Async) .FFI) .NonAssoc
 
 /-- Applying handlers for all effects always produces the pure row. -/
 theorem maskAll_pure (r : EffectRow) : maskAll r = pureRow := by
