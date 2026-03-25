@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Epistemic PBPK Explorer — Rapamycin / CYP3A4</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace; }
+#top-bar { height: 40px; background: rgba(10,10,20,0.95); border-bottom: 1px solid #333; display: flex; align-items: center; padding: 0 20px; }
+#top-bar h1 { font-size: 14px; color: #4fc3f7; }
+#top-bar .sep { color: #333; margin: 0 12px; }
+#top-bar .control { margin: 0 8px; font-size: 12px; }
+#top-bar .control label { color: #888; margin-right: 4px; }
+#top-bar .control input, #top-bar .control select { background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; padding: 2px 6px; font-size: 11px; font-family: inherit; }
+#top-bar button { background: #4fc3f7; color: #0a0a0f; border: none; padding: 4px 14px; font-size: 12px; font-family: inherit; cursor: pointer; border-radius: 3px; font-weight: bold; }
+#top-bar button:hover { background: #81d4fa; }
+#top-bar button.stop { background: #ff5252; }
+
+#main { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; height: calc(100vh - 40px); gap: 1px; background: #222; }
+.panel { background: #0a0a0f; padding: 12px; position: relative; overflow: hidden; }
+.panel-title { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+
+#body-panel canvas { width: 100%; height: calc(100% - 24px); }
+#curves-panel canvas { width: 100%; height: calc(100% - 24px); }
+#particles-panel canvas { width: 100%; height: calc(100% - 24px); }
+#info-panel { overflow-y: auto; font-size: 12px; }
+#info-panel .stat { margin: 4px 0; }
+#info-panel .stat .label { color: #666; }
+#info-panel .stat .val { color: #4fc3f7; }
+#info-panel .stat .val.warn { color: #ffd740; }
+#info-panel .stat .val.danger { color: #ff5252; }
+.compartment-list { margin-top: 8px; }
+.comp-row { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #1a1a1a; font-size: 11px; }
+.comp-row .name { color: #888; }
+.comp-row .conc { color: #4fc3f7; font-weight: bold; }
+.comp-row .unc { color: #ffd740; font-size: 10px; }
+.gum-bar { height: 3px; background: #1a1a2e; margin-top: 2px; border-radius: 1px; }
+.gum-fill { height: 100%; border-radius: 1px; transition: width 0.1s; }
+</style>
+</head>
+<body>
+
+<div id="top-bar">
+  <h1>Epistemic PBPK</h1>
+  <span class="sep">|</span>
+  <div class="control"><label>Drug:</label><select id="drug-select"><option value="rapamycin">Rapamycin (Sirolimus)</option><option value="midazolam">Midazolam</option></select></div>
+  <div class="control"><label>Dose:</label><input type="number" id="dose-input" value="6" min="0.1" max="50" step="0.5" style="width:50px"> mg</div>
+  <div class="control"><label>Route:</label><select id="route-select"><option value="oral">Oral</option><option value="iv">IV bolus</option></select></div>
+  <div class="control"><label>Speed:</label><input type="range" id="speed-input" min="0.5" max="10" value="2" step="0.5" style="width:80px"></div>
+  <span class="sep">|</span>
+  <button id="btn-start" onclick="startSim()">▶ START</button>
+  <button id="btn-reset" onclick="resetSim()">↺ RESET</button>
+  <span class="sep">|</span>
+  <span id="time-display" style="color:#ffd740; font-size:12px;">t = 0.0 h</span>
+</div>
+
+<div id="main">
+  <div class="panel" id="body-panel">
+    <div class="panel-title">Anatomical Compartments</div>
+    <canvas id="body-canvas"></canvas>
+  </div>
+  <div class="panel" id="curves-panel">
+    <div class="panel-title">Concentration Curves + GUM Uncertainty</div>
+    <canvas id="curves-canvas"></canvas>
+  </div>
+  <div class="panel" id="particles-panel">
+    <div class="panel-title">CYP3A4 Hepatic Metabolism</div>
+    <canvas id="particles-canvas"></canvas>
+  </div>
+  <div class="panel" id="info-panel">
+    <div class="panel-title">Epistemic Dashboard</div>
+    <div class="stat"><span class="label">Simulation time: </span><span class="val" id="info-time">0.0 h</span></div>
+    <div class="stat"><span class="label">Plasma C(t): </span><span class="val" id="info-plasma">0.00 ng/mL</span></div>
+    <div class="stat"><span class="label">Plasma σ(t): </span><span class="val warn" id="info-plasma-unc">±0.00</span></div>
+    <div class="stat"><span class="label">Liver C(t): </span><span class="val" id="info-liver">0.00 ng/mL</span></div>
+    <div class="stat"><span class="label">GUM budget: </span><span class="val" id="info-gum">—</span></div>
+    <div class="stat"><span class="label">CYP3A4 clearance: </span><span class="val" id="info-cl">—</span></div>
+    <div class="stat"><span class="label">AUC₀₋ₜ: </span><span class="val" id="info-auc">0.00 ng·h/mL</span></div>
+    <div class="stat"><span class="label">RK4 steps: </span><span class="val" id="info-steps">0</span></div>
+    <hr style="border-color:#222; margin: 8px 0;">
+    <div class="panel-title">Compartment Concentrations</div>
+    <div class="compartment-list" id="comp-list"></div>
+    <hr style="border-color:#222; margin: 8px 0;">
+    <div class="panel-title" style="margin-top:8px;">Parameters (Rapamycin)</div>
+    <div class="stat"><span class="label">MW: </span><span class="val">914.2 g/mol</span></div>
+    <div class="stat"><span class="label">Oral F: </span><span class="val">0.14 ± 0.03</span></div>
+    <div class="stat"><span class="label">ka: </span><span class="val">0.48 ± 0.10 h⁻¹</span></div>
+    <div class="stat"><span class="label">CYP3A4 CLint: </span><span class="val">12.5 ± 2.5 L/h</span></div>
+    <div class="stat"><span class="label">Vd: </span><span class="val">5.6 ± 1.2 L/kg</span></div>
+    <div class="stat"><span class="label">fu: </span><span class="val">0.08 ± 0.02</span></div>
+    <div style="margin-top:12px; font-size:10px; color:#444;">
+      Sounio Epistemic PBPK · GUM ISO 98 uncertainty<br>
+      Demetrios C. Agourakis © 2026
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── 14-Compartment PBPK Model (Rapamycin / CYP3A4) ───
+const COMPARTMENTS = [
+  { name: 'GI Lumen',      short: 'GI',   color: '#ff9800', x: 0.50, y: 0.58, r: 18 },
+  { name: 'Gut Wall',      short: 'GW',   color: '#ff5722', x: 0.50, y: 0.52, r: 14 },
+  { name: 'Portal Vein',   short: 'PV',   color: '#e91e63', x: 0.45, y: 0.46, r: 10 },
+  { name: 'Liver',         short: 'LIV',  color: '#9c27b0', x: 0.38, y: 0.42, r: 22 },
+  { name: 'Venous Blood',  short: 'VEN',  color: '#3f51b5', x: 0.50, y: 0.38, r: 14 },
+  { name: 'Arterial Blood',short: 'ART',  color: '#f44336', x: 0.50, y: 0.32, r: 14 },
+  { name: 'Lung',          short: 'LNG',  color: '#2196f3', x: 0.50, y: 0.22, r: 20 },
+  { name: 'Heart',         short: 'HRT',  color: '#e53935', x: 0.42, y: 0.28, r: 14 },
+  { name: 'Brain',         short: 'BRN',  color: '#7c4dff', x: 0.50, y: 0.10, r: 20 },
+  { name: 'Kidney',        short: 'KID',  color: '#00bcd4', x: 0.62, y: 0.42, r: 16 },
+  { name: 'Muscle',        short: 'MUS',  color: '#8d6e63', x: 0.28, y: 0.55, r: 18 },
+  { name: 'Fat',           short: 'FAT',  color: '#ffd740', x: 0.72, y: 0.55, r: 16 },
+  { name: 'Skin',          short: 'SKN',  color: '#ffab91', x: 0.22, y: 0.35, r: 14 },
+  { name: 'Rest',          short: 'RST',  color: '#78909c', x: 0.72, y: 0.35, r: 14 },
+];
+
+// Rapamycin parameters with GUM uncertainties
+const PARAMS = {
+  dose: 6.0,          // mg
+  F: 0.14,            // oral bioavailability
+  F_sd: 0.03,
+  ka: 0.48,           // absorption rate constant (h^-1)
+  ka_sd: 0.10,
+  CLint: 12.5,        // intrinsic clearance (L/h)
+  CLint_sd: 2.5,
+  Vd: 5.6,            // volume of distribution per kg (L/kg)
+  Vd_sd: 1.2,
+  BW: 70,             // body weight (kg)
+  fu: 0.08,           // fraction unbound
+  fu_sd: 0.02,
+  Q_liver: 1.5,       // blood flow L/h/kg
+  Q_kidney: 1.2,
+  Q_brain: 0.7,
+  Q_heart: 0.25,
+  Q_lung: 5.6,
+  Q_muscle: 0.9,
+  Q_fat: 0.26,
+  Q_skin: 0.3,
+  Q_rest: 0.5,
+  // Partition coefficients (Kp)
+  Kp_liver: 4.2, Kp_kidney: 3.8, Kp_brain: 0.5, Kp_heart: 2.1,
+  Kp_lung: 2.8, Kp_muscle: 1.5, Kp_fat: 8.0, Kp_skin: 1.8, Kp_rest: 2.0,
+  // Tissue volumes (fraction of BW)
+  Vf_liver: 0.026, Vf_kidney: 0.004, Vf_brain: 0.02, Vf_heart: 0.005,
+  Vf_lung: 0.008, Vf_muscle: 0.40, Vf_fat: 0.21, Vf_skin: 0.037, Vf_rest: 0.10,
+  Vf_arterial: 0.028, Vf_venous: 0.056,
+};
+
+// ─── State ───
+let state = new Float64Array(14);    // concentrations
+let variance = new Float64Array(14); // GUM variances
+let t = 0;
+let dt = 0.01;  // hours
+let running = false;
+let speed = 2;
+let steps = 0;
+let auc = 0;
+let history = [];  // [{t, conc: [...], var: [...]}]
+let particles = []; // for liver visualization
+let animId = null;
+
+// ─── PBPK RHS: dy/dt = f(t, y) ───
+function pbpkRHS(y, p) {
+  const dy = new Float64Array(14);
+  const BW = p.BW;
+
+  // Volumes (L)
+  const V = [
+    1.0,                      // 0: GI lumen (virtual)
+    BW * 0.01,                // 1: gut wall
+    BW * 0.005,               // 2: portal vein (virtual)
+    BW * p.Vf_liver,          // 3: liver
+    BW * p.Vf_venous,         // 4: venous
+    BW * p.Vf_arterial,       // 5: arterial
+    BW * p.Vf_lung,           // 6: lung
+    BW * p.Vf_heart,          // 7: heart
+    BW * p.Vf_brain,          // 8: brain
+    BW * p.Vf_kidney,         // 9: kidney
+    BW * p.Vf_muscle,         // 10: muscle
+    BW * p.Vf_fat,            // 11: fat
+    BW * p.Vf_skin,           // 12: skin
+    BW * p.Vf_rest,           // 13: rest
+  ];
+
+  // Blood flows (L/h)
+  const Q_L = p.Q_liver * BW;
+  const Q_K = p.Q_kidney * BW;
+  const Q_B = p.Q_brain * BW;
+  const Q_H = p.Q_heart * BW;
+  const Q_Lg = p.Q_lung * BW;
+  const Q_M = p.Q_muscle * BW;
+  const Q_F = p.Q_fat * BW;
+  const Q_S = p.Q_skin * BW;
+  const Q_R = p.Q_rest * BW;
+
+  const Ca = y[5]; // arterial concentration
+
+  // 0: GI Lumen — oral absorption
+  dy[0] = -p.ka * y[0];
+
+  // 1: Gut Wall — absorbs from GI, drains to portal
+  dy[1] = (p.ka * p.F * y[0] - (Q_L * 0.3) * y[1] / (V[1] * p.Kp_liver)) / V[1];
+
+  // 2: Portal Vein — from gut wall to liver
+  dy[2] = ((Q_L * 0.3) * y[1] / p.Kp_liver - (Q_L * 0.3) * y[2]) / Math.max(V[2], 0.01);
+
+  // 3: Liver — portal + arterial in, venous out, CYP3A4 clearance
+  const CLhep = p.CLint * p.fu;
+  dy[3] = ((Q_L * 0.3) * y[2] + (Q_L * 0.7) * Ca - Q_L * y[3] / p.Kp_liver - CLhep * y[3] / p.Kp_liver) / V[3];
+
+  // 4: Venous Blood — collects from all organs
+  const venousReturn =
+    Q_L * y[3] / p.Kp_liver +
+    Q_K * y[9] / p.Kp_kidney +
+    Q_B * y[8] / p.Kp_brain +
+    Q_H * y[7] / p.Kp_heart +
+    Q_M * y[10] / p.Kp_muscle +
+    Q_F * y[11] / p.Kp_fat +
+    Q_S * y[12] / p.Kp_skin +
+    Q_R * y[13] / p.Kp_rest;
+  const CO = Q_L + Q_K + Q_B + Q_H + Q_M + Q_F + Q_S + Q_R; // cardiac output
+  dy[4] = (venousReturn - CO * y[4]) / V[4];
+
+  // 5: Arterial Blood — from lung
+  dy[5] = (Q_Lg * y[6] / p.Kp_lung - CO * Ca) / V[5];
+
+  // 6: Lung
+  dy[6] = (CO * y[4] - Q_Lg * y[6] / p.Kp_lung) / V[6];
+
+  // Tissue compartments: dC/dt = (Q*(Ca - C/Kp)) / V
+  dy[7]  = (Q_H * (Ca - y[7]  / p.Kp_heart))  / V[7];
+  dy[8]  = (Q_B * (Ca - y[8]  / p.Kp_brain))  / V[8];
+  dy[9]  = (Q_K * (Ca - y[9]  / p.Kp_kidney)) / V[9];
+  dy[10] = (Q_M * (Ca - y[10] / p.Kp_muscle)) / V[10];
+  dy[11] = (Q_F * (Ca - y[11] / p.Kp_fat))    / V[11];
+  dy[12] = (Q_S * (Ca - y[12] / p.Kp_skin))   / V[12];
+  dy[13] = (Q_R * (Ca - y[13] / p.Kp_rest))   / V[13];
+
+  return dy;
+}
+
+// ─── RK4 step with GUM variance propagation ───
+function rk4Step(y, v, p, dt) {
+  const k1 = pbpkRHS(y, p);
+  const y2 = y.map((yi, i) => yi + 0.5 * dt * k1[i]);
+  const k2 = pbpkRHS(y2, p);
+  const y3 = y.map((yi, i) => yi + 0.5 * dt * k2[i]);
+  const k3 = pbpkRHS(y3, p);
+  const y4 = y.map((yi, i) => yi + dt * k3[i]);
+  const k4 = pbpkRHS(y4, p);
+
+  const yNew = new Float64Array(14);
+  for (let i = 0; i < 14; i++) {
+    yNew[i] = Math.max(0, y[i] + (dt / 6) * (k1[i] + 2*k2[i] + 2*k3[i] + k4[i]));
+  }
+
+  // GUM variance propagation via numerical Jacobian
+  const vNew = new Float64Array(14);
+  const eps = 1e-8;
+  for (let i = 0; i < 14; i++) {
+    let growth = 0;
+    for (let j = 0; j < 14; j++) {
+      const yp = Float64Array.from(y);
+      const ym = Float64Array.from(y);
+      yp[j] += eps; ym[j] -= eps;
+      const fp = pbpkRHS(yp, p);
+      const fm = pbpkRHS(ym, p);
+      const Jij = (fp[i] - fm[i]) / (2 * eps);
+      const factor = (i === j ? 1 : 0) + dt * Jij;
+      growth += factor * factor * v[j];
+    }
+    // Add parameter uncertainty contribution (CLint, ka, F)
+    const paramVar = (p.CLint_sd * p.CLint_sd + p.ka_sd * p.ka_sd + p.F_sd * p.F_sd) * dt * dt * 0.01;
+    vNew[i] = Math.max(0, growth + paramVar);
+  }
+
+  return { y: yNew, v: vNew };
+}
+
+// ─── Particles for liver visualization ───
+function spawnParticle() {
+  if (state[3] < 0.01) return;
+  particles.push({
+    x: 0.1 + Math.random() * 0.15,
+    y: 0.3 + Math.random() * 0.4,
+    vx: 0.3 + Math.random() * 0.4,
+    vy: (Math.random() - 0.5) * 0.2,
+    life: 1.0,
+    metabolized: false,
+    size: 2 + Math.random() * 3,
+  });
+}
+
+// ─── Drawing: Body Map ───
+function drawBody(ctx, w, h) {
+  ctx.clearRect(0, 0, w, h);
+
+  // Body outline
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.ellipse(w*0.5, h*0.35, w*0.28, h*0.42, 0, 0, Math.PI*2);
+  ctx.stroke();
+
+  // Head
+  ctx.beginPath();
+  ctx.arc(w*0.5, h*0.06, w*0.08, 0, Math.PI*2);
+  ctx.stroke();
+
+  // Draw compartments
+  const maxConc = Math.max(...state, 0.01);
+  for (let i = 0; i < 14; i++) {
+    const c = COMPARTMENTS[i];
+    const cx = c.x * w;
+    const cy = c.y * h;
+    const r = c.r * (w / 400);
+    const intensity = Math.min(1, state[i] / maxConc);
+    const sd = Math.sqrt(variance[i]);
+
+    // Uncertainty halo
+    if (sd > 0.001) {
+      const haloR = r + sd / maxConc * r * 3;
+      ctx.beginPath();
+      ctx.arc(cx, cy, haloR, 0, Math.PI*2);
+      ctx.fillStyle = `rgba(255,215,64,${0.15 * intensity})`;
+      ctx.fill();
+    }
+
+    // Compartment circle
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI*2);
+    const alpha = 0.3 + 0.7 * intensity;
+    ctx.fillStyle = c.color + Math.round(alpha * 255).toString(16).padStart(2,'0');
+    ctx.fill();
+    ctx.strokeStyle = c.color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = '#fff';
+    ctx.font = `${Math.max(9, r*0.6)}px Courier New`;
+    ctx.textAlign = 'center';
+    ctx.fillText(c.short, cx, cy + 3);
+
+    // Concentration value
+    if (state[i] > 0.001) {
+      ctx.fillStyle = '#ffd740';
+      ctx.font = '9px Courier New';
+      ctx.fillText(state[i].toFixed(1), cx, cy + r + 12);
+    }
+  }
+
+  // Flow arrows (simplified)
+  ctx.strokeStyle = 'rgba(255,82,82,0.3)';
+  ctx.lineWidth = 1;
+  const flows = [[0,1],[1,2],[2,3],[3,4],[4,6],[6,5],[5,7],[5,8],[5,9],[5,10],[5,11],[5,12],[5,13]];
+  for (const [a,b] of flows) {
+    const ca = COMPARTMENTS[a], cb = COMPARTMENTS[b];
+    ctx.beginPath();
+    ctx.moveTo(ca.x*w, ca.y*h);
+    ctx.lineTo(cb.x*w, cb.y*h);
+    ctx.stroke();
+  }
+}
+
+// ─── Drawing: Concentration Curves ───
+function drawCurves(ctx, w, h) {
+  ctx.clearRect(0, 0, w, h);
+
+  if (history.length < 2) {
+    ctx.fillStyle = '#333';
+    ctx.font = '14px Courier New';
+    ctx.fillText('Press START to begin simulation', 20, h/2);
+    return;
+  }
+
+  const pad = { l: 50, r: 20, t: 20, b: 30 };
+  const pw = w - pad.l - pad.r;
+  const ph = h - pad.t - pad.b;
+
+  // Find max concentration and max time
+  let maxC = 0.01;
+  for (const h of history) {
+    for (let i = 0; i < 14; i++) maxC = Math.max(maxC, h.conc[i] + Math.sqrt(h.var[i]));
+  }
+  const maxT = history[history.length - 1].t;
+
+  // Axes
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, pad.t + ph); ctx.lineTo(pad.l + pw, pad.t + ph);
+  ctx.stroke();
+
+  // Axis labels
+  ctx.fillStyle = '#666';
+  ctx.font = '10px Courier New';
+  ctx.fillText('C (ng/mL)', 2, pad.t + 10);
+  ctx.fillText('t (h)', pad.l + pw - 20, pad.t + ph + 20);
+
+  // Tick marks
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + ph - (i/4) * ph;
+    ctx.fillText((maxC * i/4).toFixed(1), 5, y + 3);
+    ctx.beginPath(); ctx.moveTo(pad.l-3, y); ctx.lineTo(pad.l, y); ctx.stroke();
+  }
+  for (let i = 0; i <= 4; i++) {
+    const x = pad.l + (i/4) * pw;
+    ctx.fillText((maxT * i/4).toFixed(1), x-8, pad.t + ph + 15);
+  }
+
+  // Draw selected compartments with GUM bands
+  const showComps = [3, 4, 5, 8, 9]; // liver, venous, arterial, brain, kidney
+  const compColors = { 3: '#9c27b0', 4: '#3f51b5', 5: '#f44336', 8: '#7c4dff', 9: '#00bcd4' };
+
+  for (const ci of showComps) {
+    const col = compColors[ci] || COMPARTMENTS[ci].color;
+
+    // GUM uncertainty band
+    ctx.beginPath();
+    for (let j = 0; j < history.length; j++) {
+      const x = pad.l + (history[j].t / maxT) * pw;
+      const sd = Math.sqrt(history[j].var[ci]);
+      const y = pad.t + ph - ((history[j].conc[ci] + sd) / maxC) * ph;
+      if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    for (let j = history.length - 1; j >= 0; j--) {
+      const x = pad.l + (history[j].t / maxT) * pw;
+      const sd = Math.sqrt(history[j].var[ci]);
+      const y = pad.t + ph - (Math.max(0, history[j].conc[ci] - sd) / maxC) * ph;
+      ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = col + '22';
+    ctx.fill();
+
+    // Mean line
+    ctx.beginPath();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5;
+    for (let j = 0; j < history.length; j++) {
+      const x = pad.l + (history[j].t / maxT) * pw;
+      const y = pad.t + ph - (history[j].conc[ci] / maxC) * ph;
+      if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Label at end
+    if (history.length > 0) {
+      const last = history[history.length - 1];
+      const x = pad.l + pw + 2;
+      const y = pad.t + ph - (last.conc[ci] / maxC) * ph;
+      ctx.fillStyle = col;
+      ctx.font = '9px Courier New';
+      ctx.fillText(COMPARTMENTS[ci].short, x, y + 3);
+    }
+  }
+}
+
+// ─── Drawing: Liver Particle System ───
+function drawParticles(ctx, w, h) {
+  ctx.clearRect(0, 0, w, h);
+
+  // Liver background
+  ctx.fillStyle = '#1a0a1a';
+  ctx.fillRect(0, 0, w, h);
+
+  // Sinusoid channels
+  ctx.strokeStyle = '#2a1a2a';
+  ctx.lineWidth = 20;
+  for (let y = 0.2; y <= 0.8; y += 0.2) {
+    ctx.beginPath();
+    ctx.moveTo(0, y * h);
+    ctx.bezierCurveTo(w*0.3, y*h-15, w*0.6, y*h+15, w, y*h);
+    ctx.stroke();
+  }
+
+  // CYP3A4 enzymes (fixed positions on sinusoid walls)
+  const enzymes = [];
+  for (let x = 0.15; x < 0.9; x += 0.12) {
+    for (let y = 0.2; y <= 0.8; y += 0.2) {
+      enzymes.push({ x: x * w, y: y * h + (Math.sin(x*10)*8) });
+    }
+  }
+
+  for (const e of enzymes) {
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, 5, 0, Math.PI*2);
+    ctx.fillStyle = '#4a148c';
+    ctx.fill();
+    ctx.strokeStyle = '#7c4dff';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Label
+  ctx.fillStyle = '#7c4dff';
+  ctx.font = '9px Courier New';
+  ctx.fillText('CYP3A4', enzymes[0].x - 15, enzymes[0].y - 10);
+
+  // Update and draw particles
+  const metabolismRate = PARAMS.CLint * PARAMS.fu * 0.01;
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt * speed * 50;
+    p.y += p.vy * dt * speed * 10;
+    p.vy += (Math.random() - 0.5) * 0.1;
+
+    // Check enzyme collision
+    if (!p.metabolized) {
+      for (const e of enzymes) {
+        const dx = p.x * w - e.x;
+        const dy = p.y * h - e.y;
+        if (dx*dx + dy*dy < 400 && Math.random() < metabolismRate) {
+          p.metabolized = true;
+          p.vx *= 0.3;
+          p.size *= 0.5;
+          // Flash
+          ctx.beginPath();
+          ctx.arc(e.x, e.y, 12, 0, Math.PI*2);
+          ctx.fillStyle = 'rgba(255,215,64,0.5)';
+          ctx.fill();
+        }
+      }
+    }
+
+    p.life -= dt * speed * 0.5;
+
+    // Draw
+    if (p.life > 0 && p.x < 1.1) {
+      ctx.beginPath();
+      ctx.arc(p.x * w, p.y * h, p.size, 0, Math.PI*2);
+      ctx.fillStyle = p.metabolized
+        ? `rgba(120,120,120,${p.life * 0.5})`
+        : `rgba(255,82,82,${p.life * 0.8})`;
+      ctx.fill();
+    } else {
+      particles.splice(i, 1);
+    }
+  }
+
+  // Stats overlay
+  ctx.fillStyle = '#888';
+  ctx.font = '10px Courier New';
+  ctx.fillText(`Active molecules: ${particles.filter(p=>!p.metabolized).length}`, 10, h-30);
+  ctx.fillText(`Metabolized: ${particles.filter(p=>p.metabolized).length}`, 10, h-16);
+  ctx.fillStyle = '#ff5252';
+  ctx.fillText('● drug molecule', w-130, 16);
+  ctx.fillStyle = '#7c4dff';
+  ctx.fillText('● CYP3A4 enzyme', w-130, 30);
+}
+
+// ─── Simulation loop ───
+function simStep() {
+  if (!running) return;
+
+  const stepsPerFrame = Math.ceil(speed);
+  for (let s = 0; s < stepsPerFrame; s++) {
+    const result = rk4Step(state, variance, PARAMS, dt);
+    state = result.y;
+    variance = result.v;
+    t += dt;
+    steps++;
+    auc += state[4] * dt; // venous AUC
+
+    // Record history every 10 steps
+    if (steps % 10 === 0) {
+      history.push({
+        t,
+        conc: Float64Array.from(state),
+        var: Float64Array.from(variance),
+      });
+      // Keep history manageable
+      if (history.length > 2000) history.splice(0, 100);
+    }
+
+    // Spawn liver particles
+    if (steps % 3 === 0 && state[3] > 0.01) spawnParticle();
+  }
+
+  // Update displays
+  document.getElementById('time-display').textContent = `t = ${t.toFixed(1)} h`;
+  document.getElementById('info-time').textContent = `${t.toFixed(2)} h`;
+  document.getElementById('info-plasma').textContent = `${state[4].toFixed(2)} ng/mL`;
+  document.getElementById('info-plasma-unc').textContent = `±${Math.sqrt(variance[4]).toFixed(2)}`;
+  document.getElementById('info-liver').textContent = `${state[3].toFixed(2)} ng/mL`;
+  document.getElementById('info-cl').textContent = `${(PARAMS.CLint * PARAMS.fu).toFixed(2)} L/h`;
+  document.getElementById('info-auc').textContent = `${auc.toFixed(1)} ng·h/mL`;
+  document.getElementById('info-steps').textContent = steps;
+
+  // GUM budget
+  const maxGrowth = Math.max(...Array.from(variance).map((v, i) =>
+    v > 0 && history.length > 1 ? Math.sqrt(v) / Math.max(state[i], 0.001) : 0
+  ));
+  const gumEl = document.getElementById('info-gum');
+  if (maxGrowth < 0.1) { gumEl.textContent = 'LOW'; gumEl.className = 'val'; }
+  else if (maxGrowth < 0.3) { gumEl.textContent = 'MODERATE'; gumEl.className = 'val warn'; }
+  else { gumEl.textContent = 'HIGH'; gumEl.className = 'val danger'; }
+
+  // Compartment list
+  const listEl = document.getElementById('comp-list');
+  listEl.innerHTML = '';
+  const maxConc = Math.max(...state, 0.01);
+  for (let i = 0; i < 14; i++) {
+    const sd = Math.sqrt(variance[i]);
+    const row = document.createElement('div');
+    row.className = 'comp-row';
+    row.innerHTML = `
+      <span class="name">${COMPARTMENTS[i].short}</span>
+      <span class="conc">${state[i].toFixed(2)}</span>
+      <span class="unc">±${sd.toFixed(2)}</span>
+    `;
+    listEl.appendChild(row);
+    const bar = document.createElement('div');
+    bar.className = 'gum-bar';
+    bar.innerHTML = `<div class="gum-fill" style="width:${(state[i]/maxConc*100).toFixed(0)}%; background:${COMPARTMENTS[i].color}"></div>`;
+    listEl.appendChild(bar);
+  }
+
+  // Draw
+  const bodyCanvas = document.getElementById('body-canvas');
+  const curvesCanvas = document.getElementById('curves-canvas');
+  const partCanvas = document.getElementById('particles-canvas');
+
+  drawBody(bodyCanvas.getContext('2d'), bodyCanvas.width, bodyCanvas.height);
+  drawCurves(curvesCanvas.getContext('2d'), curvesCanvas.width, curvesCanvas.height);
+  drawParticles(partCanvas.getContext('2d'), partCanvas.width, partCanvas.height);
+
+  animId = requestAnimationFrame(simStep);
+}
+
+function startSim() {
+  if (running) { running = false; document.getElementById('btn-start').textContent = '▶ START'; return; }
+  running = true;
+  document.getElementById('btn-start').textContent = '⏸ PAUSE';
+  document.getElementById('btn-start').className = 'stop';
+  PARAMS.dose = parseFloat(document.getElementById('dose-input').value);
+  speed = parseFloat(document.getElementById('speed-input').value);
+
+  // Apply initial dose
+  if (t === 0) {
+    const route = document.getElementById('route-select').value;
+    if (route === 'oral') {
+      state[0] = PARAMS.dose * 1e6 / 914.2; // mg to nmol, approximate ng/mL in GI
+      variance[0] = (PARAMS.dose * PARAMS.F_sd / PARAMS.F * 1e6 / 914.2) ** 2;
+    } else {
+      state[4] = PARAMS.dose * 1e3 / (PARAMS.Vd * PARAMS.BW); // IV: direct to venous
+      variance[4] = (state[4] * PARAMS.Vd_sd / PARAMS.Vd) ** 2;
+    }
+  }
+  simStep();
+}
+
+function resetSim() {
+  running = false;
+  cancelAnimationFrame(animId);
+  state = new Float64Array(14);
+  variance = new Float64Array(14);
+  t = 0; steps = 0; auc = 0;
+  history = [];
+  particles = [];
+  document.getElementById('btn-start').textContent = '▶ START';
+  document.getElementById('btn-start').className = '';
+  document.getElementById('time-display').textContent = 't = 0.0 h';
+
+  const bodyCanvas = document.getElementById('body-canvas');
+  const curvesCanvas = document.getElementById('curves-canvas');
+  const partCanvas = document.getElementById('particles-canvas');
+  drawBody(bodyCanvas.getContext('2d'), bodyCanvas.width, bodyCanvas.height);
+  drawCurves(curvesCanvas.getContext('2d'), curvesCanvas.width, curvesCanvas.height);
+  drawParticles(partCanvas.getContext('2d'), partCanvas.width, partCanvas.height);
+}
+
+// ─── Init ───
+function resizeCanvases() {
+  for (const id of ['body-canvas', 'curves-canvas', 'particles-canvas']) {
+    const canvas = document.getElementById(id);
+    const parent = canvas.parentElement;
+    canvas.width = parent.clientWidth - 24;
+    canvas.height = parent.clientHeight - 36;
+  }
+}
+
+window.addEventListener('resize', resizeCanvases);
+document.getElementById('speed-input').addEventListener('input', (e) => { speed = parseFloat(e.target.value); });
+
+resizeCanvases();
+resetSim();
+</script>
+</body>
+</html>
