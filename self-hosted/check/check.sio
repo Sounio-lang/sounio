@@ -83,6 +83,7 @@ struct Checker {
     structs: StructTable,
     enums: EnumTable,
     fn_sigs: FnSigTable,
+    algebras: AlgebraTable,
     models: ModelTable,
     model_families: ModelFamilyTable,
     policies: PolicyTable,
@@ -340,6 +341,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         structs: struct_table_new(),
         enums: enum_table_new(),
         fn_sigs: fn_sig_table_new(),
+        algebras: empty_algebra_table(),
         models: model_table_new(),
         model_families: model_family_table_new(),
         policies: policy_table_new(),
@@ -5703,6 +5705,21 @@ impl Checker {
             None => self.lower_named_type(path)
             Some(args) => {
                 let name = checker_copy_string_list_to_name(path.segments)
+
+                // Unobserved<T> — observer type-state wrapper
+                // "Unobserved" = 10 chars, U=85, n=110
+                if name.len == 10 && name.text[0] == 85 as i8 && name.text[1] == 110 as i8 {
+                    let inner_result = self.lower_type_expr_list(*args)
+                    let c = inner_result.0
+                    let inner_args = inner_result.1
+                    let inner_ty = inner_args.head
+                    var te = ty_error()
+                    te.kind = TypeKind::TyUnobserved
+                    te.name = name
+                    te.inner = Some(Box::new(inner_ty))
+                    return (c, te)
+                }
+
                 let tmpl_idx = self.structs.find(name)
                 if tmpl_idx >= 0 {
                     let tmpl = self.structs.get(tmpl_idx)
@@ -6485,6 +6502,7 @@ impl Checker {
             ItemEffect => self.collect_item_effect(item.effect_def)
             ItemSession => self  // Session protocol registered in collect pass (no-op for now)
             ItemTrait => self.collect_trait_def(item.name, item.trait_def)
+            ItemAlgebra => self.collect_algebra_def(item.algebra_def)
         }
     }
 
@@ -8031,6 +8049,68 @@ impl Checker {
     }
 
     // --------------------------------------------------------
+    // Collect algebra declaration
+    // --------------------------------------------------------
+
+    fn collect_algebra_def(self, opt: Option<Box<AlgebraDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            None => self
+            Some(adef) => {
+                var c = self
+                let idx = c.algebras.count
+                if idx >= 16 { return c }  // table full
+
+                var info = empty_algebra_info()
+                info.name = (*adef).name
+                info.reassoc_strategy = (*adef).reassoc_strategy
+                info.is_valid = true
+
+                // Derive algebra_tag from name for backward compat
+                // "Octonion" = 8 chars, O=79
+                // "Sedenion" = 8 chars, S=83
+                // "Quaternion" = 10 chars, Q=81
+                if info.name.len == 8 && info.name.text[0] == 79 as i8 {
+                    info.algebra_tag = 3  // Octonion
+                } else if info.name.len == 8 && info.name.text[0] == 83 as i8 {
+                    info.algebra_tag = 4  // Sedenion
+                } else if info.name.len == 10 && info.name.text[0] == 81 as i8 {
+                    info.algebra_tag = 2  // Quaternion
+                }
+
+                // Walk op declarations
+                c = c.collect_algebra_ops((*adef).ops, idx)
+
+                // Copy info into table
+                c.algebras.entries[idx] = info
+                c.algebras.count = idx + 1
+                c
+            }
+        }
+    }
+
+    fn collect_algebra_ops(self, ops: Option<Box<AlgebraOpDeclList>>, idx: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match ops {
+            None => self
+            Some(list) => {
+                var c = self
+                let op = (*list).head
+                // Check op name: "add" (3 chars, a=97,d=100,d=100) or "mul" (3, m=109)
+                if op.op_name.len == 3 && op.op_name.text[0] == 97 as i8 {
+                    // add
+                    c.algebras.entries[idx].add_commutative = op.is_commutative
+                    c.algebras.entries[idx].add_associative = op.is_associative
+                } else if op.op_name.len == 3 && op.op_name.text[0] == 109 as i8 {
+                    // mul
+                    c.algebras.entries[idx].mul_commutative = op.is_commutative
+                    c.algebras.entries[idx].mul_associative = op.is_associative
+                    c.algebras.entries[idx].mul_alternative = op.is_alternative
+                }
+                c.collect_algebra_ops((*list).tail, idx)
+            }
+        }
+    }
+
+    // --------------------------------------------------------
     // Collect impl methods
     // --------------------------------------------------------
 
@@ -8160,6 +8240,7 @@ impl Checker {
             ItemEffect => self  // Already handled in collect pass
             ItemSession => self  // Session protocol declaration — type-checking is structural
             ItemTrait => self  // Trait methods already collected in pass 1
+            ItemAlgebra => self  // Already handled in collect pass
         }
     }
 
@@ -8739,6 +8820,19 @@ impl Checker {
         let right_pair = c.check_opt_expr(e.right)
         c = right_pair.0
         let right_ty = right_pair.1
+
+        // Observer semantics: comparing Unobserved<T> requires with Observe
+        if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
+            let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
+                || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+                || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
+            if is_cmp {
+                let observe_id: i64 = 13
+                if !has_effect_id(c.current_effects, c.current_effect_count, observe_id) {
+                    c = c.report_error_at(e.span, 36, 0, 0, 0)
+                }
+            }
+        }
 
         // Validate binary operator type constraints
         c = c.check_binary_op_types(e.span, e.bin_op, left_ty, right_ty)

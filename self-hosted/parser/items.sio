@@ -93,6 +93,8 @@ impl Parser {
             p.parse_session_item(is_pub)
         } else if item_kind == TokenKind::Trait {
             p.parse_trait_item(is_pub)
+        } else if item_kind == TokenKind::Algebra {
+            p.parse_algebra_item(is_pub)
         } else if item_kind == TokenKind::Extern {
             p.parse_extern_fn_item(is_pub)
         } else if item_kind == TokenKind::Export {
@@ -3130,4 +3132,178 @@ fn copy_string_list_tail_to_name(seg: StringList) -> Name with Mut, Panic, Div, 
         Some(rest) => copy_string_list_tail_to_name(*rest)
         None => copy_string_list_to_name(seg)
     }
+}
+
+// ============================================================
+// Algebra declaration parser
+// ============================================================
+// Parses: algebra Name over Type { op: prop, prop; ... reassociate: strategy }
+
+fn name_eq_str(n: Name, s: [i8; 64], slen: i64) -> bool with Mut {
+    if n.len != slen { return false }
+    var i: i64 = 0
+    while i < slen {
+        if n.text[i] != s[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn make_short_name(s: [i8; 64], slen: i64) -> Name {
+    Name { text: s, len: slen }
+}
+
+fn parse_algebra_op_decl(p: Parser) -> (Parser, AlgebraOpDecl) with Mut, IO, Panic, Div, Alloc {
+    let op_name = p.current_name()
+    var pa = p.advance()  // consume op name (e.g. "add", "mul")
+    pa = pa.expect(TokenKind::Colon)
+
+    var is_comm = false
+    var is_assoc = false
+    var is_alt = false
+    let span_start = pa.current_span()
+
+    // Parse comma-separated properties
+    var done = false
+    while !done {
+        let prop_name = pa.current_name()
+
+        // Check property names by first byte + length
+        // "commutative" = 11 chars, starts with 'c' (99)
+        // "associative" = 11 chars, starts with 'a' (97)
+        // "alternative" = 11 chars, starts with 'a' (97), text[1]='l' (108)
+        // "non_commutative" = 15, starts with 'n' (110)
+        // "non_associative" = 15, starts with 'n' (110)
+        if prop_name.len == 11 && prop_name.text[0] == 99 as i8 {
+            is_comm = true  // commutative
+        } else if prop_name.len == 11 && prop_name.text[0] == 97 as i8 && prop_name.text[1] == 115 as i8 {
+            is_assoc = true  // associative
+        } else if prop_name.len == 11 && prop_name.text[0] == 97 as i8 && prop_name.text[1] == 108 as i8 {
+            is_alt = true  // alternative
+        } else if prop_name.len == 15 && prop_name.text[0] == 110 as i8 && prop_name.text[4] == 99 as i8 {
+            is_comm = false  // non_commutative (n=110, o, n, _, c=99)
+        } else if prop_name.len == 15 && prop_name.text[0] == 110 as i8 && prop_name.text[4] == 97 as i8 {
+            is_assoc = false  // non_associative (n, o, n, _, a=97)
+        }
+        pa = pa.advance()  // consume property name
+
+        if pa.peek() == TokenKind::Comma {
+            pa = pa.advance()  // consume comma
+        } else {
+            done = true
+        }
+    }
+
+    let span = pa.span_from(span_start)
+    (pa, AlgebraOpDecl {
+        op_name: op_name,
+        is_commutative: is_comm,
+        is_associative: is_assoc,
+        is_alternative: is_alt,
+        span: span,
+    })
+}
+
+fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    let start = p.current_span()
+    var pa = p.advance()  // skip 'algebra'
+
+    // Parse name
+    let name = pa.current_name()
+    pa = pa.expect_ident()
+
+    // Parse optional "over Type" (contextual — "over" is an identifier, not a keyword)
+    var over_ty: Option<Box<TypeExpr>> = None
+    let peek_name = pa.current_name()
+    // "over" = 4 chars: o=111, v=118, e=101, r=114
+    if peek_name.len == 4 && peek_name.text[0] == 111 as i8 && peek_name.text[1] == 118 as i8 {
+        pa = pa.advance()  // consume "over"
+        let ty_pair = pa.parse_type_expr()
+        pa = ty_pair.0
+        over_ty = Some(Box::new(ty_pair.1))
+    }
+
+    pa = pa.expect(TokenKind::LBrace)
+
+    // Parse body: op declarations and reassociate strategy
+    var rev_ops: Option<Box<AlgebraOpDeclList>> = None
+    var reassoc: i64 = 0  // default: free
+
+    while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+        // Skip whitespace/newlines/semicolons
+        while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline {
+            pa = pa.advance()
+        }
+        if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof {
+            break
+        }
+
+        let entry_name = pa.current_name()
+
+        // Check for "reassociate" (11 chars, r=114, e=101, a=97, s=115)
+        if entry_name.len == 11 && entry_name.text[0] == 114 as i8 && entry_name.text[2] == 97 as i8 {
+            pa = pa.advance()  // consume "reassociate"
+            pa = pa.expect(TokenKind::Colon)
+            let strat_name = pa.current_name()
+            // "free" = 4, "blocked" = 7, "fano_selective" = 14
+            if strat_name.len == 7 {
+                reassoc = 1  // blocked
+            } else if strat_name.len == 14 {
+                reassoc = 2  // fano_selective
+            }
+            // else: free (0)
+            pa = pa.advance()  // consume strategy name
+        } else {
+            // Parse op declaration (add: ..., mul: ...)
+            let op_pair = parse_algebra_op_decl(pa)
+            pa = op_pair.0
+            rev_ops = Some(Box::new(AlgebraOpDeclList {
+                head: op_pair.1,
+                tail: rev_ops,
+            }))
+        }
+    }
+
+    pa = pa.expect(TokenKind::RBrace)
+    let span = pa.span_from(start)
+
+    let adef = AlgebraDef {
+        name: name,
+        over_type: over_ty,
+        ops: rev_ops,
+        reassoc_strategy: reassoc,
+        span: span,
+    }
+
+    (pa, Item {
+        kind: ItemKind::ItemAlgebra,
+        span: span,
+        is_pub: is_pub,
+        name: name,
+        fn_def: None,
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        policy_def: None,
+        acquisition_policy_def: None,
+        recourse_policy_def: None,
+        decision_policy_def: None,
+        deferral_policy_def: None,
+        transition_policy_def: None,
+        transition_protocol_def: None,
+        monitoring_policy_def: None,
+        alternative_policy_def: None,
+        alternative_frontier_def: None,
+        models_def: None,
+        validation_def: None,
+        audit_def: None,
+        use_path: empty_path(),
+        use_glob: false,
+        use_items: None,
+        effect_def: None,
+        session_decl: None,
+        trait_def: None,
+        algebra_def: Some(Box::new(adef)),
+    })
 }
