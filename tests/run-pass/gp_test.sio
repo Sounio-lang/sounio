@@ -1,0 +1,481 @@
+//@ run-pass
+// gp_test.sio -- Gaussian Process regression integration test
+//
+// Generates data from sin(x) + noise at 20 training points, fits a GP,
+// and validates interpolation, variance behavior, and log marginal likelihood.
+//
+// All functions are inlined since tests cannot import.
+
+// =============================================================================
+// Math helpers
+// =============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn gp_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    var y = 1.5
+    var i = 0
+    while i < 15 {
+        y = 0.5 * (y + scaled / y)
+        i = i + 1
+    }
+    return y / scale_back
+}
+
+fn gp_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 709.0 { return 1.0e308 }
+    if x < -709.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    let inv_ln2 = 1.4426950408889634
+    var k_f = x * inv_ln2
+    var k: i64 = 0
+    if k_f >= 0.0 { k = (k_f + 0.5) as i64 } else { k = (k_f - 0.5) as i64 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 20 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    var kabs = k
+    if kabs < 0 { kabs = 0 - kabs }
+    var pow2 = 2.0
+    var ka = kabs
+    var acc = 1.0
+    while ka > 0 {
+        if ka - (ka / 2) * 2 != 0 { acc = acc * pow2 }
+        pow2 = pow2 * pow2
+        ka = ka / 2
+    }
+    if k >= 0 { result = result * acc } else { result = result / acc }
+    result
+}
+
+fn gp_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return -1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var y = 0.0
+    var a = x
+    let ln2 = 0.6931471805599453
+    while a > 2.0 { a = a * 0.5; y = y + ln2 }
+    while a < 0.5 { a = a * 2.0; y = y - ln2 }
+    let t = (a - 1.0) / (a + 1.0)
+    let t2 = t * t
+    var sum = t
+    var power = t
+    var n = 1
+    while n <= 30 {
+        power = power * t2
+        sum = sum + power / (2.0 * (n as f64) + 1.0)
+        n = n + 1
+    }
+    y + 2.0 * sum
+}
+
+fn gp_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let two_pi = 6.28318530717958647692
+    var a = x
+    while a >= two_pi { a = a - two_pi }
+    while a < 0.0 { a = a + two_pi }
+    if a > 3.14159265358979323846 { a = a - two_pi }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn gp_pi() -> f64 { 3.14159265358979323846 }
+
+// =============================================================================
+// Data structures (inlined)
+// =============================================================================
+
+struct GPData {
+    x: [f64; 64],
+    y: [f64; 64],
+    n: i64
+}
+
+struct GPHyperparams {
+    length_scale: f64,
+    signal_var: f64,
+    noise_var: f64,
+    kernel_type: i64
+}
+
+struct GPModel {
+    hyper: GPHyperparams,
+    L: [f64; 4096],
+    alpha: [f64; 64],
+    n: i64,
+    ok: bool
+}
+
+struct GPPrediction {
+    means: [f64; 256],
+    variances: [f64; 256],
+    n: i64
+}
+
+// =============================================================================
+// Kernels
+// =============================================================================
+
+fn kernel_rbf(x1: f64, x2: f64, length_scale: f64, signal_var: f64) -> f64 with Mut, Div, Panic {
+    let d = x1 - x2
+    signal_var * gp_exp(0.0 - 0.5 * d * d / (length_scale * length_scale))
+}
+
+fn kernel_eval(x1: f64, x2: f64, hyper: GPHyperparams) -> f64 with Mut, Div, Panic {
+    // Only RBF for this test
+    return kernel_rbf(x1, x2, hyper.length_scale, hyper.signal_var)
+}
+
+// =============================================================================
+// Core GP operations
+// =============================================================================
+
+fn gp_build_kernel_matrix(data: GPData, params: GPHyperparams) -> [f64; 4096] with Mut, Div, Panic {
+    var K: [f64; 4096] = [0.0; 4096]
+    let n = data.n
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            let idx = i * n + j
+            let kval = kernel_eval(data.x[i as usize], data.x[j as usize], params)
+            if i == j {
+                K[idx as usize] = kval + params.noise_var
+            } else {
+                K[idx as usize] = kval
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return K
+}
+
+fn gp_cholesky(K: [f64; 4096], n: i64) -> [f64; 4096] with Mut, Div, Panic {
+    var L: [f64; 4096] = [0.0; 4096]
+    var j: i64 = 0
+    while j < n {
+        var sum_diag = 0.0
+        var k: i64 = 0
+        while k < j {
+            let ljk = L[(j * n + k) as usize]
+            sum_diag = sum_diag + ljk * ljk
+            k = k + 1
+        }
+        let diag_val = K[(j * n + j) as usize] - sum_diag
+        if diag_val <= 1.0e-15 {
+            L[(j * n + j) as usize] = 1.0e-8
+        } else {
+            L[(j * n + j) as usize] = gp_sqrt(diag_val)
+        }
+        var i: i64 = j + 1
+        while i < n {
+            var sum_off = 0.0
+            k = 0
+            while k < j {
+                sum_off = sum_off + L[(i * n + k) as usize] * L[(j * n + k) as usize]
+                k = k + 1
+            }
+            L[(i * n + j) as usize] = (K[(i * n + j) as usize] - sum_off) / L[(j * n + j) as usize]
+            i = i + 1
+        }
+        j = j + 1
+    }
+    return L
+}
+
+fn gp_solve_lower(L: [f64; 4096], b: [f64; 64], n: i64) -> [f64; 64] with Mut, Div, Panic {
+    var x: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        var sum = 0.0
+        var j: i64 = 0
+        while j < i {
+            sum = sum + L[(i * n + j) as usize] * x[j as usize]
+            j = j + 1
+        }
+        let diag = L[(i * n + i) as usize]
+        if abs_f64(diag) > 1.0e-15 {
+            x[i as usize] = (b[i as usize] - sum) / diag
+        } else {
+            x[i as usize] = 0.0
+        }
+        i = i + 1
+    }
+    return x
+}
+
+fn gp_solve_upper(L: [f64; 4096], b: [f64; 64], n: i64) -> [f64; 64] with Mut, Div, Panic {
+    var x: [f64; 64] = [0.0; 64]
+    var i: i64 = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var j: i64 = i + 1
+        while j < n {
+            sum = sum + L[(j * n + i) as usize] * x[j as usize]
+            j = j + 1
+        }
+        let diag = L[(i * n + i) as usize]
+        if abs_f64(diag) > 1.0e-15 {
+            x[i as usize] = (b[i as usize] - sum) / diag
+        } else {
+            x[i as usize] = 0.0
+        }
+        i = i - 1
+    }
+    return x
+}
+
+fn gp_cholesky_solve(L: [f64; 4096], b: [f64; 64], n: i64) -> [f64; 64] with Mut, Div, Panic {
+    let z = gp_solve_lower(L, b, n)
+    return gp_solve_upper(L, z, n)
+}
+
+fn gp_fit(data: GPData, params: GPHyperparams) -> GPModel with Mut, Div, Panic {
+    let n = data.n
+    let K = gp_build_kernel_matrix(data, params)
+    let L = gp_cholesky(K, n)
+    var y_buf: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        y_buf[i as usize] = data.y[i as usize]
+        i = i + 1
+    }
+    let alpha = gp_cholesky_solve(L, y_buf, n)
+    return GPModel {
+        hyper: params,
+        L: L,
+        alpha: alpha,
+        n: n,
+        ok: true
+    }
+}
+
+fn gp_predict(model: GPModel, data: GPData, x_star: f64) -> [f64; 2] with Mut, Div, Panic {
+    let n = model.n
+    var result: [f64; 2] = [0.0; 2]
+    var k_star: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        k_star[i as usize] = kernel_eval(x_star, data.x[i as usize], model.hyper)
+        i = i + 1
+    }
+    var mean_val = 0.0
+    i = 0
+    while i < n {
+        mean_val = mean_val + k_star[i as usize] * model.alpha[i as usize]
+        i = i + 1
+    }
+    result[0] = mean_val
+    let v = gp_solve_lower(model.L, k_star, n)
+    let k_ss = kernel_eval(x_star, x_star, model.hyper)
+    var vtv = 0.0
+    i = 0
+    while i < n {
+        vtv = vtv + v[i as usize] * v[i as usize]
+        i = i + 1
+    }
+    var var_val = k_ss - vtv
+    if var_val < 0.0 { var_val = 0.0 }
+    result[1] = var_val
+    return result
+}
+
+fn gp_log_marginal_likelihood(model: GPModel, data: GPData) -> f64 with Mut, Div, Panic {
+    let n = model.n
+    var data_fit = 0.0
+    var i: i64 = 0
+    while i < n {
+        data_fit = data_fit + data.y[i as usize] * model.alpha[i as usize]
+        i = i + 1
+    }
+    data_fit = 0.0 - 0.5 * data_fit
+    var complexity = 0.0
+    i = 0
+    while i < n {
+        complexity = complexity + gp_ln(model.L[(i * n + i) as usize])
+        i = i + 1
+    }
+    complexity = 0.0 - complexity
+    let norm_const = 0.0 - 0.5 * (n as f64) * gp_ln(2.0 * gp_pi())
+    return data_fit + complexity + norm_const
+}
+
+// =============================================================================
+// Simple PRNG for reproducible noise (linear congruential)
+// =============================================================================
+
+fn lcg_next(seed: i64) -> i64 with Mut, Div, Panic {
+    let a: i64 = 16807
+    let m: i64 = 2147483647
+    var result = (seed * a) - ((seed * a) / m) * m
+    if result < 0 { result = result + m }
+    return result
+}
+
+fn lcg_to_f64(seed: i64) -> f64 with Mut, Div, Panic {
+    let m: i64 = 2147483647
+    return 2.0 * ((seed as f64) / (m as f64)) - 1.0
+}
+
+// =============================================================================
+// Test functions
+// =============================================================================
+
+// T1: GP fit succeeds (Cholesky produces positive diagonal)
+fn test_gp_fit(model: GPModel) -> bool with Mut, Div, Panic {
+    if !model.ok { return false }
+    let n = model.n
+    var i: i64 = 0
+    while i < n {
+        let diag = model.L[(i * n + i) as usize]
+        if diag <= 0.0 { return false }
+        if diag != diag { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// T2: Predictions at training points are close to observations
+fn test_interpolation(model: GPModel, data: GPData) -> bool with Mut, Div, Panic {
+    let n = data.n
+    var max_err = 0.0
+    var i: i64 = 0
+    while i < n {
+        let pv = gp_predict(model, data, data.x[i as usize])
+        let err = abs_f64(pv[0] - data.y[i as usize])
+        if err > max_err { max_err = err }
+        i = i + 1
+    }
+    return max_err < 0.2
+}
+
+// T3: Variance small at training points, large far away
+fn test_variance_behavior(model: GPModel, data: GPData) -> bool with Mut, Div, Panic {
+    let pv_near = gp_predict(model, data, data.x[0])
+    let var_near = pv_near[1]
+    let pv_far = gp_predict(model, data, 100.0)
+    let var_far = pv_far[1]
+    if var_near > 0.5 { return false }
+    if var_far < var_near { return false }
+    return true
+}
+
+// T4: Log marginal likelihood is finite and computable
+fn test_lml(model: GPModel, data: GPData) -> bool with Mut, Div, Panic {
+    let lml = gp_log_marginal_likelihood(model, data)
+    if lml != lml { return false }      // not NaN
+    if lml > 1.0e20 { return false }    // not +inf
+    if lml < -1.0e20 { return false }   // not -inf / failure sentinel
+    return true
+}
+
+// =============================================================================
+// Main test runner
+// =============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    println("=== Gaussian Process Regression Tests ===")
+    println("")
+
+    // Generate 20 training points: x in [0, 6], y = sin(x) + noise
+    var data = GPData {
+        x: [0.0; 64],
+        y: [0.0; 64],
+        n: 20
+    }
+
+    var seed: i64 = 42
+    var i: i64 = 0
+    while i < 20 {
+        let xi = (i as f64) * 6.0 / 19.0
+        data.x[i as usize] = xi
+        seed = lcg_next(seed)
+        let noise = lcg_to_f64(seed) * 0.1
+        data.y[i as usize] = gp_sin(xi) + noise
+        i = i + 1
+    }
+
+    let params = GPHyperparams {
+        length_scale: 1.0,
+        signal_var: 1.0,
+        noise_var: 0.01,
+        kernel_type: 0
+    }
+
+    let model = gp_fit(data, params)
+
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    print("T1: GP fit succeeds (Cholesky valid).... ")
+    if test_gp_fit(model) {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("T2: Interpolation at training points.... ")
+    if test_interpolation(model, data) {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("T3: Variance small near, large far...... ")
+    if test_variance_behavior(model, data) {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("T4: Log marginal likelihood finite/neg.. ")
+    if test_lml(model, data) {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    if failed == 0 {
+        println("ALL 4 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}

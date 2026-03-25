@@ -1,0 +1,379 @@
+//@ run-pass
+// SciData — scientific data I/O module test
+//
+// T1: Create dataset, add array, get it back
+// T2: Column statistics (mean, std) correct
+// T3: Metadata set/get works
+// T4: Normalization produces mean~0, std~1
+//
+// All helpers inlined — tests cannot import stdlib.
+
+extern "C" {
+    fn sqrt(x: f64) -> f64
+}
+
+fn t_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    return sqrt(x)
+}
+
+fn t_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// ============================================================================
+// INLINE SciDataset (mirrors stdlib/io/scidata.sio)
+// ============================================================================
+
+struct SciDataset {
+    data: [f64; 16384]
+    array_lengths: [i64; 16]
+    array_names: [i64; 16]
+    n_arrays: i64
+    attr_keys: [i64; 32]
+    attr_values: [f64; 32]
+    n_attrs: i64
+}
+
+fn scidata_new() -> SciDataset {
+    SciDataset {
+        data: [0.0; 16384],
+        array_lengths: [0; 16],
+        array_names: [0; 16],
+        n_arrays: 0,
+        attr_keys: [0; 32],
+        attr_values: [0.0; 32],
+        n_attrs: 0,
+    }
+}
+
+fn scidata_add_array(
+    ds: SciDataset, name_id: i64,
+    src: [f64; 1024], length: i64
+) -> SciDataset with Mut, Panic {
+    var out = ds
+    if out.n_arrays >= 16 { return out }
+    var len = length
+    if len < 0 { len = 0 }
+    if len > 1024 { len = 1024 }
+
+    let idx = out.n_arrays
+    out.array_names[idx as usize] = name_id
+    out.array_lengths[idx as usize] = len
+
+    let base = idx * 1024
+    var i: i64 = 0
+    while i < len {
+        out.data[(base + i) as usize] = src[i as usize]
+        i = i + 1
+    }
+    out.n_arrays = out.n_arrays + 1
+    out
+}
+
+fn scidata_array_len(ds: SciDataset, array_idx: i64) -> i64 with Panic {
+    if array_idx < 0 { return 0 }
+    if array_idx >= ds.n_arrays { return 0 }
+    ds.array_lengths[array_idx as usize]
+}
+
+fn scidata_set_attr(ds: SciDataset, key_id: i64, value: f64) -> SciDataset with Mut, Panic {
+    var out = ds
+    var i: i64 = 0
+    while i < out.n_attrs {
+        if out.attr_keys[i as usize] == key_id {
+            out.attr_values[i as usize] = value
+            return out
+        }
+        i = i + 1
+    }
+    if out.n_attrs >= 32 { return out }
+    let idx = out.n_attrs
+    out.attr_keys[idx as usize] = key_id
+    out.attr_values[idx as usize] = value
+    out.n_attrs = out.n_attrs + 1
+    out
+}
+
+fn scidata_get_attr(ds: SciDataset, key_id: i64) -> f64 with Mut, Panic {
+    var i: i64 = 0
+    while i < ds.n_attrs {
+        if ds.attr_keys[i as usize] == key_id {
+            return ds.attr_values[i as usize]
+        }
+        i = i + 1
+    }
+    return 0.0
+}
+
+fn scidata_col_mean(ds: SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {
+    if array_idx < 0 { return 0.0 }
+    if array_idx >= ds.n_arrays { return 0.0 }
+    let len = ds.array_lengths[array_idx as usize]
+    if len == 0 { return 0.0 }
+
+    let base = array_idx * 1024
+    var sum = 0.0
+    var i: i64 = 0
+    while i < len {
+        sum = sum + ds.data[(base + i) as usize]
+        i = i + 1
+    }
+    sum / (len as f64)
+}
+
+fn scidata_col_std(ds: SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {
+    if array_idx < 0 { return 0.0 }
+    if array_idx >= ds.n_arrays { return 0.0 }
+    let len = ds.array_lengths[array_idx as usize]
+    if len < 2 { return 0.0 }
+
+    let mean = scidata_col_mean(ds, array_idx)
+    let base = array_idx * 1024
+    var sum_sq = 0.0
+    var i: i64 = 0
+    while i < len {
+        let diff = ds.data[(base + i) as usize] - mean
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    t_sqrt(sum_sq / ((len - 1) as f64))
+}
+
+fn scidata_col_normalize(ds: SciDataset, array_idx: i64) -> SciDataset with Mut, Div, Panic {
+    var out = ds
+    if array_idx < 0 { return out }
+    if array_idx >= out.n_arrays { return out }
+    let len = out.array_lengths[array_idx as usize]
+    if len < 2 { return out }
+
+    let mean = scidata_col_mean(out, array_idx)
+    let std = scidata_col_std(out, array_idx)
+    if std < 0.0000000001 { return out }
+
+    let base = array_idx * 1024
+    var i: i64 = 0
+    while i < len {
+        let idx = (base + i) as usize
+        out.data[idx] = (out.data[idx] - mean) / std
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // ==================================================================
+    // T1: Create dataset, add array, get it back
+    // ==================================================================
+    var ds = scidata_new()
+
+    // Build a small source array: [10.0, 20.0, 30.0, 40.0, 50.0]
+    var src: [f64; 1024] = [0.0; 1024]
+    src[0 as usize] = 10.0
+    src[1 as usize] = 20.0
+    src[2 as usize] = 30.0
+    src[3 as usize] = 40.0
+    src[4 as usize] = 50.0
+
+    ds = scidata_add_array(ds, 1, src, 5)
+
+    // Verify n_arrays
+    if ds.n_arrays != 1 {
+        failed = failed + 1
+        println("T1 FAIL: n_arrays != 1")
+    } else {
+        // Verify length
+        let arr_len = scidata_array_len(ds, 0)
+        if arr_len != 5 {
+            failed = failed + 1
+            println("T1 FAIL: array_len != 5")
+        } else {
+            // Verify values stored correctly
+            let v0 = ds.data[0 as usize]
+            let v1 = ds.data[1 as usize]
+            let v2 = ds.data[2 as usize]
+            let v3 = ds.data[3 as usize]
+            let v4 = ds.data[4 as usize]
+
+            let ok0 = t_abs(v0 - 10.0) < 0.001
+            let ok1 = t_abs(v1 - 20.0) < 0.001
+            let ok2 = t_abs(v2 - 30.0) < 0.001
+            let ok3 = t_abs(v3 - 40.0) < 0.001
+            let ok4 = t_abs(v4 - 50.0) < 0.001
+
+            if ok0 {
+                if ok1 {
+                    if ok2 {
+                        if ok3 {
+                            if ok4 {
+                                passed = passed + 1
+                                println("T1 PASS: add/get array")
+                            } else { failed = failed + 1; println("T1 FAIL: v4") }
+                        } else { failed = failed + 1; println("T1 FAIL: v3") }
+                    } else { failed = failed + 1; println("T1 FAIL: v2") }
+                } else { failed = failed + 1; println("T1 FAIL: v1") }
+            } else { failed = failed + 1; println("T1 FAIL: v0") }
+        }
+    }
+
+    // Also add a second array
+    var src2: [f64; 1024] = [0.0; 1024]
+    src2[0 as usize] = 100.0
+    src2[1 as usize] = 200.0
+    src2[2 as usize] = 300.0
+    ds = scidata_add_array(ds, 2, src2, 3)
+
+    if ds.n_arrays == 2 {
+        // Second array at offset 1*1024
+        let sv0 = ds.data[1024 as usize]
+        let sv1 = ds.data[1025 as usize]
+        let sv2 = ds.data[1026 as usize]
+        let sok0 = t_abs(sv0 - 100.0) < 0.001
+        let sok1 = t_abs(sv1 - 200.0) < 0.001
+        let sok2 = t_abs(sv2 - 300.0) < 0.001
+        if sok0 {
+            if sok1 {
+                if sok2 {
+                    passed = passed + 1
+                    println("T1b PASS: second array")
+                } else { failed = failed + 1; println("T1b FAIL") }
+            } else { failed = failed + 1; println("T1b FAIL") }
+        } else { failed = failed + 1; println("T1b FAIL") }
+    } else {
+        failed = failed + 1
+        println("T1b FAIL: n_arrays != 2")
+    }
+
+    // ==================================================================
+    // T2: Column statistics (mean, std)
+    // ==================================================================
+    // Array 0: [10, 20, 30, 40, 50]
+    // mean = 30.0
+    // std = sqrt(((10-30)^2 + (20-30)^2 + (30-30)^2 + (40-30)^2 + (50-30)^2) / 4)
+    //     = sqrt((400 + 100 + 0 + 100 + 400) / 4) = sqrt(250) = 15.8114
+    let mean0 = scidata_col_mean(ds, 0)
+    let std0 = scidata_col_std(ds, 0)
+
+    let mean_ok = t_abs(mean0 - 30.0) < 0.001
+    let std_ok = t_abs(std0 - 15.8114) < 0.01
+
+    if mean_ok {
+        if std_ok {
+            passed = passed + 1
+            println("T2 PASS: mean/std correct")
+        } else {
+            failed = failed + 1
+            print("T2 FAIL: std=")
+            println(std0)
+        }
+    } else {
+        failed = failed + 1
+        print("T2 FAIL: mean=")
+        println(mean0)
+    }
+
+    // Also check array 1: [100, 200, 300]
+    // mean = 200.0
+    // std = sqrt(((100-200)^2 + (200-200)^2 + (300-200)^2) / 2) = sqrt(10000) = 100.0
+    let mean1 = scidata_col_mean(ds, 1)
+    let std1 = scidata_col_std(ds, 1)
+
+    let m1_ok = t_abs(mean1 - 200.0) < 0.001
+    let s1_ok = t_abs(std1 - 100.0) < 0.01
+
+    if m1_ok {
+        if s1_ok {
+            passed = passed + 1
+            println("T2b PASS: array1 mean/std")
+        } else {
+            failed = failed + 1
+            print("T2b FAIL: std1=")
+            println(std1)
+        }
+    } else {
+        failed = failed + 1
+        print("T2b FAIL: mean1=")
+        println(mean1)
+    }
+
+    // ==================================================================
+    // T3: Metadata set/get
+    // ==================================================================
+    ds = scidata_set_attr(ds, 42, 1000.0)
+    ds = scidata_set_attr(ds, 99, 3.0)
+
+    let a42 = scidata_get_attr(ds, 42)
+    let a99 = scidata_get_attr(ds, 99)
+    let a_missing = scidata_get_attr(ds, 7)
+
+    let a42_ok = t_abs(a42 - 1000.0) < 0.001
+    let a99_ok = t_abs(a99 - 3.0) < 0.001
+    let am_ok = t_abs(a_missing) < 0.001
+
+    if a42_ok {
+        if a99_ok {
+            if am_ok {
+                passed = passed + 1
+                println("T3 PASS: attr set/get")
+            } else { failed = failed + 1; println("T3 FAIL: missing key") }
+        } else { failed = failed + 1; println("T3 FAIL: key 99") }
+    } else { failed = failed + 1; println("T3 FAIL: key 42") }
+
+    // Update existing key
+    ds = scidata_set_attr(ds, 42, 2000.0)
+    let a42_upd = scidata_get_attr(ds, 42)
+    if t_abs(a42_upd - 2000.0) < 0.001 {
+        passed = passed + 1
+        println("T3b PASS: attr update")
+    } else {
+        failed = failed + 1
+        println("T3b FAIL: attr update")
+    }
+
+    // ==================================================================
+    // T4: Normalization produces mean~0, std~1
+    // ==================================================================
+    // Normalize array 0: [10, 20, 30, 40, 50]
+    ds = scidata_col_normalize(ds, 0)
+
+    let norm_mean = scidata_col_mean(ds, 0)
+    let norm_std = scidata_col_std(ds, 0)
+
+    let nm_ok = t_abs(norm_mean) < 0.001
+    let ns_ok = t_abs(norm_std - 1.0) < 0.01
+
+    if nm_ok {
+        if ns_ok {
+            passed = passed + 1
+            println("T4 PASS: normalize mean~0 std~1")
+        } else {
+            failed = failed + 1
+            print("T4 FAIL: norm_std=")
+            println(norm_std)
+        }
+    } else {
+        failed = failed + 1
+        print("T4 FAIL: norm_mean=")
+        println(norm_mean)
+    }
+
+    // ==================================================================
+    // Summary
+    // ==================================================================
+    println("---")
+    print(passed)
+    print(" passed, ")
+    print(failed)
+    println(" failed")
+
+    if failed > 0 { return 1 }
+    return 0
+}

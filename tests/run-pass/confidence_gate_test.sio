@@ -1,0 +1,131 @@
+//@ run-pass
+// Test: Confidence Gates for Epistemic Computing
+//
+// Validates:
+//   T1: Gate PASSES when all inputs meet threshold
+//   T2: Gate FAILS when any input is below threshold
+//   T3: CV% gate catches high-uncertainty parameters
+//   T4: Clinical policy enforces both confidence and CV%
+//   T5: Gate identifies worst offender correctly
+
+fn cg_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn cg_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// Gate structures (inline for standalone test)
+struct GateResult {
+    passed: bool, n_checked: i64, n_violations: i64,
+    violations: [i64; 64], violation_reasons: [i64; 64], violation_values: [f64; 64],
+    worst_confidence: f64, worst_idx: i64,
+}
+
+fn gate_result_new() -> GateResult {
+    GateResult {
+        passed: true, n_checked: 0, n_violations: 0,
+        violations: [0; 64], violation_reasons: [0; 64], violation_values: [0.0; 64],
+        worst_confidence: 1.0, worst_idx: -1,
+    }
+}
+
+struct GatePolicy {
+    min_confidence: f64, max_cv_percent: f64, min_dof: f64, action: i64,
+}
+
+fn gate_check_value(
+    policy: &GatePolicy, param_idx: i64,
+    confidence: f64, value: f64, std_uncert: f64, dof: f64,
+    result: &!GateResult
+) with Mut {
+    result.n_checked = result.n_checked + 1
+    if confidence < result.worst_confidence {
+        result.worst_confidence = confidence
+        result.worst_idx = param_idx
+    }
+    if confidence < policy.min_confidence {
+        let vi = result.n_violations
+        if vi < 64 { result.violations[vi] = param_idx; result.violation_reasons[vi] = 1; result.violation_values[vi] = confidence; result.n_violations = vi + 1 }
+        result.passed = false
+    }
+    if policy.max_cv_percent > 0.0 && cg_abs(value) > 1.0e-15 {
+        let cv = 100.0 * std_uncert / cg_abs(value)
+        if cv > policy.max_cv_percent {
+            let vi = result.n_violations
+            if vi < 64 { result.violations[vi] = param_idx; result.violation_reasons[vi] = 2; result.violation_values[vi] = cv; result.n_violations = vi + 1 }
+            result.passed = false
+        }
+    }
+}
+
+fn confidence_gate(confidences: &[f64; 64], n: i64, min_confidence: f64) -> bool {
+    var i = 0
+    while i < n {
+        if i < 64 { if confidences[i] < min_confidence { return false } }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    println("==============================================================")
+    println("  Confidence Gate Tests")
+    println("==============================================================")
+    var n_pass = 0
+
+    // ---- T1: All inputs meet threshold → PASS ----
+    var confs: [f64; 64] = [0.0; 64]
+    confs[0] = 0.95; confs[1] = 0.90; confs[2] = 0.88; confs[3] = 0.92
+    let t1 = confidence_gate(&confs, 4, 0.85)
+    if t1 { println("  PASS T1: Gate passes when all meet threshold") } else { println("  FAIL T1") }
+    if t1 { n_pass = n_pass + 1 }
+
+    // ---- T2: One input below threshold → FAIL ----
+    confs[4] = 0.70  // Below 0.85
+    let t2 = !confidence_gate(&confs, 5, 0.85)
+    if t2 { println("  PASS T2: Gate fails when input below threshold") } else { println("  FAIL T2") }
+    if t2 { n_pass = n_pass + 1 }
+
+    // ---- T3: CV% gate ----
+    let policy_cv = GatePolicy { min_confidence: 0.0, max_cv_percent: 30.0, min_dof: 0.0, action: 0 }
+    var r3 = gate_result_new()
+    // Low CV: value=100, std=10 → CV=10% → PASS
+    gate_check_value(&policy_cv, 0, 1.0, 100.0, 10.0, 100.0, &!r3)
+    // High CV: value=10, std=5 → CV=50% → FAIL
+    gate_check_value(&policy_cv, 1, 1.0, 10.0, 5.0, 100.0, &!r3)
+    let t3 = !r3.passed && r3.n_violations == 1 && r3.violations[0] == 1
+    if t3 { println("  PASS T3: CV% gate catches high-uncertainty param") } else { println("  FAIL T3") }
+    if t3 { n_pass = n_pass + 1 }
+
+    // ---- T4: Clinical policy (confidence + CV%) ----
+    let policy_clin = GatePolicy { min_confidence: 0.90, max_cv_percent: 40.0, min_dof: 0.0, action: 0 }
+    var r4 = gate_result_new()
+    // Good: conf=0.95, CV=20%
+    gate_check_value(&policy_clin, 0, 0.95, 50.0, 10.0, 100.0, &!r4)
+    // Bad confidence: conf=0.80
+    gate_check_value(&policy_clin, 1, 0.80, 50.0, 5.0, 100.0, &!r4)
+    // Bad CV: conf=0.95, CV=60%
+    gate_check_value(&policy_clin, 2, 0.95, 10.0, 6.0, 100.0, &!r4)
+    let t4 = !r4.passed && r4.n_violations == 2
+    if t4 { println("  PASS T4: Clinical policy enforces both criteria") } else { println("  FAIL T4") }
+    if t4 { n_pass = n_pass + 1 }
+
+    // ---- T5: Worst offender identification ----
+    let t5 = r4.worst_confidence < 0.81 && r4.worst_idx == 1
+    println("  Worst confidence: "); println(r4.worst_confidence); println(" at idx "); println(r4.worst_idx)
+    if t5 { println("  PASS T5: Correctly identifies worst offender") } else { println("  FAIL T5") }
+    if t5 { n_pass = n_pass + 1 }
+
+    println("")
+    println("==============================================================")
+    println("  RESULT: "); println(n_pass); println(" / 5 PASS")
+    println("==============================================================")
+    if n_pass == 5 { 0 } else { 1 }
+}

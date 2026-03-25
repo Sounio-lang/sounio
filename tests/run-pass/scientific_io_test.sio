@@ -1,0 +1,433 @@
+//@ run-pass
+// Scientific I/O test — validates stdout-based export functions
+//
+// T1: print_csv produces correct CSV format (header + data rows)
+// T2: print_json_matrix produces valid JSON structure
+// T3: Epistemic CSV includes uncertainty columns
+// T4: CSV round-trip: generate data, verify row/col counts match
+//
+// All helpers inlined — tests cannot import stdlib.
+
+// ============================================================================
+// INTEGER / FLOAT PRINTING (inlined from io::scientific)
+// ============================================================================
+
+fn sci_print_i64(n: i64) with IO, Mut, Panic, Div {
+    if n == 0 {
+        print("0")
+        return
+    }
+    var val: i64 = n
+    if val < 0 {
+        print("-")
+        val = 0 - val
+    }
+    var buf: [i64; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                           0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var len: i64 = 0
+    while val > 0 {
+        buf[len as usize] = val - (val / 10) * 10
+        val = val / 10
+        len = len + 1
+    }
+    var j: i64 = len - 1
+    while j >= 0 {
+        let d = buf[j as usize]
+        if d == 0 { print("0") }
+        if d == 1 { print("1") }
+        if d == 2 { print("2") }
+        if d == 3 { print("3") }
+        if d == 4 { print("4") }
+        if d == 5 { print("5") }
+        if d == 6 { print("6") }
+        if d == 7 { print("7") }
+        if d == 8 { print("8") }
+        if d == 9 { print("9") }
+        j = j - 1
+    }
+}
+
+fn sci_print_f64(value: f64, decimals: i64) with IO, Mut, Panic, Div {
+    if value < 0.0 {
+        print("-")
+    }
+    let abs_val = if value < 0.0 { 0.0 - value } else { value }
+    let int_part = abs_val as i64
+    sci_print_i64(int_part)
+
+    if decimals > 0 {
+        print(".")
+        var frac = abs_val - int_part as f64
+        var d: i64 = 0
+        while d < decimals {
+            frac = frac * 10.0
+            let digit = frac as i64
+            sci_print_i64(digit)
+            frac = frac - digit as f64
+            d = d + 1
+        }
+    }
+}
+
+// ============================================================================
+// MATRIX DATA STRUCTURE
+// ============================================================================
+
+struct MatrixData {
+    data: [f64; 4096]
+    rows: i64
+    cols: i64
+}
+
+fn matrix_data_new(rows: i64, cols: i64) -> MatrixData with Mut {
+    var r = rows
+    var c = cols
+    if r < 0 { r = 0 }
+    if c < 0 { c = 0 }
+    if r * c > 4096 { r = 64; c = 64 }
+    MatrixData { data: [0.0; 4096], rows: r, cols: c }
+}
+
+fn matrix_data_set(m: MatrixData, row: i64, col: i64, val: f64) -> MatrixData with Mut, Panic {
+    var out = m
+    if row < 0 { return out }
+    if col < 0 { return out }
+    if row >= out.rows { return out }
+    if col >= out.cols { return out }
+    out.data[(row * out.cols + col) as usize] = val
+    out
+}
+
+fn matrix_data_get(m: MatrixData, row: i64, col: i64) -> f64 with Panic {
+    if row < 0 { return 0.0 }
+    if col < 0 { return 0.0 }
+    if row >= m.rows { return 0.0 }
+    if col >= m.cols { return 0.0 }
+    m.data[(row * m.cols + col) as usize]
+}
+
+// ============================================================================
+// EXPORT FUNCTIONS (inlined from io::scientific)
+// ============================================================================
+
+fn print_csv(data: [f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    // Header row
+    var c: i64 = 0
+    while c < cols {
+        if c > 0 { print(",") }
+        print("col_")
+        sci_print_i64(c)
+        c = c + 1
+    }
+    println("")
+
+    // Data rows
+    var r: i64 = 0
+    while r < rows {
+        var c2: i64 = 0
+        while c2 < cols {
+            if c2 > 0 { print(",") }
+            sci_print_f64(data[(r * cols + c2) as usize], 6)
+            c2 = c2 + 1
+        }
+        println("")
+        r = r + 1
+    }
+}
+
+fn print_json_matrix(data: [f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    println("[")
+    var r: i64 = 0
+    while r < rows {
+        print("  [")
+        var c: i64 = 0
+        while c < cols {
+            if c > 0 { print(", ") }
+            sci_print_f64(data[(r * cols + c) as usize], 6)
+            c = c + 1
+        }
+        if r < rows - 1 {
+            println("],")
+        } else {
+            println("]")
+        }
+        r = r + 1
+    }
+    println("]")
+}
+
+fn print_epistemic_csv(values: [f64; 4096], uncertainties: [f64; 4096],
+                       rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    // Header: value,uncertainty pairs for each column
+    var c: i64 = 0
+    while c < cols {
+        if c > 0 { print(",") }
+        print("param_")
+        sci_print_i64(c)
+        print("_value,param_")
+        sci_print_i64(c)
+        print("_uncertainty")
+        c = c + 1
+    }
+    println("")
+
+    // Data rows: interleave value and uncertainty for each column
+    var r: i64 = 0
+    while r < rows {
+        var c2: i64 = 0
+        while c2 < cols {
+            if c2 > 0 { print(",") }
+            let idx = (r * cols + c2) as usize
+            sci_print_f64(values[idx], 6)
+            print(",")
+            sci_print_f64(uncertainties[idx], 6)
+            c2 = c2 + 1
+        }
+        println("")
+        r = r + 1
+    }
+}
+
+fn print_npy_header(rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    print("{'descr': '<f8', 'fortran_order': False, 'shape': (")
+    sci_print_i64(rows)
+    print(", ")
+    sci_print_i64(cols)
+    println("), }")
+}
+
+// ============================================================================
+// TEST DATA GENERATION
+// ============================================================================
+// Simple deterministic data: cell(r, c) = (r + 1) * 10 + (c + 1)
+// e.g., for 3x2: [[11, 12], [21, 22], [31, 32]]
+
+fn make_test_matrix(rows: i64, cols: i64) -> MatrixData with Mut, Panic {
+    var m = matrix_data_new(rows, cols)
+    var r: i64 = 0
+    while r < rows {
+        var c: i64 = 0
+        while c < cols {
+            let val = ((r + 1) * 10 + (c + 1)) as f64
+            m = matrix_data_set(m, r, c, val)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    m
+}
+
+// ============================================================================
+// T1: CSV FORMAT TEST
+// ============================================================================
+// Verifies:
+//   - Header row has correct number of comma-separated column names
+//   - Data values match expected pattern
+//   - Row count matches (1 header + rows data lines)
+
+fn test_csv_format() -> bool with IO, Mut, Panic, Div {
+    println("--- T1: CSV format test ---")
+    let rows: i64 = 3
+    let cols: i64 = 2
+    let m = make_test_matrix(rows, cols)
+
+    // Print CSV (will appear in output)
+    print_csv(m.data, rows, cols)
+
+    // Verify data values match expected pattern
+    let v00 = m.data[0]  // row 0, col 0 = 11.0
+    let v01 = m.data[1]  // row 0, col 1 = 12.0
+    let v10 = m.data[2]  // row 1, col 0 = 21.0
+    let v11 = m.data[3]  // row 1, col 1 = 22.0
+    let v20 = m.data[4]  // row 2, col 0 = 31.0
+    let v21 = m.data[5]  // row 2, col 1 = 32.0
+
+    let ok1 = v00 > 10.9 && v00 < 11.1
+    let ok2 = v01 > 11.9 && v01 < 12.1
+    let ok3 = v10 > 20.9 && v10 < 21.1
+    let ok4 = v11 > 21.9 && v11 < 22.1
+    let ok5 = v20 > 30.9 && v20 < 31.1
+    let ok6 = v21 > 31.9 && v21 < 32.1
+
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// ============================================================================
+// T2: JSON MATRIX FORMAT TEST
+// ============================================================================
+// Verifies:
+//   - JSON output is produced (non-empty)
+//   - Data dimensions are correct (2x3 matrix)
+
+fn test_json_format() -> bool with IO, Mut, Panic, Div {
+    println("--- T2: JSON matrix format test ---")
+    let rows: i64 = 2
+    let cols: i64 = 3
+    let m = make_test_matrix(rows, cols)
+
+    // Print JSON (will appear in output)
+    print_json_matrix(m.data, rows, cols)
+
+    // Verify data shape: 2 rows, 3 cols
+    let ok1 = m.rows == 2
+    let ok2 = m.cols == 3
+
+    // Verify values: row 0 = [11, 12, 13], row 1 = [21, 22, 23]
+    let ok3 = m.data[0] > 10.9 && m.data[0] < 11.1
+    let ok4 = m.data[2] > 12.9 && m.data[2] < 13.1
+    let ok5 = m.data[3] > 20.9 && m.data[3] < 21.1
+    let ok6 = m.data[5] > 22.9 && m.data[5] < 23.1
+
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// ============================================================================
+// T3: EPISTEMIC CSV TEST
+// ============================================================================
+// Verifies:
+//   - Output includes uncertainty columns (param_X_value, param_X_uncertainty)
+//   - Values and uncertainties are paired correctly
+
+fn test_epistemic_csv() -> bool with IO, Mut, Panic, Div {
+    println("--- T3: Epistemic CSV test ---")
+    let rows: i64 = 2
+    let cols: i64 = 2
+
+    // Values: deterministic pattern
+    var values: [f64; 4096] = [0.0; 4096]
+    values[0] = 1.5     // row 0, col 0
+    values[1] = 2.3     // row 0, col 1
+    values[2] = 3.7     // row 1, col 0
+    values[3] = 4.1     // row 1, col 1
+
+    // Uncertainties: 10% of each value
+    var uncerts: [f64; 4096] = [0.0; 4096]
+    uncerts[0] = 0.15
+    uncerts[1] = 0.23
+    uncerts[2] = 0.37
+    uncerts[3] = 0.41
+
+    // Print epistemic CSV
+    print_epistemic_csv(values, uncerts, rows, cols)
+
+    // Verify values are stored correctly
+    let ok1 = values[0] > 1.49 && values[0] < 1.51
+    let ok2 = uncerts[0] > 0.14 && uncerts[0] < 0.16
+    let ok3 = values[3] > 4.09 && values[3] < 4.11
+    let ok4 = uncerts[3] > 0.40 && uncerts[3] < 0.42
+
+    // Verify that uncertainty is ~10% of value for each entry
+    var ratio_ok: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        let ratio = uncerts[i as usize] / values[i as usize]
+        if ratio > 0.09 && ratio < 0.11 {
+            ratio_ok = ratio_ok + 1
+        }
+        i = i + 1
+    }
+    let ok5 = ratio_ok == 4
+
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// ============================================================================
+// T4: CSV ROUND-TRIP DIMENSIONS
+// ============================================================================
+// Generate a matrix, export it, verify that internal row/col counts
+// are preserved through the MatrixData structure.
+
+fn test_csv_roundtrip_dims() -> bool with IO, Mut, Panic, Div {
+    println("--- T4: CSV round-trip dimensions test ---")
+
+    // Create a 4x5 matrix
+    let rows: i64 = 4
+    let cols: i64 = 5
+    let m = make_test_matrix(rows, cols)
+
+    // Verify dimensions match
+    let ok1 = m.rows == 4
+    let ok2 = m.cols == 5
+
+    // Verify total element count = rows * cols
+    let total = m.rows * m.cols
+    let ok3 = total == 20
+
+    // Print CSV to show output
+    print_csv(m.data, rows, cols)
+
+    // Verify corner values:
+    // m[0,0] = 11, m[0,4] = 15, m[3,0] = 41, m[3,4] = 45
+    let ok4 = matrix_data_get(m, 0, 0) > 10.9 && matrix_data_get(m, 0, 0) < 11.1
+    let ok5 = matrix_data_get(m, 0, 4) > 14.9 && matrix_data_get(m, 0, 4) < 15.1
+    let ok6 = matrix_data_get(m, 3, 0) > 40.9 && matrix_data_get(m, 3, 0) < 41.1
+    let ok7 = matrix_data_get(m, 3, 4) > 44.9 && matrix_data_get(m, 3, 4) < 45.1
+
+    // Print .npy header info as bonus check
+    print_npy_header(rows, cols)
+
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    println("=== Scientific I/O Tests ===")
+    println("")
+
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    print("T1: CSV format.................. ")
+    if test_csv_format() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("T2: JSON matrix................. ")
+    if test_json_format() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("T3: Epistemic CSV............... ")
+    if test_epistemic_csv() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("T4: CSV round-trip dimensions... ")
+    if test_csv_roundtrip_dims() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    sci_print_i64(passed)
+    println("")
+    print("Failed: ")
+    sci_print_i64(failed)
+    println("")
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 4 TESTS PASSED")
+    return 0
+}

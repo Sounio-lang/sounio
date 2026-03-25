@@ -1,0 +1,374 @@
+//@ run-pass
+// DataFrame dense storage — run-pass test
+//
+// T1: Create DF, set/get values
+// T2: Column mean/std
+// T3: Filter keeps only matching rows
+// T4: Sort orders correctly
+//
+// All helpers inlined — tests cannot import stdlib.
+
+extern "C" {
+    fn sqrt(x: f64) -> f64
+}
+
+fn t_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    return sqrt(x)
+}
+
+fn t_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// ============================================================================
+// INLINE DATAFRAME (mirrors stdlib/data/dataframe.sio)
+// ============================================================================
+
+struct DataFrame {
+    data: [f64; 65536],
+    col_names: [i64; 64],
+    n_rows: i64,
+    n_cols: i64,
+}
+
+fn df_new(n_cols: i64) -> DataFrame {
+    var nc = n_cols
+    if nc < 0 { nc = 0 }
+    if nc > 64 { nc = 64 }
+    DataFrame {
+        data: [0.0; 65536],
+        col_names: [0; 64],
+        n_rows: 0,
+        n_cols: nc,
+    }
+}
+
+fn df_set(df: &!DataFrame, row: i64, col: i64, val: f64) with Mut, Panic {
+    if row < 0 { return }
+    if col < 0 { return }
+    if row >= df.n_rows { return }
+    if col >= df.n_cols { return }
+    let idx = row * 64 + col
+    df.data[idx] = val
+}
+
+fn df_get(df: &DataFrame, row: i64, col: i64) -> f64 with Panic {
+    if row < 0 { return 0.0 }
+    if col < 0 { return 0.0 }
+    if row >= df.n_rows { return 0.0 }
+    if col >= df.n_cols { return 0.0 }
+    let idx = row * 64 + col
+    return df.data[idx]
+}
+
+fn df_add_row(df: &!DataFrame, values: &[f64; 64]) with Mut, Div, Panic {
+    if df.n_rows >= 1024 { return }
+    let row = df.n_rows
+    var col: i64 = 0
+    while col < df.n_cols {
+        let idx = row * 64 + col
+        df.data[idx] = values[col]
+        col = col + 1
+    }
+    df.n_rows = df.n_rows + 1
+}
+
+fn df_col_mean(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    if col < 0 { return 0.0 }
+    if col >= df.n_cols { return 0.0 }
+    if df.n_rows == 0 { return 0.0 }
+    var sum = 0.0
+    var row: i64 = 0
+    while row < df.n_rows {
+        sum = sum + df.data[row * 64 + col]
+        row = row + 1
+    }
+    return sum / (df.n_rows as f64)
+}
+
+fn df_col_std(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    if col < 0 { return 0.0 }
+    if col >= df.n_cols { return 0.0 }
+    if df.n_rows < 2 { return 0.0 }
+    let mean = df_col_mean(df, col)
+    var sum_sq = 0.0
+    var row: i64 = 0
+    while row < df.n_rows {
+        let diff = df.data[row * 64 + col] - mean
+        sum_sq = sum_sq + diff * diff
+        row = row + 1
+    }
+    let variance = sum_sq / ((df.n_rows - 1) as f64)
+    return t_sqrt(variance)
+}
+
+fn df_col_min(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    if col < 0 { return 0.0 }
+    if col >= df.n_cols { return 0.0 }
+    if df.n_rows == 0 { return 0.0 }
+    var m = df.data[0 * 64 + col]
+    var row: i64 = 1
+    while row < df.n_rows {
+        let v = df.data[row * 64 + col]
+        if v < m { m = v }
+        row = row + 1
+    }
+    return m
+}
+
+fn df_col_max(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    if col < 0 { return 0.0 }
+    if col >= df.n_cols { return 0.0 }
+    if df.n_rows == 0 { return 0.0 }
+    var m = df.data[0 * 64 + col]
+    var row: i64 = 1
+    while row < df.n_rows {
+        let v = df.data[row * 64 + col]
+        if v > m { m = v }
+        row = row + 1
+    }
+    return m
+}
+
+fn df_filter_gt(df: &DataFrame, col: i64, threshold: f64) -> DataFrame with Mut, Div, Panic {
+    var result = df_new(df.n_cols)
+    if col < 0 { return result }
+    if col >= df.n_cols { return result }
+    var row: i64 = 0
+    while row < df.n_rows {
+        let v = df.data[row * 64 + col]
+        if v > threshold {
+            if result.n_rows < 1024 {
+                let dst_row = result.n_rows
+                var c: i64 = 0
+                while c < df.n_cols {
+                    result.data[dst_row * 64 + c] = df.data[row * 64 + c]
+                    c = c + 1
+                }
+                result.n_rows = result.n_rows + 1
+            }
+        }
+        row = row + 1
+    }
+    return result
+}
+
+fn df_sort_by(df: &DataFrame, col: i64) -> DataFrame with Mut, Div, Panic {
+    var result = df_new(df.n_cols)
+    if col < 0 { return result }
+    if col >= df.n_cols { return result }
+    var row: i64 = 0
+    while row < df.n_rows {
+        var c: i64 = 0
+        while c < df.n_cols {
+            result.data[row * 64 + c] = df.data[row * 64 + c]
+            c = c + 1
+        }
+        row = row + 1
+    }
+    result.n_rows = df.n_rows
+    // Insertion sort ascending
+    var i: i64 = 1
+    while i < result.n_rows {
+        let key_val = result.data[i * 64 + col]
+        var j = i - 1
+        while j >= 0 {
+            let cmp_val = result.data[j * 64 + col]
+            if cmp_val > key_val {
+                var c2: i64 = 0
+                while c2 < result.n_cols {
+                    let tmp = result.data[(j + 1) * 64 + c2]
+                    result.data[(j + 1) * 64 + c2] = result.data[j * 64 + c2]
+                    result.data[j * 64 + c2] = tmp
+                    c2 = c2 + 1
+                }
+                j = j - 1
+            } else {
+                j = -1
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // ==================================================================
+    // T1: Create DF, set values, get values back
+    // ==================================================================
+    var df1 = df_new(3)
+    // Manually insert 2 rows
+    df1.n_rows = 2
+    df_set(&!df1, 0, 0, 1.0)
+    df_set(&!df1, 0, 1, 2.0)
+    df_set(&!df1, 0, 2, 3.0)
+    df_set(&!df1, 1, 0, 4.0)
+    df_set(&!df1, 1, 1, 5.0)
+    df_set(&!df1, 1, 2, 6.0)
+
+    let v00 = df_get(&df1, 0, 0)
+    let v01 = df_get(&df1, 0, 1)
+    let v02 = df_get(&df1, 0, 2)
+    let v10 = df_get(&df1, 1, 0)
+    let v11 = df_get(&df1, 1, 1)
+    let v12 = df_get(&df1, 1, 2)
+
+    if t_abs(v00 - 1.0) < 0.001 {
+        if t_abs(v01 - 2.0) < 0.001 {
+            if t_abs(v02 - 3.0) < 0.001 {
+                if t_abs(v10 - 4.0) < 0.001 {
+                    if t_abs(v11 - 5.0) < 0.001 {
+                        if t_abs(v12 - 6.0) < 0.001 {
+                            passed = passed + 1
+                            println("T1 PASS: set/get values")
+                        } else { failed = failed + 1; println("T1 FAIL") }
+                    } else { failed = failed + 1; println("T1 FAIL") }
+                } else { failed = failed + 1; println("T1 FAIL") }
+            } else { failed = failed + 1; println("T1 FAIL") }
+        } else { failed = failed + 1; println("T1 FAIL") }
+    } else { failed = failed + 1; println("T1 FAIL") }
+
+    // Also test add_row
+    var df1b = df_new(2)
+    var row_vals: [f64; 64] = [0.0; 64]
+    row_vals[0] = 10.0
+    row_vals[1] = 20.0
+    df_add_row(&!df1b, &row_vals)
+    row_vals[0] = 30.0
+    row_vals[1] = 40.0
+    df_add_row(&!df1b, &row_vals)
+    let ar0 = df_get(&df1b, 0, 0)
+    let ar1 = df_get(&df1b, 1, 1)
+    if t_abs(ar0 - 10.0) < 0.001 {
+        if t_abs(ar1 - 40.0) < 0.001 {
+            passed = passed + 1
+            println("T1b PASS: add_row")
+        } else { failed = failed + 1; println("T1b FAIL") }
+    } else { failed = failed + 1; println("T1b FAIL") }
+
+    // ==================================================================
+    // T2: Column mean/std correct
+    // ==================================================================
+    // col 0: [1, 4] => mean = 2.5, std = sqrt((1.5^2 + 1.5^2) / 1) = sqrt(4.5) ~ 2.1213
+    // col 1: [2, 5] => mean = 3.5
+    let mean0 = df_col_mean(&df1, 0)
+    let mean1 = df_col_mean(&df1, 1)
+    let std0 = df_col_std(&df1, 0)
+
+    // mean of [1,4] = 2.5; std of [1,4] = sqrt(((1-2.5)^2+(4-2.5)^2)/1) = sqrt(4.5) = 2.1213
+    let mean0_ok = t_abs(mean0 - 2.5) < 0.001
+    let mean1_ok = t_abs(mean1 - 3.5) < 0.001
+    let std0_ok = t_abs(std0 - 2.12132) < 0.01
+
+    if mean0_ok {
+        if mean1_ok {
+            if std0_ok {
+                passed = passed + 1
+                println("T2 PASS: col mean/std")
+            } else { failed = failed + 1; print("T2 FAIL: std0="); println(std0) }
+        } else { failed = failed + 1; print("T2 FAIL: mean1="); println(mean1) }
+    } else { failed = failed + 1; print("T2 FAIL: mean0="); println(mean0) }
+
+    // Also check min/max
+    let min0 = df_col_min(&df1, 0)
+    let max0 = df_col_max(&df1, 0)
+    if t_abs(min0 - 1.0) < 0.001 {
+        if t_abs(max0 - 4.0) < 0.001 {
+            passed = passed + 1
+            println("T2b PASS: col min/max")
+        } else { failed = failed + 1; println("T2b FAIL") }
+    } else { failed = failed + 1; println("T2b FAIL") }
+
+    // ==================================================================
+    // T3: Filter keeps only matching rows
+    // ==================================================================
+    // Build a 3-col, 5-row DF:
+    //   row 0: [1, 10, 100]
+    //   row 1: [5, 50, 500]
+    //   row 2: [3, 30, 300]
+    //   row 3: [7, 70, 700]
+    //   row 4: [2, 20, 200]
+    var df3 = df_new(3)
+    df3.n_rows = 5
+    df_set(&!df3, 0, 0, 1.0);  df_set(&!df3, 0, 1, 10.0);  df_set(&!df3, 0, 2, 100.0)
+    df_set(&!df3, 1, 0, 5.0);  df_set(&!df3, 1, 1, 50.0);  df_set(&!df3, 1, 2, 500.0)
+    df_set(&!df3, 2, 0, 3.0);  df_set(&!df3, 2, 1, 30.0);  df_set(&!df3, 2, 2, 300.0)
+    df_set(&!df3, 3, 0, 7.0);  df_set(&!df3, 3, 1, 70.0);  df_set(&!df3, 3, 2, 700.0)
+    df_set(&!df3, 4, 0, 2.0);  df_set(&!df3, 4, 1, 20.0);  df_set(&!df3, 4, 2, 200.0)
+
+    // Filter col 0 > 3.0 => should keep rows 1 (5), 3 (7)
+    let filtered = df_filter_gt(&df3, 0, 3.0)
+    if filtered.n_rows == 2 {
+        let fr0c0 = df_get(&filtered, 0, 0)
+        let fr1c0 = df_get(&filtered, 1, 0)
+        if t_abs(fr0c0 - 5.0) < 0.001 {
+            if t_abs(fr1c0 - 7.0) < 0.001 {
+                // Check that associated columns came along
+                let fr0c2 = df_get(&filtered, 0, 2)
+                if t_abs(fr0c2 - 500.0) < 0.001 {
+                    passed = passed + 1
+                    println("T3 PASS: filter_gt")
+                } else { failed = failed + 1; println("T3 FAIL: associated col") }
+            } else { failed = failed + 1; println("T3 FAIL: row1 val") }
+        } else { failed = failed + 1; println("T3 FAIL: row0 val") }
+    } else {
+        failed = failed + 1
+        print("T3 FAIL: expected 2 rows, got ")
+        println(filtered.n_rows)
+    }
+
+    // ==================================================================
+    // T4: Sort orders correctly
+    // ==================================================================
+    // Sort df3 by col 0 => should be [1, 2, 3, 5, 7]
+    let sorted = df_sort_by(&df3, 0)
+    if sorted.n_rows == 5 {
+        let s0 = df_get(&sorted, 0, 0)
+        let s1 = df_get(&sorted, 1, 0)
+        let s2 = df_get(&sorted, 2, 0)
+        let s3 = df_get(&sorted, 3, 0)
+        let s4 = df_get(&sorted, 4, 0)
+        let sort_ok = t_abs(s0 - 1.0) < 0.001
+        if sort_ok {
+            if t_abs(s1 - 2.0) < 0.001 {
+                if t_abs(s2 - 3.0) < 0.001 {
+                    if t_abs(s3 - 5.0) < 0.001 {
+                        if t_abs(s4 - 7.0) < 0.001 {
+                            // Verify associated column also sorted
+                            let sc2 = df_get(&sorted, 4, 2)
+                            if t_abs(sc2 - 700.0) < 0.001 {
+                                passed = passed + 1
+                                println("T4 PASS: sort_by")
+                            } else { failed = failed + 1; println("T4 FAIL: assoc col") }
+                        } else { failed = failed + 1; println("T4 FAIL: s4") }
+                    } else { failed = failed + 1; println("T4 FAIL: s3") }
+                } else { failed = failed + 1; println("T4 FAIL: s2") }
+            } else { failed = failed + 1; println("T4 FAIL: s1") }
+        } else { failed = failed + 1; print("T4 FAIL: s0="); println(s0) }
+    } else {
+        failed = failed + 1
+        print("T4 FAIL: expected 5 rows, got ")
+        println(sorted.n_rows)
+    }
+
+    // ==================================================================
+    // Summary
+    // ==================================================================
+    println("---")
+    print(passed)
+    print(" passed, ")
+    print(failed)
+    println(" failed")
+
+    if failed > 0 { return 1 }
+    return 0
+}

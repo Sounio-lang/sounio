@@ -1,0 +1,598 @@
+//@ run-pass
+// NLME Population PK module tests
+//
+// T1: 1-compartment oral PK model produces reasonable concentrations
+// T2: Individual parameter computation (theta * exp(eta)) works
+// T3: Objective function (-2LL) computable for synthetic data
+// T4: FOCE inner optimization (eta estimation) converges for single individual
+
+extern "C" {
+    fn exp(x: f64) -> f64
+    fn log(x: f64) -> f64
+    fn sqrt(x: f64) -> f64
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn t_abs(x: f64) -> f64 { if x < 0.0 { return 0.0 - x } return x }
+fn t_max(a: f64, b: f64) -> f64 { if a > b { return a } return b }
+
+fn t_exp(x: f64) -> f64 {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    return exp(x)
+}
+
+fn t_log(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    return log(x)
+}
+
+fn t_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    return sqrt(x)
+}
+
+fn print_f64(v: f64) with IO {
+    if v < 0.0 {
+        print("-")
+        let neg_v = 0.0 - v
+        let int_part = neg_v as i64
+        let frac = ((neg_v - (int_part as f64)) * 1000.0) as i64
+        print_int(int_part)
+        print(".")
+        if frac < 100 { print("0") }
+        if frac < 10 { print("0") }
+        print_int(frac)
+    } else {
+        let int_part = v as i64
+        let frac = ((v - (int_part as f64)) * 1000.0) as i64
+        print_int(int_part)
+        print(".")
+        if frac < 100 { print("0") }
+        if frac < 10 { print("0") }
+        print_int(frac)
+    }
+}
+
+// ============================================================================
+// DATA STRUCTURES (mirroring nlme.sio)
+// ============================================================================
+
+struct NLMEData {
+    times: [f64; 2048],
+    observations: [f64; 2048],
+    n_obs: [i64; 32],
+    doses: [f64; 32],
+    n_individuals: i64
+}
+
+struct NLMEParams {
+    theta: [f64; 16],
+    omega: [f64; 256],
+    sigma: f64,
+    n_theta: i64,
+    n_eta: i64
+}
+
+struct ParamVec { data: [f64; 16] }
+struct EtaVec { data: [f64; 16] }
+struct GradVec { data: [f64; 16] }
+struct PredVec { data: [f64; 64] }
+
+// ============================================================================
+// PK MODEL: 1-compartment oral
+// ============================================================================
+
+// params[0] = ka, params[1] = CL, params[2] = V, params[3] = F, params[4] = dose
+fn pk_1comp_oral(t: f64, params: &ParamVec, n: i64) -> f64 with Div, Panic {
+    let ka = params.data[0]
+    let cl = params.data[1]
+    let v  = params.data[2]
+    let f  = params.data[3]
+    let dose = params.data[4]
+
+    if v < 1.0e-30 { return 0.0 }
+    let ke = cl / v
+
+    let diff = t_abs(ka - ke)
+    if diff < 1.0e-10 {
+        return f * dose * ka / v * t * t_exp(0.0 - ke * t)
+    }
+
+    let coeff = f * dose * ka / (v * (ka - ke))
+    return coeff * (t_exp(0.0 - ke * t) - t_exp(0.0 - ka * t))
+}
+
+// ============================================================================
+// CORE FUNCTIONS (self-contained for test)
+// ============================================================================
+
+fn compute_individual_params(
+    theta: &ParamVec,
+    eta: &EtaVec,
+    n_theta: i64,
+    n_eta: i64,
+    out: &!ParamVec
+) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n_theta {
+        if i < n_eta {
+            out.data[i] = theta.data[i] * t_exp(eta.data[i])
+        } else {
+            out.data[i] = theta.data[i]
+        }
+        i = i + 1
+    }
+}
+
+fn compute_individual_predictions(
+    pk_model: fn(f64, &ParamVec, i64) -> f64 with Div, Panic,
+    ind_params: &ParamVec,
+    n_params: i64,
+    data: &NLMEData,
+    ind_idx: i64,
+    pred: &!PredVec
+) with Mut, Div, Panic {
+    let base = ind_idx * 64
+    let n = data.n_obs[ind_idx]
+    var j: i64 = 0
+    while j < n {
+        let t = data.times[base + j]
+        pred.data[j] = pk_model(t, ind_params, n_params)
+        j = j + 1
+    }
+}
+
+fn individual_obj_function(
+    pk_model: fn(f64, &ParamVec, i64) -> f64 with Div, Panic,
+    data: &NLMEData,
+    ind_idx: i64,
+    theta: &ParamVec,
+    eta: &EtaVec,
+    params: &NLMEParams
+) -> f64 with Mut, Div, Panic {
+    let n_theta = params.n_theta
+    let n_eta = params.n_eta
+    let sigma = params.sigma
+
+    var ind_params: ParamVec = ParamVec { data: [0.0; 16] }
+    compute_individual_params(theta, eta, n_theta, n_eta, &!ind_params)
+
+    var pred: PredVec = PredVec { data: [0.0; 64] }
+    compute_individual_predictions(pk_model, &ind_params, n_theta, data, ind_idx, &!pred)
+
+    let base = ind_idx * 64
+    let n_obs = data.n_obs[ind_idx]
+    var rss: f64 = 0.0
+    var j: i64 = 0
+    while j < n_obs {
+        let resid = data.observations[base + j] - pred.data[j]
+        rss = rss + resid * resid
+        j = j + 1
+    }
+
+    let pi_val: f64 = 3.141592653589793
+    var obj: f64 = (n_obs as f64) * t_log(2.0 * pi_val * sigma) + rss / sigma
+
+    var k: i64 = 0
+    while k < n_eta {
+        let omega_kk = params.omega[k * 16 + k]
+        if omega_kk > 1.0e-30 {
+            obj = obj + eta.data[k] * eta.data[k] / omega_kk + t_log(omega_kk)
+        }
+        k = k + 1
+    }
+
+    return obj
+}
+
+fn optimize_eta_newton(
+    pk_model: fn(f64, &ParamVec, i64) -> f64 with Div, Panic,
+    data: &NLMEData,
+    ind_idx: i64,
+    theta: &ParamVec,
+    params: &NLMEParams,
+    eta_out: &!EtaVec,
+    max_inner_iter: i64
+) with Mut, Div, Panic {
+    let n_eta = params.n_eta
+    let n_theta = params.n_theta
+    let sigma = params.sigma
+    let base = ind_idx * 64
+    let n_obs = data.n_obs[ind_idx]
+
+    var k: i64 = 0
+    while k < 16 { eta_out.data[k] = 0.0; k = k + 1 }
+
+    var iter: i64 = 0
+    while iter < max_inner_iter {
+        var ind_params: ParamVec = ParamVec { data: [0.0; 16] }
+        compute_individual_params(theta, eta_out, n_theta, n_eta, &!ind_params)
+
+        var pred: PredVec = PredVec { data: [0.0; 64] }
+        compute_individual_predictions(pk_model, &ind_params, n_theta, data, ind_idx, &!pred)
+
+        var resid: PredVec = PredVec { data: [0.0; 64] }
+        var j: i64 = 0
+        while j < n_obs {
+            resid.data[j] = data.observations[base + j] - pred.data[j]
+            j = j + 1
+        }
+
+        // Finite-difference sensitivities
+        var sens: [f64; 1024] = [0.0; 1024]
+        let fd_eps: f64 = 1.0e-5
+        k = 0
+        while k < n_eta {
+            var eta_pert: EtaVec = EtaVec { data: [0.0; 16] }
+            var m: i64 = 0
+            while m < n_eta { eta_pert.data[m] = eta_out.data[m]; m = m + 1 }
+            eta_pert.data[k] = eta_pert.data[k] + fd_eps
+
+            var ip_pert: ParamVec = ParamVec { data: [0.0; 16] }
+            compute_individual_params(theta, &eta_pert, n_theta, n_eta, &!ip_pert)
+
+            var pred_pert: PredVec = PredVec { data: [0.0; 64] }
+            compute_individual_predictions(pk_model, &ip_pert, n_theta, data, ind_idx, &!pred_pert)
+
+            j = 0
+            while j < n_obs {
+                sens[k * 64 + j] = (pred_pert.data[j] - pred.data[j]) / fd_eps
+                j = j + 1
+            }
+            k = k + 1
+        }
+
+        // Gradient + diagonal Hessian
+        var grad: GradVec = GradVec { data: [0.0; 16] }
+        var hess_diag: [f64; 16] = [0.0; 16]
+
+        k = 0
+        while k < n_eta {
+            var g: f64 = 0.0
+            var h: f64 = 0.0
+            j = 0
+            while j < n_obs {
+                g = g - 2.0 / sigma * resid.data[j] * sens[k * 64 + j]
+                h = h + 2.0 / sigma * sens[k * 64 + j] * sens[k * 64 + j]
+                j = j + 1
+            }
+            let omega_kk = params.omega[k * 16 + k]
+            if omega_kk > 1.0e-30 {
+                g = g + 2.0 * eta_out.data[k] / omega_kk
+                h = h + 2.0 / omega_kk
+            }
+            grad.data[k] = g
+            hess_diag[k] = h
+            k = k + 1
+        }
+
+        // Newton step with damping
+        var max_step: f64 = 0.0
+        k = 0
+        while k < n_eta {
+            var delta: f64 = 0.0
+            if t_abs(hess_diag[k]) > 1.0e-30 {
+                delta = 0.0 - grad.data[k] / hess_diag[k]
+            }
+            if delta > 2.0 { delta = 2.0 }
+            if delta < -2.0 { delta = -2.0 }
+            eta_out.data[k] = eta_out.data[k] + delta
+            let abs_delta = t_abs(delta)
+            if abs_delta > max_step { max_step = abs_delta }
+            k = k + 1
+        }
+
+        if max_step < 1.0e-6 {
+            iter = max_inner_iter
+        } else {
+            iter = iter + 1
+        }
+    }
+}
+
+// ============================================================================
+// SYNTHETIC DATA GENERATOR
+// ============================================================================
+
+fn generate_synthetic_individual(
+    data: &!NLMEData,
+    ind_idx: i64,
+    ka: f64,
+    cl: f64,
+    v: f64,
+    f_bio: f64,
+    dose: f64,
+    n_obs: i64,
+    noise_seed: i64
+) with Mut, Div, Panic {
+    let base = ind_idx * 64
+    data.n_obs[ind_idx] = n_obs
+    data.doses[ind_idx] = dose
+
+    let ke = cl / v
+    var seed = noise_seed
+
+    var j: i64 = 0
+    while j < n_obs {
+        var t: f64 = 0.0
+        if j == 0 { t = 0.5 }
+        if j == 1 { t = 1.0 }
+        if j == 2 { t = 2.0 }
+        if j == 3 { t = 4.0 }
+        if j == 4 { t = 6.0 }
+        if j == 5 { t = 8.0 }
+        if j == 6 { t = 12.0 }
+        if j == 7 { t = 24.0 }
+        data.times[base + j] = t
+
+        let diff = t_abs(ka - ke)
+        var conc: f64 = 0.0
+        if diff < 1.0e-10 {
+            conc = f_bio * dose * ka / v * t * t_exp(0.0 - ke * t)
+        } else {
+            let coeff = f_bio * dose * ka / (v * (ka - ke))
+            conc = coeff * (t_exp(0.0 - ke * t) - t_exp(0.0 - ka * t))
+        }
+
+        seed = ((seed * 1103515245 + 12345) % 2147483648 + 2147483648) % 2147483648
+        let u = (seed as f64) / 2147483648.0 - 0.5
+        conc = conc * (1.0 + 0.05 * u)
+        if conc < 0.0 { conc = 0.0 }
+
+        data.observations[base + j] = conc
+        j = j + 1
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var pass_count: i64 = 0
+    var fail_count: i64 = 0
+
+    // ========================================================================
+    // T1: 1-compartment oral PK model produces reasonable concentrations
+    // ========================================================================
+    // Caffeine-like PK: ka=4.4/h, CL=5.46 L/h, V=42 L, F=0.99, dose=200mg
+    {
+        var params: ParamVec = ParamVec { data: [0.0; 16] }
+        params.data[0] = 4.4
+        params.data[1] = 5.46
+        params.data[2] = 42.0
+        params.data[3] = 0.99
+        params.data[4] = 200.0
+
+        let c_1h = pk_1comp_oral(1.0, &params, 5)
+        let c_4h = pk_1comp_oral(4.0, &params, 5)
+        let c_24h = pk_1comp_oral(24.0, &params, 5)
+        let c_0h = pk_1comp_oral(0.0, &params, 5)
+
+        let ok_0 = t_abs(c_0h) < 0.01
+        let ok_1 = c_1h > 1.0 && c_1h < 20.0
+        let ok_4 = c_4h > 0.1 && c_4h < c_1h * 2.0
+        let ok_24 = c_24h > 0.0 && c_24h < c_4h
+
+        if ok_0 && ok_1 && ok_4 && ok_24 {
+            print("T1 PASS: 1-comp oral PK model -- C(1h)=")
+            print_f64(c_1h)
+            print(", C(4h)=")
+            print_f64(c_4h)
+            print(", C(24h)=")
+            print_f64(c_24h)
+            println("")
+            pass_count = pass_count + 1
+        } else {
+            print("T1 FAIL: 1-comp oral PK -- C(0)=")
+            print_f64(c_0h)
+            print(", C(1h)=")
+            print_f64(c_1h)
+            print(", C(4h)=")
+            print_f64(c_4h)
+            print(", C(24h)=")
+            print_f64(c_24h)
+            println("")
+            fail_count = fail_count + 1
+        }
+    }
+
+    // ========================================================================
+    // T2: Individual parameter computation (theta * exp(eta)) works
+    // ========================================================================
+    {
+        var theta: ParamVec = ParamVec { data: [0.0; 16] }
+        theta.data[0] = 10.0
+        theta.data[1] = 50.0
+        theta.data[2] = 2.0
+
+        var eta: EtaVec = EtaVec { data: [0.0; 16] }
+        eta.data[0] = 0.3
+        eta.data[1] = -0.2
+
+        var out: ParamVec = ParamVec { data: [0.0; 16] }
+        compute_individual_params(&theta, &eta, 3, 2, &!out)
+
+        let cl_expected = 10.0 * t_exp(0.3)
+        let v_expected  = 50.0 * t_exp(-0.2)
+        let ka_expected = 2.0
+
+        let cl_ok = t_abs(out.data[0] - cl_expected) < 0.01
+        let v_ok  = t_abs(out.data[1] - v_expected) < 0.01
+        let ka_ok = t_abs(out.data[2] - ka_expected) < 0.01
+
+        if cl_ok && v_ok && ka_ok {
+            print("T2 PASS: Individual params -- CL_i=")
+            print_f64(out.data[0])
+            print(", V_i=")
+            print_f64(out.data[1])
+            print(", ka_i=")
+            print_f64(out.data[2])
+            println("")
+            pass_count = pass_count + 1
+        } else {
+            print("T2 FAIL: Individual params -- CL_i=")
+            print_f64(out.data[0])
+            print(" (exp=")
+            print_f64(cl_expected)
+            print("), V_i=")
+            print_f64(out.data[1])
+            println("")
+            fail_count = fail_count + 1
+        }
+    }
+
+    // ========================================================================
+    // T3: Objective function (-2LL) computable for synthetic data
+    // ========================================================================
+    {
+        var data: NLMEData = NLMEData {
+            times: [0.0; 2048],
+            observations: [0.0; 2048],
+            n_obs: [0; 32],
+            doses: [0.0; 32],
+            n_individuals: 1
+        }
+        generate_synthetic_individual(
+            &!data, 0,
+            4.4, 5.46, 42.0, 0.99, 200.0,
+            8, 42
+        )
+
+        var params: NLMEParams = NLMEParams {
+            theta: [0.0; 16],
+            omega: [0.0; 256],
+            sigma: 1.0,
+            n_theta: 5,
+            n_eta: 3
+        }
+        params.theta[0] = 4.4
+        params.theta[1] = 5.46
+        params.theta[2] = 42.0
+        params.theta[3] = 0.99
+        params.theta[4] = 200.0
+        params.omega[0] = 0.09
+        params.omega[17] = 0.09
+        params.omega[34] = 0.04
+
+        var theta: ParamVec = ParamVec { data: [0.0; 16] }
+        var k: i64 = 0
+        while k < 5 { theta.data[k] = params.theta[k]; k = k + 1 }
+
+        var eta_zero: EtaVec = EtaVec { data: [0.0; 16] }
+
+        let ofv = individual_obj_function(pk_1comp_oral, &data, 0, &theta, &eta_zero, &params)
+
+        let ofv_finite = ofv > -1000.0 && ofv < 10000.0
+        let ofv_reasonable = t_abs(ofv) < 5000.0
+
+        if ofv_finite && ofv_reasonable {
+            print("T3 PASS: OFV(-2LL)=")
+            print_f64(ofv)
+            println(" (finite, reasonable)")
+            pass_count = pass_count + 1
+        } else {
+            print("T3 FAIL: OFV(-2LL)=")
+            print_f64(ofv)
+            println(" (expected finite value)")
+            fail_count = fail_count + 1
+        }
+    }
+
+    // ========================================================================
+    // T4: FOCE inner optimization (eta estimation) converges
+    // ========================================================================
+    {
+        var data: NLMEData = NLMEData {
+            times: [0.0; 2048],
+            observations: [0.0; 2048],
+            n_obs: [0; 32],
+            doses: [0.0; 32],
+            n_individuals: 1
+        }
+
+        let true_ka = 4.4 * t_exp(0.2)
+        let true_cl = 5.46 * t_exp(-0.15)
+        let true_v  = 42.0 * t_exp(0.1)
+        generate_synthetic_individual(
+            &!data, 0,
+            true_ka, true_cl, true_v, 0.99, 200.0,
+            8, 137
+        )
+
+        var params: NLMEParams = NLMEParams {
+            theta: [0.0; 16],
+            omega: [0.0; 256],
+            sigma: 0.5,
+            n_theta: 5,
+            n_eta: 3
+        }
+        params.theta[0] = 4.4
+        params.theta[1] = 5.46
+        params.theta[2] = 42.0
+        params.theta[3] = 0.99
+        params.theta[4] = 200.0
+        params.omega[0] = 0.09
+        params.omega[17] = 0.09
+        params.omega[34] = 0.04
+
+        var theta: ParamVec = ParamVec { data: [0.0; 16] }
+        var k: i64 = 0
+        while k < 5 { theta.data[k] = params.theta[k]; k = k + 1 }
+
+        var eta_est: EtaVec = EtaVec { data: [0.0; 16] }
+        optimize_eta_newton(pk_1comp_oral, &data, 0, &theta, &params, &!eta_est, 30)
+
+        let eta_bounded = t_abs(eta_est.data[0]) < 2.0 && t_abs(eta_est.data[1]) < 2.0 && t_abs(eta_est.data[2]) < 2.0
+
+        var eta_zero: EtaVec = EtaVec { data: [0.0; 16] }
+        let ofv_zero = individual_obj_function(pk_1comp_oral, &data, 0, &theta, &eta_zero, &params)
+        let ofv_est  = individual_obj_function(pk_1comp_oral, &data, 0, &theta, &eta_est, &params)
+        let ofv_improved = ofv_est <= ofv_zero + 0.01
+
+        if eta_bounded && ofv_improved {
+            print("T4 PASS: FOCE inner -- eta=[")
+            print_f64(eta_est.data[0])
+            print(", ")
+            print_f64(eta_est.data[1])
+            print(", ")
+            print_f64(eta_est.data[2])
+            print("] OFV: ")
+            print_f64(ofv_zero)
+            print(" -> ")
+            print_f64(ofv_est)
+            println("")
+            pass_count = pass_count + 1
+        } else {
+            print("T4 FAIL: FOCE inner -- eta=[")
+            print_f64(eta_est.data[0])
+            print(", ")
+            print_f64(eta_est.data[1])
+            print(", ")
+            print_f64(eta_est.data[2])
+            print("] bounded=")
+            if eta_bounded { print("Y") } else { print("N") }
+            print(" improved=")
+            if ofv_improved { print("Y") } else { print("N") }
+            println("")
+            fail_count = fail_count + 1
+        }
+    }
+
+    // ========================================================================
+    // Summary
+    // ========================================================================
+    println("")
+    print("NLME tests: ")
+    print_int(pass_count)
+    print(" passed, ")
+    print_int(fail_count)
+    println(" failed")
+
+    if fail_count > 0 { return 1 }
+    return 0
+}

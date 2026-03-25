@@ -1,0 +1,199 @@
+//@ run-pass
+// Test: 64-Entry GUM Uncertainty Budget
+//
+// Validates:
+//   T1: Budget with >4 entries computes correctly
+//   T2: Welch-Satterthwaite effective DOF correct
+//   T3: Ranking identifies dominant source
+//   T4: Percent contributions sum to 100%
+//   T5: Parameter sensitivity budget from ODE params
+
+fn b64_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn b64_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ============================================================================
+// Inline budget64 structures (same as stdlib/epistemic/budget64.sio)
+// ============================================================================
+
+struct Budget64 {
+    result_value: f64, confidence: f64, entry_count: i64,
+    source_types: [i64; 64], param_indices: [i64; 64],
+    estimates: [f64; 64], std_uncerts: [f64; 64],
+    sensitivities: [f64; 64], contributions: [f64; 64], dofs: [f64; 64],
+    combined_variance: f64, combined_std_uncert: f64, effective_dof: f64,
+    rank_indices: [i64; 64],
+}
+
+fn budget64_new(result_value: f64, confidence: f64) -> Budget64 {
+    Budget64 {
+        result_value: result_value, confidence: confidence, entry_count: 0,
+        source_types: [0; 64], param_indices: [-1; 64],
+        estimates: [0.0; 64], std_uncerts: [0.0; 64],
+        sensitivities: [0.0; 64], contributions: [0.0; 64], dofs: [1.0; 64],
+        combined_variance: 0.0, combined_std_uncert: 0.0, effective_dof: 0.0,
+        rank_indices: [0; 64],
+    }
+}
+
+fn budget64_add_type_b(b: &!Budget64, param_idx: i64, estimate: f64, std_uncert: f64, sensitivity: f64) with Mut {
+    let idx = b.entry_count
+    if idx >= 64 { return }
+    let contrib = sensitivity * sensitivity * std_uncert * std_uncert
+    b.source_types[idx] = 1
+    b.param_indices[idx] = param_idx
+    b.estimates[idx] = estimate
+    b.std_uncerts[idx] = std_uncert
+    b.sensitivities[idx] = sensitivity
+    b.contributions[idx] = contrib
+    b.dofs[idx] = 1.0e30
+    b.entry_count = idx + 1
+}
+
+fn budget64_add_type_a(b: &!Budget64, param_idx: i64, estimate: f64, std_uncert: f64, sensitivity: f64, n_samples: f64) with Mut {
+    let idx = b.entry_count
+    if idx >= 64 { return }
+    let dof = n_samples - 1.0
+    let contrib = sensitivity * sensitivity * std_uncert * std_uncert
+    b.source_types[idx] = 0
+    b.param_indices[idx] = param_idx
+    b.estimates[idx] = estimate
+    b.std_uncerts[idx] = std_uncert
+    b.sensitivities[idx] = sensitivity
+    b.contributions[idx] = contrib
+    b.dofs[idx] = dof
+    b.entry_count = idx + 1
+}
+
+fn budget64_finalize(b: &!Budget64) with Mut {
+    var total_var = 0.0
+    var i = 0
+    while i < b.entry_count {
+        if i < 64 { total_var = total_var + b.contributions[i] }
+        i = i + 1
+    }
+    b.combined_variance = total_var
+    b.combined_std_uncert = b64_sqrt(total_var)
+
+    let u_c4 = total_var * total_var
+    var denom = 0.0
+    i = 0
+    while i < b.entry_count {
+        if i < 64 && b.dofs[i] < 1.0e20 {
+            let c4 = b.contributions[i] * b.contributions[i]
+            denom = denom + c4 / b.dofs[i]
+        }
+        i = i + 1
+    }
+    if denom > 1.0e-15 { b.effective_dof = u_c4 / denom }
+    else { b.effective_dof = 1.0e30 }
+
+    // Ranking
+    i = 0
+    while i < b.entry_count { if i < 64 { b.rank_indices[i] = i }; i = i + 1 }
+    i = 1
+    while i < b.entry_count {
+        if i < 64 {
+            let key_idx = b.rank_indices[i]
+            let key_val = b.contributions[key_idx]
+            var j = i - 1
+            var done = false
+            while j >= 0 && !done {
+                if j < 64 {
+                    let rj = b.rank_indices[j]
+                    if b.contributions[rj] < key_val {
+                        b.rank_indices[j + 1] = b.rank_indices[j]
+                        j = j - 1
+                    } else { done = true }
+                } else { done = true }
+            }
+            b.rank_indices[j + 1] = key_idx
+        }
+        i = i + 1
+    }
+}
+
+fn budget64_percent(b: &Budget64, idx: i64) -> f64 {
+    if b.combined_variance < 1.0e-15 { return 0.0 }
+    if idx < 0 || idx >= b.entry_count { return 0.0 }
+    100.0 * b.contributions[idx] / b.combined_variance
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    println("==============================================================")
+    println("  64-Entry GUM Uncertainty Budget Tests")
+    println("==============================================================")
+    var n_pass = 0
+
+    // ---- T1: Budget with 10 entries ----
+    var b = budget64_new(50.0, 0.95)
+    // Add 10 entries with known contributions: 1, 4, 9, 16, 25, 36, 49, 64, 81, 100
+    // contribution = sensitivity^2 * std_uncert^2 = 1^2 * k^2 = k^2
+    var k = 1
+    while k <= 10 {
+        budget64_add_type_b(&!b, k, 10.0 * (k as f64), k as f64, 1.0)
+        k = k + 1
+    }
+    budget64_finalize(&!b)
+
+    // Combined variance = 1+4+9+16+25+36+49+64+81+100 = 385
+    let expected_var = 385.0
+    let var_err = b64_abs(b.combined_variance - expected_var)
+    println("  T1: Combined variance = "); println(b.combined_variance)
+    println("  Expected: 385.0, diff: "); println(var_err)
+    let t1 = var_err < 0.01
+    if t1 { println("  PASS T1: 10-entry budget computes correctly") } else { println("  FAIL T1") }
+    if t1 { n_pass = n_pass + 1 }
+
+    // ---- T2: Effective DOF (all Type B -> ∞) ----
+    let t2 = b.effective_dof > 1.0e20
+    if t2 { println("  PASS T2: Type B entries → infinite DOF") } else { println("  FAIL T2") }
+    if t2 { n_pass = n_pass + 1 }
+
+    // ---- T3: Dominant source is entry 10 (contribution=100) ----
+    let dom_idx = b.rank_indices[0]
+    let dom_pct = budget64_percent(&b, dom_idx)
+    println("  T3: Dominant source index: "); println(dom_idx)
+    println("  Dominant contribution: "); println(dom_pct); println(" %")
+    // Entry 10 (index 9): contribution 100, pct = 100/385 ≈ 25.97%
+    let t3 = dom_idx == 9 && b64_abs(dom_pct - 25.974) < 1.0
+    if t3 { println("  PASS T3: Correctly identified dominant source") } else { println("  FAIL T3") }
+    if t3 { n_pass = n_pass + 1 }
+
+    // ---- T4: Percent contributions sum to ~100% ----
+    var pct_sum = 0.0
+    var i = 0
+    while i < b.entry_count {
+        if i < 64 { pct_sum = pct_sum + budget64_percent(&b, i) }
+        i = i + 1
+    }
+    println("  T4: Sum of percent contributions: "); println(pct_sum)
+    let t4 = b64_abs(pct_sum - 100.0) < 0.1
+    if t4 { println("  PASS T4: Contributions sum to 100%") } else { println("  FAIL T4") }
+    if t4 { n_pass = n_pass + 1 }
+
+    // ---- T5: Budget with Type A entries has finite DOF ----
+    var b2 = budget64_new(100.0, 0.95)
+    budget64_add_type_a(&!b2, 0, 50.0, 2.0, 1.0, 10.0)  // DOF=9
+    budget64_add_type_a(&!b2, 1, 30.0, 3.0, 1.0, 20.0)  // DOF=19
+    budget64_finalize(&!b2)
+    println("  T5: Effective DOF with Type A: "); println(b2.effective_dof)
+    let t5 = b2.effective_dof > 5.0 && b2.effective_dof < 100.0
+    if t5 { println("  PASS T5: Welch-Satterthwaite DOF computed") } else { println("  FAIL T5") }
+    if t5 { n_pass = n_pass + 1 }
+
+    println("")
+    println("==============================================================")
+    println("  RESULT: "); println(n_pass); println(" / 5 PASS")
+    println("==============================================================")
+    if n_pass == 5 { 0 } else { 1 }
+}
