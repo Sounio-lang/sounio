@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="./bin/souc"
 SELFHOST_RUN="./scripts/lib/run_selfhost_fresh.sh"
 SH="self-hosted/compiler/main.sio"
 SUMMARY_SMOKE="self-hosted/compiler/render_streaming_body_smoke.sio"

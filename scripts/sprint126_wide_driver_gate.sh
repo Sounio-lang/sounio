@@ -3,7 +3,7 @@
 # Tests that wide_driver.sio provides batch compilation for 1024-function modules.
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
 DRIVER=self-hosted/native/wide_driver.sio
 WIDE=self-hosted/native/wide.sio

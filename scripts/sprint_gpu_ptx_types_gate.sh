@@ -18,7 +18,7 @@ FAIL=0
 SKIP=0
 TOTAL=8
 
-SOUC="${SOUC:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+SOUC="${SOUC:-./bin/souc}"
 PTXAS="${PTXAS:-/tmp/cuda-nvcc-extracted/usr/local/cuda-12.4/bin/ptxas}"
 
 _report() {

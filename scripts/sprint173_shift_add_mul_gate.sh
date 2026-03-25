@@ -7,7 +7,7 @@
 set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." ; pwd)"; cd "$ROOT_DIR"
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
-SOUC="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="./bin/souc"
 O="self-hosted/ir/opt_cleanup.sio"; M="self-hosted/compiler/main.sio"
 cg() {
     local name="$1"; local pat="$2"; local f="$3"; TOTAL=$((TOTAL+1))

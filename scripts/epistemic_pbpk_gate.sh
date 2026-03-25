@@ -3,7 +3,7 @@
 # Sprint 228-230: Operation Epistemic Dawn
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 LEAN=self-hosted/compiler/render_native_compile_driver_lean.sio
 SRC=tests/run-pass/epistemic_pbpk_native.sio
 ELF=/tmp/epistemic_pbpk_gate.elf

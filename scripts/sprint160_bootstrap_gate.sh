@@ -3,7 +3,7 @@
 # Tests: typecheck, structural checks, hello compilation
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 BOOT=self-hosted/bootstrap/bootstrap_v0.sio
 TMPDIR=/tmp/sprint160_gate
 mkdir -p "$TMPDIR"

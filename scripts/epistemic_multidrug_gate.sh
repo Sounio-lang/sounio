@@ -2,7 +2,7 @@
 # Epistemic Multi-Drug PBPK Gate — 3 drugs, ASCII curves, 10 tests
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 LEAN=self-hosted/compiler/render_native_compile_driver_lean.sio
 SRC=tests/run-pass/epistemic_pbpk_multidrug.sio
 ELF=/tmp/epistemic_multidrug_gate.elf

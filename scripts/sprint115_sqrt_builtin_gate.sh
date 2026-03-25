@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sprint 115 — sqrt builtin (hardware SQRTSD) gate
 set -eo pipefail
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 CODEGEN=self-hosted/native/codegen.sio
 ENCODE=self-hosted/native/encode.sio
 MAIN=self-hosted/compiler/main.sio

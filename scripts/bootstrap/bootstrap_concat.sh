@@ -17,7 +17,7 @@ cd "$REPO_ROOT"
 
 PINNED_BIN="${PINNED_BIN:-artifacts/omega/souc-bin/souc-linux-x86_64}"
 if [ ! -x "$PINNED_BIN" ]; then
-  JIT_FALLBACK="artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+  JIT_FALLBACK="bin/souc"
   if [ -x "$JIT_FALLBACK" ]; then
     echo "bootstrap_concat: pinned binary not found at $PINNED_BIN, falling back to $JIT_FALLBACK"
     PINNED_BIN="$JIT_FALLBACK"

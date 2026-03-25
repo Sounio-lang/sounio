@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sprint 116 — Knowledge<f64> struct layout + measure() rewrite gate
 set -eo pipefail
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 LOWER=self-hosted/ir/lower.sio
 MAIN=self-hosted/compiler/main.sio
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0

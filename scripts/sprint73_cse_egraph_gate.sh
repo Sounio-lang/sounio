@@ -13,7 +13,7 @@
 
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 TOTAL=0; PASS=0; FAIL=0; NOT_RUN=0
 
 # ── helpers ──────────────────────────────────────────────────────────────────

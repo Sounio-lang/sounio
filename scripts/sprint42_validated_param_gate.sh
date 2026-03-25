@@ -37,7 +37,7 @@ check_grep() {
 check_probe_strategy() {
     local name="$1"; local source_file="$2"; local expected_line="$3"
     TOTAL=$((TOTAL+1))
-    local souc="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+    local souc="./bin/souc"
     if [ ! -x "$souc" ]; then
         echo "NOT_RUN  $name (souc '$souc' not executable)"; NOT_RUN=$((NOT_RUN+1))
         return

@@ -18,7 +18,7 @@ else
   TARGET_DIR="$ROOT_DIR/target"
 fi
 
-SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/bin/souc}"
 EXAMPLE="$ROOT_DIR/examples/simple_test.sio"
 GPU_FIXTURE="$ROOT_DIR/scripts/fixtures/gpu_minimal.sio"
 
@@ -28,8 +28,8 @@ trap 'rm -rf "$OUT_DIR"' EXIT
 echo "[e2e] native build + run"
 sounio_require_souc
 
-# Skip JIT-specific build modes when using native wrapper
-if [[ "$SOUC_BIN" == *"native-wrapper"* ]]; then
+# Skip backend-specific build modes when using the native wrapper
+if [[ "$SOUC_BIN" == *"/bin/souc" ]] || [[ "$SOUC_BIN" == *"native-wrapper"* ]]; then
   echo "[e2e] native compiler detected — using compile+run instead of build --backend"
   "$SOUC_BIN" run "$EXAMPLE" 2>/dev/null || echo "[e2e] run skipped (example may need features not in native)"
   echo "[e2e] e2e gate ok (native mode)"

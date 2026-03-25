@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="./bin/souc"
 SH="self-hosted/compiler/main.sio"
 TIMEOUT=60
 FIXTURE="tests/selfhost/render_ir_expectations.tsv"

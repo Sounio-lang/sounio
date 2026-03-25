@@ -124,7 +124,7 @@ else
 fi
 
 # ── JIT probe on sample SELFHOST_PASS tests ───────────────────────────────────
-JIT_BIN="${SOUNIO_JIT_BIN:-$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+JIT_BIN="${SOUNIO_JIT_BIN:-$ROOT_DIR/bin/souc}"
 
 probe_jit() {
   local name="$1" file="$2"

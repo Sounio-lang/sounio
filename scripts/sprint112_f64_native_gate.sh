@@ -4,7 +4,7 @@ set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="./bin/souc"
 DRIVER="self-hosted/compiler/render_native_compile_driver_f64.sio"
 TIMEOUT=120
 ARTIFACT="artifacts/sprint112/f64_native_gate.v1.json"

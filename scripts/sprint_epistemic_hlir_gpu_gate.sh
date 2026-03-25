@@ -21,7 +21,7 @@ FAIL=0
 SKIP=0
 TOTAL=12
 
-SOUC="${SOUC:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+SOUC="${SOUC:-./bin/souc}"
 GPU_SOUC="${GPU_SOUC:-./artifacts/omega/souc-bin/souc-linux-x86_64-gpu}"
 
 _report() {

@@ -2,11 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT_DIR/target/debug/souc"
+BIN="$ROOT_DIR/bin/souc"
 FAIL_LOG="/tmp/sounio_examples_failures.txt"
 
 if [[ ! -x "$BIN" ]]; then
-  (cd "$ROOT_DIR" && cargo build -q -p souc --bin souc)
+  echo "error: missing wrapper at $BIN" >&2
+  exit 1
 fi
 
 : > "$FAIL_LOG"

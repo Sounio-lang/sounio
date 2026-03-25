@@ -57,7 +57,7 @@ for f in "${FILES[@]}"; do
 done
 
 if [ ! -x "$PINNED_BIN" ]; then
-  JIT_FALLBACK="artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+  JIT_FALLBACK="bin/souc"
   if [ -x "$JIT_FALLBACK" ]; then
     echo "knowledge_bootstrap: pinned binary not found at $PINNED_BIN, falling back to $JIT_FALLBACK"
     PINNED_BIN="$JIT_FALLBACK"

@@ -3,7 +3,7 @@
 # Tests collect_rela_section, finalize_elf64_relocatable, compile_to_obj, --emit-obj flag
 set -o pipefail
 
-SOUC=${SOUC:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}
+SOUC=${SOUC:-./bin/souc}
 PASS=0; FAIL=0; NOT_RUN=0
 
 _ec=0
@@ -70,7 +70,7 @@ run_check T2_elf_check self-hosted/native/elf.sio
 # T3: codegen.sio typechecks with compile_to_obj
 # codegen.sio has 78 pre-existing BinaryOp/UnaryOp "Undefined variable" errors — not from our changes.
 # Verify our new functions compile_to_obj/compile_module_for_obj introduce no *new* undefined symbols.
-T3_out=$(./artifacts/omega/souc-bin/souc-linux-x86_64-jit check self-hosted/native/codegen.sio 2>&1)
+T3_out=$(./bin/souc check self-hosted/native/codegen.sio 2>&1)
 T3_new=$(echo "$T3_out" | grep -E "compile_to_obj|compile_module_for_obj|finalize_elf64_relocatable|collect_rela_section" || true)
 if [ -z "$T3_new" ]; then
     echo "PASS T3_codegen_check (new functions: no type errors)"

@@ -85,7 +85,7 @@ if [[ -n "${SOUNIO_SOUC_BIN:-}" ]]; then
   candidates+=("${SOUNIO_SOUC_BIN}")
 fi
 candidates+=(
-  "$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+  "$ROOT_DIR/bin/souc"
   "$ROOT_DIR/souc"
   "$ROOT_DIR/target/debug/souc"
   "$ROOT_DIR/target/release/souc"

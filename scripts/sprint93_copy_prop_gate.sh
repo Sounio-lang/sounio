@@ -3,7 +3,7 @@
 # SOTA: Cytron et al. TOPLAS 1991 §5; Cooper & Torczon §8.5
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 OPT=self-hosted/ir/opt_cleanup.sio
 MAIN=self-hosted/compiler/main.sio
 

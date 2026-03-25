@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 PKG=self-hosted/interop/package.sio
 PASS=0 FAIL=0
 

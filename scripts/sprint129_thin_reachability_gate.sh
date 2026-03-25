@@ -4,7 +4,7 @@
 # compacts the IrModule, and is wired into wide_native_compile_driver.sio.
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
 REACH=self-hosted/ir/reachability.sio
 CLI=self-hosted/compiler/wide_native_compile_driver.sio

@@ -2,7 +2,7 @@
 # Sprint 105 Block AC — Instruction Scheduling / Load Sinking gate
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 OPT=self-hosted/ir/opt_cleanup.sio
 MAIN=self-hosted/compiler/main.sio
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sprint 119: for-in + break + continue in lean AST driver
 set -eo pipefail
-SOUC=${SOUC:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}
+SOUC=${SOUC:-./bin/souc}
 LEAN=self-hosted/compiler/render_native_compile_driver_lean.sio
 export SOUNIO_STDLIB_PATH=${SOUNIO_STDLIB_PATH:-$(pwd)/stdlib}
 PASS=0; FAIL=0; NOT_RUN=0

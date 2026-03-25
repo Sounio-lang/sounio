@@ -4,7 +4,7 @@
 #        preseed sets strategy=EXPORTED + records export_names for is_pub=true ItemFn
 set -o pipefail
 
-SOUC=${SOUC:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}
+SOUC=${SOUC:-./bin/souc}
 PASS=0; FAIL=0; NOT_RUN=0
 
 run_check() {

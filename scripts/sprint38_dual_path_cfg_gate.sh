@@ -7,8 +7,8 @@ cd "$ROOT_DIR"
 
 if [ -n "${SOUNIO_SOUC:-}" ]; then
   SOUC="$SOUNIO_SOUC"
-elif [ -x "$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit" ]; then
-  SOUC="$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+elif [ -x "$ROOT_DIR/bin/souc" ]; then
+  SOUC="$ROOT_DIR/bin/souc"
 else
   # shellcheck source=/dev/null
   source "$ROOT_DIR/scripts/lib/resolve_souc.sh"

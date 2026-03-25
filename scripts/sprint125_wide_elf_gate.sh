@@ -4,7 +4,7 @@
 # relocation application, and finalize_elf64_wide() function.
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
 WIDE=self-hosted/native/wide.sio
 RUNNER=self-hosted/native/wide_self_test_runner.sio

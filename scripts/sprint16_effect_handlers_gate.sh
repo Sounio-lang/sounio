@@ -26,7 +26,7 @@ cd "$ROOT_DIR"
 
 SELFHOST_DIR="$ROOT_DIR/self-hosted"
 CF_DIR="$ROOT_DIR/tests/compile-fail"
-JIT="${SOUNIO_JIT_BIN:-$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+JIT="${SOUNIO_JIT_BIN:-$ROOT_DIR/bin/souc}"
 
 pass=0
 fail=0

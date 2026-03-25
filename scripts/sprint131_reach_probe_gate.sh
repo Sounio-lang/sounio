@@ -12,7 +12,7 @@
 # exists from the Sprint 58 self-hosted bootstrap path.
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
 RUNNER=self-hosted/ir/reach_probe_runner.sio
 REACH=self-hosted/ir/reachability.sio

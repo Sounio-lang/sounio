@@ -57,7 +57,7 @@ check "regression_ir_hlirblock" "grep -q 'struct HlirBlock' '$IR'"
 check "regression_ir_terminator" "grep -q 'struct HlirTerminator' '$IR'"
 
 # 10. Frontend tests pass souc check (graceful skip)
-SOUC="$REPO_ROOT/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="$REPO_ROOT/bin/souc"
 if [ -x "$SOUC" ]; then
     check "souc_check_contest" "$SOUC check '$REPO_ROOT/tests/frontend/dual_path_contest.sio'"
     check "souc_check_robust" "$SOUC check '$REPO_ROOT/tests/frontend/dual_path_robust.sio'"

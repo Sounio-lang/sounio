@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=6
 
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }

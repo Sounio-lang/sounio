@@ -11,7 +11,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." ; pwd)"
 cd "$ROOT_DIR"
 
-SOUC="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="./bin/souc"
 SELFHOST_RUN="./scripts/lib/run_selfhost_fresh.sh"
 BOOTSTRAP_DRIVER="self-hosted/compiler/native_compile_driver.sio"
 WIDE_DRIVER="self-hosted/compiler/wide_native_compile_driver.sio"

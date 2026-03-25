@@ -5,7 +5,7 @@
 # Caller: let s = f(p, q) → s_field0 from rax, s_field1 from rdx
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 LEAN=self-hosted/compiler/render_native_compile_driver_lean.sio
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 

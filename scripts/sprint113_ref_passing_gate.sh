@@ -2,7 +2,7 @@
 # Sprint 113: Reference-Passing Gate — &arr / (*ptr)[i] across function calls
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 LEAN=self-hosted/compiler/render_native_compile_driver_lean.sio
 TMPDIR=/tmp/sprint113_gate
 mkdir -p "$TMPDIR"

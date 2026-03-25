@@ -10,6 +10,7 @@
 #   //@ expect-stdout: X — stdout must contain X (run-pass only)
 #   //@ error-pattern: X — stderr/stdout must contain X (compile-fail only)
 #   //@ ignore           — skip this test
+#   //@ check-only       — compile only, do not execute
 #
 # Usage:
 #   bash scripts/run_sio_test_suite.sh [--filter PATTERN] [--verbose]
@@ -54,6 +55,7 @@ run_test() {
     local is_run_pass=false
     local is_compile_fail=false
     local is_ignored=false
+    local is_check_only=false
     local expect_stdout=()
     local error_patterns=()
 
@@ -70,6 +72,9 @@ run_test() {
         fi
         if [[ "$line" =~ "//@ ignore" ]]; then
             is_ignored=true
+        fi
+        if [[ "$line" =~ "//@ check-only" ]]; then
+            is_check_only=true
         fi
         if [[ "$line" =~ "//@ expect-stdout: "(.*) ]]; then
             expect_stdout+=("${BASH_REMATCH[1]}")
@@ -98,39 +103,40 @@ run_test() {
     local output
     local exit_code=0
     if $is_run_pass; then
-        output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
-        if [[ $exit_code -ne 0 ]]; then
-            FAIL=$((FAIL + 1))
-            ERRORS="${ERRORS}\n  FAIL  $basename (check exited $exit_code)"
-            if [[ "$VERBOSE" == "--verbose" ]]; then
-                echo "  FAIL  $basename (check exited $exit_code)"
-                echo "        $output" | head -5
+        if $is_check_only; then
+            output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+            if [[ $exit_code -ne 0 ]]; then
+                FAIL=$((FAIL + 1))
+                ERRORS="${ERRORS}\n  FAIL  $basename (check exited $exit_code)"
+                if [[ "$VERBOSE" == "--verbose" ]]; then
+                    echo "  FAIL  $basename (check exited $exit_code)"
+                    echo "        $output" | head -5
+                fi
+                return
             fi
-            return
-        fi
-
-        # Check expect-stdout patterns (run the program)
-        if [[ ${#expect_stdout[@]} -gt 0 ]]; then
+        else
             output=$("$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
             if [[ $exit_code -ne 0 ]]; then
                 FAIL=$((FAIL + 1))
                 ERRORS="${ERRORS}\n  FAIL  $basename (run exited $exit_code)"
                 if [[ "$VERBOSE" == "--verbose" ]]; then
                     echo "  FAIL  $basename (run exited $exit_code)"
+                    echo "        $output" | head -5
                 fi
                 return
             fi
-            for pattern in "${expect_stdout[@]}"; do
-                if ! echo "$output" | grep -qF "$pattern"; then
-                    FAIL=$((FAIL + 1))
-                    ERRORS="${ERRORS}\n  FAIL  $basename (missing stdout: $pattern)"
-                    if [[ "$VERBOSE" == "--verbose" ]]; then
-                        echo "  FAIL  $basename (missing stdout: $pattern)"
-                    fi
-                    return
-                fi
-            done
         fi
+
+        for pattern in "${expect_stdout[@]}"; do
+            if ! echo "$output" | grep -qF "$pattern"; then
+                FAIL=$((FAIL + 1))
+                ERRORS="${ERRORS}\n  FAIL  $basename (missing stdout: $pattern)"
+                if [[ "$VERBOSE" == "--verbose" ]]; then
+                    echo "  FAIL  $basename (missing stdout: $pattern)"
+                fi
+                return
+            fi
+        done
 
         PASS=$((PASS + 1))
         if [[ "$VERBOSE" == "--verbose" ]]; then
@@ -138,7 +144,10 @@ run_test() {
         fi
 
     elif $is_compile_fail; then
-        output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+        local tmp_out
+        tmp_out="$(mktemp /tmp/sounio-compile-fail-XXXXXX.elf)"
+        output=$("$SOUC_BIN" compile "$file" -o "$tmp_out" 2>&1) || exit_code=$?
+        rm -f "$tmp_out"
         if [[ $exit_code -eq 0 ]]; then
             FAIL=$((FAIL + 1))
             ERRORS="${ERRORS}\n  FAIL  $basename (expected compile failure but passed)"

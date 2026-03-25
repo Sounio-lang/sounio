@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/souc}"
 # The selfhosted lane requires the JIT binary for adequate performance.
 # Use the JIT binary directly if available; fall back to SOUC_BIN for check-only cases.
-JIT_BIN="${SOUNIO_JIT_BIN:-$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+JIT_BIN="${SOUNIO_JIT_BIN:-$ROOT_DIR/bin/souc}"
 if [ ! -x "$JIT_BIN" ]; then
   JIT_BIN="$SOUC_BIN"
 fi

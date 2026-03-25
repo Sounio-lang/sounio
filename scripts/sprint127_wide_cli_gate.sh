@@ -4,7 +4,7 @@
 # for invoking the wide compilation driver on large modules.
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
 DRIVER=self-hosted/compiler/wide_native_compile_driver.sio
 WIDE_DRIVER=self-hosted/native/wide_driver.sio

@@ -3,7 +3,7 @@
 # Tests: hello_world, primes, fizzbuzz, fib, gcd, collatz, hanoi, ackermann, isqrt
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 LEAN=self-hosted/compiler/render_native_compile_driver_lean.sio
 TMPDIR=/tmp/sprint111_gate
 mkdir -p "$TMPDIR"

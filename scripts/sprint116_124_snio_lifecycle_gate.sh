@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -eo pipefail
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 PASS=0; FAIL=0; TOTAL=8
 
 run() { local name=$1; shift; if "$@" >/dev/null 2>&1; then echo "  PASS: $name"; PASS=$((PASS+1)); else echo "  FAIL: $name"; FAIL=$((FAIL+1)); fi; }

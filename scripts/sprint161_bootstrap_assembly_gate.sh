@@ -18,7 +18,7 @@
 
 set -eo pipefail
 
-SOUC="${SOUC:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+SOUC="${SOUC:-./bin/souc}"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$(pwd)/stdlib}"
 PASS=0
 FAIL=0

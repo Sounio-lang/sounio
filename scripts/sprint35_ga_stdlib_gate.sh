@@ -59,7 +59,7 @@ check "test ga_quaternion_basic.sio exists"         test -f "$ROOT/tests/fronten
 check "test ga_product_basic.sio exists"            test -f "$ROOT/tests/frontend/ga_product_basic.sio"
 
 # --- souc check on test files (optional) ---
-SOUC="$ROOT/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="$ROOT/bin/souc"
 if [ -x "$SOUC" ]; then
     for tf in ga_algebra_basic.sio ga_quaternion_basic.sio ga_product_basic.sio; do
         check "souc check $tf" "$SOUC" check "$ROOT/tests/frontend/$tf"

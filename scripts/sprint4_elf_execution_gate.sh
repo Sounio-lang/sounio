@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-JIT_BIN="${SOUNIO_JIT_BIN:-$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+JIT_BIN="${SOUNIO_JIT_BIN:-$ROOT_DIR/bin/souc}"
 [ ! -x "$JIT_BIN" ] && JIT_BIN="$ROOT_DIR/souc"
 
 OUT_JSON="${SOUNIO_SPRINT4_ELF_GATE_OUT:-$ROOT_DIR/artifacts/sprint4/elf_execution_gate.v1.json}"

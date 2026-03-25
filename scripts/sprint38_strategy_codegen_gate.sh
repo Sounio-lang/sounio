@@ -35,7 +35,7 @@ check_probe_strategy() {
         echo "NOT_RUN  $name (file '$source_file' not found)"; NOT_RUN=$((NOT_RUN+1))
         return
     fi
-    local souc="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+    local souc="./bin/souc"
     if [ ! -x "$souc" ]; then
         echo "NOT_RUN  $name (compiler '$souc' not executable)"; NOT_RUN=$((NOT_RUN+1))
         return

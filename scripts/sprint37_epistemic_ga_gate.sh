@@ -85,7 +85,7 @@ check_grep "regression:quaternion" "fn quat_new" "stdlib/math/ga/quaternion.sio"
 
 echo ""
 echo "--- souc check (optional) ---"
-SOUC="artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="bin/souc"
 if [ -x "$SOUC" ]; then
     for f in tests/frontend/epistemic_ga_knowledge_mv.sio tests/frontend/epistemic_ga_contest_motor.sio tests/frontend/epistemic_ga_uncertainty_propagation.sio; do
         TOTAL=$((TOTAL+1))

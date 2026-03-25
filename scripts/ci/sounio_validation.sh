@@ -207,9 +207,9 @@ jobs:
         chmod +x check_sounio.sh
         
         # Display Sounio version info if available
-        if [ -f "artifacts/omega/souc-bin/souc-linux-x86_64-jit" ]; then
+        if [ -f "bin/souc" ]; then
           echo "Sounio compiler found"
-          artifacts/omega/souc-bin/souc-linux-x86_64-jit --version || true
+          bin/souc --version || true
         fi
     
     - name: Run Sounio validation

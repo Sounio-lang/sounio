@@ -3,7 +3,7 @@
 # Tests: basic bitwise, Stein binary GCD, popcount, bit mask
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 LEAN=self-hosted/compiler/render_native_compile_driver_lean.sio
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 

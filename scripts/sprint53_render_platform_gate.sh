@@ -8,7 +8,7 @@ PASS=0
 FAIL=0
 NOT_RUN=0
 TOTAL=0
-SOUC="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="./bin/souc"
 OUT_JSON="$ROOT_DIR/artifacts/sprint53/render_platform_gate.v1.json"
 
 check_grep() {

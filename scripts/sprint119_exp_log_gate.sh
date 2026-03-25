@@ -4,7 +4,7 @@
 #        dispatch wiring in compile_ir_function / v2 / v2_mut
 set -o pipefail
 
-SOUC=${SOUC:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}
+SOUC=${SOUC:-./bin/souc}
 PASS=0; FAIL=0; NOT_RUN=0
 
 run_check() {

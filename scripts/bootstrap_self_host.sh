@@ -6,7 +6,7 @@
 #
 # Requirements:
 #   - 35GB+ free RAM (kill all other souc processes first!)
-#   - JIT binary at artifacts/omega/souc-bin/souc-linux-x86_64-jit
+#   - JIT binary at bin/souc
 #
 # Usage:
 #   pkill -9 -f souc   # IMPORTANT: free memory first
@@ -20,7 +20,7 @@
 # =============================================================================
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 BOOT=self-hosted/bootstrap/bootstrap_v0.sio
 TMPDIR=/tmp/sounio_bootstrap
 mkdir -p "$TMPDIR"

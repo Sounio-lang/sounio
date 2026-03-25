@@ -2,7 +2,7 @@
 # Sprint 117 — GUM arithmetic for Knowledge<f64> gate
 # JCGM 100:2008 §5.1.2-5.1.3
 set -eo pipefail
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 MAIN=self-hosted/compiler/main.sio
 LOWER=self-hosted/ir/lower.sio
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0

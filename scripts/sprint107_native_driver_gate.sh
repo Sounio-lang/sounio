@@ -5,7 +5,7 @@ set -eo pipefail
 # NativeCompiler struct + IrModule exceed default 12.5MB stack; raise limit
 ulimit -s unlimited 2>/dev/null || ulimit -s 65536 2>/dev/null || true
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 DRIVER=self-hosted/compiler/native_compile_driver.sio
 STABLE=self-hosted/compiler/render_native_compile_driver_stable.sio
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0

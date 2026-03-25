@@ -2,7 +2,7 @@
 # Sprint 114 — Structured Diagnostics gate
 set -eo pipefail
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 CONTRACT=self-hosted/interop/contract.sio
 FILE_WRITE=self-hosted/io/file_write.sio
 PASS=0; FAIL=0; TOTAL=0

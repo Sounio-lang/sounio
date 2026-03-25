@@ -13,7 +13,7 @@
 
 set -e
 
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 
 if [ ! -f "$SOUC" ]; then
     echo "ERROR: SOUC binary not found at $SOUC"

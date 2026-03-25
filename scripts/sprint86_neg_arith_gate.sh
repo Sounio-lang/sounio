@@ -5,7 +5,7 @@
 set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." ; pwd)"; cd "$ROOT_DIR"
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
-SOUC="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="./bin/souc"
 OUT_DIR="$ROOT_DIR/artifacts/sprint86"; mkdir -p "$OUT_DIR"
 
 chk() { local n="$1" p="$2" f="$3"; TOTAL=$((TOTAL+1))
