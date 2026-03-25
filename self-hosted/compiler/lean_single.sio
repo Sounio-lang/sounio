@@ -667,6 +667,23 @@ fn src_match(p: i64, l: i64, kw: string) -> bool with Panic, Mut {
     return true
 }
 
+fn tok_is_unicode_epsilon(p: i64) -> bool with Panic, Mut {
+    if TK[p as usize] != 3 { return false }
+    let ns = TS[p as usize]
+    let ne = TE[p as usize]
+    if ne - ns != 2 { return false }
+    return sb(ns) == 206 && sb(ns + 1) == 181
+}
+
+fn tok_is_unicode_bottom(p: i64) -> bool with Panic, Mut {
+    if TK[p as usize] != 3 { return false }
+    let ns = TS[p as usize]
+    let ne = TE[p as usize]
+    if ne - ns != 3 { return false }
+    if sb(ns) != 226 || sb(ns + 1) != 138 { return false }
+    return sb(ns + 2) == 165
+}
+
 fn cli_arg_eq(raw: string, kw: string) -> bool with Panic, Mut {
     let l = str_len(kw)
     if str_len(raw) != l { return false }
@@ -778,22 +795,27 @@ fn knowledge_hash_is(h: i64) -> bool {
     return h < 0
 }
 
-fn knowledge_hash_make(inner_ty: i64, inner_hash: i64, eps_scaled: i64) -> i64 {
-    if eps_scaled < -1 {
-        let packed = (inner_ty * 1048576) + (inner_hash * 67108864)
-        return 0 - packed
-    }
-    if eps_scaled >= 0 {
-        let packed = (eps_scaled + 2) + (inner_ty * 1048576) + (inner_hash * 67108864)
-        return 0 - packed
-    }
-    let packed = 1 + (inner_ty * 1048576) + (inner_hash * 67108864)
+fn knowledge_hash_make_mode(inner_ty: i64, inner_hash: i64, meta_mode: i64, eps_scaled: i64) -> i64 {
+    let eps_code =
+        if eps_scaled < -1 { 0 }
+        else { if eps_scaled >= 0 { eps_scaled + 2 } else { 1 } }
+    let packed_ty = inner_ty + meta_mode * 16
+    let packed = eps_code + (packed_ty * 1048576) + (inner_hash * 67108864)
     return 0 - packed
+}
+
+fn knowledge_hash_make(inner_ty: i64, inner_hash: i64, eps_scaled: i64) -> i64 {
+    return knowledge_hash_make_mode(inner_ty, inner_hash, 0, eps_scaled)
 }
 
 fn knowledge_hash_inner_ty(h: i64) -> i64 with Panic, Mut {
     let packed = 0 - h
-    return (packed / 1048576) % 64
+    return ((packed / 1048576) % 64) % 16
+}
+
+fn knowledge_hash_meta_mode(h: i64) -> i64 with Panic, Mut {
+    let packed = 0 - h
+    return ((packed / 1048576) % 64) / 16
 }
 
 fn knowledge_hash_inner_hash(h: i64) -> i64 with Panic, Mut {
@@ -812,6 +834,19 @@ fn knowledge_hash_eps(h: i64) -> i64 with Panic, Mut {
 fn knowledge_hash_invalid(h: i64) -> bool with Panic, Mut {
     if knowledge_hash_is(h) == false { return false }
     return knowledge_hash_eps(h) < -1
+}
+
+fn knowledge_struct_hash() -> i64 {
+    return 9 * 1000003
+        + 75 * 1 * 31
+        + 110 * 2 * 31
+        + 111 * 3 * 31
+        + 119 * 4 * 31
+        + 108 * 5 * 31
+        + 101 * 6 * 31
+        + 100 * 7 * 31
+        + 103 * 8 * 31
+        + 101 * 9 * 31
 }
 
 fn ref_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 {
@@ -924,13 +959,20 @@ fn knowledge_binary_result_hash(op: i64, left_ty: i64, left_hash: i64, right_ty:
     if left_has { left_eps = knowledge_hash_eps(left_hash) }
     var right_eps: i64 = 0
     if right_has { right_eps = knowledge_hash_eps(right_hash) }
+    var left_mode: i64 = 0
+    if left_has { left_mode = knowledge_hash_meta_mode(left_hash) }
+    var right_mode: i64 = 0
+    if right_has { right_mode = knowledge_hash_meta_mode(right_hash) }
+    if left_mode == 3 || right_mode == 3 {
+        return knowledge_hash_make_mode(inner_ty, inner_hash, 3, -1)
+    }
     var eps: i64 = -1
     if op == 17 || op == 18 || op == 29 {
         eps = knowledge_eps_combine_independent(left_eps, right_eps)
     } else {
         eps = knowledge_eps_combine_relative(left_eps, right_eps)
     }
-    return knowledge_hash_make(inner_ty, inner_hash, eps)
+    return knowledge_hash_make_mode(inner_ty, inner_hash, 0, eps)
 }
 
 fn skip_call_arg_expr(p0: i64) -> i64 with Panic, Mut {
@@ -1015,6 +1057,7 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
         if ref_hash_mut(h1) != ref_hash_mut(h2) { return false }
         return ty_eq(ref_hash_inner_ty(h1), ref_hash_inner_hash(h1), ref_hash_inner_ty(h2), ref_hash_inner_hash(h2))
     }
+    if k1 == 0 && knowledge_hash_is(h1) && k2 == 6 && h2 == knowledge_struct_hash() { return true }
     if k1 == 0 && k2 == 0 && h1 != 0 && h2 != 0 {
         if knowledge_hash_is(h1) || knowledge_hash_is(h2) {
             if knowledge_hash_is(h1) == false || knowledge_hash_is(h2) == false { return false }
@@ -1022,9 +1065,26 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
             if ty_eq(knowledge_hash_inner_ty(h1), knowledge_hash_inner_hash(h1), knowledge_hash_inner_ty(h2), knowledge_hash_inner_hash(h2)) == false {
                 return false
             }
+            let req_mode = knowledge_hash_meta_mode(h1)
+            let got_mode = knowledge_hash_meta_mode(h2)
             let req_eps = knowledge_hash_eps(h1)
             let got_eps = knowledge_hash_eps(h2)
+            if req_mode == 3 {
+                if got_mode == 3 { return true }
+                return got_mode == 0 && got_eps < 0
+            }
+            if req_mode == 2 {
+                if got_mode == 3 { return false }
+                if got_eps < 0 { return false }
+                return got_eps >= req_eps
+            }
+            if req_mode == 1 {
+                if got_mode == 3 { return false }
+                if got_eps < 0 { return false }
+                return got_eps == req_eps
+            }
             if req_eps < 0 { return true }
+            if got_mode == 2 || got_mode == 3 { return false }
             if got_eps < 0 { return false }
             return got_eps <= req_eps
         }
@@ -1101,7 +1161,7 @@ fn tc_linear_violation(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
 }
 
 fn tc_epistemic_boundary(tok: i64) -> i64 with IO, Mut, Panic {
-    tc_error(tok, "P0003 type mismatch in Knowledge epsilon boundary")
+    tc_error(tok, "P0003 type mismatch in Knowledge epsilon / ε boundary")
 }
 
 fn scan_fn_param_type(fi: i64, arg_idx: i64) with Mut, Panic {
@@ -1197,8 +1257,53 @@ fn print_array_elem_type(elem_ty: i64, esiz: i64) with IO, Mut, Panic, Div {
     print("?")
 }
 
+fn print_scaled_million(v: i64) with IO, Mut, Panic, Div {
+    if v < 0 {
+        print("?")
+        return
+    }
+    print_int(v / 1000000)
+    print(".")
+    let frac = v % 1000000
+    if frac < 100000 { print("0") }
+    if frac < 10000 { print("0") }
+    if frac < 1000 { print("0") }
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    print_int(frac)
+}
+
 fn print_type_label(ty: i64, ty_hash: i64) with IO, Mut, Panic, Div {
-    if ty == 0 { print("?"); return }
+    if ty == 0 {
+        if knowledge_hash_is(ty_hash) {
+            print("Knowledge<")
+            print_type_label(knowledge_hash_inner_ty(ty_hash), knowledge_hash_inner_hash(ty_hash))
+            let mode = knowledge_hash_meta_mode(ty_hash)
+            let eps = knowledge_hash_eps(ty_hash)
+            if mode == 3 {
+                print(", epsilon=bottom")
+            } else if mode == 2 {
+                if eps >= 0 {
+                    print(", epsilon >= ")
+                    print_scaled_million(eps)
+                }
+            } else if mode == 1 {
+                if eps >= 0 {
+                    print(", epsilon=")
+                    print_scaled_million(eps)
+                }
+            } else {
+                if eps >= 0 {
+                    print(", epsilon < ")
+                    print_scaled_million(eps)
+                }
+            }
+            print(">")
+            return
+        }
+        print("?")
+        return
+    }
     if ty == 1 { print("i64"); return }
     if ty == 2 { print("f64"); return }
     if ty == 3 { print("string"); return }
@@ -1420,6 +1525,23 @@ fn precheck_knightian_conflict() -> i64 with IO, Mut, Panic {
     var knight_line: i64 = 0
     var has_conf_req: i64 = 0
     while p < SRC_LEN {
+        if sb(p) == 47 && p + 1 < SRC_LEN && sb(p + 1) == 47 {
+            p = p + 2
+            while p < SRC_LEN && sb(p) != 10 { p = p + 1 }
+            continue
+        }
+        if sb(p) == 34 {
+            p = p + 1
+            while p < SRC_LEN && sb(p) != 34 {
+                if sb(p) == 92 && p + 1 < SRC_LEN {
+                    p = p + 2
+                } else {
+                    p = p + 1
+                }
+            }
+            if p < SRC_LEN && sb(p) == 34 { p = p + 1 }
+            continue
+        }
         if src_has_knightian_bottom_at(p) {
             if knight_line == 0 { knight_line = src_line_of(p) }
         }
@@ -1450,6 +1572,23 @@ fn precheck_temporal_window_conflict() -> i64 with IO, Mut, Panic {
     var p: i64 = 0
     var first_date_s: i64 = -1
     while p + 11 < SRC_LEN {
+        if sb(p) == 47 && p + 1 < SRC_LEN && sb(p + 1) == 47 {
+            p = p + 2
+            while p < SRC_LEN && sb(p) != 10 { p = p + 1 }
+            continue
+        }
+        if sb(p) == 34 {
+            p = p + 1
+            while p < SRC_LEN && sb(p) != 34 {
+                if sb(p) == 92 && p + 1 < SRC_LEN {
+                    p = p + 2
+                } else {
+                    p = p + 1
+                }
+            }
+            if p < SRC_LEN && sb(p) == 34 { p = p + 1 }
+            continue
+        }
         if src_match(p, 12, "ValidUntil(\"") {
             let date_s = p + 12
             if date_s + 9 < SRC_LEN {
@@ -1656,13 +1795,17 @@ fn scan_type(p0: i64) with Mut, Panic {
             scan_type(p)
             let inner_ty = SCAN_TY
             let inner_hash = SCAN_TY_HASH
+            var meta_mode: i64 = 0
             var eps_scaled: i64 = -1
             var invalid_eps: i64 = 0
+            var saw_eps_meta: i64 = 0
             p = SCAN_TY_NEXT
             while TK[p as usize] == 28 {
                 p = p + 1
                 let meta_start = p
                 if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "epsilon") {
+                    if saw_eps_meta != 0 { invalid_eps = 1 }
+                    saw_eps_meta = 1
                     p = p + 1
                     if TK[p as usize] == 23 {
                         p = p + 1
@@ -1673,16 +1816,58 @@ fn scan_type(p0: i64) with Mut, Panic {
                         } else {
                             invalid_eps = 1
                         }
-                        if TK[p as usize] == 24 {
-                            p = p + 1
-                        } else {
-                            invalid_eps = 1
-                            p = skip_type_meta_item(p, close_tk)
-                        }
                     } else {
                         invalid_eps = 1
                         p = skip_type_meta_item(meta_start, close_tk)
                     }
+                } else if tok_is_unicode_epsilon(p) {
+                    if saw_eps_meta != 0 { invalid_eps = 1 }
+                    saw_eps_meta = 1
+                    p = p + 1
+                    if TK[p as usize] == 16 {
+                        p = p + 1
+                        if tok_is_unicode_bottom(p) {
+                            meta_mode = 3
+                            eps_scaled = -1
+                            p = p + 1
+                        } else {
+                            if TK[p as usize] == 4 || TK[p as usize] == 53 {
+                                meta_mode = 1
+                                eps_scaled = tok_scaled_million(p)
+                                if eps_scaled < 0 || eps_scaled > 1000000 { invalid_eps = 1 }
+                                p = p + 1
+                            } else {
+                                invalid_eps = 1
+                            }
+                        }
+                    } else {
+                        if TK[p as usize] == 26 {
+                            p = p + 1
+                            meta_mode = 2
+                            if TK[p as usize] == 4 || TK[p as usize] == 53 {
+                                eps_scaled = tok_scaled_million(p)
+                                if eps_scaled < 0 || eps_scaled > 1000000 { invalid_eps = 1 }
+                                p = p + 1
+                            } else {
+                                invalid_eps = 1
+                            }
+                        } else {
+                            invalid_eps = 1
+                        }
+                    }
+                } else if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "ValidUntil") {
+                    p = p + 1
+                    if TK[p as usize] == 6 {
+                        p = p + 1
+                        if TK[p as usize] == 5 { p = p + 1 } else { invalid_eps = 1 }
+                        if TK[p as usize] == 7 { p = p + 1 } else { invalid_eps = 1 }
+                    } else {
+                        invalid_eps = 1
+                        p = skip_type_meta_item(meta_start, close_tk)
+                    }
+                } else if TK[p as usize] == 3 {
+                    // Accept ignorable provenance/evidence tags like Derived.
+                    p = p + 1
                 } else {
                     invalid_eps = 1
                     p = skip_type_meta_item(meta_start, close_tk)
@@ -1698,9 +1883,9 @@ fn scan_type(p0: i64) with Mut, Panic {
             }
             SCAN_TY = 0
             if invalid_eps != 0 {
-                SCAN_TY_HASH = knowledge_hash_make(inner_ty, inner_hash, -2)
+                SCAN_TY_HASH = knowledge_hash_make_mode(inner_ty, inner_hash, meta_mode, -2)
             } else {
-                SCAN_TY_HASH = knowledge_hash_make(inner_ty, inner_hash, eps_scaled)
+                SCAN_TY_HASH = knowledge_hash_make_mode(inner_ty, inner_hash, meta_mode, eps_scaled)
             }
             SCAN_TY_NEXT = p
             return
@@ -1855,6 +2040,24 @@ fn lex_all() with Mut, Panic, Div {
                 TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom; TL[TC as usize] = cur_line; TC = TC + 1; continue
             }
             TK[TC as usize] = 4; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TL[TC as usize] = cur_line; TC = TC + 1; continue
+        }
+        if c == 206 && p + 1 < SRC_LEN && sb(p + 1) == 181 {
+            TK[TC as usize] = 3
+            TS[TC as usize] = p
+            TE[TC as usize] = p + 2
+            TL[TC as usize] = cur_line
+            TC = TC + 1
+            p = p + 2
+            continue
+        }
+        if c == 226 && p + 2 < SRC_LEN && sb(p + 1) == 138 && sb(p + 2) == 165 {
+            TK[TC as usize] = 3
+            TS[TC as usize] = p
+            TE[TC as usize] = p + 3
+            TL[TC as usize] = cur_line
+            TC = TC + 1
+            p = p + 3
+            continue
         }
         // Identifier / keyword
         if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 {
@@ -3010,6 +3213,109 @@ fn compile_measure_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     EXPR_TY_HASH = knowledge_hash_make(value_ty, value_hash, eps_scaled)
 }
 
+fn compile_knowledge_literal_x86() with IO, Mut, Panic, Div {
+    EP = EP + 1
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    var value_ty: i64 = 0
+    var value_hash: i64 = 0
+    var saw_value: i64 = 0
+    var saw_var: i64 = 0
+    var saw_conf: i64 = 0
+    var lit_mode: i64 = 0
+    var lit_eps: i64 = -1
+    while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+        if TK[EP as usize] == 3 {
+            let field_tok = EP
+            let fns = TS[EP as usize]
+            let fne = TE[EP as usize]
+            EP = EP + 1
+            if TK[EP as usize] == 43 { EP = EP + 1 }
+            let field_start = EP
+            compile_or()
+            let field_ty = EXPR_TY
+            let field_hash = EXPR_TY_HASH
+            let lit_tok = expr_simple_numeric_tok(field_start, EP)
+            if src_match(fns, fne - fns, "value") {
+                emit_store_var(base_slot + 2)
+                value_ty = field_ty
+                value_hash = field_hash
+                saw_value = 1
+            } else if src_match(fns, fne - fns, "variance") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        emit_i64_to_f64_in_rax_x86()
+                    } else {
+                        tc_error(field_tok, "Knowledge variance must be numeric")
+                        em(0x31); em(0xc0)
+                    }
+                }
+                emit_store_var(base_slot + 1)
+                saw_var = 1
+            } else if src_match(fns, fne - fns, "uncertainty") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        emit_i64_to_f64_in_rax_x86()
+                    } else {
+                        tc_error(field_tok, "Knowledge uncertainty must be numeric")
+                        em(0x31); em(0xc0)
+                    }
+                }
+                em(0x48); em(0x89); em(0xc1)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc9)
+                em(0xf2); em(0x0f); em(0x59); em(0xc1)
+                em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+                emit_store_var(base_slot + 1)
+                saw_var = 1
+            } else if src_match(fns, fne - fns, "confidence") || src_match(fns, fne - fns, "epsilon") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        emit_i64_to_f64_in_rax_x86()
+                    } else {
+                        tc_error(field_tok, "Knowledge epsilon must be numeric")
+                        em(0x31); em(0xc0)
+                    }
+                }
+                emit_store_var(base_slot)
+                saw_conf = 1
+                if lit_tok >= 0 {
+                    let scaled = tok_scaled_million(lit_tok)
+                    if scaled >= 0 && scaled <= 1000000 {
+                        lit_mode = 1
+                        lit_eps = scaled
+                    }
+                }
+            } else if src_match(fns, fne - fns, "validity") || src_match(fns, fne - fns, "provenance") {
+            } else {
+                tc_error(field_tok, "unknown field in Knowledge literal")
+            }
+        }
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+    }
+    if TK[EP as usize] == 9 { EP = EP + 1 }
+    if saw_value == 0 {
+        em(0x31); em(0xc0)
+        emit_store_var(base_slot + 2)
+        value_ty = 0
+        value_hash = 0
+    }
+    if saw_var == 0 {
+        em(0x31); em(0xc0)
+        emit_store_var(base_slot + 1)
+    }
+    if saw_conf == 0 {
+        emit_imm64(4607182418800017408)
+        emit_store_var(base_slot)
+    }
+    em(0x48); em(0x8d); em(0x85)
+    em32(0 - (base_slot + 2) * 8)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_hash_make_mode(value_ty, value_hash, lit_mode, lit_eps)
+    LAST_EXPR_IS_LINEAR = 0
+}
+
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
 fn compile_primary() with IO, Mut, Panic, Div {
@@ -3973,6 +4279,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
             }
             if fi < 0 { EXPR_IS_F64 = 0 }
+            return
+        }
+        if TK[EP as usize] == 8 && src_match(ns, ne - ns, "Knowledge") {
+            compile_knowledge_literal_x86()
             return
         }
         // Struct literal: StructName { field: val, ... }
@@ -5164,6 +5474,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 decl_ty = SCAN_TY
                 decl_ty_hash = SCAN_TY_HASH
                 if knowledge_hash_invalid(decl_ty_hash) {
+                    if 0 == 1 {
+                        print("DEBUG decl ty=")
+                        print_int(decl_ty)
+                        print(" hash=")
+                        print_int(decl_ty_hash)
+                        print(" eps=")
+                        print_int(knowledge_hash_eps(decl_ty_hash))
+                        print("\n")
+                    }
                     tc_epistemic_boundary(EP)
                     decl_ty = 0
                     decl_ty_hash = 0
@@ -5207,8 +5526,12 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             emit_store_var(ptr_slot)
         } else {
             compile_or()
-            if decl_ty != 0 && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
-                tc_error(EP - 1, "initializer type does not match declaration")
+            if (decl_ty != 0 || decl_ty_hash != 0) && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
+                if type_has_knowledge(decl_ty, decl_ty_hash) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
+                    tc_epistemic_boundary(EP)
+                } else {
+                    tc_error(EP - 1, "initializer type does not match declaration")
+                }
             }
             if (decl_ty == 8) || (decl_ty == 0 && EXPR_TY == 8) {
                 var bind_hash = EXPR_TY_HASH
@@ -5472,8 +5795,12 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, EXPR_TY, EXPR_TY_HASH) == false {
             // Allow numeric coercions (i32→i64, unit→f64, etc.)
             if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(EXPR_TY)) == false {
-                if CURRENT_RET_TY != 0 && EXPR_TY != 0 {
-                    tc_error(EP - 1, "return type does not match function signature")
+                if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (EXPR_TY != 0 || EXPR_TY_HASH != 0) {
+                    if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
+                        tc_epistemic_boundary(EP)
+                    } else {
+                        tc_error(EP - 1, "return type does not match function signature")
+                    }
                 }
             }
         }
@@ -6436,7 +6763,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                             FN_NEEDS_SESSION[sig_fi as usize] = 1
                         }
                         scan_type(q)
-                        if knowledge_hash_invalid(SCAN_TY_HASH) { tc_epistemic_boundary(q) }
+                        if knowledge_hash_invalid(SCAN_TY_HASH) {
+                            if 0 == 1 {
+                                print("DEBUG sig ty=")
+                                print_int(SCAN_TY)
+                                print(" hash=")
+                                print_int(SCAN_TY_HASH)
+                                print(" eps=")
+                                print_int(knowledge_hash_eps(SCAN_TY_HASH))
+                                print("\n")
+                            }
+                            tc_epistemic_boundary(q)
+                        }
                         q = SCAN_TY_NEXT
                     }
                 } else {
@@ -6452,6 +6790,15 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 }
                 scan_type(q)
                 if knowledge_hash_invalid(SCAN_TY_HASH) {
+                    if 0 == 1 {
+                        print("DEBUG ret ty=")
+                        print_int(SCAN_TY)
+                        print(" hash=")
+                        print_int(SCAN_TY_HASH)
+                        print(" eps=")
+                        print_int(knowledge_hash_eps(SCAN_TY_HASH))
+                        print("\n")
+                    }
                     tc_epistemic_boundary(q)
                     FN_RET_TY[sig_fi as usize] = 0
                     FN_RET_HASH[sig_fi as usize] = 0
@@ -6711,8 +7058,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 em(0x31); em(0xc0)
             } else if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
                 if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
-                    if CURRENT_RET_TY != 0 && LAST_STMT_TY != 0 {
-                        tc_error(EP - 1, "tail expression type does not match function signature")
+                    if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
+                        if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                            tc_epistemic_boundary(EP)
+                        } else {
+                            tc_error(EP - 1, "tail expression type does not match function signature")
+                        }
                     }
                 }
             } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
@@ -7631,6 +7982,108 @@ fn compile_measure_call_a64(call_tok: i64) with IO, Mut, Panic, Div {
     EXPR_TY_HASH = knowledge_hash_make(value_ty, value_hash, eps_scaled)
 }
 
+fn compile_knowledge_literal_a64() with IO, Mut, Panic, Div {
+    EP = EP + 1
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    var value_ty: i64 = 0
+    var value_hash: i64 = 0
+    var saw_value: i64 = 0
+    var saw_var: i64 = 0
+    var saw_conf: i64 = 0
+    var lit_mode: i64 = 0
+    var lit_eps: i64 = -1
+    while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+        if TK[EP as usize] == 3 {
+            let field_tok = EP
+            let fns = TS[EP as usize]
+            let fne = TE[EP as usize]
+            EP = EP + 1
+            if TK[EP as usize] == 43 { EP = EP + 1 }
+            let field_start = EP
+            compile_or_a64()
+            let field_ty = EXPR_TY
+            let field_hash = EXPR_TY_HASH
+            let lit_tok = expr_simple_numeric_tok(field_start, EP)
+            if src_match(fns, fne - fns, "value") {
+                emit_store_var_a64(base_slot + 2)
+                value_ty = field_ty
+                value_hash = field_hash
+                saw_value = 1
+            } else if src_match(fns, fne - fns, "variance") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        em32(0x9E620000)
+                        em32(0x9E660000)
+                    } else {
+                        tc_error(field_tok, "Knowledge variance must be numeric")
+                        em32(0xD2800000)
+                    }
+                }
+                emit_store_var_a64(base_slot + 1)
+                saw_var = 1
+            } else if src_match(fns, fne - fns, "uncertainty") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        em32(0x9E620000)
+                        em32(0x9E660000)
+                    } else {
+                        tc_error(field_tok, "Knowledge uncertainty must be numeric")
+                        em32(0xD2800000)
+                    }
+                }
+                em32(0xAA0003E1)
+                emit_f64_binop_a64(0x1E610800)
+                emit_store_var_a64(base_slot + 1)
+                saw_var = 1
+            } else if src_match(fns, fne - fns, "confidence") || src_match(fns, fne - fns, "epsilon") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        em32(0x9E620000)
+                        em32(0x9E660000)
+                    } else {
+                        tc_error(field_tok, "Knowledge epsilon must be numeric")
+                        em32(0xD2800000)
+                    }
+                }
+                emit_store_var_a64(base_slot)
+                saw_conf = 1
+                if lit_tok >= 0 {
+                    let scaled = tok_scaled_million(lit_tok)
+                    if scaled >= 0 && scaled <= 1000000 {
+                        lit_mode = 1
+                        lit_eps = scaled
+                    }
+                }
+            } else if src_match(fns, fne - fns, "validity") || src_match(fns, fne - fns, "provenance") {
+            } else {
+                tc_error(field_tok, "unknown field in Knowledge literal")
+            }
+        }
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+    }
+    if TK[EP as usize] == 9 { EP = EP + 1 }
+    if saw_value == 0 {
+        em32(0xD2800000)
+        emit_store_var_a64(base_slot + 2)
+        value_ty = 0
+        value_hash = 0
+    }
+    if saw_var == 0 {
+        em32(0xD2800000)
+        emit_store_var_a64(base_slot + 1)
+    }
+    if saw_conf == 0 {
+        emit_imm64_a64(4607182418800017408)
+        emit_store_var_a64(base_slot)
+    }
+    emit_lea_var_a64(base_slot + 2)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_hash_make_mode(value_ty, value_hash, lit_mode, lit_eps)
+    LAST_EXPR_IS_LINEAR = 0
+}
+
 // ─── ARM64 expression compiler ───
 fn compile_primary_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
@@ -8247,6 +8700,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
             }
             if fi < 0 { EXPR_IS_F64 = 0 }
+            return
+        }
+        if TK[EP as usize] == 8 && src_match(ns, ne - ns, "Knowledge") {
+            compile_knowledge_literal_a64()
             return
         }
         // Struct literal
@@ -8890,6 +9347,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 decl_ty = SCAN_TY
                 decl_ty_hash = SCAN_TY_HASH
                 if knowledge_hash_invalid(decl_ty_hash) {
+                    if 0 == 1 {
+                        print("DEBUG decl ty=")
+                        print_int(decl_ty)
+                        print(" hash=")
+                        print_int(decl_ty_hash)
+                        print(" eps=")
+                        print_int(knowledge_hash_eps(decl_ty_hash))
+                        print("\n")
+                    }
                     tc_epistemic_boundary(EP)
                     decl_ty = 0
                     decl_ty_hash = 0
@@ -8921,8 +9387,12 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             emit_store_var_a64(ptr_slot)
         } else {
             compile_or_a64()
-            if decl_ty != 0 && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
-                tc_error(EP - 1, "initializer type does not match declaration")
+            if (decl_ty != 0 || decl_ty_hash != 0) && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
+                if type_has_knowledge(decl_ty, decl_ty_hash) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
+                    tc_epistemic_boundary(EP)
+                } else {
+                    tc_error(EP - 1, "initializer type does not match declaration")
+                }
             }
             if (decl_ty == 8) || (decl_ty == 0 && EXPR_TY == 8) {
                 var bind_hash = EXPR_TY_HASH
@@ -9151,8 +9621,12 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, EXPR_TY, EXPR_TY_HASH) == false {
             if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(EXPR_TY)) == false {
-                if CURRENT_RET_TY != 0 && EXPR_TY != 0 {
-                    tc_error(EP - 1, "return type does not match function signature")
+                if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (EXPR_TY != 0 || EXPR_TY_HASH != 0) {
+                    if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
+                        tc_epistemic_boundary(EP)
+                    } else {
+                        tc_error(EP - 1, "return type does not match function signature")
+                    }
                 }
             }
         }
@@ -9580,8 +10054,12 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 em32(0xD2800000)
             } else if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
                 if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
-                    if CURRENT_RET_TY != 0 && LAST_STMT_TY != 0 {
-                        tc_error(EP - 1, "tail expression type does not match function signature")
+                    if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
+                        if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                            tc_epistemic_boundary(EP)
+                        } else {
+                            tc_error(EP - 1, "tail expression type does not match function signature")
+                        }
                     }
                 }
             } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
