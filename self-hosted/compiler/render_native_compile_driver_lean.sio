@@ -5843,10 +5843,7 @@ var MC_PARAM_IS_F64: [i64; 1024] = [0; 1024]  // 1 if param type is f64
 
 // --- Function return type tracking ---
 // -1 = scalar, >=0 = struct index
-var MC_FN_RET_TYPE: [i64; 256] = [-1; 256]  // -1=scalar, >=0=struct index
-var MC_CUR_FI: i64 = 0  // current function index being compiled
-var MC_SRET_BASE: i64 = -1  // >= 0 when last call returned a struct (slot base of SRET data)
-var MC_SRET_SI: i64 = -1    // struct index of SRET return
+var MC_FN_RET_TYPE: [i64; 256] = [0; 256]  // set per-fn in mc_scan_functions
 
 // Frame size: fixed 4096 bytes (512 slots * 8)
 fn MC_FRAME_SIZE() -> i64 { 4096 }
@@ -6019,8 +6016,6 @@ fn mc_emit_load_xmm1(slot: i64) with Mut {
 // --- Local variable management ---
 fn mc_locals_reset() with Mut {
     MC_LOC_COUNT = 0
-    MC_SRET_BASE = -1
-    MC_SRET_SI = -1
     MC_NEXT_SLOT = 0
 }
 
@@ -7633,33 +7628,12 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
     // Find target function
     let fn_idx = mc_find_fn(name_s, name_len)
     if fn_idx >= 0 {
-        // call rel32
+        // call rel32 — emit sentinel, will be patched
         we(0xe8)
         MC_CALL_FIX_OFF[MC_CALL_FIX_COUNT as usize] = WIDE_LEN
         MC_CALL_FIX_TARGET[MC_CALL_FIX_COUNT as usize] = fn_idx
         MC_CALL_FIX_COUNT = MC_CALL_FIX_COUNT + 1
         we32(0)  // placeholder
-        // Register-pass SRET: read r10, r11, r12 into caller-owned slots
-        let ret_si = MC_FN_RET_TYPE[fn_idx as usize]
-        if ret_si >= 0 {
-            let flat = MC_ST_FLAT_SIZE[ret_si as usize]
-            let sret_base = MC_NEXT_SLOT
-            MC_NEXT_SLOT = MC_NEXT_SLOT + flat
-            // r10=field0, r11=field1, r12=field2 (set by callee before leave;ret)
-            // Store fields in contragradiant order: field 0 → highest addr (sret_base)
-            if flat > 0 { we(0x4C); we(0x89); we(0xD0); mc_emit_store_rax(sret_base) }  // mov rax, r10; store field 0
-            if flat > 1 { we(0x4C); we(0x89); we(0xD8); mc_emit_store_rax(sret_base + 1) }  // mov rax, r11; store field 1
-            if flat > 2 { we(0x4C); we(0x89); we(0xE0); mc_emit_store_rax(sret_base + 2) }  // mov rax, r12; store field 2
-            // Set rax = base pointer for struct
-            mc_emit_lea_slot(sret_base)
-            MC_EXPR_IS_F64 = 0
-            // Tell mc_stmt_let to use these slots directly (no double-copy)
-            MC_SRET_BASE = sret_base
-            MC_SRET_SI = ret_si
-        }
-            // lea rax, [rbp - (dst_base + flat - 1 + 1)*8] — new base
-            mc_emit_lea_slot(dst_base + flat - 1)
-        }
     } else {
         // Unknown function — emit warning + nop call
         print("mc: unknown fn '")
@@ -8310,21 +8284,7 @@ fn mc_stmt_let() with Mut, Panic, Div {
         }
     }
     mc_parse_expr()
-    // Check for SRET: mc_emit_call already copied struct into caller slots
-    if MC_SRET_BASE >= 0 {
-        let sret_si = MC_SRET_SI
-        let sret_slot = MC_SRET_BASE
-        MC_SRET_BASE = -1
-        MC_SRET_SI = -1
-        // Register the local at the SRET slot base (no re-copy needed)
-        let idx = MC_LOC_COUNT
-        MC_LOC_NAME_START[idx as usize] = ns
-        MC_LOC_NAME_LEN[idx as usize] = nl
-        MC_LOC_SLOT[idx as usize] = sret_slot
-        MC_LOC_TYPE[idx as usize] = sret_si
-        MC_LOC_IS_F64[idx as usize] = 0
-        MC_LOC_COUNT = MC_LOC_COUNT + 1
-    } else if let_st >= 0 {
+    if let_st >= 0 {
         let slot = mc_add_local_struct(ns, nl, let_st)
         mc_emit_struct_copy_from_rax(slot, MC_ST_FLAT_SIZE[let_st as usize])
     } else if let_is_f64 == 1 {
@@ -8436,17 +8396,6 @@ fn mc_stmt_return() with Mut, Panic, Div {
         we(0x48)
         we(0x31)
         we(0xc0)  // xor rax, rax
-    }
-    // Register-pass SRET: load struct fields into r10, r11, r12 BEFORE epilogue
-    // These registers survive leave;ret and the caller reads them after call.
-    let cur_ret_si = MC_FN_RET_TYPE[MC_CUR_FI as usize]
-    if cur_ret_si >= 0 {
-        let flat = MC_ST_FLAT_SIZE[cur_ret_si as usize]
-        // rax = local struct ptr (contragradiant: field 0 at [rax], field 1 at [rax-8])
-        we(0x48); we(0x89); we(0xC1)  // mov rcx, rax (src base)
-        if flat > 0 { we(0x4C); we(0x8B); we(0x11) }           // mov r10, [rcx] (field 0)
-        if flat > 1 { we(0x4C); we(0x8B); we(0x59); we(0xF8) } // mov r11, [rcx-8] (field 1)
-        if flat > 2 { we(0x4C); we(0x8B); we(0x61); we(0xF0) } // mov r12, [rcx-16] (field 2)
     }
     // Epilogue: mov rsp, rbp; pop rbp; ret
     we(0x48)
@@ -9343,9 +9292,6 @@ fn mc_scan_functions() with Mut, Panic, Div {
     MC_POS = 0
     MC_FN_COUNT = 0
     MC_PARAM_TOTAL = 0
-    // Initialize ret types to -1 (BSS zeroing doesn't handle negative init)
-    var ri: i64 = 0
-    while ri < 256 { MC_FN_RET_TYPE[ri as usize] = -1; ri = ri + 1 }
     print("SF\n")
     while MC_POS < MC_TC {
         print(".")
@@ -9374,9 +9320,7 @@ fn mc_scan_functions() with Mut, Panic, Div {
             MC_POS = MC_POS + 1
             MC_FN_PARAM_COUNT[SC_FI as usize] = SC_PC
             MC_FN_RET_TYPE[SC_FI as usize] = -1
-            // Check for return type: -> TypeName
-            mc_scan_fn_return_and_effects()
-            // Skip to body {
+            // Skip to body { — just advance until we hit { (boot4 frame too small for full parsing)
             while MC_POS < MC_TC {
                 if MP_KIND[MC_POS as usize] == 173 { break }
                 MC_POS = MC_POS + 1
@@ -9404,7 +9348,6 @@ fn mc_compile_functions() with Mut, Panic, Div {
     var fi: i64 = 0
     while fi < MC_FN_COUNT {
         print("CF:")
-        MC_CUR_FI = fi
         MC_FN_OFF[fi as usize] = WIDE_LEN
 
         // Reset locals
