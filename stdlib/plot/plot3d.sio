@@ -1,0 +1,592 @@
+// 3D Plot Rendering — WebGL-based HTML Output
+//
+// Generates self-contained HTML files with interactive 3D visualization.
+// Supports scatter plots (point clouds) and surface wireframes.
+// Mouse drag rotates the view, scroll wheel zooms.
+//
+// ## Workflow
+//
+// 1. Generate HTML via `plot3d_scatter()` / `plot3d_surface()` — writes to stdout
+// 2. Redirect to file: `souc run script.sio > plot3d.html`
+// 3. Open in any modern browser
+//
+// ## Supported plot types
+//
+// - 3D scatter plots with colored point clouds (up to 512 points)
+// - 3D surface wireframes (up to 64x64 grid = 4096 cells)
+// - Combined scatter + surface overlay
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+struct Plot3DConfig {
+    width: i64,
+    height: i64,
+    title: string,
+    x_label: string,
+    y_label: string,
+    z_label: string,
+    camera_angle_x: f64,
+    camera_angle_y: f64,
+    bg_color: string,
+}
+
+struct Scatter3D {
+    x: [f64; 512],
+    y: [f64; 512],
+    z: [f64; 512],
+    n: i64,
+    color: string,
+    point_size: f64,
+}
+
+struct Surface3D {
+    z_grid: [f64; 4096],
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    nx: i64,
+    ny: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+fn plot3d_config_default() -> Plot3DConfig {
+    Plot3DConfig {
+        width: 800,
+        height: 600,
+        title: "3D Plot",
+        x_label: "X",
+        y_label: "Y",
+        z_label: "Z",
+        camera_angle_x: 0.6,
+        camera_angle_y: 0.8,
+        bg_color: "#1a1a2e",
+    }
+}
+
+fn scatter3d_new() -> Scatter3D {
+    Scatter3D {
+        x: [0.0; 512],
+        y: [0.0; 512],
+        z: [0.0; 512],
+        n: 0,
+        color: "#00d4ff",
+        point_size: 4.0,
+    }
+}
+
+fn scatter3d_add_point(s: &!Scatter3D, xv: f64, yv: f64, zv: f64) {
+    if s.n < 512 {
+        s.x[s.n as usize] = xv
+        s.y[s.n as usize] = yv
+        s.z[s.n as usize] = zv
+        s.n = s.n + 1
+    }
+}
+
+fn surface3d_new() -> Surface3D {
+    Surface3D {
+        z_grid: [0.0; 4096],
+        x_min: -1.0,
+        x_max: 1.0,
+        y_min: -1.0,
+        y_max: 1.0,
+        nx: 32,
+        ny: 32,
+    }
+}
+
+// Sample a function z=f(x,y) over a grid.
+// f is not a closure — caller must populate the grid manually or use this
+// with inline computation. Since Sounio does not yet support closure literals,
+// we provide the grid-building pattern instead.
+fn surface3d_set(s: &!Surface3D, ix: i64, iy: i64, z_val: f64) {
+    if ix >= 0 && ix < s.nx && iy >= 0 && iy < s.ny {
+        let idx = iy * s.nx + ix
+        if idx < 4096 {
+            s.z_grid[idx as usize] = z_val
+        }
+    }
+}
+
+// ============================================================================
+// INTEGER PRINTING HELPER
+// ============================================================================
+
+fn p3d_print_int(n: i64) with IO, Mut, Panic, Div {
+    if n == 0 {
+        print("0")
+        return
+    }
+    var val: i64 = n
+    if val < 0 {
+        print("-")
+        val = 0 - val
+    }
+    var buf: [i64; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                           0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var len: i64 = 0
+    while val > 0 {
+        buf[len as usize] = val - (val / 10) * 10
+        val = val / 10
+        len = len + 1
+    }
+    var j: i64 = len - 1
+    while j >= 0 {
+        let d = buf[j as usize]
+        if d == 0 { print("0") }
+        if d == 1 { print("1") }
+        if d == 2 { print("2") }
+        if d == 3 { print("3") }
+        if d == 4 { print("4") }
+        if d == 5 { print("5") }
+        if d == 6 { print("6") }
+        if d == 7 { print("7") }
+        if d == 8 { print("8") }
+        if d == 9 { print("9") }
+        j = j - 1
+    }
+}
+
+// ============================================================================
+// FLOAT PRINTING HELPER
+// ============================================================================
+
+fn p3d_print_f64(value: f64, decimals: i64) with IO, Mut, Panic, Div {
+    if value < 0.0 {
+        print("-")
+    }
+    let abs_val = if value < 0.0 { 0.0 - value } else { value }
+    let int_part = abs_val as i64
+    p3d_print_int(int_part)
+
+    if decimals > 0 {
+        print(".")
+        var frac = abs_val - int_part as f64
+        var d: i64 = 0
+        while d < decimals {
+            frac = frac * 10.0
+            let digit = frac as i64
+            p3d_print_int(digit)
+            frac = frac - digit as f64
+            d = d + 1
+        }
+    }
+}
+
+// ============================================================================
+// HTML DOCUMENT STRUCTURE
+// ============================================================================
+
+fn p3d_emit_html_header(config: &Plot3DConfig) with IO, Mut, Panic, Div {
+    println("<!DOCTYPE html>")
+    println("<html lang=\"en\">")
+    println("<head>")
+    println("<meta charset=\"UTF-8\">")
+    println("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">")
+    print("<title>")
+    print(config.title)
+    println("</title>")
+    println("<style>")
+    println("  * { margin: 0; padding: 0; box-sizing: border-box; }")
+    print("  body { background: ")
+    print(config.bg_color)
+    println("; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: 'Segoe UI', sans-serif; color: #e0e0e0; }")
+    println("  h1 { margin: 20px 0 10px; font-size: 1.4em; letter-spacing: 1px; }")
+    println("  .labels { font-size: 0.85em; opacity: 0.7; margin-bottom: 8px; }")
+    println("  canvas { border: 1px solid #333; cursor: grab; }")
+    println("  canvas:active { cursor: grabbing; }")
+    println("</style>")
+    println("</head>")
+    println("<body>")
+    print("<h1>")
+    print(config.title)
+    println("</h1>")
+    print("<div class=\"labels\">")
+    print(config.x_label)
+    print(" / ")
+    print(config.y_label)
+    print(" / ")
+    print(config.z_label)
+    println("</div>")
+    print("<canvas id=\"c\" width=\"")
+    p3d_print_int(config.width)
+    print("\" height=\"")
+    p3d_print_int(config.height)
+    println("\"></canvas>")
+    println("<script>")
+}
+
+fn p3d_emit_html_footer() with IO {
+    println("</script>")
+    println("</body>")
+    println("</html>")
+}
+
+// ============================================================================
+// JAVASCRIPT 3D RENDERER
+// ============================================================================
+
+fn p3d_emit_js_engine(config: &Plot3DConfig) with IO, Mut, Panic, Div {
+    println("'use strict';")
+    println("const canvas = document.getElementById('c');")
+    println("const ctx = canvas.getContext('2d');")
+    println("const W = canvas.width, H = canvas.height;")
+    println("const cx = W / 2, cy = H / 2;")
+    println("const scale = Math.min(W, H) * 0.32;")
+    println("")
+
+    // Camera state
+    print("let rotX = ")
+    p3d_print_f64(config.camera_angle_x, 4)
+    println(";")
+    print("let rotY = ")
+    p3d_print_f64(config.camera_angle_y, 4)
+    println(";")
+    println("let zoom = 1.0;")
+    println("")
+
+    // 3D projection function
+    println("function project(x, y, z) {")
+    println("  const cosX = Math.cos(rotX), sinX = Math.sin(rotX);")
+    println("  const cosY = Math.cos(rotY), sinY = Math.sin(rotY);")
+    println("  // Rotate around X axis")
+    println("  const y1 = y * cosX - z * sinX;")
+    println("  const z1 = y * sinX + z * cosX;")
+    println("  // Rotate around Y axis")
+    println("  const x1 = x * cosY + z1 * sinY;")
+    println("  const z2 = -x * sinY + z1 * cosY;")
+    println("  // Orthographic with depth-based scale")
+    println("  const s = scale * zoom * (1.0 + z2 * 0.15);")
+    println("  return { px: cx + x1 * s, py: cy - y1 * s, depth: z2 };")
+    println("}")
+    println("")
+
+    // Axis drawing
+    println("function drawAxes() {")
+    println("  const axLen = 1.15;")
+    println("  const axes = [")
+    println("    { dir: [axLen, 0, 0], label: '" )
+    // Close the string inline
+    print(config.x_label)
+    println("', color: '#ff6b6b' },")
+    print("    { dir: [0, axLen, 0], label: '")
+    print(config.y_label)
+    println("', color: '#51cf66' },")
+    print("    { dir: [0, 0, axLen], label: '")
+    print(config.z_label)
+    println("', color: '#339af0' },")
+    println("  ];")
+    println("  const o = project(0, 0, 0);")
+    println("  axes.forEach(a => {")
+    println("    const e = project(a.dir[0], a.dir[1], a.dir[2]);")
+    println("    ctx.beginPath();")
+    println("    ctx.moveTo(o.px, o.py);")
+    println("    ctx.lineTo(e.px, e.py);")
+    println("    ctx.strokeStyle = a.color;")
+    println("    ctx.lineWidth = 1.5;")
+    println("    ctx.stroke();")
+    println("    ctx.fillStyle = a.color;")
+    println("    ctx.font = '13px sans-serif';")
+    println("    ctx.fillText(a.label, e.px + 6, e.py - 6);")
+    println("  });")
+    println("  // Grid lines on XY plane at z=0")
+    println("  ctx.strokeStyle = 'rgba(255,255,255,0.08)';")
+    println("  ctx.lineWidth = 0.5;")
+    println("  for (let i = -1; i <= 1; i += 0.25) {")
+    println("    const a = project(i, -1, 0), b = project(i, 1, 0);")
+    println("    ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();")
+    println("    const c = project(-1, i, 0), d = project(1, i, 0);")
+    println("    ctx.beginPath(); ctx.moveTo(c.px, c.py); ctx.lineTo(d.px, d.py); ctx.stroke();")
+    println("  }")
+    println("}")
+    println("")
+
+    // Mouse interaction
+    println("let dragging = false, lastMX = 0, lastMY = 0;")
+    println("canvas.addEventListener('mousedown', e => { dragging = true; lastMX = e.clientX; lastMY = e.clientY; });")
+    println("canvas.addEventListener('mouseup', () => { dragging = false; });")
+    println("canvas.addEventListener('mouseleave', () => { dragging = false; });")
+    println("canvas.addEventListener('mousemove', e => {")
+    println("  if (!dragging) return;")
+    println("  rotY += (e.clientX - lastMX) * 0.008;")
+    println("  rotX += (e.clientY - lastMY) * 0.008;")
+    println("  lastMX = e.clientX; lastMY = e.clientY;")
+    println("  render();")
+    println("});")
+    println("canvas.addEventListener('wheel', e => {")
+    println("  e.preventDefault();")
+    println("  zoom *= e.deltaY > 0 ? 0.92 : 1.08;")
+    println("  zoom = Math.max(0.2, Math.min(5.0, zoom));")
+    println("  render();")
+    println("}, { passive: false });")
+    println("")
+}
+
+// ============================================================================
+// SCATTER PLOT DATA EMISSION
+// ============================================================================
+
+fn p3d_emit_scatter_data(data: &Scatter3D) with IO, Mut, Panic, Div {
+    if data.n <= 0 { return }
+
+    // Find data range for normalization to [-1, 1]
+    var x_min = data.x[0]
+    var x_max = data.x[0]
+    var y_min = data.y[0]
+    var y_max = data.y[0]
+    var z_min = data.z[0]
+    var z_max = data.z[0]
+
+    var i: i64 = 1
+    while i < data.n {
+        if data.x[i as usize] < x_min { x_min = data.x[i as usize] }
+        if data.x[i as usize] > x_max { x_max = data.x[i as usize] }
+        if data.y[i as usize] < y_min { y_min = data.y[i as usize] }
+        if data.y[i as usize] > y_max { y_max = data.y[i as usize] }
+        if data.z[i as usize] < z_min { z_min = data.z[i as usize] }
+        if data.z[i as usize] > z_max { z_max = data.z[i as usize] }
+        i = i + 1
+    }
+
+    let x_range = if x_max > x_min { x_max - x_min } else { 1.0 }
+    let y_range = if y_max > y_min { y_max - y_min } else { 1.0 }
+    let z_range = if z_max > z_min { z_max - z_min } else { 1.0 }
+
+    // Emit normalized points as JS array
+    println("const scatterPts = [")
+    i = 0
+    while i < data.n {
+        let nx = (data.x[i as usize] - x_min) / x_range * 2.0 - 1.0
+        let ny = (data.y[i as usize] - y_min) / y_range * 2.0 - 1.0
+        let nz = (data.z[i as usize] - z_min) / z_range * 2.0 - 1.0
+        print("  [")
+        p3d_print_f64(nx, 6)
+        print(", ")
+        p3d_print_f64(ny, 6)
+        print(", ")
+        p3d_print_f64(nz, 6)
+        print("]")
+        if i < data.n - 1 {
+            print(",")
+        }
+        println("")
+        i = i + 1
+    }
+    println("];")
+
+    print("const scatterColor = '")
+    print(data.color)
+    println("';")
+    print("const scatterSize = ")
+    p3d_print_f64(data.point_size, 1)
+    println(";")
+    println("")
+}
+
+fn p3d_emit_scatter_render() with IO {
+    println("function drawScatter() {")
+    println("  if (typeof scatterPts === 'undefined') return;")
+    println("  // Sort by depth for back-to-front rendering")
+    println("  const projected = scatterPts.map(p => {")
+    println("    const pr = project(p[0], p[1], p[2]);")
+    println("    return { px: pr.px, py: pr.py, depth: pr.depth, orig: p };")
+    println("  });")
+    println("  projected.sort((a, b) => a.depth - b.depth);")
+    println("  projected.forEach(p => {")
+    println("    const r = scatterSize * (1.0 + p.depth * 0.3);")
+    println("    const alpha = 0.4 + 0.6 * ((p.depth + 1.5) / 3.0);")
+    println("    ctx.beginPath();")
+    println("    ctx.arc(p.px, p.py, Math.max(1, r), 0, Math.PI * 2);")
+    println("    ctx.fillStyle = scatterColor;")
+    println("    ctx.globalAlpha = Math.max(0.15, Math.min(1.0, alpha));")
+    println("    ctx.fill();")
+    println("  });")
+    println("  ctx.globalAlpha = 1.0;")
+    println("}")
+    println("")
+}
+
+// ============================================================================
+// SURFACE WIREFRAME DATA EMISSION
+// ============================================================================
+
+fn p3d_emit_surface_data(surf: &Surface3D) with IO, Mut, Panic, Div {
+    if surf.nx <= 0 || surf.ny <= 0 { return }
+
+    // Find z range for normalization
+    var z_min = surf.z_grid[0]
+    var z_max = surf.z_grid[0]
+    var idx: i64 = 1
+    let total = surf.nx * surf.ny
+    while idx < total {
+        if idx < 4096 {
+            if surf.z_grid[idx as usize] < z_min { z_min = surf.z_grid[idx as usize] }
+            if surf.z_grid[idx as usize] > z_max { z_max = surf.z_grid[idx as usize] }
+        }
+        idx = idx + 1
+    }
+    let z_range = if z_max > z_min { z_max - z_min } else { 1.0 }
+
+    // Emit grid as JS 2D array of [x, y, z] normalized to [-1, 1]
+    print("const surfNX = ")
+    p3d_print_int(surf.nx)
+    print(", surfNY = ")
+    p3d_print_int(surf.ny)
+    println(";")
+    println("const surfGrid = [")
+
+    var iy: i64 = 0
+    while iy < surf.ny {
+        print("  [")
+        var ix: i64 = 0
+        while ix < surf.nx {
+            let gi = iy * surf.nx + ix
+            let nx = if surf.nx > 1 { ix as f64 / (surf.nx - 1) as f64 * 2.0 - 1.0 } else { 0.0 }
+            let ny = if surf.ny > 1 { iy as f64 / (surf.ny - 1) as f64 * 2.0 - 1.0 } else { 0.0 }
+            let nz = if gi < 4096 { (surf.z_grid[gi as usize] - z_min) / z_range * 2.0 - 1.0 } else { 0.0 }
+            print("[")
+            p3d_print_f64(nx, 4)
+            print(",")
+            p3d_print_f64(ny, 4)
+            print(",")
+            p3d_print_f64(nz, 4)
+            print("]")
+            if ix < surf.nx - 1 { print(",") }
+            ix = ix + 1
+        }
+        print("]")
+        if iy < surf.ny - 1 { print(",") }
+        println("")
+        iy = iy + 1
+    }
+    println("];")
+    println("")
+}
+
+fn p3d_emit_surface_render() with IO {
+    println("function drawSurface() {")
+    println("  if (typeof surfGrid === 'undefined') return;")
+    println("  for (let iy = 0; iy < surfNY; iy++) {")
+    println("    for (let ix = 0; ix < surfNX; ix++) {")
+    println("      const pt = surfGrid[iy][ix];")
+    println("      const p0 = project(pt[0], pt[2], pt[1]);")
+    println("      // Horizontal line to next column")
+    println("      if (ix < surfNX - 1) {")
+    println("        const pt1 = surfGrid[iy][ix + 1];")
+    println("        const p1 = project(pt1[0], pt1[2], pt1[1]);")
+    println("        const depth = (p0.depth + p1.depth) / 2;")
+    println("        const alpha = 0.15 + 0.5 * ((depth + 1.5) / 3.0);")
+    println("        // Color by height")
+    println("        const h = (pt[2] + 1) / 2;")
+    println("        const r = Math.floor(40 + 180 * h);")
+    println("        const g = Math.floor(120 + 60 * (1 - h));")
+    println("        const b = Math.floor(200 - 100 * h);")
+    println("        ctx.strokeStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + Math.max(0.1, Math.min(0.9, alpha)) + ')';")
+    println("        ctx.lineWidth = 0.8;")
+    println("        ctx.beginPath();")
+    println("        ctx.moveTo(p0.px, p0.py);")
+    println("        ctx.lineTo(p1.px, p1.py);")
+    println("        ctx.stroke();")
+    println("      }")
+    println("      // Vertical line to next row")
+    println("      if (iy < surfNY - 1) {")
+    println("        const pt2 = surfGrid[iy + 1][ix];")
+    println("        const p2 = project(pt2[0], pt2[2], pt2[1]);")
+    println("        const depth = (p0.depth + p2.depth) / 2;")
+    println("        const alpha = 0.15 + 0.5 * ((depth + 1.5) / 3.0);")
+    println("        const h = (pt[2] + 1) / 2;")
+    println("        const r = Math.floor(40 + 180 * h);")
+    println("        const g = Math.floor(120 + 60 * (1 - h));")
+    println("        const b = Math.floor(200 - 100 * h);")
+    println("        ctx.strokeStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + Math.max(0.1, Math.min(0.9, alpha)) + ')';")
+    println("        ctx.lineWidth = 0.8;")
+    println("        ctx.beginPath();")
+    println("        ctx.moveTo(p0.px, p0.py);")
+    println("        ctx.lineTo(p2.px, p2.py);")
+    println("        ctx.stroke();")
+    println("      }")
+    println("    }")
+    println("  }")
+    println("}")
+    println("")
+}
+
+// ============================================================================
+// RENDER LOOP AND MAIN PLOT FUNCTIONS
+// ============================================================================
+
+fn p3d_emit_render_fn(has_scatter: bool, has_surface: bool) with IO {
+    println("function render() {")
+    print("  ctx.fillStyle = '")
+    // Re-emit bg color from the already-set page bg
+    println("';")
+    println("  ctx.fillStyle = document.body.style.background || '#1a1a2e';")
+    println("  ctx.fillRect(0, 0, W, H);")
+    println("  drawAxes();")
+    if has_surface {
+        println("  drawSurface();")
+    }
+    if has_scatter {
+        println("  drawScatter();")
+    }
+    println("}")
+    println("render();")
+    println("")
+}
+
+// ============================================================================
+// PUBLIC API — SCATTER PLOT
+// ============================================================================
+
+/// Generate a complete self-contained HTML document for a 3D scatter plot.
+/// Output is written to stdout via print/println.
+/// Redirect to file: souc run script.sio > scatter3d.html
+fn plot3d_scatter(config: &Plot3DConfig, data: &Scatter3D) with IO, Mut, Div, Panic {
+    p3d_emit_html_header(config)
+    p3d_emit_js_engine(config)
+    p3d_emit_scatter_data(data)
+    p3d_emit_scatter_render()
+    p3d_emit_render_fn(true, false)
+    p3d_emit_html_footer()
+}
+
+// ============================================================================
+// PUBLIC API — SURFACE WIREFRAME
+// ============================================================================
+
+/// Generate a complete self-contained HTML document for a 3D surface wireframe.
+/// Output is written to stdout via print/println.
+fn plot3d_surface(config: &Plot3DConfig, surf: &Surface3D) with IO, Mut, Div, Panic {
+    p3d_emit_html_header(config)
+    p3d_emit_js_engine(config)
+    p3d_emit_surface_data(surf)
+    p3d_emit_surface_render()
+    p3d_emit_render_fn(false, true)
+    p3d_emit_html_footer()
+}
+
+// ============================================================================
+// PUBLIC API — SCATTER + SURFACE OVERLAY
+// ============================================================================
+
+/// Generate HTML with both scatter points overlaid on a surface wireframe.
+fn plot3d_scatter_surface(
+    config: &Plot3DConfig,
+    data: &Scatter3D,
+    surf: &Surface3D,
+) with IO, Mut, Div, Panic {
+    p3d_emit_html_header(config)
+    p3d_emit_js_engine(config)
+    p3d_emit_scatter_data(data)
+    p3d_emit_scatter_render()
+    p3d_emit_surface_data(surf)
+    p3d_emit_surface_render()
+    p3d_emit_render_fn(true, true)
+    p3d_emit_html_footer()
+}

@@ -1,0 +1,651 @@
+// symbolic.sio — Symbolic differentiation for automatic Jacobian generation
+//
+// Arena-based expression tree with symbolic differentiation, evaluation,
+// simplification, and pretty-printing. Enables compile-time Jacobian
+// generation for ODE systems without runtime AD overhead.
+//
+// Architecture: parallel-array arena (no heap allocation, no Box).
+// Each expression node stores: type tag, scalar value, left/right child index.
+//
+// Node types:
+//   0 = Const    value = constant
+//   1 = Var      value = variable index (as f64)
+//   2 = Add      left + right
+//   3 = Sub      left - right
+//   4 = Mul      left * right
+//   5 = Div      left / right
+//   6 = Neg      -left
+//   7 = Sin      sin(left)
+//   8 = Cos      cos(left)
+//   9 = Exp      exp(left)
+//  10 = Log      ln(left)
+//  11 = Pow      left ^ value  (value = exponent)
+//
+// References:
+//   Griewank & Walther, "Evaluating Derivatives" (2nd ed., SIAM, 2008)
+//   Rall, "Automatic Differentiation: Techniques and Applications"
+//       (LNCS 120, Springer, 1981)
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn sym_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sym_floor_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let i = x as i32
+    let f = i as f64
+    if x < 0.0 && f != x { return f - 1.0 }
+    return f
+}
+
+fn sym_sin_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let pi = 3.141592653589793
+    let two_pi = 6.283185307179586
+    var t = x - sym_floor_f64(x / two_pi) * two_pi
+    if t > pi { t = t - two_pi }
+    if t < 0.0 - pi { t = t + two_pi }
+    var sum = t
+    var term = t
+    var n = 1
+    while n <= 15 {
+        term = 0.0 - term * t * t / (((2 * n) as f64) * ((2 * n + 1) as f64))
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn sym_cos_f64(x: f64) -> f64 with Mut, Panic, Div {
+    return sym_sin_f64(x + 1.5707963267948966)
+}
+
+fn sym_exp_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let ln2 = 0.6931471805599453
+    let k_f = sym_floor_f64(x / ln2 + 0.5)
+    let k = k_f as i32
+    let r = x - k_f * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 20 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k > 0 {
+        var j = 0
+        while j < k { result = result * 2.0; j = j + 1 }
+    } else if k < 0 {
+        var j = 0
+        let neg_k = 0 - k
+        while j < neg_k { result = result / 2.0; j = j + 1 }
+    }
+    return result
+}
+
+fn sym_ln_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    var val = x
+    var k = 0.0
+    let e = 2.718281828459045
+    while val > e {
+        val = val / e
+        k = k + 1.0
+    }
+    while val < 1.0 / e {
+        val = val * e
+        k = k - 1.0
+    }
+    let u = (val - 1.0) / (val + 1.0)
+    let u2 = u * u
+    var sum = u
+    var term = u
+    term = term * u2
+    sum = sum + term / 3.0
+    term = term * u2
+    sum = sum + term / 5.0
+    term = term * u2
+    sum = sum + term / 7.0
+    term = term * u2
+    sum = sum + term / 9.0
+    term = term * u2
+    sum = sum + term / 11.0
+    term = term * u2
+    sum = sum + term / 13.0
+    term = term * u2
+    sum = sum + term / 15.0
+    term = term * u2
+    sum = sum + term / 17.0
+    term = term * u2
+    sum = sum + term / 19.0
+    return 2.0 * sum + k
+}
+
+fn sym_pow_f64(x: f64, n: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    return sym_exp_f64(n * sym_ln_f64(x))
+}
+
+// ============================================================================
+// EXPRESSION ARENA
+// ============================================================================
+
+struct ExprArena {
+    // Node type: 0=Const, 1=Var, 2=Add, 3=Sub, 4=Mul, 5=Div, 6=Neg,
+    //            7=Sin, 8=Cos, 9=Exp, 10=Log, 11=Pow
+    node_types: [i64; 1024],
+    // For Const: the value; for Var: variable index; for Pow: exponent
+    values: [f64; 1024],
+    // Left child index (-1 if leaf)
+    left: [i64; 1024],
+    // Right child index (-1 if leaf)
+    right: [i64; 1024],
+    // Number of nodes
+    count: i64,
+}
+
+// Result of adding a node: the modified arena plus the new node's index
+struct ExprResult {
+    arena: ExprArena,
+    idx: i64,
+}
+
+fn expr_arena_new() -> ExprArena with Mut, Panic {
+    ExprArena {
+        node_types: [0; 1024],
+        values: [0.0; 1024],
+        left: [-1; 1024],
+        right: [-1; 1024],
+        count: 0,
+    }
+}
+
+// ============================================================================
+// NODE CONSTRUCTORS (return ExprResult with arena + index)
+// ============================================================================
+
+fn expr_const(arena: ExprArena, value: f64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 0
+    a.values[idx] = value
+    a.left[idx] = -1
+    a.right[idx] = -1
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_var(arena: ExprArena, var_idx: i64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 1
+    a.values[idx] = var_idx as f64
+    a.left[idx] = -1
+    a.right[idx] = -1
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_add(arena: ExprArena, l: i64, r: i64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 2
+    a.values[idx] = 0.0
+    a.left[idx] = l
+    a.right[idx] = r
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_sub(arena: ExprArena, l: i64, r: i64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 3
+    a.values[idx] = 0.0
+    a.left[idx] = l
+    a.right[idx] = r
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_mul(arena: ExprArena, l: i64, r: i64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 4
+    a.values[idx] = 0.0
+    a.left[idx] = l
+    a.right[idx] = r
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_div(arena: ExprArena, l: i64, r: i64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 5
+    a.values[idx] = 0.0
+    a.left[idx] = l
+    a.right[idx] = r
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_neg(arena: ExprArena, child: i64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 6
+    a.values[idx] = 0.0
+    a.left[idx] = child
+    a.right[idx] = -1
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_sin(arena: ExprArena, child: i64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 7
+    a.values[idx] = 0.0
+    a.left[idx] = child
+    a.right[idx] = -1
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_cos(arena: ExprArena, child: i64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 8
+    a.values[idx] = 0.0
+    a.left[idx] = child
+    a.right[idx] = -1
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_exp(arena: ExprArena, child: i64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 9
+    a.values[idx] = 0.0
+    a.left[idx] = child
+    a.right[idx] = -1
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_log(arena: ExprArena, child: i64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 10
+    a.values[idx] = 0.0
+    a.left[idx] = child
+    a.right[idx] = -1
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+fn expr_pow(arena: ExprArena, child: i64, exponent: f64) -> ExprResult with Mut, Panic {
+    var a = arena
+    let idx = a.count
+    a.node_types[idx] = 11
+    a.values[idx] = exponent
+    a.left[idx] = child
+    a.right[idx] = -1
+    a.count = idx + 1
+    ExprResult { arena: a, idx: idx }
+}
+
+// ============================================================================
+// SYMBOLIC DIFFERENTIATION
+// ============================================================================
+// Differentiates node at node_idx with respect to variable var_idx.
+// Returns ExprResult with the derivative expression added to the arena.
+
+fn expr_diff(arena: ExprArena, node_idx: i64, var_idx: i64) -> ExprResult with Mut, Panic, Div {
+    let ntype = arena.node_types[node_idx]
+
+    // Const: d/dx(c) = 0
+    if ntype == 0 {
+        return expr_const(arena, 0.0)
+    }
+
+    // Var: d/dx(x) = 1, d/dx(y) = 0
+    if ntype == 1 {
+        let vi = arena.values[node_idx] as i64
+        if vi == var_idx {
+            return expr_const(arena, 1.0)
+        }
+        return expr_const(arena, 0.0)
+    }
+
+    // Add: d/dx(f+g) = df/dx + dg/dx
+    if ntype == 2 {
+        let l = arena.left[node_idx]
+        let r = arena.right[node_idx]
+        let dl = expr_diff(arena, l, var_idx)
+        let dr = expr_diff(dl.arena, r, var_idx)
+        return expr_add(dr.arena, dl.idx, dr.idx)
+    }
+
+    // Sub: d/dx(f-g) = df/dx - dg/dx
+    if ntype == 3 {
+        let l = arena.left[node_idx]
+        let r = arena.right[node_idx]
+        let dl = expr_diff(arena, l, var_idx)
+        let dr = expr_diff(dl.arena, r, var_idx)
+        return expr_sub(dr.arena, dl.idx, dr.idx)
+    }
+
+    // Mul: d/dx(f*g) = f*dg/dx + df/dx*g  (product rule)
+    if ntype == 4 {
+        let l = arena.left[node_idx]
+        let r = arena.right[node_idx]
+        let dl = expr_diff(arena, l, var_idx)
+        let dr = expr_diff(dl.arena, r, var_idx)
+        // f * dg/dx
+        let t1 = expr_mul(dr.arena, l, dr.idx)
+        // df/dx * g
+        let t2 = expr_mul(t1.arena, dl.idx, r)
+        // t2 + t1
+        return expr_add(t2.arena, t2.idx, t1.idx)
+    }
+
+    // Div: d/dx(f/g) = (g*df/dx - f*dg/dx) / g^2  (quotient rule)
+    if ntype == 5 {
+        let l = arena.left[node_idx]
+        let r = arena.right[node_idx]
+        let dl = expr_diff(arena, l, var_idx)
+        let dr = expr_diff(dl.arena, r, var_idx)
+        // g * df/dx
+        let t1 = expr_mul(dr.arena, r, dl.idx)
+        // f * dg/dx
+        let t2 = expr_mul(t1.arena, l, dr.idx)
+        // numerator = g*df - f*dg
+        let num = expr_sub(t2.arena, t1.idx, t2.idx)
+        // g^2
+        let g2 = expr_mul(num.arena, r, r)
+        return expr_div(g2.arena, num.idx, g2.idx)
+    }
+
+    // Neg: d/dx(-f) = -(df/dx)
+    if ntype == 6 {
+        let child = arena.left[node_idx]
+        let dc = expr_diff(arena, child, var_idx)
+        return expr_neg(dc.arena, dc.idx)
+    }
+
+    // Sin: d/dx(sin(f)) = cos(f) * df/dx
+    if ntype == 7 {
+        let child = arena.left[node_idx]
+        let dc = expr_diff(arena, child, var_idx)
+        let cos_f = expr_cos(dc.arena, child)
+        return expr_mul(cos_f.arena, cos_f.idx, dc.idx)
+    }
+
+    // Cos: d/dx(cos(f)) = -sin(f) * df/dx
+    if ntype == 8 {
+        let child = arena.left[node_idx]
+        let dc = expr_diff(arena, child, var_idx)
+        let sin_f = expr_sin(dc.arena, child)
+        let neg_sin = expr_neg(sin_f.arena, sin_f.idx)
+        return expr_mul(neg_sin.arena, neg_sin.idx, dc.idx)
+    }
+
+    // Exp: d/dx(exp(f)) = exp(f) * df/dx
+    if ntype == 9 {
+        let child = arena.left[node_idx]
+        let dc = expr_diff(arena, child, var_idx)
+        // reuse node_idx which is already exp(f)
+        return expr_mul(dc.arena, node_idx, dc.idx)
+    }
+
+    // Log: d/dx(ln(f)) = (1/f) * df/dx
+    if ntype == 10 {
+        let child = arena.left[node_idx]
+        let dc = expr_diff(arena, child, var_idx)
+        let one = expr_const(dc.arena, 1.0)
+        let inv_f = expr_div(one.arena, one.idx, child)
+        return expr_mul(inv_f.arena, inv_f.idx, dc.idx)
+    }
+
+    // Pow: d/dx(f^n) = n * f^(n-1) * df/dx  (power rule)
+    if ntype == 11 {
+        let child = arena.left[node_idx]
+        let n = arena.values[node_idx]
+        let dc = expr_diff(arena, child, var_idx)
+        let n_const = expr_const(dc.arena, n)
+        let pow_nm1 = expr_pow(n_const.arena, child, n - 1.0)
+        let n_times_pow = expr_mul(pow_nm1.arena, n_const.idx, pow_nm1.idx)
+        return expr_mul(n_times_pow.arena, n_times_pow.idx, dc.idx)
+    }
+
+    // Fallback: unknown node type -> return 0
+    return expr_const(arena, 0.0)
+}
+
+// ============================================================================
+// EVALUATION
+// ============================================================================
+// Evaluate expression tree at given variable values.
+// vars array maps variable index to value: vars[0] = x, vars[1] = y, etc.
+
+fn expr_eval(arena: ExprArena, node_idx: i64, vars: [f64; 16]) -> f64 with Mut, Panic, Div {
+    let ntype = arena.node_types[node_idx]
+
+    if ntype == 0 { return arena.values[node_idx] }
+    if ntype == 1 {
+        let vi = arena.values[node_idx] as i64
+        return vars[vi]
+    }
+
+    let l = arena.left[node_idx]
+    let r = arena.right[node_idx]
+
+    if ntype == 2 {
+        return expr_eval(arena, l, vars) + expr_eval(arena, r, vars)
+    }
+    if ntype == 3 {
+        return expr_eval(arena, l, vars) - expr_eval(arena, r, vars)
+    }
+    if ntype == 4 {
+        return expr_eval(arena, l, vars) * expr_eval(arena, r, vars)
+    }
+    if ntype == 5 {
+        return expr_eval(arena, l, vars) / expr_eval(arena, r, vars)
+    }
+    if ntype == 6 {
+        return 0.0 - expr_eval(arena, l, vars)
+    }
+    if ntype == 7 {
+        return sym_sin_f64(expr_eval(arena, l, vars))
+    }
+    if ntype == 8 {
+        return sym_cos_f64(expr_eval(arena, l, vars))
+    }
+    if ntype == 9 {
+        return sym_exp_f64(expr_eval(arena, l, vars))
+    }
+    if ntype == 10 {
+        return sym_ln_f64(expr_eval(arena, l, vars))
+    }
+    if ntype == 11 {
+        let base = expr_eval(arena, l, vars)
+        let exp = arena.values[node_idx]
+        return sym_pow_f64(base, exp)
+    }
+    return 0.0
+}
+
+// ============================================================================
+// SIMPLIFICATION (basic algebraic identities + constant folding)
+// ============================================================================
+// Returns ExprResult with simplified expression.
+// Applies: 0+x=x, x+0=x, 0*x=0, x*0=0, 1*x=x, x*1=x, const op const = const
+
+fn is_const_zero(arena: ExprArena, idx: i64) -> bool {
+    arena.node_types[idx] == 0 && arena.values[idx] == 0.0
+}
+
+fn is_const_one(arena: ExprArena, idx: i64) -> bool {
+    arena.node_types[idx] == 0 && arena.values[idx] == 1.0
+}
+
+fn expr_simplify(arena: ExprArena, node_idx: i64) -> ExprResult with Mut, Panic, Div {
+    let ntype = arena.node_types[node_idx]
+
+    // Leaves: nothing to simplify
+    if ntype == 0 { return ExprResult { arena: arena, idx: node_idx } }
+    if ntype == 1 { return ExprResult { arena: arena, idx: node_idx } }
+
+    let l = arena.left[node_idx]
+    let r = arena.right[node_idx]
+
+    // Constant folding for binary ops
+    if ntype == 2 {
+        // Add
+        if arena.node_types[l] == 0 && arena.node_types[r] == 0 {
+            return expr_const(arena, arena.values[l] + arena.values[r])
+        }
+        if is_const_zero(arena, l) { return ExprResult { arena: arena, idx: r } }
+        if is_const_zero(arena, r) { return ExprResult { arena: arena, idx: l } }
+        return ExprResult { arena: arena, idx: node_idx }
+    }
+    if ntype == 3 {
+        // Sub
+        if arena.node_types[l] == 0 && arena.node_types[r] == 0 {
+            return expr_const(arena, arena.values[l] - arena.values[r])
+        }
+        if is_const_zero(arena, r) { return ExprResult { arena: arena, idx: l } }
+        return ExprResult { arena: arena, idx: node_idx }
+    }
+    if ntype == 4 {
+        // Mul
+        if arena.node_types[l] == 0 && arena.node_types[r] == 0 {
+            return expr_const(arena, arena.values[l] * arena.values[r])
+        }
+        if is_const_zero(arena, l) { return expr_const(arena, 0.0) }
+        if is_const_zero(arena, r) { return expr_const(arena, 0.0) }
+        if is_const_one(arena, l) { return ExprResult { arena: arena, idx: r } }
+        if is_const_one(arena, r) { return ExprResult { arena: arena, idx: l } }
+        return ExprResult { arena: arena, idx: node_idx }
+    }
+    if ntype == 5 {
+        // Div
+        if arena.node_types[l] == 0 && arena.node_types[r] == 0 && arena.values[r] != 0.0 {
+            return expr_const(arena, arena.values[l] / arena.values[r])
+        }
+        if is_const_zero(arena, l) { return expr_const(arena, 0.0) }
+        if is_const_one(arena, r) { return ExprResult { arena: arena, idx: l } }
+        return ExprResult { arena: arena, idx: node_idx }
+    }
+
+    // Unary ops: constant folding
+    if ntype == 6 {
+        if arena.node_types[l] == 0 {
+            return expr_const(arena, 0.0 - arena.values[l])
+        }
+        return ExprResult { arena: arena, idx: node_idx }
+    }
+
+    return ExprResult { arena: arena, idx: node_idx }
+}
+
+// ============================================================================
+// EXPRESSION PRINTING (infix notation, for debugging)
+// ============================================================================
+
+fn expr_print(arena: ExprArena, node_idx: i64) -> ExprArena with IO, Mut, Panic, Div {
+    let ntype = arena.node_types[node_idx]
+
+    if ntype == 0 {
+        print(arena.values[node_idx])
+        return arena
+    }
+    if ntype == 1 {
+        let vi = arena.values[node_idx] as i64
+        if vi == 0 { print("x") }
+        else if vi == 1 { print("y") }
+        else if vi == 2 { print("z") }
+        else if vi == 3 { print("w") }
+        else { print("v"); print(vi) }
+        return arena
+    }
+    if ntype == 2 {
+        print("(")
+        let a2 = expr_print(arena, arena.left[node_idx])
+        print(" + ")
+        let a3 = expr_print(a2, arena.right[node_idx])
+        print(")")
+        return a3
+    }
+    if ntype == 3 {
+        print("(")
+        let a2 = expr_print(arena, arena.left[node_idx])
+        print(" - ")
+        let a3 = expr_print(a2, arena.right[node_idx])
+        print(")")
+        return a3
+    }
+    if ntype == 4 {
+        print("(")
+        let a2 = expr_print(arena, arena.left[node_idx])
+        print(" * ")
+        let a3 = expr_print(a2, arena.right[node_idx])
+        print(")")
+        return a3
+    }
+    if ntype == 5 {
+        print("(")
+        let a2 = expr_print(arena, arena.left[node_idx])
+        print(" / ")
+        let a3 = expr_print(a2, arena.right[node_idx])
+        print(")")
+        return a3
+    }
+    if ntype == 6 {
+        print("(-")
+        let a2 = expr_print(arena, arena.left[node_idx])
+        print(")")
+        return a2
+    }
+    if ntype == 7 {
+        print("sin(")
+        let a2 = expr_print(arena, arena.left[node_idx])
+        print(")")
+        return a2
+    }
+    if ntype == 8 {
+        print("cos(")
+        let a2 = expr_print(arena, arena.left[node_idx])
+        print(")")
+        return a2
+    }
+    if ntype == 9 {
+        print("exp(")
+        let a2 = expr_print(arena, arena.left[node_idx])
+        print(")")
+        return a2
+    }
+    if ntype == 10 {
+        print("ln(")
+        let a2 = expr_print(arena, arena.left[node_idx])
+        print(")")
+        return a2
+    }
+    if ntype == 11 {
+        print("(")
+        let a2 = expr_print(arena, arena.left[node_idx])
+        print("^")
+        print(arena.values[node_idx])
+        print(")")
+        return a2
+    }
+    print("?")
+    return arena
+}

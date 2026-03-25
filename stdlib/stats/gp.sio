@@ -1,0 +1,552 @@
+// stdlib/stats/gp.sio -- Gaussian Process Regression
+//
+// Full GP regression module: kernels (RBF, Matern 3/2, Matern 5/2, Periodic),
+// Cholesky-based inference, predictive mean/variance, log marginal likelihood,
+// and hyperparameter optimization via grid search in log-space.
+//
+// Max 64 training points (64x64 = 4096 array limit).
+// Max 256 prediction points.
+//
+// References:
+//   Rasmussen & Williams (2006): "Gaussian Processes for Machine Learning"
+//   JCGM 100:2008 (GUM): measurement uncertainty propagation
+//   Stein (1999): "Interpolation of Spatial Data" -- Matern kernels
+
+// =============================================================================
+// Math helpers (prefixed gp_ to avoid name collisions)
+// =============================================================================
+
+fn gp_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn gp_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    var y = 1.5
+    var i = 0
+    while i < 15 {
+        y = 0.5 * (y + scaled / y)
+        i = i + 1
+    }
+    return y / scale_back
+}
+
+fn gp_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 709.0 { return 1.0e308 }
+    if x < -709.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    let inv_ln2 = 1.4426950408889634
+    var k_f = x * inv_ln2
+    var k: i64 = 0
+    if k_f >= 0.0 { k = (k_f + 0.5) as i64 } else { k = (k_f - 0.5) as i64 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 20 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    var kabs = k
+    if kabs < 0 { kabs = 0 - kabs }
+    var pow2 = 2.0
+    var ka = kabs
+    var acc = 1.0
+    while ka > 0 {
+        if ka - (ka / 2) * 2 != 0 { acc = acc * pow2 }
+        pow2 = pow2 * pow2
+        ka = ka / 2
+    }
+    if k >= 0 { result = result * acc } else { result = result / acc }
+    result
+}
+
+fn gp_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return -1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var y = 0.0
+    var a = x
+    let ln2 = 0.6931471805599453
+    while a > 2.0 { a = a * 0.5; y = y + ln2 }
+    while a < 0.5 { a = a * 2.0; y = y - ln2 }
+    let t = (a - 1.0) / (a + 1.0)
+    let t2 = t * t
+    var sum = t
+    var power = t
+    var n = 1
+    while n <= 30 {
+        power = power * t2
+        sum = sum + power / (2.0 * (n as f64) + 1.0)
+        n = n + 1
+    }
+    y + 2.0 * sum
+}
+
+fn gp_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let two_pi = 6.28318530717958647692
+    var a = x
+    while a >= two_pi { a = a - two_pi }
+    while a < 0.0 { a = a + two_pi }
+    if a > 3.14159265358979323846 { a = a - two_pi }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn gp_pi() -> f64 { 3.14159265358979323846 }
+
+// =============================================================================
+// Data structures
+// =============================================================================
+
+// Training data container (max 64 points for tractability)
+struct GPData {
+    x: [f64; 64],
+    y: [f64; 64],
+    n: i64
+}
+
+// Hyperparameters for GP kernel
+//   kernel_type: 0=RBF, 1=Matern32, 2=Matern52, 3=Periodic
+struct GPHyperparams {
+    length_scale: f64,
+    signal_var: f64,
+    noise_var: f64,
+    kernel_type: i64
+}
+
+// Fitted GP model: Cholesky factor L and weights alpha = K^{-1}y
+//   L: 64x64 lower triangular stored row-major in flat array
+//   alpha: K^{-1}y vector
+struct GPModel {
+    hyper: GPHyperparams,
+    L: [f64; 4096],
+    alpha: [f64; 64],
+    n: i64,
+    ok: bool
+}
+
+// Batch prediction result
+struct GPPrediction {
+    means: [f64; 256],
+    variances: [f64; 256],
+    n: i64
+}
+
+// =============================================================================
+// Kernel functions
+// =============================================================================
+
+// Squared Exponential / RBF kernel:
+//   k(x1, x2) = signal_var * exp(-0.5 * (x1 - x2)^2 / length_scale^2)
+fn kernel_rbf(x1: f64, x2: f64, length_scale: f64, signal_var: f64) -> f64 with Mut, Div, Panic {
+    let d = x1 - x2
+    signal_var * gp_exp(0.0 - 0.5 * d * d / (length_scale * length_scale))
+}
+
+// Matern 3/2 kernel:
+//   k(x1, x2) = signal_var * (1 + sqrt(3)*r/l) * exp(-sqrt(3)*r/l)
+fn kernel_matern32(x1: f64, x2: f64, length_scale: f64, signal_var: f64) -> f64 with Mut, Div, Panic {
+    let r = gp_abs(x1 - x2)
+    let sqrt3 = 1.7320508075688772
+    let z = sqrt3 * r / length_scale
+    signal_var * (1.0 + z) * gp_exp(0.0 - z)
+}
+
+// Matern 5/2 kernel:
+//   k(x1, x2) = signal_var * (1 + sqrt(5)*r/l + 5r^2/(3l^2)) * exp(-sqrt(5)*r/l)
+fn kernel_matern52(x1: f64, x2: f64, length_scale: f64, signal_var: f64) -> f64 with Mut, Div, Panic {
+    let r = gp_abs(x1 - x2)
+    let sqrt5 = 2.2360679774997896
+    let z = sqrt5 * r / length_scale
+    let z2 = 5.0 * r * r / (3.0 * length_scale * length_scale)
+    signal_var * (1.0 + z + z2) * gp_exp(0.0 - z)
+}
+
+// Linear kernel:
+//   k(x1, x2) = signal_var * x1 * x2
+fn kernel_linear(x1: f64, x2: f64, signal_var: f64) -> f64 {
+    signal_var * x1 * x2
+}
+
+// Periodic kernel:
+//   k(x1, x2) = signal_var * exp(-2 * sin^2(pi*|x1-x2|/period) / length_scale^2)
+fn kernel_periodic(x1: f64, x2: f64, length_scale: f64, signal_var: f64, period: f64) -> f64 with Mut, Div, Panic {
+    let r = gp_abs(x1 - x2)
+    let s = gp_sin(gp_pi() * r / period)
+    signal_var * gp_exp(0.0 - 2.0 * s * s / (length_scale * length_scale))
+}
+
+// Kernel dispatch by kernel_type
+//   0=RBF, 1=Matern32, 2=Matern52, 3=Linear, 4=Periodic
+fn kernel_eval(x1: f64, x2: f64, hyper: GPHyperparams) -> f64 with Mut, Div, Panic {
+    if hyper.kernel_type == 0 {
+        return kernel_rbf(x1, x2, hyper.length_scale, hyper.signal_var)
+    }
+    if hyper.kernel_type == 1 {
+        return kernel_matern32(x1, x2, hyper.length_scale, hyper.signal_var)
+    }
+    if hyper.kernel_type == 2 {
+        return kernel_matern52(x1, x2, hyper.length_scale, hyper.signal_var)
+    }
+    if hyper.kernel_type == 3 {
+        return kernel_linear(x1, x2, hyper.signal_var)
+    }
+    // Default: RBF
+    return kernel_rbf(x1, x2, hyper.length_scale, hyper.signal_var)
+}
+
+// =============================================================================
+// Kernel matrix assembly
+// =============================================================================
+
+// Build N x N kernel matrix K(X,X) + noise_var * I.
+// Stored row-major: K[i*n + j] = k(x_i, x_j) + delta_ij * noise_var.
+fn gp_build_kernel_matrix(data: GPData, params: GPHyperparams) -> [f64; 4096] with Mut, Div, Panic {
+    var K: [f64; 4096] = [0.0; 4096]
+    let n = data.n
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            let idx = i * n + j
+            let kval = kernel_eval(data.x[i as usize], data.x[j as usize], params)
+            if i == j {
+                K[idx as usize] = kval + params.noise_var
+            } else {
+                K[idx as usize] = kval
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return K
+}
+
+// =============================================================================
+// Cholesky factorization
+// =============================================================================
+
+// Cholesky factorization: L * L^T = K
+// K is n x n symmetric positive definite, row-major in [f64; 4096].
+// Returns lower triangular L, also row-major.
+// Algorithm: Golub & Van Loan, "Matrix Computations" (4th ed.)
+fn gp_cholesky(K: [f64; 4096], n: i64) -> [f64; 4096] with Mut, Div, Panic {
+    var L: [f64; 4096] = [0.0; 4096]
+    var j: i64 = 0
+    while j < n {
+        // Diagonal: L[j][j] = sqrt(K[j][j] - sum_{k<j} L[j][k]^2)
+        var sum_diag = 0.0
+        var k: i64 = 0
+        while k < j {
+            let ljk = L[(j * n + k) as usize]
+            sum_diag = sum_diag + ljk * ljk
+            k = k + 1
+        }
+        let diag_val = K[(j * n + j) as usize] - sum_diag
+        if diag_val <= 1.0e-15 {
+            // Not positive definite; use small positive value to avoid crash
+            L[(j * n + j) as usize] = 1.0e-8
+        } else {
+            L[(j * n + j) as usize] = gp_sqrt(diag_val)
+        }
+        // Off-diagonal: L[i][j] = (K[i][j] - sum_{k<j} L[i][k]*L[j][k]) / L[j][j]
+        var i: i64 = j + 1
+        while i < n {
+            var sum_off = 0.0
+            k = 0
+            while k < j {
+                sum_off = sum_off + L[(i * n + k) as usize] * L[(j * n + k) as usize]
+                k = k + 1
+            }
+            L[(i * n + j) as usize] = (K[(i * n + j) as usize] - sum_off) / L[(j * n + j) as usize]
+            i = i + 1
+        }
+        j = j + 1
+    }
+    return L
+}
+
+// =============================================================================
+// Triangular solve
+// =============================================================================
+
+// Forward substitution: solve L * x = b where L is lower triangular (n x n).
+fn gp_solve_lower(L: [f64; 4096], b: [f64; 64], n: i64) -> [f64; 64] with Mut, Div, Panic {
+    var x: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        var sum = 0.0
+        var j: i64 = 0
+        while j < i {
+            sum = sum + L[(i * n + j) as usize] * x[j as usize]
+            j = j + 1
+        }
+        let diag = L[(i * n + i) as usize]
+        if gp_abs(diag) > 1.0e-15 {
+            x[i as usize] = (b[i as usize] - sum) / diag
+        } else {
+            x[i as usize] = 0.0
+        }
+        i = i + 1
+    }
+    return x
+}
+
+// Backward substitution: solve L^T * x = b where L is lower triangular.
+fn gp_solve_upper(L: [f64; 4096], b: [f64; 64], n: i64) -> [f64; 64] with Mut, Div, Panic {
+    var x: [f64; 64] = [0.0; 64]
+    var i: i64 = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var j: i64 = i + 1
+        while j < n {
+            sum = sum + L[(j * n + i) as usize] * x[j as usize]
+            j = j + 1
+        }
+        let diag = L[(i * n + i) as usize]
+        if gp_abs(diag) > 1.0e-15 {
+            x[i as usize] = (b[i as usize] - sum) / diag
+        } else {
+            x[i as usize] = 0.0
+        }
+        i = i - 1
+    }
+    return x
+}
+
+// Full Cholesky solve: L * L^T * x = b
+// Forward (L * z = b), then backward (L^T * x = z).
+fn gp_cholesky_solve(L: [f64; 4096], b: [f64; 64], n: i64) -> [f64; 64] with Mut, Div, Panic {
+    let z = gp_solve_lower(L, b, n)
+    return gp_solve_upper(L, z, n)
+}
+
+// =============================================================================
+// GP fit
+// =============================================================================
+
+// Fit a GP model: compute Cholesky of K + sigma^2 I and alpha = K^{-1} y.
+// Rasmussen & Williams (2006) Algorithm 2.1, training phase.
+fn gp_fit(data: GPData, params: GPHyperparams) -> GPModel with Mut, Div, Panic {
+    let n = data.n
+    let K = gp_build_kernel_matrix(data, params)
+    let L = gp_cholesky(K, n)
+
+    // Copy y into a [f64; 64] buffer
+    var y_buf: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        y_buf[i as usize] = data.y[i as usize]
+        i = i + 1
+    }
+
+    // alpha = (K + sigma^2 I)^{-1} y via Cholesky solve
+    let alpha = gp_cholesky_solve(L, y_buf, n)
+
+    return GPModel {
+        hyper: params,
+        L: L,
+        alpha: alpha,
+        n: n,
+        ok: true
+    }
+}
+
+// =============================================================================
+// GP prediction
+// =============================================================================
+
+// Predict posterior mean and variance at a single test point x_star.
+// Returns (mean, variance) packed in a [f64; 2] array.
+//
+//   k_star = [k(x_star, x_1), ..., k(x_star, x_n)]
+//   mean = k_star^T * alpha
+//   v = L \ k_star
+//   variance = k(x_star, x_star) - v^T * v
+fn gp_predict(model: GPModel, data: GPData, x_star: f64) -> [f64; 2] with Mut, Div, Panic {
+    let n = model.n
+    var result: [f64; 2] = [0.0; 2]
+
+    // Compute k_star vector
+    var k_star: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        k_star[i as usize] = kernel_eval(x_star, data.x[i as usize], model.hyper)
+        i = i + 1
+    }
+
+    // Predictive mean: k_star^T * alpha
+    var mean_val = 0.0
+    i = 0
+    while i < n {
+        mean_val = mean_val + k_star[i as usize] * model.alpha[i as usize]
+        i = i + 1
+    }
+    result[0] = mean_val
+
+    // Predictive variance: k(x_star, x_star) - v^T v where L*v = k_star
+    let v = gp_solve_lower(model.L, k_star, n)
+    let k_ss = kernel_eval(x_star, x_star, model.hyper)
+    var vtv = 0.0
+    i = 0
+    while i < n {
+        vtv = vtv + v[i as usize] * v[i as usize]
+        i = i + 1
+    }
+    var var_val = k_ss - vtv
+    if var_val < 0.0 { var_val = 0.0 }
+    result[1] = var_val
+
+    return result
+}
+
+// Batch prediction at multiple test points.
+fn gp_predict_array(
+    model: GPModel, data: GPData,
+    x_stars: [f64; 256], n_stars: i64
+) -> GPPrediction with Mut, Div, Panic {
+    var pred = GPPrediction {
+        means: [0.0; 256],
+        variances: [0.0; 256],
+        n: n_stars
+    }
+    var t: i64 = 0
+    while t < n_stars {
+        let pv = gp_predict(model, data, x_stars[t as usize])
+        pred.means[t as usize] = pv[0]
+        pred.variances[t as usize] = pv[1]
+        t = t + 1
+    }
+    return pred
+}
+
+// =============================================================================
+// Log marginal likelihood
+// =============================================================================
+
+// Compute log marginal likelihood:
+//   log p(y|X,theta) = -0.5 * y^T * alpha - sum(log(diag(L))) - n/2 * log(2*pi)
+//
+// Rasmussen & Williams (2006) Eq. 5.8
+fn gp_log_marginal_likelihood(model: GPModel, data: GPData) -> f64 with Mut, Div, Panic {
+    let n = model.n
+
+    // Data fit: -0.5 * y^T * alpha
+    var data_fit = 0.0
+    var i: i64 = 0
+    while i < n {
+        data_fit = data_fit + data.y[i as usize] * model.alpha[i as usize]
+        i = i + 1
+    }
+    data_fit = 0.0 - 0.5 * data_fit
+
+    // Complexity: -sum(log(L_ii))
+    var complexity = 0.0
+    i = 0
+    while i < n {
+        complexity = complexity + gp_ln(model.L[(i * n + i) as usize])
+        i = i + 1
+    }
+    complexity = 0.0 - complexity
+
+    // Normalization: -n/2 * log(2*pi)
+    let norm_const = 0.0 - 0.5 * (n as f64) * gp_ln(2.0 * gp_pi())
+
+    return data_fit + complexity + norm_const
+}
+
+// =============================================================================
+// Hyperparameter optimization
+// =============================================================================
+
+// Evaluate neg log marginal likelihood for a given set of hyperparameters.
+fn gp_eval_nlml(data: GPData, length_scale: f64, signal_var: f64, noise_var: f64, kernel_type: i64) -> f64 with Mut, Div, Panic {
+    let params = GPHyperparams {
+        length_scale: length_scale,
+        signal_var: signal_var,
+        noise_var: noise_var,
+        kernel_type: kernel_type
+    }
+    let model = gp_fit(data, params)
+    let lml = gp_log_marginal_likelihood(model, data)
+    return 0.0 - lml
+}
+
+// Optimize hyperparameters via grid search over log-space.
+// Searches over length_scale and signal_var; noise_var is held fixed.
+// max_iter controls grid density (unused in grid search, kept for API compat).
+// Returns the best GPHyperparams found.
+//
+// Grid: 7 values for length_scale x 5 values for signal_var = 35 evaluations.
+fn gp_optimize_hyper(data: GPData, hyper_init: GPHyperparams, max_iter: i64) -> GPHyperparams with Mut, Div, Panic {
+    return gp_optimize_hyperparams(data, hyper_init)
+}
+
+fn gp_optimize_hyperparams(data: GPData, params_init: GPHyperparams) -> GPHyperparams with Mut, Div, Panic {
+    let kt = params_init.kernel_type
+    let nv = params_init.noise_var
+
+    // Log-space grid for length_scale: exp(-2) to exp(3) in 7 steps
+    var ls_grid: [f64; 7] = [0.0; 7]
+    ls_grid[0] = gp_exp(-2.0)
+    ls_grid[1] = gp_exp(-1.0)
+    ls_grid[2] = gp_exp(-0.5)
+    ls_grid[3] = gp_exp(0.0)
+    ls_grid[4] = gp_exp(0.5)
+    ls_grid[5] = gp_exp(1.0)
+    ls_grid[6] = gp_exp(2.0)
+
+    // Log-space grid for signal_var: exp(-2) to exp(2) in 5 steps
+    var sv_grid: [f64; 5] = [0.0; 5]
+    sv_grid[0] = gp_exp(-2.0)
+    sv_grid[1] = gp_exp(-1.0)
+    sv_grid[2] = gp_exp(0.0)
+    sv_grid[3] = gp_exp(1.0)
+    sv_grid[4] = gp_exp(2.0)
+
+    var best_nlml = 1.0e30
+    var best_ls = params_init.length_scale
+    var best_sv = params_init.signal_var
+
+    var i: i64 = 0
+    while i < 7 {
+        var j: i64 = 0
+        while j < 5 {
+            let nlml = gp_eval_nlml(data, ls_grid[i as usize], sv_grid[j as usize], nv, kt)
+            if nlml < best_nlml {
+                best_nlml = nlml
+                best_ls = ls_grid[i as usize]
+                best_sv = sv_grid[j as usize]
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    return GPHyperparams {
+        length_scale: best_ls,
+        signal_var: best_sv,
+        noise_var: nv,
+        kernel_type: kt
+    }
+}

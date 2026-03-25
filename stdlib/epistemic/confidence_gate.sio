@@ -1,0 +1,260 @@
+//! Confidence Gates for Epistemic Computing
+//!
+//! A confidence gate enforces that all epistemic values entering a computation
+//! meet a minimum confidence threshold. This is the second novel contribution
+//! of the dissertation: preventing low-confidence data from contaminating
+//! high-confidence computations.
+//!
+//! Architecture:
+//!   - GatePolicy: specifies threshold, action on violation
+//!   - gate_check: validates a single value against the policy
+//!   - gate_check_array: validates an array of values
+//!   - GateResult: pass/fail + violation details
+//!
+//! Future work: compile-time enforcement via the effect system
+//!   (e.g., `fn dosing(c: Epistemic) with Confidence(0.95)` rejects at type-check)
+//!
+//! References:
+//!   - JCGM 100:2008 §4.3: "target uncertainty"
+//!   - ISO 17025:2017 §7.6: "decision rules" for conformity assessment
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn cg_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn cg_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// ============================================================================
+// GATE POLICY
+// ============================================================================
+
+// Action to take when confidence is below threshold
+//   0 = REJECT (fail hard)
+//   1 = WARN   (continue with degraded confidence flag)
+//   2 = DEMOTE (reduce to lower-confidence tier automatically)
+
+struct GatePolicy {
+    min_confidence: f64,     // Minimum acceptable confidence level (0-1)
+    max_cv_percent: f64,     // Maximum acceptable CV% (0 = unchecked)
+    min_dof: f64,            // Minimum degrees of freedom (0 = unchecked)
+    action: i64,             // 0=REJECT, 1=WARN, 2=DEMOTE
+}
+
+fn gate_policy_strict(min_confidence: f64) -> GatePolicy {
+    GatePolicy {
+        min_confidence: min_confidence,
+        max_cv_percent: 0.0,
+        min_dof: 0.0,
+        action: 0,  // REJECT
+    }
+}
+
+fn gate_policy_clinical(min_confidence: f64, max_cv: f64) -> GatePolicy {
+    GatePolicy {
+        min_confidence: min_confidence,
+        max_cv_percent: max_cv,
+        min_dof: 5.0,
+        action: 0,  // REJECT
+    }
+}
+
+fn gate_policy_exploratory() -> GatePolicy {
+    GatePolicy {
+        min_confidence: 0.5,
+        max_cv_percent: 100.0,
+        min_dof: 0.0,
+        action: 1,  // WARN
+    }
+}
+
+// ============================================================================
+// GATE RESULT
+// ============================================================================
+
+struct GateViolation {
+    param_idx: i64,
+    actual_confidence: f64,
+    actual_cv: f64,
+    actual_dof: f64,
+    reason: i64,   // 1=low confidence, 2=high CV, 3=low DOF
+}
+
+struct GateResult {
+    passed: bool,
+    n_checked: i64,
+    n_violations: i64,
+    violations: [i64; 64],          // param indices that failed
+    violation_reasons: [i64; 64],   // reason codes
+    violation_values: [f64; 64],    // actual values that failed
+    worst_confidence: f64,
+    worst_idx: i64,
+}
+
+fn gate_result_new() -> GateResult {
+    GateResult {
+        passed: true, n_checked: 0, n_violations: 0,
+        violations: [0; 64], violation_reasons: [0; 64], violation_values: [0.0; 64],
+        worst_confidence: 1.0, worst_idx: -1,
+    }
+}
+
+// ============================================================================
+// SINGLE VALUE CHECK
+// ============================================================================
+
+fn gate_check_value(
+    policy: &GatePolicy,
+    param_idx: i64,
+    confidence: f64,
+    value: f64,
+    std_uncert: f64,
+    dof: f64,
+    result: &!GateResult
+) with Mut {
+    result.n_checked = result.n_checked + 1
+
+    // Track worst confidence
+    if confidence < result.worst_confidence {
+        result.worst_confidence = confidence
+        result.worst_idx = param_idx
+    }
+
+    // Check confidence threshold
+    if confidence < policy.min_confidence {
+        let vi = result.n_violations
+        if vi < 64 {
+            result.violations[vi] = param_idx
+            result.violation_reasons[vi] = 1
+            result.violation_values[vi] = confidence
+            result.n_violations = vi + 1
+        }
+        result.passed = false
+    }
+
+    // Check CV% if requested
+    if policy.max_cv_percent > 0.0 && cg_abs(value) > 1.0e-15 {
+        let cv = 100.0 * std_uncert / cg_abs(value)
+        if cv > policy.max_cv_percent {
+            let vi = result.n_violations
+            if vi < 64 {
+                result.violations[vi] = param_idx
+                result.violation_reasons[vi] = 2
+                result.violation_values[vi] = cv
+                result.n_violations = vi + 1
+            }
+            result.passed = false
+        }
+    }
+
+    // Check DOF if requested
+    if policy.min_dof > 0.0 && dof < policy.min_dof {
+        let vi = result.n_violations
+        if vi < 64 {
+            result.violations[vi] = param_idx
+            result.violation_reasons[vi] = 3
+            result.violation_values[vi] = dof
+            result.n_violations = vi + 1
+        }
+        result.passed = false
+    }
+}
+
+// ============================================================================
+// ARRAY CHECK (for ODEParams-like structures)
+// ============================================================================
+
+fn gate_check_params(
+    policy: &GatePolicy,
+    params: &[f64; 64],
+    param_variances: &[f64; 64],
+    param_confidences: &[f64; 64],
+    n_params: i64
+) -> GateResult with Mut {
+    var result = gate_result_new()
+    var k = 0
+    while k < n_params {
+        if k < 64 {
+            let std_u = cg_sqrt(param_variances[k])
+            gate_check_value(
+                policy, k, param_confidences[k],
+                params[k], std_u, 1.0e30, &!result
+            )
+        }
+        k = k + 1
+    }
+    result
+}
+
+// ============================================================================
+// CONVENIENCE: Quick gate check with default policies
+// ============================================================================
+
+// Returns true if all confidence values meet the threshold
+fn confidence_gate(
+    confidences: &[f64; 64],
+    n: i64,
+    min_confidence: f64
+) -> bool {
+    var i = 0
+    while i < n {
+        if i < 64 {
+            if confidences[i] < min_confidence { return false }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Returns true if all CVs are below max_cv%
+fn cv_gate(
+    values: &[f64; 64],
+    variances: &[f64; 64],
+    n: i64,
+    max_cv_percent: f64
+) -> bool with Mut {
+    var i = 0
+    while i < n {
+        if i < 64 {
+            if cg_abs(values[i]) > 1.0e-15 {
+                let cv = 100.0 * cg_sqrt(variances[i]) / cg_abs(values[i])
+                if cv > max_cv_percent { return false }
+            }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// REPORT
+// ============================================================================
+
+fn gate_print_result(result: &GateResult) with IO {
+    if result.passed {
+        println("  GATE: PASSED — all inputs meet confidence requirements")
+    } else {
+        println("  GATE: FAILED — confidence requirements not met")
+        println("  Violations: "); println(result.n_violations)
+        var i = 0
+        while i < result.n_violations {
+            if i < 64 && i < 10 {
+                let reason = if result.violation_reasons[i] == 1 { "low confidence" }
+                    else if result.violation_reasons[i] == 2 { "high CV%" }
+                    else { "low DOF" }
+                println("    p["); println(result.violations[i])
+                println("]: "); println(reason)
+                println(" (actual="); println(result.violation_values[i]); println(")")
+            }
+            i = i + 1
+        }
+    }
+    println("  Worst confidence: "); println(result.worst_confidence)
+    println("  at index: "); println(result.worst_idx)
+}

@@ -1,0 +1,554 @@
+//! stdlib/linalg/matnm.sio - Dynamic N×M Matrix Type (f64)
+//!
+//! Dense matrix up to 64×64 backed by flat [f64; 4096] array.
+//! Row-major storage with stride 64: element (i,j) at index i*64+j.
+//!
+//! Core operations: add, sub, scale, mul, transpose
+//! Decompositions: LU (partial pivoting), QR (Householder)
+//! Derived: solve, det, inv, norm, trace
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn matnm_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn matnm_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+pub struct MatNM {
+    data: [f64; 4096],
+    rows: i64,
+    cols: i64
+}
+
+pub struct LUResult {
+    l: MatNM,
+    u: MatNM,
+    piv: [i64; 64],
+    n: i64,
+    sign: i64
+}
+
+pub struct QRResult_NM {
+    q: MatNM,
+    r: MatNM,
+    rows: i64,
+    cols: i64
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+pub fn matnm_new(rows: i64, cols: i64) -> MatNM {
+    MatNM { data: [0.0; 4096], rows: rows, cols: cols }
+}
+
+pub fn matnm_zeros(rows: i64, cols: i64) -> MatNM {
+    MatNM { data: [0.0; 4096], rows: rows, cols: cols }
+}
+
+pub fn matnm_identity(n: i64) -> MatNM with Mut, Div, Panic {
+    var d = [0.0; 4096]
+    var i: i64 = 0
+    while i < n {
+        d[i * 64 + i] = 1.0
+        i = i + 1
+    }
+    MatNM { data: d, rows: n, cols: n }
+}
+
+// ============================================================================
+// ELEMENT ACCESS
+// ============================================================================
+
+pub fn matnm_get(m: MatNM, i: i64, j: i64) -> f64 {
+    m.data[i * 64 + j]
+}
+
+pub fn matnm_set(m: MatNM, i: i64, j: i64, val: f64) -> MatNM with Mut, Panic {
+    var result = m
+    result.data[i * 64 + j] = val
+    return result
+}
+
+// ============================================================================
+// ARITHMETIC
+// ============================================================================
+
+pub fn matnm_add(a: MatNM, b: MatNM) -> MatNM with Mut, Div, Panic {
+    var d = [0.0; 4096]
+    var i: i64 = 0
+    while i < a.rows {
+        var j: i64 = 0
+        while j < a.cols {
+            let idx = i * 64 + j
+            d[idx] = a.data[idx] + b.data[idx]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    MatNM { data: d, rows: a.rows, cols: a.cols }
+}
+
+pub fn matnm_sub(a: MatNM, b: MatNM) -> MatNM with Mut, Div, Panic {
+    var d = [0.0; 4096]
+    var i: i64 = 0
+    while i < a.rows {
+        var j: i64 = 0
+        while j < a.cols {
+            let idx = i * 64 + j
+            d[idx] = a.data[idx] - b.data[idx]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    MatNM { data: d, rows: a.rows, cols: a.cols }
+}
+
+pub fn matnm_scale(m: MatNM, s: f64) -> MatNM with Mut, Div, Panic {
+    var d = [0.0; 4096]
+    var i: i64 = 0
+    while i < m.rows {
+        var j: i64 = 0
+        while j < m.cols {
+            let idx = i * 64 + j
+            d[idx] = m.data[idx] * s
+            j = j + 1
+        }
+        i = i + 1
+    }
+    MatNM { data: d, rows: m.rows, cols: m.cols }
+}
+
+// Matrix multiply: a is N×K, b is K×M, result is N×M
+pub fn matnm_mul(a: MatNM, b: MatNM) -> MatNM with Mut, Div, Panic {
+    var d = [0.0; 4096]
+    let n = a.rows
+    let k = a.cols
+    let m = b.cols
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < m {
+            var sum = 0.0
+            var p: i64 = 0
+            while p < k {
+                sum = sum + a.data[i * 64 + p] * b.data[p * 64 + j]
+                p = p + 1
+            }
+            d[i * 64 + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+    MatNM { data: d, rows: n, cols: m }
+}
+
+pub fn matnm_transpose(m: MatNM) -> MatNM with Mut, Div, Panic {
+    var d = [0.0; 4096]
+    var i: i64 = 0
+    while i < m.rows {
+        var j: i64 = 0
+        while j < m.cols {
+            d[j * 64 + i] = m.data[i * 64 + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    MatNM { data: d, rows: m.cols, cols: m.rows }
+}
+
+// ============================================================================
+// NORMS AND TRACE
+// ============================================================================
+
+pub fn matnm_norm_fro(m: MatNM) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i: i64 = 0
+    while i < m.rows {
+        var j: i64 = 0
+        while j < m.cols {
+            let v = m.data[i * 64 + j]
+            sum = sum + v * v
+            j = j + 1
+        }
+        i = i + 1
+    }
+    matnm_sqrt(sum)
+}
+
+pub fn matnm_trace(m: MatNM) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var n = m.rows
+    if m.cols < n { n = m.cols }
+    var i: i64 = 0
+    while i < n {
+        sum = sum + m.data[i * 64 + i]
+        i = i + 1
+    }
+    sum
+}
+
+// ============================================================================
+// LU DECOMPOSITION (partial pivoting)
+// ============================================================================
+// Doolittle LU: PA = LU where L is unit lower triangular, U is upper triangular.
+// piv[i] records the row swap at step i.
+
+pub fn matnm_lu(m: MatNM) -> LUResult with Mut, Div, Panic {
+    let n = m.rows
+    // Work on a copy that becomes U; L is built separately
+    var u_data = [0.0; 4096]
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            u_data[i * 64 + j] = m.data[i * 64 + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var l_data = [0.0; 4096]
+    var piv = [0; 64]
+    var sign: i64 = 1
+
+    // Initialize pivot as identity permutation
+    i = 0
+    while i < n {
+        piv[i] = i
+        i = i + 1
+    }
+
+    var k: i64 = 0
+    while k < n {
+        // Find pivot: row with max |u[i][k]| for i >= k
+        var max_val = 0.0
+        var max_row = k
+        i = k
+        while i < n {
+            let v = matnm_abs(u_data[i * 64 + k])
+            if v > max_val {
+                max_val = v
+                max_row = i
+            }
+            i = i + 1
+        }
+
+        // Swap rows k and max_row in u_data, l_data, and piv
+        if max_row != k {
+            sign = 0 - sign
+            let tmp_piv = piv[k]
+            piv[k] = piv[max_row]
+            piv[max_row] = tmp_piv
+
+            var j: i64 = 0
+            while j < n {
+                let tmp_u = u_data[k * 64 + j]
+                u_data[k * 64 + j] = u_data[max_row * 64 + j]
+                u_data[max_row * 64 + j] = tmp_u
+
+                let tmp_l = l_data[k * 64 + j]
+                l_data[k * 64 + j] = l_data[max_row * 64 + j]
+                l_data[max_row * 64 + j] = tmp_l
+
+                j = j + 1
+            }
+        }
+
+        // Eliminate below diagonal
+        let pivot_val = u_data[k * 64 + k]
+        if matnm_abs(pivot_val) > 1e-30 {
+            i = k + 1
+            while i < n {
+                let factor = u_data[i * 64 + k] / pivot_val
+                l_data[i * 64 + k] = factor
+                u_data[i * 64 + k] = 0.0
+                var j: i64 = k + 1
+                while j < n {
+                    u_data[i * 64 + j] = u_data[i * 64 + j] - factor * u_data[k * 64 + j]
+                    j = j + 1
+                }
+                i = i + 1
+            }
+        }
+
+        k = k + 1
+    }
+
+    // Set L diagonal to 1
+    i = 0
+    while i < n {
+        l_data[i * 64 + i] = 1.0
+        i = i + 1
+    }
+
+    let l_mat = MatNM { data: l_data, rows: n, cols: n }
+    let u_mat = MatNM { data: u_data, rows: n, cols: n }
+    LUResult { l: l_mat, u: u_mat, piv: piv, n: n, sign: sign }
+}
+
+// ============================================================================
+// SOLVE Ax = b via LU
+// ============================================================================
+// b is treated as an N×1 matrix (column vector stored in MatNM).
+
+pub fn matnm_solve(a: MatNM, b: MatNM) -> MatNM with Mut, Div, Panic {
+    let lu = matnm_lu(a)
+    let n = lu.n
+    let ncols = b.cols
+
+    var x_data = [0.0; 4096]
+
+    var col: i64 = 0
+    while col < ncols {
+        // Apply permutation: pb[i] = b[piv[i], col]
+        var pb = [0.0; 64]
+        var i: i64 = 0
+        while i < n {
+            pb[i] = b.data[lu.piv[i] * 64 + col]
+            i = i + 1
+        }
+
+        // Forward substitution: Ly = pb
+        var y = [0.0; 64]
+        i = 0
+        while i < n {
+            var sum = pb[i]
+            var j: i64 = 0
+            while j < i {
+                sum = sum - lu.l.data[i * 64 + j] * y[j]
+                j = j + 1
+            }
+            y[i] = sum
+            i = i + 1
+        }
+
+        // Back substitution: Ux = y
+        var x = [0.0; 64]
+        i = n - 1
+        while i >= 0 {
+            var sum = y[i]
+            var j: i64 = i + 1
+            while j < n {
+                sum = sum - lu.u.data[i * 64 + j] * x[j]
+                j = j + 1
+            }
+            let diag = lu.u.data[i * 64 + i]
+            if matnm_abs(diag) > 1e-30 {
+                x[i] = sum / diag
+            } else {
+                x[i] = 0.0
+            }
+            i = i - 1
+        }
+
+        // Store column into result
+        i = 0
+        while i < n {
+            x_data[i * 64 + col] = x[i]
+            i = i + 1
+        }
+
+        col = col + 1
+    }
+
+    MatNM { data: x_data, rows: n, cols: ncols }
+}
+
+// ============================================================================
+// DETERMINANT via LU
+// ============================================================================
+
+pub fn matnm_det(m: MatNM) -> f64 with Mut, Div, Panic {
+    let lu = matnm_lu(m)
+    var det = (lu.sign as f64)
+    var i: i64 = 0
+    while i < lu.n {
+        det = det * lu.u.data[i * 64 + i]
+        i = i + 1
+    }
+    det
+}
+
+// ============================================================================
+// INVERSE via LU solve with identity RHS
+// ============================================================================
+
+pub fn matnm_inv(m: MatNM) -> MatNM with Mut, Div, Panic {
+    let n = m.rows
+    let eye = matnm_identity(n)
+    matnm_solve(m, eye)
+}
+
+// ============================================================================
+// QR DECOMPOSITION (Householder reflections)
+// ============================================================================
+// For A (m×n), compute Q (m×m orthogonal) and R (m×n upper triangular)
+// such that A = Q * R.
+
+pub fn matnm_qr(a: MatNM) -> QRResult_NM with Mut, Div, Panic {
+    let m = a.rows
+    let n = a.cols
+    var mn = m
+    if n < mn { mn = n }
+
+    // R starts as a copy of A
+    var r_data = [0.0; 4096]
+    var ii: i64 = 0
+    while ii < m {
+        var jj: i64 = 0
+        while jj < n {
+            r_data[ii * 64 + jj] = a.data[ii * 64 + jj]
+            jj = jj + 1
+        }
+        ii = ii + 1
+    }
+
+    // Q starts as identity (m×m)
+    var q_data = [0.0; 4096]
+    ii = 0
+    while ii < m {
+        q_data[ii * 64 + ii] = 1.0
+        ii = ii + 1
+    }
+
+    var k: i64 = 0
+    while k < mn {
+        // Extract column below diagonal into working vector
+        let col_len = m - k
+        var x = [0.0; 64]
+        var i: i64 = 0
+        while i < col_len {
+            x[i] = r_data[(k + i) * 64 + k]
+            i = i + 1
+        }
+
+        // Compute norm of x
+        var x_norm_sq = 0.0
+        i = 0
+        while i < col_len {
+            x_norm_sq = x_norm_sq + x[i] * x[i]
+            i = i + 1
+        }
+        let x_norm = matnm_sqrt(x_norm_sq)
+
+        if x_norm > 1e-15 {
+            // Householder vector: v = x + sign(x[0])*||x||*e_1
+            var v = [0.0; 64]
+            i = 0
+            while i < col_len {
+                v[i] = x[i]
+                i = i + 1
+            }
+            if x[0] >= 0.0 {
+                v[0] = v[0] + x_norm
+            } else {
+                v[0] = v[0] - x_norm
+            }
+
+            // v^T * v
+            var vtv = 0.0
+            i = 0
+            while i < col_len {
+                vtv = vtv + v[i] * v[i]
+                i = i + 1
+            }
+
+            if vtv > 1e-30 {
+                let scale = 2.0 / vtv
+
+                // Apply H to R columns: R[k:m, j] -= scale * v * (v^T * R[k:m, j])
+                var j: i64 = k
+                while j < n {
+                    var dot = 0.0
+                    i = 0
+                    while i < col_len {
+                        dot = dot + v[i] * r_data[(k + i) * 64 + j]
+                        i = i + 1
+                    }
+                    i = 0
+                    while i < col_len {
+                        r_data[(k + i) * 64 + j] = r_data[(k + i) * 64 + j] - scale * v[i] * dot
+                        i = i + 1
+                    }
+                    j = j + 1
+                }
+
+                // Apply H to Q from the right: Q[:, k:m]
+                i = 0
+                while i < m {
+                    var dot2 = 0.0
+                    var p: i64 = 0
+                    while p < col_len {
+                        dot2 = dot2 + q_data[i * 64 + (k + p)] * v[p]
+                        p = p + 1
+                    }
+                    p = 0
+                    while p < col_len {
+                        q_data[i * 64 + (k + p)] = q_data[i * 64 + (k + p)] - scale * dot2 * v[p]
+                        p = p + 1
+                    }
+                    i = i + 1
+                }
+            }
+        }
+
+        k = k + 1
+    }
+
+    // Clean near-zero sub-diagonal entries in R
+    ii = 0
+    while ii < m {
+        var jj: i64 = 0
+        while jj < ii {
+            if jj < n {
+                if matnm_abs(r_data[ii * 64 + jj]) < 1e-14 {
+                    r_data[ii * 64 + jj] = 0.0
+                }
+            }
+            jj = jj + 1
+        }
+        ii = ii + 1
+    }
+
+    let q_mat = MatNM { data: q_data, rows: m, cols: m }
+    let r_mat = MatNM { data: r_data, rows: m, cols: n }
+    QRResult_NM { q: q_mat, r: r_mat, rows: m, cols: n }
+}

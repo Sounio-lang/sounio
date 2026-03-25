@@ -1,0 +1,354 @@
+//! Extended Uncertainty Budget Ledger — 64 Entries
+//!
+//! Array-based GUM uncertainty budget supporting up to 64 sources.
+//! Designed for PBPK models with 44+ parameters contributing to output uncertainty.
+//!
+//! Extends the original 4-entry budget.sio with:
+//!   - Array-based storage (no named fields e0..e3)
+//!   - Parameter sensitivity attribution from ODE solver Jacobians
+//!   - ISO GUM Table H.1 format output
+//!   - Dominant source identification and ranking
+//!
+//! References:
+//!   - GUM (JCGM 100:2008) Section 5: Determining Combined Uncertainty
+//!   - GUM Supplement 1 (JCGM 101:2008): Monte Carlo method
+//!   - ISO 17025:2017: Uncertainty budgets in testing/calibration
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn b64_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn b64_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ============================================================================
+// BUDGET ENTRY
+// ============================================================================
+
+struct BudgetEntry64 {
+    source_type: i64,    // 0=Type A (statistical), 1=Type B (systematic/literature)
+    param_idx: i64,      // Index into ODEParams (for attribution)
+    estimate: f64,       // Parameter value (xi)
+    std_uncert: f64,     // Standard uncertainty u(xi)
+    sensitivity: f64,    // Sensitivity coefficient ci = df/dxi
+    contribution: f64,   // Variance contribution (ci * u(xi))²
+    dof: f64,            // Degrees of freedom (n-1 for Type A, ∞ for Type B)
+}
+
+fn b64_entry_a(param_idx: i64, estimate: f64, std_uncert: f64, sensitivity: f64, dof: f64) -> BudgetEntry64 {
+    let contrib = sensitivity * sensitivity * std_uncert * std_uncert
+    BudgetEntry64 {
+        source_type: 0, param_idx: param_idx,
+        estimate: estimate, std_uncert: std_uncert,
+        sensitivity: sensitivity, contribution: contrib, dof: dof,
+    }
+}
+
+fn b64_entry_b(param_idx: i64, estimate: f64, std_uncert: f64, sensitivity: f64) -> BudgetEntry64 {
+    let contrib = sensitivity * sensitivity * std_uncert * std_uncert
+    BudgetEntry64 {
+        source_type: 1, param_idx: param_idx,
+        estimate: estimate, std_uncert: std_uncert,
+        sensitivity: sensitivity, contribution: contrib, dof: 1.0e30,
+    }
+}
+
+fn b64_empty_entry() -> BudgetEntry64 {
+    BudgetEntry64 {
+        source_type: 0, param_idx: -1,
+        estimate: 0.0, std_uncert: 0.0,
+        sensitivity: 0.0, contribution: 0.0, dof: 1.0,
+    }
+}
+
+// ============================================================================
+// UNCERTAINTY BUDGET — 64 entries, array-based
+// ============================================================================
+
+struct Budget64 {
+    result_value: f64,
+    confidence: f64,
+    entry_count: i64,
+
+    // Array storage for entries (flat arrays — Sounio does not support [Struct; N])
+    source_types: [i64; 64],
+    param_indices: [i64; 64],
+    estimates: [f64; 64],
+    std_uncerts: [f64; 64],
+    sensitivities: [f64; 64],
+    contributions: [f64; 64],
+    dofs: [f64; 64],
+
+    // Computed fields
+    combined_variance: f64,
+    combined_std_uncert: f64,
+    effective_dof: f64,
+
+    // Ranking (indices of entries sorted by contribution, descending)
+    rank_indices: [i64; 64],
+}
+
+fn budget64_new(result_value: f64, confidence: f64) -> Budget64 {
+    Budget64 {
+        result_value: result_value, confidence: confidence, entry_count: 0,
+        source_types: [0; 64], param_indices: [-1; 64],
+        estimates: [0.0; 64], std_uncerts: [0.0; 64],
+        sensitivities: [0.0; 64], contributions: [0.0; 64], dofs: [1.0; 64],
+        combined_variance: 0.0, combined_std_uncert: 0.0, effective_dof: 0.0,
+        rank_indices: [0; 64],
+    }
+}
+
+// ============================================================================
+// ADD ENTRIES
+// ============================================================================
+
+fn budget64_add_type_a(
+    b: &!Budget64, param_idx: i64,
+    estimate: f64, std_uncert: f64, sensitivity: f64, n_samples: f64
+) with Mut {
+    let idx = b.entry_count
+    if idx >= 64 { return }
+    let dof = n_samples - 1.0
+    let contrib = sensitivity * sensitivity * std_uncert * std_uncert
+    b.source_types[idx] = 0
+    b.param_indices[idx] = param_idx
+    b.estimates[idx] = estimate
+    b.std_uncerts[idx] = std_uncert
+    b.sensitivities[idx] = sensitivity
+    b.contributions[idx] = contrib
+    b.dofs[idx] = dof
+    b.entry_count = idx + 1
+}
+
+fn budget64_add_type_b(
+    b: &!Budget64, param_idx: i64,
+    estimate: f64, std_uncert: f64, sensitivity: f64
+) with Mut {
+    let idx = b.entry_count
+    if idx >= 64 { return }
+    let contrib = sensitivity * sensitivity * std_uncert * std_uncert
+    b.source_types[idx] = 1
+    b.param_indices[idx] = param_idx
+    b.estimates[idx] = estimate
+    b.std_uncerts[idx] = std_uncert
+    b.sensitivities[idx] = sensitivity
+    b.contributions[idx] = contrib
+    b.dofs[idx] = 1.0e30
+    b.entry_count = idx + 1
+}
+
+// ============================================================================
+// FINALIZATION: compute combined variance, effective DOF, ranking
+// ============================================================================
+
+fn budget64_finalize(b: &!Budget64) with Mut {
+    // Combined variance = sum of contributions
+    var total_var = 0.0
+    var i = 0
+    while i < b.entry_count {
+        if i < 64 { total_var = total_var + b.contributions[i] }
+        i = i + 1
+    }
+    b.combined_variance = total_var
+    b.combined_std_uncert = b64_sqrt(total_var)
+
+    // Welch-Satterthwaite effective degrees of freedom
+    let u_c4 = total_var * total_var
+    var denom = 0.0
+    i = 0
+    while i < b.entry_count {
+        if i < 64 && b.dofs[i] < 1.0e20 {
+            let c4 = b.contributions[i] * b.contributions[i]
+            denom = denom + c4 / b.dofs[i]
+        }
+        i = i + 1
+    }
+    if denom > 1.0e-15 { b.effective_dof = u_c4 / denom }
+    else { b.effective_dof = 1.0e30 }
+
+    // Ranking: insertion sort by contribution (descending)
+    i = 0
+    while i < b.entry_count {
+        if i < 64 { b.rank_indices[i] = i }
+        i = i + 1
+    }
+    i = 1
+    while i < b.entry_count {
+        if i < 64 {
+            let key_idx = b.rank_indices[i]
+            let key_val = b.contributions[key_idx]
+            var j = i - 1
+            var done = false
+            while j >= 0 && !done {
+                if j < 64 {
+                    let rj = b.rank_indices[j]
+                    if b.contributions[rj] < key_val {
+                        b.rank_indices[j + 1] = b.rank_indices[j]
+                        j = j - 1
+                    } else { done = true }
+                } else { done = true }
+            }
+            b.rank_indices[j + 1] = key_idx
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// QUERY
+// ============================================================================
+
+fn budget64_percent(b: &Budget64, idx: i64) -> f64 {
+    if b.combined_variance < 1.0e-15 { return 0.0 }
+    if idx < 0 || idx >= b.entry_count { return 0.0 }
+    100.0 * b.contributions[idx] / b.combined_variance
+}
+
+fn budget64_dominant_idx(b: &Budget64) -> i64 {
+    if b.entry_count == 0 { return -1 }
+    b.rank_indices[0]
+}
+
+fn budget64_dominant_percent(b: &Budget64) -> f64 {
+    if b.entry_count == 0 { return 0.0 }
+    budget64_percent(b, b.rank_indices[0])
+}
+
+// ============================================================================
+// COVERAGE FACTOR AND EXPANDED UNCERTAINTY
+// ============================================================================
+
+fn b64_coverage_factor(dof: f64, conf: f64) -> f64 {
+    if conf < 0.95 {
+        if dof < 5.0 { return 2.13 }
+        if dof < 10.0 { return 1.83 }
+        return 1.65
+    }
+    if conf < 0.99 {
+        if dof < 3.0 { return 4.30 }
+        if dof < 5.0 { return 2.78 }
+        if dof < 10.0 { return 2.26 }
+        if dof < 30.0 { return 2.04 }
+        return 1.96
+    }
+    // 99% confidence
+    if dof < 3.0 { return 9.92 }
+    if dof < 5.0 { return 4.60 }
+    if dof < 10.0 { return 3.25 }
+    if dof < 30.0 { return 2.75 }
+    return 2.576
+}
+
+fn budget64_expanded(b: &Budget64, conf: f64) -> f64 {
+    let k = b64_coverage_factor(b.effective_dof, conf)
+    k * b.combined_std_uncert
+}
+
+struct ConfInterval64 {
+    lower: f64,
+    upper: f64,
+    coverage_k: f64,
+    confidence: f64,
+}
+
+fn budget64_interval(b: &Budget64, conf: f64) -> ConfInterval64 {
+    let k = b64_coverage_factor(b.effective_dof, conf)
+    let u_exp = k * b.combined_std_uncert
+    ConfInterval64 {
+        lower: b.result_value - u_exp,
+        upper: b.result_value + u_exp,
+        coverage_k: k, confidence: conf,
+    }
+}
+
+// ============================================================================
+// PARAMETER SENSITIVITY BUDGET FROM ODE SOLVER
+//
+// Build a budget from ODEParams variances and a Jacobian row (df/dp)
+// at the output of interest (e.g., C_max, AUC).
+//
+// For each parameter p[k] with variance Var(p[k]):
+//   sensitivity[k] = df/dp[k] (from Jacobian)
+//   contribution[k] = (sensitivity[k])² * Var(p[k])
+//
+// This gives the JCGM 100:2008 eq. 10 decomposition by parameter.
+// ============================================================================
+
+struct ODEParams64 {
+    params: [f64; 64],
+    param_variances: [f64; 64],
+    n_params: i64,
+}
+
+fn budget64_from_ode_params(
+    result_value: f64,
+    confidence: f64,
+    params: &ODEParams64,
+    sensitivities: &[f64; 64],
+    n_params: i64
+) -> Budget64 with Mut {
+    var b = budget64_new(result_value, confidence)
+    var k = 0
+    while k < n_params {
+        if k < 64 {
+            let u_k = b64_sqrt(params.param_variances[k])
+            if u_k > 1.0e-30 {
+                // All PBPK params are Type B (literature/population estimates)
+                budget64_add_type_b(&!b, k, params.params[k], u_k, sensitivities[k])
+            }
+        }
+        k = k + 1
+    }
+    budget64_finalize(&!b)
+    b
+}
+
+// ============================================================================
+// TEXT REPORT (ISO GUM Table H.1 style)
+// ============================================================================
+
+fn budget64_print_report(b: &Budget64) with IO, Mut {
+    println("================================================================")
+    println("  GUM UNCERTAINTY BUDGET (JCGM 100:2008)")
+    println("================================================================")
+    println("  Result value: "); println(b.result_value)
+    println("  Combined std uncertainty: "); println(b.combined_std_uncert)
+
+    let rel_pct = if b64_abs(b.result_value) > 1.0e-15 {
+        100.0 * b.combined_std_uncert / b64_abs(b.result_value)
+    } else { 0.0 }
+    println("  Relative uncertainty: "); println(rel_pct); println(" %")
+    println("  Effective DOF: "); println(b.effective_dof)
+
+    let ci = budget64_interval(b, b.confidence)
+    println("  Expanded uncertainty (k="); println(ci.coverage_k); println("): ")
+    println(ci.coverage_k * b.combined_std_uncert)
+    println("  Interval: ["); println(ci.lower); println(", "); println(ci.upper); println("]")
+
+    println("")
+    println("  --- Sources ranked by contribution ---")
+    var i = 0
+    while i < b.entry_count {
+        if i < 64 && i < 10 {
+            let idx = b.rank_indices[i]
+            let pct = budget64_percent(b, idx)
+            let typ = if b.source_types[idx] == 0 { "A" } else { "B" }
+            println("  ["); println(i + 1); println("] p["); println(b.param_indices[idx])
+            println("] Type "); println(typ)
+            println("    Estimate: "); println(b.estimates[idx])
+            println("    u(xi): "); println(b.std_uncerts[idx])
+            println("    ci: "); println(b.sensitivities[idx])
+            println("    Contribution: "); println(pct); println(" %")
+        }
+        i = i + 1
+    }
+    println("================================================================")
+}

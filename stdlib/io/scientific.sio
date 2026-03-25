@@ -1,0 +1,512 @@
+// io::scientific — Scientific data I/O for interoperability with Python/R
+//
+// Provides stdout-based export in standard scientific formats:
+//   - CSV (plain and epistemic with uncertainty columns)
+//   - JSON (dense matrix as nested array)
+//   - NumPy .npy header info (for scripted binary generation)
+//   - SMAT binary format specification (header + dense f64 matrix)
+//
+// Design:
+//   - All stdout-based functions work with both JIT and native backends
+//   - No external library dependencies (no HDF5/Parquet C libs needed)
+//   - FFI declarations included for native-only file I/O (fopen/fwrite/fread)
+//   - Data stored in flat [f64; 4096] arrays, addressed as data[row * cols + col]
+//   - Max matrix size: 64x64 = 4096 elements (sufficient for typical exports)
+//
+// Usage:
+//   $SOUC run export_script.sio > output.csv
+//   $SOUC run export_script.sio > output.json
+//
+// Python interop:
+//   import numpy as np
+//   data = np.loadtxt("output.csv", delimiter=",", skiprows=1)
+
+extern "C" {
+    fn sqrt(x: f64) -> f64
+}
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn sci_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sci_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    sqrt(x)
+}
+
+// ============================================================================
+// INTEGER / FLOAT PRINTING
+// ============================================================================
+// Inlined because stdlib modules cannot rely on import chains for
+// these fundamental operations in test/export contexts.
+
+fn sci_print_i64(n: i64) with IO, Mut, Panic, Div {
+    if n == 0 {
+        print("0")
+        return
+    }
+    var val: i64 = n
+    if val < 0 {
+        print("-")
+        val = 0 - val
+    }
+    var buf: [i64; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                           0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var len: i64 = 0
+    while val > 0 {
+        buf[len as usize] = val - (val / 10) * 10
+        val = val / 10
+        len = len + 1
+    }
+    var j: i64 = len - 1
+    while j >= 0 {
+        let d = buf[j as usize]
+        if d == 0 { print("0") }
+        if d == 1 { print("1") }
+        if d == 2 { print("2") }
+        if d == 3 { print("3") }
+        if d == 4 { print("4") }
+        if d == 5 { print("5") }
+        if d == 6 { print("6") }
+        if d == 7 { print("7") }
+        if d == 8 { print("8") }
+        if d == 9 { print("9") }
+        j = j - 1
+    }
+}
+
+fn sci_print_f64(value: f64, decimals: i64) with IO, Mut, Panic, Div {
+    if value < 0.0 {
+        print("-")
+    }
+    let abs_val = if value < 0.0 { 0.0 - value } else { value }
+    let int_part = abs_val as i64
+    sci_print_i64(int_part)
+
+    if decimals > 0 {
+        print(".")
+        var frac = abs_val - int_part as f64
+        var d: i64 = 0
+        while d < decimals {
+            frac = frac * 10.0
+            let digit = frac as i64
+            sci_print_i64(digit)
+            frac = frac - digit as f64
+            d = d + 1
+        }
+    }
+}
+
+// ============================================================================
+// MATRIX DATA STRUCTURE
+// ============================================================================
+// Flat row-major storage. data[row * cols + col].
+// Max 64x64 = 4096 elements.
+
+pub struct MatrixData {
+    data: [f64; 4096]
+    rows: i64
+    cols: i64
+}
+
+pub fn matrix_data_new(rows: i64, cols: i64) -> MatrixData with Mut {
+    var r = rows
+    var c = cols
+    if r < 0 { r = 0 }
+    if c < 0 { c = 0 }
+    if r * c > 4096 { r = 64; c = 64 }
+    MatrixData { data: [0.0; 4096], rows: r, cols: c }
+}
+
+pub fn matrix_data_get(m: MatrixData, row: i64, col: i64) -> f64 with Panic {
+    if row < 0 { return 0.0 }
+    if col < 0 { return 0.0 }
+    if row >= m.rows { return 0.0 }
+    if col >= m.cols { return 0.0 }
+    m.data[(row * m.cols + col) as usize]
+}
+
+pub fn matrix_data_set(m: MatrixData, row: i64, col: i64, val: f64) -> MatrixData with Mut, Panic {
+    var out = m
+    if row < 0 { return out }
+    if col < 0 { return out }
+    if row >= out.rows { return out }
+    if col >= out.cols { return out }
+    out.data[(row * out.cols + col) as usize] = val
+    out
+}
+
+// ============================================================================
+// SMAT BINARY FORMAT SPECIFICATION
+// ============================================================================
+// The SMAT format is a simple dense matrix binary format:
+//
+//   Offset  Size    Content
+//   0       4       Magic: 0x53 0x4D 0x41 0x54 ("SMAT")
+//   4       8       rows (i64, little-endian)
+//   12      8       cols (i64, little-endian)
+//   20      R*C*8   data (f64 values, row-major, little-endian)
+//
+// Total size: 20 + rows * cols * 8 bytes
+//
+// The format is designed for:
+//   - Direct mmap in C/Rust/Python (ctypes.Structure)
+//   - No alignment padding issues (all fields naturally aligned)
+//   - Little-endian for x86-64 compatibility
+//
+// Python reader:
+//   import struct, numpy as np
+//   with open("file.smat", "rb") as f:
+//       magic = f.read(4)
+//       assert magic == b"SMAT"
+//       rows, cols = struct.unpack("<qq", f.read(16))
+//       data = np.frombuffer(f.read(rows*cols*8), dtype="<f8").reshape(rows, cols)
+
+// Print SMAT header info (useful for shell-based binary generation)
+pub fn print_smat_header_info(rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    println("# SMAT Binary Format Header")
+    print("# magic: SMAT (0x534D4154)")
+    println("")
+    print("# rows: ")
+    sci_print_i64(rows)
+    println("")
+    print("# cols: ")
+    sci_print_i64(cols)
+    println("")
+    print("# data_bytes: ")
+    sci_print_i64(rows * cols * 8)
+    println("")
+    print("# total_bytes: ")
+    sci_print_i64(20 + rows * cols * 8)
+    println("")
+}
+
+// ============================================================================
+// CSV EXPORT — PLAIN MATRIX
+// ============================================================================
+// Prints a dense matrix as CSV to stdout.
+// First row is a header with column names: col_0,col_1,...,col_N.
+// Data rows follow with comma-separated f64 values.
+
+pub fn print_csv(data: [f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    // Header row
+    var c: i64 = 0
+    while c < cols {
+        if c > 0 { print(",") }
+        print("col_")
+        sci_print_i64(c)
+        c = c + 1
+    }
+    println("")
+
+    // Data rows
+    var r: i64 = 0
+    while r < rows {
+        var c2: i64 = 0
+        while c2 < cols {
+            if c2 > 0 { print(",") }
+            sci_print_f64(data[(r * cols + c2) as usize], 6)
+            c2 = c2 + 1
+        }
+        println("")
+        r = r + 1
+    }
+}
+
+// Print CSV with custom column name prefix
+pub fn print_csv_named(data: [f64; 4096], rows: i64, cols: i64,
+                       prefix: &[i64; 16], n_names: i64) with IO, Mut, Panic, Div {
+    // Header row using name IDs
+    var c: i64 = 0
+    while c < cols {
+        if c > 0 { print(",") }
+        if c < n_names {
+            print("param_")
+            sci_print_i64(prefix[c as usize])
+        } else {
+            print("col_")
+            sci_print_i64(c)
+        }
+        c = c + 1
+    }
+    println("")
+
+    // Data rows
+    var r: i64 = 0
+    while r < rows {
+        var c2: i64 = 0
+        while c2 < cols {
+            if c2 > 0 { print(",") }
+            sci_print_f64(data[(r * cols + c2) as usize], 6)
+            c2 = c2 + 1
+        }
+        println("")
+        r = r + 1
+    }
+}
+
+// ============================================================================
+// CSV EXPORT — EPISTEMIC (VALUE +/- UNCERTAINTY)
+// ============================================================================
+// Each logical column becomes two CSV columns: <name>_value, <name>_uncertainty.
+// values and uncertainties are parallel flat arrays of the same shape.
+//
+// Example output for 2 columns, 3 rows:
+//   param_0_value,param_0_uncertainty,param_1_value,param_1_uncertainty
+//   1.500000,0.100000,2.300000,0.200000
+//   ...
+
+pub fn print_epistemic_csv(values: [f64; 4096], uncertainties: [f64; 4096],
+                           rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    // Header: value,uncertainty pairs for each column
+    var c: i64 = 0
+    while c < cols {
+        if c > 0 { print(",") }
+        print("param_")
+        sci_print_i64(c)
+        print("_value,param_")
+        sci_print_i64(c)
+        print("_uncertainty")
+        c = c + 1
+    }
+    println("")
+
+    // Data rows: interleave value and uncertainty for each column
+    var r: i64 = 0
+    while r < rows {
+        var c2: i64 = 0
+        while c2 < cols {
+            if c2 > 0 { print(",") }
+            let idx = (r * cols + c2) as usize
+            sci_print_f64(values[idx], 6)
+            print(",")
+            sci_print_f64(uncertainties[idx], 6)
+            c2 = c2 + 1
+        }
+        println("")
+        r = r + 1
+    }
+}
+
+// ============================================================================
+// JSON EXPORT — DENSE MATRIX
+// ============================================================================
+// Prints matrix as a JSON array of arrays:
+//   [[1.0, 2.0], [3.0, 4.0]]
+// Compatible with json.loads() in Python, jsonlite::fromJSON() in R.
+
+pub fn print_json_matrix(data: [f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    println("[")
+    var r: i64 = 0
+    while r < rows {
+        print("  [")
+        var c: i64 = 0
+        while c < cols {
+            if c > 0 { print(", ") }
+            sci_print_f64(data[(r * cols + c) as usize], 6)
+            c = c + 1
+        }
+        if r < rows - 1 {
+            println("],")
+        } else {
+            println("]")
+        }
+        r = r + 1
+    }
+    println("]")
+}
+
+// ============================================================================
+// NUMPY .npy FORMAT INFO
+// ============================================================================
+// NumPy v1.0 format (simple, widely supported):
+//
+//   Bytes 0-5:   magic "\x93NUMPY"
+//   Byte 6:      major version (1)
+//   Byte 7:      minor version (0)
+//   Bytes 8-9:   HEADER_LEN (little-endian u16, length of header dict)
+//   Bytes 10+:   ASCII header dict, padded to multiple of 64 with spaces + \n
+//   After header: raw data (f64, little-endian, row-major)
+//
+// Header dict format:
+//   {'descr': '<f8', 'fortran_order': False, 'shape': (R, C), }
+//
+// This function prints the header information so a shell script can
+// assemble the binary file:
+//   1. Write magic + version bytes
+//   2. Write header dict (padded)
+//   3. Append raw f64 data
+
+pub fn print_npy_header(rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    // Print the Python dict that would be the .npy header
+    print("{'descr': '<f8', 'fortran_order': False, 'shape': (")
+    sci_print_i64(rows)
+    print(", ")
+    sci_print_i64(cols)
+    println("), }")
+
+    // Print metadata for shell scripts
+    println("# NumPy .npy v1.0 header info")
+    print("# magic: \\x93NUMPY\\x01\\x00")
+    println("")
+    print("# header_dict_length: variable (padded to 64-byte boundary)")
+    println("")
+    print("# data_dtype: float64 (little-endian, 8 bytes per element)")
+    println("")
+    print("# data_elements: ")
+    sci_print_i64(rows * cols)
+    println("")
+    print("# data_bytes: ")
+    sci_print_i64(rows * cols * 8)
+    println("")
+}
+
+// Print data in a format that a helper script can convert to .npy binary.
+// Format: one f64 per line, row-major order.
+// Usage: $SOUC run script.sio | python3 -c "import numpy, sys; numpy.save('out.npy', numpy.loadtxt(sys.stdin).reshape(R, C))"
+pub fn print_npy_data(data: [f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    var r: i64 = 0
+    while r < rows {
+        var c: i64 = 0
+        while c < cols {
+            sci_print_f64(data[(r * cols + c) as usize], 15)
+            println("")
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// ============================================================================
+// FFI FILE I/O PRIMITIVES (NATIVE COMPILER ONLY)
+// ============================================================================
+// These extern declarations bind to libc. They work with the native
+// x86-64 ELF backend but NOT with the Cranelift JIT (which cannot
+// handle pointer-based string FFI reliably).
+//
+// For JIT-compatible workflows, use the stdout-based print_* functions
+// above and redirect output in the shell.
+
+// NOTE: Uncomment when targeting native compilation.
+// The JIT will crash or produce garbage if these are called.
+//
+// extern "C" {
+//     fn fopen(path: &[i8; 256], mode: &[i8; 4]) -> i64
+//     fn fwrite(buf: &[f64; 4096], size: i64, count: i64, fp: i64) -> i64
+//     fn fread(buf: &![f64; 4096], size: i64, count: i64, fp: i64) -> i64
+//     fn fclose(fp: i64) -> i32
+// }
+
+// ============================================================================
+// SMAT FILE I/O — WRITE (NATIVE ONLY, STUBBED)
+// ============================================================================
+// Writes a dense matrix to an SMAT binary file.
+// This is a specification stub — the actual implementation requires
+// the native compiler with working FFI.
+//
+// fn write_matrix_binary(path: &[i8; 256], data: [f64; 4096],
+//                        rows: i64, cols: i64) -> i64 with IO, Mut, Panic, Div {
+//     // Open file for writing
+//     var mode: [i8; 4] = [119, 98, 0, 0]  // "wb\0\0"
+//     let fp = fopen(path, &mode)
+//     if fp == 0 { return 0 - 1 }
+//
+//     // Write magic "SMAT" (4 bytes)
+//     // Write rows (8 bytes, little-endian i64)
+//     // Write cols (8 bytes, little-endian i64)
+//     // Write data (rows * cols * 8 bytes, f64 array)
+//
+//     fclose(fp)
+//     return 0
+// }
+
+// ============================================================================
+// SMAT FILE I/O — READ (NATIVE ONLY, STUBBED)
+// ============================================================================
+// fn read_matrix_binary(path: &[i8; 256]) -> MatrixData with IO, Mut, Panic, Div {
+//     var mode: [i8; 4] = [114, 98, 0, 0]  // "rb\0\0"
+//     let fp = fopen(path, &mode)
+//     var m = matrix_data_new(0, 0)
+//     if fp == 0 { return m }
+//
+//     // Read 4-byte magic, verify "SMAT"
+//     // Read 8-byte rows, 8-byte cols
+//     // Read rows*cols f64 values into m.data
+//
+//     fclose(fp)
+//     return m
+// }
+
+// ============================================================================
+// CONVENIENCE: PRINT MATRIX AS CSV (from MatrixData struct)
+// ============================================================================
+
+pub fn matrix_data_print_csv(m: MatrixData) with IO, Mut, Panic, Div {
+    print_csv(m.data, m.rows, m.cols)
+}
+
+pub fn matrix_data_print_json(m: MatrixData) with IO, Mut, Panic, Div {
+    print_json_matrix(m.data, m.rows, m.cols)
+}
+
+// ============================================================================
+// COLUMN STATISTICS (operates on flat arrays)
+// ============================================================================
+
+pub fn col_mean(data: [f64; 4096], rows: i64, cols: i64, col: i64) -> f64 with Mut, Div, Panic {
+    if col < 0 { return 0.0 }
+    if col >= cols { return 0.0 }
+    if rows <= 0 { return 0.0 }
+    var sum = 0.0
+    var r: i64 = 0
+    while r < rows {
+        sum = sum + data[(r * cols + col) as usize]
+        r = r + 1
+    }
+    sum / (rows as f64)
+}
+
+pub fn col_std(data: [f64; 4096], rows: i64, cols: i64, col: i64) -> f64 with Mut, Div, Panic {
+    if rows < 2 { return 0.0 }
+    let mean = col_mean(data, rows, cols, col)
+    var sum_sq = 0.0
+    var r: i64 = 0
+    while r < rows {
+        let diff = data[(r * cols + col) as usize] - mean
+        sum_sq = sum_sq + diff * diff
+        r = r + 1
+    }
+    sci_sqrt(sum_sq / ((rows - 1) as f64))
+}
+
+// ============================================================================
+// PYTHON INTEROP SCRIPTS (printed to stdout)
+// ============================================================================
+
+// Print a complete Python script that reads the CSV from stdin
+pub fn print_python_csv_reader() with IO {
+    println("#!/usr/bin/env python3")
+    println("import numpy as np")
+    println("import sys")
+    println("data = np.loadtxt(sys.stdin, delimiter=',', skiprows=1)")
+    println("print(f'Loaded matrix: {data.shape}')")
+    println("print(f'Mean: {data.mean():.6f}')")
+    println("print(f'Std:  {data.std():.6f}')")
+}
+
+// Print a Python script that converts the flat f64 stream to .npy
+pub fn print_python_npy_converter(rows: i64, cols: i64) with IO, Mut, Panic, Div {
+    println("#!/usr/bin/env python3")
+    println("import numpy as np, sys")
+    print("data = np.loadtxt(sys.stdin).reshape(")
+    sci_print_i64(rows)
+    print(", ")
+    sci_print_i64(cols)
+    println(")")
+    println("np.save('output.npy', data)")
+    println("print(f'Saved {data.shape} to output.npy')")
+}

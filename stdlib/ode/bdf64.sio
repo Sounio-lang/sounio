@@ -1,0 +1,775 @@
+// bdf64.sio - Extended BDF Stiff ODE Solver (up to 64 equations)
+//
+// BDF methods for large stiff systems, orders 1-4, with:
+//   - fn-type RHS parameter (no integer dispatch)
+//   - 64x64 Gaussian elimination via Mat64 Jacobian
+//   - GUM uncertainty propagation through the Jacobian
+//   - Adaptive step size and order control
+//
+// The solver accepts the RHS as a first-class function parameter:
+//   fn(f64, &Vec64, i32, &!Vec64) with Mut, Div, Panic
+//   (t, y, n_eqs, dydt_out)
+//
+// Arrays are wrapped in Vec64/Mat64 structs. With the native compiler
+// (self-hosted), bare [f64; 64] &! mutation works correctly. The wrappers
+// are retained for JIT compatibility but are not needed for native builds.
+//
+// Variance propagation follows the Guide to Uncertainty in Measurement
+// (GUM, JCGM 100:2008): given the Jacobian J already computed for the
+// Newton corrector, the variance at the next step is approximated by
+//   Var(y_{n+1}) ~ (I - beta*h*J)^{-1} * Var(y_n) * (I - beta*h*J)^{-T}
+// using the diagonal approximation for efficiency.
+//
+// References:
+//   Hairer, Wanner (1996) "Solving ODEs II: Stiff Problems"
+//   Gear (1971) "Numerical Initial Value Problems in ODEs"
+//   JCGM 100:2008 "Evaluation of measurement data -- Guide to the
+//     expression of uncertainty in measurement"
+
+extern "C" {
+    fn sqrt(x: f64) -> f64
+    fn exp(x: f64) -> f64
+    fn log(x: f64) -> f64
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn b64_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn b64_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn b64_min(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn b64_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    return sqrt(x)
+}
+
+// ============================================================================
+// WRAPPER TYPES (JIT &! mutation fix)
+// ============================================================================
+
+struct Vec64 { data: [f64; 64] }
+struct Mat64 { data: [f64; 4096] }
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+struct BDF64State {
+    y: Vec64,
+    t: f64,
+    dt: f64,
+    dt_max: f64,
+    n_eqs: i32,
+
+    y_prev1: Vec64,
+    y_prev2: Vec64,
+    y_prev3: Vec64,
+    n_history: i32,
+
+    order: i32,
+    max_order: i32,
+    n_steps: i32,
+    n_function_evals: i32,
+    n_jac_evals: i32,
+
+    variances: Vec64,
+
+    atol: f64,
+    rtol: f64,
+    newton_tol: f64,
+    max_newton_iter: i32
+}
+
+struct BDF64Solution {
+    times: [f64; 256],
+    values: Mat64,
+    variances: Mat64,
+    n_steps: i32,
+    n_dims: i32,
+    n_accepted: i32,
+    n_rejected: i32,
+    n_function_evals: i32,
+    success: bool
+}
+
+struct Newton64Result {
+    y: Vec64,
+    jac: Mat64,
+    converged: bool,
+    iters: i32,
+    fevals: i32,
+    jevals: i32
+}
+
+// ============================================================================
+// BDF COEFFICIENTS
+// ============================================================================
+
+fn b64_beta(order: i32) -> f64 with Div, Panic {
+    if order == 1 { return 1.0 }
+    if order == 2 { return 2.0 / 3.0 }
+    if order == 3 { return 6.0 / 11.0 }
+    if order == 4 { return 12.0 / 25.0 }
+    return 1.0
+}
+
+fn b64_error_constant(order: i32) -> f64 with Div, Panic {
+    if order == 1 { return 0.5 }
+    if order == 2 { return 2.0 / 9.0 }
+    if order == 3 { return 3.0 / 22.0 }
+    if order == 4 { return 12.0 / 125.0 }
+    return 0.5
+}
+
+// ============================================================================
+// HISTORY SUM for BDF corrector equation
+// ============================================================================
+
+fn b64_history_sum(y: &Vec64, y1: &Vec64, y2: &Vec64, y3: &Vec64,
+                   order: i32, n: i32, out: &!Vec64) with Mut, Div, Panic {
+    var i: i32 = 0
+    if order == 1 {
+        while i < n { out.data[i] = y.data[i]; i = i + 1 }
+    } else if order == 2 {
+        while i < n {
+            out.data[i] = (4.0 / 3.0) * y.data[i] - (1.0 / 3.0) * y1.data[i]
+            i = i + 1
+        }
+    } else if order == 3 {
+        while i < n {
+            out.data[i] = (18.0 / 11.0) * y.data[i]
+                        - (9.0 / 11.0) * y1.data[i]
+                        + (2.0 / 11.0) * y2.data[i]
+            i = i + 1
+        }
+    } else {
+        while i < n {
+            out.data[i] = (48.0 / 25.0) * y.data[i]
+                        - (36.0 / 25.0) * y1.data[i]
+                        + (16.0 / 25.0) * y2.data[i]
+                        - (3.0 / 25.0) * y3.data[i]
+            i = i + 1
+        }
+    }
+}
+
+// ============================================================================
+// BDF PREDICTOR
+// ============================================================================
+
+fn b64_predict(y: &Vec64, y1: &Vec64, y2: &Vec64, y3: &Vec64,
+               order: i32, n: i32, out: &!Vec64) with Mut, Div, Panic {
+    var i: i32 = 0
+    if order == 1 {
+        while i < n { out.data[i] = y.data[i]; i = i + 1 }
+    } else if order == 2 {
+        while i < n { out.data[i] = 2.0 * y.data[i] - y1.data[i]; i = i + 1 }
+    } else if order == 3 {
+        while i < n {
+            out.data[i] = 3.0 * y.data[i] - 3.0 * y1.data[i] + y2.data[i]
+            i = i + 1
+        }
+    } else {
+        while i < n {
+            out.data[i] = 4.0 * y.data[i] - 6.0 * y1.data[i]
+                        + 4.0 * y2.data[i] - y3.data[i]
+            i = i + 1
+        }
+    }
+}
+
+// ============================================================================
+// GAUSSIAN ELIMINATION (partial pivoting, up to 64x64)
+// Row-major layout: A.data[i*64+j]
+// Solves A*x = b in-place (result written to b)
+// ============================================================================
+
+fn gauss_solve_64(a: &!Mat64, b: &!Vec64, n: i32) with Mut, Panic, Div {
+    var col: i32 = 0
+    while col < n {
+        var max_val: f64 = b64_abs(a.data[col * 64 + col])
+        var max_row: i32 = col
+        var row: i32 = col + 1
+        while row < n {
+            let val = b64_abs(a.data[row * 64 + col])
+            if val > max_val { max_val = val; max_row = row }
+            row = row + 1
+        }
+
+        if max_row != col {
+            var k: i32 = 0
+            while k < n {
+                let tmp = a.data[col * 64 + k]
+                a.data[col * 64 + k] = a.data[max_row * 64 + k]
+                a.data[max_row * 64 + k] = tmp
+                k = k + 1
+            }
+            let tmp_b = b.data[col]
+            b.data[col] = b.data[max_row]
+            b.data[max_row] = tmp_b
+        }
+
+        let pivot = a.data[col * 64 + col]
+        if b64_abs(pivot) < 1.0e-30 {
+            col = col + 1
+        } else {
+            row = col + 1
+            while row < n {
+                let factor = a.data[row * 64 + col] / pivot
+                var k: i32 = col + 1
+                while k < n {
+                    a.data[row * 64 + k] = a.data[row * 64 + k] - factor * a.data[col * 64 + k]
+                    k = k + 1
+                }
+                a.data[row * 64 + col] = 0.0
+                b.data[row] = b.data[row] - factor * b.data[col]
+                row = row + 1
+            }
+            col = col + 1
+        }
+    }
+
+    var i: i32 = n - 1
+    while i >= 0 {
+        var sum: f64 = b.data[i]
+        var j: i32 = i + 1
+        while j < n {
+            sum = sum - a.data[i * 64 + j] * b.data[j]
+            j = j + 1
+        }
+        let diag = a.data[i * 64 + i]
+        if b64_abs(diag) < 1.0e-30 {
+            b.data[i] = 0.0
+        } else {
+            b.data[i] = sum / diag
+        }
+        i = i - 1
+    }
+}
+
+// ============================================================================
+// FINITE-DIFFERENCE JACOBIAN APPROXIMATION (64x64)
+// J[i,j] = dfi/dyj ~ (f(y + d*ej) - f(y)) / d
+// ============================================================================
+
+fn compute_jacobian_64(
+    rhs: fn(f64, &Vec64, i32, &!Vec64) with Mut, Div, Panic,
+    t: f64, y: &Vec64, f0: &Vec64,
+    n: i32, jac: &!Mat64
+) with Mut, Panic, Div {
+    let eps = 1.0e-8
+    var y_pert: Vec64 = Vec64 { data: [0.0; 64] }
+    var f_pert: Vec64 = Vec64 { data: [0.0; 64] }
+
+    var j: i32 = 0
+    while j < n {
+        var k: i32 = 0
+        while k < n { y_pert.data[k] = y.data[k]; k = k + 1 }
+
+        let delta = eps * b64_max(b64_abs(y.data[j]), 1.0)
+        y_pert.data[j] = y.data[j] + delta
+
+        k = 0
+        while k < n { f_pert.data[k] = 0.0; k = k + 1 }
+        rhs(t, &y_pert, n, &!f_pert)
+
+        var i: i32 = 0
+        while i < n {
+            jac.data[i * 64 + j] = (f_pert.data[i] - f0.data[i]) / delta
+            i = i + 1
+        }
+        j = j + 1
+    }
+}
+
+// ============================================================================
+// NEWTON SOLVE FOR BDF CORRECTOR
+// Solves: G(y) = y - hist_sum - bh*f(t,y) = 0
+// via simplified Newton: M*dy = -G(yk), M = I - bh*J
+// ============================================================================
+
+fn bdf64_newton_solve(
+    rhs: fn(f64, &Vec64, i32, &!Vec64) with Mut, Div, Panic,
+    t_new: f64,
+    y_pred: &Vec64,
+    hist_sum: &Vec64,
+    beta_h: f64,
+    n_eqs: i32,
+    newton_tol: f64,
+    max_iter: i32,
+    result: &!Newton64Result
+) with Mut, Panic, Div {
+    var i: i32 = 0
+    while i < 64 { result.y.data[i] = y_pred.data[i]; i = i + 1 }
+    result.converged = false
+    result.iters = 0
+    result.fevals = 0
+    result.jevals = 0
+
+    // Evaluate RHS at prediction
+    var f_pred: Vec64 = Vec64 { data: [0.0; 64] }
+    rhs(t_new, y_pred, n_eqs, &!f_pred)
+    result.fevals = result.fevals + 1
+
+    // Compute Jacobian at prediction
+    compute_jacobian_64(rhs, t_new, y_pred, &f_pred, n_eqs, &!result.jac)
+    result.fevals = result.fevals + n_eqs
+    result.jevals = result.jevals + 1
+
+    // Build iteration matrix M = I - bh*J
+    var M: Mat64 = Mat64 { data: [0.0; 4096] }
+    i = 0
+    while i < n_eqs {
+        var j: i32 = 0
+        while j < n_eqs {
+            let jac_val = result.jac.data[i * 64 + j]
+            if i == j {
+                M.data[i * 64 + j] = 1.0 - beta_h * jac_val
+            } else {
+                M.data[i * 64 + j] = 0.0 - beta_h * jac_val
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Newton iterations
+    var iter: i32 = 0
+    while iter < max_iter {
+        var f_k: Vec64 = Vec64 { data: [0.0; 64] }
+        rhs(t_new, &result.y, n_eqs, &!f_k)
+        result.fevals = result.fevals + 1
+
+        // Compute -G = -(yk - hist_sum - bh*fk)
+        var neg_G: Vec64 = Vec64 { data: [0.0; 64] }
+        i = 0
+        while i < n_eqs {
+            neg_G.data[i] = 0.0 - (result.y.data[i] - hist_sum.data[i] - beta_h * f_k.data[i])
+            i = i + 1
+        }
+
+        // Check convergence
+        var g_norm: f64 = 0.0
+        i = 0
+        while i < n_eqs {
+            g_norm = g_norm + neg_G.data[i] * neg_G.data[i]
+            i = i + 1
+        }
+        g_norm = b64_sqrt(g_norm)
+
+        if g_norm < newton_tol {
+            result.converged = true
+            result.iters = iter + 1
+            return
+        }
+
+        // Solve M*dy = -G (fresh copy since gauss is destructive)
+        var M_copy: Mat64 = Mat64 { data: [0.0; 4096] }
+        i = 0
+        while i < n_eqs {
+            var j: i32 = 0
+            while j < n_eqs {
+                M_copy.data[i * 64 + j] = M.data[i * 64 + j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        gauss_solve_64(&!M_copy, &!neg_G, n_eqs)
+
+        // Update: yk = yk + dy
+        i = 0
+        while i < n_eqs {
+            result.y.data[i] = result.y.data[i] + neg_G.data[i]
+            i = i + 1
+        }
+
+        iter = iter + 1
+    }
+
+    // Final convergence check with relaxed tolerance
+    var f_final: Vec64 = Vec64 { data: [0.0; 64] }
+    rhs(t_new, &result.y, n_eqs, &!f_final)
+    result.fevals = result.fevals + 1
+
+    var final_norm: f64 = 0.0
+    i = 0
+    while i < n_eqs {
+        let g_i = result.y.data[i] - hist_sum.data[i] - beta_h * f_final.data[i]
+        final_norm = final_norm + g_i * g_i
+        i = i + 1
+    }
+    final_norm = b64_sqrt(final_norm)
+    if final_norm < newton_tol * 100.0 {
+        result.converged = true
+    }
+    result.iters = max_iter
+}
+
+// ============================================================================
+// ERROR ESTIMATION (weighted RMS norm)
+// ============================================================================
+
+fn b64_error_norm(err: &Vec64, y_old: &Vec64, y_new: &Vec64,
+                  n: i32, atol: f64, rtol: f64) -> f64 with Mut, Panic, Div {
+    var sum: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        var scale = atol + rtol * b64_max(b64_abs(y_old.data[i]), b64_abs(y_new.data[i]))
+        if scale < 1.0e-30 { scale = 1.0e-30 }
+        let e = err.data[i] / scale
+        sum = sum + e * e
+        i = i + 1
+    }
+    if n > 0 {
+        return b64_sqrt(sum / (n as f64))
+    }
+    return 0.0
+}
+
+// ============================================================================
+// GUM VARIANCE PROPAGATION (diagonal approximation)
+//
+// M_ii = 1 - bh * J_ii
+// Var(y_{n+1})_i = Var(y_n)_i / M_ii^2
+// ============================================================================
+
+fn b64_propagate_variance(
+    jac: &Mat64, beta_h: f64,
+    var_in: &Vec64, n: i32, var_out: &!Vec64
+) with Mut, Panic, Div {
+    var i: i32 = 0
+    while i < n {
+        let m_ii = 1.0 - beta_h * jac.data[i * 64 + i]
+        if b64_abs(m_ii) < 1.0e-30 {
+            var_out.data[i] = var_in.data[i] * 1.0e10
+        } else {
+            var_out.data[i] = var_in.data[i] / (m_ii * m_ii)
+        }
+        i = i + 1
+    }
+    while i < 64 { var_out.data[i] = 0.0; i = i + 1 }
+}
+
+// ============================================================================
+// BDF STEP (single adaptive step with Newton corrector)
+// Returns true if step accepted, false if rejected
+// ============================================================================
+
+fn bdf64_step(
+    rhs: fn(f64, &Vec64, i32, &!Vec64) with Mut, Div, Panic,
+    s: &!BDF64State
+) -> bool with Mut, Panic, Div {
+    let n = s.n_eqs
+    let h = s.dt
+    let t_new = s.t + h
+
+    // Determine effective order
+    var eff_order: i32 = 1
+    if s.order > 1 && s.n_history >= s.order - 1 {
+        eff_order = s.order
+    }
+    if eff_order > s.n_history + 1 { eff_order = s.n_history + 1 }
+    if eff_order < 1 { eff_order = 1 }
+    if eff_order > s.max_order { eff_order = s.max_order }
+
+    // Predict
+    var y_pred: Vec64 = Vec64 { data: [0.0; 64] }
+    b64_predict(&s.y, &s.y_prev1, &s.y_prev2, &s.y_prev3,
+                eff_order, n, &!y_pred)
+
+    let beta = b64_beta(eff_order)
+    let beta_h = beta * h
+
+    // History sum
+    var hist_sum: Vec64 = Vec64 { data: [0.0; 64] }
+    b64_history_sum(&s.y, &s.y_prev1, &s.y_prev2, &s.y_prev3,
+                    eff_order, n, &!hist_sum)
+
+    // Newton solve
+    var newton: Newton64Result = Newton64Result {
+        y: Vec64 { data: [0.0; 64] },
+        jac: Mat64 { data: [0.0; 4096] },
+        converged: false, iters: 0, fevals: 0, jevals: 0
+    }
+    bdf64_newton_solve(rhs, t_new, &y_pred, &hist_sum, beta_h,
+                       n, s.newton_tol, s.max_newton_iter, &!newton)
+
+    s.n_function_evals = s.n_function_evals + newton.fevals
+    s.n_jac_evals = s.n_jac_evals + newton.jevals
+
+    if !newton.converged {
+        s.dt = s.dt * 0.25
+        s.dt = b64_max(1.0e-14, s.dt)
+        if s.order > 1 { s.order = s.order - 1 }
+        return false
+    }
+
+    // Error estimation: LTE ~ C_k * (y_corrected - y_predicted)
+    let err_const = b64_error_constant(eff_order)
+    var lte: Vec64 = Vec64 { data: [0.0; 64] }
+    var i: i32 = 0
+    while i < n {
+        lte.data[i] = err_const * (newton.y.data[i] - y_pred.data[i])
+        i = i + 1
+    }
+
+    let err_n = b64_error_norm(&lte, &s.y, &newton.y, n, s.atol, s.rtol)
+    let accepted = err_n <= 1.0
+
+    if accepted {
+        // Shift history
+        i = 0
+        while i < 64 {
+            s.y_prev3.data[i] = s.y_prev2.data[i]
+            s.y_prev2.data[i] = s.y_prev1.data[i]
+            s.y_prev1.data[i] = s.y.data[i]
+            s.y.data[i] = newton.y.data[i]
+            i = i + 1
+        }
+        s.t = t_new
+        s.n_steps = s.n_steps + 1
+        if s.n_history < 3 { s.n_history = s.n_history + 1 }
+
+        // GUM variance propagation
+        var new_var: Vec64 = Vec64 { data: [0.0; 64] }
+        b64_propagate_variance(&newton.jac, beta_h, &s.variances, n, &!new_var)
+        i = 0
+        while i < 64 { s.variances.data[i] = new_var.data[i]; i = i + 1 }
+
+        // Order promotion
+        if s.n_history >= s.order && s.order < s.max_order && err_n < 0.1 {
+            s.order = s.order + 1
+        }
+
+        // Step size control
+        if err_n > 1.0e-10 {
+            let order_p1 = (eff_order + 1) as f64
+            let factor = 0.9 * exp(log(1.0 / err_n) / order_p1)
+            let factor_lim = b64_min(1.5, b64_max(0.8, factor))
+            s.dt = s.dt * factor_lim
+        } else {
+            s.dt = s.dt * 1.5
+        }
+    } else {
+        if s.order > 1 { s.order = s.order - 1 }
+        if err_n > 1.0e-10 {
+            let order_p1 = (eff_order + 1) as f64
+            let factor = 0.9 * exp(log(1.0 / err_n) / order_p1)
+            let factor_lim = b64_max(0.1, b64_min(0.5, factor))
+            s.dt = s.dt * factor_lim
+        } else {
+            s.dt = s.dt * 0.5
+        }
+    }
+
+    s.dt = b64_max(1.0e-14, s.dt)
+    s.dt = b64_min(s.dt, s.dt_max)
+
+    return accepted
+}
+
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+fn bdf64_init(
+    n_eqs: i32, y0: &Vec64, t0: f64, dt: f64,
+    atol: f64, rtol: f64, state: &!BDF64State
+) with Mut, Div, Panic {
+    var i: i32 = 0
+    while i < 64 {
+        state.y.data[i] = y0.data[i]
+        state.y_prev1.data[i] = 0.0
+        state.y_prev2.data[i] = 0.0
+        state.y_prev3.data[i] = 0.0
+        state.variances.data[i] = 0.0
+        i = i + 1
+    }
+    state.t = t0
+    state.dt = dt
+    state.dt_max = 1.0
+    state.n_eqs = n_eqs
+    state.n_history = 0
+    state.order = 1
+    state.max_order = 4
+    state.n_steps = 0
+    state.n_function_evals = 0
+    state.n_jac_evals = 0
+    state.atol = atol
+    state.rtol = rtol
+    state.newton_tol = 1.0e-10
+    state.max_newton_iter = 20
+}
+
+// ============================================================================
+// MAIN SOLVER: solve_bdf64
+// Integrates dy/dt = rhs(t, y) from t_start to t_end
+// ============================================================================
+
+fn solve_bdf64(
+    rhs: fn(f64, &Vec64, i32, &!Vec64) with Mut, Div, Panic,
+    y0: &Vec64,
+    n_eqs: i32,
+    t_start: f64,
+    t_end: f64,
+    dt_init: f64,
+    atol: f64,
+    rtol: f64,
+    sol: &!BDF64Solution
+) with Mut, Panic, Div {
+    var state: BDF64State = BDF64State {
+        y: Vec64 { data: [0.0; 64] }, t: 0.0, dt: 0.0, dt_max: 0.0, n_eqs: 0,
+        y_prev1: Vec64 { data: [0.0; 64] },
+        y_prev2: Vec64 { data: [0.0; 64] },
+        y_prev3: Vec64 { data: [0.0; 64] },
+        n_history: 0, order: 0, max_order: 0,
+        n_steps: 0, n_function_evals: 0, n_jac_evals: 0,
+        variances: Vec64 { data: [0.0; 64] },
+        atol: 0.0, rtol: 0.0, newton_tol: 0.0, max_newton_iter: 0
+    }
+    bdf64_init(n_eqs, y0, t_start, dt_init, atol, rtol, &!state)
+    state.dt_max = (t_end - t_start) / 2.0
+
+    sol.n_steps = 0
+    sol.n_dims = n_eqs
+    sol.n_accepted = 0
+    sol.n_rejected = 0
+    sol.n_function_evals = 0
+    sol.success = false
+
+    // Store initial point
+    let max_stored: i32 = 64
+    sol.times[0] = t_start
+    var k: i32 = 0
+    while k < n_eqs {
+        sol.values.data[0 * 64 + k] = y0.data[k]
+        sol.variances.data[0 * 64 + k] = 0.0
+        k = k + 1
+    }
+    sol.n_steps = 1
+
+    let max_total_steps: i32 = 50000
+    var total_attempts: i32 = 0
+
+    while state.t < t_end && total_attempts < max_total_steps {
+        if state.t + state.dt > t_end { state.dt = t_end - state.t }
+        if state.dt < 1.0e-15 { state.dt = 1.0e-15 }
+
+        let accepted = bdf64_step(rhs, &!state)
+
+        if accepted {
+            sol.n_accepted = sol.n_accepted + 1
+            if sol.n_steps < max_stored {
+                let idx = sol.n_steps
+                sol.times[idx] = state.t
+                k = 0
+                while k < n_eqs {
+                    sol.values.data[idx * 64 + k] = state.y.data[k]
+                    sol.variances.data[idx * 64 + k] = state.variances.data[k]
+                    k = k + 1
+                }
+                sol.n_steps = sol.n_steps + 1
+            }
+        } else {
+            sol.n_rejected = sol.n_rejected + 1
+        }
+        total_attempts = total_attempts + 1
+    }
+
+    sol.n_function_evals = state.n_function_evals
+    sol.success = state.t >= t_end - 1.0e-12
+}
+
+// ============================================================================
+// SOLVER WITH INITIAL VARIANCES (GUM)
+// ============================================================================
+
+fn solve_bdf64_gum(
+    rhs: fn(f64, &Vec64, i32, &!Vec64) with Mut, Div, Panic,
+    y0: &Vec64,
+    var0: &Vec64,
+    n_eqs: i32,
+    t_start: f64,
+    t_end: f64,
+    dt_init: f64,
+    atol: f64,
+    rtol: f64,
+    sol: &!BDF64Solution
+) with Mut, Panic, Div {
+    var state: BDF64State = BDF64State {
+        y: Vec64 { data: [0.0; 64] }, t: 0.0, dt: 0.0, dt_max: 0.0, n_eqs: 0,
+        y_prev1: Vec64 { data: [0.0; 64] },
+        y_prev2: Vec64 { data: [0.0; 64] },
+        y_prev3: Vec64 { data: [0.0; 64] },
+        n_history: 0, order: 0, max_order: 0,
+        n_steps: 0, n_function_evals: 0, n_jac_evals: 0,
+        variances: Vec64 { data: [0.0; 64] },
+        atol: 0.0, rtol: 0.0, newton_tol: 0.0, max_newton_iter: 0
+    }
+    bdf64_init(n_eqs, y0, t_start, dt_init, atol, rtol, &!state)
+    var vi: i32 = 0
+    while vi < n_eqs { state.variances.data[vi] = var0.data[vi]; vi = vi + 1 }
+    state.dt_max = (t_end - t_start) / 2.0
+
+    sol.n_steps = 0
+    sol.n_dims = n_eqs
+    sol.n_accepted = 0
+    sol.n_rejected = 0
+    sol.n_function_evals = 0
+    sol.success = false
+
+    let max_stored: i32 = 64
+    sol.times[0] = t_start
+    var k: i32 = 0
+    while k < n_eqs {
+        sol.values.data[0 * 64 + k] = y0.data[k]
+        sol.variances.data[0 * 64 + k] = var0.data[k]
+        k = k + 1
+    }
+    sol.n_steps = 1
+
+    let max_total_steps: i32 = 50000
+    var total_attempts: i32 = 0
+
+    while state.t < t_end && total_attempts < max_total_steps {
+        if state.t + state.dt > t_end { state.dt = t_end - state.t }
+        if state.dt < 1.0e-15 { state.dt = 1.0e-15 }
+
+        let accepted = bdf64_step(rhs, &!state)
+
+        if accepted {
+            sol.n_accepted = sol.n_accepted + 1
+            if sol.n_steps < max_stored {
+                let idx = sol.n_steps
+                sol.times[idx] = state.t
+                k = 0
+                while k < n_eqs {
+                    sol.values.data[idx * 64 + k] = state.y.data[k]
+                    sol.variances.data[idx * 64 + k] = state.variances.data[k]
+                    k = k + 1
+                }
+                sol.n_steps = sol.n_steps + 1
+            }
+        } else {
+            sol.n_rejected = sol.n_rejected + 1
+        }
+        total_attempts = total_attempts + 1
+    }
+
+    sol.n_function_evals = state.n_function_evals
+    sol.success = state.t >= t_end - 1.0e-12
+}

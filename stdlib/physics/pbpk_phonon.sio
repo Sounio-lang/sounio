@@ -1,0 +1,151 @@
+// stdlib/physics/pbpk_phonon.sio
+// Coupling: 1D Phonon Lattice ↔ PBPK-14 Compartmental Model
+//
+// Multi-scale strategy:
+//   PBPK runs at ~minutes timescale (14 compartments, well-stirred)
+//   Phonon lattice runs at ~milliseconds (64 sites in liver sinusoid)
+//
+// At each PBPK evaluation of the liver compartment:
+//   1. Set lattice boundary from PBPK portal + arterial concentrations
+//   2. Run the lattice for one cardiac cycle (~0.83s at 72 bpm)
+//   3. Average the outflow concentration and variance over the cycle
+//   4. Return: (cycle_avg_venous_C, cycle_avg_variance)
+//
+// The correction = phonon_outflow - well_stirred_outflow.
+// This quantifies the microcirculation discreteness effect.
+
+// Import phonon lattice functions (same directory)
+// In practice these are linked at compile time; shown here for clarity.
+
+// --- Cycle-averaged liver clearance via phonon lattice ---
+fn phonon_liver_cycle(
+    c_portal: f64,
+    c_arterial: f64,
+    c_tissue: f64,
+    base_params: &[f64; 64],
+    lattice: &!PhononState
+) -> f64 with Mut, Div, Panic {
+    // Update boundary concentrations in params
+    var params: [f64; 64] = [0.0; 64]
+    var k: i64 = 0
+    while k < 64 {
+        params[k] = base_params[k]
+        k = k + 1
+    }
+    params[PP_C_PORTAL] = c_portal
+    params[PP_C_HA] = c_arterial
+    params[PP_C_TISSUE] = c_tissue
+
+    // Run lattice for one cardiac cycle
+    let f_heart = params[PP_F_HEART]
+    let t_cycle = if f_heart > 0.0 { 1.0 / f_heart } else { 0.833 }
+
+    // Timestep: CFL for diffusion + advection stability
+    let dx = params[PP_DX]
+    let d_eff = params[PP_D_EFF]
+    let v_bl = params[PP_V_BLOOD]
+    let dt_diff = if d_eff > 0.0 { 0.4 * dx * dx / d_eff } else { 1.0e-4 }
+    let dt_adv = if v_bl > 0.0 { 0.8 * dx / v_bl } else { 1.0e-4 }
+    let dt_cfl = if dt_diff < dt_adv { dt_diff } else { dt_adv }
+    let dt = if dt_cfl < 1.0e-4 { dt_cfl } else { 1.0e-4 }
+
+    // Accumulate outflow over the cycle for averaging
+    var outflow_sum: f64 = 0.0
+    var n_samples: i64 = 0
+    var t: f64 = 0.0
+
+    while t < t_cycle {
+        let step_dt = if t + dt > t_cycle { t_cycle - t } else { dt }
+        phonon_rk4_step(t, lattice, &params, step_dt)
+        outflow_sum = outflow_sum + phonon_outflow_concentration(lattice)
+        n_samples = n_samples + 1
+        t = t + step_dt
+    }
+
+    if n_samples > 0 {
+        outflow_sum / (n_samples as f64)
+    } else {
+        c_portal  // fallback
+    }
+}
+
+// --- Cycle-averaged outflow variance ---
+fn phonon_liver_cycle_variance(
+    c_portal: f64,
+    c_arterial: f64,
+    c_tissue: f64,
+    base_params: &[f64; 64],
+    lattice: &!PhononState
+) -> f64 with Mut, Div, Panic {
+    var params: [f64; 64] = [0.0; 64]
+    var k: i64 = 0
+    while k < 64 {
+        params[k] = base_params[k]
+        k = k + 1
+    }
+    params[PP_C_PORTAL] = c_portal
+    params[PP_C_HA] = c_arterial
+    params[PP_C_TISSUE] = c_tissue
+
+    let f_heart = params[PP_F_HEART]
+    let t_cycle = if f_heart > 0.0 { 1.0 / f_heart } else { 0.833 }
+    let dx = params[PP_DX]
+    let d_eff = params[PP_D_EFF]
+    let v_bl = params[PP_V_BLOOD]
+    let dt_diff = if d_eff > 0.0 { 0.4 * dx * dx / d_eff } else { 1.0e-4 }
+    let dt_adv = if v_bl > 0.0 { 0.8 * dx / v_bl } else { 1.0e-4 }
+    let dt_cfl = if dt_diff < dt_adv { dt_diff } else { dt_adv }
+    let dt = if dt_cfl < 1.0e-4 { dt_cfl } else { 1.0e-4 }
+
+    var var_sum: f64 = 0.0
+    var n_samples: i64 = 0
+    var t: f64 = 0.0
+
+    while t < t_cycle {
+        let step_dt = if t + dt > t_cycle { t_cycle - t } else { dt }
+        phonon_rk4_step(t, lattice, &params, step_dt)
+        var_sum = var_sum + phonon_outflow_variance(lattice)
+        n_samples = n_samples + 1
+        t = t + step_dt
+    }
+
+    if n_samples > 0 {
+        var_sum / (n_samples as f64)
+    } else {
+        0.0
+    }
+}
+
+// --- The phonon correction ---
+// Compares phonon-resolved outflow to well-stirred prediction
+fn phonon_correction(
+    c_liver_wellstirred: f64,
+    kp_liver: f64,
+    c_portal: f64,
+    c_arterial: f64,
+    phonon_params: &[f64; 64],
+    lattice: &!PhononState
+) -> f64 with Mut, Div, Panic {
+    // Well-stirred venous concentration
+    let c_venous_ws = c_liver_wellstirred / kp_liver
+
+    // Phonon-resolved venous concentration (cycle-averaged)
+    let c_tissue_approx = c_liver_wellstirred  // use well-stirred as tissue estimate
+    let c_venous_phonon = phonon_liver_cycle(
+        c_portal, c_arterial, c_tissue_approx, phonon_params, lattice
+    )
+
+    // Correction = phonon - well_stirred
+    c_venous_phonon - c_venous_ws
+}
+
+// --- Initialize lattice with uniform concentration ---
+fn phonon_init_uniform(state: &!PhononState, c_init: f64, var_init: f64) with Mut {
+    var i: i64 = 0
+    while i < PHONON_N {
+        state.values[i] = c_init
+        state.variances[i] = var_init
+        i = i + 1
+    }
+    state.n = PHONON_N
+}

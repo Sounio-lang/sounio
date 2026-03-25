@@ -1,0 +1,900 @@
+// stats::nlme — Nonlinear Mixed-Effects Population Pharmacokinetics
+//
+// NONMEM/Monolix-class population PK estimation via FOCE (First-Order
+// Conditional Estimation).  Estimates fixed effects (theta), random effect
+// variance-covariance (omega), and residual error variance (sigma)
+// simultaneously from pooled multi-individual concentration-time data.
+//
+// Algorithm:
+//   Outer loop — coordinate descent on theta + closed-form omega/sigma updates
+//   Inner loop — Newton optimization of individual eta_i (MAP estimate)
+//   Objective   — -2 * log-likelihood (Laplacian approximation)
+//
+// References:
+//   Beal & Sheiner 1982: NONMEM technical report
+//   Lindstrom & Bates 1990: FOCE for NLME
+//   Lavielle 2014: Mixed Effects Models for the Population Approach (SAEM)
+//   Plan et al. 2012: Visual Predictive Check (VPC) methodology
+//
+// SOTA context: Pumas.jl (Julia), nlmixr2 (R), Monolix (Lixoft), NONMEM 7.5
+
+extern "C" {
+    fn exp(x: f64) -> f64
+    fn log(x: f64) -> f64
+    fn sqrt(x: f64) -> f64
+}
+
+// ============================================================================
+// MATH HELPERS (self-contained, no stdlib dependency)
+// ============================================================================
+
+fn nlme_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn nlme_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn nlme_min(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn nlme_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    return sqrt(x)
+}
+
+fn nlme_exp(x: f64) -> f64 {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    return exp(x)
+}
+
+fn nlme_log(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    return log(x)
+}
+
+// ============================================================================
+// CORE DATA STRUCTURES
+// ============================================================================
+
+// Per-individual observations: max 32 individuals, 64 observations each
+// Layout: times[ind * 64 + obs], observations[ind * 64 + obs]
+struct NLMEData {
+    times: [f64; 2048],
+    observations: [f64; 2048],
+    n_obs: [i64; 32],
+    doses: [f64; 32],
+    n_individuals: i64
+}
+
+// Population PK parameters
+//   theta: fixed effects (population means), e.g. theta[0]=CL, theta[1]=V, ...
+//   omega: variance-covariance matrix of random effects (n_eta x n_eta, row-major 16x16)
+//   sigma: proportional + additive residual error variance
+struct NLMEParams {
+    theta: [f64; 16],
+    omega: [f64; 256],
+    sigma: f64,
+    n_theta: i64,
+    n_eta: i64
+}
+
+// Estimation result
+struct NLMEResult {
+    theta: [f64; 16],
+    omega: [f64; 256],
+    sigma: f64,
+    obj_function: f64,
+    n_iterations: i64,
+    converged: i64,
+    eta: [f64; 512],
+    ipred: [f64; 2048]
+}
+
+// Workspace arrays wrapped in structs for &! mutation (JIT workaround)
+struct EtaVec { data: [f64; 16] }
+struct ParamVec { data: [f64; 16] }
+struct GradVec { data: [f64; 16] }
+struct HessMat { data: [f64; 256] }
+struct PredVec { data: [f64; 64] }
+struct ResidVec { data: [f64; 64] }
+struct EtaAllBuf { data: [f64; 512] }
+struct SimConcBuf { data: [f64; 4096] }
+struct SortBuf { data: [f64; 128] }
+struct SeedBox { val: i64 }
+
+// VPC output: percentile bands at time grid points (max 128 time points)
+struct VPCResult {
+    times: [f64; 128],
+    p5: [f64; 128],
+    p50: [f64; 128],
+    p95: [f64; 128],
+    n_time_points: i64
+}
+
+// ============================================================================
+// INDIVIDUAL PARAMETER COMPUTATION
+// ============================================================================
+
+// Exponential random-effects model:
+//   param_i = theta_i * exp(eta_i)  for i in 0..n_eta
+//   param_i = theta_i               for i >= n_eta (no random effect)
+//
+// This is the standard NONMEM parameterization for log-normally distributed
+// PK parameters (CL, V, ka are always positive).
+fn compute_individual_params(
+    theta: &ParamVec,
+    eta: &EtaVec,
+    n_theta: i64,
+    n_eta: i64,
+    out: &!ParamVec
+) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n_theta {
+        if i < n_eta {
+            out.data[i] = theta.data[i] * nlme_exp(eta.data[i])
+        } else {
+            out.data[i] = theta.data[i]
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// INDIVIDUAL PREDICTIONS
+// ============================================================================
+
+// Compute predicted concentrations for one individual given their parameters.
+//
+// pk_model: fn(time, params_array_ref, n_params) -> predicted_concentration
+//           The user's structural PK model function.
+fn compute_individual_predictions(
+    pk_model: fn(f64, &ParamVec, i64) -> f64 with Div, Panic,
+    ind_params: &ParamVec,
+    n_params: i64,
+    data: &NLMEData,
+    ind_idx: i64,
+    pred: &!PredVec
+) with Mut, Div, Panic {
+    let base = ind_idx * 64
+    let n = data.n_obs[ind_idx]
+    var j: i64 = 0
+    while j < n {
+        let t = data.times[base + j]
+        pred.data[j] = pk_model(t, ind_params, n_params)
+        j = j + 1
+    }
+}
+
+// ============================================================================
+// OBJECTIVE FUNCTION COMPONENTS
+// ============================================================================
+
+// Individual contribution to -2LL under FOCE (Laplacian approximation):
+//
+//   -2LL_i = n_i * ln(2*pi*sigma)
+//          + (1/sigma) * sum_j (y_ij - f_ij)^2
+//          + eta_i' * Omega^{-1} * eta_i
+//          + ln(det(Omega))
+//
+// For diagonal Omega (independent random effects):
+//   eta_i' * Omega^{-1} * eta_i = sum_k (eta_k^2 / omega_kk)
+//   ln(det(Omega)) = sum_k ln(omega_kk)
+
+fn individual_obj_function(
+    pk_model: fn(f64, &ParamVec, i64) -> f64 with Div, Panic,
+    data: &NLMEData,
+    ind_idx: i64,
+    theta: &ParamVec,
+    eta: &EtaVec,
+    params: &NLMEParams
+) -> f64 with Mut, Div, Panic {
+    let n_theta = params.n_theta
+    let n_eta = params.n_eta
+    let sigma = params.sigma
+
+    // Compute individual parameters: theta * exp(eta)
+    var ind_params: ParamVec = ParamVec { data: [0.0; 16] }
+    compute_individual_params(theta, eta, n_theta, n_eta, &!ind_params)
+
+    // Compute predictions
+    var pred: PredVec = PredVec { data: [0.0; 64] }
+    compute_individual_predictions(pk_model, &ind_params, n_theta, data, ind_idx, &!pred)
+
+    // Residual sum of squares
+    let base = ind_idx * 64
+    let n_obs = data.n_obs[ind_idx]
+    var rss: f64 = 0.0
+    var j: i64 = 0
+    while j < n_obs {
+        let resid = data.observations[base + j] - pred.data[j]
+        rss = rss + resid * resid
+        j = j + 1
+    }
+
+    // Normal log-likelihood for observations: n*ln(2*pi*sigma) + RSS/sigma
+    let pi_val: f64 = 3.141592653589793
+    var obj: f64 = (n_obs as f64) * nlme_log(2.0 * pi_val * sigma) + rss / sigma
+
+    // Prior on eta: eta' * Omega^{-1} * eta + ln(det(Omega))
+    // Diagonal case: sum_k [eta_k^2/omega_kk + ln(omega_kk)]
+    var k: i64 = 0
+    while k < n_eta {
+        let omega_kk = params.omega[k * 16 + k]
+        if omega_kk > 1.0e-30 {
+            obj = obj + eta.data[k] * eta.data[k] / omega_kk + nlme_log(omega_kk)
+        }
+        k = k + 1
+    }
+
+    return obj
+}
+
+// ============================================================================
+// FOCE INNER OPTIMIZATION — Individual Eta Estimation
+// ============================================================================
+
+// Newton-Raphson optimization of eta_i for individual i, holding theta/omega
+// fixed. Minimizes the individual contribution to -2LL w.r.t. eta.
+//
+// Gradient (diagonal Omega):
+//   d(-2LL_i)/d(eta_k) = -(2/sigma) * sum_j (y_ij - f_ij) * df_ij/d(eta_k)
+//                       + 2 * eta_k / omega_kk
+//
+// where df_ij/d(eta_k) is computed by finite differences on the PK model.
+//
+// Hessian approximation (Gauss-Newton):
+//   H_kl ~= (2/sigma) * sum_j (df/d(eta_k)) * (df/d(eta_l)) + diag(2/omega_kk)
+//
+// Newton step: eta_new = eta_old - H^{-1} * grad
+
+fn optimize_eta_newton(
+    pk_model: fn(f64, &ParamVec, i64) -> f64 with Div, Panic,
+    data: &NLMEData,
+    ind_idx: i64,
+    theta: &ParamVec,
+    params: &NLMEParams,
+    eta_out: &!EtaVec,
+    max_inner_iter: i64
+) with Mut, Div, Panic {
+    let n_eta = params.n_eta
+    let n_theta = params.n_theta
+    let sigma = params.sigma
+    let base = ind_idx * 64
+    let n_obs = data.n_obs[ind_idx]
+
+    // Initialize eta to zero (population mean)
+    var k: i64 = 0
+    while k < 16 { eta_out.data[k] = 0.0; k = k + 1 }
+
+    var iter: i64 = 0
+    while iter < max_inner_iter {
+        // Current individual parameters
+        var ind_params: ParamVec = ParamVec { data: [0.0; 16] }
+        compute_individual_params(theta, eta_out, n_theta, n_eta, &!ind_params)
+
+        // Predictions at current eta
+        var pred: PredVec = PredVec { data: [0.0; 64] }
+        compute_individual_predictions(pk_model, &ind_params, n_theta, data, ind_idx, &!pred)
+
+        // Residuals
+        var resid: ResidVec = ResidVec { data: [0.0; 64] }
+        var j: i64 = 0
+        while j < n_obs {
+            resid.data[j] = data.observations[base + j] - pred.data[j]
+            j = j + 1
+        }
+
+        // Compute gradient and Gauss-Newton Hessian by finite differences
+        var grad: GradVec = GradVec { data: [0.0; 16] }
+        var hess: HessMat = HessMat { data: [0.0; 256] }
+        let fd_eps: f64 = 1.0e-5
+
+        // Sensitivity: df/d(eta_k) for each eta dimension
+        // Store sensitivities: sens[k * 64 + j] = df_j / d(eta_k)
+        var sens: [f64; 1024] = [0.0; 1024]
+
+        k = 0
+        while k < n_eta {
+            // Perturbed eta
+            var eta_pert: EtaVec = EtaVec { data: [0.0; 16] }
+            var m: i64 = 0
+            while m < n_eta { eta_pert.data[m] = eta_out.data[m]; m = m + 1 }
+            eta_pert.data[k] = eta_pert.data[k] + fd_eps
+
+            var ip_pert: ParamVec = ParamVec { data: [0.0; 16] }
+            compute_individual_params(theta, &eta_pert, n_theta, n_eta, &!ip_pert)
+
+            var pred_pert: PredVec = PredVec { data: [0.0; 64] }
+            compute_individual_predictions(pk_model, &ip_pert, n_theta, data, ind_idx, &!pred_pert)
+
+            j = 0
+            while j < n_obs {
+                sens[k * 64 + j] = (pred_pert.data[j] - pred.data[j]) / fd_eps
+                j = j + 1
+            }
+            k = k + 1
+        }
+
+        // Gradient: -(2/sigma)*sum_j resid_j * sens_kj + 2*eta_k/omega_kk
+        k = 0
+        while k < n_eta {
+            var g: f64 = 0.0
+            j = 0
+            while j < n_obs {
+                g = g - 2.0 / sigma * resid.data[j] * sens[k * 64 + j]
+                j = j + 1
+            }
+            let omega_kk = params.omega[k * 16 + k]
+            if omega_kk > 1.0e-30 {
+                g = g + 2.0 * eta_out.data[k] / omega_kk
+            }
+            grad.data[k] = g
+            k = k + 1
+        }
+
+        // Hessian (Gauss-Newton approximation):
+        //   H_kl = (2/sigma)*sum_j sens_kj*sens_lj + delta_kl * 2/omega_kk
+        k = 0
+        while k < n_eta {
+            var l: i64 = 0
+            while l < n_eta {
+                var h: f64 = 0.0
+                j = 0
+                while j < n_obs {
+                    h = h + 2.0 / sigma * sens[k * 64 + j] * sens[l * 64 + j]
+                    j = j + 1
+                }
+                if k == l {
+                    let omega_kk = params.omega[k * 16 + k]
+                    if omega_kk > 1.0e-30 {
+                        h = h + 2.0 / omega_kk
+                    }
+                }
+                hess.data[k * 16 + l] = h
+                l = l + 1
+            }
+            k = k + 1
+        }
+
+        // Solve H * delta_eta = -grad  (small system, direct for n_eta <= 4)
+        // Diagonal-dominant simplification for robustness:
+        //   delta_eta_k = -grad_k / H_kk
+        var max_step: f64 = 0.0
+        k = 0
+        while k < n_eta {
+            let h_kk = hess.data[k * 16 + k]
+            var delta: f64 = 0.0
+            if nlme_abs(h_kk) > 1.0e-30 {
+                delta = 0.0 - grad.data[k] / h_kk
+            }
+            // Damping: limit step size to avoid divergence
+            if delta > 2.0 { delta = 2.0 }
+            if delta < -2.0 { delta = -2.0 }
+            eta_out.data[k] = eta_out.data[k] + delta
+            let abs_delta = nlme_abs(delta)
+            if abs_delta > max_step { max_step = abs_delta }
+            k = k + 1
+        }
+
+        // Convergence check
+        if max_step < 1.0e-6 {
+            iter = max_inner_iter
+        } else {
+            iter = iter + 1
+        }
+    }
+}
+
+// ============================================================================
+// TOTAL OBJECTIVE FUNCTION (-2LL)
+// ============================================================================
+
+// Sum individual contributions for all individuals in the dataset
+fn total_objective_function(
+    pk_model: fn(f64, &ParamVec, i64) -> f64 with Div, Panic,
+    data: &NLMEData,
+    params: &NLMEParams,
+    eta_buf: &EtaAllBuf
+) -> f64 with Mut, Div, Panic {
+    var total: f64 = 0.0
+    var theta: ParamVec = ParamVec { data: [0.0; 16] }
+    var k: i64 = 0
+    while k < params.n_theta { theta.data[k] = params.theta[k]; k = k + 1 }
+
+    var i: i64 = 0
+    while i < data.n_individuals {
+        // Extract eta for this individual
+        var eta_i: EtaVec = EtaVec { data: [0.0; 16] }
+        k = 0
+        while k < params.n_eta {
+            eta_i.data[k] = eta_buf.data[i * 16 + k]
+            k = k + 1
+        }
+
+        let obj_i = individual_obj_function(pk_model, data, i, &theta, &eta_i, params)
+        total = total + obj_i
+        i = i + 1
+    }
+    return total
+}
+
+// ============================================================================
+// FOCE ESTIMATION — Full Algorithm
+// ============================================================================
+
+// Main FOCE fit:
+//   1. Initialize theta, omega, sigma from user-provided starting values
+//   2. E-step: for each individual, find MAP eta_i via Newton (inner loop)
+//   3. M-step: compute total -2LL; perturb theta/omega/sigma and take
+//      steepest-descent step (outer loop)
+//   4. Repeat until convergence or max_iter
+//
+// This is a simplified but functional FOCE. Production systems (NONMEM,
+// Monolix) use SAEM or full FOCE-I with exact gradient; this implementation
+// uses a coordinate-descent outer loop which is robust for 2-6 parameter
+// models typical in clinical pharmacometrics.
+
+fn nlme_fit_foce(
+    data: &NLMEData,
+    params_init: &NLMEParams,
+    pk_model: fn(f64, &ParamVec, i64) -> f64 with Div, Panic,
+    max_iter: i64
+) -> NLMEResult with Mut, Div, Panic {
+    // Initialize result
+    var result: NLMEResult = NLMEResult {
+        theta: [0.0; 16],
+        omega: [0.0; 256],
+        sigma: 0.0,
+        obj_function: 1.0e30,
+        n_iterations: 0,
+        converged: 0,
+        eta: [0.0; 512],
+        ipred: [0.0; 2048]
+    }
+
+    // Working copy of parameters
+    var params: NLMEParams = NLMEParams {
+        theta: [0.0; 16],
+        omega: [0.0; 256],
+        sigma: params_init.sigma,
+        n_theta: params_init.n_theta,
+        n_eta: params_init.n_eta
+    }
+    var k: i64 = 0
+    while k < 16 { params.theta[k] = params_init.theta[k]; k = k + 1 }
+    k = 0
+    while k < 256 { params.omega[k] = params_init.omega[k]; k = k + 1 }
+
+    // Working eta buffer
+    var eta_buf: EtaAllBuf = EtaAllBuf { data: [0.0; 512] }
+
+    var outer_iter: i64 = 0
+    var prev_obj: f64 = 1.0e30
+    let outer_step: f64 = 0.05
+    let convergence_tol: f64 = 1.0e-4
+
+    while outer_iter < max_iter {
+        // ---- E-step: Optimize individual etas ----
+        var theta_vec: ParamVec = ParamVec { data: [0.0; 16] }
+        k = 0
+        while k < params.n_theta { theta_vec.data[k] = params.theta[k]; k = k + 1 }
+
+        var i: i64 = 0
+        while i < data.n_individuals {
+            var eta_i: EtaVec = EtaVec { data: [0.0; 16] }
+            // Warm-start from previous iteration
+            k = 0
+            while k < params.n_eta { eta_i.data[k] = eta_buf.data[i * 16 + k]; k = k + 1 }
+
+            optimize_eta_newton(pk_model, data, i, &theta_vec, &params, &!eta_i, 20)
+
+            // Store optimized eta
+            k = 0
+            while k < params.n_eta { eta_buf.data[i * 16 + k] = eta_i.data[k]; k = k + 1 }
+            i = i + 1
+        }
+
+        // ---- Compute current objective ----
+        let current_obj = total_objective_function(pk_model, data, &params, &eta_buf)
+
+        // ---- M-step: Coordinate descent on theta ----
+        k = 0
+        while k < params.n_theta {
+            let orig = params.theta[k]
+            let step = nlme_max(nlme_abs(orig) * outer_step, 1.0e-6)
+
+            // Try +step
+            params.theta[k] = orig + step
+            let obj_plus = total_objective_function(pk_model, data, &params, &eta_buf)
+
+            // Try -step
+            params.theta[k] = orig - step
+            let obj_minus = total_objective_function(pk_model, data, &params, &eta_buf)
+
+            // Pick best direction
+            if obj_plus < current_obj && obj_plus <= obj_minus {
+                params.theta[k] = orig + step
+            } else {
+                if obj_minus < current_obj {
+                    params.theta[k] = orig - step
+                } else {
+                    params.theta[k] = orig
+                }
+            }
+            k = k + 1
+        }
+
+        // ---- M-step: Update omega from empirical variance of etas ----
+        k = 0
+        while k < params.n_eta {
+            var sum_sq: f64 = 0.0
+            i = 0
+            while i < data.n_individuals {
+                let eta_ik = eta_buf.data[i * 16 + k]
+                sum_sq = sum_sq + eta_ik * eta_ik
+                i = i + 1
+            }
+            let new_omega = sum_sq / (data.n_individuals as f64)
+            // Floor to prevent collapse
+            if new_omega > 1.0e-6 {
+                params.omega[k * 16 + k] = new_omega
+            } else {
+                params.omega[k * 16 + k] = 1.0e-6
+            }
+            k = k + 1
+        }
+
+        // ---- M-step: Update sigma from residuals ----
+        var total_rss: f64 = 0.0
+        var total_obs: i64 = 0
+        i = 0
+        while i < data.n_individuals {
+            var ind_params: ParamVec = ParamVec { data: [0.0; 16] }
+            var eta_i: EtaVec = EtaVec { data: [0.0; 16] }
+            k = 0
+            while k < params.n_eta { eta_i.data[k] = eta_buf.data[i * 16 + k]; k = k + 1 }
+            compute_individual_params(&theta_vec, &eta_i, params.n_theta, params.n_eta, &!ind_params)
+
+            var pred: PredVec = PredVec { data: [0.0; 64] }
+            compute_individual_predictions(pk_model, &ind_params, params.n_theta, data, i, &!pred)
+
+            let base = i * 64
+            var j: i64 = 0
+            while j < data.n_obs[i] {
+                let r = data.observations[base + j] - pred.data[j]
+                total_rss = total_rss + r * r
+                j = j + 1
+            }
+            total_obs = total_obs + data.n_obs[i]
+            i = i + 1
+        }
+        if total_obs > 0 {
+            let new_sigma = total_rss / (total_obs as f64)
+            if new_sigma > 1.0e-10 {
+                params.sigma = new_sigma
+            }
+        }
+
+        // ---- Convergence check ----
+        let rel_change = nlme_abs(current_obj - prev_obj) / nlme_max(nlme_abs(prev_obj), 1.0)
+        if rel_change < convergence_tol && outer_iter > 2 {
+            result.converged = 1
+            result.obj_function = current_obj
+            result.n_iterations = outer_iter + 1
+            outer_iter = max_iter
+        } else {
+            prev_obj = current_obj
+            outer_iter = outer_iter + 1
+        }
+    }
+
+    // ---- Store final results ----
+    k = 0
+    while k < 16 { result.theta[k] = params.theta[k]; k = k + 1 }
+    k = 0
+    while k < 256 { result.omega[k] = params.omega[k]; k = k + 1 }
+    result.sigma = params.sigma
+    if result.converged == 0 {
+        result.obj_function = prev_obj
+        result.n_iterations = max_iter
+    }
+
+    // Store final etas
+    k = 0
+    while k < 512 { result.eta[k] = eta_buf.data[k]; k = k + 1 }
+
+    // Compute final individual predictions (ipred)
+    var theta_final: ParamVec = ParamVec { data: [0.0; 16] }
+    k = 0
+    while k < params.n_theta { theta_final.data[k] = params.theta[k]; k = k + 1 }
+
+    var i: i64 = 0
+    while i < data.n_individuals {
+        var eta_i: EtaVec = EtaVec { data: [0.0; 16] }
+        k = 0
+        while k < params.n_eta { eta_i.data[k] = eta_buf.data[i * 16 + k]; k = k + 1 }
+
+        var ind_params: ParamVec = ParamVec { data: [0.0; 16] }
+        compute_individual_params(&theta_final, &eta_i, params.n_theta, params.n_eta, &!ind_params)
+
+        var pred: PredVec = PredVec { data: [0.0; 64] }
+        compute_individual_predictions(pk_model, &ind_params, params.n_theta, data, i, &!pred)
+
+        let base = i * 64
+        var j: i64 = 0
+        while j < data.n_obs[i] {
+            result.ipred[base + j] = pred.data[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// BUILT-IN PK MODELS
+// ============================================================================
+
+// One-compartment model with first-order absorption (oral dosing)
+//
+// params[0] = ka  (absorption rate constant, 1/h)
+// params[1] = CL  (clearance, L/h)
+// params[2] = V   (volume of distribution, L)
+// params[3] = F   (bioavailability fraction)
+// params[4] = dose (mg)
+//
+// C(t) = (F * dose * ka) / (V * (ka - ke)) * (exp(-ke*t) - exp(-ka*t))
+// where ke = CL / V
+fn pk_1comp_oral(t: f64, params: &ParamVec, n: i64) -> f64 with Div, Panic {
+    let ka = params.data[0]
+    let cl = params.data[1]
+    let v  = params.data[2]
+    let f  = params.data[3]
+    let dose = params.data[4]
+
+    if v < 1.0e-30 { return 0.0 }
+    let ke = cl / v
+
+    // Avoid division by zero when ka == ke
+    let diff = nlme_abs(ka - ke)
+    if diff < 1.0e-10 {
+        // L'Hopital limit: C(t) = (F*dose*ka/V) * t * exp(-ke*t)
+        return f * dose * ka / v * t * nlme_exp(0.0 - ke * t)
+    }
+
+    let coeff = f * dose * ka / (v * (ka - ke))
+    return coeff * (nlme_exp(0.0 - ke * t) - nlme_exp(0.0 - ka * t))
+}
+
+// Two-compartment model with IV bolus
+//
+// params[0] = CL   (clearance, L/h)
+// params[1] = V1   (central volume, L)
+// params[2] = Q    (inter-compartmental clearance, L/h)
+// params[3] = V2   (peripheral volume, L)
+// params[4] = dose (mg)
+//
+// C(t) = A*exp(-alpha*t) + B*exp(-beta*t)
+// where alpha, beta are eigenvalues of the disposition matrix
+fn pk_2comp_iv(t: f64, params: &ParamVec, n: i64) -> f64 with Div, Panic {
+    let cl = params.data[0]
+    let v1 = params.data[1]
+    let q  = params.data[2]
+    let v2 = params.data[3]
+    let dose = params.data[4]
+
+    if v1 < 1.0e-30 { return 0.0 }
+    if v2 < 1.0e-30 { return 0.0 }
+
+    let k10 = cl / v1
+    let k12 = q / v1
+    let k21 = q / v2
+
+    // Eigenvalues: alpha, beta from quadratic
+    // alpha + beta = k10 + k12 + k21
+    // alpha * beta = k10 * k21
+    let sum_k = k10 + k12 + k21
+    let prod_k = k10 * k21
+    let disc = sum_k * sum_k - 4.0 * prod_k
+    if disc < 0.0 { return 0.0 }
+
+    let sqrt_disc = nlme_sqrt(disc)
+    let alpha = (sum_k + sqrt_disc) / 2.0
+    let beta  = (sum_k - sqrt_disc) / 2.0
+
+    // Macro-constants
+    let diff_ab = alpha - beta
+    if nlme_abs(diff_ab) < 1.0e-30 { return dose / v1 * nlme_exp(0.0 - alpha * t) }
+
+    let a_coeff = dose / v1 * (alpha - k21) / diff_ab
+    let b_coeff = dose / v1 * (k21 - beta) / diff_ab
+
+    return a_coeff * nlme_exp(0.0 - alpha * t) + b_coeff * nlme_exp(0.0 - beta * t)
+}
+
+// ============================================================================
+// VISUAL PREDICTIVE CHECK (VPC)
+// ============================================================================
+
+// Simple LCG pseudo-random number generator (period 2^32)
+// Returns value in [0, 1)
+fn lcg_next(seed: &!SeedBox) -> f64 with Mut, Div, Panic {
+    // Numerical Recipes LCG: seed = (1664525 * seed + 1013904223) mod 2^32
+    let a: i64 = 1664525
+    let c: i64 = 1013904223
+    let m: i64 = 4294967296
+    var s = seed.val
+    s = ((a * s + c) % m + m) % m
+    seed.val = s
+    return (s as f64) / (m as f64)
+}
+
+// Box-Muller transform: uniform (0,1) pair -> standard normal
+fn box_muller(u1: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    let pi_val: f64 = 3.141592653589793
+    let r = nlme_sqrt(0.0 - 2.0 * nlme_log(nlme_max(u1, 1.0e-30)))
+    let angle = 2.0 * pi_val * u2
+    // cos(angle) via Taylor series
+    var cos_a: f64 = 1.0
+    var term: f64 = 1.0
+    var n: i64 = 1
+    while n < 12 {
+        term = 0.0 - term * angle * angle / ((2 * n - 1) * (2 * n)) as f64
+        cos_a = cos_a + term
+        n = n + 1
+    }
+    return r * cos_a
+}
+
+// Simulate one virtual population and compute concentrations at grid times.
+// For each simulated individual:
+//   1. Draw eta from N(0, omega)
+//   2. Compute individual params
+//   3. Evaluate PK model at each time point
+//   4. Add residual noise ~ N(0, sigma)
+fn vpc_simulate_population(
+    pk_model: fn(f64, &ParamVec, i64) -> f64 with Div, Panic,
+    theta: &ParamVec,
+    params: &NLMEParams,
+    dose: f64,
+    times: &[f64; 128],
+    n_times: i64,
+    n_sim_individuals: i64,
+    seed: &!SeedBox,
+    out_conc: &!SimConcBuf
+) with Mut, Div, Panic {
+    // out_conc layout: [ind * 128 + t_idx]
+    var ind: i64 = 0
+    while ind < n_sim_individuals {
+        // Draw random etas
+        var eta: EtaVec = EtaVec { data: [0.0; 16] }
+        var k: i64 = 0
+        while k < params.n_eta {
+            let u1 = lcg_next(seed)
+            let u2 = lcg_next(seed)
+            let z = box_muller(u1, u2)
+            let omega_kk = params.omega[k * 16 + k]
+            eta.data[k] = z * nlme_sqrt(omega_kk)
+            k = k + 1
+        }
+
+        // Compute individual params
+        var ind_params: ParamVec = ParamVec { data: [0.0; 16] }
+        compute_individual_params(theta, &eta, params.n_theta, params.n_eta, &!ind_params)
+
+        // Set dose in params if needed (param index 4 by convention)
+        if params.n_theta > 4 {
+            ind_params.data[4] = dose
+        }
+
+        // Evaluate model at each time point
+        var t_idx: i64 = 0
+        while t_idx < n_times {
+            let pred = pk_model(times[t_idx], &ind_params, params.n_theta)
+            // Add residual noise
+            let u1 = lcg_next(seed)
+            let u2 = lcg_next(seed)
+            let noise = box_muller(u1, u2) * nlme_sqrt(params.sigma)
+            var conc = pred + noise
+            if conc < 0.0 { conc = 0.0 }
+            out_conc.data[ind * 128 + t_idx] = conc
+            t_idx = t_idx + 1
+        }
+        ind = ind + 1
+    }
+}
+
+// Sort n values in-place (selection sort for small n)
+fn sort_f64(arr: &!SortBuf, n: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n - 1 {
+        var min_idx: i64 = i
+        var j: i64 = i + 1
+        while j < n {
+            if arr.data[j] < arr.data[min_idx] { min_idx = j }
+            j = j + 1
+        }
+        if min_idx != i {
+            let tmp = arr.data[i]
+            arr.data[i] = arr.data[min_idx]
+            arr.data[min_idx] = tmp
+        }
+        i = i + 1
+    }
+}
+
+// Compute VPC: simulate n_sim populations, extract 5th/50th/95th percentiles
+//
+// n_sim_individuals: individuals per simulated dataset (typically 200-1000)
+// time_grid / n_time_points: evaluation time points
+fn compute_vpc(
+    pk_model: fn(f64, &ParamVec, i64) -> f64 with Div, Panic,
+    result: &NLMEResult,
+    params: &NLMEParams,
+    dose: f64,
+    time_grid: &[f64; 128],
+    n_time_points: i64,
+    n_sim_individuals: i64,
+    seed_init: i64
+) -> VPCResult with Mut, Div, Panic {
+    var vpc: VPCResult = VPCResult {
+        times: [0.0; 128],
+        p5: [0.0; 128],
+        p50: [0.0; 128],
+        p95: [0.0; 128],
+        n_time_points: n_time_points
+    }
+
+    // Copy time grid
+    var t: i64 = 0
+    while t < n_time_points { vpc.times[t] = time_grid[t]; t = t + 1 }
+
+    // Theta from result
+    var theta: ParamVec = ParamVec { data: [0.0; 16] }
+    var k: i64 = 0
+    while k < params.n_theta { theta.data[k] = result.theta[k]; k = k + 1 }
+
+    // Simulate population
+    var seed: SeedBox = SeedBox { val: seed_init }
+    var sim_conc: SimConcBuf = SimConcBuf { data: [0.0; 4096] }
+    vpc_simulate_population(
+        pk_model, &theta, params, dose,
+        time_grid, n_time_points, n_sim_individuals,
+        &!seed, &!sim_conc
+    )
+
+    // Extract percentiles at each time point
+    t = 0
+    while t < n_time_points {
+        // Collect concentrations at this time point
+        var vals: SortBuf = SortBuf { data: [0.0; 128] }
+        let n_vals_f = nlme_min((n_sim_individuals as f64), 128.0)
+        let n_vals = n_vals_f as i64
+        var i: i64 = 0
+        while i < n_vals {
+            vals.data[i] = sim_conc.data[i * 128 + t]
+            i = i + 1
+        }
+        sort_f64(&!vals, n_vals)
+
+        // Percentile indices
+        let idx_5  = ((n_vals as f64) * 0.05) as i64
+        let idx_50 = ((n_vals as f64) * 0.50) as i64
+        let idx_95 = ((n_vals as f64) * 0.95) as i64
+
+        vpc.p5[t]  = vals.data[idx_5]
+        vpc.p50[t] = vals.data[idx_50]
+        vpc.p95[t] = vals.data[idx_95]
+        t = t + 1
+    }
+
+    return vpc
+}

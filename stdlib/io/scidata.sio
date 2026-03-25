@@ -1,0 +1,368 @@
+// io::scidata — Scientific data I/O in a native binary-text format
+//
+// HDF5-like in-memory dataset with named arrays, metadata attributes,
+// column statistics, and epistemic (value+variance) array pairs.
+//
+// Design constraints:
+//   - Fixed-capacity: 16 arrays x 1024 elements, 32 metadata attrs
+//   - All numeric (f64 values, i64 name/key IDs)
+//   - No file I/O (JIT limitation); serializes to stdout for piping
+//   - Epistemic convention: array 2k = values, array 2k+1 = variances
+//
+// Text interchange format (readable by Python/R):
+//   # SciData v1
+//   @attr <key_id> <value>
+//   !array <name_id> <length>
+//   <val0> <val1> <val2> ...
+
+extern "C" {
+    fn sqrt(x: f64) -> f64
+}
+
+fn sd_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    return sqrt(x)
+}
+
+fn sd_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// ============================================================================
+// DATASET STRUCTURE
+// ============================================================================
+
+pub struct SciDataset {
+    data: [f64; 16384]        // data[array_idx * 1024 + element_idx]
+    array_lengths: [i64; 16]  // length of each array
+    array_names: [i64; 16]    // name ID for each array
+    n_arrays: i64
+
+    // Metadata: key-value attributes (max 32)
+    attr_keys: [i64; 32]
+    attr_values: [f64; 32]
+    n_attrs: i64
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+pub fn scidata_new() -> SciDataset {
+    SciDataset {
+        data: [0.0; 16384],
+        array_lengths: [0; 16],
+        array_names: [0; 16],
+        n_arrays: 0,
+        attr_keys: [0; 32],
+        attr_values: [0.0; 32],
+        n_attrs: 0,
+    }
+}
+
+// ============================================================================
+// ARRAY OPERATIONS
+// ============================================================================
+
+// Add a named array to the dataset.
+// name_id: integer identifier for the array name
+// src: source array containing data
+// length: number of elements to copy (max 1024)
+// Returns updated dataset (by value to avoid JIT &! issues).
+pub fn scidata_add_array(
+    ds: SciDataset, name_id: i64,
+    src: [f64; 1024], length: i64
+) -> SciDataset with Mut, Div, Panic {
+    var out = ds
+    if out.n_arrays >= 16 { return out }
+    var len = length
+    if len < 0 { len = 0 }
+    if len > 1024 { len = 1024 }
+
+    let idx = out.n_arrays
+    out.array_names[idx as usize] = name_id
+    out.array_lengths[idx as usize] = len
+
+    let base = idx * 1024
+    var i: i64 = 0
+    while i < len {
+        out.data[(base + i) as usize] = src[i as usize]
+        i = i + 1
+    }
+    out.n_arrays = out.n_arrays + 1
+    out
+}
+
+// Copy array at array_idx into output buffer.
+// Returns the number of elements copied.
+pub fn scidata_get_array(
+    ds: SciDataset, array_idx: i64,
+    out: [f64; 1024], max_len: i64
+) -> [f64; 1024] with Mut, Div, Panic {
+    var buf = out
+    if array_idx < 0 { return buf }
+    if array_idx >= ds.n_arrays { return buf }
+
+    let len = ds.array_lengths[array_idx as usize]
+    var n = len
+    if n > max_len { n = max_len }
+    if n > 1024 { n = 1024 }
+
+    let base = array_idx * 1024
+    var i: i64 = 0
+    while i < n {
+        buf[i as usize] = ds.data[(base + i) as usize]
+        i = i + 1
+    }
+    buf
+}
+
+// Return the length of the array at array_idx.
+pub fn scidata_array_len(ds: SciDataset, array_idx: i64) -> i64 with Div, Panic {
+    if array_idx < 0 { return 0 }
+    if array_idx >= ds.n_arrays { return 0 }
+    ds.array_lengths[array_idx as usize]
+}
+
+// ============================================================================
+// METADATA ATTRIBUTES
+// ============================================================================
+
+// Set a numeric metadata attribute.
+// If key_id already exists, update its value; otherwise add new.
+pub fn scidata_set_attr(ds: SciDataset, key_id: i64, value: f64) -> SciDataset with Mut, Div, Panic {
+    var out = ds
+    // Search for existing key
+    var i: i64 = 0
+    while i < out.n_attrs {
+        if out.attr_keys[i as usize] == key_id {
+            out.attr_values[i as usize] = value
+            return out
+        }
+        i = i + 1
+    }
+    // Add new attr
+    if out.n_attrs >= 32 { return out }
+    let idx = out.n_attrs
+    out.attr_keys[idx as usize] = key_id
+    out.attr_values[idx as usize] = value
+    out.n_attrs = out.n_attrs + 1
+    out
+}
+
+// Get a metadata attribute value by key_id.
+// Returns 0.0 if not found.
+pub fn scidata_get_attr(ds: SciDataset, key_id: i64) -> f64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ds.n_attrs {
+        if ds.attr_keys[i as usize] == key_id {
+            return ds.attr_values[i as usize]
+        }
+        i = i + 1
+    }
+    return 0.0
+}
+
+// ============================================================================
+// SERIALIZATION — human-readable text format
+// ============================================================================
+
+// Print the dataset in SciData v1 text format to stdout.
+// Format:
+//   # SciData v1
+//   @attr <key_id> <value>
+//   !array <name_id> <length>
+//   <val0> <val1> <val2> ...
+pub fn scidata_print(ds: SciDataset) with IO, Mut, Panic, Div {
+    println("# SciData v1")
+
+    // Print attributes
+    var a: i64 = 0
+    while a < ds.n_attrs {
+        print("@attr ")
+        print(ds.attr_keys[a as usize])
+        print(" ")
+        println(ds.attr_values[a as usize])
+        a = a + 1
+    }
+
+    // Print arrays
+    var arr: i64 = 0
+    while arr < ds.n_arrays {
+        print("!array ")
+        print(ds.array_names[arr as usize])
+        print(" ")
+        println(ds.array_lengths[arr as usize])
+
+        let base = arr * 1024
+        let len = ds.array_lengths[arr as usize]
+        var i: i64 = 0
+        while i < len {
+            if i > 0 { print(" ") }
+            print(ds.data[(base + i) as usize])
+            i = i + 1
+        }
+        println("")
+        arr = arr + 1
+    }
+}
+
+// ============================================================================
+// COLUMN STATISTICS
+// ============================================================================
+
+// Mean of array at array_idx.
+pub fn scidata_col_mean(ds: SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {
+    if array_idx < 0 { return 0.0 }
+    if array_idx >= ds.n_arrays { return 0.0 }
+    let len = ds.array_lengths[array_idx as usize]
+    if len == 0 { return 0.0 }
+
+    let base = array_idx * 1024
+    var sum = 0.0
+    var i: i64 = 0
+    while i < len {
+        sum = sum + ds.data[(base + i) as usize]
+        i = i + 1
+    }
+    sum / (len as f64)
+}
+
+// Standard deviation (sample, n-1 denominator) of array at array_idx.
+pub fn scidata_col_std(ds: SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {
+    if array_idx < 0 { return 0.0 }
+    if array_idx >= ds.n_arrays { return 0.0 }
+    let len = ds.array_lengths[array_idx as usize]
+    if len < 2 { return 0.0 }
+
+    let mean = scidata_col_mean(ds, array_idx)
+    let base = array_idx * 1024
+    var sum_sq = 0.0
+    var i: i64 = 0
+    while i < len {
+        let diff = ds.data[(base + i) as usize] - mean
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    sd_sqrt(sum_sq / ((len - 1) as f64))
+}
+
+// Minimum value in array at array_idx.
+pub fn scidata_col_min(ds: SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {
+    if array_idx < 0 { return 0.0 }
+    if array_idx >= ds.n_arrays { return 0.0 }
+    let len = ds.array_lengths[array_idx as usize]
+    if len == 0 { return 0.0 }
+
+    let base = array_idx * 1024
+    var m = ds.data[base as usize]
+    var i: i64 = 1
+    while i < len {
+        let v = ds.data[(base + i) as usize]
+        if v < m { m = v }
+        i = i + 1
+    }
+    m
+}
+
+// Maximum value in array at array_idx.
+pub fn scidata_col_max(ds: SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {
+    if array_idx < 0 { return 0.0 }
+    if array_idx >= ds.n_arrays { return 0.0 }
+    let len = ds.array_lengths[array_idx as usize]
+    if len == 0 { return 0.0 }
+
+    let base = array_idx * 1024
+    var m = ds.data[base as usize]
+    var i: i64 = 1
+    while i < len {
+        let v = ds.data[(base + i) as usize]
+        if v > m { m = v }
+        i = i + 1
+    }
+    m
+}
+
+// Z-score normalization in-place: (x - mean) / std.
+// Returns the updated dataset.
+pub fn scidata_col_normalize(ds: SciDataset, array_idx: i64) -> SciDataset with Mut, Div, Panic {
+    var out = ds
+    if array_idx < 0 { return out }
+    if array_idx >= out.n_arrays { return out }
+    let len = out.array_lengths[array_idx as usize]
+    if len < 2 { return out }
+
+    let mean = scidata_col_mean(out, array_idx)
+    let std = scidata_col_std(out, array_idx)
+    if std < 0.0000000001 { return out }
+
+    let base = array_idx * 1024
+    var i: i64 = 0
+    while i < len {
+        let idx = (base + i) as usize
+        out.data[idx] = (out.data[idx] - mean) / std
+        i = i + 1
+    }
+    out
+}
+
+// Multiply all elements of array at array_idx by a scalar factor.
+// Returns the updated dataset.
+pub fn scidata_col_scale(ds: SciDataset, array_idx: i64, factor: f64) -> SciDataset with Mut, Div, Panic {
+    var out = ds
+    if array_idx < 0 { return out }
+    if array_idx >= out.n_arrays { return out }
+    let len = out.array_lengths[array_idx as usize]
+
+    let base = array_idx * 1024
+    var i: i64 = 0
+    while i < len {
+        let idx = (base + i) as usize
+        out.data[idx] = out.data[idx] * factor
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// EPISTEMIC EXTENSION — value+variance paired arrays
+// ============================================================================
+
+// Add a paired value+variance array.
+// Convention: array at index 2k = values, array at index 2k+1 = variances.
+// Requires at least 2 free array slots.
+pub fn scidata_add_array_with_uncertainty(
+    ds: SciDataset, name_id: i64,
+    values: [f64; 1024], variances: [f64; 1024], length: i64
+) -> SciDataset with Mut, Div, Panic {
+    if ds.n_arrays >= 15 { return ds }
+    // Value array gets name_id, variance array gets name_id + 1000000
+    var out = scidata_add_array(ds, name_id, values, length)
+    out = scidata_add_array(out, name_id + 1000000, variances, length)
+    out
+}
+
+// Get the value element at position elem_idx from epistemic pair starting at pair_base_idx.
+pub fn scidata_epist_value(ds: SciDataset, pair_base_idx: i64, elem_idx: i64) -> f64 with Div, Panic {
+    let arr_idx = pair_base_idx * 2
+    if arr_idx < 0 { return 0.0 }
+    if arr_idx >= ds.n_arrays { return 0.0 }
+    let base = arr_idx * 1024
+    ds.data[(base + elem_idx) as usize]
+}
+
+// Get the variance element at position elem_idx from epistemic pair starting at pair_base_idx.
+pub fn scidata_epist_variance(ds: SciDataset, pair_base_idx: i64, elem_idx: i64) -> f64 with Div, Panic {
+    let arr_idx = pair_base_idx * 2 + 1
+    if arr_idx < 0 { return 0.0 }
+    if arr_idx >= ds.n_arrays { return 0.0 }
+    let base = arr_idx * 1024
+    ds.data[(base + elem_idx) as usize]
+}
+
+// Get the standard uncertainty (sqrt of variance) for an epistemic element.
+pub fn scidata_epist_std_uncert(ds: SciDataset, pair_base_idx: i64, elem_idx: i64) -> f64 with Div, Panic {
+    let v = scidata_epist_variance(ds, pair_base_idx, elem_idx)
+    sd_sqrt(v)
+}

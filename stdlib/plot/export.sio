@@ -1,0 +1,562 @@
+// SVG Plot Export — Publication-Quality Vector Graphics
+//
+// Generates SVG markup for line plots suitable for scientific papers.
+// Since Sounio cannot directly invoke rasterizers, the companion
+// script `scripts/plot-export.sh` handles SVG → PNG/PDF conversion
+// via rsvg-convert, Inkscape, or ImageMagick.
+//
+// ## Workflow
+//
+// 1. Generate SVG via `svg_line_plot()` — writes to stdout
+// 2. Redirect to file: `souc run plot_script.sio > plot.svg`
+// 3. Convert: `bash scripts/plot-export.sh plot.svg png`
+//
+// ## Supported plot types
+//
+// - Line plots with up to 8 series
+// - Automatic axis scaling with tick marks
+// - Title, axis labels, legend
+// - Publication-quality default styling (600x400, white background)
+
+// ============================================================================
+// SVG EXPORT TYPES
+// ============================================================================
+
+struct SvgPlotConfig {
+    width: i64,
+    height: i64,
+    margin_top: i64,
+    margin_right: i64,
+    margin_bottom: i64,
+    margin_left: i64,
+    title: string,
+    x_label: string,
+    y_label: string,
+    show_grid: bool,
+    show_legend: bool,
+    font_size: i64,
+    bg_color: string,
+}
+
+struct SvgSeries {
+    x: [f64; 1024],
+    y: [f64; 1024],
+    n: i64,
+    label: string,
+    color: string,
+    stroke_width: i64,
+}
+
+fn svg_config_default() -> SvgPlotConfig {
+    SvgPlotConfig {
+        width: 600,
+        height: 400,
+        margin_top: 50,
+        margin_right: 30,
+        margin_bottom: 60,
+        margin_left: 70,
+        title: "",
+        x_label: "",
+        y_label: "",
+        show_grid: true,
+        show_legend: true,
+        font_size: 14,
+        bg_color: "white",
+    }
+}
+
+fn svg_config_new(title: string, width: i64, height: i64) -> SvgPlotConfig {
+    SvgPlotConfig {
+        width: width,
+        height: height,
+        margin_top: 50,
+        margin_right: 30,
+        margin_bottom: 60,
+        margin_left: 70,
+        title: title,
+        x_label: "",
+        y_label: "",
+        show_grid: true,
+        show_legend: true,
+        font_size: 14,
+        bg_color: "white",
+    }
+}
+
+fn svg_config_labeled(
+    title: string,
+    x_label: string,
+    y_label: string,
+    width: i64,
+    height: i64,
+) -> SvgPlotConfig {
+    SvgPlotConfig {
+        width: width,
+        height: height,
+        margin_top: 50,
+        margin_right: 30,
+        margin_bottom: 60,
+        margin_left: 70,
+        title: title,
+        x_label: x_label,
+        y_label: y_label,
+        show_grid: true,
+        show_legend: true,
+        font_size: 14,
+        bg_color: "white",
+    }
+}
+
+fn svg_series_new(label: string, color: string) -> SvgSeries {
+    SvgSeries {
+        x: [0.0; 1024],
+        y: [0.0; 1024],
+        n: 0,
+        label: label,
+        color: color,
+        stroke_width: 2,
+    }
+}
+
+fn svg_series_add(s: &!SvgSeries, xv: f64, yv: f64) {
+    if s.n < 1024 {
+        s.x[s.n as usize] = xv
+        s.y[s.n as usize] = yv
+        s.n = s.n + 1
+    }
+}
+
+// ============================================================================
+// PALETTE — publication-quality colors (ColorBrewer Set1)
+// ============================================================================
+
+fn svg_palette_color(index: i64) -> string {
+    if index == 0 { return "#e41a1c" }   // red
+    if index == 1 { return "#377eb8" }   // blue
+    if index == 2 { return "#4daf4a" }   // green
+    if index == 3 { return "#984ea3" }   // purple
+    if index == 4 { return "#ff7f00" }   // orange
+    if index == 5 { return "#a65628" }   // brown
+    if index == 6 { return "#f781bf" }   // pink
+    if index == 7 { return "#999999" }   // grey
+    "#333333"
+}
+
+// ============================================================================
+// FLOAT PRINTING HELPERS (for SVG coordinate values)
+// ============================================================================
+
+fn svg_print_f64(value: f64, decimals: i64) with Panic, Div, Mut, IO {
+    if value < 0.0 {
+        print("-")
+    }
+    let abs_val = if value < 0.0 { 0.0 - value } else { value }
+    let int_part = abs_val as i64
+    print_int(int_part)
+
+    if decimals > 0 {
+        print(".")
+        var frac = abs_val - int_part as f64
+        var d: i64 = 0
+        while d < decimals {
+            frac = frac * 10.0
+            let digit = frac as i64
+            print_int(digit)
+            frac = frac - digit as f64
+            d = d + 1
+        }
+    }
+}
+
+// ============================================================================
+// DATA RANGE COMPUTATION
+// ============================================================================
+
+fn svg_find_range(
+    series: &[SvgSeries],
+    n_series: i64,
+) -> [f64; 4] with Mut, Panic, Div {
+    // Returns [x_min, x_max, y_min, y_max]
+    var x_min = series[0].x[0]
+    var x_max = series[0].x[0]
+    var y_min = series[0].y[0]
+    var y_max = series[0].y[0]
+
+    var s: i64 = 0
+    while s < n_series {
+        var i: i64 = 0
+        while i < series[s as usize].n {
+            let xv = series[s as usize].x[i as usize]
+            let yv = series[s as usize].y[i as usize]
+            if xv < x_min { x_min = xv }
+            if xv > x_max { x_max = xv }
+            if yv < y_min { y_min = yv }
+            if yv > y_max { y_max = yv }
+            i = i + 1
+        }
+        s = s + 1
+    }
+
+    // Add 5% padding
+    let x_range = x_max - x_min
+    let y_range = y_max - y_min
+    let x_pad = if x_range > 0.0 { x_range * 0.05 } else { 1.0 }
+    let y_pad = if y_range > 0.0 { y_range * 0.05 } else { 1.0 }
+
+    var result: [f64; 4] = [0.0, 0.0, 0.0, 0.0]
+    result[0] = x_min - x_pad
+    result[1] = x_max + x_pad
+    result[2] = y_min - y_pad
+    result[3] = y_max + y_pad
+    result
+}
+
+// ============================================================================
+// SVG LINE PLOT — MAIN ENTRY POINT
+// ============================================================================
+
+/// Generate a complete SVG document for a multi-series line plot.
+/// Output is written to stdout via print/println.
+///
+/// Usage:
+///   svg_line_plot(&config, &series_array, n_series)
+///   // redirect stdout to file: souc run script.sio > output.svg
+fn svg_line_plot(
+    config: &SvgPlotConfig,
+    series: &[SvgSeries],
+    n_series: i64,
+) with IO, Mut, Div, Panic {
+    if n_series <= 0 { return }
+
+    let range = svg_find_range(series, n_series)
+    let x_min = range[0]
+    let x_max = range[1]
+    let y_min = range[2]
+    let y_max = range[3]
+
+    let plot_w = config.width - config.margin_left - config.margin_right
+    let plot_h = config.height - config.margin_top - config.margin_bottom
+
+    // ---- SVG header ----
+    print("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"")
+    print_int(config.width)
+    print("\" height=\"")
+    print_int(config.height)
+    print("\" viewBox=\"0 0 ")
+    print_int(config.width)
+    print(" ")
+    print_int(config.height)
+    println("\">")
+
+    // Background
+    print("<rect width=\"")
+    print_int(config.width)
+    print("\" height=\"")
+    print_int(config.height)
+    print("\" fill=\"")
+    print(config.bg_color)
+    println("\"/>")
+
+    // ---- Plot area clip group ----
+    print("<g transform=\"translate(")
+    print_int(config.margin_left)
+    print(",")
+    print_int(config.margin_top)
+    println(")\">")
+
+    // ---- Grid lines ----
+    if config.show_grid {
+        svg_emit_grid(plot_w, plot_h, x_min, x_max, y_min, y_max)
+    }
+
+    // ---- Axes ----
+    svg_emit_axes(plot_w, plot_h, x_min, x_max, y_min, y_max)
+
+    // ---- Data series ----
+    var si: i64 = 0
+    while si < n_series {
+        svg_emit_polyline(
+            &series[si as usize],
+            plot_w, plot_h,
+            x_min, x_max, y_min, y_max,
+        )
+        si = si + 1
+    }
+
+    println("</g>")
+
+    // ---- Title ----
+    if config.title.len() > 0 {
+        print("<text x=\"")
+        print_int(config.width / 2)
+        print("\" y=\"")
+        print_int(config.margin_top / 2 + 5)
+        print("\" text-anchor=\"middle\" font-family=\"sans-serif\" font-weight=\"bold\" font-size=\"")
+        print_int(config.font_size + 2)
+        print("\">")
+        print(config.title)
+        println("</text>")
+    }
+
+    // ---- X-axis label ----
+    if config.x_label.len() > 0 {
+        print("<text x=\"")
+        print_int(config.width / 2)
+        print("\" y=\"")
+        print_int(config.height - 10)
+        print("\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"")
+        print_int(config.font_size)
+        print("\">")
+        print(config.x_label)
+        println("</text>")
+    }
+
+    // ---- Y-axis label (rotated) ----
+    if config.y_label.len() > 0 {
+        print("<text x=\"15\" y=\"")
+        print_int(config.height / 2)
+        print("\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"")
+        print_int(config.font_size)
+        print("\" transform=\"rotate(-90,15,")
+        print_int(config.height / 2)
+        print(")\">")
+        print(config.y_label)
+        println("</text>")
+    }
+
+    // ---- Legend ----
+    if config.show_legend && n_series > 1 {
+        svg_emit_legend(config, series, n_series)
+    }
+
+    println("</svg>")
+}
+
+// ============================================================================
+// SVG COMPONENT EMITTERS
+// ============================================================================
+
+fn svg_emit_grid(
+    plot_w: i64, plot_h: i64,
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+) with IO, Mut, Div, Panic {
+    // Horizontal grid lines (5 divisions)
+    var i: i64 = 0
+    while i <= 5 {
+        let y_px = (i * plot_h) / 5
+        print("<line x1=\"0\" y1=\"")
+        print_int(y_px)
+        print("\" x2=\"")
+        print_int(plot_w)
+        print("\" y2=\"")
+        print_int(y_px)
+        println("\" stroke=\"#e0e0e0\" stroke-width=\"1\"/>")
+        i = i + 1
+    }
+
+    // Vertical grid lines (5 divisions)
+    i = 0
+    while i <= 5 {
+        let x_px = (i * plot_w) / 5
+        print("<line x1=\"")
+        print_int(x_px)
+        print("\" y1=\"0\" x2=\"")
+        print_int(x_px)
+        print("\" y2=\"")
+        print_int(plot_h)
+        println("\" stroke=\"#e0e0e0\" stroke-width=\"1\"/>")
+        i = i + 1
+    }
+}
+
+fn svg_emit_axes(
+    plot_w: i64, plot_h: i64,
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+) with IO, Mut, Div, Panic {
+    // X-axis (bottom)
+    print("<line x1=\"0\" y1=\"")
+    print_int(plot_h)
+    print("\" x2=\"")
+    print_int(plot_w)
+    print("\" y2=\"")
+    print_int(plot_h)
+    println("\" stroke=\"#333\" stroke-width=\"1.5\"/>")
+
+    // Y-axis (left)
+    print("<line x1=\"0\" y1=\"0\" x2=\"0\" y2=\"")
+    print_int(plot_h)
+    println("\" stroke=\"#333\" stroke-width=\"1.5\"/>")
+
+    // X-axis tick labels
+    var i: i64 = 0
+    while i <= 5 {
+        let x_px = (i * plot_w) / 5
+        let x_val = x_min + (x_max - x_min) * i as f64 / 5.0
+
+        // Tick mark
+        print("<line x1=\"")
+        print_int(x_px)
+        print("\" y1=\"")
+        print_int(plot_h)
+        print("\" x2=\"")
+        print_int(x_px)
+        print("\" y2=\"")
+        print_int(plot_h + 6)
+        println("\" stroke=\"#333\" stroke-width=\"1\"/>")
+
+        // Label
+        print("<text x=\"")
+        print_int(x_px)
+        print("\" y=\"")
+        print_int(plot_h + 20)
+        print("\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"11\">")
+        svg_print_f64(x_val, 1)
+        println("</text>")
+
+        i = i + 1
+    }
+
+    // Y-axis tick labels
+    i = 0
+    while i <= 5 {
+        let y_px = plot_h - (i * plot_h) / 5
+        let y_val = y_min + (y_max - y_min) * i as f64 / 5.0
+
+        // Tick mark
+        print("<line x1=\"-6\" y1=\"")
+        print_int(y_px)
+        print("\" x2=\"0\" y2=\"")
+        print_int(y_px)
+        println("\" stroke=\"#333\" stroke-width=\"1\"/>")
+
+        // Label
+        print("<text x=\"-10\" y=\"")
+        print_int(y_px + 4)
+        print("\" text-anchor=\"end\" font-family=\"sans-serif\" font-size=\"11\">")
+        svg_print_f64(y_val, 1)
+        println("</text>")
+
+        i = i + 1
+    }
+}
+
+fn svg_emit_polyline(
+    s: &SvgSeries,
+    plot_w: i64, plot_h: i64,
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+) with IO, Mut, Div, Panic {
+    if s.n <= 0 { return }
+
+    let x_range = x_max - x_min
+    let y_range = y_max - y_min
+
+    print("<polyline fill=\"none\" stroke=\"")
+    print(s.color)
+    print("\" stroke-width=\"")
+    print_int(s.stroke_width)
+    print("\" stroke-linejoin=\"round\" stroke-linecap=\"round\" points=\"")
+
+    var i: i64 = 0
+    while i < s.n {
+        let px = if x_range > 0.0 {
+            ((s.x[i as usize] - x_min) / x_range) * plot_w as f64
+        } else {
+            plot_w as f64 / 2.0
+        }
+        let py = if y_range > 0.0 {
+            plot_h as f64 - ((s.y[i as usize] - y_min) / y_range) * plot_h as f64
+        } else {
+            plot_h as f64 / 2.0
+        }
+
+        svg_print_f64(px, 1)
+        print(",")
+        svg_print_f64(py, 1)
+
+        if i < s.n - 1 {
+            print(" ")
+        }
+
+        i = i + 1
+    }
+    println("\"/>")
+}
+
+fn svg_emit_legend(
+    config: &SvgPlotConfig,
+    series: &[SvgSeries],
+    n_series: i64,
+) with IO, Mut, Div, Panic {
+    let legend_x = config.margin_left + 10
+    let legend_y = config.margin_top + 10
+    let row_h: i64 = 20
+
+    // Legend background
+    print("<rect x=\"")
+    print_int(legend_x)
+    print("\" y=\"")
+    print_int(legend_y)
+    print("\" width=\"120\" height=\"")
+    print_int(n_series * row_h + 10)
+    println("\" fill=\"white\" fill-opacity=\"0.85\" stroke=\"#ccc\" stroke-width=\"1\" rx=\"3\"/>")
+
+    var si: i64 = 0
+    while si < n_series {
+        let ly = legend_y + 8 + si * row_h
+
+        // Color swatch line
+        print("<line x1=\"")
+        print_int(legend_x + 8)
+        print("\" y1=\"")
+        print_int(ly + 7)
+        print("\" x2=\"")
+        print_int(legend_x + 28)
+        print("\" y2=\"")
+        print_int(ly + 7)
+        print("\" stroke=\"")
+        print(series[si as usize].color)
+        println("\" stroke-width=\"2\"/>")
+
+        // Label text
+        print("<text x=\"")
+        print_int(legend_x + 34)
+        print("\" y=\"")
+        print_int(ly + 11)
+        print("\" font-family=\"sans-serif\" font-size=\"11\">")
+        print(series[si as usize].label)
+        println("</text>")
+
+        si = si + 1
+    }
+}
+
+// ============================================================================
+// CONVENIENCE: SINGLE-SERIES SVG LINE PLOT
+// ============================================================================
+
+/// Quick single-series line plot. Prints SVG to stdout.
+fn svg_plot_single(
+    x: &[f64],
+    y: &[f64],
+    n: i64,
+    title: string,
+    color: string,
+) with IO, Mut, Div, Panic {
+    var config = svg_config_new(title, 600, 400)
+    config.show_legend = false
+
+    var s = svg_series_new("data", color)
+    var i: i64 = 0
+    while i < n && i < 1024 {
+        s.x[i as usize] = x[i as usize]
+        s.y[i as usize] = y[i as usize]
+        i = i + 1
+    }
+    s.n = if n < 1024 { n } else { 1024 }
+
+    var series_arr: [SvgSeries; 1] = [s]
+    svg_line_plot(&config, &series_arr, 1)
+}

@@ -1,0 +1,656 @@
+// stdlib/epistemic/ode_generic.sio
+//
+// Generic Epistemic ODE Solver — User-Defined RHS via fn-type Parameters
+//
+// Architecture:
+//   - Fixed arrays throughout (max 64 state dimensions)
+//   - User passes RHS function as fn-type parameter (no dispatch table)
+//   - GUM uncertainty propagation via numerical Jacobian (delta method)
+//   - RK4 fixed-step + adaptive RK45 (Dormand-Prince)
+//
+// Usage:
+//   fn my_rhs(t: f64, y: &EState, p: &ODEParams, out: &!EState) with Mut, Div, Panic {
+//       out.values[0] = -p.params[0] * y.values[0]
+//       out.n = 1
+//   }
+//
+//   let sol = solve_generic(my_rhs, sys, y0, params, 0.0, 10.0, opts)
+//
+// Reference: GUM (JCGM 100:2008) §5.1.2 — law of propagation of uncertainty
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn og_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn og_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn og_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn og_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+// ============================================================================
+// State Vector: value + variance for each component
+// Max 64 components (14 typical for PBPK)
+// ============================================================================
+
+struct EState {
+    values: [f64; 64],
+    variances: [f64; 64],
+    n: i64,
+}
+
+fn estate_new(n: i64) -> EState {
+    EState { values: [0.0; 64], variances: [0.0; 64], n: n }
+}
+
+fn estate_set(s: &!EState, idx: i64, val: f64, var_: f64) {
+    if idx >= 0 && idx < 64 { s.values[idx] = val; s.variances[idx] = var_ }
+}
+
+fn estate_get_value(s: &EState, idx: i64) -> f64 {
+    if idx >= 0 && idx < 64 { s.values[idx] } else { 0.0 }
+}
+
+fn estate_get_variance(s: &EState, idx: i64) -> f64 {
+    if idx >= 0 && idx < 64 { s.variances[idx] } else { 0.0 }
+}
+
+fn estate_std(s: &EState, idx: i64) -> f64 with Mut {
+    og_sqrt(estate_get_variance(s, idx))
+}
+
+fn estate_copy(dst: &!EState, src: &EState) with Mut {
+    var i = 0
+    while i < src.n {
+        if i < 64 { dst.values[i] = src.values[i]; dst.variances[i] = src.variances[i] }
+        i = i + 1
+    }
+    dst.n = src.n
+}
+
+fn estate_axpy(dst: &!EState, a: &EState, scale: f64, b: &EState) with Mut {
+    let n = a.n
+    var i = 0
+    while i < n {
+        if i < 64 { dst.values[i] = a.values[i] + scale * b.values[i] }
+        i = i + 1
+    }
+    dst.n = n
+}
+
+// ============================================================================
+// ODE Parameters: up to 64 parameters with uncertainty
+// ============================================================================
+
+struct ODEParams {
+    params: [f64; 64],
+    param_variances: [f64; 64],
+    n_params: i64,
+}
+
+fn ode_params_new() -> ODEParams {
+    ODEParams { params: [0.0; 64], param_variances: [0.0; 64], n_params: 0 }
+}
+
+fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) {
+    if idx >= 0 && idx < 64 {
+        p.params[idx] = val
+        p.param_variances[idx] = var_
+        if idx >= p.n_params { p.n_params = idx + 1 }
+    }
+}
+
+fn ode_params_get(p: &ODEParams, idx: i64) -> f64 {
+    if idx >= 0 && idx < 64 { p.params[idx] } else { 0.0 }
+}
+
+// ============================================================================
+// ODE System metadata
+// ============================================================================
+
+struct ODESystem {
+    system_id: i64,
+    n_dims: i64,
+}
+
+fn ode_system(id: i64, n_dims: i64) -> ODESystem {
+    ODESystem { system_id: id, n_dims: n_dims }
+}
+
+// ============================================================================
+// Solver Options
+// ============================================================================
+
+struct SolverOptions {
+    dt: f64,
+    rtol: f64,
+    atol: f64,
+    max_steps: i64,
+    adaptive: bool,
+}
+
+fn solver_opts_default() -> SolverOptions {
+    SolverOptions { dt: 0.01, rtol: 1.0e-6, atol: 1.0e-8, max_steps: 10000, adaptive: true }
+}
+
+fn solver_opts_fixed(dt: f64, max_steps: i64) -> SolverOptions {
+    SolverOptions { dt: dt, rtol: 1.0e-6, atol: 1.0e-8, max_steps: max_steps, adaptive: false }
+}
+
+fn solver_opts_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -> SolverOptions {
+    SolverOptions { dt: dt_init, rtol: rtol, atol: atol, max_steps: max_steps, adaptive: true }
+}
+
+// ============================================================================
+// ODE Solution: trajectory storage (max 1024 time points, 64 dimensions)
+// ============================================================================
+
+struct ODESolution {
+    times: [f64; 1024],
+    values: [f64; 4096],      // values[step * 64 + dim]
+    variances: [f64; 4096],   // variances[step * 64 + dim]
+    n_steps: i64,
+    n_dims: i64,
+    n_rhs_evals: i64,
+    n_rejected: i64,
+}
+
+fn solution_new(n_dims: i64) -> ODESolution {
+    ODESolution {
+        times: [0.0; 1024], values: [0.0; 4096], variances: [0.0; 4096],
+        n_steps: 0, n_dims: n_dims, n_rhs_evals: 0, n_rejected: 0,
+    }
+}
+
+fn solution_record(sol: &!ODESolution, t: f64, state: &EState) with Mut {
+    if sol.n_steps >= 1024 { return }
+    let step = sol.n_steps
+    sol.times[step] = t
+    var i = 0
+    while i < sol.n_dims {
+        if i < 64 {
+            sol.values[step * 64 + i] = state.values[i]
+            sol.variances[step * 64 + i] = state.variances[i]
+        }
+        i = i + 1
+    }
+    sol.n_steps = sol.n_steps + 1
+}
+
+fn solution_get_value(sol: &ODESolution, step: i64, dim: i64) -> f64 {
+    sol.values[step * 64 + dim]
+}
+
+fn solution_get_variance(sol: &ODESolution, step: i64, dim: i64) -> f64 {
+    sol.variances[step * 64 + dim]
+}
+
+fn solution_get_std(sol: &ODESolution, step: i64, dim: i64) -> f64 with Mut {
+    og_sqrt(sol.variances[step * 64 + dim])
+}
+
+// ============================================================================
+// RHS Type: fn(f64, &EState, &ODEParams, &!EState) with Mut, Div, Panic
+//
+// Users define their RHS with this exact signature and pass it to the solver.
+// ============================================================================
+
+// ============================================================================
+// GUM Variance Propagation via Numerical Jacobian
+//
+// After an RK4 step y_{n+1} = Phi(y_n, p, dt), propagate variance:
+//   Var(y_{n+1,i}) = sum_j (dPhi_i/dy_j)^2 * Var(y_{n,j})
+//                  + sum_k (dPhi_i/dp_k)^2 * Var(p_k)
+//
+// JCGM 100:2008 eq. 10
+// ============================================================================
+
+struct Jacobian {
+    data: [f64; 4096],
+    n: i64,
+}
+
+fn jacobian_new(n: i64) -> Jacobian {
+    Jacobian { data: [0.0; 4096], n: n }
+}
+
+fn compute_jacobian_state_generic(
+    rhs: fn(f64, &EState, &ODEParams, &!EState) -> (),
+    t: f64, y: &EState, p: &ODEParams, n: i64,
+    jac: &!Jacobian, n_evals: &!i64
+) with Mut, Div, Panic {
+    let eps = 1.0e-7
+    var f_plus = estate_new(n)
+    var f_minus = estate_new(n)
+    var y_pert = estate_new(n)
+
+    var j = 0
+    while j < n {
+        if j < 64 {
+            var k = 0
+            while k < n {
+                if k < 64 { y_pert.values[k] = y.values[k] }
+                k = k + 1
+            }
+            y_pert.n = n
+            let h = og_max(eps * og_abs(y.values[j]), eps)
+            y_pert.values[j] = y.values[j] + h
+            rhs(t, &y_pert, p, &!f_plus)
+            y_pert.values[j] = y.values[j] - h
+            rhs(t, &y_pert, p, &!f_minus)
+            let inv_2h = 1.0 / (2.0 * h)
+            var i = 0
+            while i < n {
+                if i < 64 {
+                    jac.data[i * 64 + j] = (f_plus.values[i] - f_minus.values[i]) * inv_2h
+                }
+                i = i + 1
+            }
+            *n_evals = *n_evals + 2
+        }
+        j = j + 1
+    }
+    jac.n = n
+}
+
+fn compute_jacobian_params_generic(
+    rhs: fn(f64, &EState, &ODEParams, &!EState) -> (),
+    t: f64, y: &EState, p: &ODEParams, n: i64,
+    jac_p: &!Jacobian, n_evals: &!i64
+) with Mut, Div, Panic {
+    let np = p.n_params
+    let eps = 1.0e-7
+    var f_plus = estate_new(n)
+    var f_minus = estate_new(n)
+    var p_pert = ode_params_new()
+
+    var k = 0
+    while k < np {
+        if k < 64 {
+            var m = 0
+            while m < np {
+                if m < 64 {
+                    p_pert.params[m] = p.params[m]
+                    p_pert.param_variances[m] = p.param_variances[m]
+                }
+                m = m + 1
+            }
+            p_pert.n_params = np
+            let h = og_max(eps * og_abs(p.params[k]), eps)
+            p_pert.params[k] = p.params[k] + h
+            rhs(t, y, &p_pert, &!f_plus)
+            p_pert.params[k] = p.params[k] - h
+            rhs(t, y, &p_pert, &!f_minus)
+            let inv_2h = 1.0 / (2.0 * h)
+            var i = 0
+            while i < n {
+                if i < 64 {
+                    jac_p.data[i * 64 + k] = (f_plus.values[i] - f_minus.values[i]) * inv_2h
+                }
+                i = i + 1
+            }
+            *n_evals = *n_evals + 2
+        }
+        k = k + 1
+    }
+    jac_p.n = n
+}
+
+fn propagate_variance_generic(
+    rhs: fn(f64, &EState, &ODEParams, &!EState) -> (),
+    t: f64, state: &!EState, p: &ODEParams, dt: f64, n_evals: &!i64
+) with Mut, Div, Panic {
+    let n = state.n
+    var jac = jacobian_new(n)
+    var jac_p = jacobian_new(n)
+    compute_jacobian_state_generic(rhs, t, state, p, n, &!jac, n_evals)
+    compute_jacobian_params_generic(rhs, t, state, p, n, &!jac_p, n_evals)
+
+    var new_var: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < n {
+        if i < 64 {
+            var vi = 0.0
+            var j = 0
+            while j < n {
+                if j < 64 {
+                    let s = if i == j { 1.0 + dt * jac.data[i * 64 + j] } else { dt * jac.data[i * 64 + j] }
+                    vi = vi + s * s * state.variances[j]
+                }
+                j = j + 1
+            }
+            var k = 0
+            while k < p.n_params {
+                if k < 64 {
+                    let sp = dt * jac_p.data[i * 64 + k]
+                    vi = vi + sp * sp * p.param_variances[k]
+                }
+                k = k + 1
+            }
+            new_var[i] = og_max(vi, 0.0)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        if i < 64 { state.variances[i] = new_var[i] }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// RK4 Step (with GUM variance propagation)
+// ============================================================================
+
+fn rk4_step_generic(
+    rhs: fn(f64, &EState, &ODEParams, &!EState) -> (),
+    t: f64, state: &!EState, p: &ODEParams, dt: f64,
+    propagate_gum: bool, n_evals: &!i64
+) with Mut, Div, Panic {
+    let n = state.n
+    var k1 = estate_new(n); var k2 = estate_new(n)
+    var k3 = estate_new(n); var k4 = estate_new(n)
+    var tmp = estate_new(n)
+
+    rhs(t, state, p, &!k1); *n_evals = *n_evals + 1
+    estate_axpy(&!tmp, state, 0.5 * dt, &k1)
+    rhs(t + 0.5 * dt, &tmp, p, &!k2); *n_evals = *n_evals + 1
+    estate_axpy(&!tmp, state, 0.5 * dt, &k2)
+    rhs(t + 0.5 * dt, &tmp, p, &!k3); *n_evals = *n_evals + 1
+    estate_axpy(&!tmp, state, dt, &k3)
+    rhs(t + dt, &tmp, p, &!k4); *n_evals = *n_evals + 1
+
+    var i = 0
+    while i < n {
+        if i < 64 {
+            let dy = (k1.values[i] + 2.0 * k2.values[i] + 2.0 * k3.values[i] + k4.values[i]) / 6.0
+            state.values[i] = state.values[i] + dt * dy
+        }
+        i = i + 1
+    }
+
+    if propagate_gum {
+        propagate_variance_generic(rhs, t, state, p, dt, n_evals)
+    }
+}
+
+// ============================================================================
+// RK45 Step (Dormand-Prince, adaptive)
+// ============================================================================
+
+fn rk45_step_generic(
+    rhs: fn(f64, &EState, &ODEParams, &!EState) -> (),
+    t: f64, state: &!EState, p: &ODEParams, dt: f64,
+    err_out: &!f64, n_evals: &!i64
+) with Mut, Div, Panic {
+    let n = state.n
+    var k1 = estate_new(n); var k2 = estate_new(n); var k3 = estate_new(n)
+    var k4 = estate_new(n); var k5 = estate_new(n); var k6 = estate_new(n)
+    var tmp = estate_new(n)
+
+    rhs(t, state, p, &!k1); *n_evals = *n_evals + 1
+    estate_axpy(&!tmp, state, dt * 0.2, &k1)
+    rhs(t + 0.2 * dt, &tmp, p, &!k2); *n_evals = *n_evals + 1
+
+    var i = 0
+    while i < n {
+        if i < 64 { tmp.values[i] = state.values[i] + dt * (0.075 * k1.values[i] + 0.225 * k2.values[i]) }
+        i = i + 1
+    }
+    rhs(t + 0.3 * dt, &tmp, p, &!k3); *n_evals = *n_evals + 1
+
+    i = 0
+    while i < n {
+        if i < 64 {
+            tmp.values[i] = state.values[i] + dt * (0.977777777777778 * k1.values[i]
+                - 3.73333333333333 * k2.values[i] + 3.55555555555556 * k3.values[i])
+        }
+        i = i + 1
+    }
+    rhs(t + 0.8 * dt, &tmp, p, &!k4); *n_evals = *n_evals + 1
+
+    i = 0
+    while i < n {
+        if i < 64 {
+            tmp.values[i] = state.values[i] + dt * (2.95259868922420 * k1.values[i]
+                - 11.5959564945227 * k2.values[i] + 9.82289285169509 * k3.values[i]
+                - 0.290809327846365 * k4.values[i])
+        }
+        i = i + 1
+    }
+    rhs(t + 0.888888888888889 * dt, &tmp, p, &!k5); *n_evals = *n_evals + 1
+
+    i = 0
+    while i < n {
+        if i < 64 {
+            tmp.values[i] = state.values[i] + dt * (2.84627525252526 * k1.values[i]
+                - 10.7575757575758 * k2.values[i] + 8.90642271774548 * k3.values[i]
+                + 0.278001721790970 * k4.values[i] - 0.273076923076923 * k5.values[i])
+        }
+        i = i + 1
+    }
+    rhs(t + dt, &tmp, p, &!k6); *n_evals = *n_evals + 1
+
+    // 5th-order solution
+    i = 0
+    while i < n {
+        if i < 64 {
+            state.values[i] = state.values[i] + dt * (
+                0.0917194570135880 * k1.values[i]
+                + 0.449236298109796 * k3.values[i]
+                + 0.651489067543612 * k4.values[i]
+                - 0.322376179245283 * k5.values[i]
+                + 0.130888888888889 * k6.values[i])
+        }
+        i = i + 1
+    }
+
+    // Error estimate
+    var max_err = 0.0
+    i = 0
+    while i < n {
+        if i < 64 {
+            let ei = dt * og_abs(
+                0.00277777777777778 * k1.values[i]
+                - 0.0299415204678363 * k3.values[i]
+                - 0.0291998936510851 * k4.values[i]
+                + 0.02 * k5.values[i]
+                + 0.0363636363636364 * k6.values[i])
+            let sci = og_abs(state.values[i]) + 1.0e-10
+            let rel = ei / sci
+            if rel > max_err { max_err = rel }
+        }
+        i = i + 1
+    }
+    *err_out = max_err
+}
+
+fn og_pow_fifth(ratio: f64) -> f64 with Mut {
+    if ratio <= 0.0 { return 0.2 }
+    var x = ratio
+    var iter = 0
+    while iter < 20 {
+        let x2 = x * x; let x4 = x2 * x2; let x5 = x4 * x
+        let fp = 5.0 * x4
+        if fp > 1.0e-30 { x = x - (x5 - ratio) / fp }
+        if x < 1.0e-10 { x = 1.0e-10 }
+        iter = iter + 1
+    }
+    x
+}
+
+// ============================================================================
+// MAIN ENTRY POINTS
+// ============================================================================
+
+/// Solve with fixed-step RK4 and GUM variance propagation.
+///
+/// rhs: User-defined RHS function
+/// sys: System metadata (system_id, n_dims)
+/// y0:  Initial state (values + initial variances)
+/// p:   Parameters (values + parameter variances for GUM)
+/// t_start, t_end: Integration interval
+/// opts: Solver options (dt, max_steps)
+fn solve_generic(
+    rhs: fn(f64, &EState, &ODEParams, &!EState) -> (),
+    sys: ODESystem,
+    y0: EState,
+    p: ODEParams,
+    t_start: f64,
+    t_end: f64,
+    opts: SolverOptions
+) -> ODESolution with Mut, Div, Panic {
+    var state = y0
+    state.n = sys.n_dims
+    var sol = solution_new(sys.n_dims)
+    var t = t_start
+    var step = 0
+    var n_evals: i64 = 0
+    solution_record(&!sol, t, &state)
+
+    while t < t_end && step < opts.max_steps {
+        let dt = og_min(opts.dt, t_end - t)
+        if dt <= 0.0 { t = t_end }
+        else {
+            rk4_step_generic(rhs, t, &!state, &p, dt, true, &!n_evals)
+            t = t + dt
+            step = step + 1
+            solution_record(&!sol, t, &state)
+        }
+    }
+    sol.n_rhs_evals = n_evals
+    sol
+}
+
+/// Solve with fixed-step RK4, NO variance propagation (deterministic only).
+fn solve_generic_det(
+    rhs: fn(f64, &EState, &ODEParams, &!EState) -> (),
+    sys: ODESystem,
+    y0: EState,
+    p: ODEParams,
+    t_start: f64,
+    t_end: f64,
+    opts: SolverOptions
+) -> ODESolution with Mut, Div, Panic {
+    var state = y0
+    state.n = sys.n_dims
+    var sol = solution_new(sys.n_dims)
+    var t = t_start
+    var step = 0
+    var n_evals: i64 = 0
+    solution_record(&!sol, t, &state)
+
+    while t < t_end && step < opts.max_steps {
+        let dt = og_min(opts.dt, t_end - t)
+        if dt <= 0.0 { t = t_end }
+        else {
+            rk4_step_generic(rhs, t, &!state, &p, dt, false, &!n_evals)
+            t = t + dt
+            step = step + 1
+            solution_record(&!sol, t, &state)
+        }
+    }
+    sol.n_rhs_evals = n_evals
+    sol
+}
+
+/// Solve with adaptive RK45 (Dormand-Prince) and GUM variance propagation.
+fn solve_generic_adaptive(
+    rhs: fn(f64, &EState, &ODEParams, &!EState) -> (),
+    sys: ODESystem,
+    y0: EState,
+    p: ODEParams,
+    t_start: f64,
+    t_end: f64,
+    opts: SolverOptions
+) -> ODESolution with Mut, Div, Panic {
+    var state = y0
+    state.n = sys.n_dims
+    var sol = solution_new(sys.n_dims)
+    var t = t_start
+    var dt = opts.dt
+    var step = 0
+    var n_evals: i64 = 0
+    var n_rejected: i64 = 0
+    solution_record(&!sol, t, &state)
+
+    while t < t_end && step < opts.max_steps {
+        dt = og_min(dt, t_end - t)
+        if dt <= 1.0e-15 { t = t_end }
+        else {
+            var saved = estate_new(sys.n_dims)
+            estate_copy(&!saved, &state)
+            var err = 0.0
+            rk45_step_generic(rhs, t, &!state, &p, dt, &!err, &!n_evals)
+
+            if err <= opts.rtol || dt <= 1.0e-12 {
+                // Accept — propagate GUM variance
+                propagate_variance_generic(rhs, t, &!state, &p, dt, &!n_evals)
+                t = t + dt
+                step = step + 1
+                solution_record(&!sol, t, &state)
+                // Grow step
+                if err > 1.0e-20 {
+                    let factor = og_min(5.0, 0.9 * og_pow_fifth(opts.rtol / err))
+                    dt = dt * og_max(0.2, factor)
+                } else { dt = dt * 5.0 }
+            } else {
+                // Reject — restore and shrink
+                estate_copy(&!state, &saved)
+                let factor = og_max(0.2, 0.9 * og_pow_fifth(opts.rtol / err))
+                dt = dt * factor
+                n_rejected = n_rejected + 1
+            }
+        }
+    }
+    sol.n_rhs_evals = n_evals
+    sol.n_rejected = n_rejected
+    sol
+}
+
+// ============================================================================
+// Uncertainty Budget from Solution
+// ============================================================================
+
+struct DimBudget {
+    std_initial: [f64; 64],
+    std_final: [f64; 64],
+    growth_ratio: [f64; 64],
+    n_dims: i64,
+    max_growth_dim: i64,
+    max_growth_ratio: f64,
+}
+
+fn compute_dim_budget(sol: &ODESolution) -> DimBudget with Mut {
+    var budget = DimBudget {
+        std_initial: [0.0; 64], std_final: [0.0; 64], growth_ratio: [0.0; 64],
+        n_dims: sol.n_dims, max_growth_dim: 0, max_growth_ratio: 0.0,
+    }
+    if sol.n_steps < 1 { return budget }
+    let last = sol.n_steps - 1
+    var i = 0
+    while i < sol.n_dims {
+        if i < 64 {
+            let v0 = solution_get_variance(sol, 0, i)
+            let vf = solution_get_variance(sol, last, i)
+            let s0 = og_sqrt(v0)
+            let sf = og_sqrt(vf)
+            budget.std_initial[i] = s0
+            budget.std_final[i] = sf
+            let ratio = if s0 > 1.0e-20 { sf / s0 } else { if sf > 1.0e-20 { 1.0e10 } else { 1.0 } }
+            budget.growth_ratio[i] = ratio
+            if ratio > budget.max_growth_ratio {
+                budget.max_growth_ratio = ratio
+                budget.max_growth_dim = i
+            }
+        }
+        i = i + 1
+    }
+    budget
+}
