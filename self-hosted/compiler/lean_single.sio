@@ -15,6 +15,8 @@ var IMP_LOADED: [i64; 64] = [0; 64]
 var IMP_COUNT: i64 = 0
 var BASE_DIR: [i8; 512] = [0; 512]
 var BASE_DIR_LEN: i64 = 0
+var CLI_SHOW_AST: i64 = 0
+var CLI_SHOW_TYPES: i64 = 0
 
 // Token parallel arrays (kind, start, end, int_value)
 var TK: [i64; 131072] = [0; 131072]
@@ -652,6 +654,17 @@ fn src_match(p: i64, l: i64, kw: string) -> bool with Panic {
     return true
 }
 
+fn cli_arg_eq(raw: string, kw: string) -> bool with Panic {
+    let l = str_len(kw)
+    if str_len(raw) != l { return false }
+    var i: i64 = 0
+    while i < l {
+        if str_char_at(raw, i) != str_char_at(kw, i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
 fn name_eq(s1: i64, e1: i64, s2: i64, e2: i64) -> bool with Panic {
     let l = e1 - s1
     if l != e2 - s2 { return false }
@@ -762,7 +775,7 @@ fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic {
     return 0
 }
 
-fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool {
+fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div {
     if k1 == 0 || k2 == 0 { return true }
     if k1 != k2 { return false }
     if k1 == 6 || k1 == 7 { return h1 == h2 }
@@ -797,11 +810,180 @@ fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
 }
 
 fn tc_undefined_var(tok: i64) -> i64 with IO, Mut, Panic {
-    // Warning only — don't abort compilation. Codegen emits 0 for unknown vars.
-    print("warning: unknown identifier at line ")
+    tc_error(tok, "unknown identifier")
+}
+
+fn tc_duplicate_fn(tok: i64) -> i64 with IO, Mut, Panic {
+    tc_error(tok, "duplicate function name")
+}
+
+fn print_effect_mask(mask: i64) with IO {
+    if mask == 0 {
+        print("Pure")
+        return
+    }
+    var first: i64 = 1
+    if (mask & 1) != 0 {
+        if first == 0 { print(",") }
+        print("IO")
+        first = 0
+    }
+    if (mask & 2) != 0 {
+        if first == 0 { print(",") }
+        print("Mut")
+        first = 0
+    }
+    if (mask & 4) != 0 {
+        if first == 0 { print(",") }
+        print("Panic")
+        first = 0
+    }
+    if (mask & 8) != 0 {
+        if first == 0 { print(",") }
+        print("Div")
+        first = 0
+    }
+    if (mask & 16) != 0 {
+        if first == 0 { print(",") }
+        print("Alloc")
+    }
+}
+
+fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
+    TYPECHECK_FAILED = 1
+    print("type error line ")
     print_int(TL[tok as usize])
-    print("\n")
+    print(": effect not declared in function signature (needs ")
+    print_effect_mask(callee_eff & ~caller_eff)
+    print(", caller has ")
+    print_effect_mask(caller_eff)
+    print(")\n")
     return 0
+}
+
+fn print_array_elem_type(elem_ty: i64, esiz: i64) with IO, Mut, Panic, Div {
+    if elem_ty == 1 {
+        if esiz == 1 {
+            print("i8")
+        } else {
+            print("i64")
+        }
+        return
+    }
+    if elem_ty == 2 { print("f64"); return }
+    if elem_ty == 3 { print("string"); return }
+    if elem_ty == 4 { print("bool"); return }
+    if elem_ty == 5 { print("()"); return }
+    if elem_ty == 6 { print("struct"); return }
+    if elem_ty == 7 { print("enum"); return }
+    if elem_ty == 8 { print("array"); return }
+    if elem_ty == 9 { print("fn"); return }
+    print("?")
+}
+
+fn print_type_label(ty: i64, ty_hash: i64) with IO, Mut, Panic, Div {
+    if ty == 0 { print("?"); return }
+    if ty == 1 { print("i64"); return }
+    if ty == 2 { print("f64"); return }
+    if ty == 3 { print("string"); return }
+    if ty == 4 { print("bool"); return }
+    if ty == 5 { print("()"); return }
+    if ty == 6 {
+        print("struct")
+        return
+    }
+    if ty == 7 {
+        print("enum")
+        return
+    }
+    if ty == 8 {
+        print("[")
+        print_array_elem_type(arr_hash_elem_ty(ty_hash), arr_hash_esiz(ty_hash))
+        print("; ")
+        let alen = arr_hash_alen(ty_hash)
+        if alen == 0 {
+            print("?")
+        } else {
+            print_int(alen)
+        }
+        print("]")
+        return
+    }
+    if ty == 9 { print("fn"); return }
+    print("?")
+}
+
+fn dump_cli_ast_summary() with IO, Mut, Panic, Div {
+    print("AST summary:\n")
+    var si: i64 = 0
+    while si < ST_COUNT {
+        print("struct#")
+        print_int(si)
+        print("\n")
+        si = si + 1
+    }
+    var ei: i64 = 0
+    while ei < EN_COUNT {
+        print("enum#")
+        print_int(ei)
+        print("\n")
+        ei = ei + 1
+    }
+    var gi: i64 = 0
+    while gi < GL_COUNT {
+        print("global#")
+        print_int(gi)
+        if GL_TY[gi as usize] != 0 {
+            print(": ")
+            print_type_label(GL_TY[gi as usize], GL_TY_HASH[gi as usize])
+        }
+        print("\n")
+        gi = gi + 1
+    }
+    var fi: i64 = 0
+    while fi < FN_COUNT {
+        print("fn#")
+        print_int(fi)
+        print("(")
+        print_int(FN_ARITY[fi as usize])
+        print(" params)")
+        if FN_RET_TY[fi as usize] != 5 {
+            print(" -> ")
+            print_type_label(FN_RET_TY[fi as usize], FN_RET_HASH[fi as usize])
+        }
+        if FN_EFFECTS[fi as usize] != 0 {
+            print(" with ")
+            print_effect_mask(FN_EFFECTS[fi as usize])
+        }
+        print("\n")
+        fi = fi + 1
+    }
+}
+
+fn dump_cli_type_summary() with IO, Mut, Panic, Div {
+    print("Type summary:\n")
+    var gi: i64 = 0
+    while gi < GL_COUNT {
+        print("global#")
+        print_int(gi)
+        print(": ")
+        print_type_label(GL_TY[gi as usize], GL_TY_HASH[gi as usize])
+        print("\n")
+        gi = gi + 1
+    }
+    var fi: i64 = 0
+    while fi < FN_COUNT {
+        print("fn#")
+        print_int(fi)
+        print(": arity ")
+        print_int(FN_ARITY[fi as usize])
+        print(" -> ")
+        print_type_label(FN_RET_TY[fi as usize], FN_RET_HASH[fi as usize])
+        print(" with ")
+        print_effect_mask(FN_EFFECTS[fi as usize])
+        print("\n")
+        fi = fi + 1
+    }
 }
 
 fn tc_wrong_arity(tok: i64, expected: i64, got: i64) -> i64 with IO, Mut, Panic {
@@ -2730,15 +2912,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let callee_eff = FN_EFFECTS[fi as usize]
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
                 if (callee_eff & ~caller_eff) != 0 {
-                    print("warning: effect violation: fn#")
-                    print_int(fi)
-                    print("(eff=")
-                    print_int(callee_eff)
-                    print(") called from fn#")
-                    print_int(CURRENT_FN)
-                    print("(eff=")
-                    print_int(caller_eff)
-                    print(")\n")
+                    tc_effect_violation(call_tok, callee_eff, caller_eff)
                 }
                 emit_setup_direct_call_args_x86(argc)
                 emit_prepare_stack_call_args_x86(argc, 6)
@@ -5060,6 +5234,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
+            if fn_find(TS[p as usize], TE[p as usize]) >= 0 {
+                tc_duplicate_fn(p)
+            }
             FN_NS[FN_COUNT as usize] = TS[p as usize]
             FN_NE[FN_COUNT as usize] = TE[p as usize]
             FN_OFF[FN_COUNT as usize] = -1
@@ -5207,6 +5384,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         p = p + 1
     }
     if REF_TYPE_COUNT > 0 { print("types: "); print_int(REF_TYPE_COUNT); print(" aliases\n") }
+    if CLI_SHOW_AST != 0 { dump_cli_ast_summary() }
+    if CLI_SHOW_TYPES != 0 { dump_cli_type_summary() }
 
     // Pass 2: compile each function
     p = 0
@@ -6662,7 +6841,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
                 let callee_eff = FN_EFFECTS[fi as usize]
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
-                if (callee_eff & ~caller_eff) != 0 { print("warning: effect violation in ARM64\n") }
+                if (callee_eff & ~caller_eff) != 0 { tc_effect_violation(call_tok, callee_eff, caller_eff) }
                 if argc >= 8 { em32(0xF8410FE7) }
                 if argc >= 7 { em32(0xF8410FE6) }
                 if argc >= 6 { em32(0xF8410FE5) }
@@ -8341,7 +8520,10 @@ fn strip_extern_blocks() with Mut, Panic {
 
 fn main() -> i64 with IO, Mut, Panic, Div {
     let argc = arg_count()
-    if argc < 2 { print("Usage: mini_native <source.sio> <output> [--target x86_64-windows]\n"); return 1 }
+    if argc < 2 {
+        print("Usage: mini_native <source.sio> <output> [--show-ast] [--show-types] [--target x86_64-windows]\n")
+        return 1
+    }
     let src = get_arg(0)
     let out = get_arg(1)
     let src_len = str_len(src)
@@ -8365,16 +8547,44 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     }
     BASE_DIR[BASE_DIR_LEN as usize] = 0
 
-    // Parse optional --target flag
-    if argc >= 4 {
-        let flag = get_arg(2)
-        let targ = get_arg(3)
-        // Check if flag == "--target" and targ == "x86_64-windows"
-        if file_size(flag) == 0 && file_size(targ) == 0 {
-            // Can't use str_eq (not available in lean), use char comparison
+    CLI_SHOW_AST = 0
+    CLI_SHOW_TYPES = 0
+    var arg_i: i64 = 2
+    while arg_i < argc {
+        let flag = get_arg(arg_i)
+        if cli_arg_eq(flag, "--show-ast") {
+            CLI_SHOW_AST = 1
+        } else {
+            if cli_arg_eq(flag, "--show-types") {
+                CLI_SHOW_TYPES = 1
+            } else {
+                if cli_arg_eq(flag, "--target") && arg_i + 1 < argc {
+                    let targ = get_arg(arg_i + 1)
+                    if cli_arg_eq(targ, "x86_64-windows") {
+                        TARGET_OS = 3
+                        TARGET_ARCH = 0
+                    } else {
+                        if cli_arg_eq(targ, "x86_64-macos") {
+                            TARGET_OS = 2
+                            TARGET_ARCH = 0
+                        } else {
+                            if cli_arg_eq(targ, "aarch64-macos") {
+                                TARGET_OS = 2
+                                TARGET_ARCH = 1
+                            } else {
+                                if cli_arg_eq(targ, "aarch64-linux") {
+                                    TARGET_OS = 0
+                                    TARGET_ARCH = 1
+                                }
+                            }
+                        }
+                    }
+                    arg_i = arg_i + 1
+                }
+            }
         }
+        arg_i = arg_i + 1
     }
-    // Default target remains x86_64 Linux in the self-host path.
 
     let raw = read_file(src)
     let sz = file_size(src)
