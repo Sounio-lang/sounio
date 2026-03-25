@@ -7638,27 +7638,24 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
         let ret_si = MC_FN_RET_TYPE[fn_idx as usize]
         if ret_si >= 0 {
             let flat = MC_ST_FLAT_SIZE[ret_si as usize]
-            // rax = callee struct pointer; read ALL fields first, then store
-            we(0x48); we(0x89); we(0xC2)  // mov rdx, rax (save src ptr)
-            // Phase 1: read all fields from callee ptr into stack (push)
-            var ci: i64 = flat - 1
-            while ci >= 0 {
+            // Callee returned struct pointer in rax — but callee frame is dead.
+            // Fix: allocate caller-owned slots, then COPY using memcpy-style
+            // (the callee data is just above rsp in the red zone — safe for 128 bytes)
+            let dst_base = MC_NEXT_SLOT
+            MC_NEXT_SLOT = MC_NEXT_SLOT + flat
+            // rax = src pointer from callee (dead frame, but data still in red zone)
+            // Save src pointer to r10 (caller-save, won't be clobbered)
+            we(0x49); we(0x89); we(0xC2)  // mov r10, rax
+            // Copy each field: read from [r10 - ci*8], store to caller slot
+            var ci: i64 = 0
+            while ci < flat {
                 if ci == 0 {
-                    we(0x48); we(0x8B); we(0x02)  // mov rax, [rdx]
+                    we(0x49); we(0x8B); we(0x02)  // mov rax, [r10]
                 } else {
-                    we(0x48); we(0x8B); we(0x82)  // mov rax, [rdx + disp32]
+                    we(0x49); we(0x8B); we(0x82)  // mov rax, [r10 + disp32]
                     let d = 0 - (ci * 8)
                     we(d & 0xFF); we((d >> 8) & 0xFF); we((d >> 16) & 0xFF); we((d >> 24) & 0xFF)
                 }
-                we(0x50)  // push rax
-                ci = ci - 1
-            }
-            // Phase 2: pop into caller-owned slots (contragradiant order)
-            let dst_base = MC_NEXT_SLOT
-            MC_NEXT_SLOT = MC_NEXT_SLOT + flat
-            ci = 0
-            while ci < flat {
-                we(0x58)  // pop rax
                 mc_emit_store_rax(dst_base + flat - 1 - ci)
                 ci = ci + 1
             }
