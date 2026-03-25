@@ -66,7 +66,7 @@ No build needed—pure Sounio source.
 ### Run Full Pipeline
 
 ```bash
-export SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+export SOUC=./bin/souc
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 
 $SOUC run examples/full_pipeline.sio

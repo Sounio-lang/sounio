@@ -38,7 +38,7 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 DEFAULT_SOUC = os.environ.get(
-    "SOUC", "./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+    "SOUC", "./bin/souc"
 )
 DEFAULT_TIMEOUT = 30  # seconds
 DEFAULT_K_VALUES = [1, 10, 100]

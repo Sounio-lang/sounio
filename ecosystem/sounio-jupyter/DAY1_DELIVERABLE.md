@@ -93,7 +93,7 @@ python3 -m py_compile sounio_kernel/*.py
 
 ### Binary Availability
 ```bash
-/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit
+/home/demetrios/RustroverProjects/sounio/bin/souc
 # ✅ Found (13MB, executable)
 ```
 
@@ -111,7 +111,7 @@ fn main() with IO {
 }
 EOF
 
-./artifacts/omega/souc-bin/souc-linux-x86_64-jit run /tmp/test_kernel.sio
+./bin/souc run /tmp/test_kernel.sio
 # ✅ Output: 2
 ```
 

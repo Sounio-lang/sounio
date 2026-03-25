@@ -178,7 +178,7 @@ r"Knowledge \{ value: ([\d.e+-]+) epsilon: ([\d.e+-]+) prov: \"([^\"]+)\" \}"
 
 ### Environment Variables (SET BEFORE DAY 12)
 ```bash
-export SOUC=/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit
+export SOUC=/home/demetrios/RustroverProjects/sounio/bin/souc
 export SOUNIO_STDLIB_PATH=/home/demetrios/RustroverProjects/sounio/stdlib
 ```
 

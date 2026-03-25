@@ -7,7 +7,7 @@ description: "Work on the self-hosted Sounio compiler bootstrap path: self-hoste
 
 ## Overview
 
-`self-hosted/main.sio` is the entry point for the self-hosted Sounio compiler. It runs the full pipeline — lex → parse → resolve → check → lower → native compile — as a pure `.sio` program executed by the souc JIT binary.
+`self-hosted/main.sio` is the entry point for the self-hosted Sounio compiler. It runs the full pipeline — lex → parse → resolve → check → lower → native compile — as a pure `.sio` program executed by the native `souc` wrapper.
 
 The self-hosted pipeline is separate from the Rust `compiler/` pipeline. Changes here affect the self-hosted path only.
 
@@ -30,7 +30,7 @@ Invoke as: `$SOUC run self-hosted/main.sio -- <mode> <args>`
 | `--native-compile <file> -o <out>` | ELF binary | Full pipeline → runnable binary |
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 $SOUC run self-hosted/main.sio -- --check examples/render/triangle_basic.sio
 # Expected: "Check OK: 0 errors"
 ```
@@ -76,7 +76,7 @@ Minimum expected function counts:
 The primary bootstrap claim: `examples/render/triangle_basic.sio` compiled via self-hosted frontend → runnable ELF → pixel-correct 128×128 PPM.
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 $SOUC run self-hosted/main.sio -- --native-compile examples/render/triangle_basic.sio -o /tmp/tri_sh
 # Expected: "Native compilation successful"
 /tmp/tri_sh > /tmp/tri_sh.ppm && head -3 /tmp/tri_sh.ppm

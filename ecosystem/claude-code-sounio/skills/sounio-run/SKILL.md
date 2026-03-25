@@ -1,20 +1,20 @@
 ---
 name: sounio-run
-description: JIT-execute a Sounio .sio file and show output
+description: Compile and run a Sounio .sio file and show output
 user-invocable: true
 allowed-tools: Bash, Read, Glob
 ---
 
 # Sounio Run
 
-JIT-execute the specified Sounio source file.
+Compile the specified Sounio source file to a native ELF and run it.
 
 ## Instructions
 
 1. Resolve the souc compiler binary:
    - Use `$SOUC_BIN` or `$SOUC` environment variable if set
    - Otherwise try `souc` on PATH
-   - Otherwise try `./artifacts/omega/souc-bin/souc-linux-x86_64-jit`
+   - Otherwise try `./bin/souc`
 
 2. If no file argument given, find the most recently modified `.sio` file in the working directory
 

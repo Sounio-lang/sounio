@@ -295,7 +295,7 @@ type SounioProcess(soucPath: string, ?programPath: string, ?extraArgs: string[])
 
     /// Create a SounioProcess using the default souc binary path.
     static member CreateDefault(?programPath: string) =
-        let defaultPath = "artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+        let defaultPath = "bin/souc"
         match programPath with
         | Some p -> new SounioProcess(defaultPath, p)
         | None -> new SounioProcess(defaultPath)

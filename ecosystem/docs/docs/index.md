@@ -105,7 +105,7 @@ A 3-stage epistemic pipeline for computational drug discovery, written entirely 
     Download the pre-built binary:
 
     ```bash
-    export SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+    export SOUC=./bin/souc
     $SOUC run examples/hello.sio
     ```
 

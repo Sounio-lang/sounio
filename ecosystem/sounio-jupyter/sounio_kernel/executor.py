@@ -179,7 +179,7 @@ class CellExecutor:
             return str(repo_souc)
 
         # Check current working directory (legacy behavior).
-        default_souc = Path("artifacts/omega/souc-bin/souc-linux-x86_64-jit")
+        default_souc = Path("bin/souc")
         if default_souc.is_file() and os.access(default_souc, os.X_OK):
             return str(default_souc.resolve())
 

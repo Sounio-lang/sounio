@@ -12,7 +12,7 @@ This script demonstrates:
 
 Run with:
     PYTHONPATH=sounio-py/python \\
-    SOUC=../artifacts/omega/souc-bin/souc-linux-x86_64-jit \\
+    SOUC=../bin/souc \\
     SOUNIO_STDLIB_PATH=../stdlib \\
     python3 examples/complete_demo.py
 """

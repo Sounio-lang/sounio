@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -s /bin/bash sounio || true
 
 # Copy souc binary to /usr/local/bin/
-COPY artifacts/omega/souc-bin/souc-linux-x86_64-jit /usr/local/bin/souc
+COPY bin/souc /usr/local/bin/souc
 RUN chmod +x /usr/local/bin/souc
 
 # Copy stdlib to /opt/sounio/stdlib/

@@ -3,7 +3,7 @@
 Run with:
     cd triple-sounio-ecosystem/sounio-py
     PYTHONPATH=python \
-    SOUC=../../artifacts/omega/souc-bin/souc-linux-x86_64-jit \
+    SOUC=../../bin/souc \
     SOUNIO_STDLIB_PATH=../../stdlib \
     python3 -m pytest tests/test_pipeline.py -q
 """

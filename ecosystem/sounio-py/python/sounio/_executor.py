@@ -1,4 +1,4 @@
-"""SounioExecutor — subprocess wrapper around the souc JIT binary.
+"""SounioExecutor — subprocess wrapper around the native `souc` CLI.
 
 Exposes run_file, run_code, and check_file with structured return types.
 Knowledge values printed by the running program are parsed from stdout
@@ -108,7 +108,7 @@ _KNOWLEDGE_RE = re.compile(
 
 
 class SounioExecutor:
-    """Execute Sounio code via the souc JIT binary.
+    """Execute Sounio code via the native `souc` wrapper.
 
     Parameters
     ----------
@@ -126,9 +126,9 @@ class SounioExecutor:
     # Repo-relative default (works when cwd is the repo root or sounio-py/).
     _DEFAULT_SOUC_CANDIDATES = [
         # Running from sounio-py/ inside the repo
-        "../../../../artifacts/omega/souc-bin/souc-linux-x86_64-jit",
+        "../../../../bin/souc",
         # Running from repo root
-        "artifacts/omega/souc-bin/souc-linux-x86_64-jit",
+        "bin/souc",
     ]
     _DEFAULT_STDLIB_CANDIDATES = [
         "../../../../stdlib",
@@ -187,7 +187,7 @@ class SounioExecutor:
     # ---- Public API -------------------------------------------------------
 
     def run_file(self, path: str, timeout: int = 30) -> ExecutionResult:
-        """JIT-run a .sio file and return a structured result.
+        """Run a .sio file through the native wrapper and return a structured result.
 
         Parameters
         ----------

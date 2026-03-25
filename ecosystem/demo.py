@@ -53,7 +53,7 @@ def test_drug_discovery_pipeline():
         # Verify souc binary exists
         souc_path = os.environ.get('SOUC')
         if not souc_path:
-            souc_path = "/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+            souc_path = "/home/demetrios/RustroverProjects/sounio/bin/souc"
 
         if not os.path.exists(souc_path):
             print(f"⚠️  Test 2 SKIP: souc binary not found at {souc_path}")
@@ -204,7 +204,7 @@ def test_pipeline_knowledge_parsing():
 
         souc_path = os.environ.get('SOUC')
         if not souc_path:
-            souc_path = "/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+            souc_path = "/home/demetrios/RustroverProjects/sounio/bin/souc"
 
         if not os.path.exists(souc_path):
             print(f"⚠️  Test 5 SKIP: souc binary not found at {souc_path}")

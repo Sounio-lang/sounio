@@ -7,7 +7,7 @@ let main argv =
     let soucPath =
         match argv |> Array.tryHead with
         | Some p -> p
-        | None -> "artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+        | None -> "bin/souc"
 
     printfn "=== Sounio <-> F# Interop Example ==="
     printfn ""

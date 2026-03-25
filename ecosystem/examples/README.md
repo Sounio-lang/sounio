@@ -11,7 +11,7 @@ cd triple-sounio-ecosystem
 
 # With all optional dependencies
 PYTHONPATH=sounio-py/python \
-SOUC=../artifacts/omega/souc-bin/souc-linux-x86_64-jit \
+SOUC=../bin/souc \
 SOUNIO_STDLIB_PATH=../stdlib \
 python3 examples/complete_demo.py
 ```
@@ -180,7 +180,7 @@ rb.save("output.md", format="markdown")
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `PYTHONPATH` | Python path to sounio-py | (required) |
-| `SOUC` | Path to souc JIT binary | auto-detect |
+| `SOUC` | Path to the souc native wrapper | auto-detect |
 | `SOUNIO_STDLIB_PATH` | Path to stdlib | auto-detect |
 
 ## Troubleshooting

@@ -138,7 +138,7 @@ jupyter kernelspec list | grep sounio
 ```bash
 cd drug-discovery
 # No build required — pure Sounio
-export SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+export SOUC=./bin/souc
 $SOUC run examples/full_pipeline.sio
 ```
 
@@ -166,7 +166,7 @@ python -c "import sounio; x = sounio.Knowledge(100, 2); y = sounio.Knowledge(50,
 jupyter kernelspec list | grep sounio
 
 # 3. Run the complete drug discovery pipeline
-export SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+export SOUC=./bin/souc
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 $SOUC run triple-sounio-ecosystem/drug-discovery/examples/full_pipeline.sio
 ```

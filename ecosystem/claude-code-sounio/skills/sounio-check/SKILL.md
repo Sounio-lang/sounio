@@ -14,7 +14,7 @@ Type-check the specified Sounio source file.
 1. Resolve the souc compiler binary:
    - Use `$SOUC_BIN` or `$SOUC` environment variable if set
    - Otherwise try `souc` on PATH
-   - Otherwise try `./artifacts/omega/souc-bin/souc-linux-x86_64-jit`
+   - Otherwise try `./bin/souc`
    - If none found, tell the user to set `SOUC_BIN`
 
 2. If no file argument given, find the most recently modified `.sio` file in the working directory

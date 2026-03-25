@@ -258,7 +258,7 @@ jupyter notebook
 ### souc binary not found
 ```bash
 # Set environment variables before running Jupyter
-export SOUC=/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit
+export SOUC=/home/demetrios/RustroverProjects/sounio/bin/souc
 export SOUNIO_STDLIB_PATH=/home/demetrios/RustroverProjects/sounio/stdlib
 jupyter notebook
 ```

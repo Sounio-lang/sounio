@@ -2,7 +2,7 @@
 # HumanEval-Sounio benchmark runner
 # Usage: bash benchmarks/humaneval_sounio/run_bench.sh
 
-SOUC="${SOUC:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+SOUC="${SOUC:-./bin/souc}"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$(pwd)/stdlib}"
 PASS=0 FAIL=0
 for f in benchmarks/humaneval_sounio/*.sio; do

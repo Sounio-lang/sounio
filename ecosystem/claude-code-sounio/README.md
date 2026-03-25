@@ -7,7 +7,7 @@ Makes any Claude model write correct, idiomatic Sounio — no Rust-isms, proper 
 
 - **CLAUDE.md** — Comprehensive syntax reference auto-loaded into every conversation
 - **`/sounio-check`** — Type-check `.sio` files using the souc compiler
-- **`/sounio-run`** — JIT-execute `.sio` files and see output
+- **`/sounio-run`** — compile and run `.sio` files with the native wrapper
 - **`/sounio-lint`** — Detect and fix Rust-isms (semicolons, `&mut`, `let mut`, macros)
 - **Auto-validation hook** — Every `.sio` file is linted + type-checked on save
 
@@ -38,7 +38,7 @@ export SOUC_BIN=/path/to/souc-linux-x86_64-jit
 
 ### Full (inside the Sounio repo)
 
-Already included. The souc binary is at `artifacts/omega/souc-bin/souc-linux-x86_64-jit`.
+Already included. The souc binary is at `bin/souc`.
 
 ## Usage
 
@@ -60,7 +60,7 @@ Write a Sounio function that computes BMI with epistemic uncertainty tracking
 
 ```
 /sounio-check examples/hello.sio     # type-check
-/sounio-run examples/hello.sio       # JIT execute
+/sounio-run examples/hello.sio       # compile and run
 /sounio-lint examples/hello.sio      # detect Rust-isms
 ```
 

@@ -41,13 +41,13 @@ All three projects depend on these **two critical env vars**. Set them before ru
 
 **Default location:**
 ```
-/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit
+/home/demetrios/RustroverProjects/sounio/bin/souc
 ```
 
 **How to set:**
 ```bash
 # In your shell profile (~/.bashrc, ~/.zshrc)
-export SOUC=/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit
+export SOUC=/home/demetrios/RustroverProjects/sounio/bin/souc
 
 # Or set at runtime
 SOUC=/path/to/souc python demo.py
@@ -384,7 +384,7 @@ ls $SOUC
 
 **Fix:**
 ```bash
-export SOUC=/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit
+export SOUC=/home/demetrios/RustroverProjects/sounio/bin/souc
 python triple-sounio-ecosystem/demo.py
 ```
 

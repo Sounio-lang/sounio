@@ -45,7 +45,7 @@ Strategies: `STANDARD=0`, `PRECISION=1`, `AGGRESSIVE=2`, `INSTRUMENTED=3`.
 ### 3) Run the relevant gate
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 
 bash scripts/sprint65_peephole_gate.sh     # 30/30 — peephole optimizer wiring
 bash scripts/sprint64_frame_trim_gate.sh   # 25/25 — compact frame sizing

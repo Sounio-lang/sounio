@@ -44,7 +44,7 @@
   - [ ] `souc check tests/test_simulation.sio` — pass
 - [ ] `examples/full_pipeline.sio` runs end-to-end:
   ```bash
-  SOUC=../../artifacts/omega/souc-bin/souc-linux-x86_64-jit \
+  SOUC=../../bin/souc \
   SOUNIO_STDLIB_PATH=../../stdlib \
   $SOUC run examples/full_pipeline.sio
   ```
@@ -119,7 +119,7 @@
 |---------|---------|----------|
 | Track A slow | Knowledge class takes >10s to import | Profile Cranelift JIT; consider pure Python fallback for quick test |
 | Track B kernel not discoverable | Test 3 fails | Check `jupyter --version`; re-run `install.py` with `--user` or `--system` |
-| Track C souc not found | Test 2 fails with "souc binary not found" | Set `SOUC` env var; verify `artifacts/omega/souc-bin/souc-linux-x86_64-jit` exists |
+| Track C souc not found | Test 2 fails with "souc binary not found" | Set `SOUC` env var; verify `bin/souc` exists |
 | Canonical format mismatch | Regex doesn't parse output | Compare actual output with pattern; update pattern if format differs |
 | Deadlock in souc process | demo.py hangs | Ensure stderr is drained in background thread (Rust process.rs) |
 | Demo.py import errors | Test 1 ImportError | Run `maturin develop` in sounio-py/ and verify `$PYTHONPATH` |

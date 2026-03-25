@@ -15,7 +15,7 @@ Language support for [Sounio](https://github.com/sounio-lang/sounio) — the L0 
 A `souc` binary (Sounio compiler). Get it from the [Sounio repo](https://github.com/sounio-lang/sounio) at:
 
 ```
-artifacts/omega/souc-bin/souc-linux-x86_64-jit
+bin/souc
 ```
 
 ## Configuration
@@ -30,7 +30,7 @@ artifacts/omega/souc-bin/souc-linux-x86_64-jit
 
 ```json
 {
-  "sounio.soucPath": "/home/user/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit",
+  "sounio.soucPath": "/home/user/sounio/bin/souc",
   "sounio.stdlibPath": "/home/user/sounio/stdlib"
 }
 ```

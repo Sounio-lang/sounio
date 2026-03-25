@@ -47,7 +47,7 @@ echo
 
 # Check souc binary
 echo "3. Checking souc binary..."
-if [ -x "/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit" ]; then
+if [ -x "/home/demetrios/RustroverProjects/sounio/bin/souc" ]; then
     echo "  ✓ souc binary found and executable"
 else
     echo "  ✗ souc binary not found or not executable"
@@ -90,7 +90,7 @@ echo
 
 # Test souc execution
 echo "6. Testing souc execution..."
-SOUC="/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SOUC="/home/demetrios/RustroverProjects/sounio/bin/souc"
 cat > /tmp/test_kernel.sio << 'EOF'
 fn main() with IO {
     print(1 + 1)

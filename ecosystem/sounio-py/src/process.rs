@@ -4,7 +4,7 @@
 ///
 /// Key design decisions:
 /// - stderr is drained in a background thread to prevent deadlock when the
-///   JIT emits warnings (which it does for file_size() etc.).
+///   the compiler emits warnings (for example around file_size()).
 /// - All I/O is synchronous on the calling thread via stdin/stdout pipes.
 /// - `SounioProcess` is `Send` because the child process handles are `Send`.
 use crate::protocol::{self, Response};
@@ -20,7 +20,7 @@ use std::thread;
 /// Resolution order:
 /// 1. `SOUC` environment variable
 /// 2. `SOUNIO_SOUC_PATH` environment variable
-/// 3. Repo-relative default: `<repo_root>/artifacts/omega/souc-bin/souc-linux-x86_64-jit`
+/// 3. Repo-relative default: `<repo_root>/bin/souc`
 pub fn find_souc() -> Option<PathBuf> {
     // 1. SOUC env var
     if let Ok(p) = env::var("SOUC") {
@@ -39,9 +39,9 @@ pub fn find_souc() -> Option<PathBuf> {
     // 3. Relative to this binary's location (walk up to find repo root)
     let candidates = [
         // If run from within the sounio-py project dir
-        "../../artifacts/omega/souc-bin/souc-linux-x86_64-jit",
+        "../../bin/souc",
         // Standard repo root
-        "artifacts/omega/souc-bin/souc-linux-x86_64-jit",
+        "bin/souc",
     ];
     for rel in &candidates {
         let path = PathBuf::from(rel);

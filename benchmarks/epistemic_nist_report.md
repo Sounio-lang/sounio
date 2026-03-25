@@ -188,7 +188,7 @@ Failures fall into three categories:
 ### Test Harness
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 
 # Type-check all stdlib tests (fast, ~3sec per file)
@@ -255,7 +255,7 @@ done
 - **NIST standard**: https://www.bipm.org/documents/20126/2071204/JCGM_100_2008_E.pdf
 - **Epistemic core**: `/home/demetrios/RustroverProjects/sounio/stdlib/epistemic/`
 - **Test suite**: `/home/demetrios/RustroverProjects/sounio/tests/stdlib/epistemic/`
-- **Compiler binary**: `./artifacts/omega/souc-bin/souc-linux-x86_64-jit`
+- **Compiler binary**: `./bin/souc`
 - **Project memory**: `.claude/projects/-home-demetrios-RustroverProjects-sounio/memory/MEMORY.md`
 
 ---

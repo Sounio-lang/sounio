@@ -31,7 +31,7 @@ Six modules in `stdlib/render/` define the shared API: `types.sio`, `framebuffer
 ### 3) Run the PPM gate
 
 ```bash
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 bash scripts/sprint53_render_platform_gate.sh
 # Spot-check a render:
 $SOUC run examples/render/uncertainty_field.sio > /tmp/uf.ppm && head -3 /tmp/uf.ppm

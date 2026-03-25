@@ -25,7 +25,7 @@ Inspired by OpenAI's HumanEval benchmark for measuring code generation capabilit
 bash benchmarks/humaneval_sounio/run_bench.sh
 
 # Run a single problem
-SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+SOUC=./bin/souc
 $SOUC run benchmarks/humaneval_sounio/005_fibonacci.sio
 ```
 

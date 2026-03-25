@@ -18,8 +18,8 @@ fi
 # 3. Common repo-relative location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CANDIDATES=(
-    "$SCRIPT_DIR/../../../artifacts/omega/souc-bin/souc-linux-x86_64-jit"
-    "./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+    "$SCRIPT_DIR/../../../bin/souc"
+    "./bin/souc"
 )
 for c in "${CANDIDATES[@]}"; do
     if [[ -x "$c" ]]; then

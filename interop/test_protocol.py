@@ -86,9 +86,9 @@ def read_response(stdout):
 
 def main():
     souc = os.path.join(os.path.dirname(__file__), "..",
-                        "artifacts/omega/souc-bin/souc-linux-x86_64-jit")
+                        "bin/souc")
     if not os.path.exists(souc):
-        souc = "./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+        souc = "./bin/souc"
 
     main_sio = "self-hosted/compiler/main.sio"
 

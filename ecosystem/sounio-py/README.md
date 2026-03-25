@@ -154,7 +154,7 @@ Run Sounio code with configurable timeouts and environment.
 
 ```python
 executor = sounio.SounioExecutor(
-    souc_path="./artifacts/omega/souc-bin/souc-linux-x86_64-jit",
+    souc_path="./bin/souc",
     stdlib_path="./stdlib",
     timeout=30
 )
