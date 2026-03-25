@@ -2354,6 +2354,113 @@ var BREAK_COUNT: i64 = 0
 // Track if last struct literal was a linear type
 var LAST_EXPR_IS_LINEAR: i64 = 0
 
+fn compile_measure_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
+    EP = EP + 1
+    var value_ty: i64 = 0
+    var value_hash: i64 = 0
+    var value_tok: i64 = -1
+    var unc_ty: i64 = 0
+    var unc_tok: i64 = -1
+    var conf_ty: i64 = 0
+    var value_slot: i64 = -1
+    var unc_slot: i64 = -1
+    var conf_slot: i64 = -1
+    var argc: i64 = 0
+    var saw_unc: i64 = 0
+    var saw_conf: i64 = 0
+    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        let arg_start = EP
+        compile_or()
+        value_ty = EXPR_TY
+        value_hash = EXPR_TY_HASH
+        value_tok = expr_simple_numeric_tok(arg_start, EP)
+        value_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(value_slot)
+        argc = 1
+    }
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+        if TK[EP as usize] == 7 || TK[EP as usize] == 0 { break }
+        var label_kind: i64 = 0
+        if TK[EP as usize] == 3 && TK[(EP + 1) as usize] == 43 {
+            let lns = TS[EP as usize]
+            let lne = TE[EP as usize]
+            if src_match(lns, lne - lns, "uncertainty") { label_kind = 1 }
+            else if src_match(lns, lne - lns, "confidence") { label_kind = 2 }
+            else { tc_error(call_tok, "unknown measure metadata label") }
+            EP = EP + 2
+        }
+        let arg_start = EP
+        compile_or()
+        let arg_ty = EXPR_TY
+        let lit_tok = expr_simple_numeric_tok(arg_start, EP)
+        let tmp_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(tmp_slot)
+        argc = argc + 1
+        if label_kind == 2 || (label_kind == 0 && saw_unc != 0 && saw_conf == 0) {
+            if saw_conf != 0 { tc_error(call_tok, "duplicate measure confidence") }
+            conf_slot = tmp_slot
+            conf_ty = arg_ty
+            saw_conf = 1
+        } else {
+            if saw_unc != 0 { tc_error(call_tok, "duplicate measure uncertainty") }
+            unc_slot = tmp_slot
+            unc_ty = arg_ty
+            unc_tok = lit_tok
+            saw_unc = 1
+        }
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }
+    if argc <= 0 { tc_wrong_arity(call_tok, 2, 0) }
+    let eps_scaled = infer_measure_eps_scaled(value_tok, unc_tok)
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    if value_slot >= 0 { emit_load_var(value_slot) } else { em(0x31); em(0xc0) }
+    emit_store_var(base_slot + 2)
+    if unc_slot >= 0 {
+        emit_load_var(unc_slot)
+        if unc_ty != 2 {
+            if ty_is_numeric(unc_ty) {
+                em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
+                em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+            } else {
+                tc_error(call_tok, "measure uncertainty must be numeric")
+                em(0x31); em(0xc0)
+            }
+        }
+        em(0x48); em(0x89); em(0xc1)
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc9)
+        em(0xf2); em(0x0f); em(0x59); em(0xc1)
+        em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+    } else {
+        emit_imm64(0)
+    }
+    emit_store_var(base_slot + 1)
+    if conf_slot >= 0 {
+        emit_load_var(conf_slot)
+        if conf_ty != 2 {
+            if ty_is_numeric(conf_ty) {
+                em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
+                em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+            } else {
+                tc_error(call_tok, "measure confidence must be numeric")
+                emit_imm64(4607182418800017408)
+            }
+        }
+    } else {
+        emit_imm64(4607182418800017408)
+    }
+    emit_store_var(base_slot)
+    em(0x48); em(0x8d); em(0x85)
+    em32(0 - (base_slot + 2) * 8)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_hash_make(value_ty, value_hash, eps_scaled)
+}
+
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
 fn compile_primary() with IO, Mut, Panic, Div {
@@ -2986,6 +3093,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
+            if src_match(ns, ne - ns, "measure") {
+                compile_measure_call_x86(name_tok)
+                return
+            }
             // Check for arg_count()
             if src_match(ns, ne - ns, "arg_count") {
                 EP = EP + 1
@@ -3551,7 +3662,12 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 em(0x8b)
                 em(0x00)  // mov rax, [rax]
                 // Try to determine type from struct
-                if EXPR_TY == 6 {
+                if knowledge_hash_is(EXPR_TY_HASH) {
+                    let inner_hash = knowledge_hash_inner_hash(EXPR_TY_HASH)
+                    EXPR_TY = knowledge_hash_inner_ty(EXPR_TY_HASH)
+                    EXPR_TY_HASH = inner_hash
+                    if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                } else if EXPR_TY == 6 {
                     let uw_si = st_find(EXPR_TY_HASH)
                     if uw_si >= 0 {
                         // Get type of first field (value)
@@ -3602,6 +3718,29 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             var found: i64 = 0
             EXPR_TY = 0
             EXPR_TY_HASH = 0
+            if knowledge_hash_is(base_hash) {
+                if src_match(fns, fne - fns, "value") {
+                    em(0x48); em(0x8b); em(0x00)
+                    EXPR_TY = knowledge_hash_inner_ty(base_hash)
+                    EXPR_TY_HASH = knowledge_hash_inner_hash(base_hash)
+                    if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                } else if src_match(fns, fne - fns, "variance") {
+                    em(0x48); em(0x8b); em(0x40); em(8)
+                    EXPR_TY = 2
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 1
+                } else if src_match(fns, fne - fns, "confidence") {
+                    em(0x48); em(0x8b); em(0x40); em(16)
+                    EXPR_TY = 2
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 1
+                } else {
+                    tc_error(method_tok, "unknown field access")
+                    em(0x31); em(0xc0)
+                    EXPR_IS_F64 = 0
+                }
+                found = 1
+            }
             if base_ty == 6 {
                 let bsi = st_find(base_hash)
                 if bsi >= 0 {
@@ -3609,7 +3748,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     if off >= 0 {
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
-                        if EXPR_TY == 8 || EXPR_TY == 6 {
+                        if EXPR_TY == 8 || EXPR_TY == 6 || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                         } else {
                             if off == 0 {
@@ -3632,7 +3771,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if off >= 0 {
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
-                    if EXPR_TY == 8 || EXPR_TY == 6 {
+                    if EXPR_TY == 8 || EXPR_TY == 6 || knowledge_hash_is(EXPR_TY_HASH) {
                         if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                     } else {
                         if off == 0 {
@@ -4366,9 +4505,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 let avix = VAR_COUNT - 1
                 VAR_IS_CLOSURE[avix as usize] = 0
                 VAR_LINEAR[avix as usize] = 0
-            } else if (decl_ty == 6) || (decl_ty == 0 && EXPR_TY == 6) {
+            } else if type_is_struct_like(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_struct_like(EXPR_TY, EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
-                if decl_ty == 6 { bind_hash = decl_ty_hash }
+                if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
                 bind_struct_local_from_rax_x86(ns, ne, bind_hash)
                 let svix = VAR_COUNT - 1
                 VAR_IS_CLOSURE[svix as usize] = 0
@@ -4447,7 +4586,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         }
         if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
         em(0x5a)  // pop rdx (value/src ptr)
-        if fty == 8 || fty == 6 {
+        if fty == 8 || fty == 6 || knowledge_hash_is(fhash) {
             emit_copy_agg_to_ptr_x86(fty, fhash)
         } else {
             em(0x48); em(0x89); em(0x10)  // mov [rax], rdx
@@ -4474,7 +4613,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             }
             if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 8 {
                 copy_array_into_local_slot_x86(slot, VAR_TY_HASH[ty_vi as usize])
-            } else if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 6 {
+            } else if ty_vi >= 0 && type_is_struct_like(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize]) {
                 copy_struct_into_local_slot_x86(slot, VAR_TY_HASH[ty_vi as usize])
             } else {
                 emit_store_var(slot)
@@ -4608,7 +4747,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 }
             }
         }
-        if CURRENT_RET_TY == 8 || CURRENT_RET_TY == 6 || EXPR_TY == 8 || EXPR_TY == 6 {
+        if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_x86(EXPR_TY, EXPR_TY_HASH)
         }
         em(0x48); em(0x81); em(0xc4); em32(131072)
@@ -5825,7 +5964,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             // Tail expression type check: warn but don't error (allows unit types, coercions)
             if LAST_STMT_HAS_VALUE == 0 {
                 em(0x31); em(0xc0)
-            } else if CURRENT_RET_TY == 8 || CURRENT_RET_TY == 6 || LAST_STMT_TY == 8 || LAST_STMT_TY == 6 {
+            } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                 stabilize_return_agg_x86(LAST_STMT_TY, LAST_STMT_TY_HASH)
             }
             em(0x48); em(0x81); em(0xc4); em32(131072)
@@ -6638,6 +6777,109 @@ fn emit_f64_binop_a64(opcode: i64) with Mut {
     em32(0x9E660000)  // fmov x0, d0
 }
 
+fn compile_measure_call_a64(call_tok: i64) with IO, Mut, Panic, Div {
+    EP = EP + 1
+    var value_ty: i64 = 0
+    var value_hash: i64 = 0
+    var value_tok: i64 = -1
+    var unc_ty: i64 = 0
+    var unc_tok: i64 = -1
+    var conf_ty: i64 = 0
+    var value_slot: i64 = -1
+    var unc_slot: i64 = -1
+    var conf_slot: i64 = -1
+    var argc: i64 = 0
+    var saw_unc: i64 = 0
+    var saw_conf: i64 = 0
+    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        let arg_start = EP
+        compile_or_a64()
+        value_ty = EXPR_TY
+        value_hash = EXPR_TY_HASH
+        value_tok = expr_simple_numeric_tok(arg_start, EP)
+        value_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var_a64(value_slot)
+        argc = 1
+    }
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+        if TK[EP as usize] == 7 || TK[EP as usize] == 0 { break }
+        var label_kind: i64 = 0
+        if TK[EP as usize] == 3 && TK[(EP + 1) as usize] == 43 {
+            let lns = TS[EP as usize]
+            let lne = TE[EP as usize]
+            if src_match(lns, lne - lns, "uncertainty") { label_kind = 1 }
+            else if src_match(lns, lne - lns, "confidence") { label_kind = 2 }
+            else { tc_error(call_tok, "unknown measure metadata label") }
+            EP = EP + 2
+        }
+        let arg_start = EP
+        compile_or_a64()
+        let arg_ty = EXPR_TY
+        let lit_tok = expr_simple_numeric_tok(arg_start, EP)
+        let tmp_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var_a64(tmp_slot)
+        argc = argc + 1
+        if label_kind == 2 || (label_kind == 0 && saw_unc != 0 && saw_conf == 0) {
+            if saw_conf != 0 { tc_error(call_tok, "duplicate measure confidence") }
+            conf_slot = tmp_slot
+            conf_ty = arg_ty
+            saw_conf = 1
+        } else {
+            if saw_unc != 0 { tc_error(call_tok, "duplicate measure uncertainty") }
+            unc_slot = tmp_slot
+            unc_ty = arg_ty
+            unc_tok = lit_tok
+            saw_unc = 1
+        }
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }
+    if argc <= 0 { tc_wrong_arity(call_tok, 2, 0) }
+    let eps_scaled = infer_measure_eps_scaled(value_tok, unc_tok)
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    if value_slot >= 0 { emit_load_var_a64(value_slot) } else { em32(0xD2800000) }
+    emit_store_var_a64(base_slot + 2)
+    if unc_slot >= 0 {
+        emit_load_var_a64(unc_slot)
+        if unc_ty != 2 {
+            if ty_is_numeric(unc_ty) {
+                em32(0x9E620000)
+                em32(0x9E660000)
+            } else {
+                tc_error(call_tok, "measure uncertainty must be numeric")
+                em32(0xD2800000)
+            }
+        }
+        em32(0xAA0003E1)
+        emit_f64_binop_a64(0x1E610800)
+    } else {
+        em32(0xD2800000)
+    }
+    emit_store_var_a64(base_slot + 1)
+    if conf_slot >= 0 {
+        emit_load_var_a64(conf_slot)
+        if conf_ty != 2 {
+            if ty_is_numeric(conf_ty) {
+                em32(0x9E620000)
+                em32(0x9E660000)
+            } else {
+                tc_error(call_tok, "measure confidence must be numeric")
+                emit_imm64_a64(4607182418800017408)
+            }
+        }
+    } else {
+        emit_imm64_a64(4607182418800017408)
+    }
+    emit_store_var_a64(base_slot)
+    emit_lea_var_a64(base_slot + 2)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_hash_make(value_ty, value_hash, eps_scaled)
+}
+
 // ─── ARM64 expression compiler ───
 fn compile_primary_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
@@ -7076,6 +7318,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
+            if src_match(ns, ne - ns, "measure") {
+                compile_measure_call_a64(name_tok)
+                return
+            }
             if src_match(ns, ne - ns, "arg_count") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -7497,7 +7743,12 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
                 em32(0xF9400000)  // ldr x0, [x0]
-                if EXPR_TY == 6 {
+                if knowledge_hash_is(EXPR_TY_HASH) {
+                    let inner_hash_a = knowledge_hash_inner_hash(EXPR_TY_HASH)
+                    EXPR_TY = knowledge_hash_inner_ty(EXPR_TY_HASH)
+                    EXPR_TY_HASH = inner_hash_a
+                    if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                } else if EXPR_TY == 6 {
                     let uw_si_a = st_find(EXPR_TY_HASH)
                     if uw_si_a >= 0 {
                         EXPR_TY = ST_FTY[(uw_si_a * 64) as usize]
@@ -7547,6 +7798,29 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             var found: i64 = 0
             EXPR_TY = 0
             EXPR_TY_HASH = 0
+            if knowledge_hash_is(base_hash) {
+                if src_match(fns, fne - fns, "value") {
+                    em32(0xF9400000)
+                    EXPR_TY = knowledge_hash_inner_ty(base_hash)
+                    EXPR_TY_HASH = knowledge_hash_inner_hash(base_hash)
+                    if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                } else if src_match(fns, fne - fns, "variance") {
+                    em32(0xF9400400)
+                    EXPR_TY = 2
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 1
+                } else if src_match(fns, fne - fns, "confidence") {
+                    em32(0xF9400800)
+                    EXPR_TY = 2
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 1
+                } else {
+                    tc_error(method_tok, "unknown field access")
+                    em32(0xD2800000)
+                    EXPR_IS_F64 = 0
+                }
+                found = 1
+            }
             if base_ty == 6 {
                 let bsi = st_find(base_hash)
                 if bsi >= 0 {
@@ -7554,7 +7828,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     if off >= 0 {
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
-                        if EXPR_TY == 8 || EXPR_TY == 6 {
+                        if EXPR_TY == 8 || EXPR_TY == 6 || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 {
                                 emit_imm64_reg_a64(1, off)
                                 em32(0x8B010000)
@@ -7577,7 +7851,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 if off >= 0 {
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
-                    if EXPR_TY == 8 || EXPR_TY == 6 {
+                    if EXPR_TY == 8 || EXPR_TY == 6 || knowledge_hash_is(EXPR_TY_HASH) {
                         if off != 0 {
                             emit_imm64_reg_a64(1, off)
                             em32(0x8B010000)
@@ -7857,9 +8131,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 let avix = VAR_COUNT - 1
                 VAR_IS_CLOSURE[avix as usize] = 0
                 VAR_LINEAR[avix as usize] = 0
-            } else if (decl_ty == 6) || (decl_ty == 0 && EXPR_TY == 6) {
+            } else if type_is_struct_like(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_struct_like(EXPR_TY, EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
-                if decl_ty == 6 { bind_hash = decl_ty_hash }
+                if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
                 bind_struct_local_from_x0_a64(ns, ne, bind_hash)
                 let svix = VAR_COUNT - 1
                 VAR_IS_CLOSURE[svix as usize] = 0
@@ -7930,7 +8204,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             em32(0x8B0B0000)  // add x0, x0, x11
         }
         emit_pop_x1_a64()
-        if fty == 8 || fty == 6 {
+        if fty == 8 || fty == 6 || knowledge_hash_is(fhash) {
             em32(0xAA0103EA)  // mov x10, x1
             emit_copy_agg_to_ptr_a64(fty, fhash)
         } else {
@@ -7956,7 +8230,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 8 {
                 copy_array_into_local_slot_a64(slot, VAR_TY_HASH[ty_vi as usize])
-            } else if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 6 {
+            } else if ty_vi >= 0 && type_is_struct_like(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize]) {
                 copy_struct_into_local_slot_a64(slot, VAR_TY_HASH[ty_vi as usize])
             } else {
                 emit_store_var_a64(slot)
@@ -8064,7 +8338,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 }
             }
         }
-        if CURRENT_RET_TY == 8 || CURRENT_RET_TY == 6 || EXPR_TY == 8 || EXPR_TY == 6 {
+        if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_a64(EXPR_TY, EXPR_TY_HASH)
         }
         em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
@@ -8468,7 +8742,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             // Tail expression type check: relaxed (allows unit types, coercions)
             if LAST_STMT_HAS_VALUE == 0 {
                 em32(0xD2800000)
-            } else if CURRENT_RET_TY == 8 || CURRENT_RET_TY == 6 || LAST_STMT_TY == 8 || LAST_STMT_TY == 6 {
+            } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                 stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)
             }
             em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
