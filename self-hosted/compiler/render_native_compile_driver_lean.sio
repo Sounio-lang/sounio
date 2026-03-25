@@ -7638,13 +7638,11 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
         let ret_si = MC_FN_RET_TYPE[fn_idx as usize]
         if ret_si >= 0 {
             let flat = MC_ST_FLAT_SIZE[ret_si as usize]
-            // rax = callee struct pointer; copy into new local slots
+            // rax = callee struct pointer; read ALL fields first, then store
             we(0x48); we(0x89); we(0xC2)  // mov rdx, rax (save src ptr)
-            let dst_base = MC_NEXT_SLOT
-            MC_NEXT_SLOT = MC_NEXT_SLOT + flat
-            var ci: i64 = 0
-            while ci < flat {
-                // mov rax, [rdx - ci*8] (contragradiant: callee fields go DOWN)
+            // Phase 1: read all fields from callee ptr into stack (push)
+            var ci: i64 = flat - 1
+            while ci >= 0 {
                 if ci == 0 {
                     we(0x48); we(0x8B); we(0x02)  // mov rax, [rdx]
                 } else {
@@ -7652,6 +7650,15 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
                     let d = 0 - (ci * 8)
                     we(d & 0xFF); we((d >> 8) & 0xFF); we((d >> 16) & 0xFF); we((d >> 24) & 0xFF)
                 }
+                we(0x50)  // push rax
+                ci = ci - 1
+            }
+            // Phase 2: pop into caller-owned slots (contragradiant order)
+            let dst_base = MC_NEXT_SLOT
+            MC_NEXT_SLOT = MC_NEXT_SLOT + flat
+            ci = 0
+            while ci < flat {
+                we(0x58)  // pop rax
                 mc_emit_store_rax(dst_base + flat - 1 - ci)
                 ci = ci + 1
             }
