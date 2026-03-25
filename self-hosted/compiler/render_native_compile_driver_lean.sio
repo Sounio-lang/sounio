@@ -7629,31 +7629,23 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
     // Find target function
     let fn_idx = mc_find_fn(name_s, name_len)
     if fn_idx >= 0 {
-        // Check if this function returns a struct (SRET)
-        let ret_si = MC_FN_RET_TYPE[fn_idx as usize]
-        var sret_base: i64 = -1
-        if ret_si >= 0 {
-            // Pre-allocate caller-owned storage for return struct
-            let flat = MC_ST_FLAT_SIZE[ret_si as usize]
-            sret_base = MC_NEXT_SLOT
-            MC_NEXT_SLOT = MC_NEXT_SLOT + flat
-            // Zero-init the slots
-            var zi: i64 = 0
-            while zi < flat { we(0x48); we(0x31); we(0xC0); mc_emit_store_rax(sret_base + zi); zi = zi + 1 }
-            // Pass destination pointer as hidden last arg (r10)
-            // Use slot sret_base (highest address) as r10 — callee writes DOWN from there
-            mc_emit_lea_slot(sret_base)
-            we(0x49); we(0x89); we(0xC2)  // mov r10, rax (SRET dest ptr)
-        }
         // call rel32
         we(0xe8)
         MC_CALL_FIX_OFF[MC_CALL_FIX_COUNT as usize] = WIDE_LEN
         MC_CALL_FIX_TARGET[MC_CALL_FIX_COUNT as usize] = fn_idx
         MC_CALL_FIX_COUNT = MC_CALL_FIX_COUNT + 1
         we32(0)  // placeholder
+        // Register-pass SRET: read r10, r11, r12 into caller-owned slots
+        let ret_si = MC_FN_RET_TYPE[fn_idx as usize]
         if ret_si >= 0 {
-            // After call: rax already has r10 (caller ptr) from callee's SRET copy
-            // Just use it — it points to sret_base (highest address, field 0)
+            let flat = MC_ST_FLAT_SIZE[ret_si as usize]
+            let sret_base = MC_NEXT_SLOT
+            MC_NEXT_SLOT = MC_NEXT_SLOT + flat
+            // r10=field0, r11=field1, r12=field2 (set by callee before leave;ret)
+            if flat > 0 { we(0x4C); we(0x89); we(0xD0); mc_emit_store_rax(sret_base) }  // mov rax, r10; store field 0
+            if flat > 1 { we(0x4C); we(0x89); we(0xD8); mc_emit_store_rax(sret_base + 1) }  // mov rax, r11; store field 1
+            if flat > 2 { we(0x4C); we(0x89); we(0xE0); mc_emit_store_rax(sret_base + 2) }  // mov rax, r12; store field 2
+            // lea rax to struct base (contragradiant: highest slot = field 0)
             mc_emit_lea_slot(sret_base)
         }
             // lea rax, [rbp - (dst_base + flat - 1 + 1)*8] — new base
@@ -8422,33 +8414,16 @@ fn mc_stmt_return() with Mut, Panic, Div {
         we(0x31)
         we(0xc0)  // xor rax, rax
     }
-    // SRET: if current function returns a struct, copy from rax (local ptr) to r10 (caller dest)
+    // Register-pass SRET: load struct fields into r10, r11, r12 BEFORE epilogue
+    // These registers survive leave;ret and the caller reads them after call.
     let cur_ret_si = MC_FN_RET_TYPE[MC_CUR_FI as usize]
     if cur_ret_si >= 0 {
         let flat = MC_ST_FLAT_SIZE[cur_ret_si as usize]
-        // rax = local struct ptr, r10 = caller SRET dest (passed before call)
-        we(0x48); we(0x89); we(0xC1)  // mov rcx, rax (src ptr)
-        var si: i64 = 0
-        while si < flat {
-            // mov rax, [rcx - si*8]
-            if si == 0 {
-                we(0x48); we(0x8B); we(0x01)  // mov rax, [rcx]
-            } else {
-                we(0x48); we(0x8B); we(0x81)  // mov rax, [rcx + disp32]
-                let sd = 0 - (si * 8)
-                we(sd & 0xFF); we((sd >> 8) & 0xFF); we((sd >> 16) & 0xFF); we((sd >> 24) & 0xFF)
-            }
-            // mov [r10 - si*8], rax
-            if si == 0 {
-                we(0x49); we(0x89); we(0x02)  // mov [r10], rax
-            } else {
-                we(0x49); we(0x89); we(0x82)  // mov [r10 + disp32]
-                let dd = 0 - (si * 8)
-                we(dd & 0xFF); we((dd >> 8) & 0xFF); we((dd >> 16) & 0xFF); we((dd >> 24) & 0xFF)
-            }
-            si = si + 1
-        }
-        we(0x4C); we(0x89); we(0xD0)  // mov rax, r10 (return caller's ptr)
+        // rax = local struct ptr (contragradiant: field 0 at [rax], field 1 at [rax-8])
+        we(0x48); we(0x89); we(0xC1)  // mov rcx, rax (src base)
+        if flat > 0 { we(0x4C); we(0x8B); we(0x11) }           // mov r10, [rcx] (field 0)
+        if flat > 1 { we(0x4C); we(0x8B); we(0x59); we(0xF8) } // mov r11, [rcx-8] (field 1)
+        if flat > 2 { we(0x4C); we(0x8B); we(0x61); we(0xF0) } // mov r12, [rcx-16] (field 2)
     }
     // Epilogue: mov rsp, rbp; pop rbp; ret
     we(0x48)
