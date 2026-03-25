@@ -18,7 +18,7 @@ Notes:
   - Native mode compiles to an ELF before execution.
   - `build` is a compatibility alias for native compilation only.
   - REPL is not yet supported in native mode.
-  - --show-ast and --show-types are not yet supported in native mode.
+  - `check --show-ast` and `check --show-types` use native compiler summaries.
 EOF
 }
 
@@ -38,11 +38,84 @@ compile_quiet() {
   local src="$1"
   local out="$2"
   local log="$3"
-  if "$NATIVE_BIN" "$src" "$out" >"$log" 2>&1; then
+  shift 3
+  if "$NATIVE_BIN" "$src" "$out" "$@" >"$log" 2>&1; then
     return 0
   fi
   cat "$log" >&2
   return 1
+}
+
+print_native_summary_log() {
+  local log="$1"
+  awk '
+    /^AST summary:/ { section="ast"; print; next }
+    /^Type summary:/ { section="types"; print; next }
+    /^compile: fns=/ { section=""; next }
+    section == "ast" {
+      if ($0 ~ /^struct#/ || $0 ~ /^enum#/ || $0 ~ /^global#/ || $0 ~ /^fn#/ || $0 ~ /^[(]/ || $0 ~ /^ -> /) {
+        print
+      }
+      next
+    }
+    section == "types" {
+      if ($0 ~ /^global#/ || $0 ~ /^fn#/ || $0 ~ /^: arity/ || $0 ~ /^ -> /) {
+        print
+      }
+      next
+    }
+  ' "$log"
+}
+
+parse_check_args() {
+  local src_ref="$1"
+  local show_ast_ref="$2"
+  local show_types_ref="$3"
+  shift 3
+
+  printf -v "$src_ref" '%s' ""
+  printf -v "$show_ast_ref" '%s' "0"
+  printf -v "$show_types_ref" '%s' "0"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        cat <<'EOF'
+Type-check a Sounio source file without keeping the produced ELF
+
+Usage:
+  souc check <file.sio> [--show-ast] [--show-types]
+EOF
+        exit 0
+        ;;
+      --show-ast)
+        printf -v "$show_ast_ref" '%s' "1"
+        shift
+        ;;
+      --show-types)
+        printf -v "$show_types_ref" '%s' "1"
+        shift
+        ;;
+      -*)
+        echo "error: unsupported argument for check: $1" >&2
+        exit 2
+        ;;
+      *)
+        if [[ -z "${!src_ref}" ]]; then
+          printf -v "$src_ref" '%s' "$1"
+        else
+          echo "error: unexpected extra argument: $1" >&2
+          exit 2
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "${!src_ref}" ]]; then
+    echo "error: missing input .sio file" >&2
+    exit 2
+  fi
 }
 
 parse_build_args() {
@@ -128,8 +201,8 @@ native compiler: $NATIVE_BIN
 [-] LLVM backend
 [-] GPU codegen
 [-] REPL
-[-] --show-ast
-[-] --show-types
+[+] --show-ast
+[+] --show-types
 EOF
     ;;
   repl)
@@ -138,28 +211,22 @@ EOF
     ;;
   check)
     require_native
-    src="${1:-}"
-    if [[ -z "$src" ]]; then
-      usage >&2
-      exit 1
-    fi
-    shift || true
-    for extra in "$@"; do
-      case "$extra" in
-        --show-ast|--show-types)
-          unsupported_flag "$extra"
-          ;;
-        *)
-          echo "error: unsupported argument for check: $extra" >&2
-          exit 2
-          ;;
-      esac
-    done
+    parse_check_args src show_ast show_types "$@"
     tmp_out="$(mktemp /tmp/souc-check-XXXXXX.elf)"
     tmp_log="$(mktemp /tmp/souc-check-XXXXXX.log)"
     trap 'rm -f "$tmp_out" "$tmp_log"' EXIT
-    compile_quiet "$src" "$tmp_out" "$tmp_log"
+    extra_flags=()
+    if [[ "$show_ast" == "1" ]]; then
+      extra_flags+=(--show-ast)
+    fi
+    if [[ "$show_types" == "1" ]]; then
+      extra_flags+=(--show-types)
+    fi
+    compile_quiet "$src" "$tmp_out" "$tmp_log" "${extra_flags[@]}"
     rm -f "$tmp_out"
+    if [[ ${#extra_flags[@]} -gt 0 ]]; then
+      print_native_summary_log "$tmp_log"
+    fi
     echo "All checks passed"
     ;;
   run)
@@ -189,20 +256,37 @@ EOF
     fi
     shift || true
     out="a.elf"
+    extra_flags=()
     if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
       usage
       exit 0
     fi
-    if [[ "${1:-}" == "-o" ]]; then
-      out="${2:-}"
-      if [[ -z "$out" ]]; then
-        echo "error: missing output after -o" >&2
-        exit 2
-      fi
-    elif [[ $# -ge 1 ]]; then
-      out="$1"
-    fi
-    "$NATIVE_BIN" "$src" "$out"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -o)
+          out="${2:-}"
+          if [[ -z "$out" ]]; then
+            echo "error: missing output after -o" >&2
+            exit 2
+          fi
+          shift 2
+          ;;
+        --show-ast|--show-types)
+          extra_flags+=("$1")
+          shift
+          ;;
+        *)
+          if [[ "$out" == "a.elf" ]]; then
+            out="$1"
+            shift
+          else
+            echo "error: unexpected extra argument: $1" >&2
+            exit 2
+          fi
+          ;;
+      esac
+    done
+    "$NATIVE_BIN" "$src" "$out" "${extra_flags[@]}"
     chmod +x "$out"
     ;;
   build)
