@@ -5844,6 +5844,7 @@ var MC_PARAM_IS_F64: [i64; 1024] = [0; 1024]  // 1 if param type is f64
 // --- Function return type tracking ---
 // -1 = scalar, >=0 = struct index
 var MC_FN_RET_TYPE: [i64; 256] = [-1; 256]  // -1=scalar, >=0=struct index
+var MC_CUR_FI: i64 = 0  // current function index being compiled
 
 // Frame size: fixed 4096 bytes (512 slots * 8)
 fn MC_FRAME_SIZE() -> i64 { 4096 }
@@ -7628,37 +7629,32 @@ fn mc_emit_call(name_s: i64, name_len: i64) with Mut, Panic, Div {
     // Find target function
     let fn_idx = mc_find_fn(name_s, name_len)
     if fn_idx >= 0 {
-        // call rel32 — emit sentinel, will be patched
+        // Check if this function returns a struct (SRET)
+        let ret_si = MC_FN_RET_TYPE[fn_idx as usize]
+        var sret_base: i64 = -1
+        if ret_si >= 0 {
+            // Pre-allocate caller-owned storage for return struct
+            let flat = MC_ST_FLAT_SIZE[ret_si as usize]
+            sret_base = MC_NEXT_SLOT
+            MC_NEXT_SLOT = MC_NEXT_SLOT + flat
+            // Zero-init the slots
+            var zi: i64 = 0
+            while zi < flat { we(0x48); we(0x31); we(0xC0); mc_emit_store_rax(sret_base + zi); zi = zi + 1 }
+            // Pass destination pointer as hidden last arg (r10)
+            mc_emit_lea_slot(sret_base + flat - 1)
+            we(0x49); we(0x89); we(0xC2)  // mov r10, rax (SRET dest ptr)
+        }
+        // call rel32
         we(0xe8)
         MC_CALL_FIX_OFF[MC_CALL_FIX_COUNT as usize] = WIDE_LEN
         MC_CALL_FIX_TARGET[MC_CALL_FIX_COUNT as usize] = fn_idx
         MC_CALL_FIX_COUNT = MC_CALL_FIX_COUNT + 1
         we32(0)  // placeholder
-        // Struct return: copy callee data into caller-owned slots
-        let ret_si = MC_FN_RET_TYPE[fn_idx as usize]
         if ret_si >= 0 {
-            let flat = MC_ST_FLAT_SIZE[ret_si as usize]
-            // Callee returned struct pointer in rax — but callee frame is dead.
-            // Fix: allocate caller-owned slots, then COPY using memcpy-style
-            // (the callee data is just above rsp in the red zone — safe for 128 bytes)
-            let dst_base = MC_NEXT_SLOT
-            MC_NEXT_SLOT = MC_NEXT_SLOT + flat
-            // rax = src pointer from callee (dead frame, but data still in red zone)
-            // Save src pointer to r10 (caller-save, won't be clobbered)
-            we(0x49); we(0x89); we(0xC2)  // mov r10, rax
-            // Copy each field: read from [r10 - ci*8], store to caller slot
-            var ci: i64 = 0
-            while ci < flat {
-                if ci == 0 {
-                    we(0x49); we(0x8B); we(0x02)  // mov rax, [r10]
-                } else {
-                    we(0x49); we(0x8B); we(0x82)  // mov rax, [r10 + disp32]
-                    let d = 0 - (ci * 8)
-                    we(d & 0xFF); we((d >> 8) & 0xFF); we((d >> 16) & 0xFF); we((d >> 24) & 0xFF)
-                }
-                mc_emit_store_rax(dst_base + flat - 1 - ci)
-                ci = ci + 1
-            }
+            // After call: lea rax to sret base (caller already owns the storage)
+            let flat2 = MC_ST_FLAT_SIZE[ret_si as usize]
+            mc_emit_lea_slot(sret_base + flat2 - 1)
+        }
             // lea rax, [rbp - (dst_base + flat - 1 + 1)*8] — new base
             mc_emit_lea_slot(dst_base + flat - 1)
         }
@@ -8424,6 +8420,34 @@ fn mc_stmt_return() with Mut, Panic, Div {
         we(0x48)
         we(0x31)
         we(0xc0)  // xor rax, rax
+    }
+    // SRET: if current function returns a struct, copy from rax (local ptr) to r10 (caller dest)
+    let cur_ret_si = MC_FN_RET_TYPE[MC_CUR_FI as usize]
+    if cur_ret_si >= 0 {
+        let flat = MC_ST_FLAT_SIZE[cur_ret_si as usize]
+        // rax = local struct ptr, r10 = caller SRET dest (passed before call)
+        we(0x48); we(0x89); we(0xC1)  // mov rcx, rax (src ptr)
+        var si: i64 = 0
+        while si < flat {
+            // mov rax, [rcx - si*8]
+            if si == 0 {
+                we(0x48); we(0x8B); we(0x01)  // mov rax, [rcx]
+            } else {
+                we(0x48); we(0x8B); we(0x81)  // mov rax, [rcx + disp32]
+                let sd = 0 - (si * 8)
+                we(sd & 0xFF); we((sd >> 8) & 0xFF); we((sd >> 16) & 0xFF); we((sd >> 24) & 0xFF)
+            }
+            // mov [r10 - si*8], rax
+            if si == 0 {
+                we(0x49); we(0x89); we(0x02)  // mov [r10], rax
+            } else {
+                we(0x49); we(0x89); we(0x82)  // mov [r10 + disp32]
+                let dd = 0 - (si * 8)
+                we(dd & 0xFF); we((dd >> 8) & 0xFF); we((dd >> 16) & 0xFF); we((dd >> 24) & 0xFF)
+            }
+            si = si + 1
+        }
+        we(0x4C); we(0x89); we(0xD0)  // mov rax, r10 (return caller's ptr)
     }
     // Epilogue: mov rsp, rbp; pop rbp; ret
     we(0x48)
@@ -9381,6 +9405,7 @@ fn mc_compile_functions() with Mut, Panic, Div {
     var fi: i64 = 0
     while fi < MC_FN_COUNT {
         print("CF:")
+        MC_CUR_FI = fi
         MC_FN_OFF[fi as usize] = WIDE_LEN
 
         // Reset locals
