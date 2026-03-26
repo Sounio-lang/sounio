@@ -6,6 +6,9 @@
 // T3: d/dx(sin(x)) = cos(x), eval at x=0 gives 1
 // T4: d/dx(exp(x)) = exp(x), eval at x=0 gives 1
 // T5: Product rule: d/dx(x * sin(x)) at x=pi/2 gives ~1
+//
+// Uses global flat arrays instead of ExprArena struct+references
+// to avoid lean_single's &!Struct write-through limitation.
 
 // =============================================================================
 // Tag constants
@@ -22,154 +25,142 @@ fn TAG_SIN() -> i64 { 7 }
 fn TAG_COS() -> i64 { 8 }
 fn TAG_EXP() -> i64 { 9 }
 fn TAG_LOG() -> i64 { 10 }
-fn TAG_POW() -> i64 { 11 }
 
 // =============================================================================
-// Expression Arena
+// Global arena (flat arrays, BSS-allocated)
 // =============================================================================
 
-struct ExprArena {
-    tags: [i64; 256],
-    left: [i64; 256],
-    right: [i64; 256],
-    values: [f64; 256],
-    var_ids: [i64; 256],
-    count: i64,
-}
+var AR_TAGS: [i64; 256] = [0; 256]
+var AR_LEFT: [i64; 256] = [0; 256]
+var AR_RIGHT: [i64; 256] = [0; 256]
+var AR_VALS: [f64; 256] = [0.0; 256]
+var AR_VIDS: [i64; 256] = [0; 256]
+var AR_COUNT: i64 = 0
 
-fn arena_new() -> ExprArena {
-    ExprArena {
-        tags: [0; 256],
-        left: [0; 256],
-        right: [0; 256],
-        values: [0.0; 256],
-        var_ids: [0; 256],
-        count: 0,
-    }
-}
+fn arena_reset() with Mut { AR_COUNT = 0 }
 
 // =============================================================================
-// Node constructors
+// Node constructors (operate on global arena)
 // =============================================================================
 
-fn expr_const(arena: &!ExprArena, value: f64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_CONST()
-    arena.left[idx] = 0 - 1
-    arena.right[idx] = 0 - 1
-    arena.values[idx] = value
-    arena.var_ids[idx] = 0 - 1
-    arena.count = arena.count + 1
+fn expr_const(value: f64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 0  // TAG_CONST
+    AR_LEFT[idx] = 0 - 1
+    AR_RIGHT[idx] = 0 - 1
+    AR_VALS[idx] = value
+    AR_VIDS[idx] = 0 - 1
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
-fn expr_var(arena: &!ExprArena, var_id: i64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_VAR()
-    arena.left[idx] = 0 - 1
-    arena.right[idx] = 0 - 1
-    arena.values[idx] = 0.0
-    arena.var_ids[idx] = var_id
-    arena.count = arena.count + 1
+fn expr_var(var_id: i64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 1  // TAG_VAR
+    AR_LEFT[idx] = 0 - 1
+    AR_RIGHT[idx] = 0 - 1
+    AR_VALS[idx] = 0.0
+    AR_VIDS[idx] = var_id
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
-fn expr_add(arena: &!ExprArena, l: i64, r: i64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_ADD()
-    arena.left[idx] = l
-    arena.right[idx] = r
-    arena.values[idx] = 0.0
-    arena.var_ids[idx] = 0 - 1
-    arena.count = arena.count + 1
+fn expr_add(l: i64, r: i64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 2  // TAG_ADD
+    AR_LEFT[idx] = l
+    AR_RIGHT[idx] = r
+    AR_VALS[idx] = 0.0
+    AR_VIDS[idx] = 0 - 1
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
-fn expr_sub(arena: &!ExprArena, l: i64, r: i64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_SUB()
-    arena.left[idx] = l
-    arena.right[idx] = r
-    arena.values[idx] = 0.0
-    arena.var_ids[idx] = 0 - 1
-    arena.count = arena.count + 1
+fn expr_sub(l: i64, r: i64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 3  // TAG_SUB
+    AR_LEFT[idx] = l
+    AR_RIGHT[idx] = r
+    AR_VALS[idx] = 0.0
+    AR_VIDS[idx] = 0 - 1
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
-fn expr_mul(arena: &!ExprArena, l: i64, r: i64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_MUL()
-    arena.left[idx] = l
-    arena.right[idx] = r
-    arena.values[idx] = 0.0
-    arena.var_ids[idx] = 0 - 1
-    arena.count = arena.count + 1
+fn expr_mul(l: i64, r: i64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 4  // TAG_MUL
+    AR_LEFT[idx] = l
+    AR_RIGHT[idx] = r
+    AR_VALS[idx] = 0.0
+    AR_VIDS[idx] = 0 - 1
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
-fn expr_div(arena: &!ExprArena, l: i64, r: i64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_DIV()
-    arena.left[idx] = l
-    arena.right[idx] = r
-    arena.values[idx] = 0.0
-    arena.var_ids[idx] = 0 - 1
-    arena.count = arena.count + 1
+fn expr_div(l: i64, r: i64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 5  // TAG_DIV
+    AR_LEFT[idx] = l
+    AR_RIGHT[idx] = r
+    AR_VALS[idx] = 0.0
+    AR_VIDS[idx] = 0 - 1
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
-fn expr_neg(arena: &!ExprArena, child: i64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_NEG()
-    arena.left[idx] = child
-    arena.right[idx] = 0 - 1
-    arena.values[idx] = 0.0
-    arena.var_ids[idx] = 0 - 1
-    arena.count = arena.count + 1
+fn expr_neg(child: i64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 6  // TAG_NEG
+    AR_LEFT[idx] = child
+    AR_RIGHT[idx] = 0 - 1
+    AR_VALS[idx] = 0.0
+    AR_VIDS[idx] = 0 - 1
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
-fn expr_sin(arena: &!ExprArena, child: i64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_SIN()
-    arena.left[idx] = child
-    arena.right[idx] = 0 - 1
-    arena.values[idx] = 0.0
-    arena.var_ids[idx] = 0 - 1
-    arena.count = arena.count + 1
+fn expr_sin(child: i64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 7  // TAG_SIN
+    AR_LEFT[idx] = child
+    AR_RIGHT[idx] = 0 - 1
+    AR_VALS[idx] = 0.0
+    AR_VIDS[idx] = 0 - 1
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
-fn expr_cos(arena: &!ExprArena, child: i64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_COS()
-    arena.left[idx] = child
-    arena.right[idx] = 0 - 1
-    arena.values[idx] = 0.0
-    arena.var_ids[idx] = 0 - 1
-    arena.count = arena.count + 1
+fn expr_cos(child: i64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 8  // TAG_COS
+    AR_LEFT[idx] = child
+    AR_RIGHT[idx] = 0 - 1
+    AR_VALS[idx] = 0.0
+    AR_VIDS[idx] = 0 - 1
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
-fn expr_exp(arena: &!ExprArena, child: i64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_EXP()
-    arena.left[idx] = child
-    arena.right[idx] = 0 - 1
-    arena.values[idx] = 0.0
-    arena.var_ids[idx] = 0 - 1
-    arena.count = arena.count + 1
+fn expr_exp(child: i64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 9  // TAG_EXP
+    AR_LEFT[idx] = child
+    AR_RIGHT[idx] = 0 - 1
+    AR_VALS[idx] = 0.0
+    AR_VIDS[idx] = 0 - 1
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
-fn expr_log(arena: &!ExprArena, child: i64) -> i64 with Mut, Panic {
-    let idx = arena.count
-    arena.tags[idx] = TAG_LOG()
-    arena.left[idx] = child
-    arena.right[idx] = 0 - 1
-    arena.values[idx] = 0.0
-    arena.var_ids[idx] = 0 - 1
-    arena.count = arena.count + 1
+fn expr_log(child: i64) -> i64 with Mut, Panic {
+    let idx = AR_COUNT
+    AR_TAGS[idx] = 10  // TAG_LOG
+    AR_LEFT[idx] = child
+    AR_RIGHT[idx] = 0 - 1
+    AR_VALS[idx] = 0.0
+    AR_VIDS[idx] = 0 - 1
+    AR_COUNT = AR_COUNT + 1
     idx
 }
 
@@ -239,53 +230,53 @@ fn sym_exp(x: f64) -> f64 with Mut, Panic, Div {
 // Evaluation
 // =============================================================================
 
-fn expr_eval(arena: &ExprArena, idx: i64, vars: &[f64; 16], n_vars: i64) -> f64 with Mut, Panic, Div {
-    let tag = arena.tags[idx]
+fn expr_eval(idx: i64, vars: &[f64; 16], n_vars: i64) -> f64 with Mut, Panic, Div {
+    let tag = AR_TAGS[idx]
 
-    if tag == TAG_CONST() {
-        return arena.values[idx]
+    if tag == 0 {  // TAG_CONST
+        return AR_VALS[idx]
     }
-    if tag == TAG_VAR() {
-        let vid = arena.var_ids[idx]
+    if tag == 1 {  // TAG_VAR
+        let vid = AR_VIDS[idx]
         if vid >= 0 && vid < n_vars {
-            return (*vars)[vid]
+            return vars[vid]
         }
         return 0.0
     }
-    if tag == TAG_ADD() {
-        let lv = expr_eval(arena, arena.left[idx], vars, n_vars)
-        let rv = expr_eval(arena, arena.right[idx], vars, n_vars)
+    if tag == 2 {  // TAG_ADD
+        let lv = expr_eval(AR_LEFT[idx], vars, n_vars)
+        let rv = expr_eval(AR_RIGHT[idx], vars, n_vars)
         return lv + rv
     }
-    if tag == TAG_SUB() {
-        let lv = expr_eval(arena, arena.left[idx], vars, n_vars)
-        let rv = expr_eval(arena, arena.right[idx], vars, n_vars)
+    if tag == 3 {  // TAG_SUB
+        let lv = expr_eval(AR_LEFT[idx], vars, n_vars)
+        let rv = expr_eval(AR_RIGHT[idx], vars, n_vars)
         return lv - rv
     }
-    if tag == TAG_MUL() {
-        let lv = expr_eval(arena, arena.left[idx], vars, n_vars)
-        let rv = expr_eval(arena, arena.right[idx], vars, n_vars)
+    if tag == 4 {  // TAG_MUL
+        let lv = expr_eval(AR_LEFT[idx], vars, n_vars)
+        let rv = expr_eval(AR_RIGHT[idx], vars, n_vars)
         return lv * rv
     }
-    if tag == TAG_DIV() {
-        let lv = expr_eval(arena, arena.left[idx], vars, n_vars)
-        let rv = expr_eval(arena, arena.right[idx], vars, n_vars)
+    if tag == 5 {  // TAG_DIV
+        let lv = expr_eval(AR_LEFT[idx], vars, n_vars)
+        let rv = expr_eval(AR_RIGHT[idx], vars, n_vars)
         return lv / rv
     }
-    if tag == TAG_NEG() {
-        let cv = expr_eval(arena, arena.left[idx], vars, n_vars)
+    if tag == 6 {  // TAG_NEG
+        let cv = expr_eval(AR_LEFT[idx], vars, n_vars)
         return 0.0 - cv
     }
-    if tag == TAG_SIN() {
-        let cv = expr_eval(arena, arena.left[idx], vars, n_vars)
+    if tag == 7 {  // TAG_SIN
+        let cv = expr_eval(AR_LEFT[idx], vars, n_vars)
         return sym_sin(cv)
     }
-    if tag == TAG_COS() {
-        let cv = expr_eval(arena, arena.left[idx], vars, n_vars)
+    if tag == 8 {  // TAG_COS
+        let cv = expr_eval(AR_LEFT[idx], vars, n_vars)
         return sym_cos(cv)
     }
-    if tag == TAG_EXP() {
-        let cv = expr_eval(arena, arena.left[idx], vars, n_vars)
+    if tag == 9 {  // TAG_EXP
+        let cv = expr_eval(AR_LEFT[idx], vars, n_vars)
         return sym_exp(cv)
     }
     return 0.0
@@ -295,178 +286,174 @@ fn expr_eval(arena: &ExprArena, idx: i64, vars: &[f64; 16], n_vars: i64) -> f64 
 // Symbolic differentiation
 // =============================================================================
 
-fn expr_diff(arena: &!ExprArena, idx: i64, var_id: i64) -> i64 with Mut, Panic, Div {
-    let tag = arena.tags[idx]
+fn expr_diff(idx: i64, var_id: i64) -> i64 with Mut, Panic, Div {
+    let tag = AR_TAGS[idx]
 
-    if tag == TAG_CONST() {
-        return expr_const(arena, 0.0)
+    if tag == 0 {  // TAG_CONST
+        return expr_const(0.0)
     }
 
-    if tag == TAG_VAR() {
-        if arena.var_ids[idx] == var_id {
-            return expr_const(arena, 1.0)
+    if tag == 1 {  // TAG_VAR
+        if AR_VIDS[idx] == var_id {
+            return expr_const(1.0)
         }
-        return expr_const(arena, 0.0)
+        return expr_const(0.0)
     }
 
-    if tag == TAG_ADD() {
-        let dl = expr_diff(arena, arena.left[idx], var_id)
-        let dr = expr_diff(arena, arena.right[idx], var_id)
-        return expr_add(arena, dl, dr)
+    if tag == 2 {  // TAG_ADD
+        let dl = expr_diff(AR_LEFT[idx], var_id)
+        let dr = expr_diff(AR_RIGHT[idx], var_id)
+        return expr_add(dl, dr)
     }
 
-    if tag == TAG_SUB() {
-        let dl = expr_diff(arena, arena.left[idx], var_id)
-        let dr = expr_diff(arena, arena.right[idx], var_id)
-        return expr_sub(arena, dl, dr)
+    if tag == 3 {  // TAG_SUB
+        let dl = expr_diff(AR_LEFT[idx], var_id)
+        let dr = expr_diff(AR_RIGHT[idx], var_id)
+        return expr_sub(dl, dr)
     }
 
-    if tag == TAG_MUL() {
-        let l = arena.left[idx]
-        let r = arena.right[idx]
-        let dl = expr_diff(arena, l, var_id)
-        let dr = expr_diff(arena, r, var_id)
-        let t1 = expr_mul(arena, dl, r)
-        let t2 = expr_mul(arena, l, dr)
-        return expr_add(arena, t1, t2)
+    if tag == 4 {  // TAG_MUL
+        let l = AR_LEFT[idx]
+        let r = AR_RIGHT[idx]
+        let dl = expr_diff(l, var_id)
+        let dr = expr_diff(r, var_id)
+        let t1 = expr_mul(dl, r)
+        let t2 = expr_mul(l, dr)
+        return expr_add(t1, t2)
     }
 
-    if tag == TAG_DIV() {
-        let l = arena.left[idx]
-        let r = arena.right[idx]
-        let dl = expr_diff(arena, l, var_id)
-        let dr = expr_diff(arena, r, var_id)
-        let num_l = expr_mul(arena, dl, r)
-        let num_r = expr_mul(arena, l, dr)
-        let numer = expr_sub(arena, num_l, num_r)
-        let denom = expr_mul(arena, r, r)
-        return expr_div(arena, numer, denom)
+    if tag == 5 {  // TAG_DIV
+        let l = AR_LEFT[idx]
+        let r = AR_RIGHT[idx]
+        let dl = expr_diff(l, var_id)
+        let dr = expr_diff(r, var_id)
+        let num_l = expr_mul(dl, r)
+        let num_r = expr_mul(l, dr)
+        let numer = expr_sub(num_l, num_r)
+        let denom = expr_mul(r, r)
+        return expr_div(numer, denom)
     }
 
-    if tag == TAG_NEG() {
-        let dc = expr_diff(arena, arena.left[idx], var_id)
-        return expr_neg(arena, dc)
+    if tag == 6 {  // TAG_NEG
+        let dc = expr_diff(AR_LEFT[idx], var_id)
+        return expr_neg(dc)
     }
 
-    // d/dx[sin(f)] = cos(f) * f'
-    if tag == TAG_SIN() {
-        let child = arena.left[idx]
-        let dc = expr_diff(arena, child, var_id)
-        let cos_node = expr_cos(arena, child)
-        return expr_mul(arena, cos_node, dc)
+    if tag == 7 {  // TAG_SIN — d/dx[sin(f)] = cos(f) * f'
+        let child = AR_LEFT[idx]
+        let dc = expr_diff(child, var_id)
+        let cos_node = expr_cos(child)
+        return expr_mul(cos_node, dc)
     }
 
-    // d/dx[cos(f)] = -sin(f) * f'
-    if tag == TAG_COS() {
-        let child = arena.left[idx]
-        let dc = expr_diff(arena, child, var_id)
-        let sin_node = expr_sin(arena, child)
-        let neg_sin = expr_neg(arena, sin_node)
-        return expr_mul(arena, neg_sin, dc)
+    if tag == 8 {  // TAG_COS — d/dx[cos(f)] = -sin(f) * f'
+        let child = AR_LEFT[idx]
+        let dc = expr_diff(child, var_id)
+        let sin_node = expr_sin(child)
+        let neg_sin = expr_neg(sin_node)
+        return expr_mul(neg_sin, dc)
     }
 
-    // d/dx[exp(f)] = exp(f) * f'
-    if tag == TAG_EXP() {
-        let child = arena.left[idx]
-        let dc = expr_diff(arena, child, var_id)
-        let exp_node = expr_exp(arena, child)
-        return expr_mul(arena, exp_node, dc)
+    if tag == 9 {  // TAG_EXP — d/dx[exp(f)] = exp(f) * f'
+        let child = AR_LEFT[idx]
+        let dc = expr_diff(child, var_id)
+        let exp_node = expr_exp(child)
+        return expr_mul(exp_node, dc)
     }
 
-    // d/dx[log(f)] = f' / f
-    if tag == TAG_LOG() {
-        let child = arena.left[idx]
-        let dc = expr_diff(arena, child, var_id)
-        return expr_div(arena, dc, child)
+    if tag == 10 {  // TAG_LOG — d/dx[log(f)] = f' / f
+        let child = AR_LEFT[idx]
+        let dc = expr_diff(child, var_id)
+        return expr_div(dc, child)
     }
 
-    return expr_const(arena, 0.0)
+    return expr_const(0.0)
 }
 
 // =============================================================================
 // Simplification (basic)
 // =============================================================================
 
-fn is_const_val(arena: &ExprArena, idx: i64, val: f64) -> bool with Panic {
-    if arena.tags[idx] == TAG_CONST() {
-        let diff = arena.values[idx] - val
+fn is_const_val(idx: i64, val: f64) -> bool with Panic {
+    if AR_TAGS[idx] == 0 {  // TAG_CONST
+        let diff = AR_VALS[idx] - val
         if diff < 0.0 { return (0.0 - diff) < 1.0e-15 }
         return diff < 1.0e-15
     }
     return false
 }
 
-fn expr_simplify(arena: &!ExprArena, idx: i64) -> i64 with Mut, Panic, Div {
-    let tag = arena.tags[idx]
+fn expr_simplify(idx: i64) -> i64 with Mut, Panic, Div {
+    let tag = AR_TAGS[idx]
 
-    if tag == TAG_CONST() { return idx }
-    if tag == TAG_VAR() { return idx }
+    if tag == 0 { return idx }  // TAG_CONST
+    if tag == 1 { return idx }  // TAG_VAR
 
-    if tag == TAG_NEG() {
-        let sc = expr_simplify(arena, arena.left[idx])
-        if arena.tags[sc] == TAG_CONST() {
-            return expr_const(arena, 0.0 - arena.values[sc])
+    if tag == 6 {  // TAG_NEG
+        let sc = expr_simplify(AR_LEFT[idx])
+        if AR_TAGS[sc] == 0 {  // TAG_CONST
+            return expr_const(0.0 - AR_VALS[sc])
         }
-        if arena.tags[sc] == TAG_NEG() {
-            return arena.left[sc]
+        if AR_TAGS[sc] == 6 {  // TAG_NEG
+            return AR_LEFT[sc]
         }
-        arena.left[idx] = sc
+        AR_LEFT[idx] = sc
         return idx
     }
 
-    if tag == TAG_ADD() {
-        let sl = expr_simplify(arena, arena.left[idx])
-        let sr = expr_simplify(arena, arena.right[idx])
-        if arena.tags[sl] == TAG_CONST() && arena.tags[sr] == TAG_CONST() {
-            return expr_const(arena, arena.values[sl] + arena.values[sr])
+    if tag == 2 {  // TAG_ADD
+        let sl = expr_simplify(AR_LEFT[idx])
+        let sr = expr_simplify(AR_RIGHT[idx])
+        if AR_TAGS[sl] == 0 && AR_TAGS[sr] == 0 {
+            return expr_const(AR_VALS[sl] + AR_VALS[sr])
         }
-        if is_const_val(arena, sl, 0.0) { return sr }
-        if is_const_val(arena, sr, 0.0) { return sl }
-        arena.left[idx] = sl
-        arena.right[idx] = sr
+        if is_const_val(sl, 0.0) { return sr }
+        if is_const_val(sr, 0.0) { return sl }
+        AR_LEFT[idx] = sl
+        AR_RIGHT[idx] = sr
         return idx
     }
 
-    if tag == TAG_SUB() {
-        let sl = expr_simplify(arena, arena.left[idx])
-        let sr = expr_simplify(arena, arena.right[idx])
-        if arena.tags[sl] == TAG_CONST() && arena.tags[sr] == TAG_CONST() {
-            return expr_const(arena, arena.values[sl] - arena.values[sr])
+    if tag == 3 {  // TAG_SUB
+        let sl = expr_simplify(AR_LEFT[idx])
+        let sr = expr_simplify(AR_RIGHT[idx])
+        if AR_TAGS[sl] == 0 && AR_TAGS[sr] == 0 {
+            return expr_const(AR_VALS[sl] - AR_VALS[sr])
         }
-        if is_const_val(arena, sr, 0.0) { return sl }
-        if is_const_val(arena, sl, 0.0) { return expr_neg(arena, sr) }
-        arena.left[idx] = sl
-        arena.right[idx] = sr
+        if is_const_val(sr, 0.0) { return sl }
+        if is_const_val(sl, 0.0) { return expr_neg(sr) }
+        AR_LEFT[idx] = sl
+        AR_RIGHT[idx] = sr
         return idx
     }
 
-    if tag == TAG_MUL() {
-        let sl = expr_simplify(arena, arena.left[idx])
-        let sr = expr_simplify(arena, arena.right[idx])
-        if arena.tags[sl] == TAG_CONST() && arena.tags[sr] == TAG_CONST() {
-            return expr_const(arena, arena.values[sl] * arena.values[sr])
+    if tag == 4 {  // TAG_MUL
+        let sl = expr_simplify(AR_LEFT[idx])
+        let sr = expr_simplify(AR_RIGHT[idx])
+        if AR_TAGS[sl] == 0 && AR_TAGS[sr] == 0 {
+            return expr_const(AR_VALS[sl] * AR_VALS[sr])
         }
-        if is_const_val(arena, sl, 0.0) { return expr_const(arena, 0.0) }
-        if is_const_val(arena, sr, 0.0) { return expr_const(arena, 0.0) }
-        if is_const_val(arena, sl, 1.0) { return sr }
-        if is_const_val(arena, sr, 1.0) { return sl }
-        arena.left[idx] = sl
-        arena.right[idx] = sr
+        if is_const_val(sl, 0.0) { return expr_const(0.0) }
+        if is_const_val(sr, 0.0) { return expr_const(0.0) }
+        if is_const_val(sl, 1.0) { return sr }
+        if is_const_val(sr, 1.0) { return sl }
+        AR_LEFT[idx] = sl
+        AR_RIGHT[idx] = sr
         return idx
     }
 
-    if tag == TAG_DIV() {
-        let sl = expr_simplify(arena, arena.left[idx])
-        let sr = expr_simplify(arena, arena.right[idx])
-        if arena.tags[sl] == TAG_CONST() && arena.tags[sr] == TAG_CONST() {
-            if sym_abs(arena.values[sr]) > 1.0e-30 {
-                return expr_const(arena, arena.values[sl] / arena.values[sr])
+    if tag == 5 {  // TAG_DIV
+        let sl = expr_simplify(AR_LEFT[idx])
+        let sr = expr_simplify(AR_RIGHT[idx])
+        if AR_TAGS[sl] == 0 && AR_TAGS[sr] == 0 {
+            if sym_abs(AR_VALS[sr]) > 1.0e-30 {
+                return expr_const(AR_VALS[sl] / AR_VALS[sr])
             }
         }
-        if is_const_val(arena, sl, 0.0) { return expr_const(arena, 0.0) }
-        if is_const_val(arena, sr, 1.0) { return sl }
-        arena.left[idx] = sl
-        arena.right[idx] = sr
+        if is_const_val(sl, 0.0) { return expr_const(0.0) }
+        if is_const_val(sr, 1.0) { return sl }
+        AR_LEFT[idx] = sl
+        AR_RIGHT[idx] = sr
         return idx
     }
 
@@ -500,76 +487,76 @@ fn print_f64_compact(v: f64) with IO, Mut, Panic, Div {
     }
 }
 
-fn expr_print(arena: &ExprArena, idx: i64) with IO, Mut, Panic, Div {
-    let tag = arena.tags[idx]
-    if tag == TAG_CONST() {
-        print_f64_compact(arena.values[idx])
+fn expr_print(idx: i64) with IO, Mut, Panic, Div {
+    let tag = AR_TAGS[idx]
+    if tag == 0 {
+        print_f64_compact(AR_VALS[idx])
         return
     }
-    if tag == TAG_VAR() {
+    if tag == 1 {
         print("x")
-        print_int(arena.var_ids[idx])
+        print_int(AR_VIDS[idx])
         return
     }
-    if tag == TAG_ADD() {
+    if tag == 2 {
         print("(")
-        expr_print(arena, arena.left[idx])
+        expr_print(AR_LEFT[idx])
         print(" + ")
-        expr_print(arena, arena.right[idx])
+        expr_print(AR_RIGHT[idx])
         print(")")
         return
     }
-    if tag == TAG_SUB() {
+    if tag == 3 {
         print("(")
-        expr_print(arena, arena.left[idx])
+        expr_print(AR_LEFT[idx])
         print(" - ")
-        expr_print(arena, arena.right[idx])
+        expr_print(AR_RIGHT[idx])
         print(")")
         return
     }
-    if tag == TAG_MUL() {
+    if tag == 4 {
         print("(")
-        expr_print(arena, arena.left[idx])
+        expr_print(AR_LEFT[idx])
         print(" * ")
-        expr_print(arena, arena.right[idx])
+        expr_print(AR_RIGHT[idx])
         print(")")
         return
     }
-    if tag == TAG_DIV() {
+    if tag == 5 {
         print("(")
-        expr_print(arena, arena.left[idx])
+        expr_print(AR_LEFT[idx])
         print(" / ")
-        expr_print(arena, arena.right[idx])
+        expr_print(AR_RIGHT[idx])
         print(")")
         return
     }
-    if tag == TAG_NEG() {
+    if tag == 6 {
         print("(0-")
-        expr_print(arena, arena.left[idx])
+        expr_print(AR_LEFT[idx])
         print(")")
         return
     }
-    if tag == TAG_SIN() {
+    if tag == 7 {
         print("sin(")
-        expr_print(arena, arena.left[idx])
+        expr_print(AR_LEFT[idx])
         print(")")
         return
     }
-    if tag == TAG_COS() {
+    if tag == 8 {
         print("cos(")
-        expr_print(arena, arena.left[idx])
+        expr_print(AR_LEFT[idx])
         print(")")
         return
     }
-    if tag == TAG_EXP() {
+    if tag == 9 {
         print("exp(")
-        expr_print(arena, arena.left[idx])
+        expr_print(AR_LEFT[idx])
         print(")")
         return
     }
-    if tag == TAG_LOG() {
+    if tag == 10 {
         print("log(")
-        expr_print(arena, arena.left[idx])
+        expr_print(AR_LEFT[idx])
         print(")")
         return
     }
@@ -621,17 +608,17 @@ fn print_f64_6(v: f64) -> i64 with IO, Mut, Panic, Div {
 
 // T1: eval(2*x + 3) at x=5 gives 13
 fn test_eval_linear() -> bool with IO, Mut, Panic, Div {
-    var arena = arena_new()
+    arena_reset()
     // Build: 2*x0 + 3
-    let two = expr_const(&! arena, 2.0)
-    let x = expr_var(&! arena, 0)
-    let three = expr_const(&! arena, 3.0)
-    let prod = expr_mul(&! arena, two, x)
-    let expr = expr_add(&! arena, prod, three)
+    let two = expr_const(2.0)
+    let x = expr_var(0)
+    let three = expr_const(3.0)
+    let prod = expr_mul(two, x)
+    let expr = expr_add(prod, three)
 
     var vars: [f64; 16] = [0.0; 16]
     vars[0] = 5.0
-    let result = expr_eval(&arena, expr, &vars, 1)
+    let result = expr_eval(expr, &vars, 1)
 
     print("  eval(2*x+3) at x=5 = ")
     print_f64_6(result)
@@ -642,27 +629,27 @@ fn test_eval_linear() -> bool with IO, Mut, Panic, Div {
 
 // T2: d/dx(x*x) simplify+eval at x=3 gives 6
 fn test_diff_x_squared() -> bool with IO, Mut, Panic, Div {
-    var arena = arena_new()
+    arena_reset()
     // Build: x0 * x0
-    let x = expr_var(&! arena, 0)
-    let x2 = expr_mul(&! arena, x, x)
+    let x = expr_var(0)
+    let x2 = expr_mul(x, x)
 
     // Differentiate w.r.t. x0
-    let dx2 = expr_diff(&! arena, x2, 0)
+    let dx2 = expr_diff(x2, 0)
 
     // Simplify
-    let sdx2 = expr_simplify(&! arena, dx2)
+    let sdx2 = expr_simplify(dx2)
 
     var vars: [f64; 16] = [0.0; 16]
     vars[0] = 3.0
-    let result = expr_eval(&arena, sdx2, &vars, 1)
+    let result = expr_eval(sdx2, &vars, 1)
 
     print("  d/dx(x*x) at x=3 = ")
     print_f64_6(result)
     println("")
 
     print("  expr: ")
-    expr_print(&arena, sdx2)
+    expr_print(sdx2)
     println("")
 
     return approx_eq(result, 6.0, 1.0e-8)
@@ -670,16 +657,16 @@ fn test_diff_x_squared() -> bool with IO, Mut, Panic, Div {
 
 // T3: d/dx(sin(x)) = cos(x), eval at x=0 gives 1
 fn test_diff_sin() -> bool with IO, Mut, Panic, Div {
-    var arena = arena_new()
-    let x = expr_var(&! arena, 0)
-    let sin_x = expr_sin(&! arena, x)
+    arena_reset()
+    let x = expr_var(0)
+    let sin_x = expr_sin(x)
 
-    let dsin = expr_diff(&! arena, sin_x, 0)
-    let sdsin = expr_simplify(&! arena, dsin)
+    let dsin = expr_diff(sin_x, 0)
+    let sdsin = expr_simplify(dsin)
 
     var vars: [f64; 16] = [0.0; 16]
     vars[0] = 0.0
-    let result = expr_eval(&arena, sdsin, &vars, 1)
+    let result = expr_eval(sdsin, &vars, 1)
 
     print("  d/dx(sin(x)) at x=0 = ")
     print_f64_6(result)
@@ -690,16 +677,16 @@ fn test_diff_sin() -> bool with IO, Mut, Panic, Div {
 
 // T4: d/dx(exp(x)) = exp(x), eval at x=0 gives 1
 fn test_diff_exp() -> bool with IO, Mut, Panic, Div {
-    var arena = arena_new()
-    let x = expr_var(&! arena, 0)
-    let exp_x = expr_exp(&! arena, x)
+    arena_reset()
+    let x = expr_var(0)
+    let exp_x = expr_exp(x)
 
-    let dexp = expr_diff(&! arena, exp_x, 0)
-    let sdexp = expr_simplify(&! arena, dexp)
+    let dexp = expr_diff(exp_x, 0)
+    let sdexp = expr_simplify(dexp)
 
     var vars: [f64; 16] = [0.0; 16]
     vars[0] = 0.0
-    let result = expr_eval(&arena, sdexp, &vars, 1)
+    let result = expr_eval(sdexp, &vars, 1)
 
     print("  d/dx(exp(x)) at x=0 = ")
     print_f64_6(result)
@@ -708,22 +695,20 @@ fn test_diff_exp() -> bool with IO, Mut, Panic, Div {
     return approx_eq(result, 1.0, 1.0e-8)
 }
 
-// T5: Product rule: d/dx(x * sin(x)) at x=pi/2
-// d/dx(x*sin(x)) = sin(x) + x*cos(x)
-// At x=pi/2: sin(pi/2) + (pi/2)*cos(pi/2) = 1 + (pi/2)*0 = 1
+// T5: Product rule: d/dx(x * sin(x)) at x=pi/2 gives ~1
 fn test_product_rule() -> bool with IO, Mut, Panic, Div {
-    var arena = arena_new()
-    let x = expr_var(&! arena, 0)
-    let sin_x = expr_sin(&! arena, x)
-    let prod = expr_mul(&! arena, x, sin_x)
+    arena_reset()
+    let x = expr_var(0)
+    let sin_x = expr_sin(x)
+    let prod = expr_mul(x, sin_x)
 
-    let dprod = expr_diff(&! arena, prod, 0)
-    let sdprod = expr_simplify(&! arena, dprod)
+    let dprod = expr_diff(prod, 0)
+    let sdprod = expr_simplify(dprod)
 
     let pi_half = 1.5707963267948966
     var vars: [f64; 16] = [0.0; 16]
     vars[0] = pi_half
-    let result = expr_eval(&arena, sdprod, &vars, 1)
+    let result = expr_eval(sdprod, &vars, 1)
 
     print("  d/dx(x*sin(x)) at x=pi/2 = ")
     print_f64_6(result)
