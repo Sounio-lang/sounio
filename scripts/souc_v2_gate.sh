@@ -52,7 +52,9 @@ TOTAL=$((TOTAL+1))
 if $S self-hosted/compiler/souc_v2/main.sio /tmp/gate_split1.elf 2>&1 | tail -1 && \
    chmod +x /tmp/gate_split1.elf && \
    /tmp/gate_split1.elf self-hosted/compiler/souc_v2/main.sio /tmp/gate_split2.elf 2>&1 | tail -1 && \
-   cmp -s /tmp/gate_split1.elf /tmp/gate_split2.elf; then
+   chmod +x /tmp/gate_split2.elf && \
+   /tmp/gate_split2.elf self-hosted/compiler/souc_v2/main.sio /tmp/gate_split3.elf 2>&1 | tail -1 && \
+   cmp -s /tmp/gate_split2.elf /tmp/gate_split3.elf; then
     echo "PASS: souc_v2 split fixed-point"
     PASS=$((PASS+1))
 else
@@ -80,6 +82,50 @@ run_test() {
         fi
     else
         echo "FAIL: $name (compile error)"
+        FAIL=$((FAIL+1))
+    fi
+}
+
+run_test_exact() {
+    local name=$1 src=$2 expected=$3
+    shift 3
+    TOTAL=$((TOTAL+1))
+    if timeout 30 $S "$src" /tmp/gate_out.elf >/tmp/gate_compile.log 2>&1 && \
+       chmod +x /tmp/gate_out.elf 2>/dev/null; then
+        local output
+        output=$(timeout 10 /tmp/gate_out.elf "$@" 2>/dev/null) || true
+        if [ "$output" = "$expected" ]; then
+            echo "PASS: $name"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL: $name"
+            echo "  expected: $(printf '%q' "$expected")"
+            echo "  got:      $(printf '%q' "$output")"
+            FAIL=$((FAIL+1))
+        fi
+    else
+        echo "FAIL: $name (compile error)"
+        tail -n 20 /tmp/gate_compile.log 2>/dev/null || true
+        FAIL=$((FAIL+1))
+    fi
+}
+
+run_cross_compile_test() {
+    local name=$1 src=$2 target=$3 expected_kind=$4
+    TOTAL=$((TOTAL+1))
+    if timeout 30 $S "$src" /tmp/gate_cross.out --target "$target" >/tmp/gate_cross.log 2>&1; then
+        local kind
+        kind=$(file /tmp/gate_cross.out 2>/dev/null || true)
+        if echo "$kind" | grep -q "$expected_kind"; then
+            echo "PASS: $name"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL: $name (unexpected artifact: $kind)"
+            FAIL=$((FAIL+1))
+        fi
+    else
+        echo "FAIL: $name (compile error)"
+        tail -n 20 /tmp/gate_cross.log 2>/dev/null || true
         FAIL=$((FAIL+1))
     fi
 }
@@ -126,11 +172,45 @@ fn main() -> i64 with IO { print_int(id<i64>(99)); print("\n"); return 0 }
 EOF
 run_test "generics" /tmp/gate_t6.sio "99"
 
-# Test: print_f64
-cat > /tmp/gate_t7.sio << 'EOF'
-fn main() -> i64 with IO { print_f64(3.14); print("\n"); print_f64(-0.5); print("\n"); print("PASS\n"); return 0 }
-EOF
-run_test "print_f64" /tmp/gate_t7.sio "PASS"
+# Test: fixed-format print_f64
+run_test_exact \
+    "print_f64_fixed6" \
+    self-hosted/compiler/native_print_f64_smoke.sio \
+    $'3.141590\n-0.500000\n2.000000'
+
+# Test: read_file + read_f64/read_i64
+python3 - <<'PY'
+import struct
+with open('/tmp/gate_read64.bin', 'wb') as f:
+    f.write(struct.pack('<ddq', 3.14159, -0.5, 42))
+PY
+run_test_exact \
+    "read64_smoke" \
+    self-hosted/compiler/native_read64_smoke.sio \
+    $'3.141590\n-0.500000\n42' \
+    /tmp/gate_read64.bin
+
+# ARM64 smoke coverage: compile-only
+run_cross_compile_test \
+    "print_f64_aarch64_linux" \
+    self-hosted/compiler/native_print_f64_smoke.sio \
+    aarch64-linux \
+    "ARM aarch64"
+run_cross_compile_test \
+    "read64_aarch64_linux" \
+    self-hosted/compiler/native_read64_smoke.sio \
+    aarch64-linux \
+    "ARM aarch64"
+run_cross_compile_test \
+    "print_f64_aarch64_macos" \
+    self-hosted/compiler/native_print_f64_smoke.sio \
+    aarch64-macos \
+    "Mach-O 64-bit arm64"
+run_cross_compile_test \
+    "read64_aarch64_macos" \
+    self-hosted/compiler/native_read64_smoke.sio \
+    aarch64-macos \
+    "Mach-O 64-bit arm64"
 
 # Test: error reporting (compile-time warning)
 cat > /tmp/gate_t8.sio << 'EOF'

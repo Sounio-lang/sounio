@@ -291,6 +291,7 @@ fn gl_add(ns: i64, ne: i64, esiz: i64, alen: i64) with Mut, Panic {
 var VAR_NS: [i64; 128] = [0; 128]
 var VAR_NE: [i64; 128] = [0; 128]
 var VAR_SLOT: [i64; 128] = [0; 128]
+var VAR_LEN_SLOT: [i64; 128] = [0; 128]
 var VAR_ALEN: [i64; 128] = [0; 128]
 var VAR_ESIZ: [i64; 128] = [0; 128]
 var VAR_IS_F64: [i64; 128] = [0; 128]
@@ -376,6 +377,17 @@ fn emit_drop_call_args_x86(argc: i64) with Mut {
     }
 }
 
+fn emit_store_incoming_arg_x86(arg_idx: i64, slot: i64) with Mut {
+    if arg_idx == 0 { em(0x48); em(0x89); em(0xf8); emit_store_var(slot); return }  // mov rax, rdi
+    if arg_idx == 1 { em(0x48); em(0x89); em(0xf0); emit_store_var(slot); return }  // mov rax, rsi
+    if arg_idx == 2 { em(0x48); em(0x89); em(0xd0); emit_store_var(slot); return }  // mov rax, rdx
+    if arg_idx == 3 { em(0x48); em(0x89); em(0xc8); emit_store_var(slot); return }  // mov rax, rcx
+    if arg_idx == 4 { em(0x4c); em(0x89); em(0xc0); emit_store_var(slot); return }  // mov rax, r8
+    if arg_idx == 5 { em(0x4c); em(0x89); em(0xc8); emit_store_var(slot); return }  // mov rax, r9
+    em(0x48); em(0x8b); em(0x85); em32(16 + (arg_idx - 6) * 8)
+    emit_store_var(slot)
+}
+
 // Write 32-bit value at arbitrary offset in CD[] (for ARM64 branch patching)
 fn em32_at(off: i64, v: i64) with Mut, Panic {
     CD[off as usize] = (v & 0xFF) as i8
@@ -437,6 +449,20 @@ fn emit_imm64_a64(v: i64) with Mut {
     if v3 != 0 { em32(0xF2E00000 | (v3 << 5)) }        // movk x0, #v3, lsl #48
 }
 
+fn emit_store_incoming_arg_a64(arg_idx: i64, slot: i64) with Mut, Panic {
+    if arg_idx == 0 { emit_store_var_a64(slot); return }
+    if arg_idx == 1 { em32(0xAA0103E0); emit_store_var_a64(slot); return }
+    if arg_idx == 2 { em32(0xAA0203E0); emit_store_var_a64(slot); return }
+    if arg_idx == 3 { em32(0xAA0303E0); emit_store_var_a64(slot); return }
+    if arg_idx == 4 { em32(0xAA0403E0); emit_store_var_a64(slot); return }
+    if arg_idx == 5 { em32(0xAA0503E0); emit_store_var_a64(slot); return }
+    if arg_idx == 6 { em32(0xAA0603E0); emit_store_var_a64(slot); return }
+    if arg_idx == 7 { em32(0xAA0703E0); emit_store_var_a64(slot); return }
+    let off_words = (16 + (arg_idx - 8) * 8) / 8
+    em32(0xF9400000 | (off_words << 10) | (29 << 5) | 0)
+    emit_store_var_a64(slot)
+}
+
 fn bind_array_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
     let esiz = arr_hash_esiz(ty_hash)
     let elem_ty = arr_hash_elem_ty(ty_hash)
@@ -489,6 +515,7 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
     VAR_NS[VAR_COUNT as usize] = ns
     VAR_NE[VAR_COUNT as usize] = ne
     VAR_SLOT[VAR_COUNT as usize] = ptr_slot
+    VAR_LEN_SLOT[VAR_COUNT as usize] = 0
     VAR_ALEN[VAR_COUNT as usize] = 0
     VAR_ESIZ[VAR_COUNT as usize] = 8
     VAR_IS_F64[VAR_COUNT as usize] = 0
@@ -885,15 +912,45 @@ fn ref_hash_is(h: i64) -> bool {
 }
 
 fn ref_hash_mut(h: i64) -> i64 with Div, Mut {
-    return h % 4
+    return (h - 1125899906842624) % 4
 }
 
 fn ref_hash_inner_ty(h: i64) -> i64 with Div, Mut {
-    return (h / 4) % 64
+    return ((h - 1125899906842624) / 4) % 64
 }
 
 fn ref_hash_inner_hash(h: i64) -> i64 with Div, Mut {
-    return h / 256
+    return (h - 1125899906842624) / 256
+}
+
+fn type_is_slice_ref(ty: i64, ty_hash: i64) -> bool with Panic, Div, Mut {
+    if ty != 10 { return false }
+    if ref_hash_inner_ty(ty_hash) != 8 { return false }
+    return arr_hash_alen(ref_hash_inner_hash(ty_hash)) == 0
+}
+
+fn type_is_array_ref(ty: i64, ty_hash: i64) -> bool with Panic, Div, Mut {
+    if ty != 10 { return false }
+    return ref_hash_inner_ty(ty_hash) == 8
+}
+
+fn slice_inner_matches(expected_hash: i64, actual_hash: i64) -> bool with Panic, Div, Mut {
+    let expected_inner = ref_hash_inner_hash(expected_hash)
+    let actual_inner = ref_hash_inner_hash(actual_hash)
+    return arr_hash_esiz(expected_inner) == arr_hash_esiz(actual_inner)
+        && arr_hash_elem_ty(expected_inner) == arr_hash_elem_ty(actual_inner)
+}
+
+fn call_arg_type_compatible(expected_ty: i64, expected_hash: i64, actual_ty: i64, actual_hash: i64) -> bool with Panic, Div, Mut {
+    if ty_eq(expected_ty, expected_hash, actual_ty, actual_hash) { return true }
+    if type_is_slice_ref(expected_ty, expected_hash) {
+        if actual_ty == 10 && ref_hash_inner_ty(actual_hash) == 8 {
+            if slice_inner_matches(expected_hash, actual_hash) == false { return false }
+            if ref_hash_mut(expected_hash) != 0 && ref_hash_mut(actual_hash) == 0 { return false }
+            return true
+        }
+    }
+    return false
 }
 
 fn expr_simple_numeric_tok(start: i64, finish: i64) -> i64 with Panic, Mut {
@@ -1395,6 +1452,21 @@ fn print_type_label(ty: i64, ty_hash: i64) with IO, Mut, Panic, Div {
         return
     }
     if ty == 9 { print("fn"); return }
+    if ty == 10 {
+        let inner_ty = ref_hash_inner_ty(ty_hash)
+        let inner_hash = ref_hash_inner_hash(ty_hash)
+        if type_is_slice_ref(ty, ty_hash) {
+            if ref_hash_mut(ty_hash) != 0 { print("&![") }
+            else { print("&[") }
+            print_array_elem_type(arr_hash_elem_ty(inner_hash), arr_hash_esiz(inner_hash))
+            print("]")
+            return
+        }
+        if ref_hash_mut(ty_hash) != 0 { print("&!") }
+        else { print("&") }
+        print_type_label(inner_ty, inner_hash)
+        return
+    }
     if ty == 20 {
         print("Unobserved<")
         print_type_label(unobserved_hash_inner_ty(ty_hash), unobserved_hash_inner_hash(ty_hash))
@@ -2248,6 +2320,7 @@ fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
     VAR_NS[VAR_COUNT as usize] = ns
     VAR_NE[VAR_COUNT as usize] = ne
     VAR_SLOT[VAR_COUNT as usize] = slot
+    VAR_LEN_SLOT[VAR_COUNT as usize] = 0
     VAR_ALEN[VAR_COUNT as usize] = 0
     VAR_ESIZ[VAR_COUNT as usize] = 8
     VAR_IS_F64[VAR_COUNT as usize] = 0
@@ -2272,6 +2345,7 @@ fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64, elem_ty: i64) -> i64 with
     VAR_NS[VAR_COUNT as usize] = ns
     VAR_NE[VAR_COUNT as usize] = ne
     VAR_SLOT[VAR_COUNT as usize] = ptr_slot
+    VAR_LEN_SLOT[VAR_COUNT as usize] = 0
     VAR_ALEN[VAR_COUNT as usize] = alen
     VAR_ESIZ[VAR_COUNT as usize] = esiz
     VAR_IS_F64[VAR_COUNT as usize] = 0
@@ -2281,6 +2355,93 @@ fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64, elem_ty: i64) -> i64 with
     VAR_TY_HASH[VAR_COUNT as usize] = arr_ty_hash(alen, esiz, elem_ty)
     VAR_COUNT = VAR_COUNT + 1
     return ptr_slot
+}
+
+fn var_find_len_slot(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    var i: i64 = VAR_COUNT - 1
+    while i >= 0 {
+        if name_eq(VAR_NS[i as usize], VAR_NE[i as usize], ns, ne) { return VAR_LEN_SLOT[i as usize] }
+        i = i - 1
+    }
+    return 0
+}
+
+fn bind_slice_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
+    let inner_hash = ref_hash_inner_hash(ty_hash)
+    let len_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let ptr_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    VAR_NS[VAR_COUNT as usize] = ns
+    VAR_NE[VAR_COUNT as usize] = ne
+    VAR_SLOT[VAR_COUNT as usize] = ptr_slot
+    VAR_LEN_SLOT[VAR_COUNT as usize] = len_slot
+    VAR_ALEN[VAR_COUNT as usize] = 0
+    VAR_ESIZ[VAR_COUNT as usize] = arr_hash_esiz(inner_hash)
+    VAR_IS_F64[VAR_COUNT as usize] = 0
+    VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
+    VAR_MUT[VAR_COUNT as usize] = 0
+    VAR_UNIT[VAR_COUNT as usize] = 0
+    VAR_LINEAR[VAR_COUNT as usize] = 0
+    VAR_USED[VAR_COUNT as usize] = 0
+    VAR_TY[VAR_COUNT as usize] = 10
+    VAR_TY_HASH[VAR_COUNT as usize] = ty_hash
+    VAR_COUNT = VAR_COUNT + 1
+    if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
+        em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
+        em(0x48); em(0x8b); em(0x02)  // mov rax, [rdx]
+        emit_store_var(ptr_slot)
+        em(0x48); em(0x8b); em(0x42); em(8)  // mov rax, [rdx + 8]
+        emit_store_var(len_slot)
+    } else if EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 8 {
+        emit_store_var(ptr_slot)
+        emit_imm64(arr_hash_alen(ref_hash_inner_hash(EXPR_TY_HASH)))
+        emit_store_var(len_slot)
+    } else {
+        emit_store_var(ptr_slot)
+        emit_imm64(0)
+        emit_store_var(len_slot)
+    }
+    emit_lea_var(ptr_slot)
+}
+
+fn bind_slice_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
+    let inner_hash = ref_hash_inner_hash(ty_hash)
+    let len_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let ptr_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    VAR_NS[VAR_COUNT as usize] = ns
+    VAR_NE[VAR_COUNT as usize] = ne
+    VAR_SLOT[VAR_COUNT as usize] = ptr_slot
+    VAR_LEN_SLOT[VAR_COUNT as usize] = len_slot
+    VAR_ALEN[VAR_COUNT as usize] = 0
+    VAR_ESIZ[VAR_COUNT as usize] = arr_hash_esiz(inner_hash)
+    VAR_IS_F64[VAR_COUNT as usize] = 0
+    VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
+    VAR_MUT[VAR_COUNT as usize] = 0
+    VAR_UNIT[VAR_COUNT as usize] = 0
+    VAR_LINEAR[VAR_COUNT as usize] = 0
+    VAR_USED[VAR_COUNT as usize] = 0
+    VAR_TY[VAR_COUNT as usize] = 10
+    VAR_TY_HASH[VAR_COUNT as usize] = ty_hash
+    VAR_COUNT = VAR_COUNT + 1
+    if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
+        em32(0xAA0003EA)  // mov x10, x0
+        em32(0xF9400140)  // ldr x0, [x10]
+        emit_store_var_a64(ptr_slot)
+        em32(0xF9400540)  // ldr x0, [x10, #8]
+        emit_store_var_a64(len_slot)
+    } else if EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 8 {
+        emit_store_var_a64(ptr_slot)
+        emit_imm64_a64(arr_hash_alen(ref_hash_inner_hash(EXPR_TY_HASH)))
+        emit_store_var_a64(len_slot)
+    } else {
+        emit_store_var_a64(ptr_slot)
+        em32(0xD2800000)
+        emit_store_var_a64(len_slot)
+    }
+    emit_lea_var_a64(ptr_slot)
 }
 
 // Find array info for a local variable by name
@@ -2384,12 +2545,84 @@ fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
 fn emit_load_var(slot: i64) with Mut { em(0x48); em(0x8b); em(0x85); em32(0 - slot * 8) }
 // mov [rbp - 8*slot], rax
 fn emit_store_var(slot: i64) with Mut { em(0x48); em(0x89); em(0x85); em32(0 - slot * 8) }
+// lea rax, [rbp - 8*slot]
+fn emit_lea_var(slot: i64) with Mut { em(0x48); em(0x8d); em(0x85); em32(0 - slot * 8) }
 // push rax
 fn emit_push() with Mut { em(0x50) }
 // pop rcx
 fn emit_pop_rcx() with Mut { em(0x59) }
 // mov rax, imm64
 fn emit_imm64(v: i64) with Mut { em(0x48); em(0xb8); em64(v) }
+
+fn emit_push_expr_as_slice_arg_x86(call_tok: i64) with IO, Mut, Panic, Div {
+    if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
+        em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
+        em(0x48); em(0x8b); em(0x02)  // mov rax, [rdx]
+        emit_push()
+        em(0x48); em(0x8b); em(0x42); em(8)  // mov rax, [rdx + 8]
+        emit_push()
+        return
+    }
+    if type_is_array_ref(EXPR_TY, EXPR_TY_HASH) {
+        emit_push()
+        emit_imm64(arr_hash_alen(ref_hash_inner_hash(EXPR_TY_HASH)))
+        emit_push()
+        return
+    }
+    tc_error(call_tok, "slice argument requires slice or array reference")
+    emit_push()
+    emit_imm64(0)
+    emit_push()
+}
+
+fn emit_push_expr_as_slice_arg_a64(call_tok: i64) with IO, Mut, Panic, Div {
+    if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
+        em32(0xAA0003EA)  // mov x10, x0
+        em32(0xF9400140)  // ldr x0, [x10]
+        emit_push_a64()
+        em32(0xF9400540)  // ldr x0, [x10, #8]
+        emit_push_a64()
+        return
+    }
+    if type_is_array_ref(EXPR_TY, EXPR_TY_HASH) {
+        emit_push_a64()
+        emit_imm64_a64(arr_hash_alen(ref_hash_inner_hash(EXPR_TY_HASH)))
+        emit_push_a64()
+        return
+    }
+    tc_error(call_tok, "slice argument requires slice or array reference")
+    emit_push_a64()
+    em32(0xD2800000)
+    emit_push_a64()
+}
+
+fn emit_slice_len_of_expr_x86(call_tok: i64) with IO, Mut, Panic, Div {
+    if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
+        em(0x48); em(0x8b); em(0x40); em(8)  // mov rax, [rax + 8]
+    } else if type_is_array_ref(EXPR_TY, EXPR_TY_HASH) {
+        emit_imm64(arr_hash_alen(ref_hash_inner_hash(EXPR_TY_HASH)))
+    } else {
+        tc_error(call_tok, "slice_len requires slice or array reference")
+        em(0x31); em(0xc0)
+    }
+    EXPR_IS_F64 = 0
+    EXPR_TY = 1
+    EXPR_TY_HASH = 0
+}
+
+fn emit_slice_len_of_expr_a64(call_tok: i64) with IO, Mut, Panic, Div {
+    if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
+        em32(0xF9400400)  // ldr x0, [x0, #8]
+    } else if type_is_array_ref(EXPR_TY, EXPR_TY_HASH) {
+        emit_imm64_a64(arr_hash_alen(ref_hash_inner_hash(EXPR_TY_HASH)))
+    } else {
+        tc_error(call_tok, "slice_len requires slice or array reference")
+        em32(0xD2800000)
+    }
+    EXPR_IS_F64 = 0
+    EXPR_TY = 1
+    EXPR_TY_HASH = 0
+}
 
 fn bind_array_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
     let esiz = arr_hash_esiz(ty_hash)
@@ -2444,6 +2677,7 @@ fn bind_struct_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
     VAR_NS[VAR_COUNT as usize] = ns
     VAR_NE[VAR_COUNT as usize] = ne
     VAR_SLOT[VAR_COUNT as usize] = ptr_slot
+    VAR_LEN_SLOT[VAR_COUNT as usize] = 0
     VAR_ALEN[VAR_COUNT as usize] = 0
     VAR_ESIZ[VAR_COUNT as usize] = 8
     VAR_IS_F64[VAR_COUNT as usize] = 0
@@ -2950,43 +3184,25 @@ fn emit_print_int() with Mut {
     em(0x48); em(0x83); em(0xc4); em(32)  // add rsp, 32
 }
 
-// print_f64: rax = f64 bits → print decimal with 6 decimal places
-// Uses r12 (abs f64 bits) and r13 (integer part), both callee-saved.
-// Calls emit_print_int inline for integer part (prints with newline, overwritten by '.'),
-// then emits fractional 6 digits with leading zeros via div chain.
-fn emit_print_f64() with Mut {
-    // Save callee-saved registers
-    em(0x41); em(0x54)  // push r12
-    em(0x41); em(0x55)  // push r13
-    // Step 1: Save rax (f64 bits) to r12
-    em(0x49); em(0x89); em(0xc4)  // mov r12, rax
-    // Step 2: Check sign bit (bit 63). If set, print '-', then clear sign bit
-    em(0x48); em(0x0f); em(0xba); em(0xe0); em(63)  // bt rax, 63
-    em(0x73); em(31)  // jnc +31 (skip printing '-' and sign clear)
-    // Print '-': push '-' on stack, write(1, rsp, 1), pop
-    em(0x6a); em(45)  // push 45 ('-')
-    em(0xb8); em32(1); em(0xbf); em32(1)  // mov eax, 1; mov edi, 1
-    em(0x48); em(0x89); em(0xe6)  // mov rsi, rsp
-    em(0xba); em32(1)  // mov edx, 1
-    em(0x0f); em(0x05)  // syscall
-    em(0x48); em(0x83); em(0xc4); em(8)  // add rsp, 8
-    // Clear sign bit in r12: btr r12, 63
-    em(0x49); em(0x0f); em(0xba); em(0xf4); em(63)  // btr r12, 63
-    // Step 3: movq xmm0, r12 → integer part via cvttsd2si
-    em(0x66); em(0x49); em(0x0f); em(0x6e); em(0xc4)  // movq xmm0, r12
-    em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0)  // cvttsd2si rax, xmm0 → integer part
-    em(0x49); em(0x89); em(0xc5)  // mov r13, rax (save integer part)
-    // Step 4: Print integer part (no trailing newline)
-    // Inline print_int_no_nl: sub rsp,32; write digits at [rsp..rsp+31]
+fn emit_print_char_lit_x86(ch: i64) with Mut {
+    em(0x48); em(0x83); em(0xec); em(8)
+    em(0xc6); em(0x04); em(0x24); em(ch)
+    em(0xb8); em32(1)
+    em(0xbf); em32(1)
+    em(0x48); em(0x89); em(0xe6)
+    em(0xba); em32(1)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x83); em(0xc4); em(8)
+}
+
+fn emit_print_u64_no_nl_x86() with Mut {
     em(0x48); em(0x83); em(0xec); em(32)  // sub rsp, 32
     em(0x48); em(0x8d); em(0x4c); em(0x24); em(31)  // lea rcx, [rsp+31]
-    // Handle zero: if rax==0, write '0' and skip loop
     em(0x48); em(0x85); em(0xc0)  // test rax, rax
-    em(0x75); em(0x08)  // jnz div_loop (+8)
+    em(0x75); em(0x08)  // jnz div_loop
     em(0xc6); em(0x01); em(48)  // mov byte [rcx], '0'
     em(0x48); em(0xff); em(0xc9)  // dec rcx
-    em(0xeb); em(30)  // jmp after_loop (skip 30-byte div loop)
-    // div loop
+    em(0xeb); em(30)  // jmp after_loop
     let pf_loop_top = CL
     em(0x48); em(0x31); em(0xd2)  // xor rdx, rdx
     em(0x48); em(0xc7); em(0xc6); em32(10)  // mov rsi, 10
@@ -2996,84 +3212,145 @@ fn emit_print_f64() with Mut {
     em(0x48); em(0xff); em(0xc9)  // dec rcx
     em(0x48); em(0x85); em(0xc0)  // test rax, rax
     em(0x0f); em(0x85); em32(pf_loop_top - (CL + 4))  // jnz loop
-    // after_loop: write(1, rcx+1, rsp+32-(rcx+1))
     em(0x48); em(0xff); em(0xc1)  // inc rcx
     em(0x48); em(0x89); em(0xce)  // mov rsi, rcx
     em(0x48); em(0x8d); em(0x54); em(0x24); em(32)  // lea rdx, [rsp+32]
     em(0x48); em(0x29); em(0xca)  // sub rdx, rcx
     em(0xb8); em32(1); em(0xbf); em32(1)
     em(0x0f); em(0x05)
-    em(0x48); em(0x83); em(0xc4); em(32)  // add rsp, 32
-    // Step 5: Print '.'
-    em(0x6a); em(46)  // push 46 ('.')
-    em(0xb8); em32(1); em(0xbf); em32(1)
-    em(0x48); em(0x89); em(0xe6); em(0xba); em32(1)
-    em(0x0f); em(0x05)
-    em(0x48); em(0x83); em(0xc4); em(8)  // add rsp, 8
-    // Step 6: fractional part = abs(original) - integer_part
-    em(0x66); em(0x49); em(0x0f); em(0x6e); em(0xc4)  // movq xmm0, r12
-    em(0xf2); em(0x49); em(0x0f); em(0x2a); em(0xcd)  // cvtsi2sd xmm1, r13
-    em(0xf2); em(0x0f); em(0x5c); em(0xc1)            // subsd xmm0, xmm1
-    // Step 7: multiply by 1000000.0 (f64 bits = 0x4130D40000000000 = 4696837146684686336)
-    em(0x48); em(0xb8); em64(4696837146684686336)
-    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
-    em(0xf2); em(0x0f); em(0x59); em(0xc1)            // mulsd xmm0, xmm1
-    // Step 8: cvttsd2si rax, xmm0 → 6-digit frac integer
-    em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0)  // cvttsd2si rax, xmm0
-    // Ensure positive
-    em(0x48); em(0x85); em(0xc0)  // test rax, rax
-    em(0x79); em(3)  // jns +3
-    em(0x48); em(0xf7); em(0xd8)  // neg rax
-    // Step 9: Build 6 fractional digits in stack buffer, then write at once
-    // sub rsp, 8 — allocate 8-byte buffer (only 6 used)
+    em(0x48); em(0x83); em(0xc4); em(32)
+}
+
+fn emit_print_fixed6_x86() with Mut {
     em(0x48); em(0x83); em(0xec); em(8)
-    // rax = frac_int (6-digit number). Extract digits via repeated div.
-    // Digit 1: rax / 100000
-    em(0x48); em(0x31); em(0xd2)  // xor rdx, rdx
-    em(0x48); em(0xb9); em64(100000)  // mov rcx, 100000
-    em(0x48); em(0xf7); em(0xf1)  // div rcx
-    em(0x48); em(0x83); em(0xc0); em(48)  // add rax, '0'
-    em(0x88); em(0x04); em(0x24)  // mov [rsp], al
-    em(0x48); em(0x89); em(0xd0)  // mov rax, rdx
-    // Digit 2: / 10000
+    em(0x48); em(0x31); em(0xd2)
+    em(0x48); em(0xb9); em64(100000)
+    em(0x48); em(0xf7); em(0xf1)
+    em(0x48); em(0x83); em(0xc0); em(48)
+    em(0x88); em(0x04); em(0x24)
+    em(0x48); em(0x89); em(0xd0)
     em(0x48); em(0x31); em(0xd2)
     em(0x48); em(0xb9); em64(10000)
     em(0x48); em(0xf7); em(0xf1)
     em(0x48); em(0x83); em(0xc0); em(48)
-    em(0x88); em(0x44); em(0x24); em(1)  // mov [rsp+1], al
+    em(0x88); em(0x44); em(0x24); em(1)
     em(0x48); em(0x89); em(0xd0)
-    // Digit 3: / 1000
     em(0x48); em(0x31); em(0xd2)
     em(0x48); em(0xb9); em64(1000)
     em(0x48); em(0xf7); em(0xf1)
     em(0x48); em(0x83); em(0xc0); em(48)
-    em(0x88); em(0x44); em(0x24); em(2)  // mov [rsp+2], al
+    em(0x88); em(0x44); em(0x24); em(2)
     em(0x48); em(0x89); em(0xd0)
-    // Digit 4: / 100
     em(0x48); em(0x31); em(0xd2)
     em(0x48); em(0xb9); em64(100)
     em(0x48); em(0xf7); em(0xf1)
     em(0x48); em(0x83); em(0xc0); em(48)
-    em(0x88); em(0x44); em(0x24); em(3)  // mov [rsp+3], al
+    em(0x88); em(0x44); em(0x24); em(3)
     em(0x48); em(0x89); em(0xd0)
-    // Digit 5: / 10
     em(0x48); em(0x31); em(0xd2)
     em(0x48); em(0xb9); em64(10)
     em(0x48); em(0xf7); em(0xf1)
     em(0x48); em(0x83); em(0xc0); em(48)
-    em(0x88); em(0x44); em(0x24); em(4)  // mov [rsp+4], al
-    // Digit 6: rdx is last digit
-    em(0x48); em(0x83); em(0xc2); em(48)  // add rdx, '0'
-    em(0x88); em(0x54); em(0x24); em(5)  // mov [rsp+5], dl
-    // Write all 6 digits: write(1, rsp, 6)
+    em(0x88); em(0x44); em(0x24); em(4)
+    em(0x48); em(0x83); em(0xc2); em(48)
+    em(0x88); em(0x54); em(0x24); em(5)
     em(0xb8); em32(1); em(0xbf); em32(1)
-    em(0x48); em(0x89); em(0xe6)  // mov rsi, rsp
-    em(0xba); em32(6)  // mov edx, 6
+    em(0x48); em(0x89); em(0xe6)
+    em(0xba); em32(6)
     em(0x0f); em(0x05)
-    em(0x48); em(0x83); em(0xc4); em(8)  // add rsp, 8
-    // Restore callee-saved registers
+    em(0x48); em(0x83); em(0xc4); em(8)
+}
+
+fn emit_print_nan_x86() with Mut {
+    em(0x48); em(0x83); em(0xec); em(8)
+    em(0x48); em(0xb8); em64(7233902)
+    em(0x48); em(0x89); em(0x04); em(0x24)
+    em(0xb8); em32(1)
+    em(0xbf); em32(1)
+    em(0x48); em(0x89); em(0xe6)
+    em(0xba); em32(3)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x83); em(0xc4); em(8)
+}
+
+// print_f64: rax = f64 bits → print decimal with 6 decimal places
+fn emit_print_f64() with Mut, Panic {
+    em(0x41); em(0x54)  // push r12
+    em(0x41); em(0x55)  // push r13
+    em(0x41); em(0x56)  // push r14
+    em(0x49); em(0x89); em(0xc4)  // mov r12, rax
+    em(0x4c); em(0x89); em(0xe0)  // mov rax, r12
+    em(0x48); em(0xb9); em64(9223372036854775807)
+    em(0x48); em(0x21); em(0xc8)  // and rax, rcx
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let zero_patch_a = CL; em32(0)
+    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax
+    em(0x48); em(0xc1); em(0xe9); em(52)  // shr rcx, 52
+    em(0x48); em(0x81); em(0xf9); em32(2047)  // cmp rcx, 2047
+    em(0x0f); em(0x84); let nan_patch = CL; em32(0)
+    em(0x48); em(0x85); em(0xc9)
+    em(0x0f); em(0x84); let zero_patch_b = CL; em32(0)
+    em(0x49); em(0x0f); em(0xba); em(0xe4); em(63)  // bt r12, 63
+    em(0x0f); em(0x83); let sign_done_patch = CL; em32(0)
+    emit_print_char_lit_x86(45)
+    patch32(sign_done_patch, CL)
+    em(0x49); em(0x0f); em(0xba); em(0xf4); em(63)  // btr r12, 63
+    em(0x66); em(0x49); em(0x0f); em(0x6e); em(0xc4)  // movq xmm0, r12
+    em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0)  // cvttsd2si rax, xmm0
+    em(0x49); em(0x89); em(0xc5)  // mov r13, rax
+    em(0x66); em(0x49); em(0x0f); em(0x6e); em(0xc4)  // movq xmm0, r12
+    em(0xf2); em(0x49); em(0x0f); em(0x2a); em(0xcd)  // cvtsi2sd xmm1, r13
+    em(0xf2); em(0x0f); em(0x5c); em(0xc1)            // subsd xmm0, xmm1
+    em(0x48); em(0xb8); em64(4696837146684686336)  // 1000000.0
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+    em(0xf2); em(0x0f); em(0x59); em(0xc1)            // mulsd xmm0, xmm1
+    em(0x48); em(0xb8); em64(4602678819172646912)  // 0.5
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+    em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
+    em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0)  // cvttsd2si rax, xmm0
+    em(0x48); em(0x3d); em32(1000000)                 // cmp rax, 1000000
+    em(0x0f); em(0x8c); let frac_ok_patch = CL; em32(0)
+    em(0x31); em(0xc0)                                // xor eax, eax
+    em(0x49); em(0xff); em(0xc5)                      // inc r13
+    patch32(frac_ok_patch, CL)
+    em(0x49); em(0x89); em(0xc6)  // mov r14, rax
+    em(0x4c); em(0x89); em(0xe8)  // mov rax, r13
+    emit_print_u64_no_nl_x86()
+    emit_print_char_lit_x86(46)
+    em(0x4c); em(0x89); em(0xf0)  // mov rax, r14
+    emit_print_fixed6_x86()
+    em(0xe9); let done_after_norm = CL; em32(0)
+    let zero_label = CL
+    em(0x31); em(0xc0)
+    emit_print_u64_no_nl_x86()
+    emit_print_char_lit_x86(46)
+    em(0x31); em(0xc0)
+    emit_print_fixed6_x86()
+    em(0xe9); let done_after_zero = CL; em32(0)
+    let nan_label = CL
+    emit_print_nan_x86()
+    let done_label = CL
+    patch32(zero_patch_a, zero_label)
+    patch32(zero_patch_b, zero_label)
+    patch32(nan_patch, nan_label)
+    patch32(done_after_norm, done_label)
+    patch32(done_after_zero, done_label)
+    em(0x41); em(0x5e)  // pop r14
     em(0x41); em(0x5d)  // pop r13
     em(0x41); em(0x5c)  // pop r12
+}
+
+fn emit_read_i64() with Mut {
+    em(0x48); em(0x89); em(0xc1)            // mov rcx, rax (index)
+    em(0x58)                                // pop rax (buf)
+    em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+}
+
+fn emit_read_f64() with Mut {
+    em(0x48); em(0x89); em(0xc1)            // mov rcx, rax (index)
+    em(0x58)                                // pop rax (buf)
+    em(0xf2); em(0x0f); em(0x10); em(0x04); em(0xc8)  // movsd xmm0, [rax + rcx*8]
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
 }
 
 // arg_count: load argc from the saved stack pointer
@@ -3549,6 +3826,177 @@ fn compile_knowledge_literal_x86() with IO, Mut, Panic, Div {
 
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
+fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
+    EP = EP + 1
+    var want_mut: i64 = 0
+    if TK[EP as usize] == 32 {
+        want_mut = 1
+        EP = EP + 1
+    }
+    let borrow_tok = EP - 1
+    let rns = TS[EP as usize]
+    let rne = TE[EP as usize]
+    EP = EP + 1
+    if TK[EP as usize] == 41 {
+        EP = EP + 1
+        let start_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        compile_or()
+        emit_store_var(start_slot)
+        if TK[EP as usize] == 64 { tc_error(borrow_tok, "slice borrows require half-open ranges") }
+        if TK[EP as usize] == 63 || TK[EP as usize] == 64 {
+            EP = EP + 1
+        } else {
+            tc_error(borrow_tok, "slice borrow requires a..b range")
+        }
+        let end_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        compile_or()
+        emit_store_var(end_slot)
+        if TK[EP as usize] == 42 { EP = EP + 1 }
+        else { tc_error(borrow_tok, "slice borrow missing closing ]") }
+        let lvi = var_find_idx(rns, rne)
+        var base_ptr_slot: i64 = 0
+        var base_len_slot: i64 = 0
+        var base_len_const: i64 = 0
+        var has_const_len: i64 = 0
+        var elem_ty: i64 = 1
+        var esiz: i64 = 8
+        var ok_base: i64 = 0
+        var allow_mut: i64 = 0
+        if lvi >= 0 {
+            let lty = VAR_TY[lvi as usize]
+            let lhash = VAR_TY_HASH[lvi as usize]
+            base_ptr_slot = VAR_SLOT[lvi as usize]
+            if type_is_slice_ref(lty, lhash) {
+                let inner_hash = ref_hash_inner_hash(lhash)
+                base_len_slot = VAR_LEN_SLOT[lvi as usize]
+                esiz = arr_hash_esiz(inner_hash)
+                if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                ok_base = 1
+                if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
+            } else if lty == 8 {
+                base_len_const = VAR_ALEN[lvi as usize]
+                has_const_len = 1
+                esiz = VAR_ESIZ[lvi as usize]
+                if arr_hash_elem_ty(lhash) != 0 { elem_ty = arr_hash_elem_ty(lhash) }
+                ok_base = 1
+                if want_mut == 0 || VAR_MUT[lvi as usize] != 0 { allow_mut = 1 }
+            } else if type_is_array_ref(lty, lhash) {
+                let inner_hash = ref_hash_inner_hash(lhash)
+                base_len_const = arr_hash_alen(inner_hash)
+                has_const_len = 1
+                esiz = arr_hash_esiz(inner_hash)
+                if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                ok_base = 1
+                if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
+            }
+        } else {
+            let gi = gl_find(rns, rne)
+            if gi >= 0 && GL_TY[gi as usize] == 8 {
+                base_len_const = GL[(gi * 4 + 3) as usize]
+                has_const_len = 1
+                esiz = GL[(gi * 4 + 2) as usize]
+                if arr_hash_elem_ty(GL_TY_HASH[gi as usize]) != 0 { elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize]) }
+                ok_base = 1
+                allow_mut = 1
+            }
+        }
+        if ok_base == 0 {
+            tc_error(borrow_tok, "slice borrow requires array or slice base")
+            em(0x31); em(0xc0)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            EXPR_TY_HASH = ref_hash_make(8, arr_ty_hash(0, 8, 1), want_mut)
+            return
+        }
+        if want_mut != 0 && allow_mut == 0 {
+            tc_error(borrow_tok, "Mut borrow requires mutable slice source")
+        }
+        emit_load_var(end_slot)
+        em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (end)
+        emit_load_var(start_slot)
+        em(0x48); em(0x39); em(0xc8)  // cmp rax, rcx
+        em(0x0f); em(0x86); let slice_range_ok_a = CL; em32(0)
+        emit_assert_fail()
+        patch32(slice_range_ok_a, CL)
+        if has_const_len != 0 { emit_imm64(base_len_const) }
+        else { emit_load_var(base_len_slot) }
+        em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+        em(0x0f); em(0x86); let slice_range_ok_b = CL; em32(0)
+        emit_assert_fail()
+        patch32(slice_range_ok_b, CL)
+        let len_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        let ptr_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        if lvi >= 0 {
+            emit_load_var(base_ptr_slot)
+        } else {
+            let gi = gl_find(rns, rne)
+            if gi >= 0 { emit_imm64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+            else { em(0x31); em(0xc0) }
+        }
+        em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (base ptr)
+        emit_load_var(start_slot)
+        if esiz == 8 {
+            em(0x48); em(0xc1); em(0xe0); em(3)  // shl rax, 3
+        }
+        em(0x48); em(0x01); em(0xd0)  // add rax, rdx
+        emit_store_var(ptr_slot)
+        emit_load_var(end_slot)
+        em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (end)
+        emit_load_var(start_slot)
+        em(0x48); em(0x29); em(0xc1)  // sub rcx, rax
+        em(0x48); em(0x89); em(0xc8)  // mov rax, rcx
+        emit_store_var(len_slot)
+        emit_lea_var(ptr_slot)
+        EXPR_IS_F64 = 0
+        EXPR_TY = 10
+        EXPR_TY_HASH = ref_hash_make(8, arr_ty_hash(0, esiz, elem_ty), want_mut)
+        return
+    }
+    let slot = var_find(rns, rne)
+    if slot >= 0 {
+        if want_mut != 0 && var_find_is_mut(rns, rne) == 0 {
+            tc_error(borrow_tok, "Mut borrow requires mutable binding")
+        }
+        let lalen = var_find_alen(rns, rne)
+        if lalen > 0 || var_find_ty(rns, rne) == 6 {
+            emit_load_var(slot)
+        } else {
+            let off = 0 - slot * 8
+            em(0x48); em(0x8d); em(0x85)
+            em32(off)
+        }
+    } else {
+        let gi = gl_find(rns, rne)
+        if gi >= 0 {
+            let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+            em(0x48); em(0xb8); em64(addr)
+        } else { tc_undefined_var(EP - 1); em(0x31); em(0xc0) }
+    }
+    EXPR_IS_F64 = 0
+    EXPR_TY = 10
+    if var_find_idx(rns, rne) >= 0 {
+        if want_mut != 0 {
+            EXPR_TY_HASH = ref_hash_make(VAR_TY[var_find_idx(rns, rne) as usize], VAR_TY_HASH[var_find_idx(rns, rne) as usize], 1)
+        } else {
+            EXPR_TY_HASH = ref_hash_make(VAR_TY[var_find_idx(rns, rne) as usize], VAR_TY_HASH[var_find_idx(rns, rne) as usize], 0)
+        }
+    } else {
+        let rgi = gl_find(rns, rne)
+        if rgi >= 0 {
+            if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 1) }
+            else { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 0) }
+        }
+        else {
+            if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(0, 0, 1) }
+            else { EXPR_TY_HASH = ref_hash_make(0, 0, 0) }
+        }
+    }
+}
+
 fn compile_primary() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
     LAST_EXPR_IS_LINEAR = 0
@@ -3928,57 +4376,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     }
     // Parenthesized
     if k == 6 { EP = EP + 1; compile_or(); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-    // Address-of: &ident → lea rax, [rbp - 8*slot] or mov rax, bss_addr
-    if k == 44 {
-        EP = EP + 1
-        // Skip ! in &! (exclusive ref — same codegen as shared ref)
-        if TK[EP as usize] == 32 { EP = EP + 1 }
-        let rns = TS[EP as usize]
-        let rne = TE[EP as usize]
-        EP = EP + 1
-        let slot = var_find(rns, rne)
-        if slot >= 0 {
-            if TK[(EP - 2) as usize] == 32 && var_find_is_mut(rns, rne) == 0 {
-                tc_error(EP - 1, "Mut borrow requires mutable binding")
-            }
-            let lalen = var_find_alen(rns, rne)
-            if lalen > 0 || var_find_ty(rns, rne) == 6 {
-                // array or struct: ptr_slot stores the data pointer — load it
-                emit_load_var(slot)
-            } else {
-                // scalar: take address of slot
-                let off = 0 - slot * 8
-                em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
-                em32(off)
-            }
-        } else {
-            let gi = gl_find(rns, rne)
-            if gi >= 0 {
-                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
-                em(0x48); em(0xb8); em64(addr)  // mov rax, bss_addr
-            } else { tc_undefined_var(EP - 1); em(0x31); em(0xc0) }
-        }
-        EXPR_IS_F64 = 0
-        EXPR_TY = 10
-        if var_find_idx(rns, rne) >= 0 {
-            if TK[(EP - 2) as usize] == 32 {
-                EXPR_TY_HASH = ref_hash_make(VAR_TY[var_find_idx(rns, rne) as usize], VAR_TY_HASH[var_find_idx(rns, rne) as usize], 1)
-            } else {
-                EXPR_TY_HASH = ref_hash_make(VAR_TY[var_find_idx(rns, rne) as usize], VAR_TY_HASH[var_find_idx(rns, rne) as usize], 0)
-            }
-        } else {
-            let rgi = gl_find(rns, rne)
-            if rgi >= 0 {
-                if TK[(EP - 2) as usize] == 32 { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 1) }
-                else { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 0) }
-            }
-            else {
-                if TK[(EP - 2) as usize] == 32 { EXPR_TY_HASH = ref_hash_make(0, 0, 1) }
-                else { EXPR_TY_HASH = ref_hash_make(0, 0, 0) }
-            }
-        }
-        return
-    }
+    if k == 44 { compile_borrow_primary_x86(); return }
     // Dereference: *expr → compile expr, then load from pointer
     if k == 19 {
         EP = EP + 1
@@ -4348,6 +4746,60 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 3
                 return
             }
+            if src_match(ns, ne - ns, "read_i64") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em(0x31); em(0xc0)
+                } else {
+                    compile_or(); em(0x50)
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or()
+                        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "read offset must be integer") }
+                    } else {
+                        em(0x31); em(0xc0)
+                    }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_read_i64()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "read_f64") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em(0x31); em(0xc0)
+                } else {
+                    compile_or(); em(0x50)
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or()
+                        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "read offset must be integer") }
+                    } else {
+                        em(0x31); em(0xc0)
+                    }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_read_f64()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 1
+                EXPR_TY = 2
+                EXPR_TY_HASH = 0
+                return
+            }
             // Check for read_file(path)
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_file") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
@@ -4393,6 +4845,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 emit_str_len()
                 EXPR_IS_F64 = 0
                 EXPR_TY = 1
+                return
+            }
+            if src_match(ns, ne - ns, "slice_len") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_slice_len_of_expr_x86(name_tok)
                 return
             }
             if src_match(ns, ne - ns, "str_eq") {
@@ -4645,11 +5103,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let call_tok = EP - 1
             EP = EP + 1
             var argc: i64 = 0
+            var abi_argc: i64 = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or()
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
-                    if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && ty_eq(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
+                    if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
                         if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                             tc_epistemic_boundary(call_tok)
                         } else {
@@ -4657,8 +5116,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         }
                     }
                 }
-                materialize_aggregate_expr_x86()
-                em(0x50)
+                if fi >= 0 && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                    emit_push_expr_as_slice_arg_x86(call_tok)
+                    abi_argc = abi_argc + 2
+                } else {
+                    materialize_aggregate_expr_x86()
+                    em(0x50)
+                    abi_argc = abi_argc + 1
+                }
                 argc = argc + 1
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
@@ -4671,14 +5136,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if (callee_eff & ~caller_eff) != 0 {
                     tc_effect_violation(call_tok, callee_eff, caller_eff)
                 }
-                emit_setup_direct_call_args_x86(argc)
-                emit_prepare_stack_call_args_x86(argc, 6)
+                emit_setup_direct_call_args_x86(abi_argc)
+                emit_prepare_stack_call_args_x86(abi_argc, 6)
                 em(0xe8)
                 PATCH_OFF[PATCH_COUNT as usize] = CL
                 PATCH_FN[PATCH_COUNT as usize] = fi
                 PATCH_COUNT = PATCH_COUNT + 1
                 em32(0)
-                emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
+                emit_drop_call_args_x86(abi_argc + call_extra_stack_args_x86(abi_argc, 6))
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -4815,6 +5280,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let lvi = var_find_idx(ns, ne)
                     var elem_ty = 1
                     var is_arr_ty = 0
+                    var is_slice_ty = 0
                     if lvi >= 0 {
                         elem_ty = arr_hash_elem_ty(VAR_TY_HASH[lvi as usize])
                         if elem_ty == 0 { elem_ty = 1 }
@@ -4823,6 +5289,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         if VAR_TY[lvi as usize] == 10 {
                             if ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 {
                                 is_arr_ty = 1
+                                if type_is_slice_ref(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) { is_slice_ty = 1 }
                                 if arr_hash_elem_ty(ref_hash_inner_hash(VAR_TY_HASH[lvi as usize])) != 0 {
                                     elem_ty = arr_hash_elem_ty(ref_hash_inner_hash(VAR_TY_HASH[lvi as usize]))
                                 }
@@ -4830,6 +5297,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         }
                     }
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
+                    if is_slice_ty == 1 {
+                        emit_load_var(VAR_LEN_SLOT[lvi as usize])
+                        em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+                        em(0x0f); em(0x82); let slice_ok_local = CL; em32(0)
+                        emit_assert_fail()
+                        let slice_ok_local_target = CL
+                        patch32(slice_ok_local, slice_ok_local_target)
+                    }
                     emit_load_var(slot)  // load ptr into rax
                     if is_arr_ty == 1 && lesiz == 8 {
                         em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
@@ -4862,7 +5337,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let slot = var_find(ns, ne)
         if slot >= 0 {
             let vi = var_find_idx(ns, ne)
-            emit_load_var(slot)
+            if vi >= 0 && type_is_slice_ref(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) {
+                emit_lea_var(slot)
+            } else {
+                emit_load_var(slot)
+            }
             EXPR_IS_F64 = var_find_is_f64(ns, ne)
             if vi >= 0 {
                 EXPR_TY = VAR_TY[vi as usize]
@@ -5022,6 +5501,29 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_TY_HASH = 0
                     EXPR_IS_F64 = 0
                 }
+            } else if type_is_slice_ref(base_ty, base_hash) {
+                let inner_hash = ref_hash_inner_hash(base_hash)
+                let esiz = arr_hash_esiz(inner_hash)
+                var elem_ty = arr_hash_elem_ty(inner_hash)
+                if elem_ty == 0 { elem_ty = 1 }
+                em(0x48); em(0x8b); em(0x41); em(8)  // mov rax, [rcx + 8] (len)
+                em(0x48); em(0x39); em(0xc2)         // cmp rdx, rax
+                em(0x0f); em(0x82); let slice_ok = CL; em32(0)
+                emit_assert_fail()
+                let slice_ok_target = CL
+                patch32(slice_ok, slice_ok_target)
+                em(0x48); em(0x8b); em(0x01)         // mov rax, [rcx] (data ptr)
+                if esiz == 8 {
+                    em(0x48); em(0x8b); em(0x04); em(0xd0)  // mov rax, [rax + rdx*8]
+                    EXPR_TY = elem_ty
+                    EXPR_TY_HASH = 0
+                    if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                } else {
+                    em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x10)  // movsx rax, byte [rax + rdx]
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 0
+                }
             } else {
                 em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x11)  // movsx rax, byte [rcx + rdx]
                 EXPR_TY = 1
@@ -5041,10 +5543,14 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 EP = EP + 1  // skip 'len'
                 EP = EP + 1  // skip (
                 EP = EP + 1  // skip )
-                // Emit: mov rax, LAST_ALEN (compile-time constant)
-                em(0x48)
-                em(0xb8)
-                em64(LAST_ALEN)
+                if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
+                    em(0x48); em(0x8b); em(0x40); em(8)  // mov rax, [rax + 8]
+                } else {
+                    // Emit: mov rax, LAST_ALEN (compile-time constant)
+                    em(0x48)
+                    em(0xb8)
+                    em64(LAST_ALEN)
+                }
                 EXPR_TY = 1
                 EXPR_TY_HASH = 0
                 EXPR_IS_F64 = 0
@@ -6022,7 +6528,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     tc_error(EP - 1, "initializer type does not match declaration")
                 }
             }
-            if (decl_ty == 8) || (decl_ty == 0 && EXPR_TY == 8) {
+            if type_is_slice_ref(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
+                var bind_hash = EXPR_TY_HASH
+                if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
+                bind_slice_local_from_rax_x86(ns, ne, bind_hash)
+                let svix = VAR_COUNT - 1
+                VAR_IS_CLOSURE[svix as usize] = 0
+                VAR_MUT[svix as usize] = decl_is_mut
+                VAR_LINEAR[svix as usize] = 0
+            } else if (decl_ty == 8) || (decl_ty == 0 && EXPR_TY == 8) {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty == 8 { bind_hash = decl_ty_hash }
                 bind_array_local_from_rax_x86(ns, ne, bind_hash)
@@ -6217,12 +6731,23 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 let lesiz = var_find_esiz(ns, ne)
                 let lvi = var_find_idx(ns, ne)
                 var is_arr_ty = 0
+                var is_slice_ty = 0
                 if lvi >= 0 && VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
                 if lvi >= 0 && VAR_TY[lvi as usize] == 10 {
-                    if ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 { is_arr_ty = 1 }
+                    if ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 {
+                        is_arr_ty = 1
+                        if type_is_slice_ref(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) { is_slice_ty = 1 }
+                    }
                 }
                 em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
                 em(0x59)  // pop rcx (index)
+                if is_slice_ty == 1 {
+                    emit_load_var(VAR_LEN_SLOT[lvi as usize])
+                    em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
+                    em(0x0f); em(0x82); let slice_store_ok = CL; em32(0)
+                    emit_assert_fail()
+                    patch32(slice_store_ok, CL)
+                }
                 emit_load_var(lslot)  // load base ptr into rax
                 if is_arr_ty == 1 && lesiz == 8 {
                     em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
@@ -7489,7 +8014,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                     if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                     if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
-                    if SCAN_TY == 8 {
+                    if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                        VAR_LEN_SLOT[(VAR_COUNT - 1) as usize] = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        VAR_ESIZ[(VAR_COUNT - 1) as usize] = arr_hash_esiz(ref_hash_inner_hash(SCAN_TY_HASH))
+                    } else if SCAN_TY == 8 {
                         VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                         VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
                     }
@@ -7518,18 +8047,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em(0x55); em(0x48); em(0x89); em(0xe5)
         em(0x48); em(0x81); em(0xec); em32(131072)
 
-        // Store parameters from registers to stack slots (System V ABI: rdi,rsi,rdx,rcx,r8,r9)
-        if VAR_COUNT >= 1 { em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF) }    // mov [rbp-8], rdi
-        if VAR_COUNT >= 2 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }    // mov [rbp-16], rsi
-        if VAR_COUNT >= 3 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }    // mov [rbp-24], rdx
-        if VAR_COUNT >= 4 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }    // mov [rbp-32], rcx
-        if VAR_COUNT >= 5 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }    // mov [rbp-40], r8
-        if VAR_COUNT >= 6 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }    // mov [rbp-48], r9
-        var param_slot: i64 = 7
-        while param_slot <= VAR_COUNT {
-            em(0x48); em(0x8b); em(0x85); em32(16 + (param_slot - 7) * 8)
-            emit_store_var(param_slot)
-            param_slot = param_slot + 1
+        // Store parameters from registers/stack using low-level ABI slot order.
+        var param_vi: i64 = 0
+        var abi_arg_idx: i64 = 0
+        while param_vi < VAR_COUNT {
+            emit_store_incoming_arg_x86(abi_arg_idx, VAR_SLOT[param_vi as usize])
+            abi_arg_idx = abi_arg_idx + 1
+            if type_is_slice_ref(VAR_TY[param_vi as usize], VAR_TY_HASH[param_vi as usize]) {
+                emit_store_incoming_arg_x86(abi_arg_idx, VAR_LEN_SLOT[param_vi as usize])
+                abi_arg_idx = abi_arg_idx + 1
+            }
+            param_vi = param_vi + 1
         }
 
         // Compile body
@@ -8141,6 +8669,22 @@ fn emit_print_nl_a64() with Mut {
     em32(0x910043FF)  // add sp, sp, #16
 }
 
+fn emit_print_char_lit_a64(ch: i64) with Mut {
+    em32(0xD1000000 | (16 << 10) | (31 << 5) | 31)  // sub sp, sp, #16
+    em32(0xD2800000 | ((ch & 0xFFFF) << 5) | 10)     // movz x10, #ch
+    em32(0x390003EA)                                  // strb w10, [sp]
+    em32(0xD2800020)                                  // movz x0, #1
+    em32(0x910003E1)                                  // mov x1, sp
+    em32(0xD2800022)                                  // movz x2, #1
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000004)
+    } else {
+        em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    em32(0x910043FF)  // add sp, sp, #16
+}
+
 fn emit_assert_fail_a64() with Mut {
     em32(0xD2800020)  // movz x0, #1
     if TARGET_OS == 2 {
@@ -8211,12 +8755,158 @@ fn emit_print_int_a64() with Mut {
     em32(0x91000000 | (64 << 10) | (31 << 5) | 31)
 }
 
-// ─── ARM64 print_f64 (stub — prints integer part only) ───
-fn emit_print_f64_a64() with Mut {
-    // x0 = f64 bits. Convert to integer part, print that.
-    em32(0x9E670000)  // fmov d0, x0
-    em32(0x9E780000)  // fcvtzs x0, d0
-    emit_print_int_a64()
+fn emit_print_u64_no_nl_a64() with Mut {
+    em32(0xD1000000 | (64 << 10) | (31 << 5) | 31)  // sub sp, sp, #64
+    em32(0x91000000 | (63 << 10) | (31 << 5) | 9)   // add x9, sp, #63
+    em32(0xD280014A)                                  // movz x10, #10
+    let loop_top = CL
+    em32(0x9AC00C00 | (10 << 16) | (0 << 5) | 12)   // sdiv x12, x0, x10
+    em32(0x9B000000 | (10 << 16) | (0 << 10) | (12 << 5) | 13)  // msub x13, x12, x10, x0
+    em32(0x91000000 | (48 << 10) | (13 << 5) | 13)  // add x13, x13, #48
+    em32(0x39000000 | (0 << 10) | (9 << 5) | 13)    // strb w13, [x9]
+    em32(0xD1000000 | (1 << 10) | (9 << 5) | 9)     // sub x9, x9, #1
+    em32(0xAA0C03E0)                                  // mov x0, x12
+    let rel = (loop_top - CL) / 4
+    em32(0xB5000000 | ((rel & 0x7FFFF) << 5) | 0)    // cbnz x0, loop
+    em32(0x91000000 | (1 << 10) | (9 << 5) | 1)      // add x1, x9, #1
+    em32(0x91000000 | (64 << 10) | (31 << 5) | 2)    // add x2, sp, #64
+    em32(0xCB010042)                                  // sub x2, x2, x1
+    em32(0xD2800020)                                  // movz x0, #1
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000004)
+    } else {
+        em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    em32(0x91000000 | (64 << 10) | (31 << 5) | 31)   // add sp, sp, #64
+}
+
+fn emit_print_fixed6_a64() with Mut {
+    em32(0xD1000000 | (16 << 10) | (31 << 5) | 31)  // sub sp, sp, #16
+    emit_imm64_reg_a64(10, 100000)
+    em32(0x9AC00C00 | (10 << 16) | (0 << 5) | 12)
+    em32(0x9B000000 | (10 << 16) | (0 << 10) | (12 << 5) | 13)
+    em32(0x91000000 | (48 << 10) | (12 << 5) | 12)
+    em32(0x39000000 | (0 << 10) | (31 << 5) | 12)
+    em32(0xAA0D03E0)
+    emit_imm64_reg_a64(10, 10000)
+    em32(0x9AC00C00 | (10 << 16) | (0 << 5) | 12)
+    em32(0x9B000000 | (10 << 16) | (0 << 10) | (12 << 5) | 13)
+    em32(0x91000000 | (48 << 10) | (12 << 5) | 12)
+    em32(0x39000000 | (1 << 10) | (31 << 5) | 12)
+    em32(0xAA0D03E0)
+    emit_imm64_reg_a64(10, 1000)
+    em32(0x9AC00C00 | (10 << 16) | (0 << 5) | 12)
+    em32(0x9B000000 | (10 << 16) | (0 << 10) | (12 << 5) | 13)
+    em32(0x91000000 | (48 << 10) | (12 << 5) | 12)
+    em32(0x39000000 | (2 << 10) | (31 << 5) | 12)
+    em32(0xAA0D03E0)
+    emit_imm64_reg_a64(10, 100)
+    em32(0x9AC00C00 | (10 << 16) | (0 << 5) | 12)
+    em32(0x9B000000 | (10 << 16) | (0 << 10) | (12 << 5) | 13)
+    em32(0x91000000 | (48 << 10) | (12 << 5) | 12)
+    em32(0x39000000 | (3 << 10) | (31 << 5) | 12)
+    em32(0xAA0D03E0)
+    emit_imm64_reg_a64(10, 10)
+    em32(0x9AC00C00 | (10 << 16) | (0 << 5) | 12)
+    em32(0x9B000000 | (10 << 16) | (0 << 10) | (12 << 5) | 13)
+    em32(0x91000000 | (48 << 10) | (12 << 5) | 12)
+    em32(0x39000000 | (4 << 10) | (31 << 5) | 12)
+    em32(0x91000000 | (48 << 10) | (13 << 5) | 13)
+    em32(0x39000000 | (5 << 10) | (31 << 5) | 13)
+    em32(0xD2800020)  // movz x0, #1
+    em32(0x910003E1)  // mov x1, sp
+    em32(0xD28000C2)  // movz x2, #6
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 0x2000004)
+    } else {
+        em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    em32(0x910043FF)  // add sp, sp, #16
+}
+
+// ─── ARM64 print_f64 ───
+fn emit_print_f64_a64() with Mut, Panic {
+    em32(0xD1000000 | (32 << 10) | (31 << 5) | 31)  // sub sp, sp, #32
+    em32(0xAA0003EF)                                  // mov x15, x0
+    emit_imm64_reg_a64(9, 9223372036854775807)
+    em32(0x8A090000)                                  // and x0, x0, x9
+    let zero_abs_patch = CL
+    em32(0xB4000000)                                  // cbz x0, zero
+    emit_imm64_reg_a64(10, 52)
+    em32(0x9AC02800 | (10 << 16) | (0 << 5) | 9)     // asrv x9, x0, x10
+    emit_imm64_reg_a64(10, 2047)
+    em32(0xEB00001F | (10 << 16) | (9 << 5))         // cmp x9, x10
+    let nan_patch = CL
+    em32(0x54000000)                                  // b.eq nan
+    let zero_sub_patch = CL
+    em32(0xB4000000 | 9)                              // cbz x9, zero
+    em32(0xF100001F | (15 << 5))                      // cmp x15, #0
+    let sign_done_patch = CL
+    em32(0x5400000A)                                  // b.ge sign_done
+    emit_print_char_lit_a64(45)
+    patch_branch_a64(sign_done_patch, CL)
+    em32(0x9E670000)                                  // fmov d0, x0
+    em32(0x9E78000D)                                  // fcvtzs x13, d0
+    em32(0xAA0D03E0)                                  // mov x0, x13
+    em32(0x9E620001)                                  // scvtf d1, x0
+    em32(0x1E613800)                                  // fsub d0, d0, d1
+    emit_imm64_reg_a64(10, 4696837146684686336)       // 1000000.0
+    em32(0x9E670141)                                  // fmov d1, x10
+    em32(0x1E610800)                                  // fmul d0, d0, d1
+    emit_imm64_reg_a64(10, 4602678819172646912)       // 0.5
+    em32(0x9E670141)                                  // fmov d1, x10
+    em32(0x1E612800)                                  // fadd d0, d0, d1
+    em32(0x9E78000E)                                  // fcvtzs x14, d0
+    emit_imm64_reg_a64(10, 1000000)
+    em32(0xEB00001F | (10 << 16) | (14 << 5))        // cmp x14, x10
+    let frac_ok_patch = CL
+    em32(0x5400000B)                                  // b.lt frac_ok
+    em32(0xD280000E)                                  // movz x14, #0
+    em32(0x91000000 | (1 << 10) | (13 << 5) | 13)    // add x13, x13, #1
+    patch_branch_a64(frac_ok_patch, CL)
+    em32(0xF90003ED)                                  // str x13, [sp, #0]
+    em32(0xF90007EE)                                  // str x14, [sp, #8]
+    em32(0xF94003E0)                                  // ldr x0, [sp, #0]
+    emit_print_u64_no_nl_a64()
+    emit_print_char_lit_a64(46)
+    em32(0xF94007E0)                                  // ldr x0, [sp, #8]
+    emit_print_fixed6_a64()
+    let done_norm_patch = CL
+    em32(0x14000000)                                  // b done
+    let zero_label = CL
+    em32(0xD2800000)                                  // movz x0, #0
+    em32(0xF90003E0)                                  // str x0, [sp, #0]
+    em32(0xF90007E0)                                  // str x0, [sp, #8]
+    em32(0xF94003E0)                                  // ldr x0, [sp, #0]
+    emit_print_u64_no_nl_a64()
+    emit_print_char_lit_a64(46)
+    em32(0xF94007E0)                                  // ldr x0, [sp, #8]
+    emit_print_fixed6_a64()
+    let done_zero_patch = CL
+    em32(0x14000000)                                  // b done
+    let nan_label = CL
+    emit_print_char_lit_a64(110)
+    emit_print_char_lit_a64(97)
+    emit_print_char_lit_a64(110)
+    let done_label = CL
+    em32(0x91000000 | (32 << 10) | (31 << 5) | 31)   // add sp, sp, #32
+    patch_branch_a64(zero_abs_patch, zero_label)
+    patch_branch_a64(zero_sub_patch, zero_label)
+    patch_branch_a64(nan_patch, nan_label)
+    patch_branch_a64(done_norm_patch, done_label)
+    patch_branch_a64(done_zero_patch, done_label)
+}
+
+fn emit_read_i64_a64() with Mut {
+    emit_pop_x1_a64()
+    em32(0xF8607820)  // ldr x0, [x1, x0, lsl #3]
+}
+
+fn emit_read_f64_a64() with Mut {
+    emit_pop_x1_a64()
+    em32(0xF8607820)  // ldr x0, [x1, x0, lsl #3]
 }
 
 // ─── ARM64 read_file ───
@@ -8604,11 +9294,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         else { emit_imm64_a64(v) }
         EP = EP + 1
         EXPR_IS_F64 = 0
+        EXPR_TY = 1
+        EXPR_TY_HASH = 0
         return
     }
     // true/false
-    if k == 35 { em32(0xD2800020); EP = EP + 1; EXPR_IS_F64 = 0; return }
-    if k == 36 { em32(0xD2800000); EP = EP + 1; EXPR_IS_F64 = 0; return }
+    if k == 35 { em32(0xD2800020); EP = EP + 1; EXPR_IS_F64 = 0; EXPR_TY = 4; EXPR_TY_HASH = 0; return }
+    if k == 36 { em32(0xD2800000); EP = EP + 1; EXPR_IS_F64 = 0; EXPR_TY = 4; EXPR_TY_HASH = 0; return }
     // Float literal
     if k == 53 {
         let fl_int = TV[EP as usize]
@@ -8646,6 +9338,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         em32(0x9E660000)  // fmov x0, d0
         EXPR_IS_F64 = 1
         EXPR_TY = 2
+        EXPR_TY_HASH = 0
         return
     }
     if k == 48 {
@@ -8798,14 +9491,146 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     // Address-of
     if k == 44 {
         EP = EP + 1
-        if TK[EP as usize] == 32 { EP = EP + 1 }
+        var want_mut: i64 = 0
+        if TK[EP as usize] == 32 {
+            want_mut = 1
+            EP = EP + 1
+        }
+        let borrow_tok = EP - 1
         let rns = TS[EP as usize]
         let rne = TE[EP as usize]
         EP = EP + 1
+        if TK[EP as usize] == 41 {
+            EP = EP + 1
+            let start_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            compile_or_a64()
+            emit_store_var_a64(start_slot)
+            if TK[EP as usize] == 64 { tc_error(borrow_tok, "slice borrows require half-open ranges") }
+            if TK[EP as usize] == 63 || TK[EP as usize] == 64 {
+                EP = EP + 1
+            } else {
+                tc_error(borrow_tok, "slice borrow requires a..b range")
+            }
+            let end_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            compile_or_a64()
+            emit_store_var_a64(end_slot)
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            else { tc_error(borrow_tok, "slice borrow missing closing ]") }
+            let lvi = var_find_idx(rns, rne)
+            var base_ptr_slot: i64 = 0
+            var base_len_slot: i64 = 0
+            var base_len_const: i64 = 0
+            var has_const_len: i64 = 0
+            var elem_ty: i64 = 1
+            var esiz: i64 = 8
+            var ok_base: i64 = 0
+            var allow_mut: i64 = 0
+            if lvi >= 0 {
+                let lty = VAR_TY[lvi as usize]
+                let lhash = VAR_TY_HASH[lvi as usize]
+                base_ptr_slot = VAR_SLOT[lvi as usize]
+                if type_is_slice_ref(lty, lhash) {
+                    let inner_hash = ref_hash_inner_hash(lhash)
+                    base_len_slot = VAR_LEN_SLOT[lvi as usize]
+                    esiz = arr_hash_esiz(inner_hash)
+                    if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                    ok_base = 1
+                    if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
+                } else if lty == 8 {
+                    base_len_const = VAR_ALEN[lvi as usize]
+                    has_const_len = 1
+                    esiz = VAR_ESIZ[lvi as usize]
+                    if arr_hash_elem_ty(lhash) != 0 { elem_ty = arr_hash_elem_ty(lhash) }
+                    ok_base = 1
+                    if want_mut == 0 || VAR_MUT[lvi as usize] != 0 { allow_mut = 1 }
+                } else if type_is_array_ref(lty, lhash) {
+                    let inner_hash = ref_hash_inner_hash(lhash)
+                    base_len_const = arr_hash_alen(inner_hash)
+                    has_const_len = 1
+                    esiz = arr_hash_esiz(inner_hash)
+                    if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                    ok_base = 1
+                    if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
+                }
+            } else {
+                let gi = gl_find(rns, rne)
+                if gi >= 0 && GL_TY[gi as usize] == 8 {
+                    base_len_const = GL[(gi * 4 + 3) as usize]
+                    has_const_len = 1
+                    esiz = GL[(gi * 4 + 2) as usize]
+                    if arr_hash_elem_ty(GL_TY_HASH[gi as usize]) != 0 { elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize]) }
+                    ok_base = 1
+                    allow_mut = 1
+                }
+            }
+            if ok_base == 0 {
+                tc_error(borrow_tok, "slice borrow requires array or slice base")
+                em32(0xD2800000)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 10
+                EXPR_TY_HASH = ref_hash_make(8, arr_ty_hash(0, 8, 1), want_mut)
+                return
+            }
+            if want_mut != 0 && allow_mut == 0 {
+                tc_error(borrow_tok, "Mut borrow requires mutable slice source")
+            }
+            emit_load_var_a64(start_slot)
+            emit_push_a64()
+            emit_load_var_a64(end_slot)
+            emit_pop_x1_a64()
+            em32(0xEB00003F)  // cmp x1, x0
+            let slice_range_ok_a = CL
+            em32(0x54000009)  // b.ls ok
+            emit_assert_fail_a64()
+            patch_branch_a64(slice_range_ok_a, CL)
+            emit_load_var_a64(end_slot)
+            emit_push_a64()
+            if has_const_len != 0 { emit_imm64_a64(base_len_const) }
+            else { emit_load_var_a64(base_len_slot) }
+            emit_pop_x1_a64()
+            em32(0xEB00003F)  // cmp x1, x0
+            let slice_range_ok_b = CL
+            em32(0x54000009)  // b.ls ok
+            emit_assert_fail_a64()
+            patch_branch_a64(slice_range_ok_b, CL)
+            let len_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            let ptr_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            if lvi >= 0 {
+                emit_load_var_a64(base_ptr_slot)
+            } else {
+                let gi = gl_find(rns, rne)
+                if gi >= 0 { emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+                else { em32(0xD2800000) }
+            }
+            em32(0xAA0003EA)  // mov x10, x0
+            emit_load_var_a64(start_slot)
+            if esiz == 8 {
+                em32(0x8B000000)  // add x0, x0, x0
+                em32(0x8B000000)  // add x0, x0, x0
+                em32(0x8B000000)  // add x0, x0, x0
+            }
+            em32(0x8B000140)  // add x0, x10, x0
+            emit_store_var_a64(ptr_slot)
+            emit_load_var_a64(end_slot)
+            emit_push_a64()
+            emit_load_var_a64(start_slot)
+            emit_pop_x1_a64()
+            em32(0xCB000020)  // sub x0, x1, x0
+            emit_store_var_a64(len_slot)
+            emit_lea_var_a64(ptr_slot)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            EXPR_TY_HASH = ref_hash_make(8, arr_ty_hash(0, esiz, elem_ty), want_mut)
+            return
+        }
         let slot = var_find(rns, rne)
         if slot >= 0 {
-            if TK[(EP - 2) as usize] == 32 && var_find_is_mut(rns, rne) == 0 {
-                tc_error(EP - 1, "Mut borrow requires mutable binding")
+            if want_mut != 0 && var_find_is_mut(rns, rne) == 0 {
+                tc_error(borrow_tok, "Mut borrow requires mutable binding")
             }
             let lalen = var_find_alen(rns, rne)
             if lalen > 0 { emit_load_var_a64(slot) }
@@ -8819,7 +9644,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         EXPR_IS_F64 = 0
         EXPR_TY = 10
         if var_find_idx(rns, rne) >= 0 {
-            if TK[(EP - 2) as usize] == 32 {
+            if want_mut != 0 {
                 EXPR_TY_HASH = ref_hash_make(VAR_TY[var_find_idx(rns, rne) as usize], VAR_TY_HASH[var_find_idx(rns, rne) as usize], 1)
             } else {
                 EXPR_TY_HASH = ref_hash_make(VAR_TY[var_find_idx(rns, rne) as usize], VAR_TY_HASH[var_find_idx(rns, rne) as usize], 0)
@@ -8827,11 +9652,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         } else {
             let rgi = gl_find(rns, rne)
             if rgi >= 0 {
-                if TK[(EP - 2) as usize] == 32 { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 1) }
+                if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 1) }
                 else { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 0) }
             }
             else {
-                if TK[(EP - 2) as usize] == 32 { EXPR_TY_HASH = ref_hash_make(0, 0, 1) }
+                if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(0, 0, 1) }
                 else { EXPR_TY_HASH = ref_hash_make(0, 0, 0) }
             }
         }
@@ -9102,24 +9927,78 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if src_match(ns, ne - ns, "arg_count") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                emit_arg_count_a64(); EXPR_IS_F64 = 0; return
+                emit_arg_count_a64(); EXPR_IS_F64 = 0; EXPR_TY = 1; EXPR_TY_HASH = 0; return
             }
             if src_match(ns, ne - ns, "get_arg") {
                 EP = EP + 1; compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                emit_get_arg_a64(); EXPR_IS_F64 = 0; return
+                emit_get_arg_a64(); EXPR_IS_F64 = 0; EXPR_TY = 3; EXPR_TY_HASH = 0; return
+            }
+            if src_match(ns, ne - ns, "read_i64") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64(); emit_push_a64()
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "read offset must be integer") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_read_i64_a64()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "read_f64") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64(); emit_push_a64()
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "read offset must be integer") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_read_f64_a64()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 1
+                EXPR_TY = 2
+                EXPR_TY_HASH = 0
+                return
             }
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_file") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1; compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                emit_read_file_a64(); EXPR_IS_F64 = 0; return
+                emit_read_file_a64(); EXPR_IS_F64 = 0; EXPR_TY = 3; EXPR_TY_HASH = 0; return
             }
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "file_size") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1; compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                emit_file_size_a64(); EXPR_IS_F64 = 0; return
+                emit_file_size_a64(); EXPR_IS_F64 = 0; EXPR_TY = 1; EXPR_TY_HASH = 0; return
             }
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "write_file") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
@@ -9136,6 +10015,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1; compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_str_len_a64(); EXPR_IS_F64 = 0; return
+            }
+            if src_match(ns, ne - ns, "slice_len") {
+                EP = EP + 1; compile_or_a64()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_slice_len_of_expr_a64(name_tok)
+                return
             }
             if src_match(ns, ne - ns, "str_char_at") {
                 EP = EP + 1
@@ -9168,11 +10053,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let call_tok = EP - 1
             EP = EP + 1
             var argc: i64 = 0
+            var abi_argc: i64 = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or_a64()
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
-                    if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && ty_eq(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
+                    if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
                         if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                             tc_epistemic_boundary(call_tok)
                         } else {
@@ -9180,8 +10066,14 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         }
                     }
                 }
-                materialize_aggregate_expr_a64()
-                emit_push_a64()
+                if fi >= 0 && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                    emit_push_expr_as_slice_arg_a64(call_tok)
+                    abi_argc = abi_argc + 2
+                } else {
+                    materialize_aggregate_expr_a64()
+                    emit_push_a64()
+                    abi_argc = abi_argc + 1
+                }
                 argc = argc + 1
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
@@ -9191,14 +10083,14 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let callee_eff = FN_EFFECTS[fi as usize]
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
                 if (callee_eff & ~caller_eff) != 0 { tc_effect_violation(call_tok, callee_eff, caller_eff) }
-                if argc >= 8 { em32(0xF8410FE7) }
-                if argc >= 7 { em32(0xF8410FE6) }
-                if argc >= 6 { em32(0xF8410FE5) }
-                if argc >= 5 { em32(0xF8410FE4) }
-                if argc >= 4 { em32(0xF8410FE3) }
-                if argc >= 3 { em32(0xF8410FE2) }
-                if argc >= 2 { emit_pop_x1_a64() }
-                if argc >= 1 { em32(0xF8410FE0) }
+                if abi_argc >= 8 { em32(0xF8410FE7) }
+                if abi_argc >= 7 { em32(0xF8410FE6) }
+                if abi_argc >= 6 { em32(0xF8410FE5) }
+                if abi_argc >= 5 { em32(0xF8410FE4) }
+                if abi_argc >= 4 { em32(0xF8410FE3) }
+                if abi_argc >= 3 { em32(0xF8410FE2) }
+                if abi_argc >= 2 { emit_pop_x1_a64() }
+                if abi_argc >= 1 { em32(0xF8410FE0) }
                 PATCH_OFF[PATCH_COUNT as usize] = CL
                 PATCH_FN[PATCH_COUNT as usize] = fi
                 PATCH_COUNT = PATCH_COUNT + 1
@@ -9329,6 +10221,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     let lvi = var_find_idx(ns, ne)
                     var elem_ty = 1
                     var is_arr_ty = 0
+                    var is_slice_ty = 0
                     if lvi >= 0 {
                         elem_ty = arr_hash_elem_ty(VAR_TY_HASH[lvi as usize])
                         if elem_ty == 0 { elem_ty = 1 }
@@ -9336,6 +10229,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         if VAR_TY[lvi as usize] == 10 {
                             if ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 {
                                 is_arr_ty = 1
+                                if type_is_slice_ref(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) { is_slice_ty = 1 }
                                 if arr_hash_elem_ty(ref_hash_inner_hash(VAR_TY_HASH[lvi as usize])) != 0 {
                                     elem_ty = arr_hash_elem_ty(ref_hash_inner_hash(VAR_TY_HASH[lvi as usize]))
                                 }
@@ -9343,6 +10237,15 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         }
                     }
                     em32(0xAA0003E9)
+                    if is_slice_ty == 1 {
+                        emit_load_var_a64(VAR_LEN_SLOT[lvi as usize])
+                        em32(0xAA0003EA)  // mov x10, x0
+                        em32(0xEB00001F | (10 << 16) | (9 << 5))  // cmp x9, x10
+                        let slice_ok_local_a = CL
+                        em32(0x54000003)  // b.lo ok
+                        emit_assert_fail_a64()
+                        patch_branch_a64(slice_ok_local_a, CL)
+                    }
                     emit_load_var_a64(slot)
                     if is_arr_ty == 1 && lesiz == 8 {
                         em32(0xF8697800)
@@ -9373,9 +10276,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         // Variable load
         let slot = var_find(ns, ne)
         if slot >= 0 {
-            emit_load_var_a64(slot)
-            EXPR_IS_F64 = var_find_is_f64(ns, ne)
             let vi = var_find_idx(ns, ne)
+            if vi >= 0 && type_is_slice_ref(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) {
+                emit_lea_var_a64(slot)
+            } else {
+                emit_load_var_a64(slot)
+            }
+            EXPR_IS_F64 = var_find_is_f64(ns, ne)
             if vi >= 0 {
                 EXPR_TY = VAR_TY[vi as usize]
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
@@ -9505,6 +10412,29 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     EXPR_TY_HASH = 0
                     EXPR_IS_F64 = 0
                 }
+            } else if type_is_slice_ref(base_ty, base_hash) {
+                let inner_hash = ref_hash_inner_hash(base_hash)
+                let esiz = arr_hash_esiz(inner_hash)
+                var elem_ty = arr_hash_elem_ty(inner_hash)
+                if elem_ty == 0 { elem_ty = 1 }
+                em32(0xF940042A)  // ldr x10, [x1, #8] (len)
+                em32(0xEB00001F | (10 << 16) | (9 << 5))  // cmp x9, x10
+                let slice_ok_patch_a = CL
+                em32(0x54000003)  // b.lo ok
+                emit_assert_fail_a64()
+                patch_branch_a64(slice_ok_patch_a, CL)
+                em32(0xF9400020)  // ldr x0, [x1] (data ptr)
+                if esiz == 8 {
+                    em32(0xF8697800)
+                    EXPR_TY = elem_ty
+                    EXPR_TY_HASH = 0
+                    if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                } else {
+                    em32(0x38A96800)
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 0
+                }
             } else {
                 em32(0x38A96800)
                 EXPR_TY = 1
@@ -9524,7 +10454,11 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1  // skip 'len'
                 EP = EP + 1  // skip (
                 EP = EP + 1  // skip )
-                emit_imm64_a64(LAST_ALEN)
+                if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
+                    em32(0xF9400400)  // ldr x0, [x0, #8]
+                } else {
+                    emit_imm64_a64(LAST_ALEN)
+                }
                 EXPR_TY = 1
                 EXPR_TY_HASH = 0
                 EXPR_IS_F64 = 0
@@ -9965,7 +10899,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     tc_error(EP - 1, "initializer type does not match declaration")
                 }
             }
-            if (decl_ty == 8) || (decl_ty == 0 && EXPR_TY == 8) {
+            if type_is_slice_ref(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
+                var bind_hash = EXPR_TY_HASH
+                if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
+                bind_slice_local_from_x0_a64(ns, ne, bind_hash)
+                let svix = VAR_COUNT - 1
+                VAR_IS_CLOSURE[svix as usize] = 0
+                VAR_MUT[svix as usize] = decl_is_mut
+                VAR_LINEAR[svix as usize] = 0
+            } else if (decl_ty == 8) || (decl_ty == 0 && EXPR_TY == 8) {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty == 8 { bind_hash = decl_ty_hash }
                 bind_array_local_from_x0_a64(ns, ne, bind_hash)
@@ -10139,12 +11081,24 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 let lesiz = var_find_esiz(ns, ne)
                 let lvi = var_find_idx(ns, ne)
                 var is_arr_ty = 0
+                var is_slice_ty = 0
                 if lvi >= 0 && VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
                 if lvi >= 0 && VAR_TY[lvi as usize] == 10 {
-                    if ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 { is_arr_ty = 1 }
+                    if ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 {
+                        is_arr_ty = 1
+                        if type_is_slice_ref(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) { is_slice_ty = 1 }
+                    }
                 }
                 em32(0xAA0003EA)
                 emit_pop_x1_a64()
+                if is_slice_ty == 1 {
+                    emit_load_var_a64(VAR_LEN_SLOT[lvi as usize])
+                    em32(0xEB00003F)  // cmp x1, x0
+                    let slice_store_ok = CL
+                    em32(0x54000003)  // b.lo ok
+                    emit_assert_fail_a64()
+                    patch_branch_a64(slice_store_ok, CL)
+                }
                 emit_load_var_a64(lslot)
                 if is_arr_ty == 1 && lesiz == 8 { em32(0xF821780A) }
                 else { em32(0x3821680A) }
@@ -10565,7 +11519,11 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                     VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                     if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                     if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
-                    if SCAN_TY == 8 {
+                    if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                        VAR_LEN_SLOT[(VAR_COUNT - 1) as usize] = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        VAR_ESIZ[(VAR_COUNT - 1) as usize] = arr_hash_esiz(ref_hash_inner_hash(SCAN_TY_HASH))
+                    } else if SCAN_TY == 8 {
                         VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                         VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
                     }
@@ -10590,16 +11548,18 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         em32(0x910003FD)  // mov x29, sp
         em32(0xD1000000 | (2048 << 10) | (31 << 5) | 31)  // sub sp, sp, #2048
         em32(0xD1000000 | (2048 << 10) | (31 << 5) | 31)  // sub sp, sp, #2048
-        // Spill params
-        let nparams = VAR_COUNT
-        if nparams >= 1 { emit_store_var_a64(1) }
-        if nparams >= 2 { em32(0xAA0103E0); emit_store_var_a64(2) }
-        if nparams >= 3 { em32(0xAA0203E0); emit_store_var_a64(3) }
-        if nparams >= 4 { em32(0xAA0303E0); emit_store_var_a64(4) }
-        if nparams >= 5 { em32(0xAA0403E0); emit_store_var_a64(5) }
-        if nparams >= 6 { em32(0xAA0503E0); emit_store_var_a64(6) }
-        if nparams >= 7 { em32(0xAA0603E0); emit_store_var_a64(7) }
-        if nparams >= 8 { em32(0xAA0703E0); emit_store_var_a64(8) }
+        // Spill params using low-level ABI slot order.
+        var param_vi_a: i64 = 0
+        var abi_arg_idx_a: i64 = 0
+        while param_vi_a < VAR_COUNT {
+            emit_store_incoming_arg_a64(abi_arg_idx_a, VAR_SLOT[param_vi_a as usize])
+            abi_arg_idx_a = abi_arg_idx_a + 1
+            if type_is_slice_ref(VAR_TY[param_vi_a as usize], VAR_TY_HASH[param_vi_a as usize]) {
+                emit_store_incoming_arg_a64(abi_arg_idx_a, VAR_LEN_SLOT[param_vi_a as usize])
+                abi_arg_idx_a = abi_arg_idx_a + 1
+            }
+            param_vi_a = param_vi_a + 1
+        }
         // Compile body
         EP = p
         var depth: i64 = 1
