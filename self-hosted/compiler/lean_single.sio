@@ -26,6 +26,8 @@ var TV: [i64; 262144] = [0; 262144]
 // Float literal extra: frac numerator and denominator (kind=53)
 var TF: [i64; 262144] = [0; 262144]
 var TD: [i64; 262144] = [0; 262144]
+// Float literal scientific exponent (signed exp_val; 0 = no exponent)
+var TX: [i64; 262144] = [0; 262144]
 var TL: [i64; 262144] = [0; 262144]
 var TC: i64 = 0
 
@@ -2098,17 +2100,13 @@ fn lex_all() with Mut, Panic, Div {
                 }
             }
             if is_float == 1 {
-                var num = v * denom + frac
-                var scale = denom
-                while exp_val > 0 {
-                    if exp_sign == 1 { num = num * 10 }
-                    else { scale = scale * 10 }
-                    exp_val = exp_val - 1
-                }
-                v = num / scale
-                frac = num % scale
-                denom = scale
-                TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom; TL[TC as usize] = cur_line; TC = TC + 1; continue
+                // Store mantissa parts without applying the exponent (avoids i64 overflow
+                // for large exponents like 1.0e30). The signed exponent is stored in TX
+                // and applied at codegen time via SSE2 multiply/divide.
+                TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p
+                TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom
+                TX[TC as usize] = exp_sign * exp_val
+                TL[TC as usize] = cur_line; TC = TC + 1; continue
             }
             TK[TC as usize] = 4; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
@@ -3550,6 +3548,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let fl_int = TV[EP as usize]
         let fl_frac = TF[EP as usize]
         let fl_denom = TD[EP as usize]
+        let fl_sci = TX[EP as usize]
         EP = EP + 1
         // mov rax, int_part; cvtsi2sd xmm0, rax
         em(0x48); em(0xb8); em64(fl_int)
@@ -3562,6 +3561,22 @@ fn compile_primary() with IO, Mut, Panic, Div {
             em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xd0)  // cvtsi2sd xmm2, rax
             em(0xf2); em(0x0f); em(0x5e); em(0xca)            // divsd xmm1, xmm2
             em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
+        }
+        // Apply scientific exponent: multiply or divide xmm0 by 10.0 |fl_sci| times
+        if fl_sci != 0 {
+            // Load 10.0 into xmm1: movabs rax, 0x4024000000000000; movq xmm1, rax
+            em(0x48); em(0xb8); em64(0x4024000000000000)
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)
+            var se = fl_sci
+            if se < 0 { se = 0 - se }
+            while se > 0 {
+                if fl_sci > 0 {
+                    em(0xf2); em(0x0f); em(0x59); em(0xc1)  // mulsd xmm0, xmm1
+                } else {
+                    em(0xf2); em(0x0f); em(0x5e); em(0xc1)  // divsd xmm0, xmm1
+                }
+                se = se - 1
+            }
         }
         // movq rax, xmm0 — store f64 bits in rax
         em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
@@ -8551,6 +8566,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         let fl_int = TV[EP as usize]
         let fl_frac = TF[EP as usize]
         let fl_denom = TD[EP as usize]
+        let fl_sci = TX[EP as usize]
         EP = EP + 1
         emit_imm64_a64(fl_int)
         em32(0x9E620000)  // scvtf d0, x0
@@ -8561,6 +8577,21 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             em32(0x9E620002)  // scvtf d2, x0
             em32(0x1E601800 | (2 << 16) | (1 << 5) | 1)  // fdiv d1, d1, d2
             em32(0x1E612800)  // fadd d0, d0, d1
+        }
+        // Apply scientific exponent: mul/div d0 by 10.0 |fl_sci| times
+        if fl_sci != 0 {
+            emit_imm64_a64(0x4024000000000000)  // x0 = bits of 10.0
+            em32(0x9E670001)  // fmov d1, x0
+            var se = fl_sci
+            if se < 0 { se = 0 - se }
+            while se > 0 {
+                if fl_sci > 0 {
+                    em32(0x1E610800)  // fmul d0, d0, d1
+                } else {
+                    em32(0x1E611800)  // fdiv d0, d0, d1
+                }
+                se = se - 1
+            }
         }
         em32(0x9E660000)  // fmov x0, d0
         EXPR_IS_F64 = 1
