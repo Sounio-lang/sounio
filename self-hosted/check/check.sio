@@ -1226,6 +1226,22 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
                 None => print("?")
             }
         }
+        TySlice => {
+            print("&[")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print("]")
+        }
+        TySliceMut => {
+            print("&![")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print("]")
+        }
         TyTuple => {
             print("(")
             print_tuple_type_elems(ty.tuple_elems)
@@ -4859,6 +4875,18 @@ fn call_expr_is_builtin_lift_knowledge(opt: Option<Box<Expr>>) -> bool with Mut,
     }
 }
 
+fn call_expr_is_builtin_slice_len(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str9((*expr).name, 115, 108, 105, 99, 101, 95, 108, 101, 110)
+        }
+        None => false
+    }
+}
+
 fn contest_witness_kind_from_name(name: Name) -> i64 with Panic, Div {
     if name_matches_str14(name, 115, 105, 103, 110, 95, 99, 111, 110, 115, 101, 110, 115, 117, 115) {
         return CONTEST_WITNESS_SIGN_CONSENSUS
@@ -5553,16 +5581,24 @@ fn check_policy_requirements_against_contest(
 }
 
 // Extract variable name from unary operand (if it's a simple ident)
+fn empty_type_name() -> Name {
+    Name { buf: [0; 128], len: 0 }
+}
+
+fn unary_operand_root_name(expr: Expr) -> Name {
+    if expr.kind == ExprKind::ExprIdent {
+        return expr.name
+    }
+    if expr.kind == ExprKind::ExprIndex {
+        return unary_operand_name(expr.left)
+    }
+    empty_type_name()
+}
+
 fn unary_operand_name(opt: Option<Box<Expr>>) -> Name {
     match opt {
-        Some(inner) => {
-            if (*inner).kind == ExprKind::ExprIdent {
-                (*inner).name
-            } else {
-                Name { buf: [0; 128], len: 0 }
-            }
-        }
-        None => Name { buf: [0; 128], len: 0 }
+        Some(inner) => unary_operand_root_name(*inner)
+        None => empty_type_name()
     }
 }
 
@@ -5574,6 +5610,164 @@ fn call_ref_inner_or_self(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Allo
         }
     } else {
         ty
+    }
+}
+
+fn indexable_elem_type(base_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if is_error_or_unknown(base_ty) {
+        return base_ty
+    }
+    if base_ty.kind == TypeKind::TyArray
+        || base_ty.kind == TypeKind::TySlice
+        || base_ty.kind == TypeKind::TySliceMut {
+        match base_ty.inner {
+            Some(elem_ty) => return *elem_ty
+            None => return ty_error()
+        }
+    }
+    if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TyRefMut {
+        match base_ty.inner {
+            Some(inner_ty) => {
+                if (*inner_ty).kind == TypeKind::TyArray
+                    || (*inner_ty).kind == TypeKind::TySlice
+                    || (*inner_ty).kind == TypeKind::TySliceMut {
+                    match (*inner_ty).inner {
+                        Some(elem_ty) => return *elem_ty
+                        None => return ty_error()
+                    }
+                }
+                return ty_error()
+            }
+            None => return ty_error()
+        }
+    }
+    ty_error()
+}
+
+fn len_method_supported(base_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if base_ty.kind == TypeKind::TyString
+        || base_ty.kind == TypeKind::TyArray
+        || base_ty.kind == TypeKind::TySlice
+        || base_ty.kind == TypeKind::TySliceMut {
+        return true
+    }
+    if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TyRefMut {
+        match base_ty.inner {
+            Some(inner_ty) => {
+                return (*inner_ty).kind == TypeKind::TyArray
+                    || (*inner_ty).kind == TypeKind::TySlice
+                    || (*inner_ty).kind == TypeKind::TySliceMut
+            }
+            None => return false
+        }
+    }
+    false
+}
+
+fn slice_param_accepts_array_ref(arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if param_ty.kind != TypeKind::TySlice && param_ty.kind != TypeKind::TySliceMut {
+        return false
+    }
+    if arg_ty.kind != TypeKind::TyRef && arg_ty.kind != TypeKind::TyRefMut {
+        return false
+    }
+    if param_ty.kind == TypeKind::TySliceMut && arg_ty.kind != TypeKind::TyRefMut {
+        return false
+    }
+    match arg_ty.inner {
+        Some(arg_inner) => {
+            if (*arg_inner).kind != TypeKind::TyArray {
+                return false
+            }
+            match ((*arg_inner).inner, param_ty.inner) {
+                (Some(arg_elem), Some(param_elem)) => types_compatible(*arg_elem, *param_elem),
+                _ => false
+            }
+        }
+        None => false
+    }
+}
+
+fn slice_borrow_result_type(base_ty: TypeEntry, want_mut: bool) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if is_error_or_unknown(base_ty) {
+        return base_ty
+    }
+    if base_ty.kind == TypeKind::TyArray {
+        match base_ty.inner {
+            Some(elem_ty) => {
+                if want_mut { return ty_slice_mut(*elem_ty) }
+                return ty_slice(*elem_ty)
+            }
+            None => return ty_error()
+        }
+    }
+    if base_ty.kind == TypeKind::TySlice {
+        if want_mut {
+            return ty_error()
+        }
+        match base_ty.inner {
+            Some(elem_ty) => return ty_slice(*elem_ty)
+            None => return ty_error()
+        }
+    }
+    if base_ty.kind == TypeKind::TySliceMut {
+        match base_ty.inner {
+            Some(elem_ty) => {
+                if want_mut { return ty_slice_mut(*elem_ty) }
+                return ty_slice(*elem_ty)
+            }
+            None => return ty_error()
+        }
+    }
+    if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TyRefMut {
+        match base_ty.inner {
+            Some(inner_ty) => {
+                if (*inner_ty).kind == TypeKind::TyArray {
+                    match (*inner_ty).inner {
+                        Some(elem_ty) => {
+                            if want_mut {
+                                if base_ty.kind == TypeKind::TyRefMut { return ty_slice_mut(*elem_ty) }
+                                return ty_error()
+                            }
+                            return ty_slice(*elem_ty)
+                        }
+                        None => return ty_error()
+                    }
+                }
+                if (*inner_ty).kind == TypeKind::TySlice {
+                    if want_mut {
+                        return ty_error()
+                    }
+                    match (*inner_ty).inner {
+                        Some(elem_ty) => return ty_slice(*elem_ty)
+                        None => return ty_error()
+                    }
+                }
+                if (*inner_ty).kind == TypeKind::TySliceMut {
+                    match (*inner_ty).inner {
+                        Some(elem_ty) => {
+                            if want_mut {
+                                if base_ty.kind == TypeKind::TyRefMut { return ty_slice_mut(*elem_ty) }
+                                return ty_error()
+                            }
+                            return ty_slice(*elem_ty)
+                        }
+                        None => return ty_error()
+                    }
+                }
+                ty_error()
+            }
+            None => ty_error()
+        }
+    } else {
+        ty_error()
+    }
+}
+
+fn expr_is_half_open_range(opt: Option<Box<Expr>>) -> bool {
+    match opt {
+        Some(expr) => (*expr).kind == ExprKind::ExprRange && (*expr).bin_op == BinaryOp::OpRange
+        None => false
     }
 }
 
@@ -5630,6 +5824,12 @@ fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEn
     if param_ty.kind == TypeKind::TyRef && arg_ty.kind == TypeKind::TyRefMut {
         return types_compatible_inner(arg_ty.inner, param_ty.inner)
     }
+    if param_ty.kind == TypeKind::TySlice && arg_ty.kind == TypeKind::TySliceMut {
+        return types_compatible_inner(arg_ty.inner, param_ty.inner)
+    }
+    if slice_param_accepts_array_ref(arg_ty, param_ty) {
+        return true
+    }
     // Allow implicit borrow syntax at call boundaries: f(&T) <- x
     if arg_expr.kind == ExprKind::ExprIdent &&
        (param_ty.kind == TypeKind::TyRef || param_ty.kind == TypeKind::TyRefMut) {
@@ -5643,6 +5843,35 @@ fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEn
 // ============================================================
 
 impl Checker {
+    fn lower_ref_like_type(self, inner_te: TypeExpr, is_mut_ref: bool) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        if inner_te.kind == TypeExprKind::TypeArray {
+            match inner_te.array_size {
+                None => {
+                    match inner_te.inner {
+                        Some(elem_te) => {
+                            let pair = self.lower_type_expr(*elem_te)
+                            let c = pair.0
+                            if is_mut_ref {
+                                return (c, ty_slice_mut(pair.1))
+                            }
+                            return (c, ty_slice(pair.1))
+                        }
+                        None => return (self, ty_error())
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        let pair = self.lower_type_expr(inner_te)
+        let c = pair.0
+        let inner_ty = pair.1
+        if is_mut_ref {
+            (c, ty_ref_mut(inner_ty))
+        } else {
+            (c, ty_ref(inner_ty))
+        }
+    }
+
     fn lower_type_expr(self, te: TypeExpr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // Check type depth limit
         let depth_pair = self.check_type_depth(te.span)
@@ -5887,24 +6116,14 @@ impl Checker {
 
     fn lower_ref_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
-            Some(inner_te) => {
-                let pair = self.lower_type_expr(*inner_te)
-                let c = pair.0
-                let inner_ty = pair.1
-                (c, ty_ref(inner_ty))
-            }
+            Some(inner_te) => self.lower_ref_like_type(*inner_te, false)
             None => (self, ty_error())
         }
     }
 
     fn lower_ref_mut_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
-            Some(inner_te) => {
-                let pair = self.lower_type_expr(*inner_te)
-                let c = pair.0
-                let inner_ty = pair.1
-                (c, ty_ref_mut(inner_ty))
-            }
+            Some(inner_te) => self.lower_ref_like_type(*inner_te, true)
             None => (self, ty_error())
         }
     }
@@ -9128,7 +9347,82 @@ impl Checker {
     // Unary expression
     // --------------------------------------------------------
 
+    fn check_slice_borrow_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let want_mut = e.un_op == UnaryOp::OpRefMut
+        let borrow_name = unary_operand_name(e.left)
+        match e.left {
+            Some(index_expr) => {
+                let idx_expr = *index_expr
+                if idx_expr.kind != ExprKind::ExprIndex {
+                    return (self.report_error_at(e.span, 13, 0, 0, 0), ty_error())
+                }
+                let base_pair = self.check_opt_expr(idx_expr.left)
+                var c = base_pair.0
+                let base_ty = base_pair.1
+                let result_ty = slice_borrow_result_type(base_ty, want_mut)
+                if result_ty.kind == TypeKind::TyError && !is_error_or_unknown(base_ty) {
+                    c = c.report_error_at(e.span, 13, 0, 0, 0)
+                }
+                match idx_expr.right {
+                    Some(range_expr) => {
+                        if (*range_expr).kind != ExprKind::ExprRange || (*range_expr).bin_op != BinaryOp::OpRange {
+                            c = c.report_error_at(e.span, 13, 0, 0, 0)
+                        } else {
+                            match (*range_expr).left {
+                                Some(start_expr) => {
+                                    let start_pair = c.check_expr(*start_expr)
+                                    c = start_pair.0
+                                    if !is_error_or_unknown(start_pair.1) && !is_integer_type(start_pair.1) {
+                                        c = c.report_mismatch(e.span, 55, ty_i64(), start_pair.1)
+                                    }
+                                }
+                                None => {
+                                    c = c.report_error_at(e.span, 13, 0, 0, 0)
+                                }
+                            }
+                            match (*range_expr).right {
+                                Some(end_expr) => {
+                                    let end_pair = c.check_expr(*end_expr)
+                                    c = end_pair.0
+                                    if !is_error_or_unknown(end_pair.1) && !is_integer_type(end_pair.1) {
+                                        c = c.report_mismatch(e.span, 55, ty_i64(), end_pair.1)
+                                    }
+                                }
+                                None => {
+                                    c = c.report_error_at(e.span, 13, 0, 0, 0)
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        c = c.report_error_at(e.span, 13, 0, 0, 0)
+                    }
+                }
+                if borrow_name.len > 0 {
+                    if want_mut {
+                        let borrow_result = c.borrows.try_exclusive_borrow(borrow_name)
+                        c.borrows = borrow_result.0
+                        if borrow_result.1 != 0 {
+                            c = c.report_error_at(e.span, borrow_result.1, 0, 0, 0)
+                        }
+                    } else {
+                        let borrow_result = c.borrows.try_shared_borrow(borrow_name)
+                        c.borrows = borrow_result.0
+                        if borrow_result.1 != 0 {
+                            c = c.report_error_at(e.span, borrow_result.1, 0, 0, 0)
+                        }
+                    }
+                }
+                (c, result_ty)
+            }
+            None => (self.report_error_at(e.span, 13, 0, 0, 0), ty_error())
+        }
+    }
+
     fn check_unary_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && expr_is_half_open_range(e.left) {
+            return self.check_slice_borrow_expr(e)
+        }
         let pair = self.check_opt_expr(e.left)
         var c = pair.0
         let operand_ty = pair.1
@@ -9287,36 +9581,14 @@ impl Checker {
         if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
             c = c.report_error_at(e.span, 14, 0, 0, 0)
         }
-        // Base must be array (or a reference to array — auto-deref)
-        if base_ty.kind == TypeKind::TyArray {
-            match base_ty.inner {
-                Some(elem_ty) => (c, *elem_ty)
-                None => (c, ty_error())
-            }
-        } else if base_ty.kind == TypeKind::TyRefMut || base_ty.kind == TypeKind::TyRef {
-            // Auto-deref: &[T; N][i] -> T, &![T; N][i] -> T
-            match base_ty.inner {
-                Some(inner_ty) => {
-                    if (*inner_ty).kind == TypeKind::TyArray {
-                        match (*inner_ty).inner {
-                            Some(elem_ty) => (c, *elem_ty)
-                            None => (c, ty_error())
-                        }
-                    } else {
-                        c = c.report_error_at(e.span, 13, 0, 0, 0)
-                        (c, ty_error())
-                    }
-                }
-                None => {
-                    c = c.report_error_at(e.span, 13, 0, 0, 0)
-                    (c, ty_error())
-                }
-            }
+        let elem_ty = indexable_elem_type(base_ty)
+        if !is_error_or_unknown(base_ty) && elem_ty.kind == TypeKind::TyError {
+            c = c.report_error_at(e.span, 13, 0, 0, 0)
+            (c, ty_error())
         } else if is_error_or_unknown(base_ty) {
             (c, base_ty)
         } else {
-            c = c.report_error_at(e.span, 13, 0, 0, 0)
-            (c, ty_error())
+            (c, elem_ty)
         }
     }
 
@@ -9335,6 +9607,12 @@ impl Checker {
             c.suppress_linear_consume_depth = c.suppress_linear_consume_depth - 1
         }
         let base_ty = base_pair.1
+        if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
+            let call_start_borrows = c.borrows
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            return (c, ty_i64())
+        }
         if base_ty.kind == TypeKind::TyKnowledge {
             // Knowledge<T>.unwrap() -> T
             if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
@@ -9441,6 +9719,32 @@ impl Checker {
     // Function call
     // --------------------------------------------------------
 
+    fn check_slice_len_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        let call_start_borrows = self.borrows
+        let first_pair = self.check_opt_expr(first_arg)
+        var c = first_pair.0
+        let arg_ty = first_pair.1
+        match first_arg {
+            None => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            Some(_) => {}
+        }
+        match second_arg {
+            Some(_) => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            None => {}
+        }
+        let is_ok =
+            arg_ty.kind == TypeKind::TySlice
+            || arg_ty.kind == TypeKind::TySliceMut
+            || slice_param_accepts_array_ref(arg_ty, ty_slice(ty_unknown()))
+        if !is_ok && !is_error_or_unknown(arg_ty) {
+            c = c.report_error_at(e.span, 9, 0, 0, 0)
+        }
+        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+        (c, ty_i64())
+    }
+
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // Safety guard: ExprIndex nodes (e.right=Some) are occasionally dispatched here
         // due to a VM-level kind mismatch. ExprCall never sets e.right; ExprIndex always does.
@@ -9507,6 +9811,9 @@ impl Checker {
         }
         if call_expr_is_builtin_measure(e.left) {
             return self.check_measure_expr(e)
+        }
+        if call_expr_is_builtin_slice_len(e.left) {
+            return self.check_slice_len_call_expr(e)
         }
         let witness_kind = call_expr_contest_witness_kind(e.left)
         if witness_kind >= 0 {

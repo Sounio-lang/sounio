@@ -34,6 +34,20 @@ fn tc_make_name5(a: i8, b: i8, c: i8, d: i8, e: i8) -> Name with Mut, Panic, Div
     n
 }
 
+fn tc_make_name9(a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8, h: i8, i: i8) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 9 }
+    n.buf[0] = a
+    n.buf[1] = b
+    n.buf[2] = c
+    n.buf[3] = d
+    n.buf[4] = e
+    n.buf[5] = f
+    n.buf[6] = g
+    n.buf[7] = h
+    n.buf[8] = i
+    n
+}
+
 fn tc_empty_path() -> AstPath {
     AstPath {
         segments: StringList { head_buf: [0; 128], head_len: 0, tail: None },
@@ -100,6 +114,48 @@ fn tc_array_type(elem_ty: TypeExpr, size: i64) -> TypeExpr with Mut, Panic, Div,
         type_args: None,
         inner: Some(Box::new(elem_ty)),
         array_size: Some(Box::new(tc_int_expr(size))),
+        effects: None,
+        knowledge_info: None,
+        refinement_info: None,
+    }
+}
+
+fn tc_slice_inner_type(elem_ty: TypeExpr) -> TypeExpr with Mut, Panic, Div, Alloc {
+    TypeExpr {
+        kind: TypeExprKind::TypeArray,
+        span: Span::dummy(),
+        path: tc_empty_path(),
+        type_args: None,
+        inner: Some(Box::new(elem_ty)),
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+        refinement_info: None,
+    }
+}
+
+fn tc_slice_type(elem_ty: TypeExpr) -> TypeExpr with Mut, Panic, Div, Alloc {
+    TypeExpr {
+        kind: TypeExprKind::TypeReference,
+        span: Span::dummy(),
+        path: tc_empty_path(),
+        type_args: None,
+        inner: Some(Box::new(tc_slice_inner_type(elem_ty))),
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+        refinement_info: None,
+    }
+}
+
+fn tc_slice_mut_type(elem_ty: TypeExpr) -> TypeExpr with Mut, Panic, Div, Alloc {
+    TypeExpr {
+        kind: TypeExprKind::TypeRefMut,
+        span: Span::dummy(),
+        path: tc_empty_path(),
+        type_args: None,
+        inner: Some(Box::new(tc_slice_inner_type(elem_ty))),
+        array_size: None,
         effects: None,
         knowledge_info: None,
         refinement_info: None,
@@ -220,6 +276,28 @@ fn tc_ident_expr(a: i8, b: i8, c: i8, count: i64) -> Expr with Mut, Panic, Div {
     }
 }
 
+fn tc_ident_name_expr(name: Name) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprIdent,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: name,
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+        cast_type: None,
+        handler_block: None,
+    }
+}
+
 fn tc_binop_expr(left: Expr, op: BinaryOp, right: Expr) -> Expr with Mut, Panic, Div, Alloc {
     Expr {
         kind: ExprKind::ExprBinary,
@@ -298,6 +376,28 @@ fn tc_index_expr(base: Expr, index: Expr) -> Expr with Mut, Panic, Div, Alloc {
         un_op: UnaryOp::OpNeg,
         left: Some(Box::new(base)),
         right: Some(Box::new(index)),
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+        cast_type: None,
+        handler_block: None,
+    }
+}
+
+fn tc_range_expr(start: Expr, finish: Expr) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprRange,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpRange,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(start)),
+        right: Some(Box::new(finish)),
         block: None,
         else_expr: None,
         args: None,
@@ -1247,13 +1347,184 @@ fn tc_test_32() -> bool with Mut, Panic, Div, Alloc, IO {
     result.error_count == 0
 }
 
+// T33: &[T] param + slice_len(&array) coercion
+fn tc_test_33() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_len9 = tc_make_name9(115, 108, 105, 99, 101, 95, 108, 101, 110)
+    let name_a = tc_make_name(97, 0, 0, 1)
+    let name_s = tc_make_name(115, 0, 0, 1)
+    let take_param = tc_param(name_s, tc_slice_type(tc_i64_type()))
+    let take_body = tc_block1(tc_expr_stmt(
+        tc_call_expr(
+            tc_ident_name_expr(name_len9),
+            Some(Box::new(ExprList { head: tc_ident_expr(115, 0, 0, 1), tail: None }))
+        )
+    ))
+    let take_item = tc_fn_item(tc_make_name4(116, 97, 107, 101), Some(Box::new(ParamList { head: take_param, tail: None })), Some(Box::new(tc_i64_type())), take_body)
+
+    let elems = Some(Box::new(ExprList {
+        head: tc_int_expr(1),
+        tail: Some(Box::new(ExprList {
+            head: tc_int_expr(2),
+            tail: Some(Box::new(ExprList {
+                head: tc_int_expr(3),
+                tail: None,
+            })),
+        })),
+    }))
+    let call = tc_call_expr(
+        tc_ident_expr(116, 97, 107, 4),
+        Some(Box::new(ExprList {
+            head: tc_unary_expr(UnaryOp::OpRef, tc_ident_expr(97, 0, 0, 1)),
+            tail: None,
+        }))
+    )
+    let main_body = tc_block2(
+        tc_let_stmt(name_a, tc_array_lit_expr(elems)),
+        tc_expr_stmt(call)
+    )
+    let main_item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, main_body)
+
+    let result = check_program(tc_two_items(take_item, main_item))
+    result.error_count == 0
+}
+
+// T34: &![T] param + slice indexing/assignment
+fn tc_test_34() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_a = tc_make_name(97, 0, 0, 1)
+    let name_s = tc_make_name(115, 0, 0, 1)
+    let name_swap = tc_make_name4(115, 119, 97, 112)
+    let touch_param = tc_param(name_s, tc_slice_mut_type(tc_i64_type()))
+    let assign = tc_assign_stmt(
+        tc_index_expr(tc_ident_expr(115, 0, 0, 1), tc_int_expr(0)),
+        tc_index_expr(tc_ident_expr(115, 0, 0, 1), tc_int_expr(1))
+    )
+    let touch_item = tc_fn_item(
+        name_swap,
+        Some(Box::new(ParamList { head: touch_param, tail: None })),
+        None,
+        tc_block1(assign)
+    )
+
+    let elems = Some(Box::new(ExprList {
+        head: tc_int_expr(4),
+        tail: Some(Box::new(ExprList {
+            head: tc_int_expr(7),
+            tail: None,
+        })),
+    }))
+    let main_call = tc_call_expr(
+        tc_ident_name_expr(name_swap),
+        Some(Box::new(ExprList {
+            head: tc_unary_expr(UnaryOp::OpRefMut, tc_ident_expr(97, 0, 0, 1)),
+            tail: None,
+        }))
+    )
+    let main_body = tc_block2(
+        tc_var_stmt(name_a, tc_array_lit_expr(elems)),
+        tc_expr_stmt(main_call)
+    )
+    let main_item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, main_body)
+
+    let result = check_program(tc_two_items(touch_item, main_item))
+    result.error_count == 0
+}
+
+// T35: subslice from fixed array and existing slice
+fn tc_test_35() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_a = tc_make_name(97, 0, 0, 1)
+    let name_s = tc_make_name(115, 0, 0, 1)
+    let name_w = tc_make_name(119, 0, 0, 1)
+    let slice_param = tc_param(name_s, tc_slice_type(tc_i64_type()))
+    let win_init = tc_unary_expr(
+        UnaryOp::OpRef,
+        tc_index_expr(
+            tc_ident_expr(115, 0, 0, 1),
+            tc_range_expr(tc_int_expr(0), tc_int_expr(1))
+        )
+    )
+    let inner_body = tc_block2(
+        tc_let_stmt(name_w, win_init),
+        tc_expr_stmt(tc_method_call_expr(tc_ident_expr(119, 0, 0, 1), tc_make_name(108, 101, 110, 3), None))
+    )
+    let use_item = tc_fn_item(tc_make_name(117, 115, 101, 3), Some(Box::new(ParamList { head: slice_param, tail: None })), Some(Box::new(tc_i64_type())), inner_body)
+
+    let elems = Some(Box::new(ExprList {
+        head: tc_int_expr(9),
+        tail: Some(Box::new(ExprList {
+            head: tc_int_expr(8),
+            tail: Some(Box::new(ExprList {
+                head: tc_int_expr(7),
+                tail: None,
+            })),
+        })),
+    }))
+    let outer_slice = tc_unary_expr(
+        UnaryOp::OpRef,
+        tc_index_expr(
+            tc_ident_expr(97, 0, 0, 1),
+            tc_range_expr(tc_int_expr(0), tc_int_expr(2))
+        )
+    )
+    let main_call = tc_call_expr(
+        tc_ident_expr(117, 115, 101, 3),
+        Some(Box::new(ExprList { head: outer_slice, tail: None }))
+    )
+    let main_body = tc_block2(
+        tc_let_stmt(name_a, tc_array_lit_expr(elems)),
+        tc_expr_stmt(main_call)
+    )
+    let main_item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, main_body)
+
+    let result = check_program(tc_two_items(use_item, main_item))
+    result.error_count == 0
+}
+
+// T36: slice borrows track the root array name
+fn tc_test_36() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_a = tc_make_name(97, 0, 0, 1)
+    let name_s = tc_make_name(115, 0, 0, 1)
+    let name_t = tc_make_name(116, 0, 0, 1)
+    let elems = Some(Box::new(ExprList {
+        head: tc_int_expr(1),
+        tail: Some(Box::new(ExprList {
+            head: tc_int_expr(2),
+            tail: Some(Box::new(ExprList {
+                head: tc_int_expr(3),
+                tail: None,
+            })),
+        })),
+    }))
+    let first_slice = tc_unary_expr(
+        UnaryOp::OpRefMut,
+        tc_index_expr(
+            tc_ident_expr(97, 0, 0, 1),
+            tc_range_expr(tc_int_expr(0), tc_int_expr(2))
+        )
+    )
+    let second_slice = tc_unary_expr(
+        UnaryOp::OpRef,
+        tc_index_expr(
+            tc_ident_expr(97, 0, 0, 1),
+            tc_range_expr(tc_int_expr(1), tc_int_expr(3))
+        )
+    )
+    let body = tc_block3(
+        tc_var_stmt(name_a, tc_array_lit_expr(elems)),
+        tc_let_stmt(name_s, first_slice),
+        tc_let_stmt(name_t, second_slice)
+    )
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count > 0
+}
+
 // ============================================================================
 // ENTRY POINT
 // ============================================================================
 
 fn run_check_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 32
+    let total: i64 = 36
 
     print("=== Type Checker Tests ===\n")
 
@@ -1289,6 +1560,10 @@ fn run_check_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if tc_test_30() { passed = passed + 1; print("  T30 OK: string + int -> error\n") } else { print("  FAIL: T30 string + int -> error\n") }
     if tc_test_31() { passed = passed + 1; print("  T31 OK: arity mismatch\n") } else { print("  FAIL: T31 arity mismatch\n") }
     if tc_test_32() { passed = passed + 1; print("  T32 OK: nested block scoping\n") } else { print("  FAIL: T32 nested block scoping\n") }
+    if tc_test_33() { passed = passed + 1; print("  T33 OK: slice_len + shared slice coercion\n") } else { print("  FAIL: T33 slice_len + shared slice coercion\n") }
+    if tc_test_34() { passed = passed + 1; print("  T34 OK: mutable slice index assign\n") } else { print("  FAIL: T34 mutable slice index assign\n") }
+    if tc_test_35() { passed = passed + 1; print("  T35 OK: subslice from array and slice\n") } else { print("  FAIL: T35 subslice from array and slice\n") }
+    if tc_test_36() { passed = passed + 1; print("  T36 OK: subslice borrow root tracking\n") } else { print("  FAIL: T36 subslice borrow root tracking\n") }
 
     print("\nCheck tests: ")
     print_int(passed)

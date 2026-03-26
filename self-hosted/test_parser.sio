@@ -54,6 +54,76 @@ fn ptok_id3(c0: i8, c1: i8, c2: i8) -> Token with Mut, Panic {
     tok
 }
 
+fn typeexpr_is_shared_slice(te: TypeExpr) -> bool with Alloc {
+    if te.kind != TypeExprKind::TypeReference {
+        return false
+    }
+    match te.inner {
+        Some(inner) => {
+            if (*inner).kind != TypeExprKind::TypeArray {
+                return false
+            }
+            match (*inner).array_size {
+                None => true,
+                Some(_) => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn typeexpr_is_mut_slice(te: TypeExpr) -> bool with Alloc {
+    if te.kind != TypeExprKind::TypeRefMut {
+        return false
+    }
+    match te.inner {
+        Some(inner) => {
+            if (*inner).kind != TypeExprKind::TypeArray {
+                return false
+            }
+            match (*inner).array_size {
+                None => true,
+                Some(_) => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn first_fn_first_param_is_shared_slice(prog: Program) -> bool with Alloc {
+    match prog.items {
+        Some(items) => {
+            match (*items).head.fn_def {
+                Some(fd) => {
+                    match (*fd).params {
+                        Some(params) => typeexpr_is_shared_slice((*params).head.ty),
+                        None => false,
+                    }
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn first_fn_first_param_is_mut_slice(prog: Program) -> bool with Alloc {
+    match prog.items {
+        Some(items) => {
+            match (*items).head.fn_def {
+                Some(fd) => {
+                    match (*fd).params {
+                        Some(params) => typeexpr_is_mut_slice((*params).head.ty),
+                        None => false,
+                    }
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
 fn parse_program_from_ascii(input: [i8; 256], len: i64) -> Program with Mut, IO, Panic, Div, Alloc {
     var source: [i8; 1048576] = [0; 1048576]
     var i: i64 = 0
@@ -528,6 +598,46 @@ fn test_hardware_publish_canonicalization() -> bool with Mut, IO, Panic, Div, Al
     first_stmt_call_second_arg_is_fma_code(prog)
 }
 
+// T12: fn f(s: &[f64]) {} parses a shared slice parameter
+fn test_fn_with_shared_slice_param() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok(TokenKind::Fn)
+    tokens[1] = ptok_id1(102)  // f
+    tokens[2] = ptok(TokenKind::LParen)
+    tokens[3] = ptok_id1(115)  // s
+    tokens[4] = ptok(TokenKind::Colon)
+    tokens[5] = ptok(TokenKind::Amp)
+    tokens[6] = ptok(TokenKind::LBracket)
+    tokens[7] = ptok_id3(102, 54, 52)  // f64
+    tokens[8] = ptok(TokenKind::RBracket)
+    tokens[9] = ptok(TokenKind::RParen)
+    tokens[10] = ptok(TokenKind::LBrace)
+    tokens[11] = ptok(TokenKind::RBrace)
+    tokens[12] = ptok_eof()
+    let prog = parse_program(tokens, 13)
+    count_items(prog) == 1 && first_fn_first_param_is_shared_slice(prog)
+}
+
+// T13: fn f(s: &![f64]) {} parses a mutable slice parameter
+fn test_fn_with_mut_slice_param() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok(TokenKind::Fn)
+    tokens[1] = ptok_id1(102)  // f
+    tokens[2] = ptok(TokenKind::LParen)
+    tokens[3] = ptok_id1(115)  // s
+    tokens[4] = ptok(TokenKind::Colon)
+    tokens[5] = ptok(TokenKind::AmpBang)
+    tokens[6] = ptok(TokenKind::LBracket)
+    tokens[7] = ptok_id3(102, 54, 52)  // f64
+    tokens[8] = ptok(TokenKind::RBracket)
+    tokens[9] = ptok(TokenKind::RParen)
+    tokens[10] = ptok(TokenKind::LBrace)
+    tokens[11] = ptok(TokenKind::RBrace)
+    tokens[12] = ptok_eof()
+    let prog = parse_program(tokens, 13)
+    count_items(prog) == 1 && first_fn_first_param_is_mut_slice(prog)
+}
+
 // ============================================================================
 // TEST RUNNER
 // ============================================================================
@@ -568,6 +678,12 @@ fn run_parser_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
 
     total = total + 1
     if test_hardware_publish_canonicalization() { passed = passed + 1 } else { print("FAIL: T11 hardware_publish_canonicalization\n") }
+
+    total = total + 1
+    if test_fn_with_shared_slice_param() { passed = passed + 1 } else { print("FAIL: T12 fn_with_shared_slice_param\n") }
+
+    total = total + 1
+    if test_fn_with_mut_slice_param() { passed = passed + 1 } else { print("FAIL: T13 fn_with_mut_slice_param\n") }
 
     if passed == total {
         print("ALL PARSER TESTS PASSED\n")
