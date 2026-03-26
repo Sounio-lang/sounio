@@ -10,6 +10,7 @@ module check::mod
 
 use ir::ir::*
 use parser::ast::*
+use check::types::{TypeEntry, TypeEntryList, TypeKind}
 
 struct CheckResult {
     error_count: i64,
@@ -71,6 +72,101 @@ fn checker_to_ir_epistemic(checker: Checker) -> IrEpistemicSection with Mut, Pan
 
 fn check_result_to_ir_epistemic(result: &CheckArtifactsResult) -> IrEpistemicSection with Mut, Panic, Div, Alloc {
     checker_to_ir_epistemic(result.checker)
+}
+
+fn checker_to_ir_algebras(checker: &Checker) -> IrAlgebraTable with Mut, Panic, Div, Alloc {
+    var out = ir_empty_algebra_table()
+    var i: i64 = 0
+    while i < checker.algebras.count && i < 32 {
+        let src = checker.algebras.entries[i]
+        out.entries[i] = IrAlgebraInfo {
+            name: src.name,
+            add_commutative: src.add_commutative,
+            add_associative: src.add_associative,
+            mul_commutative: src.mul_commutative,
+            mul_associative: src.mul_associative,
+            mul_alternative: src.mul_alternative,
+            reassoc_strategy: src.reassoc_strategy,
+            algebra_tag: src.algebra_tag,
+            is_valid: src.is_valid,
+        }
+        i = i + 1
+    }
+    out.count = if checker.algebras.count > 32 { 32 } else { checker.algebras.count }
+    out
+}
+
+fn checker_collect_hyper_alg_from_type_list(
+    elems: Option<Box<TypeEntryList>>,
+    found_alg: &! i64,
+    found_any: &! i64,
+    ambiguous: &! i64
+) with Mut, Panic, Div, Alloc {
+    if *ambiguous != 0 { return }
+    match elems {
+        None => {}
+        Some(list) => {
+            checker_collect_hyper_alg_from_type((*list).head, &! found_alg, &! found_any, &! ambiguous)
+            checker_collect_hyper_alg_from_type_list((*list).tail, &! found_alg, &! found_any, &! ambiguous)
+        }
+    }
+}
+
+fn checker_collect_hyper_alg_from_type(
+    ty: TypeEntry,
+    found_alg: &! i64,
+    found_any: &! i64,
+    ambiguous: &! i64
+) with Mut, Panic, Div, Alloc {
+    if *ambiguous != 0 { return }
+    if ty.kind == TypeKind::TyHyper {
+        if *found_any == 0 {
+            *found_any = 1
+            *found_alg = ty.algebra_kind
+        } else if *found_alg != ty.algebra_kind {
+            *ambiguous = 1
+        }
+    }
+    match ty.inner {
+        None => {}
+        Some(inner) => checker_collect_hyper_alg_from_type(*inner, &! found_alg, &! found_any, &! ambiguous)
+    }
+    checker_collect_hyper_alg_from_type_list(ty.tuple_elems, &! found_alg, &! found_any, &! ambiguous)
+}
+
+fn checker_infer_fn_hyper_algebra(checker: &Checker, fn_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    let sig_idx = checker.fn_sigs.find(fn_name)
+    if sig_idx < 0 { return -1 }
+    let sig = checker.fn_sigs.get(sig_idx)
+    var found_alg: i64 = -1
+    var found_any: i64 = 0
+    var ambiguous: i64 = 0
+
+    checker_collect_hyper_alg_from_type(sig.return_type, &! found_alg, &! found_any, &! ambiguous)
+    if sig.is_method {
+        checker_collect_hyper_alg_from_type(sig.self_type_entry, &! found_alg, &! found_any, &! ambiguous)
+    }
+
+    var i: i64 = 0
+    while i < sig.param_count && ambiguous == 0 {
+        let param = fn_param_list_get(sig.params, i)
+        checker_collect_hyper_alg_from_type(param.ty, &! found_alg, &! found_any, &! ambiguous)
+        i = i + 1
+    }
+
+    if ambiguous != 0 { return -1 }
+    if found_any == 0 { return -1 }
+    found_alg
+}
+
+fn checker_apply_ir_metadata(checker: &Checker, module: &! IrModule) with Mut, Panic, Div, Alloc {
+    (*module).algebras = checker_to_ir_algebras(checker)
+    var i: i64 = 0
+    while i < (*module).fn_count {
+        let fn_name = (*module).functions[i].name
+        (*module).functions[i].hyper_algebra_kind = checker_infer_fn_hyper_algebra(checker, fn_name)
+        i = i + 1
+    }
 }
 
 fn check_program_ok(prog: Program) -> bool with Mut, Panic, Div, Alloc, IO {

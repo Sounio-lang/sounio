@@ -84,6 +84,7 @@ struct Checker {
     enums: EnumTable,
     fn_sigs: FnSigTable,
     algebras: AlgebraTable,
+    hyper_exprs: HyperExprTable,
     models: ModelTable,
     model_families: ModelFamilyTable,
     policies: PolicyTable,
@@ -342,6 +343,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         enums: enum_table_new(),
         fn_sigs: fn_sig_table_new(),
         algebras: empty_algebra_table(),
+        hyper_exprs: hyper_expr_table_new(),
         models: model_table_new(),
         model_families: model_family_table_new(),
         policies: policy_table_new(),
@@ -1147,6 +1149,23 @@ fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicS
             robust_proof_id: info.robust_proof_id,
             validation_id: info.validation_id,
             inner_ty: info.inner_ty,
+        }
+        i = i + 1
+    }
+
+    ep.hyper_expr_count = checker.hyper_exprs.count
+    if ep.hyper_expr_count > IR_MAX_EPI_HYPER_EXPRS {
+        ep.hyper_expr_count = IR_MAX_EPI_HYPER_EXPRS
+    }
+    i = 0
+    while i < ep.hyper_expr_count {
+        let info = checker.hyper_exprs.entries[i as usize]
+        ep.hyper_exprs[i as usize] = IrHyperExprInfo {
+            span_start: info.span_start,
+            span_end: info.span_end,
+            algebra_tag: info.algebra_tag,
+            op_kind: info.op_kind,
+            knowledge_wrapped: info.knowledge_wrapped,
         }
         i = i + 1
     }
@@ -5706,9 +5725,34 @@ impl Checker {
             Some(args) => {
                 let name = checker_copy_string_list_to_name(path.segments)
 
+                // Hyper<Algebra, T> — checker-level hyper type now lowered from source.
+                if name_matches_str5(name, 72, 121, 112, 101, 114) {
+                    let alg_expr = (*args).head
+                    let elem_expr = match (*args).tail {
+                        Some(rest) => (*rest).head
+                        None => {
+                            let c = self.report_error_at(alg_expr.span, 1, 0, 0, 0)
+                            return (c, ty_error())
+                        }
+                    }
+                    if alg_expr.kind != TypeExprKind::TypeNamed {
+                        let c = self.report_error_at(alg_expr.span, 1, 0, 0, 0)
+                        return (c, ty_error())
+                    }
+                    let alg_name = checker_copy_string_list_to_name(alg_expr.path.segments)
+                    let algebra_tag = resolve_algebra_name(alg_name)
+                    if algebra_tag < 0 {
+                        let c = self.report_error_at(alg_expr.span, 1, 0, 0, 0)
+                        return (c, ty_error())
+                    }
+                    let elem_pair = self.lower_type_expr(elem_expr)
+                    let c = elem_pair.0
+                    let elem_ty = elem_pair.1
+                    return (c, ty_hyper(algebra_tag, elem_ty))
+                }
+
                 // Unobserved<T> — observer type-state wrapper
-                // "Unobserved" = 10 chars, U=85, n=110
-                if name.len == 10 && name.text[0] == 85 as i8 && name.text[1] == 110 as i8 {
+                if name_matches_str10(name, 85, 110, 111, 98, 115, 101, 114, 118, 101, 100) {
                     let inner_result = self.lower_type_expr_list(*args)
                     let c = inner_result.0
                     let inner_args = inner_result.1
@@ -5761,6 +5805,23 @@ impl Checker {
                 }
             }
         }
+    }
+
+    fn record_hyper_expr(self, span: Span, algebra_tag: i64, op_kind: i64, knowledge_wrapped: bool) -> Checker with Mut, Panic, Div {
+        if algebra_tag < 0 || op_kind <= 0 {
+            return self
+        }
+        var c = self
+        let info = HyperExprInfo {
+            span_start: span.start,
+            span_end: span.end,
+            algebra_tag: algebra_tag,
+            op_kind: op_kind,
+            knowledge_wrapped: knowledge_wrapped,
+        }
+        let add_result = c.hyper_exprs.add(info)
+        c.hyper_exprs = add_result.0
+        c
     }
 
     fn lower_named_type(self, path: AstPath) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -8840,6 +8901,12 @@ impl Checker {
         // Epsilon propagation for Knowledge types
         // If either operand is Knowledge<T, epsilon>, propagate epsilon bounds
         if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
+            let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
+            let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
+            if left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
+                let hyper_checked = check_hyper_binary(c, e.span, e.bin_op, left_inner, right_inner)
+                c = hyper_checked.0
+            }
             let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
             if knowledge_result.kind == TypeKind::TyError {
                 c = c.report_error_at(e.span, 36, 0, 0, 0)
@@ -8849,6 +8916,29 @@ impl Checker {
             let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, knowledge_result)
             c = result_with_units.0
             let final_result = result_with_units.1
+            if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
+                let final_inner = if final_result.kind == TypeKind::TyKnowledge {
+                    knowledge_inner(final_result)
+                } else {
+                    final_result
+                }
+                if final_inner.kind == TypeKind::TyHyper {
+                    c = c.record_hyper_expr(e.span, final_inner.algebra_kind, 1, true)
+                }
+            }
+            return (c, final_result)
+        }
+
+        if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
+            let hyper_result = check_hyper_binary(c, e.span, e.bin_op, left_ty, right_ty)
+            c = hyper_result.0
+            let typed_result = hyper_result.1
+            let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, typed_result)
+            c = result_with_units.0
+            let final_result = result_with_units.1
+            if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
+                c = c.record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
+            }
             return (c, final_result)
         }
 
