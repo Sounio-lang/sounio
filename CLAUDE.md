@@ -40,6 +40,8 @@ let dose: mg = 500.0                   // units
 let arr2 = a ++ b                      // concatenation
 type Pos = { x: i32 | x > 0 }          // refinement
 let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)  // epistemic
+algebra Octonion over f64 { add: commutative, associative; mul: alternative, non_commutative; reassociate: fano_selective }
+fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 }
 ```
 
 ## Build & Run

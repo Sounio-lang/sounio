@@ -10,8 +10,8 @@
 // (accepted by the self-hosted runtime's flat-bundle approach).
 // Named imports only — glob imports caused type-checker stack overflow
 use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Name, Program, StringList}
-use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
-use check::mod::{check_program_epistemic_into}
+use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
+use check::mod::{check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
 use resolve::imports::{collect_module_exports, ModuleEntry, ModuleRegistry, module_registry_find, module_registry_new, module_registry_put}
 use resolve::symbol::{SymbolKind}
@@ -840,7 +840,35 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
     }
 
     merged.epistemic = ir_merge_epistemic_sections(merged.epistemic, src.epistemic)
+    merged.algebras = ir_merge_algebra_tables(merged.algebras, src.algebras)
 
+    merged
+}
+
+fn ir_merge_algebra_tables(dst: IrAlgebraTable, src: IrAlgebraTable) -> IrAlgebraTable with Mut, Panic, Div {
+    var merged = dst
+    var si: i64 = 0
+    while si < src.count && merged.count < 32 {
+        let candidate = src.entries[si]
+        if candidate.is_valid {
+            var exists: bool = false
+            var di: i64 = 0
+            while di < merged.count {
+                let entry = merged.entries[di]
+                if entry.is_valid && entry.algebra_tag == candidate.algebra_tag && ir_name_eq(entry.name, candidate.name) {
+                    exists = true
+                    di = merged.count
+                } else {
+                    di = di + 1
+                }
+            }
+            if exists == false {
+                merged.entries[merged.count as usize] = candidate
+                merged.count = merged.count + 1
+            }
+        }
+        si = si + 1
+    }
     merged
 }
 
@@ -1151,17 +1179,20 @@ fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrac
     var seed_epistemic = ir_empty_epistemic_section()
     trace.last_stage = "typecheck"
     trace.last_module_index = 0
-    if !check_program_epistemic_into(programs[0], &!seed_epistemic) {
+    let seed_artifacts = check_program_with_artifacts(programs[0])
+    if seed_artifacts.had_error {
         print("Type check failed during IR lowering for module 0\n")
         return multimodule_ir_error("type_check_failed")
     }
+    checker_to_ir_epistemic_into(&seed_artifacts.checker, &! seed_epistemic)
     trace.typechecked_modules = 1
     var seed_lower_had_error = false
     var merged_module = ir_empty_module()
     {
-        let seed_lower_result = load_multimodule_lower_program_traced(programs[0], seed_epistemic, 0, &! trace)
+        var seed_lower_result = load_multimodule_lower_program_traced(programs[0], seed_epistemic, 0, &! trace)
         seed_lower_had_error = seed_lower_result.had_error
         if !seed_lower_had_error {
+            checker_apply_ir_metadata(&seed_artifacts.checker, &! seed_lower_result.module)
             merged_module = seed_lower_result.module
         }
     }
@@ -1176,19 +1207,22 @@ fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrac
         var epistemic = ir_empty_epistemic_section()
         trace.last_stage = "typecheck"
         trace.last_module_index = i
-        if !check_program_epistemic_into(programs[i], &!epistemic) {
+        let artifacts = check_program_with_artifacts(programs[i])
+        if artifacts.had_error {
             print("Type check failed during IR lowering for module ")
             print_int(i)
             print("\n")
             return multimodule_ir_error("type_check_failed")
         }
+        checker_to_ir_epistemic_into(&artifacts.checker, &! epistemic)
         trace.typechecked_modules = trace.typechecked_modules + 1
         var lower_had_error = false
         var lowered_module = ir_empty_module()
         {
-            let lower_result = load_multimodule_lower_program_traced(programs[i], epistemic, i, &! trace)
+            var lower_result = load_multimodule_lower_program_traced(programs[i], epistemic, i, &! trace)
             lower_had_error = lower_result.had_error
             if !lower_had_error {
+                checker_apply_ir_metadata(&artifacts.checker, &! lower_result.module)
                 lowered_module = lower_result.module
             }
         }
@@ -1291,17 +1325,20 @@ fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! LoadMul
     var seed_epistemic = ir_empty_epistemic_section()
     trace.last_stage = "typecheck"
     trace.last_module_index = 0
-    if !check_program_epistemic_into(programs[0], &!seed_epistemic) {
+    let seed_artifacts = check_program_with_artifacts(programs[0])
+    if seed_artifacts.had_error {
         print("Type check failed during IR lowering for module 0\n")
         return multimodule_ir_error("type_check_failed")
     }
+    checker_to_ir_epistemic_into(&seed_artifacts.checker, &! seed_epistemic)
     trace.typechecked_modules = 1
     trace.last_stage = "lower"
-    let seed_lower_result = lower_program_to_ir_probe_summary(programs[0])
+    var seed_lower_result = lower_program_to_ir_probe_summary(programs[0])
     if seed_lower_result.had_error {
         print("IR lowering failed for module 0\n")
         return multimodule_ir_error("ir_lowering_failed")
     }
+    checker_apply_ir_metadata(&seed_artifacts.checker, &! seed_lower_result.module)
     trace.lowered_modules = 1
     trace.merged_modules = 1
     var merged_module = seed_lower_result.module
@@ -1311,21 +1348,24 @@ fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! LoadMul
         var epistemic = ir_empty_epistemic_section()
         trace.last_stage = "typecheck"
         trace.last_module_index = i
-        if !check_program_epistemic_into(programs[i], &!epistemic) {
+        let artifacts = check_program_with_artifacts(programs[i])
+        if artifacts.had_error {
             print("Type check failed during IR lowering for module ")
             print_int(i)
             print("\n")
             return multimodule_ir_error("type_check_failed")
         }
+        checker_to_ir_epistemic_into(&artifacts.checker, &! epistemic)
         trace.typechecked_modules = trace.typechecked_modules + 1
         trace.last_stage = "lower"
-        let lower_result = lower_program_to_ir_probe_summary(programs[i])
+        var lower_result = lower_program_to_ir_probe_summary(programs[i])
         if lower_result.had_error {
             print("IR lowering failed for module ")
             print_int(i)
             print("\n")
             return multimodule_ir_error("ir_lowering_failed")
         }
+        checker_apply_ir_metadata(&artifacts.checker, &! lower_result.module)
         trace.lowered_modules = trace.lowered_modules + 1
         trace.last_stage = "merge"
         merged_module = ir_merge_modules(merged_module, lower_result.module)

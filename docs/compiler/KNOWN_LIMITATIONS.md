@@ -2,7 +2,7 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
+last_validated: 2026-03-25
 validated_by: A4
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
@@ -21,7 +21,7 @@ Updated February 2026 after full-project audit.
 | Lexer/Parser/AST | Production | logos-based, error recovery, comprehensive |
 | Type Checker (core) | Production | Bidirectional inference, generics, unification |
 | Epistemic Types | Production | GUM uncertainty, confidence propagation, provenance |
-| Effects System | Production | 8 effects (IO, Mut, Alloc, Panic, Async, GPU, Prob, Div) |
+| Effects System | Production | 9 effects (IO, Mut, Alloc, Panic, Async, GPU, Prob, Div, Observe) |
 | HIR + HLIR | Production | SSA generation, async transform |
 | SIR | Production | Domain-specific IR, epistemic passes |
 | Native Backend | Production | ELF/Mach-O, epistemic runtime, continuations |
@@ -62,6 +62,10 @@ fn sort_broken(arr: &![i64; 10000]) with Mut { arr[0] = 99 }
 ```
 
 **`extern "C"` FFI limited to math functions** (JIT only): Only f64-typed extern functions are supported in `$SOUC run`. Integer FFI (`malloc`, `getpid`, etc.) silently terminates due to Cranelift JIT's return register handling (reads XMM0 instead of RAX for integer returns). Native compilation handles integer FFI correctly.
+
+**Observation boundary coverage differs by frontend**: The multi-file checker enforces `with Observe` across comparison, pattern-match, IO, and FFI observation boundaries. `self-hosted/compiler/lean_single.sio` currently enforces `Observe` only for comparison-triggered observation.
+
+**Mixed-Hyper optimizer metadata is conservative**: Registry-driven reassociation activates only when lowering can stamp one unambiguous `hyper_algebra_kind` onto a function. If a function mixes Hyper algebras or the tag is unknown, the optimizer leaves the small e-graph at default settings instead of guessing a registry entry.
 
 ### Fixed in Self-Hosted Compiler (activate on $SOUC rebuild)
 

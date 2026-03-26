@@ -2,7 +2,7 @@
 topic_id: repo.docs.llm-programming-guide
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-03-25
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm-programming-guide
 -->
@@ -107,6 +107,35 @@ let dose: mg = 500.0
 let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)
 ```
 
+### Algebra Declarations [Beta]
+```sio
+algebra Octonion over f64 {
+    add: commutative, associative
+    mul: alternative, non_commutative
+    reassociate: fano_selective
+}
+```
+
+Supported properties:
+- `add`: `commutative`, `associative`
+- `mul`: `commutative`, `associative`, `alternative`, `non_commutative`
+- `reassociate`: `free`, `blocked`, `fano_selective`
+
+`mul: alternative` derives `NonAssoc` requirements for functions that multiply the type.
+
+### Observation Types [Beta]
+```sio
+fn sense() -> Unobserved<f64> with Observe {
+    37.2
+}
+
+fn above_threshold(x: Unobserved<f64>) -> bool with Observe {
+    x > 36.0
+}
+```
+
+`Unobserved<T>` carries a value before observation. Comparisons and other observation boundaries require `with Observe`; pure functions can pass `Unobserved<T>` through unchanged.
+
 ## 4. Functions
 
 ```sio
@@ -202,6 +231,7 @@ Effects track what a function can do. Missing effects = compile error.
 | `Div` | Division `/` or modulo `%` | `a / b` (always pair with `Panic`) |
 | `Panic` | Array bounds, asserts, `as` casts | `arr[i]`, `assert(cond)` |
 | `Alloc` | Heap allocation | Rare |
+| `Observe` | Collapsing `Unobserved<T>` at an observation boundary | `if reading > 36.0 { ... }` |
 | `Async` | Async operations | Rare |
 | `GPU` | GPU kernels | Rare |
 | `Prob` | Probabilistic operations | Rare |
@@ -210,6 +240,7 @@ Effects track what a function can do. Missing effects = compile error.
 fn pure_add(a: i64, b: i64) -> i64 { a + b }                   // no effects = pure
 fn mutate(x: &!i32) with Mut { *x = 42 }                        // mutation
 fn divide(a: f64, b: f64) -> f64 with Div, Panic { a / b }      // division
+fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 } // observation
 fn process() with IO, Mut, Panic, Div { /* all four */ }         // multiple
 ```
 

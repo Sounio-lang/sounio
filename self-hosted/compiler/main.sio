@@ -10,7 +10,7 @@
 // Horizon 3: wire to real multi-module native compilation pipeline
 // Named imports only — glob imports caused type-checker stack overflow (~3500 symbols)
 use parser::ast::{BinaryOp, Block, CompareOp, EffectList, empty_name, Item, ItemKind, ItemList, Name, ParamList, Pattern, Program, TypeExpr, TypeExprKind, UnaryOp}
-use ir::ir::{empty_struct_layout_table, ir_alloc, ir_binop, ir_branch_false, ir_branch_true, ir_call, ir_copy, ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_prof_counter_info, ir_empty_reg_list, IrEpistemicSection, ir_field_get, ir_field_set, ir_float_to_int, IrFunction, IrInstr, ir_instr_new, ir_int_to_float, ir_jump, ir_label, ir_load_bool, ir_load_float, ir_load_imm, ir_measure, IrModule, ir_name_eq, ir_name_from_bytes, ir_nop, IrOpcode, IrPolicyRequirementInfo, ir_prof_counter, IrRegList, ir_reg_list_single, ir_return, IR_STRATEGY_AGGRESSIVE, IR_STRATEGY_GPU_KERNEL, IR_STRATEGY_INSTRUMENTED, ir_strategy_name, IR_STRATEGY_PRECISION_PRESERVING, IR_STRATEGY_PROBABILISTIC, IR_STRATEGY_STANDARD, ir_unaryop, make_name, SOUNIO_ABI_VERSION, SOUNIO_RUNTIME_VERSION_MAJOR}
+use ir::ir::{empty_struct_layout_table, ir_alloc, ir_binop, ir_branch_false, ir_branch_true, ir_call, ir_copy, ir_empty_algebra_info, ir_empty_algebra_table, ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_prof_counter_info, ir_empty_reg_list, IrEpistemicSection, ir_field_get, ir_field_set, ir_float_to_int, IrFunction, IrInstr, ir_instr_new, ir_int_to_float, ir_jump, ir_label, ir_load_bool, ir_load_float, ir_load_imm, ir_measure, IrModule, ir_name_eq, ir_name_from_bytes, ir_nop, IrOpcode, IrPolicyRequirementInfo, ir_prof_counter, IrRegList, ir_reg_list_single, ir_return, IR_STRATEGY_AGGRESSIVE, IR_STRATEGY_GPU_KERNEL, IR_STRATEGY_INSTRUMENTED, ir_strategy_name, IR_STRATEGY_PRECISION_PRESERVING, IR_STRATEGY_PROBABILISTIC, IR_STRATEGY_STANDARD, ir_unaryop, make_name, SOUNIO_ABI_VERSION, SOUNIO_RUNTIME_VERSION_MAJOR}
 use check::types::{empty_type_entry, TypeEntry, TypeEntryList, TypeKind}
 use check::mod::{check_program, check_program_epistemic_into}
 use io::file_write::{io_write_bytes_to_file, io_write_elf_to_file, io_write_kernel_response_json, io_write_version_json}
@@ -37,7 +37,7 @@ use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_
 use ir::profile::{sprof_apply_promotion, sprof_empty_entry, sprof_empty_profile, sprof_lookup, sprof_parse, sprof_promotion_target}
 use ir::inline::{inl_analyze_function, InlCallSite, inl_compute_benefit, inl_context_new, inl_run_pass, INL_STRATEGY_AGGRESSIVE_BONUS}
 use ir::layout::{layout_sort_by_profile}
-use ir::opt_cleanup::{ocp_binop_to_eg_op, ocp_compact_nops, ocp_const_fold, ocp_copy_prop, ocp_cse, ocp_dead_after_jump, ocp_dead_label, ocp_dse, ocp_egraph_epistemic_pass, ocp_egraph_mini_pass, ocp_gvn, ocp_is_binop, ocp_is_load_imm, ocp_jump_to_return, ocp_licm, ocp_mul3_sr, ocp_redundant_jump, ocp_sink_loads, opt_cleanup_function, opt_cleanup_module}
+use ir::opt_cleanup::{ocp_binop_to_eg_op, ocp_compact_nops, ocp_configure_small_context, ocp_const_fold, ocp_copy_prop, ocp_cse, ocp_dead_after_jump, ocp_dead_label, ocp_dse, ocp_egraph_epistemic_pass, ocp_egraph_mini_pass, ocp_gvn, ocp_is_binop, ocp_is_load_imm, ocp_jump_to_return, ocp_licm, ocp_mul3_sr, ocp_redundant_jump, ocp_reg_flows_to_observation, ocp_sink_loads, opt_cleanup_function, opt_cleanup_module}
 use ir::egraph::{EG_COST_CONST, EG_COST_OP, EG_COST_VAR, eg_hash_node, EG_INVALID, eg_isqrt, EG_MAX_CLASSES, EG_MAX_ITERATIONS, EG_MAX_NODES, EG_MAX_RULES, EgNode, EG_OP_ADD, EG_OP_CONST, EG_OP_MUL, eg_op_name_hash, EG_OP_NEG, EG_OP_SUB, EG_OP_VAR, EG_PAT_VAR_A, EG_PAT_VAR_B, EG_PAT_VAR_C, EG_PAT_VAR_D, eg_quantize_unc, eg_rule_add_commute, eg_rule_mul_commute, eg_small_add_binop, eg_small_add_const, eg_small_add_node, eg_small_add_var, EgSmallContext, eg_small_extract, eg_small_find, eg_small_init, eg_small_saturate, eg_small_union, EgUnionFind, main, test_eg_uf_find_self, test_eg_uf_union_basic}
 use ir::loop_opt::{lopt_optimize_function, lopt_optimize_module}
 use ir::tailcall::{tco_analyze_function, tco_check_eligibility, tco_context_new, tco_count_tail_calls_for_func, tco_discover_tail_calls, tco_is_call, tco_is_self_call, tco_is_tail_position, tco_make_func_name, tco_make_func_with_alloca, tco_make_non_tail_call_func, tco_make_self_tail_call_func, tco_make_test_func, tco_make_test_module, tco_run_pass}
@@ -6713,6 +6713,24 @@ fn compiler_main_test_ocp_mini_pass_9_instrs() -> bool with Mut, Div, Panic {
     let func   = cp_make_test_func(instrs, 9)   // instr_count=9 > 8, guard skips
     let result = ocp_egraph_mini_pass(func)
     result.instrs[0].op == IrOpcode::IrBinOp && result.instr_count == 9
+}
+
+// T1000: Hyper-tagged mini e-graph contexts inherit registry reassociation metadata.
+fn compiler_main_test_ocp_context_uses_algebra_registry() -> bool with Mut, Div, Panic {
+    var func = ir_empty_function()
+    func.hyper_algebra_kind = 3
+
+    var algebras = ir_empty_algebra_table()
+    var octonion = ir_empty_algebra_info()
+    octonion.is_valid = true
+    octonion.algebra_tag = 3
+    octonion.reassoc_strategy = 2
+    algebras.entries[0] = octonion
+    algebras.count = 1
+
+    var ctx = eg_small_init()
+    ocp_configure_small_context(&! ctx, func, algebras)
+    ctx.algebra_kind == 3 && ctx.reassoc_strategy == 2 && ctx.cd_bits == 3
 }
 
 // T161: Both-constant OpLe: 3 <= 3 → IrLoadImm(dst, 1).
@@ -16561,7 +16579,7 @@ fn compiler_main_test_ey_no_fold_and_outer() -> bool with Mut, Div, Panic {
         && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
 }
 
-// Sprint 247: GUM-guided epistemic e-graph rewriting (T1148-T1153)
+// Sprint 247: GUM-guided epistemic e-graph rewriting (T1148-T1157)
 // ocp_egraph_epistemic_pass guard/activation tests.
 // Scientific novelty: first analytically GUM-guided FP rewriting in any compiler.
 // SOTA: Panchekha et al. PLDI 2015 (Herbie/sampling); Sounio uses GUM §5.1.2 analytically.
@@ -16578,21 +16596,26 @@ fn compiler_main_test_ge_standard_passthrough() -> bool with Mut, Div, Panic {
 }
 
 fn compiler_main_test_ge_precision_no_crash() -> bool with Mut, Div, Panic {
-    // IR_STRATEGY_PRECISION_PRESERVING + IrMeasure: pass activates without crash
+    // IR_STRATEGY_PRECISION_PRESERVING + canonical Knowledge struct source: pass activates
     var instrs: [IrInstr; 128] = cp_empty_instrs()
-    var meas = ir_measure(1, 0, -1)
-    meas.imm_f64 = 2500000000.0
-    instrs[0 as usize] = ir_load_imm(0, 42)
-    instrs[1 as usize] = meas
-    instrs[2 as usize] = ir_return(1)
-    var func = cp_make_test_func(instrs, 3)
+    instrs[0 as usize] = ir_load_float(0, 42.0)
+    instrs[1 as usize] = ir_load_float(1, 0.25)
+    instrs[2 as usize] = ir_alloc(2, 0)
+    instrs[3 as usize] = ir_field_set(2, 0, 0, make_name("value"))
+    instrs[4 as usize] = ir_binop(3, 1, BinaryOp::OpMul, 1)
+    instrs[5 as usize] = ir_field_set(2, 1, 3, make_name("variance"))
+    instrs[6 as usize] = ir_load_float(4, 1.0)
+    instrs[7 as usize] = ir_field_set(2, 2, 4, make_name("confidence"))
+    instrs[8 as usize] = ir_return(2)
+    var func = cp_make_test_func(instrs, 9)
     func.compile_strategy = IR_STRATEGY_PRECISION_PRESERVING
-    let _opt = ocp_egraph_epistemic_pass(func)
-    true
+    let opt = ocp_egraph_epistemic_pass(func)
+    opt.instrs[8 as usize].op == IrOpcode::IrReturn && opt.instrs[8 as usize].src1 == 2
 }
 
 fn compiler_main_test_ge_count_guard() -> bool with Mut, Div, Panic {
-    // Guard: instr_count > 16 → pass returns function unchanged
+    // Large non-epistemic bodies still pass through unchanged under the
+    // precision-preserving strategy.
     var instrs: [IrInstr; 128] = cp_empty_instrs()
     var i: i64 = 0
     while i < 17 {
@@ -16606,22 +16629,27 @@ fn compiler_main_test_ge_count_guard() -> bool with Mut, Div, Panic {
 }
 
 fn compiler_main_test_ge_binop_no_crash() -> bool with Mut, Div, Panic {
-    // PRECISION_PRESERVING + binop on epistemic regs: pass processes without crash
+    // PRECISION_PRESERVING + value extracted from Knowledge struct: binop is processed
     var instrs: [IrInstr; 128] = cp_empty_instrs()
-    var m1 = ir_measure(2, 0, -1)
-    m1.imm_f64 = 3000000.0
-    var m2 = ir_measure(3, 1, -1)
-    m2.imm_f64 = 4000000.0
-    instrs[0 as usize] = ir_load_imm(0, 10)
-    instrs[1 as usize] = ir_load_imm(1, 20)
-    instrs[2 as usize] = m1
-    instrs[3 as usize] = m2
-    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
-    instrs[5 as usize] = ir_return(4)
-    var func = cp_make_test_func(instrs, 6)
+    instrs[0 as usize] = ir_load_float(0, 10.0)
+    instrs[1 as usize] = ir_load_float(1, 0.003)
+    instrs[2 as usize] = ir_alloc(2, 0)
+    instrs[3 as usize] = ir_field_set(2, 0, 0, make_name("value"))
+    instrs[4 as usize] = ir_binop(3, 1, BinaryOp::OpMul, 1)
+    instrs[5 as usize] = ir_field_set(2, 1, 3, make_name("variance"))
+    instrs[6 as usize] = ir_load_float(4, 1.0)
+    instrs[7 as usize] = ir_field_set(2, 2, 4, make_name("confidence"))
+    // Source lowering currently hashes named field access when the struct layout
+    // is not attached at the use site: "value"[0]='v' => 118 % 64 = 54.
+    instrs[8 as usize] = ir_field_get(5, 2, 54, make_name("value"))
+    instrs[9 as usize] = ir_load_float(6, 1.0)
+    instrs[10 as usize] = ir_binop(7, 5, BinaryOp::OpAdd, 6)
+    instrs[11 as usize] = ir_return(7)
+    var func = cp_make_test_func(instrs, 12)
     func.compile_strategy = IR_STRATEGY_PRECISION_PRESERVING
-    let _opt = ocp_egraph_epistemic_pass(func)
-    true
+    let opt = ocp_egraph_epistemic_pass(func)
+    (opt.instrs[10 as usize].op == IrOpcode::IrBinOp || opt.instrs[10 as usize].op == IrOpcode::IrCopy)
+        && opt.instrs[11 as usize].op == IrOpcode::IrReturn
 }
 
 fn compiler_main_test_ge_quantize_integration() -> bool with Mut, Div, Panic {
@@ -16638,6 +16666,117 @@ fn compiler_main_test_ge_pythagorean_integration() -> bool with Mut, Div, Panic 
     let sq_sum = u3 * u3 + u4 * u4
     let combined = eg_isqrt(sq_sum)
     combined >= 4999 && combined <= 5001
+}
+
+fn compiler_main_test_ge_observation_flow_return_value() -> bool with Mut, Div, Panic {
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_float(0, 10.0)
+    instrs[1 as usize] = ir_load_float(1, 0.5)
+    instrs[2 as usize] = ir_alloc(2, 0)
+    instrs[3 as usize] = ir_field_set(2, 0, 0, make_name("value"))
+    instrs[4 as usize] = ir_binop(3, 1, BinaryOp::OpMul, 1)
+    instrs[5 as usize] = ir_field_set(2, 1, 3, make_name("variance"))
+    instrs[6 as usize] = ir_load_float(4, 1.0)
+    instrs[7 as usize] = ir_field_set(2, 2, 4, make_name("confidence"))
+    instrs[8 as usize] = ir_field_get(5, 2, 54, make_name("value"))
+    instrs[9 as usize] = ir_load_float(6, 1.0)
+    instrs[10 as usize] = ir_binop(7, 5, BinaryOp::OpAdd, 6)
+    instrs[11 as usize] = ir_return(7)
+    let func = cp_make_test_func(instrs, 12)
+    ocp_reg_flows_to_observation(func, 7)
+        && ocp_reg_flows_to_observation(func, 5)
+}
+
+fn compiler_main_test_ge_observation_flow_unobserved_temp() -> bool with Mut, Div, Panic {
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_float(0, 10.0)
+    instrs[1 as usize] = ir_load_float(1, 0.5)
+    instrs[2 as usize] = ir_alloc(2, 0)
+    instrs[3 as usize] = ir_field_set(2, 0, 0, make_name("value"))
+    instrs[4 as usize] = ir_binop(3, 1, BinaryOp::OpMul, 1)
+    instrs[5 as usize] = ir_field_set(2, 1, 3, make_name("variance"))
+    instrs[6 as usize] = ir_load_float(4, 1.0)
+    instrs[7 as usize] = ir_field_set(2, 2, 4, make_name("confidence"))
+    instrs[8 as usize] = ir_field_get(5, 2, 54, make_name("value"))
+    instrs[9 as usize] = ir_load_float(6, 1.0)
+    instrs[10 as usize] = ir_binop(7, 5, BinaryOp::OpAdd, 6)
+    instrs[11 as usize] = ir_return(2)
+    let func = cp_make_test_func(instrs, 12)
+    !ocp_reg_flows_to_observation(func, 7)
+        && !ocp_reg_flows_to_observation(func, 5)
+        && ocp_reg_flows_to_observation(func, 2)
+}
+
+fn compiler_main_test_ge_observation_flow_branch() -> bool with Mut, Div, Panic {
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_float(0, 10.0)
+    instrs[1 as usize] = ir_load_float(1, 0.5)
+    instrs[2 as usize] = ir_alloc(2, 0)
+    instrs[3 as usize] = ir_field_set(2, 0, 0, make_name("value"))
+    instrs[4 as usize] = ir_binop(3, 1, BinaryOp::OpMul, 1)
+    instrs[5 as usize] = ir_field_set(2, 1, 3, make_name("variance"))
+    instrs[6 as usize] = ir_load_float(4, 1.0)
+    instrs[7 as usize] = ir_field_set(2, 2, 4, make_name("confidence"))
+    instrs[8 as usize] = ir_field_get(5, 2, 54, make_name("value"))
+    instrs[9 as usize] = ir_load_float(6, 0.0)
+    instrs[10 as usize] = ir_binop(7, 5, BinaryOp::OpGt, 6)
+    instrs[11 as usize] = ir_branch_false(7, 0)
+    instrs[12 as usize] = ir_return(5)
+    instrs[13 as usize] = ir_label(0)
+    instrs[14 as usize] = ir_return(5)
+    let func = cp_make_test_func(instrs, 15)
+    ocp_reg_flows_to_observation(func, 7)
+        && ocp_reg_flows_to_observation(func, 5)
+}
+
+fn compiler_main_test_ge_observed_reassoc_chain() -> bool with Mut, Div, Panic {
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_float(0, 1.0)
+    instrs[1 as usize] = ir_load_float(1, 0.000000003)
+    instrs[2 as usize] = ir_alloc(2, 0)
+    instrs[3 as usize] = ir_field_set(2, 0, 0, make_name("value"))
+    instrs[4 as usize] = ir_binop(3, 1, BinaryOp::OpMul, 1)
+    instrs[5 as usize] = ir_field_set(2, 1, 3, make_name("variance"))
+    instrs[6 as usize] = ir_load_float(4, 1.0)
+    instrs[7 as usize] = ir_field_set(2, 2, 4, make_name("confidence"))
+    instrs[8 as usize] = ir_field_get(5, 2, 54, make_name("value"))
+
+    instrs[9 as usize] = ir_load_float(6, 2.0)
+    instrs[10 as usize] = ir_load_float(7, 0.000000003)
+    instrs[11 as usize] = ir_alloc(8, 0)
+    instrs[12 as usize] = ir_field_set(8, 0, 6, make_name("value"))
+    instrs[13 as usize] = ir_binop(9, 7, BinaryOp::OpMul, 7)
+    instrs[14 as usize] = ir_field_set(8, 1, 9, make_name("variance"))
+    instrs[15 as usize] = ir_load_float(10, 1.0)
+    instrs[16 as usize] = ir_field_set(8, 2, 10, make_name("confidence"))
+    instrs[17 as usize] = ir_field_get(11, 8, 54, make_name("value"))
+
+    instrs[18 as usize] = ir_load_float(12, 3.0)
+    instrs[19 as usize] = ir_load_float(13, 0.000000005)
+    instrs[20 as usize] = ir_alloc(14, 0)
+    instrs[21 as usize] = ir_field_set(14, 0, 12, make_name("value"))
+    instrs[22 as usize] = ir_binop(15, 13, BinaryOp::OpMul, 13)
+    instrs[23 as usize] = ir_field_set(14, 1, 15, make_name("variance"))
+    instrs[24 as usize] = ir_load_float(16, 1.0)
+    instrs[25 as usize] = ir_field_set(14, 2, 16, make_name("confidence"))
+    instrs[26 as usize] = ir_field_get(17, 14, 54, make_name("value"))
+
+    instrs[27 as usize] = ir_binop(18, 5, BinaryOp::OpAdd, 11)
+    instrs[28 as usize] = ir_binop(19, 18, BinaryOp::OpAdd, 17)
+    instrs[29 as usize] = ir_return(19)
+
+    var func = cp_make_test_func(instrs, 30)
+    func.compile_strategy = IR_STRATEGY_PRECISION_PRESERVING
+    let opt = ocp_egraph_epistemic_pass(func)
+    opt.instr_count == 31
+        && opt.instrs[28 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[28 as usize].dst == 40
+        && opt.instrs[28 as usize].src1 == 11
+        && opt.instrs[28 as usize].src2 == 17
+        && opt.instrs[29 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[29 as usize].dst == 19
+        && opt.instrs[29 as usize].src1 == 5
+        && opt.instrs[29 as usize].src2 == 40
 }
 
 // Sprint 246 Block FD: XOR decomposition fold — (~x&y)^(x&~y) → x^y (T1142-T1147)
@@ -20092,6 +20231,13 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T160 ocp_mini_pass 9-instr skip")
+    }
+
+    if compiler_main_test_ocp_context_uses_algebra_registry() {
+        println("  T1000 OK: mini e-graph context loads reassociation strategy from algebra registry")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T1000 algebra-registry mini e-graph bridge")
     }
 
     if compiler_main_test_cmp_le_const_true() {
@@ -23898,7 +24044,7 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
 
-    // Sprint 247: GUM-guided epistemic e-graph rewriting (T1148-T1153)
+    // Sprint 247: GUM-guided epistemic e-graph rewriting (T1148-T1157)
     if compiler_main_test_ge_standard_passthrough() {
         passed = passed + 1
         println("  T1148 OK: Sprint 247 GUM egraph: standard strategy passthrough")
@@ -23909,7 +24055,7 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     } else { println("  FAIL: T1149") }
     if compiler_main_test_ge_count_guard() {
         passed = passed + 1
-        println("  T1150 OK: Sprint 247 GUM egraph: instr_count>16 guard passthrough")
+        println("  T1150 OK: Sprint 247 GUM egraph: large non-epistemic body passes through")
     } else { println("  FAIL: T1150") }
     if compiler_main_test_ge_binop_no_crash() {
         passed = passed + 1
@@ -23923,6 +24069,22 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T1153 OK: Sprint 247 GUM egraph: Pythagorean u(3μ)^2+u(4μ)^2 → u(5μ)")
     } else { println("  FAIL: T1153") }
+    if compiler_main_test_ge_observation_flow_return_value() {
+        passed = passed + 1
+        println("  T1154 OK: Sprint 247 GUM egraph: returned epistemic value flows to observation")
+    } else { println("  FAIL: T1154") }
+    if compiler_main_test_ge_observation_flow_unobserved_temp() {
+        passed = passed + 1
+        println("  T1155 OK: Sprint 247 GUM egraph: unreturned epistemic temp stays unobserved")
+    } else { println("  FAIL: T1155") }
+    if compiler_main_test_ge_observation_flow_branch() {
+        passed = passed + 1
+        println("  T1156 OK: Sprint 247 GUM egraph: branch condition marks observation flow")
+    } else { println("  FAIL: T1156") }
+    if compiler_main_test_ge_observed_reassoc_chain() {
+        passed = passed + 1
+        println("  T1157 OK: Sprint 247 GUM egraph: observed add chain is reassociated via synthesized temp")
+    } else { println("  FAIL: T1157") }
 
     // Sprint 246 Block FD: XOR decomposition fold (T1142-T1147)
     if compiler_main_test_fd_xor_decomp_basic() {
