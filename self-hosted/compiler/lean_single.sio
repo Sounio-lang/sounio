@@ -919,7 +919,7 @@ fn comparison_visible_hash(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
 
 fn comparison_require_observe(op_tok: i64, left_ty: i64, right_ty: i64) with IO, Mut, Panic {
     if (ty_is_unobserved(left_ty) || ty_is_unobserved(right_ty)) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
-        tc_effect_violation(op_tok, 64, FN_EFFECTS[CURRENT_FN as usize])
+        tc_observe_violation(op_tok)
     }
 }
 
@@ -1176,11 +1176,10 @@ fn ret_agg_nslots(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
 }
 
 fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
-    TYPECHECK_FAILED = 1
-    print("type error line ")
-    print_int(TL[tok as usize])
-    print(": ")
+    print("warning: ")
     print(msg)
+    print(" at line ")
+    print_int(TL[tok as usize])
     print("\n")
     return 0
 }
@@ -1285,6 +1284,14 @@ fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with I
     print("warning: effect not declared at line ")
     print_int(TL[tok as usize])
     print("\n")
+    return 0
+}
+
+fn tc_observe_violation(tok: i64) -> i64 with IO, Mut, Panic {
+    TYPECHECK_FAILED = 1
+    print("type error line ")
+    print_int(TL[tok as usize])
+    print("\n: effect not declared (needs Observe)\n")
     return 0
 }
 
@@ -3318,6 +3325,10 @@ var BREAK_PATCH: [i64; 64] = [0; 64]
 var BREAK_COUNT: i64 = 0
 // Track if last struct literal was a linear type
 var LAST_EXPR_IS_LINEAR: i64 = 0
+// Scratch local-slot ids for string builtins inside large expression compilers.
+var BUILTIN_SLOT_A: i64 = 0
+var BUILTIN_SLOT_B: i64 = 0
+var BUILTIN_SLOT_C: i64 = 0
 
 fn compile_measure_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     EP = EP + 1
@@ -4417,9 +4428,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             if src_match(ns, ne - ns, "str_concat") {
-                let slot_a = NEXT_SLOT
+                BUILTIN_SLOT_A = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
-                let slot_b = NEXT_SLOT
+                BUILTIN_SLOT_B = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -4429,7 +4440,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 } else {
                     compile_or()
                     if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
-                    emit_store_var(slot_a)
+                    emit_store_var(BUILTIN_SLOT_A)
                     if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
                     if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                         compile_or()
@@ -4437,12 +4448,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     } else {
                         em(0x31); em(0xc0)
                     }
-                    emit_store_var(slot_b)
+                    emit_store_var(BUILTIN_SLOT_B)
                     if TK[EP as usize] == 28 {
                         tc_wrong_arity(name_tok, 2, 3)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
-                    emit_str_concat_slots_x86(slot_a, slot_b)
+                    emit_str_concat_slots_x86(BUILTIN_SLOT_A, BUILTIN_SLOT_B)
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                 }
                 EXPR_IS_F64 = 0
@@ -4464,11 +4475,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             if src_match(ns, ne - ns, "str_slice") {
-                let slot_s = NEXT_SLOT
+                BUILTIN_SLOT_A = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
-                let slot_start = NEXT_SLOT
+                BUILTIN_SLOT_B = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
-                let slot_end = NEXT_SLOT
+                BUILTIN_SLOT_C = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -4482,7 +4493,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
                 compile_or()
                 if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_slice requires a string receiver") }
-                emit_store_var(slot_s)
+                emit_store_var(BUILTIN_SLOT_A)
                 if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
                 if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                     compile_or()
@@ -4490,7 +4501,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 } else {
                     em(0x31); em(0xc0)
                 }
-                emit_store_var(slot_start)
+                emit_store_var(BUILTIN_SLOT_B)
                 if TK[EP as usize] == 28 {
                     EP = EP + 1
                     if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
@@ -4499,16 +4510,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     } else {
                         em(0x31); em(0xc0)
                     }
-                    emit_store_var(slot_end)
+                    emit_store_var(BUILTIN_SLOT_C)
                     if TK[EP as usize] == 28 {
                         tc_wrong_arity(name_tok, 3, 4)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
-                    emit_str_slice_range_slots_x86(slot_s, slot_start, slot_end)
+                    emit_str_slice_range_slots_x86(BUILTIN_SLOT_A, BUILTIN_SLOT_B, BUILTIN_SLOT_C)
                 } else {
-                    emit_load_var(slot_s)
+                    emit_load_var(BUILTIN_SLOT_A)
                     emit_push()
-                    emit_load_var(slot_start)
+                    emit_load_var(BUILTIN_SLOT_B)
                     em(0x59)
                     em(0x48); em(0x01); em(0xc8)  // add rax, rcx
                 }
@@ -5164,15 +5175,15 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let left_has_knowledge = knowledge_hash_is(left_hash)
         let right_has_knowledge = knowledge_hash_is(right_hash)
         if op == 17 && left_ty == 3 && right_ty == 3 {
-            let slot_right = NEXT_SLOT
+            BUILTIN_SLOT_B = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var(slot_right)
-            let slot_left = NEXT_SLOT
+            emit_store_var(BUILTIN_SLOT_B)
+            BUILTIN_SLOT_A = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
             em(0x59)
             em(0x48); em(0x89); em(0xc8)  // mov rax, rcx
-            emit_store_var(slot_left)
-            emit_str_concat_slots_x86(slot_left, slot_right)
+            emit_store_var(BUILTIN_SLOT_A)
+            emit_str_concat_slots_x86(BUILTIN_SLOT_A, BUILTIN_SLOT_B)
             EXPR_IS_F64 = 0
             EXPR_TY = 3
             EXPR_TY_HASH = 0
