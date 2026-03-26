@@ -418,3 +418,261 @@ pub fn compare_assoc_fields(
         zero_frac_b: zf_b,
     }
 }
+
+// ============================================================================
+// LAPLACIAN EIGENVECTOR EXTRACTION (for G₂ bridge)
+// ============================================================================
+//
+// Extract the k smallest non-trivial eigenvectors of the graph Laplacian
+// via deflated power iteration on the shifted matrix (λ_max·I - L).
+//
+// The Laplacian L = D - A has eigenvalues 0 = λ₁ ≤ λ₂ ≤ ... ≤ λₙ.
+// The eigenvector for λ₁ is the constant vector (1/√n, ..., 1/√n).
+// We want eigenvectors ψ₂, ..., ψ₈ (the 7 smallest non-trivial modes).
+//
+// Method:
+//   1. Compute L and estimate λ_max via power iteration
+//   2. Form M = λ_max·I - L (flips spectrum: largest eigenvalues of M
+//      correspond to smallest non-zero eigenvalues of L)
+//   3. Deflated power iteration: for each eigenvector k,
+//      iterate v ← M·v, project out constant vector and all
+//      previously found eigenvectors, normalize
+//   4. The Rayleigh quotient on L gives the eigenvalue
+//
+// Storage: eigenvectors stored in flat array evecs[k*n + i]
+//   where k = eigenvector index (0..6 for ψ₂..ψ₈), i = vertex index
+//
+// Max n = 32 (matching OctGraph), max k = 7 (imaginary octonion basis).
+//
+// References:
+//   Belkin-Niyogi 2003, "Laplacian Eigenmaps for dimensionality reduction"
+//   Atasoy+ 2016, "Human brain networks function in connectome-specific
+//     harmonic waves" (connectome harmonics)
+
+// Result of eigenvector extraction
+pub struct LaplacianEigenvectors {
+    n: i64                    // number of vertices
+    k: i64                    // number of eigenvectors extracted
+    eigenvalues: [f64; 8]     // λ₂..λ₈ (indices 0..6)
+    // Eigenvectors stored flat: evecs[idx*32 + vertex]
+    evecs: [f64; 256]         // 8 eigenvectors × 32 vertices max
+}
+
+fn le_empty() -> LaplacianEigenvectors {
+    LaplacianEigenvectors {
+        n: 0, k: 0,
+        eigenvalues: [0.0; 8],
+        evecs: [0.0; 256],
+    }
+}
+
+// Internal: matvec for n×n matrix in [f64; 1024]
+fn cn_matvec(
+    mat: &[f64; 1024], n: i64,
+    vec: &[f64; 32], out: &![f64; 32]
+) with Mut {
+    var i: i64 = 0
+    while i < n {
+        var s: f64 = 0.0
+        var j: i64 = 0
+        while j < n {
+            s = s + mat[i * n + j] * vec[j]
+            j = j + 1
+        }
+        out[i] = s
+        i = i + 1
+    }
+}
+
+// Internal: dot product
+fn cn_dot(u: &[f64; 32], v: &[f64; 32], n: i64) -> f64 with Mut {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        s = s + u[i] * v[i]
+        i = i + 1
+    }
+    s
+}
+
+// Internal: normalize vector, return norm
+fn cn_normalize(v: &![f64; 32], n: i64) -> f64 with Mut, Div {
+    var norm_sq: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        norm_sq = norm_sq + v[i] * v[i]
+        i = i + 1
+    }
+    let nval = cn_sqrt(norm_sq)
+    if nval > 1.0e-15 {
+        i = 0
+        while i < n {
+            v[i] = v[i] / nval
+            i = i + 1
+        }
+    }
+    nval
+}
+
+// Internal: project out the constant vector
+fn cn_project_orth_ones(v: &![f64; 32], n: i64) with Mut, Div {
+    var dot: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        dot = dot + v[i]
+        i = i + 1
+    }
+    let proj = dot / (n as f64)
+    i = 0
+    while i < n {
+        v[i] = v[i] - proj
+        i = i + 1
+    }
+}
+
+// Internal: project out previously found eigenvector (stored in evecs at offset)
+fn cn_project_orth_evec(
+    v: &![f64; 32], evecs: &[f64; 256], evec_idx: i64, n: i64
+) with Mut {
+    let offset = evec_idx * 32
+    var dot: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        dot = dot + v[i] * evecs[offset + i]
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        v[i] = v[i] - dot * evecs[offset + i]
+        i = i + 1
+    }
+}
+
+// Extract k smallest non-trivial eigenvectors of the Laplacian.
+//   adj:  n×n adjacency matrix in row-major [f64; 1024]
+//   n:    number of vertices (max 32)
+//   k:    number of eigenvectors to extract (max 7)
+//   max_iter: power iterations per eigenvector
+pub fn laplacian_eigenvectors(
+    adj: &[f64; 1024], n: i64, k: i64, max_iter: i64
+) -> LaplacianEigenvectors with Mut, Div, Panic {
+    var result = le_empty()
+    result.n = n
+    result.k = k
+
+    // Step 1: Compute Laplacian L = D - A
+    var lap: [f64; 1024] = [0.0; 1024]
+    var i: i64 = 0
+    while i < n {
+        var deg: f64 = 0.0
+        var jj: i64 = 0
+        while jj < n {
+            deg = deg + adj[i * n + jj]
+            jj = jj + 1
+        }
+        var j: i64 = 0
+        while j < n {
+            if i == j {
+                lap[i * n + j] = deg
+            } else {
+                lap[i * n + j] = 0.0 - adj[i * n + j]
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 2: Estimate λ_max via power iteration on L
+    var v: [f64; 32] = [0.0; 32]
+    i = 0
+    while i < n { v[i] = 1.0; i = i + 1 }
+    cn_normalize(&!v, n)
+    var w: [f64; 32] = [0.0; 32]
+    var lambda_max: f64 = 0.0
+    var iter: i64 = 0
+    while iter < 100 {
+        cn_matvec(&lap, n, &v, &!w)
+        lambda_max = cn_dot(&v, &w, n)
+        cn_normalize(&!w, n)
+        i = 0
+        while i < n { v[i] = w[i]; i = i + 1 }
+        iter = iter + 1
+    }
+    // Add small margin to ensure positive definiteness
+    lambda_max = lambda_max * 1.01 + 0.1
+
+    // Step 3: Form M = λ_max·I - L (shifted matrix)
+    var shifted: [f64; 1024] = [0.0; 1024]
+    i = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            if i == j {
+                shifted[i * n + j] = lambda_max - lap[i * n + j]
+            } else {
+                shifted[i * n + j] = 0.0 - lap[i * n + j]
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 4: Extract k eigenvectors via deflated power iteration
+    var ek: i64 = 0
+    while ek < k && ek < 7 {
+        // Initialize with alternating vector orthogonal to constants
+        i = 0
+        while i < n {
+            // Use different starting vectors for each eigenvector
+            let phase = (i + ek) * 7 + ek * 3
+            let bit = phase - (phase / 2) * 2
+            if bit == 0 { v[i] = 1.0 } else { v[i] = 0.0 - 1.0 }
+            i = i + 1
+        }
+        // Project out constant and all previous eigenvectors
+        cn_project_orth_ones(&!v, n)
+        var prev: i64 = 0
+        while prev < ek {
+            cn_project_orth_evec(&!v, &result.evecs, prev, n)
+            prev = prev + 1
+        }
+        cn_normalize(&!v, n)
+
+        // Power iteration on shifted matrix
+        iter = 0
+        while iter < max_iter {
+            cn_matvec(&shifted, n, &v, &!w)
+            // Project out constant vector
+            cn_project_orth_ones(&!w, n)
+            // Project out all previously found eigenvectors
+            prev = 0
+            while prev < ek {
+                cn_project_orth_evec(&!w, &result.evecs, prev, n)
+                prev = prev + 1
+            }
+            let nval = cn_normalize(&!w, n)
+            if nval < 1.0e-15 { iter = max_iter }
+            // Copy w → v
+            i = 0
+            while i < n { v[i] = w[i]; i = i + 1 }
+            iter = iter + 1
+        }
+
+        // Compute eigenvalue via Rayleigh quotient on L
+        cn_matvec(&lap, n, &v, &!w)
+        let eigenval = cn_dot(&v, &w, n)
+        result.eigenvalues[ek] = eigenval
+
+        // Store eigenvector
+        let offset = ek * 32
+        i = 0
+        while i < n {
+            result.evecs[offset + i] = v[i]
+            i = i + 1
+        }
+
+        ek = ek + 1
+    }
+
+    result
+}

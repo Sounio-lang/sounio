@@ -225,7 +225,7 @@ fn oct_xor(a: i64, b: i64) -> i64 {
 }
 
 // === Associator norm for basis triple ===
-// |[ei, ej, ek]|² — should be 0 for Fano lines, 8 for non-Fano
+// |[ei, ej, ek]|² — should be 0 for Fano lines, 4 for non-Fano
 fn basis_associator_norm_sq(i: i64, j: i64, k: i64) -> f64 with Mut, Div, NonAssoc {
     var a = oct_basis(i)
     var b = oct_basis(j)
@@ -234,3 +234,300 @@ fn basis_associator_norm_sq(i: i64, j: i64, k: i64) -> f64 with Mut, Div, NonAss
     oct_associator(&a, &b, &c, &!assoc)
     oct_norm_sq(&assoc)
 }
+
+// =========================================================================
+// G₂ 3-form and SU(3) branching
+// =========================================================================
+//
+// The G₂ 3-form φ is the canonical calibration form on Im(O) ≅ ℝ⁷.
+// It is defined by the Fano plane: φ = Σ_{(i,j,k) ∈ Fano} eⁱ ∧ eʲ ∧ eᵏ
+// where the 7 oriented Fano lines are:
+//   (1,2,3), (1,4,5), (1,7,6), (2,4,6), (2,5,7), (3,4,7), (3,6,5)
+// with signs from the Cayley-Dickson cocycle.
+//
+// Given a 7-frame {v₁..v₇} (7 vectors of dimension n), the G₂ 3-form
+// evaluates to: φ(v_i, v_j, v_k) = det of the 3×3 Gram-like matrix
+// projected onto the Fano structure.
+//
+// For connectome eigenvectors: each vₖ is an n-dimensional vector
+// (one entry per brain region). We compute the inner products
+// ⟨vₐ, v_b⟩ and evaluate φ on the frame.
+//
+// The maximal subgroup SU(3) ⊂ G₂ induces the branching:
+//   7 = 3 ⊕ 3̄ ⊕ 1     (fundamental representation)
+//  14 = 8 ⊕ 3 ⊕ 3̄       (adjoint representation)
+// Under the standard embedding, the decomposition maps:
+//   3 ↔ {e₁, e₂, e₃}    (color triplet)
+//   3̄ ↔ {e₄, e₅, e₆}    (anti-triplet)
+//   1 ↔ {e₇}             (singlet)
+//
+// References:
+//   Harvey-Lawson 1982, "Calibrated geometries"
+//   Bryant 1987, "Metrics with exceptional holonomy"
+//   Baez 2002, "The Octonions" §4.1
+
+// The 7 oriented Fano lines as (i,j,k) triples.
+// Sign convention: ei*ej = +ek along each oriented line.
+// Stored as flat array: fano_lines[3*n .. 3*n+2] = (i,j,k) for line n.
+fn fano_line_i(n: i64) -> i64 {
+    // Line 0: (1,2,3), Line 1: (1,4,5), Line 2: (1,7,6)
+    // Line 3: (2,4,6), Line 4: (2,5,7), Line 5: (3,4,7), Line 6: (3,6,5)
+    if n == 0 { return 1 }
+    if n == 1 { return 1 }
+    if n == 2 { return 1 }
+    if n == 3 { return 2 }
+    if n == 4 { return 2 }
+    if n == 5 { return 3 }
+    3
+}
+
+fn fano_line_j(n: i64) -> i64 {
+    if n == 0 { return 2 }
+    if n == 1 { return 4 }
+    if n == 2 { return 7 }
+    if n == 3 { return 4 }
+    if n == 4 { return 5 }
+    if n == 5 { return 4 }
+    6
+}
+
+fn fano_line_k(n: i64) -> i64 {
+    if n == 0 { return 3 }
+    if n == 1 { return 5 }
+    if n == 2 { return 6 }
+    if n == 3 { return 6 }
+    if n == 4 { return 7 }
+    if n == 5 { return 7 }
+    5
+}
+
+// Inner product of two vectors stored in flat arrays.
+// v1 starts at offset o1, v2 at offset o2, each of length `dim`.
+fn frame_inner(frame: &[f64; 700], o1: i64, o2: i64, dim: i64) -> f64 with Mut {
+    var sum: f64 = 0.0
+    var idx: i64 = 0
+    while idx < dim {
+        sum = sum + frame[o1 + idx] * frame[o2 + idx]
+        idx = idx + 1
+    }
+    sum
+}
+
+// G₂ 3-form evaluated on a 7-frame.
+//
+// `frame` is a flat array of 7 vectors, each of dimension `dim`.
+//   frame[k*dim .. (k+1)*dim - 1] = vector vₖ₊₁ (k = 0..6, mapping to e₁..e₇)
+//
+// φ(frame) = Σ_{line ℓ} sign(ℓ) · det(G_ℓ)
+// where G_ℓ is the 3×3 Gram matrix of the triple (v_i, v_j, v_k)
+// and sign(ℓ) is the Cayley-Dickson sign σ(i,j) for that Fano line.
+//
+// For an orthonormal frame aligned with octonion basis, this equals 7.
+// Deviation from 7 measures departure from G₂ structure.
+//
+// Max dim = 100 (frame array is 700 = 7 * 100).
+fn g2_3form(frame: &[f64; 700], dim: i64) -> f64 with Mut, Div {
+    var phi: f64 = 0.0
+    var line: i64 = 0
+    while line < 7 {
+        let i = fano_line_i(line)
+        let j = fano_line_j(line)
+        let k = fano_line_k(line)
+
+        // Offsets into frame array (basis e₁..e₇ → indices 0..6)
+        let oi = (i - 1) * dim
+        let oj = (j - 1) * dim
+        let ok = (k - 1) * dim
+
+        // 3×3 Gram matrix entries
+        let g11 = frame_inner(frame, oi, oi, dim)
+        let g12 = frame_inner(frame, oi, oj, dim)
+        let g13 = frame_inner(frame, oi, ok, dim)
+        let g21 = frame_inner(frame, oj, oi, dim)
+        let g22 = frame_inner(frame, oj, oj, dim)
+        let g23 = frame_inner(frame, oj, ok, dim)
+        let g31 = frame_inner(frame, ok, oi, dim)
+        let g32 = frame_inner(frame, ok, oj, dim)
+        let g33 = frame_inner(frame, ok, ok, dim)
+
+        // det(G) = g11(g22*g33 - g23*g32)
+        //        - g12(g21*g33 - g23*g31)
+        //        + g13(g21*g32 - g22*g31)
+        let det = g11 * (g22 * g33 - g23 * g32)
+                - g12 * (g21 * g33 - g23 * g31)
+                + g13 * (g21 * g32 - g22 * g31)
+
+        // Sign from Cayley-Dickson cocycle
+        let sign = cd_sigma(i, j)
+
+        if sign > 0 {
+            phi = phi + det
+        } else {
+            phi = phi - det
+        }
+
+        line = line + 1
+    }
+    phi
+}
+
+// === SU(3) ⊂ G₂ branching projector ===
+//
+// Under SU(3) ⊂ G₂, the fundamental 7 decomposes as 3 ⊕ 3̄ ⊕ 1:
+//   triplet:      {v₁, v₂, v₃}  (color)
+//   anti-triplet: {v₄, v₅, v₆}  (anti-color)
+//   singlet:      {v₇}
+//
+// We measure decomposition quality by computing the 7×7 Gram matrix
+// of the frame and checking block-diagonal dominance:
+//
+//   G = [ G₃₃   G₃₃̄  G₃₁ ]    ideal:  [ I₃  0   0 ]
+//       [ G₃̄₃   G₃̄₃̄  G₃̄₁ ]            [ 0   I₃  0 ]
+//       [ G₁₃   G₁₃̄  G₁₁ ]            [ 0   0   1 ]
+//
+// The branching quality Q ∈ [0,1] is:
+//   Q = 1 - (off-block Frobenius norm)² / (total Frobenius norm)²
+// Q = 1 means perfect block-diagonal (exact SU(3) decomposition).
+// Q = 0 means no block structure.
+
+// Compute the 7×7 Gram matrix of a 7-frame.
+// gram[i*7 + j] = ⟨v_{i+1}, v_{j+1}⟩
+fn frame_gram(frame: &[f64; 700], dim: i64, gram: &![f64; 49]) with Mut {
+    var i: i64 = 0
+    while i < 7 {
+        var j: i64 = 0
+        while j < 7 {
+            gram[i * 7 + j] = frame_inner(frame, i * dim, j * dim, dim)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Which block does basis index k (0..6) belong to?
+// 0,1,2 → block 0 (triplet 3)
+// 3,4,5 → block 1 (anti-triplet 3̄)
+// 6     → block 2 (singlet 1)
+fn su3_block(k: i64) -> i64 {
+    if k < 3 { return 0 }
+    if k < 6 { return 1 }
+    2
+}
+
+// SU(3) branching quality Q ∈ [0, 1].
+// Input: gram is a 7×7 Gram matrix (49 entries, row-major).
+fn su3_branching_quality(gram: &[f64; 49]) -> f64 with Mut {
+    var total_frob: f64 = 0.0
+    var off_block_frob: f64 = 0.0
+    var i: i64 = 0
+    while i < 7 {
+        var j: i64 = 0
+        while j < 7 {
+            let val = gram[i * 7 + j]
+            let v2 = val * val
+            total_frob = total_frob + v2
+            if su3_block(i) != su3_block(j) {
+                off_block_frob = off_block_frob + v2
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if total_frob < 0.000001 { return 0.0 }
+    1.0 - off_block_frob / total_frob
+}
+
+// Combined analysis: G₂ 3-form + SU(3) branching quality for a 7-frame.
+// Returns (phi, quality) packed as a 2-element array.
+fn g2_su3_analysis(frame: &[f64; 700], dim: i64, result: &![f64; 2]) with Mut, Div {
+    let phi = g2_3form(frame, dim)
+    var gram: [f64; 49] = [0.0; 49]
+    frame_gram(frame, dim, &!gram)
+    let q = su3_branching_quality(&gram)
+    result[0] = phi
+    result[1] = q
+}
+
+// === Associator deviation field ===
+//
+// For a 7-frame, compute the associator deviation for all 35 unordered
+// triples {i,j,k} with 1 ≤ i < j < k ≤ 7.
+//
+// Each triple gets mapped to basis elements, and the associator
+// ‖[eᵢ, eⱼ, eₖ]‖² is computed. For a G₂-compatible frame, the
+// deviations should be:
+//   0   for triples on Fano lines (7 of them)
+//   4   for non-Fano triples (28 of them)
+//
+// The deviation field is stored in `devs[0..34]`.
+// Triple ordering: lexicographic on (i,j,k) with i<j<k.
+fn associator_deviation_field(devs: &![f64; 35]) with Mut, Div, NonAssoc {
+    var idx: i64 = 0
+    var i: i64 = 1
+    while i <= 7 {
+        var j: i64 = i + 1
+        while j <= 7 {
+            var k: i64 = j + 1
+            while k <= 7 {
+                devs[idx] = basis_associator_norm_sq(i, j, k)
+                idx = idx + 1
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Count how many of the 35 triples are Fano (associator norm = 0).
+fn count_fano_triples(devs: &[f64; 35]) -> i64 with Mut {
+    var count: i64 = 0
+    var idx: i64 = 0
+    while idx < 35 {
+        if devs[idx] < 0.001 {
+            count = count + 1
+        }
+        idx = idx + 1
+    }
+    count
+}
+
+// Count how many non-Fano triples have ‖associator‖² = 4 (±ε).
+// Under Cayley-Dickson sign convention, [eᵢ,eⱼ,eₖ] = ±2eₘ for non-Fano
+// triples, giving ‖·‖² = 4.
+fn count_norm4_triples(devs: &[f64; 35]) -> i64 with Mut {
+    var count: i64 = 0
+    var idx: i64 = 0
+    while idx < 35 {
+        let diff = devs[idx] - 4.0
+        let absdiff = if diff < 0.0 { 0.0 - diff } else { diff }
+        if absdiff < 0.001 {
+            count = count + 1
+        }
+        idx = idx + 1
+    }
+    count
+}
+
+// === G₂ null model ===
+//
+// For significance testing of the G₂ 3-form on connectome eigenvectors,
+// we need a null distribution. The null hypothesis is: the eigenvector
+// frame bears no relationship to the octonion G₂ structure.
+//
+// Procedure:
+//   1. Generate random SO(7) rotations via 21 Givens rotations
+//      (one per plane pair (i,j) with 0 ≤ i < j ≤ 6)
+//   2. Apply each rotation to the eigenvector frame
+//   3. Recompute φ = g2_3form on the rotated frame
+//   4. Collect the distribution of |φ| values
+//   5. The p-value is the fraction of null |φ| values ≥ observed |φ|
+//
+// Key insight: SO(7) has dimension 21, G₂ has dimension 14.
+// The coset SO(7)/G₂ is 7-dimensional. Generic SO(7) rotations
+// break the G₂ 3-form, reducing |φ| from its maximum of 7.
+// Only the 14-dimensional G₂ subgroup preserves φ.
+//
+// Note: SU(3) branching quality Q is invariant under SO(7) for
+// orthonormal frames (SO(7) preserves the Gram matrix). Q only
+// varies for non-orthonormal frames from real data.
