@@ -138,9 +138,9 @@ struct GPHyper {
 struct GPModel {
     L: [f64; 4096],
     alpha: [f64; 128],
-    x_train: [f64; 128],
-    y_train: [f64; 128],
-    n_train: i32,
+    mx: [f64; 128],
+    my: [f64; 128],
+    mn: i32,
     hyper: GPHyper,
     log_ml: f64
 }
@@ -281,11 +281,11 @@ fn gp_train(data: &GPData, hyper: &GPHyper, model: &!GPModel) -> bool with Mut, 
 
     var i = 0
     while i < n {
-        model.x_train[i] = data.x_train[i]
-        model.y_train[i] = data.y_train[i]
+        model.mx[i] = data.x_train[i]
+        model.my[i] = data.y_train[i]
         i = i + 1
     }
-    model.n_train = n
+    model.mn = n
     model.hyper.signal_var = hyper.signal_var
     model.hyper.length_scale = hyper.length_scale
     model.hyper.noise_var = hyper.noise_var
@@ -308,10 +308,16 @@ fn gp_train(data: &GPData, hyper: &GPHyper, model: &!GPModel) -> bool with Mut, 
         i = i + 1
     }
 
-    let ok = gp_cholesky(&K, n, &!model.L)
+    var local_L: [f64; 4096] = [0.0; 4096]
+    let ok = gp_cholesky(&K, n, &!local_L)
     if !ok { return false }
+    var li: i32 = 0
+    while li < n * n { model.L[li] = local_L[li]; li = li + 1 }
 
-    gp_cholesky_solve(&model.L, &data.y_train, n, &!model.alpha)
+    var local_alpha: [f64; 128] = [0.0; 128]
+    gp_cholesky_solve(&local_L, data.y_train, n, &!local_alpha)
+    var ai: i32 = 0
+    while ai < n { model.alpha[ai] = local_alpha[ai]; ai = ai + 1 }
 
     var data_fit = 0.0
     i = 0
@@ -340,12 +346,12 @@ fn gp_train(data: &GPData, hyper: &GPHyper, model: &!GPModel) -> bool with Mut, 
 // ============================================================================
 
 fn gp_predict(model: &GPModel, x_star: f64, pred: &!GPPrediction) with Mut, Div, Panic {
-    let n = model.n_train
+    let n = model.mn
 
     var k_star: [f64; 128] = [0.0; 128]
     var i = 0
     while i < n {
-        k_star[i] = kernel_eval(x_star, model.x_train[i], &model.hyper)
+        k_star[i] = kernel_eval(x_star, model.mx[i], model.hyper)
         i = i + 1
     }
 
@@ -358,9 +364,9 @@ fn gp_predict(model: &GPModel, x_star: f64, pred: &!GPPrediction) with Mut, Div,
     pred.mean = mean
 
     var v: [f64; 128] = [0.0; 128]
-    gp_forward_solve(&model.L, &k_star, n, &!v)
+    gp_forward_solve(model.L, &k_star, n, &!v)
 
-    let k_ss = kernel_eval(x_star, x_star, &model.hyper)
+    let k_ss = kernel_eval(x_star, x_star, model.hyper)
     var v_dot_v = 0.0
     i = 0
     while i < n {
@@ -413,9 +419,9 @@ fn make_zero_model() -> GPModel {
     GPModel {
         L: [0.0; 4096],
         alpha: [0.0; 128],
-        x_train: [0.0; 128],
-        y_train: [0.0; 128],
-        n_train: 0,
+        mx: [0.0; 128],
+        my: [0.0; 128],
+        mn: 0,
         hyper: GPHyper {
             signal_var: 0.0,
             length_scale: 0.0,
