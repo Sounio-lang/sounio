@@ -676,3 +676,252 @@ pub fn laplacian_eigenvectors(
 
     result
 }
+
+// ============================================================================
+// COHORT COMPARISON (G₂ bridge — neurotypical vs ADHD)
+// ============================================================================
+//
+// Given two groups of connectomes (e.g., neurotypical vs ADHD), compute
+// G₂ invariants per subject and test for group differences via
+// permutation test.
+//
+// Pipeline per subject:
+//   adjacency matrix → Laplacian → 7 eigenvectors → G₂ 3-form + SU(3) Q
+//
+// Group comparison:
+//   1. Compute mean φ and mean Q per group
+//   2. Test statistic: |mean_φ_A - mean_φ_B| (or Q analog)
+//   3. Permutation test: shuffle group labels N times, recompute statistic
+//   4. p-value = fraction of permutations with statistic ≥ observed
+//
+// Effect size: Cohen's d = (mean_A - mean_B) / pooled_sd
+//
+// Max cohort size: 64 subjects per group (128 total).
+//
+// References:
+//   Good 2005, "Permutation, Parametric and Bootstrap Tests of Hypotheses"
+//   Di Martino+ 2014, "The autism brain imaging data exchange" (ABIDE-I)
+
+// Per-subject G₂ invariants
+pub struct SubjectG2 {
+    phi: f64           // G₂ 3-form value
+    phi_abs: f64       // |φ|
+    su3_quality: f64   // SU(3) branching quality Q
+    lambda2: f64       // Fiedler value (algebraic connectivity)
+}
+
+fn subject_g2_empty() -> SubjectG2 {
+    SubjectG2 { phi: 0.0, phi_abs: 0.0, su3_quality: 0.0, lambda2: 0.0 }
+}
+
+// Cohort: up to 64 subjects
+pub struct Cohort {
+    n: i64
+    subjects: [SubjectG2; 64]
+}
+
+fn cohort_empty() -> Cohort {
+    Cohort {
+        n: 0,
+        subjects: [SubjectG2 { phi: 0.0, phi_abs: 0.0, su3_quality: 0.0, lambda2: 0.0 }; 64],
+    }
+}
+
+fn cohort_add(c: &!Cohort, s: SubjectG2) with Mut {
+    if c.n < 64 {
+        c.subjects[c.n] = s
+        c.n = c.n + 1
+    }
+}
+
+// Group statistics
+pub struct CohortStats {
+    n: i64
+    mean_phi_abs: f64
+    var_phi_abs: f64
+    mean_su3_q: f64
+    var_su3_q: f64
+    mean_lambda2: f64
+}
+
+fn cn_cohort_stats(c: &Cohort) -> CohortStats with Mut, Div {
+    var stats = CohortStats {
+        n: c.n, mean_phi_abs: 0.0, var_phi_abs: 0.0,
+        mean_su3_q: 0.0, var_su3_q: 0.0, mean_lambda2: 0.0,
+    }
+    if c.n == 0 { return stats }
+
+    // Means
+    var i: i64 = 0
+    while i < c.n {
+        stats.mean_phi_abs = stats.mean_phi_abs + c.subjects[i].phi_abs
+        stats.mean_su3_q = stats.mean_su3_q + c.subjects[i].su3_quality
+        stats.mean_lambda2 = stats.mean_lambda2 + c.subjects[i].lambda2
+        i = i + 1
+    }
+    let nf = c.n as f64
+    stats.mean_phi_abs = stats.mean_phi_abs / nf
+    stats.mean_su3_q = stats.mean_su3_q / nf
+    stats.mean_lambda2 = stats.mean_lambda2 / nf
+
+    // Variances
+    i = 0
+    while i < c.n {
+        let dp = c.subjects[i].phi_abs - stats.mean_phi_abs
+        let dq = c.subjects[i].su3_quality - stats.mean_su3_q
+        stats.var_phi_abs = stats.var_phi_abs + dp * dp
+        stats.var_su3_q = stats.var_su3_q + dq * dq
+        i = i + 1
+    }
+    if c.n > 1 {
+        stats.var_phi_abs = stats.var_phi_abs / (nf - 1.0)
+        stats.var_su3_q = stats.var_su3_q / (nf - 1.0)
+    }
+    stats
+}
+
+// Cohen's d effect size between two cohorts
+pub struct EffectSize {
+    d_phi: f64      // Cohen's d for |φ|
+    d_su3_q: f64    // Cohen's d for SU(3) quality
+    diff_phi: f64   // raw mean difference in |φ|
+    diff_q: f64     // raw mean difference in Q
+}
+
+fn cn_effect_size(a: &CohortStats, b: &CohortStats) -> EffectSize with Div {
+    let diff_phi = a.mean_phi_abs - b.mean_phi_abs
+    let diff_q = a.mean_su3_q - b.mean_su3_q
+
+    // Pooled sd: sp = sqrt(((n1-1)*s1² + (n2-1)*s2²) / (n1+n2-2))
+    let n1 = if a.n > 1 { a.n - 1 } else { 1 }
+    let n2 = if b.n > 1 { b.n - 1 } else { 1 }
+    let denom = (n1 + n2) as f64
+
+    let pooled_var_phi = ((n1 as f64) * a.var_phi_abs + (n2 as f64) * b.var_phi_abs) / denom
+    let pooled_var_q = ((n1 as f64) * a.var_su3_q + (n2 as f64) * b.var_su3_q) / denom
+
+    let sp_phi = cn_sqrt(pooled_var_phi)
+    let sp_q = cn_sqrt(pooled_var_q)
+
+    EffectSize {
+        d_phi: if sp_phi > 1.0e-12 { diff_phi / sp_phi } else { 0.0 },
+        d_su3_q: if sp_q > 1.0e-12 { diff_q / sp_q } else { 0.0 },
+        diff_phi: diff_phi,
+        diff_q: diff_q,
+    }
+}
+
+// Permutation test result
+pub struct PermTestResult {
+    observed_diff_phi: f64    // |mean_A(|φ|) - mean_B(|φ|)|
+    observed_diff_q: f64      // |mean_A(Q) - mean_B(Q)|
+    p_value_phi: f64          // fraction of permutations ≥ observed (|φ|)
+    p_value_q: f64            // fraction of permutations ≥ observed (Q)
+    n_perms: i64              // number of permutations run
+}
+
+// Internal: MINSTD PRNG for permutation shuffling
+fn cn_rng_next(state: i64) -> i64 with Div {
+    let a: i64 = 16807
+    let m: i64 = 2147483647
+    let q: i64 = 127773
+    let r: i64 = 2836
+    let hi = state / q
+    let lo = state - hi * q
+    let t = a * lo - r * hi
+    if t > 0 { t } else { t + m }
+}
+
+// Permutation test: combine two cohorts, shuffle labels, compare groups.
+pub fn permutation_test(
+    a: &Cohort, b: &Cohort, n_perms: i64, seed: i64
+) -> PermTestResult with Mut, Div {
+    let stats_a = cn_cohort_stats(a)
+    let stats_b = cn_cohort_stats(b)
+    let obs_diff_phi = cn_abs(stats_a.mean_phi_abs - stats_b.mean_phi_abs)
+    let obs_diff_q = cn_abs(stats_a.mean_su3_q - stats_b.mean_su3_q)
+
+    let n_total = a.n + b.n
+    if n_total == 0 || n_perms == 0 {
+        return PermTestResult {
+            observed_diff_phi: obs_diff_phi, observed_diff_q: obs_diff_q,
+            p_value_phi: 1.0, p_value_q: 1.0, n_perms: 0,
+        }
+    }
+
+    // Combined pool
+    var pool_phi: [f64; 128] = [0.0; 128]
+    var pool_q: [f64; 128] = [0.0; 128]
+    var i: i64 = 0
+    while i < a.n {
+        pool_phi[i] = a.subjects[i].phi_abs
+        pool_q[i] = a.subjects[i].su3_quality
+        i = i + 1
+    }
+    i = 0
+    while i < b.n {
+        pool_phi[a.n + i] = b.subjects[i].phi_abs
+        pool_q[a.n + i] = b.subjects[i].su3_quality
+        i = i + 1
+    }
+
+    // Permutation loop
+    var count_ge_phi: i64 = 0
+    var count_ge_q: i64 = 0
+    var rng = seed
+    var perm: i64 = 0
+
+    while perm < n_perms {
+        // Copy pool for shuffling
+        var sh_phi: [f64; 128] = [0.0; 128]
+        var sh_q: [f64; 128] = [0.0; 128]
+        i = 0
+        while i < n_total {
+            sh_phi[i] = pool_phi[i]
+            sh_q[i] = pool_q[i]
+            i = i + 1
+        }
+
+        // Fisher-Yates shuffle
+        i = n_total - 1
+        while i > 0 {
+            rng = cn_rng_next(rng)
+            var j = rng
+            if j < 0 { j = 0 - j }
+            j = j - (j / (i + 1)) * (i + 1)
+            let tp = sh_phi[i]
+            let tq = sh_q[i]
+            sh_phi[i] = sh_phi[j]
+            sh_q[i] = sh_q[j]
+            sh_phi[j] = tp
+            sh_q[j] = tq
+            i = i - 1
+        }
+
+        // Mean difference under this permutation
+        var sa_phi: f64 = 0.0
+        var sa_q: f64 = 0.0
+        i = 0
+        while i < a.n { sa_phi = sa_phi + sh_phi[i]; sa_q = sa_q + sh_q[i]; i = i + 1 }
+        var sb_phi: f64 = 0.0
+        var sb_q: f64 = 0.0
+        i = 0
+        while i < b.n { sb_phi = sb_phi + sh_phi[a.n + i]; sb_q = sb_q + sh_q[a.n + i]; i = i + 1 }
+
+        let pd_phi = cn_abs(sa_phi / (a.n as f64) - sb_phi / (b.n as f64))
+        let pd_q = cn_abs(sa_q / (a.n as f64) - sb_q / (b.n as f64))
+
+        if pd_phi >= obs_diff_phi { count_ge_phi = count_ge_phi + 1 }
+        if pd_q >= obs_diff_q { count_ge_q = count_ge_q + 1 }
+
+        perm = perm + 1
+    }
+
+    PermTestResult {
+        observed_diff_phi: obs_diff_phi,
+        observed_diff_q: obs_diff_q,
+        p_value_phi: (count_ge_phi as f64) / (n_perms as f64),
+        p_value_q: (count_ge_q as f64) / (n_perms as f64),
+        n_perms: n_perms,
+    }
+}

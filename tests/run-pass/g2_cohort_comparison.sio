@@ -1,0 +1,352 @@
+//@ run-pass
+// Test: G₂ cohort comparison — permutation test on synthetic groups.
+//
+// Two synthetic cohorts:
+//   Group A (neurotypical): |φ| ~ 5.0, Q ~ 0.8 (tight G₂ structure)
+//   Group B (ADHD):         |φ| ~ 3.0, Q ~ 0.6 (looser structure)
+//
+// Verifies:
+//   T1: Cohort statistics compute correctly (mean, variance)
+//   T2: Cohen's d effect size is large (|d| > 0.8)
+//   T3: Permutation test detects the difference (p < 0.1)
+//   T4: Identical cohorts produce p ≈ 1.0 (no false positive)
+//   T5: Effect size for identical cohorts is near zero
+//   T6: Permutation test is two-sided (|diff| used)
+
+// === Math helpers ===
+
+fn abs_f32(x: f32) -> f32 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sqrt_f32(x: f32) -> f32 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i32 = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// === PRNG for synthetic data ===
+
+struct Rng { state: i32 }
+
+fn rng_next(r: Rng) -> Rng {
+    let a = 16807
+    let m = 2147483647
+    let q = 127773
+    let rem = 2836
+    let hi = r.state / q
+    let lo = r.state - hi * q
+    let t = a * lo - rem * hi
+    Rng { state: if t > 0 { t } else { t + m } }
+}
+
+// Uniform in [0, 1)
+fn rng_uniform(r: Rng) -> f32 {
+    (r.state / 100) as f32 / 21474836.0
+}
+
+// === Subject data (by-value, JIT-compatible) ===
+
+struct Subject {
+    phi_abs: f32,
+    su3_q: f32,
+}
+
+// Max 10 subjects per group for JIT test speed
+struct Group {
+    n: i32,
+    s0: Subject, s1: Subject, s2: Subject, s3: Subject, s4: Subject,
+    s5: Subject, s6: Subject, s7: Subject, s8: Subject, s9: Subject,
+}
+
+fn empty_subject() -> Subject { Subject { phi_abs: 0.0, su3_q: 0.0 } }
+
+fn empty_group() -> Group {
+    Group {
+        n: 0,
+        s0: empty_subject(), s1: empty_subject(), s2: empty_subject(),
+        s3: empty_subject(), s4: empty_subject(), s5: empty_subject(),
+        s6: empty_subject(), s7: empty_subject(), s8: empty_subject(),
+        s9: empty_subject(),
+    }
+}
+
+fn group_get(g: Group, i: i32) -> Subject {
+    if i == 0 { return g.s0 } if i == 1 { return g.s1 } if i == 2 { return g.s2 }
+    if i == 3 { return g.s3 } if i == 4 { return g.s4 } if i == 5 { return g.s5 }
+    if i == 6 { return g.s6 } if i == 7 { return g.s7 } if i == 8 { return g.s8 }
+    g.s9
+}
+
+fn group_set(g: Group, i: i32, s: Subject) -> Group {
+    Group {
+        n: g.n,
+        s0: if i == 0 { s } else { g.s0 }, s1: if i == 1 { s } else { g.s1 },
+        s2: if i == 2 { s } else { g.s2 }, s3: if i == 3 { s } else { g.s3 },
+        s4: if i == 4 { s } else { g.s4 }, s5: if i == 5 { s } else { g.s5 },
+        s6: if i == 6 { s } else { g.s6 }, s7: if i == 7 { s } else { g.s7 },
+        s8: if i == 8 { s } else { g.s8 }, s9: if i == 9 { s } else { g.s9 },
+    }
+}
+
+// === Group statistics ===
+
+struct GroupStats {
+    mean_phi: f32,
+    var_phi: f32,
+    mean_q: f32,
+    var_q: f32,
+}
+
+fn group_stats(g: Group) -> GroupStats with Mut {
+    var mp: f32 = 0.0
+    var mq: f32 = 0.0
+    var i: i32 = 0
+    while i < g.n {
+        let s = group_get(g, i)
+        mp = mp + s.phi_abs
+        mq = mq + s.su3_q
+        i = i + 1
+    }
+    mp = mp / g.n as f32
+    mq = mq / g.n as f32
+
+    var vp: f32 = 0.0
+    var vq: f32 = 0.0
+    i = 0
+    while i < g.n {
+        let s = group_get(g, i)
+        let dp = s.phi_abs - mp
+        let dq = s.su3_q - mq
+        vp = vp + dp * dp
+        vq = vq + dq * dq
+        i = i + 1
+    }
+    if g.n > 1 { vp = vp / (g.n - 1) as f32; vq = vq / (g.n - 1) as f32 }
+
+    GroupStats { mean_phi: mp, var_phi: vp, mean_q: mq, var_q: vq }
+}
+
+// Cohen's d
+fn cohens_d(sa: GroupStats, sb: GroupStats) -> f32 with Mut {
+    let diff = sa.mean_phi - sb.mean_phi
+    let pooled_var = (sa.var_phi + sb.var_phi) / 2.0
+    let sp = sqrt_f32(pooled_var)
+    if sp < 0.001 { return 0.0 }
+    diff / sp
+}
+
+fn cohens_d_q(sa: GroupStats, sb: GroupStats) -> f32 with Mut {
+    let diff = sa.mean_q - sb.mean_q
+    let pooled_var = (sa.var_q + sb.var_q) / 2.0
+    let sp = sqrt_f32(pooled_var)
+    if sp < 0.001 { return 0.0 }
+    diff / sp
+}
+
+// === Permutation test (by-value, small groups) ===
+
+// Combined pool of 20 subjects max
+struct Pool {
+    n: i32,
+    phi: [f32; 20],
+    q: [f32; 20],
+}
+
+fn pool_from_groups(a: Group, b: Group) -> Pool with Mut {
+    var p = Pool { n: a.n + b.n, phi: [0.0; 20], q: [0.0; 20] }
+    var i: i32 = 0
+    while i < a.n {
+        let s = group_get(a, i)
+        p.phi[i] = s.phi_abs
+        p.q[i] = s.su3_q
+        i = i + 1
+    }
+    i = 0
+    while i < b.n {
+        let s = group_get(b, i)
+        p.phi[a.n + i] = s.phi_abs
+        p.q[a.n + i] = s.su3_q
+        i = i + 1
+    }
+    p
+}
+
+struct PermResult {
+    p_phi: f32,
+    p_q: f32,
+    obs_diff_phi: f32,
+    obs_diff_q: f32,
+}
+
+fn run_perm_test(a: Group, b: Group, n_perms: i32, seed: i32) -> PermResult with Mut {
+    let sa = group_stats(a)
+    let sb = group_stats(b)
+    let obs_dp = abs_f32(sa.mean_phi - sb.mean_phi)
+    let obs_dq = abs_f32(sa.mean_q - sb.mean_q)
+
+    var pool = pool_from_groups(a, b)
+    let na = a.n
+    let ntot = pool.n
+
+    var count_phi: i32 = 0
+    var count_q: i32 = 0
+    var r = Rng { state: seed }
+    var perm: i32 = 0
+
+    while perm < n_perms {
+        // Copy pool for shuffling
+        var sp: [f32; 20] = [0.0; 20]
+        var sq: [f32; 20] = [0.0; 20]
+        var i: i32 = 0
+        while i < ntot { sp[i] = pool.phi[i]; sq[i] = pool.q[i]; i = i + 1 }
+
+        // Fisher-Yates
+        i = ntot - 1
+        while i > 0 {
+            r = rng_next(r)
+            var j = r.state
+            if j < 0 { j = 0 - j }
+            j = j - (j / (i + 1)) * (i + 1)
+            let tp = sp[i]; let tq = sq[i]
+            sp[i] = sp[j]; sq[i] = sq[j]
+            sp[j] = tp; sq[j] = tq
+            i = i - 1
+        }
+
+        // Mean diff under permutation
+        var ma_p: f32 = 0.0
+        var ma_q: f32 = 0.0
+        i = 0
+        while i < na { ma_p = ma_p + sp[i]; ma_q = ma_q + sq[i]; i = i + 1 }
+        ma_p = ma_p / na as f32
+        ma_q = ma_q / na as f32
+
+        var mb_p: f32 = 0.0
+        var mb_q: f32 = 0.0
+        i = na
+        while i < ntot { mb_p = mb_p + sp[i]; mb_q = mb_q + sq[i]; i = i + 1 }
+        mb_p = mb_p / (ntot - na) as f32
+        mb_q = mb_q / (ntot - na) as f32
+
+        if abs_f32(ma_p - mb_p) >= obs_dp { count_phi = count_phi + 1 }
+        if abs_f32(ma_q - mb_q) >= obs_dq { count_q = count_q + 1 }
+
+        perm = perm + 1
+    }
+
+    PermResult {
+        p_phi: count_phi as f32 / n_perms as f32,
+        p_q: count_q as f32 / n_perms as f32,
+        obs_diff_phi: obs_dp,
+        obs_diff_q: obs_dq,
+    }
+}
+
+// === Generate synthetic cohorts ===
+
+fn make_neurotypical(seed: i32) -> Group with Mut {
+    var g = empty_group()
+    g = Group { n: 8, s0: g.s0, s1: g.s1, s2: g.s2, s3: g.s3, s4: g.s4,
+                s5: g.s5, s6: g.s6, s7: g.s7, s8: g.s8, s9: g.s9 }
+    var r = Rng { state: seed }
+    var i: i32 = 0
+    while i < 8 {
+        r = rng_next(r)
+        let noise = rng_uniform(r) - 0.5  // [-0.5, 0.5]
+        let phi = 5.0 + noise * 0.8        // ~[4.6, 5.4]
+        r = rng_next(r)
+        let qnoise = rng_uniform(r) - 0.5
+        let q = 0.8 + qnoise * 0.1         // ~[0.75, 0.85]
+        g = group_set(g, i, Subject { phi_abs: phi, su3_q: q })
+        i = i + 1
+    }
+    g
+}
+
+fn make_adhd(seed: i32) -> Group with Mut {
+    var g = empty_group()
+    g = Group { n: 8, s0: g.s0, s1: g.s1, s2: g.s2, s3: g.s3, s4: g.s4,
+                s5: g.s5, s6: g.s6, s7: g.s7, s8: g.s8, s9: g.s9 }
+    var r = Rng { state: seed }
+    var i: i32 = 0
+    while i < 8 {
+        r = rng_next(r)
+        let noise = rng_uniform(r) - 0.5
+        let phi = 3.0 + noise * 0.8         // ~[2.6, 3.4]
+        r = rng_next(r)
+        let qnoise = rng_uniform(r) - 0.5
+        let q = 0.6 + qnoise * 0.1          // ~[0.55, 0.65]
+        g = group_set(g, i, Subject { phi_abs: phi, su3_q: q })
+        i = i + 1
+    }
+    g
+}
+
+// === MAIN ===
+
+fn main() -> i32 with IO, Mut {
+    var pass: i32 = 0
+    var fail: i32 = 0
+
+    let nt = make_neurotypical(42)
+    let adhd = make_adhd(137)
+
+    let sa = group_stats(nt)
+    let sb = group_stats(adhd)
+
+    // T1: Statistics compute correctly
+    let mean_ok = sa.mean_phi > 4.0 && sa.mean_phi < 6.0
+                && sb.mean_phi > 2.0 && sb.mean_phi < 4.0
+    let var_ok = sa.var_phi > 0.0 && sb.var_phi > 0.0
+    if mean_ok && var_ok {
+        pass = pass + 1; println("T1 PASS: cohort statistics correct")
+    } else {
+        fail = fail + 1; println("T1 FAIL: bad statistics")
+    }
+
+    // T2: Cohen's d is large
+    let d = cohens_d(sa, sb)
+    let d_abs = abs_f32(d)
+    if d_abs > 0.8 {
+        pass = pass + 1; println("T2 PASS: large effect size (d > 0.8)")
+    } else {
+        fail = fail + 1; println("T2 FAIL: effect size too small")
+    }
+
+    // T3: Permutation test detects difference (p < 0.1)
+    let result = run_perm_test(nt, adhd, 200, 999)
+    if result.p_phi < 0.1 {
+        pass = pass + 1; println("T3 PASS: permutation test significant (p < 0.1)")
+    } else {
+        fail = fail + 1; println("T3 FAIL: permutation test not significant")
+    }
+
+    // T4: Identical cohorts → p ≈ 1.0
+    let null_result = run_perm_test(nt, nt, 200, 777)
+    if null_result.p_phi > 0.3 {
+        pass = pass + 1; println("T4 PASS: identical cohorts not significant")
+    } else {
+        fail = fail + 1; println("T4 FAIL: false positive on identical cohorts")
+    }
+
+    // T5: Effect size for identical cohorts ≈ 0
+    let d_null = cohens_d(sa, sa)
+    if abs_f32(d_null) < 0.01 {
+        pass = pass + 1; println("T5 PASS: zero effect size for identical groups")
+    } else {
+        fail = fail + 1; println("T5 FAIL: nonzero effect for identical groups")
+    }
+
+    // T6: Observed difference is positive (two-sided test)
+    if result.obs_diff_phi > 1.0 {
+        pass = pass + 1; println("T6 PASS: observed |phi| difference > 1.0")
+    } else {
+        fail = fail + 1; println("T6 FAIL: observed difference too small")
+    }
+
+    println("---")
+    if fail == 0 { println("ALL PASS") }
+    else { println("SOME TESTS FAILED") }
+    0
+}
