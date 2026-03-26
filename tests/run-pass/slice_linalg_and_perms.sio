@@ -1,0 +1,455 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+//@ expect-stdout: Failed: 0
+// slice_linalg_and_perms.sio — Tests for combinatorics_perm + slice_ops
+//
+// Self-contained test suite exercising lexicographic permutation generation,
+// Fisher-Yates shuffle, dot product, norms, matrix multiply, matvec, and
+// transpose. All functions inlined since tests cannot import new modules.
+//
+// References:
+//   Knuth (2011): TAOCP Vol. 4A, Section 7.2.1.2
+//   Golub & Van Loan (2013): Matrix Computations (4th ed.)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn t_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    t_abs(a - b) < tol
+}
+
+fn t_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    if y < 1.0 { y = 1.0 }
+    var i: i32 = 0
+    while i < 60 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================================
+// PERMUTATION (struct wrapper for i64 array)
+// ============================================================================
+
+struct Perm128 {
+    data: [i64; 128]
+}
+
+fn next_permutation(p: &!Perm128, n: i32) -> bool with Mut, Panic {
+    var i = n - 2
+    while i >= 0 {
+        if p.data[i] < p.data[i + 1] {
+            var j = n - 1
+            while p.data[j] <= p.data[i] {
+                j = j - 1
+            }
+            let tmp = p.data[i]
+            p.data[i] = p.data[j]
+            p.data[j] = tmp
+            var lo = i + 1
+            var hi = n - 1
+            while lo < hi {
+                let t = p.data[lo]
+                p.data[lo] = p.data[hi]
+                p.data[hi] = t
+                lo = lo + 1
+                hi = hi - 1
+            }
+            return true
+        }
+        i = i - 1
+    }
+    return false
+}
+
+fn count_permutations(n: i32) -> i32 with Mut, Panic {
+    var p = Perm128 { data: [0; 128] }
+    var i: i32 = 0
+    while i < n {
+        p.data[i] = i as i64
+        i = i + 1
+    }
+    var count: i32 = 1
+    while next_permutation(&!p, n) {
+        count = count + 1
+    }
+    count
+}
+
+fn shuffle_perm(p: &!Perm128, n: i32, seed: i64) -> i64 with Mut, Div, Panic {
+    var rng = seed
+    var i = n - 1
+    while i > 0 {
+        let a: i64 = 16807
+        let m: i64 = 2147483647
+        let q: i64 = 127773
+        let r_val: i64 = 2836
+        let hi = rng / q
+        let lo = rng - hi * q
+        let t = a * lo - r_val * hi
+        if t > 0 {
+            rng = t
+        } else {
+            rng = t + m
+        }
+        var j_val = rng
+        if j_val < 0 {
+            j_val = 0 - j_val
+        }
+        j_val = j_val - (j_val / ((i as i64) + 1)) * ((i as i64) + 1)
+        let j_i32 = j_val as i32
+        let tmp = p.data[i]
+        p.data[i] = p.data[j_i32]
+        p.data[j_i32] = tmp
+        i = i - 1
+    }
+    rng
+}
+
+// ============================================================================
+// LINEAR ALGEBRA (fixed-size arrays)
+// ============================================================================
+
+fn slop_dot(a: &[f64; 64], b: &[f64; 64], n: i32) -> f64 with Mut, Panic {
+    var sum: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    }
+    sum
+}
+
+fn slop_norm(a: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        sum = sum + a[i] * a[i]
+        i = i + 1
+    }
+    t_sqrt(sum)
+}
+
+fn slop_scale(a: &[f64; 64], alpha: f64, out: &![f64; 64], n: i32) with Mut, Panic {
+    var i: i32 = 0
+    while i < n {
+        out[i] = alpha * a[i]
+        i = i + 1
+    }
+}
+
+fn slop_axpy(alpha: f64, a: &[f64; 64], b: &[f64; 64], out: &![f64; 64], n: i32) with Mut, Panic {
+    var i: i32 = 0
+    while i < n {
+        out[i] = alpha * a[i] + b[i]
+        i = i + 1
+    }
+}
+
+fn slop_matvec(a: &[f64; 4096], x: &[f64; 64], out: &![f64; 64],
+               m_dim: i32, n: i32) with Mut, Panic {
+    var i: i32 = 0
+    while i < m_dim {
+        var sum: f64 = 0.0
+        var j: i32 = 0
+        while j < n {
+            sum = sum + a[i * n + j] * x[j]
+            j = j + 1
+        }
+        out[i] = sum
+        i = i + 1
+    }
+}
+
+fn slop_matmul(a: &[f64; 4096], b: &[f64; 4096], c: &![f64; 4096],
+               m_dim: i32, k_dim: i32, n: i32) with Mut, Panic {
+    var i: i32 = 0
+    while i < m_dim {
+        var j: i32 = 0
+        while j < n {
+            var sum: f64 = 0.0
+            var p: i32 = 0
+            while p < k_dim {
+                sum = sum + a[i * k_dim + p] * b[p * n + j]
+                p = p + 1
+            }
+            c[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn slop_transpose(a: &[f64; 4096], b: &![f64; 4096], m_dim: i32, n: i32) with Mut, Panic {
+    var i: i32 = 0
+    while i < m_dim {
+        var j: i32 = 0
+        while j < n {
+            b[j * m_dim + i] = a[i * n + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// TEST 1: next_permutation on [0,1,2] produces all 6 permutations
+// ============================================================================
+
+fn test_perm3() -> bool with Mut, Panic {
+    count_permutations(3) == 6
+}
+
+// ============================================================================
+// TEST 2: next_permutation on [0,1,2,3] produces 24 permutations
+// ============================================================================
+
+fn test_perm4() -> bool with Mut, Panic {
+    count_permutations(4) == 24
+}
+
+// ============================================================================
+// TEST 3: shuffle produces a different ordering than identity
+// ============================================================================
+
+fn test_shuffle() -> bool with Mut, Div, Panic {
+    var p = Perm128 { data: [0; 128] }
+    var i: i32 = 0
+    while i < 8 {
+        p.data[i] = i as i64
+        i = i + 1
+    }
+    shuffle_perm(&!p, 8, 12345)
+    // Check that at least one element moved
+    var any_moved = false
+    i = 0
+    while i < 8 {
+        if p.data[i] != (i as i64) {
+            any_moved = true
+        }
+        i = i + 1
+    }
+    any_moved
+}
+
+// ============================================================================
+// TEST 4: dot product [1,2,3] . [4,5,6] = 32
+// ============================================================================
+
+fn test_dot() -> bool with Mut, Panic {
+    var a: [f64; 64] = [0.0; 64]
+    var b: [f64; 64] = [0.0; 64]
+    a[0] = 1.0
+    a[1] = 2.0
+    a[2] = 3.0
+    b[0] = 4.0
+    b[1] = 5.0
+    b[2] = 6.0
+    let d = slop_dot(&a, &b, 3)
+    approx_eq(d, 32.0, 1.0e-10)
+}
+
+// ============================================================================
+// TEST 5: norm of [3,4] = 5.0
+// ============================================================================
+
+fn test_norm() -> bool with Mut, Div, Panic {
+    var a: [f64; 64] = [0.0; 64]
+    a[0] = 3.0
+    a[1] = 4.0
+    let n = slop_norm(&a, 2)
+    approx_eq(n, 5.0, 1.0e-8)
+}
+
+// ============================================================================
+// TEST 6: matmul identity * [[1,2],[3,4]] = [[1,2],[3,4]]
+// ============================================================================
+
+fn test_matmul_identity() -> bool with Mut, Panic {
+    // I = 2x2 identity
+    var eye: [f64; 4096] = [0.0; 4096]
+    eye[0] = 1.0   // (0,0)
+    eye[3] = 1.0   // (1,1)
+
+    // B = [[1,2],[3,4]]
+    var b_mat: [f64; 4096] = [0.0; 4096]
+    b_mat[0] = 1.0
+    b_mat[1] = 2.0
+    b_mat[2] = 3.0
+    b_mat[3] = 4.0
+
+    var c_mat: [f64; 4096] = [0.0; 4096]
+    slop_matmul(&eye, &b_mat, &!c_mat, 2, 2, 2)
+
+    let ok0 = approx_eq(c_mat[0], 1.0, 1.0e-10)
+    let ok1 = approx_eq(c_mat[1], 2.0, 1.0e-10)
+    let ok2 = approx_eq(c_mat[2], 3.0, 1.0e-10)
+    let ok3 = approx_eq(c_mat[3], 4.0, 1.0e-10)
+    ok0 && ok1 && ok2 && ok3
+}
+
+// ============================================================================
+// TEST 7: matvec identity * [5,7] = [5,7]
+// ============================================================================
+
+fn test_matvec_identity() -> bool with Mut, Panic {
+    var eye: [f64; 4096] = [0.0; 4096]
+    eye[0] = 1.0   // (0,0)
+    eye[3] = 1.0   // (1,1)
+
+    var x: [f64; 64] = [0.0; 64]
+    x[0] = 5.0
+    x[1] = 7.0
+
+    var out: [f64; 64] = [0.0; 64]
+    slop_matvec(&eye, &x, &!out, 2, 2)
+
+    let ok0 = approx_eq(out[0], 5.0, 1.0e-10)
+    let ok1 = approx_eq(out[1], 7.0, 1.0e-10)
+    ok0 && ok1
+}
+
+// ============================================================================
+// TEST 8: transpose of 2x3 [[1,2,3],[4,5,6]] gives 3x2 [[1,4],[2,5],[3,6]]
+// ============================================================================
+
+fn test_transpose() -> bool with Mut, Panic {
+    // A = 2x3: [[1,2,3],[4,5,6]]
+    var a_mat: [f64; 4096] = [0.0; 4096]
+    a_mat[0] = 1.0
+    a_mat[1] = 2.0
+    a_mat[2] = 3.0
+    a_mat[3] = 4.0
+    a_mat[4] = 5.0
+    a_mat[5] = 6.0
+
+    var b_mat: [f64; 4096] = [0.0; 4096]
+    slop_transpose(&a_mat, &!b_mat, 2, 3)
+
+    // Expected B = 3x2: [[1,4],[2,5],[3,6]]
+    // Row 0: b[0]=1, b[1]=4
+    // Row 1: b[2]=2, b[3]=5
+    // Row 2: b[4]=3, b[5]=6
+    let ok0 = approx_eq(b_mat[0], 1.0, 1.0e-10)
+    let ok1 = approx_eq(b_mat[1], 4.0, 1.0e-10)
+    let ok2 = approx_eq(b_mat[2], 2.0, 1.0e-10)
+    let ok3 = approx_eq(b_mat[3], 5.0, 1.0e-10)
+    let ok4 = approx_eq(b_mat[4], 3.0, 1.0e-10)
+    let ok5 = approx_eq(b_mat[5], 6.0, 1.0e-10)
+    ok0 && ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// ============================================================================
+// MAIN — run all tests
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Slice LinAlg + Permutations Test Suite ===")
+    println("")
+
+    var pass = 0
+    var fail = 0
+
+    // T1
+    print("T1 next_permutation n=3 gives 6 ... ")
+    if test_perm3() {
+        println("T1 PASS")
+        pass = pass + 1
+    } else {
+        println("T1 FAIL")
+        fail = fail + 1
+    }
+
+    // T2
+    print("T2 next_permutation n=4 gives 24 ... ")
+    if test_perm4() {
+        println("T2 PASS")
+        pass = pass + 1
+    } else {
+        println("T2 FAIL")
+        fail = fail + 1
+    }
+
+    // T3
+    print("T3 shuffle produces reordering ... ")
+    if test_shuffle() {
+        println("T3 PASS")
+        pass = pass + 1
+    } else {
+        println("T3 FAIL")
+        fail = fail + 1
+    }
+
+    // T4
+    print("T4 dot([1,2,3],[4,5,6])=32 ... ")
+    if test_dot() {
+        println("T4 PASS")
+        pass = pass + 1
+    } else {
+        println("T4 FAIL")
+        fail = fail + 1
+    }
+
+    // T5
+    print("T5 norm([3,4])=5 ... ")
+    if test_norm() {
+        println("T5 PASS")
+        pass = pass + 1
+    } else {
+        println("T5 FAIL")
+        fail = fail + 1
+    }
+
+    // T6
+    print("T6 matmul I*[[1,2],[3,4]] ... ")
+    if test_matmul_identity() {
+        println("T6 PASS")
+        pass = pass + 1
+    } else {
+        println("T6 FAIL")
+        fail = fail + 1
+    }
+
+    // T7
+    print("T7 matvec I*[5,7]=[5,7] ... ")
+    if test_matvec_identity() {
+        println("T7 PASS")
+        pass = pass + 1
+    } else {
+        println("T7 FAIL")
+        fail = fail + 1
+    }
+
+    // T8
+    print("T8 transpose 2x3 ... ")
+    if test_transpose() {
+        println("T8 PASS")
+        pass = pass + 1
+    } else {
+        println("T8 FAIL")
+        fail = fail + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(pass)
+    print("Failed: ")
+    println(fail)
+    println("")
+    if fail == 0 {
+        println("ALL PASS")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+}
