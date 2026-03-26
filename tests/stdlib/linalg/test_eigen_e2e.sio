@@ -1,0 +1,159 @@
+//@ run-pass
+// E2E test for stdlib/linalg/eigen
+// Covers:
+//   1. 8x8 cycle-graph Laplacian eigenvalues
+//   2. 32x32 symmetric reconstruction and orthogonality
+
+use linalg::eigen::{
+    householder_tridiag, qr_tridiag, eigen_symmetric
+}
+
+var WORK_MAT: [f64; 65536] = [0.0; 65536]
+var EIGENVECTORS: [f64; 65536] = [0.0; 65536]
+var EIGENVALUES: [f64; 256] = [0.0; 256]
+var SUBDIAG: [f64; 256] = [0.0; 256]
+var RANDOM_ORIGINAL: [f64; 1024] = [0.0; 1024]
+
+fn test_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn test_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 24 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    // Test 1: 8x8 cycle graph Laplacian
+    var i = 0
+    while i < 8 {
+        var j = 0
+        while j < 8 {
+            WORK_MAT[i * 8 + j] = 0.0
+            j = j + 1
+        }
+        EIGENVALUES[i] = 0.0
+        SUBDIAG[i] = 0.0
+        i = i + 1
+    }
+
+    i = 0
+    while i < 8 {
+        WORK_MAT[i * 8 + i] = 2.0
+        let prev = if i == 0 { 7 } else { i - 1 }
+        let next = if i == 7 { 0 } else { i + 1 }
+        WORK_MAT[i * 8 + prev] = 0.0 - 1.0
+        WORK_MAT[i * 8 + next] = 0.0 - 1.0
+        i = i + 1
+    }
+
+    householder_tridiag(&!WORK_MAT, 8, &!EIGENVALUES, &!SUBDIAG)
+    if !qr_tridiag(&!EIGENVALUES, &!SUBDIAG, 8, 1024) { return 1 }
+    if test_abs(SUBDIAG[7]) > 1.0e-12 { return 2 }
+
+    let expected: [f64; 8] = [
+        0.0,
+        0.5857864376269049,
+        0.5857864376269049,
+        2.0,
+        2.0,
+        3.414213562373095,
+        3.414213562373095,
+        4.0
+    ]
+
+    i = 0
+    while i < 8 {
+        if test_abs(EIGENVALUES[i] - expected[i]) > 1.0e-6 { return 3 }
+        i = i + 1
+    }
+
+    // Test 2: 32x32 deterministic symmetric matrix
+    i = 0
+    while i < 32 {
+        var j = 0
+        while j < 32 {
+            RANDOM_ORIGINAL[i * 32 + j] = 0.0
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < 32 {
+        var j = i
+        while j < 32 {
+            let numer = ((i * 17 + j * 23 + 7) % 29) as f64
+            let value = numer / 29.0 - 0.5
+            RANDOM_ORIGINAL[i * 32 + j] = value
+            RANDOM_ORIGINAL[j * 32 + i] = value
+            j = j + 1
+        }
+        RANDOM_ORIGINAL[i * 32 + i] = RANDOM_ORIGINAL[i * 32 + i] + 32.0
+        i = i + 1
+    }
+
+    i = 0
+    while i < 32 {
+        var j = 0
+        while j < 32 {
+            WORK_MAT[i * 32 + j] = RANDOM_ORIGINAL[i * 32 + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    if !eigen_symmetric(&!WORK_MAT, 32, &!EIGENVALUES, &!EIGENVECTORS) { return 4 }
+
+    var ortho_sq = 0.0
+    i = 0
+    while i < 32 {
+        var j = 0
+        while j < 32 {
+            var dot = 0.0
+            var k = 0
+            while k < 32 {
+                dot = dot + EIGENVECTORS[k * 32 + i] * EIGENVECTORS[k * 32 + j]
+                k = k + 1
+            }
+            if i == j { dot = dot - 1.0 }
+            ortho_sq = ortho_sq + dot * dot
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var diff_sq = 0.0
+    var base_sq = 0.0
+    i = 0
+    while i < 32 {
+        var j = 0
+        while j < 32 {
+            var recon = 0.0
+            var k = 0
+            while k < 32 {
+                recon = recon + EIGENVECTORS[i * 32 + k] * EIGENVALUES[k] * EIGENVECTORS[j * 32 + k]
+                k = k + 1
+            }
+            let diff = recon - RANDOM_ORIGINAL[i * 32 + j]
+            diff_sq = diff_sq + diff * diff
+            base_sq = base_sq + RANDOM_ORIGINAL[i * 32 + j] * RANDOM_ORIGINAL[i * 32 + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    let ortho = test_sqrt(ortho_sq)
+    let recon = if base_sq <= 1.0e-30 { test_sqrt(diff_sq) } else { test_sqrt(diff_sq / base_sq) }
+    if ortho > 1.0e-6 { return 5 }
+    if recon > 1.0e-6 { return 6 }
+
+    0
+}

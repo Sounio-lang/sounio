@@ -1,0 +1,612 @@
+// eigen.sio - Dense symmetric eigendecomposition for matrices up to 256x256
+//
+// Algorithm:
+//   1. Householder tridiagonalization of a real symmetric matrix
+//   2. Implicit shifted iteration on the symmetric tridiagonal
+//   3. Accumulation of orthogonal transforms for eigenvectors
+
+fn eg_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn eg_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 24 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn eg_hypot(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    let aa = eg_abs(a)
+    let bb = eg_abs(b)
+    if aa > bb {
+        let r = bb / aa
+        return aa * eg_sqrt(1.0 + r * r)
+    }
+    if bb > 0.0 {
+        let r = aa / bb
+        return bb * eg_sqrt(1.0 + r * r)
+    }
+    0.0
+}
+
+fn eg_identity(mat: &![f64; 65536], n: i32) with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            if i == j { mat[i * n + j] = 1.0 }
+            else { mat[i * n + j] = 0.0 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn eg_copy_matrix(dst: &![f64; 65536], src: &![f64; 65536], n: i32) with Mut, Panic {
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            dst[i * n + j] = src[i * n + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn eg_sort_values(values: &![f64; 256], n: i32) with Mut, Div, Panic {
+    var i = 1
+    while i < n {
+        let key = values[i]
+        var j = i - 1
+        while j >= 0 && values[j] > key {
+            values[j + 1] = values[j]
+            j = j - 1
+        }
+        values[j + 1] = key
+        i = i + 1
+    }
+}
+
+fn eg_sort_pairs(values: &![f64; 256], vecs: &![f64; 65536], n: i32) with Mut, Div, Panic {
+    var i = 1
+    while i < n {
+        let key = values[i]
+        var col: [f64; 256] = [0.0; 256]
+        var r = 0
+        while r < n {
+            col[r] = vecs[r * n + i]
+            r = r + 1
+        }
+
+        var j = i - 1
+        while j >= 0 && values[j] > key {
+            values[j + 1] = values[j]
+            r = 0
+            while r < n {
+                vecs[r * n + (j + 1)] = vecs[r * n + j]
+                r = r + 1
+            }
+            j = j - 1
+        }
+
+        values[j + 1] = key
+        r = 0
+        while r < n {
+            vecs[r * n + (j + 1)] = col[r]
+            r = r + 1
+        }
+        i = i + 1
+    }
+}
+
+var EIG_WORK_MAT: [f64; 65536] = [0.0; 65536]
+var EIG_WORK_VECS: [f64; 65536] = [0.0; 65536]
+var EIG_WORK_DIAG: [f64; 256] = [0.0; 256]
+var EIG_WORK_SUBDIAG: [f64; 256] = [0.0; 256]
+var EIG_WORK_N: i32 = 0
+var EIG_WORK_CONVERGED: i32 = 0
+
+fn eg_shift_subdiag_left(subdiag: &![f64; 256], n: i32) with Mut, Panic {
+    if n <= 0 { return }
+    var i = 1
+    while i < n {
+        subdiag[i - 1] = subdiag[i]
+        i = i + 1
+    }
+    subdiag[n - 1] = 0.0
+}
+
+fn eg_tred2_inplace(mat: &![f64; 65536], n: i32, diag: &![f64; 256], subdiag: &![f64; 256]) with Mut, Div, Panic {
+    if n <= 0 { return }
+
+    var j = 0
+    while j < n {
+        diag[j] = mat[(n - 1) * n + j]
+        j = j + 1
+    }
+
+    var i = n - 1
+    while i >= 1 {
+        var scale = 0.0
+        var h = 0.0
+        var k = 0
+        while k < i {
+            scale = scale + eg_abs(diag[k])
+            k = k + 1
+        }
+
+        if scale <= 1.0e-30 {
+            subdiag[i] = diag[i - 1]
+            j = 0
+            while j < i {
+                diag[j] = mat[(i - 1) * n + j]
+                mat[i * n + j] = 0.0
+                mat[j * n + i] = 0.0
+                j = j + 1
+            }
+        } else {
+            k = 0
+            while k < i {
+                diag[k] = diag[k] / scale
+                h = h + diag[k] * diag[k]
+                k = k + 1
+            }
+
+            let f0 = diag[i - 1]
+            var g = eg_sqrt(h)
+            if f0 > 0.0 { g = 0.0 - g }
+            subdiag[i] = scale * g
+            h = h - f0 * g
+            diag[i - 1] = f0 - g
+
+            j = 0
+            while j < i {
+                subdiag[j] = 0.0
+                j = j + 1
+            }
+
+            j = 0
+            while j < i {
+                let f = diag[j]
+                mat[j * n + i] = f
+                g = subdiag[j] + mat[j * n + j] * f
+
+                k = j + 1
+                while k <= i - 1 {
+                    g = g + mat[k * n + j] * diag[k]
+                    subdiag[k] = subdiag[k] + mat[k * n + j] * f
+                    k = k + 1
+                }
+                subdiag[j] = g
+                j = j + 1
+            }
+
+            var f = 0.0
+            j = 0
+            while j < i {
+                subdiag[j] = subdiag[j] / h
+                f = f + subdiag[j] * diag[j]
+                j = j + 1
+            }
+            let hh = f / (h + h)
+
+            j = 0
+            while j < i {
+                subdiag[j] = subdiag[j] - hh * diag[j]
+                j = j + 1
+            }
+
+            j = 0
+            while j < i {
+                let f = diag[j]
+                g = subdiag[j]
+                k = j
+                while k <= i - 1 {
+                    mat[k * n + j] = mat[k * n + j] - (f * subdiag[k] + g * diag[k])
+                    k = k + 1
+                }
+                diag[j] = mat[(i - 1) * n + j]
+                mat[i * n + j] = 0.0
+                j = j + 1
+            }
+        }
+
+        diag[i] = h
+        if i == 1 { break }
+        i = i - 1
+    }
+
+    i = 0
+    while i < n - 1 {
+        mat[(n - 1) * n + i] = mat[i * n + i]
+        mat[i * n + i] = 1.0
+
+        let h2 = diag[i + 1]
+        if eg_abs(h2) > 1.0e-30 {
+            var k2 = 0
+            while k2 <= i {
+                diag[k2] = mat[k2 * n + (i + 1)] / h2
+                k2 = k2 + 1
+            }
+
+            j = 0
+            while j <= i {
+                var g2 = 0.0
+                k2 = 0
+                while k2 <= i {
+                    g2 = g2 + mat[k2 * n + (i + 1)] * mat[k2 * n + j]
+                    k2 = k2 + 1
+                }
+
+                k2 = 0
+                while k2 <= i {
+                    mat[k2 * n + j] = mat[k2 * n + j] - g2 * diag[k2]
+                    k2 = k2 + 1
+                }
+                j = j + 1
+            }
+        }
+
+        var k3 = 0
+        while k3 <= i {
+            mat[k3 * n + (i + 1)] = 0.0
+            k3 = k3 + 1
+        }
+
+        i = i + 1
+    }
+
+    j = 0
+    while j < n {
+        diag[j] = mat[(n - 1) * n + j]
+        mat[(n - 1) * n + j] = 0.0
+        j = j + 1
+    }
+    mat[(n - 1) * n + (n - 1)] = 1.0
+    subdiag[0] = 0.0
+}
+
+fn eg_tridiag_iter_no_vecs(diag: &![f64; 256], subdiag: &![f64; 256], n: i32, max_iter: i32) -> bool with Mut, Div, Panic {
+    let tol = 1.0e-12
+    var total_iter = 0
+    var l = 0
+
+    while l < n {
+        var keep_iterating = true
+        while keep_iterating {
+            var m = l
+            while m < n - 1 {
+                let dd = eg_abs(diag[m]) + eg_abs(diag[m + 1])
+                if eg_abs(subdiag[m]) <= tol * (dd + 1.0) { break }
+                m = m + 1
+            }
+
+            if m == l {
+                keep_iterating = false
+            } else {
+                if total_iter >= max_iter { return false }
+                total_iter = total_iter + 1
+
+                var g = (diag[l + 1] - diag[l]) / (2.0 * subdiag[l])
+                let gr = eg_hypot(g, 1.0)
+                if g < 0.0 {
+                    g = diag[m] - diag[l] + subdiag[l] / (g - gr)
+                } else {
+                    g = diag[m] - diag[l] + subdiag[l] / (g + gr)
+                }
+
+                var s = 1.0
+                var c = 1.0
+                var p = 0.0
+                var restart = false
+                var i = m - 1
+                while i >= l {
+                    let f = s * subdiag[i]
+                    let b = c * subdiag[i]
+                    let r = eg_hypot(f, g)
+                    subdiag[i + 1] = r
+
+                    if r <= 1.0e-30 {
+                        diag[i + 1] = diag[i + 1] - p
+                        subdiag[m] = 0.0
+                        restart = true
+                        break
+                    }
+
+                    s = f / r
+                    c = g / r
+                    g = diag[i + 1] - p
+                    let t = (diag[i] - g) * s + 2.0 * c * b
+                    p = s * t
+                    diag[i + 1] = g + p
+                    g = c * t - b
+
+                    if i == l { break }
+                    i = i - 1
+                }
+
+                if restart { continue }
+
+                diag[l] = diag[l] - p
+                subdiag[l] = g
+                subdiag[m] = 0.0
+            }
+        }
+
+        l = l + 1
+    }
+
+    var i = 0
+    while i < n {
+        subdiag[i] = 0.0
+        i = i + 1
+    }
+    eg_sort_values(diag, n)
+    true
+}
+
+fn eg_tridiag_iter_with_vecs(
+    diag: &![f64; 256],
+    subdiag: &![f64; 256],
+    n: i32,
+    max_iter: i32,
+    vecs: &![f64; 65536]
+) -> bool with Mut, Div, Panic {
+    let tol = 1.0e-12
+    var total_iter = 0
+    var l = 0
+
+    while l < n {
+        var keep_iterating = true
+        while keep_iterating {
+            var m = l
+            while m < n - 1 {
+                let dd = eg_abs(diag[m]) + eg_abs(diag[m + 1])
+                if eg_abs(subdiag[m]) <= tol * (dd + 1.0) { break }
+                m = m + 1
+            }
+
+            if m == l {
+                keep_iterating = false
+            } else {
+                if total_iter >= max_iter { return false }
+                total_iter = total_iter + 1
+
+                var g = (diag[l + 1] - diag[l]) / (2.0 * subdiag[l])
+                let gr = eg_hypot(g, 1.0)
+                if g < 0.0 {
+                    g = diag[m] - diag[l] + subdiag[l] / (g - gr)
+                } else {
+                    g = diag[m] - diag[l] + subdiag[l] / (g + gr)
+                }
+
+                var s = 1.0
+                var c = 1.0
+                var p = 0.0
+                var restart = false
+                var i = m - 1
+                while i >= l {
+                    let f = s * subdiag[i]
+                    let b = c * subdiag[i]
+                    let r = eg_hypot(f, g)
+                    subdiag[i + 1] = r
+
+                    if r <= 1.0e-30 {
+                        diag[i + 1] = diag[i + 1] - p
+                        subdiag[m] = 0.0
+                        restart = true
+                        break
+                    }
+
+                    s = f / r
+                    c = g / r
+                    g = diag[i + 1] - p
+                    let t = (diag[i] - g) * s + 2.0 * c * b
+                    p = s * t
+                    diag[i + 1] = g + p
+                    g = c * t - b
+
+                    var k = 0
+                    while k < n {
+                        let vk1 = vecs[k * n + (i + 1)]
+                        let vki = vecs[k * n + i]
+                        vecs[k * n + (i + 1)] = s * vki + c * vk1
+                        vecs[k * n + i] = c * vki - s * vk1
+                        k = k + 1
+                    }
+
+                    if i == l { break }
+                    i = i - 1
+                }
+
+                if restart { continue }
+
+                diag[l] = diag[l] - p
+                subdiag[l] = g
+                subdiag[m] = 0.0
+            }
+        }
+
+        l = l + 1
+    }
+
+    var i = 0
+    while i < n {
+        subdiag[i] = 0.0
+        i = i + 1
+    }
+    eg_sort_pairs(diag, vecs, n)
+    true
+}
+
+fn householder_tridiag_raw(mat: &![f64; 65536], n: i32, diag: &![f64; 256], subdiag: &![f64; 256]) with Mut, Div, Panic {
+    if n <= 0 { return }
+    if n == 1 {
+        diag[0] = mat[0]
+        subdiag[0] = 0.0
+        return
+    }
+    eg_tred2_inplace(mat, n, diag, subdiag)
+    eg_shift_subdiag_left(subdiag, n)
+}
+
+fn qr_tridiag_raw(
+    diag: &![f64; 256],
+    subdiag: &![f64; 256],
+    n: i32,
+    max_iter: i32,
+    vecs: &![f64; 65536]
+) -> bool with Mut, Div, Panic {
+    eg_identity(vecs, n)
+    eg_tridiag_iter_with_vecs(diag, subdiag, n, max_iter, vecs)
+}
+
+fn eigen_symmetric_raw(
+    mat: &![f64; 65536],
+    n: i32,
+    diag: &![f64; 256],
+    subdiag: &![f64; 256],
+    vecs: &![f64; 65536]
+) -> bool with Mut, Div, Panic {
+    if n <= 0 { return false }
+    if n == 1 {
+        diag[0] = mat[0]
+        subdiag[0] = 0.0
+        eg_identity(vecs, 1)
+        return true
+    }
+
+    eg_copy_matrix(vecs, mat, n)
+    eg_tred2_inplace(vecs, n, diag, subdiag)
+    eg_shift_subdiag_left(subdiag, n)
+
+    let max_steps = 128 * n
+    eg_tridiag_iter_with_vecs(diag, subdiag, n, max_steps, vecs)
+}
+
+pub fn eigen_workspace_reset(n: i32) with Mut, Div, Panic {
+    var size = n
+    if size < 0 { size = 0 }
+    if size > 256 { size = 256 }
+    EIG_WORK_N = size
+    EIG_WORK_CONVERGED = 0
+
+    var i = 0
+    while i < size {
+        EIG_WORK_DIAG[i] = 0.0
+        EIG_WORK_SUBDIAG[i] = 0.0
+        var j = 0
+        while j < size {
+            EIG_WORK_MAT[i * size + j] = 0.0
+            EIG_WORK_VECS[i * size + j] = 0.0
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+pub fn eigen_workspace_n() -> i32 {
+    EIG_WORK_N
+}
+
+pub fn eigen_workspace_set(row: i32, col: i32, value: f64) with Mut, Panic {
+    if row < 0 { return }
+    if col < 0 { return }
+    if row >= EIG_WORK_N { return }
+    if col >= EIG_WORK_N { return }
+    EIG_WORK_MAT[row * EIG_WORK_N + col] = value
+}
+
+pub fn eigen_workspace_get(row: i32, col: i32) -> f64 with Panic {
+    if row < 0 { return 0.0 }
+    if col < 0 { return 0.0 }
+    if row >= EIG_WORK_N { return 0.0 }
+    if col >= EIG_WORK_N { return 0.0 }
+    EIG_WORK_MAT[row * EIG_WORK_N + col]
+}
+
+pub fn householder_tridiag(
+    mat: &![f64; 65536],
+    n: i32,
+    diag: &![f64; 256],
+    subdiag: &![f64; 256]
+) with Mut, Div, Panic {
+    householder_tridiag_raw(mat, n, diag, subdiag)
+}
+
+pub fn qr_tridiag(
+    diag: &![f64; 256],
+    subdiag: &![f64; 256],
+    n: i32,
+    max_iter: i32
+) -> bool with Mut, Div, Panic {
+    qr_tridiag_raw(diag, subdiag, n, max_iter, &!EIG_WORK_VECS)
+}
+
+pub fn eigen_symmetric(
+    mat: &![f64; 65536],
+    n: i32,
+    eigenvalues: &![f64; 256],
+    eigenvectors: &![f64; 65536]
+) -> bool with Mut, Div, Panic {
+    var subdiag: [f64; 256] = [0.0; 256]
+    let ok = eigen_symmetric_raw(mat, n, eigenvalues, &!subdiag, eigenvectors)
+    ok
+}
+
+pub fn eigen_workspace_householder_tridiag(n: i32) with Mut, Div, Panic {
+    EIG_WORK_N = n
+    householder_tridiag(&!EIG_WORK_MAT, n, &!EIG_WORK_DIAG, &!EIG_WORK_SUBDIAG)
+    EIG_WORK_CONVERGED = 1
+}
+
+pub fn eigen_workspace_qr_tridiag(n: i32, max_iter: i32) -> bool with Mut, Div, Panic {
+    EIG_WORK_N = n
+    let ok = qr_tridiag(&!EIG_WORK_DIAG, &!EIG_WORK_SUBDIAG, n, max_iter)
+    if ok { EIG_WORK_CONVERGED = 1 } else { EIG_WORK_CONVERGED = 0 }
+    ok
+}
+
+pub fn eigen_workspace_symmetric(n: i32) -> bool with Mut, Div, Panic {
+    EIG_WORK_N = n
+    let ok = eigen_symmetric(&!EIG_WORK_MAT, n, &!EIG_WORK_DIAG, &!EIG_WORK_VECS)
+    if ok { EIG_WORK_CONVERGED = 1 } else { EIG_WORK_CONVERGED = 0 }
+    ok
+}
+
+pub fn eigen_converged() -> bool {
+    EIG_WORK_CONVERGED == 1
+}
+
+pub fn tridiag_diag_get(idx: i32) -> f64 with Panic {
+    if idx < 0 { return 0.0 }
+    if idx >= EIG_WORK_N { return 0.0 }
+    EIG_WORK_DIAG[idx]
+}
+
+pub fn tridiag_subdiag_get(idx: i32) -> f64 with Panic {
+    if idx < 0 { return 0.0 }
+    if idx >= EIG_WORK_N { return 0.0 }
+    EIG_WORK_SUBDIAG[idx]
+}
+
+pub fn eigenvalue_get(idx: i32) -> f64 with Panic {
+    if idx < 0 { return 0.0 }
+    if idx >= EIG_WORK_N { return 0.0 }
+    EIG_WORK_DIAG[idx]
+}
+
+pub fn eigenvector_get(row: i32, col: i32) -> f64 with Panic {
+    if row < 0 { return 0.0 }
+    if col < 0 { return 0.0 }
+    if row >= EIG_WORK_N { return 0.0 }
+    if col >= EIG_WORK_N { return 0.0 }
+    EIG_WORK_VECS[row * EIG_WORK_N + col]
+}

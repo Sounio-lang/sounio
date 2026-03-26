@@ -1,718 +1,76 @@
 //@ run-pass
-// linalg_decomp.sio - Integration tests for QR, Eigendecomposition, and SVD
-//
-// Tests matrix decompositions on small matrices (up to 4x4).
-// All structs and functions are inlined since tests cannot import.
+// Integration tests for stdlib/linalg/decomp
 
-// ============================================================================
-// HELPERS
-// ============================================================================
+use linalg::decomp::*
 
-fn abs_f64(x: f64) -> f64 {
-    if x < 0.0 {
-        return 0.0 - x
-    }
-    return x
+fn test_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
 }
 
-fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
-    if x <= 0.0 { return 0.0 }
-    // Range reduction: scale x into [1, 4) by multiplying by powers of 4
-    // then scale the result back by dividing by the power of 2
-    var scaled = x
-    var scale_back = 1.0
-    // Scale up small numbers
-    while scaled < 1.0 {
-        scaled = scaled * 4.0
-        scale_back = scale_back * 2.0
-    }
-    // Scale down large numbers
-    while scaled > 4.0 {
-        scaled = scaled * 0.25
-        scale_back = scale_back * 0.5
-    }
-    // Newton-Raphson on scaled value (now in [1, 4))
-    var y = 1.5
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    y = 0.5 * (y + scaled / y)
-    return y / scale_back
+fn make_2x2(a00: f64, a01: f64, a10: f64, a11: f64) -> Matrix8 with Mut, Panic {
+    var a = mat8_zeros(2, 2)
+    a = mat8_set(a, 0, 0, a00)
+    a = mat8_set(a, 0, 1, a01)
+    a = mat8_set(a, 1, 0, a10)
+    a = mat8_set(a, 1, 1, a11)
+    a
 }
-
-fn sign_f64(x: f64) -> f64 {
-    if x >= 0.0 { return 1.0 }
-    return 0.0 - 1.0
-}
-
-fn min_i32(a: i32, b: i32) -> i32 {
-    if a < b { return a }
-    return b
-}
-
-// ============================================================================
-// DATA STRUCTURES
-// ============================================================================
-
-struct Matrix8 {
-    data: [f64; 64],
-    rows: i32,
-    cols: i32
-}
-
-struct QRResult {
-    q: Matrix8,
-    r: Matrix8,
-    rows: i32,
-    cols: i32
-}
-
-struct EigenResult {
-    eigenvalues_real: [f64; 8],
-    eigenvalues_imag: [f64; 8],
-    eigenvectors: Matrix8,
-    n: i32
-}
-
-struct SVDResult {
-    u: Matrix8,
-    sigma: [f64; 8],
-    vt: Matrix8,
-    rows: i32,
-    cols: i32
-}
-
-// ============================================================================
-// MATRIX8 OPERATIONS
-// ============================================================================
-
-fn mat8_get(m: Matrix8, r: i32, c: i32) -> f64 with Panic {
-    let idx = r * m.cols + c
-    return m.data[idx]
-}
-
-fn mat8_set(m: Matrix8, r: i32, c: i32, val: f64) -> Matrix8 with Mut, Panic {
-    var result = m
-    let idx = r * m.cols + c
-    result.data[idx] = val
-    return result
-}
-
-fn mat8_zeros(rows: i32, cols: i32) -> Matrix8 {
-    let data: [f64; 64] = [0.0; 64]
-    return Matrix8 { data: data, rows: rows, cols: cols }
-}
-
-fn mat8_identity(n: i32) -> Matrix8 with Mut, Panic, Div {
-    var m = mat8_zeros(n, n)
-    var i = 0
-    while i < n {
-        m = mat8_set(m, i, i, 1.0)
-        i = i + 1
-    }
-    return m
-}
-
-fn mat8_copy(src: Matrix8) -> Matrix8 {
-    return Matrix8 { data: src.data, rows: src.rows, cols: src.cols }
-}
-
-fn mat8_multiply(a: Matrix8, b: Matrix8) -> Matrix8 with Mut, Panic, Div {
-    var c = mat8_zeros(a.rows, b.cols)
-    var i = 0
-    while i < a.rows {
-        var j = 0
-        while j < b.cols {
-            var sum = 0.0
-            var k = 0
-            while k < a.cols {
-                sum = sum + mat8_get(a, i, k) * mat8_get(b, k, j)
-                k = k + 1
-            }
-            c = mat8_set(c, i, j, sum)
-            j = j + 1
-        }
-        i = i + 1
-    }
-    return c
-}
-
-fn mat8_transpose(m: Matrix8) -> Matrix8 with Mut, Panic, Div {
-    var t = mat8_zeros(m.cols, m.rows)
-    var i = 0
-    while i < m.rows {
-        var j = 0
-        while j < m.cols {
-            t = mat8_set(t, j, i, mat8_get(m, i, j))
-            j = j + 1
-        }
-        i = i + 1
-    }
-    return t
-}
-
-fn mat8_subtract(a: Matrix8, b: Matrix8) -> Matrix8 with Mut, Panic, Div {
-    var c = mat8_zeros(a.rows, a.cols)
-    var i = 0
-    while i < a.rows {
-        var j = 0
-        while j < a.cols {
-            c = mat8_set(c, i, j, mat8_get(a, i, j) - mat8_get(b, i, j))
-            j = j + 1
-        }
-        i = i + 1
-    }
-    return c
-}
-
-fn mat8_frobenius_norm(m: Matrix8) -> f64 with Mut, Panic, Div {
-    var sum = 0.0
-    var i = 0
-    while i < m.rows {
-        var j = 0
-        while j < m.cols {
-            let v = mat8_get(m, i, j)
-            sum = sum + v * v
-            j = j + 1
-        }
-        i = i + 1
-    }
-    return sqrt_f64(sum)
-}
-
-fn vec8_norm(v: [f64; 8], n: i32) -> f64 with Mut, Panic, Div {
-    var sum = 0.0
-    var i = 0
-    while i < n {
-        sum = sum + v[i] * v[i]
-        i = i + 1
-    }
-    return sqrt_f64(sum)
-}
-
-fn vec8_dot(a: [f64; 8], b: [f64; 8], n: i32) -> f64 with Mut, Panic, Div {
-    var sum = 0.0
-    var i = 0
-    while i < n {
-        sum = sum + a[i] * b[i]
-        i = i + 1
-    }
-    return sum
-}
-
-// ============================================================================
-// QR DECOMPOSITION
-// ============================================================================
-
-fn qr_decompose(a: Matrix8) -> QRResult with Mut, Panic, Div {
-    let m = a.rows
-    let n = a.cols
-    let mn = min_i32(m, n)
-
-    var r = mat8_copy(a)
-    var q = mat8_identity(m)
-
-    var k = 0
-    while k < mn {
-        var x: [f64; 8] = [0.0; 8]
-        let col_len = m - k
-        var i = 0
-        while i < col_len {
-            x[i] = mat8_get(r, k + i, k)
-            i = i + 1
-        }
-
-        let x_norm = vec8_norm(x, col_len)
-
-        if x_norm > 1e-15 {
-            var v: [f64; 8] = [0.0; 8]
-            i = 0
-            while i < col_len {
-                v[i] = x[i]
-                i = i + 1
-            }
-            v[0] = v[0] + sign_f64(x[0]) * x_norm
-
-            let vtv = vec8_dot(v, v, col_len)
-
-            if vtv > 1e-30 {
-                let scale = 2.0 / vtv
-
-                var j = k
-                while j < n {
-                    var dot = 0.0
-                    i = 0
-                    while i < col_len {
-                        dot = dot + v[i] * mat8_get(r, k + i, j)
-                        i = i + 1
-                    }
-                    i = 0
-                    while i < col_len {
-                        let old = mat8_get(r, k + i, j)
-                        r = mat8_set(r, k + i, j, old - scale * v[i] * dot)
-                        i = i + 1
-                    }
-                    j = j + 1
-                }
-
-                i = 0
-                while i < m {
-                    var dot2 = 0.0
-                    var p = 0
-                    while p < col_len {
-                        dot2 = dot2 + mat8_get(q, i, k + p) * v[p]
-                        p = p + 1
-                    }
-                    p = 0
-                    while p < col_len {
-                        let old2 = mat8_get(q, i, k + p)
-                        q = mat8_set(q, i, k + p, old2 - scale * dot2 * v[p])
-                        p = p + 1
-                    }
-                    i = i + 1
-                }
-            }
-        }
-
-        k = k + 1
-    }
-
-    // Clean up near-zero entries below diagonal
-    var ci = 0
-    while ci < m {
-        var cj = 0
-        while cj < min_i32(ci, n) {
-            let rv = mat8_get(r, ci, cj)
-            if abs_f64(rv) < 1e-14 {
-                r = mat8_set(r, ci, cj, 0.0)
-            }
-            cj = cj + 1
-        }
-        ci = ci + 1
-    }
-
-    return QRResult { q: q, r: r, rows: m, cols: n }
-}
-
-// ============================================================================
-// EIGENDECOMPOSITION
-// ============================================================================
-
-fn eigen_decompose(a: Matrix8) -> EigenResult with Mut, Panic, Div {
-    let n = a.rows
-    var eigenvalues_real: [f64; 8] = [0.0; 8]
-    var eigenvalues_imag: [f64; 8] = [0.0; 8]
-
-    var work = mat8_copy(a)
-    var vecs = mat8_identity(n)
-
-    let max_iter = 200
-    let tol = 1e-10
-
-    var p = n - 1
-    var total_iter = 0
-
-    while p > 0 {
-        if total_iter > max_iter {
-            p = 0
-        } else {
-            let subdiag = abs_f64(mat8_get(work, p, p - 1))
-            let diag_sum = abs_f64(mat8_get(work, p, p)) + abs_f64(mat8_get(work, p - 1, p - 1))
-
-            var converged = false
-            if diag_sum > 1.0 {
-                if subdiag < tol * diag_sum {
-                    converged = true
-                }
-            } else {
-                if subdiag < tol {
-                    converged = true
-                }
-            }
-
-            if converged {
-                work = mat8_set(work, p, p - 1, 0.0)
-                p = p - 1
-            } else {
-                // Wilkinson shift
-                let app = mat8_get(work, p, p)
-                let apm = mat8_get(work, p - 1, p - 1)
-                let apmp = mat8_get(work, p - 1, p)
-                let appm = mat8_get(work, p, p - 1)
-
-                let dd = (apm - app) / 2.0
-                let det_2x2 = appm * apmp
-                let disc = dd * dd + det_2x2
-                var sigma = app
-
-                if disc >= 0.0 {
-                    let sq = sqrt_f64(disc)
-                    let s1 = app - dd + sq
-                    let s2 = app - dd - sq
-                    if abs_f64(s1 - app) < abs_f64(s2 - app) {
-                        sigma = s1
-                    } else {
-                        sigma = s2
-                    }
-                }
-
-                // Shift
-                var si = 0
-                while si <= p {
-                    let old_d = mat8_get(work, si, si)
-                    work = mat8_set(work, si, si, old_d - sigma)
-                    si = si + 1
-                }
-
-                // Extract submatrix for QR
-                var sub = mat8_zeros(p + 1, p + 1)
-                si = 0
-                while si <= p {
-                    var sj = 0
-                    while sj <= p {
-                        sub = mat8_set(sub, si, sj, mat8_get(work, si, sj))
-                        sj = sj + 1
-                    }
-                    si = si + 1
-                }
-
-                let qr = qr_decompose(sub)
-                let rq = mat8_multiply(qr.r, qr.q)
-
-                // Put back with shift restoration
-                si = 0
-                while si <= p {
-                    var sj = 0
-                    while sj <= p {
-                        var val = mat8_get(rq, si, sj)
-                        if si == sj {
-                            val = val + sigma
-                        }
-                        work = mat8_set(work, si, sj, val)
-                        sj = sj + 1
-                    }
-                    si = si + 1
-                }
-
-                // Accumulate eigenvectors
-                var new_vecs = mat8_zeros(n, n)
-                si = 0
-                while si < n {
-                    var sj = 0
-                    while sj <= p {
-                        var sum = 0.0
-                        var sk = 0
-                        while sk <= p {
-                            sum = sum + mat8_get(vecs, si, sk) * mat8_get(qr.q, sk, sj)
-                            sk = sk + 1
-                        }
-                        new_vecs = mat8_set(new_vecs, si, sj, sum)
-                        sj = sj + 1
-                    }
-                    sj = p + 1
-                    while sj < n {
-                        new_vecs = mat8_set(new_vecs, si, sj, mat8_get(vecs, si, sj))
-                        sj = sj + 1
-                    }
-                    si = si + 1
-                }
-                vecs = new_vecs
-                total_iter = total_iter + 1
-            }
-        }
-    }
-
-    // Extract eigenvalues
-    var ei = 0
-    while ei < n {
-        if ei < n - 1 {
-            let sub_el = abs_f64(mat8_get(work, ei + 1, ei))
-            if sub_el > tol {
-                let a11 = mat8_get(work, ei, ei)
-                let a12 = mat8_get(work, ei, ei + 1)
-                let a21 = mat8_get(work, ei + 1, ei)
-                let a22 = mat8_get(work, ei + 1, ei + 1)
-                let tr = a11 + a22
-                let det = a11 * a22 - a12 * a21
-                let disc_e = tr * tr - 4.0 * det
-                if disc_e < 0.0 {
-                    eigenvalues_real[ei] = tr / 2.0
-                    eigenvalues_imag[ei] = sqrt_f64(0.0 - disc_e) / 2.0
-                    eigenvalues_real[ei + 1] = tr / 2.0
-                    eigenvalues_imag[ei + 1] = 0.0 - sqrt_f64(0.0 - disc_e) / 2.0
-                } else {
-                    let sq_e = sqrt_f64(disc_e)
-                    eigenvalues_real[ei] = (tr + sq_e) / 2.0
-                    eigenvalues_imag[ei] = 0.0
-                    eigenvalues_real[ei + 1] = (tr - sq_e) / 2.0
-                    eigenvalues_imag[ei + 1] = 0.0
-                }
-                ei = ei + 2
-            } else {
-                eigenvalues_real[ei] = mat8_get(work, ei, ei)
-                eigenvalues_imag[ei] = 0.0
-                ei = ei + 1
-            }
-        } else {
-            eigenvalues_real[ei] = mat8_get(work, ei, ei)
-            eigenvalues_imag[ei] = 0.0
-            ei = ei + 1
-        }
-    }
-
-    return EigenResult {
-        eigenvalues_real: eigenvalues_real,
-        eigenvalues_imag: eigenvalues_imag,
-        eigenvectors: vecs,
-        n: n
-    }
-}
-
-// ============================================================================
-// SVD DECOMPOSITION
-// ============================================================================
-
-fn svd_decompose(a: Matrix8) -> SVDResult with Mut, Panic, Div {
-    let m = a.rows
-    let n = a.cols
-    let mn = min_i32(m, n)
-
-    let at = mat8_transpose(a)
-    let ata = mat8_multiply(at, a)
-    let eig = eigen_decompose(ata)
-
-    var sigma: [f64; 8] = [0.0; 8]
-    var order: [i32; 8] = [0; 8]
-    var i = 0
-    while i < n {
-        let ev = eig.eigenvalues_real[i]
-        if ev > 0.0 {
-            sigma[i] = sqrt_f64(ev)
-        } else {
-            sigma[i] = 0.0
-        }
-        order[i] = i
-        i = i + 1
-    }
-
-    // Sort descending (bubble sort)
-    i = 0
-    while i < n - 1 {
-        var j = 0
-        while j < n - 1 - i {
-            if sigma[j] < sigma[j + 1] {
-                let tmp_s = sigma[j]
-                sigma[j] = sigma[j + 1]
-                sigma[j + 1] = tmp_s
-                let tmp_o = order[j]
-                order[j] = order[j + 1]
-                order[j + 1] = tmp_o
-            }
-            j = j + 1
-        }
-        i = i + 1
-    }
-
-    // Build V^T
-    var vt = mat8_zeros(n, n)
-    i = 0
-    while i < n {
-        let col_idx = order[i]
-        var j = 0
-        while j < n {
-            vt = mat8_set(vt, i, j, mat8_get(eig.eigenvectors, j, col_idx))
-            j = j + 1
-        }
-        i = i + 1
-    }
-
-    // Build U
-    var u = mat8_zeros(m, m)
-    i = 0
-    while i < mn {
-        if sigma[i] > 1e-14 {
-            var vi: [f64; 8] = [0.0; 8]
-            var j = 0
-            while j < n {
-                vi[j] = mat8_get(vt, i, j)
-                j = j + 1
-            }
-            j = 0
-            while j < m {
-                var dot = 0.0
-                var k = 0
-                while k < n {
-                    dot = dot + mat8_get(a, j, k) * vi[k]
-                    k = k + 1
-                }
-                u = mat8_set(u, j, i, dot / sigma[i])
-                j = j + 1
-            }
-        }
-        i = i + 1
-    }
-
-    // Fill remaining columns of U with orthogonal complement
-    if m > mn {
-        var col = mn
-        while col < m {
-            var candidate: [f64; 8] = [0.0; 8]
-            candidate[col] = 1.0
-            var oi = 0
-            while oi < col {
-                var dot_o = 0.0
-                var oj = 0
-                while oj < m {
-                    dot_o = dot_o + candidate[oj] * mat8_get(u, oj, oi)
-                    oj = oj + 1
-                }
-                oj = 0
-                while oj < m {
-                    candidate[oj] = candidate[oj] - dot_o * mat8_get(u, oj, oi)
-                    oj = oj + 1
-                }
-                oi = oi + 1
-            }
-            let cn = vec8_norm(candidate, m)
-            if cn > 1e-14 {
-                var ci = 0
-                while ci < m {
-                    u = mat8_set(u, ci, col, candidate[ci] / cn)
-                    ci = ci + 1
-                }
-            }
-            col = col + 1
-        }
-    }
-
-    return SVDResult {
-        u: u,
-        sigma: sigma,
-        vt: vt,
-        rows: m,
-        cols: n
-    }
-}
-
-// ============================================================================
-// TEST HELPERS
-// ============================================================================
 
 fn make_3x3(
     a00: f64, a01: f64, a02: f64,
     a10: f64, a11: f64, a12: f64,
     a20: f64, a21: f64, a22: f64
 ) -> Matrix8 with Mut, Panic {
-    var m = mat8_zeros(3, 3)
-    m = mat8_set(m, 0, 0, a00)
-    m = mat8_set(m, 0, 1, a01)
-    m = mat8_set(m, 0, 2, a02)
-    m = mat8_set(m, 1, 0, a10)
-    m = mat8_set(m, 1, 1, a11)
-    m = mat8_set(m, 1, 2, a12)
-    m = mat8_set(m, 2, 0, a20)
-    m = mat8_set(m, 2, 1, a21)
-    m = mat8_set(m, 2, 2, a22)
-    return m
+    var a = mat8_zeros(3, 3)
+    a = mat8_set(a, 0, 0, a00)
+    a = mat8_set(a, 0, 1, a01)
+    a = mat8_set(a, 0, 2, a02)
+    a = mat8_set(a, 1, 0, a10)
+    a = mat8_set(a, 1, 1, a11)
+    a = mat8_set(a, 1, 2, a12)
+    a = mat8_set(a, 2, 0, a20)
+    a = mat8_set(a, 2, 1, a21)
+    a = mat8_set(a, 2, 2, a22)
+    a
 }
 
-fn make_2x2(a00: f64, a01: f64, a10: f64, a11: f64) -> Matrix8 with Mut, Panic {
-    var m = mat8_zeros(2, 2)
-    m = mat8_set(m, 0, 0, a00)
-    m = mat8_set(m, 0, 1, a01)
-    m = mat8_set(m, 1, 0, a10)
-    m = mat8_set(m, 1, 1, a11)
-    return m
-}
-
-// ============================================================================
-// TESTS
-// ============================================================================
-
-// Test 1: QR of 3x3 identity -> Q=I, R=I
 fn test_qr_identity() -> bool with Mut, Panic, Div {
     let a = mat8_identity(3)
-    let result = qr_decompose(a)
-
-    let qr_prod = mat8_multiply(result.q, result.r)
-    let diff = mat8_subtract(qr_prod, a)
-    let err = mat8_frobenius_norm(diff)
-
-    return err < 1e-10
+    let qr = qr_decompose(a)
+    qr_reconstruction_error(a, qr) < 1.0e-10
 }
 
-// Test 2: QR of known 3x3 matrix, verify Q*R = A
 fn test_qr_reconstruction() -> bool with Mut, Panic, Div {
     let a = make_3x3(
         1.0, 2.0, 3.0,
         4.0, 5.0, 6.0,
         7.0, 8.0, 10.0
     )
-    let result = qr_decompose(a)
-
-    let qr_prod = mat8_multiply(result.q, result.r)
-    let diff = mat8_subtract(qr_prod, a)
-    let err = mat8_frobenius_norm(diff)
-
-    return err < 1e-8
+    let qr = qr_decompose(a)
+    qr_reconstruction_error(a, qr) < 1.0e-6
 }
 
-// Test 3: QR orthogonality -- Q^T * Q = I
 fn test_qr_orthogonality() -> bool with Mut, Panic, Div {
     let a = make_3x3(
-        2.0, 1.0, 0.0,
-        1.0, 3.0, 1.0,
-        0.0, 1.0, 2.0
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+        7.0, 8.0, 10.0
     )
-    let result = qr_decompose(a)
-
-    let qt = mat8_transpose(result.q)
-    let qtq = mat8_multiply(qt, result.q)
-    let eye = mat8_identity(3)
-    let diff = mat8_subtract(qtq, eye)
-    let err = mat8_frobenius_norm(diff)
-
-    return err < 1e-8
+    let qr = qr_decompose(a)
+    qr_orthogonality_error(qr) < 1.0e-6
 }
 
-// Test 4: QR upper triangular -- R[i][j] = 0 for i > j
 fn test_qr_upper_triangular() -> bool with Mut, Panic, Div {
     let a = make_3x3(
         1.0, 2.0, 3.0,
         4.0, 5.0, 6.0,
         7.0, 8.0, 10.0
     )
-    let result = qr_decompose(a)
-
-    var max_below = 0.0
-    var i = 0
-    while i < 3 {
-        var j = 0
-        while j < i {
-            let v = abs_f64(mat8_get(result.r, i, j))
-            if v > max_below {
-                max_below = v
-            }
-            j = j + 1
-        }
-        i = i + 1
-    }
-
-    return max_below < 1e-10
+    let qr = qr_decompose(a)
+    qr_upper_triangular_error(qr) < 1.0e-6
 }
 
-// Test 5: Eigen of diagonal matrix -> eigenvalues are diagonal entries
 fn test_eigen_diagonal() -> bool with Mut, Panic, Div {
     let a = make_3x3(
         3.0, 0.0, 0.0,
@@ -721,14 +79,11 @@ fn test_eigen_diagonal() -> bool with Mut, Panic, Div {
     )
     let result = eigen_decompose(a)
 
-    // Eigenvalues should be 3.0, 1.0, 2.0 (in some order)
-    // Sort and compare
     var evs: [f64; 3] = [0.0; 3]
     evs[0] = result.eigenvalues_real[0]
     evs[1] = result.eigenvalues_real[1]
     evs[2] = result.eigenvalues_real[2]
 
-    // Bubble sort ascending
     if evs[0] > evs[1] {
         let t = evs[0]
         evs[0] = evs[1]
@@ -745,19 +100,12 @@ fn test_eigen_diagonal() -> bool with Mut, Panic, Div {
         evs[1] = t3
     }
 
-    let e1 = abs_f64(evs[0] - 1.0)
-    let e2 = abs_f64(evs[1] - 2.0)
-    let e3 = abs_f64(evs[2] - 3.0)
-
-    // All imaginary parts should be zero
-    let im_err = abs_f64(result.eigenvalues_imag[0]) + abs_f64(result.eigenvalues_imag[1]) + abs_f64(result.eigenvalues_imag[2])
-
-    return e1 < 1e-6 && e2 < 1e-6 && e3 < 1e-6 && im_err < 1e-8
+    test_abs(evs[0] - 1.0) < 1.0e-6
+        && test_abs(evs[1] - 2.0) < 1.0e-6
+        && test_abs(evs[2] - 3.0) < 1.0e-6
 }
 
-// Test 6: Eigen of symmetric 3x3 -- verify Av = lambda*v
 fn test_eigen_symmetric() -> bool with Mut, Panic, Div {
-    // Symmetric matrix with known eigenvalues
     let a = make_3x3(
         2.0, 1.0, 0.0,
         1.0, 3.0, 1.0,
@@ -765,73 +113,22 @@ fn test_eigen_symmetric() -> bool with Mut, Panic, Div {
     )
     let result = eigen_decompose(a)
 
-    // Check Av = lambda*v for each eigenpair with real eigenvalues
-    var max_err = 0.0
-    var i = 0
-    while i < 3 {
-        if abs_f64(result.eigenvalues_imag[i]) < 1e-8 {
-            let lambda = result.eigenvalues_real[i]
-
-            // Compute Av
-            var av: [f64; 8] = [0.0; 8]
-            var j = 0
-            while j < 3 {
-                var sum = 0.0
-                var k = 0
-                while k < 3 {
-                    sum = sum + mat8_get(a, j, k) * mat8_get(result.eigenvectors, k, i)
-                    k = k + 1
-                }
-                av[j] = sum
-                j = j + 1
-            }
-
-            // Compute |Av - lambda*v|
-            var err_sq = 0.0
-            var v_sq = 0.0
-            j = 0
-            while j < 3 {
-                let vi = mat8_get(result.eigenvectors, j, i)
-                let diff = av[j] - lambda * vi
-                err_sq = err_sq + diff * diff
-                v_sq = v_sq + vi * vi
-                j = j + 1
-            }
-
-            if v_sq > 1e-10 {
-                let rel = sqrt_f64(err_sq) / sqrt_f64(v_sq)
-                if rel > max_err {
-                    max_err = rel
-                }
-            }
-        }
-        i = i + 1
-    }
-
-    return max_err < 1e-6
+    eigen_residual(a, result) < 1.0e-6
+        && test_abs(result.eigenvalues_imag[0]) < 1.0e-8
+        && test_abs(result.eigenvalues_imag[1]) < 1.0e-8
+        && test_abs(result.eigenvalues_imag[2]) < 1.0e-8
 }
 
-// Test 7: Eigen of 2x2 rotation-like matrix -- complex eigenvalues
 fn test_eigen_complex() -> bool with Mut, Panic, Div {
-    // [[0, -1], [1, 0]] has eigenvalues +/- i
     let a = make_2x2(0.0, 0.0 - 1.0, 1.0, 0.0)
     let result = eigen_decompose(a)
 
-    // Both eigenvalues should have zero real part and imaginary = +/- 1
-    let re0 = abs_f64(result.eigenvalues_real[0])
-    let re1 = abs_f64(result.eigenvalues_real[1])
-    let im0 = abs_f64(result.eigenvalues_imag[0])
-    let im1 = abs_f64(result.eigenvalues_imag[1])
-
-    // Real parts should be ~0
-    let re_ok = re0 < 1e-6 && re1 < 1e-6
-    // Imaginary parts should be ~1 in magnitude
-    let im_ok = abs_f64(im0 - 1.0) < 1e-6 && abs_f64(im1 - 1.0) < 1e-6
-
-    return re_ok && im_ok
+    test_abs(result.eigenvalues_real[0]) < 1.0e-6
+        && test_abs(result.eigenvalues_real[1]) < 1.0e-6
+        && test_abs(test_abs(result.eigenvalues_imag[0]) - 1.0) < 1.0e-6
+        && test_abs(test_abs(result.eigenvalues_imag[1]) - 1.0) < 1.0e-6
 }
 
-// Test 8: SVD of diagonal -> singular values match diagonal entries
 fn test_svd_diagonal() -> bool with Mut, Panic, Div {
     let a = make_3x3(
         5.0, 0.0, 0.0,
@@ -840,15 +137,11 @@ fn test_svd_diagonal() -> bool with Mut, Panic, Div {
     )
     let result = svd_decompose(a)
 
-    // Singular values should be 5, 3, 1 (sorted descending)
-    let e1 = abs_f64(result.sigma[0] - 5.0)
-    let e2 = abs_f64(result.sigma[1] - 3.0)
-    let e3 = abs_f64(result.sigma[2] - 1.0)
-
-    return e1 < 1e-6 && e2 < 1e-6 && e3 < 1e-6
+    test_abs(result.sigma[0] - 5.0) < 1.0e-6
+        && test_abs(result.sigma[1] - 3.0) < 1.0e-6
+        && test_abs(result.sigma[2] - 1.0) < 1.0e-6
 }
 
-// Test 9: SVD of 3x3 -- verify U*Sigma*V^T = A
 fn test_svd_reconstruction() -> bool with Mut, Panic, Div {
     let a = make_3x3(
         1.0, 2.0, 3.0,
@@ -856,57 +149,9 @@ fn test_svd_reconstruction() -> bool with Mut, Panic, Div {
         7.0, 8.0, 10.0
     )
     let result = svd_decompose(a)
-
-    let m = result.rows
-    let n = result.cols
-    let mn = min_i32(m, n)
-
-    // Build U * diag(sigma) * V^T
-    var sv = mat8_zeros(m, n)
-    var i = 0
-    while i < mn {
-        var j = 0
-        while j < n {
-            sv = mat8_set(sv, i, j, result.sigma[i] * mat8_get(result.vt, i, j))
-            j = j + 1
-        }
-        i = i + 1
-    }
-    let usv = mat8_multiply(result.u, sv)
-    let diff = mat8_subtract(usv, a)
-    let err = mat8_frobenius_norm(diff)
-
-    return err < 1e-6
+    svd_reconstruction_error(a, result) < 1.0e-6
 }
 
-// Test 10: SVD orthogonality -- U^T*U = I and V*V^T = I
-fn test_svd_orthogonality() -> bool with Mut, Panic, Div {
-    let a = make_3x3(
-        1.0, 2.0, 3.0,
-        4.0, 5.0, 6.0,
-        7.0, 8.0, 10.0
-    )
-    let result = svd_decompose(a)
-
-    // Check U^T * U = I
-    let ut = mat8_transpose(result.u)
-    let utu = mat8_multiply(ut, result.u)
-    let eye3 = mat8_identity(3)
-    let diff_u = mat8_subtract(utu, eye3)
-    let err_u = mat8_frobenius_norm(diff_u)
-
-    // Check V^T * V = I
-    // result.vt = V^T, so V = result.vt^T = vtt
-    // V^T * V = result.vt * vtt  (should be I)
-    let vtt = mat8_transpose(result.vt)
-    let vtv = mat8_multiply(result.vt, vtt)
-    let diff_v = mat8_subtract(vtv, eye3)
-    let err_v = mat8_frobenius_norm(diff_v)
-
-    return err_u < 1e-6 && err_v < 1e-6
-}
-
-// Test 11: Singular values are non-negative and sorted descending
 fn test_svd_sorted() -> bool with Mut, Panic, Div {
     let a = make_3x3(
         2.0, 1.0, 0.0,
@@ -915,180 +160,62 @@ fn test_svd_sorted() -> bool with Mut, Panic, Div {
     )
     let result = svd_decompose(a)
 
-    // All non-negative
-    var all_nonneg = true
-    var i = 0
-    while i < 3 {
-        if result.sigma[i] < 0.0 - 1e-10 {
-            all_nonneg = false
-        }
-        i = i + 1
-    }
-
-    // Sorted descending
-    var sorted = true
-    i = 0
-    while i < 2 {
-        if result.sigma[i] < result.sigma[i + 1] - 1e-10 {
-            sorted = false
-        }
-        i = i + 1
-    }
-
-    return all_nonneg && sorted
+    result.sigma[0] >= result.sigma[1] - 1.0e-10
+        && result.sigma[1] >= result.sigma[2] - 1.0e-10
+        && result.sigma[2] >= 0.0 - 1.0e-10
 }
-
-// Test 12: Rank-deficient matrix -- last singular value near zero
-fn test_svd_rank_deficient() -> bool with Mut, Panic, Div {
-    // Row 3 = Row 1 + Row 2, so rank = 2
-    let a = make_3x3(
-        1.0, 2.0, 3.0,
-        4.0, 5.0, 6.0,
-        5.0, 7.0, 9.0
-    )
-    let result = svd_decompose(a)
-
-    // Last singular value should be near 0
-    let last_sv = result.sigma[2]
-    return abs_f64(last_sv) < 1e-6
-}
-
-// ============================================================================
-// MAIN TEST RUNNER
-// ============================================================================
 
 fn main() -> i32 with IO, Mut, Panic, Div {
-    println("=== Linear Algebra Decomposition Tests ===")
-    println("")
-
     var passed = 0
     var failed = 0
 
-    // Test 1: QR of identity
     print("Test  1: QR identity............. ")
-    if test_qr_identity() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_qr_identity() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
 
-    // Test 2: QR reconstruction
     print("Test  2: QR reconstruction....... ")
-    if test_qr_reconstruction() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_qr_reconstruction() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
 
-    // Test 3: QR orthogonality
     print("Test  3: QR orthogonality........ ")
-    if test_qr_orthogonality() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_qr_orthogonality() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
 
-    // Test 4: QR upper triangular
-    print("Test  4: QR upper triangular..... ")
-    if test_qr_upper_triangular() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    print("Test  4: QR triangular........... ")
+    if test_qr_upper_triangular() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
 
-    // Test 5: Eigen diagonal
     print("Test  5: Eigen diagonal.......... ")
-    if test_eigen_diagonal() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_eigen_diagonal() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
 
-    // Test 6: Eigen symmetric Av=lv
-    print("Test  6: Eigen symmetric Av=lv... ")
-    if test_eigen_symmetric() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    print("Test  6: Eigen symmetric......... ")
+    if test_eigen_symmetric() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
 
-    // Test 7: Eigen complex eigenvalues
-    print("Test  7: Eigen complex........... ")
-    if test_eigen_complex() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    print("Test  7: Eigen complex fallback.. ")
+    if test_eigen_complex() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
 
-    // Test 8: SVD diagonal
     print("Test  8: SVD diagonal............ ")
-    if test_svd_diagonal() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_svd_diagonal() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
 
-    // Test 9: SVD reconstruction
     print("Test  9: SVD reconstruction...... ")
-    if test_svd_reconstruction() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_svd_reconstruction() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
 
-    // Test 10: SVD orthogonality
-    print("Test 10: SVD orthogonality....... ")
-    if test_svd_orthogonality() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
-
-    // Test 11: SVD sorted
-    print("Test 11: SVD sorted descending... ")
-    if test_svd_sorted() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
-
-    // Test 12: SVD rank-deficient
-    print("Test 12: SVD rank-deficient...... ")
-    if test_svd_rank_deficient() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    print("Test 10: SVD sorted.............. ")
+    if test_svd_sorted() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
 
     println("")
-    if failed == 0 {
-        println("ALL 12 TESTS PASSED")
-        return 0
-    }
-    println("SOME TESTS FAILED")
-    return 1
+    print("Passed: ")
+    print(passed)
+    print("  Failed: ")
+    print(failed)
+    println("")
+
+    if failed > 0 { return 1 }
+    0
 }

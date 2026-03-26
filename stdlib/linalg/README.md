@@ -124,6 +124,7 @@ See [`VALIDATION_REPORT.md`](../../benchmarks/stdlib_validation/VALIDATION_REPOR
 | [`matrix`](./matrix.sio) | Standard matrix operations |
 | [`vector`](./vector.sio) | Vector operations |
 | [`decomp`](./decomp.sio) | Decompositions (LU, QR, SVD) |
+| [`eigen`](./eigen.sio) | Dense symmetric eigendecomposition |
 | [`factorize`](./factorize.sio) | Matrix factorization |
 | [`sparse`](./sparse.sio) | Sparse matrix support |
 | [`shaped`](./shaped.sio) | Shape-checked operations |

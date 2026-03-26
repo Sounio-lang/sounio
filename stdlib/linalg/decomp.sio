@@ -8,6 +8,11 @@
 //   Eigen: QR algorithm with Wilkinson shift
 //   SVD:   Via eigendecomposition of A^T A
 
+use linalg::eigen::{
+    eigen_workspace_reset, eigen_workspace_set, eigen_workspace_symmetric,
+    eigenvalue_get, eigenvector_get
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -342,7 +347,390 @@ fn qr_decompose(a: Matrix8) -> QRResult with Mut, Panic, Div {
 // converges to a quasi-upper-triangular (Schur) form.
 // Eigenvalues appear on the diagonal (real) or in 2x2 blocks (complex pairs).
 
-fn eigen_decompose(a: Matrix8) -> EigenResult with Mut, Panic, Div {
+fn mat8_is_symmetric(a: Matrix8, tol: f64) -> bool with Mut, Panic, Div {
+    if a.rows != a.cols { return false }
+
+    var i = 0
+    while i < a.rows {
+        var j = 0
+        while j < i {
+            let aij = mat8_get(a, i, j)
+            let aji = mat8_get(a, j, i)
+            let limit = tol * (1.0 + abs_f64(aij) + abs_f64(aji))
+            if abs_f64(aij - aji) > limit {
+                return false
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    true
+}
+
+fn hypot_f64(a: f64, b: f64) -> f64 with Mut, Panic, Div {
+    let aa = abs_f64(a)
+    let bb = abs_f64(b)
+    if aa > bb {
+        let r = bb / aa
+        return aa * sqrt_f64(1.0 + r * r)
+    }
+    if bb > 0.0 {
+        let r = aa / bb
+        return bb * sqrt_f64(1.0 + r * r)
+    }
+    0.0
+}
+
+fn tridiag8_householder(a: Matrix8, diag: &![f64; 8], subdiag: &![f64; 8]) -> Matrix8 with Mut, Panic, Div {
+    var mat = mat8_copy(a)
+    var work: [f64; 8] = [0.0; 8]
+
+    var k = 0
+    while k < a.rows - 2 {
+        let alpha = mat8_get(mat, k + 1, k)
+        var xnorm_sq = 0.0
+        var i = k + 2
+        while i < a.rows {
+            let v = mat8_get(mat, i, k)
+            xnorm_sq = xnorm_sq + v * v
+            i = i + 1
+        }
+
+        if xnorm_sq <= 1.0e-30 {
+            i = k + 2
+            while i < a.rows {
+                mat = mat8_set(mat, i, k, 0.0)
+                mat = mat8_set(mat, k, i, 0.0)
+                i = i + 1
+            }
+        } else {
+            let xnorm = sqrt_f64(xnorm_sq)
+            let beta = if alpha >= 0.0 { 0.0 - hypot_f64(alpha, xnorm) } else { hypot_f64(alpha, xnorm) }
+            let tau = (beta - alpha) / beta
+            let inv = 1.0 / (alpha - beta)
+            let start = k + 1
+            let end = a.rows - 1
+
+            mat = mat8_set(mat, start, k, 1.0)
+            i = k + 2
+            while i < a.rows {
+                mat = mat8_set(mat, i, k, mat8_get(mat, i, k) * inv)
+                i = i + 1
+            }
+
+            i = start
+            while i <= end {
+                var ui = 1.0
+                if i > start { ui = mat8_get(mat, i, k) }
+
+                var sum = 0.0
+                var j = start
+                while j <= end {
+                    var uj = 1.0
+                    if j > start { uj = mat8_get(mat, j, k) }
+                    sum = sum + mat8_get(mat, i, j) * uj
+                    j = j + 1
+                }
+                work[i - start] = tau * sum
+                i = i + 1
+            }
+
+            var dot = work[0]
+            i = start + 1
+            while i <= end {
+                dot = dot + mat8_get(mat, i, k) * work[i - start]
+                i = i + 1
+            }
+            let corr = 0.0 - 0.5 * tau * dot
+
+            i = start
+            while i <= end {
+                var ui = 1.0
+                if i > start { ui = mat8_get(mat, i, k) }
+                work[i - start] = work[i - start] + corr * ui
+                i = i + 1
+            }
+
+            i = start
+            while i <= end {
+                var ui = 1.0
+                if i > start { ui = mat8_get(mat, i, k) }
+
+                var j = i
+                while j <= end {
+                    var uj = 1.0
+                    if j > start { uj = mat8_get(mat, j, k) }
+                    let updated = mat8_get(mat, i, j) - ui * work[j - start] - work[i - start] * uj
+                    mat = mat8_set(mat, i, j, updated)
+                    mat = mat8_set(mat, j, i, updated)
+                    j = j + 1
+                }
+                i = i + 1
+            }
+
+            mat = mat8_set(mat, start, k, beta)
+            mat = mat8_set(mat, k, start, beta)
+            i = k + 2
+            while i < a.rows {
+                mat = mat8_set(mat, k, i, 0.0)
+                i = i + 1
+            }
+        }
+
+        k = k + 1
+    }
+
+    var i = 0
+    while i < a.rows {
+        diag[i] = mat8_get(mat, i, i)
+        if i < a.rows - 1 { subdiag[i] = mat8_get(mat, i + 1, i) }
+        else { subdiag[i] = 0.0 }
+        i = i + 1
+    }
+
+    mat
+}
+
+fn tridiag8_accumulate_householder(mat: Matrix8, vecs: &!Matrix8) with Mut, Panic, Div {
+    vecs.rows = mat.rows
+    vecs.cols = mat.cols
+    var i = 0
+    while i < mat.rows {
+        var j = 0
+        while j < mat.cols {
+            if i == j { vecs.data[i * mat.cols + j] = 1.0 }
+            else { vecs.data[i * mat.cols + j] = 0.0 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    if mat.rows <= 2 { return }
+
+    var k = 0
+    while k < mat.rows - 2 {
+        let start = k + 1
+        let end = mat.rows - 1
+        var tail_sq = 0.0
+        i = k + 2
+        while i < mat.rows {
+            let v = mat8_get(mat, i, k)
+            tail_sq = tail_sq + v * v
+            i = i + 1
+        }
+
+        if tail_sq > 1.0e-30 {
+            let tau = 2.0 / (1.0 + tail_sq)
+            i = 0
+            while i < mat.rows {
+                var dot = vecs.data[i * vecs.cols + start]
+                var p = start + 1
+                while p <= end {
+                    dot = dot + vecs.data[i * vecs.cols + p] * mat8_get(mat, p, k)
+                    p = p + 1
+                }
+                dot = tau * dot
+
+                vecs.data[i * vecs.cols + start] = vecs.data[i * vecs.cols + start] - dot
+                p = start + 1
+                while p <= end {
+                    vecs.data[i * vecs.cols + p] = vecs.data[i * vecs.cols + p] - dot * mat8_get(mat, p, k)
+                    p = p + 1
+                }
+                i = i + 1
+            }
+        }
+
+        k = k + 1
+    }
+}
+
+fn tridiag8_sort_pairs(values: &![f64; 8], vecs: &!Matrix8, n: i32) with Mut, Panic, Div {
+    var i = 1
+    while i < n {
+        let key = values[i]
+        var col: [f64; 8] = [0.0; 8]
+        var r = 0
+        while r < n {
+            col[r] = vecs.data[r * vecs.cols + i]
+            r = r + 1
+        }
+
+        var j = i - 1
+        while j >= 0 && values[j] > key {
+            values[j + 1] = values[j]
+            r = 0
+            while r < n {
+                vecs.data[r * vecs.cols + (j + 1)] = vecs.data[r * vecs.cols + j]
+                r = r + 1
+            }
+            j = j - 1
+        }
+
+        values[j + 1] = key
+        r = 0
+        while r < n {
+            vecs.data[r * vecs.cols + (j + 1)] = col[r]
+            r = r + 1
+        }
+        i = i + 1
+    }
+}
+
+fn tridiag8_iter(diag: &![f64; 8], subdiag: &![f64; 8], n: i32, vecs: &!Matrix8) -> bool with Mut, Panic, Div {
+    let tol = 1.0e-12
+    var total_iter = 0
+    var l = 0
+    var f = 0.0
+    var tst1 = 0.0
+
+    while l < n {
+        let row_mag = abs_f64(diag[l]) + abs_f64(subdiag[l])
+        if row_mag > tst1 { tst1 = row_mag }
+
+        var m = l
+        while m < n - 1 {
+            if abs_f64(subdiag[m]) <= tol * (tst1 + 1.0) { break }
+            m = m + 1
+        }
+
+        if m > l {
+            var keep_iterating = true
+            while keep_iterating {
+                if total_iter >= 128 * n { return false }
+                total_iter = total_iter + 1
+
+                let g0 = diag[l]
+                var p = (diag[l + 1] - g0) / (2.0 * subdiag[l])
+                var r = hypot_f64(p, 1.0)
+                if p < 0.0 { r = 0.0 - r }
+
+                diag[l] = subdiag[l] / (p + r)
+                diag[l + 1] = subdiag[l] * (p + r)
+
+                let dl1 = diag[l + 1]
+                let h = g0 - diag[l]
+                var i = l + 2
+                while i < n {
+                    diag[i] = diag[i] - h
+                    i = i + 1
+                }
+                f = f + h
+
+                p = diag[m]
+                var c = 1.0
+                var c2 = 1.0
+                var c3 = 1.0
+                let el1 = if l + 1 < n { subdiag[l + 1] } else { 0.0 }
+                var s = 0.0
+                var s2 = 0.0
+                i = m - 1
+                while i >= l {
+                    c3 = c2
+                    c2 = c
+                    s2 = s
+
+                    let g1 = c * subdiag[i]
+                    let h2 = c * p
+                    r = hypot_f64(p, subdiag[i])
+
+                    if r <= 1.0e-30 {
+                        subdiag[i + 1] = 0.0
+                        s = 0.0
+                        c = 1.0
+                    } else {
+                        subdiag[i + 1] = s * r
+                        s = subdiag[i] / r
+                        c = p / r
+                    }
+
+                    p = c * diag[i] - s * g1
+                    diag[i + 1] = h2 + s * (c * g1 + s * diag[i])
+
+                    var k = 0
+                    while k < n {
+                        let vk1 = vecs.data[k * vecs.cols + (i + 1)]
+                        let vki = vecs.data[k * vecs.cols + i]
+                        vecs.data[k * vecs.cols + (i + 1)] = s * vki + c * vk1
+                        vecs.data[k * vecs.cols + i] = c * vki - s * vk1
+                        k = k + 1
+                    }
+
+                    if i == l { break }
+                    i = i - 1
+                }
+
+                var p_shift = 0.0
+                if abs_f64(dl1) > 1.0e-30 {
+                    p_shift = 0.0 - s * s2 * c3 * el1 * subdiag[l] / dl1
+                }
+                subdiag[l] = s * p_shift
+                diag[l] = c * p_shift
+
+                if abs_f64(subdiag[l]) <= tol * (tst1 + 1.0) {
+                    keep_iterating = false
+                }
+            }
+        }
+
+        diag[l] = diag[l] + f
+        subdiag[l] = 0.0
+        l = l + 1
+    }
+
+    var i = 0
+    while i < n {
+        subdiag[i] = 0.0
+        i = i + 1
+    }
+
+    tridiag8_sort_pairs(diag, vecs, n)
+    true
+}
+
+fn eigen_decompose_symmetric_mat8(a: Matrix8) -> EigenResult with Mut, Panic, Div {
+    let n = a.rows
+    var eigenvalues_real: [f64; 8] = [0.0; 8]
+    var eigenvalues_imag: [f64; 8] = [0.0; 8]
+    var eigenvectors = mat8_zeros(n, n)
+
+    eigen_workspace_reset(n)
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            eigen_workspace_set(i, j, mat8_get(a, i, j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    if !eigen_workspace_symmetric(n) {
+        return eigen_decompose_general_qr(a)
+    }
+
+    i = 0
+    while i < n {
+        eigenvalues_real[i] = eigenvalue_get(i)
+        eigenvalues_imag[i] = 0.0
+        var j = 0
+        while j < n {
+            eigenvectors.data[i * eigenvectors.cols + j] = eigenvector_get(i, j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    return EigenResult {
+        eigenvalues_real: eigenvalues_real,
+        eigenvalues_imag: eigenvalues_imag,
+        eigenvectors: eigenvectors,
+        n: n
+    }
+}
+
+fn eigen_decompose_general_qr(a: Matrix8) -> EigenResult with Mut, Panic, Div {
     let n = a.rows
     var eigenvalues_real: [f64; 8] = [0.0; 8]
     var eigenvalues_imag: [f64; 8] = [0.0; 8]
@@ -604,6 +992,15 @@ fn eigen_decompose(a: Matrix8) -> EigenResult with Mut, Panic, Div {
     }
 }
 
+fn eigen_decompose(a: Matrix8) -> EigenResult with Mut, Panic, Div {
+    if a.rows == a.cols {
+        if mat8_is_symmetric(a, 1.0e-12) {
+            return eigen_decompose_symmetric_mat8(a)
+        }
+    }
+    return eigen_decompose_general_qr(a)
+}
+
 // ============================================================================
 // SVD DECOMPOSITION (via eigendecomposition of A^T A)
 // ============================================================================
@@ -623,7 +1020,7 @@ fn svd_decompose(a: Matrix8) -> SVDResult with Mut, Panic, Div {
     let ata = mat8_multiply(at, a)
 
     // Eigendecompose A^T A
-    let eig = eigen_decompose(ata)
+    let eig = eigen_decompose_symmetric_mat8(ata)
 
     // Singular values = sqrt(eigenvalues of A^T A)
     // Eigenvalues should be non-negative for A^T A
