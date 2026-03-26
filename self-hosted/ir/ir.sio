@@ -50,6 +50,7 @@ let IR_MAX_EPI_MONITORING_POLICIES: i64 = 32
 let IR_MAX_EPI_OBSERVED_TRANSITIONS: i64 = 64
 let IR_MAX_EPI_ROLLBACK_CERTIFICATES: i64 = 64
 let IR_MAX_EPI_VALIDATED_MANIFESTS: i64 = 64
+let IR_MAX_EPI_HYPER_EXPRS: i64 = 128
 
 let SOUNIO_ABI_VERSION: i64 = 1
 let SOUNIO_RUNTIME_VERSION_MAJOR: i64 = 1
@@ -419,6 +420,63 @@ struct IrFunction {
     param_regs: [i64; 64],
     compile_strategy: i64,
     prof_counter_id: i64,
+    hyper_algebra_kind: i64,  // -1 = absent/unknown, otherwise ALG_REAL..ALG_CLIFFORD
+}
+
+struct IrAlgebraInfo {
+    name: Name,
+    add_commutative: bool,
+    add_associative: bool,
+    mul_commutative: bool,
+    mul_associative: bool,
+    mul_alternative: bool,
+    reassoc_strategy: i64,  // 0=free, 1=blocked, 2=fano_selective
+    algebra_tag: i64,
+    is_valid: bool,
+}
+
+struct IrAlgebraTable {
+    entries: [IrAlgebraInfo; 32],
+    count: i64,
+}
+
+fn ir_empty_algebra_info() -> IrAlgebraInfo {
+    IrAlgebraInfo {
+        name: Name { buf: [0; 128], len: 0 },
+        add_commutative: true,
+        add_associative: true,
+        mul_commutative: true,
+        mul_associative: true,
+        mul_alternative: false,
+        reassoc_strategy: 0,
+        algebra_tag: 0,
+        is_valid: false,
+    }
+}
+
+fn ir_empty_algebra_table() -> IrAlgebraTable {
+    IrAlgebraTable {
+        entries: [ir_empty_algebra_info(); 32],
+        count: 0,
+    }
+}
+
+struct IrHyperExprInfo {
+    span_start: i64,
+    span_end: i64,
+    algebra_tag: i64,
+    op_kind: i64,
+    knowledge_wrapped: bool,
+}
+
+fn ir_empty_hyper_expr_info() -> IrHyperExprInfo {
+    IrHyperExprInfo {
+        span_start: 0,
+        span_end: 0,
+        algebra_tag: -1,
+        op_kind: 0,
+        knowledge_wrapped: false,
+    }
 }
 
 // Sprint 44: profiling counter metadata — one per instrumented function
@@ -1377,6 +1435,8 @@ struct IrEpistemicSection {
     rollback_certificate_count: i64,
     validated_manifests: [IrValidatedManifestInfo; 64],
     validated_manifest_count: i64,
+    hyper_exprs: [IrHyperExprInfo; 128],
+    hyper_expr_count: i64,
 }
 
 fn ir_empty_epistemic_section() -> IrEpistemicSection {
@@ -1451,6 +1511,8 @@ fn ir_empty_epistemic_section() -> IrEpistemicSection {
         rollback_certificate_count: 0,
         validated_manifests: [ir_empty_validated_manifest_info(); 64],
         validated_manifest_count: 0,
+        hyper_exprs: [ir_empty_hyper_expr_info(); 128],
+        hyper_expr_count: 0,
     }
 }
 
@@ -1460,6 +1522,7 @@ struct IrModule {
     string_table: [Name; 4096],
     string_count: i64,
     epistemic: IrEpistemicSection,
+    algebras: IrAlgebraTable,
     prof_counters: [IrProfCounterInfo; 64],
     prof_counter_count: i64,
     export_names: [Name; 64],
@@ -2536,6 +2599,48 @@ fn ir_binop(dst: i64, lhs: i64, op: BinaryOp, rhs: i64) -> IrInstr {
     }
 }
 
+fn ir_hyper_mul_o(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrHyperMulO)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: lhs,
+        src2: rhs,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: 0,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: 0,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_hyper_mul_s(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrHyperMulS)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: lhs,
+        src2: rhs,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: 0,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: 0,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
 fn ir_unaryop(dst: i64, op: UnaryOp, src: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrUnaryOp)
     IrInstr {
@@ -2753,6 +2858,7 @@ fn ir_empty_function() -> IrFunction {
         param_regs: [IR_INVALID_REG; 64],
         compile_strategy: IR_STRATEGY_STANDARD,
         prof_counter_id: -1,
+        hyper_algebra_kind: -1,
     }
 }
 
@@ -2763,6 +2869,7 @@ fn ir_empty_module() -> IrModule {
         string_table: [ir_empty_name(); 4096],
         string_count: 0,
         epistemic: ir_empty_epistemic_section(),
+        algebras: ir_empty_algebra_table(),
         prof_counters: [ir_empty_prof_counter_info(); 64],
         prof_counter_count: 0,
         export_names: [ir_empty_name(); 64],

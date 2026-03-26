@@ -6,11 +6,11 @@ use parser::ast::*
 use ir::ir::*
 use check::types::*
 //
-// SOIR v2 Binary Format:
+// SOIR v3 Binary Format:
 // ─────────────────────────
 // Header (8 bytes):
 //   - Magic: "SOIR" (0x534F4952 little-endian)
-//   - Version: 2 (1 byte)
+//   - Version: 3 (1 byte)
 //   - Reserved: 0x00 (3 bytes padding)
 //
 // Body:
@@ -18,6 +18,8 @@ use check::types::*
 //   - functions[]: array of serialized IrFunction
 //   - string_count: i64 (8 bytes)
 //   - strings[]: array of serialized Name
+//   - epistemic: IrEpistemicSection (v2+)
+//   - algebras: IrAlgebraTable (v3+)
 //
 // IrFunction encoding:
 //   - name: Name (128 bytes + 8 byte length)
@@ -26,6 +28,9 @@ use check::types::*
 //   - label_count: i64
 //   - param_count: i64
 //   - param_regs: [i64; 64]
+//   - compile_strategy: i64
+//   - prof_counter_id: i64
+//   - hyper_algebra_kind: i64 (v3+)
 //   - instrs: array of IrInstr
 //
 // IrInstr encoding (fixed-size, 128 bytes):
@@ -40,7 +45,7 @@ use check::types::*
 //   - arg_count: i64
 
 let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
-let SOIR_VERSION: i8 = 2
+let SOIR_VERSION: i8 = 4
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 
 fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -566,6 +571,12 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
     b = prof_ctr_pair.0
     p = prof_ctr_pair.1
 
+    if SOIR_VERSION >= 3 {
+        let hyper_alg_pair = write_i64(b, p, func.hyper_algebra_kind)
+        b = hyper_alg_pair.0
+        p = hyper_alg_pair.1
+    }
+
     // Write instructions
     var j: i64 = 0
     while j < func.instr_count {
@@ -578,7 +589,7 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
     (b, p)
 }
 
-fn deserialize_ir_function(buf: [i8; 131072], pos: i64) -> (IrFunction, i64) with Mut, Panic, Div {
+fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunction, i64) with Mut, Panic, Div {
     var p = pos
     let name_pair = read_name(buf, p)
     let name = name_pair.0
@@ -620,6 +631,13 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64) -> (IrFunction, i64) wit
     let prof_counter_id = prof_ctr_pair.0
     p = prof_ctr_pair.1
 
+    var hyper_algebra_kind: i64 = -1
+    if version >= 3 {
+        let hyper_alg_pair = read_i64(buf, p)
+        hyper_algebra_kind = hyper_alg_pair.0
+        p = hyper_alg_pair.1
+    }
+
     // Read instructions
     var instrs: [IrInstr; 2048] = [ir_nop(); 2048]
     var j: i64 = 0
@@ -640,8 +658,114 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64) -> (IrFunction, i64) wit
         param_regs: param_regs,
         compile_strategy: compile_strategy,
         prof_counter_id: prof_counter_id,
+        hyper_algebra_kind: hyper_algebra_kind,
     }
     (func, p)
+}
+
+fn write_ir_algebra_info(buf: [i8; 131072], pos: i64, info: IrAlgebraInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let name_pair = write_name(b, p, info.name)
+    b = name_pair.0
+    p = name_pair.1
+    let add_comm_pair = write_i64(b, p, if info.add_commutative { 1 } else { 0 })
+    b = add_comm_pair.0
+    p = add_comm_pair.1
+    let add_assoc_pair = write_i64(b, p, if info.add_associative { 1 } else { 0 })
+    b = add_assoc_pair.0
+    p = add_assoc_pair.1
+    let mul_comm_pair = write_i64(b, p, if info.mul_commutative { 1 } else { 0 })
+    b = mul_comm_pair.0
+    p = mul_comm_pair.1
+    let mul_assoc_pair = write_i64(b, p, if info.mul_associative { 1 } else { 0 })
+    b = mul_assoc_pair.0
+    p = mul_assoc_pair.1
+    let mul_alt_pair = write_i64(b, p, if info.mul_alternative { 1 } else { 0 })
+    b = mul_alt_pair.0
+    p = mul_alt_pair.1
+    let reassoc_pair = write_i64(b, p, info.reassoc_strategy)
+    b = reassoc_pair.0
+    p = reassoc_pair.1
+    let tag_pair = write_i64(b, p, info.algebra_tag)
+    b = tag_pair.0
+    p = tag_pair.1
+    write_i64(b, p, if info.is_valid { 1 } else { 0 })
+}
+
+fn read_ir_algebra_info(buf: [i8; 131072], pos: i64) -> (IrAlgebraInfo, i64) with Mut, Panic, Div {
+    var p = pos
+    let name_pair = read_name(buf, p)
+    let name = name_pair.0
+    p = name_pair.1
+    let add_comm_pair = read_i64(buf, p)
+    let add_comm = add_comm_pair.0 != 0
+    p = add_comm_pair.1
+    let add_assoc_pair = read_i64(buf, p)
+    let add_assoc = add_assoc_pair.0 != 0
+    p = add_assoc_pair.1
+    let mul_comm_pair = read_i64(buf, p)
+    let mul_comm = mul_comm_pair.0 != 0
+    p = mul_comm_pair.1
+    let mul_assoc_pair = read_i64(buf, p)
+    let mul_assoc = mul_assoc_pair.0 != 0
+    p = mul_assoc_pair.1
+    let mul_alt_pair = read_i64(buf, p)
+    let mul_alt = mul_alt_pair.0 != 0
+    p = mul_alt_pair.1
+    let reassoc_pair = read_i64(buf, p)
+    let reassoc_strategy = reassoc_pair.0
+    p = reassoc_pair.1
+    let tag_pair = read_i64(buf, p)
+    let algebra_tag = tag_pair.0
+    p = tag_pair.1
+    let valid_pair = read_i64(buf, p)
+    let is_valid = valid_pair.0 != 0
+    p = valid_pair.1
+    (IrAlgebraInfo {
+        name: name,
+        add_commutative: add_comm,
+        add_associative: add_assoc,
+        mul_commutative: mul_comm,
+        mul_associative: mul_assoc,
+        mul_alternative: mul_alt,
+        reassoc_strategy: reassoc_strategy,
+        algebra_tag: algebra_tag,
+        is_valid: is_valid,
+    }, p)
+}
+
+fn serialize_ir_algebra_table(buf: [i8; 131072], pos: i64, table: IrAlgebraTable) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let count_pair = write_i64(b, p, table.count)
+    b = count_pair.0
+    p = count_pair.1
+    var i: i64 = 0
+    while i < table.count {
+        let info_pair = write_ir_algebra_info(b, p, table.entries[i])
+        b = info_pair.0
+        p = info_pair.1
+        i = i + 1
+    }
+    (b, p)
+}
+
+fn deserialize_ir_algebra_table(buf: [i8; 131072], pos: i64) -> (IrAlgebraTable, i64) with Mut, Panic, Div {
+    var p = pos
+    let count_pair = read_i64(buf, p)
+    let count = count_pair.0
+    p = count_pair.1
+    var table = ir_empty_algebra_table()
+    var i: i64 = 0
+    while i < count && i < 32 {
+        let info_pair = read_ir_algebra_info(buf, p)
+        table.entries[i] = info_pair.0
+        p = info_pair.1
+        i = i + 1
+    }
+    table.count = if count > 32 { 32 } else { count }
+    (table, p)
 }
 
 fn write_policy_requirement_info(buf: [i8; 131072], pos: i64, req: IrPolicyRequirementInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -3321,6 +3445,53 @@ fn read_rollback_certificate_info(buf: [i8; 131072], pos: i64) -> (IrRollbackCer
     }, p)
 }
 
+fn write_hyper_expr_info(buf: [i8; 131072], pos: i64, info: IrHyperExprInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let p0 = write_i64(b, p, info.span_start)
+    b = p0.0
+    p = p0.1
+    let p1 = write_i64(b, p, info.span_end)
+    b = p1.0
+    p = p1.1
+    let p2 = write_i64(b, p, info.algebra_tag)
+    b = p2.0
+    p = p2.1
+    let p3 = write_i64(b, p, info.op_kind)
+    b = p3.0
+    p = p3.1
+    let p4 = write_i64(b, p, if info.knowledge_wrapped { 1 } else { 0 })
+    b = p4.0
+    p = p4.1
+    (b, p)
+}
+
+fn read_hyper_expr_info(buf: [i8; 131072], pos: i64) -> (IrHyperExprInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let p0 = read_i64(buf, p)
+    let span_start = p0.0
+    p = p0.1
+    let p1 = read_i64(buf, p)
+    let span_end = p1.0
+    p = p1.1
+    let p2 = read_i64(buf, p)
+    let algebra_tag = p2.0
+    p = p2.1
+    let p3 = read_i64(buf, p)
+    let op_kind = p3.0
+    p = p3.1
+    let p4 = read_i64(buf, p)
+    let knowledge_wrapped = p4.0 != 0
+    p = p4.1
+    (IrHyperExprInfo {
+        span_start: span_start,
+        span_end: span_end,
+        algebra_tag: algebra_tag,
+        op_kind: op_kind,
+        knowledge_wrapped: knowledge_wrapped,
+    }, p)
+}
+
 fn serialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, ep: IrEpistemicSection) -> ([i8; 131072], i64) with Mut, Panic, Div, Alloc {
     var b = buf
     var p = pos
@@ -3707,6 +3878,17 @@ fn serialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, ep: IrEpistemicSe
     i = 0
     while i < ep.rollback_certificate_count {
         let pair = write_rollback_certificate_info(b, p, ep.rollback_certificates[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c34 = write_i64(b, p, ep.hyper_expr_count)
+    b = c34.0
+    p = c34.1
+    i = 0
+    while i < ep.hyper_expr_count {
+        let pair = write_hyper_expr_info(b, p, ep.hyper_exprs[i])
         b = pair.0
         p = pair.1
         i = i + 1
@@ -4152,6 +4334,19 @@ fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64) -> (IrEpistemic
         }
     }
 
+    if p < len {
+        let c34 = read_i64(buf, p)
+        ep.hyper_expr_count = c34.0
+        p = c34.1
+        i = 0
+        while i < ep.hyper_expr_count && i < IR_MAX_EPI_HYPER_EXPRS {
+            let pair = read_hyper_expr_info(buf, p)
+            ep.hyper_exprs[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
     (ep, p)
 }
 
@@ -4204,6 +4399,12 @@ fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: 
         pos = ep_pair.1
     }
 
+    if SOIR_VERSION >= 3 {
+        let alg_pair = serialize_ir_algebra_table(buf, pos, module.algebras)
+        buf = alg_pair.0
+        pos = alg_pair.1
+    }
+
     (*out_buf) = buf
     (*out_len) = pos
 }
@@ -4230,7 +4431,7 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     }
 
     let version = buf[4]
-    if version != 1 && version != SOIR_VERSION {
+    if version != 1 && version != 2 as i8 && version != 3 as i8 && version != SOIR_VERSION {
         return ir_empty_module()
     }
 
@@ -4245,7 +4446,7 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     var functions: [IrFunction; 1024] = [ir_empty_function(); 1024]
     var i: i64 = 0
     while i < fn_count {
-        let func_pair = deserialize_ir_function(buf, pos)
+        let func_pair = deserialize_ir_function(buf, pos, version)
         functions[i] = func_pair.0
         pos = func_pair.1
         i = i + 1
@@ -4266,19 +4467,21 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
         j = j + 1
     }
 
-    var module = IrModule {
-        functions: functions,
-        fn_count: fn_count,
-        string_table: string_table,
-        string_count: string_count,
-        epistemic: ir_empty_epistemic_section(),
-        prof_counters: [ir_empty_prof_counter_info(); 64],
-        prof_counter_count: 0,
-    }
+    var module = ir_empty_module()
+    module.functions = functions
+    module.fn_count = fn_count
+    module.string_table = string_table
+    module.string_count = string_count
 
     if version >= 2 && pos < len {
         let ep_pair = deserialize_ir_epistemic_section(buf, pos)
         module.epistemic = ep_pair.0
+        pos = ep_pair.1
+    }
+
+    if version >= 3 && pos < len {
+        let alg_pair = deserialize_ir_algebra_table(buf, pos)
+        module.algebras = alg_pair.0
     }
 
     module
