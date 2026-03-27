@@ -325,6 +325,13 @@ var FL_SCI_NEG: i64 = 0
 var FL_FRAC_DIGITS: i64 = 0
 var LAST_STMT_HAS_VALUE: i64 = 0
 
+// Constant table (pub const NAME: TYPE = VALUE)
+var CONST_NS: [i64; 512] = [0; 512]
+var CONST_NE: [i64; 512] = [0; 512]
+var CONST_VAL: [i64; 512] = [0; 512]
+var CONST_COUNT: i64 = 0
+var CONST_FOUND_VAL: i64 = 0
+
 // Token kinds: inlined as integers (boot4 doesn't init scalar globals)
 
 // ─── Helpers ───
@@ -2538,6 +2545,47 @@ fn var_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
         i = i - 1
     }
     return -1
+}
+
+fn const_find_val(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    var i: i64 = 0
+    while i < CONST_COUNT {
+        if name_eq(CONST_NS[i as usize], CONST_NE[i as usize], ns, ne) {
+            CONST_FOUND_VAL = CONST_VAL[i as usize]
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn scan_all_consts() with Panic, Mut {
+    CONST_COUNT = 0
+    var p: i64 = 0
+    var cv: i64 = 0
+    var neg_c: i64 = 0
+    var cn_ns: i64 = 0
+    var cn_ne: i64 = 0
+    while p < TC {
+        if TK[p as usize] != 49 { p = p + 1; continue }
+        p = p + 1  // skip 'pub'
+        if TK[p as usize] != 3 { continue }
+        if 0 == src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "const") { continue }
+        p = p + 1  // skip 'const'
+        if TK[p as usize] != 3 { continue }
+        if CONST_COUNT >= 511 { p = p + 1; continue }
+        cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
+        while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
+        if TK[p as usize] == 16 { p = p + 1 }
+        cv = 0; neg_c = 0
+        if TK[p as usize] == 18 { neg_c = 1; p = p + 1 }
+        if TK[p as usize] == 4 { cv = TV[p as usize]; p = p + 1 }
+        if neg_c != 0 { cv = 0 - cv }
+        CONST_NS[CONST_COUNT as usize] = cn_ns
+        CONST_NE[CONST_COUNT as usize] = cn_ne
+        CONST_VAL[CONST_COUNT as usize] = cv
+        CONST_COUNT = CONST_COUNT + 1
+    }
 }
 
 fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
@@ -5759,6 +5807,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     EXPR_TY_HASH = FN_SIG[fri as usize]
                     LAST_EXPR_IS_CLOSURE = 0
                 } else {
+                    if const_find_val(ns, ne) != 0 {
+                        if CONST_FOUND_VAL == 0 { em(0x31); em(0xc0) }
+                        else { em(0x48); em(0xb8); em64(CONST_FOUND_VAL) }
+                        EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                        return
+                    }
                     tc_undefined_var(name_tok)
                     em(0x31); em(0xc0)
                     EXPR_TY = 0
@@ -7913,8 +7967,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     TYPECHECK_FAILED = 0
     var p: i64 = 0
 
-    // Pass 0a: register structs (and skip algebra declarations)
+    // Pass 0a: register structs, constants, and skip algebra declarations
     ST_COUNT = 0
+    scan_all_consts()
     while p < TC {
         // Skip algebra declarations: algebra Name over Type { ... }
         if TK[p as usize] == 70 {
