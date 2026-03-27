@@ -6,12 +6,16 @@
 //        /tmp/mini_native.elf input.sio output.elf
 
 // ─── Global buffers ───
-var SRC: [i8; 2097152] = [0; 2097152]
+var SRC: [i8; 4194304] = [0; 4194304]
 var SRC_LEN: i64 = 0
 // Import resolution
 var IMP_PATH: [i8; 4096] = [0; 4096]
 var IMP_RAW_PATH: [i8; 4096] = [0; 4096]
 var IMP_LOADED: [i64; 256] = [0; 256]
+var IMP_LOADED_PATHS: [i8; 65536] = [0; 65536]
+var IMP_LOADED_OFFS: [i64; 256] = [0; 256]
+var IMP_LOADED_LENS: [i64; 256] = [0; 256]
+var IMP_PATHS_USED: i64 = 0
 var IMP_COUNT: i64 = 0
 var BASE_DIR: [i8; 512] = [0; 512]
 var BASE_DIR_LEN: i64 = 0
@@ -12979,19 +12983,39 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     }
                 }
             }
-            // Dedup check
+            // Dedup check — string comparison (hash pre-filter + full path match)
             let ph = imp_path_hash(fp_len)
             var already: i64 = 0
             var di: i64 = 0
             while di < IMP_COUNT {
-                if IMP_LOADED[di as usize] == ph { already = 1 }
+                if IMP_LOADED[di as usize] == ph && IMP_LOADED_LENS[di as usize] == fp_len {
+                    let off = IMP_LOADED_OFFS[di as usize]
+                    var match_ok: i64 = 1
+                    var mi: i64 = 0
+                    while mi < fp_len {
+                        if IMP_LOADED_PATHS[(off + mi) as usize] != IMP_PATH[mi as usize] { match_ok = 0 }
+                        mi = mi + 1
+                    }
+                    if match_ok == 1 { already = 1 }
+                }
                 di = di + 1
             }
             if already == 0 && IMP_COUNT < 256 {
+                // Record this path
                 IMP_LOADED[IMP_COUNT as usize] = ph
+                if IMP_PATHS_USED + fp_len < 65536 {
+                    IMP_LOADED_OFFS[IMP_COUNT as usize] = IMP_PATHS_USED
+                    IMP_LOADED_LENS[IMP_COUNT as usize] = fp_len
+                    var ri: i64 = 0
+                    while ri < fp_len {
+                        IMP_LOADED_PATHS[(IMP_PATHS_USED + ri) as usize] = IMP_PATH[ri as usize]
+                        ri = ri + 1
+                    }
+                    IMP_PATHS_USED = IMP_PATHS_USED + fp_len
+                }
                 IMP_COUNT = IMP_COUNT + 1
                 // Try to read the file
-                if fsz > 0 && SRC_LEN + fp_len + fsz + 3 < 2097152 {
+                if fsz > 0 && SRC_LEN + fp_len + fsz + 3 < 4194304 {
                     let raw = read_file(IMP_PATH)
                     // Append newline separator
                     SRC[SRC_LEN as usize] = 10
@@ -13011,6 +13035,8 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     while ci < fsz { SRC[(SRC_LEN + ci) as usize] = raw[ci as usize]; ci = ci + 1 }
                     SRC_LEN = SRC_LEN + fsz
                     print("import: "); print(IMP_PATH); print(" "); print_int(fsz); print(" bytes\n")
+                } else if fsz > 0 {
+                    print("error: import too large for SRC buffer: "); print(IMP_PATH); print(" ("); print_int(fsz); print(" bytes)\n")
                 }
             }
         }
@@ -13125,7 +13151,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     let raw = read_file(src)
     let sz = file_size(src)
     var i: i64 = 0
-    while i < sz && i < 2097152 { SRC[i as usize] = raw[i as usize]; i = i + 1 }
+    while i < sz && i < 4194304 { SRC[i as usize] = raw[i as usize]; i = i + 1 }
     SRC_LEN = sz
     print("source: "); print(src); print(" "); print_int(sz); print(" bytes\n")
     resolve_imports()
