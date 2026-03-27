@@ -11,12 +11,12 @@
 
 pub struct AutopoieticSystem {
     component_count: i64,
-    relations: [i64; 256],           // 16x16 flattened: relations[i*16+j]=1 means i produces j
-    component_values: [f64; 16],
-    component_variances: [f64; 16],
-    component_active: [i64; 16],     // 1=active, 0=inactive
+    relations: [i64; 64],            // 8x8 flattened: relations[i*8+j]=1 means i produces j
+    component_values: [f64; 8],
+    component_variances: [f64; 8],
+    component_active: [i64; 8],      // 1=active, 0=inactive
     boundary_permeability: f64,
-    alive: bool,
+    alive: i64,
     generation: i64,
     total_perturbation: f64,
     structural_drift_val: f64,
@@ -25,12 +25,12 @@ pub struct AutopoieticSystem {
 pub fn system_new(permeability: f64) -> AutopoieticSystem {
     AutopoieticSystem {
         component_count: 0,
-        relations: [0; 256],
-        component_values: [0.0; 16],
-        component_variances: [0.0; 16],
-        component_active: [0; 16],
+        relations: [0; 64],
+        component_values: [0.0; 8],
+        component_variances: [0.0; 8],
+        component_active: [0; 8],
         boundary_permeability: permeability,
-        alive: false,
+        alive: 0,
         generation: 0,
         total_perturbation: 0.0,
         structural_drift_val: 0.0,
@@ -41,19 +41,19 @@ pub fn system_new(permeability: f64) -> AutopoieticSystem {
 pub fn add_component(sys: AutopoieticSystem, produced_by: i64, produces: i64, value: f64, variance: f64) -> AutopoieticSystem with Mut, Div, Panic {
     var s = sys
     let idx = s.component_count
-    if idx >= 16 { return s }
+    if idx >= 8 { return s }
 
     s.component_active[idx as usize] = 1
     s.component_values[idx as usize] = value
     s.component_variances[idx as usize] = variance
 
     // Record production relation: produced_by → idx
-    if produced_by >= 0 && produced_by < 16 {
-        s.relations[(produced_by * 16 + idx) as usize] = 1
+    if produced_by >= 0 && produced_by < 8 {
+        s.relations[(produced_by * 8 + idx) as usize] = 1
     }
     // Record production relation: idx → produces
-    if produces >= 0 && produces < 16 {
-        s.relations[(idx * 16 + produces) as usize] = 1
+    if produces >= 0 && produces < 8 {
+        s.relations[(idx * 8 + produces) as usize] = 1
     }
 
     s.component_count = idx + 1
@@ -65,15 +65,15 @@ pub fn add_component(sys: AutopoieticSystem, produced_by: i64, produces: i64, va
 /// Values average with GUM variance propagation.
 pub fn produce_cycle(sys: AutopoieticSystem) -> AutopoieticSystem with Mut, Div, Panic {
     var s = sys
-    var new_values: [f64; 16] = s.component_values
-    var new_vars: [f64; 16] = s.component_variances
+    var new_values: [f64; 8] = s.component_values
+    var new_vars: [f64; 8] = s.component_variances
 
     var i = 0
     while i < s.component_count {
         if s.component_active[i as usize] == 1 {
             var j = 0
             while j < s.component_count {
-                if s.relations[(i * 16 + j) as usize] == 1 && s.component_active[j as usize] == 1 {
+                if s.relations[(i * 8 + j) as usize] == 1 && s.component_active[j as usize] == 1 {
                     let vi = s.component_values[i as usize]
                     let vj = s.component_values[j as usize]
                     let old_vj = vj
@@ -120,7 +120,7 @@ pub fn perturb(sys: AutopoieticSystem, value: f64, variance: f64) -> Autopoietic
 /// Deactivate a component and recheck closure.
 pub fn deactivate_component(sys: AutopoieticSystem, id: i64) -> AutopoieticSystem with Mut, Div, Panic {
     var s = sys
-    if id >= 0 && id < 16 {
+    if id >= 0 && id < 8 {
         s.component_active[id as usize] = 0
         s.alive = check_closure(s)
     }
@@ -128,7 +128,7 @@ pub fn deactivate_component(sys: AutopoieticSystem, id: i64) -> AutopoieticSyste
 }
 
 pub fn is_alive(sys: AutopoieticSystem) -> bool {
-    sys.alive
+    sys.alive != 0
 }
 
 pub fn generation(sys: AutopoieticSystem) -> i64 {
@@ -142,7 +142,7 @@ pub fn structural_drift(sys: AutopoieticSystem) -> f64 {
 /// DFS cycle detection on the active component subgraph.
 /// For each active component, search for a path back to itself.
 /// A cycle = organizational closure = autopoiesis.
-fn check_closure(sys: AutopoieticSystem) -> bool with Mut, Div, Panic {
+fn check_closure(sys: AutopoieticSystem) -> i64 with Mut, Div, Panic {
     var start = 0
     while start < sys.component_count {
         if sys.component_active[start as usize] == 0 {
@@ -150,17 +150,17 @@ fn check_closure(sys: AutopoieticSystem) -> bool with Mut, Div, Panic {
             continue
         }
 
-        var stack: [i64; 16] = [-1; 16]
+        var stack: [i64; 8] = [-1; 8]
         var stack_top = 0
-        var visited: [i64; 16] = [0; 16]
+        var visited: [i64; 8] = [0; 8]
         visited[start as usize] = 1
 
         // Push direct successors of start
         var j = 0
         while j < sys.component_count {
-            if sys.relations[(start * 16 + j) as usize] == 1 && sys.component_active[j as usize] == 1 {
-                if j == start { return true }
-                if stack_top < 16 {
+            if sys.relations[(start * 8 + j) as usize] == 1 && sys.component_active[j as usize] == 1 {
+                if j == start { return 1 }
+                if stack_top < 8 {
                     stack[stack_top as usize] = j
                     stack_top = stack_top + 1
                 }
@@ -177,9 +177,9 @@ fn check_closure(sys: AutopoieticSystem) -> bool with Mut, Div, Panic {
 
             var k = 0
             while k < sys.component_count {
-                if sys.relations[(node * 16 + k) as usize] == 1 && sys.component_active[k as usize] == 1 {
-                    if k == start { return true }
-                    if visited[k as usize] == 0 && stack_top < 16 {
+                if sys.relations[(node * 8 + k) as usize] == 1 && sys.component_active[k as usize] == 1 {
+                    if k == start { return 1 }
+                    if visited[k as usize] == 0 && stack_top < 8 {
                         stack[stack_top as usize] = k
                         stack_top = stack_top + 1
                     }
@@ -189,5 +189,5 @@ fn check_closure(sys: AutopoieticSystem) -> bool with Mut, Div, Panic {
         }
         start = start + 1
     }
-    false
+    0
 }
