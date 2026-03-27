@@ -8,19 +8,24 @@ cd "$ROOT_DIR"
 
 LEAN="$ROOT_DIR/self-hosted/compiler/lean_single.sio"
 OUT="${1:-/tmp/souc-native.elf}"
+FORCE_SOURCE_BOOTSTRAP="${SOUNIO_FORCE_SOURCE_BOOTSTRAP:-0}"
 
 # Strategy 0: Use checked-in self-hosted native compiler
-for NATIVE_PREBUILT in \
-    "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64" \
-    "$ROOT_DIR/artifacts/bootstrap/souc-native-v1.0.0.elf"; do
-if [ -x "$NATIVE_PREBUILT" ]; then
-    echo "Using native compiler artifact..."
-    cp "$NATIVE_PREBUILT" "$OUT"
-    chmod +x "$OUT"
-    echo "Native compiler ready: $OUT ($(stat -c%s "$OUT") bytes)"
-    exit 0
+if [ "$FORCE_SOURCE_BOOTSTRAP" != "1" ]; then
+    for NATIVE_PREBUILT in \
+        "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64" \
+        "$ROOT_DIR/artifacts/bootstrap/souc-native-v1.0.0.elf"; do
+    if [ -x "$NATIVE_PREBUILT" ]; then
+        echo "Using native compiler artifact..."
+        cp "$NATIVE_PREBUILT" "$OUT"
+        chmod +x "$OUT"
+        echo "Native compiler ready: $OUT ($(stat -c%s "$OUT") bytes)"
+        exit 0
+    fi
+    done
+else
+    echo "Skipping checked-in native compiler artifacts (SOUNIO_FORCE_SOURCE_BOOTSTRAP=1)"
 fi
-done
 
 # Strategy 1: Use boot4.elf (pure native, no dependencies)
 for BOOT4_ELF in \

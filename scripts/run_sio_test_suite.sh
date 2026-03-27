@@ -20,6 +20,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Harness-local override: keep repo-wide default behavior untouched unless
+# callers explicitly point the suite at an alternate compiler path/backend.
+if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
+    export SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+fi
+if [[ -n "${SOUNIO_TEST_NATIVE_BIN:-}" ]]; then
+    export SOUC_NATIVE_BIN="$SOUNIO_TEST_NATIVE_BIN"
+fi
+
 # shellcheck source=lib/resolve_souc.sh
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
@@ -178,6 +187,9 @@ run_test() {
 
 echo "=== Sounio Test Suite ==="
 echo "Using souc: $SOUC_BIN"
+if [[ -n "${SOUC_NATIVE_BIN:-}" ]]; then
+    echo "Using native backend: $SOUC_NATIVE_BIN"
+fi
 echo ""
 
 echo "--- run-pass tests ---"
