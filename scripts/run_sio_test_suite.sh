@@ -112,8 +112,18 @@ run_test() {
     local output
     local exit_code=0
     if $is_run_pass; then
+        # Per-test timeout (seconds); override via SOUNIO_TEST_TIMEOUT env var
+        local _timeout="${SOUNIO_TEST_TIMEOUT:-30}"
         if $is_check_only; then
-            output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+            output=$(timeout "$_timeout" "$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+            if [[ $exit_code -eq 124 ]]; then
+                FAIL=$((FAIL + 1))
+                ERRORS="${ERRORS}\n  FAIL  $basename (check timed out after ${_timeout}s)"
+                if [[ "$VERBOSE" == "--verbose" ]]; then
+                    echo "  FAIL  $basename (check timed out after ${_timeout}s)"
+                fi
+                return
+            fi
             if [[ $exit_code -ne 0 ]]; then
                 FAIL=$((FAIL + 1))
                 ERRORS="${ERRORS}\n  FAIL  $basename (check exited $exit_code)"
@@ -124,7 +134,15 @@ run_test() {
                 return
             fi
         else
-            output=$("$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+            output=$(timeout "$_timeout" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+            if [[ $exit_code -eq 124 ]]; then
+                FAIL=$((FAIL + 1))
+                ERRORS="${ERRORS}\n  FAIL  $basename (run timed out after ${_timeout}s)"
+                if [[ "$VERBOSE" == "--verbose" ]]; then
+                    echo "  FAIL  $basename (run timed out after ${_timeout}s)"
+                fi
+                return
+            fi
             if [[ $exit_code -ne 0 ]]; then
                 FAIL=$((FAIL + 1))
                 ERRORS="${ERRORS}\n  FAIL  $basename (run exited $exit_code)"
@@ -155,8 +173,17 @@ run_test() {
     elif $is_compile_fail; then
         local tmp_out
         tmp_out="$(mktemp /tmp/sounio-compile-fail-XXXXXX.elf)"
-        output=$("$SOUC_BIN" compile "$file" -o "$tmp_out" 2>&1) || exit_code=$?
+        local _timeout="${SOUNIO_TEST_TIMEOUT:-30}"
+        output=$(timeout "$_timeout" "$SOUC_BIN" compile "$file" -o "$tmp_out" 2>&1) || exit_code=$?
         rm -f "$tmp_out"
+        if [[ $exit_code -eq 124 ]]; then
+            FAIL=$((FAIL + 1))
+            ERRORS="${ERRORS}\n  FAIL  $basename (compile timed out after ${_timeout}s)"
+            if [[ "$VERBOSE" == "--verbose" ]]; then
+                echo "  FAIL  $basename (compile timed out after ${_timeout}s)"
+            fi
+            return
+        fi
         if [[ $exit_code -eq 0 ]]; then
             FAIL=$((FAIL + 1))
             ERRORS="${ERRORS}\n  FAIL  $basename (expected compile failure but passed)"
