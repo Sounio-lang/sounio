@@ -2,7 +2,7 @@
 topic_id: repo.docs.llm-programming-guide
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-03-27
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm-programming-guide
 -->
@@ -477,7 +477,68 @@ extern "C" {
 - Two-arg `f64,f64→f64`: `pow`, `atan2`
 - Integer FFI (`malloc`, `getpid`, etc.) **silently terminates** — do not use.
 
-## 14. What Does NOT Work (Verified)
+## 14. Ontology Declarations [Production]
+
+```sio
+// Source: tests/run-pass/ontology_roles_basic.sio
+ontology Pharma {
+    class Drug
+    class Disease
+    class Rapamycin subclass_of Drug
+    role treats domain Drug range Disease
+    role treated_by inverse_of treats
+    role has_part transitive
+    disjoint Drug, Disease
+
+    class StrongDrug subclass_of Drug {
+        property potency: f64 where potency >= 10.0
+    }
+}
+```
+
+Classes become types usable in function signatures. Disjointness and subsumption are enforced at compile time. OWL 2 axiom semantics: SubClassOf, EquivalentClasses, DisjointClasses, object property domain/range, inverse properties.
+
+## 15. Study Blocks (PPCR / Clinical Research) [Beta]
+
+```sio
+// Source: tests/run-pass/study_block_basic.sio
+study MyTrial {
+    title: "Rapamycin Dosing Study"
+    design: parallel_rct
+    participants { sample_size: 120, power: 0.80 }
+    outcomes { primary: blood_concentration }
+    analysis {
+        hypothesis H1 { outcome: blood_concentration, direction: greater, effect_size: 0.5 }
+        alpha: 0.05
+        correction: bonferroni
+    }
+}
+```
+
+CONSORT-aligned study declarations with pre-registered hypotheses, multiple testing correction, and audit trails.
+
+### PPCR Effects
+
+| Effect | ID | Required when |
+|--------|----|---------------|
+| `Audit` | 15 | Provenance tracking (PROV-DM) |
+| `Hypothesis` | 16 | Statistical tests on registered endpoints |
+| `MultiTest` | 17 | Multiple hypothesis tests requiring correction |
+
+```sio
+// Registered analysis — no warning
+fn analyze() -> i32 with Hypothesis {
+    t_test_one_sample(endpoint_a, 30, 0)
+}
+
+// Unregistered analysis — W041 warning
+fn exploratory() -> i32 with Hypothesis {
+    t_test_one_sample(bmi, 50, 0)  // W041: testing unregistered variable
+}
+```
+
+## 16. What Does NOT Work (Verified)
+
 
 | Feature | Status | Use Instead |
 |---------|--------|-------------|
@@ -491,7 +552,7 @@ extern "C" {
 | Integer FFI (`malloc`, etc.) | Broken | Fixed-size arrays |
 | Bare `&![T;N]` mutation (interpreter) | Known bug | Struct wrapper |
 
-## 15. Quick Checklist
+## 17. Quick Checklist
 
 Before submitting Sounio code:
 
@@ -505,7 +566,7 @@ Before submitting Sounio code:
 8. Named fn refs for higher-order, not closures
 9. Bare array `&!` mutation: wrap in struct if interpreter
 
-## 16. Real Code to Study
+## 18. Real Code to Study
 
 | File | What it demonstrates |
 |------|---------------------|
@@ -520,3 +581,7 @@ Before submitting Sounio code:
 | `stdlib/collections/vec.sio` | impl blocks, IntVec, push/pop |
 | `stdlib/math/approx.sio` | Function pointers, Chebyshev approximation |
 | `stdlib/prob/normal.sio` | Structs, math, scientific computing |
+| `tests/run-pass/ontology_roles_basic.sio` | Ontology: classes, roles, disjoint |
+| `tests/run-pass/study_block_basic.sio` | PPCR: study block with hypotheses |
+| `tests/run-pass/hypothesis_registered.sio` | Hypothesis effect, registered analysis |
+| `tests/run-pass/algebra_g2_invariants.sio` | Algebra declarations, octonions |
