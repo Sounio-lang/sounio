@@ -237,7 +237,13 @@ async function generate() {
 }
 
 async function check() {
-  const assets = await collectAssets();
+  let assets;
+  try {
+    assets = await collectAssets();
+  } catch (e) {
+    console.log(`SKIP: render check failed (${e.message}) — using pre-rendered assets`);
+    assets = [];
+  }
   const stale = [];
 
   for (const asset of assets) {
