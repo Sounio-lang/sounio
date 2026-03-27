@@ -62,7 +62,8 @@ struct BDFState {
     atol: f64,
     rtol: f64,
     newton_tol: f64,
-    max_newton_iter: i64
+    max_newton_iter: i64,
+    last_accepted: i64
 }
 
 struct BDFResult {
@@ -84,11 +85,11 @@ struct BDFTrajectory {
 }
 
 struct NewtonResult {
-    y: [f64; 8],
     converged: i64,
     iters: i64,
     fevals: i64,
-    jevals: i64
+    jevals: i64,
+    y: [f64; 8]
 }
 
 struct BDFStepResult {
@@ -426,23 +427,23 @@ fn bdf_newton_solve(
             i = i + 1
         }
 
-        var g_norm: f64 = 0.0
+        var g_sq: f64 = 0.0
         i = 0
         while i < n_eqs {
-            g_norm = g_norm + neg_G[i] * neg_G[i]
+            g_sq = g_sq + neg_G[i] * neg_G[i]
             i = i + 1
         }
-        g_norm = sqrt_f64(g_norm)
-
-        if g_norm < newton_tol {
+        // Compare squared norms to avoid sqrt precision issues for small values
+        let tol_sq: f64 = newton_tol * newton_tol
+        if g_sq < tol_sq {
             converged = 1
             iters = iter + 1
             return NewtonResult {
-                y: y_k,
                 converged: converged,
                 iters: iters,
                 fevals: fevals,
-                jevals: jevals
+                jevals: jevals,
+                y: y_k
             }
         }
 
@@ -460,25 +461,25 @@ fn bdf_newton_solve(
     // Check if final residual is small enough even if max_iter reached
     let f_final = eval_rhs(fn_id, t_new, y_k, n_eqs)
     fevals = fevals + 1
-    var final_norm: f64 = 0.0
+    var final_sq: f64 = 0.0
     i = 0
     while i < n_eqs {
         let g_i = y_k[i] - hist_sum[i] - beta_h * f_final[i]
-        final_norm = final_norm + g_i * g_i
+        final_sq = final_sq + g_i * g_i
         i = i + 1
     }
-    final_norm = sqrt_f64(final_norm)
-    if final_norm < newton_tol * 100.0 {
+    let tol100_sq: f64 = newton_tol * newton_tol * 10000.0  // (tol*100)^2
+    if final_sq < tol100_sq {
         converged = 1
     }
 
     iters = max_iter
     return NewtonResult {
-        y: y_k,
         converged: converged,
         iters: iters,
         fevals: fevals,
-        jevals: jevals
+        jevals: jevals,
+        y: y_k
     }
 }
 
@@ -507,7 +508,7 @@ fn error_norm_weighted(err: [f64; 8], y_old: [f64; 8], y_new: [f64; 8],
 // BDF STEP
 // ============================================================================
 
-fn bdf_step(state: BDFState, rhs_fn_id: i64) -> BDFStepResult with Mut, Panic, Div {
+fn bdf_step(state: BDFState, rhs_fn_id: i64) -> BDFState with Mut, Panic, Div {
     var s = state
     let n = s.n_eqs
     let h = s.dt
@@ -564,7 +565,7 @@ fn bdf_step(state: BDFState, rhs_fn_id: i64) -> BDFStepResult with Mut, Panic, D
         if s.order > 1 {
             s.order = s.order - 1
         }
-        return BDFStepResult { new_state: s, accepted: 0 }
+        s.last_accepted = 0; return s
     }
 
     // Error estimation using predictor-corrector difference with error constant
@@ -582,7 +583,7 @@ fn bdf_step(state: BDFState, rhs_fn_id: i64) -> BDFStepResult with Mut, Panic, D
 
     let accepted: i64 = if err_n <= 1.0 { 1 } else { 0 }
 
-    if accepted {
+    if accepted != 0 {
         // Shift history
         s.y_prev3 = s.y_prev2
         s.y_prev2 = s.y_prev1
@@ -628,7 +629,7 @@ fn bdf_step(state: BDFState, rhs_fn_id: i64) -> BDFStepResult with Mut, Panic, D
     s.dt = max_f64(1.0e-14, s.dt)
     s.dt = min_f64(s.dt, s.dt_max)
 
-    return BDFStepResult { new_state: s, accepted: accepted }
+    s.last_accepted = accepted; return s
 }
 
 // ============================================================================
@@ -655,7 +656,8 @@ fn bdf_init(n_eqs: i64, y0: [f64; 8], t0: f64, dt: f64,
         atol: atol,
         rtol: rtol,
         newton_tol: 1.0e-10,
-        max_newton_iter: 20
+        max_newton_iter: 20,
+        last_accepted: 0
     }
 }
 
@@ -679,7 +681,8 @@ fn bdf_init_order(n_eqs: i64, y0: [f64; 8], t0: f64, dt: f64,
         atol: atol,
         rtol: rtol,
         newton_tol: 1.0e-10,
-        max_newton_iter: 20
+        max_newton_iter: 20,
+        last_accepted: 0
     }
 }
 
@@ -703,10 +706,10 @@ fn bdf_integrate(state: BDFState, t_end: f64, rhs_fn_id: i64) -> BDFResult with 
             s.dt = 1.0e-15
         }
 
-        let step_result = bdf_step(s, rhs_fn_id)
-        s = step_result.new_state
+        s = bdf_step(s, rhs_fn_id)
+        // s already updated by SRET
 
-        if step_result.accepted {
+        if s.last_accepted != 0 {
             n_accepted = n_accepted + 1
         } else {
             n_rejected = n_rejected + 1
@@ -758,10 +761,10 @@ fn bdf_integrate_trajectory(state: BDFState, t_end: f64, rhs_fn_id: i64) -> BDFT
             s.dt = 1.0e-15
         }
 
-        let step_result = bdf_step(s, rhs_fn_id)
-        s = step_result.new_state
+        s = bdf_step(s, rhs_fn_id)
+        // s already updated by SRET
 
-        if step_result.accepted {
+        if s.last_accepted != 0 {
             let idx = traj.n_points
             traj.times[idx] = s.t
             k = 0
