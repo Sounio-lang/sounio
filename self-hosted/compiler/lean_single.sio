@@ -53,12 +53,31 @@ var SQW: [i64; 256] = [0; 256]
 var FN_NS: [i64; 4096] = [0; 4096]
 var FN_NE: [i64; 4096] = [0; 4096]
 var FN_OFF: [i64; 4096] = [0; 4096]
+var FN_SIG: [i64; 4096] = [0; 4096]
 var FN_COUNT: i64 = 0
 
 // Call patch table: code offset where rel32 needs patching, target fn index
 var PATCH_OFF: [i64; 8192] = [0; 8192]
 var PATCH_FN: [i64; 8192] = [0; 8192]
+var PATCH_KIND: [i64; 8192] = [0; 8192]
 var PATCH_COUNT: i64 = 0
+
+// Canonical function-signature registry for fn-typed values and indirect calls.
+// Signatures are stored as arity + param types/hashes + return type/hash.
+var FNSIG_ARITY: [i64; 256] = [0; 256]
+var FNSIG_RET_TY: [i64; 256] = [0; 256]
+var FNSIG_RET_HASH: [i64; 256] = [0; 256]
+var FNSIG_PARAM_TY: [i64; 4096] = [0; 4096]
+var FNSIG_PARAM_HASH: [i64; 4096] = [0; 4096]
+var FNSIG_COUNT: i64 = 1
+var FNSIG_SCRATCH_ARITY: i64 = 0
+var FNSIG_SCRATCH_RET_TY: i64 = 0
+var FNSIG_SCRATCH_RET_HASH: i64 = 0
+var FNSIG_SCRATCH_PARAM_TY: [i64; 16] = [0; 16]
+var FNSIG_SCRATCH_PARAM_HASH: [i64; 16] = [0; 16]
+var FNSIG_SCAN_DEPTH: i64 = 0
+var FNSIG_TMP_PARAM_TY: [i64; 256] = [0; 256]
+var FNSIG_TMP_PARAM_HASH: [i64; 256] = [0; 256]
 
 // Struct registry: flat array, up to 32 structs
 // ST[i*66+0] = name hash
@@ -373,6 +392,7 @@ fn emit_direct_fn_call_x86(fi: i64, argc: i64) with Mut {
     em(0xe8)
     PATCH_OFF[PATCH_COUNT as usize] = CL
     PATCH_FN[PATCH_COUNT as usize] = fi
+    PATCH_KIND[PATCH_COUNT as usize] = 0
     PATCH_COUNT = PATCH_COUNT + 1
     em32(0)
     emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
@@ -473,6 +493,7 @@ fn emit_direct_fn_call_a64(fi: i64, argc: i64) with Mut {
     if argc >= 1 { emit_pop_x0_a64() }
     PATCH_OFF[PATCH_COUNT as usize] = CL
     PATCH_FN[PATCH_COUNT as usize] = fi
+    PATCH_KIND[PATCH_COUNT as usize] = 0
     PATCH_COUNT = PATCH_COUNT + 1
     em32(0x94000000)
 }
@@ -720,6 +741,13 @@ fn patch_branch_a64(off: i64, target: i64) with Mut, Panic {
         // B.cond / CBZ / CBNZ: 19-bit offset in bits [23:5]
         em32_at(off, (insn & 0xFF00001F) | ((rel & 0x7FFFF) << 5))
     }
+}
+
+fn patch_adr_a64(off: i64, target: i64, rd: i64) with Mut, Panic {
+    let rel = target - off
+    let immlo = rel & 0x3
+    let immhi = (rel >> 2) & 0x7FFFF
+    em32_at(off, 0x10000000 | ((immlo & 0x3) << 29) | ((immhi & 0x7FFFF) << 5) | rd)
 }
 
 // ARM64 address-of variable: lea x0, [x29 - slot*8]
@@ -1346,6 +1374,17 @@ fn scan_fn_param_type(fi: i64, arg_idx: i64) with Mut, Panic {
     SCAN_TY_HASH = 0
 }
 
+fn scan_fnsig_param_type(sig: i64, arg_idx: i64) with Mut, Panic {
+    SCAN_TY = 0
+    SCAN_TY_HASH = 0
+    SCAN_TY_NEXT = 0
+    if sig <= 0 || sig >= FNSIG_COUNT { return }
+    if arg_idx < 0 || arg_idx >= FNSIG_ARITY[sig as usize] { return }
+    let base = sig * 16 + arg_idx
+    SCAN_TY = FNSIG_PARAM_TY[base as usize]
+    SCAN_TY_HASH = FNSIG_PARAM_HASH[base as usize]
+}
+
 
 fn print_effect_mask(mask: i64) with IO, Mut {
     if mask == 0 {
@@ -1785,6 +1824,181 @@ fn precheck_temporal_window_conflict() -> i64 with IO, Mut, Panic {
     return 0
 }
 
+fn fnsig_intern_scratch() -> i64 with Mut, Panic {
+    var sig: i64 = 1
+    while sig < FNSIG_COUNT {
+        if FNSIG_ARITY[sig as usize] == FNSIG_SCRATCH_ARITY
+            && FNSIG_RET_TY[sig as usize] == FNSIG_SCRATCH_RET_TY
+            && FNSIG_RET_HASH[sig as usize] == FNSIG_SCRATCH_RET_HASH {
+            var same: i64 = 1
+            var pi: i64 = 0
+            while pi < FNSIG_SCRATCH_ARITY {
+                let base = sig * 16 + pi
+                if FNSIG_PARAM_TY[base as usize] != FNSIG_SCRATCH_PARAM_TY[pi as usize]
+                    || FNSIG_PARAM_HASH[base as usize] != FNSIG_SCRATCH_PARAM_HASH[pi as usize] {
+                    same = 0
+                    pi = FNSIG_SCRATCH_ARITY
+                } else {
+                    pi = pi + 1
+                }
+            }
+            if same == 1 { return sig }
+        }
+        sig = sig + 1
+    }
+    sig = FNSIG_COUNT
+    if sig >= 256 { return 0 }
+    FNSIG_ARITY[sig as usize] = FNSIG_SCRATCH_ARITY
+    FNSIG_RET_TY[sig as usize] = FNSIG_SCRATCH_RET_TY
+    FNSIG_RET_HASH[sig as usize] = FNSIG_SCRATCH_RET_HASH
+    var pi: i64 = 0
+    while pi < 16 {
+        let base = sig * 16 + pi
+        if pi < FNSIG_SCRATCH_ARITY {
+            FNSIG_PARAM_TY[base as usize] = FNSIG_SCRATCH_PARAM_TY[pi as usize]
+            FNSIG_PARAM_HASH[base as usize] = FNSIG_SCRATCH_PARAM_HASH[pi as usize]
+        } else {
+            FNSIG_PARAM_TY[base as usize] = 0
+            FNSIG_PARAM_HASH[base as usize] = 0
+        }
+        pi = pi + 1
+    }
+    FNSIG_COUNT = FNSIG_COUNT + 1
+    return sig
+}
+
+fn scan_fn_type_signature(p0: i64) with Mut, Panic {
+    var p = p0 + 1
+    let depth = FNSIG_SCAN_DEPTH
+    let tmp_base = depth * 16
+    if depth < 15 { FNSIG_SCAN_DEPTH = depth + 1 }
+    var arity: i64 = 0
+    var i: i64 = 0
+    while i < 16 {
+        FNSIG_TMP_PARAM_TY[(tmp_base + i) as usize] = 0
+        FNSIG_TMP_PARAM_HASH[(tmp_base + i) as usize] = 0
+        i = i + 1
+    }
+    if TK[p as usize] == 6 {
+        p = p + 1
+        while TK[p as usize] != 7 && TK[p as usize] != 0 {
+            scan_type(p)
+            if arity < 16 {
+                FNSIG_TMP_PARAM_TY[(tmp_base + arity) as usize] = SCAN_TY
+                FNSIG_TMP_PARAM_HASH[(tmp_base + arity) as usize] = SCAN_TY_HASH
+            }
+            arity = arity + 1
+            p = SCAN_TY_NEXT
+            if TK[p as usize] == 28 { p = p + 1 }
+        }
+        if TK[p as usize] == 7 { p = p + 1 }
+    }
+    var ret_ty: i64 = 5
+    var ret_hash: i64 = 0
+    if TK[p as usize] == 10 {
+        p = p + 1
+        scan_type(p)
+        ret_ty = SCAN_TY
+        ret_hash = SCAN_TY_HASH
+        p = SCAN_TY_NEXT
+    }
+    if TK[p as usize] == 38 {
+        p = p + 1
+        while tok_is_effect_name(p) {
+            p = p + 1
+            if TK[p as usize] == 28 && tok_is_effect_name(p + 1) {
+                p = p + 1
+            } else {
+                break
+            }
+        }
+    }
+    FNSIG_SCRATCH_ARITY = arity
+    FNSIG_SCRATCH_RET_TY = ret_ty
+    FNSIG_SCRATCH_RET_HASH = ret_hash
+    i = 0
+    while i < 16 {
+        if i < arity {
+            FNSIG_SCRATCH_PARAM_TY[i as usize] = FNSIG_TMP_PARAM_TY[(tmp_base + i) as usize]
+            FNSIG_SCRATCH_PARAM_HASH[i as usize] = FNSIG_TMP_PARAM_HASH[(tmp_base + i) as usize]
+        } else {
+            FNSIG_SCRATCH_PARAM_TY[i as usize] = 0
+            FNSIG_SCRATCH_PARAM_HASH[i as usize] = 0
+        }
+        i = i + 1
+    }
+    FNSIG_SCAN_DEPTH = depth
+    SCAN_TY = 9
+    SCAN_TY_HASH = fnsig_intern_scratch()
+    SCAN_TY_NEXT = p
+}
+
+fn fnsig_from_decl_name_tok(name_tok: i64) -> i64 with Mut, Panic {
+    var p = name_tok + 1
+    let depth = FNSIG_SCAN_DEPTH
+    let tmp_base = depth * 16
+    if depth < 15 { FNSIG_SCAN_DEPTH = depth + 1 }
+    var arity: i64 = 0
+    var i: i64 = 0
+    while i < 16 {
+        FNSIG_TMP_PARAM_TY[(tmp_base + i) as usize] = 0
+        FNSIG_TMP_PARAM_HASH[(tmp_base + i) as usize] = 0
+        i = i + 1
+    }
+    if TK[p as usize] == 6 {
+        p = p + 1
+        while TK[p as usize] != 7 && TK[p as usize] != 0 {
+            if TK[p as usize] == 3 {
+                p = p + 1
+                if TK[p as usize] == 43 {
+                    p = p + 1
+                    scan_type(p)
+                    if arity < 16 {
+                        FNSIG_TMP_PARAM_TY[(tmp_base + arity) as usize] = SCAN_TY
+                        FNSIG_TMP_PARAM_HASH[(tmp_base + arity) as usize] = SCAN_TY_HASH
+                    }
+                    arity = arity + 1
+                    p = SCAN_TY_NEXT
+                }
+            } else {
+                p = p + 1
+            }
+            if TK[p as usize] == 28 { p = p + 1 }
+        }
+        if TK[p as usize] == 7 { p = p + 1 }
+    }
+    var ret_ty: i64 = 5
+    var ret_hash: i64 = 0
+    if TK[p as usize] == 10 {
+        p = p + 1
+        scan_type(p)
+        ret_ty = SCAN_TY
+        ret_hash = SCAN_TY_HASH
+        p = SCAN_TY_NEXT
+    }
+    p = skip_signature_where_clause(p)
+    if TK[p as usize] == 38 {
+        p = p + 1
+        while TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 }
+    }
+    FNSIG_SCRATCH_ARITY = arity
+    FNSIG_SCRATCH_RET_TY = ret_ty
+    FNSIG_SCRATCH_RET_HASH = ret_hash
+    i = 0
+    while i < 16 {
+        if i < arity {
+            FNSIG_SCRATCH_PARAM_TY[i as usize] = FNSIG_TMP_PARAM_TY[(tmp_base + i) as usize]
+            FNSIG_SCRATCH_PARAM_HASH[i as usize] = FNSIG_TMP_PARAM_HASH[(tmp_base + i) as usize]
+        } else {
+            FNSIG_SCRATCH_PARAM_TY[i as usize] = 0
+            FNSIG_SCRATCH_PARAM_HASH[i as usize] = 0
+        }
+        i = i + 1
+    }
+    FNSIG_SCAN_DEPTH = depth
+    return fnsig_intern_scratch()
+}
+
 fn scan_type(p0: i64) with Mut, Panic {
     var p = p0
     SCAN_TY = 0
@@ -1834,37 +2048,7 @@ fn scan_type(p0: i64) with Mut, Panic {
     if TK[p as usize] == 44 { p = p + 1 }
     if TK[p as usize] == 32 { p = p + 1 }
     if TK[p as usize] == 1 {
-        p = p + 1
-        if TK[p as usize] == 6 {
-            p = p + 1
-            while TK[p as usize] != 7 && TK[p as usize] != 0 {
-                scan_type(p)
-                p = SCAN_TY_NEXT
-                if TK[p as usize] == 28 { p = p + 1 }
-            }
-            if TK[p as usize] == 7 { p = p + 1 }
-        }
-        FL_SCI_SCRATCH = 0
-        if TK[p as usize] == 10 {
-            p = p + 1
-            scan_type(p)
-            FL_SCI_SCRATCH = SCAN_TY
-            p = SCAN_TY_NEXT
-        }
-        if TK[p as usize] == 38 {
-            p = p + 1
-            while tok_is_effect_name(p) {
-                p = p + 1
-                if TK[p as usize] == 28 && tok_is_effect_name(p + 1) {
-                    p = p + 1
-                } else {
-                    break
-                }
-            }
-        }
-        SCAN_TY = 9
-        SCAN_TY_HASH = FL_SCI_SCRATCH
-        SCAN_TY_NEXT = p
+        scan_fn_type_signature(p)
         return
     }
     if TK[p as usize] == 6 && TK[(p + 1) as usize] == 7 {
@@ -3609,24 +3793,42 @@ fn emit_file_size() with Mut {
     em(0x48); em(0x83); em(0xc4); em(0x90 as i64 & 0xFF)  // add rsp, 144
 }
 
-fn emit_write_file() with Mut {
+fn emit_write_file_flags(open_flags: i64) with Mut {
     // rdi = path, rsi = buf addr, rdx = len
-    // open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644) → write(fd, buf, len) → close(fd)
     em(0x52)  // push rdx (len)
     em(0x56)  // push rsi (buf)
-    em(0xbe); em32(0x241)  // mov esi, O_WRONLY|O_CREAT|O_TRUNC (0x41|0x200)
+    em(0xbe); em32(open_flags)
     em(0xba); em32(0x1A4)  // mov edx, 0644
     em(0xb8); em32(2)  // mov eax, 2 (sys_open)
     em(0x0f); em(0x05)  // → fd in rax
-    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (fd)
+    em(0x48); em(0x85); em(0xc0)  // test rax, rax
+    em(0x0f); em(0x89); let open_ok = CL; em32(0)  // jns open_ok
+    em(0x48); em(0x83); em(0xc4); em(0x10)  // add rsp, 16
+    em(0xe9); let done = CL; em32(0)
+    let open_ok_target = CL
+    em(0x49); em(0x89); em(0xc0)  // mov r8, rax (fd)
     em(0x5e)  // pop rsi (buf)
     em(0x5a)  // pop rdx (len)
+    em(0x4c); em(0x89); em(0xc7)  // mov rdi, r8
     em(0xb8); em32(1)  // mov eax, 1 (sys_write)
     em(0x0f); em(0x05)
+    em(0x49); em(0x89); em(0xc1)  // mov r9, rax (write result)
     // close(fd)
+    em(0x4c); em(0x89); em(0xc7)  // mov rdi, r8
     em(0xb8); em32(3)  // mov eax, 3 (sys_close)
     em(0x0f); em(0x05)
-    em(0x48); em(0xb8); em64(1)  // return 1 (success)
+    em(0x4c); em(0x89); em(0xc8)  // mov rax, r9
+    let done_target = CL
+    patch32(open_ok, open_ok_target)
+    patch32(done, done_target)
+}
+
+fn emit_write_file() with Mut {
+    emit_write_file_flags(0x241)
+}
+
+fn emit_append_file() with Mut {
+    emit_write_file_flags(0x441)
 }
 
 // ─── Expression compiler (recursive descent) ───
@@ -4219,7 +4421,6 @@ fn compile_primary() with IO, Mut, Panic, Div {
                             VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                             VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
                         }
-                        if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
                         EP = SCAN_TY_NEXT
                     }
                 }
@@ -4614,6 +4815,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             if g_found == 1 { EP = EP + 3 }
         }
+        let ident_fi = fn_find(ns, ne)
         // Function call: ident(args)
         if TK[EP as usize] == 6 {
             // Check for print("str") or print(variable)
@@ -4910,8 +5112,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 1
                 return
             }
-            // Check for write_file(path, buf, len)
-            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "write_file") {
+            // Check for write_file/path aliases
+            if fn_find(ns, ne) < 0 && (src_match(ns, ne - ns, "write_file") || src_match(ns, ne - ns, "write_bytes") || src_match(ns, ne - ns, "append_file")) {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 compile_or(); em(0x50)  // path
@@ -4923,9 +5125,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x5e)  // pop rsi (buf addr)
                 em(0x5f)  // pop rdi (path)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                emit_write_file()
+                if src_match(ns, ne - ns, "append_file") { emit_append_file() } else { emit_write_file() }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 1
+                EXPR_TY_HASH = 0
                 return
             }
             // Check for str_len(s)
@@ -5251,8 +5454,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if bl == 10 && bh == 10139623 { EP = EP + 1; compile_or(); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0); em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; EXPR_TY = 1; return }
             if bl == 10 && bh == 10138972 { EP = EP + 1; compile_or(); em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
             // User function call
-            let fi = fn_find(ns, ne)
+            let fi = ident_fi
             let call_vslot = var_find(ns, ne)
+            var call_sig: i64 = 0
+            var call_is_closure: i64 = 0
+            if call_vslot >= 0 && var_find_ty(ns, ne) == 9 {
+                call_sig = var_find_ty_hash(ns, ne)
+                call_is_closure = var_find_is_closure(ns, ne)
+            }
             let call_tok = EP - 1
             EP = EP + 1
             var argc: i64 = 0
@@ -5261,15 +5470,20 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 compile_or()
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
-                    if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
-                        if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
-                            tc_epistemic_boundary(call_tok)
-                        } else {
-                            tc_error(call_tok, "type mismatch in call argument")
-                        }
+                } else if call_sig > 0 {
+                    scan_fnsig_param_type(call_sig, argc)
+                } else {
+                    SCAN_TY = 0
+                    SCAN_TY_HASH = 0
+                }
+                if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
+                    if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
+                        tc_epistemic_boundary(call_tok)
+                    } else {
+                        tc_error(call_tok, "type mismatch in call argument")
                     }
                 }
-                if fi >= 0 && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                if (fi >= 0 || (call_sig > 0 && call_is_closure == 0)) && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                     emit_push_expr_as_slice_arg_x86(call_tok)
                     abi_argc = abi_argc + 2
                 } else {
@@ -5283,7 +5497,6 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 7 { EP = EP + 1 }
             if fi >= 0 {
                 if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
-                // Effects check: callee effects must be subset of caller effects
                 let callee_eff = FN_EFFECTS[fi as usize]
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
                 if (callee_eff & ~caller_eff) != 0 {
@@ -5294,6 +5507,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0xe8)
                 PATCH_OFF[PATCH_COUNT as usize] = CL
                 PATCH_FN[PATCH_COUNT as usize] = fi
+                PATCH_KIND[PATCH_COUNT as usize] = 0
                 PATCH_COUNT = PATCH_COUNT + 1
                 em32(0)
                 emit_drop_call_args_x86(abi_argc + call_extra_stack_args_x86(abi_argc, 6))
@@ -5301,30 +5515,38 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             } else {
-                // Indirect call through variable — uniform closure convention:
-                // All callable values are closure struct pointers [fn_ptr, cap_0, ...]
-                // Load user args into shifted regs (rsi,rdx,rcx,r8,r9), max 5 user args
-                // rdi = closure struct ptr (env), fn_ptr loaded from [env]
-                emit_setup_closure_call_args_x86(argc)
-                emit_prepare_stack_call_args_x86(argc, 5)
                 if call_vslot >= 0 {
-                    emit_load_var(call_vslot)           // rax = closure struct ptr
-                    em(0x48); em(0x89); em(0xc7)        // mov rdi, rax (env_ptr)
-                    em(0x48); em(0x8b); em(0x00)        // mov rax, [rax] (fn_ptr)
-                    em(0xff); em(0xd0)                  // call rax
-                    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
+                    if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
+                    if call_is_closure == 1 {
+                        emit_setup_closure_call_args_x86(argc)
+                        emit_prepare_stack_call_args_x86(argc, 5)
+                        emit_load_var(call_vslot)
+                        em(0x48); em(0x89); em(0xc7)
+                        em(0x48); em(0x8b); em(0x00)
+                        em(0xff); em(0xd0)
+                        emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
+                    } else {
+                        emit_setup_direct_call_args_x86(abi_argc)
+                        emit_prepare_stack_call_args_x86(abi_argc, 6)
+                        emit_load_var(call_vslot)
+                        em(0xff); em(0xd0)
+                        emit_drop_call_args_x86(abi_argc + call_extra_stack_args_x86(abi_argc, 6))
+                    }
+                    if call_sig > 0 {
+                        EXPR_TY = FNSIG_RET_TY[call_sig as usize]
+                        EXPR_TY_HASH = FNSIG_RET_HASH[call_sig as usize]
+                    } else {
+                        EXPR_TY = 0
+                        EXPR_TY_HASH = 0
+                    }
+                    if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else {
                     tc_undefined_var(call_tok)
-                    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
-                    em(0x31); em(0xc0)  // unknown fn
-                }
-            }
-            if fi < 0 {
-                if call_vslot >= 0 && var_find_ty(ns, ne) == 9 && var_find_ty_hash(ns, ne) == 2 {
-                    EXPR_IS_F64 = 1
-                    EXPR_TY = 2
-                } else {
+                    emit_drop_call_args_x86(abi_argc + call_extra_stack_args_x86(abi_argc, 6))
+                    em(0x31); em(0xc0)
                     EXPR_IS_F64 = 0
+                    EXPR_TY = 0
+                    EXPR_TY_HASH = 0
                 }
             }
             return
@@ -5500,79 +5722,47 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = VAR_TY[vi as usize]
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
                 if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
-                if EXPR_TY == 9 || VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
+                if VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
             }
             var_mark_used(ns, ne)
         }
         else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
-                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
-                let alen = GL[(gi * 4 + 3) as usize]
-                em(0x48); em(0xb8); em64(addr)  // mov rax, addr
-                if alen == 0 {
+                em(0x48); em(0xb8); em64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])  // mov rax, addr
+                if GL[(gi * 4 + 3) as usize] == 0 {
                     em(0x48); em(0x8b); em(0x00)  // scalar: mov rax, [rax] (dereference)
                 }
                 EXPR_TY = GL_TY[gi as usize]
                 EXPR_TY_HASH = GL_TY_HASH[gi as usize]
                 // array: rax = address (no dereference — used as pointer)
             } else {
-                // Function reference: let f = some_fn (no parens)
-                // Wrap in closure struct so indirect calls use uniform convention.
-                // Emit a wrapper fn that converts closure convention → normal convention:
-                //   rdi=env(ignored), rsi=arg0, rdx=arg1, ... → rdi=arg0, rsi=arg1, ...
-                // Then build a 1-slot struct [wrapper_addr] on the outer stack.
-                let fri = fn_find(ns, ne)
+                // Named function reference: materialize a tiny direct-ABI wrapper.
+                let fri = fn_find(TS[(EP - 1) as usize], TE[(EP - 1) as usize])
                 if fri >= 0 {
-                    // Emit jmp over wrapper
                     em(0xe9)
-                    let wr_jmp_patch = CL
-                    em32(0)
-                    let wr_start = CL
-                    // Wrapper: shift args back (rsi→rdi, rdx→rsi, rcx→rdx, r8→rcx, r9→r8)
-                    em(0x48); em(0x89); em(0xf7)  // mov rdi, rsi
-                    em(0x48); em(0x89); em(0xd6)  // mov rsi, rdx
-                    em(0x48); em(0x89); em(0xca)  // mov rdx, rcx
-                    em(0x49); em(0x89); em(0xc0)  // mov r8, rax — save rax temporarily
-                    em(0x4c); em(0x89); em(0xc1)  // mov rcx, r8 (original r8 value is lost, use r10)
-                    // Actually we need: rcx = r8_old, r8 = r9_old
-                    // The registers at entry: rdi=env, rsi=a0, rdx=a1, rcx=a2, r8=a3, r9=a4
-                    // Target: rdi=a0, rsi=a1, rdx=a2, rcx=a3, r8=a4, r9=unused
-                    // Careful ordering to avoid clobbering:
-                    // 1. mov rdi, rsi (rdi clobbered, but we don't need env anymore)
-                    // 2. mov rsi, rdx
-                    // 3. mov rdx, rcx
-                    // 4. mov rcx, r8
-                    // 5. mov r8, r9
-                    // Each reads from a register before it's overwritten. Safe order. Let me redo:
-                    CL = wr_start  // rewind
-                    em(0x48); em(0x89); em(0xf7)        // mov rdi, rsi
-                    em(0x48); em(0x89); em(0xd6)        // mov rsi, rdx
-                    em(0x48); em(0x89); em(0xca)        // mov rdx, rcx
-                    em(0x4c); em(0x89); em(0xc1)        // mov rcx, r8
-                    em(0x4d); em(0x89); em(0xc8)        // mov r8, r9
-                    // jmp to real function (rel32, patched later)
-                    em(0xe9)
-                    PATCH_OFF[PATCH_COUNT as usize] = CL
-                    PATCH_FN[PATCH_COUNT as usize] = fri
-                    PATCH_COUNT = PATCH_COUNT + 1
-                    em32(0)
-                    // Patch jmp over wrapper
-                    patch32(wr_jmp_patch, CL)
-                    // Build 1-slot closure struct on stack: [wrapper_addr]
-                    let fn_struct_slot = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
+                    em32(6)  // skip over `call rel32; ret`
+                    em(0xe8)
+                    if FN_OFF[fri as usize] >= 0 {
+                        em32(FN_OFF[fri as usize] - (CL + 4))
+                    } else {
+                        PATCH_OFF[PATCH_COUNT as usize] = CL
+                        PATCH_FN[PATCH_COUNT as usize] = fri
+                        PATCH_KIND[PATCH_COUNT as usize] = 0
+                        PATCH_COUNT = PATCH_COUNT + 1
+                        em32(0)
+                    }
+                    em(0xc3)
                     em(0x48); em(0x8d); em(0x05)
-                    em32(wr_start - (CL + 4))  // lea rax, [rip + offset_to_wrapper]
-                    emit_store_var(fn_struct_slot)
-                    // lea rax, [rbp - fn_struct_slot*8] — pointer to struct
-                    em(0x48); em(0x8d); em(0x85)
-                    em32(0 - fn_struct_slot * 8)
-                    LAST_EXPR_IS_CLOSURE = 1
+                    em32(-13)  // lea back to wrapper start
                     EXPR_TY = 9
+                    EXPR_TY_HASH = FN_SIG[fri as usize]
+                    LAST_EXPR_IS_CLOSURE = 0
                 } else {
                     tc_undefined_var(name_tok)
                     em(0x31); em(0xc0)
+                    EXPR_TY = 0
+                    EXPR_TY_HASH = 0
                 }
             }
             EXPR_IS_F64 = 0
@@ -5766,6 +5956,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     em(0xe8)
                     PATCH_OFF[PATCH_COUNT as usize] = CL
                     PATCH_FN[PATCH_COUNT as usize] = mfi
+                    PATCH_KIND[PATCH_COUNT as usize] = 0
                     PATCH_COUNT = PATCH_COUNT + 1
                     em32(0)
                     emit_drop_call_args_x86(margc + call_extra_stack_args_x86(margc, 6))
@@ -7715,6 +7906,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     FN_COUNT = 0
     PATCH_COUNT = 0
+    FNSIG_COUNT = 1
     GL_COUNT = 0
     GL_BSS_SIZE = 0
     RET_AGG_BSS_OFF = 0
@@ -7926,6 +8118,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
             FN_NAME_TOK[sig_fi as usize] = p
+            FN_SIG[sig_fi as usize] = fnsig_from_decl_name_tok(p)
             FN_NEEDS_SESSION[sig_fi as usize] = 0
             FN_ARITY[sig_fi as usize] = 0
             FN_RET_TY[sig_fi as usize] = 5
@@ -8166,7 +8359,6 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                     VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                     if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
-                    if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
                     if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                         let len_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]
                         let ptr_slot = NEXT_SLOT
@@ -9122,7 +9314,7 @@ fn emit_read_file_a64() with Mut {
 }
 
 // ─── ARM64 write_file ───
-fn emit_write_file_a64() with Mut {
+fn emit_write_file_a64_flags(linux_flags: i64, macos_flags: i64) with Mut {
     // On entry: stack=[buf, path] (path pushed first, buf second), x0=len
     em32(0xAA0003E4)  // mov x4, x0 (save len)
     em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 5)  // ldr x5, [sp, #16] (path)
@@ -9131,19 +9323,26 @@ fn emit_write_file_a64() with Mut {
     // open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
     em32(0xAA0503E0)  // mov x0, x5 (path)
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(1, 0x601)
+        emit_imm64_reg_a64(1, macos_flags)
         em32(0xD2800000 | ((0x1A4 & 0xFFFF) << 5) | 2)
         emit_imm64_reg_a64(16, 0x2000005)
     } else {
         em32(0xAA0003E1)  // mov x1, x0
         emit_imm64_reg_a64(0, -100)
-        emit_imm64_reg_a64(2, 0x241)
+        emit_imm64_reg_a64(2, linux_flags)
         em32(0xD2800000 | ((0x1A4 & 0xFFFF) << 5) | 3)
         em32(0xD2800000 | ((56 & 0xFFFF) << 5) | 8)
     }
     emit_syscall_a64()
+    em32(0xF100001F)  // cmp x0, #0
+    let open_ok_patch = CL
+    em32(0x5400000A)  // b.ge open_ok
+    let open_fail_done = CL
+    em32(0x14000000)  // b done
+    let open_ok_target = CL
     em32(0xAA0003E7)  // mov x7, x0 (save fd)
     // write(fd, buf, len)
+    em32(0xAA0703E0)  // mov x0, x7
     em32(0xAA0603E1)  // mov x1, x6
     em32(0xAA0403E2)  // mov x2, x4
     if TARGET_OS == 2 {
@@ -9152,6 +9351,7 @@ fn emit_write_file_a64() with Mut {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
     }
     emit_syscall_a64()
+    em32(0xAA0003EA)  // mov x10, x0 (write result)
     // close(fd)
     em32(0xAA0703E0)  // mov x0, x7
     if TARGET_OS == 2 {
@@ -9160,7 +9360,18 @@ fn emit_write_file_a64() with Mut {
         em32(0xD2800000 | ((57 & 0xFFFF) << 5) | 8)
     }
     emit_syscall_a64()
-    em32(0xD2800020)  // movz x0, #1 (return 1)
+    em32(0xAA0A03E0)  // mov x0, x10
+    let done_target = CL
+    patch_branch_a64(open_ok_patch, open_ok_target)
+    patch_branch_a64(open_fail_done, done_target)
+}
+
+fn emit_write_file_a64() with Mut {
+    emit_write_file_a64_flags(0x241, 0x601)
+}
+
+fn emit_append_file_a64() with Mut {
+    emit_write_file_a64_flags(0x441, 0x209)
 }
 
 // ─── ARM64 file_size ───
@@ -9988,6 +10199,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             if g_found == 1 { EP = EP + 3 }
         }
+        let ident_fi = fn_find(ns, ne)
         // Function call
         if TK[EP as usize] == 6 {
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print") {
@@ -10193,7 +10405,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_file_size_a64(); EXPR_IS_F64 = 0; EXPR_TY = 1; EXPR_TY_HASH = 0; return
             }
-            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "write_file") {
+            if fn_find(ns, ne) < 0 && (src_match(ns, ne - ns, "write_file") || src_match(ns, ne - ns, "write_bytes") || src_match(ns, ne - ns, "append_file")) {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 compile_or_a64(); emit_push_a64()
@@ -10202,7 +10414,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                emit_write_file_a64(); EXPR_IS_F64 = 0; return
+                if src_match(ns, ne - ns, "append_file") { emit_append_file_a64() } else { emit_write_file_a64() }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
             }
             if src_match(ns, ne - ns, "str_len") {
                 EP = EP + 1; compile_or_a64()
@@ -10367,8 +10583,14 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if bl == 10 && bh == 10139623 { EP = EP + 1; compile_or_a64(); em32(0x9E670000); em32(0x9E780000); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 0; return }
             if bl == 10 && bh == 10138972 { EP = EP + 1; compile_or_a64(); em32(0x9E620000); em32(0x9E660000); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             // User function call
-            let fi = fn_find(ns, ne)
+            let fi = ident_fi
             let call_vslot = var_find(ns, ne)
+            var call_sig: i64 = 0
+            var call_is_closure: i64 = 0
+            if call_vslot >= 0 && var_find_ty(ns, ne) == 9 {
+                call_sig = var_find_ty_hash(ns, ne)
+                call_is_closure = var_find_is_closure(ns, ne)
+            }
             let call_tok = EP - 1
             EP = EP + 1
             var argc: i64 = 0
@@ -10377,15 +10599,20 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 compile_or_a64()
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
-                    if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
-                        if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
-                            tc_epistemic_boundary(call_tok)
-                        } else {
-                            tc_error(call_tok, "type mismatch in call argument")
-                        }
+                } else if call_sig > 0 {
+                    scan_fnsig_param_type(call_sig, argc)
+                } else {
+                    SCAN_TY = 0
+                    SCAN_TY_HASH = 0
+                }
+                if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
+                    if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
+                        tc_epistemic_boundary(call_tok)
+                    } else {
+                        tc_error(call_tok, "type mismatch in call argument")
                     }
                 }
-                if fi >= 0 && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                if (fi >= 0 || (call_sig > 0 && call_is_closure == 0)) && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                     emit_push_expr_as_slice_arg_a64(call_tok)
                     abi_argc = abi_argc + 2
                 } else {
@@ -10412,36 +10639,51 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if abi_argc >= 1 { em32(0xF8410FE0) }
                 PATCH_OFF[PATCH_COUNT as usize] = CL
                 PATCH_FN[PATCH_COUNT as usize] = fi
+                PATCH_KIND[PATCH_COUNT as usize] = 0
                 PATCH_COUNT = PATCH_COUNT + 1
                 em32(0x94000000)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             } else {
-                if argc >= 5 { em32(0xF8410FE5) }
-                if argc >= 4 { em32(0xF8410FE4) }
-                if argc >= 3 { em32(0xF8410FE3) }
-                if argc >= 2 { em32(0xF8410FE2) }
-                if argc >= 1 { em32(0xF8410FE1) }
                 if call_vslot >= 0 {
-                    emit_load_var_a64(call_vslot)
-                    em32(0xF9400009)  // ldr x9, [x0] (fn_ptr)
-                    em32(0xD63F0120)  // blr x9
-                    EXPR_TY = 0
-                    EXPR_TY_HASH = 0
+                    if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
+                    if call_is_closure == 1 {
+                        if argc >= 5 { em32(0xF8410FE5) }
+                        if argc >= 4 { em32(0xF8410FE4) }
+                        if argc >= 3 { em32(0xF8410FE3) }
+                        if argc >= 2 { em32(0xF8410FE2) }
+                        if argc >= 1 { em32(0xF8410FE1) }
+                        emit_load_var_a64(call_vslot)
+                        em32(0xF9400009)
+                        em32(0xD63F0120)
+                    } else {
+                        emit_load_var_a64(call_vslot)
+                        em32(0xAA0003E9)
+                        if abi_argc >= 8 { em32(0xF8410FE7) }
+                        if abi_argc >= 7 { em32(0xF8410FE6) }
+                        if abi_argc >= 6 { em32(0xF8410FE5) }
+                        if abi_argc >= 5 { em32(0xF8410FE4) }
+                        if abi_argc >= 4 { em32(0xF8410FE3) }
+                        if abi_argc >= 3 { em32(0xF8410FE2) }
+                        if abi_argc >= 2 { emit_pop_x1_a64() }
+                        if abi_argc >= 1 { em32(0xF8410FE0) }
+                        em32(0xD63F0120)
+                    }
+                    if call_sig > 0 {
+                        EXPR_TY = FNSIG_RET_TY[call_sig as usize]
+                        EXPR_TY_HASH = FNSIG_RET_HASH[call_sig as usize]
+                    } else {
+                        EXPR_TY = 0
+                        EXPR_TY_HASH = 0
+                    }
+                    if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else {
                     tc_undefined_var(name_tok)
                     em32(0xD2800000)
+                    EXPR_IS_F64 = 0
                     EXPR_TY = 0
                     EXPR_TY_HASH = 0
-                }
-            }
-            if fi < 0 {
-                if call_vslot >= 0 && var_find_ty(ns, ne) == 9 && var_find_ty_hash(ns, ne) == 2 {
-                    EXPR_IS_F64 = 1
-                    EXPR_TY = 2
-                } else {
-                    EXPR_IS_F64 = 0
                 }
             }
             return
@@ -10606,48 +10848,39 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = VAR_TY[vi as usize]
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
                 if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
-                if EXPR_TY == 9 || VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
+                if VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
             }
             var_mark_used(ns, ne)
         } else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
-                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
-                let alen = GL[(gi * 4 + 3) as usize]
-                emit_imm64_a64(addr)
-                if alen == 0 { em32(0xF9400000) }
+                emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])
+                if GL[(gi * 4 + 3) as usize] == 0 { em32(0xF9400000) }
                 EXPR_TY = GL_TY[gi as usize]
                 EXPR_TY_HASH = GL_TY_HASH[gi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             } else {
-                let fri = fn_find(ns, ne)
+                let fri = fn_find(TS[(EP - 1) as usize], TE[(EP - 1) as usize])
                 if fri >= 0 {
-                    let wr_jmp_patch = CL
-                    em32(0x14000000)
+                    em32(0x14000002)  // b +8, skipping the wrapper branch
                     let wr_start = CL
-                    em32(0xAA0103E0)  // mov x0, x1
-                    em32(0xAA0203E1)  // mov x1, x2
-                    em32(0xAA0303E2)  // mov x2, x3
-                    em32(0xAA0403E3)  // mov x3, x4
-                    em32(0xAA0503E4)  // mov x4, x5
-                    em32(0xAA0603E5)  // mov x5, x6
-                    em32(0xAA0703E6)  // mov x6, x7
-                    PATCH_OFF[PATCH_COUNT as usize] = CL
-                    PATCH_FN[PATCH_COUNT as usize] = fri
-                    PATCH_COUNT = PATCH_COUNT + 1
-                    em32(0x14000000)
-                    patch_branch_a64(wr_jmp_patch, CL)
-                    let fn_struct_slot = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
+                    if FN_OFF[fri as usize] >= 0 {
+                        let rel = (FN_OFF[fri as usize] - CL) / 4
+                        em32(0x14000000 | (rel & 0x3FFFFFF))
+                    } else {
+                        PATCH_OFF[PATCH_COUNT as usize] = CL
+                        PATCH_FN[PATCH_COUNT as usize] = fri
+                        PATCH_KIND[PATCH_COUNT as usize] = 2
+                        PATCH_COUNT = PATCH_COUNT + 1
+                        em32(0x14000000)
+                    }
                     let adr_off = wr_start - CL
-                    let adr_immlo = adr_off & 3
+                    let adr_immlo = adr_off & 0x3
                     let adr_immhi = (adr_off >> 2) & 0x7FFFF
                     em32(0x10000000 | ((adr_immlo & 0x3) << 29) | ((adr_immhi & 0x7FFFF) << 5) | 0)
-                    emit_store_var_a64(fn_struct_slot)
-                    emit_lea_var_a64(fn_struct_slot)
-                    LAST_EXPR_IS_CLOSURE = 1
                     EXPR_TY = 9
-                    EXPR_TY_HASH = 0
+                    EXPR_TY_HASH = FN_SIG[fri as usize]
+                    LAST_EXPR_IS_CLOSURE = 0
                 }
                 else { tc_undefined_var(name_tok); em32(0xD2800000); EXPR_TY = 0; EXPR_TY_HASH = 0 }
             }
@@ -10836,6 +11069,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     if margc >= 1 { em32(0xF8410FE0) }
                     PATCH_OFF[PATCH_COUNT as usize] = CL
                     PATCH_FN[PATCH_COUNT as usize] = mfi
+                    PATCH_KIND[PATCH_COUNT as usize] = 0
                     PATCH_COUNT = PATCH_COUNT + 1
                     em32(0x94000000)
                     EXPR_TY = FN_RET_TY[mfi as usize]
@@ -11837,7 +12071,6 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                     VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                     VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                     if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
-                    if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
                     if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                         let len_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]
                         let ptr_slot = NEXT_SLOT
@@ -11941,8 +12174,15 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         let fi = PATCH_FN[pi as usize]
         if fi >= 0 && fi < FN_COUNT {
             let target = FN_OFF[fi as usize]
-            let rel = (target - off) / 4
-            em32_at(off, 0x94000000 | (rel & 0x3FFFFFF))
+            if PATCH_KIND[pi as usize] == 1 {
+                patch_adr_a64(off, target, 0)
+            } else if PATCH_KIND[pi as usize] == 2 {
+                let rel = (target - off) / 4
+                em32_at(off, 0x14000000 | (rel & 0x3FFFFFF))
+            } else {
+                let rel = (target - off) / 4
+                em32_at(off, 0x94000000 | (rel & 0x3FFFFFF))
+            }
         }
         pi = pi + 1
     }
