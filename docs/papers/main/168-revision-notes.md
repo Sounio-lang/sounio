@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.papers.main.168-revision-notes
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.main.168-revision-notes
+-->
+
 # 168 Theorem — Revision Notes
 
 Paper: "The 168 Count for Octonion Basis Associators and a Computational Sedenion Extension"

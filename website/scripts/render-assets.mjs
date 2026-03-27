@@ -16,7 +16,7 @@ if (!['generate', 'check'].includes(mode)) {
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const websiteDir = path.resolve(scriptDir, '..');
 const repoRoot = path.resolve(websiteDir, '..');
-const soucBin = path.join(repoRoot, 'artifacts/omega/souc-bin/souc-linux-x86_64-jit');
+const soucBin = path.join(repoRoot, 'bin/souc');
 const outputDir = path.join(websiteDir, 'public/assets/generated/render');
 const manifestPath = path.join(outputDir, 'manifest.json');
 
@@ -28,7 +28,7 @@ const renderSpecs = [
     description:
       'Software-rasterized triangle with barycentric color interpolation emitted by the checked JIT artifact.',
     command:
-      'artifacts/omega/souc-bin/souc-linux-x86_64-jit run examples/render/triangle_basic.sio > triangle_basic.ppm',
+      'bin/souc run examples/render/triangle_basic.sio > triangle_basic.ppm',
   },
   {
     example: 'examples/render/cube_wireframe.sio',
@@ -37,7 +37,7 @@ const renderSpecs = [
     description:
       'Perspective-projected cube with depth-tinted edges emitted by the checked JIT artifact.',
     command:
-      'artifacts/omega/souc-bin/souc-linux-x86_64-jit run examples/render/cube_wireframe.sio > cube_wireframe.ppm',
+      'bin/souc run examples/render/cube_wireframe.sio > cube_wireframe.ppm',
   },
   {
     example: 'examples/render/uncertainty_field.sio',
@@ -46,7 +46,7 @@ const renderSpecs = [
     description:
       'Epistemic heatmap over value and epsilon axes emitted as a real 128x128 raster by the checked JIT artifact.',
     command:
-      'artifacts/omega/souc-bin/souc-linux-x86_64-jit run examples/render/uncertainty_field.sio > uncertainty_field.ppm',
+      'bin/souc run examples/render/uncertainty_field.sio > uncertainty_field.ppm',
   },
   {
     example: 'examples/render/causal_dag.sio',
@@ -55,7 +55,7 @@ const renderSpecs = [
     description:
       'Front-door causal graph with intervention and latent-node annotations emitted as a real 256x128 raster by the checked JIT artifact.',
     command:
-      'artifacts/omega/souc-bin/souc-linux-x86_64-jit run examples/render/causal_dag.sio > causal_dag.ppm',
+      'bin/souc run examples/render/causal_dag.sio > causal_dag.ppm',
   },
   {
     example: 'examples/render/quaternion_rotation.sio',
@@ -64,7 +64,7 @@ const renderSpecs = [
     description:
       'Tetrahedron wireframe showing original and quaternion-rotated geometry emitted as a real 192x192 raster by the checked JIT artifact.',
     command:
-      'artifacts/omega/souc-bin/souc-linux-x86_64-jit run examples/render/quaternion_rotation.sio > quaternion_rotation.ppm',
+      'bin/souc run examples/render/quaternion_rotation.sio > quaternion_rotation.ppm',
   },
 ];
 

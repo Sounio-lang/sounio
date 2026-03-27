@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.frontdoor.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
+-->
+
 <p align="center">
   <img src="docs/assets/sounio-logo.svg" alt="Sounio" width="200"/>
 </p>

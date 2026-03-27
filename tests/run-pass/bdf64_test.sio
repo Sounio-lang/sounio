@@ -1,155 +1,128 @@
 //@ run-pass
-// BDF64 extended stiff ODE solver test
-//
-// T1: Stiff dual-decay (lambda=-1000, lambda=-1)
-// T2: Robertson chemical kinetics (3 species, conservation)
-// T3: GUM variance propagation (nonzero variance at end)
-//
-// Rewritten for lean_single: no extern "C", no fn-refs, no structs.
-
-fn ba(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
-fn bm(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
-fn bsqrt(x: f64) -> f64 with Mut {
-    if x <= 0.0 { return 0.0 }
-    var y = x; var i = 0
-    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
-    y
-}
-fn bexp(x: f64) -> f64 with Mut, Div {
-    if x > 700.0 { return 1.0e200 }
-    if x < 0.0 - 700.0 { return 0.0 }
-    var kf = x / 0.6931471805599453; var k: i64 = 0
-    if kf >= 0.0 { k = kf as i64 } else { k = (kf as i64) - 1 }
-    let r = x - (k as f64) * 0.6931471805599453
-    var s = 1.0; var term = 1.0; var n: i64 = 1
-    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
-    var result = s
-    if k >= 0 { var i: i64 = 0; while i < k { result = result * 2.0; i = i + 1 } }
-    else { var i: i64 = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+fn bdf_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn bdf_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn bdf_sqrt(x: f64) -> f64 with Mut { if x<=0.0{return 0.0} var y=x;var i=0;while i<20{y=0.5*(y+x/y);i=i+1}y }
+fn bdf_exp(x: f64) -> f64 with Mut, Div {
+    if x>700.0{return 1.0e200} if x<0.0-700.0{return 0.0}
+    var kf=x/0.6931471805599453;var k:i64=0
+    if kf>=0.0{k=kf as i64}else{k=(kf as i64)-1}
+    let r=x-(k as f64)*0.6931471805599453
+    var s=1.0;var term=1.0;var n:i64=1
+    while n<25{term=term*r/(n as f64);s=s+term;n=n+1}
+    var result=s
+    if k>=0{var i:i64=0;while i<k{result=result*2.0;i=i+1}}
+    else{var i:i64=0;while i<(0-k){result=result/2.0;i=i+1}}
     result
 }
-
 fn bdf_rhs(rhs_id: i64, y: &[f64; 64], n: i64, out: &![f64; 64]) with Mut {
-    var k: i64 = 0
-    if rhs_id == 0 {
-        out[0] = 0.0 - 1000.0 * y[0]; out[1] = 0.0 - 1.0 * y[1]
-        k = 2; while k < n { out[k] = 0.0; k = k + 1 }
-        return
+    var k:i64=0
+    if rhs_id==0{out[0]=0.0-1000.0*y[0];out[1]=0.0-1.0*y[1];k=2;while k<n{out[k]=0.0;k=k+1}return}
+    if rhs_id==1{
+        out[0]=0.0-0.04*y[0]+10000.0*y[1]*y[2]
+        out[1]=0.04*y[0]-10000.0*y[1]*y[2]-30000000.0*y[1]*y[1]
+        out[2]=30000000.0*y[1]*y[1]
+        k=3;while k<n{out[k]=0.0;k=k+1}return
     }
-    if rhs_id == 1 {
-        out[0] = 0.0 - 0.04 * y[0] + 10000.0 * y[1] * y[2]
-        out[1] = 0.04 * y[0] - 10000.0 * y[1] * y[2] - 30000000.0 * y[1] * y[1]
-        out[2] = 30000000.0 * y[1] * y[1]
-        k = 3; while k < n { out[k] = 0.0; k = k + 1 }
-        return
-    }
-    out[0] = 0.0 - 0.5 * y[0]; out[1] = 0.0 - 0.1 * y[1]
-    k = 2; while k < n { out[k] = 0.0; k = k + 1 }
+    out[0]=0.0-0.5*y[0];out[1]=0.0-0.1*y[1];k=2;while k<n{out[k]=0.0;k=k+1}
 }
-
-var G_JAC: [f64; 4096] = [0.0; 4096]
-var G_M:   [f64; 4096] = [0.0; 4096]
-var G_MC:  [f64; 4096] = [0.0; 4096]
-
-fn gsolve(a: &![f64; 4096], b: &![f64; 64], n: i64) with Mut, Div {
-    var col: i64 = 0
-    while col < n {
-        let pivot = a[col * 64 + col]
-        if ba(pivot) > 1.0e-30 {
-            var row = col + 1
-            while row < n {
-                let fac = a[row * 64 + col] / pivot
-                var k = col + 1
-                while k < n { a[row * 64 + k] = a[row * 64 + k] - fac * a[col * 64 + k]; k = k + 1 }
-                a[row * 64 + col] = 0.0
-                b[row] = b[row] - fac * b[col]
-                row = row + 1
+var G_JAC:[f64;4096]=[0.0;4096]
+var G_M:[f64;4096]=[0.0;4096]
+var G_MC:[f64;4096]=[0.0;4096]
+fn gsolve(a: &![f64;4096], b: &![f64;64], n: i64) with Mut, Div {
+    var col:i64=0
+    while col<n {
+        let pivot=a[col*64+col]
+        if bdf_abs(pivot)>1.0e-30 {
+            var row=col+1
+            while row<n {
+                let fac=a[row*64+col]/pivot
+                var k=col+1
+                while k<n{a[row*64+k]=a[row*64+k]-fac*a[col*64+k];k=k+1}
+                a[row*64+col]=0.0
+                b[row]=b[row]-fac*b[col]
+                row=row+1
             }
         }
-        col = col + 1
+        col=col+1
     }
-    var i = n - 1
-    while i >= 0 {
-        var sum = b[i]; var j = i + 1
-        while j < n { sum = sum - a[i * 64 + j] * b[j]; j = j + 1 }
-        let d = a[i * 64 + i]
-        if ba(d) < 1.0e-30 { b[i] = 0.0 } else { b[i] = sum / d }
-        i = i - 1
+    var i=n-1
+    while i>=0 {
+        var sum=b[i];var j=i+1
+        while j<n{sum=sum-a[i*64+j]*b[j];j=j+1}
+        let d=a[i*64+i]
+        if bdf_abs(d)<1.0e-30{b[i]=0.0}else{b[i]=sum/d}
+        i=i-1
     }
 }
-
-fn bdf1(rhs_id: i64, y: &![f64; 64], n: i64, t_start: f64, t_end: f64, h: f64,
-        vars: &![f64; 64]) with Mut, Div {
-    var t = t_start
-    while t < t_end {
-        var dt = h; if t + dt > t_end { dt = t_end - t }
-        var y_n: [f64; 64] = [0.0; 64]; var i: i64 = 0
-        while i < n { y_n[i] = y[i]; i = i + 1 }
-        var f0: [f64; 64] = [0.0; 64]
-        bdf_rhs(rhs_id, y, n, &!f0)
-        let eps = 1.0e-8; var j: i64 = 0
-        while j < n {
-            var yp: [f64; 64] = [0.0; 64]; i = 0; while i < n { yp[i] = y[i]; i = i + 1 }
-            let delta = bm(eps * ba(y[j]), eps)
-            yp[j] = y[j] + delta
-            var fp: [f64; 64] = [0.0; 64]
-            bdf_rhs(rhs_id, &yp, n, &!fp)
-            i = 0; while i < n { G_JAC[i * 64 + j] = (fp[i] - f0[i]) / delta; i = i + 1 }
-            j = j + 1
+fn bdf1(rhs_id:i64, y:&![f64;64], n:i64, t_start:f64, t_end:f64, h:f64, vars:&![f64;64]) with Mut, Div {
+    var t=t_start
+    while t<t_end {
+        var dt=h;if t+dt>t_end{dt=t_end-t}
+        var y_n:[f64;64]=[0.0;64];var i:i64=0
+        while i<n{y_n[i]=y[i];i=i+1}
+        var f0:[f64;64]=[0.0;64]
+        bdf_rhs(rhs_id,y,n,&!f0)
+        let eps=1.0e-8;var j:i64=0
+        while j<n {
+            var yp:[f64;64]=[0.0;64];i=0;while i<n{yp[i]=y[i];i=i+1}
+            let delta=bdf_max(eps*bdf_abs(y[j]),eps)
+            yp[j]=y[j]+delta
+            var fp:[f64;64]=[0.0;64]
+            bdf_rhs(rhs_id,&yp,n,&!fp)
+            i=0;while i<n{G_JAC[i*64+j]=(fp[i]-f0[i])/delta;i=i+1}
+            j=j+1
         }
-        i = 0; while i < n { j = 0; while j < n {
-            if i == j { G_M[i*64+j] = 1.0 - dt * G_JAC[i*64+j] }
-            else { G_M[i*64+j] = 0.0 - dt * G_JAC[i*64+j] }
-            j = j + 1 }; i = i + 1 }
-        var iter: i64 = 0
-        while iter < 20 {
-            var fk: [f64; 64] = [0.0; 64]
-            bdf_rhs(rhs_id, y, n, &!fk)
-            var ng: [f64; 64] = [0.0; 64]
-            i = 0; while i < n { ng[i] = 0.0 - (y[i] - y_n[i] - dt * fk[i]); i = i + 1 }
-            var gnorm = 0.0; i = 0; while i < n { gnorm = gnorm + ng[i] * ng[i]; i = i + 1 }
-            gnorm = bsqrt(gnorm)
-            if gnorm < 1.0e-10 { iter = 100 } else {
-                i = 0; while i < n { j = 0; while j < n { G_MC[i*64+j] = G_M[i*64+j]; j = j+1 }; i = i+1 }
-                gsolve(&!G_MC, &!ng, n)
-                i = 0; while i < n { y[i] = y[i] + ng[i]; i = i + 1 }
-                iter = iter + 1
+        i=0;while i<n{j=0;while j<n{
+            if i==j{G_M[i*64+j]=1.0-dt*G_JAC[i*64+j]}else{G_M[i*64+j]=0.0-dt*G_JAC[i*64+j]}
+            j=j+1};i=i+1}
+        var iter:i64=0
+        while iter<20 {
+            var fk:[f64;64]=[0.0;64]
+            bdf_rhs(rhs_id,y,n,&!fk)
+            var ng:[f64;64]=[0.0;64]
+            i=0;while i<n{ng[i]=0.0-(y[i]-y_n[i]-dt*fk[i]);i=i+1}
+            var gnorm=0.0;i=0;while i<n{gnorm=gnorm+ng[i]*ng[i];i=i+1}
+            gnorm=bdf_sqrt(gnorm)
+            if gnorm<1.0e-10{iter=100}else{
+                i=0;while i<n{j=0;while j<n{G_MC[i*64+j]=G_M[i*64+j];j=j+1};i=i+1}
+                gsolve(&!G_MC,&!ng,n)
+                i=0;while i<n{y[i]=y[i]+ng[i];i=i+1}
+                iter=iter+1
             }
         }
-        i = 0; while i < n {
-            let mii = 1.0 - dt * G_JAC[i * 64 + i]
-            if ba(mii) < 1.0e-30 { vars[i] = vars[i] * 1.0e10 }
-            else { vars[i] = vars[i] / (mii * mii) }
-            i = i + 1 }
-        t = t + dt
+        i=0;while i<n{
+            let mii=1.0-dt*G_JAC[i*64+i]
+            if bdf_abs(mii)<1.0e-30{vars[i]=vars[i]*1.0e10}else{vars[i]=vars[i]/(mii*mii)}
+            i=i+1}
+        t=t+dt
     }
 }
-
 fn main() -> i64 with IO, Mut, Div, Panic {
-    var n_pass: i64 = 0
+    var y1:[f64;64]=[0.0;64]; y1[0]=1.0;y1[1]=1.0
+    var v1:[f64;64]=[0.0;64]
+    bdf1(0,&!y1,2,0.0,0.01,0.001,&!v1)
+    let e0=bdf_exp(0.0-10.0);let e1=bdf_exp(0.0-0.01)
+    println(y1[0]);println(y1[1]);println(e0);println(e1)
+    let t1=bdf_abs(y1[0]-e0)<1.0e-3&&bdf_abs(y1[1]-e1)<1.0e-3
+    if t1{println("T1 PASS")}else{println("T1 FAIL")}
 
-    var y1: [f64; 64] = [0.0; 64]; y1[0] = 1.0; y1[1] = 1.0
-    var v1: [f64; 64] = [0.0; 64]
-    bdf1(0, &!y1, 2, 0.0, 0.01, 0.001, &!v1)
-    let e0 = bdf_exp(0.0 - 10.0); let e1 = bdf_exp(0.0 - 0.01)
-    let t1 = ba(y1[0] - e0) < 1.0e-3 && ba(y1[1] - e1) < 1.0e-3
-    if t1 { n_pass = n_pass + 1 }
+    var y2:[f64;64]=[0.0;64]; y2[0]=1.0
+    var v2:[f64;64]=[0.0;64]
+    bdf1(1,&!y2,3,0.0,0.001,1.0e-6,&!v2)
+    let sy=y2[0]+y2[1]+y2[2]
+    println(y2[0]);println(y2[1]);println(y2[2]);println(sy)
+    let t2=bdf_abs(sy-1.0)<1.0e-3&&y2[0]<1.0&&y2[0]>=0.0-1.0e-6&&y2[1]>=0.0-1.0e-6&&y2[2]>=0.0-1.0e-6
+    if t2{println("T2 PASS")}else{println("T2 FAIL")}
 
-    var y2: [f64; 64] = [0.0; 64]; y2[0] = 1.0
-    var v2: [f64; 64] = [0.0; 64]
-    bdf1(1, &!y2, 3, 0.0, 0.001, 1.0e-6, &!v2)
-    let sy = y2[0] + y2[1] + y2[2]
-    let t2 = ba(sy - 1.0) < 1.0e-3 && y2[0] < 1.0
-           && y2[0] >= 0.0 - 1.0e-6 && y2[1] >= 0.0 - 1.0e-6 && y2[2] >= 0.0 - 1.0e-6
-    if t2 { n_pass = n_pass + 1 }
+    var y3:[f64;64]=[0.0;64]; y3[0]=10.0;y3[1]=5.0
+    var v3:[f64;64]=[0.0;64]; v3[0]=0.01;v3[1]=0.005
+    bdf1(2,&!y3,2,0.0,1.0,0.01,&!v3)
+    let yg0=10.0*bdf_exp(0.0-0.5);let yg1=5.0*bdf_exp(0.0-0.1)
+    println(y3[0]);println(y3[1]);println(yg0);println(yg1)
+    println(v3[0]);println(v3[1])
+    let t3=bdf_abs(y3[0]-yg0)<0.5&&bdf_abs(y3[1]-yg1)<0.5&&v3[0]>1.0e-15&&v3[1]>1.0e-15
+    if t3{println("T3 PASS")}else{println("T3 FAIL")}
 
-    var y3: [f64; 64] = [0.0; 64]; y3[0] = 10.0; y3[1] = 5.0
-    var v3: [f64; 64] = [0.0; 64]; v3[0] = 0.01; v3[1] = 0.005
-    bdf1(2, &!y3, 2, 0.0, 1.0, 0.01, &!v3)
-    let yg0 = 10.0 * bdf_exp(0.0 - 0.5); let yg1 = 5.0 * bdf_exp(0.0 - 0.1)
-    let t3 = ba(y3[0] - yg0) < 0.5 && ba(y3[1] - yg1) < 0.5
-           && v3[0] > 1.0e-15 && v3[1] > 1.0e-15
-    if t3 { n_pass = n_pass + 1 }
-
-    if n_pass == 3 { return 0 } else { return 1 }
+    let np=(if t1{1}else{0})+(if t2{1}else{0})+(if t3{1}else{0})
+    if np==3{return 0}else{return 1}
 }
