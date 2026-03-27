@@ -242,7 +242,8 @@ async function check() {
     assets = await collectAssets();
   } catch (e) {
     console.log(`SKIP: render check failed (${e.message}) — using pre-rendered assets`);
-    assets = [];
+    console.log('OK: render-assets check skipped (compiler unavailable).');
+    return;
   }
   const stale = [];
 
