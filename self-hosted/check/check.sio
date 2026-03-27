@@ -86,6 +86,7 @@ struct Checker {
     algebras: AlgebraTable,
     studies: StudyTable,
     ontologies: OntologyTable,
+    ontology_kernel: OntologyKernel,
     hyper_exprs: HyperExprTable,
     models: ModelTable,
     model_families: ModelFamilyTable,
@@ -352,6 +353,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         algebras: empty_algebra_table(),
         studies: empty_study_table(),
         ontologies: empty_ontology_table(),
+        ontology_kernel: ontology_kernel_empty(),
         hyper_exprs: hyper_expr_table_new(),
         models: model_table_new(),
         model_families: model_family_table_new(),
@@ -4129,6 +4131,11 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 153 { print("ontology class table overflow (maximum 64 classes per compilation unit)") }
     else if code == 154 { print("study table overflow (maximum 16 studies per compilation unit)") }
     else if code == 155 { print("study definition requires at least one hypothesis") }
+    else if code == 156 { print("role domain class not found in ontology") }
+    else if code == 157 { print("role range class not found in ontology") }
+    else if code == 158 { print("inverse_of target role not found") }
+    else if code == 159 { print("inverse role constraints are inconsistent or duplicate role declaration encountered") }
+    else if code == 160 { print("ontology axiom store overflow (maximum 256 axioms)") }
     else { print("unknown error") }
 }
 
@@ -4721,6 +4728,7 @@ fn print_warning_message(code: i64) with IO, Mut, Panic, Div {
         print("   = note: this compiles but may fail at runtime; annotate with an explicit refinement type to prove statically\n")
     }
     else if code == 41 { print("ontology subsumption could not be verified") }
+    else if code == 42 { print("ontology axiom overflow - more than 16 property axioms available; proof may be incomplete") }
     else {
         print("unknown warning")
     }
@@ -6272,7 +6280,8 @@ impl Checker {
                     (self, ty_with_refinement(rt.base_type, ref_idx))
                 } else {
                     let bound_ty = self.env.lookup(name)
-                    if bound_ty.kind == TypeKind::TyModel
+                    if bound_ty.ontology_id >= 0
+                        || bound_ty.kind == TypeKind::TyModel
                         || bound_ty.kind == TypeKind::TyModelFamily
                         || bound_ty.kind == TypeKind::TyPolicy
                         || bound_ty.kind == TypeKind::TyAcquisitionPolicy
@@ -8629,44 +8638,15 @@ impl Checker {
                 c = c.collect_ontology_disjoints((*odef).disjoints)
                 // Compute transitive closure of superclass relationships
                 c.ontologies = ontology_table_compute_closure(c.ontologies)
-                // Verify inheritance strengthening: child properties must imply parent properties
-                var vi: i64 = 0
-                while vi < c.ontologies.count {
-                    let child = c.ontologies.entries[vi as usize]
-                    if child.is_valid && child.property_count > 0 {
-                        // For each ancestor, check for same-named properties
-                        var ai: i64 = 0
-                        while ai < child.all_ancestor_count {
-                            let anc_idx = child.all_ancestor_indices[ai as usize]
-                            if anc_idx >= 0 && anc_idx < c.ontologies.count {
-                                let ancestor = c.ontologies.entries[anc_idx as usize]
-                                var ci: i64 = 0
-                                while ci < child.property_count {
-                                    var pi: i64 = 0
-                                    while pi < ancestor.property_count {
-                                        if name_eq(child.property_names[ci as usize], ancestor.property_names[pi as usize]) {
-                                            // Same-named property: child must strengthen parent
-                                            let child_ref_id = child.property_ref_ids[ci as usize]
-                                            let parent_ref_id = ancestor.property_ref_ids[pi as usize]
-                                            if child_ref_id >= 0 && parent_ref_id >= 0 && child_ref_id < 64 && parent_ref_id < 64 {
-                                                let child_pred = c.refinements.entries[child_ref_id as usize].predicate
-                                                let parent_pred = c.refinements.entries[parent_ref_id as usize].predicate
-                                                if !pred_implies(child_pred, parent_pred) {
-                                                    let warn_span = Span { start: 0, end: 0 }
-                                                    c = c.report_warning_at(warn_span, 41, 0, 0, 0)
-                                                }
-                                            }
-                                        }
-                                        pi = pi + 1
-                                    }
-                                    ci = ci + 1
-                                }
-                            }
-                            ai = ai + 1
-                        }
-                    }
-                    vi = vi + 1
-                }
+                // Collect the new axiom-centric kernel in parallel with the legacy table.
+                c = c.collect_ontology_kernel_classes((*odef).classes, ont_name)
+                c = c.collect_ontology_kernel_property_axioms_from_legacy(ont_name)
+                c = c.collect_ontology_kernel_disjoints((*odef).disjoints)
+                c = c.collect_ontology_roles((*odef).roles)
+                c.ontology_kernel = ontology_kernel_materialize(c.ontology_kernel)
+                c.ontology_kernel.profile = ontology_kernel_check_profile(c.ontology_kernel)
+                c = c.validate_ontology_kernel_inverse_consistency()
+                c = c.validate_ontology_kernel_strengthening()
                 // Bind each class name as a named type with ontology_id
                 var i: i64 = 0
                 while i < c.ontologies.count {
@@ -8774,6 +8754,442 @@ impl Checker {
                 c.collect_ontology_disjoints((*list).tail)
             }
         }
+    }
+
+    fn collect_ontology_kernel_add_axiom(self, span: Span, axiom: OntologyAxiom) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        if ontology_kernel_can_add_axiom(c.ontology_kernel) {
+            c.ontology_kernel = ontology_kernel_add_axiom(c.ontology_kernel, axiom)
+        } else {
+            c = c.report_error_at(span, 160, 0, 0, 0)
+        }
+        c
+    }
+
+    fn collect_ontology_kernel_classes(self, classes: Option<Box<OntologyClassDeclList>>, ont_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match classes {
+            None => self
+            Some(list) => {
+                var c = self
+                let decl = (*list).head
+                if ontology_kernel_can_add_class(c.ontology_kernel) {
+                    let pair = ontology_kernel_add_class(c.ontology_kernel, decl.name, ont_name)
+                    c.ontology_kernel = pair.0
+                    let class_idx = pair.1
+                    if class_idx >= 0 {
+                        var i: i64 = 0
+                        while i < decl.superclass_count && i < 8 {
+                            let sc_name = decl.superclass_names[i as usize]
+                            let sc_idx = ontology_kernel_find_class(c.ontology_kernel, sc_name)
+                            if sc_idx >= 0 {
+                                c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                                    axiom_type: owl_subclass_of(),
+                                    subject_idx: class_idx,
+                                    object_idx: sc_idx,
+                                    refinement_ref_id: -1,
+                                    property_name: empty_name(),
+                                    is_property_axiom: false,
+                                })
+                            }
+                            i = i + 1
+                        }
+                    }
+                }
+                c.collect_ontology_kernel_classes((*list).tail, ont_name)
+            }
+        }
+    }
+
+    fn collect_ontology_kernel_property_axioms_from_legacy(self, ont_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        var i: i64 = 0
+        while i < c.ontologies.count {
+            let cls = c.ontologies.entries[i as usize]
+            if cls.is_valid && name_eq(cls.ontology_name, ont_name) {
+                var j: i64 = 0
+                while j < cls.property_count {
+                    let ref_id = cls.property_ref_ids[j as usize]
+                    if ref_id >= 0 && ref_id < 128 {
+                        c = c.collect_ontology_kernel_add_axiom(Span { start: 0, end: 0 }, OntologyAxiom {
+                            axiom_type: owl_data_property_constraint(),
+                            subject_idx: i,
+                            object_idx: -1,
+                            refinement_ref_id: ref_id,
+                            property_name: cls.property_names[j as usize],
+                            is_property_axiom: false,
+                        })
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        c
+    }
+
+    fn collect_ontology_kernel_disjoints(self, disjoints: Option<Box<OntologyDisjointDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match disjoints {
+            None => self
+            Some(list) => {
+                var c = self
+                let decl = (*list).head
+                let a_idx = ontology_kernel_find_class(c.ontology_kernel, decl.name_a)
+                let b_idx = ontology_kernel_find_class(c.ontology_kernel, decl.name_b)
+                if a_idx >= 0 && b_idx >= 0 {
+                    c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                        axiom_type: owl_disjoint_classes(),
+                        subject_idx: a_idx,
+                        object_idx: b_idx,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: false,
+                    })
+                }
+                c.collect_ontology_kernel_disjoints((*list).tail)
+            }
+        }
+    }
+
+    fn ontology_role_decl_count(self, roles: Option<Box<OntologyRoleDeclList>>, target: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
+        match roles {
+            None => 0
+            Some(list) => {
+                let count_here = if name_eq((*list).head.name, target) { 1 } else { 0 }
+                count_here + self.ontology_role_decl_count((*list).tail, target)
+            }
+        }
+    }
+
+    fn collect_ontology_roles(self, roles: Option<Box<OntologyRoleDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match roles {
+            None => self
+            Some(list) => {
+                var c = self
+                let decl = (*list).head
+                let duplicate_in_tail = c.ontology_role_decl_count((*list).tail, decl.name) > 0
+                let already_registered = ontology_kernel_find_property(c.ontology_kernel, decl.name) >= 0
+
+                if !already_registered && ontology_kernel_can_add_property(c.ontology_kernel) {
+                    let pair = ontology_kernel_add_property(c.ontology_kernel, decl.name)
+                    c.ontology_kernel = pair.0
+                }
+
+                if already_registered || decl.duplicate_modifier_bits != 0 {
+                    c = c.report_error_at(decl.span, 159, 0, 0, 0)
+                }
+
+                c = c.collect_ontology_roles((*list).tail)
+
+                if already_registered || duplicate_in_tail || decl.duplicate_modifier_bits != 0 {
+                    return c
+                }
+
+                let prop_idx = ontology_kernel_find_property(c.ontology_kernel, decl.name)
+                if prop_idx >= 0 {
+                    if decl.has_domain {
+                        let domain_idx = ontology_kernel_find_class(c.ontology_kernel, decl.domain_name)
+                        if domain_idx >= 0 {
+                            c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                                axiom_type: owl_object_property_domain(),
+                                subject_idx: prop_idx,
+                                object_idx: domain_idx,
+                                refinement_ref_id: -1,
+                                property_name: empty_name(),
+                                is_property_axiom: true,
+                            })
+                        } else {
+                            c = c.report_error_at(decl.span, 156, 0, 0, 0)
+                        }
+                    }
+
+                    if decl.has_range {
+                        let range_idx = ontology_kernel_find_class(c.ontology_kernel, decl.range_name)
+                        if range_idx >= 0 {
+                            c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                                axiom_type: owl_object_property_range(),
+                                subject_idx: prop_idx,
+                                object_idx: range_idx,
+                                refinement_ref_id: -1,
+                                property_name: empty_name(),
+                                is_property_axiom: true,
+                            })
+                        } else {
+                            c = c.report_error_at(decl.span, 157, 0, 0, 0)
+                        }
+                    }
+
+                    if decl.has_inverse {
+                        let inverse_idx = ontology_kernel_find_property(c.ontology_kernel, decl.inverse_name)
+                        if inverse_idx >= 0 {
+                            c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                                axiom_type: owl_inverse_object_properties(),
+                                subject_idx: prop_idx,
+                                object_idx: inverse_idx,
+                                refinement_ref_id: -1,
+                                property_name: empty_name(),
+                                is_property_axiom: true,
+                            })
+                        } else {
+                            c = c.report_error_at(decl.span, 158, 0, 0, 0)
+                        }
+                    }
+
+                    if decl.is_transitive {
+                        c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                            axiom_type: owl_transitive_property(),
+                            subject_idx: prop_idx,
+                            object_idx: -1,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    }
+                    if decl.is_symmetric {
+                        c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                            axiom_type: owl_symmetric_property(),
+                            subject_idx: prop_idx,
+                            object_idx: -1,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    }
+                    if decl.is_functional {
+                        c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                            axiom_type: owl_functional_property(),
+                            subject_idx: prop_idx,
+                            object_idx: -1,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    }
+                }
+
+                c
+            }
+        }
+    }
+
+    fn collect_ontology_role_registry(self, roles: Option<Box<OntologyRoleDeclList>>, all_roles: Option<Box<OntologyRoleDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match roles {
+            None => self
+            Some(list) => {
+                var c = self
+                let decl = (*list).head
+                if ontology_kernel_find_property(c.ontology_kernel, decl.name) >= 0 {
+                    c = c.report_error_at(decl.span, 159, 0, 0, 0)
+                    return c.collect_ontology_role_registry((*list).tail, all_roles)
+                }
+                if ontology_kernel_can_add_property(c.ontology_kernel) {
+                    let pair = ontology_kernel_add_property(c.ontology_kernel, decl.name)
+                    c.ontology_kernel = pair.0
+                }
+                if decl.duplicate_modifier_bits != 0 || c.ontology_role_decl_count(all_roles, decl.name) > 1 {
+                    c = c.report_error_at(decl.span, 159, 0, 0, 0)
+                }
+                c.collect_ontology_role_registry((*list).tail, all_roles)
+            }
+        }
+    }
+
+    fn collect_ontology_role_axioms(self, roles: Option<Box<OntologyRoleDeclList>>, all_roles: Option<Box<OntologyRoleDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match roles {
+            None => self
+            Some(list) => {
+                var c = self
+                let decl = (*list).head
+                if decl.duplicate_modifier_bits != 0 || c.ontology_role_decl_count(all_roles, decl.name) > 1 {
+                    return c.collect_ontology_role_axioms((*list).tail, all_roles)
+                }
+
+                let prop_idx = ontology_kernel_find_property(c.ontology_kernel, decl.name)
+                if prop_idx >= 0 {
+                    if decl.has_domain {
+                        let domain_idx = ontology_kernel_find_class(c.ontology_kernel, decl.domain_name)
+                        if domain_idx >= 0 {
+                            c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                                axiom_type: owl_object_property_domain(),
+                                subject_idx: prop_idx,
+                                object_idx: domain_idx,
+                                refinement_ref_id: -1,
+                                property_name: empty_name(),
+                                is_property_axiom: true,
+                            })
+                        } else {
+                            c = c.report_error_at(decl.span, 156, 0, 0, 0)
+                        }
+                    }
+
+                    if decl.has_range {
+                        let range_idx = ontology_kernel_find_class(c.ontology_kernel, decl.range_name)
+                        if range_idx >= 0 {
+                            c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                                axiom_type: owl_object_property_range(),
+                                subject_idx: prop_idx,
+                                object_idx: range_idx,
+                                refinement_ref_id: -1,
+                                property_name: empty_name(),
+                                is_property_axiom: true,
+                            })
+                        } else {
+                            c = c.report_error_at(decl.span, 157, 0, 0, 0)
+                        }
+                    }
+
+                    if decl.has_inverse {
+                        let inverse_idx = ontology_kernel_find_property(c.ontology_kernel, decl.inverse_name)
+                        if inverse_idx >= 0 {
+                            c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                                axiom_type: owl_inverse_object_properties(),
+                                subject_idx: prop_idx,
+                                object_idx: inverse_idx,
+                                refinement_ref_id: -1,
+                                property_name: empty_name(),
+                                is_property_axiom: true,
+                            })
+                        } else {
+                            c = c.report_error_at(decl.span, 158, 0, 0, 0)
+                        }
+                    }
+
+                    if decl.is_transitive {
+                        c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                            axiom_type: owl_transitive_property(),
+                            subject_idx: prop_idx,
+                            object_idx: -1,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    }
+                    if decl.is_symmetric {
+                        c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                            axiom_type: owl_symmetric_property(),
+                            subject_idx: prop_idx,
+                            object_idx: -1,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    }
+                    if decl.is_functional {
+                        c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
+                            axiom_type: owl_functional_property(),
+                            subject_idx: prop_idx,
+                            object_idx: -1,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    }
+                }
+
+                c.collect_ontology_role_axioms((*list).tail, all_roles)
+            }
+        }
+    }
+
+    fn validate_ontology_kernel_inverse_consistency(self) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        var i: i64 = 0
+        while i < c.ontology_kernel.properties.count {
+            let prop_info = c.ontology_kernel.properties.entries[i as usize]
+            let inverse_idx = prop_info.inverse_property_idx
+            if inverse_idx >= 0 && inverse_idx < c.ontology_kernel.properties.count {
+                let inverse_info = c.ontology_kernel.properties.entries[inverse_idx as usize]
+                if inverse_info.inverse_property_idx != i {
+                    c = c.report_error_at(Span { start: 0, end: 0 }, 159, 0, 0, 0)
+                }
+                if prop_info.domain_class_idx >= 0 && inverse_info.range_class_idx >= 0 && prop_info.domain_class_idx != inverse_info.range_class_idx {
+                    c = c.report_error_at(Span { start: 0, end: 0 }, 159, 0, 0, 0)
+                }
+                if prop_info.range_class_idx >= 0 && inverse_info.domain_class_idx >= 0 && prop_info.range_class_idx != inverse_info.domain_class_idx {
+                    c = c.report_error_at(Span { start: 0, end: 0 }, 159, 0, 0, 0)
+                }
+            }
+            i = i + 1
+        }
+        c
+    }
+
+    fn validate_ontology_kernel_role_constraints(self, roles: Option<Box<OntologyRoleDeclList>>, all_roles: Option<Box<OntologyRoleDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match roles {
+            None => self
+            Some(list) => {
+                var c = self
+                let decl = (*list).head
+                if decl.duplicate_modifier_bits != 0 || c.ontology_role_decl_count(all_roles, decl.name) > 1 {
+                    return c.validate_ontology_kernel_role_constraints((*list).tail, all_roles)
+                }
+
+                if decl.has_inverse {
+                    let prop_idx = ontology_kernel_find_property(c.ontology_kernel, decl.name)
+                    let inverse_idx = ontology_kernel_find_property(c.ontology_kernel, decl.inverse_name)
+                    if prop_idx >= 0 && inverse_idx >= 0 {
+                        let prop_info = c.ontology_kernel.properties.entries[prop_idx as usize]
+                        let inverse_info = c.ontology_kernel.properties.entries[inverse_idx as usize]
+                        if prop_info.inverse_property_idx != inverse_idx || inverse_info.inverse_property_idx != prop_idx {
+                            c = c.report_error_at(decl.span, 159, 0, 0, 0)
+                        }
+                        if prop_info.domain_class_idx >= 0 && inverse_info.range_class_idx >= 0 && prop_info.domain_class_idx != inverse_info.range_class_idx {
+                            c = c.report_error_at(decl.span, 159, 0, 0, 0)
+                        }
+                        if prop_info.range_class_idx >= 0 && inverse_info.domain_class_idx >= 0 && prop_info.range_class_idx != inverse_info.domain_class_idx {
+                            c = c.report_error_at(decl.span, 159, 0, 0, 0)
+                        }
+                    }
+                }
+
+                c.validate_ontology_kernel_role_constraints((*list).tail, all_roles)
+            }
+        }
+    }
+
+    fn validate_ontology_kernel_strengthening(self) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        var child_idx: i64 = 0
+        while child_idx < c.ontology_kernel.classes.count {
+            let child_property_count = c.ontology_kernel.materialized.class_property_counts[child_idx as usize]
+            if child_property_count > 0 {
+                var ancestor_idx: i64 = 0
+                while ancestor_idx < c.ontology_kernel.classes.count {
+                    if child_idx != ancestor_idx && ontology_kernel_is_subclass(c.ontology_kernel, child_idx, ancestor_idx) {
+                        let ancestor_property_count = c.ontology_kernel.materialized.class_property_counts[ancestor_idx as usize]
+                        var ci: i64 = 0
+                        while ci < child_property_count {
+                            let child_axiom_idx = c.ontology_kernel.materialized.class_property_axioms[(child_idx * 8 + ci) as usize]
+                            if child_axiom_idx >= 0 && child_axiom_idx < c.ontology_kernel.axioms.count {
+                                let child_axiom = c.ontology_kernel.axioms.axioms[child_axiom_idx as usize]
+                                var pi: i64 = 0
+                                while pi < ancestor_property_count {
+                                    let ancestor_axiom_idx = c.ontology_kernel.materialized.class_property_axioms[(ancestor_idx * 8 + pi) as usize]
+                                    if ancestor_axiom_idx >= 0 && ancestor_axiom_idx < c.ontology_kernel.axioms.count {
+                                        let ancestor_axiom = c.ontology_kernel.axioms.axioms[ancestor_axiom_idx as usize]
+                                        if name_eq(child_axiom.property_name, ancestor_axiom.property_name) {
+                                            let child_ref_id = child_axiom.refinement_ref_id
+                                            let ancestor_ref_id = ancestor_axiom.refinement_ref_id
+                                            if child_ref_id >= 0 && child_ref_id < 128 && ancestor_ref_id >= 0 && ancestor_ref_id < 128 {
+                                                let child_pred = c.refinements.entries[child_ref_id as usize].predicate
+                                                let ancestor_pred = c.refinements.entries[ancestor_ref_id as usize].predicate
+                                                if !pred_implies(child_pred, ancestor_pred) {
+                                                    c = c.report_warning_at(Span { start: 0, end: 0 }, 41, 0, 0, 0)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    pi = pi + 1
+                                }
+                            }
+                            ci = ci + 1
+                        }
+                    }
+                    ancestor_idx = ancestor_idx + 1
+                }
+            }
+            child_idx = child_idx + 1
+        }
+        c
     }
 
     // --------------------------------------------------------
@@ -12340,8 +12756,9 @@ impl Checker {
             // This is the canonical form for compound property reasoning:
             //   axioms = {potency >= 0.0, mw < 1000.0, ...}
             //   conjoined = (potency >= 0.0) AND (mw < 1000.0) AND ...
-            //   pred_implies_structural(conjoined, expected) succeeds if
-            //   ANY conjunct alone entails expected (sound under-approx).
+            //   pred_implies_structural(conjoined, expected) succeeds when the
+            //   collected conjunction is strong enough to discharge expected.
+            // Failure is still only an under-approximation of semantic proof.
             //
             // Uses pred_implies_structural (var_name independent) because
             // properties are universally quantified — the bound variable name
@@ -12350,44 +12767,61 @@ impl Checker {
                 let arg_oid = env_lookup.ontology_id
                 var axiom_preds: [RefinementPred; 16] = [empty_refinement_pred(); 16]
                 var axiom_count: i64 = 0
+                var axiom_overflow = false
 
-                // Collect own properties
-                var pi: i64 = 0
-                while pi < c.ontologies.entries[arg_oid as usize].property_count {
-                    let prop_ref_id = c.ontologies.entries[arg_oid as usize].property_ref_ids[pi as usize]
-                    if prop_ref_id >= 0 && prop_ref_id < 64 && axiom_count < 16 {
-                        axiom_preds[axiom_count as usize] = c.refinements.entries[prop_ref_id as usize].predicate
-                        axiom_count = axiom_count + 1
-                    }
-                    pi = pi + 1
-                }
-
-                // Collect ancestor type-binding refinements + ancestor properties
-                var anc_i: i64 = 0
-                while anc_i < c.ontologies.entries[arg_oid as usize].all_ancestor_count {
-                    let anc_idx = c.ontologies.entries[arg_oid as usize].all_ancestor_indices[anc_i as usize]
-                    if anc_idx >= 0 && anc_idx < c.ontologies.count {
-                        let anc_name = c.ontologies.entries[anc_idx as usize].name
-                        let anc_ty = c.env.lookup(anc_name)
-                        if anc_ty.refinement_id >= 0 && anc_ty.refinement_id < 128 && axiom_count < 16 {
-                            axiom_preds[axiom_count as usize] = c.refinements.entries[anc_ty.refinement_id as usize].predicate
-                            axiom_count = axiom_count + 1
-                        }
-                        var pj: i64 = 0
-                        while pj < c.ontologies.entries[anc_idx as usize].property_count {
-                            let anc_prop_ref_id = c.ontologies.entries[anc_idx as usize].property_ref_ids[pj as usize]
-                            if anc_prop_ref_id >= 0 && anc_prop_ref_id < 64 && axiom_count < 16 {
-                                axiom_preds[axiom_count as usize] = c.refinements.entries[anc_prop_ref_id as usize].predicate
-                                axiom_count = axiom_count + 1
+                if arg_oid >= 0 && arg_oid < c.ontology_kernel.classes.count {
+                    // Collect own class property axioms first.
+                    var pi: i64 = 0
+                    let own_axiom_count = c.ontology_kernel.materialized.class_property_counts[arg_oid as usize]
+                    while pi < own_axiom_count {
+                        let axiom_idx = c.ontology_kernel.materialized.class_property_axioms[(arg_oid * 8 + pi) as usize]
+                        if axiom_idx >= 0 && axiom_idx < c.ontology_kernel.axioms.count {
+                            let ontology_axiom = c.ontology_kernel.axioms.axioms[axiom_idx as usize]
+                            let prop_ref_id = ontology_axiom.refinement_ref_id
+                            if prop_ref_id >= 0 && prop_ref_id < 128 {
+                                if axiom_count < 16 {
+                                    axiom_preds[axiom_count as usize] = c.refinements.entries[prop_ref_id as usize].predicate
+                                    axiom_count = axiom_count + 1
+                                } else {
+                                    axiom_overflow = true
+                                }
                             }
-                            pj = pj + 1
                         }
+                        pi = pi + 1
                     }
-                    anc_i = anc_i + 1
+
+                    // Collect superclass property axioms via the materialized subclass matrix.
+                    var anc_idx: i64 = 0
+                    while anc_idx < c.ontology_kernel.classes.count {
+                        if anc_idx != arg_oid && ontology_kernel_is_subclass(c.ontology_kernel, arg_oid, anc_idx) {
+                            var pj: i64 = 0
+                            let anc_axiom_count = c.ontology_kernel.materialized.class_property_counts[anc_idx as usize]
+                            while pj < anc_axiom_count {
+                                let anc_axiom_idx = c.ontology_kernel.materialized.class_property_axioms[(anc_idx * 8 + pj) as usize]
+                                if anc_axiom_idx >= 0 && anc_axiom_idx < c.ontology_kernel.axioms.count {
+                                    let anc_axiom = c.ontology_kernel.axioms.axioms[anc_axiom_idx as usize]
+                                    let anc_prop_ref_id = anc_axiom.refinement_ref_id
+                                    if anc_prop_ref_id >= 0 && anc_prop_ref_id < 128 {
+                                        if axiom_count < 16 {
+                                            axiom_preds[axiom_count as usize] = c.refinements.entries[anc_prop_ref_id as usize].predicate
+                                            axiom_count = axiom_count + 1
+                                        } else {
+                                            axiom_overflow = true
+                                        }
+                                    }
+                                }
+                                pj = pj + 1
+                            }
+                        }
+                        anc_idx = anc_idx + 1
+                    }
                 }
 
                 // Build conjunction and discharge with one call
                 if axiom_count > 0 {
+                    if axiom_overflow {
+                        c = c.report_warning_at(call_span, 42, 0, 0, 0)
+                    }
                     var conjoined = axiom_preds[0]
                     var ci: i64 = 1
                     while ci < axiom_count {
@@ -12444,11 +12878,11 @@ impl Checker {
             return self.report_error_at(call_span, 150, 0, 0, 0)
         }
         // Check subsumption: provided must be subclass of expected
-        if ontology_table_is_subclass(self.ontologies, provided_ty.ontology_id, expected_ty.ontology_id) {
+        if ontology_kernel_is_subclass(self.ontology_kernel, provided_ty.ontology_id, expected_ty.ontology_id) {
             return self
         }
         // Check disjointness for better error
-        if ontology_table_is_disjoint(self.ontologies, provided_ty.ontology_id, expected_ty.ontology_id) {
+        if ontology_kernel_is_disjoint(self.ontology_kernel, provided_ty.ontology_id, expected_ty.ontology_id) {
             return self.report_error_at(call_span, 151, 0, 0, 0)
         }
         self.report_error_at(call_span, 152, 0, 0, 0)

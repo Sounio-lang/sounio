@@ -593,6 +593,495 @@ fn ontology_table_compute_closure(t: OntologyTable) -> OntologyTable with Mut, P
 }
 
 // ============================================================
+// Ontology axiom-centric kernel
+// ============================================================
+
+fn owl_subclass_of() -> i64 { 1 }
+fn owl_equivalent_classes() -> i64 { 2 }
+fn owl_disjoint_classes() -> i64 { 3 }
+fn owl_object_property_domain() -> i64 { 4 }
+fn owl_object_property_range() -> i64 { 5 }
+fn owl_inverse_object_properties() -> i64 { 6 }
+fn owl_sub_object_property_of() -> i64 { 7 }
+fn owl_transitive_property() -> i64 { 8 }
+fn owl_symmetric_property() -> i64 { 9 }
+fn owl_functional_property() -> i64 { 10 }
+fn owl_data_property_constraint() -> i64 { 11 }
+
+struct OntologyClassEntry {
+    name: Name,
+    ontology_name: Name,
+    class_index: i64,
+    is_valid: bool,
+}
+
+struct OntologyClassRegistry {
+    entries: [OntologyClassEntry; 64],
+    count: i64,
+}
+
+struct OntologyObjectProperty {
+    name: Name,
+    property_index: i64,
+    domain_class_idx: i64,
+    range_class_idx: i64,
+    inverse_property_idx: i64,
+    is_transitive: bool,
+    is_functional: bool,
+    is_symmetric: bool,
+    is_valid: bool,
+}
+
+struct OntologyPropertyRegistry {
+    entries: [OntologyObjectProperty; 32],
+    count: i64,
+}
+
+struct OntologyAxiom {
+    axiom_type: i64,
+    subject_idx: i64,
+    object_idx: i64,
+    refinement_ref_id: i64,
+    property_name: Name,
+    is_property_axiom: bool,
+}
+
+struct OntologyAxiomStore {
+    axioms: [OntologyAxiom; 256],
+    count: i64,
+}
+
+struct OntologyMaterialized {
+    subclass_matrix: [bool; 4096],
+    disjoint_matrix: [bool; 4096],
+    sub_property_matrix: [bool; 1024],
+    class_property_axioms: [i64; 512],
+    class_property_counts: [i64; 64],
+}
+
+struct OntologyProfile {
+    is_el: bool,
+    is_ql: bool,
+    is_rl: bool,
+    is_dl: bool,
+}
+
+struct OntologyKernel {
+    classes: OntologyClassRegistry,
+    properties: OntologyPropertyRegistry,
+    axioms: OntologyAxiomStore,
+    materialized: OntologyMaterialized,
+    profile: OntologyProfile,
+}
+
+fn empty_ontology_class_entry() -> OntologyClassEntry {
+    OntologyClassEntry {
+        name: empty_name(),
+        ontology_name: empty_name(),
+        class_index: -1,
+        is_valid: false,
+    }
+}
+
+fn empty_ontology_class_registry() -> OntologyClassRegistry {
+    OntologyClassRegistry {
+        entries: [empty_ontology_class_entry(); 64],
+        count: 0,
+    }
+}
+
+fn empty_ontology_object_property() -> OntologyObjectProperty {
+    OntologyObjectProperty {
+        name: empty_name(),
+        property_index: -1,
+        domain_class_idx: -1,
+        range_class_idx: -1,
+        inverse_property_idx: -1,
+        is_transitive: false,
+        is_functional: false,
+        is_symmetric: false,
+        is_valid: false,
+    }
+}
+
+fn empty_ontology_property_registry() -> OntologyPropertyRegistry {
+    OntologyPropertyRegistry {
+        entries: [empty_ontology_object_property(); 32],
+        count: 0,
+    }
+}
+
+fn empty_ontology_axiom() -> OntologyAxiom {
+    OntologyAxiom {
+        axiom_type: 0,
+        subject_idx: -1,
+        object_idx: -1,
+        refinement_ref_id: -1,
+        property_name: empty_name(),
+        is_property_axiom: false,
+    }
+}
+
+fn empty_ontology_axiom_store() -> OntologyAxiomStore {
+    OntologyAxiomStore {
+        axioms: [empty_ontology_axiom(); 256],
+        count: 0,
+    }
+}
+
+fn empty_ontology_materialized() -> OntologyMaterialized {
+    OntologyMaterialized {
+        subclass_matrix: [false; 4096],
+        disjoint_matrix: [false; 4096],
+        sub_property_matrix: [false; 1024],
+        class_property_axioms: [-1; 512],
+        class_property_counts: [0; 64],
+    }
+}
+
+fn empty_ontology_profile() -> OntologyProfile {
+    OntologyProfile {
+        is_el: true,
+        is_ql: true,
+        is_rl: true,
+        is_dl: true,
+    }
+}
+
+fn ontology_kernel_empty() -> OntologyKernel {
+    OntologyKernel {
+        classes: empty_ontology_class_registry(),
+        properties: empty_ontology_property_registry(),
+        axioms: empty_ontology_axiom_store(),
+        materialized: empty_ontology_materialized(),
+        profile: empty_ontology_profile(),
+    }
+}
+
+fn ontology_kernel_class_matrix_index(sub_idx: i64, super_idx: i64) -> i64 {
+    sub_idx * 64 + super_idx
+}
+
+fn ontology_kernel_property_matrix_index(sub_idx: i64, super_idx: i64) -> i64 {
+    sub_idx * 32 + super_idx
+}
+
+fn ontology_kernel_find_class(k: OntologyKernel, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < k.classes.count {
+        if name_eq(k.classes.entries[i as usize].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn ontology_kernel_find_property(k: OntologyKernel, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < k.properties.count {
+        if name_eq(k.properties.entries[i as usize].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn ontology_kernel_can_add_axiom(k: OntologyKernel) -> bool {
+    k.axioms.count < 256
+}
+
+fn ontology_kernel_can_add_class(k: OntologyKernel) -> bool {
+    k.classes.count < 64
+}
+
+fn ontology_kernel_can_add_property(k: OntologyKernel) -> bool {
+    k.properties.count < 32
+}
+
+fn ontology_kernel_add_class(k: OntologyKernel, name: Name, ontology_name: Name) -> (OntologyKernel, i64) with Mut, Panic, Div {
+    var out = k
+    if out.classes.count >= 64 {
+        return (out, -1)
+    }
+    let idx = out.classes.count
+    out.classes.entries[idx as usize] = OntologyClassEntry {
+        name: name,
+        ontology_name: ontology_name,
+        class_index: idx,
+        is_valid: true,
+    }
+    out.classes.count = idx + 1
+    (out, idx)
+}
+
+fn ontology_kernel_add_property(k: OntologyKernel, name: Name) -> (OntologyKernel, i64) with Mut, Panic, Div {
+    var out = k
+    if out.properties.count >= 32 {
+        return (out, -1)
+    }
+    let idx = out.properties.count
+    out.properties.entries[idx as usize] = OntologyObjectProperty {
+        name: name,
+        property_index: idx,
+        domain_class_idx: -1,
+        range_class_idx: -1,
+        inverse_property_idx: -1,
+        is_transitive: false,
+        is_functional: false,
+        is_symmetric: false,
+        is_valid: true,
+    }
+    out.properties.count = idx + 1
+    (out, idx)
+}
+
+fn ontology_kernel_add_axiom(k: OntologyKernel, axiom: OntologyAxiom) -> OntologyKernel with Mut, Panic, Div {
+    var out = k
+    if out.axioms.count < 256 {
+        out.axioms.axioms[out.axioms.count as usize] = axiom
+        out.axioms.count = out.axioms.count + 1
+    }
+    out
+}
+
+fn ontology_kernel_is_subclass(k: OntologyKernel, sub_idx: i64, super_idx: i64) -> bool with Mut, Panic, Div {
+    if sub_idx < 0 || super_idx < 0 || sub_idx >= k.classes.count || super_idx >= k.classes.count {
+        return false
+    }
+    k.materialized.subclass_matrix[ontology_kernel_class_matrix_index(sub_idx, super_idx) as usize]
+}
+
+fn ontology_kernel_is_disjoint(k: OntologyKernel, a_idx: i64, b_idx: i64) -> bool with Mut, Panic, Div {
+    if a_idx < 0 || b_idx < 0 || a_idx >= k.classes.count || b_idx >= k.classes.count {
+        return false
+    }
+    k.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(a_idx, b_idx) as usize]
+}
+
+fn ontology_kernel_is_sub_property(k: OntologyKernel, sub_idx: i64, super_idx: i64) -> bool with Mut, Panic, Div {
+    if sub_idx < 0 || super_idx < 0 || sub_idx >= k.properties.count || super_idx >= k.properties.count {
+        return false
+    }
+    k.materialized.sub_property_matrix[ontology_kernel_property_matrix_index(sub_idx, super_idx) as usize]
+}
+
+fn ontology_kernel_check_profile(k: OntologyKernel) -> OntologyProfile with Mut, Panic, Div {
+    var out = empty_ontology_profile()
+    var i: i64 = 0
+    while i < k.axioms.count {
+        let ax = k.axioms.axioms[i as usize]
+        if ax.axiom_type == owl_equivalent_classes() || ax.axiom_type == owl_disjoint_classes() {
+            out.is_el = false
+        }
+        if ax.axiom_type == owl_transitive_property() {
+            out.is_ql = false
+        }
+        if ax.axiom_type == owl_inverse_object_properties() || ax.axiom_type == owl_symmetric_property() || ax.axiom_type == owl_functional_property() {
+            out.is_el = false
+            out.is_ql = false
+        }
+        if ax.axiom_type == owl_data_property_constraint() {
+            out.is_el = false
+            out.is_ql = false
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn ontology_kernel_materialize(k: OntologyKernel) -> OntologyKernel with Mut, Panic, Div {
+    var out = k
+    out.materialized = empty_ontology_materialized()
+
+    var pi: i64 = 0
+    while pi < out.properties.count {
+        out.properties.entries[pi as usize].domain_class_idx = -1
+        out.properties.entries[pi as usize].range_class_idx = -1
+        out.properties.entries[pi as usize].inverse_property_idx = -1
+        out.properties.entries[pi as usize].is_transitive = false
+        out.properties.entries[pi as usize].is_functional = false
+        out.properties.entries[pi as usize].is_symmetric = false
+        pi = pi + 1
+    }
+
+    var i: i64 = 0
+    while i < out.classes.count {
+        out.materialized.subclass_matrix[ontology_kernel_class_matrix_index(i, i) as usize] = true
+        i = i + 1
+    }
+
+    i = 0
+    while i < out.properties.count {
+        out.materialized.sub_property_matrix[ontology_kernel_property_matrix_index(i, i) as usize] = true
+        i = i + 1
+    }
+
+    i = 0
+    while i < out.axioms.count {
+        let ax = out.axioms.axioms[i as usize]
+        if ax.axiom_type == owl_subclass_of() {
+            if ax.subject_idx >= 0 && ax.subject_idx < out.classes.count && ax.object_idx >= 0 && ax.object_idx < out.classes.count {
+                out.materialized.subclass_matrix[ontology_kernel_class_matrix_index(ax.subject_idx, ax.object_idx) as usize] = true
+            }
+        }
+        else if ax.axiom_type == owl_equivalent_classes() {
+            if ax.subject_idx >= 0 && ax.subject_idx < out.classes.count && ax.object_idx >= 0 && ax.object_idx < out.classes.count {
+                out.materialized.subclass_matrix[ontology_kernel_class_matrix_index(ax.subject_idx, ax.object_idx) as usize] = true
+                out.materialized.subclass_matrix[ontology_kernel_class_matrix_index(ax.object_idx, ax.subject_idx) as usize] = true
+            }
+        }
+        else if ax.axiom_type == owl_disjoint_classes() {
+            if ax.subject_idx >= 0 && ax.subject_idx < out.classes.count && ax.object_idx >= 0 && ax.object_idx < out.classes.count {
+                out.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(ax.subject_idx, ax.object_idx) as usize] = true
+                out.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(ax.object_idx, ax.subject_idx) as usize] = true
+            }
+        }
+        else if ax.axiom_type == owl_object_property_domain() {
+            if ax.subject_idx >= 0 && ax.subject_idx < out.properties.count && ax.object_idx >= 0 && ax.object_idx < out.classes.count {
+                out.properties.entries[ax.subject_idx as usize].domain_class_idx = ax.object_idx
+            }
+        }
+        else if ax.axiom_type == owl_object_property_range() {
+            if ax.subject_idx >= 0 && ax.subject_idx < out.properties.count && ax.object_idx >= 0 && ax.object_idx < out.classes.count {
+                out.properties.entries[ax.subject_idx as usize].range_class_idx = ax.object_idx
+            }
+        }
+        else if ax.axiom_type == owl_inverse_object_properties() {
+            if ax.subject_idx >= 0 && ax.subject_idx < out.properties.count && ax.object_idx >= 0 && ax.object_idx < out.properties.count {
+                out.properties.entries[ax.subject_idx as usize].inverse_property_idx = ax.object_idx
+                out.properties.entries[ax.object_idx as usize].inverse_property_idx = ax.subject_idx
+            }
+        }
+        else if ax.axiom_type == owl_sub_object_property_of() {
+            if ax.subject_idx >= 0 && ax.subject_idx < out.properties.count && ax.object_idx >= 0 && ax.object_idx < out.properties.count {
+                out.materialized.sub_property_matrix[ontology_kernel_property_matrix_index(ax.subject_idx, ax.object_idx) as usize] = true
+            }
+        }
+        else if ax.axiom_type == owl_transitive_property() {
+            if ax.subject_idx >= 0 && ax.subject_idx < out.properties.count {
+                out.properties.entries[ax.subject_idx as usize].is_transitive = true
+            }
+        }
+        else if ax.axiom_type == owl_symmetric_property() {
+            if ax.subject_idx >= 0 && ax.subject_idx < out.properties.count {
+                out.properties.entries[ax.subject_idx as usize].is_symmetric = true
+            }
+        }
+        else if ax.axiom_type == owl_functional_property() {
+            if ax.subject_idx >= 0 && ax.subject_idx < out.properties.count {
+                out.properties.entries[ax.subject_idx as usize].is_functional = true
+            }
+        }
+        i = i + 1
+    }
+
+    var mid: i64 = 0
+    while mid < out.classes.count {
+        var src: i64 = 0
+        while src < out.classes.count {
+            if out.materialized.subclass_matrix[ontology_kernel_class_matrix_index(src, mid) as usize] {
+                var dst: i64 = 0
+                while dst < out.classes.count {
+                    if out.materialized.subclass_matrix[ontology_kernel_class_matrix_index(mid, dst) as usize] {
+                        out.materialized.subclass_matrix[ontology_kernel_class_matrix_index(src, dst) as usize] = true
+                    }
+                    dst = dst + 1
+                }
+            }
+            src = src + 1
+        }
+        mid = mid + 1
+    }
+
+    mid = 0
+    while mid < out.properties.count {
+        var psrc: i64 = 0
+        while psrc < out.properties.count {
+            if out.materialized.sub_property_matrix[ontology_kernel_property_matrix_index(psrc, mid) as usize] {
+                var pdst: i64 = 0
+                while pdst < out.properties.count {
+                    if out.materialized.sub_property_matrix[ontology_kernel_property_matrix_index(mid, pdst) as usize] {
+                        out.materialized.sub_property_matrix[ontology_kernel_property_matrix_index(psrc, pdst) as usize] = true
+                    }
+                    pdst = pdst + 1
+                }
+            }
+            psrc = psrc + 1
+        }
+        mid = mid + 1
+    }
+
+    var changed = true
+    var iterations: i64 = 0
+    while changed && iterations < 64 {
+        changed = false
+        iterations = iterations + 1
+        var x: i64 = 0
+        while x < out.classes.count {
+            var a: i64 = 0
+            while a < out.classes.count {
+                if out.materialized.subclass_matrix[ontology_kernel_class_matrix_index(x, a) as usize] {
+                    var b: i64 = 0
+                    while b < out.classes.count {
+                        if out.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(a, b) as usize] &&
+                           !out.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(x, b) as usize] {
+                            out.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(x, b) as usize] = true
+                            out.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(b, x) as usize] = true
+                            changed = true
+                        }
+                        b = b + 1
+                    }
+                }
+                a = a + 1
+            }
+            x = x + 1
+        }
+    }
+
+    pi = 0
+    while pi < out.properties.count {
+        let inv_idx = out.properties.entries[pi as usize].inverse_property_idx
+        if inv_idx >= 0 && inv_idx < out.properties.count {
+            let prop_domain = out.properties.entries[pi as usize].domain_class_idx
+            let prop_range = out.properties.entries[pi as usize].range_class_idx
+            let inv_domain = out.properties.entries[inv_idx as usize].domain_class_idx
+            let inv_range = out.properties.entries[inv_idx as usize].range_class_idx
+            if prop_domain >= 0 && inv_range < 0 {
+                out.properties.entries[inv_idx as usize].range_class_idx = prop_domain
+            }
+            if prop_range >= 0 && inv_domain < 0 {
+                out.properties.entries[inv_idx as usize].domain_class_idx = prop_range
+            }
+            if inv_domain >= 0 && prop_range < 0 {
+                out.properties.entries[pi as usize].range_class_idx = inv_domain
+            }
+            if inv_range >= 0 && prop_domain < 0 {
+                out.properties.entries[pi as usize].domain_class_idx = inv_range
+            }
+        }
+        pi = pi + 1
+    }
+
+    i = 0
+    while i < out.axioms.count {
+        let ax = out.axioms.axioms[i as usize]
+        if ax.axiom_type == owl_data_property_constraint() && ax.subject_idx >= 0 && ax.subject_idx < out.classes.count {
+            let slot = out.materialized.class_property_counts[ax.subject_idx as usize]
+            if slot < 8 {
+                out.materialized.class_property_axioms[(ax.subject_idx * 8 + slot) as usize] = i
+                out.materialized.class_property_counts[ax.subject_idx as usize] = slot + 1
+            }
+        }
+        i = i + 1
+    }
+
+    out.profile = ontology_kernel_check_profile(out)
+    out
+}
+
+// ============================================================
 // Hyper expression metadata
 // ============================================================
 
