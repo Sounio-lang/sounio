@@ -147,19 +147,19 @@ var CURRENT_FN: i64 = 0
 
 // ─── Phase 6a: Unit tracking (compile-time only) ───
 // Unit hash per local variable (0 = no unit)
-var VAR_UNIT: [i64; 256] = [0; 256]
+var VAR_UNIT: [i64; 1024] = [0; 1024]
 
 // ─── Phase 6c: Linear type tracking ───
 // Per-struct: 1 if declared with 'linear' keyword, 0 otherwise
 var ST_LINEAR: [i64; 32] = [0; 32]
 // Per local variable: 1 if linear type, 0 otherwise
-var VAR_LINEAR: [i64; 256] = [0; 256]
+var VAR_LINEAR: [i64; 1024] = [0; 1024]
 // Per local variable: use count (for linear checking)
-var VAR_USED: [i64; 256] = [0; 256]
-var VAR_TY: [i64; 256] = [0; 256]
-var VAR_TY_HASH: [i64; 256] = [0; 256]
-var GL_TY: [i64; 256] = [0; 256]
-var GL_TY_HASH: [i64; 256] = [0; 256]
+var VAR_USED: [i64; 1024] = [0; 1024]
+var VAR_TY: [i64; 1024] = [0; 1024]
+var VAR_TY_HASH: [i64; 1024] = [0; 1024]
+var GL_TY: [i64; 1024] = [0; 1024]
+var GL_TY_HASH: [i64; 1024] = [0; 1024]
 var FN_RET_TY: [i64; 4096] = [0; 4096]
 var FN_RET_HASH: [i64; 4096] = [0; 4096]
 var FN_ARITY: [i64; 4096] = [0; 4096]
@@ -277,11 +277,44 @@ fn st_total_size(si: i64) -> i64 with Panic, Div, Mut {
 }
 
 // Global variable table: flat array, 4 fields per entry [hash, offset, esiz, alen]
-var GL: [i64; 1024] = [0; 1024]
+var GL: [i64; 4096] = [0; 4096]
 var GL_COUNT: i64 = 0
 var GL_BSS_SIZE: i64 = 0
 var GL_BSS_BASE: i64 = 0
 var RET_AGG_BSS_OFF: i64 = 0
+var LIMIT_ERROR_KIND: i64 = 0
+var LAST_LOCAL_BSS_SPILL: i64 = 0
+var LAST_LOCAL_BSS_ADDR: i64 = 0
+
+fn local_cap() -> i64 { return 1024 }
+fn global_cap() -> i64 { return 1024 }
+fn max_frame_bytes() -> i64 { return 4194304 }
+fn box_page_bytes() -> i64 { return 4096 }
+fn local_bss_spill_bytes() -> i64 { return 524288 }
+
+fn note_limit_error(kind: i64) with Mut {
+    if LIMIT_ERROR_KIND == 0 { LIMIT_ERROR_KIND = kind }
+    TYPECHECK_FAILED = 1
+}
+
+fn print_limit_error() with IO, Mut, Panic {
+    if LIMIT_ERROR_KIND == 1 {
+        print("error: too many local variables in function (max ")
+        print_int(local_cap())
+        print(")\n")
+    } else if LIMIT_ERROR_KIND == 2 {
+        print("error: too many globals (max ")
+        print_int(global_cap())
+        print(")\n")
+    }
+}
+
+fn bss_alloc_aligned(bytes: i64) -> i64 with Mut, Panic, Div {
+    let aligned = (bytes + 7) / 8 * 8
+    let off = GL_BSS_SIZE
+    GL_BSS_SIZE = GL_BSS_SIZE + aligned
+    return off
+}
 
 // Hash: pack name length + first 6 bytes into i64 (avoids sb()-based comparison during lookup)
 fn gl_name_hash(ns: i64, ne: i64) -> i64 with Panic, Mut {
@@ -306,32 +339,39 @@ fn gl_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
     return -1
 }
 
-fn gl_add(ns: i64, ne: i64, esiz: i64, alen: i64) with Mut, Panic {
+fn gl_add(ns: i64, ne: i64, esiz: i64, alen: i64) -> i64 with Mut, Panic {
+    if GL_COUNT >= global_cap() {
+        note_limit_error(2)
+        return -1
+    }
     var sz: i64 = 8
     if alen > 0 { sz = alen * esiz }
     let aligned = (sz + 7) / 8 * 8
+    let gix = GL_COUNT
     GL[(GL_COUNT * 4 + 0) as usize] = gl_name_hash(ns, ne)
     GL[(GL_COUNT * 4 + 1) as usize] = GL_BSS_SIZE
     GL[(GL_COUNT * 4 + 2) as usize] = esiz
     GL[(GL_COUNT * 4 + 3) as usize] = alen
     GL_COUNT = GL_COUNT + 1
     GL_BSS_SIZE = GL_BSS_SIZE + aligned
+    return gix
 }
 
 // Per-function local variable table (reset per function)
-var VAR_NS: [i64; 256] = [0; 256]
-var VAR_NE: [i64; 256] = [0; 256]
-var VAR_SLOT: [i64; 256] = [0; 256]
-var VAR_LEN_SLOT: [i64; 256] = [0; 256]
-var VAR_ALEN: [i64; 256] = [0; 256]
-var VAR_ESIZ: [i64; 256] = [0; 256]
-var VAR_IS_F64: [i64; 256] = [0; 256]
-var VAR_IS_CLOSURE: [i64; 256] = [0; 256]
-var VAR_MUT: [i64; 256] = [0; 256]
+var VAR_NS: [i64; 1024] = [0; 1024]
+var VAR_NE: [i64; 1024] = [0; 1024]
+var VAR_SLOT: [i64; 1024] = [0; 1024]
+var VAR_LEN_SLOT: [i64; 1024] = [0; 1024]
+var VAR_ALEN: [i64; 1024] = [0; 1024]
+var VAR_ESIZ: [i64; 1024] = [0; 1024]
+var VAR_IS_F64: [i64; 1024] = [0; 1024]
+var VAR_IS_CLOSURE: [i64; 1024] = [0; 1024]
+var VAR_MUT: [i64; 1024] = [0; 1024]
 var VAR_COUNT: i64 = 0
 var NEXT_SLOT: i64 = 1
 var FRAME_PATCH_COUNT: i64 = 0
 var FRAME_PATCH_OFF: [i64; 4096] = [0; 4096]
+var FN_FRAME_SIZE: [i64; 4096] = [0; 4096]
 var LAST_EXPR_IS_CLOSURE: i64 = 0
 // Scratch globals for float scientific exponent (avoids extra locals in compile_primary)
 var FL_SCI_SCRATCH: i64 = 0
@@ -466,8 +506,7 @@ fn emit_load_var_a64(slot: i64) with Mut, Panic {
         // sub x9, x29, #off
         em32(0xD1000000 | (off << 10) | (29 << 5) | 9)
     } else {
-        // movz x9, #off (off <= 32768 for 512 slots)
-        em32(0xD2800000 | ((off & 0xFFFF) << 5) | 9)
+        emit_imm64_reg_a64(9, off)
         // sub x9, x29, x9
         em32(0xCB090000 | (29 << 5) | 9)
     }
@@ -480,7 +519,7 @@ fn emit_store_var_a64(slot: i64) with Mut, Panic {
     if off <= 4095 {
         em32(0xD1000000 | (off << 10) | (29 << 5) | 9)
     } else {
-        em32(0xD2800000 | ((off & 0xFFFF) << 5) | 9)
+        emit_imm64_reg_a64(9, off)
         em32(0xCB090000 | (29 << 5) | 9)
     }
     // str x0, [x9]
@@ -494,6 +533,45 @@ fn emit_pop_x1_a64() with Mut { em32(0xF8410FE1) }  // ldr x1, [sp], #16
 fn emit_pop_x0_a64() with Mut { em32(0xF8410FE0) }  // ldr x0, [sp], #16
 
 fn emit_pop_x2_a64() with Mut { em32(0xF8410FE2) }  // ldr x2, [sp], #16
+
+fn emit_copy_words_x10_x11_a64(words: i64) with Mut {
+    if words <= 0 { return }
+    emit_imm64_reg_a64(12, words)
+    let loop_off = CL
+    em32(0xF940014D)  // ldr x13, [x10]
+    em32(0xF900016D)  // str x13, [x11]
+    em32(0x9100214A)  // add x10, x10, #8
+    em32(0x9100216B)  // add x11, x11, #8
+    em32(0xF100058C)  // subs x12, x12, #1
+    let br_off = CL
+    let rel = (loop_off - br_off) / 4
+    em32(0x54000001 | ((rel & 0x7FFFF) << 5))  // b.ne loop
+}
+
+fn emit_zero_words_x11_a64(words: i64) with Mut {
+    if words <= 0 { return }
+    emit_imm64_reg_a64(12, words)
+    em32(0xD280000D)  // mov x13, #0
+    let loop_off = CL
+    em32(0xF900016D)  // str x13, [x11]
+    em32(0x9100216B)  // add x11, x11, #8
+    em32(0xF100058C)  // subs x12, x12, #1
+    let br_off = CL
+    let rel = (loop_off - br_off) / 4
+    em32(0x54000001 | ((rel & 0x7FFFF) << 5))  // b.ne loop
+}
+
+fn emit_fill_words_x13_x11_a64(words: i64) with Mut {
+    if words <= 0 { return }
+    emit_imm64_reg_a64(12, words)
+    let loop_off = CL
+    em32(0xF900016D)  // str x13, [x11]
+    em32(0x9100216B)  // add x11, x11, #8
+    em32(0xF100058C)  // subs x12, x12, #1
+    let br_off = CL
+    let rel = (loop_off - br_off) / 4
+    em32(0x54000001 | ((rel & 0x7FFFF) << 5))  // b.ne loop
+}
 
 fn emit_drop_call_args_a64(argc: i64) with Mut {
     let bytes = argc * 16
@@ -554,18 +632,20 @@ fn bind_array_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic,
     let elem_ty = arr_hash_elem_ty(ty_hash)
     let nslots = arr_storage_slots(ty_hash)
     let ptr_slot = var_add_arr(ns, ne, nslots, esiz, elem_ty)
+    if ptr_slot < 0 { return }
     let arr_vi = VAR_COUNT - 1
     let base = ptr_slot - nslots
     VAR_TY[arr_vi as usize] = 8
     VAR_TY_HASH[arr_vi as usize] = ty_hash
     em32(0xAA0003EA)  // mov x10, x0
-    var i: i64 = 0
-    while i < nslots {
-        em32(0xF9400000 | (i << 10) | (10 << 5) | 0)  // ldr x0, [x10, #i*8]
-        emit_store_var_a64(base + nslots - 1 - i)
-        i = i + 1
+    if LAST_LOCAL_BSS_SPILL != 0 {
+        emit_imm64_reg_a64(0, LAST_LOCAL_BSS_ADDR)
+        emit_copy_agg_to_ptr_a64(8, ty_hash)
+    } else {
+        emit_lea_var_a64(base + nslots - 1)
+        em32(0xAA0003EB)  // mov x11, x0
+        emit_copy_words_x10_x11_a64(nslots)
     }
-    emit_lea_var_a64(base + nslots - 1)
     emit_store_var_a64(ptr_slot)
 }
 
@@ -574,19 +654,14 @@ fn copy_array_into_local_slot_a64(slot: i64, ty_hash: i64) with Mut, Panic, Div 
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
     emit_load_var_a64(slot)
     em32(0xAA0003EB)  // mov x11, x0 (dst ptr)
-    var i: i64 = 0
-    while i < nslots {
-        em32(0xF9400000 | (i << 10) | (10 << 5) | 0)  // ldr x0, [x10, #i*8]
-        em32(0xF9000000 | (i << 10) | (11 << 5) | 0)  // str x0, [x11, #i*8]
-        i = i + 1
-    }
-    em32(0xAA0B03E0)  // mov x0, x11
+    emit_copy_words_x10_x11_a64(nslots)
 }
 
 fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
     let si = st_find(ty_hash)
     if si < 0 && knowledge_hash_is(ty_hash) == false {
         let slot = var_add(ns, ne)
+        if slot < 0 { return }
         emit_store_var_a64(slot)
         let vix = VAR_COUNT - 1
         VAR_TY[vix as usize] = 6
@@ -598,31 +673,18 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
     NEXT_SLOT = NEXT_SLOT + nslots
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
-    VAR_NS[VAR_COUNT as usize] = ns
-    VAR_NE[VAR_COUNT as usize] = ne
-    VAR_SLOT[VAR_COUNT as usize] = ptr_slot
-    VAR_LEN_SLOT[VAR_COUNT as usize] = 0
-    VAR_ALEN[VAR_COUNT as usize] = 0
-    VAR_ESIZ[VAR_COUNT as usize] = 8
-    VAR_IS_F64[VAR_COUNT as usize] = 0
-    VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
-    VAR_MUT[VAR_COUNT as usize] = 0
-    VAR_UNIT[VAR_COUNT as usize] = 0
-    if knowledge_hash_is(ty_hash) { VAR_LINEAR[VAR_COUNT as usize] = 0 }
-    else { VAR_LINEAR[VAR_COUNT as usize] = ST_LINEAR[si as usize] }
-    VAR_USED[VAR_COUNT as usize] = 0
-    if knowledge_hash_is(ty_hash) { VAR_TY[VAR_COUNT as usize] = 0 }
-    else { VAR_TY[VAR_COUNT as usize] = 6 }
-    VAR_TY_HASH[VAR_COUNT as usize] = ty_hash
-    VAR_COUNT = VAR_COUNT + 1
-    em32(0xAA0003EA)  // mov x10, x0
-    var i: i64 = 0
-    while i < nslots {
-        em32(0xF9400000 | (i << 10) | (10 << 5) | 0)  // ldr x0, [x10, #i*8]
-        emit_store_var_a64(base + nslots - 1 - i)
-        i = i + 1
+    var linear_flag: i64 = 0
+    if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize] }
+    var out_ty: i64 = 0
+    if knowledge_hash_is(ty_hash) == false { out_ty = 6 }
+    if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, linear_flag, 0, out_ty, ty_hash) < 0 {
+        NEXT_SLOT = NEXT_SLOT - nslots - 1
+        return
     }
+    em32(0xAA0003EA)  // mov x10, x0
     emit_lea_var_a64(base + nslots - 1)
+    em32(0xAA0003EB)  // mov x11, x0
+    emit_copy_words_x10_x11_a64(nslots)
     emit_store_var_a64(ptr_slot)
 }
 
@@ -633,13 +695,7 @@ fn copy_struct_into_local_slot_a64(slot: i64, ty_hash: i64) with Mut, Panic, Div
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
     emit_load_var_a64(slot)
     em32(0xAA0003EB)  // mov x11, x0 (dst ptr)
-    var i: i64 = 0
-    while i < nslots {
-        em32(0xF9400000 | (i << 10) | (10 << 5) | 0)  // ldr x0, [x10, #i*8]
-        em32(0xF9000000 | (i << 10) | (11 << 5) | 0)  // str x0, [x11, #i*8]
-        i = i + 1
-    }
-    em32(0xAA0B03E0)  // mov x0, x11
+    emit_copy_words_x10_x11_a64(nslots)
 }
 
 fn materialize_aggregate_expr_a64() with Mut, Panic, Div {
@@ -648,13 +704,9 @@ fn materialize_aggregate_expr_a64() with Mut, Panic, Div {
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + nslots
         em32(0xAA0003EA)  // mov x10, x0
-        var i: i64 = 0
-        while i < nslots {
-            em32(0xF9400000 | (i << 10) | (10 << 5) | 0)
-            emit_store_var_a64(base + nslots - 1 - i)
-            i = i + 1
-        }
         emit_lea_var_a64(base + nslots - 1)
+        em32(0xAA0003EB)  // mov x11, x0
+        emit_copy_words_x10_x11_a64(nslots)
         return
     }
     if type_is_struct_like(EXPR_TY, EXPR_TY_HASH) {
@@ -663,13 +715,9 @@ fn materialize_aggregate_expr_a64() with Mut, Panic, Div {
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + nslots
         em32(0xAA0003EA)  // mov x10, x0
-        var i: i64 = 0
-        while i < nslots {
-            em32(0xF9400000 | (i << 10) | (10 << 5) | 0)
-            emit_store_var_a64(base + nslots - 1 - i)
-            i = i + 1
-        }
         emit_lea_var_a64(base + nslots - 1)
+        em32(0xAA0003EB)  // mov x11, x0
+        emit_copy_words_x10_x11_a64(nslots)
     }
 }
 
@@ -677,24 +725,18 @@ fn copy_agg_into_struct_slots_a64(dst_start: i64, field_ty: i64, field_hash: i64
     if field_ty == 8 {
         let nslots = arr_storage_slots(field_hash)
         em32(0xAA0003EA)
-        var i: i64 = 0
-        while i < nslots {
-            em32(0xF9400000 | (i << 10) | (10 << 5) | 0)
-            emit_store_var_a64(dst_start - i)
-            i = i + 1
-        }
+        emit_lea_var_a64(dst_start - (nslots - 1))
+        em32(0xAA0003EB)
+        emit_copy_words_x10_x11_a64(nslots)
         return
     }
     if field_ty == 6 || knowledge_hash_is(field_hash) {
         let nslots = struct_like_nslots(field_hash)
         if nslots > 0 {
             em32(0xAA0003EA)
-            var i: i64 = 0
-            while i < nslots {
-                em32(0xF9400000 | (i << 10) | (10 << 5) | 0)
-                emit_store_var_a64(dst_start - i)
-                i = i + 1
-            }
+            emit_lea_var_a64(dst_start - (nslots - 1))
+            em32(0xAA0003EB)
+            emit_copy_words_x10_x11_a64(nslots)
             return
         }
     }
@@ -709,12 +751,8 @@ fn emit_copy_agg_to_ptr_a64(field_ty: i64, field_hash: i64) with Mut, Panic, Div
         nslots = struct_like_nslots(field_hash)
     }
     if nslots <= 0 { return }
-    var i: i64 = 0
-    while i < nslots {
-        em32(0xF9400000 | (i << 10) | (10 << 5) | 11)
-        em32(0xF9000000 | (i << 10) | (0 << 5) | 11)
-        i = i + 1
-    }
+    em32(0xAA0003EB)  // mov x11, x0
+    emit_copy_words_x10_x11_a64(nslots)
 }
 
 fn fill_repeat_struct_array_slots_a64(dst_start: i64, field_hash: i64) with Mut, Panic, Div {
@@ -732,13 +770,8 @@ fn stabilize_return_agg_a64(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
     if nslots <= 0 { return }
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
     emit_imm64_reg_a64(11, GL_BSS_BASE + RET_AGG_BSS_OFF)
-    var i: i64 = 0
-    while i < nslots {
-        em32(0xF9400000 | (i << 10) | (10 << 5) | 0)
-        em32(0xF9000000 | (i << 10) | (11 << 5) | 0)
-        i = i + 1
-    }
-    em32(0xAA0B03E0)  // mov x0, x11
+    emit_copy_words_x10_x11_a64(nslots)
+    emit_imm64_reg_a64(0, GL_BSS_BASE + RET_AGG_BSS_OFF)
 }
 
 // Load 64-bit immediate into arbitrary register
@@ -781,7 +814,7 @@ fn emit_lea_var_a64(slot: i64) with Mut, Panic {
         // sub x0, x29, #off
         em32(0xD1000000 | (off << 10) | (29 << 5) | 0)
     } else {
-        em32(0xD2800000 | ((off & 0xFFFF) << 5) | 0)
+        emit_imm64_reg_a64(0, off)
         em32(0xCB000000 | (29 << 5) | 0)  // sub x0, x29, x0
     }
 }
@@ -1332,6 +1365,24 @@ fn ret_agg_nslots(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
         if si >= 0 { return st_total_size(si) / 8 }
     }
     return 0
+}
+
+fn box_alloc_bytes(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
+    var bytes = box_page_bytes()
+    if ty == 8 {
+        bytes = arr_storage_slots(ty_hash) * 8
+    } else if ty == 6 || knowledge_hash_is(ty_hash) {
+        bytes = struct_like_nslots(ty_hash) * 8
+    }
+    if bytes < box_page_bytes() { bytes = box_page_bytes() }
+    return ((bytes + box_page_bytes() - 1) / box_page_bytes()) * box_page_bytes()
+}
+
+fn tc_stack_frame_too_large(bytes: i64) with IO, Mut, Panic {
+    print("error: stack frame too large (")
+    print_int(bytes)
+    print(" bytes) - consider using global arrays\n")
+    TYPECHECK_FAILED = 1
 }
 
 fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
@@ -2813,45 +2864,80 @@ fn skip_study_decl(p0: i64) -> i64 with IO, Mut, Panic {
     p
 }
 
+fn local_meta_add(
+    ns: i64,
+    ne: i64,
+    slot: i64,
+    len_slot: i64,
+    alen: i64,
+    esiz: i64,
+    is_f64: i64,
+    is_closure: i64,
+    is_mut: i64,
+    unit_hash: i64,
+    is_linear: i64,
+    used: i64,
+    ty: i64,
+    ty_hash: i64
+) -> i64 with Mut, Panic {
+    if VAR_COUNT >= local_cap() {
+        note_limit_error(1)
+        return -1
+    }
+    let idx = VAR_COUNT
+    VAR_NS[idx as usize] = ns
+    VAR_NE[idx as usize] = ne
+    VAR_SLOT[idx as usize] = slot
+    VAR_LEN_SLOT[idx as usize] = len_slot
+    VAR_ALEN[idx as usize] = alen
+    VAR_ESIZ[idx as usize] = esiz
+    VAR_IS_F64[idx as usize] = is_f64
+    VAR_IS_CLOSURE[idx as usize] = is_closure
+    VAR_MUT[idx as usize] = is_mut
+    VAR_UNIT[idx as usize] = unit_hash
+    VAR_LINEAR[idx as usize] = is_linear
+    VAR_USED[idx as usize] = used
+    VAR_TY[idx as usize] = ty
+    VAR_TY_HASH[idx as usize] = ty_hash
+    VAR_COUNT = VAR_COUNT + 1
+    return idx
+}
+
 fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
     let slot = NEXT_SLOT
-    VAR_NS[VAR_COUNT as usize] = ns
-    VAR_NE[VAR_COUNT as usize] = ne
-    VAR_SLOT[VAR_COUNT as usize] = slot
-    VAR_LEN_SLOT[VAR_COUNT as usize] = 0
-    VAR_ALEN[VAR_COUNT as usize] = 0
-    VAR_ESIZ[VAR_COUNT as usize] = 8
-    VAR_IS_F64[VAR_COUNT as usize] = 0
-    VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
-    VAR_MUT[VAR_COUNT as usize] = 0
-    VAR_UNIT[VAR_COUNT as usize] = 0
-    VAR_LINEAR[VAR_COUNT as usize] = 0
-    VAR_USED[VAR_COUNT as usize] = 0
-    VAR_TY[VAR_COUNT as usize] = 0
-    VAR_TY_HASH[VAR_COUNT as usize] = 0
-    VAR_COUNT = VAR_COUNT + 1
+    if local_meta_add(ns, ne, slot, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0) < 0 {
+        LAST_LOCAL_BSS_SPILL = 0
+        LAST_LOCAL_BSS_ADDR = 0
+        return -1
+    }
     NEXT_SLOT = NEXT_SLOT + 1
+    LAST_LOCAL_BSS_SPILL = 0
+    LAST_LOCAL_BSS_ADDR = 0
     return slot
 }
 
 // Add a local array variable: allocate N slots, return base slot, store lea as value
 fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64, elem_ty: i64) -> i64 with Mut, Panic {
+    let storage_bytes = alen * 8
+    let spill = storage_bytes >= local_bss_spill_bytes()
     let base = NEXT_SLOT
-    NEXT_SLOT = NEXT_SLOT + alen
+    if spill == 0 { NEXT_SLOT = NEXT_SLOT + alen }
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
-    VAR_NS[VAR_COUNT as usize] = ns
-    VAR_NE[VAR_COUNT as usize] = ne
-    VAR_SLOT[VAR_COUNT as usize] = ptr_slot
-    VAR_LEN_SLOT[VAR_COUNT as usize] = 0
-    VAR_ALEN[VAR_COUNT as usize] = alen
-    VAR_ESIZ[VAR_COUNT as usize] = esiz
-    VAR_IS_F64[VAR_COUNT as usize] = 0
-    VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
-    VAR_MUT[VAR_COUNT as usize] = 0
-    VAR_TY[VAR_COUNT as usize] = 8
-    VAR_TY_HASH[VAR_COUNT as usize] = arr_ty_hash(alen, esiz, elem_ty)
-    VAR_COUNT = VAR_COUNT + 1
+    if local_meta_add(ns, ne, ptr_slot, 0, alen, esiz, 0, 0, 0, 0, 0, 0, 8, arr_ty_hash(alen, esiz, elem_ty)) < 0 {
+        if spill == 0 { NEXT_SLOT = NEXT_SLOT - alen }
+        NEXT_SLOT = NEXT_SLOT - 1
+        LAST_LOCAL_BSS_SPILL = 0
+        LAST_LOCAL_BSS_ADDR = 0
+        return -1
+    }
+    if spill != 0 {
+        LAST_LOCAL_BSS_SPILL = 1
+        LAST_LOCAL_BSS_ADDR = GL_BSS_BASE + bss_alloc_aligned(storage_bytes)
+    } else {
+        LAST_LOCAL_BSS_SPILL = 0
+        LAST_LOCAL_BSS_ADDR = 0
+    }
     return ptr_slot
 }
 
@@ -2870,21 +2956,10 @@ fn bind_slice_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
     NEXT_SLOT = NEXT_SLOT + 1
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
-    VAR_NS[VAR_COUNT as usize] = ns
-    VAR_NE[VAR_COUNT as usize] = ne
-    VAR_SLOT[VAR_COUNT as usize] = ptr_slot
-    VAR_LEN_SLOT[VAR_COUNT as usize] = len_slot
-    VAR_ALEN[VAR_COUNT as usize] = 0
-    VAR_ESIZ[VAR_COUNT as usize] = arr_hash_esiz(inner_hash)
-    VAR_IS_F64[VAR_COUNT as usize] = 0
-    VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
-    VAR_MUT[VAR_COUNT as usize] = 0
-    VAR_UNIT[VAR_COUNT as usize] = 0
-    VAR_LINEAR[VAR_COUNT as usize] = 0
-    VAR_USED[VAR_COUNT as usize] = 0
-    VAR_TY[VAR_COUNT as usize] = 10
-    VAR_TY_HASH[VAR_COUNT as usize] = ty_hash
-    VAR_COUNT = VAR_COUNT + 1
+    if local_meta_add(ns, ne, ptr_slot, len_slot, 0, arr_hash_esiz(inner_hash), 0, 0, 0, 0, 0, 0, 10, ty_hash) < 0 {
+        NEXT_SLOT = NEXT_SLOT - 2
+        return
+    }
     if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
         em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
         em(0x48); em(0x8b); em(0x02)  // mov rax, [rdx]
@@ -2909,21 +2984,10 @@ fn bind_slice_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic,
     NEXT_SLOT = NEXT_SLOT + 1
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
-    VAR_NS[VAR_COUNT as usize] = ns
-    VAR_NE[VAR_COUNT as usize] = ne
-    VAR_SLOT[VAR_COUNT as usize] = ptr_slot
-    VAR_LEN_SLOT[VAR_COUNT as usize] = len_slot
-    VAR_ALEN[VAR_COUNT as usize] = 0
-    VAR_ESIZ[VAR_COUNT as usize] = arr_hash_esiz(inner_hash)
-    VAR_IS_F64[VAR_COUNT as usize] = 0
-    VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
-    VAR_MUT[VAR_COUNT as usize] = 0
-    VAR_UNIT[VAR_COUNT as usize] = 0
-    VAR_LINEAR[VAR_COUNT as usize] = 0
-    VAR_USED[VAR_COUNT as usize] = 0
-    VAR_TY[VAR_COUNT as usize] = 10
-    VAR_TY_HASH[VAR_COUNT as usize] = ty_hash
-    VAR_COUNT = VAR_COUNT + 1
+    if local_meta_add(ns, ne, ptr_slot, len_slot, 0, arr_hash_esiz(inner_hash), 0, 0, 0, 0, 0, 0, 10, ty_hash) < 0 {
+        NEXT_SLOT = NEXT_SLOT - 2
+        return
+    }
     if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
         em32(0xAA0003EA)  // mov x10, x0
         em32(0xF9400140)  // ldr x0, [x10]
@@ -3139,19 +3203,26 @@ fn bind_array_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
     let elem_ty = arr_hash_elem_ty(ty_hash)
     let nslots = arr_storage_slots(ty_hash)
     let ptr_slot = var_add_arr(ns, ne, nslots, esiz, elem_ty)
+    if ptr_slot < 0 { return }
     let arr_vi = VAR_COUNT - 1
     let base = ptr_slot - nslots
     VAR_TY[arr_vi as usize] = 8
     VAR_TY_HASH[arr_vi as usize] = ty_hash
     em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
-    var i: i64 = 0
-    while i < nslots {
-        em(0x48); em(0x8b); em(0x82); em32(i * 8)  // mov rax, [rdx + off]
-        emit_store_var(base + nslots - 1 - i)
-        i = i + 1
+    if LAST_LOCAL_BSS_SPILL != 0 {
+        em(0x48); em(0xb8); em64(LAST_LOCAL_BSS_ADDR)
+        emit_copy_agg_to_ptr_x86(8, ty_hash)
+        em(0x48); em(0xb8); em64(LAST_LOCAL_BSS_ADDR)
+    } else {
+        var i: i64 = 0
+        while i < nslots {
+            em(0x48); em(0x8b); em(0x82); em32(i * 8)  // mov rax, [rdx + off]
+            emit_store_var(base + nslots - 1 - i)
+            i = i + 1
+        }
+        em(0x48); em(0x8d); em(0x85)
+        em32(0 - (base + nslots - 1) * 8)
     }
-    em(0x48); em(0x8d); em(0x85)
-    em32(0 - (base + nslots - 1) * 8)
     emit_store_var(ptr_slot)
 }
 
@@ -3173,6 +3244,7 @@ fn bind_struct_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
     let si = st_find(ty_hash)
     if si < 0 && knowledge_hash_is(ty_hash) == false {
         let slot = var_add(ns, ne)
+        if slot < 0 { return }
         emit_store_var(slot)
         let vix = VAR_COUNT - 1
         VAR_TY[vix as usize] = 6
@@ -3184,22 +3256,14 @@ fn bind_struct_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
     NEXT_SLOT = NEXT_SLOT + nslots
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
-    VAR_NS[VAR_COUNT as usize] = ns
-    VAR_NE[VAR_COUNT as usize] = ne
-    VAR_SLOT[VAR_COUNT as usize] = ptr_slot
-    VAR_LEN_SLOT[VAR_COUNT as usize] = 0
-    VAR_ALEN[VAR_COUNT as usize] = 0
-    VAR_ESIZ[VAR_COUNT as usize] = 8
-    VAR_IS_F64[VAR_COUNT as usize] = 0
-    VAR_IS_CLOSURE[VAR_COUNT as usize] = 0
-    VAR_UNIT[VAR_COUNT as usize] = 0
-    if knowledge_hash_is(ty_hash) { VAR_LINEAR[VAR_COUNT as usize] = 0 }
-    else { VAR_LINEAR[VAR_COUNT as usize] = ST_LINEAR[si as usize] }
-    VAR_USED[VAR_COUNT as usize] = 0
-    if knowledge_hash_is(ty_hash) { VAR_TY[VAR_COUNT as usize] = 0 }
-    else { VAR_TY[VAR_COUNT as usize] = 6 }
-    VAR_TY_HASH[VAR_COUNT as usize] = ty_hash
-    VAR_COUNT = VAR_COUNT + 1
+    var linear_flag: i64 = 0
+    if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize] }
+    var out_ty: i64 = 0
+    if knowledge_hash_is(ty_hash) == false { out_ty = 6 }
+    if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, linear_flag, 0, out_ty, ty_hash) < 0 {
+        NEXT_SLOT = NEXT_SLOT - nslots - 1
+        return
+    }
     em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
     var i: i64 = 0
     while i < nslots {
@@ -4124,17 +4188,22 @@ var LAST_STMT_TY_HASH: i64 = 0
 var CURRENT_RET_TY: i64 = 0
 var CURRENT_RET_HASH: i64 = 0
 // Closure state save buffers (global to avoid stack overflow in recursive compile_primary)
-var CL_SAVE_NS: [i64; 128] = [0; 128]
-var CL_SAVE_NE: [i64; 128] = [0; 128]
-var CL_SAVE_SL: [i64; 128] = [0; 128]
-var CL_SAVE_AL: [i64; 128] = [0; 128]
-var CL_SAVE_ES: [i64; 128] = [0; 128]
-var CL_SAVE_F64: [i64; 128] = [0; 128]
-var CL_SAVE_ISCL: [i64; 128] = [0; 128]
-var CL_SAVE_TY: [i64; 128] = [0; 128]
-var CL_SAVE_TH: [i64; 128] = [0; 128]
-// Capture tracking for closures (max 16 captured variables)
-var CL_CAP_SLOT: [i64; 16] = [0; 16]
+var CL_SAVE_NS: [i64; 1024] = [0; 1024]
+var CL_SAVE_NE: [i64; 1024] = [0; 1024]
+var CL_SAVE_SL: [i64; 1024] = [0; 1024]
+var CL_SAVE_LS: [i64; 1024] = [0; 1024]
+var CL_SAVE_AL: [i64; 1024] = [0; 1024]
+var CL_SAVE_ES: [i64; 1024] = [0; 1024]
+var CL_SAVE_F64: [i64; 1024] = [0; 1024]
+var CL_SAVE_ISCL: [i64; 1024] = [0; 1024]
+var CL_SAVE_MUT: [i64; 1024] = [0; 1024]
+var CL_SAVE_UNIT: [i64; 1024] = [0; 1024]
+var CL_SAVE_LINEAR: [i64; 1024] = [0; 1024]
+var CL_SAVE_USED: [i64; 1024] = [0; 1024]
+var CL_SAVE_TY: [i64; 1024] = [0; 1024]
+var CL_SAVE_TH: [i64; 1024] = [0; 1024]
+// Capture tracking for closures
+var CL_CAP_SLOT: [i64; 1024] = [0; 1024]
 var CL_CAP_COUNT: i64 = 0
 // Loop stack for continue/break (max 16 nested loops)
 var LOOP_TOP: [i64; 16] = [0; 16]
@@ -4617,6 +4686,34 @@ fn compile_primary() with IO, Mut, Panic, Div {
         return
     }
     if k == 41 {
+        if array_init_is_repeat(EP) {
+            EP = EP + 1
+            compile_or()
+            let elem_ty = EXPR_TY
+            if TK[EP as usize] == 27 { EP = EP + 1 }
+            let rep_count = TV[EP as usize]
+            EP = EP + 1
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            let arr_hash = arr_ty_hash(rep_count, 8, elem_ty)
+            let nslots = arr_storage_slots(arr_hash)
+            if nslots > 0 {
+                let base = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + nslots
+                em(0x48); em(0x8d); em(0xbd)
+                em32(0 - (base + nslots - 1) * 8)
+                em(0xb9); em32(nslots)
+                em(0xf3); em(0x48); em(0xab)
+                em(0x48); em(0x8d); em(0x85)
+                em32(0 - (base + nslots - 1) * 8)
+            } else {
+                em(0x31); em(0xc0)
+            }
+            EXPR_IS_F64 = 0
+            EXPR_TY = 8
+            EXPR_TY_HASH = arr_hash
+            LAST_ALEN = rep_count
+            return
+        }
         let arr_count = array_lit_count(EP)
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + arr_count
@@ -4672,10 +4769,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
             CL_SAVE_NS[svi as usize] = VAR_NS[svi as usize]
             CL_SAVE_NE[svi as usize] = VAR_NE[svi as usize]
             CL_SAVE_SL[svi as usize] = VAR_SLOT[svi as usize]
+            CL_SAVE_LS[svi as usize] = VAR_LEN_SLOT[svi as usize]
             CL_SAVE_AL[svi as usize] = VAR_ALEN[svi as usize]
             CL_SAVE_ES[svi as usize] = VAR_ESIZ[svi as usize]
             CL_SAVE_F64[svi as usize] = VAR_IS_F64[svi as usize]
             CL_SAVE_ISCL[svi as usize] = VAR_IS_CLOSURE[svi as usize]
+            CL_SAVE_MUT[svi as usize] = VAR_MUT[svi as usize]
+            CL_SAVE_UNIT[svi as usize] = VAR_UNIT[svi as usize]
+            CL_SAVE_LINEAR[svi as usize] = VAR_LINEAR[svi as usize]
+            CL_SAVE_USED[svi as usize] = VAR_USED[svi as usize]
             CL_SAVE_TY[svi as usize] = VAR_TY[svi as usize]
             CL_SAVE_TH[svi as usize] = VAR_TY_HASH[svi as usize]
             svi = svi + 1
@@ -4698,12 +4800,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if TK[EP as usize] == 43 {
                         EP = EP + 1
                         scan_type(EP)
-                        VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
-                        VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
-                        if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
-                        if SCAN_TY == 8 {
-                            VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
-                            VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                        if pslot >= 0 {
+                            VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
+                            VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                            if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                            if SCAN_TY == 8 {
+                                VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
+                                VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                            }
                         }
                         EP = SCAN_TY_NEXT
                     }
@@ -4735,16 +4839,27 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let outer_slot = CL_SAVE_SL[ci as usize]
             let existing = var_find(ons, one)
             if existing < 0 {
-                var_add(ons, one)
-                let cap_vi = VAR_COUNT - 1
-                VAR_ALEN[cap_vi as usize] = CL_SAVE_AL[ci as usize]
-                VAR_ESIZ[cap_vi as usize] = CL_SAVE_ES[ci as usize]
-                VAR_IS_F64[cap_vi as usize] = CL_SAVE_F64[ci as usize]
-                VAR_IS_CLOSURE[cap_vi as usize] = CL_SAVE_ISCL[ci as usize]
-                VAR_TY[cap_vi as usize] = CL_SAVE_TY[ci as usize]
-                VAR_TY_HASH[cap_vi as usize] = CL_SAVE_TH[ci as usize]
-                CL_CAP_SLOT[CL_CAP_COUNT as usize] = outer_slot
-                CL_CAP_COUNT = CL_CAP_COUNT + 1
+                let cap_slot = var_add(ons, one)
+                if cap_slot >= 0 {
+                    let cap_vi = VAR_COUNT - 1
+                    VAR_LEN_SLOT[cap_vi as usize] = CL_SAVE_LS[ci as usize]
+                    VAR_ALEN[cap_vi as usize] = CL_SAVE_AL[ci as usize]
+                    VAR_ESIZ[cap_vi as usize] = CL_SAVE_ES[ci as usize]
+                    VAR_IS_F64[cap_vi as usize] = CL_SAVE_F64[ci as usize]
+                    VAR_IS_CLOSURE[cap_vi as usize] = CL_SAVE_ISCL[ci as usize]
+                    VAR_MUT[cap_vi as usize] = CL_SAVE_MUT[ci as usize]
+                    VAR_UNIT[cap_vi as usize] = CL_SAVE_UNIT[ci as usize]
+                    VAR_LINEAR[cap_vi as usize] = CL_SAVE_LINEAR[ci as usize]
+                    VAR_USED[cap_vi as usize] = CL_SAVE_USED[ci as usize]
+                    VAR_TY[cap_vi as usize] = CL_SAVE_TY[ci as usize]
+                    VAR_TY_HASH[cap_vi as usize] = CL_SAVE_TH[ci as usize]
+                    if CL_CAP_COUNT < local_cap() {
+                        CL_CAP_SLOT[CL_CAP_COUNT as usize] = outer_slot
+                        CL_CAP_COUNT = CL_CAP_COUNT + 1
+                    } else {
+                        note_limit_error(1)
+                    }
+                }
             }
             ci = ci + 1
         }
@@ -4798,6 +4913,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // Patch closure sub rsp / add rsp with actual frame size.
         // Closure's patches start at save_fpc (appended after outer patches).
         let cl_frame_sz = (NEXT_SLOT * 8 + 15) & 0xFFFFFFF0
+        if cl_frame_sz > max_frame_bytes() { tc_stack_frame_too_large(cl_frame_sz) }
         var cl_fpi: i64 = save_fpc
         while cl_fpi < FRAME_PATCH_COUNT { em32_at(FRAME_PATCH_OFF[cl_fpi as usize], cl_frame_sz); cl_fpi = cl_fpi + 1 }
         // Patch jmp over closure body
@@ -4817,10 +4933,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
             VAR_NS[svi as usize] = CL_SAVE_NS[svi as usize]
             VAR_NE[svi as usize] = CL_SAVE_NE[svi as usize]
             VAR_SLOT[svi as usize] = CL_SAVE_SL[svi as usize]
+            VAR_LEN_SLOT[svi as usize] = CL_SAVE_LS[svi as usize]
             VAR_ALEN[svi as usize] = CL_SAVE_AL[svi as usize]
             VAR_ESIZ[svi as usize] = CL_SAVE_ES[svi as usize]
             VAR_IS_F64[svi as usize] = CL_SAVE_F64[svi as usize]
             VAR_IS_CLOSURE[svi as usize] = CL_SAVE_ISCL[svi as usize]
+            VAR_MUT[svi as usize] = CL_SAVE_MUT[svi as usize]
+            VAR_UNIT[svi as usize] = CL_SAVE_UNIT[svi as usize]
+            VAR_LINEAR[svi as usize] = CL_SAVE_LINEAR[svi as usize]
+            VAR_USED[svi as usize] = CL_SAVE_USED[svi as usize]
             VAR_TY[svi as usize] = CL_SAVE_TY[svi as usize]
             VAR_TY_HASH[svi as usize] = CL_SAVE_TH[svi as usize]
             svi = svi + 1
@@ -5035,18 +5156,32 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 6 { EP = EP + 1 }  // skip (
             compile_or()  // value in rax
             if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
-            em(0x50)  // push value
-            // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)
-            em(0x48); em(0x31); em(0xff)           // xor rdi, rdi
-            em(0xbe); em32(4096)                    // mov esi, 4096
-            em(0xba); em32(3)                       // mov edx, 3 (PROT_RW)
-            em(0x41); em(0xba); em32(0x22)          // mov r10d, 0x22
-            em(0x49); em(0xc7); em(0xc0); em32(-1)  // mov r8, -1
-            em(0x4d); em(0x31); em(0xc9)           // xor r9, r9
-            em(0xb8); em32(9)                       // mov eax, 9 (SYS_mmap)
-            em(0x0f); em(0x05)                     // syscall
-            em(0x59)  // pop rcx (value)
-            em(0x48); em(0x89); em(0x08)  // mov [rax], rcx
+            if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
+                em(0x50)                             // push src ptr
+                em(0x48); em(0x31); em(0xff)        // xor rdi, rdi
+                em(0xbe); em32(box_alloc_bytes(EXPR_TY, EXPR_TY_HASH))
+                em(0xba); em32(3)                   // mov edx, 3 (PROT_RW)
+                em(0x41); em(0xba); em32(0x22)      // mov r10d, 0x22
+                em(0x49); em(0xc7); em(0xc0); em32(-1)
+                em(0x4d); em(0x31); em(0xc9)
+                em(0xb8); em32(9)
+                em(0x0f); em(0x05)
+                em(0x5a)                             // pop rdx (src ptr)
+                emit_copy_agg_to_ptr_x86(EXPR_TY, EXPR_TY_HASH)
+            } else {
+                em(0x50)  // push value
+                // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)
+                em(0x48); em(0x31); em(0xff)           // xor rdi, rdi
+                em(0xbe); em32(box_page_bytes())       // mov esi, 4096
+                em(0xba); em32(3)                      // mov edx, 3 (PROT_RW)
+                em(0x41); em(0xba); em32(0x22)         // mov r10d, 0x22
+                em(0x49); em(0xc7); em(0xc0); em32(-1) // mov r8, -1
+                em(0x4d); em(0x31); em(0xc9)           // xor r9, r9
+                em(0xb8); em32(9)                      // mov eax, 9 (SYS_mmap)
+                em(0x0f); em(0x05)                     // syscall
+                em(0x59)  // pop rcx (value)
+                em(0x48); em(0x89); em(0x08)  // mov [rax], rcx
+            }
             EXPR_IS_F64 = 0
             return
         }
@@ -6792,6 +6927,7 @@ var TUP_RHS_NEXT: i64 = 0
 
 fn tuple_bind_leaf_x86(ns: i64, ne: i64) with Mut, Panic, Div {
     let slot = var_add(ns, ne)
+    if slot < 0 { return }
     let vix = VAR_COUNT - 1
     emit_store_var(slot)
     VAR_IS_F64[vix as usize] = EXPR_IS_F64
@@ -6807,6 +6943,7 @@ fn tuple_bind_leaf_x86(ns: i64, ne: i64) with Mut, Panic, Div {
 
 fn tuple_bind_leaf_a64(ns: i64, ne: i64) with Mut, Panic, Div {
     let slot = var_add(ns, ne)
+    if slot < 0 { return }
     let vix = VAR_COUNT - 1
     emit_store_var_a64(slot)
     VAR_IS_F64[vix as usize] = EXPR_IS_F64
@@ -7190,6 +7327,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             let nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
             let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
+            if ptr_slot < 0 { return }
             let arr_vi = VAR_COUNT - 1
             VAR_TY[arr_vi as usize] = 8
             VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
@@ -7197,16 +7335,24 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             // Array slots: base..base+nslots-1, lowest addr = rbp-(base+nslots-1)*8
             // rep stosq: store rax to [rdi], rdi += 8, rcx--; repeats rcx times (DF=0 → ascending)
             let base = ptr_slot - nslots
-            em(0x48); em(0x8d); em(0xbd)  // lea rdi, [rbp + disp32]  (lowest array addr)
-            em32(0 - (base + nslots - 1) * 8)
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                em(0x48); em(0xbf); em64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                em(0x48); em(0x8d); em(0xbd)  // lea rdi, [rbp + disp32]  (lowest array addr)
+                em32(0 - (base + nslots - 1) * 8)
+            }
             em(0x48); em(0x31); em(0xc0)  // xor rax, rax
             em(0xb9); em32(nslots)         // mov ecx, nslots (zero-extends to rcx)
             em(0xf3); em(0x48); em(0xab)  // rep stosq
             // Store lea (pointer to array start) in ptr_slot
             // Array slots are base..base+nslots-1, addresses [rbp-base*8]..[rbp-(base+nslots-1)*8]
             // Pointer must point to lowest address so arr[i] = [ptr + i*8] addresses upward
-            em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
-            em32(0 - (base + nslots - 1) * 8)
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                em(0x48); em(0xb8); em64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
+                em32(0 - (base + nslots - 1) * 8)
+            }
             emit_store_var(ptr_slot)
         } else {
             compile_or()
@@ -7220,28 +7366,38 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             if type_is_slice_ref(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
+                let before_vc = VAR_COUNT
                 bind_slice_local_from_rax_x86(ns, ne, bind_hash)
-                let svix = VAR_COUNT - 1
-                VAR_IS_CLOSURE[svix as usize] = 0
-                VAR_MUT[svix as usize] = decl_is_mut
-                VAR_LINEAR[svix as usize] = 0
+                if VAR_COUNT > before_vc {
+                    let svix = VAR_COUNT - 1
+                    VAR_IS_CLOSURE[svix as usize] = 0
+                    VAR_MUT[svix as usize] = decl_is_mut
+                    VAR_LINEAR[svix as usize] = 0
+                }
             } else if (decl_ty == 8) || (decl_ty == 0 && EXPR_TY == 8) {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty == 8 { bind_hash = decl_ty_hash }
+                let before_vc = VAR_COUNT
                 bind_array_local_from_rax_x86(ns, ne, bind_hash)
-                let avix = VAR_COUNT - 1
-                VAR_IS_CLOSURE[avix as usize] = 0
-                VAR_MUT[avix as usize] = decl_is_mut
-                VAR_LINEAR[avix as usize] = 0
+                if VAR_COUNT > before_vc {
+                    let avix = VAR_COUNT - 1
+                    VAR_IS_CLOSURE[avix as usize] = 0
+                    VAR_MUT[avix as usize] = decl_is_mut
+                    VAR_LINEAR[avix as usize] = 0
+                }
             } else if type_is_struct_like(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_struct_like(EXPR_TY, EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
+                let before_vc = VAR_COUNT
                 bind_struct_local_from_rax_x86(ns, ne, bind_hash)
-                let svix = VAR_COUNT - 1
-                VAR_IS_CLOSURE[svix as usize] = 0
-                VAR_MUT[svix as usize] = decl_is_mut
+                if VAR_COUNT > before_vc {
+                    let svix = VAR_COUNT - 1
+                    VAR_IS_CLOSURE[svix as usize] = 0
+                    VAR_MUT[svix as usize] = decl_is_mut
+                }
             } else {
                 let slot = var_add(ns, ne)
+                if slot < 0 { return }
                 let vix = VAR_COUNT - 1
                 emit_store_var(slot)
                 // Set f64 flag: explicit type annotation takes priority, else infer from RHS
@@ -7649,6 +7805,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             compile_or()  // START in rax
             if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(EP - 1, "for range start must be integer") }
             let iter_slot_a = var_add(vns, vne)
+            if iter_slot_a < 0 { return }
             VAR_TY[(VAR_COUNT - 1) as usize] = 1
             VAR_TY_HASH[(VAR_COUNT - 1) as usize] = 0
             emit_store_var(iter_slot_a)
@@ -7664,6 +7821,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             compile_or()  // START in rax
             if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(EP - 1, "for range start must be integer") }
             let iter_slot_r = var_add(vns, vne)
+            if iter_slot_r < 0 { return }
             VAR_TY[(VAR_COUNT - 1) as usize] = 1
             VAR_TY_HASH[(VAR_COUNT - 1) as usize] = 0
             emit_store_var(iter_slot_r)
@@ -7828,7 +7986,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         emit_load_var(match_slot)
                         em(0x48); em(0x8b); em(0x40); em(0x08)  // mov rax, [rax + 8] (value)
                         let bslot = var_add(bind_ns, bind_ne)
-                        emit_store_var(bslot)
+                        if bslot >= 0 { emit_store_var(bslot) }
                     }
                     if TK[EP as usize] == 52 { EP = EP + 1 }  // skip =>
                     var arm_has_block: i64 = 0
@@ -8247,6 +8405,29 @@ fn mono_pass() with IO, Mut, Panic, Div {
     }
 }
 
+fn resolve_forward_struct_types() with Mut, Panic, Div {
+    var fix_si: i64 = 0
+    while fix_si < ST_COUNT {
+        var fix_fi: i64 = 0
+        while fix_fi < ST[(fix_si * 66 + 1) as usize] {
+            if ST_FTY[(fix_si * 64 + fix_fi) as usize] == 0 {
+                var fix_fh: i64 = ST_FHASH[(fix_si * 64 + fix_fi) as usize]
+                if fix_fh != 0 {
+                    if st_find(fix_fh) >= 0 {
+                        ST_FTY[(fix_si * 64 + fix_fi) as usize] = 6
+                    } else {
+                        if en_find(fix_fh) >= 0 {
+                            ST_FTY[(fix_si * 64 + fix_fi) as usize] = 7
+                        }
+                    }
+                }
+            }
+            fix_fi = fix_fi + 1
+        }
+        fix_si = fix_si + 1
+    }
+}
+
 fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     FN_COUNT = 0
@@ -8256,6 +8437,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GL_BSS_SIZE = 0
     RET_AGG_BSS_OFF = 0
     TYPECHECK_FAILED = 0
+    LIMIT_ERROR_KIND = 0
     var p: i64 = 0
 
     // Pass 0a: register structs, constants, and skip algebra/study declarations
@@ -8334,6 +8516,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         }
         p = p + 1
     }
+    resolve_forward_struct_types()
     // Also scan enums in the same pass
     p = 0
     EN_COUNT = 0
@@ -8415,17 +8598,19 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     p = p + 1
                     // Skip ]
                     if TK[p as usize] == 42 { p = p + 1 }
-                    let gix = GL_COUNT
-                    gl_add(gns, gne, esiz, alen)
-                    GL_TY[gix as usize] = 8
-                    GL_TY_HASH[gix as usize] = arr_ty_hash(alen, esiz, elem_ty)
+                    let gix = gl_add(gns, gne, esiz, alen)
+                    if gix >= 0 {
+                        GL_TY[gix as usize] = 8
+                        GL_TY_HASH[gix as usize] = arr_ty_hash(alen, esiz, elem_ty)
+                    }
                 } else {
                     // Scalar: i64, i32, bool, string
                     scan_type(p)
-                    let gix = GL_COUNT
-                    gl_add(gns, gne, 8, 0)
-                    GL_TY[gix as usize] = SCAN_TY
-                    GL_TY_HASH[gix as usize] = SCAN_TY_HASH
+                    let gix = gl_add(gns, gne, 8, 0)
+                    if gix >= 0 {
+                        GL_TY[gix as usize] = SCAN_TY
+                        GL_TY_HASH[gix as usize] = SCAN_TY_HASH
+                    }
                     p = SCAN_TY_NEXT
                 }
             }
@@ -8715,19 +8900,21 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 if TK[p as usize] == 43 {
                     p = p + 1  // skip :
                     scan_type(p)
-                    VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
-                    VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
-                    if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
-                    if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
-                        let len_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]
-                        let ptr_slot = NEXT_SLOT
-                        NEXT_SLOT = NEXT_SLOT + 1
-                        VAR_SLOT[(VAR_COUNT - 1) as usize] = ptr_slot
-                        VAR_LEN_SLOT[(VAR_COUNT - 1) as usize] = len_slot
-                        VAR_ESIZ[(VAR_COUNT - 1) as usize] = arr_hash_esiz(ref_hash_inner_hash(SCAN_TY_HASH))
-                    } else if SCAN_TY == 8 {
-                        VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
-                        VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                    if pslot >= 0 {
+                        VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
+                        VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                        if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                        if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                            let len_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]
+                            let ptr_slot = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            VAR_SLOT[(VAR_COUNT - 1) as usize] = ptr_slot
+                            VAR_LEN_SLOT[(VAR_COUNT - 1) as usize] = len_slot
+                            VAR_ESIZ[(VAR_COUNT - 1) as usize] = arr_hash_esiz(ref_hash_inner_hash(SCAN_TY_HASH))
+                        } else if SCAN_TY == 8 {
+                            VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
+                            VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                        }
                     }
                     p = SCAN_TY_NEXT
                 }
@@ -8817,12 +9004,15 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         }
         // Patch sub rsp / add rsp with actual frame size
         let frame_sz = (NEXT_SLOT * 8 + 15) & 0xFFFFFFF0
+        FN_FRAME_SIZE[fn_idx as usize] = frame_sz
+        if frame_sz > max_frame_bytes() { tc_stack_frame_too_large(frame_sz) }
         var fpi: i64 = 0
         while fpi < FRAME_PATCH_COUNT { em32_at(FRAME_PATCH_OFF[fpi as usize], frame_sz); fpi = fpi + 1 }
         fn_idx = fn_idx + 1
     }
 
     if TYPECHECK_FAILED != 0 {
+        print_limit_error()
         print("typecheck: failed\n")
         return 1
     }
@@ -10101,6 +10291,33 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         return
     }
     if k == 41 {
+        if array_init_is_repeat(EP) {
+            EP = EP + 1
+            compile_or_a64()
+            let elem_ty = EXPR_TY
+            if TK[EP as usize] == 27 { EP = EP + 1 }
+            let rep_count = TV[EP as usize]
+            EP = EP + 1
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            let arr_hash = arr_ty_hash(rep_count, 8, elem_ty)
+            let nslots = arr_storage_slots(arr_hash)
+            if nslots > 0 {
+                let base = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + nslots
+                em32(0xAA0003ED)  // mov x13, x0
+                emit_lea_var_a64(base + nslots - 1)
+                em32(0xAA0003EB)  // mov x11, x0
+                emit_fill_words_x13_x11_a64(nslots)
+                emit_lea_var_a64(base + nslots - 1)
+            } else {
+                em32(0xD2800000)
+            }
+            EXPR_IS_F64 = 0
+            EXPR_TY = 8
+            EXPR_TY_HASH = arr_hash
+            LAST_ALEN = rep_count
+            return
+        }
         let arr_count = array_lit_count(EP)
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + arr_count
@@ -10504,18 +10721,32 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 6 { EP = EP + 1 }
             compile_or_a64()
             if TK[EP as usize] == 7 { EP = EP + 1 }
-            emit_push_a64()
-            em32(0xD2800000)
-            emit_imm64_reg_a64(1, 4096)
-            em32(0xD2800060 | 2)
-            em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)
-            emit_imm64_reg_a64(4, -1)
-            em32(0xD2800005)
-            if TARGET_OS == 2 { emit_imm64_reg_a64(16, 0x20000C5) }
-            else { em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8) }
-            emit_syscall_a64()
-            emit_pop_x1_a64()
-            em32(0xF9000001)  // str x1, [x0]
+            if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
+                em32(0xAA0003EA)  // mov x10, x0 (src ptr)
+                em32(0xD2800000)
+                emit_imm64_reg_a64(1, box_alloc_bytes(EXPR_TY, EXPR_TY_HASH))
+                em32(0xD2800060 | 2)
+                em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)
+                emit_imm64_reg_a64(4, -1)
+                em32(0xD2800005)
+                if TARGET_OS == 2 { emit_imm64_reg_a64(16, 0x20000C5) }
+                else { em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8) }
+                emit_syscall_a64()
+                emit_copy_agg_to_ptr_a64(EXPR_TY, EXPR_TY_HASH)
+            } else {
+                emit_push_a64()
+                em32(0xD2800000)
+                emit_imm64_reg_a64(1, box_page_bytes())
+                em32(0xD2800060 | 2)
+                em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)
+                emit_imm64_reg_a64(4, -1)
+                em32(0xD2800005)
+                if TARGET_OS == 2 { emit_imm64_reg_a64(16, 0x20000C5) }
+                else { em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8) }
+                emit_syscall_a64()
+                emit_pop_x1_a64()
+                em32(0xF9000001)  // str x1, [x0]
+            }
             EXPR_IS_F64 = 0
             return
         }
@@ -11839,13 +12070,21 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             let nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
             let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
+            if ptr_slot < 0 { return }
             let arr_vi = VAR_COUNT - 1
             VAR_TY[arr_vi as usize] = 8
             VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
             let base = ptr_slot - nslots
-            var zi: i64 = 0
-            while zi < nslots { em32(0xD2800000); emit_store_var_a64(base + zi); zi = zi + 1 }
-            emit_lea_var_a64(base + nslots - 1)
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                emit_imm64_reg_a64(11, LAST_LOCAL_BSS_ADDR)
+                emit_zero_words_x11_a64(nslots)
+                emit_imm64_reg_a64(0, LAST_LOCAL_BSS_ADDR)
+            } else {
+                emit_lea_var_a64(base + nslots - 1)
+                em32(0xAA0003EB)  // mov x11, x0
+                emit_zero_words_x11_a64(nslots)
+                emit_lea_var_a64(base + nslots - 1)
+            }
             emit_store_var_a64(ptr_slot)
         } else {
             compile_or_a64()
@@ -11859,28 +12098,38 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             if type_is_slice_ref(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
+                let before_vc = VAR_COUNT
                 bind_slice_local_from_x0_a64(ns, ne, bind_hash)
-                let svix = VAR_COUNT - 1
-                VAR_IS_CLOSURE[svix as usize] = 0
-                VAR_MUT[svix as usize] = decl_is_mut
-                VAR_LINEAR[svix as usize] = 0
+                if VAR_COUNT > before_vc {
+                    let svix = VAR_COUNT - 1
+                    VAR_IS_CLOSURE[svix as usize] = 0
+                    VAR_MUT[svix as usize] = decl_is_mut
+                    VAR_LINEAR[svix as usize] = 0
+                }
             } else if (decl_ty == 8) || (decl_ty == 0 && EXPR_TY == 8) {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty == 8 { bind_hash = decl_ty_hash }
+                let before_vc = VAR_COUNT
                 bind_array_local_from_x0_a64(ns, ne, bind_hash)
-                let avix = VAR_COUNT - 1
-                VAR_IS_CLOSURE[avix as usize] = 0
-                VAR_MUT[avix as usize] = decl_is_mut
-                VAR_LINEAR[avix as usize] = 0
+                if VAR_COUNT > before_vc {
+                    let avix = VAR_COUNT - 1
+                    VAR_IS_CLOSURE[avix as usize] = 0
+                    VAR_MUT[avix as usize] = decl_is_mut
+                    VAR_LINEAR[avix as usize] = 0
+                }
             } else if type_is_struct_like(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_struct_like(EXPR_TY, EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
+                let before_vc = VAR_COUNT
                 bind_struct_local_from_x0_a64(ns, ne, bind_hash)
-                let svix = VAR_COUNT - 1
-                VAR_IS_CLOSURE[svix as usize] = 0
-                VAR_MUT[svix as usize] = decl_is_mut
+                if VAR_COUNT > before_vc {
+                    let svix = VAR_COUNT - 1
+                    VAR_IS_CLOSURE[svix as usize] = 0
+                    VAR_MUT[svix as usize] = decl_is_mut
+                }
             } else {
                 let slot = var_add(ns, ne)
+                if slot < 0 { return }
                 let vix = VAR_COUNT - 1
                 emit_store_var_a64(slot)
                 if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
@@ -12118,8 +12367,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_a64(EXPR_TY, EXPR_TY_HASH)
         }
-        em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
-        em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
+        emit_imm64_reg_a64(9, FN_FRAME_SIZE[CURRENT_FN as usize])
+        em32(0x8B0903FF)  // add sp, sp, x9
         em32(0xA8C17BFD)
         em32(0xD65F03C0)
         return
@@ -12236,6 +12485,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             EP = EP + 1  // skip (
             compile_or_a64()
             let iter_slot_a = var_add(vns, vne)
+            if iter_slot_a < 0 { return }
             emit_store_var_a64(iter_slot_a)
             if TK[EP as usize] == 28 { EP = EP + 1 }
             compile_or_a64()
@@ -12246,6 +12496,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             // START..END or START..=END form
             compile_or_a64()
             let iter_slot_b = var_add(vns, vne)
+            if iter_slot_b < 0 { return }
             emit_store_var_a64(iter_slot_b)
             var is_incl: i64 = 0
             if TK[EP as usize] == 64 { is_incl = 1 }
@@ -12323,7 +12574,12 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     emit_imm64_a64(disc); emit_pop_x1_a64()
                     em32(0xEB00003F)
                     let skip_off = CL; em32(0x54000001)
-                    if has_binding == 1 { emit_load_var_a64(match_slot); em32(0xF9400400); let bslot = var_add(bind_ns, bind_ne); emit_store_var_a64(bslot) }
+                    if has_binding == 1 {
+                        emit_load_var_a64(match_slot)
+                        em32(0xF9400400)
+                        let bslot = var_add(bind_ns, bind_ne)
+                        if bslot >= 0 { emit_store_var_a64(bslot) }
+                    }
                     if TK[EP as usize] == 52 { EP = EP + 1 }
                     var arm_has_block: i64 = 0
                     if TK[EP as usize] == 8 { arm_has_block = 1; EP = EP + 1 }
@@ -12472,19 +12728,21 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 if TK[p as usize] == 43 {
                     p = p + 1
                     scan_type(p)
-                    VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
-                    VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
-                    if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
-                    if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
-                        let len_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]
-                        let ptr_slot = NEXT_SLOT
-                        NEXT_SLOT = NEXT_SLOT + 1
-                        VAR_SLOT[(VAR_COUNT - 1) as usize] = ptr_slot
-                        VAR_LEN_SLOT[(VAR_COUNT - 1) as usize] = len_slot
-                        VAR_ESIZ[(VAR_COUNT - 1) as usize] = arr_hash_esiz(ref_hash_inner_hash(SCAN_TY_HASH))
-                    } else if SCAN_TY == 8 {
-                        VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
-                        VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                    if pslot >= 0 {
+                        VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
+                        VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                        if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                        if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                            let len_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]
+                            let ptr_slot = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            VAR_SLOT[(VAR_COUNT - 1) as usize] = ptr_slot
+                            VAR_LEN_SLOT[(VAR_COUNT - 1) as usize] = len_slot
+                            VAR_ESIZ[(VAR_COUNT - 1) as usize] = arr_hash_esiz(ref_hash_inner_hash(SCAN_TY_HASH))
+                        } else if SCAN_TY == 8 {
+                            VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
+                            VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                        }
                     }
                     p = SCAN_TY_NEXT
                 }
@@ -12503,10 +12761,11 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         if TK[p as usize] == 8 { p = p + 1 }
         // ARM64 prologue
         print_int(fn_idx); print(" ")
+        let frame_sz = FN_FRAME_SIZE[fn_idx as usize]
         em32(0xA9BF7BFD)  // stp x29, x30, [sp, #-16]!
         em32(0x910003FD)  // mov x29, sp
-        em32(0xD1000000 | (2048 << 10) | (31 << 5) | 31)  // sub sp, sp, #2048
-        em32(0xD1000000 | (2048 << 10) | (31 << 5) | 31)  // sub sp, sp, #2048
+        emit_imm64_reg_a64(9, frame_sz)
+        em32(0xCB0903FF)  // sub sp, sp, x9
         // Spill params using low-level ABI slot order.
         var param_vi_a: i64 = 0
         var abi_arg_idx_a: i64 = 0
@@ -12564,8 +12823,8 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                 stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)
             }
-            em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
-            em32(0x91000000 | (2048 << 10) | (31 << 5) | 31)
+            emit_imm64_reg_a64(9, frame_sz)
+            em32(0x8B0903FF)  // add sp, sp, x9
             em32(0xA8C17BFD)
             em32(0xD65F03C0)
         }
