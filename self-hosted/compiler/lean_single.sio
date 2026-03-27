@@ -7181,14 +7181,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             let arr_vi = VAR_COUNT - 1
             VAR_TY[arr_vi as usize] = 8
             VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
-            // Zero-init the array slots
+            // Zero-init the array slots using rep stosq (compact: 3 instrs vs N*2 instrs)
+            // Array slots: base..base+nslots-1, lowest addr = rbp-(base+nslots-1)*8
+            // rep stosq: store rax to [rdi], rdi += 8, rcx--; repeats rcx times (DF=0 → ascending)
             let base = ptr_slot - nslots
-            var zi: i64 = 0
-            while zi < nslots {
-                em(0x48); em(0x31); em(0xc0)  // xor rax, rax
-                emit_store_var(base + zi)
-                zi = zi + 1
-            }
+            em(0x48); em(0x8d); em(0xbd)  // lea rdi, [rbp + disp32]  (lowest array addr)
+            em32(0 - (base + nslots - 1) * 8)
+            em(0x48); em(0x31); em(0xc0)  // xor rax, rax
+            em(0xb9); em32(nslots)         // mov ecx, nslots (zero-extends to rcx)
+            em(0xf3); em(0x48); em(0xab)  // rep stosq
             // Store lea (pointer to array start) in ptr_slot
             // Array slots are base..base+nslots-1, addresses [rbp-base*8]..[rbp-(base+nslots-1)*8]
             // Pointer must point to lowest address so arr[i] = [ptr + i*8] addresses upward
@@ -8426,7 +8427,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
     // BSS layout: [argc(8)] [argv(8)] [globals...] [aggregate return scratch]
     RET_AGG_BSS_OFF = GL_BSS_SIZE
-    GL_BSS_SIZE = GL_BSS_SIZE + 65536
+    GL_BSS_SIZE = GL_BSS_SIZE + 1048576  // 1MB scratch for aggregate (struct/array) returns
     // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0
     if TARGET_OS == 2 {
         GL_BSS_BASE = 0x100008000 + 16    // macOS: __DATA segment at 0x100008000
