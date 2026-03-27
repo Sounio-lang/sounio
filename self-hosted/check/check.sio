@@ -8629,6 +8629,44 @@ impl Checker {
                 c = c.collect_ontology_disjoints((*odef).disjoints)
                 // Compute transitive closure of superclass relationships
                 c.ontologies = ontology_table_compute_closure(c.ontologies)
+                // Verify inheritance strengthening: child properties must imply parent properties
+                var vi: i64 = 0
+                while vi < c.ontologies.count {
+                    let child = c.ontologies.entries[vi as usize]
+                    if child.is_valid && child.property_count > 0 {
+                        // For each ancestor, check for same-named properties
+                        var ai: i64 = 0
+                        while ai < child.all_ancestor_count {
+                            let anc_idx = child.all_ancestor_indices[ai as usize]
+                            if anc_idx >= 0 && anc_idx < c.ontologies.count {
+                                let ancestor = c.ontologies.entries[anc_idx as usize]
+                                var ci: i64 = 0
+                                while ci < child.property_count {
+                                    var pi: i64 = 0
+                                    while pi < ancestor.property_count {
+                                        if name_eq(child.property_names[ci as usize], ancestor.property_names[pi as usize]) {
+                                            // Same-named property: child must strengthen parent
+                                            let child_ref_id = child.property_ref_ids[ci as usize]
+                                            let parent_ref_id = ancestor.property_ref_ids[pi as usize]
+                                            if child_ref_id >= 0 && parent_ref_id >= 0 && child_ref_id < 64 && parent_ref_id < 64 {
+                                                let child_pred = c.refinements.entries[child_ref_id as usize].predicate
+                                                let parent_pred = c.refinements.entries[parent_ref_id as usize].predicate
+                                                if !pred_implies(child_pred, parent_pred) {
+                                                    let warn_span = Span { start: 0, end: 0 }
+                                                    c = c.report_warning_at(warn_span, 41, 0, 0, 0)
+                                                }
+                                            }
+                                        }
+                                        pi = pi + 1
+                                    }
+                                    ci = ci + 1
+                                }
+                            }
+                            ai = ai + 1
+                        }
+                    }
+                    vi = vi + 1
+                }
                 // Bind each class name as a named type with ontology_id
                 var i: i64 = 0
                 while i < c.ontologies.count {
@@ -8671,6 +8709,37 @@ impl Checker {
                         info.superclass_indices[info.superclass_count as usize] = sc_idx
                         info.superclass_count = info.superclass_count + 1
                     }
+                    i = i + 1
+                }
+
+                // Register properties as refinements
+                i = 0
+                while i < decl.property_count && i < 4 {
+                    let prop = decl.properties[i as usize]
+                    info.property_names[info.property_count as usize] = prop.name
+                    if prop.pred_op > 0 {
+                        // Build a RefinementPred from the property declaration
+                        let pred = RefinementPred {
+                            op: prop.pred_op,
+                            var_name: prop.name,
+                            rhs_int: prop.pred_rhs_int,
+                            rhs_float: prop.pred_rhs_float,
+                            is_float: prop.is_float,
+                            left: None,
+                            right: None,
+                        }
+                        let base_ty = if prop.is_float { ty_f64() } else { ty_i64() }
+                        let rt = RefinementType {
+                            base_type: base_ty,
+                            var_name: prop.name,
+                            predicate: pred,
+                        }
+                        // Synthesize a unique name for this property refinement
+                        let synth_name = make_refinement_synth_name(c.refinements.count)
+                        c.refinements = refinement_table_add(c.refinements, synth_name, rt)
+                        info.property_ref_ids[info.property_count as usize] = c.refinements.count - 1
+                    }
+                    info.property_count = info.property_count + 1
                     i = i + 1
                 }
 
@@ -12265,37 +12334,65 @@ impl Checker {
                     return c
                 }
             }
-            // Ontology-aware proof: if arg has an ontology type and the expected
-            // refinement's base type also has an ontology type, check if ontology
-            // subsumption holds. If it does, the base type constraint is satisfied
-            // by the class hierarchy — only the predicate part needs verification.
-            // This bridges ontology axioms into refinement obligations.
-            if env_lookup.ontology_id >= 0 && expected_ty.ontology_id >= 0 {
-                if ontology_table_is_subclass(c.ontologies, env_lookup.ontology_id, expected_ty.ontology_id) {
-                    // Ontology subsumption proves base type compatibility.
-                    // The predicate is not yet proven, but the type system accepts
-                    // the base constraint. Scan ancestor classes for refinement
-                    // predicates that could discharge the obligation.
-                    var found_ancestor_ref = false
+            // Ontology-aware proof: type-driven axiom collection.
+            // When the argument has an ontology type, collect ALL property
+            // predicates from the class + ancestors and check if ANY
+            // structurally implies the expected refinement.
+            // Uses pred_implies_structural (var_name independent) because
+            // property predicates are universally quantified over class
+            // instances — "potency >= 0.0" proves "v >= 0.0" regardless
+            // of the bound variable name.
+            if env_lookup.ontology_id >= 0 {
+                let arg_oid = env_lookup.ontology_id
+                var found_property_proof = false
+
+                // Check the class itself: all properties are candidate axioms
+                var pi: i64 = 0
+                while pi < c.ontologies.entries[arg_oid as usize].property_count {
+                    let prop_ref_id = c.ontologies.entries[arg_oid as usize].property_ref_ids[pi as usize]
+                    if prop_ref_id >= 0 && prop_ref_id < 64 {
+                        let prop_pred = c.refinements.entries[prop_ref_id as usize].predicate
+                        if pred_implies_structural(prop_pred, expected_ref.predicate) {
+                            found_property_proof = true
+                        }
+                    }
+                    pi = pi + 1
+                }
+
+                // Scan all ancestors: collect their property axioms too
+                if !found_property_proof {
                     var anc_i: i64 = 0
-                    while anc_i < c.ontologies.entries[env_lookup.ontology_id as usize].all_ancestor_count {
-                        let anc_idx = c.ontologies.entries[env_lookup.ontology_id as usize].all_ancestor_indices[anc_i as usize]
+                    while anc_i < c.ontologies.entries[arg_oid as usize].all_ancestor_count {
+                        let anc_idx = c.ontologies.entries[arg_oid as usize].all_ancestor_indices[anc_i as usize]
                         if anc_idx >= 0 && anc_idx < c.ontologies.count {
-                            // Check if this ancestor's type binding has a refinement
+                            // Ancestor type binding refinement (structural)
                             let anc_name = c.ontologies.entries[anc_idx as usize].name
                             let anc_ty = c.env.lookup(anc_name)
                             if anc_ty.refinement_id >= 0 && anc_ty.refinement_id < 128 {
-                                let anc_ref = c.refinements.entries[anc_ty.refinement_id as usize]
-                                if pred_implies(anc_ref.predicate, expected_ref.predicate) {
-                                    found_ancestor_ref = true
+                                let anc_pred = c.refinements.entries[anc_ty.refinement_id as usize].predicate
+                                if pred_implies_structural(anc_pred, expected_ref.predicate) {
+                                    found_property_proof = true
                                 }
+                            }
+                            // Ancestor property refinements (structural)
+                            var pj: i64 = 0
+                            while pj < c.ontologies.entries[anc_idx as usize].property_count {
+                                let anc_prop_ref_id = c.ontologies.entries[anc_idx as usize].property_ref_ids[pj as usize]
+                                if anc_prop_ref_id >= 0 && anc_prop_ref_id < 64 {
+                                    let anc_prop_pred = c.refinements.entries[anc_prop_ref_id as usize].predicate
+                                    if pred_implies_structural(anc_prop_pred, expected_ref.predicate) {
+                                        found_property_proof = true
+                                    }
+                                }
+                                pj = pj + 1
                             }
                         }
                         anc_i = anc_i + 1
                     }
-                    if found_ancestor_ref {
-                        return c
-                    }
+                }
+
+                if found_property_proof {
+                    return c
                 }
             }
         }

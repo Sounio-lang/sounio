@@ -95,6 +95,10 @@ impl Parser {
             p.parse_trait_item(is_pub)
         } else if item_kind == TokenKind::Algebra {
             p.parse_algebra_item(is_pub)
+        } else if item_kind == TokenKind::Study {
+            p.parse_study_item(is_pub)
+        } else if item_kind == TokenKind::Ontology {
+            p.parse_ontology_item(is_pub)
         } else if item_kind == TokenKind::Extern {
             p.parse_extern_fn_item(is_pub)
         } else if item_kind == TokenKind::Export {
@@ -3143,14 +3147,301 @@ fn name_eq_str(n: Name, s: [i8; 64], slen: i64) -> bool with Mut {
     if n.len != slen { return false }
     var i: i64 = 0
     while i < slen {
-        if n.text[i] != s[i] { return false }
+        if n.buf[i as usize] != s[i as usize] { return false }
         i = i + 1
     }
     true
 }
 
-fn make_short_name(s: [i8; 64], slen: i64) -> Name {
-    Name { text: s, len: slen }
+fn make_short_name(s: [i8; 64], slen: i64) -> Name with Mut {
+    var out = Name { buf: [0; 128], len: 0 }
+    var i: i64 = 0
+    while i < slen && i < 64 && i < 128 {
+        out.buf[i as usize] = s[i as usize]
+        i = i + 1
+    }
+    out.len = i
+    out
+}
+
+fn study_parse_name_f64(name: Name) -> f64 with Mut, Panic, Div {
+    var i: i64 = 0
+    var sign: f64 = 1.0
+    if name.len > 0 && name.buf[0] == 45 as i8 {
+        sign = 0.0 - 1.0
+        i = 1
+    }
+
+    var whole: f64 = 0.0
+    while i < name.len {
+        let ch = name.buf[i as usize]
+        if ch == 95 as i8 {
+            i = i + 1
+            continue
+        }
+        if ch == 46 as i8 || ch == 101 as i8 || ch == 69 as i8 {
+            break
+        }
+        if ch >= 48 as i8 && ch <= 57 as i8 {
+            whole = whole * 10.0 + ((ch as i64) - 48) as f64
+        }
+        i = i + 1
+    }
+
+    var frac: f64 = 0.0
+    var scale: f64 = 1.0
+    if i < name.len && name.buf[i as usize] == 46 as i8 {
+        i = i + 1
+        while i < name.len {
+            let ch = name.buf[i as usize]
+            if ch == 95 as i8 {
+                i = i + 1
+                continue
+            }
+            if ch == 101 as i8 || ch == 69 as i8 {
+                break
+            }
+            if ch >= 48 as i8 && ch <= 57 as i8 {
+                frac = frac * 10.0 + ((ch as i64) - 48) as f64
+                scale = scale * 10.0
+            }
+            i = i + 1
+        }
+    }
+
+    var value = whole
+    if scale > 1.0 {
+        value = value + frac / scale
+    }
+
+    if i < name.len && (name.buf[i as usize] == 101 as i8 || name.buf[i as usize] == 69 as i8) {
+        i = i + 1
+        var exp_sign: i64 = 1
+        if i < name.len && name.buf[i as usize] == 45 as i8 {
+            exp_sign = -1
+            i = i + 1
+        } else if i < name.len && name.buf[i as usize] == 43 as i8 {
+            i = i + 1
+        }
+
+        var exp: i64 = 0
+        while i < name.len {
+            let ch = name.buf[i as usize]
+            if ch == 95 as i8 {
+                i = i + 1
+                continue
+            }
+            if ch >= 48 as i8 && ch <= 57 as i8 {
+                exp = exp * 10 + ((ch as i64) - 48)
+            }
+            i = i + 1
+        }
+
+        if exp_sign < 0 {
+            while exp > 0 {
+                value = value / 10.0
+                exp = exp - 1
+            }
+        } else {
+            while exp > 0 {
+                value = value * 10.0
+                exp = exp - 1
+            }
+        }
+    }
+
+    sign * value
+}
+
+fn study_parse_i64_value(p: Parser) -> (Parser, i64) with Mut, IO, Panic, Div, Alloc {
+    if p.peek() == TokenKind::IntLit {
+        let value = p.current().int_value
+        (p.advance(), value)
+    } else {
+        var pa = p
+        pa.had_error = true
+        pa.error_count = pa.error_count + 1
+        (pa.advance(), 0)
+    }
+}
+
+fn study_parse_f64_value(p: Parser) -> (Parser, f64) with Mut, IO, Panic, Div, Alloc {
+    if p.peek() == TokenKind::IntLit {
+        let value = p.current().int_value as f64
+        (p.advance(), value)
+    } else if p.peek() == TokenKind::FloatLit {
+        let lit_name = p.current_name()
+        (p.advance(), study_parse_name_f64(lit_name))
+    } else {
+        var pa = p
+        pa.had_error = true
+        pa.error_count = pa.error_count + 1
+        (pa.advance(), 0.0)
+    }
+}
+
+fn study_design_from_name(name: Name) -> i32 with Panic, Div {
+    if name.len == 12
+        && name.buf[0] == 112 as i8
+        && name.buf[1] == 97 as i8
+        && name.buf[2] == 114 as i8
+        && name.buf[3] == 97 as i8
+        && name.buf[4] == 108 as i8
+        && name.buf[5] == 108 as i8
+        && name.buf[6] == 101 as i8
+        && name.buf[7] == 108 as i8
+        && name.buf[8] == 95 as i8
+        && name.buf[9] == 114 as i8
+        && name.buf[10] == 99 as i8
+        && name.buf[11] == 116 as i8 {
+        0  // parallel_rct
+    } else if name.len == 9
+        && name.buf[0] == 99 as i8
+        && name.buf[1] == 114 as i8
+        && name.buf[2] == 111 as i8
+        && name.buf[3] == 115 as i8
+        && name.buf[4] == 115 as i8
+        && name.buf[5] == 111 as i8
+        && name.buf[6] == 118 as i8
+        && name.buf[7] == 101 as i8
+        && name.buf[8] == 114 as i8 {
+        1  // crossover
+    } else if name.len == 6
+        && name.buf[0] == 99 as i8
+        && name.buf[1] == 111 as i8
+        && name.buf[2] == 104 as i8
+        && name.buf[3] == 111 as i8
+        && name.buf[4] == 114 as i8
+        && name.buf[5] == 116 as i8 {
+        2  // cohort
+    } else if name.len == 12
+        && name.buf[0] == 99 as i8
+        && name.buf[1] == 97 as i8
+        && name.buf[2] == 115 as i8
+        && name.buf[3] == 101 as i8
+        && name.buf[4] == 95 as i8
+        && name.buf[5] == 99 as i8
+        && name.buf[6] == 111 as i8
+        && name.buf[7] == 110 as i8
+        && name.buf[8] == 116 as i8
+        && name.buf[9] == 114 as i8
+        && name.buf[10] == 111 as i8
+        && name.buf[11] == 108 as i8 {
+        3  // case_control
+    } else {
+        0
+    }
+}
+
+fn study_direction_from_name(name: Name) -> i32 with Panic, Div {
+    if name.len == 4
+        && name.buf[0] == 108 as i8
+        && name.buf[1] == 101 as i8
+        && name.buf[2] == 115 as i8
+        && name.buf[3] == 115 as i8 {
+        1  // less
+    } else if name.len == 9
+        && name.buf[0] == 110 as i8
+        && name.buf[1] == 111 as i8
+        && name.buf[2] == 116 as i8
+        && name.buf[3] == 95 as i8
+        && name.buf[4] == 101 as i8
+        && name.buf[5] == 113 as i8
+        && name.buf[6] == 117 as i8
+        && name.buf[7] == 97 as i8
+        && name.buf[8] == 108 as i8 {
+        2  // not_equal
+    } else {
+        0  // greater
+    }
+}
+
+fn study_correction_from_name(name: Name) -> i32 with Panic, Div {
+    if name.len == 10
+        && name.buf[0] == 98 as i8
+        && name.buf[1] == 111 as i8
+        && name.buf[2] == 110 as i8
+        && name.buf[3] == 102 as i8
+        && name.buf[4] == 101 as i8
+        && name.buf[5] == 114 as i8
+        && name.buf[6] == 114 as i8
+        && name.buf[7] == 111 as i8
+        && name.buf[8] == 110 as i8
+        && name.buf[9] == 105 as i8 {
+        1  // bonferroni
+    } else if name.len == 18
+        && name.buf[0] == 98 as i8
+        && name.buf[1] == 101 as i8
+        && name.buf[2] == 110 as i8
+        && name.buf[3] == 106 as i8
+        && name.buf[4] == 97 as i8
+        && name.buf[5] == 109 as i8
+        && name.buf[6] == 105 as i8
+        && name.buf[7] == 110 as i8
+        && name.buf[8] == 105 as i8
+        && name.buf[9] == 95 as i8
+        && name.buf[10] == 104 as i8
+        && name.buf[11] == 111 as i8
+        && name.buf[12] == 99 as i8
+        && name.buf[13] == 104 as i8
+        && name.buf[14] == 98 as i8
+        && name.buf[15] == 101 as i8
+        && name.buf[16] == 114 as i8
+        && name.buf[17] == 103 as i8 {
+        2  // benjamini_hochberg
+    } else {
+        0  // none
+    }
+}
+
+fn parse_study_hypothesis(p: Parser) -> (Parser, StudyHypothesis) with Mut, IO, Panic, Div, Alloc {
+    var pa = p.advance()  // skip "hypothesis"
+    let name = pa.current_name()
+    pa = pa.expect_ident()
+    pa = pa.expect(TokenKind::LBrace)
+
+    var outcome = empty_name()
+    var direction: i32 = 0
+    var effect_size: f64 = 0.0
+
+    while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+        while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline {
+            pa = pa.advance()
+        }
+        if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof {
+            break
+        }
+
+        let field_name = pa.current_name()
+        if field_name.len == 7 && field_name.buf[0] == 111 as i8 && field_name.buf[1] == 117 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::Colon)
+            outcome = pa.current_name()
+            pa = pa.expect_ident()
+        } else if field_name.len == 9 && field_name.buf[0] == 100 as i8 && field_name.buf[1] == 105 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::Colon)
+            let dir_name = pa.current_name()
+            pa = pa.expect_ident()
+            direction = study_direction_from_name(dir_name)
+        } else if field_name.len == 11 && field_name.buf[0] == 101 as i8 && field_name.buf[6] == 95 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::Colon)
+            let effect_pair = study_parse_f64_value(pa)
+            pa = effect_pair.0
+            effect_size = effect_pair.1
+        } else {
+            pa = pa.advance()
+        }
+    }
+
+    pa = pa.expect(TokenKind::RBrace)
+    (pa, StudyHypothesis {
+        name: name,
+        outcome: outcome,
+        direction: direction,
+        effect_size: effect_size,
+    })
 }
 
 fn parse_algebra_op_decl(p: Parser) -> (Parser, AlgebraOpDecl) with Mut, IO, Panic, Div, Alloc {
@@ -3174,15 +3465,15 @@ fn parse_algebra_op_decl(p: Parser) -> (Parser, AlgebraOpDecl) with Mut, IO, Pan
         // "alternative" = 11 chars, starts with 'a' (97), text[1]='l' (108)
         // "non_commutative" = 15, starts with 'n' (110)
         // "non_associative" = 15, starts with 'n' (110)
-        if prop_name.len == 11 && prop_name.text[0] == 99 as i8 {
+        if prop_name.len == 11 && prop_name.buf[0] == 99 as i8 {
             is_comm = true  // commutative
-        } else if prop_name.len == 11 && prop_name.text[0] == 97 as i8 && prop_name.text[1] == 115 as i8 {
+        } else if prop_name.len == 11 && prop_name.buf[0] == 97 as i8 && prop_name.buf[1] == 115 as i8 {
             is_assoc = true  // associative
-        } else if prop_name.len == 11 && prop_name.text[0] == 97 as i8 && prop_name.text[1] == 108 as i8 {
+        } else if prop_name.len == 11 && prop_name.buf[0] == 97 as i8 && prop_name.buf[1] == 108 as i8 {
             is_alt = true  // alternative
-        } else if prop_name.len == 15 && prop_name.text[0] == 110 as i8 && prop_name.text[4] == 99 as i8 {
+        } else if prop_name.len == 15 && prop_name.buf[0] == 110 as i8 && prop_name.buf[4] == 99 as i8 {
             is_comm = false  // non_commutative (n=110, o, n, _, c=99)
-        } else if prop_name.len == 15 && prop_name.text[0] == 110 as i8 && prop_name.text[4] == 97 as i8 {
+        } else if prop_name.len == 15 && prop_name.buf[0] == 110 as i8 && prop_name.buf[4] == 97 as i8 {
             is_assoc = false  // non_associative (n, o, n, _, a=97)
         }
         pa = pa.advance()  // consume property name
@@ -3216,7 +3507,7 @@ fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, P
     var over_ty: Option<Box<TypeExpr>> = None
     let peek_name = pa.current_name()
     // "over" = 4 chars: o=111, v=118, e=101, r=114
-    if peek_name.len == 4 && peek_name.text[0] == 111 as i8 && peek_name.text[1] == 118 as i8 {
+    if peek_name.len == 4 && peek_name.buf[0] == 111 as i8 && peek_name.buf[1] == 118 as i8 {
         pa = pa.advance()  // consume "over"
         let ty_pair = pa.parse_type_expr()
         pa = ty_pair.0
@@ -3241,7 +3532,7 @@ fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, P
         let entry_name = pa.current_name()
 
         // Check for "reassociate" (11 chars, r=114, e=101, a=97, s=115)
-        if entry_name.len == 11 && entry_name.text[0] == 114 as i8 && entry_name.text[2] == 97 as i8 {
+        if entry_name.len == 11 && entry_name.buf[0] == 114 as i8 && entry_name.buf[2] == 97 as i8 {
             pa = pa.advance()  // consume "reassociate"
             pa = pa.expect(TokenKind::Colon)
             let strat_name = pa.current_name()
@@ -3305,5 +3596,468 @@ fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, P
         session_decl: None,
         trait_def: None,
         algebra_def: Some(Box::new(adef)),
+        study_def: None,
+        ontology_def: None,
+    })
+}
+
+fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    let start = p.current_span()
+    var pa = p.advance()  // skip 'study'
+
+    let name = pa.current_name()
+    pa = pa.expect_ident()
+    pa = pa.expect(TokenKind::LBrace)
+
+    var title = empty_name()
+    var registration = empty_name()
+    var design: i32 = 0
+    var sample_size: i64 = 0
+    var power: f64 = 0.0
+    var alpha: f64 = 0.0
+    var correction: i32 = 0
+    var hypotheses: [StudyHypothesis; 8] = [empty_study_hypothesis(); 8]
+    var n_hypotheses: i64 = 0
+    var outcomes: [StudyOutcome; 16] = [empty_study_outcome(); 16]
+    var n_outcomes: i64 = 0
+
+    while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+        while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline {
+            pa = pa.advance()
+        }
+        if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof {
+            break
+        }
+
+        let entry_name = pa.current_name()
+
+        if entry_name.len == 5 && entry_name.buf[0] == 116 as i8 && entry_name.buf[1] == 105 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::Colon)
+            let title_pair = pa.parse_audit_name_value()
+            pa = title_pair.0
+            title = title_pair.1
+        } else if entry_name.len == 12 && entry_name.buf[0] == 114 as i8 && entry_name.buf[11] == 110 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::Colon)
+            let reg_pair = pa.parse_audit_name_value()
+            pa = reg_pair.0
+            registration = reg_pair.1
+        } else if entry_name.len == 6 && entry_name.buf[0] == 100 as i8 && entry_name.buf[5] == 110 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::Colon)
+            let design_name = pa.current_name()
+            pa = pa.expect_ident()
+            design = study_design_from_name(design_name)
+        } else if entry_name.len == 12 && entry_name.buf[0] == 112 as i8 && entry_name.buf[11] == 115 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::LBrace)
+
+            while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+                while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline {
+                    pa = pa.advance()
+                }
+                if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof {
+                    break
+                }
+
+                let field_name = pa.current_name()
+                if field_name.len == 11 && field_name.buf[0] == 115 as i8 && field_name.buf[6] == 95 as i8 {
+                    pa = pa.advance()
+                    pa = pa.expect(TokenKind::Colon)
+                    let sample_pair = study_parse_i64_value(pa)
+                    pa = sample_pair.0
+                    sample_size = sample_pair.1
+                } else if field_name.len == 5 && field_name.buf[0] == 112 as i8 && field_name.buf[4] == 114 as i8 {
+                    pa = pa.advance()
+                    pa = pa.expect(TokenKind::Colon)
+                    let power_pair = study_parse_f64_value(pa)
+                    pa = power_pair.0
+                    power = power_pair.1
+                } else {
+                    pa = pa.advance()
+                }
+            }
+
+            pa = pa.expect(TokenKind::RBrace)
+        } else if entry_name.len == 8 && entry_name.buf[0] == 111 as i8 && entry_name.buf[7] == 115 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::LBrace)
+
+            while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+                while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline {
+                    pa = pa.advance()
+                }
+                if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof {
+                    break
+                }
+
+                let field_name = pa.current_name()
+                if field_name.len == 7 && field_name.buf[0] == 112 as i8 && field_name.buf[6] == 121 as i8 {
+                    pa = pa.advance()
+                    pa = pa.expect(TokenKind::Colon)
+                    let outcome_name = pa.current_name()
+                    pa = pa.expect_ident()
+                    if n_outcomes < 16 {
+                        outcomes[n_outcomes as usize] = StudyOutcome { name: outcome_name, is_primary: true }
+                        n_outcomes = n_outcomes + 1
+                    }
+                } else if field_name.len == 9 && field_name.buf[0] == 115 as i8 && field_name.buf[8] == 121 as i8 {
+                    pa = pa.advance()
+                    pa = pa.expect(TokenKind::Colon)
+                    while pa.peek() == TokenKind::Ident {
+                        let outcome_name = pa.current_name()
+                        pa = pa.expect_ident()
+                        if n_outcomes < 16 {
+                            outcomes[n_outcomes as usize] = StudyOutcome { name: outcome_name, is_primary: false }
+                            n_outcomes = n_outcomes + 1
+                        }
+                        if pa.peek() == TokenKind::Comma {
+                            pa = pa.advance()
+                        } else {
+                            break
+                        }
+                    }
+                } else {
+                    pa = pa.advance()
+                }
+            }
+
+            pa = pa.expect(TokenKind::RBrace)
+        } else if entry_name.len == 8 && entry_name.buf[0] == 97 as i8 && entry_name.buf[7] == 115 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::LBrace)
+
+            while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+                while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline {
+                    pa = pa.advance()
+                }
+                if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof {
+                    break
+                }
+
+                let field_name = pa.current_name()
+                if field_name.len == 10 && field_name.buf[0] == 104 as i8 && field_name.buf[9] == 115 as i8 {
+                    let hyp_pair = parse_study_hypothesis(pa)
+                    pa = hyp_pair.0
+                    if n_hypotheses < 8 {
+                        hypotheses[n_hypotheses as usize] = hyp_pair.1
+                        n_hypotheses = n_hypotheses + 1
+                    }
+                } else if field_name.len == 5 && field_name.buf[0] == 97 as i8 && field_name.buf[4] == 97 as i8 {
+                    pa = pa.advance()
+                    pa = pa.expect(TokenKind::Colon)
+                    let alpha_pair = study_parse_f64_value(pa)
+                    pa = alpha_pair.0
+                    alpha = alpha_pair.1
+                } else if field_name.len == 10 && field_name.buf[0] == 99 as i8 && field_name.buf[9] == 110 as i8 {
+                    pa = pa.advance()
+                    pa = pa.expect(TokenKind::Colon)
+                    let correction_name = pa.current_name()
+                    pa = pa.expect_ident()
+                    correction = study_correction_from_name(correction_name)
+                } else {
+                    pa = pa.advance()
+                }
+            }
+
+            pa = pa.expect(TokenKind::RBrace)
+        } else {
+            pa = pa.advance()
+        }
+    }
+
+    pa = pa.expect(TokenKind::RBrace)
+    let span = pa.span_from(start)
+
+    let sdef = StudyDef {
+        name: name,
+        title: title,
+        registration: registration,
+        design: design,
+        sample_size: sample_size,
+        power: power,
+        alpha: alpha,
+        correction: correction,
+        hypotheses: hypotheses,
+        n_hypotheses: n_hypotheses as i32,
+        outcomes: outcomes,
+        n_outcomes: n_outcomes as i32,
+    }
+
+    (pa, Item {
+        kind: ItemKind::ItemStudy,
+        span: span,
+        is_pub: is_pub,
+        name: name,
+        fn_def: None,
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        policy_def: None,
+        acquisition_policy_def: None,
+        recourse_policy_def: None,
+        decision_policy_def: None,
+        deferral_policy_def: None,
+        transition_policy_def: None,
+        transition_protocol_def: None,
+        monitoring_policy_def: None,
+        alternative_policy_def: None,
+        alternative_frontier_def: None,
+        models_def: None,
+        validation_def: None,
+        audit_def: None,
+        use_path: empty_path(),
+        use_glob: false,
+        use_items: None,
+        effect_def: None,
+        session_decl: None,
+        trait_def: None,
+        algebra_def: None,
+        study_def: Some(Box::new(sdef)),
+        ontology_def: None,
+    })
+}
+
+// ============================================================
+// Ontology declaration parser
+// ============================================================
+// Parses: ontology Name { class A; class B subclass_of A; disjoint X, Y }
+
+fn parse_ontology_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    let start = p.current_span()
+    var pa = p.advance()  // skip 'ontology'
+
+    // Parse name
+    let name = pa.current_name()
+    pa = pa.expect_ident()
+
+    pa = pa.expect(TokenKind::LBrace)
+
+    // Parse body: class declarations and disjoint declarations
+    var rev_classes: Option<Box<OntologyClassDeclList>> = None
+    var rev_disjoints: Option<Box<OntologyDisjointDeclList>> = None
+
+    while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+        // Skip whitespace/newlines/semicolons
+        while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline {
+            pa = pa.advance()
+        }
+        if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof {
+            break
+        }
+
+        let entry_name = pa.current_name()
+        let entry_start = pa.current_span()
+
+        // "class" = 5 chars: c=99, l=108, a=97, s=115, s=115
+        if entry_name.len == 5 && entry_name.buf[0] == 99 as i8 && entry_name.buf[1] == 108 as i8 && entry_name.buf[2] == 97 as i8 && entry_name.buf[3] == 115 as i8 && entry_name.buf[4] == 115 as i8 {
+            pa = pa.advance()  // consume "class"
+            let class_name = pa.current_name()
+            pa = pa.expect_ident()
+
+            // Check for optional "subclass_of" (12 chars: s=115, u=117, b=98, c=99, l=108, a=97, s=115, s=115, _=95, o=111, f=102)
+            var superclass_names: [Name; 8] = [empty_name(); 8]
+            var superclass_count: i64 = 0
+
+            let sc_peek = pa.current_name()
+            // "subclass_of" = 11 chars: s=115, u=117, b=98
+            if sc_peek.len == 11 && sc_peek.buf[0] == 115 as i8 && sc_peek.buf[1] == 117 as i8 && sc_peek.buf[2] == 98 as i8 {
+                pa = pa.advance()  // consume "subclass_of"
+                // Parse comma-separated superclass names
+                let sc_name = pa.current_name()
+                pa = pa.expect_ident()
+                if superclass_count < 8 {
+                    superclass_names[superclass_count as usize] = sc_name
+                    superclass_count = superclass_count + 1
+                }
+                // Additional superclasses after comma
+                while pa.peek() == TokenKind::Comma {
+                    pa = pa.advance()  // skip comma
+                    let next_sc = pa.current_name()
+                    pa = pa.expect_ident()
+                    if superclass_count < 8 {
+                        superclass_names[superclass_count as usize] = next_sc
+                        superclass_count = superclass_count + 1
+                    }
+                }
+            }
+
+            // Parse optional class body { property ... }
+            var properties: [OntologyPropertyDecl; 4] = [empty_ontology_property_decl(); 4]
+            var property_count: i64 = 0
+
+            if pa.peek() == TokenKind::LBrace {
+                pa = pa.advance()  // consume '{'
+                while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+                    while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline {
+                        pa = pa.advance()
+                    }
+                    if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof { break }
+
+                    let prop_kw = pa.current_name()
+                    // "property" = 8 chars: p=112, r=114, o=111, p=112, e=101, r=114, t=116, y=121
+                    if prop_kw.len == 8 && prop_kw.buf[0] == 112 as i8 && prop_kw.buf[1] == 114 as i8 {
+                        pa = pa.advance()  // consume "property"
+                        let prop_name = pa.current_name()
+                        pa = pa.expect_ident()
+                        pa = pa.expect(TokenKind::Colon)
+                        let prop_type = pa.current_name()
+                        pa = pa.expect_ident()
+
+                        // Parse optional "where name op value"
+                        var prop_op: i64 = 0
+                        var prop_rhs_int: i64 = 0
+                        var prop_rhs_float: f64 = 0.0
+                        var prop_is_float = false
+
+                        let where_peek = pa.current_name()
+                        // "where" = 5 chars: w=119, h=104, e=101, r=114, e=101
+                        if where_peek.len == 5 && where_peek.buf[0] == 119 as i8 && where_peek.buf[1] == 104 as i8 {
+                            pa = pa.advance()  // consume "where"
+                            pa = pa.expect_ident()  // consume variable name (should match prop_name)
+
+                            // Parse comparison operator
+                            if pa.peek() == TokenKind::Gt {
+                                pa = pa.advance()
+                                if pa.peek() == TokenKind::Eq {
+                                    pa = pa.advance()
+                                    prop_op = 2  // GtEq
+                                } else {
+                                    prop_op = 1  // Gt
+                                }
+                            } else if pa.peek() == TokenKind::Lt {
+                                pa = pa.advance()
+                                if pa.peek() == TokenKind::Eq {
+                                    pa = pa.advance()
+                                    prop_op = 4  // LtEq
+                                } else {
+                                    prop_op = 3  // Lt
+                                }
+                            } else if pa.peek() == TokenKind::EqEq {
+                                pa = pa.advance()
+                                prop_op = 5  // Eq
+                            } else if pa.peek() == TokenKind::BangEq {
+                                pa = pa.advance()
+                                prop_op = 6  // NotEq
+                            }
+
+                            // Parse RHS value (int or float literal)
+                            // Handle optional negation
+                            var negate = false
+                            if pa.peek() == TokenKind::Minus {
+                                negate = true
+                                pa = pa.advance()
+                            }
+                            if pa.peek() == TokenKind::FloatLit {
+                                prop_is_float = true
+                                prop_rhs_float = pa.current_float()
+                                if negate { prop_rhs_float = 0.0 - prop_rhs_float }
+                                pa = pa.advance()
+                            } else if pa.peek() == TokenKind::IntLit {
+                                prop_rhs_int = pa.current_int()
+                                if negate { prop_rhs_int = 0 - prop_rhs_int }
+                                pa = pa.advance()
+                            }
+                        }
+
+                        if property_count < 4 {
+                            properties[property_count as usize] = OntologyPropertyDecl {
+                                name: prop_name,
+                                type_name: prop_type,
+                                pred_op: prop_op,
+                                pred_rhs_int: prop_rhs_int,
+                                pred_rhs_float: prop_rhs_float,
+                                is_float: prop_is_float,
+                                span: pa.span_from(entry_start),
+                            }
+                            property_count = property_count + 1
+                        }
+                    } else {
+                        pa = pa.advance()  // skip unknown
+                    }
+                }
+                pa = pa.expect(TokenKind::RBrace)
+            }
+
+            let class_span = pa.span_from(entry_start)
+            rev_classes = Some(Box::new(OntologyClassDeclList {
+                head: OntologyClassDecl {
+                    name: class_name,
+                    superclass_names: superclass_names,
+                    superclass_count: superclass_count,
+                    properties: properties,
+                    property_count: property_count,
+                    span: class_span,
+                },
+                tail: rev_classes,
+            }))
+
+        // "disjoint" = 8 chars: d=100, i=105, s=115, j=106, o=111, i=105, n=110, t=116
+        } else if entry_name.len == 8 && entry_name.buf[0] == 100 as i8 && entry_name.buf[1] == 105 as i8 && entry_name.buf[2] == 115 as i8 && entry_name.buf[3] == 106 as i8 {
+            pa = pa.advance()  // consume "disjoint"
+            let dj_name_a = pa.current_name()
+            pa = pa.expect_ident()
+            pa = pa.expect(TokenKind::Comma)
+            let dj_name_b = pa.current_name()
+            pa = pa.expect_ident()
+            let dj_span = pa.span_from(entry_start)
+            rev_disjoints = Some(Box::new(OntologyDisjointDeclList {
+                head: OntologyDisjointDecl {
+                    name_a: dj_name_a,
+                    name_b: dj_name_b,
+                    span: dj_span,
+                },
+                tail: rev_disjoints,
+            }))
+        } else {
+            // Unknown entry, skip
+            pa = pa.advance()
+        }
+    }
+
+    pa = pa.expect(TokenKind::RBrace)
+    let span = pa.span_from(start)
+
+    let odef = OntologyDef {
+        name: name,
+        classes: rev_classes,
+        disjoints: rev_disjoints,
+        span: span,
+    }
+
+    (pa, Item {
+        kind: ItemKind::ItemOntology,
+        span: span,
+        is_pub: is_pub,
+        name: name,
+        fn_def: None,
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        policy_def: None,
+        acquisition_policy_def: None,
+        recourse_policy_def: None,
+        decision_policy_def: None,
+        deferral_policy_def: None,
+        transition_policy_def: None,
+        transition_protocol_def: None,
+        monitoring_policy_def: None,
+        alternative_policy_def: None,
+        alternative_frontier_def: None,
+        models_def: None,
+        validation_def: None,
+        audit_def: None,
+        use_path: empty_path(),
+        use_glob: false,
+        use_items: None,
+        effect_def: None,
+        session_decl: None,
+        trait_def: None,
+        algebra_def: None,
+        study_def: None,
+        ontology_def: Some(Box::new(odef)),
     })
 }
