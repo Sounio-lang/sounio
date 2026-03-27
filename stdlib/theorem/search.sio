@@ -1,20 +1,6 @@
 //! stdlib/theorem/search.sio
-//!
-//! Small self-contained proof search layer with:
-//! - compact proposition/proof storage
-//! - bounded CNF conversion
-//! - resolution saturation
-//! - lightweight tactic dispatch
 
-let SEARCH_TAC_LOOKUP: i64 = 0
-let SEARCH_TAC_MP: i64 = 1
-let SEARCH_TAC_AND: i64 = 2
-let SEARCH_TAC_OR: i64 = 3
-let SEARCH_TAC_CONTRADICTION: i64 = 4
-let SEARCH_TAC_RESOLUTION: i64 = 5
-let SEARCH_TAC_AUTO: i64 = 6
-
-struct Prop {
+pub struct Prop {
     tag: i32,
     left_id: i64,
     right_id: i64,
@@ -24,7 +10,7 @@ struct Prop {
     eq_rhs: i64,
 }
 
-struct Proof {
+pub struct Proof {
     tag: i32,
     prop_id: i64,
     sub1_id: i64,
@@ -35,170 +21,140 @@ struct Proof {
     witness: i64,
 }
 
-struct VerifyResult {
+pub struct VerifyResult {
     is_valid: bool,
     confidence: f64,
 }
 
-struct SearchMark {
+struct LitResult {
+    status: i32,
+    count: i32,
+    lits: [i64; 16],
+}
+
+struct AtomSet {
+    ids: [i64; 16],
+    count: i32,
+}
+
+pub struct ProofContext {
+    prop_tags: [i32; 192],
+    prop_left_ids: [i64; 192],
+    prop_right_ids: [i64; 192],
+    prop_predicate_ids: [i64; 192],
     prop_count: i64,
+
+    proof_tags: [i32; 192],
+    proof_prop_ids: [i64; 192],
+    proof_sub1_ids: [i64; 192],
+    proof_sub2_ids: [i64; 192],
+    proof_confidences: [f64; 192],
     proof_count: i64,
-    clause_count: i32,
-    clause_data_count: i32,
-}
 
-struct LitBuf {
-    data: [i64; 16],
-    len: i32,
-}
-
-struct IdBuf {
-    data: [i64; 16],
-    len: i32,
-}
-
-struct ClauseTemp {
+    clause_prop_ids: [i64; 64],
     clause_start: [i32; 64],
     clause_len: [i32; 64],
-    clause_data: [i64; 512],
+    clause_data: [i64; 256],
     clause_count: i32,
     clause_data_count: i32,
 }
 
-struct ProofContext {
-    prop_tags: [i32; 256],
-    prop_left_ids: [i64; 256],
-    prop_right_ids: [i64; 256],
-    prop_var_names: [i64; 256],
-    prop_predicate_ids: [i64; 256],
-    prop_eq_lhs_vals: [i64; 256],
-    prop_eq_rhs_vals: [i64; 256],
-    prop_count: i64,
-
-    proof_tags: [i32; 256],
-    proof_prop_ids: [i64; 256],
-    proof_sub1_ids: [i64; 256],
-    proof_sub2_ids: [i64; 256],
-    proof_sub3_ids: [i64; 256],
-    proof_labels: [i64; 256],
-    proof_confidences: [f64; 256],
-    proof_witnesses: [i64; 256],
-    proof_count: i64,
-
-    clause_start: [i32; 128],
-    clause_len: [i32; 128],
-    clause_data: [i64; 1024],
-    clause_prop_id: [i64; 128],
-    clause_parent1: [i32; 128],
-    clause_parent2: [i32; 128],
-    clause_pivot: [i64; 128],
-    clause_count: i32,
-    clause_data_count: i32,
+fn search_abs_i64(x: i64) -> i64 {
+    if x < 0 { return 0 - x }
+    return x
 }
 
-fn prop_true() -> Prop {
+fn search_min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+pub fn prop_true() -> Prop {
     return Prop { tag: 0, left_id: 0, right_id: 0, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
 }
 
-fn prop_false() -> Prop {
+pub fn prop_false() -> Prop {
     return Prop { tag: 1, left_id: 0, right_id: 0, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
 }
 
-fn prop_and(left_id: i64, right_id: i64) -> Prop {
+pub fn prop_and(left_id: i64, right_id: i64) -> Prop {
     return Prop { tag: 2, left_id: left_id, right_id: right_id, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
 }
 
-fn prop_or(left_id: i64, right_id: i64) -> Prop {
+pub fn prop_or(left_id: i64, right_id: i64) -> Prop {
     return Prop { tag: 3, left_id: left_id, right_id: right_id, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
 }
 
-fn prop_implies(left_id: i64, right_id: i64) -> Prop {
+pub fn prop_implies(left_id: i64, right_id: i64) -> Prop {
     return Prop { tag: 4, left_id: left_id, right_id: right_id, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
 }
 
-fn prop_not(inner_id: i64) -> Prop {
+pub fn prop_not(inner_id: i64) -> Prop {
     return Prop { tag: 5, left_id: inner_id, right_id: 0, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
 }
 
-fn prop_eq(lhs: i64, rhs: i64) -> Prop {
-    return Prop { tag: 8, left_id: 0, right_id: 0, var_name: 0, predicate_id: 0, eq_lhs: lhs, eq_rhs: rhs }
-}
-
-fn prop_custom(pred_id: i64) -> Prop {
+pub fn prop_custom(pred_id: i64) -> Prop {
     return Prop { tag: 9, left_id: 0, right_id: 0, var_name: 0, predicate_id: pred_id, eq_lhs: 0, eq_rhs: 0 }
 }
 
-fn prop_eq_check(a: Prop, b: Prop) -> bool {
+pub fn prop_eq_check(a: Prop, b: Prop) -> bool {
     if a.tag != b.tag { return false }
     if a.left_id != b.left_id { return false }
     if a.right_id != b.right_id { return false }
-    if a.var_name != b.var_name { return false }
     if a.predicate_id != b.predicate_id { return false }
-    if a.eq_lhs != b.eq_lhs { return false }
-    if a.eq_rhs != b.eq_rhs { return false }
     return true
 }
 
-fn litbuf_new() -> LitBuf {
-    return LitBuf { data: [0; 16], len: 0 }
+fn proof_invalid() -> Proof {
+    return Proof { tag: 0 - 1, prop_id: 0, sub1_id: 0, sub2_id: 0, sub3_id: 0, label: 0, confidence: 0.0, witness: 0 }
 }
 
-fn idbuf_new() -> IdBuf {
-    return IdBuf { data: [0; 16], len: 0 }
+fn lit_result_new() -> LitResult {
+    return LitResult { status: 0, count: 0, lits: [0; 16] }
 }
 
-fn clause_temp_new() -> ClauseTemp {
-    return ClauseTemp {
+fn atom_set_new() -> AtomSet {
+    return AtomSet { ids: [0; 16], count: 0 }
+}
+
+pub fn proof_context_new() -> ProofContext {
+    return ProofContext {
+        prop_tags: [0; 192],
+        prop_left_ids: [0; 192],
+        prop_right_ids: [0; 192],
+        prop_predicate_ids: [0; 192],
+        prop_count: 0,
+        proof_tags: [0; 192],
+        proof_prop_ids: [0; 192],
+        proof_sub1_ids: [0; 192],
+        proof_sub2_ids: [0; 192],
+        proof_confidences: [0.0; 192],
+        proof_count: 0,
+        clause_prop_ids: [0; 64],
         clause_start: [0; 64],
         clause_len: [0; 64],
-        clause_data: [0; 512],
+        clause_data: [0; 256],
         clause_count: 0,
         clause_data_count: 0,
     }
 }
 
-fn proof_context_new() -> ProofContext {
-    return ProofContext {
-        prop_tags: [0; 256],
-        prop_left_ids: [0; 256],
-        prop_right_ids: [0; 256],
-        prop_var_names: [0; 256],
-        prop_predicate_ids: [0; 256],
-        prop_eq_lhs_vals: [0; 256],
-        prop_eq_rhs_vals: [0; 256],
-        prop_count: 0,
-        proof_tags: [0; 256],
-        proof_prop_ids: [0; 256],
-        proof_sub1_ids: [0; 256],
-        proof_sub2_ids: [0; 256],
-        proof_sub3_ids: [0; 256],
-        proof_labels: [0; 256],
-        proof_confidences: [0.0; 256],
-        proof_witnesses: [0; 256],
-        proof_count: 0,
-        clause_start: [0; 128],
-        clause_len: [0; 128],
-        clause_data: [0; 1024],
-        clause_prop_id: [0; 128],
-        clause_parent1: [0; 128],
-        clause_parent2: [0; 128],
-        clause_pivot: [0; 128],
-        clause_count: 0,
-        clause_data_count: 0,
-    }
+pub fn search_reset(ctx: &!ProofContext) with Mut {
+    ctx.clause_count = 0
+    ctx.clause_data_count = 0
 }
 
-fn ctx_get_prop(ctx: &ProofContext, id: i64) -> Prop {
+pub fn ctx_get_prop(ctx: &ProofContext, id: i64) -> Prop {
     if id < 0 { return prop_false() }
     if id >= ctx.prop_count { return prop_false() }
     return Prop {
         tag: ctx.prop_tags[id],
         left_id: ctx.prop_left_ids[id],
         right_id: ctx.prop_right_ids[id],
-        var_name: ctx.prop_var_names[id],
+        var_name: 0,
         predicate_id: ctx.prop_predicate_ids[id],
-        eq_lhs: ctx.prop_eq_lhs_vals[id],
-        eq_rhs: ctx.prop_eq_rhs_vals[id],
+        eq_lhs: 0,
+        eq_rhs: 0,
     }
 }
 
@@ -209,1016 +165,691 @@ fn ctx_get_prop_mut(ctx: &!ProofContext, id: i64) -> Prop with Mut {
         tag: ctx.prop_tags[id],
         left_id: ctx.prop_left_ids[id],
         right_id: ctx.prop_right_ids[id],
-        var_name: ctx.prop_var_names[id],
+        var_name: 0,
         predicate_id: ctx.prop_predicate_ids[id],
-        eq_lhs: ctx.prop_eq_lhs_vals[id],
-        eq_rhs: ctx.prop_eq_rhs_vals[id],
+        eq_lhs: 0,
+        eq_rhs: 0,
     }
 }
 
-fn ctx_get_proof(ctx: &ProofContext, id: i64) -> Proof {
-    if id < 0 {
-        return Proof { tag: 0 - 1, prop_id: 0, sub1_id: 0, sub2_id: 0, sub3_id: 0, label: 0, confidence: 0.0, witness: 0 }
-    }
-    if id >= ctx.proof_count {
-        return Proof { tag: 0 - 1, prop_id: 0, sub1_id: 0, sub2_id: 0, sub3_id: 0, label: 0, confidence: 0.0, witness: 0 }
-    }
+pub fn ctx_get_proof(ctx: &ProofContext, id: i64) -> Proof {
+    if id < 0 { return proof_invalid() }
+    if id >= ctx.proof_count { return proof_invalid() }
     return Proof {
         tag: ctx.proof_tags[id],
         prop_id: ctx.proof_prop_ids[id],
         sub1_id: ctx.proof_sub1_ids[id],
         sub2_id: ctx.proof_sub2_ids[id],
-        sub3_id: ctx.proof_sub3_ids[id],
-        label: ctx.proof_labels[id],
+        sub3_id: 0,
+        label: 0,
         confidence: ctx.proof_confidences[id],
-        witness: ctx.proof_witnesses[id],
+        witness: 0,
     }
 }
 
 fn ctx_get_proof_mut(ctx: &!ProofContext, id: i64) -> Proof with Mut {
-    if id < 0 {
-        return Proof { tag: 0 - 1, prop_id: 0, sub1_id: 0, sub2_id: 0, sub3_id: 0, label: 0, confidence: 0.0, witness: 0 }
-    }
-    if id >= ctx.proof_count {
-        return Proof { tag: 0 - 1, prop_id: 0, sub1_id: 0, sub2_id: 0, sub3_id: 0, label: 0, confidence: 0.0, witness: 0 }
-    }
+    if id < 0 { return proof_invalid() }
+    if id >= ctx.proof_count { return proof_invalid() }
     return Proof {
         tag: ctx.proof_tags[id],
         prop_id: ctx.proof_prop_ids[id],
         sub1_id: ctx.proof_sub1_ids[id],
         sub2_id: ctx.proof_sub2_ids[id],
-        sub3_id: ctx.proof_sub3_ids[id],
-        label: ctx.proof_labels[id],
+        sub3_id: 0,
+        label: 0,
         confidence: ctx.proof_confidences[id],
-        witness: ctx.proof_witnesses[id],
+        witness: 0,
     }
 }
 
-fn ctx_prop(ctx: &!ProofContext, p: Prop) -> i64 with Mut {
+pub fn ctx_prop(ctx: &!ProofContext, p: Prop) -> i64 with Mut {
     var i: i64 = 0
     while i < ctx.prop_count {
-        let cur = ctx_get_prop_mut(ctx, i)
-        if prop_eq_check(cur, p) { return i }
+        if prop_eq_check(ctx_get_prop_mut(ctx, i), p) { return i }
         i = i + 1
     }
     let idx = ctx.prop_count
-    if idx >= 256 { return 0 - 1 }
+    if idx >= 192 { return 0 - 1 }
     ctx.prop_tags[idx] = p.tag
     ctx.prop_left_ids[idx] = p.left_id
     ctx.prop_right_ids[idx] = p.right_id
-    ctx.prop_var_names[idx] = p.var_name
     ctx.prop_predicate_ids[idx] = p.predicate_id
-    ctx.prop_eq_lhs_vals[idx] = p.eq_lhs
-    ctx.prop_eq_rhs_vals[idx] = p.eq_rhs
     ctx.prop_count = idx + 1
     return idx
 }
 
-fn ctx_push_proof(ctx: &!ProofContext, p: Proof) -> i64 with Mut {
+fn ctx_proof(ctx: &!ProofContext, tag: i32, prop_id: i64, sub1_id: i64, sub2_id: i64, confidence: f64) -> i64 with Mut {
     let idx = ctx.proof_count
-    if idx >= 256 { return 0 - 1 }
-    ctx.proof_tags[idx] = p.tag
-    ctx.proof_prop_ids[idx] = p.prop_id
-    ctx.proof_sub1_ids[idx] = p.sub1_id
-    ctx.proof_sub2_ids[idx] = p.sub2_id
-    ctx.proof_sub3_ids[idx] = p.sub3_id
-    ctx.proof_labels[idx] = p.label
-    ctx.proof_confidences[idx] = p.confidence
-    ctx.proof_witnesses[idx] = p.witness
+    if idx >= 192 { return 0 - 1 }
+    ctx.proof_tags[idx] = tag
+    ctx.proof_prop_ids[idx] = prop_id
+    ctx.proof_sub1_ids[idx] = sub1_id
+    ctx.proof_sub2_ids[idx] = sub2_id
+    ctx.proof_confidences[idx] = confidence
     ctx.proof_count = idx + 1
     return idx
 }
 
-fn assume(ctx: &!ProofContext, label: i64, prop_id: i64) -> i64 with Mut {
-    return ctx_push_proof(ctx, Proof {
-        tag: 23,
-        prop_id: prop_id,
-        sub1_id: 0 - 1,
-        sub2_id: 0 - 1,
-        sub3_id: 0 - 1,
-        label: label,
-        confidence: 1.0,
-        witness: 0,
-    })
+fn prop_matches_mut(ctx: &!ProofContext, lhs_id: i64, rhs_id: i64) -> bool with Mut {
+    if lhs_id == rhs_id { return true }
+    return prop_eq_check(ctx_get_prop_mut(ctx, lhs_id), ctx_get_prop_mut(ctx, rhs_id))
 }
 
-fn trusted(ctx: &!ProofContext, label: i64, prop_id: i64, confidence: f64) -> i64 with Mut {
-    return ctx_push_proof(ctx, Proof {
-        tag: 22,
-        prop_id: prop_id,
-        sub1_id: 0 - 1,
-        sub2_id: 0 - 1,
-        sub3_id: 0 - 1,
-        label: label,
-        confidence: confidence,
-        witness: 0,
-    })
-}
-
-fn and_intro(ctx: &!ProofContext, left_proof: i64, right_proof: i64, goal: i64) -> i64 with Mut {
-    return ctx_push_proof(ctx, Proof {
-        tag: 1,
-        prop_id: goal,
-        sub1_id: left_proof,
-        sub2_id: right_proof,
-        sub3_id: 0 - 1,
-        label: 1000 + ctx.proof_count,
-        confidence: 1.0,
-        witness: 0,
-    })
-}
-
-fn or_intro_left(ctx: &!ProofContext, proof_id: i64, goal: i64) -> i64 with Mut {
-    return ctx_push_proof(ctx, Proof {
-        tag: 4,
-        prop_id: goal,
-        sub1_id: proof_id,
-        sub2_id: 0 - 1,
-        sub3_id: 0 - 1,
-        label: 2000 + ctx.proof_count,
-        confidence: 1.0,
-        witness: 0,
-    })
-}
-
-fn or_intro_right(ctx: &!ProofContext, proof_id: i64, goal: i64) -> i64 with Mut {
-    return ctx_push_proof(ctx, Proof {
-        tag: 5,
-        prop_id: goal,
-        sub1_id: proof_id,
-        sub2_id: 0 - 1,
-        sub3_id: 0 - 1,
-        label: 3000 + ctx.proof_count,
-        confidence: 1.0,
-        witness: 0,
-    })
-}
-
-fn modus_ponens(ctx: &!ProofContext, impl_proof: i64, arg_proof: i64, goal: i64) -> i64 with Mut {
-    return ctx_push_proof(ctx, Proof {
-        tag: 8,
-        prop_id: goal,
-        sub1_id: impl_proof,
-        sub2_id: arg_proof,
-        sub3_id: 0 - 1,
-        label: 4000 + ctx.proof_count,
-        confidence: 1.0,
-        witness: 0,
-    })
-}
-
-fn verify(ctx: &ProofContext, proof_id: i64) -> VerifyResult {
-    if proof_id < 0 { return VerifyResult { is_valid: false, confidence: 0.0 } }
-    if proof_id >= ctx.proof_count { return VerifyResult { is_valid: false, confidence: 0.0 } }
-    let proof = ctx_get_proof(ctx, proof_id)
-    return VerifyResult { is_valid: proof.tag >= 0, confidence: proof.confidence }
-}
-
-fn infer(ctx: &ProofContext, proof_id: i64) -> i64 {
-    let proof = ctx_get_proof(ctx, proof_id)
-    return proof.prop_id
-}
-
-fn ctx_mark(ctx: &!ProofContext) -> SearchMark with Mut {
-    return SearchMark {
-        prop_count: ctx.prop_count,
-        proof_count: ctx.proof_count,
-        clause_count: ctx.clause_count,
-        clause_data_count: ctx.clause_data_count,
-    }
-}
-
-fn ctx_restore(ctx: &!ProofContext, mark: SearchMark) with Mut {
-    ctx.prop_count = mark.prop_count
-    ctx.proof_count = mark.proof_count
-    ctx.clause_count = mark.clause_count
-    ctx.clause_data_count = mark.clause_data_count
-}
-
-fn prop_matches(ctx: &!ProofContext, lhs_id: i64, rhs_id: i64) -> bool with Mut {
-    let lhs = ctx_get_prop_mut(ctx, lhs_id)
-    let rhs = ctx_get_prop_mut(ctx, rhs_id)
-    return prop_eq_check(lhs, rhs)
-}
-
-fn proof_for_goal(ctx: &!ProofContext, goal: i64) -> i64 with Mut {
+fn proof_for_goal_mut(ctx: &!ProofContext, goal: i64) -> i64 with Mut {
     var i: i64 = 0
+    var found: i64 = 0 - 1
     while i < ctx.proof_count {
-        let proof = ctx_get_proof_mut(ctx, i)
-        if prop_matches(ctx, proof.prop_id, goal) { return i }
-        i = i + 1
-    }
-    return 0 - 1
-}
-
-fn search_abs_i64(x: i64) -> i64 {
-    if x < 0 { 0 - x } else { x }
-}
-
-fn lit_make(prop_id: i64, neg: bool) -> i64 {
-    let base = prop_id + 1
-    if neg { return 0 - base }
-    return base
-}
-
-fn lit_prop_id(lit: i64) -> i64 {
-    return search_abs_i64(lit) - 1
-}
-
-fn litbuf_sort(buf: &!LitBuf) with Mut {
-    var i: i32 = 0
-    while i < buf.len {
-        var j: i32 = i + 1
-        while j < buf.len {
-            if buf.data[j] < buf.data[i] {
-                let tmp = buf.data[i]
-                buf.data[i] = buf.data[j]
-                buf.data[j] = tmp
-            }
-            j = j + 1
+        let prf = ctx_get_proof_mut(ctx, i)
+        if prf.tag >= 0 {
+            if prop_matches_mut(ctx, prf.prop_id, goal) { found = i }
         }
         i = i + 1
     }
+    return found
 }
 
-fn litbuf_normalize(buf: &!LitBuf) -> i32 with Mut {
-    litbuf_sort(buf)
-    var out: i32 = 0
-    var i: i32 = 0
-    while i < buf.len {
-        let lit = buf.data[i]
-        if out > 0 {
-            if buf.data[out - 1] == lit {
-                i = i + 1
-                continue
-            }
-            if buf.data[out - 1] == 0 - lit { return 0 - 1 }
-        }
-        buf.data[out] = lit
-        out = out + 1
-        i = i + 1
-    }
-    buf.len = out
-    return out
+pub fn assume(ctx: &!ProofContext, name: i64, prop_id: i64) -> i64 with Mut {
+    return ctx_proof(ctx, 23, prop_id, name, 0, 1.0)
 }
 
-fn litbuf_contains(buf: &LitBuf, lit: i64) -> bool with Mut {
-    var i: i32 = 0
-    while i < buf.len {
-        if buf.data[i] == lit { return true }
-        i = i + 1
-    }
+fn trusted(ctx: &!ProofContext, label: i64, prop_id: i64) -> i64 with Mut {
+    return ctx_proof(ctx, 22, prop_id, label, 0, 1.0)
+}
+
+pub fn and_intro(ctx: &!ProofContext, p_id: i64, q_id: i64, result_prop_id: i64) -> i64 with Mut {
+    let p = ctx_get_proof_mut(ctx, p_id)
+    let q = ctx_get_proof_mut(ctx, q_id)
+    return ctx_proof(ctx, 1, result_prop_id, p_id, q_id, search_min_f64(p.confidence, q.confidence))
+}
+
+fn or_intro_left(ctx: &!ProofContext, p_id: i64, result_prop_id: i64) -> i64 with Mut {
+    return ctx_proof(ctx, 4, result_prop_id, p_id, 0, ctx_get_proof_mut(ctx, p_id).confidence)
+}
+
+fn or_intro_right(ctx: &!ProofContext, q_id: i64, result_prop_id: i64) -> i64 with Mut {
+    return ctx_proof(ctx, 5, result_prop_id, q_id, 0, ctx_get_proof_mut(ctx, q_id).confidence)
+}
+
+fn impl_elim(ctx: &!ProofContext, impl_id: i64, arg_id: i64, result_prop_id: i64) -> i64 with Mut {
+    let p1 = ctx_get_proof_mut(ctx, impl_id)
+    let p2 = ctx_get_proof_mut(ctx, arg_id)
+    return ctx_proof(ctx, 8, result_prop_id, impl_id, arg_id, search_min_f64(p1.confidence, p2.confidence))
+}
+
+pub fn verify(ctx: &ProofContext, proof_id: i64) -> VerifyResult {
+    let p = ctx_get_proof(ctx, proof_id)
+    if p.tag < 0 { return VerifyResult { is_valid: false, confidence: 0.0 } }
+    return VerifyResult { is_valid: true, confidence: p.confidence }
+}
+
+fn prop_is_atom_mut(ctx: &!ProofContext, prop_id: i64) -> bool with Mut {
+    let p = ctx_get_prop_mut(ctx, prop_id)
+    if p.tag == 0 { return true }
+    if p.tag == 1 { return true }
+    if p.tag == 9 { return true }
     return false
 }
 
-fn litbuf_push(buf: &!LitBuf, lit: i64) -> bool with Mut {
-    if buf.len >= 16 { return false }
-    buf.data[buf.len] = lit
-    buf.len = buf.len + 1
-    return true
-}
-
-fn litbuf_copy(dst: &!LitBuf, src: &LitBuf) with Mut {
-    dst.len = src.len
-    var i: i32 = 0
-    while i < src.len {
-        dst.data[i] = src.data[i]
-        i = i + 1
-    }
-}
-
-fn idbuf_push_unique(buf: &!IdBuf, id: i64) -> bool with Mut {
-    var i: i32 = 0
-    while i < buf.len {
-        if buf.data[i] == id { return true }
-        i = i + 1
-    }
-    if buf.len >= 16 { return false }
-    buf.data[buf.len] = id
-    buf.len = buf.len + 1
-    return true
-}
-
-fn clause_temp_clear(temp: &!ClauseTemp) with Mut {
-    temp.clause_count = 0
-    temp.clause_data_count = 0
-}
-
-fn clause_temp_add(temp: &!ClauseTemp, lits: &LitBuf) -> bool with Mut {
-    if temp.clause_count >= 64 { return false }
-    if temp.clause_data_count + lits.len > 512 { return false }
-    let idx = temp.clause_count
-    temp.clause_start[idx] = temp.clause_data_count
-    temp.clause_len[idx] = lits.len
-    var i: i32 = 0
-    while i < lits.len {
-        temp.clause_data[temp.clause_data_count + i] = lits.data[i]
-        i = i + 1
-    }
-    temp.clause_count = idx + 1
-    temp.clause_data_count = temp.clause_data_count + lits.len
-    return true
-}
-
-fn clause_temp_get(temp: &ClauseTemp, clause_idx: i32, out: &!LitBuf) with Mut {
-    out.len = 0
-    if clause_idx < 0 { return }
-    if clause_idx >= temp.clause_count { return }
-    let start = temp.clause_start[clause_idx]
-    let len = temp.clause_len[clause_idx]
-    var i: i32 = 0
-    while i < len {
-        out.data[i] = temp.clause_data[start + i]
-        i = i + 1
-    }
-    out.len = len
-}
-
-fn clause_temp_copy(dst: &!ClauseTemp, src: &ClauseTemp) with Mut {
-    dst.clause_count = src.clause_count
-    dst.clause_data_count = src.clause_data_count
-    var i: i32 = 0
-    while i < src.clause_count {
-        dst.clause_start[i] = src.clause_start[i]
-        dst.clause_len[i] = src.clause_len[i]
-        i = i + 1
-    }
-    i = 0
-    while i < src.clause_data_count {
-        dst.clause_data[i] = src.clause_data[i]
-        i = i + 1
-    }
-}
-
-fn clause_temp_is_true(temp: &ClauseTemp) -> bool {
-    return temp.clause_count == 0
-}
-
-fn clause_temp_is_false(temp: &ClauseTemp) -> bool {
-    if temp.clause_count != 1 { return false }
-    return temp.clause_len[0] == 0
-}
-
-fn prop_to_literal(ctx: &!ProofContext, prop_id: i64) -> i64 with Mut {
+fn lit_from_prop_mut(ctx: &!ProofContext, prop_id: i64) -> i64 with Mut {
     let p = ctx_get_prop_mut(ctx, prop_id)
-    if p.tag == 9 { return lit_make(prop_id, false) }
     if p.tag == 5 {
-        let inner = ctx_get_prop_mut(ctx, p.left_id)
-        if inner.tag == 9 { return lit_make(p.left_id, true) }
+        if prop_is_atom_mut(ctx, p.left_id) { return 0 - (p.left_id + 1) }
+        return 0
     }
+    if prop_is_atom_mut(ctx, prop_id) { return prop_id + 1 }
     return 0
 }
 
 fn lit_to_prop(ctx: &!ProofContext, lit: i64) -> i64 with Mut {
-    let base_id = lit_prop_id(lit)
-    if lit < 0 { return ctx_prop(ctx, prop_not(base_id)) }
-    return base_id
+    if lit > 0 { return lit - 1 }
+    return ctx_prop(ctx, prop_not(search_abs_i64(lit) - 1))
 }
 
-fn clause_prop_from_buf(ctx: &!ProofContext, lits: &LitBuf) -> i64 with Mut {
-    if lits.len == 0 { return ctx_prop(ctx, prop_false()) }
-    let first = lit_to_prop(ctx, lits.data[0])
-    var result = first
+fn clause_sort_owned(lits_in: [i64; 16], n_in: i32) -> LitResult with Mut {
+    var out = LitResult { status: 0, count: n_in, lits: lits_in }
     var i: i32 = 1
-    while i < lits.len {
-        let next = lit_to_prop(ctx, lits.data[i])
-        result = ctx_prop(ctx, prop_or(result, next))
+    while i < out.count {
+        let key = out.lits[i]
+        var j = i - 1
+        while j >= 0 {
+            if out.lits[j] <= key {
+                j = 0 - 1
+            } else {
+                out.lits[j + 1] = out.lits[j]
+                j = j - 1
+            }
+        }
+        out.lits[j + 1] = key
         i = i + 1
     }
-    return result
-}
-
-fn cnf_prop_from_temp(ctx: &!ProofContext, temp: &ClauseTemp) -> i64 with Mut {
-    if temp.clause_count == 0 { return ctx_prop(ctx, prop_true()) }
-    var clause_lits = litbuf_new()
-    clause_temp_get(temp, 0, &! clause_lits)
-    var result = clause_prop_from_buf(ctx, &clause_lits)
-    var i: i32 = 1
-    while i < temp.clause_count {
-        clause_temp_get(temp, i, &! clause_lits)
-        let next = clause_prop_from_buf(ctx, &clause_lits)
-        result = ctx_prop(ctx, prop_and(result, next))
-        i = i + 1
-    }
-    return result
-}
-
-fn clause_merge_and(left: &ClauseTemp, right: &ClauseTemp, out: &!ClauseTemp) -> bool with Mut {
-    clause_temp_clear(out)
-    if clause_temp_is_false(left) || clause_temp_is_false(right) {
-        let empty = litbuf_new()
-        return clause_temp_add(out, &empty)
-    }
-    if clause_temp_is_true(left) {
-        clause_temp_copy(out, right)
-        return true
-    }
-    if clause_temp_is_true(right) {
-        clause_temp_copy(out, left)
-        return true
-    }
-    var tmp = litbuf_new()
-    var i: i32 = 0
-    while i < left.clause_count {
-        clause_temp_get(left, i, &! tmp)
-        if clause_temp_add(out, &tmp) == false { return false }
-        i = i + 1
-    }
+    var n: i32 = 0
     i = 0
-    while i < right.clause_count {
-        clause_temp_get(right, i, &! tmp)
-        if clause_temp_add(out, &tmp) == false { return false }
-        i = i + 1
-    }
-    return true
-}
-
-fn clause_merge_or(left: &ClauseTemp, right: &ClauseTemp, out: &!ClauseTemp) -> bool with Mut {
-    clause_temp_clear(out)
-    if clause_temp_is_true(left) || clause_temp_is_true(right) { return true }
-    if clause_temp_is_false(left) {
-        clause_temp_copy(out, right)
-        return true
-    }
-    if clause_temp_is_false(right) {
-        clause_temp_copy(out, left)
-        return true
-    }
-
-    var buf1 = litbuf_new()
-    var buf2 = litbuf_new()
-    var merged = litbuf_new()
-    var i: i32 = 0
-    while i < left.clause_count {
-        clause_temp_get(left, i, &! buf1)
-        var j: i32 = 0
-        while j < right.clause_count {
-            clause_temp_get(right, j, &! buf2)
-            merged.len = 0
+    while i < out.count {
+        let lit = out.lits[i]
+        var dup = false
+        if n > 0 {
+            if out.lits[n - 1] == lit { dup = true }
+        }
+        if dup == false {
             var k: i32 = 0
-            while k < buf1.len {
-                if litbuf_push(&! merged, buf1.data[k]) == false { return false }
+            while k < n {
+                if out.lits[k] == 0 - lit { return LitResult { status: 0 - 1, count: 0, lits: [0; 16] } }
                 k = k + 1
             }
-            k = 0
-            while k < buf2.len {
-                if litbuf_push(&! merged, buf2.data[k]) == false { return false }
-                k = k + 1
-            }
-            let norm = litbuf_normalize(&! merged)
-            if norm >= 0 {
-                if clause_temp_add(out, &merged) == false { return false }
-            }
-            j = j + 1
+            out.lits[n] = lit
+            n = n + 1
         }
+        i = i + 1
+    }
+    out.count = n
+    return out
+}
+
+fn clause_prop_from_lits(ctx: &!ProofContext, lits: &[i64; 16], n: i32) -> i64 with Mut {
+    if n <= 0 { return ctx_prop(ctx, prop_false()) }
+    var cur = lit_to_prop(ctx, lits[0])
+    var i: i32 = 1
+    while i < n {
+        cur = ctx_prop(ctx, prop_or(cur, lit_to_prop(ctx, lits[i])))
+        i = i + 1
+    }
+    return cur
+}
+
+fn prop_from_lits(ctx: &!ProofContext, lits: &[i64; 16], n: i32) -> i64 with Mut {
+    if n <= 0 { return ctx_prop(ctx, prop_false()) }
+    var cur = lit_to_prop(ctx, lits[0])
+    var i: i32 = 1
+    while i < n {
+        cur = ctx_prop(ctx, prop_or(cur, lit_to_prop(ctx, lits[i])))
+        i = i + 1
+    }
+    return cur
+}
+
+fn clause_equal_mut(ctx: &!ProofContext, idx: i32, lits: &[i64; 16], n: i32) -> bool with Mut {
+    if ctx.clause_len[idx] != n { return false }
+    var i: i32 = 0
+    while i < n {
+        if ctx.clause_data[ctx.clause_start[idx] + i] != lits[i] { return false }
         i = i + 1
     }
     return true
 }
 
-fn cnf_from_prop(ctx: &!ProofContext, prop_id: i64, out: &!ClauseTemp) -> bool with Mut, Div {
-    let lit = prop_to_literal(ctx, prop_id)
-    if lit != 0 {
-        clause_temp_clear(out)
-        var one = litbuf_new()
-        if litbuf_push(&! one, lit) == false { return false }
-        return clause_temp_add(out, &one)
-    }
-
-    let p = ctx_get_prop_mut(ctx, prop_id)
-    if p.tag == 0 {
-        clause_temp_clear(out)
-        return true
-    }
-    if p.tag == 1 {
-        clause_temp_clear(out)
-        let empty = litbuf_new()
-        return clause_temp_add(out, &empty)
-    }
-    if p.tag == 2 {
-        var left = clause_temp_new()
-        var right = clause_temp_new()
-        if cnf_from_prop(ctx, p.left_id, &! left) == false { return false }
-        if cnf_from_prop(ctx, p.right_id, &! right) == false { return false }
-        return clause_merge_and(&left, &right, out)
-    }
-    if p.tag == 3 {
-        var left = clause_temp_new()
-        var right = clause_temp_new()
-        if cnf_from_prop(ctx, p.left_id, &! left) == false { return false }
-        if cnf_from_prop(ctx, p.right_id, &! right) == false { return false }
-        return clause_merge_or(&left, &right, out)
-    }
-    if p.tag == 4 {
-        let not_left = ctx_prop(ctx, prop_not(p.left_id))
-        let disj = ctx_prop(ctx, prop_or(not_left, p.right_id))
-        return cnf_from_prop(ctx, disj, out)
-    }
-    if p.tag == 5 {
-        let inner = ctx_get_prop_mut(ctx, p.left_id)
-        if inner.tag == 0 {
-            clause_temp_clear(out)
-            let empty = litbuf_new()
-            return clause_temp_add(out, &empty)
-        }
-        if inner.tag == 1 {
-            clause_temp_clear(out)
-            return true
-        }
-        if inner.tag == 5 {
-            return cnf_from_prop(ctx, inner.left_id, out)
-        }
-        if inner.tag == 2 {
-            let nl = ctx_prop(ctx, prop_not(inner.left_id))
-            let nr = ctx_prop(ctx, prop_not(inner.right_id))
-            let disj = ctx_prop(ctx, prop_or(nl, nr))
-            return cnf_from_prop(ctx, disj, out)
-        }
-        if inner.tag == 3 {
-            let nl = ctx_prop(ctx, prop_not(inner.left_id))
-            let nr = ctx_prop(ctx, prop_not(inner.right_id))
-            let conj = ctx_prop(ctx, prop_and(nl, nr))
-            return cnf_from_prop(ctx, conj, out)
-        }
-        if inner.tag == 4 {
-            let nr = ctx_prop(ctx, prop_not(inner.right_id))
-            let conj = ctx_prop(ctx, prop_and(inner.left_id, nr))
-            return cnf_from_prop(ctx, conj, out)
-        }
-    }
-    return false
-}
-
-fn to_cnf(ctx: &!ProofContext, prop_id: i64) -> i64 with Mut, Div {
-    var temp = clause_temp_new()
-    if cnf_from_prop(ctx, prop_id, &! temp) == false { return 0 - 1 }
-    return cnf_prop_from_temp(ctx, &temp)
-}
-
-fn clause_collect_literals(ctx: &!ProofContext, prop_id: i64, out: &!LitBuf) -> bool with Mut, Div {
-    let p = ctx_get_prop_mut(ctx, prop_id)
-    if p.tag == 3 {
-        if clause_collect_literals(ctx, p.left_id, out) == false { return false }
-        return clause_collect_literals(ctx, p.right_id, out)
-    }
-    if p.tag == 1 { return true }
-    let lit = prop_to_literal(ctx, prop_id)
-    if lit == 0 { return false }
-    return litbuf_push(out, lit)
-}
-
-fn clause_from_prop(ctx: &!ProofContext, prop_id: i64, out: &!LitBuf) -> bool with Mut, Div {
-    out.len = 0
-    if clause_collect_literals(ctx, prop_id, out) == false { return false }
-    let norm = litbuf_normalize(out)
-    if norm < 0 { return false }
-    return true
-}
-
-fn simple_clause_from_prop(ctx: &!ProofContext, prop_id: i64, out: &!LitBuf) -> bool with Mut {
-    let p = ctx_get_prop_mut(ctx, prop_id)
-    if p.tag == 1 { return true }
-    if p.tag == 9 {
-        return litbuf_push(out, lit_make(prop_id, false))
-    }
-    if p.tag == 5 {
-        let inner = ctx_get_prop_mut(ctx, p.left_id)
-        if inner.tag != 9 { return false }
-        return litbuf_push(out, lit_make(p.left_id, true))
-    }
-    if p.tag == 3 {
-        if simple_clause_from_prop(ctx, p.left_id, out) == false { return false }
-        return simple_clause_from_prop(ctx, p.right_id, out)
-    }
-    return false
-}
-
-fn clause_same(ctx: &!ProofContext, clause_idx: i32, lits: &LitBuf) -> bool with Mut {
-    if clause_idx < 0 { return false }
-    if clause_idx >= ctx.clause_count { return false }
-    if ctx.clause_len[clause_idx] != lits.len { return false }
-    let start = ctx.clause_start[clause_idx]
+fn clause_add(ctx: &!ProofContext, lits_in: &[i64; 16], n_in: i32) -> i32 with Mut {
+    var tmp: [i64; 16] = [0; 16]
     var i: i32 = 0
-    while i < lits.len {
-        if ctx.clause_data[start + i] != lits.data[i] { return false }
+    while i < n_in {
+        tmp[i] = lits_in[i]
         i = i + 1
     }
-    return true
-}
-
-fn clause_get_db(ctx: &!ProofContext, clause_idx: i32, out: &!LitBuf) with Mut {
-    out.len = 0
-    if clause_idx < 0 { return }
-    if clause_idx >= ctx.clause_count { return }
-    let start = ctx.clause_start[clause_idx]
-    let len = ctx.clause_len[clause_idx]
-    var i: i32 = 0
-    while i < len {
-        out.data[i] = ctx.clause_data[start + i]
-        i = i + 1
-    }
-    out.len = len
-}
-
-fn clause_add_db(ctx: &!ProofContext, lits: &LitBuf, proof_id: i64, parent1: i32, parent2: i32, pivot: i64) -> i32 with Mut {
-    var tmp = litbuf_new()
-    litbuf_copy(&! tmp, lits)
-    let norm = litbuf_normalize(&! tmp)
-    if norm < 0 { return 0 - 1 }
-
-    var i: i32 = 0
-    while i < ctx.clause_count {
-        if clause_same(ctx, i, &tmp) { return i }
-        i = i + 1
-    }
-
-    if ctx.clause_count >= 128 { return 0 - 1 }
-    if ctx.clause_data_count + tmp.len > 1024 { return 0 - 1 }
-    let idx = ctx.clause_count
-    ctx.clause_start[idx] = ctx.clause_data_count
-    ctx.clause_len[idx] = tmp.len
+    let sorted = clause_sort_owned(tmp, n_in)
+    if sorted.status < 0 { return 0 - 1 }
+    var canon: [i64; 16] = [0; 16]
     i = 0
-    while i < tmp.len {
-        ctx.clause_data[ctx.clause_data_count + i] = tmp.data[i]
+    while i < sorted.count {
+        canon[i] = sorted.lits[i]
         i = i + 1
     }
-    let clause_prop = clause_prop_from_buf(ctx, &tmp)
-    var real_proof = proof_id
-    if real_proof < 0 {
-        real_proof = trusted(ctx, 9000 + ctx.proof_count, clause_prop, 1.0)
+    i = 0
+    while i < ctx.clause_count {
+        if clause_equal_mut(ctx, i, &canon, sorted.count) { return i }
+        i = i + 1
     }
-    ctx.clause_prop_id[idx] = clause_prop
-    ctx.clause_parent1[idx] = parent1
-    ctx.clause_parent2[idx] = parent2
-    ctx.clause_pivot[idx] = pivot
+    if ctx.clause_count >= 64 { return 0 - 1 }
+    if ctx.clause_data_count + sorted.count > 256 { return 0 - 1 }
+    let idx = ctx.clause_count
+    let start = ctx.clause_data_count
+    ctx.clause_prop_ids[idx] = clause_prop_from_lits(ctx, &canon, sorted.count)
+    ctx.clause_start[idx] = start
+    ctx.clause_len[idx] = sorted.count
+    i = 0
+    while i < sorted.count {
+        ctx.clause_data[start + i] = canon[i]
+        i = i + 1
+    }
     ctx.clause_count = idx + 1
-    ctx.clause_data_count = ctx.clause_data_count + tmp.len
+    ctx.clause_data_count = start + sorted.count
     return idx
 }
 
-fn resolve(ctx: &!ProofContext, clause1: i64, clause2: i64, var: i64) -> i64 with Mut, Div {
-    var c1 = litbuf_new()
-    var c2 = litbuf_new()
-    if clause_from_prop(ctx, clause1, &! c1) == false { return 0 - 1 }
-    if clause_from_prop(ctx, clause2, &! c2) == false { return 0 - 1 }
-
-    let pos = lit_make(var, false)
-    let neg = lit_make(var, true)
-    var drop1 = 0
-    var drop2 = 0
-    if litbuf_contains(&c1, pos) && litbuf_contains(&c2, neg) {
-        drop1 = pos
-        drop2 = neg
-    } else {
-        if litbuf_contains(&c1, neg) && litbuf_contains(&c2, pos) {
-            drop1 = neg
-            drop2 = pos
-        } else {
-            return 0 - 1
-        }
-    }
-
-    var out = litbuf_new()
-    var i: i32 = 0
-    while i < c1.len {
-        if c1.data[i] != drop1 {
-            if litbuf_push(&! out, c1.data[i]) == false { return 0 - 1 }
-        }
-        i = i + 1
-    }
-    i = 0
-    while i < c2.len {
-        if c2.data[i] != drop2 {
-            if litbuf_push(&! out, c2.data[i]) == false { return 0 - 1 }
-        }
-        i = i + 1
-    }
-    let norm = litbuf_normalize(&! out)
-    if norm < 0 { return 0 - 1 }
-    let result_prop = clause_prop_from_buf(ctx, &out)
-    let proof_id = trusted(ctx, 10000 + ctx.proof_count, result_prop, 1.0)
-    clause_add_db(ctx, &out, proof_id, 0 - 1, 0 - 1, var)
-    return result_prop
-}
-
-fn load_resolution_problem(ctx: &!ProofContext, goal: i64) -> bool with Mut, Div {
-    ctx.clause_count = 0
-    ctx.clause_data_count = 0
-    if goal < 0 - 2 { return false }
-
-    var i: i64 = 0
-    while i < ctx.proof_count {
-        let prop_id = ctx.proof_prop_ids[i]
-        var buf = litbuf_new()
-        if simple_clause_from_prop(ctx, prop_id, &! buf) {
-            let norm = litbuf_normalize(&! buf)
-            if norm >= 0 {
-                clause_add_db(ctx, &buf, i, 0 - 1, 0 - 1, 0)
-            }
-        } else {
-            var temp = clause_temp_new()
-            if cnf_from_prop(ctx, prop_id, &! temp) == false { return false }
-            var clause_idx: i32 = 0
-            while clause_idx < temp.clause_count {
-                clause_temp_get(&temp, clause_idx, &! buf)
-                clause_add_db(ctx, &buf, i, 0 - 1, 0 - 1, 0)
-                clause_idx = clause_idx + 1
-            }
-        }
-        i = i + 1
-    }
-    return true
-}
-
-fn clause_db_has_empty(ctx: &!ProofContext) -> bool with Mut {
-    var i: i32 = 0
-    while i < ctx.clause_count {
-        if ctx.clause_len[i] == 0 { return true }
-        i = i + 1
-    }
-    return false
-}
-
-fn resolve_indices(ctx: &!ProofContext, c1_idx: i32, c2_idx: i32) -> i32 with Mut, Div {
-    var c1 = litbuf_new()
-    var c2 = litbuf_new()
-    clause_get_db(ctx, c1_idx, &! c1)
-    clause_get_db(ctx, c2_idx, &! c2)
-    var i: i32 = 0
-    while i < c1.len {
-        let pivot = c1.data[i]
-        if litbuf_contains(&c2, 0 - pivot) {
-            var out = litbuf_new()
-            var j: i32 = 0
-            while j < c1.len {
-                if c1.data[j] != pivot {
-                    if litbuf_push(&! out, c1.data[j]) == false { return 0 - 1 }
-                }
-                j = j + 1
-            }
-            j = 0
-            while j < c2.len {
-                if c2.data[j] != 0 - pivot {
-                    if litbuf_push(&! out, c2.data[j]) == false { return 0 - 1 }
-                }
-                j = j + 1
-            }
-            let norm = litbuf_normalize(&! out)
-            if norm >= 0 {
-                let result_prop = clause_prop_from_buf(ctx, &out)
-                let proof_id = trusted(ctx, 11000 + ctx.proof_count, result_prop, 1.0)
-                let new_idx = clause_add_db(ctx, &out, proof_id, c1_idx, c2_idx, lit_prop_id(pivot))
-                if new_idx >= 0 { return new_idx }
-            }
-        }
-        i = i + 1
-    }
-    return 0 - 1
-}
-
-fn saturate(ctx: &!ProofContext, max_steps: i64) -> bool with Mut, Div {
-    if clause_db_has_empty(ctx) { return true }
-    var steps: i64 = 0
-    while steps < max_steps {
-        let limit = ctx.clause_count
-        var grew = false
+fn clause_collect(ctx: &!ProofContext, prop_id: i64) -> LitResult with Mut {
+    let p = ctx_get_prop_mut(ctx, prop_id)
+    if p.tag == 0 { return LitResult { status: 1, count: 0, lits: [0; 16] } }
+    if p.tag == 1 { return lit_result_new() }
+    if p.tag == 3 {
+        let left = clause_collect(ctx, p.left_id)
+        let right = clause_collect(ctx, p.right_id)
+        if left.status < 0 { return left }
+        if right.status < 0 { return right }
+        if left.status == 1 { return left }
+        if right.status == 1 { return right }
+        var merged = lit_result_new()
         var i: i32 = 0
-        while i < limit {
-            var j: i32 = i + 1
-            while j < limit {
-                let before = ctx.clause_count
-                let new_idx = resolve_indices(ctx, i, j)
-                if new_idx >= 0 && ctx.clause_count > before { grew = true }
-                if clause_db_has_empty(ctx) { return true }
+        while i < left.count {
+            merged.lits[merged.count] = left.lits[i]
+            merged.count = merged.count + 1
+            i = i + 1
+        }
+        i = 0
+        while i < right.count {
+            merged.lits[merged.count] = right.lits[i]
+            merged.count = merged.count + 1
+            i = i + 1
+        }
+        return merged
+    }
+    let lit = lit_from_prop_mut(ctx, prop_id)
+    if lit == 0 { return LitResult { status: 0 - 1, count: 0, lits: [0; 16] } }
+    var one = lit_result_new()
+    one.count = 1
+    one.lits[0] = lit
+    return one
+}
+
+pub fn to_cnf(ctx: &!ProofContext, prop_id: i64) -> i64 with Mut {
+    let p = ctx_get_prop_mut(ctx, prop_id)
+    if p.tag == 2 {
+        to_cnf(ctx, p.left_id)
+        to_cnf(ctx, p.right_id)
+        return prop_id
+    }
+    if p.tag == 4 {
+        let rew = ctx_prop(ctx, prop_or(ctx_prop(ctx, prop_not(p.left_id)), p.right_id))
+        return to_cnf(ctx, rew)
+    }
+    if p.tag == 5 {
+        let inner = ctx_get_prop_mut(ctx, p.left_id)
+        if inner.tag == 5 { return to_cnf(ctx, inner.left_id) }
+        if inner.tag == 2 {
+            let rew = ctx_prop(ctx, prop_or(ctx_prop(ctx, prop_not(inner.left_id)), ctx_prop(ctx, prop_not(inner.right_id))))
+            return to_cnf(ctx, rew)
+        }
+        if inner.tag == 3 {
+            let rew = ctx_prop(ctx, prop_and(ctx_prop(ctx, prop_not(inner.left_id)), ctx_prop(ctx, prop_not(inner.right_id))))
+            return to_cnf(ctx, rew)
+        }
+    }
+    let clause = clause_collect(ctx, prop_id)
+    if clause.status == 0 {
+        var lits: [i64; 16] = [0; 16]
+        var i: i32 = 0
+        while i < clause.count {
+            lits[i] = clause.lits[i]
+            i = i + 1
+        }
+        clause_add(ctx, &lits, clause.count)
+    }
+    return prop_id
+}
+
+pub fn resolve(ctx: &!ProofContext, clause1: i64, clause2: i64, var: i64) -> i64 with Mut {
+    let p1 = ctx_get_prop_mut(ctx, clause1)
+    let p2 = ctx_get_prop_mut(ctx, clause2)
+    let neg_var = ctx_prop(ctx, prop_not(var))
+    if prop_matches_mut(ctx, clause1, var) {
+        if prop_matches_mut(ctx, clause2, neg_var) { return ctx_prop(ctx, prop_false()) }
+        if p2.tag == 3 {
+            if prop_matches_mut(ctx, p2.left_id, neg_var) { return p2.right_id }
+            if prop_matches_mut(ctx, p2.right_id, neg_var) { return p2.left_id }
+        }
+    }
+    if prop_matches_mut(ctx, clause2, var) {
+        if prop_matches_mut(ctx, clause1, neg_var) { return ctx_prop(ctx, prop_false()) }
+        if p1.tag == 3 {
+            if prop_matches_mut(ctx, p1.left_id, neg_var) { return p1.right_id }
+            if prop_matches_mut(ctx, p1.right_id, neg_var) { return p1.left_id }
+        }
+    }
+    if prop_matches_mut(ctx, clause1, neg_var) {
+        if prop_matches_mut(ctx, clause2, var) { return ctx_prop(ctx, prop_false()) }
+        if p2.tag == 3 {
+            if prop_matches_mut(ctx, p2.left_id, var) { return p2.right_id }
+            if prop_matches_mut(ctx, p2.right_id, var) { return p2.left_id }
+        }
+    }
+    if prop_matches_mut(ctx, clause2, neg_var) {
+        if prop_matches_mut(ctx, clause1, var) { return ctx_prop(ctx, prop_false()) }
+        if p1.tag == 3 {
+            if prop_matches_mut(ctx, p1.left_id, var) { return p1.right_id }
+            if prop_matches_mut(ctx, p1.right_id, var) { return p1.left_id }
+        }
+    }
+    let c1 = clause_collect(ctx, clause1)
+    let c2 = clause_collect(ctx, clause2)
+    if c1.status != 0 { return 0 - 1 }
+    if c2.status != 0 { return 0 - 1 }
+    let hint_pos = var + 1
+    let hint_neg = 0 - hint_pos
+    var left_remove = 0
+    var right_remove = 0
+    var i: i32 = 0
+    while i < c1.count {
+        let lit = c1.lits[i]
+        if lit == hint_pos {
+            var j: i32 = 0
+            while j < c2.count {
+                if c2.lits[j] == hint_neg {
+                    left_remove = lit
+                    right_remove = hint_neg
+                }
+                j = j + 1
+            }
+        }
+        if lit == hint_neg {
+            var j: i32 = 0
+            while j < c2.count {
+                if c2.lits[j] == hint_pos {
+                    left_remove = lit
+                    right_remove = hint_pos
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    if left_remove == 0 && right_remove == 0 {
+        i = 0
+        while i < c1.count {
+            let lit = c1.lits[i]
+            var j: i32 = 0
+            while j < c2.count {
+                if c2.lits[j] == 0 - lit {
+                    left_remove = lit
+                    right_remove = c2.lits[j]
+                }
                 j = j + 1
             }
             i = i + 1
         }
-        if grew == false { break }
-        steps = steps + 1
     }
-    return clause_db_has_empty(ctx)
-}
-
-fn collect_atoms(ctx: &!ProofContext, prop_id: i64, out: &!IdBuf) -> bool with Mut {
-    let p = ctx_get_prop_mut(ctx, prop_id)
-    if p.tag == 9 { return idbuf_push_unique(out, p.predicate_id) }
-    if p.tag == 5 { return collect_atoms(ctx, p.left_id, out) }
-    if p.tag == 2 || p.tag == 3 || p.tag == 4 {
-        if collect_atoms(ctx, p.left_id, out) == false { return false }
-        return collect_atoms(ctx, p.right_id, out)
-    }
-    return true
-}
-
-fn mask_bit(mask: i32, idx: i32) -> bool with Mut, Div {
-    var value = mask
-    var i: i32 = 0
-    while i < idx {
-        value = value / 2
+    if left_remove == 0 && right_remove == 0 { return 0 - 1 }
+    var lits: [i64; 16] = [0; 16]
+    var n: i32 = 0
+    i = 0
+    while i < c1.count {
+        if c1.lits[i] != left_remove {
+            lits[n] = c1.lits[i]
+            n = n + 1
+        }
         i = i + 1
     }
-    return value - (value / 2) * 2 == 1
-}
-
-fn atom_lookup(atoms: &IdBuf, pred_id: i64) -> i32 with Mut {
-    var i: i32 = 0
-    while i < atoms.len {
-        if atoms.data[i] == pred_id { return i }
+    i = 0
+    while i < c2.count {
+        if c2.lits[i] != right_remove {
+            lits[n] = c2.lits[i]
+            n = n + 1
+        }
         i = i + 1
     }
-    return 0 - 1
+    let sorted = clause_sort_owned(lits, n)
+    if sorted.status < 0 { return 0 - 1 }
+    var final_lits: [i64; 16] = [0; 16]
+    i = 0
+    while i < sorted.count {
+        final_lits[i] = sorted.lits[i]
+        i = i + 1
+    }
+    return prop_from_lits(ctx, &final_lits, sorted.count)
 }
 
-fn eval_prop(ctx: &!ProofContext, prop_id: i64, atoms: &IdBuf, mask: i32) -> bool with Mut, Div {
-    let p = ctx_get_prop_mut(ctx, prop_id)
-    if p.tag == 0 { return true }
-    if p.tag == 1 { return false }
-    if p.tag == 2 { return eval_prop(ctx, p.left_id, atoms, mask) && eval_prop(ctx, p.right_id, atoms, mask) }
-    if p.tag == 3 { return eval_prop(ctx, p.left_id, atoms, mask) || eval_prop(ctx, p.right_id, atoms, mask) }
-    if p.tag == 4 {
-        if eval_prop(ctx, p.left_id, atoms, mask) == false { return true }
-        return eval_prop(ctx, p.right_id, atoms, mask)
+fn clause_contains_mut(ctx: &!ProofContext, idx: i32, lit: i64) -> bool with Mut {
+    var i: i32 = 0
+    while i < ctx.clause_len[idx] {
+        if ctx.clause_data[ctx.clause_start[idx] + i] == lit { return true }
+        i = i + 1
     }
-    if p.tag == 5 { return eval_prop(ctx, p.left_id, atoms, mask) == false }
-    if p.tag == 9 {
-        let idx = atom_lookup(atoms, p.predicate_id)
-        if idx < 0 { return false }
-        return mask_bit(mask, idx)
-    }
-    if p.tag == 8 { return p.eq_lhs == p.eq_rhs }
     return false
 }
 
-fn semantic_inconsistent(ctx: &!ProofContext) -> bool with Mut, Div {
-    var atoms = idbuf_new()
+pub fn saturate(ctx: &!ProofContext, max_steps: i64) -> bool with Mut {
+    var work_start: [i32; 64] = [0; 64]
+    var work_len: [i32; 64] = [0; 64]
+    var work_data: [i64; 256] = [0; 256]
+    var work_count: i32 = 0
+    var work_data_count: i32 = 0
+    var i: i32 = 0
+    while i < ctx.clause_count {
+        work_start[i] = work_data_count
+        work_len[i] = ctx.clause_len[i]
+        var j: i32 = 0
+        while j < ctx.clause_len[i] {
+            work_data[work_data_count + j] = ctx.clause_data[ctx.clause_start[i] + j]
+            j = j + 1
+        }
+        work_data_count = work_data_count + ctx.clause_len[i]
+        work_count = work_count + 1
+        i = i + 1
+    }
+
+    var steps: i64 = 0
+    while steps < max_steps {
+        var changed = false
+        i = 0
+        while i < work_count {
+            var j: i32 = i + 1
+            while j < work_count {
+                var k: i32 = 0
+                while k < work_len[i] {
+                    let lit = work_data[work_start[i] + k]
+                    if clause_contains_mut(ctx, j, 0 - lit) {
+                        var out_lits: [i64; 16] = [0; 16]
+                        var out_n: i32 = 0
+                        var a: i32 = 0
+                        while a < work_len[i] {
+                            let alit = work_data[work_start[i] + a]
+                            if alit != lit {
+                                out_lits[out_n] = alit
+                                out_n = out_n + 1
+                            }
+                            a = a + 1
+                        }
+                        a = 0
+                        while a < work_len[j] {
+                            let blit = work_data[work_start[j] + a]
+                            if blit != 0 - lit {
+                                out_lits[out_n] = blit
+                                out_n = out_n + 1
+                            }
+                            a = a + 1
+                        }
+                        let sorted = clause_sort_owned(out_lits, out_n)
+                        if sorted.status >= 0 {
+                            if sorted.count == 0 { return true }
+                            var duplicate = false
+                            a = 0
+                            while a < work_count {
+                                if work_len[a] == sorted.count {
+                                    var eq = true
+                                    var b: i32 = 0
+                                    while b < sorted.count {
+                                        if work_data[work_start[a] + b] != sorted.lits[b] { eq = false }
+                                        b = b + 1
+                                    }
+                                    if eq { duplicate = true }
+                                }
+                                a = a + 1
+                            }
+                            if duplicate == false {
+                                if work_count >= 64 { return false }
+                                if work_data_count + sorted.count > 256 { return false }
+                                work_start[work_count] = work_data_count
+                                work_len[work_count] = sorted.count
+                                a = 0
+                                while a < sorted.count {
+                                    work_data[work_data_count + a] = sorted.lits[a]
+                                    a = a + 1
+                                }
+                                work_data_count = work_data_count + sorted.count
+                                work_count = work_count + 1
+                                changed = true
+                                steps = steps + 1
+                                if steps >= max_steps { return false }
+                            }
+                        }
+                    }
+                    k = k + 1
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        if changed == false { return false }
+    }
+    return false
+}
+
+fn atom_add(set: &!AtomSet, atom: i64) with Mut {
+    var i: i32 = 0
+    while i < set.count {
+        if set.ids[i] == atom { return }
+        i = i + 1
+    }
+    if set.count >= 16 { return }
+    set.ids[set.count] = atom
+    set.count = set.count + 1
+}
+
+fn collect_atoms(ctx: &!ProofContext, prop_id: i64, set: &!AtomSet) with Mut {
+    let p = ctx_get_prop_mut(ctx, prop_id)
+    if p.tag == 9 {
+        atom_add(set, prop_id)
+        return
+    }
+    if p.tag == 5 { collect_atoms(ctx, p.left_id, set); return }
+    if p.tag == 2 || p.tag == 3 || p.tag == 4 {
+        collect_atoms(ctx, p.left_id, set)
+        collect_atoms(ctx, p.right_id, set)
+    }
+}
+
+fn atom_value(atoms: &[i64; 16], n: i32, mask: i64, atom: i64) -> bool with Mut, Div {
+    var i: i32 = 0
+    while i < n {
+        if atoms[i] == atom {
+            return ((mask / (1 << i)) % 2) == 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn eval_prop(ctx: &!ProofContext, prop_id: i64, atoms: &[i64; 16], n: i32, mask: i64) -> bool with Mut, Div {
+    let p = ctx_get_prop_mut(ctx, prop_id)
+    if p.tag == 0 { return true }
+    if p.tag == 1 { return false }
+    if p.tag == 9 { return atom_value(atoms, n, mask, prop_id) }
+    if p.tag == 5 { return eval_prop(ctx, p.left_id, atoms, n, mask) == false }
+    if p.tag == 2 { return eval_prop(ctx, p.left_id, atoms, n, mask) && eval_prop(ctx, p.right_id, atoms, n, mask) }
+    if p.tag == 3 { return eval_prop(ctx, p.left_id, atoms, n, mask) || eval_prop(ctx, p.right_id, atoms, n, mask) }
+    if p.tag == 4 { return eval_prop(ctx, p.left_id, atoms, n, mask) == false || eval_prop(ctx, p.right_id, atoms, n, mask) }
+    return false
+}
+
+fn entails(ctx: &!ProofContext, goal: i64) -> bool with Mut, Div {
+    var atoms = atom_set_new()
+    collect_atoms(ctx, goal, &! atoms)
     var i: i64 = 0
     while i < ctx.proof_count {
-        let proof = ctx_get_proof_mut(ctx, i)
-        if collect_atoms(ctx, proof.prop_id, &! atoms) == false { return false }
+        let prf = ctx_get_proof_mut(ctx, i)
+        if prf.tag >= 0 { collect_atoms(ctx, prf.prop_id, &! atoms) }
         i = i + 1
     }
-    var total: i32 = 1
+    if atoms.count > 12 { return false }
+    let total = 1 << atoms.count
+    var atom_ids: [i64; 16] = [0; 16]
     i = 0
-    while i < atoms.len {
-        total = total * 2
+    while i < atoms.count {
+        atom_ids[i] = atoms.ids[i]
         i = i + 1
     }
-    var mask: i32 = 0
+    var mask: i64 = 0
     while mask < total {
-        var ok = true
+        var assumptions_hold = true
         i = 0
         while i < ctx.proof_count {
-            let proof = ctx_get_proof_mut(ctx, i)
-            if eval_prop(ctx, proof.prop_id, &atoms, mask) == false {
-                ok = false
-                i = ctx.proof_count
-            } else {
-                i = i + 1
+            let prf = ctx_get_proof_mut(ctx, i)
+            if prf.tag >= 0 {
+                if eval_prop(ctx, prf.prop_id, &atom_ids, atoms.count, mask) == false {
+                    assumptions_hold = false
+                }
             }
+            i = i + 1
         }
-        if ok { return false }
+        if assumptions_hold {
+            if eval_prop(ctx, goal, &atom_ids, atoms.count, mask) == false { return false }
+        }
         mask = mask + 1
     }
     return true
 }
 
-fn prove_by_contradiction(ctx: &!ProofContext, goal: i64, max_depth: i64) -> i64 with Mut, Div {
+fn auto_try_mp(ctx: &!ProofContext, goal: i64, max_depth: i64) -> i64 with Mut, Div {
     if max_depth <= 0 { return 0 - 1 }
-    let mark = ctx_mark(ctx)
-    let not_goal = ctx_prop(ctx, prop_not(goal))
-    assume(ctx, 12000 + max_depth, not_goal)
-    if semantic_inconsistent(ctx) {
-        ctx_restore(ctx, mark)
-        return trusted(ctx, 12100 + max_depth, goal, 1.0)
-    }
-    let false_goal = ctx_prop(ctx, prop_false())
-    if load_resolution_problem(ctx, false_goal) && saturate(ctx, 100) {
-        ctx_restore(ctx, mark)
-        return trusted(ctx, 12200 + max_depth, goal, 1.0)
-    }
-    ctx_restore(ctx, mark)
-    return 0 - 1
-}
-
-fn auto_prove(ctx: &!ProofContext, goal: i64, max_depth: i64) -> i64 with Mut, Div {
-    if max_depth <= 0 { return 0 - 1 }
-
-    let direct = proof_for_goal(ctx, goal)
-    if direct >= 0 { return direct }
-
-    let goal_prop = ctx_get_prop_mut(ctx, goal)
-    if goal_prop.tag == 1 {
-        if semantic_inconsistent(ctx) { return trusted(ctx, 13000 + max_depth, goal, 1.0) }
-        if load_resolution_problem(ctx, goal) && saturate(ctx, 100) {
-            return trusted(ctx, 13100 + max_depth, goal, 1.0)
-        }
-        return 0 - 1
-    }
-
-    if goal_prop.tag == 2 {
-        let pa = auto_prove(ctx, goal_prop.left_id, max_depth - 1)
-        if pa >= 0 {
-            let pb = auto_prove(ctx, goal_prop.right_id, max_depth - 1)
-            if pb >= 0 { return and_intro(ctx, pa, pb, goal) }
-        }
-    }
-
-    if goal_prop.tag == 3 {
-        let pa = auto_prove(ctx, goal_prop.left_id, max_depth - 1)
-        if pa >= 0 { return or_intro_left(ctx, pa, goal) }
-        let pb = auto_prove(ctx, goal_prop.right_id, max_depth - 1)
-        if pb >= 0 { return or_intro_right(ctx, pb, goal) }
-    }
-
-    if goal_prop.tag == 4 {
-        let mark = ctx_mark(ctx)
-        assume(ctx, 13200 + max_depth, goal_prop.left_id)
-        let body = auto_prove(ctx, goal_prop.right_id, max_depth - 1)
-        ctx_restore(ctx, mark)
-        if body >= 0 { return trusted(ctx, 13300 + max_depth, goal, 1.0) }
-    }
-
-    if goal_prop.tag == 5 {
-        let mark = ctx_mark(ctx)
-        assume(ctx, 13400 + max_depth, goal_prop.left_id)
-        let false_goal = ctx_prop(ctx, prop_false())
-        let falsum = auto_prove(ctx, false_goal, max_depth - 1)
-        ctx_restore(ctx, mark)
-        if falsum >= 0 { return trusted(ctx, 13500 + max_depth, goal, 1.0) }
-    }
-
     var i: i64 = 0
     while i < ctx.proof_count {
-        let proof = ctx_get_proof_mut(ctx, i)
-        let prop = ctx_get_prop_mut(ctx, proof.prop_id)
-        if prop.tag == 4 && prop_matches(ctx, prop.right_id, goal) {
-            let arg = auto_prove(ctx, prop.left_id, max_depth - 1)
-            if arg >= 0 { return modus_ponens(ctx, i, arg, goal) }
+        let prf = ctx_get_proof_mut(ctx, i)
+        if prf.tag >= 0 {
+            let p = ctx_get_prop_mut(ctx, prf.prop_id)
+            if p.tag == 4 {
+                if prop_matches_mut(ctx, p.right_id, goal) {
+                    let arg = auto_prove(ctx, p.left_id, max_depth - 1)
+                    if arg >= 0 { return impl_elim(ctx, i, arg, goal) }
+                }
+            }
         }
         i = i + 1
     }
-
-    return prove_by_contradiction(ctx, goal, max_depth - 1)
+    return 0 - 1
 }
 
-fn run_tactic(ctx: &!ProofContext, goal: i64, tac_id: i64) -> i64 with Mut, Div {
-    if tac_id == 0 { return proof_for_goal(ctx, goal) }
-    if tac_id == 1 {
-        var i: i64 = 0
-        while i < ctx.proof_count {
-            let proof = ctx_get_proof_mut(ctx, i)
-            let prop = ctx_get_prop_mut(ctx, proof.prop_id)
-            if prop.tag == 4 && prop_matches(ctx, prop.right_id, goal) {
-                let arg = auto_prove(ctx, prop.left_id, 4)
-                if arg >= 0 { return modus_ponens(ctx, i, arg, goal) }
-            }
-            i = i + 1
+pub fn auto_prove(ctx: &!ProofContext, goal: i64, max_depth: i64) -> i64 with Mut, Div {
+    if max_depth <= 0 { return 0 - 1 }
+    let direct = proof_for_goal_mut(ctx, goal)
+    if direct >= 0 { return direct }
+    let p = ctx_get_prop_mut(ctx, goal)
+    if p.tag == 2 {
+        let p1 = auto_prove(ctx, p.left_id, max_depth - 1)
+        if p1 >= 0 {
+            let p2 = auto_prove(ctx, p.right_id, max_depth - 1)
+            if p2 >= 0 { return and_intro(ctx, p1, p2, goal) }
         }
-        return 0 - 1
     }
-    if tac_id == 2 {
-        let goal_prop = ctx_get_prop_mut(ctx, goal)
-        if goal_prop.tag != 2 { return 0 - 1 }
-        let pa = auto_prove(ctx, goal_prop.left_id, 4)
-        let pb = auto_prove(ctx, goal_prop.right_id, 4)
-        if pa >= 0 && pb >= 0 { return and_intro(ctx, pa, pb, goal) }
-        return 0 - 1
+    if p.tag == 3 {
+        let p1 = auto_prove(ctx, p.left_id, max_depth - 1)
+        if p1 >= 0 { return or_intro_left(ctx, p1, goal) }
+        let p2 = auto_prove(ctx, p.right_id, max_depth - 1)
+        if p2 >= 0 { return or_intro_right(ctx, p2, goal) }
     }
-    if tac_id == 3 {
-        let goal_prop = ctx_get_prop_mut(ctx, goal)
-        if goal_prop.tag != 3 { return 0 - 1 }
-        let pa = auto_prove(ctx, goal_prop.left_id, 4)
-        if pa >= 0 { return or_intro_left(ctx, pa, goal) }
-        let pb = auto_prove(ctx, goal_prop.right_id, 4)
-        if pb >= 0 { return or_intro_right(ctx, pb, goal) }
-        return 0 - 1
-    }
-    if tac_id == 4 { return prove_by_contradiction(ctx, goal, 6) }
-    if tac_id == 5 {
-        let mark = ctx_mark(ctx)
-        let not_goal = ctx_prop(ctx, prop_not(goal))
-        let false_goal = ctx_prop(ctx, prop_false())
-        assume(ctx, 13600, not_goal)
-        if load_resolution_problem(ctx, false_goal) && saturate(ctx, 100) {
-            ctx_restore(ctx, mark)
-            return trusted(ctx, 13700, goal, 1.0)
-        }
-        ctx_restore(ctx, mark)
-        return 0 - 1
-    }
-    return auto_prove(ctx, goal, 8)
+    let mp = auto_try_mp(ctx, goal, max_depth)
+    if mp >= 0 { return mp }
+    if entails(ctx, goal) { return trusted(ctx, 700, goal) }
+    return 0 - 1
 }
 
-fn tactic_then(ctx: &!ProofContext, goal: i64, tac1_result: i64, tac2_fn_id: i64) -> i64 with Mut, Div {
-    if tac1_result < 0 { return 0 - 1 }
-    let next = run_tactic(ctx, goal, tac2_fn_id)
-    if next >= 0 { return next }
-    return tac1_result
+fn run_tactic(ctx: &!ProofContext, goal: i64, tactic_id: i64) -> i64 with Mut, Div {
+    if tactic_id == 1 { return auto_try_mp(ctx, goal, 4) }
+    if tactic_id == 5 {
+        if entails(ctx, goal) { return trusted(ctx, 805, goal) }
+        return 0 - 1
+    }
+    return auto_prove(ctx, goal, 5)
 }
 
-fn tactic_or(ctx: &!ProofContext, goal: i64, tac1: i64, tac2: i64) -> i64 with Mut, Div {
-    let first = run_tactic(ctx, goal, tac1)
-    if first >= 0 { return first }
+pub fn tactic_or(ctx: &!ProofContext, goal: i64, tac1: i64, tac2: i64) -> i64 with Mut, Div {
+    let p1 = run_tactic(ctx, goal, tac1)
+    if p1 >= 0 { return p1 }
     return run_tactic(ctx, goal, tac2)
+}
+
+pub fn tactic_then(ctx: &!ProofContext, goal: i64, tac1_result: i64, tac2_fn_id: i64) -> i64 with Mut, Div {
+    if tac1_result >= 0 {
+        if prop_matches_mut(ctx, ctx_get_proof_mut(ctx, tac1_result).prop_id, goal) { return tac1_result }
+    }
+    return run_tactic(ctx, goal, tac2_fn_id)
+}
+
+fn main() -> i64 {
+    return 0
 }
