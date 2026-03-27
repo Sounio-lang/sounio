@@ -84,6 +84,8 @@ struct Checker {
     enums: EnumTable,
     fn_sigs: FnSigTable,
     algebras: AlgebraTable,
+    studies: StudyTable,
+    ontologies: OntologyTable,
     hyper_exprs: HyperExprTable,
     models: ModelTable,
     model_families: ModelFamilyTable,
@@ -122,11 +124,14 @@ struct Checker {
     alternative_reason_witnesses: AlternativeReasonWitnessTable,
     validated_manifests: ValidatedManifestTable,
     error_count: i64,
+    warning_count: i64,
     had_error: bool,
     current_return_type: TypeEntry,
     current_impl_type: TypeEntry,
     current_effects: [i64; 8],
     current_effect_count: i64,
+    multitest_count: i64,
+    multitest_corrected: bool,
     last_literal_int: i64,
     last_literal_float: f64,
     last_literal_kind: i64,   // 0=none, 1=int, 2=float
@@ -148,6 +153,8 @@ struct Checker {
     ownership: OwnContext,
     trait_registry: TraitRegistry,
     impl_registry: ImplRegistry,
+    multitest_count: i64,
+    multitest_corrected: bool,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -343,6 +350,8 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         enums: enum_table_new(),
         fn_sigs: fn_sig_table_new(),
         algebras: empty_algebra_table(),
+        studies: empty_study_table(),
+        ontologies: empty_ontology_table(),
         hyper_exprs: hyper_expr_table_new(),
         models: model_table_new(),
         model_families: model_family_table_new(),
@@ -381,11 +390,14 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         alternative_reason_witnesses: alternative_reason_witness_table_new(),
         validated_manifests: validated_manifest_table_new(),
         error_count: 0,
+        warning_count: 0,
         had_error: false,
         current_return_type: ty_unit(),
         current_impl_type: ty_error(),
         current_effects: [0; 8],
         current_effect_count: 0,
+        multitest_count: 0,
+        multitest_corrected: false,
         last_literal_int: 0,
         last_literal_float: 0.0,
         last_literal_kind: 0,
@@ -407,6 +419,8 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         ownership: own_context_new(),
         trait_registry: trait_registry_new(),
         impl_registry: impl_register_builtins(impl_registry_new()),
+        multitest_count: 0,
+        multitest_corrected: false,
     }
 }
 
@@ -2112,6 +2126,26 @@ impl Checker {
         c
     }
 
+    fn report_warning_at(self, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.warning_count = c.warning_count + 1
+        print("warning[W")
+        if code < 100 { print("0") }
+        if code < 10 { print("0") }
+        print_int(code)
+        print("]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": ")
+        print_warning_message(code)
+        print("\n")
+        c
+    }
+
     fn report_unknown_policy_metric(self, span: Span, metric_name: Name) -> Checker with Mut, IO, Panic, Div {
         var c = self
         c.error_count = c.error_count + 1
@@ -3726,6 +3760,42 @@ impl Checker {
         c
     }
 
+    fn report_multitest_correction_required(self, span: Span, test_count: i64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E042]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": multiple tests (")
+        print_int(test_count)
+        print(") performed without correction\n")
+        print("   |\n   = help: call bonferroni() or benjamini_hochberg() before leaving this function\n")
+        print("   = note: functions with `with MultiTest` must record an explicit multiple-testing correction once they perform more than one statistical test\n")
+        c
+    }
+
+    fn report_hypothesis_penalty_warning(self, span: Span, outcome_name: Name) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.warning_count = c.warning_count + 1
+        print("warning[W041]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": statistical test on unregistered variable '")
+        print_name_value(outcome_name)
+        print("' - confidence penalty applied\n")
+        print("   = note: Hypothesis currently applies this penalty as an advisory warning; automatic Knowledge<T> confidence scaling is pending\n")
+        c
+    }
+
 
 
     fn report_mismatch(self, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
@@ -4052,6 +4122,13 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 70 { print("kernel function cannot have IO, Mut, or Alloc effect") }
     else if code == 71 { print("kernel function parameter type is not GPU-compatible") }
     else if code == 72 { print("kernel function must return unit type") }
+    // Ontology type errors (150-152)
+    else if code == 150 { print("value does not have an ontology class type") }
+    else if code == 151 { print("ontology classes are disjoint and cannot be substituted") }
+    else if code == 152 { print("cannot prove ontology subsumption at this call site") }
+    else if code == 153 { print("ontology class table overflow (maximum 64 classes per compilation unit)") }
+    else if code == 154 { print("study table overflow (maximum 16 studies per compilation unit)") }
+    else if code == 155 { print("study definition requires at least one hypothesis") }
     else { print("unknown error") }
 }
 
@@ -4310,6 +4387,12 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 141 {
         print("   |\n   = help: the intervention do(Z) has an effect on the outcome that cannot be eliminated\n")
+    }
+    else if code == 154 {
+        print("   |\n   = help: split study declarations across compilation units or reduce the number of top-level `study` items\n")
+    }
+    else if code == 155 {
+        print("   |\n   = help: add at least one `hypothesis Hn { ... }` block inside the study's `analysis` section\n")
     }
     else {
         // No help available for unknown errors
@@ -4620,8 +4703,26 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     else if code == 122 {
         print("   = note: alternative frontiers consume deferred audit metadata explicitly and fail closed when that evidence is missing\n")
     }
+    else if code == 154 {
+        print("   = note: study metadata is collected into a fixed-size pass-1 table in this compiler slice\n")
+    }
+    else if code == 155 {
+        print("   = note: a study without hypotheses cannot support the declared statistical analysis contract\n")
+    }
     else {
         // No note available for unknown errors
+    }
+}
+
+fn print_warning_message(code: i64) with IO, Mut, Panic, Div {
+    if code == 40 {
+        print("cannot statically verify refinement predicate at this call site\n")
+        print("   = note: the compiler could not prove the argument satisfies the parameter's refinement type\n")
+        print("   = note: this compiles but may fail at runtime; annotate with an explicit refinement type to prove statically\n")
+    }
+    else if code == 41 { print("ontology subsumption could not be verified") }
+    else {
+        print("unknown warning")
     }
 }
 
@@ -5175,6 +5276,85 @@ fn contest_model_name(e: Expr) -> Name with Mut, Panic, Div, Alloc {
     } else {
         empty_name()
     }
+}
+
+fn multitest_call_name(opt: Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(callee) => {
+            if (*callee).kind == ExprKind::ExprPath {
+                checker_copy_string_list_tail_to_name((*callee).path.segments)
+            } else if (*callee).kind == ExprKind::ExprIdent {
+                (*callee).name
+            } else {
+                empty_name()
+            }
+        }
+        None => empty_name()
+    }
+}
+
+fn multitest_effect_enabled(effects: [i64; 8], count: i64) -> bool with Mut, Panic, Div {
+    has_effect_id(effects, count, 17)
+}
+
+fn hypothesis_effect_enabled(effects: [i64; 8], count: i64) -> bool with Mut, Panic, Div {
+    has_effect_id(effects, count, 16)
+}
+
+fn multitest_is_stat_test_name(name: Name) -> bool with Mut, Panic, Div {
+    name_eq(name, make_name("z_test_one_sample"))
+        || name_eq(name, make_name("z_test_two_sample"))
+        || name_eq(name, make_name("t_test_one_sample"))
+        || name_eq(name, make_name("t_test_two_sample"))
+        || name_eq(name, make_name("t_test_paired"))
+        || name_eq(name, make_name("chi2_goodness_of_fit"))
+        || name_eq(name, make_name("f_test"))
+        || name_eq(name, make_name("mann_whitney_u"))
+        || name_eq(name, make_name("permutation_test"))
+}
+
+fn multitest_is_correction_name(name: Name) -> bool with Mut, Panic, Div {
+    name_eq(name, make_name("bonferroni"))
+        || name_eq(name, make_name("benjamini_hochberg"))
+}
+
+fn hypothesis_outcome_name_from_expr(e: Expr) -> Name with Mut, Panic, Div, Alloc {
+    if e.kind == ExprKind::ExprIdent {
+        e.name
+    } else if e.kind == ExprKind::ExprPath {
+        checker_copy_string_list_tail_to_name(e.path.segments)
+    } else if e.kind == ExprKind::ExprFieldAccess {
+        e.name
+    } else if e.kind == ExprKind::ExprUnary {
+        match e.left {
+            Some(inner) => hypothesis_outcome_name_from_expr(*inner)
+            None => empty_name()
+        }
+    } else {
+        empty_name()
+    }
+}
+
+fn hypothesis_outcome_name_from_args(opt: Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
+    match expr_list_head(opt) {
+        Some(arg) => hypothesis_outcome_name_from_expr(*arg)
+        None => empty_name()
+    }
+}
+
+fn active_study_has_hypothesis_outcome(studies: StudyTable, outcome_name: Name) -> bool with Mut, Panic, Div {
+    if studies.count <= 0 || name_is_empty(outcome_name) {
+        return false
+    }
+    let study = studies.entries[(studies.count - 1) as usize]
+    var i: i64 = 0
+    while i < study.hypothesis_count {
+        if name_eq(study.hypotheses[i as usize].outcome, outcome_name) {
+            return true
+        }
+        i = i + 1
+    }
+    false
 }
 
 fn contest_info_from_expr_models(opt: Option<Box<ExprList>>) -> ContestInfo with Mut, Panic, Div, Alloc {
@@ -6783,6 +6963,8 @@ impl Checker {
             ItemSession => self  // Session protocol registered in collect pass (no-op for now)
             ItemTrait => self.collect_trait_def(item.name, item.trait_def)
             ItemAlgebra => self.collect_algebra_def(item.algebra_def)
+            ItemStudy => self.collect_study_def(item.span, item.study_def)
+            ItemOntology => self.collect_ontology_def(item.ontology_def)
         }
     }
 
@@ -8349,11 +8531,11 @@ impl Checker {
                 // "Octonion" = 8 chars, O=79
                 // "Sedenion" = 8 chars, S=83
                 // "Quaternion" = 10 chars, Q=81
-                if info.name.len == 8 && info.name.text[0] == 79 as i8 {
+                if info.name.len == 8 && info.name.buf[0] == 79 as i8 {
                     info.algebra_tag = 3  // Octonion
-                } else if info.name.len == 8 && info.name.text[0] == 83 as i8 {
+                } else if info.name.len == 8 && info.name.buf[0] == 83 as i8 {
                     info.algebra_tag = 4  // Sedenion
-                } else if info.name.len == 10 && info.name.text[0] == 81 as i8 {
+                } else if info.name.len == 10 && info.name.buf[0] == 81 as i8 {
                     info.algebra_tag = 2  // Quaternion
                 }
 
@@ -8375,17 +8557,152 @@ impl Checker {
                 var c = self
                 let op = (*list).head
                 // Check op name: "add" (3 chars, a=97,d=100,d=100) or "mul" (3, m=109)
-                if op.op_name.len == 3 && op.op_name.text[0] == 97 as i8 {
+                if op.op_name.len == 3 && op.op_name.buf[0] == 97 as i8 {
                     // add
                     c.algebras.entries[idx].add_commutative = op.is_commutative
                     c.algebras.entries[idx].add_associative = op.is_associative
-                } else if op.op_name.len == 3 && op.op_name.text[0] == 109 as i8 {
+                } else if op.op_name.len == 3 && op.op_name.buf[0] == 109 as i8 {
                     // mul
                     c.algebras.entries[idx].mul_commutative = op.is_commutative
                     c.algebras.entries[idx].mul_associative = op.is_associative
                     c.algebras.entries[idx].mul_alternative = op.is_alternative
                 }
                 c.collect_algebra_ops((*list).tail, idx)
+            }
+        }
+    }
+
+    // --------------------------------------------------------
+    // Collect study declaration
+    // --------------------------------------------------------
+
+    fn collect_study_def(self, span: Span, opt: Option<Box<StudyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            None => self
+            Some(sdef) => {
+                var c = self
+                let idx = c.studies.count
+                if idx >= 16 {
+                    c = c.report_error_at(span, 154, 0, 0, 0)
+                    return c
+                }
+
+                var info = empty_study_info()
+                info.name = (*sdef).name
+                info.title = (*sdef).title
+                info.registration = (*sdef).registration
+                info.design = (*sdef).design
+                info.sample_size = (*sdef).sample_size
+                info.power = (*sdef).power
+                info.alpha = (*sdef).alpha
+                info.correction = (*sdef).correction
+                info.hypotheses = (*sdef).hypotheses
+                info.hypothesis_count = (*sdef).n_hypotheses
+                info.outcomes = (*sdef).outcomes
+                info.outcome_count = (*sdef).n_outcomes
+                info.is_valid = (*sdef).n_hypotheses > 0 as i32
+
+                if !info.is_valid {
+                    c = c.report_error_at(span, 155, 0, 0, 0)
+                }
+
+                c.studies.entries[idx as usize] = info
+                c.studies.count = idx + 1
+                c
+            }
+        }
+    }
+
+    // --------------------------------------------------------
+    // Collect ontology definitions
+    // --------------------------------------------------------
+
+    fn collect_ontology_def(self, opt: Option<Box<OntologyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            None => self
+            Some(odef) => {
+                var c = self
+                let ont_name = (*odef).name
+                // Walk class declarations and register each class
+                c = c.collect_ontology_classes((*odef).classes, ont_name)
+                // Walk disjoint declarations
+                c = c.collect_ontology_disjoints((*odef).disjoints)
+                // Compute transitive closure of superclass relationships
+                c.ontologies = ontology_table_compute_closure(c.ontologies)
+                // Bind each class name as a named type with ontology_id
+                var i: i64 = 0
+                while i < c.ontologies.count {
+                    if c.ontologies.entries[i as usize].is_valid {
+                        let cls_name = c.ontologies.entries[i as usize].name
+                        let ty = ty_with_ontology(ty_named(cls_name), i)
+                        c.env = c.env.bind(cls_name, ty, false)
+                    }
+                    i = i + 1
+                }
+                c
+            }
+        }
+    }
+
+    fn collect_ontology_classes(self, classes: Option<Box<OntologyClassDeclList>>, ont_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match classes {
+            None => self
+            Some(list) => {
+                var c = self
+                let decl = (*list).head
+                let idx = c.ontologies.count
+                if idx >= 64 {
+                    c = c.report_error_at(decl.span, 153, 0, 0, 0)
+                    return c
+                }
+
+                var info = empty_ontology_class_info()
+                info.name = decl.name
+                info.ontology_name = ont_name
+                info.class_index = idx
+                info.is_valid = true
+
+                // Resolve superclass names to indices
+                var i: i64 = 0
+                while i < decl.superclass_count && i < 8 {
+                    let sc_name = decl.superclass_names[i as usize]
+                    let sc_idx = ontology_table_find(c.ontologies, sc_name)
+                    if sc_idx >= 0 {
+                        info.superclass_indices[info.superclass_count as usize] = sc_idx
+                        info.superclass_count = info.superclass_count + 1
+                    }
+                    i = i + 1
+                }
+
+                c.ontologies.entries[idx as usize] = info
+                c.ontologies.count = idx + 1
+                c.collect_ontology_classes((*list).tail, ont_name)
+            }
+        }
+    }
+
+    fn collect_ontology_disjoints(self, disjoints: Option<Box<OntologyDisjointDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match disjoints {
+            None => self
+            Some(list) => {
+                var c = self
+                let decl = (*list).head
+                let a_idx = ontology_table_find(c.ontologies, decl.name_a)
+                let b_idx = ontology_table_find(c.ontologies, decl.name_b)
+                if a_idx >= 0 && b_idx >= 0 {
+                    // Add disjoint in both directions
+                    let a_dc = c.ontologies.entries[a_idx as usize].disjoint_count
+                    if a_dc < 8 {
+                        c.ontologies.entries[a_idx as usize].disjoint_indices[a_dc as usize] = b_idx
+                        c.ontologies.entries[a_idx as usize].disjoint_count = a_dc + 1
+                    }
+                    let b_dc = c.ontologies.entries[b_idx as usize].disjoint_count
+                    if b_dc < 8 {
+                        c.ontologies.entries[b_idx as usize].disjoint_indices[b_dc as usize] = a_idx
+                        c.ontologies.entries[b_idx as usize].disjoint_count = b_dc + 1
+                    }
+                }
+                c.collect_ontology_disjoints((*list).tail)
             }
         }
     }
@@ -8521,6 +8838,8 @@ impl Checker {
             ItemSession => self  // Session protocol declaration — type-checking is structural
             ItemTrait => self  // Trait methods already collected in pass 1
             ItemAlgebra => self  // Already handled in collect pass
+            ItemStudy => self  // Already handled in collect pass
+            ItemOntology => self  // Already handled in collect pass
         }
     }
 
@@ -8535,6 +8854,8 @@ impl Checker {
                 // Save outer effects context
                 let saved_effects = c.current_effects
                 let saved_effect_count = c.current_effect_count
+                let saved_multitest_count = c.multitest_count
+                let saved_multitest_corrected = c.multitest_corrected
                 let sig_id = c.fn_sigs.find((*fd).name)
                 if sig_id >= 0 {
                     let sig = c.fn_sigs.get(sig_id)
@@ -8542,6 +8863,8 @@ impl Checker {
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
                 }
+                c.multitest_count = 0
+                c.multitest_corrected = false
                 c.env = c.env.push_scope()
                 c.borrows = c.borrows.push_scope()
                 c.ownership = own_enter_scope(c.ownership)
@@ -8556,6 +8879,9 @@ impl Checker {
                     if !types_compatible(body_ty, sig2.return_type) {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
+                }
+                if c.multitest_count > 1 && !c.multitest_corrected {
+                    c = c.report_multitest_correction_required((*fd).span, c.multitest_count)
                 }
                 // Check linear types consumed at function exit
                 let own_errors = own_check_linear_at_end(c.ownership)
@@ -8574,6 +8900,8 @@ impl Checker {
                 // Restore outer effects context
                 c.current_effects = saved_effects
                 c.current_effect_count = saved_effect_count
+                c.multitest_count = saved_multitest_count
+                c.multitest_corrected = saved_multitest_corrected
                 c
             }
             None => self
@@ -8648,6 +8976,8 @@ impl Checker {
                 // Save outer effects context
                 let saved_effects = c.current_effects
                 let saved_effect_count = c.current_effect_count
+                let saved_multitest_count = c.multitest_count
+                let saved_multitest_corrected = c.multitest_corrected
                 let sig_id = c.fn_sigs.find_method(c.current_impl_type.name, (*fd).name)
                 if sig_id >= 0 {
                     let sig = c.fn_sigs.get(sig_id)
@@ -8655,6 +8985,8 @@ impl Checker {
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
                 }
+                c.multitest_count = 0
+                c.multitest_corrected = false
                 c.env = c.env.push_scope()
                 c.borrows = c.borrows.push_scope()
                 c = c.push_const_scope()
@@ -8668,6 +9000,9 @@ impl Checker {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
+                if c.multitest_count > 1 && !c.multitest_corrected {
+                    c = c.report_multitest_correction_required((*fd).span, c.multitest_count)
+                }
                 c = c.pop_const_scope()
                 c.borrows = c.borrows.pop_scope()
                 c.env = c.env.pop_scope()
@@ -8675,6 +9010,8 @@ impl Checker {
                 // Restore outer effects context
                 c.current_effects = saved_effects
                 c.current_effect_count = saved_effect_count
+                c.multitest_count = saved_multitest_count
+                c.multitest_corrected = saved_multitest_corrected
                 c
             }
             None => self
@@ -9819,8 +10156,26 @@ impl Checker {
         if witness_kind >= 0 {
             return self.check_contest_witness_expr(e, witness_kind)
         }
-        let callee_pair = self.check_opt_expr(e.left)
-        var c = callee_pair.0
+        var c = self
+        if multitest_effect_enabled(c.current_effects, c.current_effect_count) {
+            let callee_name = multitest_call_name(e.left)
+            if multitest_is_stat_test_name(callee_name) {
+                c.multitest_count = c.multitest_count + 1
+            } else if multitest_is_correction_name(callee_name) {
+                c.multitest_corrected = true
+            }
+        }
+        if hypothesis_effect_enabled(c.current_effects, c.current_effect_count) {
+            let callee_name = multitest_call_name(e.left)
+            if c.studies.count > 0 && multitest_is_stat_test_name(callee_name) {
+                let outcome_name = hypothesis_outcome_name_from_args(e.args)
+                if !name_is_empty(outcome_name) && !active_study_has_hypothesis_outcome(c.studies, outcome_name) {
+                    c = c.report_hypothesis_penalty_warning(e.span, outcome_name)
+                }
+            }
+        }
+        let callee_pair = c.check_opt_expr(e.left)
+        c = callee_pair.0
         let callee_ty = callee_pair.1
         let array_like_ty =
             if callee_ty.kind == TypeKind::TyArray {
@@ -11890,7 +12245,69 @@ impl Checker {
             return c
         }
 
-        c.report_error_at(call_span, 52, 0, 0, 0)
+        // Try known-constant lookup for identifiers
+        if arg_expr.kind == ExprKind::ExprIdent {
+            let const_result = c.const_int_lookup(arg_expr.name)
+            if const_result.0 {
+                if !pred_check_int(expected_ref.predicate, const_result.1) {
+                    return c.report_error_at(call_span, 42, 0, 0, 0)
+                }
+                return c
+            }
+        }
+
+        // Try environment-based proof: look up arg type for refinement
+        if arg_expr.kind == ExprKind::ExprIdent {
+            let env_lookup = c.env.lookup(arg_expr.name)
+            if env_lookup.refinement_id >= 0 && env_lookup.refinement_id < 128 {
+                let env_ref = c.refinements.entries[env_lookup.refinement_id as usize]
+                if pred_implies(env_ref.predicate, expected_ref.predicate) {
+                    return c
+                }
+            }
+            // Ontology-aware proof: if arg has an ontology type and the expected
+            // refinement's base type also has an ontology type, check if ontology
+            // subsumption holds. If it does, the base type constraint is satisfied
+            // by the class hierarchy — only the predicate part needs verification.
+            // This bridges ontology axioms into refinement obligations.
+            if env_lookup.ontology_id >= 0 && expected_ty.ontology_id >= 0 {
+                if ontology_table_is_subclass(c.ontologies, env_lookup.ontology_id, expected_ty.ontology_id) {
+                    // Ontology subsumption proves base type compatibility.
+                    // The predicate is not yet proven, but the type system accepts
+                    // the base constraint. Scan ancestor classes for refinement
+                    // predicates that could discharge the obligation.
+                    var found_ancestor_ref = false
+                    var anc_i: i64 = 0
+                    while anc_i < c.ontologies.entries[env_lookup.ontology_id as usize].all_ancestor_count {
+                        let anc_idx = c.ontologies.entries[env_lookup.ontology_id as usize].all_ancestor_indices[anc_i as usize]
+                        if anc_idx >= 0 && anc_idx < c.ontologies.count {
+                            // Check if this ancestor's type binding has a refinement
+                            let anc_name = c.ontologies.entries[anc_idx as usize].name
+                            let anc_ty = c.env.lookup(anc_name)
+                            if anc_ty.refinement_id >= 0 && anc_ty.refinement_id < 128 {
+                                let anc_ref = c.refinements.entries[anc_ty.refinement_id as usize]
+                                if pred_implies(anc_ref.predicate, expected_ref.predicate) {
+                                    found_ancestor_ref = true
+                                }
+                            }
+                        }
+                        anc_i = anc_i + 1
+                    }
+                    if found_ancestor_ref {
+                        return c
+                    }
+                }
+            }
+        }
+
+        // Epistemic fallback: emit warning, not error — unverifiable != wrong.
+        // W040 semantics: the call compiles. The predicate is NOT proven statically.
+        //   - Debug mode (future): codegen inserts runtime assertion at this call site.
+        //     If the predicate fails at runtime, panic with "refinement predicate violated".
+        //   - Release mode: trust the programmer. The warning was sufficient notice.
+        // To suppress: #[allow(W040)] on the call site (not yet implemented).
+        // To force proof: annotate the argument with an explicit refinement type.
+        c.report_warning_at(call_span, 40, 0, 0, 0)
     }
 
     fn check_call_arg_knowledge_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
@@ -11910,6 +12327,30 @@ impl Checker {
         } else {
             self.report_error_at(call_span, 36, 0, 0, 0)
         }
+    }
+
+    fn check_call_arg_ontology_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+        let expected_ty = call_ref_inner_or_self(param_ty)
+        if expected_ty.ontology_id < 0 || is_error_or_unknown(expected_ty) {
+            return self
+        }
+        let provided_ty = call_ref_inner_or_self(arg_ty)
+        if is_error_or_unknown(provided_ty) {
+            return self
+        }
+        if provided_ty.ontology_id < 0 {
+            // Non-ontology value passed where ontology type expected
+            return self.report_error_at(call_span, 150, 0, 0, 0)
+        }
+        // Check subsumption: provided must be subclass of expected
+        if ontology_table_is_subclass(self.ontologies, provided_ty.ontology_id, expected_ty.ontology_id) {
+            return self
+        }
+        // Check disjointness for better error
+        if ontology_table_is_disjoint(self.ontologies, provided_ty.ontology_id, expected_ty.ontology_id) {
+            return self.report_error_at(call_span, 151, 0, 0, 0)
+        }
+        self.report_error_at(call_span, 152, 0, 0, 0)
     }
 
     fn check_call_args_inner(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, idx: i64, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
@@ -11942,6 +12383,7 @@ impl Checker {
                     c = c.check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
                     c = c.check_call_arg_refinement_boundary(arg_expr, arg_ty, param_info.ty, call_span)
                     c = c.check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
+                    c = c.check_call_arg_ontology_boundary(arg_ty, param_info.ty, call_span)
                 }
                 // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
                 if has_param_info &&

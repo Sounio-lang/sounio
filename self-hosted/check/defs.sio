@@ -5,7 +5,7 @@
 //   EnumTable    — enum name + variants
 //   FnSigTable   — fn name + params + return type + method info
 
-use parser::ast::{BinaryOp, CompareOp, Expr, ExprKind, Name, UnaryOp, empty_path, name_eq}
+use parser::ast::{BinaryOp, CompareOp, Expr, ExprKind, Name, StudyHypothesis, StudyOutcome, UnaryOp, empty_name, empty_path, empty_study_hypothesis, empty_study_outcome, name_eq}
 use lexer::span::Span
 
 // ============================================================
@@ -368,6 +368,228 @@ fn empty_algebra_table() -> AlgebraTable {
         entries: [empty_algebra_info(); 16],
         count: 0,
     }
+}
+
+// ============================================================
+// Study registry
+// ============================================================
+
+struct StudyInfo {
+    name: Name,
+    title: Name,
+    registration: Name,
+    design: i32,
+    sample_size: i64,
+    power: f64,
+    alpha: f64,
+    correction: i32,
+    hypotheses: [StudyHypothesis; 8],
+    hypothesis_count: i32,
+    outcomes: [StudyOutcome; 16],
+    outcome_count: i32,
+    is_valid: bool,
+}
+
+struct StudyTable {
+    entries: [StudyInfo; 16],
+    count: i64,
+}
+
+fn empty_study_info() -> StudyInfo {
+    StudyInfo {
+        name: empty_name(),
+        title: empty_name(),
+        registration: empty_name(),
+        design: 0,
+        sample_size: 0,
+        power: 0.0,
+        alpha: 0.0,
+        correction: 0,
+        hypotheses: [empty_study_hypothesis(); 8],
+        hypothesis_count: 0,
+        outcomes: [empty_study_outcome(); 16],
+        outcome_count: 0,
+        is_valid: false,
+    }
+}
+
+fn empty_study_table() -> StudyTable {
+    StudyTable {
+        entries: [empty_study_info(); 16],
+        count: 0,
+    }
+}
+
+// ============================================================
+// Ontology class registry
+// ============================================================
+
+struct OntologyClassInfo {
+    name: Name,
+    ontology_name: Name,
+    class_index: i64,
+    superclass_indices: [i64; 8],
+    superclass_count: i64,
+    all_ancestor_indices: [i64; 64],
+    all_ancestor_count: i64,
+    disjoint_indices: [i64; 8],
+    disjoint_count: i64,
+    property_names: [Name; 4],
+    property_ref_ids: [i64; 4],
+    property_count: i64,
+    is_valid: bool,
+}
+
+struct OntologyTable {
+    entries: [OntologyClassInfo; 64],
+    count: i64,
+}
+
+fn empty_ontology_class_info() -> OntologyClassInfo {
+    OntologyClassInfo {
+        name: empty_name(),
+        ontology_name: empty_name(),
+        class_index: -1,
+        superclass_indices: [-1; 8],
+        superclass_count: 0,
+        all_ancestor_indices: [-1; 64],
+        all_ancestor_count: 0,
+        disjoint_indices: [-1; 8],
+        disjoint_count: 0,
+        property_names: [empty_name(); 4],
+        property_ref_ids: [-1; 4],
+        property_count: 0,
+        is_valid: false,
+    }
+}
+
+fn empty_ontology_table() -> OntologyTable {
+    OntologyTable {
+        entries: [empty_ontology_class_info(); 64],
+        count: 0,
+    }
+}
+
+fn ontology_table_find(t: OntologyTable, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < t.count {
+        if name_eq(t.entries[i as usize].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn ontology_table_is_subclass(t: OntologyTable, sub_idx: i64, super_idx: i64) -> bool with Mut, Panic, Div {
+    if sub_idx < 0 || sub_idx >= t.count { return false }
+    if sub_idx == super_idx { return true }
+    var i: i64 = 0
+    while i < t.entries[sub_idx as usize].all_ancestor_count {
+        if t.entries[sub_idx as usize].all_ancestor_indices[i as usize] == super_idx {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn ontology_table_is_disjoint(t: OntologyTable, a_idx: i64, b_idx: i64) -> bool with Mut, Panic, Div {
+    if a_idx < 0 || b_idx < 0 || a_idx >= t.count || b_idx >= t.count { return false }
+    var i: i64 = 0
+    while i < t.entries[a_idx as usize].disjoint_count {
+        if t.entries[a_idx as usize].disjoint_indices[i as usize] == b_idx {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Returns true if class at idx has itself in its ancestor list (cycle).
+fn ontology_table_has_cycle(t: OntologyTable, idx: i64) -> bool with Mut, Panic, Div {
+    if idx < 0 || idx >= t.count { return false }
+    var i: i64 = 0
+    while i < t.entries[idx as usize].all_ancestor_count {
+        if t.entries[idx as usize].all_ancestor_indices[i as usize] == idx {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn ontology_table_compute_closure(t: OntologyTable) -> OntologyTable with Mut, Panic, Div {
+    var out = t
+    // Seed: each class has its direct superclasses as ancestors
+    var i: i64 = 0
+    while i < out.count {
+        var j: i64 = 0
+        while j < out.entries[i as usize].superclass_count {
+            let sup = out.entries[i as usize].superclass_indices[j as usize]
+            // Reject self-loops immediately
+            if sup == i { j = j + 1 }
+            else if sup >= 0 && out.entries[i as usize].all_ancestor_count < 64 {
+                out.entries[i as usize].all_ancestor_indices[out.entries[i as usize].all_ancestor_count as usize] = sup
+                out.entries[i as usize].all_ancestor_count = out.entries[i as usize].all_ancestor_count + 1
+                j = j + 1
+            } else {
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    // Fixed-point: propagate through hierarchy
+    var changed = true
+    var iterations: i64 = 0
+    while changed && iterations < 256 {
+        changed = false
+        iterations = iterations + 1
+        i = 0
+        while i < out.count {
+            var j: i64 = 0
+            while j < out.entries[i as usize].all_ancestor_count {
+                let anc_idx = out.entries[i as usize].all_ancestor_indices[j as usize]
+                if anc_idx >= 0 && anc_idx < out.count {
+                    var k: i64 = 0
+                    while k < out.entries[anc_idx as usize].all_ancestor_count {
+                        let transitive = out.entries[anc_idx as usize].all_ancestor_indices[k as usize]
+                        // Skip if transitive ancestor is self (cycle)
+                        if transitive == i {
+                            k = k + 1
+                        } else {
+                            // Check if already present
+                            var found = false
+                            var m: i64 = 0
+                            while m < out.entries[i as usize].all_ancestor_count {
+                                if out.entries[i as usize].all_ancestor_indices[m as usize] == transitive {
+                                    found = true
+                                }
+                                m = m + 1
+                            }
+                            if !found && out.entries[i as usize].all_ancestor_count < 64 {
+                                out.entries[i as usize].all_ancestor_indices[out.entries[i as usize].all_ancestor_count as usize] = transitive
+                                out.entries[i as usize].all_ancestor_count = out.entries[i as usize].all_ancestor_count + 1
+                                changed = true
+                            }
+                            k = k + 1
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+    }
+    // Post-closure cycle check: invalidate classes that ended up in cycles
+    i = 0
+    while i < out.count {
+        if ontology_table_has_cycle(out, i) {
+            out.entries[i as usize].is_valid = false
+        }
+        i = i + 1
+    }
+    out
 }
 
 // ============================================================
