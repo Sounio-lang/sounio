@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { useAudience } from '../../lib/useAudience';
+import { codeExplanations } from '../../lib/audienceContent';
 
 interface TabExample {
   id: string;
@@ -24,25 +26,25 @@ if bmi < 25:
     print("Normal weight")
 # What if the scale was off by 2kg?`,
     sounio: `// Sounio: epistemic computing
-// ε is the confidence level (0.0 to 1.0)
+// \u03B5 is the confidence level (0.0 to 1.0)
 let mass: Knowledge<f64> = Knowledge(
-    75.3, 
-    ε=0.98, 
+    75.3,
+    \u03B5=0.98,
     prov="clinical_scale_001"
 )
 
 let height: Knowledge<f64> = Knowledge(
-    1.82, 
-    ε=0.99, 
+    1.82,
+    \u03B5=0.99,
     prov="stadiometer_001"
 )
 
 // GUM Uncertainty propagates automatically:
-// ε(a/b) = ε(a) × ε(b)
+// \u03B5(a/b) = \u03B5(a) \u00D7 \u03B5(b)
 let bmi: Knowledge<f64> = mass / (height * height)
-// bmi.value = 22.74, bmi.ε = 0.96
+// bmi.value = 22.74, bmi.\u03B5 = 0.96
 
-if bmi.ε >= 0.95 {
+if bmi.\u03B5 >= 0.95 {
     println("Confidence sufficient for diagnosis")
 } else {
     println("Request remeasurement")
@@ -54,7 +56,7 @@ if bmi.ε >= 0.95 {
     python: `# Python: implicit causality, no type safety
 import dowhy
 
-# Intervention is a plain dict — no type check
+# Intervention is a plain dict \u2014 no type check
 model = CausalModel(data=df,
     graph="digraph {Education -> Earnings}")
 do_result = model.do({"Education": 1})
@@ -64,21 +66,20 @@ cf_earnings = predict_cf(do_result)
 # Was cf_earnings reliable? The type won't say.
 # No way to gate on causal confidence.`,
     sounio: `// Sounio: Intervention<T> and Counterfactual<T>
-// are first-class epistemic types
+// are language-level types (compiler keywords)
 
-// Causal intervention: do(Treatment = active)
-let treated: Intervention<bool> = intervene(true)
+// Build a causal DAG with epistemic edge uncertainty
+var dag = causal_dag_new()
+dag = dag_add_node(dag, 0)  // treatment
+dag = dag_add_node(dag, 1)  // outcome
+dag = dag_add_edge(dag, 0, 1,
+    ec_beta_new(8.0, 2.0), 0.5, 0.1)
 
-// Counterfactual: what if Alice had education?
-let cf: Counterfactual<f64> = counterfactual(
-    observed: 30000.0,
-    under: education_iv
-)
+// Pearl's do-operator removes confounding
+let intervened = do_intervention(dag, 1)
 
-// .epsilon gates on causal confidence
-if cf.epsilon > 0.90 {
-    report_finding(cf)  // type-safe causal claim
-}`,
+// Average treatment effect with epistemic uncertainty
+let ate = average_treatment_effect(dag, 0, 1)`,
   },
   {
     id: 'resources',
@@ -95,7 +96,7 @@ def close_file(h):
 h = FileHandle(42)
 close_file(h)
 close_file(h) # Oops, double free!
-# The type system doesn't stop you from using 
+# The type system doesn't stop you from using
 # a closed resource or forgetting to close it.`,
     sounio: `// Sounio: linear types for strict ownership
 linear struct FileHandle {
@@ -108,11 +109,11 @@ fn close_file(h: FileHandle) -> i32 {
 
 fn main() {
     let handle = FileHandle { fd: 42 }
-    
+
     // Consumes the linear resource
     let result = close_file(handle)
-    
-    // let err = close_file(handle) 
+
+    // let err = close_file(handle)
     // ^ COMPILE ERROR: use of consumed linear value!
 }
 // Enforces no-cloning and no-dropping at compile time.`,
@@ -121,8 +122,17 @@ fn main() {
 
 export default function CodeExamples() {
   const [activeTab, setActiveTab] = useState('uncertainty');
+  const [codeExpanded, setCodeExpanded] = useState<Record<string, boolean>>({});
+  const { audience } = useAudience();
 
   const activeExample = examples.find((e) => e.id === activeTab) || examples[0];
+  const isScientist = audience === 'scientist';
+  const isExpanded = codeExpanded[activeTab] ?? !isScientist;
+  const explanation = codeExplanations[activeTab];
+
+  const toggleCode = () => {
+    setCodeExpanded((prev) => ({ ...prev, [activeTab]: !isExpanded }));
+  };
 
   return (
     <section id="code" className="py-32 bg-[var(--color-surface-primary)]">
@@ -132,7 +142,9 @@ export default function CodeExamples() {
             See the Difference
           </h2>
           <p className="text-lg text-[var(--color-text-secondary)] max-w-2xl mx-auto">
-            Python computes the number. Sounio computes what you can trust.
+            {isScientist
+              ? 'Your current tools compute the number. Sounio computes what you can trust about that number.'
+              : 'Python computes the number. Sounio computes what you can trust.'}
           </p>
         </div>
 
@@ -169,9 +181,11 @@ export default function CodeExamples() {
                 example.py
               </span>
             </div>
-            <pre className="p-6 bg-[#0d1117] text-sm leading-relaxed overflow-x-auto min-h-[400px]">
-              <code className="text-[#e6edf3]">{activeExample.python}</code>
-            </pre>
+            <div className={isScientist ? `code-collapsible ${isExpanded ? 'expanded' : 'collapsed'}` : ''}>
+              <pre className="p-6 bg-[#0d1117] text-sm leading-relaxed overflow-x-auto min-h-[400px]">
+                <code className="text-[#e6edf3]">{activeExample.python}</code>
+              </pre>
+            </div>
           </div>
 
           {/* Sounio panel */}
@@ -186,11 +200,30 @@ export default function CodeExamples() {
                 example.sio
               </span>
             </div>
-            <pre className="p-6 bg-[#0d1117] text-sm leading-relaxed overflow-x-auto min-h-[400px]">
-              <code className="text-[#e6edf3]">{activeExample.sounio}</code>
-            </pre>
+            <div className={isScientist ? `code-collapsible ${isExpanded ? 'expanded' : 'collapsed'}` : ''}>
+              <pre className="p-6 bg-[#0d1117] text-sm leading-relaxed overflow-x-auto min-h-[400px]">
+                <code className="text-[#e6edf3]">{activeExample.sounio}</code>
+              </pre>
+            </div>
+            {isScientist && (
+              <div className="px-4 py-3 bg-[#0d1117] border-t border-[var(--glass-border)] flex justify-center">
+                <button onClick={toggleCode} className="code-toggle-btn">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d={isExpanded ? "M19 9l-7 7-7-7" : "M9 5l7 7-7 7"} />
+                  </svg>
+                  {isExpanded ? 'Hide code' : 'Show code'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
+
+        {/* Explanation panel for scientist mode */}
+        {isScientist && explanation && (
+          <div className="explanation-panel rounded-2xl mt-4 max-w-6xl mx-auto">
+            <strong>In plain language: </strong>{explanation}
+          </div>
+        )}
 
       </div>
     </section>

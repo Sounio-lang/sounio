@@ -163,18 +163,21 @@ fn main() -> i32 with IO {
   },
   {
     name: 'Causal Types',
-    code: `// CausalEffect<T> carries an intervention identifier.
-// The compiler verifies do-calculus identifiability at type-check time.
-fn apply_treatment(dose: Knowledge<mg>) -> CausalEffect<mg> with IO {
-    let effect: CausalEffect<mg> = intervene(dose, on: "blood_pressure")
-    print("Causal intervention typed")
-    effect
+    code: `// Causal DAG with epistemic edge uncertainty
+// Intervention<T> and Counterfactual<T> are compiler-level types
+fn build_dag() -> i32 with IO {
+    var dag = causal_dag_new()
+    dag = dag_add_node(dag, 0)  // treatment
+    dag = dag_add_node(dag, 1)  // outcome
+    dag = dag_add_edge(dag, 0, 1,
+        ec_beta_new(8.0, 2.0), 0.5, 0.1)
+    let intervened = do_intervention(dag, 1)
+    print("Causal intervention applied")
+    0
 }
 
 fn main() -> i32 with IO {
-    let k = measure(200.0, uncertainty: 5.0)
-    apply_treatment(k)
-    0
+    build_dag()
 }`,
   },
   {

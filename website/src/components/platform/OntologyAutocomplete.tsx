@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-// Mock data to simulate the 15M+ ontology database
+// Mock data to simulate the ontology database (stdlib modules exist; type-level integration planned for 2026)
 const ONTOLOGY_DB = [
   {
     id: "SNOMED:22298006",
@@ -50,7 +50,7 @@ export function OntologyAutocomplete() {
     <div className="relative w-full max-w-2xl mx-auto font-sans">
       <div className="flex flex-col gap-2">
         <label className="text-sm font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
-          Ontology Term Resolution (15M+ Entities)
+          Ontology Term Resolution (Stdlib Modules)
         </label>
         <div className="relative">
           <input

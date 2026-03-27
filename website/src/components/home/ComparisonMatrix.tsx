@@ -1,286 +1,163 @@
-import React, { useState } from 'react';
+import { useAudience } from '../../lib/useAudience';
+import { useState } from 'react';
 
-interface Scenario {
-  id: string;
-  label: string;
-  dimension: string;
-  traditional: {
-    lang: string;
-    code: string;
-    lines: number;
-    issues: string[];
-  };
-  sounio: {
-    code: string;
-    lines: number;
-    advantages: string[];
-  };
-}
-
-const scenarios: Scenario[] = [
+const scenarios = [
   {
-    id: 'uncertainty',
-    label: 'Uncertainty Propagation',
-    dimension: 'Every measurement carries doubt. How does the language handle it?',
-    traditional: {
-      lang: 'Python + NumPy',
-      code: `import numpy as np
-
-value = 9.8
-std_dev = 0.3
-
-# Manual propagation
-derived = value * 2.5
-derived_err = std_dev * 2.5  # hope this is right
-
-# Manual threshold check
-if derived_err / derived < 0.05:
-    approve(derived)
-else:
-    # What was the original source?
-    # Who measured it? When?
-    remeasure()  # no provenance`,
-      lines: 14,
-      issues: [
-        'Uncertainty is a separate variable — easy to lose',
-        'Propagation rules are manual and error-prone',
-        'No provenance: source identity is gone',
-      ],
-    },
-    sounio: {
-      code: `let c: Knowledge<f64> = Knowledge(
-  9.8,
-  ε=0.97,
-  prov="lab_run_042"
+    id: 'epistemic',
+    scientistTitle: 'Numbers Without Context Are Dangerous',
+    technicalTitle: 'Epistemic Uncertainty & Provenance',
+    problem: 'Traditional tools lose where your data came from and how reliable it really is.',
+    scientistExplanation:
+      'Sounio automatically tracks provenance and uncertainty for every measurement. When confidence drops too low, it warns you \u2014 before you draw the wrong conclusion.',
+    researchImpact: [
+      'Automatic GUM-compliant error propagation',
+      'Full audit trail of every data source',
+      'Safety gates that prevent overconfident results',
+      'Reproducible and defensible findings',
+    ],
+    status: 'Fully implemented',
+    code: `let weight: Knowledge<f64> = Knowledge(
+    75.3,
+    \u03B5=0.98,
+    prov="clinical_scale_001"
+)
+let height: Knowledge<f64> = Knowledge(
+    1.82,
+    \u03B5=0.99,
+    prov="stadiometer_002"
 )
 
-let derived: Knowledge<f64> = c * 2.5  // uncertainty auto-propagates
+let bmi: Knowledge<f64> = weight / (height * height)
+// bmi.value = 22.74, bmi.\u03B5 = 0.96, provenance tracked
 
-if derived.ε > 0.95 {
-  approve(derived)  // provenance travels with it
+if bmi.\u03B5 >= 0.95 {
+    approve_for_diagnosis(bmi)
+} else {
+    request_remeasurement(bmi)
 }`,
-      lines: 10,
-      advantages: [
-        'Uncertainty is part of the type — impossible to forget',
-        'Propagation is automatic through all operations',
-        'Provenance tracks the full measurement chain',
-      ],
-    },
   },
   {
     id: 'causal',
-    label: 'Causal Integration',
-    dimension: 'Statistical correlation is not causation. Can the type system express interventions and counterfactuals?',
-    traditional: {
-      lang: 'Python (DoWhy / manual)',
-      code: `import dowhy
+    scientistTitle: 'Correlation Is Not Causation',
+    technicalTitle: 'Causal Reasoning',
+    problem: 'Most code cannot tell the difference between association and real cause.',
+    scientistExplanation:
+      'Sounio lets you build causal models and apply interventions that remove confounding. You get the true effect size \u2014 not just statistical correlation.',
+    researchImpact: [
+      'True treatment effect quantification',
+      'Automatic confounder removal',
+      'Stronger causal claims in papers',
+      'Better clinical and policy decisions',
+    ],
+    status: 'Stdlib \u2014 actively maturing',
+    code: `var dag = causal_dag_new()
+dag = dag_add_node(dag, 0)  // treatment
+dag = dag_add_node(dag, 1)  // outcome
+dag = dag_add_edge(dag, 0, 1,
+    ec_beta_new(8.0, 2.0), 0.5, 0.1)
 
-# Causal graph is a string — opaque to type checker
-model = CausalModel(
-    data=df,
-    graph="digraph {Education -> Earnings}"
-)
-# intervention is a plain dict, no type safety
-do_result = model.do({"Education": 1})
-
-# Counterfactual: manual estimate, no confidence
-cf_earnings = predict_cf(do_result)
-# Was cf_earnings reliable? The type won't say.`,
-      lines: 12,
-      issues: [
-        'Interventions are plain dicts — type system is blind',
-        'No confidence attached to counterfactual estimates',
-        'Refactoring variable names breaks graphs silently',
-      ],
-    },
-    sounio: {
-      code: `// Causal intervention: do(Treatment = active)
-let treated: Intervention<bool> = intervene(true)
-
-// Counterfactual: what earnings if Alice had education?
-let cf: Counterfactual<f64> = counterfactual(
-  observed: 30000.0,
-  under: education_iv
-)
-
-if cf.epsilon > 0.90 {
-  report_finding(cf)  // confidence gates the decision
-}`,
-      lines: 11,
-      advantages: [
-        'Intervention<T> and Counterfactual<T> are first-class types',
-        '.epsilon field carries causal confidence — gates control flow',
-        'Compiler enforces epistemic wrapper; accidental drops are type errors',
-      ],
-    },
+// Pearl's do-operator removes confounding
+let intervened = do_intervention(dag, 1)
+let ate = average_treatment_effect(dag, 0, 1)`,
   },
   {
-    id: 'resources',
-    label: 'Resource Safety',
-    dimension: 'Forgetting to close a file or release a lock causes leaks. How are resources managed?',
-    traditional: {
-      lang: 'C (Manual)',
-      code: `void process(int fd) {
-    FILE* f = fdopen(fd, "r");
-    
-    if (error_condition) {
-        // Forgot to fclose(f) before return!
-        // Resource leak in error path.
-        return; 
-    }
-    
-    fclose(f);
+    id: 'knowledge',
+    scientistTitle: 'Knowledge With Guardrails',
+    technicalTitle: 'Knowledge<T> + Safety Gates',
+    problem: 'Scientific data always carries uncertainty that normal code silently ignores.',
+    scientistExplanation:
+      'Sounio wraps your data in Knowledge<T> and enforces confidence thresholds. It refuses to let unsafe or unreliable results proceed.',
+    researchImpact: [
+      'Prevents dangerous overconfidence',
+      "Enforces your lab\u2019s risk standards",
+      'Clear compliance and audit trail',
+      'Built-in protection for patients and conclusions',
+    ],
+    status: 'Fully implemented',
+    code: `let dose: Knowledge<f64> = Knowledge(
+    500.0,
+    \u03B5=0.92,
+    prov="ASHP_2020_RCT"
+)
+
+let validated: Validated<f64> = validate(
+    dose, threshold: 0.85
+)
+
+if dose.\u03B5 >= 0.85 {
+    approve_dose(dose)
+} else {
+    request_remeasurement(dose)  // safety gate triggered
 }`,
-      lines: 10,
-      issues: [
-        'Resource cleanup is purely convention',
-        'Early returns easily bypass cleanup logic',
-        'Double-free and use-after-free bugs common',
-      ],
-    },
-    sounio: {
-      code: `linear struct FileHandle { fd: i32 }
-
-fn process(h: FileHandle) {
-    if error_condition {
-        // Compiler ERROR: \`h\` must be consumed!
-        // Cannot return without closing or moving \`h\`
-        return
-    }
-    
-    close(h) // Consumes the linear value
-}`,
-      lines: 10,
-      advantages: [
-        'Linear structs must be consumed exactly once',
-        'Compiler prevents leaks on all code paths',
-        'Cannot accidentally use a resource after closing',
-      ],
-    },
-  },
-  {
-    id: 'ontology',
-    label: 'Ontology Integration',
-    dimension: 'Scientific data requires standardized terminologies. How are domain concepts validated?',
-    traditional: {
-      lang: 'Python / JSON',
-      code: `# Stringly-typed concepts, no domain validation
-patient_data = {
-    "diagnosis": "SNOMED:22298006", # Myocardial infarction
-    "lab_test": "LOINC:718-7"      # Hemoglobin
-}
-
-def analyze_cardiac_event(dx_code):
-    # Just a string check. Is this code a specific type 
-    # of heart disease? The compiler doesn't know.
-    if dx_code == "SNOMED:22298006":
-        run_protocol()`,
-      lines: 11,
-      issues: [
-        'Ontology IDs are opaque strings prone to typos',
-        'No compile-time validation of SNOMED/LOINC codes',
-        'Subsumption (Is-A) hierarchy is lost in the language',
-      ],
-    },
-    sounio: {
-      code: `import medical::snomed::{Disease, MyocardialInfarction}
-
-// Compiler natively resolves the 15M+ term hierarchy
-fn analyze_cardiac_event(dx: Disease) {
-    match dx {
-        // MyocardialInfarction is type-checked as a valid Disease
-        MyocardialInfarction => run_protocol(),
-        _ => default_care()
-    }
-}
-
-let dx = MyocardialInfarction
-analyze_cardiac_event(dx)`,
-      lines: 12,
-      advantages: [
-        '15M+ scientific entities bound directly as language types',
-        'Compile-time validation guarantees valid ontology terms',
-        'Type system understands subsumption (child/parent relations)',
-      ],
-    },
   },
 ];
 
-export function ComparisonMatrix() {
-  const [activeId, setActiveId] = useState(scenarios[0].id);
-  const active = scenarios.find((s) => s.id === activeId)!;
+export default function ComparisonMatrix() {
+  const { audience } = useAudience();
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const isScientist = audience === 'scientist';
 
   return (
-    <div className="comparison-matrix">
-      <div className="flex flex-wrap gap-2 mb-8">
-        {scenarios.map((s) => (
+    <div className="grid gap-8">
+      {scenarios.map((s) => (
+        <div key={s.id} className="glass glass-specular rounded-[var(--radius-xl)] p-[clamp(1.1rem,3vw,2rem)]">
+          <h3 className="text-[clamp(1.3rem,3vw,1.7rem)] font-bold text-[var(--color-text-primary)] mb-3">
+            {isScientist ? s.scientistTitle : s.technicalTitle}
+          </h3>
+
+          <p className="text-[var(--color-text-secondary)] mb-6">{s.problem}</p>
+
+          {isScientist && (
+            <div className="mb-8 p-5 bg-[rgba(0,0,0,0.25)] rounded-xl border border-[var(--glass-border)]">
+              <p className="text-[1.02rem] leading-relaxed text-[var(--color-text-primary)]">
+                {s.scientistExplanation}
+              </p>
+            </div>
+          )}
+
+          <div className="mb-8">
+            <p className="uppercase text-xs tracking-[0.12em] text-[var(--color-accent-teal)] font-semibold mb-3">
+              What this means for your research
+            </p>
+            <ul className="grid md:grid-cols-2 gap-2.5 text-sm list-none p-0 m-0">
+              {s.researchImpact.map((item, i) => (
+                <li key={i} className="flex gap-2.5 text-[var(--color-text-secondary)]">
+                  <span className="text-[var(--color-accent-teal)] shrink-0">\u2192</span> {item}
+                </li>
+              ))}
+            </ul>
+          </div>
+
           <button
-            key={s.id}
-            onClick={() => setActiveId(s.id)}
-            className={`
-              px-4 py-2 rounded-full text-sm font-semibold transition-all duration-200
-              ${activeId === s.id
-                ? 'bg-[var(--color-accent-gold)] text-[#10233e] shadow-lg shadow-[var(--color-accent-gold)]/20'
-                : 'bg-[rgba(255,255,255,0.06)] text-[var(--color-text-secondary)] border border-[var(--glass-border)] hover:border-[var(--color-accent-gold)]/40'
-              }
-            `}
+            onClick={() => setExpanded((prev) => ({ ...prev, [s.id]: !prev[s.id] }))}
+            className="w-full flex items-center justify-between bg-[rgba(0,0,0,0.2)] hover:bg-[rgba(0,0,0,0.3)] px-5 py-3.5 rounded-xl border border-[var(--glass-border)] transition-colors text-left"
           >
-            {s.label}
+            <span className="font-semibold text-sm text-[var(--color-text-secondary)]">
+              {isScientist ? 'Show the actual Sounio code' : 'Show code comparison'}
+            </span>
+            <span
+              className="text-[var(--color-text-tertiary)] transition-transform duration-300"
+              style={{ transform: expanded[s.id] ? 'rotate(180deg)' : 'rotate(0deg)' }}
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </span>
           </button>
-        ))}
-      </div>
 
-      <p className="text-[var(--color-text-secondary)] text-[0.95rem] mb-6 max-w-[60ch]">
-        {active.dimension}
-      </p>
+          {expanded[s.id] && (
+            <pre className="mt-2 px-5 py-5 bg-[#0d1117] rounded-xl text-[0.82rem] leading-relaxed text-emerald-400/90 font-mono overflow-x-auto">
+              {s.code}
+            </pre>
+          )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Traditional Side */}
-        <div className="glass rounded-[var(--radius-xl)] overflow-hidden border border-red-500/20">
-          <div className="flex items-center justify-between px-5 py-3 bg-red-500/10 border-b border-red-500/20">
-            <span className="text-sm font-semibold text-red-400">{active.traditional.lang}</span>
-            <span className="text-xs text-[var(--color-text-tertiary)]">{active.traditional.lines} lines</span>
-          </div>
-          <pre className="p-5 overflow-x-auto text-[0.82rem] leading-relaxed text-[var(--color-text-secondary)] bg-[rgba(0,0,0,0.2)]">
-            <code>{active.traditional.code}</code>
-          </pre>
-          <div className="p-5 border-t border-[var(--glass-border)]">
-            <ul className="list-none p-0 m-0 flex flex-col gap-2">
-              {active.traditional.issues.map((issue, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm text-red-400/80">
-                  <svg className="w-4 h-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                  {issue}
-                </li>
-              ))}
-            </ul>
+          <div className="mt-4">
+            <span className="px-3 py-1 rounded-full text-[0.68rem] font-semibold tracking-[0.06em] bg-[rgba(255,255,255,0.06)] text-[var(--color-text-tertiary)] border border-[var(--glass-border)]">
+              {s.status}
+            </span>
           </div>
         </div>
-
-        {/* Sounio Side */}
-        <div className="glass glass-specular rounded-[var(--radius-xl)] overflow-hidden border border-[var(--color-accent-green)]/30">
-          <div className="flex items-center justify-between px-5 py-3 bg-[var(--color-accent-green)]/10 border-b border-[var(--color-accent-green)]/20">
-            <span className="text-sm font-semibold text-[var(--color-accent-green)]">Sounio</span>
-            <span className="text-xs text-[var(--color-text-tertiary)]">{active.sounio.lines} lines</span>
-          </div>
-          <pre className="p-5 overflow-x-auto text-[0.82rem] leading-relaxed text-[var(--color-text-primary)] bg-[rgba(0,0,0,0.15)]">
-            <code>{active.sounio.code}</code>
-          </pre>
-          <div className="p-5 border-t border-[var(--glass-border)]">
-            <ul className="list-none p-0 m-0 flex flex-col gap-2">
-              {active.sounio.advantages.map((adv, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm text-[var(--color-accent-green)]">
-                  <svg className="w-4 h-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                  </svg>
-                  {adv}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      </div>
+      ))}
     </div>
   );
 }
