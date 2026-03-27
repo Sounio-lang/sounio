@@ -1,75 +1,68 @@
 //@ run-pass
 //@ expect-stdout: ALL 10 TESTS PASSED
-//@ expect-stdout: Failed: 0
+
 // Epistemic Molecule H2O Test Suite
-//
-// Self-contained tests for the epistemic chemical molecule graph.
-// Every bond carries Merkle provenance, variance, and confidence.
-// The hardware accumulator bound (delta_32 < 96) is verified.
-//
-// All functions inlined (tests cannot import stdlib).
+// Rewritten with global flat arrays (no local struct vars) to work with
+// lean_single limitations (var = struct_fn() crashes compiler).
 
 // ============================================================================
-// MERKLE INFRASTRUCTURE (inlined from hardware/rtl/kaxi/merkle_root_lane.sio)
+// GLOBAL MOLECULE STATE
 // ============================================================================
 
-let MOL_MERKLE_SALT_A: i64 = 0x4F4D4547
-let MOL_MERKLE_SALT_B: i64 = 0x4147454E
-let MOL_MERKLE_SALT_C: i64 = 0x45534953
-let MOL_MERKLE_SALT_D: i64 = 0x76312E30
+var G_ATOM_Z:    [i64; 256] = [0; 256]  // atomic numbers
+var G_ATOM_MASS: [i64; 256] = [0; 256]  // mass Q16.16
+var G_ATOM_PROV: [i64; 256] = [0; 256]  // provenance
+var G_ATOM_CNT:  i64 = 0
 
-let MOL_MAX_ATOMS: i64 = 256
-let MOL_MAX_BONDS: i64 = 512
-let MOL_BOND_SINGLE: i64 = 1
+var G_BOND_SRC:  [i64; 512] = [0; 512]
+var G_BOND_DST:  [i64; 512] = [0; 512]
+var G_BOND_TYPE: [i64; 512] = [0; 512]
+var G_BOND_PROV: [i64; 512] = [0; 512]
+var G_BOND_VAR:  [i64; 512] = [0; 512]
+var G_BOND_CONF: [i64; 512] = [0; 512]
+var G_BOND_CNT:  i64 = 0
+var G_MOL_PROV:  i64 = 0
+var G_ATOM_ID:   i64 = 0  // last added atom id
 
-fn mol_merkle_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
+// ============================================================================
+// MERKLE / HASH (decimal salts to avoid hex literal issues)
+// 0x4F4D4547 = 1330531655, 0x4147454E = 1095715150
+// 0x45534953 = 1163347283, 0x76312E30 = 1983271984
+// ============================================================================
+
+fn m_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
     ((a ^ b) + c + salt) ^ (a << 5) ^ (b >> 7)
 }
 
-fn mol_merkle_root_lane_l64(
-    p0: i64, p1: i64, p2: i64, p3: i64, p4: i64
-) -> i64 {
-    let h0 = mol_merkle_mix(p0, p1, p2, MOL_MERKLE_SALT_A)
-    let h1 = mol_merkle_mix(p3, p4, h0, MOL_MERKLE_SALT_B)
-    let h2 = mol_merkle_mix(h0, h1, p0 ^ p3, MOL_MERKLE_SALT_C)
-    mol_merkle_mix(h1, h2, p1 ^ p2, MOL_MERKLE_SALT_D)
+fn m_root(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64) -> i64 {
+    let h0 = m_mix(p0, p1, p2, 1330531655)
+    let h1 = m_mix(p3, p4, h0, 1095715150)
+    let h2 = m_mix(h0, h1, p0 ^ p3, 1163347283)
+    m_mix(h1, h2, p1 ^ p2, 1983271984)
 }
 
-fn mol_atom_hash(atomic_number: i64, mass_q16_16: i64) -> i64 {
+fn m_atom_hash(z: i64, mass: i64) -> i64 {
     var hash: i64 = 5381
-    hash = hash * 33 + atomic_number
-    hash = hash * 33 + mass_q16_16
+    hash = hash * 33 + z
+    hash = hash * 33 + mass
     hash & 9223372036854775807
 }
 
-fn mol_bond_hash(src: i64, dst: i64, bond_type: i64) -> i64 {
+fn m_bond_hash(src: i64, dst: i64, btype: i64) -> i64 {
     var hash: i64 = 5381
     hash = hash * 33 + src
     hash = hash * 33 + dst
-    hash = hash * 33 + bond_type
+    hash = hash * 33 + btype
     hash & 9223372036854775807
 }
 
-fn mol_provenance_seed(item_hash: i64) -> i64 {
-    mol_merkle_root_lane_l64(0, item_hash, 0, 0, 1)
+fn m_seed(h: i64) -> i64 { m_root(0, h, 0, 0, 1) }
+
+fn m_merge(root: i64, h: i64, v: i64, c: i64) -> i64 {
+    m_root(root, h, v, c, root ^ h)
 }
 
-fn mol_provenance_merge(
-    existing_root_l64: i64,
-    item_hash: i64,
-    variance_q32_32: i64,
-    confidence_beta: i64
-) -> i64 {
-    mol_merkle_root_lane_l64(
-        existing_root_l64,
-        item_hash,
-        variance_q32_32,
-        confidence_beta,
-        existing_root_l64 ^ item_hash
-    )
-}
-
-fn mol_delta_32(fidelity: i64, provenance: i64, quantum: i64) -> i64 {
+fn m_delta32(fidelity: i64, provenance: i64, quantum: i64) -> i64 with Div {
     let frac_f = fidelity - (fidelity / 8) * 8
     let frac_p = provenance - (provenance / 16) * 16
     let frac_q = quantum - (quantum / 32) * 32
@@ -77,417 +70,255 @@ fn mol_delta_32(fidelity: i64, provenance: i64, quantum: i64) -> i64 {
 }
 
 // ============================================================================
-// EPISTEMIC MOLECULE STRUCT (inlined)
+// MOLECULE OPERATIONS ON GLOBALS
 // ============================================================================
 
-struct EpistemicMolecule {
-    atom_atomic_number: [i64; 256],
-    atom_mass_q16_16: [i64; 256],
-    atom_provenance_l64: [i64; 256],
-    atom_count: i64,
-
-    bond_src: [i64; 512],
-    bond_dst: [i64; 512],
-    bond_type: [i64; 512],
-    bond_provenance_l64: [i64; 512],
-    bond_variance_q32_32: [i64; 512],
-    bond_confidence_beta: [i64; 512],
-    bond_count: i64,
-
-    mol_provenance_l64: i64,
-}
-
-fn mol_new() -> EpistemicMolecule {
-    EpistemicMolecule {
-        atom_atomic_number: [0; 256],
-        atom_mass_q16_16: [0; 256],
-        atom_provenance_l64: [0; 256],
-        atom_count: 0,
-
-        bond_src: [0; 512],
-        bond_dst: [0; 512],
-        bond_type: [0; 512],
-        bond_provenance_l64: [0; 512],
-        bond_variance_q32_32: [0; 512],
-        bond_confidence_beta: [0; 512],
-        bond_count: 0,
-
-        mol_provenance_l64: 0,
+fn g_mol_reset() with Mut, Panic {
+    var i: i64 = 0
+    while i < 256 { G_ATOM_Z[i] = 0; G_ATOM_MASS[i] = 0; G_ATOM_PROV[i] = 0; i = i + 1 }
+    i = 0
+    while i < 512 {
+        G_BOND_SRC[i] = 0; G_BOND_DST[i] = 0; G_BOND_TYPE[i] = 0
+        G_BOND_PROV[i] = 0; G_BOND_VAR[i] = 0; G_BOND_CONF[i] = 0
+        i = i + 1
     }
+    G_ATOM_CNT = 0
+    G_BOND_CNT = 0
+    G_MOL_PROV = 0
+    G_ATOM_ID = 0
 }
 
-fn mol_add_atom(
-    m: EpistemicMolecule,
-    atomic_number: i64,
-    mass_q16_16: i64
-) -> (EpistemicMolecule, i64) with Mut, Panic {
-    var mol = m
-    if mol.atom_count >= MOL_MAX_ATOMS {
-        return (mol, 0 - 1)
-    }
-    let id = mol.atom_count
-    mol.atom_atomic_number[id] = atomic_number
-    mol.atom_mass_q16_16[id] = mass_q16_16
-    let ah = mol_atom_hash(atomic_number, mass_q16_16)
-    mol.atom_provenance_l64[id] = mol_provenance_seed(ah)
-    mol.atom_count = mol.atom_count + 1
-    (mol, id)
+fn g_add_atom(z: i64, mass: i64) with Mut, Panic {
+    if G_ATOM_CNT >= 256 { G_ATOM_ID = 0 - 1; return }
+    let id = G_ATOM_CNT
+    G_ATOM_Z[id] = z
+    G_ATOM_MASS[id] = mass
+    G_ATOM_PROV[id] = m_seed(m_atom_hash(z, mass))
+    G_ATOM_CNT = G_ATOM_CNT + 1
+    G_ATOM_ID = id
 }
 
-fn mol_atom_count(m: EpistemicMolecule) -> i64 {
-    m.atom_count
+fn g_add_bond(src: i64, dst: i64, btype: i64) with Mut, Panic {
+    if src < 0 { return }
+    if src >= G_ATOM_CNT { return }
+    if dst < 0 { return }
+    if dst >= G_ATOM_CNT { return }
+    if G_BOND_CNT >= 512 { return }
+    let id = G_BOND_CNT
+    G_BOND_SRC[id] = src
+    G_BOND_DST[id] = dst
+    G_BOND_TYPE[id] = btype
+    G_BOND_PROV[id] = m_seed(m_bond_hash(src, dst, btype))
+    G_BOND_VAR[id] = 0
+    G_BOND_CONF[id] = 1
+    G_BOND_CNT = G_BOND_CNT + 1
 }
 
-fn mol_atom_provenance_at(m: EpistemicMolecule, atom_id: i64) -> i64 with Panic, Div {
-    if atom_id < 0 || atom_id >= m.atom_count {
-        return 0
-    }
-    m.atom_provenance_l64[atom_id]
-}
-
-fn mol_valid_atom(m: EpistemicMolecule, atom_id: i64) -> bool {
-    atom_id >= 0 && atom_id < m.atom_count
-}
-
-fn mol_add_bond(
-    m: EpistemicMolecule,
-    src: i64,
-    dst: i64,
-    btype: i64
-) -> EpistemicMolecule with Mut, Panic {
-    var mol = m
-    if !mol_valid_atom(mol, src) {
-        return mol
-    }
-    if !mol_valid_atom(mol, dst) {
-        return mol
-    }
-    if mol.bond_count >= MOL_MAX_BONDS {
-        return mol
-    }
-    let id = mol.bond_count
-    mol.bond_src[id] = src
-    mol.bond_dst[id] = dst
-    mol.bond_type[id] = btype
-    let bh = mol_bond_hash(src, dst, btype)
-    mol.bond_provenance_l64[id] = mol_provenance_seed(bh)
-    mol.bond_variance_q32_32[id] = 0
-    mol.bond_confidence_beta[id] = 1
-    mol.bond_count = mol.bond_count + 1
-    mol
-}
-
-fn mol_bond_count(m: EpistemicMolecule) -> i64 {
-    m.bond_count
-}
-
-fn mol_degree(m: EpistemicMolecule, atom_id: i64) -> i64 with Mut, Panic, Div {
+fn g_mol_degree(atom_id: i64) -> i64 with Mut, Div {
     var count: i64 = 0
     var i: i64 = 0
-    while i < m.bond_count {
-        if m.bond_src[i] == atom_id || m.bond_dst[i] == atom_id {
-            count = count + 1
-        }
+    while i < G_BOND_CNT {
+        if G_BOND_SRC[i] == atom_id { count = count + 1 }
+        if G_BOND_DST[i] == atom_id { count = count + 1 }
         i = i + 1
     }
     count
 }
 
-fn mol_has_bond(m: EpistemicMolecule, src: i64, dst: i64) -> bool with Mut, Panic, Div {
+fn g_has_bond(src: i64, dst: i64) -> i64 with Div {
     var i: i64 = 0
-    while i < m.bond_count {
-        if m.bond_src[i] == src && m.bond_dst[i] == dst {
-            return true
-        }
+    while i < G_BOND_CNT {
+        if G_BOND_SRC[i] == src && G_BOND_DST[i] == dst { return 1 }
         i = i + 1
     }
-    false
+    0
 }
 
-fn mol_bond_provenance(m: EpistemicMolecule, bond_id: i64) -> i64 with Panic, Div {
-    if bond_id < 0 || bond_id >= m.bond_count {
-        return 0
-    }
-    m.bond_provenance_l64[bond_id]
-}
-
-fn mol_bond_variance(m: EpistemicMolecule, bond_id: i64) -> i64 with Panic, Div {
-    if bond_id < 0 || bond_id >= m.bond_count {
-        return 0
-    }
-    m.bond_variance_q32_32[bond_id]
-}
-
-fn mol_bond_confidence(m: EpistemicMolecule, bond_id: i64) -> i64 with Panic, Div {
-    if bond_id < 0 || bond_id >= m.bond_count {
-        return 0
-    }
-    m.bond_confidence_beta[bond_id]
-}
-
-fn mol_update_provenance(m: EpistemicMolecule) -> EpistemicMolecule with Mut, Panic, Div {
-    var mol = m
+fn g_update_mol_prov() with Mut, Div {
     var root: i64 = 0
     var i: i64 = 0
-    while i < mol.bond_count {
-        root = mol_merkle_mix(
-            root,
-            mol.bond_provenance_l64[i],
-            mol.bond_variance_q32_32[i],
-            MOL_MERKLE_SALT_A
-        )
+    while i < G_BOND_CNT {
+        root = m_mix(root, G_BOND_PROV[i], G_BOND_VAR[i], 1330531655)
         i = i + 1
     }
-    mol.mol_provenance_l64 = root
-    mol
-}
-
-fn mol_molecule_provenance(m: EpistemicMolecule) -> i64 {
-    m.mol_provenance_l64
+    G_MOL_PROV = root
 }
 
 // ============================================================================
-// TEST FUNCTIONS
+// TESTS
 // ============================================================================
 
-fn test_empty_molecule() -> bool {
-    let mol = mol_new()
-    mol_atom_count(mol) == 0 && mol_bond_count(mol) == 0
-        && mol_molecule_provenance(mol) == 0
+fn test_01_empty() -> i64 {
+    g_mol_reset()
+    if G_ATOM_CNT != 0 { return 0 }
+    if G_BOND_CNT != 0 { return 0 }
+    if G_MOL_PROV != 0 { return 0 }
+    1
 }
 
-fn test_add_atoms() -> bool with Mut, Panic {
-    var mol = mol_new()
-    // H(Z=1, mass=1.008 as Q16.16 ~= 66060)
-    let p1 = mol_add_atom(mol, 1, 66060)
-    mol = p1.0
-    // O(Z=8, mass=15.999 as Q16.16 ~= 1048510)
-    let p2 = mol_add_atom(mol, 8, 1048510)
-    mol = p2.0
-    // H(Z=1)
-    let p3 = mol_add_atom(mol, 1, 66060)
-    mol = p3.0
-    mol_atom_count(mol) == 3 && p1.1 == 0 && p2.1 == 1 && p3.1 == 2
+fn test_02_add_atoms() -> i64 with Mut, Panic, Div {
+    g_mol_reset()
+    g_add_atom(1, 66060)
+    let id_h1 = G_ATOM_ID
+    g_add_atom(8, 1048510)
+    let id_o = G_ATOM_ID
+    g_add_atom(1, 66060)
+    let id_h2 = G_ATOM_ID
+    if G_ATOM_CNT != 3 { return 0 }
+    if id_h1 != 0 { return 0 }
+    if id_o != 1 { return 0 }
+    if id_h2 != 2 { return 0 }
+    1
 }
 
-fn test_add_bonds() -> bool with Mut, Panic, Div {
-    var mol = mol_new()
-    let p0 = mol_add_atom(mol, 1, 66060)
-    mol = p0.0
-    let p1 = mol_add_atom(mol, 8, 1048510)
-    mol = p1.0
-    let p2 = mol_add_atom(mol, 1, 66060)
-    mol = p2.0
-    mol = mol_add_bond(mol, 0, 1, MOL_BOND_SINGLE)
-    mol = mol_add_bond(mol, 1, 2, MOL_BOND_SINGLE)
-    let ok1 = mol_bond_count(mol) == 2
-    let ok2 = mol_has_bond(mol, 0, 1)
-    let ok3 = mol_has_bond(mol, 1, 2)
-    let ok4 = !mol_has_bond(mol, 0, 2)
-    ok1 && ok2 && ok3 && ok4
+fn test_03_add_bonds() -> i64 with Mut, Panic, Div {
+    g_mol_reset()
+    g_add_atom(1, 66060)
+    g_add_atom(8, 1048510)
+    g_add_atom(1, 66060)
+    g_add_bond(0, 1, 1)
+    g_add_bond(1, 2, 1)
+    if G_BOND_CNT != 2 { return 0 }
+    if g_has_bond(0, 1) == 0 { return 0 }
+    if g_has_bond(1, 2) == 0 { return 0 }
+    if g_has_bond(0, 2) != 0 { return 0 }
+    1
 }
 
-fn test_degree_check() -> bool with Mut, Panic, Div {
-    var mol = mol_new()
-    let p0 = mol_add_atom(mol, 1, 66060)
-    mol = p0.0
-    let p1 = mol_add_atom(mol, 8, 1048510)
-    mol = p1.0
-    let p2 = mol_add_atom(mol, 1, 66060)
-    mol = p2.0
-    mol = mol_add_bond(mol, 0, 1, MOL_BOND_SINGLE)
-    mol = mol_add_bond(mol, 1, 2, MOL_BOND_SINGLE)
-    let deg_o = mol_degree(mol, 1)
-    let deg_h1 = mol_degree(mol, 0)
-    let deg_h2 = mol_degree(mol, 2)
-    deg_o == 2 && deg_h1 == 1 && deg_h2 == 1
+fn test_04_degree_check() -> i64 with Mut, Panic, Div {
+    g_mol_reset()
+    g_add_atom(1, 66060)
+    g_add_atom(8, 1048510)
+    g_add_atom(1, 66060)
+    g_add_bond(0, 1, 1)
+    g_add_bond(1, 2, 1)
+    let deg_o = g_mol_degree(1)
+    let deg_h1 = g_mol_degree(0)
+    let deg_h2 = g_mol_degree(2)
+    if deg_o != 2 { return 0 }
+    if deg_h1 != 1 { return 0 }
+    if deg_h2 != 1 { return 0 }
+    1
 }
 
-fn test_bond_provenance_seeded() -> bool with Mut, Panic, Div {
-    var mol = mol_new()
-    let p0 = mol_add_atom(mol, 8, 1048510)
-    mol = p0.0
-    let p1 = mol_add_atom(mol, 1, 66060)
-    mol = p1.0
-    mol = mol_add_bond(mol, 0, 1, MOL_BOND_SINGLE)
-    let prov = mol_bond_provenance(mol, 0)
-    let var_v = mol_bond_variance(mol, 0)
-    let conf = mol_bond_confidence(mol, 0)
-    prov != 0 && var_v == 0 && conf == 1
+fn test_05_bond_prov_seeded() -> i64 with Mut, Panic, Div {
+    g_mol_reset()
+    g_add_atom(8, 1048510)
+    g_add_atom(1, 66060)
+    g_add_bond(0, 1, 1)
+    if G_BOND_PROV[0] == 0 { return 0 }
+    if G_BOND_VAR[0] != 0 { return 0 }
+    if G_BOND_CONF[0] != 1 { return 0 }
+    1
 }
 
-fn test_molecule_provenance() -> bool with Mut, Panic, Div {
-    var mol = mol_new()
-    let p0 = mol_add_atom(mol, 1, 66060)
-    mol = p0.0
-    let p1 = mol_add_atom(mol, 8, 1048510)
-    mol = p1.0
-    let p2 = mol_add_atom(mol, 1, 66060)
-    mol = p2.0
-    mol = mol_add_bond(mol, 0, 1, MOL_BOND_SINGLE)
-    mol = mol_add_bond(mol, 1, 2, MOL_BOND_SINGLE)
-    mol = mol_update_provenance(mol)
-    mol_molecule_provenance(mol) != 0
+fn test_06_mol_prov_nonzero() -> i64 with Mut, Panic, Div {
+    g_mol_reset()
+    g_add_atom(1, 66060)
+    g_add_atom(8, 1048510)
+    g_add_atom(1, 66060)
+    g_add_bond(0, 1, 1)
+    g_add_bond(1, 2, 1)
+    g_update_mol_prov()
+    if G_MOL_PROV == 0 { return 0 }
+    1
 }
 
-fn test_different_bonds_different_provenance() -> bool with Mut, Panic, Div {
-    var mol = mol_new()
-    let p0 = mol_add_atom(mol, 1, 66060)
-    mol = p0.0
-    let p1 = mol_add_atom(mol, 8, 1048510)
-    mol = p1.0
-    let p2 = mol_add_atom(mol, 1, 66060)
-    mol = p2.0
-    mol = mol_add_bond(mol, 0, 1, MOL_BOND_SINGLE)
-    mol = mol_add_bond(mol, 1, 2, MOL_BOND_SINGLE)
-    let prov_b0 = mol_bond_provenance(mol, 0)
-    let prov_b1 = mol_bond_provenance(mol, 1)
-    // Different endpoints produce different provenance roots
-    prov_b0 != 0 && prov_b1 != 0 && prov_b0 != prov_b1
+fn test_07_diff_bonds_diff_prov() -> i64 with Mut, Panic, Div {
+    g_mol_reset()
+    g_add_atom(1, 66060)
+    g_add_atom(8, 1048510)
+    g_add_atom(1, 66060)
+    g_add_bond(0, 1, 1)
+    g_add_bond(1, 2, 1)
+    let p0 = G_BOND_PROV[0]
+    let p1 = G_BOND_PROV[1]
+    if p0 == 0 { return 0 }
+    if p1 == 0 { return 0 }
+    if p0 == p1 { return 0 }
+    1
 }
 
-fn test_delta_32_bound() -> bool with Mut, Panic, Div {
-    var mol = mol_new()
-    let p0 = mol_add_atom(mol, 8, 1048510)
-    mol = p0.0
-    let p1 = mol_add_atom(mol, 1, 66060)
-    mol = p1.0
-    mol = mol_add_bond(mol, 0, 1, MOL_BOND_SINGLE)
-    let var_v = mol_bond_variance(mol, 0)
-    let conf = mol_bond_confidence(mol, 0)
-    let delta = mol_delta_32(0, var_v, conf)
-    delta >= 0 && delta < 96
+fn test_08_delta32_bound() -> i64 with Mut, Panic, Div {
+    g_mol_reset()
+    g_add_atom(8, 1048510)
+    g_add_atom(1, 66060)
+    g_add_bond(0, 1, 1)
+    let delta = m_delta32(0, G_BOND_VAR[0], G_BOND_CONF[0])
+    if delta < 0 { return 0 }
+    if delta >= 96 { return 0 }
+    1
 }
 
-fn test_atom_provenance_nonzero() -> bool with Mut, Panic, Div {
-    var mol = mol_new()
-    let p0 = mol_add_atom(mol, 1, 66060)
-    mol = p0.0
-    let p1 = mol_add_atom(mol, 8, 1048510)
-    mol = p1.0
-    let prov_h = mol_atom_provenance_at(mol, 0)
-    let prov_o = mol_atom_provenance_at(mol, 1)
-    prov_h != 0 && prov_o != 0 && prov_h != prov_o
+fn test_09_atom_prov_nonzero() -> i64 with Mut, Panic, Div {
+    g_mol_reset()
+    g_add_atom(1, 66060)
+    g_add_atom(8, 1048510)
+    let prov_h = G_ATOM_PROV[0]
+    let prov_o = G_ATOM_PROV[1]
+    if prov_h == 0 { return 0 }
+    if prov_o == 0 { return 0 }
+    if prov_h == prov_o { return 0 }
+    1
 }
 
-fn test_bond_invalid_atoms_noop() -> bool with Mut, Panic {
-    var mol = mol_new()
-    // No atoms added — bond should be no-op
-    mol = mol_add_bond(mol, 0, 1, MOL_BOND_SINGLE)
-    mol_bond_count(mol) == 0
+fn test_10_invalid_bond_noop() -> i64 with Mut, Panic, Div {
+    g_mol_reset()
+    g_add_bond(0, 1, 1)
+    if G_BOND_CNT != 0 { return 0 }
+    1
 }
 
 // ============================================================================
 // MAIN
 // ============================================================================
 
-fn main() -> i32 with IO, Mut, Panic, Div {
-    println("=== Epistemic Molecule H2O Tests ===")
-    println("")
+fn main() -> i64 with IO, Mut, Panic, Div {
+    print("=== Epistemic Molecule H2O Tests ===\n")
 
-    var passed = 0
-    var failed = 0
+    var passed: i64 = 0
+    var failed: i64 = 0
 
     print("Test  1: Empty molecule.................. ")
-    if test_empty_molecule() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_01_empty() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  2: Add atoms (H, O, H)............ ")
-    if test_add_atoms() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_02_add_atoms() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  3: Add bonds (H-O, O-H)........... ")
-    if test_add_bonds() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_03_add_bonds() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  4: Degree check (O=2, H=1)........ ")
-    if test_degree_check() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_04_degree_check() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  5: Bond provenance seeded.......... ")
-    if test_bond_provenance_seeded() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_05_bond_prov_seeded() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  6: Molecule provenance non-zero.... ")
-    if test_molecule_provenance() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_06_mol_prov_nonzero() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  7: Different bonds diff prov....... ")
-    if test_different_bonds_different_provenance() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_07_diff_bonds_diff_prov() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  8: delta_32 bound [0, 96).......... ")
-    if test_delta_32_bound() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_08_delta32_bound() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  9: Atom provenance non-zero........ ")
-    if test_atom_provenance_nonzero() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_09_atom_prov_nonzero() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test 10: Bond invalid atoms no-op........ ")
-    if test_bond_invalid_atoms_noop() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_10_invalid_bond_noop() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
-    println("")
-    print("Passed: ")
-    println(passed)
-    print("Failed: ")
-    println(failed)
+    print("\nPassed: ")
+    print_int(passed)
+    print("\nFailed: ")
+    print_int(failed)
+    print("\n")
 
     if failed > 0 {
-        println("SOME TESTS FAILED")
+        print("SOME TESTS FAILED\n")
         return 1
     }
-    println("ALL 10 TESTS PASSED")
-    return 0
+    print("ALL 10 TESTS PASSED\n")
+    0
 }

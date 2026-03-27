@@ -1,71 +1,62 @@
 //@ run-pass
 //@ expect-stdout: ALL 10 TESTS PASSED
-//@ expect-stdout: Failed: 0
 
 // Self-contained run-pass test for the epistemic arena allocator.
-//
-// Verifies:
-//   1. Empty arena: len=0
-//   2. Single alloc: id=0, len=1, correct value
-//   3. Multiple alloc: sequential ids, correct count
-//   4. Set/get: update a slot, read it back
-//   5. Provenance seeded on alloc (non-zero, variance=0, confidence=1)
-//   6. Set merges provenance (provenance changes, variance/confidence bump)
-//   7. Free marks slot not-live, reduces len
-//   8. Free + realloc: reuses slot, carries lineage (variance > 0)
-//   9. delta_32 < 96 bound holds for all slots
-//  10. H2O chemical self-check: alloc/free/realloc with full validation
+// Rewritten to use global flat arrays (no local struct variables) to work
+// with lean_single limitations (var = struct_fn() crashes compiler).
 
 // ============================================================================
-// MERKLE INFRASTRUCTURE (inlined from epistemic_arena.sio)
+// GLOBAL ARENA STATE (flat arrays, no local struct vars)
 // ============================================================================
 
-let EPI_ARENA_CAP: i64 = 512
-let EPI_ARENA_MERKLE_SALT_A: i64 = 0x4F4D4547
-let EPI_ARENA_MERKLE_SALT_B: i64 = 0x4147454E
-let EPI_ARENA_MERKLE_SALT_C: i64 = 0x45534953
-let EPI_ARENA_MERKLE_SALT_D: i64 = 0x76312E30
+var G_DATA:    [i64; 512] = [0; 512]
+var G_VAR32:   [i64; 512] = [0; 512]
+var G_PROV:    [i64; 512] = [0; 512]
+var G_CONF:    [i64; 512] = [0; 512]
+var G_OCC:     [i64; 512] = [0; 512]
+var G_FREESTK: [i64; 512] = [0; 512]
+var G_FREETOP: i64 = 0
+var G_BUMP:    i64 = 0
+var G_LIVE:    i64 = 0
+var G_SLOT:    i64 = 0   // last allocated slot id
 
-fn epi_arena_merkle_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
+// ============================================================================
+// MERKLE / HASH
+// ============================================================================
+
+// Salts as decimal to avoid hex literal issues in lean_single
+// 0x4F4D4547 = 1330531655
+// 0x4147454E = 1095715150
+// 0x45534953 = 1163347283
+// 0x76312E30 = 1983271984
+
+fn g_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
     ((a ^ b) + c + salt) ^ (a << 5) ^ (b >> 7)
 }
 
-fn epi_arena_merkle_root_lane_l64(
-    p0: i64, p1: i64, p2: i64, p3: i64, p4: i64
-) -> i64 {
-    let h0 = epi_arena_merkle_mix(p0, p1, p2, EPI_ARENA_MERKLE_SALT_A)
-    let h1 = epi_arena_merkle_mix(p3, p4, h0, EPI_ARENA_MERKLE_SALT_B)
-    let h2 = epi_arena_merkle_mix(h0, h1, p0 ^ p3, EPI_ARENA_MERKLE_SALT_C)
-    epi_arena_merkle_mix(h1, h2, p1 ^ p2, EPI_ARENA_MERKLE_SALT_D)
+fn g_root(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64) -> i64 {
+    let h0 = g_mix(p0, p1, p2, 1330531655)
+    let h1 = g_mix(p3, p4, h0, 1095715150)
+    let h2 = g_mix(h0, h1, p0 ^ p3, 1163347283)
+    g_mix(h1, h2, p1 ^ p2, 1983271984)
 }
 
-fn epi_arena_hash_slot(slot_id: i64, value: i64) -> i64 {
+fn g_hash(slot_id: i64, value: i64) -> i64 {
     var hash: i64 = 5381
     hash = hash * 33 + slot_id
     hash = hash * 33 + value
     hash & 9223372036854775807
 }
 
-fn epi_arena_provenance_seed(item_hash: i64) -> i64 {
-    epi_arena_merkle_root_lane_l64(0, item_hash, 0, 0, 1)
+fn g_seed(item_hash: i64) -> i64 {
+    g_root(0, item_hash, 0, 0, 1)
 }
 
-fn epi_arena_provenance_merge(
-    existing_root: i64,
-    item_hash: i64,
-    variance: i64,
-    confidence: i64
-) -> i64 {
-    epi_arena_merkle_root_lane_l64(
-        existing_root,
-        item_hash,
-        variance,
-        confidence,
-        existing_root ^ item_hash
-    )
+fn g_merge(root: i64, item_hash: i64, variance: i64, confidence: i64) -> i64 {
+    g_root(root, item_hash, variance, confidence, root ^ item_hash)
 }
 
-fn epi_arena_delta_32(fidelity: i64, provenance: i64, quantum: i64) -> i64 {
+fn g_delta32(fidelity: i64, provenance: i64, quantum: i64) -> i64 with Div {
     let frac_f = fidelity - (fidelity / 8) * 8
     let frac_p = provenance - (provenance / 16) * 16
     let frac_q = quantum - (quantum / 32) * 32
@@ -73,461 +64,290 @@ fn epi_arena_delta_32(fidelity: i64, provenance: i64, quantum: i64) -> i64 {
 }
 
 // ============================================================================
-// STRUCT + CONSTRUCTOR
+// ARENA OPERATIONS ON GLOBALS
 // ============================================================================
 
-struct EpistemicArena {
-    data: [i64; 512],
-    variance_q32_32: [i64; 512],
-    provenance_root_l64: [i64; 512],
-    confidence_beta: [i64; 512],
-    occupied: [i64; 512],
-    free_stack: [i64; 512],
-    free_top: i64,
-    bump: i64,
-    live: i64,
-}
-
-fn epi_arena_new() -> EpistemicArena {
-    EpistemicArena {
-        data: [0; 512],
-        variance_q32_32: [0; 512],
-        provenance_root_l64: [0; 512],
-        confidence_beta: [0; 512],
-        occupied: [0; 512],
-        free_stack: [0; 512],
-        free_top: 0,
-        bump: 0,
-        live: 0,
+fn g_reset() with Mut, Panic {
+    var i: i64 = 0
+    while i < 512 {
+        G_DATA[i] = 0
+        G_VAR32[i] = 0
+        G_PROV[i] = 0
+        G_CONF[i] = 0
+        G_OCC[i] = 0
+        G_FREESTK[i] = 0
+        i = i + 1
     }
+    G_FREETOP = 0
+    G_BUMP = 0
+    G_LIVE = 0
+    G_SLOT = 0
 }
 
-// ============================================================================
-// CORE OPERATIONS
-// ============================================================================
-
-fn epi_arena_is_live(a: EpistemicArena, id: i64) -> bool with Panic, Div {
-    if id < 0 || id >= a.bump {
-        return false
+fn g_alloc(value: i64) with Mut, Panic {
+    if G_FREETOP > 0 {
+        G_FREETOP = G_FREETOP - 1
+        let slot = G_FREESTK[G_FREETOP]
+        G_FREESTK[G_FREETOP] = 0
+        G_DATA[slot] = value
+        G_OCC[slot] = 1
+        let hash = g_hash(slot, value)
+        let new_seed = g_seed(hash)
+        G_PROV[slot] = g_merge(G_PROV[slot], new_seed, G_VAR32[slot] + 1, G_CONF[slot] + 1)
+        G_VAR32[slot] = G_VAR32[slot] + 1
+        G_CONF[slot] = G_CONF[slot] + 1
+        G_LIVE = G_LIVE + 1
+        G_SLOT = slot
+        return
     }
-    a.occupied[id] == 1
-}
-
-fn epi_arena_alloc(a: EpistemicArena, value: i64) -> (EpistemicArena, i64) with Mut, Panic {
-    var arena = a
-
-    if arena.free_top > 0 {
-        arena.free_top = arena.free_top - 1
-        let slot = arena.free_stack[arena.free_top]
-        arena.free_stack[arena.free_top] = 0
-
-        arena.data[slot] = value
-        arena.occupied[slot] = 1
-
-        let hash = epi_arena_hash_slot(slot, value)
-        let new_seed = epi_arena_provenance_seed(hash)
-        arena.provenance_root_l64[slot] = epi_arena_provenance_merge(
-            arena.provenance_root_l64[slot],
-            new_seed,
-            arena.variance_q32_32[slot] + 1,
-            arena.confidence_beta[slot] + 1
-        )
-        arena.variance_q32_32[slot] = arena.variance_q32_32[slot] + 1
-        arena.confidence_beta[slot] = arena.confidence_beta[slot] + 1
-        arena.live = arena.live + 1
-
-        return (arena, slot)
+    if G_BUMP < 512 {
+        let slot = G_BUMP
+        G_BUMP = G_BUMP + 1
+        G_DATA[slot] = value
+        G_OCC[slot] = 1
+        let hash = g_hash(slot, value)
+        G_PROV[slot] = g_seed(hash)
+        G_VAR32[slot] = 0
+        G_CONF[slot] = 1
+        G_LIVE = G_LIVE + 1
+        G_SLOT = slot
+        return
     }
-
-    if arena.bump < EPI_ARENA_CAP {
-        let slot = arena.bump
-        arena.bump = arena.bump + 1
-
-        arena.data[slot] = value
-        arena.occupied[slot] = 1
-
-        let hash = epi_arena_hash_slot(slot, value)
-        arena.provenance_root_l64[slot] = epi_arena_provenance_seed(hash)
-        arena.variance_q32_32[slot] = 0
-        arena.confidence_beta[slot] = 1
-        arena.live = arena.live + 1
-
-        return (arena, slot)
-    }
-
-    (arena, 0 - 1)
+    G_SLOT = 0 - 1
 }
 
-fn epi_arena_free(a: EpistemicArena, id: i64) -> EpistemicArena with Mut, Panic, Div {
-    var arena = a
-    if !epi_arena_is_live(arena, id) {
-        return arena
-    }
-
-    let free_hash = epi_arena_hash_slot(id, arena.data[id])
-    arena.provenance_root_l64[id] = epi_arena_provenance_merge(
-        arena.provenance_root_l64[id],
-        free_hash,
-        arena.variance_q32_32[id] + 1,
-        arena.confidence_beta[id] + 1
-    )
-    arena.variance_q32_32[id] = arena.variance_q32_32[id] + 1
-    arena.confidence_beta[id] = arena.confidence_beta[id] + 1
-
-    arena.occupied[id] = 0
-    arena.free_stack[arena.free_top] = id
-    arena.free_top = arena.free_top + 1
-    arena.live = arena.live - 1
-
-    arena
+fn g_free(id: i64) with Mut, Panic, Div {
+    if id < 0 { return }
+    if id >= G_BUMP { return }
+    if G_OCC[id] != 1 { return }
+    let free_hash = g_hash(id, G_DATA[id])
+    G_PROV[id] = g_merge(G_PROV[id], free_hash, G_VAR32[id] + 1, G_CONF[id] + 1)
+    G_VAR32[id] = G_VAR32[id] + 1
+    G_CONF[id] = G_CONF[id] + 1
+    G_OCC[id] = 0
+    G_FREESTK[G_FREETOP] = id
+    G_FREETOP = G_FREETOP + 1
+    G_LIVE = G_LIVE - 1
 }
 
-fn epi_arena_get(a: EpistemicArena, id: i64) -> i64 with Panic, Div {
-    if !epi_arena_is_live(a, id) {
-        return 0
-    }
-    a.data[id]
+fn g_set(id: i64, value: i64) with Mut, Panic, Div {
+    if id < 0 { return }
+    if id >= G_BUMP { return }
+    if G_OCC[id] != 1 { return }
+    G_DATA[id] = value
+    let hash = g_hash(id, value)
+    G_PROV[id] = g_merge(G_PROV[id], hash, G_VAR32[id] + 1, G_CONF[id] + 1)
+    G_VAR32[id] = G_VAR32[id] + 1
+    G_CONF[id] = G_CONF[id] + 1
 }
 
-fn epi_arena_set(a: EpistemicArena, id: i64, value: i64) -> EpistemicArena with Mut, Panic, Div {
-    var arena = a
-    if !epi_arena_is_live(arena, id) {
-        return arena
-    }
-
-    arena.data[id] = value
-
-    let hash = epi_arena_hash_slot(id, value)
-    arena.provenance_root_l64[id] = epi_arena_provenance_merge(
-        arena.provenance_root_l64[id],
-        hash,
-        arena.variance_q32_32[id] + 1,
-        arena.confidence_beta[id] + 1
-    )
-    arena.variance_q32_32[id] = arena.variance_q32_32[id] + 1
-    arena.confidence_beta[id] = arena.confidence_beta[id] + 1
-
-    arena
-}
-
-fn epi_arena_get_provenance(a: EpistemicArena, id: i64) -> i64 with Panic, Div {
-    if !epi_arena_is_live(a, id) {
-        return 0
-    }
-    a.provenance_root_l64[id]
-}
-
-fn epi_arena_get_variance(a: EpistemicArena, id: i64) -> i64 with Panic, Div {
-    if !epi_arena_is_live(a, id) {
-        return 0
-    }
-    a.variance_q32_32[id]
-}
-
-fn epi_arena_get_confidence(a: EpistemicArena, id: i64) -> i64 with Panic, Div {
-    if !epi_arena_is_live(a, id) {
-        return 0
-    }
-    a.confidence_beta[id]
-}
-
-fn epi_arena_len(a: EpistemicArena) -> i64 {
-    a.live
-}
-
-fn epi_arena_check_bound(a: EpistemicArena, id: i64) -> bool with Panic, Div {
-    if !epi_arena_is_live(a, id) {
-        return false
-    }
-    let d = epi_arena_delta_32(
-        a.variance_q32_32[id],
-        0,
-        a.confidence_beta[id]
-    )
-    d >= 0 && d < 96
-}
-
-// ============================================================================
-// CHEMICAL SELF-CHECK
-// ============================================================================
-
-fn epi_arena_chemical_self_check() -> bool with Mut, Panic, Div {
-    var arena = epi_arena_new()
-
-    let r0 = epi_arena_alloc(arena, 1)
-    arena = r0.0
-    let id_h1 = r0.1
-
-    let r1 = epi_arena_alloc(arena, 8)
-    arena = r1.0
-    let id_o = r1.1
-
-    let r2 = epi_arena_alloc(arena, 1)
-    arena = r2.0
-    let id_h2 = r2.1
-
-    let count_ok = epi_arena_len(arena) == 3
-
-    let live_ok = epi_arena_is_live(arena, id_h1)
-        && epi_arena_is_live(arena, id_o)
-        && epi_arena_is_live(arena, id_h2)
-
-    let val_ok = epi_arena_get(arena, id_h1) == 1
-        && epi_arena_get(arena, id_o) == 8
-        && epi_arena_get(arena, id_h2) == 1
-
-    let prov_ok = epi_arena_get_provenance(arena, id_h1) != 0
-        && epi_arena_get_provenance(arena, id_o) != 0
-        && epi_arena_get_provenance(arena, id_h2) != 0
-
-    let diff_prov = epi_arena_get_provenance(arena, id_h1)
-        != epi_arena_get_provenance(arena, id_h2)
-
-    let bound_ok = epi_arena_check_bound(arena, id_h1)
-        && epi_arena_check_bound(arena, id_o)
-        && epi_arena_check_bound(arena, id_h2)
-
-    arena = epi_arena_free(arena, id_h2)
-    let free_ok = epi_arena_len(arena) == 2
-        && !epi_arena_is_live(arena, id_h2)
-
-    let r3 = epi_arena_alloc(arena, 1)
-    arena = r3.0
-    let id_h3 = r3.1
-
-    let reuse_ok = id_h3 == id_h2
-    let lineage_ok = epi_arena_get_provenance(arena, id_h3) != 0
-    let var_ok = epi_arena_get_variance(arena, id_h3) > 0
-    let conf_ok = epi_arena_get_confidence(arena, id_h3) > 1
-
-    count_ok && live_ok && val_ok && prov_ok && diff_prov
-        && bound_ok && free_ok && reuse_ok && lineage_ok
-        && var_ok && conf_ok
+fn g_is_live(id: i64) -> i64 with Div {
+    if id < 0 { return 0 }
+    if id >= G_BUMP { return 0 }
+    G_OCC[id]
 }
 
 // ============================================================================
 // TESTS
 // ============================================================================
 
-fn test_01_empty() -> bool {
-    let a = epi_arena_new()
-    epi_arena_len(a) == 0
+fn test_01_empty() -> i64 {
+    g_reset()
+    if G_LIVE == 0 { return 1 }
+    0
 }
 
-fn test_02_alloc_single() -> bool with Mut, Panic, Div {
-    var a = epi_arena_new()
-    let result = epi_arena_alloc(a, 42)
-    a = result.0
-    let id = result.1
-    id == 0 && epi_arena_len(a) == 1 && epi_arena_get(a, id) == 42
+fn test_02_alloc_single() -> i64 with Mut, Panic, Div {
+    g_reset()
+    g_alloc(42)
+    let id = G_SLOT
+    if id != 0 { return 0 }
+    if G_LIVE != 1 { return 0 }
+    if G_DATA[id] != 42 { return 0 }
+    1
 }
 
-fn test_03_alloc_multiple() -> bool with Mut, Panic, Div {
-    var a = epi_arena_new()
-
-    let r0 = epi_arena_alloc(a, 10)
-    a = r0.0
-    let id0 = r0.1
-
-    let r1 = epi_arena_alloc(a, 20)
-    a = r1.0
-    let id1 = r1.1
-
-    let r2 = epi_arena_alloc(a, 30)
-    a = r2.0
-    let id2 = r2.1
-
-    id0 == 0 && id1 == 1 && id2 == 2 && epi_arena_len(a) == 3
+fn test_03_alloc_multiple() -> i64 with Mut, Panic, Div {
+    g_reset()
+    g_alloc(10)
+    let id0 = G_SLOT
+    g_alloc(20)
+    let id1 = G_SLOT
+    g_alloc(30)
+    let id2 = G_SLOT
+    if id0 != 0 { return 0 }
+    if id1 != 1 { return 0 }
+    if id2 != 2 { return 0 }
+    if G_LIVE != 3 { return 0 }
+    1
 }
 
-fn test_04_set_get() -> bool with Mut, Panic, Div {
-    var a = epi_arena_new()
-    let r0 = epi_arena_alloc(a, 0)
-    a = r0.0
-    let id = r0.1
-    a = epi_arena_set(a, id, 77)
-    epi_arena_get(a, id) == 77
+fn test_04_set_get() -> i64 with Mut, Panic, Div {
+    g_reset()
+    g_alloc(0)
+    let id = G_SLOT
+    g_set(id, 77)
+    if G_DATA[id] != 77 { return 0 }
+    1
 }
 
-fn test_05_provenance_seeded() -> bool with Mut, Panic, Div {
-    var a = epi_arena_new()
-    let r0 = epi_arena_alloc(a, 99)
-    a = r0.0
-    let id = r0.1
-    epi_arena_get_provenance(a, id) != 0
-        && epi_arena_get_variance(a, id) == 0
-        && epi_arena_get_confidence(a, id) == 1
+fn test_05_provenance_seeded() -> i64 with Mut, Panic, Div {
+    g_reset()
+    g_alloc(99)
+    let id = G_SLOT
+    if G_PROV[id] == 0 { return 0 }
+    if G_VAR32[id] != 0 { return 0 }
+    if G_CONF[id] != 1 { return 0 }
+    1
 }
 
-fn test_06_set_merges() -> bool with Mut, Panic, Div {
-    var a = epi_arena_new()
-    let r0 = epi_arena_alloc(a, 10)
-    a = r0.0
-    let id = r0.1
-
-    let prov_before = epi_arena_get_provenance(a, id)
-    a = epi_arena_set(a, id, 20)
-    let prov_after = epi_arena_get_provenance(a, id)
-
-    prov_after != prov_before
-        && epi_arena_get_variance(a, id) == 1
-        && epi_arena_get_confidence(a, id) == 2
+fn test_06_set_merges() -> i64 with Mut, Panic, Div {
+    g_reset()
+    g_alloc(10)
+    let id = G_SLOT
+    let prov_before = G_PROV[id]
+    g_set(id, 20)
+    let prov_after = G_PROV[id]
+    if prov_after == prov_before { return 0 }
+    if G_VAR32[id] != 1 { return 0 }
+    if G_CONF[id] != 2 { return 0 }
+    1
 }
 
-fn test_07_free() -> bool with Mut, Panic, Div {
-    var a = epi_arena_new()
-    let r0 = epi_arena_alloc(a, 42)
-    a = r0.0
-    let id = r0.1
-
-    a = epi_arena_free(a, id)
-    epi_arena_len(a) == 0 && !epi_arena_is_live(a, id)
+fn test_07_free() -> i64 with Mut, Panic, Div {
+    g_reset()
+    g_alloc(42)
+    let id = G_SLOT
+    g_free(id)
+    if G_LIVE != 0 { return 0 }
+    if g_is_live(id) != 0 { return 0 }
+    1
 }
 
-fn test_08_free_realloc() -> bool with Mut, Panic, Div {
-    var a = epi_arena_new()
-    let r0 = epi_arena_alloc(a, 42)
-    a = r0.0
-    let id0 = r0.1
-
-    a = epi_arena_free(a, id0)
-
-    let r1 = epi_arena_alloc(a, 99)
-    a = r1.0
-    let id1 = r1.1
-
-    id1 == id0 && epi_arena_get(a, id1) == 99
-        && epi_arena_get_variance(a, id1) > 0
-        && epi_arena_get_confidence(a, id1) > 1
+fn test_08_free_realloc() -> i64 with Mut, Panic, Div {
+    g_reset()
+    g_alloc(42)
+    let id0 = G_SLOT
+    g_free(id0)
+    g_alloc(99)
+    let id1 = G_SLOT
+    if id1 != id0 { return 0 }
+    if G_DATA[id1] != 99 { return 0 }
+    if G_VAR32[id1] <= 0 { return 0 }
+    if G_CONF[id1] <= 1 { return 0 }
+    1
 }
 
-fn test_09_delta_32_bound() -> bool with Mut, Panic, Div {
-    var a = epi_arena_new()
-    let r0 = epi_arena_alloc(a, 1)
-    a = r0.0
-    let r1 = epi_arena_alloc(a, 8)
-    a = r1.0
-    let r2 = epi_arena_alloc(a, 1)
-    a = r2.0
-    epi_arena_check_bound(a, 0) && epi_arena_check_bound(a, 1)
-        && epi_arena_check_bound(a, 2)
+fn test_09_delta32_bound() -> i64 with Mut, Panic, Div {
+    g_reset()
+    g_alloc(1)
+    g_alloc(8)
+    g_alloc(1)
+    var i: i64 = 0
+    while i < 3 {
+        let d = g_delta32(G_VAR32[i], 0, G_CONF[i])
+        if d < 0 { return 0 }
+        if d >= 96 { return 0 }
+        i = i + 1
+    }
+    1
 }
 
-fn test_10_chemical_self_check() -> bool with Mut, Panic, Div {
-    epi_arena_chemical_self_check()
+fn test_10_chemical_self_check() -> i64 with Mut, Panic, Div {
+    g_reset()
+    g_alloc(1)
+    let id_h1 = G_SLOT
+    g_alloc(8)
+    let id_o = G_SLOT
+    g_alloc(1)
+    let id_h2 = G_SLOT
+
+    if G_LIVE != 3 { return 0 }
+    if g_is_live(id_h1) == 0 { return 0 }
+    if g_is_live(id_o) == 0 { return 0 }
+    if g_is_live(id_h2) == 0 { return 0 }
+    if G_DATA[id_h1] != 1 { return 0 }
+    if G_DATA[id_o] != 8 { return 0 }
+    if G_DATA[id_h2] != 1 { return 0 }
+    if G_PROV[id_h1] == 0 { return 0 }
+    if G_PROV[id_o] == 0 { return 0 }
+    if G_PROV[id_h2] == 0 { return 0 }
+    if G_PROV[id_h1] == G_PROV[id_h2] { return 0 }
+
+    let d0 = g_delta32(G_VAR32[id_h1], 0, G_CONF[id_h1])
+    let d1 = g_delta32(G_VAR32[id_o], 0, G_CONF[id_o])
+    let d2 = g_delta32(G_VAR32[id_h2], 0, G_CONF[id_h2])
+    if d0 < 0 { return 0 }
+    if d0 >= 96 { return 0 }
+    if d1 < 0 { return 0 }
+    if d1 >= 96 { return 0 }
+    if d2 < 0 { return 0 }
+    if d2 >= 96 { return 0 }
+
+    g_free(id_h2)
+    if G_LIVE != 2 { return 0 }
+    if g_is_live(id_h2) != 0 { return 0 }
+
+    g_alloc(1)
+    let id_h3 = G_SLOT
+    if id_h3 != id_h2 { return 0 }
+    if G_PROV[id_h3] == 0 { return 0 }
+    if G_VAR32[id_h3] <= 0 { return 0 }
+    if G_CONF[id_h3] <= 1 { return 0 }
+
+    1
 }
 
 // ============================================================================
 // MAIN — test harness
 // ============================================================================
 
-fn main() -> i32 with IO, Mut, Panic, Div {
-    println("=== Epistemic Arena Tests ===")
-    println("")
+fn main() -> i64 with IO, Mut, Panic, Div {
+    print("=== Epistemic Arena Tests ===\n")
 
-    var passed = 0
-    var failed = 0
+    var passed: i64 = 0
+    var failed: i64 = 0
 
     print("Test  1: Empty arena..................... ")
-    if test_01_empty() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_01_empty() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  2: Alloc single.................... ")
-    if test_02_alloc_single() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_02_alloc_single() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  3: Alloc multiple.................. ")
-    if test_03_alloc_multiple() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_03_alloc_multiple() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  4: Set/get......................... ")
-    if test_04_set_get() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_04_set_get() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  5: Provenance seeded............... ")
-    if test_05_provenance_seeded() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_05_provenance_seeded() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  6: Set merges provenance........... ")
-    if test_06_set_merges() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_06_set_merges() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  7: Free............................ ")
-    if test_07_free() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_07_free() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  8: Free + realloc lineage.......... ")
-    if test_08_free_realloc() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_08_free_realloc() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test  9: delta_32 bound.................. ")
-    if test_09_delta_32_bound() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_09_delta32_bound() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
     print("Test 10: H2O chemical self-check......... ")
-    if test_10_chemical_self_check() {
-        println("PASS")
-        passed = passed + 1
-    } else {
-        println("FAIL")
-        failed = failed + 1
-    }
+    if test_10_chemical_self_check() != 0 { print("PASS\n"); passed = passed + 1 } else { print("FAIL\n"); failed = failed + 1 }
 
-    println("")
-    print("Passed: ")
-    println(passed)
-    print("Failed: ")
-    println(failed)
+    print("\nPassed: ")
+    print_int(passed)
+    print("\nFailed: ")
+    print_int(failed)
+    print("\n")
 
     if failed > 0 {
-        println("SOME TESTS FAILED")
+        print("SOME TESTS FAILED\n")
         return 1
     }
-    println("ALL 10 TESTS PASSED")
-    return 0
+    print("ALL 10 TESTS PASSED\n")
+    0
 }

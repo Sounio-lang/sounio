@@ -501,11 +501,16 @@ fn pod_compute(snapshots: &SnapshotMatrix, energy_thresh: f64,
     let nd = snapshots.n_dof
     let ns = snapshots.n_snap
 
+    // Copy snapshots.data to local array: &ref.field passing is broken in lean_single
+    var data_local: [f64; 4096] = [0.0; 4096]
+    var di = 0
+    while di < nd * ns { data_local[di] = snapshots.data[di]; di = di + 1 }
+
     var U_svd: [f64; 4096] = [0.0; 4096]
     var S_svd: [f64; 64] = [0.0; 64]
     var Vt_svd: [f64; 4096] = [0.0; 4096]
 
-    mr_svd(&snapshots.data, nd, ns, &!U_svd, &!S_svd, &!Vt_svd)
+    mr_svd(&data_local, nd, ns, &!U_svd, &!S_svd, &!Vt_svd)
 
     let r = pod_rank_for_energy(&S_svd, ns, energy_thresh)
 
@@ -754,11 +759,16 @@ fn mor_solve(A: &[f64; 4096], b: &[f64; 256], n_dof: i32,
              result: &!MORResult) with Mut, Div, Panic {
     let nb = basis.n_basis
 
+    // Copy basis.V to local: &ref.field passing is broken in lean_single
+    var V_local: [f64; 4096] = [0.0; 4096]
+    var vi = 0
+    while vi < n_dof * nb { V_local[vi] = basis.V[vi]; vi = vi + 1 }
+
     var A_r: [f64; 4096] = [0.0; 4096]
-    mor_project_matrix(&basis.V, A, n_dof, nb, &!A_r)
+    mor_project_matrix(&V_local, A, n_dof, nb, &!A_r)
 
     var b_r: [f64; 64] = [0.0; 64]
-    mor_project_rhs(&basis.V, b, n_dof, nb, &!b_r)
+    mor_project_rhs(&V_local, b, n_dof, nb, &!b_r)
 
     var u_r: [f64; 64] = [0.0; 64]
     mor_solve_reduced(&A_r, &b_r, nb, &!u_r)
@@ -769,9 +779,13 @@ fn mor_solve(A: &[f64; 4096], b: &[f64; 256], n_dof: i32,
         i = i + 1
     }
 
-    mor_reconstruct(&basis.V, &u_r, n_dof, nb, &!result.u_full)
+    // Reconstruct into local array then copy: &!ref.field is also broken
+    var u_full_local: [f64; 256] = [0.0; 256]
+    mor_reconstruct(&V_local, &u_r, n_dof, nb, &!u_full_local)
+    i = 0
+    while i < n_dof { result.u_full[i] = u_full_local[i]; i = i + 1 }
 
-    let err = mor_error_estimate(A, b, &basis.V, &u_r, n_dof, nb)
+    let err = mor_error_estimate(A, b, &V_local, &u_r, n_dof, nb)
 
     result.n_basis = nb
     result.error_est = err
@@ -791,6 +805,7 @@ fn mr_gram_schmidt(V: &![f64; 4096], n_dof: i32, n_basis: i32,
         i = i + 1
     }
 
+    // Read existing columns at new stride (n_basis+1) since we write at that stride too
     var pass = 0
     while pass < 2 {
         var j = 0
@@ -798,12 +813,12 @@ fn mr_gram_schmidt(V: &![f64; 4096], n_dof: i32, n_basis: i32,
             var proj = 0.0
             i = 0
             while i < n_dof {
-                proj = proj + w[i] * V[i * n_basis + j]
+                proj = proj + w[i] * V[i * (n_basis + 1) + j]
                 i = i + 1
             }
             i = 0
             while i < n_dof {
-                w[i] = w[i] - proj * V[i * n_basis + j]
+                w[i] = w[i] - proj * V[i * (n_basis + 1) + j]
                 i = i + 1
             }
             j = j + 1
@@ -1599,12 +1614,12 @@ fn test_gram_schmidt_orthogonality() -> bool with Mut, Div, Panic {
     let n_dof = 4
 
     // Start with one normalized vector: v0 = [1/2, 1/2, 1/2, 1/2]
+    // Use stride 2 (= n_basis+1) since mr_gram_schmidt reads at final stride
     var V: [f64; 4096] = [0.0; 4096]
-    // V is n_dof x 1 initially (stride 1)
-    V[0 * 1 + 0] = 0.5
-    V[1 * 1 + 0] = 0.5
-    V[2 * 1 + 0] = 0.5
-    V[3 * 1 + 0] = 0.5
+    V[0 * 2 + 0] = 0.5
+    V[1 * 2 + 0] = 0.5
+    V[2 * 2 + 0] = 0.5
+    V[3 * 2 + 0] = 0.5
 
     // Add a second vector via Gram-Schmidt
     var v_new: [f64; 256] = [0.0; 256]
@@ -1663,7 +1678,11 @@ fn test_deim_indices_valid() -> bool with Mut, Div, Panic {
         n_basis: n_basis,
         singular_values: [0.0; 64]
     }
-    build_test_basis_4x2(&!basis.V)
+    // Use local array to avoid &!local_struct.field broken pattern
+    var V_tmp: [f64; 4096] = [0.0; 4096]
+    build_test_basis_4x2(&!V_tmp)
+    var vi = 0
+    while vi < 4096 { basis.V[vi] = V_tmp[vi]; vi = vi + 1 }
 
     var deim: DEIMBasis = DEIMBasis {
         U: [0.0; 4096],
