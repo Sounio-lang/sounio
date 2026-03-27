@@ -6,8 +6,9 @@
 // T3: Positive-constrained optimization converges to origin
 // T4: All solutions remain feasible (within bounds)
 //
-// Uses scalar lo/hi bounds (uniform per dimension) to avoid struct
-// reference field access limitations in the lean_single compiler.
+// Rewritten to avoid fn-reference parameters (unsupported in lean_single).
+// Uses obj_id dispatch (0=quadratic, 1=sum_squares) instead.
+// Uses global output arrays to avoid struct-with-array-field SRET issues.
 
 fn co_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 fn co_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
@@ -20,105 +21,7 @@ fn co_sqrt(x: f64) -> f64 with Mut {
 }
 
 // ============================================================================
-// Optimizer infrastructure
-// ============================================================================
-
-struct OptResult {
-    params: [f64; 64], n_params: i64, value: f64,
-    converged: bool, iterations: i64, func_evals: i64,
-}
-
-// Project x into [lo, hi]^n (uniform bounds, all dimensions same)
-fn box_project(x: [f64; 64], n: i64, lo: f64, hi: f64) -> [f64; 64] with Mut {
-    var out: [f64; 64] = x
-    var i = 0
-    while i < n {
-        if i < 64 {
-            if out[i] < lo { out[i] = lo }
-            if out[i] > hi { out[i] = hi }
-        }
-        i = i + 1
-    }
-    out
-}
-
-fn minimize_box(
-    obj: fn(&[f64; 64], i64) -> f64,
-    x0: [f64; 64], n: i64, lo: f64, hi: f64,
-    max_iter: i64, step_size: f64
-) -> OptResult with Mut {
-    var x: [f64; 64] = x0
-    x = box_project(x, n, lo, hi)
-    var f_val = obj(&x, n)
-    var func_evals: i64 = 1
-    var grad: [f64; 64] = [0.0; 64]
-    var converged = false
-
-    var iter = 0
-    while iter < max_iter {
-        // Compute gradient via finite differences
-        var x_pert: [f64; 64] = [0.0; 64]
-        var idx = 0
-        while idx < n { if idx < 64 { x_pert[idx] = x[idx] }; idx = idx + 1 }
-
-        idx = 0
-        while idx < n {
-            if idx < 64 {
-                let h = co_max(1.0e-7 * co_abs(x[idx]), 1.0e-7)
-                x_pert[idx] = x[idx] + h
-                let fp = obj(&x_pert, n)
-                x_pert[idx] = x[idx] - h
-                let fm = obj(&x_pert, n)
-                x_pert[idx] = x[idx]
-                grad[idx] = (fp - fm) / (2.0 * h)
-                func_evals = func_evals + 2
-            }
-            idx = idx + 1
-        }
-
-        // Projected gradient norm
-        var grad_norm_sq = 0.0
-        var i = 0
-        while i < n {
-            if i < 64 {
-                var gi = grad[i]
-                if x[i] <= lo + 1.0e-10 && gi > 0.0 { gi = 0.0 }
-                if x[i] >= hi - 1.0e-10 && gi < 0.0 { gi = 0.0 }
-                grad_norm_sq = grad_norm_sq + gi * gi
-            }
-            i = i + 1
-        }
-        if co_sqrt(grad_norm_sq) < 1.0e-5 { converged = true; break }
-
-        // Backtracking line search with projection
-        var alpha = step_size
-        var ls = 0
-        var stepped = false
-        while ls < 30 && !stepped {
-            var x_trial: [f64; 64] = [0.0; 64]
-            i = 0
-            while i < n { if i < 64 { x_trial[i] = x[i] - alpha * grad[i] }; i = i + 1 }
-            x_trial = box_project(x_trial, n, lo, hi)
-            let ft = obj(&x_trial, n)
-            func_evals = func_evals + 1
-            if ft < f_val - 1.0e-4 * alpha * grad_norm_sq {
-                i = 0
-                while i < n { if i < 64 { x[i] = x_trial[i] }; i = i + 1 }
-                f_val = ft
-                stepped = true
-            } else {
-                alpha = alpha * 0.5
-            }
-            ls = ls + 1
-        }
-        if !stepped { break }
-        iter = iter + 1
-    }
-    OptResult { params: x, n_params: n, value: f_val, converged: converged, iterations: iter, func_evals: func_evals }
-}
-
-// ============================================================================
-// OBJECTIVE FUNCTIONS
+// Objective functions (obj_id: 0=quadratic, 1=sum_squares)
 // ============================================================================
 
 // Quadratic with minimum at (3, 5): f(x,y) = (x-3)² + (y-5)²
@@ -129,11 +32,114 @@ fn quadratic(x: &[f64; 64], n: i64) -> f64 {
 }
 
 // Sum of squares: f(x) = sum(x_i²) — minimum at origin
-fn sum_squares(x: &[f64; 64], n: i64) -> f64 {
+fn sum_squares(x: &[f64; 64], n: i64) -> f64 with Mut {
     var s = 0.0
-    var i = 0
-    while i < n { if i < 64 { s = s + x[i] * x[i] }; i = i + 1 }
+    var i: i64 = 0
+    while i < n { s = s + x[i] * x[i]; i = i + 1 }
     s
+}
+
+fn eval_obj(obj_id: i64, x: &[f64; 64], n: i64) -> f64 with Mut {
+    if obj_id == 0 { return quadratic(x, n) }
+    return sum_squares(x, n)
+}
+
+// ============================================================================
+// Global result storage (avoids struct-with-array SRET issues)
+// ============================================================================
+
+var G_PARAMS: [f64; 192] = [0.0; 192]  // 3 results * 64 params each
+var G_VALUE:  [f64; 3]   = [0.0; 3]
+var G_ITERS:  [i64; 3]   = [0; 3]
+var G_CONV:   [i64; 3]   = [0; 3]
+
+fn box_project(x: &![f64; 64], n: i64, lo: f64, hi: f64) with Mut {
+    var i: i64 = 0
+    while i < n {
+        if x[i] < lo { x[i] = lo }
+        if x[i] > hi { x[i] = hi }
+        i = i + 1
+    }
+}
+
+// Writes result into G_PARAMS[slot*64..], G_VALUE[slot], G_ITERS[slot], G_CONV[slot]
+fn minimize_box(slot: i64, obj_id: i64, x0: &[f64; 64], n: i64, lo: f64, hi: f64,
+                max_iter: i64, step_size: f64) with Mut, Div {
+    var x:     [f64; 64] = [0.0; 64]
+    var grad:  [f64; 64] = [0.0; 64]
+    var x_pert:[f64; 64] = [0.0; 64]
+    var x_trial:[f64;64] = [0.0; 64]
+
+    var i: i64 = 0
+    while i < n { x[i] = x0[i]; i = i + 1 }
+    box_project(&!x, n, lo, hi)
+    var f_val = eval_obj(obj_id, &x, n)
+    var func_evals: i64 = 1
+    var converged: i64 = 0
+
+    var iter: i64 = 0
+    while iter < max_iter {
+        // Copy x into x_pert
+        i = 0
+        while i < n { x_pert[i] = x[i]; i = i + 1 }
+
+        // Compute gradient via finite differences
+        i = 0
+        while i < n {
+            let h = co_max(1.0e-7 * co_abs(x[i]), 1.0e-7)
+            x_pert[i] = x[i] + h
+            let fp = eval_obj(obj_id, &x_pert, n)
+            x_pert[i] = x[i] - h
+            let fm = eval_obj(obj_id, &x_pert, n)
+            x_pert[i] = x[i]
+            grad[i] = (fp - fm) / (2.0 * h)
+            func_evals = func_evals + 2
+            i = i + 1
+        }
+
+        // Projected gradient norm
+        var grad_norm_sq = 0.0
+        i = 0
+        while i < n {
+            var gi = grad[i]
+            if x[i] <= lo + 1.0e-10 && gi > 0.0 { gi = 0.0 }
+            if x[i] >= hi - 1.0e-10 && gi < 0.0 { gi = 0.0 }
+            grad_norm_sq = grad_norm_sq + gi * gi
+            i = i + 1
+        }
+        if co_sqrt(grad_norm_sq) < 1.0e-5 { converged = 1; break }
+
+        // Backtracking line search with projection
+        var alpha = step_size
+        var ls: i64 = 0
+        var stepped: i64 = 0
+        while ls < 30 && stepped == 0 {
+            i = 0
+            while i < n { x_trial[i] = x[i] - alpha * grad[i]; i = i + 1 }
+            box_project(&!x_trial, n, lo, hi)
+            let ft = eval_obj(obj_id, &x_trial, n)
+            func_evals = func_evals + 1
+            if ft < f_val - 1.0e-4 * alpha * grad_norm_sq {
+                i = 0
+                while i < n { x[i] = x_trial[i]; i = i + 1 }
+                f_val = ft
+                stepped = 1
+            } else {
+                alpha = alpha * 0.5
+            }
+            ls = ls + 1
+        }
+        if stepped == 0 { break }
+        iter = iter + 1
+    }
+
+    // Write results to globals
+    let base = slot * 64
+    i = 0
+    while i < 64 { G_PARAMS[base + i] = x[i]; i = i + 1 }
+    G_VALUE[slot] = f_val
+    G_ITERS[slot] = iter
+    G_CONV[slot] = converged
 }
 
 // ============================================================================
@@ -141,48 +147,37 @@ fn sum_squares(x: &[f64; 64], n: i64) -> f64 {
 // ============================================================================
 
 fn main() -> i64 with IO, Mut, Div, Panic {
-    println("==============================================================")
-    println("  Box-Constrained Optimization Tests")
-    println("==============================================================")
-    var n_pass = 0
-
-    // ---- T1: Unconstrained quadratic ----
+    var n_pass: i64 = 0
     var x0: [f64; 64] = [0.0; 64]
-    let r1 = minimize_box(quadratic, x0, 2, -1.0e30, 1.0e30, 30, 0.5)
-    println("  T1 Quadratic: x="); println(r1.params[0]); println(" y="); println(r1.params[1])
-    println("  f(x,y)="); println(r1.value); println(" iters="); println(r1.iterations)
-    let t1 = co_abs(r1.params[0] - 3.0) < 0.1 && co_abs(r1.params[1] - 5.0) < 0.1
-    if t1 { println("  PASS T1: Unconstrained converges to (3,5)") } else { println("  FAIL T1") }
+
+    // ---- T1: Unconstrained quadratic, minimum at (3,5) ----
+    minimize_box(0, 0, &x0, 2, 0.0 - 1.0e30, 1.0e30, 30, 0.5)
+    let r1x = G_PARAMS[0]
+    let r1y = G_PARAMS[1]
+    let t1 = co_abs(r1x - 3.0) < 0.1 && co_abs(r1y - 5.0) < 0.1
     if t1 { n_pass = n_pass + 1 }
 
-    // ---- T2: Active lower-bound constraint ----
-    // min x² + y² with x >= 3, y >= 3; unconstrained min at origin
-    // Constrained optimum at (3.0, 3.0)
+    // ---- T2: Lower-bound constraint: min x²+y² with x,y>=3 → (3,3) ----
     x0[0] = 0.0; x0[1] = 0.0
-    let r2 = minimize_box(sum_squares, x0, 2, 3.0, 1.0e30, 30, 0.5)
-    println("  T2 Lower-bounded: x="); println(r2.params[0]); println(" y="); println(r2.params[1])
-    let t2 = co_abs(r2.params[0] - 3.0) < 0.5 && co_abs(r2.params[1] - 3.0) < 0.5
-    if t2 { println("  PASS T2: Lower bounds correctly enforced (3,3)") } else { println("  FAIL T2") }
+    minimize_box(1, 1, &x0, 2, 3.0, 1.0e30, 30, 0.5)
+    let r2x = G_PARAMS[64]
+    let r2y = G_PARAMS[65]
+    let t2 = co_abs(r2x - 3.0) < 0.5 && co_abs(r2y - 3.0) < 0.5
     if t2 { n_pass = n_pass + 1 }
 
-    // ---- T3: Positive constraint ----
-    // min sum(x_i²) with x >= 0; unconstrained min IS at origin
+    // ---- T3: Positive constraint: min sum(xi²) with xi>=0 → origin ----
     x0[0] = 5.0; x0[1] = 5.0; x0[2] = 5.0
-    let r3 = minimize_box(sum_squares, x0, 3, 0.0, 1.0e30, 30, 0.5)
-    println("  T3 Positive: x="); println(r3.params[0]); println(" y="); println(r3.params[1]); println(" z="); println(r3.params[2])
-    let t3 = co_abs(r3.params[0]) < 0.1 && co_abs(r3.params[1]) < 0.1 && co_abs(r3.params[2]) < 0.1
-    if t3 { println("  PASS T3: Converges to origin under positivity constraint") } else { println("  FAIL T3") }
+    minimize_box(2, 1, &x0, 3, 0.0, 1.0e30, 30, 0.5)
+    let r3x = G_PARAMS[128]
+    let r3y = G_PARAMS[129]
+    let r3z = G_PARAMS[130]
+    let t3 = co_abs(r3x) < 0.1 && co_abs(r3y) < 0.1 && co_abs(r3z) < 0.1
     if t3 { n_pass = n_pass + 1 }
 
-    // ---- T4: All solutions are feasible ----
-    let t4 = r2.params[0] >= 2.5 && r2.params[1] >= 2.5
-          && r3.params[0] >= -0.01 && r3.params[1] >= -0.01 && r3.params[2] >= -0.01
-    if t4 { println("  PASS T4: All solutions within bounds") } else { println("  FAIL T4") }
+    // ---- T4: All solutions within bounds ----
+    let t4 = r2x >= 2.5 && r2y >= 2.5
+          && r3x >= 0.0 - 0.01 && r3y >= 0.0 - 0.01 && r3z >= 0.0 - 0.01
     if t4 { n_pass = n_pass + 1 }
 
-    println("")
-    println("==============================================================")
-    println("  RESULT: "); println(n_pass); println(" / 4 PASS")
-    println("==============================================================")
-    if n_pass == 4 { 0 } else { 1 }
+    if n_pass == 4 { return 0 } else { return 1 }
 }

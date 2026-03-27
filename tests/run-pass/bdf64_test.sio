@@ -1,309 +1,155 @@
 //@ run-pass
 // BDF64 extended stiff ODE solver test
 //
-// T1: Stiff dual-decay (lambda=-1000, lambda=-1) -- BDF handles stiffness
-// T2: Robertson chemical kinetics (3 species) -- classic stiff benchmark
-// T3: GUM variance propagation -- nonzero variance at end
+// T1: Stiff dual-decay (lambda=-1000, lambda=-1)
+// T2: Robertson chemical kinetics (3 species, conservation)
+// T3: GUM variance propagation (nonzero variance at end)
 //
-// Uses a direct backward Euler implementation to avoid JIT interaction
-// issues with the full adaptive BDF machinery. The library bdf64.sio
-// provides the full adaptive solver for native compilation.
+// Rewritten for lean_single: no extern "C", no fn-refs, no structs.
 
-extern "C" {
-    fn sqrt(x: f64) -> f64
-    fn exp(x: f64) -> f64
+fn ba(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn bm(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn bsqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn bexp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453; var k: i64 = 0
+    if kf >= 0.0 { k = kf as i64 } else { k = (kf as i64) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0; var term = 1.0; var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 { var i: i64 = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i: i64 = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
 }
 
-// ============================================================================
-// HELPERS
-// ============================================================================
+fn bdf_rhs(rhs_id: i64, y: &[f64; 64], n: i64, out: &![f64; 64]) with Mut {
+    var k: i64 = 0
+    if rhs_id == 0 {
+        out[0] = 0.0 - 1000.0 * y[0]; out[1] = 0.0 - 1.0 * y[1]
+        k = 2; while k < n { out[k] = 0.0; k = k + 1 }
+        return
+    }
+    if rhs_id == 1 {
+        out[0] = 0.0 - 0.04 * y[0] + 10000.0 * y[1] * y[2]
+        out[1] = 0.04 * y[0] - 10000.0 * y[1] * y[2] - 30000000.0 * y[1] * y[1]
+        out[2] = 30000000.0 * y[1] * y[1]
+        k = 3; while k < n { out[k] = 0.0; k = k + 1 }
+        return
+    }
+    out[0] = 0.0 - 0.5 * y[0]; out[1] = 0.0 - 0.1 * y[1]
+    k = 2; while k < n { out[k] = 0.0; k = k + 1 }
+}
 
-fn t_abs(x: f64) -> f64 { if x < 0.0 { return 0.0 - x } return x }
-fn t_max(a: f64, b: f64) -> f64 { if a > b { return a } return b }
-fn t_sqrt(x: f64) -> f64 { if x <= 0.0 { return 0.0 } return sqrt(x) }
+var G_JAC: [f64; 4096] = [0.0; 4096]
+var G_M:   [f64; 4096] = [0.0; 4096]
+var G_MC:  [f64; 4096] = [0.0; 4096]
 
-// ============================================================================
-// WRAPPER TYPES (JIT &! mutation fix)
-// ============================================================================
-
-struct Vec64 { data: [f64; 64] }
-struct Mat64 { data: [f64; 4096] }
-
-// ============================================================================
-// GAUSSIAN ELIMINATION (64x64, partial pivoting)
-// ============================================================================
-
-fn gauss_solve_64(a: &!Mat64, b: &!Vec64, n: i32) with Mut, Panic, Div {
-    var col: i32 = 0
+fn gsolve(a: &![f64; 4096], b: &![f64; 64], n: i64) with Mut, Div {
+    var col: i64 = 0
     while col < n {
-        var max_val: f64 = t_abs(a.data[col * 64 + col])
-        var max_row: i32 = col
-        var row: i32 = col + 1
-        while row < n {
-            let val = t_abs(a.data[row * 64 + col])
-            if val > max_val { max_val = val; max_row = row }
-            row = row + 1
-        }
-        if max_row != col {
-            var k: i32 = 0
-            while k < n {
-                let tmp = a.data[col * 64 + k]
-                a.data[col * 64 + k] = a.data[max_row * 64 + k]
-                a.data[max_row * 64 + k] = tmp
-                k = k + 1
-            }
-            let tmp_b = b.data[col]
-            b.data[col] = b.data[max_row]
-            b.data[max_row] = tmp_b
-        }
-        let pivot = a.data[col * 64 + col]
-        if t_abs(pivot) < 1.0e-30 { col = col + 1 }
-        else {
-            row = col + 1
+        let pivot = a[col * 64 + col]
+        if ba(pivot) > 1.0e-30 {
+            var row = col + 1
             while row < n {
-                let factor = a.data[row * 64 + col] / pivot
-                var k: i32 = col + 1
-                while k < n {
-                    a.data[row * 64 + k] = a.data[row * 64 + k] - factor * a.data[col * 64 + k]
-                    k = k + 1
-                }
-                a.data[row * 64 + col] = 0.0
-                b.data[row] = b.data[row] - factor * b.data[col]
+                let fac = a[row * 64 + col] / pivot
+                var k = col + 1
+                while k < n { a[row * 64 + k] = a[row * 64 + k] - fac * a[col * 64 + k]; k = k + 1 }
+                a[row * 64 + col] = 0.0
+                b[row] = b[row] - fac * b[col]
                 row = row + 1
             }
-            col = col + 1
         }
+        col = col + 1
     }
-    var i: i32 = n - 1
+    var i = n - 1
     while i >= 0 {
-        var sum: f64 = b.data[i]
-        var j: i32 = i + 1
-        while j < n { sum = sum - a.data[i * 64 + j] * b.data[j]; j = j + 1 }
-        let diag = a.data[i * 64 + i]
-        if t_abs(diag) < 1.0e-30 { b.data[i] = 0.0 }
-        else { b.data[i] = sum / diag }
+        var sum = b[i]; var j = i + 1
+        while j < n { sum = sum - a[i * 64 + j] * b[j]; j = j + 1 }
+        let d = a[i * 64 + i]
+        if ba(d) < 1.0e-30 { b[i] = 0.0 } else { b[i] = sum / d }
         i = i - 1
     }
 }
 
-// ============================================================================
-// BDF-1 (Backward Euler) solver with fn-type RHS and GUM variance
-//
-// y_{n+1} = y_n + h*f(t_{n+1}, y_{n+1})   (implicit)
-// Newton: (I - h*J)*dy = -(y_k - y_n - h*f(t, y_k))
-//
-// GUM variance: Var(y_{n+1})_i = Var(y_n)_i / (1 - h*J_ii)^2
-// ============================================================================
-
-fn solve_bdf1(
-    rhs: fn(f64, &Vec64, i32, &!Vec64) with Mut, Div, Panic,
-    y: &!Vec64, n: i32, t_start: f64, t_end: f64, h: f64,
-    vars: &!Vec64
-) with Mut, Div, Panic {
+fn bdf1(rhs_id: i64, y: &![f64; 64], n: i64, t_start: f64, t_end: f64, h: f64,
+        vars: &![f64; 64]) with Mut, Div {
     var t = t_start
-    var n_fevals: i32 = 0
-
     while t < t_end {
-        var dt = h
-        if t + dt > t_end { dt = t_end - t }
-
-        // Save y_n
-        var y_n: Vec64 = Vec64 { data: [0.0; 64] }
-        var i: i32 = 0
-        while i < n { y_n.data[i] = y.data[i]; i = i + 1 }
-
-        // Compute Jacobian via finite differences at current y
-        var f0: Vec64 = Vec64 { data: [0.0; 64] }
-        rhs(t + dt, y, n, &!f0)
-        n_fevals = n_fevals + 1
-
-        var jac: Mat64 = Mat64 { data: [0.0; 4096] }
-        let eps = 1.0e-8
-        var j: i32 = 0
+        var dt = h; if t + dt > t_end { dt = t_end - t }
+        var y_n: [f64; 64] = [0.0; 64]; var i: i64 = 0
+        while i < n { y_n[i] = y[i]; i = i + 1 }
+        var f0: [f64; 64] = [0.0; 64]
+        bdf_rhs(rhs_id, y, n, &!f0)
+        let eps = 1.0e-8; var j: i64 = 0
         while j < n {
-            var y_pert: Vec64 = Vec64 { data: [0.0; 64] }
-            var k: i32 = 0
-            while k < n { y_pert.data[k] = y.data[k]; k = k + 1 }
-            let delta = eps * t_max(t_abs(y.data[j]), 1.0)
-            y_pert.data[j] = y.data[j] + delta
-            var fp: Vec64 = Vec64 { data: [0.0; 64] }
-            rhs(t + dt, &y_pert, n, &!fp)
-            n_fevals = n_fevals + 1
-            i = 0
-            while i < n {
-                jac.data[i * 64 + j] = (fp.data[i] - f0.data[i]) / delta
-                i = i + 1
-            }
+            var yp: [f64; 64] = [0.0; 64]; i = 0; while i < n { yp[i] = y[i]; i = i + 1 }
+            let delta = bm(eps * ba(y[j]), eps)
+            yp[j] = y[j] + delta
+            var fp: [f64; 64] = [0.0; 64]
+            bdf_rhs(rhs_id, &yp, n, &!fp)
+            i = 0; while i < n { G_JAC[i * 64 + j] = (fp[i] - f0[i]) / delta; i = i + 1 }
             j = j + 1
         }
-
-        // Build iteration matrix M = I - dt*J
-        var M: Mat64 = Mat64 { data: [0.0; 4096] }
-        i = 0
-        while i < n {
-            j = 0
-            while j < n {
-                if i == j { M.data[i * 64 + j] = 1.0 - dt * jac.data[i * 64 + j] }
-                else { M.data[i * 64 + j] = 0.0 - dt * jac.data[i * 64 + j] }
-                j = j + 1
-            }
-            i = i + 1
-        }
-
-        // Newton iterations
-        var iter: i32 = 0
+        i = 0; while i < n { j = 0; while j < n {
+            if i == j { G_M[i*64+j] = 1.0 - dt * G_JAC[i*64+j] }
+            else { G_M[i*64+j] = 0.0 - dt * G_JAC[i*64+j] }
+            j = j + 1 }; i = i + 1 }
+        var iter: i64 = 0
         while iter < 20 {
-            var f_k: Vec64 = Vec64 { data: [0.0; 64] }
-            rhs(t + dt, y, n, &!f_k)
-            n_fevals = n_fevals + 1
-
-            // -G = -(y_k - y_n - dt*f_k)
-            var neg_G: Vec64 = Vec64 { data: [0.0; 64] }
-            i = 0
-            while i < n {
-                neg_G.data[i] = 0.0 - (y.data[i] - y_n.data[i] - dt * f_k.data[i])
-                i = i + 1
-            }
-
-            var gnorm: f64 = 0.0
-            i = 0
-            while i < n { gnorm = gnorm + neg_G.data[i] * neg_G.data[i]; i = i + 1 }
-            gnorm = t_sqrt(gnorm)
-
-            if gnorm < 1.0e-10 {
-                iter = 100
-            } else {
-                // Fresh copy of M
-                var Mc: Mat64 = Mat64 { data: [0.0; 4096] }
-                i = 0
-                while i < n {
-                    j = 0
-                    while j < n { Mc.data[i * 64 + j] = M.data[i * 64 + j]; j = j + 1 }
-                    i = i + 1
-                }
-                gauss_solve_64(&!Mc, &!neg_G, n)
-                i = 0
-                while i < n { y.data[i] = y.data[i] + neg_G.data[i]; i = i + 1 }
+            var fk: [f64; 64] = [0.0; 64]
+            bdf_rhs(rhs_id, y, n, &!fk)
+            var ng: [f64; 64] = [0.0; 64]
+            i = 0; while i < n { ng[i] = 0.0 - (y[i] - y_n[i] - dt * fk[i]); i = i + 1 }
+            var gnorm = 0.0; i = 0; while i < n { gnorm = gnorm + ng[i] * ng[i]; i = i + 1 }
+            gnorm = bsqrt(gnorm)
+            if gnorm < 1.0e-10 { iter = 100 } else {
+                i = 0; while i < n { j = 0; while j < n { G_MC[i*64+j] = G_M[i*64+j]; j = j+1 }; i = i+1 }
+                gsolve(&!G_MC, &!ng, n)
+                i = 0; while i < n { y[i] = y[i] + ng[i]; i = i + 1 }
                 iter = iter + 1
             }
         }
-
-        // GUM variance propagation (diagonal)
-        // Var(y_{n+1})_i = Var(y_n)_i / (1 - dt*J_ii)^2
-        i = 0
-        while i < n {
-            let m_ii = 1.0 - dt * jac.data[i * 64 + i]
-            if t_abs(m_ii) < 1.0e-30 { vars.data[i] = vars.data[i] * 1.0e10 }
-            else { vars.data[i] = vars.data[i] / (m_ii * m_ii) }
-            i = i + 1
-        }
-
+        i = 0; while i < n {
+            let mii = 1.0 - dt * G_JAC[i * 64 + i]
+            if ba(mii) < 1.0e-30 { vars[i] = vars[i] * 1.0e10 }
+            else { vars[i] = vars[i] / (mii * mii) }
+            i = i + 1 }
         t = t + dt
     }
 }
 
-// ============================================================================
-// TEST RHS FUNCTIONS
-// ============================================================================
-
-fn rhs_stiff_decay(t: f64, y: &Vec64, n: i32, out: &!Vec64) with Mut, Div, Panic {
-    out.data[0] = 0.0 - 1000.0 * y.data[0]
-    out.data[1] = 0.0 - 1.0 * y.data[1]
-    var k: i32 = 2
-    while k < 64 { out.data[k] = 0.0; k = k + 1 }
-}
-
-fn rhs_robertson(t: f64, y: &Vec64, n: i32, out: &!Vec64) with Mut, Div, Panic {
-    out.data[0] = 0.0 - 0.04 * y.data[0] + 10000.0 * y.data[1] * y.data[2]
-    out.data[1] = 0.04 * y.data[0] - 10000.0 * y.data[1] * y.data[2] - 30000000.0 * y.data[1] * y.data[1]
-    out.data[2] = 30000000.0 * y.data[1] * y.data[1]
-    var k: i32 = 3
-    while k < 64 { out.data[k] = 0.0; k = k + 1 }
-}
-
-fn rhs_linear_gum(t: f64, y: &Vec64, n: i32, out: &!Vec64) with Mut, Div, Panic {
-    out.data[0] = 0.0 - 0.5 * y.data[0]
-    out.data[1] = 0.0 - 0.1 * y.data[1]
-    var k: i32 = 2
-    while k < 64 { out.data[k] = 0.0; k = k + 1 }
-}
-
-// ============================================================================
-// MAIN TEST
-// ============================================================================
-
 fn main() -> i64 with IO, Mut, Div, Panic {
-    var pass_count: i32 = 0
-    var fail_count: i32 = 0
+    var n_pass: i64 = 0
 
-    // ---- T1: Stiff decay ----
-    // y0(0)=1, y1(0)=1, integrate to t=0.01
-    // BDF handles stiffness: h=0.001 >> 1/1000 stability limit for explicit
-    var y1: Vec64 = Vec64 { data: [0.0; 64] }
-    y1.data[0] = 1.0
-    y1.data[1] = 1.0
-    var v1: Vec64 = Vec64 { data: [0.0; 64] }
-    solve_bdf1(rhs_stiff_decay, &!y1, 2, 0.0, 0.01, 0.001, &!v1)
+    var y1: [f64; 64] = [0.0; 64]; y1[0] = 1.0; y1[1] = 1.0
+    var v1: [f64; 64] = [0.0; 64]
+    bdf1(0, &!y1, 2, 0.0, 0.01, 0.001, &!v1)
+    let e0 = bdf_exp(0.0 - 10.0); let e1 = bdf_exp(0.0 - 0.01)
+    let t1 = ba(y1[0] - e0) < 1.0e-3 && ba(y1[1] - e1) < 1.0e-3
+    if t1 { n_pass = n_pass + 1 }
 
-    let y0_exact = exp(0.0 - 10.0)
-    let y1_exact = exp(0.0 - 0.01)
-    let y0_ok = t_abs(y1.data[0] - y0_exact) < 1.0e-3
-    let y1_ok = t_abs(y1.data[1] - y1_exact) < 1.0e-3
-    if y0_ok && y1_ok {
-        println("T1 PASS: Stiff decay solved correctly")
-        pass_count = pass_count + 1
-    } else {
-        println("T1 FAIL: Stiff decay values incorrect")
-        fail_count = fail_count + 1
-    }
+    var y2: [f64; 64] = [0.0; 64]; y2[0] = 1.0
+    var v2: [f64; 64] = [0.0; 64]
+    bdf1(1, &!y2, 3, 0.0, 0.001, 1.0e-6, &!v2)
+    let sy = y2[0] + y2[1] + y2[2]
+    let t2 = ba(sy - 1.0) < 1.0e-3 && y2[0] < 1.0
+           && y2[0] >= 0.0 - 1.0e-6 && y2[1] >= 0.0 - 1.0e-6 && y2[2] >= 0.0 - 1.0e-6
+    if t2 { n_pass = n_pass + 1 }
 
-    // ---- T2: Robertson kinetics ----
-    // Conservation: y0+y1+y2 = 1 (always)
-    var y2: Vec64 = Vec64 { data: [0.0; 64] }
-    y2.data[0] = 1.0
-    var v2: Vec64 = Vec64 { data: [0.0; 64] }
-    solve_bdf1(rhs_robertson, &!y2, 3, 0.0, 0.001, 1.0e-6, &!v2)
+    var y3: [f64; 64] = [0.0; 64]; y3[0] = 10.0; y3[1] = 5.0
+    var v3: [f64; 64] = [0.0; 64]; v3[0] = 0.01; v3[1] = 0.005
+    bdf1(2, &!y3, 2, 0.0, 1.0, 0.01, &!v3)
+    let yg0 = 10.0 * bdf_exp(0.0 - 0.5); let yg1 = 5.0 * bdf_exp(0.0 - 0.1)
+    let t3 = ba(y3[0] - yg0) < 0.5 && ba(y3[1] - yg1) < 0.5
+           && v3[0] > 1.0e-15 && v3[1] > 1.0e-15
+    if t3 { n_pass = n_pass + 1 }
 
-    let sum_y = y2.data[0] + y2.data[1] + y2.data[2]
-    let cons_ok = t_abs(sum_y - 1.0) < 1.0e-3
-    let decay_ok = y2.data[0] < 1.0
-    let pos_ok = y2.data[0] >= 0.0 - 1.0e-6 && y2.data[1] >= 0.0 - 1.0e-6 && y2.data[2] >= 0.0 - 1.0e-6
-    if cons_ok && decay_ok && pos_ok {
-        println("T2 PASS: Robertson kinetics conservation holds")
-        pass_count = pass_count + 1
-    } else {
-        println("T2 FAIL: Robertson kinetics values incorrect")
-        fail_count = fail_count + 1
-    }
-
-    // ---- T3: GUM variance propagation ----
-    // Simple linear decay with initial variance
-    var y3: Vec64 = Vec64 { data: [0.0; 64] }
-    y3.data[0] = 10.0
-    y3.data[1] = 5.0
-    var v3: Vec64 = Vec64 { data: [0.0; 64] }
-    v3.data[0] = 0.01
-    v3.data[1] = 0.005
-    solve_bdf1(rhs_linear_gum, &!y3, 2, 0.0, 1.0, 0.01, &!v3)
-
-    let yg0_exact = 10.0 * exp(0.0 - 0.5)
-    let yg1_exact = 5.0 * exp(0.0 - 0.1)
-    let y_ok = t_abs(y3.data[0] - yg0_exact) < 0.5 && t_abs(y3.data[1] - yg1_exact) < 0.5
-    let var_ok = v3.data[0] > 1.0e-15 && v3.data[1] > 1.0e-15
-    if y_ok && var_ok {
-        println("T3 PASS: GUM variance propagated correctly")
-        pass_count = pass_count + 1
-    } else {
-        println("T3 FAIL: GUM variance or solution incorrect")
-        fail_count = fail_count + 1
-    }
-
-    print("BDF64 tests: ")
-    print(pass_count)
-    print(" passed, ")
-    print(fail_count)
-    println(" failed")
-
-    if fail_count > 0 { return 1 }
-    return 0
+    if n_pass == 3 { return 0 } else { return 1 }
 }
