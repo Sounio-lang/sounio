@@ -8714,7 +8714,7 @@ impl Checker {
 
                 // Register properties as refinements
                 i = 0
-                while i < decl.property_count && i < 4 {
+                while i < decl.property_count && i < 8 {
                     let prop = decl.properties[i as usize]
                     info.property_names[info.property_count as usize] = prop.name
                     if prop.pred_op > 0 {
@@ -12334,65 +12334,69 @@ impl Checker {
                     return c
                 }
             }
-            // Ontology-aware proof: type-driven axiom collection.
-            // When the argument has an ontology type, collect ALL property
-            // predicates from the class + ancestors and check if ANY
-            // structurally implies the expected refinement.
+            // Ontology-aware proof: collect ALL property predicates from
+            // class + ancestors into a single conjunction, then check once.
+            //
+            // This is the canonical form for compound property reasoning:
+            //   axioms = {potency >= 0.0, mw < 1000.0, ...}
+            //   conjoined = (potency >= 0.0) AND (mw < 1000.0) AND ...
+            //   pred_implies_structural(conjoined, expected) succeeds if
+            //   ANY conjunct alone entails expected (sound under-approx).
+            //
             // Uses pred_implies_structural (var_name independent) because
-            // property predicates are universally quantified over class
-            // instances — "potency >= 0.0" proves "v >= 0.0" regardless
-            // of the bound variable name.
+            // properties are universally quantified — the bound variable name
+            // is a binder artifact, not a semantic identity.
             if env_lookup.ontology_id >= 0 {
                 let arg_oid = env_lookup.ontology_id
-                var found_property_proof = false
+                var axiom_preds: [RefinementPred; 16] = [empty_refinement_pred(); 16]
+                var axiom_count: i64 = 0
 
-                // Check the class itself: all properties are candidate axioms
+                // Collect own properties
                 var pi: i64 = 0
                 while pi < c.ontologies.entries[arg_oid as usize].property_count {
                     let prop_ref_id = c.ontologies.entries[arg_oid as usize].property_ref_ids[pi as usize]
-                    if prop_ref_id >= 0 && prop_ref_id < 64 {
-                        let prop_pred = c.refinements.entries[prop_ref_id as usize].predicate
-                        if pred_implies_structural(prop_pred, expected_ref.predicate) {
-                            found_property_proof = true
-                        }
+                    if prop_ref_id >= 0 && prop_ref_id < 64 && axiom_count < 16 {
+                        axiom_preds[axiom_count as usize] = c.refinements.entries[prop_ref_id as usize].predicate
+                        axiom_count = axiom_count + 1
                     }
                     pi = pi + 1
                 }
 
-                // Scan all ancestors: collect their property axioms too
-                if !found_property_proof {
-                    var anc_i: i64 = 0
-                    while anc_i < c.ontologies.entries[arg_oid as usize].all_ancestor_count {
-                        let anc_idx = c.ontologies.entries[arg_oid as usize].all_ancestor_indices[anc_i as usize]
-                        if anc_idx >= 0 && anc_idx < c.ontologies.count {
-                            // Ancestor type binding refinement (structural)
-                            let anc_name = c.ontologies.entries[anc_idx as usize].name
-                            let anc_ty = c.env.lookup(anc_name)
-                            if anc_ty.refinement_id >= 0 && anc_ty.refinement_id < 128 {
-                                let anc_pred = c.refinements.entries[anc_ty.refinement_id as usize].predicate
-                                if pred_implies_structural(anc_pred, expected_ref.predicate) {
-                                    found_property_proof = true
-                                }
-                            }
-                            // Ancestor property refinements (structural)
-                            var pj: i64 = 0
-                            while pj < c.ontologies.entries[anc_idx as usize].property_count {
-                                let anc_prop_ref_id = c.ontologies.entries[anc_idx as usize].property_ref_ids[pj as usize]
-                                if anc_prop_ref_id >= 0 && anc_prop_ref_id < 64 {
-                                    let anc_prop_pred = c.refinements.entries[anc_prop_ref_id as usize].predicate
-                                    if pred_implies_structural(anc_prop_pred, expected_ref.predicate) {
-                                        found_property_proof = true
-                                    }
-                                }
-                                pj = pj + 1
-                            }
+                // Collect ancestor type-binding refinements + ancestor properties
+                var anc_i: i64 = 0
+                while anc_i < c.ontologies.entries[arg_oid as usize].all_ancestor_count {
+                    let anc_idx = c.ontologies.entries[arg_oid as usize].all_ancestor_indices[anc_i as usize]
+                    if anc_idx >= 0 && anc_idx < c.ontologies.count {
+                        let anc_name = c.ontologies.entries[anc_idx as usize].name
+                        let anc_ty = c.env.lookup(anc_name)
+                        if anc_ty.refinement_id >= 0 && anc_ty.refinement_id < 128 && axiom_count < 16 {
+                            axiom_preds[axiom_count as usize] = c.refinements.entries[anc_ty.refinement_id as usize].predicate
+                            axiom_count = axiom_count + 1
                         }
-                        anc_i = anc_i + 1
+                        var pj: i64 = 0
+                        while pj < c.ontologies.entries[anc_idx as usize].property_count {
+                            let anc_prop_ref_id = c.ontologies.entries[anc_idx as usize].property_ref_ids[pj as usize]
+                            if anc_prop_ref_id >= 0 && anc_prop_ref_id < 64 && axiom_count < 16 {
+                                axiom_preds[axiom_count as usize] = c.refinements.entries[anc_prop_ref_id as usize].predicate
+                                axiom_count = axiom_count + 1
+                            }
+                            pj = pj + 1
+                        }
                     }
+                    anc_i = anc_i + 1
                 }
 
-                if found_property_proof {
-                    return c
+                // Build conjunction and discharge with one call
+                if axiom_count > 0 {
+                    var conjoined = axiom_preds[0]
+                    var ci: i64 = 1
+                    while ci < axiom_count {
+                        conjoined = pred_and(conjoined, axiom_preds[ci as usize])
+                        ci = ci + 1
+                    }
+                    if pred_implies_structural(conjoined, expected_ref.predicate) {
+                        return c
+                    }
                 }
             }
         }
