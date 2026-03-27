@@ -32,12 +32,12 @@ var TL: [i64; 262144] = [0; 262144]
 var TC: i64 = 0
 
 // Code output
-var CD: [i8; 1048576] = [0; 1048576]
+var CD: [i8; 16777216] = [0; 16777216]
 var CL: i64 = 0
 var TRAMP_OFF: i64 = 0
 
 // ELF/PE output
-var ELF: [i8; 1048576] = [0; 1048576]
+var ELF: [i8; 16781312] = [0; 16781312]
 
 // Target OS: 0=linux (default), 2=macos, 3=windows
 var TARGET_OS: i64 = 0
@@ -127,7 +127,8 @@ var MAN_BUF_S: [i64; 64] = [0; 64]
 var MAN_BUF_E: [i64; 64] = [0; 64]
 
 // ─── Phase 5: Effects checking ───
-// Bitmask per function: IO=1, Mut=2, Panic=4, Div=8, Alloc=16, Custom/Session=32, Observe=64
+// Bitmask per function: IO=1, Mut=2, Panic=4, Div=8, Alloc=16,
+// Custom/Session=32, Observe=64, Audit=128, Hypothesis=256
 var FN_EFFECTS: [i64; 4096] = [0; 4096]
 var FN_NAME_TOK: [i64; 4096] = [0; 4096]
 var FN_NEEDS_SESSION: [i64; 4096] = [0; 4096]
@@ -135,17 +136,17 @@ var CURRENT_FN: i64 = 0
 
 // ─── Phase 6a: Unit tracking (compile-time only) ───
 // Unit hash per local variable (0 = no unit)
-var VAR_UNIT: [i64; 128] = [0; 128]
+var VAR_UNIT: [i64; 256] = [0; 256]
 
 // ─── Phase 6c: Linear type tracking ───
 // Per-struct: 1 if declared with 'linear' keyword, 0 otherwise
 var ST_LINEAR: [i64; 32] = [0; 32]
 // Per local variable: 1 if linear type, 0 otherwise
-var VAR_LINEAR: [i64; 128] = [0; 128]
+var VAR_LINEAR: [i64; 256] = [0; 256]
 // Per local variable: use count (for linear checking)
-var VAR_USED: [i64; 128] = [0; 128]
-var VAR_TY: [i64; 128] = [0; 128]
-var VAR_TY_HASH: [i64; 128] = [0; 128]
+var VAR_USED: [i64; 256] = [0; 256]
+var VAR_TY: [i64; 256] = [0; 256]
+var VAR_TY_HASH: [i64; 256] = [0; 256]
 var GL_TY: [i64; 256] = [0; 256]
 var GL_TY_HASH: [i64; 256] = [0; 256]
 var FN_RET_TY: [i64; 4096] = [0; 4096]
@@ -307,17 +308,19 @@ fn gl_add(ns: i64, ne: i64, esiz: i64, alen: i64) with Mut, Panic {
 }
 
 // Per-function local variable table (reset per function)
-var VAR_NS: [i64; 128] = [0; 128]
-var VAR_NE: [i64; 128] = [0; 128]
-var VAR_SLOT: [i64; 128] = [0; 128]
-var VAR_LEN_SLOT: [i64; 128] = [0; 128]
-var VAR_ALEN: [i64; 128] = [0; 128]
-var VAR_ESIZ: [i64; 128] = [0; 128]
-var VAR_IS_F64: [i64; 128] = [0; 128]
-var VAR_IS_CLOSURE: [i64; 128] = [0; 128]
-var VAR_MUT: [i64; 128] = [0; 128]
+var VAR_NS: [i64; 256] = [0; 256]
+var VAR_NE: [i64; 256] = [0; 256]
+var VAR_SLOT: [i64; 256] = [0; 256]
+var VAR_LEN_SLOT: [i64; 256] = [0; 256]
+var VAR_ALEN: [i64; 256] = [0; 256]
+var VAR_ESIZ: [i64; 256] = [0; 256]
+var VAR_IS_F64: [i64; 256] = [0; 256]
+var VAR_IS_CLOSURE: [i64; 256] = [0; 256]
+var VAR_MUT: [i64; 256] = [0; 256]
 var VAR_COUNT: i64 = 0
 var NEXT_SLOT: i64 = 1
+var FRAME_PATCH_COUNT: i64 = 0
+var FRAME_PATCH_OFF: [i64; 4096] = [0; 4096]
 var LAST_EXPR_IS_CLOSURE: i64 = 0
 // Scratch globals for float scientific exponent (avoids extra locals in compile_primary)
 var FL_SCI_SCRATCH: i64 = 0
@@ -336,7 +339,7 @@ var CONST_FOUND_VAL: i64 = 0
 
 // ─── Helpers ───
 fn sb(i: i64) -> i64 with Panic, Mut { if i >= 0 && i < SRC_LEN { return SRC[i as usize] as i64 & 0xFF }; return 0 }
-fn em(b: i64) with Mut { if CL < 1048576 { CD[CL as usize] = b as i8; CL = CL + 1 } }
+fn em(b: i64) with Mut { if CL < 16777216 { CD[CL as usize] = b as i8; CL = CL + 1 } }
 fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xFF); em((v >> 24) & 0xFF) }
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
 
@@ -432,6 +435,9 @@ fn em32_at(off: i64, v: i64) with Mut, Panic {
     CD[(off + 1) as usize] = ((v >> 8) & 0xFF) as i8
     CD[(off + 2) as usize] = ((v >> 16) & 0xFF) as i8
     CD[(off + 3) as usize] = ((v >> 24) & 0xFF) as i8
+}
+fn record_frame_patch() with Mut {
+    if FRAME_PATCH_COUNT < 4096 { FRAME_PATCH_OFF[FRAME_PATCH_COUNT as usize] = CL; FRAME_PATCH_COUNT = FRAME_PATCH_COUNT + 1 }
 }
 
 // Read 32-bit value from CD[] (for ARM64 branch patching)
@@ -830,6 +836,9 @@ fn tok_is_effect_name(p: i64) -> bool with Panic, Mut {
     if src_match(ns, ne - ns, "Div") { return true }
     if src_match(ns, ne - ns, "Alloc") { return true }
     if src_match(ns, ne - ns, "Observe") { return true }
+    if src_match(ns, ne - ns, "Audit") { return true }
+    if src_match(ns, ne - ns, "Hypothesis") { return true }
+    if src_match(ns, ne - ns, "MultiTest") { return true }
     return false
 }
 
@@ -1427,6 +1436,16 @@ fn print_effect_mask(mask: i64) with IO, Mut {
     if (mask & 64) != 0 {
         if first == 0 { print(",") }
         print("Observe")
+        first = 0
+    }
+    if (mask & 128) != 0 {
+        if first == 0 { print(",") }
+        print("Audit")
+        first = 0
+    }
+    if (mask & 256) != 0 {
+        if first == 0 { print(",") }
+        print("Hypothesis")
     }
 }
 
@@ -2466,6 +2485,7 @@ fn lex_all() with Mut, Panic, Div {
             if src_match(s, l, "linear") { k = 62 }
             if src_match(s, l, "type") { k = 61 }
             if src_match(s, l, "algebra") { k = 70 }
+            if src_match(s, l, "study") { k = 71 }
             if src_match(s, l, "Some") { k = 57 }
             if src_match(s, l, "None") { k = 58 }
             if src_match(s, l, "Ok") { k = 59 }
@@ -2586,6 +2606,41 @@ fn scan_all_consts() with Panic, Mut {
         CONST_VAL[CONST_COUNT as usize] = cv
         CONST_COUNT = CONST_COUNT + 1
     }
+}
+
+fn skip_study_decl(p0: i64) -> i64 with IO, Mut, Panic {
+    let study_tok = p0
+    var p = p0 + 1
+    var depth: i64 = 0
+    var saw_hypothesis: i64 = 0
+
+    while p < TC && TK[p as usize] != 8 && TK[p as usize] != 0 { p = p + 1 }
+    if p >= TC || TK[p as usize] != 8 {
+        return p
+    }
+
+    depth = 1
+    p = p + 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "hypothesis") {
+            saw_hypothesis = 1
+        }
+        if TK[p as usize] == 8 {
+            depth = depth + 1
+        } else if TK[p as usize] == 9 {
+            depth = depth - 1
+        }
+        p = p + 1
+    }
+
+    if saw_hypothesis == 0 {
+        TYPECHECK_FAILED = 1
+        print("type error line ")
+        print_int(TL[study_tok as usize])
+        print("\n: study definition requires at least one hypothesis\n")
+    }
+
+    p
 }
 
 fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
@@ -3833,12 +3888,20 @@ fn emit_read_file() with Mut {
 fn emit_file_size() with Mut {
     // rax = path. stat(path, &statbuf) → statbuf.st_size at offset 48
     em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (path)
-    em(0x48); em(0x83); em(0xec); em(0x90 as i64 & 0xFF)  // sub rsp, 144 (struct stat)
+    em(0x48); em(0x81); em(0xec); em32(144)  // sub rsp, 144 (struct stat)
     em(0x48); em(0x89); em(0xe6)  // mov rsi, rsp (statbuf)
     em(0xb8); em32(4)  // mov eax, 4 (sys_stat)
     em(0x0f); em(0x05)
+    em(0x48); em(0x85); em(0xc0)  // test rax, rax
+    em(0x0f); em(0x88); let stat_fail = CL; em32(0)  // js stat_fail
     em(0x48); em(0x8b); em(0x44); em(0x24); em(48)  // mov rax, [rsp+48] (st_size)
-    em(0x48); em(0x83); em(0xc4); em(0x90 as i64 & 0xFF)  // add rsp, 144
+    em(0xe9); let stat_done = CL; em32(0)
+    let stat_fail_target = CL
+    em(0x31); em(0xc0)  // xor eax, eax
+    let stat_done_target = CL
+    patch32(stat_fail, stat_fail_target)
+    patch32(stat_done, stat_done_target)
+    em(0x48); em(0x81); em(0xc4); em32(144)  // add rsp, 144
 }
 
 fn emit_write_file_flags(open_flags: i64) with Mut {
@@ -4431,6 +4494,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let save_bc = BREAK_COUNT
         let save_ret_ty = CURRENT_RET_TY
         let save_ret_hash = CURRENT_RET_HASH
+        let save_fpc = FRAME_PATCH_COUNT
+        FRAME_PATCH_COUNT = 0
         var svi: i64 = 0
         while svi < save_vc {
             CL_SAVE_NS[svi as usize] = VAR_NS[svi as usize]
@@ -4518,9 +4583,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em32(0)
         // Emit closure function body
         let cl_start = CL
-        // Prologue: push rbp; mov rbp, rsp; sub rsp, 131072
+        // Prologue: push rbp; mov rbp, rsp; sub rsp, <dynamic frame>
         em(0x55); em(0x48); em(0x89); em(0xe5)
-        em(0x48); em(0x81); em(0xec); em32(131072)
+        em(0x48); em(0x81); em(0xec); record_frame_patch(); em32(0)
         // Spill env_ptr (rdi) to slot 1: mov [rbp-8], rdi
         em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF)
         // Spill user params from shifted registers (rsi=slot2, rdx=slot3, ...)
@@ -4556,9 +4621,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         // Epilogue
         if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
-            em(0x48); em(0x81); em(0xc4); em32(131072)
+            em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
             em(0x5d); em(0xc3)
         }
+        // Patch closure sub rsp / add rsp with actual frame size
+        let cl_frame_sz = (NEXT_SLOT * 8 + 15) & 0xFFFFFFF0
+        var cl_fpi: i64 = 0
+        while cl_fpi < FRAME_PATCH_COUNT { em32_at(FRAME_PATCH_OFF[cl_fpi as usize], cl_frame_sz); cl_fpi = cl_fpi + 1 }
         // Patch jmp over closure body
         patch32(jmp_patch, CL)
         // Save capture count before restoring outer state
@@ -4570,6 +4639,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         BREAK_COUNT = save_bc
         CURRENT_RET_TY = save_ret_ty
         CURRENT_RET_HASH = save_ret_hash
+        FRAME_PATCH_COUNT = save_fpc
         svi = 0
         while svi < save_vc {
             VAR_NS[svi as usize] = CL_SAVE_NS[svi as usize]
@@ -7222,7 +7292,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_x86(EXPR_TY, EXPR_TY_HASH)
         }
-        em(0x48); em(0x81); em(0xc4); em32(131072)
+        em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
         em(0x5d); em(0xc3)
         return
     }
@@ -7967,7 +8037,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     TYPECHECK_FAILED = 0
     var p: i64 = 0
 
-    // Pass 0a: register structs, constants, and skip algebra declarations
+    // Pass 0a: register structs, constants, and skip algebra/study declarations
     ST_COUNT = 0
     scan_all_consts()
     while p < TC {
@@ -7978,6 +8048,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if TK[p as usize] == 8 { p = p + 1 }  // skip {
             while p < TC && TK[p as usize] != 9 && TK[p as usize] != 0 { p = p + 1 }  // skip to }
             if TK[p as usize] == 9 { p = p + 1 }  // skip }
+            continue
+        }
+        if TK[p as usize] == 71 || (TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "study")) {
+            p = skip_study_decl(p)
             continue
         }
         if TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 {
@@ -8144,7 +8218,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     if TARGET_OS == 2 {
         GL_BSS_BASE = 0x100008000 + 16    // macOS: __DATA segment at 0x100008000
     } else {
-        GL_BSS_BASE = 0x600000 + 16       // Linux/Windows: BSS at 0x600000
+        GL_BSS_BASE = 0x10000000 + 16     // Linux/Windows: BSS at 0x10000000 (256MB, never overlaps code)
     }
     GL_BSS_SIZE = GL_BSS_SIZE + 16
 
@@ -8278,7 +8352,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
     // Pass 1b: scan effects clauses for each function
     // For each fn at index fi, scan forward from its name token to find 'with' (38)
-    // and record effect bitmask: IO=1, Mut=2, Panic=4, Div=8, Alloc=16, Observe=64
+    // and record effect bitmask: IO=1, Mut=2, Panic=4, Div=8, Alloc=16,
+    // Observe=64, Audit=128, Hypothesis=256
     p = 0
     var eff_fi: i64 = 0
     while p < TC {
@@ -8320,6 +8395,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if src_match(ens, ene - ens, "Div") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 8; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Alloc") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 16; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Observe") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 64; matched_builtin = 1 }
+                        if src_match(ens, ene - ens, "Audit") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 128; matched_builtin = 1 }
+                        if src_match(ens, ene - ens, "Hypothesis") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 256; matched_builtin = 1 }
                         if matched_builtin == 0 { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 32 }
                     }
                     ew = ew + 1
@@ -8396,6 +8473,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
+        FRAME_PATCH_COUNT = 0
 
         // Register parameters
         p = p + 1  // skip name
@@ -8448,7 +8526,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         print_int(fn_idx)
         print(" ")
         em(0x55); em(0x48); em(0x89); em(0xe5)
-        em(0x48); em(0x81); em(0xec); em32(131072)
+        em(0x48); em(0x81); em(0xec); record_frame_patch(); em32(0)
 
         // Store parameters from registers/stack using low-level ABI slot order.
         var param_vi: i64 = 0
@@ -8508,9 +8586,13 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                 stabilize_return_agg_x86(LAST_STMT_TY, LAST_STMT_TY_HASH)
             }
-            em(0x48); em(0x81); em(0xc4); em32(131072)
+            em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
             em(0x5d); em(0xc3)
         }
+        // Patch sub rsp / add rsp with actual frame size
+        let frame_sz = (NEXT_SLOT * 8 + 15) & 0xFFFFFFF0
+        var fpi: i64 = 0
+        while fpi < FRAME_PATCH_COUNT { em32_at(FRAME_PATCH_OFF[fpi as usize], frame_sz); fpi = fpi + 1 }
         fn_idx = fn_idx + 1
     }
 
@@ -8524,7 +8606,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     while pi < PATCH_COUNT {
         let off = PATCH_OFF[pi as usize]
         let fi = PATCH_FN[pi as usize]
-        if fi >= 0 && fi < FN_COUNT {
+        if fi >= 0 && fi < FN_COUNT && off >= 0 && off + 3 < CL {
             let target = FN_OFF[fi as usize]
             let rel = target - (off + 4)
             CD[(off) as usize] = (rel & 0xFF) as i8
@@ -8541,7 +8623,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     while mi < FN_COUNT {
         let ms = FN_NS[mi as usize]
         let me = FN_NE[mi as usize]
-        if me - ms == 4 && sb(ms) == 109 && sb(ms+1) == 97 && sb(ms+2) == 105 && sb(ms+3) == 110 { main_fn = mi }
+        if main_fn < 0 && me - ms == 4 && sb(ms) == 109 && sb(ms+1) == 97 && sb(ms+2) == 105 && sb(ms+3) == 110 { main_fn = mi }
         mi = mi + 1
     }
     if main_fn < 0 { print("error: no main\n"); return 1 }
@@ -8588,8 +8670,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em(0x0f); em(0x05)                     // syscall
     } else {
         // Linux trampoline
-        let argc_addr = 0x600000
-        let argv_addr = 0x600000 + 8
+        let argc_addr = 0x10000000
+        let argv_addr = 0x10000000 + 8
         em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (argc)
         em(0x48); em(0x83); em(0xe8); em(0x01)  // sub rax, 1 (skip program name)
         em(0x48); em(0xb9); em64(argc_addr)
@@ -8622,14 +8704,12 @@ fn elf_w64(off: i64, v: i64) with Mut, Panic { elf_w32(off, v); elf_w32(off+4, v
 fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
     let text_base = 0x400000
     let text_off = 4096
-    let bss_base = 0x600000
+    let bss_base = 0x10000000        // 256MB: always above code, never overlaps
     let entry = text_base + text_off + TRAMP_OFF
     var i: i64 = 0
     while i < 4096 { ELF[i as usize] = 0; i = i + 1 }
 
     let tsz = text_off + CL
-    // Total memory: from text_base to bss_base + GL_BSS_SIZE
-    let total_memsz = (bss_base - text_base) + GL_BSS_SIZE
 
     // ELF header (64 bytes)
     elf_w8(0, 0x7f); elf_w8(1, 69); elf_w8(2, 76); elf_w8(3, 70)
@@ -8637,18 +8717,29 @@ fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w16(16, 2); elf_w16(18, 0x3e); elf_w32(20, 1)
     elf_w64(24, entry)
     elf_w64(32, 64)
-    elf_w16(52, 64); elf_w16(54, 56); elf_w16(56, 1); elf_w16(58, 64)
+    elf_w16(52, 64); elf_w16(54, 56); elf_w16(56, 2); elf_w16(58, 64)
 
-    // Single LOAD segment: text(RX) + gap + BSS(RW) — all RWX
+    // PT_LOAD #0: text (R+X)
     let ph0 = 64
     elf_w32(ph0, 1)                 // PT_LOAD
-    elf_w32(ph0+4, 7)               // p_flags = R+W+X
-    elf_w64(ph0+8, 0)               // p_offset
+    elf_w32(ph0+4, 5)               // p_flags = R+X
+    elf_w64(ph0+8, 0)               // p_offset = 0
     elf_w64(ph0+16, text_base)      // p_vaddr
     elf_w64(ph0+24, text_base)      // p_paddr
-    elf_w64(ph0+32, tsz)            // p_filesz (text only)
-    elf_w64(ph0+40, total_memsz)    // p_memsz (text + gap + BSS)
-    elf_w64(ph0+48, 0x200000)       // p_align = 2MB (cover gap)
+    elf_w64(ph0+32, tsz)            // p_filesz
+    elf_w64(ph0+40, tsz)            // p_memsz (no zero-fill in text)
+    elf_w64(ph0+48, 4096)           // p_align
+
+    // PT_LOAD #1: BSS (R+W), no file data
+    let ph1 = 120
+    elf_w32(ph1, 1)                 // PT_LOAD
+    elf_w32(ph1+4, 6)               // p_flags = R+W
+    elf_w64(ph1+8, 0)               // p_offset = 0 (filesz=0, kernel zero-fills)
+    elf_w64(ph1+16, bss_base)       // p_vaddr = 0x10000000
+    elf_w64(ph1+24, bss_base)       // p_paddr
+    elf_w64(ph1+32, 0)              // p_filesz = 0 (pure BSS)
+    elf_w64(ph1+40, GL_BSS_SIZE)    // p_memsz
+    elf_w64(ph1+48, 4096)           // p_align
 
     // Copy code after header
     i = 0
@@ -12227,7 +12318,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     while pi < PATCH_COUNT {
         let off = PATCH_OFF[pi as usize]
         let fi = PATCH_FN[pi as usize]
-        if fi >= 0 && fi < FN_COUNT {
+        if fi >= 0 && fi < FN_COUNT && off >= 0 && off + 3 < CL {
             let target = FN_OFF[fi as usize]
             if PATCH_KIND[pi as usize] == 1 {
                 patch_adr_a64(off, target, 0)
@@ -12267,8 +12358,8 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         emit_imm64_reg_a64(16, 0x2000001)
         em32(0xD4001001)
     } else {
-        let argc_addr = 0x600000
-        let argv_addr = 0x600000 + 8
+        let argc_addr = 0x10000000
+        let argv_addr = 0x10000000 + 8
         em32(0xF94003E9)
         em32(0xD1000529)
         emit_imm64_reg_a64(10, argc_addr)
@@ -12290,22 +12381,25 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
 fn write_elf_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     let text_base = 0x400000
     let text_off = 4096
-    let bss_base = 0x600000
+    let bss_base = 0x10000000         // 256MB: always above code
     let entry = text_base + text_off + TRAMP_OFF
     var i: i64 = 0
     while i < 4096 { ELF[i as usize] = 0; i = i + 1 }
     let tsz = text_off + CL
-    let total_memsz = (bss_base - text_base) + GL_BSS_SIZE
     // ELF header
     elf_w8(0, 0x7f); elf_w8(1, 69); elf_w8(2, 76); elf_w8(3, 70)
     elf_w8(4, 2); elf_w8(5, 1); elf_w8(6, 1)
     elf_w16(16, 2); elf_w16(18, 0xB7); elf_w32(20, 1)
     elf_w64(24, entry); elf_w64(32, 64)
-    elf_w16(52, 64); elf_w16(54, 56); elf_w16(56, 1); elf_w16(58, 64)
+    elf_w16(52, 64); elf_w16(54, 56); elf_w16(56, 2); elf_w16(58, 64)
     let ph0 = 64
-    elf_w32(ph0, 1); elf_w32(ph0+4, 7)
+    elf_w32(ph0, 1); elf_w32(ph0+4, 5)   // PT_LOAD, R+X
     elf_w64(ph0+8, 0); elf_w64(ph0+16, text_base); elf_w64(ph0+24, text_base)
-    elf_w64(ph0+32, tsz); elf_w64(ph0+40, total_memsz); elf_w64(ph0+48, 0x200000)
+    elf_w64(ph0+32, tsz); elf_w64(ph0+40, tsz); elf_w64(ph0+48, 4096)
+    let ph1 = 120
+    elf_w32(ph1, 1); elf_w32(ph1+4, 6)   // PT_LOAD, R+W
+    elf_w64(ph1+8, 0); elf_w64(ph1+16, bss_base); elf_w64(ph1+24, bss_base)
+    elf_w64(ph1+32, 0); elf_w64(ph1+40, GL_BSS_SIZE); elf_w64(ph1+48, 4096)
     i = 0
     while i < CL { ELF[(text_off + i) as usize] = CD[i as usize]; i = i + 1 }
     let ok = write_file(output, ELF, tsz)

@@ -1,0 +1,171 @@
+//! Runtime audit log for W3C PROV-DM style provenance tracking.
+//!
+//! The log is a fixed-size circular buffer to keep runtime overhead bounded.
+//! Entry ordering is exposed oldest-to-newest via `audit_get_entry`.
+
+struct AuditEntry {
+    // Store small enums in i64 slots so array-of-struct reads stay stable in the
+    // current runtime/compiler layout.
+    entry_type: i64,       // 0=data_read, 1=transform, 2=observe, 3=stat_test, 4=regulatory
+    timestamp: i64,        // monotonic logical counter
+    entity_id: i64,        // generated PROV entity identifier
+    activity_id: i64,      // generating PROV activity identifier
+    input1_id: i64,        // first input entity or encoded source metadata
+    input2_id: i64,        // second input entity or encoded source metadata
+    output_id: i64,        // output entity identifier
+    operation: i64,        // 0=read, 1=add, 2=mul, 3=div, ...
+    regulatory_layer: i64, // 0=none, 1=iso_17025, 2=ich_e6, 3=cfr_part11
+    value: f64,            // recorded value (for stat tests: p-value)
+    extra: f64,            // extra value (for stat tests: effect size)
+}
+
+var AUDIT_ENTRY_TYPES: [i64; 4096] = [0; 4096]
+var AUDIT_TIMESTAMPS: [i64; 4096] = [0; 4096]
+var AUDIT_ENTITY_IDS: [i64; 4096] = [0; 4096]
+var AUDIT_ACTIVITY_IDS: [i64; 4096] = [0; 4096]
+var AUDIT_INPUT1_IDS: [i64; 4096] = [0; 4096]
+var AUDIT_INPUT2_IDS: [i64; 4096] = [0; 4096]
+var AUDIT_OUTPUT_IDS: [i64; 4096] = [0; 4096]
+var AUDIT_OPERATIONS: [i64; 4096] = [0; 4096]
+var AUDIT_REGULATORY_LAYERS: [i64; 4096] = [0; 4096]
+var AUDIT_VALUES: [f64; 4096] = [0.0; 4096]
+var AUDIT_EXTRAS: [f64; 4096] = [0.0; 4096]
+
+struct AuditLog {
+    entries: [AuditEntry; 4096]
+    count: i64
+    next_entity_id: i64
+    next_activity_id: i64
+    timestamp_counter: i64
+}
+
+fn audit_entry_zero() -> AuditEntry {
+    AuditEntry {
+        entry_type: 0,
+        timestamp: 0,
+        entity_id: 0,
+        activity_id: 0,
+        input1_id: 0,
+        input2_id: 0,
+        output_id: 0,
+        operation: 0,
+        regulatory_layer: 0,
+        value: 0.0,
+        extra: 0.0,
+    }
+}
+
+fn audit_log_slot(seq: i64) -> i64 {
+    if seq < 4096 { return seq }
+    audit_log_slot(seq - 4096)
+}
+
+fn audit_log_oldest_timestamp(log: &AuditLog) -> i64 {
+    if log.timestamp_counter <= log.count { return 0 }
+    log.timestamp_counter - log.count
+}
+
+fn audit_log_new() -> AuditLog {
+    AuditLog {
+        entries: [audit_entry_zero(); 4096],
+        count: 0,
+        next_entity_id: 1,
+        next_activity_id: 1,
+        timestamp_counter: 0,
+    }
+}
+
+fn audit_log_append(
+    log: &!AuditLog,
+    entry_type: i32,
+    input1_id: i64,
+    input2_id: i64,
+    operation: i32,
+    regulatory_layer: i32,
+    value: f64,
+    extra: f64
+) -> i64 with Mut {
+    let entity_id = log.next_entity_id
+    let activity_id = log.next_activity_id
+    let timestamp = log.timestamp_counter
+    let slot = audit_log_slot(timestamp)
+
+    AUDIT_ENTRY_TYPES[slot as usize] = entry_type
+    AUDIT_TIMESTAMPS[slot as usize] = timestamp
+    AUDIT_ENTITY_IDS[slot as usize] = entity_id
+    AUDIT_ACTIVITY_IDS[slot as usize] = activity_id
+    AUDIT_INPUT1_IDS[slot as usize] = input1_id
+    AUDIT_INPUT2_IDS[slot as usize] = input2_id
+    AUDIT_OUTPUT_IDS[slot as usize] = entity_id
+    AUDIT_OPERATIONS[slot as usize] = operation
+    AUDIT_REGULATORY_LAYERS[slot as usize] = regulatory_layer
+    AUDIT_VALUES[slot as usize] = value
+    AUDIT_EXTRAS[slot as usize] = extra
+
+    log.entries[slot as usize] = AuditEntry {
+        entry_type: entry_type,
+        timestamp: timestamp,
+        entity_id: entity_id,
+        activity_id: activity_id,
+        input1_id: input1_id,
+        input2_id: input2_id,
+        output_id: entity_id,
+        operation: operation,
+        regulatory_layer: regulatory_layer,
+        value: value,
+        extra: extra,
+    }
+
+    if log.count < 4096 {
+        log.count = log.count + 1
+    }
+    log.next_entity_id = entity_id + 1
+    log.next_activity_id = activity_id + 1
+    log.timestamp_counter = timestamp + 1
+    entity_id
+}
+
+fn audit_log_read(log: &!AuditLog, path_hash: i64, byte_start: i64, byte_end: i64) -> i64 with Mut {
+    // Preserve the source hash and byte window without expanding the entry schema.
+    audit_log_append(log, 0, path_hash, byte_start, 0, 0, byte_end as f64, 0.0)
+}
+
+fn audit_log_transform(log: &!AuditLog, op: i32, in1: i64, in2: i64) -> i64 with Mut {
+    audit_log_append(log, 1, in1, in2, op, 0, 0.0, 0.0)
+}
+
+fn audit_log_observe(log: &!AuditLog, entity: i64, pre_hash: i64) -> i64 with Mut {
+    audit_log_append(log, 2, entity, pre_hash, 0, 0, 0.0, 0.0)
+}
+
+fn audit_log_test(log: &!AuditLog, test_name: i32, statistic: f64, p_value: f64, effect_size: f64) -> i64 with Mut {
+    // Encode the test statistic in input1_id so the fixed record format retains it.
+    let statistic_encoded = (statistic * 1000000.0) as i64
+    audit_log_append(log, 3, statistic_encoded, 0, test_name, 0, p_value, effect_size)
+}
+
+fn audit_log_count(log: &AuditLog) -> i64 {
+    log.count
+}
+
+fn audit_get_entry(log: &AuditLog, idx: i64) -> AuditEntry {
+    if idx < 0 || idx >= log.count {
+        return audit_entry_zero()
+    }
+
+    let oldest = audit_log_oldest_timestamp(log)
+    let slot = audit_log_slot(oldest + idx)
+    AuditEntry {
+        entry_type: AUDIT_ENTRY_TYPES[slot as usize],
+        timestamp: AUDIT_TIMESTAMPS[slot as usize],
+        entity_id: AUDIT_ENTITY_IDS[slot as usize],
+        activity_id: AUDIT_ACTIVITY_IDS[slot as usize],
+        input1_id: AUDIT_INPUT1_IDS[slot as usize],
+        input2_id: AUDIT_INPUT2_IDS[slot as usize],
+        output_id: AUDIT_OUTPUT_IDS[slot as usize],
+        operation: AUDIT_OPERATIONS[slot as usize],
+        regulatory_layer: AUDIT_REGULATORY_LAYERS[slot as usize],
+        value: AUDIT_VALUES[slot as usize],
+        extra: AUDIT_EXTRAS[slot as usize],
+    }
+}
