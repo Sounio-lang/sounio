@@ -47,6 +47,13 @@ var ELF: [i8; 16781312] = [0; 16781312]
 var TARGET_OS: i64 = 0
 // Target arch: 0=x86_64 (default), 1=aarch64
 var TARGET_ARCH: i64 = 0
+// Ontology validation: class/role name tracking (reset per ontology block)
+var ONT_CLASS_S: [i64; 64] = [0; 64]
+var ONT_CLASS_E: [i64; 64] = [0; 64]
+var ONT_CLASS_COUNT: i64 = 0
+var ONT_ROLE_S: [i64; 32] = [0; 32]
+var ONT_ROLE_E: [i64; 32] = [0; 32]
+var ONT_ROLE_COUNT: i64 = 0
 // PE: offset within CD[] of the ExitProcess call [rip+disp32]'s disp32 field
 var PE_EXIT_CALL_OFF: i64 = -1
 
@@ -2490,6 +2497,7 @@ fn lex_all() with Mut, Panic, Div {
             if src_match(s, l, "type") { k = 61 }
             if src_match(s, l, "algebra") { k = 70 }
             if src_match(s, l, "study") { k = 71 }
+            if src_match(s, l, "ontology") { k = 72 }
             if src_match(s, l, "Some") { k = 57 }
             if src_match(s, l, "None") { k = 58 }
             if src_match(s, l, "Ok") { k = 59 }
@@ -2610,6 +2618,164 @@ fn scan_all_consts() with Panic, Mut {
         CONST_VAL[CONST_COUNT as usize] = cv
         CONST_COUNT = CONST_COUNT + 1
     }
+}
+
+fn ont_find_class(ns: i64, ne: i64) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < ONT_CLASS_COUNT {
+        if name_eq(ns, ne, ONT_CLASS_S[i as usize], ONT_CLASS_E[i as usize]) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fn ont_find_role(ns: i64, ne: i64) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < ONT_ROLE_COUNT {
+        if name_eq(ns, ne, ONT_ROLE_S[i as usize], ONT_ROLE_E[i as usize]) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fn ont_error(tok: i64, code: i64, msg: string) with IO, Mut, Panic {
+    print("error[E")
+    if code < 100 { print("0") }
+    if code < 10 { print("0") }
+    print_int(code)
+    print("] at line ")
+    print_int(TL[tok as usize])
+    print(": ")
+    print(msg)
+    print("\n")
+    TYPECHECK_FAILED = 1
+}
+
+fn skip_ontology_decl(p0: i64) -> i64 with IO, Mut, Panic {
+    var p = p0 + 1  // skip 'ontology'
+    let ont_tok = p0
+
+    // Reset per-block tracking
+    ONT_CLASS_COUNT = 0
+    ONT_ROLE_COUNT = 0
+
+    if p < TC && TK[p as usize] == 3 { p = p + 1 }  // skip name
+
+    // Find opening brace
+    while p < TC && TK[p as usize] != 8 && TK[p as usize] != 0 { p = p + 1 }
+    if p >= TC || TK[p as usize] != 8 { return p }
+    p = p + 1  // skip {
+
+    // Parse body: collect class/role names, validate references
+    while p < TC && TK[p as usize] != 9 {
+        if TK[p as usize] != 3 { p = p + 1; continue }
+        let kw_s = TS[p as usize]
+        let kw_l = TE[p as usize] - TS[p as usize]
+
+        // "class" = 5 chars
+        if src_match(kw_s, kw_l, "class") {
+            p = p + 1  // skip "class"
+            if p < TC && TK[p as usize] == 3 {
+                if ONT_CLASS_COUNT < 64 {
+                    ONT_CLASS_S[ONT_CLASS_COUNT as usize] = TS[p as usize]
+                    ONT_CLASS_E[ONT_CLASS_COUNT as usize] = TE[p as usize]
+                    ONT_CLASS_COUNT = ONT_CLASS_COUNT + 1
+                }
+                p = p + 1  // skip class name
+            }
+            // Skip rest of class declaration (subclass_of, { properties })
+            if p < TC && TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "subclass_of") {
+                p = p + 1  // skip "subclass_of"
+                while p < TC && TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 }  // skip names and commas
+            }
+            if p < TC && TK[p as usize] == 8 {
+                // Skip nested { property ... } block
+                var depth: i64 = 1
+                p = p + 1
+                while p < TC && depth > 0 {
+                    if TK[p as usize] == 8 { depth = depth + 1 }
+                    if TK[p as usize] == 9 { depth = depth - 1 }
+                    p = p + 1
+                }
+            }
+            continue
+        }
+
+        // "disjoint" = 8 chars
+        if src_match(kw_s, kw_l, "disjoint") {
+            p = p + 1  // skip "disjoint"
+            // skip comma-separated names
+            while p < TC && (TK[p as usize] == 3 || TK[p as usize] == 28) { p = p + 1 }
+            continue
+        }
+
+        // "role" = 4 chars
+        if src_match(kw_s, kw_l, "role") {
+            let role_tok = p
+            p = p + 1  // skip "role"
+            if p >= TC || TK[p as usize] != 3 { continue }
+
+            let rn_s = TS[p as usize]
+            let rn_e = TE[p as usize]
+
+            // Check duplicate role
+            if ont_find_role(rn_s, rn_e) {
+                ont_error(role_tok, 159, "duplicate role declaration")
+            }
+
+            // Register role
+            if ONT_ROLE_COUNT < 32 {
+                ONT_ROLE_S[ONT_ROLE_COUNT as usize] = rn_s
+                ONT_ROLE_E[ONT_ROLE_COUNT as usize] = rn_e
+                ONT_ROLE_COUNT = ONT_ROLE_COUNT + 1
+            }
+            p = p + 1  // skip role name
+
+            // Parse role modifiers: domain, range, inverse_of, transitive, etc.
+            while p < TC && TK[p as usize] == 3 {
+                let mod_s = TS[p as usize]
+                let mod_l = TE[p as usize] - TS[p as usize]
+
+                if src_match(mod_s, mod_l, "domain") {
+                    p = p + 1  // skip "domain"
+                    if p < TC && TK[p as usize] == 3 {
+                        if !ont_find_class(TS[p as usize], TE[p as usize]) {
+                            ont_error(p, 156, "role domain class not found in ontology")
+                        }
+                        p = p + 1
+                    }
+                } else if src_match(mod_s, mod_l, "range") {
+                    p = p + 1  // skip "range"
+                    if p < TC && TK[p as usize] == 3 {
+                        if !ont_find_class(TS[p as usize], TE[p as usize]) {
+                            ont_error(p, 157, "role range class not found in ontology")
+                        }
+                        p = p + 1
+                    }
+                } else if src_match(mod_s, mod_l, "inverse_of") {
+                    p = p + 1  // skip "inverse_of"
+                    if p < TC && TK[p as usize] == 3 {
+                        if !ont_find_role(TS[p as usize], TE[p as usize]) {
+                            ont_error(p, 158, "inverse_of target role not found")
+                        }
+                        p = p + 1
+                    }
+                } else if src_match(mod_s, mod_l, "transitive") || src_match(mod_s, mod_l, "functional") || src_match(mod_s, mod_l, "symmetric") {
+                    p = p + 1
+                } else {
+                    break
+                }
+            }
+            continue
+        }
+
+        // Unknown keyword in ontology block — skip
+        p = p + 1
+    }
+
+    // Skip closing }
+    if p < TC && TK[p as usize] == 9 { p = p + 1 }
+    p
 }
 
 fn skip_study_decl(p0: i64) -> i64 with IO, Mut, Panic {
@@ -8094,6 +8260,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         }
         if TK[p as usize] == 71 || (TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "study")) {
             p = skip_study_decl(p)
+            continue
+        }
+        // Skip + validate ontology declarations
+        if TK[p as usize] == 72 {
+            p = skip_ontology_decl(p)
             continue
         }
         if TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 {
