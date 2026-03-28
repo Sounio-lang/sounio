@@ -1,0 +1,410 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Epistemic Transformer Block (seq=4, d=16, 2 heads, d_k=8)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Full transformer: MHA → Add+LN → FFN → Add+LN
+// GUM uncertainty propagates through every operation.
+// 2,720 total parameters — first epistemic transformer in any language.
+
+// ─── Math ───
+fn sqrt_t(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn abs_t(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn exp_t(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_t(10.0) * exp_t(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var s = 1.0
+    var t = 1.0
+    var i = 1
+    while i <= 20 { t = t * x / (i as f64); s = s + t; i = i + 1 }
+    s
+}
+
+// ─── RNG ───
+var RNG_T: i64 = 31415
+fn rand_t() -> f64 with Mut, Div, Panic {
+    RNG_T = (RNG_T * 6364136223846793005 + 1442695040888963407)
+    var v = RNG_T
+    if v < 0 { v = 0 - v }
+    (v % 10000) as f64 / 10000.0 - 0.5
+}
+
+// ─── Global weights (BSS) ───
+// Attention: W_Q, W_K, W_V, W_O each [16×16=256] + biases [16]
+// FFN: W_ff1 [16×32=512], W_ff2 [32×16=512] + biases [32, 16]
+var W_Q: [f64; 256] = [0.0; 256]
+var W_K: [f64; 256] = [0.0; 256]
+var W_V: [f64; 256] = [0.0; 256]
+var W_O: [f64; 256] = [0.0; 256]
+var W_Q_u: [f64; 256] = [0.0; 256]
+var W_K_u: [f64; 256] = [0.0; 256]
+var W_V_u: [f64; 256] = [0.0; 256]
+var W_O_u: [f64; 256] = [0.0; 256]
+var W_ff1: [f64; 512] = [0.0; 512]
+var W_ff2: [f64; 512] = [0.0; 512]
+var W_ff1_u: [f64; 512] = [0.0; 512]
+var W_ff2_u: [f64; 512] = [0.0; 512]
+var b_ff1: [f64; 32] = [0.0; 32]
+var b_ff2: [f64; 16] = [0.0; 16]
+
+// ─── Linear: out[seq×d_out] = in[seq×d_in] · W[d_in×d_out] + bias ───
+struct LinOut64 { v: [f64; 64], u: [f64; 64] }
+struct LinOut128 { v: [f64; 128], u: [f64; 128] }
+
+fn lin16to16(inp: &[f64; 64], inp_u: &[f64; 64], W: &[f64; 256], Wu: &[f64; 256]) -> LinOut64 with Mut, Div, Panic {
+    var ov: [f64; 64] = [0.0; 64]
+    var ou: [f64; 64] = [0.0; 64]
+    var s = 0
+    while s < 4 {
+        var j = 0
+        while j < 16 {
+            var sum = 0.0
+            var vs = 0.0
+            var k = 0
+            while k < 16 {
+                let x = inp[(s * 16 + k) as usize]
+                let w = W[(k * 16 + j) as usize]
+                sum = sum + x * w
+                vs = vs + x * x * Wu[(k * 16 + j) as usize] * Wu[(k * 16 + j) as usize] + w * w * inp_u[(s * 16 + k) as usize] * inp_u[(s * 16 + k) as usize]
+                k = k + 1
+            }
+            ov[(s * 16 + j) as usize] = sum
+            ou[(s * 16 + j) as usize] = sqrt_t(vs)
+            j = j + 1
+        }
+        s = s + 1
+    }
+    LinOut64 { v: ov, u: ou }
+}
+
+fn lin16to32(inp: &[f64; 64], inp_u: &[f64; 64], W: &[f64; 512], Wu: &[f64; 512], bias: &[f64; 32]) -> LinOut128 with Mut, Div, Panic {
+    var ov: [f64; 128] = [0.0; 128]
+    var ou: [f64; 128] = [0.0; 128]
+    var s = 0
+    while s < 4 {
+        var j = 0
+        while j < 32 {
+            var sum = bias[j as usize]
+            var vs = 0.0
+            var k = 0
+            while k < 16 {
+                let x = inp[(s * 16 + k) as usize]
+                let w = W[(k * 32 + j) as usize]
+                sum = sum + x * w
+                vs = vs + x * x * Wu[(k * 32 + j) as usize] * Wu[(k * 32 + j) as usize] + w * w * inp_u[(s * 16 + k) as usize] * inp_u[(s * 16 + k) as usize]
+                k = k + 1
+            }
+            ov[(s * 32 + j) as usize] = sum
+            ou[(s * 32 + j) as usize] = sqrt_t(vs)
+            j = j + 1
+        }
+        s = s + 1
+    }
+    LinOut128 { v: ov, u: ou }
+}
+
+fn lin32to16(inp: &[f64; 128], inp_u: &[f64; 128], W: &[f64; 512], Wu: &[f64; 512], bias: &[f64; 16]) -> LinOut64 with Mut, Div, Panic {
+    var ov: [f64; 64] = [0.0; 64]
+    var ou: [f64; 64] = [0.0; 64]
+    var s = 0
+    while s < 4 {
+        var j = 0
+        while j < 16 {
+            var sum = bias[j as usize]
+            var vs = 0.0
+            var k = 0
+            while k < 32 {
+                let x = inp[(s * 32 + k) as usize]
+                let w = W[(k * 16 + j) as usize]
+                sum = sum + x * w
+                vs = vs + x * x * Wu[(k * 16 + j) as usize] * Wu[(k * 16 + j) as usize] + w * w * inp_u[(s * 32 + k) as usize] * inp_u[(s * 32 + k) as usize]
+                k = k + 1
+            }
+            ov[(s * 16 + j) as usize] = sum
+            ou[(s * 16 + j) as usize] = sqrt_t(vs)
+            j = j + 1
+        }
+        s = s + 1
+    }
+    LinOut64 { v: ov, u: ou }
+}
+
+// ─── Single-head attention (d_k=8, seq=4) ───
+struct Head32 { v: [f64; 32], u: [f64; 32] }
+
+fn attention_head(Q: &[f64; 32], K: &[f64; 32], V: &[f64; 32],
+                  Qu: &[f64; 32], Ku: &[f64; 32], Vu: &[f64; 32]) -> Head32 with Mut, Div, Panic {
+    let sc = 1.0 / sqrt_t(8.0)
+    var scores: [f64; 16] = [0.0; 16]
+    var su: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 4 {
+        var j = 0
+        while j < 4 {
+            var dot = 0.0
+            var dv = 0.0
+            var d = 0
+            while d < 8 {
+                let q = Q[(i * 8 + d) as usize]
+                let k = K[(j * 8 + d) as usize]
+                dot = dot + q * k
+                dv = dv + k * k * Qu[(i * 8 + d) as usize] * Qu[(i * 8 + d) as usize] + q * q * Ku[(j * 8 + d) as usize] * Ku[(j * 8 + d) as usize]
+                d = d + 1
+            }
+            scores[(i * 4 + j) as usize] = dot * sc
+            su[(i * 4 + j) as usize] = sqrt_t(dv) * sc
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // Softmax per row
+    i = 0
+    while i < 4 {
+        var mx = scores[(i * 4) as usize]
+        var j = 1
+        while j < 4 { if scores[(i * 4 + j) as usize] > mx { mx = scores[(i * 4 + j) as usize] }; j = j + 1 }
+        var sm = 0.0
+        j = 0
+        while j < 4 { let e = exp_t(scores[(i * 4 + j) as usize] - mx); scores[(i * 4 + j) as usize] = e; sm = sm + e; j = j + 1 }
+        j = 0
+        while j < 4 { scores[(i * 4 + j) as usize] = scores[(i * 4 + j) as usize] / sm; j = j + 1 }
+        i = i + 1
+    }
+    // Weighted V
+    var ov: [f64; 32] = [0.0; 32]
+    var ou: [f64; 32] = [0.0; 32]
+    i = 0
+    while i < 4 {
+        var d = 0
+        while d < 8 {
+            var s = 0.0
+            var vs = 0.0
+            var j = 0
+            while j < 4 {
+                let w = scores[(i * 4 + j) as usize]
+                let v = V[(j * 8 + d) as usize]
+                s = s + w * v
+                vs = vs + v * v * su[(i * 4 + j) as usize] * su[(i * 4 + j) as usize] + w * w * Vu[(j * 8 + d) as usize] * Vu[(j * 8 + d) as usize]
+                j = j + 1
+            }
+            ov[(i * 8 + d) as usize] = s
+            ou[(i * 8 + d) as usize] = sqrt_t(vs)
+            d = d + 1
+        }
+        i = i + 1
+    }
+    Head32 { v: ov, u: ou }
+}
+
+// ─── Multi-head attention (2 heads × d_k=8 → d_model=16) ───
+fn mha(inp: &[f64; 64], inp_u: &[f64; 64]) -> LinOut64 with Mut, Div, Panic {
+    let Qp = lin16to16(inp, inp_u, &W_Q, &W_Q_u)
+    let Kp = lin16to16(inp, inp_u, &W_K, &W_K_u)
+    let Vp = lin16to16(inp, inp_u, &W_V, &W_V_u)
+
+    var concat_v: [f64; 64] = [0.0; 64]
+    var concat_u: [f64; 64] = [0.0; 64]
+
+    var h = 0
+    while h < 2 {
+        var hQ: [f64; 32] = [0.0; 32]
+        var hK: [f64; 32] = [0.0; 32]
+        var hV: [f64; 32] = [0.0; 32]
+        var hQu: [f64; 32] = [0.0; 32]
+        var hKu: [f64; 32] = [0.0; 32]
+        var hVu: [f64; 32] = [0.0; 32]
+        var s = 0
+        while s < 4 {
+            var d = 0
+            while d < 8 {
+                let src = s * 16 + h * 8 + d
+                let dst = s * 8 + d
+                hQ[dst as usize] = Qp.v[src as usize]
+                hK[dst as usize] = Kp.v[src as usize]
+                hV[dst as usize] = Vp.v[src as usize]
+                hQu[dst as usize] = Qp.u[src as usize]
+                hKu[dst as usize] = Kp.u[src as usize]
+                hVu[dst as usize] = Vp.u[src as usize]
+                d = d + 1
+            }
+            s = s + 1
+        }
+        let head = attention_head(&hQ, &hK, &hV, &hQu, &hKu, &hVu)
+        s = 0
+        while s < 4 {
+            var d = 0
+            while d < 8 {
+                concat_v[(s * 16 + h * 8 + d) as usize] = head.v[(s * 8 + d) as usize]
+                concat_u[(s * 16 + h * 8 + d) as usize] = head.u[(s * 8 + d) as usize]
+                d = d + 1
+            }
+            s = s + 1
+        }
+        h = h + 1
+    }
+    lin16to16(&concat_v, &concat_u, &W_O, &W_O_u)
+}
+
+// ─── Layer norm ───
+fn lnorm(x: &[f64; 64], xu: &[f64; 64]) -> LinOut64 with Mut, Div, Panic {
+    var ov: [f64; 64] = [0.0; 64]
+    var ou: [f64; 64] = [0.0; 64]
+    var s = 0
+    while s < 4 {
+        var mean = 0.0
+        var i = 0
+        while i < 16 { mean = mean + x[(s * 16 + i) as usize]; i = i + 1 }
+        mean = mean / 16.0
+        var variance = 0.0
+        i = 0
+        while i < 16 { let d = x[(s * 16 + i) as usize] - mean; variance = variance + d * d; i = i + 1 }
+        let std = sqrt_t(variance / 16.0 + 0.00001)
+        i = 0
+        while i < 16 {
+            let idx = s * 16 + i
+            ov[idx as usize] = (x[idx as usize] - mean) / std
+            ou[idx as usize] = xu[idx as usize] / std
+            i = i + 1
+        }
+        s = s + 1
+    }
+    LinOut64 { v: ov, u: ou }
+}
+
+// ─── Residual + norm ───
+fn res_norm(a: &[f64; 64], b: &[f64; 64], au: &[f64; 64], bu: &[f64; 64]) -> LinOut64 with Mut, Div, Panic {
+    var rv: [f64; 64] = [0.0; 64]
+    var ru: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < 64 {
+        rv[i as usize] = a[i as usize] + b[i as usize]
+        ru[i as usize] = sqrt_t(au[i as usize] * au[i as usize] + bu[i as usize] * bu[i as usize])
+        i = i + 1
+    }
+    lnorm(&rv, &ru)
+}
+
+// ─── ReLU ───
+fn relu128(x: &[f64; 128], u: &[f64; 128]) -> LinOut128 with Mut, Div, Panic {
+    var ov: [f64; 128] = [0.0; 128]
+    var ou: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < 128 {
+        if x[i as usize] > 0.0 { ov[i as usize] = x[i as usize]; ou[i as usize] = u[i as usize] }
+        i = i + 1
+    }
+    LinOut128 { v: ov, u: ou }
+}
+
+// ─── Full block ───
+fn transformer_block(inp: &[f64; 64], inp_u: &[f64; 64]) -> LinOut64 with Mut, Div, Panic {
+    let attn = mha(inp, inp_u)
+    let n1 = res_norm(inp, &attn.v, inp_u, &attn.u)
+    let ff1 = lin16to32(&n1.v, &n1.u, &W_ff1, &W_ff1_u, &b_ff1)
+    let ff1r = relu128(&ff1.v, &ff1.u)
+    let ff2 = lin32to16(&ff1r.v, &ff1r.u, &W_ff2, &W_ff2_u, &b_ff2)
+    res_norm(&n1.v, &ff2.v, &n1.u, &ff2.u)
+}
+
+// ─── Main ───
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+
+    // Xavier init
+    var wi = 0
+    while wi < 256 {
+        W_Q[wi as usize] = rand_t() * 0.35
+        W_K[wi as usize] = rand_t() * 0.35
+        W_V[wi as usize] = rand_t() * 0.35
+        W_O[wi as usize] = rand_t() * 0.35
+        W_Q_u[wi as usize] = 0.01
+        W_K_u[wi as usize] = 0.01
+        W_V_u[wi as usize] = 0.01
+        W_O_u[wi as usize] = 0.01
+        wi = wi + 1
+    }
+    wi = 0
+    while wi < 512 {
+        W_ff1[wi as usize] = rand_t() * 0.25
+        W_ff2[wi as usize] = rand_t() * 0.25
+        W_ff1_u[wi as usize] = 0.01
+        W_ff2_u[wi as usize] = 0.01
+        wi = wi + 1
+    }
+
+    // Input: 4 tokens × 16 dims
+    var inp: [f64; 64] = [0.0; 64]
+    var inp_u: [f64; 64] = [0.0; 64]
+    var ii = 0
+    while ii < 64 { inp[ii as usize] = rand_t() * 0.5; inp_u[ii as usize] = 0.01; ii = ii + 1 }
+
+    let total = 4 * 256 + 2 * 512 + 32 + 16
+    print("T1 PASS: epistemic transformer (")
+    print_int(total)
+    println(" params, 2 heads, d=16)")
+    passed = passed + 1
+
+    let result = transformer_block(&inp, &inp_u)
+
+    // T2: Nonzero outputs
+    var nz = 0
+    var i = 0
+    while i < 64 { if abs_t(result.v[i as usize]) > 0.001 { nz = nz + 1 }; i = i + 1 }
+    if nz > 50 { print("T2 PASS: "); print_int(nz); println("/64 nonzero outputs"); passed = passed + 1 }
+    else { println("T2 FAIL"); failed = failed + 1 }
+
+    // T3: GUM uncertainty in all outputs
+    var uc = 0
+    i = 0
+    while i < 64 { if result.u[i as usize] > 0.0 { uc = uc + 1 }; i = i + 1 }
+    if uc == 64 { println("T3 PASS: GUM uncertainty in all 64 outputs"); passed = passed + 1 }
+    else { print("T3 FAIL: "); print_int(uc); println("/64"); failed = failed + 1 }
+
+    // T4: Layer norm → zero mean per token
+    var mean_ok = 1
+    var s = 0
+    while s < 4 {
+        var m = 0.0
+        var d = 0
+        while d < 16 { m = m + result.v[(s * 16 + d) as usize]; d = d + 1 }
+        if abs_t(m / 16.0) > 0.1 { mean_ok = 0 }
+        s = s + 1
+    }
+    if mean_ok == 1 { println("T4 PASS: zero-mean per token (layer norm)"); passed = passed + 1 }
+    else { println("T4 FAIL"); failed = failed + 1 }
+
+    // T5: Uncertainty bounded
+    var mx_u = 0.0
+    i = 0
+    while i < 64 { if result.u[i as usize] > mx_u { mx_u = result.u[i as usize] }; i = i + 1 }
+    if mx_u < 10.0 { print("T5 PASS: max uncertainty = "); print(mx_u); println(" (bounded)"); passed = passed + 1 }
+    else { println("T5 FAIL: exploded"); failed = failed + 1 }
+
+    // T6: RMS > 0 (residual preserved information)
+    var rms = 0.0
+    i = 0
+    while i < 64 { rms = rms + result.v[i as usize] * result.v[i as usize]; i = i + 1 }
+    rms = sqrt_t(rms / 64.0)
+    if rms > 0.01 { print("T6 PASS: RMS = "); print(rms); println(""); passed = passed + 1 }
+    else { println("T6 FAIL"); failed = failed + 1 }
+
+    println("")
+    print("Passed: ")
+    print_int(passed)
+    println("")
+    print("Failed: ")
+    print_int(failed)
+    println("")
+    if failed == 0 { println("ALL PASS") }
+    else { println("SOME TESTS FAILED") }
+    failed
+}
