@@ -4754,6 +4754,20 @@ fn compile_primary() with IO, Mut, Panic, Div {
     // Token 45 = | at expression start = closure (not bitwise OR)
     // Supports captured variables from outer scope via closure struct.
     // All closures build a stack struct: [fn_ptr, cap_0, cap_1, ...]
+fn emit_syscall6_x86(argc: i64) with Mut {
+    if argc >= 1 {
+        em(0x48); em(0x8b); em(0x84); em(0x24); em32((argc - 1) * 8)  // mov rax, [rsp+num]
+    }
+    if argc >= 2 { emit_load_rsp_arg_x86(0, (argc - 2) * 8) }  // rdi = a1
+    if argc >= 3 { emit_load_rsp_arg_x86(1, (argc - 3) * 8) }  // rsi = a2
+    if argc >= 4 { emit_load_rsp_arg_x86(2, (argc - 4) * 8) }  // rdx = a3
+    if argc >= 5 { em(0x4c); em(0x8b); em(0x94); em(0x24); em32((argc - 5) * 8) }  // mov r10, [rsp+a4]
+    if argc >= 6 { emit_load_rsp_arg_x86(4, (argc - 6) * 8) }  // r8 = a5
+    if argc >= 7 { emit_load_rsp_arg_x86(5, (argc - 7) * 8) }  // r9 = a6
+    em(0x0f); em(0x05)
+    emit_drop_call_args_x86(argc)
+}
+
     // Closure function receives hidden first param (env_ptr) in rdi.
     // User args shift to rsi, rdx, rcx, r8, r9 (max 5 user args).
     if k == 45 || k == 31 {
@@ -6234,6 +6248,30 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
     var more: i64 = 1
     while more == 1 {
         if TK[EP as usize] == 37 {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "syscall6") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                var sys_argc: i64 = 0
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or()
+                    materialize_aggregate_expr_x86()
+                    em(0x50)
+                    sys_argc = sys_argc + 1
+                    if TK[EP as usize] == 28 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                if sys_argc != 7 {
+                    tc_wrong_arity(name_tok, 7, sys_argc)
+                    emit_drop_call_args_x86(sys_argc)
+                    em(0x31); em(0xc0)
+                } else {
+                    emit_syscall6_x86(sys_argc)
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
             EP = EP + 1  // skip 'as'
             let tp = EP
             let src_ty = EXPR_TY
