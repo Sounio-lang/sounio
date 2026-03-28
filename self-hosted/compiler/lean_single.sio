@@ -11,10 +11,10 @@ var SRC_LEN: i64 = 0
 // Import resolution
 var IMP_PATH: [i8; 4096] = [0; 4096]
 var IMP_RAW_PATH: [i8; 4096] = [0; 4096]
-var IMP_LOADED: [i64; 256] = [0; 256]
-var IMP_LOADED_PATHS: [i8; 65536] = [0; 65536]
-var IMP_LOADED_OFFS: [i64; 256] = [0; 256]
-var IMP_LOADED_LENS: [i64; 256] = [0; 256]
+var IMP_LOADED: [i64; 1024] = [0; 1024]
+var IMP_LOADED_PATHS: [i8; 262144] = [0; 262144]
+var IMP_LOADED_OFFS: [i64; 1024] = [0; 1024]
+var IMP_LOADED_LENS: [i64; 1024] = [0; 1024]
 var IMP_PATHS_USED: i64 = 0
 var IMP_COUNT: i64 = 0
 var BASE_DIR: [i8; 512] = [0; 512]
@@ -4097,9 +4097,9 @@ fn emit_read_file() with Mut {
     em(0x48); em(0x31); em(0xf6)  // xor rsi, rsi
     em(0xb8); em32(2); em(0x0f); em(0x05)  // open → fd in rax
     em(0x50)  // push fd
-    // mmap(NULL, 16MB, 3, 0x22, -1, 0)
+    // mmap(NULL, 16MB+1, 3, 0x22, -1, 0)
     em(0x48); em(0x31); em(0xff)  // rdi=0
-    em(0xbe); em32(0x1000000)  // esi=16MB
+    em(0xbe); em32(0x1000001)  // esi=16MB+1
     em(0xba); em32(3)  // edx=PROT_RW
     em(0x41); em(0xba); em32(0x22)  // r10d=MAP_PRIVATE|MAP_ANON
     em(0x49); em(0xc7); em(0xc0); em32(-1)  // r8=-1
@@ -4111,6 +4111,12 @@ fn emit_read_file() with Mut {
     em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x08)  // mov rdi, [rsp+8] (fd)
     em(0xba); em32(0x1000000)  // edx=16MB
     em(0xb8); em32(0); em(0x0f); em(0x05)  // read
+    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (bytes read)
+    em(0x48); em(0x85); em(0xc9)  // test rcx, rcx
+    em(0x79); em(0x02)  // jns read_ok
+    em(0x31); em(0xc9)  // xor ecx, ecx
+    em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (buf)
+    em(0xc6); em(0x04); em(0x08); em(0x00)  // mov byte [rax + rcx], 0
     // close(fd)
     em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x08)  // mov rdi, [rsp+8] (fd)
     em(0xb8); em32(3); em(0x0f); em(0x05)  // close
@@ -4122,7 +4128,7 @@ fn emit_read_file() with Mut {
 fn emit_file_size() with Mut {
     // rax = path. stat(path, &statbuf) → statbuf.st_size at offset 48
     em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (path)
-    em(0x48); em(0x81); em(0xec); em32(144)  // sub rsp, 144 (struct stat)
+    em(0x48); em(0x81); em(0xec); em32(160)  // sub rsp, 160 (struct stat + padding)
     em(0x48); em(0x89); em(0xe6)  // mov rsi, rsp (statbuf)
     em(0xb8); em32(4)  // mov eax, 4 (sys_stat)
     em(0x0f); em(0x05)
@@ -4135,7 +4141,7 @@ fn emit_file_size() with Mut {
     let stat_done_target = CL
     patch32(stat_fail, stat_fail_target)
     patch32(stat_done, stat_done_target)
-    em(0x48); em(0x81); em(0xc4); em32(144)  // add rsp, 144
+    em(0x48); em(0x81); em(0xc4); em32(160)  // add rsp, 160
 }
 
 fn emit_write_file_flags(open_flags: i64) with Mut {
@@ -9837,9 +9843,9 @@ fn emit_read_file_a64() with Mut {
     emit_syscall_a64()
     // x0 = fd. Push it.
     emit_push_a64()
-    // mmap(NULL, 4MB, 3, 0x22, -1, 0)
+    // mmap(NULL, 4MB+1, 3, 0x22, -1, 0)
     em32(0xD2800000)  // x0 = NULL
-    emit_imm64_reg_a64(1, 0x400000)  // x1 = 4MB
+    emit_imm64_reg_a64(1, 0x400001)  // x1 = 4MB+1
     em32(0xD2800060 | 2)  // x2 = 3
     em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)  // x3 = 0x22
     emit_imm64_reg_a64(4, -1)  // x4 = -1
@@ -9862,6 +9868,16 @@ fn emit_read_file_a64() with Mut {
         em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // x8 = 63 (read)
     }
     emit_syscall_a64()
+    em32(0xAA0003E2)  // mov x2, x0 (bytes read)
+    em32(0xF100005F)  // cmp x2, #0
+    let read_ok_patch = CL
+    em32(0x5400000A)  // b.ge read_ok
+    em32(0xD2800002)  // movz x2, #0
+    let read_ok_target = CL
+    patch_branch_a64(read_ok_patch, read_ok_target)
+    em32(0xF9400000 | ((0/8) << 10) | (31 << 5) | 1)  // ldr x1, [sp, #0] (buf)
+    em32(0x8B020021)  // add x1, x1, x2
+    em32(0x3900003F)  // strb wzr, [x1]
     // close(fd)
     em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #16]
     if TARGET_OS == 2 {
@@ -9950,7 +9966,7 @@ fn emit_file_size_a64() with Mut {
     }
     emit_syscall_a64()
     emit_push_a64()  // save fd
-    em32(0xD1000000 | (144 << 10) | (31 << 5) | 31)  // sub sp, sp, #144
+    em32(0xD1000000 | (160 << 10) | (31 << 5) | 31)  // sub sp, sp, #160
     em32(0x910003E1)  // mov x1, sp
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(16, 0x2000153)
@@ -9959,7 +9975,7 @@ fn emit_file_size_a64() with Mut {
     }
     emit_syscall_a64()
     em32(0xF9400000 | ((48/8) << 10) | (31 << 5) | 9)  // ldr x9, [sp, #48]
-    em32(0x91000000 | (144 << 10) | (31 << 5) | 31)     // add sp, sp, #144
+    em32(0x91000000 | (160 << 10) | (31 << 5) | 31)     // add sp, sp, #160
     em32(0xF8410FE0)  // pop fd
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(16, 0x2000006)
@@ -13001,6 +13017,14 @@ fn imp_path_hash(len: i64) -> i64 with Panic, Mut {
     return h
 }
 
+fn print_imp_path() with IO, Mut, Panic {
+    var i: i64 = 0
+    while i < 4096 && IMP_PATH[i as usize] != 0 {
+        print_char(IMP_PATH[i as usize] as i64)
+        i = i + 1
+    }
+}
+
 fn set_base_dir_from_src_path(ps: i64, pe: i64) with Mut, Panic {
     var last_slash: i64 = -1
     var i: i64 = ps
@@ -13378,8 +13402,10 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 fp_len = BASE_DIR_LEN + 1 + fp_len
             }
             IMP_PATH[fp_len as usize] = 0  // null terminate
+            var raw = read_file(IMP_PATH)
+            var copy_len = str_len(raw)
             var fsz: i64 = file_size(IMP_PATH)
-            if fsz <= 0 && needs_base_dir == 1 {
+            if copy_len <= 0 && needs_base_dir == 1 {
                 fp_len = raw_len
                 raw_i = 0
                 while raw_i < raw_len {
@@ -13387,8 +13413,10 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     raw_i = raw_i + 1
                 }
                 IMP_PATH[fp_len as usize] = 0
+                raw = read_file(IMP_PATH)
+                copy_len = str_len(raw)
                 fsz = file_size(IMP_PATH)
-                if fsz <= 0 {
+                if copy_len <= 0 {
                     IMP_PATH[0 as usize] = 115
                     IMP_PATH[1 as usize] = 101
                     IMP_PATH[2 as usize] = 108
@@ -13408,8 +13436,10 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     }
                     fp_len = 12 + raw_len
                     IMP_PATH[fp_len as usize] = 0
+                    raw = read_file(IMP_PATH)
+                    copy_len = str_len(raw)
                     fsz = file_size(IMP_PATH)
-                    if fsz <= 0 {
+                    if copy_len <= 0 {
                         IMP_PATH[0 as usize] = 115
                         IMP_PATH[1 as usize] = 116
                         IMP_PATH[2 as usize] = 100
@@ -13424,64 +13454,97 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         }
                         fp_len = 7 + raw_len
                         IMP_PATH[fp_len as usize] = 0
+                        raw = read_file(IMP_PATH)
+                        copy_len = str_len(raw)
                         fsz = file_size(IMP_PATH)
                     }
                 }
             }
-            // Dedup check — string comparison (hash pre-filter + full path match)
-            let ph = imp_path_hash(fp_len)
-            var already: i64 = 0
-            var di: i64 = 0
-            while di < IMP_COUNT {
-                if IMP_LOADED[di as usize] == ph && IMP_LOADED_LENS[di as usize] == fp_len {
-                    let off = IMP_LOADED_OFFS[di as usize]
-                    var match_ok: i64 = 1
-                    var mi: i64 = 0
-                    while mi < fp_len {
-                        if IMP_LOADED_PATHS[(off + mi) as usize] != IMP_PATH[mi as usize] { match_ok = 0 }
-                        mi = mi + 1
-                    }
-                    if match_ok == 1 { already = 1 }
+            if copy_len <= 0 {
+                print("error: unreadable import: ")
+                print_imp_path()
+                print("\n")
+            } else {
+                if fsz <= 0 || fsz >= 4194304 {
+                    print("warning: import size invalid; using read count for ")
+                    print_imp_path()
+                    print("\n")
                 }
-                di = di + 1
-            }
-            if already == 0 && IMP_COUNT < 256 {
-                // Record this path
-                IMP_LOADED[IMP_COUNT as usize] = ph
-                if IMP_PATHS_USED + fp_len < 65536 {
-                    IMP_LOADED_OFFS[IMP_COUNT as usize] = IMP_PATHS_USED
-                    IMP_LOADED_LENS[IMP_COUNT as usize] = fp_len
-                    var ri: i64 = 0
-                    while ri < fp_len {
-                        IMP_LOADED_PATHS[(IMP_PATHS_USED + ri) as usize] = IMP_PATH[ri as usize]
-                        ri = ri + 1
+                // Dedup check — string comparison (hash pre-filter + full path match)
+                let ph = imp_path_hash(fp_len)
+                var already: i64 = 0
+                var di: i64 = 0
+                while di < IMP_COUNT {
+                    if IMP_LOADED[di as usize] == ph && IMP_LOADED_LENS[di as usize] == fp_len {
+                        let off = IMP_LOADED_OFFS[di as usize]
+                        var match_ok: i64 = 1
+                        var mi: i64 = 0
+                        while mi < fp_len {
+                            if IMP_LOADED_PATHS[(off + mi) as usize] != IMP_PATH[mi as usize] { match_ok = 0 }
+                            mi = mi + 1
+                        }
+                        if match_ok == 1 { already = 1 }
                     }
-                    IMP_PATHS_USED = IMP_PATHS_USED + fp_len
+                    di = di + 1
                 }
-                IMP_COUNT = IMP_COUNT + 1
-                // Try to read the file
-                if fsz > 0 && SRC_LEN + fp_len + fsz + 3 < 4194304 {
-                    let raw = read_file(IMP_PATH)
-                    // Append newline separator
-                    SRC[SRC_LEN as usize] = 10
-                    SRC_LEN = SRC_LEN + 1
-                    SRC[SRC_LEN as usize] = 1
-                    SRC_LEN = SRC_LEN + 1
-                    var pi2: i64 = 0
-                    while pi2 < fp_len {
-                        SRC[(SRC_LEN + pi2) as usize] = IMP_PATH[pi2 as usize]
-                        pi2 = pi2 + 1
+                if already == 0 {
+                    if IMP_COUNT >= 1024 {
+                        print("error: import dedup table full: ")
+                        print_imp_path()
+                        print("\n")
+                    } else if IMP_PATHS_USED + fp_len > 262144 {
+                        print("error: import path table full: ")
+                        print_imp_path()
+                        print("\n")
+                    } else if copy_len >= 4194304 || SRC_LEN + fp_len + copy_len + 3 >= 4194304 {
+                        print("error: import too large for SRC buffer: ")
+                        print_imp_path()
+                        print(" (")
+                        print_int(copy_len)
+                        print(" bytes)\n")
+                    } else {
+                        let prev_src_len = SRC_LEN
+                        SRC[SRC_LEN as usize] = 10
+                        SRC_LEN = SRC_LEN + 1
+                        SRC[SRC_LEN as usize] = 1
+                        SRC_LEN = SRC_LEN + 1
+                        var pi2: i64 = 0
+                        while pi2 < fp_len {
+                            SRC[(SRC_LEN + pi2) as usize] = IMP_PATH[pi2 as usize]
+                            pi2 = pi2 + 1
+                        }
+                        SRC_LEN = SRC_LEN + fp_len
+                        SRC[SRC_LEN as usize] = 2
+                        SRC_LEN = SRC_LEN + 1
+                        var ci: i64 = 0
+                        while ci < copy_len && SRC_LEN + ci < 4194304 {
+                            SRC[(SRC_LEN + ci) as usize] = raw[ci as usize]
+                            ci = ci + 1
+                        }
+                        if ci != copy_len {
+                            SRC_LEN = prev_src_len
+                            print("error: import copy truncated: ")
+                            print_imp_path()
+                            print("\n")
+                        } else {
+                            SRC_LEN = SRC_LEN + copy_len
+                            IMP_LOADED[IMP_COUNT as usize] = ph
+                            IMP_LOADED_OFFS[IMP_COUNT as usize] = IMP_PATHS_USED
+                            IMP_LOADED_LENS[IMP_COUNT as usize] = fp_len
+                            var ri: i64 = 0
+                            while ri < fp_len {
+                                IMP_LOADED_PATHS[(IMP_PATHS_USED + ri) as usize] = IMP_PATH[ri as usize]
+                                ri = ri + 1
+                            }
+                            IMP_PATHS_USED = IMP_PATHS_USED + fp_len
+                            IMP_COUNT = IMP_COUNT + 1
+                            print("import: ")
+                            print_imp_path()
+                            print(" ")
+                            print_int(copy_len)
+                            print(" bytes\n")
+                        }
                     }
-                    SRC_LEN = SRC_LEN + fp_len
-                    SRC[SRC_LEN as usize] = 2
-                    SRC_LEN = SRC_LEN + 1
-                    // Copy imported source
-                    var ci: i64 = 0
-                    while ci < fsz { SRC[(SRC_LEN + ci) as usize] = raw[ci as usize]; ci = ci + 1 }
-                    SRC_LEN = SRC_LEN + fsz
-                    print("import: "); print(IMP_PATH); print(" "); print_int(fsz); print(" bytes\n")
-                } else if fsz > 0 {
-                    print("error: import too large for SRC buffer: "); print(IMP_PATH); print(" ("); print_int(fsz); print(" bytes)\n")
                 }
             }
         }
