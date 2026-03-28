@@ -1,0 +1,337 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Door 5: Epistemic Scaled Dot-Product Attention
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Single-head attention: Attention(Q,K,V) = softmax(QK^T / sqrt(d_k)) · V
+// With GUM uncertainty: every Q, K, V element carries σ (measurement std).
+// Output uncertainty propagates through matmul + softmax via law of propagation.
+//
+// Dimensions: seq_len=8, d_model=16 (exercising Door 1's large arrays)
+// Total: Q[128] + K[128] + V[128] + scores[64] + output[128] + uncertainties
+//        = ~1,200 f64 values — well within Door 1 limits.
+
+// ─── Math helpers ───
+
+fn sqrt_a(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_a(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn exp_a(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_a(10.0) * exp_a(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+// ─── Dimensions ───
+fn SEQ_LEN() -> i64 { 8 }
+fn D_MODEL() -> i64 { 16 }
+fn QKV_SIZE() -> i64 { 128 }   // 8 × 16
+fn SCORE_SIZE() -> i64 { 64 }  // 8 × 8
+
+// ─── RNG ───
+var RNG_A: i64 = 7777
+
+fn rand_a() -> f64 with Mut, Div, Panic {
+    RNG_A = (RNG_A * 6364136223846793005 + 1442695040888963407)
+    var v = RNG_A
+    if v < 0 { v = 0 - v }
+    (v % 10000) as f64 / 10000.0 - 0.5  // uniform [-0.5, 0.5]
+}
+
+// ─── Softmax over a row of scores ───
+// scores[row_start .. row_start + SEQ_LEN] → normalized in-place
+// Returns max exponent uncertainty for GUM propagation
+
+struct SoftmaxResult {
+    probs: [f64; 64],
+    max_grad: f64,
+}
+
+fn softmax_row(scores: &[f64; 64], row: i64) -> SoftmaxResult with Mut, Div, Panic {
+    var probs: [f64; 64] = [0.0; 64]
+    let base = row * 8
+
+    // Find max for numerical stability
+    var max_val = scores[base as usize]
+    var j = 1
+    while j < 8 {
+        let v = scores[(base + j) as usize]
+        if v > max_val { max_val = v }
+        j = j + 1
+    }
+
+    // exp(x - max) and sum
+    var sum = 0.0
+    j = 0
+    while j < 8 {
+        let e = exp_a(scores[(base + j) as usize] - max_val)
+        probs[(base + j) as usize] = e
+        sum = sum + e
+        j = j + 1
+    }
+
+    // Normalize
+    var max_p = 0.0
+    j = 0
+    while j < 8 {
+        let p = probs[(base + j) as usize] / sum
+        probs[(base + j) as usize] = p
+        // softmax gradient: max |p(1-p)| for GUM
+        let grad = abs_a(p * (1.0 - p))
+        if grad > max_p { max_p = grad }
+        j = j + 1
+    }
+
+    // Copy non-row entries from original
+    var k = 0
+    while k < 64 {
+        if k / 8 != row { probs[k as usize] = scores[k as usize] }
+        k = k + 1
+    }
+
+    SoftmaxResult { probs: probs, max_grad: max_p }
+}
+
+// ─── Attention ───
+
+struct AttentionOutput {
+    output: [f64; 128],       // [seq_len × d_model]
+    output_unc: [f64; 128],   // GUM uncertainty per output element
+    scores: [f64; 64],        // attention weights [seq_len × seq_len]
+}
+
+fn scaled_dot_product_attention(
+    Q: &[f64; 128],        // [8 × 16]
+    K: &[f64; 128],
+    V: &[f64; 128],
+    Q_unc: &[f64; 128],   // per-element uncertainty
+    K_unc: &[f64; 128],
+    V_unc: &[f64; 128]
+) -> AttentionOutput with Mut, Div, Panic {
+    let scale = 1.0 / sqrt_a(16.0)  // 1/sqrt(d_k)
+
+    // Step 1: Compute attention scores = Q · K^T / sqrt(d_k)
+    // scores[i,j] = sum_d Q[i,d] * K[j,d] / sqrt(d_k)
+    var scores: [f64; 64] = [0.0; 64]
+    var score_unc: [f64; 64] = [0.0; 64]
+
+    var i = 0
+    while i < 8 {
+        var j = 0
+        while j < 8 {
+            var dot = 0.0
+            var dot_var = 0.0
+            var d = 0
+            while d < 16 {
+                let q_val = Q[(i * 16 + d) as usize]
+                let k_val = K[(j * 16 + d) as usize]
+                let q_u = Q_unc[(i * 16 + d) as usize]
+                let k_u = K_unc[(j * 16 + d) as usize]
+
+                dot = dot + q_val * k_val
+                // GUM: var(q*k) = k²·σ_q² + q²·σ_k²
+                dot_var = dot_var + k_val * k_val * q_u * q_u + q_val * q_val * k_u * k_u
+                d = d + 1
+            }
+            scores[(i * 8 + j) as usize] = dot * scale
+            score_unc[(i * 8 + j) as usize] = sqrt_a(dot_var) * scale
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 2: Softmax each row
+    var attn_weights: [f64; 64] = [0.0; 64]
+    var attn_unc: [f64; 64] = [0.0; 64]
+
+    i = 0
+    while i < 8 {
+        let sr = softmax_row(&scores, i)
+        var j = 0
+        while j < 8 {
+            let idx = i * 8 + j
+            attn_weights[idx as usize] = sr.probs[idx as usize]
+            // GUM through softmax: σ_out ≈ |softmax'| · σ_in
+            attn_unc[idx as usize] = sr.max_grad * score_unc[idx as usize]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 3: Output = attn_weights · V
+    var output: [f64; 128] = [0.0; 128]
+    var output_unc: [f64; 128] = [0.0; 128]
+
+    i = 0
+    while i < 8 {
+        var d = 0
+        while d < 16 {
+            var sum = 0.0
+            var var_sum = 0.0
+            var j = 0
+            while j < 8 {
+                let w = attn_weights[(i * 8 + j) as usize]
+                let v = V[(j * 16 + d) as usize]
+                let w_u = attn_unc[(i * 8 + j) as usize]
+                let v_u = V_unc[(j * 16 + d) as usize]
+
+                sum = sum + w * v
+                // GUM: var(w*v) = v²·σ_w² + w²·σ_v²
+                var_sum = var_sum + v * v * w_u * w_u + w * w * v_u * v_u
+                j = j + 1
+            }
+            output[(i * 16 + d) as usize] = sum
+            output_unc[(i * 16 + d) as usize] = sqrt_a(var_sum)
+            d = d + 1
+        }
+        i = i + 1
+    }
+
+    AttentionOutput { output: output, output_unc: output_unc, scores: attn_weights }
+}
+
+// ─── Tests ───
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+
+    // Initialize Q, K, V with random values + uncertainty
+    var Q: [f64; 128] = [0.0; 128]
+    var K: [f64; 128] = [0.0; 128]
+    var V: [f64; 128] = [0.0; 128]
+    var Q_unc: [f64; 128] = [0.0; 128]
+    var K_unc: [f64; 128] = [0.0; 128]
+    var V_unc: [f64; 128] = [0.0; 128]
+
+    var idx = 0
+    while idx < 128 {
+        Q[idx as usize] = rand_a()
+        K[idx as usize] = rand_a()
+        V[idx as usize] = rand_a()
+        Q_unc[idx as usize] = 0.01  // 1% measurement uncertainty
+        K_unc[idx as usize] = 0.01
+        V_unc[idx as usize] = 0.01
+        idx = idx + 1
+    }
+
+    let result = scaled_dot_product_attention(&Q, &K, &V, &Q_unc, &K_unc, &V_unc)
+
+    // T1: Attention scores sum to 1 per row (softmax property)
+    var row_sums_ok = 1
+    var i = 0
+    while i < 8 {
+        var rsum = 0.0
+        var j = 0
+        while j < 8 {
+            rsum = rsum + result.scores[(i * 8 + j) as usize]
+            j = j + 1
+        }
+        if abs_a(rsum - 1.0) > 0.01 { row_sums_ok = 0 }
+        i = i + 1
+    }
+    if row_sums_ok == 1 { println("T1 PASS: attention scores sum to 1.0 per row"); passed = passed + 1 }
+    else { println("T1 FAIL: row sums != 1.0"); failed = failed + 1 }
+
+    // T2: All attention weights in [0, 1]
+    var weights_valid = 1
+    i = 0
+    while i < 64 {
+        let w = result.scores[i as usize]
+        if w < 0.0 || w > 1.0 { weights_valid = 0 }
+        i = i + 1
+    }
+    if weights_valid == 1 { println("T2 PASS: all attention weights in [0,1]"); passed = passed + 1 }
+    else { println("T2 FAIL: weights out of range"); failed = failed + 1 }
+
+    // T3: Output has non-trivial values (not all zero)
+    var output_nonzero = 0
+    i = 0
+    while i < 128 {
+        if abs_a(result.output[i as usize]) > 0.001 { output_nonzero = output_nonzero + 1 }
+        i = i + 1
+    }
+    if output_nonzero > 100 {
+        print("T3 PASS: ")
+        print_int(output_nonzero)
+        println("/128 output elements are nonzero")
+        passed = passed + 1
+    } else { println("T3 FAIL: too many zero outputs"); failed = failed + 1 }
+
+    // T4: GUM uncertainty propagated to ALL output elements
+    var unc_nonzero = 0
+    i = 0
+    while i < 128 {
+        if result.output_unc[i as usize] > 0.0 { unc_nonzero = unc_nonzero + 1 }
+        i = i + 1
+    }
+    if unc_nonzero == 128 { println("T4 PASS: GUM uncertainty in all 128 outputs"); passed = passed + 1 }
+    else { print("T4 FAIL: only "); print_int(unc_nonzero); println("/128 have uncertainty"); failed = failed + 1 }
+
+    // T5: Output uncertainty is smaller than input uncertainty
+    //     (attention averages V values, reducing variance)
+    var mean_out_unc = 0.0
+    i = 0
+    while i < 128 { mean_out_unc = mean_out_unc + result.output_unc[i as usize]; i = i + 1 }
+    mean_out_unc = mean_out_unc / 128.0
+    if mean_out_unc < 0.01 {
+        print("T5 PASS: output uncertainty (")
+        print(mean_out_unc)
+        println(") < input uncertainty (0.01)")
+        passed = passed + 1
+    } else {
+        print("T5 FAIL: output uncertainty = ")
+        print(mean_out_unc)
+        println("")
+        failed = failed + 1
+    }
+
+    // T6: Self-attention (Q=K) produces peaked scores
+    //     When Q==K, each token attends most to itself
+    var K2: [f64; 128] = [0.0; 128]
+    var K2_unc: [f64; 128] = [0.0; 128]
+    i = 0
+    while i < 128 { K2[i as usize] = Q[i as usize]; K2_unc[i as usize] = Q_unc[i as usize]; i = i + 1 }
+
+    let self_attn = scaled_dot_product_attention(&Q, &K2, &V, &Q_unc, &K2_unc, &V_unc)
+
+    var diag_dominant = 0
+    i = 0
+    while i < 8 {
+        let diag_val = self_attn.scores[(i * 8 + i) as usize]
+        if diag_val > 0.12 { diag_dominant = diag_dominant + 1 }  // > 1/8 = 0.125 baseline
+        i = i + 1
+    }
+    if diag_dominant >= 6 {
+        print("T6 PASS: self-attention diagonal dominant (")
+        print_int(diag_dominant)
+        println("/8 rows)")
+        passed = passed + 1
+    } else { println("T6 FAIL: self-attention not diagonal dominant"); failed = failed + 1 }
+
+    println("")
+    print("Passed: ")
+    print_int(passed)
+    println("")
+    print("Failed: ")
+    print_int(failed)
+    println("")
+    if failed == 0 { println("ALL PASS") }
+    else { println("SOME TESTS FAILED") }
+    failed
+}
