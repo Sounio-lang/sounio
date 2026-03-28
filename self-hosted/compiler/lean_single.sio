@@ -403,21 +403,20 @@ fn emit_load_rsp_arg_x86(reg_idx: i64, disp: i64) with Mut {
     if reg_idx == 5 { em(0x4c); em(0x8b); em(0x8c); em(0x24); em32(disp); return }
 }
 
+fn emit_setup_call_args_shift_x86(argc: i64, shift: i64) with Mut {
+    var arg_idx: i64 = 0
+    while arg_idx < argc && arg_idx + shift < 6 {
+        emit_load_rsp_arg_x86(arg_idx + shift, (argc - 1 - arg_idx) * 8)
+        arg_idx = arg_idx + 1
+    }
+}
+
 fn emit_setup_direct_call_args_x86(argc: i64) with Mut {
-    if argc >= 1 { emit_load_rsp_arg_x86(0, (argc - 1) * 8) }
-    if argc >= 2 { emit_load_rsp_arg_x86(1, (argc - 2) * 8) }
-    if argc >= 3 { emit_load_rsp_arg_x86(2, (argc - 3) * 8) }
-    if argc >= 4 { emit_load_rsp_arg_x86(3, (argc - 4) * 8) }
-    if argc >= 5 { emit_load_rsp_arg_x86(4, (argc - 5) * 8) }
-    if argc >= 6 { emit_load_rsp_arg_x86(5, (argc - 6) * 8) }
+    emit_setup_call_args_shift_x86(argc, 0)
 }
 
 fn emit_setup_closure_call_args_x86(argc: i64) with Mut {
-    if argc >= 1 { emit_load_rsp_arg_x86(1, (argc - 1) * 8) }
-    if argc >= 2 { emit_load_rsp_arg_x86(2, (argc - 2) * 8) }
-    if argc >= 3 { emit_load_rsp_arg_x86(3, (argc - 3) * 8) }
-    if argc >= 4 { emit_load_rsp_arg_x86(4, (argc - 4) * 8) }
-    if argc >= 5 { emit_load_rsp_arg_x86(5, (argc - 5) * 8) }
+    emit_setup_call_args_shift_x86(argc, 1)
 }
 
 fn call_extra_stack_args_x86(argc: i64, regc: i64) -> i64 {
@@ -447,7 +446,25 @@ fn emit_prepare_stack_call_args_x86(argc: i64, regc: i64) with Mut {
     }
 }
 
-fn emit_direct_fn_call_x86(fi: i64, argc: i64) with Mut {
+fn emit_direct_fn_call_x86(fi: i64, argc: i64) with Mut, Panic, Div {
+    let ret_slots = ret_agg_nslots(FN_RET_TY[fi as usize], FN_RET_HASH[fi as usize])
+    if ret_slots > 0 {
+        let ret_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + ret_slots
+        emit_setup_call_args_shift_x86(argc, 1)
+        emit_prepare_stack_call_args_x86(argc, 5)
+        em(0x48); em(0x8d); em(0x85)
+        em32(0 - (ret_base + ret_slots - 1) * 8)
+        em(0x48); em(0x89); em(0xc7)
+        em(0xe8)
+        PATCH_OFF[PATCH_COUNT as usize] = CL
+        PATCH_FN[PATCH_COUNT as usize] = fi
+        PATCH_KIND[PATCH_COUNT as usize] = 0
+        PATCH_COUNT = PATCH_COUNT + 1
+        em32(0)
+        emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
+        return
+    }
     emit_setup_direct_call_args_x86(argc)
     emit_prepare_stack_call_args_x86(argc, 6)
     em(0xe8)
@@ -456,6 +473,28 @@ fn emit_direct_fn_call_x86(fi: i64, argc: i64) with Mut {
     PATCH_KIND[PATCH_COUNT as usize] = 0
     PATCH_COUNT = PATCH_COUNT + 1
     em32(0)
+    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
+}
+
+fn emit_indirect_fn_call_x86(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i64) with Mut, Panic, Div {
+    let ret_slots = ret_agg_nslots(ret_ty, ret_hash)
+    if ret_slots > 0 {
+        let ret_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + ret_slots
+        emit_setup_call_args_shift_x86(argc, 1)
+        emit_prepare_stack_call_args_x86(argc, 5)
+        em(0x48); em(0x8d); em(0x85)
+        em32(0 - (ret_base + ret_slots - 1) * 8)
+        em(0x48); em(0x89); em(0xc7)
+        emit_load_var(ptr_slot)
+        em(0xff); em(0xd0)
+        emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
+        return
+    }
+    emit_setup_direct_call_args_x86(argc)
+    emit_prepare_stack_call_args_x86(argc, 6)
+    emit_load_var(ptr_slot)
+    em(0xff); em(0xd0)
     emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
 }
 
@@ -3382,16 +3421,26 @@ fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
     var nslots = ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH)
     if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
     if nslots <= 0 { return }
-    let dst = GL_BSS_BASE + RET_AGG_BSS_OFF
     em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
-    em(0x48); em(0xb9); em64(dst)  // mov rcx, dst ptr
+    if CURRENT_SRET_SLOT > 0 {
+        emit_load_var(CURRENT_SRET_SLOT)
+        em(0x48); em(0x89); em(0xc1)  // mov rcx, dst ptr
+    } else {
+        let dst = GL_BSS_BASE + RET_AGG_BSS_OFF
+        em(0x48); em(0xb9); em64(dst)  // mov rcx, dst ptr
+    }
     var i: i64 = 0
     while i < nslots {
         em(0x48); em(0x8b); em(0x82); em32(i * 8)
         em(0x48); em(0x89); em(0x81); em32(i * 8)
         i = i + 1
     }
-    em(0x48); em(0xb8); em64(dst)
+    if CURRENT_SRET_SLOT > 0 {
+        emit_load_var(CURRENT_SRET_SLOT)
+    } else {
+        let dst2 = GL_BSS_BASE + RET_AGG_BSS_OFF
+        em(0x48); em(0xb8); em64(dst2)
+    }
 }
 
 // ─── Emit print("string") ───
@@ -4193,6 +4242,7 @@ var LAST_STMT_TY: i64 = 0
 var LAST_STMT_TY_HASH: i64 = 0
 var CURRENT_RET_TY: i64 = 0
 var CURRENT_RET_HASH: i64 = 0
+var CURRENT_SRET_SLOT: i64 = 0
 // Closure state save buffers (global to avoid stack overflow in recursive compile_primary)
 var CL_SAVE_NS: [i64; 1024] = [0; 1024]
 var CL_SAVE_NE: [i64; 1024] = [0; 1024]
@@ -4781,6 +4831,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         let save_bc = BREAK_COUNT
         let save_ret_ty = CURRENT_RET_TY
         let save_ret_hash = CURRENT_RET_HASH
+        let save_sret_slot = CURRENT_SRET_SLOT
         let save_fpc = FRAME_PATCH_COUNT
         // Do NOT reset FRAME_PATCH_COUNT to 0: closure patches append after outer patches,
         // preserving the outer function's sub-rsp patch location at [0..save_fpc).
@@ -4808,6 +4859,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         LOOP_DEPTH = 0
         BREAK_COUNT = 0
         CL_CAP_COUNT = 0
+        CURRENT_SRET_SLOT = 0
         // Parse closure parameters (between | ... |)
         // User params get slots 2, 3, ... (registers rsi, rdx, rcx, r8, r9)
         if zero_param_closure == 0 {
@@ -4947,6 +4999,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         BREAK_COUNT = save_bc
         CURRENT_RET_TY = save_ret_ty
         CURRENT_RET_HASH = save_ret_hash
+        CURRENT_SRET_SLOT = save_sret_slot
         FRAME_PATCH_COUNT = save_fpc
         svi = 0
         while svi < save_vc {
@@ -5952,15 +6005,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
                 if (callee_eff & ~caller_eff) != 0 {
                     tc_effect_violation(call_tok, callee_eff, caller_eff)
                 }
-                emit_setup_direct_call_args_x86(abi_argc)
-                emit_prepare_stack_call_args_x86(abi_argc, 6)
-                em(0xe8)
-                PATCH_OFF[PATCH_COUNT as usize] = CL
-                PATCH_FN[PATCH_COUNT as usize] = fi
-                PATCH_KIND[PATCH_COUNT as usize] = 0
-                PATCH_COUNT = PATCH_COUNT + 1
-                em32(0)
-                emit_drop_call_args_x86(abi_argc + call_extra_stack_args_x86(abi_argc, 6))
+                emit_direct_fn_call_x86(fi, abi_argc)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -5976,11 +6021,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
                         em(0xff); em(0xd0)
                         emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
                     } else {
-                        emit_setup_direct_call_args_x86(abi_argc)
-                        emit_prepare_stack_call_args_x86(abi_argc, 6)
-                        emit_load_var(call_vslot)
-                        em(0xff); em(0xd0)
-                        emit_drop_call_args_x86(abi_argc + call_extra_stack_args_x86(abi_argc, 6))
+                        emit_indirect_fn_call_x86(call_vslot, abi_argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     }
                     if call_sig > 0 {
                         EXPR_TY = FNSIG_RET_TY[call_sig as usize]
@@ -8928,6 +8969,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
+        CURRENT_SRET_SLOT = 0
+        if ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH) > 0 {
+            CURRENT_SRET_SLOT = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+        }
         FRAME_PATCH_COUNT = 0
 
         // Register parameters
@@ -8988,6 +9034,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // Store parameters from registers/stack using low-level ABI slot order.
         var param_vi: i64 = 0
         var abi_arg_idx: i64 = 0
+        if CURRENT_SRET_SLOT > 0 {
+            emit_store_incoming_arg_x86(0, CURRENT_SRET_SLOT)
+            abi_arg_idx = 1
+        }
         while param_vi < VAR_COUNT {
             emit_store_incoming_arg_x86(abi_arg_idx, VAR_SLOT[param_vi as usize])
             abi_arg_idx = abi_arg_idx + 1
