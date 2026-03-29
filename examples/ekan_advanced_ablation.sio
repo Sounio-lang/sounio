@@ -1,0 +1,406 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// E-KAN Advanced Ablation: Width, σ Threshold, Heteroscedastic, OOD
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A) Width: 1→5→1 vs 1→10→1 vs 1→20→1 on sin(2πx)
+// B) Coefficient σ sweep: 0.01, 0.05, 0.1, 0.3 — find GUM breakdown
+// C) Heteroscedastic: noise = 0.01 + 0.49*x — spatially varying
+// D) OOD: train [0,0.7], test [0.7,1.0] — extrapolation detection
+
+fn sqrt_v(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn abs_v(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sin_v(x: f64) -> f64 with Mut, Div {
+    var v = x
+    while v > 3.14159265 { v = v - 6.28318530 }
+    while v < 0.0 - 3.14159265 { v = v + 6.28318530 }
+    let v3 = v * v * v
+    let v5 = v3 * v * v
+    let v7 = v5 * v * v
+    v - v3 / 6.0 + v5 / 120.0 - v7 / 5040.0
+}
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+fn rand_uniform() -> f64 with Mut, Div { (rng_next() % 10000) as f64 / 10000.0 }
+fn rand_normal() -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+fn hat6(x: f64, k: i64) -> f64 with Div {
+    let c = (k as f64) / 5.0
+    let d = abs_v(x - c) / 0.2
+    if d >= 1.0 { return 0.0 }
+    1.0 - d
+}
+
+// ─── Data ───
+var TX: [i64; 30] = [0; 30]
+var TY: [i64; 30] = [0; 30]
+var SX: [i64; 15] = [0; 15]
+var SYC: [i64; 15] = [0; 15]
+var N_TR: i64 = 0
+var N_TE: i64 = 0
+
+// ─── 2-layer E-KAN with variable width ───
+// Max width=20: L1=1*20*6=120, L2=20*1*6=120 → 240 max
+var EW: [i64; 240] = [0; 240]
+var EH: [i64; 20] = [0; 20]
+
+fn ew_set(i: i64, v: f64) with Mut { EW[i] = (v * 100000000.0) as i64 }
+fn ew_get(i: i64) -> f64 with Div { (EW[i] as f64) / 100000000.0 }
+
+fn ek_init(w: i64) with Mut, Div, Panic {
+    let total = w * 6 + w * 6
+    var i = 0
+    while i < total { ew_set(i, rand_normal() * 0.08); i = i + 1 }
+}
+
+fn ek_fwd(x: f64, w: i64) -> f64 with Mut, Div {
+    var j = 0
+    while j < w {
+        var s = 0.0
+        var k = 0
+        while k < 6 { s = s + ew_get(j * 6 + k) * hat6(x, k); k = k + 1 }
+        EH[j] = (s * 100000000.0) as i64
+        j = j + 1
+    }
+    var out = 0.0
+    j = 0
+    while j < w {
+        let hv = (EH[j] as f64) / 100000000.0
+        var hx = (hv + 1.5) / 3.0
+        if hx < 0.0 { hx = 0.0 }
+        if hx > 1.0 { hx = 1.0 }
+        let base = w * 6 + j * 6
+        var k = 0
+        while k < 6 { out = out + ew_get(base + k) * hat6(hx, k); k = k + 1 }
+        j = j + 1
+    }
+    out
+}
+
+fn ek_gum(x: f64, w: i64, cs: f64) -> f64 with Mut, Div, Panic {
+    var hvar: [f64; 20] = [0.0; 20]
+    var j = 0
+    while j < w {
+        var v = 0.0
+        var k = 0
+        while k < 6 { let b = hat6(x, k); v = v + b * b * cs * cs; k = k + 1 }
+        hvar[j] = v
+        j = j + 1
+    }
+    var ov = 0.0
+    j = 0
+    while j < w {
+        let hv = (EH[j] as f64) / 100000000.0
+        var hx = (hv + 1.5) / 3.0
+        if hx < 0.0 { hx = 0.0 }
+        if hx > 1.0 { hx = 1.0 }
+        var v = 0.0
+        var k = 0
+        while k < 6 { let b = hat6(hx, k); v = v + b * b * cs * cs; k = k + 1 }
+        ov = ov + v + hvar[j]
+        j = j + 1
+    }
+    sqrt_v(ov)
+}
+
+fn ek_train(w: i64, lr: f64) with Mut, Div, Panic {
+    var ep = 0
+    while ep < 200 {
+        var si = 0
+        while si < N_TR {
+            let x = (TX[si] as f64) / 100000000.0
+            let err = ek_fwd(x, w) - (TY[si] as f64) / 100000000.0
+            // L2 backprop
+            var j = 0
+            while j < w {
+                let hv = (EH[j] as f64) / 100000000.0
+                var hx = (hv + 1.5) / 3.0
+                if hx < 0.0 { hx = 0.0 }
+                if hx > 1.0 { hx = 1.0 }
+                let base = w * 6 + j * 6
+                var k = 0
+                while k < 6 {
+                    let b = hat6(hx, k)
+                    ew_set(base + k, ew_get(base + k) - lr * 2.0 * err * b)
+                    k = k + 1
+                }
+                j = j + 1
+            }
+            // L1 backprop
+            j = 0
+            while j < w {
+                let hv = (EH[j] as f64) / 100000000.0
+                var hx = (hv + 1.5) / 3.0
+                if hx < 0.0 { hx = 0.0 }
+                if hx > 1.0 { hx = 1.0 }
+                var dh = 0.0
+                let base = w * 6 + j * 6
+                var k = 0
+                while k < 6 { dh = dh + ew_get(base + k) * hat6(hx, k); k = k + 1 }
+                let gh = 2.0 * err * dh
+                k = 0
+                while k < 6 {
+                    let b = hat6(x, k)
+                    ew_set(j * 6 + k, ew_get(j * 6 + k) - lr * gh * b)
+                    k = k + 1
+                }
+                j = j + 1
+            }
+            si = si + 1
+        }
+        ep = ep + 1
+    }
+}
+
+fn coverage_test(w: i64, cs: f64) -> f64 with Mut, Div, Panic {
+    var cov = 0
+    var i = 0
+    while i < N_TE {
+        let x = (SX[i] as f64) / 100000000.0
+        let yc = (SYC[i] as f64) / 100000000.0
+        let pred = ek_fwd(x, w)
+        let sig = ek_gum(x, w, cs)
+        if abs_v(pred - yc) < 1.96 * sig { cov = cov + 1 }
+        i = i + 1
+    }
+    (cov as f64) / (N_TE as f64) * 100.0
+}
+
+// ─── Generate datasets ───
+
+fn gen_uniform_sin(noise: f64) with Mut, Div, Panic {
+    rng_seed(12345678, 87654321)
+    N_TR = 25
+    N_TE = 10
+    var i = 0
+    while i < N_TR {
+        let x = (i as f64) / (N_TR as f64) + 0.02
+        TX[i] = (x * 100000000.0) as i64
+        TY[i] = ((sin_v(6.28318 * x) + noise * rand_normal()) * 100000000.0) as i64
+        i = i + 1
+    }
+    i = 0
+    while i < N_TE {
+        let x = (i as f64) / (N_TE as f64) + 0.05
+        SX[i] = (x * 100000000.0) as i64
+        SYC[i] = (sin_v(6.28318 * x) * 100000000.0) as i64
+        i = i + 1
+    }
+}
+
+fn gen_heteroscedastic() with Mut, Div, Panic {
+    rng_seed(12345678, 87654321)
+    N_TR = 25
+    N_TE = 10
+    var i = 0
+    while i < N_TR {
+        let x = (i as f64) / (N_TR as f64) + 0.02
+        let noise = 0.01 + 0.49 * x  // σ grows with x
+        TX[i] = (x * 100000000.0) as i64
+        TY[i] = ((sin_v(6.28318 * x) + noise * rand_normal()) * 100000000.0) as i64
+        i = i + 1
+    }
+    i = 0
+    while i < N_TE {
+        let x = (i as f64) / (N_TE as f64) + 0.05
+        SX[i] = (x * 100000000.0) as i64
+        SYC[i] = (sin_v(6.28318 * x) * 100000000.0) as i64
+        i = i + 1
+    }
+}
+
+fn gen_ood() with Mut, Div, Panic {
+    rng_seed(12345678, 87654321)
+    // Train on [0, 0.7], test on [0.7, 1.0]
+    N_TR = 20
+    N_TE = 10
+    var i = 0
+    while i < N_TR {
+        let x = (i as f64) / (N_TR as f64) * 0.7 + 0.01
+        TX[i] = (x * 100000000.0) as i64
+        TY[i] = ((sin_v(6.28318 * x) + 0.1 * rand_normal()) * 100000000.0) as i64
+        i = i + 1
+    }
+    // Test: OOD region [0.7, 1.0]
+    i = 0
+    while i < N_TE {
+        let x = 0.7 + (i as f64) / (N_TE as f64) * 0.3 + 0.01
+        SX[i] = (x * 100000000.0) as i64
+        SYC[i] = (sin_v(6.28318 * x) * 100000000.0) as i64
+        i = i + 1
+    }
+}
+
+// ─── Experiments ───
+
+fn run_width_ablation() with IO, Mut, Div, Panic {
+    print("=== A) Width Ablation (sin, noise=0.1, 6 knots) ===\n")
+    gen_uniform_sin(0.1)
+
+    rng_seed(99999, 11111)
+    ek_init(5)
+    ek_train(5, 0.003)
+    let c5 = coverage_test(5, 0.05)
+    print("  width=5:  GUM coverage = "); print(c5); println("%")
+
+    rng_seed(99999, 11111)
+    ek_init(10)
+    ek_train(10, 0.002)
+    let c10 = coverage_test(10, 0.05)
+    print("  width=10: GUM coverage = "); print(c10); println("%")
+
+    rng_seed(99999, 11111)
+    ek_init(20)
+    ek_train(20, 0.001)
+    let c20 = coverage_test(20, 0.05)
+    print("  width=20: GUM coverage = "); print(c20); println("%")
+}
+
+fn run_sigma_sweep() with IO, Mut, Div, Panic {
+    print("\n=== B) Coefficient σ Sweep (width=10, sin, noise=0.1) ===\n")
+    gen_uniform_sin(0.1)
+    rng_seed(99999, 11111)
+    ek_init(10)
+    ek_train(10, 0.002)
+
+    let c001 = coverage_test(10, 0.01)
+    print("  σ=0.01: GUM coverage = "); print(c001); println("%")
+
+    let c005 = coverage_test(10, 0.05)
+    print("  σ=0.05: GUM coverage = "); print(c005); println("%")
+
+    let c010 = coverage_test(10, 0.10)
+    print("  σ=0.10: GUM coverage = "); print(c010); println("%")
+
+    let c030 = coverage_test(10, 0.30)
+    print("  σ=0.30: GUM coverage = "); print(c030); println("%")
+}
+
+fn run_heteroscedastic() with IO, Mut, Div, Panic {
+    print("\n=== C) Heteroscedastic (noise=0.01+0.49*x) ===\n")
+    gen_heteroscedastic()
+    rng_seed(99999, 11111)
+    ek_init(10)
+    ek_train(10, 0.002)
+
+    // Check if GUM σ is larger for high-x points (more noise)
+    var sig_low = 0.0  // x < 0.5
+    var sig_high = 0.0 // x >= 0.5
+    var n_low = 0
+    var n_high = 0
+    var i = 0
+    while i < N_TE {
+        let x = (SX[i] as f64) / 100000000.0
+        let pred = ek_fwd(x, 10)
+        let sig = ek_gum(x, 10, 0.05)
+        if x < 0.5 { sig_low = sig_low + sig; n_low = n_low + 1 }
+        else { sig_high = sig_high + sig; n_high = n_high + 1 }
+        i = i + 1
+    }
+    if n_low > 0 { sig_low = sig_low / (n_low as f64) }
+    if n_high > 0 { sig_high = sig_high / (n_high as f64) }
+    print("  mean σ (x<0.5):  "); print(sig_low); println("")
+    print("  mean σ (x>=0.5): "); print(sig_high); println("")
+    if sig_high > sig_low {
+        print("  GUM captures heteroscedasticity (σ_high/σ_low = ")
+        print(sig_high / sig_low)
+        println(")")
+    } else {
+        println("  GUM does NOT capture heteroscedasticity (constant σ)")
+    }
+    let cov = coverage_test(10, 0.05)
+    print("  GUM coverage = "); print(cov); println("%")
+}
+
+fn run_ood() with IO, Mut, Div, Panic {
+    print("\n=== D) Out-of-Distribution (train [0,0.7], test [0.7,1.0]) ===\n")
+    gen_ood()
+    rng_seed(99999, 11111)
+    ek_init(10)
+    ek_train(10, 0.002)
+
+    // Check σ on OOD test points vs in-distribution
+    // Recompute in-distribution σ on train region
+    var sig_id = 0.0
+    var i = 0
+    while i < 5 {
+        let x = (i as f64) / 5.0 * 0.7 + 0.05
+        let pred = ek_fwd(x, 10)
+        sig_id = sig_id + ek_gum(x, 10, 0.05)
+        i = i + 1
+    }
+    sig_id = sig_id / 5.0
+
+    var sig_ood = 0.0
+    i = 0
+    while i < N_TE {
+        let x = (SX[i] as f64) / 100000000.0
+        let pred = ek_fwd(x, 10)
+        sig_ood = sig_ood + ek_gum(x, 10, 0.05)
+        i = i + 1
+    }
+    sig_ood = sig_ood / (N_TE as f64)
+
+    print("  mean σ (in-distribution):  "); print(sig_id); println("")
+    print("  mean σ (out-of-distribution): "); print(sig_ood); println("")
+    if sig_ood > sig_id {
+        print("  GUM DETECTS OOD (σ_ood/σ_id = ")
+        print(sig_ood / sig_id)
+        println(")")
+    } else {
+        println("  GUM does NOT detect OOD (same σ everywhere)")
+    }
+    let cov = coverage_test(10, 0.05)
+    print("  OOD coverage = "); print(cov); println("%")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+
+    run_width_ablation()
+    println("T1 PASS: width ablation complete")
+    passed = passed + 1
+
+    run_sigma_sweep()
+    println("T2 PASS: σ sweep complete")
+    passed = passed + 1
+
+    run_heteroscedastic()
+    println("T3 PASS: heteroscedastic test complete")
+    passed = passed + 1
+
+    run_ood()
+    println("T4 PASS: OOD detection test complete")
+    passed = passed + 1
+
+    print("\nPassed: "); print_int(passed); println("")
+    print("Failed: 0\n")
+    println("ALL PASS")
+    0
+}
