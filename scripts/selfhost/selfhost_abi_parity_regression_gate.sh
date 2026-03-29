@@ -48,7 +48,7 @@ RESULTS_FILE="$ARTIFACT_DIR/results.tsv"
 SUMMARY_FILE="$ARTIFACT_DIR/summary.txt"
 
 cat >"$RESULTS_FILE" <<'EOF'
-case_id	kind	program	exit	status
+case_id	kind	support_class	program	exit	status
 EOF
 
 echo "SELFHOST_ABI_PARITY_REGRESSION_GATE_START"
@@ -71,12 +71,13 @@ fi
 run_case() {
   local case_id="$1"
   local kind="$2"
-  local program_path="$3"
-  local expected="$4"
+  local support_class="$3"
+  local program_path="$4"
+  local expected="$5"
 
   if [ -n "$FILTER" ] && [[ "$case_id" != *"$FILTER"* ]] && [[ "$program_path" != *"$FILTER"* ]]; then
     skip "$case_id" "filtered"
-    printf '%s\t%s\t%s\t-\tfiltered\n' "$case_id" "$kind" "$program_path" >>"$RESULTS_FILE"
+    printf '%s\t%s\t%s\t%s\t-\tfiltered\n' "$case_id" "$kind" "$support_class" "$program_path" >>"$RESULTS_FILE"
     return 0
   fi
 
@@ -92,16 +93,16 @@ run_case() {
     set -e
     if [ "$exit_code" -ne 0 ]; then
       fail "$case_id" "run failed (exit=$exit_code)"
-      printf '%s\t%s\t%s\t%s\trun_fail\n' "$case_id" "$kind" "$program_path" "$exit_code" >>"$RESULTS_FILE"
+      printf '%s\t%s\t%s\t%s\t%s\trun_fail\n' "$case_id" "$kind" "$support_class" "$program_path" "$exit_code" >>"$RESULTS_FILE"
       return 0
     fi
     if [ "$expected" != "-" ] && ! grep -qF "$expected" "$stdout_path"; then
       fail "$case_id" "missing stdout marker"
-      printf '%s\t%s\t%s\t%s\tstdout_fail\n' "$case_id" "$kind" "$program_path" "$exit_code" >>"$RESULTS_FILE"
+      printf '%s\t%s\t%s\t%s\t%s\tstdout_fail\n' "$case_id" "$kind" "$support_class" "$program_path" "$exit_code" >>"$RESULTS_FILE"
       return 0
     fi
     pass "$case_id" "run ok"
-    printf '%s\t%s\t%s\t%s\tok\n' "$case_id" "$kind" "$program_path" "$exit_code" >>"$RESULTS_FILE"
+    printf '%s\t%s\t%s\t%s\t%s\tok\n' "$case_id" "$kind" "$support_class" "$program_path" "$exit_code" >>"$RESULTS_FILE"
     return 0
   fi
 
@@ -115,16 +116,16 @@ run_case() {
     set -e
     if [ "$exit_code" -ne 0 ]; then
       fail "$case_id" "aarch64 compile failed (exit=$exit_code)"
-      printf '%s\t%s\t%s\t%s\tcompile_fail\n' "$case_id" "$kind" "$program_path" "$exit_code" >>"$RESULTS_FILE"
+      printf '%s\t%s\t%s\t%s\t%s\tcompile_fail\n' "$case_id" "$kind" "$support_class" "$program_path" "$exit_code" >>"$RESULTS_FILE"
       return 0
     fi
     if [ ! -s "$out_path" ]; then
       fail "$case_id" "aarch64 output missing"
-      printf '%s\t%s\t%s\t%s\tmissing_output\n' "$case_id" "$kind" "$program_path" "$exit_code" >>"$RESULTS_FILE"
+      printf '%s\t%s\t%s\t%s\t%s\tmissing_output\n' "$case_id" "$kind" "$support_class" "$program_path" "$exit_code" >>"$RESULTS_FILE"
       return 0
     fi
     pass "$case_id" "aarch64 compile ok"
-    printf '%s\t%s\t%s\t%s\tok\n' "$case_id" "$kind" "$program_path" "$exit_code" >>"$RESULTS_FILE"
+    printf '%s\t%s\t%s\t%s\t%s\tok\n' "$case_id" "$kind" "$support_class" "$program_path" "$exit_code" >>"$RESULTS_FILE"
     return 0
   fi
 
@@ -136,37 +137,59 @@ run_case() {
     cat "$stdout_path" "$stderr_path" >"$LOG_DIR/${case_id}.combined.log"
     if [ "$exit_code" -eq 0 ]; then
       fail "$case_id" "expected aarch64 compile failure but succeeded"
-      printf '%s\t%s\t%s\t%s\tunexpected_success\n' "$case_id" "$kind" "$program_path" "$exit_code" >>"$RESULTS_FILE"
+      printf '%s\t%s\t%s\t%s\t%s\tunexpected_success\n' "$case_id" "$kind" "$support_class" "$program_path" "$exit_code" >>"$RESULTS_FILE"
       return 0
     fi
     if [ "$expected" != "-" ] && ! grep -qF "$expected" "$LOG_DIR/${case_id}.combined.log"; then
       fail "$case_id" "missing expected diagnostic"
-      printf '%s\t%s\t%s\t%s\tmissing_pattern\n' "$case_id" "$kind" "$program_path" "$exit_code" >>"$RESULTS_FILE"
+      printf '%s\t%s\t%s\t%s\t%s\tmissing_pattern\n' "$case_id" "$kind" "$support_class" "$program_path" "$exit_code" >>"$RESULTS_FILE"
       return 0
     fi
     pass "$case_id" "aarch64 compile rejected as expected"
-    printf '%s\t%s\t%s\t%s\tok\n' "$case_id" "$kind" "$program_path" "$exit_code" >>"$RESULTS_FILE"
+    printf '%s\t%s\t%s\t%s\t%s\tok\n' "$case_id" "$kind" "$support_class" "$program_path" "$exit_code" >>"$RESULTS_FILE"
     return 0
   fi
 
   fail "$case_id" "unknown manifest kind: $kind"
-  printf '%s\t%s\t%s\t-\tunknown_kind\n' "$case_id" "$kind" "$program_path" >>"$RESULTS_FILE"
+  printf '%s\t%s\t%s\t%s\t-\tunknown_kind\n' "$case_id" "$kind" "$support_class" "$program_path" >>"$RESULTS_FILE"
   return 0
 }
 
-while IFS=$'\t' read -r case_id kind program_path expected; do
+while IFS=$'\t' read -r case_id kind col3 col4 col5; do
   if [ -z "${case_id:-}" ]; then
     continue
   fi
   if [[ "$case_id" == \#* ]]; then
     continue
   fi
-  if [ ! -f "$program_path" ]; then
-    fail "$case_id" "missing program $program_path"
-    printf '%s\t%s\t%s\t-\tmissing_program\n' "$case_id" "$kind" "$program_path" >>"$RESULTS_FILE"
+
+  local_support_class=""
+  local_program_path=""
+  local_expected=""
+  if [[ "${col3:-}" == *.sio ]] || [[ "${col3:-}" == tests/* ]]; then
+    local_program_path="${col3:-}"
+    local_expected="${col4:--}"
+    if [ "$kind" = "run" ]; then
+      local_support_class="x86-runtime-supported"
+    elif [ "$kind" = "aarch64-ok" ]; then
+      local_support_class="aarch64-compile-proof"
+    elif [ "$kind" = "aarch64-fail" ]; then
+      local_support_class="aarch64-explicit-unsupported"
+    else
+      local_support_class="unknown"
+    fi
+  else
+    local_support_class="${col3:-unknown}"
+    local_program_path="${col4:-}"
+    local_expected="${col5:--}"
+  fi
+
+  if [ ! -f "$local_program_path" ]; then
+    fail "$case_id" "missing program $local_program_path"
+    printf '%s\t%s\t%s\t%s\t-\tmissing_program\n' "$case_id" "$kind" "$local_support_class" "$local_program_path" >>"$RESULTS_FILE"
     continue
   fi
-  run_case "$case_id" "$kind" "$program_path" "${expected:--}"
+  run_case "$case_id" "$kind" "$local_support_class" "$local_program_path" "${local_expected:--}"
 done <"$MANIFEST_PATH"
 
 {
