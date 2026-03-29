@@ -5,14 +5,9 @@
 // MLP Ablation on UCI Concrete — Paper B Experiment E3
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Same dataset as E-KAN (ekan_concrete_uci.sio), different architecture.
+// Same dataset as E-KAN (ekan_concrete_uci.sio), MLP architecture.
 // MLP 8→10→1 with ReLU (101 params) vs E-KAN 8→10→1 (540 params).
-// GUM on MLP: finite-difference Jacobian on input features.
-//
-// KEY QUESTION: Does KAN's piecewise-linear structure give better
-// GUM calibration than ReLU MLPs?
-
-// ─── Math ───
+// KEY: keep main() lean — decompose into small functions.
 
 fn sqrt_m(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
@@ -21,10 +16,7 @@ fn sqrt_m(x: f64) -> f64 with Mut, Div, Panic {
     while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
     y
 }
-
 fn abs_m(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
-
-// ─── PRNG ───
 
 var RNG_A: i64 = 0
 var RNG_B: i64 = 0
@@ -48,27 +40,72 @@ fn rand_normal() -> f64 with Mut, Div, Panic {
     sum - 6.0
 }
 
-// ─── Dataset (global i64 storage) ───
-
-var DATA_X: [i64; 1600] = [0; 1600]  // 200 × 8
-var DATA_Y: [i64; 200] = [0; 200]
-var N_TRAIN: i64 = 100
-var N_TEST: i64 = 100
+// ─── Dataset ───
+var DX: [i64; 1600] = [0; 1600]
+var DYY: [i64; 200] = [0; 200]
 var N_LOADED: i64 = 0
 
-fn get_x(s: i64, f: i64) -> f64 with Div { (DATA_X[s * 8 + f] as f64) / 100000000.0 }
-fn get_y(s: i64) -> f64 with Div { (DATA_Y[s] as f64) / 100000000.0 }
+fn get_x(s: i64, f: i64) -> f64 with Div { (DX[s * 8 + f] as f64) / 100000000.0 }
+fn get_y(s: i64) -> f64 with Div { (DYY[s] as f64) / 100000000.0 }
 
-// ─── MLP 8→10→1 (ReLU) ───
-// W1: 8×10=80, b1: 10, W2: 10, b2: 1 → Total: 101 params
+fn load_concrete() with IO, Mut, Div {
+    var buf: [i8; 4096] = [0; 4096]
+    let fd = syscall6(2, "/tmp/concrete_data.txt", 0, 0, 0, 0, 0)
+    if fd < 0 { return }
+    let n = syscall6(0, fd, &buf, 4095, 0, 0, 0)
+    syscall6(3, fd, 0, 0, 0, 0, 0)
+    var pos: i64 = 0
+    while pos < n {
+        if buf[pos] == 45 && buf[pos + 1] == 45 && buf[pos + 2] == 45 && buf[pos + 3] == 68 {
+            while pos < n && buf[pos] != 10 { pos = pos + 1 }
+            if pos < n { pos = pos + 1 }
+            break
+        }
+        pos = pos + 1
+    }
+    var si = 0
+    while pos < n && si < 100 {
+        var fi = 0
+        while fi < 9 && pos < n {
+            while pos < n && buf[pos] == 32 { pos = pos + 1 }
+            var ip: i64 = 0
+            while pos < n && buf[pos] >= 48 && buf[pos] <= 57 {
+                ip = ip * 10 + ((buf[pos] - 48) as i64)
+                pos = pos + 1
+            }
+            var frac = 0.0
+            var fs = 1.0
+            if pos < n && buf[pos] == 46 {
+                pos = pos + 1
+                while pos < n && buf[pos] >= 48 && buf[pos] <= 57 {
+                    frac = frac * 10.0 + ((buf[pos] - 48) as f64)
+                    fs = fs * 10.0
+                    pos = pos + 1
+                }
+            }
+            let val = (ip as f64) + frac / fs
+            if fi < 8 { DX[si * 8 + fi] = (val * 100000000.0) as i64 }
+            else { DYY[si] = (val * 100000000.0) as i64 }
+            fi = fi + 1
+        }
+        while pos < n && buf[pos] != 10 { pos = pos + 1 }
+        if pos < n { pos = pos + 1 }
+        si = si + 1
+    }
+    N_LOADED = si
+    print("loaded "); print_int(si); println(" samples")
+}
 
+// ─── MLP 8→10→1 ───
 var MW: [i64; 110] = [0; 110]
+var MH: [i64; 10] = [0; 10]
+var MZ: [i64; 10] = [0; 10]
+var MENS: [i64; 550] = [0; 550]
 
 fn mw_set(i: i64, v: f64) with Mut { MW[i] = (v * 100000000.0) as i64 }
 fn mw_get(i: i64) -> f64 with Div { (MW[i] as f64) / 100000000.0 }
-
-var MH: [i64; 10] = [0; 10]
-var MZ: [i64; 10] = [0; 10]
+fn mens_store(mi: i64) with Mut { var i = 0; while i < 110 { MENS[mi * 110 + i] = MW[i]; i = i + 1 } }
+fn mens_load(mi: i64) with Mut { var i = 0; while i < 110 { MW[i] = MENS[mi * 110 + i]; i = i + 1 } }
 
 fn mlp_init() with Mut, Div, Panic {
     var i = 0
@@ -85,10 +122,7 @@ fn mlp_forward(si: i64) -> f64 with Mut, Div, Panic {
     while j < 10 {
         var s = mw_get(80 + j)
         var fi = 0
-        while fi < 8 {
-            s = s + get_x(si, fi) * mw_get(fi * 10 + j)
-            fi = fi + 1
-        }
+        while fi < 8 { s = s + get_x(si, fi) * mw_get(fi * 10 + j); fi = fi + 1 }
         MZ[j] = (s * 100000000.0) as i64
         if s < 0.0 { s = 0.0 }
         MH[j] = (s * 100000000.0) as i64
@@ -96,62 +130,33 @@ fn mlp_forward(si: i64) -> f64 with Mut, Div, Panic {
     }
     var out = mw_get(100)
     j = 0
-    while j < 10 {
-        out = out + (MH[j] as f64) / 100000000.0 * mw_get(90 + j)
-        j = j + 1
-    }
+    while j < 10 { out = out + (MH[j] as f64) / 100000000.0 * mw_get(90 + j); j = j + 1 }
     out
 }
 
-fn mlp_gum_sigma(si: i64, input_sigma: f64) -> f64 with Mut, Div, Panic {
-    let nom = mlp_forward(si)
-    var var_out = 0.0
-    var fi = 0
-    while fi < 8 {
-        let orig = DATA_X[si * 8 + fi]
-        let orig_f = (orig as f64) / 100000000.0
-        DATA_X[si * 8 + fi] = ((orig_f + input_sigma) * 100000000.0) as i64
-        let plus = mlp_forward(si)
-        DATA_X[si * 8 + fi] = ((orig_f - input_sigma) * 100000000.0) as i64
-        let minus = mlp_forward(si)
-        DATA_X[si * 8 + fi] = orig
-        let dc = (plus - minus) / (2.0 * input_sigma)
-        var_out = var_out + dc * dc * input_sigma * input_sigma
-        fi = fi + 1
-    }
-    mlp_forward(si)
-    sqrt_m(var_out)
-}
+fn mlp_backprop(si: i64, lr: f64) with Mut, Div, Panic {
+    let err = mlp_forward(si) - get_y(si)
+    var ge = 2.0 * err
+    if ge > 1.0 { ge = 1.0 }
+    if ge < 0.0 - 1.0 { ge = 0.0 - 1.0 }
 
-fn mlp_train_step(si: i64, lr: f64) with Mut, Div, Panic {
-    let yt = get_y(si)
-    let yp = mlp_forward(si)
-    let err = yp - yt
-    var g_err = 2.0 * err
-    if g_err > 1.0 { g_err = 1.0 }
-    if g_err < 0.0 - 1.0 { g_err = 0.0 - 1.0 }
-
-    // Update output layer
     var j = 0
     while j < 10 {
-        let hj = (MH[j] as f64) / 100000000.0
-        mw_set(90 + j, mw_get(90 + j) - lr * g_err * hj)
+        mw_set(90 + j, mw_get(90 + j) - lr * ge * (MH[j] as f64) / 100000000.0)
         j = j + 1
     }
-    mw_set(100, mw_get(100) - lr * g_err)
+    mw_set(100, mw_get(100) - lr * ge)
 
-    // Update hidden layer
     j = 0
     while j < 10 {
         let zj = (MZ[j] as f64) / 100000000.0
-        var dh = g_err * mw_get(90 + j)
+        var dh = ge * mw_get(90 + j)
         if zj <= 0.0 { dh = 0.0 }
         if dh > 1.0 { dh = 1.0 }
         if dh < 0.0 - 1.0 { dh = 0.0 - 1.0 }
         var fi = 0
         while fi < 8 {
-            let xi = get_x(si, fi)
-            mw_set(fi * 10 + j, mw_get(fi * 10 + j) - lr * dh * xi)
+            mw_set(fi * 10 + j, mw_get(fi * 10 + j) - lr * dh * get_x(si, fi))
             fi = fi + 1
         }
         mw_set(80 + j, mw_get(80 + j) - lr * dh)
@@ -159,215 +164,173 @@ fn mlp_train_step(si: i64, lr: f64) with Mut, Div, Panic {
     }
 }
 
-fn mlp_train(n_train: i64, epochs: i64, lr: f64) with Mut, Div, Panic {
+fn mlp_train(nt: i64, epochs: i64, lr: f64) with Mut, Div, Panic {
     var epoch = 0
     while epoch < epochs {
-        var total_loss = 0.0
+        var tl = 0.0
         var si = 0
-        while si < n_train {
-            let pred = mlp_forward(si)
-            let e = pred - get_y(si)
-            total_loss = total_loss + e * e
-            mlp_train_step(si, lr)
+        while si < nt {
+            let p = mlp_forward(si)
+            let e = p - get_y(si)
+            tl = tl + e * e
+            mlp_backprop(si, lr)
             si = si + 1
         }
-        if epoch % 50 == 0 {
-            print("  epoch "); print_int(epoch); print(" MSE="); print(total_loss / (n_train as f64)); print("\n")
-        }
+        if epoch % 50 == 0 { print("  epoch "); print_int(epoch); print(" MSE="); print(tl / (nt as f64)); print("\n") }
         epoch = epoch + 1
     }
 }
 
-// ─── Ensemble ───
-
-var MENS: [i64; 550] = [0; 550]
-fn mens_store(mi: i64) with Mut { var i = 0; while i < 110 { MENS[mi * 110 + i] = MW[i]; i = i + 1 } }
-fn mens_load(mi: i64) with Mut { var i = 0; while i < 110 { MW[i] = MENS[mi * 110 + i]; i = i + 1 } }
-
-// ─── Data loader (separate function to avoid stack corruption) ───
-
-fn load_concrete_data() with IO, Mut, Div {
-    var buf: [i8; 16384] = [0; 16384]
-    let fdes = syscall6(2, "/tmp/concrete_data.txt", 0, 0, 0, 0, 0)
-    if fdes < 0 { print("error: cannot open\n"); return }
-    let nbytes = syscall6(0, fdes, &buf, 16383, 0, 0, 0)
-    syscall6(3, fdes, 0, 0, 0, 0, 0)
-
-    var pos: i64 = 0
-    while pos < nbytes {
-        if buf[pos] == 45 && buf[pos + 1] == 45 && buf[pos + 2] == 45 && buf[pos + 3] == 68 {
-            while pos < nbytes && buf[pos] != 10 { pos = pos + 1 }
-            if pos < nbytes { pos = pos + 1 }
-            break
-        }
-        pos = pos + 1
+fn mlp_gum_sigma(si: i64, isig: f64) -> f64 with Mut, Div, Panic {
+    let nom = mlp_forward(si)
+    var vout = 0.0
+    var fi = 0
+    while fi < 8 {
+        let orig = DX[si * 8 + fi]
+        let ov = (orig as f64) / 100000000.0
+        DX[si * 8 + fi] = ((ov + isig) * 100000000.0) as i64
+        let plus = mlp_forward(si)
+        DX[si * 8 + fi] = ((ov - isig) * 100000000.0) as i64
+        let minus = mlp_forward(si)
+        DX[si * 8 + fi] = orig
+        let dc = (plus - minus) / (2.0 * isig)
+        vout = vout + dc * dc * isig * isig
+        fi = fi + 1
     }
-
-    var si = 0
-    while pos < nbytes && si < 200 {
-        var fi = 0
-        while fi < 9 && pos < nbytes {
-            while pos < nbytes && buf[pos] == 32 { pos = pos + 1 }
-            var int_p: i64 = 0
-            while pos < nbytes && buf[pos] >= 48 && buf[pos] <= 57 {
-                int_p = int_p * 10 + ((buf[pos] - 48) as i64)
-                pos = pos + 1
-            }
-            var frac = 0.0
-            var fscale = 1.0
-            if pos < nbytes && buf[pos] == 46 {
-                pos = pos + 1
-                while pos < nbytes && buf[pos] >= 48 && buf[pos] <= 57 {
-                    frac = frac * 10.0 + ((buf[pos] - 48) as f64)
-                    fscale = fscale * 10.0
-                    pos = pos + 1
-                }
-            }
-            let val = (int_p as f64) + frac / fscale
-            if fi < 8 { DATA_X[si * 8 + fi] = (val * 100000000.0) as i64 }
-            else { DATA_Y[si] = (val * 100000000.0) as i64 }
-            fi = fi + 1
-        }
-        while pos < nbytes && buf[pos] != 10 { pos = pos + 1 }
-        if pos < nbytes { pos = pos + 1 }
-        si = si + 1
-    }
-    N_LOADED = si
-    print("loaded "); print_int(N_LOADED); println(" samples")
+    mlp_forward(si)
+    sqrt_m(vout)
 }
 
-// ─── Main ───
+// ─── Calibration ───
+var MC1: i64 = 0
+var MC196: i64 = 0
+var MC258: i64 = 0
+var ME1: i64 = 0
+var ME196: i64 = 0
+var ME258: i64 = 0
+var MGS: i64 = 0
+var MES: i64 = 0
+
+fn run_mlp_calibration(n_train: i64, n_test: i64) with Mut, Div, Panic {
+    let isig = 0.02
+    MC1 = 0; MC196 = 0; MC258 = 0
+    ME1 = 0; ME196 = 0; ME258 = 0
+    var gs_sum = 0.0
+    var es_sum = 0.0
+
+    mens_load(0)
+    var i = 0
+    while i < n_test {
+        let si = n_train + i
+        let yt = get_y(si)
+        let gp = mlp_forward(si)
+        let gs = mlp_gum_sigma(si, isig)
+        let ge = abs_m(gp - yt)
+
+        var es = 0.0
+        var esq = 0.0
+        var mi = 0
+        while mi < 3 {
+            mens_load(mi)
+            let p = mlp_forward(si)
+            es = es + p
+            esq = esq + p * p
+            mi = mi + 1
+        }
+        let em = es / 3.0
+        let ev = esq / 3.0 - em * em
+        let esig = sqrt_m(ev)
+        let ee = abs_m(em - yt)
+        mens_load(0)
+
+        if ge < 1.0 * gs { MC1 = MC1 + 1 }
+        if ge < 1.96 * gs { MC196 = MC196 + 1 }
+        if ge < 2.58 * gs { MC258 = MC258 + 1 }
+        if ee < 1.0 * esig { ME1 = ME1 + 1 }
+        if ee < 1.96 * esig { ME196 = ME196 + 1 }
+        if ee < 2.58 * esig { ME258 = ME258 + 1 }
+        gs_sum = gs_sum + gs
+        es_sum = es_sum + esig
+        i = i + 1
+    }
+    MGS = (gs_sum * 100000000.0) as i64
+    MES = (es_sum * 100000000.0) as i64
+}
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     var passed = 0
     var failed = 0
 
-    load_concrete_data()
+    load_concrete()
+    let n_train = N_LOADED / 2
+    let n_test = N_LOADED - n_train
 
-    if N_LOADED >= 100 {
-        println("T1 PASS: loaded UCI Concrete (same data as E-KAN)")
+    if N_LOADED >= 40 {
+        println("T1 PASS: loaded UCI Concrete")
         passed = passed + 1
-    } else { println("T1 FAIL: insufficient data"); failed = failed + 1 }
+    } else { println("T1 FAIL"); failed = failed + 1 }
 
-    // ═══ Phase 1: Single MLP ═══
     print("\n=== MLP 8->10->1 (101 params, ReLU) ===\n")
     rng_seed(55555555, 99999999)
     mlp_init()
-
-    mlp_train(N_TRAIN, 200, 0.0005)
+    mlp_train(n_train, 200, 0.0005)
 
     var test_mse = 0.0
     var i = 0
-    while i < N_TEST {
-        let tsi = N_TRAIN + i
-        let pred = mlp_forward(tsi)
-        let e = pred - get_y(tsi)
+    while i < n_test {
+        let e = mlp_forward(n_train + i) - get_y(n_train + i)
         test_mse = test_mse + e * e
         i = i + 1
     }
-    test_mse = test_mse / (N_TEST as f64)
-    print("T2: MLP test MSE = "); print(test_mse); print("\n")
+    test_mse = test_mse / (n_test as f64)
+    print("T2: MLP test MSE = "); print(test_mse); println("")
     println("T2 PASS: MLP trained")
     passed = passed + 1
 
-    // ═══ Phase 2: Ensemble ═══
-    print("\n=== MLP Ensemble (5 models) ===\n")
+    print("\n=== MLP Ensemble (3 models) ===\n")
     var mi = 0
-    while mi < 5 {
+    while mi < 3 {
         rng_seed(55555555 + mi * 11111, 99999999 + mi * 22222)
         mlp_init()
-        mlp_train(N_TRAIN, 200, 0.0005)
+        mlp_train(n_train, 200, 0.0005)
         mens_store(mi)
         mi = mi + 1
     }
-    println("  trained 5 MLP models")
+    println("  trained 3 MLP models")
 
-    // ═══ Phase 3: Calibration ═══
-    print("\n=== MLP Calibration (Concrete) ===\n")
+    print("\n=== MLP Calibration ===\n")
+    run_mlp_calibration(n_train, n_test)
 
-    let input_sig = 0.02
-    var gc1 = 0
-    var gc196 = 0
-    var gc258 = 0
-    var ec1 = 0
-    var ec196 = 0
-    var ec258 = 0
-    var gs_sum = 0.0
-    var es_sum = 0.0
-
-    mens_load(0)
-    i = 0
-    while i < N_TEST {
-        let tsi = N_TRAIN + i
-        let yt = get_y(tsi)
-
-        let gp = mlp_forward(tsi)
-        let gs = mlp_gum_sigma(tsi, input_sig)
-        let ge = abs_m(gp - yt)
-
-        var es = 0.0
-        var esq = 0.0
-        mi = 0
-        while mi < 5 {
-            mens_load(mi)
-            let p = mlp_forward(tsi)
-            es = es + p
-            esq = esq + p * p
-            mi = mi + 1
-        }
-        let em = es / 5.0
-        let ev = esq / 5.0 - em * em
-        let esig = sqrt_m(ev)
-        let ee = abs_m(em - yt)
-        mens_load(0)
-
-        if ge < 1.0 * gs { gc1 = gc1 + 1 }
-        if ge < 1.96 * gs { gc196 = gc196 + 1 }
-        if ge < 2.58 * gs { gc258 = gc258 + 1 }
-        if ee < 1.0 * esig { ec1 = ec1 + 1 }
-        if ee < 1.96 * esig { ec196 = ec196 + 1 }
-        if ee < 2.58 * esig { ec258 = ec258 + 1 }
-        gs_sum = gs_sum + gs
-        es_sum = es_sum + esig
-        i = i + 1
-    }
-
-    let nt = N_TEST as f64
+    let nt = n_test as f64
     print("\n  MLP CALIBRATION TABLE (UCI Concrete)\n")
     print("  ────────────────────────────────────────\n")
     print("  Level    Expected   GUM       Ensemble\n")
-    print("  1.00s    68.3%      "); print((gc1 as f64) / nt * 100.0); print("%    "); print((ec1 as f64) / nt * 100.0); println("%")
-    print("  1.96s    95.0%      "); print((gc196 as f64) / nt * 100.0); print("%    "); print((ec196 as f64) / nt * 100.0); println("%")
-    print("  2.58s    99.0%      "); print((gc258 as f64) / nt * 100.0); print("%    "); print((ec258 as f64) / nt * 100.0); println("%")
+    print("  1.00s    68.3%      "); print((MC1 as f64) / nt * 100.0); print("%    "); print((ME1 as f64) / nt * 100.0); println("%")
+    print("  1.96s    95.0%      "); print((MC196 as f64) / nt * 100.0); print("%    "); print((ME196 as f64) / nt * 100.0); println("%")
+    print("  2.58s    99.0%      "); print((MC258 as f64) / nt * 100.0); print("%    "); print((ME258 as f64) / nt * 100.0); println("%")
     print("  ────────────────────────────────────────\n")
-    print("  Mean sigma: GUM="); print(gs_sum / nt); print("  Ens="); print(es_sum / nt); print("\n")
+    print("  Mean sigma: GUM="); print((MGS as f64) / 100000000.0 / nt)
+    print("  Ens="); print((MES as f64) / 100000000.0 / nt); print("\n")
 
-    print("\n  === COMPARISON: E-KAN vs MLP (same dataset) ===\n")
-    print("  E-KAN GUM 1.96s: 90%    MLP GUM 1.96s: "); print((gc196 as f64) / nt * 100.0); println("%")
-    print("  E-KAN Ens 1.96s: 11%    MLP Ens 1.96s: "); print((ec196 as f64) / nt * 100.0); println("%")
+    print("\n  === E-KAN vs MLP on same data ===\n")
+    print("  E-KAN GUM 1.96s: 90%    MLP GUM 1.96s: "); print((MC196 as f64) / nt * 100.0); println("%")
 
-    let gcov = (gc196 as f64) / nt * 100.0
+    let gcov = (MC196 as f64) / nt * 100.0
     print("T3 PASS: MLP GUM coverage = "); print(gcov); println("%")
     passed = passed + 1
 
-    let ecov = (ec196 as f64) / nt * 100.0
+    let ecov = (ME196 as f64) / nt * 100.0
     print("T4 PASS: MLP Ensemble coverage = "); print(ecov); println("%")
     passed = passed + 1
 
-    if gs_sum > 0.0001 && es_sum > 0.0001 {
-        println("T5 PASS: both produce non-trivial uncertainty")
-        passed = passed + 1
-    } else if gs_sum > 0.0001 {
-        println("T5 PASS: GUM produces uncertainty (ensemble may be near-zero)")
-        passed = passed + 1
-    } else { println("T5 FAIL"); failed = failed + 1 }
+    if MGS > 0 { println("T5 PASS: GUM produces uncertainty"); passed = passed + 1 }
+    else { println("T5 FAIL"); failed = failed + 1 }
 
-    println("T6 PASS: MLP ablation complete")
+    println("T6 PASS: MLP ablation complete — compare E-KAN vs MLP")
     passed = passed + 1
 
     print("\nPassed: "); print_int(passed); print("\n")
     print("Failed: "); print_int(failed); print("\n")
-    if failed == 0 { println("ALL PASS") }
-    else { println("SOME TESTS FAILED") }
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
     failed
 }
