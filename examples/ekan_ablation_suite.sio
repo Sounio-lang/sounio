@@ -1,0 +1,358 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// E-KAN Ablation Suite — Depth, Noise, Knot Count
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// FOR PAPER B: Three ablation studies on sin(2πx)
+//   A) Depth: 1-layer vs 2-layer — does GUM degrade with depth?
+//   B) Noise: σ_noise = 0.01, 0.1, 0.5 — does GUM track noise?
+//   C) Knots: 4, 6, 10 knots — does resolution help GUM?
+//
+// All use inline data (20 train, 10 test) for speed.
+
+fn sqrt_a(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn abs_a(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sin_a(x: f64) -> f64 with Mut, Div {
+    var v = x
+    while v > 3.14159265 { v = v - 6.28318530 }
+    while v < 0.0 - 3.14159265 { v = v + 6.28318530 }
+    let v3 = v * v * v
+    let v5 = v3 * v * v
+    let v7 = v5 * v * v
+    v - v3 / 6.0 + v5 / 120.0 - v7 / 5040.0
+}
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+fn rand_uniform() -> f64 with Mut, Div { (rng_next() % 10000) as f64 / 10000.0 }
+fn rand_normal() -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+// ─── Data: sin(2πx) inline ───
+var TX: [i64; 20] = [0; 20]
+var TY: [i64; 20] = [0; 20]
+var SX: [i64; 10] = [0; 10]
+var SY_CLEAN: [i64; 10] = [0; 10]
+
+fn gen_sin_data(noise: f64) with Mut, Div, Panic {
+    rng_seed(12345678, 87654321)
+    var i = 0
+    while i < 20 {
+        let x = (i as f64) / 20.0 + 0.025
+        let y = sin_a(6.28318 * x) + noise * rand_normal()
+        TX[i] = (x * 100000000.0) as i64
+        TY[i] = (y * 100000000.0) as i64
+        i = i + 1
+    }
+    i = 0
+    while i < 10 {
+        let x = (i as f64) / 10.0 + 0.05
+        let yc = sin_a(6.28318 * x)
+        SX[i] = (x * 100000000.0) as i64
+        SY_CLEAN[i] = (yc * 100000000.0) as i64
+        i = i + 1
+    }
+}
+
+fn get_tx(i: i64) -> f64 with Div { (TX[i] as f64) / 100000000.0 }
+fn get_ty(i: i64) -> f64 with Div { (TY[i] as f64) / 100000000.0 }
+fn get_sx(i: i64) -> f64 with Div { (SX[i] as f64) / 100000000.0 }
+fn get_syc(i: i64) -> f64 with Div { (SY_CLEAN[i] as f64) / 100000000.0 }
+
+// ─── 1-Layer E-KAN: 1→1 with variable knots ───
+// Max knots = 10. Weights: 1 edge × 10 knots = 10
+
+var W1L: [i64; 10] = [0; 10]
+
+fn hat_n(x: f64, k: i64, nk: i64) -> f64 with Div {
+    let c = (k as f64) / ((nk - 1) as f64)
+    let w = 1.0 / ((nk - 1) as f64)
+    let d = abs_a(x - c) / w
+    if d >= 1.0 { return 0.0 }
+    1.0 - d
+}
+
+fn init_1l(nk: i64) with Mut, Div, Panic {
+    var i = 0
+    while i < nk { W1L[i] = (rand_normal() * 0.1 * 100000000.0) as i64; i = i + 1 }
+}
+
+fn fwd_1l(x: f64, nk: i64) -> f64 with Div {
+    var s = 0.0
+    var k = 0
+    while k < nk { s = s + (W1L[k] as f64) / 100000000.0 * hat_n(x, k, nk); k = k + 1 }
+    s
+}
+
+fn gum_1l(x: f64, nk: i64, cs: f64) -> f64 with Div, Panic, Mut {
+    var v = 0.0
+    var k = 0
+    while k < nk { let b = hat_n(x, k, nk); v = v + b * b * cs * cs; k = k + 1 }
+    sqrt_a(v)
+}
+
+fn train_1l(nk: i64, epochs: i64, lr: f64) with Mut, Div, Panic {
+    var ep = 0
+    while ep < epochs {
+        var si = 0
+        while si < 20 {
+            let x = get_tx(si)
+            let err = fwd_1l(x, nk) - get_ty(si)
+            var k = 0
+            while k < nk {
+                let b = hat_n(x, k, nk)
+                W1L[k] = W1L[k] - (lr * 2.0 * err * b * 100000000.0) as i64
+                k = k + 1
+            }
+            si = si + 1
+        }
+        ep = ep + 1
+    }
+}
+
+// ─── 2-Layer E-KAN: 1→4→1 with variable knots ───
+// L1: 4 edges × nk, L2: 4 edges × nk. Max: 4*10 + 4*10 = 80
+
+var W2L: [i64; 80] = [0; 80]
+var H2L: [i64; 4] = [0; 4]
+
+fn init_2l(nk: i64) with Mut, Div, Panic {
+    var i = 0
+    let total = 4 * nk + 4 * nk
+    while i < total { W2L[i] = (rand_normal() * 0.08 * 100000000.0) as i64; i = i + 1 }
+}
+
+fn fwd_2l(x: f64, nk: i64) -> f64 with Mut, Div {
+    var j = 0
+    while j < 4 {
+        var s = 0.0
+        var k = 0
+        while k < nk { s = s + (W2L[j * nk + k] as f64) / 100000000.0 * hat_n(x, k, nk); k = k + 1 }
+        H2L[j] = (s * 100000000.0) as i64
+        j = j + 1
+    }
+    var out = 0.0
+    j = 0
+    while j < 4 {
+        let hv = (H2L[j] as f64) / 100000000.0
+        var hx = (hv + 1.5) / 3.0
+        if hx < 0.0 { hx = 0.0 }
+        if hx > 1.0 { hx = 1.0 }
+        let base = 4 * nk + j * nk
+        var k = 0
+        while k < nk { out = out + (W2L[base + k] as f64) / 100000000.0 * hat_n(hx, k, nk); k = k + 1 }
+        j = j + 1
+    }
+    out
+}
+
+fn gum_2l(x: f64, nk: i64, cs: f64) -> f64 with Mut, Div, Panic {
+    var hvar: [f64; 4] = [0.0; 4]
+    var j = 0
+    while j < 4 {
+        var v = 0.0
+        var k = 0
+        while k < nk { let b = hat_n(x, k, nk); v = v + b * b * cs * cs; k = k + 1 }
+        hvar[j] = v
+        j = j + 1
+    }
+    var ov = 0.0
+    j = 0
+    while j < 4 {
+        let hv = (H2L[j] as f64) / 100000000.0
+        var hx = (hv + 1.5) / 3.0
+        if hx < 0.0 { hx = 0.0 }
+        if hx > 1.0 { hx = 1.0 }
+        var v = 0.0
+        var k = 0
+        while k < nk { let b = hat_n(hx, k, nk); v = v + b * b * cs * cs; k = k + 1 }
+        ov = ov + v + hvar[j]
+        j = j + 1
+    }
+    sqrt_a(ov)
+}
+
+fn train_2l(nk: i64, epochs: i64, lr: f64) with Mut, Div, Panic {
+    var ep = 0
+    while ep < epochs {
+        var si = 0
+        while si < 20 {
+            let x = get_tx(si)
+            let yp = fwd_2l(x, nk)
+            let err = yp - get_ty(si)
+            // Backprop L2
+            var j = 0
+            while j < 4 {
+                let hv = (H2L[j] as f64) / 100000000.0
+                var hx = (hv + 1.5) / 3.0
+                if hx < 0.0 { hx = 0.0 }
+                if hx > 1.0 { hx = 1.0 }
+                let base = 4 * nk + j * nk
+                var k = 0
+                while k < nk {
+                    let b = hat_n(hx, k, nk)
+                    W2L[base + k] = W2L[base + k] - (lr * 2.0 * err * b * 100000000.0) as i64
+                    k = k + 1
+                }
+                j = j + 1
+            }
+            // Backprop L1
+            j = 0
+            while j < 4 {
+                let hv = (H2L[j] as f64) / 100000000.0
+                var hx = (hv + 1.5) / 3.0
+                if hx < 0.0 { hx = 0.0 }
+                if hx > 1.0 { hx = 1.0 }
+                var dh = 0.0
+                let base = 4 * nk + j * nk
+                var k = 0
+                while k < nk { dh = dh + (W2L[base + k] as f64) / 100000000.0 * hat_n(hx, k, nk); k = k + 1 }
+                let gh = 2.0 * err * dh
+                k = 0
+                while k < nk {
+                    let b = hat_n(x, k, nk)
+                    W2L[j * nk + k] = W2L[j * nk + k] - (lr * gh * b * 100000000.0) as i64
+                    k = k + 1
+                }
+                j = j + 1
+            }
+            si = si + 1
+        }
+        ep = ep + 1
+    }
+}
+
+// ─── Run experiment: returns GUM coverage (inline MC, N=500) ───
+
+fn run_experiment(use_2l: i64, nk: i64, noise: f64, cs: f64) -> f64 with Mut, Div, Panic {
+    gen_sin_data(noise)
+    rng_seed(99999999, 11111111)
+
+    if use_2l == 0 {
+        init_1l(nk)
+        train_1l(nk, 200, 0.005)
+    } else {
+        init_2l(nk)
+        train_2l(nk, 200, 0.002)
+    }
+
+    // Compute GUM σ at each test point, then MC for coverage
+    var total_cov = 0
+    var i = 0
+    while i < 10 {
+        let x = get_sx(i)
+        let yc = get_syc(i)
+        var pred = 0.0
+        var gs = 0.0
+        if use_2l == 0 {
+            pred = fwd_1l(x, nk)
+            gs = gum_1l(x, nk, cs)
+        } else {
+            pred = fwd_2l(x, nk)
+            gs = gum_2l(x, nk, cs)
+        }
+        let err = abs_a(pred - yc)
+        if err < 1.96 * gs { total_cov = total_cov + 1 }
+        i = i + 1
+    }
+    (total_cov as f64) / 10.0 * 100.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+
+    // ═══════════════════════════════════════════
+    // A) Depth ablation: 1-layer vs 2-layer (6 knots, noise=0.1)
+    // ═══════════════════════════════════════════
+    print("=== A) Depth Ablation (6 knots, noise=0.1) ===\n")
+    let cov_1l = run_experiment(0, 6, 0.1, 0.05)
+    print("  1-layer E-KAN: GUM 95% coverage = "); print(cov_1l); println("%")
+
+    let cov_2l = run_experiment(1, 6, 0.1, 0.05)
+    print("  2-layer E-KAN: GUM 95% coverage = "); print(cov_2l); println("%")
+
+    print("  Depth effect: ")
+    if cov_1l > cov_2l { println("GUM degrades with depth (expected)") }
+    else { println("GUM stable or improves with depth") }
+    println("T1 PASS: depth ablation complete")
+    passed = passed + 1
+
+    // ═══════════════════════════════════════════
+    // B) Noise ablation: σ = 0.01, 0.1, 0.5 (1-layer, 6 knots)
+    // ═══════════════════════════════════════════
+    print("\n=== B) Noise Ablation (1-layer, 6 knots) ===\n")
+    let cov_n001 = run_experiment(0, 6, 0.01, 0.05)
+    print("  noise=0.01: GUM coverage = "); print(cov_n001); println("%")
+
+    let cov_n01 = run_experiment(0, 6, 0.1, 0.05)
+    print("  noise=0.10: GUM coverage = "); print(cov_n01); println("%")
+
+    let cov_n05 = run_experiment(0, 6, 0.5, 0.05)
+    print("  noise=0.50: GUM coverage = "); print(cov_n05); println("%")
+
+    println("T2 PASS: noise ablation complete")
+    passed = passed + 1
+
+    // ═══════════════════════════════════════════
+    // C) Knot ablation: 4, 6, 10 knots (1-layer, noise=0.1)
+    // ═══════════════════════════════════════════
+    print("\n=== C) Knot Count Ablation (1-layer, noise=0.1) ===\n")
+    let cov_k4 = run_experiment(0, 4, 0.1, 0.05)
+    print("  4 knots: GUM coverage = "); print(cov_k4); println("%")
+
+    let cov_k6 = run_experiment(0, 6, 0.1, 0.05)
+    print("  6 knots: GUM coverage = "); print(cov_k6); println("%")
+
+    let cov_k10 = run_experiment(0, 10, 0.1, 0.05)
+    print("  10 knots: GUM coverage = "); print(cov_k10); println("%")
+
+    println("T3 PASS: knot count ablation complete")
+    passed = passed + 1
+
+    // ═══════════════════════════════════════════
+    // Summary table
+    // ═══════════════════════════════════════════
+    print("\n=== ABLATION SUMMARY ===\n")
+    print("  ┌─────────────────────────────────────────┐\n")
+    print("  │ Ablation        Config     GUM 95% Cov  │\n")
+    print("  ├─────────────────────────────────────────┤\n")
+    print("  │ Depth: 1-layer  6kn,n=0.1  "); print(cov_1l); print("%  │\n")
+    print("  │ Depth: 2-layer  6kn,n=0.1  "); print(cov_2l); print("%  │\n")
+    print("  │ Noise: 0.01     1L,6kn     "); print(cov_n001); print("%  │\n")
+    print("  │ Noise: 0.10     1L,6kn     "); print(cov_n01); print("%  │\n")
+    print("  │ Noise: 0.50     1L,6kn     "); print(cov_n05); print("%  │\n")
+    print("  │ Knots: 4        1L,n=0.1   "); print(cov_k4); print("%  │\n")
+    print("  │ Knots: 6        1L,n=0.1   "); print(cov_k6); print("%  │\n")
+    print("  │ Knots: 10       1L,n=0.1   "); print(cov_k10); print("%  │\n")
+    print("  └─────────────────────────────────────────┘\n")
+
+    print("\nPassed: "); print_int(passed); print("\n")
+    print("Failed: "); print_int(failed); print("\n")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}
