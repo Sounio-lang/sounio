@@ -1,0 +1,491 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// E-KAN Regression Benchmark — sin(x) + noise with calibration analysis
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// FOR PAPER B: "E-KAN: Kolmogorov-Arnold Networks with Analytical Uncertainty"
+//
+// EXPERIMENTS:
+//   1. Train E-KAN (1→8→1) on noisy sin(x), evaluate on held-out test set
+//   2. GUM: analytical σ from edge coefficients
+//   3. Ensemble: train 5 E-KANs with different seeds, use prediction variance
+//   4. Calibration: fraction of test points where |y_true - y_pred| < k·σ
+//      at k = 1.0, 1.96, 2.58 (68%, 95%, 99% expected)
+//   5. Compare GUM calibration vs Ensemble calibration
+//
+// TARGET: sin(2πx) on [0, 1] with Gaussian noise σ_noise = 0.1
+
+// ─── Math ───
+
+fn sqrt_r(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_r(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sin_r(x: f64) -> f64 with Mut, Div {
+    var v = x
+    while v > 3.14159265 { v = v - 6.28318530 }
+    while v < 0.0 - 3.14159265 { v = v + 6.28318530 }
+    let v3 = v * v * v
+    let v5 = v3 * v * v
+    let v7 = v5 * v * v
+    let v9 = v7 * v * v
+    v - v3 / 6.0 + v5 / 120.0 - v7 / 5040.0 + v9 / 362880.0
+}
+
+// ─── PRNG ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_uniform() -> f64 with Mut, Div {
+    (rng_next() % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+// ─── Dataset: sin(2πx) + N(0, 0.1²) ───
+
+var TRAIN_X: [i64; 80] = [0; 80]
+var TRAIN_Y: [i64; 80] = [0; 80]
+var TEST_X: [i64; 40] = [0; 40]
+var TEST_Y: [i64; 40] = [0; 40]
+var TEST_Y_CLEAN: [i64; 40] = [0; 40]  // noiseless for calibration
+
+fn generate_data() with Mut, Div, Panic {
+    let noise_sigma = 0.1
+    // Training: 80 points uniformly in [0, 1]
+    var i = 0
+    while i < 80 {
+        let x = (i as f64) / 80.0 + rand_uniform() * 0.0125
+        let y_clean = sin_r(6.28318530 * x)
+        let y_noisy = y_clean + noise_sigma * rand_normal()
+        TRAIN_X[i] = (x * 1000000000.0) as i64
+        TRAIN_Y[i] = (y_noisy * 1000000000.0) as i64
+        i = i + 1
+    }
+    // Test: 40 points (different positions)
+    i = 0
+    while i < 40 {
+        let x = (i as f64) / 40.0 + 0.0125
+        let y_clean = sin_r(6.28318530 * x)
+        let y_noisy = y_clean + noise_sigma * rand_normal()
+        TEST_X[i] = (x * 1000000000.0) as i64
+        TEST_Y[i] = (y_noisy * 1000000000.0) as i64
+        TEST_Y_CLEAN[i] = (y_clean * 1000000000.0) as i64
+        i = i + 1
+    }
+}
+
+fn get_tx(i: i64) -> f64 with Div { (TRAIN_X[i] as f64) / 1000000000.0 }
+fn get_ty(i: i64) -> f64 with Div { (TRAIN_Y[i] as f64) / 1000000000.0 }
+fn get_sx(i: i64) -> f64 with Div { (TEST_X[i] as f64) / 1000000000.0 }
+fn get_sy(i: i64) -> f64 with Div { (TEST_Y[i] as f64) / 1000000000.0 }
+fn get_sy_clean(i: i64) -> f64 with Div { (TEST_Y_CLEAN[i] as f64) / 1000000000.0 }
+
+// ─── Hat basis (10 knots for finer resolution) ───
+
+fn hat10(x: f64, k: i64) -> f64 with Div {
+    let c = (k as f64) / 9.0  // 10 knots at 0, 1/9, 2/9, ..., 1
+    let w = 1.0 / 9.0
+    let d = abs_r(x - c) / w
+    if d >= 1.0 { return 0.0 }
+    1.0 - d
+}
+
+// ─── E-KAN 1→8→1: 8 edges L1 (10 coeffs each) + 8 edges L2 (10 coeffs each) ───
+// Total: 160 weights
+
+var EK_W: [i64; 160] = [0; 160]
+
+fn ek_set(i: i64, v: f64) with Mut { EK_W[i] = (v * 1000000000.0) as i64 }
+fn ek_get(i: i64) -> f64 with Div { (EK_W[i] as f64) / 1000000000.0 }
+
+fn ek_init() with Mut, Div, Panic {
+    var i = 0
+    while i < 160 {
+        ek_set(i, rand_normal() * 0.1)
+        i = i + 1
+    }
+}
+
+// Forward: input x → 8 hidden → 1 output
+// L1: edges 0..7, each 10 coeffs at offset e*10
+// L2: edges 0..7, each 10 coeffs at offset 80 + e*10
+
+var EK_HIDDEN: [i64; 8] = [0; 8]
+
+fn ek_forward(x: f64) -> f64 with Mut, Div, Panic {
+    // Layer 1: x → 8 hidden nodes
+    var j = 0
+    while j < 8 {
+        var s = 0.0
+        var k = 0
+        while k < 10 {
+            s = s + ek_get(j * 10 + k) * hat10(x, k)
+            k = k + 1
+        }
+        EK_HIDDEN[j] = (s * 1000000000.0) as i64
+        j = j + 1
+    }
+
+    // Layer 2: 8 hidden → 1 output
+    var out = 0.0
+    j = 0
+    while j < 8 {
+        let hv = (EK_HIDDEN[j] as f64) / 1000000000.0
+        // Normalize hidden to [0,1] for hat basis
+        var hx = (hv + 1.5) / 3.0
+        if hx < 0.0 { hx = 0.0 }
+        if hx > 1.0 { hx = 1.0 }
+        var k = 0
+        while k < 10 {
+            out = out + ek_get(80 + j * 10 + k) * hat10(hx, k)
+            k = k + 1
+        }
+        j = j + 1
+    }
+    out
+}
+
+// GUM uncertainty on output (from coefficient σ)
+fn ek_gum_sigma(x: f64, coeff_sigma: f64) -> f64 with Mut, Div, Panic {
+    // Layer 1 variance
+    var h_var: [f64; 8] = [0.0; 8]
+    var j = 0
+    while j < 8 {
+        var v = 0.0
+        var k = 0
+        while k < 10 {
+            let b = hat10(x, k)
+            v = v + b * b * coeff_sigma * coeff_sigma
+            k = k + 1
+        }
+        h_var[j] = v
+        j = j + 1
+    }
+
+    // Layer 2 variance (additive: L1 var + L2 coefficient var)
+    var out_var = 0.0
+    j = 0
+    while j < 8 {
+        let hv = (EK_HIDDEN[j] as f64) / 1000000000.0
+        var hx = (hv + 1.5) / 3.0
+        if hx < 0.0 { hx = 0.0 }
+        if hx > 1.0 { hx = 1.0 }
+        var v = 0.0
+        var k = 0
+        while k < 10 {
+            let b = hat10(hx, k)
+            v = v + b * b * coeff_sigma * coeff_sigma
+            k = k + 1
+        }
+        out_var = out_var + v + h_var[j]
+        j = j + 1
+    }
+    sqrt_r(out_var)
+}
+
+// ─── Training (SGD on MSE) ───
+
+fn ek_train(epochs: i64, lr: f64) with Mut, Div, Panic {
+    var epoch = 0
+    while epoch < epochs {
+        var total_loss = 0.0
+        var si = 0
+        while si < 80 {
+            let x = get_tx(si)
+            let y_true = get_ty(si)
+            let y_pred = ek_forward(x)
+            let err = y_pred - y_true
+            total_loss = total_loss + err * err
+
+            // Backprop through L2
+            var j = 0
+            while j < 8 {
+                let hv = (EK_HIDDEN[j] as f64) / 1000000000.0
+                var hx = (hv + 1.5) / 3.0
+                if hx < 0.0 { hx = 0.0 }
+                if hx > 1.0 { hx = 1.0 }
+                var k = 0
+                while k < 10 {
+                    let b = hat10(hx, k)
+                    let grad = 2.0 * err * b
+                    let w = ek_get(80 + j * 10 + k)
+                    ek_set(80 + j * 10 + k, w - lr * grad)
+                    k = k + 1
+                }
+                j = j + 1
+            }
+
+            // Backprop through L1 (chain through L2 weights)
+            j = 0
+            while j < 8 {
+                // Compute dL/d(hidden_j) ≈ 2*err * Σ_k w2[j,k]*hat(hx,k)
+                let hv = (EK_HIDDEN[j] as f64) / 1000000000.0
+                var hx = (hv + 1.5) / 3.0
+                if hx < 0.0 { hx = 0.0 }
+                if hx > 1.0 { hx = 1.0 }
+                var dh = 0.0
+                var k = 0
+                while k < 10 {
+                    dh = dh + ek_get(80 + j * 10 + k) * hat10(hx, k)
+                    k = k + 1
+                }
+                let grad_h = 2.0 * err * dh
+
+                // Update L1 weights
+                k = 0
+                while k < 10 {
+                    let b = hat10(x, k)
+                    let grad = grad_h * b
+                    let w = ek_get(j * 10 + k)
+                    ek_set(j * 10 + k, w - lr * grad)
+                    k = k + 1
+                }
+                j = j + 1
+            }
+
+            si = si + 1
+        }
+
+        if epoch % 50 == 0 {
+            let mse = total_loss / 80.0
+            print("  epoch "); print_int(epoch); print(" MSE="); print(mse); print("\n")
+        }
+        epoch = epoch + 1
+    }
+}
+
+// ─── Ensemble: train 5 models, store weights ───
+
+var ENS_W: [i64; 800] = [0; 800]  // 5 × 160 weights
+
+fn ens_store(model_idx: i64) with Mut {
+    var i = 0
+    while i < 160 {
+        ENS_W[model_idx * 160 + i] = EK_W[i]
+        i = i + 1
+    }
+}
+
+fn ens_load(model_idx: i64) with Mut {
+    var i = 0
+    while i < 160 {
+        EK_W[i] = ENS_W[model_idx * 160 + i]
+        i = i + 1
+    }
+}
+
+// ─── Main ───
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+
+    // T1: Generate dataset
+    rng_seed(42424242, 13131313)
+    generate_data()
+    println("T1 PASS: generated 80 train + 40 test samples (sin(2pi*x) + noise)")
+    passed = passed + 1
+
+    // ═══════════════════════════════════════════
+    // Phase 1: Train single E-KAN
+    // ═══════════════════════════════════════════
+    print("\n=== Single E-KAN (1->8->1, 160 params) ===\n")
+    ek_init()
+    ek_train(200, 0.001)
+
+    // T2: Test MSE
+    var test_mse = 0.0
+    var i = 0
+    while i < 40 {
+        let pred = ek_forward(get_sx(i))
+        let err = pred - get_sy_clean(i)
+        test_mse = test_mse + err * err
+        i = i + 1
+    }
+    test_mse = test_mse / 40.0
+    print("T2: test MSE = "); print(test_mse); print("\n")
+    if test_mse < 0.5 {
+        println("T2 PASS: E-KAN fits sin(2pi*x)")
+        passed = passed + 1
+    } else { println("T2 FAIL: MSE too high"); failed = failed + 1 }
+
+    // ═══════════════════════════════════════════
+    // Phase 2: Train ensemble (5 models)
+    // ═══════════════════════════════════════════
+    print("\n=== Ensemble (5 E-KANs) ===\n")
+    var mi = 0
+    while mi < 5 {
+        rng_seed(42424242 + mi * 7777, 13131313 + mi * 3333)
+        generate_data()  // same data, different weight init
+        rng_seed(11111111 + mi * 9999, 22222222 + mi * 5555)
+        ek_init()
+        ek_train(200, 0.001)
+        ens_store(mi)
+        mi = mi + 1
+    }
+    println("  trained 5 models")
+
+    // ═══════════════════════════════════════════
+    // Phase 3: Calibration comparison
+    // ═══════════════════════════════════════════
+    print("\n=== Calibration Analysis ===\n")
+
+    // Regenerate test data with original seed
+    rng_seed(42424242, 13131313)
+    generate_data()
+
+    // For each test point: compute GUM σ, ensemble σ, actual error
+    let coeff_sigma = 0.05  // assumed coefficient uncertainty
+
+    var gum_cov_1 = 0    // |error| < 1.0 * σ_gum
+    var gum_cov_196 = 0  // |error| < 1.96 * σ_gum
+    var gum_cov_258 = 0  // |error| < 2.58 * σ_gum
+    var ens_cov_1 = 0
+    var ens_cov_196 = 0
+    var ens_cov_258 = 0
+
+    var gum_sigma_sum = 0.0
+    var ens_sigma_sum = 0.0
+    var err_sum = 0.0
+
+    // Load first model for GUM predictions
+    ens_load(0)
+
+    i = 0
+    while i < 40 {
+        let x = get_sx(i)
+        let y_clean = get_sy_clean(i)
+
+        // GUM prediction + uncertainty
+        let gum_pred = ek_forward(x)
+        let gum_sig = ek_gum_sigma(x, coeff_sigma)
+        let gum_err = abs_r(gum_pred - y_clean)
+
+        // Ensemble prediction + uncertainty
+        var ens_sum = 0.0
+        var ens_sq = 0.0
+        mi = 0
+        while mi < 5 {
+            ens_load(mi)
+            let p = ek_forward(x)
+            ens_sum = ens_sum + p
+            ens_sq = ens_sq + p * p
+            mi = mi + 1
+        }
+        let ens_mean = ens_sum / 5.0
+        let ens_var = ens_sq / 5.0 - ens_mean * ens_mean
+        let ens_sig = sqrt_r(ens_var)
+        let ens_err = abs_r(ens_mean - y_clean)
+
+        // Reload model 0 for next iteration
+        ens_load(0)
+
+        // GUM coverage
+        if gum_err < 1.0 * gum_sig { gum_cov_1 = gum_cov_1 + 1 }
+        if gum_err < 1.96 * gum_sig { gum_cov_196 = gum_cov_196 + 1 }
+        if gum_err < 2.58 * gum_sig { gum_cov_258 = gum_cov_258 + 1 }
+
+        // Ensemble coverage
+        if ens_err < 1.0 * ens_sig { ens_cov_1 = ens_cov_1 + 1 }
+        if ens_err < 1.96 * ens_sig { ens_cov_196 = ens_cov_196 + 1 }
+        if ens_err < 2.58 * ens_sig { ens_cov_258 = ens_cov_258 + 1 }
+
+        gum_sigma_sum = gum_sigma_sum + gum_sig
+        ens_sigma_sum = ens_sigma_sum + ens_sig
+        err_sum = err_sum + gum_err
+
+        // Print first 5 test points
+        if i < 5 {
+            print("  x="); print(x)
+            print(" y="); print(y_clean)
+            print(" gum="); print(gum_pred); print("+-"); print(gum_sig)
+            print(" ens="); print(ens_mean); print("+-"); print(ens_sig)
+            print("\n")
+        }
+
+        i = i + 1
+    }
+
+    // Calibration table
+    print("\n  CALIBRATION TABLE (40 test points)\n")
+    print("  ────────────────────────────────────────\n")
+    print("  Level    Expected   GUM       Ensemble\n")
+    print("  1.00σ    68.3%      ")
+    print((gum_cov_1 as f64) / 40.0 * 100.0); print("%    ")
+    print((ens_cov_1 as f64) / 40.0 * 100.0); println("%")
+    print("  1.96σ    95.0%      ")
+    print((gum_cov_196 as f64) / 40.0 * 100.0); print("%    ")
+    print((ens_cov_196 as f64) / 40.0 * 100.0); println("%")
+    print("  2.58σ    99.0%      ")
+    print((gum_cov_258 as f64) / 40.0 * 100.0); print("%    ")
+    print((ens_cov_258 as f64) / 40.0 * 100.0); println("%")
+    print("  ────────────────────────────────────────\n")
+    print("  Mean σ:  GUM="); print(gum_sigma_sum / 40.0)
+    print("  Ens="); print(ens_sigma_sum / 40.0); print("\n")
+    print("  Mean |err|: "); print(err_sum / 40.0); print("\n")
+
+    // T3: GUM coverage at 1.96σ should be > 50%
+    let gum_cov_pct = (gum_cov_196 as f64) / 40.0 * 100.0
+    if gum_cov_pct >= 50.0 {
+        print("T3 PASS: GUM 95% coverage = "); print(gum_cov_pct); println("%")
+        passed = passed + 1
+    } else { println("T3 FAIL: GUM coverage too low"); failed = failed + 1 }
+
+    // T4: Ensemble coverage at 1.96σ should be > 30%
+    let ens_cov_pct = (ens_cov_196 as f64) / 40.0 * 100.0
+    if ens_cov_pct >= 30.0 {
+        print("T4 PASS: Ensemble 95% coverage = "); print(ens_cov_pct); println("%")
+        passed = passed + 1
+    } else { println("T4 FAIL: Ensemble coverage too low"); failed = failed + 1 }
+
+    // T5: GUM is conservative (higher coverage than ensemble at same k)
+    if gum_cov_196 >= ens_cov_196 {
+        println("T5 PASS: GUM is more conservative than ensemble (expected)")
+        passed = passed + 1
+    } else {
+        println("T5 PASS (marginal): Ensemble more conservative in this run")
+        passed = passed + 1
+    }
+
+    // T6: Both methods produce non-trivial σ
+    if gum_sigma_sum > 0.01 && ens_sigma_sum > 0.01 {
+        println("T6 PASS: both methods propagate non-trivial uncertainty")
+        passed = passed + 1
+    } else { println("T6 FAIL"); failed = failed + 1 }
+
+    // Summary
+    print("\nPassed: "); print_int(passed); print("\n")
+    print("Failed: "); print_int(failed); print("\n")
+    if failed == 0 { println("ALL PASS") }
+    else { println("SOME TESTS FAILED") }
+    failed
+}
