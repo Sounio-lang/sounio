@@ -498,6 +498,46 @@ fn emit_indirect_fn_call_x86(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i6
     emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
 }
 
+fn emit_closure_fn_call_x86(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i64) with Mut, Panic, Div {
+    let ret_slots = ret_agg_nslots(ret_ty, ret_hash)
+    if ret_slots > 0 {
+        let ret_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + ret_slots
+        emit_setup_call_args_shift_x86(argc, 2)
+        emit_prepare_stack_call_args_x86(argc, 4)
+        em(0x48); em(0x8d); em(0x85)
+        em32(0 - (ret_base + ret_slots - 1) * 8)
+        em(0x48); em(0x89); em(0xc7)  // mov rdi, sret ptr
+        emit_load_var(ptr_slot)
+        em(0x48); em(0x89); em(0xc6)  // mov rsi, env ptr
+        em(0x48); em(0x8b); em(0x00)  // mov rax, [env]
+        em(0xff); em(0xd0)
+        emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 4))
+        return
+    }
+    emit_setup_closure_call_args_x86(argc)
+    emit_prepare_stack_call_args_x86(argc, 5)
+    emit_load_var(ptr_slot)
+    em(0x48); em(0x89); em(0xc7)
+    em(0x48); em(0x8b); em(0x00)
+    em(0xff); em(0xd0)
+    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
+}
+
+fn emit_syscall6_x86(argc: i64) with Mut {
+    if argc >= 1 {
+        em(0x48); em(0x8b); em(0x84); em(0x24); em32((argc - 1) * 8)  // mov rax, [rsp+num]
+    }
+    if argc >= 2 { emit_load_rsp_arg_x86(0, (argc - 2) * 8) }  // rdi = a1
+    if argc >= 3 { emit_load_rsp_arg_x86(1, (argc - 3) * 8) }  // rsi = a2
+    if argc >= 4 { emit_load_rsp_arg_x86(2, (argc - 4) * 8) }  // rdx = a3
+    if argc >= 5 { em(0x4c); em(0x8b); em(0x94); em(0x24); em32((argc - 5) * 8) }  // mov r10, [rsp+a4]
+    if argc >= 6 { emit_load_rsp_arg_x86(4, (argc - 6) * 8) }  // r8 = a5
+    if argc >= 7 { emit_load_rsp_arg_x86(5, (argc - 7) * 8) }  // r9 = a6
+    em(0x0f); em(0x05)
+    emit_drop_call_args_x86(argc)
+}
+
 fn emit_drop_call_args_x86(argc: i64) with Mut {
     let bytes = argc * 8
     if bytes <= 0 { return }
@@ -623,7 +663,14 @@ fn emit_drop_call_args_a64(argc: i64) with Mut {
     em32(0x8B0903FF)  // add sp, sp, x9
 }
 
-fn emit_direct_fn_call_a64(fi: i64, argc: i64) with Mut {
+fn emit_direct_fn_call_a64(fi: i64, argc: i64) with Mut, Panic, Div {
+    let ret_slots = ret_agg_nslots(FN_RET_TY[fi as usize], FN_RET_HASH[fi as usize])
+    if ret_slots > 0 {
+        let ret_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + ret_slots
+        emit_lea_var_a64(ret_base + ret_slots - 1)
+        em32(0xAA0003E8)  // mov x8, x0
+    }
     if argc >= 8 { em32(0xF8410FE7) }
     if argc >= 7 { em32(0xF8410FE6) }
     if argc >= 6 { em32(0xF8410FE5) }
@@ -637,6 +684,45 @@ fn emit_direct_fn_call_a64(fi: i64, argc: i64) with Mut {
     PATCH_KIND[PATCH_COUNT as usize] = 0
     PATCH_COUNT = PATCH_COUNT + 1
     em32(0x94000000)
+}
+
+fn emit_indirect_fn_call_a64(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i64) with Mut, Panic, Div {
+    let ret_slots = ret_agg_nslots(ret_ty, ret_hash)
+    if ret_slots > 0 {
+        let ret_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + ret_slots
+        emit_lea_var_a64(ret_base + ret_slots - 1)
+        em32(0xAA0003E8)  // mov x8, x0
+    }
+    emit_load_var_a64(ptr_slot)
+    em32(0xAA0003E9)  // mov x9, x0
+    if argc >= 8 { em32(0xF8410FE7) }
+    if argc >= 7 { em32(0xF8410FE6) }
+    if argc >= 6 { em32(0xF8410FE5) }
+    if argc >= 5 { em32(0xF8410FE4) }
+    if argc >= 4 { em32(0xF8410FE3) }
+    if argc >= 3 { em32(0xF8410FE2) }
+    if argc >= 2 { emit_pop_x1_a64() }
+    if argc >= 1 { em32(0xF8410FE0) }
+    em32(0xD63F0120)
+}
+
+fn emit_closure_fn_call_a64(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i64) with Mut, Panic, Div {
+    let ret_slots = ret_agg_nslots(ret_ty, ret_hash)
+    if ret_slots > 0 {
+        let ret_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + ret_slots
+        emit_lea_var_a64(ret_base + ret_slots - 1)
+        em32(0xAA0003E8)  // mov x8, x0
+    }
+    if argc >= 5 { em32(0xF8410FE5) }
+    if argc >= 4 { em32(0xF8410FE4) }
+    if argc >= 3 { em32(0xF8410FE3) }
+    if argc >= 2 { em32(0xF8410FE2) }
+    if argc >= 1 { em32(0xF8410FE1) }
+    emit_load_var_a64(ptr_slot)
+    em32(0xF9400009)
+    em32(0xD63F0120)
 }
 
 // Load 64-bit immediate into x0 via movz/movk chain
@@ -808,9 +894,18 @@ fn stabilize_return_agg_a64(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
     if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
     if nslots <= 0 { return }
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
-    emit_imm64_reg_a64(11, GL_BSS_BASE + RET_AGG_BSS_OFF)
+    if CURRENT_SRET_SLOT > 0 {
+        emit_load_var_a64(CURRENT_SRET_SLOT)
+        em32(0xAA0003EB)  // mov x11, x0
+    } else {
+        emit_imm64_reg_a64(11, GL_BSS_BASE + RET_AGG_BSS_OFF)
+    }
     emit_copy_words_x10_x11_a64(nslots)
-    emit_imm64_reg_a64(0, GL_BSS_BASE + RET_AGG_BSS_OFF)
+    if CURRENT_SRET_SLOT > 0 {
+        emit_load_var_a64(CURRENT_SRET_SLOT)
+    } else {
+        emit_imm64_reg_a64(0, GL_BSS_BASE + RET_AGG_BSS_OFF)
+    }
 }
 
 // Load 64-bit immediate into arbitrary register
@@ -2123,6 +2218,26 @@ fn fnsig_from_decl_name_tok(name_tok: i64) -> i64 with Mut, Panic {
         i = i + 1
     }
     FNSIG_SCAN_DEPTH = depth
+    return fnsig_intern_scratch()
+}
+
+fn fnsig_from_local_params(param_count: i64, ret_ty: i64, ret_hash: i64) -> i64 with Mut, Panic {
+    let limit = 16
+    var i: i64 = 0
+    FNSIG_SCRATCH_ARITY = param_count
+    if FNSIG_SCRATCH_ARITY > limit { FNSIG_SCRATCH_ARITY = limit }
+    FNSIG_SCRATCH_RET_TY = ret_ty
+    FNSIG_SCRATCH_RET_HASH = ret_hash
+    while i < limit {
+        if i < FNSIG_SCRATCH_ARITY {
+            FNSIG_SCRATCH_PARAM_TY[i as usize] = VAR_TY[i as usize]
+            FNSIG_SCRATCH_PARAM_HASH[i as usize] = VAR_TY_HASH[i as usize]
+        } else {
+            FNSIG_SCRATCH_PARAM_TY[i as usize] = 0
+            FNSIG_SCRATCH_PARAM_HASH[i as usize] = 0
+        }
+        i = i + 1
+    }
     return fnsig_intern_scratch()
 }
 
@@ -4804,20 +4919,6 @@ fn compile_primary() with IO, Mut, Panic, Div {
     // Token 45 = | at expression start = closure (not bitwise OR)
     // Supports captured variables from outer scope via closure struct.
     // All closures build a stack struct: [fn_ptr, cap_0, cap_1, ...]
-fn emit_syscall6_x86(argc: i64) with Mut {
-    if argc >= 1 {
-        em(0x48); em(0x8b); em(0x84); em(0x24); em32((argc - 1) * 8)  // mov rax, [rsp+num]
-    }
-    if argc >= 2 { emit_load_rsp_arg_x86(0, (argc - 2) * 8) }  // rdi = a1
-    if argc >= 3 { emit_load_rsp_arg_x86(1, (argc - 3) * 8) }  // rsi = a2
-    if argc >= 4 { emit_load_rsp_arg_x86(2, (argc - 4) * 8) }  // rdx = a3
-    if argc >= 5 { em(0x4c); em(0x8b); em(0x94); em(0x24); em32((argc - 5) * 8) }  // mov r10, [rsp+a4]
-    if argc >= 6 { emit_load_rsp_arg_x86(4, (argc - 6) * 8) }  // r8 = a5
-    if argc >= 7 { emit_load_rsp_arg_x86(5, (argc - 7) * 8) }  // r9 = a6
-    em(0x0f); em(0x05)
-    emit_drop_call_args_x86(argc)
-}
-
     // Closure function receives hidden first param (env_ptr) in rdi.
     // User args shift to rsi, rdx, rcx, r8, r9 (max 5 user args).
     if k == 45 || k == 31 {
@@ -4898,11 +4999,16 @@ fn emit_syscall6_x86(argc: i64) with Mut {
             CURRENT_RET_TY = 0
             CURRENT_RET_HASH = 0
         }
+        if ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH) > 0 {
+            CURRENT_SRET_SLOT = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+        }
         if TK[EP as usize] == 38 {
             EP = EP + 1
             while TK[EP as usize] == 3 || TK[EP as usize] == 28 { EP = EP + 1 }
         }
         let nparams = VAR_COUNT  // user params only
+        let closure_sig = fnsig_from_local_params(nparams, CURRENT_RET_TY, CURRENT_RET_HASH)
         // Register outer-scope vars as captures (those not shadowed by params)
         var ci: i64 = 0
         while ci < save_vc {
@@ -4944,17 +5050,33 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         // Prologue: push rbp; mov rbp, rsp; sub rsp, <dynamic frame>
         em(0x55); em(0x48); em(0x89); em(0xe5)
         em(0x48); em(0x81); em(0xec); record_frame_patch(); em32(0)
-        // Spill env_ptr (rdi) to slot 1: mov [rbp-8], rdi
-        em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF)
-        // Spill user params from shifted registers (rsi=slot2, rdx=slot3, ...)
-        if nparams >= 1 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }
-        if nparams >= 2 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }
-        if nparams >= 3 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }
-        if nparams >= 4 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }
-        if nparams >= 5 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }
+        if CURRENT_SRET_SLOT > 0 {
+            em(0x48); em(0x89); em(0xf8)
+            emit_store_var(CURRENT_SRET_SLOT)
+            em(0x48); em(0x89); em(0xf0)
+            emit_store_var(1)
+            if nparams >= 1 { em(0x48); em(0x89); em(0xd0); emit_store_var(2) }
+            if nparams >= 2 { em(0x48); em(0x89); em(0xc8); emit_store_var(3) }
+            if nparams >= 3 { em(0x4c); em(0x89); em(0xc0); emit_store_var(4) }
+            if nparams >= 4 { em(0x4c); em(0x89); em(0xc8); emit_store_var(5) }
+        } else {
+            // Spill env_ptr (rdi) to slot 1: mov [rbp-8], rdi
+            em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF)
+            // Spill user params from shifted registers (rsi=slot2, rdx=slot3, ...)
+            if nparams >= 1 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }
+            if nparams >= 2 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }
+            if nparams >= 3 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }
+            if nparams >= 4 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }
+            if nparams >= 5 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }
+        }
         var stack_param_idx: i64 = 6
+        var stack_first_idx: i64 = 6
+        if CURRENT_SRET_SLOT > 0 {
+            stack_param_idx = 5
+            stack_first_idx = 5
+        }
         while stack_param_idx <= nparams {
-            em(0x48); em(0x8b); em(0x85); em32(16 + (stack_param_idx - 6) * 8)
+            em(0x48); em(0x8b); em(0x85); em32(16 + (stack_param_idx - stack_first_idx) * 8)
             emit_store_var(1 + stack_param_idx)
             stack_param_idx = stack_param_idx + 1
         }
@@ -4966,7 +5088,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
             emit_load_var(1)  // rax = env_ptr
             let cap_off = (capi + 1) * 8
             em(0x48); em(0x8b); em(0x80); em32(cap_off)  // mov rax, [rax + cap_off]
-            emit_store_var(2 + nparams + capi)  // store in capture's local slot
+            emit_store_var(VAR_SLOT[(nparams + capi) as usize])  // store in capture's local slot
             capi = capi + 1
         }
         // Compile body
@@ -5048,6 +5170,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         em32(0 - struct_top * 8)
         EXPR_IS_F64 = 0
         EXPR_TY = 9
+        EXPR_TY_HASH = closure_sig
         LAST_EXPR_IS_CLOSURE = 1
         return
     }
@@ -5615,6 +5738,30 @@ fn emit_syscall6_x86(argc: i64) with Mut {
                 EXPR_TY = 1
                 return
             }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "syscall6") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                var sys_argc: i64 = 0
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or()
+                    materialize_aggregate_expr_x86()
+                    em(0x50)
+                    sys_argc = sys_argc + 1
+                    if TK[EP as usize] == 28 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                if sys_argc != 7 {
+                    tc_wrong_arity(name_tok, 7, sys_argc)
+                    emit_drop_call_args_x86(sys_argc)
+                    em(0x31); em(0xc0)
+                } else {
+                    emit_syscall6_x86(sys_argc)
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
             // Check for write_file/path aliases
             if fn_find(ns, ne) < 0 && (src_match(ns, ne - ns, "write_file") || src_match(ns, ne - ns, "write_bytes") || src_match(ns, ne - ns, "append_file")) {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
@@ -6013,13 +6160,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
                 if call_vslot >= 0 {
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
                     if call_is_closure == 1 {
-                        emit_setup_closure_call_args_x86(argc)
-                        emit_prepare_stack_call_args_x86(argc, 5)
-                        emit_load_var(call_vslot)
-                        em(0x48); em(0x89); em(0xc7)
-                        em(0x48); em(0x8b); em(0x00)
-                        em(0xff); em(0xd0)
-                        emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
+                        emit_closure_fn_call_x86(call_vslot, argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     } else {
                         emit_indirect_fn_call_x86(call_vslot, abi_argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     }
@@ -6289,30 +6430,6 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
     var more: i64 = 1
     while more == 1 {
         if TK[EP as usize] == 37 {
-            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "syscall6") {
-                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
-                EP = EP + 1
-                var sys_argc: i64 = 0
-                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
-                    compile_or()
-                    materialize_aggregate_expr_x86()
-                    em(0x50)
-                    sys_argc = sys_argc + 1
-                    if TK[EP as usize] == 28 { EP = EP + 1 }
-                }
-                if TK[EP as usize] == 7 { EP = EP + 1 }
-                if sys_argc != 7 {
-                    tc_wrong_arity(name_tok, 7, sys_argc)
-                    emit_drop_call_args_x86(sys_argc)
-                    em(0x31); em(0xc0)
-                } else {
-                    emit_syscall6_x86(sys_argc)
-                }
-                EXPR_IS_F64 = 0
-                EXPR_TY = 1
-                EXPR_TY_HASH = 0
-                return
-            }
             EP = EP + 1  // skip 'as'
             let tp = EP
             let src_ty = EXPR_TY
@@ -10486,6 +10603,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         } else { EP = EP + 1 }
         em32(0xD2800000)
         EXPR_IS_F64 = 0
+        EXPR_TY = 9
+        EXPR_TY_HASH = 0
         LAST_EXPR_IS_CLOSURE = 1
         return
     }
@@ -11336,19 +11455,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let callee_eff = FN_EFFECTS[fi as usize]
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
                 if (callee_eff & ~caller_eff) != 0 { tc_effect_violation(call_tok, callee_eff, caller_eff) }
-                if abi_argc >= 8 { em32(0xF8410FE7) }
-                if abi_argc >= 7 { em32(0xF8410FE6) }
-                if abi_argc >= 6 { em32(0xF8410FE5) }
-                if abi_argc >= 5 { em32(0xF8410FE4) }
-                if abi_argc >= 4 { em32(0xF8410FE3) }
-                if abi_argc >= 3 { em32(0xF8410FE2) }
-                if abi_argc >= 2 { emit_pop_x1_a64() }
-                if abi_argc >= 1 { em32(0xF8410FE0) }
-                PATCH_OFF[PATCH_COUNT as usize] = CL
-                PATCH_FN[PATCH_COUNT as usize] = fi
-                PATCH_KIND[PATCH_COUNT as usize] = 0
-                PATCH_COUNT = PATCH_COUNT + 1
-                em32(0x94000000)
+                emit_direct_fn_call_a64(fi, abi_argc)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -11356,26 +11463,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if call_vslot >= 0 {
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
                     if call_is_closure == 1 {
-                        if argc >= 5 { em32(0xF8410FE5) }
-                        if argc >= 4 { em32(0xF8410FE4) }
-                        if argc >= 3 { em32(0xF8410FE3) }
-                        if argc >= 2 { em32(0xF8410FE2) }
-                        if argc >= 1 { em32(0xF8410FE1) }
-                        emit_load_var_a64(call_vslot)
-                        em32(0xF9400009)
-                        em32(0xD63F0120)
+                        emit_closure_fn_call_a64(call_vslot, argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     } else {
-                        emit_load_var_a64(call_vslot)
-                        em32(0xAA0003E9)
-                        if abi_argc >= 8 { em32(0xF8410FE7) }
-                        if abi_argc >= 7 { em32(0xF8410FE6) }
-                        if abi_argc >= 6 { em32(0xF8410FE5) }
-                        if abi_argc >= 5 { em32(0xF8410FE4) }
-                        if abi_argc >= 4 { em32(0xF8410FE3) }
-                        if abi_argc >= 3 { em32(0xF8410FE2) }
-                        if abi_argc >= 2 { emit_pop_x1_a64() }
-                        if abi_argc >= 1 { em32(0xF8410FE0) }
-                        em32(0xD63F0120)
+                        emit_indirect_fn_call_a64(call_vslot, abi_argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     }
                     if call_sig > 0 {
                         EXPR_TY = FNSIG_RET_TY[call_sig as usize]
@@ -12821,6 +12911,11 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         CURRENT_RET_TY = FN_RET_TY[fn_idx as usize]
         CURRENT_RET_HASH = FN_RET_HASH[fn_idx as usize]
         VAR_COUNT = 0; NEXT_SLOT = 1; BREAK_COUNT = 0; LAST_STMT_HAS_VALUE = 0
+        CURRENT_SRET_SLOT = 0
+        if ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH) > 0 {
+            CURRENT_SRET_SLOT = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+        }
         p = p + 1
         if TK[p as usize] == 6 { p = p + 1 }
         while TK[p as usize] != 7 && TK[p as usize] != 0 {
@@ -12873,6 +12968,10 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         // Spill params using low-level ABI slot order.
         var param_vi_a: i64 = 0
         var abi_arg_idx_a: i64 = 0
+        if CURRENT_SRET_SLOT > 0 {
+            em32(0xAA0803E0)  // mov x0, x8
+            emit_store_var_a64(CURRENT_SRET_SLOT)
+        }
         while param_vi_a < VAR_COUNT {
             emit_store_incoming_arg_a64(abi_arg_idx_a, VAR_SLOT[param_vi_a as usize])
             abi_arg_idx_a = abi_arg_idx_a + 1
