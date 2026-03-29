@@ -9,6 +9,8 @@ WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-authority-gate}"
 LOG_DIR="$WORK_DIR/logs"
 ARTIFACT_DIR="$WORK_DIR/artifacts"
 
+POLICY_WORK_DIR="$WORK_DIR/promotion_policy"
+DRIFT_WORK_DIR="$WORK_DIR/release_drift"
 FIXED_POINT_WORK_DIR="$WORK_DIR/fixed_point"
 FALLBACK_WORK_DIR="$WORK_DIR/fallback_inventory"
 ABI_WORK_DIR="$WORK_DIR/abi_regressions"
@@ -17,6 +19,8 @@ ACCEPTANCE_WORK_DIR="$WORK_DIR/native_acceptance"
 PARITY_WORK_DIR="$WORK_DIR/source_artifact_parity"
 RUN_LEGACY_ACCEPTANCE="${RUN_LEGACY_ACCEPTANCE:-0}"
 
+POLICY_LOG="$LOG_DIR/promotion_policy.log"
+DRIFT_LOG="$LOG_DIR/release_drift.log"
 FIXED_LOG="$LOG_DIR/fixed_point.log"
 FALLBACK_LOG="$LOG_DIR/fallback_inventory.log"
 ABI_LOG="$LOG_DIR/abi_regressions.log"
@@ -33,6 +37,20 @@ mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 echo "SELFHOST_AUTHORITY_GATE_START"
 echo "souc_native=$SOUC_NATIVE"
 echo "work_dir=$WORK_DIR"
+
+env WORK_DIR="$POLICY_WORK_DIR" \
+  bash "$ROOT_DIR/scripts/selfhost/selfhost_promotion_policy_gate.sh" >"$POLICY_LOG" 2>&1 || {
+    echo "error: promotion policy gate failed (see $POLICY_LOG)" >&2
+    cat "$POLICY_LOG" >&2 || true
+    exit 1
+  }
+
+env WORK_DIR="$DRIFT_WORK_DIR" \
+  bash "$ROOT_DIR/scripts/selfhost/selfhost_release_drift_gate.sh" >"$DRIFT_LOG" 2>&1 || {
+    echo "error: release drift gate failed (see $DRIFT_LOG)" >&2
+    cat "$DRIFT_LOG" >&2 || true
+    exit 1
+  }
 
 env SOUC_NATIVE="$SOUC_NATIVE" WORK_DIR="$FIXED_POINT_WORK_DIR" \
   bash "$ROOT_DIR/scripts/selfhost/selfhost_x86_fixed_point_gate.sh" >"$FIXED_LOG" 2>&1 || {
@@ -89,6 +107,8 @@ env ACCEPTED_ARTIFACT_BIN="$SOUC_NATIVE" WORK_DIR="$PARITY_WORK_DIR" \
   }
 
 REPORT_ARGS=(
+  --policy-summary "$POLICY_WORK_DIR/artifacts/summary.txt"
+  --drift-summary "$DRIFT_WORK_DIR/artifacts/summary.txt"
   --fixed-summary "$FIXED_POINT_WORK_DIR/artifacts/summary.txt"
   --fallback-summary "$FALLBACK_WORK_DIR/artifacts/summary.txt"
   --abi-summary "$ABI_WORK_DIR/artifacts/summary.txt"
@@ -111,11 +131,15 @@ python3 "$ROOT_DIR/scripts/selfhost/selfhost_authority_report.py" \
 
 {
   echo "souc_native=$SOUC_NATIVE"
+  echo "policy_log=$POLICY_LOG"
+  echo "drift_log=$DRIFT_LOG"
   echo "fixed_log=$FIXED_LOG"
   echo "fallback_log=$FALLBACK_LOG"
   echo "abi_log=$ABI_LOG"
   echo "aarch64_log=$AARCH64_LOG"
   echo "parity_log=$PARITY_LOG"
+  echo "policy_work_dir=$POLICY_WORK_DIR"
+  echo "drift_work_dir=$DRIFT_WORK_DIR"
   echo "fixed_point_work_dir=$FIXED_POINT_WORK_DIR"
   echo "fallback_work_dir=$FALLBACK_WORK_DIR"
   echo "abi_work_dir=$ABI_WORK_DIR"

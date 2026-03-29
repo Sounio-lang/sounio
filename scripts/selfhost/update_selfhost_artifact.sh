@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+POLICY_FILE="${POLICY_FILE:-$ROOT_DIR/scripts/selfhost/selfhost_promotion_policy.v1.json}"
 BOOTSTRAP_BIN="${BOOTSTRAP_BIN:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64}"
 TARGET_ARTIFACT="${TARGET_ARTIFACT:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64}"
 TARGET_PROVENANCE="${TARGET_PROVENANCE:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64.provenance.json}"
@@ -19,6 +20,29 @@ mkdir -p "$WORK_DIR"
 if [ ! -x "$BOOTSTRAP_BIN" ]; then
   echo "error: missing bootstrap compiler at $BOOTSTRAP_BIN" >&2
   exit 1
+fi
+
+python3 "$ROOT_DIR/scripts/selfhost/verify_selfhost_promotion_policy.py" \
+  --policy "$POLICY_FILE" \
+  --json-out "$WORK_DIR/policy-summary.json" \
+  --md-out "$WORK_DIR/policy-summary.md"
+
+env POLICY_FILE="$POLICY_FILE" WORK_DIR="$WORK_DIR/drift" \
+  bash "$ROOT_DIR/scripts/selfhost/selfhost_release_drift_gate.sh"
+
+REQUIRE_CLEAN_TREE="$(python3 - <<'PY' "$POLICY_FILE"
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    policy = json.load(f)
+print('1' if policy['artifact_freshness']['require_clean_git_tree_before_promotion'] else '0')
+PY
+)"
+
+if [ "$REQUIRE_CLEAN_TREE" = "1" ]; then
+  if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "error: promotion requires a clean git tree" >&2
+    exit 1
+  fi
 fi
 
 cp "$BOOTSTRAP_BIN" "$BOOTSTRAP_COPY"
@@ -40,9 +64,10 @@ python3 "$ROOT_DIR/scripts/selfhost/selfhost_artifact_attest.py" \
   --authority-summary "$PROMOTION_WORK_DIR/artifacts/summary.v2.json" \
   --bootstrap-summary "$BOOTSTRAP_WORK_DIR/artifacts/summary.v2.json" \
   --bootstrap-sha256 "$BOOTSTRAP_SHA256" \
+  --policy-file "$POLICY_FILE" \
   --provenance-out "$TARGET_PROVENANCE"
 
-env ARTIFACT_PATH="$TARGET_ARTIFACT" PROVENANCE_PATH="$TARGET_PROVENANCE" \
+env ARTIFACT_PATH="$TARGET_ARTIFACT" PROVENANCE_PATH="$TARGET_PROVENANCE" POLICY_FILE="$POLICY_FILE" \
   WORK_DIR="$WORK_DIR/provenance_verification" \
   bash "$ROOT_DIR/scripts/selfhost/selfhost_artifact_provenance_gate.sh"
 

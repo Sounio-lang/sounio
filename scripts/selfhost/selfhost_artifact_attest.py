@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import time
+import csv
 from pathlib import Path
 
 
@@ -17,11 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--provenance-out", required=True)
     parser.add_argument("--bootstrap-summary")
     parser.add_argument("--bootstrap-sha256")
-    parser.add_argument("--required-checks-manifest", default="scripts/selfhost/selfhost_required_checks.v1.json")
-    parser.add_argument("--authority-model-doc", default="docs/implementation/SELFHOST_AUTHORITY_MODEL.md")
-    parser.add_argument("--release-train-doc", default="docs/implementation/SELFHOST_RELEASE_TRAIN.md")
-    parser.add_argument("--promotion-entrypoint", default="scripts/selfhost/update_selfhost_artifact.sh")
-    parser.add_argument("--verification-entrypoint", default="scripts/selfhost/selfhost_artifact_provenance_gate.sh")
+    parser.add_argument("--policy-file", default="scripts/selfhost/selfhost_promotion_policy.v1.json")
     return parser.parse_args()
 
 
@@ -43,6 +40,27 @@ def git_output(*args: str) -> str:
         return "unknown"
 
 
+def manifest_support_classes(path: str) -> list[str]:
+    classes: set[str] = set()
+    with open(path, encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle, delimiter="\t")
+        for row in reader:
+            if not row or not row[0] or row[0].startswith("#"):
+                continue
+            if "abi_parity" in path:
+                if len(row) >= 3:
+                    classes.add(row[2])
+            else:
+                if len(row) >= 2:
+                    classes.add(row[1])
+    return sorted(classes)
+
+
+def stable_sha256_payload(data: dict[str, object]) -> str:
+    payload = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def extract_fixed_point(authority: dict[str, object]) -> dict[str, object]:
     for check in authority["blocking_checks"]:
         if check["name"] == "fixed_point":
@@ -59,10 +77,12 @@ def main() -> int:
 
     artifact_path = Path(args.artifact)
     source_path = Path(args.source)
+    policy_path = Path(args.policy_file)
     authority = json.loads(Path(args.authority_summary).read_text(encoding="utf-8"))
     bootstrap = {}
     if args.bootstrap_summary:
         bootstrap = json.loads(Path(args.bootstrap_summary).read_text(encoding="utf-8"))
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
 
     fixed_point = extract_fixed_point(authority)
     gate_status = []
@@ -71,8 +91,15 @@ def main() -> int:
     for surface in authority["nonblocking_surfaces"]:
         gate_status.append({"name": surface["name"], "status": surface["status"], "blocking": False})
 
+    required_checks_manifest = policy["manifests"]["required_checks"]
+    authority_model_doc = policy["reference_docs"]["authority_model"]
+    release_train_doc = policy["reference_docs"]["release_train"]
+    debt_register_doc = policy["reference_docs"]["debt_register"]
+    abi_manifest = policy["manifests"]["abi_parity"]
+    aarch64_manifest = policy["manifests"]["aarch64_compile"]
+
     report = {
-        "schema": "sounio.selfhost_artifact_provenance.v2",
+        "schema": "sounio.selfhost_artifact_provenance.v3",
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "git": {
             "attestation_commit": git_output("rev-parse", "HEAD"),
@@ -90,11 +117,33 @@ def main() -> int:
             "sha256": sha256_file(str(source_path)),
         },
         "policy": {
-            "required_checks_manifest": args.required_checks_manifest,
-            "authority_model_doc": args.authority_model_doc,
-            "release_train_doc": args.release_train_doc,
-            "promotion_entrypoint": args.promotion_entrypoint,
-            "verification_entrypoint": args.verification_entrypoint,
+            "policy_file": str(policy_path),
+            "policy_sha256": sha256_file(str(policy_path)),
+            "required_checks_manifest": required_checks_manifest,
+            "required_checks_manifest_sha256": sha256_file(required_checks_manifest),
+            "authority_model_doc": authority_model_doc,
+            "release_train_doc": release_train_doc,
+            "debt_register_doc": debt_register_doc,
+            "promotion_entrypoint": policy["entrypoints"]["promotion_entrypoint"],
+            "verification_entrypoint": policy["entrypoints"]["provenance_gate"],
+            "drift_entrypoint": policy["entrypoints"]["drift_gate"],
+            "policy_entrypoint": policy["entrypoints"]["policy_gate"],
+            "release_candidate_entrypoint": policy["entrypoints"]["release_candidate_gate"],
+        },
+        "target_taxonomy": {
+            "allowed_support_classes": policy["allowed_support_classes"],
+            "manifests": [
+                {
+                    "path": abi_manifest,
+                    "sha256": sha256_file(abi_manifest),
+                    "support_classes": manifest_support_classes(abi_manifest),
+                },
+                {
+                    "path": aarch64_manifest,
+                    "sha256": sha256_file(aarch64_manifest),
+                    "support_classes": manifest_support_classes(aarch64_manifest),
+                },
+            ],
         },
         "promotion": {
             "authority_summary": str(args.authority_summary),
@@ -109,6 +158,10 @@ def main() -> int:
             "sha256_before_update": args.bootstrap_sha256 or "",
             "overall_status": bootstrap.get("overall_status", ""),
         },
+    }
+
+    report["integrity"] = {
+        "payload_sha256": stable_sha256_payload(report),
     }
 
     Path(args.provenance_out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

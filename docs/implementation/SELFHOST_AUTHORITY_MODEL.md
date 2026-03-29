@@ -1,16 +1,11 @@
 <!-- docs:meta
 topic_id: repo.docs.implementation.selfhost-authority-model
-authority: historical
+authority: repo_only
 audience: maintainers
 last_validated: 2026-03-07
 validated_by: A7
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.selfhost-authority-model
 -->
-
-<!-- docs:status-note:start -->
-> Docs status: `historical`
-> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
-<!-- docs:status-note:end -->
 
 # Selfhost Authority Model
 
@@ -30,16 +25,22 @@ Use it to answer:
 
 - local authority gate: [`scripts/selfhost/selfhost_authority_gate.sh`](../../scripts/selfhost/selfhost_authority_gate.sh)
 - focused ABI/parity gate: [`scripts/selfhost/selfhost_ci_abi_parity_gate.sh`](../../scripts/selfhost/selfhost_ci_abi_parity_gate.sh)
+- provenance verification gate: [`scripts/selfhost/selfhost_artifact_provenance_gate.sh`](../../scripts/selfhost/selfhost_artifact_provenance_gate.sh)
 - source↔artifact parity gate: [`scripts/selfhost/selfhost_source_artifact_parity_gate.sh`](../../scripts/selfhost/selfhost_source_artifact_parity_gate.sh)
 - fixed-point gate: [`scripts/selfhost/selfhost_x86_fixed_point_gate.sh`](../../scripts/selfhost/selfhost_x86_fixed_point_gate.sh)
 - artifact promotion entrypoint: [`scripts/selfhost/update_selfhost_artifact.sh`](../../scripts/selfhost/update_selfhost_artifact.sh)
 - checked artifact provenance: [`artifacts/self-hosted/souc-self-hosted-x86_64.provenance.json`](../../artifacts/self-hosted/souc-self-hosted-x86_64.provenance.json)
+- promotion policy: [`scripts/selfhost/selfhost_promotion_policy.v1.json`](../../scripts/selfhost/selfhost_promotion_policy.v1.json)
 - required-checks manifest: [`scripts/selfhost/selfhost_required_checks.v1.json`](../../scripts/selfhost/selfhost_required_checks.v1.json)
+- release drift gate: [`scripts/selfhost/selfhost_release_drift_gate.sh`](../../scripts/selfhost/selfhost_release_drift_gate.sh)
+- release candidate gate: [`scripts/selfhost/selfhost_release_candidate_gate.sh`](../../scripts/selfhost/selfhost_release_candidate_gate.sh)
 
 ## Pass/fail semantics
 
 Blocking selfhost authority checks:
 
+- `promotion_policy`
+- `release_drift`
 - `fixed_point`
 - `fallback_inventory`
 - `abi_parity_regressions`
@@ -115,4 +116,5 @@ The canonical inventory is produced by:
 ## Related operator docs
 
 - release train and promotion sequence: [`docs/implementation/SELFHOST_RELEASE_TRAIN.md`](SELFHOST_RELEASE_TRAIN.md)
+- deferred debt register: [`docs/implementation/SELFHOST_DEBT_REGISTER.md`](SELFHOST_DEBT_REGISTER.md)
 - contributor-facing compiler map: [`docs/implementation/SELF_HOSTED_COMPILER.md`](SELF_HOSTED_COMPILER.md)

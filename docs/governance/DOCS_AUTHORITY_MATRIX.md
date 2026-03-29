@@ -120,9 +120,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.implementation.scientific-pipelines-blockers-analyse | historical | docs/implementation/SCIENTIFIC_PIPELINES_BLOCKERS_ANALYSE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.self-hosted-compiler | repo_only | docs/implementation/SELF_HOSTED_COMPILER.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.self-hosting-phases | repo_only | docs/implementation/SELF_HOSTING_PHASES.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.implementation.selfhost-authority-model | historical | docs/implementation/SELFHOST_AUTHORITY_MODEL.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.selfhost-authority-model | repo_only | docs/implementation/SELFHOST_AUTHORITY_MODEL.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.selfhost-checklist | repo_only | docs/implementation/SELFHOST_CHECKLIST.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.implementation.selfhost-release-train | historical | docs/implementation/SELFHOST_RELEASE_TRAIN.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.selfhost-debt-register | repo_only | docs/implementation/SELFHOST_DEBT_REGISTER.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.selfhost-release-train | repo_only | docs/implementation/SELFHOST_RELEASE_TRAIN.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.selfhost-reproducibility-report | repo_only | docs/implementation/SELFHOST_REPRODUCIBILITY_REPORT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.string-interning-summary | historical | docs/implementation/STRING_INTERNING_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.summary-v0.2.0 | historical | docs/implementation/SUMMARY_v0.2.0.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

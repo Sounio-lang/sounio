@@ -11,6 +11,8 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a machine-readable selfhost authority summary.")
+    parser.add_argument("--policy-summary", required=True)
+    parser.add_argument("--drift-summary", required=True)
     parser.add_argument("--fixed-summary", required=True)
     parser.add_argument("--fallback-summary", required=True)
     parser.add_argument("--abi-summary", required=True)
@@ -64,6 +66,8 @@ def git_output(*args: str) -> str:
 def main() -> int:
     args = parse_args()
 
+    policy_summary = parse_summary(args.policy_summary)
+    drift_summary = parse_summary(args.drift_summary)
     fixed = parse_summary(args.fixed_summary)
     fallback = parse_summary(args.fallback_summary)
     abi = parse_summary(args.abi_summary)
@@ -83,6 +87,20 @@ def main() -> int:
             break
 
     blocking_checks = [
+        {
+            "name": "promotion_policy",
+            "blocking": True,
+            "status": "pass",
+            "summary_file": args.policy_summary,
+            "report_json": policy_summary.get("report_json", ""),
+        },
+        {
+            "name": "release_drift",
+            "blocking": True,
+            "status": "pass",
+            "summary_file": args.drift_summary,
+            "report_json": drift_summary.get("report_json", ""),
+        },
         {
             "name": "fixed_point",
             "blocking": True,
