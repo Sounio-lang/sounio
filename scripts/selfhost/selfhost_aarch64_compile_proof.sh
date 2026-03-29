@@ -49,7 +49,7 @@ RESULTS_FILE="$ARTIFACT_DIR/results.tsv"
 SUMMARY_FILE="$ARTIFACT_DIR/summary.txt"
 
 cat >"$RESULTS_FILE" <<'EOF'
-case_id	program	compile_exit	out_size	status
+case_id	program	expected_status	compile_exit	out_size	status
 EOF
 
 echo "SELFHOST_AARCH64_COMPILE_PROOF_START"
@@ -71,30 +71,55 @@ fi
 run_case() {
   local case_id="$1"
   local program_path="$2"
+  local expected_status="$3"
+  local expected_pattern="$4"
 
   if [ -n "$FILTER" ] && [[ "$case_id" != *"$FILTER"* ]] && [[ "$program_path" != *"$FILTER"* ]]; then
     skip "$case_id" "filtered"
-    printf '%s\t%s\t-\t-\tfiltered\n' "$case_id" "$program_path" >>"$RESULTS_FILE"
+    printf '%s\t%s\t%s\t-\t-\tfiltered\n' "$case_id" "$program_path" "$expected_status" >>"$RESULTS_FILE"
     return 0
   fi
 
   local elf_path="$ARTIFACT_DIR/${case_id}.aarch64.elf"
   local compile_stdout="$LOG_DIR/${case_id}.compile.stdout"
   local compile_stderr="$LOG_DIR/${case_id}.compile.stderr"
+  local combined_log="$LOG_DIR/${case_id}.combined.log"
   local compile_exit=0
   local out_size=0
 
-  rm -f "$elf_path" "$compile_stdout" "$compile_stderr"
+  rm -f "$elf_path" "$compile_stdout" "$compile_stderr" "$combined_log"
 
   set +e
-  run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" "$program_path" "$elf_path" \
+  run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" "$program_path" "$elf_path" --target aarch64-linux \
     >"$compile_stdout" 2>"$compile_stderr"
   compile_exit=$?
   set -e
 
+  cat "$compile_stdout" "$compile_stderr" >"$combined_log"
+
+  if [ "$expected_status" = "fail" ]; then
+    if [ "$compile_exit" -eq 0 ]; then
+      fail "$case_id" "expected compile failure but compilation succeeded"
+      printf '%s\t%s\t%s\t%s\t-\tunexpected_success\n' "$case_id" "$program_path" "$expected_status" "$compile_exit" >>"$RESULTS_FILE"
+      return 0
+    fi
+    if [ "$expected_pattern" != "-" ] && ! grep -qF "$expected_pattern" "$combined_log"; then
+      fail "$case_id" "missing expected diagnostic"
+      printf '%s\t%s\t%s\t%s\t-\tmissing_pattern\n' "$case_id" "$program_path" "$expected_status" "$compile_exit" >>"$RESULTS_FILE"
+      echo "--- expected pattern"
+      echo "$expected_pattern"
+      echo "--- compiler output"
+      cat "$combined_log" || true
+      return 0
+    fi
+    pass "$case_id" "compile rejected as expected"
+    printf '%s\t%s\t%s\t%s\t-\tok\n' "$case_id" "$program_path" "$expected_status" "$compile_exit" >>"$RESULTS_FILE"
+    return 0
+  fi
+
   if [ "$compile_exit" -ne 0 ]; then
     fail "$case_id" "compile failed (exit=$compile_exit)"
-    printf '%s\t%s\t%s\t-\tcompile_fail\n' "$case_id" "$program_path" "$compile_exit" >>"$RESULTS_FILE"
+    printf '%s\t%s\t%s\t%s\t-\tcompile_fail\n' "$case_id" "$program_path" "$expected_status" "$compile_exit" >>"$RESULTS_FILE"
     sed -n '1,20p' "$compile_stdout" || true
     sed -n '1,20p' "$compile_stderr" || true
     return 0
@@ -102,22 +127,22 @@ run_case() {
 
   if [ ! -f "$elf_path" ]; then
     fail "$case_id" "missing output artifact"
-    printf '%s\t%s\t%s\t0\tmissing_output\n' "$case_id" "$program_path" "$compile_exit" >>"$RESULTS_FILE"
+    printf '%s\t%s\t%s\t%s\t0\tmissing_output\n' "$case_id" "$program_path" "$expected_status" "$compile_exit" >>"$RESULTS_FILE"
     return 0
   fi
 
   out_size=$(wc -c <"$elf_path")
   if [ "$out_size" -le 0 ]; then
     fail "$case_id" "empty output artifact"
-    printf '%s\t%s\t%s\t%s\tempty_output\n' "$case_id" "$program_path" "$compile_exit" "$out_size" >>"$RESULTS_FILE"
+    printf '%s\t%s\t%s\t%s\t%s\tempty_output\n' "$case_id" "$program_path" "$expected_status" "$compile_exit" "$out_size" >>"$RESULTS_FILE"
     return 0
   fi
 
   pass "$case_id" "compile ok (size=$out_size)"
-  printf '%s\t%s\t%s\t%s\tok\n' "$case_id" "$program_path" "$compile_exit" "$out_size" >>"$RESULTS_FILE"
+  printf '%s\t%s\t%s\t%s\t%s\tok\n' "$case_id" "$program_path" "$expected_status" "$compile_exit" "$out_size" >>"$RESULTS_FILE"
 }
 
-while IFS=$'\t' read -r case_id program_path; do
+while IFS=$'\t' read -r case_id program_path expected_status expected_pattern; do
   if [ -z "${case_id:-}" ]; then
     continue
   fi
@@ -127,11 +152,18 @@ while IFS=$'\t' read -r case_id program_path; do
 
   if [ ! -f "$program_path" ]; then
     fail "$case_id" "missing program $program_path"
-    printf '%s\t%s\t-\t-\tmissing_program\n' "$case_id" "$program_path" >>"$RESULTS_FILE"
+    printf '%s\t%s\t%s\t-\t-\tmissing_program\n' "$case_id" "$program_path" "${expected_status:-ok}" >>"$RESULTS_FILE"
     continue
   fi
 
-  run_case "$case_id" "$program_path"
+  if [ -z "${expected_status:-}" ]; then
+    expected_status="ok"
+  fi
+  if [ -z "${expected_pattern:-}" ]; then
+    expected_pattern="-"
+  fi
+
+  run_case "$case_id" "$program_path" "$expected_status" "$expected_pattern"
 done <"$MANIFEST_PATH"
 
 {
