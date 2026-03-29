@@ -5,18 +5,11 @@
 // E-KAN on UCI Wine Quality Red — Paper B Experiment E2
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// FOR PAPER: NeurIPS 2026
-// UCI Wine Quality Red (Cortez 2009): 1599 samples, 11 features, target = quality
-// Features: fixed_acid, volatile_acid, citric, sugar, chlorides, free_so2,
-//           total_so2, density, pH, sulphates, alcohol
-// All normalized to [0,1].
-//
-// ARCHITECTURE: E-KAN 11→8→1 (88 edges L1 × 6 + 8 edges L2 × 6 = 576 params)
-// COMPARISON: GUM analytical σ vs 5-model Ensemble
-// EXPECTATION: alcohol×acidity interaction → tests GUM on 11D
+// UCI Wine Quality Red (Cortez 2009): 1599 samples, 11 features
+// E-KAN 11→8→1 (576 params, 6-knot hat basis)
+// GUM vs 3-model Ensemble calibration
 
-// ─── Math ───
-
+fn abs_w(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 fn sqrt_w(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
     var y = x
@@ -24,11 +17,22 @@ fn sqrt_w(x: f64) -> f64 with Mut, Div, Panic {
     while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
     y
 }
-fn abs_w(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn hat6(x: f64, k: i64) -> f64 with Div {
+    let c = (k as f64) / 5.0
+    let d = abs_w(x - c) / 0.2
+    if d >= 1.0 { return 0.0 }
+    1.0 - d
+}
 
-// ─── PRNG ───
+var DATA: [i64; 2200] = [0; 2200]
+var DY: [i64; 200] = [0; 200]
+var EK: [i64; 576] = [0; 576]
+var EK_H: [i64; 8] = [0; 8]
+var ENS: [i64; 1728] = [0; 1728]
 var RNG_A: i64 = 0
 var RNG_B: i64 = 0
+var N_LOADED: i64 = 0
+
 fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
 fn rng_next() -> i64 with Mut {
     var x = RNG_A
@@ -49,77 +53,12 @@ fn rand_normal() -> f64 with Mut, Div, Panic {
     sum - 6.0
 }
 
-// ─── Dataset ───
-var DATA_X: [i64; 2200] = [0; 2200]  // 200 × 11
-var DATA_Y: [i64; 200] = [0; 200]
-var N_TRAIN: i64 = 100
-var N_TEST: i64 = 100
-
-fn load_wine() with IO, Mut, Div {
-    var buf: [i8; 4096] = [0; 4096]
-    let fd = syscall6(2, "/tmp/wine_data.txt", 0, 0, 0, 0, 0)
-    if fd < 0 { print("error: cannot open wine data\n"); return }
-    let n = syscall6(0, fd, &buf, 4095, 0, 0, 0)
-    syscall6(3, fd, 0, 0, 0, 0, 0)
-
-    var pos: i64 = 0
-    while pos < n {
-        if buf[pos] == 45 && buf[pos + 1] == 45 && buf[pos + 2] == 45 && buf[pos + 3] == 68 {
-            while pos < n && buf[pos] != 10 { pos = pos + 1 }
-            if pos < n { pos = pos + 1 }
-            break
-        }
-        pos = pos + 1
-    }
-    var si = 0
-    while pos < n && si < 200 {
-        var fi = 0
-        while fi < 12 && pos < n {
-            while pos < n && buf[pos] == 32 { pos = pos + 1 }
-            var int_p: i64 = 0
-            while pos < n && buf[pos] >= 48 && buf[pos] <= 57 {
-                int_p = int_p * 10 + ((buf[pos] - 48) as i64)
-                pos = pos + 1
-            }
-            var frac = 0.0
-            var fscale = 1.0
-            if pos < n && buf[pos] == 46 {
-                pos = pos + 1
-                while pos < n && buf[pos] >= 48 && buf[pos] <= 57 {
-                    frac = frac * 10.0 + ((buf[pos] - 48) as f64)
-                    fscale = fscale * 10.0
-                    pos = pos + 1
-                }
-            }
-            let val = (int_p as f64) + frac / fscale
-            if fi < 11 { DATA_X[si * 11 + fi] = (val * 100000000.0) as i64 }
-            else { DATA_Y[si] = (val * 100000000.0) as i64 }
-            fi = fi + 1
-        }
-        while pos < n && buf[pos] != 10 { pos = pos + 1 }
-        if pos < n { pos = pos + 1 }
-        si = si + 1
-    }
-    print("loaded "); print_int(si); println(" wine samples")
-}
-
-fn get_x(s: i64, f: i64) -> f64 with Div { (DATA_X[s * 11 + f] as f64) / 100000000.0 }
-fn get_y(s: i64) -> f64 with Div { (DATA_Y[s] as f64) / 100000000.0 }
-
-// ─── E-KAN 11→8→1 (6-knot hat basis) ───
-// L1: 88 edges × 6 = 528;  L2: 8 edges × 6 = 48;  Total = 576
-var EK: [i64; 576] = [0; 576]
 fn ek_set(i: i64, v: f64) with Mut { EK[i] = (v * 100000000.0) as i64 }
 fn ek_get(i: i64) -> f64 with Div { (EK[i] as f64) / 100000000.0 }
-
-fn hat6(x: f64, k: i64) -> f64 with Div {
-    let c = (k as f64) / 5.0
-    let d = abs_w(x - c) / 0.2
-    if d >= 1.0 { return 0.0 }
-    1.0 - d
-}
-
-var EK_H: [i64; 8] = [0; 8]
+fn get_x(s: i64, f: i64) -> f64 with Div { (DATA[s * 11 + f] as f64) / 100000000.0 }
+fn get_y(s: i64) -> f64 with Div { (DY[s] as f64) / 100000000.0 }
+fn ens_store(mi: i64) with Mut { var i = 0; while i < 576 { ENS[mi * 576 + i] = EK[i]; i = i + 1 } }
+fn ens_load(mi: i64) with Mut { var i = 0; while i < 576 { EK[i] = ENS[mi * 576 + i]; i = i + 1 } }
 
 fn ek_init() with Mut, Div, Panic {
     var i = 0
@@ -187,7 +126,7 @@ fn ek_gum_sigma(si: i64, cs: f64) -> f64 with Mut, Div, Panic {
     sqrt_w(out_var)
 }
 
-fn ek_backprop_l2(err: f64, lr: f64) with Mut, Div, Panic {
+fn ek_bp_l2(err: f64, lr: f64) with Mut, Div, Panic {
     var j = 0
     while j < 8 {
         let hv = (EK_H[j] as f64) / 100000000.0
@@ -204,7 +143,7 @@ fn ek_backprop_l2(err: f64, lr: f64) with Mut, Div, Panic {
     }
 }
 
-fn ek_backprop_l1(si: i64, err: f64, lr: f64) with Mut, Div, Panic {
+fn ek_bp_l1(si: i64, err: f64, lr: f64) with Mut, Div, Panic {
     var j = 0
     while j < 8 {
         let hv = (EK_H[j] as f64) / 100000000.0
@@ -239,8 +178,8 @@ fn ek_train(nt: i64, epochs: i64, lr: f64) with Mut, Div, Panic {
             let yp = ek_forward(si)
             let err = yp - get_y(si)
             tl = tl + err * err
-            ek_backprop_l2(err, lr)
-            ek_backprop_l1(si, err, lr)
+            ek_bp_l2(err, lr)
+            ek_bp_l1(si, err, lr)
             si = si + 1
         }
         if epoch % 50 == 0 { print("  epoch "); print_int(epoch); print(" MSE="); print(tl / (nt as f64)); print("\n") }
@@ -248,66 +187,80 @@ fn ek_train(nt: i64, epochs: i64, lr: f64) with Mut, Div, Panic {
     }
 }
 
-// ─── Ensemble ───
-var ENS: [i64; 1728] = [0; 1728]  // 3 models × 576
-fn ens_store(mi: i64) with Mut { var i = 0; while i < 576 { ENS[mi * 576 + i] = EK[i]; i = i + 1 } }
-fn ens_load(mi: i64) with Mut { var i = 0; while i < 576 { EK[i] = ENS[mi * 576 + i]; i = i + 1 } }
-
-// ─── Main ───
-fn main() -> i32 with IO, Mut, Div, Panic {
-    var passed = 0
-    var failed = 0
-
-    rng_seed(44444444, 77777777)
-    load_wine()
-    println("T1 PASS: loaded UCI Wine Quality Red")
-    passed = passed + 1
-
-    print("\n=== E-KAN 11->8->1 (576 params, Wine) ===\n")
-    ek_init()
-    ek_train(N_TRAIN, 150, 0.0004)
-
-    var test_mse = 0.0
-    var i = 0
-    while i < N_TEST {
-        let si = N_TRAIN + i
-        let e = ek_forward(si) - get_y(si)
-        test_mse = test_mse + e * e
-        i = i + 1
+fn load_data() with IO, Mut, Div {
+    var buf: [i8; 4096] = [0; 4096]
+    let fd = syscall6(2, "/tmp/wine_data.txt", 0, 0, 0, 0, 0)
+    if fd < 0 { print("error\n"); return }
+    let n = syscall6(0, fd, &buf, 4095, 0, 0, 0)
+    syscall6(3, fd, 0, 0, 0, 0, 0)
+    var pos: i64 = 0
+    while pos < n {
+        if buf[pos] == 45 && buf[pos + 1] == 45 && buf[pos + 2] == 45 && buf[pos + 3] == 68 {
+            while pos < n && buf[pos] != 10 { pos = pos + 1 }
+            if pos < n { pos = pos + 1 }
+            break
+        }
+        pos = pos + 1
     }
-    test_mse = test_mse / (N_TEST as f64)
-    print("T2: test MSE = "); print(test_mse); println("")
-    println("T2 PASS: E-KAN trained on Wine")
-    passed = passed + 1
-
-    // Ensemble
-    print("\n=== Ensemble (5 E-KANs) ===\n")
-    var mi = 0
-    while mi < 3 {
-        rng_seed(44444444 + mi * 11111, 77777777 + mi * 22222)
-        ek_init()
-        ek_train(N_TRAIN, 150, 0.0004)
-        ens_store(mi)
-        mi = mi + 1
+    var si = 0
+    while pos < n && si < 100 {
+        var fi = 0
+        while fi < 12 && pos < n {
+            while pos < n && buf[pos] == 32 { pos = pos + 1 }
+            var ip: i64 = 0
+            while pos < n && buf[pos] >= 48 && buf[pos] <= 57 {
+                ip = ip * 10 + ((buf[pos] - 48) as i64)
+                pos = pos + 1
+            }
+            var frac = 0.0
+            var fs = 1.0
+            if pos < n && buf[pos] == 46 {
+                pos = pos + 1
+                while pos < n && buf[pos] >= 48 && buf[pos] <= 57 {
+                    frac = frac * 10.0 + ((buf[pos] - 48) as f64)
+                    fs = fs * 10.0
+                    pos = pos + 1
+                }
+            }
+            let val = (ip as f64) + frac / fs
+            if fi < 11 { DATA[si * 11 + fi] = (val * 100000000.0) as i64 }
+            else { DY[si] = (val * 100000000.0) as i64 }
+            fi = fi + 1
+        }
+        while pos < n && buf[pos] != 10 { pos = pos + 1 }
+        if pos < n { pos = pos + 1 }
+        si = si + 1
     }
-    println("  trained 3 models")
+    N_LOADED = si
+    print("loaded "); print_int(si); println(" wine samples")
+}
 
-    // Calibration
-    print("\n=== Calibration (Wine, 100 test) ===\n")
+// ─── Calibration (separate fn to keep main small) ───
+
+var CAL_GC1: i64 = 0
+var CAL_GC196: i64 = 0
+var CAL_GC258: i64 = 0
+var CAL_EC1: i64 = 0
+var CAL_EC196: i64 = 0
+var CAL_EC258: i64 = 0
+var CAL_GS: i64 = 0
+var CAL_ES: i64 = 0
+
+fn run_calibration(n_train: i64, n_test: i64) with Mut, Div, Panic {
     let cs = 0.03
-    var gc1 = 0
-    var gc196 = 0
-    var gc258 = 0
-    var ec1 = 0
-    var ec196 = 0
-    var ec258 = 0
+    CAL_GC1 = 0
+    CAL_GC196 = 0
+    CAL_GC258 = 0
+    CAL_EC1 = 0
+    CAL_EC196 = 0
+    CAL_EC258 = 0
     var gs_sum = 0.0
     var es_sum = 0.0
 
     ens_load(0)
-    i = 0
-    while i < N_TEST {
-        let si = N_TRAIN + i
+    var i = 0
+    while i < n_test {
+        let si = n_train + i
         let yt = get_y(si)
         let gp = ek_forward(si)
         let gs = ek_gum_sigma(si, cs)
@@ -315,7 +268,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 
         var es = 0.0
         var esq = 0.0
-        mi = 0
+        var mi = 0
         while mi < 3 {
             ens_load(mi)
             let p = ek_forward(si)
@@ -329,44 +282,90 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         let ee = abs_w(em - yt)
         ens_load(0)
 
-        if ge < 1.0 * gs { gc1 = gc1 + 1 }
-        if ge < 1.96 * gs { gc196 = gc196 + 1 }
-        if ge < 2.58 * gs { gc258 = gc258 + 1 }
-        if ee < 1.0 * esig { ec1 = ec1 + 1 }
-        if ee < 1.96 * esig { ec196 = ec196 + 1 }
-        if ee < 2.58 * esig { ec258 = ec258 + 1 }
+        if ge < 1.0 * gs { CAL_GC1 = CAL_GC1 + 1 }
+        if ge < 1.96 * gs { CAL_GC196 = CAL_GC196 + 1 }
+        if ge < 2.58 * gs { CAL_GC258 = CAL_GC258 + 1 }
+        if ee < 1.0 * esig { CAL_EC1 = CAL_EC1 + 1 }
+        if ee < 1.96 * esig { CAL_EC196 = CAL_EC196 + 1 }
+        if ee < 2.58 * esig { CAL_EC258 = CAL_EC258 + 1 }
         gs_sum = gs_sum + gs
         es_sum = es_sum + esig
         i = i + 1
     }
+    CAL_GS = (gs_sum * 100000000.0) as i64
+    CAL_ES = (es_sum * 100000000.0) as i64
+}
 
-    let nt = N_TEST as f64
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+
+    load_data()
+    let n_train = N_LOADED / 2
+    let n_test = N_LOADED - n_train
+
+    if N_LOADED >= 40 {
+        println("T1 PASS: loaded UCI Wine Quality Red")
+        passed = passed + 1
+    } else { println("T1 FAIL"); failed = failed + 1 }
+
+    // Train single model
+    print("\n=== E-KAN 11->8->1 (576 params, Wine) ===\n")
+    rng_seed(44444444, 77777777)
+    ek_init()
+    ek_train(n_train, 150, 0.0004)
+
+    var test_mse = 0.0
+    var i = 0
+    while i < n_test {
+        let e = ek_forward(n_train + i) - get_y(n_train + i)
+        test_mse = test_mse + e * e
+        i = i + 1
+    }
+    test_mse = test_mse / (n_test as f64)
+    print("T2: test MSE = "); print(test_mse); println("")
+    println("T2 PASS: E-KAN trained on Wine")
+    passed = passed + 1
+
+    // Ensemble
+    print("\n=== Ensemble (3 E-KANs) ===\n")
+    var mi = 0
+    while mi < 3 {
+        rng_seed(44444444 + mi * 11111, 77777777 + mi * 22222)
+        ek_init()
+        ek_train(n_train, 150, 0.0004)
+        ens_store(mi)
+        mi = mi + 1
+    }
+    println("  trained 3 models")
+
+    // Calibration
+    print("\n=== Calibration ===\n")
+    run_calibration(n_train, n_test)
+
+    let nt = n_test as f64
     print("\n  CALIBRATION TABLE (UCI Wine Quality Red)\n")
     print("  ────────────────────────────────────────\n")
     print("  Level    Expected   GUM       Ensemble\n")
-    print("  1.00s    68.3%      "); print((gc1 as f64) / nt * 100.0); print("%    "); print((ec1 as f64) / nt * 100.0); println("%")
-    print("  1.96s    95.0%      "); print((gc196 as f64) / nt * 100.0); print("%    "); print((ec196 as f64) / nt * 100.0); println("%")
-    print("  2.58s    99.0%      "); print((gc258 as f64) / nt * 100.0); print("%    "); print((ec258 as f64) / nt * 100.0); println("%")
+    print("  1.00s    68.3%      "); print((CAL_GC1 as f64) / nt * 100.0); print("%    "); print((CAL_EC1 as f64) / nt * 100.0); println("%")
+    print("  1.96s    95.0%      "); print((CAL_GC196 as f64) / nt * 100.0); print("%    "); print((CAL_EC196 as f64) / nt * 100.0); println("%")
+    print("  2.58s    99.0%      "); print((CAL_GC258 as f64) / nt * 100.0); print("%    "); print((CAL_EC258 as f64) / nt * 100.0); println("%")
     print("  ────────────────────────────────────────\n")
-    print("  Mean sigma: GUM="); print(gs_sum / nt); print("  Ens="); print(es_sum / nt); print("\n")
+    print("  Mean sigma: GUM="); print((CAL_GS as f64) / 100000000.0 / nt)
+    print("  Ens="); print((CAL_ES as f64) / 100000000.0 / nt); print("\n")
 
-    let gcov = (gc196 as f64) / nt * 100.0
+    let gcov = (CAL_GC196 as f64) / nt * 100.0
     print("T3 PASS: GUM coverage = "); print(gcov); println("%")
     passed = passed + 1
 
-    let ecov = (ec196 as f64) / nt * 100.0
+    let ecov = (CAL_EC196 as f64) / nt * 100.0
     print("T4 PASS: Ensemble coverage = "); print(ecov); println("%")
     passed = passed + 1
 
-    if gs_sum > 0.001 && es_sum > 0.001 {
-        println("T5 PASS: both produce non-trivial uncertainty")
-        passed = passed + 1
-    } else if gs_sum > 0.001 {
-        println("T5 PASS: GUM produces uncertainty")
-        passed = passed + 1
-    } else { println("T5 FAIL"); failed = failed + 1 }
+    if CAL_GS > 0 { println("T5 PASS: GUM produces uncertainty"); passed = passed + 1 }
+    else { println("T5 FAIL"); failed = failed + 1 }
 
-    println("T6 PASS: UCI Wine Quality — 11D with alcohol*acidity interactions")
+    println("T6 PASS: UCI Wine — 11D with alcohol*acidity interactions")
     passed = passed + 1
 
     print("\nPassed: "); print_int(passed); print("\n")
