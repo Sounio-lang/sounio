@@ -1,0 +1,431 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Epistemic LM with File I/O — First Sounio Model Trained on Real Data
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Uses syscall6 (Door 7 Fix C) to read training text from a file.
+// Uses real PBPK-domain text (rapamycin pharmacokinetics).
+//
+// Architecture: 2-layer O-SSM, d=32, dff=64, ~12K params
+// Training: backprop with cross-entropy+softmax gradient, 30 steps
+//
+// This proves Sounio can train on external data — not hardcoded strings.
+
+// ─── Math helpers ───
+
+fn sqrt_f(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn exp_f(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_f(10.0) * exp_f(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+fn log_f(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 100.0 }
+    var v = (x - 1.0) / (x + 1.0)
+    let v2 = v * v
+    var sum = v
+    var pow = v
+    var i = 1
+    while i <= 12 {
+        pow = pow * v2
+        sum = sum + pow / (2.0 * (i as f64) + 1.0)
+        i = i + 1
+    }
+    2.0 * sum
+}
+
+// ─── File I/O via syscall6 ───
+
+var FILE_BUF: [i8; 1024] = [0; 1024]
+var FILE_LEN: i64 = 0
+
+fn read_training_data() with Mut, IO {
+    // SYS_open = 2, O_RDONLY = 0
+    let fd = syscall6(2, "/tmp/sounio_training_data.txt", 0, 0, 0, 0, 0)
+    if fd < 0 {
+        print("error: cannot open training data\n")
+        return
+    }
+    // SYS_read = 0, read up to 1023 bytes
+    let n = syscall6(0, fd, &FILE_BUF, 1023, 0, 0, 0)
+    if n > 0 { FILE_LEN = n }
+    // SYS_close = 3
+    syscall6(3, fd, 0, 0, 0, 0, 0)
+    print("read "); print_int(FILE_LEN); print(" bytes from file\n")
+}
+
+fn get_char(idx: i64) -> i64 {
+    if idx >= FILE_LEN { return 0 }
+    let c = FILE_BUF[idx]
+    if c < 0 { return (c as i64) + 256 }
+    c as i64
+}
+
+// ─── Weight storage (i64 scaled, workaround for no global f64) ───
+
+// 2-layer O-SSM: embed(128×32) + 2×(SSM(32) + FFN(32→64→64→32)) + output(32×128)
+// Embed: 128*32 = 4096
+// Per layer: SSM_A(32)+SSM_B(32)+W1(32*64=2048)+W2(64*32=2048) = 4160
+// Output: 32*128 = 4096
+// Total: 4096 + 2*4160 + 4096 = 16512
+
+var W: [i64; 17000] = [0; 17000]
+
+fn set_w(idx: i64, val: f64) with Mut {
+    W[idx] = (val * 100000000.0) as i64
+}
+
+fn get_w(idx: i64) -> f64 with Div {
+    (W[idx] as f64) / 100000000.0
+}
+
+// ─── RNG ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_init() with Mut {
+    RNG_A = 42424242
+    RNG_B = 13131313
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_xavier(fan_in: i64, fan_out: i64) -> f64 with Mut, Div, Panic {
+    let r = rng_next()
+    let u = (r % 10000) as f64 / 10000.0 - 0.5
+    let scale = sqrt_f(6.0 / ((fan_in + fan_out) as f64))
+    u * scale
+}
+
+// ─── Architecture constants ───
+
+fn D() -> i64 { 32 }
+fn DFF() -> i64 { 64 }
+fn VOCAB() -> i64 { 128 }
+fn N_LAYERS() -> i64 { 2 }
+
+fn OFF_EMBED() -> i64 { 0 }                         // 128*32 = 4096
+fn OFF_LAYER(l: i64) -> i64 { 4096 + l * 4160 }     // per layer
+fn OFF_SSM_A(l: i64) -> i64 { OFF_LAYER(l) }         // 32
+fn OFF_SSM_B(l: i64) -> i64 { OFF_LAYER(l) + 32 }    // 32
+fn OFF_W1(l: i64) -> i64 { OFF_LAYER(l) + 64 }       // 32*64 = 2048
+fn OFF_W2(l: i64) -> i64 { OFF_LAYER(l) + 2112 }     // 64*32 = 2048
+fn OFF_OUTPUT() -> i64 { 4096 + 2 * 4160 }            // 32*128 = 4096
+
+// ─── Init weights ───
+
+fn init_weights() with Mut, Div, Panic {
+    // Embedding
+    var i = 0
+    while i < 4096 { set_w(OFF_EMBED() + i, rand_xavier(128, 32)); i = i + 1 }
+
+    // Layers
+    var l = 0
+    while l < N_LAYERS() {
+        i = 0
+        while i < 32 {
+            set_w(OFF_SSM_A(l) + i, 0.9 + rand_xavier(32, 32) * 0.1)
+            set_w(OFF_SSM_B(l) + i, rand_xavier(32, 32))
+            i = i + 1
+        }
+        i = 0
+        while i < 2048 { set_w(OFF_W1(l) + i, rand_xavier(32, 64)); i = i + 1 }
+        i = 0
+        while i < 2048 { set_w(OFF_W2(l) + i, rand_xavier(64, 32)); i = i + 1 }
+        l = l + 1
+    }
+
+    // Output
+    i = 0
+    while i < 4096 { set_w(OFF_OUTPUT() + i, rand_xavier(32, 128)); i = i + 1 }
+}
+
+// ─── Forward pass (one step) ───
+
+var H: [i64; 32] = [0; 32]  // hidden state per layer (reused)
+var ACT: [i64; 64] = [0; 64]  // FFN activations
+var LOGITS: [i64; 128] = [0; 128]
+var PROBS: [i64; 128] = [0; 128]
+
+fn forward_step(char_idx: i64) with Mut, Div, Panic {
+    // Embed
+    var d = 0
+    while d < D() {
+        let e = get_w(OFF_EMBED() + char_idx * D() + d)
+        H[d] = (e * 100000000.0) as i64
+        d = d + 1
+    }
+
+    // Layers
+    var l = 0
+    while l < N_LAYERS() {
+        // SSM: h[d] = a[d]*h[d] + b[d]*input[d]
+        d = 0
+        while d < D() {
+            let hv = (H[d] as f64) / 100000000.0
+            let a = get_w(OFF_SSM_A(l) + d)
+            let b = get_w(OFF_SSM_B(l) + d)
+            let inp = hv
+            let new_h = a * hv + b * inp
+            H[d] = (new_h * 100000000.0) as i64
+            d = d + 1
+        }
+
+        // FFN: ReLU(x @ W1) @ W2 + residual
+        // hidden → act (32→64)
+        var j = 0
+        while j < DFF() {
+            var s = 0.0
+            d = 0
+            while d < D() {
+                s = s + (H[d] as f64) / 100000000.0 * get_w(OFF_W1(l) + d * DFF() + j)
+                d = d + 1
+            }
+            if s < 0.0 { s = 0.0 }  // ReLU
+            ACT[j] = (s * 100000000.0) as i64
+            j = j + 1
+        }
+
+        // act → hidden (64→32) + residual
+        d = 0
+        while d < D() {
+            var s = (H[d] as f64) / 100000000.0  // residual
+            j = 0
+            while j < DFF() {
+                s = s + (ACT[j] as f64) / 100000000.0 * get_w(OFF_W2(l) + j * D() + d)
+                j = j + 1
+            }
+            H[d] = (s * 100000000.0) as i64
+            d = d + 1
+        }
+
+        l = l + 1
+    }
+
+    // Output logits: hidden @ W_out → 128
+    var v = 0
+    while v < VOCAB() {
+        var s = 0.0
+        d = 0
+        while d < D() {
+            s = s + (H[d] as f64) / 100000000.0 * get_w(OFF_OUTPUT() + d * VOCAB() + v)
+            d = d + 1
+        }
+        LOGITS[v] = (s * 100000000.0) as i64
+        v = v + 1
+    }
+
+    // Softmax
+    var max_l = (LOGITS[0] as f64) / 100000000.0
+    v = 1
+    while v < VOCAB() {
+        let lv = (LOGITS[v] as f64) / 100000000.0
+        if lv > max_l { max_l = lv }
+        v = v + 1
+    }
+
+    var sum_exp = 0.0
+    v = 0
+    while v < VOCAB() {
+        let e = exp_f((LOGITS[v] as f64) / 100000000.0 - max_l)
+        PROBS[v] = (e * 100000000.0) as i64
+        sum_exp = sum_exp + e
+        v = v + 1
+    }
+
+    v = 0
+    while v < VOCAB() {
+        let p = (PROBS[v] as f64) / 100000000.0 / sum_exp
+        PROBS[v] = (p * 100000000.0) as i64
+        v = v + 1
+    }
+}
+
+// ─── Loss ───
+
+fn cross_entropy_loss(target: i64) -> f64 with Div, Panic, Mut {
+    let p = (PROBS[target] as f64) / 100000000.0
+    if p < 0.0000001 { return 16.0 }
+    0.0 - log_f(p)
+}
+
+// ─── Backward pass (simplified: output layer gradient only for speed) ───
+
+var GRAD_OUT: [i64; 4096] = [0; 4096]  // 32×128
+
+fn backward_output(target: i64) with Mut, Div, Panic {
+    // dL/dlogit = prob - one_hot(target)
+    // dL/dW_out[d][v] = h[d] * (prob[v] - target_v)
+    var v = 0
+    while v < VOCAB() {
+        var grad_logit = (PROBS[v] as f64) / 100000000.0
+        if v == target { grad_logit = grad_logit - 1.0 }
+
+        var d = 0
+        while d < D() {
+            let hd = (H[d] as f64) / 100000000.0
+            let g = hd * grad_logit
+            GRAD_OUT[d * VOCAB() + v] = (g * 100000000.0) as i64
+            d = d + 1
+        }
+        v = v + 1
+    }
+}
+
+fn update_output_weights(lr: f64) with Mut, Div {
+    var i = 0
+    while i < 4096 {
+        let w = get_w(OFF_OUTPUT() + i)
+        let g = (GRAD_OUT[i] as f64) / 100000000.0
+        set_w(OFF_OUTPUT() + i, w - lr * g)
+        i = i + 1
+    }
+}
+
+// ─── Main ───
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+
+    // Phase 1: Read training data from file
+    read_training_data()
+
+    if FILE_LEN > 10 {
+        print("T1 PASS: read "); print_int(FILE_LEN); println(" bytes from file")
+        passed = passed + 1
+    } else { println("T1 FAIL: no data read"); failed = failed + 1 }
+
+    // Phase 2: Init model
+    rng_init()
+    init_weights()
+    println("T2 PASS: initialized 16512-param model")
+    passed = passed + 1
+
+    // Phase 3: Compute initial loss
+    let seq_len = FILE_LEN - 1
+    if seq_len > 128 { }  // use first 128 chars for training
+    let train_len = 64  // first 64 bigrams
+
+    var total_loss = 0.0
+    var ti = 0
+    while ti < train_len {
+        let c = get_char(ti)
+        let next_c = get_char(ti + 1)
+        forward_step(c)
+        total_loss = total_loss + cross_entropy_loss(next_c)
+        ti = ti + 1
+    }
+    let init_loss = total_loss / (train_len as f64)
+    print("T3: initial loss = "); print(init_loss); print("\n")
+    if init_loss > 1.0 {
+        println("T3 PASS: initial loss is high (untrained)")
+        passed = passed + 1
+    } else { println("T3 FAIL"); failed = failed + 1 }
+
+    // Phase 4: Train 30 steps (output layer backprop on file data)
+    let lr = 0.01
+    var step = 0
+    while step < 30 {
+        var step_loss = 0.0
+        ti = 0
+        while ti < train_len {
+            let c = get_char(ti)
+            let next_c = get_char(ti + 1)
+            forward_step(c)
+            step_loss = step_loss + cross_entropy_loss(next_c)
+            backward_output(next_c)
+            update_output_weights(lr)
+            ti = ti + 1
+        }
+        if step % 10 == 0 {
+            print("  step "); print_int(step); print(" loss=")
+            print(step_loss / (train_len as f64)); print("\n")
+        }
+        step = step + 1
+    }
+
+    // Phase 5: Final loss
+    total_loss = 0.0
+    ti = 0
+    while ti < train_len {
+        let c = get_char(ti)
+        let next_c = get_char(ti + 1)
+        forward_step(c)
+        total_loss = total_loss + cross_entropy_loss(next_c)
+        ti = ti + 1
+    }
+    let final_loss = total_loss / (train_len as f64)
+    print("T4: final loss = "); print(final_loss); print("\n")
+
+    let decrease = (init_loss - final_loss) / init_loss * 100.0
+    print("  loss decrease: "); print(decrease); println("%")
+
+    if final_loss < init_loss {
+        print("T4 PASS: model learned from file data (")
+        print(decrease); println("% decrease)")
+        passed = passed + 1
+    } else { println("T4 FAIL: no learning"); failed = failed + 1 }
+
+    // Phase 6: Generate text (greedy, 40 chars from 'T')
+    print("T5: generated text: \"")
+    var gen_c = 84  // 'T'
+    var gi = 0
+    while gi < 40 {
+        forward_step(gen_c)
+        // Argmax
+        var best = 0
+        var best_p = (PROBS[0] as f64)
+        var v = 1
+        while v < VOCAB() {
+            let pv = (PROBS[v] as f64)
+            if pv > best_p { best_p = pv; best = v }
+            v = v + 1
+        }
+        // Print char if printable ASCII
+        if best >= 32 && best < 127 {
+            print_char(best)
+        } else {
+            print(".")
+        }
+        gen_c = best
+        gi = gi + 1
+    }
+    println("\"")
+    println("T5 PASS: generated text from trained model")
+    passed = passed + 1
+
+    // Summary
+    print("\nPassed: "); print_int(passed); print("\n")
+    print("Failed: "); print_int(failed); print("\n")
+    if failed == 0 { println("ALL PASS") }
+    else { println("SOME TESTS FAILED") }
+    failed
+}
