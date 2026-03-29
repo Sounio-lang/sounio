@@ -27,8 +27,8 @@ validate_support_class() {
   local expected_status="$3"
   case "$expected_status" in
     ok)
-      if [ "$support_class" != "aarch64-compile-proof" ]; then
-        fail_manifest "case $case_id must use support_class=aarch64-compile-proof for expected_status=ok"
+      if [ "$support_class" != "aarch64-compile-proof" ] && [ "$support_class" != "aarch64-runtime-supported" ]; then
+        fail_manifest "case $case_id must use support_class=aarch64-compile-proof or aarch64-runtime-supported for expected_status=ok"
       fi
       ;;
     fail)

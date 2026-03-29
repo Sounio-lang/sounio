@@ -14,6 +14,7 @@ REQUIRED_BLOCKING_GATES = [
     "fallback_inventory",
     "abi_parity_regressions",
     "aarch64_compile_proof",
+    "aarch64_runtime",
     "source_artifact_parity",
 ]
 
@@ -184,8 +185,16 @@ def main() -> int:
         if recorded_allowed_support_classes != allowed_support_classes:
             errors.append("recorded allowed support classes do not match policy")
 
+        recorded_manifest_paths: set[str] = set()
+        expected_manifest_paths: set[str] = set()
+        for manifest_key, manifest_path in policy.get("manifests", {}).items():
+            if manifest_key == "required_checks":
+                continue
+            expected_manifest_paths.add(manifest_path)
         for manifest in taxonomy.get("manifests", []):
             manifest_path = Path(manifest.get("path", ""))
+            if manifest.get("path", ""):
+                recorded_manifest_paths.add(manifest.get("path", ""))
             if not manifest_path.is_file():
                 errors.append(f"missing taxonomy manifest: {manifest.get('path', '')}")
                 continue
@@ -194,6 +203,8 @@ def main() -> int:
             for support_class in manifest.get("support_classes", []):
                 if support_class not in allowed_support_classes:
                     errors.append(f"taxonomy manifest uses unsupported support_class: {support_class}")
+        if recorded_manifest_paths != expected_manifest_paths:
+            errors.append("taxonomy manifest set does not match promotion policy manifests")
 
         artifact_source_commit = provenance.get("git", {}).get("artifact_source_commit", "")
         if not artifact_source_commit or artifact_source_commit == "unknown":

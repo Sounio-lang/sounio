@@ -27,8 +27,8 @@ This file is the short deferred-debt register for the self-hosted compiler autho
 
 - AArch64 closure literals
   - class: transitional implementation debt
-  - severity: high
-  - note: basic closure literal compile-proof support exists, but runtime validation is not yet available and explicit unsupported edges remain fenced
+  - severity: medium
+  - note: runtime validation now exists for the current focused closure surface; `>7` user-parameter closure literals remain explicitly fenced unsupported and broader runtime coverage still needs expansion
 
 - `legacy_native_acceptance` non-green baseline
   - class: baseline inherited noise
@@ -40,10 +40,10 @@ This file is the short deferred-debt register for the self-hosted compiler autho
   - severity: medium
   - note: repo-local model is explicit; hosted branch protection still needs maintainer application
 
-## Wave 5 candidate
+## Next candidate wave
 
 Highest-value implementation wave after governance hardening:
 
 - eliminate the remaining fenced missing-SRET sites once all callers are proven to supply hidden result buffers
-- promote AArch64 closure literals from compile-proof to runtime-supported only after a real runner exists
-- reclassify supported AArch64 paths from compile-proof to runtime-supported only after runtime tests prove it
+- expand AArch64 runtime coverage beyond the current focused closure and aggregate-return surface
+- reclassify additional AArch64 paths from compile-proof to runtime-supported only after runtime tests prove them

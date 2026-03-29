@@ -16,14 +16,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_support_classes(manifest_path: Path) -> set[str]:
+def load_support_classes(manifest_key: str, manifest_path: Path) -> set[str]:
     classes: set[str] = set()
     with manifest_path.open(encoding="utf-8", newline="") as handle:
         reader = csv.reader(handle, delimiter="\t")
         for row in reader:
             if not row or not row[0] or row[0].startswith("#"):
                 continue
-            if manifest_path.name == "manifest.tsv" and "abi_parity" in str(manifest_path.parent):
+            if manifest_key == "abi_parity":
                 if len(row) < 3:
                     raise SystemExit(f"invalid abi parity manifest row in {manifest_path}: {row}")
                 classes.add(row[2])
@@ -67,15 +67,16 @@ def main() -> int:
         errors.append("required_provenance_fields is empty")
 
     manifests = policy.get("manifests", {})
-    for manifest_key in ["abi_parity", "aarch64_compile"]:
-        rel_path = manifests.get(manifest_key, "")
+    for manifest_key, rel_path in manifests.items():
+        if manifest_key == "required_checks":
+            continue
         if not rel_path:
             errors.append(f"missing manifest path for {manifest_key}")
             continue
         manifest_path = Path(rel_path)
         if not manifest_path.is_file():
             continue
-        for support_class in load_support_classes(manifest_path):
+        for support_class in load_support_classes(manifest_key, manifest_path):
             if support_class not in allowed_support_classes:
                 errors.append(
                     f"manifest {rel_path} uses unsupported support_class {support_class}"

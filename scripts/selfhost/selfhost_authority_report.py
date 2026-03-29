@@ -17,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fallback-summary", required=True)
     parser.add_argument("--abi-summary", required=True)
     parser.add_argument("--aarch64-summary", required=True)
+    parser.add_argument("--aarch64-runtime-summary", required=True)
     parser.add_argument("--parity-json", required=True)
     parser.add_argument("--legacy-summary")
     parser.add_argument("--legacy-status", required=True)
@@ -72,6 +73,7 @@ def main() -> int:
     fallback = parse_summary(args.fallback_summary)
     abi = parse_summary(args.abi_summary)
     aarch64 = parse_summary(args.aarch64_summary)
+    aarch64_runtime = parse_summary(args.aarch64_runtime_summary)
     legacy = parse_summary(args.legacy_summary) if args.legacy_summary else {}
     parity = json.loads(Path(args.parity_json).read_text(encoding="utf-8"))
     comparison = parity["comparison"]
@@ -79,6 +81,7 @@ def main() -> int:
     fixed_pass = fixed.get("gen2_md5", "") != "" and fixed.get("gen2_md5") == fixed.get("gen3_md5")
     abi_fail = int(abi.get("summary_fail", "1"))
     aarch64_fail = int(aarch64.get("summary_fail", "1"))
+    aarch64_runtime_fail = int(aarch64_runtime.get("summary_fail", "1"))
     fallback_inventory = parse_inventory(fallback["report_json"])
     fallback_fenced = True
     for entry in fallback_inventory["entries"]:
@@ -136,6 +139,18 @@ def main() -> int:
             "fail_count": aarch64_fail,
             "skip_count": int(aarch64.get("summary_skip", "0")),
             "results": parse_results(aarch64["results_file"]),
+        },
+        {
+            "name": "aarch64_runtime",
+            "blocking": True,
+            "status": "pass" if aarch64_runtime_fail == 0 else "fail",
+            "summary_file": args.aarch64_runtime_summary,
+            "pass_count": int(aarch64_runtime.get("summary_pass", "0")),
+            "fail_count": aarch64_runtime_fail,
+            "skip_count": int(aarch64_runtime.get("summary_skip", "0")),
+            "runner_path": aarch64_runtime.get("runner_path", ""),
+            "runner_source": aarch64_runtime.get("runner_source", ""),
+            "results": parse_results(aarch64_runtime["results_file"]),
         },
         {
             "name": "source_artifact_parity",

@@ -15,6 +15,7 @@ FIXED_POINT_WORK_DIR="$WORK_DIR/fixed_point"
 FALLBACK_WORK_DIR="$WORK_DIR/fallback_inventory"
 ABI_WORK_DIR="$WORK_DIR/abi_regressions"
 AARCH64_WORK_DIR="$WORK_DIR/aarch64_compile"
+AARCH64_RUNTIME_WORK_DIR="$WORK_DIR/aarch64_runtime"
 ACCEPTANCE_WORK_DIR="$WORK_DIR/native_acceptance"
 PARITY_WORK_DIR="$WORK_DIR/source_artifact_parity"
 RUN_LEGACY_ACCEPTANCE="${RUN_LEGACY_ACCEPTANCE:-0}"
@@ -25,6 +26,7 @@ FIXED_LOG="$LOG_DIR/fixed_point.log"
 FALLBACK_LOG="$LOG_DIR/fallback_inventory.log"
 ABI_LOG="$LOG_DIR/abi_regressions.log"
 AARCH64_LOG="$LOG_DIR/aarch64_compile.log"
+AARCH64_RUNTIME_LOG="$LOG_DIR/aarch64_runtime.log"
 ACCEPTANCE_LOG="$LOG_DIR/native_acceptance.log"
 PARITY_LOG="$LOG_DIR/source_artifact_parity.log"
 SUMMARY_FILE="$ARTIFACT_DIR/summary.txt"
@@ -82,6 +84,13 @@ env SOUC_NATIVE="$GEN2_PATH" WORK_DIR="$AARCH64_WORK_DIR" \
     exit 1
   }
 
+env SOUC_NATIVE="$GEN2_PATH" WORK_DIR="$AARCH64_RUNTIME_WORK_DIR" \
+  bash "$ROOT_DIR/scripts/selfhost/selfhost_aarch64_runtime_gate.sh" >"$AARCH64_RUNTIME_LOG" 2>&1 || {
+    echo "error: aarch64 runtime gate failed (see $AARCH64_RUNTIME_LOG)" >&2
+    cat "$AARCH64_RUNTIME_LOG" >&2 || true
+    exit 1
+  }
+
 LEGACY_ACCEPTANCE_STATUS="skipped"
 if [ "$RUN_LEGACY_ACCEPTANCE" = "1" ]; then
   set +e
@@ -113,6 +122,7 @@ REPORT_ARGS=(
   --fallback-summary "$FALLBACK_WORK_DIR/artifacts/summary.txt"
   --abi-summary "$ABI_WORK_DIR/artifacts/summary.txt"
   --aarch64-summary "$AARCH64_WORK_DIR/artifacts/summary.txt"
+  --aarch64-runtime-summary "$AARCH64_RUNTIME_WORK_DIR/artifacts/summary.txt"
   --parity-json "$PARITY_WORK_DIR/artifacts/suite_delta.v1.json"
   --legacy-status "$LEGACY_ACCEPTANCE_STATUS"
   --summary-json "$SUMMARY_JSON"
@@ -137,6 +147,7 @@ python3 "$ROOT_DIR/scripts/selfhost/selfhost_authority_report.py" \
   echo "fallback_log=$FALLBACK_LOG"
   echo "abi_log=$ABI_LOG"
   echo "aarch64_log=$AARCH64_LOG"
+  echo "aarch64_runtime_log=$AARCH64_RUNTIME_LOG"
   echo "parity_log=$PARITY_LOG"
   echo "policy_work_dir=$POLICY_WORK_DIR"
   echo "drift_work_dir=$DRIFT_WORK_DIR"
@@ -144,6 +155,7 @@ python3 "$ROOT_DIR/scripts/selfhost/selfhost_authority_report.py" \
   echo "fallback_work_dir=$FALLBACK_WORK_DIR"
   echo "abi_work_dir=$ABI_WORK_DIR"
   echo "aarch64_work_dir=$AARCH64_WORK_DIR"
+  echo "aarch64_runtime_work_dir=$AARCH64_RUNTIME_WORK_DIR"
   echo "parity_work_dir=$PARITY_WORK_DIR"
   echo "gen2_path=$GEN2_PATH"
   echo "legacy_acceptance_status=$LEGACY_ACCEPTANCE_STATUS"

@@ -33,6 +33,12 @@ Canonical release-candidate command:
 bash scripts/selfhost/selfhost_release_candidate_gate.sh
 ```
 
+Canonical AArch64 runtime validation command:
+
+```bash
+bash scripts/selfhost/selfhost_aarch64_runtime_gate.sh
+```
+
 This script:
 
 1. validates the bootstrap artifact with the authority gate
@@ -75,25 +81,33 @@ This script:
    bash scripts/selfhost/selfhost_ci_abi_parity_gate.sh
    ```
 
-6. Refresh the artifact and provenance:
+6. Use the canonical AArch64 runtime gate directly when investigating or promoting AArch64 support:
+
+   ```bash
+   bash scripts/selfhost/selfhost_aarch64_runtime_gate.sh
+   ```
+
+   The authority gate and focused ABI/parity gate already run this surface as part of their blocking validation.
+
+7. Refresh the artifact and provenance:
 
    ```bash
    bash scripts/selfhost/update_selfhost_artifact.sh
    ```
 
-7. Inspect the provenance file:
+8. Inspect the provenance file:
 
    - [`artifacts/self-hosted/souc-self-hosted-x86_64.provenance.json`](../../artifacts/self-hosted/souc-self-hosted-x86_64.provenance.json)
 
-8. Run the provenance verification gate:
+9. Run the provenance verification gate:
 
    ```bash
    bash scripts/selfhost/selfhost_artifact_provenance_gate.sh
    ```
 
-9. Open a PR with both artifact and provenance updates.
-10. Wait for the required CI checks listed in [`scripts/selfhost/selfhost_required_checks.v1.json`](../../scripts/selfhost/selfhost_required_checks.v1.json).
-11. Merge only after required checks pass and the required review policy is satisfied.
+10. Open a PR with both artifact and provenance updates.
+11. Wait for the required CI checks listed in [`scripts/selfhost/selfhost_required_checks.v1.json`](../../scripts/selfhost/selfhost_required_checks.v1.json).
+12. Merge only after required checks pass and the required review policy is satisfied.
 
 Required checks for merge:
 
@@ -117,6 +131,7 @@ Mandatory provenance fields:
 - required-check manifest and hash
 - fixed-point `gen2` and `gen3` md5 values
 - gate set executed during promotion
+- AArch64 runtime validation status for any runtime-supported target claims
 - promotion timestamp
 - bootstrap artifact sha256 before update
 

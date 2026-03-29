@@ -25,6 +25,7 @@ Use it to answer:
 
 - local authority gate: [`scripts/selfhost/selfhost_authority_gate.sh`](../../scripts/selfhost/selfhost_authority_gate.sh)
 - focused ABI/parity gate: [`scripts/selfhost/selfhost_ci_abi_parity_gate.sh`](../../scripts/selfhost/selfhost_ci_abi_parity_gate.sh)
+- canonical AArch64 runtime gate: [`scripts/selfhost/selfhost_aarch64_runtime_gate.sh`](../../scripts/selfhost/selfhost_aarch64_runtime_gate.sh)
 - provenance verification gate: [`scripts/selfhost/selfhost_artifact_provenance_gate.sh`](../../scripts/selfhost/selfhost_artifact_provenance_gate.sh)
 - source↔artifact parity gate: [`scripts/selfhost/selfhost_source_artifact_parity_gate.sh`](../../scripts/selfhost/selfhost_source_artifact_parity_gate.sh)
 - fixed-point gate: [`scripts/selfhost/selfhost_x86_fixed_point_gate.sh`](../../scripts/selfhost/selfhost_x86_fixed_point_gate.sh)
@@ -45,6 +46,7 @@ Blocking selfhost authority checks:
 - `fallback_inventory`
 - `abi_parity_regressions`
 - `aarch64_compile_proof`
+- `aarch64_runtime`
 - `source_artifact_parity`
 
 Non-blocking legacy surface:
@@ -94,11 +96,11 @@ Review expectation:
 ## Target support taxonomy
 
 - `x86-runtime-supported`: supported runtime behavior and merge-blocking in ABI/parity coverage
-- `aarch64-runtime-supported`: reserved for true AArch64 runtime support; no current cases are admitted
+- `aarch64-runtime-supported`: AArch64 behavior backed by the canonical runtime gate under a repo-local runner
 - `aarch64-compile-proof`: code generation accepted as compile-proof only
 - `aarch64-explicit-unsupported`: expected-fail paths that must reject with a named diagnostic
 
-The manifests under `tests/selfhost/` are the active taxonomy surface. Unsupported paths must be recorded there as expected-fail coverage instead of succeeding silently.
+The manifests under `tests/selfhost/` are the active taxonomy surface. Current runtime-supported AArch64 cases are tracked in `tests/selfhost/aarch64_runtime/manifest.tsv`; unsupported paths must be recorded as expected-fail coverage instead of succeeding silently.
 
 ## Fallback debt status
 

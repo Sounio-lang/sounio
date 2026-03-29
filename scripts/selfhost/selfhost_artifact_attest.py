@@ -40,14 +40,14 @@ def git_output(*args: str) -> str:
         return "unknown"
 
 
-def manifest_support_classes(path: str) -> list[str]:
+def manifest_support_classes(manifest_key: str, path: str) -> list[str]:
     classes: set[str] = set()
     with open(path, encoding="utf-8", newline="") as handle:
         reader = csv.reader(handle, delimiter="\t")
         for row in reader:
             if not row or not row[0] or row[0].startswith("#"):
                 continue
-            if "abi_parity" in path:
+            if manifest_key == "abi_parity":
                 if len(row) >= 3:
                     classes.add(row[2])
             else:
@@ -95,8 +95,18 @@ def main() -> int:
     authority_model_doc = policy["reference_docs"]["authority_model"]
     release_train_doc = policy["reference_docs"]["release_train"]
     debt_register_doc = policy["reference_docs"]["debt_register"]
-    abi_manifest = policy["manifests"]["abi_parity"]
-    aarch64_manifest = policy["manifests"]["aarch64_compile"]
+    taxonomy_manifests = []
+    for manifest_key, manifest_path in policy["manifests"].items():
+        if manifest_key == "required_checks":
+            continue
+        taxonomy_manifests.append(
+            {
+                "key": manifest_key,
+                "path": manifest_path,
+                "sha256": sha256_file(manifest_path),
+                "support_classes": manifest_support_classes(manifest_key, manifest_path),
+            }
+        )
 
     report = {
         "schema": "sounio.selfhost_artifact_provenance.v3",
@@ -132,18 +142,7 @@ def main() -> int:
         },
         "target_taxonomy": {
             "allowed_support_classes": policy["allowed_support_classes"],
-            "manifests": [
-                {
-                    "path": abi_manifest,
-                    "sha256": sha256_file(abi_manifest),
-                    "support_classes": manifest_support_classes(abi_manifest),
-                },
-                {
-                    "path": aarch64_manifest,
-                    "sha256": sha256_file(aarch64_manifest),
-                    "support_classes": manifest_support_classes(aarch64_manifest),
-                },
-            ],
+            "manifests": taxonomy_manifests,
         },
         "promotion": {
             "authority_summary": str(args.authority_summary),
