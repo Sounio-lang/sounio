@@ -6650,15 +6650,21 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             // Field access: rax = struct pointer, load field
             let base_ty = EXPR_TY
             let base_hash = EXPR_TY_HASH
+            var field_base_ty = base_ty
+            var field_base_hash = base_hash
+            if base_ty == 10 {
+                field_base_ty = ref_hash_inner_ty(base_hash)
+                field_base_hash = ref_hash_inner_hash(base_hash)
+            }
             EP = EP + 1
             var found: i64 = 0
             EXPR_TY = 0
             EXPR_TY_HASH = 0
-            if knowledge_hash_is(base_hash) {
+            if knowledge_hash_is(field_base_hash) {
                 if src_match(fns, fne - fns, "value") {
                     em(0x48); em(0x8b); em(0x00)
-                    EXPR_TY = knowledge_hash_inner_ty(base_hash)
-                    EXPR_TY_HASH = knowledge_hash_inner_hash(base_hash)
+                    EXPR_TY = knowledge_hash_inner_ty(field_base_hash)
+                    EXPR_TY_HASH = knowledge_hash_inner_hash(field_base_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else if src_match(fns, fne - fns, "variance") {
                     em(0x48); em(0x8b); em(0x40); em(8)
@@ -6683,8 +6689,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 }
                 found = 1
             }
-            if base_ty == 6 {
-                let bsi = st_find(base_hash)
+            if field_base_ty == 6 {
+                let bsi = st_find(field_base_hash)
                 if bsi >= 0 {
                     let off = st_field_offset(bsi, fh)
                     if off >= 0 {
@@ -7305,14 +7311,30 @@ fn tuple_bind_pattern_a64(pp0: i64, rp0: i64) with IO, Mut, Panic, Div {
 
 fn resolve_field_struct_index(ns: i64, ne: i64, fh: i64) -> i64 with Panic, Div, Mut {
     let vi = var_find_idx(ns, ne)
-    if vi >= 0 && VAR_TY[vi as usize] == 6 {
-        let si = st_find(VAR_TY_HASH[vi as usize])
-        if si >= 0 { return si }
+    if vi >= 0 {
+        let vty = VAR_TY[vi as usize]
+        let vhash = VAR_TY_HASH[vi as usize]
+        if vty == 6 {
+            let si = st_find(vhash)
+            if si >= 0 { return si }
+        }
+        if vty == 10 && ref_hash_inner_ty(vhash) == 6 {
+            let si = st_find(ref_hash_inner_hash(vhash))
+            if si >= 0 { return si }
+        }
     }
     let gi = gl_find(ns, ne)
-    if gi >= 0 && GL_TY[gi as usize] == 6 {
-        let si = st_find(GL_TY_HASH[gi as usize])
-        if si >= 0 { return si }
+    if gi >= 0 {
+        let gty = GL_TY[gi as usize]
+        let ghash = GL_TY_HASH[gi as usize]
+        if gty == 6 {
+            let si = st_find(ghash)
+            if si >= 0 { return si }
+        }
+        if gty == 10 && ref_hash_inner_ty(ghash) == 6 {
+            let si = st_find(ref_hash_inner_hash(ghash))
+            if si >= 0 { return si }
+        }
     }
     var sj: i64 = 0
     while sj < ST_COUNT {
@@ -7427,6 +7449,82 @@ fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
     else { em32(0x3821680A) }
 }
 
+fn tok_is_ident_text(idx: i64, s: string) -> bool with Panic, Mut {
+    if idx < 0 || idx >= TC { return false }
+    if TK[idx as usize] != 3 { return false }
+    return src_match(TS[idx as usize], TE[idx as usize] - TS[idx as usize], s)
+}
+
+fn stmt_is_gpu_perform(pos: i64) -> bool with Panic, Mut {
+    if pos + 3 >= TC { return false }
+    if tok_is_ident_text(pos, "perform") == false { return false }
+    if tok_is_ident_text(pos + 1, "GPU") == false { return false }
+    if TK[(pos + 2) as usize] != 50 { return false }
+    if tok_is_ident_text(pos + 3, "launch") { return true }
+    if tok_is_ident_text(pos + 3, "sync") { return true }
+    return false
+}
+
+fn compile_stmt_arg_list_x86() with IO, Mut, Panic, Div {
+    if TK[EP as usize] != 6 { return }
+    EP = EP + 1
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        compile_or()
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }
+}
+
+fn compile_stmt_arg_list_a64() with IO, Mut, Panic, Div {
+    if TK[EP as usize] != 6 { return }
+    EP = EP + 1
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        compile_or_a64()
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }
+}
+
+fn compile_gpu_perform_stmt_x86() with IO, Mut, Panic, Div {
+    let method_tok = EP + 3
+    let is_launch = tok_is_ident_text(method_tok, "launch")
+    let is_sync = tok_is_ident_text(method_tok, "sync")
+    EP = EP + 4
+    if is_launch {
+        if TK[EP as usize] != 6 { tc_error(method_tok, "GPU.launch requires launch config") }
+        compile_stmt_arg_list_x86()
+        if TK[EP as usize] != 6 { tc_error(method_tok, "GPU.launch requires kernel arguments") }
+        compile_stmt_arg_list_x86()
+    } else if is_sync {
+        if TK[EP as usize] == 6 { compile_stmt_arg_list_x86() }
+    } else {
+        tc_error(method_tok, "unknown GPU perform")
+    }
+    LAST_STMT_HAS_VALUE = 0
+    LAST_STMT_TY = 0
+    LAST_STMT_TY_HASH = 0
+}
+
+fn compile_gpu_perform_stmt_a64() with IO, Mut, Panic, Div {
+    let method_tok = EP + 3
+    let is_launch = tok_is_ident_text(method_tok, "launch")
+    let is_sync = tok_is_ident_text(method_tok, "sync")
+    EP = EP + 4
+    if is_launch {
+        if TK[EP as usize] != 6 { tc_error(method_tok, "GPU.launch requires launch config") }
+        compile_stmt_arg_list_a64()
+        if TK[EP as usize] != 6 { tc_error(method_tok, "GPU.launch requires kernel arguments") }
+        compile_stmt_arg_list_a64()
+    } else if is_sync {
+        if TK[EP as usize] == 6 { compile_stmt_arg_list_a64() }
+    } else {
+        tc_error(method_tok, "unknown GPU perform")
+    }
+    LAST_STMT_HAS_VALUE = 0
+    LAST_STMT_TY = 0
+    LAST_STMT_TY_HASH = 0
+}
+
 // ─── Statement compiler ───
 fn compile_stmt() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
@@ -7434,6 +7532,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // Skip semicolons
     if k == 27 { EP = EP + 1; return }
+
+    if stmt_is_gpu_perform(EP) {
+        compile_gpu_perform_stmt_x86()
+        return
+    }
 
     // let x = expr / var x = expr (with optional : type)
     if k == 11 || k == 12 {
@@ -11909,15 +12012,21 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             let base_ty = EXPR_TY
             let base_hash = EXPR_TY_HASH
+            var field_base_ty = base_ty
+            var field_base_hash = base_hash
+            if base_ty == 10 {
+                field_base_ty = ref_hash_inner_ty(base_hash)
+                field_base_hash = ref_hash_inner_hash(base_hash)
+            }
             EP = EP + 1
             var found: i64 = 0
             EXPR_TY = 0
             EXPR_TY_HASH = 0
-            if knowledge_hash_is(base_hash) {
+            if knowledge_hash_is(field_base_hash) {
                 if src_match(fns, fne - fns, "value") {
                     em32(0xF9400000)
-                    EXPR_TY = knowledge_hash_inner_ty(base_hash)
-                    EXPR_TY_HASH = knowledge_hash_inner_hash(base_hash)
+                    EXPR_TY = knowledge_hash_inner_ty(field_base_hash)
+                    EXPR_TY_HASH = knowledge_hash_inner_hash(field_base_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else if src_match(fns, fne - fns, "variance") {
                     em32(0xF9400400)
@@ -11936,8 +12045,8 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 }
                 found = 1
             }
-            if base_ty == 6 {
-                let bsi = st_find(base_hash)
+            if field_base_ty == 6 {
+                let bsi = st_find(field_base_hash)
                 if bsi >= 0 {
                     let off = st_field_offset(bsi, fh)
                     if off >= 0 {
@@ -12177,6 +12286,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
     LAST_STMT_HAS_VALUE = 0
     if k == 27 { EP = EP + 1; return }
+    if stmt_is_gpu_perform(EP) {
+        compile_gpu_perform_stmt_a64()
+        return
+    }
     // let/var
     if k == 11 || k == 12 {
         EP = EP + 1
