@@ -893,15 +893,18 @@ fn stabilize_return_agg_a64(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
     var nslots = ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH)
     if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
     if nslots <= 0 { return }
+    var legacy_fallback: i64 = 0
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
     if CURRENT_SRET_SLOT > 0 {
         emit_load_var_a64(CURRENT_SRET_SLOT)
         em32(0xAA0003EB)  // mov x11, x0
     } else {
+        legacy_fallback = 1
+        tc_fatal(FN_NAME_TOK[CURRENT_FN as usize], "AArch64 aggregate-return fallback requires caller-provided SRET buffer")
         emit_imm64_reg_a64(11, GL_BSS_BASE + RET_AGG_BSS_OFF)
     }
     emit_copy_words_x10_x11_a64(nslots)
-    if CURRENT_SRET_SLOT > 0 {
+    if legacy_fallback == 0 {
         emit_load_var_a64(CURRENT_SRET_SLOT)
     } else {
         emit_imm64_reg_a64(0, GL_BSS_BASE + RET_AGG_BSS_OFF)
@@ -1516,6 +1519,15 @@ fn tc_stack_frame_too_large(bytes: i64) with IO, Mut, Panic {
     print("error: stack frame too large (")
     print_int(bytes)
     print(" bytes) - consider using global arrays\n")
+    TYPECHECK_FAILED = 1
+}
+
+fn tc_fatal(tok: i64, msg: string) with IO, Mut, Panic {
+    print("error: ")
+    print(msg)
+    print(" at line ")
+    print_int(TL[tok as usize])
+    print("\n")
     TYPECHECK_FAILED = 1
 }
 
@@ -3536,11 +3548,14 @@ fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
     var nslots = ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH)
     if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
     if nslots <= 0 { return }
+    var legacy_fallback: i64 = 0
     em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
     if CURRENT_SRET_SLOT > 0 {
         emit_load_var(CURRENT_SRET_SLOT)
         em(0x48); em(0x89); em(0xc1)  // mov rcx, dst ptr
     } else {
+        legacy_fallback = 1
+        tc_fatal(FN_NAME_TOK[CURRENT_FN as usize], "x86 aggregate-return fallback requires caller-provided SRET buffer")
         let dst = GL_BSS_BASE + RET_AGG_BSS_OFF
         em(0x48); em(0xb9); em64(dst)  // mov rcx, dst ptr
     }
@@ -3550,7 +3565,7 @@ fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
         em(0x48); em(0x89); em(0x81); em32(i * 8)
         i = i + 1
     }
-    if CURRENT_SRET_SLOT > 0 {
+    if legacy_fallback == 0 {
         emit_load_var(CURRENT_SRET_SLOT)
     } else {
         let dst2 = GL_BSS_BASE + RET_AGG_BSS_OFF
@@ -10706,10 +10721,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             var cd: i64 = 1
             while EP < TC && cd > 0 { if TK[EP as usize] == 8 { cd = cd + 1 }; if TK[EP as usize] == 9 { cd = cd - 1 }; EP = EP + 1 }
         } else { EP = EP + 1 }
-        print("error: AArch64 closure literals are not yet supported at line ")
-        print_int(TL[closure_tok as usize])
-        print("\n")
-        TYPECHECK_FAILED = 1
+        tc_fatal(closure_tok, "AArch64 closure literals are not yet supported")
         em32(0xD2800000)
         EXPR_IS_F64 = 0
         EXPR_TY = 0

@@ -10,6 +10,7 @@ LOG_DIR="$WORK_DIR/logs"
 ARTIFACT_DIR="$WORK_DIR/artifacts"
 
 FIXED_POINT_WORK_DIR="$WORK_DIR/fixed_point"
+FALLBACK_WORK_DIR="$WORK_DIR/fallback_inventory"
 ABI_WORK_DIR="$WORK_DIR/abi_regressions"
 AARCH64_WORK_DIR="$WORK_DIR/aarch64_compile"
 ACCEPTANCE_WORK_DIR="$WORK_DIR/native_acceptance"
@@ -17,6 +18,7 @@ PARITY_WORK_DIR="$WORK_DIR/source_artifact_parity"
 RUN_LEGACY_ACCEPTANCE="${RUN_LEGACY_ACCEPTANCE:-0}"
 
 FIXED_LOG="$LOG_DIR/fixed_point.log"
+FALLBACK_LOG="$LOG_DIR/fallback_inventory.log"
 ABI_LOG="$LOG_DIR/abi_regressions.log"
 AARCH64_LOG="$LOG_DIR/aarch64_compile.log"
 ACCEPTANCE_LOG="$LOG_DIR/native_acceptance.log"
@@ -40,6 +42,13 @@ env SOUC_NATIVE="$SOUC_NATIVE" WORK_DIR="$FIXED_POINT_WORK_DIR" \
   }
 
 GEN2_PATH="$FIXED_POINT_WORK_DIR/artifacts/gen2.elf"
+
+env WORK_DIR="$FALLBACK_WORK_DIR" \
+  bash "$ROOT_DIR/scripts/selfhost/selfhost_fallback_inventory_gate.sh" >"$FALLBACK_LOG" 2>&1 || {
+    echo "error: fallback inventory gate failed (see $FALLBACK_LOG)" >&2
+    cat "$FALLBACK_LOG" >&2 || true
+    exit 1
+  }
 
 env SOUC_NATIVE="$GEN2_PATH" WORK_DIR="$ABI_WORK_DIR" \
   bash "$ROOT_DIR/scripts/selfhost/selfhost_abi_parity_regression_gate.sh" >"$ABI_LOG" 2>&1 || {
@@ -81,6 +90,7 @@ env ACCEPTED_ARTIFACT_BIN="$SOUC_NATIVE" WORK_DIR="$PARITY_WORK_DIR" \
 
 REPORT_ARGS=(
   --fixed-summary "$FIXED_POINT_WORK_DIR/artifacts/summary.txt"
+  --fallback-summary "$FALLBACK_WORK_DIR/artifacts/summary.txt"
   --abi-summary "$ABI_WORK_DIR/artifacts/summary.txt"
   --aarch64-summary "$AARCH64_WORK_DIR/artifacts/summary.txt"
   --parity-json "$PARITY_WORK_DIR/artifacts/suite_delta.v1.json"
@@ -102,10 +112,12 @@ python3 "$ROOT_DIR/scripts/selfhost/selfhost_authority_report.py" \
 {
   echo "souc_native=$SOUC_NATIVE"
   echo "fixed_log=$FIXED_LOG"
+  echo "fallback_log=$FALLBACK_LOG"
   echo "abi_log=$ABI_LOG"
   echo "aarch64_log=$AARCH64_LOG"
   echo "parity_log=$PARITY_LOG"
   echo "fixed_point_work_dir=$FIXED_POINT_WORK_DIR"
+  echo "fallback_work_dir=$FALLBACK_WORK_DIR"
   echo "abi_work_dir=$ABI_WORK_DIR"
   echo "aarch64_work_dir=$AARCH64_WORK_DIR"
   echo "parity_work_dir=$PARITY_WORK_DIR"

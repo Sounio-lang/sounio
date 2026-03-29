@@ -12,6 +12,7 @@ from pathlib import Path
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a machine-readable selfhost authority summary.")
     parser.add_argument("--fixed-summary", required=True)
+    parser.add_argument("--fallback-summary", required=True)
     parser.add_argument("--abi-summary", required=True)
     parser.add_argument("--aarch64-summary", required=True)
     parser.add_argument("--parity-json", required=True)
@@ -49,6 +50,10 @@ def parse_results(path: str) -> dict[str, dict[str, int]]:
     }
 
 
+def parse_inventory(path: str) -> dict[str, object]:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
 def git_output(*args: str) -> str:
     try:
         return subprocess.check_output(["git", *args], text=True, timeout=5).strip()
@@ -60,6 +65,7 @@ def main() -> int:
     args = parse_args()
 
     fixed = parse_summary(args.fixed_summary)
+    fallback = parse_summary(args.fallback_summary)
     abi = parse_summary(args.abi_summary)
     aarch64 = parse_summary(args.aarch64_summary)
     legacy = parse_summary(args.legacy_summary) if args.legacy_summary else {}
@@ -69,6 +75,12 @@ def main() -> int:
     fixed_pass = fixed.get("gen2_md5", "") != "" and fixed.get("gen2_md5") == fixed.get("gen3_md5")
     abi_fail = int(abi.get("summary_fail", "1"))
     aarch64_fail = int(aarch64.get("summary_fail", "1"))
+    fallback_inventory = parse_inventory(fallback["report_json"])
+    fallback_fenced = True
+    for entry in fallback_inventory["entries"]:
+        if entry["classification"] != "unsupported_but_fenced":
+            fallback_fenced = False
+            break
 
     blocking_checks = [
         {
@@ -78,6 +90,14 @@ def main() -> int:
             "summary_file": args.fixed_summary,
             "gen2_md5": fixed.get("gen2_md5", ""),
             "gen3_md5": fixed.get("gen3_md5", ""),
+        },
+        {
+            "name": "fallback_inventory",
+            "blocking": True,
+            "status": "pass" if fallback_fenced else "fail",
+            "summary_file": args.fallback_summary,
+            "classification_counts": fallback_inventory["classification_counts"],
+            "entries": fallback_inventory["entries"],
         },
         {
             "name": "abi_parity_regressions",
