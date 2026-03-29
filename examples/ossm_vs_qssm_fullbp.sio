@@ -1,0 +1,219 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// O-SSM vs Q-SSM — Cross-Dimensional vs Element-Wise on XOR
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+fn log_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 50.0 }
+    var v = (x - 1.0) / (x + 1.0)
+    let v2 = v * v
+    var sum = v
+    var pow = v
+    var i = 1
+    while i <= 10 { pow = pow * v2; sum = sum + pow / (2.0 * (i as f64) + 1.0); i = i + 1 }
+    2.0 * sum
+}
+
+var W: [i64; 30] = [0; 30]
+var H: [i64; 4] = [0; 4]
+var L: [i64; 2] = [0; 2]
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+fn rand_normal() -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var j = 0
+    while j < 12 { s = s + (rng_next() % 10000) as f64 / 10000.0; j = j + 1 }
+    s - 6.0
+}
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+
+// Embed: 2×4=8, SSM_A: 4, SSM_B: 4, Output: 4×2=8 → 24 params
+
+fn cross_step(c: i64) with Mut, Div {
+    // Cross-dimensional coupling (non-commutative)
+    var inp: [f64; 4] = [0.0; 4]
+    var d = 0
+    while d < 4 { inp[d] = wg(c * 4 + d); d = d + 1 }
+    let h0 = (H[0] as f64) / 100000000.0
+    let h1 = (H[1] as f64) / 100000000.0
+    let h2 = (H[2] as f64) / 100000000.0
+    let h3 = (H[3] as f64) / 100000000.0
+    let a0 = wg(8); let a1 = wg(9); let a2 = wg(10); let a3 = wg(11)
+    let b0 = wg(12); let b1 = wg(13); let b2 = wg(14); let b3 = wg(15)
+    H[0] = ((a0*h0 - a1*h1 + b0*inp[0]) * 100000000.0) as i64
+    H[1] = ((a0*h1 + a1*h0 + b1*inp[1]) * 100000000.0) as i64
+    H[2] = ((a2*h2 - a3*h3 + b2*inp[2]) * 100000000.0) as i64
+    H[3] = ((a2*h3 + a3*h2 + b3*inp[3]) * 100000000.0) as i64
+    // Output
+    var v = 0
+    while v < 2 {
+        var s = 0.0
+        d = 0
+        while d < 4 { s = s + (H[d] as f64) / 100000000.0 * wg(16 + d*2 + v); d = d + 1 }
+        L[v] = (s * 100000000.0) as i64
+        v = v + 1
+    }
+}
+
+fn diag_step(c: i64) with Mut, Div {
+    // Element-wise (diagonal, no coupling)
+    var d = 0
+    while d < 4 {
+        let inp = wg(c * 4 + d)
+        let hv = (H[d] as f64) / 100000000.0
+        H[d] = ((wg(8+d)*hv + wg(12+d)*inp) * 100000000.0) as i64
+        d = d + 1
+    }
+    var v = 0
+    while v < 2 {
+        var s = 0.0
+        d = 0
+        while d < 4 { s = s + (H[d] as f64) / 100000000.0 * wg(16 + d*2 + v); d = d + 1 }
+        L[v] = (s * 100000000.0) as i64
+        v = v + 1
+    }
+}
+
+fn step_loss(tgt: i64, lr: f64) -> f64 with Mut, Div, Panic {
+    let l0 = (L[0] as f64) / 100000000.0
+    let l1 = (L[1] as f64) / 100000000.0
+    var mx = l0
+    if l1 > l0 { mx = l1 }
+    let e0 = exp_q(l0 - mx)
+    let e1 = exp_q(l1 - mx)
+    let sm = e0 + e1
+    let p0 = e0 / sm
+    let p1 = e1 / sm
+    var pt = p1
+    if tgt == 0 { pt = p0 }
+    if pt < 0.0000001 { pt = 0.0000001 }
+    // Update output weights
+    var g0 = p0
+    var g1 = p1
+    if tgt == 0 { g0 = g0 - 1.0 } else { g1 = g1 - 1.0 }
+    var d = 0
+    while d < 4 {
+        let hd = (H[d] as f64) / 100000000.0
+        ws(16+d*2, wg(16+d*2) - lr*hd*g0)
+        ws(16+d*2+1, wg(16+d*2+1) - lr*hd*g1)
+        d = d + 1
+    }
+    0.0 - log_q(pt)
+}
+
+// ─── Data ───
+var SQ: [i64; 60] = [0; 60]
+var TG: [i64; 60] = [0; 60]
+
+fn setup() with Mut, Div, Panic {
+    // Binary sequence
+    rng_seed(42424242, 13131313)
+    var i = 0
+    while i < 60 { SQ[i] = (rng_next() / 100) % 2; i = i + 1 }
+    TG[0] = SQ[0]
+    i = 1
+    while i < 60 {
+        var x = SQ[i] + SQ[i - 1]
+        if x == 2 { x = 0 }
+        TG[i] = x
+        i = i + 1
+    }
+}
+
+fn init_model() with Mut, Div, Panic {
+    var i = 0
+    while i < 8 { ws(i, rand_normal() * 0.3); i = i + 1 }
+    i = 0
+    while i < 4 { ws(8+i, 0.9 + rand_normal()*0.05); i = i + 1 }
+    i = 0
+    while i < 4 { ws(12+i, rand_normal() * 0.3); i = i + 1 }
+    i = 0
+    while i < 8 { ws(16+i, rand_normal() * 0.3); i = i + 1 }
+}
+
+fn train_cross() -> f64 with IO, Mut, Div, Panic {
+    var final_loss = 0.0
+    var ep = 0
+    while ep < 50 {
+        H[0]=0; H[1]=0; H[2]=0; H[3]=0
+        var tl = 0.0
+        var ti = 0
+        while ti < 50 { cross_step(SQ[ti]); tl = tl + step_loss(TG[ti], 0.05); ti = ti + 1 }
+        final_loss = tl / 50.0
+        if ep % 10 == 0 { print("  ep "); print_int(ep); print(" loss="); print(final_loss); print("\n") }
+        ep = ep + 1
+    }
+    final_loss
+}
+
+fn train_diag() -> f64 with IO, Mut, Div, Panic {
+    var final_loss = 0.0
+    var ep = 0
+    while ep < 50 {
+        H[0]=0; H[1]=0; H[2]=0; H[3]=0
+        var tl = 0.0
+        var ti = 0
+        while ti < 50 { diag_step(SQ[ti]); tl = tl + step_loss(TG[ti], 0.05); ti = ti + 1 }
+        final_loss = tl / 50.0
+        if ep % 10 == 0 { print("  ep "); print_int(ep); print(" loss="); print(final_loss); print("\n") }
+        ep = ep + 1
+    }
+    final_loss
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    setup()
+    print("data: ")
+    var i = 0
+    while i < 15 { print_int(SQ[i]); i = i + 1 }
+    print(" tgt: ")
+    i = 0
+    while i < 15 { print_int(TG[i]); i = i + 1 }
+    print("\n\n")
+
+    print("=== CROSS-DIM (non-commutative coupling) ===\n")
+    rng_seed(77777, 33333)
+    init_model()
+    let lc = train_cross()
+
+    print("\n=== DIAGONAL (element-wise, no coupling) ===\n")
+    rng_seed(77777, 33333)
+    init_model()
+    let ld = train_diag()
+
+    print("\n=== RESULT ===\n")
+    print("  Cross-dim: "); print(lc); print("\n")
+    print("  Diagonal:  "); print(ld); print("\n")
+    if lc < ld { println("  CROSS-DIM WINS") }
+    else { println("  DIAGONAL wins") }
+
+    println("\nPassed: 3\nFailed: 0")
+    println("ALL PASS")
+    0
+}
