@@ -15,20 +15,20 @@ This file is the short deferred-debt register for the self-hosted compiler autho
 
 ## Current deferred debt
 
-- `stabilize_return_agg_x86` legacy BSS fallback
+- `stabilize_return_agg_x86` fenced missing-SRET path
   - class: fenced unsupported
   - severity: medium
-  - note: normal supported path is caller-owned SRET; fallback remains only as fenced legacy code
+  - note: normal supported path is caller-owned SRET; shared aggregate BSS codegen is no longer emitted here
 
-- `stabilize_return_agg_a64` legacy BSS fallback
+- `stabilize_return_agg_a64` fenced missing-SRET path
   - class: fenced unsupported
   - severity: medium
-  - note: normal supported path is caller-owned SRET; fallback remains only as fenced legacy code
+  - note: normal supported path is caller-owned SRET; shared aggregate BSS codegen is no longer emitted here
 
 - AArch64 closure literals
   - class: transitional implementation debt
   - severity: high
-  - note: compile path is explicitly unsupported and expected-fail, not runtime-supported
+  - note: basic closure literal compile-proof support exists, but runtime validation is not yet available and explicit unsupported edges remain fenced
 
 - `legacy_native_acceptance` non-green baseline
   - class: baseline inherited noise
@@ -44,6 +44,6 @@ This file is the short deferred-debt register for the self-hosted compiler autho
 
 Highest-value implementation wave after governance hardening:
 
-- eliminate fenced aggregate-return fallback debt in normal paths
-- implement AArch64 closure literals for real runtime support
-- reclassify supported AArch64 paths from compile-proof to runtime-supported only after tests prove it
+- eliminate the remaining fenced missing-SRET sites once all callers are proven to supply hidden result buffers
+- promote AArch64 closure literals from compile-proof to runtime-supported only after a real runner exists
+- reclassify supported AArch64 paths from compile-proof to runtime-supported only after runtime tests prove it

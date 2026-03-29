@@ -47,6 +47,7 @@ def inspect_site(lines: list[str], symbol: str, target: str, diagnostic: str) ->
         "target": target,
         "source_line": start + 1,
         "fallback_lines": fallback_lines,
+        "legacy_storage_referenced": bool(fallback_lines),
         "diagnostic_line": diagnostic_line,
         "classification": classification,
         "normal_supported_path": "caller-owned hidden aggregate-return buffer",
@@ -91,6 +92,7 @@ def main() -> int:
             md_lines.append(f"- fallback_lines: {', '.join(str(v) for v in entry['fallback_lines'])}")
         else:
             md_lines.append("- fallback_lines: none")
+        md_lines.append(f"- legacy_storage_referenced: {entry['legacy_storage_referenced']}")
         md_lines.append(f"- diagnostic_line: {entry['diagnostic_line']}")
         md_lines.append(f"- normal_supported_path: {entry['normal_supported_path']}")
         md_lines.append("")

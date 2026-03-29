@@ -109,6 +109,8 @@ Current status:
 - `stabilize_return_agg_x86`: unsupported but fenced
 - `stabilize_return_agg_a64`: unsupported but fenced
 
+These fenced sites now reject missing caller-provided SRET explicitly; they no longer emit shared aggregate BSS copy code.
+
 The canonical inventory is produced by:
 
 - [`scripts/selfhost/selfhost_fallback_inventory_gate.sh`](../../scripts/selfhost/selfhost_fallback_inventory_gate.sh)

@@ -715,6 +715,8 @@ fn emit_closure_fn_call_a64(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i64
         emit_lea_var_a64(ret_base + ret_slots - 1)
         em32(0xAA0003E8)  // mov x8, x0
     }
+    if argc >= 7 { em32(0xF8410FE7) }
+    if argc >= 6 { em32(0xF8410FE6) }
     if argc >= 5 { em32(0xF8410FE5) }
     if argc >= 4 { em32(0xF8410FE4) }
     if argc >= 3 { em32(0xF8410FE3) }
@@ -889,26 +891,20 @@ fn fill_repeat_struct_array_slots_a64(dst_start: i64, field_hash: i64) with Mut,
     }
 }
 
-fn stabilize_return_agg_a64(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
+fn stabilize_return_agg_a64(expr_ty: i64, expr_hash: i64) with IO, Mut, Panic, Div {
     var nslots = ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH)
     if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
     if nslots <= 0 { return }
-    var legacy_fallback: i64 = 0
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
-    if CURRENT_SRET_SLOT > 0 {
-        emit_load_var_a64(CURRENT_SRET_SLOT)
-        em32(0xAA0003EB)  // mov x11, x0
-    } else {
-        legacy_fallback = 1
+    if CURRENT_SRET_SLOT <= 0 {
         tc_fatal(FN_NAME_TOK[CURRENT_FN as usize], "AArch64 aggregate-return fallback requires caller-provided SRET buffer")
-        emit_imm64_reg_a64(11, GL_BSS_BASE + RET_AGG_BSS_OFF)
+        em32(0xD2800000)
+        return
     }
+    emit_load_var_a64(CURRENT_SRET_SLOT)
+    em32(0xAA0003EB)  // mov x11, x0
     emit_copy_words_x10_x11_a64(nslots)
-    if legacy_fallback == 0 {
-        emit_load_var_a64(CURRENT_SRET_SLOT)
-    } else {
-        emit_imm64_reg_a64(0, GL_BSS_BASE + RET_AGG_BSS_OFF)
-    }
+    emit_load_var_a64(CURRENT_SRET_SLOT)
 }
 
 // Load 64-bit immediate into arbitrary register
@@ -3544,33 +3540,25 @@ fn fill_repeat_struct_array_slots_x86(dst_start: i64, field_hash: i64) with Mut,
     }
 }
 
-fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
+fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with IO, Mut, Panic, Div {
     var nslots = ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH)
     if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
     if nslots <= 0 { return }
-    var legacy_fallback: i64 = 0
     em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
-    if CURRENT_SRET_SLOT > 0 {
-        emit_load_var(CURRENT_SRET_SLOT)
-        em(0x48); em(0x89); em(0xc1)  // mov rcx, dst ptr
-    } else {
-        legacy_fallback = 1
+    if CURRENT_SRET_SLOT <= 0 {
         tc_fatal(FN_NAME_TOK[CURRENT_FN as usize], "x86 aggregate-return fallback requires caller-provided SRET buffer")
-        let dst = GL_BSS_BASE + RET_AGG_BSS_OFF
-        em(0x48); em(0xb9); em64(dst)  // mov rcx, dst ptr
+        em(0x31); em(0xc0)
+        return
     }
+    emit_load_var(CURRENT_SRET_SLOT)
+    em(0x48); em(0x89); em(0xc1)  // mov rcx, dst ptr
     var i: i64 = 0
     while i < nslots {
         em(0x48); em(0x8b); em(0x82); em32(i * 8)
         em(0x48); em(0x89); em(0x81); em32(i * 8)
         i = i + 1
     }
-    if legacy_fallback == 0 {
-        emit_load_var(CURRENT_SRET_SLOT)
-    } else {
-        let dst2 = GL_BSS_BASE + RET_AGG_BSS_OFF
-        em(0x48); em(0xb8); em64(dst2)
-    }
+    emit_load_var(CURRENT_SRET_SLOT)
 }
 
 // ─── Emit print("string") ───
@@ -4949,6 +4937,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let save_ret_hash = CURRENT_RET_HASH
         let save_sret_slot = CURRENT_SRET_SLOT
         let save_fpc = FRAME_PATCH_COUNT
+        let save_last_stmt_has_value = LAST_STMT_HAS_VALUE
+        let save_last_stmt_ty = LAST_STMT_TY
+        let save_last_stmt_hash = LAST_STMT_TY_HASH
         // Do NOT reset FRAME_PATCH_COUNT to 0: closure patches append after outer patches,
         // preserving the outer function's sub-rsp patch location at [0..save_fpc).
         var svi: i64 = 0
@@ -4976,6 +4967,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
         BREAK_COUNT = 0
         CL_CAP_COUNT = 0
         CURRENT_SRET_SLOT = 0
+        LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
         // Parse closure parameters (between | ... |)
         // User params get slots 2, 3, ... (registers rsi, rdx, rcx, r8, r9)
         if zero_param_closure == 0 {
@@ -5113,9 +5107,29 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 9 { EP = EP + 1 }
         } else {
             compile_or()
+            LAST_STMT_HAS_VALUE = 1
+            LAST_STMT_TY = EXPR_TY
+            LAST_STMT_TY_HASH = EXPR_TY_HASH
         }
         // Epilogue
         if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
+            if CURRENT_RET_TY == 5 {
+                em(0x31); em(0xc0)
+            } else if LAST_STMT_HAS_VALUE == 0 {
+                em(0x31); em(0xc0)
+            } else if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
+                    if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
+                        if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                            tc_epistemic_boundary(EP)
+                        } else {
+                            tc_error(EP - 1, "closure return type does not match signature")
+                        }
+                    }
+                }
+            } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                stabilize_return_agg_x86(LAST_STMT_TY, LAST_STMT_TY_HASH)
+            }
             em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
             em(0x5d); em(0xc3)
         }
@@ -5138,6 +5152,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
         CURRENT_RET_HASH = save_ret_hash
         CURRENT_SRET_SLOT = save_sret_slot
         FRAME_PATCH_COUNT = save_fpc
+        LAST_STMT_HAS_VALUE = save_last_stmt_has_value
+        LAST_STMT_TY = save_last_stmt_ty
+        LAST_STMT_TY_HASH = save_last_stmt_hash
         svi = 0
         while svi < save_vc {
             VAR_NS[svi as usize] = CL_SAVE_NS[svi as usize]
@@ -8942,9 +8959,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     }
     p = 0
 
-    // BSS layout: [argc(8)] [argv(8)] [globals...] [aggregate return scratch]
+    // BSS layout: [argc(8)] [argv(8)] [globals...]
+    // Aggregate-return scratch is no longer part of emitted normal-path code.
     RET_AGG_BSS_OFF = GL_BSS_SIZE
-    GL_BSS_SIZE = GL_BSS_SIZE + 1048576  // 1MB scratch for aggregate (struct/array) returns
     // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0
     if TARGET_OS == 2 {
         GL_BSS_BASE = 0x100008000 + 16    // macOS: __DATA segment at 0x100008000
@@ -10686,22 +10703,74 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         LAST_ALEN = arr_count
         return
     }
-    // Closure literals are not implemented on AArch64 yet.
-    // Reject them explicitly instead of silently materializing a bogus stub.
+    // Closure: |params| expr  or  |params| { stmts }
+    // AArch64 closure ABI:
+    //   x0 = env_ptr
+    //   x1..x7 = user args
+    //   x8 = hidden SRET pointer for aggregate returns
     if k == 45 || k == 31 {
         let closure_tok = EP
+        var zero_param_closure_a: i64 = 0
+        if k == 31 { zero_param_closure_a = 1 }
         EP = EP + 1
-        if k == 45 {
+        let save_vc_a = VAR_COUNT
+        let save_ns_a = NEXT_SLOT
+        let save_ld_a = LOOP_DEPTH
+        let save_bc_a = BREAK_COUNT
+        let save_ret_ty_a = CURRENT_RET_TY
+        let save_ret_hash_a = CURRENT_RET_HASH
+        let save_sret_slot_a = CURRENT_SRET_SLOT
+        let save_last_stmt_has_value_a = LAST_STMT_HAS_VALUE
+        let save_last_stmt_ty_a = LAST_STMT_TY
+        let save_last_stmt_hash_a = LAST_STMT_TY_HASH
+        var svi_a: i64 = 0
+        while svi_a < save_vc_a {
+            CL_SAVE_NS[svi_a as usize] = VAR_NS[svi_a as usize]
+            CL_SAVE_NE[svi_a as usize] = VAR_NE[svi_a as usize]
+            CL_SAVE_SL[svi_a as usize] = VAR_SLOT[svi_a as usize]
+            CL_SAVE_LS[svi_a as usize] = VAR_LEN_SLOT[svi_a as usize]
+            CL_SAVE_AL[svi_a as usize] = VAR_ALEN[svi_a as usize]
+            CL_SAVE_ES[svi_a as usize] = VAR_ESIZ[svi_a as usize]
+            CL_SAVE_F64[svi_a as usize] = VAR_IS_F64[svi_a as usize]
+            CL_SAVE_ISCL[svi_a as usize] = VAR_IS_CLOSURE[svi_a as usize]
+            CL_SAVE_MUT[svi_a as usize] = VAR_MUT[svi_a as usize]
+            CL_SAVE_UNIT[svi_a as usize] = VAR_UNIT[svi_a as usize]
+            CL_SAVE_LINEAR[svi_a as usize] = VAR_LINEAR[svi_a as usize]
+            CL_SAVE_USED[svi_a as usize] = VAR_USED[svi_a as usize]
+            CL_SAVE_TY[svi_a as usize] = VAR_TY[svi_a as usize]
+            CL_SAVE_TH[svi_a as usize] = VAR_TY_HASH[svi_a as usize]
+            svi_a = svi_a + 1
+        }
+        VAR_COUNT = 0
+        NEXT_SLOT = 2
+        LOOP_DEPTH = 0
+        BREAK_COUNT = 0
+        CL_CAP_COUNT = 0
+        CURRENT_SRET_SLOT = 0
+        LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
+        if zero_param_closure_a == 0 {
             while TK[EP as usize] != 45 && TK[EP as usize] != 0 {
                 if TK[EP as usize] == 3 {
+                    let pns_a = TS[EP as usize]
+                    let pne_a = TE[EP as usize]
+                    let pslot_a = var_add(pns_a, pne_a)
                     EP = EP + 1
                     if TK[EP as usize] == 43 {
                         EP = EP + 1
                         scan_type(EP)
+                        if pslot_a >= 0 {
+                            VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
+                            VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                            if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                            if SCAN_TY == 8 {
+                                VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
+                                VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                            }
+                        }
                         EP = SCAN_TY_NEXT
                     }
-                } else {
-                    EP = EP + 1
                 }
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
@@ -10710,23 +10779,204 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 10 {
             EP = EP + 1
             scan_type(EP)
+            CURRENT_RET_TY = SCAN_TY
+            CURRENT_RET_HASH = SCAN_TY_HASH
             EP = SCAN_TY_NEXT
+        } else {
+            CURRENT_RET_TY = 0
+            CURRENT_RET_HASH = 0
+        }
+        if ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH) > 0 {
+            CURRENT_SRET_SLOT = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
         }
         if TK[EP as usize] == 38 {
             EP = EP + 1
             while TK[EP as usize] == 3 || TK[EP as usize] == 28 { EP = EP + 1 }
         }
+        let nparams_a = VAR_COUNT
+        if nparams_a > 7 {
+            tc_fatal(closure_tok, "AArch64 closure literals support at most 7 user parameters")
+            em32(0xD2800000)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 0
+            EXPR_TY_HASH = 0
+            LAST_EXPR_IS_CLOSURE = 0
+            VAR_COUNT = save_vc_a
+            NEXT_SLOT = save_ns_a
+            LOOP_DEPTH = save_ld_a
+            BREAK_COUNT = save_bc_a
+            CURRENT_RET_TY = save_ret_ty_a
+            CURRENT_RET_HASH = save_ret_hash_a
+            CURRENT_SRET_SLOT = save_sret_slot_a
+            LAST_STMT_HAS_VALUE = save_last_stmt_has_value_a
+            LAST_STMT_TY = save_last_stmt_ty_a
+            LAST_STMT_TY_HASH = save_last_stmt_hash_a
+            svi_a = 0
+            while svi_a < save_vc_a {
+                VAR_NS[svi_a as usize] = CL_SAVE_NS[svi_a as usize]
+                VAR_NE[svi_a as usize] = CL_SAVE_NE[svi_a as usize]
+                VAR_SLOT[svi_a as usize] = CL_SAVE_SL[svi_a as usize]
+                VAR_LEN_SLOT[svi_a as usize] = CL_SAVE_LS[svi_a as usize]
+                VAR_ALEN[svi_a as usize] = CL_SAVE_AL[svi_a as usize]
+                VAR_ESIZ[svi_a as usize] = CL_SAVE_ES[svi_a as usize]
+                VAR_IS_F64[svi_a as usize] = CL_SAVE_F64[svi_a as usize]
+                VAR_IS_CLOSURE[svi_a as usize] = CL_SAVE_ISCL[svi_a as usize]
+                VAR_MUT[svi_a as usize] = CL_SAVE_MUT[svi_a as usize]
+                VAR_UNIT[svi_a as usize] = CL_SAVE_UNIT[svi_a as usize]
+                VAR_LINEAR[svi_a as usize] = CL_SAVE_LINEAR[svi_a as usize]
+                VAR_USED[svi_a as usize] = CL_SAVE_USED[svi_a as usize]
+                VAR_TY[svi_a as usize] = CL_SAVE_TY[svi_a as usize]
+                VAR_TY_HASH[svi_a as usize] = CL_SAVE_TH[svi_a as usize]
+                svi_a = svi_a + 1
+            }
+            return
+        }
+        let closure_sig_a = fnsig_from_local_params(nparams_a, CURRENT_RET_TY, CURRENT_RET_HASH)
+        var ci_a: i64 = 0
+        while ci_a < save_vc_a {
+            let ons_a = CL_SAVE_NS[ci_a as usize]
+            let one_a = CL_SAVE_NE[ci_a as usize]
+            let outer_slot_a = CL_SAVE_SL[ci_a as usize]
+            let existing_a = var_find(ons_a, one_a)
+            if existing_a < 0 {
+                let cap_slot_a = var_add(ons_a, one_a)
+                if cap_slot_a >= 0 {
+                    let cap_vi_a = VAR_COUNT - 1
+                    VAR_LEN_SLOT[cap_vi_a as usize] = CL_SAVE_LS[ci_a as usize]
+                    VAR_ALEN[cap_vi_a as usize] = CL_SAVE_AL[ci_a as usize]
+                    VAR_ESIZ[cap_vi_a as usize] = CL_SAVE_ES[ci_a as usize]
+                    VAR_IS_F64[cap_vi_a as usize] = CL_SAVE_F64[ci_a as usize]
+                    VAR_IS_CLOSURE[cap_vi_a as usize] = CL_SAVE_ISCL[ci_a as usize]
+                    VAR_MUT[cap_vi_a as usize] = CL_SAVE_MUT[ci_a as usize]
+                    VAR_UNIT[cap_vi_a as usize] = CL_SAVE_UNIT[ci_a as usize]
+                    VAR_LINEAR[cap_vi_a as usize] = CL_SAVE_LINEAR[ci_a as usize]
+                    VAR_USED[cap_vi_a as usize] = CL_SAVE_USED[ci_a as usize]
+                    VAR_TY[cap_vi_a as usize] = CL_SAVE_TY[ci_a as usize]
+                    VAR_TY_HASH[cap_vi_a as usize] = CL_SAVE_TH[ci_a as usize]
+                    if CL_CAP_COUNT < local_cap() {
+                        CL_CAP_SLOT[CL_CAP_COUNT as usize] = outer_slot_a
+                        CL_CAP_COUNT = CL_CAP_COUNT + 1
+                    } else {
+                        note_limit_error(1)
+                    }
+                }
+            }
+            ci_a = ci_a + 1
+        }
+        let cl_frame_sz_a = (local_cap() * 8 + 15) & 0xFFFFFFF0
+        if cl_frame_sz_a > max_frame_bytes() { tc_stack_frame_too_large(cl_frame_sz_a) }
+        let skip_patch_a = CL
+        em32(0x14000000)
+        let cl_start_a = CL
+        em32(0xA9BF7BFD)
+        em32(0x910003FD)
+        emit_imm64_reg_a64(9, cl_frame_sz_a)
+        em32(0xCB0903FF)
+        if CURRENT_SRET_SLOT > 0 {
+            em32(0xAA0803E0)
+            emit_store_var_a64(CURRENT_SRET_SLOT)
+        }
+        emit_store_incoming_arg_a64(0, 1)
+        var param_vi_cl_a: i64 = 0
+        var abi_arg_idx_cl_a: i64 = 1
+        while param_vi_cl_a < nparams_a {
+            emit_store_incoming_arg_a64(abi_arg_idx_cl_a, VAR_SLOT[param_vi_cl_a as usize])
+            abi_arg_idx_cl_a = abi_arg_idx_cl_a + 1
+            param_vi_cl_a = param_vi_cl_a + 1
+        }
+        var capi_a: i64 = 0
+        while capi_a < CL_CAP_COUNT {
+            emit_load_var_a64(1)
+            let cap_words_a = capi_a + 1
+            em32(0xF9400000 | (cap_words_a << 10))
+            emit_store_var_a64(VAR_SLOT[(nparams_a + capi_a) as usize])
+            capi_a = capi_a + 1
+        }
         if TK[EP as usize] == 8 {
             EP = EP + 1
-            var cd: i64 = 1
-            while EP < TC && cd > 0 { if TK[EP as usize] == 8 { cd = cd + 1 }; if TK[EP as usize] == 9 { cd = cd - 1 }; EP = EP + 1 }
-        } else { EP = EP + 1 }
-        tc_fatal(closure_tok, "AArch64 closure literals are not yet supported")
-        em32(0xD2800000)
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }
+        } else {
+            compile_or_a64()
+            LAST_STMT_HAS_VALUE = 1
+            LAST_STMT_TY = EXPR_TY
+            LAST_STMT_TY_HASH = EXPR_TY_HASH
+        }
+        var needs_epilogue_a: i64 = 1
+        if CL >= 4 { if rd32_at(CL - 4) == 0xD65F03C0 { needs_epilogue_a = 0 } }
+        if needs_epilogue_a == 1 {
+            if CURRENT_RET_TY == 5 {
+                em32(0xD2800000)
+            } else if LAST_STMT_HAS_VALUE == 0 {
+                em32(0xD2800000)
+            } else if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
+                    if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
+                        if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                            tc_epistemic_boundary(EP)
+                        } else {
+                            tc_error(EP - 1, "closure return type does not match signature")
+                        }
+                    }
+                }
+            } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)
+            }
+            emit_imm64_reg_a64(9, cl_frame_sz_a)
+            em32(0x8B0903FF)
+            em32(0xA8C17BFD)
+            em32(0xD65F03C0)
+        }
+        patch_branch_a64(skip_patch_a, CL)
+        let saved_cap_count_a = CL_CAP_COUNT
+        VAR_COUNT = save_vc_a
+        NEXT_SLOT = save_ns_a
+        LOOP_DEPTH = save_ld_a
+        BREAK_COUNT = save_bc_a
+        CURRENT_RET_TY = save_ret_ty_a
+        CURRENT_RET_HASH = save_ret_hash_a
+        CURRENT_SRET_SLOT = save_sret_slot_a
+        LAST_STMT_HAS_VALUE = save_last_stmt_has_value_a
+        LAST_STMT_TY = save_last_stmt_ty_a
+        LAST_STMT_TY_HASH = save_last_stmt_hash_a
+        svi_a = 0
+        while svi_a < save_vc_a {
+            VAR_NS[svi_a as usize] = CL_SAVE_NS[svi_a as usize]
+            VAR_NE[svi_a as usize] = CL_SAVE_NE[svi_a as usize]
+            VAR_SLOT[svi_a as usize] = CL_SAVE_SL[svi_a as usize]
+            VAR_LEN_SLOT[svi_a as usize] = CL_SAVE_LS[svi_a as usize]
+            VAR_ALEN[svi_a as usize] = CL_SAVE_AL[svi_a as usize]
+            VAR_ESIZ[svi_a as usize] = CL_SAVE_ES[svi_a as usize]
+            VAR_IS_F64[svi_a as usize] = CL_SAVE_F64[svi_a as usize]
+            VAR_IS_CLOSURE[svi_a as usize] = CL_SAVE_ISCL[svi_a as usize]
+            VAR_MUT[svi_a as usize] = CL_SAVE_MUT[svi_a as usize]
+            VAR_UNIT[svi_a as usize] = CL_SAVE_UNIT[svi_a as usize]
+            VAR_LINEAR[svi_a as usize] = CL_SAVE_LINEAR[svi_a as usize]
+            VAR_USED[svi_a as usize] = CL_SAVE_USED[svi_a as usize]
+            VAR_TY[svi_a as usize] = CL_SAVE_TY[svi_a as usize]
+            VAR_TY_HASH[svi_a as usize] = CL_SAVE_TH[svi_a as usize]
+            svi_a = svi_a + 1
+        }
+        let struct_size_a = 1 + saved_cap_count_a
+        let struct_base_a = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + struct_size_a
+        let struct_top_a = struct_base_a + struct_size_a - 1
+        let adr_off_a = CL
+        em32(0x10000000)
+        patch_adr_a64(adr_off_a, cl_start_a, 0)
+        emit_store_var_a64(struct_top_a)
+        var capj_a: i64 = 0
+        while capj_a < saved_cap_count_a {
+            emit_load_var_a64(CL_CAP_SLOT[capj_a as usize])
+            emit_store_var_a64(struct_top_a - 1 - capj_a)
+            capj_a = capj_a + 1
+        }
+        emit_lea_var_a64(struct_top_a)
         EXPR_IS_F64 = 0
-        EXPR_TY = 0
-        EXPR_TY_HASH = 0
-        LAST_EXPR_IS_CLOSURE = 0
+        EXPR_TY = 9
+        EXPR_TY_HASH = closure_sig_a
+        LAST_EXPR_IS_CLOSURE = 1
         return
     }
     // None
@@ -11584,6 +11834,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if call_vslot >= 0 {
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
                     if call_is_closure == 1 {
+                        if argc > 7 { tc_fatal(call_tok, "AArch64 closure calls support at most 7 user arguments") }
                         emit_closure_fn_call_a64(call_vslot, argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     } else {
                         emit_indirect_fn_call_a64(call_vslot, abi_argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
