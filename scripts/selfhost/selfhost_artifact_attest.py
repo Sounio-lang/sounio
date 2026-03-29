@@ -17,6 +17,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--provenance-out", required=True)
     parser.add_argument("--bootstrap-summary")
     parser.add_argument("--bootstrap-sha256")
+    parser.add_argument("--required-checks-manifest", default="scripts/selfhost/selfhost_required_checks.v1.json")
+    parser.add_argument("--authority-model-doc", default="docs/implementation/SELFHOST_AUTHORITY_MODEL.md")
+    parser.add_argument("--release-train-doc", default="docs/implementation/SELFHOST_RELEASE_TRAIN.md")
+    parser.add_argument("--promotion-entrypoint", default="scripts/selfhost/update_selfhost_artifact.sh")
+    parser.add_argument("--verification-entrypoint", default="scripts/selfhost/selfhost_artifact_provenance_gate.sh")
     return parser.parse_args()
 
 
@@ -67,11 +72,13 @@ def main() -> int:
         gate_status.append({"name": surface["name"], "status": surface["status"], "blocking": False})
 
     report = {
-        "schema": "sounio.selfhost_artifact_provenance.v1",
+        "schema": "sounio.selfhost_artifact_provenance.v2",
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "git": {
-            "commit": git_output("rev-parse", "HEAD"),
-            "branch": git_output("rev-parse", "--abbrev-ref", "HEAD"),
+            "attestation_commit": git_output("rev-parse", "HEAD"),
+            "attestation_branch": git_output("rev-parse", "--abbrev-ref", "HEAD"),
+            "artifact_source_commit": git_output("rev-parse", "HEAD"),
+            "artifact_source_branch": git_output("rev-parse", "--abbrev-ref", "HEAD"),
         },
         "artifact": {
             "path": str(artifact_path),
@@ -81,6 +88,13 @@ def main() -> int:
         "source": {
             "path": str(source_path),
             "sha256": sha256_file(str(source_path)),
+        },
+        "policy": {
+            "required_checks_manifest": args.required_checks_manifest,
+            "authority_model_doc": args.authority_model_doc,
+            "release_train_doc": args.release_train_doc,
+            "promotion_entrypoint": args.promotion_entrypoint,
+            "verification_entrypoint": args.verification_entrypoint,
         },
         "promotion": {
             "authority_summary": str(args.authority_summary),

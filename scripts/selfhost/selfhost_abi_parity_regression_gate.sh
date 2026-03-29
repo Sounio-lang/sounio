@@ -17,6 +17,37 @@ PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 
+fail_manifest() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+validate_support_class() {
+  local case_id="$1"
+  local kind="$2"
+  local support_class="$3"
+  case "$kind" in
+    run)
+      if [ "$support_class" != "x86-runtime-supported" ]; then
+        fail_manifest "case $case_id must use support_class=x86-runtime-supported for kind=run"
+      fi
+      ;;
+    aarch64-ok)
+      if [ "$support_class" != "aarch64-compile-proof" ]; then
+        fail_manifest "case $case_id must use support_class=aarch64-compile-proof for kind=aarch64-ok"
+      fi
+      ;;
+    aarch64-fail)
+      if [ "$support_class" != "aarch64-explicit-unsupported" ]; then
+        fail_manifest "case $case_id must use support_class=aarch64-explicit-unsupported for kind=aarch64-fail"
+      fi
+      ;;
+    *)
+      fail_manifest "case $case_id has unknown manifest kind: $kind"
+      ;;
+  esac
+}
+
 run_with_timeout() {
   local seconds="$1"
   shift
@@ -163,26 +194,15 @@ while IFS=$'\t' read -r case_id kind col3 col4 col5; do
     continue
   fi
 
-  local_support_class=""
-  local_program_path=""
-  local_expected=""
-  if [[ "${col3:-}" == *.sio ]] || [[ "${col3:-}" == tests/* ]]; then
-    local_program_path="${col3:-}"
-    local_expected="${col4:--}"
-    if [ "$kind" = "run" ]; then
-      local_support_class="x86-runtime-supported"
-    elif [ "$kind" = "aarch64-ok" ]; then
-      local_support_class="aarch64-compile-proof"
-    elif [ "$kind" = "aarch64-fail" ]; then
-      local_support_class="aarch64-explicit-unsupported"
-    else
-      local_support_class="unknown"
-    fi
-  else
-    local_support_class="${col3:-unknown}"
-    local_program_path="${col4:-}"
-    local_expected="${col5:--}"
+  local_support_class="${col3:-}"
+  local_program_path="${col4:-}"
+  local_expected="${col5:--}"
+
+  if [ -z "$local_support_class" ] || [ -z "$local_program_path" ]; then
+    fail_manifest "case $case_id must provide explicit support_class and program columns"
   fi
+
+  validate_support_class "$case_id" "$kind" "$local_support_class"
 
   if [ ! -f "$local_program_path" ]; then
     fail "$case_id" "missing program $local_program_path"

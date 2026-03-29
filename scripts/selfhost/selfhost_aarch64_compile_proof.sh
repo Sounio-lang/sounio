@@ -16,6 +16,32 @@ PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 
+fail_manifest() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+validate_support_class() {
+  local case_id="$1"
+  local support_class="$2"
+  local expected_status="$3"
+  case "$expected_status" in
+    ok)
+      if [ "$support_class" != "aarch64-compile-proof" ]; then
+        fail_manifest "case $case_id must use support_class=aarch64-compile-proof for expected_status=ok"
+      fi
+      ;;
+    fail)
+      if [ "$support_class" != "aarch64-explicit-unsupported" ]; then
+        fail_manifest "case $case_id must use support_class=aarch64-explicit-unsupported for expected_status=fail"
+      fi
+      ;;
+    *)
+      fail_manifest "case $case_id has unknown expected_status: $expected_status"
+      ;;
+  esac
+}
+
 run_with_timeout() {
   local seconds="$1"
   shift
@@ -151,25 +177,13 @@ while IFS=$'\t' read -r case_id col2 col3 col4 col5; do
     continue
   fi
 
-  local_support_class=""
-  local_program_path=""
-  local_expected_status=""
-  local_expected_pattern=""
+  local_support_class="${col2:-}"
+  local_program_path="${col3:-}"
+  local_expected_status="${col4:-ok}"
+  local_expected_pattern="${col5:--}"
 
-  if [[ "${col2:-}" == *.sio ]] || [[ "${col2:-}" == tests/* ]]; then
-    local_program_path="${col2:-}"
-    local_expected_status="${col3:-ok}"
-    local_expected_pattern="${col4:--}"
-    if [ "$local_expected_status" = "fail" ]; then
-      local_support_class="aarch64-explicit-unsupported"
-    else
-      local_support_class="aarch64-compile-proof"
-    fi
-  else
-    local_support_class="${col2:-unknown}"
-    local_program_path="${col3:-}"
-    local_expected_status="${col4:-ok}"
-    local_expected_pattern="${col5:--}"
+  if [ -z "$local_support_class" ] || [ -z "$local_program_path" ]; then
+    fail_manifest "case $case_id must provide explicit support_class and program columns"
   fi
 
   if [ ! -f "$local_program_path" ]; then
@@ -184,6 +198,8 @@ while IFS=$'\t' read -r case_id col2 col3 col4 col5; do
   if [ -z "${local_expected_pattern:-}" ]; then
     local_expected_pattern="-"
   fi
+
+  validate_support_class "$case_id" "$local_support_class" "$local_expected_status"
 
   run_case "$case_id" "$local_support_class" "$local_program_path" "$local_expected_status" "$local_expected_pattern"
 done <"$MANIFEST_PATH"

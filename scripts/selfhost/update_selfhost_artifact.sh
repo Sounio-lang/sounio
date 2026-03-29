@@ -42,6 +42,10 @@ python3 "$ROOT_DIR/scripts/selfhost/selfhost_artifact_attest.py" \
   --bootstrap-sha256 "$BOOTSTRAP_SHA256" \
   --provenance-out "$TARGET_PROVENANCE"
 
+env ARTIFACT_PATH="$TARGET_ARTIFACT" PROVENANCE_PATH="$TARGET_PROVENANCE" \
+  WORK_DIR="$WORK_DIR/provenance_verification" \
+  bash "$ROOT_DIR/scripts/selfhost/selfhost_artifact_provenance_gate.sh"
+
 echo "SELFHOST_ARTIFACT_UPDATE_DONE"
 echo "target_artifact=$TARGET_ARTIFACT"
 echo "target_provenance=$TARGET_PROVENANCE"
