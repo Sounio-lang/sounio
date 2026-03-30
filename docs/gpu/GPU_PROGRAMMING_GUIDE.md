@@ -9,6 +9,16 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.gpu.gpu-progra
 
 # GPU Programming Guide
 
+This guide describes the broader GPU implementation tree and the intended
+programming model. It is not, by itself, proof that every described surface is
+public in the checked GPU artifact.
+
+For the evidence-backed public contract and the canonical support classes, use:
+
+- `docs/features/GPU_RUNTIME.md`
+- `docs/compiler/GPU_KERNELS.md`
+- `docs/implementation/GPU_CAPABILITY_MODEL.md`
+
 Sounio GPU computing is a first-class part of the language. Kernels are declared with the `kernel fn` syntax, type-checked with the same bidirectional inference as the rest of the language, and lowered through a dedicated GPU IR pipeline (HLIR → GpuKernelIr) to three backends: PTX (CUDA), Metal (MSL), and SPIR-V (Vulkan/OpenCL). Epistemic uncertainty — `Knowledge<T>` and GUM-compliant shadow registers — propagates transparently through kernel execution.
 
 **Pipeline:**
@@ -70,6 +80,10 @@ kernel fn vec_scale(factor: f64, n: i64) with GPU, Div, Mut, Panic {
 ---
 
 ## 2. GPU Builtins
+
+The builtins in this section describe the implementation-facing GPU model.
+They should not be read as proof that the checked public GPU artifact already
+accepts every `gpu.*` form today.
 
 Inside a `kernel fn` body the following built-in names are available. They map to specific `GpuKernelIr` opcodes which the PTX emitter lowers to `%tid`, `%ctaid`, and `%ntid` special registers.
 

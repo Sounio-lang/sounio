@@ -23,6 +23,11 @@ There are two separate truths you need to hold at once:
 
 Contributor docs should always label which layer they are talking about.
 
+For the canonical support classes and repo-local gate entrypoints, use
+`docs/implementation/GPU_CAPABILITY_MODEL.md`. That document is now the source
+of truth for how GPU capability is classified as surface-only, lowering-backed,
+compile-proof, simulator-runtime, hardware-runtime, or explicitly unsupported.
+
 ## Public kernel contract
 
 Use the checked GPU artifact:

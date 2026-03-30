@@ -100,6 +100,21 @@ At the same time, support remains tiered:
 - source-tree implementation work without equal public runtime evidence yet:
   Metal, SPIR-V, WGSL/render, tensor-core tuning, and other advanced paths
 
+## Capability taxonomy
+
+Repo-local GPU support is now described with explicit classes:
+
+- `gpu-surface-supported`
+- `gpu-lowering-supported`
+- `gpu-compile-proof`
+- `gpu-sim-runtime-supported`
+- `gpu-hardware-runtime-supported`
+- `gpu-explicit-unsupported`
+
+Use `docs/implementation/GPU_CAPABILITY_MODEL.md` for the maintainer-facing
+mapping from examples/tests to those support classes and for the canonical gate
+entrypoints that validate each lane.
+
 ## 4. Where the implementation lives
 
 The main self-hosted GPU surface is under `self-hosted/gpu/`:
@@ -137,7 +152,9 @@ If public GPU docs, examples, or website copy change, rerun:
 
 ```bash
 bash scripts/omega/omega_gpu_public_contract_gate.sh
+bash scripts/gpu/gpu_surface_lowering_gate.sh
 ```
 
 That gate is the machine-readable check that the shipped GPU profile, examples,
-and public docs are still talking about the same thing.
+and public docs are still talking about the same thing. The second gate keeps
+the new GPU capability taxonomy aligned with the checked artifact surface.

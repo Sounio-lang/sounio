@@ -103,6 +103,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.implementation.completed-mega-project | historical | docs/implementation/COMPLETED_MEGA_PROJECT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.dead-code-analysis-summary | historical | docs/implementation/DEAD_CODE_ANALYSIS_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.final-integration-guide | historical | docs/implementation/FINAL_INTEGRATION_GUIDE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.gpu-capability-model | repo_only | docs/implementation/GPU_CAPABILITY_MODEL.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.gpu-compiler-contracts | repo_only | docs/implementation/GPU_COMPILER_CONTRACTS.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.hot-reload-complete | historical | docs/implementation/HOT_RELOAD_COMPLETE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.implementation-complete-report | historical | docs/implementation/IMPLEMENTATION_COMPLETE_REPORT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
