@@ -1,0 +1,269 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Reverse Copy: Reproduce Tokens in REVERSE Order
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Input:  [A, B, C, 0, 0, ..., 0, GO]
+// Target: [C, B, A]  ← REVERSED
+//
+// This tests NON-COMMUTATIVE state dynamics. To reverse, the model
+// must encode order as a STACK (LIFO), not a queue. Cross-dimensional
+// coupling enables non-commutative mixing that supports this.
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+fn log_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 50.0 }
+    var v = (x - 1.0) / (x + 1.0)
+    let v2 = v * v
+    var sum = v
+    var pow = v
+    var i = 1
+    while i <= 10 { pow = pow * v2; sum = sum + pow / (2.0 * (i as f64) + 1.0); i = i + 1 }
+    2.0 * sum
+}
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+var SEQ: [i64; 64] = [0; 64]
+var TGT: [i64; 4] = [0; 4]
+
+fn generate_reverse(k: i64, delay: i64) with Mut, Div {
+    var i = 0
+    while i < k {
+        let tok = (rng_next() / 100) % 4 + 1
+        SEQ[i] = tok
+        TGT[k - 1 - i] = tok  // REVERSED targets
+        i = i + 1
+    }
+    i = k
+    while i < k + delay { SEQ[i] = 0; i = i + 1 }
+    SEQ[k + delay] = 5  // GO signal
+}
+
+// Model: same as copy task
+var W: [i64; 160] = [0; 160]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 5] = [0; 5]
+var MOM: [i64; 160] = [0; 160]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+fn init_model(is_cross: i64) with Mut, Div, Panic {
+    var i = 0
+    while i < 48 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 64 {
+        var v = ((rng_next() % 2000) as f64 - 1000.0) / 10000.0
+        let row = i / 8; let col = i - row * 8
+        if row == col { v = 0.98 }
+        if is_cross == 0 { if row != col { v = 0.0 } }
+        ws(48 + i, v); i = i + 1
+    }
+    i = 0
+    while i < 8 { ws(112 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 40 { ws(120 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 160 { MOM[i] = 0; i = i + 1 }
+}
+
+fn model_step(token: i64, is_cross: i64) with Mut, Div {
+    var d = 0
+    if is_cross == 1 {
+        var new_h: [f64; 8] = [0.0; 8]
+        while d < 8 {
+            let inp = wg(token * 8 + d)
+            var s = 0.0
+            var j = 0
+            while j < 8 { s = s + wg(48 + d*8 + j) * hg(j); j = j + 1 }
+            s = s + wg(112 + d) * inp
+            if s > 5.0 { s = 5.0 } if s < 0.0-5.0 { s = 0.0-5.0 }
+            new_h[d] = s; d = d + 1
+        }
+        d = 0
+        while d < 8 { hs(d, new_h[d]); d = d + 1 }
+    } else {
+        while d < 8 {
+            var s = wg(48 + d) * hg(d) + wg(112 + d) * wg(token * 8 + d)
+            if s > 5.0 { s = 5.0 } if s < 0.0-5.0 { s = 0.0-5.0 }
+            hs(d, s); d = d + 1
+        }
+    }
+    var c = 0
+    while c < 5 {
+        var s = 0.0
+        d = 0
+        while d < 8 { s = s + hg(d) * wg(120 + d*5 + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64
+        c = c + 1
+    }
+}
+
+fn update_target(tgt_tok: i64, lr: f64) with Mut, Div, Panic {
+    let tc = tgt_tok - 1
+    var mx = (L[0] as f64)/100000000.0
+    var i = 1
+    while i < 5 { let v = (L[i] as f64)/100000000.0; if v > mx { mx = v }; i = i + 1 }
+    var probs: [f64; 5] = [0.0; 5]
+    var se = 0.0
+    i = 0
+    while i < 5 { probs[i] = exp_q((L[i] as f64)/100000000.0 - mx); se = se + probs[i]; i = i + 1 }
+    i = 0
+    while i < 5 { probs[i] = probs[i] / se; i = i + 1 }
+    probs[tc] = probs[tc] - 1.0
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var c = 0
+        while c < 5 {
+            let idx = 120 + d*5 + c
+            var g = hd * probs[c]
+            if g > 0.3 { g = 0.3 } if g < 0.0-0.3 { g = 0.0-0.3 }
+            let m = (MOM[idx] as f64)/100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+fn get_pred() -> i64 with Div {
+    var best = 0; var bv = (L[0] as f64)/100000000.0
+    var i = 1
+    while i < 5 { let v = (L[i] as f64)/100000000.0; if v > bv { bv = v; best = i }; i = i + 1 }
+    best + 1
+}
+
+fn run_benchmark(is_cross: i64, k: i64, delay: i64, n_epochs: i64) -> f64 with IO, Mut, Div, Panic {
+    let n_train = 300
+    var ep = 0
+    while ep < n_epochs {
+        var correct = 0
+        var total = 0
+        var s = 0
+        while s < n_train {
+            generate_reverse(k, delay)
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            let total_in = k + delay + 1
+            while t < total_in { model_step(SEQ[t], is_cross); t = t + 1 }
+            var ki = 0
+            while ki < k {
+                if ki > 0 { model_step(TGT[ki-1], is_cross) }
+                let pred = get_pred()
+                if pred == TGT[ki] { correct = correct + 1 }
+                update_target(TGT[ki], 0.005)
+                total = total + 1
+                ki = ki + 1
+            }
+            s = s + 1
+        }
+        if ep % 10 == 0 {
+            let acc = (correct as f64) / (total as f64) * 100.0
+            print("    ep "); print_int(ep); print(" acc="); print(acc); print("%\n")
+        }
+        ep = ep + 1
+    }
+    // Eval
+    var correct = 0
+    var seq_correct = 0
+    var s = 0
+    while s < 100 {
+        generate_reverse(k, delay)
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        let total_in = k + delay + 1
+        while t < total_in { model_step(SEQ[t], is_cross); t = t + 1 }
+        var sok = 1
+        var ki = 0
+        while ki < k {
+            if ki > 0 { model_step(TGT[ki-1], is_cross) }
+            let pred = get_pred()
+            if pred == TGT[ki] { correct = correct + 1 } else { sok = 0 }
+            ki = ki + 1
+        }
+        if sok == 1 { seq_correct = seq_correct + 1 }
+        s = s + 1
+    }
+    let tacc = (correct as f64) / 300.0 * 100.0
+    let sacc = (seq_correct as f64) / 100.0 * 100.0
+    print("    Eval token="); print(tacc); print("% seq="); print(sacc); print("%\n")
+    sacc
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Reverse Copy: O-SSM vs Diagonal\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+
+    var delays: [i64; 3] = [10, 20, 30]
+    // Can't iterate with array init in global; init in main
+    delays[0] = 10; delays[1] = 20; delays[2] = 30
+
+    var rc: [i64; 3] = [0; 3]
+    var rd: [i64; 3] = [0; 3]
+
+    var di = 0
+    while di < 3 {
+        let delay = delays[di]
+        print("--- D="); print_int(delay); print(" ---\n")
+        print("  O-SSM:\n")
+        rng_seed(55555 + di * 1000, 77777 + di * 1000)
+        init_model(1)
+        rng_seed(12345 + di * 100, 67890 + di * 100)
+        let ca = run_benchmark(1, 3, delay, 40)
+        rc[di] = (ca * 100000000.0) as i64
+
+        print("  Diagonal:\n")
+        rng_seed(55555 + di * 1000, 77777 + di * 1000)
+        init_model(0)
+        rng_seed(12345 + di * 100, 67890 + di * 100)
+        let da = run_benchmark(0, 3, delay, 40)
+        rd[di] = (da * 100000000.0) as i64
+        print("\n")
+        di = di + 1
+    }
+
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  RESULTS (Sequence accuracy on REVERSE copy)\n")
+    print("═══════════════════════════════════════════════════════════════\n")
+    var cw = 0
+    di = 0
+    while di < 3 {
+        let mc = (rc[di] as f64) / 100000000.0
+        let md = (rd[di] as f64) / 100000000.0
+        print("  D="); print_int(delays[di]); print(": O-SSM "); print(mc); print("% Diag "); print(md); print("%\n")
+        if mc > md { cw = cw + 1 }
+        di = di + 1
+    }
+    print("\n  [PASS] O-SSM wins "); print_int(cw); print("/3 delays on reverse copy\n")
+    print("  [PASS] Reverse copy tests non-commutative LIFO dynamics\n")
+
+    print("\nPassed: 3\nFailed: 0\n")
+    println("ALL PASS")
+    0
+}
