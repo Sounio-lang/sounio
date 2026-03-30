@@ -1,8 +1,8 @@
 # Hypercomplex Algebra Research Lane
 
 This directory contains the Wave 1 baseline plus the Wave 2 semantic-contract
-package and the Wave 3 prototype-safe scaffolding for hypercomplex algebra in
-the compiler.
+package, the Wave 3 prototype-safe scaffolding, and the Wave 4 compile-proof
+prototype harnesses for hypercomplex algebra in the compiler.
 
 Wave 1 baseline:
 
@@ -18,6 +18,11 @@ Wave 3 baseline:
 
 - builds on `hypercomplex-algebra-wave2`
 - baseline commit `55eb15cdc7e80069657e8033cb945afa4f1a8833`
+
+Wave 4 baseline:
+
+- builds on `hypercomplex-algebra-wave3`
+- baseline commit `8c71e758c4f8eb7cc986dac26212cb8ca320d927`
 
 Scope:
 
@@ -43,6 +48,7 @@ Files:
 - `roadmap.v1.json`: internal Wave 3 experiment frame
 - `expected_fail.v1.json`: Wave 3 forbidden-rewrite coverage, mixing executable counterexamples with explicit validation-only gaps
 - `compiler_audit.v1.json`: bounded internal audit seams for type, IR, and lowering touchpoints
+- `prototype_scaffolding.v1.json`: Wave 4 compile-proof and harness matrix for non-public compiler-facing scaffolding
 
 Validation:
 
@@ -50,6 +56,7 @@ Validation:
 bash scripts/research/hypercomplex_wave1_gate.sh
 bash scripts/research/hypercomplex_wave2_gate.sh
 bash scripts/research/hypercomplex_wave3_gate.sh
+bash scripts/research/hypercomplex_wave4_gate.sh
 ```
 
 What the baseline already contains:
@@ -87,6 +94,16 @@ What Wave 3 adds without changing support claims:
 - a Wave 3 validator that executes the safe witnesses and cross-checks the new
   manifests against Wave 1 and Wave 2
 
+What Wave 4 adds without changing support claims:
+
+- the first non-public compile-proof harnesses that deliberately exercise
+  `Hyper<...>` signatures, struct carriage, and algebra-declaration compile
+  paths through the real `compile` pipeline
+- a prototype scaffolding manifest that links compile-proof harnesses, runtime
+  harnesses, and forbidden-law validation into one bounded internal surface
+- a Wave 4 validator that requires Wave 3 to stay green and then compiles the
+  new Hyper fixtures through the canonical `resolve_souc.sh` path
+
 Current inventory summary:
 
 - active entries: 9
@@ -114,3 +131,5 @@ Wave 2 operating rule:
 - any future compiler experiment must stay bounded by `semantics.v1.json`
 - Wave 3 witnesses stay non-public and are not part of the normal run-pass or
   compile-fail suite
+- Wave 4 compile-proof harnesses are internal evidence for compiler carriage
+  only; they do not imply runtime, optimizer, or ABI support
