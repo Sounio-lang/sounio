@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bootstrap-summary")
     parser.add_argument("--bootstrap-sha256")
     parser.add_argument("--policy-file", default="scripts/selfhost/selfhost_promotion_policy.v1.json")
+    parser.add_argument("--repro-summary")
     return parser.parse_args()
 
 
@@ -82,6 +83,9 @@ def main() -> int:
     bootstrap = {}
     if args.bootstrap_summary:
         bootstrap = json.loads(Path(args.bootstrap_summary).read_text(encoding="utf-8"))
+    reproducible = {}
+    if args.repro_summary:
+        reproducible = json.loads(Path(args.repro_summary).read_text(encoding="utf-8"))
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
 
     fixed_point = extract_fixed_point(authority)
@@ -109,7 +113,7 @@ def main() -> int:
         )
 
     report = {
-        "schema": "sounio.selfhost_artifact_provenance.v3",
+        "schema": "sounio.selfhost_artifact_provenance.v4",
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "git": {
             "attestation_commit": git_output("rev-parse", "HEAD"),
@@ -143,6 +147,26 @@ def main() -> int:
         "target_taxonomy": {
             "allowed_support_classes": policy["allowed_support_classes"],
             "manifests": taxonomy_manifests,
+        },
+        "trust_planes": {
+            "canonical": {
+                "plane": "repo_local_provenance",
+                "canonical": True,
+                "status": "pass",
+                "verification_entrypoint": policy["entrypoints"]["provenance_gate"],
+            },
+            "supplemental": {
+                "plane": "repo_local_reproducible_bootstrap",
+                "canonical": False,
+                "status": reproducible.get("overall_status", "unknown"),
+                "entrypoint": policy["entrypoints"].get("reproducible_bootstrap_gate", ""),
+                "artifact_sha256": reproducible.get("artifact_sha256", ""),
+                "gen1_sha256": reproducible.get("gen1_sha256", ""),
+                "gen2_sha256": reproducible.get("gen2_sha256", ""),
+                "gen3_sha256": reproducible.get("gen3_sha256", ""),
+                "gen2_md5": reproducible.get("gen2_md5", ""),
+                "gen3_md5": reproducible.get("gen3_md5", ""),
+            },
         },
         "promotion": {
             "authority_summary": str(args.authority_summary),

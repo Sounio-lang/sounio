@@ -22,6 +22,7 @@ SUPPORTED_SCHEMAS = {
     "sounio.selfhost_artifact_provenance.v1",
     "sounio.selfhost_artifact_provenance.v2",
     "sounio.selfhost_artifact_provenance.v3",
+    "sounio.selfhost_artifact_provenance.v4",
 }
 
 
@@ -95,6 +96,7 @@ def main() -> int:
     source = provenance.get("source", {})
     policy_meta = provenance.get("policy", {})
     taxonomy = provenance.get("target_taxonomy", {})
+    trust_planes = provenance.get("trust_planes", {})
     integrity = provenance.get("integrity", {})
     fixed_point = promotion.get("fixed_point", {})
     gates_run = promotion.get("gates_run", [])
@@ -216,6 +218,94 @@ def main() -> int:
             else:
                 if sha256_bytes(blob) != source.get("sha256", ""):
                     errors.append("artifact_source_commit does not match recorded source sha256")
+
+        integrity_payload = dict(provenance)
+        integrity_payload.pop("integrity", None)
+        expected_payload_sha = stable_sha256_payload(integrity_payload)
+        if integrity.get("payload_sha256", "") != expected_payload_sha:
+            errors.append("integrity payload sha256 does not match canonical provenance payload")
+
+    if schema == "sounio.selfhost_artifact_provenance.v4":
+        required_fields = policy.get("required_provenance_fields", [])
+        for key in required_fields:
+            if key not in provenance:
+                errors.append(f"missing required provenance field: {key}")
+
+        recorded_policy_file = policy_meta.get("policy_file", "")
+        if recorded_policy_file != str(policy_path):
+            errors.append("policy file path does not match current policy path")
+        if policy_meta.get("policy_sha256", "") != sha256_file(policy_path):
+            errors.append("policy sha256 does not match current policy file")
+
+        required_checks_path = policy_meta.get("required_checks_manifest", "")
+        if not required_checks_path:
+            errors.append("missing required_checks_manifest in provenance")
+        else:
+            required_checks_file = Path(required_checks_path)
+            if not required_checks_file.is_file():
+                errors.append(f"missing required checks manifest: {required_checks_path}")
+            elif policy_meta.get("required_checks_manifest_sha256", "") != sha256_file(required_checks_file):
+                errors.append("required checks manifest sha256 does not match current file")
+
+        allowed_support_classes = set(policy.get("allowed_support_classes", []))
+        recorded_allowed_support_classes = set(taxonomy.get("allowed_support_classes", []))
+        if recorded_allowed_support_classes != allowed_support_classes:
+            errors.append("recorded allowed support classes do not match policy")
+
+        recorded_manifest_paths: set[str] = set()
+        expected_manifest_paths: set[str] = set()
+        for manifest_key, manifest_path in policy.get("manifests", {}).items():
+            if manifest_key == "required_checks":
+                continue
+            expected_manifest_paths.add(manifest_path)
+        for manifest in taxonomy.get("manifests", []):
+            manifest_path = Path(manifest.get("path", ""))
+            if manifest.get("path", ""):
+                recorded_manifest_paths.add(manifest.get("path", ""))
+            if not manifest_path.is_file():
+                errors.append(f"missing taxonomy manifest: {manifest.get('path', '')}")
+                continue
+            if manifest.get("sha256", "") != sha256_file(manifest_path):
+                errors.append(f"taxonomy manifest sha256 does not match current file: {manifest_path}")
+            for support_class in manifest.get("support_classes", []):
+                if support_class not in allowed_support_classes:
+                    errors.append(f"taxonomy manifest uses unsupported support_class: {support_class}")
+        if recorded_manifest_paths != expected_manifest_paths:
+            errors.append("taxonomy manifest set does not match promotion policy manifests")
+
+        artifact_source_commit = provenance.get("git", {}).get("artifact_source_commit", "")
+        if not artifact_source_commit or artifact_source_commit == "unknown":
+            errors.append("missing artifact_source_commit in provenance")
+        elif source_path_value:
+            blob = git_show_blob(artifact_source_commit, source_path_value)
+            if blob is None:
+                errors.append("artifact_source_commit does not resolve the recorded source path")
+            else:
+                if sha256_bytes(blob) != source.get("sha256", ""):
+                    errors.append("artifact_source_commit does not match recorded source sha256")
+
+        canonical_plane = trust_planes.get("canonical", {})
+        supplemental_plane = trust_planes.get("supplemental", {})
+        if canonical_plane.get("plane", "") != "repo_local_provenance":
+            errors.append("canonical trust plane is not repo_local_provenance")
+        if canonical_plane.get("status", "") != "pass":
+            errors.append("canonical trust plane is not pass")
+        if canonical_plane.get("verification_entrypoint", "") != policy_meta.get("verification_entrypoint", ""):
+            errors.append("canonical trust plane verification entrypoint does not match policy")
+        if supplemental_plane.get("plane", "") != "repo_local_reproducible_bootstrap":
+            errors.append("supplemental trust plane is not repo_local_reproducible_bootstrap")
+        if supplemental_plane.get("status", "") != "pass":
+            errors.append("supplemental trust plane is not pass")
+        if supplemental_plane.get("entrypoint", "") != policy["entrypoints"].get("reproducible_bootstrap_gate", ""):
+            errors.append("supplemental trust plane entrypoint does not match policy")
+        if supplemental_plane.get("artifact_sha256", "") != actual_sha256:
+            errors.append("supplemental trust plane artifact sha256 does not match checked artifact")
+        if supplemental_plane.get("gen1_sha256", "") != actual_sha256:
+            errors.append("supplemental trust plane gen1 sha256 does not match checked artifact")
+        if supplemental_plane.get("gen2_sha256", "") != actual_sha256:
+            errors.append("supplemental trust plane gen2 sha256 does not match checked artifact")
+        if supplemental_plane.get("gen3_sha256", "") != actual_sha256:
+            errors.append("supplemental trust plane gen3 sha256 does not match checked artifact")
 
         integrity_payload = dict(provenance)
         integrity_payload.pop("integrity", None)

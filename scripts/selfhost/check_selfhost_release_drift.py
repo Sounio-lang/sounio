@@ -73,9 +73,9 @@ def main() -> int:
 
     policy_entrypoints = policy.get("entrypoints", {})
     for label, rel_path in policy_entrypoints.items():
-        if label in {"authority_gate", "focused_abi_gate", "promotion_entrypoint", "aarch64_runtime_gate"}:
+        if label in {"authority_gate", "focused_abi_gate", "promotion_entrypoint", "aarch64_runtime_gate", "reproducible_bootstrap_gate", "dual_trust_gate"}:
             require_text(release_doc, rel_path, f"release doc entrypoint {label}", errors)
-        if label in {"authority_gate", "focused_abi_gate", "provenance_gate", "aarch64_runtime_gate"}:
+        if label in {"authority_gate", "focused_abi_gate", "provenance_gate", "aarch64_runtime_gate", "dual_trust_gate"}:
             require_text(authority_doc, rel_path, f"authority doc entrypoint {label}", errors)
 
     require_text(authority_doc, "authority: repo_only", "authority doc metadata", errors)

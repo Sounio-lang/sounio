@@ -2,8 +2,8 @@
 topic_id: repo.docs.implementation.selfhost-authority-model
 authority: repo_only
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A7
+last_validated: 2026-03-30
+validated_by: A12
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.selfhost-authority-model
 -->
 
@@ -27,6 +27,8 @@ Use it to answer:
 - focused ABI/parity gate: [`scripts/selfhost/selfhost_ci_abi_parity_gate.sh`](../../scripts/selfhost/selfhost_ci_abi_parity_gate.sh)
 - canonical AArch64 runtime gate: [`scripts/selfhost/selfhost_aarch64_runtime_gate.sh`](../../scripts/selfhost/selfhost_aarch64_runtime_gate.sh)
 - provenance verification gate: [`scripts/selfhost/selfhost_artifact_provenance_gate.sh`](../../scripts/selfhost/selfhost_artifact_provenance_gate.sh)
+- dual trust gate: [`scripts/selfhost/selfhost_dual_trust_gate.sh`](../../scripts/selfhost/selfhost_dual_trust_gate.sh)
+- reproducible bootstrap gate: [`scripts/selfhost/selfhost_reproducible_bootstrap_gate.sh`](../../scripts/selfhost/selfhost_reproducible_bootstrap_gate.sh)
 - source↔artifact parity gate: [`scripts/selfhost/selfhost_source_artifact_parity_gate.sh`](../../scripts/selfhost/selfhost_source_artifact_parity_gate.sh)
 - fixed-point gate: [`scripts/selfhost/selfhost_x86_fixed_point_gate.sh`](../../scripts/selfhost/selfhost_x86_fixed_point_gate.sh)
 - artifact promotion entrypoint: [`scripts/selfhost/update_selfhost_artifact.sh`](../../scripts/selfhost/update_selfhost_artifact.sh)
@@ -101,6 +103,28 @@ Review expectation:
 - `aarch64-explicit-unsupported`: expected-fail paths that must reject with a named diagnostic
 
 The manifests under `tests/selfhost/` are the active taxonomy surface. Current runtime-supported AArch64 cases are tracked in `tests/selfhost/aarch64_runtime/manifest.tsv`; unsupported paths must be recorded as expected-fail coverage instead of succeeding silently.
+
+Current promoted AArch64 runtime-supported cases include:
+
+- closure capture
+- direct aggregate return
+- closure aggregate return
+- closure struct return
+- closure literals with more than 7 user parameters
+- large import
+
+## Trust planes
+
+Canonical trust plane:
+
+- repo-local provenance verification via [`scripts/selfhost/selfhost_artifact_provenance_gate.sh`](../../scripts/selfhost/selfhost_artifact_provenance_gate.sh)
+
+Supplemental trust plane:
+
+- repo-local reproducible bootstrap via [`scripts/selfhost/selfhost_reproducible_bootstrap_gate.sh`](../../scripts/selfhost/selfhost_reproducible_bootstrap_gate.sh)
+- combined enforcement via [`scripts/selfhost/selfhost_dual_trust_gate.sh`](../../scripts/selfhost/selfhost_dual_trust_gate.sh)
+
+Hosted artifact attestation is not assumed in this repo model. The canonical policy stays repo-local so release discipline does not depend on plan-specific hosting features.
 
 ## Fallback debt status
 

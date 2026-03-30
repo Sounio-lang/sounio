@@ -2,8 +2,8 @@
 topic_id: repo.docs.implementation.selfhost-debt-register
 authority: repo_only
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A7
+last_validated: 2026-03-30
+validated_by: A12
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.selfhost-debt-register
 -->
 
@@ -25,10 +25,10 @@ This file is the short deferred-debt register for the self-hosted compiler autho
   - severity: medium
   - note: normal supported path is caller-owned SRET; shared aggregate BSS codegen is no longer emitted here
 
-- AArch64 closure literals
+- AArch64 runtime surface expansion
   - class: transitional implementation debt
   - severity: medium
-  - note: runtime validation now exists for the current focused closure surface; `>7` user-parameter closure literals remain explicitly fenced unsupported and broader runtime coverage still needs expansion
+  - note: closure literals now cover runtime-validated capture, aggregate return, closure-expression aggregate return, closure struct return, large import, and `>7` user-parameter closure calls; broader runtime promotion still needs additional cases such as `ref_inner_struct_field`
 
 - `legacy_native_acceptance` non-green baseline
   - class: baseline inherited noise
@@ -40,10 +40,15 @@ This file is the short deferred-debt register for the self-hosted compiler autho
   - severity: medium
   - note: repo-local model is explicit; hosted branch protection still needs maintainer application
 
+- hosted artifact attestation
+  - class: CI/governance follow-up
+  - severity: low
+  - note: repo-local provenance plus repo-local reproducible bootstrap is the active trust model; hosted attestation remains optional and should only be added when the repo/plan context supports it cleanly
+
 ## Next candidate wave
 
 Highest-value implementation wave after governance hardening:
 
 - eliminate the remaining fenced missing-SRET sites once all callers are proven to supply hidden result buffers
-- expand AArch64 runtime coverage beyond the current focused closure and aggregate-return surface
+- expand AArch64 runtime coverage beyond the current promoted closure, aggregate-return, and large-import surface
 - reclassify additional AArch64 paths from compile-proof to runtime-supported only after runtime tests prove them

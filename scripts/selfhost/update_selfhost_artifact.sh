@@ -13,6 +13,8 @@ WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-artifact-update}"
 
 BOOTSTRAP_WORK_DIR="$WORK_DIR/bootstrap_authority"
 PROMOTION_WORK_DIR="$WORK_DIR/promotion_authority"
+REPRO_WORK_DIR="$WORK_DIR/reproducible_bootstrap"
+DUAL_TRUST_WORK_DIR="$WORK_DIR/dual_trust"
 BOOTSTRAP_COPY="$WORK_DIR/bootstrap-artifact.bin"
 
 mkdir -p "$WORK_DIR"
@@ -58,6 +60,9 @@ chmod +x "$TARGET_ARTIFACT"
 env SOUC_NATIVE="$TARGET_ARTIFACT" WORK_DIR="$PROMOTION_WORK_DIR" \
   bash "$ROOT_DIR/scripts/selfhost/selfhost_authority_gate.sh"
 
+env ARTIFACT_BIN="$TARGET_ARTIFACT" SOURCE_FILE="$SOURCE_FILE" WORK_DIR="$REPRO_WORK_DIR" \
+  bash "$ROOT_DIR/scripts/selfhost/selfhost_reproducible_bootstrap_gate.sh"
+
 python3 "$ROOT_DIR/scripts/selfhost/selfhost_artifact_attest.py" \
   --artifact "$TARGET_ARTIFACT" \
   --source "$SOURCE_FILE" \
@@ -65,11 +70,16 @@ python3 "$ROOT_DIR/scripts/selfhost/selfhost_artifact_attest.py" \
   --bootstrap-summary "$BOOTSTRAP_WORK_DIR/artifacts/summary.v2.json" \
   --bootstrap-sha256 "$BOOTSTRAP_SHA256" \
   --policy-file "$POLICY_FILE" \
+  --repro-summary "$REPRO_WORK_DIR/artifacts/summary.v1.json" \
   --provenance-out "$TARGET_PROVENANCE"
 
 env ARTIFACT_PATH="$TARGET_ARTIFACT" PROVENANCE_PATH="$TARGET_PROVENANCE" POLICY_FILE="$POLICY_FILE" \
   WORK_DIR="$WORK_DIR/provenance_verification" \
   bash "$ROOT_DIR/scripts/selfhost/selfhost_artifact_provenance_gate.sh"
+
+env ARTIFACT_PATH="$TARGET_ARTIFACT" PROVENANCE_PATH="$TARGET_PROVENANCE" POLICY_FILE="$POLICY_FILE" \
+  SOURCE_FILE="$SOURCE_FILE" WORK_DIR="$DUAL_TRUST_WORK_DIR" \
+  bash "$ROOT_DIR/scripts/selfhost/selfhost_dual_trust_gate.sh"
 
 echo "SELFHOST_ARTIFACT_UPDATE_DONE"
 echo "target_artifact=$TARGET_ARTIFACT"
