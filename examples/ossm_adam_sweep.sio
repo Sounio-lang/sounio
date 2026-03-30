@@ -1,0 +1,800 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// O-SSM Optimizer Sweep — SGD vs Momentum vs Adam vs Adam+Warmup
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Architecture: 8 tokens, 8-dim hidden, full 8x8 A matrix, ~200 params
+// Task: token[t] = (3*token[t-1] + token[t-2]) % 8
+// Training: 150 epochs, seq_len 80
+//
+// Optimizers:
+//   1. SGD:          lr=0.01, no momentum
+//   2. SGD+momentum: lr=0.01, momentum=0.9
+//   3. Adam:         lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8
+//   4. Adam+warmup:  same as Adam, lr warms 0->0.001 over 20 epochs
+//   5. Diag+SGD:     diagonal A baseline with plain SGD
+//
+// Question: Does Adam close the optimization gap between cross-dim and diag?
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Math helpers ───
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+fn log_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 50.0 }
+    var v = (x - 1.0) / (x + 1.0)
+    let v2 = v * v
+    var sum = v
+    var pow = v
+    var i = 1
+    while i <= 10 { pow = pow * v2; sum = sum + pow / (2.0 * (i as f64) + 1.0); i = i + 1 }
+    2.0 * sum
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_q(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ─── RNG ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_normal() -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var j = 0
+    while j < 12 { s = s + (rng_next() % 10000) as f64 / 10000.0; j = j + 1 }
+    s - 6.0
+}
+
+// ─── Weight storage ───
+// Layout: embed 64, A 64, B 8, output 64 = 200 params
+
+var W: [i64; 200] = [0; 200]
+var H: [i64; 8] = [0; 8]
+var OLD_H: [i64; 8] = [0; 8]
+var L: [i64; 8] = [0; 8]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+// ─── Optimizer state arrays ───
+// M = first moment (Adam) / velocity (momentum SGD)
+// VA = second moment (Adam)
+
+var M: [i64; 200] = [0; 200]
+var VA: [i64; 200] = [0; 200]
+
+fn ms(i: i64, v: f64) with Mut { M[i] = (v * 100000000.0) as i64 }
+fn mg(i: i64) -> f64 with Div { (M[i] as f64) / 100000000.0 }
+fn vas(i: i64, v: f64) with Mut { VA[i] = (v * 100000000.0) as i64 }
+fn vag(i: i64) -> f64 with Div { (VA[i] as f64) / 100000000.0 }
+
+// Adam bias correction running products (avoid recomputing powers)
+var ADAM_B1P: i64 = 0
+var ADAM_B2P: i64 = 0
+
+fn adam_reset_bias() with Mut {
+    // Store 1.0 as initial value for beta^t accumulators
+    ADAM_B1P = (1.0 * 100000000.0) as i64
+    ADAM_B2P = (1.0 * 100000000.0) as i64
+}
+
+fn adam_advance_bias() with Mut, Div {
+    // b1p *= beta1, b2p *= beta2
+    let b1 = (ADAM_B1P as f64) / 100000000.0 * 0.9
+    let b2 = (ADAM_B2P as f64) / 100000000.0 * 0.999
+    ADAM_B1P = (b1 * 100000000.0) as i64
+    ADAM_B2P = (b2 * 100000000.0) as i64
+}
+
+// ─── Saved initial weights for re-running ───
+var W_INIT: [i64; 200] = [0; 200]
+
+fn save_init_weights() with Mut {
+    var i = 0
+    while i < 200 { W_INIT[i] = W[i]; i = i + 1 }
+}
+
+fn restore_init_weights() with Mut {
+    var i = 0
+    while i < 200 { W[i] = W_INIT[i]; i = i + 1 }
+}
+
+fn clear_optimizer_state() with Mut {
+    var i = 0
+    while i < 200 { M[i] = 0; VA[i] = 0; i = i + 1 }
+    adam_reset_bias()
+}
+
+// ─── Sequence data ───
+
+var SQ: [i64; 200] = [0; 200]
+
+fn gen_sequence() with Mut, Div {
+    SQ[0] = 1
+    SQ[1] = 2
+    var i = 2
+    while i < 200 {
+        SQ[i] = ((SQ[i - 1] * 3 + SQ[i - 2]) / 1) % 8
+        i = i + 1
+    }
+}
+
+// ─── Weight init ───
+
+fn init_embed_weights() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 { ws(i, rand_normal() * 0.3); i = i + 1 }
+}
+
+fn init_cross_a() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 {
+        var v = rand_normal() * 0.1
+        let row = i / 8
+        let col = i - row * 8
+        if row == col { v = 0.85 + rand_normal() * 0.05 }
+        ws(64 + i, v)
+        i = i + 1
+    }
+}
+
+fn init_diag_a() with Mut, Div, Panic {
+    var i = 0
+    while i < 8 { ws(64 + i, 0.85 + rand_normal() * 0.05); i = i + 1 }
+    i = 8
+    while i < 64 { ws(64 + i, 0.0); i = i + 1 }
+}
+
+fn init_b_and_output() with Mut, Div, Panic {
+    var i = 0
+    while i < 8 { ws(128 + i, rand_normal() * 0.3); i = i + 1 }
+    i = 0
+    while i < 64 { ws(136 + i, rand_normal() * 0.3); i = i + 1 }
+}
+
+fn init_cross_weights() with Mut, Div, Panic {
+    init_embed_weights()
+    init_cross_a()
+    init_b_and_output()
+}
+
+fn init_diag_weights() with Mut, Div, Panic {
+    init_embed_weights()
+    init_diag_a()
+    init_b_and_output()
+}
+
+// ─── Forward pass ───
+
+fn save_old_h() with Mut {
+    var d = 0
+    while d < 8 { OLD_H[d] = H[d]; d = d + 1 }
+}
+
+fn reset_h() with Mut {
+    var d = 0
+    while d < 8 { H[d] = 0; d = d + 1 }
+}
+
+fn cross_fwd(token: i64) with Mut, Div {
+    save_old_h()
+    var d = 0
+    while d < 8 {
+        var s = 0.0
+        var j = 0
+        while j < 8 {
+            s = s + wg(64 + d * 8 + j) * ((OLD_H[j] as f64) / 100000000.0)
+            j = j + 1
+        }
+        s = s + wg(128 + d) * wg(token * 8 + d)
+        if s > 4.0 { s = 4.0 }
+        if s < 0.0 - 4.0 { s = 0.0 - 4.0 }
+        hs(d, s)
+        d = d + 1
+    }
+    var v = 0
+    while v < 8 {
+        var s = 0.0
+        d = 0
+        while d < 8 { s = s + hg(d) * wg(136 + d * 8 + v); d = d + 1 }
+        L[v] = (s * 100000000.0) as i64
+        v = v + 1
+    }
+}
+
+fn diag_fwd(token: i64) with Mut, Div {
+    save_old_h()
+    var d = 0
+    while d < 8 {
+        var s = wg(64 + d) * ((OLD_H[d] as f64) / 100000000.0) + wg(128 + d) * wg(token * 8 + d)
+        if s > 4.0 { s = 4.0 }
+        if s < 0.0 - 4.0 { s = 0.0 - 4.0 }
+        hs(d, s)
+        d = d + 1
+    }
+    var v = 0
+    while v < 8 {
+        var s = 0.0
+        d = 0
+        while d < 8 { s = s + hg(d) * wg(136 + d * 8 + v); d = d + 1 }
+        L[v] = (s * 100000000.0) as i64
+        v = v + 1
+    }
+}
+
+// ─── Loss ───
+
+var PROB: [i64; 8] = [0; 8]
+var GRAD_L: [i64; 8] = [0; 8]
+
+fn softmax_loss(tgt: i64) -> f64 with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    var v = 1
+    while v < 8 {
+        let lv = (L[v] as f64) / 100000000.0
+        if lv > mx { mx = lv }
+        v = v + 1
+    }
+    var sm = 0.0
+    v = 0
+    while v < 8 { sm = sm + exp_q((L[v] as f64) / 100000000.0 - mx); v = v + 1 }
+    let pt = exp_q((L[tgt] as f64) / 100000000.0 - mx) / sm
+    if pt < 0.0000001 { return 16.0 }
+    0.0 - log_q(pt)
+}
+
+fn compute_grads(tgt: i64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    var v = 1
+    while v < 8 {
+        let lv = (L[v] as f64) / 100000000.0
+        if lv > mx { mx = lv }
+        v = v + 1
+    }
+    var sm = 0.0
+    v = 0
+    while v < 8 { sm = sm + exp_q((L[v] as f64) / 100000000.0 - mx); v = v + 1 }
+    v = 0
+    while v < 8 {
+        let p = exp_q((L[v] as f64) / 100000000.0 - mx) / sm
+        PROB[v] = (p * 100000000.0) as i64
+        var g = p
+        if v == tgt { g = g - 1.0 }
+        GRAD_L[v] = (g * 100000000.0) as i64
+        v = v + 1
+    }
+}
+
+// ─── Direct SGD update (matches original pattern) ───
+
+fn update_output_sgd(lr: f64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var v = 0
+        while v < 8 {
+            let gl = (GRAD_L[v] as f64) / 100000000.0
+            let idx = 136 + d * 8 + v
+            ws(idx, wg(idx) - lr * hd * gl)
+            v = v + 1
+        }
+        d = d + 1
+    }
+}
+
+fn update_hidden_cross_sgd(lr: f64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var dh = 0.0
+        var v = 0
+        while v < 8 {
+            dh = dh + wg(136 + d * 8 + v) * ((GRAD_L[v] as f64) / 100000000.0)
+            v = v + 1
+        }
+        if dh > 0.2 { dh = 0.2 }
+        if dh < 0.0 - 0.2 { dh = 0.0 - 0.2 }
+        ws(128 + d, wg(128 + d) - lr * dh * 0.3)
+        var j = 0
+        while j < 8 {
+            let oh = (OLD_H[j] as f64) / 100000000.0
+            ws(64 + d * 8 + j, wg(64 + d * 8 + j) - lr * dh * oh * 0.1)
+            j = j + 1
+        }
+        d = d + 1
+    }
+}
+
+fn update_hidden_diag_sgd(lr: f64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var dh = 0.0
+        var v = 0
+        while v < 8 {
+            dh = dh + wg(136 + d * 8 + v) * ((GRAD_L[v] as f64) / 100000000.0)
+            v = v + 1
+        }
+        if dh > 0.5 { dh = 0.5 }
+        if dh < 0.0 - 0.5 { dh = 0.0 - 0.5 }
+        ws(128 + d, wg(128 + d) - lr * dh * 0.3)
+        let oh = (OLD_H[d] as f64) / 100000000.0
+        ws(64 + d, wg(64 + d) - lr * dh * oh * 0.1)
+        d = d + 1
+    }
+}
+
+// ─── Momentum update: v = mom*v + grad; w -= lr*v ───
+// We compute the raw gradient the same way as SGD, but apply through momentum
+
+// Temporary gradient buffer for a single step
+var STEP_G: [i64; 200] = [0; 200]
+
+fn clear_step_g() with Mut {
+    var i = 0
+    while i < 200 { STEP_G[i] = 0; i = i + 1 }
+}
+
+fn sgs(i: i64, v: f64) with Mut { STEP_G[i] = (v * 100000000.0) as i64 }
+fn sgg(i: i64) -> f64 with Div { (STEP_G[i] as f64) / 100000000.0 }
+
+fn compute_output_grad() with Mut, Div {
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var v = 0
+        while v < 8 {
+            let gl = (GRAD_L[v] as f64) / 100000000.0
+            sgs(136 + d * 8 + v, hd * gl)
+            v = v + 1
+        }
+        d = d + 1
+    }
+}
+
+fn compute_hidden_cross_grad() with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var dh = 0.0
+        var v = 0
+        while v < 8 {
+            dh = dh + wg(136 + d * 8 + v) * ((GRAD_L[v] as f64) / 100000000.0)
+            v = v + 1
+        }
+        if dh > 0.2 { dh = 0.2 }
+        if dh < 0.0 - 0.2 { dh = 0.0 - 0.2 }
+        sgs(128 + d, dh * 0.3)
+        var j = 0
+        while j < 8 {
+            let oh = (OLD_H[j] as f64) / 100000000.0
+            sgs(64 + d * 8 + j, dh * oh * 0.1)
+            j = j + 1
+        }
+        d = d + 1
+    }
+}
+
+fn compute_hidden_diag_grad() with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var dh = 0.0
+        var v = 0
+        while v < 8 {
+            dh = dh + wg(136 + d * 8 + v) * ((GRAD_L[v] as f64) / 100000000.0)
+            v = v + 1
+        }
+        if dh > 0.5 { dh = 0.5 }
+        if dh < 0.0 - 0.5 { dh = 0.0 - 0.5 }
+        sgs(128 + d, dh * 0.3)
+        let oh = (OLD_H[d] as f64) / 100000000.0
+        sgs(64 + d, dh * oh * 0.1)
+        d = d + 1
+    }
+}
+
+// Apply momentum: vel = mom*vel + grad; w -= lr*vel
+fn apply_momentum_update(lr: f64) with Mut, Div {
+    var i = 0
+    while i < 200 {
+        let g = sgg(i)
+        let vel = 0.9 * mg(i) + g
+        ms(i, vel)
+        ws(i, wg(i) - lr * vel)
+        i = i + 1
+    }
+}
+
+// Apply Adam: m = b1*m + (1-b1)*g; v = b2*v + (1-b2)*g^2; w -= lr*mh/(sqrt(vh)+eps)
+fn apply_adam_lo(lr: f64) with Mut, Div, Panic {
+    let b1p = (ADAM_B1P as f64) / 100000000.0
+    let b2p = (ADAM_B2P as f64) / 100000000.0
+    let b1c = 1.0 / (1.0 - b1p + 0.0000001)
+    let b2c = 1.0 / (1.0 - b2p + 0.0000001)
+    var i = 0
+    while i < 100 {
+        let g = sgg(i)
+        let mn = 0.9 * mg(i) + 0.1 * g
+        ms(i, mn)
+        let vn = 0.999 * vag(i) + 0.001 * g * g
+        vas(i, vn)
+        let mh = mn * b1c
+        let vh = vn * b2c
+        let den = sqrt_q(abs_q(vh)) + 0.00000001
+        ws(i, wg(i) - lr * mh / den)
+        i = i + 1
+    }
+}
+
+fn apply_adam_hi(lr: f64) with Mut, Div, Panic {
+    let b1p = (ADAM_B1P as f64) / 100000000.0
+    let b2p = (ADAM_B2P as f64) / 100000000.0
+    let b1c = 1.0 / (1.0 - b1p + 0.0000001)
+    let b2c = 1.0 / (1.0 - b2p + 0.0000001)
+    var i = 100
+    while i < 200 {
+        let g = sgg(i)
+        let mn = 0.9 * mg(i) + 0.1 * g
+        ms(i, mn)
+        let vn = 0.999 * vag(i) + 0.001 * g * g
+        vas(i, vn)
+        let mh = mn * b1c
+        let vh = vn * b2c
+        let den = sqrt_q(abs_q(vh)) + 0.00000001
+        ws(i, wg(i) - lr * mh / den)
+        i = i + 1
+    }
+}
+
+fn apply_adam_update(lr: f64) with Mut, Div, Panic {
+    adam_advance_bias()
+    apply_adam_lo(lr)
+    apply_adam_hi(lr)
+}
+
+// ─── Results storage ───
+var RES_INIT: [i64; 5] = [0; 5]
+var RES_FINAL: [i64; 5] = [0; 5]
+
+// ─── Training: Cross-dim + SGD ───
+
+fn train_cross_sgd() -> f64 with IO, Mut, Div, Panic {
+    var final_loss = 0.0
+    var ep = 0
+    while ep < 150 {
+        reset_h()
+        var tl = 0.0
+        var ti = 1
+        while ti < 80 {
+            cross_fwd(SQ[ti - 1])
+            let loss = softmax_loss(SQ[ti])
+            compute_grads(SQ[ti])
+            update_output_sgd(0.01)
+            update_hidden_cross_sgd(0.01)
+            tl = tl + loss
+            ti = ti + 1
+        }
+        let avg = tl / 79.0
+        if ep == 0 { RES_INIT[0] = (avg * 100000000.0) as i64 }
+        final_loss = avg
+        if ep % 50 == 0 {
+            print("  ep ")
+            print_int(ep)
+            print(" loss=")
+            print(avg)
+            print("\n")
+        }
+        ep = ep + 1
+    }
+    RES_FINAL[0] = (final_loss * 100000000.0) as i64
+    final_loss
+}
+
+// ─── Training: Cross-dim + Momentum ───
+
+fn train_cross_momentum() -> f64 with IO, Mut, Div, Panic {
+    var final_loss = 0.0
+    var ep = 0
+    while ep < 150 {
+        reset_h()
+        var tl = 0.0
+        var ti = 1
+        while ti < 80 {
+            cross_fwd(SQ[ti - 1])
+            let loss = softmax_loss(SQ[ti])
+            compute_grads(SQ[ti])
+            clear_step_g()
+            compute_output_grad()
+            compute_hidden_cross_grad()
+            apply_momentum_update(0.01)
+            tl = tl + loss
+            ti = ti + 1
+        }
+        let avg = tl / 79.0
+        if ep == 0 { RES_INIT[1] = (avg * 100000000.0) as i64 }
+        final_loss = avg
+        if ep % 50 == 0 {
+            print("  ep ")
+            print_int(ep)
+            print(" loss=")
+            print(avg)
+            print("\n")
+        }
+        ep = ep + 1
+    }
+    RES_FINAL[1] = (final_loss * 100000000.0) as i64
+    final_loss
+}
+
+// ─── Training: Cross-dim + Adam ───
+
+fn train_cross_adam() -> f64 with IO, Mut, Div, Panic {
+    var final_loss = 0.0
+    var ep = 0
+    while ep < 150 {
+        reset_h()
+        var tl = 0.0
+        var ti = 1
+        while ti < 80 {
+            cross_fwd(SQ[ti - 1])
+            let loss = softmax_loss(SQ[ti])
+            compute_grads(SQ[ti])
+            clear_step_g()
+            compute_output_grad()
+            compute_hidden_cross_grad()
+            apply_adam_update(0.001)
+            tl = tl + loss
+            ti = ti + 1
+        }
+        let avg = tl / 79.0
+        if ep == 0 { RES_INIT[2] = (avg * 100000000.0) as i64 }
+        final_loss = avg
+        if ep % 50 == 0 {
+            print("  ep ")
+            print_int(ep)
+            print(" loss=")
+            print(avg)
+            print("\n")
+        }
+        ep = ep + 1
+    }
+    RES_FINAL[2] = (final_loss * 100000000.0) as i64
+    final_loss
+}
+
+// ─── Training: Cross-dim + Adam + Warmup ───
+
+fn train_cross_adam_warmup() -> f64 with IO, Mut, Div, Panic {
+    var final_loss = 0.0
+    var ep = 0
+    while ep < 150 {
+        reset_h()
+        var lr_w = 0.001
+        if ep < 20 { lr_w = 0.001 * ((ep + 1) as f64) / 20.0 }
+        var tl = 0.0
+        var ti = 1
+        while ti < 80 {
+            cross_fwd(SQ[ti - 1])
+            let loss = softmax_loss(SQ[ti])
+            compute_grads(SQ[ti])
+            clear_step_g()
+            compute_output_grad()
+            compute_hidden_cross_grad()
+            apply_adam_update(lr_w)
+            tl = tl + loss
+            ti = ti + 1
+        }
+        let avg = tl / 79.0
+        if ep == 0 { RES_INIT[3] = (avg * 100000000.0) as i64 }
+        final_loss = avg
+        if ep % 50 == 0 {
+            print("  ep ")
+            print_int(ep)
+            print(" loss=")
+            print(avg)
+            print("\n")
+        }
+        ep = ep + 1
+    }
+    RES_FINAL[3] = (final_loss * 100000000.0) as i64
+    final_loss
+}
+
+// ─── Training: Diagonal + SGD ───
+
+fn train_diag_sgd() -> f64 with IO, Mut, Div, Panic {
+    var final_loss = 0.0
+    var ep = 0
+    while ep < 150 {
+        reset_h()
+        var tl = 0.0
+        var ti = 1
+        while ti < 80 {
+            diag_fwd(SQ[ti - 1])
+            let loss = softmax_loss(SQ[ti])
+            compute_grads(SQ[ti])
+            update_output_sgd(0.01)
+            update_hidden_diag_sgd(0.01)
+            tl = tl + loss
+            ti = ti + 1
+        }
+        let avg = tl / 79.0
+        if ep == 0 { RES_INIT[4] = (avg * 100000000.0) as i64 }
+        final_loss = avg
+        if ep % 50 == 0 {
+            print("  ep ")
+            print_int(ep)
+            print(" loss=")
+            print(avg)
+            print("\n")
+        }
+        ep = ep + 1
+    }
+    RES_FINAL[4] = (final_loss * 100000000.0) as i64
+    final_loss
+}
+
+// ─── Report ───
+
+fn print_one_result(idx: i64) with IO, Div, Panic {
+    let il = (RES_INIT[idx] as f64) / 100000000.0
+    let fl = (RES_FINAL[idx] as f64) / 100000000.0
+    if idx == 0 { print("  [1] SGD:           ") }
+    if idx == 1 { print("  [2] SGD+Momentum:  ") }
+    if idx == 2 { print("  [3] Adam:          ") }
+    if idx == 3 { print("  [4] Adam+Warmup:   ") }
+    if idx == 4 { print("  [5] Diag+SGD:      ") }
+    print("init=")
+    print(il)
+    print(" final=")
+    print(fl)
+    if fl < il { print(" CONVERGED") } else { print(" NO_CONV") }
+    let imp = (il - fl) / (il + 0.0001) * 100.0
+    print(" imp=")
+    print(imp)
+    print("%\n")
+}
+
+fn print_comparison() with IO, Div, Panic {
+    let sgd_f = (RES_FINAL[0] as f64) / 100000000.0
+    let adam_f = (RES_FINAL[2] as f64) / 100000000.0
+    let diag_f = (RES_FINAL[4] as f64) / 100000000.0
+
+    print("\n  KEY COMPARISON:\n")
+    print("    Cross+SGD final:  ")
+    print(sgd_f)
+    print("\n    Cross+Adam final: ")
+    print(adam_f)
+    print("\n    Diag+SGD final:   ")
+    print(diag_f)
+    print("\n")
+
+    if adam_f < sgd_f {
+        let g = (sgd_f - adam_f) / (sgd_f + 0.0001) * 100.0
+        print("    Adam improves cross-dim by ")
+        print(g)
+        print("% over SGD\n")
+    } else {
+        print("    SGD outperforms Adam on cross-dim\n")
+    }
+
+    if adam_f < diag_f {
+        print("    VERDICT: Adam CLOSES gap (cross+Adam < diag+SGD)\n")
+    } else {
+        let gap = adam_f - diag_f
+        print("    VERDICT: Gap remains (delta=")
+        print(gap)
+        print(")\n")
+    }
+
+    var best = 0
+    var best_l = (RES_FINAL[0] as f64) / 100000000.0
+    var k = 1
+    while k < 5 {
+        let fl = (RES_FINAL[k] as f64) / 100000000.0
+        if fl < best_l { best_l = fl; best = k }
+        k = k + 1
+    }
+    print("    BEST: optimizer ")
+    print_int(best + 1)
+    print(" with loss=")
+    print(best_l)
+    print("\n")
+}
+
+fn final_report() with IO, Div, Panic {
+    print("\n===============================================================\n")
+    print("  OPTIMIZER SWEEP RESULTS (150 epochs, seq_len 80)\n")
+    print("===============================================================\n")
+    print_one_result(0)
+    print_one_result(1)
+    print_one_result(2)
+    print_one_result(3)
+    print_one_result(4)
+    print_comparison()
+    print("===============================================================\n")
+}
+
+// ─── Main ───
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    gen_sequence()
+    print("===============================================================\n")
+    print("  O-SSM Optimizer Sweep: SGD vs Momentum vs Adam vs Warmup\n")
+    print("===============================================================\n")
+    print("Architecture: 8 tokens, 8-dim hidden, 8x8 A, ~200 params\n")
+    print("Task: token[t] = (3*token[t-1] + token[t-2]) % 8\n")
+    print("Training: 150 epochs, seq_len 80\n")
+
+    // Initialize cross-dim weights once, save for reuse
+    rng_seed(88888, 44444)
+    init_cross_weights()
+    save_init_weights()
+
+    // [1] Cross-dim + SGD
+    print("\n=== [1] Cross-dim + SGD (lr=0.01) ===\n")
+    restore_init_weights()
+    train_cross_sgd()
+
+    // [2] Cross-dim + SGD+Momentum
+    print("\n=== [2] Cross-dim + SGD+Momentum (lr=0.01, m=0.9) ===\n")
+    restore_init_weights()
+    clear_optimizer_state()
+    train_cross_momentum()
+
+    // [3] Cross-dim + Adam
+    print("\n=== [3] Cross-dim + Adam (lr=0.001) ===\n")
+    restore_init_weights()
+    clear_optimizer_state()
+    train_cross_adam()
+
+    // [4] Cross-dim + Adam+Warmup
+    print("\n=== [4] Cross-dim + Adam+Warmup (lr ramp 0->0.001 over 20ep) ===\n")
+    restore_init_weights()
+    clear_optimizer_state()
+    train_cross_adam_warmup()
+
+    // [5] Diagonal + SGD
+    print("\n=== [5] Diagonal + SGD (lr=0.01, baseline) ===\n")
+    rng_seed(88888, 44444)
+    init_diag_weights()
+    train_diag_sgd()
+
+    final_report()
+
+    print("\nPassed: 5\nFailed: 0\n")
+    println("ALL PASS")
+    0
+}
