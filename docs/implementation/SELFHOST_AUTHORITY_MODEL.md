@@ -143,6 +143,7 @@ The canonical inventory is produced by:
 
 ## Related operator docs
 
+- post-program operating plan: [BASELINE_STEWARDSHIP_PLAN.md](BASELINE_STEWARDSHIP_PLAN.md)
 - release train and promotion sequence: [`docs/implementation/SELFHOST_RELEASE_TRAIN.md`](SELFHOST_RELEASE_TRAIN.md)
 - deferred debt register: [`docs/implementation/SELFHOST_DEBT_REGISTER.md`](SELFHOST_DEBT_REGISTER.md)
 - contributor-facing compiler map: [`docs/implementation/SELF_HOSTED_COMPILER.md`](SELF_HOSTED_COMPILER.md)

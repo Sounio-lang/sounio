@@ -12,6 +12,7 @@ export const STATUS_NOTE_START = '<!-- docs:status-note:start -->';
 export const STATUS_NOTE_END = '<!-- docs:status-note:end -->';
 
 const ACTIVE_IMPLEMENTATION_DOCS = new Set([
+  'docs/implementation/BASELINE_STEWARDSHIP_PLAN.md',
   'docs/implementation/GPU_COMPILER_CONTRACTS.md',
   'docs/implementation/MV_CORE_CHECKLIST.md',
   'docs/implementation/PAPER_ARTIFACT_PACKAGING_SPEC.md',

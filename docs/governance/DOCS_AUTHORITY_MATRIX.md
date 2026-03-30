@@ -95,6 +95,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.guide.sounio-quick-start | repo_only | docs/guide/SOUNIO_QUICK_START.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.sounio-style-guide | repo_only | docs/guide/SOUNIO_STYLE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.tutorial | repo_only | docs/guide/tutorial.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.baseline-stewardship-plan | repo_only | docs/implementation/BASELINE_STEWARDSHIP_PLAN.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.bootstrap-seed-policy | historical | docs/implementation/BOOTSTRAP_SEED_POLICY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.codex-claude-parallel-contract | historical | docs/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.completed-mega-project | historical | docs/implementation/COMPLETED_MEGA_PROJECT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
