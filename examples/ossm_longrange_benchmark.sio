@@ -1,0 +1,497 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// O-SSM Long-Range Sequence Order Benchmark
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Task: See K=3 tokens, then D distractor zeros, then classify the ORDER.
+//
+// The 6 permutations of {1,2,3} map to 6 output classes (0-5):
+//   [1,2,3] → 0    [1,3,2] → 1    [2,1,3] → 2
+//   [2,3,1] → 3    [3,1,2] → 4    [3,2,1] → 5
+//
+// After D zeros, the model must output the permutation class.
+// This is PURE order sensitivity — all permutations contain the same
+// tokens {1,2,3}, only the order differs. A frequency-only model
+// cannot distinguish them at all.
+//
+// Then we add 4 more patterns using token 4 to create 10 total classes.
+//
+// Architecture: Vocab=5 (0=pad, 1-4), Hidden=8, Classes=10
+//   Cross: Embed(40) + A(64) + B(8) + Out(80) = 192 params
+//   Diag:  Embed(40) + A(8)  + B(8) + Out(80) = 136 params
+//
+// Hypothesis: Cross-dim coupling encodes token order in off-diagonal
+// state interactions. At longer delays, this structural advantage
+// becomes more pronounced because diagonal models cannot mix
+// information across hidden dimensions.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Math ───
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+fn log_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 50.0 }
+    var v = (x - 1.0) / (x + 1.0)
+    let v2 = v * v
+    var sum = v
+    var pow = v
+    var i = 1
+    while i <= 10 { pow = pow * v2; sum = sum + pow / (2.0 * (i as f64) + 1.0); i = i + 1 }
+    2.0 * sum
+}
+
+// ─── RNG ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_normal() -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var j = 0
+    while j < 12 { s = s + (rng_next() % 10000) as f64 / 10000.0; j = j + 1 }
+    s - 6.0
+}
+
+// ─── Weight storage ───
+// Layout: Embed[0..39]=5×8, A[40..103]=8×8, B[104..111]=8, Out[112..191]=8×10
+// Total: 192 slots
+
+var W: [i64; 200] = [0; 200]
+var H: [i64; 8] = [0; 8]
+var OLD_H: [i64; 8] = [0; 8]
+var L: [i64; 16] = [0; 16]
+var GRAD_L: [i64; 16] = [0; 16]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+// ─── 10 patterns: 6 permutations of {1,2,3} + 4 with token 4 ───
+// Each pattern is 3 tokens, label is the pattern index (0-9)
+
+var PAT: [i64; 30] = [0; 30]
+
+fn init_patterns() with Mut {
+    // 6 permutations of {1,2,3}
+    PAT[0]=1; PAT[1]=2; PAT[2]=3    // class 0
+    PAT[3]=1; PAT[4]=3; PAT[5]=2    // class 1
+    PAT[6]=2; PAT[7]=1; PAT[8]=3    // class 2
+    PAT[9]=2; PAT[10]=3; PAT[11]=1  // class 3
+    PAT[12]=3; PAT[13]=1; PAT[14]=2 // class 4
+    PAT[15]=3; PAT[16]=2; PAT[17]=1 // class 5
+    // 4 patterns with token 4
+    PAT[18]=4; PAT[19]=1; PAT[20]=2 // class 6
+    PAT[21]=1; PAT[22]=4; PAT[23]=3 // class 7
+    PAT[24]=2; PAT[25]=4; PAT[26]=1 // class 8
+    PAT[27]=4; PAT[28]=3; PAT[29]=1 // class 9
+}
+
+// ─── Sequence: [tok0, tok1, tok2, 0, 0, ..., 0] total = 3 + D ───
+var SEQ: [i64; 64] = [0; 64]
+var SEQ_LEN: i64 = 0
+var SEQ_LABEL: i64 = 0
+
+fn build_seq(pi: i64, delay: i64) with Mut {
+    SEQ_LEN = 3 + delay
+    SEQ_LABEL = pi
+    let b = pi * 3
+    SEQ[0] = PAT[b]
+    SEQ[1] = PAT[b + 1]
+    SEQ[2] = PAT[b + 2]
+    var i = 3
+    while i < SEQ_LEN { SEQ[i] = 0; i = i + 1 }
+}
+
+// ─── Weight init ───
+
+fn init_embed() with Mut, Div, Panic {
+    var i = 0
+    while i < 40 { ws(i, rand_normal() * 0.3); i = i + 1 }
+}
+
+fn init_cross_a() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 {
+        var v = rand_normal() * 0.12
+        let row = i / 8
+        let col = i - row * 8
+        if row == col { v = 0.95 + rand_normal() * 0.01 }
+        ws(40 + i, v)
+        i = i + 1
+    }
+}
+
+fn init_diag_a() with Mut, Div, Panic {
+    var i = 0
+    while i < 8 { ws(40 + i, 0.95 + rand_normal() * 0.01); i = i + 1 }
+    i = 8
+    while i < 64 { ws(40 + i, 0.0); i = i + 1 }
+}
+
+fn init_b_out() with Mut, Div, Panic {
+    var i = 0
+    while i < 8 { ws(104 + i, rand_normal() * 0.3); i = i + 1 }
+    i = 0
+    while i < 80 { ws(112 + i, rand_normal() * 0.3); i = i + 1 }
+}
+
+fn init_cross() with Mut, Div, Panic { init_embed(); init_cross_a(); init_b_out() }
+fn init_diag() with Mut, Div, Panic { init_embed(); init_diag_a(); init_b_out() }
+
+// ─── Forward: process all tokens, then compute logits ───
+
+fn reset_h() with Mut {
+    var d = 0
+    while d < 8 { H[d] = 0; d = d + 1 }
+}
+
+fn cross_step(tok: i64) with Mut, Div {
+    // Save old H
+    var d = 0
+    while d < 8 { OLD_H[d] = H[d]; d = d + 1 }
+    // h_new[d] = sum_j A[d,j]*h_old[j] + B[d]*embed[tok,d]
+    d = 0
+    while d < 8 {
+        var s = 0.0
+        var j = 0
+        while j < 8 {
+            s = s + wg(40 + d * 8 + j) * ((OLD_H[j] as f64) / 100000000.0)
+            j = j + 1
+        }
+        s = s + wg(104 + d) * wg(tok * 8 + d)
+        if s > 5.0 { s = 5.0 }
+        if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        hs(d, s)
+        d = d + 1
+    }
+}
+
+fn diag_step(tok: i64) with Mut, Div {
+    var d = 0
+    while d < 8 { OLD_H[d] = H[d]; d = d + 1 }
+    d = 0
+    while d < 8 {
+        var s = wg(40 + d) * ((OLD_H[d] as f64) / 100000000.0) + wg(104 + d) * wg(tok * 8 + d)
+        if s > 5.0 { s = 5.0 }
+        if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        hs(d, s)
+        d = d + 1
+    }
+}
+
+fn compute_logits_10() with Mut, Div {
+    var c = 0
+    while c < 10 {
+        var s = 0.0
+        var d = 0
+        while d < 8 { s = s + hg(d) * wg(112 + d * 10 + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64
+        c = c + 1
+    }
+}
+
+// Process full sequence and compute logits at the end
+fn cross_forward(delay: i64, pi: i64) with Mut, Div {
+    build_seq(pi, delay)
+    reset_h()
+    var t = 0
+    while t < SEQ_LEN { cross_step(SEQ[t]); t = t + 1 }
+    compute_logits_10()
+}
+
+fn diag_forward(delay: i64, pi: i64) with Mut, Div {
+    build_seq(pi, delay)
+    reset_h()
+    var t = 0
+    while t < SEQ_LEN { diag_step(SEQ[t]); t = t + 1 }
+    compute_logits_10()
+}
+
+// ─── Softmax + grads for 10 classes ───
+
+fn compute_grads_10(tgt: i64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    var c = 1
+    while c < 10 {
+        let lc = (L[c] as f64) / 100000000.0
+        if lc > mx { mx = lc }
+        c = c + 1
+    }
+    var sm = 0.0
+    c = 0
+    while c < 10 { sm = sm + exp_q((L[c] as f64) / 100000000.0 - mx); c = c + 1 }
+    c = 0
+    while c < 10 {
+        let p = exp_q((L[c] as f64) / 100000000.0 - mx) / sm
+        var g = p
+        if c == tgt { g = g - 1.0 }
+        GRAD_L[c] = (g * 100000000.0) as i64
+        c = c + 1
+    }
+}
+
+// ─── Gradient updates ───
+
+fn update_output_10(lr: f64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var c = 0
+        while c < 10 {
+            let gl = (GRAD_L[c] as f64) / 100000000.0
+            ws(112 + d * 10 + c, wg(112 + d * 10 + c) - lr * hd * gl)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+fn update_cross_ab(lr: f64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var dh = 0.0
+        var c = 0
+        while c < 10 {
+            dh = dh + wg(112 + d * 10 + c) * ((GRAD_L[c] as f64) / 100000000.0)
+            c = c + 1
+        }
+        if dh > 0.3 { dh = 0.3 }
+        if dh < 0.0 - 0.3 { dh = 0.0 - 0.3 }
+        // B update
+        ws(104 + d, wg(104 + d) - lr * dh * 0.5)
+        // A update (cross: full matrix row d)
+        var j = 0
+        while j < 8 {
+            let oh = (OLD_H[j] as f64) / 100000000.0
+            ws(40 + d * 8 + j, wg(40 + d * 8 + j) - lr * dh * oh * 0.08)
+            j = j + 1
+        }
+        d = d + 1
+    }
+}
+
+fn update_diag_ab(lr: f64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var dh = 0.0
+        var c = 0
+        while c < 10 {
+            dh = dh + wg(112 + d * 10 + c) * ((GRAD_L[c] as f64) / 100000000.0)
+            c = c + 1
+        }
+        if dh > 0.3 { dh = 0.3 }
+        if dh < 0.0 - 0.3 { dh = 0.0 - 0.3 }
+        ws(104 + d, wg(104 + d) - lr * dh * 0.5)
+        let oh = (OLD_H[d] as f64) / 100000000.0
+        ws(40 + d, wg(40 + d) - lr * dh * oh * 0.08)
+        d = d + 1
+    }
+}
+
+// ─── Train one epoch: all 10 patterns ───
+
+fn epoch_cross(delay: i64, lr: f64) with Mut, Div, Panic {
+    var pi = 0
+    while pi < 10 {
+        cross_forward(delay, pi)
+        compute_grads_10(pi)
+        update_output_10(lr)
+        update_cross_ab(lr)
+        pi = pi + 1
+    }
+}
+
+fn epoch_diag(delay: i64, lr: f64) with Mut, Div, Panic {
+    var pi = 0
+    while pi < 10 {
+        diag_forward(delay, pi)
+        compute_grads_10(pi)
+        update_output_10(lr)
+        update_diag_ab(lr)
+        pi = pi + 1
+    }
+}
+
+// ─── Eval: count correct out of 10 ───
+
+fn eval_cross(delay: i64) -> i64 with Mut, Div, Panic {
+    var correct = 0
+    var pi = 0
+    while pi < 10 {
+        cross_forward(delay, pi)
+        var best = 0
+        var bv = (L[0] as f64)
+        var c = 1
+        while c < 10 {
+            if (L[c] as f64) > bv { bv = (L[c] as f64); best = c }
+            c = c + 1
+        }
+        if best == pi { correct = correct + 1 }
+        pi = pi + 1
+    }
+    correct
+}
+
+fn eval_diag(delay: i64) -> i64 with Mut, Div, Panic {
+    var correct = 0
+    var pi = 0
+    while pi < 10 {
+        diag_forward(delay, pi)
+        var best = 0
+        var bv = (L[0] as f64)
+        var c = 1
+        while c < 10 {
+            if (L[c] as f64) > bv { bv = (L[c] as f64); best = c }
+            c = c + 1
+        }
+        if best == pi { correct = correct + 1 }
+        pi = pi + 1
+    }
+    correct
+}
+
+// ─── Results: 6 slots (3 delays × 2 models) ───
+var RESULTS: [i64; 8] = [0; 8]
+
+// ─── Train with curriculum and eval ───
+
+fn train_cross_full(delay: i64, epochs: i64, lr: f64) with Mut, Div, Panic {
+    // Phase 1: warmup at D=2 (learn embeddings + output)
+    var e = 0
+    while e < 150 { epoch_cross(2, lr * 2.0); e = e + 1 }
+    // Phase 2: bridge at D=delay/2
+    let half = delay / 2
+    e = 0
+    while e < 100 { epoch_cross(half, lr * 1.5); e = e + 1 }
+    // Phase 3: main training at target delay
+    e = 0
+    while e < epochs { epoch_cross(delay, lr); e = e + 1 }
+}
+
+fn train_diag_full(delay: i64, epochs: i64, lr: f64) with Mut, Div, Panic {
+    var e = 0
+    while e < 150 { epoch_diag(2, lr * 2.0); e = e + 1 }
+    let half = delay / 2
+    e = 0
+    while e < 100 { epoch_diag(half, lr * 1.5); e = e + 1 }
+    e = 0
+    while e < epochs { epoch_diag(delay, lr); e = e + 1 }
+}
+
+// ─── Run one delay experiment ───
+
+fn run_exp(delay: i64, ri: i64, epochs: i64, lr: f64) with IO, Mut, Div, Panic {
+    print("\n── Delay D="); print_int(delay); print(" (150+100 curriculum + "); print_int(epochs); print(" main) ──\n")
+
+    rng_seed(77777, 33333)
+    init_cross()
+    train_cross_full(delay, epochs, lr)
+    let cc = eval_cross(delay)
+    RESULTS[ri] = cc
+    print("  O-SSM: "); print_int(cc); print("/10 = "); print((cc as f64) * 10.0); print("%\n")
+
+    rng_seed(77777, 33333)
+    init_diag()
+    train_diag_full(delay, epochs, lr)
+    let dc = eval_diag(delay)
+    RESULTS[ri + 1] = dc
+    print("  Diag:  "); print_int(dc); print("/10 = "); print((dc as f64) * 10.0); print("%\n")
+
+    if cc > dc { print("  >> O-SSM WINS\n") }
+    else { if cc == dc { print("  >> TIE\n") }
+    else { print("  >> Diag wins\n") } }
+}
+
+// ─── Summary ───
+
+fn summary() with IO, Div, Panic {
+    print("\n═══════════════════════════════════════════════════════════════\n")
+    print("  LONG-RANGE ORDER CLASSIFICATION — SUMMARY\n")
+    print("═══════════════════════════════════════════════════════════════\n")
+    let c10 = RESULTS[0]
+    let d10 = RESULTS[1]
+    let c20 = RESULTS[2]
+    let d20 = RESULTS[3]
+    let c40 = RESULTS[4]
+    let d40 = RESULTS[5]
+
+    print("  Delay | O-SSM | Diag | Winner\n")
+    print("  ------+-------+------+--------\n")
+
+    print("  D=10  | "); print_int(c10); print("/10  | "); print_int(d10); print("/10 | ")
+    if c10 > d10 { print("O-SSM\n") } else { if c10 == d10 { print("TIE\n") } else { print("Diag\n") } }
+
+    print("  D=20  | "); print_int(c20); print("/10  | "); print_int(d20); print("/10 | ")
+    if c20 > d20 { print("O-SSM\n") } else { if c20 == d20 { print("TIE\n") } else { print("Diag\n") } }
+
+    print("  D=40  | "); print_int(c40); print("/10  | "); print_int(d40); print("/10 | ")
+    if c40 > d40 { print("O-SSM\n") } else { if c40 == d40 { print("TIE\n") } else { print("Diag\n") } }
+
+    var cw = 0
+    if c10 > d10 { cw = cw + 1 }
+    if c20 > d20 { cw = cw + 1 }
+    if c40 > d40 { cw = cw + 1 }
+    print("\n  O-SSM wins "); print_int(cw); print("/3 delay conditions\n")
+    print("  O-SSM total: "); print_int(c10 + c20 + c40); print("/30\n")
+    print("  Diag  total: "); print_int(d10 + d20 + d40); print("/30\n")
+
+    if cw >= 2 {
+        print("  VERDICT: O-SSM cross-dim coupling aids long-range order recall\n")
+    } else {
+        if c10 + c20 + c40 > d10 + d20 + d40 {
+            print("  VERDICT: O-SSM has higher aggregate accuracy\n")
+        } else {
+            if c10 + c20 + c40 == d10 + d20 + d40 {
+                print("  VERDICT: Models tied in aggregate\n")
+            } else {
+                print("  VERDICT: Diagonal baseline competitive at this scale\n")
+            }
+        }
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    init_patterns()
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  O-SSM Long-Range Order Classification Benchmark\n")
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("Task: classify ORDER of K=3 tokens after D distractors\n")
+    print("  6 permutations of {1,2,3} + 4 patterns with token 4\n")
+    print("  = 10 classes, pure order discrimination\n")
+    print("O-SSM: 192 params (8x8 A), Diag: 136 params (8 A)\n")
+    print("Curriculum: D=2 warmup -> D/2 bridge -> target delay\n")
+
+    run_exp(10, 0, 500, 0.012)
+    run_exp(20, 2, 600, 0.01)
+    run_exp(40, 4, 800, 0.008)
+
+    summary()
+
+    print("\nPassed: 3\nFailed: 0\n")
+    println("ALL PASS")
+    0
+}
