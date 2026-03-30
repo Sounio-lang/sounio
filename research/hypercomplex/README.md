@@ -1,8 +1,17 @@
-# Hypercomplex Algebra Wave 1
+# Hypercomplex Algebra Research Lane
 
-This directory is the Wave 1 research package for hypercomplex algebra in the
-compiler baseline anchored at `compiler-institutional-finalization`
-(`5f6b8e5502004b1b017b53ac662aa3efa75c20dd`).
+This directory contains the Wave 1 baseline plus the Wave 2 semantic-contract
+package for hypercomplex algebra in the compiler.
+
+Wave 1 baseline:
+
+- anchored at `compiler-institutional-finalization`
+- baseline commit `5f6b8e5502004b1b017b53ac662aa3efa75c20dd`
+
+Wave 2 baseline:
+
+- builds on `hypercomplex-algebra-wave1`
+- baseline commit `69da08bc663f7346743e31d0d92baa34d0b18340`
 
 Scope:
 
@@ -23,11 +32,15 @@ Files:
 - `taxonomy.v1.json`: machine-readable maturity classes, categories, and state vocabulary
 - `inventory.v1.json`: concrete touchpoints, research assets, contradictions, and gaps
 - `hazards.v1.json`: semantic hazard map tied back to actual touchpoints
+- `semantics.v1.json`: compact Wave 2 semantic contract for prototype-safe vs deferred assumptions
+- `touchpoints.v1.json`: bounded map of prototype-safe compiler-facing candidate areas
+- `roadmap.v1.json`: internal Wave 3 experiment frame
 
 Validation:
 
 ```bash
 bash scripts/research/hypercomplex_wave1_gate.sh
+bash scripts/research/hypercomplex_wave2_gate.sh
 ```
 
 What the baseline already contains:
@@ -45,6 +58,14 @@ What Wave 1 still treats conservatively:
 - public maturity/support claims for hypercomplex execution surfaces
 - ABI or interop promises around hypercomplex native layout
 - optimizer laws that rely on norm, inverse, or zero-divisor assumptions outside proven domains
+
+What Wave 2 adds without changing support claims:
+
+- a minimal semantic contract for parenthesization, associativity, distributivity,
+  zero divisors, division domains, norm/conjugation, reorderability, and optimizer-law safety
+- a bounded touchpoint map for prototype-safe compiler-facing work
+- a non-public validator that checks wave1 + wave2 manifests together
+- a short internal roadmap for Wave 3 experiments
 
 Current inventory summary:
 
@@ -64,3 +85,10 @@ Important current gaps:
 - no hypercomplex-specific required check in `scripts/selfhost/selfhost_required_checks.v1.json`
 - no general symbolic normalizer for non-associative expressions beyond narrow Fano-selective basis reassociation
 - public docs do not yet tell one consistent maturity story across README, limitations, and technical-report surfaces
+
+Wave 2 operating rule:
+
+- this remains a research/prototype lane
+- no public support claim is expanded here
+- no required CI gate is promoted here
+- any future compiler experiment must stay bounded by `semantics.v1.json`
