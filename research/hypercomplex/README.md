@@ -2,8 +2,9 @@
 
 This directory contains the Wave 1 baseline plus the Wave 2 semantic-contract
 package, the Wave 3 prototype-safe scaffolding, the Wave 4 compile-proof
-prototype harnesses, and the Wave 5 metadata-carriage scaffolding for
-hypercomplex algebra in the compiler.
+prototype harnesses, the Wave 5 reassociation metadata scaffolding, and the
+Wave 6 forbidden-law metadata scaffolding for hypercomplex algebra in the
+compiler.
 
 Wave 1 baseline:
 
@@ -30,6 +31,11 @@ Wave 5 baseline:
 - builds on `hypercomplex-algebra-wave4`
 - baseline commit `57c593e0a617174bcc24580e967cfee54368b437`
 
+Wave 6 baseline:
+
+- builds on `hypercomplex-algebra-wave5-codex`
+- baseline commit `d7f14f150358e3afdad9e6350175d45b5e844775`
+
 Scope:
 
 - inventory the hypercomplex surface already present in the accepted baseline
@@ -55,7 +61,7 @@ Files:
 - `expected_fail.v1.json`: Wave 3 forbidden-rewrite coverage, mixing executable counterexamples with explicit validation-only gaps
 - `compiler_audit.v1.json`: bounded internal audit seams for type, IR, and lowering touchpoints
 - `prototype_scaffolding.v1.json`: Wave 4 compile-proof and harness matrix for non-public compiler-facing scaffolding
-- `prototype_scaffolding.v1.json`: Wave 5 metadata-carriage harnesses and validation rules for non-public compiler-facing scaffolding
+- `prototype_scaffolding.v1.json`: Wave 5 and Wave 6 metadata-carriage harnesses and validation rules for non-public compiler-facing scaffolding
 
 Validation:
 
@@ -65,6 +71,7 @@ bash scripts/research/hypercomplex_wave2_gate.sh
 bash scripts/research/hypercomplex_wave3_gate.sh
 bash scripts/research/hypercomplex_wave4_gate.sh
 bash scripts/research/hypercomplex_wave5_gate.sh
+bash scripts/research/hypercomplex_wave6_gate.sh
 ```
 
 What the baseline already contains:
@@ -124,6 +131,18 @@ What Wave 5 adds without changing support claims:
   metadata-carriage fixture, and checks that forbidden-law gaps remain fenced by
   research-only touchpoints
 
+What Wave 6 adds without changing support claims:
+
+- an internal-only forbidden-law mask seam that rides beside reassociation
+  metadata through checker state, serialized IR algebra metadata, and mini
+  e-graph context setup
+- a compile-proof fixture for `reassociate: fano_selective` plus `blocked`
+  algebra lanes so forbidden-law metadata carriage stays bounded to internal
+  compiler surfaces
+- a stricter Wave 6 validator that requires Wave 5 to stay green, compiles the
+  new fixture, and symbol-checks the required reassociation and forbidden-law
+  metadata references instead of trusting path existence alone
+
 Current inventory summary:
 
 - active entries: 9
@@ -155,3 +174,5 @@ Wave 2 operating rule:
   only; they do not imply runtime, optimizer, or ABI support
 - Wave 5 metadata-carriage harnesses are still compile-proof only; they do not
   upgrade rewrite-engine, optimizer, runtime, or public maturity claims
+- Wave 6 forbidden-law metadata masks are still internal compiler annotations;
+  they do not authorize broader rewrites, runtime claims, or public support

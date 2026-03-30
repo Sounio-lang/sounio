@@ -10,6 +10,7 @@
 // Horizon 3: wire to real multi-module native compilation pipeline
 // Named imports only — glob imports caused type-checker stack overflow (~3500 symbols)
 use parser::ast::{BinaryOp, Block, CompareOp, EffectList, empty_name, Item, ItemKind, ItemList, Name, ParamList, Pattern, Program, TypeExpr, TypeExprKind, UnaryOp}
+use ir::algebra::{IR_HYPER_FORBID_CANCEL_NONZERO_SEDENION_FACTORS, IR_HYPER_FORBID_GENERIC_DISTRIBUTE_FACTOR, IR_HYPER_FORBID_LIFT_OCTONION_NORM_TO_SEDENION, ir_forbidden_law_mask, ir_forbidden_law_mask_has}
 use ir::ir::{empty_struct_layout_table, ir_alloc, ir_binop, ir_branch_false, ir_branch_true, ir_call, ir_copy, ir_empty_algebra_info, ir_empty_algebra_table, ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_prof_counter_info, ir_empty_reg_list, IrEpistemicSection, ir_field_get, ir_field_set, ir_float_to_int, IrFunction, IrInstr, ir_instr_new, ir_int_to_float, ir_jump, ir_label, ir_load_bool, ir_load_float, ir_load_imm, ir_measure, IrModule, ir_name_eq, ir_name_from_bytes, ir_nop, IrOpcode, IrPolicyRequirementInfo, ir_prof_counter, IrRegList, ir_reg_list_single, ir_return, IR_STRATEGY_AGGRESSIVE, IR_STRATEGY_GPU_KERNEL, IR_STRATEGY_INSTRUMENTED, ir_strategy_name, IR_STRATEGY_PRECISION_PRESERVING, IR_STRATEGY_PROBABILISTIC, IR_STRATEGY_STANDARD, ir_unaryop, make_name, SOUNIO_ABI_VERSION, SOUNIO_RUNTIME_VERSION_MAJOR}
 use check::types::{empty_type_entry, TypeEntry, TypeEntryList, TypeKind}
 use check::mod::{check_program, check_program_epistemic_into}
@@ -6715,7 +6716,8 @@ fn compiler_main_test_ocp_mini_pass_9_instrs() -> bool with Mut, Div, Panic {
     result.instrs[0].op == IrOpcode::IrBinOp && result.instr_count == 9
 }
 
-// T1000: Hyper-tagged mini e-graph contexts inherit registry reassociation metadata.
+// T1000: Hyper-tagged mini e-graph contexts inherit reassociation metadata and
+// derive forbidden-law masks without widening optimizer behavior.
 fn compiler_main_test_ocp_context_uses_algebra_registry() -> bool with Mut, Div, Panic {
     var func = ir_empty_function()
     func.hyper_algebra_kind = 3
@@ -6725,12 +6727,32 @@ fn compiler_main_test_ocp_context_uses_algebra_registry() -> bool with Mut, Div,
     octonion.is_valid = true
     octonion.algebra_tag = 3
     octonion.reassoc_strategy = 2
+    octonion.forbidden_law_mask = ir_forbidden_law_mask(3, 2)
     algebras.entries[0] = octonion
     algebras.count = 1
 
     var ctx = eg_small_init()
     ocp_configure_small_context(&! ctx, func, algebras)
-    ctx.algebra_kind == 3 && ctx.reassoc_strategy == 2 && ctx.cd_bits == 3
+
+    var fallback_func = ir_empty_function()
+    fallback_func.hyper_algebra_kind = 4
+    var fallback_ctx = eg_small_init()
+    ocp_configure_small_context(&! fallback_ctx, fallback_func, ir_empty_algebra_table())
+
+    let oct_mask = ir_forbidden_law_mask(3, 2)
+    let sed_mask = ir_forbidden_law_mask(4, 1)
+
+    if ctx.algebra_kind != 3 { return false }
+    if ctx.reassoc_strategy != 2 { return false }
+    if ctx.cd_bits != 3 { return false }
+    if ctx.forbidden_law_mask != oct_mask { return false }
+    if fallback_ctx.reassoc_strategy != 1 { return false }
+    if fallback_ctx.cd_bits != 4 { return false }
+    if fallback_ctx.forbidden_law_mask != sed_mask { return false }
+    if !ir_forbidden_law_mask_has(sed_mask, IR_HYPER_FORBID_GENERIC_DISTRIBUTE_FACTOR) { return false }
+    if !ir_forbidden_law_mask_has(sed_mask, IR_HYPER_FORBID_CANCEL_NONZERO_SEDENION_FACTORS) { return false }
+    if !ir_forbidden_law_mask_has(sed_mask, IR_HYPER_FORBID_LIFT_OCTONION_NORM_TO_SEDENION) { return false }
+    true
 }
 
 // T161: Both-constant OpLe: 3 <= 3 → IrLoadImm(dst, 1).
@@ -20234,10 +20256,10 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     }
 
     if compiler_main_test_ocp_context_uses_algebra_registry() {
-        println("  T1000 OK: mini e-graph context loads reassociation strategy from algebra registry")
+        println("  T1000 OK: mini e-graph context loads reassociation metadata and derives forbidden-law masks")
         passed = passed + 1
     } else {
-        println("  FAIL: T1000 algebra-registry mini e-graph bridge")
+        println("  FAIL: T1000 algebra-registry metadata bridge")
     }
 
     if compiler_main_test_cmp_le_const_true() {
