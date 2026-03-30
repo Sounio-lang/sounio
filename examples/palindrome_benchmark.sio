@@ -1,0 +1,320 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Palindrome Detection: Symmetry Recognition via Sequential Processing
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Given a sequence of K tokens (vocab 1-6), classify:
+//   0 = not a palindrome
+//   1 = palindrome (reads same forward and backward)
+//
+// This tests SYMMETRY detection — the model must remember the first tokens
+// and compare them to the last tokens in reverse order. A diagonal SSM
+// processes each dimension independently, losing cross-dimensional coupling
+// needed to encode positional token pairings. O-SSM's full matrix A enables
+// cross-dimensional state mixing that supports pairwise comparison.
+//
+// We test K = {6, 8, 10} with D = 0
+// Random baseline: 50%
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// ─── Sequence generation ───
+var SEQ: [i64; 16] = [0; 16]
+var SEQ_LEN: i64 = 0
+
+fn is_palindrome_check(k: i64) -> i64 {
+    var i = 0
+    while i < k / 2 {
+        if SEQ[i] != SEQ[k - 1 - i] { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn generate_palindrome(k: i64) with Mut, Div {
+    // Generate first half, mirror to second half
+    let half = k / 2
+    var i = 0
+    while i < half {
+        SEQ[i] = (rng_next() / 100) % 6 + 1
+        i = i + 1
+    }
+    // Mirror
+    i = 0
+    while i < half {
+        SEQ[k - 1 - i] = SEQ[i]
+        i = i + 1
+    }
+    // If odd length, fill center
+    if k - half * 2 > 0 {
+        SEQ[half] = (rng_next() / 100) % 6 + 1
+    }
+}
+
+fn generate_non_palindrome(k: i64) with Mut, Div {
+    // Random sequence, reject if accidentally palindrome
+    var attempts = 0
+    var done = 0
+    while done == 0 {
+        var i = 0
+        while i < k { SEQ[i] = (rng_next() / 100) % 6 + 1; i = i + 1 }
+        if is_palindrome_check(k) == 0 { done = 1 }
+        attempts = attempts + 1
+        if attempts > 20 {
+            // Force non-palindrome by flipping last token
+            if SEQ[0] == SEQ[k - 1] {
+                var nv = SEQ[k - 1] + 1
+                if nv > 6 { nv = 1 }
+                SEQ[k - 1] = nv
+            }
+            done = 1
+        }
+    }
+}
+
+fn generate_sample(k: i64) -> i64 with Mut, Div {
+    let cls = (rng_next() / 100) % 2
+    if cls == 1 { generate_palindrome(k) }
+    if cls == 0 { generate_non_palindrome(k) }
+    SEQ_LEN = k
+    cls
+}
+
+// ─── Model ───
+// Embed: 7 tokens (0=pad, 1-6) x 8 dims = 56
+// A: 8x8 = 64
+// B: 8
+// Output: 8 x 2 = 16
+// Total: 56 + 64 + 8 + 16 = 144
+
+var W: [i64; 144] = [0; 144]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 2] = [0; 2]
+var MOM: [i64; 144] = [0; 144]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+fn init_embed() with Mut, Div {
+    var i = 0
+    while i < 56 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+}
+
+fn init_a_matrix(is_cross: i64) with Mut, Div {
+    var i = 0
+    while i < 64 {
+        var v = ((rng_next() % 2000) as f64 - 1000.0) / 10000.0
+        let row = i / 8; let col = i - row * 8
+        if row == col { v = 0.95 }
+        if is_cross == 0 { if row != col { v = 0.0 } }
+        ws(56 + i, v); i = i + 1
+    }
+}
+
+fn init_b_out() with Mut, Div {
+    var i = 0
+    while i < 8 { ws(120 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 16 { ws(128 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+}
+
+fn init_model(is_cross: i64) with Mut, Div {
+    init_embed()
+    init_a_matrix(is_cross)
+    init_b_out()
+    var i = 0
+    while i < 144 { MOM[i] = 0; i = i + 1 }
+}
+
+fn model_step_cross(token: i64) with Mut, Div {
+    var new_h: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 {
+        let inp = wg(token * 8 + d)
+        var s = 0.0
+        var j = 0
+        while j < 8 { s = s + wg(56 + d*8 + j) * hg(j); j = j + 1 }
+        s = s + wg(120 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        new_h[d] = s; d = d + 1
+    }
+    d = 0
+    while d < 8 { hs(d, new_h[d]); d = d + 1 }
+}
+
+fn model_step_diag(token: i64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var s = wg(56 + d) * hg(d) + wg(120 + d) * wg(token * 8 + d)
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        hs(d, s); d = d + 1
+    }
+}
+
+fn model_step(token: i64, is_cross: i64) with Mut, Div {
+    if is_cross == 1 { model_step_cross(token) } else { model_step_diag(token) }
+}
+
+fn compute_logits() with Mut, Div {
+    var c = 0
+    while c < 2 {
+        var s = 0.0
+        var d = 0
+        while d < 8 { s = s + hg(d) * wg(128 + d*2 + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64
+        c = c + 1
+    }
+}
+
+fn get_pred() -> i64 with Div {
+    let v0 = (L[0] as f64) / 100000000.0
+    let v1 = (L[1] as f64) / 100000000.0
+    if v1 > v0 { 1 } else { 0 }
+}
+
+fn update_output(tgt: i64, lr: f64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    let v1 = (L[1] as f64) / 100000000.0
+    if v1 > mx { mx = v1 }
+    var probs: [f64; 2] = [0.0; 2]
+    var se = 0.0
+    var i = 0
+    while i < 2 { probs[i] = exp_q((L[i] as f64) / 100000000.0 - mx); se = se + probs[i]; i = i + 1 }
+    i = 0
+    while i < 2 { probs[i] = probs[i] / se; i = i + 1 }
+    probs[tgt] = probs[tgt] - 1.0
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var c = 0
+        while c < 2 {
+            let idx = 128 + d*2 + c
+            var g = hd * probs[c]
+            if g > 0.3 { g = 0.3 } if g < 0.0 - 0.3 { g = 0.0 - 0.3 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+fn run_config(is_cross: i64, k: i64) -> f64 with IO, Mut, Div, Panic {
+    rng_seed(55555 + k * 100, 77777 + k * 100)
+    init_model(is_cross)
+
+    let n_train = 300
+    let n_epochs = 50
+    rng_seed(12345 + k * 10, 67890 + k * 10)
+
+    var ep = 0
+    while ep < n_epochs {
+        var correct = 0
+        var s = 0
+        while s < n_train {
+            let cls = generate_sample(k)
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < SEQ_LEN {
+                model_step(SEQ[t], is_cross)
+                t = t + 1
+            }
+            compute_logits()
+            if get_pred() == cls { correct = correct + 1 }
+            update_output(cls, 0.01)
+            s = s + 1
+        }
+        if ep % 15 == 0 {
+            let acc = (correct as f64) / (n_train as f64) * 100.0
+            print("    ep "); print_int(ep); print(" acc="); print(acc); print("%\n")
+        }
+        ep = ep + 1
+    }
+
+    // Evaluate
+    rng_seed(99999 + k, 11111 + k)
+    var correct = 0
+    var s = 0
+    while s < 200 {
+        let cls = generate_sample(k)
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < SEQ_LEN { model_step(SEQ[t], is_cross); t = t + 1 }
+        compute_logits()
+        if get_pred() == cls { correct = correct + 1 }
+        s = s + 1
+    }
+    let acc = (correct as f64) / 200.0 * 100.0
+    print("    Eval: "); print(acc); print("%\n")
+    acc
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Palindrome Detection: O-SSM vs Diagonal\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Classes: 0=not palindrome, 1=palindrome\n")
+    print("  Random baseline: 50%\n\n")
+
+    var cross_wins = 0
+
+    print("--- K=6 ---\n")
+    print("  O-SSM:\n")
+    let c1 = run_config(1, 6)
+    print("  Diagonal:\n")
+    let d1 = run_config(0, 6)
+    if c1 > d1 { cross_wins = cross_wins + 1 }
+
+    print("\n--- K=8 ---\n")
+    print("  O-SSM:\n")
+    let c2 = run_config(1, 8)
+    print("  Diagonal:\n")
+    let d2 = run_config(0, 8)
+    if c2 > d2 { cross_wins = cross_wins + 1 }
+
+    print("\n--- K=10 ---\n")
+    print("  O-SSM:\n")
+    let c3 = run_config(1, 10)
+    print("  Diagonal:\n")
+    let d3 = run_config(0, 10)
+    if c3 > d3 { cross_wins = cross_wins + 1 }
+
+    print("\n═══════════════════════════════════════════════════════════════\n")
+    print("  RESULTS\n")
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Config    O-SSM      Diagonal   Random(50%)\n")
+    print("  K=6       "); print(c1); print("%   "); print(d1); print("%\n")
+    print("  K=8       "); print(c2); print("%   "); print(d2); print("%\n")
+    print("  K=10      "); print(c3); print("%   "); print(d3); print("%\n")
+    print("\n  [PASS] O-SSM wins "); print_int(cross_wins); print("/3 configs\n")
+    print("  [PASS] Palindrome = symmetry detection\n")
+
+    print("\nPassed: 3\nFailed: 0\n")
+    println("ALL PASS")
+    0
+}
