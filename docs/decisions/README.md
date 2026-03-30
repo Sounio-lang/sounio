@@ -16,13 +16,32 @@ decision that was already made and validated — not a proposal.
 
 ```
 ADR-NNN: Title
-Status: accepted | superseded | deprecated
+Status: accepted | experimental | superseded | deprecated
 Date: YYYY-MM-DD
+Superseded by: ADR-NNN (optional, only when status=superseded)
 Context: why the decision was needed
 Decision: what was chosen
 Consequences: what follows
 Grounded in: commit, artifact, or empirical result
 ```
+
+## Status Convention
+
+- `accepted`: current decision of record
+- `experimental`: evidence-backed direction still under active validation and
+  not yet the default long-term rule
+- `superseded`: kept for lineage, but replaced by a later ADR
+- `deprecated`: still historically relevant, but no longer recommended and not
+  yet replaced by a single successor
+
+## Maintenance Rules
+
+- ADR numbering is append-only.
+- Existing ADRs should not be rewritten to change history; new decisions should
+  be captured in new ADRs.
+- When an ADR becomes superseded, update its status and add `Superseded by`.
+- The index below is the scan surface for current lifecycle state and should be
+  kept in sync with the file headers.
 
 ## Index
 
