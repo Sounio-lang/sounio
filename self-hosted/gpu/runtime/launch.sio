@@ -16,8 +16,9 @@
 //   - gpu::runtime::cuda — CudaContext, CudaModule, CudaBuffer, CudaEvent,
 //     cuda_init, cuda_device_get, cuda_context_create, cuda_module_load_ptx,
 //     cuda_module_get_function, cuda_malloc, cuda_memcpy_h2d, cuda_memcpy_d2h,
-//     cuda_free, cuda_module_unload, cuda_context_destroy, cuda_launch_kernel_1d,
-//     cuda_context_synchronize, cuda_grid_dim, cuda_default_block_size,
+//     cuda_free, cuda_module_unload, cuda_context_destroy, cuda_launch_kernel,
+//     cuda_launch_kernel_1d, cuda_context_synchronize, cuda_grid_dim,
+//     cuda_default_block_size,
 //     cuda_event_create_default, cuda_event_record_default, cuda_event_synchronize,
 //     cuda_event_elapsed, cuda_event_destroy, cuda_is_success, cuda_check,
 //     cuda_runtime_available, cuda_buffer_raw_ptr, CUDA_SUCCESS, CU_CTX_SCHED_AUTO
@@ -788,33 +789,116 @@ fn gpu_launch_smoke_test() -> bool with IO, Mut, Panic, Div, Alloc {
 // This section provides a 2-buffer variant for map/transform kernels.
 
 struct GpuLaunchConfig {
-    block_dim: i32,
+    grid_dim_x: i32,
+    grid_dim_y: i32,
+    grid_dim_z: i32,
+    block_dim_x: i32,
+    block_dim_y: i32,
+    block_dim_z: i32,
     shared_mem_bytes: i32,
     stream_handle: i64,
 }
 
-fn gpu_launch_config_default() -> GpuLaunchConfig {
-    GpuLaunchConfig {
-        block_dim: 256,
+struct GpuLaunchDescriptor {
+    grid_dim_x: i32,
+    grid_dim_y: i32,
+    grid_dim_z: i32,
+    block_dim_x: i32,
+    block_dim_y: i32,
+    block_dim_z: i32,
+    shared_mem_bytes: i32,
+    stream_handle: i64,
+}
+
+fn gpu_launch_descriptor_invalid() -> GpuLaunchDescriptor {
+    GpuLaunchDescriptor {
+        grid_dim_x: 0,
+        grid_dim_y: 0,
+        grid_dim_z: 0,
+        block_dim_x: 0,
+        block_dim_y: 0,
+        block_dim_z: 0,
         shared_mem_bytes: 0,
         stream_handle: 0,
     }
 }
 
-fn gpu_launch_config_with_block(block: i32) -> GpuLaunchConfig {
-    GpuLaunchConfig {
-        block_dim: block,
-        shared_mem_bytes: 0,
-        stream_handle: 0,
-    }
+fn gpu_launch_config_default(n: i64) -> GpuLaunchConfig with Div {
+    gpu_launch_config_with_stream(n, 256, 0, 0)
 }
 
-fn gpu_launch_config_with_shared(block: i32, smem: i32) -> GpuLaunchConfig {
+fn gpu_launch_config_with_stream(
+    n: i64,
+    block_x: i32,
+    smem: i32,
+    stream_handle: i64
+) -> GpuLaunchConfig with Div {
+    var grid_x: i32 = 0
+    if block_x > 0 {
+        grid_x = cuda_grid_dim(n, block_x)
+    }
     GpuLaunchConfig {
-        block_dim: block,
+        grid_dim_x: grid_x,
+        grid_dim_y: 1,
+        grid_dim_z: 1,
+        block_dim_x: block_x,
+        block_dim_y: 1,
+        block_dim_z: 1,
         shared_mem_bytes: smem,
-        stream_handle: 0,
+        stream_handle: stream_handle,
     }
+}
+
+fn gpu_launch_config_with_block(n: i64, block: i32) -> GpuLaunchConfig with Div {
+    gpu_launch_config_with_stream(n, block, 0, 0)
+}
+
+fn gpu_launch_config_with_shared(n: i64, block: i32, smem: i32) -> GpuLaunchConfig with Div {
+    gpu_launch_config_with_stream(n, block, smem, 0)
+}
+
+fn gpu_launch_config_explicit(
+    grid_x: i32,
+    grid_y: i32,
+    grid_z: i32,
+    block_x: i32,
+    block_y: i32,
+    block_z: i32,
+    smem: i32,
+    stream_handle: i64
+) -> GpuLaunchConfig {
+    GpuLaunchConfig {
+        grid_dim_x: grid_x,
+        grid_dim_y: grid_y,
+        grid_dim_z: grid_z,
+        block_dim_x: block_x,
+        block_dim_y: block_y,
+        block_dim_z: block_z,
+        shared_mem_bytes: smem,
+        stream_handle: stream_handle,
+    }
+}
+
+fn gpu_launch_descriptor_validate(config: GpuLaunchConfig) -> (GpuLaunchDescriptor, i32) {
+    if config.grid_dim_x <= 0 || config.grid_dim_y <= 0 || config.grid_dim_z <= 0 {
+        return (gpu_launch_descriptor_invalid(), CUDA_ERROR_INVALID_VALUE)
+    }
+    if config.block_dim_x <= 0 || config.block_dim_y <= 0 || config.block_dim_z <= 0 {
+        return (gpu_launch_descriptor_invalid(), CUDA_ERROR_INVALID_VALUE)
+    }
+    (
+        GpuLaunchDescriptor {
+            grid_dim_x: config.grid_dim_x,
+            grid_dim_y: config.grid_dim_y,
+            grid_dim_z: config.grid_dim_z,
+            block_dim_x: config.block_dim_x,
+            block_dim_y: config.block_dim_y,
+            block_dim_z: config.block_dim_z,
+            shared_mem_bytes: config.shared_mem_bytes,
+            stream_handle: config.stream_handle,
+        },
+        CUDA_SUCCESS
+    )
 }
 
 // Launch a PTX kernel that operates on 2 buffers (in-place transform pattern).
@@ -828,6 +912,12 @@ fn gpu_launch_ptx_map(
     config: GpuLaunchConfig
 ) -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {
     let byte_count: i64 = n * 4
+    let descriptor_result = gpu_launch_descriptor_validate(config)
+    let descriptor = descriptor_result.0
+    let descriptor_err = descriptor_result.1
+    if descriptor_err != CUDA_SUCCESS {
+        return gpu_launch_result_err(descriptor_err)
+    }
 
     // Initialize
     let init_err = cuda_init()
@@ -905,9 +995,6 @@ fn gpu_launch_ptx_map(
         return gpu_launch_result_err(h2d_err)
     }
 
-    // Grid/block dims
-    let grid_dim = cuda_grid_dim(n, config.block_dim)
-
     // Pack params: (ptr_in, ptr_out, n)
     let ptr_in_result = cuda_buffer_raw_ptr(buf_in)
     buf_in = ptr_in_result.0
@@ -921,12 +1008,16 @@ fn gpu_launch_ptx_map(
     let addrs = cuda_param_addrs_3(&params)
 
     // Launch
-    let launch_err = cuda_launch_kernel_1d(
+    let launch_err = cuda_launch_kernel(
         func_handle,
-        grid_dim,
-        config.block_dim,
-        config.shared_mem_bytes,
-        config.stream_handle,
+        descriptor.grid_dim_x,
+        descriptor.grid_dim_y,
+        descriptor.grid_dim_z,
+        descriptor.block_dim_x,
+        descriptor.block_dim_y,
+        descriptor.block_dim_z,
+        descriptor.shared_mem_bytes,
+        descriptor.stream_handle,
         &addrs[0] as *const i64
     )
     if launch_err != CUDA_SUCCESS {
