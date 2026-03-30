@@ -16,6 +16,7 @@ const ACTIVE_IMPLEMENTATION_DOCS = new Set([
   'docs/implementation/BASELINE_STEWARDSHIP_PR_NOTE.md',
   'docs/implementation/BASELINE_STEWARDSHIP_MAINTAINER_MEMO.md',
   'docs/implementation/GPU_CAPABILITY_MODEL.md',
+  'docs/implementation/GPU_CAPABILITY_WAVE2.md',
   'docs/implementation/GPU_COMPILER_CONTRACTS.md',
   'docs/implementation/MV_CORE_CHECKLIST.md',
   'docs/implementation/PAPER_ARTIFACT_PACKAGING_SPEC.md',
@@ -40,6 +41,7 @@ const ACTIVE_FEATURE_DOCS = new Set([
 ]);
 
 const ACTIVE_RESEARCH_DOCS = new Set([
+  'docs/research/HYPERCOMPLEX_COMPILER_TRACK.md',
   'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
   'docs/research/epistemic_algebra_review.md',
   'docs/research/vancomycin-uncertainty.md',
