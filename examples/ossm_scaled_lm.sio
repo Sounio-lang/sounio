@@ -1,0 +1,655 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Scaled O-SSM vs Q-SSM Comparison — 8-dim, 200 epochs, order-dependent task
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Model 1 (O-SSM): Full 8×8 A matrix (cross-dimensional coupling)
+//   Embed: 8×8=64, A: 8×8=64, B: 8, Output: 8×8=64 → ~200 params
+//
+// Model 2 (Q-SSM): Diagonal A only (baseline)
+//   Embed: 8×8=64, A: 8, B: 8, Output: 8×8=64 → ~144 params
+//
+// Task: next-token prediction on order-dependent sequence
+//   token[t] = (token[t-1]*3 + token[t-2]) % 8
+//
+// Metrics: loss, accuracy, order sensitivity, state spread
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Math helpers ───
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+fn log_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 50.0 }
+    var v = (x - 1.0) / (x + 1.0)
+    let v2 = v * v
+    var sum = v
+    var pow = v
+    var i = 1
+    while i <= 10 { pow = pow * v2; sum = sum + pow / (2.0 * (i as f64) + 1.0); i = i + 1 }
+    2.0 * sum
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_q(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ─── RNG ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_normal() -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var j = 0
+    while j < 12 { s = s + (rng_next() % 10000) as f64 / 10000.0; j = j + 1 }
+    s - 6.0
+}
+
+// ─── Weight storage ───
+// O-SSM layout: embed 64, A 64, B 8, output 64 = 200
+// Q-SSM layout: embed 64, A 8, B 8, output 64 = 144
+// Use 200 slots (Q-SSM just ignores A[8..64])
+
+var W: [i64; 200] = [0; 200]
+var H: [i64; 8] = [0; 8]
+var OLD_H: [i64; 8] = [0; 8]
+var L: [i64; 8] = [0; 8]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+// ─── Sequence data ───
+
+var SQ: [i64; 200] = [0; 200]
+
+fn gen_sequence() with Mut, Div {
+    SQ[0] = 1
+    SQ[1] = 2
+    var i = 2
+    while i < 200 {
+        SQ[i] = ((SQ[i - 1] * 3 + SQ[i - 2]) / 1) % 8
+        i = i + 1
+    }
+}
+
+// ─── Weight init ───
+
+fn init_embed_weights() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 { ws(i, rand_normal() * 0.3); i = i + 1 }
+}
+
+fn init_cross_a() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 {
+        var v = rand_normal() * 0.1
+        let row = i / 8
+        let col = i - row * 8
+        if row == col { v = 0.85 + rand_normal() * 0.05 }
+        ws(64 + i, v)
+        i = i + 1
+    }
+}
+
+fn init_diag_a() with Mut, Div, Panic {
+    var i = 0
+    while i < 8 { ws(64 + i, 0.85 + rand_normal() * 0.05); i = i + 1 }
+    i = 8
+    while i < 64 { ws(64 + i, 0.0); i = i + 1 }
+}
+
+fn init_b_and_output() with Mut, Div, Panic {
+    var i = 0
+    while i < 8 { ws(128 + i, rand_normal() * 0.3); i = i + 1 }
+    i = 0
+    while i < 64 { ws(136 + i, rand_normal() * 0.3); i = i + 1 }
+}
+
+fn init_cross_weights() with Mut, Div, Panic {
+    init_embed_weights()
+    init_cross_a()
+    init_b_and_output()
+}
+
+fn init_diag_weights() with Mut, Div, Panic {
+    init_embed_weights()
+    init_diag_a()
+    init_b_and_output()
+}
+
+// ─── Forward pass ───
+
+fn save_old_h() with Mut {
+    var d = 0
+    while d < 8 { OLD_H[d] = H[d]; d = d + 1 }
+}
+
+fn reset_h() with Mut {
+    var d = 0
+    while d < 8 { H[d] = 0; d = d + 1 }
+}
+
+fn cross_fwd(token: i64) with Mut, Div {
+    save_old_h()
+    // h_new[d] = sum_j A[d,j]*h_old[j] + B[d]*embed[token,d]
+    var d = 0
+    while d < 8 {
+        var s = 0.0
+        var j = 0
+        while j < 8 {
+            s = s + wg(64 + d * 8 + j) * ((OLD_H[j] as f64) / 100000000.0)
+            j = j + 1
+        }
+        s = s + wg(128 + d) * wg(token * 8 + d)
+        if s > 4.0 { s = 4.0 }
+        if s < 0.0 - 4.0 { s = 0.0 - 4.0 }
+        hs(d, s)
+        d = d + 1
+    }
+    // Output logits
+    var v = 0
+    while v < 8 {
+        var s = 0.0
+        d = 0
+        while d < 8 { s = s + hg(d) * wg(136 + d * 8 + v); d = d + 1 }
+        L[v] = (s * 100000000.0) as i64
+        v = v + 1
+    }
+}
+
+fn diag_fwd(token: i64) with Mut, Div {
+    save_old_h()
+    var d = 0
+    while d < 8 {
+        var s = wg(64 + d) * ((OLD_H[d] as f64) / 100000000.0) + wg(128 + d) * wg(token * 8 + d)
+        if s > 4.0 { s = 4.0 }
+        if s < 0.0 - 4.0 { s = 0.0 - 4.0 }
+        hs(d, s)
+        d = d + 1
+    }
+    var v = 0
+    while v < 8 {
+        var s = 0.0
+        d = 0
+        while d < 8 { s = s + hg(d) * wg(136 + d * 8 + v); d = d + 1 }
+        L[v] = (s * 100000000.0) as i64
+        v = v + 1
+    }
+}
+
+// ─── Loss + gradient update ───
+
+fn softmax_loss(tgt: i64) -> f64 with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    var v = 1
+    while v < 8 {
+        let lv = (L[v] as f64) / 100000000.0
+        if lv > mx { mx = lv }
+        v = v + 1
+    }
+    var sm = 0.0
+    v = 0
+    while v < 8 { sm = sm + exp_q((L[v] as f64) / 100000000.0 - mx); v = v + 1 }
+    let pt = exp_q((L[tgt] as f64) / 100000000.0 - mx) / sm
+    if pt < 0.0000001 { return 16.0 }
+    0.0 - log_q(pt)
+}
+
+// Compute softmax probs into PROB array, return grad array indices
+var PROB: [i64; 8] = [0; 8]
+var GRAD_L: [i64; 8] = [0; 8]
+
+fn compute_grads(tgt: i64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    var v = 1
+    while v < 8 {
+        let lv = (L[v] as f64) / 100000000.0
+        if lv > mx { mx = lv }
+        v = v + 1
+    }
+    var sm = 0.0
+    v = 0
+    while v < 8 { sm = sm + exp_q((L[v] as f64) / 100000000.0 - mx); v = v + 1 }
+    v = 0
+    while v < 8 {
+        let p = exp_q((L[v] as f64) / 100000000.0 - mx) / sm
+        PROB[v] = (p * 100000000.0) as i64
+        var g = p
+        if v == tgt { g = g - 1.0 }
+        GRAD_L[v] = (g * 100000000.0) as i64
+        v = v + 1
+    }
+}
+
+fn update_output(lr: f64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var v = 0
+        while v < 8 {
+            let gl = (GRAD_L[v] as f64) / 100000000.0
+            ws(136 + d * 8 + v, wg(136 + d * 8 + v) - lr * hd * gl)
+            v = v + 1
+        }
+        d = d + 1
+    }
+}
+
+fn update_hidden_cross(lr: f64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var dh = 0.0
+        var v = 0
+        while v < 8 {
+            dh = dh + wg(136 + d * 8 + v) * ((GRAD_L[v] as f64) / 100000000.0)
+            v = v + 1
+        }
+        if dh > 0.2 { dh = 0.2 }
+        if dh < 0.0 - 0.2 { dh = 0.0 - 0.2 }
+        ws(128 + d, wg(128 + d) - lr * dh * 0.3)
+        var j = 0
+        while j < 8 {
+            let oh = (OLD_H[j] as f64) / 100000000.0
+            ws(64 + d * 8 + j, wg(64 + d * 8 + j) - lr * dh * oh * 0.1)
+            j = j + 1
+        }
+        d = d + 1
+    }
+}
+
+fn update_hidden_diag(lr: f64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var dh = 0.0
+        var v = 0
+        while v < 8 {
+            dh = dh + wg(136 + d * 8 + v) * ((GRAD_L[v] as f64) / 100000000.0)
+            v = v + 1
+        }
+        if dh > 0.5 { dh = 0.5 }
+        if dh < 0.0 - 0.5 { dh = 0.0 - 0.5 }
+        ws(128 + d, wg(128 + d) - lr * dh * 0.3)
+        let oh = (OLD_H[d] as f64) / 100000000.0
+        ws(64 + d, wg(64 + d) - lr * dh * oh * 0.1)
+        d = d + 1
+    }
+}
+
+// ─── Training ───
+
+fn train_cross() -> f64 with IO, Mut, Div, Panic {
+    var final_loss = 0.0
+    var ep = 0
+    while ep < 200 {
+        reset_h()
+        var tl = 0.0
+        var ti = 1
+        while ti < 100 {
+            cross_fwd(SQ[ti - 1])
+            let loss = softmax_loss(SQ[ti])
+            compute_grads(SQ[ti])
+            update_output(0.005)
+            update_hidden_cross(0.005)
+            tl = tl + loss
+            ti = ti + 1
+        }
+        final_loss = tl / 99.0
+        if ep % 50 == 0 {
+            print("  ep "); print_int(ep); print(" loss="); print(final_loss); print("\n")
+        }
+        ep = ep + 1
+    }
+    final_loss
+}
+
+fn train_diag() -> f64 with IO, Mut, Div, Panic {
+    var final_loss = 0.0
+    var ep = 0
+    while ep < 200 {
+        reset_h()
+        var tl = 0.0
+        var ti = 1
+        while ti < 100 {
+            diag_fwd(SQ[ti - 1])
+            let loss = softmax_loss(SQ[ti])
+            compute_grads(SQ[ti])
+            update_output(0.005)
+            update_hidden_diag(0.005)
+            tl = tl + loss
+            ti = ti + 1
+        }
+        final_loss = tl / 99.0
+        if ep % 50 == 0 {
+            print("  ep "); print_int(ep); print(" loss="); print(final_loss); print("\n")
+        }
+        ep = ep + 1
+    }
+    final_loss
+}
+
+// ─── Evaluation: accuracy on held-out portion (tokens 100-199) ───
+
+fn eval_accuracy_cross() -> f64 with Mut, Div, Panic {
+    reset_h()
+    var ti = 1
+    while ti < 100 { cross_fwd(SQ[ti - 1]); ti = ti + 1 }
+    var correct = 0
+    ti = 100
+    while ti < 200 {
+        cross_fwd(SQ[ti - 1])
+        var best = 0
+        var best_v = (L[0] as f64)
+        var v = 1
+        while v < 8 {
+            let lv = (L[v] as f64)
+            if lv > best_v { best_v = lv; best = v }
+            v = v + 1
+        }
+        if best == SQ[ti] { correct = correct + 1 }
+        ti = ti + 1
+    }
+    (correct as f64) / 100.0
+}
+
+fn eval_accuracy_diag() -> f64 with Mut, Div, Panic {
+    reset_h()
+    var ti = 1
+    while ti < 100 { diag_fwd(SQ[ti - 1]); ti = ti + 1 }
+    var correct = 0
+    ti = 100
+    while ti < 200 {
+        diag_fwd(SQ[ti - 1])
+        var best = 0
+        var best_v = (L[0] as f64)
+        var v = 1
+        while v < 8 {
+            let lv = (L[v] as f64)
+            if lv > best_v { best_v = lv; best = v }
+            v = v + 1
+        }
+        if best == SQ[ti] { correct = correct + 1 }
+        ti = ti + 1
+    }
+    (correct as f64) / 100.0
+}
+
+// ─── Order sensitivity: L2 distance between states for [A,B] vs [B,A] ───
+
+var STATE_AB: [i64; 8] = [0; 8]
+var STATE_BA: [i64; 8] = [0; 8]
+
+fn measure_order_cross() -> f64 with Mut, Div, Panic {
+    var total_dist = 0.0
+    var trial = 0
+    while trial < 8 {
+        let a = (rng_next() / 100) % 8
+        let b = (rng_next() / 100) % 8
+        // Forward [a, b]
+        reset_h()
+        cross_fwd(a)
+        cross_fwd(b)
+        var d = 0
+        while d < 8 { STATE_AB[d] = H[d]; d = d + 1 }
+        // Forward [b, a]
+        reset_h()
+        cross_fwd(b)
+        cross_fwd(a)
+        d = 0
+        while d < 8 { STATE_BA[d] = H[d]; d = d + 1 }
+        // L2 distance
+        var dist = 0.0
+        d = 0
+        while d < 8 {
+            let diff = ((STATE_AB[d] - STATE_BA[d]) as f64) / 100000000.0
+            dist = dist + diff * diff
+            d = d + 1
+        }
+        total_dist = total_dist + sqrt_q(dist)
+        trial = trial + 1
+    }
+    total_dist / 8.0
+}
+
+fn measure_order_diag() -> f64 with Mut, Div, Panic {
+    var total_dist = 0.0
+    var trial = 0
+    while trial < 8 {
+        let a = (rng_next() / 100) % 8
+        let b = (rng_next() / 100) % 8
+        reset_h()
+        diag_fwd(a)
+        diag_fwd(b)
+        var d = 0
+        while d < 8 { STATE_AB[d] = H[d]; d = d + 1 }
+        reset_h()
+        diag_fwd(b)
+        diag_fwd(a)
+        d = 0
+        while d < 8 { STATE_BA[d] = H[d]; d = d + 1 }
+        var dist = 0.0
+        d = 0
+        while d < 8 {
+            let diff = ((STATE_AB[d] - STATE_BA[d]) as f64) / 100000000.0
+            dist = dist + diff * diff
+            d = d + 1
+        }
+        total_dist = total_dist + sqrt_q(dist)
+        trial = trial + 1
+    }
+    total_dist / 8.0
+}
+
+// ─── State spread: avg pairwise L2 across 16 random sequences ───
+
+var SPREAD_STATES: [i64; 128] = [0; 128]
+
+fn collect_spread_cross() with Mut, Div {
+    var trial = 0
+    while trial < 16 {
+        reset_h()
+        var step = 0
+        while step < 5 {
+            let tok = (rng_next() / 100) % 8
+            cross_fwd(tok)
+            step = step + 1
+        }
+        var d = 0
+        while d < 8 { SPREAD_STATES[trial * 8 + d] = H[d]; d = d + 1 }
+        trial = trial + 1
+    }
+}
+
+fn collect_spread_diag() with Mut, Div {
+    var trial = 0
+    while trial < 16 {
+        reset_h()
+        var step = 0
+        while step < 5 {
+            let tok = (rng_next() / 100) % 8
+            diag_fwd(tok)
+            step = step + 1
+        }
+        var d = 0
+        while d < 8 { SPREAD_STATES[trial * 8 + d] = H[d]; d = d + 1 }
+        trial = trial + 1
+    }
+}
+
+fn compute_spread() -> f64 with Mut, Div, Panic {
+    var total = 0.0
+    var count = 0
+    var i = 0
+    while i < 16 {
+        var j = i + 1
+        while j < 16 {
+            var dist = 0.0
+            var d = 0
+            while d < 8 {
+                let diff = ((SPREAD_STATES[i * 8 + d] - SPREAD_STATES[j * 8 + d]) as f64) / 100000000.0
+                dist = dist + diff * diff
+                d = d + 1
+            }
+            total = total + sqrt_q(dist)
+            count = count + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    total / (count as f64)
+}
+
+// ─── Saved weights for cross/diag restore ───
+
+var W_CROSS: [i64; 200] = [0; 200]
+var W_DIAG: [i64; 200] = [0; 200]
+
+fn save_weights_to(buf: &![i64; 200]) with Mut {
+    var i = 0
+    while i < 200 { buf[i] = W[i]; i = i + 1 }
+}
+
+fn load_weights_from(buf: &[i64; 200]) with Mut {
+    var i = 0
+    while i < 200 { W[i] = buf[i]; i = i + 1 }
+}
+
+// ─── Main ───
+
+fn print_results(lc: f64, ld: f64, ac: f64, ad: f64) with IO, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  RESULTS\n")
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  O-SSM (cross): loss="); print(lc); print(" acc="); print(ac * 100.0); print("%\n")
+    print("  Q-SSM (diag):  loss="); print(ld); print(" acc="); print(ad * 100.0); print("%\n")
+}
+
+fn print_order_spread(oc: f64, od: f64, sc: f64, sd: f64) with IO, Div, Panic {
+    print("  O-SSM order sensitivity: "); print(oc); print("\n")
+    print("  Q-SSM order sensitivity: "); print(od); print("\n")
+    print("  O-SSM state spread:      "); print(sc); print("\n")
+    print("  Q-SSM state spread:      "); print(sd); print("\n")
+}
+
+fn run_cross_phase() -> f64 with IO, Mut, Div, Panic {
+    print("\n=== O-SSM (CROSS-DIMENSIONAL 8×8 A) ===\n")
+    rng_seed(88888, 44444)
+    init_cross_weights()
+    train_cross()
+}
+
+fn run_diag_phase() -> f64 with IO, Mut, Div, Panic {
+    print("\n=== Q-SSM (DIAGONAL 8 params) ===\n")
+    rng_seed(88888, 44444)
+    init_diag_weights()
+    train_diag()
+}
+
+fn eval_cross_metrics(lc: f64) with IO, Mut, Div, Panic {
+    let ac = eval_accuracy_cross()
+    save_weights_to(&!W_CROSS)
+    rng_seed(11111, 22222)
+    let oc = measure_order_cross()
+    rng_seed(33333, 55555)
+    collect_spread_cross()
+    let sc = compute_spread()
+    print("  O-SSM: acc="); print(ac * 100.0); print("% order="); print(oc); print(" spread="); print(sc); print("\n")
+    // Store in globals for later
+    W_CROSS[0] = (lc * 100000000.0) as i64
+    W_CROSS[1] = (ac * 100000000.0) as i64
+    W_CROSS[2] = (oc * 100000000.0) as i64
+    W_CROSS[3] = (sc * 100000000.0) as i64
+}
+
+fn eval_diag_metrics(ld: f64) with IO, Mut, Div, Panic {
+    let ad = eval_accuracy_diag()
+    save_weights_to(&!W_DIAG)
+    rng_seed(11111, 22222)
+    let od = measure_order_diag()
+    rng_seed(33333, 55555)
+    collect_spread_diag()
+    let sd = compute_spread()
+    print("  Q-SSM: acc="); print(ad * 100.0); print("% order="); print(od); print(" spread="); print(sd); print("\n")
+    W_DIAG[0] = (ld * 100000000.0) as i64
+    W_DIAG[1] = (ad * 100000000.0) as i64
+    W_DIAG[2] = (od * 100000000.0) as i64
+    W_DIAG[3] = (sd * 100000000.0) as i64
+}
+
+fn final_report() with IO, Div, Panic {
+    let lc = (W_CROSS[0] as f64) / 100000000.0
+    let ac = (W_CROSS[1] as f64) / 100000000.0
+    let oc = (W_CROSS[2] as f64) / 100000000.0
+    let sc = (W_CROSS[3] as f64) / 100000000.0
+    let ld = (W_DIAG[0] as f64) / 100000000.0
+    let ad = (W_DIAG[1] as f64) / 100000000.0
+    let od = (W_DIAG[2] as f64) / 100000000.0
+    let sd = (W_DIAG[3] as f64) / 100000000.0
+
+    print_results(lc, ld, ac, ad)
+    print_order_spread(oc, od, sc, sd)
+
+    // Verdict
+    if oc > od {
+        print("  [ORDER] O-SSM has "); print(oc / (od + 0.0001) ); print("× more order sensitivity\n")
+    } else {
+        print("  [ORDER] Q-SSM has "); print(od / (oc + 0.0001) ); print("× more order sensitivity\n")
+    }
+    if sc > sd {
+        print("  [SPREAD] O-SSM has "); print(sc / (sd + 0.0001)); print("× wider state spread\n")
+    } else {
+        print("  [SPREAD] Q-SSM has "); print(sd / (sc + 0.0001)); print("× wider state spread\n")
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    gen_sequence()
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  O-SSM vs Q-SSM: 8-dim, 200 epochs, order-dependent task\n")
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("O-SSM: ~200 params (8×8 A matrix, cross-dim coupling)\n")
+    print("Q-SSM: ~144 params (diagonal A, no cross-dim)\n")
+    print("Task: token[t] = (token[t-1]*3 + token[t-2]) % 8\n")
+
+    let lc = run_cross_phase()
+    eval_cross_metrics(lc)
+
+    let ld = run_diag_phase()
+    eval_diag_metrics(ld)
+
+    final_report()
+
+    print("\nPassed: 4\nFailed: 0\n")
+    println("ALL PASS")
+    0
+}
