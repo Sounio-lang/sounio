@@ -132,6 +132,8 @@ The self-hosted compiler baseline remains institutionally mature only while all 
 
 ## Related Docs
 
+- PR-ready summary: [BASELINE_STEWARDSHIP_PR_NOTE.md](BASELINE_STEWARDSHIP_PR_NOTE.md)
+- maintainer handoff: [BASELINE_STEWARDSHIP_MAINTAINER_MEMO.md](BASELINE_STEWARDSHIP_MAINTAINER_MEMO.md)
 - authority overview: [SELFHOST_AUTHORITY_MODEL.md](SELFHOST_AUTHORITY_MODEL.md)
 - release train: [SELFHOST_RELEASE_TRAIN.md](SELFHOST_RELEASE_TRAIN.md)
 - deferred debt register: [SELFHOST_DEBT_REGISTER.md](SELFHOST_DEBT_REGISTER.md)
