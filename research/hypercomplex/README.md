@@ -1,8 +1,9 @@
 # Hypercomplex Algebra Research Lane
 
 This directory contains the Wave 1 baseline plus the Wave 2 semantic-contract
-package, the Wave 3 prototype-safe scaffolding, and the Wave 4 compile-proof
-prototype harnesses for hypercomplex algebra in the compiler.
+package, the Wave 3 prototype-safe scaffolding, the Wave 4 compile-proof
+prototype harnesses, and the Wave 5 metadata-carriage scaffolding for
+hypercomplex algebra in the compiler.
 
 Wave 1 baseline:
 
@@ -23,6 +24,11 @@ Wave 4 baseline:
 
 - builds on `hypercomplex-algebra-wave3`
 - baseline commit `8c71e758c4f8eb7cc986dac26212cb8ca320d927`
+
+Wave 5 baseline:
+
+- builds on `hypercomplex-algebra-wave4`
+- baseline commit `57c593e0a617174bcc24580e967cfee54368b437`
 
 Scope:
 
@@ -49,6 +55,7 @@ Files:
 - `expected_fail.v1.json`: Wave 3 forbidden-rewrite coverage, mixing executable counterexamples with explicit validation-only gaps
 - `compiler_audit.v1.json`: bounded internal audit seams for type, IR, and lowering touchpoints
 - `prototype_scaffolding.v1.json`: Wave 4 compile-proof and harness matrix for non-public compiler-facing scaffolding
+- `prototype_scaffolding.v1.json`: Wave 5 metadata-carriage harnesses and validation rules for non-public compiler-facing scaffolding
 
 Validation:
 
@@ -57,6 +64,7 @@ bash scripts/research/hypercomplex_wave1_gate.sh
 bash scripts/research/hypercomplex_wave2_gate.sh
 bash scripts/research/hypercomplex_wave3_gate.sh
 bash scripts/research/hypercomplex_wave4_gate.sh
+bash scripts/research/hypercomplex_wave5_gate.sh
 ```
 
 What the baseline already contains:
@@ -104,6 +112,18 @@ What Wave 4 adds without changing support claims:
 - a Wave 4 validator that requires Wave 3 to stay green and then compiles the
   new Hyper fixtures through the canonical `resolve_souc.sh` path
 
+What Wave 5 adds without changing support claims:
+
+- a prototype-safe compile-proof harness that carries reassociation-strategy
+  metadata through `algebra` declarations and `Hyper<...>` signatures without
+  altering runtime or optimizer behavior
+- a stronger validation-only contract for the still-missing generic
+  distribute/factor law surface, so future prototype work cannot silently
+  pretend the rewrite engine exists
+- a Wave 5 validator that requires Wave 4 to stay green, compiles the new
+  metadata-carriage fixture, and checks that forbidden-law gaps remain fenced by
+  research-only touchpoints
+
 Current inventory summary:
 
 - active entries: 9
@@ -133,3 +153,5 @@ Wave 2 operating rule:
   compile-fail suite
 - Wave 4 compile-proof harnesses are internal evidence for compiler carriage
   only; they do not imply runtime, optimizer, or ABI support
+- Wave 5 metadata-carriage harnesses are still compile-proof only; they do not
+  upgrade rewrite-engine, optimizer, runtime, or public maturity claims
