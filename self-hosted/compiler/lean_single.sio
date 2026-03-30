@@ -613,6 +613,26 @@ fn emit_pop_x0_a64() with Mut { em32(0xF84107E0) }  // ldr x0, [sp], #16
 
 fn emit_pop_x2_a64() with Mut { em32(0xF84107E2) }  // ldr x2, [sp], #16
 
+fn emit_load_sp_offset_a64(rd: i64, byte_off: i64) with Mut, Panic {
+    if byte_off >= 0 && byte_off <= 32760 && (byte_off & 7) == 0 {
+        em32(0xF9400000 | (((byte_off / 8) & 0xFFF) << 10) | (31 << 5) | rd)
+        return
+    }
+    emit_imm64_reg_a64(9, byte_off)
+    em32(0x8B0903E9)  // add x9, sp, x9
+    em32(0xF9400000 | (9 << 5) | rd)
+}
+
+fn emit_store_sp_offset_a64(rs: i64, byte_off: i64) with Mut, Panic {
+    if byte_off >= 0 && byte_off <= 32760 && (byte_off & 7) == 0 {
+        em32(0xF9000000 | (((byte_off / 8) & 0xFFF) << 10) | (31 << 5) | rs)
+        return
+    }
+    emit_imm64_reg_a64(9, byte_off)
+    em32(0x8B0903E9)  // add x9, sp, x9
+    em32(0xF9000000 | (9 << 5) | rs)
+}
+
 fn emit_copy_words_x10_x11_a64(words: i64) with Mut {
     if words <= 0 { return }
     emit_imm64_reg_a64(12, words)
@@ -710,16 +730,28 @@ fn emit_closure_fn_call_a64(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i64
         emit_lea_var_a64(ret_base + ret_slots - 1)
         em32(0xAA0003E8)  // mov x8, x0
     }
-    if argc >= 7 { em32(0xF84107E7) }
-    if argc >= 6 { em32(0xF84107E6) }
-    if argc >= 5 { em32(0xF84107E5) }
-    if argc >= 4 { em32(0xF84107E4) }
-    if argc >= 3 { em32(0xF84107E3) }
-    if argc >= 2 { em32(0xF84107E2) }
-    if argc >= 1 { em32(0xF84107E1) }
+    let stack_argc = argc - 7
+    if stack_argc > 0 {
+        var stack_i: i64 = stack_argc - 1
+        while stack_i >= 0 {
+            let src_off = (argc - (8 + stack_i)) * 16
+            let dst_off = stack_i * 8
+            emit_load_sp_offset_a64(10, src_off)
+            emit_store_sp_offset_a64(10, dst_off)
+            stack_i = stack_i - 1
+        }
+    }
+    if argc >= 7 { emit_load_sp_offset_a64(7, (argc - 7) * 16) }
+    if argc >= 6 { emit_load_sp_offset_a64(6, (argc - 6) * 16) }
+    if argc >= 5 { emit_load_sp_offset_a64(5, (argc - 5) * 16) }
+    if argc >= 4 { emit_load_sp_offset_a64(4, (argc - 4) * 16) }
+    if argc >= 3 { emit_load_sp_offset_a64(3, (argc - 3) * 16) }
+    if argc >= 2 { emit_load_sp_offset_a64(2, (argc - 2) * 16) }
+    if argc >= 1 { emit_load_sp_offset_a64(1, (argc - 1) * 16) }
     emit_load_var_a64(ptr_slot)
     em32(0xF9400009)
     em32(0xD63F0120)
+    emit_drop_call_args_a64(argc)
 }
 
 // Load 64-bit immediate into x0 via movz/movk chain
@@ -10810,43 +10842,6 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             while TK[EP as usize] == 3 || TK[EP as usize] == 28 { EP = EP + 1 }
         }
         let nparams_a = VAR_COUNT
-        if nparams_a > 7 {
-            tc_fatal(closure_tok, "AArch64 closure literals support at most 7 user parameters")
-            em32(0xD2800000)
-            EXPR_IS_F64 = 0
-            EXPR_TY = 0
-            EXPR_TY_HASH = 0
-            LAST_EXPR_IS_CLOSURE = 0
-            VAR_COUNT = save_vc_a
-            NEXT_SLOT = save_ns_a
-            LOOP_DEPTH = save_ld_a
-            BREAK_COUNT = save_bc_a
-            CURRENT_RET_TY = save_ret_ty_a
-            CURRENT_RET_HASH = save_ret_hash_a
-            CURRENT_SRET_SLOT = save_sret_slot_a
-            LAST_STMT_HAS_VALUE = save_last_stmt_has_value_a
-            LAST_STMT_TY = save_last_stmt_ty_a
-            LAST_STMT_TY_HASH = save_last_stmt_hash_a
-            svi_a = 0
-            while svi_a < save_vc_a {
-                VAR_NS[svi_a as usize] = CL_SAVE_NS[svi_a as usize]
-                VAR_NE[svi_a as usize] = CL_SAVE_NE[svi_a as usize]
-                VAR_SLOT[svi_a as usize] = CL_SAVE_SL[svi_a as usize]
-                VAR_LEN_SLOT[svi_a as usize] = CL_SAVE_LS[svi_a as usize]
-                VAR_ALEN[svi_a as usize] = CL_SAVE_AL[svi_a as usize]
-                VAR_ESIZ[svi_a as usize] = CL_SAVE_ES[svi_a as usize]
-                VAR_IS_F64[svi_a as usize] = CL_SAVE_F64[svi_a as usize]
-                VAR_IS_CLOSURE[svi_a as usize] = CL_SAVE_ISCL[svi_a as usize]
-                VAR_MUT[svi_a as usize] = CL_SAVE_MUT[svi_a as usize]
-                VAR_UNIT[svi_a as usize] = CL_SAVE_UNIT[svi_a as usize]
-                VAR_LINEAR[svi_a as usize] = CL_SAVE_LINEAR[svi_a as usize]
-                VAR_USED[svi_a as usize] = CL_SAVE_USED[svi_a as usize]
-                VAR_TY[svi_a as usize] = CL_SAVE_TY[svi_a as usize]
-                VAR_TY_HASH[svi_a as usize] = CL_SAVE_TH[svi_a as usize]
-                svi_a = svi_a + 1
-            }
-            return
-        }
         let closure_sig_a = fnsig_from_local_params(nparams_a, CURRENT_RET_TY, CURRENT_RET_HASH)
         var ci_a: i64 = 0
         while ci_a < save_vc_a {
@@ -11847,7 +11842,6 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if call_vslot >= 0 {
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
                     if call_is_closure == 1 {
-                        if argc > 7 { tc_fatal(call_tok, "AArch64 closure calls support at most 7 user arguments") }
                         emit_closure_fn_call_a64(call_vslot, argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     } else {
                         emit_indirect_fn_call_a64(call_vslot, abi_argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
