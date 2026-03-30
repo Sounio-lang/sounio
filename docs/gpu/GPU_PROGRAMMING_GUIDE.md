@@ -85,7 +85,12 @@ The builtins in this section describe the implementation-facing GPU model.
 They should not be read as proof that the checked public GPU artifact already
 accepts every `gpu.*` form today.
 
-Inside a `kernel fn` body the following built-in names are available. They map to specific `GpuKernelIr` opcodes which the PTX emitter lowers to `%tid`, `%ctaid`, and `%ntid` special registers.
+The following built-in names describe the internal lowering model and
+deterministic reference semantics used by `hlir_to_gpu` and the backend
+emitters. They map to specific `GpuKernelIr` opcodes which the PTX emitter
+lowers to `%tid`, `%ctaid`, and `%ntid` special registers. They are not, by
+themselves, proof that the checked public artifact or the current default
+selfhost front-end accepts every `gpu.*` form as source syntax today.
 
 | Sounio name | GpuKernelIr opcode | PTX register | Meaning |
 |---|---|---|---|

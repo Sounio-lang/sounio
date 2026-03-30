@@ -1559,28 +1559,31 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
         k = gpu_kernel_append_op(k, op)
     } else if op_kind == HLIR_OP_CALL_DIRECT {
         // Check if it's a GPU intrinsic by name
-        // gpu_thread_id_x → GpuGetTid axis=0
-        // gpu_block_id_x  → GpuGetBid axis=0
-        // gpu_block_dim_x → GpuGetNtid axis=0
+        // gpu_thread_id_[xyz] → GpuGetTid  axis=0/1/2
+        // gpu_block_id_[xyz]  → GpuGetBid  axis=0/1/2
+        // gpu_block_dim_[xyz] → GpuGetNtid axis=0/1/2
         var op = gpu_op_new()
         let cn = instr.call_name
         // Match against known GPU builtins (name-based dispatch)
-        if hlir_name_starts_with_gpu_thread(cn) {
+        let thread_axis = hlir_name_gpu_thread_axis(cn)
+        let block_axis = hlir_name_gpu_block_id_axis(cn)
+        let block_dim_axis = hlir_name_gpu_block_dim_axis(cn)
+        if thread_axis >= 0 {
             op.opcode = GpuOpcode::GpuGetTid
             op.dst_reg = instr.result
-            op.axis = 0
+            op.axis = thread_axis
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
-        } else if hlir_name_starts_with_gpu_block_id(cn) {
+        } else if block_axis >= 0 {
             op.opcode = GpuOpcode::GpuGetBid
             op.dst_reg = instr.result
-            op.axis = 0
+            op.axis = block_axis
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
-        } else if hlir_name_starts_with_gpu_block_dim(cn) {
+        } else if block_dim_axis >= 0 {
             op.opcode = GpuOpcode::GpuGetNtid
             op.dst_reg = instr.result
-            op.axis = 0
+            op.axis = block_dim_axis
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
         }
@@ -1591,33 +1594,53 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
     k
 }
 
-// Check if an HlirName starts with "gpu_thread_id" (13 chars).
-fn hlir_name_starts_with_gpu_thread(n: HlirName) -> bool {
-    if n.len < 13 { return false }
+// Decode a trailing "_x", "_y", or "_z" suffix after a builtin stem.
+fn hlir_name_gpu_axis_suffix(n: HlirName, stem_len: i64) -> i64 {
+    if n.len != stem_len + 2 { return -1 }
+    if n.buf[stem_len as usize] != 95 as i8 { return -1 }
+    let axis = n.buf[(stem_len + 1) as usize]
+    if axis == 120 as i8 { 0 }
+    else if axis == 121 as i8 { 1 }
+    else if axis == 122 as i8 { 2 }
+    else { -1 }
+}
+
+// Return the axis for "gpu_thread_id_[xyz]" or -1 if not matched exactly.
+fn hlir_name_gpu_thread_axis(n: HlirName) -> i64 {
+    if n.len < 15 { return -1 }
     // "gpu_thread_id" = g(103) p(112) u(117) _(95) t(116) h(104) r(114) e(101) a(97) d(100) _(95) i(105) d(100)
-    n.buf[0] == 103 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 117 as i8 && n.buf[3] == 95 as i8 &&
-    n.buf[4] == 116 as i8 && n.buf[5] == 104 as i8 && n.buf[6] == 114 as i8 && n.buf[7] == 101 as i8 &&
-    n.buf[8] == 97 as i8 && n.buf[9] == 100 as i8 && n.buf[10] == 95 as i8 && n.buf[11] == 105 as i8 &&
-    n.buf[12] == 100 as i8
+    if !(n.buf[0] == 103 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 117 as i8 && n.buf[3] == 95 as i8 &&
+         n.buf[4] == 116 as i8 && n.buf[5] == 104 as i8 && n.buf[6] == 114 as i8 && n.buf[7] == 101 as i8 &&
+         n.buf[8] == 97 as i8 && n.buf[9] == 100 as i8 && n.buf[10] == 95 as i8 && n.buf[11] == 105 as i8 &&
+         n.buf[12] == 100 as i8) {
+        return -1
+    }
+    hlir_name_gpu_axis_suffix(n, 13)
 }
 
-// Check if an HlirName starts with "gpu_block_id" (12 chars).
-fn hlir_name_starts_with_gpu_block_id(n: HlirName) -> bool {
-    if n.len < 12 { return false }
+// Return the axis for "gpu_block_id_[xyz]" or -1 if not matched exactly.
+fn hlir_name_gpu_block_id_axis(n: HlirName) -> i64 {
+    if n.len < 14 { return -1 }
     // "gpu_block_id" = g(103) p(112) u(117) _(95) b(98) l(108) o(111) c(99) k(107) _(95) i(105) d(100)
-    n.buf[0] == 103 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 117 as i8 && n.buf[3] == 95 as i8 &&
-    n.buf[4] == 98 as i8 && n.buf[5] == 108 as i8 && n.buf[6] == 111 as i8 && n.buf[7] == 99 as i8 &&
-    n.buf[8] == 107 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 105 as i8 && n.buf[11] == 100 as i8
+    if !(n.buf[0] == 103 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 117 as i8 && n.buf[3] == 95 as i8 &&
+         n.buf[4] == 98 as i8 && n.buf[5] == 108 as i8 && n.buf[6] == 111 as i8 && n.buf[7] == 99 as i8 &&
+         n.buf[8] == 107 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 105 as i8 && n.buf[11] == 100 as i8) {
+        return -1
+    }
+    hlir_name_gpu_axis_suffix(n, 12)
 }
 
-// Check if an HlirName starts with "gpu_block_dim" (13 chars).
-fn hlir_name_starts_with_gpu_block_dim(n: HlirName) -> bool {
-    if n.len < 13 { return false }
+// Return the axis for "gpu_block_dim_[xyz]" or -1 if not matched exactly.
+fn hlir_name_gpu_block_dim_axis(n: HlirName) -> i64 {
+    if n.len < 15 { return -1 }
     // "gpu_block_dim" = g(103) p(112) u(117) _(95) b(98) l(108) o(111) c(99) k(107) _(95) d(100) i(105) m(109)
-    n.buf[0] == 103 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 117 as i8 && n.buf[3] == 95 as i8 &&
-    n.buf[4] == 98 as i8 && n.buf[5] == 108 as i8 && n.buf[6] == 111 as i8 && n.buf[7] == 99 as i8 &&
-    n.buf[8] == 107 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 100 as i8 && n.buf[11] == 105 as i8 &&
-    n.buf[12] == 109 as i8
+    if !(n.buf[0] == 103 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 117 as i8 && n.buf[3] == 95 as i8 &&
+         n.buf[4] == 98 as i8 && n.buf[5] == 108 as i8 && n.buf[6] == 111 as i8 && n.buf[7] == 99 as i8 &&
+         n.buf[8] == 107 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 100 as i8 && n.buf[11] == 105 as i8 &&
+         n.buf[12] == 109 as i8) {
+        return -1
+    }
+    hlir_name_gpu_axis_suffix(n, 13)
 }
 
 // Convert HlirName → Name (structurally identical, different types).
@@ -3026,7 +3049,9 @@ fn gpu_emit_spec_host_glue(ptx: PtxBuf, output_path: string) -> bool with IO, Mu
 //   HLIR_GPU_BUILTIN_BID_Y       → GpuGetBid  axis=1  (gpu.block_id.y)
 //   HLIR_GPU_BUILTIN_BID_Z       → GpuGetBid  axis=2  (gpu.block_id.z)
 //   HLIR_GPU_BUILTIN_BDIM_X      → GpuGetNtid axis=0  (gpu.block_dim.x)
-//   HLIR_GPU_BUILTIN_SYNC_THREADS→ GpuBarrierSync      (gpu.sync_threads)
+//   HLIR_GPU_BUILTIN_BDIM_Y      → GpuGetNtid axis=1  (gpu.block_dim.y)
+//   HLIR_GPU_BUILTIN_BDIM_Z      → GpuGetNtid axis=2  (gpu.block_dim.z)
+//   HLIR_GPU_BUILTIN_SYNC_THREADS→ GpuBarrierSync     (gpu.sync_threads)
 
 // Builtin tag constants for hlir_lower_gpu_builtins.
 let HLIR_GPU_BUILTIN_TID_X: i64 = 0
@@ -3036,7 +3061,9 @@ let HLIR_GPU_BUILTIN_BID_X: i64 = 3
 let HLIR_GPU_BUILTIN_BID_Y: i64 = 4
 let HLIR_GPU_BUILTIN_BID_Z: i64 = 5
 let HLIR_GPU_BUILTIN_BDIM_X: i64 = 6
-let HLIR_GPU_BUILTIN_SYNC_THREADS: i64 = 7
+let HLIR_GPU_BUILTIN_BDIM_Y: i64 = 7
+let HLIR_GPU_BUILTIN_BDIM_Z: i64 = 8
+let HLIR_GPU_BUILTIN_SYNC_THREADS: i64 = 9
 
 // Lower a source-level GPU builtin to a GpuOp and append it to the kernel.
 //
@@ -3102,6 +3129,22 @@ fn hlir_lower_gpu_builtins(kernel: GpuKernelIr, builtin_tag: i64, dst_reg: i64) 
         op.opcode = GpuOpcode::GpuGetNtid
         op.dst_reg = dst_reg
         op.axis = 0
+        op.ty = GpuType::GpuU32
+        k = gpu_kernel_append_op(k, op)
+    } else if builtin_tag == HLIR_GPU_BUILTIN_BDIM_Y {
+        // gpu.block_dim.y → GpuGetNtid axis=1
+        var op = gpu_op_new()
+        op.opcode = GpuOpcode::GpuGetNtid
+        op.dst_reg = dst_reg
+        op.axis = 1
+        op.ty = GpuType::GpuU32
+        k = gpu_kernel_append_op(k, op)
+    } else if builtin_tag == HLIR_GPU_BUILTIN_BDIM_Z {
+        // gpu.block_dim.z → GpuGetNtid axis=2
+        var op = gpu_op_new()
+        op.opcode = GpuOpcode::GpuGetNtid
+        op.dst_reg = dst_reg
+        op.axis = 2
         op.ty = GpuType::GpuU32
         k = gpu_kernel_append_op(k, op)
     } else if builtin_tag == HLIR_GPU_BUILTIN_SYNC_THREADS {

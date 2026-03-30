@@ -6,8 +6,8 @@
 #   hlir_lower_gpu_builtins() + hlir_emit_kernel_prologue()
 #   in self-hosted/gpu/hlir_to_gpu.sio
 #
-# 12 checks:
-#   Section 1 — Infrastructure (5 grep checks)
+# 15 checks:
+#   Section 1 — Infrastructure (8 grep checks)
 #   Section 2 — PTX patterns    (2 grep checks)
 #   Section 3 — Index oracle    (3 awk math checks)
 #   Section 4 — Example         (1 souc check, SKIP if no souc)
@@ -19,7 +19,7 @@ set -eo pipefail
 PASS=0
 FAIL=0
 SKIP=0
-TOTAL=12
+TOTAL=15
 
 SOUC="${SOUC:-./bin/souc}"
 GPU_SOUC="${GPU_SOUC:-./artifacts/omega/souc-bin/souc-linux-x86_64-gpu}"
@@ -83,20 +83,41 @@ else
     _report "GpuOpcode::GpuBarrierSync in hlir_to_gpu.sio" "FAIL"
 fi
 
+# Check 6: exact thread-axis decoder exists in hlir_to_gpu.sio
+if grep -q "hlir_name_gpu_thread_axis" self-hosted/gpu/hlir_to_gpu.sio 2>/dev/null; then
+    _report "hlir_name_gpu_thread_axis in hlir_to_gpu.sio" "PASS"
+else
+    _report "hlir_name_gpu_thread_axis in hlir_to_gpu.sio" "FAIL"
+fi
+
+# Check 7: exact block-axis decoder exists in hlir_to_gpu.sio
+if grep -q "hlir_name_gpu_block_id_axis" self-hosted/gpu/hlir_to_gpu.sio 2>/dev/null; then
+    _report "hlir_name_gpu_block_id_axis in hlir_to_gpu.sio" "PASS"
+else
+    _report "hlir_name_gpu_block_id_axis in hlir_to_gpu.sio" "FAIL"
+fi
+
+# Check 8: exact block-dimension-axis decoder exists in hlir_to_gpu.sio
+if grep -q "hlir_name_gpu_block_dim_axis" self-hosted/gpu/hlir_to_gpu.sio 2>/dev/null; then
+    _report "hlir_name_gpu_block_dim_axis in hlir_to_gpu.sio" "PASS"
+else
+    _report "hlir_name_gpu_block_dim_axis in hlir_to_gpu.sio" "FAIL"
+fi
+
 echo ""
 
 # ── Section 2: PTX patterns ────────────────────────────────────────
 
 echo "── Section 2: PTX Patterns ────────────────────────────────────"
 
-# Check 6: GpuGetNtid opcode referenced in hlir_to_gpu.sio (block_dim → ntid)
+# Check 9: GpuGetNtid opcode referenced in hlir_to_gpu.sio (block_dim → ntid)
 if grep -q "GpuOpcode::GpuGetNtid" self-hosted/gpu/hlir_to_gpu.sio 2>/dev/null; then
     _report "GpuOpcode::GpuGetNtid in hlir_to_gpu.sio" "PASS"
 else
     _report "GpuOpcode::GpuGetNtid in hlir_to_gpu.sio" "FAIL"
 fi
 
-# Check 7: gpu_op_new() usage in new functions (prologue + builtin lowering)
+# Check 10: gpu_op_new() usage in new functions (prologue + builtin lowering)
 if grep -q "gpu_op_new" self-hosted/gpu/hlir_to_gpu.sio 2>/dev/null; then
     _report "gpu_op_new usage in hlir_to_gpu.sio" "PASS"
 else
@@ -109,7 +130,7 @@ echo ""
 
 echo "── Section 3: Thread Index Oracle ─────────────────────────────"
 
-# Check 8: 1D global index — tid=3, bid=2, bdim=32 → global_idx=67
+# Check 11: 1D global index — tid=3, bid=2, bdim=32 → global_idx=67
 IDX_1D=$(awk 'BEGIN {
     tid = 3; bid = 2; bdim = 32;
     global_idx = bid * bdim + tid;
@@ -117,7 +138,7 @@ IDX_1D=$(awk 'BEGIN {
 }')
 _report "1D global index: tid=3 bid=2 bdim=32 → 67" "$IDX_1D"
 
-# Check 9: 2D flat index — row=5, col=7, width=16 → idx=87
+# Check 12: 2D flat index — row=5, col=7, width=16 → idx=87
 IDX_2D=$(awk 'BEGIN {
     row = 5; col = 7; width = 16;
     flat_idx = row * width + col;
@@ -125,7 +146,7 @@ IDX_2D=$(awk 'BEGIN {
 }')
 _report "2D flat index: row=5 col=7 width=16 → 87" "$IDX_2D"
 
-# Check 10: Linear addressing continuity — consecutive threads → consecutive indices
+# Check 13: Linear addressing continuity — consecutive threads → consecutive indices
 IDX_LINEAR=$(awk 'BEGIN {
     bdim = 32;
     g0 = 0 * bdim + 0;   # tid=0, bid=0 → 0
@@ -141,7 +162,7 @@ echo ""
 
 echo "── Section 4: Example Validation ──────────────────────────────"
 
-# Check 11: souc check on kernel_source_level.sio
+# Check 14: souc check on kernel_source_level.sio
 if [ -x "$GPU_SOUC" ]; then
     if timeout 30 "$GPU_SOUC" check examples/kernel_source_level.sio >/dev/null 2>&1; then
         _report "souc check examples/kernel_source_level.sio" "PASS"
@@ -164,7 +185,7 @@ echo ""
 
 echo "── Section 5: Test File Integrity ─────────────────────────────"
 
-# Check 12: test_epistemic_hlir_gpu.sio contains all 9 test functions
+# Check 15: test_epistemic_hlir_gpu.sio contains all 9 test functions
 if grep -q "test_hlir_gpu_global_idx_basic\|test_hlir_gpu_linear_addressing" \
     self-hosted/test_epistemic_hlir_gpu.sio 2>/dev/null; then
     _report "test_epistemic_hlir_gpu.sio has oracle tests" "PASS"

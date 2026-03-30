@@ -40,6 +40,7 @@ KIND_SPECS = {
         "support_classes": {
             "gpu-surface-supported",
             "gpu-compile-proof",
+            "gpu-explicit-unsupported",
         },
         "modes": {"check-pass", "check-fail"},
         "path_field": "program",

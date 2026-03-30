@@ -86,6 +86,12 @@ Those fenced surfaces now have dedicated negative fixtures in
 `tests/gpu/fixtures/` so each unsupported public builtin is independently
 attested instead of being grouped into a single umbrella rejection.
 
+Wave 6 re-checked the same fixtures against the selfhost compile-proof lane and
+found that the current selfhost front-end also still rejects these names at the
+source surface. Internal lowering modules may model axis-sensitive builtin
+semantics for future work, but that is not a public or default-selfhost support
+claim today.
+
 Those surfaces still matter for implementation work, but they should not be
 presented as the default public happy path until the checked artifact accepts
 them.
