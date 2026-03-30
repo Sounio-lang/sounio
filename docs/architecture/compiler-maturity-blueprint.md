@@ -176,3 +176,4 @@ This note does not claim any of the following:
 - [module-closure-truth.md](./module-closure-truth.md)
 - [scientific-core.md](./scientific-core.md)
 - [semantic-contracts.md](./semantic-contracts.md)
+- [decisions/README.md](../decisions/README.md)

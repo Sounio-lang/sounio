@@ -81,6 +81,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.cybernetics-api-reference | repo_only | docs/CYBERNETICS_API_REFERENCE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.cybernetics-layer-2 | repo_only | docs/CYBERNETICS_LAYER_2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.cybernetics-theory | repo_only | docs/CYBERNETICS_THEORY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.adr-001-bundle-as-authority | repo_only | docs/decisions/adr-001-bundle-as-authority.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.adr-002-truth-layers-independent | repo_only | docs/decisions/adr-002-truth-layers-independent.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.adr-003-wrapper-provenance-preserved | repo_only | docs/decisions/adr-003-wrapper-provenance-preserved.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.adr-004-capacity-guards-over-silent-corruption | repo_only | docs/decisions/adr-004-capacity-guards-over-silent-corruption.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.adr-005-algebra-keyword-compiler-infrastructure | repo_only | docs/decisions/adr-005-algebra-keyword-compiler-infrastructure.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.adr-006-fixed-point-trust-anchor | repo_only | docs/decisions/adr-006-fixed-point-trust-anchor.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.readme | repo_only | docs/decisions/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.faq | repo_only | docs/FAQ.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.feature-flags | repo_only | docs/FEATURE_FLAGS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.features.epistemic-tensor-core | historical | docs/features/EPISTEMIC_TENSOR_CORE.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

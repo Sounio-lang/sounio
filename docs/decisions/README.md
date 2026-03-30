@@ -1,0 +1,52 @@
+<!-- docs:meta
+topic_id: repo.docs.decisions.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.readme
+-->
+
+# Architecture Decision Records (ADRs)
+
+Decision records for the Sounio compiler and language. Each ADR captures a
+decision that was already made and validated — not a proposal.
+
+## Format
+
+```
+ADR-NNN: Title
+Status: accepted | superseded | deprecated
+Date: YYYY-MM-DD
+Context: why the decision was needed
+Decision: what was chosen
+Consequences: what follows
+Grounded in: commit, artifact, or empirical result
+```
+
+## Index
+
+| ADR | Title | Status | Date |
+|-----|-------|--------|------|
+| 001 | Bundle-as-authority | accepted | 2026-03-30 |
+| 002 | Truth layers are independent | accepted | 2026-03-30 |
+| 003 | Wrapper provenance preserved | accepted | 2026-03-30 |
+| 004 | Capacity guards over silent corruption | accepted | 2026-03-30 |
+| 005 | `algebra` keyword is compiler infrastructure | accepted | 2026-03-30 |
+| 006 | Self-hosting fixed-point as trust anchor | accepted | 2026-03-30 |
+
+## Files
+
+- [ADR-001](./adr-001-bundle-as-authority.md)
+- [ADR-002](./adr-002-truth-layers-independent.md)
+- [ADR-003](./adr-003-wrapper-provenance-preserved.md)
+- [ADR-004](./adr-004-capacity-guards-over-silent-corruption.md)
+- [ADR-005](./adr-005-algebra-keyword-compiler-infrastructure.md)
+- [ADR-006](./adr-006-fixed-point-trust-anchor.md)
+
+## Related Docs
+
+- [compiler-maturity-blueprint.md](../architecture/compiler-maturity-blueprint.md)
+- [truth-layers.md](../architecture/truth-layers.md)
+- [module-closure-truth.md](../architecture/module-closure-truth.md)
+- [scientific-core.md](../architecture/scientific-core.md)
