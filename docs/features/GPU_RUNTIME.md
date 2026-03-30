@@ -56,9 +56,23 @@ The checked public surface currently includes:
 
 - `kernel fn`
 - `with GPU`
-- `perform GPU.launch(...)`
+- `perform GPU.launch(...)` with explicit `(x, y, z)` grid/block tuples
 - `perform GPU.sync()`
 - PTX emission through `build --backend gpu`
+
+The checked public lane now has explicit regression coverage for both the
+baseline 1D-default launch tuple shape and a non-unit multidimensional launch
+surface in `tests/run-pass/gpu_launch_multidim_surface.sio`.
+
+That does **not** mean every source-tree runtime/helper path is now a general
+multidimensional promotion. The honest state today is:
+
+- checked public surface: explicit 3-tuple launch syntax is accepted
+- deterministic sim/reference lane: explicit multidimensional tuple launch is
+  exercised without hardware dependency
+- source-tree PTX helper generation: the convenience `n`-based helper path
+  still defaults to 1D launch derivation unless an explicit descriptor path is
+  used
 
 The checked public artifact does **not** currently resolve the `gpu.*`
 intrinsic namespace used by older docs and sketches. In practice, that means:
@@ -67,6 +81,10 @@ intrinsic namespace used by older docs and sketches. In practice, that means:
 - `gpu.block_id.*`: not public in the checked artifact
 - `gpu.block_dim.*`: not public in the checked artifact
 - `gpu.alloc<T>(...)`: not public in the checked artifact
+
+Those fenced surfaces now have dedicated negative fixtures in
+`tests/gpu/fixtures/` so each unsupported public builtin is independently
+attested instead of being grouped into a single umbrella rejection.
 
 Those surfaces still matter for implementation work, but they should not be
 presented as the default public happy path until the checked artifact accepts
@@ -141,6 +159,9 @@ recommended public command for GPU emission is still:
 - Do not describe the default JIT artifact as GPU-enabled. It is not.
 - Do not describe the checked GPU artifact as exposing the full `gpu.*`
   intrinsic namespace. It does not.
+- Do not describe the public contract as general automatic multidimensional
+  host-lowering support. The checked surface accepts explicit 3-tuples, but the
+  source-tree convenience helper path is still 1D-default.
 - Do not describe `gpu-emit` as a public top-level subcommand of the checked
   GPU artifact. It is not there today.
 - Do describe the attestation artifacts when making claims about CUDA/ROCm

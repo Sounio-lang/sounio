@@ -40,13 +40,13 @@ The current repo has four distinct GPU truth planes:
 | Surface | Primary evidence | Current class | Notes |
 | --- | --- | --- | --- |
 | `kernel fn` + `with GPU` | `tests/run-pass/gpu_launch_surface.sio`, `tests/run-pass/kernel_fn_gpu_effect.sio` | `gpu-surface-supported` | Checked GPU artifact accepts the syntax. |
-| `perform GPU.launch(...)` | `tests/run-pass/gpu_launch_surface.sio` | `gpu-surface-supported` | Checked via public GPU artifact. |
+| `perform GPU.launch(...)` | `tests/run-pass/gpu_launch_surface.sio`, `tests/run-pass/gpu_launch_multidim_surface.sio` | `gpu-surface-supported` | Checked via public GPU artifact for both the baseline 1D-default tuple shape and explicit non-unit multidimensional tuples. |
 | `perform GPU.sync()` | `tests/run-pass/gpu_launch_surface.sio` plus selfhost compile-fail regression | `gpu-surface-supported` | Public contract is zero-argument sync; selfhost source now rejects argumented sync. |
 | PTX emission via `build --backend gpu` | `examples/gpu.sio`, `examples/kernel_vec_add.sio`, `examples/kernel_matmul.sio`, `examples/kernel_epistemic_vec_add.sio` | `gpu-lowering-supported` | Deterministic lowering truth via checked GPU artifact. |
 | Kernel examples that compile in selfhost source but are not runtime-promoted here | `examples/kernel_source_level.sio`, `tests/run-pass/kernel_multi_backend.sio`, `tests/run-pass/kernel_ptx_emit.sio`, epistemic kernel smokes | `gpu-compile-proof` | Kept honest until runtime evidence exists. |
-| CPU fallback/reference execution | `tests/run-pass/gpu_kernel_basic.sio`, `tests/gpu/test_gpu_pipeline.sio`, `tests/stdlib/gpu/test_gpu.sio`, `examples/gpu.sio`, `examples/gpu_hypercomplex.sio` | `gpu-sim-runtime-supported` | Deterministic repo-local runtime truth plane. |
+| CPU fallback/reference execution | `tests/run-pass/gpu_kernel_basic.sio`, `tests/gpu/test_gpu_pipeline.sio`, `tests/stdlib/gpu/test_gpu.sio`, `examples/gpu.sio`, `examples/gpu_hypercomplex.sio`, `tests/run-pass/gpu_launch_multidim_surface.sio` | `gpu-sim-runtime-supported` | Deterministic repo-local runtime truth plane, including explicit multidimensional launch tuple carriage without hardware dependency. |
 | Remote GPU attestation lane | `artifacts/omega/gpu_runtime_attest_gate.v1.json` via canonical wrapper | `gpu-hardware-runtime-supported` | Informational by default; not merge-blocking. |
-| `gpu.thread_id.*`, `gpu.block_id.*`, `gpu.block_dim.*`, `gpu.alloc<T>(...)` on the checked public artifact | `tests/gpu/fixtures/gpu_public_builtin_not_yet_supported.sio` | `gpu-explicit-unsupported` | Implementation breadth exists in the source tree, but the checked public artifact still rejects these surfaces. |
+| `gpu.thread_id.*`, `gpu.block_id.*`, `gpu.block_dim.*`, `gpu.alloc<T>(...)` on the checked public artifact | `tests/gpu/fixtures/gpu_public_thread_id_not_yet_supported.sio`, `tests/gpu/fixtures/gpu_public_block_id_not_yet_supported.sio`, `tests/gpu/fixtures/gpu_public_block_dim_not_yet_supported.sio`, `tests/gpu/fixtures/gpu_public_alloc_not_yet_supported.sio` | `gpu-explicit-unsupported` | Implementation breadth exists in the source tree, but the checked public artifact still rejects these surfaces and now attests them individually. |
 
 ## Capability taxonomy
 
