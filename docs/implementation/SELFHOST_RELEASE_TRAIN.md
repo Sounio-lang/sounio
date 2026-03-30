@@ -2,8 +2,8 @@
 topic_id: repo.docs.implementation.selfhost-release-train
 authority: repo_only
 audience: maintainers
-last_validated: 2026-03-30
-validated_by: A12
+last_validated: 2026-03-07
+validated_by: A7
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.selfhost-release-train
 -->
 
