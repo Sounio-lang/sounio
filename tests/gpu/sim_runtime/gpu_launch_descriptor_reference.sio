@@ -1,0 +1,101 @@
+//@ run-pass
+// Deterministic reference model for the source-tree PTX launch descriptor path.
+//
+// This fixture mirrors the current 1D launch contract in
+// self-hosted/gpu/runtime/cuda.sio and self-hosted/gpu/runtime/launch.sio:
+// - gridDimX is derived from n and block_dim via ceiling division
+// - gridDimY/gridDimZ and blockDimY/blockDimZ are fixed to 1
+// - shared memory and stream handle are carried through from GpuLaunchConfig
+
+struct GpuLaunchConfigRef {
+    block_dim: i64,
+    shared_mem_bytes: i64,
+    stream_handle: i64,
+}
+
+struct GpuLaunchDescriptorRef {
+    grid_dim_x: i64,
+    grid_dim_y: i64,
+    grid_dim_z: i64,
+    block_dim_x: i64,
+    block_dim_y: i64,
+    block_dim_z: i64,
+    shared_mem_bytes: i64,
+    stream_handle: i64,
+    param_count: i64,
+}
+
+fn ref_cuda_grid_dim(n: i64, block_dim: i64) -> i64 with Div {
+    if block_dim <= 0 { return 1 }
+    (n + block_dim - 1) / block_dim
+}
+
+fn ref_gpu_launch_descriptor(
+    n: i64,
+    param_count: i64,
+    cfg: GpuLaunchConfigRef
+) -> GpuLaunchDescriptorRef with Div {
+    GpuLaunchDescriptorRef {
+        grid_dim_x: ref_cuda_grid_dim(n, cfg.block_dim),
+        grid_dim_y: 1,
+        grid_dim_z: 1,
+        block_dim_x: cfg.block_dim,
+        block_dim_y: 1,
+        block_dim_z: 1,
+        shared_mem_bytes: cfg.shared_mem_bytes,
+        stream_handle: cfg.stream_handle,
+        param_count: param_count,
+    }
+}
+
+fn descriptor_shape_ok(d: GpuLaunchDescriptorRef) -> bool {
+    d.grid_dim_x > 0 &&
+    d.grid_dim_y == 1 &&
+    d.grid_dim_z == 1 &&
+    d.block_dim_x > 0 &&
+    d.block_dim_y == 1 &&
+    d.block_dim_z == 1
+}
+
+fn test_default_descriptor() -> bool with Div {
+    let cfg = GpuLaunchConfigRef {
+        block_dim: 256,
+        shared_mem_bytes: 0,
+        stream_handle: 0,
+    }
+    let d = ref_gpu_launch_descriptor(1024, 3, cfg)
+    descriptor_shape_ok(d) &&
+    d.grid_dim_x == 4 &&
+    d.block_dim_x == 256 &&
+    d.shared_mem_bytes == 0 &&
+    d.stream_handle == 0 &&
+    d.param_count == 3
+}
+
+fn test_custom_descriptor() -> bool with Div {
+    let cfg = GpuLaunchConfigRef {
+        block_dim: 128,
+        shared_mem_bytes: 96,
+        stream_handle: 7,
+    }
+    let d = ref_gpu_launch_descriptor(130, 4, cfg)
+    descriptor_shape_ok(d) &&
+    d.grid_dim_x == 2 &&
+    d.block_dim_x == 128 &&
+    d.shared_mem_bytes == 96 &&
+    d.stream_handle == 7 &&
+    d.param_count == 4
+}
+
+fn main() -> i32 with IO, Div {
+    if !test_default_descriptor() {
+        print("gpu_launch_descriptor_reference failed: default descriptor\n")
+        return 1
+    }
+    if !test_custom_descriptor() {
+        print("gpu_launch_descriptor_reference failed: custom descriptor\n")
+        return 1
+    }
+    print("gpu_launch_descriptor_reference ok\n")
+    0
+}
