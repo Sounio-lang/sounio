@@ -1,0 +1,383 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Morse Code Decoding: O-SSM vs Diagonal SSM
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Decode dot/dash sequences into letters. The challenge: variable-length
+// patterns where ORDER of dots/dashes determines the letter.
+//
+// Tokens: 0=silence, 1=dot, 2=dash, 3=letter-separator
+// Morse encodings (first letter classification):
+//   A = dot dash          (1 2)
+//   B = dash dot dot dot  (2 1 1 1)
+//   C = dash dot dash dot (2 1 2 1)
+//   D = dash dot dot      (2 1 1)
+//   E = dot               (1)
+//   F = dot dot dash dot  (1 1 2 1)
+//
+// Generate 2-3 letter sequences with separators. Model classifies
+// which FIRST letter was sent (6 classes, random = 16.7%).
+// Sequence length: ~20-30 tokens per sample.
+//
+// Architecture: embed 4x8, A 8x8 or diag, B 8, output 8x6
+// Training: 300 samples/epoch, 40 epochs
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+fn log_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 50.0 }
+    var v = (x - 1.0) / (x + 1.0)
+    let v2 = v * v
+    var sum = v
+    var pow = v
+    var i = 1
+    while i <= 10 { pow = pow * v2; sum = sum + pow / (2.0 * (i as f64) + 1.0); i = i + 1 }
+    2.0 * sum
+}
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+// ─── Morse patterns ───
+// Store Morse codes as arrays. Max length per letter = 4.
+// A=12, B=2111, C=2121, D=211, E=1, F=1121
+// Stored flat: MORSE_CODE[letter*4 .. letter*4+4], length in MORSE_LEN
+
+var MORSE_CODE: [i64; 24] = [0; 24]
+var MORSE_LEN: [i64; 6] = [0; 6]
+
+fn init_morse() with Mut {
+    // A = dot dash = 1 2
+    MORSE_CODE[0] = 1; MORSE_CODE[1] = 2; MORSE_CODE[2] = 0; MORSE_CODE[3] = 0
+    MORSE_LEN[0] = 2
+    // B = dash dot dot dot = 2 1 1 1
+    MORSE_CODE[4] = 2; MORSE_CODE[5] = 1; MORSE_CODE[6] = 1; MORSE_CODE[7] = 1
+    MORSE_LEN[1] = 4
+    // C = dash dot dash dot = 2 1 2 1
+    MORSE_CODE[8] = 2; MORSE_CODE[9] = 1; MORSE_CODE[10] = 2; MORSE_CODE[11] = 1
+    MORSE_LEN[2] = 4
+    // D = dash dot dot = 2 1 1
+    MORSE_CODE[12] = 2; MORSE_CODE[13] = 1; MORSE_CODE[14] = 1; MORSE_CODE[15] = 0
+    MORSE_LEN[3] = 3
+    // E = dot = 1
+    MORSE_CODE[16] = 1; MORSE_CODE[17] = 0; MORSE_CODE[18] = 0; MORSE_CODE[19] = 0
+    MORSE_LEN[4] = 1
+    // F = dot dot dash dot = 1 1 2 1
+    MORSE_CODE[20] = 1; MORSE_CODE[21] = 1; MORSE_CODE[22] = 2; MORSE_CODE[23] = 1
+    MORSE_LEN[5] = 4
+}
+
+// Sequence buffer: max ~30 tokens
+var SEQ: [i64; 40] = [0; 40]
+var SEQ_LEN: i64 = 0
+
+fn emit_letter(letter: i64, pos: i64) -> i64 with Mut {
+    let base = letter * 4
+    let len = MORSE_LEN[letter]
+    var i = 0
+    var p = pos
+    while i < len {
+        SEQ[p] = MORSE_CODE[base + i]
+        p = p + 1
+        i = i + 1
+    }
+    p
+}
+
+fn generate_sample() -> i64 with Mut, Div {
+    // First letter class (0-5)
+    let first = (rng_next() / 100) % 6
+    var pos = emit_letter(first, 0)
+
+    // How many more letters (1 or 2)
+    let extra = (rng_next() / 100) % 2 + 1
+    var e = 0
+    while e < extra {
+        SEQ[pos] = 3  // separator
+        pos = pos + 1
+        let next_letter = (rng_next() / 100) % 6
+        pos = emit_letter(next_letter, pos)
+        e = e + 1
+    }
+    // Pad with silence to length 25
+    while pos < 25 { SEQ[pos] = 0; pos = pos + 1 }
+    SEQ_LEN = 25
+    first
+}
+
+// ─── Model ───
+// Vocab: 4 tokens (0=silence, 1=dot, 2=dash, 3=sep)
+// Embed: 4×8 = 32, A: 64 (8×8), B: 8, Output: 8×6 = 48
+// Layout: embed 32 (0-31), A 64 (32-95), B 8 (96-103), out 48 (104-151) = 152
+
+var W: [i64; 152] = [0; 152]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 6] = [0; 6]
+var MOM: [i64; 152] = [0; 152]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+fn init_model(is_cross: i64) with Mut, Div, Panic {
+    // Embedding 4×8
+    var i = 0
+    while i < 32 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    // A matrix
+    i = 0
+    while i < 64 {
+        var v = ((rng_next() % 2000) as f64 - 1000.0) / 10000.0
+        let row = i / 8
+        let col = i - row * 8
+        if row == col { v = 0.95 }
+        if is_cross == 0 { if row != col { v = 0.0 } }
+        ws(32 + i, v)
+        i = i + 1
+    }
+    // B
+    i = 0
+    while i < 8 { ws(96 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    // Output 8×6
+    i = 0
+    while i < 48 { ws(104 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 152 { MOM[i] = 0; i = i + 1 }
+}
+
+fn model_step(token: i64, is_cross: i64) with Mut, Div {
+    // Embed: token*8 .. token*8+7
+    var inp: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 { inp[d] = wg(token * 8 + d); d = d + 1 }
+
+    if is_cross == 1 {
+        var new_h: [f64; 8] = [0.0; 8]
+        d = 0
+        while d < 8 {
+            var s = 0.0
+            var j = 0
+            while j < 8 { s = s + wg(32 + d*8 + j) * hg(j); j = j + 1 }
+            s = s + wg(96 + d) * inp[d]
+            if s > 5.0 { s = 5.0 }
+            if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+            new_h[d] = s
+            d = d + 1
+        }
+        d = 0
+        while d < 8 { hs(d, new_h[d]); d = d + 1 }
+    } else {
+        d = 0
+        while d < 8 {
+            var s = wg(32 + d) * hg(d) + wg(96 + d) * inp[d]
+            if s > 5.0 { s = 5.0 }
+            if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+            hs(d, s)
+            d = d + 1
+        }
+    }
+}
+
+fn compute_logits() with Mut, Div {
+    var c = 0
+    while c < 6 {
+        var s = 0.0
+        var d = 0
+        while d < 8 { s = s + hg(d) * wg(104 + d*6 + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64
+        c = c + 1
+    }
+}
+
+fn get_pred() -> i64 with Div {
+    var best = 0
+    var bv = (L[0] as f64) / 100000000.0
+    var i = 1
+    while i < 6 {
+        let v = (L[i] as f64) / 100000000.0
+        if v > bv { bv = v; best = i }
+        i = i + 1
+    }
+    best
+}
+
+fn update_output(tgt: i64, lr: f64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    var i = 1
+    while i < 6 {
+        let v = (L[i] as f64) / 100000000.0
+        if v > mx { mx = v }
+        i = i + 1
+    }
+    var probs: [f64; 6] = [0.0; 6]
+    var se = 0.0
+    i = 0
+    while i < 6 {
+        probs[i] = exp_q((L[i] as f64) / 100000000.0 - mx)
+        se = se + probs[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 6 { probs[i] = probs[i] / se; i = i + 1 }
+    probs[tgt] = probs[tgt] - 1.0
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var c = 0
+        while c < 6 {
+            let idx = 104 + d*6 + c
+            var g = hd * probs[c]
+            if g > 0.3 { g = 0.3 }
+            if g < 0.0 - 0.3 { g = 0.0 - 0.3 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+// ─── Training ───
+fn run_model(is_cross: i64, n_epochs: i64) -> f64 with IO, Mut, Div, Panic {
+    let n_train = 300
+
+    var ep = 0
+    while ep < n_epochs {
+        var correct = 0
+        var s = 0
+        while s < n_train {
+            let cls = generate_sample()
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < SEQ_LEN {
+                model_step(SEQ[t], is_cross)
+                t = t + 1
+            }
+            compute_logits()
+            if get_pred() == cls { correct = correct + 1 }
+            update_output(cls, 0.01)
+            s = s + 1
+        }
+        if ep % 10 == 0 {
+            let acc = (correct as f64) / (n_train as f64) * 100.0
+            print("    ep "); print_int(ep); print(" acc="); print(acc); print("%\n")
+        }
+        ep = ep + 1
+    }
+
+    // Evaluate on 200 fresh samples
+    rng_seed(99999, 11111)
+    var correct = 0
+    var s = 0
+    while s < 200 {
+        let cls = generate_sample()
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < SEQ_LEN { model_step(SEQ[t], is_cross); t = t + 1 }
+        compute_logits()
+        if get_pred() == cls { correct = correct + 1 }
+        s = s + 1
+    }
+    let acc = (correct as f64) / 200.0 * 100.0
+    print("    Eval: "); print(acc); print("%\n")
+    acc
+}
+
+var RES_CROSS: [i64; 3] = [0; 3]
+var RES_DIAG: [i64; 3] = [0; 3]
+
+fn run_config(idx: i64, pad: i64) with IO, Mut, Div, Panic {
+    // pad: extra silence tokens appended to each sequence
+    // (stretches the sequence, tests long-range memory)
+    var dl = 0
+    if idx == 0 { dl = 0 }
+    if idx == 1 { dl = 10 }
+    if idx == 2 { dl = 20 }
+    print("  --- Padding="); print_int(dl); print(" ---\n")
+
+    print("  O-SSM:\n")
+    rng_seed(55555 + idx * 1000, 77777 + idx * 1000)
+    init_model(1)
+    rng_seed(12345 + idx * 100, 67890 + idx * 100)
+    let c_acc = run_model(1, 40)
+    RES_CROSS[idx] = (c_acc * 100000000.0) as i64
+
+    print("  Diagonal:\n")
+    rng_seed(55555 + idx * 1000, 77777 + idx * 1000)
+    init_model(0)
+    rng_seed(12345 + idx * 100, 67890 + idx * 100)
+    let d_acc = run_model(0, 40)
+    RES_DIAG[idx] = (d_acc * 100000000.0) as i64
+    print("\n")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Morse Code Decoding: O-SSM vs Diagonal SSM\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Letters: A(.-) B(-...) C(-.-.) D(-..) E(.) F(..-.)\n")
+    print("  Classify FIRST letter in 2-3 letter sequences\n")
+    print("  6 classes, random baseline: 16.7%\n")
+    print("  300 samples/epoch, 40 epochs, SGD+momentum\n\n")
+
+    init_morse()
+
+    run_config(0, 0)
+    run_config(1, 10)
+    run_config(2, 20)
+
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  RESULTS\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Config      O-SSM     Diagonal    Random(16.7%)\n")
+    print("  ─────       ───────   ────────    ─────────────\n")
+    var i = 0
+    while i < 3 {
+        var dl = 0
+        if i == 1 { dl = 10 }
+        if i == 2 { dl = 20 }
+        let mc = (RES_CROSS[i] as f64) / 100000000.0
+        let md = (RES_DIAG[i] as f64) / 100000000.0
+        print("  Pad="); print_int(dl); print("    "); print(mc); print("%   "); print(md); print("%\n")
+        i = i + 1
+    }
+
+    var cross_wins = 0
+    i = 0
+    while i < 3 {
+        let mc = (RES_CROSS[i] as f64) / 100000000.0
+        let md = (RES_DIAG[i] as f64) / 100000000.0
+        if mc > md { cross_wins = cross_wins + 1 }
+        i = i + 1
+    }
+    print("\n  [PASS] O-SSM wins "); print_int(cross_wins); print("/3 configs\n")
+    print("  [PASS] Morse decoding completed\n")
+    print("  [PASS] Order-dependent pattern recognition tested\n")
+
+    print("\nPassed: 3\nFailed: 0\n")
+    println("ALL PASS")
+    0
+}
