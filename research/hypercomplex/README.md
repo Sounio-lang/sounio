@@ -1,7 +1,8 @@
 # Hypercomplex Algebra Research Lane
 
 This directory contains the Wave 1 baseline plus the Wave 2 semantic-contract
-package for hypercomplex algebra in the compiler.
+package and the Wave 3 prototype-safe scaffolding for hypercomplex algebra in
+the compiler.
 
 Wave 1 baseline:
 
@@ -12,6 +13,11 @@ Wave 2 baseline:
 
 - builds on `hypercomplex-algebra-wave1`
 - baseline commit `69da08bc663f7346743e31d0d92baa34d0b18340`
+
+Wave 3 baseline:
+
+- builds on `hypercomplex-algebra-wave2`
+- baseline commit `55eb15cdc7e80069657e8033cb945afa4f1a8833`
 
 Scope:
 
@@ -35,12 +41,15 @@ Files:
 - `semantics.v1.json`: compact Wave 2 semantic contract for prototype-safe vs deferred assumptions
 - `touchpoints.v1.json`: bounded map of prototype-safe compiler-facing candidate areas
 - `roadmap.v1.json`: internal Wave 3 experiment frame
+- `expected_fail.v1.json`: Wave 3 forbidden-rewrite coverage, mixing executable counterexamples with explicit validation-only gaps
+- `compiler_audit.v1.json`: bounded internal audit seams for type, IR, and lowering touchpoints
 
 Validation:
 
 ```bash
 bash scripts/research/hypercomplex_wave1_gate.sh
 bash scripts/research/hypercomplex_wave2_gate.sh
+bash scripts/research/hypercomplex_wave3_gate.sh
 ```
 
 What the baseline already contains:
@@ -67,6 +76,17 @@ What Wave 2 adds without changing support claims:
 - a non-public validator that checks wave1 + wave2 manifests together
 - a short internal roadmap for Wave 3 experiments
 
+What Wave 3 adds without changing support claims:
+
+- executable non-public witnesses for the forbidden rewrite classes that already
+  have concrete repo-local counterexamples
+- explicit validation-only coverage for forbidden rewrite classes that remain
+  unsupported because the compiler still has no checked general law surface
+- a bounded compiler-audit manifest covering type tagging, IR metadata, and
+  native lowering seams
+- a Wave 3 validator that executes the safe witnesses and cross-checks the new
+  manifests against Wave 1 and Wave 2
+
 Current inventory summary:
 
 - active entries: 9
@@ -92,3 +112,5 @@ Wave 2 operating rule:
 - no public support claim is expanded here
 - no required CI gate is promoted here
 - any future compiler experiment must stay bounded by `semantics.v1.json`
+- Wave 3 witnesses stay non-public and are not part of the normal run-pass or
+  compile-fail suite
