@@ -498,6 +498,46 @@ fn emit_indirect_fn_call_x86(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i6
     emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
 }
 
+fn emit_closure_fn_call_x86(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i64) with Mut, Panic, Div {
+    let ret_slots = ret_agg_nslots(ret_ty, ret_hash)
+    if ret_slots > 0 {
+        let ret_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + ret_slots
+        emit_setup_call_args_shift_x86(argc, 2)
+        emit_prepare_stack_call_args_x86(argc, 4)
+        em(0x48); em(0x8d); em(0x85)
+        em32(0 - (ret_base + ret_slots - 1) * 8)
+        em(0x48); em(0x89); em(0xc7)  // mov rdi, sret ptr
+        emit_load_var(ptr_slot)
+        em(0x48); em(0x89); em(0xc6)  // mov rsi, env ptr
+        em(0x48); em(0x8b); em(0x00)  // mov rax, [env]
+        em(0xff); em(0xd0)
+        emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 4))
+        return
+    }
+    emit_setup_closure_call_args_x86(argc)
+    emit_prepare_stack_call_args_x86(argc, 5)
+    emit_load_var(ptr_slot)
+    em(0x48); em(0x89); em(0xc7)
+    em(0x48); em(0x8b); em(0x00)
+    em(0xff); em(0xd0)
+    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
+}
+
+fn emit_syscall6_x86(argc: i64) with Mut {
+    if argc >= 1 {
+        em(0x48); em(0x8b); em(0x84); em(0x24); em32((argc - 1) * 8)  // mov rax, [rsp+num]
+    }
+    if argc >= 2 { emit_load_rsp_arg_x86(0, (argc - 2) * 8) }  // rdi = a1
+    if argc >= 3 { emit_load_rsp_arg_x86(1, (argc - 3) * 8) }  // rsi = a2
+    if argc >= 4 { emit_load_rsp_arg_x86(2, (argc - 4) * 8) }  // rdx = a3
+    if argc >= 5 { em(0x4c); em(0x8b); em(0x94); em(0x24); em32((argc - 5) * 8) }  // mov r10, [rsp+a4]
+    if argc >= 6 { emit_load_rsp_arg_x86(4, (argc - 6) * 8) }  // r8 = a5
+    if argc >= 7 { emit_load_rsp_arg_x86(5, (argc - 7) * 8) }  // r9 = a6
+    em(0x0f); em(0x05)
+    emit_drop_call_args_x86(argc)
+}
+
 fn emit_drop_call_args_x86(argc: i64) with Mut {
     let bytes = argc * 8
     if bytes <= 0 { return }
@@ -567,11 +607,31 @@ fn emit_store_var_a64(slot: i64) with Mut, Panic {
 
 fn emit_push_a64() with Mut { em32(0xF81F0FE0) }  // str x0, [sp, #-16]!
 
-fn emit_pop_x1_a64() with Mut { em32(0xF8410FE1) }  // ldr x1, [sp], #16
+fn emit_pop_x1_a64() with Mut { em32(0xF84107E1) }  // ldr x1, [sp], #16
 
-fn emit_pop_x0_a64() with Mut { em32(0xF8410FE0) }  // ldr x0, [sp], #16
+fn emit_pop_x0_a64() with Mut { em32(0xF84107E0) }  // ldr x0, [sp], #16
 
-fn emit_pop_x2_a64() with Mut { em32(0xF8410FE2) }  // ldr x2, [sp], #16
+fn emit_pop_x2_a64() with Mut { em32(0xF84107E2) }  // ldr x2, [sp], #16
+
+fn emit_load_sp_offset_a64(rd: i64, byte_off: i64) with Mut, Panic {
+    if byte_off >= 0 && byte_off <= 32760 && (byte_off & 7) == 0 {
+        em32(0xF9400000 | (((byte_off / 8) & 0xFFF) << 10) | (31 << 5) | rd)
+        return
+    }
+    emit_imm64_reg_a64(9, byte_off)
+    em32(0x8B0903E9)  // add x9, sp, x9
+    em32(0xF9400000 | (9 << 5) | rd)
+}
+
+fn emit_store_sp_offset_a64(rs: i64, byte_off: i64) with Mut, Panic {
+    if byte_off >= 0 && byte_off <= 32760 && (byte_off & 7) == 0 {
+        em32(0xF9000000 | (((byte_off / 8) & 0xFFF) << 10) | (31 << 5) | rs)
+        return
+    }
+    emit_imm64_reg_a64(9, byte_off)
+    em32(0x8B0903E9)  // add x9, sp, x9
+    em32(0xF9000000 | (9 << 5) | rs)
+}
 
 fn emit_copy_words_x10_x11_a64(words: i64) with Mut {
     if words <= 0 { return }
@@ -615,20 +675,22 @@ fn emit_fill_words_x13_x11_a64(words: i64) with Mut {
 fn emit_drop_call_args_a64(argc: i64) with Mut {
     let bytes = argc * 16
     if bytes <= 0 { return }
-    if bytes <= 4095 {
-        em32(0x91000000 | ((bytes & 0xFFF) << 10) | (31 << 5) | 31)
-        return
-    }
-    emit_imm64_reg_a64(9, bytes)
-    em32(0x8B0903FF)  // add sp, sp, x9
+    emit_add_sp_imm_a64(bytes)
 }
 
-fn emit_direct_fn_call_a64(fi: i64, argc: i64) with Mut {
-    if argc >= 8 { em32(0xF8410FE7) }
-    if argc >= 7 { em32(0xF8410FE6) }
-    if argc >= 6 { em32(0xF8410FE5) }
-    if argc >= 5 { em32(0xF8410FE4) }
-    if argc >= 4 { em32(0xF8410FE3) }
+fn emit_direct_fn_call_a64(fi: i64, argc: i64) with Mut, Panic, Div {
+    let ret_slots = ret_agg_nslots(FN_RET_TY[fi as usize], FN_RET_HASH[fi as usize])
+    if ret_slots > 0 {
+        let ret_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + ret_slots
+        emit_lea_var_a64(ret_base + ret_slots - 1)
+        em32(0xAA0003E8)  // mov x8, x0
+    }
+    if argc >= 8 { em32(0xF84107E7) }
+    if argc >= 7 { em32(0xF84107E6) }
+    if argc >= 6 { em32(0xF84107E5) }
+    if argc >= 5 { em32(0xF84107E4) }
+    if argc >= 4 { em32(0xF84107E3) }
     if argc >= 3 { emit_pop_x2_a64() }
     if argc >= 2 { emit_pop_x1_a64() }
     if argc >= 1 { emit_pop_x0_a64() }
@@ -637,6 +699,59 @@ fn emit_direct_fn_call_a64(fi: i64, argc: i64) with Mut {
     PATCH_KIND[PATCH_COUNT as usize] = 0
     PATCH_COUNT = PATCH_COUNT + 1
     em32(0x94000000)
+}
+
+fn emit_indirect_fn_call_a64(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i64) with Mut, Panic, Div {
+    let ret_slots = ret_agg_nslots(ret_ty, ret_hash)
+    if ret_slots > 0 {
+        let ret_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + ret_slots
+        emit_lea_var_a64(ret_base + ret_slots - 1)
+        em32(0xAA0003E8)  // mov x8, x0
+    }
+    emit_load_var_a64(ptr_slot)
+    em32(0xAA0003E9)  // mov x9, x0
+    if argc >= 8 { em32(0xF84107E7) }
+    if argc >= 7 { em32(0xF84107E6) }
+    if argc >= 6 { em32(0xF84107E5) }
+    if argc >= 5 { em32(0xF84107E4) }
+    if argc >= 4 { em32(0xF84107E3) }
+    if argc >= 3 { em32(0xF84107E2) }
+    if argc >= 2 { emit_pop_x1_a64() }
+    if argc >= 1 { em32(0xF84107E0) }
+    em32(0xD63F0120)
+}
+
+fn emit_closure_fn_call_a64(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i64) with Mut, Panic, Div {
+    let ret_slots = ret_agg_nslots(ret_ty, ret_hash)
+    if ret_slots > 0 {
+        let ret_base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + ret_slots
+        emit_lea_var_a64(ret_base + ret_slots - 1)
+        em32(0xAA0003E8)  // mov x8, x0
+    }
+    let stack_argc = argc - 7
+    if stack_argc > 0 {
+        var stack_i: i64 = stack_argc - 1
+        while stack_i >= 0 {
+            let src_off = (argc - (8 + stack_i)) * 16
+            let dst_off = stack_i * 8
+            emit_load_sp_offset_a64(10, src_off)
+            emit_store_sp_offset_a64(10, dst_off)
+            stack_i = stack_i - 1
+        }
+    }
+    if argc >= 7 { emit_load_sp_offset_a64(7, (argc - 7) * 16) }
+    if argc >= 6 { emit_load_sp_offset_a64(6, (argc - 6) * 16) }
+    if argc >= 5 { emit_load_sp_offset_a64(5, (argc - 5) * 16) }
+    if argc >= 4 { emit_load_sp_offset_a64(4, (argc - 4) * 16) }
+    if argc >= 3 { emit_load_sp_offset_a64(3, (argc - 3) * 16) }
+    if argc >= 2 { emit_load_sp_offset_a64(2, (argc - 2) * 16) }
+    if argc >= 1 { emit_load_sp_offset_a64(1, (argc - 1) * 16) }
+    emit_load_var_a64(ptr_slot)
+    em32(0xF9400009)
+    em32(0xD63F0120)
+    emit_drop_call_args_a64(argc)
 }
 
 // Load 64-bit immediate into x0 via movz/movk chain
@@ -803,14 +918,20 @@ fn fill_repeat_struct_array_slots_a64(dst_start: i64, field_hash: i64) with Mut,
     }
 }
 
-fn stabilize_return_agg_a64(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
+fn stabilize_return_agg_a64(expr_ty: i64, expr_hash: i64) with IO, Mut, Panic, Div {
     var nslots = ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH)
     if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
     if nslots <= 0 { return }
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
-    emit_imm64_reg_a64(11, GL_BSS_BASE + RET_AGG_BSS_OFF)
+    if CURRENT_SRET_SLOT <= 0 {
+        tc_fatal(FN_NAME_TOK[CURRENT_FN as usize], "AArch64 aggregate-return fallback requires caller-provided SRET buffer")
+        em32(0xD2800000)
+        return
+    }
+    emit_load_var_a64(CURRENT_SRET_SLOT)
+    em32(0xAA0003EB)  // mov x11, x0
     emit_copy_words_x10_x11_a64(nslots)
-    emit_imm64_reg_a64(0, GL_BSS_BASE + RET_AGG_BSS_OFF)
+    emit_load_var_a64(CURRENT_SRET_SLOT)
 }
 
 // Load 64-bit immediate into arbitrary register
@@ -823,6 +944,26 @@ fn emit_imm64_reg_a64(rd: i64, v: i64) with Mut {
     if v1 != 0 { em32(0xF2A00000 | (v1 << 5) | rd) }
     if v2 != 0 { em32(0xF2C00000 | (v2 << 5) | rd) }
     if v3 != 0 { em32(0xF2E00000 | (v3 << 5) | rd) }
+}
+
+fn emit_sub_sp_imm_a64(bytes: i64) with Mut {
+    var rem = bytes
+    while rem > 0 {
+        var chunk = rem
+        if chunk > 4095 { chunk = 4095 }
+        em32(0xD1000000 | ((chunk & 0xFFF) << 10) | (31 << 5) | 31)
+        rem = rem - chunk
+    }
+}
+
+fn emit_add_sp_imm_a64(bytes: i64) with Mut {
+    var rem = bytes
+    while rem > 0 {
+        var chunk = rem
+        if chunk > 4095 { chunk = 4095 }
+        em32(0x91000000 | ((chunk & 0xFFF) << 10) | (31 << 5) | 31)
+        rem = rem - chunk
+    }
 }
 
 // Patch ARM64 branch instruction at off to jump to target
@@ -1421,6 +1562,15 @@ fn tc_stack_frame_too_large(bytes: i64) with IO, Mut, Panic {
     print("error: stack frame too large (")
     print_int(bytes)
     print(" bytes) - consider using global arrays\n")
+    TYPECHECK_FAILED = 1
+}
+
+fn tc_fatal(tok: i64, msg: string) with IO, Mut, Panic {
+    print("error: ")
+    print(msg)
+    print(" at line ")
+    print_int(TL[tok as usize])
+    print("\n")
     TYPECHECK_FAILED = 1
 }
 
@@ -2123,6 +2273,26 @@ fn fnsig_from_decl_name_tok(name_tok: i64) -> i64 with Mut, Panic {
         i = i + 1
     }
     FNSIG_SCAN_DEPTH = depth
+    return fnsig_intern_scratch()
+}
+
+fn fnsig_from_local_params(param_count: i64, ret_ty: i64, ret_hash: i64) -> i64 with Mut, Panic {
+    let limit = 16
+    var i: i64 = 0
+    FNSIG_SCRATCH_ARITY = param_count
+    if FNSIG_SCRATCH_ARITY > limit { FNSIG_SCRATCH_ARITY = limit }
+    FNSIG_SCRATCH_RET_TY = ret_ty
+    FNSIG_SCRATCH_RET_HASH = ret_hash
+    while i < limit {
+        if i < FNSIG_SCRATCH_ARITY {
+            FNSIG_SCRATCH_PARAM_TY[i as usize] = VAR_TY[i as usize]
+            FNSIG_SCRATCH_PARAM_HASH[i as usize] = VAR_TY_HASH[i as usize]
+        } else {
+            FNSIG_SCRATCH_PARAM_TY[i as usize] = 0
+            FNSIG_SCRATCH_PARAM_HASH[i as usize] = 0
+        }
+        i = i + 1
+    }
     return fnsig_intern_scratch()
 }
 
@@ -3417,30 +3587,25 @@ fn fill_repeat_struct_array_slots_x86(dst_start: i64, field_hash: i64) with Mut,
     }
 }
 
-fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
+fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with IO, Mut, Panic, Div {
     var nslots = ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH)
     if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
     if nslots <= 0 { return }
     em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
-    if CURRENT_SRET_SLOT > 0 {
-        emit_load_var(CURRENT_SRET_SLOT)
-        em(0x48); em(0x89); em(0xc1)  // mov rcx, dst ptr
-    } else {
-        let dst = GL_BSS_BASE + RET_AGG_BSS_OFF
-        em(0x48); em(0xb9); em64(dst)  // mov rcx, dst ptr
+    if CURRENT_SRET_SLOT <= 0 {
+        tc_fatal(FN_NAME_TOK[CURRENT_FN as usize], "x86 aggregate-return fallback requires caller-provided SRET buffer")
+        em(0x31); em(0xc0)
+        return
     }
+    emit_load_var(CURRENT_SRET_SLOT)
+    em(0x48); em(0x89); em(0xc1)  // mov rcx, dst ptr
     var i: i64 = 0
     while i < nslots {
         em(0x48); em(0x8b); em(0x82); em32(i * 8)
         em(0x48); em(0x89); em(0x81); em32(i * 8)
         i = i + 1
     }
-    if CURRENT_SRET_SLOT > 0 {
-        emit_load_var(CURRENT_SRET_SLOT)
-    } else {
-        let dst2 = GL_BSS_BASE + RET_AGG_BSS_OFF
-        em(0x48); em(0xb8); em64(dst2)
-    }
+    emit_load_var(CURRENT_SRET_SLOT)
 }
 
 // ─── Emit print("string") ───
@@ -4804,20 +4969,6 @@ fn compile_primary() with IO, Mut, Panic, Div {
     // Token 45 = | at expression start = closure (not bitwise OR)
     // Supports captured variables from outer scope via closure struct.
     // All closures build a stack struct: [fn_ptr, cap_0, cap_1, ...]
-fn emit_syscall6_x86(argc: i64) with Mut {
-    if argc >= 1 {
-        em(0x48); em(0x8b); em(0x84); em(0x24); em32((argc - 1) * 8)  // mov rax, [rsp+num]
-    }
-    if argc >= 2 { emit_load_rsp_arg_x86(0, (argc - 2) * 8) }  // rdi = a1
-    if argc >= 3 { emit_load_rsp_arg_x86(1, (argc - 3) * 8) }  // rsi = a2
-    if argc >= 4 { emit_load_rsp_arg_x86(2, (argc - 4) * 8) }  // rdx = a3
-    if argc >= 5 { em(0x4c); em(0x8b); em(0x94); em(0x24); em32((argc - 5) * 8) }  // mov r10, [rsp+a4]
-    if argc >= 6 { emit_load_rsp_arg_x86(4, (argc - 6) * 8) }  // r8 = a5
-    if argc >= 7 { emit_load_rsp_arg_x86(5, (argc - 7) * 8) }  // r9 = a6
-    em(0x0f); em(0x05)
-    emit_drop_call_args_x86(argc)
-}
-
     // Closure function receives hidden first param (env_ptr) in rdi.
     // User args shift to rsi, rdx, rcx, r8, r9 (max 5 user args).
     if k == 45 || k == 31 {
@@ -4833,6 +4984,9 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         let save_ret_hash = CURRENT_RET_HASH
         let save_sret_slot = CURRENT_SRET_SLOT
         let save_fpc = FRAME_PATCH_COUNT
+        let save_last_stmt_has_value = LAST_STMT_HAS_VALUE
+        let save_last_stmt_ty = LAST_STMT_TY
+        let save_last_stmt_hash = LAST_STMT_TY_HASH
         // Do NOT reset FRAME_PATCH_COUNT to 0: closure patches append after outer patches,
         // preserving the outer function's sub-rsp patch location at [0..save_fpc).
         var svi: i64 = 0
@@ -4860,6 +5014,9 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         BREAK_COUNT = 0
         CL_CAP_COUNT = 0
         CURRENT_SRET_SLOT = 0
+        LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
         // Parse closure parameters (between | ... |)
         // User params get slots 2, 3, ... (registers rsi, rdx, rcx, r8, r9)
         if zero_param_closure == 0 {
@@ -4898,11 +5055,16 @@ fn emit_syscall6_x86(argc: i64) with Mut {
             CURRENT_RET_TY = 0
             CURRENT_RET_HASH = 0
         }
+        if ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH) > 0 {
+            CURRENT_SRET_SLOT = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+        }
         if TK[EP as usize] == 38 {
             EP = EP + 1
             while TK[EP as usize] == 3 || TK[EP as usize] == 28 { EP = EP + 1 }
         }
         let nparams = VAR_COUNT  // user params only
+        let closure_sig = fnsig_from_local_params(nparams, CURRENT_RET_TY, CURRENT_RET_HASH)
         // Register outer-scope vars as captures (those not shadowed by params)
         var ci: i64 = 0
         while ci < save_vc {
@@ -4944,17 +5106,33 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         // Prologue: push rbp; mov rbp, rsp; sub rsp, <dynamic frame>
         em(0x55); em(0x48); em(0x89); em(0xe5)
         em(0x48); em(0x81); em(0xec); record_frame_patch(); em32(0)
-        // Spill env_ptr (rdi) to slot 1: mov [rbp-8], rdi
-        em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF)
-        // Spill user params from shifted registers (rsi=slot2, rdx=slot3, ...)
-        if nparams >= 1 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }
-        if nparams >= 2 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }
-        if nparams >= 3 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }
-        if nparams >= 4 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }
-        if nparams >= 5 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }
+        if CURRENT_SRET_SLOT > 0 {
+            em(0x48); em(0x89); em(0xf8)
+            emit_store_var(CURRENT_SRET_SLOT)
+            em(0x48); em(0x89); em(0xf0)
+            emit_store_var(1)
+            if nparams >= 1 { em(0x48); em(0x89); em(0xd0); emit_store_var(2) }
+            if nparams >= 2 { em(0x48); em(0x89); em(0xc8); emit_store_var(3) }
+            if nparams >= 3 { em(0x4c); em(0x89); em(0xc0); emit_store_var(4) }
+            if nparams >= 4 { em(0x4c); em(0x89); em(0xc8); emit_store_var(5) }
+        } else {
+            // Spill env_ptr (rdi) to slot 1: mov [rbp-8], rdi
+            em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF)
+            // Spill user params from shifted registers (rsi=slot2, rdx=slot3, ...)
+            if nparams >= 1 { em(0x48); em(0x89); em(0x75); em(0xf0 as i64 & 0xFF) }
+            if nparams >= 2 { em(0x48); em(0x89); em(0x55); em(0xe8 as i64 & 0xFF) }
+            if nparams >= 3 { em(0x48); em(0x89); em(0x4d); em(0xe0 as i64 & 0xFF) }
+            if nparams >= 4 { em(0x4c); em(0x89); em(0x45); em(0xd8 as i64 & 0xFF) }
+            if nparams >= 5 { em(0x4c); em(0x89); em(0x4d); em(0xd0 as i64 & 0xFF) }
+        }
         var stack_param_idx: i64 = 6
+        var stack_first_idx: i64 = 6
+        if CURRENT_SRET_SLOT > 0 {
+            stack_param_idx = 5
+            stack_first_idx = 5
+        }
         while stack_param_idx <= nparams {
-            em(0x48); em(0x8b); em(0x85); em32(16 + (stack_param_idx - 6) * 8)
+            em(0x48); em(0x8b); em(0x85); em32(16 + (stack_param_idx - stack_first_idx) * 8)
             emit_store_var(1 + stack_param_idx)
             stack_param_idx = stack_param_idx + 1
         }
@@ -4966,7 +5144,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
             emit_load_var(1)  // rax = env_ptr
             let cap_off = (capi + 1) * 8
             em(0x48); em(0x8b); em(0x80); em32(cap_off)  // mov rax, [rax + cap_off]
-            emit_store_var(2 + nparams + capi)  // store in capture's local slot
+            emit_store_var(VAR_SLOT[(nparams + capi) as usize])  // store in capture's local slot
             capi = capi + 1
         }
         // Compile body
@@ -4976,9 +5154,29 @@ fn emit_syscall6_x86(argc: i64) with Mut {
             if TK[EP as usize] == 9 { EP = EP + 1 }
         } else {
             compile_or()
+            LAST_STMT_HAS_VALUE = 1
+            LAST_STMT_TY = EXPR_TY
+            LAST_STMT_TY_HASH = EXPR_TY_HASH
         }
         // Epilogue
         if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
+            if CURRENT_RET_TY == 5 {
+                em(0x31); em(0xc0)
+            } else if LAST_STMT_HAS_VALUE == 0 {
+                em(0x31); em(0xc0)
+            } else if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
+                    if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
+                        if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                            tc_epistemic_boundary(EP)
+                        } else {
+                            tc_error(EP - 1, "closure return type does not match signature")
+                        }
+                    }
+                }
+            } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                stabilize_return_agg_x86(LAST_STMT_TY, LAST_STMT_TY_HASH)
+            }
             em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
             em(0x5d); em(0xc3)
         }
@@ -5001,6 +5199,9 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         CURRENT_RET_HASH = save_ret_hash
         CURRENT_SRET_SLOT = save_sret_slot
         FRAME_PATCH_COUNT = save_fpc
+        LAST_STMT_HAS_VALUE = save_last_stmt_has_value
+        LAST_STMT_TY = save_last_stmt_ty
+        LAST_STMT_TY_HASH = save_last_stmt_hash
         svi = 0
         while svi < save_vc {
             VAR_NS[svi as usize] = CL_SAVE_NS[svi as usize]
@@ -5048,6 +5249,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         em32(0 - struct_top * 8)
         EXPR_IS_F64 = 0
         EXPR_TY = 9
+        EXPR_TY_HASH = closure_sig
         LAST_EXPR_IS_CLOSURE = 1
         return
     }
@@ -5615,6 +5817,30 @@ fn emit_syscall6_x86(argc: i64) with Mut {
                 EXPR_TY = 1
                 return
             }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "syscall6") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                var sys_argc: i64 = 0
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or()
+                    materialize_aggregate_expr_x86()
+                    em(0x50)
+                    sys_argc = sys_argc + 1
+                    if TK[EP as usize] == 28 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                if sys_argc != 7 {
+                    tc_wrong_arity(name_tok, 7, sys_argc)
+                    emit_drop_call_args_x86(sys_argc)
+                    em(0x31); em(0xc0)
+                } else {
+                    emit_syscall6_x86(sys_argc)
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
             // Check for write_file/path aliases
             if fn_find(ns, ne) < 0 && (src_match(ns, ne - ns, "write_file") || src_match(ns, ne - ns, "write_bytes") || src_match(ns, ne - ns, "append_file")) {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
@@ -6013,13 +6239,7 @@ fn emit_syscall6_x86(argc: i64) with Mut {
                 if call_vslot >= 0 {
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
                     if call_is_closure == 1 {
-                        emit_setup_closure_call_args_x86(argc)
-                        emit_prepare_stack_call_args_x86(argc, 5)
-                        emit_load_var(call_vslot)
-                        em(0x48); em(0x89); em(0xc7)
-                        em(0x48); em(0x8b); em(0x00)
-                        em(0xff); em(0xd0)
-                        emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
+                        emit_closure_fn_call_x86(call_vslot, argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     } else {
                         emit_indirect_fn_call_x86(call_vslot, abi_argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     }
@@ -6289,30 +6509,6 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
     var more: i64 = 1
     while more == 1 {
         if TK[EP as usize] == 37 {
-            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "syscall6") {
-                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
-                EP = EP + 1
-                var sys_argc: i64 = 0
-                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
-                    compile_or()
-                    materialize_aggregate_expr_x86()
-                    em(0x50)
-                    sys_argc = sys_argc + 1
-                    if TK[EP as usize] == 28 { EP = EP + 1 }
-                }
-                if TK[EP as usize] == 7 { EP = EP + 1 }
-                if sys_argc != 7 {
-                    tc_wrong_arity(name_tok, 7, sys_argc)
-                    emit_drop_call_args_x86(sys_argc)
-                    em(0x31); em(0xc0)
-                } else {
-                    emit_syscall6_x86(sys_argc)
-                }
-                EXPR_IS_F64 = 0
-                EXPR_TY = 1
-                EXPR_TY_HASH = 0
-                return
-            }
             EP = EP + 1  // skip 'as'
             let tp = EP
             let src_ty = EXPR_TY
@@ -6533,15 +6729,21 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             // Field access: rax = struct pointer, load field
             let base_ty = EXPR_TY
             let base_hash = EXPR_TY_HASH
+            var field_base_ty = base_ty
+            var field_base_hash = base_hash
+            if base_ty == 10 {
+                field_base_ty = ref_hash_inner_ty(base_hash)
+                field_base_hash = ref_hash_inner_hash(base_hash)
+            }
             EP = EP + 1
             var found: i64 = 0
             EXPR_TY = 0
             EXPR_TY_HASH = 0
-            if knowledge_hash_is(base_hash) {
+            if knowledge_hash_is(field_base_hash) {
                 if src_match(fns, fne - fns, "value") {
                     em(0x48); em(0x8b); em(0x00)
-                    EXPR_TY = knowledge_hash_inner_ty(base_hash)
-                    EXPR_TY_HASH = knowledge_hash_inner_hash(base_hash)
+                    EXPR_TY = knowledge_hash_inner_ty(field_base_hash)
+                    EXPR_TY_HASH = knowledge_hash_inner_hash(field_base_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else if src_match(fns, fne - fns, "variance") {
                     em(0x48); em(0x8b); em(0x40); em(8)
@@ -6566,8 +6768,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 }
                 found = 1
             }
-            if base_ty == 6 {
-                let bsi = st_find(base_hash)
+            if field_base_ty == 6 {
+                let bsi = st_find(field_base_hash)
                 if bsi >= 0 {
                     let off = st_field_offset(bsi, fh)
                     if off >= 0 {
@@ -7188,14 +7390,30 @@ fn tuple_bind_pattern_a64(pp0: i64, rp0: i64) with IO, Mut, Panic, Div {
 
 fn resolve_field_struct_index(ns: i64, ne: i64, fh: i64) -> i64 with Panic, Div, Mut {
     let vi = var_find_idx(ns, ne)
-    if vi >= 0 && VAR_TY[vi as usize] == 6 {
-        let si = st_find(VAR_TY_HASH[vi as usize])
-        if si >= 0 { return si }
+    if vi >= 0 {
+        let vty = VAR_TY[vi as usize]
+        let vhash = VAR_TY_HASH[vi as usize]
+        if vty == 6 {
+            let si = st_find(vhash)
+            if si >= 0 { return si }
+        }
+        if vty == 10 && ref_hash_inner_ty(vhash) == 6 {
+            let si = st_find(ref_hash_inner_hash(vhash))
+            if si >= 0 { return si }
+        }
     }
     let gi = gl_find(ns, ne)
-    if gi >= 0 && GL_TY[gi as usize] == 6 {
-        let si = st_find(GL_TY_HASH[gi as usize])
-        if si >= 0 { return si }
+    if gi >= 0 {
+        let gty = GL_TY[gi as usize]
+        let ghash = GL_TY_HASH[gi as usize]
+        if gty == 6 {
+            let si = st_find(ghash)
+            if si >= 0 { return si }
+        }
+        if gty == 10 && ref_hash_inner_ty(ghash) == 6 {
+            let si = st_find(ref_hash_inner_hash(ghash))
+            if si >= 0 { return si }
+        }
     }
     var sj: i64 = 0
     while sj < ST_COUNT {
@@ -7310,6 +7528,175 @@ fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
     else { em32(0x3821680A) }
 }
 
+fn tok_is_ident_text(idx: i64, s: string) -> bool with Panic, Mut {
+    if idx < 0 || idx >= TC { return false }
+    if TK[idx as usize] != 3 { return false }
+    return src_match(TS[idx as usize], TE[idx as usize] - TS[idx as usize], s)
+}
+
+fn stmt_is_gpu_perform(pos: i64) -> bool with Panic, Mut {
+    if pos + 3 >= TC { return false }
+    if tok_is_ident_text(pos, "perform") == false { return false }
+    if tok_is_ident_text(pos + 1, "GPU") == false { return false }
+    if TK[(pos + 2) as usize] != 50 { return false }
+    if TK[(pos + 3) as usize] != 3 { return false }
+    return true
+}
+
+fn compile_stmt_arg_list_x86() -> i64 with IO, Mut, Panic, Div {
+    var argc: i64 = 0
+    if TK[EP as usize] != 6 { return 0 }
+    EP = EP + 1
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        compile_or()
+        argc = argc + 1
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }
+    argc
+}
+
+fn compile_stmt_arg_list_a64() -> i64 with IO, Mut, Panic, Div {
+    var argc: i64 = 0
+    if TK[EP as usize] != 6 { return 0 }
+    EP = EP + 1
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        compile_or_a64()
+        argc = argc + 1
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }
+    argc
+}
+
+fn compile_gpu_perform_stmt_x86() with IO, Mut, Panic, Div {
+    let method_tok = EP + 3
+    let is_launch = tok_is_ident_text(method_tok, "launch")
+    let is_sync = tok_is_ident_text(method_tok, "sync")
+    EP = EP + 4
+    if is_launch {
+        if TK[EP as usize] != 6 {
+            print("error: GPU.launch requires launch config at line ")
+            print_int(TL[method_tok as usize])
+            print("\n")
+            TYPECHECK_FAILED = 1
+            LAST_STMT_HAS_VALUE = 0
+            LAST_STMT_TY = 0
+            LAST_STMT_TY_HASH = 0
+            return
+        }
+        let launch_cfg_argc = compile_stmt_arg_list_x86()
+        if launch_cfg_argc != 3 {
+            print("error: GPU.launch requires kernel, grid, and block config at line ")
+            print_int(TL[method_tok as usize])
+            print("\n")
+            TYPECHECK_FAILED = 1
+        }
+        if TK[EP as usize] != 6 {
+            print("error: GPU.launch requires kernel arguments at line ")
+            print_int(TL[method_tok as usize])
+            print("\n")
+            TYPECHECK_FAILED = 1
+            LAST_STMT_HAS_VALUE = 0
+            LAST_STMT_TY = 0
+            LAST_STMT_TY_HASH = 0
+            return
+        }
+        let _kernel_argc = compile_stmt_arg_list_x86()
+    } else if is_sync {
+        if TK[EP as usize] != 6 {
+            print("error: GPU.sync requires empty () at line ")
+            print_int(TL[method_tok as usize])
+            print("\n")
+            TYPECHECK_FAILED = 1
+            LAST_STMT_HAS_VALUE = 0
+            LAST_STMT_TY = 0
+            LAST_STMT_TY_HASH = 0
+            return
+        } else {
+            let sync_argc = compile_stmt_arg_list_x86()
+            if sync_argc != 0 {
+                print("error: GPU.sync does not take arguments at line ")
+                print_int(TL[method_tok as usize])
+                print("\n")
+                TYPECHECK_FAILED = 1
+            }
+        }
+    } else {
+        print("error: unknown GPU perform at line ")
+        print_int(TL[method_tok as usize])
+        print("\n")
+        TYPECHECK_FAILED = 1
+    }
+    LAST_STMT_HAS_VALUE = 0
+    LAST_STMT_TY = 0
+    LAST_STMT_TY_HASH = 0
+}
+
+fn compile_gpu_perform_stmt_a64() with IO, Mut, Panic, Div {
+    let method_tok = EP + 3
+    let is_launch = tok_is_ident_text(method_tok, "launch")
+    let is_sync = tok_is_ident_text(method_tok, "sync")
+    EP = EP + 4
+    if is_launch {
+        if TK[EP as usize] != 6 {
+            print("error: GPU.launch requires launch config at line ")
+            print_int(TL[method_tok as usize])
+            print("\n")
+            TYPECHECK_FAILED = 1
+            LAST_STMT_HAS_VALUE = 0
+            LAST_STMT_TY = 0
+            LAST_STMT_TY_HASH = 0
+            return
+        }
+        let launch_cfg_argc = compile_stmt_arg_list_a64()
+        if launch_cfg_argc != 3 {
+            print("error: GPU.launch requires kernel, grid, and block config at line ")
+            print_int(TL[method_tok as usize])
+            print("\n")
+            TYPECHECK_FAILED = 1
+        }
+        if TK[EP as usize] != 6 {
+            print("error: GPU.launch requires kernel arguments at line ")
+            print_int(TL[method_tok as usize])
+            print("\n")
+            TYPECHECK_FAILED = 1
+            LAST_STMT_HAS_VALUE = 0
+            LAST_STMT_TY = 0
+            LAST_STMT_TY_HASH = 0
+            return
+        }
+        let _kernel_argc = compile_stmt_arg_list_a64()
+    } else if is_sync {
+        if TK[EP as usize] != 6 {
+            print("error: GPU.sync requires empty () at line ")
+            print_int(TL[method_tok as usize])
+            print("\n")
+            TYPECHECK_FAILED = 1
+            LAST_STMT_HAS_VALUE = 0
+            LAST_STMT_TY = 0
+            LAST_STMT_TY_HASH = 0
+            return
+        } else {
+            let sync_argc = compile_stmt_arg_list_a64()
+            if sync_argc != 0 {
+                print("error: GPU.sync does not take arguments at line ")
+                print_int(TL[method_tok as usize])
+                print("\n")
+                TYPECHECK_FAILED = 1
+            }
+        }
+    } else {
+        print("error: unknown GPU perform at line ")
+        print_int(TL[method_tok as usize])
+        print("\n")
+        TYPECHECK_FAILED = 1
+    }
+    LAST_STMT_HAS_VALUE = 0
+    LAST_STMT_TY = 0
+    LAST_STMT_TY_HASH = 0
+}
+
 // ─── Statement compiler ───
 fn compile_stmt() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
@@ -7317,6 +7704,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // Skip semicolons
     if k == 27 { EP = EP + 1; return }
+
+    if stmt_is_gpu_perform(EP) {
+        compile_gpu_perform_stmt_x86()
+        return
+    }
 
     // let x = expr / var x = expr (with optional : type)
     if k == 11 || k == 12 {
@@ -8707,9 +9099,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     }
     p = 0
 
-    // BSS layout: [argc(8)] [argv(8)] [globals...] [aggregate return scratch]
+    // BSS layout: [argc(8)] [argv(8)] [globals...]
+    // Aggregate-return scratch is no longer part of emitted normal-path code.
     RET_AGG_BSS_OFF = GL_BSS_SIZE
-    GL_BSS_SIZE = GL_BSS_SIZE + 1048576  // 1MB scratch for aggregate (struct/array) returns
     // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0
     if TARGET_OS == 2 {
         GL_BSS_BASE = 0x100008000 + 16    // macOS: __DATA segment at 0x100008000
@@ -9975,7 +10367,7 @@ fn emit_read_file_a64() with Mut {
     }
     emit_syscall_a64()
     // Return buf
-    em32(0xF8410FE0)  // ldr x0, [sp], #16 (pop buf)
+    em32(0xF84107E0)  // ldr x0, [sp], #16 (pop buf)
     em32(0x91000000 | (16 << 10) | (31 << 5) | 31)  // add sp, sp, #16 (discard fd)
 }
 
@@ -10064,7 +10456,7 @@ fn emit_file_size_a64() with Mut {
     emit_syscall_a64()
     em32(0xF9400000 | ((48/8) << 10) | (31 << 5) | 9)  // ldr x9, [sp, #48]
     em32(0x91000000 | (160 << 10) | (31 << 5) | 31)     // add sp, sp, #160
-    em32(0xF8410FE0)  // pop fd
+    em32(0xF84107E0)  // pop fd
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(16, 0x2000006)
     } else {
@@ -10451,20 +10843,74 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         LAST_ALEN = arr_count
         return
     }
-    // Closure stub
+    // Closure: |params| expr  or  |params| { stmts }
+    // AArch64 closure ABI:
+    //   x0 = env_ptr
+    //   x1..x7 = user args
+    //   x8 = hidden SRET pointer for aggregate returns
     if k == 45 || k == 31 {
+        let closure_tok = EP
+        var zero_param_closure_a: i64 = 0
+        if k == 31 { zero_param_closure_a = 1 }
         EP = EP + 1
-        if k == 45 {
+        let save_vc_a = VAR_COUNT
+        let save_ns_a = NEXT_SLOT
+        let save_ld_a = LOOP_DEPTH
+        let save_bc_a = BREAK_COUNT
+        let save_ret_ty_a = CURRENT_RET_TY
+        let save_ret_hash_a = CURRENT_RET_HASH
+        let save_sret_slot_a = CURRENT_SRET_SLOT
+        let save_last_stmt_has_value_a = LAST_STMT_HAS_VALUE
+        let save_last_stmt_ty_a = LAST_STMT_TY
+        let save_last_stmt_hash_a = LAST_STMT_TY_HASH
+        var svi_a: i64 = 0
+        while svi_a < save_vc_a {
+            CL_SAVE_NS[svi_a as usize] = VAR_NS[svi_a as usize]
+            CL_SAVE_NE[svi_a as usize] = VAR_NE[svi_a as usize]
+            CL_SAVE_SL[svi_a as usize] = VAR_SLOT[svi_a as usize]
+            CL_SAVE_LS[svi_a as usize] = VAR_LEN_SLOT[svi_a as usize]
+            CL_SAVE_AL[svi_a as usize] = VAR_ALEN[svi_a as usize]
+            CL_SAVE_ES[svi_a as usize] = VAR_ESIZ[svi_a as usize]
+            CL_SAVE_F64[svi_a as usize] = VAR_IS_F64[svi_a as usize]
+            CL_SAVE_ISCL[svi_a as usize] = VAR_IS_CLOSURE[svi_a as usize]
+            CL_SAVE_MUT[svi_a as usize] = VAR_MUT[svi_a as usize]
+            CL_SAVE_UNIT[svi_a as usize] = VAR_UNIT[svi_a as usize]
+            CL_SAVE_LINEAR[svi_a as usize] = VAR_LINEAR[svi_a as usize]
+            CL_SAVE_USED[svi_a as usize] = VAR_USED[svi_a as usize]
+            CL_SAVE_TY[svi_a as usize] = VAR_TY[svi_a as usize]
+            CL_SAVE_TH[svi_a as usize] = VAR_TY_HASH[svi_a as usize]
+            svi_a = svi_a + 1
+        }
+        VAR_COUNT = 0
+        NEXT_SLOT = 2
+        LOOP_DEPTH = 0
+        BREAK_COUNT = 0
+        CL_CAP_COUNT = 0
+        CURRENT_SRET_SLOT = 0
+        LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
+        if zero_param_closure_a == 0 {
             while TK[EP as usize] != 45 && TK[EP as usize] != 0 {
                 if TK[EP as usize] == 3 {
+                    let pns_a = TS[EP as usize]
+                    let pne_a = TE[EP as usize]
+                    let pslot_a = var_add(pns_a, pne_a)
                     EP = EP + 1
                     if TK[EP as usize] == 43 {
                         EP = EP + 1
                         scan_type(EP)
+                        if pslot_a >= 0 {
+                            VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
+                            VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                            if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                            if SCAN_TY == 8 {
+                                VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
+                                VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                            }
+                        }
                         EP = SCAN_TY_NEXT
                     }
-                } else {
-                    EP = EP + 1
                 }
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
@@ -10473,19 +10919,164 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 10 {
             EP = EP + 1
             scan_type(EP)
+            CURRENT_RET_TY = SCAN_TY
+            CURRENT_RET_HASH = SCAN_TY_HASH
             EP = SCAN_TY_NEXT
+        } else {
+            CURRENT_RET_TY = 0
+            CURRENT_RET_HASH = 0
+        }
+        if ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH) > 0 {
+            CURRENT_SRET_SLOT = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
         }
         if TK[EP as usize] == 38 {
             EP = EP + 1
             while TK[EP as usize] == 3 || TK[EP as usize] == 28 { EP = EP + 1 }
         }
+        let nparams_a = VAR_COUNT
+        let closure_sig_a = fnsig_from_local_params(nparams_a, CURRENT_RET_TY, CURRENT_RET_HASH)
+        var ci_a: i64 = 0
+        while ci_a < save_vc_a {
+            let ons_a = CL_SAVE_NS[ci_a as usize]
+            let one_a = CL_SAVE_NE[ci_a as usize]
+            let outer_slot_a = CL_SAVE_SL[ci_a as usize]
+            let existing_a = var_find(ons_a, one_a)
+            if existing_a < 0 {
+                let cap_slot_a = var_add(ons_a, one_a)
+                if cap_slot_a >= 0 {
+                    let cap_vi_a = VAR_COUNT - 1
+                    VAR_LEN_SLOT[cap_vi_a as usize] = CL_SAVE_LS[ci_a as usize]
+                    VAR_ALEN[cap_vi_a as usize] = CL_SAVE_AL[ci_a as usize]
+                    VAR_ESIZ[cap_vi_a as usize] = CL_SAVE_ES[ci_a as usize]
+                    VAR_IS_F64[cap_vi_a as usize] = CL_SAVE_F64[ci_a as usize]
+                    VAR_IS_CLOSURE[cap_vi_a as usize] = CL_SAVE_ISCL[ci_a as usize]
+                    VAR_MUT[cap_vi_a as usize] = CL_SAVE_MUT[ci_a as usize]
+                    VAR_UNIT[cap_vi_a as usize] = CL_SAVE_UNIT[ci_a as usize]
+                    VAR_LINEAR[cap_vi_a as usize] = CL_SAVE_LINEAR[ci_a as usize]
+                    VAR_USED[cap_vi_a as usize] = CL_SAVE_USED[ci_a as usize]
+                    VAR_TY[cap_vi_a as usize] = CL_SAVE_TY[ci_a as usize]
+                    VAR_TY_HASH[cap_vi_a as usize] = CL_SAVE_TH[ci_a as usize]
+                    if CL_CAP_COUNT < local_cap() {
+                        CL_CAP_SLOT[CL_CAP_COUNT as usize] = outer_slot_a
+                        CL_CAP_COUNT = CL_CAP_COUNT + 1
+                    } else {
+                        note_limit_error(1)
+                    }
+                }
+            }
+            ci_a = ci_a + 1
+        }
+        let cl_frame_sz_a = (local_cap() * 8 + 15) & 0xFFFFFFF0
+        if cl_frame_sz_a > max_frame_bytes() { tc_stack_frame_too_large(cl_frame_sz_a) }
+        let skip_patch_a = CL
+        em32(0x14000000)
+        let cl_start_a = CL
+        em32(0xA9BF7BFD)
+        em32(0x910003FD)
+        emit_sub_sp_imm_a64(cl_frame_sz_a)
+        emit_store_incoming_arg_a64(0, 1)
+        var param_vi_cl_a: i64 = 0
+        var abi_arg_idx_cl_a: i64 = 1
+        while param_vi_cl_a < nparams_a {
+            emit_store_incoming_arg_a64(abi_arg_idx_cl_a, VAR_SLOT[param_vi_cl_a as usize])
+            abi_arg_idx_cl_a = abi_arg_idx_cl_a + 1
+            param_vi_cl_a = param_vi_cl_a + 1
+        }
+        if CURRENT_SRET_SLOT > 0 {
+            em32(0xAA0803E0)
+            emit_store_var_a64(CURRENT_SRET_SLOT)
+        }
+        var capi_a: i64 = 0
+        while capi_a < CL_CAP_COUNT {
+            emit_load_var_a64(1)
+            let cap_words_a = capi_a + 1
+            em32(0xF9400000 | (cap_words_a << 10))
+            emit_store_var_a64(VAR_SLOT[(nparams_a + capi_a) as usize])
+            capi_a = capi_a + 1
+        }
         if TK[EP as usize] == 8 {
             EP = EP + 1
-            var cd: i64 = 1
-            while EP < TC && cd > 0 { if TK[EP as usize] == 8 { cd = cd + 1 }; if TK[EP as usize] == 9 { cd = cd - 1 }; EP = EP + 1 }
-        } else { EP = EP + 1 }
-        em32(0xD2800000)
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }
+        } else {
+            compile_or_a64()
+            LAST_STMT_HAS_VALUE = 1
+            LAST_STMT_TY = EXPR_TY
+            LAST_STMT_TY_HASH = EXPR_TY_HASH
+        }
+        var needs_epilogue_a: i64 = 1
+        if CL >= 4 { if rd32_at(CL - 4) == 0xD65F03C0 { needs_epilogue_a = 0 } }
+        if needs_epilogue_a == 1 {
+            if CURRENT_RET_TY == 5 {
+                em32(0xD2800000)
+            } else if LAST_STMT_HAS_VALUE == 0 {
+                em32(0xD2800000)
+            } else if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
+                    if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
+                        if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                            tc_epistemic_boundary(EP)
+                        } else {
+                            tc_error(EP - 1, "closure return type does not match signature")
+                        }
+                    }
+                }
+            } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)
+            }
+            emit_add_sp_imm_a64(cl_frame_sz_a)
+            em32(0xA8C17BFD)
+            em32(0xD65F03C0)
+        }
+        patch_branch_a64(skip_patch_a, CL)
+        let saved_cap_count_a = CL_CAP_COUNT
+        VAR_COUNT = save_vc_a
+        NEXT_SLOT = save_ns_a
+        LOOP_DEPTH = save_ld_a
+        BREAK_COUNT = save_bc_a
+        CURRENT_RET_TY = save_ret_ty_a
+        CURRENT_RET_HASH = save_ret_hash_a
+        CURRENT_SRET_SLOT = save_sret_slot_a
+        LAST_STMT_HAS_VALUE = save_last_stmt_has_value_a
+        LAST_STMT_TY = save_last_stmt_ty_a
+        LAST_STMT_TY_HASH = save_last_stmt_hash_a
+        svi_a = 0
+        while svi_a < save_vc_a {
+            VAR_NS[svi_a as usize] = CL_SAVE_NS[svi_a as usize]
+            VAR_NE[svi_a as usize] = CL_SAVE_NE[svi_a as usize]
+            VAR_SLOT[svi_a as usize] = CL_SAVE_SL[svi_a as usize]
+            VAR_LEN_SLOT[svi_a as usize] = CL_SAVE_LS[svi_a as usize]
+            VAR_ALEN[svi_a as usize] = CL_SAVE_AL[svi_a as usize]
+            VAR_ESIZ[svi_a as usize] = CL_SAVE_ES[svi_a as usize]
+            VAR_IS_F64[svi_a as usize] = CL_SAVE_F64[svi_a as usize]
+            VAR_IS_CLOSURE[svi_a as usize] = CL_SAVE_ISCL[svi_a as usize]
+            VAR_MUT[svi_a as usize] = CL_SAVE_MUT[svi_a as usize]
+            VAR_UNIT[svi_a as usize] = CL_SAVE_UNIT[svi_a as usize]
+            VAR_LINEAR[svi_a as usize] = CL_SAVE_LINEAR[svi_a as usize]
+            VAR_USED[svi_a as usize] = CL_SAVE_USED[svi_a as usize]
+            VAR_TY[svi_a as usize] = CL_SAVE_TY[svi_a as usize]
+            VAR_TY_HASH[svi_a as usize] = CL_SAVE_TH[svi_a as usize]
+            svi_a = svi_a + 1
+        }
+        let struct_size_a = 1 + saved_cap_count_a
+        let struct_base_a = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + struct_size_a
+        let struct_top_a = struct_base_a + struct_size_a - 1
+        let adr_off_a = CL
+        em32(0x10000000)
+        patch_adr_a64(adr_off_a, cl_start_a, 0)
+        emit_store_var_a64(struct_top_a)
+        var capj_a: i64 = 0
+        while capj_a < saved_cap_count_a {
+            emit_load_var_a64(CL_CAP_SLOT[capj_a as usize])
+            emit_store_var_a64(struct_top_a - 1 - capj_a)
+            capj_a = capj_a + 1
+        }
+        emit_lea_var_a64(struct_top_a)
         EXPR_IS_F64 = 0
+        EXPR_TY = 9
+        EXPR_TY_HASH = closure_sig_a
         LAST_EXPR_IS_CLOSURE = 1
         return
     }
@@ -11336,19 +11927,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let callee_eff = FN_EFFECTS[fi as usize]
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
                 if (callee_eff & ~caller_eff) != 0 { tc_effect_violation(call_tok, callee_eff, caller_eff) }
-                if abi_argc >= 8 { em32(0xF8410FE7) }
-                if abi_argc >= 7 { em32(0xF8410FE6) }
-                if abi_argc >= 6 { em32(0xF8410FE5) }
-                if abi_argc >= 5 { em32(0xF8410FE4) }
-                if abi_argc >= 4 { em32(0xF8410FE3) }
-                if abi_argc >= 3 { em32(0xF8410FE2) }
-                if abi_argc >= 2 { emit_pop_x1_a64() }
-                if abi_argc >= 1 { em32(0xF8410FE0) }
-                PATCH_OFF[PATCH_COUNT as usize] = CL
-                PATCH_FN[PATCH_COUNT as usize] = fi
-                PATCH_KIND[PATCH_COUNT as usize] = 0
-                PATCH_COUNT = PATCH_COUNT + 1
-                em32(0x94000000)
+                emit_direct_fn_call_a64(fi, abi_argc)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -11356,26 +11935,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if call_vslot >= 0 {
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
                     if call_is_closure == 1 {
-                        if argc >= 5 { em32(0xF8410FE5) }
-                        if argc >= 4 { em32(0xF8410FE4) }
-                        if argc >= 3 { em32(0xF8410FE3) }
-                        if argc >= 2 { em32(0xF8410FE2) }
-                        if argc >= 1 { em32(0xF8410FE1) }
-                        emit_load_var_a64(call_vslot)
-                        em32(0xF9400009)
-                        em32(0xD63F0120)
+                        emit_closure_fn_call_a64(call_vslot, argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     } else {
-                        emit_load_var_a64(call_vslot)
-                        em32(0xAA0003E9)
-                        if abi_argc >= 8 { em32(0xF8410FE7) }
-                        if abi_argc >= 7 { em32(0xF8410FE6) }
-                        if abi_argc >= 6 { em32(0xF8410FE5) }
-                        if abi_argc >= 5 { em32(0xF8410FE4) }
-                        if abi_argc >= 4 { em32(0xF8410FE3) }
-                        if abi_argc >= 3 { em32(0xF8410FE2) }
-                        if abi_argc >= 2 { emit_pop_x1_a64() }
-                        if abi_argc >= 1 { em32(0xF8410FE0) }
-                        em32(0xD63F0120)
+                        emit_indirect_fn_call_a64(call_vslot, abi_argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     }
                     if call_sig > 0 {
                         EXPR_TY = FNSIG_RET_TY[call_sig as usize]
@@ -11798,14 +12360,14 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                     if FN_ARITY[mfi as usize] != margc { tc_wrong_arity(method_tok, FN_ARITY[mfi as usize], margc) }
-                    if margc >= 8 { em32(0xF8410FE7) }
-                    if margc >= 7 { em32(0xF8410FE6) }
-                    if margc >= 6 { em32(0xF8410FE5) }
-                    if margc >= 5 { em32(0xF8410FE4) }
-                    if margc >= 4 { em32(0xF8410FE3) }
-                    if margc >= 3 { em32(0xF8410FE2) }
+                    if margc >= 8 { em32(0xF84107E7) }
+                    if margc >= 7 { em32(0xF84107E6) }
+                    if margc >= 6 { em32(0xF84107E5) }
+                    if margc >= 5 { em32(0xF84107E4) }
+                    if margc >= 4 { em32(0xF84107E3) }
+                    if margc >= 3 { em32(0xF84107E2) }
                     if margc >= 2 { emit_pop_x1_a64() }
-                    if margc >= 1 { em32(0xF8410FE0) }
+                    if margc >= 1 { em32(0xF84107E0) }
                     PATCH_OFF[PATCH_COUNT as usize] = CL
                     PATCH_FN[PATCH_COUNT as usize] = mfi
                     PATCH_KIND[PATCH_COUNT as usize] = 0
@@ -11819,15 +12381,21 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             let base_ty = EXPR_TY
             let base_hash = EXPR_TY_HASH
+            var field_base_ty = base_ty
+            var field_base_hash = base_hash
+            if base_ty == 10 {
+                field_base_ty = ref_hash_inner_ty(base_hash)
+                field_base_hash = ref_hash_inner_hash(base_hash)
+            }
             EP = EP + 1
             var found: i64 = 0
             EXPR_TY = 0
             EXPR_TY_HASH = 0
-            if knowledge_hash_is(base_hash) {
+            if knowledge_hash_is(field_base_hash) {
                 if src_match(fns, fne - fns, "value") {
                     em32(0xF9400000)
-                    EXPR_TY = knowledge_hash_inner_ty(base_hash)
-                    EXPR_TY_HASH = knowledge_hash_inner_hash(base_hash)
+                    EXPR_TY = knowledge_hash_inner_ty(field_base_hash)
+                    EXPR_TY_HASH = knowledge_hash_inner_hash(field_base_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else if src_match(fns, fne - fns, "variance") {
                     em32(0xF9400400)
@@ -11846,8 +12414,8 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 }
                 found = 1
             }
-            if base_ty == 6 {
-                let bsi = st_find(base_hash)
+            if field_base_ty == 6 {
+                let bsi = st_find(field_base_hash)
                 if bsi >= 0 {
                     let off = st_field_offset(bsi, fh)
                     if off >= 0 {
@@ -12087,6 +12655,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
     LAST_STMT_HAS_VALUE = 0
     if k == 27 { EP = EP + 1; return }
+    if stmt_is_gpu_perform(EP) {
+        compile_gpu_perform_stmt_a64()
+        return
+    }
     // let/var
     if k == 11 || k == 12 {
         EP = EP + 1
@@ -12471,8 +13043,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_a64(EXPR_TY, EXPR_TY_HASH)
         }
-        emit_imm64_reg_a64(9, FN_FRAME_SIZE[CURRENT_FN as usize])
-        em32(0x8B0903FF)  // add sp, sp, x9
+        emit_add_sp_imm_a64(FN_FRAME_SIZE[CURRENT_FN as usize])
         em32(0xA8C17BFD)
         em32(0xD65F03C0)
         return
@@ -12821,6 +13392,11 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         CURRENT_RET_TY = FN_RET_TY[fn_idx as usize]
         CURRENT_RET_HASH = FN_RET_HASH[fn_idx as usize]
         VAR_COUNT = 0; NEXT_SLOT = 1; BREAK_COUNT = 0; LAST_STMT_HAS_VALUE = 0
+        CURRENT_SRET_SLOT = 0
+        if ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH) > 0 {
+            CURRENT_SRET_SLOT = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+        }
         p = p + 1
         if TK[p as usize] == 6 { p = p + 1 }
         while TK[p as usize] != 7 && TK[p as usize] != 0 {
@@ -12868,8 +13444,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         let frame_sz = FN_FRAME_SIZE[fn_idx as usize]
         em32(0xA9BF7BFD)  // stp x29, x30, [sp, #-16]!
         em32(0x910003FD)  // mov x29, sp
-        emit_imm64_reg_a64(9, frame_sz)
-        em32(0xCB0903FF)  // sub sp, sp, x9
+        emit_sub_sp_imm_a64(frame_sz)
         // Spill params using low-level ABI slot order.
         var param_vi_a: i64 = 0
         var abi_arg_idx_a: i64 = 0
@@ -12881,6 +13456,10 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 abi_arg_idx_a = abi_arg_idx_a + 1
             }
             param_vi_a = param_vi_a + 1
+        }
+        if CURRENT_SRET_SLOT > 0 {
+            em32(0xAA0803E0)  // mov x0, x8
+            emit_store_var_a64(CURRENT_SRET_SLOT)
         }
         // Compile body
         EP = p
@@ -12927,12 +13506,16 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                 stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)
             }
-            emit_imm64_reg_a64(9, frame_sz)
-            em32(0x8B0903FF)  // add sp, sp, x9
+            emit_add_sp_imm_a64(frame_sz)
             em32(0xA8C17BFD)
             em32(0xD65F03C0)
         }
         fn_idx = fn_idx + 1
+    }
+    if TYPECHECK_FAILED != 0 {
+        print_limit_error()
+        print("typecheck: failed\n")
+        return 1
     }
     // Patch BL instructions
     var pi: i64 = 0
@@ -13007,6 +13590,13 @@ fn write_elf_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     var i: i64 = 0
     while i < 4096 { ELF[i as usize] = 0; i = i + 1 }
     let tsz = text_off + CL
+    let data_off = ((tsz + 4095) / 4096) * 4096
+    var data_file_size: i64 = 0
+    if GL_BSS_SIZE > 0 {
+        data_file_size = GL_BSS_SIZE
+        if data_file_size > 4096 { data_file_size = 4096 }
+    }
+    let total_file_size = data_off + data_file_size
     // ELF header
     elf_w8(0, 0x7f); elf_w8(1, 69); elf_w8(2, 76); elf_w8(3, 70)
     elf_w8(4, 2); elf_w8(5, 1); elf_w8(6, 1)
@@ -13019,12 +13609,17 @@ fn write_elf_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w64(ph0+32, tsz); elf_w64(ph0+40, tsz); elf_w64(ph0+48, 4096)
     let ph1 = 120
     elf_w32(ph1, 1); elf_w32(ph1+4, 6)   // PT_LOAD, R+W
-    elf_w64(ph1+8, 0); elf_w64(ph1+16, bss_base); elf_w64(ph1+24, bss_base)
-    elf_w64(ph1+32, 0); elf_w64(ph1+40, GL_BSS_SIZE); elf_w64(ph1+48, 4096)
+    elf_w64(ph1+8, data_off); elf_w64(ph1+16, bss_base); elf_w64(ph1+24, bss_base)
+    elf_w64(ph1+32, data_file_size); elf_w64(ph1+40, GL_BSS_SIZE); elf_w64(ph1+48, 4096)
     i = 0
     while i < CL { ELF[(text_off + i) as usize] = CD[i as usize]; i = i + 1 }
-    let ok = write_file(output, ELF, tsz)
-    print("elf_arm64: "); print(output); print(" "); print_int(tsz); print(" bytes (bss="); print_int(GL_BSS_SIZE); print(")\n")
+    i = 0
+    while i < data_file_size {
+        ELF[(data_off + i) as usize] = 0
+        i = i + 1
+    }
+    let ok = write_file(output, ELF, total_file_size)
+    print("elf_arm64: "); print(output); print(" "); print_int(total_file_size); print(" bytes (bss="); print_int(GL_BSS_SIZE); print(")\n")
     return 0
 }
 

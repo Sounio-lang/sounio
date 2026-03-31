@@ -29,6 +29,24 @@ Primary scripts:
 - `scripts/omega/omega_gpu_runtime_attest_gate.sh`
 - `scripts/omega/omega_gpu_public_contract_gate.sh`
 - `scripts/omega/omega_gpu_comprehensive_run.sh`
+- `scripts/gpu/gpu_surface_lowering_gate.sh`
+- `scripts/gpu/gpu_compile_proof_gate.sh`
+- `scripts/gpu/gpu_sim_runtime_gate.sh`
+- `scripts/gpu/gpu_hardware_runtime_gate.sh`
+- `scripts/gpu/gpu_capability_gate.sh`
+
+Capability taxonomy reference:
+
+- `docs/implementation/GPU_CAPABILITY_MODEL.md`
+
+The repo now tracks GPU capability through explicit support classes:
+
+- `gpu-surface-supported`
+- `gpu-lowering-supported`
+- `gpu-compile-proof`
+- `gpu-sim-runtime-supported`
+- `gpu-hardware-runtime-supported`
+- `gpu-explicit-unsupported`
 
 ## Shared Status Semantics
 

@@ -12,11 +12,19 @@ export const STATUS_NOTE_START = '<!-- docs:status-note:start -->';
 export const STATUS_NOTE_END = '<!-- docs:status-note:end -->';
 
 const ACTIVE_IMPLEMENTATION_DOCS = new Set([
+  'docs/implementation/BASELINE_STEWARDSHIP_PLAN.md',
+  'docs/implementation/BASELINE_STEWARDSHIP_PR_NOTE.md',
+  'docs/implementation/BASELINE_STEWARDSHIP_MAINTAINER_MEMO.md',
+  'docs/implementation/GPU_CAPABILITY_MODEL.md',
+  'docs/implementation/GPU_CAPABILITY_WAVE2.md',
   'docs/implementation/GPU_COMPILER_CONTRACTS.md',
   'docs/implementation/MV_CORE_CHECKLIST.md',
   'docs/implementation/PAPER_ARTIFACT_PACKAGING_SPEC.md',
   'docs/implementation/PRODUCTION_READYNESS.md',
+  'docs/implementation/SELFHOST_AUTHORITY_MODEL.md',
   'docs/implementation/SELFHOST_CHECKLIST.md',
+  'docs/implementation/SELFHOST_DEBT_REGISTER.md',
+  'docs/implementation/SELFHOST_RELEASE_TRAIN.md',
   'docs/implementation/SELFHOST_REPRODUCIBILITY_REPORT.md',
   'docs/implementation/SELF_HOSTED_COMPILER.md',
   'docs/implementation/SELF_HOSTING_PHASES.md',
@@ -33,6 +41,7 @@ const ACTIVE_FEATURE_DOCS = new Set([
 ]);
 
 const ACTIVE_RESEARCH_DOCS = new Set([
+  'docs/research/HYPERCOMPLEX_COMPILER_TRACK.md',
   'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
   'docs/research/epistemic_algebra_review.md',
   'docs/research/vancomycin-uncertainty.md',

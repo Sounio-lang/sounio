@@ -23,6 +23,11 @@ There are two separate truths you need to hold at once:
 
 Contributor docs should always label which layer they are talking about.
 
+For the canonical support classes and repo-local gate entrypoints, use
+`docs/implementation/GPU_CAPABILITY_MODEL.md`. That document is now the source
+of truth for how GPU capability is classified as surface-only, lowering-backed,
+compile-proof, simulator-runtime, hardware-runtime, or explicitly unsupported.
+
 ## Public kernel contract
 
 Use the checked GPU artifact:
@@ -49,9 +54,19 @@ That verified public contract currently includes:
 
 - `kernel fn`
 - `with GPU`
-- `perform GPU.launch(...)`
+- `perform GPU.launch(...)` with explicit grid/block 3-tuples
 - `perform GPU.sync()`
 - PTX emission via `build --backend gpu`
+
+Wave 5 adds checked and deterministic evidence for a non-unit multidimensional
+launch tuple surface through `tests/run-pass/gpu_launch_multidim_surface.sio`.
+Contributors should still keep the layered truth straight:
+
+- public checked surface: explicit 3-tuple launch syntax is accepted
+- source-tree PTX helper generation: the convenience `n`-based path remains
+  1D-default unless an explicit descriptor path is used
+- deterministic sim/reference lane: explicit multidimensional tuple carriage is
+  exercised without turning that into a hardware-runtime claim
 
 It does **not** currently include checked-artifact support for:
 
@@ -59,6 +74,10 @@ It does **not** currently include checked-artifact support for:
 - `gpu.block_id.*`
 - `gpu.block_dim.*`
 - `gpu.alloc<T>(...)`
+
+Each fenced surface now has a dedicated negative fixture under
+`tests/gpu/fixtures/`, which keeps the public contract honest per builtin
+instead of relying on a single combined rejection example.
 
 If you want to document those surfaces, do it as implementation work or future
 public contract work, not as default checked-artifact syntax.

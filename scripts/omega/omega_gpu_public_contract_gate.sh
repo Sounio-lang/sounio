@@ -213,16 +213,16 @@ jit_disabled=false
 gpu_backend_public=false
 gpu_emit_top_level=false
 
-if printf '%s' "$INFO_OUT" | rg -q '\[\+\] GPU codegen' >/dev/null 2>&1; then
+if printf '%s' "$INFO_OUT" | grep -Fq '[+] GPU codegen' >/dev/null 2>&1; then
   gpu_enabled=true
 fi
-if printf '%s' "$INFO_OUT" | rg -q '\[-\] Cranelift JIT' >/dev/null 2>&1; then
+if printf '%s' "$INFO_OUT" | grep -Fq '[-] Cranelift JIT' >/dev/null 2>&1; then
   jit_disabled=true
 fi
-if printf '%s' "$BUILD_HELP_OUT" | rg -q -- '--backend' >/dev/null 2>&1 && printf '%s' "$BUILD_HELP_OUT" | rg -q 'gpu' >/dev/null 2>&1; then
+if printf '%s' "$BUILD_HELP_OUT" | grep -Fq -- '--backend' >/dev/null 2>&1 && printf '%s' "$BUILD_HELP_OUT" | grep -Fq 'gpu' >/dev/null 2>&1; then
   gpu_backend_public=true
 fi
-if printf '%s' "$TOP_LEVEL_HELP_OUT" | rg -q '\bgpu-emit\b' >/dev/null 2>&1; then
+if printf '%s' "$TOP_LEVEL_HELP_OUT" | grep -Eq '(^|[^[:alnum:]_-])gpu-emit([^[:alnum:]_-]|$)' >/dev/null 2>&1; then
   gpu_emit_top_level=true
 fi
 
@@ -241,6 +241,7 @@ check_examples=(
   "examples/kernel_matmul.sio"
   "examples/kernel_epistemic_vec_add.sio"
   "tests/run-pass/gpu_launch_surface.sio"
+  "tests/run-pass/gpu_launch_multidim_surface.sio"
 )
 
 for path in "${check_examples[@]}"; do
@@ -270,7 +271,7 @@ for path in "${build_examples[@]}"; do
     status="fail"
     note="PTX file missing"
     BLOCKERS+=("public_ptx_emit_fail")
-  elif ! rg -q '\.entry|\.func' "$out_path" >/dev/null 2>&1; then
+  elif ! grep -Eq '\.entry|\.func' "$out_path" >/dev/null 2>&1; then
     status="fail"
     note="PTX markers missing"
     BLOCKERS+=("public_ptx_emit_fail")
@@ -297,41 +298,32 @@ if [[ "$rc" -ne 0 ]]; then
   BLOCKERS+=("public_contract_mismatch")
 fi
 
-TMP_INTRINSICS="$TMP_DIR/intrinsics_surface.sio"
-cat >"$TMP_INTRINSICS" <<'EOF'
-kernel fn vec_add(n: i64) with GPU {
-    let i = gpu.thread_id.x + gpu.block_id.x * gpu.block_dim.x
-    if i < n {
-    }
-}
-
-fn main() -> i32 with IO {
-    0
-}
-EOF
-
-rc="$(run_expect_fail "surface:gpu.thread_id" "gpu_intrinsics_not_public" "$GPU_SOUC" check "$TMP_INTRINSICS")"
-intrinsics_status="not_public"
-if [[ "$rc" -eq 0 ]]; then
-  intrinsics_status="pass"
+rc="$(run_ok "surface:launch.multidim" "gpu_launch_multidim_surface" "$GPU_SOUC" check "tests/run-pass/gpu_launch_multidim_surface.sio")"
+CHECKS_JSON="$(append_check "$CHECKS_JSON" "surface:GPU.launch.multidim" "$([[ "$rc" -eq 0 ]] && echo pass || echo fail)" "$GPU_SOUC check tests/run-pass/gpu_launch_multidim_surface.sio" "$rc" "Checked public multidimensional launch surface")"
+if [[ "$rc" -ne 0 ]]; then
+  BLOCKERS+=("public_contract_mismatch")
 fi
-CHECKS_JSON="$(append_check "$CHECKS_JSON" "surface:gpu.thread_id" "$intrinsics_status" "$GPU_SOUC check $TMP_INTRINSICS" "$rc" "Intrinsic namespace is not yet part of the checked public surface")"
 
-TMP_ALLOC="$TMP_DIR/alloc_surface.sio"
-cat >"$TMP_ALLOC" <<'EOF'
-fn main() with GPU, Alloc, IO {
-    let n = 4
-    let a = gpu.alloc<f32>(n)
-    perform GPU.sync()
-}
-EOF
+not_public_surfaces=(
+  "surface:gpu.thread_id|tests/gpu/fixtures/gpu_public_thread_id_not_yet_supported.sio|Thread-id intrinsics are not yet part of the checked public surface"
+  "surface:gpu.block_id|tests/gpu/fixtures/gpu_public_block_id_not_yet_supported.sio|Block-id intrinsics are not yet part of the checked public surface"
+  "surface:gpu.block_dim|tests/gpu/fixtures/gpu_public_block_dim_not_yet_supported.sio|Block-dimension intrinsics are not yet part of the checked public surface"
+  "surface:gpu.axis_family|tests/gpu/fixtures/gpu_public_axis_family_not_yet_supported.sio|Non-x axis spellings of GPU builtin intrinsics are not yet part of the checked public surface"
+  "surface:gpu.alloc|tests/gpu/fixtures/gpu_public_alloc_not_yet_supported.sio|Allocation intrinsics are not yet part of the checked public surface"
+  "surface:gpu.alloc.turbofish|tests/gpu/fixtures/gpu_public_alloc_turbofish_not_yet_supported.sio|Allocation intrinsics with turbofish syntax are not yet part of the checked public surface"
+)
 
-rc="$(run_expect_fail "surface:gpu.alloc" "gpu_alloc_not_public" "$GPU_SOUC" check "$TMP_ALLOC")"
-alloc_status="not_public"
-if [[ "$rc" -eq 0 ]]; then
-  alloc_status="pass"
-fi
-CHECKS_JSON="$(append_check "$CHECKS_JSON" "surface:gpu.alloc" "$alloc_status" "$GPU_SOUC check $TMP_ALLOC" "$rc" "Allocation intrinsics are not yet part of the checked public surface")"
+for spec in "${not_public_surfaces[@]}"; do
+  IFS='|' read -r check_name check_path check_note <<<"$spec"
+  check_tag="$(basename "$check_path" .sio)"
+  rc="$(run_expect_fail "$check_name" "$check_tag" "$GPU_SOUC" check "$check_path")"
+  check_status="not_public"
+  if [[ "$rc" -eq 0 ]]; then
+    check_status="fail"
+    BLOCKERS+=("public_contract_mismatch")
+  fi
+  CHECKS_JSON="$(append_check "$CHECKS_JSON" "$check_name" "$check_status" "$GPU_SOUC check $check_path" "$rc" "$check_note")"
+done
 
 profile_json="$(jq -cn \
   --arg souc_path "$(to_rel "$GPU_SOUC")" \

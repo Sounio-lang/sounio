@@ -56,9 +56,23 @@ The checked public surface currently includes:
 
 - `kernel fn`
 - `with GPU`
-- `perform GPU.launch(...)`
+- `perform GPU.launch(...)` with explicit `(x, y, z)` grid/block tuples
 - `perform GPU.sync()`
 - PTX emission through `build --backend gpu`
+
+The checked public lane now has explicit regression coverage for both the
+baseline 1D-default launch tuple shape and a non-unit multidimensional launch
+surface in `tests/run-pass/gpu_launch_multidim_surface.sio`.
+
+That does **not** mean every source-tree runtime/helper path is now a general
+multidimensional promotion. The honest state today is:
+
+- checked public surface: explicit 3-tuple launch syntax is accepted
+- deterministic sim/reference lane: explicit multidimensional tuple launch is
+  exercised without hardware dependency
+- source-tree PTX helper generation: the convenience `n`-based helper path
+  still defaults to 1D launch derivation unless an explicit descriptor path is
+  used
 
 The checked public artifact does **not** currently resolve the `gpu.*`
 intrinsic namespace used by older docs and sketches. In practice, that means:
@@ -67,6 +81,38 @@ intrinsic namespace used by older docs and sketches. In practice, that means:
 - `gpu.block_id.*`: not public in the checked artifact
 - `gpu.block_dim.*`: not public in the checked artifact
 - `gpu.alloc<T>(...)`: not public in the checked artifact
+- `gpu.alloc::<T>(...)`: also not public in the checked artifact
+
+Those fenced surfaces now have dedicated negative fixtures in
+`tests/gpu/fixtures/` so each unsupported public builtin is independently
+attested instead of being grouped into a single umbrella rejection.
+
+Wave 8 adds a dedicated negative regression for non-`x` axis spellings such as
+`gpu.thread_id.y`, `gpu.block_id.z`, and `gpu.block_dim.y`, keeping the
+priority builtin families explicitly fenced at the checked public boundary.
+
+Wave 9 re-checks those same priority builtin families and still finds no
+checked-artifact evidence for promotion.
+
+Wave 6 re-checked the same fixtures against the selfhost compile-proof lane and
+found that the current selfhost front-end also still rejects these names at the
+source surface. Internal lowering modules may model axis-sensitive builtin
+semantics for future work, but that is not a public or default-selfhost support
+claim today.
+
+Wave 7 tightens the source-tree launch descriptor contract further: explicit
+grid/block descriptors now fail closed when `block_dim_x * block_dim_y *
+block_dim_z` exceeds the repo-local `1024` threads-per-block ceiling, and that
+constraint is mirrored in the deterministic sim/reference lane.
+
+Wave 8 tightens the host-side marshaling path as well: launch helpers now fail
+closed before deriving byte counts when `n < 0`, and that guard is mirrored in
+the deterministic sim/reference lane.
+
+Wave 9 tightens that same path one step further: helper-based launches now also
+fail closed when `n == 0`, keeping nonpositive element counts out of the
+runtime/marshaling path and aligning the helper lane more closely with the
+descriptor lane.
 
 Those surfaces still matter for implementation work, but they should not be
 presented as the default public happy path until the checked artifact accepts
@@ -100,6 +146,21 @@ At the same time, support remains tiered:
 - source-tree implementation work without equal public runtime evidence yet:
   Metal, SPIR-V, WGSL/render, tensor-core tuning, and other advanced paths
 
+## Capability taxonomy
+
+Repo-local GPU support is now described with explicit classes:
+
+- `gpu-surface-supported`
+- `gpu-lowering-supported`
+- `gpu-compile-proof`
+- `gpu-sim-runtime-supported`
+- `gpu-hardware-runtime-supported`
+- `gpu-explicit-unsupported`
+
+Use `docs/implementation/GPU_CAPABILITY_MODEL.md` for the maintainer-facing
+mapping from examples/tests to those support classes and for the canonical gate
+entrypoints that validate each lane.
+
 ## 4. Where the implementation lives
 
 The main self-hosted GPU surface is under `self-hosted/gpu/`:
@@ -126,6 +187,9 @@ recommended public command for GPU emission is still:
 - Do not describe the default JIT artifact as GPU-enabled. It is not.
 - Do not describe the checked GPU artifact as exposing the full `gpu.*`
   intrinsic namespace. It does not.
+- Do not describe the public contract as general automatic multidimensional
+  host-lowering support. The checked surface accepts explicit 3-tuples, but the
+  source-tree convenience helper path is still 1D-default.
 - Do not describe `gpu-emit` as a public top-level subcommand of the checked
   GPU artifact. It is not there today.
 - Do describe the attestation artifacts when making claims about CUDA/ROCm
@@ -137,7 +201,9 @@ If public GPU docs, examples, or website copy change, rerun:
 
 ```bash
 bash scripts/omega/omega_gpu_public_contract_gate.sh
+bash scripts/gpu/gpu_surface_lowering_gate.sh
 ```
 
 That gate is the machine-readable check that the shipped GPU profile, examples,
-and public docs are still talking about the same thing.
+and public docs are still talking about the same thing. The second gate keeps
+the new GPU capability taxonomy aligned with the checked artifact surface.

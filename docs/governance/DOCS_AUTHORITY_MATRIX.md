@@ -108,11 +108,16 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.guide.sounio-quick-start | repo_only | docs/guide/SOUNIO_QUICK_START.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.sounio-style-guide | repo_only | docs/guide/SOUNIO_STYLE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.tutorial | repo_only | docs/guide/tutorial.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.baseline-stewardship-maintainer-memo | repo_only | docs/implementation/BASELINE_STEWARDSHIP_MAINTAINER_MEMO.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.baseline-stewardship-plan | repo_only | docs/implementation/BASELINE_STEWARDSHIP_PLAN.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.baseline-stewardship-pr-note | repo_only | docs/implementation/BASELINE_STEWARDSHIP_PR_NOTE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.bootstrap-seed-policy | historical | docs/implementation/BOOTSTRAP_SEED_POLICY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.codex-claude-parallel-contract | historical | docs/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.completed-mega-project | historical | docs/implementation/COMPLETED_MEGA_PROJECT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.dead-code-analysis-summary | historical | docs/implementation/DEAD_CODE_ANALYSIS_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.final-integration-guide | historical | docs/implementation/FINAL_INTEGRATION_GUIDE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.gpu-capability-model | repo_only | docs/implementation/GPU_CAPABILITY_MODEL.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.gpu-capability-wave2 | repo_only | docs/implementation/GPU_CAPABILITY_WAVE2.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.gpu-compiler-contracts | repo_only | docs/implementation/GPU_COMPILER_CONTRACTS.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.hot-reload-complete | historical | docs/implementation/HOT_RELOAD_COMPLETE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.implementation-complete-report | historical | docs/implementation/IMPLEMENTATION_COMPLETE_REPORT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -133,7 +138,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.implementation.scientific-pipelines-blockers-analyse | historical | docs/implementation/SCIENTIFIC_PIPELINES_BLOCKERS_ANALYSE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.self-hosted-compiler | repo_only | docs/implementation/SELF_HOSTED_COMPILER.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.self-hosting-phases | repo_only | docs/implementation/SELF_HOSTING_PHASES.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.selfhost-authority-model | repo_only | docs/implementation/SELFHOST_AUTHORITY_MODEL.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.selfhost-checklist | repo_only | docs/implementation/SELFHOST_CHECKLIST.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.selfhost-debt-register | repo_only | docs/implementation/SELFHOST_DEBT_REGISTER.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.selfhost-release-train | repo_only | docs/implementation/SELFHOST_RELEASE_TRAIN.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.selfhost-reproducibility-report | repo_only | docs/implementation/SELFHOST_REPRODUCIBILITY_REPORT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.string-interning-summary | historical | docs/implementation/STRING_INTERNING_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.summary-v0.2.0 | historical | docs/implementation/SUMMARY_v0.2.0.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -159,6 +167,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.main.sounio-arxiv-draft | repo_only | docs/papers/main/sounio_arxiv_draft.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.medrxiv-abstract | repo_only | docs/papers/medrxiv_abstract.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.peer-review-simulation | repo_only | docs/papers/peer_review_simulation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.techrxiv-submission | repo_only | docs/papers/TECHRXIV_SUBMISSION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.qnn-performance-guide | repo_only | docs/QNN_PERFORMANCE_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.qnn.api.comparison-guide | repo_only | docs/qnn/api/COMPARISON_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.qnn.architecture-deep-dive | repo_only | docs/qnn/ARCHITECTURE_DEEP_DIVE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -176,6 +185,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.epistemic-algebra-review | repo_only | docs/research/epistemic_algebra_review.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.hyper-uncertainty-parenthesization-report | historical | docs/research/HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.hypercomplex-compiler-track | repo_only | docs/research/HYPERCOMPLEX_COMPILER_TRACK.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.octonion-validation-report | historical | docs/research/OCTONION_VALIDATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.onn-benchmark-analysis | historical | docs/research/ONN_BENCHMARK_ANALYSIS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.quaternion-neural-networks | historical | docs/research/QUATERNION_NEURAL_NETWORKS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
