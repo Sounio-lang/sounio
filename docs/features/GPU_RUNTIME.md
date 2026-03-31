@@ -81,6 +81,7 @@ intrinsic namespace used by older docs and sketches. In practice, that means:
 - `gpu.block_id.*`: not public in the checked artifact
 - `gpu.block_dim.*`: not public in the checked artifact
 - `gpu.alloc<T>(...)`: not public in the checked artifact
+- `gpu.alloc::<T>(...)`: also not public in the checked artifact
 
 Those fenced surfaces now have dedicated negative fixtures in
 `tests/gpu/fixtures/` so each unsupported public builtin is independently

@@ -309,6 +309,7 @@ not_public_surfaces=(
   "surface:gpu.block_id|tests/gpu/fixtures/gpu_public_block_id_not_yet_supported.sio|Block-id intrinsics are not yet part of the checked public surface"
   "surface:gpu.block_dim|tests/gpu/fixtures/gpu_public_block_dim_not_yet_supported.sio|Block-dimension intrinsics are not yet part of the checked public surface"
   "surface:gpu.alloc|tests/gpu/fixtures/gpu_public_alloc_not_yet_supported.sio|Allocation intrinsics are not yet part of the checked public surface"
+  "surface:gpu.alloc.turbofish|tests/gpu/fixtures/gpu_public_alloc_turbofish_not_yet_supported.sio|Allocation intrinsics with turbofish syntax are not yet part of the checked public surface"
 )
 
 for spec in "${not_public_surfaces[@]}"; do
