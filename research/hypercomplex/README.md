@@ -4,7 +4,8 @@ This directory contains the Wave 1 baseline plus the Wave 2 semantic-contract
 package, the Wave 3 prototype-safe scaffolding, the Wave 4 compile-proof
 prototype harnesses, the Wave 5 reassociation metadata scaffolding, and the
 Wave 6 forbidden-law metadata scaffolding, and the Wave 7 hyper-expression law
-profile scaffolding for hypercomplex algebra in the compiler.
+profile scaffolding, and the Wave 8 law-profile observability scaffolding for
+hypercomplex algebra in the compiler.
 
 Wave 1 baseline:
 
@@ -41,6 +42,11 @@ Wave 7 baseline:
 - builds on `hypercomplex-algebra-wave6-codex`
 - baseline commit `27283e9f04a5c4f68d6abe0a7fd9850289ee4b6c`
 
+Wave 8 baseline:
+
+- builds on `hypercomplex-algebra-wave7-codex`
+- baseline commit `c2ef74888c3d3629683d1dffa58a368d59d60dad`
+
 Scope:
 
 - inventory the hypercomplex surface already present in the accepted baseline
@@ -66,7 +72,7 @@ Files:
 - `expected_fail.v1.json`: Wave 3 forbidden-rewrite coverage, mixing executable counterexamples with explicit validation-only gaps
 - `compiler_audit.v1.json`: bounded internal audit seams for type, IR, and lowering touchpoints
 - `prototype_scaffolding.v1.json`: Wave 4 compile-proof and harness matrix for non-public compiler-facing scaffolding
-- `prototype_scaffolding.v1.json`: Wave 5, Wave 6, and Wave 7 metadata-carriage harnesses and validation rules for non-public compiler-facing scaffolding
+- `prototype_scaffolding.v1.json`: Wave 5 through Wave 8 metadata and differential-selftest harnesses for non-public compiler-facing scaffolding
 
 Validation:
 
@@ -78,6 +84,8 @@ bash scripts/research/hypercomplex_wave4_gate.sh
 bash scripts/research/hypercomplex_wave5_gate.sh
 bash scripts/research/hypercomplex_wave6_gate.sh
 bash scripts/research/hypercomplex_wave7_gate.sh
+bash scripts/research/hypercomplex_wave8_diff_selftest.sh
+bash scripts/research/hypercomplex_wave8_gate.sh
 ```
 
 What the baseline already contains:
@@ -161,6 +169,19 @@ What Wave 7 adds without changing support claims:
   new expression fixture, and symbol-checks the expression-level law-profile
   references so future prototype work cannot drift semantically
 
+What Wave 8 adds without changing support claims:
+
+- a bounded registry-vs-fallback baseline-comparison path that compiles a small
+  differential harness and checks the new observability seam against the Wave 7
+  baseline without changing runtime or optimizer behavior
+- a small observability seam where expression-level hyper metadata records the
+  source of each law profile so research tooling can tell whether a profile came
+  from the algebra registry or fallback derivation
+- a stricter Wave 8 validator that requires Wave 7 to stay green, runs the new
+  differential self-test, and symbol-checks the source-tag references so future
+  prototype work cannot silently drift from advisory metadata into semantic
+  claims
+
 Current inventory summary:
 
 - active entries: 9
@@ -196,3 +217,6 @@ Wave 2 operating rule:
   they do not authorize broader rewrites, runtime claims, or public support
 - Wave 7 hyper-expression law profiles are still internal compiler bookkeeping;
   they do not create a public semantic contract or authorize new rewrites
+- Wave 8 law-profile source tags and registry-vs-fallback baseline comparisons
+  are still internal observability only; they do not authorize
+  broader rewrites, runtime claims, or public support
