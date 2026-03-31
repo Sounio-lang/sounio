@@ -87,6 +87,10 @@ Those fenced surfaces now have dedicated negative fixtures in
 `tests/gpu/fixtures/` so each unsupported public builtin is independently
 attested instead of being grouped into a single umbrella rejection.
 
+Wave 8 adds a dedicated negative regression for non-`x` axis spellings such as
+`gpu.thread_id.y`, `gpu.block_id.z`, and `gpu.block_dim.y`, keeping the
+priority builtin families explicitly fenced at the checked public boundary.
+
 Wave 6 re-checked the same fixtures against the selfhost compile-proof lane and
 found that the current selfhost front-end also still rejects these names at the
 source surface. Internal lowering modules may model axis-sensitive builtin
@@ -97,6 +101,10 @@ Wave 7 tightens the source-tree launch descriptor contract further: explicit
 grid/block descriptors now fail closed when `block_dim_x * block_dim_y *
 block_dim_z` exceeds the repo-local `1024` threads-per-block ceiling, and that
 constraint is mirrored in the deterministic sim/reference lane.
+
+Wave 8 tightens the host-side marshaling path as well: launch helpers now fail
+closed before deriving byte counts when `n < 0`, and that guard is mirrored in
+the deterministic sim/reference lane.
 
 Those surfaces still matter for implementation work, but they should not be
 presented as the default public happy path until the checked artifact accepts
