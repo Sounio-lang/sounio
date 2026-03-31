@@ -179,11 +179,9 @@ fn eg_class_new() -> EgClass {
 }
 
 fn eg_union_find_new() -> EgUnionFind {
-    EgUnionFind {
-        parent: [EG_INVALID; 8192],
-        rank: [0; 8192],
-        size: 0,
-    }
+    var out: EgUnionFind
+    out.size = 0
+    out
 }
 
 fn eg_rule_new() -> EgRule {
@@ -200,28 +198,27 @@ fn eg_rule_new() -> EgRule {
 }
 
 fn eg_rule_set_new() -> EgRuleSet {
-    EgRuleSet {
-        rules: [eg_rule_new(); 256],
-        rule_count: 0,
-    }
+    var out: EgRuleSet
+    out.rule_count = 0
+    out
 }
 
 fn eg_graph_new() -> EgGraph {
-    EgGraph {
-        nodes: [eg_node_new(); 16384],
-        node_count: 0,
-        classes: [eg_class_new(); 8192],
-        class_count: 0,
-        union_find: eg_union_find_new(),
-        hash_table: [EG_HASH_EMPTY; 16384],
+    var out: EgGraph
+    out.node_count = 0
+    out.class_count = 0
+    out.union_find = eg_union_find_new()
+    var i: i64 = 0
+    while i < EG_MAX_NODES {
+        out.hash_table[i as usize] = EG_HASH_EMPTY
+        i = i + 1
     }
+    out
 }
 
 fn eg_extractor_new() -> EgExtractor {
-    EgExtractor {
-        costs: [999999; 8192],
-        best_node: [EG_INVALID; 8192],
-    }
+    var out: EgExtractor
+    out
 }
 
 fn eg_stats_new() -> EgStats {
@@ -245,10 +242,9 @@ fn eg_match_new() -> EgMatch {
 }
 
 fn eg_match_batch_new() -> EgMatchBatch {
-    EgMatchBatch {
-        matches: [eg_match_new(); 512],
-        match_count: 0,
-    }
+    var out: EgMatchBatch
+    out.match_count = 0
+    out
 }
 
 fn eg_context_new() -> EgContext {
@@ -1351,6 +1347,25 @@ fn eg_small_init() -> EgSmallContext {
     }
 }
 
+fn eg_small_init_algebra(strategy: i64, cd_bits_in: i64) -> EgSmallContext {
+    EgSmallContext {
+        nodes:      [eg_node_new(); 64],
+        node_count: 0,
+        algebra_kind: 3,
+        reassoc_strategy: strategy,
+        cd_bits: cd_bits_in,
+        observe_barriers: [0 - 1; 16],
+        observe_barrier_count: 0,
+        parent:     [EG_INVALID; 128],
+        rank:       [0; 128],
+        uf_size:    0,
+        costs:      [999999; 64],
+        best:       [EG_INVALID; 64],
+        unc_lo:     [0; 64],
+        unc_hi:     [0; 64],
+    }
+}
+
 // Check if an e-class is an observation barrier (fixed point).
 fn eg_small_is_observed(ctx: &! EgSmallContext, eclass: i64) -> bool with Mut, Div, Panic {
     let canonical = eg_small_find(ctx, eclass)
@@ -1714,6 +1729,39 @@ fn eg_small_extract_epistemic(ctx: &! EgSmallContext, class_id: i64) -> EgNode w
         i = i + 1
     }
     best
+}
+
+// ── Fano predicate (inlined from ir/algebra.sio for standalone operation) ────
+//
+// Cayley-Dickson sign function σ(a,b) at tower level `bits`.
+// Needed to evaluate the Fano incidence condition for octonion basis triples.
+fn eg_ir_cd_sigma(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return eg_ir_cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return eg_ir_cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return eg_ir_cd_sigma(a_lo, b_lo, bits - 1) }
+        else { return 0 - eg_ir_cd_sigma(a_lo, b_lo, bits - 1) }
+    }
+    if b_lo == 0 { return 0 - eg_ir_cd_sigma(b_lo, a_lo, bits - 1) }
+    return eg_ir_cd_sigma(b_lo, a_lo, bits - 1)
+}
+
+// Can the optimizer reassociate basis triple (i,j,k) at tower level bits?
+// Returns true iff the triple lies on a Fano line (168 theorem predicate).
+fn ir_can_reassociate_triple(bits: i64, i: i64, j: i64, k: i64) -> bool with Mut, Panic, Div {
+    if bits < 3 { return true }
+    if i == 0 || j == 0 || k == 0 { return true }
+    if i == j || j == k || i == k { return true }
+    let alpha = eg_ir_cd_sigma(i, j, bits) * eg_ir_cd_sigma(i ^ j, k, bits)
+    let beta  = eg_ir_cd_sigma(j, k, bits) * eg_ir_cd_sigma(i, j ^ k, bits)
+    alpha == beta
 }
 
 // Extract basis index from an e-class for Fano predicate.
@@ -3232,12 +3280,48 @@ fn test_eg_guided_e2e() -> bool with Mut, Div, Panic {
 }
 
 // ============================================================================
+// Section 29a: Fano Gate Correctness Tests (T81-T82)
+// ============================================================================
+
+// T81 — non-Fano triple (1,2,4): fano_selective must block reassociation
+// (1,2,4) is not on any Fano line, so (e1*e2)*e4 ≠ e1*(e2*e4) in octonions.
+fn test_eg_fano_blocks_non_fano_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let e1    = eg_small_add_var(ctx, 1)
+    let e2    = eg_small_add_var(ctx, 2)
+    let e4    = eg_small_add_var(ctx, 4)
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, e1, e2)    // e1*e2
+    let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, e4)  // (e1*e2)*e4
+    let merges = eg_small_saturate_float(ctx)
+    merges == 0
+}
+fn test_eg_fano_blocks_non_fano() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init_algebra(2, 3)  // fano_selective, octonion (cd_bits=3)
+    return test_eg_fano_blocks_non_fano_inner(&! ctx)
+}
+
+// T82 — Fano triple (1,2,3): fano_selective must allow reassociation
+// (1,2,3) lies on Fano line 0, so (e1*e2)*e3 = e1*(e2*e3) is safe to merge.
+fn test_eg_fano_allows_fano_triple_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let e1    = eg_small_add_var(ctx, 1)
+    let e2    = eg_small_add_var(ctx, 2)
+    let e3    = eg_small_add_var(ctx, 3)
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, e1, e2)    // e1*e2
+    let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, e3)  // (e1*e2)*e3
+    let merges = eg_small_saturate_float(ctx)
+    merges > 0
+}
+fn test_eg_fano_allows_fano_triple() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init_algebra(2, 3)  // fano_selective, octonion (cd_bits=3)
+    return test_eg_fano_allows_fano_triple_inner(&! ctx)
+}
+
+// ============================================================================
 // Section 29: Test Runner
 // ============================================================================
 
 fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 80
+    let total: i64 = 82
 
     print("=== E-Graph Equality Saturation Tests ===\n")
 
@@ -3321,6 +3405,8 @@ fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     if test_eg_guided_lambda_high() { passed = passed + 1; print("  T78 OK guided_lambda_high\n") } else { print("  FAIL: T78 guided_lambda_high\n") }
     if test_eg_guided_saturate_extract() { passed = passed + 1; print("  T79 OK guided_saturate_extract\n") } else { print("  FAIL: T79 guided_saturate_extract\n") }
     if test_eg_guided_e2e() { passed = passed + 1; print("  T80 OK guided_e2e\n") } else { print("  FAIL: T80 guided_e2e\n") }
+    if test_eg_fano_blocks_non_fano()    { passed = passed + 1; print("  T81 OK fano_blocks_non_fano\n")    } else { print("  FAIL: T81 fano_blocks_non_fano\n")    }
+    if test_eg_fano_allows_fano_triple() { passed = passed + 1; print("  T82 OK fano_allows_fano_triple\n") } else { print("  FAIL: T82 fano_allows_fano_triple\n") }
 
     print("\nE-Graph: ")
     print_int(passed)
