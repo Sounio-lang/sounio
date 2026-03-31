@@ -91,6 +91,9 @@ Wave 8 adds a dedicated negative regression for non-`x` axis spellings such as
 `gpu.thread_id.y`, `gpu.block_id.z`, and `gpu.block_dim.y`, keeping the
 priority builtin families explicitly fenced at the checked public boundary.
 
+Wave 9 re-checks those same priority builtin families and still finds no
+checked-artifact evidence for promotion.
+
 Wave 6 re-checked the same fixtures against the selfhost compile-proof lane and
 found that the current selfhost front-end also still rejects these names at the
 source surface. Internal lowering modules may model axis-sensitive builtin
@@ -105,6 +108,11 @@ constraint is mirrored in the deterministic sim/reference lane.
 Wave 8 tightens the host-side marshaling path as well: launch helpers now fail
 closed before deriving byte counts when `n < 0`, and that guard is mirrored in
 the deterministic sim/reference lane.
+
+Wave 9 tightens that same path one step further: helper-based launches now also
+fail closed when `n == 0`, keeping nonpositive element counts out of the
+runtime/marshaling path and aligning the helper lane more closely with the
+descriptor lane.
 
 Those surfaces still matter for implementation work, but they should not be
 presented as the default public happy path until the checked artifact accepts
