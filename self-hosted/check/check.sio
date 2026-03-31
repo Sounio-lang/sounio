@@ -38,6 +38,8 @@ const CONTEST_WITNESS_DISAGREEMENT: i64 = 5
 const CONTEST_WITNESS_COUNTEREXAMPLE: i64 = 6
 const CONTEST_WITNESS_POSTERIOR_WEIGHTS: i64 = 7
 const DEFERRAL_EVIDENCE_CONTEST: i64 = 0
+const HYPER_LAW_PROFILE_SOURCE_FALLBACK: i64 = 0
+const HYPER_LAW_PROFILE_SOURCE_REGISTRY: i64 = 1
 const DEFERRAL_EVIDENCE_ROBUST: i64 = 1
 const DEFERRAL_REASON_STRUCTURAL_DISAGREEMENT: i64 = 0
 const DEFERRAL_REASON_MECHANISTIC_CONFLICT: i64 = 1
@@ -423,6 +425,46 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         impl_registry: impl_register_builtins(impl_registry_new()),
         multitest_count: 0,
         multitest_corrected: false,
+    }
+}
+
+fn make_hyper_expr_info(
+    span: Span,
+    algebra_tag: i64,
+    op_kind: i64,
+    knowledge_wrapped: bool,
+    algebra_info: AlgebraInfo
+) -> HyperExprInfo with Mut, Panic, Div {
+    var law_profile_source = HYPER_LAW_PROFILE_SOURCE_FALLBACK
+    var reassoc_strategy: i64 = 0
+    if algebra_tag >= 3 {
+        reassoc_strategy = 1
+    }
+    if algebra_info.is_valid {
+        law_profile_source = HYPER_LAW_PROFILE_SOURCE_REGISTRY
+        reassoc_strategy = algebra_info.reassoc_strategy
+    }
+    var forbidden_law_mask = cd_forbidden_law_mask(algebra_tag, reassoc_strategy)
+    if algebra_info.is_valid && algebra_info.forbidden_law_mask != 0 {
+        forbidden_law_mask = algebra_info.forbidden_law_mask
+    }
+    let law_profile_fingerprint = cd_hyper_law_profile_fingerprint(
+        algebra_tag,
+        op_kind,
+        reassoc_strategy,
+        forbidden_law_mask,
+        law_profile_source,
+    )
+    HyperExprInfo {
+        span_start: span.start,
+        span_end: span.end,
+        algebra_tag: algebra_tag,
+        op_kind: op_kind,
+        reassoc_strategy: reassoc_strategy,
+        forbidden_law_mask: forbidden_law_mask,
+        law_profile_source: law_profile_source,
+        law_profile_fingerprint: law_profile_fingerprint,
+        knowledge_wrapped: knowledge_wrapped,
     }
 }
 
@@ -1181,6 +1223,10 @@ fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicS
             span_end: info.span_end,
             algebra_tag: info.algebra_tag,
             op_kind: info.op_kind,
+            reassoc_strategy: info.reassoc_strategy,
+            forbidden_law_mask: info.forbidden_law_mask,
+            law_profile_source: info.law_profile_source,
+            law_profile_fingerprint: info.law_profile_fingerprint,
             knowledge_wrapped: info.knowledge_wrapped,
         }
         i = i + 1
@@ -6224,18 +6270,25 @@ impl Checker {
         }
     }
 
+    fn hyper_expr_lookup_algebra(self, algebra_tag: i64) -> AlgebraInfo with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.algebras.count {
+            let info = self.algebras.entries[i as usize]
+            if info.is_valid && info.algebra_tag == algebra_tag {
+                return info
+            }
+            i = i + 1
+        }
+        empty_algebra_info()
+    }
+
     fn record_hyper_expr(self, span: Span, algebra_tag: i64, op_kind: i64, knowledge_wrapped: bool) -> Checker with Mut, Panic, Div {
         if algebra_tag < 0 || op_kind <= 0 {
             return self
         }
         var c = self
-        let info = HyperExprInfo {
-            span_start: span.start,
-            span_end: span.end,
-            algebra_tag: algebra_tag,
-            op_kind: op_kind,
-            knowledge_wrapped: knowledge_wrapped,
-        }
+        let algebra_info = c.hyper_expr_lookup_algebra(algebra_tag)
+        let info = make_hyper_expr_info(span, algebra_tag, op_kind, knowledge_wrapped, algebra_info)
         let add_result = c.hyper_exprs.add(info)
         c.hyper_exprs = add_result.0
         c
@@ -8547,6 +8600,7 @@ impl Checker {
                 } else if info.name.len == 10 && info.name.buf[0] == 81 as i8 {
                     info.algebra_tag = 2  // Quaternion
                 }
+                info.forbidden_law_mask = cd_forbidden_law_mask(info.algebra_tag, info.reassoc_strategy)
 
                 // Walk op declarations
                 c = c.collect_algebra_ops((*adef).ops, idx)

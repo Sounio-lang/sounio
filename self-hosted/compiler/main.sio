@@ -10,7 +10,9 @@
 // Horizon 3: wire to real multi-module native compilation pipeline
 // Named imports only — glob imports caused type-checker stack overflow (~3500 symbols)
 use parser::ast::{BinaryOp, Block, CompareOp, EffectList, empty_name, Item, ItemKind, ItemList, Name, ParamList, Pattern, Program, TypeExpr, TypeExprKind, UnaryOp}
-use ir::ir::{empty_struct_layout_table, ir_alloc, ir_binop, ir_branch_false, ir_branch_true, ir_call, ir_copy, ir_empty_algebra_info, ir_empty_algebra_table, ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_prof_counter_info, ir_empty_reg_list, IrEpistemicSection, ir_field_get, ir_field_set, ir_float_to_int, IrFunction, IrInstr, ir_instr_new, ir_int_to_float, ir_jump, ir_label, ir_load_bool, ir_load_float, ir_load_imm, ir_measure, IrModule, ir_name_eq, ir_name_from_bytes, ir_nop, IrOpcode, IrPolicyRequirementInfo, ir_prof_counter, IrRegList, ir_reg_list_single, ir_return, IR_STRATEGY_AGGRESSIVE, IR_STRATEGY_GPU_KERNEL, IR_STRATEGY_INSTRUMENTED, ir_strategy_name, IR_STRATEGY_PRECISION_PRESERVING, IR_STRATEGY_PROBABILISTIC, IR_STRATEGY_STANDARD, ir_unaryop, make_name, SOUNIO_ABI_VERSION, SOUNIO_RUNTIME_VERSION_MAJOR}
+use ir::algebra::{IR_HYPER_FORBID_CANCEL_NONZERO_SEDENION_FACTORS, IR_HYPER_FORBID_GENERIC_DISTRIBUTE_FACTOR, IR_HYPER_FORBID_LIFT_OCTONION_NORM_TO_SEDENION, ir_forbidden_law_mask, ir_forbidden_law_mask_has, ir_hyper_law_profile_fingerprint}
+use ir::ir::{empty_struct_layout_table, ir_alloc, ir_binop, ir_branch_false, ir_branch_true, ir_call, ir_copy, ir_empty_algebra_info, ir_empty_algebra_table, ir_empty_epistemic_section, ir_empty_function, ir_empty_hyper_expr_info, ir_empty_module, ir_empty_prof_counter_info, ir_empty_reg_list, IR_HYPER_LAW_PROFILE_SOURCE_FALLBACK, IrEpistemicSection, ir_field_get, ir_field_set, ir_float_to_int, IrFunction, IrInstr, ir_instr_new, ir_int_to_float, ir_jump, ir_label, ir_load_bool, ir_load_float, ir_load_imm, ir_measure, IrModule, ir_name_eq, ir_name_from_bytes, ir_nop, IrOpcode, IrPolicyRequirementInfo, ir_prof_counter, IrRegList, ir_reg_list_single, ir_return, IR_STRATEGY_AGGRESSIVE, IR_STRATEGY_GPU_KERNEL, IR_STRATEGY_INSTRUMENTED, ir_strategy_name, IR_STRATEGY_PRECISION_PRESERVING, IR_STRATEGY_PROBABILISTIC, IR_STRATEGY_STANDARD, ir_unaryop, make_name, SOUNIO_ABI_VERSION, SOUNIO_RUNTIME_VERSION_MAJOR}
+use ir::serialize::{deserialize_ir_epistemic_section, serialize_ir_epistemic_section}
 use check::types::{empty_type_entry, TypeEntry, TypeEntryList, TypeKind}
 use check::mod::{check_program, check_program_epistemic_into}
 use io::file_write::{io_write_bytes_to_file, io_write_elf_to_file, io_write_kernel_response_json, io_write_version_json}
@@ -6715,8 +6717,11 @@ fn compiler_main_test_ocp_mini_pass_9_instrs() -> bool with Mut, Div, Panic {
     result.instrs[0].op == IrOpcode::IrBinOp && result.instr_count == 9
 }
 
-// T1000: Hyper-tagged mini e-graph contexts inherit registry reassociation metadata.
-fn compiler_main_test_ocp_context_uses_algebra_registry() -> bool with Mut, Div, Panic {
+// T1000: Hyper-tagged mini e-graph contexts inherit reassociation metadata and
+// derive forbidden-law masks without widening optimizer behavior. Wave 9 also
+// requires hyper-expression epistemic records to roundtrip an observability-only
+// fingerprint for the same advisory law profile.
+fn compiler_main_test_ocp_context_uses_algebra_registry() -> bool with Mut, Div, Panic, Alloc {
     var func = ir_empty_function()
     func.hyper_algebra_kind = 3
 
@@ -6725,12 +6730,69 @@ fn compiler_main_test_ocp_context_uses_algebra_registry() -> bool with Mut, Div,
     octonion.is_valid = true
     octonion.algebra_tag = 3
     octonion.reassoc_strategy = 2
+    octonion.forbidden_law_mask = ir_forbidden_law_mask(3, 2)
     algebras.entries[0] = octonion
     algebras.count = 1
 
     var ctx = eg_small_init()
     ocp_configure_small_context(&! ctx, func, algebras)
-    ctx.algebra_kind == 3 && ctx.reassoc_strategy == 2 && ctx.cd_bits == 3
+
+    var fallback_func = ir_empty_function()
+    fallback_func.hyper_algebra_kind = 4
+    var fallback_ctx = eg_small_init()
+    ocp_configure_small_context(&! fallback_ctx, fallback_func, ir_empty_algebra_table())
+
+    let oct_mask = ir_forbidden_law_mask(3, 2)
+    let sed_mask = ir_forbidden_law_mask(4, 1)
+    let oct_fingerprint = ir_hyper_law_profile_fingerprint(3, 1, 2, oct_mask, 1)
+    let sed_fingerprint = ir_hyper_law_profile_fingerprint(4, 1, 1, sed_mask, 0)
+
+    var ep = ir_empty_epistemic_section()
+    var expr = ir_empty_hyper_expr_info()
+    expr.span_start = 11
+    expr.span_end = 29
+    expr.algebra_tag = 4
+    expr.op_kind = 1
+    expr.reassoc_strategy = 1
+    expr.forbidden_law_mask = sed_mask
+    expr.law_profile_source = IR_HYPER_LAW_PROFILE_SOURCE_FALLBACK
+    expr.law_profile_fingerprint = sed_fingerprint
+    expr.knowledge_wrapped = true
+    ep.hyper_exprs[0] = expr
+    ep.hyper_expr_count = 1
+    let encoded = serialize_ir_epistemic_section([0; 131072], 0, ep)
+    let decoded = deserialize_ir_epistemic_section(encoded.0, 0)
+    let roundtrip = decoded.0.hyper_exprs[0]
+
+    if ctx.algebra_kind != 3 { return false }
+    if ctx.reassoc_strategy != 2 { return false }
+    if ctx.cd_bits != 3 { return false }
+    if ctx.forbidden_law_mask != oct_mask { return false }
+    if fallback_ctx.reassoc_strategy != 1 { return false }
+    if fallback_ctx.cd_bits != 4 { return false }
+    if fallback_ctx.forbidden_law_mask != sed_mask { return false }
+    if oct_fingerprint == sed_fingerprint { return false }
+    if !ir_forbidden_law_mask_has(sed_mask, IR_HYPER_FORBID_GENERIC_DISTRIBUTE_FACTOR) { return false }
+    if !ir_forbidden_law_mask_has(sed_mask, IR_HYPER_FORBID_CANCEL_NONZERO_SEDENION_FACTORS) { return false }
+    if !ir_forbidden_law_mask_has(sed_mask, IR_HYPER_FORBID_LIFT_OCTONION_NORM_TO_SEDENION) { return false }
+    if decoded.0.hyper_expr_count != 1 { return false }
+    if roundtrip.span_start != 11 { return false }
+    if roundtrip.span_end != 29 { return false }
+    if roundtrip.algebra_tag != 4 { return false }
+    if roundtrip.op_kind != 1 { return false }
+    if roundtrip.reassoc_strategy != 1 { return false }
+    if roundtrip.forbidden_law_mask != sed_mask { return false }
+    if roundtrip.law_profile_source != IR_HYPER_LAW_PROFILE_SOURCE_FALLBACK { return false }
+    if roundtrip.law_profile_fingerprint != sed_fingerprint { return false }
+    if ir_hyper_law_profile_fingerprint(
+        roundtrip.algebra_tag,
+        roundtrip.op_kind,
+        roundtrip.reassoc_strategy,
+        roundtrip.forbidden_law_mask,
+        roundtrip.law_profile_source,
+    ) != roundtrip.law_profile_fingerprint { return false }
+    if roundtrip.knowledge_wrapped != true { return false }
+    true
 }
 
 // T161: Both-constant OpLe: 3 <= 3 → IrLoadImm(dst, 1).
@@ -20234,10 +20296,10 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     }
 
     if compiler_main_test_ocp_context_uses_algebra_registry() {
-        println("  T1000 OK: mini e-graph context loads reassociation strategy from algebra registry")
+        println("  T1000 OK: context metadata and hyper-expression law profiles roundtrip")
         passed = passed + 1
     } else {
-        println("  FAIL: T1000 algebra-registry mini e-graph bridge")
+        println("  FAIL: T1000 algebra-registry metadata bridge")
     }
 
     if compiler_main_test_cmp_le_const_true() {
