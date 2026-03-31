@@ -92,6 +92,11 @@ source surface. Internal lowering modules may model axis-sensitive builtin
 semantics for future work, but that is not a public or default-selfhost support
 claim today.
 
+Wave 7 tightens the source-tree launch descriptor contract further: explicit
+grid/block descriptors now fail closed when `block_dim_x * block_dim_y *
+block_dim_z` exceeds the repo-local `1024` threads-per-block ceiling, and that
+constraint is mirrored in the deterministic sim/reference lane.
+
 Those surfaces still matter for implementation work, but they should not be
 presented as the default public happy path until the checked artifact accepts
 them.
