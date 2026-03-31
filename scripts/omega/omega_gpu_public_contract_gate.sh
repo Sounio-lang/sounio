@@ -308,6 +308,7 @@ not_public_surfaces=(
   "surface:gpu.thread_id|tests/gpu/fixtures/gpu_public_thread_id_not_yet_supported.sio|Thread-id intrinsics are not yet part of the checked public surface"
   "surface:gpu.block_id|tests/gpu/fixtures/gpu_public_block_id_not_yet_supported.sio|Block-id intrinsics are not yet part of the checked public surface"
   "surface:gpu.block_dim|tests/gpu/fixtures/gpu_public_block_dim_not_yet_supported.sio|Block-dimension intrinsics are not yet part of the checked public surface"
+  "surface:gpu.axis_family|tests/gpu/fixtures/gpu_public_axis_family_not_yet_supported.sio|Non-x axis spellings of GPU builtin intrinsics are not yet part of the checked public surface"
   "surface:gpu.alloc|tests/gpu/fixtures/gpu_public_alloc_not_yet_supported.sio|Allocation intrinsics are not yet part of the checked public surface"
   "surface:gpu.alloc.turbofish|tests/gpu/fixtures/gpu_public_alloc_turbofish_not_yet_supported.sio|Allocation intrinsics with turbofish syntax are not yet part of the checked public surface"
 )
