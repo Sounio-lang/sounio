@@ -4,8 +4,9 @@ This directory contains the Wave 1 baseline plus the Wave 2 semantic-contract
 package, the Wave 3 prototype-safe scaffolding, the Wave 4 compile-proof
 prototype harnesses, the Wave 5 reassociation metadata scaffolding, and the
 Wave 6 forbidden-law metadata scaffolding, and the Wave 7 hyper-expression law
-profile scaffolding, and the Wave 8 law-profile observability scaffolding for
-hypercomplex algebra in the compiler.
+profile scaffolding, and the Wave 8 law-profile observability scaffolding, and
+the Wave 9 law-profile fingerprint observability scaffolding for hypercomplex
+algebra in the compiler.
 
 Wave 1 baseline:
 
@@ -47,6 +48,11 @@ Wave 8 baseline:
 - builds on `hypercomplex-algebra-wave7-codex`
 - baseline commit `c2ef74888c3d3629683d1dffa58a368d59d60dad`
 
+Wave 9 baseline:
+
+- builds on `hypercomplex-algebra-wave8-codex`
+- baseline commit `94c3f76188042c36f10f3fdcb73fe0b14f3e1b9d`
+
 Scope:
 
 - inventory the hypercomplex surface already present in the accepted baseline
@@ -72,7 +78,7 @@ Files:
 - `expected_fail.v1.json`: Wave 3 forbidden-rewrite coverage, mixing executable counterexamples with explicit validation-only gaps
 - `compiler_audit.v1.json`: bounded internal audit seams for type, IR, and lowering touchpoints
 - `prototype_scaffolding.v1.json`: Wave 4 compile-proof and harness matrix for non-public compiler-facing scaffolding
-- `prototype_scaffolding.v1.json`: Wave 5 through Wave 8 metadata and differential-selftest harnesses for non-public compiler-facing scaffolding
+- `prototype_scaffolding.v1.json`: Wave 5 through Wave 9 metadata and differential-selftest harnesses for non-public compiler-facing scaffolding
 
 Validation:
 
@@ -86,6 +92,8 @@ bash scripts/research/hypercomplex_wave6_gate.sh
 bash scripts/research/hypercomplex_wave7_gate.sh
 bash scripts/research/hypercomplex_wave8_diff_selftest.sh
 bash scripts/research/hypercomplex_wave8_gate.sh
+bash scripts/research/hypercomplex_wave9_diff_selftest.sh
+bash scripts/research/hypercomplex_wave9_gate.sh
 ```
 
 What the baseline already contains:
@@ -182,6 +190,19 @@ What Wave 8 adds without changing support claims:
   prototype work cannot silently drift from advisory metadata into semantic
   claims
 
+What Wave 9 adds without changing support claims:
+
+- a stronger compile-backed baseline-comparison path that pins exact
+  registry-vs-fallback law-profile fingerprints so observability drift is
+  easier to detect even when the runnable lane remains non-blocking
+- a small observability seam where expression-level hyper metadata carries a
+  derived law-profile fingerprint through checker bookkeeping, epistemic IR, and
+  serialization without changing supported behavior
+- a stricter Wave 9 validator that requires Wave 8 to stay green, runs the new
+  differential self-test, and symbol-checks the fingerprint references so
+  future prototype work cannot silently drift advisory metadata into semantic
+  authority
+
 Current inventory summary:
 
 - active entries: 9
@@ -220,3 +241,6 @@ Wave 2 operating rule:
 - Wave 8 law-profile source tags and registry-vs-fallback baseline comparisons
   are still internal observability only; they do not authorize
   broader rewrites, runtime claims, or public support
+- Wave 9 law-profile fingerprints and fingerprint-based baseline comparisons are
+  still internal observability only; they do not authorize broader rewrites,
+  runtime claims, or public support
