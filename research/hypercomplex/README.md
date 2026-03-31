@@ -3,8 +3,8 @@
 This directory contains the Wave 1 baseline plus the Wave 2 semantic-contract
 package, the Wave 3 prototype-safe scaffolding, the Wave 4 compile-proof
 prototype harnesses, the Wave 5 reassociation metadata scaffolding, and the
-Wave 6 forbidden-law metadata scaffolding for hypercomplex algebra in the
-compiler.
+Wave 6 forbidden-law metadata scaffolding, and the Wave 7 hyper-expression law
+profile scaffolding for hypercomplex algebra in the compiler.
 
 Wave 1 baseline:
 
@@ -36,6 +36,11 @@ Wave 6 baseline:
 - builds on `hypercomplex-algebra-wave5-codex`
 - baseline commit `d7f14f150358e3afdad9e6350175d45b5e844775`
 
+Wave 7 baseline:
+
+- builds on `hypercomplex-algebra-wave6-codex`
+- baseline commit `27283e9f04a5c4f68d6abe0a7fd9850289ee4b6c`
+
 Scope:
 
 - inventory the hypercomplex surface already present in the accepted baseline
@@ -61,7 +66,7 @@ Files:
 - `expected_fail.v1.json`: Wave 3 forbidden-rewrite coverage, mixing executable counterexamples with explicit validation-only gaps
 - `compiler_audit.v1.json`: bounded internal audit seams for type, IR, and lowering touchpoints
 - `prototype_scaffolding.v1.json`: Wave 4 compile-proof and harness matrix for non-public compiler-facing scaffolding
-- `prototype_scaffolding.v1.json`: Wave 5 and Wave 6 metadata-carriage harnesses and validation rules for non-public compiler-facing scaffolding
+- `prototype_scaffolding.v1.json`: Wave 5, Wave 6, and Wave 7 metadata-carriage harnesses and validation rules for non-public compiler-facing scaffolding
 
 Validation:
 
@@ -72,6 +77,7 @@ bash scripts/research/hypercomplex_wave3_gate.sh
 bash scripts/research/hypercomplex_wave4_gate.sh
 bash scripts/research/hypercomplex_wave5_gate.sh
 bash scripts/research/hypercomplex_wave6_gate.sh
+bash scripts/research/hypercomplex_wave7_gate.sh
 ```
 
 What the baseline already contains:
@@ -143,6 +149,18 @@ What Wave 6 adds without changing support claims:
   new fixture, and symbol-checks the required reassociation and forbidden-law
   metadata references instead of trusting path existence alone
 
+What Wave 7 adds without changing support claims:
+
+- a bounded expression-level seam where each recorded hyper multiply site carries
+  its own reassociation strategy and forbidden-law profile through the checker
+  and serialized epistemic IR
+- a compile-proof fixture that exercises actual hyper multiplication expressions,
+  not just declarations and signatures, so the law profile seam reaches
+  expression recording
+- a stricter Wave 7 validator that requires Wave 6 to stay green, compiles the
+  new expression fixture, and symbol-checks the expression-level law-profile
+  references so future prototype work cannot drift semantically
+
 Current inventory summary:
 
 - active entries: 9
@@ -176,3 +194,5 @@ Wave 2 operating rule:
   upgrade rewrite-engine, optimizer, runtime, or public maturity claims
 - Wave 6 forbidden-law metadata masks are still internal compiler annotations;
   they do not authorize broader rewrites, runtime claims, or public support
+- Wave 7 hyper-expression law profiles are still internal compiler bookkeeping;
+  they do not create a public semantic contract or authorize new rewrites
