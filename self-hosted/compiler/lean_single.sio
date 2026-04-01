@@ -228,6 +228,8 @@ var FN_EFF_CONF:  [i64; 8192] = [0; 8192]
 var EPIST_TOTAL_EXPR: i64 = 0
 var EPIST_HIGH_CONF:  i64 = 0
 var EPIST_LOW_CONF:   i64 = 0
+var EPIST_GATES_DIRECT: i64 = 0
+var EPIST_GATES_GUARDED: i64 = 0
 
 fn en_find(hash: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
@@ -6973,6 +6975,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if FN_IS_KERNEL[fi as usize] != 0 {
                     emit_kernel_dispatch_x86(fi, abi_argc)
                 } else {
+                    // Epistemic gate: emit marker for uncertain calls
+                    if EXPR_GATE[call_tok as usize] == 1 {
+                        // Guarded call — emit 2-byte NOP (66 90) as epistemic marker
+                        em(0x66); em(0x90)
+                        EPIST_GATES_GUARDED = EPIST_GATES_GUARDED + 1
+                    } else {
+                        EPIST_GATES_DIRECT = EPIST_GATES_DIRECT + 1
+                    }
                     emit_direct_fn_call_x86(fi, abi_argc)
                 }
                 EXPR_TY = FN_RET_TY[fi as usize]
@@ -9820,6 +9830,38 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
             continue
         }
 
+        // Keywords that are structural (not expressions): mark confident
+        // return, continue, break, while, if, else, for, match, pub, linear
+        if tk == 2 || tk == 33 || tk == 34 || tk == 15 || tk == 13 || tk == 14 || tk == 54 || tk == 48 || tk == 49 || tk == 62 || tk == 46 || tk == 47 || tk == 38 || tk == 70 || tk == 71 || tk == 72 || tk == 61 {
+            EXPR_ETY[p as usize] = ty_void
+            EXPR_CONF[p as usize] = 1000
+            EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+            EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+            p = p + 1
+            continue
+        }
+
+        // Delimiters and punctuation: confident (structural, not epistemic)
+        // ( ) , ; . :: => ..  ..=  ~
+        if tk == 6 || tk == 7 || tk == 28 || tk == 27 || tk == 50 || tk == 51 || tk == 52 || tk == 63 || tk == 64 || tk == 55 || tk == 16 {
+            EXPR_ETY[p as usize] = ty_void
+            EXPR_CONF[p as usize] = 1000
+            EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+            EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+            p = p + 1
+            continue
+        }
+
+        // Some/None/Ok/Err — enum constructors, always confident
+        if tk == 57 || tk == 58 || tk == 59 || tk == 60 {
+            EXPR_ETY[p as usize] = ty_i64
+            EXPR_CONF[p as usize] = 1000
+            EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+            EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+            p = p + 1
+            continue
+        }
+
         // Integer literal → i64, confidence 1000
         if tk == 4 {
             EXPR_ETY[p as usize] = ty_i64
@@ -11357,7 +11399,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     }
 
     print("compile: fns="); print_int(FN_COUNT); print(" code="); print_int(CL)
-    print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT); print("\n")
+    print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT)
+    print(" gates[direct="); print_int(EPIST_GATES_DIRECT)
+    print(" guarded="); print_int(EPIST_GATES_GUARDED); print("]\n")
     0
 }
 
