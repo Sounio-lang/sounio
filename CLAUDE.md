@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-**START HERE**: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md) | **Syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md)
+**START HERE**: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md) | **Syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md) | **LLM guide**: [docs/llm-guide/](docs/llm-guide/)
 
 ## Project Identity
 
