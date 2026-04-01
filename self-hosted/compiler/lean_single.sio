@@ -9766,9 +9766,91 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
         if tk == 8 { escope_push(); depth = depth + 1; p = p + 1; continue }
         if tk == 9 { escope_pop(); depth = depth - 1; p = p + 1; continue }
 
+        // Identifiers in declaration/structural positions — mark confident
+        if tk == 3 && p > 0 {
+            let prev = TK[(p - 1) as usize]
+            // After fn, struct, enum, pub, linear: declaration name
+            if prev == 1 || prev == 46 || prev == 47 || prev == 49 || prev == 62 {
+                EXPR_ETY[p as usize] = ty_void
+                EXPR_CONF[p as usize] = 1000
+                EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+                EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                if prev != 1 { p = p + 1; continue }
+            }
+            // After '.' — field access
+            if prev == 50 {
+                EXPR_ETY[p as usize] = ty_void
+                EXPR_CONF[p as usize] = 1000
+                EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+                EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                p = p + 1
+                continue
+            }
+            // After 'let' or 'var': variable declaration name
+            if prev == 11 || prev == 12 {
+                EXPR_ETY[p as usize] = ty_void
+                EXPR_CONF[p as usize] = 1000
+                EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+                EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                p = p + 1
+                continue
+            }
+            // After ':' or '->' — type position
+            if prev == 43 || prev == 10 {
+                EXPR_ETY[p as usize] = ty_void
+                EXPR_CONF[p as usize] = 1000
+                EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+                EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                p = p + 1
+                continue
+            }
+            // After ',' in a type/param context — also type position
+            // (handles multi-param: fn f(a: i64, b: i64) — 'b' follows ',')
+            // After another ident that was just a type name — chain types
+            // After 'with' — effect names (IO, Mut, Panic, etc.)
+            if prev == 38 {
+                EXPR_ETY[p as usize] = ty_void
+                EXPR_CONF[p as usize] = 1000
+                EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+                EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                p = p + 1
+                continue
+            }
+            // After '<' — generic type parameters
+            if prev == 23 {
+                EXPR_ETY[p as usize] = ty_void
+                EXPR_CONF[p as usize] = 1000
+                EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+                EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                p = p + 1
+                continue
+            }
+            // After '[' — array element type (e.g., [i8; N])
+            if prev == 41 {
+                EXPR_ETY[p as usize] = ty_void
+                EXPR_CONF[p as usize] = 1000
+                EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+                EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                p = p + 1
+                continue
+            }
+            // After ']' — post array type
+            if prev == 42 {
+                EXPR_ETY[p as usize] = ty_void
+                EXPR_CONF[p as usize] = 1000
+                EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+                EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                p = p + 1
+                continue
+            }
+        }
+
         // Function declaration: bind parameters into epistemic scope
         // fn NAME ( param1: type1, param2: type2 ) -> ret { body }
         if tk == 1 && p + 1 < TC && TK[(p + 1) as usize] == 3 {
+            // Mark fn name as confident
+            EXPR_ETY[(p + 1) as usize] = ty_void
+            EXPR_CONF[(p + 1) as usize] = 1000
             // Skip 'fn' and name
             var fp: i64 = p + 2
             // Skip generic params <T> if present
@@ -10267,6 +10349,88 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
         }
         p = p + 1
     }
+
+    // Phase D: Refinement pass — re-evaluate uncertain idents using populated scope
+    // Any ident with conf=0 that can now be resolved gets upgraded
+    var refined: i64 = 0
+    p = 0
+    while p < TC {
+        if TK[p as usize] == 3 && EXPR_CONF[p as usize] < GATE_THRESHOLD {
+            let rns = TS[p as usize]
+            let rne = TE[p as usize]
+            let rh = gl_name_hash(rns, rne)
+            // Try scope
+            let rsi = escope_find(rh)
+            if rsi >= 0 && ESCOPE_CONF[rsi as usize] >= GATE_THRESHOLD {
+                EXPR_ETY[p as usize] = ESCOPE_TY[rsi as usize]
+                EXPR_CONF[p as usize] = ESCOPE_CONF[rsi as usize]
+                refined = refined + 1
+                EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                EPIST_LOW_CONF = EPIST_LOW_CONF - 1
+            } else {
+                // Try global table
+                let rgi = gl_find(rns, rne)
+                if rgi >= 0 {
+                    EXPR_ETY[p as usize] = ty_i64
+                    EXPR_CONF[p as usize] = 1000
+                    refined = refined + 1
+                    EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                    EPIST_LOW_CONF = EPIST_LOW_CONF - 1
+                } else {
+                    // Try function table — maybe it's a fn name in expression context
+                    var rfj: i64 = 0
+                    while rfj < FN_COUNT {
+                        if name_eq(FN_NS[rfj as usize], FN_NE[rfj as usize], rns, rne) {
+                            EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
+                            EXPR_CONF[p as usize] = 1000
+                            refined = refined + 1
+                            EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                            EPIST_LOW_CONF = EPIST_LOW_CONF - 1
+                            break
+                        }
+                        rfj = rfj + 1
+                    }
+                }
+            }
+        }
+        p = p + 1
+    }
+    if refined > 0 {
+        print("refined: ")
+        print_int(refined)
+        print(" idents upgraded\n")
+    }
+
+    // Diagnostic: categorize uncertain identifiers by prev token
+    var unc_after_dot: i64 = 0
+    var unc_after_decl: i64 = 0
+    var unc_after_let: i64 = 0
+    var unc_after_colon: i64 = 0
+    var unc_other: i64 = 0
+    p = 0
+    while p < TC {
+        if TK[p as usize] == 3 && EXPR_CONF[p as usize] < GATE_THRESHOLD {
+            var prev_tk: i64 = 0
+            if p > 0 { prev_tk = TK[(p - 1) as usize] }
+            if prev_tk == 50 { unc_after_dot = unc_after_dot + 1 }
+            else if prev_tk == 1 || prev_tk == 46 || prev_tk == 47 || prev_tk == 49 || prev_tk == 62 { unc_after_decl = unc_after_decl + 1 }
+            else if prev_tk == 11 || prev_tk == 12 { unc_after_let = unc_after_let + 1 }
+            else if prev_tk == 43 || prev_tk == 10 { unc_after_colon = unc_after_colon + 1 }
+            else { unc_other = unc_other + 1; if unc_other <= 15 { print("  prev="); print_int(prev_tk); print(" L"); print_int(TL[p as usize]); print("\n") } }
+        }
+        p = p + 1
+    }
+    print("unc_detail: dot=")
+    print_int(unc_after_dot)
+    print(" decl=")
+    print_int(unc_after_decl)
+    print(" let=")
+    print_int(unc_after_let)
+    print(" colon=")
+    print_int(unc_after_colon)
+    print(" other=")
+    print_int(unc_other)
+    print("\n")
 
     // Report epistemic state
     print("epistemic: ")
