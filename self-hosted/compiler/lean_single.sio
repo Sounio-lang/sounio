@@ -6,7 +6,7 @@
 //        /tmp/mini_native.elf input.sio output.elf
 
 // ─── Global buffers ───
-var SRC: [i8; 4194304] = [0; 4194304]
+var SRC: [i8; 8388608] = [0; 8388608]
 var SRC_LEN: i64 = 0
 // Import resolution
 var IMP_PATH: [i8; 4096] = [0; 4096]
@@ -117,10 +117,10 @@ var ST_FHASH: [i64; 25600] = [0; 25600]
 var ST_COUNT: i64 = 0
 
 // Enum registry: flat array, up to 64 enums
-// EN[i*34+0] = name hash
-// EN[i*34+1] = variant count
-// EN[i*34+2..33] = variant name hashes (up to 32 variants)
-var EN: [i64; 2176] = [0; 2176]
+// EN[i*256+0] = name hash
+// EN[i*256+1] = variant count
+// EN[i*256+2..255] = variant name hashes (up to 254 variants)
+var EN: [i64; 16384] = [0; 16384]
 var EN_COUNT: i64 = 0
 var MATCH_ENDS: [i64; 32] = [0; 32]
 
@@ -198,7 +198,7 @@ var REF_TYPE_COUNT: i64 = 0
 fn en_find(hash: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
     while i < EN_COUNT {
-        if EN[(i * 34) as usize] == hash { return i }
+        if EN[(i * 256) as usize] == hash { return i }
         i = i + 1
     }
     return -1
@@ -208,7 +208,7 @@ fn en_find(hash: i64) -> i64 with Panic, Mut {
 fn en_variant_value(enum_hash: i64, variant_hash: i64) -> i64 with Panic, Mut {
     let ei = en_find(enum_hash)
     if ei < 0 { return -1 }
-    let base = ei * 34
+    let base = ei * 256
     let vc = EN[(base + 1) as usize]
     var vi: i64 = 0
     while vi < vc {
@@ -221,7 +221,7 @@ fn en_variant_value(enum_hash: i64, variant_hash: i64) -> i64 with Panic, Mut {
 fn en_variant_count(enum_hash: i64) -> i64 with Panic, Mut {
     let ei = en_find(enum_hash)
     if ei < 0 { return 0 }
-    return EN[(ei * 34 + 1) as usize]
+    return EN[(ei * 256 + 1) as usize]
 }
 
 fn st_find(hash: i64) -> i64 with Panic, Mut {
@@ -9836,9 +9836,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // Pass 0a: register structs, constants, and skip algebra/study declarations
     ST_COUNT = 0
     scan_all_consts()
+    var pass0a_depth: i64 = 0
     while p < TC {
-        // Skip algebra declarations: algebra Name over Type { ... }
-        if TK[p as usize] == 70 {
+        // Track brace depth to only process top-level declarations
+        if TK[p as usize] == 8 { pass0a_depth = pass0a_depth + 1; p = p + 1; continue }
+        if TK[p as usize] == 9 {
+            if pass0a_depth > 0 { pass0a_depth = pass0a_depth - 1 }
+            p = p + 1
+            continue
+        }
+        // Skip algebra declarations: algebra Name over Type { ... } — top-level only
+        if pass0a_depth == 0 && TK[p as usize] == 70 {
             p = p + 1  // skip 'algebra'
             while p < TC && TK[p as usize] != 8 && TK[p as usize] != 0 { p = p + 1 }  // skip to {
             if TK[p as usize] == 8 { p = p + 1 }  // skip {
@@ -9846,16 +9854,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if TK[p as usize] == 9 { p = p + 1 }  // skip }
             continue
         }
-        if TK[p as usize] == 71 || (TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "study")) {
+        // Study keyword scanner — top-level only
+        if pass0a_depth == 0 && (TK[p as usize] == 71 || (TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "study"))) {
             p = skip_study_decl(p)
             continue
         }
-        // Skip + validate ontology declarations
-        if TK[p as usize] == 72 {
+        // Skip + validate ontology declarations — top-level only
+        if pass0a_depth == 0 && TK[p as usize] == 72 {
             p = skip_ontology_decl(p)
             continue
         }
-        if TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 {
+        if pass0a_depth == 0 && (TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62) {
             // struct or pub/linear keyword — skip pub/linear prefix, track linear
             var is_linear_decl: i64 = 0
             if TK[p as usize] == 62 { is_linear_decl = 1 }
@@ -9920,7 +9929,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             let en_ne = TE[p as usize]
             let eh = gl_name_hash(en_ns, en_ne)
             let ei = EN_COUNT
-            let base = ei * 34
+            let base = ei * 256
             EN[base as usize] = eh
             p = p + 1  // skip name
             if TK[p as usize] == 8 { p = p + 1 }  // skip {
