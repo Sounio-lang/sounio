@@ -1,0 +1,161 @@
+//@ run-pass
+// tests/stdlib/snn/test_g2_landscape_stress.sio
+//
+// Stress test: push the G₂ landscape explorer with 50 random inits.
+// Reports full coverage statistics: classes found, fiber distribution,
+// convergence rate. This is the extended version of TC10.
+//
+// Expected runtime: ~2-5 minutes depending on hardware.
+
+use math::sedenion64::*
+use math::g2_variety::*
+use snn::g2_grad::*
+use snn::g2_optimizer::*
+use snn::zd_classifier::*
+use snn::g2_landscape::*
+
+// ============================================================================
+// DETAILED LANDSCAPE RUN WITH REPORTING
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    print("=== G2 Landscape Stress Test ===\n\n")
+
+    let config = G2TrainConfig {
+        lr: 0.01,
+        max_epochs: 3000,
+        tol: 1e-8,
+        normalize_every: 5,
+        optimize_both: true,
+    }
+
+    let n_inits: i64 = 50
+
+    print("Running ")
+    print_int(n_inits)
+    print(" random initializations...\n\n")
+
+    // Run individual inits and report each
+    var n_converged: i64 = 0
+    var n_classes_found: i64 = 0
+    var class_seen = [0; 168]
+    var fiber_seen = [0; 8]
+    var i: i64 = 0
+
+    while i < n_inits {
+        let seed = 42 + i * 7919
+        let result = g2_train_from_seed(seed, config)
+
+        if result.converged {
+            n_converged = n_converged + 1
+            let cl = zd_classify(result.pair)
+
+            print("  init ")
+            print_int(i)
+            print(": converged in ")
+            print_int(result.epochs)
+            print(" epochs, class=")
+            print_int(cl.class_id as i64)
+            print(" fiber=")
+            print_int(cl.fiber as i64)
+            print(" support_a=(")
+            print_int(cl.support_a.idx_lower as i64)
+            print(",")
+            print_int(cl.support_a.idx_upper as i64)
+            print(") support_b=(")
+            print_int(cl.support_b.idx_lower as i64)
+            print(",")
+            print_int(cl.support_b.idx_upper as i64)
+            print(")\n")
+
+            let cid = cl.class_id
+            if cid >= 0 {
+                if cid < 168 {
+                    if class_seen[cid] == 0 {
+                        n_classes_found = n_classes_found + 1
+                    }
+                    class_seen[cid] = class_seen[cid] + 1
+                }
+            }
+
+            let fiber = cl.fiber
+            if fiber >= 1 {
+                if fiber <= 7 {
+                    fiber_seen[fiber] = fiber_seen[fiber] + 1
+                }
+            }
+        } else {
+            print("  init ")
+            print_int(i)
+            print(": DID NOT CONVERGE (score=")
+            // Can't easily print f64, just report failure
+            print("...)\n")
+        }
+
+        i = i + 1
+    }
+
+    // Summary
+    print("\n=== SUMMARY ===\n")
+    print("Attempted: ")
+    print_int(n_inits)
+    print("\nConverged: ")
+    print_int(n_converged)
+    print("\nDistinct classes found: ")
+    print_int(n_classes_found)
+    print(" / 168\n")
+
+    // Fiber coverage
+    var fibers_hit: i64 = 0
+    print("Fiber coverage:\n")
+    var f: i64 = 1
+    while f <= 7 {
+        print("  fiber ")
+        print_int(f)
+        print(": ")
+        print_int(fiber_seen[f] as i64)
+        print(" hits\n")
+        if fiber_seen[f] > 0 {
+            fibers_hit = fibers_hit + 1
+        }
+        f = f + 1
+    }
+    print("Fibers hit: ")
+    print_int(fibers_hit)
+    print(" / 7\n")
+
+    // Pass criteria: converge rate > 50%, at least 3 fibers, at least 5 classes
+    var fail = 0
+
+    if n_converged * 2 < n_inits {
+        print("\nFAIL: convergence rate < 50%\n")
+        fail = fail + 1
+    } else {
+        print("\nOK: convergence rate >= 50%\n")
+    }
+
+    if fibers_hit < 3 {
+        print("FAIL: fewer than 3 fibers hit\n")
+        fail = fail + 1
+    } else {
+        print("OK: ")
+        print_int(fibers_hit)
+        print(" fibers hit\n")
+    }
+
+    if n_classes_found < 5 {
+        print("FAIL: fewer than 5 distinct classes\n")
+        fail = fail + 1
+    } else {
+        print("OK: ")
+        print_int(n_classes_found)
+        print(" distinct classes found\n")
+    }
+
+    if fail == 0 {
+        print("\n=== ALL CHECKS PASSED ===\n")
+        return 0
+    }
+    print("\n=== SOME CHECKS FAILED ===\n")
+    return 1
+}
