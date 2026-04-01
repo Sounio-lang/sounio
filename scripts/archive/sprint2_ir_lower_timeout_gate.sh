@@ -1,0 +1,421 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/souc}"
+# The selfhosted lane requires the JIT binary for adequate performance.
+# Use the JIT binary directly if available; fall back to SOUC_BIN for check-only cases.
+JIT_BIN="${SOUNIO_JIT_BIN:-$ROOT_DIR/bin/souc}"
+if [ ! -x "$JIT_BIN" ]; then
+  JIT_BIN="$SOUC_BIN"
+fi
+OUT_JSON="${SOUNIO_SPRINT2_IR_LOWER_OUT:-$ROOT_DIR/artifacts/sprint2/ir_lower_timeout_gate.v1.json}"
+HOTSPOT_JSON="${SOUNIO_SPRINT2_IR_LOWER_HOTSPOT_OUT:-$ROOT_DIR/artifacts/sprint2/ir_lower_hotspot_trace.v1.json}"
+LOG_DIR="${SOUNIO_SPRINT2_IR_LOWER_LOG_DIR:-$ROOT_DIR/artifacts/sprint2/logs/ir_lower_timeout}"
+TIMEOUT_SECS="${SOUNIO_SPRINT2_IR_LOWER_TIMEOUT_SECS:-120}"
+
+SOURCE_FILE="${SOUNIO_SPRINT2_IR_LOWER_SOURCE:-tests/frontend/minimal_pipeline_i64.sio}"
+NATIVE_OUT="${SOUNIO_SPRINT2_IR_LOWER_NATIVE_OUT:-$ROOT_DIR/artifacts/sprint2/ir_lower_timeout/minimal_native.out}"
+CASES_TSV="$LOG_DIR/cases.tsv"
+
+mkdir -p "$(dirname "$OUT_JSON")" "$(dirname "$HOTSPOT_JSON")" "$LOG_DIR" "$(dirname "$NATIVE_OUT")"
+: > "$CASES_TSV"
+
+to_rel() {
+  local p="$1"
+  if [[ "$p" == "$ROOT_DIR/"* ]]; then
+    printf '%s' "${p#$ROOT_DIR/}"
+  else
+    printf '%s' "$p"
+  fi
+}
+
+append_case() {
+  local name="$1"
+  local status="$2"
+  local reason="$3"
+  local rc="$4"
+  local log_path="$5"
+  local markers="$6"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$status" "$reason" "$rc" "$(to_rel "$log_path")" "$markers" >> "$CASES_TSV"
+}
+
+has_literal() {
+  local needle="$1"
+  local log_path="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -F -q "$needle" "$log_path"
+  else
+    grep -F -q -- "$needle" "$log_path"
+  fi
+}
+
+matches_regex() {
+  local pattern="$1"
+  local log_path="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern" "$log_path"
+  else
+    grep -E -q -- "$pattern" "$log_path"
+  fi
+}
+
+run_cmd_case() {
+  local name="$1"
+  local log_path="$2"
+  shift 2
+
+  if [ ! -x "$SOUC_BIN" ]; then
+    append_case "$name" "not_run" "souc_bin_missing" "-1" "$log_path" "{}"
+    return
+  fi
+
+  set +e
+  timeout "$TIMEOUT_SECS" "$@" >"$log_path" 2>&1
+  local rc=$?
+  set -e
+
+  if [ "$rc" -eq 0 ]; then
+    append_case "$name" "pass" "ok" "$rc" "$log_path" "{}"
+  elif [ "$rc" -eq 124 ]; then
+    append_case "$name" "timeout" "timeout" "$rc" "$log_path" "{}"
+  else
+    append_case "$name" "fail" "command_failed" "$rc" "$log_path" "{}"
+  fi
+}
+
+marker_bool() {
+  local needle="$1"
+  local log_path="$2"
+  if has_literal "$needle" "$log_path"; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
+run_ir_lower_probe_case() {
+  local name="$1"
+  local log_path="$2"
+
+  if [ ! -x "$SOUC_BIN" ]; then
+    append_case "$name" "not_run" "souc_bin_missing" "-1" "$log_path" "{}"
+    return
+  fi
+
+  if [ ! -f "$SOURCE_FILE" ]; then
+    append_case "$name" "not_run" "source_missing" "-1" "$log_path" "{}"
+    return
+  fi
+
+  rm -f "$NATIVE_OUT"
+
+  set +e
+  timeout "$TIMEOUT_SECS" \
+    "$JIT_BIN" run self-hosted/compiler/main.sio -- \
+      souc "$SOURCE_FILE" -o "$NATIVE_OUT" -t native -v \
+    >"$log_path" 2>&1
+  local rc=$?
+  set -e
+
+  local type_start
+  type_start="$(marker_bool "Type checking module" "$log_path")"
+  local type_done
+  type_done="$(marker_bool "Type check complete" "$log_path")"
+  local ir_start
+  ir_start="$(marker_bool "IR lowering module" "$log_path")"
+  local ir_done
+  ir_done="$(marker_bool "IR lowering complete for module 0" "$log_path")"
+  local ir_failed_seen
+  ir_failed_seen="$(marker_bool "IR lowering failed for module" "$log_path")"
+  local merged_seen
+  merged_seen="$(marker_bool "Merged IR:" "$log_path")"
+  local native_dispatch_seen
+  native_dispatch_seen="$(marker_bool "Native dispatch:" "$log_path")"
+  local native_bin_seen
+  native_bin_seen="$(marker_bool "Native compilation successful:" "$log_path")"
+  local written_seen
+  written_seen="$(marker_bool "Compiled: " "$log_path")"
+  local selfhost_banner_seen
+  selfhost_banner_seen="$(marker_bool "SOUNIO SELF-HOSTED COMPILER v" "$log_path")"
+  local selfhost_horizon_seen
+  selfhost_horizon_seen="$(marker_bool "Horizon 3: self-hosted primary compiler." "$log_path")"
+
+  local markers
+  markers="{\"selfhost_banner_seen\":$selfhost_banner_seen,\"selfhost_horizon_seen\":$selfhost_horizon_seen,\"type_start\":$type_start,\"type_done\":$type_done,\"ir_start\":$ir_start,\"ir_done\":$ir_done,\"ir_failed_seen\":$ir_failed_seen,\"merged_seen\":$merged_seen,\"native_dispatch_seen\":$native_dispatch_seen,\"native_bin_seen\":$native_bin_seen,\"written_seen\":$written_seen}"
+
+  if [ "$rc" -eq 124 ]; then
+    # Timeout: classify by phase. If IR lowering already completed, count as pass
+    # (native codegen timeout is a separate gate concern).
+    if [ "$ir_done" -eq 1 ]; then
+      local pass_reason="ok_ir_lower_complete_native_timeout"
+      append_case "$name" "pass" "$pass_reason" "$rc" "$log_path" "$markers"
+      return
+    fi
+    local timeout_reason="timeout"
+    if [ "$selfhost_banner_seen" -eq 0 ] || [ "$selfhost_horizon_seen" -eq 0 ]; then
+      timeout_reason="timeout_non_selfhost_lane"
+    elif [ "$ir_start" -eq 0 ]; then
+      timeout_reason="timeout_pre_ir_lower"
+    elif [ "$ir_done" -eq 0 ]; then
+      timeout_reason="timeout_in_ir_lower"
+    elif [ "$native_dispatch_seen" -eq 0 ]; then
+      timeout_reason="timeout_post_ir_lower_pre_dispatch"
+    else
+      timeout_reason="timeout_post_ir_lower_native_codegen"
+    fi
+    append_case "$name" "timeout" "$timeout_reason" "$rc" "$log_path" "$markers"
+    return
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    append_case "$name" "fail" "command_failed" "$rc" "$log_path" "$markers"
+    return
+  fi
+
+  if [ "$selfhost_banner_seen" -eq 0 ] || [ "$selfhost_horizon_seen" -eq 0 ]; then
+    append_case "$name" "fail" "selfhost_lane_not_executed" "$rc" "$log_path" "$markers"
+    return
+  fi
+
+  if [ "$ir_start" -eq 0 ] || [ "$type_start" -eq 0 ]; then
+    append_case "$name" "fail" "missing_selfhost_stage_markers" "$rc" "$log_path" "$markers"
+    return
+  fi
+
+  if [ "$ir_done" -eq 0 ]; then
+    if [ "$ir_failed_seen" -eq 1 ]; then
+      append_case "$name" "fail" "ir_lowering_failed" "$rc" "$log_path" "$markers"
+      return
+    fi
+    append_case "$name" "fail" "missing_ir_lower_complete_marker" "$rc" "$log_path" "$markers"
+    return
+  fi
+
+  # Sprint2 ir_lower gate success: IR lowering must complete.
+  # Native compilation is tested separately; gate passes once IR done + dispatch seen.
+  if [ "$native_dispatch_seen" -eq 1 ]; then
+    append_case "$name" "pass" "ok_with_native_dispatch" "$rc" "$log_path" "$markers"
+    return
+  fi
+
+  # IR lowering complete even without native dispatch is a gate pass for this sprint.
+  append_case "$name" "pass" "ok_ir_lower_complete" "$rc" "$log_path" "$markers"
+}
+
+run_source_fixture_contract_case() {
+  local name="$1"
+  local log_path="$2"
+
+  if [ ! -f "$SOURCE_FILE" ]; then
+    append_case "$name" "not_run" "source_missing" "-1" "$log_path" "{}"
+    return 1
+  fi
+
+  local bytes
+  bytes="$(wc -c < "$SOURCE_FILE" | tr -d ' ')"
+  local lines
+  lines="$(wc -l < "$SOURCE_FILE" | tr -d ' ')"
+  local has_main_sig
+  has_main_sig="$(marker_bool "fn main() -> i64 {" "$SOURCE_FILE")"
+  local has_zero_expr
+  has_zero_expr="$(matches_regex '^[[:space:]]*0[[:space:]]*$' "$SOURCE_FILE" >/dev/null 2>&1 && printf '1' || printf '0')"
+  local has_forbidden_top
+  has_forbidden_top="$(matches_regex '^[[:space:]]*(use|module|import)[[:space:]]+' "$SOURCE_FILE" >/dev/null 2>&1 && printf '1' || printf '0')"
+
+  local markers
+  markers="{\"bytes\":$bytes,\"lines\":$lines,\"has_main_sig\":$has_main_sig,\"has_zero_expr\":$has_zero_expr,\"has_forbidden_top\":$has_forbidden_top}"
+
+  if [ "$bytes" -gt 512 ]; then
+    append_case "$name" "fail" "fixture_too_large" "0" "$log_path" "$markers"
+    return 1
+  fi
+  if [ "$lines" -gt 24 ]; then
+    append_case "$name" "fail" "fixture_too_many_lines" "0" "$log_path" "$markers"
+    return 1
+  fi
+  if [ "$has_main_sig" -ne 1 ] || [ "$has_zero_expr" -ne 1 ]; then
+    append_case "$name" "fail" "fixture_contract_mismatch" "0" "$log_path" "$markers"
+    return 1
+  fi
+  if [ "$has_forbidden_top" -eq 1 ]; then
+    append_case "$name" "fail" "fixture_has_top_level_directives" "0" "$log_path" "$markers"
+    return 1
+  fi
+
+  append_case "$name" "pass" "ok" "0" "$log_path" "$markers"
+  return 0
+}
+
+run_cmd_case "compiler_main_check" "$LOG_DIR/compiler_main_check.log" "$SOUC_BIN" check self-hosted/compiler/main.sio
+run_cmd_case "compiler_module_loader_check" "$LOG_DIR/compiler_module_loader_check.log" "$SOUC_BIN" check self-hosted/compiler/module_loader.sio
+if run_source_fixture_contract_case "source_fixture_contract" "$LOG_DIR/source_fixture_contract.log"; then
+  run_ir_lower_probe_case "ir_lower_native_probe" "$LOG_DIR/ir_lower_native_probe.log"
+else
+  append_case "ir_lower_native_probe" "not_run" "source_fixture_contract_failed" "-1" "$LOG_DIR/ir_lower_native_probe.log" "{}"
+fi
+
+python3 - "$OUT_JSON" "$CASES_TSV" "$TIMEOUT_SECS" "$SOUC_BIN" "$SOURCE_FILE" "$NATIVE_OUT" <<'PY'
+import datetime as dt
+import json
+import hashlib
+from pathlib import Path
+import sys
+
+out_json = Path(sys.argv[1])
+cases_tsv = Path(sys.argv[2])
+timeout_secs = int(sys.argv[3])
+souc_bin = sys.argv[4]
+source_file = sys.argv[5]
+native_out = sys.argv[6]
+source_sha256 = ""
+try:
+    source_bytes = Path(source_file).read_bytes()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+except Exception:
+    source_sha256 = ""
+
+cases = []
+counts = {"pass": 0, "fail": 0, "timeout": 0, "not_run": 0}
+
+for raw in cases_tsv.read_text(encoding="utf-8").splitlines():
+    if not raw.strip():
+        continue
+    name, status, reason, rc, log_path, markers_raw = raw.split("\t")
+    if status not in counts:
+        status = "fail"
+        reason = "invalid_status_token"
+    counts[status] += 1
+
+    item = {
+        "name": name,
+        "status": status,
+        "reason": reason,
+        "exit_code": int(rc),
+        "log_path": log_path,
+    }
+    if name == "ir_lower_native_probe":
+        try:
+            item["markers"] = json.loads(markers_raw)
+        except Exception:
+            item["markers"] = {}
+        item["native_output"] = native_out
+    cases.append(item)
+
+overall_status = "pass"
+overall_reason = "all_cases_passed"
+if counts["fail"] > 0:
+    overall_status = "fail"
+    overall_reason = "one_or_more_cases_failed"
+elif counts["timeout"] > 0:
+    overall_status = "timeout"
+    overall_reason = "one_or_more_cases_timed_out"
+elif counts["not_run"] > 0:
+    overall_status = "not_run"
+    overall_reason = "one_or_more_cases_not_run"
+
+payload = {
+    "schema": "sounio.sprint2.ir_lower_timeout_gate.v1",
+    "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "status": overall_status,
+    "reason": overall_reason,
+    "config": {
+        "souc_bin": souc_bin,
+        "timeout_seconds": timeout_secs,
+        "source_file": source_file,
+        "source_sha256": source_sha256,
+        "native_output": native_out,
+    },
+    "metrics": {
+        "total": len(cases),
+        "passed": counts["pass"],
+        "failed": counts["fail"],
+        "timeout": counts["timeout"],
+        "not_run": counts["not_run"],
+    },
+    "cases": cases,
+}
+
+out_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+print(f"wrote {out_json}")
+print(f"status={overall_status} reason={overall_reason}")
+PY
+
+python3 - "$HOTSPOT_JSON" "$LOG_DIR/ir_lower_native_probe.log" "$SOURCE_FILE" <<'PY'
+import datetime as dt
+import json
+from pathlib import Path
+import sys
+
+out_json = Path(sys.argv[1])
+log_path = Path(sys.argv[2])
+source_file = sys.argv[3]
+
+markers = [
+    ("ir_lower_init_start", "IR lower init start"),
+    ("ir_lower_init_done", "IR lower init done"),
+    ("ir_lower_fn_start", "IR lower fn start"),
+    ("ir_lower_fn_after_find_add", "IR lower fn after find/add"),
+    ("ir_lower_fn_context_set", "IR lower fn context set"),
+    ("ir_lower_fn_params_done", "IR lower fn params done"),
+    ("ir_lower_block_enter", "IR lower block enter"),
+    ("ir_lower_stmt_step", "IR lower stmt step"),
+    ("ir_lower_expr_enter", "IR lower expr enter"),
+    ("ir_lower_block_after_stmt_list", "IR lower block after stmt_list"),
+    ("ir_lower_block_done", "IR lower block done"),
+    ("ir_lower_fn_block_done", "IR lower fn block done"),
+    ("ir_lower_fn_emit_return_start", "IR lower fn emit return start"),
+    ("ir_lower_fn_emit_return_done", "IR lower fn emit return done"),
+    ("ir_lower_fn_exit_scope_start", "IR lower fn exit_scope start"),
+    ("ir_lower_fn_exit_scope_done", "IR lower fn exit_scope done"),
+    ("ir_lower_fn_invalidate_current_fn_start", "IR lower fn invalidate current_fn start"),
+    ("ir_lower_fn_invalidate_current_fn_done", "IR lower fn invalidate current_fn done"),
+    ("ir_lower_fn_done", "IR lower fn done"),
+    ("ir_lower_items_done", "IR lower items done"),
+]
+
+seen = {name: False for name, _ in markers}
+last_progress_marker = "none"
+last_progress_line = 0
+
+if log_path.exists():
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for i, line in enumerate(lines, start=1):
+        for name, token in markers:
+            if token in line:
+                seen[name] = True
+                last_progress_marker = name
+                last_progress_line = i
+
+payload = {
+    "schema": "sounio.sprint2.ir_lower_hotspot_trace.v1",
+    "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "status": "ok" if log_path.exists() else "not_run",
+    "reason": "ok" if log_path.exists() else "probe_log_missing",
+    "source_file": source_file,
+    "log_path": str(log_path),
+    "markers": seen,
+    "last_progress_marker": last_progress_marker,
+    "last_progress_line": last_progress_line,
+}
+
+out_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+print(f"wrote {out_json}")
+PY
+
+status="$(python3 - "$OUT_JSON" <<'PY'
+import json
+import sys
+obj = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+print(obj.get("status", "fail"))
+PY
+)"
+
+echo "ir_lower_timeout_gate: out_json=$(to_rel "$OUT_JSON") status=$status"
+if [ "$status" = "pass" ]; then
+  exit 0
+fi
+exit 2

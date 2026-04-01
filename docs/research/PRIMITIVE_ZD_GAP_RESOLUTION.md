@@ -11,9 +11,14 @@ computational census `scripts/research/generate_sedenion_zero_divisor_geometry.p
 
 | Gap | Status | Method |
 |-----|--------|--------|
-| Gap 2: "primitive" undefined | RESOLVED | Intrinsic CD-decomposition characterization |
-| Gap 3: anti-assoc → ZD mechanism | RESOLVED | Sign Cancellation Lemma, 168-case verified |
 | Gap 1: surjectivity of Theorem B | RESOLVED | Nullity-4 + counting argument |
+| Gap 2: "primitive" undefined | RESOLVED | Intrinsic CD-decomposition characterization (P1-P3) |
+| Gap 3: anti-assoc → ZD mechanism | RESOLVED | Sign Cancellation Lemma, 168-case verified |
+| Gap 4: Der(𝕊) = g₂ firewall | RESOLVED | Wilmot 2025 (arXiv:2512.07210) + Schafer 1954 |
+| Gap 5: PSL(2,7) in G₂ | RESOLVED | Cohen–Wales 1983 (NOT maximal; claim weakened to embedding) |
+| Gap 6: diagram misnomer | RESOLVED | "commuting diagram" → "correspondence diagram" |
+| Gap 7: Klein quartic / Hurwitz | RESOLVED | Remark in §5.3 tex, connects to PSL(2,7) symmetry |
+| §5.2–5.3 LaTeX | DONE | `section_5_2_5_3_mechanism_bijection.tex` (548 lines) |
 
 ---
 
@@ -240,48 +245,81 @@ the same 168 via the bijection in Theorem B.
 
 ## Additional Fixes for Review (non-fatal but flagged)
 
-### Firewall (Gap 4): Der(𝕊) = Lie(Aut(𝕊))
+### Firewall (Gap 4): Der(𝕊) = Lie(Aut(𝕊)) — RESOLVED
 
-Add to §4.2: "All derivations of 𝕊 are inner by Schafer [1954, Thm. 4.4], which implies
-Der(𝕊) = Lie(Aut(𝕊))₀ — i.e., Der(𝕊) coincides with the Lie algebra of the identity
-component of Aut(𝕊). The firewall therefore depends on Schafer's derivation theorem rather
-than on the automorphism group classification (which is contested between Aut(𝕊) = G₂ and
-G₂×S₃). Since S₃ is discrete, Lie(S₃) = 0, so Der(𝕊) = g₂ unconditionally."
+**Primary citation:** Wilmot 2025, arXiv:2512.07210 — resolves the decades-old Schafer/Brown
+dispute on Aut(𝕊). Confirms Aut(𝕊) ≅ G₂ (compact), with any discrete S₃ factor acting
+trivially at the Lie algebra level. Consequence: Der(𝕊) = g₂ unconditionally.
 
-### PSL(2,7) maximality (Gap 5)
+**Backup citation:** Schafer [1954, Thm. 4.4] for the classical argument that all derivations
+are inner, giving Der(𝕊) = Lie(Aut(𝕊))₀. Since S₃ is discrete, Lie(S₃) = 0, so
+Der(𝕊) = g₂ regardless of whether Aut(𝕊) = G₂ or G₂×S₃.
 
-To find: Cohen–Wales (1983), "Finite subgroups of exceptional algebraic groups" or
-Griess (1991), "A Moufang loop, the exceptional Jordan algebra, and a cubic form in 27
-variables" — check for PSL(2,7) as maximal finite subgroup of compact G₂. Alternatively:
-Wilson, *The Finite Simple Groups* (2009), Chapter 4 (G₂). The claim can be weakened to
-"maximal among finite subgroups" without affecting the theorem chain.
+Add to §4.2: cite Wilmot 2025 as the primary resolution, Schafer 1954 as the classical
+firewall argument.
 
-### Diagram misnomer (Gap 6)
+### PSL(2,7) embedding (Gap 5) — RESOLVED (claim weakened)
 
-Rename "commuting diagram" to "convergence diagram" or "correspondence diagram" in §6.2.
-A commuting diagram requires morphisms; the current §6.2 shows structural parallels between
-two counting arguments, not a categorical commutative square.
+**CRITICAL CORRECTION:** PSL(2,7) is **NOT** a maximal finite subgroup of compact G₂.
+Cohen–Wales (1983) classify all irreducible finite subgroups of G₂(ℂ):
 
-### Klein quartic / Hurwitz (Gap 7)
+| Subgroup | Order | Contains PSL(2,7)? |
+|----------|-------|--------------------|
+| PSL(2,7) | 168 | — |
+| PGL(2,7) | 336 | Yes (index 2) |
+| PSL(2,8) | 504 | No |
+| PSL(2,13) | 1092 | No |
+| G₂(2)' | 6048 | Yes |
+| G₂(2) | 12096 | Yes |
 
-Add to §7.1: "A third pathway to 168 is the Hurwitz bound 84(g−1) = 168 for g = 3, realised
-by the Klein quartic x³y + y³z + z³x = 0, whose automorphism group is PSL(2,7). This is
-consistent with — and algebraically subordinate to — the top-down path, since PSL(2,7)'s
-action on the Klein quartic factors through its embedding in G₂ ≅ 𝒵(𝕊). The Hurwitz
-realization therefore does not constitute an independent third pathway but confirms the
-PSL(2,7) symmetry from a different geometric presentation."
+PSL(2,7) sits inside PGL(2,7) and G₂(2). The paper must NOT claim maximality.
+
+**Correct claim for §3.4:** "PSL(2,7) ≅ GL(3,2) embeds in G₂ = Aut(𝕆) as the automorphism
+group of the Fano plane PG(2,2), which encodes the octonion multiplication table. Two
+non-conjugate embeddings exist (King–Toumazet–Wybourne 1999, J. Phys. A 32, 8527)."
+
+**Citations:**
+- Cohen, A.M. and Wales, D.B., "Finite subgroups of G₂(ℂ)," Comm. Algebra 11 (1983), 441–459.
+- King, R.C., Toumazet, F. and Wybourne, B.G., J. Phys. A 32 (1999), 8527–8537.
+
+**Impact on theorem chain:** None. The 168 bijection requires only that PSL(2,7) *embeds* in
+G₂, not that it is maximal. The equivariance of Φ̄ (Theorem B) uses the embedding, not
+maximality.
+
+### Diagram misnomer (Gap 6) — RESOLVED
+
+Rename "commuting diagram" to "correspondence diagram" in §6.2. A commuting diagram
+requires morphisms between objects; the current §6.2 shows structural parallels between
+two counting arguments (discrete 42×4=168 and continuous |PSL(2,7)|=168), not a
+categorical commutative square. The term "correspondence diagram" accurately describes
+the bijection between two independently-derived sets of cardinality 168.
+
+### Klein quartic / Hurwitz (Gap 7) — RESOLVED
+
+Add to §7.1 (already integrated into §5.3 tex as Remark after Prop census):
+
+"The number 168 = 84(g−1) at g = 3 is the Hurwitz bound for the Klein quartic
+x³y + y³z + z³x = 0, whose automorphism group is PSL(2,7) ≅ GL(3,2) — the same group
+that acts on the Fano plane and hence on the primitive zero-divisor pairs via Theorem B.
+This is not a numerical coincidence: the Klein quartic realizes the Hurwitz bound precisely
+because its symmetry group is PSL(2,7), which embeds in G₂ ≅ 𝒵(𝕊) via the continuous
+path of §5.1. The Hurwitz realization therefore does not constitute an independent third
+pathway but confirms the PSL(2,7) symmetry from a different geometric presentation."
 
 ---
 
 ## What Remains Before Submission
 
-1. **Write §5.2 as a Lemma + Proof block** using the Sign Cancellation Lemma and Theorem 1
-   above. The proof is now complete.
-2. **Write §5.3 with Definition 1** as the intrinsic characterization. Cross-reference to
-   the census artifact `artifacts/research/sedenion_zero_divisor_geometry.v1.json`.
-3. **Cite Schafer [1954]** in §4.2 for the derivation-vs-automorphism firewall.
-4. **Locate PSL(2,7) maximality reference** (Cohen–Wales or Wilson) for §3.4.
-5. **Rename §6.2 diagram.**
-6. **Add Klein quartic remark to §7.1.**
-7. **Cut or prove E₇/56 speculation in §7.2.**
-8. **Compress §8 (AI appendix) to one footnote for JMP submission.**
+1. ~~**Write §5.2 as a Lemma + Proof block**~~ — DONE. `section_5_2_5_3_mechanism_bijection.tex`
+   (548 lines, 3 critique cycles, sign error caught and fixed).
+2. ~~**Write §5.3 with Definition 1**~~ — DONE. Same file. Includes census, nullity,
+   Theorem B, Corollary, summary table, worked example.
+3. ~~**Cite for Der(𝕊) = g₂ firewall**~~ — RESOLVED. Primary: Wilmot 2025 (arXiv:2512.07210).
+   Backup: Schafer [1954, Thm. 4.4].
+4. ~~**PSL(2,7) reference for §3.4**~~ — RESOLVED. Cohen–Wales 1983 (classification);
+   King–Toumazet–Wybourne 1999 (two embeddings). **PSL(2,7) is NOT maximal** — claim
+   weakened to "embeds in G₂ as Aut(PG(2,2))".
+5. ~~**Rename §6.2 diagram**~~ — RESOLVED. "commuting diagram" → "correspondence diagram".
+6. ~~**Add Klein quartic remark**~~ — RESOLVED. Integrated into §5.3 tex (Remark after census).
+7. ~~**E₇/56 speculation in §7.2**~~ — CUT. No proof, would attract referee fire.
+8. ~~**§8 AI appendix**~~ — CUT. Not appropriate for JMP.

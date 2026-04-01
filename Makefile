@@ -1,8 +1,64 @@
-.PHONY: ops-guardrail-local ops-infra-up ops-strict-up ops-status
+.PHONY: build check test test-stdlib clean fmt install help \
+         ops-guardrail-local ops-infra-up ops-strict-up ops-status
+
+SOUC := ./bin/souc
 
 ifneq ("$(wildcard Makefile.verify)","")
 include Makefile.verify
 endif
+
+##@ Developer Targets
+
+help:                ## Show this help message
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+build:               ## Bootstrap compile: gen1 → gen2 → gen3 (fixed-point verification)
+	@echo "→ Stage 1: boot4.elf compiles lean_single → gen1.elf"
+	./artifacts/bootstrap/boot4.elf self-hosted/compiler/lean_single.sio gen1.elf
+	@echo "→ Stage 2: gen1.elf compiles lean_single → gen2.elf"
+	./gen1.elf self-hosted/compiler/lean_single.sio gen2.elf
+	@echo "→ Stage 3: gen2.elf compiles lean_single → gen3.elf"
+	./gen2.elf self-hosted/compiler/lean_single.sio gen3.elf
+	@echo "→ Verifying fixed-point..."
+	@MD5_GEN2=$$(md5sum gen2.elf | awk '{print $$1}'); \
+	 MD5_GEN3=$$(md5sum gen3.elf | awk '{print $$1}'); \
+	 if [ "$$MD5_GEN2" = "$$MD5_GEN3" ]; then \
+	   echo "✓ FIXED POINT OK ($$MD5_GEN2)"; \
+	 else \
+	   echo "✗ FIXED POINT BROKEN"; \
+	   echo "  gen2: $$MD5_GEN2"; \
+	   echo "  gen3: $$MD5_GEN3"; \
+	   exit 1; \
+	 fi
+
+check:               ## Type-check self-hosted compiler and run lint gates
+	@echo "→ Type-checking self-hosted/compiler/lean_single.sio"
+	$(SOUC) check self-hosted/compiler/lean_single.sio
+	@echo "→ Running lint gates..."
+	@bash scripts/ci/full_gate.sh 2>&1 | tail -30
+
+test:                ## Run full test suite (compile-fail + run-pass + stdlib)
+	@echo "→ Running full test suite"
+	@bash scripts/run_sio_test_suite.sh
+
+test-stdlib:         ## Run stdlib integration tests (subset)
+	@echo "→ Running stdlib tests"
+	$(SOUC) run tests/stdlib/bayes/test_prior_e2e.sio
+	$(SOUC) run tests/stdlib/complex/test_complex.sio
+
+clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
+	rm -f gen1.elf gen2.elf gen3.elf
+	@echo "✓ Cleaned generated artifacts"
+
+fmt:                 ## Format .sio source code (not yet implemented)
+	@echo "⚠ soufmt not yet implemented"
+
+install:             ## Install souc compiler to ~/.local/bin/souc
+	mkdir -p ~/.local/bin
+	install -m755 bin/souc ~/.local/bin/souc
+	@echo "✓ Installed souc to ~/.local/bin/souc"
+
+##@ Operations Targets (long-running infrastructure)
 
 ops-guardrail-local:
 	@echo "→ Running local ops guardrail (strict lane)"
