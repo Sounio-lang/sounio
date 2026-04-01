@@ -1,4 +1,4 @@
-.PHONY: build check test test-stdlib clean fmt install help \
+.PHONY: build check test test-stdlib clean fmt install help lint lint-fix \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status
 
 SOUC := ./bin/souc
@@ -52,6 +52,13 @@ clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
 
 fmt:                 ## Format .sio source code (not yet implemented)
 	@echo "⚠ soufmt not yet implemented"
+
+lint:                ## Lint .sio files for Rust hallucinations (LLM grammar enforcer)
+	@find tests/stdlib examples -name "*.sio" -print0 | xargs -0 python3 scripts/dev/sounio-lint.py --errors-only 2>&1 | grep -v "^sounio-lint:.*OK$$" || true
+
+lint-fix:            ## Apply automatic fixes to a file: make lint-fix FILE=path/to/file.sio
+	@if [ -z "$(FILE)" ]; then echo "Usage: make lint-fix FILE=path/to/file.sio"; exit 1; fi
+	@python3 scripts/dev/sounio-lint.py --fix $(FILE)
 
 install:             ## Install souc compiler to ~/.local/bin/souc
 	mkdir -p ~/.local/bin
