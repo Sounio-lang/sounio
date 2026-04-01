@@ -79,6 +79,7 @@ var FN_PTX_LEN: [i64; 8192] = [0; 8192]
 var FN_PTX_EXTENT_SLOT: [i64; 8192] = [0; 8192]
 var FN_PTX_PARAM_KINDS: [i64; 32768] = [0; 32768]
 var FN_COUNT: i64 = 0
+var FN_RECV_HASH: [i64; 8192] = [0; 8192]
 
 var PTX_DATA: [i8; 262144] = [0; 262144]
 var PTX_LEN: i64 = 0
@@ -3955,6 +3956,22 @@ fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
     return -1
 }
 
+fn fn_find_method(ns: i64, ne: i64, recv_hash: i64) -> i64 with Panic, Mut {
+    var i: i64 = 0
+    while i < FN_COUNT {
+        if name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) {
+            if FN_RECV_HASH[i as usize] == recv_hash { return i }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < FN_COUNT {
+        if name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
 fn fn_find_lit(name: string) -> i64 with Panic, Mut, Div {
     let name_len = str_len(name)
     var i: i64 = 0
@@ -7393,7 +7410,11 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             }
             // Method call: obj.method(args) → method(obj, args)
             if TK[(EP + 1) as usize] == 6 {
-                let mfi = fn_find(fns, fne)
+                var recv_h = EXPR_TY_HASH
+                if EXPR_TY == 10 {
+                    recv_h = ref_hash_inner_hash(EXPR_TY_HASH)
+                }
+                let mfi = fn_find_method(fns, fne, recv_h)
                 if mfi >= 0 {
                     EP = EP + 1  // skip method name
                     EP = EP + 1  // skip (
@@ -10065,9 +10086,6 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             ptx_reset_fn_meta(FN_COUNT)
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
-            if fn_find(TS[p as usize], TE[p as usize]) >= 0 {
-                tc_duplicate_fn(p)
-            }
             FN_NS[FN_COUNT as usize] = TS[p as usize]
             FN_NE[FN_COUNT as usize] = TE[p as usize]
             FN_OFF[FN_COUNT as usize] = -1
@@ -10092,6 +10110,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if TK[q as usize] == 6 { q = q + 1 }
             while TK[q as usize] != 7 && TK[q as usize] != 0 {
                 if TK[q as usize] == 3 {
+                    let is_first_param = FN_ARITY[sig_fi as usize] == 0
                     FN_ARITY[sig_fi as usize] = FN_ARITY[sig_fi as usize] + 1
                     q = q + 1
                     if TK[q as usize] == 43 {
@@ -10100,6 +10119,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                             FN_NEEDS_SESSION[sig_fi as usize] = 1
                         }
                         scan_type(q)
+                        if is_first_param {
+                            if SCAN_TY == 6 {
+                                FN_RECV_HASH[sig_fi as usize] = SCAN_TY_HASH
+                            } else if SCAN_TY == 10 {
+                                let inner_ty = ref_hash_inner_ty(SCAN_TY_HASH)
+                                let inner_hash = ref_hash_inner_hash(SCAN_TY_HASH)
+                                if inner_ty == 6 {
+                                    FN_RECV_HASH[sig_fi as usize] = inner_hash
+                                }
+                            }
+                        }
                         if knowledge_hash_invalid(SCAN_TY_HASH) {
                             if 0 == 1 {
                                 print("DEBUG sig ty=")
@@ -10146,6 +10176,15 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 q = SCAN_TY_NEXT
             }
             q = skip_signature_where_clause(q)
+            var dup_i: i64 = 0
+            while dup_i < sig_fi {
+                if name_eq(FN_NS[dup_i as usize], FN_NE[dup_i as usize], FN_NS[sig_fi as usize], FN_NE[sig_fi as usize]) {
+                    if FN_RECV_HASH[dup_i as usize] == FN_RECV_HASH[sig_fi as usize] {
+                        tc_duplicate_fn(FN_NAME_TOK[sig_fi as usize])
+                    }
+                }
+                dup_i = dup_i + 1
+            }
             if sig_fi < FN_COUNT { sig_fi = sig_fi + 1 }
         }
         p = p + 1
@@ -13348,7 +13387,11 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 }
             }
             if TK[(EP + 1) as usize] == 6 {
-                let mfi = fn_find(fns, fne)
+                var recv_h = EXPR_TY_HASH
+                if EXPR_TY == 10 {
+                    recv_h = ref_hash_inner_hash(EXPR_TY_HASH)
+                }
+                let mfi = fn_find_method(fns, fne, recv_h)
                 if mfi >= 0 {
                     EP = EP + 1; EP = EP + 1
                     materialize_aggregate_expr_a64()
