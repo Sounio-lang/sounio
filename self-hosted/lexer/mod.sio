@@ -5,97 +5,50 @@
 // strings, chars, line comments, nestable block comments, doc comments,
 // operators (max-munch), delimiters, and epistemic operators.
 //
-// LexerState uses impl block for constructors and emission.
-// All token kinds use the TokenKind enum; error kinds use LexErrorKind.
+// Boot4-safe: no LexerState (moved to lexer::lex_full). Uses lex_source_to_globals.
+// All token kinds use the TokenKind enum.
 
 module lexer::mod
 
 use lexer::cursor
 use parser::ast::*
 use parser::parser::{parser_set_token_at}
+use parser::mod::{parse_items_preloaded}
 
-// ============================================================================
-// LEXER STATE
-// ============================================================================
-
-// Maximum tokens per file
-let MAX_TOKENS: i64 = 1048576
-// Maximum errors per file
-let MAX_ERRORS: i64 = 256
-
-struct LexerState {
-    cursor: Cursor,
-    file_id: i32,
-    tokens: [Token; 1048576],
-    token_count: i64,
-    errors: [LexError; 256],
-    error_count: i64,
-}
-
-impl LexerState {
-    fn new(source: [i8; 1048576], source_len: i64, file_id: i32) -> LexerState with Mut, Panic {
-        var n: i64 = source_len
-        if n < 0 { n = 0 }
-        if n > 1048576 { n = 1048576 }
-        CURSOR_SOURCE_LEN = n
-        var ci: i64 = 0
-        while ci < n {
-            CURSOR_SOURCE[ci as usize] = source[ci as usize]
-            ci = ci + 1
-        }
-        LexerState {
-            cursor: Cursor {
-                source_len: n,
-                pos: 0,
-                line: 1,
-                col: 1,
-                current: CURSOR_SOURCE[0],
-            },
-            file_id: file_id,
-            tokens: [Token::new(); 1048576],
-            token_count: 0,
-            errors: [LexError::new(LexErrorKind::None, 0, 0, 0); 256],
-            error_count: 0,
-        }
-    }
-
-    fn emit_token(self, tok: Token) -> LexerState with Mut, Panic {
-        var s = self
-        if s.token_count < MAX_TOKENS {
-            s.tokens[s.token_count as usize] = tok
-            s.token_count = s.token_count + 1
-        }
-        s
-    }
-
-    fn emit_error(self, err: LexError) -> LexerState with Mut, Panic {
-        var s = self
-        if s.error_count < MAX_ERRORS {
-            s.errors[s.error_count as usize] = err
-            s.error_count = s.error_count + 1
-        }
-        s
-    }
-}
+// Maximum tokens per file (1048576) — use literal not constant: boot4 leaves let globals at 0
 
 // ============================================================================
 // WHITESPACE AND COMMENT HANDLING
 // ============================================================================
 
 fn skip_whitespace(c: Cursor) -> Cursor with Mut, Div, Panic {
-    var cur = c
-    while !cur.is_eof() && is_whitespace(cur.current) {
-        cur = cur.advance()
+    // Scalar extraction avoids IS_SPTR=1 SRET corruption (boot4 bug).
+    // Whitespace chars (space/tab/CR) are never newlines: col increments only.
+    var pos: i64 = c.pos
+    let source_len: i64 = c.source_len
+    let line: i64 = c.line
+    var col: i64 = c.col
+    var current: i8 = c.current
+    while pos < source_len && is_whitespace(current) {
+        col = col + 1
+        pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
     }
-    cur
+    Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
 }
 
 fn skip_line_comment(c: Cursor) -> Cursor with Mut, Div, Panic {
-    var cur = c
-    while !cur.is_eof() && cur.current != 10 {  // until '\n'
-        cur = cur.advance()
+    var pos: i64 = c.pos
+    let source_len: i64 = c.source_len
+    let line: i64 = c.line
+    var col: i64 = c.col
+    var current: i8 = c.current
+    while pos < source_len && current != 10 as i8 {  // until '\n'
+        col = col + 1
+        pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
     }
-    cur
+    Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
 }
 
 // Skip block comment with nesting support: /* ... /* inner */ ... */
@@ -105,20 +58,53 @@ struct SkipBlockResult {
 }
 
 fn skip_block_comment(c: Cursor) -> SkipBlockResult with Mut, Div, Panic {
-    var cur = c.advance_n(2)  // skip /*
+    var pos: i64 = c.pos
+    let source_len: i64 = c.source_len
+    var line: i64 = c.line
+    var col: i64 = c.col
+    var current: i8 = c.current
+
+    // Skip opening /* (advance_n(2) inline)
+    var i: i64 = 0
+    while i < 2 {
+        if pos < source_len {
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+        }
+        i = i + 1
+    }
+
     var depth: i64 = 1
-    while !cur.is_eof() && depth > 0 {
-        if cur.current == 42 && cur.peek() == 47 {  // */
-            cur = cur.advance_n(2)
+    while pos < source_len && depth > 0 {
+        var peek1: i8 = 0 as i8
+        if pos + 1 < source_len { peek1 = CURSOR_SOURCE[(pos + 1) as usize] }
+
+        if current == 42 as i8 && peek1 == 47 as i8 {  // */
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             depth = depth - 1
-        } else if cur.current == 47 && cur.peek() == 42 {  // /* (nested)
-            cur = cur.advance_n(2)
+        } else if current == 47 as i8 && peek1 == 42 as i8 {  // /* (nested)
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             depth = depth + 1
         } else {
-            cur = cur.advance()
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
         }
     }
-    SkipBlockResult { cursor: cur, unterminated: depth > 0 }
+
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    SkipBlockResult { cursor: result_cursor, unterminated: depth > 0 }
 }
 
 // ============================================================================
@@ -126,22 +112,27 @@ fn skip_block_comment(c: Cursor) -> SkipBlockResult with Mut, Div, Panic {
 // ============================================================================
 
 fn scan_identifier(c: Cursor) -> ScanResult with Mut, Div, Panic {
-    var cur = c
-    let start = cur.pos
-    let line = cur.line
-    let col = cur.col
+    var pos: i64 = c.pos
+    let source_len: i64 = c.source_len
+    var line: i64 = c.line
+    var col: i64 = c.col
+    var current: i8 = c.current
+    let start = pos
     var text: [i8; 256] = [0; 256]
     var text_idx: i64 = 0
 
-    while !cur.is_eof() && is_ident_continue(cur.current) && text_idx < 256 {
-        text[text_idx as usize] = cur.current
+    while pos < source_len && is_ident_continue(current) && text_idx < 256 {
+        text[text_idx as usize] = current
         text_idx = text_idx + 1
-        cur = cur.advance()
+        if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+        pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
     }
 
-    let end = cur.pos
+    let end = pos
     let kind = keyword_lookup(text, text_idx)
-    ScanResult::with_text(cur, kind, start, end, text, text_idx)
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    ScanResult::with_text(result_cursor, kind, start, end, text, text_idx)
 }
 
 // ============================================================================
@@ -149,119 +140,149 @@ fn scan_identifier(c: Cursor) -> ScanResult with Mut, Div, Panic {
 // ============================================================================
 
 fn scan_number(c: Cursor) -> ScanResult with Mut, Div, Panic {
-    var cur = c
-    let start = cur.pos
+    var pos: i64 = c.pos
+    let source_len: i64 = c.source_len
+    var line: i64 = c.line
+    var col: i64 = c.col
+    var current: i8 = c.current
+    let start = pos
     var kind = TokenKind::IntLit
 
     // Check for 0x, 0b, 0o prefixes
-    if cur.current == 48 {  // '0'
-        let next = cur.peek()
-        if next == 120 || next == 88 {  // 'x' or 'X'
-            cur = cur.advance_n(2)
-            cur = cur.bump_while_hex()
-            // Allow underscore separators
-            while !cur.is_eof() && (is_hex_digit(cur.current) || cur.current == 95) {
-                cur = cur.advance()
+    if current == 48 as i8 {  // '0'
+        var next: i8 = 0 as i8
+        if pos + 1 < source_len { next = CURSOR_SOURCE[(pos + 1) as usize] }
+        if next == 120 as i8 || next == 88 as i8 {  // 'x' or 'X'
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            while pos < source_len && is_hex_digit(current) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            }
+            while pos < source_len && (is_hex_digit(current) || current == 95 as i8) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             }
             kind = TokenKind::HexLit
-            // Check for suffix (u8, u16, u32, u64, i8, i16, i32, i64)
-            cur = skip_numeric_suffix(cur)
-            let end = cur.pos
-            return ScanResult::new(cur, kind, start, end)
+            let tmp_c = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+            let suf = skip_numeric_suffix(tmp_c)
+            pos = suf.pos; col = suf.col; line = suf.line; current = suf.current
+            let end = pos
+            let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+            return ScanResult::new(result_cursor, kind, start, end)
         }
-        if next == 98 || next == 66 {  // 'b' or 'B'
-            cur = cur.advance_n(2)
-            while !cur.is_eof() && (is_bin_digit(cur.current) || cur.current == 95) {
-                cur = cur.advance()
+        if next == 98 as i8 || next == 66 as i8 {  // 'b' or 'B'
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            while pos < source_len && (is_bin_digit(current) || current == 95 as i8) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             }
             kind = TokenKind::BinLit
-            cur = skip_numeric_suffix(cur)
-            let end = cur.pos
-            return ScanResult::new(cur, kind, start, end)
+            let tmp_c = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+            let suf = skip_numeric_suffix(tmp_c)
+            pos = suf.pos; col = suf.col; line = suf.line; current = suf.current
+            let end = pos
+            let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+            return ScanResult::new(result_cursor, kind, start, end)
         }
-        if next == 111 || next == 79 {  // 'o' or 'O'
-            cur = cur.advance_n(2)
-            while !cur.is_eof() && (is_oct_digit(cur.current) || cur.current == 95) {
-                cur = cur.advance()
+        if next == 111 as i8 || next == 79 as i8 {  // 'o' or 'O'
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            while pos < source_len && (is_oct_digit(current) || current == 95 as i8) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             }
             kind = TokenKind::OctLit
-            cur = skip_numeric_suffix(cur)
-            let end = cur.pos
-            return ScanResult::new(cur, kind, start, end)
+            let tmp_c = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+            let suf = skip_numeric_suffix(tmp_c)
+            pos = suf.pos; col = suf.col; line = suf.line; current = suf.current
+            let end = pos
+            let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+            return ScanResult::new(result_cursor, kind, start, end)
         }
     }
 
     // Decimal digits (with underscore separators)
-    while !cur.is_eof() && (is_digit(cur.current) || cur.current == 95) {
-        cur = cur.advance()
+    while pos < source_len && (is_digit(current) || current == 95 as i8) {
+        col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
     }
 
     // Check for decimal point (but not ".." range)
-    if !cur.is_eof() && cur.current == 46 {  // '.'
-        let after_dot = cur.peek()
+    if pos < source_len && current == 46 as i8 {  // '.'
+        var after_dot: i8 = 0 as i8
+        if pos + 1 < source_len { after_dot = CURSOR_SOURCE[(pos + 1) as usize] }
         if is_digit(after_dot) {
-            // Float: consume dot and fractional part
-            cur = cur.advance()
-            while !cur.is_eof() && (is_digit(cur.current) || cur.current == 95) {
-                cur = cur.advance()
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            while pos < source_len && (is_digit(current) || current == 95 as i8) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             }
             kind = TokenKind::FloatLit
         }
-        // If next is '.' it's a range operator, don't consume
     }
 
     // Scientific notation: e/E followed by optional +/- and digits
-    if !cur.is_eof() && (cur.current == 101 || cur.current == 69) {  // 'e' or 'E'
-        let after_e = cur.peek()
-        if is_digit(after_e) || after_e == 43 || after_e == 45 {  // digit, '+', '-'
-            cur = cur.advance()  // consume 'e'
-            if !cur.is_eof() && (cur.current == 43 || cur.current == 45) {
-                cur = cur.advance()  // consume sign
+    if pos < source_len && (current == 101 as i8 || current == 69 as i8) {  // 'e' or 'E'
+        var after_e: i8 = 0 as i8
+        if pos + 1 < source_len { after_e = CURSOR_SOURCE[(pos + 1) as usize] }
+        if is_digit(after_e) || after_e == 43 as i8 || after_e == 45 as i8 {
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            if pos < source_len && (current == 43 as i8 || current == 45 as i8) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             }
-            while !cur.is_eof() && is_digit(cur.current) {
-                cur = cur.advance()
+            while pos < source_len && is_digit(current) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             }
             kind = TokenKind::FloatLit
         }
     }
 
-    // Numeric suffix: i8, i16, i32, i64, u8, u16, u32, u64, f32, f64
-    cur = skip_numeric_suffix(cur)
+    // Numeric suffix
+    let tmp_c = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    let suf = skip_numeric_suffix(tmp_c)
+    pos = suf.pos; col = suf.col; line = suf.line; current = suf.current
 
-    let end = cur.pos
-    ScanResult::new(cur, kind, start, end)
+    let end = pos
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    ScanResult::new(result_cursor, kind, start, end)
 }
 
 fn skip_numeric_suffix(c: Cursor) -> Cursor with Mut, Div, Panic {
-    var cur = c
-    if cur.is_eof() { return cur }
+    // Scalar-only: no Cursor struct passing. Numeric suffixes have no newlines.
+    let pos0: i64 = c.pos
+    let source_len: i64 = c.source_len
+    let line: i64 = c.line
+    let col0: i64 = c.col
 
-    // Check for i/u/f suffix
-    let ch = cur.current
-    if ch == 105 || ch == 117 || ch == 102 {  // 'i', 'u', 'f'
-        let n1 = cur.peek()
-        let n2 = cur.peek_n(2)
-        // f32, f64
-        if ch == 102 {
-            if n1 == 51 && n2 == 50 { cur = cur.advance_n(3) }   // "f32"
-            else if n1 == 54 && n2 == 52 { cur = cur.advance_n(3) }  // "f64"
-        }
-        // i8, i16, i32, i64
-        if ch == 105 {
-            if n1 == 56 { cur = cur.advance_n(2) }                      // "i8"
-            else if n1 == 49 && n2 == 54 { cur = cur.advance_n(3) }     // "i16"
-            else if n1 == 51 && n2 == 50 { cur = cur.advance_n(3) }     // "i32"
-            else if n1 == 54 && n2 == 52 { cur = cur.advance_n(3) }     // "i64"
-        }
-        // u8, u16, u32, u64
-        if ch == 117 {
-            if n1 == 56 { cur = cur.advance_n(2) }                      // "u8"
-            else if n1 == 49 && n2 == 54 { cur = cur.advance_n(3) }     // "u16"
-            else if n1 == 51 && n2 == 50 { cur = cur.advance_n(3) }     // "u32"
-            else if n1 == 54 && n2 == 52 { cur = cur.advance_n(3) }     // "u64"
-        }
+    if pos0 >= source_len {
+        return Cursor { source_len: source_len, pos: pos0, line: line, col: col0, current: c.current }
     }
-    cur
+
+    let ch: i8 = c.current
+    var n1: i8 = 0 as i8
+    var n2: i8 = 0 as i8
+    if pos0 + 1 < source_len { n1 = CURSOR_SOURCE[(pos0 + 1) as usize] }
+    if pos0 + 2 < source_len { n2 = CURSOR_SOURCE[(pos0 + 2) as usize] }
+
+    var skip: i64 = 0
+    if ch == 102 as i8 {  // 'f'
+        if n1 == 51 as i8 && n2 == 50 as i8 { skip = 3 }       // "f32"
+        else if n1 == 54 as i8 && n2 == 52 as i8 { skip = 3 }  // "f64"
+    }
+    if ch == 105 as i8 {  // 'i'
+        if n1 == 56 as i8 { skip = 2 }                                  // "i8"
+        else if n1 == 49 as i8 && n2 == 54 as i8 { skip = 3 }          // "i16"
+        else if n1 == 51 as i8 && n2 == 50 as i8 { skip = 3 }          // "i32"
+        else if n1 == 54 as i8 && n2 == 52 as i8 { skip = 3 }          // "i64"
+    }
+    if ch == 117 as i8 {  // 'u'
+        if n1 == 56 as i8 { skip = 2 }                                  // "u8"
+        else if n1 == 49 as i8 && n2 == 54 as i8 { skip = 3 }          // "u16"
+        else if n1 == 51 as i8 && n2 == 50 as i8 { skip = 3 }          // "u32"
+        else if n1 == 54 as i8 && n2 == 52 as i8 { skip = 3 }          // "u64"
+    }
+
+    let pos: i64 = pos0 + skip
+    let col: i64 = col0 + skip
+    var current: i8 = 0 as i8
+    if pos < source_len { current = CURSOR_SOURCE[pos as usize] }
+    Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
 }
 
 // ============================================================================
@@ -269,47 +290,61 @@ fn skip_numeric_suffix(c: Cursor) -> Cursor with Mut, Div, Panic {
 // ============================================================================
 
 fn scan_string(c: Cursor) -> ScanResult with Mut, Div, Panic {
-    var cur = c
-    let start = cur.pos
+    var pos: i64 = c.pos
+    let source_len: i64 = c.source_len
+    var line: i64 = c.line
+    var col: i64 = c.col
+    var current: i8 = c.current
+    let start = pos
     var text: [i8; 256] = [0; 256]
     var text_idx: i64 = 0
 
-    cur = cur.advance()  // skip opening '"'
+    // Skip opening '"'
+    if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+    pos = pos + 1
+    if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
 
-    while !cur.is_eof() && cur.current != 34 && text_idx < 255 {  // '"'
-        if cur.current == 92 {  // backslash
-            cur = cur.advance()  // skip '\'
-            if !cur.is_eof() {
-                let esc = cur.current
-                // Translate escape sequences
-                if esc == 110 { text[text_idx as usize] = 10 }       // \n -> LF
-                else if esc == 116 { text[text_idx as usize] = 9 }   // \t -> TAB
-                else if esc == 114 { text[text_idx as usize] = 13 }  // \r -> CR
-                else if esc == 92 { text[text_idx as usize] = 92 }   // \\ -> backslash
-                else if esc == 34 { text[text_idx as usize] = 34 }   // \" -> quote
-                else if esc == 48 { text[text_idx as usize] = 0 }    // \0 -> null
-                else { text[text_idx as usize] = esc }               // unknown escape: keep as-is
+    while pos < source_len && current != 34 as i8 && text_idx < 255 {  // '"'
+        if current == 92 as i8 {  // backslash
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            if pos < source_len {
+                let esc: i8 = current
+                if esc == 110 as i8 { text[text_idx as usize] = 10 as i8 }       // \n -> LF
+                else if esc == 116 as i8 { text[text_idx as usize] = 9 as i8 }   // \t -> TAB
+                else if esc == 114 as i8 { text[text_idx as usize] = 13 as i8 }  // \r -> CR
+                else if esc == 92 as i8 { text[text_idx as usize] = 92 as i8 }   // \\ -> backslash
+                else if esc == 34 as i8 { text[text_idx as usize] = 34 as i8 }   // \" -> quote
+                else if esc == 48 as i8 { text[text_idx as usize] = 0 as i8 }    // \0 -> null
+                else { text[text_idx as usize] = esc }
                 text_idx = text_idx + 1
-                cur = cur.advance()
+                if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+                pos = pos + 1
+                if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             }
         } else {
-            text[text_idx as usize] = cur.current
+            text[text_idx as usize] = current
             text_idx = text_idx + 1
-            cur = cur.advance()
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
         }
     }
 
     var unterminated = true
-    if !cur.is_eof() && cur.current == 34 {
-        cur = cur.advance()  // skip closing '"'
+    if pos < source_len && current == 34 as i8 {
+        col = col + 1; pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
         unterminated = false
     }
 
-    let end = cur.pos
+    let end = pos
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
     if unterminated {
-        ScanResult::with_text(cur, TokenKind::Error, start, end, text, text_idx)
+        ScanResult::with_text(result_cursor, TokenKind::Error, start, end, text, text_idx)
     } else {
-        ScanResult::with_text(cur, TokenKind::StringLit, start, end, text, text_idx)
+        ScanResult::with_text(result_cursor, TokenKind::StringLit, start, end, text, text_idx)
     }
 }
 
@@ -318,28 +353,43 @@ fn scan_string(c: Cursor) -> ScanResult with Mut, Div, Panic {
 // ============================================================================
 
 fn scan_char_literal(c: Cursor) -> ScanResult with Mut, Panic {
-    var cur = c
-    let start = cur.pos
+    var pos: i64 = c.pos
+    let source_len: i64 = c.source_len
+    var line: i64 = c.line
+    var col: i64 = c.col
+    var current: i8 = c.current
+    let start = pos
 
-    cur = cur.advance()  // skip opening '\''
+    // Skip opening '\''
+    if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+    pos = pos + 1
+    if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
 
     // Handle escape sequence
-    if !cur.is_eof() && cur.current == 92 {  // backslash
-        cur = cur.advance()  // skip '\'
-        if !cur.is_eof() {
-            cur = cur.advance()  // skip escaped char
+    if pos < source_len && current == 92 as i8 {  // backslash
+        if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+        pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+        if pos < source_len {
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
         }
-    } else if !cur.is_eof() {
-        cur = cur.advance()  // regular char
+    } else if pos < source_len {
+        if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+        pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
     }
 
     // Expect closing quote
-    if !cur.is_eof() && cur.current == 39 {  // '\''
-        cur = cur.advance()
+    if pos < source_len && current == 39 as i8 {  // '\''
+        col = col + 1; pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
     }
 
-    let end = cur.pos
-    ScanResult::new(cur, TokenKind::CharLit, start, end)
+    let end = pos
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    ScanResult::new(result_cursor, TokenKind::CharLit, start, end)
 }
 
 // ============================================================================
@@ -347,206 +397,220 @@ fn scan_char_literal(c: Cursor) -> ScanResult with Mut, Panic {
 // ============================================================================
 
 fn scan_doc_comment_line(c: Cursor, is_inner: bool) -> ScanResult with Mut, Div, Panic {
-    var cur = c
-    let start = cur.pos
+    var pos: i64 = c.pos
+    let source_len: i64 = c.source_len
+    var line: i64 = c.line
+    var col: i64 = c.col
+    var current: i8 = c.current
+    let start = pos
     var text: [i8; 256] = [0; 256]
     var text_idx: i64 = 0
     var kind = TokenKind::DocOuter
 
-    if is_inner {
-        kind = TokenKind::DocInner
-        cur = cur.advance_n(3)  // skip //!
-    } else {
-        cur = cur.advance_n(3)  // skip ///
+    if is_inner { kind = TokenKind::DocInner }
+
+    // Skip //! or ///  (advance_n(3) inline, no newlines in // prefix)
+    var i: i64 = 0
+    while i < 3 {
+        col = col + 1; pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+        i = i + 1
     }
 
-    // Collect text until newline
-    while !cur.is_eof() && cur.current != 10 && text_idx < 256 {
-        text[text_idx as usize] = cur.current
+    while pos < source_len && current != 10 as i8 && text_idx < 256 {
+        text[text_idx as usize] = current
         text_idx = text_idx + 1
-        cur = cur.advance()
+        col = col + 1; pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
     }
 
-    let end = cur.pos
-    ScanResult::with_text(cur, kind, start, end, text, text_idx)
+    let end = pos
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    ScanResult::with_text(result_cursor, kind, start, end, text, text_idx)
 }
 
 fn scan_doc_comment_block(c: Cursor, is_inner: bool) -> ScanResult with Mut, Div, Panic {
-    var cur = c
-    let start = cur.pos
+    var pos: i64 = c.pos
+    let source_len: i64 = c.source_len
+    var line: i64 = c.line
+    var col: i64 = c.col
+    var current: i8 = c.current
+    let start = pos
     var text: [i8; 256] = [0; 256]
     var text_idx: i64 = 0
     var kind = TokenKind::DocBlockOuter
 
-    if is_inner {
-        kind = TokenKind::DocBlockInner
+    if is_inner { kind = TokenKind::DocBlockInner }
+
+    // Skip /** or /*!  (advance_n(3) inline)
+    var i: i64 = 0
+    while i < 3 {
+        if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+        pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+        i = i + 1
     }
 
-    cur = cur.advance_n(3)  // skip /** or /*!
-
-    while !cur.is_eof() && text_idx < 256 {
-        if cur.current == 42 && cur.peek() == 47 {  // */
-            cur = cur.advance_n(2)
-            break
+    var done = false
+    while pos < source_len && text_idx < 256 && !done {
+        var peek1: i8 = 0 as i8
+        if pos + 1 < source_len { peek1 = CURSOR_SOURCE[(pos + 1) as usize] }
+        if current == 42 as i8 && peek1 == 47 as i8 {  // */
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            done = true
+        } else {
+            text[text_idx as usize] = current
+            text_idx = text_idx + 1
+            if current == 10 as i8 { line = line + 1; col = 1 } else { col = col + 1 }
+            pos = pos + 1
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
         }
-        text[text_idx as usize] = cur.current
-        text_idx = text_idx + 1
-        cur = cur.advance()
     }
 
-    let end = cur.pos
-    ScanResult::with_text(cur, kind, start, end, text, text_idx)
+    let end = pos
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    ScanResult::with_text(result_cursor, kind, start, end, text, text_idx)
 }
 
 // ============================================================================
-// MAIN LEXER LOOP
+// SOURCEFILE LOADING API (boot4-safe: scalar returns, items path)
 // ============================================================================
+// NOTE: pub fn lex(source, source_len, file_id) -> LexerState has been moved
+// to lexer::lex_full to keep this module free of the 8MB LexerState frame.
+// Tests that import lex() should use lexer::lex_full instead.
 
-pub fn lex(source: [i8; 1048576], source_len: i64, file_id: i32) -> LexerState with Mut, Div, Panic {
-    var state = LexerState::new(source, source_len, file_id)
+var SOURCEFILE_TRACE: i64 = 0
 
-    while !state.cursor.is_eof() {
-        let ch = state.cursor.current
+pub fn sourcefile_trace_enable() with Mut {
+    SOURCEFILE_TRACE = 1
+}
 
-        // Skip non-newline whitespace
+// Runs the full lexer over CURSOR_SOURCE[0..source_len], emitting all tokens
+// via parser_set_token_at() only — no LexerState or token array allocation.
+// CURSOR_SOURCE must be populated before calling (e.g. by lex_file_to_globals).
+// Returns the total number of tokens emitted (including the EOF token).
+pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
+    var n: i64 = source_len
+    if n < 0 { n = 0 }
+    if n > 1048576 { n = 1048576 }
+    CURSOR_SOURCE_LEN = n
+    var first_byte: i8 = 0 as i8
+    if n > 0 { first_byte = CURSOR_SOURCE[0] }
+    var cur: Cursor = Cursor {
+        source_len: n,
+        pos: 0,
+        line: 1,
+        col: 1,
+        current: first_byte,
+    }
+    var tc: i64 = 0
+
+    while !cur.is_eof() {
+        let ch = cur.current
+
         if is_whitespace(ch) {
-            state.cursor = skip_whitespace(state.cursor)
+            cur = skip_whitespace(cur)
             continue
         }
 
-        // Newline (significant for some contexts)
-        if ch == 10 {  // '\n'
-            state.cursor = state.cursor.advance()
+        if ch == 10 {
+            cur = cur.advance()
             continue
         }
 
-        // Comments: // and /* (check before operator scanning)
-        if ch == 47 {  // '/'
-            let next = state.cursor.peek()
-
-            // Doc comment: /// (but not ////)
+        if ch == 47 {
+            let next = cur.peek()
             if next == 47 {
-                let third = state.cursor.peek_n(2)
-                if third == 47 && state.cursor.peek_n(3) != 47 {
-                    let result = scan_doc_comment_line(state.cursor, false)
-                    state.cursor = result.cursor
-                    let tok = Token::with_kind(result.kind, result.start, result.end, state.cursor.line, state.cursor.col)
-                    if state.token_count < MAX_TOKENS {
-                        let tok_idx = state.token_count
-                        state.tokens[tok_idx as usize] = tok
-                        parser_set_token_at(tok_idx, tok)
-                        state.token_count = tok_idx + 1
+                let third = cur.peek_n(2)
+                if third == 47 && cur.peek_n(3) != 47 {
+                    let result = scan_doc_comment_line(cur, false)
+                    cur = result.cursor
+                    let tok = Token::with_kind(result.kind, result.start, result.end, cur.line, cur.col)
+                    if tc < 1048576 {
+                        parser_set_token_at(tc, tok)
+                        tc = tc + 1
                     }
                     continue
                 }
-                // Inner doc comment: //!
-                if third == 33 {  // '!'
-                    let result = scan_doc_comment_line(state.cursor, true)
-                    state.cursor = result.cursor
-                    let tok = Token::with_kind(result.kind, result.start, result.end, state.cursor.line, state.cursor.col)
-                    if state.token_count < MAX_TOKENS {
-                        let tok_idx = state.token_count
-                        state.tokens[tok_idx as usize] = tok
-                        parser_set_token_at(tok_idx, tok)
-                        state.token_count = tok_idx + 1
+                if third == 33 {
+                    let result = scan_doc_comment_line(cur, true)
+                    cur = result.cursor
+                    let tok = Token::with_kind(result.kind, result.start, result.end, cur.line, cur.col)
+                    if tc < 1048576 {
+                        parser_set_token_at(tc, tok)
+                        tc = tc + 1
                     }
                     continue
                 }
-                // Regular line comment
-                state.cursor = skip_line_comment(state.cursor)
+                cur = skip_line_comment(cur)
                 continue
             }
-
-            // Block doc comment: /** or /*!
-            if next == 42 {  // '*'
-                let third = state.cursor.peek_n(2)
-                if third == 42 && state.cursor.peek_n(3) != 47 {  // /** but not /**/
-                    let result = scan_doc_comment_block(state.cursor, false)
-                    state.cursor = result.cursor
-                    let tok = Token::with_kind(result.kind, result.start, result.end, state.cursor.line, state.cursor.col)
-                    if state.token_count < MAX_TOKENS {
-                        let tok_idx = state.token_count
-                        state.tokens[tok_idx as usize] = tok
-                        parser_set_token_at(tok_idx, tok)
-                        state.token_count = tok_idx + 1
+            if next == 42 {
+                let third = cur.peek_n(2)
+                if third == 42 && cur.peek_n(3) != 47 {
+                    let result = scan_doc_comment_block(cur, false)
+                    cur = result.cursor
+                    let tok = Token::with_kind(result.kind, result.start, result.end, cur.line, cur.col)
+                    if tc < 1048576 {
+                        parser_set_token_at(tc, tok)
+                        tc = tc + 1
                     }
                     continue
                 }
-                if third == 33 {  // /*!
-                    let result = scan_doc_comment_block(state.cursor, true)
-                    state.cursor = result.cursor
-                    let tok = Token::with_kind(result.kind, result.start, result.end, state.cursor.line, state.cursor.col)
-                    if state.token_count < MAX_TOKENS {
-                        let tok_idx = state.token_count
-                        state.tokens[tok_idx as usize] = tok
-                        parser_set_token_at(tok_idx, tok)
-                        state.token_count = tok_idx + 1
+                if third == 33 {
+                    let result = scan_doc_comment_block(cur, true)
+                    cur = result.cursor
+                    let tok = Token::with_kind(result.kind, result.start, result.end, cur.line, cur.col)
+                    if tc < 1048576 {
+                        parser_set_token_at(tc, tok)
+                        tc = tc + 1
                     }
                     continue
                 }
-                // Regular block comment (nestable)
-                let block_result = skip_block_comment(state.cursor)
-                state.cursor = block_result.cursor
-                if block_result.unterminated {
-                    let err = LexError::new(LexErrorKind::UnterminatedBlockComment, state.cursor.pos, state.cursor.line, state.cursor.col)
-                    if state.error_count < MAX_ERRORS {
-                        state.errors[state.error_count as usize] = err
-                        state.error_count = state.error_count + 1
-                    }
-                }
+                let block_result = skip_block_comment(cur)
+                cur = block_result.cursor
                 continue
             }
-
-            // Not a comment — fall through to operator scanning
         }
 
-        // String literal: "..."
-        if ch == 34 {  // '"'
-            let line = state.cursor.line
-            let col = state.cursor.col
-            let result = scan_string(state.cursor)
-            state.cursor = result.cursor
+        if ch == 34 {
+            let line = cur.line
+            let col = cur.col
+            let result = scan_string(cur)
+            cur = result.cursor
             var tok = Token::with_kind(result.kind, result.start, result.end, line, col)
             tok.text = result.text
             tok.text_len = result.text_len
-            if state.token_count < MAX_TOKENS {
-                let tok_idx = state.token_count
-                state.tokens[tok_idx as usize] = tok
-                parser_set_token_at(tok_idx, tok)
-                state.token_count = tok_idx + 1
-            }
-            if result.kind == TokenKind::Error {
-                let err = LexError::new(LexErrorKind::UnterminatedString, result.start, line, col)
-                if state.error_count < MAX_ERRORS {
-                    state.errors[state.error_count as usize] = err
-                    state.error_count = state.error_count + 1
-                }
+            if tc < 1048576 {
+                parser_set_token_at(tc, tok)
+                tc = tc + 1
             }
             continue
         }
 
-        // Char literal: '.'
-        if ch == 39 {  // '\''
-            let line = state.cursor.line
-            let col = state.cursor.col
-            let result = scan_char_literal(state.cursor)
-            state.cursor = result.cursor
+        if ch == 39 {
+            let line = cur.line
+            let col = cur.col
+            let result = scan_char_literal(cur)
+            cur = result.cursor
             let tok = Token::with_kind(result.kind, result.start, result.end, line, col)
-            if state.token_count < MAX_TOKENS {
-                let tok_idx = state.token_count
-                state.tokens[tok_idx as usize] = tok
-                parser_set_token_at(tok_idx, tok)
-                state.token_count = tok_idx + 1
+            if tc < 1048576 {
+                parser_set_token_at(tc, tok)
+                tc = tc + 1
             }
             continue
         }
 
-        // Numeric literals: 0-9
         if is_digit(ch) {
-            let line = state.cursor.line
-            let col = state.cursor.col
-            let result = scan_number(state.cursor)
-            state.cursor = result.cursor
+            let line = cur.line
+            let col = cur.col
+            let result = scan_number(cur)
+            cur = result.cursor
             let nv = parse_numeric(result.start, result.end, result.kind)
             var tok = Token::with_kind(result.kind, result.start, result.end, line, col)
             if nv.is_float {
@@ -554,164 +618,156 @@ pub fn lex(source: [i8; 1048576], source_len: i64, file_id: i32) -> LexerState w
             } else {
                 tok.int_value = nv.int_val
             }
-            if state.token_count < MAX_TOKENS {
-                let tok_idx = state.token_count
-                state.tokens[tok_idx as usize] = tok
-                parser_set_token_at(tok_idx, tok)
-                state.token_count = tok_idx + 1
+            if tc < 1048576 {
+                parser_set_token_at(tc, tok)
+                tc = tc + 1
             }
             continue
         }
 
-        // Identifiers and keywords: a-z, A-Z, _
         if is_ident_start(ch) {
-            let line = state.cursor.line
-            let col = state.cursor.col
-            let result = scan_identifier(state.cursor)
-            state.cursor = result.cursor
+            let line = cur.line
+            let col = cur.col
+            let result = scan_identifier(cur)
+            cur = result.cursor
             var tok = Token::with_kind(result.kind, result.start, result.end, line, col)
             tok.text = result.text
             tok.text_len = result.text_len
-            if state.token_count < MAX_TOKENS {
-                let tok_idx = state.token_count
-                state.tokens[tok_idx as usize] = tok
-                parser_set_token_at(tok_idx, tok)
-                state.token_count = tok_idx + 1
+            if tc < 1048576 {
+                parser_set_token_at(tc, tok)
+                tc = tc + 1
             }
             continue
         }
 
-        // Operators (check before delimiters for multi-char operators like .., ::, etc.)
-        // Dot needs special handling: could be '.', '..', '..=', '...'
-        if ch == 46 {  // '.'
-            let next = state.cursor.peek()
+        if ch == 46 {
+            let next = cur.peek()
             if next == 46 {
-                // ".." or "..=" or "..."
-                let line = state.cursor.line
-                let col = state.cursor.col
-                let result = scan_operator(state.cursor)
-                state.cursor = result.cursor
+                let line = cur.line
+                let col = cur.col
+                let result = scan_operator(cur)
+                cur = result.cursor
                 let tok = Token::with_kind(result.kind, result.start, result.end, line, col)
-                if state.token_count < MAX_TOKENS {
-                    let tok_idx = state.token_count
-                    state.tokens[tok_idx as usize] = tok
-                    parser_set_token_at(tok_idx, tok)
-                    state.token_count = tok_idx + 1
+                if tc < 1048576 {
+                    parser_set_token_at(tc, tok)
+                    tc = tc + 1
                 }
                 continue
             }
-            // Single dot -> punctuation
-            let line = state.cursor.line
-            let col = state.cursor.col
-            let result = scan_punctuation(state.cursor)
-            state.cursor = result.cursor
+            let line = cur.line
+            let col = cur.col
+            let result = scan_punctuation(cur)
+            cur = result.cursor
             let tok = Token::with_kind(result.kind, result.start, result.end, line, col)
-            if state.token_count < MAX_TOKENS {
-                let tok_idx = state.token_count
-                state.tokens[tok_idx as usize] = tok
-                parser_set_token_at(tok_idx, tok)
-                state.token_count = tok_idx + 1
+            if tc < 1048576 {
+                parser_set_token_at(tc, tok)
+                tc = tc + 1
             }
             continue
         }
 
-        // Colon: could be ':' or '::'
-        if ch == 58 {  // ':'
-            let next = state.cursor.peek()
+        if ch == 58 {
+            let next = cur.peek()
             if next == 58 {
-                let line = state.cursor.line
-                let col = state.cursor.col
-                let result = scan_operator(state.cursor)
-                state.cursor = result.cursor
+                let line = cur.line
+                let col = cur.col
+                let result = scan_operator(cur)
+                cur = result.cursor
                 let tok = Token::with_kind(result.kind, result.start, result.end, line, col)
-                if state.token_count < MAX_TOKENS {
-                    let tok_idx = state.token_count
-                    state.tokens[tok_idx as usize] = tok
-                    parser_set_token_at(tok_idx, tok)
-                    state.token_count = tok_idx + 1
+                if tc < 1048576 {
+                    parser_set_token_at(tc, tok)
+                    tc = tc + 1
                 }
                 continue
             }
-            // Single colon -> punctuation
-            let line = state.cursor.line
-            let col = state.cursor.col
-            let result = scan_punctuation(state.cursor)
-            state.cursor = result.cursor
+            let line = cur.line
+            let col = cur.col
+            let result = scan_punctuation(cur)
+            cur = result.cursor
             let tok = Token::with_kind(result.kind, result.start, result.end, line, col)
-            if state.token_count < MAX_TOKENS {
-                let tok_idx = state.token_count
-                state.tokens[tok_idx as usize] = tok
-                parser_set_token_at(tok_idx, tok)
-                state.token_count = tok_idx + 1
+            if tc < 1048576 {
+                parser_set_token_at(tc, tok)
+                tc = tc + 1
             }
             continue
         }
 
-        // Other operators
         if is_operator_start(ch) {
-            let line = state.cursor.line
-            let col = state.cursor.col
-            let result = scan_operator(state.cursor)
-            state.cursor = result.cursor
+            let line = cur.line
+            let col = cur.col
+            let result = scan_operator(cur)
+            cur = result.cursor
             let tok = Token::with_kind(result.kind, result.start, result.end, line, col)
-            if state.token_count < MAX_TOKENS {
-                let tok_idx = state.token_count
-                state.tokens[tok_idx as usize] = tok
-                parser_set_token_at(tok_idx, tok)
-                state.token_count = tok_idx + 1
+            if tc < 1048576 {
+                parser_set_token_at(tc, tok)
+                tc = tc + 1
             }
             continue
         }
 
-        // Delimiters: ( ) { } [ ]
         if is_delimiter(ch) {
-            let line = state.cursor.line
-            let col = state.cursor.col
-            let result = scan_delimiter(state.cursor)
-            state.cursor = result.cursor
+            let line = cur.line
+            let col = cur.col
+            let result = scan_delimiter(cur)
+            cur = result.cursor
             let tok = Token::with_kind(result.kind, result.start, result.end, line, col)
-            if state.token_count < MAX_TOKENS {
-                let tok_idx = state.token_count
-                state.tokens[tok_idx as usize] = tok
-                parser_set_token_at(tok_idx, tok)
-                state.token_count = tok_idx + 1
+            if tc < 1048576 {
+                parser_set_token_at(tc, tok)
+                tc = tc + 1
             }
             continue
         }
 
-        // Remaining punctuation: ; , @ #
         if is_punctuation(ch) {
-            let line = state.cursor.line
-            let col = state.cursor.col
-            let result = scan_punctuation(state.cursor)
-            state.cursor = result.cursor
+            let line = cur.line
+            let col = cur.col
+            let result = scan_punctuation(cur)
+            cur = result.cursor
             let tok = Token::with_kind(result.kind, result.start, result.end, line, col)
-            if state.token_count < MAX_TOKENS {
-                let tok_idx = state.token_count
-                state.tokens[tok_idx as usize] = tok
-                parser_set_token_at(tok_idx, tok)
-                state.token_count = tok_idx + 1
+            if tc < 1048576 {
+                parser_set_token_at(tc, tok)
+                tc = tc + 1
             }
             continue
         }
 
-        // Unknown character
-        let err = LexError::with_char(LexErrorKind::UnexpectedChar, state.cursor.pos, state.cursor.line, state.cursor.col, ch)
-        if state.error_count < MAX_ERRORS {
-            state.errors[state.error_count as usize] = err
-            state.error_count = state.error_count + 1
-        }
-        state.cursor = state.cursor.advance()
+        cur = cur.advance()
     }
 
-    // Emit EOF token
-    let eof_tok = Token::eof(state.cursor.pos, state.cursor.line, state.cursor.col)
-    if state.token_count < MAX_TOKENS {
-        let tok_idx = state.token_count
-        state.tokens[tok_idx as usize] = eof_tok
-        parser_set_token_at(tok_idx, eof_tok)
-        state.token_count = tok_idx + 1
+    let eof_tok = Token::eof(cur.pos, cur.line, cur.col)
+    if tc < 1048576 {
+        parser_set_token_at(tc, eof_tok)
+        tc = tc + 1
     }
+    tc
+}
 
-    state
+// Loads a .sio file directly into CURSOR_SOURCE, then lexes it to globals.
+// Returns the token count. Frame is tiny: file pointer + a few scalars.
+pub fn lex_file_to_globals(path: string) -> i64 with IO, Mut, Div, Panic {
+    if SOURCEFILE_TRACE == 1 { print("trace=lex_file_to_globals_enter\n") }
+    let size = file_size(path)
+    let data = read_file(path)
+    var n: i64 = size
+    if n < 0 { n = 0 }
+    if n > 1048576 { n = 1048576 }
+    var ci: i64 = 0
+    while ci < n {
+        CURSOR_SOURCE[ci as usize] = data[ci as usize]
+        ci = ci + 1
+    }
+    if SOURCEFILE_TRACE == 1 { print("trace=lex_file_to_globals_buf_ok\n") }
+    lex_source_to_globals(n)
+}
+
+// Load a .sio source file, lex it, and parse its items.
+// Returns Option<Box<ItemList>> (1 slot) — avoids IS_SPTR=4 Program struct returns.
+// Uses lex_file_to_globals to keep the frame tiny (no LexerState on stack).
+pub fn lex_file_parse_items(path: string) -> Option<Box<ItemList>> with IO, Mut, Div, Panic, Alloc {
+    if SOURCEFILE_TRACE == 1 { print("trace=lex_file_parse_items_enter\n") }
+    let tc = lex_file_to_globals(path)
+    if SOURCEFILE_TRACE == 1 { print("trace=lex_ok\n") }
+    let items = parse_items_preloaded(tc)
+    if SOURCEFILE_TRACE == 1 { print("trace=parse_ok\n") }
+    items
 }

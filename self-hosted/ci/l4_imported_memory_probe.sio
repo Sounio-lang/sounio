@@ -1,0 +1,148 @@
+// L4 — Imported Indexed Memory & Global Storage Truth
+//
+// Each probe isolates exactly one failure axis:
+//   Group A: argument char indexing (no global writes)
+//   Group B: read_file return-buffer indexing (no global writes)
+//   Group C: global array writes (no argument indexing)
+//   Group D: local controls (same file, not imported)
+
+use lexer::mod::{
+    sourcefile_trace_enable,
+    l4_probe_arg_char_0,
+    l4_probe_arg_char_1,
+    l4_probe_arg_len_by_idx,
+    l4_probe_read_idx_0,
+    l4_probe_read_idx_1,
+    l4_probe_global_write_0,
+    l4_probe_global_write_1,
+    l4_probe_global_write_idx,
+    l4_probe_global_read_0,
+    l4_probe_global_write_scalar,
+    l4_probe_global_read_scalar,
+    l4_probe_lex_from_file,
+}
+
+// ============================================================================
+// Group D — Local controls (same file, not imported)
+// ============================================================================
+
+var L4_LOCAL_SCRATCH: [i8; 512] = [0; 512]
+var L4_LOCAL_SCRATCH_LEN: i64 = 0
+
+fn local_arg_char_0(path: string) -> i64 with IO, Mut, Panic, Div {
+    print("stage=l4_local_arg_char_0_enter\n")
+    let ch = str_char_at(path, 0)
+    print("stage=l4_local_arg_char_0_ok\n")
+    ch
+}
+
+fn local_arg_char_1(path: string) -> i64 with IO, Mut, Panic, Div {
+    print("stage=l4_local_arg_char_1_enter\n")
+    let ch = str_char_at(path, 1)
+    print("stage=l4_local_arg_char_1_ok\n")
+    ch
+}
+
+fn local_read_idx_0(path: string) -> i64 with IO, Mut, Panic, Div {
+    print("stage=l4_local_read_idx_0_enter\n")
+    let raw = read_file(path)
+    print("stage=l4_local_read_idx_0_call_ok\n")
+    let b = raw[0]
+    print("stage=l4_local_read_idx_0_ok\n")
+    b as i64
+}
+
+fn local_global_write_0() -> i64 with IO, Mut, Panic, Div {
+    print("stage=l4_local_gw0_enter\n")
+    L4_LOCAL_SCRATCH[0] = 7 as i8
+    print("stage=l4_local_gw0_ok\n")
+    7
+}
+
+fn local_global_read_0() -> i64 with IO, Mut, Panic, Div {
+    print("stage=l4_local_gr0_enter\n")
+    let v = L4_LOCAL_SCRATCH[0]
+    print("stage=l4_local_gr0_ok\n")
+    v as i64
+}
+
+fn local_global_write_scalar() -> i64 with IO, Mut, Panic, Div {
+    print("stage=l4_local_gws_enter\n")
+    L4_LOCAL_SCRATCH_LEN = 42
+    print("stage=l4_local_gws_ok\n")
+    42
+}
+
+fn local_global_read_scalar() -> i64 with IO, Mut, Panic, Div {
+    print("stage=l4_local_grs_enter\n")
+    let v = L4_LOCAL_SCRATCH_LEN
+    print("stage=l4_local_grs_ok\n")
+    v
+}
+
+// ============================================================================
+// Mode dispatch
+// ============================================================================
+// Uppercase = imported (from lexer::mod), lowercase = local control
+//
+//   A/a = arg_char_0          (Group A: argument indexing)
+//   B/b = arg_char_1          (Group A: argument indexing, idx 1)
+//   C/c = arg_len_by_idx      (Group A: loop indexing) / local N/A — use 'a' run
+//   D/d = read_idx_0           (Group B: return-buffer indexing)
+//   E/e = read_idx_1           (Group B: return-buffer indexing, idx 1) / local N/A
+//   F/f = global_write_0       (Group C: global array write)
+//   G/g = global_read_0        (Group C: global array read)
+//   H/h = global_write_1       (Group C: global array write idx 1)
+//   I/i = global_write_idx(0)  (Group C: global array write via arg) / local N/A
+//   J/j = global_write_scalar  (Group C: global scalar write)
+//   K/k = global_read_scalar   (Group C: global scalar read)
+
+fn run_mode(mode: string, path: string) -> i64 with IO, Mut, Panic, Div {
+    let code = str_char_at(mode, 0)
+    // Group A: argument char indexing
+    if code == 65 { return l4_probe_arg_char_0(path) }      // A — imported
+    if code == 97 { return local_arg_char_0(path) }          // a — local
+    if code == 66 { return l4_probe_arg_char_1(path) }       // B — imported
+    if code == 98 { return local_arg_char_1(path) }          // b — local
+    if code == 67 { return l4_probe_arg_len_by_idx(path) }   // C — imported
+    // Group B: return-buffer indexing
+    if code == 68 { return l4_probe_read_idx_0(path) }       // D — imported
+    if code == 100 { return local_read_idx_0(path) }         // d — local
+    if code == 69 { return l4_probe_read_idx_1(path) }       // E — imported
+    // Group C: global storage
+    if code == 70 { return l4_probe_global_write_0() }       // F — imported
+    if code == 102 { return local_global_write_0() }         // f — local
+    if code == 71 { return l4_probe_global_read_0() }        // G — imported
+    if code == 103 { return local_global_read_0() }          // g — local
+    if code == 72 { return l4_probe_global_write_1() }       // H — imported
+    if code == 73 { return l4_probe_global_write_idx(0) }    // I — imported
+    if code == 74 { return l4_probe_global_write_scalar() }  // J — imported
+    if code == 106 { return local_global_write_scalar() }    // j — local
+    if code == 75 { return l4_probe_global_read_scalar() }   // K — imported
+    if code == 107 { return local_global_read_scalar() }     // k — local
+    // L = imported lex_from_file (tests lex + parser global arrays)
+    if code == 76 { return l4_probe_lex_from_file(path) }   // L — imported lex
+    print("unknown_mode\n")
+    0 - 1
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    print("stage=startup_ok\n")
+    let argc = arg_count()
+    if argc < 2 {
+        print("usage: l4_imported_memory_probe <mode> <path>\n")
+        return 2
+    }
+    print("stage=args_ok\n")
+    let mode = get_arg(0)
+    let path = get_arg(1)
+    sourcefile_trace_enable()
+    print("stage=dispatch_enter\n")
+    let rc = run_mode(mode, path)
+    print("stage=dispatch_ok\n")
+    print("result=")
+    print_int(rc)
+    print("\n")
+    print("stage=finalize_ok\n")
+    return 0
+}

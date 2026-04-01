@@ -141,7 +141,8 @@ struct Checker {
     type_depth: i64,
     expr_depth: i64,
     complexity_budget: i64,
-    const_int_names: [Name; 128],
+    const_int_name_bufs: [i8; 16384],
+    const_int_name_lens: [i64; 128],
     const_int_values: [i64; 128],
     const_int_known: [i64; 128], // 1=known constant int, 0=shadow/unknown
     const_int_count: i64,
@@ -154,8 +155,6 @@ struct Checker {
     ownership: OwnContext,
     trait_registry: TraitRegistry,
     impl_registry: ImplRegistry,
-    multitest_count: i64,
-    multitest_corrected: bool,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -178,12 +177,12 @@ fn empty_type_param_buf() -> TypeParamBuf {
 
 // Collect type parameter names from TypeParamDefList.
 // Returns (count, names_array) with up to 8 type params.
-fn collect_type_params(opt: Option<Box<TypeParamDefList>>) -> (i64, [Name; 8]) with Mut, Panic, Div {
+fn collect_type_params(opt: Option<Box<TypeParamDefList> >) -> (i64, [Name; 8]) with Mut, Panic, Div {
     let buf = collect_type_params_rec(opt, empty_type_param_buf())
     (buf.count, buf.names)
 }
 
-fn collect_type_params_rec(opt: Option<Box<TypeParamDefList>>, acc: TypeParamBuf) -> TypeParamBuf with Mut, Panic, Div {
+fn collect_type_params_rec(opt: Option<Box<TypeParamDefList> >, acc: TypeParamBuf) -> TypeParamBuf with Mut, Panic, Div {
     match opt {
         None => acc
         Some(node) => {
@@ -290,11 +289,11 @@ fn mangle_append_literal(result: &! Name, c0: i8, c1: i8, c2: i8, c3: i8, len: i
 // For each field, if its type is TyNamed and matches a type parameter name,
 // replace it with the corresponding concrete type argument.
 fn monomorphize_fields(
-    fields: Option<Box<FieldInfoList>>,
+    fields: Option<Box<FieldInfoList> >,
     tp_count: i64,
     tp_names: [Name; 8],
     args: TypeEntryList,
-) -> (Option<Box<FieldInfoList>>, i64) with Mut, Panic, Div, Alloc {
+) -> (Option<Box<FieldInfoList> >, i64) with Mut, Panic, Div, Alloc {
     match fields {
         None => (None, 0)
         Some(fl) => {
@@ -408,7 +407,8 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         type_depth: 0,
         expr_depth: 0,
         complexity_budget: 0,
-        const_int_names: [Name { buf: [0; 128], len: 0 }; 128],
+        const_int_name_bufs: [0; 16384],
+        const_int_name_lens: [0; 128],
         const_int_values: [0; 128],
         const_int_known: [0; 128],
         const_int_count: 0,
@@ -421,13 +421,295 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         ownership: own_context_new(),
         trait_registry: trait_registry_new(),
         impl_registry: impl_register_builtins(impl_registry_new()),
-        multitest_count: 0,
-        multitest_corrected: false,
     }
 }
 
+fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
+    (*raw).env = type_env_new()
+    (*raw).borrows = borrow_env_new()
+    (*raw).units = register_builtin_units(unit_registry_new())
+    (*raw).refinements = refinement_table_new()
+    (*raw).structs = struct_table_new()
+    (*raw).enums = enum_table_new()
+    (*raw).fn_sigs = fn_sig_table_new()
+    (*raw).algebras = empty_algebra_table()
+    (*raw).studies = empty_study_table()
+    (*raw).ontologies = empty_ontology_table()
+    (*raw).ontology_kernel = ontology_kernel_empty()
+    (*raw).hyper_exprs = hyper_expr_table_new()
+    (*raw).models = model_table_new()
+    (*raw).model_families = model_family_table_new()
+    (*raw).policies = policy_table_new()
+    (*raw).decision_policies = decision_policy_table_new()
+    (*raw).deferral_policies = deferral_policy_table_new()
+    (*raw).acquisition_policies = acquisition_policy_table_new()
+    (*raw).recourse_policies = recourse_policy_table_new()
+    (*raw).alternative_policies = alternative_policy_table_new()
+    (*raw).validations = validation_policy_table_new()
+    (*raw).contests = contest_table_new()
+    (*raw).audits = audit_table_new()
+    (*raw).mechanistic_reports = mechanistic_report_table_new()
+    (*raw).posterior_weights = posterior_weights_table_new()
+    (*raw).counterexamples = counterexample_table_new()
+    (*raw).contest_witnesses = contest_witness_table_new()
+    (*raw).robust_proofs = robust_proof_table_new()
+    (*raw).decision_certificates = decision_certificate_table_new()
+    (*raw).deferred_certificates = deferred_certificate_table_new()
+    (*raw).deferred_reason_witnesses = deferred_reason_witness_table_new()
+    (*raw).acquisition_plans = acquisition_plan_table_new()
+    (*raw).acquisition_reason_witnesses = acquisition_reason_witness_table_new()
+    (*raw).recourse_plans = recourse_plan_table_new()
+    (*raw).recourse_reason_witnesses = recourse_reason_witness_table_new()
+    (*raw).transition_policies = transition_policy_table_new()
+    (*raw).transition_protocols = transition_protocol_table_new()
+    (*raw).transition_steps = transition_step_table_new()
+    (*raw).transition_plans = transition_plan_table_new()
+    (*raw).transition_reason_witnesses = transition_reason_witness_table_new()
+    (*raw).monitoring_policies = monitoring_policy_table_new()
+    (*raw).observed_transitions = observed_transition_table_new()
+    (*raw).rollback_certificates = rollback_certificate_table_new()
+    (*raw).alternative_frontiers = alternative_frontier_table_new()
+    (*raw).alternative_candidates = alternative_candidate_table_new()
+    (*raw).alternative_sets = alternative_set_table_new()
+    (*raw).alternative_reason_witnesses = alternative_reason_witness_table_new()
+    (*raw).validated_manifests = validated_manifest_table_new()
+    (*raw).error_count = 0
+    (*raw).warning_count = 0
+    (*raw).had_error = false
+    (*raw).current_return_type = ty_unit()
+    (*raw).current_impl_type = ty_error()
+    (*raw).current_effects = [0; 8]
+    (*raw).current_effect_count = 0
+    (*raw).multitest_count = 0
+    (*raw).multitest_corrected = false
+    (*raw).last_literal_int = 0
+    (*raw).last_literal_float = 0.0
+    (*raw).last_literal_kind = 0
+    (*raw).loop_depth = 0
+    (*raw).suppress_linear_consume_depth = 0
+    (*raw).type_depth = 0
+    (*raw).expr_depth = 0
+    (*raw).complexity_budget = 0
+    (*raw).const_int_name_bufs = [0; 16384]
+    (*raw).const_int_name_lens = [0; 128]
+    (*raw).const_int_values = [0; 128]
+    (*raw).const_int_known = [0; 128]
+    (*raw).const_int_count = 0
+    (*raw).const_int_scope_marks = [0; 64]
+    (*raw).const_int_scope_depth = 0
+    (*raw).effects = effect_table_new()
+    (*raw).effect_ops = effect_op_table_new()
+    (*raw).handler_depth = 0
+    (*raw).current_handler_op_id = -1
+    (*raw).ownership = own_context_new()
+    (*raw).trait_registry = trait_registry_new()
+    (*raw).impl_registry = impl_register_builtins(impl_registry_new())
+}
+
+fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Div, Alloc {
+    (*dst).env = src.env
+    (*dst).borrows = src.borrows
+    (*dst).units = src.units
+    (*dst).refinements = src.refinements
+    (*dst).structs = src.structs
+    (*dst).enums = src.enums
+    (*dst).fn_sigs = src.fn_sigs
+    (*dst).algebras = src.algebras
+    (*dst).studies = src.studies
+    (*dst).ontologies = src.ontologies
+    (*dst).ontology_kernel = src.ontology_kernel
+    (*dst).hyper_exprs = src.hyper_exprs
+    (*dst).models = src.models
+    (*dst).model_families = src.model_families
+    (*dst).policies = src.policies
+    (*dst).decision_policies = src.decision_policies
+    (*dst).deferral_policies = src.deferral_policies
+    (*dst).acquisition_policies = src.acquisition_policies
+    (*dst).recourse_policies = src.recourse_policies
+    (*dst).alternative_policies = src.alternative_policies
+    (*dst).validations = src.validations
+    (*dst).contests = src.contests
+    (*dst).audits = src.audits
+    (*dst).mechanistic_reports = src.mechanistic_reports
+    (*dst).posterior_weights = src.posterior_weights
+    (*dst).counterexamples = src.counterexamples
+    (*dst).contest_witnesses = src.contest_witnesses
+    (*dst).robust_proofs = src.robust_proofs
+    (*dst).decision_certificates = src.decision_certificates
+    (*dst).deferred_certificates = src.deferred_certificates
+    (*dst).deferred_reason_witnesses = src.deferred_reason_witnesses
+    (*dst).acquisition_plans = src.acquisition_plans
+    (*dst).acquisition_reason_witnesses = src.acquisition_reason_witnesses
+    (*dst).recourse_plans = src.recourse_plans
+    (*dst).recourse_reason_witnesses = src.recourse_reason_witnesses
+    (*dst).transition_policies = src.transition_policies
+    (*dst).transition_protocols = src.transition_protocols
+    (*dst).transition_steps = src.transition_steps
+    (*dst).transition_plans = src.transition_plans
+    (*dst).transition_reason_witnesses = src.transition_reason_witnesses
+    (*dst).monitoring_policies = src.monitoring_policies
+    (*dst).observed_transitions = src.observed_transitions
+    (*dst).rollback_certificates = src.rollback_certificates
+    (*dst).alternative_frontiers = src.alternative_frontiers
+    (*dst).alternative_candidates = src.alternative_candidates
+    (*dst).alternative_sets = src.alternative_sets
+    (*dst).alternative_reason_witnesses = src.alternative_reason_witnesses
+    (*dst).validated_manifests = src.validated_manifests
+    (*dst).error_count = src.error_count
+    (*dst).warning_count = src.warning_count
+    (*dst).had_error = src.had_error
+    (*dst).current_return_type = src.current_return_type
+    (*dst).current_impl_type = src.current_impl_type
+    (*dst).current_effects = src.current_effects
+    (*dst).current_effect_count = src.current_effect_count
+    (*dst).multitest_count = src.multitest_count
+    (*dst).multitest_corrected = src.multitest_corrected
+    (*dst).last_literal_int = src.last_literal_int
+    (*dst).last_literal_float = src.last_literal_float
+    (*dst).last_literal_kind = src.last_literal_kind
+    (*dst).loop_depth = src.loop_depth
+    (*dst).suppress_linear_consume_depth = src.suppress_linear_consume_depth
+    (*dst).type_depth = src.type_depth
+    (*dst).expr_depth = src.expr_depth
+    (*dst).complexity_budget = src.complexity_budget
+    (*dst).const_int_name_bufs = src.const_int_name_bufs
+    (*dst).const_int_name_lens = src.const_int_name_lens
+    (*dst).const_int_values = src.const_int_values
+    (*dst).const_int_known = src.const_int_known
+    (*dst).const_int_count = src.const_int_count
+    (*dst).const_int_scope_marks = src.const_int_scope_marks
+    (*dst).const_int_scope_depth = src.const_int_scope_depth
+    (*dst).effects = src.effects
+    (*dst).effect_ops = src.effect_ops
+    (*dst).handler_depth = src.handler_depth
+    (*dst).current_handler_op_id = src.current_handler_op_id
+    (*dst).ownership = src.ownership
+    (*dst).trait_registry = src.trait_registry
+    (*dst).impl_registry = src.impl_registry
+}
+
+fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    let next = (*c).collect_items(items)
+    checker_store_from_value(c, next)
+}
+
+fn checker_check_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    let next = (*c).check_items(items)
+    checker_store_from_value(c, next)
+}
+
+fn checker_check_items_inner_return_error_count_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let next = (*c).check_items(items)
+    print("stage=inner_after_check_items_value\n")
+    next.error_count
+}
+
+fn checker_check_items_inner_store_stop_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let next = (*c).check_items(items)
+    print("stage=inner_after_check_items_value\n")
+    checker_store_from_value(c, next)
+    print("stage=inner_after_store\n")
+    0
+}
+
+fn checker_check_items_inner_store_return_error_count_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let next = (*c).check_items(items)
+    print("stage=inner_after_check_items_value\n")
+    checker_store_from_value(c, next)
+    print("stage=inner_after_store\n")
+    (*c).error_count
+}
+
+fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let next = (*c).check_items(items)
+    checker_store_from_value(c, next)
+    if (*c).had_error {
+        1
+    } else {
+        0
+    }
+}
+
+fn checker_collect_then_check_inner_emit_status_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let collected = (*c).collect_items(items)
+    checker_store_from_value(c, collected)
+    let next = (*c).check_items(items)
+    checker_store_from_value(c, next)
+    print("inner_had_error=")
+    if (*c).had_error {
+        print("1\n")
+        1
+    } else {
+        print("0\n")
+        0
+    }
+}
+
+fn checker_error_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).error_count
+}
+
+fn checker_warning_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).warning_count
+}
+
+fn checker_fn_sig_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).fn_sigs.count
+}
+
+// --------------------------------------------------------
+// Summary API (driver-facing scalar surface only)
+// --------------------------------------------------------
+
+fn checker_const_name_write(
+    bufs: &! [i8; 16384],
+    lens: &! [i64; 128],
+    idx: i64,
+    name: Name
+) with Mut, Panic, Div {
+    if idx < 0 || idx >= 128 {
+        return
+    }
+    let clamped_len = if name.len > 128 { 128 } else { name.len }
+    lens[idx as usize] = clamped_len
+    let base = idx * 128
+    var j: i64 = 0
+    while j < 128 {
+        if j < clamped_len {
+            bufs[(base + j) as usize] = name.buf[j as usize]
+        } else {
+            bufs[(base + j) as usize] = 0
+        }
+        j = j + 1
+    }
+}
+
+fn checker_const_name_eq(
+    bufs: &[i8; 16384],
+    lens: &[i64; 128],
+    idx: i64,
+    name: Name
+) -> bool with Panic, Div {
+    if idx < 0 || idx >= 128 {
+        return false
+    }
+    let clamped_len = if name.len > 128 { 128 } else { name.len }
+    if lens[idx as usize] != clamped_len {
+        return false
+    }
+    let base = idx * 128
+    var j: i64 = 0
+    while j < clamped_len {
+        if bufs[(base + j) as usize] != name.buf[j as usize] {
+            return false
+        }
+        j = j + 1
+    }
+    true
+}
+
 fn check_policy_requirements_to_ir_export(
-    opt: Option<Box<PolicyRequirementInfoList>>,
+    opt: Option<Box<PolicyRequirementInfoList> >,
     out: [IrPolicyRequirementInfo; 8],
     idx: i64
 ) -> [IrPolicyRequirementInfo; 8] with Mut, Panic, Div, Alloc {
@@ -1863,7 +2145,7 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
     }
 }
 
-fn print_tuple_type_elems(opt: Option<Box<TypeEntryList>>) with IO, Mut, Panic, Div, Alloc {
+fn print_tuple_type_elems(opt: Option<Box<TypeEntryList> >) with IO, Mut, Panic, Div, Alloc {
     match opt {
         None => {}
         Some(list) => {
@@ -2146,6 +2428,24 @@ impl Checker {
         print_warning_message(code)
         print("\n")
         c
+    }
+
+    fn checker_report_warning_at_mut(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
+        (*c).warning_count = (*c).warning_count + 1
+        print("warning[W")
+        if code < 100 { print("0") }
+        if code < 10 { print("0") }
+        print_int(code)
+        print("]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": ")
+        print_warning_message(code)
+        print("\n")
     }
 
     fn report_unknown_policy_metric(self, span: Span, metric_name: Name) -> Checker with Mut, IO, Panic, Div {
@@ -3955,7 +4255,7 @@ impl Checker {
         } else {
             c.const_int_count = c.const_int_count + 1
         }
-        c.const_int_names[idx as usize] = name
+        checker_const_name_write(&! c.const_int_name_bufs, &! c.const_int_name_lens, idx, name)
         c.const_int_known[idx as usize] = known
         c.const_int_values[idx as usize] = value
         c
@@ -3972,7 +4272,7 @@ impl Checker {
     fn const_int_lookup(self, name: Name) -> (bool, i64) with Mut, Panic, Div {
         var i = self.const_int_count - 1
         while i >= 0 {
-            if name_eq(self.const_int_names[i as usize], name) {
+            if checker_const_name_eq(&self.const_int_name_bufs, &self.const_int_name_lens, i, name) {
                 if self.const_int_known[i as usize] == 1 {
                     return (true, self.const_int_values[i as usize])
                 }
@@ -4275,7 +4575,7 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("   |\n   = help: bitwise operators (`&`, `|`, `^`) require integer operands\n")
     }
     else if code == 49 {
-        print("   |\n   = help: shift operators (`<<`, `>>`) require integer operands\n")
+        print("   |\n   = help: shift operators (`<<`, `> >`) require integer operands\n")
     }
     else if code == 50 {
         print("   |\n   = help: modulo operator (`%`) requires integer operands\n")
@@ -4738,7 +5038,7 @@ fn print_warning_message(code: i64) with IO, Mut, Panic, Div {
 // Borrow checking helpers
 // ============================================================
 
-fn call_expr_is_builtin_prove_robust(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_prove_robust(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4752,7 +5052,7 @@ fn call_expr_is_builtin_prove_robust(opt: Option<Box<Expr>>) -> bool with Mut, P
 
 // "validate_manifest" = v(118) a(97) l(108) i(105) d(100) a(97) t(116) e(101)
 //                       _(95) m(109) a(97) n(110) i(105) f(102) e(101) s(115) t(116), len=17
-fn call_expr_is_builtin_validate_manifest(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_validate_manifest(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4766,7 +5066,7 @@ fn call_expr_is_builtin_validate_manifest(opt: Option<Box<Expr>>) -> bool with M
     }
 }
 
-fn call_expr_is_builtin_admit_action(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_admit_action(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4778,7 +5078,7 @@ fn call_expr_is_builtin_admit_action(opt: Option<Box<Expr>>) -> bool with Mut, P
     }
 }
 
-fn call_expr_is_builtin_defer_action(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_defer_action(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4790,7 +5090,7 @@ fn call_expr_is_builtin_defer_action(opt: Option<Box<Expr>>) -> bool with Mut, P
     }
 }
 
-fn call_expr_is_builtin_deferral_reason(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_deferral_reason(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4802,7 +5102,7 @@ fn call_expr_is_builtin_deferral_reason(opt: Option<Box<Expr>>) -> bool with Mut
     }
 }
 
-fn call_expr_is_builtin_plan_acquisition(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_plan_acquisition(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4814,7 +5114,7 @@ fn call_expr_is_builtin_plan_acquisition(opt: Option<Box<Expr>>) -> bool with Mu
     }
 }
 
-fn call_expr_is_builtin_acquisition_reason(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_acquisition_reason(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4826,7 +5126,7 @@ fn call_expr_is_builtin_acquisition_reason(opt: Option<Box<Expr>>) -> bool with 
     }
 }
 
-fn call_expr_is_builtin_plan_recourse(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_plan_recourse(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4838,7 +5138,7 @@ fn call_expr_is_builtin_plan_recourse(opt: Option<Box<Expr>>) -> bool with Mut, 
     }
 }
 
-fn call_expr_is_builtin_recourse_reason(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_recourse_reason(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4850,7 +5150,7 @@ fn call_expr_is_builtin_recourse_reason(opt: Option<Box<Expr>>) -> bool with Mut
     }
 }
 
-fn call_expr_is_builtin_propose_alternatives(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_propose_alternatives(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4862,7 +5162,7 @@ fn call_expr_is_builtin_propose_alternatives(opt: Option<Box<Expr>>) -> bool wit
     }
 }
 
-fn call_expr_is_builtin_alternative_count(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_alternative_count(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4874,7 +5174,7 @@ fn call_expr_is_builtin_alternative_count(opt: Option<Box<Expr>>) -> bool with M
     }
 }
 
-fn call_expr_is_builtin_alternative_option(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_alternative_option(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4886,7 +5186,7 @@ fn call_expr_is_builtin_alternative_option(opt: Option<Box<Expr>>) -> bool with 
     }
 }
 
-fn call_expr_is_builtin_alternative_reason(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_alternative_reason(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4898,7 +5198,7 @@ fn call_expr_is_builtin_alternative_reason(opt: Option<Box<Expr>>) -> bool with 
     }
 }
 
-fn call_expr_is_builtin_commit_alternative(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_commit_alternative(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4910,7 +5210,7 @@ fn call_expr_is_builtin_commit_alternative(opt: Option<Box<Expr>>) -> bool with 
     }
 }
 
-fn call_expr_is_builtin_transition_reason(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_transition_reason(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4922,7 +5222,7 @@ fn call_expr_is_builtin_transition_reason(opt: Option<Box<Expr>>) -> bool with M
     }
 }
 
-fn call_expr_is_builtin_transition_step_count(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_transition_step_count(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4934,7 +5234,7 @@ fn call_expr_is_builtin_transition_step_count(opt: Option<Box<Expr>>) -> bool wi
     }
 }
 
-fn call_expr_is_builtin_observe_transition(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_observe_transition(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4946,7 +5246,7 @@ fn call_expr_is_builtin_observe_transition(opt: Option<Box<Expr>>) -> bool with 
     }
 }
 
-fn call_expr_is_builtin_rollback_transition(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_rollback_transition(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4958,7 +5258,7 @@ fn call_expr_is_builtin_rollback_transition(opt: Option<Box<Expr>>) -> bool with
     }
 }
 
-fn call_expr_is_builtin_measure(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_measure(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4970,7 +5270,7 @@ fn call_expr_is_builtin_measure(opt: Option<Box<Expr>>) -> bool with Mut, Panic,
     }
 }
 
-fn call_expr_is_builtin_lift_knowledge(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_lift_knowledge(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -4984,7 +5284,7 @@ fn call_expr_is_builtin_lift_knowledge(opt: Option<Box<Expr>>) -> bool with Mut,
     }
 }
 
-fn call_expr_is_builtin_slice_len(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+fn call_expr_is_builtin_slice_len(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -5024,7 +5324,7 @@ fn contest_witness_kind_from_name(name: Name) -> i64 with Panic, Div {
     -1
 }
 
-fn call_expr_contest_witness_kind(opt: Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc, IO {
+fn call_expr_contest_witness_kind(opt: Option<Box<Expr> >) -> i64 with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent {
@@ -5216,14 +5516,14 @@ fn transition_reason_type_name() -> Name with Mut, Panic, Div {
     n
 }
 
-fn expr_list_head(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc {
+fn expr_list_head(opt: Option<Box<ExprList> >) -> Option<Box<Expr> > with Alloc {
     match opt {
         Some(list) => Some(Box::new((*list).head))
         None => None
     }
 }
 
-fn expr_list_second(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc {
+fn expr_list_second(opt: Option<Box<ExprList> >) -> Option<Box<Expr> > with Alloc {
     match opt {
         Some(list) => {
             match (*list).tail {
@@ -5235,7 +5535,7 @@ fn expr_list_second(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc 
     }
 }
 
-fn expr_list_third(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc {
+fn expr_list_third(opt: Option<Box<ExprList> >) -> Option<Box<Expr> > with Alloc {
     match opt {
         Some(list) => {
             match (*list).tail {
@@ -5269,7 +5569,7 @@ fn checker_copy_string_list_tail_to_name(seg: StringList) -> Name with Mut, Pani
     }
 }
 
-fn contest_model_list_present(opt: Option<Box<ExprList>>) -> bool {
+fn contest_model_list_present(opt: Option<Box<ExprList> >) -> bool {
     match opt {
         Some(_) => true
         None => false
@@ -5286,7 +5586,7 @@ fn contest_model_name(e: Expr) -> Name with Mut, Panic, Div, Alloc {
     }
 }
 
-fn multitest_call_name(opt: Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+fn multitest_call_name(opt: Option<Box<Expr> >) -> Name with Mut, Panic, Div, Alloc {
     match opt {
         Some(callee) => {
             if (*callee).kind == ExprKind::ExprPath {
@@ -5343,7 +5643,7 @@ fn hypothesis_outcome_name_from_expr(e: Expr) -> Name with Mut, Panic, Div, Allo
     }
 }
 
-fn hypothesis_outcome_name_from_args(opt: Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
+fn hypothesis_outcome_name_from_args(opt: Option<Box<ExprList> >) -> Name with Mut, Panic, Div, Alloc {
     match expr_list_head(opt) {
         Some(arg) => hypothesis_outcome_name_from_expr(*arg)
         None => empty_name()
@@ -5365,12 +5665,12 @@ fn active_study_has_hypothesis_outcome(studies: StudyTable, outcome_name: Name) 
     false
 }
 
-fn contest_info_from_expr_models(opt: Option<Box<ExprList>>) -> ContestInfo with Mut, Panic, Div, Alloc {
+fn contest_info_from_expr_models(opt: Option<Box<ExprList> >) -> ContestInfo with Mut, Panic, Div, Alloc {
     let info = empty_contest_info()
     contest_info_from_expr_models_loop(opt, info, 0)
 }
 
-fn contest_info_from_expr_models_loop(opt: Option<Box<ExprList>>, info: ContestInfo, idx: i64) -> ContestInfo with Mut, Panic, Div, Alloc {
+fn contest_info_from_expr_models_loop(opt: Option<Box<ExprList> >, info: ContestInfo, idx: i64) -> ContestInfo with Mut, Panic, Div, Alloc {
     match opt {
         Some(list) => {
             var next = info
@@ -5392,7 +5692,7 @@ fn model_output_ty(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
     type_entry_list_get(ty.tuple_elems, 1)
 }
 
-fn contest_model_lists_match(opt: Option<Box<ExprList>>, family: ModelFamilyInfo, idx: i64) -> bool with Mut, Panic, Div, Alloc {
+fn contest_model_lists_match(opt: Option<Box<ExprList> >, family: ModelFamilyInfo, idx: i64) -> bool with Mut, Panic, Div, Alloc {
     match opt {
         Some(list) => {
             if idx >= family.model_count || idx >= 16 {
@@ -5742,7 +6042,7 @@ fn check_policy_requirements_against_contest(
     checker: Checker,
     span: Span,
     policy_name: Name,
-    reqs: Option<Box<PolicyRequirementInfoList>>,
+    reqs: Option<Box<PolicyRequirementInfoList> >,
     contest_id: i64
 ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
     match reqs {
@@ -5783,7 +6083,7 @@ fn unary_operand_root_name(expr: Expr) -> Name {
     empty_type_name()
 }
 
-fn unary_operand_name(opt: Option<Box<Expr>>) -> Name {
+fn unary_operand_name(opt: Option<Box<Expr> >) -> Name {
     match opt {
         Some(inner) => unary_operand_root_name(*inner)
         None => empty_type_name()
@@ -5952,14 +6252,14 @@ fn slice_borrow_result_type(base_ty: TypeEntry, want_mut: bool) -> TypeEntry wit
     }
 }
 
-fn expr_is_half_open_range(opt: Option<Box<Expr>>) -> bool {
+fn expr_is_half_open_range(opt: Option<Box<Expr> >) -> bool {
     match opt {
         Some(expr) => (*expr).kind == ExprKind::ExprRange && (*expr).bin_op == BinaryOp::OpRange
         None => false
     }
 }
 
-fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr>>) -> (bool, i64) with Mut, Panic, Div, Alloc {
+fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (bool, i64) with Mut, Panic, Div, Alloc {
     match opt {
         Some(inner) => {
             let e = *inner
@@ -6124,7 +6424,7 @@ impl Checker {
         (result.0.exit_type_depth(), result.1)
     }
 
-    fn lower_chan_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_chan_type(self, opt: Option<Box<TypeExpr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(inner_te) => {
                 let pair = self.lower_type_expr(*inner_te)
@@ -6136,7 +6436,7 @@ impl Checker {
         }
     }
 
-    fn lower_named_type_with_args(self, path: AstPath, type_args: Option<Box<TypeExprList>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_named_type_with_args(self, path: AstPath, type_args: Option<Box<TypeExprList> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match type_args {
             None => self.lower_named_type(path)
             Some(args) => {
@@ -6303,21 +6603,21 @@ impl Checker {
         }
     }
 
-    fn lower_ref_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_ref_type(self, opt: Option<Box<TypeExpr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(inner_te) => self.lower_ref_like_type(*inner_te, false)
             None => (self, ty_error())
         }
     }
 
-    fn lower_ref_mut_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_ref_mut_type(self, opt: Option<Box<TypeExpr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(inner_te) => self.lower_ref_like_type(*inner_te, true)
             None => (self, ty_error())
         }
     }
 
-    fn lower_array_type(self, inner_opt: Option<Box<TypeExpr>>, size_opt: Option<Box<Expr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_array_type(self, inner_opt: Option<Box<TypeExpr> >, size_opt: Option<Box<Expr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match inner_opt {
             Some(inner_te) => {
                 let pair = self.lower_type_expr(*inner_te)
@@ -6330,7 +6630,7 @@ impl Checker {
         }
     }
 
-    fn lower_tuple_type(self, opt: Option<Box<TypeExprList>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_tuple_type(self, opt: Option<Box<TypeExprList> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(tel) => {
                 let pair = self.lower_type_expr_list(*tel)
@@ -6360,7 +6660,7 @@ impl Checker {
     fn lower_fn_type_expr(self, te: TypeExpr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
         // 1. Lower parameter types from te.type_args (TypeExprList)
-        var params: Option<Box<FnParamList>> = None
+        var params: Option<Box<FnParamList> > = None
         var param_count: i64 = 0
         match te.type_args {
             Some(tel) => {
@@ -6416,7 +6716,7 @@ impl Checker {
     }
 
     // Sprint 231: Convert TypeExprList (fn type params) to FnParamList
-    fn lower_fn_type_params(self, tel: TypeExprList, idx: i64) -> (Checker, Option<Box<FnParamList>>, i64) with Mut, Panic, Div, Alloc, IO {
+    fn lower_fn_type_params(self, tel: TypeExprList, idx: i64) -> (Checker, Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_type_expr(tel.head)
         var c = pair.0
         let param_ty = pair.1
@@ -6469,7 +6769,7 @@ impl Checker {
         (effects, count)
     }
 
-    fn lower_opt_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_opt_type(self, opt: Option<Box<TypeExpr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(te) => self.lower_type_expr(*te)
             None => (self, ty_unknown())
@@ -6488,14 +6788,14 @@ impl Checker {
         }
     }
 
-    fn lower_knowledge_type(self, opt: Option<Box<KnowledgeTypeInfo>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_knowledge_type(self, opt: Option<Box<KnowledgeTypeInfo> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(info) => check_knowledge_type(self, *info)
             None => (self, ty_error())
         }
     }
 
-    fn lower_single_wrapper_arg(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_single_wrapper_arg(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(args) => {
                 let first = (*args).head
@@ -6508,7 +6808,7 @@ impl Checker {
         }
     }
 
-    fn lower_model_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_model_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(args) => {
                 match (*args).tail {
@@ -6529,7 +6829,7 @@ impl Checker {
         }
     }
 
-    fn lower_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_policy_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6538,7 +6838,7 @@ impl Checker {
         }
     }
 
-    fn lower_acquisition_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_acquisition_policy_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6547,7 +6847,7 @@ impl Checker {
         }
     }
 
-    fn lower_acquisition_plan_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_acquisition_plan_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6556,7 +6856,7 @@ impl Checker {
         }
     }
 
-    fn lower_recourse_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_recourse_policy_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6565,7 +6865,7 @@ impl Checker {
         }
     }
 
-    fn lower_recourse_plan_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_recourse_plan_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6574,7 +6874,7 @@ impl Checker {
         }
     }
 
-    fn lower_transition_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_transition_policy_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6583,7 +6883,7 @@ impl Checker {
         }
     }
 
-    fn lower_transition_plan_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_transition_plan_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6592,7 +6892,7 @@ impl Checker {
         }
     }
 
-    fn lower_monitoring_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_monitoring_policy_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6601,7 +6901,7 @@ impl Checker {
         }
     }
 
-    fn lower_observed_transition_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_observed_transition_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6610,7 +6910,7 @@ impl Checker {
         }
     }
 
-    fn lower_rollback_certificate_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_rollback_certificate_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6619,7 +6919,7 @@ impl Checker {
         }
     }
 
-    fn lower_alternative_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_alternative_policy_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6628,7 +6928,7 @@ impl Checker {
         }
     }
 
-    fn lower_alternative_set_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_alternative_set_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6637,7 +6937,7 @@ impl Checker {
         }
     }
 
-    fn lower_alternative_option_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_alternative_option_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6646,7 +6946,7 @@ impl Checker {
         }
     }
 
-    fn lower_decision_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_decision_policy_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6655,7 +6955,7 @@ impl Checker {
         }
     }
 
-    fn lower_deferral_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_deferral_policy_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6664,7 +6964,7 @@ impl Checker {
         }
     }
 
-    fn lower_contest_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_contest_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(args) => {
                 match (*args).tail {
@@ -6719,7 +7019,7 @@ impl Checker {
         }
     }
 
-    fn lower_robust_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_robust_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(args) => {
                 match (*args).tail {
@@ -6759,14 +7059,14 @@ impl Checker {
         }
     }
 
-    fn lower_intervention_type(self, opt: Option<Box<KnowledgeTypeInfo>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_intervention_type(self, opt: Option<Box<KnowledgeTypeInfo> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(info) => check_intervention_type(self, *info)
             None => (self, ty_error())
         }
     }
 
-    fn lower_counterfactual_type(self, opt: Option<Box<KnowledgeTypeInfo>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_counterfactual_type(self, opt: Option<Box<KnowledgeTypeInfo> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(info) => check_counterfactual_type(self, *info)
             None => (self, ty_error())
@@ -6775,8 +7075,8 @@ impl Checker {
 
     fn lower_validated_type(
         self,
-        type_args: Option<Box<TypeExprList>>,
-        opt: Option<Box<KnowledgeTypeInfo>>,
+        type_args: Option<Box<TypeExprList> >,
+        opt: Option<Box<KnowledgeTypeInfo> >,
         span: Span
     ) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
@@ -6792,7 +7092,7 @@ impl Checker {
         }
     }
 
-    fn lower_admissible_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_admissible_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6801,7 +7101,7 @@ impl Checker {
         }
     }
 
-    fn lower_deferred_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_deferred_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6814,7 +7114,7 @@ impl Checker {
     // Sprint 27: Annotation syntax lowering
     // ============================================================
 
-    fn lower_diffprivate_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_diffprivate_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6823,7 +7123,7 @@ impl Checker {
         }
     }
 
-    fn lower_dp_budget_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_dp_budget_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6832,7 +7132,7 @@ impl Checker {
         }
     }
 
-    fn lower_causal_effect_annotation(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_causal_effect_annotation(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6841,7 +7141,7 @@ impl Checker {
         }
     }
 
-    fn lower_aleatoric_annotation(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_aleatoric_annotation(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6850,7 +7150,7 @@ impl Checker {
         }
     }
 
-    fn lower_potential_outcome_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_potential_outcome_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6859,7 +7159,7 @@ impl Checker {
         }
     }
 
-    fn lower_proof_annotation(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_proof_annotation(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6868,7 +7168,7 @@ impl Checker {
         }
     }
 
-    fn lower_lemma_annotation(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_lemma_annotation(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6877,7 +7177,7 @@ impl Checker {
         }
     }
 
-    fn lower_axiom_annotation(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_axiom_annotation(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
             pair
@@ -6886,7 +7186,7 @@ impl Checker {
         }
     }
 
-    fn lower_refinement_type(self, opt: Option<Box<RefinementInfo>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_refinement_type(self, opt: Option<Box<RefinementInfo> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(info) => {
                 let ri = *info
@@ -6919,7 +7219,7 @@ impl Checker {
     }
 }
 
-fn lower_array_size(opt: Option<Box<Expr>>) -> i64 {
+fn lower_array_size(opt: Option<Box<Expr> >) -> i64 {
     match opt {
         Some(e) => (*e).int_val
         None => -1
@@ -6931,7 +7231,7 @@ fn lower_array_size(opt: Option<Box<Expr>>) -> i64 {
 // ============================================================
 
 impl Checker {
-    fn collect_items(self, items: Option<Box<ItemList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_items(self, items: Option<Box<ItemList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
         var cursor = items
         while true {
@@ -6977,7 +7277,7 @@ impl Checker {
         }
     }
 
-    fn collect_item_effect(self, opt: Option<Box<EffectDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_item_effect(self, opt: Option<Box<EffectDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             None => self
             Some(edef) => {
@@ -6999,7 +7299,7 @@ impl Checker {
         }
     }
 
-    fn collect_effect_op_defs(self, opt: Option<Box<EffectOpDefList>>, effect_id: i64) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_effect_op_defs(self, opt: Option<Box<EffectOpDefList> >, effect_id: i64) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             None => (self, 0)
             Some(node) => {
@@ -7049,7 +7349,7 @@ impl Checker {
         -1
     }
 
-    fn extract_effects_with_checker(self, opt: Option<Box<EffectList>>) -> (Checker, [i64; 8], i64) with Mut, Panic, Div {
+    fn extract_effects_with_checker(self, opt: Option<Box<EffectList> >) -> (Checker, [i64; 8], i64) with Mut, Panic, Div {
         match opt {
             None => (self, [0; 8], 0)
             Some(list) => self.collect_effects_with_checker(*list, [0; 8], 0)
@@ -7083,7 +7383,7 @@ impl Checker {
         }
     }
 
-    fn collect_type_alias(self, name: Name, ty_opt: Option<Box<TypeExpr>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_type_alias(self, name: Name, ty_opt: Option<Box<TypeExpr> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match ty_opt {
             Some(te_box) => {
                 let te = *te_box
@@ -7145,7 +7445,7 @@ impl Checker {
         c
     }
 
-    fn collect_policy_def(self, name: Name, opt: Option<Box<PolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_policy_def(self, name: Name, opt: Option<Box<PolicyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(pd) => {
                 let target_pair = self.lower_type_expr((*pd).target_type)
@@ -7175,7 +7475,7 @@ impl Checker {
         }
     }
 
-    fn collect_acquisition_policy_def(self, name: Name, opt: Option<Box<AcquisitionPolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_acquisition_policy_def(self, name: Name, opt: Option<Box<AcquisitionPolicyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(ap) => {
                 let target_pair = self.lower_type_expr((*ap).target_type)
@@ -7203,7 +7503,7 @@ impl Checker {
         }
     }
 
-    fn collect_recourse_policy_def(self, name: Name, opt: Option<Box<RecoursePolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_recourse_policy_def(self, name: Name, opt: Option<Box<RecoursePolicyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(rp) => {
                 let target_pair = self.lower_type_expr((*rp).target_type)
@@ -7231,7 +7531,7 @@ impl Checker {
         }
     }
 
-    fn collect_transition_policy_def(self, name: Name, opt: Option<Box<TransitionPolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_transition_policy_def(self, name: Name, opt: Option<Box<TransitionPolicyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(tp) => {
                 let target_pair = self.lower_type_expr((*tp).target_type)
@@ -7258,7 +7558,7 @@ impl Checker {
         }
     }
 
-    fn collect_monitoring_policy_def(self, name: Name, opt: Option<Box<MonitoringPolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_monitoring_policy_def(self, name: Name, opt: Option<Box<MonitoringPolicyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(mp) => {
                 let target_pair = self.lower_type_expr((*mp).target_type)
@@ -7284,7 +7584,7 @@ impl Checker {
         }
     }
 
-    fn collect_transition_protocol_def(self, name: Name, opt: Option<Box<TransitionProtocolDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_transition_protocol_def(self, name: Name, opt: Option<Box<TransitionProtocolDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(proto) => {
                 let target_pair = self.lower_type_expr((*proto).target_type)
@@ -7337,7 +7637,7 @@ impl Checker {
         }
     }
 
-    fn collect_transition_step_defs(self, opt: Option<Box<TransitionStepDefList>>) -> (Checker, [i64; 16], i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_transition_step_defs(self, opt: Option<Box<TransitionStepDefList> >) -> (Checker, [i64; 16], i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 var c = self
@@ -7378,7 +7678,7 @@ impl Checker {
         }
     }
 
-    fn collect_transition_policy_requirements(self, opt: Option<Box<PolicyRequirementList>>) -> (Checker, Option<Box<PolicyRequirementInfoList>>, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_transition_policy_requirements(self, opt: Option<Box<PolicyRequirementList> >) -> (Checker, Option<Box<PolicyRequirementInfoList> >, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.collect_transition_policy_requirement_list(*list)
@@ -7433,7 +7733,7 @@ impl Checker {
         }
     }
 
-    fn collect_alternative_policy_def(self, name: Name, opt: Option<Box<AlternativePolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_alternative_policy_def(self, name: Name, opt: Option<Box<AlternativePolicyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(ap) => {
                 let target_pair = self.lower_type_expr((*ap).target_type)
@@ -7461,7 +7761,7 @@ impl Checker {
         }
     }
 
-    fn collect_alternative_frontier_def(self, name: Name, opt: Option<Box<AlternativeFrontierDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_alternative_frontier_def(self, name: Name, opt: Option<Box<AlternativeFrontierDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(fd) => {
                 let target_pair = self.lower_type_expr((*fd).target_type)
@@ -7510,7 +7810,7 @@ impl Checker {
 
     fn collect_alternative_objectives(
         self,
-        opt: Option<Box<AlternativeObjectiveDefList>>,
+        opt: Option<Box<AlternativeObjectiveDefList> >,
         metric_ids: [i64; 8],
         directions: [i64; 8],
         count: i64
@@ -7536,7 +7836,7 @@ impl Checker {
         }
     }
 
-    fn collect_alternative_candidates(self, opt: Option<Box<AlternativeCandidateDefList>>) -> (Checker, [i64; 16], i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_alternative_candidates(self, opt: Option<Box<AlternativeCandidateDefList> >) -> (Checker, [i64; 16], i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.collect_alternative_candidates((*list).tail)
@@ -7582,7 +7882,7 @@ impl Checker {
 
     fn collect_alternative_candidate_metrics(
         self,
-        opt: Option<Box<AuditFieldEntryList>>,
+        opt: Option<Box<AuditFieldEntryList> >,
         known: [i64; 8],
         values: [f64; 8]
     ) -> (Checker, [i64; 8], [f64; 8]) with Mut, Panic, Div, Alloc, IO {
@@ -7614,7 +7914,7 @@ impl Checker {
         (c, out_known, out_values)
     }
 
-    fn collect_decision_policy_def(self, name: Name, opt: Option<Box<DecisionPolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_decision_policy_def(self, name: Name, opt: Option<Box<DecisionPolicyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(dd) => {
                 let target_pair = self.lower_type_expr((*dd).target_type)
@@ -7640,7 +7940,7 @@ impl Checker {
         }
     }
 
-    fn collect_deferral_policy_def(self, name: Name, opt: Option<Box<DeferralPolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_deferral_policy_def(self, name: Name, opt: Option<Box<DeferralPolicyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(dd) => {
                 let target_pair = self.lower_type_expr((*dd).target_type)
@@ -7667,7 +7967,7 @@ impl Checker {
         }
     }
 
-    fn collect_models_def(self, name: Name, opt: Option<Box<ModelsDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_models_def(self, name: Name, opt: Option<Box<ModelsDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(md) => {
                 let pair = self.collect_model_family_members((*md).models, empty_model_family_info(), (*md).span)
@@ -7685,7 +7985,7 @@ impl Checker {
         }
     }
 
-    fn collect_model_family_members(self, opt: Option<Box<AstPathList>>, seed: ModelFamilyInfo, span: Span) -> (Checker, ModelFamilyInfo) with Mut, Panic, Div, Alloc, IO {
+    fn collect_model_family_members(self, opt: Option<Box<AstPathList> >, seed: ModelFamilyInfo, span: Span) -> (Checker, ModelFamilyInfo) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let model_name = checker_copy_string_list_tail_to_name((*list).head.segments)
@@ -7714,7 +8014,7 @@ impl Checker {
         }
     }
 
-    fn collect_validation_def(self, name: Name, opt: Option<Box<ValidationDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_validation_def(self, name: Name, opt: Option<Box<ValidationDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(vd) => {
                 let target_pair = self.lower_type_expr((*vd).target_type)
@@ -7778,7 +8078,7 @@ impl Checker {
         }
     }
 
-    fn collect_audit_def(self, name: Name, opt: Option<Box<AuditDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_audit_def(self, name: Name, opt: Option<Box<AuditDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(ad) => {
                 let target_pair = self.lower_audit_target_type((*ad).target_type, (*ad).span)
@@ -7814,7 +8114,7 @@ impl Checker {
     fn collect_audit_sections(
         self,
         audit_name: Name,
-        opt: Option<Box<AuditSectionList>>,
+        opt: Option<Box<AuditSectionList> >,
         seed: AuditInfo,
         section_seen: [i64; 4]
     ) -> (Checker, AuditInfo, [i64; 4]) with Mut, Panic, Div, Alloc, IO {
@@ -7878,7 +8178,7 @@ impl Checker {
     fn collect_audit_metrics_section(
         self,
         section_name: Name,
-        opt: Option<Box<AuditFieldEntryList>>,
+        opt: Option<Box<AuditFieldEntryList> >,
         seed: AuditInfo,
         seen_fields: [i64; 8]
     ) -> (Checker, AuditInfo, [i64; 8]) with Mut, Panic, Div, Alloc, IO {
@@ -7908,7 +8208,7 @@ impl Checker {
         self,
         audit_name: Name,
         section_name: Name,
-        opt: Option<Box<AuditFieldEntryList>>
+        opt: Option<Box<AuditFieldEntryList> >
     ) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
         let pair = self.collect_audit_mechanistic_fields(section_name, opt, [0; 6], [0.0; 6])
         var c = pair.0
@@ -7938,7 +8238,7 @@ impl Checker {
     fn collect_audit_mechanistic_fields(
         self,
         section_name: Name,
-        opt: Option<Box<AuditFieldEntryList>>,
+        opt: Option<Box<AuditFieldEntryList> >,
         seen_fields: [i64; 6],
         values: [f64; 6]
     ) -> (Checker, [i64; 6], [f64; 6]) with Mut, Panic, Div, Alloc, IO {
@@ -7967,7 +8267,7 @@ impl Checker {
         self,
         audit_name: Name,
         section_name: Name,
-        opt: Option<Box<AuditFieldEntryList>>
+        opt: Option<Box<AuditFieldEntryList> >
     ) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
         let pair = self.collect_audit_counterexample_fields(
             section_name,
@@ -8004,7 +8304,7 @@ impl Checker {
     fn collect_audit_counterexample_fields(
         self,
         section_name: Name,
-        opt: Option<Box<AuditFieldEntryList>>,
+        opt: Option<Box<AuditFieldEntryList> >,
         seen_fields: [i64; 6],
         names: [Name; 6],
         values: [f64; 6]
@@ -8042,7 +8342,7 @@ impl Checker {
         audit_name: Name,
         section_name: Name,
         family: ModelFamilyInfo,
-        opt: Option<Box<AuditFieldEntryList>>
+        opt: Option<Box<AuditFieldEntryList> >
     ) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
         if family.model_count > 16 {
             let c = self.report_audit_weights_family_mismatch(Span { start: 0, end: 0 }, audit_name)
@@ -8080,7 +8380,7 @@ impl Checker {
         self,
         section_name: Name,
         family: ModelFamilyInfo,
-        opt: Option<Box<AuditFieldEntryList>>,
+        opt: Option<Box<AuditFieldEntryList> >,
         seen_fields: [i64; 16],
         weights: [f64; 16]
     ) -> (Checker, [i64; 16], [f64; 16]) with Mut, Panic, Div, Alloc, IO {
@@ -8109,7 +8409,7 @@ impl Checker {
         }
     }
 
-    fn collect_policy_requirements(self, opt: Option<Box<PolicyRequirementList>>) -> (Checker, Option<Box<PolicyRequirementInfoList>>, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_policy_requirements(self, opt: Option<Box<PolicyRequirementList> >) -> (Checker, Option<Box<PolicyRequirementInfoList> >, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.collect_policy_requirement_list(*list)
@@ -8168,7 +8468,7 @@ impl Checker {
     // Collect function signature
     // --------------------------------------------------------
 
-    fn collect_fn_def(self, name: Name, opt: Option<Box<FnDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_fn_def(self, name: Name, opt: Option<Box<FnDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(fd) => {
                 let pair = self.collect_fn_params((*fd).params)
@@ -8337,7 +8637,7 @@ impl Checker {
         }
     }
 
-    fn collect_fn_params(self, opt: Option<Box<ParamList>>) -> (Checker, Option<Box<FnParamList>>, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_fn_params(self, opt: Option<Box<ParamList> >) -> (Checker, Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(pl) => {
                 let pair = self.collect_fn_param_list(*pl)
@@ -8365,7 +8665,7 @@ impl Checker {
         }
     }
 
-    fn lower_opt_return_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_opt_return_type(self, opt: Option<Box<TypeExpr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(te) => self.lower_type_expr(*te)
             None => (self, ty_unknown())
@@ -8376,7 +8676,7 @@ impl Checker {
     // Collect struct definition
     // --------------------------------------------------------
 
-    fn collect_struct_def(self, name: Name, opt: Option<Box<StructDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_struct_def(self, name: Name, opt: Option<Box<StructDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(sd) => {
                 // Extract type parameters if present
@@ -8405,7 +8705,7 @@ impl Checker {
         }
     }
 
-    fn collect_field_defs(self, opt: Option<Box<FieldDefList>>) -> (Checker, Option<Box<FieldInfoList>>, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_field_defs(self, opt: Option<Box<FieldDefList> >) -> (Checker, Option<Box<FieldInfoList> >, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(fdl) => {
                 let pair = self.collect_field_def_list(*fdl)
@@ -8437,7 +8737,7 @@ impl Checker {
     // Collect enum definition
     // --------------------------------------------------------
 
-    fn collect_enum_def(self, name: Name, opt: Option<Box<EnumDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_enum_def(self, name: Name, opt: Option<Box<EnumDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(ed) => {
                 let pair = self.collect_variants((*ed).variants)
@@ -8456,7 +8756,7 @@ impl Checker {
         }
     }
 
-    fn collect_variants(self, opt: Option<Box<VariantDefList>>) -> (Checker, Option<Box<VariantInfoList>>, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_variants(self, opt: Option<Box<VariantDefList> >) -> (Checker, Option<Box<VariantInfoList> >, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(vdl) => {
                 let pair = self.collect_variant_list(*vdl)
@@ -8489,7 +8789,7 @@ impl Checker {
     // Collect trait definitions
     // --------------------------------------------------------
 
-    fn collect_trait_def(self, name: Name, opt: Option<Box<TraitDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_trait_def(self, name: Name, opt: Option<Box<TraitDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(td) => {
                 // Register trait in the trait registry (sequential ID from count)
@@ -8505,7 +8805,7 @@ impl Checker {
         }
     }
 
-    fn collect_trait_methods(self, methods: Option<Box<ItemList>>, trait_id: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_trait_methods(self, methods: Option<Box<ItemList> >, trait_id: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
         match methods {
             None => self
             Some(list) => {
@@ -8523,7 +8823,7 @@ impl Checker {
     // Collect algebra declaration
     // --------------------------------------------------------
 
-    fn collect_algebra_def(self, opt: Option<Box<AlgebraDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_algebra_def(self, opt: Option<Box<AlgebraDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             None => self
             Some(adef) => {
@@ -8559,7 +8859,7 @@ impl Checker {
         }
     }
 
-    fn collect_algebra_ops(self, ops: Option<Box<AlgebraOpDeclList>>, idx: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_algebra_ops(self, ops: Option<Box<AlgebraOpDeclList> >, idx: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
         match ops {
             None => self
             Some(list) => {
@@ -8585,7 +8885,7 @@ impl Checker {
     // Collect study declaration
     // --------------------------------------------------------
 
-    fn collect_study_def(self, span: Span, opt: Option<Box<StudyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_study_def(self, span: Span, opt: Option<Box<StudyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             None => self
             Some(sdef) => {
@@ -8626,7 +8926,39 @@ impl Checker {
     // Collect ontology definitions
     // --------------------------------------------------------
 
-    fn collect_ontology_def(self, opt: Option<Box<OntologyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn ontology_inference_collect_kernel(self, classes: Option<Box<OntologyClassDeclList> >, disjoints: Option<Box<OntologyDisjointDeclList> >, roles: Option<Box<OntologyRoleDeclList> >, ont_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        c = c.collect_ontology_kernel_classes(classes, ont_name)
+        c = c.collect_ontology_kernel_property_axioms_from_legacy(ont_name)
+        c = c.collect_ontology_kernel_disjoints(disjoints)
+        c = c.collect_ontology_roles(roles)
+        c.ontology_kernel = ontology_kernel_materialize(c.ontology_kernel)
+        c.ontology_kernel.profile = ontology_kernel_check_profile(c.ontology_kernel)
+        c
+    }
+
+    fn ontology_validation_apply_decl_constraints(self) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        c = c.validate_ontology_kernel_inverse_consistency()
+        c = c.validate_ontology_kernel_strengthening()
+        c
+    }
+
+    fn ontology_boundary_bind_named_types(self) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        var i: i64 = 0
+        while i < c.ontologies.count {
+            if c.ontologies.entries[i as usize].is_valid {
+                let cls_name = c.ontologies.entries[i as usize].name
+                let ty = ty_with_ontology(ty_named(cls_name), i)
+                c.env = c.env.bind(cls_name, ty, false)
+            }
+            i = i + 1
+        }
+        c
+    }
+
+    fn collect_ontology_def(self, opt: Option<Box<OntologyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             None => self
             Some(odef) => {
@@ -8638,31 +8970,17 @@ impl Checker {
                 c = c.collect_ontology_disjoints((*odef).disjoints)
                 // Compute transitive closure of superclass relationships
                 c.ontologies = ontology_table_compute_closure(c.ontologies)
-                // Collect the new axiom-centric kernel in parallel with the legacy table.
-                c = c.collect_ontology_kernel_classes((*odef).classes, ont_name)
-                c = c.collect_ontology_kernel_property_axioms_from_legacy(ont_name)
-                c = c.collect_ontology_kernel_disjoints((*odef).disjoints)
-                c = c.collect_ontology_roles((*odef).roles)
-                c.ontology_kernel = ontology_kernel_materialize(c.ontology_kernel)
-                c.ontology_kernel.profile = ontology_kernel_check_profile(c.ontology_kernel)
-                c = c.validate_ontology_kernel_inverse_consistency()
-                c = c.validate_ontology_kernel_strengthening()
-                // Bind each class name as a named type with ontology_id
-                var i: i64 = 0
-                while i < c.ontologies.count {
-                    if c.ontologies.entries[i as usize].is_valid {
-                        let cls_name = c.ontologies.entries[i as usize].name
-                        let ty = ty_with_ontology(ty_named(cls_name), i)
-                        c.env = c.env.bind(cls_name, ty, false)
-                    }
-                    i = i + 1
-                }
+                // S2 semantic contract split: keep behavior the same while naming
+                // the kernel, validation, and compiler-boundary layers explicitly.
+                c = c.ontology_inference_collect_kernel((*odef).classes, (*odef).disjoints, (*odef).roles, ont_name)
+                c = c.ontology_validation_apply_decl_constraints()
+                c = c.ontology_boundary_bind_named_types()
                 c
             }
         }
     }
 
-    fn collect_ontology_classes(self, classes: Option<Box<OntologyClassDeclList>>, ont_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_ontology_classes(self, classes: Option<Box<OntologyClassDeclList> >, ont_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
         match classes {
             None => self
             Some(list) => {
@@ -8730,7 +9048,7 @@ impl Checker {
         }
     }
 
-    fn collect_ontology_disjoints(self, disjoints: Option<Box<OntologyDisjointDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_ontology_disjoints(self, disjoints: Option<Box<OntologyDisjointDeclList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match disjoints {
             None => self
             Some(list) => {
@@ -8766,7 +9084,7 @@ impl Checker {
         c
     }
 
-    fn collect_ontology_kernel_classes(self, classes: Option<Box<OntologyClassDeclList>>, ont_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_ontology_kernel_classes(self, classes: Option<Box<OntologyClassDeclList> >, ont_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
         match classes {
             None => self
             Some(list) => {
@@ -8827,7 +9145,7 @@ impl Checker {
         c
     }
 
-    fn collect_ontology_kernel_disjoints(self, disjoints: Option<Box<OntologyDisjointDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_ontology_kernel_disjoints(self, disjoints: Option<Box<OntologyDisjointDeclList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match disjoints {
             None => self
             Some(list) => {
@@ -8850,7 +9168,7 @@ impl Checker {
         }
     }
 
-    fn ontology_role_decl_count(self, roles: Option<Box<OntologyRoleDeclList>>, target: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
+    fn ontology_role_decl_count(self, roles: Option<Box<OntologyRoleDeclList> >, target: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
         match roles {
             None => 0
             Some(list) => {
@@ -8860,7 +9178,7 @@ impl Checker {
         }
     }
 
-    fn collect_ontology_roles(self, roles: Option<Box<OntologyRoleDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_ontology_roles(self, roles: Option<Box<OntologyRoleDeclList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match roles {
             None => self
             Some(list) => {
@@ -8971,7 +9289,7 @@ impl Checker {
         }
     }
 
-    fn collect_ontology_role_registry(self, roles: Option<Box<OntologyRoleDeclList>>, all_roles: Option<Box<OntologyRoleDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_ontology_role_registry(self, roles: Option<Box<OntologyRoleDeclList> >, all_roles: Option<Box<OntologyRoleDeclList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match roles {
             None => self
             Some(list) => {
@@ -8993,7 +9311,7 @@ impl Checker {
         }
     }
 
-    fn collect_ontology_role_axioms(self, roles: Option<Box<OntologyRoleDeclList>>, all_roles: Option<Box<OntologyRoleDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_ontology_role_axioms(self, roles: Option<Box<OntologyRoleDeclList> >, all_roles: Option<Box<OntologyRoleDeclList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match roles {
             None => self
             Some(list) => {
@@ -9090,6 +9408,14 @@ impl Checker {
         }
     }
 
+    fn ontology_inference_query_subclass(self, provided_ty_id: i64, expected_ty_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+        ontology_kernel_is_subclass(self.ontology_kernel, provided_ty_id, expected_ty_id)
+    }
+
+    fn ontology_inference_query_disjoint(self, provided_ty_id: i64, expected_ty_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+        ontology_kernel_is_disjoint(self.ontology_kernel, provided_ty_id, expected_ty_id)
+    }
+
     fn validate_ontology_kernel_inverse_consistency(self) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
         var i: i64 = 0
@@ -9113,7 +9439,7 @@ impl Checker {
         c
     }
 
-    fn validate_ontology_kernel_role_constraints(self, roles: Option<Box<OntologyRoleDeclList>>, all_roles: Option<Box<OntologyRoleDeclList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn validate_ontology_kernel_role_constraints(self, roles: Option<Box<OntologyRoleDeclList> >, all_roles: Option<Box<OntologyRoleDeclList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match roles {
             None => self
             Some(list) => {
@@ -9196,7 +9522,7 @@ impl Checker {
     // Collect impl methods
     // --------------------------------------------------------
 
-    fn collect_impl_def(self, opt: Option<Box<ImplDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_impl_def(self, opt: Option<Box<ImplDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(id) => {
                 let pair = self.lower_type_expr((*id).target_type)
@@ -9210,7 +9536,7 @@ impl Checker {
         }
     }
 
-    fn collect_impl_methods(self, opt: Option<Box<ItemList>>, type_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_impl_methods(self, opt: Option<Box<ItemList> >, type_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 var c = self.collect_impl_method((*list).head, type_name)
@@ -9261,7 +9587,7 @@ impl Checker {
         }
     }
 
-    fn collect_method_params(self, opt: Option<Box<ParamList>>) -> (Checker, Option<Box<FnParamList>>, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_method_params(self, opt: Option<Box<ParamList> >) -> (Checker, Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(pl) => {
                 // Skip self param for method signatures
@@ -9282,7 +9608,7 @@ impl Checker {
 // ============================================================
 
 impl Checker {
-    fn check_items(self, items: Option<Box<ItemList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_items(self, items: Option<Box<ItemList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
         var cursor = items
         while true {
@@ -9332,7 +9658,7 @@ impl Checker {
     // Check function definition
     // --------------------------------------------------------
 
-    fn check_fn_item(self, opt: Option<Box<FnDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_fn_item(self, opt: Option<Box<FnDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(fd) => {
                 var c = self
@@ -9393,7 +9719,7 @@ impl Checker {
         }
     }
 
-    fn bind_fn_params(self, opt: Option<Box<ParamList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn bind_fn_params(self, opt: Option<Box<ParamList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(pl) => {
                 var c = self.bind_fn_param((*pl).head)
@@ -9429,7 +9755,7 @@ impl Checker {
     // Check impl definition
     // --------------------------------------------------------
 
-    fn check_impl_item(self, opt: Option<Box<ImplDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_impl_item(self, opt: Option<Box<ImplDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(id) => {
                 let pair = self.lower_type_expr((*id).target_type)
@@ -9444,7 +9770,7 @@ impl Checker {
         }
     }
 
-    fn check_impl_methods(self, opt: Option<Box<ItemList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_impl_methods(self, opt: Option<Box<ItemList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 var c = self.check_impl_method((*list).head)
@@ -9533,7 +9859,7 @@ impl Checker {
         (c, result_ty)
     }
 
-    fn check_stmts(self, opt: Option<Box<StmtList>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn check_stmts(self, opt: Option<Box<StmtList> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.check_stmt((*list).head)
@@ -9742,7 +10068,7 @@ impl Checker {
         (c, ty_unit())
     }
 
-    fn check_assign_mutability(self, opt: Option<Box<Expr>>, span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_assign_mutability(self, opt: Option<Box<Expr> >, span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(e) => {
                 if (*e).kind == ExprKind::ExprIdent {
@@ -9760,14 +10086,14 @@ impl Checker {
         }
     }
 
-    fn check_opt_expr(self, opt: Option<Box<Expr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn check_opt_expr(self, opt: Option<Box<Expr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(e) => self.check_expr(*e)
             None => (self, ty_unit())
         }
     }
 
-    fn check_binding_init_expr(self, opt: Option<Box<Expr>>, ann_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn check_binding_init_expr(self, opt: Option<Box<Expr> >, ann_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(e) => {
                 if (*e).kind == ExprKind::ExprContest {
@@ -10983,7 +11309,7 @@ impl Checker {
         self,
         span: Span,
         policy_name: Name,
-        opt: Option<Box<PolicyRequirementInfoList>>,
+        opt: Option<Box<PolicyRequirementInfoList> >,
         proof_info: RobustProofInfo
     ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         match opt {
@@ -11022,7 +11348,7 @@ impl Checker {
         DEFERRAL_REASON_POLICY_INCOMPLETE
     }
 
-    fn deferral_reason_code_from_requirements(self, opt: Option<Box<PolicyRequirementInfoList>>) -> i64 with Mut, Panic, Div {
+    fn deferral_reason_code_from_requirements(self, opt: Option<Box<PolicyRequirementInfoList> >) -> i64 with Mut, Panic, Div {
         match opt {
             Some(list) => self.deferral_reason_code_from_metric_id((*list).head.metric_id)
             None => DEFERRAL_REASON_POLICY_INCOMPLETE
@@ -11033,7 +11359,7 @@ impl Checker {
         self,
         span: Span,
         policy_name: Name,
-        opt: Option<Box<PolicyRequirementInfoList>>,
+        opt: Option<Box<PolicyRequirementInfoList> >,
         contest_info: ContestInfo
     ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         match opt {
@@ -11061,7 +11387,7 @@ impl Checker {
         self,
         span: Span,
         policy_name: Name,
-        opt: Option<Box<PolicyRequirementInfoList>>,
+        opt: Option<Box<PolicyRequirementInfoList> >,
         proof_info: RobustProofInfo
     ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         match opt {
@@ -11088,7 +11414,7 @@ impl Checker {
         self,
         span: Span,
         policy_name: Name,
-        opt: Option<Box<PolicyRequirementInfoList>>,
+        opt: Option<Box<PolicyRequirementInfoList> >,
         cert_info: DeferredCertificateInfo
     ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         match opt {
@@ -11116,7 +11442,7 @@ impl Checker {
         self,
         span: Span,
         policy_name: Name,
-        opt: Option<Box<PolicyRequirementInfoList>>,
+        opt: Option<Box<PolicyRequirementInfoList> >,
         cert_info: DeferredCertificateInfo
     ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         match opt {
@@ -11180,14 +11506,14 @@ impl Checker {
         }
     }
 
-    fn alternative_frontier_name_from_expr(self, opt: Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+    fn alternative_frontier_name_from_expr(self, opt: Option<Box<Expr> >) -> Name with Mut, Panic, Div, Alloc {
         match opt {
             Some(inner) => contest_model_name(*inner)
             None => empty_name()
         }
     }
 
-    fn transition_protocol_name_from_expr(self, opt: Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+    fn transition_protocol_name_from_expr(self, opt: Option<Box<Expr> >) -> Name with Mut, Panic, Div, Alloc {
         match opt {
             Some(inner) => contest_model_name(*inner)
             None => empty_name()
@@ -11311,7 +11637,7 @@ impl Checker {
         self,
         span: Span,
         owner_name: Name,
-        opt: Option<Box<PolicyRequirementInfoList>>,
+        opt: Option<Box<PolicyRequirementInfoList> >,
         candidate: AlternativeCandidateInfo
     ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         match opt {
@@ -12201,7 +12527,7 @@ impl Checker {
         self,
         span: Span,
         policy_name: Name,
-        opt: Option<Box<PolicyRequirementInfoList>>,
+        opt: Option<Box<PolicyRequirementInfoList> >,
         plan_info: TransitionPlanInfo
     ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         match opt {
@@ -12227,7 +12553,7 @@ impl Checker {
 
     fn monitoring_policy_has_violation_or_unavailable(
         self,
-        opt: Option<Box<PolicyRequirementInfoList>>,
+        opt: Option<Box<PolicyRequirementInfoList> >,
         plan_info: TransitionPlanInfo
     ) -> bool with Mut, Panic, Div, Alloc {
         var cur = opt
@@ -12255,7 +12581,7 @@ impl Checker {
 
     fn monitoring_policy_reason_code_from_plan(
         self,
-        opt: Option<Box<PolicyRequirementInfoList>>,
+        opt: Option<Box<PolicyRequirementInfoList> >,
         plan_info: TransitionPlanInfo
     ) -> i64 with Mut, Panic, Div, Alloc {
         var cur = opt
@@ -12280,7 +12606,7 @@ impl Checker {
 
     fn monitoring_policy_requirements_hold_silent(
         self,
-        opt: Option<Box<PolicyRequirementInfoList>>,
+        opt: Option<Box<PolicyRequirementInfoList> >,
         plan_info: TransitionPlanInfo
     ) -> bool with Mut, Panic, Div, Alloc {
         var cur = opt
@@ -12622,14 +12948,14 @@ impl Checker {
     //   2) explicit unary borrows:   f(&x) / f(&!x)
     // Release only borrows introduced by this call expression; pre-existing
     // borrows must remain active even if a call-site borrow attempt fails.
-    fn release_call_arg_borrows(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, call_start_borrows: BorrowEnv) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn release_call_arg_borrows(self, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
         match args {
             None => c
             Some(arg_list) => {
                 let arg_expr = (*arg_list).head
                 var implicit_release_kind: i64 = 0  // 0=none, 1=shared, 2=exclusive
-                var next_params: Option<Box<FnParamList>> = None
+                var next_params: Option<Box<FnParamList> > = None
 
                 match params {
                     None => {}
@@ -12669,7 +12995,7 @@ impl Checker {
         }
     }
 
-    fn check_call_args(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_call_args(self, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
         c = c.check_call_args_inner(args, params, 0, expected_count, call_span)
         c
@@ -12878,17 +13204,21 @@ impl Checker {
             return self.report_error_at(call_span, 150, 0, 0, 0)
         }
         // Check subsumption: provided must be subclass of expected
-        if ontology_kernel_is_subclass(self.ontology_kernel, provided_ty.ontology_id, expected_ty.ontology_id) {
+        if self.ontology_inference_query_subclass(provided_ty.ontology_id, expected_ty.ontology_id) {
             return self
         }
         // Check disjointness for better error
-        if ontology_kernel_is_disjoint(self.ontology_kernel, provided_ty.ontology_id, expected_ty.ontology_id) {
+        if self.ontology_inference_query_disjoint(provided_ty.ontology_id, expected_ty.ontology_id) {
             return self.report_error_at(call_span, 151, 0, 0, 0)
         }
         self.report_error_at(call_span, 152, 0, 0, 0)
     }
 
-    fn check_call_args_inner(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, idx: i64, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn ontology_boundary_check_call_arg_contract(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+        self.check_call_arg_ontology_boundary(arg_ty, param_ty, call_span)
+    }
+
+    fn check_call_args_inner(self, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, idx: i64, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         match args {
             Some(arg_list) => {
                 let arg_expr = (*arg_list).head
@@ -12918,7 +13248,7 @@ impl Checker {
                     c = c.check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
                     c = c.check_call_arg_refinement_boundary(arg_expr, arg_ty, param_info.ty, call_span)
                     c = c.check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
-                    c = c.check_call_arg_ontology_boundary(arg_ty, param_info.ty, call_span)
+                    c = c.ontology_boundary_check_call_arg_contract(arg_ty, param_info.ty, call_span)
                 }
                 // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
                 if has_param_info &&
@@ -12949,7 +13279,7 @@ impl Checker {
         }
     }
 
-    fn check_expr_list_no_type(self, opt: Option<Box<ExprList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_expr_list_no_type(self, opt: Option<Box<ExprList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.check_expr((*list).head)
@@ -12962,7 +13292,7 @@ impl Checker {
 
     // Diagnostic-only argument checking helper: validate expression shape/type
     // without consuming linear values from identifier reads.
-    fn check_expr_list_no_type_no_linear_consume(self, opt: Option<Box<ExprList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_expr_list_no_type_no_linear_consume(self, opt: Option<Box<ExprList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
         c.suppress_linear_consume_depth = c.suppress_linear_consume_depth + 1
         c = c.check_expr_list_no_type(opt)
@@ -13003,7 +13333,7 @@ impl Checker {
         }
     }
 
-    fn check_opt_block(self, opt: Option<Box<Block>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn check_opt_block(self, opt: Option<Box<Block> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(blk) => self.check_block(*blk)
             None => (self, ty_unit())
@@ -13021,7 +13351,7 @@ impl Checker {
         c.check_match_arms(e.arms, scrut_ty)
     }
 
-    fn check_match_arms(self, opt: Option<Box<MatchArmList>>, scrut_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn check_match_arms(self, opt: Option<Box<MatchArmList> >, scrut_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.check_match_arm((*list).head, scrut_ty)
@@ -13049,7 +13379,7 @@ impl Checker {
         (c, body_ty)
     }
 
-    fn check_remaining_arms(self, opt: Option<Box<MatchArmList>>, scrut_ty: TypeEntry, expected_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_remaining_arms(self, opt: Option<Box<MatchArmList> >, scrut_ty: TypeEntry, expected_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.check_match_arm((*list).head, scrut_ty)
@@ -13094,7 +13424,7 @@ impl Checker {
         }
     }
 
-    fn bind_pattern_list(self, opt: Option<Box<PatternList>>, scrut_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn bind_pattern_list(self, opt: Option<Box<PatternList> >, scrut_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 var c = self.bind_pattern((*list).head, scrut_ty)
@@ -13104,7 +13434,7 @@ impl Checker {
         }
     }
 
-    fn bind_struct_pat_fields(self, opt: Option<Box<PatFieldList>>, scrut_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn bind_struct_pat_fields(self, opt: Option<Box<PatFieldList> >, scrut_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 var c = self
@@ -13133,12 +13463,12 @@ impl Checker {
         }
     }
 
-    fn bind_tuple_pattern_list(self, opt: Option<Box<PatternList>>, scrut_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn bind_tuple_pattern_list(self, opt: Option<Box<PatternList> >, scrut_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
         // For tuple patterns, assign each sub-pattern the corresponding tuple element type
         self.bind_tuple_pattern_list_idx(opt, scrut_ty, 0)
     }
 
-    fn bind_tuple_pattern_list_idx(self, opt: Option<Box<PatternList>>, scrut_ty: TypeEntry, idx: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn bind_tuple_pattern_list_idx(self, opt: Option<Box<PatternList> >, scrut_ty: TypeEntry, idx: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 var elem_ty = ty_unknown()
@@ -13280,7 +13610,7 @@ impl Checker {
         c.finalize_generic_struct_lit(e, tmpl, inferred.args)
     }
 
-    fn infer_type_params_from_fields(self, opt: Option<Box<StructFieldList>>, tmpl: StructInfo, acc: InferBuf) -> (Checker, InferBuf) with Mut, Panic, Div, Alloc, IO {
+    fn infer_type_params_from_fields(self, opt: Option<Box<StructFieldList> >, tmpl: StructInfo, acc: InferBuf) -> (Checker, InferBuf) with Mut, Panic, Div, Alloc, IO {
         match opt {
             None => (self, acc)
             Some(fl) => {
@@ -13310,7 +13640,7 @@ impl Checker {
 
     fn finalize_generic_struct_lit(self, e: Expr, tmpl: StructInfo, inferred_args: [TypeEntry; 8]) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // Build the TypeEntryList from inferred args
-        var args_list_opt: Option<Box<TypeEntryList>> = None
+        var args_list_opt: Option<Box<TypeEntryList> > = None
         var ai: i64 = tmpl.type_param_count - 1
         while ai >= 0 {
             args_list_opt = Some(Box::new(TypeEntryList { head: inferred_args[ai], tail: args_list_opt }))
@@ -13353,7 +13683,7 @@ impl Checker {
         }
     }
 
-    fn check_struct_field_inits(self, opt: Option<Box<StructFieldList>>, si: StructInfo, lit_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_struct_field_inits(self, opt: Option<Box<StructFieldList> >, si: StructInfo, lit_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         let init_count = struct_field_list_count(opt)
         if init_count != si.field_count {
             return self.report_error_at(lit_span, 46, 0, 0, 0)
@@ -13361,7 +13691,7 @@ impl Checker {
         self.check_struct_field_inits_with_type(opt, si)
     }
 
-    fn check_struct_field_inits_with_type(self, opt: Option<Box<StructFieldList>>, si: StructInfo) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_struct_field_inits_with_type(self, opt: Option<Box<StructFieldList> >, si: StructInfo) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 var c = self
@@ -13378,7 +13708,7 @@ impl Checker {
         }
     }
 
-    fn check_struct_field_inits_no_type(self, opt: Option<Box<StructFieldList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_struct_field_inits_no_type(self, opt: Option<Box<StructFieldList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.check_expr((*list).head.value)
@@ -13425,7 +13755,7 @@ impl Checker {
         (c, ty_array(elem_ty, count))
     }
 
-    fn check_array_elems(self, opt: Option<Box<ExprList>>) -> (Checker, TypeEntry, i64) with Mut, Panic, Div, Alloc, IO {
+    fn check_array_elems(self, opt: Option<Box<ExprList> >) -> (Checker, TypeEntry, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.check_expr((*list).head)
@@ -13438,7 +13768,7 @@ impl Checker {
         }
     }
 
-    fn check_array_rest(self, opt: Option<Box<ExprList>>, expected: TypeEntry) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+    fn check_array_rest(self, opt: Option<Box<ExprList> >, expected: TypeEntry) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.check_expr((*list).head)
@@ -13467,7 +13797,7 @@ impl Checker {
         }
     }
 
-    fn check_tuple_elems(self, opt: Option<Box<ExprList>>) -> (Checker, Option<Box<TypeEntryList>>) with Mut, Panic, Div, Alloc, IO {
+    fn check_tuple_elems(self, opt: Option<Box<ExprList> >) -> (Checker, Option<Box<TypeEntryList> >) with Mut, Panic, Div, Alloc, IO {
         // Iterative: collect element types into array, then build list in reverse.
         // Avoids recursive Checker copies that overflow the SOBC VM stack.
         var c = self
@@ -13497,7 +13827,7 @@ impl Checker {
             return (c, None)
         }
         // Build TypeEntryList in reverse order (last element first)
-        var result: Option<Box<TypeEntryList>> = None
+        var result: Option<Box<TypeEntryList> > = None
         var j = count - 1
         while j >= 0 {
             result = Some(Box::new(TypeEntryList { head: types[j], tail: result }))
@@ -13727,7 +14057,7 @@ impl Checker {
         (c, ty_fn(sig_id))
     }
 
-    fn collect_closure_params(self, opt: Option<Box<ClosureParamList>>) -> (Checker, Option<Box<FnParamList>>, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_closure_params(self, opt: Option<Box<ClosureParamList> >) -> (Checker, Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(pl) => {
                 let pair = self.collect_closure_param_list(*pl)
@@ -13755,7 +14085,7 @@ impl Checker {
         }
     }
 
-    fn bind_closure_params(self, opt: Option<Box<ClosureParamList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn bind_closure_params(self, opt: Option<Box<ClosureParamList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(pl) => {
                 var c = self.bind_closure_param((*pl).head)
@@ -13775,7 +14105,7 @@ impl Checker {
         c
     }
 
-    fn lower_opt_closure_return(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_opt_closure_return(self, opt: Option<Box<TypeExpr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(te) => self.lower_type_expr(*te)
             None => (self, ty_unknown())
@@ -13787,7 +14117,7 @@ impl Checker {
 // Struct field list helper
 // ============================================================
 
-fn struct_field_list_count(opt: Option<Box<StructFieldList>>) -> i64 with Mut, Panic, Div, Alloc {
+fn struct_field_list_count(opt: Option<Box<StructFieldList> >) -> i64 with Mut, Panic, Div, Alloc {
     match opt {
         None => 0
         Some(list) => 1 + struct_field_list_count((*list).tail)

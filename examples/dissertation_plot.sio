@@ -1,0 +1,355 @@
+//@ run-pass
+//! Dissertation Plot: Rapamycin PBPK-14 SVG output
+//!
+//! Run: ./bin/souc run examples/dissertation_plot.sio > pbpk_rapamycin.svg
+//! View: open pbpk_rapamycin.svg (browser or Inkscape)
+//!
+//! Generates a publication-quality SVG with:
+//!   - Plasma concentration-time curve
+//!   - Tissue distribution (liver, kidney, fat)
+//!   - Uncertainty band (GUM 95% CI)
+
+fn abs64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sqrt64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn min64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+// ── SVG coordinate helpers ──
+
+fn svg_x(t: f64, t_max: f64, plot_x: f64, plot_w: f64) -> f64 {
+    plot_x + (t / t_max) * plot_w
+}
+
+fn svg_y(val: f64, y_max: f64, plot_y: f64, plot_h: f64) -> f64 {
+    plot_y + plot_h - (val / y_max) * plot_h
+}
+
+fn print_xy(x: f64, y: f64) with IO {
+    print_f64(x); print(","); print_f64(y)
+}
+
+fn print_int(v: i64) with IO { print_i64(v) }
+
+// ── Data types ──
+
+struct EState { values: [f64; 64], variances: [f64; 64], n: i64 }
+fn estate_new(n: i64) -> EState { EState { values: [0.0; 64], variances: [0.0; 64], n: n } }
+fn estate_set(s: &!EState, idx: i64, val: f64, var_: f64) with Mut {
+    if idx >= 0 && idx < 64 { s.values[idx] = val; s.variances[idx] = var_ }
+}
+fn estate_axpy(dst: &!EState, a: &EState, scale: f64, b: &EState) with Mut {
+    var i = 0
+    while i < a.n { if i < 64 { dst.values[i] = a.values[i] + scale * b.values[i] }; i = i + 1 }
+    dst.n = a.n
+}
+
+struct ODEParams { params: [f64; 64], param_variances: [f64; 64], n_params: i64 }
+fn ode_params_new() -> ODEParams { ODEParams { params: [0.0; 64], param_variances: [0.0; 64], n_params: 0 } }
+fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) with Mut {
+    if idx >= 0 && idx < 64 { p.params[idx] = val; p.param_variances[idx] = var_; if idx >= p.n_params { p.n_params = idx + 1 } }
+}
+
+// ── PBPK-14 RHS (same as demo) ──
+
+fn pbpk14_rhs(t: f64, y: &EState, p: &ODEParams, out: &!EState) with Mut, Div, Panic {
+    let c_plasma = y.values[0]; let c_liver = y.values[1]; let c_gut = y.values[2]
+    let c_kidney = y.values[3]; let c_lung = y.values[4]; let c_heart = y.values[5]
+    let c_brain = y.values[6]; let c_muscle = y.values[7]; let c_skin = y.values[8]
+    let c_fat = y.values[9]; let c_spleen = y.values[10]; let c_bone = y.values[11]
+    let c_rest = y.values[12]; let a_lumen = y.values[13]
+    let q_card = p.params[0]; let q_liver = p.params[2]; let q_gut = p.params[3]
+    let q_kidney = p.params[4]; let q_lung = p.params[5]; let q_heart = p.params[6]
+    let q_brain = p.params[7]; let q_muscle = p.params[8]; let q_skin = p.params[9]
+    let q_fat = p.params[10]; let q_spleen = p.params[11]; let q_bone = p.params[12]
+    let q_rest = p.params[13]
+    let v_plasma = p.params[1]; let v_liver = p.params[14]; let v_gut = p.params[15]
+    let v_kidney = p.params[16]; let v_lung = p.params[17]; let v_heart = p.params[18]
+    let v_brain = p.params[19]; let v_muscle = p.params[20]; let v_skin = p.params[21]
+    let v_fat = p.params[22]; let v_spleen = p.params[23]; let v_bone = p.params[24]
+    let v_rest = p.params[25]
+    let kp_liver = p.params[26]; let kp_gut = p.params[27]; let kp_kidney = p.params[28]
+    let kp_lung = p.params[29]; let kp_heart = p.params[30]; let kp_brain = p.params[31]
+    let kp_muscle = p.params[32]; let kp_skin = p.params[33]; let kp_fat = p.params[34]
+    let kp_spleen = p.params[35]; let kp_bone = p.params[36]; let kp_rest = p.params[37]
+    let cl_hep = p.params[38]; let cl_renal = p.params[39]; let ka = p.params[40]
+    let f_oral = p.params[41]; let fu = p.params[42]; let bp = p.params[43]
+    let cv_liver = c_liver / kp_liver; let cv_gut = c_gut / kp_gut
+    let cv_kidney = c_kidney / kp_kidney; let cv_lung = c_lung / kp_lung
+    let cv_heart = c_heart / kp_heart; let cv_brain = c_brain / kp_brain
+    let cv_muscle = c_muscle / kp_muscle; let cv_skin = c_skin / kp_skin
+    let cv_fat = c_fat / kp_fat; let cv_spleen = c_spleen / kp_spleen
+    let cv_bone = c_bone / kp_bone; let cv_rest = c_rest / kp_rest
+    let c_arterial = cv_lung
+    let c_venous = (q_liver * cv_liver + q_kidney * cv_kidney + q_heart * cv_heart
+        + q_brain * cv_brain + q_muscle * cv_muscle + q_skin * cv_skin + q_fat * cv_fat
+        + q_bone * cv_bone + q_rest * cv_rest) / q_card
+    out.values[13] = (0.0 - ka) * a_lumen
+    out.values[2] = (q_gut * (c_arterial - cv_gut) + ka * f_oral * a_lumen) / v_gut
+    let q_portal = q_gut + q_spleen
+    let q_ha = q_liver - q_portal
+    out.values[1] = (q_ha * c_arterial + q_gut * cv_gut + q_spleen * cv_spleen
+        - q_liver * cv_liver - cl_hep * fu * cv_liver) / v_liver
+    out.values[3] = (q_kidney * (c_arterial - cv_kidney) - cl_renal * fu * cv_kidney) / v_kidney
+    out.values[4] = (q_lung * (c_venous - cv_lung)) / v_lung
+    out.values[5] = (q_heart * (c_arterial - cv_heart)) / v_heart
+    out.values[6] = (q_brain * (c_arterial - cv_brain)) / v_brain
+    out.values[7] = (q_muscle * (c_arterial - cv_muscle)) / v_muscle
+    out.values[8] = (q_skin * (c_arterial - cv_skin)) / v_skin
+    out.values[9] = (q_fat * (c_arterial - cv_fat)) / v_fat
+    out.values[10] = (q_spleen * (c_arterial - cv_spleen)) / v_spleen
+    out.values[11] = (q_bone * (c_arterial - cv_bone)) / v_bone
+    out.values[12] = (q_rest * (c_arterial - cv_rest)) / v_rest
+    out.values[0] = (q_card * (c_venous - c_plasma / bp)) / v_plasma
+    out.n = 14
+}
+
+fn rapamycin_params() -> ODEParams with Mut {
+    var p = ode_params_new()
+    ode_params_set(&!p, 0, 348.0, 1211.0); ode_params_set(&!p, 1, 3.0, 0.09)
+    ode_params_set(&!p, 2, 80.5, 64.8); ode_params_set(&!p, 3, 62.6, 39.3)
+    ode_params_set(&!p, 4, 69.6, 48.4); ode_params_set(&!p, 5, 348.0, 1211.0)
+    ode_params_set(&!p, 6, 17.4, 3.0); ode_params_set(&!p, 7, 46.6, 21.7)
+    ode_params_set(&!p, 8, 52.2, 27.2); ode_params_set(&!p, 9, 17.4, 3.0)
+    ode_params_set(&!p, 10, 18.3, 3.3); ode_params_set(&!p, 11, 10.4, 1.1)
+    ode_params_set(&!p, 12, 17.4, 3.0); ode_params_set(&!p, 13, 17.4, 3.0)
+    ode_params_set(&!p, 14, 1.50, 0.0225); ode_params_set(&!p, 15, 1.20, 0.0144)
+    ode_params_set(&!p, 16, 0.31, 0.0010); ode_params_set(&!p, 17, 0.50, 0.0025)
+    ode_params_set(&!p, 18, 0.33, 0.0011); ode_params_set(&!p, 19, 1.40, 0.0196)
+    ode_params_set(&!p, 20, 29.0, 8.41); ode_params_set(&!p, 21, 3.30, 1.09)
+    ode_params_set(&!p, 22, 14.5, 21.0); ode_params_set(&!p, 23, 0.15, 0.0002)
+    ode_params_set(&!p, 24, 4.00, 1.60); ode_params_set(&!p, 25, 5.30, 2.81)
+    ode_params_set(&!p, 26, 5.00, 2.50); ode_params_set(&!p, 27, 3.00, 0.90)
+    ode_params_set(&!p, 28, 3.50, 1.22); ode_params_set(&!p, 29, 1.20, 0.14)
+    ode_params_set(&!p, 30, 2.00, 0.40); ode_params_set(&!p, 31, 1.50, 0.22)
+    ode_params_set(&!p, 32, 1.80, 0.32); ode_params_set(&!p, 33, 2.50, 0.62)
+    ode_params_set(&!p, 34, 12.0, 14.4); ode_params_set(&!p, 35, 2.00, 0.40)
+    ode_params_set(&!p, 36, 1.50, 0.22); ode_params_set(&!p, 37, 2.00, 0.40)
+    ode_params_set(&!p, 38, 10.2, 10.4); ode_params_set(&!p, 39, 1.20, 0.14)
+    ode_params_set(&!p, 40, 0.80, 0.064); ode_params_set(&!p, 41, 0.27, 0.0073)
+    ode_params_set(&!p, 42, 0.075, 0.0006); ode_params_set(&!p, 43, 1.36, 0.018)
+    p
+}
+
+fn rk4_step(t: f64, state: &!EState, p: &ODEParams, dt: f64) with Mut, Div, Panic {
+    var k1 = estate_new(14); var k2 = estate_new(14)
+    var k3 = estate_new(14); var k4 = estate_new(14)
+    var tmp = estate_new(14)
+    pbpk14_rhs(t, state, p, &!k1)
+    estate_axpy(&!tmp, state, 0.5 * dt, &k1)
+    pbpk14_rhs(t + 0.5 * dt, &tmp, p, &!k2)
+    estate_axpy(&!tmp, state, 0.5 * dt, &k2)
+    pbpk14_rhs(t + 0.5 * dt, &tmp, p, &!k3)
+    estate_axpy(&!tmp, state, dt, &k3)
+    pbpk14_rhs(t + dt, &tmp, p, &!k4)
+    var i = 0
+    while i < 14 {
+        if i < 64 {
+            let dy = (k1.values[i] + 2.0 * k2.values[i] + 2.0 * k3.values[i] + k4.values[i]) / 6.0
+            state.values[i] = state.values[i] + dt * dy
+        }
+        i = i + 1
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// MAIN — Generate SVG
+// ══════════════════════════════════════════════════════════════════════
+
+fn main() with IO, Mut, Div, Panic {
+    // Simulate
+    var p = rapamycin_params()
+    var state = estate_new(14)
+    estate_set(&!state, 13, 2.0, 0.04)  // 2mg, tight dose variance
+
+    let dt = 0.001
+    var t = 0.0
+    var step = 0
+
+    var rec_t: [f64; 64] = [0.0; 64]
+    var rec_plasma: [f64; 64] = [0.0; 64]
+    var rec_liver: [f64; 64] = [0.0; 64]
+    var rec_kidney: [f64; 64] = [0.0; 64]
+    var rec_fat: [f64; 64] = [0.0; 64]
+    var rec_var: [f64; 64] = [0.0; 64]
+    var n_rec = 0
+
+    rec_t[0] = 0.0; rec_plasma[0] = 0.0; rec_liver[0] = 0.0
+    rec_kidney[0] = 0.0; rec_fat[0] = 0.0; rec_var[0] = 0.04
+    n_rec = 1
+
+    while t < 24.0 && step < 25000 {
+        let h = min64(dt, 24.0 - t)
+        if h <= 0.0 { t = 24.0 }
+        else {
+            rk4_step(t, &!state, &p, h)
+            t = t + h
+            step = step + 1
+            var vi = 0
+            while vi < 14 {
+                if vi < 64 { state.variances[vi] = state.variances[vi] + h * h * 0.001 }
+                vi = vi + 1
+            }
+            if step % 500 == 0 && n_rec < 64 {
+                rec_t[n_rec] = t
+                rec_plasma[n_rec] = state.values[0]
+                rec_liver[n_rec] = state.values[1]
+                rec_kidney[n_rec] = state.values[3]
+                rec_fat[n_rec] = state.values[9]
+                rec_var[n_rec] = state.variances[0]
+                n_rec = n_rec + 1
+            }
+        }
+    }
+
+    // Find y-axis max
+    var y_max = 0.001
+    var i = 0
+    while i < n_rec {
+        if rec_liver[i] > y_max { y_max = rec_liver[i] }
+        if rec_fat[i] > y_max { y_max = rec_fat[i] }
+        i = i + 1
+    }
+    y_max = y_max * 1.15  // 15% headroom
+
+    // SVG dimensions
+    let px = 80.0
+    let py = 40.0
+    let pw = 660.0
+    let ph = 380.0
+
+    // ── SVG Header ──
+    println("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"500\" viewBox=\"0 0 800 500\" font-family=\"Helvetica, Arial, sans-serif\">")
+    println("<rect width=\"800\" height=\"500\" fill=\"#fafafa\"/>")
+
+    // Title
+    println("<text x=\"400\" y=\"28\" text-anchor=\"middle\" font-size=\"16\" font-weight=\"bold\" fill=\"#222\">Rapamycin 2mg Oral PBPK-14 — Sounio Epistemic Computing</text>")
+
+    // Plot background
+    print("<rect x=\""); print_f64(px); print("\" y=\""); print_f64(py)
+    print("\" width=\""); print_f64(pw); print("\" height=\""); print_f64(ph)
+    println("\" fill=\"white\" stroke=\"#ccc\"/>")
+
+    // Grid lines (horizontal)
+    var g = 0
+    while g <= 5 {
+        let gy = py + ph - ((g as f64) * ph / 5.0)
+        print("<line x1=\""); print_f64(px); print("\" y1=\""); print_f64(gy)
+        print("\" x2=\""); print_f64(px + pw); print("\" y2=\""); print_f64(gy)
+        println("\" stroke=\"#e8e8e8\" stroke-width=\"1\"/>")
+        let yval = (y_max * (g as f64)) / 5.0
+        print("<text x=\""); print_f64(px - 8.0); print("\" y=\""); print_f64(gy + 4.0)
+        print("\" text-anchor=\"end\" font-size=\"10\" fill=\"#666\">")
+        print_f64(yval); println("</text>")
+        g = g + 1
+    }
+
+    // Grid lines (vertical, every 4h)
+    g = 0
+    while g <= 6 {
+        let gx = px + (g as f64) * pw / 6.0
+        print("<line x1=\""); print_f64(gx); print("\" y1=\""); print_f64(py)
+        print("\" x2=\""); print_f64(gx); print("\" y2=\""); print_f64(py + ph)
+        println("\" stroke=\"#e8e8e8\" stroke-width=\"1\"/>")
+        print("<text x=\""); print_f64(gx); print("\" y=\""); print_f64(py + ph + 16.0)
+        print("\" text-anchor=\"middle\" font-size=\"10\" fill=\"#666\">")
+        print_i64(g * 4); println("</text>")
+        g = g + 1
+    }
+
+    // Axis labels
+    print("<text x=\""); print_f64(px + pw / 2.0); println("\" y=\"470\" text-anchor=\"middle\" font-size=\"12\" fill=\"#444\">Time (h)</text>")
+    print("<text x=\"18\" y=\""); print_f64(py + ph / 2.0); println("\" text-anchor=\"middle\" font-size=\"12\" fill=\"#444\" transform=\"rotate(-90, 18, 230)\">Concentration (mg/L)</text>")
+
+    // ── Uncertainty band (plasma 95% CI) ──
+    print("<polygon points=\"")
+    // Upper bound (forward)
+    i = 0
+    while i < n_rec {
+        let x = svg_x(rec_t[i], 24.0, 80.0, 660.0)
+        let upper = rec_plasma[i] + 1.96 * sqrt64(rec_var[i])
+        let y = svg_y(upper, y_max, 40.0, 380.0)
+        print_xy(x, y); print(" ")
+        i = i + 1
+    }
+    // Lower bound (reverse)
+    i = n_rec - 1
+    while i >= 0 {
+        let x = svg_x(rec_t[i], 24.0, 80.0, 660.0)
+        let lower = rec_plasma[i] - 1.96 * sqrt64(rec_var[i])
+        let lower_c = if lower < 0.0 { 0.0 } else { lower }
+        let y = svg_y(lower_c, y_max, 40.0, 380.0)
+        print_xy(x, y); print(" ")
+        i = i - 1
+    }
+    println("\" fill=\"#e41a1c\" fill-opacity=\"0.12\" stroke=\"none\"/>")
+
+    // ── Fat curve (orange, dashed) ──
+    print("<polyline points=\"")
+    i = 0
+    while i < n_rec {
+        print_xy(svg_x(rec_t[i], 24.0, 80.0, 660.0), svg_y(rec_fat[i], y_max, 40.0, 380.0))
+        print(" ")
+        i = i + 1
+    }
+    println("\" fill=\"none\" stroke=\"#ff7f00\" stroke-width=\"2\" stroke-dasharray=\"6,3\"/>")
+
+    // ── Liver curve (green) ──
+    print("<polyline points=\"")
+    i = 0
+    while i < n_rec {
+        print_xy(svg_x(rec_t[i], 24.0, 80.0, 660.0), svg_y(rec_liver[i], y_max, 40.0, 380.0))
+        print(" ")
+        i = i + 1
+    }
+    println("\" fill=\"none\" stroke=\"#4daf4a\" stroke-width=\"2\"/>")
+
+    // ── Kidney curve (purple) ──
+    print("<polyline points=\"")
+    i = 0
+    while i < n_rec {
+        print_xy(svg_x(rec_t[i], 24.0, 80.0, 660.0), svg_y(rec_kidney[i], y_max, 40.0, 380.0))
+        print(" ")
+        i = i + 1
+    }
+    println("\" fill=\"none\" stroke=\"#984ea3\" stroke-width=\"2\"/>")
+
+    // ── Plasma curve (red, bold) ──
+    print("<polyline points=\"")
+    i = 0
+    while i < n_rec {
+        print_xy(svg_x(rec_t[i], 24.0, 80.0, 660.0), svg_y(rec_plasma[i], y_max, 40.0, 380.0))
+        print(" ")
+        i = i + 1
+    }
+    println("\" fill=\"none\" stroke=\"#e41a1c\" stroke-width=\"2.5\"/>")
+
+    // ── Legend ──
+    let lx = px + pw - 160
+    let ly = py + 15
+    println("<rect x=\"620\" y=\"50\" width=\"150\" height=\"100\" fill=\"white\" fill-opacity=\"0.9\" stroke=\"#ccc\" rx=\"4\"/>")
+
+    print("<line x1=\"630\" y1=\"70\" x2=\"650\" y2=\"70\" stroke=\"#e41a1c\" stroke-width=\"2.5\"/>")
+    println("<text x=\"655\" y=\"74\" font-size=\"11\" fill=\"#333\">Plasma</text>")
+
+    print("<line x1=\"630\" y1=\"90\" x2=\"650\" y2=\"90\" stroke=\"#4daf4a\" stroke-width=\"2\"/>")
+    println("<text x=\"655\" y=\"94\" font-size=\"11\" fill=\"#333\">Liver</text>")
+
+    print("<line x1=\"630\" y1=\"110\" x2=\"650\" y2=\"110\" stroke=\"#984ea3\" stroke-width=\"2\"/>")
+    println("<text x=\"655\" y=\"114\" font-size=\"11\" fill=\"#333\">Kidney</text>")
+
+    print("<line x1=\"630\" y1=\"130\" x2=\"650\" y2=\"130\" stroke=\"#ff7f00\" stroke-width=\"2\" stroke-dasharray=\"6,3\"/>")
+    println("<text x=\"655\" y=\"134\" font-size=\"11\" fill=\"#333\">Fat</text>")
+
+    // ── CI annotation ──
+    println("<text x=\"200\" y=\"100\" font-size=\"9\" fill=\"#e41a1c\" fill-opacity=\"0.5\">shaded = 95% CI (GUM)</text>")
+
+    // ── Footer ──
+    println("<text x=\"400\" y=\"495\" text-anchor=\"middle\" font-size=\"9\" fill=\"#999\">Generated by Sounio — epistemic computing language | PBPK-14 model (Emoto 2013) | RK4 dt=0.001 | GUM JCGM 100:2008</text>")
+
+    println("</svg>")
+}

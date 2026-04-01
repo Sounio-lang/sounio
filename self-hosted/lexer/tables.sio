@@ -272,8 +272,16 @@ struct ScanResult {
 
 impl ScanResult {
     fn new(cur: Cursor, kind: TokenKind, start: i64, end: i64) -> ScanResult {
+        // Inline Cursor fields to avoid IS_SPTR=1 cursor: cur embedding bug.
+        // cur.source_len etc. read through the IS_SPTR=1 pointer correctly.
         ScanResult {
-            cursor: cur,
+            cursor: Cursor {
+                source_len: cur.source_len,
+                pos: cur.pos,
+                line: cur.line,
+                col: cur.col,
+                current: cur.current,
+            },
             kind: kind,
             start: start,
             end: end,
@@ -284,7 +292,13 @@ impl ScanResult {
 
     fn with_text(cur: Cursor, kind: TokenKind, start: i64, end: i64, text: [i8; 256], text_len: i64) -> ScanResult {
         ScanResult {
-            cursor: cur,
+            cursor: Cursor {
+                source_len: cur.source_len,
+                pos: cur.pos,
+                line: cur.line,
+                col: cur.col,
+                current: cur.current,
+            },
             kind: kind,
             start: start,
             end: end,
@@ -299,149 +313,73 @@ impl ScanResult {
 // ============================================================================
 
 fn scan_operator(c: Cursor) -> ScanResult with Mut, Div, Panic {
-    var cur = c
-    let start = cur.pos
+    // Read scalars from IS_SPTR=1 c via pointer deref — correct.
+    // Compute advance count N directly; operators never contain newlines.
+    let start: i64 = c.pos
     var kind = TokenKind::Error
 
-    let c1 = cur.current
-    let c2 = cur.peek()
-    let c3 = cur.peek_n(2)
+    let c1: i8 = c.current
+    let c2: i8 = c.peek()
+    let c3: i8 = c.peek_n(2)
+
+    var n: i64 = 0
 
     // 3-char operators
-    if c1 == 46 && c2 == 46 && c3 == 46 {  // "..."
-        cur = cur.advance_n(3)
-        kind = TokenKind::DotDotDot
-    } else if c1 == 46 && c2 == 46 && c3 == 61 {  // "..="
-        cur = cur.advance_n(3)
-        kind = TokenKind::DotDotEq
-    } else if c1 == 60 && c2 == 60 && c3 == 61 {  // "<<="
-        cur = cur.advance_n(3)
-        kind = TokenKind::ShlEq
-    } else if c1 == 62 && c2 == 62 && c3 == 61 {  // ">>="
-        cur = cur.advance_n(3)
-        kind = TokenKind::ShrEq
-    }
+    if c1 == 46 && c2 == 46 && c3 == 46 { n = 3; kind = TokenKind::DotDotDot }
+    else if c1 == 46 && c2 == 46 && c3 == 61 { n = 3; kind = TokenKind::DotDotEq }
+    else if c1 == 60 && c2 == 60 && c3 == 61 { n = 3; kind = TokenKind::ShlEq }
+    else if c1 == 62 && c2 == 62 && c3 == 61 { n = 3; kind = TokenKind::ShrEq }
     // 2-char operators
-    else if c1 == 61 && c2 == 61 {  // "=="
-        cur = cur.advance_n(2)
-        kind = TokenKind::EqEq
-    } else if c1 == 33 && c2 == 61 {  // "!="
-        cur = cur.advance_n(2)
-        kind = TokenKind::BangEq
-    } else if c1 == 60 && c2 == 61 {  // "<="
-        cur = cur.advance_n(2)
-        kind = TokenKind::LtEq
-    } else if c1 == 62 && c2 == 61 {  // ">="
-        cur = cur.advance_n(2)
-        kind = TokenKind::GtEq
-    } else if c1 == 38 && c2 == 38 {  // "&&"
-        cur = cur.advance_n(2)
-        kind = TokenKind::AmpAmp
-    } else if c1 == 124 && c2 == 124 {  // "||"
-        cur = cur.advance_n(2)
-        kind = TokenKind::PipePipe
-    } else if c1 == 60 && c2 == 60 {  // "<<"
-        cur = cur.advance_n(2)
-        kind = TokenKind::Shl
-    } else if c1 == 62 && c2 == 62 {  // ">>"
-        cur = cur.advance_n(2)
-        kind = TokenKind::Shr
-    } else if c1 == 43 && c2 == 61 {  // "+="
-        cur = cur.advance_n(2)
-        kind = TokenKind::PlusEq
-    } else if c1 == 45 && c2 == 61 {  // "-="
-        cur = cur.advance_n(2)
-        kind = TokenKind::MinusEq
-    } else if c1 == 42 && c2 == 61 {  // "*="
-        cur = cur.advance_n(2)
-        kind = TokenKind::StarEq
-    } else if c1 == 47 && c2 == 61 {  // "/="
-        cur = cur.advance_n(2)
-        kind = TokenKind::SlashEq
-    } else if c1 == 37 && c2 == 61 {  // "%="
-        cur = cur.advance_n(2)
-        kind = TokenKind::PercentEq
-    } else if c1 == 38 && c2 == 61 {  // "&="
-        cur = cur.advance_n(2)
-        kind = TokenKind::AmpEq
-    } else if c1 == 124 && c2 == 61 {  // "|="
-        cur = cur.advance_n(2)
-        kind = TokenKind::PipeEq
-    } else if c1 == 94 && c2 == 61 {  // "^="
-        cur = cur.advance_n(2)
-        kind = TokenKind::CaretEq
-    } else if c1 == 45 && c2 == 62 {  // "->"
-        cur = cur.advance_n(2)
-        kind = TokenKind::Arrow
-    } else if c1 == 61 && c2 == 62 {  // "=>"
-        cur = cur.advance_n(2)
-        kind = TokenKind::FatArrow
-    } else if c1 == 60 && c2 == 45 {  // "<-"
-        cur = cur.advance_n(2)
-        kind = TokenKind::LeftArrow
-    } else if c1 == 38 && c2 == 33 {  // "&!"
-        cur = cur.advance_n(2)
-        kind = TokenKind::AmpBang
-    } else if c1 == 58 && c2 == 58 {  // "::"
-        cur = cur.advance_n(2)
-        kind = TokenKind::ColonColon
-    } else if c1 == 46 && c2 == 46 {  // ".."
-        cur = cur.advance_n(2)
-        kind = TokenKind::DotDot
-    } else if c1 == 43 && c2 == 43 {  // "++"
-        cur = cur.advance_n(2)
-        kind = TokenKind::PlusPlus
-    } else if c1 == 43 && c2 == 45 {  // "+-" (±)
-        cur = cur.advance_n(2)
-        kind = TokenKind::PlusMinus
-    }
+    else if c1 == 61 && c2 == 61 { n = 2; kind = TokenKind::EqEq }
+    else if c1 == 33 && c2 == 61 { n = 2; kind = TokenKind::BangEq }
+    else if c1 == 60 && c2 == 61 { n = 2; kind = TokenKind::LtEq }
+    else if c1 == 62 && c2 == 61 { n = 2; kind = TokenKind::GtEq }
+    else if c1 == 38 && c2 == 38 { n = 2; kind = TokenKind::AmpAmp }
+    else if c1 == 124 && c2 == 124 { n = 2; kind = TokenKind::PipePipe }
+    else if c1 == 60 && c2 == 60 { n = 2; kind = TokenKind::Shl }
+    else if c1 == 62 && c2 == 62 { n = 2; kind = TokenKind::Shr }
+    else if c1 == 43 && c2 == 61 { n = 2; kind = TokenKind::PlusEq }
+    else if c1 == 45 && c2 == 61 { n = 2; kind = TokenKind::MinusEq }
+    else if c1 == 42 && c2 == 61 { n = 2; kind = TokenKind::StarEq }
+    else if c1 == 47 && c2 == 61 { n = 2; kind = TokenKind::SlashEq }
+    else if c1 == 37 && c2 == 61 { n = 2; kind = TokenKind::PercentEq }
+    else if c1 == 38 && c2 == 61 { n = 2; kind = TokenKind::AmpEq }
+    else if c1 == 124 && c2 == 61 { n = 2; kind = TokenKind::PipeEq }
+    else if c1 == 94 && c2 == 61 { n = 2; kind = TokenKind::CaretEq }
+    else if c1 == 45 && c2 == 62 { n = 2; kind = TokenKind::Arrow }
+    else if c1 == 61 && c2 == 62 { n = 2; kind = TokenKind::FatArrow }
+    else if c1 == 60 && c2 == 45 { n = 2; kind = TokenKind::LeftArrow }
+    else if c1 == 38 && c2 == 33 { n = 2; kind = TokenKind::AmpBang }
+    else if c1 == 58 && c2 == 58 { n = 2; kind = TokenKind::ColonColon }
+    else if c1 == 46 && c2 == 46 { n = 2; kind = TokenKind::DotDot }
+    else if c1 == 43 && c2 == 43 { n = 2; kind = TokenKind::PlusPlus }
+    else if c1 == 43 && c2 == 45 { n = 2; kind = TokenKind::PlusMinus }
     // 1-char operators
-    else if c1 == 43 {  // "+"
-        cur = cur.advance()
-        kind = TokenKind::Plus
-    } else if c1 == 45 {  // "-"
-        cur = cur.advance()
-        kind = TokenKind::Minus
-    } else if c1 == 42 {  // "*"
-        cur = cur.advance()
-        kind = TokenKind::Star
-    } else if c1 == 47 {  // "/"
-        cur = cur.advance()
-        kind = TokenKind::Slash
-    } else if c1 == 37 {  // "%"
-        cur = cur.advance()
-        kind = TokenKind::Percent
-    } else if c1 == 61 {  // "="
-        cur = cur.advance()
-        kind = TokenKind::Eq
-    } else if c1 == 60 {  // "<"
-        cur = cur.advance()
-        kind = TokenKind::Lt
-    } else if c1 == 62 {  // ">"
-        cur = cur.advance()
-        kind = TokenKind::Gt
-    } else if c1 == 33 {  // "!"
-        cur = cur.advance()
-        kind = TokenKind::Bang
-    } else if c1 == 38 {  // "&"
-        cur = cur.advance()
-        kind = TokenKind::Amp
-    } else if c1 == 124 {  // "|"
-        cur = cur.advance()
-        kind = TokenKind::Pipe
-    } else if c1 == 94 {  // "^"
-        cur = cur.advance()
-        kind = TokenKind::Caret
-    } else if c1 == 126 {  // "~"
-        cur = cur.advance()
-        kind = TokenKind::Tilde
-    } else if c1 == 63 {  // "?"
-        cur = cur.advance()
-        kind = TokenKind::Question
-    }
+    else if c1 == 43 { n = 1; kind = TokenKind::Plus }
+    else if c1 == 45 { n = 1; kind = TokenKind::Minus }
+    else if c1 == 42 { n = 1; kind = TokenKind::Star }
+    else if c1 == 47 { n = 1; kind = TokenKind::Slash }
+    else if c1 == 37 { n = 1; kind = TokenKind::Percent }
+    else if c1 == 61 { n = 1; kind = TokenKind::Eq }
+    else if c1 == 60 { n = 1; kind = TokenKind::Lt }
+    else if c1 == 62 { n = 1; kind = TokenKind::Gt }
+    else if c1 == 33 { n = 1; kind = TokenKind::Bang }
+    else if c1 == 38 { n = 1; kind = TokenKind::Amp }
+    else if c1 == 124 { n = 1; kind = TokenKind::Pipe }
+    else if c1 == 94 { n = 1; kind = TokenKind::Caret }
+    else if c1 == 126 { n = 1; kind = TokenKind::Tilde }
+    else if c1 == 63 { n = 1; kind = TokenKind::Question }
 
-    let end = cur.pos
-    ScanResult::new(cur, kind, start, end)
+    // Operators contain no newlines: line unchanged, col += n
+    let source_len: i64 = c.source_len
+    let pos: i64 = c.pos + n
+    let col: i64 = c.col + n
+    let line: i64 = c.line
+    var current: i8 = 0 as i8
+    if pos < source_len { current = CURSOR_SOURCE[pos as usize] }
+    let end = pos
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    ScanResult::new(result_cursor, kind, start, end)
 }
 
 // ============================================================================
@@ -449,12 +387,10 @@ fn scan_operator(c: Cursor) -> ScanResult with Mut, Div, Panic {
 // ============================================================================
 
 fn scan_delimiter(c: Cursor) -> ScanResult with Mut, Panic {
-    var cur = c
-    let start = cur.pos
+    let start: i64 = c.pos
+    let ch: i8 = c.current
     var kind = TokenKind::Error
     var matched = false
-
-    let ch = cur.current
 
     if ch == 40 { kind = TokenKind::LParen; matched = true }
     else if ch == 41 { kind = TokenKind::RParen; matched = true }
@@ -463,21 +399,28 @@ fn scan_delimiter(c: Cursor) -> ScanResult with Mut, Panic {
     else if ch == 91 { kind = TokenKind::LBracket; matched = true }
     else if ch == 93 { kind = TokenKind::RBracket; matched = true }
 
+    let source_len: i64 = c.source_len
+    var pos: i64 = c.pos
+    var col: i64 = c.col
+    var current: i8 = c.current
+    let line: i64 = c.line
+
     if matched {
-        cur = cur.advance()
+        col = col + 1
+        pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
     }
 
-    let end = cur.pos
-    ScanResult::new(cur, kind, start, end)
+    let end = pos
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    ScanResult::new(result_cursor, kind, start, end)
 }
 
 fn scan_punctuation(c: Cursor) -> ScanResult with Mut, Panic {
-    var cur = c
-    let start = cur.pos
+    let start: i64 = c.pos
+    let ch: i8 = c.current
     var kind = TokenKind::Error
     var matched = false
-
-    let ch = cur.current
 
     if ch == 59 { kind = TokenKind::Semi; matched = true }
     else if ch == 58 { kind = TokenKind::Colon; matched = true }
@@ -486,10 +429,19 @@ fn scan_punctuation(c: Cursor) -> ScanResult with Mut, Panic {
     else if ch == 64 { kind = TokenKind::At; matched = true }
     else if ch == 35 { kind = TokenKind::Hash; matched = true }
 
+    let source_len: i64 = c.source_len
+    var pos: i64 = c.pos
+    var col: i64 = c.col
+    var current: i8 = c.current
+    let line: i64 = c.line
+
     if matched {
-        cur = cur.advance()
+        col = col + 1
+        pos = pos + 1
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
     }
 
-    let end = cur.pos
-    ScanResult::new(cur, kind, start, end)
+    let end = pos
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    ScanResult::new(result_cursor, kind, start, end)
 }

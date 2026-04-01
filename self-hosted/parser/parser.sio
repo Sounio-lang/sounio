@@ -19,7 +19,7 @@ var PT_TEXT_LEN: [i64; 1048576] = [0; 1048576]
 var PT_INT_VALUE: [i64; 1048576] = [0; 1048576]
 // Boot4-safe: parse_item stores its result here instead of returning (Parser, Item)
 // which is 314+ slots and triggers IS_SPTR=4 hang. The caller reads this after parse_item returns.
-var LAST_PARSED_ITEM: Option<Box<Item>> = None
+var LAST_PARSED_ITEM: Option<Box<Item> > = None
 // Boot4-safe: scalar globals mirroring Parser struct fields.
 // boot4 corrupts struct-by-value field access, so the parser loop
 // reads/writes these globals instead of Parser.field.
@@ -70,6 +70,9 @@ fn parser_set_tokens(tokens: [Token; 1048576], token_count: i64) with Mut, Panic
         // Write to parallel scalar arrays (boot4-compatible)
         PT_KIND[i as usize] = tokens[i as usize].kind
         PT_START[i as usize] = tokens[i as usize].start
+        PT_END[i as usize] = tokens[i as usize].end
+        PT_LINE[i as usize] = tokens[i as usize].line
+        PT_COL[i as usize] = tokens[i as usize].col
         PT_INT_VALUE[i as usize] = tokens[i as usize].int_value
         PT_TEXT_LEN[i as usize] = tokens[i as usize].text_len
         i = i + 1
@@ -81,6 +84,9 @@ fn parser_set_token_at(idx: i64, tok: Token) with Mut, Panic {
         // Write to parallel scalar arrays (boot4-compatible, avoids struct-typed global array write)
         PT_KIND[idx as usize] = tok.kind
         PT_START[idx as usize] = tok.start
+        PT_END[idx as usize] = tok.end
+        PT_LINE[idx as usize] = tok.line
+        PT_COL[idx as usize] = tok.col
         PT_INT_VALUE[idx as usize] = tok.int_value
         PT_TEXT_LEN[idx as usize] = tok.text_len
     }
@@ -146,16 +152,16 @@ fn parser_reset_last_errors() with Mut {
     PARSER_LAST_ERROR_COUNT = 0
 }
 
-fn parser_set_last_errors(had_error: bool, error_count: i64) with Mut {
+pub fn parser_set_last_errors(had_error: bool, error_count: i64) with Mut {
     PARSER_LAST_HAD_ERROR = had_error
     PARSER_LAST_ERROR_COUNT = error_count
 }
 
-fn parser_last_had_error() -> bool {
+pub fn parser_last_had_error() -> bool {
     PARSER_LAST_HAD_ERROR
 }
 
-fn parser_last_error_count() -> i64 {
+pub fn parser_last_error_count() -> i64 {
     PARSER_LAST_ERROR_COUNT
 }
 
@@ -229,7 +235,7 @@ fn pt_read_kind(idx: i64) -> TokenKind with Panic {
 }
 
 impl Parser {
-    fn current(self) -> Token with Panic, Div {
+    fn current(self: Parser) -> Token with Panic, Div {
         // Construct from parallel scalar arrays (boot4-compatible)
         var tok = Token::new()
         if self.pos < self.token_count {
@@ -241,11 +247,11 @@ impl Parser {
         tok
     }
 
-    fn current_int_value(self) -> i64 with Panic {
+    fn current_int_value(self: Parser) -> i64 with Panic {
         if self.pos >= 0 && self.pos < 1048576 { PT_INT_VALUE[self.pos as usize] } else { 0 }
     }
 
-    fn peek(self) -> TokenKind with Panic, Div {
+    fn peek(self: Parser) -> TokenKind with Panic, Div {
         if self.pending_gt > 0 {
             TokenKind::Gt
         } else {
@@ -257,7 +263,7 @@ impl Parser {
         }
     }
 
-    fn peek_ahead(self, offset: i64) -> TokenKind with Panic, Div {
+    fn peek_ahead(self: Parser, offset: i64) -> TokenKind with Panic, Div {
         if self.pending_gt > 0 {
             if offset < self.pending_gt {
                 TokenKind::Gt
@@ -279,18 +285,18 @@ impl Parser {
         }
     }
 
-    fn at(self, kind: TokenKind) -> bool with Panic, Div {
+    fn at(self: Parser, kind: TokenKind) -> bool with Panic, Div {
         self.peek() == kind
     }
 
-    fn at_eof(self) -> bool with Panic, Div {
+    fn at_eof(self: Parser) -> bool with Panic, Div {
         self.peek() == TokenKind::Eof
     }
 
     // Returns true if the current token is on a later line than the previous token.
     // Used by the Pratt parser to prevent `ident\n(` from being parsed as a call.
     // The self-hosted lexer discards newline tokens, so we compare line numbers.
-    fn had_newline_before(self) -> bool with Panic, Div {
+    fn had_newline_before(self: Parser) -> bool with Panic, Div {
         if self.pos <= 0 { return false }
         let prev_line = PT_LINE[(self.pos - 1) as usize]
         let cur_line = PT_LINE[self.pos as usize]
@@ -301,7 +307,7 @@ impl Parser {
     // Advance
     // ============================================================
 
-    fn advance(self) -> Parser with Mut, Panic, Div {
+    fn advance(self: Parser) -> Parser with Mut, Panic, Div {
         var p = self
         if p.pending_gt > 0 {
             p.pending_gt = p.pending_gt - 1
@@ -322,7 +328,7 @@ impl Parser {
         p
     }
 
-    fn advance_raw(self) -> Parser with Mut, Panic, Div {
+    fn advance_raw(self: Parser) -> Parser with Mut, Panic, Div {
         var p = self
         if p.pending_gt > 0 {
             p.pending_gt = p.pending_gt - 1
@@ -342,7 +348,7 @@ impl Parser {
     // Expect
     // ============================================================
 
-    fn expect(self, kind: TokenKind) -> Parser with Mut, IO, Panic, Div {
+    fn expect(self: Parser, kind: TokenKind) -> Parser with Mut, IO, Panic, Div {
         // In type contexts, allow `>>` to act as two consecutive `>` tokens.
         if kind == TokenKind::Gt && self.pending_gt == 0 && self.peek() == TokenKind::Shr {
             var p = self
@@ -367,7 +373,7 @@ impl Parser {
         }
     }
 
-    fn expect_ident(self) -> Parser with Mut, IO, Panic, Div {
+    fn expect_ident(self: Parser) -> Parser with Mut, IO, Panic, Div {
         let k = self.peek()
         if k == TokenKind::Ident || tk_is_keyword(k) {
             self.advance()
@@ -383,13 +389,13 @@ impl Parser {
     // Node ID allocation
     // ============================================================
 
-    fn alloc_id(self) -> Parser with Mut {
+    fn alloc_id(self: Parser) -> Parser with Mut {
         var p = self
         p.next_id = p.next_id + 1
         p
     }
 
-    fn current_id(self) -> NodeId {
+    fn current_id(self: Parser) -> NodeId {
         NodeId { id: self.next_id }
     }
 
@@ -397,7 +403,7 @@ impl Parser {
     // Span helpers
     // ============================================================
 
-    fn current_span(self) -> Span with Panic, Div {
+    fn current_span(self: Parser) -> Span with Panic, Div {
         if self.pos < self.token_count {
             Span::new(
                 0,
@@ -409,7 +415,7 @@ impl Parser {
         }
     }
 
-    fn span_from(self, start: Span) -> Span with Panic, Div {
+    fn span_from(self: Parser, start: Span) -> Span with Panic, Div {
         if self.pos < self.token_count {
             Span::new(start.file_id, start.start, PT_END[self.pos as usize])
         } else {
@@ -421,7 +427,7 @@ impl Parser {
     // Name extraction from current token
     // ============================================================
 
-    fn current_name(self) -> Name with Mut, Panic, Div {
+    fn current_name(self: Parser) -> Name with Mut, Panic, Div {
         if self.pos < self.token_count {
             // Read from source buffer using parallel start/end arrays (boot4-compatible)
             let s = PT_START[self.pos as usize]
@@ -445,7 +451,7 @@ impl Parser {
     // Utility: check if current token starts an expression
     // ============================================================
 
-    fn at_expr_start(self) -> bool with Panic, Div {
+    fn at_expr_start(self: Parser) -> bool with Panic, Div {
         let k = self.peek()
         k == TokenKind::IntLit
             || k == TokenKind::FloatLit
@@ -477,7 +483,7 @@ impl Parser {
     // Utility: check if current token starts an item
     // ============================================================
 
-    fn at_item_start(self) -> bool with Panic, Div {
+    fn at_item_start(self: Parser) -> bool with Panic, Div {
         let k = self.peek()
         k == TokenKind::Fn
             || k == TokenKind::Struct

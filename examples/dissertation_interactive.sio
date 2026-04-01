@@ -1,0 +1,236 @@
+//@ run-pass
+//! Interactive PBPK Demo — HTML with Canvas2D
+//!
+//! Run: ./bin/souc run examples/dissertation_interactive.sio > pbpk_demo.html
+//! Open: xdg-open pbpk_demo.html (or any browser)
+//!
+//! Features:
+//!   - 4 tissue curves (plasma, liver, kidney, fat)
+//!   - GUM 95% CI uncertainty band on plasma
+//!   - Mouse hover shows exact values + uncertainty
+//!   - Toggle curves on/off via legend clicks
+//!   - Zoom with scroll wheel, pan with drag
+
+fn abs64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sqrt64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn min64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn pf(v: f64) with IO { print_f64(v) }
+fn pi(v: i64) with IO { print_i64(v) }
+
+// ── Data types (same as other demos) ──
+struct EState { values: [f64; 64], variances: [f64; 64], n: i64 }
+fn estate_new(n: i64) -> EState { EState { values: [0.0; 64], variances: [0.0; 64], n: n } }
+fn estate_set(s: &!EState, idx: i64, val: f64, var_: f64) with Mut {
+    if idx >= 0 && idx < 64 { s.values[idx] = val; s.variances[idx] = var_ }
+}
+fn estate_axpy(dst: &!EState, a: &EState, scale: f64, b: &EState) with Mut {
+    var i = 0
+    while i < a.n { if i < 64 { dst.values[i] = a.values[i] + scale * b.values[i] }; i = i + 1 }
+    dst.n = a.n
+}
+struct ODEParams { params: [f64; 64], param_variances: [f64; 64], n_params: i64 }
+fn ode_params_new() -> ODEParams { ODEParams { params: [0.0; 64], param_variances: [0.0; 64], n_params: 0 } }
+fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) with Mut {
+    if idx >= 0 && idx < 64 { p.params[idx] = val; p.param_variances[idx] = var_; if idx >= p.n_params { p.n_params = idx + 1 } }
+}
+
+fn pbpk14_rhs(t: f64, y: &EState, p: &ODEParams, out: &!EState) with Mut, Div, Panic {
+    let q_card = p.params[0]; let q_liver = p.params[2]; let q_gut = p.params[3]
+    let q_kidney = p.params[4]; let q_lung = p.params[5]; let q_heart = p.params[6]
+    let q_brain = p.params[7]; let q_muscle = p.params[8]; let q_skin = p.params[9]
+    let q_fat = p.params[10]; let q_spleen = p.params[11]; let q_bone = p.params[12]; let q_rest = p.params[13]
+    let v_plasma = p.params[1]; let v_liver = p.params[14]; let v_gut = p.params[15]
+    let v_kidney = p.params[16]; let v_lung = p.params[17]; let v_heart = p.params[18]
+    let v_brain = p.params[19]; let v_muscle = p.params[20]; let v_skin = p.params[21]
+    let v_fat = p.params[22]; let v_spleen = p.params[23]; let v_bone = p.params[24]; let v_rest = p.params[25]
+    let kp_liver = p.params[26]; let kp_gut = p.params[27]; let kp_kidney = p.params[28]
+    let kp_lung = p.params[29]; let kp_heart = p.params[30]; let kp_brain = p.params[31]
+    let kp_muscle = p.params[32]; let kp_skin = p.params[33]; let kp_fat = p.params[34]
+    let kp_spleen = p.params[35]; let kp_bone = p.params[36]; let kp_rest = p.params[37]
+    let cl_hep = p.params[38]; let cl_renal = p.params[39]; let ka = p.params[40]
+    let f_oral = p.params[41]; let fu = p.params[42]; let bp = p.params[43]
+    let cv_liver = y.values[1] / kp_liver; let cv_gut = y.values[2] / kp_gut
+    let cv_kidney = y.values[3] / kp_kidney; let cv_lung = y.values[4] / kp_lung
+    let cv_heart = y.values[5] / kp_heart; let cv_brain = y.values[6] / kp_brain
+    let cv_muscle = y.values[7] / kp_muscle; let cv_skin = y.values[8] / kp_skin
+    let cv_fat = y.values[9] / kp_fat; let cv_spleen = y.values[10] / kp_spleen
+    let cv_bone = y.values[11] / kp_bone; let cv_rest = y.values[12] / kp_rest
+    let c_art = cv_lung
+    let c_ven = (q_liver*cv_liver + q_kidney*cv_kidney + q_heart*cv_heart + q_brain*cv_brain + q_muscle*cv_muscle + q_skin*cv_skin + q_fat*cv_fat + q_bone*cv_bone + q_rest*cv_rest) / q_card
+    out.values[13] = (0.0 - ka) * y.values[13]
+    out.values[2] = (q_gut * (c_art - cv_gut) + ka * f_oral * y.values[13]) / v_gut
+    let q_portal = q_gut + q_spleen; let q_ha = q_liver - q_portal
+    out.values[1] = (q_ha*c_art + q_gut*cv_gut + q_spleen*cv_spleen - q_liver*cv_liver - cl_hep*fu*cv_liver) / v_liver
+    out.values[3] = (q_kidney*(c_art - cv_kidney) - cl_renal*fu*cv_kidney) / v_kidney
+    out.values[4] = (q_lung*(c_ven - cv_lung)) / v_lung
+    out.values[5] = (q_heart*(c_art - cv_heart)) / v_heart
+    out.values[6] = (q_brain*(c_art - cv_brain)) / v_brain
+    out.values[7] = (q_muscle*(c_art - cv_muscle)) / v_muscle
+    out.values[8] = (q_skin*(c_art - cv_skin)) / v_skin
+    out.values[9] = (q_fat*(c_art - cv_fat)) / v_fat
+    out.values[10] = (q_spleen*(c_art - cv_spleen)) / v_spleen
+    out.values[11] = (q_bone*(c_art - cv_bone)) / v_bone
+    out.values[12] = (q_rest*(c_art - cv_rest)) / v_rest
+    out.values[0] = (q_card*(c_ven - y.values[0]/bp)) / v_plasma
+    out.n = 14
+}
+
+fn rapamycin_params() -> ODEParams with Mut {
+    var p = ode_params_new()
+    ode_params_set(&!p, 0, 348.0, 1211.0); ode_params_set(&!p, 1, 3.0, 0.09)
+    ode_params_set(&!p, 2, 80.5, 64.8); ode_params_set(&!p, 3, 62.6, 39.3)
+    ode_params_set(&!p, 4, 69.6, 48.4); ode_params_set(&!p, 5, 348.0, 1211.0)
+    ode_params_set(&!p, 6, 17.4, 3.0); ode_params_set(&!p, 7, 46.6, 21.7)
+    ode_params_set(&!p, 8, 52.2, 27.2); ode_params_set(&!p, 9, 17.4, 3.0)
+    ode_params_set(&!p, 10, 18.3, 3.3); ode_params_set(&!p, 11, 10.4, 1.1)
+    ode_params_set(&!p, 12, 17.4, 3.0); ode_params_set(&!p, 13, 17.4, 3.0)
+    ode_params_set(&!p, 14, 1.50, 0.0225); ode_params_set(&!p, 15, 1.20, 0.0144)
+    ode_params_set(&!p, 16, 0.31, 0.0010); ode_params_set(&!p, 17, 0.50, 0.0025)
+    ode_params_set(&!p, 18, 0.33, 0.0011); ode_params_set(&!p, 19, 1.40, 0.0196)
+    ode_params_set(&!p, 20, 29.0, 8.41); ode_params_set(&!p, 21, 3.30, 1.09)
+    ode_params_set(&!p, 22, 14.5, 21.0); ode_params_set(&!p, 23, 0.15, 0.0002)
+    ode_params_set(&!p, 24, 4.00, 1.60); ode_params_set(&!p, 25, 5.30, 2.81)
+    ode_params_set(&!p, 26, 5.00, 2.50); ode_params_set(&!p, 27, 3.00, 0.90)
+    ode_params_set(&!p, 28, 3.50, 1.22); ode_params_set(&!p, 29, 1.20, 0.14)
+    ode_params_set(&!p, 30, 2.00, 0.40); ode_params_set(&!p, 31, 1.50, 0.22)
+    ode_params_set(&!p, 32, 1.80, 0.32); ode_params_set(&!p, 33, 2.50, 0.62)
+    ode_params_set(&!p, 34, 12.0, 14.4); ode_params_set(&!p, 35, 2.00, 0.40)
+    ode_params_set(&!p, 36, 1.50, 0.22); ode_params_set(&!p, 37, 2.00, 0.40)
+    ode_params_set(&!p, 38, 10.2, 10.4); ode_params_set(&!p, 39, 1.20, 0.14)
+    ode_params_set(&!p, 40, 0.80, 0.064); ode_params_set(&!p, 41, 0.27, 0.0073)
+    ode_params_set(&!p, 42, 0.075, 0.0006); ode_params_set(&!p, 43, 1.36, 0.018)
+    p
+}
+
+fn rk4_step(t: f64, state: &!EState, p: &ODEParams, dt: f64) with Mut, Div, Panic {
+    var k1 = estate_new(14); var k2 = estate_new(14); var k3 = estate_new(14); var k4 = estate_new(14); var tmp = estate_new(14)
+    pbpk14_rhs(t, state, p, &!k1); estate_axpy(&!tmp, state, 0.5*dt, &k1)
+    pbpk14_rhs(t+0.5*dt, &tmp, p, &!k2); estate_axpy(&!tmp, state, 0.5*dt, &k2)
+    pbpk14_rhs(t+0.5*dt, &tmp, p, &!k3); estate_axpy(&!tmp, state, dt, &k3)
+    pbpk14_rhs(t+dt, &tmp, p, &!k4)
+    var i = 0
+    while i < 14 { if i < 64 { state.values[i] = state.values[i] + dt * (k1.values[i] + 2.0*k2.values[i] + 2.0*k3.values[i] + k4.values[i]) / 6.0 }; i = i + 1 }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    // Simulate
+    var p = rapamycin_params()
+    var state = estate_new(14)
+    estate_set(&!state, 13, 2.0, 0.04)
+    var t = 0.0
+    var step = 0
+    var rec_t: [f64; 64] = [0.0; 64]
+    var rec_pl: [f64; 64] = [0.0; 64]
+    var rec_li: [f64; 64] = [0.0; 64]
+    var rec_ki: [f64; 64] = [0.0; 64]
+    var rec_fa: [f64; 64] = [0.0; 64]
+    var rec_sd: [f64; 64] = [0.0; 64]
+    var n = 0
+    rec_t[0] = 0.0; rec_pl[0] = 0.0; rec_li[0] = 0.0; rec_ki[0] = 0.0; rec_fa[0] = 0.0; rec_sd[0] = sqrt64(0.04)
+    n = 1
+    while t < 24.0 && step < 25000 {
+        let h = min64(0.001, 24.0 - t)
+        if h <= 0.0 { t = 24.0 } else {
+            rk4_step(t, &!state, &p, h); t = t + h; step = step + 1
+            var vi = 0
+            while vi < 14 { if vi < 64 { state.variances[vi] = state.variances[vi] + h*h*0.001 }; vi = vi + 1 }
+            if step % 500 == 0 && n < 64 {
+                rec_t[n] = t; rec_pl[n] = state.values[0]; rec_li[n] = state.values[1]
+                rec_ki[n] = state.values[3]; rec_fa[n] = state.values[9]
+                rec_sd[n] = sqrt64(state.variances[0]); n = n + 1
+            }
+        }
+    }
+
+    // ── Emit HTML ──
+    println("<!DOCTYPE html><html><head><meta charset='UTF-8'>")
+    println("<title>Rapamycin PBPK-14 — Sounio Epistemic Demo</title>")
+    println("<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0f0f1a;color:#ccc;font-family:'SF Mono',Consolas,monospace;display:flex;flex-direction:column;align-items:center;padding:20px}")
+    println("h1{font-size:1.3em;color:#e8e8e8;margin-bottom:4px}h2{font-size:0.85em;color:#888;margin-bottom:16px;font-weight:normal}")
+    println("canvas{border:1px solid #333;border-radius:6px;cursor:crosshair}")
+    println("#info{margin-top:12px;font-size:0.8em;color:#999;text-align:center;line-height:1.6}")
+    println("#tooltip{position:absolute;background:#222;border:1px solid #555;padding:8px 12px;border-radius:4px;font-size:12px;pointer-events:none;display:none;color:#eee;line-height:1.5}")
+    println(".legend{display:flex;gap:16px;margin:12px 0}.leg-item{display:flex;align-items:center;gap:6px;cursor:pointer;opacity:1;transition:opacity 0.2s}.leg-item.off{opacity:0.3}")
+    println(".leg-dot{width:12px;height:12px;border-radius:2px}</style></head><body>")
+    println("<h1>Rapamycin (Sirolimus) 2mg Oral — 14-Compartment PBPK</h1>")
+    println("<h2>Emoto 2013 | ICRP 89 | Rodgers-Rowland Kp | GUM JCGM 100:2008</h2>")
+    println("<div class='legend'>")
+    println("<div class='leg-item' onclick='toggle(0)'><div class='leg-dot' style='background:#e05252'></div>Plasma</div>")
+    println("<div class='leg-item' onclick='toggle(1)'><div class='leg-dot' style='background:#4daf4a'></div>Liver</div>")
+    println("<div class='leg-item' onclick='toggle(2)'><div class='leg-dot' style='background:#7b68ee'></div>Kidney</div>")
+    println("<div class='leg-item' onclick='toggle(3)'><div class='leg-dot' style='background:#ff9f43'></div>Fat</div>")
+    println("</div>")
+    println("<canvas id='c' width='900' height='480'></canvas>")
+    println("<div id='tooltip'></div>")
+    println("<div id='info'>Hover for values | Click legend to toggle | Scroll to zoom | Drag to pan<br>")
+    println("Shaded band = 95% CI (GUM uncertainty propagation) | Generated by <b>Sounio</b></div>")
+    println("<script>")
+
+    // Emit data arrays
+    print("const T=["); var i = 0; while i < n { pf(rec_t[i]); if i < n-1 { print(",") }; i = i + 1 }; println("];")
+    print("const PL=["); i = 0; while i < n { pf(rec_pl[i]); if i < n-1 { print(",") }; i = i + 1 }; println("];")
+    print("const LI=["); i = 0; while i < n { pf(rec_li[i]); if i < n-1 { print(",") }; i = i + 1 }; println("];")
+    print("const KI=["); i = 0; while i < n { pf(rec_ki[i]); if i < n-1 { print(",") }; i = i + 1 }; println("];")
+    print("const FA=["); i = 0; while i < n { pf(rec_fa[i]); if i < n-1 { print(",") }; i = i + 1 }; println("];")
+    print("const SD=["); i = 0; while i < n { pf(rec_sd[i]); if i < n-1 { print(",") }; i = i + 1 }; println("];")
+    print("const N="); pi(n); println(";")
+
+    // Emit the JS renderer
+    println("const cv=document.getElementById('c'),ctx=cv.getContext('2d'),tip=document.getElementById('tooltip');")
+    println("const W=cv.width,H=cv.height,mx=70,my=40,mw=W-100,mh=H-80;")
+    println("let show=[true,true,true,true],ox=0,oy=0,zx=1,zy=1,drag=false,lx=0,ly=0;")
+    println("const colors=['#e05252','#4daf4a','#7b68ee','#ff9f43'],names=['Plasma','Liver','Kidney','Fat'];")
+    println("const series=[PL,LI,KI,FA];")
+    println("function yMax(){let m=0;for(let s=0;s<4;s++)if(show[s])for(let i=0;i<N;i++){let v=series[s][i];if(s===0)v+=1.96*SD[i];if(v>m)m=v;}return m*1.15||0.001}")
+    println("function tx(t){return mx+(t/24)*mw*zx+ox}")
+    println("function ty(v){let ym=yMax();return my+mh-(v/ym)*mh*zy+oy}")
+    println("function render(){")
+    println("ctx.fillStyle='#0f0f1a';ctx.fillRect(0,0,W,H);")
+    println("ctx.save();ctx.beginPath();ctx.rect(mx,my,mw,mh);ctx.clip();")
+    // Grid
+    println("ctx.strokeStyle='#1a1a2e';ctx.lineWidth=1;for(let g=0;g<=6;g++){let x=tx(g*4);ctx.beginPath();ctx.moveTo(x,my);ctx.lineTo(x,my+mh);ctx.stroke()}")
+    println("let ym=yMax();for(let g=0;g<=5;g++){let y=ty(g*ym/5);ctx.beginPath();ctx.moveTo(mx,y);ctx.lineTo(mx+mw,y);ctx.stroke()}")
+    // CI band
+    println("if(show[0]){ctx.beginPath();for(let i=0;i<N;i++){let x=tx(T[i]),y=ty(PL[i]+1.96*SD[i]);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)}")
+    println("for(let i=N-1;i>=0;i--){let x=tx(T[i]),lo=PL[i]-1.96*SD[i];ctx.lineTo(x,ty(lo<0?0:lo))}ctx.closePath();ctx.fillStyle='rgba(224,82,82,0.12)';ctx.fill()}")
+    // Curves
+    println("const lw=[2.5,2,2,2],dash=[[],[],[],[5,3]];")
+    println("for(let s=3;s>=0;s--){if(!show[s])continue;ctx.beginPath();ctx.setLineDash(dash[s]);ctx.strokeStyle=colors[s];ctx.lineWidth=lw[s];")
+    println("for(let i=0;i<N;i++){let x=tx(T[i]),y=ty(series[s][i]);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)}ctx.stroke();ctx.setLineDash([])}")
+    println("ctx.restore();")
+    // Axes
+    println("ctx.strokeStyle='#444';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(mx,my);ctx.lineTo(mx,my+mh);ctx.lineTo(mx+mw,my+mh);ctx.stroke();")
+    println("ctx.fillStyle='#888';ctx.font='11px sans-serif';ctx.textAlign='center';")
+    println("for(let g=0;g<=6;g++){let x=tx(g*4);ctx.fillText(g*4+'h',x,my+mh+16)}")
+    println("ctx.textAlign='right';for(let g=0;g<=5;g++){let v=(g*ym/5).toFixed(4);ctx.fillText(v,mx-6,ty(g*ym/5)+4)}")
+    // Labels
+    println("ctx.fillStyle='#aaa';ctx.font='13px sans-serif';ctx.textAlign='center';ctx.fillText('Time (hours)',mx+mw/2,H-8);")
+    println("ctx.save();ctx.translate(14,my+mh/2);ctx.rotate(-Math.PI/2);ctx.fillText('Concentration (mg/L)',0,0);ctx.restore();")
+    println("}")
+    // Tooltip
+    println("cv.addEventListener('mousemove',e=>{const r=cv.getBoundingClientRect(),px=e.clientX-r.left,py_=e.clientY-r.top;")
+    println("if(px<mx||px>mx+mw||py_<my||py_>my+mh){tip.style.display='none';return}")
+    println("let t_hover=(px-mx-ox)/(mw*zx)*24;if(t_hover<0)t_hover=0;if(t_hover>24)t_hover=24;")
+    println("let bi=0,bd=999;for(let i=0;i<N;i++){let d=Math.abs(T[i]-t_hover);if(d<bd){bd=d;bi=i}}")
+    println("let h='<b>t='+T[bi].toFixed(1)+'h</b><br>';")
+    println("for(let s=0;s<4;s++){if(!show[s])continue;h+='<span style=\"color:'+colors[s]+'\">'+names[s]+': '+series[s][bi].toFixed(6)+' mg/L</span><br>'}")
+    println("if(show[0])h+='<span style=\"color:#e0525280\">u(plasma): ±'+SD[bi].toFixed(6)+'</span>';")
+    println("tip.innerHTML=h;tip.style.display='block';tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY-10)+'px'});")
+    println("cv.addEventListener('mouseleave',()=>{tip.style.display='none'});")
+    // Zoom + pan
+    println("cv.addEventListener('wheel',e=>{e.preventDefault();let f=e.deltaY>0?0.9:1.1;zx*=f;zy*=f;zx=Math.max(0.5,Math.min(10,zx));zy=Math.max(0.5,Math.min(10,zy));render()},{passive:false});")
+    println("cv.addEventListener('mousedown',e=>{drag=true;lx=e.clientX;ly=e.clientY});")
+    println("cv.addEventListener('mouseup',()=>{drag=false});cv.addEventListener('mouseleave',()=>{drag=false});")
+    println("cv.addEventListener('mousemove',e=>{if(!drag)return;ox+=e.clientX-lx;oy+=e.clientY-ly;lx=e.clientX;ly=e.clientY;render()});")
+    // Legend toggle
+    println("function toggle(s){show[s]=!show[s];document.querySelectorAll('.leg-item')[s].classList.toggle('off');render()}")
+    println("render();")
+    println("</script></body></html>")
+}

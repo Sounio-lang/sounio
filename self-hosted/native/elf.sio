@@ -33,9 +33,13 @@ fn elf_emit_gnu_property_note(machine_id: i64) -> bool {
     machine_id == elf_machine_x86_64()
 }
 
-// ELF64 binary buffer (16MB — supports large programs and self-hosted compiler)
+// ELF64 binary buffer.
+// Keep this close to the actual emitted artifact size so we do not turn
+// zero-initialization itself into a giant text emitter.
+fn elf_binary_cap() -> i64 { 1048576 }
+
 struct Elf64Binary {
-    bytes: [i8; 16777216],
+    bytes: [i8; 1048576],
     len: i64,
 }
 
@@ -47,7 +51,10 @@ struct StringTable {
 }
 
 fn string_table_new() -> StringTable {
-    StringTable { bytes: [0; 8192], len: 0, last_offset: 0 }
+    var out: StringTable
+    out.len = 0
+    out.last_offset = 0
+    out
 }
 
 // Add a string to the table; offset stored in .last_offset
@@ -93,7 +100,9 @@ fn data_section_add_f64(st: StringTable, bits: i64) -> StringTable with Mut, Pan
 }
 
 fn elf_binary_new() -> Elf64Binary {
-    Elf64Binary { bytes: [0; 16777216], len: 0 }
+    var out: Elf64Binary
+    out.len = 0
+    out
 }
 
 // Symbol table data for .symtab/.strtab sections
@@ -104,11 +113,10 @@ struct SymbolData {
 }
 
 fn symbol_data_new() -> SymbolData {
-    SymbolData {
-        strtab: [0; 2048],
-        strtab_len: 1,             // slot 0 = \0 (null entry's st_name = 0)
-        name_offsets: [0; 256],
-    }
+    var out: SymbolData
+    out.strtab_len = 1             // slot 0 = \0 (null entry's st_name = 0)
+    out.strtab[0] = 0
+    out
 }
 
 // Record a function's name in the symbol table's strtab
@@ -131,10 +139,20 @@ fn symbol_data_add_name(sym: SymbolData, fn_idx: i64, name_buf: [i8; 128], name_
 }
 
 fn elf_emit_byte_ref(bin: &! Elf64Binary, b: i64) -> () with Mut, Panic, Div {
-    if (*bin).len < 131072 {
+    if (*bin).len < elf_binary_cap() {
         (*bin).bytes[(*bin).len as usize] = low8(b) as i8
         (*bin).len = (*bin).len + 1
     }
+}
+
+fn elf_builder_emit_cstr_ref(bin: &! Elf64Binary, s: string) -> () with Mut, Panic, Div {
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n {
+        elf_emit_byte_ref(bin, str_char_at(s, i))
+        i = i + 1
+    }
+    elf_emit_byte_ref(bin, 0)
 }
 
 fn elf_emit_u16_ref(bin: &! Elf64Binary, val: i64) -> () with Mut, Panic, Div {
@@ -169,6 +187,241 @@ fn emit_symtab_entry_ref(
     elf_emit_u16_ref(bin, st_shndx)
     elf_emit_u64_ref(bin, st_value)
     elf_emit_u64_ref(bin, st_size)
+}
+
+fn elf_builder_emit_program_headers_ref(
+    bin: &! Elf64Binary,
+    entry_offset: i64,
+    base_addr: i64,
+    phnum: i64,
+    machine_id: i64,
+    code_len: i64,
+    rodata_len: i64,
+    rodata_offset: i64,
+    data_len: i64,
+    data_offset: i64
+) -> () with Mut, Panic, Div {
+    emit_elf_header_ref(bin, entry_offset, base_addr, phnum, machine_id)
+    emit_program_header_text_ref(bin, code_len, 4096, base_addr)
+    if rodata_len > 0 {
+        emit_program_header_rodata_ref(bin, rodata_len, rodata_offset, base_addr)
+    }
+    if data_len > 0 {
+        emit_program_header_data_ref(bin, data_len, data_offset, base_addr)
+    }
+    emit_program_header_gnu_stack_ref(bin)
+}
+
+fn elf_builder_emit_payload_ref(
+    bin: &! Elf64Binary,
+    code: CodeBuffer,
+    rodata: StringTable,
+    data: StringTable,
+    text_offset: i64,
+    rodata_offset: i64,
+    data_offset: i64
+) -> () with Mut, Panic, Div {
+    while (*bin).len < text_offset {
+        elf_emit_byte_ref(bin, 0)
+    }
+
+    var i = 0
+    while i < code.len {
+        elf_emit_byte_ref(bin, code.bytes[i as usize] as i64)
+        i = i + 1
+    }
+
+    while (*bin).len < rodata_offset {
+        elf_emit_byte_ref(bin, 0)
+    }
+
+    var j = 0
+    while j < rodata.len {
+        elf_emit_byte_ref(bin, rodata.bytes[j as usize] as i64)
+        j = j + 1
+    }
+
+    if data.len > 0 {
+        while (*bin).len < data_offset {
+            elf_emit_byte_ref(bin, 0)
+        }
+        var dk = 0
+        while dk < data.len {
+            elf_emit_byte_ref(bin, data.bytes[dk as usize] as i64)
+            dk = dk + 1
+        }
+    }
+}
+
+fn elf_builder_emit_strtab_symtab_ref(
+    bin: &! Elf64Binary,
+    symbols: SymbolData,
+    fn_offsets: [i64; 256],
+    fn_count: i64,
+    text_va_base: i64,
+    strtab_offset: &! i64,
+    strtab_size: &! i64,
+    symtab_offset: &! i64,
+    symtab_size: &! i64
+) -> () with Mut, Panic, Div {
+    (*strtab_offset) = (*bin).len
+    var si = 0
+    let strtab_emit_len = if symbols.strtab_len > 0 { symbols.strtab_len } else { 1 }
+    while si < strtab_emit_len {
+        elf_emit_byte_ref(bin, symbols.strtab[si as usize] as i64)
+        si = si + 1
+    }
+    (*strtab_size) = (*bin).len - (*strtab_offset)
+
+    while (*bin).len % 8 != 0 {
+        elf_emit_byte_ref(bin, 0)
+    }
+    (*symtab_offset) = (*bin).len
+
+    emit_symtab_entry_ref(bin, 0, 0, 0, 0, 0, 0)
+
+    var fi = 0
+    while fi < fn_count {
+        let fn_name_off = symbols.name_offsets[fi as usize]
+        let fn_va = text_va_base + fn_offsets[fi as usize]
+        emit_symtab_entry_ref(bin, fn_name_off, 2, 1, 1, fn_va, 0)
+        fi = fi + 1
+    }
+    (*symtab_size) = (*bin).len - (*symtab_offset)
+}
+
+fn elf_builder_emit_shstrtab_ref(bin: &! Elf64Binary) -> () with Mut, Panic, Div {
+    elf_emit_byte_ref(bin, 0)
+    elf_builder_emit_cstr_ref(bin, ".text")
+    elf_builder_emit_cstr_ref(bin, ".rodata")
+    elf_builder_emit_cstr_ref(bin, ".symtab")
+    elf_builder_emit_cstr_ref(bin, ".strtab")
+    elf_builder_emit_cstr_ref(bin, ".shstrtab")
+    elf_builder_emit_cstr_ref(bin, ".note.gnu.property")
+    elf_builder_emit_cstr_ref(bin, ".data")
+}
+
+fn elf_builder_emit_note_and_shstrtab_ref(
+    bin: &! Elf64Binary,
+    machine_id: i64,
+    noteprop_offset: &! i64,
+    noteprop_size: &! i64,
+    shstrtab_offset: &! i64,
+    shstrtab_size: &! i64
+) -> () with Mut, Panic, Div {
+    while (*bin).len % 8 != 0 {
+        elf_emit_byte_ref(bin, 0)
+    }
+    (*noteprop_offset) = (*bin).len
+    if elf_emit_gnu_property_note(machine_id) {
+        elf_emit_u32_ref(bin, 4)
+        elf_emit_u32_ref(bin, 16)
+        elf_emit_u32_ref(bin, 5)
+        elf_emit_byte_ref(bin, 71)
+        elf_emit_byte_ref(bin, 78)
+        elf_emit_byte_ref(bin, 85)
+        elf_emit_byte_ref(bin, 0)
+        elf_emit_u32_ref(bin, 0xc0010002)
+        elf_emit_u32_ref(bin, 4)
+        elf_emit_u32_ref(bin, 0x10)
+        elf_emit_u32_ref(bin, 0)
+    }
+    (*noteprop_size) = (*bin).len - (*noteprop_offset)
+
+    while (*bin).len % 8 != 0 {
+        elf_emit_byte_ref(bin, 0)
+    }
+    (*shstrtab_offset) = (*bin).len
+    elf_builder_emit_shstrtab_ref(bin)
+    (*shstrtab_size) = (*bin).len - (*shstrtab_offset)
+}
+
+fn elf_builder_emit_section_headers_ref(
+    bin: &! Elf64Binary,
+    base_addr: i64,
+    text_offset: i64,
+    code_len: i64,
+    rodata_offset: i64,
+    rodata_len: i64,
+    data_offset: i64,
+    data_len: i64,
+    symtab_offset: i64,
+    symtab_size: i64,
+    strtab_offset: i64,
+    strtab_size: i64,
+    noteprop_offset: i64,
+    noteprop_size: i64,
+    shstrtab_offset: i64,
+    shstrtab_size: i64,
+    shoff: &! i64,
+    shnum: &! i64,
+    shstrndx: &! i64
+) -> () with Mut, Panic, Div {
+    while (*bin).len % 8 != 0 {
+        elf_emit_byte_ref(bin, 0)
+    }
+    (*shoff) = (*bin).len
+
+    var local_shnum = 6
+    if rodata_len > 0 { local_shnum = local_shnum + 1 }
+    if data_len > 0 { local_shnum = local_shnum + 1 }
+    let local_shstrndx = local_shnum - 1
+    let strtab_shndx = local_shnum - 3
+
+    let sht_progbits = 1
+    let sht_symtab = 2
+    let sht_strtab = 3
+    let shf_alloc = 2
+    let shf_execinstr = 4
+
+    emit_section_header_ref(bin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    let text_va = base_addr + text_offset
+    emit_section_header_ref(bin,
+        1, sht_progbits, shf_alloc + shf_execinstr,
+        text_va, text_offset, code_len, 0, 0, 16, 0)
+
+    if rodata_len > 0 {
+        let rodata_va = base_addr + rodata_offset
+        emit_section_header_ref(bin,
+            7, sht_progbits, shf_alloc,
+            rodata_va, rodata_offset, rodata_len, 0, 0, 8, 0)
+    }
+
+    let shf_write = 1
+    if data_len > 0 {
+        let data_va = base_addr + data_offset
+        emit_section_header_ref(bin,
+            61, sht_progbits, shf_alloc + shf_write,
+            data_va, data_offset, data_len, 0, 0, 8, 0)
+    }
+
+    emit_section_header_ref(bin,
+        15, sht_symtab, 0,
+        0, symtab_offset, symtab_size, strtab_shndx, 1, 8, 24)
+
+    emit_section_header_ref(bin,
+        23, sht_strtab, 0,
+        0, strtab_offset, strtab_size, 0, 0, 1, 0)
+
+    let sht_note = 7
+    emit_section_header_ref(bin,
+        41, sht_note, shf_alloc,
+        0, noteprop_offset, noteprop_size, 0, 0, 8, 0)
+
+    emit_section_header_ref(bin,
+        31, sht_strtab, 0,
+        0, shstrtab_offset, shstrtab_size, 0, 0, 1, 0)
+
+    (*shnum) = local_shnum
+    (*shstrndx) = local_shstrndx
+}
+
+fn elf_builder_patch_header_ref(bin: &! Elf64Binary, shoff: i64, shnum: i64, shstrndx: i64) -> () with Mut, Panic, Div {
+    elf_patch_u64_ref(bin, 40, shoff)
+    elf_patch_u16_ref(bin, 58, 64)
+    elf_patch_u16_ref(bin, 60, shnum)
+    elf_patch_u16_ref(bin, 62, shstrndx)
 }
 
 // Build ELF64 executable: .text + .rodata + PT_GNU_STACK + section headers
@@ -211,225 +464,25 @@ fn finalize_elf64_for_machine(
     if rodata.len > 0 { phnum = phnum + 1 }
     if data.len > 0 { phnum = phnum + 1 }
 
-    emit_elf_header_ref(&! bin, entry_offset, base_addr, phnum, machine_id)
-    emit_program_header_text_ref(&! bin, code.len, text_offset, base_addr)
-    if rodata.len > 0 {
-        emit_program_header_rodata_ref(&! bin, rodata.len, rodata_offset, base_addr)
-    }
-    if data.len > 0 {
-        emit_program_header_data_ref(&! bin, data.len, data_offset, base_addr)
-    }
-    emit_program_header_gnu_stack_ref(&! bin)
-
-    while bin.len < text_offset {
-        elf_emit_byte_ref(&! bin, 0)
-    }
-
-    var i = 0
-    while i < code.len {
-        elf_emit_byte_ref(&! bin, code.bytes[i as usize] as i64)
-        i = i + 1
-    }
-
-    while bin.len < rodata_offset {
-        elf_emit_byte_ref(&! bin, 0)
-    }
-
-    var j = 0
-    while j < rodata.len {
-        elf_emit_byte_ref(&! bin, rodata.bytes[j as usize] as i64)
-        j = j + 1
-    }
-
-    if data.len > 0 {
-        while bin.len < data_offset {
-            elf_emit_byte_ref(&! bin, 0)
-        }
-        var dk = 0
-        while dk < data.len {
-            elf_emit_byte_ref(&! bin, data.bytes[dk as usize] as i64)
-            dk = dk + 1
-        }
-    }
-
-    let strtab_offset = bin.len
-    var si = 0
-    let strtab_emit_len = if symbols.strtab_len > 0 { symbols.strtab_len } else { 1 }
-    while si < strtab_emit_len {
-        elf_emit_byte_ref(&! bin, symbols.strtab[si as usize] as i64)
-        si = si + 1
-    }
-    let strtab_size = bin.len - strtab_offset
-
-    while bin.len % 8 != 0 {
-        elf_emit_byte_ref(&! bin, 0)
-    }
-    let symtab_offset = bin.len
-
-    emit_symtab_entry_ref(&! bin, 0, 0, 0, 0, 0, 0)
-
     let text_va_base = base_addr + text_offset
-    var fi = 0
-    while fi < fn_count {
-        let fn_name_off = symbols.name_offsets[fi as usize]
-        let fn_va = text_va_base + fn_offsets[fi as usize]
-        emit_symtab_entry_ref(&! bin, fn_name_off, 2, 1, 1, fn_va, 0)
-        fi = fi + 1
-    }
-    let symtab_size = bin.len - symtab_offset
+    var strtab_offset: i64 = 0
+    var strtab_size: i64 = 0
+    var symtab_offset: i64 = 0
+    var symtab_size: i64 = 0
+    var noteprop_offset: i64 = 0
+    var noteprop_size: i64 = 0
+    var shstrtab_offset: i64 = 0
+    var shstrtab_size: i64 = 0
+    var shoff: i64 = 0
+    var shnum: i64 = 0
+    var shstrndx: i64 = 0
 
-    while bin.len % 8 != 0 {
-        elf_emit_byte_ref(&! bin, 0)
-    }
-    let noteprop_offset = bin.len
-    if elf_emit_gnu_property_note(machine_id) {
-        elf_emit_u32_ref(&! bin, 4)
-        elf_emit_u32_ref(&! bin, 16)
-        elf_emit_u32_ref(&! bin, 5)
-        elf_emit_byte_ref(&! bin, 71)
-        elf_emit_byte_ref(&! bin, 78)
-        elf_emit_byte_ref(&! bin, 85)
-        elf_emit_byte_ref(&! bin, 0)
-        elf_emit_u32_ref(&! bin, 0xc0010002)
-        elf_emit_u32_ref(&! bin, 4)
-        elf_emit_u32_ref(&! bin, 0x10)
-        elf_emit_u32_ref(&! bin, 0)
-    }
-    let noteprop_size = bin.len - noteprop_offset
-
-    while bin.len % 8 != 0 {
-        elf_emit_byte_ref(&! bin, 0)
-    }
-    let shstrtab_offset = bin.len
-
-    elf_emit_byte_ref(&! bin, 0)
-    elf_emit_byte_ref(&! bin, 46)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 101)
-    elf_emit_byte_ref(&! bin, 120)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 0)
-    elf_emit_byte_ref(&! bin, 46)
-    elf_emit_byte_ref(&! bin, 114)
-    elf_emit_byte_ref(&! bin, 111)
-    elf_emit_byte_ref(&! bin, 100)
-    elf_emit_byte_ref(&! bin, 97)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 97)
-    elf_emit_byte_ref(&! bin, 0)
-    elf_emit_byte_ref(&! bin, 46)
-    elf_emit_byte_ref(&! bin, 115)
-    elf_emit_byte_ref(&! bin, 121)
-    elf_emit_byte_ref(&! bin, 109)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 97)
-    elf_emit_byte_ref(&! bin, 98)
-    elf_emit_byte_ref(&! bin, 0)
-    elf_emit_byte_ref(&! bin, 46)
-    elf_emit_byte_ref(&! bin, 115)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 114)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 97)
-    elf_emit_byte_ref(&! bin, 98)
-    elf_emit_byte_ref(&! bin, 0)
-    elf_emit_byte_ref(&! bin, 46)
-    elf_emit_byte_ref(&! bin, 115)
-    elf_emit_byte_ref(&! bin, 104)
-    elf_emit_byte_ref(&! bin, 115)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 114)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 97)
-    elf_emit_byte_ref(&! bin, 98)
-    elf_emit_byte_ref(&! bin, 0)
-    elf_emit_byte_ref(&! bin, 46)
-    elf_emit_byte_ref(&! bin, 110)
-    elf_emit_byte_ref(&! bin, 111)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 101)
-    elf_emit_byte_ref(&! bin, 46)
-    elf_emit_byte_ref(&! bin, 103)
-    elf_emit_byte_ref(&! bin, 110)
-    elf_emit_byte_ref(&! bin, 117)
-    elf_emit_byte_ref(&! bin, 46)
-    elf_emit_byte_ref(&! bin, 112)
-    elf_emit_byte_ref(&! bin, 114)
-    elf_emit_byte_ref(&! bin, 111)
-    elf_emit_byte_ref(&! bin, 112)
-    elf_emit_byte_ref(&! bin, 101)
-    elf_emit_byte_ref(&! bin, 114)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 121)
-    elf_emit_byte_ref(&! bin, 0)
-    elf_emit_byte_ref(&! bin, 46)
-    elf_emit_byte_ref(&! bin, 100)
-    elf_emit_byte_ref(&! bin, 97)
-    elf_emit_byte_ref(&! bin, 116)
-    elf_emit_byte_ref(&! bin, 97)
-    elf_emit_byte_ref(&! bin, 0)
-    let shstrtab_size = bin.len - shstrtab_offset
-
-    while bin.len % 8 != 0 {
-        elf_emit_byte_ref(&! bin, 0)
-    }
-    let shoff = bin.len
-
-    var shnum = 6
-    if rodata.len > 0 { shnum = shnum + 1 }
-    if data.len > 0 { shnum = shnum + 1 }
-    let shstrndx = shnum - 1
-    let strtab_shndx = shnum - 3
-
-    let sht_progbits = 1
-    let sht_symtab = 2
-    let sht_strtab = 3
-    let shf_alloc = 2
-    let shf_execinstr = 4
-
-    emit_section_header_ref(&! bin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-
-    let text_va = base_addr + text_offset
-    emit_section_header_ref(&! bin,
-        1, sht_progbits, shf_alloc + shf_execinstr,
-        text_va, text_offset, code.len, 0, 0, 16, 0)
-
-    if rodata.len > 0 {
-        let rodata_va = base_addr + rodata_offset
-        emit_section_header_ref(&! bin,
-            7, sht_progbits, shf_alloc,
-            rodata_va, rodata_offset, rodata.len, 0, 0, 8, 0)
-    }
-
-    let shf_write = 1
-    if data.len > 0 {
-        let data_va = base_addr + data_offset
-        emit_section_header_ref(&! bin,
-            61, sht_progbits, shf_alloc + shf_write,
-            data_va, data_offset, data.len, 0, 0, 8, 0)
-    }
-
-    emit_section_header_ref(&! bin,
-        15, sht_symtab, 0,
-        0, symtab_offset, symtab_size, strtab_shndx, 1, 8, 24)
-
-    emit_section_header_ref(&! bin,
-        23, sht_strtab, 0,
-        0, strtab_offset, strtab_size, 0, 0, 1, 0)
-
-    let sht_note = 7
-    emit_section_header_ref(&! bin,
-        41, sht_note, shf_alloc,
-        0, noteprop_offset, noteprop_size, 0, 0, 8, 0)
-
-    emit_section_header_ref(&! bin,
-        31, sht_strtab, 0,
-        0, shstrtab_offset, shstrtab_size, 0, 0, 1, 0)
-
-    elf_patch_u64_ref(&! bin, 40, shoff)
-    elf_patch_u16_ref(&! bin, 58, 64)
-    elf_patch_u16_ref(&! bin, 60, shnum)
-    elf_patch_u16_ref(&! bin, 62, shstrndx)
+    elf_builder_emit_program_headers_ref(&! bin, entry_offset, base_addr, phnum, machine_id, code.len, rodata.len, rodata_offset, data.len, data_offset)
+    elf_builder_emit_payload_ref(&! bin, code, rodata, data, text_offset, rodata_offset, data_offset)
+    elf_builder_emit_strtab_symtab_ref(&! bin, symbols, fn_offsets, fn_count, text_va_base, &! strtab_offset, &! strtab_size, &! symtab_offset, &! symtab_size)
+    elf_builder_emit_note_and_shstrtab_ref(&! bin, machine_id, &! noteprop_offset, &! noteprop_size, &! shstrtab_offset, &! shstrtab_size)
+    elf_builder_emit_section_headers_ref(&! bin, base_addr, text_offset, code.len, rodata_offset, rodata.len, data_offset, data.len, symtab_offset, symtab_size, strtab_offset, strtab_size, noteprop_offset, noteprop_size, shstrtab_offset, shstrtab_size, &! shoff, &! shnum, &! shstrndx)
+    elf_builder_patch_header_ref(&! bin, shoff, shnum, shstrndx)
 
     bin
 }
