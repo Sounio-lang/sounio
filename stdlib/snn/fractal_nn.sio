@@ -1,0 +1,243 @@
+// stdlib/snn/fractal_nn.sio
+//
+// Fractal Sedenion Neural Network (FSNN)
+//
+// Architecture: one layer per Cayley-Dickson level.
+//   Level 0: ℝ  (1D)  — real scalar weight
+//   Level 1: ℂ  (2D)  — complex weight
+//   Level 2: ℍ  (4D)  — quaternion weight
+//   Level 3: 𝕆  (8D)  — octonion weight
+//   Level 4: 𝕊  (16D) — sedenion weight pair (for G₂ detection)
+//
+// The key invariant at level 4:
+//   When (w_sed, w_sed2) converges to 𝒵(𝕊) ≅ G₂,
+//   the network has found a G₂ eigenmode of the data.
+//   This is NOT a failure — it is a signal.
+//
+// Contrast with stdlib/snn/sedenion_layer_core.sio::zero_divisor_loss():
+//   zero_divisor_loss PENALIZES landing on ZD(𝕊) → repels from zero divisors
+//   fsnn_g2_step   REWARDS landing on 𝒵(𝕊)     → attracts toward G₂ variety
+//   The semantics are opposite. The distinction is the entire point.
+//
+// References:
+//   Reggiani 2024, arXiv:2411.18881 — 𝒵(𝕊) ≅ G₂ isometry
+//   Agourakis 2026 — 168 theorem, Dual Pathway, computational verification
+//   Gemini Deep Think 2026-04-01 — 𝒵(𝕊) vs ZD(𝕊) notation correction
+
+use math::sedenion64::*
+use math::g2_variety::*
+
+// ============================================================================
+// FRACTAL SEDENION NEURAL NETWORK
+// ============================================================================
+//
+// All fields are stack-allocated. No dynamic arrays.
+// Level 4 carries TWO sedenion weights to form a G₂-detectable pair.
+
+pub struct FractalSedenionNN {
+    // Level 0: ℝ
+    w_real: f64,
+    b_real: f64,
+    // Level 1: ℂ (re, im components)
+    w_re: f64,
+    w_im: f64,
+    b_re: f64,
+    b_im: f64,
+    // Level 2: ℍ (4 quaternion components)
+    w_q0: f64,
+    w_q1: f64,
+    w_q2: f64,
+    w_q3: f64,
+    b_q0: f64,
+    b_q1: f64,
+    b_q2: f64,
+    b_q3: f64,
+    // Level 3: 𝕆 (8 octonion components)
+    w_o0: f64,
+    w_o1: f64,
+    w_o2: f64,
+    w_o3: f64,
+    w_o4: f64,
+    w_o5: f64,
+    w_o6: f64,
+    w_o7: f64,
+    b_o0: f64,
+    b_o1: f64,
+    b_o2: f64,
+    b_o3: f64,
+    b_o4: f64,
+    b_o5: f64,
+    b_o6: f64,
+    b_o7: f64,
+    // Level 4: 𝕊 — TWO sedenion weights (the G₂ pair) + bias
+    w_sed: Sedenion64,
+    w_sed2: Sedenion64,
+    b_sed: Sedenion64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+// Zero-initialized network (identity at each level)
+pub fn fsnn_zero() -> FractalSedenionNN {
+    FractalSedenionNN {
+        w_real: 1.0, b_real: 0.0,
+        w_re: 1.0, w_im: 0.0, b_re: 0.0, b_im: 0.0,
+        w_q0: 1.0, w_q1: 0.0, w_q2: 0.0, w_q3: 0.0,
+        b_q0: 0.0, b_q1: 0.0, b_q2: 0.0, b_q3: 0.0,
+        w_o0: 1.0, w_o1: 0.0, w_o2: 0.0, w_o3: 0.0,
+        w_o4: 0.0, w_o5: 0.0, w_o6: 0.0, w_o7: 0.0,
+        b_o0: 0.0, b_o1: 0.0, b_o2: 0.0, b_o3: 0.0,
+        b_o4: 0.0, b_o5: 0.0, b_o6: 0.0, b_o7: 0.0,
+        w_sed: sed64_one(),
+        w_sed2: sed64_one(),
+        b_sed: sed64_zero(),
+    }
+}
+
+// Initialize with sedenion weights near the canonical G₂ pair.
+// w_sed ≈ (e3+e10)/√2, w_sed2 ≈ (e6-e15)/√2.
+// g2_proximity(w_sed, w_sed2) will be ≈ 0 from the start.
+pub fn fsnn_init_near_g2() -> FractalSedenionNN with Mut, Div, Panic {
+    let pair = g2_canonical_pair()
+    FractalSedenionNN {
+        w_real: 1.0, b_real: 0.0,
+        w_re: 1.0, w_im: 0.0, b_re: 0.0, b_im: 0.0,
+        w_q0: 1.0, w_q1: 0.0, w_q2: 0.0, w_q3: 0.0,
+        b_q0: 0.0, b_q1: 0.0, b_q2: 0.0, b_q3: 0.0,
+        w_o0: 1.0, w_o1: 0.0, w_o2: 0.0, w_o3: 0.0,
+        w_o4: 0.0, w_o5: 0.0, w_o6: 0.0, w_o7: 0.0,
+        b_o0: 0.0, b_o1: 0.0, b_o2: 0.0, b_o3: 0.0,
+        b_o4: 0.0, b_o5: 0.0, b_o6: 0.0, b_o7: 0.0,
+        w_sed: pair.a,
+        w_sed2: pair.b,
+        b_sed: sed64_zero(),
+    }
+}
+
+// Initialize with sedenion weights far from the G₂ variety (for T5 test).
+// w_sed = e0 (real unit), w_sed2 = e1 (purely imaginary) — product is non-zero.
+pub fn fsnn_init_far_from_g2() -> FractalSedenionNN {
+    FractalSedenionNN {
+        w_real: 1.0, b_real: 0.0,
+        w_re: 1.0, w_im: 0.0, b_re: 0.0, b_im: 0.0,
+        w_q0: 1.0, w_q1: 0.0, w_q2: 0.0, w_q3: 0.0,
+        b_q0: 0.0, b_q1: 0.0, b_q2: 0.0, b_q3: 0.0,
+        w_o0: 1.0, w_o1: 0.0, w_o2: 0.0, w_o3: 0.0,
+        w_o4: 0.0, w_o5: 0.0, w_o6: 0.0, w_o7: 0.0,
+        b_o0: 0.0, b_o1: 0.0, b_o2: 0.0, b_o3: 0.0,
+        b_o4: 0.0, b_o5: 0.0, b_o6: 0.0, b_o7: 0.0,
+        w_sed: sed64_one(),
+        w_sed2: sed64_basis(1),
+        b_sed: sed64_zero(),
+    }
+}
+
+// ============================================================================
+// FORWARD PASS — CD TOWER
+// ============================================================================
+//
+// Input flows through each level. Each level applies its multiplication rule.
+// Level 4 uses sedenion multiplication (non-associative, has zero divisors).
+//
+// Real level: project input to real part, scale, embed back.
+// Complex level: treat (e0,e1) as complex, multiply, project back.
+// Quaternion: treat (e0..e3) as quaternion, multiply, embed.
+// Octonion: treat (e0..e7) as octonion, multiply, embed.
+// Sedenion: full 16D multiplication.
+//
+// All levels use left-multiplication: output = weight * input + bias
+
+pub fn fsnn_forward(net: FractalSedenionNN, x: Sedenion64) -> Sedenion64
+  with Mut, Div, Panic {
+    // Level 0: real scalar on e0 component
+    let x0 = x.e0
+    let y0 = net.w_real * x0 + net.b_real
+
+    // Level 1: complex on (e0, e1)
+    let x_re = x.e0
+    let x_im = x.e1
+    let y_re = net.w_re * x_re - net.w_im * x_im + net.b_re
+    let y_im = net.w_re * x_im + net.w_im * x_re + net.b_im
+
+    // Level 2: quaternion on (e0..e3)
+    // q = (w_q0 + w_q1*i + w_q2*j + w_q3*k) * (x.e0 + x.e1*i + x.e2*j + x.e3*k)
+    let a = net.w_q0
+    let b = net.w_q1
+    let c = net.w_q2
+    let d = net.w_q3
+    let p = x.e0
+    let q = x.e1
+    let r = x.e2
+    let s = x.e3
+    let y_q0 = a*p - b*q - c*r - d*s + net.b_q0
+    let y_q1 = a*q + b*p + c*s - d*r + net.b_q1
+    let y_q2 = a*r - b*s + c*p + d*q + net.b_q2
+    let y_q3 = a*s + b*r - c*q + d*p + net.b_q3
+
+    // Level 3: octonion on (e0..e7) — use real-part output
+    // Simplified: weight dot product (associative approximation for forward pass)
+    let oct_in = x.e0 * net.w_o0 + x.e1 * net.w_o1 + x.e2 * net.w_o2 + x.e3 * net.w_o3
+               + x.e4 * net.w_o4 + x.e5 * net.w_o5 + x.e6 * net.w_o6 + x.e7 * net.w_o7
+
+    // Level 4: sedenion multiplication (full non-associative product)
+    let sed_in = sed64_add(sed64_scale(x, 1.0), net.b_sed)
+    let sed_out = sed64_mul(net.w_sed, sed_in)
+
+    // Combine: scale output by blend of all levels' real contributions
+    // The sedenion output is the primary output; other levels modulate e0
+    let blend = 0.1 * y0 + 0.1 * y_re + 0.1 * y_q0 + 0.1 * oct_in
+    sed64(sed_out.e0 + blend,
+          sed_out.e1, sed_out.e2, sed_out.e3,
+          sed_out.e4, sed_out.e5, sed_out.e6, sed_out.e7,
+          sed_out.e8, sed_out.e9, sed_out.e10, sed_out.e11,
+          sed_out.e12, sed_out.e13, sed_out.e14, sed_out.e15)
+}
+
+// ============================================================================
+// G₂ CONVERGENCE OBSERVABLES
+// ============================================================================
+
+// G₂ score: how close is (w_sed, w_sed2) to 𝒵(𝕊)?
+// = 0.0  when on the G₂ variety (weights found a G₂ eigenmode)
+// > 0.0  otherwise
+pub fn fsnn_g2_score(net: FractalSedenionNN) -> f64 with Mut, Div, Panic {
+    g2_proximity(net.w_sed, net.w_sed2)
+}
+
+// Has the sedenion level converged to the G₂ variety?
+// This is a TYPE-LEVEL observable: not "are the weights small"
+// but "have the weights found the G₂ geometry of the data."
+pub fn fsnn_is_g2_converged(net: FractalSedenionNN, tol: f64) -> bool
+  with Mut, Div, Panic {
+    fsnn_g2_score(net) < tol
+}
+
+// ============================================================================
+// G₂ GRADIENT STEP — TOWARD 𝒵(𝕊)
+// ============================================================================
+//
+// Minimize g2_proximity(w_sed, w_sed2) by moving w_sed in the direction
+// that decreases ||w_sed * w_sed2||².
+//
+// This is the OPPOSITE of zero_divisor_loss():
+//   zero_divisor_loss: gradient ASCENT on proximity → repels from 𝒵(𝕊)
+//   fsnn_g2_step:      gradient DESCENT on proximity → attracts to 𝒵(𝕊)
+pub fn fsnn_g2_step(net: FractalSedenionNN, lr: f64) -> FractalSedenionNN
+  with Mut, Div, Panic {
+    let new_w_sed = g2_step_a(net.w_sed, net.w_sed2, lr)
+    FractalSedenionNN {
+        w_real: net.w_real, b_real: net.b_real,
+        w_re: net.w_re, w_im: net.w_im, b_re: net.b_re, b_im: net.b_im,
+        w_q0: net.w_q0, w_q1: net.w_q1, w_q2: net.w_q2, w_q3: net.w_q3,
+        b_q0: net.b_q0, b_q1: net.b_q1, b_q2: net.b_q2, b_q3: net.b_q3,
+        w_o0: net.w_o0, w_o1: net.w_o1, w_o2: net.w_o2, w_o3: net.w_o3,
+        w_o4: net.w_o4, w_o5: net.w_o5, w_o6: net.w_o6, w_o7: net.w_o7,
+        b_o0: net.b_o0, b_o1: net.b_o1, b_o2: net.b_o2, b_o3: net.b_o3,
+        b_o4: net.b_o4, b_o5: net.b_o5, b_o6: net.b_o6, b_o7: net.b_o7,
+        w_sed: new_w_sed,
+        w_sed2: net.w_sed2,
+        b_sed: net.b_sed,
+    }
+}

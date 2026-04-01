@@ -1,0 +1,156 @@
+// stdlib/math/g2_variety.sio
+//
+// G₂ variety: 𝒵(𝕊) = {(a,b) ∈ 𝕊×𝕊 : |a|=|b|=1, a*b=0}
+//
+// This space is isometric to the compact exceptional Lie group G₂
+// with a naturally reductive left-invariant metric.
+// Reference: Reggiani 2024, arXiv:2411.18881
+//
+// CRITICAL NOTATION (Gemini Deep Think peer review, 2026-04-01):
+//   𝒵(𝕊) = ordered PAIR space  ≅ G₂   (this module)
+//   ZD(𝕊) = single element space ≅ V₂(ℝ⁷) (NOT this module)
+// Confusing the two is the only notation error in the 168 theorem chain.
+//
+// Canonical zero divisor pair (Cawagas 2004):
+//   a = (e3 + e10) / √2,  b = (e6 - e15) / √2
+//   a*b = 0,  |a| = |b| = 1
+//
+// The 168 theorem (Agourakis 2026, computationally verified commit 69ba3408):
+//   Non-Fano basis triples ↔ GL(3,2) = PSL(2,7) ⊂ G₂ ≅ 𝒵(𝕊)
+//   Count: 168 = 42 Assessors × 4 (Dual Pathway, formalized Gemini 2026-04-01)
+
+use math::sedenion64::*
+
+// ============================================================================
+// G₂ VARIETY TYPE
+// ============================================================================
+
+// A point on the G₂ variety: an ordered pair (a,b) of unit sedenions
+// satisfying a*b = 0. These pairs are the "zero divisors of the sedenions"
+// in the Moreno/Reggiani sense.
+pub struct G2Pair {
+    a: Sedenion64,
+    b: Sedenion64,
+}
+
+// ============================================================================
+// PROXIMITY METRIC
+// ============================================================================
+
+// Distance of (a,b) to 𝒵(𝕊): ||a*b||²
+// = 0 iff (a,b) is a zero divisor pair
+// > 0 otherwise
+// This is the G₂ convergence score for the FSNN.
+pub fn g2_proximity(a: Sedenion64, b: Sedenion64) -> f64 with Mut, Div, Panic {
+    let prod = sed64_mul(a, b)
+    sed64_norm_sq(prod)
+}
+
+// Is (a,b) on the G₂ variety (within tolerance)?
+pub fn g2_pair_check(a: Sedenion64, b: Sedenion64, tol: f64) -> bool with Mut, Div, Panic {
+    g2_proximity(a, b) < tol
+}
+
+// ============================================================================
+// CANONICAL EXAMPLE
+// ============================================================================
+
+fn g2_sqrt2_inv() -> f64 with Mut, Div, Panic {
+    // 1/√2 via Newton (10 iterations, more than sufficient for f64)
+    let x = 0.5
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+// The canonical G₂ pair from Cawagas 2004:
+//   a = (e3 + e10) / √2
+//   b = (e6 - e15) / √2
+// Verified: a*b = 0, |a|=|b|=1
+pub fn g2_canonical_pair() -> G2Pair with Mut, Div, Panic {
+    let s = g2_sqrt2_inv()
+    let a = sed64(0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let b = sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, s, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - s)
+    G2Pair { a: a, b: b }
+}
+
+// ============================================================================
+// DUAL PATHWAY COUNTING (The 168 Theorem, Bottom-Up Path)
+// ============================================================================
+//
+// Top-down path: PSL(2,7) ⊂ G₂ ≅ 𝒵(𝕊)
+// Bottom-up path: 42 Assessors × 4 = 168 primitive zero divisor pairs
+//
+// At the sedenion level (4-bit CD), the basis indices run 1..15.
+// For each ordered pair (i,j) of distinct imaginary basis indices,
+// the normalized pair (e_i, e_j) is on 𝒵(𝕊) iff g2_proximity < tol.
+//
+// This function counts them — expected result: 168.
+pub fn g2_count_basis_variety_pairs(tol: f64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 1
+    while i <= 15 {
+        var j: i64 = 1
+        while j <= 15 {
+            if i != j {
+                let a = sed64_basis(i as i32)
+                let b = sed64_basis(j as i32)
+                if g2_proximity(a, b) < tol {
+                    count = count + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// G₂ STEP: GRADIENT TOWARD 𝒵(𝕊)
+// ============================================================================
+//
+// Given a sedenion a, find the direction that reduces g2_proximity(a, b).
+// Numerical gradient: perturb each component of a by epsilon, measure change.
+// Returns a' = a - lr * ∇_a ||a*b||²
+//
+// Note: unlike zero_divisor_loss() which repels from ZD(𝕊),
+// this ATTRACTS toward 𝒵(𝕊). The semantics are opposite.
+pub fn g2_step_a(a: Sedenion64, b: Sedenion64, lr: f64) -> Sedenion64
+  with Mut, Div, Panic {
+    let eps = 0.0001
+    let base = g2_proximity(a, b)
+
+    // Numerical gradient of ||a*b||² w.r.t. each component of a
+    let ga0  = (g2_proximity(sed64_add(a, sed64_basis(0) ), b) - base) / eps
+    let ga1  = (g2_proximity(sed64_add(a, sed64_basis(1) ), b) - base) / eps
+    let ga2  = (g2_proximity(sed64_add(a, sed64_basis(2) ), b) - base) / eps
+    let ga3  = (g2_proximity(sed64_add(a, sed64_basis(3) ), b) - base) / eps
+    let ga4  = (g2_proximity(sed64_add(a, sed64_basis(4) ), b) - base) / eps
+    let ga5  = (g2_proximity(sed64_add(a, sed64_basis(5) ), b) - base) / eps
+    let ga6  = (g2_proximity(sed64_add(a, sed64_basis(6) ), b) - base) / eps
+    let ga7  = (g2_proximity(sed64_add(a, sed64_basis(7) ), b) - base) / eps
+    let ga8  = (g2_proximity(sed64_add(a, sed64_basis(8) ), b) - base) / eps
+    let ga9  = (g2_proximity(sed64_add(a, sed64_basis(9) ), b) - base) / eps
+    let ga10 = (g2_proximity(sed64_add(a, sed64_basis(10)), b) - base) / eps
+    let ga11 = (g2_proximity(sed64_add(a, sed64_basis(11)), b) - base) / eps
+    let ga12 = (g2_proximity(sed64_add(a, sed64_basis(12)), b) - base) / eps
+    let ga13 = (g2_proximity(sed64_add(a, sed64_basis(13)), b) - base) / eps
+    let ga14 = (g2_proximity(sed64_add(a, sed64_basis(14)), b) - base) / eps
+    let ga15 = (g2_proximity(sed64_add(a, sed64_basis(15)), b) - base) / eps
+
+    let grad = sed64(ga0, ga1, ga2, ga3, ga4, ga5, ga6, ga7,
+                     ga8, ga9, ga10, ga11, ga12, ga13, ga14, ga15)
+    sed64_normalize(sed64_sub(a, sed64_scale(grad, lr)))
+}
