@@ -1,0 +1,206 @@
+// stdlib/snn/zd_classifier.sio
+//
+// Classify a converged zero-divisor pair into the 168 projective framework.
+//
+// A primitive zero divisor v ∈ 𝕊 has the form (e_p ± e_{q+8})/√2 with
+// p,q ∈ {1,...,7}, p ≠ q. The classification extracts:
+//   1. Support: dominant lower-half (0..7) and upper-half (8..15) indices
+//   2. Fano triple: (p, q, p XOR q)
+//   3. XOR fiber label: p XOR q ∈ {1,...,7}
+//   4. Sign pattern → class_id ∈ {0,...,167}
+//
+// References:
+//   Agourakis 2026 — 168 theorem, Dual Pathway
+//   PRIMITIVE_ZD_GAP_RESOLUTION.md — intrinsic definition (P1-P3)
+
+use math::sedenion64::*
+use math::g2_variety::*
+
+// ============================================================================
+// SUPPORT EXTRACTION
+// ============================================================================
+
+pub struct ZDSupport {
+    idx_lower: i32,     // dominant index in {0..7}
+    idx_upper: i32,     // dominant index in {8..15}
+    weight_lower: f64,  // absolute value of dominant lower component
+    weight_upper: f64,  // absolute value of dominant upper component
+    sharpness: f64,     // dominant / second-largest (higher = cleaner)
+}
+
+fn abs64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Extract the support of a sedenion: which basis elements are dominant.
+// For a primitive ZD like (e_p + δ·e_{q+8})/√2, the support has exactly
+// one dominant index in each half, both with weight ≈ 1/√2 ≈ 0.707.
+pub fn zd_extract_support(s: Sedenion64) -> ZDSupport with Mut, Div, Panic {
+    let arr = sed64_to_array(s)
+
+    // Find dominant in lower half (indices 0..7)
+    var max_lo_idx = 0
+    var max_lo_val = 0.0
+    var second_lo = 0.0
+    var i = 0
+    while i < 8 {
+        let v = abs64(arr[i])
+        if v > max_lo_val {
+            second_lo = max_lo_val
+            max_lo_val = v
+            max_lo_idx = i
+        } else {
+            if v > second_lo {
+                second_lo = v
+            }
+        }
+        i = i + 1
+    }
+
+    // Find dominant in upper half (indices 8..15)
+    var max_hi_idx = 8
+    var max_hi_val = 0.0
+    var second_hi = 0.0
+    i = 8
+    while i < 16 {
+        let v = abs64(arr[i])
+        if v > max_hi_val {
+            second_hi = max_hi_val
+            max_hi_val = v
+            max_hi_idx = i
+        } else {
+            if v > second_hi {
+                second_hi = v
+            }
+        }
+        i = i + 1
+    }
+
+    let noise = second_lo + second_hi + 1e-30
+    let signal = max_lo_val + max_hi_val
+    let sharpness = signal / noise
+
+    ZDSupport {
+        idx_lower: max_lo_idx as i32,
+        idx_upper: max_hi_idx as i32,
+        weight_lower: max_lo_val,
+        weight_upper: max_hi_val,
+        sharpness: sharpness,
+    }
+}
+
+// ============================================================================
+// FANO TRIPLE
+// ============================================================================
+
+pub struct FanoTriple {
+    p: i32,   // 1..7 (lower-half imaginary index)
+    q: i32,   // 1..7 (upper-half imaginary index, i.e., idx_upper - 8)
+    v: i32,   // p XOR q (the XOR fiber label)
+}
+
+// Build a Fano triple from a support.
+// p = idx_lower (must be in 1..7 for a primitive ZD)
+// q = idx_upper - 8 (must be in 1..7)
+// v = p XOR q
+pub fn zd_fano_from_support(support: ZDSupport) -> FanoTriple {
+    let p = support.idx_lower
+    let q = support.idx_upper - 8
+    let v = p ^ q
+    FanoTriple { p: p, q: q, v: v }
+}
+
+// ============================================================================
+// CLASSIFICATION
+// ============================================================================
+
+pub struct ZDClassification {
+    support_a: ZDSupport,
+    support_b: ZDSupport,
+    fano_a: FanoTriple,
+    fano_b: FanoTriple,
+    fiber: i32,         // XOR fiber label = fano_a.v (should equal fano_b.v)
+    sign_a: i32,        // +1 or -1: sign of the upper component of a
+    sign_b: i32,        // +1 or -1: sign of the upper component of b
+    class_id: i32,      // 0..167: unique projective class index
+    confidence: f64,    // how cleanly the pair matches a basis pair
+}
+
+// Compute sign of the dominant upper component
+fn zd_sign(s: Sedenion64, upper_idx: i32) -> i32 with Mut, Div, Panic {
+    let arr = sed64_to_array(s)
+    if arr[upper_idx] >= 0.0 { return 1 }
+    return 0 - 1
+}
+
+// Compute the class_id from ordered pair indices and sign.
+// We use the following encoding:
+//   assessor_id = (p-1)*6 + (q-1) - (if q > p then 0 else 1)
+//     where p,q ∈ {1..7}, p ≠ q → 42 assessors
+//   sign_code = 0 if sign_a = +1, 1 if sign_a = -1
+//     (sign_b is determined by sign_a via the SCL, so only 1 bit needed
+//      BUT we track 2 sign choices for the ordered pair → 4 per assessor)
+//   class_id = assessor_id * 4 + sign_code
+//
+// This gives 42 * 4 = 168 classes.
+fn zd_compute_class_id(fano_a: FanoTriple, fano_b: FanoTriple,
+                        sign_a: i32, sign_b: i32) -> i32 {
+    // Assessor from a's support: ordered pair (p, q) with p,q ∈ 1..7, p ≠ q
+    let p = fano_a.p
+    let q = fano_a.q
+
+    // Map (p,q) to assessor_id in 0..41
+    // The ordered pairs (1..7)² \ diagonal = 42 pairs
+    // Simple encoding: (p-1)*7 + (q-1), but skip p==q
+    var assessor_id = (p - 1) * 6
+    if q > p {
+        assessor_id = assessor_id + (q - 1) - 1
+    } else {
+        assessor_id = assessor_id + (q - 1)
+    }
+
+    // Sign code: 2 bits from sign_a and sign_b
+    var sign_code = 0
+    if sign_a < 0 { sign_code = sign_code + 1 }
+    if sign_b < 0 { sign_code = sign_code + 2 }
+
+    assessor_id * 4 + sign_code
+}
+
+// Full classification of a converged G2 pair.
+pub fn zd_classify(pair: G2Pair) -> ZDClassification with Mut, Div, Panic {
+    let sup_a = zd_extract_support(pair.a)
+    let sup_b = zd_extract_support(pair.b)
+    let fano_a = zd_fano_from_support(sup_a)
+    let fano_b = zd_fano_from_support(sup_b)
+    let sa = zd_sign(pair.a, sup_a.idx_upper)
+    let sb = zd_sign(pair.b, sup_b.idx_upper)
+
+    let fiber = fano_a.v
+
+    let class_id = zd_compute_class_id(fano_a, fano_b, sa, sb)
+
+    // Confidence: minimum sharpness of the two supports
+    var confidence = sup_a.sharpness
+    if sup_b.sharpness < confidence { confidence = sup_b.sharpness }
+    // Normalize to [0, 1]: sharpness > 10 is very clean
+    if confidence > 100.0 { confidence = 100.0 }
+    confidence = confidence / 100.0
+
+    ZDClassification {
+        support_a: sup_a,
+        support_b: sup_b,
+        fano_a: fano_a,
+        fano_b: fano_b,
+        fiber: fiber,
+        sign_a: sa,
+        sign_b: sb,
+        class_id: class_id,
+        confidence: confidence,
+    }
+}
+
+// Check if two classifications are in the same projective class.
+pub fn zd_same_class(c1: ZDClassification, c2: ZDClassification) -> bool {
+    c1.class_id == c2.class_id
+}

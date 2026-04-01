@@ -1,0 +1,226 @@
+//@ run-pass
+// tests/stdlib/snn/test_g2_grad_e2e.sio
+//
+// Validates analytical gradient of g2_proximity against numerical FD.
+// 6 tests: TG1-TG6.
+
+use math::sedenion64::*
+use math::g2_variety::*
+use snn::g2_grad::*
+
+fn abs64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// TG1: Analytical grad_a matches numerical FD (component-wise)
+// ============================================================================
+
+fn tg1_grad_a_matches_fd() -> bool with Mut, Div, Panic {
+    // Use a non-trivial pair (not on G₂ variety)
+    let a = sed64_normalize(sed64(0.3, 0.1, 0.4, 0.1, 0.5, 0.9, 0.2, 0.6,
+                                   0.5, 0.3, 0.5, 0.8, 0.9, 0.7, 0.9, 0.3))
+    let b = sed64_normalize(sed64(0.2, 0.7, 0.1, 0.8, 0.2, 0.8, 0.1, 0.8,
+                                   0.4, 0.5, 0.9, 0.0, 0.4, 0.5, 0.2, 0.3))
+
+    let analytical = g2_grad_a(a, b)
+    let a_arr = sed64_to_array(analytical)
+
+    // Numerical FD: (f(a + eps*e_k) - f(a - eps*e_k)) / (2*eps)
+    let eps = 0.0001
+    var max_err = 0.0
+    var k = 0
+    while k < 16 {
+        let ek = sed64_basis(k)
+        let a_plus = sed64_add(a, sed64_scale(ek, eps))
+        let a_minus = sed64_sub(a, sed64_scale(ek, eps))
+        let fd_k = (g2_proximity(a_plus, b) - g2_proximity(a_minus, b)) / (2.0 * eps)
+        let err = abs64(a_arr[k] - fd_k)
+        if err > max_err { max_err = err }
+        k = k + 1
+    }
+    max_err < 1e-4
+}
+
+// ============================================================================
+// TG2: Gradient is zero at canonical ZD pair (score=0 → grad=0)
+// ============================================================================
+
+fn tg2_grad_zero_at_zd_pair() -> bool with Mut, Div, Panic {
+    let pair = g2_canonical_pair()
+    let gr = g2_grad(pair.a, pair.b)
+
+    // Score should be ~0
+    if gr.score > 1e-10 { return 0 }
+
+    // Both gradients should be ~0
+    let ga_norm = sed64_norm_sq(gr.grad_a)
+    let gb_norm = sed64_norm_sq(gr.grad_b)
+    ga_norm < 1e-10 && gb_norm < 1e-10
+}
+
+// ============================================================================
+// TG3: Gradient descent direction reduces score
+// ============================================================================
+
+fn tg3_descent_reduces_score() -> bool with Mut, Div, Panic {
+    // Use a pair that's not on G₂ but has non-trivial mixed components
+    let a = sed64_normalize(sed64(0.5, 0.3, 0.1, 0.4, 0.2, 0.6, 0.1, 0.3,
+                                   0.7, 0.2, 0.5, 0.1, 0.8, 0.3, 0.4, 0.2))
+    let b = sed64_normalize(sed64(0.1, 0.6, 0.3, 0.2, 0.7, 0.1, 0.5, 0.4,
+                                   0.3, 0.8, 0.2, 0.6, 0.1, 0.4, 0.7, 0.5))
+
+    let score_before = g2_proximity(a, b)
+    let new_a = g2_analytical_step_a(a, b, 0.01)
+    let score_after = g2_proximity(new_a, b)
+
+    score_after < score_before
+}
+
+// ============================================================================
+// TG4: Analytical grad_b matches numerical FD
+// ============================================================================
+
+fn tg4_grad_b_matches_fd() -> bool with Mut, Div, Panic {
+    let a = sed64_normalize(sed64(0.3, 0.1, 0.4, 0.1, 0.5, 0.9, 0.2, 0.6,
+                                   0.5, 0.3, 0.5, 0.8, 0.9, 0.7, 0.9, 0.3))
+    let b = sed64_normalize(sed64(0.2, 0.7, 0.1, 0.8, 0.2, 0.8, 0.1, 0.8,
+                                   0.4, 0.5, 0.9, 0.0, 0.4, 0.5, 0.2, 0.3))
+
+    let analytical = g2_grad_b(a, b)
+    let b_arr = sed64_to_array(analytical)
+
+    let eps = 0.0001
+    var max_err = 0.0
+    var k = 0
+    while k < 16 {
+        let ek = sed64_basis(k)
+        let b_plus = sed64_add(b, sed64_scale(ek, eps))
+        let b_minus = sed64_sub(b, sed64_scale(ek, eps))
+        let fd_k = (g2_proximity(a, b_plus) - g2_proximity(a, b_minus)) / (2.0 * eps)
+        let err = abs64(b_arr[k] - fd_k)
+        if err > max_err { max_err = err }
+        k = k + 1
+    }
+    max_err < 1e-4
+}
+
+// ============================================================================
+// TG5: Analytical step matches existing g2_step_a direction
+// ============================================================================
+
+fn tg5_analytical_step_reduces_score() -> bool with Mut, Div, Panic {
+    // Use the same non-trivial pair as TG1
+    let a = sed64_normalize(sed64(0.3, 0.1, 0.4, 0.1, 0.5, 0.9, 0.2, 0.6,
+                                   0.5, 0.3, 0.5, 0.8, 0.9, 0.7, 0.9, 0.3))
+    let b = sed64_normalize(sed64(0.2, 0.7, 0.1, 0.8, 0.2, 0.8, 0.1, 0.8,
+                                   0.4, 0.5, 0.9, 0.0, 0.4, 0.5, 0.2, 0.3))
+    let lr = 0.01
+
+    let score_before = g2_proximity(a, b)
+    let new_a = g2_analytical_step_a(a, b, lr)
+    let score_after = g2_proximity(new_a, b)
+
+    // Multiple steps should keep reducing
+    var a2 = new_a
+    var i = 0
+    while i < 10 {
+        a2 = g2_analytical_step_a(a2, b, lr)
+        i = i + 1
+    }
+    let score_10 = g2_proximity(a2, b)
+
+    score_after < score_before && score_10 < score_after
+}
+
+// ============================================================================
+// TG6: Both-variable step converges faster than a-only
+// ============================================================================
+
+fn tg6_both_faster_than_a_only() -> bool with Mut, Div, Panic {
+    let a0 = sed64_normalize(sed64(0.5, 0.3, 0.1, 0.4, 0.2, 0.6, 0.1, 0.3,
+                                    0.7, 0.2, 0.5, 0.1, 0.8, 0.3, 0.4, 0.2))
+    let b0 = sed64_normalize(sed64(0.1, 0.6, 0.3, 0.2, 0.7, 0.1, 0.5, 0.4,
+                                    0.3, 0.8, 0.2, 0.6, 0.1, 0.4, 0.7, 0.5))
+    let lr = 0.01
+
+    // 20 steps with a-only
+    var a_only = a0
+    var i = 0
+    while i < 20 {
+        a_only = g2_analytical_step_a(a_only, b0, lr)
+        i = i + 1
+    }
+    let score_a_only = g2_proximity(a_only, b0)
+
+    // 20 steps with both
+    var a_both = a0
+    var b_both = b0
+    i = 0
+    while i < 20 {
+        let pair = g2_analytical_step_both(a_both, b_both, lr)
+        a_both = pair.a
+        b_both = pair.b
+        i = i + 1
+    }
+    let score_both = g2_proximity(a_both, b_both)
+
+    score_both < score_a_only
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var fail = 0
+
+    if tg1_grad_a_matches_fd() {
+        print("TG1 OK grad_a_matches_fd\n")
+    } else {
+        print("TG1 FAIL grad_a_matches_fd\n")
+        fail = fail + 1
+    }
+
+    if tg2_grad_zero_at_zd_pair() {
+        print("TG2 OK grad_zero_at_zd_pair\n")
+    } else {
+        print("TG2 FAIL grad_zero_at_zd_pair\n")
+        fail = fail + 1
+    }
+
+    if tg3_descent_reduces_score() {
+        print("TG3 OK descent_reduces_score\n")
+    } else {
+        print("TG3 FAIL descent_reduces_score\n")
+        fail = fail + 1
+    }
+
+    if tg4_grad_b_matches_fd() {
+        print("TG4 OK grad_b_matches_fd\n")
+    } else {
+        print("TG4 FAIL grad_b_matches_fd\n")
+        fail = fail + 1
+    }
+
+    if tg5_analytical_step_reduces_score() {
+        print("TG5 OK analytical_step_reduces_score\n")
+    } else {
+        print("TG5 FAIL analytical_step_reduces_score\n")
+        fail = fail + 1
+    }
+
+    if tg6_both_faster_than_a_only() {
+        print("TG6 OK both_faster_than_a_only\n")
+    } else {
+        print("TG6 FAIL both_faster_than_a_only\n")
+        fail = fail + 1
+    }
+
+    let passed = 6 - fail
+    print_int(passed)
+    print(" / 6 passed\n")
+
+    if fail == 0 { return 0 }
+    return 1
+}

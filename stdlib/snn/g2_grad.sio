@@ -1,0 +1,149 @@
+// stdlib/snn/g2_grad.sio
+//
+// Analytical gradient of g₂ proximity: ∂||a*b||²/∂a and ∂||a*b||²/∂b.
+//
+// The sedenion product c = a*b is bilinear in a (for fixed b).
+// The Jacobian ∂c/∂a is the right-multiplication matrix R_b,
+// already available as sed64_right_mul_matrix(b).
+//
+// Therefore:
+//   ∂||c||²/∂a = 2 · R_b^T · c
+//   ∂||c||²/∂b = 2 · L_a^T · c
+//
+// This replaces the 16-evaluation numerical finite-difference in g2_step_a
+// with a single matrix-transpose-vector multiply (~16x faster, exact).
+//
+// References:
+//   Reggiani 2024, arXiv:2411.18881 — 𝒵(𝕊) ≅ G₂
+//   Agourakis 2026 — 168 theorem, Dual Pathway
+
+use math::sedenion64::*
+use math::g2_variety::*
+
+// ============================================================================
+// GRADIENT RESULT
+// ============================================================================
+
+pub struct G2GradResult {
+    grad_a: Sedenion64,   // ∂||a*b||²/∂a
+    grad_b: Sedenion64,   // ∂||a*b||²/∂b
+    score: f64,           // ||a*b||² (computed during forward pass)
+}
+
+// ============================================================================
+// MATRIX-TRANSPOSE-VECTOR MULTIPLY
+// ============================================================================
+
+// Compute M^T · v where M is a 16×16 row-major matrix in [f64; 256].
+// (M^T · v)_j = Σ_i M[i,j] · v[i] = Σ_i m[i*16 + j] · v[i]
+fn mat16t_vec_mul(m: [f64; 256], v: [f64; 16]) -> [f64; 16] with Mut, Div, Panic {
+    var result = [0.0; 16]
+    var j = 0
+    while j < 16 {
+        var sum = 0.0
+        var i = 0
+        while i < 16 {
+            sum = sum + m[i * 16 + j] * v[i]
+            i = i + 1
+        }
+        result[j] = sum
+        j = j + 1
+    }
+    return result
+}
+
+// ============================================================================
+// CORE GRADIENT COMPUTATION
+// ============================================================================
+
+// Analytical gradient of g2_proximity(a,b) = ||a*b||² w.r.t. both a and b.
+//
+// Math:
+//   c = a * b                           (sedenion product)
+//   ∂||c||²/∂a_k = 2 · Σ_m c_m · R_b[m,k]  = 2 · (R_b^T · c)_k
+//   ∂||c||²/∂b_k = 2 · Σ_m c_m · L_a[m,k]  = 2 · (L_a^T · c)_k
+//
+// where R_b = sed64_right_mul_matrix(b) has column j = e_j * b,
+// and   L_a = sed64_left_mul_matrix(a)  has column j = a * e_j.
+pub fn g2_grad(a: Sedenion64, b: Sedenion64) -> G2GradResult with Mut, Div, Panic {
+    // Forward pass: c = a * b
+    let c = sed64_mul(a, b)
+    let score = sed64_norm_sq(c)
+    let c_arr = sed64_to_array(c)
+
+    // Gradient w.r.t. a: 2 · R_b^T · c
+    let rb = sed64_right_mul_matrix(b)
+    let ga_raw = mat16t_vec_mul(rb, c_arr)
+    var ga_scaled = [0.0; 16]
+    var k = 0
+    while k < 16 {
+        ga_scaled[k] = 2.0 * ga_raw[k]
+        k = k + 1
+    }
+    let grad_a = sed64_from_array(ga_scaled)
+
+    // Gradient w.r.t. b: 2 · L_a^T · c
+    let la = sed64_left_mul_matrix(a)
+    let gb_raw = mat16t_vec_mul(la, c_arr)
+    var gb_scaled = [0.0; 16]
+    k = 0
+    while k < 16 {
+        gb_scaled[k] = 2.0 * gb_raw[k]
+        k = k + 1
+    }
+    let grad_b = sed64_from_array(gb_scaled)
+
+    G2GradResult { grad_a: grad_a, grad_b: grad_b, score: score }
+}
+
+// Gradient w.r.t. a only (when b is frozen).
+pub fn g2_grad_a(a: Sedenion64, b: Sedenion64) -> Sedenion64 with Mut, Div, Panic {
+    let c = sed64_mul(a, b)
+    let c_arr = sed64_to_array(c)
+    let rb = sed64_right_mul_matrix(b)
+    let ga_raw = mat16t_vec_mul(rb, c_arr)
+    var ga_scaled = [0.0; 16]
+    var k = 0
+    while k < 16 {
+        ga_scaled[k] = 2.0 * ga_raw[k]
+        k = k + 1
+    }
+    sed64_from_array(ga_scaled)
+}
+
+// Gradient w.r.t. b only (when a is frozen).
+pub fn g2_grad_b(a: Sedenion64, b: Sedenion64) -> Sedenion64 with Mut, Div, Panic {
+    let c = sed64_mul(a, b)
+    let c_arr = sed64_to_array(c)
+    let la = sed64_left_mul_matrix(a)
+    let gb_raw = mat16t_vec_mul(la, c_arr)
+    var gb_scaled = [0.0; 16]
+    var k = 0
+    while k < 16 {
+        gb_scaled[k] = 2.0 * gb_raw[k]
+        k = k + 1
+    }
+    sed64_from_array(gb_scaled)
+}
+
+// ============================================================================
+// GRADIENT STEPS
+// ============================================================================
+
+// Single analytical gradient step on a (b frozen).
+// a' = normalize(a - lr · ∂||a*b||²/∂a)
+pub fn g2_analytical_step_a(a: Sedenion64, b: Sedenion64, lr: f64) -> Sedenion64
+  with Mut, Div, Panic {
+    let grad = g2_grad_a(a, b)
+    sed64_normalize(sed64_sub(a, sed64_scale(grad, lr)))
+}
+
+// Single analytical gradient step on both a and b.
+// a' = normalize(a - lr · grad_a), b' = normalize(b - lr · grad_b)
+pub fn g2_analytical_step_both(a: Sedenion64, b: Sedenion64, lr: f64) -> G2Pair
+  with Mut, Div, Panic {
+    let gr = g2_grad(a, b)
+    let new_a = sed64_normalize(sed64_sub(a, sed64_scale(gr.grad_a, lr)))
+    let new_b = sed64_normalize(sed64_sub(b, sed64_scale(gr.grad_b, lr)))
+    G2Pair { a: new_a, b: new_b }
+}

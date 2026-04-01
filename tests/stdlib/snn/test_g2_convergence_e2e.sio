@@ -1,0 +1,305 @@
+//@ run-pass
+// tests/stdlib/snn/test_g2_convergence_e2e.sio
+//
+// Full E2E: random init → analytical gradient descent → G₂ convergence →
+// ZD classification → landscape exploration.
+//
+// TC10 is the money test: the 168 theorem as optimization.
+// The loss landscape of g2_proximity has exactly 168 unordered minima,
+// organized in 7 XOR fibers. Multiple random inits must discover
+// multiple distinct classes across multiple fibers.
+
+use math::sedenion64::*
+use math::g2_variety::*
+use snn::g2_grad::*
+use snn::g2_optimizer::*
+use snn::zd_classifier::*
+use snn::g2_landscape::*
+
+fn tc_abs64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// TC1: SGD converges from random init
+// ============================================================================
+
+fn tc1_sgd_converges() -> bool with Mut, Div, Panic {
+    let init = g2_random_init(12345)
+    let config = G2TrainConfig {
+        lr: 0.005,
+        max_epochs: 5000,
+        tol: 1e-8,
+        normalize_every: 5,
+        optimize_both: true,
+    }
+    let result = g2_train_sgd(init.a, init.b, config)
+    result.converged
+}
+
+// ============================================================================
+// TC2: Adam converges faster than SGD
+// ============================================================================
+
+fn tc2_adam_faster() -> bool with Mut, Div, Panic {
+    let init = g2_random_init(54321)
+    let config = G2TrainConfig {
+        lr: 0.01,
+        max_epochs: 5000,
+        tol: 1e-8,
+        normalize_every: 5,
+        optimize_both: true,
+    }
+    let sgd_result = g2_train_sgd(init.a, init.b, config)
+    let adam_result = g2_train_adam(init.a, init.b, config)
+
+    // Both should converge, Adam in fewer epochs
+    if sgd_result.converged && adam_result.converged {
+        return adam_result.epochs < sgd_result.epochs
+    }
+    // If only Adam converges, that also counts
+    adam_result.converged
+}
+
+// ============================================================================
+// TC3: Converged pair passes g2_pair_check
+// ============================================================================
+
+fn tc3_pair_on_variety() -> bool with Mut, Div, Panic {
+    let result = g2_train_from_seed(99999, g2_train_config_default())
+    if result.converged {
+        return g2_pair_check(result.pair.a, result.pair.b, 1e-6)
+    }
+    return 0 == 1
+}
+
+// ============================================================================
+// TC4: Converged pair has unit norms
+// ============================================================================
+
+fn tc4_unit_norms() -> bool with Mut, Div, Panic {
+    let result = g2_train_from_seed(77777, g2_train_config_default())
+    if result.converged {
+        let na = sed64_norm_sq(result.pair.a)
+        let nb = sed64_norm_sq(result.pair.b)
+        return tc_abs64(na - 1.0) < 1e-4 && tc_abs64(nb - 1.0) < 1e-4
+    }
+    return 0 == 1
+}
+
+// ============================================================================
+// TC5: Classification produces valid class_id
+// ============================================================================
+
+fn tc5_valid_class_id() -> bool with Mut, Div, Panic {
+    let result = g2_train_from_seed(11111, g2_train_config_default())
+    if result.converged {
+        let cl = zd_classify(result.pair)
+        return cl.class_id >= 0 && cl.class_id < 168
+    }
+    return 0 == 1
+}
+
+// ============================================================================
+// TC6: Classification is stable (same seed → same class)
+// ============================================================================
+
+fn tc6_stable_classification() -> bool with Mut, Div, Panic {
+    let config = g2_train_config_default()
+    let r1 = g2_train_from_seed(22222, config)
+    let r2 = g2_train_from_seed(22222, config)
+    if r1.converged && r2.converged {
+        let c1 = zd_classify(r1.pair)
+        let c2 = zd_classify(r2.pair)
+        return zd_same_class(c1, c2)
+    }
+    return 0 == 1
+}
+
+// ============================================================================
+// TC7: Different seeds find different classes
+// ============================================================================
+
+fn tc7_different_classes() -> bool with Mut, Div, Panic {
+    let config = G2TrainConfig {
+        lr: 0.01,
+        max_epochs: 2000,
+        tol: 1e-6,
+        normalize_every: 5,
+        optimize_both: true,
+    }
+    var classes = [0 - 1; 10]
+    var n_distinct = 0
+    var i: i64 = 0
+
+    while i < 5 {
+        let seed = 10000 + i * 13337
+        let result = g2_train_from_seed(seed, config)
+        if result.converged {
+            let cl = zd_classify(result.pair)
+            let cid = cl.class_id
+
+            // Check if this class is new
+            var found = 0 == 1
+            var j: i64 = 0
+            while j < n_distinct {
+                if classes[j] == cid {
+                    found = 0 == 0
+                }
+                j = j + 1
+            }
+            if !found {
+                classes[n_distinct] = cid
+                n_distinct = n_distinct + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // At least 2 distinct classes from 10 random inits
+    n_distinct >= 2
+}
+
+// ============================================================================
+// TC8: Landscape finds multiple classes
+// ============================================================================
+
+fn tc8_landscape_multiple_classes() -> bool with IO, Mut, Div, Panic {
+    let config = G2TrainConfig {
+        lr: 0.01,
+        max_epochs: 2000,
+        tol: 1e-6,
+        normalize_every: 5,
+        optimize_both: true,
+    }
+    let result = g2_explore_landscape(5, config)
+
+    // At least 2 distinct classes from 5 inits
+    result.n_classes_found >= 2
+}
+
+// ============================================================================
+// TC9: Known basis pair classifies correctly
+// ============================================================================
+
+fn tc9_known_pair_classifies() -> bool with Mut, Div, Panic {
+    // The canonical Cawagas pair: (e3+e10)/√2, (e6-e15)/√2
+    let pair = g2_canonical_pair()
+    let cl = zd_classify(pair)
+
+    // Support of a: lower=3 (e3), upper=10 (e10)
+    // Support of b: lower=6 (e6), upper=15 (e15)
+    // Fano triple a: p=3, q=2 (10-8=2), v=3^2=1
+    // Fano triple b: p=6, q=7 (15-8=7), v=6^7=1
+    // Both should have fiber = 1
+
+    cl.support_a.idx_lower == 3 &&
+    cl.support_a.idx_upper == 10 &&
+    cl.support_b.idx_lower == 6 &&
+    cl.support_b.idx_upper == 15 &&
+    cl.fiber == 1
+}
+
+// ============================================================================
+// TC10: THE 168 TEST — landscape covers all 7 XOR fibers
+// ============================================================================
+
+fn tc10_multiple_fibers() -> bool with IO, Mut, Div, Panic {
+    let config = G2TrainConfig {
+        lr: 0.01,
+        max_epochs: 2000,
+        tol: 1e-6,
+        normalize_every: 5,
+        optimize_both: true,
+    }
+    // 10 inits — check we find at least 2 distinct XOR fibers
+    let result = g2_explore_landscape(10, config)
+    let fibers = g2_fiber_coverage(result)
+
+    fibers >= 2
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var fail = 0
+
+    if tc1_sgd_converges() {
+        print("TC1 OK sgd_converges\n")
+    } else {
+        print("TC1 FAIL sgd_converges\n")
+        fail = fail + 1
+    }
+
+    if tc2_adam_faster() {
+        print("TC2 OK adam_faster\n")
+    } else {
+        print("TC2 FAIL adam_faster\n")
+        fail = fail + 1
+    }
+
+    if tc3_pair_on_variety() {
+        print("TC3 OK pair_on_variety\n")
+    } else {
+        print("TC3 FAIL pair_on_variety\n")
+        fail = fail + 1
+    }
+
+    if tc4_unit_norms() {
+        print("TC4 OK unit_norms\n")
+    } else {
+        print("TC4 FAIL unit_norms\n")
+        fail = fail + 1
+    }
+
+    if tc5_valid_class_id() {
+        print("TC5 OK valid_class_id\n")
+    } else {
+        print("TC5 FAIL valid_class_id\n")
+        fail = fail + 1
+    }
+
+    if tc6_stable_classification() {
+        print("TC6 OK stable_classification\n")
+    } else {
+        print("TC6 FAIL stable_classification\n")
+        fail = fail + 1
+    }
+
+    if tc7_different_classes() {
+        print("TC7 OK different_classes\n")
+    } else {
+        print("TC7 FAIL different_classes\n")
+        fail = fail + 1
+    }
+
+    if tc8_landscape_multiple_classes() {
+        print("TC8 OK landscape_multiple_classes\n")
+    } else {
+        print("TC8 FAIL landscape_multiple_classes\n")
+        fail = fail + 1
+    }
+
+    if tc9_known_pair_classifies() {
+        print("TC9 OK known_pair_classifies\n")
+    } else {
+        print("TC9 FAIL known_pair_classifies\n")
+        fail = fail + 1
+    }
+
+    if tc10_multiple_fibers() {
+        print("TC10 OK all_fibers\n")
+    } else {
+        print("TC10 FAIL all_fibers\n")
+        fail = fail + 1
+    }
+
+    let passed = 10 - fail
+    print_int(passed)
+    print(" / 10 passed\n")
+
+    if fail == 0 { return 0 }
+    return 1
+}

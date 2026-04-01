@@ -1,0 +1,305 @@
+// stdlib/snn/g2_optimizer.sio
+//
+// G₂ convergence optimizer: multi-step training loops that drive
+// a sedenion pair (a,b) toward the G₂ variety 𝒵(𝕊) = {(a,b) : a*b=0, |a|=|b|=1}.
+//
+// Two optimizers:
+//   g2_train_sgd  — vanilla gradient descent with periodic re-normalization
+//   g2_train_adam — Adam with per-component moment tracking
+//
+// Both use analytical gradients from g2_grad.sio (exact, not numerical FD).
+//
+// References:
+//   Reggiani 2024, arXiv:2411.18881 — 𝒵(𝕊) ≅ G₂
+//   Agourakis 2026 — 168 theorem, Dual Pathway
+
+use math::sedenion64::*
+use math::g2_variety::*
+use snn::g2_grad::*
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+pub struct G2TrainConfig {
+    lr: f64,               // learning rate
+    max_epochs: i64,       // maximum iterations
+    tol: f64,              // convergence tolerance on ||a*b||²
+    normalize_every: i64,  // re-normalize to unit sphere every N steps
+    optimize_both: bool,   // optimize both a and b (vs a only)
+}
+
+pub fn g2_train_config_default() -> G2TrainConfig {
+    G2TrainConfig {
+        lr: 0.01,
+        max_epochs: 10000,
+        tol: 1e-12,
+        normalize_every: 10,
+        optimize_both: true,
+    }
+}
+
+// ============================================================================
+// TRAINING RESULT
+// ============================================================================
+
+pub struct G2TrainResult {
+    pair: G2Pair,
+    final_score: f64,
+    epochs: i64,
+    converged: bool,
+}
+
+// ============================================================================
+// LCG RANDOM INITIALIZATION
+// ============================================================================
+
+fn lcg_next(s: i64) -> i64 {
+    // LCG: a=1103515245, c=12345, m=2^31
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+    ((s * a + c) % m + m) % m
+}
+
+fn lcg_to_f64(s: i64) -> f64 {
+    // Map to [-1, 1]
+    let m: i64 = 2147483648
+    let x = s % m
+    (x as f64) / (m as f64) * 2.0 - 1.0
+}
+
+// Generate a random unit sedenion pair from a seed.
+pub fn g2_random_init(seed: i64) -> G2Pair with Mut, Div, Panic {
+    var s = seed
+    var a_arr = [0.0; 16]
+    var b_arr = [0.0; 16]
+
+    var i = 0
+    while i < 16 {
+        s = lcg_next(s)
+        a_arr[i] = lcg_to_f64(s)
+        s = lcg_next(s)
+        b_arr[i] = lcg_to_f64(s)
+        i = i + 1
+    }
+
+    let a = sed64_normalize(sed64_from_array(a_arr))
+    let b = sed64_normalize(sed64_from_array(b_arr))
+    G2Pair { a: a, b: b }
+}
+
+// ============================================================================
+// SGD TRAINING LOOP
+// ============================================================================
+
+pub fn g2_train_sgd(a0: Sedenion64, b0: Sedenion64, config: G2TrainConfig) -> G2TrainResult
+  with Mut, Div, Panic {
+    var a = sed64_normalize(a0)
+    var b = sed64_normalize(b0)
+    var lr = config.lr
+    var epoch: i64 = 0
+
+    while epoch < config.max_epochs {
+        let gr = g2_grad(a, b)
+
+        if gr.score < config.tol {
+            return G2TrainResult {
+                pair: G2Pair { a: a, b: b },
+                final_score: gr.score,
+                epochs: epoch,
+                converged: true,
+            }
+        }
+
+        // SGD update
+        a = sed64_sub(a, sed64_scale(gr.grad_a, lr))
+        if config.optimize_both {
+            b = sed64_sub(b, sed64_scale(gr.grad_b, lr))
+        }
+
+        // Periodic re-normalization to unit sphere
+        if config.normalize_every > 0 {
+            if (epoch % config.normalize_every) == 0 {
+                a = sed64_normalize(a)
+                b = sed64_normalize(b)
+            }
+        }
+
+        epoch = epoch + 1
+    }
+
+    // Final normalize
+    a = sed64_normalize(a)
+    b = sed64_normalize(b)
+    let final_score = g2_proximity(a, b)
+    G2TrainResult {
+        pair: G2Pair { a: a, b: b },
+        final_score: final_score,
+        epochs: epoch,
+        converged: final_score < config.tol,
+    }
+}
+
+// ============================================================================
+// ADAM OPTIMIZER STATE
+// ============================================================================
+
+// Sedenion-valued element-wise operations for Adam moments.
+fn sed64_sq(s: Sedenion64) -> Sedenion64 {
+    // Component-wise square (NOT sedenion product)
+    sed64(s.e0*s.e0, s.e1*s.e1, s.e2*s.e2, s.e3*s.e3,
+          s.e4*s.e4, s.e5*s.e5, s.e6*s.e6, s.e7*s.e7,
+          s.e8*s.e8, s.e9*s.e9, s.e10*s.e10, s.e11*s.e11,
+          s.e12*s.e12, s.e13*s.e13, s.e14*s.e14, s.e15*s.e15)
+}
+
+fn sed64_sqrt_comp(s: Sedenion64) -> Sedenion64 with Mut, Div, Panic {
+    // Component-wise square root via Newton (5 iterations each)
+    let a = sed64_to_array(s)
+    var r = [0.0; 16]
+    var i = 0
+    while i < 16 {
+        var y = 0.5
+        if a[i] > 0.0 {
+            y = a[i]
+            y = 0.5 * (y + a[i] / y)
+            y = 0.5 * (y + a[i] / y)
+            y = 0.5 * (y + a[i] / y)
+            y = 0.5 * (y + a[i] / y)
+            y = 0.5 * (y + a[i] / y)
+        } else {
+            y = 0.0
+        }
+        r[i] = y
+        i = i + 1
+    }
+    sed64_from_array(r)
+}
+
+fn sed64_div_comp(num: Sedenion64, den: Sedenion64, eps: f64) -> Sedenion64 {
+    // Component-wise division: num_k / (den_k + eps)
+    sed64(num.e0 / (den.e0 + eps), num.e1 / (den.e1 + eps),
+          num.e2 / (den.e2 + eps), num.e3 / (den.e3 + eps),
+          num.e4 / (den.e4 + eps), num.e5 / (den.e5 + eps),
+          num.e6 / (den.e6 + eps), num.e7 / (den.e7 + eps),
+          num.e8 / (den.e8 + eps), num.e9 / (den.e9 + eps),
+          num.e10 / (den.e10 + eps), num.e11 / (den.e11 + eps),
+          num.e12 / (den.e12 + eps), num.e13 / (den.e13 + eps),
+          num.e14 / (den.e14 + eps), num.e15 / (den.e15 + eps))
+}
+
+pub struct G2AdamState {
+    m_a: Sedenion64,
+    v_a: Sedenion64,
+    m_b: Sedenion64,
+    v_b: Sedenion64,
+    beta1: f64,
+    beta2: f64,
+    epsilon: f64,
+    timestep: i64,
+}
+
+fn g2_adam_init() -> G2AdamState {
+    G2AdamState {
+        m_a: sed64_zero(), v_a: sed64_zero(),
+        m_b: sed64_zero(), v_b: sed64_zero(),
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 1e-8,
+        timestep: 0,
+    }
+}
+
+// ============================================================================
+// ADAM TRAINING LOOP
+// ============================================================================
+
+pub fn g2_train_adam(a0: Sedenion64, b0: Sedenion64, config: G2TrainConfig) -> G2TrainResult
+  with Mut, Div, Panic {
+    var a = sed64_normalize(a0)
+    var b = sed64_normalize(b0)
+    var state = g2_adam_init()
+    var epoch: i64 = 0
+
+    while epoch < config.max_epochs {
+        let gr = g2_grad(a, b)
+
+        if gr.score < config.tol {
+            return G2TrainResult {
+                pair: G2Pair { a: a, b: b },
+                final_score: gr.score,
+                epochs: epoch,
+                converged: true,
+            }
+        }
+
+        state.timestep = state.timestep + 1
+        let t = state.timestep
+
+        // Update first moment: m = β₁·m + (1-β₁)·g
+        state.m_a = sed64_add(sed64_scale(state.m_a, state.beta1),
+                              sed64_scale(gr.grad_a, 1.0 - state.beta1))
+        state.v_a = sed64_add(sed64_scale(state.v_a, state.beta2),
+                              sed64_scale(sed64_sq(gr.grad_a), 1.0 - state.beta2))
+
+        // Bias correction
+        var beta1_t = 1.0
+        var beta2_t = 1.0
+        var ti = 0
+        while ti < t {
+            beta1_t = beta1_t * state.beta1
+            beta2_t = beta2_t * state.beta2
+            ti = ti + 1
+        }
+        let m_hat_a = sed64_scale(state.m_a, 1.0 / (1.0 - beta1_t))
+        let v_hat_a = sed64_scale(state.v_a, 1.0 / (1.0 - beta2_t))
+
+        // Adam update: a -= lr * m_hat / (sqrt(v_hat) + eps)
+        let update_a = sed64_div_comp(m_hat_a, sed64_sqrt_comp(v_hat_a), state.epsilon)
+        a = sed64_sub(a, sed64_scale(update_a, config.lr))
+
+        if config.optimize_both {
+            state.m_b = sed64_add(sed64_scale(state.m_b, state.beta1),
+                                  sed64_scale(gr.grad_b, 1.0 - state.beta1))
+            state.v_b = sed64_add(sed64_scale(state.v_b, state.beta2),
+                                  sed64_scale(sed64_sq(gr.grad_b), 1.0 - state.beta2))
+
+            let m_hat_b = sed64_scale(state.m_b, 1.0 / (1.0 - beta1_t))
+            let v_hat_b = sed64_scale(state.v_b, 1.0 / (1.0 - beta2_t))
+
+            let update_b = sed64_div_comp(m_hat_b, sed64_sqrt_comp(v_hat_b), state.epsilon)
+            b = sed64_sub(b, sed64_scale(update_b, config.lr))
+        }
+
+        // Periodic re-normalization
+        if config.normalize_every > 0 {
+            if (epoch % config.normalize_every) == 0 {
+                a = sed64_normalize(a)
+                b = sed64_normalize(b)
+            }
+        }
+
+        epoch = epoch + 1
+    }
+
+    a = sed64_normalize(a)
+    b = sed64_normalize(b)
+    let final_score = g2_proximity(a, b)
+    G2TrainResult {
+        pair: G2Pair { a: a, b: b },
+        final_score: final_score,
+        epochs: epoch,
+        converged: final_score < config.tol,
+    }
+}
+
+// ============================================================================
+// CONVENIENCE: TRAIN FROM SEED
+// ============================================================================
+
+pub fn g2_train_from_seed(seed: i64, config: G2TrainConfig) -> G2TrainResult
+  with Mut, Div, Panic {
+    let init = g2_random_init(seed)
+    g2_train_adam(init.a, init.b, config)
+}

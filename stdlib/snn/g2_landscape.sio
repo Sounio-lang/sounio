@@ -1,0 +1,109 @@
+// stdlib/snn/g2_landscape.sio
+//
+// Multi-init landscape explorer: the 168 theorem as optimization.
+//
+// Run N random initializations, train each to convergence on 𝒵(𝕊),
+// classify converged pairs, count distinct projective classes.
+// The loss landscape of g2_proximity has exactly 168 unordered minima
+// (up to sign), organized in 7 XOR fibers of 24 each.
+//
+// References:
+//   Agourakis 2026 — 168 theorem, Dual Pathway
+//   Reggiani 2024, arXiv:2411.18881 — 𝒵(𝕊) ≅ G₂
+
+use math::sedenion64::*
+use math::g2_variety::*
+use snn::g2_grad::*
+use snn::g2_optimizer::*
+use snn::zd_classifier::*
+
+// ============================================================================
+// LANDSCAPE RESULT
+// ============================================================================
+
+pub struct G2LandscapeResult {
+    n_classes_found: i64,       // distinct class_ids discovered
+    class_counts: [i64; 168],   // histogram: how many times each class was hit
+    n_converged: i64,           // total runs that reached tol
+    n_attempted: i64,           // total runs attempted
+    fiber_counts: [i64; 8],     // how many classes per XOR fiber (index 0 unused)
+}
+
+// ============================================================================
+// LANDSCAPE EXPLORATION
+// ============================================================================
+
+// Run n_inits random initializations, train each, classify, tally.
+pub fn g2_explore_landscape(n_inits: i64, config: G2TrainConfig) -> G2LandscapeResult
+  with IO, Mut, Div, Panic {
+    var result = G2LandscapeResult {
+        n_classes_found: 0,
+        class_counts: [0; 168],
+        n_converged: 0,
+        n_attempted: 0,
+        fiber_counts: [0; 8],
+    }
+
+    var i: i64 = 0
+    while i < n_inits {
+        // Use prime stride for better LCG coverage
+        let seed = 42 + i * 7919
+        let train_result = g2_train_from_seed(seed, config)
+        result.n_attempted = result.n_attempted + 1
+
+        if train_result.converged {
+            result.n_converged = result.n_converged + 1
+            let classification = zd_classify(train_result.pair)
+            let cid = classification.class_id
+
+            if cid >= 0 {
+                if cid < 168 {
+                    if result.class_counts[cid] == 0 {
+                        result.n_classes_found = result.n_classes_found + 1
+                    }
+                    result.class_counts[cid] = result.class_counts[cid] + 1
+
+                    // Track fiber coverage
+                    let fiber = classification.fiber
+                    if fiber >= 1 {
+                        if fiber <= 7 {
+                            result.fiber_counts[fiber] = result.fiber_counts[fiber] + 1
+                        }
+                    }
+                }
+            }
+        }
+
+        i = i + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// COVERAGE METRICS
+// ============================================================================
+
+// What fraction of the 168 classes were found?
+pub fn g2_landscape_coverage(result: G2LandscapeResult) -> f64 with Div, Panic {
+    (result.n_classes_found as f64) / 168.0
+}
+
+// How many of the 7 XOR fibers have at least one class discovered?
+pub fn g2_fiber_coverage(result: G2LandscapeResult) -> i64 {
+    var count: i64 = 0
+    var f = 1
+    while f <= 7 {
+        if result.fiber_counts[f] > 0 {
+            count = count + 1
+        }
+        f = f + 1
+    }
+    count
+}
+
+// Convergence rate: fraction of runs that converged.
+pub fn g2_convergence_rate(result: G2LandscapeResult) -> f64 with Div, Panic {
+    if result.n_attempted == 0 { return 0.0 }
+    (result.n_converged as f64) / (result.n_attempted as f64)
+}
