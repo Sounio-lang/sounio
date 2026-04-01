@@ -54,6 +54,12 @@ var ONT_CLASS_COUNT: i64 = 0
 var ONT_ROLE_S: [i64; 32] = [0; 32]
 var ONT_ROLE_E: [i64; 32] = [0; 32]
 var ONT_ROLE_COUNT: i64 = 0
+// OWL2 kernel: class hashes + subclass/disjoint matrices (64×64, reset per ontology block)
+var ONT_CLASS_HASH: [i64; 64] = [0; 64]
+var ONT_SUB_MATRIX: [i64; 4096] = [0; 4096]
+var ONT_DIS_MATRIX: [i64; 4096] = [0; 4096]
+var ONT_DIS_TMP: [i64; 64] = [0; 64]  // temp list for disjoint class indices
+var ONT_DIS_TMP_CNT: i64 = 0
 // PE: offset within CD[] of the ExitProcess call [rip+disp32]'s disp32 field
 var PE_EXIT_CALL_OFF: i64 = -1
 
@@ -61,16 +67,26 @@ var PE_EXIT_CALL_OFF: i64 = -1
 var SQW: [i64; 256] = [0; 256]
 
 // Function table: name start/end in source, code offset
-var FN_NS: [i64; 4096] = [0; 4096]
-var FN_NE: [i64; 4096] = [0; 4096]
-var FN_OFF: [i64; 4096] = [0; 4096]
-var FN_SIG: [i64; 4096] = [0; 4096]
+var FN_NS: [i64; 8192] = [0; 8192]
+var FN_NE: [i64; 8192] = [0; 8192]
+var FN_OFF: [i64; 8192] = [0; 8192]
+var FN_SIG: [i64; 8192] = [0; 8192]
+var FN_IS_KERNEL: [i64; 8192] = [0; 8192]
+var FN_PTX_SUPPORTED: [i64; 8192] = [0; 8192]
+var FN_PTX_KIND: [i64; 8192] = [0; 8192]
+var FN_PTX_OFF: [i64; 8192] = [0; 8192]
+var FN_PTX_LEN: [i64; 8192] = [0; 8192]
+var FN_PTX_EXTENT_SLOT: [i64; 8192] = [0; 8192]
+var FN_PTX_PARAM_KINDS: [i64; 32768] = [0; 32768]
 var FN_COUNT: i64 = 0
 
+var PTX_DATA: [i8; 262144] = [0; 262144]
+var PTX_LEN: i64 = 0
+
 // Call patch table: code offset where rel32 needs patching, target fn index
-var PATCH_OFF: [i64; 8192] = [0; 8192]
-var PATCH_FN: [i64; 8192] = [0; 8192]
-var PATCH_KIND: [i64; 8192] = [0; 8192]
+var PATCH_OFF: [i64; 32768] = [0; 32768]
+var PATCH_FN: [i64; 32768] = [0; 32768]
+var PATCH_KIND: [i64; 32768] = [0; 32768]
 var PATCH_COUNT: i64 = 0
 
 // Canonical function-signature registry for fn-typed values and indirect calls.
@@ -94,10 +110,10 @@ var FNSIG_TMP_PARAM_HASH: [i64; 256] = [0; 256]
 // ST[i*66+0] = name hash
 // ST[i*66+1] = field count
 // ST[i*66+2..65] = field name hashes (up to 64 fields)
-var ST: [i64; 2112] = [0; 2112]
+var ST: [i64; 26000] = [0; 26000]
 // Per-struct field type metadata, indexed as si*64 + fi
-var ST_FTY: [i64; 2048] = [0; 2048]
-var ST_FHASH: [i64; 2048] = [0; 2048]
+var ST_FTY: [i64; 25600] = [0; 25600]
+var ST_FHASH: [i64; 25600] = [0; 25600]
 var ST_COUNT: i64 = 0
 
 // Enum registry: flat array, up to 64 enums
@@ -140,9 +156,9 @@ var MAN_BUF_E: [i64; 64] = [0; 64]
 // ─── Phase 5: Effects checking ───
 // Bitmask per function: IO=1, Mut=2, Panic=4, Div=8, Alloc=16,
 // Custom/Session=32, Observe=64, Audit=128, Hypothesis=256
-var FN_EFFECTS: [i64; 4096] = [0; 4096]
-var FN_NAME_TOK: [i64; 4096] = [0; 4096]
-var FN_NEEDS_SESSION: [i64; 4096] = [0; 4096]
+var FN_EFFECTS: [i64; 8192] = [0; 8192]
+var FN_NAME_TOK: [i64; 8192] = [0; 8192]
+var FN_NEEDS_SESSION: [i64; 8192] = [0; 8192]
 var CURRENT_FN: i64 = 0
 
 // ─── Phase 6a: Unit tracking (compile-time only) ───
@@ -151,7 +167,7 @@ var VAR_UNIT: [i64; 1024] = [0; 1024]
 
 // ─── Phase 6c: Linear type tracking ───
 // Per-struct: 1 if declared with 'linear' keyword, 0 otherwise
-var ST_LINEAR: [i64; 32] = [0; 32]
+var ST_LINEAR: [i64; 200] = [0; 200]
 // Per local variable: 1 if linear type, 0 otherwise
 var VAR_LINEAR: [i64; 1024] = [0; 1024]
 // Per local variable: use count (for linear checking)
@@ -160,9 +176,9 @@ var VAR_TY: [i64; 1024] = [0; 1024]
 var VAR_TY_HASH: [i64; 1024] = [0; 1024]
 var GL_TY: [i64; 1024] = [0; 1024]
 var GL_TY_HASH: [i64; 1024] = [0; 1024]
-var FN_RET_TY: [i64; 4096] = [0; 4096]
-var FN_RET_HASH: [i64; 4096] = [0; 4096]
-var FN_ARITY: [i64; 4096] = [0; 4096]
+var FN_RET_TY: [i64; 8192] = [0; 8192]
+var FN_RET_HASH: [i64; 8192] = [0; 8192]
+var FN_ARITY: [i64; 8192] = [0; 8192]
 var TYPECHECK_FAILED: i64 = 0
 var SCAN_TY: i64 = 0
 var SCAN_TY_HASH: i64 = 0
@@ -211,7 +227,7 @@ fn en_variant_count(enum_hash: i64) -> i64 with Panic, Mut {
 fn st_find(hash: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
     while i < ST_COUNT {
-        if ST[(i * 66) as usize] == hash { return i }
+        if ST[(i * 130) as usize] == hash { return i }
         i = i + 1
     }
     return -1
@@ -227,11 +243,11 @@ fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
 }
 
 fn st_field_slots_idx(si: i64, fi: i64) -> i64 with Panic, Div, Mut {
-    return ty_slot_count(ST_FTY[(si * 64 + fi) as usize], ST_FHASH[(si * 64 + fi) as usize])
+    return ty_slot_count(ST_FTY[(si * 128 + fi) as usize], ST_FHASH[(si * 128 + fi) as usize])
 }
 
 fn st_field_offset(si: i64, field_hash: i64) -> i64 with Panic, Div, Mut {
-    let base = si * 66
+    let base = si * 130
     let fc = ST[(base + 1) as usize]
     var fi: i64 = 0
     var off: i64 = 0
@@ -244,29 +260,29 @@ fn st_field_offset(si: i64, field_hash: i64) -> i64 with Panic, Div, Mut {
 }
 
 fn st_field_ty(si: i64, field_hash: i64) -> i64 with Panic, Mut {
-    let base = si * 66
+    let base = si * 130
     let fc = ST[(base + 1) as usize]
     var fi: i64 = 0
     while fi < fc {
-        if ST[(base + 2 + fi) as usize] == field_hash { return ST_FTY[(si * 64 + fi) as usize] }
+        if ST[(base + 2 + fi) as usize] == field_hash { return ST_FTY[(si * 128 + fi) as usize] }
         fi = fi + 1
     }
     return 0
 }
 
 fn st_field_hash(si: i64, field_hash: i64) -> i64 with Panic, Mut {
-    let base = si * 66
+    let base = si * 130
     let fc = ST[(base + 1) as usize]
     var fi: i64 = 0
     while fi < fc {
-        if ST[(base + 2 + fi) as usize] == field_hash { return ST_FHASH[(si * 64 + fi) as usize] }
+        if ST[(base + 2 + fi) as usize] == field_hash { return ST_FHASH[(si * 128 + fi) as usize] }
         fi = fi + 1
     }
     return 0
 }
 
 fn st_total_size(si: i64) -> i64 with Panic, Div, Mut {
-    let fc = ST[(si * 66 + 1) as usize]
+    let fc = ST[(si * 130 + 1) as usize]
     var fi: i64 = 0
     var nslots: i64 = 0
     while fi < fc {
@@ -285,6 +301,40 @@ var RET_AGG_BSS_OFF: i64 = 0
 var LIMIT_ERROR_KIND: i64 = 0
 var LAST_LOCAL_BSS_SPILL: i64 = 0
 var LAST_LOCAL_BSS_ADDR: i64 = 0
+var GPU_EMU_THREAD_ID_BSS_OFF: i64 = 0
+var GPU_RT_STATE_BSS_OFF: i64 = 0
+var GPU_RT_DIAG_BSS_OFF: i64 = 0
+var GPU_RT_LIBCUDA_HANDLE_BSS_OFF: i64 = 0
+var GPU_RT_DEVICE_BSS_OFF: i64 = 0
+var GPU_RT_CTX_BSS_OFF: i64 = 0
+var GPU_RT_CUINIT_PTR_BSS_OFF: i64 = 0
+var GPU_RT_CUDEVICEGET_PTR_BSS_OFF: i64 = 0
+var GPU_RT_CUCTXCREATE_PTR_BSS_OFF: i64 = 0
+var GPU_RT_CUCTXSYNC_PTR_BSS_OFF: i64 = 0
+var GPU_RT_CUMODULELOADDATA_PTR_BSS_OFF: i64 = 0
+var GPU_RT_CUMODULEGETFUNCTION_PTR_BSS_OFF: i64 = 0
+var GPU_RT_CUMEMALLOC_PTR_BSS_OFF: i64 = 0
+var GPU_RT_CUMEMFREE_PTR_BSS_OFF: i64 = 0
+var GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF: i64 = 0
+var GPU_RT_CUMEMCPYDTOH_PTR_BSS_OFF: i64 = 0
+var GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF: i64 = 0
+
+var NEEDS_GPU_RUNTIME_DYNLINK: i64 = 0
+
+fn gpu_param_kind_scalar_i64() -> i64 { 1 }
+fn gpu_param_kind_slice_in_f64() -> i64 { 2 }
+fn gpu_param_kind_slice_out_f64() -> i64 { 3 }
+fn gpu_kernel_ptx_kind_vec_binary_f64() -> i64 { 1 }
+
+fn gpu_dyn_linux_x86_text_base() -> i64 { 0x400000 }
+fn gpu_dyn_linux_x86_text_off() -> i64 { 4096 }
+fn gpu_dyn_linux_x86_data_off() -> i64 { 8192 }
+fn gpu_dyn_linux_x86_data_base() -> i64 { 0x600000 }
+fn gpu_dyn_linux_x86_got_off() -> i64 { 512 }
+fn gpu_dyn_linux_x86_got_base() -> i64 { return gpu_dyn_linux_x86_data_base() + gpu_dyn_linux_x86_got_off() }
+fn gpu_dyn_linux_x86_got_slot_dlopen() -> i64 { return gpu_dyn_linux_x86_got_base() + 0 }
+fn gpu_dyn_linux_x86_got_slot_dlsym() -> i64 { return gpu_dyn_linux_x86_got_base() + 8 }
+fn gpu_dyn_linux_x86_got_slot_dlclose() -> i64 { return gpu_dyn_linux_x86_got_base() + 16 }
 
 fn local_cap() -> i64 { return 1024 }
 fn global_cap() -> i64 { return 1024 }
@@ -314,6 +364,160 @@ fn bss_alloc_aligned(bytes: i64) -> i64 with Mut, Panic, Div {
     let off = GL_BSS_SIZE
     GL_BSS_SIZE = GL_BSS_SIZE + aligned
     return off
+}
+
+fn ptx_reset_fn_meta(fi: i64) with Mut, Panic {
+    if fi < 0 || fi >= 4096 { return }
+    FN_PTX_SUPPORTED[fi as usize] = 0
+    FN_PTX_KIND[fi as usize] = 0
+    FN_PTX_OFF[fi as usize] = 0
+    FN_PTX_LEN[fi as usize] = 0
+    FN_PTX_EXTENT_SLOT[fi as usize] = 0
+    var i: i64 = 0
+    while i < 8 {
+        FN_PTX_PARAM_KINDS[(fi * 8 + i) as usize] = 0
+        i = i + 1
+    }
+}
+
+fn ptx_emit_byte(v: i64) with Mut {
+    if PTX_LEN < 262144 {
+        PTX_DATA[PTX_LEN as usize] = (v & 0xFF) as i8
+        PTX_LEN = PTX_LEN + 1
+    }
+}
+
+fn ptx_emit_string(s: string) with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        ptx_emit_byte(str_char_at(s, i))
+        i = i + 1
+    }
+}
+
+fn ptx_emit_src_range(ns: i64, ne: i64) with Mut, Panic {
+    var i: i64 = ns
+    while i < ne {
+        ptx_emit_byte(sb(i))
+        i = i + 1
+    }
+}
+
+fn ptx_finish_fn(fi: i64, start_off: i64, kind: i64, extent_slot: i64) with Mut, Panic {
+    if fi < 0 || fi >= 4096 { return }
+    ptx_emit_byte(0)
+    FN_PTX_SUPPORTED[fi as usize] = 1
+    FN_PTX_KIND[fi as usize] = kind
+    FN_PTX_OFF[fi as usize] = start_off
+    FN_PTX_LEN[fi as usize] = PTX_LEN - start_off - 1
+    FN_PTX_EXTENT_SLOT[fi as usize] = extent_slot
+}
+
+fn fn_param_kind(fi: i64, arg_idx: i64) -> i64 with Mut, Panic {
+    if fi < 0 || fi >= FN_COUNT { return 0 }
+    scan_fn_param_type(fi, arg_idx)
+    if SCAN_TY == 1 && SCAN_TY_HASH == 0 { return gpu_param_kind_scalar_i64() }
+    if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+        let inner_ty = ref_hash_inner_ty(SCAN_TY_HASH)
+        let inner_hash = ref_hash_inner_hash(SCAN_TY_HASH)
+        if inner_ty == 8 && arr_hash_elem_ty(inner_hash) == 2 && arr_hash_esiz(inner_hash) == 8 {
+            if ref_hash_mut(SCAN_TY_HASH) != 0 { return gpu_param_kind_slice_out_f64() }
+            return gpu_param_kind_slice_in_f64()
+        }
+    }
+    return 0
+}
+
+fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 with Mut, Panic {
+    if fi < 0 || fi >= FN_COUNT { return 0 }
+    var saw_gpu_tid: i64 = 0
+    var saw_tid: i64 = 0
+    var saw_n: i64 = 0
+    var saw_a: i64 = 0
+    var saw_b: i64 = 0
+    var saw_c: i64 = 0
+    var saw_add: i64 = 0
+    var p: i64 = body_start
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 8 { depth = depth + 1 }
+        if TK[p as usize] == 9 { depth = depth - 1 }
+        if TK[p as usize] == 3 {
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "gpu_thread_id_x") { saw_gpu_tid = 1 }
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "tid") { saw_tid = 1 }
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "n") { saw_n = 1 }
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "a") { saw_a = 1 }
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "b") { saw_b = 1 }
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "c") { saw_c = 1 }
+        }
+        if TK[p as usize] == 17 { saw_add = 1 }
+        p = p + 1
+    }
+    if saw_gpu_tid == 0 { return 0 }
+    if saw_tid == 0 || saw_n == 0 { return 0 }
+    if saw_a == 0 || saw_b == 0 || saw_c == 0 { return 0 }
+    if saw_add == 0 { return 0 }
+    return 1
+}
+
+fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with Mut, Panic, Div {
+    ptx_reset_fn_meta(fi)
+    if fi < 0 || fi >= FN_COUNT { return }
+    if FN_ARITY[fi as usize] != 4 { return }
+    if fn_param_kind(fi, 0) != gpu_param_kind_scalar_i64() { return }
+    if fn_param_kind(fi, 1) != gpu_param_kind_slice_in_f64() { return }
+    if fn_param_kind(fi, 2) != gpu_param_kind_slice_in_f64() { return }
+    if fn_param_kind(fi, 3) != gpu_param_kind_slice_out_f64() { return }
+    if kernel_matches_supported_vec_binary_pattern(fi, body_start) == 0 { return }
+
+    let name_tok = FN_NAME_TOK[fi as usize]
+    if name_tok < 0 || name_tok >= TC { return }
+    let n_ns = TS[name_tok as usize]
+    let n_ne = TE[name_tok as usize]
+    let start_off = PTX_LEN
+    FN_PTX_PARAM_KINDS[(fi * 8 + 0) as usize] = gpu_param_kind_scalar_i64()
+    FN_PTX_PARAM_KINDS[(fi * 8 + 1) as usize] = gpu_param_kind_slice_in_f64()
+    FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = gpu_param_kind_slice_in_f64()
+    FN_PTX_PARAM_KINDS[(fi * 8 + 3) as usize] = gpu_param_kind_slice_out_f64()
+
+    ptx_emit_string(".version 7.0\n")
+    ptx_emit_string(".target sm_70\n")
+    ptx_emit_string(".address_size 64\n\n")
+    ptx_emit_string(".visible .entry ")
+    ptx_emit_src_range(n_ns, n_ne)
+    ptx_emit_string("(\n")
+    ptx_emit_string("    .param .u64 n,\n")
+    ptx_emit_string("    .param .u64 a,\n")
+    ptx_emit_string("    .param .u64 b,\n")
+    ptx_emit_string("    .param .u64 c\n")
+    ptx_emit_string(") {\n")
+    ptx_emit_string("    .reg .u32 %r<4>;\n")
+    ptx_emit_string("    .reg .u64 %rd<8>;\n")
+    ptx_emit_string("    .reg .f64 %fd<4>;\n")
+    ptx_emit_string("    .reg .pred %p<2>;\n")
+    ptx_emit_string("    mov.u32 %r0, %tid.x;\n")
+    ptx_emit_string("    mov.u32 %r1, %ntid.x;\n")
+    ptx_emit_string("    mov.u32 %r2, %ctaid.x;\n")
+    ptx_emit_string("    mad.lo.u32 %r3, %r2, %r1, %r0;\n")
+    ptx_emit_string("    cvt.u64.u32 %rd0, %r3;\n")
+    ptx_emit_string("    ld.param.u64 %rd1, [n];\n")
+    ptx_emit_string("    setp.ge.u64 %p0, %rd0, %rd1;\n")
+    ptx_emit_string("    @%p0 ret;\n")
+    ptx_emit_string("    ld.param.u64 %rd2, [a];\n")
+    ptx_emit_string("    ld.param.u64 %rd3, [b];\n")
+    ptx_emit_string("    ld.param.u64 %rd4, [c];\n")
+    ptx_emit_string("    shl.b64 %rd5, %rd0, 3;\n")
+    ptx_emit_string("    add.u64 %rd2, %rd2, %rd5;\n")
+    ptx_emit_string("    add.u64 %rd3, %rd3, %rd5;\n")
+    ptx_emit_string("    add.u64 %rd4, %rd4, %rd5;\n")
+    ptx_emit_string("    ld.global.f64 %fd0, [%rd2];\n")
+    ptx_emit_string("    ld.global.f64 %fd1, [%rd3];\n")
+    ptx_emit_string("    add.f64 %fd2, %fd0, %fd1;\n")
+    ptx_emit_string("    st.global.f64 [%rd4], %fd2;\n")
+    ptx_emit_string("    ret;\n")
+    ptx_emit_string("}\n")
+    ptx_finish_fn(fi, start_off, gpu_kernel_ptx_kind_vec_binary_f64(), extent_slot)
 }
 
 // Hash: pack name length + first 6 bytes into i64 (avoids sb()-based comparison during lookup)
@@ -370,8 +574,8 @@ var VAR_MUT: [i64; 1024] = [0; 1024]
 var VAR_COUNT: i64 = 0
 var NEXT_SLOT: i64 = 1
 var FRAME_PATCH_COUNT: i64 = 0
-var FRAME_PATCH_OFF: [i64; 4096] = [0; 4096]
-var FN_FRAME_SIZE: [i64; 4096] = [0; 4096]
+var FRAME_PATCH_OFF: [i64; 8192] = [0; 8192]
+var FN_FRAME_SIZE: [i64; 8192] = [0; 8192]
 var LAST_EXPR_IS_CLOSURE: i64 = 0
 // Scratch globals for float scientific exponent (avoids extra locals in compile_primary)
 var FL_SCI_SCRATCH: i64 = 0
@@ -393,6 +597,291 @@ fn sb(i: i64) -> i64 with Panic, Mut { if i >= 0 && i < SRC_LEN { return SRC[i a
 fn em(b: i64) with Mut { if CL < 16777216 { CD[CL as usize] = b as i8; CL = CL + 1 } }
 fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xFF); em((v >> 24) & 0xFF) }
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
+
+fn emit_load_abs_addr_to_rax_x86(addr: i64) with Mut {
+    em(0x48); em(0xb8); em64(addr)
+}
+
+fn emit_load_abs_qword_to_rax_x86(addr: i64) with Mut {
+    emit_load_abs_addr_to_rax_x86(addr)
+    em(0x48); em(0x8b); em(0x00)
+}
+
+fn emit_store_rax_to_abs_qword_x86(addr: i64) with Mut {
+    em(0x48); em(0x89); em(0xc1)
+    emit_load_abs_addr_to_rax_x86(addr)
+    em(0x48); em(0x89); em(0x08)
+    em(0x48); em(0x89); em(0xc8)
+}
+
+fn emit_store_imm64_to_abs_qword_x86(addr: i64, value: i64) with Mut {
+    emit_imm64(value)
+    emit_store_rax_to_abs_qword_x86(addr)
+}
+
+fn emit_load_stack_qword_to_rax_x86(disp: i64) with Mut {
+    em(0x48); em(0x8b); em(0x84); em(0x24); em32(disp)
+}
+
+fn emit_load_call_arg_to_rax_x86(argc: i64, arg_idx: i64) with Mut {
+    emit_load_stack_qword_to_rax_x86((argc - 1 - arg_idx) * 8)
+}
+
+fn emit_call_rax_x86(argc: i64) with Mut {
+    emit_setup_direct_call_args_x86(argc)
+    emit_prepare_stack_call_args_x86(argc, 6)
+    em(0xff); em(0xd0)
+    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
+}
+
+fn emit_call_abs_qword_x86(addr: i64, argc: i64) with Mut {
+    emit_load_abs_qword_to_rax_x86(addr)
+    emit_call_rax_x86(argc)
+}
+
+fn emit_inline_cstr_from_string_x86(s: string) with Mut, Panic, Div {
+    let n = str_len(s)
+    em(0xe9)
+    em32(n + 1)
+    let start = CL
+    var i: i64 = 0
+    while i < n {
+        em(str_char_at(s, i))
+        i = i + 1
+    }
+    em(0)
+    let disp = start - (CL + 7)
+    em(0x48); em(0x8d); em(0x05); em32(disp)
+}
+
+fn emit_inline_cstr_from_src_x86(ns: i64, ne: i64) with Mut, Panic {
+    let n = ne - ns
+    em(0xe9)
+    em32(n + 1)
+    let start = CL
+    var i: i64 = 0
+    while i < n {
+        em(sb(ns + i))
+        i = i + 1
+    }
+    em(0)
+    let disp = start - (CL + 7)
+    em(0x48); em(0x8d); em(0x05); em32(disp)
+}
+
+fn emit_inline_cstr_from_ptx_x86(off: i64, len: i64) with Mut, Panic {
+    em(0xe9)
+    em32(len + 1)
+    let start = CL
+    var i: i64 = 0
+    while i < len {
+        em(PTX_DATA[(off + i) as usize] as i64 & 0xFF)
+        i = i + 1
+    }
+    em(0)
+    let disp = start - (CL + 7)
+    em(0x48); em(0x8d); em(0x05); em32(disp)
+}
+
+fn emit_gpu_diag_once_x86(msg: string) with Mut, Panic, Div {
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + GPU_RT_DIAG_BSS_OFF)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85)
+    let skip = CL
+    em32(0)
+    emit_inline_cstr_from_string_x86(msg)
+    emit_print_cstr()
+    emit_store_imm64_to_abs_qword_x86(GL_BSS_BASE + GPU_RT_DIAG_BSS_OFF, 1)
+    patch32(skip, CL)
+}
+
+fn emit_mark_gpu_unavailable_x86(msg: string) with Mut, Panic, Div {
+    emit_store_imm64_to_abs_qword_x86(GL_BSS_BASE + GPU_RT_STATE_BSS_OFF, 0 - 1)
+    emit_gpu_diag_once_x86(msg)
+}
+
+fn emit_gpu_resolve_symbol_x86(sym: string, sym_fallback: string, dst_addr: i64, fail_msg: string) with Mut, Panic, Div {
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + GPU_RT_LIBCUDA_HANDLE_BSS_OFF)
+    em(0x50)
+    emit_inline_cstr_from_string_x86(sym)
+    em(0x50)
+    emit_call_abs_qword_x86(gpu_dyn_linux_x86_got_slot_dlsym(), 2)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85)
+    let have_primary = CL
+    em32(0)
+    if str_len(sym_fallback) > 0 {
+        emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + GPU_RT_LIBCUDA_HANDLE_BSS_OFF)
+        em(0x50)
+        emit_inline_cstr_from_string_x86(sym_fallback)
+        em(0x50)
+        emit_call_abs_qword_x86(gpu_dyn_linux_x86_got_slot_dlsym(), 2)
+    }
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85)
+    let have_symbol = CL
+    em32(0)
+    emit_mark_gpu_unavailable_x86(fail_msg)
+    em(0x31); em(0xc0)
+    em(0xe9)
+    let end_jmp = CL
+    em32(0)
+    patch32(have_primary, CL)
+    patch32(have_symbol, CL)
+    emit_store_rax_to_abs_qword_x86(dst_addr)
+    emit_imm64(1)
+    patch32(end_jmp, CL)
+}
+
+fn emit_try_gpu_runtime_init_x86() with Mut, Panic, Div {
+    if TARGET_OS != 0 || TARGET_ARCH != 0 {
+        emit_mark_gpu_unavailable_x86("GPU unavailable: native CUDA runtime unsupported on this target\n")
+        em(0x31); em(0xc0)
+        return
+    }
+    NEEDS_GPU_RUNTIME_DYNLINK = 1
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + GPU_RT_STATE_BSS_OFF)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84)
+    let do_init = CL
+    em32(0)
+    em(0x48); em(0x83); em(0xf8); em(1)
+    em(0x0f); em(0x84)
+    let already_ok = CL
+    em32(0)
+    em(0x31); em(0xc0)
+    em(0xe9)
+    let end_jmp = CL
+    em32(0)
+
+    patch32(do_init, CL)
+    emit_inline_cstr_from_string_x86("libcuda.so.1")
+    em(0x50)
+    emit_imm64(2)
+    em(0x50)
+    emit_call_abs_qword_x86(gpu_dyn_linux_x86_got_slot_dlopen(), 2)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85)
+    let have_lib = CL
+    em32(0)
+    emit_mark_gpu_unavailable_x86("GPU unavailable: libcuda.so not found\n")
+    em(0x31); em(0xc0)
+    em(0xe9)
+    let after_fail_no_lib = CL
+    em32(0)
+    patch32(have_lib, CL)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + GPU_RT_LIBCUDA_HANDLE_BSS_OFF)
+
+    emit_gpu_resolve_symbol_x86("cuInit", "", GL_BSS_BASE + GPU_RT_CUINIT_PTR_BSS_OFF, "GPU unavailable: cuInit unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84)
+    let fail_after_resolve = CL
+    em32(0)
+    emit_gpu_resolve_symbol_x86("cuDeviceGet", "", GL_BSS_BASE + GPU_RT_CUDEVICEGET_PTR_BSS_OFF, "GPU unavailable: cuDeviceGet unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let fail_after_resolve_b = CL; em32(0)
+    emit_gpu_resolve_symbol_x86("cuCtxCreate_v2", "cuCtxCreate", GL_BSS_BASE + GPU_RT_CUCTXCREATE_PTR_BSS_OFF, "GPU unavailable: cuCtxCreate unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let fail_after_resolve_c = CL; em32(0)
+    emit_gpu_resolve_symbol_x86("cuCtxSynchronize", "", GL_BSS_BASE + GPU_RT_CUCTXSYNC_PTR_BSS_OFF, "GPU unavailable: cuCtxSynchronize unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let fail_after_resolve_d = CL; em32(0)
+    emit_gpu_resolve_symbol_x86("cuModuleLoadData", "", GL_BSS_BASE + GPU_RT_CUMODULELOADDATA_PTR_BSS_OFF, "GPU unavailable: cuModuleLoadData unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let fail_after_resolve_e = CL; em32(0)
+    emit_gpu_resolve_symbol_x86("cuModuleGetFunction", "", GL_BSS_BASE + GPU_RT_CUMODULEGETFUNCTION_PTR_BSS_OFF, "GPU unavailable: cuModuleGetFunction unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let fail_after_resolve_f = CL; em32(0)
+    emit_gpu_resolve_symbol_x86("cuMemAlloc_v2", "cuMemAlloc", GL_BSS_BASE + GPU_RT_CUMEMALLOC_PTR_BSS_OFF, "GPU unavailable: cuMemAlloc unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let fail_after_resolve_g = CL; em32(0)
+    emit_gpu_resolve_symbol_x86("cuMemFree_v2", "cuMemFree", GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, "GPU unavailable: cuMemFree unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let fail_after_resolve_h = CL; em32(0)
+    emit_gpu_resolve_symbol_x86("cuMemcpyHtoD_v2", "cuMemcpyHtoD", GL_BSS_BASE + GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF, "GPU unavailable: cuMemcpyHtoD unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let fail_after_resolve_i = CL; em32(0)
+    emit_gpu_resolve_symbol_x86("cuMemcpyDtoH_v2", "cuMemcpyDtoH", GL_BSS_BASE + GPU_RT_CUMEMCPYDTOH_PTR_BSS_OFF, "GPU unavailable: cuMemcpyDtoH unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let fail_after_resolve_j = CL; em32(0)
+    emit_gpu_resolve_symbol_x86("cuLaunchKernel", "", GL_BSS_BASE + GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF, "GPU unavailable: cuLaunchKernel unresolved\n")
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let fail_after_resolve_k = CL; em32(0)
+
+    emit_imm64(0)
+    em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUINIT_PTR_BSS_OFF, 1)
+    em(0x85); em(0xc0)
+    em(0x0f); em(0x85)
+    let fail_init = CL
+    em32(0)
+
+    emit_imm64(GL_BSS_BASE + GPU_RT_DEVICE_BSS_OFF)
+    em(0x50)
+    emit_imm64(0)
+    em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUDEVICEGET_PTR_BSS_OFF, 2)
+    em(0x85); em(0xc0)
+    em(0x0f); em(0x85)
+    let fail_device = CL
+    em32(0)
+
+    emit_imm64(GL_BSS_BASE + GPU_RT_CTX_BSS_OFF)
+    em(0x50)
+    emit_imm64(0)
+    em(0x50)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + GPU_RT_DEVICE_BSS_OFF)
+    em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUCTXCREATE_PTR_BSS_OFF, 3)
+    em(0x85); em(0xc0)
+    em(0x0f); em(0x85)
+    let fail_ctx = CL
+    em32(0)
+
+    emit_store_imm64_to_abs_qword_x86(GL_BSS_BASE + GPU_RT_STATE_BSS_OFF, 1)
+    emit_imm64(1)
+    em(0xe9)
+    let after_success = CL
+    em32(0)
+
+    patch32(fail_after_resolve, CL)
+    patch32(fail_after_resolve_b, CL)
+    patch32(fail_after_resolve_c, CL)
+    patch32(fail_after_resolve_d, CL)
+    patch32(fail_after_resolve_e, CL)
+    patch32(fail_after_resolve_f, CL)
+    patch32(fail_after_resolve_g, CL)
+    patch32(fail_after_resolve_h, CL)
+    patch32(fail_after_resolve_i, CL)
+    patch32(fail_after_resolve_j, CL)
+    patch32(fail_after_resolve_k, CL)
+    patch32(fail_init, CL)
+    patch32(fail_device, CL)
+    patch32(fail_ctx, CL)
+    emit_mark_gpu_unavailable_x86("GPU unavailable: CUDA initialization failed\n")
+    em(0x31); em(0xc0)
+    em(0xe9)
+    let after_fail = CL
+    em32(0)
+
+    patch32(already_ok, CL)
+    emit_imm64(1)
+    patch32(after_fail_no_lib, CL)
+    patch32(after_success, CL)
+    patch32(after_fail, CL)
+    patch32(end_jmp, CL)
+}
+
+fn emit_load_gpu_thread_id_x86() with Mut {
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + GPU_EMU_THREAD_ID_BSS_OFF)
+    em(0x48); em(0x8b); em(0x00)
+}
+
+fn emit_store_gpu_thread_id_x86() with Mut {
+    em(0x48); em(0x89); em(0xc1)
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + GPU_EMU_THREAD_ID_BSS_OFF)
+    em(0x48); em(0x89); em(0x08)
+}
 
 fn emit_load_rsp_arg_x86(reg_idx: i64, disp: i64) with Mut {
     if reg_idx == 0 { em(0x48); em(0x8b); em(0xbc); em(0x24); em32(disp); return }
@@ -865,6 +1354,68 @@ fn src_match(p: i64, l: i64, kw: string) -> bool with Panic, Mut {
     return true
 }
 
+fn token_is_kernel_marker(ti: i64) -> bool with Panic, Mut {
+    if ti < 0 || ti >= TC { return false }
+    if TK[ti as usize] != 3 { return false }
+    return src_match(TS[ti as usize], TE[ti as usize] - TS[ti as usize], "kernel")
+}
+
+fn token_is_ident_text(ti: i64, text: string) -> bool with Panic, Mut {
+    if ti < 0 || ti >= TC { return false }
+    if TK[ti as usize] != 3 { return false }
+    return src_match(TS[ti as usize], TE[ti as usize] - TS[ti as usize], text)
+}
+
+fn token_is_gpu_builtin_name(ti: i64) -> bool with Panic, Mut {
+    if ti < 0 || ti >= TC { return false }
+    if TK[ti as usize] != 3 { return false }
+    let ns = TS[ti as usize]
+    let ne = TE[ti as usize]
+    if src_match(ns, ne - ns, "gpu_thread_id_x") { return true }
+    if src_match(ns, ne - ns, "gpu_block_id_x") { return true }
+    if src_match(ns, ne - ns, "gpu_block_dim_x") { return true }
+    if src_match(ns, ne - ns, "gpu_barrier") { return true }
+    if src_match(ns, ne - ns, "gpu_barrier_sync") { return true }
+    return false
+}
+
+fn kernel_body_uses_gpu_builtins(body_start: i64) -> i64 with Panic, Mut {
+    var p: i64 = body_start
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 8 {
+            depth = depth + 1
+        } else if TK[p as usize] == 9 {
+            depth = depth - 1
+        } else if token_is_gpu_builtin_name(p) {
+            return 1
+        }
+        p = p + 1
+    }
+    return 0
+}
+
+fn current_fn_allows_mutation() -> bool with Panic, Mut {
+    if FN_IS_KERNEL[CURRENT_FN as usize] != 0 { return true }
+    return (FN_EFFECTS[CURRENT_FN as usize] & 2) != 0
+}
+
+fn stmt_is_gpu_launch_perform(p0: i64) -> bool with Panic, Mut {
+    if token_is_ident_text(p0, "perform") == false { return false }
+    if token_is_ident_text(p0 + 1, "GPU") == false { return false }
+    if TK[(p0 + 2) as usize] != 50 { return false }
+    if token_is_ident_text(p0 + 3, "launch") == false { return false }
+    return TK[(p0 + 4) as usize] == 6
+}
+
+fn stmt_is_gpu_sync_perform(p0: i64) -> bool with Panic, Mut {
+    if token_is_ident_text(p0, "perform") == false { return false }
+    if token_is_ident_text(p0 + 1, "GPU") == false { return false }
+    if TK[(p0 + 2) as usize] != 50 { return false }
+    if token_is_ident_text(p0 + 3, "sync") == false { return false }
+    return TK[(p0 + 4) as usize] == 6
+}
+
 fn tok_is_unicode_epsilon(p: i64) -> bool with Panic, Mut {
     if TK[p as usize] != 3 { return false }
     let ns = TS[p as usize]
@@ -1089,6 +1640,22 @@ fn ref_hash_inner_ty(h: i64) -> i64 with Div, Mut {
 
 fn ref_hash_inner_hash(h: i64) -> i64 with Div, Mut {
     return (h - 1125899906842624) / 256
+}
+
+fn ptr_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 {
+    return ref_hash_make(inner_ty, inner_hash, is_mut)
+}
+
+fn ptr_hash_mut(h: i64) -> i64 with Div, Mut {
+    return ref_hash_mut(h)
+}
+
+fn ptr_hash_inner_ty(h: i64) -> i64 with Div, Mut {
+    return ref_hash_inner_ty(h)
+}
+
+fn ptr_hash_inner_hash(h: i64) -> i64 with Div, Mut {
+    return ref_hash_inner_hash(h)
 }
 
 fn type_is_slice_ref(ty: i64, ty_hash: i64) -> bool with Panic, Div, Mut {
@@ -1328,6 +1895,10 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
     if k1 == 10 && k2 == 10 {
         if ref_hash_mut(h1) != ref_hash_mut(h2) { return false }
         return ty_eq(ref_hash_inner_ty(h1), ref_hash_inner_hash(h1), ref_hash_inner_ty(h2), ref_hash_inner_hash(h2))
+    }
+    if k1 == 11 && k2 == 11 {
+        if ptr_hash_mut(h1) != ptr_hash_mut(h2) { return false }
+        return ty_eq(ptr_hash_inner_ty(h1), ptr_hash_inner_hash(h1), ptr_hash_inner_ty(h2), ptr_hash_inner_hash(h2))
     }
     if k1 == 20 && k2 == 20 {
         return ty_eq(unobserved_hash_inner_ty(h1), unobserved_hash_inner_hash(h1), unobserved_hash_inner_ty(h2), unobserved_hash_inner_hash(h2))
@@ -1674,6 +2245,12 @@ fn print_type_label(ty: i64, ty_hash: i64) with IO, Mut, Panic, Div {
         print_type_label(inner_ty, inner_hash)
         return
     }
+    if ty == 11 {
+        if ptr_hash_mut(ty_hash) != 0 { print("*mut ") }
+        else { print("*") }
+        print_type_label(ptr_hash_inner_ty(ty_hash), ptr_hash_inner_hash(ty_hash))
+        return
+    }
     if ty == 20 {
         print("Unobserved<")
         print_type_label(unobserved_hash_inner_ty(ty_hash), unobserved_hash_inner_hash(ty_hash))
@@ -1805,6 +2382,22 @@ fn stmt_is_deref_array_store(p0: i64) -> bool with Panic, Mut {
         p = p + 1
     }
     return TK[p as usize] == 16
+}
+
+fn stmt_is_deref_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 19 { return false }
+    if TK[(p0 + 1) as usize] != 3 { return false }
+    return TK[(p0 + 2) as usize] == 16
+}
+
+fn stmt_is_deref_field_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }
+    if TK[(p0 + 1) as usize] != 19 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 7 { return false }
+    if TK[(p0 + 4) as usize] != 50 { return false }
+    if TK[(p0 + 5) as usize] != 3 { return false }
+    return TK[(p0 + 6) as usize] == 16
 }
 
 fn skip_type_meta_item(p0: i64, close_tk: i64) -> i64 with Panic, Mut {
@@ -2132,6 +2725,29 @@ fn scan_type(p0: i64) with Mut, Panic {
     SCAN_TY_HASH = 0
     SCAN_TY_ESIZ = 8
     SCAN_TY_ALEN = 0
+    if TK[p as usize] == 19 {
+        var ptr_mode: i64 = 0
+        p = p + 1
+        if TK[p as usize] == 32 {
+            ptr_mode = 1
+            p = p + 1
+        } else if TK[p as usize] == 3 {
+            let mns = TS[p as usize]
+            let mne = TE[p as usize]
+            if src_match(mns, mne - mns, "mut") {
+                ptr_mode = 1
+                p = p + 1
+            }
+        }
+        scan_type(p)
+        let inner_ty = SCAN_TY
+        let inner_hash = SCAN_TY_HASH
+        let inner_next = SCAN_TY_NEXT
+        SCAN_TY_HASH = ptr_hash_make(inner_ty, inner_hash, ptr_mode)
+        SCAN_TY = 11
+        SCAN_TY_NEXT = inner_next
+        return
+    }
     if TK[p as usize] == 44 {
         var ref_mode: i64 = 0
         p = p + 1
@@ -2741,9 +3357,89 @@ fn ont_error(tok: i64, code: i64, msg: string) with IO, Mut, Panic {
     TYPECHECK_FAILED = 1
 }
 
+fn ont_find_class_by_hash(h: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < ONT_CLASS_COUNT {
+        if ONT_CLASS_HASH[i as usize] == h { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn ont_materialize_kernel() with Mut, Panic {
+    // Set reflexive closure
+    var i: i64 = 0
+    while i < ONT_CLASS_COUNT {
+        ONT_SUB_MATRIX[(i * 64 + i) as usize] = 1
+        i = i + 1
+    }
+    // Floyd-Warshall transitive closure on subclass matrix
+    var k: i64 = 0
+    while k < ONT_CLASS_COUNT {
+        var ii: i64 = 0
+        while ii < ONT_CLASS_COUNT {
+            var j: i64 = 0
+            while j < ONT_CLASS_COUNT {
+                if ONT_SUB_MATRIX[(ii * 64 + k) as usize] != 0 && ONT_SUB_MATRIX[(k * 64 + j) as usize] != 0 {
+                    ONT_SUB_MATRIX[(ii * 64 + j) as usize] = 1
+                }
+                j = j + 1
+            }
+            ii = ii + 1
+        }
+        k = k + 1
+    }
+    // Propagate disjoint through subclass hierarchy (single pass, closure already complete)
+    var a: i64 = 0
+    while a < ONT_CLASS_COUNT {
+        var b: i64 = 0
+        while b < ONT_CLASS_COUNT {
+            if ONT_DIS_MATRIX[(a * 64 + b) as usize] != 0 {
+                var x: i64 = 0
+                while x < ONT_CLASS_COUNT {
+                    if ONT_SUB_MATRIX[(x * 64 + a) as usize] != 0 {
+                        ONT_DIS_MATRIX[(x * 64 + b) as usize] = 1
+                        ONT_DIS_MATRIX[(b * 64 + x) as usize] = 1
+                    }
+                    if ONT_SUB_MATRIX[(x * 64 + b) as usize] != 0 {
+                        ONT_DIS_MATRIX[(a * 64 + x) as usize] = 1
+                        ONT_DIS_MATRIX[(x * 64 + a) as usize] = 1
+                    }
+                    x = x + 1
+                }
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+fn try_tc_ontology_call_error(tok: i64, param_hash: i64, arg_hash: i64) -> i64 with IO, Mut, Panic {
+    if param_hash == 0 || arg_hash == 0 { return 0 }
+    let pi = ont_find_class_by_hash(param_hash)
+    let ai = ont_find_class_by_hash(arg_hash)
+    if pi < 0 || ai < 0 { return 0 }
+    if pi == ai { return 2 }
+    if ONT_DIS_MATRIX[(ai * 64 + pi) as usize] != 0 {
+        ont_error(tok, 151, "ontology classes are disjoint and cannot be substituted")
+        return 1
+    }
+    if ONT_SUB_MATRIX[(ai * 64 + pi) as usize] != 0 { return 2 }
+    ont_error(tok, 152, "cannot prove ontology subsumption at this call site")
+    return 1
+}
+
 fn skip_ontology_decl(p0: i64) -> i64 with IO, Mut, Panic {
     var p = p0 + 1  // skip 'ontology'
     let ont_tok = p0
+
+    // Reset subclass/disjoint matrices from previous block
+    var zi: i64 = 0
+    while zi < ONT_CLASS_COUNT * 64 {
+        ONT_SUB_MATRIX[zi as usize] = 0
+        ONT_DIS_MATRIX[zi as usize] = 0
+        zi = zi + 1
+    }
 
     // Reset per-block tracking
     ONT_CLASS_COUNT = 0
@@ -2755,8 +3451,9 @@ fn skip_ontology_decl(p0: i64) -> i64 with IO, Mut, Panic {
     while p < TC && TK[p as usize] != 8 && TK[p as usize] != 0 { p = p + 1 }
     if p >= TC || TK[p as usize] != 8 { return p }
     p = p + 1  // skip {
+    let body_start = p
 
-    // Parse body: collect class/role names, validate references
+    // --- Pass 1: collect class/role names and store class hashes ---
     while p < TC && TK[p as usize] != 9 {
         if TK[p as usize] != 3 { p = p + 1; continue }
         let kw_s = TS[p as usize]
@@ -2769,14 +3466,24 @@ fn skip_ontology_decl(p0: i64) -> i64 with IO, Mut, Panic {
                 if ONT_CLASS_COUNT < 64 {
                     ONT_CLASS_S[ONT_CLASS_COUNT as usize] = TS[p as usize]
                     ONT_CLASS_E[ONT_CLASS_COUNT as usize] = TE[p as usize]
+                    ONT_CLASS_HASH[ONT_CLASS_COUNT as usize] = gl_name_hash(TS[p as usize], TE[p as usize])
                     ONT_CLASS_COUNT = ONT_CLASS_COUNT + 1
                 }
                 p = p + 1  // skip class name
             }
-            // Skip rest of class declaration (subclass_of, { properties })
+            // Skip subclass_of clause (stop at declaration keywords to avoid over-advance)
             if p < TC && TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "subclass_of") {
                 p = p + 1  // skip "subclass_of"
-                while p < TC && TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 }  // skip names and commas
+                while p < TC && (TK[p as usize] == 3 || TK[p as usize] == 28) {
+                    if TK[p as usize] == 3 {
+                        let skip_l = TE[p as usize] - TS[p as usize]
+                        if src_match(TS[p as usize], skip_l, "class") { break }
+                        if src_match(TS[p as usize], skip_l, "disjoint") { break }
+                        if src_match(TS[p as usize], skip_l, "role") { break }
+                        if src_match(TS[p as usize], skip_l, "subclass_of") { break }
+                    }
+                    p = p + 1
+                }
             }
             if p < TC && TK[p as usize] == 8 {
                 // Skip nested { property ... } block
@@ -2862,10 +3569,92 @@ fn skip_ontology_decl(p0: i64) -> i64 with IO, Mut, Panic {
         // Unknown keyword in ontology block — skip
         p = p + 1
     }
+    let body_end = p
+
+    // --- Pass 2: build subclass/disjoint relationship matrices ---
+    p = body_start
+    while p < TC && p < body_end && TK[p as usize] != 9 {
+        if TK[p as usize] != 3 { p = p + 1; continue }
+        let kw_s2 = TS[p as usize]
+        let kw_l2 = TE[p as usize] - TS[p as usize]
+
+        if src_match(kw_s2, kw_l2, "class") {
+            p = p + 1  // skip "class"
+            if p >= body_end || TK[p as usize] != 3 { continue }
+            let cn_h = gl_name_hash(TS[p as usize], TE[p as usize])
+            let ci = ont_find_class_by_hash(cn_h)
+            p = p + 1  // skip class name
+            // Handle subclass_of relationships
+            if p < body_end && TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "subclass_of") {
+                p = p + 1  // skip "subclass_of"
+                while p < body_end && (TK[p as usize] == 3 || TK[p as usize] == 28) {
+                    if TK[p as usize] == 3 {
+                        let tsn_l = TE[p as usize] - TS[p as usize]
+                        if src_match(TS[p as usize], tsn_l, "class") { break }
+                        if src_match(TS[p as usize], tsn_l, "disjoint") { break }
+                        if src_match(TS[p as usize], tsn_l, "role") { break }
+                        if src_match(TS[p as usize], tsn_l, "subclass_of") { break }
+                        let sn_h = gl_name_hash(TS[p as usize], TE[p as usize])
+                        let si = ont_find_class_by_hash(sn_h)
+                        if ci >= 0 && si >= 0 {
+                            ONT_SUB_MATRIX[(ci * 64 + si) as usize] = 1
+                        }
+                    }
+                    p = p + 1
+                }
+            }
+            // Skip nested { } block
+            if p < body_end && TK[p as usize] == 8 {
+                var depth2: i64 = 1
+                p = p + 1
+                while p < body_end && depth2 > 0 {
+                    if TK[p as usize] == 8 { depth2 = depth2 + 1 }
+                    if TK[p as usize] == 9 { depth2 = depth2 - 1 }
+                    p = p + 1
+                }
+            }
+            continue
+        }
+
+        if src_match(kw_s2, kw_l2, "disjoint") {
+            p = p + 1  // skip "disjoint"
+            ONT_DIS_TMP_CNT = 0
+            while p < body_end && (TK[p as usize] == 3 || TK[p as usize] == 28) {
+                if TK[p as usize] == 3 {
+                    let dh = gl_name_hash(TS[p as usize], TE[p as usize])
+                    let di = ont_find_class_by_hash(dh)
+                    if di >= 0 && ONT_DIS_TMP_CNT < 64 {
+                        ONT_DIS_TMP[ONT_DIS_TMP_CNT as usize] = di
+                        ONT_DIS_TMP_CNT = ONT_DIS_TMP_CNT + 1
+                    }
+                }
+                p = p + 1
+            }
+            var dii: i64 = 0
+            while dii < ONT_DIS_TMP_CNT {
+                var djj: i64 = dii + 1
+                while djj < ONT_DIS_TMP_CNT {
+                    let da = ONT_DIS_TMP[dii as usize]
+                    let db = ONT_DIS_TMP[djj as usize]
+                    ONT_DIS_MATRIX[(da * 64 + db) as usize] = 1
+                    ONT_DIS_MATRIX[(db * 64 + da) as usize] = 1
+                    djj = djj + 1
+                }
+                dii = dii + 1
+            }
+            continue
+        }
+
+        // Skip roles and other keywords token-by-token
+        p = p + 1
+    }
+
+    // Compute transitive closure + propagate disjoint through subclass hierarchy
+    ont_materialize_kernel()
 
     // Skip closing }
-    if p < TC && TK[p as usize] == 9 { p = p + 1 }
-    p
+    if body_end < TC && TK[body_end as usize] == 9 { return body_end + 1 }
+    return body_end
 }
 
 fn skip_study_decl(p0: i64) -> i64 with IO, Mut, Panic {
@@ -4193,6 +4982,20 @@ fn emit_file_size() with Mut {
     em(0x48); em(0x81); em(0xc4); em32(160)  // add rsp, 160
 }
 
+fn emit_syscall6_x86(argc: i64) with Mut {
+    if argc >= 1 {
+        em(0x48); em(0x8b); em(0x84); em(0x24); em32((argc - 1) * 8)  // mov rax, [rsp+num]
+    }
+    if argc >= 2 { emit_load_rsp_arg_x86(0, (argc - 2) * 8) }  // rdi = a1
+    if argc >= 3 { emit_load_rsp_arg_x86(1, (argc - 3) * 8) }  // rsi = a2
+    if argc >= 4 { emit_load_rsp_arg_x86(2, (argc - 4) * 8) }  // rdx = a3
+    if argc >= 5 { em(0x4c); em(0x8b); em(0x94); em(0x24); em32((argc - 5) * 8) }  // mov r10, [rsp+a4]
+    if argc >= 6 { emit_load_rsp_arg_x86(4, (argc - 6) * 8) }  // r8 = a5
+    if argc >= 7 { emit_load_rsp_arg_x86(5, (argc - 7) * 8) }  // r9 = a6
+    em(0x0f); em(0x05)
+    emit_drop_call_args_x86(argc)
+}
+
 fn emit_write_file_flags(open_flags: i64) with Mut {
     // rdi = path, rsi = buf addr, rdx = len
     em(0x52)  // push rdx (len)
@@ -4623,7 +5426,8 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
             tc_error(borrow_tok, "Mut borrow requires mutable binding")
         }
         let lalen = var_find_alen(rns, rne)
-        if lalen > 0 || var_find_ty(rns, rne) == 6 {
+        let lty = var_find_ty(rns, rne)
+        if lalen > 0 || lty == 6 || lty == 8 {
             emit_load_var(slot)
         } else {
             let off = 0 - slot * 8
@@ -4804,20 +5608,6 @@ fn compile_primary() with IO, Mut, Panic, Div {
     // Token 45 = | at expression start = closure (not bitwise OR)
     // Supports captured variables from outer scope via closure struct.
     // All closures build a stack struct: [fn_ptr, cap_0, cap_1, ...]
-fn emit_syscall6_x86(argc: i64) with Mut {
-    if argc >= 1 {
-        em(0x48); em(0x8b); em(0x84); em(0x24); em32((argc - 1) * 8)  // mov rax, [rsp+num]
-    }
-    if argc >= 2 { emit_load_rsp_arg_x86(0, (argc - 2) * 8) }  // rdi = a1
-    if argc >= 3 { emit_load_rsp_arg_x86(1, (argc - 3) * 8) }  // rsi = a2
-    if argc >= 4 { emit_load_rsp_arg_x86(2, (argc - 4) * 8) }  // rdx = a3
-    if argc >= 5 { em(0x4c); em(0x8b); em(0x94); em(0x24); em32((argc - 5) * 8) }  // mov r10, [rsp+a4]
-    if argc >= 6 { emit_load_rsp_arg_x86(4, (argc - 6) * 8) }  // r8 = a5
-    if argc >= 7 { emit_load_rsp_arg_x86(5, (argc - 7) * 8) }  // r9 = a6
-    em(0x0f); em(0x05)
-    emit_drop_call_args_x86(argc)
-}
-
     // Closure function receives hidden first param (env_ptr) in rdi.
     // User args shift to rsi, rdx, rcx, r8, r9 (max 5 user args).
     if k == 45 || k == 31 {
@@ -5120,12 +5910,12 @@ fn emit_syscall6_x86(argc: i64) with Mut {
         EP = EP + 1
         compile_primary()
         compile_postfix_tail()
-        if EXPR_TY != 0 && EXPR_TY != 10 { tc_error(EP - 1, "dereference requires reference operand") }
+        if EXPR_TY != 0 && EXPR_TY != 10 && EXPR_TY != 11 { tc_error(EP - 1, "dereference requires reference operand") }
         em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
-        if EXPR_TY == 10 {
+        if EXPR_TY == 10 || EXPR_TY == 11 {
             let ref_hash = EXPR_TY_HASH
-            let inner_hash = ref_hash_inner_hash(ref_hash)
-            EXPR_TY = ref_hash_inner_ty(ref_hash)
+            let inner_hash = ptr_hash_inner_hash(ref_hash)
+            EXPR_TY = ptr_hash_inner_ty(ref_hash)
             EXPR_TY_HASH = inner_hash
         } else {
             EXPR_TY = 0
@@ -5318,9 +6108,62 @@ fn emit_syscall6_x86(argc: i64) with Mut {
             }
             if g_found == 1 { EP = EP + 3 }
         }
-        let ident_fi = fn_find(ns, ne)
+            let ident_fi = fn_find(ns, ne)
         // Function call: ident(args)
         if TK[EP as usize] == 6 {
+            if src_match(ns, ne - ns, "gpu_thread_id_x") {
+                EP = EP + 1
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    EP = skip_call_arg_expr(EP)
+                    if TK[EP as usize] == 28 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_gpu_thread_id_x86()
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "gpu_block_id_x") {
+                EP = EP + 1
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    EP = skip_call_arg_expr(EP)
+                    if TK[EP as usize] == 28 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_gpu_thread_id_x86()
+                em(0x48); em(0xc1); em(0xe8); em(8)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "gpu_block_dim_x") {
+                EP = EP + 1
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    EP = skip_call_arg_expr(EP)
+                    if TK[EP as usize] == 28 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_imm64(256)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "gpu_barrier") || src_match(ns, ne - ns, "gpu_barrier_sync") {
+                EP = EP + 1
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    EP = skip_call_arg_expr(EP)
+                    if TK[EP as usize] == 28 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                em(0x31); em(0xc0)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
             // Check for print("str") or print(variable)
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
@@ -5541,6 +6384,28 @@ fn emit_syscall6_x86(argc: i64) with Mut {
                 EXPR_TY = 3
                 return
             }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "malloc") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 16) == 0 { tc_effect_violation(name_tok, 16, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 1, 0)
+                    EP = EP + 1
+                    em(0x31); em(0xc0)
+                } else {
+                    compile_or()
+                    if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "malloc size must be integer") }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 1, 2)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                    emit_mmap_len_in_rax_x86()
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 11
+                EXPR_TY_HASH = ptr_hash_make(1, 0, 1)
+                return
+            }
             if src_match(ns, ne - ns, "read_i64") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -5613,6 +6478,30 @@ fn emit_syscall6_x86(argc: i64) with Mut {
                 emit_file_size()
                 EXPR_IS_F64 = 0
                 EXPR_TY = 1
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "syscall6") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                var sys_argc: i64 = 0
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or()
+                    materialize_aggregate_expr_x86()
+                    em(0x50)
+                    sys_argc = sys_argc + 1
+                    if TK[EP as usize] == 28 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                if sys_argc != 7 {
+                    tc_wrong_arity(name_tok, 7, sys_argc)
+                    emit_drop_call_args_x86(sys_argc)
+                    em(0x31); em(0xc0)
+                } else {
+                    emit_syscall6_x86(sys_argc)
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
                 return
             }
             // Check for write_file/path aliases
@@ -5983,7 +6872,8 @@ fn emit_syscall6_x86(argc: i64) with Mut {
                     if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                         tc_epistemic_boundary(call_tok)
                     } else {
-                        tc_error(call_tok, "type mismatch in call argument")
+                        let ont_r = try_tc_ontology_call_error(call_tok, SCAN_TY_HASH, EXPR_TY_HASH)
+                        if ont_r == 0 { tc_error(call_tok, "type mismatch in call argument") }
                     }
                 }
                 if (fi >= 0 || (call_sig > 0 && call_is_closure == 0)) && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
@@ -6005,7 +6895,11 @@ fn emit_syscall6_x86(argc: i64) with Mut {
                 if (callee_eff & ~caller_eff) != 0 {
                     tc_effect_violation(call_tok, callee_eff, caller_eff)
                 }
-                emit_direct_fn_call_x86(fi, abi_argc)
+                if FN_IS_KERNEL[fi as usize] != 0 {
+                    emit_kernel_dispatch_x86(fi, abi_argc)
+                } else {
+                    emit_direct_fn_call_x86(fi, abi_argc)
+                }
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -6289,30 +7183,6 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
     var more: i64 = 1
     while more == 1 {
         if TK[EP as usize] == 37 {
-            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "syscall6") {
-                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
-                EP = EP + 1
-                var sys_argc: i64 = 0
-                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
-                    compile_or()
-                    materialize_aggregate_expr_x86()
-                    em(0x50)
-                    sys_argc = sys_argc + 1
-                    if TK[EP as usize] == 28 { EP = EP + 1 }
-                }
-                if TK[EP as usize] == 7 { EP = EP + 1 }
-                if sys_argc != 7 {
-                    tc_wrong_arity(name_tok, 7, sys_argc)
-                    emit_drop_call_args_x86(sys_argc)
-                    em(0x31); em(0xc0)
-                } else {
-                    emit_syscall6_x86(sys_argc)
-                }
-                EXPR_IS_F64 = 0
-                EXPR_TY = 1
-                EXPR_TY_HASH = 0
-                return
-            }
             EP = EP + 1  // skip 'as'
             let tp = EP
             let src_ty = EXPR_TY
@@ -6457,8 +7327,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     let uw_si = st_find(EXPR_TY_HASH)
                     if uw_si >= 0 {
                         // Get type of first field (value)
-                        EXPR_TY = ST_FTY[(uw_si * 64) as usize]
-                        EXPR_TY_HASH = ST_FHASH[(uw_si * 64) as usize]
+                        EXPR_TY = ST_FTY[(uw_si * 128) as usize]
+                        EXPR_TY_HASH = ST_FHASH[(uw_si * 128) as usize]
                         if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
                     }
                 }
@@ -6533,15 +7403,21 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             // Field access: rax = struct pointer, load field
             let base_ty = EXPR_TY
             let base_hash = EXPR_TY_HASH
+            var base_data_ty = base_ty
+            var base_data_hash = base_hash
+            if base_ty == 10 {
+                base_data_ty = ref_hash_inner_ty(base_hash)
+                base_data_hash = ref_hash_inner_hash(base_hash)
+            }
             EP = EP + 1
             var found: i64 = 0
             EXPR_TY = 0
             EXPR_TY_HASH = 0
-            if knowledge_hash_is(base_hash) {
+            if knowledge_hash_is(base_data_hash) {
                 if src_match(fns, fne - fns, "value") {
                     em(0x48); em(0x8b); em(0x00)
-                    EXPR_TY = knowledge_hash_inner_ty(base_hash)
-                    EXPR_TY_HASH = knowledge_hash_inner_hash(base_hash)
+                    EXPR_TY = knowledge_hash_inner_ty(base_data_hash)
+                    EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else if src_match(fns, fne - fns, "variance") {
                     em(0x48); em(0x8b); em(0x40); em(8)
@@ -6566,8 +7442,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 }
                 found = 1
             }
-            if base_ty == 6 {
-                let bsi = st_find(base_hash)
+            if base_data_ty == 6 {
+                let bsi = st_find(base_data_hash)
                 if bsi >= 0 {
                     let off = st_field_offset(bsi, fh)
                     if off >= 0 {
@@ -6619,7 +7495,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
 
 fn compile_multiplicative() with IO, Mut, Panic, Div {
     compile_postfix()
+    var lhs_end_line: i64 = TL[(EP - 1) as usize]
     while TK[EP as usize] == 19 || TK[EP as usize] == 20 || TK[EP as usize] == 29 {
+        if EXPR_TY == 11 && TK[EP as usize] == 19 && TL[EP as usize] > lhs_end_line { return }
         let op_tok = EP
         let op = TK[EP as usize]
         EP = EP + 1
@@ -6703,6 +7581,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             EXPR_TY = 1
         }
         EXPR_TY_HASH = 0
+        lhs_end_line = TL[(EP - 1) as usize]
     }
 }
 
@@ -6783,6 +7662,310 @@ fn compile_additive() with IO, Mut, Panic, Div {
             }
         }
     }
+}
+
+fn emit_kernel_cpu_direct_call_x86(fi: i64, abi_argc: i64) with Mut {
+    emit_setup_direct_call_args_x86(abi_argc)
+    emit_prepare_stack_call_args_x86(abi_argc, 6)
+    em(0xe8)
+    PATCH_OFF[PATCH_COUNT as usize] = CL
+    PATCH_FN[PATCH_COUNT as usize] = fi
+    PATCH_KIND[PATCH_COUNT as usize] = 0
+    PATCH_COUNT = PATCH_COUNT + 1
+    em32(0)
+    emit_drop_call_args_x86(abi_argc + call_extra_stack_args_x86(abi_argc, 6))
+}
+
+fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
+    if fi < 0 || fi >= FN_COUNT {
+        emit_drop_call_args_x86(abi_argc)
+        em(0x31); em(0xc0)
+        return
+    }
+    if TARGET_OS != 0 || TARGET_ARCH != 0 || FN_PTX_SUPPORTED[fi as usize] == 0 || FN_PTX_KIND[fi as usize] != gpu_kernel_ptx_kind_vec_binary_f64() {
+        emit_kernel_cpu_direct_call_x86(fi, abi_argc)
+        return
+    }
+
+    NEEDS_GPU_RUNTIME_DYNLINK = 1
+    emit_try_gpu_runtime_init_x86()
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84)
+    let cpu_fallback = CL
+    em32(0)
+
+    let n_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let a_ptr_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let a_len_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let b_ptr_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let b_len_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let c_ptr_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let c_len_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let module_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let func_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let dptr_a_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let dptr_b_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let dptr_c_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let grid_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let bytes_a_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let bytes_b_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let bytes_c_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let param0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let param1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let param2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let param3_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr3_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+
+    emit_load_call_arg_to_rax_x86(abi_argc, 0); emit_store_var(n_slot)
+    emit_load_call_arg_to_rax_x86(abi_argc, 1); emit_store_var(a_ptr_slot)
+    emit_load_call_arg_to_rax_x86(abi_argc, 2); emit_store_var(a_len_slot)
+    emit_load_call_arg_to_rax_x86(abi_argc, 3); emit_store_var(b_ptr_slot)
+    emit_load_call_arg_to_rax_x86(abi_argc, 4); emit_store_var(b_len_slot)
+    emit_load_call_arg_to_rax_x86(abi_argc, 5); emit_store_var(c_ptr_slot)
+    emit_load_call_arg_to_rax_x86(abi_argc, 6); emit_store_var(c_len_slot)
+
+    emit_load_var(a_len_slot)
+    em(0x48); em(0xc1); em(0xe0); em(3)
+    emit_store_var(bytes_a_slot)
+    emit_load_var(b_len_slot)
+    em(0x48); em(0xc1); em(0xe0); em(3)
+    emit_store_var(bytes_b_slot)
+    emit_load_var(c_len_slot)
+    em(0x48); em(0xc1); em(0xe0); em(3)
+    emit_store_var(bytes_c_slot)
+
+    emit_load_var(n_slot)
+    em(0x48); em(0x05); em32(255)
+    em(0x48); em(0xc1); em(0xe8); em(8)
+    emit_store_var(grid_slot)
+
+    emit_lea_var(module_slot); em(0x50)
+    emit_inline_cstr_from_ptx_x86(FN_PTX_OFF[fi as usize], FN_PTX_LEN[fi as usize]); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMODULELOADDATA_PTR_BSS_OFF, 2)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail = CL; em32(0)
+
+    emit_lea_var(func_slot); em(0x50)
+    emit_load_var(module_slot); em(0x50)
+    let name_tok = FN_NAME_TOK[fi as usize]
+    emit_inline_cstr_from_src_x86(TS[name_tok as usize], TE[name_tok as usize]); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMODULEGETFUNCTION_PTR_BSS_OFF, 3)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_b = CL; em32(0)
+
+    emit_lea_var(dptr_a_slot); em(0x50)
+    emit_load_var(bytes_a_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMALLOC_PTR_BSS_OFF, 2)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_c = CL; em32(0)
+    emit_lea_var(dptr_b_slot); em(0x50)
+    emit_load_var(bytes_b_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMALLOC_PTR_BSS_OFF, 2)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_d = CL; em32(0)
+    emit_lea_var(dptr_c_slot); em(0x50)
+    emit_load_var(bytes_c_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMALLOC_PTR_BSS_OFF, 2)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_e = CL; em32(0)
+
+    emit_load_var(dptr_a_slot); em(0x50)
+    emit_load_var(a_ptr_slot); em(0x50)
+    emit_load_var(bytes_a_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF, 3)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_f = CL; em32(0)
+    emit_load_var(dptr_b_slot); em(0x50)
+    emit_load_var(b_ptr_slot); em(0x50)
+    emit_load_var(bytes_b_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF, 3)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_g = CL; em32(0)
+    emit_load_var(dptr_c_slot); em(0x50)
+    emit_load_var(c_ptr_slot); em(0x50)
+    emit_load_var(bytes_c_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF, 3)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_h = CL; em32(0)
+
+    emit_load_var(n_slot); emit_store_var(param0_slot)
+    emit_load_var(dptr_a_slot); emit_store_var(param1_slot)
+    emit_load_var(dptr_b_slot); emit_store_var(param2_slot)
+    emit_load_var(dptr_c_slot); emit_store_var(param3_slot)
+    emit_lea_var(param0_slot); emit_store_var(paddr0_slot)
+    emit_lea_var(param1_slot); emit_store_var(paddr1_slot)
+    emit_lea_var(param2_slot); emit_store_var(paddr2_slot)
+    emit_lea_var(param3_slot); emit_store_var(paddr3_slot)
+
+    emit_load_var(func_slot); em(0x50)
+    emit_load_var(grid_slot); em(0x50)
+    emit_imm64(1); em(0x50)
+    emit_imm64(1); em(0x50)
+    emit_imm64(256); em(0x50)
+    emit_imm64(1); em(0x50)
+    emit_imm64(1); em(0x50)
+    emit_imm64(0); em(0x50)
+    emit_imm64(0); em(0x50)
+    emit_lea_var(paddr0_slot); em(0x50)
+    emit_imm64(0); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF, 11)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_i = CL; em32(0)
+
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUCTXSYNC_PTR_BSS_OFF, 0)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_j = CL; em32(0)
+
+    emit_load_var(c_ptr_slot); em(0x50)
+    emit_load_var(dptr_c_slot); em(0x50)
+    emit_load_var(bytes_c_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMCPYDTOH_PTR_BSS_OFF, 3)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_k = CL; em32(0)
+
+    emit_load_var(dptr_a_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
+    emit_load_var(dptr_b_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
+    emit_load_var(dptr_c_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
+    emit_drop_call_args_x86(abi_argc)
+    em(0x31); em(0xc0)
+    em(0xe9)
+    let done = CL
+    em32(0)
+
+    patch32(gpu_fail, CL)
+    patch32(gpu_fail_b, CL)
+    patch32(gpu_fail_c, CL)
+    patch32(gpu_fail_d, CL)
+    patch32(gpu_fail_e, CL)
+    patch32(gpu_fail_f, CL)
+    patch32(gpu_fail_g, CL)
+    patch32(gpu_fail_h, CL)
+    patch32(gpu_fail_i, CL)
+    patch32(gpu_fail_j, CL)
+    patch32(gpu_fail_k, CL)
+    emit_mark_gpu_unavailable_x86("GPU unavailable: CUDA kernel launch failed\n")
+    patch32(cpu_fallback, CL)
+    emit_kernel_cpu_direct_call_x86(fi, abi_argc)
+    patch32(done, CL)
+}
+
+fn compile_gpu_launch_stmt_x86() with IO, Mut, Panic, Div {
+    let perform_tok = EP
+    EP = EP + 4  // skip perform GPU . launch
+    let launch_tok = EP
+    if TK[EP as usize] != 6 {
+        tc_error(perform_tok, "GPU.launch requires launch(...)")
+        return
+    }
+    EP = EP + 1  // skip (
+
+    var fi: i64 = -1
+    var launch_argc: i64 = 0
+    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        launch_argc = 1
+        if TK[EP as usize] == 3 {
+            fi = fn_find(TS[EP as usize], TE[EP as usize])
+            if fi < 0 {
+                tc_undefined_var(EP)
+            } else if FN_IS_KERNEL[fi as usize] == 0 {
+                tc_error(EP, "GPU.launch requires kernel fn")
+                fi = -1
+            }
+            EP = EP + 1
+        } else {
+            tc_error(perform_tok, "GPU.launch requires kernel function name")
+            EP = skip_call_arg_expr(EP)
+        }
+        while TK[EP as usize] == 28 {
+            EP = EP + 1
+            launch_argc = launch_argc + 1
+            EP = skip_call_arg_expr(EP)
+        }
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }
+    else { tc_error(perform_tok, "GPU.launch missing closing )") }
+    if launch_argc != 3 { tc_wrong_arity(launch_tok, 3, launch_argc) }
+
+    if TK[EP as usize] != 6 {
+        tc_error(perform_tok, "GPU.launch requires kernel argument list")
+        return
+    }
+    EP = EP + 1  // skip (
+
+    let call_tok = launch_tok
+    var argc: i64 = 0
+    var abi_argc: i64 = 0
+    if fi >= 0 {
+        while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+            compile_or()
+            scan_fn_param_type(fi, argc)
+            if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
+                if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
+                    tc_epistemic_boundary(call_tok)
+                } else {
+                    let ont_r = try_tc_ontology_call_error(call_tok, SCAN_TY_HASH, EXPR_TY_HASH)
+                    if ont_r == 0 { tc_error(call_tok, "type mismatch in call argument") }
+                }
+            }
+            if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                emit_push_expr_as_slice_arg_x86(call_tok)
+                abi_argc = abi_argc + 2
+            } else {
+                materialize_aggregate_expr_x86()
+                em(0x50)
+                abi_argc = abi_argc + 1
+            }
+            argc = argc + 1
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+        }
+    } else {
+        while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+            EP = skip_call_arg_expr(EP)
+            argc = argc + 1
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+        }
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }
+    else { tc_error(perform_tok, "GPU.launch missing kernel argument )") }
+
+    if fi >= 0 {
+        if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
+        let callee_eff = FN_EFFECTS[fi as usize]
+        let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
+        if (callee_eff & ~caller_eff) != 0 {
+            tc_effect_violation(call_tok, callee_eff, caller_eff)
+        }
+        emit_kernel_dispatch_x86(fi, abi_argc)
+    }
+    EXPR_IS_F64 = 0
+    EXPR_TY = 5
+    EXPR_TY_HASH = 0
+}
+
+fn compile_gpu_sync_stmt_x86() with IO, Mut, Panic, Div {
+    let sync_tok = EP
+    EP = EP + 4  // skip perform GPU . sync
+    if TK[EP as usize] != 6 {
+        tc_error(sync_tok, "GPU.sync requires sync()")
+        return
+    }
+    EP = EP + 1  // skip (
+    var argc: i64 = 0
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        EP = skip_call_arg_expr(EP)
+        argc = argc + 1
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }
+    else { tc_error(sync_tok, "GPU.sync missing closing )") }
+    if argc != 0 { tc_wrong_arity(sync_tok, 0, argc) }
+    if TARGET_OS == 0 && TARGET_ARCH == 0 && NEEDS_GPU_RUNTIME_DYNLINK != 0 {
+        emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + GPU_RT_STATE_BSS_OFF)
+        em(0x48); em(0x83); em(0xf8); em(1)
+        em(0x0f); em(0x85)
+        let skip_sync = CL
+        em32(0)
+        emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUCTXSYNC_PTR_BSS_OFF, 0)
+        patch32(skip_sync, CL)
+    }
+    EXPR_IS_F64 = 0
+    EXPR_TY = 5
+    EXPR_TY_HASH = 0
 }
 
 // Shift: << (40), >> (39)
@@ -7512,7 +8695,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // x.field[idx] = expr
     if stmt_is_field_array_store(EP) {
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2) == 0 {
+        if current_fn_allows_mutation() == false {
             tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         compile_field_array_store_x86()
@@ -7522,7 +8705,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // x.field = expr (struct field write)
     if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
         let name_tok = EP
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2) == 0 {
+        if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]
@@ -7574,7 +8757,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // x = expr (local or global scalar assignment)
     if k == 3 && TK[(EP + 1) as usize] == 16 {
         let name_tok = EP
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2) == 0 {
+        if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]
@@ -7628,7 +8811,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // ARRAY[idx] = expr (global array write)
     if stmt_is_array_store(EP) {
         let name_tok = EP
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2) == 0 {
+        if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]
@@ -7698,7 +8881,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // (*ARRAY_PTR)[idx] = expr
     if stmt_is_deref_array_store(EP) {
         let name_tok = EP + 2
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2) == 0 {
+        if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[(EP + 2) as usize]
@@ -7724,6 +8907,95 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         } else {
             tc_undefined_var(name_tok)
             em(0x59)  // discard pushed index
+        }
+        return
+    }
+    // *PTR = expr
+    if stmt_is_deref_store(EP) {
+        let name_tok = EP + 1
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        let ns = TS[(EP + 1) as usize]
+        let ne = TE[(EP + 1) as usize]
+        EP = EP + 2
+        if TK[EP as usize] == 16 { EP = EP + 1 }
+        compile_or()
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
+        let lslot = var_find(ns, ne)
+        if lslot >= 0 {
+            let lvi = var_find_idx(ns, ne)
+            if lvi >= 0 && VAR_TY[lvi as usize] == 11 {
+                let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+                let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+                if ty_eq(inner_ty, inner_hash, rhs_ty, rhs_ty_hash) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
+                if inner_ty == 8 || type_is_struct_like(inner_ty, inner_hash) {
+                    tc_error(name_tok, "dereference assignment supports scalar pointer targets only")
+                } else {
+                    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+                    emit_load_var(lslot)
+                    em(0x48); em(0x89); em(0x10)  // mov [rax], rdx
+                }
+            } else {
+                tc_error(name_tok, "dereference assignment requires raw pointer binding")
+            }
+        } else {
+            tc_undefined_var(name_tok)
+        }
+        return
+    }
+    // (*PTR).field = expr
+    if stmt_is_deref_field_store(EP) {
+        let name_tok = EP + 2
+        let field_tok = EP + 5
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(field_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        let ns = TS[name_tok as usize]
+        let ne = TE[name_tok as usize]
+        let fh = gl_name_hash(TS[field_tok as usize], TE[field_tok as usize])
+        EP = EP + 7
+        compile_or()
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
+        let lslot = var_find(ns, ne)
+        if lslot >= 0 {
+            let lvi = var_find_idx(ns, ne)
+            if lvi >= 0 && VAR_TY[lvi as usize] == 11 {
+                let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+                let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+                if inner_ty != 6 {
+                    tc_error(field_tok, "field access through raw pointer requires struct pointee")
+                } else {
+                    let si = st_find(inner_hash)
+                    if si < 0 {
+                        tc_error(field_tok, "unknown field access")
+                    } else {
+                        let foff = st_field_offset(si, fh)
+                        let fty = st_field_ty(si, fh)
+                        let fhash = st_field_hash(si, fh)
+                        if foff < 0 {
+                            tc_error(field_tok, "unknown field access")
+                        } else if ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
+                            tc_error(EP - 1, "assignment type mismatch")
+                        } else if fty == 8 || type_is_struct_like(fty, fhash) {
+                            tc_error(field_tok, "raw pointer field store supports scalar fields only")
+                        } else {
+                            em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+                            emit_load_var(lslot)
+                            if foff != 0 { em(0x48); em(0x8d); em(0x80); em32(foff) }
+                            em(0x48); em(0x89); em(0x10)  // mov [rax], rdx
+                        }
+                    }
+                }
+            } else {
+                tc_error(field_tok, "field access through raw pointer requires raw pointer binding")
+            }
+        } else {
+            tc_undefined_var(name_tok)
         }
         return
     }
@@ -7777,6 +9049,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         BREAK_PATCH[BREAK_COUNT as usize] = CL
         BREAK_COUNT = BREAK_COUNT + 1
         em32(0)  // placeholder — patched by while handler
+        return
+    }
+
+    if stmt_is_gpu_launch_perform(EP) {
+        compile_gpu_launch_stmt_x86()
+        return
+    }
+
+    if stmt_is_gpu_sync_perform(EP) {
+        compile_gpu_sync_stmt_x86()
         return
     }
 
@@ -8450,7 +9732,7 @@ fn mono_pass() with IO, Mut, Panic, Div {
                     let rsh = gl_name_hash(rsn_ns, rsn_ne)
                     if st_find(rsh) < 0 {
                         let rsi = ST_COUNT
-                        let rbase = rsi * 66
+                        let rbase = rsi * 130
                         ST[rbase as usize] = rsh
                         p = p + 1
                         if TK[p as usize] == 23 { p = p + 1; while TK[p as usize] != 9 && TK[p as usize] != 0 { p = p + 1 }; if TK[p as usize] == 9 { p = p + 1 }; ST[(rbase + 1) as usize] = 0; ST_COUNT = ST_COUNT + 1; continue }
@@ -8465,12 +9747,12 @@ fn mono_pass() with IO, Mut, Panic, Div {
                                 if TK[p as usize] == 43 {
                                     p = p + 1
                                     scan_type(p)
-                                    ST_FTY[(rsi * 64 + rffi) as usize] = SCAN_TY
-                                    ST_FHASH[(rsi * 64 + rffi) as usize] = SCAN_TY_HASH
+                                    ST_FTY[(rsi * 128 + rffi) as usize] = SCAN_TY
+                                    ST_FHASH[(rsi * 128 + rffi) as usize] = SCAN_TY_HASH
                                     p = SCAN_TY_NEXT
                                 } else {
-                                    ST_FTY[(rsi * 64 + rffi) as usize] = 0
-                                    ST_FHASH[(rsi * 64 + rffi) as usize] = 0
+                                    ST_FTY[(rsi * 128 + rffi) as usize] = 0
+                                    ST_FHASH[(rsi * 128 + rffi) as usize] = 0
                                 }
                                 rfc = rfc + 1
                                 if TK[p as usize] == 28 { p = p + 1 }
@@ -8494,15 +9776,15 @@ fn resolve_forward_struct_types() with Mut, Panic, Div {
     var fix_si: i64 = 0
     while fix_si < ST_COUNT {
         var fix_fi: i64 = 0
-        while fix_fi < ST[(fix_si * 66 + 1) as usize] {
-            if ST_FTY[(fix_si * 64 + fix_fi) as usize] == 0 {
-                var fix_fh: i64 = ST_FHASH[(fix_si * 64 + fix_fi) as usize]
+        while fix_fi < ST[(fix_si * 130 + 1) as usize] {
+            if ST_FTY[(fix_si * 128 + fix_fi) as usize] == 0 {
+                var fix_fh: i64 = ST_FHASH[(fix_si * 128 + fix_fi) as usize]
                 if fix_fh != 0 {
                     if st_find(fix_fh) >= 0 {
-                        ST_FTY[(fix_si * 64 + fix_fi) as usize] = 6
+                        ST_FTY[(fix_si * 128 + fix_fi) as usize] = 6
                     } else {
                         if en_find(fix_fh) >= 0 {
-                            ST_FTY[(fix_si * 64 + fix_fi) as usize] = 7
+                            ST_FTY[(fix_si * 128 + fix_fi) as usize] = 7
                         }
                     }
                 }
@@ -8521,6 +9803,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GL_COUNT = 0
     GL_BSS_SIZE = 0
     RET_AGG_BSS_OFF = 0
+    GPU_EMU_THREAD_ID_BSS_OFF = 0
     TYPECHECK_FAILED = 0
     LIMIT_ERROR_KIND = 0
     var p: i64 = 0
@@ -8564,7 +9847,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 }
                 let sh = gl_name_hash(sn_ns, sn_ne)
                 let si = ST_COUNT
-                let base = si * 66
+                let base = si * 130
                 ST[base as usize] = sh
                 if TK[p as usize] == 8 { p = p + 1 }  // skip {
                 var fc: i64 = 0
@@ -8578,12 +9861,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if TK[p as usize] == 43 {
                             p = p + 1
                             scan_type(p)
-                            ST_FTY[(si * 64 + ffi) as usize] = SCAN_TY
-                            ST_FHASH[(si * 64 + ffi) as usize] = SCAN_TY_HASH
+                            ST_FTY[(si * 128 + ffi) as usize] = SCAN_TY
+                            ST_FHASH[(si * 128 + ffi) as usize] = SCAN_TY_HASH
                             p = SCAN_TY_NEXT
                         } else {
-                            ST_FTY[(si * 64 + ffi) as usize] = 0
-                            ST_FHASH[(si * 64 + ffi) as usize] = 0
+                            ST_FTY[(si * 128 + ffi) as usize] = 0
+                            ST_FHASH[(si * 128 + ffi) as usize] = 0
                         }
                         fc = fc + 1
                         // Skip comma
@@ -8707,6 +9990,26 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     }
     p = 0
 
+    GPU_EMU_THREAD_ID_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_STATE_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_DIAG_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_LIBCUDA_HANDLE_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_DEVICE_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CTX_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CUINIT_PTR_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CUDEVICEGET_PTR_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CUCTXCREATE_PTR_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CUCTXSYNC_PTR_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CUMODULELOADDATA_PTR_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CUMODULEGETFUNCTION_PTR_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CUMEMALLOC_PTR_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CUMEMFREE_PTR_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CUMEMCPYDTOH_PTR_BSS_OFF = bss_alloc_aligned(8)
+    GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF = bss_alloc_aligned(8)
+    PTX_LEN = 0
+    NEEDS_GPU_RUNTIME_DYNLINK = 0
+
     // BSS layout: [argc(8)] [argv(8)] [globals...] [aggregate return scratch]
     RET_AGG_BSS_OFF = GL_BSS_SIZE
     GL_BSS_SIZE = GL_BSS_SIZE + 1048576  // 1MB scratch for aggregate (struct/array) returns
@@ -8723,6 +10026,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // Pass 1: register all function names (skip generic templates)
     while p < TC {
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
+            FN_IS_KERNEL[FN_COUNT as usize] = 0
+            if token_is_kernel_marker(p - 1) { FN_IS_KERNEL[FN_COUNT as usize] = 1 }
+            ptx_reset_fn_meta(FN_COUNT)
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
             if fn_find(TS[p as usize], TE[p as usize]) >= 0 {
@@ -8946,6 +10252,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     while p < TC {
         if TK[p as usize] != 1 || TK[(p + 1) as usize] != 3 { p = p + 1; continue }
         p = p + 1  // skip 'fn'
+        let is_kernel_fn = FN_IS_KERNEL[fn_idx as usize]
 
         // Skip generic function templates
         if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 {
@@ -8978,6 +10285,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
         // Register parameters
         p = p + 1  // skip name
+        var kernel_extent_slot: i64 = 0
         if TK[p as usize] == 6 { p = p + 1 }
         while TK[p as usize] != 7 && TK[p as usize] != 0 {
             if TK[p as usize] == 3 {
@@ -9004,6 +10312,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         } else if SCAN_TY == 8 {
                             VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                             VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                        }
+                        if is_kernel_fn != 0 && kernel_extent_slot == 0 && SCAN_TY == 1 {
+                            kernel_extent_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]
                         }
                     }
                     p = SCAN_TY_NEXT
@@ -9048,14 +10359,49 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             param_vi = param_vi + 1
         }
 
-        // Compile body
-        EP = p
-        var depth: i64 = 1
-        while EP < TC && depth > 0 {
-            if TK[EP as usize] == 9 { depth = depth - 1; if depth == 0 { EP = EP + 1; continue } else { EP = EP + 1; continue } }
-            compile_stmt()
+        // Kernels that reference GPU builtins are executed through a CPU lane loop
+        // until the native runtime grows real CUDA dispatch support.
+        var kernel_uses_gpu_builtins: i64 = 0
+        if is_kernel_fn != 0 { kernel_uses_gpu_builtins = kernel_body_uses_gpu_builtins(p) }
+        if is_kernel_fn != 0 { maybe_compile_kernel_ptx(fn_idx, p, kernel_extent_slot) }
+        if kernel_uses_gpu_builtins != 0 && kernel_extent_slot > 0 {
+            em(0x31); em(0xc0)
+            emit_store_gpu_thread_id_x86()
+            let kernel_loop_top = CL
+            emit_load_gpu_thread_id_x86()
+            em(0x50)
+            emit_load_var(kernel_extent_slot)
+            em(0x59)
+            em(0x48); em(0x39); em(0xc1)
+            em(0x0f); em(0x9c); em(0xc0)
+            em(0x48); em(0x0f); em(0xb6); em(0xc0)
+            em(0x48); em(0x85); em(0xc0)
+            em(0x0f); em(0x84)
+            let kernel_loop_end = CL
+            em32(0)
+            EP = p
+            var kernel_body_depth: i64 = 1
+            while EP < TC && kernel_body_depth > 0 {
+                if TK[EP as usize] == 9 { kernel_body_depth = kernel_body_depth - 1; if kernel_body_depth == 0 { EP = EP + 1; continue } else { EP = EP + 1; continue } }
+                compile_stmt()
+            }
+            emit_load_gpu_thread_id_x86()
+            em(0x48); em(0x83); em(0xc0); em(1)
+            emit_store_gpu_thread_id_x86()
+            em(0xe9)
+            em32(kernel_loop_top - (CL + 4))
+            patch32(kernel_loop_end, CL)
+            p = EP
+        } else {
+            // Compile body
+            EP = p
+            var depth: i64 = 1
+            while EP < TC && depth > 0 {
+                if TK[EP as usize] == 9 { depth = depth - 1; if depth == 0 { EP = EP + 1; continue } else { EP = EP + 1; continue } }
+                compile_stmt()
+            }
+            p = EP
         }
-        p = EP
 
         // Linear type check: warn if any linear variable was not used exactly once
         var lci: i64 = 0
@@ -9210,8 +10556,191 @@ fn elf_w16(off: i64, v: i64) with Mut, Panic { elf_w8(off, v); elf_w8(off+1, v >
 fn elf_w32(off: i64, v: i64) with Mut, Panic { elf_w16(off, v); elf_w16(off+2, v >> 16) }
 fn elf_w64(off: i64, v: i64) with Mut, Panic { elf_w32(off, v); elf_w32(off+4, v >> 32) }
 
+fn elf_write_cstr(off: i64, s: string) with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        elf_w8(off + i, str_char_at(s, i))
+        i = i + 1
+    }
+    elf_w8(off + n, 0)
+}
+
+fn write_elf_gpu_dyn_x86(output: string) -> i64 with IO, Mut, Panic, Div {
+    let text_base = gpu_dyn_linux_x86_text_base()
+    let text_off = gpu_dyn_linux_x86_text_off()
+    let data_off = ((text_off + CL + 4095) / 4096) * 4096
+    let data_base = gpu_dyn_linux_x86_data_base()
+    let bss_base = 0x10000000
+    let entry = text_base + text_off + TRAMP_OFF
+    let interp_off: i64 = 344
+    let interp_len: i64 = 28
+
+    let dynstr_rel: i64 = 0
+    let dynstr_len: i64 = 33
+    let dynsym_rel: i64 = 40
+    let dynsym_entsize: i64 = 24
+    let dynsym_count: i64 = 4
+    let dynsym_size: i64 = dynsym_entsize * dynsym_count
+    let hash_rel: i64 = 136
+    let hash_size: i64 = 28
+    let rela_rel: i64 = 168
+    let rela_entsize: i64 = 24
+    let rela_count: i64 = 3
+    let rela_size: i64 = rela_entsize * rela_count
+    let dynamic_rel: i64 = 240
+    let dynamic_entsize: i64 = 16
+    let dynamic_count: i64 = 10
+    let dynamic_size: i64 = dynamic_entsize * dynamic_count
+    let got_rel = gpu_dyn_linux_x86_got_off()
+    let got_size: i64 = 24
+    let data_size = got_rel + got_size
+    let total_size = data_off + data_size
+
+    var i: i64 = 0
+    while i < total_size + 64 {
+        ELF[i as usize] = 0
+        i = i + 1
+    }
+
+    elf_w8(0, 0x7f); elf_w8(1, 69); elf_w8(2, 76); elf_w8(3, 70)
+    elf_w8(4, 2); elf_w8(5, 1); elf_w8(6, 1)
+    elf_w16(16, 2); elf_w16(18, 0x3e); elf_w32(20, 1)
+    elf_w64(24, entry)
+    elf_w64(32, 64)
+    elf_w16(52, 64); elf_w16(54, 56); elf_w16(56, 5)
+    elf_w16(58, 0); elf_w16(60, 0); elf_w16(62, 0)
+
+    let text_filesz = text_off + CL
+    let ph0 = 64
+    elf_w32(ph0, 1)
+    elf_w32(ph0 + 4, 5)
+    elf_w64(ph0 + 8, 0)
+    elf_w64(ph0 + 16, text_base)
+    elf_w64(ph0 + 24, text_base)
+    elf_w64(ph0 + 32, text_filesz)
+    elf_w64(ph0 + 40, text_filesz)
+    elf_w64(ph0 + 48, 4096)
+
+    let ph1 = ph0 + 56
+    elf_w32(ph1, 3)
+    elf_w32(ph1 + 4, 4)
+    elf_w64(ph1 + 8, interp_off)
+    elf_w64(ph1 + 16, text_base + interp_off)
+    elf_w64(ph1 + 24, text_base + interp_off)
+    elf_w64(ph1 + 32, interp_len)
+    elf_w64(ph1 + 40, interp_len)
+    elf_w64(ph1 + 48, 1)
+
+    let ph2 = ph1 + 56
+    elf_w32(ph2, 1)
+    elf_w32(ph2 + 4, 6)
+    elf_w64(ph2 + 8, data_off)
+    elf_w64(ph2 + 16, data_base)
+    elf_w64(ph2 + 24, data_base)
+    elf_w64(ph2 + 32, data_size)
+    elf_w64(ph2 + 40, data_size)
+    elf_w64(ph2 + 48, 4096)
+
+    let ph3 = ph2 + 56
+    elf_w32(ph3, 2)
+    elf_w32(ph3 + 4, 6)
+    elf_w64(ph3 + 8, data_off + dynamic_rel)
+    elf_w64(ph3 + 16, data_base + dynamic_rel)
+    elf_w64(ph3 + 24, data_base + dynamic_rel)
+    elf_w64(ph3 + 32, dynamic_size)
+    elf_w64(ph3 + 40, dynamic_size)
+    elf_w64(ph3 + 48, 8)
+
+    let ph4 = ph3 + 56
+    elf_w32(ph4, 1)
+    elf_w32(ph4 + 4, 6)
+    elf_w64(ph4 + 8, 0)
+    elf_w64(ph4 + 16, bss_base)
+    elf_w64(ph4 + 24, bss_base)
+    elf_w64(ph4 + 32, 0)
+    elf_w64(ph4 + 40, GL_BSS_SIZE)
+    elf_w64(ph4 + 48, 4096)
+
+    elf_write_cstr(interp_off, "/lib64/ld-linux-x86-64.so.2")
+
+    i = 0
+    while i < CL {
+        ELF[(text_off + i) as usize] = CD[i as usize]
+        i = i + 1
+    }
+
+    let dynstr_off = data_off + dynstr_rel
+    elf_w8(dynstr_off + 0, 0)
+    elf_write_cstr(dynstr_off + 1, "libdl.so.2")
+    elf_write_cstr(dynstr_off + 12, "dlopen")
+    elf_write_cstr(dynstr_off + 19, "dlsym")
+    elf_write_cstr(dynstr_off + 25, "dlclose")
+
+    let dynsym_off = data_off + dynsym_rel
+    elf_w32(dynsym_off + 24, 12)
+    elf_w8(dynsym_off + 28, 0x12)
+    elf_w16(dynsym_off + 30, 0)
+    elf_w32(dynsym_off + 48, 19)
+    elf_w8(dynsym_off + 52, 0x12)
+    elf_w16(dynsym_off + 54, 0)
+    elf_w32(dynsym_off + 72, 25)
+    elf_w8(dynsym_off + 76, 0x12)
+    elf_w16(dynsym_off + 78, 0)
+
+    let hash_off = data_off + hash_rel
+    elf_w32(hash_off + 0, 1)
+    elf_w32(hash_off + 4, dynsym_count)
+    elf_w32(hash_off + 8, 1)
+    elf_w32(hash_off + 12, 0)
+    elf_w32(hash_off + 16, 2)
+    elf_w32(hash_off + 20, 3)
+    elf_w32(hash_off + 24, 0)
+
+    let rela_off = data_off + rela_rel
+    elf_w64(rela_off + 0, gpu_dyn_linux_x86_got_slot_dlopen())
+    elf_w64(rela_off + 8, (1 << 32) | 6)
+    elf_w64(rela_off + 16, 0)
+    elf_w64(rela_off + 24, gpu_dyn_linux_x86_got_slot_dlsym())
+    elf_w64(rela_off + 32, (2 << 32) | 6)
+    elf_w64(rela_off + 40, 0)
+    elf_w64(rela_off + 48, gpu_dyn_linux_x86_got_slot_dlclose())
+    elf_w64(rela_off + 56, (3 << 32) | 6)
+    elf_w64(rela_off + 64, 0)
+
+    let dynamic_off = data_off + dynamic_rel
+    elf_w64(dynamic_off + 0, 1)
+    elf_w64(dynamic_off + 8, 1)
+    elf_w64(dynamic_off + 16, 5)
+    elf_w64(dynamic_off + 24, data_base + dynstr_rel)
+    elf_w64(dynamic_off + 32, 6)
+    elf_w64(dynamic_off + 40, data_base + dynsym_rel)
+    elf_w64(dynamic_off + 48, 10)
+    elf_w64(dynamic_off + 56, dynstr_len)
+    elf_w64(dynamic_off + 64, 11)
+    elf_w64(dynamic_off + 72, dynsym_entsize)
+    elf_w64(dynamic_off + 80, 4)
+    elf_w64(dynamic_off + 88, data_base + hash_rel)
+    elf_w64(dynamic_off + 96, 7)
+    elf_w64(dynamic_off + 104, data_base + rela_rel)
+    elf_w64(dynamic_off + 112, 8)
+    elf_w64(dynamic_off + 120, rela_size)
+    elf_w64(dynamic_off + 128, 9)
+    elf_w64(dynamic_off + 136, rela_entsize)
+    elf_w64(dynamic_off + 144, 0)
+    elf_w64(dynamic_off + 152, 0)
+
+    let ok = write_file(output, ELF, total_size)
+    print("elf_dyn: "); print(output); print(" "); print_int(total_size)
+    print(" bytes (bss="); print_int(GL_BSS_SIZE); print(")\n")
+    return 0
+}
+
 // ─── ELF writer (2 LOAD segments: text RX + BSS RW) ───
 fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
+    if TARGET_OS == 0 && TARGET_ARCH == 0 && NEEDS_GPU_RUNTIME_DYNLINK != 0 {
+        return write_elf_gpu_dyn_x86(output)
+    }
     let text_base = 0x400000
     let text_off = 4096
     let bss_base = 0x10000000        // 256MB: always above code, never overlaps
@@ -10693,7 +12222,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 tc_error(borrow_tok, "Mut borrow requires mutable binding")
             }
             let lalen = var_find_alen(rns, rne)
-            if lalen > 0 { emit_load_var_a64(slot) }
+            let lty = var_find_ty(rns, rne)
+            if lalen > 0 || lty == 6 || lty == 8 { emit_load_var_a64(slot) }
             else { emit_lea_var_a64(slot) }
         }
         else {
@@ -10727,12 +12257,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         EP = EP + 1
         compile_primary_a64()
         compile_postfix_tail_a64()
-        if EXPR_TY != 0 && EXPR_TY != 10 { tc_error(EP - 1, "dereference requires reference operand") }
+        if EXPR_TY != 0 && EXPR_TY != 10 && EXPR_TY != 11 { tc_error(EP - 1, "dereference requires reference operand") }
         em32(0xF9400000)  // ldr x0, [x0]
-        if EXPR_TY == 10 {
+        if EXPR_TY == 10 || EXPR_TY == 11 {
             let ref_hash = EXPR_TY_HASH
-            EXPR_TY = ref_hash_inner_ty(ref_hash)
-            EXPR_TY_HASH = ref_hash_inner_hash(ref_hash)
+            EXPR_TY = ptr_hash_inner_ty(ref_hash)
+            EXPR_TY_HASH = ptr_hash_inner_hash(ref_hash)
         } else {
             EXPR_TY = 0
             EXPR_TY_HASH = 0
@@ -11316,7 +12846,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                         tc_epistemic_boundary(call_tok)
                     } else {
-                        tc_error(call_tok, "type mismatch in call argument")
+                        let ont_r = try_tc_ontology_call_error(call_tok, SCAN_TY_HASH, EXPR_TY_HASH)
+                        if ont_r == 0 { tc_error(call_tok, "type mismatch in call argument") }
                     }
                 }
                 if (fi >= 0 || (call_sig > 0 && call_is_closure == 0)) && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
@@ -11743,8 +13274,8 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 } else if EXPR_TY == 6 {
                     let uw_si_a = st_find(EXPR_TY_HASH)
                     if uw_si_a >= 0 {
-                        EXPR_TY = ST_FTY[(uw_si_a * 64) as usize]
-                        EXPR_TY_HASH = ST_FHASH[(uw_si_a * 64) as usize]
+                        EXPR_TY = ST_FTY[(uw_si_a * 128) as usize]
+                        EXPR_TY_HASH = ST_FHASH[(uw_si_a * 128) as usize]
                         if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
                     }
                 }
@@ -11819,15 +13350,21 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             let base_ty = EXPR_TY
             let base_hash = EXPR_TY_HASH
+            var base_data_ty = base_ty
+            var base_data_hash = base_hash
+            if base_ty == 10 {
+                base_data_ty = ref_hash_inner_ty(base_hash)
+                base_data_hash = ref_hash_inner_hash(base_hash)
+            }
             EP = EP + 1
             var found: i64 = 0
             EXPR_TY = 0
             EXPR_TY_HASH = 0
-            if knowledge_hash_is(base_hash) {
+            if knowledge_hash_is(base_data_hash) {
                 if src_match(fns, fne - fns, "value") {
                     em32(0xF9400000)
-                    EXPR_TY = knowledge_hash_inner_ty(base_hash)
-                    EXPR_TY_HASH = knowledge_hash_inner_hash(base_hash)
+                    EXPR_TY = knowledge_hash_inner_ty(base_data_hash)
+                    EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else if src_match(fns, fne - fns, "variance") {
                     em32(0xF9400400)
@@ -11846,8 +13383,8 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 }
                 found = 1
             }
-            if base_ty == 6 {
-                let bsi = st_find(base_hash)
+            if base_data_ty == 6 {
+                let bsi = st_find(base_data_hash)
                 if bsi >= 0 {
                     let off = st_field_offset(bsi, fh)
                     if off >= 0 {
@@ -11900,7 +13437,9 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
 // ─── ARM64 multiplicative ───
 fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
     compile_postfix_a64()
+    var lhs_end_line: i64 = TL[(EP - 1) as usize]
     while TK[EP as usize] == 19 || TK[EP as usize] == 20 || TK[EP as usize] == 29 {
+        if EXPR_TY == 11 && TK[EP as usize] == 19 && TL[EP as usize] > lhs_end_line { return }
         let op = TK[EP as usize]
         EP = EP + 1
         let left_f64 = EXPR_IS_F64
@@ -11920,6 +13459,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
                 em32(0x9B000000 | (0 << 16) | (1 << 10) | (9 << 5) | 0)
             }
         }
+        lhs_end_line = TL[(EP - 1) as usize]
     }
 }
 
@@ -12259,7 +13799,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     }
     // x.field[idx] = expr
     if stmt_is_field_array_store(EP) {
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2) == 0 {
+        if current_fn_allows_mutation() == false {
             tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         compile_field_array_store_a64()
@@ -12269,7 +13809,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // x.field = expr
     if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
         let name_tok = EP
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2) == 0 {
+        if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
@@ -12317,7 +13857,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // x = expr
     if k == 3 && TK[(EP + 1) as usize] == 16 {
         let name_tok = EP
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2) == 0 {
+        if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
@@ -12364,7 +13904,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // ARRAY[idx] = expr
     if stmt_is_array_store(EP) {
         let name_tok = EP
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2) == 0 {
+        if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
@@ -12422,7 +13962,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // (*ARRAY_PTR)[idx] = expr
     if stmt_is_deref_array_store(EP) {
         let name_tok = EP + 2
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2) == 0 {
+        if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[(EP + 2) as usize]; let ne = TE[(EP + 2) as usize]
@@ -12444,6 +13984,98 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         } else {
             tc_undefined_var(name_tok)
             emit_pop_x1_a64()
+        }
+        return
+    }
+    // *PTR = expr
+    if stmt_is_deref_store(EP) {
+        let name_tok = EP + 1
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        let ns = TS[(EP + 1) as usize]
+        let ne = TE[(EP + 1) as usize]
+        EP = EP + 2
+        if TK[EP as usize] == 16 { EP = EP + 1 }
+        compile_or_a64()
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
+        let lslot = var_find(ns, ne)
+        if lslot >= 0 {
+            let lvi = var_find_idx(ns, ne)
+            if lvi >= 0 && VAR_TY[lvi as usize] == 11 {
+                let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+                let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+                if ty_eq(inner_ty, inner_hash, rhs_ty, rhs_ty_hash) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
+                if inner_ty == 8 || type_is_struct_like(inner_ty, inner_hash) {
+                    tc_error(name_tok, "dereference assignment supports scalar pointer targets only")
+                } else {
+                    em32(0xAA0003EA)  // mov x10, x0 (value)
+                    emit_load_var_a64(lslot)
+                    em32(0xF900000A)  // str x10, [x0]
+                }
+            } else {
+                tc_error(name_tok, "dereference assignment requires raw pointer binding")
+            }
+        } else {
+            tc_undefined_var(name_tok)
+        }
+        return
+    }
+    // (*PTR).field = expr
+    if stmt_is_deref_field_store(EP) {
+        let name_tok = EP + 2
+        let field_tok = EP + 5
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(field_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        let ns = TS[name_tok as usize]
+        let ne = TE[name_tok as usize]
+        let fh = gl_name_hash(TS[field_tok as usize], TE[field_tok as usize])
+        EP = EP + 7
+        compile_or_a64()
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
+        let lslot = var_find(ns, ne)
+        if lslot >= 0 {
+            let lvi = var_find_idx(ns, ne)
+            if lvi >= 0 && VAR_TY[lvi as usize] == 11 {
+                let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+                let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+                if inner_ty != 6 {
+                    tc_error(field_tok, "field access through raw pointer requires struct pointee")
+                } else {
+                    let si = st_find(inner_hash)
+                    if si < 0 {
+                        tc_error(field_tok, "unknown field access")
+                    } else {
+                        let foff = st_field_offset(si, fh)
+                        let fty = st_field_ty(si, fh)
+                        let fhash = st_field_hash(si, fh)
+                        if foff < 0 {
+                            tc_error(field_tok, "unknown field access")
+                        } else if ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
+                            tc_error(EP - 1, "assignment type mismatch")
+                        } else if fty == 8 || type_is_struct_like(fty, fhash) {
+                            tc_error(field_tok, "raw pointer field store supports scalar fields only")
+                        } else {
+                            em32(0xAA0003EA)  // mov x10, x0 (value)
+                            emit_load_var_a64(lslot)
+                            if foff != 0 {
+                                emit_imm64_reg_a64(11, foff)
+                                em32(0x8B0B0000)  // add x0, x0, x11
+                            }
+                            em32(0xF900000A)  // str x10, [x0]
+                        }
+                    }
+                }
+            } else {
+                tc_error(field_tok, "field access through raw pointer requires raw pointer binding")
+            }
+        } else {
+            tc_undefined_var(name_tok)
         }
         return
     }
@@ -13553,7 +15185,7 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 print_imp_path()
                 print("\n")
             } else {
-                if fsz <= 0 || fsz >= 4194304 {
+                if fsz <= 0 || fsz >= 8388608 {
                     print("warning: import size invalid; using read count for ")
                     print_imp_path()
                     print("\n")
@@ -13584,7 +15216,7 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         print("error: import path table full: ")
                         print_imp_path()
                         print("\n")
-                    } else if copy_len >= 4194304 || SRC_LEN + fp_len + copy_len + 3 >= 4194304 {
+                    } else if copy_len >= 8388608 || SRC_LEN + fp_len + copy_len + 3 >= 8388608 {
                         print("error: import too large for SRC buffer: ")
                         print_imp_path()
                         print(" (")
@@ -13605,7 +15237,7 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         SRC[SRC_LEN as usize] = 2
                         SRC_LEN = SRC_LEN + 1
                         var ci: i64 = 0
-                        while ci < copy_len && SRC_LEN + ci < 4194304 {
+                        while ci < copy_len && SRC_LEN + ci < 8388608 {
                             SRC[(SRC_LEN + ci) as usize] = raw[ci as usize]
                             ci = ci + 1
                         }
@@ -13747,7 +15379,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     let raw = read_file(src)
     let sz = file_size(src)
     var i: i64 = 0
-    while i < sz && i < 4194304 { SRC[i as usize] = raw[i as usize]; i = i + 1 }
+    while i < sz && i < 8388608 { SRC[i as usize] = raw[i as usize]; i = i + 1 }
     SRC_LEN = sz
     print("source: "); print(src); print(" "); print_int(sz); print(" bytes\n")
     resolve_imports()
