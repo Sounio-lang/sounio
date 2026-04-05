@@ -17,7 +17,12 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/../lib/resolve_souc.sh" && -d "$SCRIPT_DIR/../../tests" ]]; then
+    ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+else
+    ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 cd "$ROOT_DIR"
 
 # Harness-local override: keep repo-wide default behavior untouched unless
