@@ -118,6 +118,45 @@ fn main() {
 }
 // Enforces no-cloning and no-dropping at compile time.`,
   },
+  {
+    id: 'algebra',
+    label: 'Algebra',
+    python: `# Python: no algebraic laws in the type system
+import numpy as np
+
+# Octonions: multiplication is non-associative.
+# Python has no way to express or enforce this.
+# The optimizer will reorder operations assuming
+# standard floating-point associativity — wrong.
+
+def oct_mul(a, b):
+    # 64-element Cayley table... hope it's correct
+    result = np.zeros(8)
+    # ... manual table lookup ...
+    return result
+
+x = oct_mul(a, oct_mul(b, c))  # (a*(b*c))?
+y = oct_mul(oct_mul(a, b), c)  # (a*b)*c?
+# x != y — but NumPy doesn't warn you.`,
+    sounio: `// Sounio: algebraic laws are part of the type
+algebra Octonion over f64 {
+    add: commutative, associative
+    mul: alternative, non_commutative
+    reassociate: fano_selective
+}
+
+// The e-graph optimizer only rewrites using
+// laws you declared. Fano-selective means it
+// respects the Fano plane symmetry for octonions.
+
+fn norm_sq(x0: f64, x1: f64, x2: f64, x3: f64,
+           x4: f64, x5: f64, x6: f64, x7: f64) -> f64 {
+    x0*x0 + x1*x1 + x2*x2 + x3*x3 +
+    x4*x4 + x5*x5 + x6*x6 + x7*x7
+}
+// Optimizer applies only algebra-safe rewrites.
+// Non-associative operations are never reordered.`,
+  },
 ];
 
 export default function CodeExamples() {

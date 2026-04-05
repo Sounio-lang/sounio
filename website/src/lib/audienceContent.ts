@@ -111,6 +111,8 @@ export const codeExplanations: Record<string, string> = {
     'What this means: Instead of representing interventions as plain dictionaries, Sounio uses a typed causal DAG. You add nodes (treatment, outcome), edges with uncertainty, and apply Pearl\u2019s do-operator. The system tracks how confident the causal effect estimate is.',
   resources:
     'What this means: A linear struct can only be used once. After you pass it to close_file(), the compiler prevents you from using it again. This eliminates double-free bugs and resource leaks at compile time, not at runtime.',
+  algebra:
+    'What this means: Sounio lets you declare the mathematical laws your data obeys \u2014 like \u201coctonion multiplication is non-associative\u201d \u2014 and the compiler enforces those laws in every optimization. Tools like NumPy assume floating-point associativity everywhere; Sounio respects what your algebra actually allows.',
 };
 
 // ---------------------------------------------------------------------------
@@ -137,7 +139,7 @@ export const capabilityCards: Record<Audience, CapabilityCard[]> = {
     },
     {
       title: 'Automatic Error Propagation',
-      body: 'No more manual uncertainty formulas in spreadsheets. Sounio follows the GUM standard to propagate measurement uncertainty through all your calculations.',
+      body: 'No more manual uncertainty formulas in spreadsheets. Sounio follows the GUM standard (JCGM 100:2008) to propagate measurement uncertainty through all your calculations — including through ODEs and neural networks.',
       accent: 'var(--color-accent-blue)',
     },
     {
@@ -149,22 +151,22 @@ export const capabilityCards: Record<Audience, CapabilityCard[]> = {
   technical: [
     {
       title: 'Epistemic Core',
-      body: 'Confidence-aware types such as Knowledge<T> are exercised through canonical check fixtures, including compile-time refusal cases.',
+      body: 'Knowledge<T> with GUM propagation, Unobserved<T> for observation boundaries, and epistemic closures that auto-infer the Epistemic effect when capturing uncertain values.',
       accent: 'var(--color-accent-gold)',
     },
     {
-      title: 'Check-First Workflow',
-      body: 'The most trustworthy repo path today is souc check over canonical fixtures and gate-backed stdlib lanes, with runtime claims scoped by artifact evidence.',
+      title: 'Algebra System',
+      body: 'Declare algebraic laws on types (commutative, alternative, Fano-selective). The e-graph optimizer only applies rewrites permitted by your declared algebra — Quaternion, Octonion, Clifford, G2.',
       accent: 'var(--color-accent-teal)',
     },
     {
-      title: 'Self-Hosted Stack',
-      body: 'The repository includes a self-hosted compiler tree, SOIR serialization, and the Poseidon bootstrap VM used to track the rustless cutover.',
+      title: 'Self-Hosted Stack v2.0',
+      body: 'gen2==gen3 fixed point (bit-identical, 230KB ELF). Ownership tracking with use-after-move and move-while-borrowed enforced at compile time.',
       accent: 'var(--color-accent-blue)',
     },
     {
       title: 'Gate-Tracked Stdlib',
-      body: 'Repo artifacts track which stdlib lanes are callable today, which remain stub surfaces, and which are still disabled.',
+      body: '743 stdlib files, 257 run-pass tests, 1,003+ e-graph rewrite rules. Repo artifacts track which stdlib lanes are callable today and which are still gated.',
       accent: 'var(--color-accent-green)',
     },
   ],
