@@ -17,6 +17,28 @@ When in doubt, prefer:
 3. historical prompt contracts
 4. assumptions
 
+## Recovery + Remote-First Bootstrap
+
+Before implementation work:
+
+1. Read `CLAUDE_HANDOFF.md`.
+2. Confirm the current branch.
+3. Treat `/workspace/sounio` as the active development surface when operating in the promoted workspace.
+
+Important context:
+
+- This repository was recovered from VM `sounio-dev-01`.
+- The recovery was based on tarball import, then Git re-attachment.
+- The safe active branch is:
+  - `integration/sounio-dev-ready-base`
+- Older Claude/Codex artifacts may still reference the VM-era path:
+  - `/home/demetrios/RustroverProjects/sounio`
+- The current remote-first workspace path is:
+  - `/workspace/sounio`
+
+Do not treat stale VM paths as the current execution surface.
+Preserve recovery state and avoid destructive "align with main" workflows unless explicitly requested.
+
 ---
 
 ## Repository identity

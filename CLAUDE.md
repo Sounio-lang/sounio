@@ -1,6 +1,28 @@
 # CLAUDE.md
 
-**START HERE**: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md) | **Syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md) | **LLM guide**: [docs/llm-guide/](docs/llm-guide/)
+**RECOVERY + REMOTE-FIRST CONTEXT**: [CLAUDE_HANDOFF.md](CLAUDE_HANDOFF.md) | **START HERE**: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md) | **Syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md) | **LLM guide**: [docs/llm-guide/](docs/llm-guide/)
+
+## Session Bootstrap (Mandatory)
+
+Before making non-trivial changes:
+
+1. Read `CLAUDE_HANDOFF.md` first.
+2. Verify the current repo path and branch.
+3. Treat `/workspace/sounio` as the active remote-first execution surface.
+
+Important recovery details:
+
+- This repo was recovered from VM `sounio-dev-01`, not cloned cleanly from scratch.
+- The safe active branch is `integration/sounio-dev-ready-base`.
+- Historical Claude context may still mention the old VM path:
+  - `/home/demetrios/RustroverProjects/sounio`
+- That old path is predecessor history, not the current workspace path.
+- The active path now is:
+  - `/workspace/sounio`
+
+Operational rule:
+
+- Do not propose or perform destructive reset/clean/rebase flows to "simplify" the recovery state.
 
 ## Project Identity
 
