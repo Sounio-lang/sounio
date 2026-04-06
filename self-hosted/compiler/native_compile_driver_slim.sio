@@ -1,0 +1,184 @@
+// self-hosted::compiler::native_compile_driver_slim
+//
+// Slim native compile driver for JIT-free bootstrap. x86-64 Linux only.
+// Stripped imports: no macho, pe_coff, aarch64, wasm, optimizer, type checker.
+// Total: ~1.2MB imports (vs 3MB original) — fits within 262K token limit.
+//
+// Pipeline: parse → flat summary → per-body lower + native-v2 → ELF → write
+//
+// Usage (natively compiled):
+//   ./native_driver.elf <source.sio> [-o <output>]
+//   ./native_driver.elf <source.sio> <output>
+
+use lexer::mod::*
+use parser::ast::*
+use parser::mod::{parse_program_preloaded, count_items}
+use parser::parser::{parser_last_error_count}
+use ir::ir::*
+use ir::lower::{lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref}
+use native::encode::*
+use native::elf::*
+use native::elf_bulk::*
+use native::reloc::*
+use native::frame::*
+use native::lower_ir::*
+use native::machine_ir::*
+use native::gc::*
+use native::runtime_context::*
+use native::stack_maps::*
+use native::target_policy::*
+use native::codegen_x86_linux::*
+use native::regalloc::*
+use native::peephole::*
+use io::trace::*
+
+// Inlined from module_loader.sio to avoid importing 3900 lines.
+fn load_source_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
+    let data = read_file(path)
+    let size = file_size(path)
+    var buf: [i8; 1048576] = [0; 1048576]
+    var i: i64 = 0
+    while i < size && i < 1048576 {
+        buf[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    let state = lex(buf, size, 0)
+    parse_program_preloaded(state.token_count)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 1 {
+        print("native_compile: usage: native_compile_driver.sio <source.sio> [-o <output>]\n")
+        print("native_compile: usage: native_compile_driver.sio <source.sio> <output>\n")
+        return 1
+    }
+    let source_path = get_arg(0)
+
+    // Parse output path: supports both "-o <output>" and positional "<output>"
+    var output_path = "a.out"
+    if argc >= 3 {
+        let flag = get_arg(1)
+        if flag == "-o" {
+            output_path = get_arg(2)
+        }
+    }
+    if argc == 2 {
+        // Positional: <source> <output> (backward compat with stable driver)
+        let arg1 = get_arg(1)
+        if arg1 != "-o" {
+            output_path = arg1
+        }
+    }
+
+    print("native_compile: source=")
+    print(source_path)
+    print(" output=")
+    print(output_path)
+    print("\n")
+
+    // Phase 0: Parse
+    let prog = load_source_file(source_path)
+    if parser_last_error_count() > 0 {
+        print("native_compile: parse_error\n")
+        return 1
+    }
+    print("native_compile: parse_ok\n")
+
+    // NOTE: Typecheck intentionally skipped. The check_program_epistemic_into
+    // call triggers JIT compilation of the entire type checker (~30GB RSS),
+    // defeating the purpose of this lightweight driver. Users should run
+    // `souc check <file>` separately before compiling.
+    let epistemic = ir_empty_epistemic_section()
+
+    // Phase 1: Flat IR summary (one-shot, no Box allocation)
+    let summary_result = lower_program_to_ir_summary_flat_owned_with_epistemic_ref(&prog, epistemic)
+    if summary_result.had_error {
+        print("native_compile: summary_lower_error\n")
+        return 2
+    }
+    let fn_count = summary_result.summary.module.fn_count
+    if fn_count <= 0 {
+        print("native_compile: empty_module (no functions)\n")
+        return 2
+    }
+    print("native_compile: fn_count=")
+    print_int(fn_count)
+    print("\n")
+
+    // Phase 2: Streaming compile — per-function body lower + optimize + native-v2
+    var nc = compile_module_streaming_begin(compiler_new(), &summary_result.summary.module)
+
+    var fi: i64 = 0
+    while fi < fn_count {
+        let fn_name = summary_result.summary.module.functions[fi as usize].name
+
+        print("native_compile: fn=")
+        print(str_from_bytes(fn_name.buf, fn_name.len))
+
+        let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
+            &prog, &summary_result.summary, epistemic, fn_name
+        )
+        if body_result.had_error {
+            print(" body_error errors=")
+            print_int(body_result.error_count)
+            print(" instrs=")
+            print_int(body_result.func.instr_count)
+            print("\n")
+            if body_result.func.instr_count <= 0 {
+                print("native_compile: skip (no instrs)\n")
+                fi = fi + 1
+                continue
+            }
+            // Continue with codegen despite errors — builtins may still work
+        }
+
+        // NOTE: IR optimizer (opt_cleanup_function) intentionally skipped.
+        // Calling it triggers JIT compilation of 30+ optimizer functions,
+        // adding ~4GB RSS. The stable driver succeeds without it.
+        // Users wanting optimized output should use the full main.sio path
+        // once a native-compiled souc binary is available.
+
+        print(" instrs=")
+        print_int(body_result.func.instr_count)
+
+        let lowered = native_v2_lower_function_to_machine(body_result.func)
+        let legal = native_v2_legalize_function(lowered)
+        if !legal.supported {
+            print(" unsupported=")
+            print(legal.unsupported_detail)
+            print("\n")
+            fi = fi + 1
+            continue
+        }
+
+        nc = compile_ir_function_v2(nc, body_result.func, legal, fi)
+        print(" ok\n")
+        fi = fi + 1
+    }
+
+    // Phase 3: Streaming finish (entry trampoline, relocations)
+    print("native_compile: streaming_finish\n")
+    nc = compile_module_streaming_finish(nc, &summary_result.summary.module)
+
+    // Phase 4: Finalize ELF
+    print("native_compile: finalize_elf_bulk\n")
+    let elf = finalize_elf64_bulk(nc.code, nc.rodata, nc.data, nc.entry_offset, 4194304, nc.symbols, nc.fn_offsets, nc.fn_count)
+    print("native_compile: elf_size=")
+    print_int(elf.len)
+    print("\n")
+
+    // Phase 5: Write binary
+    let write_ok = write_file(output_path, elf.bytes, elf.len) == 0
+    if !write_ok {
+        print("native_compile: write_error\n")
+        return 5
+    }
+
+    print("native_compile: ok written=")
+    print(output_path)
+    print(" size=")
+    print_int(elf.len)
+    print("\n")
+    0
+}

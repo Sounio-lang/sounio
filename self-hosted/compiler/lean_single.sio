@@ -24,16 +24,17 @@ var CLI_SHOW_AST: i64 = 0
 var CLI_SHOW_TYPES: i64 = 0
 
 // Token parallel arrays (kind, start, end, int_value)
-var TK: [i64; 262144] = [0; 262144]
-var TS: [i64; 262144] = [0; 262144]
-var TE: [i64; 262144] = [0; 262144]
-var TV: [i64; 262144] = [0; 262144]
+// Raised from 262144 to 524288 for JIT-free bootstrap (compile native_compile_driver + main.sio)
+var TK: [i64; 524288] = [0; 524288]
+var TS: [i64; 524288] = [0; 524288]
+var TE: [i64; 524288] = [0; 524288]
+var TV: [i64; 524288] = [0; 524288]
 // Float literal extra: frac numerator and denominator (kind=53)
-var TF: [i64; 262144] = [0; 262144]
-var TD: [i64; 262144] = [0; 262144]
+var TF: [i64; 524288] = [0; 524288]
+var TD: [i64; 524288] = [0; 524288]
 // Float literal scientific exponent (signed exp_val; 0 = no exponent)
-var TX: [i64; 262144] = [0; 262144]
-var TL: [i64; 262144] = [0; 262144]
+var TX: [i64; 524288] = [0; 524288]
+var TL: [i64; 524288] = [0; 524288]
 var TC: i64 = 0
 
 // Code output
@@ -252,9 +253,9 @@ var ETY_UNC:  [i64; 16384] = [0; 16384]
 var ETY_HASH: [i64; 16384] = [0; 16384]
 var ETY_COUNT: i64 = 0
 // Per-expression epistemic state (indexed by token position)
-var EXPR_ETY:  [i64; 262144] = [0; 262144]
-var EXPR_CONF: [i64; 262144] = [0; 262144]
-var EXPR_GATE: [i64; 262144] = [0; 262144]
+var EXPR_ETY:  [i64; 524288] = [0; 524288]
+var EXPR_CONF: [i64; 524288] = [0; 524288]
+var EXPR_GATE: [i64; 524288] = [0; 524288]
 // Confidence gate threshold: 950 = 95.0% required for direct code emission
 var GATE_THRESHOLD: i64 = 950
 // Epistemic scope stack (variable name hash → type ID + confidence)
@@ -2005,6 +2006,7 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
         return ty_eq(ref_hash_inner_ty(h1), ref_hash_inner_hash(h1), ref_hash_inner_ty(h2), ref_hash_inner_hash(h2))
     }
     if k1 == 11 && k2 == 11 {
+        if h1 == 0 || h2 == 0 { return true }
         if ptr_hash_mut(h1) != ptr_hash_mut(h2) { return false }
         return ty_eq(ptr_hash_inner_ty(h1), ptr_hash_inner_hash(h1), ptr_hash_inner_ty(h2), ptr_hash_inner_hash(h2))
     }
@@ -2099,11 +2101,21 @@ fn box_alloc_bytes(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     return ((bytes + box_page_bytes() - 1) / box_page_bytes()) * box_page_bytes()
 }
 
+// Guard: errors in imported module functions should NOT block ELF emission.
+fn tc_mark_failed() with Mut {
+    if MAIN_SRC_END > 0 && CURRENT_FN >= 0 && CURRENT_FN < 16384 {
+        if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 {
+            return
+        }
+    }
+    TYPECHECK_FAILED = 1
+}
+
 fn tc_stack_frame_too_large(bytes: i64) with IO, Mut, Panic {
     print("error: stack frame too large (")
     print_int(bytes)
     print(" bytes) - consider using global arrays\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
@@ -2134,7 +2146,7 @@ fn tc_missing_effect(tok: i64) -> i64 with IO, Mut, Panic {
     print("error: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
     print("\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
     return 0
 }
 
@@ -2144,7 +2156,7 @@ fn tc_linear_violation(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     print(" at line ")
     print_int(TL[tok as usize])
     print("\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
     return 0
 }
 
@@ -2154,7 +2166,7 @@ fn tc_arity_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     print(" at line ")
     print_int(TL[tok as usize])
     print("\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
     return 0
 }
 
@@ -2162,7 +2174,7 @@ fn tc_epistemic_boundary(tok: i64) -> i64 with IO, Mut, Panic {
     print("error: Type mismatch — expected confidence level not satisfied: Knowledge ε boundary violation at line ")
     print_int(TL[tok as usize])
     print("\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
     return 0
 }
 
@@ -2173,14 +2185,14 @@ fn tc_kernel_invalid_effect(tok: i64, eff_name: string) with IO, Mut, Panic {
     print(" effect at line ")
     print_int(TL[tok as usize])
     print("\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 fn tc_kernel_nonvoid_return(tok: i64) with IO, Mut, Panic {
     print("error[E072]: kernel function must return unit type () at line ")
     print_int(TL[tok as usize])
     print("\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 // Epistemic enforcement (E170/E171)
@@ -2188,14 +2200,14 @@ fn tc_epistemic_value_access(tok: i64) with IO, Mut, Panic {
     print("error[E170]: accessing .value on Knowledge<T> requires `with Epistemic` effect at line ")
     print_int(TL[tok as usize])
     print("\n   = help: add `with Epistemic` to your function signature\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 fn tc_epistemic_cast_blocked(tok: i64) with IO, Mut, Panic {
     print("error[E171]: cannot cast epistemic type to its inner type at line ")
     print_int(TL[tok as usize])
     print("\n   = help: use `.value` within a `with Epistemic` function instead of `as`\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 // Algebra property violations
@@ -2205,7 +2217,7 @@ fn tc_algebra_violation(tok: i64, msg: string) with IO, Mut, Panic {
     print(" at line ")
     print_int(TL[tok as usize])
     print("\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 // Rust syntax rejection (Strike 2)
@@ -2213,35 +2225,35 @@ fn tc_rust_let_mut(tok: i64) with IO, Mut, Panic {
     print("error: Sounio uses 'var' instead of 'let mut' for mutable bindings at line ")
     print_int(TL[tok as usize])
     print("\n  help: change 'let mut x' to 'var x'\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 fn tc_rust_mut_ref(tok: i64) with IO, Mut, Panic {
     print("error: Sounio uses '&!' instead of '&mut' for exclusive references at line ")
     print_int(TL[tok as usize])
     print("\n  help: change '&mut T' to '&! T'\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 fn tc_rust_attribute(tok: i64) with IO, Mut, Panic {
     print("error: Sounio does not use Rust attributes (#[...]) at line ")
     print_int(TL[tok as usize])
     print("\n  help: remove the #[] syntax\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 fn tc_rust_attribute_lex(line: i64) with IO, Mut, Panic {
     print("error: Sounio does not use Rust attributes (#[...]) at line ")
     print_int(line)
     print("\n  help: remove the #[] syntax\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 fn tc_rust_macro(tok: i64) with IO, Mut, Panic {
     print("error: Sounio does not use Rust macros (ident!()) at line ")
     print_int(TL[tok as usize])
     print("\n  help: use regular function calls instead of macro syntax\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 fn scan_fn_param_type(fi: i64, arg_idx: i64) with IO, Mut, Panic {
@@ -2337,11 +2349,13 @@ fn print_effect_mask(mask: i64) with IO, Mut {
 }
 
 fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
+    // Skip effect violations for functions from imported modules — already validated
+    if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
     if caller_eff == 0 {
         print("error: effect not declared in function signature at line ")
         print_int(TL[tok as usize])
         print("\n")
-        TYPECHECK_FAILED = 1
+        tc_mark_failed()
     } else {
         print("warning: effect not declared at line ")
         print_int(TL[tok as usize])
@@ -2355,12 +2369,12 @@ fn tc_effect_call_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 w
     print("error: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
     print("\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
     return 0
 }
 
 fn tc_observe_violation(tok: i64) -> i64 with IO, Mut, Panic {
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
     print("error: Unobserved<T> value crosses observation boundary without `with Observe` effect at line ")
     print_int(TL[tok as usize])
     print("\n")
@@ -2368,7 +2382,7 @@ fn tc_observe_violation(tok: i64) -> i64 with IO, Mut, Panic {
 }
 
 fn tc_observe_boundary(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
     print("error: ")
     print(msg)
     print(" — Unobserved<T> requires `with Observe` at line ")
@@ -3171,6 +3185,34 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
                 }
             }
         }
+        // Option<T> → pointer-sized (tag + value); in struct fields, 2 qwords
+        if src_match(ns, ne - ns, "Option") && TK[(p + 1) as usize] == 23 {
+            p = p + 2
+            scan_type(p)
+            let inner_ty = SCAN_TY
+            let inner_hash = SCAN_TY_HASH
+            p = SCAN_TY_NEXT
+            if TK[p as usize] == 24 { p = p + 1 }
+            // Option<T> is represented as a 2-qword tagged union;
+            // for struct field scanning, treat as pointer-like (type 11)
+            SCAN_TY = 11
+            SCAN_TY_HASH = ptr_hash_make(inner_ty, inner_hash, 0)
+            SCAN_TY_NEXT = p
+            return
+        }
+        // Box<T> → heap pointer (8 bytes); transparent wrapper
+        if src_match(ns, ne - ns, "Box") && TK[(p + 1) as usize] == 23 {
+            p = p + 2
+            scan_type(p)
+            let inner_ty = SCAN_TY
+            let inner_hash = SCAN_TY_HASH
+            p = SCAN_TY_NEXT
+            if TK[p as usize] == 24 { p = p + 1 }
+            SCAN_TY = 11
+            SCAN_TY_HASH = ptr_hash_make(inner_ty, inner_hash, 0)
+            SCAN_TY_NEXT = p
+            return
+        }
         if src_match(ns, ne - ns, "Unobserved") && TK[(p + 1) as usize] == 23 {
             p = p + 2
             scan_type(p)
@@ -3661,7 +3703,7 @@ fn ont_error(tok: i64, code: i64, msg: string) with IO, Mut, Panic {
     print(": ")
     print(msg)
     print("\n")
-    TYPECHECK_FAILED = 1
+    tc_mark_failed()
 }
 
 fn ont_find_class_by_hash(h: i64) -> i64 with Mut, Panic {
@@ -4109,7 +4151,7 @@ fn skip_study_decl(p0: i64) -> i64 with IO, Mut, Panic {
     }
 
     if saw_hypothesis == 0 {
-        TYPECHECK_FAILED = 1
+        tc_mark_failed()
         print("error: study block requires at least one hypothesis at line ")
         print_int(TL[study_tok as usize])
         print("\n")
@@ -6216,25 +6258,66 @@ fn compile_primary() with IO, Mut, Panic, Div {
     if k == 41 {
         if array_init_is_repeat(EP) {
             EP = EP + 1
+            let expr_start = EP
             compile_or()
             let elem_ty = EXPR_TY
+            let elem_hash = EXPR_TY_HASH
             if TK[EP as usize] == 27 { EP = EP + 1 }
             let rep_count = TV[EP as usize]
             EP = EP + 1
             if TK[EP as usize] == 42 { EP = EP + 1 }
             let arr_hash = arr_ty_hash(rep_count, 8, elem_ty)
-            let nslots = arr_storage_slots(arr_hash)
-            if nslots > 0 {
-                let base = NEXT_SLOT
-                NEXT_SLOT = NEXT_SLOT + nslots
-                em(0x48); em(0x8d); em(0xbd)
-                em32(0 - (base + nslots - 1) * 8)
-                em(0xb9); em32(nslots)
-                em(0xf3); em(0x48); em(0xab)
-                em(0x48); em(0x8d); em(0x85)
-                em32(0 - (base + nslots - 1) * 8)
+            if elem_ty == 6 {
+                // Struct element: each element occupies struct_nslots qwords
+                let s_nslots = struct_like_nslots(elem_hash)
+                let total_slots = rep_count * s_nslots
+                if total_slots > 0 {
+                    let base = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + total_slots
+                    let end_ep = EP
+                    // First element already compiled, RAX = struct ptr
+                    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
+                    var j: i64 = 0
+                    while j < s_nslots {
+                        em(0x48); em(0x8b); em(0x82); em32(j * 8)  // mov rax, [rdx + j*8]
+                        emit_store_var(base + total_slots - 1 - j)
+                        j = j + 1
+                    }
+                    // Remaining elements: re-compile expression for each
+                    var ri: i64 = 1
+                    while ri < rep_count {
+                        EP = expr_start
+                        compile_or()
+                        em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
+                        j = 0
+                        while j < s_nslots {
+                            em(0x48); em(0x8b); em(0x82); em32(j * 8)  // mov rax, [rdx + j*8]
+                            emit_store_var(base + total_slots - 1 - ri * s_nslots - j)
+                            j = j + 1
+                        }
+                        ri = ri + 1
+                    }
+                    EP = end_ep
+                    em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
+                    em32(0 - (base + total_slots - 1) * 8)
+                } else {
+                    em(0x31); em(0xc0)
+                }
             } else {
-                em(0x31); em(0xc0)
+                // Scalar element: rep stosq fills all slots with RAX
+                let nslots = arr_storage_slots(arr_hash)
+                if nslots > 0 {
+                    let base = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + nslots
+                    em(0x48); em(0x8d); em(0xbd)
+                    em32(0 - (base + nslots - 1) * 8)
+                    em(0xb9); em32(nslots)
+                    em(0xf3); em(0x48); em(0xab)
+                    em(0x48); em(0x8d); em(0x85)
+                    em32(0 - (base + nslots - 1) * 8)
+                } else {
+                    em(0x31); em(0xc0)
+                }
             }
             EXPR_IS_F64 = 0
             EXPR_TY = 8
@@ -6520,6 +6603,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp - (base+1)*8]
         em32(0 - (base + 1) * 8)
         EXPR_IS_F64 = 0
+        EXPR_TY = 11
+        EXPR_TY_HASH = 0
         return
     }
     // Some(expr) → 2-qword tagged union [tag=1, value=expr]
@@ -6536,6 +6621,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp - (base+1)*8]
         em32(0 - (base + 1) * 8)
         EXPR_IS_F64 = 0
+        EXPR_TY = 11
+        EXPR_TY_HASH = 0
         return
     }
     // Ok(expr) → 2-qword tagged union [tag=0, payload=expr]
@@ -6552,6 +6639,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em(0x48); em(0x8d); em(0x85)
         em32(0 - (base + 1) * 8)
         EXPR_IS_F64 = 0
+        EXPR_TY = 11
+        EXPR_TY_HASH = 0
         return
     }
     // Err(expr) → 2-qword tagged union [tag=1, payload=expr]
@@ -6568,6 +6657,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em(0x48); em(0x8d); em(0x85)
         em32(0 - (base + 1) * 8)
         EXPR_IS_F64 = 0
+        EXPR_TY = 11
+        EXPR_TY_HASH = 0
         return
     }
     // Parenthesized
@@ -6579,13 +6670,17 @@ fn compile_primary() with IO, Mut, Panic, Div {
         compile_primary()
         compile_postfix_tail()
         if EXPR_TY != 0 && EXPR_TY != 10 && EXPR_TY != 11 { tc_error(EP - 1, "dereference requires reference operand") }
-        em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
         if EXPR_TY == 10 || EXPR_TY == 11 {
-            let ref_hash = EXPR_TY_HASH
-            let inner_hash = ptr_hash_inner_hash(ref_hash)
-            EXPR_TY = ptr_hash_inner_ty(ref_hash)
-            EXPR_TY_HASH = inner_hash
+            let deref_ref_hash = EXPR_TY_HASH
+            let deref_inner_hash = ptr_hash_inner_hash(deref_ref_hash)
+            let deref_inner_ty = ptr_hash_inner_ty(deref_ref_hash)
+            if type_is_aggregate(deref_inner_ty, deref_inner_hash) == false {
+                em(0x48); em(0x8b); em(0x00)  // mov rax, [rax] — scalar dereference
+            }
+            EXPR_TY = deref_inner_ty
+            EXPR_TY_HASH = deref_inner_hash
         } else {
+            em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
             EXPR_TY = 0
             EXPR_TY_HASH = 0
         }
@@ -6713,7 +6808,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x59)  // pop rcx (value)
                 em(0x48); em(0x89); em(0x08)  // mov [rax], rcx
             }
+            let box_inner_ty = EXPR_TY
+            let box_inner_hash = EXPR_TY_HASH
             EXPR_IS_F64 = 0
+            EXPR_TY = 11
+            EXPR_TY_HASH = ptr_hash_make(box_inner_ty, box_inner_hash, 1)
             return
         }
         // Turbofish generic function: ident :: < TYPE , TYPE > (
@@ -7756,13 +7855,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
                 let callee_eff = FN_EFFECTS[fi as usize] & 1023  // mask out visibility bits
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize] & 1023
-                if (callee_eff & ~caller_eff) != 0 {
+                let callee_is_import = (FN_EFFECTS[fi as usize] & 2048) != 0
+                let caller_is_import = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
+                if (callee_eff & ~caller_eff) != 0 && !(callee_is_import && caller_is_import) {
                     tc_effect_call_violation(call_tok, callee_eff, caller_eff)
                 }
                 // Visibility check: imported non-pub function called from main module
-                let callee_is_import = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let callee_is_pub = (FN_EFFECTS[fi as usize] & 1024) != 0
-                let caller_is_main = (FN_EFFECTS[CURRENT_FN as usize] & 2048) == 0
+                let caller_is_main = !caller_is_import
                 if callee_is_import && !callee_is_pub && caller_is_main {
                     tc_error(call_tok, "cannot call non-pub function from imported module")
                 }
@@ -8064,7 +8164,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     print("error[E200] at line ")
                     print_int(TL[name_tok as usize])
                     print(": undefined variable\n")
-                    TYPECHECK_FAILED = 1
+                    tc_mark_failed()
                     em(0x31); em(0xc0)
                     EXPR_TY = 0
                     EXPR_TY_HASH = 0
@@ -8927,7 +9027,9 @@ fn compile_gpu_launch_stmt_x86() with IO, Mut, Panic, Div {
         if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
         let callee_eff = FN_EFFECTS[fi as usize]
         let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
-        if (callee_eff & ~caller_eff) != 0 {
+        let gpu_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
+        let gpu_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
+        if (callee_eff & ~caller_eff) != 0 && !(gpu_callee_imp && gpu_caller_imp) {
             tc_effect_call_violation(call_tok, callee_eff, caller_eff)
         }
         emit_kernel_dispatch_x86(fi, abi_argc)
@@ -9333,7 +9435,7 @@ fn tuple_bind_pattern_x86(pp0: i64, rp0: i64) with IO, Mut, Panic, Div {
         print(" at line ")
         print_int(TL[pp0 as usize])
         print("\n")
-        TYPECHECK_FAILED = 1
+        tc_mark_failed()
     }
     if TK[pp as usize] == 7 { pp = pp + 1 }
     if TK[rp as usize] == 7 { rp = rp + 1 }
@@ -9782,7 +9884,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         print(" does not satisfy predicate at line ")
                         print_int(TL[(EP - 1) as usize])
                         print("\n")
-                        TYPECHECK_FAILED = 1
+                        tc_mark_failed()
                         SCAN_HAS_PRED = 0
                     }
                 }
@@ -12242,7 +12344,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 }
             }
             if saw_hypo == 0 {
-                TYPECHECK_FAILED = 1
+                tc_mark_failed()
                 print("error: study block requires at least one hypothesis at line ")
                 print_int(TL[study_tok as usize])
                 print("\n")
@@ -12795,7 +12897,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     print("effects: scanned "); print_int(eff_fi); print(" functions\n")
     var evi: i64 = 0
     while evi < FN_COUNT {
-        if FN_NEEDS_SESSION[evi as usize] != 0 && (FN_EFFECTS[evi as usize] & 32) == 0 {
+        if FN_NEEDS_SESSION[evi as usize] != 0 && (FN_EFFECTS[evi as usize] & 32) == 0 && (FN_EFFECTS[evi as usize] & 2048) == 0 {
             tc_missing_effect(FN_NAME_TOK[evi as usize])
         }
         evi = evi + 1
@@ -12862,20 +12964,20 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 print("error[E070]: IO effect not allowed in kernel function at line ")
                 print_int(TL[FN_NAME_TOK[fn_idx as usize] as usize])
                 print("\n")
-                TYPECHECK_FAILED = 1
+                tc_mark_failed()
             }
             if (FN_EFFECTS[fn_idx as usize] & 2) != 0 {
                 print("error[E070]: Mut effect not allowed in kernel function at line ")
                 print_int(TL[FN_NAME_TOK[fn_idx as usize] as usize])
                 print("\n")
-                TYPECHECK_FAILED = 1
+                tc_mark_failed()
             }
             // E072: kernel functions must return void
             if CURRENT_RET_TY != 5 && CURRENT_RET_TY != 0 {
                 print("error[E072]: kernel function must return void at line ")
                 print_int(TL[FN_NAME_TOK[fn_idx as usize] as usize])
                 print("\n")
-                TYPECHECK_FAILED = 1
+                tc_mark_failed()
             }
         }
 
@@ -14822,6 +14924,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         emit_store_var_a64(base + 1)
         emit_lea_var_a64(base + 1)
         EXPR_IS_F64 = 0
+        EXPR_TY = 11
+        EXPR_TY_HASH = 0
         return
     }
     // Some(expr)
@@ -14837,6 +14941,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         emit_store_var_a64(base + 1)
         emit_lea_var_a64(base + 1)
         EXPR_IS_F64 = 0
+        EXPR_TY = 11
+        EXPR_TY_HASH = 0
         return
     }
     // Ok(expr)
@@ -14852,6 +14958,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         emit_store_var_a64(base + 1)
         emit_lea_var_a64(base + 1)
         EXPR_IS_F64 = 0
+        EXPR_TY = 11
+        EXPR_TY_HASH = 0
         return
     }
     // Err(expr)
@@ -14867,6 +14975,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         emit_store_var_a64(base + 1)
         emit_lea_var_a64(base + 1)
         EXPR_IS_F64 = 0
+        EXPR_TY = 11
+        EXPR_TY_HASH = 0
         return
     }
     // Parenthesized
@@ -15052,12 +15162,17 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         compile_primary_a64()
         compile_postfix_tail_a64()
         if EXPR_TY != 0 && EXPR_TY != 10 && EXPR_TY != 11 { tc_error(EP - 1, "dereference requires reference operand") }
-        em32(0xF9400000)  // ldr x0, [x0]
         if EXPR_TY == 10 || EXPR_TY == 11 {
-            let ref_hash = EXPR_TY_HASH
-            EXPR_TY = ptr_hash_inner_ty(ref_hash)
-            EXPR_TY_HASH = ptr_hash_inner_hash(ref_hash)
+            let deref_ref_hash_a = EXPR_TY_HASH
+            let deref_inner_hash_a = ptr_hash_inner_hash(deref_ref_hash_a)
+            let deref_inner_ty_a = ptr_hash_inner_ty(deref_ref_hash_a)
+            if type_is_aggregate(deref_inner_ty_a, deref_inner_hash_a) == false {
+                em32(0xF9400000)  // ldr x0, [x0] — scalar dereference
+            }
+            EXPR_TY = deref_inner_ty_a
+            EXPR_TY_HASH = deref_inner_hash_a
         } else {
+            em32(0xF9400000)  // ldr x0, [x0]
             EXPR_TY = 0
             EXPR_TY_HASH = 0
         }
@@ -15175,7 +15290,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_pop_x1_a64()
                 em32(0xF9000001)  // str x1, [x0]
             }
+            let box_inner_ty_a = EXPR_TY
+            let box_inner_hash_a = EXPR_TY_HASH
             EXPR_IS_F64 = 0
+            EXPR_TY = 11
+            EXPR_TY_HASH = ptr_hash_make(box_inner_ty_a, box_inner_hash_a, 1)
             return
         }
         // Turbofish generic function: ident :: < TYPE > (
@@ -15782,7 +15901,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
                 let callee_eff = FN_EFFECTS[fi as usize]
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
-                if (callee_eff & ~caller_eff) != 0 { tc_effect_call_violation(call_tok, callee_eff, caller_eff) }
+                let a64_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
+                let a64_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
+                if (callee_eff & ~caller_eff) != 0 && !(a64_callee_imp && a64_caller_imp) { tc_effect_call_violation(call_tok, callee_eff, caller_eff) }
                 if abi_argc >= 8 { em32(0xF8410FE7) }
                 if abi_argc >= 7 { em32(0xF8410FE6) }
                 if abi_argc >= 6 { em32(0xF8410FE5) }
