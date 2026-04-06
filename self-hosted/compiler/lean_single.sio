@@ -4614,20 +4614,38 @@ fn copy_struct_into_local_slot_x86(slot: i64, ty_hash: i64) with Mut, Panic, Div
     em(0x48); em(0x89); em(0xc8)  // mov rax, rcx
 }
 
-fn materialize_aggregate_expr_x86() with Mut, Panic, Div {
-    if EXPR_TY == 8 {
-        let nslots = arr_storage_slots(EXPR_TY_HASH)
-        let base = NEXT_SLOT
-        NEXT_SLOT = NEXT_SLOT + nslots
-        em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
+fn emit_bulk_copy_to_slots_x86(nslots: i64, base: i64) with Mut, Panic, Div {
+    // rax = source pointer. Copy nslots qwords to stack slots [base..base+nslots-1].
+    // Stack layout: slot base+nslots-1 is at lowest address = rbp - (base+nslots-1)*8.
+    // For nslots > 32: use rep movsq (constant-size code).
+    // For nslots <= 32: per-qword mov (lower overhead for small aggregates).
+    if nslots > 32 {
+        em(0x48); em(0x89); em(0xc6)      // mov rsi, rax (source)
+        em(0x48); em(0x8d); em(0xbd)      // lea rdi, [rbp - (base+nslots-1)*8]
+        em32(0 - (base + nslots - 1) * 8)
+        em(0xb9); em32(nslots)            // mov ecx, nslots
+        em(0xf3); em(0x48); em(0xa5)      // rep movsq
+        em(0x48); em(0x8d); em(0x85)      // lea rax, [rbp - (base+nslots-1)*8]
+        em32(0 - (base + nslots - 1) * 8)
+    } else {
+        em(0x48); em(0x89); em(0xc2)      // mov rdx, rax
         var i: i64 = 0
         while i < nslots {
-            em(0x48); em(0x8b); em(0x82); em32(i * 8)
+            em(0x48); em(0x8b); em(0x82); em32(i * 8)  // mov rax, [rdx + i*8]
             emit_store_var(base + nslots - 1 - i)
             i = i + 1
         }
         em(0x48); em(0x8d); em(0x85)
         em32(0 - (base + nslots - 1) * 8)
+    }
+}
+
+fn materialize_aggregate_expr_x86() with Mut, Panic, Div {
+    if EXPR_TY == 8 {
+        let nslots = arr_storage_slots(EXPR_TY_HASH)
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + nslots
+        emit_bulk_copy_to_slots_x86(nslots, base)
         return
     }
     if type_is_struct_like(EXPR_TY, EXPR_TY_HASH) {
@@ -4635,21 +4653,26 @@ fn materialize_aggregate_expr_x86() with Mut, Panic, Div {
         if nslots <= 0 { return }
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + nslots
-        em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
-        var i: i64 = 0
-        while i < nslots {
-            em(0x48); em(0x8b); em(0x82); em32(i * 8)
-            emit_store_var(base + nslots - 1 - i)
-            i = i + 1
-        }
-        em(0x48); em(0x8d); em(0x85)
-        em32(0 - (base + nslots - 1) * 8)
+        emit_bulk_copy_to_slots_x86(nslots, base)
     }
 }
 
 fn copy_agg_into_struct_slots_x86(dst_start: i64, field_ty: i64, field_hash: i64) with Mut, Panic, Div {
+    var nslots: i64 = 0
     if field_ty == 8 {
-        let nslots = arr_storage_slots(field_hash)
+        nslots = arr_storage_slots(field_hash)
+    } else if field_ty == 6 || knowledge_hash_is(field_hash) {
+        nslots = struct_like_nslots(field_hash)
+    }
+    if nslots <= 0 { emit_store_var(dst_start); return }
+    if nslots > 32 {
+        // rep movsq: rax=source, dst slots are dst_start..dst_start-nslots+1
+        em(0x48); em(0x89); em(0xc6)      // mov rsi, rax (source)
+        em(0x48); em(0x8d); em(0xbd)      // lea rdi, [rbp - dst_start*8]
+        em32(0 - dst_start * 8)
+        em(0xb9); em32(nslots)            // mov ecx, nslots
+        em(0xf3); em(0x48); em(0xa5)      // rep movsq
+    } else {
         em(0x48); em(0x89); em(0xc2)
         var i: i64 = 0
         while i < nslots {
@@ -4657,25 +4680,11 @@ fn copy_agg_into_struct_slots_x86(dst_start: i64, field_ty: i64, field_hash: i64
             emit_store_var(dst_start - i)
             i = i + 1
         }
-        return
     }
-    if field_ty == 6 || knowledge_hash_is(field_hash) {
-        let nslots = struct_like_nslots(field_hash)
-        if nslots > 0 {
-            em(0x48); em(0x89); em(0xc2)
-            var i: i64 = 0
-            while i < nslots {
-                em(0x48); em(0x8b); em(0x82); em32(i * 8)
-                emit_store_var(dst_start - i)
-                i = i + 1
-            }
-            return
-        }
-    }
-    emit_store_var(dst_start)
 }
 
 fn emit_copy_agg_to_ptr_x86(field_ty: i64, field_hash: i64) with Mut, Panic, Div {
+    // Copy nslots qwords from [rdx] to [rax] (both pointers)
     var nslots: i64 = 0
     if field_ty == 8 {
         nslots = arr_storage_slots(field_hash)
@@ -4683,11 +4692,19 @@ fn emit_copy_agg_to_ptr_x86(field_ty: i64, field_hash: i64) with Mut, Panic, Div
         nslots = struct_like_nslots(field_hash)
     }
     if nslots <= 0 { return }
-    var i: i64 = 0
-    while i < nslots {
-        em(0x48); em(0x8b); em(0x8a); em32(i * 8)
-        em(0x48); em(0x89); em(0x88); em32(i * 8)
-        i = i + 1
+    if nslots > 32 {
+        // rep movsq: rsi=rdx (source), rdi=rax (dest)
+        em(0x48); em(0x89); em(0xd6)      // mov rsi, rdx
+        em(0x48); em(0x89); em(0xc7)      // mov rdi, rax
+        em(0xb9); em32(nslots)            // mov ecx, nslots
+        em(0xf3); em(0x48); em(0xa5)      // rep movsq
+    } else {
+        var i: i64 = 0
+        while i < nslots {
+            em(0x48); em(0x8b); em(0x8a); em32(i * 8)  // mov rcx, [rdx + i*8]
+            em(0x48); em(0x89); em(0x88); em32(i * 8)  // mov [rax + i*8], rcx
+            i = i + 1
+        }
     }
 }
 
@@ -4712,11 +4729,19 @@ fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
         let dst = GL_BSS_BASE + RET_AGG_BSS_OFF
         em(0x48); em(0xb9); em64(dst)  // mov rcx, dst ptr
     }
-    var i: i64 = 0
-    while i < nslots {
-        em(0x48); em(0x8b); em(0x82); em32(i * 8)
-        em(0x48); em(0x89); em(0x81); em32(i * 8)
-        i = i + 1
+    if nslots > 32 {
+        // rep movsq: rdx=source, rcx=dest pointer
+        em(0x48); em(0x89); em(0xd6)      // mov rsi, rdx (source)
+        em(0x48); em(0x89); em(0xcf)      // mov rdi, rcx (dest)
+        em(0xb9); em32(nslots)            // mov ecx, nslots (clobbers rcx)
+        em(0xf3); em(0x48); em(0xa5)      // rep movsq
+    } else {
+        var i: i64 = 0
+        while i < nslots {
+            em(0x48); em(0x8b); em(0x82); em32(i * 8)  // mov rax, [rdx + i*8]
+            em(0x48); em(0x89); em(0x81); em32(i * 8)  // mov [rcx + i*8], rax
+            i = i + 1
+        }
     }
     if CURRENT_SRET_SLOT > 0 {
         emit_load_var(CURRENT_SRET_SLOT)
