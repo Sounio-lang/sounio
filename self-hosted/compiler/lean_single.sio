@@ -12674,13 +12674,25 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if token_is_kernel_marker(p - 1) { FN_IS_KERNEL[FN_COUNT as usize] = 1 }
             ptx_reset_fn_meta(FN_COUNT)
             p = p + 1
-            if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
+            // Skip generic function templates — match the same logic as Pass 2
+            if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 {
+                while p < TC && TK[p as usize] != 8 { p = p + 1 }
+                var gd: i64 = 1
+                p = p + 1
+                while p < TC && gd > 0 { if TK[p as usize] == 8 { gd = gd + 1 }; if TK[p as usize] == 9 { gd = gd - 1 }; p = p + 1 }
+                continue
+            }
             FN_NS[FN_COUNT as usize] = TS[p as usize]
             FN_NE[FN_COUNT as usize] = TE[p as usize]
             FN_OFF[FN_COUNT as usize] = -1
             FN_COUNT = FN_COUNT + 1
         }
         p = p + 1
+    }
+
+    // DEBUG: print FN_COUNT after first loop registration
+    if FN_COUNT >= 1500 && FN_COUNT <= 1550 {
+        print("DEBUG: FN_COUNT="); print_int(FN_COUNT); print("\n")
     }
 
     p = 0
@@ -12690,10 +12702,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     while p < TC {
         // Track study block depth for implicit Hypothesis effect
         if TK[p as usize] == 71 || (TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "study")) {
-            // Find opening { of study block
+            // Find opening { of study block to set study_depth
             var sq: i64 = p + 1
             while sq < TC && TK[sq as usize] != 8 && TK[sq as usize] != 0 { sq = sq + 1 }
-            if sq < TC && TK[sq as usize] == 8 { sig_study_depth = 1; p = sq + 1; continue }
+            if sq < TC && TK[sq as usize] == 8 { sig_study_depth = 1 }
+            // Don't skip — let normal loop iteration continue
         }
         if sig_study_depth > 0 {
             if TK[p as usize] == 8 { sig_study_depth = sig_study_depth + 1 }
@@ -12717,7 +12730,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             let fn_is_pub = p > 0 && TK[(p - 1) as usize] == 49
             let fn_from_import = TS[p as usize] >= MAIN_SRC_END && MAIN_SRC_END > 0
             p = p + 1
-            if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
+            // Skip generic function templates — must match Pass 2 logic exactly
+            if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 {
+                // DEBUG: function is generic, skipping
+                if sig_fi >= 1500 && sig_fi <= 1525 {
+                    print("P1 SKIP sig_fi="); print_int(sig_fi); print(" (generic template)\n")
+                }
+                while p < TC && TK[p as usize] != 8 { p = p + 1 }
+                var gd: i64 = 1
+                p = p + 1
+                while p < TC && gd > 0 { if TK[p as usize] == 8 { gd = gd + 1 }; if TK[p as usize] == 9 { gd = gd - 1 }; p = p + 1 }
+                continue
+            }
             FN_NAME_TOK[sig_fi as usize] = p
             FN_SIG[sig_fi as usize] = fnsig_from_decl_name_tok(p)
             FN_NEEDS_SESSION[sig_fi as usize] = 0
@@ -12814,7 +12838,21 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 }
                 dup_i = dup_i + 1
             }
-            if sig_fi < FN_COUNT { sig_fi = sig_fi + 1 }
+            if sig_fi < FN_COUNT {
+                // DEBUG: print function being registered
+                if sig_fi >= 1500 && sig_fi <= 1525 {
+                    print("P1 sig_fi="); print_int(sig_fi); print(" name=");
+                    var dname_s = FN_NS[sig_fi as usize];
+                    var dname_e = FN_NE[sig_fi as usize];
+                    var dn_i = dname_s;
+                    while dn_i < dname_e {
+                        print_char(sb(dn_i) as i8);
+                        dn_i = dn_i + 1
+                    }
+                    print("\n")
+                }
+                sig_fi = sig_fi + 1
+            }
         }
         p = p + 1
     }
@@ -12964,11 +13002,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // Pass 1d: Epistemic type inference (Patient Zero)
     epistemic_infer_pass()
 
+    // DEBUG: Before Pass 2
+    print("DEBUG: Pass 2 starting, FN_COUNT="); print_int(FN_COUNT); print("\n")
+
     // Pass 2: compile each function
     p = 0
     var fn_idx: i64 = 0
     while p < TC {
         if TK[p as usize] != 1 || TK[(p + 1) as usize] != 3 { p = p + 1; continue }
+        // DEBUG: function found at this position
+        if fn_idx >= 1500 && fn_idx <= 1525 {
+            print("P2_FOUND fn_idx="); print_int(fn_idx); print(" at p="); print_int(p); print("\n")
+        }
         p = p + 1  // skip 'fn'
         let is_kernel_fn = FN_IS_KERNEL[fn_idx as usize]
 
@@ -13086,7 +13131,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if TK[p as usize] == 8 { p = p + 1 }
 
         // Emit prologue: push rbp; mov rbp, rsp; sub rsp, 131072
-        if fn_idx >= 1510 && fn_idx <= 1520 { print("DBG fn="); print_int(fn_idx); print(" CL="); print_int(CL); print(" NS="); print_int(NEXT_SLOT); print("\n") }
+        if fn_idx >= 1500 && fn_idx <= 1525 {
+            print("P2 fn_idx="); print_int(fn_idx); print(" name=");
+            var dname_s = FN_NS[fn_idx as usize];
+            var dname_e = FN_NE[fn_idx as usize];
+            var dn_i = dname_s;
+            while dn_i < dname_e {
+                print_char(sb(dn_i) as i8);
+                dn_i = dn_i + 1
+            }
+            print(" CL="); print_int(CL); print(" NS="); print_int(NEXT_SLOT); print("\n")
+        }
         print_int(fn_idx)
         print(" ")
         em(0x55); em(0x48); em(0x89); em(0xe5)
@@ -13205,6 +13260,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // (stub infrastructure removed)
         fn_idx = fn_idx + 1
     }
+
+    // DEBUG: After Pass 2
+    print("DEBUG: Pass 2 completed, fn_idx="); print_int(fn_idx); print("\n")
 
     if TYPECHECK_FAILED != 0 {
         print_limit_error()

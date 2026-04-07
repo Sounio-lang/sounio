@@ -1,0 +1,319 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Sorting K-Sweep: O-SSM vs S4-DIAG vs Naive across K={3,5,8,10}
+// ═══════════════════════════════════════════════════════════════════════════
+// See how performance scales with sequence length / difficulty.
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+var SQ: [i64; 32] = [0; 32]
+
+fn gen_sorted_asc(k: i64) with Mut, Div {
+    var i = 0
+    while i < k { SQ[i] = (rng_next() / 100) % 100; i = i + 1 }
+    i = 0
+    while i < k {
+        var j = 0
+        while j < k - 1 - i {
+            if SQ[j] > SQ[j+1] { let tmp = SQ[j]; SQ[j] = SQ[j+1]; SQ[j+1] = tmp }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn gen_sorted_desc(k: i64) with Mut, Div {
+    gen_sorted_asc(k)
+    var i = 0
+    while i < k / 2 { let tmp = SQ[i]; SQ[i] = SQ[k - 1 - i]; SQ[k - 1 - i] = tmp; i = i + 1 }
+}
+
+fn gen_unsorted(k: i64) with Mut, Div {
+    var i = 0
+    while i < k { SQ[i] = (rng_next() / 100) % 100; i = i + 1 }
+    var ia = 1; var id = 1
+    i = 0
+    while i < k - 1 {
+        if SQ[i] > SQ[i+1] { ia = 0 }
+        if SQ[i] < SQ[i+1] { id = 0 }
+        i = i + 1
+    }
+    if ia == 1 { let tmp = SQ[0]; SQ[0] = SQ[1]; SQ[1] = tmp }
+    if id == 1 { let tmp = SQ[0]; SQ[0] = SQ[1]; SQ[1] = tmp }
+}
+
+fn gen_sample(k: i64) -> i64 with Mut, Div {
+    let cls = (rng_next() / 100) % 3
+    if cls == 0 { gen_sorted_asc(k) }
+    if cls == 1 { gen_sorted_desc(k) }
+    if cls == 2 { gen_unsorted(k) }
+    cls
+}
+
+var W: [i64; 200] = [0; 200]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 3] = [0; 3]
+var MOM: [i64; 200] = [0; 200]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+fn init_embed_output() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 5000.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(128 + i, ((rng_next() % 2000) as f64 - 1000.0) / 5000.0); i = i + 1 }
+    i = 0
+    while i < 64 { ws(136 + i, ((rng_next() % 2000) as f64 - 1000.0) / 5000.0); i = i + 1 }
+    i = 0
+    while i < 200 { MOM[i] = 0; i = i + 1 }
+}
+
+fn init_A_ossm() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 {
+        var v = ((rng_next() % 2000) as f64 - 1000.0) / 20000.0
+        let row = i / 8; let col = i - row * 8
+        if row == col { v = 0.95 }
+        ws(64 + i, v); i = i + 1
+    }
+}
+
+fn init_A_s4diag() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 { ws(64 + i, 0.0); i = i + 1 }
+    var k = 0
+    while k < 4 {
+        let a = 0.0 - 0.5
+        let b = 3.14159265 * (2.0 * (k as f64) + 1.0) / 2.0
+        let ea = exp_q(a)
+        var bmod = b
+        while bmod > 3.14159265 { bmod = bmod - 6.28318530 }
+        while bmod < 0.0 - 3.14159265 { bmod = bmod + 6.28318530 }
+        let b2 = bmod * bmod
+        let cos_b = 1.0 - b2/2.0 + b2*b2/24.0 - b2*b2*b2/720.0
+        let sin_b = bmod - bmod*b2/6.0 + bmod*b2*b2/120.0 - bmod*b2*b2*b2/5040.0
+        let r = k * 2
+        ws(64 + r*8 + r, ea * cos_b)
+        ws(64 + r*8 + r + 1, 0.0 - ea * sin_b)
+        ws(64 + (r+1)*8 + r, ea * sin_b)
+        ws(64 + (r+1)*8 + r + 1, ea * cos_b)
+        k = k + 1
+    }
+}
+
+fn init_A_naive_diag() with Mut {
+    var i = 0
+    while i < 64 { ws(64 + i, 0.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(64 + i*8 + i, 0.95); i = i + 1 }
+}
+
+fn ossm_step(token: i64) with Mut, Div {
+    var new_h: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 {
+        let inp = wg(token*8 + d)
+        var s = 0.0
+        var j = 0
+        while j < 8 { s = s + wg(64 + d*8 + j) * hg(j); j = j + 1 }
+        s = s + wg(128 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0-5.0 { s = 0.0-5.0 }
+        new_h[d] = s; d = d + 1
+    }
+    d = 0
+    while d < 8 { hs(d, new_h[d]); d = d + 1 }
+}
+
+fn s4diag_step(token: i64) with Mut, Div {
+    var new_h: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 {
+        let inp = wg(token*8 + d)
+        var s = 0.0
+        var j = 0
+        while j < 8 { s = s + wg(64 + d*8 + j) * hg(j); j = j + 1 }
+        s = s + wg(128 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0-5.0 { s = 0.0-5.0 }
+        new_h[d] = s; d = d + 1
+    }
+    d = 0
+    while d < 8 { hs(d, new_h[d]); d = d + 1 }
+}
+
+fn naive_diag_step(token: i64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        let inp = wg(token*8 + d)
+        var s = wg(64 + d*8 + d) * hg(d) + wg(128 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0-5.0 { s = 0.0-5.0 }
+        hs(d, s); d = d + 1
+    }
+}
+
+fn compute_logits() with Mut, Div {
+    var c = 0
+    while c < 3 {
+        var s = 0.0
+        var d = 0
+        while d < 8 { s = s + hg(d) * wg(136 + d*8 + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64
+        c = c + 1
+    }
+}
+
+fn get_pred() -> i64 with Mut, Div {
+    var best = 0; var bv = (L[0] as f64)/100000000.0
+    var i = 1
+    while i < 3 { let v = (L[i] as f64)/100000000.0; if v > bv { bv = v; best = i }; i = i + 1 }
+    best
+}
+
+fn softmax_loss_update(tgt: i64, lr: f64) -> f64 with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    var i = 1
+    while i < 3 { let v = (L[i] as f64)/100000000.0; if v > mx { mx = v }; i = i + 1 }
+    var probs: [f64; 3] = [0.0; 3]
+    var se = 0.0
+    i = 0
+    while i < 3 { probs[i] = exp_q((L[i] as f64)/100000000.0 - mx); se = se + probs[i]; i = i + 1 }
+    i = 0
+    while i < 3 { probs[i] = probs[i] / se; i = i + 1 }
+    var pt = probs[tgt]
+    if pt < 0.0000001 { pt = 0.0000001 }
+    let loss = 0.0 - (pt * 100000000.0) / 100000000.0
+    probs[tgt] = probs[tgt] - 1.0
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var c = 0
+        while c < 3 {
+            let idx = 136 + d*8 + c
+            var g = hd * probs[c]
+            if g > 0.3 { g = 0.3 } if g < 0.0-0.3 { g = 0.0-0.3 }
+            let m = (MOM[idx] as f64)/100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+    loss
+}
+
+fn run_sorting(model_id: i64, k: i64) -> f64 with IO, Mut, Div, Panic {
+    let n_train = 250
+    let n_epochs = 40
+
+    var ep = 0
+    while ep < n_epochs {
+        var s = 0
+        while s < n_train {
+            let cls = gen_sample(k)
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < k {
+                if model_id == 0 { ossm_step(0) }
+                if model_id == 1 { s4diag_step(0) }
+                if model_id == 2 { naive_diag_step(0) }
+                var dd = 0
+                while dd < 8 {
+                    let cur = hg(dd)
+                    let val_signal = (SQ[t] as f64) / 100.0 * wg(dd)
+                    hs(dd, cur + val_signal)
+                    dd = dd + 1
+                }
+                t = t + 1
+            }
+            compute_logits()
+            if get_pred() == cls { }
+            softmax_loss_update(cls, 0.01)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+
+    rng_seed(99999, 11111)
+    var correct = 0
+    var s = 0
+    while s < 150 {
+        let cls = gen_sample(k)
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < k {
+            if model_id == 0 { ossm_step(0) }
+            if model_id == 1 { s4diag_step(0) }
+            if model_id == 2 { naive_diag_step(0) }
+            var dd = 0
+            while dd < 8 {
+                let cur = hg(dd)
+                hs(dd, cur + (SQ[t] as f64) / 100.0 * wg(dd))
+                dd = dd + 1
+            }
+            t = t + 1
+        }
+        compute_logits()
+        if get_pred() == cls { correct = correct + 1 }
+        s = s + 1
+    }
+    (correct as f64) / 150.0 * 100.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Sorting K-Sweep: K={3,5,8,10}\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+
+    var k_vals: [i64; 4] = [3, 5, 8, 10]
+    var idx = 0
+    while idx < 4 {
+        let k = k_vals[idx]
+        print("=== K="); print_int(k); print(" ===\n")
+
+        print("  O-SSM:   ")
+        rng_seed(55555 + k, 77777); init_embed_output(); init_A_ossm()
+        rng_seed(12345, 67890)
+        let acc_o = run_sorting(0, k)
+        print(acc_o); print("%\n")
+
+        print("  S4-DIAG: ")
+        rng_seed(55555 + k, 77777); init_embed_output(); init_A_s4diag()
+        rng_seed(12345, 67890)
+        let acc_s = run_sorting(1, k)
+        print(acc_s); print("%\n")
+
+        print("  Naive:   ")
+        rng_seed(55555 + k, 77777); init_embed_output(); init_A_naive_diag()
+        rng_seed(12345, 67890)
+        let acc_n = run_sorting(2, k)
+        print(acc_n); print("%\n\n")
+
+        idx = idx + 1
+    }
+
+    println("ALL PASS")
+    0
+}
