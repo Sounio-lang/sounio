@@ -1,0 +1,775 @@
+// self-hosted::compiler::flat_lex_parse
+//
+// Flat-style lexer and parser for slim native driver.
+
+module compiler::flat_lex_parse
+// Avoids idiomatic features (methods, enums, Box) that lean compiler can't codegen.
+// Uses parallel arrays and simple integer token kinds, exactly like lean_single.sio.
+//
+// Token kinds (integers):
+// 0=Eof, 1=fn, 2=let, 3=var, 4=return, 5=if, 6=else, 7=while, 8=for, 9=match,
+// 10=ident, 11=intlit, 12=floatlit, 13=strlit, 14=charlit, 15=boollit,
+// 16=lparen, 17=rparen, 18=lbrace, 19=rbrace, 20=lbracket, 21=rbracket,
+// 22=semicolon, 23=colon, 24=comma, 25=dot, 26=arrow, 27=fatarrow,
+// 28=plus, 29=minus, 30=star, 31=slash, 32=percent, 33=eq, 34=eqeq, 35=bangeq,
+// 36=lt, 37=gt, 38=lteq, 39=gteq, 40=ampamp, 41=pipepipe, 42=bang, 43=amp,
+// 44=pipe, 45=caret, 46=tilde, 47=shl, 48=shr,
+// 49=import, 50=pub, 51=with, 52=type, 53=struct, 54=enum, 55=impl,
+// 56=module, 57=use, 58=as, 59=where, 60=underscore,
+// 61=pluseq, 62=minuseq, 63=stareq, 64=slasheq,
+// 65=ampbang, 66=plusplus, 67=coloncolon, 68=dotdot, 69=dotdoteq,
+// 70=newline, 71=error
+
+pub struct FlatProgram {
+    fn_count: i64,
+    fn_names_start: [i64; 2048],     // start position in source
+    fn_names_end: [i64; 2048],       // end position in source
+    fn_arg_count: [i64; 2048],       // number of parameters
+    fn_body_start_token: [i64; 2048], // token index of body start (lbrace)
+}
+
+// Global token arrays (parallel to lean_single.sio style)
+var FLX_TK: [i64; 524288] = [0; 524288]    // token kind
+var FLX_TS: [i64; 524288] = [0; 524288]    // token start (source offset)
+var FLX_TE: [i64; 524288] = [0; 524288]    // token end (source offset)
+var FLX_TV: [i64; 524288] = [0; 524288]    // token int value (for intlit)
+var FLX_TL: [i64; 524288] = [0; 524288]    // token line number
+var FLX_TC: i64 = 0                        // token count
+
+var FLX_SRC: [i8; 8388608] = [0; 8388608] // source buffer
+var FLX_SRC_LEN: i64 = 0                    // source length
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn sb(pos: i64) -> i64 {
+    FLX_SRC[pos as usize] as i64
+}
+
+fn sb_char(pos: i64) -> i8 {
+    FLX_SRC[pos as usize]
+}
+
+fn is_eof(pos: i64) -> i64 {
+    if pos < FLX_SRC_LEN { 0 } else { 1 }
+}
+
+fn is_whitespace_char(c: i8) -> i64 {
+    let b = c as i64
+    if b == 32 || b == 9 || b == 13 { 1 } else { 0 }
+}
+
+fn is_newline_char(c: i8) -> i64 {
+    if c as i64 == 10 { 1 } else { 0 }
+}
+
+fn is_digit_char(c: i8) -> i64 {
+    let b = c as i64
+    if b >= 48 && b <= 57 { 1 } else { 0 }
+}
+
+fn is_hex_digit_char(c: i8) -> i64 {
+    let b = c as i64
+    if (b >= 48 && b <= 57) || (b >= 97 && b <= 102) || (b >= 65 && b <= 70) { 1 } else { 0 }
+}
+
+fn is_ident_start_char(c: i8) -> i64 {
+    let b = c as i64
+    if (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95 { 1 } else { 0 }
+}
+
+fn is_ident_continue_char(c: i8) -> i64 {
+    let b = c as i64
+    if (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95 || (b >= 48 && b <= 57) { 1 } else { 0 }
+}
+
+fn str_matches(src_start: i64, src_end: i64, pattern: [i8; 256], pattern_len: i64) -> i64 {
+    let len = src_end - src_start
+    if len != pattern_len { return 0 }
+    var i: i64 = 0
+    while i < len {
+        if FLX_SRC[(src_start + i) as usize] != pattern[i as usize] { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn keyword_lookup(start: i64, end: i64) -> i64 {
+    let len = end - start
+
+    // fn (2 chars)
+    if len == 2 && sb(start) == 102 && sb(start + 1) == 110 { return 1 }
+    // let (3 chars)
+    if len == 3 && sb(start) == 108 && sb(start + 1) == 101 && sb(start + 2) == 116 { return 2 }
+    // var (3 chars)
+    if len == 3 && sb(start) == 118 && sb(start + 1) == 97 && sb(start + 2) == 114 { return 3 }
+    // return (6 chars)
+    if len == 6 && sb(start) == 114 && sb(start + 1) == 101 && sb(start + 2) == 116 &&
+       sb(start + 3) == 117 && sb(start + 4) == 114 && sb(start + 5) == 110 { return 4 }
+    // if (2 chars)
+    if len == 2 && sb(start) == 105 && sb(start + 1) == 102 { return 5 }
+    // else (4 chars)
+    if len == 4 && sb(start) == 101 && sb(start + 1) == 108 &&
+       sb(start + 2) == 115 && sb(start + 3) == 101 { return 6 }
+    // while (5 chars)
+    if len == 5 && sb(start) == 119 && sb(start + 1) == 104 && sb(start + 2) == 105 &&
+       sb(start + 3) == 108 && sb(start + 4) == 101 { return 7 }
+    // for (3 chars)
+    if len == 3 && sb(start) == 102 && sb(start + 1) == 111 && sb(start + 2) == 114 { return 8 }
+    // match (5 chars)
+    if len == 5 && sb(start) == 109 && sb(start + 1) == 97 && sb(start + 2) == 116 &&
+       sb(start + 3) == 99 && sb(start + 4) == 104 { return 9 }
+    // import (6 chars)
+    if len == 6 && sb(start) == 105 && sb(start + 1) == 109 && sb(start + 2) == 112 &&
+       sb(start + 3) == 111 && sb(start + 4) == 114 && sb(start + 5) == 116 { return 49 }
+    // pub (3 chars)
+    if len == 3 && sb(start) == 112 && sb(start + 1) == 117 && sb(start + 2) == 98 { return 50 }
+    // with (4 chars)
+    if len == 4 && sb(start) == 119 && sb(start + 1) == 105 &&
+       sb(start + 2) == 116 && sb(start + 3) == 104 { return 51 }
+    // type (4 chars)
+    if len == 4 && sb(start) == 116 && sb(start + 1) == 121 &&
+       sb(start + 2) == 112 && sb(start + 3) == 101 { return 52 }
+    // struct (6 chars)
+    if len == 6 && sb(start) == 115 && sb(start + 1) == 116 && sb(start + 2) == 114 &&
+       sb(start + 3) == 117 && sb(start + 4) == 99 && sb(start + 5) == 116 { return 53 }
+    // enum (4 chars)
+    if len == 4 && sb(start) == 101 && sb(start + 1) == 110 &&
+       sb(start + 2) == 117 && sb(start + 3) == 109 { return 54 }
+    // impl (4 chars)
+    if len == 4 && sb(start) == 105 && sb(start + 1) == 109 &&
+       sb(start + 2) == 112 && sb(start + 3) == 108 { return 55 }
+    // module (6 chars)
+    if len == 6 && sb(start) == 109 && sb(start + 1) == 111 && sb(start + 2) == 100 &&
+       sb(start + 3) == 117 && sb(start + 4) == 108 && sb(start + 5) == 101 { return 56 }
+    // use (3 chars)
+    if len == 3 && sb(start) == 117 && sb(start + 1) == 115 && sb(start + 2) == 101 { return 57 }
+    // as (2 chars)
+    if len == 2 && sb(start) == 97 && sb(start + 1) == 115 { return 58 }
+    // where (5 chars)
+    if len == 5 && sb(start) == 119 && sb(start + 1) == 104 && sb(start + 2) == 101 &&
+       sb(start + 3) == 114 && sb(start + 4) == 101 { return 59 }
+
+    // Default: identifier
+    10
+}
+
+// ============================================================================
+// LEXER
+// ============================================================================
+
+pub fn flat_lex_file(path: string) -> i64 with IO, Mut {
+    FLX_SRC_LEN = file_size(path)
+    if FLX_SRC_LEN < 0 || FLX_SRC_LEN >= 8388608 { return 0 }
+
+    let raw = read_file(path)
+    var i: i64 = 0
+    while i < FLX_SRC_LEN {
+        FLX_SRC[i as usize] = raw[i as usize]
+        i = i + 1
+    }
+
+    FLX_TC = 0
+    flat_lex_buffer()
+    FLX_TC
+}
+
+fn flat_lex_buffer() with Mut {
+    var pos: i64 = 0
+    var line: i64 = 1
+
+    while pos < FLX_SRC_LEN && FLX_TC < 524288 {
+        let c = sb_char(pos)
+        let b = c as i64
+
+        // Whitespace (but not newline)
+        if is_whitespace_char(c) == 1 {
+            pos = pos + 1
+            continue
+        }
+
+        // Newline
+        if is_newline_char(c) == 1 {
+            FLX_TK[FLX_TC as usize] = 70
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            line = line + 1
+            pos = pos + 1
+            continue
+        }
+
+        // Line comment
+        if b == 47 && pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 47 {
+            while pos < FLX_SRC_LEN && is_newline_char(sb_char(pos)) == 0 {
+                pos = pos + 1
+            }
+            continue
+        }
+
+        // Block comment /* ... */
+        if b == 47 && pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 42 {
+            pos = pos + 2
+            var depth: i64 = 1
+            while pos < FLX_SRC_LEN && depth > 0 {
+                if b == 42 && pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 47 {
+                    pos = pos + 2
+                    depth = depth - 1
+                } else if sb(pos) == 47 && pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 42 {
+                    pos = pos + 2
+                    depth = depth + 1
+                } else {
+                    if is_newline_char(sb_char(pos)) == 1 { line = line + 1 }
+                    pos = pos + 1
+                }
+            }
+            continue
+        }
+
+        // String literal
+        if b == 34 {
+            let start = pos
+            pos = pos + 1
+            var end = pos
+            while pos < FLX_SRC_LEN && sb(pos) != 34 {
+                if sb(pos) == 92 && pos + 1 < FLX_SRC_LEN {
+                    pos = pos + 2  // skip escape sequence
+                } else {
+                    if is_newline_char(sb_char(pos)) == 1 { line = line + 1 }
+                    pos = pos + 1
+                }
+                end = pos
+            }
+            if pos < FLX_SRC_LEN && sb(pos) == 34 { pos = pos + 1 }
+            FLX_TK[FLX_TC as usize] = 13
+            FLX_TS[FLX_TC as usize] = start
+            FLX_TE[FLX_TC as usize] = pos
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            continue
+        }
+
+        // Number literal
+        if is_digit_char(c) == 1 {
+            let start = pos
+            while pos < FLX_SRC_LEN && is_digit_char(sb_char(pos)) == 1 {
+                pos = pos + 1
+            }
+            // Check for float (. followed by digit)
+            var is_float: i64 = 0
+            if pos < FLX_SRC_LEN && sb(pos) == 46 && pos + 1 < FLX_SRC_LEN && is_digit_char(sb_char(pos + 1)) == 1 {
+                is_float = 1
+                pos = pos + 1
+                while pos < FLX_SRC_LEN && is_digit_char(sb_char(pos)) == 1 {
+                    pos = pos + 1
+                }
+            }
+
+            let kind = if is_float == 1 { 12 } else { 11 }
+            FLX_TK[FLX_TC as usize] = kind
+            FLX_TS[FLX_TC as usize] = start
+            FLX_TE[FLX_TC as usize] = pos
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            continue
+        }
+
+        // Identifier or keyword
+        if is_ident_start_char(c) == 1 {
+            let start = pos
+            while pos < FLX_SRC_LEN && is_ident_continue_char(sb_char(pos)) == 1 {
+                pos = pos + 1
+            }
+            let kind = keyword_lookup(start, pos)
+            FLX_TK[FLX_TC as usize] = kind
+            FLX_TS[FLX_TC as usize] = start
+            FLX_TE[FLX_TC as usize] = pos
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            continue
+        }
+
+        // Operators and delimiters
+        if b == 40 {  // (
+            FLX_TK[FLX_TC as usize] = 16
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 41 {  // )
+            FLX_TK[FLX_TC as usize] = 17
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 123 {  // {
+            FLX_TK[FLX_TC as usize] = 18
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 125 {  // }
+            FLX_TK[FLX_TC as usize] = 19
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 91 {  // [
+            FLX_TK[FLX_TC as usize] = 20
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 93 {  // ]
+            FLX_TK[FLX_TC as usize] = 21
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 59 {  // ;
+            FLX_TK[FLX_TC as usize] = 22
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 58 {  // : or ::
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 58 {
+                FLX_TK[FLX_TC as usize] = 67
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 23
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 44 {  // ,
+            FLX_TK[FLX_TC as usize] = 24
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 46 {  // . or .. or ...
+            if pos + 2 < FLX_SRC_LEN && sb(pos + 1) == 46 && sb(pos + 2) == 46 {
+                FLX_TK[FLX_TC as usize] = 69  // ...
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 3
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 3
+            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 46 {
+                FLX_TK[FLX_TC as usize] = 68  // ..
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 25
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 43 {  // + or ++ or +=
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 43 {
+                FLX_TK[FLX_TC as usize] = 66
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
+                FLX_TK[FLX_TC as usize] = 61
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 28
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 45 {  // - or -> or -=
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 62 {
+                FLX_TK[FLX_TC as usize] = 26
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
+                FLX_TK[FLX_TC as usize] = 62
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 29
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 42 {  // * or *=
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
+                FLX_TK[FLX_TC as usize] = 63
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 30
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 47 {  // / or /=
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
+                FLX_TK[FLX_TC as usize] = 64
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 31
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 37 {  // %
+            FLX_TK[FLX_TC as usize] = 32
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 61 {  // = or ==
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
+                FLX_TK[FLX_TC as usize] = 34
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 33
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 33 {  // ! or !=
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
+                FLX_TK[FLX_TC as usize] = 35
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 42
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 60 {  // < or << or <= or <<=
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 60 {
+                if pos + 2 < FLX_SRC_LEN && sb(pos + 2) == 61 {
+                    FLX_TK[FLX_TC as usize] = 0  // <<= not used here, skip
+                    pos = pos + 3
+                    continue
+                }
+                FLX_TK[FLX_TC as usize] = 47
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
+                FLX_TK[FLX_TC as usize] = 39
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 36
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 62 {  // > or >> or >=
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 62 {
+                FLX_TK[FLX_TC as usize] = 48
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
+                FLX_TK[FLX_TC as usize] = 38
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 37
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 38 {  // & or && or &!
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 38 {
+                FLX_TK[FLX_TC as usize] = 40
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 33 {
+                FLX_TK[FLX_TC as usize] = 65
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 43
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 124 {  // | or ||
+            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 124 {
+                FLX_TK[FLX_TC as usize] = 41
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 2
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 2
+            } else {
+                FLX_TK[FLX_TC as usize] = 44
+                FLX_TS[FLX_TC as usize] = pos
+                FLX_TE[FLX_TC as usize] = pos + 1
+                FLX_TL[FLX_TC as usize] = line
+                FLX_TC = FLX_TC + 1
+                pos = pos + 1
+            }
+            continue
+        }
+        if b == 94 {  // ^
+            FLX_TK[FLX_TC as usize] = 45
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 126 {  // ~
+            FLX_TK[FLX_TC as usize] = 46
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+        if b == 95 {  // _
+            FLX_TK[FLX_TC as usize] = 60
+            FLX_TS[FLX_TC as usize] = pos
+            FLX_TE[FLX_TC as usize] = pos + 1
+            FLX_TL[FLX_TC as usize] = line
+            FLX_TC = FLX_TC + 1
+            pos = pos + 1
+            continue
+        }
+
+        // Unknown character — skip
+        pos = pos + 1
+    }
+
+    // Add EOF token
+    FLX_TK[FLX_TC as usize] = 0
+    FLX_TS[FLX_TC as usize] = FLX_SRC_LEN
+    FLX_TE[FLX_TC as usize] = FLX_SRC_LEN
+    FLX_TL[FLX_TC as usize] = line
+    FLX_TC = FLX_TC + 1
+}
+
+// ============================================================================
+// PARSER (minimal — just function signatures)
+// ============================================================================
+
+pub fn flat_parse_tokens(tc: i64) -> FlatProgram with Mut {
+    var prog: FlatProgram = FlatProgram {
+        fn_count: 0,
+        fn_names_start: [0; 2048],
+        fn_names_end: [0; 2048],
+        fn_arg_count: [0; 2048],
+        fn_body_start_token: [0; 2048],
+    }
+
+    var ti: i64 = 0
+    while ti < tc {
+        // Look for "fn" keyword (token kind == 1)
+        if FLX_TK[ti as usize] == 1 {
+            // fn keyword at ti
+            ti = ti + 1
+
+            // Skip whitespace/newlines
+            while ti < tc && FLX_TK[ti as usize] == 70 {
+                ti = ti + 1
+            }
+
+            // Expect identifier (function name)
+            if ti < tc && FLX_TK[ti as usize] == 10 {
+                let fn_name_start = FLX_TS[ti as usize]
+                let fn_name_end = FLX_TE[ti as usize]
+                ti = ti + 1
+
+                // Skip whitespace
+                while ti < tc && FLX_TK[ti as usize] == 70 {
+                    ti = ti + 1
+                }
+
+                // Expect lparen
+                var arg_count: i64 = 0
+                if ti < tc && FLX_TK[ti as usize] == 16 {
+                    ti = ti + 1
+
+                    // Count parameters until rparen
+                    // Simple: count idents
+                    while ti < tc && FLX_TK[ti as usize] != 17 {
+                        if FLX_TK[ti as usize] == 10 {
+                            arg_count = arg_count + 1
+                        }
+                        ti = ti + 1
+                    }
+
+                    // Skip rparen
+                    if ti < tc && FLX_TK[ti as usize] == 17 {
+                        ti = ti + 1
+                    }
+                }
+
+                // Skip to lbrace, skipping over return type and "with" clause
+                while ti < tc && FLX_TK[ti as usize] != 18 && FLX_TK[ti as usize] != 0 {
+                    ti = ti + 1
+                }
+
+                // Expect lbrace
+                if ti < tc && FLX_TK[ti as usize] == 18 {
+                    let body_start = ti
+
+                    // Store function info
+                    if prog.fn_count < 2048 {
+                        prog.fn_names_start[prog.fn_count as usize] = fn_name_start
+                        prog.fn_names_end[prog.fn_count as usize] = fn_name_end
+                        prog.fn_arg_count[prog.fn_count as usize] = arg_count
+                        prog.fn_body_start_token[prog.fn_count as usize] = body_start
+                        prog.fn_count = prog.fn_count + 1
+                    }
+
+                    // Skip to closing brace
+                    var brace_depth: i64 = 1
+                    ti = ti + 1
+                    while ti < tc && brace_depth > 0 {
+                        if FLX_TK[ti as usize] == 18 {
+                            brace_depth = brace_depth + 1
+                        }
+                        if FLX_TK[ti as usize] == 19 {
+                            brace_depth = brace_depth - 1
+                        }
+                        ti = ti + 1
+                    }
+                } else {
+                    ti = ti + 1
+                }
+                continue
+            }
+        }
+        ti = ti + 1
+    }
+
+    prog
+}
