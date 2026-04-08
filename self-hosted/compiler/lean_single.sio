@@ -2093,7 +2093,6 @@ fn ret_agg_nslots(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
         let si = st_find(ty_hash)
         if si >= 0 { return st_total_size(si) / 8 }
         // Synthetic tuple or unregistered struct: use SRET with generous slot count.
-        // The callee will write up to this many slots via the hidden SRET pointer.
         // 128 slots = 1024 bytes — must cover (Parser, Item) which is ~92 slots.
         if ty_hash != 0 { return 128 }
     }
@@ -8548,8 +8547,36 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                     if FN_ARITY[mfi as usize] != margc { tc_wrong_arity(method_tok, FN_ARITY[mfi as usize], margc) }
-                    // Use emit_direct_fn_call_x86 which handles SRET for aggregate returns
-                    emit_direct_fn_call_x86(mfi, margc)
+                    // Check if method returns aggregate (needs SRET)
+                    let method_ret_slots = ret_agg_nslots(FN_RET_TY[mfi as usize], FN_RET_HASH[mfi as usize])
+                    if method_ret_slots > 0 {
+                        // SRET: allocate return buffer, shift args, pass SRET ptr in rdi
+                        let method_ret_base = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + method_ret_slots
+                        emit_setup_call_args_shift_x86(margc, 1)
+                        emit_prepare_stack_call_args_x86(margc, 5)
+                        em(0x48); em(0x8d); em(0x85)
+                        em32(0 - (method_ret_base + method_ret_slots - 1) * 8)
+                        em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (SRET ptr)
+                        em(0xe8)
+                        PATCH_OFF[PATCH_COUNT as usize] = CL
+                        PATCH_FN[PATCH_COUNT as usize] = mfi
+                        PATCH_KIND[PATCH_COUNT as usize] = 0
+                        PATCH_COUNT = PATCH_COUNT + 1
+                        em32(0)
+                        emit_drop_call_args_x86(margc + call_extra_stack_args_x86(margc, 5))
+                    } else {
+                        // Scalar return: original path
+                        emit_setup_direct_call_args_x86(margc)
+                        emit_prepare_stack_call_args_x86(margc, 6)
+                        em(0xe8)
+                        PATCH_OFF[PATCH_COUNT as usize] = CL
+                        PATCH_FN[PATCH_COUNT as usize] = mfi
+                        PATCH_KIND[PATCH_COUNT as usize] = 0
+                        PATCH_COUNT = PATCH_COUNT + 1
+                        em32(0)
+                        emit_drop_call_args_x86(margc + call_extra_stack_args_x86(margc, 6))
+                    }
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
