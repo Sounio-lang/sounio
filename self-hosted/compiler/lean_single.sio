@@ -6767,7 +6767,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
             em32(0 - (tup_base + tup_total_slots - 1) * 8)
             EXPR_IS_F64 = 0
             EXPR_TY = 6
-            EXPR_TY_HASH = tup_count * 999983 + 7777
+            // Encode first_nslots in low bits of hash for .1 field access
+            let first_actual = if first_nslots > 1 { first_nslots } else { 1 }
+            EXPR_TY_HASH = tup_count * 999983 + first_actual * 1000 + 7777
             return
         }
         if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -8590,9 +8592,17 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if tup_idx == 0 {
                     // .0 → rax already points to first element, keep as-is
                 } else {
-                    // .1 → offset by half the SRET buffer (64 slots = 512 bytes)
-                    // This is a heuristic — works for (Parser, X) where Parser < 64 slots
-                    em(0x48); em(0x05); em32(64 * 8)  // add rax, 512
+                    // .1 → offset by first element's slot count (encoded in hash)
+                    // Hash = tcount * 999983 + first_nslots * 1000 + 7777
+                    let tup_first_slots = (EXPR_TY_HASH - 7777) / 1000 - ((EXPR_TY_HASH - 7777) / 999983) * (999983 / 1000)
+                    // Simpler: extract using modular arithmetic
+                    let hash_remainder = EXPR_TY_HASH - 7777
+                    let tcount_part = hash_remainder / 999983
+                    let first_slots_enc = (hash_remainder - tcount_part * 999983) / 1000
+                    let byte_offset = first_slots_enc * 8
+                    if byte_offset > 0 && byte_offset < 8192 {
+                        em(0x48); em(0x05); em32(byte_offset)  // add rax, offset
+                    }
                 }
                 // Result type is aggregate (struct-like) — leave as pointer
                 EXPR_IS_F64 = 0
