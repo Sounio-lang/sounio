@@ -1,775 +1,417 @@
 // self-hosted::compiler::flat_lex_parse
 //
-// Flat-style lexer and parser for slim native driver.
+// Flat-style lexer for slim native compile driver.
+// Uses integer constants for token kinds, calls parser_set_token_flat directly.
 
 module compiler::flat_lex_parse
-// Avoids idiomatic features (methods, enums, Box) that lean compiler can't codegen.
-// Uses parallel arrays and simple integer token kinds, exactly like lean_single.sio.
-//
-// Token kinds (integers):
-// 0=Eof, 1=fn, 2=let, 3=var, 4=return, 5=if, 6=else, 7=while, 8=for, 9=match,
-// 10=ident, 11=intlit, 12=floatlit, 13=strlit, 14=charlit, 15=boollit,
-// 16=lparen, 17=rparen, 18=lbrace, 19=rbrace, 20=lbracket, 21=rbracket,
-// 22=semicolon, 23=colon, 24=comma, 25=dot, 26=arrow, 27=fatarrow,
-// 28=plus, 29=minus, 30=star, 31=slash, 32=percent, 33=eq, 34=eqeq, 35=bangeq,
-// 36=lt, 37=gt, 38=lteq, 39=gteq, 40=ampamp, 41=pipepipe, 42=bang, 43=amp,
-// 44=pipe, 45=caret, 46=tilde, 47=shl, 48=shr,
-// 49=import, 50=pub, 51=with, 52=type, 53=struct, 54=enum, 55=impl,
-// 56=module, 57=use, 58=as, 59=where, 60=underscore,
-// 61=pluseq, 62=minuseq, 63=stareq, 64=slasheq,
-// 65=ampbang, 66=plusplus, 67=coloncolon, 68=dotdot, 69=dotdoteq,
-// 70=newline, 71=error
 
-pub struct FlatProgram {
-    fn_count: i64,
-    fn_names_start: [i64; 2048],     // start position in source
-    fn_names_end: [i64; 2048],       // end position in source
-    fn_arg_count: [i64; 2048],       // number of parameters
-    fn_body_start_token: [i64; 2048], // token index of body start (lbrace)
-}
-
-// Global token arrays (parallel to lean_single.sio style)
-var FLX_TK: [i64; 524288] = [0; 524288]    // token kind
-var FLX_TS: [i64; 524288] = [0; 524288]    // token start (source offset)
-var FLX_TE: [i64; 524288] = [0; 524288]    // token end (source offset)
-var FLX_TV: [i64; 524288] = [0; 524288]    // token int value (for intlit)
-var FLX_TL: [i64; 524288] = [0; 524288]    // token line number
-var FLX_TC: i64 = 0                        // token count
-
-var FLX_SRC: [i8; 8388608] = [0; 8388608] // source buffer
-var FLX_SRC_LEN: i64 = 0                    // source length
+use parser::parser::{parser_set_token_flat}
 
 // ============================================================================
-// HELPERS
+// TOKEN KIND CONSTANTS
 // ============================================================================
 
-fn sb(pos: i64) -> i64 {
-    FLX_SRC[pos as usize] as i64
+let EOF: i64 = 0
+let ERROR: i64 = 1
+let NEWLINE: i64 = 2
+let USE: i64 = 5
+let FN: i64 = 7
+let LET: i64 = 8
+let VAR: i64 = 9
+let TYPE: i64 = 12
+let STRUCT: i64 = 13
+let ENUM: i64 = 14
+let IF: i64 = 20
+let ELSE: i64 = 21
+let WHILE: i64 = 24
+let RETURN: i64 = 28
+let AS: i64 = 30
+let PUB: i64 = 32
+let TRUE: i64 = 35
+let FALSE: i64 = 36
+let WITH: i64 = 45
+let IDENT: i64 = 123
+let INT_LIT: i64 = 124
+let STRING_LIT: i64 = 126
+let PLUS: i64 = 132
+let MINUS: i64 = 133
+let STAR: i64 = 134
+let SLASH: i64 = 135
+let PERCENT: i64 = 136
+let EQ: i64 = 137
+let LT: i64 = 138
+let GT: i64 = 139
+let BANG: i64 = 140
+let AMP: i64 = 141
+let PIPE: i64 = 142
+let EQ_EQ: i64 = 146
+let BANG_EQ: i64 = 147
+let LT_EQ: i64 = 148
+let GT_EQ: i64 = 149
+let AMP_AMP: i64 = 150
+let PIPE_PIPE: i64 = 151
+let ARROW: i64 = 158
+let COLON_COLON: i64 = 162
+let AMP_BANG: i64 = 163
+let L_PAREN: i64 = 174
+let R_PAREN: i64 = 175
+let L_BRACE: i64 = 176
+let R_BRACE: i64 = 177
+let L_BRACKET: i64 = 178
+let R_BRACKET: i64 = 179
+let SEMI: i64 = 180
+let COLON: i64 = 181
+let COMMA: i64 = 182
+let DOT: i64 = 183
+
+// ============================================================================
+// SOURCE BUFFER
+// ============================================================================
+var FLAT_SRC: [i8; 1048576] = [0; 1048576]
+var FLAT_SRC_LEN: i64 = 0
+
+// ============================================================================
+// CHARACTER CLASSIFICATION
+// ============================================================================
+
+fn is_whitespace(ch: i8) -> bool {
+    ch == 32 as i8 || ch == 9 as i8 || ch == 13 as i8
 }
 
-fn sb_char(pos: i64) -> i8 {
-    FLX_SRC[pos as usize]
+fn is_digit(ch: i8) -> bool {
+    ch >= 48 as i8 && ch <= 57 as i8
 }
 
-fn is_eof(pos: i64) -> i64 {
-    if pos < FLX_SRC_LEN { 0 } else { 1 }
+fn is_ident_start(ch: i8) -> bool {
+    (ch >= 65 as i8 && ch <= 90 as i8) ||
+    (ch >= 97 as i8 && ch <= 122 as i8) ||
+    ch == 95 as i8
 }
 
-fn is_whitespace_char(c: i8) -> i64 {
-    let b = c as i64
-    if b == 32 || b == 9 || b == 13 { 1 } else { 0 }
+fn is_ident_cont(ch: i8) -> bool {
+    is_ident_start(ch) || is_digit(ch)
 }
 
-fn is_newline_char(c: i8) -> i64 {
-    if c as i64 == 10 { 1 } else { 0 }
+fn is_operator_start(ch: i8) -> bool {
+    ch == 43 as i8 ||  // +
+    ch == 45 as i8 ||  // -
+    ch == 42 as i8 ||  // *
+    ch == 47 as i8 ||  // /
+    ch == 37 as i8 ||  // %
+    ch == 61 as i8 ||  // =
+    ch == 60 as i8 ||  // <
+    ch == 62 as i8 ||  // >
+    ch == 33 as i8 ||  // !
+    ch == 38 as i8 ||  // &
+    ch == 124 as i8 || // |
+    ch == 94 as i8 ||  // ^
+    ch == 126 as i8 || // ~
+    ch == 63 as i8     // ?
 }
 
-fn is_digit_char(c: i8) -> i64 {
-    let b = c as i64
-    if b >= 48 && b <= 57 { 1 } else { 0 }
+fn is_delimiter(ch: i8) -> bool {
+    ch == 40 as i8 ||  // (
+    ch == 41 as i8 ||  // )
+    ch == 123 as i8 || // {
+    ch == 125 as i8 || // }
+    ch == 91 as i8 ||  // [
+    ch == 93 as i8     // ]
 }
 
-fn is_hex_digit_char(c: i8) -> i64 {
-    let b = c as i64
-    if (b >= 48 && b <= 57) || (b >= 97 && b <= 102) || (b >= 65 && b <= 70) { 1 } else { 0 }
+fn is_punctuation(ch: i8) -> bool {
+    ch == 59 as i8 ||  // ;
+    ch == 58 as i8 ||  // :
+    ch == 44 as i8 ||  // ,
+    ch == 46 as i8     // .
 }
 
-fn is_ident_start_char(c: i8) -> i64 {
-    let b = c as i64
-    if (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95 { 1 } else { 0 }
+// ============================================================================
+// KEYWORD LOOKUP
+// ============================================================================
+
+fn keyword_kind(text_start: i64, text_len: i64) -> i64 with Mut {
+    if text_len == 2 {
+        let ch0 = FLAT_SRC[text_start as usize]
+        let ch1 = FLAT_SRC[(text_start + 1) as usize]
+        if ch0 == 102 as i8 && ch1 == 110 as i8 { return FN }     // fn
+        if ch0 == 105 as i8 && ch1 == 102 as i8 { return IF }     // if
+    }
+    if text_len == 3 {
+        let ch0 = FLAT_SRC[text_start as usize]
+        let ch1 = FLAT_SRC[(text_start + 1) as usize]
+        let ch2 = FLAT_SRC[(text_start + 2) as usize]
+        if ch0 == 108 as i8 && ch1 == 101 as i8 && ch2 == 116 as i8 { return LET }    // let
+        if ch0 == 118 as i8 && ch1 == 97 as i8 && ch2 == 114 as i8 { return VAR }     // var
+        if ch0 == 117 as i8 && ch1 == 115 as i8 && ch2 == 101 as i8 { return USE }    // use
+    }
+    if text_len == 4 {
+        let ch0 = FLAT_SRC[text_start as usize]
+        let ch1 = FLAT_SRC[(text_start + 1) as usize]
+        let ch2 = FLAT_SRC[(text_start + 2) as usize]
+        let ch3 = FLAT_SRC[(text_start + 3) as usize]
+        if ch0 == 119 as i8 && ch1 == 105 as i8 && ch2 == 116 as i8 && ch3 == 104 as i8 { return WITH }  // with
+        if ch0 == 101 as i8 && ch1 == 108 as i8 && ch2 == 115 as i8 && ch3 == 101 as i8 { return ELSE }   // else
+        if ch0 == 116 as i8 && ch1 == 114 as i8 && ch2 == 117 as i8 && ch3 == 101 as i8 { return TRUE }   // true
+    }
+    if text_len == 5 {
+        let ch0 = FLAT_SRC[text_start as usize]
+        let ch1 = FLAT_SRC[(text_start + 1) as usize]
+        let ch2 = FLAT_SRC[(text_start + 2) as usize]
+        let ch3 = FLAT_SRC[(text_start + 3) as usize]
+        let ch4 = FLAT_SRC[(text_start + 4) as usize]
+        if ch0 == 119 as i8 && ch1 == 104 as i8 && ch2 == 105 as i8 && ch3 == 108 as i8 && ch4 == 101 as i8 { return WHILE }  // while
+        if ch0 == 102 as i8 && ch1 == 97 as i8 && ch2 == 108 as i8 && ch3 == 115 as i8 && ch4 == 101 as i8 { return FALSE }   // false
+    }
+    if text_len == 6 {
+        let ch0 = FLAT_SRC[text_start as usize]
+        let ch1 = FLAT_SRC[(text_start + 1) as usize]
+        let ch2 = FLAT_SRC[(text_start + 2) as usize]
+        let ch3 = FLAT_SRC[(text_start + 3) as usize]
+        let ch4 = FLAT_SRC[(text_start + 4) as usize]
+        let ch5 = FLAT_SRC[(text_start + 5) as usize]
+        if ch0 == 114 as i8 && ch1 == 101 as i8 && ch2 == 116 as i8 && ch3 == 117 as i8 && ch4 == 114 as i8 && ch5 == 110 as i8 { return RETURN }  // return
+        if ch0 == 115 as i8 && ch1 == 116 as i8 && ch2 == 114 as i8 && ch3 == 117 as i8 && ch4 == 99 as i8 && ch5 == 116 as i8 { return STRUCT }  // struct
+    }
+    IDENT
 }
 
-fn is_ident_continue_char(c: i8) -> i64 {
-    let b = c as i64
-    if (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95 || (b >= 48 && b <= 57) { 1 } else { 0 }
+// ============================================================================
+// BASIC SCANNING
+// ============================================================================
+
+fn scan_identifier(pos: i64) -> i64 with Mut {
+    var end = pos
+    while end < FLAT_SRC_LEN && is_ident_cont(FLAT_SRC[end as usize]) {
+        end = end + 1
+    }
+    end
 }
 
-fn str_matches(src_start: i64, src_end: i64, pattern: [i8; 256], pattern_len: i64) -> i64 {
-    let len = src_end - src_start
-    if len != pattern_len { return 0 }
+fn scan_number(pos: i64) -> i64 with Mut {
+    var end = pos
+    while end < FLAT_SRC_LEN && is_digit(FLAT_SRC[end as usize]) {
+        end = end + 1
+    }
+    end
+}
+
+fn scan_string(pos: i64) -> i64 with Mut {
+    var end = pos + 1  // skip opening quote
+    while end < FLAT_SRC_LEN && FLAT_SRC[end as usize] != 34 as i8 {
+        if end + 1 < FLAT_SRC_LEN && FLAT_SRC[end as usize] == 92 as i8 {  // backslash escape
+            end = end + 2
+        } else {
+            end = end + 1
+        }
+    }
+    if end < FLAT_SRC_LEN && FLAT_SRC[end as usize] == 34 as i8 {
+        end = end + 1  // skip closing quote
+    }
+    end
+}
+
+fn scan_operator(pos: i64) -> i64 with Mut {
+    var end = pos + 1
+    if end >= FLAT_SRC_LEN { return end }
+
+    let ch0 = FLAT_SRC[pos as usize]
+    let ch1 = FLAT_SRC[end as usize]
+
+    // Check two-char operators
+    if ch0 == 61 as i8 && ch1 == 61 as i8 { return pos + 2 }  // ==
+    if ch0 == 33 as i8 && ch1 == 61 as i8 { return pos + 2 }  // !=
+    if ch0 == 60 as i8 && ch1 == 61 as i8 { return pos + 2 }  // <=
+    if ch0 == 62 as i8 && ch1 == 61 as i8 { return pos + 2 }  // >=
+    if ch0 == 38 as i8 && ch1 == 38 as i8 { return pos + 2 }  // &&
+    if ch0 == 124 as i8 && ch1 == 124 as i8 { return pos + 2 }  // ||
+    if ch0 == 45 as i8 && ch1 == 62 as i8 { return pos + 2 }  // ->
+    if ch0 == 38 as i8 && ch1 == 33 as i8 { return pos + 2 }  // &!
+
+    end
+}
+
+fn get_operator_kind(pos: i64, end: i64) -> i64 with Mut {
+    let len = end - pos
+    if len == 1 {
+        let ch = FLAT_SRC[pos as usize]
+        if ch == 43 as i8 { return PLUS }
+        if ch == 45 as i8 { return MINUS }
+        if ch == 42 as i8 { return STAR }
+        if ch == 47 as i8 { return SLASH }
+        if ch == 37 as i8 { return PERCENT }
+        if ch == 61 as i8 { return EQ }
+        if ch == 60 as i8 { return LT }
+        if ch == 62 as i8 { return GT }
+        if ch == 33 as i8 { return BANG }
+        if ch == 38 as i8 { return AMP }
+        if ch == 124 as i8 { return PIPE }
+    }
+    if len == 2 {
+        let ch0 = FLAT_SRC[pos as usize]
+        let ch1 = FLAT_SRC[(pos + 1) as usize]
+        if ch0 == 61 as i8 && ch1 == 61 as i8 { return EQ_EQ }
+        if ch0 == 33 as i8 && ch1 == 61 as i8 { return BANG_EQ }
+        if ch0 == 60 as i8 && ch1 == 61 as i8 { return LT_EQ }
+        if ch0 == 62 as i8 && ch1 == 61 as i8 { return GT_EQ }
+        if ch0 == 38 as i8 && ch1 == 38 as i8 { return AMP_AMP }
+        if ch0 == 124 as i8 && ch1 == 124 as i8 { return PIPE_PIPE }
+        if ch0 == 45 as i8 && ch1 == 62 as i8 { return ARROW }
+        if ch0 == 38 as i8 && ch1 == 33 as i8 { return AMP_BANG }
+    }
+    IDENT
+}
+
+fn get_delimiter_kind(ch: i8) -> i64 with Mut {
+    if ch == 40 as i8 { return L_PAREN }
+    if ch == 41 as i8 { return R_PAREN }
+    if ch == 123 as i8 { return L_BRACE }
+    if ch == 125 as i8 { return R_BRACE }
+    if ch == 91 as i8 { return L_BRACKET }
+    if ch == 93 as i8 { return R_BRACKET }
+    ERROR
+}
+
+fn get_punctuation_kind(ch: i8) -> i64 with Mut {
+    if ch == 59 as i8 { return SEMI }
+    if ch == 58 as i8 { return COLON }
+    if ch == 44 as i8 { return COMMA }
+    if ch == 46 as i8 { return DOT }
+    ERROR
+}
+
+// ============================================================================
+// MAIN LEXER FUNCTION
+// ============================================================================
+
+pub fn flat_lex_file(path: string) -> i64 with IO, Mut, Div, Panic {
+    // Read file into FLAT_SRC
+    let size = file_size(path)
+    let data = read_file(path)
+    var n: i64 = size
+    if n < 0 { n = 0 }
+    if n > 1048576 { n = 1048576 }
+
     var i: i64 = 0
-    while i < len {
-        if FLX_SRC[(src_start + i) as usize] != pattern[i as usize] { return 0 }
+    while i < n {
+        FLAT_SRC[i as usize] = data[i as usize]
         i = i + 1
     }
-    1
-}
+    FLAT_SRC_LEN = n
 
-fn keyword_lookup(start: i64, end: i64) -> i64 {
-    let len = end - start
-
-    // fn (2 chars)
-    if len == 2 && sb(start) == 102 && sb(start + 1) == 110 { return 1 }
-    // let (3 chars)
-    if len == 3 && sb(start) == 108 && sb(start + 1) == 101 && sb(start + 2) == 116 { return 2 }
-    // var (3 chars)
-    if len == 3 && sb(start) == 118 && sb(start + 1) == 97 && sb(start + 2) == 114 { return 3 }
-    // return (6 chars)
-    if len == 6 && sb(start) == 114 && sb(start + 1) == 101 && sb(start + 2) == 116 &&
-       sb(start + 3) == 117 && sb(start + 4) == 114 && sb(start + 5) == 110 { return 4 }
-    // if (2 chars)
-    if len == 2 && sb(start) == 105 && sb(start + 1) == 102 { return 5 }
-    // else (4 chars)
-    if len == 4 && sb(start) == 101 && sb(start + 1) == 108 &&
-       sb(start + 2) == 115 && sb(start + 3) == 101 { return 6 }
-    // while (5 chars)
-    if len == 5 && sb(start) == 119 && sb(start + 1) == 104 && sb(start + 2) == 105 &&
-       sb(start + 3) == 108 && sb(start + 4) == 101 { return 7 }
-    // for (3 chars)
-    if len == 3 && sb(start) == 102 && sb(start + 1) == 111 && sb(start + 2) == 114 { return 8 }
-    // match (5 chars)
-    if len == 5 && sb(start) == 109 && sb(start + 1) == 97 && sb(start + 2) == 116 &&
-       sb(start + 3) == 99 && sb(start + 4) == 104 { return 9 }
-    // import (6 chars)
-    if len == 6 && sb(start) == 105 && sb(start + 1) == 109 && sb(start + 2) == 112 &&
-       sb(start + 3) == 111 && sb(start + 4) == 114 && sb(start + 5) == 116 { return 49 }
-    // pub (3 chars)
-    if len == 3 && sb(start) == 112 && sb(start + 1) == 117 && sb(start + 2) == 98 { return 50 }
-    // with (4 chars)
-    if len == 4 && sb(start) == 119 && sb(start + 1) == 105 &&
-       sb(start + 2) == 116 && sb(start + 3) == 104 { return 51 }
-    // type (4 chars)
-    if len == 4 && sb(start) == 116 && sb(start + 1) == 121 &&
-       sb(start + 2) == 112 && sb(start + 3) == 101 { return 52 }
-    // struct (6 chars)
-    if len == 6 && sb(start) == 115 && sb(start + 1) == 116 && sb(start + 2) == 114 &&
-       sb(start + 3) == 117 && sb(start + 4) == 99 && sb(start + 5) == 116 { return 53 }
-    // enum (4 chars)
-    if len == 4 && sb(start) == 101 && sb(start + 1) == 110 &&
-       sb(start + 2) == 117 && sb(start + 3) == 109 { return 54 }
-    // impl (4 chars)
-    if len == 4 && sb(start) == 105 && sb(start + 1) == 109 &&
-       sb(start + 2) == 112 && sb(start + 3) == 108 { return 55 }
-    // module (6 chars)
-    if len == 6 && sb(start) == 109 && sb(start + 1) == 111 && sb(start + 2) == 100 &&
-       sb(start + 3) == 117 && sb(start + 4) == 108 && sb(start + 5) == 101 { return 56 }
-    // use (3 chars)
-    if len == 3 && sb(start) == 117 && sb(start + 1) == 115 && sb(start + 2) == 101 { return 57 }
-    // as (2 chars)
-    if len == 2 && sb(start) == 97 && sb(start + 1) == 115 { return 58 }
-    // where (5 chars)
-    if len == 5 && sb(start) == 119 && sb(start + 1) == 104 && sb(start + 2) == 101 &&
-       sb(start + 3) == 114 && sb(start + 4) == 101 { return 59 }
-
-    // Default: identifier
-    10
-}
-
-// ============================================================================
-// LEXER
-// ============================================================================
-
-pub fn flat_lex_file(path: string) -> i64 with IO, Mut {
-    FLX_SRC_LEN = file_size(path)
-    if FLX_SRC_LEN < 0 || FLX_SRC_LEN >= 8388608 { return 0 }
-
-    let raw = read_file(path)
-    var i: i64 = 0
-    while i < FLX_SRC_LEN {
-        FLX_SRC[i as usize] = raw[i as usize]
-        i = i + 1
-    }
-
-    FLX_TC = 0
-    flat_lex_buffer()
-    FLX_TC
-}
-
-fn flat_lex_buffer() with Mut {
+    // Tokenize
     var pos: i64 = 0
     var line: i64 = 1
+    var col: i64 = 1
+    var token_count: i64 = 0
 
-    while pos < FLX_SRC_LEN && FLX_TC < 524288 {
-        let c = sb_char(pos)
-        let b = c as i64
+    while pos < FLAT_SRC_LEN {
+        let ch = FLAT_SRC[pos as usize]
 
-        // Whitespace (but not newline)
-        if is_whitespace_char(c) == 1 {
+        // Skip whitespace
+        if is_whitespace(ch) {
+            col = col + 1
             pos = pos + 1
             continue
         }
 
-        // Newline
-        if is_newline_char(c) == 1 {
-            FLX_TK[FLX_TC as usize] = 70
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
+        // Skip newlines
+        if ch == 10 as i8 {
             line = line + 1
+            col = 1
             pos = pos + 1
             continue
         }
 
-        // Line comment
-        if b == 47 && pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 47 {
-            while pos < FLX_SRC_LEN && is_newline_char(sb_char(pos)) == 0 {
+        // Skip comments (// to end of line)
+        if ch == 47 as i8 && pos + 1 < FLAT_SRC_LEN && FLAT_SRC[(pos + 1) as usize] == 47 as i8 {
+            while pos < FLAT_SRC_LEN && FLAT_SRC[pos as usize] != 10 as i8 {
+                col = col + 1
                 pos = pos + 1
             }
             continue
         }
 
-        // Block comment /* ... */
-        if b == 47 && pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 42 {
-            pos = pos + 2
-            var depth: i64 = 1
-            while pos < FLX_SRC_LEN && depth > 0 {
-                if b == 42 && pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 47 {
-                    pos = pos + 2
-                    depth = depth - 1
-                } else if sb(pos) == 47 && pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 42 {
-                    pos = pos + 2
-                    depth = depth + 1
-                } else {
-                    if is_newline_char(sb_char(pos)) == 1 { line = line + 1 }
-                    pos = pos + 1
-                }
-            }
-            continue
-        }
-
-        // String literal
-        if b == 34 {
+        // Identifiers and keywords
+        if is_ident_start(ch) {
             let start = pos
-            pos = pos + 1
-            var end = pos
-            while pos < FLX_SRC_LEN && sb(pos) != 34 {
-                if sb(pos) == 92 && pos + 1 < FLX_SRC_LEN {
-                    pos = pos + 2  // skip escape sequence
-                } else {
-                    if is_newline_char(sb_char(pos)) == 1 { line = line + 1 }
-                    pos = pos + 1
-                }
-                end = pos
-            }
-            if pos < FLX_SRC_LEN && sb(pos) == 34 { pos = pos + 1 }
-            FLX_TK[FLX_TC as usize] = 13
-            FLX_TS[FLX_TC as usize] = start
-            FLX_TE[FLX_TC as usize] = pos
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
+            pos = scan_identifier(pos)
+            let len = pos - start
+            let kind = keyword_kind(start, len)
+            parser_set_token_flat(token_count, kind, start, pos, line, col, 0)
+            token_count = token_count + 1
+            col = col + len
             continue
         }
 
-        // Number literal
-        if is_digit_char(c) == 1 {
+        // Numbers
+        if is_digit(ch) {
             let start = pos
-            while pos < FLX_SRC_LEN && is_digit_char(sb_char(pos)) == 1 {
-                pos = pos + 1
+            pos = scan_number(pos)
+            let len = pos - start
+            // Parse integer value
+            var val: i64 = 0
+            var j: i64 = start
+            while j < pos {
+                let d = FLAT_SRC[j as usize] - 48 as i8
+                val = val * 10 + (d as i64)
+                j = j + 1
             }
-            // Check for float (. followed by digit)
-            var is_float: i64 = 0
-            if pos < FLX_SRC_LEN && sb(pos) == 46 && pos + 1 < FLX_SRC_LEN && is_digit_char(sb_char(pos + 1)) == 1 {
-                is_float = 1
-                pos = pos + 1
-                while pos < FLX_SRC_LEN && is_digit_char(sb_char(pos)) == 1 {
-                    pos = pos + 1
-                }
-            }
-
-            let kind = if is_float == 1 { 12 } else { 11 }
-            FLX_TK[FLX_TC as usize] = kind
-            FLX_TS[FLX_TC as usize] = start
-            FLX_TE[FLX_TC as usize] = pos
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
+            parser_set_token_flat(token_count, INT_LIT, start, pos, line, col, val)
+            token_count = token_count + 1
+            col = col + len
             continue
         }
 
-        // Identifier or keyword
-        if is_ident_start_char(c) == 1 {
+        // Strings
+        if ch == 34 as i8 {
             let start = pos
-            while pos < FLX_SRC_LEN && is_ident_continue_char(sb_char(pos)) == 1 {
-                pos = pos + 1
-            }
-            let kind = keyword_lookup(start, pos)
-            FLX_TK[FLX_TC as usize] = kind
-            FLX_TS[FLX_TC as usize] = start
-            FLX_TE[FLX_TC as usize] = pos
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
+            pos = scan_string(pos)
+            let len = pos - start
+            parser_set_token_flat(token_count, STRING_LIT, start, pos, line, col, 0)
+            token_count = token_count + 1
+            col = col + len
             continue
         }
 
-        // Operators and delimiters
-        if b == 40 {  // (
-            FLX_TK[FLX_TC as usize] = 16
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
+        // Operators
+        if is_operator_start(ch) {
+            let start = pos
+            pos = scan_operator(pos)
+            let kind = get_operator_kind(start, pos)
+            parser_set_token_flat(token_count, kind, start, pos, line, col, 0)
+            token_count = token_count + 1
+            col = col + (pos - start)
+            continue
+        }
+
+        // Delimiters
+        if is_delimiter(ch) {
+            let kind = get_delimiter_kind(ch)
+            parser_set_token_flat(token_count, kind, pos, pos + 1, line, col, 0)
+            token_count = token_count + 1
+            col = col + 1
             pos = pos + 1
             continue
         }
-        if b == 41 {  // )
-            FLX_TK[FLX_TC as usize] = 17
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
-            pos = pos + 1
-            continue
-        }
-        if b == 123 {  // {
-            FLX_TK[FLX_TC as usize] = 18
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
-            pos = pos + 1
-            continue
-        }
-        if b == 125 {  // }
-            FLX_TK[FLX_TC as usize] = 19
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
-            pos = pos + 1
-            continue
-        }
-        if b == 91 {  // [
-            FLX_TK[FLX_TC as usize] = 20
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
-            pos = pos + 1
-            continue
-        }
-        if b == 93 {  // ]
-            FLX_TK[FLX_TC as usize] = 21
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
-            pos = pos + 1
-            continue
-        }
-        if b == 59 {  // ;
-            FLX_TK[FLX_TC as usize] = 22
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
-            pos = pos + 1
-            continue
-        }
-        if b == 58 {  // : or ::
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 58 {
-                FLX_TK[FLX_TC as usize] = 67
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 23
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 44 {  // ,
-            FLX_TK[FLX_TC as usize] = 24
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
-            pos = pos + 1
-            continue
-        }
-        if b == 46 {  // . or .. or ...
-            if pos + 2 < FLX_SRC_LEN && sb(pos + 1) == 46 && sb(pos + 2) == 46 {
-                FLX_TK[FLX_TC as usize] = 69  // ...
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 3
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 3
-            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 46 {
-                FLX_TK[FLX_TC as usize] = 68  // ..
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 25
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 43 {  // + or ++ or +=
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 43 {
-                FLX_TK[FLX_TC as usize] = 66
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
-                FLX_TK[FLX_TC as usize] = 61
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 28
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 45 {  // - or -> or -=
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 62 {
-                FLX_TK[FLX_TC as usize] = 26
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
-                FLX_TK[FLX_TC as usize] = 62
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 29
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 42 {  // * or *=
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
-                FLX_TK[FLX_TC as usize] = 63
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 30
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 47 {  // / or /=
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
-                FLX_TK[FLX_TC as usize] = 64
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 31
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 37 {  // %
-            FLX_TK[FLX_TC as usize] = 32
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
-            pos = pos + 1
-            continue
-        }
-        if b == 61 {  // = or ==
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
-                FLX_TK[FLX_TC as usize] = 34
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 33
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 33 {  // ! or !=
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
-                FLX_TK[FLX_TC as usize] = 35
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 42
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 60 {  // < or << or <= or <<=
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 60 {
-                if pos + 2 < FLX_SRC_LEN && sb(pos + 2) == 61 {
-                    FLX_TK[FLX_TC as usize] = 0  // <<= not used here, skip
-                    pos = pos + 3
-                    continue
-                }
-                FLX_TK[FLX_TC as usize] = 47
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
-                FLX_TK[FLX_TC as usize] = 39
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 36
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 62 {  // > or >> or >=
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 62 {
-                FLX_TK[FLX_TC as usize] = 48
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 61 {
-                FLX_TK[FLX_TC as usize] = 38
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 37
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 38 {  // & or && or &!
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 38 {
-                FLX_TK[FLX_TC as usize] = 40
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 33 {
-                FLX_TK[FLX_TC as usize] = 65
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 43
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 124 {  // | or ||
-            if pos + 1 < FLX_SRC_LEN && sb(pos + 1) == 124 {
-                FLX_TK[FLX_TC as usize] = 41
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 2
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 2
-            } else {
-                FLX_TK[FLX_TC as usize] = 44
-                FLX_TS[FLX_TC as usize] = pos
-                FLX_TE[FLX_TC as usize] = pos + 1
-                FLX_TL[FLX_TC as usize] = line
-                FLX_TC = FLX_TC + 1
-                pos = pos + 1
-            }
-            continue
-        }
-        if b == 94 {  // ^
-            FLX_TK[FLX_TC as usize] = 45
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
-            pos = pos + 1
-            continue
-        }
-        if b == 126 {  // ~
-            FLX_TK[FLX_TC as usize] = 46
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
-            pos = pos + 1
-            continue
-        }
-        if b == 95 {  // _
-            FLX_TK[FLX_TC as usize] = 60
-            FLX_TS[FLX_TC as usize] = pos
-            FLX_TE[FLX_TC as usize] = pos + 1
-            FLX_TL[FLX_TC as usize] = line
-            FLX_TC = FLX_TC + 1
+
+        // Punctuation
+        if is_punctuation(ch) {
+            let kind = get_punctuation_kind(ch)
+            parser_set_token_flat(token_count, kind, pos, pos + 1, line, col, 0)
+            token_count = token_count + 1
+            col = col + 1
             pos = pos + 1
             continue
         }
 
         // Unknown character — skip
+        col = col + 1
         pos = pos + 1
     }
 
-    // Add EOF token
-    FLX_TK[FLX_TC as usize] = 0
-    FLX_TS[FLX_TC as usize] = FLX_SRC_LEN
-    FLX_TE[FLX_TC as usize] = FLX_SRC_LEN
-    FLX_TL[FLX_TC as usize] = line
-    FLX_TC = FLX_TC + 1
-}
+    // EOF token
+    parser_set_token_flat(token_count, EOF, pos, pos, line, col, 0)
+    token_count = token_count + 1
 
-// ============================================================================
-// PARSER (minimal — just function signatures)
-// ============================================================================
-
-pub fn flat_parse_tokens(tc: i64) -> FlatProgram with Mut {
-    var prog: FlatProgram = FlatProgram {
-        fn_count: 0,
-        fn_names_start: [0; 2048],
-        fn_names_end: [0; 2048],
-        fn_arg_count: [0; 2048],
-        fn_body_start_token: [0; 2048],
-    }
-
-    var ti: i64 = 0
-    while ti < tc {
-        // Look for "fn" keyword (token kind == 1)
-        if FLX_TK[ti as usize] == 1 {
-            // fn keyword at ti
-            ti = ti + 1
-
-            // Skip whitespace/newlines
-            while ti < tc && FLX_TK[ti as usize] == 70 {
-                ti = ti + 1
-            }
-
-            // Expect identifier (function name)
-            if ti < tc && FLX_TK[ti as usize] == 10 {
-                let fn_name_start = FLX_TS[ti as usize]
-                let fn_name_end = FLX_TE[ti as usize]
-                ti = ti + 1
-
-                // Skip whitespace
-                while ti < tc && FLX_TK[ti as usize] == 70 {
-                    ti = ti + 1
-                }
-
-                // Expect lparen
-                var arg_count: i64 = 0
-                if ti < tc && FLX_TK[ti as usize] == 16 {
-                    ti = ti + 1
-
-                    // Count parameters until rparen
-                    // Simple: count idents
-                    while ti < tc && FLX_TK[ti as usize] != 17 {
-                        if FLX_TK[ti as usize] == 10 {
-                            arg_count = arg_count + 1
-                        }
-                        ti = ti + 1
-                    }
-
-                    // Skip rparen
-                    if ti < tc && FLX_TK[ti as usize] == 17 {
-                        ti = ti + 1
-                    }
-                }
-
-                // Skip to lbrace, skipping over return type and "with" clause
-                while ti < tc && FLX_TK[ti as usize] != 18 && FLX_TK[ti as usize] != 0 {
-                    ti = ti + 1
-                }
-
-                // Expect lbrace
-                if ti < tc && FLX_TK[ti as usize] == 18 {
-                    let body_start = ti
-
-                    // Store function info
-                    if prog.fn_count < 2048 {
-                        prog.fn_names_start[prog.fn_count as usize] = fn_name_start
-                        prog.fn_names_end[prog.fn_count as usize] = fn_name_end
-                        prog.fn_arg_count[prog.fn_count as usize] = arg_count
-                        prog.fn_body_start_token[prog.fn_count as usize] = body_start
-                        prog.fn_count = prog.fn_count + 1
-                    }
-
-                    // Skip to closing brace
-                    var brace_depth: i64 = 1
-                    ti = ti + 1
-                    while ti < tc && brace_depth > 0 {
-                        if FLX_TK[ti as usize] == 18 {
-                            brace_depth = brace_depth + 1
-                        }
-                        if FLX_TK[ti as usize] == 19 {
-                            brace_depth = brace_depth - 1
-                        }
-                        ti = ti + 1
-                    }
-                } else {
-                    ti = ti + 1
-                }
-                continue
-            }
-        }
-        ti = ti + 1
-    }
-
-    prog
+    token_count
 }

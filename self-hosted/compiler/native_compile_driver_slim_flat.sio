@@ -1,73 +1,280 @@
 // self-hosted::compiler::native_compile_driver_slim_flat
 //
-// Slim native compile driver using flat_lex_parse module.
-// Avoids idiomatic features (methods, enums, Box) that lean compiler can't codegen.
-// Uses flat_lex_parse::flat_lex_file and flat_lex_parse::flat_parse_tokens instead of
-// lexer::mod and parser::mod.
-//
-// Pipeline: flat_lex → flat_parse → ... (remaining pipeline same as slim driver)
-//
-// Usage (natively compiled):
-//   ./native_driver_flat.elf <source.sio> [-o <output>]
-//   ./native_driver_flat.elf <source.sio> <output>
+// Slim native compile driver using flat lexer. x86-64 Linux only.
+// Uses flat_lex_parse instead of lexer::mod to avoid method calls.
 
-use compiler::flat_lex_parse::{flat_lex_file, flat_parse_tokens}
+use parser::ast::{Program}
+use parser::mod::{parse_program_preloaded}
+use parser::parser::{parser_last_error_count, parser_set_token_flat}
+use ir::ir::{ir_empty_epistemic_section}
+use ir::lower::{lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref}
+use native::encode::*
+use native::elf::*
+use native::elf_bulk::*
+use native::reloc::*
+use native::frame::*
+use native::lower_ir::*
+use native::machine_ir::*
+use native::gc::*
+use native::runtime_context::*
+use native::stack_maps::*
+use native::target_policy::*
+use native::codegen_x86_linux::*
+use native::regalloc::*
+use native::peephole::*
+use io::trace::*
 
-fn main() -> i64 with IO, Mut {
+// ============================================================================
+// INLINE FLAT LEXER (avoids cross-module call boundary)
+// ============================================================================
+var FLAT_SRC: [i8; 1048576] = [0; 1048576]
+var FLAT_SRC_LEN: i64 = 0
+
+fn fl_is_ws(ch: i8) -> bool { ch == 32 as i8 || ch == 9 as i8 || ch == 13 as i8 }
+fn fl_is_digit(ch: i8) -> bool { ch >= 48 as i8 && ch <= 57 as i8 }
+fn fl_is_id_start(ch: i8) -> bool { (ch >= 65 as i8 && ch <= 90 as i8) || (ch >= 97 as i8 && ch <= 122 as i8) || ch == 95 as i8 }
+fn fl_is_id_cont(ch: i8) -> bool { fl_is_id_start(ch) || fl_is_digit(ch) }
+
+fn fl_scan_id(pos: i64) -> i64 with Mut { var e = pos; while e < FLAT_SRC_LEN && fl_is_id_cont(FLAT_SRC[e as usize]) { e = e + 1 }; e }
+fn fl_scan_num(pos: i64) -> i64 with Mut { var e = pos; while e < FLAT_SRC_LEN && fl_is_digit(FLAT_SRC[e as usize]) { e = e + 1 }; e }
+fn fl_scan_str(pos: i64) -> i64 with Mut {
+    var e = pos + 1
+    while e < FLAT_SRC_LEN && FLAT_SRC[e as usize] != 34 as i8 {
+        if e + 1 < FLAT_SRC_LEN && FLAT_SRC[e as usize] == 92 as i8 { e = e + 2 } else { e = e + 1 }
+    }
+    if e < FLAT_SRC_LEN && FLAT_SRC[e as usize] == 34 as i8 { e = e + 1 }
+    e
+}
+
+fn fl_kw(s: i64, n: i64) -> i64 with Mut {
+    // 0=Eof 7=Fn 8=Let 9=Var 20=If 21=Else 24=While 28=Return 45=With 123=Ident
+    if n == 2 {
+        let a = FLAT_SRC[s as usize]; let b = FLAT_SRC[(s+1) as usize]
+        if a == 102 as i8 && b == 110 as i8 { return 7 }   // fn
+        if a == 105 as i8 && b == 102 as i8 { return 20 }  // if
+        if a == 97 as i8 && b == 115 as i8 { return 30 }   // as
+    }
+    if n == 3 {
+        let a = FLAT_SRC[s as usize]; let b = FLAT_SRC[(s+1) as usize]; let c = FLAT_SRC[(s+2) as usize]
+        if a == 108 as i8 && b == 101 as i8 && c == 116 as i8 { return 8 }   // let
+        if a == 118 as i8 && b == 97 as i8 && c == 114 as i8 { return 9 }    // var
+        if a == 117 as i8 && b == 115 as i8 && c == 101 as i8 { return 5 }   // use
+        if a == 112 as i8 && b == 117 as i8 && c == 98 as i8 { return 32 }   // pub
+    }
+    if n == 4 {
+        let a = FLAT_SRC[s as usize]; let b = FLAT_SRC[(s+1) as usize]; let c = FLAT_SRC[(s+2) as usize]; let d = FLAT_SRC[(s+3) as usize]
+        if a == 119 as i8 && b == 105 as i8 && c == 116 as i8 && d == 104 as i8 { return 45 }  // with
+        if a == 101 as i8 && b == 108 as i8 && c == 115 as i8 && d == 101 as i8 { return 21 }  // else
+        if a == 116 as i8 && b == 114 as i8 && c == 117 as i8 && d == 101 as i8 { return 35 }  // true
+        if a == 116 as i8 && b == 121 as i8 && c == 112 as i8 && d == 101 as i8 { return 12 }  // type
+        if a == 98 as i8 && b == 111 as i8 && c == 111 as i8 && d == 108 as i8 { return 123 }  // bool (ident)
+    }
+    if n == 5 {
+        let a = FLAT_SRC[s as usize]; let b = FLAT_SRC[(s+1) as usize]; let c = FLAT_SRC[(s+2) as usize]; let d = FLAT_SRC[(s+3) as usize]; let e = FLAT_SRC[(s+4) as usize]
+        if a == 119 as i8 && b == 104 as i8 && c == 105 as i8 && d == 108 as i8 && e == 101 as i8 { return 24 }  // while
+        if a == 102 as i8 && b == 97 as i8 && c == 108 as i8 && d == 115 as i8 && e == 101 as i8 { return 36 }  // false
+    }
+    if n == 6 {
+        let a = FLAT_SRC[s as usize]; let b = FLAT_SRC[(s+1) as usize]; let c = FLAT_SRC[(s+2) as usize]; let d = FLAT_SRC[(s+3) as usize]; let e = FLAT_SRC[(s+4) as usize]; let f = FLAT_SRC[(s+5) as usize]
+        if a == 114 as i8 && b == 101 as i8 && c == 116 as i8 && d == 117 as i8 && e == 114 as i8 && f == 110 as i8 { return 28 }  // return
+        if a == 115 as i8 && b == 116 as i8 && c == 114 as i8 && d == 117 as i8 && e == 99 as i8 && f == 116 as i8 { return 13 }  // struct
+    }
+    123  // Ident
+}
+
+fn fl_op(p: i64) -> i64 with Mut {
+    let a = FLAT_SRC[p as usize]
+    if p + 1 < FLAT_SRC_LEN {
+        let b = FLAT_SRC[(p+1) as usize]
+        if a == 61 as i8 && b == 61 as i8 { return 146 }  // ==
+        if a == 33 as i8 && b == 61 as i8 { return 147 }  // !=
+        if a == 60 as i8 && b == 61 as i8 { return 148 }  // <=
+        if a == 62 as i8 && b == 61 as i8 { return 149 }  // >=
+        if a == 38 as i8 && b == 38 as i8 { return 150 }  // &&
+        if a == 124 as i8 && b == 124 as i8 { return 151 } // ||
+        if a == 45 as i8 && b == 62 as i8 { return 158 }  // ->
+        if a == 58 as i8 && b == 58 as i8 { return 162 }  // ::
+        if a == 38 as i8 && b == 33 as i8 { return 163 }  // &!
+    }
+    // single-char
+    if a == 43 as i8 { return 132 }   // +
+    if a == 45 as i8 { return 133 }   // -
+    if a == 42 as i8 { return 134 }   // *
+    if a == 47 as i8 { return 135 }   // /
+    if a == 37 as i8 { return 136 }   // %
+    if a == 61 as i8 { return 137 }   // =
+    if a == 60 as i8 { return 138 }   // <
+    if a == 62 as i8 { return 139 }   // >
+    if a == 33 as i8 { return 140 }   // !
+    if a == 38 as i8 { return 141 }   // &
+    if a == 124 as i8 { return 142 }  // |
+    if a == 58 as i8 { return 181 }   // : (treat as punctuation)
+    1  // Error
+}
+
+fn fl_op_len(p: i64, kind: i64) -> i64 {
+    if kind >= 146 && kind <= 163 { return 2 }
+    1
+}
+
+fn flat_lex_file(path: string) -> i64 with IO, Mut, Div, Panic {
+    let size = file_size(path)
+    let data = read_file(path)
+    var n: i64 = size
+    if n < 0 { n = 0 }
+    if n > 1048576 { n = 1048576 }
+    var i: i64 = 0
+    while i < n { FLAT_SRC[i as usize] = data[i as usize]; i = i + 1 }
+    FLAT_SRC_LEN = n
+
+    var pos: i64 = 0
+    var line: i64 = 1
+    var col: i64 = 1
+    var tc: i64 = 0
+
+    while pos < FLAT_SRC_LEN {
+        let ch = FLAT_SRC[pos as usize]
+        if fl_is_ws(ch) { col = col + 1; pos = pos + 1; continue }
+        if ch == 10 as i8 { line = line + 1; col = 1; pos = pos + 1; continue }
+        // Comments
+        if ch == 47 as i8 && pos + 1 < FLAT_SRC_LEN && FLAT_SRC[(pos+1) as usize] == 47 as i8 {
+            while pos < FLAT_SRC_LEN && FLAT_SRC[pos as usize] != 10 as i8 { pos = pos + 1 }
+            continue
+        }
+        // Identifiers/keywords
+        if fl_is_id_start(ch) {
+            let s = pos; pos = fl_scan_id(pos); let len = pos - s
+            parser_set_token_flat(tc, fl_kw(s, len), s, pos, line, col, 0)
+            tc = tc + 1; col = col + len; continue
+        }
+        // Numbers
+        if fl_is_digit(ch) {
+            let s = pos; pos = fl_scan_num(pos); let len = pos - s
+            var val: i64 = 0; var j: i64 = s
+            while j < pos { val = val * 10 + ((FLAT_SRC[j as usize] - 48 as i8) as i64); j = j + 1 }
+            parser_set_token_flat(tc, 124, s, pos, line, col, val)
+            tc = tc + 1; col = col + len; continue
+        }
+        // Strings
+        if ch == 34 as i8 {
+            let s = pos; pos = fl_scan_str(pos); let len = pos - s
+            parser_set_token_flat(tc, 126, s, pos, line, col, 0)
+            tc = tc + 1; col = col + len; continue
+        }
+        // Delimiters
+        if ch == 40 as i8 { parser_set_token_flat(tc, 174, pos, pos+1, line, col, 0); tc = tc + 1; col = col + 1; pos = pos + 1; continue }
+        if ch == 41 as i8 { parser_set_token_flat(tc, 175, pos, pos+1, line, col, 0); tc = tc + 1; col = col + 1; pos = pos + 1; continue }
+        if ch == 123 as i8 { parser_set_token_flat(tc, 176, pos, pos+1, line, col, 0); tc = tc + 1; col = col + 1; pos = pos + 1; continue }
+        if ch == 125 as i8 { parser_set_token_flat(tc, 177, pos, pos+1, line, col, 0); tc = tc + 1; col = col + 1; pos = pos + 1; continue }
+        if ch == 91 as i8 { parser_set_token_flat(tc, 178, pos, pos+1, line, col, 0); tc = tc + 1; col = col + 1; pos = pos + 1; continue }
+        if ch == 93 as i8 { parser_set_token_flat(tc, 179, pos, pos+1, line, col, 0); tc = tc + 1; col = col + 1; pos = pos + 1; continue }
+        // Punctuation
+        if ch == 59 as i8 { parser_set_token_flat(tc, 180, pos, pos+1, line, col, 0); tc = tc + 1; col = col + 1; pos = pos + 1; continue }
+        if ch == 44 as i8 { parser_set_token_flat(tc, 182, pos, pos+1, line, col, 0); tc = tc + 1; col = col + 1; pos = pos + 1; continue }
+        if ch == 46 as i8 { parser_set_token_flat(tc, 183, pos, pos+1, line, col, 0); tc = tc + 1; col = col + 1; pos = pos + 1; continue }
+        // Operators (including : and ::)
+        let ok = fl_op(pos)
+        let ol = fl_op_len(pos, ok)
+        parser_set_token_flat(tc, ok, pos, pos + ol, line, col, 0)
+        tc = tc + 1; col = col + ol; pos = pos + ol
+    }
+    // EOF
+    parser_set_token_flat(tc, 0, pos, pos, line, col, 0)
+    tc = tc + 1
+    tc
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     let argc = arg_count()
     if argc < 1 {
-        print("native_compile_flat: usage: native_compile_driver_slim_flat.sio <source.sio> [-o <output>]\n")
-        print("native_compile_flat: usage: native_compile_driver_slim_flat.sio <source.sio> <output>\n")
+        print("usage: slim_flat <source.sio> [<output> | -o <output>]\n")
         return 1
     }
     let source_path = get_arg(0)
 
-    // Parse output path: supports both "-o <output>" and positional "<output>"
     var output_path = "a.out"
     if argc >= 3 {
         let flag = get_arg(1)
-        if flag == "-o" {
-            output_path = get_arg(2)
-        }
+        if flag == "-o" { output_path = get_arg(2) }
     }
     if argc == 2 {
-        // Positional: <source> <output> (backward compat)
         let arg1 = get_arg(1)
-        if arg1 != "-o" {
-            output_path = arg1
-        }
+        if arg1 != "-o" { output_path = arg1 }
     }
 
-    print("native_compile_flat: source=")
-    print(source_path)
-    print(" output=")
-    print(output_path)
-    print("\n")
+    print("slim_flat: source="); print(source_path)
+    print(" output="); print(output_path); print("\n")
 
-    // Phase 0: Flat lex
+    // Phase 0: Lex + Parse using inline flat lexer
     let tc = flat_lex_file(source_path)
+    print("slim_flat: tc="); print_int(tc); print("\n")
     if tc <= 0 {
-        print("native_compile_flat: lex_error\n")
+        print("slim_flat: lex_error (0 tokens)\n")
         return 1
     }
-    print("native_compile_flat: lex_ok token_count=")
-    print_int(tc)
-    print("\n")
-
-    // Phase 1: Flat parse
-    let prog = flat_parse_tokens(tc)
-    if prog.fn_count <= 0 {
-        print("native_compile_flat: parse_error (no functions)\n")
+    let prog = parse_program_preloaded(tc)
+    if parser_last_error_count() > 0 {
+        print("slim_flat: parse_error\n")
         return 1
     }
-    print("native_compile_flat: parse_ok fn_count=")
-    print_int(prog.fn_count)
-    print("\n")
+    print("slim_flat: parse_ok\n")
 
-    // NOTE: Full compilation pipeline (IR, codegen, ELF) intentionally skipped.
-    // This driver is a minimal test of flat_lex_parse integration.
-    // Return success once parsing completes without error.
+    let epistemic = ir_empty_epistemic_section()
 
-    print("native_compile_flat: ok\n")
+    // Phase 1: Flat IR summary
+    let summary_result = lower_program_to_ir_summary_flat_owned_with_epistemic_ref(&prog, epistemic)
+    if summary_result.had_error {
+        print("slim_flat: summary_lower_error\n")
+        return 2
+    }
+    let fn_count = summary_result.summary.module.fn_count
+    if fn_count <= 0 {
+        print("slim_flat: empty_module\n")
+        return 2
+    }
+    print("slim_flat: fn_count="); print_int(fn_count); print("\n")
+
+    // Phase 2: Streaming compile
+    var nc = compile_module_streaming_begin(compiler_new(), &summary_result.summary.module)
+    var fi: i64 = 0
+    while fi < fn_count {
+        let fn_name = summary_result.summary.module.functions[fi as usize].name
+        print("slim_flat: fn="); print(str_from_bytes(fn_name.buf, fn_name.len))
+
+        let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
+            &prog, &summary_result.summary, epistemic, fn_name
+        )
+        if body_result.had_error {
+            print(" body_error\n")
+            if body_result.func.instr_count <= 0 { fi = fi + 1; continue }
+        }
+        print(" instrs="); print_int(body_result.func.instr_count)
+
+        let lowered = native_v2_lower_function_to_machine(body_result.func)
+        let legal = native_v2_legalize_function(lowered)
+        if !legal.supported {
+            print(" unsupported="); print(legal.unsupported_detail); print("\n")
+            fi = fi + 1; continue
+        }
+        nc = compile_ir_function_v2(nc, body_result.func, legal, fi)
+        print(" ok\n")
+        fi = fi + 1
+    }
+
+    // Phase 3: Finish
+    print("slim_flat: streaming_finish\n")
+    nc = compile_module_streaming_finish(nc, &summary_result.summary.module)
+
+    // Phase 4: ELF
+    print("slim_flat: finalize_elf\n")
+    let elf = finalize_elf64_bulk(nc.code, nc.rodata, nc.data, nc.entry_offset, 4194304, nc.symbols, nc.fn_offsets, nc.fn_count)
+    print("slim_flat: elf_size="); print_int(elf.len); print("\n")
+
+    // Phase 5: Write
+    let write_ok = write_file(output_path, elf.bytes, elf.len) == 0
+    if !write_ok { print("slim_flat: write_error\n"); return 5 }
+
+    print("slim_flat: ok written="); print(output_path)
+    print(" size="); print_int(elf.len); print("\n")
     0
 }
