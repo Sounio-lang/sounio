@@ -13106,6 +13106,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if TK[p as usize] == 38 { p = p + 1; while TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 } }
         if TK[p as usize] == 8 { p = p + 1 }
 
+        // Save error count before compiling this function's body
+        let fn_err_before = TC_FN_ERR_COUNT
+
         // Emit prologue: push rbp; mov rbp, rsp; sub rsp, 131072
         print_int(fn_idx)
         print(" ")
@@ -13222,7 +13225,34 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if frame_sz > max_frame_bytes() { tc_stack_frame_too_large(frame_sz) }
         var fpi: i64 = 0
         while fpi < FRAME_PATCH_COUNT { em32_at(FRAME_PATCH_OFF[fpi as usize], frame_sz); fpi = fpi + 1 }
-        // (stub infrastructure removed)
+
+        // CONVERGENCE FIX: If imported function had errors, rewind and emit clean stub.
+        // This ensures FN_OFF[fn_idx] points to valid code (just returns 0) and
+        // prevents broken partial codegen from corrupting downstream call offsets.
+        let fn_had_errors = TC_FN_ERR_COUNT > fn_err_before
+        let fn_is_import = (FN_EFFECTS[fn_idx as usize] & 2048) != 0
+        if fn_had_errors && fn_is_import {
+            // Invalidate patches that were recorded during this function's body
+            // (they reference code offsets that will be overwritten by the stub)
+            let stub_start = FN_OFF[fn_idx as usize]
+            var rpi: i64 = 0
+            while rpi < PATCH_COUNT {
+                if PATCH_OFF[rpi as usize] >= stub_start && PATCH_OFF[rpi as usize] < CL {
+                    PATCH_FN[rpi as usize] = -1  // invalidate: fn_find check in patch loop skips fi<0
+                }
+                rpi = rpi + 1
+            }
+            // Rewind code to function start
+            CL = stub_start
+            // Emit minimal stub: push rbp; mov rbp,rsp; xor eax,eax; pop rbp; ret
+            em(0x55)                         // push rbp
+            em(0x48); em(0x89); em(0xe5)     // mov rbp, rsp
+            em(0x31); em(0xc0)               // xor eax, eax
+            em(0x5d)                         // pop rbp
+            em(0xc3)                         // ret
+            FN_FRAME_SIZE[fn_idx as usize] = 0
+        }
+
         fn_idx = fn_idx + 1
     }
 
