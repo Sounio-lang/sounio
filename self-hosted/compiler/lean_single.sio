@@ -2092,6 +2092,10 @@ fn ret_agg_nslots(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     if ty == 6 {
         let si = st_find(ty_hash)
         if si >= 0 { return st_total_size(si) / 8 }
+        // Synthetic tuple or unregistered struct: use SRET with generous slot count.
+        // The callee will write up to this many slots via the hidden SRET pointer.
+        // 64 slots = 512 bytes — enough for (Parser, Item) and similar large tuples.
+        if ty_hash != 0 { return 64 }
     }
     return 0
 }
@@ -6723,8 +6727,53 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EXPR_TY_HASH = 0
         return
     }
-    // Parenthesized
-    if k == 6 { EP = EP + 1; compile_or(); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+    // Parenthesized expression or tuple literal
+    if k == 6 {
+        EP = EP + 1
+        compile_or()
+        if TK[EP as usize] == 28 {
+            // Tuple literal: (expr1, expr2, ...)
+            // First element already compiled → store to slots
+            let tup_base = NEXT_SLOT
+            var tup_count: i64 = 0
+            // Store first element
+            let first_nslots = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+            if first_nslots > 1 {
+                copy_agg_into_struct_slots_x86(tup_base, EXPR_TY, EXPR_TY_HASH)
+                NEXT_SLOT = NEXT_SLOT + first_nslots
+            } else {
+                emit_store_var(tup_base)
+                NEXT_SLOT = NEXT_SLOT + 1
+            }
+            tup_count = tup_count + 1
+            // Compile remaining elements
+            while TK[EP as usize] == 28 {
+                EP = EP + 1  // skip ,
+                if TK[EP as usize] == 7 { break }  // trailing comma
+                compile_or()
+                let elem_nslots = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+                if elem_nslots > 1 {
+                    copy_agg_into_struct_slots_x86(NEXT_SLOT, EXPR_TY, EXPR_TY_HASH)
+                    NEXT_SLOT = NEXT_SLOT + elem_nslots
+                } else {
+                    emit_store_var(NEXT_SLOT)
+                    NEXT_SLOT = NEXT_SLOT + 1
+                }
+                tup_count = tup_count + 1
+            }
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            let tup_total_slots = NEXT_SLOT - tup_base
+            // Return pointer to tuple data (like struct literal)
+            em(0x48); em(0x8d); em(0x85)
+            em32(0 - (tup_base + tup_total_slots - 1) * 8)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 6
+            EXPR_TY_HASH = tup_count * 999983 + 7777
+            return
+        }
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        return
+    }
     if k == 44 { compile_borrow_primary_x86(); return }
     // Dereference: *expr → compile expr, then load from pointer
     if k == 19 {
@@ -8499,15 +8548,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                     if FN_ARITY[mfi as usize] != margc { tc_wrong_arity(method_tok, FN_ARITY[mfi as usize], margc) }
-                    emit_setup_direct_call_args_x86(margc)
-                    emit_prepare_stack_call_args_x86(margc, 6)
-                    em(0xe8)
-                    PATCH_OFF[PATCH_COUNT as usize] = CL
-                    PATCH_FN[PATCH_COUNT as usize] = mfi
-                    PATCH_KIND[PATCH_COUNT as usize] = 0
-                    PATCH_COUNT = PATCH_COUNT + 1
-                    em32(0)
-                    emit_drop_call_args_x86(margc + call_extra_stack_args_x86(margc, 6))
+                    // Use emit_direct_fn_call_x86 which handles SRET for aggregate returns
+                    emit_direct_fn_call_x86(mfi, margc)
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
