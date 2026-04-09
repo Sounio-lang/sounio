@@ -1786,6 +1786,24 @@ fn call_arg_type_compatible(expected_ty: i64, expected_hash: i64, actual_ty: i64
             return true
         }
     }
+    // Auto-ref coercion: struct/array field access through a reference produces an address
+    // in the codegen (via lea), so it is ABI-compatible with a shared &T parameter.
+    // This handles patterns like: fn f(x: &Foo) called as f(obj.field) where obj: &Bar.
+    if expected_ty == 10 && ref_hash_mut(expected_hash) == 0 {
+        let exp_inner_ty = ref_hash_inner_ty(expected_hash)
+        let exp_inner_hash = ref_hash_inner_hash(expected_hash)
+        if (actual_ty == 6 || actual_ty == 8) && ty_eq(exp_inner_ty, exp_inner_hash, actual_ty, actual_hash) {
+            return true
+        }
+        // Allow passing &!T (exclusive) where &T (shared) is expected — safe downgrade.
+        if actual_ty == 10 && ref_hash_mut(actual_hash) != 0 {
+            let act_inner_ty = ref_hash_inner_ty(actual_hash)
+            let act_inner_hash = ref_hash_inner_hash(actual_hash)
+            if ty_eq(exp_inner_ty, exp_inner_hash, act_inner_ty, act_inner_hash) {
+                return true
+            }
+        }
+    }
     return false
 }
 
@@ -4486,8 +4504,11 @@ fn var_find_ty_hash(ns: i64, ne: i64) -> i64 with Panic, Mut {
 }
 
 // Release call-site borrows recorded during a call's argument list
-fn release_call_arg_borrows() with Mut {
-    var ri: i64 = 0
+// Release borrows recorded from index `from_n` to current CALL_ARG_BORROW_N,
+// then restore CALL_ARG_BORROW_N to from_n.  Supports nested calls correctly:
+// each call saves its own base and only releases the borrows it added.
+fn release_call_arg_borrows(from_n: i64) with Mut {
+    var ri: i64 = from_n
     while ri < CALL_ARG_BORROW_N {
         let rvi = CALL_ARG_BORROW_VI[ri as usize]
         if rvi >= 0 && rvi < 1024 {
@@ -4503,7 +4524,7 @@ fn release_call_arg_borrows() with Mut {
         }
         ri = ri + 1
     }
-    CALL_ARG_BORROW_N = 0
+    CALL_ARG_BORROW_N = from_n
 }
 
 // ─── Function lookup ───
@@ -4533,6 +4554,17 @@ fn fn_find_method(ns: i64, ne: i64, recv_hash: i64) -> i64 with Panic, Mut {
         while i < FN_COUNT {
             if name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) { return i }
             i = i + 1
+        }
+    }
+    // SIZE_HINT fallback: recv_hash is 1000000007+nslots after tuple .0 materialization.
+    // The actual struct type was lost; fall back to name-only match so method calls work.
+    if recv_hash >= 1000000007 {
+        if recv_hash < 1000001007 {
+            i = 0
+            while i < FN_COUNT {
+                if name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) { return i }
+                i = i + 1
+            }
         }
     }
     return -1
@@ -8123,10 +8155,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
             EP = EP + 1
             var argc: i64 = 0
             var abi_argc: i64 = 0
-            // Mark that we're inside a call arg list so borrows taken here are tracked
+            // Mark that we're inside a call arg list so borrows taken here are tracked.
+            // Save prev_borrow_n so nested calls don't clobber our borrow records.
             let prev_in_call_args = IN_CALL_ARGS
+            let prev_borrow_n = CALL_ARG_BORROW_N
             IN_CALL_ARGS = 1
-            CALL_ARG_BORROW_N = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or()
                 if fi >= 0 {
@@ -8173,7 +8206,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 7 { EP = EP + 1 }
             // Restore call-arg tracking state and release call-site borrows
             IN_CALL_ARGS = prev_in_call_args
-            release_call_arg_borrows()
+            release_call_arg_borrows(prev_borrow_n)
             if fi >= 0 {
                 if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
                 let callee_eff = FN_EFFECTS[fi as usize] & 1023  // mask out visibility bits
