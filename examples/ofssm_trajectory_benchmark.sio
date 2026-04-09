@@ -1,0 +1,287 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// O-FSSM Trajectory Divergence with ANALYTICAL BPTT
+// The gradient through oct_mul is an explicit 8×8 Jacobian transpose — 120 FLOPs, exact.
+// For h' = (A⊗h)⊗x: backward uses 4 Jacobian applications (same cost as forward).
+// 4 agents, 64 triples, 70/30 split, MSE regression, divergence-binned evaluation.
+
+fn sqrt_q(x:f64)->f64 with Mut,Div,Panic{if x<=0.0{return 0.0}var g=x;var i=0;while i<15{g=0.5*(g+x/g);i=i+1};g}
+var RNG_A:i64=0;var RNG_B:i64=0
+fn rng_seed(a:i64,b:i64) with Mut{RNG_A=a;RNG_B=b}
+fn rng_next()->i64 with Mut{var x=RNG_A;let y=RNG_B;RNG_A=y;x=x^(x<<23);x=x^(x>>17);x=x^(y^(y>>26));RNG_B=x;let r=x+y;if r<0{0-r}else{r}}
+
+// ═══ Cayley product + analytical gradient ═══
+var T1:[f64;8]=[0.0;8]; var T2:[f64;8]=[0.0;8]
+fn do_oct_mul(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+              b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    T1[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    T1[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    T1[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    T1[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    T1[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    T1[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    T1[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    T1[7]=a0*b7+a7*b0-a1*b6+a6*b1-a2*b5+a5*b2+a3*b4-a4*b3
+}
+
+// Gradient w.r.t. first arg: da = R_b^T · dc (result in T2)
+fn oct_grad_a(dc0:f64,dc1:f64,dc2:f64,dc3:f64,dc4:f64,dc5:f64,dc6:f64,dc7:f64,
+              b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    T2[0]=b0*dc0+b1*dc1+b2*dc2+b3*dc3+b4*dc4+b5*dc5+b6*dc6+b7*dc7
+    T2[1]=0.0-b1*dc0+b0*dc1-b3*dc2+b2*dc3-b5*dc4+b4*dc5+b7*dc6-b6*dc7
+    T2[2]=0.0-b2*dc0+b3*dc1+b0*dc2-b1*dc3-b6*dc4-b7*dc5+b4*dc6-b5*dc7
+    T2[3]=0.0-b3*dc0-b2*dc1+b1*dc2+b0*dc3-b7*dc4+b6*dc5-b5*dc6+b4*dc7
+    T2[4]=0.0-b4*dc0+b5*dc1+b6*dc2+b7*dc3+b0*dc4-b1*dc5-b2*dc6-b3*dc7
+    T2[5]=0.0-b5*dc0-b4*dc1+b7*dc2-b6*dc3+b1*dc4+b0*dc5+b3*dc6+b2*dc7
+    T2[6]=0.0-b6*dc0-b7*dc1-b4*dc2+b5*dc3+b2*dc4-b3*dc5+b0*dc6+b1*dc7
+    T2[7]=0.0-b7*dc0+b6*dc1-b5*dc2-b4*dc3+b3*dc4+b2*dc5-b1*dc6+b0*dc7
+}
+
+// Gradient w.r.t. second arg: db = L_a^T · dc (result in T2)
+fn oct_grad_b(dc0:f64,dc1:f64,dc2:f64,dc3:f64,dc4:f64,dc5:f64,dc6:f64,dc7:f64,
+              a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64) with Mut {
+    T2[0]=a0*dc0+a1*dc1+a2*dc2+a3*dc3+a4*dc4+a5*dc5+a6*dc6+a7*dc7
+    T2[1]=0.0-a1*dc0+a0*dc1+a3*dc2-a2*dc3+a5*dc4-a4*dc5+a7*dc6-a6*dc7
+    T2[2]=0.0-a2*dc0-a3*dc1+a0*dc2+a1*dc3+a6*dc4+a7*dc5-a4*dc6-a5*dc7
+    T2[3]=0.0-a3*dc0+a2*dc1-a1*dc2+a0*dc3+a7*dc4-a6*dc5+a5*dc6-a4*dc7
+    T2[4]=0.0-a4*dc0-a5*dc1-a6*dc2-a7*dc3+a0*dc4+a1*dc5+a2*dc6+a3*dc7
+    T2[5]=0.0-a5*dc0+a4*dc1-a7*dc2+a6*dc3-a1*dc4+a0*dc5-a3*dc6+a2*dc7
+    T2[6]=0.0-a6*dc0+a7*dc1+a4*dc2-a5*dc3-a2*dc4+a3*dc5+a0*dc6-a1*dc7
+    T2[7]=0.0-a7*dc0-a6*dc1+a5*dc2+a4*dc3-a3*dc4-a2*dc5+a1*dc6+a0*dc7
+}
+
+// ═══ Trajectory table ═══
+var AGENTS:[f64;32]=[0.0;32]; var TRAJ:[i64;5120]=[0;5120]; var DIV:[f64;64]=[0.0;64]
+fn ti(a:i64,b:i64,c:i64,m:i64,s:i64,d:i64)->i64{(((a*4+b)*4+c)*2+m)*40+s*8+d}
+
+// ═══ Model weights ═══
+var W:[i64;200]=[0;200]; var H:[i64;8]=[0;8]; var MOM:[i64;200]=[0;200]
+var PRED:[f64;8]=[0.0;8]; var TGT:[f64;8]=[0.0;8]
+// BPTT: save h and x at each of 5 timesteps
+var HS:[f64;40]=[0.0;40]; var XS:[f64;40]=[0.0;40]  // 5 steps × 8 dims
+var DA:[f64;8]=[0.0;8]  // accumulated gradient for A
+
+fn ws(i:i64,v:f64) with Mut{W[i]=(v*100000000.0) as i64}
+fn wg(i:i64)->f64 with Div{(W[i] as f64)/100000000.0}
+fn hs(i:i64,v:f64) with Mut{H[i]=(v*100000000.0) as i64}
+fn hg(i:i64)->f64 with Div{(H[i] as f64)/100000000.0}
+
+// ═══ Forward step with state saving ═══
+fn fwd_oct_save(tok:i64, step:i64) with Mut, Div {
+    // Save h before step
+    var d=0;while d<8{HS[step*8+d]=hg(d);XS[step*8+d]=wg(tok*8+d);d=d+1}
+    // h' = (A⊗h)⊗x + 0.5*B*embed
+    let a0=wg(120);let a1=wg(121);let a2=wg(122);let a3=wg(123);let a4=wg(124);let a5=wg(125);let a6=wg(126);let a7=wg(127)
+    let h0=hg(0);let h1=hg(1);let h2=hg(2);let h3=hg(3);let h4=hg(4);let h5=hg(5);let h6=hg(6);let h7=hg(7)
+    let x0=wg(tok*8);let x1=wg(tok*8+1);let x2=wg(tok*8+2);let x3=wg(tok*8+3);let x4=wg(tok*8+4);let x5=wg(tok*8+5);let x6=wg(tok*8+6);let x7=wg(tok*8+7)
+    do_oct_mul(a0,a1,a2,a3,a4,a5,a6,a7,h0,h1,h2,h3,h4,h5,h6,h7)
+    let t0=T1[0];let t1=T1[1];let t2=T1[2];let t3=T1[3];let t4=T1[4];let t5=T1[5];let t6=T1[6];let t7=T1[7]
+    do_oct_mul(t0,t1,t2,t3,t4,t5,t6,t7,x0,x1,x2,x3,x4,x5,x6,x7)
+    d=0;while d<8{var v=T1[d]+0.5*wg(128+d)*wg(tok*8+d);if v>5.0{v=5.0}if v<0.0-5.0{v=0.0-5.0};hs(d,v);d=d+1}
+}
+
+fn fwd_quat_save(tok:i64, step:i64) with Mut, Div {
+    var d=0;while d<8{HS[step*8+d]=hg(d);XS[step*8+d]=wg(tok*8+d);d=d+1}
+    let qw=wg(120);let qx=wg(121);let qy=wg(122);let qz=wg(123)
+    let hw=hg(0);let hx=hg(1);let hy=hg(2);let hz=hg(3)
+    let tw=qw*hw-qx*hx-qy*hy-qz*hz;let tx=qw*hx+qx*hw+qy*hz-qz*hy;let ty=qw*hy-qx*hz+qy*hw+qz*hx;let tz=qw*hz+qx*hy-qy*hx+qz*hw
+    let xw=wg(tok*8);let xx=wg(tok*8+1);let xy=wg(tok*8+2);let xz=wg(tok*8+3)
+    var n0=tw*xw-tx*xx-ty*xy-tz*xz+0.5*wg(128)*wg(tok*8);var n1=tw*xx+tx*xw+ty*xz-tz*xy+0.5*wg(129)*wg(tok*8+1)
+    var n2=tw*xy-tx*xz+ty*xw+tz*xx+0.5*wg(130)*wg(tok*8+2);var n3=tw*xz+tx*xy-ty*xx+tz*xw+0.5*wg(131)*wg(tok*8+3)
+    if n0>5.0{n0=5.0}if n0<0.0-5.0{n0=0.0-5.0}if n1>5.0{n1=5.0}if n1<0.0-5.0{n1=0.0-5.0}
+    if n2>5.0{n2=5.0}if n2<0.0-5.0{n2=0.0-5.0}if n3>5.0{n3=5.0}if n3<0.0-5.0{n3=0.0-5.0}
+    let qw2=wg(124);let qx2=wg(125);let qy2=wg(126);let qz2=wg(127)
+    let hw2=hg(4);let hx2=hg(5);let hy2=hg(6);let hz2=hg(7)
+    let tw2=qw2*hw2-qx2*hx2-qy2*hy2-qz2*hz2;let tx2=qw2*hx2+qx2*hw2+qy2*hz2-qz2*hy2;let ty2=qw2*hy2-qx2*hz2+qy2*hw2+qz2*hx2;let tz2=qw2*hz2+qx2*hy2-qy2*hx2+qz2*hw2
+    let xw2=wg(tok*8+4);let xx2=wg(tok*8+5);let xy2=wg(tok*8+6);let xz2=wg(tok*8+7)
+    var n4=tw2*xw2-tx2*xx2-ty2*xy2-tz2*xz2+0.5*wg(132)*wg(tok*8+4);var n5=tw2*xx2+tx2*xw2+ty2*xz2-tz2*xy2+0.5*wg(133)*wg(tok*8+5)
+    var n6=tw2*xy2-tx2*xz2+ty2*xw2+tz2*xx2+0.5*wg(134)*wg(tok*8+6);var n7=tw2*xz2+tx2*xy2-ty2*xx2+tz2*xw2+0.5*wg(135)*wg(tok*8+7)
+    if n4>5.0{n4=5.0}if n4<0.0-5.0{n4=0.0-5.0}if n5>5.0{n5=5.0}if n5<0.0-5.0{n5=0.0-5.0}
+    if n6>5.0{n6=5.0}if n6<0.0-5.0{n6=0.0-5.0}if n7>5.0{n7=5.0}if n7<0.0-5.0{n7=0.0-5.0}
+    hs(0,n0);hs(1,n1);hs(2,n2);hs(3,n3);hs(4,n4);hs(5,n5);hs(6,n6);hs(7,n7)
+}
+
+fn fwd_diag(tok:i64) with Mut, Div {
+    var d=0;while d<8{var s=wg(120+d)*hg(d)+wg(128+d)*wg(tok*8+d);if s>5.0{s=5.0}if s<0.0-5.0{s=0.0-5.0};hs(d,s);d=d+1}
+}
+
+fn compute_pred() with Mut,Div{var o=0;while o<8{var s=0.0;var d=0;while d<8{s=s+hg(d)*wg(136+d*8+o);d=d+1};PRED[o]=s;o=o+1}}
+
+fn mse_update(lr:f64)->f64 with Mut,Div{
+    var mse=0.0;var o=0;while o<8{let e=PRED[o]-TGT[o];mse=mse+e*e;o=o+1};mse=mse/8.0
+    var d=0;while d<8{let hd=hg(d);o=0;while o<8{let idx=136+d*8+o;var g=0.25*(PRED[o]-TGT[o])*hd;if g>0.3{g=0.3}if g<0.0-0.3{g=0.0-0.3};let m=(MOM[idx] as f64)/100000000.0*0.9+g;MOM[idx]=(m*100000000.0) as i64;ws(idx,wg(idx)-lr*m);o=o+1};d=d+1}
+    mse
+}
+
+// ═══ BPTT backward for oct triple product ═══
+// Forward: temp_t = A⊗h_t, out_t = temp_t⊗x_t, h_{t+1} = clamp(out_t + residual)
+// Backward: given dh (gradient from output or next step):
+//   d_out = dh (ignoring clamp gradient for simplicity)
+//   d_temp = oct_grad_a(d_out, x_t)     [∂(temp⊗x)/∂temp]
+//   d_A += oct_grad_a(d_temp, h_t)      [∂(A⊗h)/∂A, accumulated]
+//   d_h_prev = oct_grad_b(d_temp, A)    [∂(A⊗h)/∂h, for chaining]
+fn bptt_oct(n_steps: i64) with Mut, Div, Panic {
+    // Compute dh from MSE output gradient
+    var dh: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 {
+        // dMSE/dh = dMSE/dpred * dpred/dh = Σ_o 2/8*(pred_o - tgt_o)*W_out[d,o]
+        var g = 0.0; var o = 0
+        while o < 8 { g = g + 0.25*(PRED[o]-TGT[o])*wg(136+d*8+o); o = o + 1 }
+        dh[d] = g; d = d + 1
+    }
+    // Clear DA
+    d = 0; while d < 8 { DA[d] = 0.0; d = d + 1 }
+
+    let a0=wg(120);let a1=wg(121);let a2=wg(122);let a3=wg(123);let a4=wg(124);let a5=wg(125);let a6=wg(126);let a7=wg(127)
+
+    // BPTT loop: t = n_steps-1 down to 0
+    var t = n_steps - 1
+    while t >= 0 {
+        let h0=HS[t*8];let h1=HS[t*8+1];let h2=HS[t*8+2];let h3=HS[t*8+3]
+        let h4=HS[t*8+4];let h5=HS[t*8+5];let h6=HS[t*8+6];let h7=HS[t*8+7]
+        let x0=XS[t*8];let x1=XS[t*8+1];let x2=XS[t*8+2];let x3=XS[t*8+3]
+        let x4=XS[t*8+4];let x5=XS[t*8+5];let x6=XS[t*8+6];let x7=XS[t*8+7]
+
+        // Recompute temp = A⊗h for this step
+        do_oct_mul(a0,a1,a2,a3,a4,a5,a6,a7, h0,h1,h2,h3,h4,h5,h6,h7)
+        let tmp0=T1[0];let tmp1=T1[1];let tmp2=T1[2];let tmp3=T1[3]
+        let tmp4=T1[4];let tmp5=T1[5];let tmp6=T1[6];let tmp7=T1[7]
+
+        // d_temp = ∂(temp⊗x)/∂temp^T · dh
+        oct_grad_a(dh[0],dh[1],dh[2],dh[3],dh[4],dh[5],dh[6],dh[7], x0,x1,x2,x3,x4,x5,x6,x7)
+        let dt0=T2[0];let dt1=T2[1];let dt2=T2[2];let dt3=T2[3]
+        let dt4=T2[4];let dt5=T2[5];let dt6=T2[6];let dt7=T2[7]
+
+        // d_A += ∂(A⊗h)/∂A^T · d_temp
+        oct_grad_a(dt0,dt1,dt2,dt3,dt4,dt5,dt6,dt7, h0,h1,h2,h3,h4,h5,h6,h7)
+        d=0;while d<8{DA[d]=DA[d]+T2[d];d=d+1}
+
+        // d_h_prev = ∂(A⊗h)/∂h^T · d_temp (for chaining to previous step)
+        oct_grad_b(dt0,dt1,dt2,dt3,dt4,dt5,dt6,dt7, a0,a1,a2,a3,a4,a5,a6,a7)
+        d=0;while d<8{
+            var v=T2[d];if v>1.0{v=1.0}if v<0.0-1.0{v=0.0-1.0}
+            dh[d]=v;d=d+1}
+        t = t - 1
+    }
+    // RIEMANNIAN GRADIENT: project DA onto tangent space of S⁷ at A
+    // tang = DA - <DA, A> * A  (remove normal component)
+    let inv = 1.0 / (n_steps as f64)
+    var dot_da_a = 0.0
+    d=0;while d<8{DA[d]=DA[d]*inv;dot_da_a=dot_da_a+DA[d]*wg(120+d);d=d+1}
+    // Project
+    d=0;while d<8{DA[d]=DA[d]-dot_da_a*wg(120+d);d=d+1}
+    // Clip + momentum + update
+    d=0;while d<8{
+        var g=DA[d];if g>0.5{g=0.5}if g<0.0-0.5{g=0.0-0.5}
+        let m=(MOM[120+d] as f64)/100000000.0*0.9+g
+        MOM[120+d]=(m*100000000.0) as i64
+        ws(120+d, wg(120+d)-0.002*m)
+        d=d+1}
+    // Retract to unit sphere (Riemannian exponential map approximation)
+    var nsq=0.0;d=0;while d<8{let v=wg(120+d);nsq=nsq+v*v;d=d+1}
+    let n=sqrt_q(nsq);if n>0.001{d=0;while d<8{ws(120+d,wg(120+d)/n);d=d+1}}
+}
+
+fn init_model(mid:i64) with Mut,Div,Panic{
+    rng_seed(55555,77777)
+    var i=0;while i<120{ws(i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    if mid==0{var nsq=0.0;var d=0;while d<8{let v=((rng_next()%2000) as f64-1000.0)/1000.0;ws(120+d,v);nsq=nsq+v*v;d=d+1};let n=sqrt_q(nsq);d=0;while d<8{ws(120+d,wg(120+d)/n);d=d+1}}
+    if mid==1{var nsq=0.0;var d=0;while d<4{let v=((rng_next()%2000) as f64-1000.0)/1000.0;ws(120+d,v);nsq=nsq+v*v;d=d+1};var n=sqrt_q(nsq);d=0;while d<4{ws(120+d,wg(120+d)/n);d=d+1}
+              nsq=0.0;d=0;while d<4{let v=((rng_next()%2000) as f64-1000.0)/1000.0;ws(124+d,v);nsq=nsq+v*v;d=d+1};n=sqrt_q(nsq);d=0;while d<4{ws(124+d,wg(124+d)/n);d=d+1}}
+    if mid==2{var d=0;while d<8{ws(120+d,0.95);d=d+1}}
+    i=0;while i<8{ws(128+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0;while i<64{ws(136+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0;while i<200{MOM[i]=0;i=i+1}
+}
+
+fn train_and_eval(mid:i64) with IO,Mut,Div,Panic{
+    init_model(mid)
+    rng_seed(12345,67890)
+    // Phase 1: output-only 30ep × 200
+    var ep=0;while ep<30{var s=0;while s<200{
+        let triple=(rng_next()/100)%45;let a=triple/16;let rem=triple-a*16;let b=rem/4;let c=rem-b*4
+        let mode=(rng_next()/100)%2;let step=(rng_next()/100)%5
+        var d=0;while d<8{H[d]=0;d=d+1};hs(0,1.0)
+        if mid==0{var t=0;while t<5{let toks:[i64;5]=[a,b,c,mode+4,step+6];fwd_oct_save(toks[t],t);t=t+1}}
+        if mid==1{var t=0;while t<5{let toks:[i64;5]=[a,b,c,mode+4,step+6];fwd_quat_save(toks[t],t);t=t+1}}
+        if mid==2{fwd_diag(a);fwd_diag(b);fwd_diag(c);fwd_diag(mode+4);fwd_diag(step+6)}
+        compute_pred()
+        d=0;while d<8{TGT[d]=(TRAJ[ti(a,b,c,mode,step,d)] as f64)/100000000.0;d=d+1}
+        mse_update(0.01)
+        s=s+1};ep=ep+1}
+
+    // Phase 2: BPTT through A, 50ep × 150
+    var ep2=0;while ep2<50{var s=0;while s<150{
+        let triple=(rng_next()/100)%45;let a=triple/16;let rem=triple-a*16;let b=rem/4;let c=rem-b*4
+        let mode=(rng_next()/100)%2;let step=(rng_next()/100)%5
+        var d=0;while d<8{H[d]=0;d=d+1};hs(0,1.0)
+        if mid==0{var t=0;while t<5{let toks:[i64;5]=[a,b,c,mode+4,step+6];fwd_oct_save(toks[t],t);t=t+1}}
+        if mid==1{var t=0;while t<5{let toks:[i64;5]=[a,b,c,mode+4,step+6];fwd_quat_save(toks[t],t);t=t+1}}
+        if mid==2{fwd_diag(a);fwd_diag(b);fwd_diag(c);fwd_diag(mode+4);fwd_diag(step+6)}
+        compute_pred()
+        d=0;while d<8{TGT[d]=(TRAJ[ti(a,b,c,mode,step,d)] as f64)/100000000.0;d=d+1}
+        mse_update(0.005)
+        // Analytical BPTT for O-SSM
+        if mid==0{bptt_oct(5)}
+        s=s+1};ep2=ep2+1}
+
+    // Eval
+    var mse_all=0.0;var n_all=0;var mse_lo=0.0;var n_lo=0;var mse_hi=0.0;var n_hi=0
+    var idx=45;while idx<64{
+        let a=idx/16;let rem=idx-a*16;let b=rem/4;let c=rem-b*4;let div=DIV[idx]
+        var mode=0;while mode<2{var step=0;while step<5{
+            var d=0;while d<8{H[d]=0;d=d+1};hs(0,1.0)
+            if mid==0{var t=0;while t<5{let toks:[i64;5]=[a,b,c,mode+4,step+6];fwd_oct_save(toks[t],t);t=t+1}}
+            if mid==1{var t=0;while t<5{let toks:[i64;5]=[a,b,c,mode+4,step+6];fwd_quat_save(toks[t],t);t=t+1}}
+            if mid==2{fwd_diag(a);fwd_diag(b);fwd_diag(c);fwd_diag(mode+4);fwd_diag(step+6)}
+            compute_pred()
+            var mse=0.0;d=0;while d<8{let tgt=(TRAJ[ti(a,b,c,mode,step,d)] as f64)/100000000.0;let e=PRED[d]-tgt;mse=mse+e*e;d=d+1}
+            mse=mse/8.0;mse_all=mse_all+mse;n_all=n_all+1
+            if div<0.15{mse_lo=mse_lo+mse;n_lo=n_lo+1}else{mse_hi=mse_hi+mse;n_hi=n_hi+1}
+            step=step+1};mode=mode+1}
+        idx=idx+1}
+    var avg_all=0.0;if n_all>0{avg_all=mse_all/(n_all as f64)}
+    var avg_lo=0.0;if n_lo>0{avg_lo=mse_lo/(n_lo as f64)}
+    var avg_hi=0.0;if n_hi>0{avg_hi=mse_hi/(n_hi as f64)}
+    print(avg_all);print("  lo=");print(avg_lo);print("(");print_int(n_lo);print(")  hi=");print(avg_hi);print("(");print_int(n_hi);print(")\n")
+}
+
+fn main()->i32 with IO,Mut,Div,Panic{
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  O-FSSM Trajectory: ANALYTICAL BPTT Through Cayley Product\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    // Generate agents
+    rng_seed(31415,27182)
+    var ag=0;while ag<4{var nsq=0.0;var d=0;while d<8{let v=((rng_next()%2000) as f64-1000.0)/1000.0;AGENTS[ag*8+d]=v;nsq=nsq+v*v;d=d+1};let n=sqrt_q(nsq);d=0;while d<8{AGENTS[ag*8+d]=AGENTS[ag*8+d]/n;d=d+1};ag=ag+1}
+    // Precompute trajectories
+    print("  Precomputing...\n")
+    var a=0;while a<4{var b=0;while b<4{var c=0;while c<4{var mode=0;while mode<2{
+        var h:[f64;8]=[0.0;8];h[0]=1.0
+        var step=0;while step<5{
+            let a0=AGENTS[a*8];let a1=AGENTS[a*8+1];let a2=AGENTS[a*8+2];let a3=AGENTS[a*8+3];let a4=AGENTS[a*8+4];let a5=AGENTS[a*8+5];let a6=AGENTS[a*8+6];let a7=AGENTS[a*8+7]
+            let b0=AGENTS[b*8];let b1=AGENTS[b*8+1];let b2=AGENTS[b*8+2];let b3=AGENTS[b*8+3];let b4=AGENTS[b*8+4];let b5=AGENTS[b*8+5];let b6=AGENTS[b*8+6];let b7=AGENTS[b*8+7]
+            let c0=AGENTS[c*8];let c1=AGENTS[c*8+1];let c2=AGENTS[c*8+2];let c3=AGENTS[c*8+3];let c4=AGENTS[c*8+4];let c5=AGENTS[c*8+5];let c6=AGENTS[c*8+6];let c7=AGENTS[c*8+7]
+            if mode==0{do_oct_mul(a0,a1,a2,a3,a4,a5,a6,a7,b0,b1,b2,b3,b4,b5,b6,b7);let ab0=T1[0];let ab1=T1[1];let ab2=T1[2];let ab3=T1[3];let ab4=T1[4];let ab5=T1[5];let ab6=T1[6];let ab7=T1[7];do_oct_mul(ab0,ab1,ab2,ab3,ab4,ab5,ab6,ab7,c0,c1,c2,c3,c4,c5,c6,c7)}
+            if mode==1{do_oct_mul(b0,b1,b2,b3,b4,b5,b6,b7,c0,c1,c2,c3,c4,c5,c6,c7);let bc0=T1[0];let bc1=T1[1];let bc2=T1[2];let bc3=T1[3];let bc4=T1[4];let bc5=T1[5];let bc6=T1[6];let bc7=T1[7];do_oct_mul(a0,a1,a2,a3,a4,a5,a6,a7,bc0,bc1,bc2,bc3,bc4,bc5,bc6,bc7)}
+            var abc:[f64;8]=[0.0;8];var dd=0;while dd<8{abc[dd]=T1[dd];dd=dd+1}
+            do_oct_mul(abc[0],abc[1],abc[2],abc[3],abc[4],abc[5],abc[6],abc[7],h[0],h[1],h[2],h[3],h[4],h[5],h[6],h[7])
+            dd=0;while dd<8{h[dd]=T1[dd];dd=dd+1}
+            var nsq=0.0;dd=0;while dd<8{nsq=nsq+h[dd]*h[dd];dd=dd+1};let n=sqrt_q(nsq);if n>0.001{dd=0;while dd<8{h[dd]=h[dd]/n;dd=dd+1}}
+            dd=0;while dd<8{TRAJ[ti(a,b,c,mode,step,dd)]=(h[dd]*100000000.0) as i64;dd=dd+1}
+            step=step+1};mode=mode+1};c=c+1};b=b+1};a=a+1}
+    // Divergences
+    a=0;while a<4{var b=0;while b<4{var c=0;while c<4{var dsq=0.0;var step=0;while step<5{var d=0;while d<8{let l=(TRAJ[ti(a,b,c,0,step,d)] as f64)/100000000.0;let r=(TRAJ[ti(a,b,c,1,step,d)] as f64)/100000000.0;dsq=dsq+(l-r)*(l-r);d=d+1};step=step+1};DIV[a*16+b*4+c]=sqrt_q(dsq/5.0);c=c+1};b=b+1};a=a+1}
+    var n_lo=0;var n_hi=0;var i=0;while i<64{if DIV[i]<0.15{n_lo=n_lo+1}else{n_hi=n_hi+1};i=i+1}
+    print("  Divergence: LOW=");print_int(n_lo);print(" HIGH=");print_int(n_hi);print("\n")
+    print("  Phase 1: 30ep×200 output-only, Phase 2: 50ep×150 BPTT(A)\n")
+    print("  O-SSM gets analytical BPTT; H-SSM and Diag are output-only\n\n")
+    print("  Model         MSE(all)   MSE(lo-div)    MSE(hi-div)\n")
+    print("  ───────────   ────────   ───────────    ───────────\n")
+    print("  O-SSM+BPTT    ");train_and_eval(0)
+    print("  H-SSM         ");train_and_eval(1)
+    print("  Naive-DIAG    ");train_and_eval(2)
+    println("ALL PASS")
+    0
+}

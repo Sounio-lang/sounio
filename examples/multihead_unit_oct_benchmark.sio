@@ -1,0 +1,639 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-Head Unit-Octonion SSM with Associator-as-Feature
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// THREE pieces working together:
+//
+// 1. COMPOSITION ALGEBRA (||ab||=||a||·||b||): Unit-octonion A guarantees
+//    norm-preserving state transitions (unitary RNN in 8D). Prevents
+//    gradient vanishing/explosion by algebraic structure, not eigenvalue
+//    hacking. Quaternions have this too — the advantage is 8D vs 4D.
+//
+// 2. MULTI-HEAD (4 × 8D): Each head has its own unit-octonion transition.
+//    Heads specialize independently. Total hidden dim = 32.
+//    A single 8D head is too small for Fano structure to express itself.
+//
+// 3. ASSOCIATOR-AS-FEATURE: At each step, compute ||[A,h,x]||
+//    = ||(A⊗h)⊗x - A⊗(h⊗x)||. This is the FREE geometric signal that
+//    ONLY exists in non-associative algebras. Fed into the output layer
+//    as a 4-dim vector (one per head). Quaternion heads produce ZERO
+//    associator (by definition). This is the non-associativity channel.
+//
+// Models:
+//   0: MH-Oct    4 heads × unit-oct (36 A-params) + 4 assoc features
+//   1: MH-Quat   4 heads × unit-quat×2 (36 A-params) + 0 assoc features
+//   2: MH-Dense  4 heads × dense 8×8 (256 A-params), no assoc [control]
+//   3: MH-Diag   4 heads × diagonal (32 A-params), no coupling [baseline]
+//
+// Task: Associativity probe (Fano plane ground truth, 16 classes)
+// Also: ListOps L=15 (10 classes)
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0; var term = 1.0; var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x; var i = 0
+    while i < 15 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+var RNG_A: i64 = 0; var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Fano Plane
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn oct_sign(i: i64, j: i64) -> i64 {
+    if i == 0 { return 1 } if j == 0 { return 1 }
+    if i == j { return 0 - 1 }
+    if i==1 { if j==2{return 1} if j==4{return 0-1} if j==3{return 1} if j==5{return 1} if j==6{return 0-1} if j==7{return 0-1} }
+    if i==2 { if j==1{return 0-1} if j==3{return 1} if j==4{return 1} if j==5{return 0-1} if j==6{return 1} if j==7{return 0-1} }
+    if i==3 { if j==1{return 0-1} if j==2{return 0-1} if j==4{return 1} if j==5{return 1} if j==6{return 0-1} if j==7{return 1} }
+    if i==4 { if j==1{return 1} if j==2{return 0-1} if j==3{return 0-1} if j==5{return 1} if j==6{return 1} if j==7{return 0-1} }
+    if i==5 { if j==1{return 0-1} if j==2{return 1} if j==3{return 0-1} if j==4{return 0-1} if j==6{return 1} if j==7{return 1} }
+    if i==6 { if j==1{return 1} if j==2{return 0-1} if j==3{return 1} if j==4{return 0-1} if j==5{return 0-1} if j==7{return 1} }
+    if i==7 { if j==1{return 1} if j==2{return 1} if j==3{return 0-1} if j==4{return 1} if j==5{return 0-1} if j==6{return 0-1} }
+    0
+}
+
+fn oct_basis(i: i64, j: i64) -> i64 {
+    if i == 0 { return j } if j == 0 { return i }
+    if i == j { return 0 }
+    if i==1 { if j==2{return 4} if j==4{return 2} if j==3{return 7} if j==5{return 6} if j==6{return 5} if j==7{return 3} }
+    if i==2 { if j==1{return 4} if j==3{return 5} if j==4{return 1} if j==5{return 3} if j==6{return 7} if j==7{return 6} }
+    if i==3 { if j==1{return 7} if j==2{return 5} if j==4{return 6} if j==5{return 2} if j==6{return 4} if j==7{return 1} }
+    if i==4 { if j==1{return 2} if j==2{return 1} if j==3{return 6} if j==5{return 7} if j==6{return 3} if j==7{return 5} }
+    if i==5 { if j==1{return 6} if j==2{return 3} if j==3{return 2} if j==4{return 7} if j==6{return 1} if j==7{return 4} }
+    if i==6 { if j==1{return 5} if j==2{return 7} if j==3{return 4} if j==4{return 3} if j==5{return 1} if j==7{return 2} }
+    if i==7 { if j==1{return 3} if j==2{return 6} if j==3{return 1} if j==4{return 5} if j==5{return 4} if j==6{return 2} }
+    0
+}
+
+fn oct_signed_mul(s_a: i64, idx_a: i64, idx_b: i64) -> i64 with Mut {
+    let raw_sign = oct_sign(idx_a, idx_b); let raw_basis = oct_basis(idx_a, idx_b)
+    var final_sign = raw_sign
+    if s_a < 0 { final_sign = 0 - final_sign }
+    if final_sign >= 0 { raw_basis } else { 8 + raw_basis }
+}
+
+// ─── Ground truth ───
+var PROBE_TOKENS: [i64; 4] = [0; 4]
+var PROBE_LABEL: i64 = 0
+var PROBE_IS_ASSOC: i64 = 0
+
+fn generate_assoc_probe() with Mut, Div {
+    let a = (rng_next() / 100) % 8; let b = (rng_next() / 100) % 8
+    let c = (rng_next() / 100) % 8; let mode = (rng_next() / 100) % 2
+    PROBE_TOKENS[0] = a; PROBE_TOKENS[1] = b; PROBE_TOKENS[2] = c; PROBE_TOKENS[3] = mode + 8
+    let ab_s = oct_sign(a,b); let ab_i = oct_basis(a,b)
+    let left = oct_signed_mul(ab_s, ab_i, c)
+    let bc_s = oct_sign(b,c); let bc_i = oct_basis(b,c)
+    let right = oct_signed_mul(bc_s, a, bc_i)
+    if mode == 0 { PROBE_LABEL = left } if mode == 1 { PROBE_LABEL = right }
+    if left == right { PROBE_IS_ASSOC = 1 } else { PROBE_IS_ASSOC = 0 }
+}
+
+// ─── ListOps ───
+var SEQ: [i64; 32] = [0; 32]; var SEQ_POS: i64 = 0
+fn min_val(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn max_val(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn compute_med3(a: i64, b: i64, c: i64) -> i64 {
+    if a <= b { if b <= c { b } else { if a <= c { c } else { a } } }
+    else { if a <= c { a } else { if b <= c { c } else { b } } }
+}
+fn apply_op(op: i64, vals: i64, v0: i64, v1: i64, v2: i64) -> i64 with Mut {
+    if op == 10 { var r = v0; if vals >= 2 { r = min_val(r, v1) }; if vals >= 3 { r = min_val(r, v2) }; r }
+    else { if op == 11 { var r = v0; if vals >= 2 { r = max_val(r, v1) }; if vals >= 3 { r = max_val(r, v2) }; r }
+    else { if vals >= 3 { compute_med3(v0, v1, v2) } else { if vals >= 2 { min_val(v0, v1) } else { v0 } } } }
+}
+fn gen_flat_expr() -> i64 with Mut, Div {
+    let op = (rng_next()/100)%3+10; let nargs = (rng_next()/100)%2+2
+    SEQ[SEQ_POS] = op; SEQ_POS = SEQ_POS + 1
+    var v0 = (rng_next()/100)%10; var v1 = (rng_next()/100)%10; var v2 = 0
+    SEQ[SEQ_POS] = v0; SEQ_POS = SEQ_POS+1; SEQ[SEQ_POS] = v1; SEQ_POS = SEQ_POS+1
+    if nargs == 3 { v2 = (rng_next()/100)%10; SEQ[SEQ_POS] = v2; SEQ_POS = SEQ_POS+1 }
+    apply_op(op, nargs, v0, v1, v2)
+}
+fn gen_nested_expr() -> i64 with Mut, Div {
+    let o = (rng_next()/100)%3+10; let n = (rng_next()/100)%2+2
+    SEQ[SEQ_POS] = o; SEQ_POS = SEQ_POS+1
+    var vals: [i64; 3] = [0; 3]; var ai = 0
+    while ai < n {
+        let nest = (rng_next()/100)%3
+        if nest == 0 { vals[ai] = gen_flat_expr() }
+        else { let d = (rng_next()/100)%10; SEQ[SEQ_POS] = d; SEQ_POS = SEQ_POS+1; vals[ai] = d }
+        ai = ai + 1
+    }
+    apply_op(o, n, vals[0], vals[1], vals[2])
+}
+fn generate_sample_lo(tl: i64) -> i64 with Mut, Div {
+    SEQ_POS = 0; let r = gen_nested_expr()
+    var al = SEQ_POS
+    while al < tl { SEQ[al] = 0; al = al + 1 }
+    SEQ_POS = tl; r
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Weight Storage — Unified for all models
+// ═══════════════════════════════════════════════════════════════════════════
+// Embed: 13 tokens × 32 dims = 416 (idx 0..415)
+//   (10 tokens for probe, 13 for listops — use 13 for both)
+// A params: up to 256 (idx 416..671)
+// B: 32 (idx 672..703)
+// Output: (32+4) × 16 = 576 (idx 704..1279) for probe (36 hidden → 16 classes)
+//   or (32+4) × 10 = 360 for listops
+// Total buffer: 1280
+
+var W: [i64; 1280] = [0; 1280]
+var H: [i64; 32] = [0; 32]      // 4 heads × 8D
+var ASSOC: [f64; 4] = [0.0; 4]  // Associator norms per head
+var L: [i64; 16] = [0; 16]      // logits (max 16 classes)
+var MOM: [i64; 1280] = [0; 1280]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+// A params layout:
+// MH-Oct/MH-Quat: per head: 1 decay + 8 oct/quat params = 9, total 36 (416..451)
+// MH-Dense: per head: 64 params, total 256 (416..671)
+// MH-Diag: per head: 8 diag, total 32 (416..447)
+
+fn init_embed_b() with Mut, Div {
+    var i = 0
+    while i < 416 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 32 { ws(672 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+}
+
+fn init_out(n_classes: i64) with Mut, Div {
+    let out_dim = 36  // 32 hidden + 4 associator features
+    var i = 0
+    while i < out_dim * n_classes { ws(704 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 1280 { MOM[i] = 0; i = i + 1 }
+}
+
+fn init_A_mh_oct() with Mut, Div, Panic {
+    // 4 heads × (1 decay + 8 octonion components, normalized to unit)
+    var head = 0
+    while head < 4 {
+        let base = 416 + head * 9
+        ws(base, 0.95)  // decay
+        // Random unit octonion: generate 8 random, normalize
+        var norm_sq = 0.0; var d = 0
+        while d < 8 {
+            let v = ((rng_next() % 2000) as f64 - 1000.0) / 1000.0
+            ws(base + 1 + d, v)
+            norm_sq = norm_sq + v * v
+            d = d + 1
+        }
+        let norm = sqrt_q(norm_sq)
+        if norm > 0.001 {
+            d = 0
+            while d < 8 { ws(base + 1 + d, wg(base + 1 + d) / norm); d = d + 1 }
+        }
+        head = head + 1
+    }
+}
+
+fn init_A_mh_quat() with Mut, Div, Panic {
+    // 4 heads × (1 decay + 8 params as 2 unit quaternions)
+    var head = 0
+    while head < 4 {
+        let base = 416 + head * 9
+        ws(base, 0.95)  // decay
+        // Quat 1: normalize 4 random to unit
+        var norm_sq = 0.0; var d = 0
+        while d < 4 {
+            let v = ((rng_next() % 2000) as f64 - 1000.0) / 1000.0
+            ws(base + 1 + d, v)
+            norm_sq = norm_sq + v * v
+            d = d + 1
+        }
+        var norm = sqrt_q(norm_sq)
+        if norm > 0.001 { d = 0; while d < 4 { ws(base+1+d, wg(base+1+d)/norm); d = d + 1 } }
+        // Quat 2: normalize 4 random to unit
+        norm_sq = 0.0; d = 0
+        while d < 4 {
+            let v = ((rng_next() % 2000) as f64 - 1000.0) / 1000.0
+            ws(base + 5 + d, v)
+            norm_sq = norm_sq + v * v
+            d = d + 1
+        }
+        norm = sqrt_q(norm_sq)
+        if norm > 0.001 { d = 0; while d < 4 { ws(base+5+d, wg(base+5+d)/norm); d = d + 1 } }
+        head = head + 1
+    }
+}
+
+fn init_A_mh_dense() with Mut, Div {
+    var head = 0
+    while head < 4 {
+        var i = 0
+        while i < 64 {
+            let row = i / 8; let col = i - row * 8
+            var v = ((rng_next() % 2000) as f64 - 1000.0) / 10000.0
+            if row == col { v = 0.90 + (head as f64) * 0.02 }
+            ws(416 + head * 64 + i, v); i = i + 1
+        }
+        head = head + 1
+    }
+}
+
+fn init_A_mh_diag() with Mut {
+    var head = 0
+    while head < 4 {
+        var d = 0
+        while d < 8 { ws(416 + head * 8 + d, 0.95); d = d + 1 }
+        head = head + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// oct_mul inline (stores result in TEMP)
+// ═══════════════════════════════════════════════════════════════════════════
+var T1: [f64; 8] = [0.0; 8]  // temp for first product
+var T2: [f64; 8] = [0.0; 8]  // temp for second product
+
+fn oct_mul_into(dst: i64,
+    a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+    b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64) with Mut {
+    let r0 = a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    let r1 = a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    let r2 = a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    let r3 = a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    let r4 = a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    let r5 = a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    let r6 = a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    let r7 = a0*b7+a7*b0-a1*b6+a6*b1-a2*b5+a5*b2+a3*b4-a4*b3
+    if dst == 1 { T1[0]=r0;T1[1]=r1;T1[2]=r2;T1[3]=r3;T1[4]=r4;T1[5]=r5;T1[6]=r6;T1[7]=r7 }
+    if dst == 2 { T2[0]=r0;T2[1]=r1;T2[2]=r2;T2[3]=r3;T2[4]=r4;T2[5]=r5;T2[6]=r6;T2[7]=r7 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Forward Steps
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Model 0: MH-Oct — unit octonion transition + associator feature
+fn mh_oct_head(head: i64, token: i64) with Mut, Div, Panic {
+    let ab = 416 + head * 9
+    let decay = wg(ab)
+    // Read unit octonion A
+    let a0=wg(ab+1); let a1=wg(ab+2); let a2=wg(ab+3); let a3=wg(ab+4)
+    let a4=wg(ab+5); let a5=wg(ab+6); let a6=wg(ab+7); let a7=wg(ab+8)
+    // Read h for this head
+    let bh = head * 8
+    let h0=hg(bh); let h1=hg(bh+1); let h2=hg(bh+2); let h3=hg(bh+3)
+    let h4=hg(bh+4); let h5=hg(bh+5); let h6=hg(bh+6); let h7=hg(bh+7)
+    // Read input x (embedding)
+    let x0=wg(token*32+bh); let x1=wg(token*32+bh+1); let x2=wg(token*32+bh+2); let x3=wg(token*32+bh+3)
+    let x4=wg(token*32+bh+4); let x5=wg(token*32+bh+5); let x6=wg(token*32+bh+6); let x7=wg(token*32+bh+7)
+
+    // Compute A ⊗ h → T1
+    oct_mul_into(1, a0,a1,a2,a3,a4,a5,a6,a7, h0,h1,h2,h3,h4,h5,h6,h7)
+
+    // State update: h' = decay * (A ⊗ h) + B · x
+    var d = 0
+    while d < 8 {
+        var v = decay * T1[d] + wg(672 + bh + d) * wg(token*32 + bh + d)
+        if v > 5.0 { v = 5.0 } if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+        hs(bh + d, v)
+        d = d + 1
+    }
+
+    // Compute associator: [A, h, x] = (A⊗h)⊗x - A⊗(h⊗x)
+    // (A⊗h) is in T1. Compute (A⊗h)⊗x → T2  (left association)
+    oct_mul_into(2, T1[0],T1[1],T1[2],T1[3],T1[4],T1[5],T1[6],T1[7], x0,x1,x2,x3,x4,x5,x6,x7)
+    // Save left result
+    var left: [f64; 8] = [0.0; 8]
+    d = 0
+    while d < 8 { left[d] = T2[d]; d = d + 1 }
+
+    // Compute h⊗x → T1, then A⊗(h⊗x) → T2  (right association)
+    oct_mul_into(1, h0,h1,h2,h3,h4,h5,h6,h7, x0,x1,x2,x3,x4,x5,x6,x7)
+    oct_mul_into(2, a0,a1,a2,a3,a4,a5,a6,a7, T1[0],T1[1],T1[2],T1[3],T1[4],T1[5],T1[6],T1[7])
+
+    // Associator norm: ||left - right||
+    var assoc_sq = 0.0
+    d = 0
+    while d < 8 {
+        let diff = left[d] - T2[d]
+        assoc_sq = assoc_sq + diff * diff
+        d = d + 1
+    }
+    ASSOC[head] = sqrt_q(assoc_sq)
+}
+
+// Model 1: MH-Quat — unit quaternion transition (associator is identically 0)
+fn mh_quat_head(head: i64, token: i64) with Mut, Div {
+    let ab = 416 + head * 9
+    let decay = wg(ab)
+    let bh = head * 8
+    // Quat 1 (dims 0-3)
+    let qw=wg(ab+1); let qx=wg(ab+2); let qy=wg(ab+3); let qz=wg(ab+4)
+    let hw=hg(bh); let hx=hg(bh+1); let hy=hg(bh+2); let hz=hg(bh+3)
+    var n0 = decay*(qw*hw-qx*hx-qy*hy-qz*hz) + wg(672+bh)*wg(token*32+bh)
+    var n1 = decay*(qw*hx+qx*hw+qy*hz-qz*hy) + wg(672+bh+1)*wg(token*32+bh+1)
+    var n2 = decay*(qw*hy-qx*hz+qy*hw+qz*hx) + wg(672+bh+2)*wg(token*32+bh+2)
+    var n3 = decay*(qw*hz+qx*hy-qy*hx+qz*hw) + wg(672+bh+3)*wg(token*32+bh+3)
+    if n0>5.0{n0=5.0} if n0<0.0-5.0{n0=0.0-5.0}
+    if n1>5.0{n1=5.0} if n1<0.0-5.0{n1=0.0-5.0}
+    if n2>5.0{n2=5.0} if n2<0.0-5.0{n2=0.0-5.0}
+    if n3>5.0{n3=5.0} if n3<0.0-5.0{n3=0.0-5.0}
+    // Quat 2 (dims 4-7)
+    let qw2=wg(ab+5); let qx2=wg(ab+6); let qy2=wg(ab+7); let qz2=wg(ab+8)
+    let hw2=hg(bh+4); let hx2=hg(bh+5); let hy2=hg(bh+6); let hz2=hg(bh+7)
+    var n4 = decay*(qw2*hw2-qx2*hx2-qy2*hy2-qz2*hz2) + wg(672+bh+4)*wg(token*32+bh+4)
+    var n5 = decay*(qw2*hx2+qx2*hw2+qy2*hz2-qz2*hy2) + wg(672+bh+5)*wg(token*32+bh+5)
+    var n6 = decay*(qw2*hy2-qx2*hz2+qy2*hw2+qz2*hx2) + wg(672+bh+6)*wg(token*32+bh+6)
+    var n7 = decay*(qw2*hz2+qx2*hy2-qy2*hx2+qz2*hw2) + wg(672+bh+7)*wg(token*32+bh+7)
+    if n4>5.0{n4=5.0} if n4<0.0-5.0{n4=0.0-5.0}
+    if n5>5.0{n5=5.0} if n5<0.0-5.0{n5=0.0-5.0}
+    if n6>5.0{n6=5.0} if n6<0.0-5.0{n6=0.0-5.0}
+    if n7>5.0{n7=5.0} if n7<0.0-5.0{n7=0.0-5.0}
+    hs(bh,n0); hs(bh+1,n1); hs(bh+2,n2); hs(bh+3,n3)
+    hs(bh+4,n4); hs(bh+5,n5); hs(bh+6,n6); hs(bh+7,n7)
+    ASSOC[head] = 0.0  // quaternions are associative: associator ≡ 0
+}
+
+// Model 2: MH-Dense — dense 8×8 per head
+fn mh_dense_head(head: i64, token: i64) with Mut, Div {
+    let base_a = 416 + head * 64; let bh = head * 8
+    var d = 0
+    while d < 8 {
+        var s = 0.0; var j = 0
+        while j < 8 { s = s + wg(base_a + d*8 + j) * hg(bh + j); j = j + 1 }
+        s = s + wg(672 + bh + d) * wg(token*32 + bh + d)
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        hs(bh + d, s); d = d + 1
+    }
+    ASSOC[head] = 0.0
+}
+
+// Model 3: MH-Diag — diagonal per head
+fn mh_diag_head(head: i64, token: i64) with Mut, Div {
+    let bh = head * 8
+    var d = 0
+    while d < 8 {
+        var s = wg(416 + head*8 + d) * hg(bh + d) + wg(672 + bh + d) * wg(token*32 + bh + d)
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        hs(bh + d, s); d = d + 1
+    }
+    ASSOC[head] = 0.0
+}
+
+fn model_step(token: i64, model_id: i64) with Mut, Div, Panic {
+    var head = 0
+    while head < 4 {
+        if model_id == 0 { mh_oct_head(head, token) }
+        if model_id == 1 { mh_quat_head(head, token) }
+        if model_id == 2 { mh_dense_head(head, token) }
+        if model_id == 3 { mh_diag_head(head, token) }
+        head = head + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Logits: 32 hidden dims + 4 associator features → n_classes
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn compute_logits(n_classes: i64) with Mut, Div {
+    var c = 0
+    while c < n_classes {
+        var s = 0.0
+        // Hidden state contribution
+        var d = 0
+        while d < 32 { s = s + hg(d) * wg(704 + d * n_classes + c); d = d + 1 }
+        // Associator feature contribution (4 dims)
+        var h = 0
+        while h < 4 {
+            s = s + ASSOC[h] * wg(704 + (32 + h) * n_classes + c)
+            h = h + 1
+        }
+        L[c] = (s * 100000000.0) as i64; c = c + 1
+    }
+}
+
+fn get_pred(n_classes: i64) -> i64 with Mut, Div {
+    var best = 0; var bv = (L[0] as f64)/100000000.0; var i = 1
+    while i < n_classes { let v = (L[i] as f64)/100000000.0; if v > bv { bv = v; best = i }; i = i + 1 }
+    best
+}
+
+fn update_out(tgt: i64, lr: f64, n_classes: i64) with Mut, Div, Panic {
+    var mx = (L[0] as f64)/100000000.0; var i = 1
+    while i < n_classes { let v = (L[i] as f64)/100000000.0; if v > mx { mx = v }; i = i + 1 }
+    var probs: [f64; 16] = [0.0; 16]; var se = 0.0; i = 0
+    while i < n_classes { probs[i] = exp_q((L[i] as f64)/100000000.0 - mx); se = se + probs[i]; i = i + 1 }
+    i = 0
+    while i < n_classes { probs[i] = probs[i] / se; i = i + 1 }
+    probs[tgt] = probs[tgt] - 1.0
+    let out_dim = 36  // 32 hidden + 4 assoc
+    var d = 0
+    while d < out_dim {
+        var feat = 0.0
+        if d < 32 { feat = hg(d) } else { feat = ASSOC[d - 32] }
+        var c = 0
+        while c < n_classes {
+            let idx = 704 + d * n_classes + c
+            var g = feat * probs[c]
+            if g > 0.3 { g = 0.3 } if g < 0.0 - 0.3 { g = 0.0 - 0.3 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Train + Eval: Associativity Probe
+// ═══════════════════════════════════════════════════════════════════════════
+
+var EVAL_OVERALL: i64 = 0
+var EVAL_AC: i64 = 0; var EVAL_AT: i64 = 0
+var EVAL_NC: i64 = 0; var EVAL_NT: i64 = 0
+
+fn run_assoc_probe(model_id: i64) with IO, Mut, Div, Panic {
+    var ep = 0
+    while ep < 100 {
+        var s = 0
+        while s < 500 {
+            generate_assoc_probe()
+            var d = 0
+            while d < 32 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < 4 { model_step(PROBE_TOKENS[t], model_id); t = t + 1 }
+            compute_logits(16)
+            update_out(PROBE_LABEL, 0.01, 16)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+    // Eval
+    rng_seed(99999, 11111)
+    EVAL_OVERALL = 0; EVAL_AC = 0; EVAL_AT = 0; EVAL_NC = 0; EVAL_NT = 0
+    var s = 0
+    while s < 1000 {
+        generate_assoc_probe()
+        var d = 0
+        while d < 32 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < 4 { model_step(PROBE_TOKENS[t], model_id); t = t + 1 }
+        compute_logits(16)
+        let pred = get_pred(16)
+        if pred == PROBE_LABEL { EVAL_OVERALL = EVAL_OVERALL + 1 }
+        if PROBE_IS_ASSOC == 1 { EVAL_AT = EVAL_AT + 1; if pred == PROBE_LABEL { EVAL_AC = EVAL_AC + 1 } }
+        else { EVAL_NT = EVAL_NT + 1; if pred == PROBE_LABEL { EVAL_NC = EVAL_NC + 1 } }
+        s = s + 1
+    }
+}
+
+fn run_listops(model_id: i64) -> f64 with IO, Mut, Div, Panic {
+    var ep = 0
+    while ep < 80 {
+        var s = 0
+        while s < 500 {
+            let label = generate_sample_lo(15)
+            var tgt = label % 10; if tgt < 0 { tgt = tgt + 10 }
+            var d = 0
+            while d < 32 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < SEQ_POS { model_step(SEQ[t], model_id); t = t + 1 }
+            compute_logits(10)
+            update_out(tgt, 0.01, 10)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+    rng_seed(99999 + 15, 11111 + 15)
+    var correct = 0; var s = 0
+    while s < 1000 {
+        let label = generate_sample_lo(15)
+        var tgt = label % 10; if tgt < 0 { tgt = tgt + 10 }
+        var d = 0
+        while d < 32 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < SEQ_POS { model_step(SEQ[t], model_id); t = t + 1 }
+        compute_logits(10)
+        if get_pred(10) == tgt { correct = correct + 1 }
+        s = s + 1
+    }
+    (correct as f64) / 1000.0 * 100.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Multi-Head Unit-Octonion SSM + Associator-as-Feature\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  4 heads × 8D = 32D hidden state\n")
+    print("  Associator ||[A,h,x]|| fed as 4 extra features to output\n")
+    print("  Unit-octonion A: decay × (oct/||oct||) → norm-preserving\n\n")
+
+    // ─── Task 1: Associativity Probe ───
+    print("=== TASK 1: Associativity Probe (16 classes) ===\n\n")
+
+    // Store results
+    var probe_overall: [i64; 4] = [0; 4]
+    var probe_ac: [i64; 4] = [0; 4]; var probe_at: [i64; 4] = [0; 4]
+    var probe_nc: [i64; 4] = [0; 4]; var probe_nt: [i64; 4] = [0; 4]
+
+    print("  MH-Oct (unit oct + assoc feature)...\n")
+    rng_seed(55555, 77777); init_embed_b(); init_A_mh_oct(); init_out(16)
+    rng_seed(12345, 67890); run_assoc_probe(0)
+    probe_overall[0]=EVAL_OVERALL; probe_ac[0]=EVAL_AC; probe_at[0]=EVAL_AT; probe_nc[0]=EVAL_NC; probe_nt[0]=EVAL_NT
+
+    print("  MH-Quat (unit quat, assoc=0)...\n")
+    rng_seed(55555, 77777); init_embed_b(); init_A_mh_quat(); init_out(16)
+    rng_seed(12345, 67890); run_assoc_probe(1)
+    probe_overall[1]=EVAL_OVERALL; probe_ac[1]=EVAL_AC; probe_at[1]=EVAL_AT; probe_nc[1]=EVAL_NC; probe_nt[1]=EVAL_NT
+
+    print("  MH-Dense (64p/head, no assoc)...\n")
+    rng_seed(55555, 77777); init_embed_b(); init_A_mh_dense(); init_out(16)
+    rng_seed(12345, 67890); run_assoc_probe(2)
+    probe_overall[2]=EVAL_OVERALL; probe_ac[2]=EVAL_AC; probe_at[2]=EVAL_AT; probe_nc[2]=EVAL_NC; probe_nt[2]=EVAL_NT
+
+    print("  MH-Diag (diagonal, no coupling)...\n")
+    rng_seed(55555, 77777); init_embed_b(); init_A_mh_diag(); init_out(16)
+    rng_seed(12345, 67890); run_assoc_probe(3)
+    probe_overall[3]=EVAL_OVERALL; probe_ac[3]=EVAL_AC; probe_at[3]=EVAL_AT; probe_nc[3]=EVAL_NC; probe_nt[3]=EVAL_NT
+
+    print("\n  Model         Overall   Assoc      Non-assoc   Delta\n")
+    print("  ───────────   ───────   ─────────  ─────────   ─────\n")
+    var m = 0
+    while m < 4 {
+        if m==0{print("  MH-Oct        ")} if m==1{print("  MH-Quat       ")} if m==2{print("  MH-Dense      ")} if m==3{print("  MH-Diag       ")}
+        let ov = (probe_overall[m] as f64) / 1000.0 * 100.0
+        var ap = 0.0; if probe_at[m] > 0 { ap = (probe_ac[m] as f64) / (probe_at[m] as f64) * 100.0 }
+        var np = 0.0; if probe_nt[m] > 0 { np = (probe_nc[m] as f64) / (probe_nt[m] as f64) * 100.0 }
+        print(ov); print("%    "); print(ap); print("%   "); print(np); print("%   ")
+        let delta = np - ap
+        if delta >= 0.0 { print("+") }
+        print(delta); print("%\n")
+        m = m + 1
+    }
+    print("  Random        6.25%\n")
+
+    // Verdict
+    var oct_na = 0.0; if probe_nt[0] > 0 { oct_na = (probe_nc[0] as f64) / (probe_nt[0] as f64) * 100.0 }
+    var quat_na = 0.0; if probe_nt[1] > 0 { quat_na = (probe_nc[1] as f64) / (probe_nt[1] as f64) * 100.0 }
+    let gap = oct_na - quat_na
+    print("\n  Non-assoc gap (MH-Oct - MH-Quat): ")
+    if gap >= 0.0 { print("+") }
+    print(gap); print("pp\n")
+
+    // ─── Task 2: ListOps ───
+    print("\n=== TASK 2: ListOps L=15 (10 classes) ===\n\n")
+
+    print("  MH-Oct...\n")
+    rng_seed(55555, 77777); init_embed_b(); init_A_mh_oct(); init_out(10)
+    rng_seed(12345, 67890)
+    let lo_oct = run_listops(0)
+    print("  "); print(lo_oct); print("%\n")
+
+    print("  MH-Quat...\n")
+    rng_seed(55555, 77777); init_embed_b(); init_A_mh_quat(); init_out(10)
+    rng_seed(12345, 67890)
+    let lo_quat = run_listops(1)
+    print("  "); print(lo_quat); print("%\n")
+
+    print("  MH-Dense...\n")
+    rng_seed(55555, 77777); init_embed_b(); init_A_mh_dense(); init_out(10)
+    rng_seed(12345, 67890)
+    let lo_dense = run_listops(2)
+    print("  "); print(lo_dense); print("%\n")
+
+    print("  MH-Diag...\n")
+    rng_seed(55555, 77777); init_embed_b(); init_A_mh_diag(); init_out(10)
+    rng_seed(12345, 67890)
+    let lo_diag = run_listops(3)
+    print("  "); print(lo_diag); print("%\n")
+
+    print("\n  ListOps Results:\n")
+    print("  MH-Oct:   "); print(lo_oct); print("%\n")
+    print("  MH-Quat:  "); print(lo_quat); print("%\n")
+    print("  MH-Dense: "); print(lo_dense); print("% (256 A-params)\n")
+    print("  MH-Diag:  "); print(lo_diag); print("% (32 A-params)\n")
+    print("  Random:   10%\n")
+
+    println("ALL PASS")
+    0
+}
