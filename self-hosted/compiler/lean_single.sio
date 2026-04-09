@@ -317,6 +317,8 @@ fn st_find(hash: i64) -> i64 with Panic, Mut {
 fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     if ty == 8 { return arr_storage_slots(ty_hash) }
     if ty == 6 {
+        // Size-hint sentinel: 1000000007 + nslots, set after .0 tuple field access
+        if ty_hash >= 1000000007 && ty_hash < 1000001007 { return ty_hash - 1000000007 }
         let si = st_find(ty_hash)
         if si >= 0 { return st_total_size(si) / 8 }
     }
@@ -2004,6 +2006,8 @@ fn type_is_aggregate(ty: i64, ty_hash: i64) -> bool {
 
 fn struct_like_nslots(ty_hash: i64) -> i64 with Panic, Div, Mut {
     if knowledge_hash_is(ty_hash) { return 3 }
+    // Size-hint sentinel: 1000000007 + nslots, set after .0 tuple field access
+    if ty_hash >= 1000000007 && ty_hash < 1000001007 { return ty_hash - 1000000007 }
     let si = st_find(ty_hash)
     if si >= 0 { return st_total_size(si) / 8 }
     return 0
@@ -4679,6 +4683,10 @@ fn emit_bulk_copy_to_slots_x86(nslots: i64, base: i64) with Mut, Panic, Div {
 fn materialize_aggregate_expr_x86() with Mut, Panic, Div {
     if EXPR_TY == 8 {
         let nslots = arr_storage_slots(EXPR_TY_HASH)
+        // Large arrays exceed the spill threshold: rax already holds a pointer to the
+        // array data (from var load or BSS). Pass the pointer as-is rather than
+        // copying 1M+ slots onto the local stack frame.
+        if nslots * 8 >= local_bss_spill_bytes() { return }
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + nslots
         emit_bulk_copy_to_slots_x86(nslots, base)
@@ -6731,42 +6739,62 @@ fn compile_primary() with IO, Mut, Panic, Div {
         compile_or()
         if TK[EP as usize] == 28 {
             // Tuple literal: (expr1, expr2, ...)
-            // First element already compiled → store to slots
-            let tup_base = NEXT_SLOT
-            var tup_count: i64 = 0
-            // Store first element
-            let first_nslots = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
-            if first_nslots > 1 {
-                copy_agg_into_struct_slots_x86(tup_base, EXPR_TY, EXPR_TY_HASH)
-                NEXT_SLOT = NEXT_SLOT + first_nslots
-            } else {
-                emit_store_var(tup_base)
-                NEXT_SLOT = NEXT_SLOT + 1
-            }
-            tup_count = tup_count + 1
-            // Compile remaining elements
+            // First element already compiled (rax = value or pointer).
+            // Layout requirement: .0 at lowest address (highest slot), .1 above.
+            // Problem: we don't know total_slots until all elements are compiled.
+            // Strategy:
+            //   1. Save first element's rax to a temp slot.
+            //   2. Compile remaining elements (last element stays in rax).
+            //   3. Allocate tuple buffer now that total_slots is known.
+            //   4. Store last element to low slots (dst_start = tup_base + last_nslots - 1).
+            //   5. Restore first element rax; store to high slots (dst_start = tup_base + total - 1).
+            //   6. LEA = rbp - (tup_base + total - 1)*8 → pointer to first element.
+            let first_ty = EXPR_TY
+            let first_hash = EXPR_TY_HASH
+            let first_nslots = ty_slot_count(first_ty, first_hash)
+            // Save first element's rax before second-element compilation clobbers it
+            let first_save = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(first_save)
+            var tup_count: i64 = 1
+            // Compile remaining elements; track the last one's type info
+            var last_ty: i64 = 0
+            var last_hash: i64 = 0
+            var last_nslots: i64 = 0
             while TK[EP as usize] == 28 {
                 EP = EP + 1  // skip ,
                 if TK[EP as usize] == 7 { break }  // trailing comma
                 compile_or()
-                let elem_nslots = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
-                if elem_nslots > 1 {
-                    copy_agg_into_struct_slots_x86(NEXT_SLOT, EXPR_TY, EXPR_TY_HASH)
-                    NEXT_SLOT = NEXT_SLOT + elem_nslots
-                } else {
-                    emit_store_var(NEXT_SLOT)
-                    NEXT_SLOT = NEXT_SLOT + 1
-                }
+                last_ty = EXPR_TY
+                last_hash = EXPR_TY_HASH
+                last_nslots = ty_slot_count(last_ty, last_hash)
                 tup_count = tup_count + 1
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
-            let tup_total_slots = NEXT_SLOT - tup_base
-            // Return pointer to tuple data (like struct literal)
+            // Allocate the tuple buffer (all sizes now known)
+            let total_slots = first_nslots + last_nslots
+            let tup_base = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + total_slots
+            // Store last element (rax) to low slots: dst_start = tup_base + last_nslots - 1
+            if last_nslots > 1 {
+                copy_agg_into_struct_slots_x86(tup_base + last_nslots - 1, last_ty, last_hash)
+            } else {
+                emit_store_var(tup_base + last_nslots - 1)
+            }
+            // Restore first element's rax from temp slot
+            em(0x48); em(0x8b); em(0x85); em32(0 - first_save * 8)
+            // Store first element to high slots: dst_start = tup_base + total_slots - 1
+            if first_nslots > 1 {
+                copy_agg_into_struct_slots_x86(tup_base + total_slots - 1, first_ty, first_hash)
+            } else {
+                emit_store_var(tup_base + total_slots - 1)
+            }
+            // Return pointer to first element (lowest address = highest slot)
             em(0x48); em(0x8d); em(0x85)
-            em32(0 - (tup_base + tup_total_slots - 1) * 8)
+            em32(0 - (tup_base + total_slots - 1) * 8)
             EXPR_IS_F64 = 0
             EXPR_TY = 6
-            // Encode first_nslots in low bits of hash for .1 field access
+            // Encode first_nslots in hash for .1 field access
             let first_actual = if first_nslots > 1 { first_nslots } else { 1 }
             EXPR_TY_HASH = tup_count * 999983 + first_actual * 1000 + 7777
             return
@@ -8608,10 +8636,21 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 // by materialize_aggregate_expr_x86 for subsequent method calls.
                 EXPR_IS_F64 = 0
                 EXPR_TY = 6
-                EXPR_TY_HASH = 0
-                // Copy 8 qwords (enough for Parser + margin) to fresh slots
+                // For .0 access: encode the element's slot count as a size-hint in EXPR_TY_HASH
+                // so that downstream ty_slot_count/copy_agg_into_struct_slots_x86 get the right size.
+                // SIZE_HINT_SENTINEL = 1000000007; hash = 1000000007 + nslots.
+                // For .1 access: we always copy 128 qwords anyway, leave hash=0.
+                if tup_idx == 0 {
+                    let hr0 = EXPR_TY_HASH - 7777
+                    let tc0 = hr0 / 999983
+                    let fs0 = (hr0 - tc0 * 999983) / 1000
+                    if fs0 > 0 { EXPR_TY_HASH = 1000000007 + fs0 } else { EXPR_TY_HASH = 0 }
+                } else {
+                    EXPR_TY_HASH = 0
+                }
+                // Copy 128 qwords (enough for Item=93 slots + Parser=7 slots + margin) to fresh slots
                 let tup_mat_base = NEXT_SLOT
-                let tup_mat_n: i64 = 8
+                let tup_mat_n: i64 = 128
                 NEXT_SLOT = NEXT_SLOT + tup_mat_n
                 emit_bulk_copy_to_slots_x86(tup_mat_n, tup_mat_base)
                 continue
@@ -12943,16 +12982,25 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     FN_NEEDS_SESSION[sig_fi as usize] = 1
                 }
                 scan_type(q)
-                if knowledge_hash_invalid(SCAN_TY_HASH) {
-                    if 1 == 1 {
-                        print("DEBUG ret ty=")
-                        print_int(SCAN_TY)
-                        print(" hash=")
-                        print_int(SCAN_TY_HASH)
-                        print(" eps=")
-                        print_int(knowledge_hash_eps(SCAN_TY_HASH))
-                        print("\n")
+                var scan_ret_ty = SCAN_TY
+                var scan_ret_hash = SCAN_TY_HASH
+                let scan_ret_next = SCAN_TY_NEXT
+                // For tuple return types, encode first element's slot count in hash
+                // so that .1 field access computes the correct byte offset.
+                // Hash format: tcount * 999983 + first_nslots * 1000 + 7777
+                if scan_ret_ty == 6 && TK[q as usize] == 6 {
+                    let tcount_enc = (scan_ret_hash - 7777) / 999983
+                    let first_enc_check = (scan_ret_hash - 7777 - tcount_enc * 999983) / 1000
+                    if first_enc_check == 0 {
+                        scan_type(q + 1)
+                        let first_nslots = ret_agg_nslots(SCAN_TY, SCAN_TY_HASH)
+                        if first_nslots > 0 { scan_ret_hash = tcount_enc * 999983 + first_nslots * 1000 + 7777 }
+                        SCAN_TY = scan_ret_ty
+                        SCAN_TY_HASH = scan_ret_hash
+                        SCAN_TY_NEXT = scan_ret_next
                     }
+                }
+                if knowledge_hash_invalid(SCAN_TY_HASH) {
                     tc_epistemic_boundary(q)
                     FN_RET_TY[sig_fi as usize] = 0
                     FN_RET_HASH[sig_fi as usize] = 0
@@ -13268,9 +13316,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // Save error count before compiling this function's body
         let fn_err_before = TC_FN_ERR_COUNT
 
-        // Emit prologue: push rbp; mov rbp, rsp; sub rsp, 131072
-        print_int(fn_idx)
-        print(" ")
+        // Emit prologue: push rbp; mov rbp, rsp; sub rsp, <frame>
         em(0x55); em(0x48); em(0x89); em(0xe5)
         // If SRET: save r12 (callee-saved), then mov r12, rdi (preserve SRET ptr)
         if CURRENT_SRET_SLOT > 0 {
@@ -13335,6 +13381,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             // Compile body
             EP = p
             var depth: i64 = 1
+            let body_ns_trace = NEXT_SLOT
             while EP < TC && depth > 0 {
                 if TK[EP as usize] == 9 { depth = depth - 1; if depth == 0 { EP = EP + 1; continue } else { EP = EP + 1; continue } }
                 compile_stmt()
