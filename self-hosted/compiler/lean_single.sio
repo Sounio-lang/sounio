@@ -2105,9 +2105,14 @@ fn ret_agg_nslots(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     if ty == 6 {
         let si = st_find(ty_hash)
         if si >= 0 { return st_total_size(si) / 8 }
-        // Synthetic tuple or unregistered struct: use SRET with generous slot count.
-        // 128 slots = 1024 bytes — must cover (Parser, Item) which is ~92 slots.
-        if ty_hash != 0 { return 128 }
+        // Synthetic tuple: decode total slot count from hash.
+        // Hash format: tcount * 1000000 + first_nslots * 1000 + total_nslots
+        // Falls back to 128 for partially-encoded or unregistered structs.
+        if ty_hash != 0 {
+            let tup_total = ty_hash % 1000
+            if tup_total > 0 { return tup_total }
+            return 128
+        }
     }
     return 0
 }
@@ -2377,25 +2382,20 @@ fn print_effect_mask(mask: i64) with IO, Mut {
 fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
     // Skip effect violations for functions from imported modules — already validated
     if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
-    if caller_eff == 0 {
-        print("error: effect not declared in function signature at line ")
-        print_int(TL[tok as usize])
-        print("\n")
-        tc_mark_failed()
-    } else {
-        print("warning: effect not declared at line ")
-        print_int(TL[tok as usize])
-        print("\n")
-    }
+    // Effect violations are warnings — effects are gradually adopted, not yet mandatory
+    print("warning: effect not declared at line ")
+    print_int(TL[tok as usize])
+    print("\n")
     return 0
 }
 
-// Hard-error version used at function call sites — callee requires effects caller doesn't have.
+// Call-site version — callee requires effects caller doesn't have.
+// Also a warning during gradual effect adoption.
 fn tc_effect_call_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
-    print("error: effect not declared in function signature at line ")
+    if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
+    print("warning: effect not declared at line ")
     print_int(TL[tok as usize])
     print("\n")
-    tc_mark_failed()
     return 0
 }
 
@@ -3019,7 +3019,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
         }
         // Treat tuple as a struct-like aggregate with tcount slots
         SCAN_TY = 6
-        SCAN_TY_HASH = tcount * 999983 + 7777  // synthetic hash for tuple type
+        SCAN_TY_HASH = tcount * 1000000  // synthetic tuple hash (first+total filled in later)
         SCAN_TY_NEXT = p
         return
     }
@@ -6885,9 +6885,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
             em32(0 - (tup_base + total_slots - 1) * 8)
             EXPR_IS_F64 = 0
             EXPR_TY = 6
-            // Encode first_nslots in hash for .1 field access
+            // Encode first_nslots and total_slots in hash for .1 offset and SRET sizing
             let first_actual = if first_nslots > 1 { first_nslots } else { 1 }
-            EXPR_TY_HASH = tup_count * 999983 + first_actual * 1000 + 7777
+            EXPR_TY_HASH = tup_count * 1000000 + first_actual * 1000 + total_slots
             return
         }
         if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -7129,15 +7129,35 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if FN_ARITY[static_mfi as usize] != static_argc {
                         tc_wrong_arity(EP - 1, FN_ARITY[static_mfi as usize], static_argc)
                     }
-                    emit_setup_direct_call_args_x86(static_argc)
-                    emit_prepare_stack_call_args_x86(static_argc, 6)
-                    em(0xe8)
-                    PATCH_OFF[PATCH_COUNT as usize] = CL
-                    PATCH_FN[PATCH_COUNT as usize] = static_mfi
-                    PATCH_KIND[PATCH_COUNT as usize] = 0
-                    PATCH_COUNT = PATCH_COUNT + 1
-                    em32(0)
-                    emit_drop_call_args_x86(static_argc + call_extra_stack_args_x86(static_argc, 6))
+                    // Check if static method returns aggregate (needs SRET)
+                    let static_ret_slots = ret_agg_nslots(FN_RET_TY[static_mfi as usize], FN_RET_HASH[static_mfi as usize])
+                    if static_ret_slots > 0 {
+                        // SRET: allocate return buffer, shift args, pass SRET ptr in rdi
+                        let static_ret_base = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + static_ret_slots
+                        emit_setup_call_args_shift_x86(static_argc, 1)
+                        emit_prepare_stack_call_args_x86(static_argc, 5)
+                        em(0x48); em(0x8d); em(0x85)
+                        em32(0 - (static_ret_base + static_ret_slots - 1) * 8)
+                        em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (SRET ptr)
+                        em(0xe8)
+                        PATCH_OFF[PATCH_COUNT as usize] = CL
+                        PATCH_FN[PATCH_COUNT as usize] = static_mfi
+                        PATCH_KIND[PATCH_COUNT as usize] = 0
+                        PATCH_COUNT = PATCH_COUNT + 1
+                        em32(0)
+                        emit_drop_call_args_x86(static_argc + call_extra_stack_args_x86(static_argc, 5))
+                    } else {
+                        emit_setup_direct_call_args_x86(static_argc)
+                        emit_prepare_stack_call_args_x86(static_argc, 6)
+                        em(0xe8)
+                        PATCH_OFF[PATCH_COUNT as usize] = CL
+                        PATCH_FN[PATCH_COUNT as usize] = static_mfi
+                        PATCH_KIND[PATCH_COUNT as usize] = 0
+                        PATCH_COUNT = PATCH_COUNT + 1
+                        em32(0)
+                        emit_drop_call_args_x86(static_argc + call_extra_stack_args_x86(static_argc, 6))
+                    }
                     EXPR_TY = FN_RET_TY[static_mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[static_mfi as usize]
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -8727,17 +8747,16 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 4 {
                 let tup_idx = TV[EP as usize]
                 EP = EP + 1
+                // Decode element sizes from tuple hash BEFORE any modification.
+                // Hash format: tcount * 1000000 + first_nslots * 1000 + total_nslots
+                let tup_first_slots = (EXPR_TY_HASH % 1000000) / 1000
+                let tup_total_slots = EXPR_TY_HASH % 1000
+                let tup_last_slots = tup_total_slots - tup_first_slots
                 if tup_idx == 0 {
                     // .0 → rax already points to first element, keep as-is
                 } else {
-                    // .1 → offset by first element's slot count (encoded in hash)
-                    // Hash = tcount * 999983 + first_nslots * 1000 + 7777
-                    let tup_first_slots = (EXPR_TY_HASH - 7777) / 1000 - ((EXPR_TY_HASH - 7777) / 999983) * (999983 / 1000)
-                    // Simpler: extract using modular arithmetic
-                    let hash_remainder = EXPR_TY_HASH - 7777
-                    let tcount_part = hash_remainder / 999983
-                    let first_slots_enc = (hash_remainder - tcount_part * 999983) / 1000
-                    let byte_offset = first_slots_enc * 8
+                    // .1 → offset rax by first element's slot count
+                    let byte_offset = tup_first_slots * 8
                     if byte_offset > 0 && byte_offset < 8192 {
                         em(0x48); em(0x05); em32(byte_offset)  // add rax, offset
                     }
@@ -8747,21 +8766,20 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 // by materialize_aggregate_expr_x86 for subsequent method calls.
                 EXPR_IS_F64 = 0
                 EXPR_TY = 6
-                // For .0 access: encode the element's slot count as a size-hint in EXPR_TY_HASH
-                // so that downstream ty_slot_count/copy_agg_into_struct_slots_x86 get the right size.
-                // SIZE_HINT_SENTINEL = 1000000007; hash = 1000000007 + nslots.
-                // For .1 access: we always copy 128 qwords anyway, leave hash=0.
+                // Set EXPR_TY_HASH: SIZE_HINT_SENTINEL (1000000007+nslots) for .0, 0 for .1
                 if tup_idx == 0 {
-                    let hr0 = EXPR_TY_HASH - 7777
-                    let tc0 = hr0 / 999983
-                    let fs0 = (hr0 - tc0 * 999983) / 1000
-                    if fs0 > 0 { EXPR_TY_HASH = 1000000007 + fs0 } else { EXPR_TY_HASH = 0 }
+                    if tup_first_slots > 0 { EXPR_TY_HASH = 1000000007 + tup_first_slots } else { EXPR_TY_HASH = 0 }
                 } else {
                     EXPR_TY_HASH = 0
                 }
-                // Copy 128 qwords (enough for Item=93 slots + Parser=7 slots + margin) to fresh slots
+                // Copy only as many slots as the element actually occupies
+                var tup_mat_n: i64 = 128
+                if tup_idx == 0 {
+                    if tup_first_slots > 0 { tup_mat_n = tup_first_slots }
+                } else {
+                    if tup_last_slots > 0 { tup_mat_n = tup_last_slots }
+                }
                 let tup_mat_base = NEXT_SLOT
-                let tup_mat_n: i64 = 128
                 NEXT_SLOT = NEXT_SLOT + tup_mat_n
                 emit_bulk_copy_to_slots_x86(tup_mat_n, tup_mat_base)
                 continue
@@ -13111,14 +13129,22 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 let scan_ret_next = SCAN_TY_NEXT
                 // For tuple return types, encode first element's slot count in hash
                 // so that .1 field access computes the correct byte offset.
-                // Hash format: tcount * 999983 + first_nslots * 1000 + 7777
+                // Hash format: tcount * 1000000 + first_nslots * 1000 + total_nslots
                 if scan_ret_ty == 6 && TK[q as usize] == 6 {
-                    let tcount_enc = (scan_ret_hash - 7777) / 999983
-                    let first_enc_check = (scan_ret_hash - 7777 - tcount_enc * 999983) / 1000
+                    let tcount_enc = scan_ret_hash / 1000000
+                    let first_enc_check = (scan_ret_hash % 1000000) / 1000
                     if first_enc_check == 0 {
+                        // Scan first element — use ty_slot_count (not ret_agg_nslots)
+                        // to match tuple construction which also uses ty_slot_count.
                         scan_type(q + 1)
-                        let first_nslots = ret_agg_nslots(SCAN_TY, SCAN_TY_HASH)
-                        if first_nslots > 0 { scan_ret_hash = tcount_enc * 999983 + first_nslots * 1000 + 7777 }
+                        let first_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
+                        // Scan second element (skip comma after first)
+                        var second_q = SCAN_TY_NEXT
+                        if TK[second_q as usize] == 28 { second_q = second_q + 1 }
+                        scan_type(second_q)
+                        let last_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
+                        let total_nslots = first_nslots + last_nslots
+                        scan_ret_hash = tcount_enc * 1000000 + first_nslots * 1000 + total_nslots
                         SCAN_TY = scan_ret_ty
                         SCAN_TY_HASH = scan_ret_hash
                         SCAN_TY_NEXT = scan_ret_next
@@ -13265,6 +13291,19 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         p = p + 1
     }
     print("effects: scanned "); print_int(eff_fi); print(" functions\n")
+    // Auto-grant main() all basic effects (IO|Mut|Panic|Div|Alloc = 31)
+    // main is the program entry point — it implicitly has all capabilities
+    var mai: i64 = 0
+    while mai < FN_COUNT {
+        let mns = FN_NS[mai as usize]
+        let mne = FN_NE[mai as usize]
+        if mne - mns == 4 && sb(mns) == 109 && sb(mns+1) == 97 && sb(mns+2) == 105 && sb(mns+3) == 110 {
+            if FN_RECV_HASH[mai as usize] == 0 {
+                FN_EFFECTS[mai as usize] = FN_EFFECTS[mai as usize] | 31
+            }
+        }
+        mai = mai + 1
+    }
     var evi: i64 = 0
     while evi < FN_COUNT {
         if FN_NEEDS_SESSION[evi as usize] != 0 && (FN_EFFECTS[evi as usize] & 32) == 0 && (FN_EFFECTS[evi as usize] & 2048) == 0 {
