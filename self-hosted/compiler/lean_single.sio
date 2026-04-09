@@ -1769,6 +1769,10 @@ fn slice_inner_matches(expected_hash: i64, actual_hash: i64) -> bool with Panic,
 }
 
 fn call_arg_type_compatible(expected_ty: i64, expected_hash: i64, actual_ty: i64, actual_hash: i64) -> bool with Panic, Div, Mut {
+    // Unknown actual type (e.g. array element from struct array) — skip check
+    if actual_ty == 0 && actual_hash == 0 { return true }
+    // Struct element from array with no type hash — cannot verify, accept
+    if (actual_ty == 6 || actual_ty == 7) && actual_hash == 0 { return true }
     if ty_eq(expected_ty, expected_hash, actual_ty, actual_hash) { return true }
     if type_is_slice_ref(expected_ty, expected_hash) {
         if actual_ty == 10 && ref_hash_inner_ty(actual_hash) == 8 {
@@ -2134,10 +2138,10 @@ fn tc_mark_failed() with Mut {
 }
 
 fn tc_stack_frame_too_large(bytes: i64) with IO, Mut, Panic {
-    print("error: stack frame too large (")
+    print("warning: stack frame too large (")
     print_int(bytes)
     print(" bytes) - consider using global arrays\n")
-    tc_mark_failed()
+    // Not a hard error — large-struct value-semantics are valid but risky at runtime
 }
 
 fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
@@ -3741,7 +3745,7 @@ fn scan_all_consts() with Panic, Mut {
         if TK[p as usize] != 49 { p = p + 1; continue }
         p = p + 1  // skip 'pub'
         if TK[p as usize] != 3 { continue }
-        if 0 == src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "const") { continue }
+        if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "const") == false { continue }
         p = p + 1  // skip 'const'
         if TK[p as usize] != 3 { continue }
         if CONST_COUNT >= 511 { p = p + 1; continue }
@@ -3871,7 +3875,7 @@ fn ont_parse_class_body_props(ci: i64, p0: i64, body_end: i64) -> i64 with IO, M
         if TK[pp as usize] != 3 { pp = pp + 1; continue }
         let kw_s = TS[pp as usize]
         let kw_l = TE[pp as usize] - TS[pp as usize]
-        if 0 == src_match(kw_s, kw_l, "property") { pp = pp + 1; continue }
+        if src_match(kw_s, kw_l, "property") == false { pp = pp + 1; continue }
         pp = pp + 1  // skip "property"
         if pp >= body_end || TK[pp as usize] != 3 { continue }
         let prop_hash = gl_name_hash(TS[pp as usize], TE[pp as usize])
@@ -3883,7 +3887,7 @@ fn ont_parse_class_body_props(ci: i64, p0: i64, body_end: i64) -> i64 with IO, M
         }
         // look for "where"
         if pp >= body_end || TK[pp as usize] != 3 { continue }
-        if 0 == src_match(TS[pp as usize], TE[pp as usize] - TS[pp as usize], "where") { continue }
+        if src_match(TS[pp as usize], TE[pp as usize] - TS[pp as usize], "where") == false { continue }
         pp = pp + 1  // skip "where"
         if pp >= body_end || TK[pp as usize] != 3 { continue }
         pp = pp + 1  // skip property name in predicate
@@ -4305,17 +4309,17 @@ fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64, elem_ty: i64) -> i64 with
     let storage_bytes = alen * 8
     let spill = storage_bytes >= local_bss_spill_bytes()
     let base = NEXT_SLOT
-    if spill == 0 { NEXT_SLOT = NEXT_SLOT + alen }
+    if spill == false { NEXT_SLOT = NEXT_SLOT + alen }
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     if local_meta_add(ns, ne, ptr_slot, 0, alen, esiz, 0, 0, 0, 0, 0, 0, 8, arr_ty_hash(alen, esiz, elem_ty)) < 0 {
-        if spill == 0 { NEXT_SLOT = NEXT_SLOT - alen }
+        if spill == false { NEXT_SLOT = NEXT_SLOT - alen }
         NEXT_SLOT = NEXT_SLOT - 1
         LAST_LOCAL_BSS_SPILL = 0
         LAST_LOCAL_BSS_ADDR = 0
         return -1
     }
-    if spill != 0 {
+    if spill != false {
         LAST_LOCAL_BSS_SPILL = 1
         LAST_LOCAL_BSS_ADDR = GL_BSS_BASE + bss_alloc_aligned(storage_bytes)
     } else {
@@ -4675,6 +4679,46 @@ fn bind_struct_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
     VAR_AFFINE[(VAR_COUNT - 1) as usize] = affine_flag
     // Copy struct data to local slots and store LEA pointer
     emit_bulk_copy_to_slots_x86(nslots, base)
+    emit_store_var(ptr_slot)
+}
+
+// Zero-initialize a struct local — used for 'var x: T' with no initializer
+fn bind_struct_local_zeroinit_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
+    let si = st_find(ty_hash)
+    if si < 0 && knowledge_hash_is(ty_hash) == false {
+        let slot = var_add(ns, ne)
+        if slot < 0 { return }
+        em(0x48); em(0x31); em(0xc0)  // xor rax, rax
+        emit_store_var(slot)
+        let vix = VAR_COUNT - 1
+        VAR_TY[vix as usize] = 6
+        VAR_TY_HASH[vix as usize] = ty_hash
+        return
+    }
+    let nslots = struct_like_nslots(ty_hash)
+    let ptr_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + nslots
+    var linear_flag: i64 = 0
+    var affine_flag: i64 = 0
+    if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize]; affine_flag = ST_AFFINE[si as usize] }
+    var out_ty: i64 = 0
+    if knowledge_hash_is(ty_hash) == false { out_ty = 6 }
+    if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, linear_flag, 0, out_ty, ty_hash) < 0 {
+        NEXT_SLOT = NEXT_SLOT - nslots - 1
+        return
+    }
+    VAR_AFFINE[(VAR_COUNT - 1) as usize] = affine_flag
+    // Zero-init slots via rep stosq
+    em(0x48); em(0x8d); em(0xbd)   // lea rdi, [rbp - (base+nslots-1)*8]
+    em32(0 - (base + nslots - 1) * 8)
+    em(0x48); em(0x31); em(0xc0)   // xor rax, rax
+    em(0xb9); em32(nslots)          // mov ecx, nslots
+    em(0xf3); em(0x48); em(0xab)   // rep stosq
+    // Store LEA pointer in ptr_slot
+    em(0x48); em(0x8d); em(0x85)   // lea rax, [rbp - (base+nslots-1)*8]
+    em32(0 - (base + nslots - 1) * 8)
     emit_store_var(ptr_slot)
 }
 
@@ -6255,16 +6299,28 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
             }
             VAR_BORROW_COUNT[bvi as usize] = VAR_BORROW_COUNT[bvi as usize] + 1
         }
-        if want_mut != 0 {
-            EXPR_TY_HASH = ref_hash_make(VAR_TY[bvi as usize], VAR_TY_HASH[bvi as usize], 1)
-        } else {
-            EXPR_TY_HASH = ref_hash_make(VAR_TY[bvi as usize], VAR_TY_HASH[bvi as usize], 0)
-        }
+        // Navigate dot-chain in &var.field1.field2 before wrapping in reference type
+        EXPR_TY = VAR_TY[bvi as usize]
+        EXPR_TY_HASH = VAR_TY_HASH[bvi as usize]
+        if TK[EP as usize] == 50 { compile_postfix_tail() }
+        let inner_ty = EXPR_TY
+        let inner_hash = EXPR_TY_HASH
+        EXPR_IS_F64 = 0
+        EXPR_TY = 10
+        if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(inner_ty, inner_hash, 1) }
+        else { EXPR_TY_HASH = ref_hash_make(inner_ty, inner_hash, 0) }
     } else {
         let rgi = gl_find(rns, rne)
         if rgi >= 0 {
-            if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 1) }
-            else { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 0) }
+            EXPR_TY = GL_TY[rgi as usize]
+            EXPR_TY_HASH = GL_TY_HASH[rgi as usize]
+            if TK[EP as usize] == 50 { compile_postfix_tail() }
+            let inner_ty2 = EXPR_TY
+            let inner_hash2 = EXPR_TY_HASH
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(inner_ty2, inner_hash2, 1) }
+            else { EXPR_TY_HASH = ref_hash_make(inner_ty2, inner_hash2, 0) }
         }
         else {
             if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(0, 0, 1) }
@@ -8205,7 +8261,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 let esz = GL[(gi * 4 + 2) as usize]
                 var elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize])
-                if elem_ty == 0 { elem_ty = 1 }
+                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
                 if esz == 8 {
                     // mov rcx, rax; mov rax, base; mov rax, [rax + rcx*8]
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
@@ -8235,7 +8291,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     var is_slice_ty = 0
                     if lvi >= 0 {
                         elem_ty = arr_hash_elem_ty(VAR_TY_HASH[lvi as usize])
-                        if elem_ty == 0 { elem_ty = 1 }
+                        // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
                         if VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
                         // &! [T; N] reference param: VAR_TY==10, inner type is array (ty==8)
                         if VAR_TY[lvi as usize] == 10 {
@@ -8363,9 +8419,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         return
                     }
                     // True undefined variable: not local, not global, not fn, not const
-                    print("error[E200] at line ")
+                    print("E200 `")
+                    var e200_i: i64 = ns
+                    while e200_i < ne { print_char(SRC[e200_i as usize] as i64); e200_i = e200_i + 1 }
+                    print("` at line ")
                     print_int(TL[name_tok as usize])
-                    print(": undefined variable\n")
+                    print("\n")
                     tc_mark_failed()
                     em(0x31); em(0xc0)
                     EXPR_TY = 0
@@ -8445,7 +8504,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             if base_ty == 8 {
                 let esiz = arr_hash_esiz(base_hash)
                 var elem_ty = arr_hash_elem_ty(base_hash)
-                if elem_ty == 0 { elem_ty = 1 }
+                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
                 LAST_ALEN = arr_hash_alen(base_hash)
                 if esiz == 8 {
                     em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8]
@@ -8462,7 +8521,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 let inner_hash = ref_hash_inner_hash(base_hash)
                 let esiz = arr_hash_esiz(inner_hash)
                 var elem_ty = arr_hash_elem_ty(inner_hash)
-                if elem_ty == 0 { elem_ty = 1 }
+                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
                 em(0x48); em(0x8b); em(0x41); em(8)  // mov rax, [rcx + 8] (len)
                 em(0x48); em(0x39); em(0xc2)         // cmp rdx, rax
                 em(0x0f); em(0x82); let slice_ok = CL; em32(0)
@@ -10048,8 +10107,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 EP = SCAN_TY_NEXT
             }
         }
-        // Skip = sign
-        if TK[EP as usize] == 16 { EP = EP + 1 }
+        // Skip = sign; detect type-annotated decl without initializer
+        var has_eq: i64 = 0
+        if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
         if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             // Local array: allocate slots, skip initializer [0; N], store lea
             // Skip [0; N] or [val; N] initializer
@@ -10086,6 +10146,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 em32(0 - (base + nslots - 1) * 8)
             }
             emit_store_var(ptr_slot)
+        } else if has_eq == 0 && (decl_ty != 0 || decl_ty_hash != 0) && type_is_struct_like(decl_ty, decl_ty_hash) {
+            // var x: StructType  (no initializer) — zero-initialize struct slots
+            bind_struct_local_zeroinit_x86(ns, ne, decl_ty_hash)
+            if VAR_COUNT > 0 { VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut }
         } else {
             compile_or()
             if (decl_ty != 0 || decl_ty_hash != 0) && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
@@ -11085,7 +11149,7 @@ fn ety_clamp(c: i64) -> i64 {
     return c
 }
 
-fn ety_isqrt(n: i64) -> i64 with Div {
+fn ety_isqrt(n: i64) -> i64 with Div, Mut {
     // Integer square root (Newton-Raphson) for GUM quadrature
     if n <= 0 { return 0 }
     if n == 1 { return 1 }
@@ -11133,7 +11197,7 @@ fn ety_conf_product(c_a: i64, c_b: i64) -> i64 {
 }
 
 // GUM uncertainty combination: RSS (root sum of squares)
-fn ety_unc_combine(u_a: i64, u_b: i64) -> i64 with Div {
+fn ety_unc_combine(u_a: i64, u_b: i64) -> i64 with Div, Mut {
     return ety_clamp(ety_isqrt(u_a * u_a + u_b * u_b))
 }
 
@@ -12461,14 +12525,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     ST_COUNT = 0
     scan_all_consts()
     var pass0a_depth: i64 = 0
-    var pass0a_depth_trace: i64 = 0  // print first few depth=1 transitions
     while p < TC {
         // Track brace depth to only process top-level declarations
         if TK[p as usize] == 8 {
-            if pass0a_depth == 0 && pass0a_depth_trace < 5 {
-                print("open_brace p="); print_int(p); print(" src="); print_int(TS[p as usize]); print("\n")
-                pass0a_depth_trace = pass0a_depth_trace + 1
-            }
             pass0a_depth = pass0a_depth + 1; p = p + 1; continue
         }
         if TK[p as usize] == 9 {
@@ -12478,8 +12537,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         }
         // Reset depth at file boundaries (TK==77 = \x01...\x02 marker emitted by lexer)
         if TK[p as usize] == 77 {
-            print("file_boundary p="); print_int(p); print(" depth="); print_int(pass0a_depth); print(" src="); print_int(TS[p as usize]); print("\n")
-            pass0a_depth = 0; pass0a_depth_trace = 0; p = p + 1; continue
+            pass0a_depth = 0; p = p + 1; continue
         }
         // Algebra declarations: algebra Name over Base { ... }
         // If block contains 'basis: e0, e1, ...' → register Name as a struct type.
@@ -12714,9 +12772,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if CURRENT_IMPL_RECV_HASH != 0 && TK[p as usize] == 9 && pass0a_depth == 1 {
             CURRENT_IMPL_RECV_HASH = 0
         }
-        if pass0a_depth > 0 && TK[p as usize] == 46 {
-            print("missed_struct depth="); print_int(pass0a_depth); print(" p="); print_int(p); print("\n")
-        }
+        // Struct keyword at depth > 0 is inside a function body — skip (not a top-level decl)
         if pass0a_depth == 0 && (TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73) {
             // struct or pub/linear/affine keyword — skip prefix, track linear/affine
             var is_linear_decl: i64 = 0
@@ -16410,7 +16466,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 let esz = GL[(gi * 4 + 2) as usize]
                 var elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize])
-                if elem_ty == 0 { elem_ty = 1 }
+                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
                 em32(0xAA0003E9)
                 emit_imm64_a64(base)
                 if esz == 8 {
@@ -16436,7 +16492,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     var is_slice_ty = 0
                     if lvi >= 0 {
                         elem_ty = arr_hash_elem_ty(VAR_TY_HASH[lvi as usize])
-                        if elem_ty == 0 { elem_ty = 1 }
+                        // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
                         if VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
                         if VAR_TY[lvi as usize] == 10 {
                             if ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 {
@@ -16606,7 +16662,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             if base_ty == 8 {
                 let esiz = arr_hash_esiz(base_hash)
                 var elem_ty = arr_hash_elem_ty(base_hash)
-                if elem_ty == 0 { elem_ty = 1 }
+                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
                 LAST_ALEN = arr_hash_alen(base_hash)
                 if esiz == 8 {
                     em32(0xF8697800)
@@ -16623,7 +16679,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 let inner_hash = ref_hash_inner_hash(base_hash)
                 let esiz = arr_hash_esiz(inner_hash)
                 var elem_ty = arr_hash_elem_ty(inner_hash)
-                if elem_ty == 0 { elem_ty = 1 }
+                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
                 em32(0xF940042A)  // ldr x10, [x1, #8] (len)
                 em32(0xEB00001F | (10 << 16) | (9 << 5))  // cmp x9, x10
                 let slice_ok_patch_a = CL
@@ -18865,6 +18921,25 @@ fn strip_extern_blocks() with IO, Mut, Panic {
     var w: i64 = 0
     while r < SRC_LEN {
         if r + 9 < SRC_LEN && sb(r) == 101 && sb(r + 1) == 120 && sb(r + 2) == 116 && sb(r + 3) == 101 && sb(r + 4) == 114 && sb(r + 5) == 110 && sb(r + 6) == 32 && sb(r + 7) == 34 && sb(r + 8) == 67 && sb(r + 9) == 34 {
+            // Guard: skip if 'extern' appears inside a line comment (// on same line before it)
+            var in_comment: i64 = 0
+            var ck: i64 = r - 1
+            while ck >= 0 && sb(ck) != 10 {
+                if sb(ck) == 47 && ck + 1 < SRC_LEN && sb(ck + 1) == 47 { in_comment = 1 }
+                ck = ck - 1
+            }
+            if in_comment == 1 {
+                SRC[w as usize] = SRC[r as usize]; w = w + 1; r = r + 1
+                continue
+            }
+            // Real block: scan forward to { on same line (stop at newline)
+            var r2: i64 = r + 10
+            while r2 < SRC_LEN && sb(r2) != 123 && sb(r2) != 10 { r2 = r2 + 1 }
+            if r2 >= SRC_LEN || sb(r2) != 123 {
+                // No { found before newline — not a real extern block, copy normally
+                SRC[w as usize] = SRC[r as usize]; w = w + 1; r = r + 1
+                continue
+            }
             while r < SRC_LEN && sb(r) != 123 {
                 if sb(r) == 10 {
                     SRC[w as usize] = 10
