@@ -6342,7 +6342,13 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     EXPR_TY = 10
     let bvi = var_find_idx(rns, rne)
     if bvi >= 0 {
+        // Reborrow-through-reference: if the target variable is itself a reference (ty=10),
+        // e.g. `result: &!IEResult` parameter, then `&!result` or `&result` is a reborrow.
+        // The exclusivity is already guaranteed by the existing reference — do not apply
+        // borrow conflict checks or tracking (disjoint field reborrows are always safe).
+        let bvi_is_ref = VAR_TY[bvi as usize] == 10
         // Borrow conflict detection: exclusive borrows conflict with any other borrow.
+        if bvi_is_ref == false {
         if want_mut != 0 {
             if VAR_BORROW_COUNT[bvi as usize] > 0 {
                 tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared")
@@ -6368,6 +6374,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 CALL_ARG_BORROW_EXCL[CALL_ARG_BORROW_N as usize] = 0
                 CALL_ARG_BORROW_N = CALL_ARG_BORROW_N + 1
             }
+        }
         }
         // Navigate dot-chain in &var.field1.field2 before wrapping in reference type
         EXPR_TY = VAR_TY[bvi as usize]
@@ -8915,7 +8922,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     if off >= 0 {
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
-                        if EXPR_TY == 8 || EXPR_TY == 6 || knowledge_hash_is(EXPR_TY_HASH) {
+                        // ty==11 (Option/Box): multi-slot; emit LEA so caller gets pointer to field
+                        if EXPR_TY == 8 || EXPR_TY == 6 || EXPR_TY == 11 || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                         } else {
                             if off == 0 {
@@ -8938,7 +8946,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if off >= 0 {
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
-                    if EXPR_TY == 8 || EXPR_TY == 6 || knowledge_hash_is(EXPR_TY_HASH) {
+                    // ty==11 (Option/Box): multi-slot; emit LEA so caller gets pointer to field
+                    if EXPR_TY == 8 || EXPR_TY == 6 || EXPR_TY == 11 || knowledge_hash_is(EXPR_TY_HASH) {
                         if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                     } else {
                         if off == 0 {
@@ -11119,6 +11128,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         em(0x48); em(0x8b); em(0x40); em(0x08)  // mov rax, [rax + 8] (value)
                         let bslot = var_add(bind_ns, bind_ne)
                         if bslot >= 0 { emit_store_var(bslot) }
+                        // Propagate inner type from Option/Result scrutinee to bound variable
+                        if bslot >= 0 && VAR_COUNT > 0 {
+                            let bvi = VAR_COUNT - 1
+                            if MATCH_SCRUT_TY == 11 {
+                                VAR_TY[bvi as usize] = ptr_hash_inner_ty(MATCH_SCRUT_HASH)
+                                VAR_TY_HASH[bvi as usize] = ptr_hash_inner_hash(MATCH_SCRUT_HASH)
+                            }
+                        }
                     }
                     if TK[EP as usize] == 52 { EP = EP + 1 }  // skip =>
                     var arm_has_block: i64 = 0
