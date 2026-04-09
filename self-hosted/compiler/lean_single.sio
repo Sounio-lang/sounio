@@ -201,6 +201,11 @@ var VAR_MOVED: [i64; 1024] = [0; 1024]
 // Per local variable: count of active borrows (&var taken, for move-while-borrowed check)
 var VAR_BORROW_COUNT: [i64; 1024] = [0; 1024]
 var VAR_BORROW_EXCL: [i64; 1024] = [0; 1024]   // exclusive borrow active for this var
+// Call-site borrow tracking: borrows taken in arg position are ephemeral — released after call
+var CALL_ARG_BORROW_VI:   [i64; 32] = [-1; 32]  // var index borrowed in current call's args
+var CALL_ARG_BORROW_EXCL: [i64; 32] = [0; 32]   // 1=exclusive, 0=shared
+var CALL_ARG_BORROW_N:    i64 = 0               // count of borrows recorded this call
+var IN_CALL_ARGS:         i64 = 0               // 1 when compiling a call arg list
 // Per local variable: use count (for linear/affine checking)
 var VAR_USED: [i64; 1024] = [0; 1024]
 // Compile-time literal tracking for refinement predicate checks
@@ -4480,6 +4485,27 @@ fn var_find_ty_hash(ns: i64, ne: i64) -> i64 with Panic, Mut {
     return 0
 }
 
+// Release call-site borrows recorded during a call's argument list
+fn release_call_arg_borrows() with Mut {
+    var ri: i64 = 0
+    while ri < CALL_ARG_BORROW_N {
+        let rvi = CALL_ARG_BORROW_VI[ri as usize]
+        if rvi >= 0 && rvi < 1024 {
+            if CALL_ARG_BORROW_EXCL[ri as usize] != 0 {
+                if VAR_BORROW_EXCL[rvi as usize] > 0 {
+                    VAR_BORROW_EXCL[rvi as usize] = VAR_BORROW_EXCL[rvi as usize] - 1
+                }
+            } else {
+                if VAR_BORROW_COUNT[rvi as usize] > 0 {
+                    VAR_BORROW_COUNT[rvi as usize] = VAR_BORROW_COUNT[rvi as usize] - 1
+                }
+            }
+        }
+        ri = ri + 1
+    }
+    CALL_ARG_BORROW_N = 0
+}
+
 // ─── Function lookup ───
 fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
@@ -6293,11 +6319,23 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 tc_linear_violation(borrow_tok, "Cannot borrow as mutable: exclusive borrow already active")
             }
             VAR_BORROW_EXCL[bvi as usize] = VAR_BORROW_EXCL[bvi as usize] + 1
+            // Track call-site exclusive borrows for release after the call
+            if IN_CALL_ARGS != 0 && CALL_ARG_BORROW_N < 32 {
+                CALL_ARG_BORROW_VI[CALL_ARG_BORROW_N as usize] = bvi
+                CALL_ARG_BORROW_EXCL[CALL_ARG_BORROW_N as usize] = 1
+                CALL_ARG_BORROW_N = CALL_ARG_BORROW_N + 1
+            }
         } else {
             if VAR_BORROW_EXCL[bvi as usize] > 0 {
                 tc_linear_violation(borrow_tok, "cannot borrow as shared because it is also borrowed as mutable")
             }
             VAR_BORROW_COUNT[bvi as usize] = VAR_BORROW_COUNT[bvi as usize] + 1
+            // Track call-site shared borrows for release after the call
+            if IN_CALL_ARGS != 0 && CALL_ARG_BORROW_N < 32 {
+                CALL_ARG_BORROW_VI[CALL_ARG_BORROW_N as usize] = bvi
+                CALL_ARG_BORROW_EXCL[CALL_ARG_BORROW_N as usize] = 0
+                CALL_ARG_BORROW_N = CALL_ARG_BORROW_N + 1
+            }
         }
         // Navigate dot-chain in &var.field1.field2 before wrapping in reference type
         EXPR_TY = VAR_TY[bvi as usize]
@@ -8085,6 +8123,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
             EP = EP + 1
             var argc: i64 = 0
             var abi_argc: i64 = 0
+            // Mark that we're inside a call arg list so borrows taken here are tracked
+            let prev_in_call_args = IN_CALL_ARGS
+            IN_CALL_ARGS = 1
+            CALL_ARG_BORROW_N = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or()
                 if fi >= 0 {
@@ -8129,6 +8171,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
+            // Restore call-arg tracking state and release call-site borrows
+            IN_CALL_ARGS = prev_in_call_args
+            release_call_arg_borrows()
             if fi >= 0 {
                 if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
                 let callee_eff = FN_EFFECTS[fi as usize] & 1023  // mask out visibility bits
