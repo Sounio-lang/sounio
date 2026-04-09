@@ -10474,7 +10474,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(CURRENT_RET_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
             tc_observe_boundary(EP - 1, "cannot return Unobserved<T> as non-Unobserved type")
         }
-        if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
+        if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_x86(EXPR_TY, EXPR_TY_HASH)
         }
         // Linear type check at early return: any unconsumed linear var is an error
@@ -13363,20 +13363,27 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 em(0x31); em(0xc0)
             } else if LAST_STMT_HAS_VALUE == 0 {
                 em(0x31); em(0xc0)
-            } else if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
-                if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
-                    if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
-                        if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
-                            tc_epistemic_boundary(EP)
-                        } else {
-                            print("warning: tail type mismatch at line ")
-                            print_int(TL[(EP - 1) as usize])
-                            print("\n")
+            } else {
+                if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                    if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
+                        if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
+                            if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                                tc_epistemic_boundary(EP)
+                            } else {
+                                print("warning: tail type mismatch at line ")
+                                print_int(TL[(EP - 1) as usize])
+                                print("\n")
+                            }
                         }
                     }
                 }
-            } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
-                stabilize_return_agg_x86(LAST_STMT_TY, LAST_STMT_TY_HASH)
+                // SRET fix: stabilize whenever SRET was set up, regardless of type-eq result.
+                // Without this, functions returning tuples with a mismatched LAST_STMT_TY
+                // (e.g. last stmt typed as Item while return is (Parser,Item)) skip stabilization
+                // and return a dangling local stack address instead of the r12 SRET buffer.
+                if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                    stabilize_return_agg_x86(LAST_STMT_TY, LAST_STMT_TY_HASH)
+                }
             }
             // Observation boundary: implicit tail return of Unobserved<T> as non-Unobserved
             if ty_is_unobserved(LAST_STMT_TY) && !ty_is_unobserved(CURRENT_RET_TY) && CURRENT_RET_TY != 5 && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
@@ -17408,7 +17415,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 }
             }
         }
-        if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
+        if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_a64(EXPR_TY, EXPR_TY_HASH)
         }
         emit_imm64_reg_a64(9, FN_FRAME_SIZE[CURRENT_FN as usize])
@@ -17852,20 +17859,23 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 em32(0xD2800000)
             } else if LAST_STMT_HAS_VALUE == 0 {
                 em32(0xD2800000)
-            } else if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
-                if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
-                    if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
-                        if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
-                            tc_epistemic_boundary(EP)
-                        } else {
-                            print("warning: tail type mismatch at line ")
-                            print_int(TL[(EP - 1) as usize])
-                            print("\n")
+            } else {
+                if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
+                    if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
+                        if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
+                            if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                                tc_epistemic_boundary(EP)
+                            } else {
+                                print("warning: tail type mismatch at line ")
+                                print_int(TL[(EP - 1) as usize])
+                                print("\n")
+                            }
                         }
                     }
                 }
-            } else if type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
-                stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)
+                if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
+                    stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)
+                }
             }
             emit_imm64_reg_a64(9, frame_sz)
             em32(0x8B0903FF)  // add sp, sp, x9
