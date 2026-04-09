@@ -119,10 +119,10 @@ var FNSIG_TMP_PARAM_HASH: [i64; 256] = [0; 256]
 // ST[i*66+0] = name hash
 // ST[i*66+1] = field count
 // ST[i*66+2..65] = field name hashes (up to 64 fields)
-var ST: [i64; 78000] = [0; 78000]
+var ST: [i64; 133120] = [0; 133120]
 // Per-struct field type metadata, indexed as si*64 + fi
-var ST_FTY: [i64; 76800] = [0; 76800]
-var ST_FHASH: [i64; 76800] = [0; 76800]
+var ST_FTY: [i64; 131072] = [0; 131072]
+var ST_FHASH: [i64; 131072] = [0; 131072]
 var ST_COUNT: i64 = 0
 
 // Enum registry: flat array, up to 64 enums
@@ -184,9 +184,9 @@ var VAR_UNIT: [i64; 1024] = [0; 1024]
 
 // ─── Phase 6c: Linear type tracking ───
 // Per-struct: 1 if declared with 'linear' keyword, 0 otherwise
-var ST_LINEAR: [i64; 600] = [0; 600]
+var ST_LINEAR: [i64; 1024] = [0; 1024]
 // Per-struct: 1 if declared with 'affine' keyword, 0 otherwise
-var ST_AFFINE: [i64; 600] = [0; 600]
+var ST_AFFINE: [i64; 1024] = [0; 1024]
 // ─── Phase 6d: Algebra property tracking (bit-packed per struct) ───
 // Bit 0: is_algebra, Bit 1: add_comm, Bit 2: add_assoc,
 // Bit 3: mul_comm, Bit 4: mul_assoc, Bit 5: mul_alt
@@ -3231,12 +3231,13 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
             let inner_ty = SCAN_TY
             let inner_hash = SCAN_TY_HASH
             p = SCAN_TY_NEXT
-            // Handle closing >: single > (24) or >> (39, consumes one > and leaves one)
+            // Handle closing >: single > (24) or >> (39, both > consumed here — outer finds nothing)
             if TK[p as usize] == 24 { p = p + 1 }
             else if TK[p as usize] == 39 {
-                // >> token: consume as one >, rewrite remaining > as single > (24)
+                // >> token: rewrite as > for idempotency, then advance past it entirely
                 TK[p as usize] = 24
                 TS[p as usize] = TS[p as usize] + 1
+                p = p + 1
             }
             SCAN_TY = 11
             SCAN_TY_HASH = ptr_hash_make(inner_ty, inner_hash, 0)
@@ -3250,11 +3251,12 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
             let inner_ty = SCAN_TY
             let inner_hash = SCAN_TY_HASH
             p = SCAN_TY_NEXT
-            // Handle closing >: single > (24) or >> (39, consumes one > and leaves one)
+            // Handle closing >: single > (24) or >> (39, both > consumed here — outer finds nothing)
             if TK[p as usize] == 24 { p = p + 1 }
             else if TK[p as usize] == 39 {
                 TK[p as usize] = 24
                 TS[p as usize] = TS[p as usize] + 1
+                p = p + 1
             }
             SCAN_TY = 11
             SCAN_TY_HASH = ptr_hash_make(inner_ty, inner_hash, 0)
@@ -3268,6 +3270,11 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
             let inner_hash = SCAN_TY_HASH
             p = SCAN_TY_NEXT
             if TK[p as usize] == 24 { p = p + 1 }
+            else if TK[p as usize] == 39 {
+                TK[p as usize] = 24
+                TS[p as usize] = TS[p as usize] + 1
+                p = p + 1
+            }
             SCAN_TY = 20
             SCAN_TY_HASH = unobserved_hash_make(inner_ty, inner_hash)
             SCAN_TY_NEXT = p
@@ -3388,9 +3395,10 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
                 p = p + 1
             }
         }
-        if saw_generic != 0 && SCAN_TY == 0 && SCAN_TY_HASH != 0 {
-            SCAN_TY_HASH = gl_name_hash(ns, TE[(p - 1) as usize])
-        }
+        // saw_generic: SCAN_TY_HASH already holds hash(base_name) from the unknown-type branch.
+        // Do NOT re-hash across the <...> span — that produces a garbage key that never matches
+        // any mono-mangled name. The call site (compile_primary) resolves the monomorphized
+        // version via mono_find_inst using the base-name hash.
     }
     SCAN_TY_NEXT = p
 }
@@ -3430,7 +3438,16 @@ fn lex_all() with IO, Mut, Panic, Div {
     while p < SRC_LEN && TC < 262143 {
         let c = sb(p)
         // Whitespace
-        if c == 1 || c == 2 || c == 32 || c == 9 || c == 13 || c == 10 { if c == 10 { cur_line = cur_line + 1 }; p = p + 1; continue }
+        // File boundary marker \x01<path>\x02 — emit TK==77 and reset line counter
+        if c == 1 {
+            p = p + 1
+            while p < SRC_LEN && sb(p) != 2 { p = p + 1 }
+            if p < SRC_LEN { p = p + 1 }
+            TK[TC as usize] = 77; TS[TC as usize] = p; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1
+            cur_line = 1
+            continue
+        }
+        if c == 2 || c == 32 || c == 9 || c == 13 || c == 10 { if c == 10 { cur_line = cur_line + 1 }; p = p + 1; continue }
         // Line comment
         if c == 47 && p + 1 < SRC_LEN && sb(p + 1) == 47 {
             p = p + 2; while p < SRC_LEN && sb(p) != 10 { p = p + 1 }; continue
@@ -3688,6 +3705,24 @@ fn scan_all_consts() with Panic, Mut {
         // top-level let NAME: TYPE = LITERAL
         if depth == 0 && TK[p as usize] == 11 {
             p = p + 1  // skip 'let'
+            if TK[p as usize] != 3 { continue }
+            if CONST_COUNT >= 511 { p = p + 1; continue }
+            cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
+            while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
+            if TK[p as usize] == 16 { p = p + 1 }
+            cv = 0; neg_c = 0
+            if TK[p as usize] == 18 { neg_c = 1; p = p + 1 }
+            if TK[p as usize] == 4 { cv = TV[p as usize]; p = p + 1 }
+            if neg_c != 0 { cv = 0 - cv }
+            CONST_NS[CONST_COUNT as usize] = cn_ns
+            CONST_NE[CONST_COUNT as usize] = cn_ne
+            CONST_VAL[CONST_COUNT as usize] = cv
+            CONST_COUNT = CONST_COUNT + 1
+            continue
+        }
+        // bare 'const NAME: TYPE = VALUE'
+        if depth == 0 && TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "const") {
+            p = p + 1  // skip 'const'
             if TK[p as usize] != 3 { continue }
             if CONST_COUNT >= 511 { p = p + 1; continue }
             cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
@@ -7052,7 +7087,24 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     return
                 }
+                // Method not found — drain () to prevent EP stranding at (
+                EP = EP + 1  // skip (
+                var drain_d: i64 = 1
+                while EP < TC && drain_d > 0 {
+                    if TK[EP as usize] == 6 { drain_d = drain_d + 1 }
+                    if TK[EP as usize] == 7 { drain_d = drain_d - 1 }
+                    EP = EP + 1
+                }
+                em(0x48); em(0xb8); em64(0)
+                EXPR_IS_F64 = 0; EXPR_TY = 0; EXPR_TY_HASH = 0
+                return
             }
+            // disc < 0, not a method call — unregistered enum variant: consume :: + name to prevent cascade
+            EP = EP + 1  // skip ::
+            EP = EP + 1  // skip variant name
+            em(0x48); em(0xb8); em64(0)
+            EXPR_IS_F64 = 0; EXPR_TY = 0; EXPR_TY_HASH = 0
+            return
         }
         // Generic call/struct: IDENT < TYPE > ( or IDENT < TYPE > {
         if TK[EP as usize] == 23 && EP + 2 < TC && TK[(EP + 1) as usize] == 3 && TK[(EP + 2) as usize] == 24 {
@@ -12409,13 +12461,25 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     ST_COUNT = 0
     scan_all_consts()
     var pass0a_depth: i64 = 0
+    var pass0a_depth_trace: i64 = 0  // print first few depth=1 transitions
     while p < TC {
         // Track brace depth to only process top-level declarations
-        if TK[p as usize] == 8 { pass0a_depth = pass0a_depth + 1; p = p + 1; continue }
+        if TK[p as usize] == 8 {
+            if pass0a_depth == 0 && pass0a_depth_trace < 5 {
+                print("open_brace p="); print_int(p); print(" src="); print_int(TS[p as usize]); print("\n")
+                pass0a_depth_trace = pass0a_depth_trace + 1
+            }
+            pass0a_depth = pass0a_depth + 1; p = p + 1; continue
+        }
         if TK[p as usize] == 9 {
             if pass0a_depth > 0 { pass0a_depth = pass0a_depth - 1 }
             p = p + 1
             continue
+        }
+        // Reset depth at file boundaries (TK==77 = \x01...\x02 marker emitted by lexer)
+        if TK[p as usize] == 77 {
+            print("file_boundary p="); print_int(p); print(" depth="); print_int(pass0a_depth); print(" src="); print_int(TS[p as usize]); print("\n")
+            pass0a_depth = 0; pass0a_depth_trace = 0; p = p + 1; continue
         }
         // Algebra declarations: algebra Name over Base { ... }
         // If block contains 'basis: e0, e1, ...' → register Name as a struct type.
@@ -12512,7 +12576,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 ap = ap + 1
             }
             // Register as struct if basis was declared
-            if alg_fc > 0 && ST_COUNT < 600 {
+            if alg_fc > 0 && ST_COUNT < 1024 {
                 let asi = ST_COUNT
                 let abase = asi * 130
                 ST[abase as usize] = alg_hash
@@ -12592,7 +12656,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 let trait_hash = gl_name_hash(trait_ns, trait_ne)
                 p = p + 1  // skip trait name
                 // Register trait as a struct-like entry (for name resolution)
-                if ST_COUNT < 600 {
+                if ST_COUNT < 1024 {
                     let tsi = ST_COUNT
                     let tbase = tsi * 130
                     ST[tbase as usize] = trait_hash
@@ -12649,6 +12713,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // Reset impl context when closing a top-level block
         if CURRENT_IMPL_RECV_HASH != 0 && TK[p as usize] == 9 && pass0a_depth == 1 {
             CURRENT_IMPL_RECV_HASH = 0
+        }
+        if pass0a_depth > 0 && TK[p as usize] == 46 {
+            print("missed_struct depth="); print_int(pass0a_depth); print(" p="); print_int(p); print("\n")
         }
         if pass0a_depth == 0 && (TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73) {
             // struct or pub/linear/affine keyword — skip prefix, track linear/affine
@@ -12717,6 +12784,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         p = p + 1
     }
     resolve_forward_struct_types()
+    print("st_count: "); print_int(ST_COUNT); print(" depth_end: "); print_int(pass0a_depth); print("\n")
     // Also scan enums in the same pass
     p = 0
     EN_COUNT = 0
