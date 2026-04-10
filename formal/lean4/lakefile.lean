@@ -46,4 +46,7 @@ lean_lib «SounioSkewCategory» where
 lean_lib «SounioBidirectionalBridge» where
 
 @[default_target]
+lean_lib «SounioCompositionAlgebra» where
+
+@[default_target]
 lean_lib «SounioFormal» where

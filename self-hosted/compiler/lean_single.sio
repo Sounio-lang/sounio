@@ -241,6 +241,10 @@ var SCAN_HAS_PRED: i64 = 0      // 1 if predicate was successfully parsed
 var SCAN_PRED_OP: i64 = 0       // comparison TK: 26=>=, 24=>, 25=<=, 23=<, 21===, 22=!=
 var SCAN_PRED_BOUND: i64 = 0    // literal bound value (i64 bits; for f64, IEEE 754)
 var SCAN_PRED_IS_F64: i64 = 0   // 1 if float predicate
+var SCAN_HAS_PRED2: i64 = 0     // 1 if second OR-predicate was parsed
+var SCAN_PRED_OP2: i64 = 0      // second predicate operator
+var SCAN_PRED_BOUND2: i64 = 0   // second predicate bound
+var SCAN_PRED_IS_F64_2: i64 = 0 // 1 if second predicate is float
 
 // ─── Phase 6d: Unit dimension checking ───
 // Tracks unit hash of the last compiled expression sub-result.
@@ -3088,6 +3092,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
     }
     // Refinement type: { ident : TYPE | pred } -> treat as TYPE + parse predicate
     SCAN_HAS_PRED = 0
+    SCAN_HAS_PRED2 = 0
     if TK[p as usize] == 8 {
         if p + 3 < TC {
             let ref_t1 = TK[(p + 1) as usize]
@@ -3122,6 +3127,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
                                     SCAN_PRED_BOUND = bv
                                     SCAN_PRED_IS_F64 = 0
                                     SCAN_HAS_PRED = 1
+                                    pp = pp + 1
                                 }
                                 if pp < TC && TK[pp as usize] == 53 {
                                     var fbv = TV[pp as usize]
@@ -3129,6 +3135,35 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
                                     SCAN_PRED_BOUND = fbv
                                     SCAN_PRED_IS_F64 = 1
                                     SCAN_HAS_PRED = 1
+                                    pp = pp + 1
+                                }
+                                // Check for || and parse second predicate
+                                if SCAN_HAS_PRED == 1 && pp < TC && TK[pp as usize] == 31 {
+                                    pp = pp + 1  // skip ||
+                                    if pp < TC && TK[pp as usize] == 3 { pp = pp + 1 }  // skip var ident
+                                    if pp < TC {
+                                        let pred_op2 = TK[pp as usize]
+                                        if pred_op2 == 26 || pred_op2 == 24 || pred_op2 == 25 || pred_op2 == 23 || pred_op2 == 21 || pred_op2 == 22 {
+                                            SCAN_PRED_OP2 = pred_op2
+                                            pp = pp + 1
+                                            var pred_neg2: i64 = 0
+                                            if pp < TC && TK[pp as usize] == 18 { pred_neg2 = 1; pp = pp + 1 }
+                                            if pp < TC && TK[pp as usize] == 4 {
+                                                var bv2 = TV[pp as usize]
+                                                if pred_neg2 == 1 { bv2 = 0 - bv2 }
+                                                SCAN_PRED_BOUND2 = bv2
+                                                SCAN_PRED_IS_F64_2 = 0
+                                                SCAN_HAS_PRED2 = 1
+                                            }
+                                            if pp < TC && TK[pp as usize] == 53 {
+                                                var fbv2 = TV[pp as usize]
+                                                if pred_neg2 == 1 { fbv2 = fbv2 | 0 - 9223372036854775808 }
+                                                SCAN_PRED_BOUND2 = fbv2
+                                                SCAN_PRED_IS_F64_2 = 1
+                                                SCAN_HAS_PRED2 = 1
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -7007,6 +7042,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
             em(0x48); em(0x0f); em(0xba); em(0xf8); em(63)  // btc rax, 63
         } else {
             em(0x48); em(0xf7); em(0xd8)  // neg rax
+            // Track negation in literal value so compile-time refinement checks use -N not N
+            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = 0 - LAST_LITERAL_VAL }
         }
         return
     }
@@ -8659,8 +8696,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             let fns = TS[EP as usize]
             let fne = TE[EP as usize]
             let fh = gl_name_hash(fns, fne)
-            // Built-in .len() — return compile-time array length
-            if src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 {
+            // Built-in .len() — return compile-time array length (only for array/slice receivers)
+            if src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 && (EXPR_TY == 8 || type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
                 EP = EP + 1  // skip 'len'
                 EP = EP + 1  // skip (
                 EP = EP + 1  // skip )
@@ -8761,19 +8798,10 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     let method_expects_borrow = (SCAN_TY == 10)
                         // If receiver is a struct value and method expects borrow, auto-borrow
                     if method_expects_borrow && EXPR_TY == 6 {
-                        // Store struct value to a temporary slot and pass its address
-                        let nslots = struct_like_nslots(EXPR_TY_HASH)
-                        if nslots > 0 {
-                            // Allocate temp slot - must increment NEXT_SLOT so frame is sized correctly
-                            let temp_slot = NEXT_SLOT
-                            NEXT_SLOT = NEXT_SLOT + nslots
-                            // Store value: mov [rbp - slot*8], rax
-                            em(0x48); em(0x89); em(0x85)
-                            em32(0 - temp_slot * 8)
-                            // Load address: lea rax, [rbp - slot*8]
-                            em(0x48); em(0x8d); em(0x85)
-                            em32(0 - temp_slot * 8)
-                        }
+                        // rax already holds the pointer to the struct data:
+                        //   - from a struct variable: emit_load_var(ptr_slot) loads the stored LEA address
+                        //   - from a struct literal: LEA is left in rax by compile_primary
+                        // Just pass rax directly — no temp slot needed.
                     } else if method_expects_borrow && EXPR_TY == 10 {
                         // Receiver is already a borrow, pass as-is
                         // rax already contains the pointer
@@ -10124,6 +10152,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // let x = expr / var x = expr (with optional : type)
     if k == 11 || k == 12 {
         EP = EP + 1
+        // Clear refinement predicate state so it is only set by the explicit type annotation
+        // of THIS binding, not leaked from inner expressions (e.g. scan_fn_param_type in RHS).
+        SCAN_HAS_PRED = 0
         // Strike 2: Reject 'let mut' Rust syntax
         if k == 11 && TK[EP as usize] == 3 {
             let ns = TS[EP as usize]
@@ -10313,6 +10344,17 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     if SCAN_PRED_OP == 23 && cv >= bv { violated = 1 } // <  : violated if cv >= bv
                     if SCAN_PRED_OP == 21 && cv != bv { violated = 1 } // == : violated if cv != bv
                     if SCAN_PRED_OP == 22 && cv == bv { violated = 1 } // != : violated if cv == bv
+                    // For OR predicate: if first violated, check second
+                    if violated == 1 && SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+                        let bv2 = SCAN_PRED_BOUND2; var ok2: i64 = 0
+                        if SCAN_PRED_OP2 == 26 && cv >= bv2 { ok2 = 1 }
+                        if SCAN_PRED_OP2 == 24 && cv > bv2 { ok2 = 1 }
+                        if SCAN_PRED_OP2 == 25 && cv <= bv2 { ok2 = 1 }
+                        if SCAN_PRED_OP2 == 23 && cv < bv2 { ok2 = 1 }
+                        if SCAN_PRED_OP2 == 21 && cv == bv2 { ok2 = 1 }
+                        if SCAN_PRED_OP2 == 22 && cv != bv2 { ok2 = 1 }
+                        if ok2 == 1 { violated = 0 }
+                    }
                     if violated == 1 {
                         print("error: refinement type violation — value ")
                         print_int(cv)
@@ -10325,19 +10367,43 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 }
                 // Refinement predicate runtime assertion (integer bounds only)
                 // RAX holds the value before store — emit bound check + ud2 trap.
-                // Uses CMP which does NOT modify RAX, so emit_store_var below is correct.
+                // For OR predicates: first check passes → jump to ok; else check second → jump to ok; else trap.
                 if SCAN_HAS_PRED == 1 && SCAN_PRED_IS_F64 == 0 {
-                    em(0x48); em(0x81); em(0xf8); em32(SCAN_PRED_BOUND)  // cmp rax, imm32
-                    if SCAN_PRED_OP == 26 { em(0x0f); em(0x8d) }  // JGE (>=)
-                    if SCAN_PRED_OP == 24 { em(0x0f); em(0x8f) }  // JG  (>)
-                    if SCAN_PRED_OP == 25 { em(0x0f); em(0x8e) }  // JLE (<=)
-                    if SCAN_PRED_OP == 23 { em(0x0f); em(0x8c) }  // JL  (<)
-                    if SCAN_PRED_OP == 21 { em(0x0f); em(0x84) }  // JE  (==)
-                    if SCAN_PRED_OP == 22 { em(0x0f); em(0x85) }  // JNE (!=)
-                    let pred_ok_off = CL; em32(0)
-                    em(0x0f); em(0x0b)  // ud2: refinement predicate violated (trap)
-                    patch32(pred_ok_off, CL)
+                    if SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+                        // OR: cmp rax,B1; Jcc ok; cmp rax,B2; Jcc ok; ud2
+                        em(0x48); em(0x81); em(0xf8); em32(SCAN_PRED_BOUND)  // cmp rax, B1
+                        if SCAN_PRED_OP == 26 { em(0x0f); em(0x8d) }  // JGE
+                        if SCAN_PRED_OP == 24 { em(0x0f); em(0x8f) }  // JG
+                        if SCAN_PRED_OP == 25 { em(0x0f); em(0x8e) }  // JLE
+                        if SCAN_PRED_OP == 23 { em(0x0f); em(0x8c) }  // JL
+                        if SCAN_PRED_OP == 21 { em(0x0f); em(0x84) }  // JE
+                        if SCAN_PRED_OP == 22 { em(0x0f); em(0x85) }  // JNE
+                        let pred_ok1 = CL; em32(0)  // placeholder for ok offset
+                        em(0x48); em(0x81); em(0xf8); em32(SCAN_PRED_BOUND2)  // cmp rax, B2
+                        if SCAN_PRED_OP2 == 26 { em(0x0f); em(0x8d) }
+                        if SCAN_PRED_OP2 == 24 { em(0x0f); em(0x8f) }
+                        if SCAN_PRED_OP2 == 25 { em(0x0f); em(0x8e) }
+                        if SCAN_PRED_OP2 == 23 { em(0x0f); em(0x8c) }
+                        if SCAN_PRED_OP2 == 21 { em(0x0f); em(0x84) }
+                        if SCAN_PRED_OP2 == 22 { em(0x0f); em(0x85) }
+                        let pred_ok2 = CL; em32(0)
+                        em(0x0f); em(0x0b)  // ud2: neither condition satisfied
+                        patch32(pred_ok1, CL)
+                        patch32(pred_ok2, CL)
+                    } else {
+                        em(0x48); em(0x81); em(0xf8); em32(SCAN_PRED_BOUND)  // cmp rax, imm32
+                        if SCAN_PRED_OP == 26 { em(0x0f); em(0x8d) }  // JGE (>=)
+                        if SCAN_PRED_OP == 24 { em(0x0f); em(0x8f) }  // JG  (>)
+                        if SCAN_PRED_OP == 25 { em(0x0f); em(0x8e) }  // JLE (<=)
+                        if SCAN_PRED_OP == 23 { em(0x0f); em(0x8c) }  // JL  (<)
+                        if SCAN_PRED_OP == 21 { em(0x0f); em(0x84) }  // JE  (==)
+                        if SCAN_PRED_OP == 22 { em(0x0f); em(0x85) }  // JNE (!=)
+                        let pred_ok_off = CL; em32(0)
+                        em(0x0f); em(0x0b)  // ud2: refinement predicate violated (trap)
+                        patch32(pred_ok_off, CL)
+                    }
                     SCAN_HAS_PRED = 0
+                    SCAN_HAS_PRED2 = 0
                 }
                 if SCAN_HAS_PRED == 1 && SCAN_PRED_IS_F64 == 1 {
                     // f64 refinement: movq xmm0, rax; load bound into xmm1; ucomisd; Jcc ok; ud2
@@ -11698,12 +11764,9 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                         if src_match(tns, tne - tns, "bool") { bind_ty = ty_bool; bind_conf = 1000 }
                         if src_match(tns, tne - tns, "string") { bind_ty = ty_string; bind_conf = 1000 }
                     }
-                    // Skip past type annotation to find '='
-                    anno_end = p + 3
-                    // Skip array types [T; N] and compound types
-                    while anno_end < TC && TK[anno_end as usize] != 16 && TK[anno_end as usize] != 8 && TK[anno_end as usize] != 0 {
-                        anno_end = anno_end + 1
-                    }
+                    // Skip past type annotation to find '=' — use scan_type to handle generics
+                    scan_type(p + 3)
+                    anno_end = SCAN_TY_NEXT
                 }
                 // Scan forward to find '=' and RHS expression
                 var eq_pos: i64 = anno_end
@@ -12156,8 +12219,12 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     let lnh = gl_name_hash(TS[(lp + 1) as usize], TE[(lp + 1) as usize])
                     let lsi = escope_find(lnh)
                     if lsi >= 0 && ESCOPE_CONF[lsi as usize] < GATE_THRESHOLD {
-                        // Find '='
+                        // Find '=' — skip type annotation via scan_type if present
                         var leq: i64 = lp + 2
+                        if leq < TC && TK[leq as usize] == 43 {
+                            scan_type(lp + 3)
+                            leq = SCAN_TY_NEXT
+                        }
                         while leq < TC && TK[leq as usize] != 16 && TK[leq as usize] != 8 && TK[leq as usize] != 0 {
                             leq = leq + 1
                         }
