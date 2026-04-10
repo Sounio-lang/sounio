@@ -5,84 +5,46 @@
 //
 // NOTE: This file requires the self-hosted compiler pipeline, not the JIT.
 // The JIT frontend does not recognize measure() as a builtin.
-
-// GUM addition: z = a + b
-// z.value = a.value + b.value
-// z.variance = a.variance + b.variance  (JCGM 100:2008 §5.1.2)
-// z.confidence = min(a.confidence, b.confidence)
-fn knowledge_add(a: Knowledge<f64>, b: Knowledge<f64>) -> Knowledge<f64> with Mut, Panic, Div {
-    let av = a.value
-    let bv = b.value
-    let sum_val = av + bv
-    let sum_var = a.variance + b.variance
-    let ca = a.confidence
-    let cb = b.confidence
-    let conf = if ca < cb { ca } else { cb }
-    measure(sum_val,  sqrt(sum_var))
-}
-
-// GUM subtraction: z = a - b
-// z.value = a.value - b.value
-// z.variance = a.variance + b.variance  (partials squared cancel sign)
-// z.confidence = min(a.confidence, b.confidence)
-fn knowledge_sub(a: Knowledge<f64>, b: Knowledge<f64>) -> Knowledge<f64> with Mut, Panic, Div {
-    let av = a.value
-    let bv = b.value
-    let diff_val = av - bv
-    let diff_var = a.variance + b.variance
-    let ca = a.confidence
-    let cb = b.confidence
-    let conf = if ca < cb { ca } else { cb }
-    measure(diff_val,  sqrt(diff_var))
-}
-
-// GUM multiplication: z = a * b
-// z.value = a.value * b.value
-// z.variance = a.value² * b.variance + b.value² * a.variance  (JCGM §5.1.3)
-// z.confidence = min(a.confidence, b.confidence)
-fn knowledge_mul(a: Knowledge<f64>, b: Knowledge<f64>) -> Knowledge<f64> with Mut, Panic, Div {
-    let av = a.value
-    let bv = b.value
-    let prod_val = av * bv
-    let av2 = av * av
-    let bv2 = bv * bv
-    let prod_var = av2 * b.variance + bv2 * a.variance
-    let ca = a.confidence
-    let cb = b.confidence
-    let conf = if ca < cb { ca } else { cb }
-    measure(prod_val,  sqrt(prod_var))
-}
-
-// GUM division: z = a / b
-// z.value = a.value / b.value
-// z.variance = (1/b.value²) * a.variance + (a.value²/b.value⁴) * b.variance
-// z.confidence = min(a.confidence, b.confidence)
-fn knowledge_div(a: Knowledge<f64>, b: Knowledge<f64>) -> Knowledge<f64> with Mut, Panic, Div {
-    let av = a.value
-    let bv = b.value
-    let quot_val = av / bv
-    let bv2 = bv * bv
-    let bv4 = bv2 * bv2
-    let quot_var = a.variance / bv2 + (av * av) * b.variance / bv4
-    let ca = a.confidence
-    let cb = b.confidence
-    let conf = if ca < cb { ca } else { cb }
-    measure(quot_val,  sqrt(quot_var))
-}
+//
+// Since the compiler emits inline GUM codegen for Knowledge<f64> arithmetic,
+// these operations use native `+`, `-`, `*`, `/` directly rather than manual
+// propagation.  The compiler enforces E170: .value requires `with Epistemic`.
 
 // Demo: compute area of rectangle with uncertain dimensions
-fn main() -> i32 with IO, Mut, Panic, Div {
+fn main() -> i32 with IO, Epistemic, Mut, Panic, Div {
     // Length = 10.5 ± 0.1 m
-    let length = measure(10.5,  0.1)
+    let length = measure(10.5, uncertainty: 0.1)
     // Width = 5.2 ± 0.05 m
-    let width = measure(5.2,  0.05)
+    let width = measure(5.2, uncertainty: 0.05)
 
-    // Area = length * width (GUM §5.1.3)
-    let area = knowledge_mul(length, width)
+    // Area = length * width
+    // Compiler emits inline GUM §5.1.3:
+    //   value = length.value * width.value
+    //   variance = length.value² * width.variance + width.value² * length.variance
+    //   confidence = min(length.confidence, width.confidence)
+    let area = length * width
 
-    // Print results
+    // Perimeter = 2*(length + width)
+    // Compiler emits inline GUM §5.1.2 for add, then §5.1.3 for scalar mul
+    let half_perim = length + width
+
+    // Print results (requires `with Epistemic` for .value access)
+    print("area value: ")
     print_f64(area.value)
+    print("\n")
+    print("area variance: ")
     print_f64(area.variance)
+    print("\n")
+    print("area uncertainty: ")
+    print_f64(area.uncertainty)
+    print("\n")
+
+    print("half-perimeter value: ")
+    print_f64(half_perim.value)
+    print("\n")
+    print("half-perimeter uncertainty: ")
+    print_f64(half_perim.uncertainty)
+    print("\n")
 
     0
 }
