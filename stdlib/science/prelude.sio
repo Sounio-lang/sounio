@@ -1,0 +1,108 @@
+// stdlib/science/prelude.sio — Science prelude bridging to compiler-native Knowledge<f64>
+//
+// The compiler enforces epistemic discipline:
+//   E170: .value access requires `with Epistemic`
+//   E171: `as` cast on Knowledge<T> is blocked
+//   +/-/*/÷: emit inline GUM uncertainty propagation (JCGM 100:2008)
+//
+// This module provides:
+//   - Convenience constructor (k_measured)
+//   - Transcendental wrappers with delta-method uncertainty (k_sqrt, k_exp, k_ln, k_sin, k_cos)
+//   - Output helpers (k_print, k_print_ci)
+//
+// Arithmetic is NOT wrapped — use native `a + b`, `a * b`, etc. directly.
+// The compiler emits inline GUM codegen for these.
+
+// ============================================================================
+// Construction
+// ============================================================================
+
+fn k_measured(val: f64, unc: f64) -> Knowledge<f64> {
+    measure(val, uncertainty: unc)
+}
+
+fn k_constant(val: f64) -> Knowledge<f64> {
+    measure(val, uncertainty: 0.0)
+}
+
+// ============================================================================
+// Transcendental uncertainty propagation (delta method)
+//
+// For f(x): u_f = |f'(x)| * u_x   (GUM §5.1.2, first-order Taylor)
+//
+// The compiler provides .sqrt(), .exp(), .ln(), .sin(), .cos() as scalar
+// intrinsics on f64.  These wrappers extract the value (with Epistemic gate),
+// apply the intrinsic, and reconstruct a Knowledge<f64> with propagated
+// uncertainty.
+// ============================================================================
+
+// sqrt(x):  f'(x) = 1 / (2 sqrt(x))
+fn k_sqrt(k: Knowledge<f64>) -> Knowledge<f64> with Epistemic, Mut, Div, Panic {
+    let v = k.value
+    let u = k.uncertainty
+    let sv = v.sqrt()
+    let du = if sv > 1.0e-300 { u / (2.0 * sv) } else { 0.0 }
+    measure(sv, uncertainty: du)
+}
+
+// exp(x):  f'(x) = exp(x)
+fn k_exp(k: Knowledge<f64>) -> Knowledge<f64> with Epistemic, Mut, Div, Panic {
+    let v = k.value
+    let u = k.uncertainty
+    let ev = v.exp()
+    measure(ev, uncertainty: ev * u)
+}
+
+// ln(x):  f'(x) = 1/x
+fn k_ln(k: Knowledge<f64>) -> Knowledge<f64> with Epistemic, Mut, Div, Panic {
+    let v = k.value
+    let u = k.uncertainty
+    let lv = v.ln()
+    let av = v.abs()
+    let du = if av > 1.0e-300 { u / av } else { 0.0 }
+    measure(lv, uncertainty: du)
+}
+
+// sin(x):  f'(x) = cos(x)
+fn k_sin(k: Knowledge<f64>) -> Knowledge<f64> with Epistemic, Mut, Div, Panic {
+    let v = k.value
+    let u = k.uncertainty
+    let cv = v.cos()
+    let acv = cv.abs()
+    measure(v.sin(), uncertainty: acv * u)
+}
+
+// cos(x):  f'(x) = -sin(x)
+fn k_cos(k: Knowledge<f64>) -> Knowledge<f64> with Epistemic, Mut, Div, Panic {
+    let v = k.value
+    let u = k.uncertainty
+    let sv = v.sin()
+    let asv = sv.abs()
+    measure(v.cos(), uncertainty: asv * u)
+}
+
+// ============================================================================
+// Output helpers
+// ============================================================================
+
+fn k_print(k: Knowledge<f64>) with IO, Epistemic {
+    print_f64(k.value)
+    print(" +/- ")
+    print_f64(k.uncertainty)
+    print("\n")
+}
+
+fn k_print_ci(k: Knowledge<f64>, label: string) with IO, Epistemic {
+    print(label)
+    print(": ")
+    let v = k.value
+    let u = k.uncertainty
+    let lo = v - 1.96 * u
+    let hi = v + 1.96 * u
+    print_f64(v)
+    print(" [95% CI: ")
+    print_f64(lo)
+    print(" .. ")
+    print_f64(hi)
+    print("]\n")
+}
