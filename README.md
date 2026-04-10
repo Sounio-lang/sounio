@@ -37,6 +37,30 @@ The compiler is **self-hosted**: Sounio compiles itself, bootstrapped from a [20
 
 This is an active **research project**, not a production release. Read the [honest status](#honest-status) before using it for anything serious.
 
+### Cross-Repo Example: Cognitive O-SSM on SWOW-EN
+
+The canonical Sounio checkout now includes a bounded cross-repo example under:
+
+- `examples/cognitive_ossm/`
+
+This lane is paired with the repository:
+
+- `github.com/agourakis82/hyperbolic-semantic-networks`
+
+Workflow split:
+
+- Sounio provides the executable parity path and canonical `.sio` implementation scaffolding.
+- The hyperbolic repo exports the compact SWOW bundle in `data/cpc2026/sounio_input/`.
+- The hyperbolic repo's Python mirror currently generates the full paper-scale O-SSM artifacts.
+
+From the Sounio repo root:
+
+```bash
+./artifacts/omega/souc-bin/souc-linux-x86_64-gpu run examples/cognitive_ossm/cognitive_ossm.sio
+./artifacts/omega/souc-bin/souc-linux-x86_64-gpu run examples/cognitive_ossm/run_regimes.sio -- --max-trajectories 8 --max-steps 64
+./artifacts/omega/souc-bin/souc-linux-x86_64-gpu run examples/cognitive_ossm/export_results.sio
+```
+
 ---
 
 ## For LLMs and Code Tools
