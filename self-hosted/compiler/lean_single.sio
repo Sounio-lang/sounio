@@ -406,6 +406,14 @@ var RET_AGG_BSS_OFF: i64 = 0
 var LIMIT_ERROR_KIND: i64 = 0
 var LAST_LOCAL_BSS_SPILL: i64 = 0
 var LAST_LOCAL_BSS_ADDR: i64 = 0
+var ASYNC_RT_INIT_BSS_OFF: i64 = 0
+var ASYNC_RT_INIT_LOCK_BSS_OFF: i64 = 0
+var ASYNC_RT_QUEUE_LOCK_BSS_OFF: i64 = 0
+var ASYNC_RT_QUEUE_HEAD_BSS_OFF: i64 = 0
+var ASYNC_RT_QUEUE_TAIL_BSS_OFF: i64 = 0
+var ASYNC_RT_QUEUE_COUNT_BSS_OFF: i64 = 0
+var ASYNC_RT_WORKER_COUNT_BSS_OFF: i64 = 0
+var ASYNC_RT_QUEUE_PTRS_BSS_OFF: i64 = 0
 var GPU_EMU_THREAD_ID_BSS_OFF: i64 = 0
 var GPU_RT_STATE_BSS_OFF: i64 = 0
 var GPU_RT_DIAG_BSS_OFF: i64 = 0
@@ -1169,6 +1177,11 @@ fn em32_at(off: i64, v: i64) with Mut, Panic {
     CD[(off + 1) as usize] = ((v >> 8) & 0xFF) as i8
     CD[(off + 2) as usize] = ((v >> 16) & 0xFF) as i8
     CD[(off + 3) as usize] = ((v >> 24) & 0xFF) as i8
+}
+
+fn em64_at(off: i64, v: i64) with Mut, Panic {
+    em32_at(off, v)
+    em32_at(off + 4, v >> 32)
 }
 fn record_frame_patch() with Mut {
     if FRAME_PATCH_COUNT < 4096 { FRAME_PATCH_OFF[FRAME_PATCH_COUNT as usize] = CL; FRAME_PATCH_COUNT = FRAME_PATCH_COUNT + 1 }
@@ -5079,7 +5092,7 @@ fn emit_print_nl() with Mut {
 
 fn emit_assert_fail() with Mut {
     em(0xbf); em32(1)
-    em(0xb8); em32(60)
+    em(0xb8); em32(231)
     em(0x0f); em(0x05)
 }
 
@@ -6174,15 +6187,21 @@ fn emit_store_imm64_to_rbx_disp_x86(disp: i64, v: i64) with Mut {
 
 fn task_runtime_rec_size_x86() -> i64 { return 4096 }
 fn task_runtime_stack_size_x86() -> i64 { return 1048576 }
+fn async_rt_queue_cap_x86() -> i64 { return 256 }
+fn async_rt_queue_mask_x86() -> i64 { return 255 }
+fn async_rt_worker_count_x86() -> i64 { return 4 }
+fn async_rt_text_base_x86() -> i64 { return 0x401000 }
 fn task_rec_tid_off_x86() -> i64 { return 0 }
 fn task_rec_state_off_x86() -> i64 { return 8 }
 fn task_rec_result_off_x86() -> i64 { return 16 }
-fn task_rec_stack_off_x86() -> i64 { return 24 }
-fn task_rec_arg_base_off_x86() -> i64 { return 32 }
+fn task_rec_argc_off_x86() -> i64 { return 24 }
+fn task_rec_entry_off_x86() -> i64 { return 32 }
+fn task_rec_arg_base_off_x86() -> i64 { return 40 }
+fn task_state_queued_x86() -> i64 { return 0 }
 fn task_state_running_x86() -> i64 { return 1 }
 fn task_state_done_x86() -> i64 { return 2 }
 fn task_state_failed_x86() -> i64 { return 3 }
-fn task_clone_flags_x86() -> i64 { return 0x00000F11 }
+fn task_worker_clone_flags_x86() -> i64 { return 0x00050F00 }
 
 fn emit_task_alloc_shared_x86() with Mut {
     emit_imm64(9); em(0x50)
@@ -6208,24 +6227,13 @@ fn emit_task_alloc_stack_x86() with Mut {
 
 fn emit_task_alloc_runtime_x86() with Mut {
     emit_task_alloc_shared_x86()
-    em(0x48); em(0x89); em(0xc3)                                   // mov rbx, rax
+    em(0x48); em(0x89); em(0xc3)
     emit_store_imm64_to_rbx_disp_x86(task_rec_tid_off_x86(), 0)
-    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_running_x86())
+    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_queued_x86())
     emit_store_imm64_to_rbx_disp_x86(task_rec_result_off_x86(), 0)
-    emit_task_alloc_stack_x86()
-    emit_store_rax_to_rbx_disp_x86(task_rec_stack_off_x86())
-    em(0x48); em(0x89); em(0xd8)                                   // mov rax, rbx
-}
-
-fn emit_task_clone_x86() with Mut {
-    em(0xbf); em32(task_clone_flags_x86())                         // mov edi, flags
-    em(0x48); em(0x8b); em(0x73); em(task_rec_stack_off_x86())    // mov rsi, [rbx+stack]
-    em(0x48); em(0x81); em(0xc6); em32(task_runtime_stack_size_x86() - 16)
-    em(0x31); em(0xd2)                                             // xor edx, edx
-    em(0x45); em(0x31); em(0xd2)                                   // xor r10d, r10d
-    em(0x45); em(0x31); em(0xc0)                                   // xor r8d, r8d
-    em(0xb8); em32(56)                                             // mov eax, 56 (clone)
-    em(0x0f); em(0x05)
+    emit_store_imm64_to_rbx_disp_x86(task_rec_argc_off_x86(), 0)
+    emit_store_imm64_to_rbx_disp_x86(task_rec_entry_off_x86(), 0)
+    em(0x48); em(0x89); em(0xd8)
 }
 
 fn emit_task_exit_x86(code: i64) with Mut {
@@ -6234,26 +6242,54 @@ fn emit_task_exit_x86(code: i64) with Mut {
     em(0x0f); em(0x05)
 }
 
-fn emit_task_futex_wait_running_x86() with Mut {
-    em(0x48); em(0x8d); em(0x7b); em(task_rec_state_off_x86())     // lea rdi, [rbx+state]
-    em(0xbe); em32(0)                                              // mov esi, FUTEX_WAIT
-    em(0xba); em32(task_state_running_x86())                       // mov edx, running
-    em(0x45); em(0x31); em(0xd2)                                   // xor r10d, r10d
-    em(0x45); em(0x31); em(0xc0)                                   // xor r8d, r8d
-    em(0x45); em(0x31); em(0xc9)                                   // xor r9d, r9d
-    em(0xb8); em32(202)                                            // mov eax, 202 (futex)
+fn emit_futex_wait_abs_x86(addr: i64, expected: i64) with Mut {
+    emit_load_abs_addr_to_rax_x86(addr)
+    em(0x48); em(0x89); em(0xc7)
+    em(0xbe); em32(0)
+    em(0xba); em32(expected)
+    em(0x45); em(0x31); em(0xd2)
+    em(0x45); em(0x31); em(0xc0)
+    em(0x45); em(0x31); em(0xc9)
+    em(0xb8); em32(202)
     em(0x0f); em(0x05)
 }
 
-fn emit_task_futex_wake_x86() with Mut {
-    em(0x48); em(0x8d); em(0x7b); em(task_rec_state_off_x86())     // lea rdi, [rbx+state]
-    em(0xbe); em32(1)                                              // mov esi, FUTEX_WAKE
-    em(0xba); em32(1)                                              // mov edx, wake one waiter
-    em(0x45); em(0x31); em(0xd2)                                   // xor r10d, r10d
-    em(0x45); em(0x31); em(0xc0)                                   // xor r8d, r8d
-    em(0x45); em(0x31); em(0xc9)                                   // xor r9d, r9d
-    em(0xb8); em32(202)                                            // mov eax, 202 (futex)
+fn emit_futex_wake_abs_x86(addr: i64, wake_count: i64) with Mut {
+    emit_load_abs_addr_to_rax_x86(addr)
+    em(0x48); em(0x89); em(0xc7)
+    em(0xbe); em32(1)
+    em(0xba); em32(wake_count)
+    em(0x45); em(0x31); em(0xd2)
+    em(0x45); em(0x31); em(0xc0)
+    em(0x45); em(0x31); em(0xc9)
+    em(0xb8); em32(202)
     em(0x0f); em(0x05)
+}
+
+fn emit_abs_lock_acquire_x86(addr: i64) with Mut, Panic {
+    let retry = CL
+    emit_load_abs_addr_to_rax_x86(addr)
+    em(0x48); em(0x89); em(0xc1)
+    emit_imm64(1)
+    em(0x48); em(0x87); em(0x01)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let acquired = CL; em32(0)
+    em(0x48); em(0x89); em(0xcf)
+    em(0xbe); em32(0)
+    em(0xba); em32(1)
+    em(0x45); em(0x31); em(0xd2)
+    em(0x45); em(0x31); em(0xc0)
+    em(0x45); em(0x31); em(0xc9)
+    em(0xb8); em32(202)
+    em(0x0f); em(0x05)
+    em(0xe9); em32(retry - (CL + 4))
+    let acquired_target = CL
+    patch32(acquired, acquired_target)
+}
+
+fn emit_abs_lock_release_x86(addr: i64) with Mut {
+    emit_store_imm64_to_abs_qword_x86(addr, 0)
+    emit_futex_wake_abs_x86(addr, 1)
 }
 
 fn emit_task_copy_call_args_to_record_x86(argc: i64) with Mut {
@@ -6274,109 +6310,331 @@ fn emit_task_push_marshaled_args_x86(argc: i64) with Mut {
     }
 }
 
-fn emit_task_await_x86() with Mut, Panic {
-    em(0x48); em(0x89); em(0xc3)                                   // mov rbx, rax
+fn emit_async_enqueue_task_x86() with Mut, Panic, Div {
+    em(0x48); em(0x89); em(0xc3)
+    let retry = CL
+    emit_abs_lock_acquire_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_LOCK_BSS_OFF)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF)
+    em(0x48); em(0x3d); em32(async_rt_queue_cap_x86())
+    em(0x0f); em(0x8c); let has_space = CL; em32(0)
+    emit_abs_lock_release_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_LOCK_BSS_OFF)
+    emit_futex_wait_abs_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF, async_rt_queue_cap_x86())
+    em(0xe9); em32(retry - (CL + 4))
+    let has_space_target = CL
+    patch32(has_space, has_space_target)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_TAIL_BSS_OFF)
+    em(0x48); em(0x89); em(0xc2)
+    emit_imm64(GL_BSS_BASE + ASYNC_RT_QUEUE_PTRS_BSS_OFF)
+    em(0x48); em(0x8d); em(0x0c); em(0xd0)
+    em(0x48); em(0x89); em(0x19)
+    em(0x48); em(0xff); em(0xc2)
+    em(0x48); em(0x81); em(0xe2); em32(async_rt_queue_mask_x86())
+    em(0x48); em(0x89); em(0xd0)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_TAIL_BSS_OFF)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF)
+    em(0x48); em(0xff); em(0xc0)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF)
+    emit_abs_lock_release_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_LOCK_BSS_OFF)
+    emit_futex_wake_abs_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF, 1)
+    em(0x48); em(0x89); em(0xd8)
+}
+
+fn emit_async_dequeue_task_x86() with Mut, Panic, Div {
+    let retry = CL
+    emit_abs_lock_acquire_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_LOCK_BSS_OFF)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85); let has_item = CL; em32(0)
+    emit_abs_lock_release_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_LOCK_BSS_OFF)
+    emit_futex_wait_abs_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF, 0)
+    em(0xe9); em32(retry - (CL + 4))
+    let has_item_target = CL
+    patch32(has_item, has_item_target)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_HEAD_BSS_OFF)
+    em(0x48); em(0x89); em(0xc2)
+    emit_imm64(GL_BSS_BASE + ASYNC_RT_QUEUE_PTRS_BSS_OFF)
+    em(0x48); em(0x8d); em(0x0c); em(0xd0)
+    em(0x48); em(0x8b); em(0x19)
+    em(0x48); em(0x89); em(0xd8)
+    em(0x48); em(0xff); em(0xc0)
+    em(0x48); em(0x25); em32(async_rt_queue_mask_x86())
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_HEAD_BSS_OFF)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF)
+    em(0x48); em(0xff); em(0xc8)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF)
+    emit_abs_lock_release_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_LOCK_BSS_OFF)
+    emit_futex_wake_abs_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF, 1)
+    em(0x48); em(0x89); em(0xd8)
+}
+
+fn emit_async_try_dequeue_task_x86() with Mut, Panic, Div {
+    emit_abs_lock_acquire_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_LOCK_BSS_OFF)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85); let has_item = CL; em32(0)
+    emit_abs_lock_release_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_LOCK_BSS_OFF)
+    em(0x31); em(0xc0)
+    em(0xe9); let done = CL; em32(0)
+    let has_item_target = CL
+    patch32(has_item, has_item_target)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_HEAD_BSS_OFF)
+    em(0x48); em(0x89); em(0xc2)
+    emit_imm64(GL_BSS_BASE + ASYNC_RT_QUEUE_PTRS_BSS_OFF)
+    em(0x48); em(0x8d); em(0x0c); em(0xd0)
+    em(0x48); em(0x8b); em(0x19)
+    em(0x48); em(0x89); em(0xd8)
+    em(0x48); em(0xff); em(0xc0)
+    em(0x48); em(0x25); em32(async_rt_queue_mask_x86())
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_HEAD_BSS_OFF)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF)
+    em(0x48); em(0xff); em(0xc8)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF)
+    emit_abs_lock_release_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_LOCK_BSS_OFF)
+    emit_futex_wake_abs_x86(GL_BSS_BASE + ASYNC_RT_QUEUE_COUNT_BSS_OFF, 1)
+    em(0x48); em(0x89); em(0xd8)
+    let done_target = CL
+    patch32(done, done_target)
+}
+
+fn emit_async_worker_dispatch_x86() with Mut, Panic, Div {
+    em(0x48); em(0x8b); em(0x4b); em(task_rec_argc_off_x86())
+    em(0x48); em(0x85); em(0xc9)
+    em(0x0f); em(0x84); let argc0 = CL; em32(0)
+    em(0x48); em(0x83); em(0xf9); em(1)
+    em(0x0f); em(0x84); let argc1 = CL; em32(0)
+    em(0x48); em(0x83); em(0xf9); em(2)
+    em(0x0f); em(0x84); let argc2 = CL; em32(0)
+    em(0x48); em(0x83); em(0xf9); em(3)
+    em(0x0f); em(0x84); let argc3 = CL; em32(0)
+    em(0x48); em(0x83); em(0xf9); em(4)
+    em(0x0f); em(0x84); let argc4 = CL; em32(0)
+    em(0x48); em(0x83); em(0xf9); em(5)
+    em(0x0f); em(0x84); let argc5 = CL; em32(0)
+    em(0x48); em(0x83); em(0xf9); em(6)
+    em(0x0f); em(0x84); let argc6 = CL; em32(0)
+    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_failed_x86())
+    em(0x31); em(0xc0)
+    em(0xe9); let call_done = CL; em32(0)
+    let argc0_target = CL
+    em(0x48); em(0x8b); em(0x43); em(task_rec_entry_off_x86())
+    emit_call_rax_x86(0)
+    em(0xe9); let argc0_done = CL; em32(0)
+    let argc1_target = CL
+    emit_task_push_marshaled_args_x86(1)
+    em(0x48); em(0x8b); em(0x43); em(task_rec_entry_off_x86())
+    emit_call_rax_x86(1)
+    em(0xe9); let argc1_done = CL; em32(0)
+    let argc2_target = CL
+    emit_task_push_marshaled_args_x86(2)
+    em(0x48); em(0x8b); em(0x43); em(task_rec_entry_off_x86())
+    emit_call_rax_x86(2)
+    em(0xe9); let argc2_done = CL; em32(0)
+    let argc3_target = CL
+    emit_task_push_marshaled_args_x86(3)
+    em(0x48); em(0x8b); em(0x43); em(task_rec_entry_off_x86())
+    emit_call_rax_x86(3)
+    em(0xe9); let argc3_done = CL; em32(0)
+    let argc4_target = CL
+    emit_task_push_marshaled_args_x86(4)
+    em(0x48); em(0x8b); em(0x43); em(task_rec_entry_off_x86())
+    emit_call_rax_x86(4)
+    em(0xe9); let argc4_done = CL; em32(0)
+    let argc5_target = CL
+    emit_task_push_marshaled_args_x86(5)
+    em(0x48); em(0x8b); em(0x43); em(task_rec_entry_off_x86())
+    emit_call_rax_x86(5)
+    em(0xe9); let argc5_done = CL; em32(0)
+    let argc6_target = CL
+    emit_task_push_marshaled_args_x86(6)
+    em(0x48); em(0x8b); em(0x43); em(task_rec_entry_off_x86())
+    emit_call_rax_x86(6)
+    let call_done_target = CL
+    patch32(argc0, argc0_target)
+    patch32(argc1, argc1_target)
+    patch32(argc2, argc2_target)
+    patch32(argc3, argc3_target)
+    patch32(argc4, argc4_target)
+    patch32(argc5, argc5_target)
+    patch32(argc6, argc6_target)
+    patch32(argc0_done, call_done_target)
+    patch32(argc1_done, call_done_target)
+    patch32(argc2_done, call_done_target)
+    patch32(argc3_done, call_done_target)
+    patch32(argc4_done, call_done_target)
+    patch32(argc5_done, call_done_target)
+}
+
+fn emit_async_run_task_from_rax_x86() with Mut, Panic, Div {
+    em(0x48); em(0x89); em(0xc3)
+    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_running_x86())
+    em(0x48); em(0x83); em(0xec); em(8)
+    em(0x48); em(0x89); em(0x1c); em(0x24)
+    emit_async_worker_dispatch_x86()
+    em(0x48); em(0x8b); em(0x1c); em(0x24)
+    em(0x48); em(0x83); em(0xc4); em(8)
+    emit_store_rax_to_rbx_disp_x86(task_rec_result_off_x86())
+    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_done_x86())
+    em(0x48); em(0x8d); em(0x7b); em(task_rec_state_off_x86())
+    em(0xbe); em32(1)
+    em(0xba); em32(1)
+    em(0x45); em(0x31); em(0xd2)
+    em(0x45); em(0x31); em(0xc0)
+    em(0x45); em(0x31); em(0xc9)
+    em(0xb8); em32(202)
+    em(0x0f); em(0x05)
+}
+
+fn emit_async_worker_loop_x86() with Mut, Panic, Div {
+    let worker_loop = CL
+    emit_async_dequeue_task_x86()
+    emit_async_run_task_from_rax_x86()
+    em(0xe9); em32(worker_loop - (CL + 4))
+}
+
+fn emit_async_runtime_ensure_x86() with Mut, Panic, Div {
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_INIT_BSS_OFF)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85); let rt_done = CL; em32(0)
+    emit_abs_lock_acquire_x86(GL_BSS_BASE + ASYNC_RT_INIT_LOCK_BSS_OFF)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_INIT_BSS_OFF)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85); let already_init = CL; em32(0)
+    emit_store_imm64_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_WORKER_COUNT_BSS_OFF, async_rt_worker_count_x86())
+    var wi: i64 = 0
+    while wi < 4 {
+        emit_task_alloc_stack_x86()
+        em(0x48); em(0x89); em(0xc6)
+        em(0x48); em(0x81); em(0xc6); em32(task_runtime_stack_size_x86() - 16)
+        em(0xbf); em32(task_worker_clone_flags_x86())
+        em(0x31); em(0xd2)
+        em(0x45); em(0x31); em(0xd2)
+        em(0x45); em(0x31); em(0xc0)
+        em(0xb8); em32(56)
+        em(0x0f); em(0x05)
+        em(0x48); em(0x85); em(0xc0)
+        em(0x0f); em(0x88); let clone_fail = CL; em32(0)
+        em(0x0f); em(0x85); let clone_parent = CL; em32(0)
+        emit_async_worker_loop_x86()
+        emit_task_exit_x86(0)
+        let clone_parent_target = CL
+        em(0xe9); let clone_after = CL; em32(0)
+        let clone_fail_target = CL
+        let clone_after_target = CL
+        patch32(clone_parent, clone_parent_target)
+        patch32(clone_fail, clone_fail_target)
+        patch32(clone_after, clone_after_target)
+        wi = wi + 1
+    }
+    emit_store_imm64_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_INIT_BSS_OFF, 1)
+    let already_init_target = CL
+    patch32(already_init, already_init_target)
+    emit_abs_lock_release_x86(GL_BSS_BASE + ASYNC_RT_INIT_LOCK_BSS_OFF)
+    let rt_done_target = CL
+    patch32(rt_done, rt_done_target)
+}
+
+fn emit_task_await_x86() with Mut, Panic, Div {
+    let task_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(task_slot)
     let wait_loop = CL
-    em(0x48); em(0x8b); em(0x4b); em(task_rec_state_off_x86())     // mov rcx, [rbx+state]
-    em(0x48); em(0x83); em(0xf9); em(task_state_running_x86())     // cmp rcx, running
-    em(0x0f); em(0x85); let wait_done = CL; em32(0)
-    emit_task_futex_wait_running_x86()
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)
+    em(0x48); em(0x8b); em(0x4b); em(task_rec_state_off_x86())
+    em(0x48); em(0x83); em(0xf9); em(task_state_done_x86())
+    em(0x0f); em(0x8d); let wait_done = CL; em32(0)
+    emit_async_try_dequeue_task_x86()
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let wait_sleep = CL; em32(0)
+    emit_async_run_task_from_rax_x86()
+    em(0xe9); em32(wait_loop - (CL + 4))
+    let wait_sleep_target = CL
+    patch32(wait_sleep, wait_sleep_target)
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)
+    em(0x48); em(0x8b); em(0x4b); em(task_rec_state_off_x86())
+    em(0x48); em(0x83); em(0xf9); em(task_state_done_x86())
+    em(0x0f); em(0x8d); let wait_done_after_reload = CL; em32(0)
+    em(0x48); em(0x8d); em(0x7b); em(task_rec_state_off_x86())
+    em(0x89); em(0xca)
+    em(0xbe); em32(0)
+    em(0x45); em(0x31); em(0xd2)
+    em(0x45); em(0x31); em(0xc0)
+    em(0x45); em(0x31); em(0xc9)
+    em(0xb8); em32(202)
+    em(0x0f); em(0x05)
     em(0xe9); em32(wait_loop - (CL + 4))
     let wait_done_target = CL
     patch32(wait_done, wait_done_target)
-    em(0x48); em(0x8b); em(0x43); em(task_rec_result_off_x86())    // mov rax, [rbx+result]
+    patch32(wait_done_after_reload, wait_done_target)
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)
+    em(0x48); em(0x8b); em(0x43); em(task_rec_result_off_x86())
+}
+
+fn emit_store_async_entry_ptr_patch_x86(fi: i64) with Mut {
+    em(0x48); em(0xb8)
+    PATCH_OFF[PATCH_COUNT as usize] = CL
+    PATCH_FN[PATCH_COUNT as usize] = fi
+    PATCH_KIND[PATCH_COUNT as usize] = 3
+    PATCH_COUNT = PATCH_COUNT + 1
+    em64(0)
 }
 
 fn emit_async_direct_fn_call_x86(fi: i64, argc: i64) with Mut, Panic, Div {
+    emit_async_runtime_ensure_x86()
     emit_task_alloc_runtime_x86()
     let task_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     emit_store_var(task_slot)
     emit_load_var(task_slot)
-    em(0x48); em(0x89); em(0xc3)                                   // mov rbx, rax
+    em(0x48); em(0x89); em(0xc3)
+    emit_store_imm64_to_rbx_disp_x86(task_rec_argc_off_x86(), argc)
+    emit_store_async_entry_ptr_patch_x86(fi)
+    emit_store_rax_to_rbx_disp_x86(task_rec_entry_off_x86())
     emit_task_copy_call_args_to_record_x86(argc)
-    emit_task_clone_x86()
-    em(0x48); em(0x85); em(0xc0)                   // test rax, rax
-    em(0x0f); em(0x88); let clone_fail = CL; em32(0)
-    em(0x0f); em(0x85); let parent_path = CL; em32(0)
-    emit_task_push_marshaled_args_x86(argc)
-    emit_direct_fn_call_x86(fi, argc)
-    emit_push()
-    emit_load_var(task_slot)
-    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
-    em(0x58)                                       // pop rax
-    emit_store_rax_to_rbx_disp_x86(task_rec_result_off_x86())
-    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_done_x86())
-    emit_task_futex_wake_x86()
-    emit_task_exit_x86(0)
-    let parent_target = CL
-    emit_drop_call_args_x86(argc)
-    emit_push()
-    emit_load_var(task_slot)
-    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
-    em(0x58)                                       // pop rax
-    emit_store_rax_to_rbx_disp_x86(task_rec_tid_off_x86())
-    em(0x48); em(0x89); em(0xd8)                   // mov rax, rbx
-    em(0xe9); let async_done = CL; em32(0)
-    let clone_fail_target = CL
     emit_drop_call_args_x86(argc)
     emit_load_var(task_slot)
-    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
-    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_failed_x86())
-    emit_store_imm64_to_rbx_disp_x86(task_rec_result_off_x86(), 0)
-    emit_task_futex_wake_x86()
-    em(0x48); em(0x89); em(0xd8)                   // mov rax, rbx
-    let async_done_target = CL
-    patch32(parent_path, parent_target)
-    patch32(clone_fail, clone_fail_target)
-    patch32(async_done, async_done_target)
+    emit_async_enqueue_task_x86()
 }
 
 fn compile_async_inline_block_x86(tok: i64) with IO, Mut, Panic, Div {
     if (FN_EFFECTS[CURRENT_FN as usize] & 32) == 0 { tc_effect_violation(tok, 32, FN_EFFECTS[CURRENT_FN as usize]) }
     EP = EP + 1
-    emit_task_alloc_runtime_x86()
-    let task_slot = NEXT_SLOT
-    NEXT_SLOT = NEXT_SLOT + 1
-    emit_store_var(task_slot)
-    emit_load_var(task_slot)
-    em(0x48); em(0x89); em(0xc3)                                   // mov rbx, rax
-    emit_task_clone_x86()
-    em(0x48); em(0x85); em(0xc0)                   // test rax, rax
-    em(0x0f); em(0x88); let clone_fail = CL; em32(0)
-    em(0x0f); em(0x85); let parent_path = CL; em32(0)
+    em(0xe9); let thunk_skip = CL; em32(0)
+    let thunk_off = CL
+    em(0x55)
+    em(0x48); em(0x89); em(0xe5)
+    let save_fpc = FRAME_PATCH_COUNT
+    em(0x48); em(0x81); em(0xec); record_frame_patch(); em32(0)
     compile_inline_block_expr_x86()
     if type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
         tc_error(tok, "async aggregate results not yet supported")
         em(0x31); em(0xc0)
     }
-    emit_push()
+    em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
+    em(0x5d); em(0xc3)
+    let thunk_frame_sz = (NEXT_SLOT * 8 + 15) & 0xFFFFFFF0
+    if thunk_frame_sz > max_frame_bytes() { tc_stack_frame_too_large(thunk_frame_sz) }
+    var thunk_fpi: i64 = save_fpc
+    while thunk_fpi < FRAME_PATCH_COUNT {
+        em32_at(FRAME_PATCH_OFF[thunk_fpi as usize], thunk_frame_sz)
+        thunk_fpi = thunk_fpi + 1
+    }
+    let thunk_skip_target = CL
+    patch32(thunk_skip, thunk_skip_target)
+    emit_async_runtime_ensure_x86()
+    emit_task_alloc_runtime_x86()
+    let task_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(task_slot)
     emit_load_var(task_slot)
-    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
-    em(0x58)                                       // pop rax
-    emit_store_rax_to_rbx_disp_x86(task_rec_result_off_x86())
-    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_done_x86())
-    emit_task_futex_wake_x86()
-    emit_task_exit_x86(0)
-    let parent_target = CL
-    emit_push()
+    em(0x48); em(0x89); em(0xc3)
+    emit_store_imm64_to_rbx_disp_x86(task_rec_argc_off_x86(), 0)
+    emit_imm64(async_rt_text_base_x86() + thunk_off)
+    emit_store_rax_to_rbx_disp_x86(task_rec_entry_off_x86())
     emit_load_var(task_slot)
-    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
-    em(0x58)                                       // pop rax
-    emit_store_rax_to_rbx_disp_x86(task_rec_tid_off_x86())
-    em(0x48); em(0x89); em(0xd8)                   // mov rax, rbx
-    em(0xe9); let async_done = CL; em32(0)
-    let clone_fail_target = CL
-    emit_load_var(task_slot)
-    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
-    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_failed_x86())
-    emit_store_imm64_to_rbx_disp_x86(task_rec_result_off_x86(), 0)
-    emit_task_futex_wake_x86()
-    em(0x48); em(0x89); em(0xd8)                   // mov rax, rbx
-    let async_done_target = CL
-    patch32(parent_path, parent_target)
-    patch32(clone_fail, clone_fail_target)
-    patch32(async_done, async_done_target)
+    emit_async_enqueue_task_x86()
     EXPR_TY_HASH = task_hash_make(EXPR_TY, EXPR_TY_HASH)
     EXPR_TY = 13
     EXPR_IS_F64 = 0
@@ -11555,6 +11813,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let then_has_value = LAST_STMT_HAS_VALUE
         let then_ty = LAST_STMT_TY
         let then_hash = LAST_STMT_TY_HASH
+        let then_conf = EXPR_CONFIDENCE
         if TK[EP as usize] == 9 { EP = EP + 1 }
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
@@ -11612,6 +11871,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             let else_has_value = LAST_STMT_HAS_VALUE
             let else_ty = LAST_STMT_TY
             let else_hash = LAST_STMT_TY_HASH
+            let else_conf = EXPR_CONFIDENCE
             patch32(jmp_off, CL)
             if then_has_value == 1 && else_has_value == 1 && then_ty != 5 && else_ty != 5 {
                 if ty_eq(then_ty, then_hash, else_ty, else_hash) == false {
@@ -11623,6 +11883,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 EXPR_TY = then_ty
                 EXPR_TY_HASH = then_hash
                 if then_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // Epistemic: if-else result confidence = min(then, else)
+                if then_conf < else_conf { EXPR_CONFIDENCE = then_conf }
+                else { EXPR_CONFIDENCE = else_conf }
             } else {
                 LAST_STMT_HAS_VALUE = 0
                 LAST_STMT_TY = 0
@@ -11670,6 +11933,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         while bi < BREAK_COUNT { patch32(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
         BREAK_COUNT = saved_bc
         LOOP_DEPTH = LOOP_DEPTH - 1
+        // Epistemic: loop iteration amplifies uncertainty — degrade confidence by 5%
+        EXPR_CONFIDENCE = EXPR_CONFIDENCE * 950 / 1000
         return
     }
 
@@ -11765,6 +12030,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         while bi < BREAK_COUNT { patch32(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
         BREAK_COUNT = saved_bc
         LOOP_DEPTH = LOOP_DEPTH - 1
+        // Epistemic: loop iteration amplifies uncertainty — degrade confidence by 5%
+        EXPR_CONFIDENCE = EXPR_CONFIDENCE * 950 / 1000
         return
     }
 
@@ -11786,6 +12053,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         var match_have_ty: i64 = 0
         var match_all_value: i64 = 1
         var match_arms: i64 = 0
+        var match_min_conf: i64 = 1000
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
             var is_wildcard: i64 = 0
             var disc: i64 = -1
@@ -11887,6 +12155,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         compile_stmt()
                     }
                     match_arms = match_arms + 1
+                    if EXPR_CONFIDENCE < match_min_conf { match_min_conf = EXPR_CONFIDENCE }
                     if LAST_STMT_HAS_VALUE == 1 {
                         if match_have_ty == 0 {
                             match_have_ty = 1
@@ -11920,6 +12189,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         compile_stmt()
                     }
                     match_arms = match_arms + 1
+                    if EXPR_CONFIDENCE < match_min_conf { match_min_conf = EXPR_CONFIDENCE }
                     if LAST_STMT_HAS_VALUE == 1 {
                         if match_have_ty == 0 {
                             match_have_ty = 1
@@ -11949,6 +12219,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     compile_stmt()
                 }
                 match_arms = match_arms + 1
+                if EXPR_CONFIDENCE < match_min_conf { match_min_conf = EXPR_CONFIDENCE }
                 if LAST_STMT_HAS_VALUE == 1 {
                     if match_have_ty == 0 {
                         match_have_ty = 1
@@ -11981,6 +12252,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             EXPR_TY_HASH = match_hash
             if match_ty == 2 { EXPR_IS_F64 = 1 }
             else { EXPR_IS_F64 = 0 }
+            // Epistemic: match result confidence = min across all arms
+            EXPR_CONFIDENCE = match_min_conf
         }
         return
     }
@@ -13791,6 +14064,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     }
     p = 0
 
+    ASYNC_RT_INIT_BSS_OFF = bss_alloc_aligned(8)
+    ASYNC_RT_INIT_LOCK_BSS_OFF = bss_alloc_aligned(8)
+    ASYNC_RT_QUEUE_LOCK_BSS_OFF = bss_alloc_aligned(8)
+    ASYNC_RT_QUEUE_HEAD_BSS_OFF = bss_alloc_aligned(8)
+    ASYNC_RT_QUEUE_TAIL_BSS_OFF = bss_alloc_aligned(8)
+    ASYNC_RT_QUEUE_COUNT_BSS_OFF = bss_alloc_aligned(8)
+    ASYNC_RT_WORKER_COUNT_BSS_OFF = bss_alloc_aligned(8)
+    ASYNC_RT_QUEUE_PTRS_BSS_OFF = bss_alloc_aligned(8 * async_rt_queue_cap_x86())
     GPU_EMU_THREAD_ID_BSS_OFF = bss_alloc_aligned(8)
     GPU_RT_STATE_BSS_OFF = bss_alloc_aligned(8)
     GPU_RT_DIAG_BSS_OFF = bss_alloc_aligned(8)
@@ -14423,11 +14704,16 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         let fi = PATCH_FN[pi as usize]
         if fi >= 0 && fi < FN_COUNT && off >= 0 && off + 3 < CL {
             let target = FN_OFF[fi as usize]
-            let rel = target - (off + 4)
-            CD[(off) as usize] = (rel & 0xFF) as i8
-            CD[(off + 1) as usize] = ((rel >> 8) & 0xFF) as i8
-            CD[(off + 2) as usize] = ((rel >> 16) & 0xFF) as i8
-            CD[(off + 3) as usize] = ((rel >> 24) & 0xFF) as i8
+            if PATCH_KIND[pi as usize] == 3 {
+                let abs = async_rt_text_base_x86() + target
+                em64_at(off, abs)
+            } else {
+                let rel = target - (off + 4)
+                CD[(off) as usize] = (rel & 0xFF) as i8
+                CD[(off + 1) as usize] = ((rel >> 8) & 0xFF) as i8
+                CD[(off + 2) as usize] = ((rel >> 16) & 0xFF) as i8
+                CD[(off + 3) as usize] = ((rel >> 24) & 0xFF) as i8
+            }
         }
         pi = pi + 1
     }
@@ -14531,9 +14817,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         let skip_var_off = CL - (jz_var_patch + 1)
         CD[jz_var_patch as usize] = (skip_var_off & 0xFF) as i8
         em(0x58)  // pop rax (restore exit code)
-        // exit(rax): Linux syscall 60
+        // exit_group(rax): Linux syscall 231, so clone-thread workers do not
+        // keep the process alive after main returns.
         em(0x89); em(0xc7)
-        em(0xb8); em32(60)
+        em(0xb8); em32(231)
         em(0x0f); em(0x05)
     }
 
@@ -18458,6 +18745,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         let then_has_value = LAST_STMT_HAS_VALUE
         let then_ty = LAST_STMT_TY
         let then_hash = LAST_STMT_TY_HASH
+        let then_conf_a = EXPR_CONFIDENCE
         if TK[EP as usize] == 9 { EP = EP + 1 }
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
@@ -18479,6 +18767,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             let else_has_value = LAST_STMT_HAS_VALUE
             let else_ty = LAST_STMT_TY
             let else_hash = LAST_STMT_TY_HASH
+            let else_conf_a = EXPR_CONFIDENCE
             patch_branch_a64(b_end_off, CL)
             if then_has_value == 1 && else_has_value == 1 && then_ty != 5 && else_ty != 5 {
                 if ty_eq(then_ty, then_hash, else_ty, else_hash) == false {
@@ -18490,6 +18779,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = then_ty
                 EXPR_TY_HASH = then_hash
                 if then_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // Epistemic: if-else result confidence = min(then, else)
+                if then_conf_a < else_conf_a { EXPR_CONFIDENCE = then_conf_a }
+                else { EXPR_CONFIDENCE = else_conf_a }
             } else {
                 LAST_STMT_HAS_VALUE = 0
                 LAST_STMT_TY = 0
@@ -18523,6 +18815,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         while bi < BREAK_COUNT { patch_branch_a64(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
         BREAK_COUNT = saved_bc
         LOOP_DEPTH = LOOP_DEPTH - 1
+        // Epistemic: loop iteration amplifies uncertainty — degrade confidence by 5%
+        EXPR_CONFIDENCE = EXPR_CONFIDENCE * 950 / 1000
         return
     }
     // for IDENT in range(START, END) / START..END / START..=END
@@ -18586,6 +18880,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         while bi < BREAK_COUNT { patch_branch_a64(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
         BREAK_COUNT = saved_bc
         LOOP_DEPTH = LOOP_DEPTH - 1
+        // Epistemic: loop iteration amplifies uncertainty — degrade confidence by 5%
+        EXPR_CONFIDENCE = EXPR_CONFIDENCE * 950 / 1000
         return
     }
     // match
@@ -18603,6 +18899,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         var match_have_ty: i64 = 0
         var match_ty: i64 = 0
         var match_hash: i64 = 0
+        var match_min_conf_a: i64 = 1000
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
             var is_wildcard: i64 = 0
             var disc: i64 = -1
@@ -18644,6 +18941,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                         compile_stmt_a64()
                     }
                     match_arms = match_arms + 1
+                    if EXPR_CONFIDENCE < match_min_conf_a { match_min_conf_a = EXPR_CONFIDENCE }
                     if LAST_STMT_HAS_VALUE == 1 {
                         if match_have_ty == 0 {
                             match_have_ty = 1
@@ -18674,6 +18972,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                         compile_stmt_a64()
                     }
                     match_arms = match_arms + 1
+                    if EXPR_CONFIDENCE < match_min_conf_a { match_min_conf_a = EXPR_CONFIDENCE }
                     if LAST_STMT_HAS_VALUE == 1 {
                         if match_have_ty == 0 {
                             match_have_ty = 1
@@ -18703,6 +19002,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     compile_stmt_a64()
                 }
                 match_arms = match_arms + 1
+                if EXPR_CONFIDENCE < match_min_conf_a { match_min_conf_a = EXPR_CONFIDENCE }
                 if LAST_STMT_HAS_VALUE == 1 {
                     if match_have_ty == 0 {
                         match_have_ty = 1
@@ -18734,6 +19034,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             EXPR_TY = match_ty
             EXPR_TY_HASH = match_hash
             if match_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+            // Epistemic: match result confidence = min across all arms
+            EXPR_CONFIDENCE = match_min_conf_a
         }
         return
     }
