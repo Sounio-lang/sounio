@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SRC_ROOT="${SOUNIO_DIR:-/home/devsounio/sounio}"
+OUT_ROOT="${OUT_ROOT:-$(mktemp -d /tmp/abide-campaign-snapshot.XXXXXX)}"
+
+mkdir -p \
+  "${OUT_ROOT}/bin" \
+  "${OUT_ROOT}/artifacts/self-hosted" \
+  "${OUT_ROOT}/examples" \
+  "${OUT_ROOT}/scripts/research"
+
+rsync -a "${SRC_ROOT}/bin/souc" "${OUT_ROOT}/bin/"
+rsync -a "${SRC_ROOT}/artifacts/self-hosted/souc-self-hosted-x86_64" "${OUT_ROOT}/artifacts/self-hosted/"
+rsync -a "${SRC_ROOT}/examples/brain_ossm_abide.sio" "${OUT_ROOT}/examples/"
+rsync -a "${SRC_ROOT}/scripts/research/abide_campaign_lib.py" "${OUT_ROOT}/scripts/research/"
+rsync -a "${SRC_ROOT}/scripts/research/build_abide_temporal_manifest.py" "${OUT_ROOT}/scripts/research/"
+rsync -a "${SRC_ROOT}/scripts/research/normalize_abide_manifest.py" "${OUT_ROOT}/scripts/research/"
+rsync -a "${SRC_ROOT}/scripts/research/parse_brain_ossm_abide_output.py" "${OUT_ROOT}/scripts/research/"
+rsync -a "${SRC_ROOT}/scripts/research/abide_external_baselines.py" "${OUT_ROOT}/scripts/research/"
+rsync -a "${SRC_ROOT}/scripts/research/aggregate_brain_ossm_campaign.py" "${OUT_ROOT}/scripts/research/"
+
+echo "${OUT_ROOT}"
