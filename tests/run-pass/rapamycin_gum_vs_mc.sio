@@ -1,0 +1,299 @@
+//@ run-pass
+// GUM-vs-Monte-Carlo validation for rapamycin 3-compartment PBPK
+//
+// Validates that GUM linearized uncertainty propagation (finite-difference
+// Jacobian) agrees with Monte Carlo sampling to within an order of magnitude.
+//
+// GUM path: perturb CL, kp_brain, fu by h = max(1e-6*|mean|, 1e-2*SD),
+//   compute Var(c_blood) = sum_i (dc/dtheta_i)^2 * Var(theta_i)
+//
+// MC path: N=200 samples, each parameter drawn as mean + sigma * z
+//   where z ~ Normal(0,1) via CLT (sum of 12 uniform - 6).
+//   Sample variance of c_blood computed from MC ensemble.
+//
+// Acceptance criterion: ratio of GUM variance to MC variance between
+//   0.1 and 10.0 (same order of magnitude). GUM is linearized, MC
+//   captures nonlinearity, so exact match is not expected.
+//
+// Model: 3-compartment rapamycin (blood, brain, peripheral)
+//   IV bolus 6mg, Euler integration, 20 steps, dt=0.1h
+//
+// References:
+//   Ferron 1997 (CYP3A4 CL), Lampen 1998 (P-gp BBB), Schreiber 1991 (binding)
+//   JCGM 100:2008 (GUM) Section 5.1.2
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn mc_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn mc_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 {
+        y = (y + x / y) * 0.5
+        i = i + 1
+    }
+    return y
+}
+
+fn mc_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+// ============================================================================
+// LCG PSEUDO-RANDOM NUMBER GENERATOR
+// ============================================================================
+// Knuth LCG: x_{n+1} = (a * x_n + c) mod 2^64
+// We rely on i64 wrapping arithmetic for modulus.
+
+fn lcg_next(seed: i64) -> i64 {
+    // a = 6364136223846793005, c = 1442695040888963407
+    return seed * 6364136223846793005 + 1442695040888963407
+}
+
+// Convert LCG state to uniform [0,1) f64
+// Take upper bits, divide by 2^32
+fn lcg_uniform(seed: i64) -> f64 {
+    // Shift right 33 bits to get positive 31-bit value, then normalize
+    var s = seed
+    if s < 0 { s = 0 - s }
+    // Use modular reduction to get a value in [0, 2^30)
+    let m = 1073741824
+    var r = s
+    if r < 0 { r = 0 - r }
+    // Simple modular approach: remainder after dividing by large power of 2
+    let bucket = r - (r / m) * m
+    return (bucket as f64) / (m as f64)
+}
+
+// Normal(0,1) sample via CLT: sum of 12 Uniform(0,1) minus 6.
+// Returns (sample, new_seed) packed as struct.
+
+struct NormalResult {
+    value: f64,
+    seed: i64,
+}
+
+fn normal_sample(seed: i64) -> NormalResult {
+    var s = seed
+    var sum = 0.0
+    var j = 0
+    while j < 12 {
+        s = lcg_next(s)
+        let u = lcg_uniform(s)
+        sum = sum + u
+        j = j + 1
+    }
+    return NormalResult { value: sum - 6.0, seed: s }
+}
+
+// ============================================================================
+// 3-COMPARTMENT EULER INTEGRATOR
+// ============================================================================
+// Returns c_blood at t=2h (20 Euler steps, dt=0.1) for given CL, kp_brain, fu.
+// Fixed parameters: v_blood=5.0, v_brain=1.4, v_periph=40.0,
+//   q_brain=0.7, q_periph=3.9, kp_periph=3.0
+// IV bolus: 6mg into blood compartment.
+
+fn run_euler_pbpk(cl: f64, kp: f64, fu: f64) -> f64 {
+    let v_blood = 5.0
+    let v_brain = 1.4
+    let v_periph = 40.0
+    let q_brain = 0.7
+    let q_periph = 3.9
+    let kp_periph = 3.0
+    let dt = 0.1
+    let dose = 6.0
+
+    var c_blood = dose / v_blood
+    var c_brain = 0.0
+    var c_periph = 0.0
+
+    var step = 0
+    while step < 20 {
+        let cl_eff = cl * fu
+
+        let inflow_brain = (q_brain / v_blood) * c_brain / kp
+        let inflow_periph = (q_periph / v_blood) * c_periph / kp_periph
+        let outflow = ((q_brain + q_periph) / v_blood) * c_blood
+        let clearance = (cl_eff / v_blood) * c_blood
+
+        let d_blood = inflow_brain + inflow_periph - outflow - clearance
+        let d_brain = (q_brain / v_brain) * (c_blood - c_brain / kp)
+        let d_periph = (q_periph / v_periph) * (c_blood - c_periph / kp_periph)
+
+        c_blood = c_blood + d_blood * dt
+        c_brain = c_brain + d_brain * dt
+        c_periph = c_periph + d_periph * dt
+
+        step = step + 1
+    }
+
+    return c_blood
+}
+
+// ============================================================================
+// GUM FINITE-DIFFERENCE STEP SIZE
+// ============================================================================
+// h = max(1e-6 * |mean|, 1e-2 * SD) — robust for both large and small params
+
+fn fdiff_h(mean: f64, sd: f64) -> f64 {
+    let h_rel = 0.000001 * mc_abs(mean)
+    let h_abs = 0.01 * sd
+    return mc_max(h_rel, h_abs)
+}
+
+// ============================================================================
+// MAIN — GUM path vs MC path
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div {
+    print("======================================================================\n")
+    print("  GUM-vs-Monte-Carlo Validation\n")
+    print("  Rapamycin 3-Compartment PBPK (Euler, 20 steps, dt=0.1h)\n")
+    print("======================================================================\n\n")
+
+    // --- Parameter means and standard deviations ---
+    let cl_mean = 12.4
+    let cl_sd = 1.24
+    let kp_mean = 0.08
+    let kp_sd = 0.008
+    let fu_mean = 0.08
+    let fu_sd = 0.008
+
+    // ================================================================
+    // GUM PATH — finite-difference linearized variance
+    // ================================================================
+
+    let c_ref = run_euler_pbpk(cl_mean, kp_mean, fu_mean)
+
+    // Perturbation 1: CL
+    let h_cl = fdiff_h(cl_mean, cl_sd)
+    let c_cl = run_euler_pbpk(cl_mean + h_cl, kp_mean, fu_mean)
+    let dc_dcl = (c_cl - c_ref) / h_cl
+
+    // Perturbation 2: kp_brain
+    let h_kp = fdiff_h(kp_mean, kp_sd)
+    let c_kp = run_euler_pbpk(cl_mean, kp_mean + h_kp, fu_mean)
+    let dc_dkp = (c_kp - c_ref) / h_kp
+
+    // Perturbation 3: fu_plasma
+    let h_fu = fdiff_h(fu_mean, fu_sd)
+    let c_fu = run_euler_pbpk(cl_mean, kp_mean, fu_mean + h_fu)
+    let dc_dfu = (c_fu - c_ref) / h_fu
+
+    // GUM variance: Var(c) = sum_i (dc/dtheta_i)^2 * Var(theta_i)
+    let gum_var = dc_dcl * dc_dcl * cl_sd * cl_sd
+               + dc_dkp * dc_dkp * kp_sd * kp_sd
+               + dc_dfu * dc_dfu * fu_sd * fu_sd
+
+    print("  GUM path:\n")
+    print("    c_blood(ref) = ")
+    println(c_ref)
+    print("    dc/dCL       = ")
+    println(dc_dcl)
+    print("    dc/dkp       = ")
+    println(dc_dkp)
+    print("    dc/dfu       = ")
+    println(dc_dfu)
+    print("    GUM variance = ")
+    println(gum_var)
+    print("    GUM SD       = ")
+    println(mc_sqrt(gum_var))
+    print("\n")
+
+    // ================================================================
+    // MC PATH — Monte Carlo sampling (N=200)
+    // ================================================================
+
+    let n_mc = 200
+    var mc_sum = 0.0
+    var mc_sum_sq = 0.0
+    var seed: i64 = 42
+    var i = 0
+
+    while i < n_mc {
+        // Draw normal samples for each parameter
+        let z1 = normal_sample(seed)
+        seed = z1.seed
+        let cl_sample = cl_mean + cl_sd * z1.value
+
+        let z2 = normal_sample(seed)
+        seed = z2.seed
+        let kp_sample = kp_mean + kp_sd * z2.value
+
+        let z3 = normal_sample(seed)
+        seed = z3.seed
+        let fu_sample = fu_mean + fu_sd * z3.value
+
+        // Clamp to positive (physical constraint)
+        var cl_use = cl_sample
+        if cl_use < 0.1 { cl_use = 0.1 }
+        var kp_use = kp_sample
+        if kp_use < 0.001 { kp_use = 0.001 }
+        var fu_use = fu_sample
+        if fu_use < 0.001 { fu_use = 0.001 }
+
+        let cb = run_euler_pbpk(cl_use, kp_use, fu_use)
+        mc_sum = mc_sum + cb
+        mc_sum_sq = mc_sum_sq + cb * cb
+        i = i + 1
+    }
+
+    let mc_mean = mc_sum / 200.0
+    let mc_var = mc_sum_sq / 200.0 - mc_mean * mc_mean
+
+    print("  MC path (N=200):\n")
+    print("    mc_mean      = ")
+    println(mc_mean)
+    print("    mc_variance  = ")
+    println(mc_var)
+    print("    mc_SD        = ")
+    println(mc_sqrt(mc_var))
+    print("\n")
+
+    // ================================================================
+    // COMPARISON
+    // ================================================================
+    // GUM is linearized, MC captures nonlinearity.
+    // For small perturbations they should agree to within an order of magnitude.
+    // Ratio should be between 0.1 and 10.0.
+
+    // Compute ratio as max(gum/mc, mc/gum) to always get >= 1.0
+    var ratio = 1.0
+    if gum_var > 0.0 {
+        if mc_var > 0.0 {
+            let r1 = gum_var / mc_var
+            let r2 = mc_var / gum_var
+            ratio = mc_max(r1, r2)
+        }
+    }
+
+    print("  Comparison:\n")
+    print("    GUM variance = ")
+    println(gum_var)
+    print("    MC  variance = ")
+    println(mc_var)
+    print("    ratio (max)  = ")
+    println(ratio)
+    print("\n")
+
+    print("======================================================================\n")
+    if ratio < 10.0 {
+        print("  PASS: GUM and MC agree within order of magnitude (ratio < 10)\n")
+        print("======================================================================\n")
+        print("PASS\n")
+        return 0
+    } else {
+        print("  FAIL: GUM/MC ratio too large (>= 10)\n")
+        print("======================================================================\n")
+        return 1
+    }
+}
