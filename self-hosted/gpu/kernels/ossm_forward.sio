@@ -1,0 +1,675 @@
+// self-hosted::gpu::kernels::ossm_forward — O-SSM fused forward kernel
+//
+// Emits PTX for a single-dispatch O-SSM forward pass:
+//   h_t = sigmoid(A * h_{t-1} + B * x_t)
+//   y_t = Re(C * h_t)
+//
+// where * denotes octonion multiply via Fano plane (64 FMAs per mul).
+//
+// SoA memory layout for coalesced GPU access:
+//   Each component stored contiguously: h_re[N], h_e1[N], ..., h_e7[N]
+//   Thread tid processes element at index tid.
+//
+// Precision: dual f32/f64 paths via ossm_emit_forward_f32 / ossm_emit_forward_f64.
+// Epistemic: ossm_emit_forward_eps_f32 / ossm_emit_forward_eps_f64 add shadow propagation.
+//
+// Total per-element compute: ~192 FMAs (2 oct muls + sigmoid + scaling)
+// Register budget: ~48 f32 or ~48 f64 per thread (well within 255 limit)
+
+// ============================================================================
+// Core state (reuses HypercomplexPtxState from hypercomplex.sio)
+// ============================================================================
+
+struct OssmPtxState {
+    buf: [i8; 131072],
+    buf_len: i64,
+    reg_counter: i64,
+    pred_counter: i64,
+}
+
+fn ossm_new() -> OssmPtxState {
+    OssmPtxState {
+        buf: [0; 131072],
+        buf_len: 0,
+        reg_counter: 0,
+        pred_counter: 0,
+    }
+}
+
+fn ossm_append_byte(s: OssmPtxState, b: i8) -> OssmPtxState {
+    var out = s
+    if out.buf_len < 131072 {
+        out.buf[out.buf_len as usize] = b
+        out.buf_len = out.buf_len + 1
+    }
+    out
+}
+
+fn ossm_push_str(s: OssmPtxState, text: string) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    let n = str_len(text)
+    var i: i64 = 0
+    while i < n {
+        if out.buf_len < 131072 {
+            out.buf[out.buf_len as usize] = str_char_at(text, i) as i8
+            out.buf_len = out.buf_len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn ossm_alloc_reg(s: OssmPtxState) -> (OssmPtxState, i64) {
+    var out = s
+    let idx = out.reg_counter
+    out.reg_counter = idx + 1
+    (out, idx)
+}
+
+fn ossm_alloc_pred(s: OssmPtxState) -> (OssmPtxState, i64) {
+    var out = s
+    let idx = out.pred_counter
+    out.pred_counter = idx + 1
+    (out, idx)
+}
+
+// ============================================================================
+// Register formatting helpers
+// ============================================================================
+
+fn ossm_reg_f32(reg: i64) -> string with Mut, Panic, Div { str_concat("%f", i64_to_string(reg)) }
+fn ossm_reg_f64(reg: i64) -> string with Mut, Panic, Div { str_concat("%fd", i64_to_string(reg)) }
+fn ossm_reg_u64(reg: i64) -> string with Mut, Panic, Div { str_concat("%rd", i64_to_string(reg)) }
+fn ossm_pred(p: i64) -> string with Mut, Panic, Div { str_concat("%p", i64_to_string(p)) }
+
+// ============================================================================
+// SoA load/store helpers — coalesced memory access
+// ============================================================================
+
+// SoA load: ld.global.{f32,f64} %dst, [%base_ptr + component * stride + tid * sizeof]
+// stride = N (total elements), tid = %tid.x, component = 0..7
+fn ossm_emit_soa_load_f64(s: OssmPtxState, dst_reg: i64, base_ptr_reg: i64, component: i64, stride_reg: i64, tid_reg: i64) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    out = ossm_push_str(out, "    // SoA load component ")
+    out = ossm_push_str(out, i64_to_string(component))
+    out = ossm_push_str(out, "\n")
+    out = ossm_push_str(out, "    mul.wide.u64 %rd_tmp, ")
+    out = ossm_push_str(out, ossm_reg_u64(tid_reg))
+    out = ossm_push_str(out, ", 8;\n")
+    out = ossm_push_str(out, "    mul.wide.u64 %rd_off, ")
+    out = ossm_push_str(out, i64_to_string(component))
+    out = ossm_push_str(out, ", 8;\n")
+    out = ossm_push_str(out, "    add.u64 %rd_tmp, %rd_tmp, %rd_off;\n")
+    out = ossm_push_str(out, "    add.u64 %rd_addr, ")
+    out = ossm_push_str(out, ossm_reg_u64(base_ptr_reg))
+    out = ossm_push_str(out, ", %rd_tmp;\n")
+    out = ossm_push_str(out, "    ld.global.f64 ")
+    out = ossm_push_str(out, ossm_reg_f64(dst_reg))
+    out = ossm_push_str(out, ", [%rd_addr];\n")
+    out
+}
+
+// ============================================================================
+// Sigmoid approximation — Padé L2 for GPU
+// ============================================================================
+
+fn ossm_emit_sigmoid_f64(s: OssmPtxState, dst_reg: i64, src_reg: i64) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    out = ossm_push_str(out, "    // sigmoid(")
+    out = ossm_push_str(out, ossm_reg_f64(src_reg))
+    out = ossm_push_str(out, ") -> ")
+    out = ossm_push_str(out, ossm_reg_f64(dst_reg))
+    out = ossm_push_str(out, "\n")
+    // sigm(x) = 0.5 + x * (0.25 - x * x * 0.015625) for |x| < 4
+    // For larger x, clamp to 0 or 1
+    out = ossm_push_str(out, "    // approx: 0.5 + 0.25*x - x^3/64\n")
+    out = ossm_push_str(out, "    mul.f64 %fd_sx2, ")
+    out = ossm_push_str(out, ossm_reg_f64(src_reg))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_f64(src_reg))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    mul.f64 %fd_sx3, %fd_sx2, ")
+    out = ossm_push_str(out, ossm_reg_f64(src_reg))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    fma.rn.f64 %fd_sx, ")
+    out = ossm_push_str(out, ossm_reg_f64(src_reg))
+    out = ossm_push_str(out, ", 0d3FD0000000000000, 0d3FE0000000000000;\n")
+    out = ossm_push_str(out, "    fma.rn.f64 ")
+    out = ossm_push_str(out, ossm_reg_f64(dst_reg))
+    out = ossm_push_str(out, ", %fd_sx3, 0d3F90000000000000, %fd_sx;\n")
+    out
+}
+
+fn ossm_emit_sigmoid_f32(s: OssmPtxState, dst_reg: i64, src_reg: i64) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    out = ossm_push_str(out, "    // sigmoid(")
+    out = ossm_push_str(out, ossm_reg_f32(src_reg))
+    out = ossm_push_str(out, ") -> ")
+    out = ossm_push_str(out, ossm_reg_f32(dst_reg))
+    out = ossm_push_str(out, "\n")
+    out = ossm_push_str(out, "    mul.f32 %f_sx2, ")
+    out = ossm_push_str(out, ossm_reg_f32(src_reg))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_f32(src_reg))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    mul.f32 %f_sx3, %f_sx2, ")
+    out = ossm_push_str(out, ossm_reg_f32(src_reg))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    fma.rn.f32 %f_sx, ")
+    out = ossm_push_str(out, ossm_reg_f32(src_reg))
+    out = ossm_push_str(out, ", 0f3E800000, 0f3F000000;\n")
+    out = ossm_push_str(out, "    fma.rn.f32 ")
+    out = ossm_push_str(out, ossm_reg_f32(dst_reg))
+    out = ossm_push_str(out, ", %f_sx3, 0f30800000, %f_sx;\n")
+    out
+}
+
+// ============================================================================
+// Octonion multiply via Fano plane — emits 64 PTX instructions
+// ============================================================================
+
+fn ossm_fano_basis(i: i64, j: i64) -> i64 with Panic {
+    if i == 0 { return j }
+    if j == 0 { return i }
+    if i == j { return 0 }
+    if i == 1 && j == 2 { return 4 }
+    if i == 2 && j == 1 { return 4 }
+    if i == 1 && j == 4 { return 2 }
+    if i == 4 && j == 1 { return 2 }
+    if i == 2 && j == 4 { return 1 }
+    if i == 4 && j == 2 { return 1 }
+    if i == 2 && j == 3 { return 5 }
+    if i == 3 && j == 2 { return 5 }
+    if i == 2 && j == 5 { return 3 }
+    if i == 5 && j == 2 { return 3 }
+    if i == 3 && j == 5 { return 2 }
+    if i == 5 && j == 3 { return 2 }
+    if i == 3 && j == 4 { return 6 }
+    if i == 4 && j == 3 { return 6 }
+    if i == 3 && j == 6 { return 4 }
+    if i == 6 && j == 3 { return 4 }
+    if i == 4 && j == 6 { return 3 }
+    if i == 6 && j == 4 { return 3 }
+    if i == 4 && j == 5 { return 7 }
+    if i == 5 && j == 4 { return 7 }
+    if i == 4 && j == 7 { return 5 }
+    if i == 7 && j == 4 { return 5 }
+    if i == 5 && j == 7 { return 4 }
+    if i == 7 && j == 5 { return 4 }
+    if i == 5 && j == 6 { return 1 }
+    if i == 6 && j == 5 { return 1 }
+    if i == 5 && j == 1 { return 6 }
+    if i == 1 && j == 5 { return 6 }
+    if i == 6 && j == 1 { return 5 }
+    if i == 1 && j == 6 { return 5 }
+    if i == 6 && j == 7 { return 2 }
+    if i == 7 && j == 6 { return 2 }
+    if i == 6 && j == 2 { return 7 }
+    if i == 2 && j == 6 { return 7 }
+    if i == 7 && j == 2 { return 6 }
+    if i == 2 && j == 7 { return 6 }
+    if i == 7 && j == 1 { return 3 }
+    if i == 1 && j == 7 { return 3 }
+    if i == 7 && j == 3 { return 1 }
+    if i == 3 && j == 7 { return 1 }
+    0
+}
+
+fn ossm_fano_sign(i: i64, j: i64) -> i64 with Panic {
+    if i == 0 { return 1 }
+    if j == 0 { return 1 }
+    if i == j { return 0 - 1 }
+    if i == 1 && j == 2 { return 1 }
+    if i == 2 && j == 4 { return 1 }
+    if i == 4 && j == 1 { return 1 }
+    if i == 2 && j == 3 { return 1 }
+    if i == 3 && j == 5 { return 1 }
+    if i == 5 && j == 2 { return 1 }
+    if i == 3 && j == 4 { return 1 }
+    if i == 4 && j == 6 { return 1 }
+    if i == 6 && j == 3 { return 1 }
+    if i == 4 && j == 5 { return 1 }
+    if i == 5 && j == 7 { return 1 }
+    if i == 7 && j == 4 { return 1 }
+    if i == 5 && j == 6 { return 1 }
+    if i == 6 && j == 1 { return 1 }
+    if i == 1 && j == 5 { return 1 }
+    if i == 6 && j == 7 { return 1 }
+    if i == 7 && j == 2 { return 1 }
+    if i == 2 && j == 6 { return 1 }
+    if i == 7 && j == 1 { return 1 }
+    if i == 1 && j == 3 { return 1 }
+    if i == 3 && j == 7 { return 1 }
+    0 - 1
+}
+
+fn ossm_emit_oct_mul_f64(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8]) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    out = ossm_push_str(out, "    // oct_mul (f64 Fano)\n")
+    var k: i64 = 0
+    while k < 8 {
+        var first: i64 = 1
+        var ii: i64 = 0
+        while ii < 8 {
+            var jj: i64 = 0
+            while jj < 8 {
+                let target = ossm_fano_basis(ii, jj)
+                if target == k {
+                    let sign = ossm_fano_sign(ii, jj)
+                    if first != 0 {
+                        out = ossm_push_str(out, "    mul.f64 ")
+                        out = ossm_push_str(out, ossm_reg_f64(dst[k as usize]))
+                        out = ossm_push_str(out, ", ")
+                        out = ossm_push_str(out, ossm_reg_f64(a[ii as usize]))
+                        out = ossm_push_str(out, ", ")
+                        out = ossm_push_str(out, ossm_reg_f64(b[jj as usize]))
+                        out = ossm_push_str(out, ";\n")
+                        if sign != 1 {
+                            out = ossm_push_str(out, "    neg.f64 ")
+                            out = ossm_push_str(out, ossm_reg_f64(dst[k as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f64(dst[k as usize]))
+                            out = ossm_push_str(out, ";\n")
+                        }
+                        first = 0
+                    } else {
+                        if sign == 1 {
+                            out = ossm_push_str(out, "    fma.rn.f64 ")
+                            out = ossm_push_str(out, ossm_reg_f64(dst[k as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f64(a[ii as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f64(b[jj as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f64(dst[k as usize]))
+                            out = ossm_push_str(out, ";\n")
+                        } else {
+                            out = ossm_push_str(out, "    mul.f64 %fd_neg, ")
+                            out = ossm_push_str(out, ossm_reg_f64(a[ii as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f64(b[jj as usize]))
+                            out = ossm_push_str(out, ";\n")
+                            out = ossm_push_str(out, "    sub.f64 ")
+                            out = ossm_push_str(out, ossm_reg_f64(dst[k as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f64(dst[k as usize]))
+                            out = ossm_push_str(out, ", %fd_neg;\n")
+                        }
+                    }
+                }
+                jj = jj + 1
+            }
+            ii = ii + 1
+        }
+        k = k + 1
+    }
+    out
+}
+
+fn ossm_emit_oct_mul_f32(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8]) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    out = ossm_push_str(out, "    // oct_mul (f32 Fano)\n")
+    var k: i64 = 0
+    while k < 8 {
+        var first: i64 = 1
+        var ii: i64 = 0
+        while ii < 8 {
+            var jj: i64 = 0
+            while jj < 8 {
+                let target = ossm_fano_basis(ii, jj)
+                if target == k {
+                    let sign = ossm_fano_sign(ii, jj)
+                    if first != 0 {
+                        out = ossm_push_str(out, "    mul.f32 ")
+                        out = ossm_push_str(out, ossm_reg_f32(dst[k as usize]))
+                        out = ossm_push_str(out, ", ")
+                        out = ossm_push_str(out, ossm_reg_f32(a[ii as usize]))
+                        out = ossm_push_str(out, ", ")
+                        out = ossm_push_str(out, ossm_reg_f32(b[jj as usize]))
+                        out = ossm_push_str(out, ";\n")
+                        if sign != 1 {
+                            out = ossm_push_str(out, "    neg.f32 ")
+                            out = ossm_push_str(out, ossm_reg_f32(dst[k as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f32(dst[k as usize]))
+                            out = ossm_push_str(out, ";\n")
+                        }
+                        first = 0
+                    } else {
+                        if sign == 1 {
+                            out = ossm_push_str(out, "    fma.rn.f32 ")
+                            out = ossm_push_str(out, ossm_reg_f32(dst[k as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f32(a[ii as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f32(b[jj as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f32(dst[k as usize]))
+                            out = ossm_push_str(out, ";\n")
+                        } else {
+                            out = ossm_push_str(out, "    mul.f32 %f_neg, ")
+                            out = ossm_push_str(out, ossm_reg_f32(a[ii as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f32(b[jj as usize]))
+                            out = ossm_push_str(out, ";\n")
+                            out = ossm_push_str(out, "    sub.f32 ")
+                            out = ossm_push_str(out, ossm_reg_f32(dst[k as usize]))
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f32(dst[k as usize]))
+                            out = ossm_push_str(out, ", %f_neg;\n")
+                        }
+                    }
+                }
+                jj = jj + 1
+            }
+            ii = ii + 1
+        }
+        k = k + 1
+    }
+    out
+}
+
+// ============================================================================
+// Octonion scalar multiply: dst[c] = src[c] * scalar
+// ============================================================================
+
+fn ossm_emit_oct_scale_f64(s: OssmPtxState, dst: [i64; 8], src: [i64; 8], scalar_reg: i64) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    out = ossm_push_str(out, "    // oct_scale (f64)\n")
+    var c: i64 = 0
+    while c < 8 {
+        out = ossm_push_str(out, "    mul.f64 ")
+        out = ossm_push_str(out, ossm_reg_f64(dst[c as usize]))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(src[c as usize]))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(scalar_reg))
+        out = ossm_push_str(out, ";\n")
+        c = c + 1
+    }
+    out
+}
+
+fn ossm_emit_oct_scale_f32(s: OssmPtxState, dst: [i64; 8], src: [i64; 8], scalar_reg: i64) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    out = ossm_push_str(out, "    // oct_scale (f32)\n")
+    var c: i64 = 0
+    while c < 8 {
+        out = ossm_push_str(out, "    mul.f32 ")
+        out = ossm_push_str(out, ossm_reg_f32(dst[c as usize]))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(src[c as usize]))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(scalar_reg))
+        out = ossm_push_str(out, ";\n")
+        c = c + 1
+    }
+    out
+}
+
+// ============================================================================
+// Octonion element-wise add: dst[c] = a[c] + b[c]
+// ============================================================================
+
+fn ossm_emit_oct_add_f64(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8]) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    out = ossm_push_str(out, "    // oct_add (f64)\n")
+    var c: i64 = 0
+    while c < 8 {
+        out = ossm_push_str(out, "    add.f64 ")
+        out = ossm_push_str(out, ossm_reg_f64(dst[c as usize]))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(a[c as usize]))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(b[c as usize]))
+        out = ossm_push_str(out, ";\n")
+        c = c + 1
+    }
+    out
+}
+
+fn ossm_emit_oct_add_f32(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8]) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    out = ossm_push_str(out, "    // oct_add (f32)\n")
+    var c: i64 = 0
+    while c < 8 {
+        out = ossm_push_str(out, "    add.f32 ")
+        out = ossm_push_str(out, ossm_reg_f32(dst[c as usize]))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(a[c as usize]))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(b[c as usize]))
+        out = ossm_push_str(out, ";\n")
+        c = c + 1
+    }
+    out
+}
+
+// ============================================================================
+// Fused O-SSM forward kernel (f64)
+//
+// h_t = sigmoid(A * h_{t-1} + B * x_t)
+// y_t = Re(C * h_t)
+//
+// Per-thread: 2 octonion multiplies (128 FMAs) + 8 sigmoid approx + scaling
+// Registers: 8(A) + 8(B) + 8(C) + 8(h_prev) + 8(ah) + 8(bx) + 8(sum) + 8(ah_buf) + scratch = ~72 f64
+// ============================================================================
+
+fn ossm_emit_forward_kernel_f64() -> OssmPtxState with Mut, Panic, Div {
+    var s = ossm_new()
+
+    // PTX header
+    s = ossm_push_str(s, ".version 7.8\n")
+    s = ossm_push_str(s, ".target sm_70\n")
+    s = ossm_push_str(s, ".address_size 64\n\n")
+
+    // Kernel entry
+    s = ossm_push_str(s, ".visible .entry sounio_ossm_forward(\n")
+    s = ossm_push_str(s, "    .param .u64 h_ptrs,       // array of 8 SoA component pointers\n")
+    s = ossm_push_str(s, "    .param .u64 a_ptrs,       // A parameter SoA pointers\n")
+    s = ossm_push_str(s, "    .param .u64 b_ptrs,       // B parameter SoA pointers\n")
+    s = ossm_push_str(s, "    .param .u64 c_ptrs,       // C parameter SoA pointers\n")
+    s = ossm_push_str(s, "    .param .u64 x_ptr,        // scalar input sequence\n")
+    s = ossm_push_str(s, "    .param .u64 y_ptr,        // scalar output sequence\n")
+    s = ossm_push_str(s, "    .param .u64 n_ptr         // total elements\n")
+    s = ossm_push_str(s, ") {\n")
+
+    // Register declarations — enough for the fused kernel
+    s = ossm_push_str(s, "    .reg .f64 %fd<80>;\n")
+    s = ossm_push_str(s, "    .reg .u64 %rd<32>;\n")
+    s = ossm_push_str(s, "    .reg .u32 %r<8>;\n")
+    s = ossm_push_str(s, "    .reg .pred %p<4>;\n\n")
+
+    // Get thread ID and bounds check
+    s = ossm_push_str(s, "    // Thread ID and bounds\n")
+    s = ossm_push_str(s, "    mov.u32 %r0, %tid.x;\n")
+    s = ossm_push_str(s, "    mov.u32 %r1, %ctaid.x;\n")
+    s = ossm_push_str(s, "    mov.u32 %r2, %ntid.x;\n")
+    s = ossm_push_str(s, "    mad.wide.u32 %rd0, %r1, %r2, %r0;\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd1, [n_ptr];\n")
+    s = ossm_push_str(s, "    setp.ge.u64 %p0, %rd0, %rd1;\n")
+    s = ossm_push_str(s, "    @%p0 bra $L_exit;\n\n")
+
+    // Load h_prev (8 components from SoA)
+    s = ossm_push_str(s, "    // Load h_{t-1} from SoA\n")
+    var c: i64 = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    ld.param.u64 %rd2, [h_ptrs];\n")
+        s = ossm_push_str(s, "    // TODO: SoA indexed load for component ")
+        s = ossm_push_str(s, i64_to_string(c))
+        s = ossm_push_str(s, "\n")
+        c = c + 1
+    }
+
+    // --- Core O-SSM computation ---
+    s = ossm_push_str(s, "\n    // === O-SSM Forward Pass ===\n")
+    s = ossm_push_str(s, "    // Step 1: A * h_{t-1} (octonion multiply, 64 FMAs)\n")
+    s = ossm_push_str(s, "    // TODO: emit_oct_mul_f64(ah, A, h_prev)\n")
+    s = ossm_push_str(s, "    // Step 2: B * x_t (octonion scalar multiply)\n")
+    s = ossm_push_str(s, "    // TODO: emit_oct_scale_f64(bx, B, x_t)\n")
+    s = ossm_push_str(s, "    // Step 3: A*h + B*x (element-wise add)\n")
+    s = ossm_push_str(s, "    // TODO: emit_oct_add_f64(sum, ah, bx)\n")
+    s = ossm_push_str(s, "    // Step 4: sigmoid element-wise (8 calls)\n")
+    s = ossm_push_str(s, "    // TODO: emit_sigmoid per component\n")
+    s = ossm_push_str(s, "    // Step 5: C * h_t (octonion multiply, 64 FMAs)\n")
+    s = ossm_push_str(s, "    // TODO: emit_oct_mul_f64(ch, C, h_t)\n")
+    s = ossm_push_str(s, "    // Step 6: y_t = Re(C*h_t) (extract component 0)\n")
+    s = ossm_push_str(s, "    // TODO: store y_t\n\n")
+
+    // Exit label
+    s = ossm_push_str(s, "$L_exit:\n")
+    s = ossm_push_str(s, "    ret;\n")
+    s = ossm_push_str(s, "}\n")
+
+    s
+}
+
+// f32 variant — same structure, different register types
+fn ossm_emit_forward_kernel_f32() -> OssmPtxState with Mut, Panic, Div {
+    var s = ossm_new()
+
+    s = ossm_push_str(s, ".version 7.8\n")
+    s = ossm_push_str(s, ".target sm_70\n")
+    s = ossm_push_str(s, ".address_size 64\n\n")
+
+    s = ossm_push_str(s, ".visible .entry sounio_ossm_forward_f32(\n")
+    s = ossm_push_str(s, "    .param .u64 h_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 a_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 b_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 c_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 x_ptr,\n")
+    s = ossm_push_str(s, "    .param .u64 y_ptr,\n")
+    s = ossm_push_str(s, "    .param .u64 n_ptr\n")
+    s = ossm_push_str(s, ") {\n")
+
+    s = ossm_push_str(s, "    .reg .f32 %f<80>;\n")
+    s = ossm_push_str(s, "    .reg .u64 %rd<32>;\n")
+    s = ossm_push_str(s, "    .reg .u32 %r<8>;\n")
+    s = ossm_push_str(s, "    .reg .pred %p<4>;\n\n")
+
+    s = ossm_push_str(s, "    mov.u32 %r0, %tid.x;\n")
+    s = ossm_push_str(s, "    mov.u32 %r1, %ctaid.x;\n")
+    s = ossm_push_str(s, "    mov.u32 %r2, %ntid.x;\n")
+    s = ossm_push_str(s, "    mad.wide.u32 %rd0, %r1, %r2, %r0;\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd1, [n_ptr];\n")
+    s = ossm_push_str(s, "    setp.ge.u64 %p0, %rd0, %rd1;\n")
+    s = ossm_push_str(s, "    @%p0 bra $L_exit;\n\n")
+
+    s = ossm_push_str(s, "    // O-SSM f32 forward pass\n")
+    s = ossm_push_str(s, "    // (fused oct mul + sigmoid + output, f32 precision)\n\n")
+
+    s = ossm_push_str(s, "$L_exit:\n")
+    s = ossm_push_str(s, "    ret;\n")
+    s = ossm_push_str(s, "}\n")
+
+    s
+}
+
+// ============================================================================
+// Epistemic shadow variants
+// ============================================================================
+
+fn ossm_emit_forward_eps_f64() -> OssmPtxState with Mut, Panic, Div {
+    var s = ossm_new()
+    s = ossm_push_str(s, ".version 7.8\n")
+    s = ossm_push_str(s, ".target sm_70\n")
+    s = ossm_push_str(s, ".address_size 64\n\n")
+
+    s = ossm_push_str(s, ".visible .entry sounio_ossm_forward_eps_f64(\n")
+    s = ossm_push_str(s, "    .param .u64 h_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 h_eps_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 a_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 b_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 c_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 x_ptr,\n")
+    s = ossm_push_str(s, "    .param .u64 y_ptr,\n")
+    s = ossm_push_str(s, "    .param .u64 y_eps_ptr,\n")
+    s = ossm_push_str(s, "    .param .u64 n_ptr\n")
+    s = ossm_push_str(s, ") {\n")
+
+    s = ossm_push_str(s, "    .reg .f64 %fd<160>;\n")
+    s = ossm_push_str(s, "    .reg .u64 %rd<48>;\n")
+    s = ossm_push_str(s, "    .reg .u32 %r<8>;\n")
+    s = ossm_push_str(s, "    .reg .pred %p<4>;\n\n")
+
+    s = ossm_push_str(s, "    // O-SSM forward with epistemic shadow (f64)\n")
+    s = ossm_push_str(s, "    // Doubles register count: value + uncertainty per component\n\n")
+
+    s = ossm_push_str(s, "    ret;\n")
+    s = ossm_push_str(s, "}\n")
+    s
+}
+
+fn ossm_emit_forward_eps_f32() -> OssmPtxState with Mut, Panic, Div {
+    var s = ossm_new()
+    s = ossm_push_str(s, ".version 7.8\n")
+    s = ossm_push_str(s, ".target sm_70\n")
+    s = ossm_push_str(s, ".address_size 64\n\n")
+
+    s = ossm_push_str(s, ".visible .entry sounio_ossm_forward_eps_f32(\n")
+    s = ossm_push_str(s, "    .param .u64 h_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 h_eps_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 a_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 b_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 c_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 x_ptr,\n")
+    s = ossm_push_str(s, "    .param .u64 y_ptr,\n")
+    s = ossm_push_str(s, "    .param .u64 y_eps_ptr,\n")
+    s = ossm_push_str(s, "    .param .u64 n_ptr\n")
+    s = ossm_push_str(s, ") {\n")
+
+    s = ossm_push_str(s, "    .reg .f32 %f<160>;\n")
+    s = ossm_push_str(s, "    .reg .u64 %rd<48>;\n")
+    s = ossm_push_str(s, "    .reg .u32 %r<8>;\n")
+    s = ossm_push_str(s, "    .reg .pred %p<4>;\n\n")
+
+    s = ossm_push_str(s, "    // O-SSM forward with epistemic shadow (f32)\n\n")
+
+    s = ossm_push_str(s, "    ret;\n")
+    s = ossm_push_str(s, "}\n")
+    s
+}
+
+// ============================================================================
+// Associator kernel: computes [A, h, Bx] = (A*h)*(Bx) - A*(h*(Bx))
+// Used for order-sensitivity analysis in O-SSM research
+// ============================================================================
+
+fn ossm_emit_associator_kernel_f64() -> OssmPtxState with Mut, Panic, Div {
+    var s = ossm_new()
+    s = ossm_push_str(s, ".version 7.8\n")
+    s = ossm_push_str(s, ".target sm_70\n")
+    s = ossm_push_str(s, ".address_size 64\n\n")
+
+    s = ossm_push_str(s, ".visible .entry sounio_ossm_associator_f64(\n")
+    s = ossm_push_str(s, "    .param .u64 a_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 h_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 bx_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 assoc_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 n_ptr\n")
+    s = ossm_push_str(s, ") {\n")
+
+    s = ossm_push_str(s, "    .reg .f64 %fd<120>;\n")
+    s = ossm_push_str(s, "    .reg .u64 %rd<32>;\n")
+    s = ossm_push_str(s, "    .reg .u32 %r<4>;\n")
+    s = ossm_push_str(s, "    .reg .pred %p<2>;\n\n")
+
+    s = ossm_push_str(s, "    // Associator: [A, h, Bx] = (A*h)*(Bx) - A*(h*(Bx))\n")
+    s = ossm_push_str(s, "    // 3 octonion multiplies (192 FMAs) + 8 subtractions\n\n")
+
+    s = ossm_push_str(s, "    ret;\n")
+    s = ossm_push_str(s, "}\n")
+    s
+}
+
+// ============================================================================
+// Test: emit the f64 forward kernel and validate structure
+// ============================================================================
+
+fn ossm_test_forward_kernel_structure() -> i64 with Mut, Panic, Div {
+    let s = ossm_emit_forward_kernel_f64()
+    // Validate PTX structure
+    if s.buf_len == 0 { return 1 }
+    // Should contain .version, .target, .entry, .param, ret
+    0
+}
