@@ -282,6 +282,8 @@ var EXPR_VAR_SLOT: i64 = -1              // slot of last loaded variable (-1 = l
 var RT_VARIANCE_BUF_BSS_OFF: i64 = 0    // BSS offset for 1024-entry variance buffer
 var RT_VARIANCE_SCRATCH_BSS_OFF: i64 = 0 // BSS offset for single scratch cell
 var RT_VARIANCE_XFER_BSS_OFF: i64 = 0   // BSS offset for 8-slot argument transfer area
+var BUDGET_CHANNELS: i64 = 8             // ISO budget decomposition: K channels
+var NEXT_BUDGET_PARAM: i64 = 0           // compile-time counter for measure()/acknowledge()/require_confidence()
 var EXPR_CONFIDENCE: i64 = 1000          // compile-time confidence of current expression (0-1000)
 var FN_EPIST_MINCONF: [i64; 16384] = [0; 16384]  // per-function minimum confidence requirement
 var VAR_CONFIDENCE: [i64; 16384] = [0; 16384]    // per-variable confidence level
@@ -1590,11 +1592,24 @@ fn tok_is_effect_name(p: i64) -> bool with Panic, Mut {
     if src_match(ns, ne - ns, "Panic") { return true }
     if src_match(ns, ne - ns, "Div") { return true }
     if src_match(ns, ne - ns, "Alloc") { return true }
+    if src_match(ns, ne - ns, "Async") { return true }
     if src_match(ns, ne - ns, "Observe") { return true }
     if src_match(ns, ne - ns, "Audit") { return true }
     if src_match(ns, ne - ns, "Hypothesis") { return true }
     if src_match(ns, ne - ns, "MultiTest") { return true }
     return false
+}
+
+fn tok_is_fn_decl_start(p: i64) -> bool with Panic, Mut {
+    if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 { return true }
+    if TK[p as usize] == 77 && TK[(p + 1) as usize] == 1 && TK[(p + 2) as usize] == 3 { return true }
+    return false
+}
+
+fn tok_fn_name_index(p: i64) -> i64 with Panic, Mut {
+    if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 { return p + 1 }
+    if TK[p as usize] == 77 && TK[(p + 1) as usize] == 1 && TK[(p + 2) as usize] == 3 { return p + 2 }
+    return -1
 }
 
 fn arr_ty_hash(alen: i64, esiz: i64, elem_ty: i64) -> i64 {
@@ -2417,6 +2432,11 @@ fn print_effect_mask(mask: i64) with IO, Mut {
     if (mask & 16) != 0 {
         if first == 0 { print(",") }
         print("Alloc")
+        first = 0
+    }
+    if (mask & 32) != 0 {
+        if first == 0 { print(",") }
+        print("Async")
         first = 0
     }
     if (mask & 64) != 0 {
@@ -3626,6 +3646,8 @@ fn lex_all() with IO, Mut, Panic, Div {
             if src_match(s, l, "ontology") { k = 72 }
             if src_match(s, l, "trait") { k = 75 }
             if src_match(s, l, "impl") { k = 76 }
+            if src_match(s, l, "async") { k = 77 }
+            if src_match(s, l, "spawn") { k = 78 }
             if src_match(s, l, "Some") { k = 57 }
             if src_match(s, l, "None") { k = 58 }
             if src_match(s, l, "Ok") { k = 59 }
@@ -5027,240 +5049,297 @@ fn emit_gate_guarded_inc_x86() with Mut {
 }
 
 fn emit_gate_variance_addsub_x86(left_slot: i64, right_slot: i64) with Mut {
-    // GUM: var(a ± b) = var(a) + var(b) for uncorrelated inputs
+    // GUM: var(a ± b) = var(a) + var(b) for uncorrelated inputs — per channel
     // Preserves rax (primary result) via push/pop
     em(0x50)  // push rax (save primary result)
-    // Load left variance into xmm0
-    if left_slot >= 0 && left_slot < 1024 {
-        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + left_slot * 8)
-        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
-        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)  // movq xmm0, rax
-    } else if left_slot == -2 {
-        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
-        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)  // movq xmm0, rax
-    } else {
-        em(0x66); em(0x0f); em(0x57); em(0xc0)            // xorpd xmm0, xmm0
+    var ch: i64 = 0
+    while ch < BUDGET_CHANNELS {
+        // Load left variance[ch] into xmm0
+        if left_slot >= 0 && left_slot < 1024 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + left_slot * 8)
+            em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)  // movq xmm0, rax
+        } else if left_slot == -2 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+            em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)  // movq xmm0, rax
+        } else {
+            em(0x66); em(0x0f); em(0x57); em(0xc0)            // xorpd xmm0, xmm0
+        }
+        // Load right variance[ch] into xmm1
+        if right_slot >= 0 && right_slot < 1024 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + right_slot * 8)
+            em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+        } else if right_slot == -2 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+            em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+        } else {
+            em(0x66); em(0x0f); em(0x57); em(0xc9)            // xorpd xmm1, xmm1
+        }
+        // addsd xmm0, xmm1 — var(a ± b) = var(a) + var(b)
+        em(0xf2); em(0x0f); em(0x58); em(0xc1)
+        // Store xmm0 → BSS_SCRATCH[ch]
+        em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)      // movq rax, xmm0
+        em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+        em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
+        ch = ch + 1
     }
-    // Load right variance into xmm1
-    if right_slot >= 0 && right_slot < 1024 {
-        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + right_slot * 8)
-        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
-        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
-    } else if right_slot == -2 {
-        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
-        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
-    } else {
-        em(0x66); em(0x0f); em(0x57); em(0xc9)            // xorpd xmm1, xmm1
-    }
-    // addsd xmm0, xmm1 — var(a ± b) = var(a) + var(b)
-    em(0xf2); em(0x0f); em(0x58); em(0xc1)
-    // Store xmm0 → BSS_SCRATCH: movq rax, xmm0; mov rcx, addr; mov [rcx], rax
-    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)      // movq rax, xmm0
-    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
     em(0x58)  // pop rax (restore primary result)
 }
 
 fn emit_gate_variance_muldiv_x86(left_slot: i64, right_slot: i64, op: i64) with Mut {
-    // GUM multiplicative variance. Called AFTER f64 arithmetic.
+    // GUM multiplicative variance — per channel.
     // On entry: rax = primary result, rcx = a (LHS preserved), xmm1 = b (RHS preserved).
     // mul: var(a*b) = a²·var(b) + b²·var(a)
     // div: var(a/b) = var(a)/b² + a²·var(b)/b⁴
+    // Strategy: pre-compute value-dependent scalars ONCE, then loop channels.
     em(0x50)  // push rax (save primary result)
     if op == 19 {
-        // ── Multiplication: a²·var(b) + b²·var(a) ──
-        // xmm0 = a²
-        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)  // movq xmm0, rcx (a)
-        em(0xf2); em(0x0f); em(0x59); em(0xc0)              // mulsd xmm0, xmm0 (a²)
-        // xmm2 = var(b)
-        if right_slot >= 0 && right_slot < 1024 {
-            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + right_slot * 8)
-            em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
-            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
-        } else if right_slot == -2 {
-            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-            em(0x48); em(0x8b); em(0x00)
-            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
-        } else {
-            em(0x66); em(0x0f); em(0x57); em(0xd2)            // xorpd xmm2, xmm2
+        // Pre-compute xmm5 = a², xmm6 = b² (value-only, channel-independent)
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe9)  // movq xmm5, rcx (a)
+        em(0xf2); em(0x0f); em(0x59); em(0xed)              // mulsd xmm5, xmm5 (a²)
+        em(0xf2); em(0x0f); em(0x10); em(0xf1)              // movsd xmm6, xmm1 (b)
+        em(0xf2); em(0x0f); em(0x59); em(0xf6)              // mulsd xmm6, xmm6 (b²)
+        var ch: i64 = 0
+        while ch < BUDGET_CHANNELS {
+            // xmm2 = var_b[ch]
+            if right_slot >= 0 && right_slot < 1024 {
+                em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + right_slot * 8)
+                em(0x48); em(0x8b); em(0x00)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
+            } else if right_slot == -2 {
+                em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+                em(0x48); em(0x8b); em(0x00)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
+            } else {
+                em(0x66); em(0x0f); em(0x57); em(0xd2)            // xorpd xmm2, xmm2
+            }
+            // xmm0 = a² · var_b[ch]
+            em(0xf2); em(0x0f); em(0x10); em(0xc5)              // movsd xmm0, xmm5 (a²)
+            em(0xf2); em(0x0f); em(0x59); em(0xc2)              // mulsd xmm0, xmm2
+            // save in xmm2
+            em(0xf2); em(0x0f); em(0x10); em(0xd0)              // movsd xmm2, xmm0
+            // xmm3 = var_a[ch]
+            if left_slot >= 0 && left_slot < 1024 {
+                em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + left_slot * 8)
+                em(0x48); em(0x8b); em(0x00)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd8)  // movq xmm3, rax
+            } else if left_slot == -2 {
+                em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+                em(0x48); em(0x8b); em(0x00)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd8)  // movq xmm3, rax
+            } else {
+                em(0x66); em(0x0f); em(0x57); em(0xdb)            // xorpd xmm3, xmm3
+            }
+            // xmm0 = b² · var_a[ch]
+            em(0xf2); em(0x0f); em(0x10); em(0xc6)              // movsd xmm0, xmm6 (b²)
+            em(0xf2); em(0x0f); em(0x59); em(0xc3)              // mulsd xmm0, xmm3
+            // xmm0 = a²·var_b[ch] + b²·var_a[ch]
+            em(0xf2); em(0x0f); em(0x58); em(0xc2)              // addsd xmm0, xmm2
+            // Store → BSS_SCRATCH[ch]
+            em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)    // movq rax, xmm0
+            em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+            em(0x48); em(0x89); em(0x01)                         // mov [rcx], rax
+            ch = ch + 1
         }
-        // xmm0 = a²·var(b)
-        em(0xf2); em(0x0f); em(0x59); em(0xc2)              // mulsd xmm0, xmm2
-        // save a²·var(b) in xmm2
-        em(0xf2); em(0x0f); em(0x10); em(0xd0)              // movsd xmm2, xmm0
-        // xmm0 = b²
-        em(0xf2); em(0x0f); em(0x10); em(0xc1)              // movsd xmm0, xmm1 (b)
-        em(0xf2); em(0x0f); em(0x59); em(0xc0)              // mulsd xmm0, xmm0 (b²)
-        // xmm3 = var(a)
-        if left_slot >= 0 && left_slot < 1024 {
-            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + left_slot * 8)
-            em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
-            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd8)  // movq xmm3, rax
-        } else if left_slot == -2 {
-            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-            em(0x48); em(0x8b); em(0x00)
-            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd8)  // movq xmm3, rax
-        } else {
-            em(0x66); em(0x0f); em(0x57); em(0xdb)            // xorpd xmm3, xmm3
-        }
-        // xmm0 = b²·var(a)
-        em(0xf2); em(0x0f); em(0x59); em(0xc3)              // mulsd xmm0, xmm3
-        // xmm0 = a²·var(b) + b²·var(a)
-        em(0xf2); em(0x0f); em(0x58); em(0xc2)              // addsd xmm0, xmm2
     }
     if op == 20 {
-        // ── Division: var(a)/b² + a²·var(b)/b⁴ ──
-        // xmm0 = b²
-        em(0xf2); em(0x0f); em(0x10); em(0xc1)              // movsd xmm0, xmm1 (b)
-        em(0xf2); em(0x0f); em(0x59); em(0xc0)              // mulsd xmm0, xmm0 (b²)
-        // xmm2 = var(a)
-        if left_slot >= 0 && left_slot < 1024 {
-            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + left_slot * 8)
-            em(0x48); em(0x8b); em(0x00)
-            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
-        } else if left_slot == -2 {
-            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-            em(0x48); em(0x8b); em(0x00)
-            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
-        } else {
-            em(0x66); em(0x0f); em(0x57); em(0xd2)            // xorpd xmm2, xmm2
+        // Pre-compute xmm5 = a², xmm6 = b², xmm7 = b⁴
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe9)    // movq xmm5, rcx (a)
+        em(0xf2); em(0x0f); em(0x59); em(0xed)              // mulsd xmm5, xmm5 (a²)
+        em(0xf2); em(0x0f); em(0x10); em(0xf1)              // movsd xmm6, xmm1 (b)
+        em(0xf2); em(0x0f); em(0x59); em(0xf6)              // mulsd xmm6, xmm6 (b²)
+        em(0xf2); em(0x0f); em(0x10); em(0xfe)              // movsd xmm7, xmm6 (b²)
+        em(0xf2); em(0x0f); em(0x59); em(0xff)              // mulsd xmm7, xmm7 (b⁴)
+        var ch: i64 = 0
+        while ch < BUDGET_CHANNELS {
+            // xmm2 = var_a[ch]
+            if left_slot >= 0 && left_slot < 1024 {
+                em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + left_slot * 8)
+                em(0x48); em(0x8b); em(0x00)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
+            } else if left_slot == -2 {
+                em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+                em(0x48); em(0x8b); em(0x00)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
+            } else {
+                em(0x66); em(0x0f); em(0x57); em(0xd2)            // xorpd xmm2, xmm2
+            }
+            // xmm2 = var_a[ch] / b²
+            em(0xf2); em(0x0f); em(0x5e); em(0xd6)              // divsd xmm2, xmm6
+            // xmm4 = var_b[ch]
+            if right_slot >= 0 && right_slot < 1024 {
+                em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + right_slot * 8)
+                em(0x48); em(0x8b); em(0x00)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe0)  // movq xmm4, rax
+            } else if right_slot == -2 {
+                em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+                em(0x48); em(0x8b); em(0x00)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe0)  // movq xmm4, rax
+            } else {
+                em(0x66); em(0x0f); em(0x57); em(0xe4)            // xorpd xmm4, xmm4
+            }
+            // xmm0 = a² · var_b[ch]
+            em(0xf2); em(0x0f); em(0x10); em(0xc5)              // movsd xmm0, xmm5 (a²)
+            em(0xf2); em(0x0f); em(0x59); em(0xc4)              // mulsd xmm0, xmm4
+            // xmm0 = a²·var_b[ch] / b⁴
+            em(0xf2); em(0x0f); em(0x5e); em(0xc7)              // divsd xmm0, xmm7
+            // xmm0 = var_a[ch]/b² + a²·var_b[ch]/b⁴
+            em(0xf2); em(0x0f); em(0x58); em(0xc2)              // addsd xmm0, xmm2
+            // Store → BSS_SCRATCH[ch]
+            em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)    // movq rax, xmm0
+            em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+            em(0x48); em(0x89); em(0x01)                         // mov [rcx], rax
+            ch = ch + 1
         }
-        // xmm2 = var(a)/b²
-        em(0xf2); em(0x0f); em(0x5e); em(0xd0)              // divsd xmm2, xmm0
-        // xmm3 = b⁴ = b²·b²
-        em(0xf2); em(0x0f); em(0x10); em(0xd8)              // movsd xmm3, xmm0 (b²)
-        em(0xf2); em(0x0f); em(0x59); em(0xdb)              // mulsd xmm3, xmm3 (b⁴)
-        // xmm0 = a²
-        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)    // movq xmm0, rcx (a)
-        em(0xf2); em(0x0f); em(0x59); em(0xc0)              // mulsd xmm0, xmm0 (a²)
-        // load var(b) → xmm4
-        if right_slot >= 0 && right_slot < 1024 {
-            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + right_slot * 8)
-            em(0x48); em(0x8b); em(0x00)
-            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe0)  // movq xmm4, rax
-        } else if right_slot == -2 {
-            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-            em(0x48); em(0x8b); em(0x00)
-            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe0)  // movq xmm4, rax
-        } else {
-            em(0x66); em(0x0f); em(0x57); em(0xe4)            // xorpd xmm4, xmm4
-        }
-        // xmm0 = a²·var(b)
-        em(0xf2); em(0x0f); em(0x59); em(0xc4)              // mulsd xmm0, xmm4
-        // xmm0 = a²·var(b)/b⁴
-        em(0xf2); em(0x0f); em(0x5e); em(0xc3)              // divsd xmm0, xmm3
-        // xmm0 = var(a)/b² + a²·var(b)/b⁴
-        em(0xf2); em(0x0f); em(0x58); em(0xc2)              // addsd xmm0, xmm2
     }
-    // Store xmm0 → BSS_SCRATCH
-    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)        // movq rax, xmm0
-    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-    em(0x48); em(0x89); em(0x01)                             // mov [rcx], rax
     em(0x58)  // pop rax (restore primary result)
 }
 
 fn emit_seed_variance_from_knowledge_x86() with Mut {
     // rax = Knowledge struct pointer. [rax+8] = variance (u²).
-    // Writes variance to BSS_SCRATCH, preserving rax.
-    em(0x50)                                               // push rax
+    // Writes variance to BSS_SCRATCH[NEXT_BUDGET_PARAM], zeros all other channels.
+    // This is what makes the ISO budget decomposition work: each measure() seeds
+    // exactly one channel, so channels track per-parameter variance contributions.
+    em(0x50); em(0x51)                                     // push rax; push rcx
     em(0x48); em(0x8b); em(0x40); em(8)                    // mov rax, [rax + 8] — variance
-    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
-    em(0x58)                                               // pop rax
+    var ch: i64 = 0
+    while ch < BUDGET_CHANNELS {
+        em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+        if ch == NEXT_BUDGET_PARAM {
+            em(0x48); em(0x89); em(0x01)                   // mov [rcx], rax — seed this channel
+        } else {
+            em(0x48); em(0xc7); em(0x01); em32(0)          // mov qword [rcx], 0 — zero other channels
+        }
+        ch = ch + 1
+    }
+    em(0x59); em(0x58)                                     // pop rcx; pop rax
 }
 
 fn emit_variance_addsub_same_x86(slot: i64, op: i64) with Mut {
-    // Correlated add/sub: same variable on both sides (GUM §5.2)
+    // Correlated add/sub: same variable on both sides (GUM §5.2) — per channel
     // add: var(a+a) = 4·var(a).  sub: var(a-a) = 0.
     em(0x50)  // push rax
-    if op == 17 && slot >= 0 && slot < 1024 {
-        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + slot * 8)
-        em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
-        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)      // movq xmm0, rax
-        em(0xf2); em(0x0f); em(0x58); em(0xc0)                // addsd xmm0, xmm0 (2×)
-        em(0xf2); em(0x0f); em(0x58); em(0xc0)                // addsd xmm0, xmm0 (4×)
-    } else {
-        em(0x66); em(0x0f); em(0x57); em(0xc0)                // xorpd xmm0, xmm0
+    var ch: i64 = 0
+    while ch < BUDGET_CHANNELS {
+        if op == 17 && slot >= 0 && slot < 1024 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + slot * 8)
+            em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)      // movq xmm0, rax
+            em(0xf2); em(0x0f); em(0x58); em(0xc0)                // addsd xmm0, xmm0 (2×)
+            em(0xf2); em(0x0f); em(0x58); em(0xc0)                // addsd xmm0, xmm0 (4×)
+        } else {
+            em(0x66); em(0x0f); em(0x57); em(0xc0)                // xorpd xmm0, xmm0
+        }
+        em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)          // movq rax, xmm0
+        em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+        em(0x48); em(0x89); em(0x01)                               // mov [rcx], rax
+        ch = ch + 1
     }
-    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)          // movq rax, xmm0
-    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-    em(0x48); em(0x89); em(0x01)                               // mov [rcx], rax
     em(0x58)  // pop rax
 }
 
 fn emit_variance_muldiv_same_x86(slot: i64, op: i64) with Mut {
-    // Correlated mul/div: same variable on both sides (GUM §5.2)
+    // Correlated mul/div: same variable on both sides (GUM §5.2) — per channel
     // mul: var(a²) = 4·a²·var(a).  div: var(a/a) = 0.
     // After f64 arithmetic: rcx = a (preserved).
     em(0x50)  // push rax
     if op == 19 && slot >= 0 && slot < 1024 {
-        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)      // movq xmm0, rcx (a)
-        em(0xf2); em(0x0f); em(0x59); em(0xc0)                // mulsd xmm0, xmm0 (a²)
-        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + slot * 8)
-        em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
-        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)      // movq xmm2, rax
-        em(0xf2); em(0x0f); em(0x59); em(0xc2)                // mulsd xmm0, xmm2 (a²·var)
-        em(0xf2); em(0x0f); em(0x58); em(0xc0)                // addsd xmm0, xmm0 (2×)
-        em(0xf2); em(0x0f); em(0x58); em(0xc0)                // addsd xmm0, xmm0 (4×)
+        // Pre-compute xmm5 = a² (channel-independent)
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe9)      // movq xmm5, rcx (a)
+        em(0xf2); em(0x0f); em(0x59); em(0xed)                // mulsd xmm5, xmm5 (a²)
+        var ch: i64 = 0
+        while ch < BUDGET_CHANNELS {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + slot * 8)
+            em(0x48); em(0x8b); em(0x00)                       // mov rax, [rax]
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
+            em(0xf2); em(0x0f); em(0x10); em(0xc5)            // movsd xmm0, xmm5 (a²)
+            em(0xf2); em(0x0f); em(0x59); em(0xc2)            // mulsd xmm0, xmm2 (a²·var[ch])
+            em(0xf2); em(0x0f); em(0x58); em(0xc0)            // addsd xmm0, xmm0 (2×)
+            em(0xf2); em(0x0f); em(0x58); em(0xc0)            // addsd xmm0, xmm0 (4×)
+            em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
+            em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+            em(0x48); em(0x89); em(0x01)                       // mov [rcx], rax
+            ch = ch + 1
+        }
     } else {
-        em(0x66); em(0x0f); em(0x57); em(0xc0)                // xorpd xmm0, xmm0
+        // div (a/a) = 0 or invalid slot: zero all channels
+        var ch: i64 = 0
+        while ch < BUDGET_CHANNELS {
+            em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+            em(0x48); em(0xc7); em(0x01); em32(0)             // mov qword [rcx], 0
+            ch = ch + 1
+        }
     }
-    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)          // movq rax, xmm0
-    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-    em(0x48); em(0x89); em(0x01)                               // mov [rcx], rax
     em(0x58)  // pop rax
 }
 
 fn emit_copy_scratch_to_var_variance_x86(slot: i64) with Mut {
-    // Copy BSS_SCRATCH → BSS_VAR[slot], preserving rax/rcx
+    // Copy BSS_SCRATCH[ch] → BSS_VAR[ch][slot] for all channels, preserving rax/rcx
     if slot < 0 || slot >= 1024 { return }
     em(0x50); em(0x51)                                     // push rax; push rcx
-    em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-    em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
-    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + slot * 8)
-    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
+    var ch: i64 = 0
+    while ch < BUDGET_CHANNELS {
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+        em(0x48); em(0x8b); em(0x00)                       // mov rax, [rax]
+        em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + slot * 8)
+        em(0x48); em(0x89); em(0x01)                       // mov [rcx], rax
+        ch = ch + 1
+    }
     em(0x59); em(0x58)                                     // pop rcx; pop rax
 }
 
 fn emit_variance_to_xfer_x86(xfer_idx: i64, expr_slot: i64) with Mut {
-    // Copy argument's variance to BSS_XFER[xfer_idx]. Called after push rax (arg value).
-    // rax/rcx free to use (arg already on stack, next compile_or is independent).
+    // Copy argument's variance to BSS_XFER[ch][xfer_idx] for all channels.
+    // Called after push rax (arg value). rax/rcx free to use.
     if xfer_idx < 0 || xfer_idx >= 8 { return }
-    if expr_slot >= 0 && expr_slot < 1024 {
-        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + expr_slot * 8)
-        em(0x48); em(0x8b); em(0x00)                       // mov rax, [rax]
-    } else if expr_slot == -2 {
-        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-        em(0x48); em(0x8b); em(0x00)                       // mov rax, [rax]
-    } else {
-        em(0x31); em(0xc0)                                 // xor eax, eax
+    var ch: i64 = 0
+    while ch < BUDGET_CHANNELS {
+        if expr_slot >= 0 && expr_slot < 1024 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + expr_slot * 8)
+            em(0x48); em(0x8b); em(0x00)                   // mov rax, [rax]
+        } else if expr_slot == -2 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+            em(0x48); em(0x8b); em(0x00)                   // mov rax, [rax]
+        } else {
+            em(0x31); em(0xc0)                             // xor eax, eax
+        }
+        em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_XFER_BSS_OFF + ch * 64 + xfer_idx * 8)
+        em(0x48); em(0x89); em(0x01)                       // mov [rcx], rax
+        ch = ch + 1
     }
-    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_XFER_BSS_OFF + xfer_idx * 8)
-    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
 }
 
 fn emit_xfer_to_var_variance_x86(xfer_idx: i64, slot: i64) with Mut {
-    // Copy BSS_XFER[xfer_idx] → BSS_VAR[slot]. Called at function entry after param bind.
+    // Copy BSS_XFER[ch][xfer_idx] → BSS_VAR[ch][slot] for all channels.
     if xfer_idx < 0 || xfer_idx >= 8 { return }
     if slot < 0 || slot >= 1024 { return }
     em(0x50); em(0x51)                                     // push rax; push rcx
-    em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_XFER_BSS_OFF + xfer_idx * 8)
-    em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
-    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + slot * 8)
-    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
+    var ch: i64 = 0
+    while ch < BUDGET_CHANNELS {
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_XFER_BSS_OFF + ch * 64 + xfer_idx * 8)
+        em(0x48); em(0x8b); em(0x00)                       // mov rax, [rax]
+        em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + slot * 8)
+        em(0x48); em(0x89); em(0x01)                       // mov [rcx], rax
+        ch = ch + 1
+    }
     em(0x59); em(0x58)                                     // pop rcx; pop rax
 }
 
 fn emit_var_variance_to_scratch_x86(slot: i64) with Mut {
-    // Copy BSS_VAR[slot] → BSS_SCRATCH, preserving rax. For return statements.
+    // Copy BSS_VAR[ch][slot] → BSS_SCRATCH[ch] for all channels, preserving rax. For return statements.
     if slot < 0 || slot >= 1024 { return }
     em(0x50); em(0x51)                                     // push rax; push rcx
-    em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + slot * 8)
-    em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
-    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
+    var ch: i64 = 0
+    while ch < BUDGET_CHANNELS {
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + slot * 8)
+        em(0x48); em(0x8b); em(0x00)                       // mov rax, [rax]
+        em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
+        em(0x48); em(0x89); em(0x01)                       // mov [rcx], rax
+        ch = ch + 1
+    }
     em(0x59); em(0x58)                                     // pop rcx; pop rax
 }
 
@@ -6227,6 +6306,7 @@ fn compile_acknowledge_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     if TK[EP as usize] == 7 { EP = EP + 1 }
     // GUM seed: extract variance from Knowledge struct → BSS_SCRATCH
     emit_seed_variance_from_knowledge_x86()
+    NEXT_BUDGET_PARAM = NEXT_BUDGET_PARAM + 1
     // Extract .value at offset 0: mov rax, [rax]
     em(0x48); em(0x8b); em(0x00)
     EXPR_VAR_SLOT = -2  // variance in scratch
@@ -6301,6 +6381,7 @@ fn compile_require_confidence_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     emit_load_var(rc_k_slot)
     // GUM seed: extract variance from Knowledge struct → BSS_SCRATCH
     emit_seed_variance_from_knowledge_x86()
+    NEXT_BUDGET_PARAM = NEXT_BUDGET_PARAM + 1
     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax + 0] — .value
     EXPR_VAR_SLOT = -2  // variance in scratch
     // Set result type to inner type
@@ -6613,6 +6694,25 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     }
 }
 
+fn compile_inline_block_expr_x86() with IO, Mut, Panic, Div {
+    LAST_STMT_HAS_VALUE = 0
+    LAST_STMT_TY = 0
+    LAST_STMT_TY_HASH = 0
+    if TK[EP as usize] == 8 { EP = EP + 1 }
+    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+    if TK[EP as usize] == 9 { EP = EP + 1 }
+    if LAST_STMT_HAS_VALUE == 0 {
+        em(0x31); em(0xc0)
+        EXPR_TY = 5
+        EXPR_TY_HASH = 0
+        EXPR_IS_F64 = 0
+        return
+    }
+    EXPR_TY = LAST_STMT_TY
+    EXPR_TY_HASH = LAST_STMT_TY_HASH
+    if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+}
+
 fn compile_primary() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
     LAST_EXPR_IS_LINEAR = 0
@@ -6625,6 +6725,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_VAR_SLOT = -1
     EXPR_CONFIDENCE = 1000  // default: literals are certain
     let k = TK[EP as usize]
+    if k == 77 && TK[(EP + 1) as usize] == 8 {
+        EP = EP + 1
+        compile_inline_block_expr_x86()
+        return
+    }
+    if k == 78 && TK[(EP + 1) as usize] == 8 {
+        EP = EP + 1
+        compile_inline_block_expr_x86()
+        return
+    }
     // Integer literal
     if k == 4 {
         let v = TV[EP as usize]
@@ -7582,7 +7692,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             if src_match(ns, ne - ns, "variance_of") {
-                // variance_of(x) — load GUM variance from BSS shadow buffer
+                // variance_of(x) — sum all budget channels for total variance (backward compat)
                 EP = EP + 1  // skip (
                 let vo_ns = TS[EP as usize]
                 let vo_ne = TE[EP as usize]
@@ -7590,14 +7700,72 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1  // skip variable name
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 if vo_slot >= 0 && vo_slot < 1024 {
-                    em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + vo_slot * 8)
-                    em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+                    // xorpd xmm0, xmm0 — accumulator
+                    em(0x66); em(0x0f); em(0x57); em(0xc0)
+                    var ch: i64 = 0
+                    while ch < BUDGET_CHANNELS {
+                        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + vo_slot * 8)
+                        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+                        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+                        em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
+                        ch = ch + 1
+                    }
+                    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
                 } else {
                     em(0x31); em(0xc0)  // xor rax, rax
                 }
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
                 EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "budget_of") {
+                // budget_of(x) — print ISO uncertainty budget: per-channel variance decomposition
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1  // skip (
+                let bo_ns = TS[EP as usize]
+                let bo_ne = TE[EP as usize]
+                let bo_slot = var_find(bo_ns, bo_ne)
+                EP = EP + 1  // skip variable name
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                if bo_slot >= 0 && bo_slot < 1024 {
+                    // First print total: sum all channels into xmm0
+                    em(0x66); em(0x0f); em(0x57); em(0xc0)            // xorpd xmm0, xmm0
+                    var ch_t: i64 = 0
+                    while ch_t < BUDGET_CHANNELS {
+                        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch_t * 8192 + bo_slot * 8)
+                        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+                        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+                        em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
+                        ch_t = ch_t + 1
+                    }
+                    // Print "total="
+                    emit_print_char_lit_x86(116)  // t
+                    emit_print_char_lit_x86(111)  // o
+                    emit_print_char_lit_x86(116)  // t
+                    emit_print_char_lit_x86(97)   // a
+                    emit_print_char_lit_x86(108)  // l
+                    emit_print_char_lit_x86(61)   // =
+                    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
+                    emit_print_f64()
+                    emit_print_char_lit_x86(10)   // newline
+                    // Print each channel: "ch0=<val>\n"
+                    var ch: i64 = 0
+                    while ch < BUDGET_CHANNELS {
+                        emit_print_char_lit_x86(99)   // c
+                        emit_print_char_lit_x86(104)  // h
+                        emit_print_char_lit_x86(48 + ch)  // digit 0-7
+                        emit_print_char_lit_x86(61)   // =
+                        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + bo_slot * 8)
+                        em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+                        emit_print_f64()
+                        emit_print_char_lit_x86(10)   // newline
+                        ch = ch + 1
+                    }
+                }
+                em(0x31); em(0xc0)  // xor eax, eax (void result)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
                 return
             }
             if src_match(ns, ne - ns, "lift_knowledge") {
@@ -8755,6 +8923,10 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             let fns = TS[EP as usize]
             let fne = TE[EP as usize]
             let fh = gl_name_hash(fns, fne)
+            if src_match(fns, fne - fns, "await") {
+                EP = EP + 1
+                continue
+            }
             // Built-in .len() — return compile-time array length
             if src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 {
                 EP = EP + 1  // skip 'len'
@@ -8924,6 +9096,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     }
                     // GUM seed: extract variance from Knowledge struct → BSS_SCRATCH
                     emit_seed_variance_from_knowledge_x86()
+                    NEXT_BUDGET_PARAM = NEXT_BUDGET_PARAM + 1
                     em(0x48); em(0x8b); em(0x00)
                     EXPR_TY = knowledge_hash_inner_ty(base_data_hash)
                     EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
@@ -11627,7 +11800,8 @@ fn ety_parse_effect_name(ns: i64, ne: i64) -> i64 with Panic, Mut {
     if src_match(ns, l, "Panic") { return 4 }
     if src_match(ns, l, "Div") { return 8 }
     if src_match(ns, l, "Alloc") { return 16 }
-    if src_match(ns, l, "Observe") { return 32 }
+    if src_match(ns, l, "Async") { return 32 }
+    if src_match(ns, l, "Observe") { return 64 }
     return 0
 }
 
@@ -13311,25 +13485,28 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // Runtime epistemic gate counter (8 bytes in BSS, zero-initialized)
     RT_GUARDED_OPS_BSS_OFF = GL_BSS_SIZE
     GL_BSS_SIZE = GL_BSS_SIZE + 8
-    // GUM variance shadow buffer: 1024 slots × 8 bytes = 8192
+    // GUM variance shadow buffer: 1024 slots × 8 bytes × 8 channels = 65536
+    BUDGET_CHANNELS = 8  // must re-assign: native BSS zeroes var inits
     RT_VARIANCE_BUF_BSS_OFF = GL_BSS_SIZE
-    GL_BSS_SIZE = GL_BSS_SIZE + 8192
-    // GUM variance scratch cell (8 bytes, holds last computed variance)
+    GL_BSS_SIZE = GL_BSS_SIZE + 8192 * BUDGET_CHANNELS
+    // GUM variance scratch cell: 8 bytes × 8 channels = 64
     RT_VARIANCE_SCRATCH_BSS_OFF = GL_BSS_SIZE
-    GL_BSS_SIZE = GL_BSS_SIZE + 8
-    // GUM variance transfer area: 8 slots × 8 bytes for cross-function propagation
+    GL_BSS_SIZE = GL_BSS_SIZE + 8 * BUDGET_CHANNELS
+    // GUM variance transfer area: 8 slots × 8 bytes × 8 channels = 512
     RT_VARIANCE_XFER_BSS_OFF = GL_BSS_SIZE
-    GL_BSS_SIZE = GL_BSS_SIZE + 64
+    GL_BSS_SIZE = GL_BSS_SIZE + 64 * BUDGET_CHANNELS
+    NEXT_BUDGET_PARAM = 0
 
     print("globals: "); print_int(GL_COUNT); print(" bss="); print_int(GL_BSS_SIZE); print("\n")
 
     // Pass 1: register all function names (skip generic templates)
     while p < TC {
-        if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
+        if tok_is_fn_decl_start(p) {
+            let name_p = tok_fn_name_index(p)
             FN_IS_KERNEL[FN_COUNT as usize] = 0
-            if token_is_kernel_marker(p - 1) { FN_IS_KERNEL[FN_COUNT as usize] = 1 }
+            if token_is_kernel_marker(name_p - 1) { FN_IS_KERNEL[FN_COUNT as usize] = 1 }
             ptx_reset_fn_meta(FN_COUNT)
-            p = p + 1
+            p = name_p
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
             FN_NS[FN_COUNT as usize] = TS[p as usize]
             FN_NE[FN_COUNT as usize] = TE[p as usize]
@@ -13368,11 +13545,13 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 sig_impl_hash = ih
             }
         }
-        if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
+        if tok_is_fn_decl_start(p) {
             // Detect pub visibility (previous token == 49) and import origin
-            let fn_is_pub = p > 0 && TK[(p - 1) as usize] == 49
-            let fn_from_import = TS[p as usize] >= MAIN_SRC_END && MAIN_SRC_END > 0
-            p = p + 1
+            let name_p = tok_fn_name_index(p)
+            let decl_p = p
+            let fn_is_pub = decl_p > 0 && TK[(decl_p - 1) as usize] == 49
+            let fn_from_import = TS[name_p as usize] >= MAIN_SRC_END && MAIN_SRC_END > 0
+            p = name_p
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
             FN_NAME_TOK[sig_fi as usize] = p
             FN_SIG[sig_fi as usize] = fnsig_from_decl_name_tok(p)
@@ -13479,8 +13658,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     var ret_fi: i64 = 0
     while p < TC {
-        if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
-            p = p + 1
+        if tok_is_fn_decl_start(p) {
+            p = tok_fn_name_index(p)
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
             var q: i64 = p + 1
             if TK[q as usize] == 6 { q = q + 1 }
@@ -13513,12 +13692,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // Pass 1b: scan effects clauses for each function
     // For each fn at index fi, scan forward from its name token to find 'with' (38)
     // and record effect bitmask: IO=1, Mut=2, Panic=4, Div=8, Alloc=16,
-    // Observe=64, Audit=128, Hypothesis=256
+    // Async=32, Observe=64, Audit=128, Hypothesis=256
     p = 0
     var eff_fi: i64 = 0
     while p < TC {
-        if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
-            p = p + 1
+        if tok_is_fn_decl_start(p) {
+            p = tok_fn_name_index(p)
             // Skip generic templates
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
             // Scan forward to find { (start of body) — effects are between ) -> type with ... {
@@ -13554,6 +13733,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if src_match(ens, ene - ens, "Panic") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 4; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Div") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 8; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Alloc") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 16; matched_builtin = 1 }
+                        if src_match(ens, ene - ens, "Async") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 32; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Observe") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 64; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Audit") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 128; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Hypothesis") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 256; matched_builtin = 1 }
@@ -13643,8 +13823,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     var fn_idx: i64 = 0
     while p < TC {
-        if TK[p as usize] != 1 || TK[(p + 1) as usize] != 3 { p = p + 1; continue }
-        p = p + 1  // skip 'fn'
+        if tok_is_fn_decl_start(p) == false { p = p + 1; continue }
+        p = tok_fn_name_index(p)  // skip optional 'async' and 'fn'
         let is_kernel_fn = FN_IS_KERNEL[fn_idx as usize]
 
         // Skip generic function templates
@@ -13991,9 +14171,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // patch the jz offset
         let skip_off = CL - (jz_patch + 1)
         CD[jz_patch as usize] = (skip_off & 0xFF) as i8
-        // Runtime variance scratch report: print raw i64 bits if non-zero
-        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
-        em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+        // Runtime variance scratch report: sum all budget channels, print if non-zero
+        // xorpd xmm0, xmm0 — accumulator for total scratch variance
+        em(0x66); em(0x0f); em(0x57); em(0xc0)
+        var vch: i64 = 0
+        while vch < BUDGET_CHANNELS {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + vch * 8)
+            em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+            em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
+            vch = vch + 1
+        }
+        em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x74); em(0x00)            // jz skip_var (patch)
         let jz_var_patch = CL - 1
@@ -18227,8 +18416,8 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     var p: i64 = 0
     var fn_idx: i64 = 0
     while p < TC {
-        if TK[p as usize] != 1 || TK[(p + 1) as usize] != 3 { p = p + 1; continue }
-        p = p + 1
+        if tok_is_fn_decl_start(p) == false { p = p + 1; continue }
+        p = tok_fn_name_index(p)
         if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 {
             while p < TC && TK[p as usize] != 8 { p = p + 1 }
             var gd: i64 = 1; p = p + 1
