@@ -282,6 +282,9 @@ var EXPR_VAR_SLOT: i64 = -1              // slot of last loaded variable (-1 = l
 var RT_VARIANCE_BUF_BSS_OFF: i64 = 0    // BSS offset for 1024-entry variance buffer
 var RT_VARIANCE_SCRATCH_BSS_OFF: i64 = 0 // BSS offset for single scratch cell
 var RT_VARIANCE_XFER_BSS_OFF: i64 = 0   // BSS offset for 8-slot argument transfer area
+var EXPR_CONFIDENCE: i64 = 1000          // compile-time confidence of current expression (0-1000)
+var FN_EPIST_MINCONF: [i64; 16384] = [0; 16384]  // per-function minimum confidence requirement
+var VAR_CONFIDENCE: [i64; 16384] = [0; 16384]    // per-variable confidence level
 
 fn en_find(hash: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
@@ -6181,6 +6184,13 @@ fn compile_measure_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     EXPR_IS_F64 = 0
     EXPR_TY = 0
     EXPR_TY_HASH = knowledge_hash_make(value_ty, value_hash, eps_scaled)
+    // Compile-time confidence: 1000 - relative_uncertainty_per_mille
+    if eps_scaled >= 0 {
+        EXPR_CONFIDENCE = 1000 - eps_scaled / 1000
+        if EXPR_CONFIDENCE < 0 { EXPR_CONFIDENCE = 0 }
+    } else {
+        EXPR_CONFIDENCE = 500  // unknown uncertainty → conservative default
+    }
 }
 
 fn compile_acknowledge_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
@@ -6613,6 +6623,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_UNIT = 0
     LAST_IS_LITERAL = 0
     EXPR_VAR_SLOT = -1
+    EXPR_CONFIDENCE = 1000  // default: literals are certain
     let k = TK[EP as usize]
     // Integer literal
     if k == 4 {
@@ -8240,8 +8251,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
             EP = EP + 1
             var argc: i64 = 0
             var abi_argc: i64 = 0
+            var call_min_conf: i64 = 1000
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or()
+                if EXPR_CONFIDENCE < call_min_conf { call_min_conf = EXPR_CONFIDENCE }
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
                 } else if call_sig > 0 {
@@ -8293,6 +8306,17 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if (callee_eff & ~caller_eff) != 0 {
                     tc_effect_call_violation(call_tok, callee_eff, caller_eff)
                 }
+                // Epistemic confidence gate: reject if arguments below callee's minconf
+                if FN_EPIST_MINCONF[fi as usize] > 0 && call_min_conf < FN_EPIST_MINCONF[fi as usize] {
+                    print("error[E180]: confidence gate violation — argument confidence ")
+                    print_int(call_min_conf)
+                    print("/1000 below required ")
+                    print_int(FN_EPIST_MINCONF[fi as usize])
+                    print("/1000 at line ")
+                    print_int(TL[call_tok as usize])
+                    print("\n")
+                    TYPECHECK_FAILED = 1
+                }
                 // Visibility check: imported non-pub function called from main module
                 let callee_is_import = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let callee_is_pub = (FN_EFFECTS[fi as usize] & 1024) != 0
@@ -8317,6 +8341,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 EXPR_VAR_SLOT = -2  // return variance is in BSS_SCRATCH
+                EXPR_CONFIDENCE = call_min_conf  // confidence can only degrade
             } else {
                 if call_vslot >= 0 {
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
@@ -8528,6 +8553,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 emit_load_var(slot)
             }
             EXPR_VAR_SLOT = slot
+            if vi >= 0 { EXPR_CONFIDENCE = VAR_CONFIDENCE[vi as usize] }
             EXPR_IS_F64 = var_find_is_f64(ns, ne)
             if vi >= 0 {
                 EXPR_TY = VAR_TY[vi as usize]
@@ -8903,6 +8929,13 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     EXPR_VAR_SLOT = -2  // variance in scratch
+                    // Confidence from Knowledge hash eps_scaled (or inherit from variable)
+                    let val_eps = knowledge_hash_eps(base_data_hash)
+                    if val_eps >= 0 {
+                        EXPR_CONFIDENCE = 1000 - val_eps / 1000
+                        if EXPR_CONFIDENCE < 0 { EXPR_CONFIDENCE = 0 }
+                    }
+                    // else: keep EXPR_CONFIDENCE from variable load (VAR_CONFIDENCE)
                 } else if src_match(fns, fne - fns, "variance") {
                     em(0x48); em(0x8b); em(0x40); em(8)
                     EXPR_TY = 2
@@ -8989,11 +9022,13 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
         let mul_left_var_slot = EXPR_VAR_SLOT
+        let mul_left_conf = EXPR_CONFIDENCE
         emit_push()
         compile_postfix()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
         let mul_right_var_slot = EXPR_VAR_SLOT
+        if EXPR_CONFIDENCE > mul_left_conf { EXPR_CONFIDENCE = mul_left_conf }
         let left_has_knowledge = knowledge_hash_is(left_hash)
         let right_has_knowledge = knowledge_hash_is(right_hash)
         if op == 17 && left_ty == 3 && right_ty == 3 {
@@ -9147,11 +9182,13 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let left_hash = EXPR_TY_HASH
         let left_unit = EXPR_UNIT
         let left_var_slot = EXPR_VAR_SLOT
+        let left_conf = EXPR_CONFIDENCE
         emit_push()
         compile_multiplicative()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
         let right_var_slot = EXPR_VAR_SLOT
+        if EXPR_CONFIDENCE > left_conf { EXPR_CONFIDENCE = left_conf }
         // Unit dimension mismatch check: both operands have units and they differ
         if left_unit != 0 && EXPR_UNIT != 0 && left_unit != EXPR_UNIT {
             tc_linear_violation(op_tok, "unit dimension mismatch")
@@ -10473,6 +10510,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     let svix = VAR_COUNT - 1
                     VAR_IS_CLOSURE[svix as usize] = 0
                     VAR_MUT[svix as usize] = decl_is_mut
+                    VAR_CONFIDENCE[svix as usize] = EXPR_CONFIDENCE
                 }
             } else if (decl_ty == 12 && tuple2_is(decl_ty_hash)) || (decl_ty == 0 && EXPR_TY == 12 && tuple2_is(EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
@@ -10546,6 +10584,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if EXPR_VAR_SLOT == -2 || EXPR_VAR_SLOT >= 0 {
                     emit_copy_scratch_to_var_variance_x86(slot)
                 }
+                // Confidence gate: store compile-time confidence for this variable
+                VAR_CONFIDENCE[vix as usize] = EXPR_CONFIDENCE
                 // Set f64 flag: explicit type annotation takes priority, else infer from RHS
                 if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                 else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
@@ -13517,7 +13557,26 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if src_match(ens, ene - ens, "Observe") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 64; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Audit") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 128; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Hypothesis") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 256; matched_builtin = 1 }
-                        if src_match(ens, ene - ens, "Epistemic") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 512; matched_builtin = 1 }
+                        if src_match(ens, ene - ens, "Epistemic") {
+                            FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 512; matched_builtin = 1
+                            // Parse optional Epistemic(minconf: 0.95)
+                            if ew + 1 < eq && TK[(ew + 1) as usize] == 6 {
+                                var ep: i64 = ew + 2
+                                while ep < eq && TK[ep as usize] != 7 {
+                                    if TK[ep as usize] == 3 && src_match(TS[ep as usize], TE[ep as usize] - TS[ep as usize], "minconf") {
+                                        ep = ep + 1
+                                        if TK[ep as usize] == 43 { ep = ep + 1 }
+                                        if TK[ep as usize] == 53 {
+                                            FN_EPIST_MINCONF[eff_fi as usize] = TV[ep as usize] * 1000 + (TF[ep as usize] * 1000) / TD[ep as usize]
+                                        } else if TK[ep as usize] == 4 {
+                                            FN_EPIST_MINCONF[eff_fi as usize] = TV[ep as usize] * 1000
+                                        }
+                                    }
+                                    ep = ep + 1
+                                }
+                                ew = ep
+                            }
+                        }
                         if matched_builtin == 0 { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 32 }
                     }
                     ew = ew + 1
@@ -13695,8 +13754,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             p = SCAN_TY_NEXT
         }
         p = skip_signature_where_clause(p)
-        // Skip 'with' effects clause (with=38, ident=3, comma=28)
-        if TK[p as usize] == 38 { p = p + 1; while TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 } }
+        // Skip 'with' effects clause (with=38, ident=3, comma=28, paren=6/7 for parameterized effects)
+        if TK[p as usize] == 38 {
+            p = p + 1
+            while TK[p as usize] == 3 || TK[p as usize] == 28 {
+                p = p + 1
+                if TK[p as usize] == 6 {
+                    p = p + 1
+                    while TK[p as usize] != 7 && TK[p as usize] != 0 { p = p + 1 }
+                    if TK[p as usize] == 7 { p = p + 1 }
+                }
+            }
+        }
         if TK[p as usize] == 8 { p = p + 1 }
 
         // Emit prologue: push rbp; mov rbp, rsp; sub rsp, 131072
