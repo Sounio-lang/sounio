@@ -22,6 +22,7 @@ var BASE_DIR: [i8; 512] = [0; 512]
 var BASE_DIR_LEN: i64 = 0
 var CLI_SHOW_AST: i64 = 0
 var CLI_SHOW_TYPES: i64 = 0
+var CLI_GPU_ENABLED: i64 = 0
 
 // Token parallel arrays (kind, start, end, int_value)
 var TK: [i64; 262144] = [0; 262144]
@@ -48,6 +49,12 @@ var ELF: [i8; 16781312] = [0; 16781312]
 var TARGET_OS: i64 = 0
 // Target arch: 0=x86_64 (default), 1=aarch64
 var TARGET_ARCH: i64 = 0
+// Target backend: 0=native (default), 1=gpu
+var TARGET_BACKEND: i64 = 0
+// GPU precision: 0=f64 (default), 1=f32
+var GPU_PRECISION: i64 = 0
+// GPU target format string index helpers
+var GPU_TARGET_FMT: i64 = 0
 // Ontology validation: class/role name tracking (reset per ontology block)
 var ONT_CLASS_S: [i64; 64] = [0; 64]
 var ONT_CLASS_E: [i64; 64] = [0; 64]
@@ -79,6 +86,7 @@ var FN_NE: [i64; 16384] = [0; 16384]
 var FN_OFF: [i64; 16384] = [0; 16384]
 var FN_SIG: [i64; 16384] = [0; 16384]
 var FN_IS_KERNEL: [i64; 16384] = [0; 16384]
+var FN_IS_ASYNC: [i64; 16384] = [0; 16384]
 var FN_PTX_SUPPORTED: [i64; 16384] = [0; 16384]
 var FN_PTX_KIND: [i64; 16384] = [0; 16384]
 var FN_PTX_OFF: [i64; 16384] = [0; 16384]
@@ -616,6 +624,55 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     ptx_emit_string("    ret;\n")
     ptx_emit_string("}\n")
     ptx_finish_fn(fi, start_off, gpu_kernel_ptx_kind_vec_binary_f64(), extent_slot)
+}
+
+fn write_ptx(output: string) -> i64 with IO, Mut, Panic, Div {
+    if PTX_LEN == 0 {
+        print("ptx: no kernel PTX generated (no kernel functions with 'with GPU' found)\n")
+        print("ptx: writing empty PTX header\n")
+        PTX_LEN = 0
+        ptx_emit_string(".version 7.8\n")
+        ptx_emit_string(".target sm_70\n")
+        ptx_emit_string(".address_size 64\n")
+    }
+    let ok = write_file(output, PTX_DATA, PTX_LEN)
+    if ok == 0 {
+        print("ptx: write error for ")
+        print(output)
+        print("\n")
+        return 1
+    }
+    print("ptx: ")
+    print(output)
+    print(" ")
+    print_int(PTX_LEN)
+    print(" bytes\n")
+    return 0
+}
+
+fn collect_all_kernels_ptx() with Mut, Panic {
+    var fi: i64 = 0
+    var kernel_count: i64 = 0
+    while fi < FN_COUNT {
+        if FN_IS_KERNEL[fi as usize] != 0 {
+            kernel_count = kernel_count + 1
+        }
+        fi = fi + 1
+    }
+    print("ptx: found ")
+    print_int(kernel_count)
+    print(" kernel functions\n")
+}
+
+fn emit_ptx_header() with Mut, Panic, Div {
+    PTX_LEN = 0
+    ptx_emit_string(".version 7.8\n")
+    if GPU_PRECISION == 1 {
+        ptx_emit_string(".target sm_70\n")
+    } else {
+        ptx_emit_string(".target sm_70\n")
+    }
+    ptx_emit_string(".address_size 64\n")
 }
 
 // Hash: pack name length + first 6 bytes into i64 (avoids sb()-based comparison during lookup)
@@ -1758,6 +1815,26 @@ fn tuple2_second_hash(h: i64) -> i64 with Panic, Div, Mut {
     return TUP2_B_HASH[tuple2_index(h) as usize]
 }
 
+fn task_hash_base() -> i64 {
+    return 5629499534213120
+}
+
+fn task_hash_make(inner_ty: i64, inner_hash: i64) -> i64 {
+    return task_hash_base() + inner_ty * 64 + inner_hash * 4096
+}
+
+fn task_hash_is(h: i64) -> bool {
+    return h >= task_hash_base()
+}
+
+fn task_hash_inner_ty(h: i64) -> i64 with Panic, Div, Mut {
+    return ((h - task_hash_base()) / 64) % 64
+}
+
+fn task_hash_inner_hash(h: i64) -> i64 with Panic, Div, Mut {
+    return (h - task_hash_base()) / 4096
+}
+
 fn knowledge_hash_make_mode(inner_ty: i64, inner_hash: i64, meta_mode: i64, eps_scaled: i64) -> i64 {
     let eps_code =
         if eps_scaled < -1 { 0 }
@@ -2131,6 +2208,9 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
     if k1 == 12 && k2 == 12 && tuple2_is(h1) && tuple2_is(h2) {
         return ty_eq(tuple2_first_ty(h1), tuple2_first_hash(h1), tuple2_first_ty(h2), tuple2_first_hash(h2))
             && ty_eq(tuple2_second_ty(h1), tuple2_second_hash(h1), tuple2_second_ty(h2), tuple2_second_hash(h2))
+    }
+    if k1 == 13 && k2 == 13 && task_hash_is(h1) && task_hash_is(h2) {
+        return ty_eq(task_hash_inner_ty(h1), task_hash_inner_hash(h1), task_hash_inner_ty(h2), task_hash_inner_hash(h2))
     }
     if k1 == 0 && knowledge_hash_is(h1) && k2 == 6 && h2 == knowledge_struct_hash() { return true }
     if k1 == 0 && k2 == 0 && h1 != 0 && h2 != 0 {
@@ -2614,6 +2694,12 @@ fn print_type_label(ty: i64, ty_hash: i64) with IO, Mut, Panic, Div {
         if ptr_hash_mut(ty_hash) != 0 { print("*mut ") }
         else { print("*") }
         print_type_label(ptr_hash_inner_ty(ty_hash), ptr_hash_inner_hash(ty_hash))
+        return
+    }
+    if ty == 13 && task_hash_is(ty_hash) {
+        print("TaskHandle<")
+        print_type_label(task_hash_inner_ty(ty_hash), task_hash_inner_hash(ty_hash))
+        print(">")
         return
     }
     if ty == 20 {
@@ -6073,6 +6159,229 @@ fn emit_syscall6_x86(argc: i64) with Mut {
     emit_drop_call_args_x86(argc)
 }
 
+fn emit_store_rax_to_rbx_disp_x86(disp: i64) with Mut {
+    if disp == 0 {
+        em(0x48); em(0x89); em(0x03)
+        return
+    }
+    em(0x48); em(0x89); em(0x43); em(disp)
+}
+
+fn emit_store_imm64_to_rbx_disp_x86(disp: i64, v: i64) with Mut {
+    emit_imm64(v)
+    emit_store_rax_to_rbx_disp_x86(disp)
+}
+
+fn task_runtime_rec_size_x86() -> i64 { return 4096 }
+fn task_runtime_stack_size_x86() -> i64 { return 1048576 }
+fn task_rec_tid_off_x86() -> i64 { return 0 }
+fn task_rec_state_off_x86() -> i64 { return 8 }
+fn task_rec_result_off_x86() -> i64 { return 16 }
+fn task_rec_stack_off_x86() -> i64 { return 24 }
+fn task_rec_arg_base_off_x86() -> i64 { return 32 }
+fn task_state_running_x86() -> i64 { return 1 }
+fn task_state_done_x86() -> i64 { return 2 }
+fn task_state_failed_x86() -> i64 { return 3 }
+fn task_clone_flags_x86() -> i64 { return 0x00000F11 }
+
+fn emit_task_alloc_shared_x86() with Mut {
+    emit_imm64(9); em(0x50)
+    emit_imm64(0); em(0x50)
+    emit_imm64(task_runtime_rec_size_x86()); em(0x50)
+    emit_imm64(0x03); em(0x50)
+    emit_imm64(0x22); em(0x50)
+    emit_imm64(0 - 1); em(0x50)
+    emit_imm64(0); em(0x50)
+    emit_syscall6_x86(7)
+}
+
+fn emit_task_alloc_stack_x86() with Mut {
+    emit_imm64(9); em(0x50)
+    emit_imm64(0); em(0x50)
+    emit_imm64(task_runtime_stack_size_x86()); em(0x50)
+    emit_imm64(0x03); em(0x50)
+    emit_imm64(0x22); em(0x50)
+    emit_imm64(0 - 1); em(0x50)
+    emit_imm64(0); em(0x50)
+    emit_syscall6_x86(7)
+}
+
+fn emit_task_alloc_runtime_x86() with Mut {
+    emit_task_alloc_shared_x86()
+    em(0x48); em(0x89); em(0xc3)                                   // mov rbx, rax
+    emit_store_imm64_to_rbx_disp_x86(task_rec_tid_off_x86(), 0)
+    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_running_x86())
+    emit_store_imm64_to_rbx_disp_x86(task_rec_result_off_x86(), 0)
+    emit_task_alloc_stack_x86()
+    emit_store_rax_to_rbx_disp_x86(task_rec_stack_off_x86())
+    em(0x48); em(0x89); em(0xd8)                                   // mov rax, rbx
+}
+
+fn emit_task_clone_x86() with Mut {
+    em(0xbf); em32(task_clone_flags_x86())                         // mov edi, flags
+    em(0x48); em(0x8b); em(0x73); em(task_rec_stack_off_x86())    // mov rsi, [rbx+stack]
+    em(0x48); em(0x81); em(0xc6); em32(task_runtime_stack_size_x86() - 16)
+    em(0x31); em(0xd2)                                             // xor edx, edx
+    em(0x45); em(0x31); em(0xd2)                                   // xor r10d, r10d
+    em(0x45); em(0x31); em(0xc0)                                   // xor r8d, r8d
+    em(0xb8); em32(56)                                             // mov eax, 56 (clone)
+    em(0x0f); em(0x05)
+}
+
+fn emit_task_exit_x86(code: i64) with Mut {
+    em(0xbf); em32(code)
+    em(0xb8); em32(60)
+    em(0x0f); em(0x05)
+}
+
+fn emit_task_futex_wait_running_x86() with Mut {
+    em(0x48); em(0x8d); em(0x7b); em(task_rec_state_off_x86())     // lea rdi, [rbx+state]
+    em(0xbe); em32(0)                                              // mov esi, FUTEX_WAIT
+    em(0xba); em32(task_state_running_x86())                       // mov edx, running
+    em(0x45); em(0x31); em(0xd2)                                   // xor r10d, r10d
+    em(0x45); em(0x31); em(0xc0)                                   // xor r8d, r8d
+    em(0x45); em(0x31); em(0xc9)                                   // xor r9d, r9d
+    em(0xb8); em32(202)                                            // mov eax, 202 (futex)
+    em(0x0f); em(0x05)
+}
+
+fn emit_task_futex_wake_x86() with Mut {
+    em(0x48); em(0x8d); em(0x7b); em(task_rec_state_off_x86())     // lea rdi, [rbx+state]
+    em(0xbe); em32(1)                                              // mov esi, FUTEX_WAKE
+    em(0xba); em32(1)                                              // mov edx, wake one waiter
+    em(0x45); em(0x31); em(0xd2)                                   // xor r10d, r10d
+    em(0x45); em(0x31); em(0xc0)                                   // xor r8d, r8d
+    em(0x45); em(0x31); em(0xc9)                                   // xor r9d, r9d
+    em(0xb8); em32(202)                                            // mov eax, 202 (futex)
+    em(0x0f); em(0x05)
+}
+
+fn emit_task_copy_call_args_to_record_x86(argc: i64) with Mut {
+    var i: i64 = 0
+    while i < argc {
+        em(0x48); em(0x8b); em(0x84); em(0x24); em32((argc - 1 - i) * 8)
+        emit_store_rax_to_rbx_disp_x86(task_rec_arg_base_off_x86() + i * 8)
+        i = i + 1
+    }
+}
+
+fn emit_task_push_marshaled_args_x86(argc: i64) with Mut {
+    var i: i64 = 0
+    while i < argc {
+        em(0x48); em(0x8b); em(0x43); em(task_rec_arg_base_off_x86() + i * 8)
+        em(0x50)
+        i = i + 1
+    }
+}
+
+fn emit_task_await_x86() with Mut, Panic {
+    em(0x48); em(0x89); em(0xc3)                                   // mov rbx, rax
+    let wait_loop = CL
+    em(0x48); em(0x8b); em(0x4b); em(task_rec_state_off_x86())     // mov rcx, [rbx+state]
+    em(0x48); em(0x83); em(0xf9); em(task_state_running_x86())     // cmp rcx, running
+    em(0x0f); em(0x85); let wait_done = CL; em32(0)
+    emit_task_futex_wait_running_x86()
+    em(0xe9); em32(wait_loop - (CL + 4))
+    let wait_done_target = CL
+    patch32(wait_done, wait_done_target)
+    em(0x48); em(0x8b); em(0x43); em(task_rec_result_off_x86())    // mov rax, [rbx+result]
+}
+
+fn emit_async_direct_fn_call_x86(fi: i64, argc: i64) with Mut, Panic, Div {
+    emit_task_alloc_runtime_x86()
+    let task_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(task_slot)
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)                                   // mov rbx, rax
+    emit_task_copy_call_args_to_record_x86(argc)
+    emit_task_clone_x86()
+    em(0x48); em(0x85); em(0xc0)                   // test rax, rax
+    em(0x0f); em(0x88); let clone_fail = CL; em32(0)
+    em(0x0f); em(0x85); let parent_path = CL; em32(0)
+    emit_task_push_marshaled_args_x86(argc)
+    emit_direct_fn_call_x86(fi, argc)
+    emit_push()
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
+    em(0x58)                                       // pop rax
+    emit_store_rax_to_rbx_disp_x86(task_rec_result_off_x86())
+    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_done_x86())
+    emit_task_futex_wake_x86()
+    emit_task_exit_x86(0)
+    let parent_target = CL
+    emit_drop_call_args_x86(argc)
+    emit_push()
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
+    em(0x58)                                       // pop rax
+    emit_store_rax_to_rbx_disp_x86(task_rec_tid_off_x86())
+    em(0x48); em(0x89); em(0xd8)                   // mov rax, rbx
+    em(0xe9); let async_done = CL; em32(0)
+    let clone_fail_target = CL
+    emit_drop_call_args_x86(argc)
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
+    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_failed_x86())
+    emit_store_imm64_to_rbx_disp_x86(task_rec_result_off_x86(), 0)
+    emit_task_futex_wake_x86()
+    em(0x48); em(0x89); em(0xd8)                   // mov rax, rbx
+    let async_done_target = CL
+    patch32(parent_path, parent_target)
+    patch32(clone_fail, clone_fail_target)
+    patch32(async_done, async_done_target)
+}
+
+fn compile_async_inline_block_x86(tok: i64) with IO, Mut, Panic, Div {
+    if (FN_EFFECTS[CURRENT_FN as usize] & 32) == 0 { tc_effect_violation(tok, 32, FN_EFFECTS[CURRENT_FN as usize]) }
+    EP = EP + 1
+    emit_task_alloc_runtime_x86()
+    let task_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(task_slot)
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)                                   // mov rbx, rax
+    emit_task_clone_x86()
+    em(0x48); em(0x85); em(0xc0)                   // test rax, rax
+    em(0x0f); em(0x88); let clone_fail = CL; em32(0)
+    em(0x0f); em(0x85); let parent_path = CL; em32(0)
+    compile_inline_block_expr_x86()
+    if type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
+        tc_error(tok, "async aggregate results not yet supported")
+        em(0x31); em(0xc0)
+    }
+    emit_push()
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
+    em(0x58)                                       // pop rax
+    emit_store_rax_to_rbx_disp_x86(task_rec_result_off_x86())
+    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_done_x86())
+    emit_task_futex_wake_x86()
+    emit_task_exit_x86(0)
+    let parent_target = CL
+    emit_push()
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
+    em(0x58)                                       // pop rax
+    emit_store_rax_to_rbx_disp_x86(task_rec_tid_off_x86())
+    em(0x48); em(0x89); em(0xd8)                   // mov rax, rbx
+    em(0xe9); let async_done = CL; em32(0)
+    let clone_fail_target = CL
+    emit_load_var(task_slot)
+    em(0x48); em(0x89); em(0xc3)                   // mov rbx, rax
+    emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_failed_x86())
+    emit_store_imm64_to_rbx_disp_x86(task_rec_result_off_x86(), 0)
+    emit_task_futex_wake_x86()
+    em(0x48); em(0x89); em(0xd8)                   // mov rax, rbx
+    let async_done_target = CL
+    patch32(parent_path, parent_target)
+    patch32(clone_fail, clone_fail_target)
+    patch32(async_done, async_done_target)
+    EXPR_TY_HASH = task_hash_make(EXPR_TY, EXPR_TY_HASH)
+    EXPR_TY = 13
+    EXPR_IS_F64 = 0
+}
+
 fn emit_write_file_flags(open_flags: i64) with Mut, Panic {
     // rdi = path, rsi = buf addr, rdx = len
     em(0x52)  // push rdx (len)
@@ -6726,13 +7035,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_CONFIDENCE = 1000  // default: literals are certain
     let k = TK[EP as usize]
     if k == 77 && TK[(EP + 1) as usize] == 8 {
-        EP = EP + 1
-        compile_inline_block_expr_x86()
+        compile_async_inline_block_x86(EP)
         return
     }
     if k == 78 && TK[(EP + 1) as usize] == 8 {
-        EP = EP + 1
-        compile_inline_block_expr_x86()
+        compile_async_inline_block_x86(EP)
         return
     }
     // Integer literal
@@ -8494,6 +8801,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
                 if FN_IS_KERNEL[fi as usize] != 0 {
                     emit_kernel_dispatch_x86(fi, abi_argc)
+                } else if FN_IS_ASYNC[fi as usize] != 0 {
+                    if ret_agg_nslots(FN_RET_TY[fi as usize], FN_RET_HASH[fi as usize]) > 0 {
+                        tc_error(call_tok, "async aggregate results not yet supported")
+                        emit_drop_call_args_x86(abi_argc)
+                        em(0x31); em(0xc0)
+                    } else {
+                        emit_async_direct_fn_call_x86(fi, abi_argc)
+                    }
                 } else {
                     // Epistemic gate: emit marker for uncertain calls
                     if EXPR_GATE[call_tok as usize] == 1 {
@@ -8505,9 +8820,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     }
                     emit_direct_fn_call_x86(fi, abi_argc)
                 }
-                EXPR_TY = FN_RET_TY[fi as usize]
-                EXPR_TY_HASH = FN_RET_HASH[fi as usize]
-                if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                if FN_IS_ASYNC[fi as usize] != 0 {
+                    EXPR_TY = 13
+                    EXPR_TY_HASH = task_hash_make(FN_RET_TY[fi as usize], FN_RET_HASH[fi as usize])
+                    EXPR_IS_F64 = 0
+                } else {
+                    EXPR_TY = FN_RET_TY[fi as usize]
+                    EXPR_TY_HASH = FN_RET_HASH[fi as usize]
+                    if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                }
                 EXPR_VAR_SLOT = -2  // return variance is in BSS_SCRATCH
                 EXPR_CONFIDENCE = call_min_conf  // confidence can only degrade
             } else {
@@ -8925,6 +9246,24 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             let fh = gl_name_hash(fns, fne)
             if src_match(fns, fne - fns, "await") {
                 EP = EP + 1
+                if (FN_EFFECTS[CURRENT_FN as usize] & 32) == 0 { tc_effect_violation(method_tok, 32, FN_EFFECTS[CURRENT_FN as usize]) }
+                if EXPR_TY == 13 && task_hash_is(EXPR_TY_HASH) {
+                    let inner_ty = task_hash_inner_ty(EXPR_TY_HASH)
+                    let inner_hash = task_hash_inner_hash(EXPR_TY_HASH)
+                    emit_task_await_x86()
+                    if type_is_aggregate(inner_ty, inner_hash) {
+                        tc_error(method_tok, "await for aggregate task results not yet supported")
+                        EXPR_TY = 0
+                        EXPR_TY_HASH = 0
+                        EXPR_IS_F64 = 0
+                    } else {
+                        EXPR_TY = inner_ty
+                        EXPR_TY_HASH = inner_hash
+                        if inner_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                    }
+                    continue
+                }
+                tc_error(method_tok, "await requires TaskHandle value")
                 continue
             }
             // Built-in .len() — return compile-time array length
@@ -13504,7 +13843,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if tok_is_fn_decl_start(p) {
             let name_p = tok_fn_name_index(p)
             FN_IS_KERNEL[FN_COUNT as usize] = 0
+            FN_IS_ASYNC[FN_COUNT as usize] = 0
             if token_is_kernel_marker(name_p - 1) { FN_IS_KERNEL[FN_COUNT as usize] = 1 }
+            if TK[p as usize] == 77 { FN_IS_ASYNC[FN_COUNT as usize] = 1 }
             ptx_reset_fn_meta(FN_COUNT)
             p = name_p
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
@@ -19477,28 +19818,67 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             if cli_arg_eq(flag, "--show-types") {
                 CLI_SHOW_TYPES = 1
             } else {
-                if cli_arg_eq(flag, "--target") && arg_i + 1 < argc {
-                    let targ = get_arg(arg_i + 1)
-                    if cli_arg_eq(targ, "x86_64-windows") {
-                        TARGET_OS = 3
-                        TARGET_ARCH = 0
+                if cli_arg_eq(flag, "--backend") && arg_i + 1 < argc {
+                    let be = get_arg(arg_i + 1)
+                    if cli_arg_eq(be, "gpu") {
+                        TARGET_BACKEND = 1
+                        CLI_GPU_ENABLED = 1
                     } else {
-                        if cli_arg_eq(targ, "x86_64-macos") {
-                            TARGET_OS = 2
-                            TARGET_ARCH = 0
+                        if cli_arg_eq(be, "native") {
+                            TARGET_BACKEND = 0
                         } else {
-                            if cli_arg_eq(targ, "aarch64-macos") {
-                                TARGET_OS = 2
-                                TARGET_ARCH = 1
-                            } else {
-                                if cli_arg_eq(targ, "aarch64-linux") {
-                                    TARGET_OS = 0
-                                    TARGET_ARCH = 1
-                                }
-                            }
+                            print("error: unknown backend '")
+                            print(be)
+                            print("' (supported: native, gpu)\n")
+                            return 1
                         }
                     }
                     arg_i = arg_i + 1
+                } else {
+                    if cli_arg_eq(flag, "--gpu-precision") && arg_i + 1 < argc {
+                        let prec = get_arg(arg_i + 1)
+                        if cli_arg_eq(prec, "f32") {
+                            GPU_PRECISION = 1
+                        } else {
+                            if cli_arg_eq(prec, "f64") {
+                                GPU_PRECISION = 0
+                            } else {
+                                print("error: unknown gpu precision '")
+                                print(prec)
+                                print("' (supported: f32, f64)\n")
+                                return 1
+                            }
+                        }
+                        arg_i = arg_i + 1
+                    } else {
+                        if cli_arg_eq(flag, "--gpu-target") && arg_i + 1 < argc {
+                            arg_i = arg_i + 1
+                        } else {
+                            if cli_arg_eq(flag, "--target") && arg_i + 1 < argc {
+                                let targ = get_arg(arg_i + 1)
+                                if cli_arg_eq(targ, "x86_64-windows") {
+                                    TARGET_OS = 3
+                                    TARGET_ARCH = 0
+                                } else {
+                                    if cli_arg_eq(targ, "x86_64-macos") {
+                                        TARGET_OS = 2
+                                        TARGET_ARCH = 0
+                                    } else {
+                                        if cli_arg_eq(targ, "aarch64-macos") {
+                                            TARGET_OS = 2
+                                            TARGET_ARCH = 1
+                                        } else {
+                                            if cli_arg_eq(targ, "aarch64-linux") {
+                                                TARGET_OS = 0
+                                                TARGET_ARCH = 1
+                                            }
+                                        }
+                                    }
+                                }
+                                arg_i = arg_i + 1
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -19538,6 +19918,11 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         cr = compile_all()
     }
     if cr != 0 { return cr }
+    if TARGET_BACKEND == 1 {
+        collect_all_kernels_ptx()
+        emit_ptx_header()
+        return write_ptx(out)
+    }
     if TARGET_ARCH == 1 {
         if TARGET_OS == 2 {
             write_macho_arm64(out)

@@ -1,81 +1,75 @@
-// stdlib/sync/rwlock — Reader-writer lock
+// stdlib/sync/rwlock — Shared-memory reader/writer lock handles
 //
-// RwLock: allows multiple concurrent readers or one exclusive writer.
-// Single-threaded simulation using counters.
+// RwLock is a copyable handle into module-global shared state so cloned tasks
+// coordinate on the same lock record by ID.
+
+let RWLOCK_MAX: i64 = 64
+
+var RWLOCK_USED: [i64; 64] = [0; 64]
+var RWLOCK_READERS: [i64; 64] = [0; 64]
+var RWLOCK_WRITER: [i64; 64] = [0; 64]
 
 pub struct RwLock {
-    readers: i64,
-    writer: i64,
+    id: i64,
 }
 
-impl RwLock {
-    fn new() -> RwLock {
-        RwLock { readers: 0, writer: 0 }
-    }
-
-    fn read_lock(self: &! RwLock) -> bool {
-        if self.writer != 0 { return false }
-        self.readers = self.readers + 1
-        true
-    }
-
-    fn read_unlock(self: &! RwLock) {
-        if self.readers > 0 {
-            self.readers = self.readers - 1
-        }
-    }
-
-    fn write_lock(self: &! RwLock) -> bool {
-        if self.writer != 0 { return false }
-        if self.readers != 0 { return false }
-        self.writer = 1
-        true
-    }
-
-    fn write_unlock(self: &! RwLock) {
-        self.writer = 0
-    }
-
-    fn reader_count(self: &RwLock) -> i64 {
-        self.readers
-    }
-
-    fn is_write_locked(self: &RwLock) -> bool {
-        self.writer != 0
-    }
+fn rwlock_slot_valid(id: i64) -> bool {
+    return id >= 0 && id < RWLOCK_MAX && RWLOCK_USED[id as usize] == 1
 }
 
 pub fn rwlock_new() -> RwLock {
-    RwLock { readers: 0, writer: 0 }
+    var i: i64 = 0
+    while i < RWLOCK_MAX {
+        if RWLOCK_USED[i as usize] == 0 {
+            RWLOCK_USED[i as usize] = 1
+            RWLOCK_READERS[i as usize] = 0
+            RWLOCK_WRITER[i as usize] = 0
+            return RwLock { id: i }
+        }
+        i = i + 1
+    }
+    return RwLock { id: -1 }
 }
 
 pub fn rwlock_read_lock(rw: &! RwLock) -> bool {
-    if rw.writer != 0 { return false }
-    rw.readers = rw.readers + 1
-    true
+    let id = rw.id
+    if !rwlock_slot_valid(id) { return false }
+    if RWLOCK_WRITER[id as usize] != 0 { return false }
+    RWLOCK_READERS[id as usize] = RWLOCK_READERS[id as usize] + 1
+    return true
 }
 
 pub fn rwlock_read_unlock(rw: &! RwLock) {
-    if rw.readers > 0 {
-        rw.readers = rw.readers - 1
+    let id = rw.id
+    if !rwlock_slot_valid(id) { return }
+    if RWLOCK_READERS[id as usize] > 0 {
+        RWLOCK_READERS[id as usize] = RWLOCK_READERS[id as usize] - 1
     }
 }
 
 pub fn rwlock_write_lock(rw: &! RwLock) -> bool {
-    if rw.writer != 0 { return false }
-    if rw.readers != 0 { return false }
-    rw.writer = 1
-    true
+    let id = rw.id
+    if !rwlock_slot_valid(id) { return false }
+    if RWLOCK_WRITER[id as usize] != 0 { return false }
+    if RWLOCK_READERS[id as usize] != 0 { return false }
+    RWLOCK_WRITER[id as usize] = 1
+    return true
 }
 
 pub fn rwlock_write_unlock(rw: &! RwLock) {
-    rw.writer = 0
+    let id = rw.id
+    if !rwlock_slot_valid(id) { return }
+    RWLOCK_WRITER[id as usize] = 0
 }
 
 pub fn rwlock_reader_count(rw: &! RwLock) -> i64 {
-    rw.readers
+    let id = rw.id
+    if !rwlock_slot_valid(id) { return 0 }
+    return RWLOCK_READERS[id as usize]
 }
 
 pub fn rwlock_is_write_locked(rw: &! RwLock) -> bool {
-    rw.writer != 0
+    let id = rw.id
+    if !rwlock_slot_valid(id) { return false }
+    return RWLOCK_WRITER[id as usize] != 0
 }
