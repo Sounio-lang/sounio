@@ -254,6 +254,8 @@ var ETY_COUNT: i64 = 0
 // Per-expression epistemic state (indexed by token position)
 var EXPR_ETY:  [i64; 262144] = [0; 262144]
 var EXPR_CONF: [i64; 262144] = [0; 262144]
+var EXPR_PROV: [i64; 262144] = [0; 262144]
+var EXPR_VALID:[i64; 262144] = [0; 262144]
 var EXPR_GATE: [i64; 262144] = [0; 262144]
 // Confidence gate threshold: 950 = 95.0% required for direct code emission
 var GATE_THRESHOLD: i64 = 950
@@ -261,6 +263,8 @@ var GATE_THRESHOLD: i64 = 950
 var ESCOPE_HASH: [i64; 2048] = [0; 2048]
 var ESCOPE_TY:   [i64; 2048] = [0; 2048]
 var ESCOPE_CONF: [i64; 2048] = [0; 2048]
+var ESCOPE_PROV: [i64; 2048] = [0; 2048]
+var ESCOPE_VALID:[i64; 2048] = [0; 2048]
 var ESCOPE_DEPTH:[i64; 2048] = [0; 2048]
 var ESCOPE_COUNT: i64 = 0
 var ESCOPE_LEVEL: i64 = 0
@@ -274,6 +278,10 @@ var EPIST_HIGH_CONF:  i64 = 0
 var EPIST_LOW_CONF:   i64 = 0
 var EPIST_GATES_DIRECT: i64 = 0
 var EPIST_GATES_GUARDED: i64 = 0
+var EXPR_VAR_SLOT: i64 = -1              // slot of last loaded variable (-1 = literal, -2 = scratch)
+var RT_VARIANCE_BUF_BSS_OFF: i64 = 0    // BSS offset for 1024-entry variance buffer
+var RT_VARIANCE_SCRATCH_BSS_OFF: i64 = 0 // BSS offset for single scratch cell
+var RT_VARIANCE_XFER_BSS_OFF: i64 = 0   // BSS offset for 8-slot argument transfer area
 
 fn en_find(hash: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
@@ -318,6 +326,10 @@ fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     if ty == 6 {
         let si = st_find(ty_hash)
         if si >= 0 { return st_total_size(si) / 8 }
+    }
+    if ty == 12 && tuple2_is(ty_hash) {
+        return ty_slot_count(tuple2_first_ty(ty_hash), tuple2_first_hash(ty_hash))
+            + ty_slot_count(tuple2_second_ty(ty_hash), tuple2_second_hash(ty_hash))
     }
     return 1
 }
@@ -398,6 +410,7 @@ var GPU_RT_CUMEMFREE_PTR_BSS_OFF: i64 = 0
 var GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF: i64 = 0
 var GPU_RT_CUMEMCPYDTOH_PTR_BSS_OFF: i64 = 0
 var GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF: i64 = 0
+var RT_GUARDED_OPS_BSS_OFF: i64 = 0
 
 var NEEDS_GPU_RUNTIME_DYNLINK: i64 = 0
 
@@ -1306,6 +1319,31 @@ fn copy_struct_into_local_slot_a64(slot: i64, ty_hash: i64) with Mut, Panic, Div
     emit_copy_words_x10_x11_a64(nslots)
 }
 
+fn bind_tuple_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
+    let nslots = ty_slot_count(12, ty_hash)
+    let base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + nslots
+    let ptr_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, 0, 0, 12, ty_hash) < 0 {
+        NEXT_SLOT = NEXT_SLOT - nslots - 1
+        return
+    }
+    em32(0xAA0003EA)  // mov x10, x0
+    emit_lea_var_a64(base + nslots - 1)
+    em32(0xAA0003EB)  // mov x11, x0
+    emit_copy_words_x10_x11_a64(nslots)
+    emit_store_var_a64(ptr_slot)
+}
+
+fn copy_tuple_into_local_slot_a64(slot: i64, ty_hash: i64) with Mut, Panic, Div {
+    let nslots = ty_slot_count(12, ty_hash)
+    em32(0xAA0003EA)  // mov x10, x0 (src ptr)
+    emit_load_var_a64(slot)
+    em32(0xAA0003EB)  // mov x11, x0 (dst ptr)
+    emit_copy_words_x10_x11_a64(nslots)
+}
+
 fn materialize_aggregate_expr_a64() with Mut, Panic, Div {
     if EXPR_TY == 8 {
         let nslots = arr_storage_slots(EXPR_TY_HASH)
@@ -1646,6 +1684,60 @@ fn unobserved_hash_inner_ty(h: i64) -> i64 with Panic, Div, Mut {
 
 fn unobserved_hash_inner_hash(h: i64) -> i64 with Panic, Div, Mut {
     return (h - unobserved_hash_base()) / 4096
+}
+
+var TUP2_COUNT: i64 = 0
+var TUP2_A_TY: [i64; 256] = [0; 256]
+var TUP2_A_HASH: [i64; 256] = [0; 256]
+var TUP2_B_TY: [i64; 256] = [0; 256]
+var TUP2_B_HASH: [i64; 256] = [0; 256]
+
+fn tuple2_hash_base() -> i64 {
+    return 4503599627370496
+}
+
+fn tuple2_is(h: i64) -> bool {
+    return h >= tuple2_hash_base() && h < tuple2_hash_base() + TUP2_COUNT
+}
+
+fn tuple2_index(h: i64) -> i64 with Panic, Div, Mut {
+    return h - tuple2_hash_base()
+}
+
+fn tuple2_intern(a_ty: i64, a_hash: i64, b_ty: i64, b_hash: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < TUP2_COUNT {
+        if TUP2_A_TY[i as usize] == a_ty &&
+           TUP2_A_HASH[i as usize] == a_hash &&
+           TUP2_B_TY[i as usize] == b_ty &&
+           TUP2_B_HASH[i as usize] == b_hash {
+            return tuple2_hash_base() + i
+        }
+        i = i + 1
+    }
+    if TUP2_COUNT >= 256 { return tuple2_hash_base() }
+    TUP2_A_TY[TUP2_COUNT as usize] = a_ty
+    TUP2_A_HASH[TUP2_COUNT as usize] = a_hash
+    TUP2_B_TY[TUP2_COUNT as usize] = b_ty
+    TUP2_B_HASH[TUP2_COUNT as usize] = b_hash
+    TUP2_COUNT = TUP2_COUNT + 1
+    return tuple2_hash_base() + TUP2_COUNT - 1
+}
+
+fn tuple2_first_ty(h: i64) -> i64 with Panic, Div, Mut {
+    return TUP2_A_TY[tuple2_index(h) as usize]
+}
+
+fn tuple2_first_hash(h: i64) -> i64 with Panic, Div, Mut {
+    return TUP2_A_HASH[tuple2_index(h) as usize]
+}
+
+fn tuple2_second_ty(h: i64) -> i64 with Panic, Div, Mut {
+    return TUP2_B_TY[tuple2_index(h) as usize]
+}
+
+fn tuple2_second_hash(h: i64) -> i64 with Panic, Div, Mut {
+    return TUP2_B_HASH[tuple2_index(h) as usize]
 }
 
 fn knowledge_hash_make_mode(inner_ty: i64, inner_hash: i64, meta_mode: i64, eps_scaled: i64) -> i64 {
@@ -1989,6 +2081,7 @@ fn type_is_struct_like(ty: i64, ty_hash: i64) -> bool {
 
 fn type_is_aggregate(ty: i64, ty_hash: i64) -> bool {
     if ty == 8 { return true }
+    if ty == 12 && tuple2_is(ty_hash) { return true }
     return type_is_struct_like(ty, ty_hash)
 }
 
@@ -2016,6 +2109,10 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
     }
     if k2 == 20 {
         return ty_eq(k1, h1, unobserved_hash_inner_ty(h2), unobserved_hash_inner_hash(h2))
+    }
+    if k1 == 12 && k2 == 12 && tuple2_is(h1) && tuple2_is(h2) {
+        return ty_eq(tuple2_first_ty(h1), tuple2_first_hash(h1), tuple2_first_ty(h2), tuple2_first_hash(h2))
+            && ty_eq(tuple2_second_ty(h1), tuple2_second_hash(h1), tuple2_second_ty(h2), tuple2_second_hash(h2))
     }
     if k1 == 0 && knowledge_hash_is(h1) && k2 == 6 && h2 == knowledge_struct_hash() { return true }
     if k1 == 0 && k2 == 0 && h1 != 0 && h2 != 0 {
@@ -2084,6 +2181,10 @@ fn ret_agg_nslots(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     if ty == 6 {
         let si = st_find(ty_hash)
         if si >= 0 { return st_total_size(si) / 8 }
+    }
+    if ty == 12 && tuple2_is(ty_hash) {
+        return ty_slot_count(tuple2_first_ty(ty_hash), tuple2_first_hash(ty_hash))
+            + ty_slot_count(tuple2_second_ty(ty_hash), tuple2_second_hash(ty_hash))
     }
     return 0
 }
@@ -3070,10 +3171,49 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
         scan_fn_type_signature(p)
         return
     }
-    if TK[p as usize] == 6 && TK[(p + 1) as usize] == 7 {
-        SCAN_TY = 5
-        SCAN_TY_NEXT = p + 2
-        return
+    if TK[p as usize] == 6 {
+        if TK[(p + 1) as usize] == 7 {
+            SCAN_TY = 5
+            SCAN_TY_NEXT = p + 2
+            return
+        }
+        var tp = p + 1
+        var td: i64 = 0
+        var split: i64 = -1
+        while tp < TC && TK[tp as usize] != 0 {
+            let tk = TK[tp as usize]
+            if tk == 6 { td = td + 1 }
+            if tk == 7 {
+                if td == 0 { break }
+                td = td - 1
+            }
+            if tk == 28 && td == 0 {
+                if split >= 0 {
+                    split = -2
+                } else {
+                    split = tp
+                }
+            }
+            tp = tp + 1
+        }
+        if split >= 0 && TK[tp as usize] == 7 {
+            scan_type(p + 1)
+            let tup_a_ty = SCAN_TY
+            let tup_a_hash = SCAN_TY_HASH
+            let tup_a_next = SCAN_TY_NEXT
+            if tup_a_next == split {
+                scan_type(split + 1)
+                let tup_b_ty = SCAN_TY
+                let tup_b_hash = SCAN_TY_HASH
+                let tup_b_next = SCAN_TY_NEXT
+                if tup_b_next == tp {
+                    SCAN_TY = 12
+                    SCAN_TY_HASH = tuple2_intern(tup_a_ty, tup_a_hash, tup_b_ty, tup_b_hash)
+                    SCAN_TY_NEXT = tp + 1
+                    return
+                }
+            }
+        }
     }
     if TK[p as usize] == 41 {
         p = p + 1
@@ -4552,6 +4692,64 @@ fn bind_struct_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
     emit_store_var(ptr_slot)
 }
 
+fn bind_tuple_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
+    let nslots = ty_slot_count(12, ty_hash)
+    let base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + nslots
+    let ptr_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, 0, 0, 12, ty_hash) < 0 {
+        NEXT_SLOT = NEXT_SLOT - nslots - 1
+        return
+    }
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
+    var i: i64 = 0
+    while i < nslots {
+        em(0x48); em(0x8b); em(0x82); em32(i * 8)
+        emit_store_var(base + nslots - 1 - i)
+        i = i + 1
+    }
+    em(0x48); em(0x8d); em(0x85)
+    em32(0 - (base + nslots - 1) * 8)
+    emit_store_var(ptr_slot)
+}
+
+fn copy_tuple_into_local_slot_x86(slot: i64, ty_hash: i64) with Mut, Panic, Div {
+    let nslots = ty_slot_count(12, ty_hash)
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
+    emit_load_var(slot)
+    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (dst ptr)
+    var i: i64 = 0
+    while i < nslots {
+        em(0x48); em(0x8b); em(0x82); em32(i * 8)
+        em(0x48); em(0x89); em(0x81); em32(i * 8)
+        i = i + 1
+    }
+    em(0x48); em(0x89); em(0xc8)
+}
+
+fn bind_local_from_rax_x86(ns: i64, ne: i64, ty: i64, ty_hash: i64) with Mut, Panic, Div {
+    if ty == 8 {
+        bind_array_local_from_rax_x86(ns, ne, ty_hash)
+        return
+    }
+    if ty == 12 && tuple2_is(ty_hash) {
+        bind_tuple_local_from_rax_x86(ns, ne, ty_hash)
+        return
+    }
+    if type_is_struct_like(ty, ty_hash) {
+        bind_struct_local_from_rax_x86(ns, ne, ty_hash)
+        return
+    }
+    let slot = var_add(ns, ne)
+    if slot < 0 { return }
+    let vix = VAR_COUNT - 1
+    emit_store_var(slot)
+    VAR_IS_F64[vix as usize] = if ty == 2 { 1 } else { 0 }
+    VAR_TY[vix as usize] = ty
+    VAR_TY_HASH[vix as usize] = ty_hash
+}
+
 fn copy_struct_into_local_slot_x86(slot: i64, ty_hash: i64) with Mut, Panic, Div {
     let si = st_find(ty_hash)
     if si < 0 && knowledge_hash_is(ty_hash) == false { emit_store_var(slot); return }
@@ -4571,6 +4769,21 @@ fn copy_struct_into_local_slot_x86(slot: i64, ty_hash: i64) with Mut, Panic, Div
 fn materialize_aggregate_expr_x86() with Mut, Panic, Div {
     if EXPR_TY == 8 {
         let nslots = arr_storage_slots(EXPR_TY_HASH)
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + nslots
+        em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
+        var i: i64 = 0
+        while i < nslots {
+            em(0x48); em(0x8b); em(0x82); em32(i * 8)
+            emit_store_var(base + nslots - 1 - i)
+            i = i + 1
+        }
+        em(0x48); em(0x8d); em(0x85)
+        em32(0 - (base + nslots - 1) * 8)
+        return
+    }
+    if EXPR_TY == 12 && tuple2_is(EXPR_TY_HASH) {
+        let nslots = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + nslots
         em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
@@ -4626,6 +4839,17 @@ fn copy_agg_into_struct_slots_x86(dst_start: i64, field_ty: i64, field_hash: i64
             return
         }
     }
+    if field_ty == 12 && tuple2_is(field_hash) {
+        let nslots = ty_slot_count(field_ty, field_hash)
+        em(0x48); em(0x89); em(0xc2)
+        var i: i64 = 0
+        while i < nslots {
+            em(0x48); em(0x8b); em(0x82); em32(i * 8)
+            emit_store_var(dst_start - i)
+            i = i + 1
+        }
+        return
+    }
     emit_store_var(dst_start)
 }
 
@@ -4633,6 +4857,8 @@ fn emit_copy_agg_to_ptr_x86(field_ty: i64, field_hash: i64) with Mut, Panic, Div
     var nslots: i64 = 0
     if field_ty == 8 {
         nslots = arr_storage_slots(field_hash)
+    } else if field_ty == 12 && tuple2_is(field_hash) {
+        nslots = ty_slot_count(field_ty, field_hash)
     } else if field_ty == 6 || knowledge_hash_is(field_hash) {
         nslots = struct_like_nslots(field_hash)
     }
@@ -4786,6 +5012,253 @@ fn emit_log_builtin_x86() with Mut {
 fn emit_i64_to_f64_in_rax_x86() with Mut {
     em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
     em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+}
+
+fn emit_gate_guarded_inc_x86() with Mut {
+    // inc qword [BSS + RT_GUARDED_OPS_BSS_OFF] — uses rcx (free after binop)
+    // push rcx; mov rcx, addr; inc qword [rcx]; pop rcx
+    em(0x51)                                              // push rcx
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_GUARDED_OPS_BSS_OFF)  // mov rcx, <addr>
+    em(0x48); em(0xff); em(0x01)                          // inc qword [rcx]
+    em(0x59)                                              // pop rcx
+}
+
+fn emit_gate_variance_addsub_x86(left_slot: i64, right_slot: i64) with Mut {
+    // GUM: var(a ± b) = var(a) + var(b) for uncorrelated inputs
+    // Preserves rax (primary result) via push/pop
+    em(0x50)  // push rax (save primary result)
+    // Load left variance into xmm0
+    if left_slot >= 0 && left_slot < 1024 {
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + left_slot * 8)
+        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)  // movq xmm0, rax
+    } else if left_slot == -2 {
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)  // movq xmm0, rax
+    } else {
+        em(0x66); em(0x0f); em(0x57); em(0xc0)            // xorpd xmm0, xmm0
+    }
+    // Load right variance into xmm1
+    if right_slot >= 0 && right_slot < 1024 {
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + right_slot * 8)
+        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+    } else if right_slot == -2 {
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
+    } else {
+        em(0x66); em(0x0f); em(0x57); em(0xc9)            // xorpd xmm1, xmm1
+    }
+    // addsd xmm0, xmm1 — var(a ± b) = var(a) + var(b)
+    em(0xf2); em(0x0f); em(0x58); em(0xc1)
+    // Store xmm0 → BSS_SCRATCH: movq rax, xmm0; mov rcx, addr; mov [rcx], rax
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)      // movq rax, xmm0
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
+    em(0x58)  // pop rax (restore primary result)
+}
+
+fn emit_gate_variance_muldiv_x86(left_slot: i64, right_slot: i64, op: i64) with Mut {
+    // GUM multiplicative variance. Called AFTER f64 arithmetic.
+    // On entry: rax = primary result, rcx = a (LHS preserved), xmm1 = b (RHS preserved).
+    // mul: var(a*b) = a²·var(b) + b²·var(a)
+    // div: var(a/b) = var(a)/b² + a²·var(b)/b⁴
+    em(0x50)  // push rax (save primary result)
+    if op == 19 {
+        // ── Multiplication: a²·var(b) + b²·var(a) ──
+        // xmm0 = a²
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)  // movq xmm0, rcx (a)
+        em(0xf2); em(0x0f); em(0x59); em(0xc0)              // mulsd xmm0, xmm0 (a²)
+        // xmm2 = var(b)
+        if right_slot >= 0 && right_slot < 1024 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + right_slot * 8)
+            em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
+        } else if right_slot == -2 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+            em(0x48); em(0x8b); em(0x00)
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
+        } else {
+            em(0x66); em(0x0f); em(0x57); em(0xd2)            // xorpd xmm2, xmm2
+        }
+        // xmm0 = a²·var(b)
+        em(0xf2); em(0x0f); em(0x59); em(0xc2)              // mulsd xmm0, xmm2
+        // save a²·var(b) in xmm2
+        em(0xf2); em(0x0f); em(0x10); em(0xd0)              // movsd xmm2, xmm0
+        // xmm0 = b²
+        em(0xf2); em(0x0f); em(0x10); em(0xc1)              // movsd xmm0, xmm1 (b)
+        em(0xf2); em(0x0f); em(0x59); em(0xc0)              // mulsd xmm0, xmm0 (b²)
+        // xmm3 = var(a)
+        if left_slot >= 0 && left_slot < 1024 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + left_slot * 8)
+            em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd8)  // movq xmm3, rax
+        } else if left_slot == -2 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+            em(0x48); em(0x8b); em(0x00)
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd8)  // movq xmm3, rax
+        } else {
+            em(0x66); em(0x0f); em(0x57); em(0xdb)            // xorpd xmm3, xmm3
+        }
+        // xmm0 = b²·var(a)
+        em(0xf2); em(0x0f); em(0x59); em(0xc3)              // mulsd xmm0, xmm3
+        // xmm0 = a²·var(b) + b²·var(a)
+        em(0xf2); em(0x0f); em(0x58); em(0xc2)              // addsd xmm0, xmm2
+    }
+    if op == 20 {
+        // ── Division: var(a)/b² + a²·var(b)/b⁴ ──
+        // xmm0 = b²
+        em(0xf2); em(0x0f); em(0x10); em(0xc1)              // movsd xmm0, xmm1 (b)
+        em(0xf2); em(0x0f); em(0x59); em(0xc0)              // mulsd xmm0, xmm0 (b²)
+        // xmm2 = var(a)
+        if left_slot >= 0 && left_slot < 1024 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + left_slot * 8)
+            em(0x48); em(0x8b); em(0x00)
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
+        } else if left_slot == -2 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+            em(0x48); em(0x8b); em(0x00)
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
+        } else {
+            em(0x66); em(0x0f); em(0x57); em(0xd2)            // xorpd xmm2, xmm2
+        }
+        // xmm2 = var(a)/b²
+        em(0xf2); em(0x0f); em(0x5e); em(0xd0)              // divsd xmm2, xmm0
+        // xmm3 = b⁴ = b²·b²
+        em(0xf2); em(0x0f); em(0x10); em(0xd8)              // movsd xmm3, xmm0 (b²)
+        em(0xf2); em(0x0f); em(0x59); em(0xdb)              // mulsd xmm3, xmm3 (b⁴)
+        // xmm0 = a²
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)    // movq xmm0, rcx (a)
+        em(0xf2); em(0x0f); em(0x59); em(0xc0)              // mulsd xmm0, xmm0 (a²)
+        // load var(b) → xmm4
+        if right_slot >= 0 && right_slot < 1024 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + right_slot * 8)
+            em(0x48); em(0x8b); em(0x00)
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe0)  // movq xmm4, rax
+        } else if right_slot == -2 {
+            em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+            em(0x48); em(0x8b); em(0x00)
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe0)  // movq xmm4, rax
+        } else {
+            em(0x66); em(0x0f); em(0x57); em(0xe4)            // xorpd xmm4, xmm4
+        }
+        // xmm0 = a²·var(b)
+        em(0xf2); em(0x0f); em(0x59); em(0xc4)              // mulsd xmm0, xmm4
+        // xmm0 = a²·var(b)/b⁴
+        em(0xf2); em(0x0f); em(0x5e); em(0xc3)              // divsd xmm0, xmm3
+        // xmm0 = var(a)/b² + a²·var(b)/b⁴
+        em(0xf2); em(0x0f); em(0x58); em(0xc2)              // addsd xmm0, xmm2
+    }
+    // Store xmm0 → BSS_SCRATCH
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)        // movq rax, xmm0
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+    em(0x48); em(0x89); em(0x01)                             // mov [rcx], rax
+    em(0x58)  // pop rax (restore primary result)
+}
+
+fn emit_seed_variance_from_knowledge_x86() with Mut {
+    // rax = Knowledge struct pointer. [rax+8] = variance (u²).
+    // Writes variance to BSS_SCRATCH, preserving rax.
+    em(0x50)                                               // push rax
+    em(0x48); em(0x8b); em(0x40); em(8)                    // mov rax, [rax + 8] — variance
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
+    em(0x58)                                               // pop rax
+}
+
+fn emit_variance_addsub_same_x86(slot: i64, op: i64) with Mut {
+    // Correlated add/sub: same variable on both sides (GUM §5.2)
+    // add: var(a+a) = 4·var(a).  sub: var(a-a) = 0.
+    em(0x50)  // push rax
+    if op == 17 && slot >= 0 && slot < 1024 {
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + slot * 8)
+        em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)      // movq xmm0, rax
+        em(0xf2); em(0x0f); em(0x58); em(0xc0)                // addsd xmm0, xmm0 (2×)
+        em(0xf2); em(0x0f); em(0x58); em(0xc0)                // addsd xmm0, xmm0 (4×)
+    } else {
+        em(0x66); em(0x0f); em(0x57); em(0xc0)                // xorpd xmm0, xmm0
+    }
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)          // movq rax, xmm0
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+    em(0x48); em(0x89); em(0x01)                               // mov [rcx], rax
+    em(0x58)  // pop rax
+}
+
+fn emit_variance_muldiv_same_x86(slot: i64, op: i64) with Mut {
+    // Correlated mul/div: same variable on both sides (GUM §5.2)
+    // mul: var(a²) = 4·a²·var(a).  div: var(a/a) = 0.
+    // After f64 arithmetic: rcx = a (preserved).
+    em(0x50)  // push rax
+    if op == 19 && slot >= 0 && slot < 1024 {
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)      // movq xmm0, rcx (a)
+        em(0xf2); em(0x0f); em(0x59); em(0xc0)                // mulsd xmm0, xmm0 (a²)
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + slot * 8)
+        em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)      // movq xmm2, rax
+        em(0xf2); em(0x0f); em(0x59); em(0xc2)                // mulsd xmm0, xmm2 (a²·var)
+        em(0xf2); em(0x0f); em(0x58); em(0xc0)                // addsd xmm0, xmm0 (2×)
+        em(0xf2); em(0x0f); em(0x58); em(0xc0)                // addsd xmm0, xmm0 (4×)
+    } else {
+        em(0x66); em(0x0f); em(0x57); em(0xc0)                // xorpd xmm0, xmm0
+    }
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)          // movq rax, xmm0
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+    em(0x48); em(0x89); em(0x01)                               // mov [rcx], rax
+    em(0x58)  // pop rax
+}
+
+fn emit_copy_scratch_to_var_variance_x86(slot: i64) with Mut {
+    // Copy BSS_SCRATCH → BSS_VAR[slot], preserving rax/rcx
+    if slot < 0 || slot >= 1024 { return }
+    em(0x50); em(0x51)                                     // push rax; push rcx
+    em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+    em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + slot * 8)
+    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
+    em(0x59); em(0x58)                                     // pop rcx; pop rax
+}
+
+fn emit_variance_to_xfer_x86(xfer_idx: i64, expr_slot: i64) with Mut {
+    // Copy argument's variance to BSS_XFER[xfer_idx]. Called after push rax (arg value).
+    // rax/rcx free to use (arg already on stack, next compile_or is independent).
+    if xfer_idx < 0 || xfer_idx >= 8 { return }
+    if expr_slot >= 0 && expr_slot < 1024 {
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + expr_slot * 8)
+        em(0x48); em(0x8b); em(0x00)                       // mov rax, [rax]
+    } else if expr_slot == -2 {
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+        em(0x48); em(0x8b); em(0x00)                       // mov rax, [rax]
+    } else {
+        em(0x31); em(0xc0)                                 // xor eax, eax
+    }
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_XFER_BSS_OFF + xfer_idx * 8)
+    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
+}
+
+fn emit_xfer_to_var_variance_x86(xfer_idx: i64, slot: i64) with Mut {
+    // Copy BSS_XFER[xfer_idx] → BSS_VAR[slot]. Called at function entry after param bind.
+    if xfer_idx < 0 || xfer_idx >= 8 { return }
+    if slot < 0 || slot >= 1024 { return }
+    em(0x50); em(0x51)                                     // push rax; push rcx
+    em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_XFER_BSS_OFF + xfer_idx * 8)
+    em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + slot * 8)
+    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
+    em(0x59); em(0x58)                                     // pop rcx; pop rax
+}
+
+fn emit_var_variance_to_scratch_x86(slot: i64) with Mut {
+    // Copy BSS_VAR[slot] → BSS_SCRATCH, preserving rax. For return statements.
+    if slot < 0 || slot >= 1024 { return }
+    em(0x50); em(0x51)                                     // push rax; push rcx
+    em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + slot * 8)
+    em(0x48); em(0x8b); em(0x00)                           // mov rax, [rax]
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
+    em(0x59); em(0x58)                                     // pop rcx; pop rax
 }
 
 fn emit_f64_add_from_rcx_rax_x86() with Mut {
@@ -5742,8 +6215,11 @@ fn compile_acknowledge_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
     }
     if TK[EP as usize] == 7 { EP = EP + 1 }
+    // GUM seed: extract variance from Knowledge struct → BSS_SCRATCH
+    emit_seed_variance_from_knowledge_x86()
     // Extract .value at offset 0: mov rax, [rax]
     em(0x48); em(0x8b); em(0x00)
+    EXPR_VAR_SLOT = -2  // variance in scratch
     // Set result type to inner type
     if knowledge_hash_is(ack_k_hash) {
         let ack_inner_hash = knowledge_hash_inner_hash(ack_k_hash)
@@ -5813,7 +6289,10 @@ fn compile_require_confidence_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     CD[rc_ok_patch as usize] = (CL - rc_ok_patch - 1) as i8
     // Extract .value at offset 0
     emit_load_var(rc_k_slot)
+    // GUM seed: extract variance from Knowledge struct → BSS_SCRATCH
+    emit_seed_variance_from_knowledge_x86()
     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax + 0] — .value
+    EXPR_VAR_SLOT = -2  // variance in scratch
     // Set result type to inner type
     if knowledge_hash_is(rc_k_hash) {
         let rc_inner_hash = knowledge_hash_inner_hash(rc_k_hash)
@@ -6133,6 +6612,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_TY_HASH = 0
     EXPR_UNIT = 0
     LAST_IS_LITERAL = 0
+    EXPR_VAR_SLOT = -1
     let k = TK[EP as usize]
     // Integer literal
     if k == 4 {
@@ -6570,8 +7050,41 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EXPR_IS_F64 = 0
         return
     }
-    // Parenthesized
-    if k == 6 { EP = EP + 1; compile_or(); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+    // Parenthesized or tuple literal
+    if k == 6 {
+        let split = tuple_pair_split(EP)
+        if split >= 0 {
+            let tuple_base = NEXT_SLOT
+            EP = EP + 1
+            compile_or()
+            let a_ty = EXPR_TY
+            let a_hash = EXPR_TY_HASH
+            let a_slots = ty_slot_count(a_ty, a_hash)
+            NEXT_SLOT = NEXT_SLOT + a_slots
+            copy_agg_into_struct_slots_x86(tuple_base + a_slots - 1, a_ty, a_hash)
+            if TK[EP as usize] == 28 { EP = EP + 1 }
+            compile_or()
+            let b_ty = EXPR_TY
+            let b_hash = EXPR_TY_HASH
+            let b_slots = ty_slot_count(b_ty, b_hash)
+            NEXT_SLOT = NEXT_SLOT + b_slots
+            copy_agg_into_struct_slots_x86(tuple_base + a_slots + b_slots - 1, b_ty, b_hash)
+            if TK[EP as usize] == 7 { EP = EP + 1 }
+            em(0x48); em(0x8d); em(0x85)
+            em32(0 - (tuple_base + a_slots + b_slots - 1) * 8)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 12
+            EXPR_TY_HASH = tuple2_intern(a_ty, a_hash, b_ty, b_hash)
+            LAST_EXPR_IS_CLOSURE = 0
+            LAST_EXPR_IS_LINEAR = 0
+            LAST_EXPR_IS_AFFINE = 0
+            return
+        }
+        EP = EP + 1
+        compile_or()
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        return
+    }
     if k == 44 { compile_borrow_primary_x86(); return }
     // Dereference: *expr → compile expr, then load from pointer
     if k == 19 {
@@ -7055,6 +7568,25 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             if src_match(ns, ne - ns, "require_confidence") {
                 compile_require_confidence_call_x86(name_tok)
+                return
+            }
+            if src_match(ns, ne - ns, "variance_of") {
+                // variance_of(x) — load GUM variance from BSS shadow buffer
+                EP = EP + 1  // skip (
+                let vo_ns = TS[EP as usize]
+                let vo_ne = TE[EP as usize]
+                let vo_slot = var_find(vo_ns, vo_ne)
+                EP = EP + 1  // skip variable name
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                if vo_slot >= 0 && vo_slot < 1024 {
+                    em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + vo_slot * 8)
+                    em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+                } else {
+                    em(0x31); em(0xc0)  // xor rax, rax
+                }
+                EXPR_IS_F64 = 1
+                EXPR_TY = 2
+                EXPR_TY_HASH = 0
                 return
             }
             if src_match(ns, ne - ns, "lift_knowledge") {
@@ -7746,6 +8278,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 } else {
                     materialize_aggregate_expr_x86()
                     em(0x50)
+                    // GUM: copy argument variance to transfer area
+                    emit_variance_to_xfer_x86(argc, EXPR_VAR_SLOT)
                     abi_argc = abi_argc + 1
                 }
                 argc = argc + 1
@@ -7782,6 +8316,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                EXPR_VAR_SLOT = -2  // return variance is in BSS_SCRATCH
             } else {
                 if call_vslot >= 0 {
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
@@ -7992,6 +8527,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             } else {
                 emit_load_var(slot)
             }
+            EXPR_VAR_SLOT = slot
             EXPR_IS_F64 = var_find_is_f64(ns, ne)
             if vi >= 0 {
                 EXPR_TY = VAR_TY[vi as usize]
@@ -8360,10 +8896,13 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     if (FN_EFFECTS[CURRENT_FN as usize] & 512) == 0 {
                         tc_epistemic_value_access(method_tok)
                     }
+                    // GUM seed: extract variance from Knowledge struct → BSS_SCRATCH
+                    emit_seed_variance_from_knowledge_x86()
                     em(0x48); em(0x8b); em(0x00)
                     EXPR_TY = knowledge_hash_inner_ty(base_data_hash)
                     EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                    EXPR_VAR_SLOT = -2  // variance in scratch
                 } else if src_match(fns, fne - fns, "variance") {
                     em(0x48); em(0x8b); em(0x40); em(8)
                     EXPR_TY = 2
@@ -8449,10 +8988,12 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        let mul_left_var_slot = EXPR_VAR_SLOT
         emit_push()
         compile_postfix()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let mul_right_var_slot = EXPR_VAR_SLOT
         let left_has_knowledge = knowledge_hash_is(left_hash)
         let right_has_knowledge = knowledge_hash_is(right_hash)
         if op == 17 && left_ty == 3 && right_ty == 3 {
@@ -8526,6 +9067,22 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             EXPR_TY = 1
         }
         EXPR_TY_HASH = 0
+        // Epistemic gate counting
+        if EXPR_GATE[op_tok as usize] == 1 {
+            emit_gate_guarded_inc_x86()
+            EPIST_GATES_GUARDED = EPIST_GATES_GUARDED + 1
+        } else {
+            EPIST_GATES_DIRECT = EPIST_GATES_DIRECT + 1
+        }
+        // GUM variance propagation for f64 mul/div
+        if left_f64 == 1 && op != 29 && (mul_left_var_slot != -1 || mul_right_var_slot != -1 || EXPR_GATE[op_tok as usize] == 1) {
+            if mul_left_var_slot >= 0 && mul_left_var_slot == mul_right_var_slot {
+                emit_variance_muldiv_same_x86(mul_left_var_slot, op)
+            } else {
+                emit_gate_variance_muldiv_x86(mul_left_var_slot, mul_right_var_slot, op)
+            }
+            EXPR_VAR_SLOT = -2
+        }
         lhs_end_line = TL[(EP - 1) as usize]
     }
 }
@@ -8589,10 +9146,12 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
         let left_unit = EXPR_UNIT
+        let left_var_slot = EXPR_VAR_SLOT
         emit_push()
         compile_multiplicative()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let right_var_slot = EXPR_VAR_SLOT
         // Unit dimension mismatch check: both operands have units and they differ
         if left_unit != 0 && EXPR_UNIT != 0 && left_unit != EXPR_UNIT {
             tc_linear_violation(op_tok, "unit dimension mismatch")
@@ -8659,6 +9218,22 @@ fn compile_additive() with IO, Mut, Panic, Div {
                     EXPR_TY = 1
                 }
                 if left_ty == 2 { EXPR_TY_HASH = left_hash } else { EXPR_TY_HASH = 0 }
+                // Epistemic gate counting
+                if EXPR_GATE[op_tok as usize] == 1 {
+                    emit_gate_guarded_inc_x86()
+                    EPIST_GATES_GUARDED = EPIST_GATES_GUARDED + 1
+                } else {
+                    EPIST_GATES_DIRECT = EPIST_GATES_DIRECT + 1
+                }
+                // GUM variance propagation: fires if any operand carries variance or gated
+                if left_var_slot != -1 || right_var_slot != -1 || EXPR_GATE[op_tok as usize] == 1 {
+                    if left_var_slot >= 0 && left_var_slot == right_var_slot {
+                        emit_variance_addsub_same_x86(left_var_slot, op)
+                    } else {
+                        emit_gate_variance_addsub_x86(left_var_slot, right_var_slot)
+                    }
+                    EXPR_VAR_SLOT = -2
+                }
             }
         }
     }
@@ -9193,18 +9768,66 @@ fn patch32(off: i64, target: i64) with Mut, Panic {
 var TUP_PAT_NEXT: i64 = 0
 var TUP_RHS_NEXT: i64 = 0
 
-fn tuple_bind_leaf_x86(ns: i64, ne: i64) with Mut, Panic, Div {
-    let slot = var_add(ns, ne)
-    if slot < 0 { return }
-    let vix = VAR_COUNT - 1
-    emit_store_var(slot)
-    VAR_IS_F64[vix as usize] = EXPR_IS_F64
-    VAR_TY[vix as usize] = EXPR_TY
-    VAR_TY_HASH[vix as usize] = EXPR_TY_HASH
-    if VAR_TY[vix as usize] == 8 {
-        VAR_ALEN[vix as usize] = arr_hash_alen(VAR_TY_HASH[vix as usize])
-        VAR_ESIZ[vix as usize] = arr_hash_esiz(VAR_TY_HASH[vix as usize])
+fn tuple_pair_split(p0: i64) -> i64 with Panic, Mut {
+    var p = p0 + 1
+    var paren_depth: i64 = 0
+    var brace_depth: i64 = 0
+    var bracket_depth: i64 = 0
+    var split: i64 = -1
+    while p < TC && TK[p as usize] != 0 {
+        let tk = TK[p as usize]
+        if tk == 6 { paren_depth = paren_depth + 1 }
+        if tk == 8 { brace_depth = brace_depth + 1 }
+        if tk == 41 { bracket_depth = bracket_depth + 1 }
+        if tk == 7 {
+            if paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 { break }
+            if paren_depth > 0 { paren_depth = paren_depth - 1 }
+        }
+        if tk == 9 {
+            if brace_depth > 0 { brace_depth = brace_depth - 1 }
+        }
+        if tk == 42 {
+            if bracket_depth > 0 { bracket_depth = bracket_depth - 1 }
+        }
+        if tk == 28 && paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 {
+            if split >= 0 { return -2 }
+            split = p
+        }
+        p = p + 1
     }
+    if TK[p as usize] != 7 { return -1 }
+    return split
+}
+
+fn tuple_pair_close(p0: i64) -> i64 with Panic, Mut {
+    var p = p0 + 1
+    var paren_depth: i64 = 0
+    var brace_depth: i64 = 0
+    var bracket_depth: i64 = 0
+    while p < TC && TK[p as usize] != 0 {
+        let tk = TK[p as usize]
+        if tk == 6 { paren_depth = paren_depth + 1 }
+        if tk == 8 { brace_depth = brace_depth + 1 }
+        if tk == 41 { bracket_depth = bracket_depth + 1 }
+        if tk == 7 {
+            if paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 { return p }
+            if paren_depth > 0 { paren_depth = paren_depth - 1 }
+        }
+        if tk == 9 {
+            if brace_depth > 0 { brace_depth = brace_depth - 1 }
+        }
+        if tk == 42 {
+            if bracket_depth > 0 { bracket_depth = bracket_depth - 1 }
+        }
+        p = p + 1
+    }
+    return p
+}
+
+fn tuple_bind_leaf_x86(ns: i64, ne: i64) with Mut, Panic, Div {
+    bind_local_from_rax_x86(ns, ne, EXPR_TY, EXPR_TY_HASH)
+    if VAR_COUNT <= 0 { return }
+    let vix = VAR_COUNT - 1
     VAR_IS_CLOSURE[vix as usize] = LAST_EXPR_IS_CLOSURE
     VAR_LINEAR[vix as usize] = LAST_EXPR_IS_LINEAR
     VAR_AFFINE[vix as usize] = LAST_EXPR_IS_AFFINE
@@ -9225,6 +9848,81 @@ fn tuple_bind_leaf_a64(ns: i64, ne: i64) with Mut, Panic, Div {
     VAR_IS_CLOSURE[vix as usize] = LAST_EXPR_IS_CLOSURE
     VAR_LINEAR[vix as usize] = LAST_EXPR_IS_LINEAR
     VAR_AFFINE[vix as usize] = LAST_EXPR_IS_AFFINE
+}
+
+fn emit_load_tuple_elem_x86(src_slot: i64, off_slots: i64, elem_ty: i64, elem_hash: i64) with Mut, Panic, Div {
+    emit_load_var(src_slot)
+    if off_slots != 0 {
+        em(0x48); em(0x8d); em(0x80); em32(off_slots * 8)
+    }
+    if elem_ty == 8 || elem_ty == 12 || type_is_struct_like(elem_ty, elem_hash) {
+        EXPR_IS_F64 = 0
+    } else if elem_ty == 2 {
+        em(0xf2); em(0x0f); em(0x10); em(0x00)
+        em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+        EXPR_IS_F64 = 1
+    } else {
+        em(0x48); em(0x8b); em(0x00)
+        EXPR_IS_F64 = 0
+    }
+    EXPR_TY = elem_ty
+    EXPR_TY_HASH = elem_hash
+    LAST_EXPR_IS_CLOSURE = 0
+    LAST_EXPR_IS_LINEAR = 0
+    LAST_EXPR_IS_AFFINE = 0
+    if elem_ty == 6 {
+        let si = st_find(elem_hash)
+        if si >= 0 {
+            LAST_EXPR_IS_LINEAR = ST_LINEAR[si as usize]
+            LAST_EXPR_IS_AFFINE = ST_AFFINE[si as usize]
+        }
+    }
+}
+
+fn tuple_bind_runtime_pair_x86(pp0: i64, src_slot: i64, pair_hash: i64, base_off_slots: i64) with IO, Mut, Panic, Div {
+    let split = tuple_pair_split(pp0)
+    let close = tuple_pair_close(pp0)
+    if TK[pp0 as usize] != 6 || split < 0 || TK[close as usize] != 7 {
+        tc_error(pp0, "tuple destructure shape mismatch")
+        return
+    }
+
+    let a_ty = tuple2_first_ty(pair_hash)
+    let a_hash = tuple2_first_hash(pair_hash)
+    let a_slots = ty_slot_count(a_ty, a_hash)
+    let b_ty = tuple2_second_ty(pair_hash)
+    let b_hash = tuple2_second_hash(pair_hash)
+    let b_slots = ty_slot_count(b_ty, b_hash)
+
+    if TK[(pp0 + 1) as usize] == 6 {
+        if a_ty != 12 || tuple2_is(a_hash) == false {
+            tc_error(pp0 + 1, "tuple destructure shape mismatch")
+        } else {
+            tuple_bind_runtime_pair_x86(pp0 + 1, src_slot, a_hash, base_off_slots + b_slots)
+        }
+    } else {
+        let ans = TS[(pp0 + 1) as usize]
+        let ane = TE[(pp0 + 1) as usize]
+        if !(ane - ans == 1 && sb(ans) == 95) {
+            emit_load_tuple_elem_x86(src_slot, base_off_slots + b_slots, a_ty, a_hash)
+            tuple_bind_leaf_x86(ans, ane)
+        }
+    }
+
+    if TK[(split + 1) as usize] == 6 {
+        if b_ty != 12 || tuple2_is(b_hash) == false {
+            tc_error(split + 1, "tuple destructure shape mismatch")
+        } else {
+            tuple_bind_runtime_pair_x86(split + 1, src_slot, b_hash, base_off_slots)
+        }
+    } else {
+        let bns = TS[(split + 1) as usize]
+        let bne = TE[(split + 1) as usize]
+        if !(bne - bns == 1 && sb(bns) == 95) {
+            emit_load_tuple_elem_x86(src_slot, base_off_slots, b_ty, b_hash)
+            tuple_bind_leaf_x86(bns, bne)
+        }
+    }
 }
 
 fn tuple_skip_value_x86() with IO, Mut, Panic, Div {
@@ -9616,9 +10314,22 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             }
             EP = pat_p
             if TK[EP as usize] == 16 { EP = EP + 1 }
-            if TK[EP as usize] != 6 { tc_error(EP, "tuple destructuring requires tuple literal") }
-            tuple_bind_pattern_x86(pat_start, EP)
-            EP = TUP_RHS_NEXT
+            let rhs_start = EP
+            let rhs_split = tuple_pair_split(rhs_start)
+            if TK[rhs_start as usize] == 6 && rhs_split >= 0 {
+                tuple_bind_pattern_x86(pat_start, rhs_start)
+                EP = TUP_RHS_NEXT
+                return
+            }
+            compile_or()
+            if EXPR_TY == 12 && tuple2_is(EXPR_TY_HASH) {
+                let src_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(src_slot)
+                tuple_bind_runtime_pair_x86(pat_start, src_slot, EXPR_TY_HASH, 0)
+                return
+            }
+            tc_error(rhs_start, "tuple destructuring requires tuple value")
             return
         }
         let ns = TS[EP as usize]
@@ -9763,6 +10474,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     VAR_IS_CLOSURE[svix as usize] = 0
                     VAR_MUT[svix as usize] = decl_is_mut
                 }
+            } else if (decl_ty == 12 && tuple2_is(decl_ty_hash)) || (decl_ty == 0 && EXPR_TY == 12 && tuple2_is(EXPR_TY_HASH)) {
+                var bind_hash = EXPR_TY_HASH
+                if decl_ty == 12 && tuple2_is(decl_ty_hash) { bind_hash = decl_ty_hash }
+                let before_vc = VAR_COUNT
+                bind_tuple_local_from_rax_x86(ns, ne, bind_hash)
+                if VAR_COUNT > before_vc {
+                    let tvix = VAR_COUNT - 1
+                    VAR_IS_CLOSURE[tvix as usize] = 0
+                    VAR_MUT[tvix as usize] = decl_is_mut
+                }
             } else {
                 let slot = var_add(ns, ne)
                 if slot < 0 { return }
@@ -9821,6 +10542,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     SCAN_HAS_PRED = 0
                 }
                 emit_store_var(slot)
+                // GUM variance: copy scratch → var slot if RHS produced variance
+                if EXPR_VAR_SLOT == -2 || EXPR_VAR_SLOT >= 0 {
+                    emit_copy_scratch_to_var_variance_x86(slot)
+                }
                 // Set f64 flag: explicit type annotation takes priority, else infer from RHS
                 if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                 else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
@@ -9948,8 +10673,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 copy_array_into_local_slot_x86(slot, VAR_TY_HASH[ty_vi as usize])
             } else if ty_vi >= 0 && type_is_struct_like(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize]) {
                 copy_struct_into_local_slot_x86(slot, VAR_TY_HASH[ty_vi as usize])
+            } else if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 12 && tuple2_is(VAR_TY_HASH[ty_vi as usize]) {
+                copy_tuple_into_local_slot_x86(slot, VAR_TY_HASH[ty_vi as usize])
             } else {
                 emit_store_var(slot)
+                // GUM variance: copy scratch → var slot on reassignment
+                if EXPR_VAR_SLOT == -2 || EXPR_VAR_SLOT >= 0 {
+                    emit_copy_scratch_to_var_variance_x86(slot)
+                }
             }
             // Update closure flag on reassignment
             var vi: i64 = VAR_COUNT - 1
@@ -10207,6 +10938,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 tc_linear_violation(EP - 1, "linear value not consumed")
             }
             lce = lce + 1
+        }
+        // GUM: copy return expression's variance to BSS_SCRATCH for caller
+        if EXPR_VAR_SLOT >= 0 {
+            emit_var_variance_to_scratch_x86(EXPR_VAR_SLOT)
         }
         em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
         em(0x5d); em(0xc3)
@@ -12533,6 +13268,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         GL_BSS_BASE = 0x10000000 + 16     // Linux/Windows: BSS at 0x10000000 (256MB, never overlaps code)
     }
     GL_BSS_SIZE = GL_BSS_SIZE + 16
+    // Runtime epistemic gate counter (8 bytes in BSS, zero-initialized)
+    RT_GUARDED_OPS_BSS_OFF = GL_BSS_SIZE
+    GL_BSS_SIZE = GL_BSS_SIZE + 8
+    // GUM variance shadow buffer: 1024 slots × 8 bytes = 8192
+    RT_VARIANCE_BUF_BSS_OFF = GL_BSS_SIZE
+    GL_BSS_SIZE = GL_BSS_SIZE + 8192
+    // GUM variance scratch cell (8 bytes, holds last computed variance)
+    RT_VARIANCE_SCRATCH_BSS_OFF = GL_BSS_SIZE
+    GL_BSS_SIZE = GL_BSS_SIZE + 8
+    // GUM variance transfer area: 8 slots × 8 bytes for cross-function propagation
+    RT_VARIANCE_XFER_BSS_OFF = GL_BSS_SIZE
+    GL_BSS_SIZE = GL_BSS_SIZE + 64
 
     print("globals: "); print_int(GL_COUNT); print(" bss="); print_int(GL_BSS_SIZE); print("\n")
 
@@ -12784,7 +13531,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 if (kernel_eff & 2) != 0 { tc_kernel_invalid_effect(FN_NAME_TOK[eff_fi as usize], "Mut") }
                 if (kernel_eff & 16) != 0 { tc_kernel_invalid_effect(FN_NAME_TOK[eff_fi as usize], "Alloc") }
                 // E072: kernel must return unit type
-                if FN_RET_TY[eff_fi as usize] != 0 {
+                if FN_RET_TY[eff_fi as usize] != 5 && FN_RET_TY[eff_fi as usize] != 0 {
                     tc_kernel_nonvoid_return(FN_NAME_TOK[eff_fi as usize])
                 }
             }
@@ -12967,6 +13714,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         }
         while param_vi < VAR_COUNT {
             emit_store_incoming_arg_x86(abi_arg_idx, VAR_SLOT[param_vi as usize])
+            // GUM: copy variance from transfer area to parameter's shadow slot
+            emit_xfer_to_var_variance_x86(param_vi, VAR_SLOT[param_vi as usize])
             abi_arg_idx = abi_arg_idx + 1
             if type_is_slice_ref(VAR_TY[param_vi as usize], VAR_TY_HASH[param_vi as usize]) {
                 emit_store_incoming_arg_x86(abi_arg_idx, VAR_LEN_SLOT[param_vi as usize])
@@ -13159,6 +13908,30 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em(0xe8)
         let rel = FN_OFF[main_fn as usize] - (CL + 4)
         em32(rel)
+        // Runtime epistemic gate report: if guarded ops > 0, print count
+        em(0x50)  // push rax (save exit code)
+        // mov rax, [BSS + RT_GUARDED_OPS_BSS_OFF]
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_GUARDED_OPS_BSS_OFF)
+        em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+        // test rax, rax; jz skip_print
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x74); em(0x00)  // jz skip (patch offset later)
+        let jz_patch = CL - 1
+        // rax = guarded count — print it
+        emit_print_int()
+        // patch the jz offset
+        let skip_off = CL - (jz_patch + 1)
+        CD[jz_patch as usize] = (skip_off & 0xFF) as i8
+        // Runtime variance scratch report: print raw i64 bits if non-zero
+        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF)
+        em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x74); em(0x00)            // jz skip_var (patch)
+        let jz_var_patch = CL - 1
+        emit_print_int()
+        let skip_var_off = CL - (jz_var_patch + 1)
+        CD[jz_var_patch as usize] = (skip_var_off & 0xFF) as i8
+        em(0x58)  // pop rax (restore exit code)
         // exit(rax): Linux syscall 60
         em(0x89); em(0xc7)
         em(0xb8); em32(60)
@@ -16704,6 +17477,16 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     VAR_IS_CLOSURE[svix as usize] = 0
                     VAR_MUT[svix as usize] = decl_is_mut
                 }
+            } else if (decl_ty == 12 && tuple2_is(decl_ty_hash)) || (decl_ty == 0 && EXPR_TY == 12 && tuple2_is(EXPR_TY_HASH)) {
+                var bind_hash = EXPR_TY_HASH
+                if decl_ty == 12 && tuple2_is(decl_ty_hash) { bind_hash = decl_ty_hash }
+                let before_vc = VAR_COUNT
+                bind_tuple_local_from_x0_a64(ns, ne, bind_hash)
+                if VAR_COUNT > before_vc {
+                    let tvix = VAR_COUNT - 1
+                    VAR_IS_CLOSURE[tvix as usize] = 0
+                    VAR_MUT[tvix as usize] = decl_is_mut
+                }
             } else {
                 let slot = var_add(ns, ne)
                 if slot < 0 { return }
@@ -16810,6 +17593,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 copy_array_into_local_slot_a64(slot, VAR_TY_HASH[ty_vi as usize])
             } else if ty_vi >= 0 && type_is_struct_like(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize]) {
                 copy_struct_into_local_slot_a64(slot, VAR_TY_HASH[ty_vi as usize])
+            } else if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 12 && tuple2_is(VAR_TY_HASH[ty_vi as usize]) {
+                copy_tuple_into_local_slot_a64(slot, VAR_TY_HASH[ty_vi as usize])
             } else {
                 emit_store_var_a64(slot)
             }
