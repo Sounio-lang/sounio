@@ -413,6 +413,7 @@ var ASYNC_RT_QUEUE_HEAD_BSS_OFF: i64 = 0
 var ASYNC_RT_QUEUE_TAIL_BSS_OFF: i64 = 0
 var ASYNC_RT_QUEUE_COUNT_BSS_OFF: i64 = 0
 var ASYNC_RT_WORKER_COUNT_BSS_OFF: i64 = 0
+var ASYNC_RT_MAIN_TID_BSS_OFF: i64 = 0
 var ASYNC_RT_QUEUE_PTRS_BSS_OFF: i64 = 0
 var GPU_EMU_THREAD_ID_BSS_OFF: i64 = 0
 var GPU_RT_STATE_BSS_OFF: i64 = 0
@@ -6396,6 +6397,15 @@ fn emit_async_try_dequeue_task_x86() with Mut, Panic, Div {
     patch32(done, done_target)
 }
 
+fn emit_task_try_claim_queued_x86() with Mut {
+    em(0x48); em(0x89); em(0xc3)  // mov rbx, rax
+    em(0xb8); em32(task_state_queued_x86())
+    em(0xb9); em32(task_state_running_x86())
+    em(0xf0); em(0x48); em(0x0f); em(0xb1); em(0x4b); em(task_rec_state_off_x86())
+    em(0x0f); em(0x94); em(0xc0)
+    em(0x48); em(0x0f); em(0xb6); em(0xc0)
+}
+
 fn emit_async_worker_dispatch_x86() with Mut, Panic, Div {
     em(0x48); em(0x8b); em(0x4b); em(task_rec_argc_off_x86())
     em(0x48); em(0x85); em(0xc9)
@@ -6467,11 +6477,12 @@ fn emit_async_worker_dispatch_x86() with Mut, Panic, Div {
 fn emit_async_run_task_from_rax_x86() with Mut, Panic, Div {
     em(0x48); em(0x89); em(0xc3)
     emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_running_x86())
-    em(0x48); em(0x83); em(0xec); em(8)
-    em(0x48); em(0x89); em(0x1c); em(0x24)
+    // Keep the worker stack 16-byte aligned across task calls.
+    em(0x48); em(0x83); em(0xec); em(16)
+    em(0x48); em(0x89); em(0x5c); em(0x24); em(8)
     emit_async_worker_dispatch_x86()
-    em(0x48); em(0x8b); em(0x1c); em(0x24)
-    em(0x48); em(0x83); em(0xc4); em(8)
+    em(0x48); em(0x8b); em(0x5c); em(0x24); em(8)
+    em(0x48); em(0x83); em(0xc4); em(16)
     emit_store_rax_to_rbx_disp_x86(task_rec_result_off_x86())
     emit_store_imm64_to_rbx_disp_x86(task_rec_state_off_x86(), task_state_done_x86())
     em(0x48); em(0x8d); em(0x7b); em(task_rec_state_off_x86())
@@ -6487,7 +6498,13 @@ fn emit_async_run_task_from_rax_x86() with Mut, Panic, Div {
 fn emit_async_worker_loop_x86() with Mut, Panic, Div {
     let worker_loop = CL
     emit_async_dequeue_task_x86()
+    emit_task_try_claim_queued_x86()
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let worker_retry = CL; em32(0)
+    em(0x48); em(0x89); em(0xd8)
     emit_async_run_task_from_rax_x86()
+    let worker_retry_target = CL
+    patch32(worker_retry, worker_retry_target)
     em(0xe9); em32(worker_loop - (CL + 4))
 }
 
@@ -6500,8 +6517,11 @@ fn emit_async_runtime_ensure_x86() with Mut, Panic, Div {
     em(0x48); em(0x85); em(0xc0)
     em(0x0f); em(0x85); let already_init = CL; em32(0)
     emit_store_imm64_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_WORKER_COUNT_BSS_OFF, async_rt_worker_count_x86())
+    em(0xb8); em32(186)
+    em(0x0f); em(0x05)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_MAIN_TID_BSS_OFF)
     var wi: i64 = 0
-    while wi < 4 {
+    while wi < async_rt_worker_count_x86() {
         emit_task_alloc_stack_x86()
         em(0x48); em(0x89); em(0xc6)
         em(0x48); em(0x81); em(0xc6); em32(task_runtime_stack_size_x86() - 16)
@@ -6543,12 +6563,21 @@ fn emit_task_await_x86() with Mut, Panic, Div {
     em(0x48); em(0x8b); em(0x4b); em(task_rec_state_off_x86())
     em(0x48); em(0x83); em(0xf9); em(task_state_done_x86())
     em(0x0f); em(0x8d); let wait_done = CL; em32(0)
-    emit_async_try_dequeue_task_x86()
+    em(0xb8); em32(186)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x89); em(0xc1)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_MAIN_TID_BSS_OFF)
+    em(0x48); em(0x39); em(0xc1)
+    em(0x0f); em(0x84); let wait_sleep_main = CL; em32(0)
+    emit_load_var(task_slot)
+    emit_task_try_claim_queued_x86()
     em(0x48); em(0x85); em(0xc0)
     em(0x0f); em(0x84); let wait_sleep = CL; em32(0)
+    emit_load_var(task_slot)
     emit_async_run_task_from_rax_x86()
     em(0xe9); em32(wait_loop - (CL + 4))
     let wait_sleep_target = CL
+    patch32(wait_sleep_main, wait_sleep_target)
     patch32(wait_sleep, wait_sleep_target)
     emit_load_var(task_slot)
     em(0x48); em(0x89); em(0xc3)
@@ -6601,6 +6630,38 @@ fn emit_async_direct_fn_call_x86(fi: i64, argc: i64) with Mut, Panic, Div {
 fn compile_async_inline_block_x86(tok: i64) with IO, Mut, Panic, Div {
     if (FN_EFFECTS[CURRENT_FN as usize] & 32) == 0 { tc_effect_violation(tok, 32, FN_EFFECTS[CURRENT_FN as usize]) }
     EP = EP + 1
+    let save_vc = VAR_COUNT
+    let save_ns2 = NEXT_SLOT
+    let save_ld = LOOP_DEPTH
+    let save_bc = BREAK_COUNT
+    let save_ret_ty = CURRENT_RET_TY
+    let save_ret_hash = CURRENT_RET_HASH
+    let save_sret_slot = CURRENT_SRET_SLOT
+    var svi: i64 = 0
+    while svi < save_vc {
+        CL_SAVE_NS[svi as usize] = VAR_NS[svi as usize]
+        CL_SAVE_NE[svi as usize] = VAR_NE[svi as usize]
+        CL_SAVE_SL[svi as usize] = VAR_SLOT[svi as usize]
+        CL_SAVE_LS[svi as usize] = VAR_LEN_SLOT[svi as usize]
+        CL_SAVE_AL[svi as usize] = VAR_ALEN[svi as usize]
+        CL_SAVE_ES[svi as usize] = VAR_ESIZ[svi as usize]
+        CL_SAVE_F64[svi as usize] = VAR_IS_F64[svi as usize]
+        CL_SAVE_ISCL[svi as usize] = VAR_IS_CLOSURE[svi as usize]
+        CL_SAVE_MUT[svi as usize] = VAR_MUT[svi as usize]
+        CL_SAVE_UNIT[svi as usize] = VAR_UNIT[svi as usize]
+        CL_SAVE_LINEAR[svi as usize] = VAR_LINEAR[svi as usize]
+        CL_SAVE_USED[svi as usize] = VAR_USED[svi as usize]
+        CL_SAVE_TY[svi as usize] = VAR_TY[svi as usize]
+        CL_SAVE_TH[svi as usize] = VAR_TY_HASH[svi as usize]
+        svi = svi + 1
+    }
+    VAR_COUNT = 0
+    NEXT_SLOT = 1
+    LOOP_DEPTH = 0
+    BREAK_COUNT = 0
+    CURRENT_RET_TY = 0
+    CURRENT_RET_HASH = 0
+    CURRENT_SRET_SLOT = -1
     em(0xe9); let thunk_skip = CL; em32(0)
     let thunk_off = CL
     em(0x55)
@@ -6620,6 +6681,32 @@ fn compile_async_inline_block_x86(tok: i64) with IO, Mut, Panic, Div {
     while thunk_fpi < FRAME_PATCH_COUNT {
         em32_at(FRAME_PATCH_OFF[thunk_fpi as usize], thunk_frame_sz)
         thunk_fpi = thunk_fpi + 1
+    }
+    VAR_COUNT = save_vc
+    NEXT_SLOT = save_ns2
+    LOOP_DEPTH = save_ld
+    BREAK_COUNT = save_bc
+    CURRENT_RET_TY = save_ret_ty
+    CURRENT_RET_HASH = save_ret_hash
+    CURRENT_SRET_SLOT = save_sret_slot
+    FRAME_PATCH_COUNT = save_fpc
+    svi = 0
+    while svi < save_vc {
+        VAR_NS[svi as usize] = CL_SAVE_NS[svi as usize]
+        VAR_NE[svi as usize] = CL_SAVE_NE[svi as usize]
+        VAR_SLOT[svi as usize] = CL_SAVE_SL[svi as usize]
+        VAR_LEN_SLOT[svi as usize] = CL_SAVE_LS[svi as usize]
+        VAR_ALEN[svi as usize] = CL_SAVE_AL[svi as usize]
+        VAR_ESIZ[svi as usize] = CL_SAVE_ES[svi as usize]
+        VAR_IS_F64[svi as usize] = CL_SAVE_F64[svi as usize]
+        VAR_IS_CLOSURE[svi as usize] = CL_SAVE_ISCL[svi as usize]
+        VAR_MUT[svi as usize] = CL_SAVE_MUT[svi as usize]
+        VAR_UNIT[svi as usize] = CL_SAVE_UNIT[svi as usize]
+        VAR_LINEAR[svi as usize] = CL_SAVE_LINEAR[svi as usize]
+        VAR_USED[svi as usize] = CL_SAVE_USED[svi as usize]
+        VAR_TY[svi as usize] = CL_SAVE_TY[svi as usize]
+        VAR_TY_HASH[svi as usize] = CL_SAVE_TH[svi as usize]
+        svi = svi + 1
     }
     let thunk_skip_target = CL
     patch32(thunk_skip, thunk_skip_target)
@@ -14071,6 +14158,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     ASYNC_RT_QUEUE_TAIL_BSS_OFF = bss_alloc_aligned(8)
     ASYNC_RT_QUEUE_COUNT_BSS_OFF = bss_alloc_aligned(8)
     ASYNC_RT_WORKER_COUNT_BSS_OFF = bss_alloc_aligned(8)
+    ASYNC_RT_MAIN_TID_BSS_OFF = bss_alloc_aligned(8)
     ASYNC_RT_QUEUE_PTRS_BSS_OFF = bss_alloc_aligned(8 * async_rt_queue_cap_x86())
     GPU_EMU_THREAD_ID_BSS_OFF = bss_alloc_aligned(8)
     GPU_RT_STATE_BSS_OFF = bss_alloc_aligned(8)

@@ -12,6 +12,8 @@ SOUC=./bin/souc
 $SOUC check examples/file.sio          # type-check only
 $SOUC run examples/file.sio            # compile to temp ELF, execute, clean up
 $SOUC compile file.sio -o output.elf   # compile to named ELF
+$SOUC build file.sio --backend gpu -o output.ptx  # compile to PTX (GPU)
+$SOUC build file.sio --backend gpu --gpu-precision f32 -o out.ptx  # f32 GPU
 make build                             # 3-stage bootstrap (gen1→gen2→gen3) + fixed-point verify
 make test                              # full test suite (compile-fail + run-pass + stdlib + ui)
 make lint                              # lint .sio files for Rust hallucinations
@@ -77,6 +79,9 @@ Pipeline: Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR
 | `self-hosted/check/`, `types/` | Bidirectional type inference + effects |
 | `self-hosted/ir/` | IR lowering, optimization, e-graph |
 | `self-hosted/native/` | x86-64 ELF emission |
+| `self-hosted/gpu/` | GPU backend (PTX, SPIR-V, Metal) |
+| `self-hosted/hypercomplex/` | Octonion/sedenion algebra + GPU lowering |
+| `self-hosted/gpu/kernels/` | Hypercomplex PTX emitters, O-SSM fused kernels |
 | `stdlib/` | Standard library (units, epistemic, stats, linalg…) |
 | `bootstrap/` | stage0 (C) → boot2g → self-hosted chain |
 | `tests/run-pass/` | Tests that should compile and run |
@@ -115,7 +120,7 @@ Tests without a `//@ run-pass` or `//@ compile-fail` annotation are skipped.
 [component] Brief description
 ```
 
-Components: `lexer`, `parser`, `ast`, `check`, `types`, `effects`, `hir`, `hlir`, `codegen`, `backend`, `cli`, `docs`, `stdlib`, `tests`, `ontology`, `epistemic`, `lsp`, `pkg`, `sir`, `units`, `refinement`
+Components: `lexer`, `parser`, `ast`, `check`, `types`, `effects`, `hir`, `hlir`, `codegen`, `backend`, `gpu`, `cli`, `docs`, `stdlib`, `tests`, `ontology`, `epistemic`, `lsp`, `pkg`, `sir`, `units`, `refinement`
 
 No AI attribution in commits (no "Co-Authored-By").
 
@@ -127,7 +132,7 @@ No AI attribution in commits (no "Co-Authored-By").
 - **No struct generics yet** — `Knowledge<T>` is monomorphic (f64 only); function-level generics work
 - **No closures** — named fn refs only (`let f = square`)
 - **No REPL** in native mode
-- **No GPU end-to-end path** — PTX codegen exists but no CLI integration
+- **GPU backend available** — `souc build --backend gpu` emits PTX; octonion/sedenion lowering via Fano plane; O-SSM fused forward kernel in `self-hosted/gpu/kernels/ossm_forward.sio`
 
 ## Lint → Check → Test
 
