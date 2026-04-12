@@ -295,6 +295,39 @@ var EPIST_KTYPE_SITES: i64 = 0
 var EPIST_KTYPE_CERTAIN: i64 = 0
 // Gen 12: --dump-conf-json flag
 var CLI_DUMP_CONF_JSON: i64 = 0
+// Gen 13: dual-channel measurement confidence (parallel to EXPR_CONF)
+// MEAS_CONF[p] = GUM measurement quality of token p:
+//   0    = not in measurement channel (bare types, constants, compiler-internal)
+//   990  = instrument measurement ("measured" constructor)
+//   970  = user assertion ("asserted" constructor)
+//   1000 = physical constant ("constant" constructor)
+//   propagates through arithmetic: min(left, right) via Sweep 2
+var MEAS_CONF: [i64; 262144] = [0; 262144]
+// Gen 13: ESCOPE measurement quality (parallel to ESCOPE_CONF)
+var ESCOPE_MEAS: [i64; 16384] = [0; 16384]
+// Gen 13: count of tokens with MEAS_CONF > 0 after all passes
+var EPIST_MEAS_COUNT: i64 = 0
+// Gen 14 (Track C): confidence tier distribution counters
+// PLATINUM = conf == 1000 (maximally certain, no uncertainty anywhere in chain)
+// GOLD     = conf >= 950  (above gate threshold, type-safe with minor heritage)
+// SILVER   = conf >= 800  (below gate, compiler-uncertain, guarded at runtime)
+// BRONZE   = conf >= 500  (low confidence, likely unresolved idents/imports)
+var EPIST_TIER_PLATINUM: i64 = 0
+var EPIST_TIER_GOLD:     i64 = 0
+var EPIST_TIER_SILVER:   i64 = 0
+var EPIST_TIER_BRONZE:   i64 = 0
+// Gen 16 Track B: EpistemicComplete effect enforcement
+var EPIST_EFFECT_VIOLATIONS: i64 = 0
+// Gen 15 (Option B): epistemic certificate (.econf) support
+// --emit-econf: print function confidence table to diagnostic stream
+// --load-econf: pre-populate FN_EFF_CONF from a previously emitted .econf
+var CLI_EMIT_ECONF: i64 = 0
+var CLI_LOAD_ECONF: i64 = 0
+// Raw bytes of a loaded .econf file (parsed in Phase A2)
+var ECONF_RAW: [i64; 65536] = [0; 65536]
+var ECONF_RAW_LEN: i64 = 0
+// Count of FN_EFF_CONF overrides applied from a loaded .econf
+var ECONF_APPLIED: i64 = 0
 
 fn en_find(hash: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
@@ -11389,6 +11422,7 @@ fn ety_mk_bool() -> i64 with Mut { return ety_alloc(3, 1000, 0) }
 fn ety_mk_string() -> i64 with Mut { return ety_alloc(4, 1000, 0) }
 fn ety_mk_void() -> i64 with Mut { return ety_alloc(5, 1000, 0) }
 fn ety_mk_unknown() -> i64 with Mut { return ety_alloc(0, 0, 1000) }
+fn ety_mk_struct() -> i64 with Mut { return ety_alloc(6, 1000, 0) }  // Gen 16 Track A: kind=6 for struct/enum
 
 fn ety_conf(id: i64) -> i64 {
     if id < 0 || id >= ETY_COUNT { return 0 }
@@ -11459,6 +11493,8 @@ fn ety_from_tnk(tnk: i64) -> i64 {
     if tnk == 3 { return 4 }
     if tnk == 4 { return 3 }
     if tnk == 5 { return 5 }
+    if tnk == 6 { return 6 }   // Gen 16 Track A: struct → kind=6, not unknown
+    if tnk == 7 { return 6 }   // Gen 16 Track A: enum  → same struct pool slot
     return 0
 }
 
@@ -11469,14 +11505,20 @@ fn ety_unify(ty_a: i64, conf_a: i64, ty_b: i64, conf_b: i64) -> i64 with Mut, Di
     if ety_kind(ty_a) == 0 { EUNIFY_CONF = 0; return ty_b }
     if ety_kind(ty_b) == 0 { EUNIFY_CONF = 0; return ty_a }
     // Types match: confidence-squared weighted average
+    // Gen 15: PLATINUM preservation — two maximally-certain types unify to 1000,
+    // not 999. The formula (a²+b²)/(a+b+1) = 999 for a=b=1000 introduces
+    // representational noise with no epistemic justification; if both inputs are
+    // fully certain the output is fully certain.
     if ety_kind(ty_a) == ety_kind(ty_b) {
+        if conf_a == 1000 && conf_b == 1000 { EUNIFY_CONF = 1000; return ty_a }
         var num: i64 = (conf_a * conf_a) + (conf_b * conf_b)
         var den: i64 = conf_a + conf_b + 1
         EUNIFY_CONF = ety_clamp(num / den)
         return ty_a
     }
-    // Numeric promotion i64 → f64
+    // Numeric promotion i64 → f64 — same PLATINUM preservation applies
     if (ety_kind(ty_a) == 1 && ety_kind(ty_b) == 2) || (ety_kind(ty_a) == 2 && ety_kind(ty_b) == 1) {
+        if conf_a == 1000 && conf_b == 1000 { EUNIFY_CONF = 1000; return 2 }
         var num: i64 = (conf_a * conf_a) + (conf_b * conf_b)
         var den: i64 = conf_a + conf_b + 1
         EUNIFY_CONF = ety_clamp(num / den)
@@ -11512,6 +11554,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     let ty_bool = ety_mk_bool()        // 3
     let ty_string = ety_mk_string()    // 4
     let ty_void = ety_mk_void()        // 5
+    let ty_struct_id = ety_mk_struct() // 6  Gen 16 Track A: struct canonical type
     EPIST_TOTAL_EXPR = 0
     EPIST_HIGH_CONF = 0
     EPIST_LOW_CONF = 0
@@ -11519,6 +11562,12 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     EPIST_MAIN_HIGH = 0
     EPIST_KTYPE_SITES = 0
     EPIST_KTYPE_CERTAIN = 0
+    EPIST_MEAS_COUNT = 0
+    EPIST_TIER_PLATINUM = 0
+    EPIST_TIER_GOLD = 0
+    EPIST_TIER_SILVER = 0
+    EPIST_TIER_BRONZE = 0
+    EPIST_EFFECT_VIOLATIONS = 0  // Gen 16 Track B
 
     // Phase A: Collect effect declarations for all registered functions
     var fi: i64 = 0
@@ -11565,6 +11614,82 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
         if src_match(g12_fns, g12_flen, "measured") { FN_EFF_CONF[fi as usize] = 990 }
         if src_match(g12_fns, g12_flen, "asserted") { FN_EFF_CONF[fi as usize] = 970 }
         fi = fi + 1
+    }
+
+    // Gen 15 Phase A3: .econf certificate loading
+    // If --load-econf was given, parse the raw byte buffer for lines of the form:
+    //   fn <name> <conf>
+    // and override FN_EFF_CONF for matching functions.
+    // This allows cross-module epistemic certificates: a library compiled at
+    // conf=990 for its measured() wrappers transfers that knowledge here.
+    if CLI_LOAD_ECONF != 0 && ECONF_RAW_LEN > 0 {
+        var ecp: i64 = 0
+        while ecp < ECONF_RAW_LEN {
+            // Skip non-'f' bytes (looking for "fn " prefix)
+            if ECONF_RAW[ecp as usize] != 102 {  // 'f'
+                while ecp < ECONF_RAW_LEN && ECONF_RAW[ecp as usize] != 10 { ecp = ecp + 1 }
+                ecp = ecp + 1
+                continue
+            }
+            if ecp + 2 >= ECONF_RAW_LEN { ecp = ecp + 1; continue }
+            if ECONF_RAW[(ecp + 1) as usize] != 110 { // 'n'
+                while ecp < ECONF_RAW_LEN && ECONF_RAW[ecp as usize] != 10 { ecp = ecp + 1 }
+                ecp = ecp + 1
+                continue
+            }
+            if ECONF_RAW[(ecp + 2) as usize] != 32 {  // ' '
+                while ecp < ECONF_RAW_LEN && ECONF_RAW[ecp as usize] != 10 { ecp = ecp + 1 }
+                ecp = ecp + 1
+                continue
+            }
+            // "fn " matched — extract name start..end
+            ecp = ecp + 3
+            let ec_ns = ecp
+            while ecp < ECONF_RAW_LEN && ECONF_RAW[ecp as usize] != 32 && ECONF_RAW[ecp as usize] != 10 { ecp = ecp + 1 }
+            let ec_ne = ecp
+            if ec_ne <= ec_ns { continue }
+            // Skip space, parse conf integer
+            if ecp < ECONF_RAW_LEN && ECONF_RAW[ecp as usize] == 32 { ecp = ecp + 1 }
+            var ec_conf: i64 = 0
+            while ecp < ECONF_RAW_LEN && ECONF_RAW[ecp as usize] >= 48 && ECONF_RAW[ecp as usize] <= 57 {
+                ec_conf = ec_conf * 10 + (ECONF_RAW[ecp as usize] - 48)
+                ecp = ecp + 1
+            }
+            if ec_conf <= 0 || ec_conf > 1000 { continue }
+            // Match against registered functions
+            let ec_name_len = ec_ne - ec_ns
+            var efi2: i64 = 0
+            while efi2 < FN_COUNT {
+                let ef_fns = FN_NS[efi2 as usize]
+                let ef_fne = FN_NE[efi2 as usize]
+                let ef_flen = ef_fne - ef_fns
+                if ef_flen == ec_name_len {
+                    // Compare ECONF_RAW[ec_ns..ec_ne] against SRC[ef_fns..ef_fne]
+                    var ec_match: i64 = 1
+                    var ec_ki: i64 = 0
+                    while ec_ki < ec_name_len {
+                        if ECONF_RAW[(ec_ns + ec_ki) as usize] != (SRC[(ef_fns + ec_ki) as usize] as i64 & 0xFF) {
+                            ec_match = 0
+                            ec_ki = ec_name_len  // break
+                        }
+                        ec_ki = ec_ki + 1
+                    }
+                    if ec_match == 1 {
+                        FN_EFF_CONF[efi2 as usize] = ec_conf
+                        ECONF_APPLIED = ECONF_APPLIED + 1
+                    }
+                }
+                efi2 = efi2 + 1
+            }
+            // Advance to next line
+            while ecp < ECONF_RAW_LEN && ECONF_RAW[ecp as usize] != 10 { ecp = ecp + 1 }
+            ecp = ecp + 1
+        }
+        if ECONF_APPLIED > 0 {
+            print("econf_load: ")
+            print_int(ECONF_APPLIED)
+            print(" FN_EFF_CONF overrides applied from certificate\n")
+        }
     }
 
     // Phase B: Walk all tokens, assign epistemic types
@@ -11836,6 +11961,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                 let nh = gl_name_hash(name_ns, name_ne)
                 var bind_ty: i64 = ty_unknown
                 var bind_conf: i64 = 0
+                var bind_meas_conf: i64 = 0   // Gen 13: measurement channel for this binding
                 // Check for type annotation: NAME : TYPE
                 var anno_end: i64 = p + 2
                 if p + 2 < TC && TK[(p + 2) as usize] == 43 {
@@ -11894,6 +12020,13 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                                     rhs_ty = ety_from_tnk(FN_RET_TY[rfj as usize])
                                     rhs_conf = FN_EFF_CONF[rfj as usize]
                                     if rhs_ty == 0 { rhs_conf = 0 }
+                                    // Gen 13: dual-channel — propagate measurement quality
+                                    // from constructor call to the binding being created
+                                    let g13_rns = FN_NS[rfj as usize]
+                                    let g13_rlen = FN_NE[rfj as usize] - g13_rns
+                                    if src_match(g13_rns, g13_rlen, "measured") { bind_meas_conf = 990 }
+                                    if src_match(g13_rns, g13_rlen, "asserted") { bind_meas_conf = 970 }
+                                    if src_match(g13_rns, g13_rlen, "constant") { bind_meas_conf = 1000 }
                                     break
                                 }
                                 rfj = rfj + 1
@@ -11958,6 +12091,10 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     }
                 }
                 escope_add(nh, bind_ty, bind_conf)
+                // Gen 13: store measurement quality in parallel ESCOPE channel
+                if bind_meas_conf > 0 && ESCOPE_COUNT > 0 {
+                    ESCOPE_MEAS[(ESCOPE_COUNT - 1) as usize] = bind_meas_conf
+                }
             }
             p = p + 1
             continue
@@ -12067,6 +12204,12 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     // Gen 11: tag closing ')' so binary operators comparing this result work
                     // q is already at the ')' position after the arg-scanning loop above
                     if q < TC && TK[q as usize] == 7 { EXPR_CONF[q as usize] = call_conf }
+                    // Gen 13: dual-channel — tag MEAS_CONF at constructor call sites
+                    let g13_cfns = FN_NS[call_fi as usize]
+                    let g13_cflen = FN_NE[call_fi as usize] - g13_cfns
+                    if src_match(g13_cfns, g13_cflen, "measured") { MEAS_CONF[p as usize] = 990 }
+                    if src_match(g13_cfns, g13_cflen, "asserted") { MEAS_CONF[p as usize] = 970 }
+                    if src_match(g13_cfns, g13_cflen, "constant") { MEAS_CONF[p as usize] = 1000 }
                 } else {
                     // Unknown function → must be a built-in (not in FN_NAME)
                     // Gen 11: assign confident — built-ins are always valid calls
@@ -12088,6 +12231,8 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
             if si >= 0 {
                 EXPR_ETY[p as usize] = ESCOPE_TY[si as usize]
                 EXPR_CONF[p as usize] = ESCOPE_CONF[si as usize]
+                // Gen 13: propagate measurement quality through variable reads
+                MEAS_CONF[p as usize] = ESCOPE_MEAS[si as usize]
             } else {
                 EXPR_ETY[p as usize] = ty_unknown
                 EXPR_CONF[p as usize] = 0
@@ -12287,7 +12432,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                             while rfj < FN_COUNT {
                                 if name_eq(FN_NS[rfj as usize], FN_NE[rfj as usize], rns, rne) {
                                     EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
-                                    EXPR_CONF[p as usize] = 1000
+                                    EXPR_CONF[p as usize] = FN_EFF_CONF[rfj as usize]  // Gen 16 Track A: propagate actual effect conf
                                     refine_changed = refine_changed + 1
                                     break
                                 }
@@ -12429,6 +12574,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     // Sweep 2: binary operators whose both operands are now confident.
     // NOTE: use min(lc, rc), not ety_conf_product — product of two 950-conf
     // values = 902 which is below GATE_THRESHOLD.
+    // Gen 13: also propagate MEAS_CONF through operators (GUM min-rule).
     p = 0
     while p < TC {
         if EXPR_CONF[p as usize] < GATE_THRESHOLD {
@@ -12445,8 +12591,87 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                 }
             }
         }
+        // Gen 13: propagate MEAS_CONF regardless of EXPR_CONF certainty.
+        // If either operand is in the measurement channel, the operation is too.
+        let g13_otk = TK[p as usize]
+        if g13_otk >= 17 && g13_otk <= 26 && p > 0 && p + 1 < TC {
+            if MEAS_CONF[p as usize] == 0 {
+                let g13_lm = MEAS_CONF[(p - 1) as usize]
+                let g13_rm = MEAS_CONF[(p + 1) as usize]
+                if g13_lm > 0 || g13_rm > 0 {
+                    // min of non-zero values (0 = "not measured", not "zero quality")
+                    var g13_mm: i64 = g13_lm
+                    if g13_rm > 0 {
+                        if g13_mm == 0 || g13_rm < g13_mm { g13_mm = g13_rm }
+                    }
+                    MEAS_CONF[p as usize] = g13_mm
+                }
+            }
+        }
         p = p + 1
     }
+
+    // Gen 16 Track B: EpistemicComplete effect enforcement
+    // Functions declaring `with Epistemic` (bit 512) must have zero uncertain
+    // expression tokens in their body. Any token with 0 < EXPR_CONF < GATE_THRESHOLD
+    // indicates an epistemic incompleteness — compile error.
+    var ec_fi: i64 = 0
+    while ec_fi < FN_COUNT {
+        if (FN_EFFECTS[ec_fi as usize] & 512) != 0 {
+            // Locate function body: scan from name token forward for first '{'
+            let ec_name_tok = FN_NAME_TOK[ec_fi as usize]
+            var ec_tp: i64 = ec_name_tok
+            var ec_body_start: i64 = 0 - 1
+            while ec_tp < TC && ec_body_start < 0 {
+                if TK[ec_tp as usize] == 8 { ec_body_start = ec_tp }
+                ec_tp = ec_tp + 1
+            }
+            if ec_body_start >= 0 {
+                // Walk body tracking brace depth; flag uncertain expression tokens
+                var ec_depth: i64 = 1
+                var ec_bp: i64 = ec_body_start + 1
+                while ec_bp < TC && ec_depth > 0 {
+                    let ec_btk = TK[ec_bp as usize]
+                    if ec_btk == 8 { ec_depth = ec_depth + 1 }
+                    if ec_btk == 9 { ec_depth = ec_depth - 1 }
+                    if ec_depth > 0 {
+                        // Check: is this token an expression with non-zero uncertain confidence?
+                        var ec_is_expr: i64 = 0
+                        if ec_btk == 3 || ec_btk == 4 || ec_btk == 5 || ec_btk == 53 { ec_is_expr = 1 }
+                        if ec_btk == 35 || ec_btk == 36 { ec_is_expr = 1 }
+                        if ec_btk >= 17 && ec_btk <= 26 { ec_is_expr = 1 }
+                        if ec_is_expr == 1 {
+                            let ec_conf = EXPR_CONF[ec_bp as usize]
+                            if ec_conf > 0 && ec_conf < GATE_THRESHOLD {
+                                EPIST_EFFECT_VIOLATIONS = EPIST_EFFECT_VIOLATIONS + 1
+                                print("error: EpistemicComplete violation in fn ")
+                                var ec_np: i64 = FN_NS[ec_fi as usize]
+                                while ec_np < FN_NE[ec_fi as usize] {
+                                    print_char(SRC[ec_np as usize] as i64)
+                                    ec_np = ec_np + 1
+                                }
+                                print(": uncertain token at pos ")
+                                print_int(ec_bp)
+                                print(" (conf=")
+                                print_int(ec_conf)
+                                print(" < ")
+                                print_int(GATE_THRESHOLD)
+                                print(")\n")
+                            }
+                        }
+                    }
+                    ec_bp = ec_bp + 1
+                }
+            }
+        }
+        ec_fi = ec_fi + 1
+    }
+    if EPIST_EFFECT_VIOLATIONS > 0 {
+        print("error: ")
+        print_int(EPIST_EFFECT_VIOLATIONS)
+        print(" EpistemicComplete violation(s) — `with Epistemic` requires 100% body confidence\n")
+    }
+
     // Recount after refinement — only count tokens that are expressions
     EPIST_TOTAL_EXPR = 0
     EPIST_HIGH_CONF = 0
@@ -12475,6 +12700,14 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     EPIST_MAIN_HIGH = EPIST_MAIN_HIGH + 1
                 }
             }
+            // Gen 13: count tokens in measurement channel
+            if MEAS_CONF[p as usize] > 0 { EPIST_MEAS_COUNT = EPIST_MEAS_COUNT + 1 }
+            // Gen 14 (Track C): confidence tier distribution
+            let tc14_c = EXPR_CONF[p as usize]
+            if tc14_c == 1000 { EPIST_TIER_PLATINUM = EPIST_TIER_PLATINUM + 1 }
+            if tc14_c >= 950 && tc14_c < 1000 { EPIST_TIER_GOLD = EPIST_TIER_GOLD + 1 }
+            if tc14_c >= 800 && tc14_c < 950 { EPIST_TIER_SILVER = EPIST_TIER_SILVER + 1 }
+            if tc14_c >= 500 && tc14_c < 800 { EPIST_TIER_BRONZE = EPIST_TIER_BRONZE + 1 }
         }
         p = p + 1
     }
@@ -12596,12 +12829,61 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
         print_int((EPIST_KTYPE_CERTAIN * 100) / EPIST_KTYPE_SITES)
         print("%)\n")
     }
+    // Gen 13: measurement channel stats
+    if EPIST_MEAS_COUNT > 0 {
+        print("epistemic_meas: ")
+        print_int(EPIST_MEAS_COUNT)
+        print(" tokens in measurement channel (meas_conf > 0)\n")
+    }
+    // Gen 14 (Track C): confidence tier distribution
+    // Emitted when total > 0 (always for non-trivial programs)
+    if EPIST_TOTAL_EXPR > 0 {
+        print("tier_dist: PLATINUM=")
+        print_int(EPIST_TIER_PLATINUM)
+        print(" GOLD=")
+        print_int(EPIST_TIER_GOLD)
+        print(" SILVER=")
+        print_int(EPIST_TIER_SILVER)
+        print(" BRONZE=")
+        print_int(EPIST_TIER_BRONZE)
+        print(" [PLATINUM%=")
+        print_int((EPIST_TIER_PLATINUM * 100) / EPIST_TOTAL_EXPR)
+        print("%]\n")
+    }
+    // Gen 15 (Option B): --emit-econf — print function confidence certificate
+    // Format: "fn <name> <conf>" per line, framed by econf_begin/econf_end markers.
+    // Redirect stderr to capture: gen15.elf src.sio out.elf --emit-econf 2>src.econf
+    // Load in subsequent compile:  gen15.elf src2.sio out2.elf --load-econf src.econf
+    if CLI_EMIT_ECONF != 0 {
+        print("econf_begin\n")
+        var efi_out: i64 = 0
+        while efi_out < FN_COUNT {
+            let efo_ns = FN_NS[efi_out as usize]
+            let efo_ne = FN_NE[efi_out as usize]
+            let efo_conf = FN_EFF_CONF[efi_out as usize]
+            if efo_ne > efo_ns && efo_conf > 0 {
+                print("fn ")
+                var efo_p: i64 = efo_ns
+                while efo_p < efo_ne {
+                    print_char(SRC[efo_p as usize] as i64)
+                    efo_p = efo_p + 1
+                }
+                print(" ")
+                print_int(efo_conf)
+            }
+            efi_out = efi_out + 1
+        }
+        print("econf_end\n")
+    }
     // Gen 12: --dump-conf-json — print token-level confidence as JSON to stdout
+    // Gen 13: adds "meas" field for measurement channel confidence
     if CLI_DUMP_CONF_JSON != 0 {
         print("{\"total\":")
         print_int(EPIST_TOTAL_EXPR)
         print(",\"certain\":")
         print_int(EPIST_HIGH_CONF)
+        print(",\"meas_tokens\":")
+        print_int(EPIST_MEAS_COUNT)
         print(",\"tokens\":[\n")
         var g12_first: i64 = 1
         var g12_tp: i64 = 0
@@ -12622,6 +12904,8 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                 print_int(g12_ctk)
                 print(",\"conf\":")
                 print_int(EXPR_CONF[g12_tp as usize])
+                print(",\"meas\":")
+                print_int(MEAS_CONF[g12_tp as usize])
                 print(",\"line\":")
                 print_int(TL[g12_tp as usize])
                 print("}")
@@ -13800,6 +14084,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
     // Pass 1d: Epistemic type inference (Patient Zero)
     epistemic_infer_pass()
+    // Gen 16 Track B: abort if any EpistemicComplete violations detected
+    if EPIST_EFFECT_VIOLATIONS > 0 { return 1 }
 
     // Pass 2: compile each function
     p = 0
@@ -19520,6 +19806,10 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     CLI_SHOW_TYPES = 0
     CLI_R15_MONITOR = 0
     CLI_DUMP_CONF_JSON = 0
+    CLI_EMIT_ECONF = 0
+    CLI_LOAD_ECONF = 0
+    ECONF_RAW_LEN = 0
+    ECONF_APPLIED = 0
     var arg_i: i64 = 2
     while arg_i < argc {
         let flag = get_arg(arg_i)
@@ -19532,7 +19822,24 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         if cli_arg_eq(flag, "--dump-conf-json") {
             CLI_DUMP_CONF_JSON = 1
         } else {
-            if cli_arg_eq(flag, "--show-types") {
+        if cli_arg_eq(flag, "--emit-econf") {
+            CLI_EMIT_ECONF = 1
+        } else {
+        if cli_arg_eq(flag, "--load-econf") && arg_i + 1 < argc {
+            // Read the .econf file immediately and cache raw bytes
+            CLI_LOAD_ECONF = 1
+            let ep = get_arg(arg_i + 1)
+            let eraw = read_file(ep)
+            let esz = file_size(ep)
+            var ei: i64 = 0
+            while ei < esz && ei < 65536 {
+                ECONF_RAW[ei as usize] = eraw[ei as usize] as i64
+                ei = ei + 1
+            }
+            ECONF_RAW_LEN = esz
+            arg_i = arg_i + 1
+        } else {
+        if cli_arg_eq(flag, "--show-types") {
                 CLI_SHOW_TYPES = 1
             } else {
                 if cli_arg_eq(flag, "--target") && arg_i + 1 < argc {
@@ -19559,7 +19866,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
                     arg_i = arg_i + 1
                 }
             }
-        } } }
+        } } } } }
         arg_i = arg_i + 1
     }
 
