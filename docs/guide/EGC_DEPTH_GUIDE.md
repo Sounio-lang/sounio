@@ -166,6 +166,81 @@ make proof-check   # runs lake build on the generated module
 | D5 decay | — | `epistemic_decay.sio` |
 | D6 Lean proofs | `formal/lean4/SounioGradedModal.lean` | `make proof-check` |
 
+---
+
+## Gen 19 — Scientific Computing Readiness
+
+Three features added for honest, reproducible science:
+
+### Unit System (multi-standard)
+
+Seven-dimension packed encoding: `bits[3:0]=mass, [7:4]=length, [11:8]=time, [15:12]=temp, [19:16]=amount, [23:20]=current, [27:24]=lum`.  
+4-bit 2's-complement per field; `0` = dimensionless.
+
+**Preloaded unit systems:** SI (40+ units), CGS (erg, dyn, Gauss), Imperial (lb, ft, psi, BTU), Astronomical (AU, pc, ly, Msun), Pharmacological (mmHg, mEq, IU, mcg), Atomic (eV, MeV, GeV, u, Bohr).
+
+**Syntax:**
+```sio
+unit mg;                      // declare or re-declare a unit name
+unit furlong = 201.168 * m;   // user-defined with scale from base unit
+let dose: mg = 500.0          // type annotation → dimension tracked
+let speed = 9.8_m / 1.0_s    // _suffix literals; result has dim length/time
+let bad = 500_mg + 2.0_m      // E: unit dimension mismatch (mass ≠ length)
+```
+
+**Dimension algebra:**
+- `a + b`, `a - b` — require same dimension vector (or either dimensionless)
+- `a * b` — result dim = dim_add(a_dim, b_dim)
+- `a / b` — result dim = dim_sub(a_dim, b_dim)
+
+**Code locations:**  
+`UNIT_HASH_TABLE/UNIT_DIM_TABLE` globals, `init_unit_table()`, `dim_pack/dim_add/dim_sub`, `unit_register_h`, `unit_lookup_dim` — all near `gl_name_hash`.  
+`_suffix` lexing — numeric literal block in `tokenize()`.  
+Dimension propagation — `compile_multiplicative()`, `compile_additive()`.  
+`unit NAME;` parsing — Pass 0a in `compile_all()`.
+
+**Stdlib:** `stdlib/units/imperial.sio`, `cgs.sio`, `astronomical.sio`, `pharmacological.sio`, `atomic.sio`, `natural.sio`  
+**Examples:** `examples/units/basics.sio`, `examples/units/pharma_dose.sio`
+
+---
+
+### I/O: `read_line()`
+
+```sio
+fn main() -> i32 with IO {
+    let line = read_line()   // reads one line from stdin (fd=0)
+    println(line)
+    return 0
+}
+```
+
+Emits `mmap(NULL, 4096, RW, ANON)` + `sys_read(0, buf, 4095)`, strips trailing `\n`, null-terminates.  
+Requires `with IO` effect — same as `read_file`.  
+**Code location:** `emit_read_line_x86()` near `emit_read_file()`.
+
+---
+
+### `Deterministic` Effect
+
+A function declared `with Deterministic` is statically guaranteed to never perform I/O.  
+Attempting to combine `Deterministic` and `IO` is a compile error (E080).
+
+```sio
+fn pure_compute(x: f64) -> f64 with Deterministic {
+    return x * 2.0   // OK — no I/O
+}
+
+fn bad(x: f64) -> f64 with Deterministic, IO {
+    println("x")     // E080: Deterministic function declares IO effect
+    return x
+}
+```
+
+Effect bitmask: `Deterministic = 4096` (bit 12).  
+**Code location:** effect parsing in Pass 1b (`compile_all()` ~line 14430), enforcement check ~line 14452.
+
+---
+
 ## Self-Compile Numbers (Gen 17)
 
 ```

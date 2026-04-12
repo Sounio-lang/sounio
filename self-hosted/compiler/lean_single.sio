@@ -167,8 +167,9 @@ var MAN_BUF_E: [i64; 128] = [0; 64]
 
 // ─── Phase 5: Effects checking ───
 // Bitmask per function: IO=1, Mut=2, Panic=4, Div=8, Alloc=16,
-// Custom/Session=32, Observe=64, Audit=128, Hypothesis=256, Epistemic=512
+// Custom/Session=32, Observe=64, Audit=128, Hypothesis=256, Epistemic=512,
 // Visibility: bit 10 (1024) = is_pub, bit 11 (2048) = from_import
+// Gen 19: Deterministic=4096 (bit 12) — function provably cannot call IO
 var FN_EFFECTS: [i64; 16384] = [0; 16384]
 var FN_NAME_TOK: [i64; 16384] = [0; 16384]
 var FN_NEEDS_SESSION: [i64; 16384] = [0; 16384]
@@ -253,6 +254,17 @@ var SCAN_PRED_IS_F64_2: i64 = 0 // 1 if second predicate is float
 // Tracks unit hash of the last compiled expression sub-result.
 // Set when a unit-typed variable is loaded; checked at + and - operators.
 var EXPR_UNIT: i64 = 0
+
+// Gen 19: Unit dimension system
+// Packed dim vector: bits[3:0]=mass, [7:4]=length, [11:8]=time, [15:12]=temp,
+//   [19:16]=amount, [23:20]=current, [27:24]=luminosity (4-bit 2's-complement each)
+// UNIT_HASH_TABLE[slot] = full hash (0=empty), UNIT_DIM_TABLE[slot] = packed dim
+var UNIT_HASH_TABLE: [i64; 2048] = [0; 2048]
+var UNIT_DIM_TABLE:  [i64; 2048] = [0; 2048]
+// Parallel token unit-hash array (for _suffix literals e.g. 500_mg)
+var TU: [i64; 524288] = [0; 524288]
+// Packed dimension vector of the current compiled expression (0 = dimensionless/unknown)
+var EXPR_UNIT_DIM: i64 = 0
 
 // ─── Phase 7: Epistemic Type System (Knowledge<Type>) ───
 // Every type carries Confidence (0–1000) and GUM Uncertainty (0–1000).
@@ -693,6 +705,190 @@ fn gl_name_hash(ns: i64, ne: i64) -> i64 with Panic, Mut {
         hi = hi + 1
     }
     return h
+}
+
+// ─── Gen 19: Unit dimension helpers ──────────────────────────────────────────
+
+// Pack 7 dimension exponents (-8..+7 each) into one i64 using 4-bit 2's-complement
+fn dim_pack(mass: i64, len: i64, time: i64, temp: i64, amount: i64, current: i64, lum: i64) -> i64 {
+    return (mass & 15)
+         | ((len     & 15) << 4)
+         | ((time    & 15) << 8)
+         | ((temp    & 15) << 12)
+         | ((amount  & 15) << 16)
+         | ((current & 15) << 20)
+         | ((lum     & 15) << 24)
+}
+
+// Add two dimension vectors (multiply units: e.g. m * s⁻¹)
+fn dim_add(a: i64, b: i64) -> i64 {
+    return ((((a & 15) + (b & 15)) & 15))
+         | (((((a >> 4) & 15) + ((b >> 4) & 15)) & 15) << 4)
+         | (((((a >> 8) & 15) + ((b >> 8) & 15)) & 15) << 8)
+         | (((((a >> 12) & 15) + ((b >> 12) & 15)) & 15) << 12)
+         | (((((a >> 16) & 15) + ((b >> 16) & 15)) & 15) << 16)
+         | (((((a >> 20) & 15) + ((b >> 20) & 15)) & 15) << 20)
+         | (((((a >> 24) & 15) + ((b >> 24) & 15)) & 15) << 24)
+}
+
+// Subtract two dimension vectors (divide units: e.g. m / s)
+fn dim_sub(a: i64, b: i64) -> i64 {
+    return (((a & 15) - (b & 15)) & 15)
+         | ((((((a >> 4) & 15) - ((b >> 4) & 15)) & 15)) << 4)
+         | ((((((a >> 8) & 15) - ((b >> 8) & 15)) & 15)) << 8)
+         | ((((((a >> 12) & 15) - ((b >> 12) & 15)) & 15)) << 12)
+         | ((((((a >> 16) & 15) - ((b >> 16) & 15)) & 15)) << 16)
+         | ((((((a >> 20) & 15) - ((b >> 20) & 15)) & 15)) << 20)
+         | ((((((a >> 24) & 15) - ((b >> 24) & 15)) & 15)) << 24)
+}
+
+// Register a unit hash → dimension vector (open-addressing hash table, load factor <5%)
+fn unit_register_h(h: i64, dim: i64) with Mut, Panic {
+    if h == 0 { return }
+    var idx: i64 = h % 2048
+    if idx < 0 { idx = idx + 2048 }
+    var probe: i64 = idx
+    var iters: i64 = 0
+    while iters < 2048 {
+        if UNIT_HASH_TABLE[probe as usize] == 0 || UNIT_HASH_TABLE[probe as usize] == h {
+            UNIT_HASH_TABLE[probe as usize] = h
+            UNIT_DIM_TABLE[probe as usize] = dim
+            return
+        }
+        probe = probe + 1
+        if probe >= 2048 { probe = 0 }
+        iters = iters + 1
+    }
+}
+
+// Look up the dimension vector for a unit hash (returns 0 if not registered)
+fn unit_lookup_dim(h: i64) -> i64 with Panic {
+    if h == 0 { return 0 }
+    var idx: i64 = h % 2048
+    if idx < 0 { idx = idx + 2048 }
+    var probe: i64 = idx
+    var iters: i64 = 0
+    while iters < 2048 {
+        if UNIT_HASH_TABLE[probe as usize] == 0 { return 0 }
+        if UNIT_HASH_TABLE[probe as usize] == h { return UNIT_DIM_TABLE[probe as usize] }
+        probe = probe + 1
+        if probe >= 2048 { probe = 0 }
+        iters = iters + 1
+    }
+    return 0
+}
+
+// Compute gl_name_hash from raw byte values (for init_unit_table without src buffer)
+// hash = len * 1000003 + sum(byte[i] * (i+1) * 31)
+fn hash_1(b0: i64) -> i64                        { return 1000003 + b0 * 31 }
+fn hash_2(b0: i64, b1: i64) -> i64               { return 2000006 + b0 * 31 + b1 * 62 }
+fn hash_3(b0: i64, b1: i64, b2: i64) -> i64      { return 3000009 + b0 * 31 + b1 * 62 + b2 * 93 }
+fn hash_4(b0: i64, b1: i64, b2: i64, b3: i64) -> i64 { return 4000012 + b0 * 31 + b1 * 62 + b2 * 93 + b3 * 124 }
+
+// Preload standard unit systems: SI, CGS, Imperial, Astronomical, Pharmacological, Atomic
+// dim_pack encoding: 4-bit 2's-complement per field, 0 = dimensionless
+// Derived dim_pack values:
+//   DIM_FORCE    = 1|(1<<4)|(14<<8) = 3601  [mass^1*len^1*time^-2, -2 → 14 in 4-bit 2's-c]
+//   DIM_ENERGY   = 1|(2<<4)|(14<<8) = 3617  [mass^1*len^2*time^-2]
+//   DIM_POWER    = 1|(2<<4)|(13<<8) = 3361  [mass^1*len^2*time^-3, -3 → 13]
+//   DIM_FREQ     = (15<<8) = 3840           [time^-1, -1 → 15]
+//   DIM_PRESSURE = 1|(15<<4)|(14<<8) = 3825 [mass^1*len^-1*time^-2, len^-1 → 15]
+//   DIM_VOLUME   = (3<<4) = 48              [length^3]
+fn init_unit_table() with Mut, Panic {
+    let DIM_MASS     = 1;       let DIM_LEN    = 16;     let DIM_TIME    = 256
+    let DIM_TEMP     = 4096;    let DIM_AMOUNT = 65536;  let DIM_CURRENT = 1048576
+    let DIM_LUM      = 16777216
+    let DIM_FORCE    = 3601;    let DIM_ENERGY = 3617;   let DIM_POWER   = 3361
+    let DIM_FREQ     = 3840;    let DIM_PRESSURE = 3825; let DIM_VOLUME  = 48
+    // ASCII byte values for hash helpers
+    let A=65; let G=71; let H=72; let I=73; let J=74; let K=75; let L=76; let M=77
+    let N=78; let P=80; let U=85; let V=86; let W=87
+    let a=97; let b=98; let c=99; let d=100; let e=101; let f=102; let g=103; let h=104
+    let i=105; let k=107; let l=108; let m=109; let n=110; let o=111; let p=112
+    let r=114; let s=115; let t=116; let u=117; let y=121; let z=122
+
+    // ── SI mass ───────────────────────────────────────────────────────────────
+    unit_register_h(hash_2(k, g),   DIM_MASS)  // kg
+    unit_register_h(hash_1(g),      DIM_MASS)  // g
+    unit_register_h(hash_2(m, g),   DIM_MASS)  // mg
+    unit_register_h(hash_2(n, g),   DIM_MASS)  // ng
+    unit_register_h(3019105,        DIM_MASS)  // mcg  hash_3(m,c,g)=3000009+109*31+99*62+103*93=3019105
+    unit_register_h(hash_1(u),      DIM_MASS)  // u    (atomic mass unit)
+    unit_register_h(3020655,        DIM_MASS)  // amu  hash_3(a,m,u)=3000009+97*31+109*62+117*93=3020655
+    unit_register_h(hash_2(l, b),   DIM_MASS)  // lb   (pound)
+    unit_register_h(hash_2(o, z),   DIM_MASS)  // oz   (ounce)
+    unit_register_h(4034050,        DIM_MASS)  // Msun hash_4(M,s,u,n)=4000012+77*31+115*62+117*93+110*124=4034050
+
+    // ── SI length ─────────────────────────────────────────────────────────────
+    unit_register_h(hash_1(m),      DIM_LEN)   // m
+    unit_register_h(hash_2(c, m),   DIM_LEN)   // cm
+    unit_register_h(hash_2(k, m),   DIM_LEN)   // km   hash=2010081
+    unit_register_h(2010143,        DIM_LEN)   // mm   hash_2(m,m)=2000006+109*31+109*62=2010143
+    unit_register_h(hash_2(n, m),   DIM_LEN)   // nm
+    unit_register_h(hash_2(f, t),   DIM_LEN)   // ft   (foot)
+    unit_register_h(hash_2(i, n),   DIM_LEN)   // in   (inch) note: same hash 2010081 as km → both length OK
+    unit_register_h(2009895,        DIM_LEN)   // mi   (mile) hash_2(m,i)=2000006+109*31+105*62=2009895
+    unit_register_h(2009957,        DIM_LEN)   // yd   (yard) hash_2(y,d)=2000006+121*31+100*62=2009957
+    unit_register_h(hash_2(A, U),   DIM_LEN)   // AU   (astronomical unit)
+    unit_register_h(hash_2(p, c),   DIM_LEN)   // pc   (parsec)
+    unit_register_h(hash_2(l, y),   DIM_LEN)   // ly   (light-year)
+
+    // ── SI time ───────────────────────────────────────────────────────────────
+    unit_register_h(hash_1(s),       DIM_TIME)  // s
+    unit_register_h(hash_2(m, s),    DIM_TIME)  // ms
+    unit_register_h(2010546,         DIM_TIME)  // ns   hash_2(n,s)=2000006+110*31+115*62=2010546
+    unit_register_h(hash_3(m, i, n), DIM_TIME)  // min
+    unit_register_h(hash_1(h),       DIM_TIME)  // h    (hour)
+    unit_register_h(hash_2(h, r),    DIM_TIME)  // hr
+    unit_register_h(hash_1(d),       DIM_TIME)  // d    (day)
+    unit_register_h(hash_2(y, r),    DIM_TIME)  // yr
+
+    // ── SI current ────────────────────────────────────────────────────────────
+    unit_register_h(hash_1(A),       DIM_CURRENT) // A
+    unit_register_h(hash_2(m, A),    DIM_CURRENT) // mA
+
+    // ── SI temperature ────────────────────────────────────────────────────────
+    unit_register_h(hash_1(K),       DIM_TEMP)  // K
+    unit_register_h(4027261,         DIM_TEMP)  // degC hash_4(d,e,g,C)=4000012+100*31+101*62+103*93+67*124=4027261
+    unit_register_h(4027633,         DIM_TEMP)  // degF hash_4(d,e,g,F)=4027261-67*124+70*124=4027633
+
+    // ── SI amount / luminosity ────────────────────────────────────────────────
+    unit_register_h(hash_3(m, o, l), DIM_AMOUNT) // mol
+    unit_register_h(3018175,         DIM_AMOUNT) // mEq  hash_3(m,E,q)=3000009+109*31+69*62+113*93=3018175
+    unit_register_h(hash_2(c, d),    DIM_LUM)   // cd   (candela)
+
+    // ── SI derived ────────────────────────────────────────────────────────────
+    unit_register_h(hash_1(N),       DIM_FORCE)    // N   (Newton)
+    unit_register_h(hash_1(J),       DIM_ENERGY)   // J   (Joule)
+    unit_register_h(hash_2(k, J),    DIM_ENERGY)   // kJ
+    unit_register_h(hash_1(W),       DIM_POWER)    // W   (Watt)
+    unit_register_h(hash_2(k, W),    DIM_POWER)    // kW
+    unit_register_h(hash_2(H, z),    DIM_FREQ)     // Hz
+    unit_register_h(3019136,         DIM_FREQ)     // kHz  hash_3(k,H,z)=3000009+107*31+72*62+122*93=3019136
+    unit_register_h(hash_2(P, a),    DIM_PRESSURE) // Pa
+    unit_register_h(3017307,         DIM_PRESSURE) // kPa  hash_3(k,P,a)=3000009+107*31+80*62+97*93=3017307
+    unit_register_h(hash_1(L),       DIM_VOLUME)   // L    (litre)
+    unit_register_h(hash_2(m, L),    DIM_VOLUME)   // mL
+    unit_register_h(2008345,         DIM_VOLUME)   // uL   hash_2(u,L)=2000006+117*31+76*62=2008345
+
+    // ── CGS ───────────────────────────────────────────────────────────────────
+    unit_register_h(hash_3(e, r, g), DIM_ENERGY)   // erg  (CGS energy = J in dimension)
+    unit_register_h(hash_3(d, y, n), DIM_FORCE)    // dyn  (CGS force = N in dimension)
+
+    // ── Imperial pressure ─────────────────────────────────────────────────────
+    unit_register_h(hash_3(p, s, i), DIM_PRESSURE) // psi
+    unit_register_h(hash_3(b, a, r), DIM_PRESSURE) // bar
+    unit_register_h(hash_3(a, t, m), DIM_PRESSURE) // atm
+
+    // ── Pharmacological ───────────────────────────────────────────────────────
+    unit_register_h(4029617,         DIM_PRESSURE) // mmHg hash_4(m,m,H,g)=4000012+109*31+109*62+72*93+103*124=4029617
+    unit_register_h(hash_2(I, U),    0)            // IU   (dimensionless biological unit)
+
+    // ── Atomic / nuclear ──────────────────────────────────────────────────────
+    unit_register_h(hash_2(e, V),    DIM_ENERGY)   // eV
+    unit_register_h(3017586,         DIM_ENERGY)   // keV  hash_3(k,e,V)=3000009+107*31+101*62+86*93=3017586
+    unit_register_h(3016656,         DIM_ENERGY)   // MeV  hash_3(M,e,V)=3000009+77*31+101*62+86*93=3016656
+    unit_register_h(3016470,         DIM_ENERGY)   // GeV  hash_3(G,e,V)=3000009+71*31+101*62+86*93=3016470
 }
 
 fn gl_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
@@ -3657,6 +3853,14 @@ fn lex_all() with IO, Mut, Panic, Div {
                     }
                 }
             }
+            // Gen 19: _suffix unit annotation on numeric literals (e.g. 500_mg, 9.8_m)
+            var lit_unit_hash: i64 = 0
+            if p < SRC_LEN && sb(p) == 95 && p + 1 < SRC_LEN && ((sb(p + 1) >= 65 && sb(p + 1) <= 90) || (sb(p + 1) >= 97 && sb(p + 1) <= 122)) {
+                p = p + 1  // skip '_'
+                let us = p
+                while p < SRC_LEN && ((sb(p) >= 65 && sb(p) <= 90) || (sb(p) >= 97 && sb(p) <= 122) || (sb(p) >= 48 && sb(p) <= 57)) { p = p + 1 }
+                lit_unit_hash = gl_name_hash(us, p)
+            }
             if is_float == 1 {
                 // Store mantissa parts without applying the exponent (avoids i64 overflow
                 // for large exponents like 1.0e30). The signed exponent is stored in TX
@@ -3664,9 +3868,12 @@ fn lex_all() with IO, Mut, Panic, Div {
                 TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p
                 TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom
                 TX[TC as usize] = exp_sign * exp_val
+                TU[TC as usize] = lit_unit_hash
                 TL[TC as usize] = cur_line; TC = TC + 1; continue
             }
-            TK[TC as usize] = 4; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TL[TC as usize] = cur_line; TC = TC + 1; continue
+            TK[TC as usize] = 4; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v
+            TU[TC as usize] = lit_unit_hash
+            TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
         if c == 206 && p + 1 < SRC_LEN && sb(p + 1) == 181 {
             TK[TC as usize] = 3
@@ -3718,6 +3925,7 @@ fn lex_all() with IO, Mut, Panic, Div {
             if src_match(s, l, "ontology") { k = 72 }
             if src_match(s, l, "trait") { k = 75 }
             if src_match(s, l, "impl") { k = 76 }
+            if src_match(s, l, "unit") { k = 78 }
             if src_match(s, l, "Some") { k = 57 }
             if src_match(s, l, "None") { k = 58 }
             if src_match(s, l, "Ok") { k = 59 }
@@ -5855,6 +6063,39 @@ fn emit_file_size() with Mut, Panic {
     em(0x48); em(0x81); em(0xc4); em32(160)  // add rsp, 160
 }
 
+// Gen 19: read_line() — read one line from stdin (fd=0) into a fresh mmap buffer.
+// Strips trailing newline. Returns null-terminated string pointer.
+fn emit_read_line_x86() with Mut {
+    // mmap(NULL, 4096, PROT_RW, MAP_PRIVATE|MAP_ANON, -1, 0)
+    em(0x48); em(0x31); em(0xff)              // xor rdi, rdi
+    em(0xbe); em32(4096)                      // mov esi, 4096
+    em(0xba); em32(3)                         // mov edx, PROT_READ|PROT_WRITE
+    em(0x41); em(0xba); em32(0x22)            // mov r10d, MAP_PRIVATE|MAP_ANON
+    em(0x49); em(0xc7); em(0xc0); em32(-1)   // mov r8, -1
+    em(0x4d); em(0x31); em(0xc9)              // xor r9, r9
+    em(0xb8); em32(9); em(0x0f); em(0x05)    // mmap → buf in rax
+    em(0x50)                                  // push buf
+    // read(0, buf, 4095)
+    em(0x48); em(0x89); em(0xc6)              // mov rsi, rax (buf)
+    em(0x48); em(0x31); em(0xff)              // xor rdi, rdi (fd=0 stdin)
+    em(0xba); em32(4095)                      // mov edx, 4095 (leave room for \0)
+    em(0x48); em(0x31); em(0xc0)              // xor rax, rax (sys_read=0)
+    em(0x0f); em(0x05)                        // syscall → bytes_read in rax
+    // If bytes_read <= 0, rax stays negative/zero — still null-terminate
+    em(0x48); em(0x85); em(0xc0)              // test rax, rax
+    em(0x7e); em(0x08)                        // jle read_done (skip newline strip)
+    // Strip trailing '\n' (10) if present
+    em(0x48); em(0x8b); em(0x0c); em(0x24)   // mov rcx, [rsp] (buf)
+    em(0x48); em(0x0f); em(0xbe); em(0x4c); em(0x01); em(0xff) // movsx rcx, byte[rcx+rax-1]
+    em(0x48); em(0x83); em(0xf9); em(0x0a)   // cmp rcx, 10  ('\n')
+    em(0x75); em(0x02)                        // jne read_done
+    em(0x48); em(0xff); em(0xc8)              // dec rax
+    // read_done: null-terminate buf[rax]
+    em(0x48); em(0x8b); em(0x0c); em(0x24)   // mov rcx, [rsp] (buf)
+    em(0xc6); em(0x04); em(0x01); em(0x00)   // mov byte[rcx+rax], 0
+    em(0x58)                                  // pop rax (return buf)
+}
+
 fn emit_syscall6_x86(argc: i64) with Mut {
     if argc >= 1 {
         em(0x48); em(0x8b); em(0x84); em(0x24); em32((argc - 1) * 8)  // mov rax, [rsp+num]
@@ -6519,6 +6760,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
     // Integer literal
     if k == 4 {
         let v = TV[EP as usize]
+        // Gen 19: _suffix unit annotation (e.g. 500_mg)
+        let lit_uh = TU[EP as usize]
         if v == 0 { em(0x31); em(0xc0) }
         else { em(0x48); em(0xb8); em64(v) }
         EP = EP + 1
@@ -6526,6 +6769,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EXPR_TY = 1
         LAST_IS_LITERAL = 1
         LAST_LITERAL_VAL = v
+        if lit_uh != 0 { EXPR_UNIT = lit_uh; EXPR_UNIT_DIM = unit_lookup_dim(lit_uh) }
         return
     }
     // true=35, false=36
@@ -6536,6 +6780,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let fl_int = TV[EP as usize]
         let fl_frac = TF[EP as usize]
         let fl_denom = TD[EP as usize]
+        // Gen 19: _suffix unit annotation (e.g. 9.8_m)
+        let flit_uh = TU[EP as usize]
         // Store exponent info in globals to avoid extra locals shifting compile_primary's frame
         if TX[EP as usize] >= 0 { FL_SCI_SCRATCH = TX[EP as usize]; FL_SCI_NEG = 0 }
         else { FL_SCI_SCRATCH = 0 - TX[EP as usize]; FL_SCI_NEG = 1 }
@@ -6573,6 +6819,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
         EXPR_IS_F64 = 1
         EXPR_TY = 2
+        if flit_uh != 0 { EXPR_UNIT = flit_uh; EXPR_UNIT_DIM = unit_lookup_dim(flit_uh) }
         return
     }
     if k == 48 {
@@ -7879,6 +8126,17 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
+            // Check for read_line() — read one line from stdin (Gen 19)
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_line") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }  // skip ')'
+                emit_read_line_x86()
+                EXPR_IS_F64 = 0
+                EXPR_TY = 3
+                EXPR_TY_HASH = 0
+                return
+            }
             // Check for read_file(path)
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_file") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
@@ -8633,6 +8891,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if vi >= 0 && VAR_TY[vi as usize] == 6 { LAST_EXPR_VAR_IDX = vi }
             // Track unit for dimension checking at + and -
             if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
+            EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
             var_mark_used(ns, ne)
             // Linear variable consumed inside a loop — would be consumed multiple times
             if vi >= 0 && VAR_LINEAR[vi as usize] == 1 && LOOP_DEPTH > 0 {
@@ -9129,10 +9388,13 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        // Gen 19: capture unit dim before push (EXPR_UNIT_DIM is global, will be overwritten)
+        let left_udim = EXPR_UNIT_DIM
         emit_push()
         compile_postfix()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let right_udim = EXPR_UNIT_DIM
         let left_has_knowledge = knowledge_hash_is(left_hash)
         let right_has_knowledge = knowledge_hash_is(right_hash)
         if op == 17 && left_ty == 3 && right_ty == 3 {
@@ -9206,6 +9468,11 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             EXPR_TY = 1
         }
         EXPR_TY_HASH = 0
+        // Gen 19: propagate unit dimension through * and /
+        // op 19 = *, op 20 = /, op 29 = % (modulo, dimensionless result)
+        if op == 19 { EXPR_UNIT = 0; EXPR_UNIT_DIM = dim_add(left_udim, right_udim) }
+        else if op == 20 { EXPR_UNIT = 0; EXPR_UNIT_DIM = dim_sub(left_udim, right_udim) }
+        else { EXPR_UNIT = 0; EXPR_UNIT_DIM = 0 }
         lhs_end_line = TL[(EP - 1) as usize]
     }
 }
@@ -9269,15 +9536,19 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
         let left_unit = EXPR_UNIT
+        let left_unit_dim = EXPR_UNIT_DIM
         emit_push()
         compile_multiplicative()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
-        // Unit dimension mismatch check: both operands have units and they differ
-        if left_unit != 0 && EXPR_UNIT != 0 && left_unit != EXPR_UNIT {
+        let right_unit_dim = EXPR_UNIT_DIM
+        // Gen 19: unit dimension mismatch — compare packed dim vectors, not name hashes
+        // This allows g + kg (both mass^1) while catching m + kg (length vs mass)
+        if left_unit_dim != 0 && right_unit_dim != 0 && left_unit_dim != right_unit_dim {
             tc_linear_violation(op_tok, "unit dimension mismatch")
         }
-        if left_unit != 0 { EXPR_UNIT = left_unit }
+        // Inherit left unit name and dim for the result
+        if left_unit != 0 { EXPR_UNIT = left_unit; EXPR_UNIT_DIM = left_unit_dim }
         let left_has_knowledge = knowledge_hash_is(left_hash)
         let right_has_knowledge = knowledge_hash_is(right_hash)
         if op == 17 && left_ty == 3 && right_ty == 3 {
@@ -10211,6 +10482,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // Skip semicolons
     if k == 27 { EP = EP + 1; return }
 
+    // Skip unit declarations (top-level only; Gen 19)
+    if k == 78 {
+        EP = EP + 1  // skip 'unit'
+        while EP < TC && TK[EP as usize] != 27 && TK[EP as usize] != 0 { EP = EP + 1 }
+        if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ';'
+        return
+    }
     // Skip trait declarations (abstract — no codegen)
     if k == 75 {
         EP = EP + 1  // skip 'trait'
@@ -10571,6 +10849,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 // decl_ty == 2 and decl_ty_hash == hash("mg") for unit annotations
                 if decl_ty == 2 && decl_ty_hash != 0 {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = decl_ty_hash
+                    // Gen 19: also propagate RHS expression unit dim if annotation is a known unit
+                    // (unit_lookup_dim returns 0 for unknown names — no-op in that case)
                 }
             }
         }
@@ -13486,6 +13766,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     LIMIT_ERROR_KIND = 0
     var p: i64 = 0
 
+    // Gen 19: preload unit dimension table (SI, CGS, Imperial, Astronomical, Pharma, Atomic)
+    init_unit_table()
+
     // Pass 0a: register structs, constants, and skip algebra/study declarations
     ST_COUNT = 0
     scan_all_consts()
@@ -13503,6 +13786,45 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // Reset depth at file boundaries (TK==77 = \x01...\x02 marker emitted by lexer)
         if TK[p as usize] == 77 {
             pass0a_depth = 0; p = p + 1; continue
+        }
+        // Gen 19: unit NAME;  or  unit NAME = SCALE * BASE_UNIT;
+        // Registers NAME as a user-declared unit in UNIT_HASH_TABLE.
+        // Minimal form: unit mg;  — just registers the hash (dim looked up from preloaded table)
+        // Future form: unit furlongs = 201.168 * m; — inherits base unit dimension
+        if pass0a_depth == 0 && TK[p as usize] == 78 {
+            p = p + 1  // skip 'unit'
+            if p < TC && TK[p as usize] == 3 {
+                let uns = TS[p as usize]
+                let une = TE[p as usize]
+                let uhash = gl_name_hash(uns, une)
+                p = p + 1  // skip NAME
+                // Check for '= SCALE * BASE;' form
+                if p < TC && TK[p as usize] == 16 {
+                    // = expr * base_unit ; — inherit base unit dimension
+                    p = p + 1  // skip '='
+                    // Skip scale factor (numeric literal(s))
+                    while p < TC && (TK[p as usize] == 4 || TK[p as usize] == 53 || TK[p as usize] == 50 || TK[p as usize] == 19) { p = p + 1 }
+                    // Expect ident (base unit name)
+                    if p < TC && TK[p as usize] == 3 {
+                        let buns = TS[p as usize]
+                        let bune = TE[p as usize]
+                        let base_hash = gl_name_hash(buns, bune)
+                        let base_dim = unit_lookup_dim(base_hash)
+                        unit_register_h(uhash, base_dim)
+                        p = p + 1
+                    } else {
+                        unit_register_h(uhash, 0)  // unknown dim, register as dimensionless
+                    }
+                } else {
+                    // Plain 'unit NAME;' — look up dim from preloaded table (may be 0 if new)
+                    let existing_dim = unit_lookup_dim(uhash)
+                    unit_register_h(uhash, existing_dim)
+                }
+                // Skip to semicolon
+                while p < TC && TK[p as usize] != 27 && TK[p as usize] != 0 { p = p + 1 }
+                if p < TC && TK[p as usize] == 27 { p = p + 1 }
+            }
+            continue
         }
         // Algebra declarations: algebra Name over Base { ... }
         // If block contains 'basis: e0, e1, ...' → register Name as a struct type.
@@ -14219,6 +14541,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if src_match(ens, ene - ens, "Observe") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 64; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Audit") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 128; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Hypothesis") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 256; matched_builtin = 1 }
+                        // Gen 19: Deterministic = bit 12 (4096) — function cannot call IO
+                        if src_match(ens, ene - ens, "Deterministic") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 4096; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Epistemic") {
                             FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 512
                             matched_builtin = 1
@@ -14240,6 +14564,13 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     }
                     ew = ew + 1
                 }
+            }
+            // Gen 19: Deterministic × IO conflict — Deterministic function cannot declare IO
+            if eff_fi < FN_COUNT && (FN_EFFECTS[eff_fi as usize] & 4096) != 0 && (FN_EFFECTS[eff_fi as usize] & 1) != 0 {
+                print("error[E080]: Deterministic function declares IO effect at line ")
+                print_int(TL[FN_NAME_TOK[eff_fi as usize] as usize])
+                print(" — Deterministic functions cannot perform I/O\n")
+                tc_mark_failed()
             }
             // E070/E072: Kernel function validation
             if eff_fi < FN_COUNT && FN_IS_KERNEL[eff_fi as usize] != 0 {

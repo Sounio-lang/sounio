@@ -1,0 +1,183 @@
+// Pharmacological dose calculation with dimensional analysis (Gen 19)
+//
+// Demonstrates scientific computing motivating the Sounio unit system:
+//  - Weight-based dosing (mg/kg) with unit type checking
+//  - Concentration calculations (mg/mL, mcg/mL)
+//  - Renal function adjustment (Cockcroft-Gault, BSA-based)
+//  - Blood pressure monitoring with mmHg units
+//  - Dimensional consistency enforced at compile time
+//
+//@ run-pass
+
+unit mg;  unit mcg;  unit ng;   // mass
+unit mL;  unit L;    unit dL;   // volume
+unit mmHg;                       // pressure
+unit mol; unit mmol;             // amount
+unit h;   unit min;  unit s;    // time
+unit kg;  unit lb;               // body mass
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+let LB_TO_KG: f64 = 0.453592
+let ML_TO_L:  f64 = 0.001
+
+// ── Deterministic dose helpers ────────────────────────────────────────────────
+
+// Weight-based total dose
+fn weight_dose(dose_mg_per_kg: f64, weight_kg: f64) -> f64 with Deterministic {
+    return dose_mg_per_kg * weight_kg
+}
+
+// Adjusted body weight (for obese patients): ABW = IBW + 0.4*(actual - IBW)
+fn adjusted_body_weight(ibw_kg: f64, actual_kg: f64) -> f64 with Deterministic {
+    if actual_kg <= ibw_kg { return actual_kg }
+    return ibw_kg + 0.4 * (actual_kg - ibw_kg)
+}
+
+// Ideal body weight (Devine formula, male): IBW = 50 + 2.3 * (height_in - 60)
+fn ibw_male_kg(height_in: f64) -> f64 with Deterministic {
+    let excess: f64 = height_in - 60.0
+    if excess < 0.0 { return 50.0 }
+    return 50.0 + 2.3 * excess
+}
+
+// Cockcroft-Gault creatinine clearance (mL/min)
+fn cockcroft_gault(age_yr: f64, weight_kg: f64, scr_mg_dL: f64, is_female: i64) -> f64 with Deterministic {
+    let cg: f64 = (140.0 - age_yr) * weight_kg / (72.0 * scr_mg_dL)
+    if is_female != 0 { return cg * 0.85 }
+    return cg
+}
+
+// Vancomycin AUC/MIC target-based dosing initial estimate
+// Targets AUC24 400–600 mg·h/L for MIC = 1 mg/L
+fn vancomycin_dose_q12h(weight_kg: f64, crcl_ml_min: f64) -> f64 with Deterministic {
+    // Simplified: initial dose ~15-20 mg/kg, adjusted for renal function
+    var dose_per_kg: f64 = 15.0
+    if crcl_ml_min < 30.0 { dose_per_kg = 10.0 }  // severe renal impairment
+    else if crcl_ml_min < 60.0 { dose_per_kg = 12.5 }
+    let total: f64 = dose_per_kg * weight_kg
+    // Round to nearest 250 mg
+    let rounded: f64 = (total / 250.0 + 0.5) * 250.0 - ((total / 250.0 + 0.5) * 250.0 % 250.0)
+    return rounded
+}
+
+// IV infusion concentration check: is concentration within safe range?
+// Returns 1 if safe, 0 if too concentrated
+fn concentration_safe(dose_mg: f64, volume_mL: f64, max_mg_per_mL: f64) -> i64 with Deterministic {
+    let conc: f64 = dose_mg / volume_mL
+    if conc <= max_mg_per_mL { return 1 }
+    return 0
+}
+
+// MAP (mean arterial pressure) from systolic and diastolic
+fn map_mmhg(systolic: f64, diastolic: f64) -> f64 with Deterministic {
+    return diastolic + (systolic - diastolic) / 3.0
+}
+
+// ── Main demo ─────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO {
+    println("=== Pharmacological Dose Calculator (Gen 19 Units Demo) ===")
+    println("")
+
+    // Patient data
+    let age:        f64 = 68.0         // years
+    let height_in:  f64 = 68.0         // inches (5'8")
+    let actual_wt:  kg  = 95.0         // kg (obese)
+    let scr:        f64 = 1.4          // serum creatinine mg/dL
+    let is_female:  i64 = 0
+
+    // Ideal and adjusted body weights
+    let ibw:   f64 = ibw_male_kg(height_in)
+    let abw:   f64 = adjusted_body_weight(ibw, actual_wt)
+
+    println("── Patient ────────────────────────────────────────────────")
+    print("Age:            ")
+    print_int(age as i64)
+    println(" yr")
+    print("Actual weight:  ")
+    print_f64(actual_wt)
+    println(" kg")
+    print("IBW:            ")
+    print_f64(ibw)
+    println(" kg")
+    print("ABW:            ")
+    print_f64(abw)
+    println(" kg")
+
+    // Renal function
+    let crcl: f64 = cockcroft_gault(age, abw, scr, is_female)
+    println("")
+    println("── Renal Function ─────────────────────────────────────────")
+    print("CrCl (CG):      ")
+    print_f64(crcl)
+    println(" mL/min")
+    if crcl >= 60.0 { println("Category: Normal/Mild impairment") }
+    else if crcl >= 30.0 { println("Category: Moderate impairment") }
+    else { println("Category: Severe impairment — dose reduction required") }
+
+    // Vancomycin dosing
+    let vanc_dose: f64 = vancomycin_dose_q12h(abw, crcl)
+    println("")
+    println("── Vancomycin Dosing ──────────────────────────────────────")
+    print("Recommended dose (q12h): ")
+    print_f64(vanc_dose)
+    println(" mg")
+    // Infusion in 250 mL NS — check concentration (max 5 mg/mL)
+    let vol_mL: f64 = 250.0
+    let is_safe: i64 = concentration_safe(vanc_dose, vol_mL, 5.0)
+    print("Concentration (")
+    print_f64(vanc_dose)
+    print(" mg / ")
+    print_f64(vol_mL)
+    print(" mL): ")
+    print_f64(vanc_dose / vol_mL)
+    println(" mg/mL")
+    if is_safe != 0 { println("Concentration: SAFE (≤5 mg/mL)") }
+    else { println("Concentration: TOO HIGH — dilute further") }
+
+    // Blood pressure
+    let sbp: mmHg = 132.0
+    let dbp: mmHg = 84.0
+    // Both are same dimension (pressure) → subtraction valid
+    let pp: f64 = sbp - dbp   // pulse pressure
+    let map: f64 = map_mmhg(sbp, dbp)
+    println("")
+    println("── Blood Pressure ─────────────────────────────────────────")
+    print("SBP: ")
+    print_f64(sbp)
+    println(" mmHg")
+    print("DBP: ")
+    print_f64(dbp)
+    println(" mmHg")
+    print("PP:  ")
+    print_f64(pp)
+    println(" mmHg")
+    print("MAP: ")
+    print_f64(map)
+    println(" mmHg")
+
+    // Electrolytes — dimensionless IU / dimensioned mmol example
+    let sodium:     mmol = 138.0   // mEq/L
+    let potassium:  mmol = 4.1
+    let insulin_dose: IU = 10.0    // units
+    println("")
+    println("── Labs / Medications ─────────────────────────────────────")
+    print("Na+:     ")
+    print_f64(sodium)
+    println(" mmol/L")
+    print("K+:      ")
+    print_f64(potassium)
+    println(" mmol/L")
+    print("Insulin: ")
+    print_f64(insulin_dose)
+    println(" IU")
+
+    println("")
+    println("=== Dimensional analysis enforced throughout ===")
+    println("All mass units (mg, mcg, kg) have dimension: mass^1")
+    println("All pressure units (mmHg) have dimension: mass^1 * length^-1 * time^-2")
+    println("pp = sbp - dbp: valid (same pressure dimension)")
+
+    return 0
+}
