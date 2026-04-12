@@ -1,5 +1,5 @@
-.PHONY: build check test test-stdlib clean fmt install help lint lint-fix \
-         ops-guardrail-local ops-infra-up ops-strict-up ops-status
+.PHONY: build check test test-stdlib clean fmt install help lint lint-fix lint-docs \
+         docs-gen ops-guardrail-local ops-infra-up ops-strict-up ops-status
 
 SOUC := ./bin/souc
 
@@ -37,6 +37,8 @@ build:               ## Bootstrap compile: gen1 → gen2 → gen3 (fixed-point v
 check:               ## Type-check self-hosted compiler and run lint gates
 	@echo "→ Type-checking self-hosted/compiler/lean_single.sio"
 	$(SOUC) check self-hosted/compiler/lean_single.sio
+	@echo "→ Regenerating stdlib API reference"
+	@bash scripts/build/gen_stdlib_api_md.sh
 	@echo "→ Running lint gates..."
 	@bash scripts/ci/full_gate.sh 2>&1 | tail -30
 
@@ -62,6 +64,12 @@ lint:                ## Lint .sio files for Rust hallucinations (LLM grammar enf
 lint-fix:            ## Apply automatic fixes to a file: make lint-fix FILE=path/to/file.sio
 	@if [ -z "$(FILE)" ]; then echo "Usage: make lint-fix FILE=path/to/file.sio"; exit 1; fi
 	@python3 scripts/dev/sounio-lint.py --fix $(FILE)
+
+docs-gen:            ## Regenerate stdlib API reference from source
+	@bash scripts/build/gen_stdlib_api_md.sh
+
+lint-docs:           ## Extract and check code snippets from docs/**/*.md
+	@bash scripts/ci/check_doc_snippets.sh
 
 install:             ## Install souc compiler to ~/.local/bin/souc
 	mkdir -p ~/.local/bin
