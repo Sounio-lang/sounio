@@ -316,6 +316,8 @@ var EPIST_TIER_PLATINUM: i64 = 0
 var EPIST_TIER_GOLD:     i64 = 0
 var EPIST_TIER_SILVER:   i64 = 0
 var EPIST_TIER_BRONZE:   i64 = 0
+// Gen 16 Track B: EpistemicComplete effect enforcement
+var EPIST_EFFECT_VIOLATIONS: i64 = 0
 // Gen 15 (Option B): epistemic certificate (.econf) support
 // --emit-econf: print function confidence table to diagnostic stream
 // --load-econf: pre-populate FN_EFF_CONF from a previously emitted .econf
@@ -11420,6 +11422,7 @@ fn ety_mk_bool() -> i64 with Mut { return ety_alloc(3, 1000, 0) }
 fn ety_mk_string() -> i64 with Mut { return ety_alloc(4, 1000, 0) }
 fn ety_mk_void() -> i64 with Mut { return ety_alloc(5, 1000, 0) }
 fn ety_mk_unknown() -> i64 with Mut { return ety_alloc(0, 0, 1000) }
+fn ety_mk_struct() -> i64 with Mut { return ety_alloc(6, 1000, 0) }  // Gen 16 Track A: kind=6 for struct/enum
 
 fn ety_conf(id: i64) -> i64 {
     if id < 0 || id >= ETY_COUNT { return 0 }
@@ -11490,6 +11493,8 @@ fn ety_from_tnk(tnk: i64) -> i64 {
     if tnk == 3 { return 4 }
     if tnk == 4 { return 3 }
     if tnk == 5 { return 5 }
+    if tnk == 6 { return 6 }   // Gen 16 Track A: struct → kind=6, not unknown
+    if tnk == 7 { return 6 }   // Gen 16 Track A: enum  → same struct pool slot
     return 0
 }
 
@@ -11549,6 +11554,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     let ty_bool = ety_mk_bool()        // 3
     let ty_string = ety_mk_string()    // 4
     let ty_void = ety_mk_void()        // 5
+    let ty_struct_id = ety_mk_struct() // 6  Gen 16 Track A: struct canonical type
     EPIST_TOTAL_EXPR = 0
     EPIST_HIGH_CONF = 0
     EPIST_LOW_CONF = 0
@@ -11561,6 +11567,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     EPIST_TIER_GOLD = 0
     EPIST_TIER_SILVER = 0
     EPIST_TIER_BRONZE = 0
+    EPIST_EFFECT_VIOLATIONS = 0  // Gen 16 Track B
 
     // Phase A: Collect effect declarations for all registered functions
     var fi: i64 = 0
@@ -12425,7 +12432,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                             while rfj < FN_COUNT {
                                 if name_eq(FN_NS[rfj as usize], FN_NE[rfj as usize], rns, rne) {
                                     EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
-                                    EXPR_CONF[p as usize] = 1000
+                                    EXPR_CONF[p as usize] = FN_EFF_CONF[rfj as usize]  // Gen 16 Track A: propagate actual effect conf
                                     refine_changed = refine_changed + 1
                                     break
                                 }
@@ -12603,6 +12610,68 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
         }
         p = p + 1
     }
+
+    // Gen 16 Track B: EpistemicComplete effect enforcement
+    // Functions declaring `with Epistemic` (bit 512) must have zero uncertain
+    // expression tokens in their body. Any token with 0 < EXPR_CONF < GATE_THRESHOLD
+    // indicates an epistemic incompleteness — compile error.
+    var ec_fi: i64 = 0
+    while ec_fi < FN_COUNT {
+        if (FN_EFFECTS[ec_fi as usize] & 512) != 0 {
+            // Locate function body: scan from name token forward for first '{'
+            let ec_name_tok = FN_NAME_TOK[ec_fi as usize]
+            var ec_tp: i64 = ec_name_tok
+            var ec_body_start: i64 = 0 - 1
+            while ec_tp < TC && ec_body_start < 0 {
+                if TK[ec_tp as usize] == 8 { ec_body_start = ec_tp }
+                ec_tp = ec_tp + 1
+            }
+            if ec_body_start >= 0 {
+                // Walk body tracking brace depth; flag uncertain expression tokens
+                var ec_depth: i64 = 1
+                var ec_bp: i64 = ec_body_start + 1
+                while ec_bp < TC && ec_depth > 0 {
+                    let ec_btk = TK[ec_bp as usize]
+                    if ec_btk == 8 { ec_depth = ec_depth + 1 }
+                    if ec_btk == 9 { ec_depth = ec_depth - 1 }
+                    if ec_depth > 0 {
+                        // Check: is this token an expression with non-zero uncertain confidence?
+                        var ec_is_expr: i64 = 0
+                        if ec_btk == 3 || ec_btk == 4 || ec_btk == 5 || ec_btk == 53 { ec_is_expr = 1 }
+                        if ec_btk == 35 || ec_btk == 36 { ec_is_expr = 1 }
+                        if ec_btk >= 17 && ec_btk <= 26 { ec_is_expr = 1 }
+                        if ec_is_expr == 1 {
+                            let ec_conf = EXPR_CONF[ec_bp as usize]
+                            if ec_conf > 0 && ec_conf < GATE_THRESHOLD {
+                                EPIST_EFFECT_VIOLATIONS = EPIST_EFFECT_VIOLATIONS + 1
+                                print("error: EpistemicComplete violation in fn ")
+                                var ec_np: i64 = FN_NS[ec_fi as usize]
+                                while ec_np < FN_NE[ec_fi as usize] {
+                                    print_char(SRC[ec_np as usize] as i64)
+                                    ec_np = ec_np + 1
+                                }
+                                print(": uncertain token at pos ")
+                                print_int(ec_bp)
+                                print(" (conf=")
+                                print_int(ec_conf)
+                                print(" < ")
+                                print_int(GATE_THRESHOLD)
+                                print(")\n")
+                            }
+                        }
+                    }
+                    ec_bp = ec_bp + 1
+                }
+            }
+        }
+        ec_fi = ec_fi + 1
+    }
+    if EPIST_EFFECT_VIOLATIONS > 0 {
+        print("error: ")
+        print_int(EPIST_EFFECT_VIOLATIONS)
+        print(" EpistemicComplete violation(s) — `with Epistemic` requires 100% body confidence\n")
+    }
+
     // Recount after refinement — only count tokens that are expressions
     EPIST_TOTAL_EXPR = 0
     EPIST_HIGH_CONF = 0
@@ -14015,6 +14084,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
     // Pass 1d: Epistemic type inference (Patient Zero)
     epistemic_infer_pass()
+    // Gen 16 Track B: abort if any EpistemicComplete violations detected
+    if EPIST_EFFECT_VIOLATIONS > 0 { return 1 }
 
     // Pass 2: compile each function
     p = 0
