@@ -147,9 +147,57 @@ Apply Change 1 pattern to the ARM A64 handler at line ~18983.
 - Silent bounds-check at line 5419 explains masked failure.
 - Pattern-match to closure-handling shows the correct idiom exists.
 
-**Confidence in fix**: 100%
-- Slot reset is semantically correct.
-- Pattern proven elsewhere in the compiler.
-- No algorithmic impact.
+**Confidence in fix**: ~~100%~~ → **REVISED: ~40% after first attempt failed**
 
-**Unknowns**: None identified. If the fix doesn't resolve the symptom, the fallback hypothesis is that the bounds check at line 5419 should be replaced with an assertion or buffer growth, but this would require BSS layout changes with larger risk.
+## UPDATE 2026-04-12: First fix attempt failed bootstrap
+
+**What was tried**: Added `let saved_ns_while = NEXT_SLOT` at the top of the x86 while-loop handler and `NEXT_SLOT = saved_ns_while` at the bottom, immediately before the epistemic confidence degradation.
+
+**Outcome**: gen1 compiled successfully. gen2 compiled via gen1 succeeded (4523543 bytes). But gen3 compiled via gen2 FAILED with "error: no main". This is a bootstrap regression.
+
+**Likely reason**: resetting `NEXT_SLOT` alone without also resetting `VAR_COUNT` (the symbol table) creates stale variable entries pointing to slots that subsequent code will re-allocate. When the next function body after the loop allocates new locals at the freed slots, they collide with stale entries that the name resolver still finds. The "no main" error suggests function-or-variable lookup was corrupted in a way that made `main` unfindable.
+
+**Reverted cleanly**. gen2 == gen3 fixed-point restored (md5=`24cfaccb`).
+
+## Revised fix hypothesis
+
+The correct fix requires **coordinated save/restore of both `NEXT_SLOT` and `VAR_COUNT`** at the loop boundary, mirroring the pattern at lines 6728/6780 used for function-body scope:
+
+```sio
+let saved_ns = NEXT_SLOT
+let saved_vc = VAR_COUNT
+// ... compile loop body ...
+NEXT_SLOT = saved_ns
+VAR_COUNT = saved_vc
+```
+
+But this has its own risk: the loop body's *var* declarations (not let) may be intended to persist across iterations at runtime (same `var` used each time the body runs). Resetting VAR_COUNT could make those unfindable on the second iteration.
+
+Actually, this is fine: the body is compiled ONCE. Runtime iterations reuse the same slots. But at compile time, after the loop block exits, the scope is gone anyway per lexical-scope rules — so resetting VAR_COUNT to the pre-loop value matches the language semantics.
+
+**However**, the `let` bindings inside the loop body that reference uncertain values DO need their variance slots to persist across loop statements within the body (e.g., `let k1 = rhs(a, b)` then `let k2 = rhs(k1, c)`). As long as VAR_COUNT and NEXT_SLOT reset happens AFTER the loop body is fully compiled, this should be fine.
+
+## What to try next
+
+1. **Implement coordinated save/restore**: save both `NEXT_SLOT` and `VAR_COUNT` at loop entry, restore both at loop exit.
+2. **Test on a minimal case first**: a tiny compile-fail test that demonstrates slot overflow without other confounders.
+3. **Bisect**: apply the fix to ONE of (x86 while, x86 for, A64 while) and verify bootstrap. If any fails, the approach is wrong.
+4. **Alternative deeper fix**: increase the variance buffer slot count from 1024 to 16384 (matching `VAR_CONFIDENCE`'s 16K). This would avoid the overflow without any scope changes. Cost: 16× memory (1MB of BSS per 8-channel table, manageable).
+
+## Fallback: increase buffer size instead of scope fix
+
+Given the failed fix attempt, the **simpler and lower-risk approach** may be to just increase `RT_VARIANCE_BUF_BSS_OFF`'s slot count from 1024 to 16384. This:
+
+- Requires NO scoping changes (zero risk of breaking bootstrap).
+- Matches `VAR_COUNT`'s existing cap of 16384.
+- Uses 1 MB of additional BSS per 8-channel scratch table, vs. 64 KB currently.
+- Would fully eliminate the overflow for realistic programs (`rapamycin_epistemic_adaptive.sio` has maybe 100-200 slots, not 1024+).
+
+This is a simpler edit: change the hardcoded 1024 and 8192 to larger values in:
+- `emit_copy_scratch_to_var_variance_x86` (line 5419): `if slot < 0 || slot >= 16384 { return }`
+- Variance buffer allocation: check where `RT_VARIANCE_BUF_BSS_OFF` is initialized
+- `ch * 8192` addressing: update to `ch * (16384 * 8) = ch * 131072`
+
+**Recommended next step**: try the buffer-size approach before retrying the scope-reset approach. The scope fix is elegant but requires understanding Sounio's full variable lifecycle; the buffer expansion is a one-liner.
+
+**Unknowns**: whether the slot allocator even goes above 1024 in practice. The "no main" error suggests the slot machinery is doing something beyond pure monotonic allocation — function bodies may already be resetting somewhere. A small investigation: instrument `NEXT_SLOT` with a `max_seen` counter to learn what values are actually hit during `rapamycin_epistemic_adaptive.sio` compilation.
