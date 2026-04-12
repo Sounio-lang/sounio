@@ -7,6 +7,8 @@ validated_by: A4
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
 
+> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: self-hosted/
+
 # Known Language Limitations
 
 This document tracks limitations in the Sounio language implementation.

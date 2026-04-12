@@ -7,6 +7,8 @@ validated_by: A3
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.stdlib.stdlib-module-organization
 -->
 
+> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: stdlib/
+
 # STDLIB Module Organization (Executable View)
 
 This page describes how STDLIB modules are organized for current reliability

@@ -7,6 +7,8 @@ validated_by: A5
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.minimum-viable-sounio
 -->
 
+> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: committed artifacts
+
 # Minimum Viable Sounio (Current Contract)
 
 This guide is intentionally conservative. It describes what is currently validated by committed artifacts and repository gates, not the full ambition implied by the source tree.

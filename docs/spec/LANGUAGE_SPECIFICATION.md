@@ -7,6 +7,8 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.language-specification
 -->
 
+> **Status**: Beta | **Last validated**: 2026-03-07 | **Source**: spec/
+
 # The Sounio Programming Language
 
 ## Language Specification v1.0.0-beta.6

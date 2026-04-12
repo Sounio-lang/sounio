@@ -7,6 +7,8 @@ validated_by: A5
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-gotchas
 -->
 
+> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: tests/run-pass/
+
 # Sounio Gotchas & Common Mistakes
 
 These are the mistakes LLMs (and humans) make writing Sounio. Learn them.

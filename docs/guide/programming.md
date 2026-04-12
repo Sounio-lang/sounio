@@ -7,6 +7,8 @@ validated_by: A5
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.programming
 -->
 
+> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: tests/run-pass/
+
 # Sounio Programming Guide for LLMs
 
 This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio is a novel L0 systems + scientific programming language - it is NOT a dialect of Rust, Julia, Python, or any other language.
@@ -74,15 +76,15 @@ If you are generating `.sio` code, prefer the working subset above.
 
 ### Hello World
 
-```d
-fn main() -> i32 {
-    return 0
+```sio
+fn main() with IO {
+    println("Hello, Sounio!")
 }
 ```
 
 ### Variables
 
-```d
+```sio
 // Immutable binding (preferred)
 let x = 5
 let y: i32 = 10
@@ -97,7 +99,7 @@ const PI: f64 = 3.14159265359
 
 ### Functions
 
-```d
+```sio
 // Basic function
 fn add(a: i32, b: i32) -> i32 {
     return a + b
@@ -125,7 +127,7 @@ impl Point {
 
 ### Control Flow
 
-```d
+```sio
 // If-else
 if condition {
     // code
@@ -176,7 +178,7 @@ loop {
 
 ### Data Structures
 
-```d
+```sio
 // Structs
 struct Point {
     x: f64,
@@ -208,7 +210,7 @@ type Matrix = [[f64]]
 
 **IMPORTANT: Sounio uses `&!` for exclusive/mutable references, NOT `&mut`**
 
-```d
+```sio
 // Shared reference (read-only)
 fn read_value(x: &i32) -> i32 {
     return *x
@@ -227,7 +229,7 @@ fn process(data: &[f64], output: &![f64]) {
 
 ### Arrays and Slices
 
-```d
+```sio
 // Fixed-size array
 let arr: [i32; 5] = [1, 2, 3, 4, 5]
 
@@ -249,7 +251,7 @@ let combined = arr1 ++ arr2
 
 ### Closures
 
-```d
+```sio
 // Basic closure
 let add_one = |x: i32| -> i32 { x + 1 }
 
@@ -271,7 +273,7 @@ let process = |data: &[f64]| -> f64 {
 
 ### Modules and Imports
 
-```d
+```sio
 // Module declaration (file-level, optional):
 // module mymodule
 
@@ -298,7 +300,7 @@ pub fn exported_function() -> i32 {
 
 ### Primitive Types
 
-```d
+```sio
 // Integers (signed)
 i8, i16, i32, i64, i128
 
@@ -321,7 +323,7 @@ string  // UTF-8 string
 
 ### Linear and Affine Types
 
-```d
+```sio
 // Linear type: must be used exactly once
 linear struct Connection {
     socket: Socket,
@@ -344,7 +346,7 @@ struct Point { x: f64, y: f64 }
 
 ### Generics
 
-```d
+```sio
 // Generic struct
 struct Container<T> {
     value: T,
@@ -517,7 +519,7 @@ Sounio has first-class algebraic effects for tracking computational side effects
 
 ### Built-in Effects
 
-```d
+```sio
 // IO effect - file/network/console operations
 fn read_file(path: string) -> string with IO {
     // file operations
@@ -559,7 +561,7 @@ async fn fetch_data() -> Data with Async {
 
 ### Custom Effects
 
-```d
+```sio
 // Define a custom effect
 effect State<T> {
     fn get() -> T;
@@ -593,7 +595,7 @@ fn main() {
 
 ### Effect Handlers
 
-```d
+```sio
 // Exception-like effect
 effect Exn {
     fn throw(message: String) -> !;
@@ -786,7 +788,7 @@ Sounio has built-in dimensional analysis for scientific computing.
 
 ### Defining Units
 
-```d
+```sio
 // Literals with units (underscore prefix)
 let mass = 500_mg
 let volume = 10_mL
@@ -799,7 +801,7 @@ let conc: mg/L = 50.0<mg/L>
 
 ### Unit Arithmetic
 
-```d
+```sio
 // Units are tracked through computations
 let dose: mg = 500.0_mg
 let volume: L = 0.5_L
@@ -815,7 +817,7 @@ let mass_g: g = mass_kg  // Automatic conversion
 
 ### Common Unit Types
 
-```d
+```sio
 // Mass
 mg, g, kg
 
@@ -837,7 +839,7 @@ mL/min, mg/kg, L/h/kg
 
 ### Units in Structs
 
-```d
+```sio
 struct PKParams {
     cl: L/h,       // Clearance
     v: L,          // Volume of distribution
@@ -857,7 +859,7 @@ struct Patient {
 
 ### Kernel Definition
 
-```d
+```sio
 kernel fn vector_add(n: i64) with GPU {
 }
 
@@ -867,7 +869,7 @@ kernel fn scale_vector(factor: f64, n: i64) with GPU, Div {
 
 ### Checked Public Surface
 
-```d
+```sio
 perform GPU.launch(vector_add, grid, block)(n)
 perform GPU.launch(scale_vector, grid, block)(2.0, n)
 perform GPU.sync()
@@ -877,7 +879,7 @@ perform GPU.sync()
 
 Use the checked GPU profile when validating GPU syntax:
 
-```d
+```sio
 fn main() with GPU, IO {
     let n: i64 = 1024
     let grid = (16, 1, 1)
@@ -890,7 +892,7 @@ fn main() with GPU, IO {
 
 Validation commands:
 
-```d
+```sio
 "$SOUC_GPU_BIN" check examples/gpu.sio
 "$SOUC_GPU_BIN" check tests/run-pass/gpu_launch_surface.sio
 "$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
@@ -898,7 +900,7 @@ Validation commands:
 
 ### Important Limitation
 
-```d
+```sio
 // Older sketches used `gpu.thread_id`, `gpu.block_id`, `gpu.block_dim`,
 // and `gpu.alloc`. Those names are not yet resolved by the checked public
 // GPU artifact, so do not present them as the default public syntax.
@@ -912,7 +914,7 @@ Validation commands:
 
 > ⚠️ **ASPIRATIONAL**: ODE DSL syntax is not implemented. Use stdlib/ode functions directly.
 
-```d
+```sio
 ode ExponentialDecay {
     state {
         y: f64,
@@ -936,7 +938,7 @@ ode ExponentialDecay {
 
 > ⚠️ **ASPIRATIONAL**: Probabilistic effect is type-level only. No inference runtime.
 
-```d
+```sio
 fn bayesian_inference() with Prob {
     // Prior distribution
     let theta = sample(Beta(1.0, 1.0))
@@ -957,7 +959,7 @@ let posterior = infer(bayesian_inference, method: MCMC(samples: 10000))
 
 > ⚠️ **ASPIRATIONAL**: Causal DSL syntax is not implemented. Dead code in compiler.
 
-```d
+```sio
 causal DrugEffect {
     nodes {
         dose: f64,
@@ -990,7 +992,7 @@ let cf = counterfactual(DrugEffect,
 
 > ⚠️ **PARTIAL**: `grad()` works on GPU. CPU `jacobian`/`hessian` are stubs.
 
-```d
+```sio
 // Dual numbers for forward-mode AD
 let x = dual(3.0, 1.0)  // value = 3, derivative seed = 1
 let y = x * x           // y.value = 9, y.deriv = 6
@@ -1011,7 +1013,7 @@ let hessian_matrix = hessian(scalar_function, at: point)
 
 ### Linear Algebra Types
 
-```d
+```sio
 // Vectors
 let v2: vec2 = vec2(1.0, 2.0)
 let v3: vec3 = vec3(1.0, 2.0, 3.0)
@@ -1042,7 +1044,7 @@ Sounio tracks knowledge, confidence, and provenance at the type level.
 
 ### Knowledge Type
 
-```d
+```sio
 // Knowledge with metadata
 let measurement: Knowledge[
     content = f64,
@@ -1058,7 +1060,7 @@ let conf = measurement.confidence()
 
 ### Uncertainty Propagation
 
-```d
+```sio
 struct Uncertain {
     mean: f64,
     std: f64,
@@ -1079,7 +1081,7 @@ let value = 100.0 +- 2.5  // 100 with uncertainty 2.5
 
 ### Provenance Tracking
 
-```d
+```sio
 // Provenance sources
 let observed_data = Source::Measured("lab_id_123")
 let derived_value = Source::Computed(formula, inputs)
@@ -1101,7 +1103,7 @@ Sounio supports C-compatible FFI through raw pointer types and extern blocks.
 
 ### Raw Pointer Types
 
-```d
+```sio
 // Const raw pointer (read-only)
 let ptr: *const i32 = null_ptr()
 
@@ -1115,7 +1117,7 @@ let mut_ptr = null_mut()
 
 ### Extern Blocks (C FFI)
 
-```d
+```sio
 // Declare external C functions
 extern "C" {
     fn malloc(size: i64) -> *mut i8;
@@ -1135,7 +1137,7 @@ extern "C" {
 
 ### Pointer Operations
 
-```d
+```sio
 // Create null pointers
 let const_ptr = null_ptr()      // *const ()
 let mut_ptr = null_mut()        // *mut ()
@@ -1176,7 +1178,7 @@ let align = align_of()   // Alignment of type
 
 ### FFI Best Practices
 
-```d
+```sio
 // Always check for null before using pointers
 fn safe_strlen(s: *const i8) -> i64 {
     if is_null(s) {
@@ -1204,7 +1206,7 @@ Sounio includes a standard library with modules for I/O, JSON, strings, and more
 
 ### I/O Module (`std.io`)
 
-```d
+```sio
 import io::*;
 
 // Read entire file as string
@@ -1247,7 +1249,7 @@ let ext = path::extension("file.txt");              // Some("txt")
 
 ### JSON Module (`std.json`)
 
-```d
+```sio
 import json::*;
 
 // Parse JSON string
@@ -1306,7 +1308,7 @@ let records = parse_jsonl(content)?;
 
 ### String Module (`std.str`)
 
-```d
+```sio
 import str::*;
 
 // String checks
@@ -1359,7 +1361,7 @@ let combined = "hello" ++ " " ++ "world";
 
 ### Comparison Module (`std.cmp`)
 
-```d
+```sio
 import cmp::*;
 
 // Min and max
@@ -1386,7 +1388,7 @@ match a.cmp(&b) {
 
 ### Collections Module (`std.collections`)
 
-```d
+```sio
 import collections::*;
 
 // Vec (dynamic array)
@@ -1929,7 +1931,7 @@ username = "your-username"
 
 ### Rust Syntax That Does NOT Work
 
-```d
+```sio
 // WRONG: &mut does not exist
 fn wrong(x: &mut i32) { }     // ERROR
 // CORRECT: use &!
@@ -1958,7 +1960,7 @@ fn foo<'a>(x: &'a str) { }    // ERROR - no lifetimes
 
 ### Features Not Implemented
 
-```d
+```sio
 // NO: Macros (limited support)
 macro_rules! my_macro { }     // NOT supported
 assert!(condition)            // NOT supported
@@ -1993,7 +1995,7 @@ type Item = i32               // In trait context - limited
 
 ### Syntax Differences from Rust
 
-```d
+```sio
 // Semicolons: optional at end of expressions
 let x = 5      // OK (no semicolon)
 let x = 5;     // OK (with semicolon)
@@ -2020,7 +2022,7 @@ fn foo() -> i32 with IO { }   // Sounio style
 
 ### Error Handling
 
-```d
+```sio
 // Option for optional values
 fn find(arr: &[i32], target: i32) -> Option<i32> {
     for i in 0..len(arr) {
@@ -2051,7 +2053,7 @@ fn safe_operation() -> i32 with Fail {
 
 ### Resource Management
 
-```d
+```sio
 // Linear types ensure cleanup
 linear struct Connection {
     handle: *mut c_void,
@@ -2078,7 +2080,7 @@ Sounio supports `for-in` loops for both range iteration and collection iteration
 
 #### Range Iteration
 
-```d
+```sio
 // Exclusive range: 0, 1, 2, ..., n-1
 for i in 0..n {
     println(i)
@@ -2105,7 +2107,7 @@ for i in 0.. {
 
 #### Collection Iteration
 
-```d
+```sio
 // Array iteration
 let arr = [10, 20, 30]
 for x in arr {
@@ -2126,7 +2128,7 @@ for x in &arr {
 
 #### Loop Control
 
-```d
+```sio
 // Break exits the loop early
 for i in 0..100 {
     if i >= 10 {
@@ -2145,7 +2147,7 @@ for i in 0..10 {
 
 #### Index-Based Iteration
 
-```d
+```sio
 // When you need the index
 for i in 0..len(arr) {
     arr[i] = arr[i] * 2
@@ -2161,7 +2163,7 @@ for i in 0..rows {
 
 #### Functional Style
 
-```d
+```sio
 let doubled = numbers.map(|x| x * 2)
 let sum = numbers.fold(0, |acc, x| acc + x)
 let filtered = numbers.filter(|x| x > 0)
@@ -2169,7 +2171,7 @@ let filtered = numbers.filter(|x| x > 0)
 
 ### Struct Patterns
 
-```d
+```sio
 // Constructor pattern
 struct Point {
     x: f64,
@@ -2231,7 +2233,7 @@ impl ConfigBuilder {
 
 ### Scientific Computing Patterns
 
-```d
+```sio
 // Uncertainty-aware calculations
 fn calculate_with_uncertainty(
     measured: Uncertain,
@@ -2267,7 +2269,7 @@ fn parallel_process(n: i64) with GPU, IO {
 
 ### 1. Using &mut Instead of &!
 
-```d
+```sio
 // WRONG
 fn increment(x: &mut i32) { }
 
@@ -2277,7 +2279,7 @@ fn increment(x: &!i32) { }
 
 ### 2. Forgetting Effect Annotations
 
-```d
+```sio
 // WRONG - missing IO effect
 fn print_value(x: i32) {
     println(x)  // ERROR: IO effect not declared
@@ -2291,7 +2293,7 @@ fn print_value(x: i32) with IO {
 
 ### 3. Using Rust Macros
 
-```d
+```sio
 // WRONG
 assert!(x > 0)
 println!("value: {}", x)
@@ -2305,7 +2307,7 @@ println("value: " + x.to_string())
 
 ### 4. Assuming Implicit Semicolons Work Like Rust
 
-```d
+```sio
 // Both work in Sounio, but be consistent:
 fn foo() -> i32 {
     return 42    // OK
@@ -2318,7 +2320,7 @@ fn bar() -> i32 {
 
 ### 5. Tuple Destructuring
 
-```d
+```sio
 // WRONG
 let (x, y) = point
 
@@ -2332,7 +2334,7 @@ let y = point.y
 
 ### 6. String Formatting
 
-```d
+```sio
 // WRONG
 println!("x = {}, y = {}", x, y)
 
@@ -2344,7 +2346,7 @@ println(format("x = {}, y = {}", x, y))  // if format() is available
 
 ### 7. Generic Bounds Syntax
 
-```d
+```sio
 // WRONG (Rust-style)
 fn foo<T: Clone + Debug>(x: T) { }
 
