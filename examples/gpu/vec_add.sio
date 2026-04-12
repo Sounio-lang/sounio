@@ -1,0 +1,49 @@
+// examples/gpu/vec_add.sio — GPU vector addition kernel example (Door 2)
+//
+// Demonstrates end-to-end GPU kernel dispatch in Sounio:
+//   1. `kernel fn` declaration with GPU effect
+//   2. gpu_thread_id_x() builtin for thread-parallel indexing
+//   3. Bounds-checked array access on device memory
+//   4. Host-side call: CUDA module load + kernel launch + readback (via lean_single)
+//
+// On machines with NVIDIA GPU + libcuda.so, this runs on real GPU hardware.
+// On machines without CUDA, the runtime gracefully falls back to CPU lane execution
+// and prints "GPU unavailable: libcuda.so not found" rather than crashing.
+//
+// Run:
+//   ./bin/souc run examples/gpu/vec_add.sio
+// Expected output (GPU available):   PASS: GPU vec_add
+// Expected output (no GPU):          GPU unavailable: libcuda.so not found
+
+kernel fn vec_add(n: i64, a: &[f64], b: &[f64], c: &![f64]) with GPU {
+    let tid = gpu_thread_id_x()
+    if tid < n {
+        c[tid as usize] = a[tid as usize] + b[tid as usize]
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, GPU {
+    let n: i64 = 1024
+    var a: [f64; 1024] = [0.0; 1024]
+    var b: [f64; 1024] = [0.0; 1024]
+    var c: [f64; 1024] = [0.0; 1024]
+
+    // Initialize: a[i] = i, b[i] = i * 2  →  c[i] = i * 3
+    var i: i64 = 0
+    while i < n {
+        a[i as usize] = i as f64
+        b[i as usize] = (i as f64) * 2.0
+        i = i + 1
+    }
+
+    // Dispatch GPU kernel: allocates device memory, copies HtoD, launches, syncs, reads back
+    vec_add(n, &a, &b, &!c)
+
+    // Verify: c[0]=0, c[1]=3, c[1023]=3069
+    if c[0] < 0.01 && c[1] > 2.99 && c[1] < 3.01 && c[1023] > 3068.0 {
+        println("PASS: GPU vec_add")
+    } else {
+        println("FAIL: GPU vec_add — unexpected output")
+    }
+    0
+}
