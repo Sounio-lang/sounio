@@ -201,3 +201,24 @@ This is a simpler edit: change the hardcoded 1024 and 8192 to larger values in:
 **Recommended next step**: try the buffer-size approach before retrying the scope-reset approach. The scope fix is elegant but requires understanding Sounio's full variable lifecycle; the buffer expansion is a one-liner.
 
 **Unknowns**: whether the slot allocator even goes above 1024 in practice. The "no main" error suggests the slot machinery is doing something beyond pure monotonic allocation — function bodies may already be resetting somewhere. A small investigation: instrument `NEXT_SLOT` with a `max_seen` counter to learn what values are actually hit during `rapamycin_epistemic_adaptive.sio` compilation.
+
+## UPDATE 2026-04-12 (session B): reproducer + defer
+
+**Added**: `tests/run-pass/variance_deep_loop.sio` — minimal reproducer marked `//@ known-failure`. 40 iterations of a 20-let-binding helper function trigger a 15-order-of-magnitude variance inflation (`var(acc) = 1.18e15` observed on current compiler; physical answer should be ~0.01). Smaller patterns (80 iterations × 5 lets inline) do NOT trigger, confirming the bug needs function-call-boundary variance plumbing *plus* depth to surface. This is now a tighter gate for any fix attempt than the 280-line rapamycin_epistemic_adaptive.
+
+**Current state of edit**: NOT applied this session. `self-hosted/compiler/lean_single.sio` has 10 lines of unstaged edits from another thread (the `.len()` method dispatch + struct-through-ref resolve_field fix, diff starts around line 9712/11078). Applying the ζ buffer-size bump on top would commingle two unrelated fixes and make revert fragile if gen2==gen3 breaks.
+
+**Blocked on**:
+1. Other thread's unstaged `lean_single.sio` edits land (commit or revert) so ζ can be a clean diff.
+2. A dedicated 30-60 min window to do gen1 → gen2 → gen3 rebuild + fixed-point verify.
+
+**When unblocked, recommended sequence** (buffer-size approach from the "Fallback" section above):
+1. Replace `slot < 1024` → `slot < 16384` (11 occurrences)
+2. Replace `slot >= 1024` → `slot >= 16384` (3 occurrences)
+3. Replace `ch * 8192` → `ch * 131072` (14 occurrences)
+4. Replace `GL_BSS_SIZE + 8192 * BUDGET_CHANNELS` → `... + 131072 * BUDGET_CHANNELS` (1 occurrence at line 14289)
+5. Rebuild gen1 / gen2 / gen3, verify `md5(gen2) == md5(gen3)`.
+6. Verify reproducer `tests/run-pass/variance_deep_loop.sio` now reports PASS.
+7. Verify rapamycin_epistemic_adaptive.sio no longer prints 9.22e18 in ch1/ch2.
+
+Total edit: 29 precise substitutions in one file. No scope-reset logic, no new code paths — only constants widened. Risk to bootstrap fixed-point: minimal (the mechanical addressing arithmetic is preserved; only the upper bounds change).
