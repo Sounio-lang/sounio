@@ -1,42 +1,70 @@
 //@ run-pass
-// E2E: stdlib/sync/rwlock.sio — RwLock read/write lock
+// E2E: stdlib/sync/rwlock.sio — blocking reader/writer parking
 
 use sync::rwlock::*;
 
-fn run_tests(rw: &! RwLock) -> i32 with Mut {
-    // Multiple read locks
+var TEST_RWLOCK_ID: i64 = -1
+
+async fn writer_wait_then_unlock() -> i64 with Async, Mut, IO {
+    var rw = rwlock_from_id(TEST_RWLOCK_ID)
+    let ok = rwlock_write_lock(&! rw)
+    if !ok { return 101 }
+    var check_rw = rwlock_from_id(TEST_RWLOCK_ID)
+    if !rwlock_is_write_locked(&! check_rw) { return 102 }
+    var unlock_rw = rwlock_from_id(TEST_RWLOCK_ID)
+    rwlock_write_unlock(&! unlock_rw)
+    201
+}
+
+async fn reader_wait_then_unlock() -> i64 with Async, Mut, IO {
+    var rw = rwlock_from_id(TEST_RWLOCK_ID)
+    let ok = rwlock_read_lock(&! rw)
+    if !ok { return 103 }
+    var count_rw = rwlock_from_id(TEST_RWLOCK_ID)
+    let count = rwlock_reader_count(&! count_rw)
+    var unlock_rw = rwlock_from_id(TEST_RWLOCK_ID)
+    rwlock_read_unlock(&! unlock_rw)
+    300 + count
+}
+
+fn run_tests(rw: &! RwLock) -> i32 with Async, Mut, IO {
+    TEST_RWLOCK_ID = rwlock_id(rw)
+
+    // Multiple readers coexist.
     let r1 = rwlock_read_lock(rw)
     if !r1 { return 1 }
     let r2 = rwlock_read_lock(rw)
     if !r2 { return 2 }
     if rwlock_reader_count(rw) != 2 { return 3 }
 
-    // Write lock fails while readers hold
-    let w1 = rwlock_write_lock(rw)
-    if w1 { return 4 }
-
-    // Unlock readers
+    // Writer parks until readers drain.
+    let writer = spawn { writer_wait_then_unlock().await }
     rwlock_read_unlock(rw)
+    if rwlock_reader_count(rw) != 1 { return 4 }
     rwlock_read_unlock(rw)
-    if rwlock_reader_count(rw) != 0 { return 5 }
+    let writer_result = writer.await
+    if writer_result != 201 { return 5 }
+    if rwlock_is_write_locked(rw) { return 6 }
 
-    // Write lock succeeds now
+    // Reader parks behind writer and resumes after unlock.
     let w2 = rwlock_write_lock(rw)
-    if !w2 { return 6 }
-    if !rwlock_is_write_locked(rw) { return 7 }
-
-    // Read lock fails while writer holds
-    let r3 = rwlock_read_lock(rw)
-    if r3 { return 8 }
-
-    // Unlock writer
+    if !w2 { return 7 }
+    let reader = spawn { reader_wait_then_unlock().await }
+    if !rwlock_is_write_locked(rw) { return 8 }
     rwlock_write_unlock(rw)
-    if rwlock_is_write_locked(rw) { return 9 }
+    let reader_result = reader.await
+    if reader_result != 301 { return 9 }
+    if rwlock_reader_count(rw) != 0 { return 10 }
 
-    return 0
+    // Fresh read lock still works after parked wakeup path.
+    let r3 = rwlock_read_lock(rw)
+    if !r3 { return 11 }
+    rwlock_read_unlock(rw)
+
+    0
 }
 
-fn main() -> i32 with Mut {
+fn main() -> i32 with Async, Mut, IO {
     var rw = rwlock_new()
-    return run_tests(&! rw)
+    run_tests(&! rw)
 }

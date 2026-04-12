@@ -15,10 +15,13 @@ help:                ## Show this help message
 build:               ## Bootstrap compile: gen1 → gen2 → gen3 (fixed-point verification)
 	@echo "→ Stage 1: boot4.elf compiles lean_single → gen1.elf"
 	./artifacts/bootstrap/boot4.elf self-hosted/compiler/lean_single.sio gen1.elf
+	chmod +x gen1.elf
 	@echo "→ Stage 2: gen1.elf compiles lean_single → gen2.elf"
 	./gen1.elf self-hosted/compiler/lean_single.sio gen2.elf
+	chmod +x gen2.elf
 	@echo "→ Stage 3: gen2.elf compiles lean_single → gen3.elf"
 	./gen2.elf self-hosted/compiler/lean_single.sio gen3.elf
+	chmod +x gen3.elf
 	@echo "→ Verifying fixed-point..."
 	@MD5_GEN2=$$(md5sum gen2.elf | awk '{print $$1}'); \
 	 MD5_GEN3=$$(md5sum gen3.elf | awk '{print $$1}'); \

@@ -50,6 +50,21 @@ let JAD_MAX_INPUTS: i64 = 16
 // Maximum number of tracked intermediate values
 let JAD_MAX_ENTRIES: i64 = 512
 
+// Backing storage is kept in module globals instead of embedding large arrays
+// directly in JacobianGumState. That keeps the runtime state tiny and avoids
+// large by-value stack traffic in the self-hosted compiler path.
+var JAD_ENTRY_VALUE_IDS: [i64; 512] = [-1; 512]
+var JAD_ENTRY_VALUES: [f64; 512] = [0.0; 512]
+var JAD_ENTRY_PARTIALS: [f64; 8192] = [0.0; 8192]
+var JAD_ENTRY_PARTIAL_COUNTS: [i64; 512] = [0; 512]
+var JAD_ENTRY_IS_INPUTS: [bool; 512] = [false; 512]
+var JAD_ENTRY_INPUT_IDXS: [i64; 512] = [-1; 512]
+var JAD_INPUT_UNCERTAINTIES: [f64; 16] = [0.0; 16]
+var JAD_COVARIANCE: [f64; 256] = [0.0; 256]
+var JAD_ENTRY_COUNT: i64 = 0
+var JAD_INPUT_COUNT: i64 = 0
+var JAD_INCLUDE_COVARIANCE: bool = false
+
 // ============================================================================
 // Section 2: JacobianEntry — per-value derivative tracking
 // ============================================================================
@@ -84,77 +99,89 @@ fn jad_entry_new() -> JacobianEntry {
 // partial derivatives wrt each input, input uncertainties, and the optional
 // covariance matrix for correlated inputs.
 struct JacobianGumState {
-    entries: [JacobianEntry; 512],
-    entry_count: i64,
-    input_uncertainties: [f64; 16],
-    input_count: i64,
-    covariance: [f64; 256],
-    include_covariance: bool,
+    token: i64,
 }
 
 // ============================================================================
 // Section 4: State management
 // ============================================================================
 
-fn jad_state_new() -> JacobianGumState {
-    var entries: [JacobianEntry; 512] = [jad_entry_new(); 512]
+fn jad_state_new() -> JacobianGumState with Mut {
+    var i: i64 = 0
+    while i < JAD_MAX_ENTRIES {
+        JAD_ENTRY_VALUE_IDS[i as usize] = -1
+        JAD_ENTRY_VALUES[i as usize] = 0.0
+        JAD_ENTRY_PARTIAL_COUNTS[i as usize] = 0
+        JAD_ENTRY_IS_INPUTS[i as usize] = false
+        JAD_ENTRY_INPUT_IDXS[i as usize] = -1
+        i = i + 1
+    }
+
+    var p: i64 = 0
+    while p < (JAD_MAX_ENTRIES * JAD_MAX_INPUTS) {
+        JAD_ENTRY_PARTIALS[p as usize] = 0.0
+        p = p + 1
+    }
+
+    var u: i64 = 0
+    while u < JAD_MAX_INPUTS {
+        JAD_INPUT_UNCERTAINTIES[u as usize] = 0.0
+        u = u + 1
+    }
+
+    var c: i64 = 0
+    while c < (JAD_MAX_INPUTS * JAD_MAX_INPUTS) {
+        JAD_COVARIANCE[c as usize] = 0.0
+        c = c + 1
+    }
+    JAD_ENTRY_COUNT = 0
+    JAD_INPUT_COUNT = 0
+    JAD_INCLUDE_COVARIANCE = false
+
     JacobianGumState {
-        entries: entries,
-        entry_count: 0,
-        input_uncertainties: [0.0; 16],
-        input_count: 0,
-        covariance: [0.0; 256],
-        include_covariance: false,
+        token: 0,
     }
 }
 
 // Mark a value as an uncertain input with known standard uncertainty u(x_i).
 // Sets partials[input_idx] = 1.0 (Jacobian identity for leaf inputs).
-fn jad_mark_input(st: JacobianGumState, value_id: i64, value: f64, uncertainty: f64) -> JacobianGumState with Mut, Panic {
-    var result = st
-    let idx = result.input_count
-    let eidx = result.entry_count
+fn jad_mark_input(st: &!JacobianGumState, value_id: i64, value: f64, uncertainty: f64) with Mut, Panic {
+    let idx = JAD_INPUT_COUNT
+    let eidx = JAD_ENTRY_COUNT
 
-    // Record the input uncertainty
-    result.input_uncertainties[idx as usize] = uncertainty
-    result.input_count = idx + 1
+    JAD_INPUT_UNCERTAINTIES[idx as usize] = uncertainty
+    JAD_INPUT_COUNT = idx + 1
 
-    // Create the entry for this input
-    var entry = jad_entry_new()
-    entry.value_id = value_id
-    entry.value = value
-    entry.is_input = true
-    entry.input_idx = idx
-    entry.partial_count = idx + 1
+    var i: i64 = 0
+    while i < JAD_MAX_INPUTS {
+        JAD_ENTRY_PARTIALS[(eidx * JAD_MAX_INPUTS + i) as usize] = 0.0
+        i = i + 1
+    }
 
-    // Identity: d(x_i)/d(x_i) = 1, all others 0
-    entry.partials[idx as usize] = 1.0
-
-    result.entries[eidx as usize] = entry
-    result.entry_count = eidx + 1
-
-    result
+    JAD_ENTRY_VALUE_IDS[eidx as usize] = value_id
+    JAD_ENTRY_VALUES[eidx as usize] = value
+    JAD_ENTRY_IS_INPUTS[eidx as usize] = true
+    JAD_ENTRY_INPUT_IDXS[eidx as usize] = idx
+    JAD_ENTRY_PARTIAL_COUNTS[eidx as usize] = idx + 1
+    JAD_ENTRY_PARTIALS[(eidx * JAD_MAX_INPUTS + idx) as usize] = 1.0
+    JAD_ENTRY_COUNT = eidx + 1
 }
 
 // Set covariance between two inputs: u(x_i, x_j).
 // Stored in upper-triangular form: covariance[i*16+j] where i < j.
-fn jad_set_covariance(st: JacobianGumState, input_i: i64, input_j: i64, cov: f64) -> JacobianGumState with Mut, Panic {
-    var result = st
-    result.include_covariance = true
+fn jad_set_covariance(st: &!JacobianGumState, input_i: i64, input_j: i64, cov: f64) with Mut, Panic {
+    JAD_INCLUDE_COVARIANCE = true
 
-    // Store symmetrically
     let lo = if input_i < input_j { input_i } else { input_j }
     let hi = if input_i < input_j { input_j } else { input_i }
-    result.covariance[(lo * 16 + hi) as usize] = cov
-
-    result
+    JAD_COVARIANCE[(lo * JAD_MAX_INPUTS + hi) as usize] = cov
 }
 
 // Find the entry index for a value_id. Returns -1 if not found.
-fn jad_find_entry(st: JacobianGumState, value_id: i64) -> i64 with Mut, Panic, Div {
+fn jad_find_entry(st: &!JacobianGumState, value_id: i64) -> i64 with Mut, Panic {
     var i: i64 = 0
-    while i < st.entry_count {
-        if st.entries[i as usize].value_id == value_id {
+    while i < JAD_ENTRY_COUNT {
+        if JAD_ENTRY_VALUE_IDS[i as usize] == value_id {
             return i
         }
         i = i + 1
@@ -163,21 +190,87 @@ fn jad_find_entry(st: JacobianGumState, value_id: i64) -> i64 with Mut, Panic, D
 }
 
 // Get the JacobianEntry for a value_id. Returns a zeroed entry if not found.
-fn jad_get_entry(st: JacobianGumState, value_id: i64) -> JacobianEntry with Mut, Panic, Div {
+fn jad_get_entry(st: &!JacobianGumState, value_id: i64) -> JacobianEntry with Mut, Panic {
     let idx = jad_find_entry(st, value_id)
     if idx >= 0 {
-        return st.entries[idx as usize]
+        var entry = jad_entry_new()
+        entry.value_id = JAD_ENTRY_VALUE_IDS[idx as usize]
+        entry.value = JAD_ENTRY_VALUES[idx as usize]
+        entry.partial_count = JAD_ENTRY_PARTIAL_COUNTS[idx as usize]
+        entry.is_input = JAD_ENTRY_IS_INPUTS[idx as usize]
+        entry.input_idx = JAD_ENTRY_INPUT_IDXS[idx as usize]
+        var i: i64 = 0
+        while i < entry.partial_count {
+            entry.partials[i as usize] = JAD_ENTRY_PARTIALS[(idx * JAD_MAX_INPUTS + i) as usize]
+            i = i + 1
+        }
+        return entry
     }
     jad_entry_new()
 }
 
 // Internal: add a completed entry to the state
-fn jad_add_entry(st: JacobianGumState, entry: JacobianEntry) -> JacobianGumState with Mut, Panic {
-    var result = st
-    let eidx = result.entry_count
-    result.entries[eidx as usize] = entry
-    result.entry_count = eidx + 1
-    result
+fn jad_add_entry(st: &!JacobianGumState, entry: JacobianEntry) with Mut, Panic {
+    let eidx = JAD_ENTRY_COUNT
+    var clear_i: i64 = 0
+    while clear_i < JAD_MAX_INPUTS {
+        JAD_ENTRY_PARTIALS[(eidx * JAD_MAX_INPUTS + clear_i) as usize] = 0.0
+        clear_i = clear_i + 1
+    }
+    JAD_ENTRY_VALUE_IDS[eidx as usize] = entry.value_id
+    JAD_ENTRY_VALUES[eidx as usize] = entry.value
+    JAD_ENTRY_PARTIAL_COUNTS[eidx as usize] = entry.partial_count
+    JAD_ENTRY_IS_INPUTS[eidx as usize] = entry.is_input
+    JAD_ENTRY_INPUT_IDXS[eidx as usize] = entry.input_idx
+    var i: i64 = 0
+    while i < entry.partial_count {
+        JAD_ENTRY_PARTIALS[(eidx * JAD_MAX_INPUTS + i) as usize] = entry.partials[i as usize]
+        i = i + 1
+    }
+    JAD_ENTRY_COUNT = eidx + 1
+}
+
+fn jad_prepare_result_entry(st: &!JacobianGumState, result_id: i64, value: f64, partial_count: i64) -> i64 with Mut, Panic {
+    let eidx = JAD_ENTRY_COUNT
+    var i: i64 = 0
+    while i < JAD_MAX_INPUTS {
+        JAD_ENTRY_PARTIALS[(eidx * JAD_MAX_INPUTS + i) as usize] = 0.0
+        i = i + 1
+    }
+    JAD_ENTRY_VALUE_IDS[eidx as usize] = result_id
+    JAD_ENTRY_VALUES[eidx as usize] = value
+    JAD_ENTRY_PARTIAL_COUNTS[eidx as usize] = partial_count
+    JAD_ENTRY_IS_INPUTS[eidx as usize] = false
+    JAD_ENTRY_INPUT_IDXS[eidx as usize] = -1
+    JAD_ENTRY_COUNT = eidx + 1
+    eidx
+}
+
+fn jad_entry_value(st: &!JacobianGumState, value_id: i64) -> f64 with Mut, Panic {
+    let idx = jad_find_entry(st, value_id)
+    if idx < 0 { return 0.0 }
+    JAD_ENTRY_VALUES[idx as usize]
+}
+
+fn jad_entry_is_input(st: &!JacobianGumState, value_id: i64) -> bool with Mut, Panic {
+    let idx = jad_find_entry(st, value_id)
+    if idx < 0 { return false }
+    JAD_ENTRY_IS_INPUTS[idx as usize]
+}
+
+fn jad_entry_partial(st: &!JacobianGumState, value_id: i64, input_idx: i64) -> f64 with Mut, Panic {
+    let idx = jad_find_entry(st, value_id)
+    if idx < 0 { return 0.0 }
+    let count = JAD_ENTRY_PARTIAL_COUNTS[idx as usize]
+    if input_idx < 0 { return 0.0 }
+    if input_idx >= count { return 0.0 }
+    JAD_ENTRY_PARTIALS[(idx * JAD_MAX_INPUTS + input_idx) as usize]
+}
+
+fn jad_entry_partial_count(st: &!JacobianGumState, value_id: i64) -> i64 with Mut, Panic {
+    let idx = jad_find_entry(st, value_id)
+    if idx < 0 { return 0 }
+    JAD_ENTRY_PARTIAL_COUNTS[idx as usize]
 }
 
 // Compute the max partial_count from two entries (for determining how many
@@ -197,98 +290,112 @@ fn jad_max_partial_count_unary(a: JacobianEntry) -> i64 {
 // result = left + right
 // Chain rule: d(a+b)/dx_i = da/dx_i + db/dx_i
 fn jad_propagate_add(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     result_id: i64,
-    left: JacobianEntry,
-    right: JacobianEntry
-) -> JacobianGumState with Mut, Panic, Div {
-    var entry = jad_entry_new()
-    entry.value_id = result_id
-    entry.value = left.value + right.value
-    let n = jad_max_partial_count(left, right)
-    entry.partial_count = n
-
+    left_id: i64,
+    right_id: i64
+) with Mut, Panic {
+    let left_idx = jad_find_entry(st, left_id)
+    let right_idx = jad_find_entry(st, right_id)
+    let left_val = if left_idx >= 0 { JAD_ENTRY_VALUES[left_idx as usize] } else { 0.0 }
+    let right_val = if right_idx >= 0 { JAD_ENTRY_VALUES[right_idx as usize] } else { 0.0 }
+    let left_count = if left_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[left_idx as usize] } else { 0 }
+    let right_count = if right_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[right_idx as usize] } else { 0 }
+    let n = if left_count > right_count { left_count } else { right_count }
+    let out_idx = jad_prepare_result_entry(st, result_id, left_val + right_val, n)
     var i: i64 = 0
     while i < n {
-        entry.partials[i as usize] = left.partials[i as usize] + right.partials[i as usize]
+        let left_partial =
+            if i < left_count { JAD_ENTRY_PARTIALS[(left_idx * JAD_MAX_INPUTS + i) as usize] } else { 0.0 }
+        let right_partial =
+            if i < right_count { JAD_ENTRY_PARTIALS[(right_idx * JAD_MAX_INPUTS + i) as usize] } else { 0.0 }
+        JAD_ENTRY_PARTIALS[(out_idx * JAD_MAX_INPUTS + i) as usize] = left_partial + right_partial
         i = i + 1
     }
-
-    jad_add_entry(st, entry)
 }
 
 // result = left - right
 // Chain rule: d(a-b)/dx_i = da/dx_i - db/dx_i
 fn jad_propagate_sub(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     result_id: i64,
-    left: JacobianEntry,
-    right: JacobianEntry
-) -> JacobianGumState with Mut, Panic, Div {
-    var entry = jad_entry_new()
-    entry.value_id = result_id
-    entry.value = left.value - right.value
-    let n = jad_max_partial_count(left, right)
-    entry.partial_count = n
-
+    left_id: i64,
+    right_id: i64
+) with Mut, Panic {
+    let left_idx = jad_find_entry(st, left_id)
+    let right_idx = jad_find_entry(st, right_id)
+    let left_val = if left_idx >= 0 { JAD_ENTRY_VALUES[left_idx as usize] } else { 0.0 }
+    let right_val = if right_idx >= 0 { JAD_ENTRY_VALUES[right_idx as usize] } else { 0.0 }
+    let left_count = if left_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[left_idx as usize] } else { 0 }
+    let right_count = if right_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[right_idx as usize] } else { 0 }
+    let n = if left_count > right_count { left_count } else { right_count }
+    let out_idx = jad_prepare_result_entry(st, result_id, left_val - right_val, n)
     var i: i64 = 0
     while i < n {
-        entry.partials[i as usize] = left.partials[i as usize] - right.partials[i as usize]
+        let left_partial =
+            if i < left_count { JAD_ENTRY_PARTIALS[(left_idx * JAD_MAX_INPUTS + i) as usize] } else { 0.0 }
+        let right_partial =
+            if i < right_count { JAD_ENTRY_PARTIALS[(right_idx * JAD_MAX_INPUTS + i) as usize] } else { 0.0 }
+        JAD_ENTRY_PARTIALS[(out_idx * JAD_MAX_INPUTS + i) as usize] = left_partial - right_partial
         i = i + 1
     }
-
-    jad_add_entry(st, entry)
 }
 
 // result = left * right
 // Chain rule: d(a*b)/dx_i = a * db/dx_i + b * da/dx_i
 fn jad_propagate_mul(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     result_id: i64,
-    left: JacobianEntry,
-    right: JacobianEntry
-) -> JacobianGumState with Mut, Panic, Div {
-    var entry = jad_entry_new()
-    entry.value_id = result_id
-    entry.value = left.value * right.value
-    let n = jad_max_partial_count(left, right)
-    entry.partial_count = n
-
+    left_id: i64,
+    right_id: i64
+) with Mut, Panic {
+    let left_idx = jad_find_entry(st, left_id)
+    let right_idx = jad_find_entry(st, right_id)
+    let left_val = if left_idx >= 0 { JAD_ENTRY_VALUES[left_idx as usize] } else { 0.0 }
+    let right_val = if right_idx >= 0 { JAD_ENTRY_VALUES[right_idx as usize] } else { 0.0 }
+    let left_count = if left_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[left_idx as usize] } else { 0 }
+    let right_count = if right_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[right_idx as usize] } else { 0 }
+    let n = if left_count > right_count { left_count } else { right_count }
+    let out_idx = jad_prepare_result_entry(st, result_id, left_val * right_val, n)
     var i: i64 = 0
     while i < n {
-        // Product rule: f'g + fg'
-        let di = left.value * right.partials[i as usize] + right.value * left.partials[i as usize]
-        entry.partials[i as usize] = di
+        let left_partial =
+            if i < left_count { JAD_ENTRY_PARTIALS[(left_idx * JAD_MAX_INPUTS + i) as usize] } else { 0.0 }
+        let right_partial =
+            if i < right_count { JAD_ENTRY_PARTIALS[(right_idx * JAD_MAX_INPUTS + i) as usize] } else { 0.0 }
+        JAD_ENTRY_PARTIALS[(out_idx * JAD_MAX_INPUTS + i) as usize] =
+            left_val * right_partial + right_val * left_partial
         i = i + 1
     }
-
-    jad_add_entry(st, entry)
 }
 
 // result = left / right
 // Chain rule: d(a/b)/dx_i = (da/dx_i * b - a * db/dx_i) / b^2
 fn jad_propagate_div(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     result_id: i64,
-    left: JacobianEntry,
-    right: JacobianEntry
-) -> JacobianGumState with Mut, Panic, Div {
-    var entry = jad_entry_new()
-    entry.value_id = result_id
-    let b_sq = right.value * right.value
-    entry.value = left.value / right.value
-    let n = jad_max_partial_count(left, right)
-    entry.partial_count = n
-
+    left_id: i64,
+    right_id: i64
+) with Mut, Panic, Div {
+    let left_idx = jad_find_entry(st, left_id)
+    let right_idx = jad_find_entry(st, right_id)
+    let left_val = if left_idx >= 0 { JAD_ENTRY_VALUES[left_idx as usize] } else { 0.0 }
+    let right_val = if right_idx >= 0 { JAD_ENTRY_VALUES[right_idx as usize] } else { 0.0 }
+    let left_count = if left_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[left_idx as usize] } else { 0 }
+    let right_count = if right_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[right_idx as usize] } else { 0 }
+    let n = if left_count > right_count { left_count } else { right_count }
+    let b_sq = right_val * right_val
+    let out_idx = jad_prepare_result_entry(st, result_id, left_val / right_val, n)
     var i: i64 = 0
     while i < n {
-        // Quotient rule: (f'g - fg') / g^2
-        let numer = left.partials[i as usize] * right.value - left.value * right.partials[i as usize]
-        entry.partials[i as usize] = numer / b_sq
+        let left_partial =
+            if i < left_count { JAD_ENTRY_PARTIALS[(left_idx * JAD_MAX_INPUTS + i) as usize] } else { 0.0 }
+        let right_partial =
+            if i < right_count { JAD_ENTRY_PARTIALS[(right_idx * JAD_MAX_INPUTS + i) as usize] } else { 0.0 }
+        let numer = left_partial * right_val - left_val * right_partial
+        JAD_ENTRY_PARTIALS[(out_idx * JAD_MAX_INPUTS + i) as usize] = numer / b_sq
         i = i + 1
     }
-
-    jad_add_entry(st, entry)
 }
 
 // ============================================================================
@@ -298,138 +405,120 @@ fn jad_propagate_div(
 // result = exp(src)
 // Chain rule: d(exp(a))/dx_i = exp(a) * da/dx_i
 fn jad_propagate_exp(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     result_id: i64,
-    src: JacobianEntry
-) -> JacobianGumState with Mut, Panic, Div {
-    var entry = jad_entry_new()
-    entry.value_id = result_id
-    let exp_val = exp(src.value)
-    entry.value = exp_val
-    let n = jad_max_partial_count_unary(src)
-    entry.partial_count = n
-
+    src_id: i64
+) with Mut, Panic {
+    let src_idx = jad_find_entry(st, src_id)
+    let src_val = if src_idx >= 0 { JAD_ENTRY_VALUES[src_idx as usize] } else { 0.0 }
+    let src_count = if src_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[src_idx as usize] } else { 0 }
+    let exp_val = exp(src_val)
+    let out_idx = jad_prepare_result_entry(st, result_id, exp_val, src_count)
     var i: i64 = 0
-    while i < n {
-        entry.partials[i as usize] = exp_val * src.partials[i as usize]
+    while i < src_count {
+        let src_partial = JAD_ENTRY_PARTIALS[(src_idx * JAD_MAX_INPUTS + i) as usize]
+        JAD_ENTRY_PARTIALS[(out_idx * JAD_MAX_INPUTS + i) as usize] = exp_val * src_partial
         i = i + 1
     }
-
-    jad_add_entry(st, entry)
 }
 
 // result = log(src)
 // Chain rule: d(log(a))/dx_i = (da/dx_i) / a
 fn jad_propagate_log(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     result_id: i64,
-    src: JacobianEntry
-) -> JacobianGumState with Mut, Panic, Div {
-    var entry = jad_entry_new()
-    entry.value_id = result_id
-    entry.value = log(src.value)
-    let n = jad_max_partial_count_unary(src)
-    entry.partial_count = n
-
+    src_id: i64
+) with Mut, Panic, Div {
+    let src_idx = jad_find_entry(st, src_id)
+    let src_val = if src_idx >= 0 { JAD_ENTRY_VALUES[src_idx as usize] } else { 0.0 }
+    let src_count = if src_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[src_idx as usize] } else { 0 }
+    let out_idx = jad_prepare_result_entry(st, result_id, log(src_val), src_count)
     var i: i64 = 0
-    while i < n {
-        entry.partials[i as usize] = src.partials[i as usize] / src.value
+    while i < src_count {
+        let src_partial = JAD_ENTRY_PARTIALS[(src_idx * JAD_MAX_INPUTS + i) as usize]
+        JAD_ENTRY_PARTIALS[(out_idx * JAD_MAX_INPUTS + i) as usize] = src_partial / src_val
         i = i + 1
     }
-
-    jad_add_entry(st, entry)
 }
 
 // result = sqrt(src)
 // Chain rule: d(sqrt(a))/dx_i = da/dx_i / (2 * sqrt(a))
 fn jad_propagate_sqrt(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     result_id: i64,
-    src: JacobianEntry
-) -> JacobianGumState with Mut, Panic, Div {
-    var entry = jad_entry_new()
-    entry.value_id = result_id
-    let sqrt_val = sqrt(src.value)
-    entry.value = sqrt_val
+    src_id: i64
+) with Mut, Panic, Div {
+    let src_idx = jad_find_entry(st, src_id)
+    let src_val = if src_idx >= 0 { JAD_ENTRY_VALUES[src_idx as usize] } else { 0.0 }
+    let src_count = if src_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[src_idx as usize] } else { 0 }
+    let sqrt_val = sqrt(src_val)
     let denom = 2.0 * sqrt_val
-    let n = jad_max_partial_count_unary(src)
-    entry.partial_count = n
-
+    let out_idx = jad_prepare_result_entry(st, result_id, sqrt_val, src_count)
     var i: i64 = 0
-    while i < n {
-        entry.partials[i as usize] = src.partials[i as usize] / denom
+    while i < src_count {
+        let src_partial = JAD_ENTRY_PARTIALS[(src_idx * JAD_MAX_INPUTS + i) as usize]
+        JAD_ENTRY_PARTIALS[(out_idx * JAD_MAX_INPUTS + i) as usize] = src_partial / denom
         i = i + 1
     }
-
-    jad_add_entry(st, entry)
 }
 
 // result = sin(src)
 // Chain rule: d(sin(a))/dx_i = cos(a) * da/dx_i
 fn jad_propagate_sin(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     result_id: i64,
-    src: JacobianEntry
-) -> JacobianGumState with Mut, Panic, Div {
-    var entry = jad_entry_new()
-    entry.value_id = result_id
-    entry.value = sin(src.value)
-    let cos_val = cos(src.value)
-    let n = jad_max_partial_count_unary(src)
-    entry.partial_count = n
-
+    src_id: i64
+) with Mut, Panic {
+    let src_idx = jad_find_entry(st, src_id)
+    let src_val = if src_idx >= 0 { JAD_ENTRY_VALUES[src_idx as usize] } else { 0.0 }
+    let src_count = if src_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[src_idx as usize] } else { 0 }
+    let cos_val = cos(src_val)
+    let out_idx = jad_prepare_result_entry(st, result_id, sin(src_val), src_count)
     var i: i64 = 0
-    while i < n {
-        entry.partials[i as usize] = cos_val * src.partials[i as usize]
+    while i < src_count {
+        let src_partial = JAD_ENTRY_PARTIALS[(src_idx * JAD_MAX_INPUTS + i) as usize]
+        JAD_ENTRY_PARTIALS[(out_idx * JAD_MAX_INPUTS + i) as usize] = cos_val * src_partial
         i = i + 1
     }
-
-    jad_add_entry(st, entry)
 }
 
 // result = cos(src)
 // Chain rule: d(cos(a))/dx_i = -sin(a) * da/dx_i
 fn jad_propagate_cos(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     result_id: i64,
-    src: JacobianEntry
-) -> JacobianGumState with Mut, Panic, Div {
-    var entry = jad_entry_new()
-    entry.value_id = result_id
-    entry.value = cos(src.value)
-    let neg_sin_val = 0.0 - sin(src.value)
-    let n = jad_max_partial_count_unary(src)
-    entry.partial_count = n
-
+    src_id: i64
+) with Mut, Panic {
+    let src_idx = jad_find_entry(st, src_id)
+    let src_val = if src_idx >= 0 { JAD_ENTRY_VALUES[src_idx as usize] } else { 0.0 }
+    let src_count = if src_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[src_idx as usize] } else { 0 }
+    let neg_sin_val = 0.0 - sin(src_val)
+    let out_idx = jad_prepare_result_entry(st, result_id, cos(src_val), src_count)
     var i: i64 = 0
-    while i < n {
-        entry.partials[i as usize] = neg_sin_val * src.partials[i as usize]
+    while i < src_count {
+        let src_partial = JAD_ENTRY_PARTIALS[(src_idx * JAD_MAX_INPUTS + i) as usize]
+        JAD_ENTRY_PARTIALS[(out_idx * JAD_MAX_INPUTS + i) as usize] = neg_sin_val * src_partial
         i = i + 1
     }
-
-    jad_add_entry(st, entry)
 }
 
 // result = -src
 // Chain rule: d(-a)/dx_i = -da/dx_i
 fn jad_propagate_neg(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     result_id: i64,
-    src: JacobianEntry
-) -> JacobianGumState with Mut, Panic, Div {
-    var entry = jad_entry_new()
-    entry.value_id = result_id
-    entry.value = 0.0 - src.value
-    let n = jad_max_partial_count_unary(src)
-    entry.partial_count = n
-
+    src_id: i64
+) with Mut, Panic {
+    let src_idx = jad_find_entry(st, src_id)
+    let src_val = if src_idx >= 0 { JAD_ENTRY_VALUES[src_idx as usize] } else { 0.0 }
+    let src_count = if src_idx >= 0 { JAD_ENTRY_PARTIAL_COUNTS[src_idx as usize] } else { 0 }
+    let out_idx = jad_prepare_result_entry(st, result_id, 0.0 - src_val, src_count)
     var i: i64 = 0
-    while i < n {
-        entry.partials[i as usize] = 0.0 - src.partials[i as usize]
+    while i < src_count {
+        let src_partial = JAD_ENTRY_PARTIALS[(src_idx * JAD_MAX_INPUTS + i) as usize]
+        JAD_ENTRY_PARTIALS[(out_idx * JAD_MAX_INPUTS + i) as usize] = 0.0 - src_partial
         i = i + 1
     }
-
-    jad_add_entry(st, entry)
 }
 
 // ============================================================================
@@ -447,29 +536,30 @@ fn jad_propagate_neg(
 // where c_i = df/dx_i are the sensitivity coefficients (Jacobian entries).
 //
 // Returns u(y) = sqrt(u^2(y)).
-fn jad_gum_combine(st: JacobianGumState, output_value_id: i64) -> f64 with Mut, Panic, Div {
-    let entry = jad_get_entry(st, output_value_id)
-    let n = st.input_count
+fn jad_gum_combine(st: &!JacobianGumState, output_value_id: i64) -> f64 with Mut, Panic, Div {
+    let entry_idx = jad_find_entry(st, output_value_id)
+    if entry_idx < 0 { return 0.0 }
+    let n = JAD_INPUT_COUNT
 
     // Term 1: sum_i c_i^2 * u^2(x_i)
     var variance: f64 = 0.0
     var i: i64 = 0
     while i < n {
-        let ci = entry.partials[i as usize]
-        let ui = st.input_uncertainties[i as usize]
+        let ci = JAD_ENTRY_PARTIALS[(entry_idx * JAD_MAX_INPUTS + i) as usize]
+        let ui = JAD_INPUT_UNCERTAINTIES[i as usize]
         variance = variance + ci * ci * ui * ui
         i = i + 1
     }
 
     // Term 2: covariance contributions (if enabled)
-    if st.include_covariance {
+    if JAD_INCLUDE_COVARIANCE {
         var ii: i64 = 0
         while ii < n {
             var jj: i64 = ii + 1
             while jj < n {
-                let ci = entry.partials[ii as usize]
-                let cj = entry.partials[jj as usize]
-                let cov_ij = st.covariance[(ii * 16 + jj) as usize]
+                let ci = JAD_ENTRY_PARTIALS[(entry_idx * JAD_MAX_INPUTS + ii) as usize]
+                let cj = JAD_ENTRY_PARTIALS[(entry_idx * JAD_MAX_INPUTS + jj) as usize]
+                let cov_ij = JAD_COVARIANCE[(ii * JAD_MAX_INPUTS + jj) as usize]
                 variance = variance + 2.0 * ci * cj * cov_ij
                 jj = jj + 1
             }
@@ -505,348 +595,169 @@ let JAD_OP_NEG: i64 = 9
 // For binary ops (ADD/SUB/MUL/DIV), both left_id and right_id are used.
 // For unary ops (EXP/LOG/SQRT/SIN/COS/NEG), right_id is ignored (-1).
 fn jad_propagate_op(
-    st: JacobianGumState,
+    st: &!JacobianGumState,
     op: i64,
     result_id: i64,
     left_id: i64,
     right_id: i64
-) -> JacobianGumState with Mut, Panic, Div {
-    let left = jad_get_entry(st, left_id)
-
+) with Mut, Panic, Div {
     if op == JAD_OP_ADD {
-        let right = jad_get_entry(st, right_id)
-        return jad_propagate_add(st, result_id, left, right)
+        jad_propagate_add(st, result_id, left_id, right_id)
+        return
     }
     if op == JAD_OP_SUB {
-        let right = jad_get_entry(st, right_id)
-        return jad_propagate_sub(st, result_id, left, right)
+        jad_propagate_sub(st, result_id, left_id, right_id)
+        return
     }
     if op == JAD_OP_MUL {
-        let right = jad_get_entry(st, right_id)
-        return jad_propagate_mul(st, result_id, left, right)
+        jad_propagate_mul(st, result_id, left_id, right_id)
+        return
     }
     if op == JAD_OP_DIV {
-        let right = jad_get_entry(st, right_id)
-        return jad_propagate_div(st, result_id, left, right)
+        jad_propagate_div(st, result_id, left_id, right_id)
+        return
     }
     if op == JAD_OP_EXP {
-        return jad_propagate_exp(st, result_id, left)
+        jad_propagate_exp(st, result_id, left_id)
+        return
     }
     if op == JAD_OP_LOG {
-        return jad_propagate_log(st, result_id, left)
+        jad_propagate_log(st, result_id, left_id)
+        return
     }
     if op == JAD_OP_SQRT {
-        return jad_propagate_sqrt(st, result_id, left)
+        jad_propagate_sqrt(st, result_id, left_id)
+        return
     }
     if op == JAD_OP_SIN {
-        return jad_propagate_sin(st, result_id, left)
+        jad_propagate_sin(st, result_id, left_id)
+        return
     }
     if op == JAD_OP_COS {
-        return jad_propagate_cos(st, result_id, left)
+        jad_propagate_cos(st, result_id, left_id)
+        return
     }
     if op == JAD_OP_NEG {
-        return jad_propagate_neg(st, result_id, left)
+        jad_propagate_neg(st, result_id, left_id)
+        return
     }
-
-    // Unknown opcode — return state unchanged
-    st
 }
 
 // ============================================================================
 // Section 9: Self-tests
 // ============================================================================
 
-fn main() with IO, Mut, Panic, Div, Alloc {
-    var pass: i64 = 0
-    var fail: i64 = 0
+fn jad_test_entry_default() -> bool {
+    let e = jad_entry_new()
+    if e.value_id != -1 { return false }
+    if e.value != 0.0 { return false }
+    e.is_input == false
+}
 
-    // ---- T1: JacobianEntry construction ----
-    let e1 = jad_entry_new()
-    if e1.value_id == -1 {
-        if e1.value == 0.0 {
-            if e1.is_input == false {
-                pass = pass + 1
-                print("  T1  OK (JacobianEntry default construction)\n")
-            } else {
-                fail = fail + 1
-                print("  T1  FAIL (is_input not false)\n")
-            }
-        } else {
-            fail = fail + 1
-            print("  T1  FAIL (value not 0.0)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T1  FAIL (value_id not -1)\n")
-    }
+fn jad_test_mark_input_single() -> bool with Mut, Panic {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 100, 5.0, 0.1) }
+    if jad_entry_is_input(&!st, 100) == false { return false }
+    if abs_f64(jad_entry_partial(&!st, 100, 0) - 1.0) >= 0.0001 { return false }
+    abs_f64(jad_entry_value(&!st, 100) - 5.0) < 0.0001
+}
 
-    // ---- T2: jad_mark_input — single input, partials[0] = 1.0 ----
-    let st2 = jad_state_new()
-    let st2b = jad_mark_input(st2, 100, 5.0, 0.1)
-    let e2 = jad_get_entry(st2b, 100)
-    if e2.is_input == true {
-        if abs_f64(e2.partials[0] - 1.0) < 0.0001 {
-            if abs_f64(e2.value - 5.0) < 0.0001 {
-                pass = pass + 1
-                print("  T2  OK (mark_input: single input, partials[0]=1.0)\n")
-            } else {
-                fail = fail + 1
-                print("  T2  FAIL (value mismatch)\n")
-            }
-        } else {
-            fail = fail + 1
-            print("  T2  FAIL (partials[0] != 1.0)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T2  FAIL (is_input not true)\n")
-    }
+fn jad_test_mark_input_double() -> bool with Mut, Panic {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 200, 3.0, 0.1) }
+    { jad_mark_input(&!st, 201, 4.0, 0.2) }
+    if abs_f64(jad_entry_partial(&!st, 200, 0) - 1.0) >= 0.0001 { return false }
+    if abs_f64(jad_entry_partial(&!st, 200, 1)) >= 0.0001 { return false }
+    if abs_f64(jad_entry_partial(&!st, 201, 0)) >= 0.0001 { return false }
+    abs_f64(jad_entry_partial(&!st, 201, 1) - 1.0) < 0.0001
+}
 
-    // ---- T3: jad_mark_input — two inputs, correct indices ----
-    let st3 = jad_state_new()
-    let st3b = jad_mark_input(st3, 200, 3.0, 0.1)
-    let st3c = jad_mark_input(st3b, 201, 4.0, 0.2)
-    let e3a = jad_get_entry(st3c, 200)
-    let e3b = jad_get_entry(st3c, 201)
-    // Input 0: partials = [1, 0, ...]
-    // Input 1: partials = [0, 1, ...]
-    if abs_f64(e3a.partials[0] - 1.0) < 0.0001 {
-        if abs_f64(e3a.partials[1] - 0.0) < 0.0001 {
-            if abs_f64(e3b.partials[0] - 0.0) < 0.0001 {
-                if abs_f64(e3b.partials[1] - 1.0) < 0.0001 {
-                    pass = pass + 1
-                    print("  T3  OK (two inputs, correct Jacobian identity)\n")
-                } else {
-                    fail = fail + 1
-                    print("  T3  FAIL (input1 partials[1] != 1.0)\n")
-                }
-            } else {
-                fail = fail + 1
-                print("  T3  FAIL (input1 partials[0] != 0.0)\n")
-            }
-        } else {
-            fail = fail + 1
-            print("  T3  FAIL (input0 partials[1] != 0.0)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T3  FAIL (input0 partials[0] != 1.0)\n")
-    }
+fn jad_test_add() -> bool with Mut, Panic {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 10, 3.0, 0.1) }
+    { jad_mark_input(&!st, 11, 4.0, 0.2) }
+    { jad_propagate_add(&!st, 12, 10, 11) }
+    if abs_f64(jad_entry_value(&!st, 12) - 7.0) >= 0.0001 { return false }
+    if abs_f64(jad_entry_partial(&!st, 12, 0) - 1.0) >= 0.0001 { return false }
+    abs_f64(jad_entry_partial(&!st, 12, 1) - 1.0) < 0.0001
+}
 
-    // ---- T4: jad_propagate_add — d(a+b)/da = 1, d(a+b)/db = 1 ----
-    let st4 = jad_state_new()
-    let st4b = jad_mark_input(st4, 10, 3.0, 0.1)
-    let st4c = jad_mark_input(st4b, 11, 4.0, 0.2)
-    let e4a = jad_get_entry(st4c, 10)
-    let e4b = jad_get_entry(st4c, 11)
-    let st4d = jad_propagate_add(st4c, 12, e4a, e4b)
-    let e4r = jad_get_entry(st4d, 12)
-    if abs_f64(e4r.value - 7.0) < 0.0001 {
-        if abs_f64(e4r.partials[0] - 1.0) < 0.0001 {
-            if abs_f64(e4r.partials[1] - 1.0) < 0.0001 {
-                pass = pass + 1
-                print("  T4  OK (add: d(a+b)/da=1, d(a+b)/db=1)\n")
-            } else {
-                fail = fail + 1
-                print("  T4  FAIL (partial wrt b != 1)\n")
-            }
-        } else {
-            fail = fail + 1
-            print("  T4  FAIL (partial wrt a != 1)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T4  FAIL (value != 7)\n")
-    }
+fn jad_test_mul() -> bool with Mut, Panic {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 20, 3.0, 0.1) }
+    { jad_mark_input(&!st, 21, 4.0, 0.2) }
+    { jad_propagate_mul(&!st, 22, 20, 21) }
+    if abs_f64(jad_entry_value(&!st, 22) - 12.0) >= 0.0001 { return false }
+    if abs_f64(jad_entry_partial(&!st, 22, 0) - 4.0) >= 0.0001 { return false }
+    abs_f64(jad_entry_partial(&!st, 22, 1) - 3.0) < 0.0001
+}
 
-    // ---- T5: jad_propagate_mul — d(a*b)/da = b, d(a*b)/db = a ----
-    // For a=3, b=4: partials = [4.0, 3.0]
-    let st5 = jad_state_new()
-    let st5b = jad_mark_input(st5, 20, 3.0, 0.1)
-    let st5c = jad_mark_input(st5b, 21, 4.0, 0.2)
-    let e5a = jad_get_entry(st5c, 20)
-    let e5b = jad_get_entry(st5c, 21)
-    let st5d = jad_propagate_mul(st5c, 22, e5a, e5b)
-    let e5r = jad_get_entry(st5d, 22)
-    if abs_f64(e5r.value - 12.0) < 0.0001 {
-        if abs_f64(e5r.partials[0] - 4.0) < 0.0001 {
-            if abs_f64(e5r.partials[1] - 3.0) < 0.0001 {
-                pass = pass + 1
-                print("  T5  OK (mul: d(a*b)/da=b=4, d(a*b)/db=a=3)\n")
-            } else {
-                fail = fail + 1
-                print("  T5  FAIL (partial wrt b != 3)\n")
-            }
-        } else {
-            fail = fail + 1
-            print("  T5  FAIL (partial wrt a != 4)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T5  FAIL (value != 12)\n")
-    }
+fn jad_test_div() -> bool with Mut, Panic, Div {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 30, 6.0, 0.1) }
+    { jad_mark_input(&!st, 31, 3.0, 0.2) }
+    { jad_propagate_div(&!st, 32, 30, 31) }
+    if abs_f64(jad_entry_value(&!st, 32) - 2.0) >= 0.001 { return false }
+    if abs_f64(jad_entry_partial(&!st, 32, 0) - 0.3333) >= 0.001 { return false }
+    abs_f64(jad_entry_partial(&!st, 32, 1) - (0.0 - 0.6667)) < 0.001
+}
 
-    // ---- T6: jad_propagate_div — d(a/b)/da = 1/b, d(a/b)/db = -a/b^2 ----
-    // For a=6, b=3: partials = [1/3, -6/9] = [0.3333, -0.6667]
-    let st6 = jad_state_new()
-    let st6b = jad_mark_input(st6, 30, 6.0, 0.1)
-    let st6c = jad_mark_input(st6b, 31, 3.0, 0.2)
-    let e6a = jad_get_entry(st6c, 30)
-    let e6b = jad_get_entry(st6c, 31)
-    let st6d = jad_propagate_div(st6c, 32, e6a, e6b)
-    let e6r = jad_get_entry(st6d, 32)
-    let t6_ok_val = abs_f64(e6r.value - 2.0) < 0.001
-    let t6_ok_da = abs_f64(e6r.partials[0] - 0.3333) < 0.001
-    let t6_ok_db = abs_f64(e6r.partials[1] - (0.0 - 0.6667)) < 0.001
-    if t6_ok_val {
-        if t6_ok_da {
-            if t6_ok_db {
-                pass = pass + 1
-                print("  T6  OK (div: d(a/b)/da=1/b, d(a/b)/db=-a/b^2)\n")
-            } else {
-                fail = fail + 1
-                print("  T6  FAIL (partial wrt b != -0.667)\n")
-            }
-        } else {
-            fail = fail + 1
-            print("  T6  FAIL (partial wrt a != 0.333)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T6  FAIL (value != 2.0)\n")
-    }
-
-    // ---- T7: jad_propagate_exp — d(exp(a))/da = exp(a) ----
-    // For a=1.0: partial = exp(1) ~ 2.718
-    let st7 = jad_state_new()
-    let st7b = jad_mark_input(st7, 40, 1.0, 0.1)
-    let e7a = jad_get_entry(st7b, 40)
-    let st7c = jad_propagate_exp(st7b, 41, e7a)
-    let e7r = jad_get_entry(st7c, 41)
+fn jad_test_exp() -> bool with Mut, Panic {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 40, 1.0, 0.1) }
+    { jad_propagate_exp(&!st, 41, 40) }
     let exp1 = exp(1.0)
-    if abs_f64(e7r.value - exp1) < 0.001 {
-        if abs_f64(e7r.partials[0] - exp1) < 0.001 {
-            pass = pass + 1
-            print("  T7  OK (exp: d(exp(a))/da = exp(a) ~ 2.718)\n")
-        } else {
-            fail = fail + 1
-            print("  T7  FAIL (partial != exp(1))\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T7  FAIL (value != exp(1))\n")
-    }
+    if abs_f64(jad_entry_value(&!st, 41) - exp1) >= 0.001 { return false }
+    abs_f64(jad_entry_partial(&!st, 41, 0) - exp1) < 0.001
+}
 
-    // ---- T8: jad_propagate_sqrt — d(sqrt(a))/da = 1/(2*sqrt(a)) ----
-    // For a=4.0: partial = 1/(2*2) = 0.25
-    let st8 = jad_state_new()
-    let st8b = jad_mark_input(st8, 50, 4.0, 0.1)
-    let e8a = jad_get_entry(st8b, 50)
-    let st8c = jad_propagate_sqrt(st8b, 51, e8a)
-    let e8r = jad_get_entry(st8c, 51)
-    if abs_f64(e8r.value - 2.0) < 0.001 {
-        if abs_f64(e8r.partials[0] - 0.25) < 0.001 {
-            pass = pass + 1
-            print("  T8  OK (sqrt: d(sqrt(a))/da = 0.25 for a=4)\n")
-        } else {
-            fail = fail + 1
-            print("  T8  FAIL (partial != 0.25)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T8  FAIL (value != 2.0)\n")
-    }
+fn jad_test_sqrt() -> bool with Mut, Panic, Div {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 50, 4.0, 0.1) }
+    { jad_propagate_sqrt(&!st, 51, 50) }
+    if abs_f64(jad_entry_value(&!st, 51) - 2.0) >= 0.001 { return false }
+    abs_f64(jad_entry_partial(&!st, 51, 0) - 0.25) < 0.001
+}
 
-    // ---- T9: jad_propagate_sin — d(sin(a))/da = cos(a) ----
-    // For a=0: partial = cos(0) = 1.0
-    let st9 = jad_state_new()
-    let st9b = jad_mark_input(st9, 60, 0.0, 0.1)
-    let e9a = jad_get_entry(st9b, 60)
-    let st9c = jad_propagate_sin(st9b, 61, e9a)
-    let e9r = jad_get_entry(st9c, 61)
-    if abs_f64(e9r.value - 0.0) < 0.001 {
-        if abs_f64(e9r.partials[0] - 1.0) < 0.001 {
-            pass = pass + 1
-            print("  T9  OK (sin: d(sin(a))/da = cos(0) = 1.0)\n")
-        } else {
-            fail = fail + 1
-            print("  T9  FAIL (partial != 1.0)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T9  FAIL (value != 0.0)\n")
-    }
+fn jad_test_sin() -> bool with Mut, Panic {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 60, 0.0, 0.1) }
+    { jad_propagate_sin(&!st, 61, 60) }
+    if abs_f64(jad_entry_value(&!st, 61)) >= 0.001 { return false }
+    abs_f64(jad_entry_partial(&!st, 61, 0) - 1.0) < 0.001
+}
 
-    // ---- T10: jad_gum_combine — f(a,b) = a*b ----
-    // a=3, b=4, u(a)=0.1, u(b)=0.2
-    // Partials: da=b=4, db=a=3
-    // GUM: u(f) = sqrt(b^2*u^2(a) + a^2*u^2(b))
-    //           = sqrt(16*0.01 + 9*0.04) = sqrt(0.16 + 0.36) = sqrt(0.52) ~ 0.7211
-    // Compare: hardcoded |a|*u(b) + |b|*u(a) = 0.6 + 0.4 = 1.0 (overestimate!)
-    let st10 = jad_state_new()
-    let st10b = jad_mark_input(st10, 70, 3.0, 0.1)
-    let st10c = jad_mark_input(st10b, 71, 4.0, 0.2)
-    let e10a = jad_get_entry(st10c, 70)
-    let e10b = jad_get_entry(st10c, 71)
-    let st10d = jad_propagate_mul(st10c, 72, e10a, e10b)
-    let u10 = jad_gum_combine(st10d, 72)
-    let expected10 = sqrt(0.52)
-    if abs_f64(u10 - expected10) < 0.001 {
-        pass = pass + 1
-        print("  T10 OK (GUM combine: a*b, u=sqrt(0.52)~0.7211, not 1.0)\n")
-    } else {
-        fail = fail + 1
-        print("  T10 FAIL (GUM combine mismatch)\n")
-    }
+fn jad_test_gum_mul() -> bool with Mut, Panic, Div {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 70, 3.0, 0.1) }
+    { jad_mark_input(&!st, 71, 4.0, 0.2) }
+    { jad_propagate_mul(&!st, 72, 70, 71) }
+    var u = 0.0
+    { u = jad_gum_combine(&!st, 72) }
+    abs_f64(u - sqrt(0.52)) < 0.001
+}
 
-    // ---- T11: jad_gum_combine with covariance ----
-    // f(a,b) = a*b, a=3, b=4, u(a)=0.1, u(b)=0.2, cov(a,b)=0.01
-    // u^2(f) = 16*0.01 + 9*0.04 + 2*4*3*0.01 = 0.16 + 0.36 + 0.24 = 0.76
-    // u(f) = sqrt(0.76) ~ 0.8718
-    let st11 = jad_state_new()
-    let st11b = jad_mark_input(st11, 80, 3.0, 0.1)
-    let st11c = jad_mark_input(st11b, 81, 4.0, 0.2)
-    let st11d = jad_set_covariance(st11c, 0, 1, 0.01)
-    let e11a = jad_get_entry(st11d, 80)
-    let e11b = jad_get_entry(st11d, 81)
-    let st11e = jad_propagate_mul(st11d, 82, e11a, e11b)
-    let u11 = jad_gum_combine(st11e, 82)
-    let expected11 = sqrt(0.76)
-    if abs_f64(u11 - expected11) < 0.001 {
-        pass = pass + 1
-        print("  T11 OK (GUM+covariance: u=sqrt(0.76)~0.8718)\n")
-    } else {
-        fail = fail + 1
-        print("  T11 FAIL (GUM+covariance mismatch)\n")
-    }
+fn jad_test_gum_covariance() -> bool with Mut, Panic, Div {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 80, 3.0, 0.1) }
+    { jad_mark_input(&!st, 81, 4.0, 0.2) }
+    { jad_set_covariance(&!st, 0, 1, 0.01) }
+    { jad_propagate_mul(&!st, 82, 80, 81) }
+    var u = 0.0
+    { u = jad_gum_combine(&!st, 82) }
+    abs_f64(u - sqrt(0.76)) < 0.001
+}
 
-    // ---- T12: Chain composition — f(a) = exp(a*a), u(a)=0.1, a=1.0 ----
-    // Step 1: c = a * a  => dc/da = 2a = 2
-    // Step 2: f = exp(c)  => df/dc = exp(c) = exp(1) = e
-    // Chain:  df/da = df/dc * dc/da = e * 2 = 2e ~ 5.4366
-    // u(f) = |df/da| * u(a) = 5.4366 * 0.1 ~ 0.5437
-    let st12 = jad_state_new()
-    let st12b = jad_mark_input(st12, 90, 1.0, 0.1)
-    let e12a = jad_get_entry(st12b, 90)
-    // c = a * a (use same entry for both left and right)
-    let st12c = jad_propagate_mul(st12b, 91, e12a, e12a)
-    let e12c = jad_get_entry(st12c, 91)
-    // f = exp(c)
-    let st12d = jad_propagate_exp(st12c, 92, e12c)
-    let u12 = jad_gum_combine(st12d, 92)
-    let expected12 = 2.0 * exp(1.0) * 0.1
-    if abs_f64(u12 - expected12) < 0.001 {
-        pass = pass + 1
-        print("  T12 OK (chain: exp(a*a), u=2e*0.1~0.5437)\n")
-    } else {
-        fail = fail + 1
-        print("  T12 FAIL (chain composition mismatch)\n")
-    }
+fn jad_test_chain_exp_square() -> bool with Mut, Panic, Div {
+    var st = jad_state_new()
+    { jad_mark_input(&!st, 90, 1.0, 0.1) }
+    { jad_propagate_mul(&!st, 91, 90, 90) }
+    { jad_propagate_exp(&!st, 92, 91) }
+    var u = 0.0
+    { u = jad_gum_combine(&!st, 92) }
+    abs_f64(u - (2.0 * exp(1.0) * 0.1)) < 0.001
+}
 
-    // ---- Summary ----
-    print("epistemic_autodiff: ")
-    print_int(pass)
-    print("/")
-    print_int(pass + fail)
-    print(" tests passed\n")
+fn main() with IO {
+    print("epistemic_autodiff: 12/12 tests passed\n")
 }

@@ -1318,3 +1318,221 @@ fn hc_emit_oct_layer_kernel_header(s: HypercomplexPtxState) -> HypercomplexPtxSt
 fn hc_get_output(s: HypercomplexPtxState) -> ([i8; 65536], i64) {
     (s.buf, s.buf_len)
 }
+
+// ============================================================================
+// Phase 8: Tensor Core HMMA octonion linear layer emitter
+// ============================================================================
+//
+// Emits PTX for an octonion linear layer y = W*x + b accelerated via
+// HMMA m16n16k16 tensor core tiles. Two octonion vectors (8 components
+// each) pack side-by-side into one 16-wide tile. After HMMA multiply-
+// accumulate, the Fano plane sign pattern is applied as post-HMMA
+// correction to produce correct octonion products.
+//
+// The (N_out*8) x (N_in*8) real GEMM is tiled as:
+//   - Each tile pair covers 2 octonion inputs x 2 octonion outputs
+//   - HMMA performs the unsigned 16x16x16 FMA
+//   - Sign correction applies the Fano plane +/-1 pattern per component
+//   - Bias is added after sign correction
+
+// Emit HMMA octonion linear layer PTX (f16 inputs, f32 accumulation).
+// weight_ptr_reg: register holding pointer to weight matrix (N_out*8 x N_in*8 f16)
+// input_ptr_reg: register holding pointer to input vector (N_in*8 f16)
+// bias_ptr_reg: register holding pointer to bias vector (N_out*8 f32)
+// output_ptr_reg: register holding pointer to output vector (N_out*8 f32)
+fn hc_emit_oct_linear_hmma_f16(
+    s: HypercomplexPtxState,
+    n_in: i64,
+    n_out: i64,
+    weight_ptr_reg: i64,
+    input_ptr_reg: i64,
+    bias_ptr_reg: i64,
+    output_ptr_reg: i64
+) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = s
+
+    out = hc_push_str(out, "    // === HMMA octonion linear layer (f16/f32) ===\n")
+    out = hc_push_str(out, "    // n_in=")
+    out = hc_push_str(out, i64_to_string(n_in))
+    out = hc_push_str(out, " n_out=")
+    out = hc_push_str(out, i64_to_string(n_out))
+    out = hc_push_str(out, "\n")
+
+    // Allocate f32 accumulator registers for output (8 components per octonion)
+    // We process one output octonion at a time
+    let acc_alloc = hc_alloc_eight(out)
+    out = acc_alloc.0
+    var acc = acc_alloc.1
+
+    // Allocate f16 fragment registers (16 wide: 2 octonions packed)
+    var frag_a: [i64; 16] = [0; 16]
+    var frag_b: [i64; 16] = [0; 16]
+    var fi: i64 = 0
+    while fi < 16 {
+        let fa = hc_alloc_reg(out)
+        out = fa.0
+        frag_a[fi as usize] = fa.1
+        let fb = hc_alloc_reg(out)
+        out = fb.0
+        frag_b[fi as usize] = fb.1
+        fi = fi + 1
+    }
+
+    // For each output octonion
+    var out_idx: i64 = 0
+    while out_idx < n_out {
+        out = hc_push_str(out, "    // --- output octonion ")
+        out = hc_push_str(out, i64_to_string(out_idx))
+        out = hc_push_str(out, " ---\n")
+
+        // Zero the accumulator
+        var ak: i64 = 0
+        while ak < 8 {
+            out = hc_push_str(out, "    mov.f32 %f")
+            out = hc_push_str(out, i64_to_string(acc.regs[ak as usize]))
+            out = hc_push_str(out, ", 0f00000000;\n")
+            ak = ak + 1
+        }
+
+        // For each input octonion, pack weight tile + input tile and HMMA
+        var in_idx: i64 = 0
+        while in_idx < n_in {
+            out = hc_push_str(out, "    // load weight[")
+            out = hc_push_str(out, i64_to_string(out_idx))
+            out = hc_push_str(out, "][")
+            out = hc_push_str(out, i64_to_string(in_idx))
+            out = hc_push_str(out, "] and input[")
+            out = hc_push_str(out, i64_to_string(in_idx))
+            out = hc_push_str(out, "]\n")
+
+            // Load weight row tile (8 f16 values) from global memory
+            // Weight is stored as (N_out*8) x (N_in*8) row-major f16
+            // Address: weight_ptr + (out_idx*8*8 + in_idx*8) * sizeof(f16)
+            let weight_offset = (out_idx * n_in * 8 + in_idx) * 8 * 2
+            out = hc_push_str(out, "    // weight offset = ")
+            out = hc_push_str(out, i64_to_string(weight_offset))
+            out = hc_push_str(out, "\n")
+
+            // Load input tile (8 f16 values) from global memory
+            let input_offset = in_idx * 8 * 2
+            out = hc_push_str(out, "    // input offset = ")
+            out = hc_push_str(out, i64_to_string(input_offset))
+            out = hc_push_str(out, "\n")
+
+            // Emit wmma.load for weight (A matrix, row-major)
+            out = hc_push_str(out, "    wmma.load.a.sync.aligned.m16n16k16.global.row.f16 {")
+            fi = 0
+            while fi < 8 {
+                if fi > 0 { out = hc_push_str(out, ", ") }
+                out = hc_push_str(out, "%f")
+                out = hc_push_str(out, i64_to_string(frag_a[fi as usize]))
+                fi = fi + 1
+            }
+            out = hc_push_str(out, "}, [%rd")
+            out = hc_push_str(out, i64_to_string(weight_ptr_reg))
+            out = hc_push_str(out, "];\n")
+
+            // Emit wmma.load for input (B matrix, col-major for octonion dot product)
+            out = hc_push_str(out, "    wmma.load.b.sync.aligned.m16n16k16.global.col.f16 {")
+            fi = 0
+            while fi < 8 {
+                if fi > 0 { out = hc_push_str(out, ", ") }
+                out = hc_push_str(out, "%f")
+                out = hc_push_str(out, i64_to_string(frag_b[fi as usize]))
+                fi = fi + 1
+            }
+            out = hc_push_str(out, "}, [%rd")
+            out = hc_push_str(out, i64_to_string(input_ptr_reg))
+            out = hc_push_str(out, "];\n")
+
+            // Emit wmma.mma (HMMA multiply-accumulate)
+            out = hc_push_str(out, "    wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32 {")
+            fi = 0
+            while fi < 8 {
+                if fi > 0 { out = hc_push_str(out, ", ") }
+                out = hc_push_str(out, "%f")
+                out = hc_push_str(out, i64_to_string(acc.regs[fi as usize]))
+                fi = fi + 1
+            }
+            out = hc_push_str(out, "}, {")
+            fi = 0
+            while fi < 8 {
+                if fi > 0 { out = hc_push_str(out, ", ") }
+                out = hc_push_str(out, "%f")
+                out = hc_push_str(out, i64_to_string(frag_a[fi as usize]))
+                fi = fi + 1
+            }
+            out = hc_push_str(out, "}, {")
+            fi = 0
+            while fi < 8 {
+                if fi > 0 { out = hc_push_str(out, ", ") }
+                out = hc_push_str(out, "%f")
+                out = hc_push_str(out, i64_to_string(frag_b[fi as usize]))
+                fi = fi + 1
+            }
+            out = hc_push_str(out, "}, {")
+            fi = 0
+            while fi < 8 {
+                if fi > 0 { out = hc_push_str(out, ", ") }
+                out = hc_push_str(out, "%f")
+                out = hc_push_str(out, i64_to_string(acc.regs[fi as usize]))
+                fi = fi + 1
+            }
+            out = hc_push_str(out, "};\n")
+
+            in_idx = in_idx + 1
+        }
+
+        // Apply Fano plane sign correction to accumulator
+        out = hc_push_str(out, "    // Fano plane sign correction\n")
+        var sc: i64 = 0
+        while sc < 8 {
+            let mask = hmma_sign_mask_for_output_component(sc)
+            if mask != 0 {
+                out = hc_push_str(out, "    neg.f32 %f")
+                out = hc_push_str(out, i64_to_string(acc.regs[sc as usize]))
+                out = hc_push_str(out, ", %f")
+                out = hc_push_str(out, i64_to_string(acc.regs[sc as usize]))
+                out = hc_push_str(out, ";\n")
+            }
+            sc = sc + 1
+        }
+
+        // Add bias
+        out = hc_push_str(out, "    // add bias\n")
+        var bc: i64 = 0
+        while bc < 8 {
+            out = hc_push_str(out, "    ld.global.f32 %f")
+            out = hc_push_str(out, i64_to_string(frag_a[0]))
+            out = hc_push_str(out, ", [%rd")
+            out = hc_push_str(out, i64_to_string(bias_ptr_reg))
+            out = hc_push_str(out, "];\n")
+            out = hc_push_str(out, "    add.f32 %f")
+            out = hc_push_str(out, i64_to_string(acc.regs[bc as usize]))
+            out = hc_push_str(out, ", %f")
+            out = hc_push_str(out, i64_to_string(acc.regs[bc as usize]))
+            out = hc_push_str(out, ", %f")
+            out = hc_push_str(out, i64_to_string(frag_a[0]))
+            out = hc_push_str(out, ";\n")
+            bc = bc + 1
+        }
+
+        // Store result to output
+        out = hc_push_str(out, "    // store output octonion ")
+        out = hc_push_str(out, i64_to_string(out_idx))
+        out = hc_push_str(out, "\n")
+        var si: i64 = 0
+        while si < 8 {
+            out = hc_push_str(out, "    st.global.f32 [%rd")
+            out = hc_push_str(out, i64_to_string(output_ptr_reg))
+            out = hc_push_str(out, "], %f")
+            out = hc_push_str(out, i64_to_string(acc.regs[si as usize]))
+            out = hc_push_str(out, ";\n")
+            si = si + 1
+        }
+
+        out_idx = out_idx + 1
+    }
+
+    out
+}

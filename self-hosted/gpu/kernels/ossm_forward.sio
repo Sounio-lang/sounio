@@ -1046,3 +1046,865 @@ fn ossm_test_forward_kernel_structure() -> i64 with Mut, Panic, Div {
     if s.buf_len == 0 { return 1 }
     0
 }
+
+// ============================================================================
+// Phase 4: O-SSM Backward Pass (BPTT) — Gradient clipping helper
+// ============================================================================
+
+// ossm_emit_grad_clip_f64 — clip `count` f64 registers starting at reg_base
+// to [clip_val_lo, clip_val_hi] using setp.lt/selp pattern.
+// clip_val_lo and clip_val_hi are register indices holding the clip bounds.
+fn ossm_emit_grad_clip_f64(s: OssmPtxState, reg_base: i64, count: i64, clip_lo_reg: i64, clip_hi_reg: i64) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    var i: i64 = 0
+    while i < count {
+        let pred = out.pred_counter
+        out.pred_counter = pred + 1
+        // if reg < clip_lo, set to clip_lo
+        out = ossm_push_str(out, "    setp.lt.f64 ")
+        out = ossm_push_str(out, ossm_pred(pred))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(clip_lo_reg))
+        out = ossm_push_str(out, ";\n")
+        out = ossm_push_str(out, "    selp.f64 ")
+        out = ossm_push_str(out, ossm_reg_f64(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(clip_lo_reg))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_pred(pred))
+        out = ossm_push_str(out, ";\n")
+
+        let pred2 = out.pred_counter
+        out.pred_counter = pred2 + 1
+        // if reg > clip_hi, set to clip_hi
+        out = ossm_push_str(out, "    setp.gt.f64 ")
+        out = ossm_push_str(out, ossm_pred(pred2))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(clip_hi_reg))
+        out = ossm_push_str(out, ";\n")
+        out = ossm_push_str(out, "    selp.f64 ")
+        out = ossm_push_str(out, ossm_reg_f64(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(clip_hi_reg))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f64(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_pred(pred2))
+        out = ossm_push_str(out, ";\n")
+
+        i = i + 1
+    }
+    out
+}
+
+// ossm_emit_grad_clip_f32 — f32 variant
+fn ossm_emit_grad_clip_f32(s: OssmPtxState, reg_base: i64, count: i64, clip_lo_reg: i64, clip_hi_reg: i64) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    var i: i64 = 0
+    while i < count {
+        let pred = out.pred_counter
+        out.pred_counter = pred + 1
+        out = ossm_push_str(out, "    setp.lt.f32 ")
+        out = ossm_push_str(out, ossm_pred(pred))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(clip_lo_reg))
+        out = ossm_push_str(out, ";\n")
+        out = ossm_push_str(out, "    selp.f32 ")
+        out = ossm_push_str(out, ossm_reg_f32(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(clip_lo_reg))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_pred(pred))
+        out = ossm_push_str(out, ";\n")
+
+        let pred2 = out.pred_counter
+        out.pred_counter = pred2 + 1
+        out = ossm_push_str(out, "    setp.gt.f32 ")
+        out = ossm_push_str(out, ossm_pred(pred2))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(clip_hi_reg))
+        out = ossm_push_str(out, ";\n")
+        out = ossm_push_str(out, "    selp.f32 ")
+        out = ossm_push_str(out, ossm_reg_f32(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(clip_hi_reg))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_reg_f32(reg_base + i))
+        out = ossm_push_str(out, ", ")
+        out = ossm_push_str(out, ossm_pred(pred2))
+        out = ossm_push_str(out, ";\n")
+
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Phase 4: O-SSM Backward Pass (BPTT) — Complete PTX kernel emitter (f64)
+//
+// Register allocation (%fd0-95, %rd0-31, %p0-15):
+//   %rd0:  global tid       %rd1:  n (element count)
+//   %rd3:  tid*8 (byte offset)
+//   %rd4:  h_ptrs base      %rd5:  a_ptrs base
+//   %rd6:  b_ptrs base      %rd7:  c_ptrs base
+//   %rd8:  x_ptrs base      %rd9:  dy_ptrs base
+//   %rd10: scratch0 (SoA)   %rd11: scratch1 (SoA)
+//   %rd12-22: gradient output ptrs
+//
+//   %fd0-7:   A parameter     %fd8-15:  B parameter
+//   %fd16-23: C parameter     %fd24-31: h_t (sigmoid output, cached from forward)
+//   %fd32-39: h_{t-1}         %fd40-47: x_t scalar broadcast / scratch
+//   %fd48-55: gradient working registers (dh, d_comb, d_ah, d_bx)
+//   %fd56-63: accumulators / scratch for oct_mul intermediates
+//   %fd64-71: scratch for oct_mul intermediates
+//   %fd72-79: grad_C, grad_B accumulators
+//   %fd80-87: dh_prev result
+//   %fd88-95: clip constants and temporaries
+// ============================================================================
+
+fn ossm_emit_backward_f64(n_timesteps: i64) -> OssmPtxState with Mut, Panic, Div {
+    var s = ossm_new()
+
+    // PTX header
+    s = ossm_push_str(s, ".version 7.8\n")
+    s = ossm_push_str(s, ".target sm_70\n")
+    s = ossm_push_str(s, ".address_size 64\n\n")
+
+    // Kernel entry point
+    s = ossm_push_str(s, ".visible .entry sounio_ossm_backward_f64(\n")
+    s = ossm_push_str(s, "    .param .u64 h_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 a_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 b_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 c_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 x_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 dy_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 dh_next_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 grad_a_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 grad_b_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 grad_c_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 grad_h_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 grad_x_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 n_ptr\n")
+    s = ossm_push_str(s, ") {\n")
+
+    // Register declarations
+    s = ossm_push_str(s, "    .reg .f64 %fd<96>;\n")
+    s = ossm_push_str(s, "    .reg .u64 %rd<32>;\n")
+    s = ossm_push_str(s, "    .reg .u32 %r<8>;\n")
+    s = ossm_push_str(s, "    .reg .pred %p<16>;\n\n")
+
+    // Thread ID and bounds check
+    s = ossm_push_str(s, "    mov.u32 %r0, %tid.x;\n")
+    s = ossm_push_str(s, "    mov.u32 %r1, %ctaid.x;\n")
+    s = ossm_push_str(s, "    mov.u32 %r2, %ntid.x;\n")
+    s = ossm_push_str(s, "    mad.wide.u32 %rd0, %r1, %r2, %r0;\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd1, [n_ptr];\n")
+    s = ossm_push_str(s, "    setp.ge.u64 %p0, %rd0, %rd1;\n")
+    s = ossm_push_str(s, "    @%p0 bra $L_exit;\n\n")
+
+    // Precompute tid*8
+    s = ossm_push_str(s, "    shl.b64 %rd3, %rd0, 3;\n\n")
+
+    // Load parameter pointers
+    s = ossm_push_str(s, "    ld.param.u64 %rd4, [h_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd5, [a_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd6, [b_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd7, [c_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd8, [x_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd9, [dy_ptrs];\n\n")
+
+    var c: i64 = 0
+
+    // Load A parameter into %fd0-7
+    s = ossm_push_str(s, "    // Load A parameter into %fd0-7\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f64(s, c, 5, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Load B parameter into %fd8-15
+    s = ossm_push_str(s, "\n    // Load B parameter into %fd8-15\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f64(s, 8 + c, 6, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Load C parameter into %fd16-23
+    s = ossm_push_str(s, "\n    // Load C parameter into %fd16-23\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f64(s, 16 + c, 7, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Load cached forward values: h_t (sigmoid output) into %fd24-31
+    s = ossm_push_str(s, "\n    // Load h_t (forward sigmoid output) into %fd24-31\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f64(s, 24 + c, 4, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Load h_{t-1} into %fd32-39 (second SoA pointer offset for prev timestep)
+    s = ossm_push_str(s, "\n    // Load h_{t-1} into %fd32-39\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f64(s, 32 + c, 4, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Load x_t scalar into %fd40 (broadcast as needed)
+    s = ossm_push_str(s, "\n    // Load x_t scalar into %fd40\n")
+    s = ossm_push_str(s, "    add.u64 %rd10, %rd8, %rd3;\n")
+    s = ossm_push_str(s, "    ld.global.f64 %fd40, [%rd10];\n\n")
+
+    // Load upstream gradient dy (scalar) into %fd41
+    s = ossm_push_str(s, "    // Load dy (scalar upstream gradient) into %fd41\n")
+    s = ossm_push_str(s, "    add.u64 %rd10, %rd9, %rd3;\n")
+    s = ossm_push_str(s, "    ld.global.f64 %fd41, [%rd10];\n\n")
+
+    // Load dh_next (8-component upstream gradient) into %fd48-55
+    s = ossm_push_str(s, "    // Load dh_next into %fd48-55\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd10, [dh_next_ptrs];\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f64(s, 48 + c, 10, c, 3, 11, 12)
+        c = c + 1
+    }
+
+    // === Backward Pass ===
+
+    // Step 1: Output projection backward
+    // grad_ch = (dy, 0, 0, 0, 0, 0, 0, 0) — only real component gets gradient
+    // dh += conj(C) * grad_ch
+    // grad_C += grad_ch * conj(h_t)
+    s = ossm_push_str(s, "\n    // === Backward Pass Step 1: Output projection backward ===\n")
+
+    // Build grad_ch in %fd56-63: grad_ch[0] = dy, grad_ch[1..7] = 0
+    s = ossm_push_str(s, "    mov.f64 %fd56, %fd41;\n")
+    s = ossm_push_str(s, "    mov.f64 %fd57, 0d0000000000000000;\n")
+    s = ossm_push_str(s, "    mov.f64 %fd58, 0d0000000000000000;\n")
+    s = ossm_push_str(s, "    mov.f64 %fd59, 0d0000000000000000;\n")
+    s = ossm_push_str(s, "    mov.f64 %fd60, 0d0000000000000000;\n")
+    s = ossm_push_str(s, "    mov.f64 %fd61, 0d0000000000000000;\n")
+    s = ossm_push_str(s, "    mov.f64 %fd62, 0d0000000000000000;\n")
+    s = ossm_push_str(s, "    mov.f64 %fd63, 0d0000000000000000;\n\n")
+
+    // grad_C += grad_ch * conj(h_t) — store in %fd64-71, then atomic add
+    // First, conj(h_t): negate h_t[1..7]
+    s = ossm_push_str(s, "    // conj(h_t)\n")
+    s = ossm_push_str(s, "    mov.f64 %fd64, %fd24;\n")
+    c = 1
+    while c < 8 {
+        s = ossm_push_str(s, "    neg.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(64 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(24 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // grad_C_local = grad_ch * conj(h_t) via oct_mul -> %fd72-79
+    let grad_ch: [i64; 8] = [56, 57, 58, 59, 60, 61, 62, 63]
+    let conj_ht: [i64; 8] = [64, 65, 66, 67, 68, 69, 70, 71]
+    let grad_c_local: [i64; 8] = [72, 73, 74, 75, 76, 77, 78, 79]
+    s = ossm_emit_oct_mul_f64(s, grad_c_local, grad_ch, conj_ht, 80)
+
+    // dh_local = conj(C) * grad_ch via oct_mul -> %fd56-63 (reuse grad_ch regs)
+    // First build conj(C) in %fd64-71
+    s = ossm_push_str(s, "\n    // conj(C)\n")
+    s = ossm_push_str(s, "    mov.f64 %fd64, %fd16;\n")
+    c = 1
+    while c < 8 {
+        s = ossm_push_str(s, "    neg.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(64 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(16 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // dh += conj(C) * grad_ch, store in %fd48-55 (add to existing dh_next)
+    let conj_c: [i64; 8] = [64, 65, 66, 67, 68, 69, 70, 71]
+    let dh_acc: [i64; 8] = [56, 57, 58, 59, 60, 61, 62, 63]
+    s = ossm_emit_oct_mul_f64(s, dh_acc, conj_c, grad_ch, 80)
+
+    // dh += dh_next: add %fd56-63 into %fd48-55
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    add.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(48 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(48 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(56 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // Step 2: Sigmoid backward
+    // d_comb[i] = dh[i] * h_t[i] * (1 - h_t[i])
+    s = ossm_push_str(s, "\n    // === Step 2: Sigmoid backward ===\n")
+    // 1.0 constant for subtraction
+    s = ossm_push_str(s, "    mov.f64 %fd88, 0d3FF0000000000000;\n")
+    c = 0
+    while c < 8 {
+        // %fd56 = 1 - h_t[i]
+        s = ossm_push_str(s, "    sub.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(56 + c))
+        s = ossm_push_str(s, ", %fd88, ")
+        s = ossm_push_str(s, ossm_reg_f64(24 + c))
+        s = ossm_push_str(s, ";\n")
+        // %fd57 = h_t[i] * (1 - h_t[i])
+        s = ossm_push_str(s, "    mul.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(56 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(24 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(56 + c))
+        s = ossm_push_str(s, ";\n")
+        // d_comb[i] = dh[i] * h_t[i] * (1 - h_t[i])
+        // Reuse %fd48+i for d_comb
+        s = ossm_push_str(s, "    mul.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(48 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(48 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(56 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // Step 3: Addition backward — d_ah = d_comb, d_bx = d_comb (copy)
+    s = ossm_push_str(s, "\n    // === Step 3: Addition backward (copy) ===\n")
+    c = 0
+    while c < 8 {
+        // d_ah -> %fd56-63 (copy of d_comb in %fd48-55)
+        s = ossm_push_str(s, "    mov.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(56 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(48 + c))
+        s = ossm_push_str(s, ";\n")
+        // d_bx -> %fd64-71
+        s = ossm_push_str(s, "    mov.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(64 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(48 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // Step 4: Octonion multiply backward (ah = A * h_{t-1})
+    // grad_A += d_ah * conj(h_{t-1})
+    // dh_prev = conj(A) * d_ah
+    s = ossm_push_str(s, "\n    // === Step 4: Oct mul backward (ah = A * h_{t-1}) ===\n")
+
+    // conj(h_{t-1}) in %fd72-79
+    s = ossm_push_str(s, "    mov.f64 %fd72, %fd32;\n")
+    c = 1
+    while c < 8 {
+        s = ossm_push_str(s, "    neg.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(72 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(32 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // grad_A_local = d_ah * conj(h_prev) -> %fd80-87
+    let d_ah: [i64; 8] = [56, 57, 58, 59, 60, 61, 62, 63]
+    let conj_hprev: [i64; 8] = [72, 73, 74, 75, 76, 77, 78, 79]
+    let grad_a_local: [i64; 8] = [80, 81, 82, 83, 84, 85, 86, 87]
+    s = ossm_emit_oct_mul_f64(s, grad_a_local, d_ah, conj_hprev, 88)
+
+    // grad_A clipping: clip to [-0.5, 0.5]
+    s = ossm_push_str(s, "\n    // Clip grad_A to [-0.5, 0.5]\n")
+    s = ossm_push_str(s, "    mov.f64 %fd89, 0dBFE0000000000000;\n")
+    s = ossm_push_str(s, "    mov.f64 %fd90, 0d3FE0000000000000;\n")
+    s = ossm_emit_grad_clip_f64(s, 80, 8, 89, 90)
+
+    // Store grad_A via atomic add to grad_a_ptrs
+    s = ossm_push_str(s, "\n    // atom.add grad_A -> grad_a_ptrs\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd12, [grad_a_ptrs];\n")
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    // atom.add.f64 component ")
+        s = ossm_push_str(s, i64_to_string(c))
+        s = ossm_push_str(s, "\n")
+        s = ossm_push_str(s, "    mov.u64 %rd13, ")
+        s = ossm_push_str(s, i64_to_string(c * 8))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    add.u64 %rd13, %rd12, %rd13;\n")
+        s = ossm_push_str(s, "    ld.global.u64 %rd14, [%rd13];\n")
+        s = ossm_push_str(s, "    add.u64 %rd14, %rd14, %rd3;\n")
+        s = ossm_push_str(s, "    atom.add.f64 [%rd14], ")
+        s = ossm_push_str(s, ossm_reg_f64(80 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // dh_prev = conj(A) * d_ah -> %fd48-55
+    // conj(A) in %fd72-79 (reuse)
+    s = ossm_push_str(s, "    mov.f64 %fd72, %fd0;\n")
+    c = 1
+    while c < 8 {
+        s = ossm_push_str(s, "    neg.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(72 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    let conj_a: [i64; 8] = [72, 73, 74, 75, 76, 77, 78, 79]
+    let dh_prev: [i64; 8] = [48, 49, 50, 51, 52, 53, 54, 55]
+    s = ossm_emit_oct_mul_f64(s, dh_prev, conj_a, d_ah, 80)
+
+    // Clip dh_prev to [-1.0, 1.0]
+    s = ossm_push_str(s, "\n    // Clip dh_prev to [-1.0, 1.0]\n")
+    s = ossm_push_str(s, "    mov.f64 %fd89, 0dBFF0000000000000;\n")
+    s = ossm_push_str(s, "    mov.f64 %fd90, 0d3FF0000000000000;\n")
+    s = ossm_emit_grad_clip_f64(s, 48, 8, 89, 90)
+
+    // Step 5: Scale backward (bx = B * x_t)
+    // grad_B[i] += d_bx[i] * x_t for each component
+    // grad_x += dot(d_bx, B)
+    s = ossm_push_str(s, "\n    // === Step 5: Scale backward (bx = B * x_t) ===\n")
+
+    // grad_B_local in %fd72-79: grad_B[i] = d_bx[i] * x_t
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    mul.f64 ")
+        s = ossm_push_str(s, ossm_reg_f64(72 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(64 + c))
+        s = ossm_push_str(s, ", %fd40;\n")
+        c = c + 1
+    }
+
+    // Store grad_B via atomic add to grad_b_ptrs
+    s = ossm_push_str(s, "\n    // atom.add grad_B -> grad_b_ptrs\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd13, [grad_b_ptrs];\n")
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    mov.u64 %rd14, ")
+        s = ossm_push_str(s, i64_to_string(c * 8))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    add.u64 %rd14, %rd13, %rd14;\n")
+        s = ossm_push_str(s, "    ld.global.u64 %rd15, [%rd14];\n")
+        s = ossm_push_str(s, "    add.u64 %rd15, %rd15, %rd3;\n")
+        s = ossm_push_str(s, "    atom.add.f64 [%rd15], ")
+        s = ossm_push_str(s, ossm_reg_f64(72 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // grad_x = dot(d_bx, B) — 8 multiply + 7 add reduction
+    s = ossm_push_str(s, "\n    // grad_x = dot(d_bx, B)\n")
+    s = ossm_push_str(s, "    mul.f64 %fd80, %fd64, %fd8;\n")
+    c = 1
+    while c < 8 {
+        s = ossm_push_str(s, "    mul.f64 %fd81, ")
+        s = ossm_push_str(s, ossm_reg_f64(64 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f64(8 + c))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    add.f64 %fd80, %fd80, %fd81;\n")
+        c = c + 1
+    }
+
+    // Store grad_x
+    s = ossm_push_str(s, "\n    // Store grad_x\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd14, [grad_x_ptrs];\n")
+    s = ossm_push_str(s, "    add.u64 %rd14, %rd14, %rd3;\n")
+    s = ossm_push_str(s, "    st.global.f64 [%rd14], %fd80;\n\n")
+
+    // Store grad_C
+    s = ossm_push_str(s, "    // atom.add grad_C -> grad_c_ptrs\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd15, [grad_c_ptrs];\n")
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    mov.u64 %rd16, ")
+        s = ossm_push_str(s, i64_to_string(c * 8))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    add.u64 %rd16, %rd15, %rd16;\n")
+        s = ossm_push_str(s, "    ld.global.u64 %rd17, [%rd16];\n")
+        s = ossm_push_str(s, "    add.u64 %rd17, %rd17, %rd3;\n")
+        s = ossm_push_str(s, "    atom.add.f64 [%rd17], ")
+        s = ossm_push_str(s, ossm_reg_f64(72 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // Store dh_prev (grad_h) to grad_h_ptrs SoA
+    s = ossm_push_str(s, "\n    // Store dh_prev -> grad_h_ptrs\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd16, [grad_h_ptrs];\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_store_f64(s, 48 + c, 16, c, 3, 17, 18)
+        c = c + 1
+    }
+
+    // Exit
+    s = ossm_push_str(s, "\n$L_exit:\n")
+    s = ossm_push_str(s, "    ret;\n")
+    s = ossm_push_str(s, "}\n")
+
+    s
+}
+
+// ============================================================================
+// Phase 4: O-SSM Backward Pass (BPTT) — f32 variant
+// ============================================================================
+
+fn ossm_emit_backward_f32(n_timesteps: i64) -> OssmPtxState with Mut, Panic, Div {
+    var s = ossm_new()
+
+    s = ossm_push_str(s, ".version 7.8\n")
+    s = ossm_push_str(s, ".target sm_70\n")
+    s = ossm_push_str(s, ".address_size 64\n\n")
+
+    s = ossm_push_str(s, ".visible .entry sounio_ossm_backward_f32(\n")
+    s = ossm_push_str(s, "    .param .u64 h_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 a_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 b_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 c_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 x_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 dy_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 dh_next_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 grad_a_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 grad_b_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 grad_c_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 grad_h_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 grad_x_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 n_ptr\n")
+    s = ossm_push_str(s, ") {\n")
+
+    s = ossm_push_str(s, "    .reg .f32 %f<96>;\n")
+    s = ossm_push_str(s, "    .reg .u64 %rd<32>;\n")
+    s = ossm_push_str(s, "    .reg .u32 %r<8>;\n")
+    s = ossm_push_str(s, "    .reg .pred %p<16>;\n\n")
+
+    // Thread ID and bounds check
+    s = ossm_push_str(s, "    mov.u32 %r0, %tid.x;\n")
+    s = ossm_push_str(s, "    mov.u32 %r1, %ctaid.x;\n")
+    s = ossm_push_str(s, "    mov.u32 %r2, %ntid.x;\n")
+    s = ossm_push_str(s, "    mad.wide.u32 %rd0, %r1, %r2, %r0;\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd1, [n_ptr];\n")
+    s = ossm_push_str(s, "    setp.ge.u64 %p0, %rd0, %rd1;\n")
+    s = ossm_push_str(s, "    @%p0 bra $L_exit;\n\n")
+
+    // tid*4 for f32
+    s = ossm_push_str(s, "    shl.b64 %rd3, %rd0, 2;\n\n")
+
+    s = ossm_push_str(s, "    ld.param.u64 %rd4, [h_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd5, [a_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd6, [b_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd7, [c_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd8, [x_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd9, [dy_ptrs];\n\n")
+
+    var c: i64 = 0
+
+    // Load A into %f0-7
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f32(s, c, 5, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Load B into %f8-15
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f32(s, 8 + c, 6, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Load C into %f16-23
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f32(s, 16 + c, 7, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Load h_t into %f24-31
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f32(s, 24 + c, 4, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Load h_{t-1} into %f32-39
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f32(s, 32 + c, 4, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Load x_t scalar into %f40
+    s = ossm_push_str(s, "    add.u64 %rd10, %rd8, %rd3;\n")
+    s = ossm_push_str(s, "    ld.global.f32 %f40, [%rd10];\n\n")
+
+    // Load dy into %f41
+    s = ossm_push_str(s, "    add.u64 %rd10, %rd9, %rd3;\n")
+    s = ossm_push_str(s, "    ld.global.f32 %f41, [%rd10];\n\n")
+
+    // Load dh_next into %f48-55
+    s = ossm_push_str(s, "    ld.param.u64 %rd10, [dh_next_ptrs];\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f32(s, 48 + c, 10, c, 3, 11, 12)
+        c = c + 1
+    }
+
+    // === Backward Pass (f32) ===
+
+    // Step 1: Output projection backward
+    s = ossm_push_str(s, "\n    // === Step 1: Output projection backward (f32) ===\n")
+    s = ossm_push_str(s, "    mov.f32 %f56, %f41;\n")
+    s = ossm_push_str(s, "    mov.f32 %f57, 0f00000000;\n")
+    s = ossm_push_str(s, "    mov.f32 %f58, 0f00000000;\n")
+    s = ossm_push_str(s, "    mov.f32 %f59, 0f00000000;\n")
+    s = ossm_push_str(s, "    mov.f32 %f60, 0f00000000;\n")
+    s = ossm_push_str(s, "    mov.f32 %f61, 0f00000000;\n")
+    s = ossm_push_str(s, "    mov.f32 %f62, 0f00000000;\n")
+    s = ossm_push_str(s, "    mov.f32 %f63, 0f00000000;\n\n")
+
+    // conj(h_t)
+    s = ossm_push_str(s, "    mov.f32 %f64, %f24;\n")
+    c = 1
+    while c < 8 {
+        s = ossm_push_str(s, "    neg.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(64 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(24 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // grad_C = grad_ch * conj(h_t)
+    let grad_ch_f32: [i64; 8] = [56, 57, 58, 59, 60, 61, 62, 63]
+    let conj_ht_f32: [i64; 8] = [64, 65, 66, 67, 68, 69, 70, 71]
+    let grad_c_f32: [i64; 8] = [72, 73, 74, 75, 76, 77, 78, 79]
+    s = ossm_emit_oct_mul_f32(s, grad_c_f32, grad_ch_f32, conj_ht_f32, 80)
+
+    // conj(C)
+    s = ossm_push_str(s, "    mov.f32 %f64, %f16;\n")
+    c = 1
+    while c < 8 {
+        s = ossm_push_str(s, "    neg.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(64 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(16 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    let conj_c_f32: [i64; 8] = [64, 65, 66, 67, 68, 69, 70, 71]
+    let dh_f32: [i64; 8] = [56, 57, 58, 59, 60, 61, 62, 63]
+    s = ossm_emit_oct_mul_f32(s, dh_f32, conj_c_f32, grad_ch_f32, 80)
+
+    // dh += dh_next
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    add.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(48 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(48 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(56 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // Step 2: Sigmoid backward
+    s = ossm_push_str(s, "\n    // === Step 2: Sigmoid backward (f32) ===\n")
+    s = ossm_push_str(s, "    mov.f32 %f88, 0f3F800000;\n")
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    sub.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(56 + c))
+        s = ossm_push_str(s, ", %f88, ")
+        s = ossm_push_str(s, ossm_reg_f32(24 + c))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    mul.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(56 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(24 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(56 + c))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    mul.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(48 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(48 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(56 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // Step 3: Copy d_comb -> d_ah and d_bx
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    mov.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(56 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(48 + c))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    mov.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(64 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(48 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // Step 4: Octonion multiply backward
+    s = ossm_push_str(s, "\n    // === Step 4: Oct mul backward (f32) ===\n")
+    s = ossm_push_str(s, "    mov.f32 %f72, %f32;\n")
+    c = 1
+    while c < 8 {
+        s = ossm_push_str(s, "    neg.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(72 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(32 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    let d_ah_f32: [i64; 8] = [56, 57, 58, 59, 60, 61, 62, 63]
+    let conj_hprev_f32: [i64; 8] = [72, 73, 74, 75, 76, 77, 78, 79]
+    let grad_a_f32: [i64; 8] = [80, 81, 82, 83, 84, 85, 86, 87]
+    s = ossm_emit_oct_mul_f32(s, grad_a_f32, d_ah_f32, conj_hprev_f32, 88)
+
+    // Clip grad_A to [-0.5, 0.5]
+    s = ossm_push_str(s, "    mov.f32 %f89, 0fBF000000;\n")
+    s = ossm_push_str(s, "    mov.f32 %f90, 0f3F000000;\n")
+    s = ossm_emit_grad_clip_f32(s, 80, 8, 89, 90)
+
+    // Store grad_A atomic
+    s = ossm_push_str(s, "    ld.param.u64 %rd12, [grad_a_ptrs];\n")
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    mov.u64 %rd13, ")
+        s = ossm_push_str(s, i64_to_string(c * 8))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    add.u64 %rd13, %rd12, %rd13;\n")
+        s = ossm_push_str(s, "    ld.global.u64 %rd14, [%rd13];\n")
+        s = ossm_push_str(s, "    add.u64 %rd14, %rd14, %rd3;\n")
+        s = ossm_push_str(s, "    atom.add.f32 [%rd14], ")
+        s = ossm_push_str(s, ossm_reg_f32(80 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // dh_prev = conj(A) * d_ah
+    s = ossm_push_str(s, "    mov.f32 %f72, %f0;\n")
+    c = 1
+    while c < 8 {
+        s = ossm_push_str(s, "    neg.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(72 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    let conj_a_f32: [i64; 8] = [72, 73, 74, 75, 76, 77, 78, 79]
+    let dh_prev_f32: [i64; 8] = [48, 49, 50, 51, 52, 53, 54, 55]
+    s = ossm_emit_oct_mul_f32(s, dh_prev_f32, conj_a_f32, d_ah_f32, 80)
+
+    // Clip dh_prev to [-1.0, 1.0]
+    s = ossm_push_str(s, "    mov.f32 %f89, 0fBF800000;\n")
+    s = ossm_push_str(s, "    mov.f32 %f90, 0f3F800000;\n")
+    s = ossm_emit_grad_clip_f32(s, 48, 8, 89, 90)
+
+    // Step 5: Scale backward
+    s = ossm_push_str(s, "\n    // === Step 5: Scale backward (f32) ===\n")
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    mul.f32 ")
+        s = ossm_push_str(s, ossm_reg_f32(72 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(64 + c))
+        s = ossm_push_str(s, ", %f40;\n")
+        c = c + 1
+    }
+
+    s = ossm_push_str(s, "    ld.param.u64 %rd13, [grad_b_ptrs];\n")
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    mov.u64 %rd14, ")
+        s = ossm_push_str(s, i64_to_string(c * 8))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    add.u64 %rd14, %rd13, %rd14;\n")
+        s = ossm_push_str(s, "    ld.global.u64 %rd15, [%rd14];\n")
+        s = ossm_push_str(s, "    add.u64 %rd15, %rd15, %rd3;\n")
+        s = ossm_push_str(s, "    atom.add.f32 [%rd15], ")
+        s = ossm_push_str(s, ossm_reg_f32(72 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // grad_x = dot(d_bx, B)
+    s = ossm_push_str(s, "    mul.f32 %f80, %f64, %f8;\n")
+    c = 1
+    while c < 8 {
+        s = ossm_push_str(s, "    mul.f32 %f81, ")
+        s = ossm_push_str(s, ossm_reg_f32(64 + c))
+        s = ossm_push_str(s, ", ")
+        s = ossm_push_str(s, ossm_reg_f32(8 + c))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    add.f32 %f80, %f80, %f81;\n")
+        c = c + 1
+    }
+
+    s = ossm_push_str(s, "    ld.param.u64 %rd14, [grad_x_ptrs];\n")
+    s = ossm_push_str(s, "    add.u64 %rd14, %rd14, %rd3;\n")
+    s = ossm_push_str(s, "    st.global.f32 [%rd14], %f80;\n\n")
+
+    // Store grad_C
+    s = ossm_push_str(s, "    ld.param.u64 %rd15, [grad_c_ptrs];\n")
+    c = 0
+    while c < 8 {
+        s = ossm_push_str(s, "    mov.u64 %rd16, ")
+        s = ossm_push_str(s, i64_to_string(c * 8))
+        s = ossm_push_str(s, ";\n")
+        s = ossm_push_str(s, "    add.u64 %rd16, %rd15, %rd16;\n")
+        s = ossm_push_str(s, "    ld.global.u64 %rd17, [%rd16];\n")
+        s = ossm_push_str(s, "    add.u64 %rd17, %rd17, %rd3;\n")
+        s = ossm_push_str(s, "    atom.add.f32 [%rd17], ")
+        s = ossm_push_str(s, ossm_reg_f32(72 + c))
+        s = ossm_push_str(s, ";\n")
+        c = c + 1
+    }
+
+    // Store dh_prev
+    s = ossm_push_str(s, "    ld.param.u64 %rd16, [grad_h_ptrs];\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_store_f32(s, 48 + c, 16, c, 3, 17, 18)
+        c = c + 1
+    }
+
+    s = ossm_push_str(s, "\n$L_exit:\n")
+    s = ossm_push_str(s, "    ret;\n")
+    s = ossm_push_str(s, "}\n")
+
+    s
+}

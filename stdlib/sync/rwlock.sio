@@ -1,13 +1,22 @@
-// stdlib/sync/rwlock — Shared-memory reader/writer lock handles
+// stdlib/sync/rwlock — futex-backed shared-memory reader/writer lock handles
 //
-// RwLock is a copyable handle into module-global shared state so cloned tasks
-// coordinate on the same lock record by ID.
+// RwLock remains a copyable ID handle. Backing state lives in module-global
+// arrays shared across clone-thread workers. A PI futex word protects lock
+// state; readers and writers park on a sequence word until the state changes.
 
 let RWLOCK_MAX: i64 = 64
 
+let FUTEX_WAIT: i64 = 0
+let FUTEX_WAKE: i64 = 1
+let FUTEX_LOCK_PI: i64 = 6
+let FUTEX_UNLOCK_PI: i64 = 7
+
 var RWLOCK_USED: [i64; 64] = [0; 64]
+var RWLOCK_LOCK: [i64; 64] = [0; 64]
 var RWLOCK_READERS: [i64; 64] = [0; 64]
 var RWLOCK_WRITER: [i64; 64] = [0; 64]
+var RWLOCK_WAITING_WRITERS: [i64; 64] = [0; 64]
+var RWLOCK_SEQ: [i64; 64] = [0; 64]
 
 pub struct RwLock {
     id: i64,
@@ -17,13 +26,32 @@ fn rwlock_slot_valid(id: i64) -> bool {
     return id >= 0 && id < RWLOCK_MAX && RWLOCK_USED[id as usize] == 1
 }
 
-pub fn rwlock_new() -> RwLock {
+fn rwlock_lock_slot(id: i64) with IO {
+    syscall6(202, &RWLOCK_LOCK[id as usize], FUTEX_LOCK_PI, 0, 0, 0, 0)
+}
+
+fn rwlock_unlock_slot(id: i64) with IO {
+    syscall6(202, &RWLOCK_LOCK[id as usize], FUTEX_UNLOCK_PI, 0, 0, 0, 0)
+}
+
+fn rwlock_wait_seq(id: i64, expected: i64) with IO {
+    syscall6(202, &RWLOCK_SEQ[id as usize], FUTEX_WAIT, expected, 0, 0, 0)
+}
+
+fn rwlock_wake_seq(id: i64, wake_count: i64) with IO {
+    syscall6(202, &RWLOCK_SEQ[id as usize], FUTEX_WAKE, wake_count, 0, 0, 0)
+}
+
+pub fn rwlock_new() -> RwLock with Mut {
     var i: i64 = 0
     while i < RWLOCK_MAX {
         if RWLOCK_USED[i as usize] == 0 {
             RWLOCK_USED[i as usize] = 1
+            RWLOCK_LOCK[i as usize] = 0
             RWLOCK_READERS[i as usize] = 0
             RWLOCK_WRITER[i as usize] = 0
+            RWLOCK_WAITING_WRITERS[i as usize] = 0
+            RWLOCK_SEQ[i as usize] = 0
             return RwLock { id: i }
         }
         i = i + 1
@@ -31,35 +59,86 @@ pub fn rwlock_new() -> RwLock {
     return RwLock { id: -1 }
 }
 
-pub fn rwlock_read_lock(rw: &! RwLock) -> bool {
-    let id = rw.id
-    if !rwlock_slot_valid(id) { return false }
-    if RWLOCK_WRITER[id as usize] != 0 { return false }
-    RWLOCK_READERS[id as usize] = RWLOCK_READERS[id as usize] + 1
-    return true
+pub fn rwlock_clone(rw: &! RwLock) -> RwLock {
+    RwLock { id: rw.id }
 }
 
-pub fn rwlock_read_unlock(rw: &! RwLock) {
+pub fn rwlock_id(rw: &! RwLock) -> i64 {
+    rw.id
+}
+
+pub fn rwlock_from_id(id: i64) -> RwLock {
+    RwLock { id: id }
+}
+
+pub fn rwlock_read_lock(rw: &! RwLock) -> bool with Mut, IO {
+    let id = rw.id
+    if !rwlock_slot_valid(id) { return false }
+    while true {
+        rwlock_lock_slot(id)
+        if RWLOCK_WRITER[id as usize] == 0 && RWLOCK_WAITING_WRITERS[id as usize] == 0 {
+            RWLOCK_READERS[id as usize] = RWLOCK_READERS[id as usize] + 1
+            rwlock_unlock_slot(id)
+            return true
+        }
+        let seq = RWLOCK_SEQ[id as usize]
+        rwlock_unlock_slot(id)
+        rwlock_wait_seq(id, seq)
+    }
+    false
+}
+
+pub fn rwlock_read_unlock(rw: &! RwLock) with Mut, IO {
     let id = rw.id
     if !rwlock_slot_valid(id) { return }
+    var wake_needed = false
+    rwlock_lock_slot(id)
     if RWLOCK_READERS[id as usize] > 0 {
         RWLOCK_READERS[id as usize] = RWLOCK_READERS[id as usize] - 1
+        if RWLOCK_READERS[id as usize] == 0 {
+            RWLOCK_SEQ[id as usize] = RWLOCK_SEQ[id as usize] + 1
+            wake_needed = true
+        }
+    }
+    rwlock_unlock_slot(id)
+    if wake_needed {
+        rwlock_wake_seq(id, 1024)
     }
 }
 
-pub fn rwlock_write_lock(rw: &! RwLock) -> bool {
+pub fn rwlock_write_lock(rw: &! RwLock) -> bool with Mut, IO {
     let id = rw.id
     if !rwlock_slot_valid(id) { return false }
-    if RWLOCK_WRITER[id as usize] != 0 { return false }
-    if RWLOCK_READERS[id as usize] != 0 { return false }
-    RWLOCK_WRITER[id as usize] = 1
-    return true
+    var announced = false
+    while true {
+        rwlock_lock_slot(id)
+        if RWLOCK_WRITER[id as usize] == 0 && RWLOCK_READERS[id as usize] == 0 {
+            if announced && RWLOCK_WAITING_WRITERS[id as usize] > 0 {
+                RWLOCK_WAITING_WRITERS[id as usize] = RWLOCK_WAITING_WRITERS[id as usize] - 1
+            }
+            RWLOCK_WRITER[id as usize] = 1
+            rwlock_unlock_slot(id)
+            return true
+        }
+        if !announced {
+            RWLOCK_WAITING_WRITERS[id as usize] = RWLOCK_WAITING_WRITERS[id as usize] + 1
+            announced = true
+        }
+        let seq = RWLOCK_SEQ[id as usize]
+        rwlock_unlock_slot(id)
+        rwlock_wait_seq(id, seq)
+    }
+    false
 }
 
-pub fn rwlock_write_unlock(rw: &! RwLock) {
+pub fn rwlock_write_unlock(rw: &! RwLock) with Mut, IO {
     let id = rw.id
     if !rwlock_slot_valid(id) { return }
+    rwlock_lock_slot(id)
     RWLOCK_WRITER[id as usize] = 0
+    RWLOCK_SEQ[id as usize] = RWLOCK_SEQ[id as usize] + 1
+    rwlock_unlock_slot(id)
+    rwlock_wake_seq(id, 1024)
 }
 
 pub fn rwlock_reader_count(rw: &! RwLock) -> i64 {

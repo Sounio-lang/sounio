@@ -1,15 +1,24 @@
-// stdlib/thread/pool — Shared-memory thread pool handles
+// stdlib/thread/pool — futex-backed shared-memory thread pool handles
 //
-// ThreadPool is a copyable handle into module-global worker/task state so
-// clone-launched tasks can observe and update the same pool by ID.
+// ThreadPool stays a copyable ID handle. Backing state lives in module-global
+// arrays shared across clone-thread workers. Submit blocks when the pool is
+// saturated and wakes when a worker slot is completed.
 
 let POOL_MAX: i64 = 16
 let POOL_MAX_WORKERS: i64 = 64
 
+let FUTEX_WAIT: i64 = 0
+let FUTEX_WAKE: i64 = 1
+let FUTEX_LOCK_PI: i64 = 6
+let FUTEX_UNLOCK_PI: i64 = 7
+
 var POOL_USED: [i64; 16] = [0; 16]
+var POOL_LOCK: [i64; 16] = [0; 16]
 var POOL_NUM_WORKERS: [i64; 16] = [0; 16]
 var POOL_TASKS_SUBMITTED: [i64; 16] = [0; 16]
 var POOL_TASKS_COMPLETED: [i64; 16] = [0; 16]
+var POOL_ACTIVE: [i64; 16] = [0; 16]
+var POOL_SEQ: [i64; 16] = [0; 16]
 var POOL_WORKER_STATUS: [i64; 1024] = [0; 1024]
 var POOL_WORKER_TASK: [i64; 1024] = [0; 1024]
 
@@ -25,12 +34,31 @@ fn pool_worker_index(id: i64, worker_idx: i64) -> i64 {
     return id * POOL_MAX_WORKERS + worker_idx
 }
 
+fn pool_lock_slot(id: i64) with IO {
+    syscall6(202, &POOL_LOCK[id as usize], FUTEX_LOCK_PI, 0, 0, 0, 0)
+}
+
+fn pool_unlock_slot(id: i64) with IO {
+    syscall6(202, &POOL_LOCK[id as usize], FUTEX_UNLOCK_PI, 0, 0, 0, 0)
+}
+
+fn pool_wait_seq(id: i64, expected: i64) with IO {
+    syscall6(202, &POOL_SEQ[id as usize], FUTEX_WAIT, expected, 0, 0, 0)
+}
+
+fn pool_wake_seq(id: i64, wake_count: i64) with IO {
+    syscall6(202, &POOL_SEQ[id as usize], FUTEX_WAKE, wake_count, 0, 0, 0)
+}
+
 pub fn thread_pool_new(num_workers: i64) -> ThreadPool with Mut {
     var pool_id: i64 = -1
     var i: i64 = 0
     while i < POOL_MAX {
         if POOL_USED[i as usize] == 0 {
             POOL_USED[i as usize] = 1
+            POOL_LOCK[i as usize] = 0
+            POOL_ACTIVE[i as usize] = 0
+            POOL_SEQ[i as usize] = 0
             pool_id = i
             break
         }
@@ -53,44 +81,57 @@ pub fn thread_pool_new(num_workers: i64) -> ThreadPool with Mut {
     return ThreadPool { id: pool_id }
 }
 
-pub fn thread_pool_submit(pool: &! ThreadPool, task_id: i64) -> bool with Mut {
+pub fn thread_pool_submit(pool: &! ThreadPool, task_id: i64) -> bool with Mut, IO {
     let id = pool.id
     if !pool_slot_valid(id) { return false }
-    var i: i64 = 0
-    while i < POOL_NUM_WORKERS[id as usize] {
-        let idx = pool_worker_index(id, i)
-        if POOL_WORKER_STATUS[idx as usize] == 0 {
-            POOL_WORKER_STATUS[idx as usize] = 1
-            POOL_WORKER_TASK[idx as usize] = task_id
-            POOL_TASKS_SUBMITTED[id as usize] = POOL_TASKS_SUBMITTED[id as usize] + 1
-            return true
+    while true {
+        pool_lock_slot(id)
+        var i: i64 = 0
+        while i < POOL_NUM_WORKERS[id as usize] {
+            let idx = pool_worker_index(id, i)
+            if POOL_WORKER_STATUS[idx as usize] == 0 {
+                POOL_WORKER_STATUS[idx as usize] = 1
+                POOL_WORKER_TASK[idx as usize] = task_id
+                POOL_TASKS_SUBMITTED[id as usize] = POOL_TASKS_SUBMITTED[id as usize] + 1
+                POOL_ACTIVE[id as usize] = POOL_ACTIVE[id as usize] + 1
+                pool_unlock_slot(id)
+                return true
+            }
+            i = i + 1
         }
-        i = i + 1
+        let seq = POOL_SEQ[id as usize]
+        pool_unlock_slot(id)
+        pool_wait_seq(id, seq)
     }
-    return false
+    false
 }
 
-pub fn thread_pool_complete(pool: &! ThreadPool, worker_idx: i64) with Mut {
+pub fn thread_pool_complete(pool: &! ThreadPool, worker_idx: i64) with Mut, IO {
     let id = pool.id
     if !pool_slot_valid(id) { return }
     if worker_idx < 0 || worker_idx >= POOL_NUM_WORKERS[id as usize] { return }
     let idx = pool_worker_index(id, worker_idx)
-    if POOL_WORKER_STATUS[idx as usize] == 0 { return }
-    POOL_WORKER_STATUS[idx as usize] = 0
-    POOL_TASKS_COMPLETED[id as usize] = POOL_TASKS_COMPLETED[id as usize] + 1
+    var wake_needed = false
+    pool_lock_slot(id)
+    if POOL_WORKER_STATUS[idx as usize] != 0 {
+        POOL_WORKER_STATUS[idx as usize] = 0
+        if POOL_ACTIVE[id as usize] > 0 {
+            POOL_ACTIVE[id as usize] = POOL_ACTIVE[id as usize] - 1
+        }
+        POOL_TASKS_COMPLETED[id as usize] = POOL_TASKS_COMPLETED[id as usize] + 1
+        POOL_SEQ[id as usize] = POOL_SEQ[id as usize] + 1
+        wake_needed = true
+    }
+    pool_unlock_slot(id)
+    if wake_needed {
+        pool_wake_seq(id, 1024)
+    }
 }
 
-pub fn thread_pool_active_count(pool: &! ThreadPool) -> i64 with Mut {
+pub fn thread_pool_active_count(pool: &! ThreadPool) -> i64 {
     let id = pool.id
     if !pool_slot_valid(id) { return 0 }
-    var count: i64 = 0
-    var i: i64 = 0
-    while i < POOL_NUM_WORKERS[id as usize] {
-        let idx = pool_worker_index(id, i)
-        if POOL_WORKER_STATUS[idx as usize] != 0 { count = count + 1 }
-        i = i + 1
-    }
-    return count
+    return POOL_ACTIVE[id as usize]
 }
 
 pub fn thread_pool_total_workers(pool: &! ThreadPool) -> i64 {

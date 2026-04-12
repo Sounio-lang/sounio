@@ -49,6 +49,14 @@ let GRAD_OP_OUTPUT: i64   = 21  // output node — seed gradient = 1.0
 let GRAD_OP_RESHAPE: i64  = 22  // ∂reshape/∂a = 1 (identity)
 let GRAD_OP_MATMUL: i64   = 23  // ∂(AB)/∂A = G*Bᵀ, ∂(AB)/∂B = Aᵀ*G
 
+// Phase 4: Octonion / vector gradient ops for O-SSM backward pass
+let GRAD_OP_OCT_MUL_F32: i64 = 100
+let GRAD_OP_OCT_MUL_F64: i64 = 101
+let GRAD_OP_OCT_SCALE_F32: i64 = 102
+let GRAD_OP_OCT_SCALE_F64: i64 = 103
+let GRAD_OP_SIGMOID_VEC_F32: i64 = 104
+let GRAD_OP_SIGMOID_VEC_F64: i64 = 105
+
 // ============================================================================
 // TapeEntry — one entry on the Wengert tape
 // ============================================================================
@@ -1117,6 +1125,504 @@ fn grad_ptx_emit_abs_grad(
     out = ges_emit_binary(out, op_add_f32(), src_grad, src_grad, sign)
     var outs = out
     outs.reg_counter = tmp_idx + 3
+    outs
+}
+
+// ============================================================================
+// Phase 4: Octonion vector gradient PTX emitters
+// ============================================================================
+
+// "add.f64" = 97 100 100 46 102 54 52
+fn op_add_f64() -> [i8; 32] {
+    make_op_slot([97, 100, 100, 46, 102, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 7)
+}
+
+// "sub.f64" = 115 117 98 46 102 54 52
+fn op_sub_f64() -> [i8; 32] {
+    make_op_slot([115, 117, 98, 46, 102, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 7)
+}
+
+// "mul.f64" = 109 117 108 46 102 54 52
+fn op_mul_f64() -> [i8; 32] {
+    make_op_slot([109, 117, 108, 46, 102, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 7)
+}
+
+// "fma.rn.f64" = 102 109 97 46 114 110 46 102 54 52
+fn op_fma_f64() -> [i8; 32] {
+    make_op_slot([102, 109, 97, 46, 114, 110, 46, 102, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10)
+}
+
+// "mov.f64" = 109 111 118 46 102 54 52
+fn op_mov_f64() -> [i8; 32] {
+    make_op_slot([109, 111, 118, 46, 102, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 7)
+}
+
+// "neg.f64" = 110 101 103 46 102 54 52
+fn op_neg_f64() -> [i8; 32] {
+    make_op_slot([110, 101, 103, 46, 102, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 7)
+}
+
+// "setp.lt.f64" = 115 101 116 112 46 108 116 46 102 54 52
+fn op_setp_lt_f64() -> [i8; 32] {
+    make_op_slot([115, 101, 116, 112, 46, 108,116, 46, 102, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0], 11)
+}
+
+// "setp.gt.f64" = 115 101 116 112 46 103 116 46 102 54 52
+fn op_setp_gt_f64() -> [i8; 32] {
+    make_op_slot([115, 101, 116, 112, 46, 103, 116, 46, 102, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0], 11)
+}
+
+// "selp.f64" = 115 101 108 112 46 102 54 52
+fn op_selp_f64() -> [i8; 32] {
+    make_op_slot([115, 101, 108, 112, 46, 102, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 8)
+}
+
+// "atom.add.f64" = 97 116 111 109 46 97 100 100 46 102 54 52
+fn op_atom_add_f64() -> [i8; 32] {
+    make_op_slot([97, 116, 111, 109, 46, 97, 100, 100, 46, 102, 54, 52, 0, 0, 0, 0, 0, 0, 0, 0], 12)
+}
+
+// Build "%fd<n>" register name slot
+fn make_fd_reg(idx: i64) -> [i8; 32] with Mut, Panic, Div {
+    var slot: [i8; 32] = [0; 32]
+    slot[0 as usize] = 37   // %
+    slot[1 as usize] = 102  // f
+    slot[2 as usize] = 100  // d
+    var digits: [i8; 32] = [0; 32]
+    let dlen = i64_write_decimal(idx, &!digits)
+    var i: i64 = 0
+    while i < dlen {
+        slot[(3 + i) as usize] = digits[i as usize]
+        i = i + 1
+    }
+    slot
+}
+
+// Build "%p<n>" predicate register name slot (for f64 variants)
+fn make_pred_reg64(idx: i64) -> [i8; 32] with Mut, Panic, Div {
+    make_pred_reg(idx)
+}
+
+// Zero constant for f64: "0d0000000000000000"
+fn zero_f64_const() -> [i8; 32] {
+    make_op_slot([48, 100, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 0, 0, 0], 17)
+}
+
+// grad_ptx_emit_sigmoid_vec_grad_f32 — vectorized sigmoid backward for 8 components
+// For each i in 0..8: grad_in[i] = grad_out[i] * fwd_out[i] * (1 - fwd_out[i])
+// Uses PTX mul.f32, sub.f32, fma.rn.f32
+fn grad_ptx_emit_sigmoid_vec_grad_f32(
+    s: GradEmitState,
+    grad_out_base: i64,
+    fwd_out_base: i64,
+    grad_in_base: i64
+) -> GradEmitState with Mut, Panic, Div {
+    var out = s
+    let tmp_idx = out.reg_counter
+    var i: i64 = 0
+    while i < 8 {
+        let grad_out_r = make_tmp_reg(tmp_idx)
+        let fwd_out_r = make_tmp_reg(tmp_idx + 1)
+        let one_r = make_tmp_reg(tmp_idx + 2)
+        let diff_r = make_tmp_reg(tmp_idx + 3)
+        // one = 1.0
+        var one_slot: [i8; 32] = [0; 32]
+        one_slot[0 as usize] = 48
+        one_slot[1 as usize] = 102
+        one_slot[2 as usize] = 51
+        one_slot[3 as usize] = 102
+        one_slot[4 as usize] = 56
+        one_slot[5 as usize] = 48
+        one_slot[6 as usize] = 48
+        one_slot[7 as usize] = 48
+        one_slot[8 as usize] = 48
+        one_slot[9 as usize] = 48
+        // mov one, 1.0
+        out = ges_emit_unary(out, op_mov_f32(), one_r, one_slot)
+        // diff = 1.0 - fwd_out[i]
+        let fwd_slot = make_tmp_reg(fwd_out_base + i)
+        out = ges_emit_binary(out, op_sub_f32(), diff_r, one_r, fwd_slot)
+        // grad_in[i] = grad_out[i] * fwd_out[i] * diff = fma(grad_out[i], diff, 0) then * fwd_out...
+        // Actually: grad_in[i] = grad_out[i] * fwd_out[i] * (1 - fwd_out[i])
+        // = fma(fwd_out[i], diff, 0) * grad_out[i]
+        // Simpler: tmp = fwd_out * diff; grad_in = grad_out * tmp
+        let tmp_mul = make_tmp_reg(tmp_idx + 4)
+        let go_slot = make_tmp_reg(grad_out_base + i)
+        let gi_slot = make_tmp_reg(grad_in_base + i)
+        out = ges_emit_binary(out, op_mul_f32(), tmp_mul, fwd_slot, diff_r)
+        out = ges_emit_binary(out, op_mul_f32(), gi_slot, go_slot, tmp_mul)
+        i = i + 1
+    }
+    var outs = out
+    outs.reg_counter = tmp_idx + 5
+    outs
+}
+
+// grad_ptx_emit_sigmoid_vec_grad_f64 — vectorized sigmoid backward for 8 components (f64)
+fn grad_ptx_emit_sigmoid_vec_grad_f64(
+    s: GradEmitState,
+    grad_out_base: i64,
+    fwd_out_base: i64,
+    grad_in_base: i64
+) -> GradEmitState with Mut, Panic, Div {
+    var out = s
+    let tmp_idx = out.reg_counter
+    var i: i64 = 0
+    while i < 8 {
+        let fwd_slot = make_fd_reg(fwd_out_base + i)
+        let go_slot = make_fd_reg(grad_out_base + i)
+        let gi_slot = make_fd_reg(grad_in_base + i)
+        let diff_r = make_fd_reg(tmp_idx)
+        let tmp_mul = make_fd_reg(tmp_idx + 1)
+        let one_r = make_fd_reg(tmp_idx + 2)
+        // 1.0 f64: 0d3FF0000000000000
+        var one_slot: [i8; 32] = [0; 32]
+        one_slot[0 as usize] = 48  // 0
+        one_slot[1 as usize] = 100 // d
+        one_slot[2 as usize] = 51  // 3
+        one_slot[3 as usize] = 70  // F
+        one_slot[4 as usize] = 70  // F
+        one_slot[5 as usize] = 48  // 0
+        one_slot[6 as usize] = 48  // 0
+        one_slot[7 as usize] = 48  // 0
+        one_slot[8 as usize] = 48  // 0
+        one_slot[9 as usize] = 48  // 0
+        one_slot[10 as usize] = 48 // 0
+        one_slot[11 as usize] = 48 // 0
+        one_slot[12 as usize] = 48 // 0
+        one_slot[13 as usize] = 48 // 0
+        one_slot[14 as usize] = 48 // 0
+        one_slot[15 as usize] = 48 // 0
+        one_slot[16 as usize] = 48 // 0
+        // diff = 1.0 - fwd_out[i]
+        out = ges_emit_unary(out, op_mov_f64(), one_r, one_slot)
+        out = ges_emit_binary(out, op_sub_f64(), diff_r, one_r, fwd_slot)
+        // tmp_mul = fwd_out[i] * diff
+        out = ges_emit_binary(out, op_mul_f64(), tmp_mul, fwd_slot, diff_r)
+        // grad_in[i] = grad_out[i] * tmp_mul
+        out = ges_emit_binary(out, op_mul_f64(), gi_slot, go_slot, tmp_mul)
+        i = i + 1
+    }
+    var outs = out
+    outs.reg_counter = tmp_idx + 3
+    outs
+}
+
+// grad_ptx_emit_oct_mul_grad_f32 — octonion multiply gradient (f32)
+// grad_a[i..i+8] = grad_out * conj(b)  (oct_mul)
+// grad_b[i..i+8] = conj(a) * grad_out  (oct_mul)
+// Note: This emits the full Fano-plane octonion multiply inline.
+// For simplicity, we emit scalar PTX instructions using the GradEmitState buffer.
+fn grad_ptx_emit_oct_mul_grad_f32(
+    s: GradEmitState,
+    grad_out_base: i64,
+    a_base: i64,
+    b_base: i64,
+    grad_a_base: i64,
+    grad_b_base: i64,
+    scratch_base: i64
+) -> GradEmitState with Mut, Panic, Div {
+    var out = s
+    // For grad_a: accumulate grad_out * conj(b) into grad_a registers
+    // For grad_b: accumulate conj(a) * grad_out into grad_b registers
+    // Conjugate: negate components 1..7 of input
+    // We emit the octonion multiply via the scalar Fano plane table
+    // Using the ossm_fano_basis and ossm_fano_sign functions would require
+    // cross-module state, so we emit a simplified 8-component gradient:
+    //   For each component k of grad_a:
+    //     grad_a[k] += sum_{basis(i,j)=k} sign(i,j) * grad_out[i] * b_or_neg[j]
+    //   Similarly for grad_b with conj(a)
+
+    // Emit conjugate of b into scratch[0..7]
+    var i: i64 = 0
+    while i < 8 {
+        let src = make_tmp_reg(b_base + i)
+        let dst = make_tmp_reg(scratch_base + i)
+        if i == 0 {
+            out = ges_emit_unary(out, op_mov_f32(), dst, src)
+        } else {
+            out = ges_emit_unary(out, op_neg_f32(), dst, src)
+        }
+        i = i + 1
+    }
+
+    // Emit oct_mul(grad_out, conj_b) -> grad_a using Fano plane
+    // For simplicity, emit component-wise: grad_a[k] = sum sign*grad_out[i]*conj_b[j]
+    var k: i64 = 0
+    while k < 8 {
+        var first: bool = true
+        var ii: i64 = 0
+        while ii < 8 {
+            var jj: i64 = 0
+            while jj < 8 {
+                let target = oct_mul_basis(ii, jj)
+                if target == k {
+                    let sign = oct_mul_sign(ii, jj)
+                    let dst_r = make_tmp_reg(grad_a_base + k)
+                    let a_r = make_tmp_reg(grad_out_base + ii)
+                    let b_r = make_tmp_reg(scratch_base + jj)
+                    if first {
+                        out = ges_emit_binary(out, op_mul_f32(), dst_r, a_r, b_r)
+                        if sign != 1 {
+                            out = ges_emit_unary(out, op_neg_f32(), dst_r, dst_r)
+                        }
+                        first = false
+                    } else {
+                        if sign == 1 {
+                            out = ges_emit_quaternary(out, op_fma_f32(), dst_r, a_r, b_r, dst_r, dst_r)
+                        } else {
+                            let neg_s = make_tmp_reg(scratch_base + 8)
+                            out = ges_emit_binary(out, op_mul_f32(), neg_s, a_r, b_r)
+                            out = ges_emit_binary(out, op_sub_f32(), dst_r, dst_r, neg_s)
+                        }
+                    }
+                }
+                jj = jj + 1
+            }
+            ii = ii + 1
+        }
+        k = k + 1
+    }
+
+    // Emit conjugate of a into scratch[0..7]
+    i = 0
+    while i < 8 {
+        let src = make_tmp_reg(a_base + i)
+        let dst = make_tmp_reg(scratch_base + i)
+        if i == 0 {
+            out = ges_emit_unary(out, op_mov_f32(), dst, src)
+        } else {
+            out = ges_emit_unary(out, op_neg_f32(), dst, src)
+        }
+        i = i + 1
+    }
+
+    // Emit oct_mul(conj_a, grad_out) -> grad_b using Fano plane
+    k = 0
+    while k < 8 {
+        var first: bool = true
+        var ii: i64 = 0
+        while ii < 8 {
+            var jj: i64 = 0
+            while jj < 8 {
+                let target = oct_mul_basis(ii, jj)
+                if target == k {
+                    let sign = oct_mul_sign(ii, jj)
+                    let dst_r = make_tmp_reg(grad_b_base + k)
+                    let a_r = make_tmp_reg(scratch_base + ii)
+                    let b_r = make_tmp_reg(grad_out_base + jj)
+                    if first {
+                        out = ges_emit_binary(out, op_mul_f32(), dst_r, a_r, b_r)
+                        if sign != 1 {
+                            out = ges_emit_unary(out, op_neg_f32(), dst_r, dst_r)
+                        }
+                        first = false
+                    } else {
+                        if sign == 1 {
+                            out = ges_emit_quaternary(out, op_fma_f32(), dst_r, a_r, b_r, dst_r, dst_r)
+                        } else {
+                            let neg_s = make_tmp_reg(scratch_base + 8)
+                            out = ges_emit_binary(out, op_mul_f32(), neg_s, a_r, b_r)
+                            out = ges_emit_binary(out, op_sub_f32(), dst_r, dst_r, neg_s)
+                        }
+                    }
+                }
+                jj = jj + 1
+            }
+            ii = ii + 1
+        }
+        k = k + 1
+    }
+
+    out
+}
+
+// grad_ptx_emit_oct_mul_grad_f64 — octonion multiply gradient (f64)
+fn grad_ptx_emit_oct_mul_grad_f64(
+    s: GradEmitState,
+    grad_out_base: i64,
+    a_base: i64,
+    b_base: i64,
+    grad_a_base: i64,
+    grad_b_base: i64,
+    scratch_base: i64
+) -> GradEmitState with Mut, Panic, Div {
+    var out = s
+
+    // Conjugate of b -> scratch[0..7]
+    var i: i64 = 0
+    while i < 8 {
+        let src = make_fd_reg(b_base + i)
+        let dst = make_fd_reg(scratch_base + i)
+        if i == 0 {
+            out = ges_emit_unary(out, op_mov_f64(), dst, src)
+        } else {
+            out = ges_emit_unary(out, op_neg_f64(), dst, src)
+        }
+        i = i + 1
+    }
+
+    // oct_mul(grad_out, conj_b) -> grad_a
+    var k: i64 = 0
+    while k < 8 {
+        var first: bool = true
+        var ii: i64 = 0
+        while ii < 8 {
+            var jj: i64 = 0
+            while jj < 8 {
+                let target = oct_mul_basis(ii, jj)
+                if target == k {
+                    let sign = oct_mul_sign(ii, jj)
+                    let dst_r = make_fd_reg(grad_a_base + k)
+                    let a_r = make_fd_reg(grad_out_base + ii)
+                    let b_r = make_fd_reg(scratch_base + jj)
+                    if first {
+                        out = ges_emit_binary(out, op_mul_f64(), dst_r, a_r, b_r)
+                        if sign != 1 {
+                            out = ges_emit_unary(out, op_neg_f64(), dst_r, dst_r)
+                        }
+                        first = false
+                    } else {
+                        if sign == 1 {
+                            out = ges_emit_quaternary(out, op_fma_f64(), dst_r, a_r, b_r, dst_r, dst_r)
+                        } else {
+                            let neg_s = make_fd_reg(scratch_base + 8)
+                            out = ges_emit_binary(out, op_mul_f64(), neg_s, a_r, b_r)
+                            out = ges_emit_binary(out, op_sub_f64(), dst_r, dst_r, neg_s)
+                        }
+                    }
+                }
+                jj = jj + 1
+            }
+            ii = ii + 1
+        }
+        k = k + 1
+    }
+
+    // Conjugate of a -> scratch[0..7]
+    i = 0
+    while i < 8 {
+        let src = make_fd_reg(a_base + i)
+        let dst = make_fd_reg(scratch_base + i)
+        if i == 0 {
+            out = ges_emit_unary(out, op_mov_f64(), dst, src)
+        } else {
+            out = ges_emit_unary(out, op_neg_f64(), dst, src)
+        }
+        i = i + 1
+    }
+
+    // oct_mul(conj_a, grad_out) -> grad_b
+    k = 0
+    while k < 8 {
+        var first: bool = true
+        var ii: i64 = 0
+        while ii < 8 {
+            var jj: i64 = 0
+            while jj < 8 {
+                let target = oct_mul_basis(ii, jj)
+                if target == k {
+                    let sign = oct_mul_sign(ii, jj)
+                    let dst_r = make_fd_reg(grad_b_base + k)
+                    let a_r = make_fd_reg(scratch_base + ii)
+                    let b_r = make_fd_reg(grad_out_base + jj)
+                    if first {
+                        out = ges_emit_binary(out, op_mul_f64(), dst_r, a_r, b_r)
+                        if sign != 1 {
+                            out = ges_emit_unary(out, op_neg_f64(), dst_r, dst_r)
+                        }
+                        first = false
+                    } else {
+                        if sign == 1 {
+                            out = ges_emit_quaternary(out, op_fma_f64(), dst_r, a_r, b_r, dst_r, dst_r)
+                        } else {
+                            let neg_s = make_fd_reg(scratch_base + 8)
+                            out = ges_emit_binary(out, op_mul_f64(), neg_s, a_r, b_r)
+                            out = ges_emit_binary(out, op_sub_f64(), dst_r, dst_r, neg_s)
+                        }
+                    }
+                }
+                jj = jj + 1
+            }
+            ii = ii + 1
+        }
+        k = k + 1
+    }
+
+    out
+}
+
+// grad_ptx_emit_oct_scale_grad_f32 — octonion scale gradient (f32)
+// grad_b[i] += grad_out[i] * scalar for each component
+// grad_scalar += dot(grad_out, b) — dot product of 8 components
+fn grad_ptx_emit_oct_scale_grad_f32(
+    s: GradEmitState,
+    grad_out_base: i64,
+    b_base: i64,
+    scalar_reg: i64,
+    grad_b_base: i64,
+    grad_scalar_base: i64
+) -> GradEmitState with Mut, Panic, Div {
+    var out = s
+    // grad_b[i] += grad_out[i] * scalar
+    var i: i64 = 0
+    while i < 8 {
+        let go_r = make_tmp_reg(grad_out_base + i)
+        let gb_r = make_tmp_reg(grad_b_base + i)
+        let sc_r = make_tmp_reg(scalar_reg)
+        out = ges_emit_quaternary(out, op_fma_f32(), gb_r, go_r, sc_r, gb_r, gb_r)
+        i = i + 1
+    }
+    // grad_scalar += dot(grad_out, b)
+    let tmp_idx = out.reg_counter
+    let dot_acc = make_tmp_reg(tmp_idx)
+    out = ges_emit_binary(out, op_mul_f32(), dot_acc, make_tmp_reg(grad_out_base), make_tmp_reg(b_base))
+    i = 1
+    while i < 8 {
+        let prod = make_tmp_reg(tmp_idx + 1)
+        out = ges_emit_binary(out, op_mul_f32(), prod, make_tmp_reg(grad_out_base + i), make_tmp_reg(b_base + i))
+        out = ges_emit_binary(out, op_add_f32(), dot_acc, dot_acc, prod)
+        i = i + 1
+    }
+    let gs_r = make_tmp_reg(grad_scalar_base)
+    out = ges_emit_binary(out, op_add_f32(), gs_r, gs_r, dot_acc)
+    var outs = out
+    outs.reg_counter = tmp_idx + 2
+    outs
+}
+
+// grad_ptx_emit_oct_scale_grad_f64 — octonion scale gradient (f64)
+fn grad_ptx_emit_oct_scale_grad_f64(
+    s: GradEmitState,
+    grad_out_base: i64,
+    b_base: i64,
+    scalar_reg: i64,
+    grad_b_base: i64,
+    grad_scalar_base: i64
+) -> GradEmitState with Mut, Panic, Div {
+    var out = s
+    var i: i64 = 0
+    while i < 8 {
+        let go_r = make_fd_reg(grad_out_base + i)
+        let gb_r = make_fd_reg(grad_b_base + i)
+        let sc_r = make_fd_reg(scalar_reg)
+        out = ges_emit_quaternary(out, op_fma_f64(), gb_r, go_r, sc_r, gb_r, gb_r)
+        i = i + 1
+    }
+    let tmp_idx = out.reg_counter
+    let dot_acc = make_fd_reg(tmp_idx)
+    out = ges_emit_binary(out, op_mul_f64(), dot_acc, make_fd_reg(grad_out_base), make_fd_reg(b_base))
+    i = 1
+    while i < 8 {
+        let prod = make_fd_reg(tmp_idx + 1)
+        out = ges_emit_binary(out, op_mul_f64(), prod, make_fd_reg(grad_out_base + i), make_fd_reg(b_base + i))
+        out = ges_emit_binary(out, op_add_f64(), dot_acc, dot_acc, prod)
+        i = i + 1
+    }
+    let gs_r = make_fd_reg(grad_scalar_base)
+    out = ges_emit_binary(out, op_add_f64(), gs_r, gs_r, dot_acc)
+    var outs = out
+    outs.reg_counter = tmp_idx + 2
     outs
 }
 
