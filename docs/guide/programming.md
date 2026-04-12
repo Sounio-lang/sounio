@@ -13,37 +13,38 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.programm
 
 This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio is a novel L0 systems + scientific programming language - it is NOT a dialect of Rust, Julia, Python, or any other language.
 
+**Implementation key** (used throughout this guide):
+- **Production** — implemented, tested, gate-backed
+- **Beta** — works for common patterns, edge cases may exist
+- **Planned** — specified but not yet implemented; examples show intended syntax
+
 ## Implementation Status (Read First)
 
-> **WARNING**: This document mixes **implemented** and **aspirational** features.
-> Sections marked with ⚠️ are NOT YET IMPLEMENTED.
-
-### What Actually Works (v1.0)
-
-| Feature | Status |
-|---------|--------|
-| Core syntax (variables, functions, control flow) | ✅ Implemented |
-| Type system (generics, structs, enums, traits) | ✅ Implemented |
-| Effects system (type-level tracking) | ✅ Implemented |
-| Units of measure | ✅ Implemented |
-| Epistemic types (`Knowledge<T>`) | ✅ Interpreter only |
-| GPU kernels (codegen) | ✅ Implemented in the checked GPU artifact |
-| GPU kernel launch surface | ✅ Checkable syntax; runtime proof is gate-backed |
-| Basic async (spawn, await, channels) | ✅ Implemented |
-| Async join/select | ⚠️ Not implemented |
-| Refinement types (parsing) | ✅ Implemented |
-| Refinement types (SMT verification) | ⚠️ Runtime checks only |
-| ODE/PDE DSL | ⚠️ Not implemented |
-| Probabilistic programming | ⚠️ Effect stub only |
-| Causal models | ⚠️ Not implemented |
-| AD jacobian/hessian (CPU) | ⚠️ Stub only |
-| Package manager | ⚠️ Feature flag stub |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Core syntax (variables, functions, control flow) | **Production** | `tests/run-pass/hello.sio`, `basic_math.sio` |
+| Type system (generics, structs, enums, traits) | **Production** | `turbofish.sio`, `impl_inherent_method.sio` |
+| Effects system (9 built-in effects) | **Production** | `effects.sio`, `effect_handler_basic.sio` |
+| Units of measure | **Production** | `unit_decl_keyword.sio`, `units.sio` |
+| Epistemic types (`Knowledge<T>`) | **Production** | `gum_compliance.sio`, knowledge tests |
+| GPU kernels (codegen) | **Beta** | GPU artifact only; `kernel_ptx_emit.sio` |
+| Basic async (spawn, await, channels) | **Beta** | `async_basic.sio`, `async_spawn.sio` |
+| Refinement types | **Beta** | Parsing works; SMT verification requires Z3 |
+| Closures / lambda literals | **Beta** | Type-check only in current JIT; self-hosted compiler supports |
+| ODE/PDE DSL | **Planned** | Use `stdlib/ode/` functions instead |
+| Probabilistic programming | **Planned** | Effect stub only |
+| Causal models DSL | **Planned** | Type checker partial; no usable DSL |
+| Effect handlers (`handle`/`resume`) | **Planned** | `effect` declaration works; handlers not yet |
+| String methods (`.split`, `.trim`, etc.) | **Planned** | Not yet gate-backed |
+| JSON parsing | **Planned** | No run-pass test coverage |
+| Collections (`Vec<T>`, `HashMap`, `HashSet`) | **Planned** | Use fixed arrays `[T; N]` and stdlib `IntVec` |
+| Package manager | **Planned** | Feature flag stub only |
 
 ### Canonical References
 
 For what the compiler accepts today:
 - `docs/guide/MINIMUM_VIABLE_SOUNIO.md` — What actually works
-- `compiler/docs/KNOWN_LIMITATIONS.md` — What is not implemented
+- `docs/compiler/KNOWN_LIMITATIONS.md` — What is not implemented
 - `tests/run-pass/` — Compilable syntax patterns
 
 If you are generating `.sio` code, prefer the working subset above.
@@ -72,7 +73,7 @@ If you are generating `.sio` code, prefer the working subset above.
 
 ---
 
-## Core Syntax
+## Core Syntax — **Production**
 
 ### Hello World
 
@@ -296,7 +297,7 @@ pub fn exported_function() -> i32 {
 
 ---
 
-## Type System
+## Type System — **Production**
 
 ### Primitive Types
 
@@ -513,7 +514,7 @@ let ratio: EpistemicValue<OrbitRatio> = from_measurement(
 
 ---
 
-## Effects System
+## Effects System — **Production**
 
 Sounio has first-class algebraic effects for tracking computational side effects.
 
@@ -617,7 +618,7 @@ fn safe_divide(a: i32, b: i32) -> Option<i32> {
 
 ---
 
-## Async Programming
+## Async Programming — **Beta** (basic), **Planned** (join/select)
 
 Sounio has first-class async/await support with structured concurrency.
 
@@ -782,7 +783,7 @@ async fn pure_async() -> i32 with Async {
 
 ---
 
-## Units of Measure
+## Units of Measure — **Production**
 
 Sounio has built-in dimensional analysis for scientific computing.
 
@@ -855,7 +856,7 @@ struct Patient {
 
 ---
 
-## GPU Programming
+## GPU Programming — **Beta** (GPU artifact only)
 
 ### Kernel Definition
 
@@ -908,9 +909,10 @@ Validation commands:
 
 ---
 
-## Scientific Computing
+## Scientific Computing — **Mixed** (see subsections)
 
-### ODE Systems
+> ODE/PDE DSL and probabilistic/causal DSL syntax is **Planned**.
+> Manual ODE solvers (`stdlib/ode/`) and AD (`stdlib/autodiff/`) are **Beta**.### ODE Systems
 
 > ⚠️ **ASPIRATIONAL**: ODE DSL syntax is not implemented. Use stdlib/ode functions directly.
 
@@ -1038,7 +1040,7 @@ let transformed = m4 * v4
 
 ---
 
-## Epistemic Types
+## Epistemic Types — **Production**
 
 Sounio tracks knowledge, confidence, and provenance at the type level.
 
@@ -1097,7 +1099,7 @@ let result: Knowledge[f64] = compute_result()
 
 ---
 
-## FFI (Foreign Function Interface)
+## FFI (Foreign Function Interface) — **Beta**
 
 Sounio supports C-compatible FFI through raw pointer types and extern blocks.
 
@@ -1200,11 +1202,13 @@ fn with_buffer() {
 
 ---
 
-## Standard Library
+## Standard Library — **Mixed** (see subsections)
 
 Sounio includes a standard library with modules for I/O, JSON, strings, and more.
 
-### I/O Module (`std.io`)
+### I/O Module (`std.io`) — **Beta**
+
+> `print()`/`println()` are Production. File I/O (`read_file`/`write_file`) is Beta. `env::args()`, `eprintln()`, `read_line()` are Planned.
 
 ```sio
 import io::*;
@@ -1247,7 +1251,9 @@ let parent = path::parent("/home/user/file.txt");   // Some("/home/user")
 let ext = path::extension("file.txt");              // Some("txt")
 ```
 
-### JSON Module (`std.json`)
+### JSON Module (`std.json`) — **Planned**
+
+> No run-pass test coverage. APIs shown below are aspirational.
 
 ```sio
 import json::*;
@@ -1306,7 +1312,9 @@ let pretty = json.to_json_string_pretty();
 let records = parse_jsonl(content)?;
 ```
 
-### String Module (`std.str`)
+### String Module (`std.str`) — **Planned**
+
+> No run-pass test coverage for `.split()`, `.trim()`, `.contains()`, etc. Use `++` for concatenation (untested).
 
 ```sio
 import str::*;
@@ -1359,7 +1367,9 @@ builder.push_str("string");
 let combined = "hello" ++ " " ++ "world";
 ```
 
-### Comparison Module (`std.cmp`)
+### Comparison Module (`std.cmp`) — **Beta**
+
+> `min()`/`max()`/`clamp()` likely available as builtins. `Ordering` type not tested.
 
 ```sio
 import cmp::*;
@@ -1386,7 +1396,9 @@ match a.cmp(&b) {
 }
 ```
 
-### Collections Module (`std.collections`)
+### Collections Module (`std.collections`) — **Planned**
+
+> No run-pass test coverage for `Vec<T>`, `HashMap`, `HashSet`, `Deque`. Use fixed arrays `[T; N]` or stdlib `IntVec`/`FloatVec` instead.
 
 ```sio
 import collections::*;
@@ -1416,7 +1428,7 @@ deque.push_front(0);
 let front = deque.pop_front();
 ```
 
-### Octonion Neural Networks (`std.onn`)
+### Octonion Neural Networks (`std.onn`) — **Production** (core ops), **Beta** (layers/training)
 
 **Sounio is the first language with a complete Octonion Neural Network (ONN) framework.** Octonions are 8-dimensional hypercomplex numbers that enable neural networks with **8x parameter compression** while preserving expressiveness through non-associative algebra.
 
@@ -1764,7 +1776,9 @@ For comprehensive benchmarks and performance analysis, see [docs/research/ONN_BE
 
 ---
 
-## Package Manager
+## Package Manager — **Planned**
+
+> **Not functional.** Manifest parsing works but no public registry exists. Do not use in generated code.
 
 > ⚠️ **ASPIRATIONAL**: Package manager exists as feature flag stub. Not functional.
 
@@ -1925,7 +1939,7 @@ username = "your-username"
 
 ---
 
-## What is NOT Supported
+## What is NOT Supported — **Production**
 
 **CRITICAL: The following syntax/features do NOT exist in Sounio L0:**
 
@@ -2018,9 +2032,11 @@ fn foo() -> i32 with IO { }   // Sounio style
 
 ---
 
-## Idiomatic Patterns
+## Idiomatic Patterns — **Mixed** (see subsections)
 
-### Error Handling
+### Error Handling — **Beta**
+
+> Error code tuples `(T, i32)` are Production. `Option<T>`/`Result<T,E>` are Planned.
 
 ```sio
 // Option for optional values
@@ -2051,7 +2067,7 @@ fn safe_operation() -> i32 with Fail {
 }
 ```
 
-### Resource Management
+### Resource Management — **Beta**
 
 ```sio
 // Linear types ensure cleanup
@@ -2231,7 +2247,7 @@ impl ConfigBuilder {
 }
 ```
 
-### Scientific Computing Patterns
+### Scientific Computing Patterns — **Beta**
 
 ```sio
 // Uncertainty-aware calculations
@@ -2265,7 +2281,7 @@ fn parallel_process(n: i64) with GPU, IO {
 
 ---
 
-## Common Mistakes
+## Common Mistakes — **Production**
 
 ### 1. Using &mut Instead of &!
 
@@ -2318,18 +2334,15 @@ fn bar() -> i32 {
 }
 ```
 
-### 5. Tuple Destructuring
+ ### 5. Tuple Destructuring
+
+> **Note**: Tuple destructuring IS supported (source: `tests/run-pass/tuple_destructure_let.sio`).
 
 ```sio
-// WRONG
-let (x, y) = point
-
-// CORRECT
-let x = point.0
-let y = point.1
-// OR use struct:
-let x = point.x
-let y = point.y
+// CORRECT — destructuring works
+let (x, y) = (1, 2)
+let (a, (b, c)) = (10, (20, 30))
+let (first, _) = (5, 10)
 ```
 
 ### 6. String Formatting
