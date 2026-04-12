@@ -596,8 +596,8 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = gpu_param_kind_slice_in_f64()
     FN_PTX_PARAM_KINDS[(fi * 8 + 3) as usize] = gpu_param_kind_slice_out_f64()
 
-    ptx_emit_string(".version 7.0\n")
-    ptx_emit_string(".target sm_70\n")
+    ptx_emit_string(".version 8.0\n")
+    ptx_emit_string(".target sm_80\n")
     ptx_emit_string(".address_size 64\n\n")
     ptx_emit_string(".visible .entry ")
     ptx_emit_src_range(n_ns, n_ne)
@@ -640,8 +640,8 @@ fn write_ptx(output: string) -> i64 with IO, Mut, Panic, Div {
         print("ptx: no kernel PTX generated (no kernel functions with 'with GPU' found)\n")
         print("ptx: writing empty PTX header\n")
         PTX_LEN = 0
-        ptx_emit_string(".version 7.8\n")
-        ptx_emit_string(".target sm_70\n")
+        ptx_emit_string(".version 8.0\n")
+        ptx_emit_string(".target sm_80\n")
         ptx_emit_string(".address_size 64\n")
     }
     let ok = write_file(output, PTX_DATA, PTX_LEN)
@@ -675,11 +675,11 @@ fn collect_all_kernels_ptx() with Mut, Panic {
 
 fn emit_ptx_header() with Mut, Panic, Div {
     PTX_LEN = 0
-    ptx_emit_string(".version 7.8\n")
+    ptx_emit_string(".version 8.0\n")
     if GPU_PRECISION == 1 {
-        ptx_emit_string(".target sm_70\n")
+        ptx_emit_string(".target sm_80\n")
     } else {
-        ptx_emit_string(".target sm_70\n")
+        ptx_emit_string(".target sm_80\n")
     }
     ptx_emit_string(".address_size 64\n")
 }
@@ -801,6 +801,10 @@ fn emit_call_rax_x86(argc: i64) with Mut {
 fn emit_call_abs_qword_x86(addr: i64, argc: i64) with Mut {
     emit_load_abs_qword_to_rax_x86(addr)
     emit_call_rax_x86(argc)
+}
+
+fn emit_jmp_rax_x86() with Mut {
+    em(0xff); em(0xe0)
 }
 
 fn emit_inline_cstr_from_string_x86(s: string) with Mut, Panic, Div {
@@ -6406,6 +6410,30 @@ fn emit_task_try_claim_queued_x86() with Mut {
     em(0x48); em(0x0f); em(0xb6); em(0xc0)
 }
 
+fn emit_async_spawn_worker_x86(worker_entry_off: i64) with Mut, Panic, Div {
+    emit_task_alloc_stack_x86()
+    em(0x48); em(0x89); em(0xc6)
+    em(0x48); em(0x81); em(0xc6); em32(task_runtime_stack_size_x86() - 16)
+    em(0xbf); em32(task_worker_clone_flags_x86())
+    em(0x31); em(0xd2)
+    em(0x45); em(0x31); em(0xd2)
+    em(0x45); em(0x31); em(0xc0)
+    em(0xb8); em32(56)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x88); let clone_fail = CL; em32(0)
+    em(0x0f); em(0x85); let clone_parent = CL; em32(0)
+    emit_imm64(async_rt_text_base_x86() + worker_entry_off)
+    emit_jmp_rax_x86()
+    let clone_parent_target = CL
+    em(0xe9); let clone_after = CL; em32(0)
+    let clone_fail_target = CL
+    let clone_after_target = CL
+    patch32(clone_parent, clone_parent_target)
+    patch32(clone_fail, clone_fail_target)
+    patch32(clone_after, clone_after_target)
+}
+
 fn emit_async_worker_dispatch_x86() with Mut, Panic, Div {
     em(0x48); em(0x8b); em(0x4b); em(task_rec_argc_off_x86())
     em(0x48); em(0x85); em(0xc9)
@@ -6495,7 +6523,7 @@ fn emit_async_run_task_from_rax_x86() with Mut, Panic, Div {
     em(0x0f); em(0x05)
 }
 
-fn emit_async_worker_loop_x86() with Mut, Panic, Div {
+fn emit_async_worker_entry_x86(worker_entry_off: i64) with Mut, Panic, Div {
     let worker_loop = CL
     emit_async_dequeue_task_x86()
     emit_task_try_claim_queued_x86()
@@ -6503,12 +6531,19 @@ fn emit_async_worker_loop_x86() with Mut, Panic, Div {
     em(0x0f); em(0x84); let worker_retry = CL; em32(0)
     em(0x48); em(0x89); em(0xd8)
     emit_async_run_task_from_rax_x86()
+    emit_async_spawn_worker_x86(worker_entry_off)
+    emit_task_exit_x86(0)
     let worker_retry_target = CL
     patch32(worker_retry, worker_retry_target)
     em(0xe9); em32(worker_loop - (CL + 4))
 }
 
 fn emit_async_runtime_ensure_x86() with Mut, Panic, Div {
+    em(0xe9); let worker_entry_skip = CL; em32(0)
+    let worker_entry_off = CL
+    emit_async_worker_entry_x86(worker_entry_off)
+    let worker_entry_skip_target = CL
+    patch32(worker_entry_skip, worker_entry_skip_target)
     emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_INIT_BSS_OFF)
     em(0x48); em(0x85); em(0xc0)
     em(0x0f); em(0x85); let rt_done = CL; em32(0)
@@ -6522,27 +6557,7 @@ fn emit_async_runtime_ensure_x86() with Mut, Panic, Div {
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_MAIN_TID_BSS_OFF)
     var wi: i64 = 0
     while wi < async_rt_worker_count_x86() {
-        emit_task_alloc_stack_x86()
-        em(0x48); em(0x89); em(0xc6)
-        em(0x48); em(0x81); em(0xc6); em32(task_runtime_stack_size_x86() - 16)
-        em(0xbf); em32(task_worker_clone_flags_x86())
-        em(0x31); em(0xd2)
-        em(0x45); em(0x31); em(0xd2)
-        em(0x45); em(0x31); em(0xc0)
-        em(0xb8); em32(56)
-        em(0x0f); em(0x05)
-        em(0x48); em(0x85); em(0xc0)
-        em(0x0f); em(0x88); let clone_fail = CL; em32(0)
-        em(0x0f); em(0x85); let clone_parent = CL; em32(0)
-        emit_async_worker_loop_x86()
-        emit_task_exit_x86(0)
-        let clone_parent_target = CL
-        em(0xe9); let clone_after = CL; em32(0)
-        let clone_fail_target = CL
-        let clone_after_target = CL
-        patch32(clone_parent, clone_parent_target)
-        patch32(clone_fail, clone_fail_target)
-        patch32(clone_after, clone_after_target)
+        emit_async_spawn_worker_x86(worker_entry_off)
         wi = wi + 1
     }
     emit_store_imm64_to_abs_qword_x86(GL_BSS_BASE + ASYNC_RT_INIT_BSS_OFF, 1)
@@ -6563,12 +6578,6 @@ fn emit_task_await_x86() with Mut, Panic, Div {
     em(0x48); em(0x8b); em(0x4b); em(task_rec_state_off_x86())
     em(0x48); em(0x83); em(0xf9); em(task_state_done_x86())
     em(0x0f); em(0x8d); let wait_done = CL; em32(0)
-    em(0xb8); em32(186)
-    em(0x0f); em(0x05)
-    em(0x48); em(0x89); em(0xc1)
-    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ASYNC_RT_MAIN_TID_BSS_OFF)
-    em(0x48); em(0x39); em(0xc1)
-    em(0x0f); em(0x84); let wait_sleep_main = CL; em32(0)
     emit_load_var(task_slot)
     emit_task_try_claim_queued_x86()
     em(0x48); em(0x85); em(0xc0)
@@ -6577,7 +6586,6 @@ fn emit_task_await_x86() with Mut, Panic, Div {
     emit_async_run_task_from_rax_x86()
     em(0xe9); em32(wait_loop - (CL + 4))
     let wait_sleep_target = CL
-    patch32(wait_sleep_main, wait_sleep_target)
     patch32(wait_sleep, wait_sleep_target)
     emit_load_var(task_slot)
     em(0x48); em(0x89); em(0xc3)
@@ -6625,6 +6633,33 @@ fn emit_async_direct_fn_call_x86(fi: i64, argc: i64) with Mut, Panic, Div {
     emit_drop_call_args_x86(argc)
     emit_load_var(task_slot)
     emit_async_enqueue_task_x86()
+}
+
+fn emit_async_launch_task_thread_x86() with Mut, Panic, Div {
+    em(0x48); em(0x89); em(0xc3)
+    emit_task_alloc_stack_x86()
+    em(0x48); em(0x89); em(0xc2)
+    em(0x48); em(0x81); em(0xc2); em32(task_runtime_stack_size_x86() - 16)
+    em(0x48); em(0x89); em(0xd6)
+    em(0xbf); em32(task_worker_clone_flags_x86())
+    em(0x31); em(0xd2)
+    em(0x45); em(0x31); em(0xd2)
+    em(0x45); em(0x31); em(0xc0)
+    em(0xb8); em32(56)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x88); let clone_fail = CL; em32(0)
+    em(0x0f); em(0x85); let clone_parent = CL; em32(0)
+    em(0x48); em(0x89); em(0xd8)
+    emit_async_run_task_from_rax_x86()
+    emit_task_exit_x86(0)
+    let clone_parent_target = CL
+    em(0xe9); let clone_after = CL; em32(0)
+    let clone_fail_target = CL
+    let clone_after_target = CL
+    patch32(clone_parent, clone_parent_target)
+    patch32(clone_fail, clone_fail_target)
+    patch32(clone_after, clone_after_target)
 }
 
 fn compile_async_inline_block_x86(tok: i64) with IO, Mut, Panic, Div {
