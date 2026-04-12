@@ -83,84 +83,243 @@ fn ossm_reg_u64(reg: i64) -> string with Mut, Panic, Div { str_concat("%rd", i64
 fn ossm_pred(p: i64) -> string with Mut, Panic, Div { str_concat("%p", i64_to_string(p)) }
 
 // ============================================================================
-// SoA load/store helpers — coalesced memory access
+// SoA load/store helpers — two-level pointer indirection for coalesced access
 // ============================================================================
+//
+// SoA layout: param points to array of 8 pointers, each pointing to
+// a contiguous array of N elements for one octonion component.
+// Load: pointers[component][tid]  via:
+//   mov.u64 scratch0, component*8
+//   add.u64 scratch0, ptr_array_reg, scratch0   // &pointers[component]
+//   ld.global.u64 scratch1, [scratch0]           // pointers[component]
+//   add.u64 scratch1, scratch1, tid_offset_reg   // + tid*sizeof
+//   ld.global.f64 dst, [scratch1]
 
-// SoA load: ld.global.{f32,f64} %dst, [%base_ptr + component * stride + tid * sizeof]
-// stride = N (total elements), tid = %tid.x, component = 0..7
-fn ossm_emit_soa_load_f64(s: OssmPtxState, dst_reg: i64, base_ptr_reg: i64, component: i64, stride_reg: i64, tid_reg: i64) -> OssmPtxState with Mut, Panic, Div {
+fn ossm_emit_soa_load_f64(s: OssmPtxState, dst_reg: i64, ptr_array_reg: i64, component: i64, tid_offset_reg: i64, scratch0: i64, scratch1: i64) -> OssmPtxState with Mut, Panic, Div {
     var out = s
+    let byte_offset = component * 8
     out = ossm_push_str(out, "    // SoA load component ")
     out = ossm_push_str(out, i64_to_string(component))
     out = ossm_push_str(out, "\n")
-    out = ossm_push_str(out, "    mul.wide.u64 %rd_tmp, ")
-    out = ossm_push_str(out, ossm_reg_u64(tid_reg))
-    out = ossm_push_str(out, ", 8;\n")
-    out = ossm_push_str(out, "    mul.wide.u64 %rd_off, ")
-    out = ossm_push_str(out, i64_to_string(component))
-    out = ossm_push_str(out, ", 8;\n")
-    out = ossm_push_str(out, "    add.u64 %rd_tmp, %rd_tmp, %rd_off;\n")
-    out = ossm_push_str(out, "    add.u64 %rd_addr, ")
-    out = ossm_push_str(out, ossm_reg_u64(base_ptr_reg))
-    out = ossm_push_str(out, ", %rd_tmp;\n")
+    out = ossm_push_str(out, "    mov.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, i64_to_string(byte_offset))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    add.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(ptr_array_reg))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    ld.global.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", [")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, "];\n")
+    out = ossm_push_str(out, "    add.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(tid_offset_reg))
+    out = ossm_push_str(out, ";\n")
     out = ossm_push_str(out, "    ld.global.f64 ")
     out = ossm_push_str(out, ossm_reg_f64(dst_reg))
-    out = ossm_push_str(out, ", [%rd_addr];\n")
+    out = ossm_push_str(out, ", [")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, "];\n")
+    out
+}
+
+fn ossm_emit_soa_load_f32(s: OssmPtxState, dst_reg: i64, ptr_array_reg: i64, component: i64, tid_offset_reg: i64, scratch0: i64, scratch1: i64) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    let byte_offset = component * 8
+    out = ossm_push_str(out, "    // SoA load component ")
+    out = ossm_push_str(out, i64_to_string(component))
+    out = ossm_push_str(out, "\n")
+    out = ossm_push_str(out, "    mov.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, i64_to_string(byte_offset))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    add.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(ptr_array_reg))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    ld.global.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", [")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, "];\n")
+    out = ossm_push_str(out, "    add.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(tid_offset_reg))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    ld.global.f32 ")
+    out = ossm_push_str(out, ossm_reg_f32(dst_reg))
+    out = ossm_push_str(out, ", [")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, "];\n")
+    out
+}
+
+fn ossm_emit_soa_store_f64(s: OssmPtxState, src_reg: i64, ptr_array_reg: i64, component: i64, tid_offset_reg: i64, scratch0: i64, scratch1: i64) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    let byte_offset = component * 8
+    out = ossm_push_str(out, "    // SoA store component ")
+    out = ossm_push_str(out, i64_to_string(component))
+    out = ossm_push_str(out, "\n")
+    out = ossm_push_str(out, "    mov.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, i64_to_string(byte_offset))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    add.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(ptr_array_reg))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    ld.global.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", [")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, "];\n")
+    out = ossm_push_str(out, "    add.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(tid_offset_reg))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    st.global.f64 [")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, "], ")
+    out = ossm_push_str(out, ossm_reg_f64(src_reg))
+    out = ossm_push_str(out, ";\n")
+    out
+}
+
+fn ossm_emit_soa_store_f32(s: OssmPtxState, src_reg: i64, ptr_array_reg: i64, component: i64, tid_offset_reg: i64, scratch0: i64, scratch1: i64) -> OssmPtxState with Mut, Panic, Div {
+    var out = s
+    let byte_offset = component * 8
+    out = ossm_push_str(out, "    // SoA store component ")
+    out = ossm_push_str(out, i64_to_string(component))
+    out = ossm_push_str(out, "\n")
+    out = ossm_push_str(out, "    mov.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, i64_to_string(byte_offset))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    add.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(ptr_array_reg))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    ld.global.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", [")
+    out = ossm_push_str(out, ossm_reg_u64(scratch0))
+    out = ossm_push_str(out, "];\n")
+    out = ossm_push_str(out, "    add.u64 ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_u64(tid_offset_reg))
+    out = ossm_push_str(out, ";\n")
+    out = ossm_push_str(out, "    st.global.f32 [")
+    out = ossm_push_str(out, ossm_reg_u64(scratch1))
+    out = ossm_push_str(out, "], ")
+    out = ossm_push_str(out, ossm_reg_f32(src_reg))
+    out = ossm_push_str(out, ";\n")
     out
 }
 
 // ============================================================================
-// Sigmoid approximation — Padé L2 for GPU
+// Sigmoid approximation — Pade L2 for GPU (parameterized scratch registers)
 // ============================================================================
 
-fn ossm_emit_sigmoid_f64(s: OssmPtxState, dst_reg: i64, src_reg: i64) -> OssmPtxState with Mut, Panic, Div {
+fn ossm_emit_sigmoid_f64(s: OssmPtxState, dst_reg: i64, src_reg: i64, sx2_reg: i64, sx3_reg: i64, sx_reg: i64) -> OssmPtxState with Mut, Panic, Div {
     var out = s
     out = ossm_push_str(out, "    // sigmoid(")
     out = ossm_push_str(out, ossm_reg_f64(src_reg))
     out = ossm_push_str(out, ") -> ")
     out = ossm_push_str(out, ossm_reg_f64(dst_reg))
     out = ossm_push_str(out, "\n")
-    // sigm(x) = 0.5 + x * (0.25 - x * x * 0.015625) for |x| < 4
-    // For larger x, clamp to 0 or 1
-    out = ossm_push_str(out, "    // approx: 0.5 + 0.25*x - x^3/64\n")
-    out = ossm_push_str(out, "    mul.f64 %fd_sx2, ")
+    out = ossm_push_str(out, "    mul.f64 ")
+    out = ossm_push_str(out, ossm_reg_f64(sx2_reg))
+    out = ossm_push_str(out, ", ")
     out = ossm_push_str(out, ossm_reg_f64(src_reg))
     out = ossm_push_str(out, ", ")
     out = ossm_push_str(out, ossm_reg_f64(src_reg))
     out = ossm_push_str(out, ";\n")
-    out = ossm_push_str(out, "    mul.f64 %fd_sx3, %fd_sx2, ")
+    out = ossm_push_str(out, "    mul.f64 ")
+    out = ossm_push_str(out, ossm_reg_f64(sx3_reg))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_f64(sx2_reg))
+    out = ossm_push_str(out, ", ")
     out = ossm_push_str(out, ossm_reg_f64(src_reg))
     out = ossm_push_str(out, ";\n")
-    out = ossm_push_str(out, "    fma.rn.f64 %fd_sx, ")
+    out = ossm_push_str(out, "    fma.rn.f64 ")
+    out = ossm_push_str(out, ossm_reg_f64(sx_reg))
+    out = ossm_push_str(out, ", ")
     out = ossm_push_str(out, ossm_reg_f64(src_reg))
     out = ossm_push_str(out, ", 0d3FD0000000000000, 0d3FE0000000000000;\n")
     out = ossm_push_str(out, "    fma.rn.f64 ")
     out = ossm_push_str(out, ossm_reg_f64(dst_reg))
-    out = ossm_push_str(out, ", %fd_sx3, 0d3F90000000000000, %fd_sx;\n")
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_f64(sx3_reg))
+    out = ossm_push_str(out, ", 0d3F90000000000000, ")
+    out = ossm_push_str(out, ossm_reg_f64(sx_reg))
+    out = ossm_push_str(out, ";\n")
     out
 }
 
-fn ossm_emit_sigmoid_f32(s: OssmPtxState, dst_reg: i64, src_reg: i64) -> OssmPtxState with Mut, Panic, Div {
+fn ossm_emit_sigmoid_f32(s: OssmPtxState, dst_reg: i64, src_reg: i64, sx2_reg: i64, sx3_reg: i64, sx_reg: i64) -> OssmPtxState with Mut, Panic, Div {
     var out = s
     out = ossm_push_str(out, "    // sigmoid(")
     out = ossm_push_str(out, ossm_reg_f32(src_reg))
     out = ossm_push_str(out, ") -> ")
     out = ossm_push_str(out, ossm_reg_f32(dst_reg))
     out = ossm_push_str(out, "\n")
-    out = ossm_push_str(out, "    mul.f32 %f_sx2, ")
+    out = ossm_push_str(out, "    mul.f32 ")
+    out = ossm_push_str(out, ossm_reg_f32(sx2_reg))
+    out = ossm_push_str(out, ", ")
     out = ossm_push_str(out, ossm_reg_f32(src_reg))
     out = ossm_push_str(out, ", ")
     out = ossm_push_str(out, ossm_reg_f32(src_reg))
     out = ossm_push_str(out, ";\n")
-    out = ossm_push_str(out, "    mul.f32 %f_sx3, %f_sx2, ")
+    out = ossm_push_str(out, "    mul.f32 ")
+    out = ossm_push_str(out, ossm_reg_f32(sx3_reg))
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_f32(sx2_reg))
+    out = ossm_push_str(out, ", ")
     out = ossm_push_str(out, ossm_reg_f32(src_reg))
     out = ossm_push_str(out, ";\n")
-    out = ossm_push_str(out, "    fma.rn.f32 %f_sx, ")
+    out = ossm_push_str(out, "    fma.rn.f32 ")
+    out = ossm_push_str(out, ossm_reg_f32(sx_reg))
+    out = ossm_push_str(out, ", ")
     out = ossm_push_str(out, ossm_reg_f32(src_reg))
     out = ossm_push_str(out, ", 0f3E800000, 0f3F000000;\n")
     out = ossm_push_str(out, "    fma.rn.f32 ")
     out = ossm_push_str(out, ossm_reg_f32(dst_reg))
-    out = ossm_push_str(out, ", %f_sx3, 0f30800000, %f_sx;\n")
+    out = ossm_push_str(out, ", ")
+    out = ossm_push_str(out, ossm_reg_f32(sx3_reg))
+    out = ossm_push_str(out, ", 0f30800000, ")
+    out = ossm_push_str(out, ossm_reg_f32(sx_reg))
+    out = ossm_push_str(out, ";\n")
     out
 }
 
@@ -243,7 +402,7 @@ fn ossm_fano_sign(i: i64, j: i64) -> i64 with Panic {
     0 - 1
 }
 
-fn ossm_emit_oct_mul_f64(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8]) -> OssmPtxState with Mut, Panic, Div {
+fn ossm_emit_oct_mul_f64(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8], neg_scratch: i64) -> OssmPtxState with Mut, Panic, Div {
     var out = s
     out = ossm_push_str(out, "    // oct_mul (f64 Fano)\n")
     var k: i64 = 0
@@ -284,7 +443,9 @@ fn ossm_emit_oct_mul_f64(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8
                             out = ossm_push_str(out, ossm_reg_f64(dst[k as usize]))
                             out = ossm_push_str(out, ";\n")
                         } else {
-                            out = ossm_push_str(out, "    mul.f64 %fd_neg, ")
+                            out = ossm_push_str(out, "    mul.f64 ")
+                            out = ossm_push_str(out, ossm_reg_f64(neg_scratch))
+                            out = ossm_push_str(out, ", ")
                             out = ossm_push_str(out, ossm_reg_f64(a[ii as usize]))
                             out = ossm_push_str(out, ", ")
                             out = ossm_push_str(out, ossm_reg_f64(b[jj as usize]))
@@ -293,7 +454,9 @@ fn ossm_emit_oct_mul_f64(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8
                             out = ossm_push_str(out, ossm_reg_f64(dst[k as usize]))
                             out = ossm_push_str(out, ", ")
                             out = ossm_push_str(out, ossm_reg_f64(dst[k as usize]))
-                            out = ossm_push_str(out, ", %fd_neg;\n")
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f64(neg_scratch))
+                            out = ossm_push_str(out, ";\n")
                         }
                     }
                 }
@@ -306,7 +469,7 @@ fn ossm_emit_oct_mul_f64(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8
     out
 }
 
-fn ossm_emit_oct_mul_f32(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8]) -> OssmPtxState with Mut, Panic, Div {
+fn ossm_emit_oct_mul_f32(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8], neg_scratch: i64) -> OssmPtxState with Mut, Panic, Div {
     var out = s
     out = ossm_push_str(out, "    // oct_mul (f32 Fano)\n")
     var k: i64 = 0
@@ -347,7 +510,9 @@ fn ossm_emit_oct_mul_f32(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8
                             out = ossm_push_str(out, ossm_reg_f32(dst[k as usize]))
                             out = ossm_push_str(out, ";\n")
                         } else {
-                            out = ossm_push_str(out, "    mul.f32 %f_neg, ")
+                            out = ossm_push_str(out, "    mul.f32 ")
+                            out = ossm_push_str(out, ossm_reg_f32(neg_scratch))
+                            out = ossm_push_str(out, ", ")
                             out = ossm_push_str(out, ossm_reg_f32(a[ii as usize]))
                             out = ossm_push_str(out, ", ")
                             out = ossm_push_str(out, ossm_reg_f32(b[jj as usize]))
@@ -356,7 +521,9 @@ fn ossm_emit_oct_mul_f32(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8
                             out = ossm_push_str(out, ossm_reg_f32(dst[k as usize]))
                             out = ossm_push_str(out, ", ")
                             out = ossm_push_str(out, ossm_reg_f32(dst[k as usize]))
-                            out = ossm_push_str(out, ", %f_neg;\n")
+                            out = ossm_push_str(out, ", ")
+                            out = ossm_push_str(out, ossm_reg_f32(neg_scratch))
+                            out = ossm_push_str(out, ";\n")
                         }
                     }
                 }
@@ -451,8 +618,20 @@ fn ossm_emit_oct_add_f32(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8
 // h_t = sigmoid(A * h_{t-1} + B * x_t)
 // y_t = Re(C * h_t)
 //
-// Per-thread: 2 octonion multiplies (128 FMAs) + 8 sigmoid approx + scaling
-// Registers: 8(A) + 8(B) + 8(C) + 8(h_prev) + 8(ah) + 8(bx) + 8(sum) + 8(ah_buf) + scratch = ~72 f64
+// Register allocation (%fd0-79, %rd0-31):
+//   %rd0:  global tid       %rd1:  n (element count)
+//   %rd2:  unused           %rd3:  tid*8 (byte offset)
+//   %rd4:  h_ptrs base      %rd5:  a_ptrs base
+//   %rd6:  b_ptrs base      %rd7:  c_ptrs base
+//   %rd8:  x_ptr            %rd9:  y_ptr
+//   %rd10: scratch0 (SoA)   %rd11: scratch1 (SoA)
+//
+//   %fd0-7:   A octonion     %fd8-15:  B octonion
+//   %fd16-23: C octonion     %fd24-31: h_prev
+//   %fd32-39: ah (A*h)      %fd40-47: bx (B*x)
+//   %fd48-55: sum / h_t     %fd56-63: ch (C*h)
+//   %fd64:    x_t scalar    %fd65-67: sigmoid scratch
+//   %fd68:    neg scratch (oct_mul)
 // ============================================================================
 
 fn ossm_emit_forward_kernel_f64() -> OssmPtxState with Mut, Panic, Div {
@@ -465,23 +644,22 @@ fn ossm_emit_forward_kernel_f64() -> OssmPtxState with Mut, Panic, Div {
 
     // Kernel entry
     s = ossm_push_str(s, ".visible .entry sounio_ossm_forward(\n")
-    s = ossm_push_str(s, "    .param .u64 h_ptrs,       // array of 8 SoA component pointers\n")
-    s = ossm_push_str(s, "    .param .u64 a_ptrs,       // A parameter SoA pointers\n")
-    s = ossm_push_str(s, "    .param .u64 b_ptrs,       // B parameter SoA pointers\n")
-    s = ossm_push_str(s, "    .param .u64 c_ptrs,       // C parameter SoA pointers\n")
-    s = ossm_push_str(s, "    .param .u64 x_ptr,        // scalar input sequence\n")
-    s = ossm_push_str(s, "    .param .u64 y_ptr,        // scalar output sequence\n")
-    s = ossm_push_str(s, "    .param .u64 n_ptr         // total elements\n")
+    s = ossm_push_str(s, "    .param .u64 h_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 a_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 b_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 c_ptrs,\n")
+    s = ossm_push_str(s, "    .param .u64 x_ptr,\n")
+    s = ossm_push_str(s, "    .param .u64 y_ptr,\n")
+    s = ossm_push_str(s, "    .param .u64 n_ptr\n")
     s = ossm_push_str(s, ") {\n")
 
-    // Register declarations — enough for the fused kernel
+    // Register declarations
     s = ossm_push_str(s, "    .reg .f64 %fd<80>;\n")
     s = ossm_push_str(s, "    .reg .u64 %rd<32>;\n")
     s = ossm_push_str(s, "    .reg .u32 %r<8>;\n")
     s = ossm_push_str(s, "    .reg .pred %p<4>;\n\n")
 
-    // Get thread ID and bounds check
-    s = ossm_push_str(s, "    // Thread ID and bounds\n")
+    // Thread ID and bounds check
     s = ossm_push_str(s, "    mov.u32 %r0, %tid.x;\n")
     s = ossm_push_str(s, "    mov.u32 %r1, %ctaid.x;\n")
     s = ossm_push_str(s, "    mov.u32 %r2, %ntid.x;\n")
@@ -490,41 +668,137 @@ fn ossm_emit_forward_kernel_f64() -> OssmPtxState with Mut, Panic, Div {
     s = ossm_push_str(s, "    setp.ge.u64 %p0, %rd0, %rd1;\n")
     s = ossm_push_str(s, "    @%p0 bra $L_exit;\n\n")
 
-    // Load h_prev (8 components from SoA)
-    s = ossm_push_str(s, "    // Load h_{t-1} from SoA\n")
+    // (a) Precompute tid*8 into %rd3
+    s = ossm_push_str(s, "    // Precompute tid*8\n")
+    s = ossm_push_str(s, "    shl.b64 %rd3, %rd0, 3;\n\n")
+
+    // (b) Load all parameter pointers
+    s = ossm_push_str(s, "    // Load parameter pointers\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd4, [h_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd5, [a_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd6, [b_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd7, [c_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd8, [x_ptr];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd9, [y_ptr];\n\n")
+
     var c: i64 = 0
+
+    // (c) Load h_prev (8 SoA components) into %fd24-31
+    s = ossm_push_str(s, "    // Load h_{t-1} from SoA into %fd24-31\n")
+    c = 0
     while c < 8 {
-        s = ossm_push_str(s, "    ld.param.u64 %rd2, [h_ptrs];\n")
-        s = ossm_push_str(s, "    // TODO: SoA indexed load for component ")
-        s = ossm_push_str(s, i64_to_string(c))
-        s = ossm_push_str(s, "\n")
+        s = ossm_emit_soa_load_f64(s, 24 + c, 4, c, 3, 10, 11)
         c = c + 1
     }
 
-    // --- Core O-SSM computation ---
-    s = ossm_push_str(s, "\n    // === O-SSM Forward Pass ===\n")
-    s = ossm_push_str(s, "    // Step 1: A * h_{t-1} (octonion multiply, 64 FMAs)\n")
-    s = ossm_push_str(s, "    // TODO: emit_oct_mul_f64(ah, A, h_prev)\n")
-    s = ossm_push_str(s, "    // Step 2: B * x_t (octonion scalar multiply)\n")
-    s = ossm_push_str(s, "    // TODO: emit_oct_scale_f64(bx, B, x_t)\n")
-    s = ossm_push_str(s, "    // Step 3: A*h + B*x (element-wise add)\n")
-    s = ossm_push_str(s, "    // TODO: emit_oct_add_f64(sum, ah, bx)\n")
-    s = ossm_push_str(s, "    // Step 4: sigmoid element-wise (8 calls)\n")
-    s = ossm_push_str(s, "    // TODO: emit_sigmoid per component\n")
-    s = ossm_push_str(s, "    // Step 5: C * h_t (octonion multiply, 64 FMAs)\n")
-    s = ossm_push_str(s, "    // TODO: emit_oct_mul_f64(ch, C, h_t)\n")
-    s = ossm_push_str(s, "    // Step 6: y_t = Re(C*h_t) (extract component 0)\n")
-    s = ossm_push_str(s, "    // TODO: store y_t\n\n")
+    // (d) Load A into %fd0-7
+    s = ossm_push_str(s, "\n    // Load A parameter into %fd0-7\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f64(s, c, 5, c, 3, 10, 11)
+        c = c + 1
+    }
 
-    // Exit label
-    s = ossm_push_str(s, "$L_exit:\n")
+    // (e) Load B into %fd8-15
+    s = ossm_push_str(s, "\n    // Load B parameter into %fd8-15\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f64(s, 8 + c, 6, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // (f) Load C into %fd16-23
+    s = ossm_push_str(s, "\n    // Load C parameter into %fd16-23\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f64(s, 16 + c, 7, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // (g) Load x_t scalar into %fd64
+    s = ossm_push_str(s, "\n    // Load x_t scalar into %fd64\n")
+    s = ossm_push_str(s, "    add.u64 %rd10, %rd8, %rd3;\n")
+    s = ossm_push_str(s, "    ld.global.f64 %fd64, [%rd10];\n\n")
+
+    // === O-SSM Forward Pass ===
+
+    // Step 1: ah = A * h_{t-1} (octonion multiply, 64 FMAs)
+    s = ossm_push_str(s, "    // Step 1: ah = A * h_{t-1}\n")
+    let ah_dst: [i64; 8] = [32, 33, 34, 35, 36, 37, 38, 39]
+    let a_reg: [i64; 8] = [0, 1, 2, 3, 4, 5, 6, 7]
+    let h_prev_reg: [i64; 8] = [24, 25, 26, 27, 28, 29, 30, 31]
+    s = ossm_emit_oct_mul_f64(s, ah_dst, a_reg, h_prev_reg, 68)
+
+    // Step 2: bx = B * x_t (octonion scalar multiply)
+    s = ossm_push_str(s, "\n    // Step 2: bx = B * x_t\n")
+    let bx_dst: [i64; 8] = [40, 41, 42, 43, 44, 45, 46, 47]
+    let b_reg: [i64; 8] = [8, 9, 10, 11, 12, 13, 14, 15]
+    s = ossm_emit_oct_scale_f64(s, bx_dst, b_reg, 64)
+
+    // Step 3: sum = ah + bx (element-wise add)
+    s = ossm_push_str(s, "\n    // Step 3: sum = ah + bx\n")
+    let sum_dst: [i64; 8] = [48, 49, 50, 51, 52, 53, 54, 55]
+    let ah_src: [i64; 8] = [32, 33, 34, 35, 36, 37, 38, 39]
+    let bx_src: [i64; 8] = [40, 41, 42, 43, 44, 45, 46, 47]
+    s = ossm_emit_oct_add_f64(s, sum_dst, ah_src, bx_src)
+
+    // Step 4: sigmoid element-wise (in-place on sum → h_t)
+    s = ossm_push_str(s, "\n    // Step 4: sigmoid(sum) -> h_t\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_sigmoid_f64(s, 48 + c, 48 + c, 65, 66, 67)
+        c = c + 1
+    }
+
+    // Step 5: ch = C * h_t (octonion multiply, 64 FMAs)
+    s = ossm_push_str(s, "\n    // Step 5: ch = C * h_t\n")
+    let ch_dst: [i64; 8] = [56, 57, 58, 59, 60, 61, 62, 63]
+    let c_param: [i64; 8] = [16, 17, 18, 19, 20, 21, 22, 23]
+    let ht_reg: [i64; 8] = [48, 49, 50, 51, 52, 53, 54, 55]
+    s = ossm_emit_oct_mul_f64(s, ch_dst, c_param, ht_reg, 68)
+
+    // Step 6: y_t = Re(C * h_t) — store component 0 of ch to y_ptr
+    s = ossm_push_str(s, "\n    // Step 6: y_t = Re(C * h_t) = %fd56\n")
+    s = ossm_push_str(s, "    add.u64 %rd10, %rd9, %rd3;\n")
+    s = ossm_push_str(s, "    st.global.f64 [%rd10], %fd56;\n\n")
+
+    // Write-back h_t to h_prev SoA for next timestep
+    s = ossm_push_str(s, "    // Write-back h_t -> h_prev SoA\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_store_f64(s, 48 + c, 4, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Exit
+    s = ossm_push_str(s, "\n$L_exit:\n")
     s = ossm_push_str(s, "    ret;\n")
     s = ossm_push_str(s, "}\n")
 
     s
 }
 
-// f32 variant — same structure, different register types
+// ============================================================================
+// Fused O-SSM forward kernel (f32)
+//
+// Same structure as f64 variant but uses .f32 registers and tid*4 offsets.
+//
+// Register allocation (%f0-79, %rd0-31):
+//   %rd0:  global tid       %rd1:  n (element count)
+//   %rd3:  tid*4 (byte offset)
+//   %rd4:  h_ptrs base      %rd5:  a_ptrs base
+//   %rd6:  b_ptrs base      %rd7:  c_ptrs base
+//   %rd8:  x_ptr            %rd9:  y_ptr
+//   %rd10: scratch0 (SoA)   %rd11: scratch1 (SoA)
+//
+//   %f0-7:   A octonion     %f8-15:  B octonion
+//   %f16-23: C octonion     %f24-31: h_prev
+//   %f32-39: ah (A*h)      %f40-47: bx (B*x)
+//   %f48-55: sum / h_t     %f56-63: ch (C*h)
+//   %f64:    x_t scalar    %f65-67: sigmoid scratch
+//   %f68:    neg scratch (oct_mul)
+// ============================================================================
+
 fn ossm_emit_forward_kernel_f32() -> OssmPtxState with Mut, Panic, Div {
     var s = ossm_new()
 
@@ -547,6 +821,7 @@ fn ossm_emit_forward_kernel_f32() -> OssmPtxState with Mut, Panic, Div {
     s = ossm_push_str(s, "    .reg .u32 %r<8>;\n")
     s = ossm_push_str(s, "    .reg .pred %p<4>;\n\n")
 
+    // Thread ID and bounds check
     s = ossm_push_str(s, "    mov.u32 %r0, %tid.x;\n")
     s = ossm_push_str(s, "    mov.u32 %r1, %ctaid.x;\n")
     s = ossm_push_str(s, "    mov.u32 %r2, %ntid.x;\n")
@@ -555,10 +830,110 @@ fn ossm_emit_forward_kernel_f32() -> OssmPtxState with Mut, Panic, Div {
     s = ossm_push_str(s, "    setp.ge.u64 %p0, %rd0, %rd1;\n")
     s = ossm_push_str(s, "    @%p0 bra $L_exit;\n\n")
 
-    s = ossm_push_str(s, "    // O-SSM f32 forward pass\n")
-    s = ossm_push_str(s, "    // (fused oct mul + sigmoid + output, f32 precision)\n\n")
+    // (a) Precompute tid*4 into %rd3 (f32 = 4 bytes)
+    s = ossm_push_str(s, "    // Precompute tid*4\n")
+    s = ossm_push_str(s, "    shl.b64 %rd3, %rd0, 2;\n\n")
 
-    s = ossm_push_str(s, "$L_exit:\n")
+    // (b) Load all parameter pointers
+    s = ossm_push_str(s, "    // Load parameter pointers\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd4, [h_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd5, [a_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd6, [b_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd7, [c_ptrs];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd8, [x_ptr];\n")
+    s = ossm_push_str(s, "    ld.param.u64 %rd9, [y_ptr];\n\n")
+
+    var c: i64 = 0
+
+    // (c) Load h_prev (8 SoA components) into %f24-31
+    s = ossm_push_str(s, "    // Load h_{t-1} from SoA into %f24-31\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f32(s, 24 + c, 4, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // (d) Load A into %f0-7
+    s = ossm_push_str(s, "\n    // Load A parameter into %f0-7\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f32(s, c, 5, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // (e) Load B into %f8-15
+    s = ossm_push_str(s, "\n    // Load B parameter into %f8-15\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f32(s, 8 + c, 6, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // (f) Load C into %f16-23
+    s = ossm_push_str(s, "\n    // Load C parameter into %f16-23\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_load_f32(s, 16 + c, 7, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // (g) Load x_t scalar into %f64
+    s = ossm_push_str(s, "\n    // Load x_t scalar into %f64\n")
+    s = ossm_push_str(s, "    add.u64 %rd10, %rd8, %rd3;\n")
+    s = ossm_push_str(s, "    ld.global.f32 %f64, [%rd10];\n\n")
+
+    // === O-SSM Forward Pass (f32) ===
+
+    // Step 1: ah = A * h_{t-1}
+    s = ossm_push_str(s, "    // Step 1: ah = A * h_{t-1}\n")
+    let ah_dst: [i64; 8] = [32, 33, 34, 35, 36, 37, 38, 39]
+    let a_reg: [i64; 8] = [0, 1, 2, 3, 4, 5, 6, 7]
+    let h_prev_reg: [i64; 8] = [24, 25, 26, 27, 28, 29, 30, 31]
+    s = ossm_emit_oct_mul_f32(s, ah_dst, a_reg, h_prev_reg, 68)
+
+    // Step 2: bx = B * x_t
+    s = ossm_push_str(s, "\n    // Step 2: bx = B * x_t\n")
+    let bx_dst: [i64; 8] = [40, 41, 42, 43, 44, 45, 46, 47]
+    let b_reg: [i64; 8] = [8, 9, 10, 11, 12, 13, 14, 15]
+    s = ossm_emit_oct_scale_f32(s, bx_dst, b_reg, 64)
+
+    // Step 3: sum = ah + bx
+    s = ossm_push_str(s, "\n    // Step 3: sum = ah + bx\n")
+    let sum_dst: [i64; 8] = [48, 49, 50, 51, 52, 53, 54, 55]
+    let ah_src: [i64; 8] = [32, 33, 34, 35, 36, 37, 38, 39]
+    let bx_src: [i64; 8] = [40, 41, 42, 43, 44, 45, 46, 47]
+    s = ossm_emit_oct_add_f32(s, sum_dst, ah_src, bx_src)
+
+    // Step 4: sigmoid element-wise
+    s = ossm_push_str(s, "\n    // Step 4: sigmoid(sum) -> h_t\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_sigmoid_f32(s, 48 + c, 48 + c, 65, 66, 67)
+        c = c + 1
+    }
+
+    // Step 5: ch = C * h_t
+    s = ossm_push_str(s, "\n    // Step 5: ch = C * h_t\n")
+    let ch_dst: [i64; 8] = [56, 57, 58, 59, 60, 61, 62, 63]
+    let c_param: [i64; 8] = [16, 17, 18, 19, 20, 21, 22, 23]
+    let ht_reg: [i64; 8] = [48, 49, 50, 51, 52, 53, 54, 55]
+    s = ossm_emit_oct_mul_f32(s, ch_dst, c_param, ht_reg, 68)
+
+    // Step 6: y_t = Re(C * h_t)
+    s = ossm_push_str(s, "\n    // Step 6: y_t = Re(C * h_t) = %f56\n")
+    s = ossm_push_str(s, "    add.u64 %rd10, %rd9, %rd3;\n")
+    s = ossm_push_str(s, "    st.global.f32 [%rd10], %f56;\n\n")
+
+    // Write-back h_t to h_prev SoA
+    s = ossm_push_str(s, "    // Write-back h_t -> h_prev SoA\n")
+    c = 0
+    while c < 8 {
+        s = ossm_emit_soa_store_f32(s, 48 + c, 4, c, 3, 10, 11)
+        c = c + 1
+    }
+
+    // Exit
+    s = ossm_push_str(s, "\n$L_exit:\n")
     s = ossm_push_str(s, "    ret;\n")
     s = ossm_push_str(s, "}\n")
 
@@ -668,8 +1043,6 @@ fn ossm_emit_associator_kernel_f64() -> OssmPtxState with Mut, Panic, Div {
 
 fn ossm_test_forward_kernel_structure() -> i64 with Mut, Panic, Div {
     let s = ossm_emit_forward_kernel_f64()
-    // Validate PTX structure
     if s.buf_len == 0 { return 1 }
-    // Should contain .version, .target, .entry, .param, ret
     0
 }
