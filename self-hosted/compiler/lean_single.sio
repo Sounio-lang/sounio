@@ -22,6 +22,9 @@ var BASE_DIR: [i8; 512] = [0; 512]
 var BASE_DIR_LEN: i64 = 0
 var CLI_SHOW_AST: i64 = 0
 var CLI_SHOW_TYPES: i64 = 0
+var CLI_R15_MONITOR: i64 = 0     // --r15-monitor: emit R15 confidence checks at all call sites
+var R15_GATE_COUNT: i64 = 0      // number of call sites instrumented
+var R15_SIDE_TABLE_BSS_OFF: i64 = 0  // BSS offset of the R15 side table
 
 // Token parallel arrays (kind, start, end, int_value)
 // Raised from 262144 to 524288 for JIT-free bootstrap (compile native_compile_driver + main.sio)
@@ -8277,6 +8280,25 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     } else {
                         EPIST_GATES_DIRECT = EPIST_GATES_DIRECT + 1
                     }
+                    // R15 Runtime Tag Stack: emit CMP/JGE/UD2 check at every call site
+                    if CLI_R15_MONITOR != 0 {
+                        let r15_gid = R15_GATE_COUNT
+                        R15_GATE_COUNT = R15_GATE_COUNT + 1
+                        let r15_disp = r15_gid * 8
+                        if r15_disp == 0 {
+                            // mod=00: CMP qword [R15], 950
+                            em(0x49); em(0x81); em(0x3f)
+                        } else if r15_disp <= 127 {
+                            // mod=01: CMP qword [R15 + disp8], 950
+                            em(0x49); em(0x81); em(0x7f); em(r15_disp)
+                        } else {
+                            // mod=10: CMP qword [R15 + disp32], 950
+                            em(0x49); em(0x81); em(0xbf); em32(r15_disp)
+                        }
+                        em32(950)        // imm32: confidence threshold
+                        em(0x7d); em(0x02)   // JGE +2 (skip UD2)
+                        em(0x0f); em(0x0b)   // UD2 — epistemic confidence trap
+                    }
                     emit_direct_fn_call_x86(fi, abi_argc)
                 }
                 EXPR_TY = FN_RET_TY[fi as usize]
@@ -12847,6 +12869,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GL_BSS_SIZE = 0
     RET_AGG_BSS_OFF = 0
     GPU_EMU_THREAD_ID_BSS_OFF = 0
+    R15_GATE_COUNT = 0
+    R15_SIDE_TABLE_BSS_OFF = 0
     // Note: do NOT reset TYPECHECK_FAILED here — lexer-phase errors must persist
     LIMIT_ERROR_KIND = 0
     var p: i64 = 0
@@ -13300,6 +13324,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF = bss_alloc_aligned(8)
     PTX_LEN = 0
     NEEDS_GPU_RUNTIME_DYNLINK = 0
+    // R15 Runtime Tag Stack: reserve BSS for side table (up to 16384 call sites × 8 bytes)
+    if CLI_R15_MONITOR != 0 {
+        R15_SIDE_TABLE_BSS_OFF = bss_alloc_aligned(16384 * 8)
+    }
 
     // BSS layout: [argc(8)] [argv(8)] [globals...] [aggregate return scratch]
     RET_AGG_BSS_OFF = GL_BSS_SIZE
@@ -14040,6 +14068,23 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em(0x48); em(0x8d); em(0x44); em(0x24); em(16)  // lea rax, [rsp+16] (argv+1)
         em(0x48); em(0xb9); em64(argv_addr)
         em(0x48); em(0x89); em(0x01)  // mov [rcx], rax (save argv ptr)
+        // R15 Runtime Tag Stack: initialize R15 and fill side table with 1000 (full confidence)
+        if CLI_R15_MONITOR != 0 {
+            let r15_tbl_abs = 0x10000000 + R15_SIDE_TABLE_BSS_OFF
+            // mov r15, side_table_abs_addr (10 bytes): REX.W+REX.B=0x49, opcode=0xbf (B8+7)
+            em(0x49); em(0xbf); em64(r15_tbl_abs)
+            // xor rcx, rcx (3 bytes)
+            em(0x48); em(0x31); em(0xc9)
+            // .loop: mov qword [r15 + rcx*8], 1000 (8 bytes)
+            // REX.W+REX.B=0x49, MOV r/m64 imm32=0xc7, ModRM=0x04 (SIB follows), SIB=0xcf (×8, rcx, r15)
+            em(0x49); em(0xc7); em(0x04); em(0xcf); em32(1000)
+            // inc rcx (3 bytes)
+            em(0x48); em(0xff); em(0xc1)
+            // cmp rcx, R15_GATE_COUNT (7 bytes)
+            em(0x48); em(0x81); em(0xf9); em32(R15_GATE_COUNT)
+            // jl .loop (2 bytes, disp8=-20)
+            em(0x7c); em(0xec)
+        }
         // call main
         em(0xe8)
         let rel = FN_OFF[main_fn as usize] - (CL + 4)
@@ -14054,6 +14099,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT)
     print(" gates[direct="); print_int(EPIST_GATES_DIRECT)
     print(" guarded="); print_int(EPIST_GATES_GUARDED); print("]\n")
+    if CLI_R15_MONITOR != 0 {
+        print("r15_monitor: "); print_int(R15_GATE_COUNT); print(" sites instrumented")
+        print(", side_table_size="); print_int(R15_GATE_COUNT * 8); print(" bytes")
+        print(", bss_off="); print_int(R15_SIDE_TABLE_BSS_OFF); print("\n")
+    }
     0
 }
 
@@ -19323,7 +19373,7 @@ fn strip_extern_blocks() with IO, Mut, Panic {
 fn main() -> i64 with IO, Mut, Panic, Div {
     let argc = arg_count()
     if argc < 2 {
-        print("Usage: mini_native <source.sio> <output> [--show-ast] [--show-types] [--target x86_64-windows]\n")
+        print("Usage: mini_native <source.sio> <output> [--show-ast] [--show-types] [--r15-monitor] [--target x86_64-windows]\n")
         return 1
     }
     let src = get_arg(0)
@@ -19351,11 +19401,15 @@ fn main() -> i64 with IO, Mut, Panic, Div {
 
     CLI_SHOW_AST = 0
     CLI_SHOW_TYPES = 0
+    CLI_R15_MONITOR = 0
     var arg_i: i64 = 2
     while arg_i < argc {
         let flag = get_arg(arg_i)
         if cli_arg_eq(flag, "--show-ast") {
             CLI_SHOW_AST = 1
+        } else {
+        if cli_arg_eq(flag, "--r15-monitor") {
+            CLI_R15_MONITOR = 1
         } else {
             if cli_arg_eq(flag, "--show-types") {
                 CLI_SHOW_TYPES = 1
@@ -19384,7 +19438,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
                     arg_i = arg_i + 1
                 }
             }
-        }
+        } }
         arg_i = arg_i + 1
     }
 

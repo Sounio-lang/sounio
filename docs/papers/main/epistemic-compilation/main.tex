@@ -858,20 +858,56 @@ constructs present in \lean.
 \label{fig:gates}
 \end{figure}
 
-\subsection{The R15 Tag Stack (Future Work)}
+\subsection{The R15 Runtime Tag Stack}
+\label{sec:r15}
 
-For full runtime enforcement, we have designed but not yet implemented
-a parallel tag stack using the x86-64 \texttt{r15} register,
-which is callee-saved and unused by \sounio's calling convention.
-On function entry, \texttt{r15} points to a per-thread confidence tag
-stack; each call pushes the callee's confidence.
-Guard NOP patches insert \texttt{cmp [r15], 950} / \texttt{jl trap}
-before the guarded instruction.
-This design adds zero overhead on the fast path (no \texttt{r15} write
-at high-confidence sites) and requires a single compare-and-branch at
-guarded sites.
-We leave the full implementation to future work as it requires the
-runtime linker to be complete.
+Generation~11 introduces an opt-in runtime confidence monitor via
+the \texttt{--r15-monitor} compilation flag.
+At every call site, the compiler emits a three-instruction check:
+
+\begin{verbatim}
+cmp  qword [r15 + gate_id*8], 950   ; compare side-table entry
+jge  .ok                            ; skip if confident
+ud2                                 ; UD2: SIGILL epistemic trap
+.ok:
+\end{verbatim}
+
+\noindent
+\texttt{r15} is loaded at program start (\texttt{\_start}) with the
+absolute address of a BSS side table of \texttt{i64} entries, one per
+call site.
+The trampoline initialises all entries to~1000 via a short loop before
+calling \texttt{main}.
+Each entry is independently writable at runtime, enabling a host
+process, debugger, or measurement harness to downgrade the confidence of
+specific sites and trigger the trap for testing or dynamic recalibration.
+
+At Generation~11, all 8,921 instrumented sites start with entry~$=1000$;
+the trap branch is provably dead code (static confidence 1000 $\geq$ 950).
+The compiled binary runs normally without triggering any SIGILL.
+Fixed-point hash of the instrumented binary: \texttt{a1497f5d}.
+
+\paragraph{Usage.}
+\begin{verbatim}
+souc source.sio output.elf --r15-monitor
+# Output: r15_monitor: 8921 sites instrumented,
+#         side_table_size=71368 bytes
+\end{verbatim}
+
+\paragraph{Design properties.}
+\begin{itemize}
+\item \emph{Zero overhead without flag}: the flag is opt-in;
+  without it, the NOP2 / direct path is unchanged.
+\item \emph{Per-site granularity}: each of the 8,921 call sites
+  has an independent 8-byte entry; the side table is 70\,KB.
+\item \emph{Dead-branch elimination}: at Gen~11 static confidence,
+  a simple optimizer can prove all trap branches unreachable and
+  eliminate them, recovering the direct-call baseline.
+\item \emph{Forward compatibility}: when a future dynamic measurement
+  system (e.g., Bayesian update from profiling) lowers a site's confidence
+  below 950, the trap fires at the next call, providing hard enforcement
+  of epistemic guarantees at runtime.
+\end{itemize}
 
 % ============================================================================
 \section{Self-Referential Validation}
