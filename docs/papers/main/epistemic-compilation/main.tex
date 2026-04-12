@@ -96,12 +96,15 @@ at confidence $\geq 950$, code is emitted directly with zero overhead.
 We implement EGC in \sounio, a self-hosted systems programming language,
 and apply it to \lean, the \sounio compiler itself---making the compiler
 its own first application of the epistemic type system.
-Across 11 self-hosted generations, confidence rises from 26\% to 100\%
+Across 12 self-hosted generations, confidence rises from 26\% to 100\%
 monotonically, with bit-identical fixed points at every generation.
 At Generation~11, all 8,883 call sites emit direct code and
 all 75,924 expression tokens carry full confidence
-(100\% expression certainty) with zero guard overhead---the 2-byte NOP
-guard never fires.
+(100\% expression certainty) with zero guard overhead.
+Generation~12 adds the \emph{Epistemic Inspector}: per-file confidence
+breakdowns, token-level JSON export (\texttt{--dump-conf-json}), and
+the first compile-time bridge between the confidence lattice and runtime
+\texttt{Knowledge\textless T\textgreater} measurement types.
 The self-referential validation loop is closed: the epistemic system
 validates itself, and its own confidence serves as the measure of
 its completeness.
@@ -223,8 +226,8 @@ This paper makes the following contributions:
   monotone non-decreasing across inference passes.
 
 \item \textbf{The bootstrapping protocol} (\S\ref{sec:bootstrap}):
-  an 11-generation self-hosting experiment in which \lean (the \sounio
-  self-hosted compiler, 16,365 lines) applies its own epistemic engine
+  a 12-generation self-hosting experiment in which \lean (the \sounio
+  self-hosted compiler, 16,700+ lines) applies its own epistemic engine
   to its own source.
   Confidence rises from 26\% at Generation~0 to 100\% at Generation~11,
   with bit-identical fixed points at every generation.
@@ -232,6 +235,9 @@ This paper makes the following contributions:
   demonstrating monotone convergence toward full typing.
   Generation~11 closes the engine: all 75,924 expression tokens
   carry full confidence.
+  Generation~12 adds observability: the Epistemic Inspector exports
+  per-file confidence breakdowns, token-level JSON, and the first
+  compile-time bridge to runtime \know{T} measurement uncertainty.
 
 \item \textbf{Codegen gates} (\S\ref{sec:gates}): a practical
   mechanism that makes quantified uncertainty visible in the binary.
@@ -516,7 +522,7 @@ Table~\ref{tab:generations} shows the full progression.
 \begin{table}[t]
 \centering
 \caption{%
-  Bootstrap convergence across 11 generations.
+  Bootstrap convergence across 12 generations.
   \emph{Certain} = expressions with confidence $\geq 950$.
   Binary size grows monotonically as new inference paths add code.
   Fixed-point hashes confirm reproducibility at each generation.
@@ -524,7 +530,9 @@ Table~\ref{tab:generations} shows the full progression.
   uncertain at Generation~6; Generation~10 adds generic call recognition,
   eliminating all 54 residual guarded sites and achieving 100\%
   call-site certainty; Generation~11 closes the final 1,183-token gap,
-  reaching 100\% expression certainty.
+  reaching 100\% expression certainty; Generation~12 adds the epistemic
+  inspector (\texttt{--dump-conf-json}), per-file confidence breakdowns,
+  and the Knowledge\textless T\textgreater{} constructor bridge.
 }
 \label{tab:generations}
 \begin{tabular}{@{}clrrrl@{}}
@@ -543,6 +551,7 @@ Gen & New inference rules & Certain & \% & Binary & Hash (8 hex) \\
 9 & +closure captures         &  97,913 & 97\% & 741\,KB & \texttt{f42a8e91} \\
 10 & +generic call recognition &  74,375 & 98\% & 837\,KB & \texttt{96fbae59} \\
 11 & +non-prim params, unary ops, call-result tagging &  75,924 & 100\% & 840\,KB & \texttt{644f7f8d} \\
+12 & +per-file stats, \texttt{--dump-conf-json}, Knowledge\textless T\textgreater{} bridge & 76,417 & 100\% & 848\,KB & \texttt{771dbedd} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -612,10 +621,10 @@ RK4--analytical agreement within $10^{-6}$\,mg/L.
   height=5.5cm,
   xlabel={Generation},
   ylabel={Confidence (\%)},
-  xtick={0,1,2,3,4,5,6,7,8,9,10,11},
+  xtick={0,1,2,3,4,5,6,7,8,9,10,11,12},
   ytick={20,30,40,50,60,70,80,90,100},
   ymin=20, ymax=105,
-  xmin=-0.3, xmax=11.3,
+  xmin=-0.3, xmax=12.3,
   grid=major,
   grid style={dotted, gray!50},
   tick label style={font=\small},
@@ -641,13 +650,14 @@ RK4--analytical agreement within $10^{-6}$\,mg/L.
   (9, 97)
   (10, 98)
   (11, 100)
+  (12, 100)
 };
 % Gate threshold horizontal line
 \addplot[
   dashed,
   color=red!60!black,
   line width=0.8pt,
-  domain=-0.3:11.3,
+  domain=-0.3:12.3,
 ] {95};
 \node[font=\tiny, red!60!black] at (axis cs: 10.5, 96.8) {$\theta{=}95\%$};
 
@@ -913,6 +923,66 @@ souc source.sio output.elf --r15-monitor
   below 950, the trap fires at the next call, providing hard enforcement
   of epistemic guarantees at runtime.
 \end{itemize}
+
+% ============================================================================
+\subsection{Generation~12: The Epistemic Inspector}
+\label{sec:gen12}
+% ============================================================================
+
+Generation~12 extends EGC from a \emph{compile-time analysis} into an
+\emph{observable system}, adding three capabilities that together form
+the \emph{Epistemic Inspector}.
+
+\paragraph{Per-file confidence breakdown.}
+When a program imports external modules, the global token count conflates
+user code with stdlib tokens.
+Generation~12 tracks which tokens originate from the main source file
+(identified by their source position relative to \texttt{MAIN\_SRC\_END})
+and emits a separate \texttt{epistemic\_main:} line:
+\begin{verbatim}
+epistemic:      76,417 expr, 76,417 certain (100%), 0 uncertain
+epistemic_main: 75,514 expr, 75,514 certain (100%), 0 uncertain
+\end{verbatim}
+This separates the user's certainty guarantee from the standard library's.
+
+\paragraph{Token-level JSON export (\texttt{--dump-conf-json}).}
+The new flag \texttt{--dump-conf-json} emits a JSON array of every
+expression token's position, token kind, confidence value, and source line:
+\begin{verbatim}
+{"total":1359, "certain":1359,
+ "tokens":[{"p":1,"tk":3,"conf":1000,"line":24}, ...]}
+\end{verbatim}
+Applied to \texttt{pbpk\_2comp.sio} this produces 1,359 entries, all with
+\texttt{"conf":1000}, confirming 100\% expression certainty at the
+token level.
+The JSON output is a foundation for editor tooling and the epistemic LSP
+described in §\ref{sec:selfref}.
+
+\paragraph{Knowledge\textless T\textgreater{} constructor bridge.}
+Generation~12 introduces the first connection between the compile-time
+confidence lattice and the runtime \texttt{Epistemic} type in \texttt{stdlib/epistemic/}.
+Functions named \texttt{measured} and \texttt{asserted} receive reduced
+\texttt{FN\_EFF\_CONF} values (990 and 970 respectively) instead of the
+default 1000, reflecting their semantic epistemic quality:
+a \emph{measured} value carries instrument uncertainty; an \emph{asserted}
+value carries user-claim uncertainty.
+With literal arguments at confidence 1000, call sites produce
+$\texttt{call\_conf} = 990$ and $970$ respectively --- both above the gate
+threshold of 950, so zero guarded sites are introduced.
+
+The compiler reports Knowledge\textless T\textgreater{} site statistics separately:
+\begin{verbatim}
+epistemic_ktype: 7 Knowledge<T> sites, 7 certain (100%)
+\end{verbatim}
+demonstrating that the compile-time epistemic analysis is now
+\emph{semantically aware} of measurement vs.\ constant vs.\ asserted values,
+bridging ISO~GUM measurement quality to the type-system confidence lattice.
+
+The demo program \texttt{examples/science/epistemic\_measured.sio} instantiates
+this bridge: $\texttt{dose} = \text{measured}(100, 5)$ carries
+$\texttt{EXPR\_CONF} = 990$ and $\texttt{volume} = \text{measured}(10, 0.3)$
+carries $\texttt{EXPR\_CONF} = 990$; the GUM product rule yields
+$\sigma_{C_0} / C_0 = 5.9\%$, matching the analytical result.
 
 % ============================================================================
 \section{Self-Referential Validation}

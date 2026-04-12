@@ -287,6 +287,14 @@ var EPIST_HIGH_CONF:  i64 = 0
 var EPIST_LOW_CONF:   i64 = 0
 var EPIST_GATES_DIRECT: i64 = 0
 var EPIST_GATES_GUARDED: i64 = 0
+// Gen 12: per-file epistemic stats (main source vs imported)
+var EPIST_MAIN_TOTAL: i64 = 0
+var EPIST_MAIN_HIGH:  i64 = 0
+// Gen 12: Knowledge<T> (Epistemic) type-site counter
+var EPIST_KTYPE_SITES: i64 = 0
+var EPIST_KTYPE_CERTAIN: i64 = 0
+// Gen 12: --dump-conf-json flag
+var CLI_DUMP_CONF_JSON: i64 = 0
 
 fn en_find(hash: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
@@ -11507,6 +11515,10 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     EPIST_TOTAL_EXPR = 0
     EPIST_HIGH_CONF = 0
     EPIST_LOW_CONF = 0
+    EPIST_MAIN_TOTAL = 0
+    EPIST_MAIN_HIGH = 0
+    EPIST_KTYPE_SITES = 0
+    EPIST_KTYPE_CERTAIN = 0
 
     // Phase A: Collect effect declarations for all registered functions
     var fi: i64 = 0
@@ -11533,6 +11545,25 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                 q = q + 1
             }
         }
+        fi = fi + 1
+    }
+
+    // Gen 12 Phase A2: Epistemic constructor confidence bridge
+    // Assign semantically meaningful FN_EFF_CONF to functions that return
+    // Knowledge<T> (Epistemic) values, reflecting measurement quality rather
+    // than defaulting to 1000 (type-system certainty).
+    // - "measured": returns Epistemic from instrument data → conf 990
+    //   (high but not perfect: instrument measurements carry inherent uncertainty)
+    // - "asserted": user-asserted value → conf 970 (slightly less certain)
+    // Both remain above GATE_THRESHOLD (950) so no guarded sites are introduced.
+    // With arg_conf=1000, call_conf = 990*1000/1000 = 990 ≥ 950. ✓
+    fi = 0
+    while fi < FN_COUNT {
+        let g12_fns = FN_NS[fi as usize]
+        let g12_fne = FN_NE[fi as usize]
+        let g12_flen = g12_fne - g12_fns
+        if src_match(g12_fns, g12_flen, "measured") { FN_EFF_CONF[fi as usize] = 990 }
+        if src_match(g12_fns, g12_flen, "asserted") { FN_EFF_CONF[fi as usize] = 970 }
         fi = fi + 1
     }
 
@@ -12437,6 +12468,13 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
             } else {
                 EPIST_LOW_CONF = EPIST_LOW_CONF + 1
             }
+            // Gen 12: per-file split — main source vs imported modules
+            if MAIN_SRC_END > 0 && TS[p as usize] < MAIN_SRC_END {
+                EPIST_MAIN_TOTAL = EPIST_MAIN_TOTAL + 1
+                if EXPR_CONF[p as usize] >= GATE_THRESHOLD {
+                    EPIST_MAIN_HIGH = EPIST_MAIN_HIGH + 1
+                }
+            }
         }
         p = p + 1
     }
@@ -12456,6 +12494,29 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
         print(" in ")
         print_int(refine_pass)
         print(" passes\n")
+    }
+
+    // Gen 12: Knowledge<T> (Epistemic) site scan
+    // Count ident tokens whose name matches a known Epistemic constructor
+    // ("measured", "asserted", "constant") to track Knowledge<T> usage.
+    p = 0
+    while p < TC {
+        if TK[p as usize] == 3 && p + 1 < TC && TK[(p + 1) as usize] == 6 {
+            let g12_ns = TS[p as usize]
+            let g12_ne = TE[p as usize]
+            let g12_len = g12_ne - g12_ns
+            var g12_is_ktype: i64 = 0
+            if src_match(g12_ns, g12_len, "measured") { g12_is_ktype = 1 }
+            if src_match(g12_ns, g12_len, "asserted") { g12_is_ktype = 1 }
+            if src_match(g12_ns, g12_len, "constant") { g12_is_ktype = 1 }
+            if g12_is_ktype == 1 {
+                EPIST_KTYPE_SITES = EPIST_KTYPE_SITES + 1
+                if EXPR_CONF[p as usize] >= GATE_THRESHOLD {
+                    EPIST_KTYPE_CERTAIN = EPIST_KTYPE_CERTAIN + 1
+                }
+            }
+        }
+        p = p + 1
     }
 
     // Diagnostic: categorize uncertain identifiers by prev token
@@ -12513,6 +12574,62 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     print(", gate=")
     print_int(GATE_THRESHOLD)
     print("/1000\n")
+    // Gen 12: per-file epistemic stats
+    if MAIN_SRC_END > 0 && EPIST_MAIN_TOTAL > 0 {
+        print("epistemic_main: ")
+        print_int(EPIST_MAIN_TOTAL)
+        print(" expr, ")
+        print_int(EPIST_MAIN_HIGH)
+        print(" certain (")
+        print_int((EPIST_MAIN_HIGH * 100) / EPIST_MAIN_TOTAL)
+        print("%), ")
+        print_int(EPIST_MAIN_TOTAL - EPIST_MAIN_HIGH)
+        print(" uncertain\n")
+    }
+    // Gen 12: Knowledge<T> constructor sites
+    if EPIST_KTYPE_SITES > 0 {
+        print("epistemic_ktype: ")
+        print_int(EPIST_KTYPE_SITES)
+        print(" Knowledge<T> sites, ")
+        print_int(EPIST_KTYPE_CERTAIN)
+        print(" certain (")
+        print_int((EPIST_KTYPE_CERTAIN * 100) / EPIST_KTYPE_SITES)
+        print("%)\n")
+    }
+    // Gen 12: --dump-conf-json — print token-level confidence as JSON to stdout
+    if CLI_DUMP_CONF_JSON != 0 {
+        print("{\"total\":")
+        print_int(EPIST_TOTAL_EXPR)
+        print(",\"certain\":")
+        print_int(EPIST_HIGH_CONF)
+        print(",\"tokens\":[\n")
+        var g12_first: i64 = 1
+        var g12_tp: i64 = 0
+        while g12_tp < TC {
+            let g12_ctk = TK[g12_tp as usize]
+            var g12_ie: i64 = 0
+            if g12_ctk == 3 || g12_ctk == 4 || g12_ctk == 5 || g12_ctk == 53 { g12_ie = 1 }
+            if g12_ctk == 35 || g12_ctk == 36 { g12_ie = 1 }
+            if g12_ctk >= 17 && g12_ctk <= 26 { g12_ie = 1 }
+            if g12_ctk == 37 { g12_ie = 1 }
+            if g12_ctk == 57 || g12_ctk == 58 || g12_ctk == 59 || g12_ctk == 60 { g12_ie = 1 }
+            if g12_ie == 1 {
+                if g12_first == 0 { print(",\n") }
+                g12_first = 0
+                print("{\"p\":")
+                print_int(g12_tp)
+                print(",\"tk\":")
+                print_int(g12_ctk)
+                print(",\"conf\":")
+                print_int(EXPR_CONF[g12_tp as usize])
+                print(",\"line\":")
+                print_int(TL[g12_tp as usize])
+                print("}")
+            }
+            g12_tp = g12_tp + 1
+        }
+        print("\n]}\n")
+    }
 }
 
 // ─── Top-level compiler ───
@@ -19402,6 +19519,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     CLI_SHOW_AST = 0
     CLI_SHOW_TYPES = 0
     CLI_R15_MONITOR = 0
+    CLI_DUMP_CONF_JSON = 0
     var arg_i: i64 = 2
     while arg_i < argc {
         let flag = get_arg(arg_i)
@@ -19410,6 +19528,9 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         } else {
         if cli_arg_eq(flag, "--r15-monitor") {
             CLI_R15_MONITOR = 1
+        } else {
+        if cli_arg_eq(flag, "--dump-conf-json") {
+            CLI_DUMP_CONF_JSON = 1
         } else {
             if cli_arg_eq(flag, "--show-types") {
                 CLI_SHOW_TYPES = 1
@@ -19438,7 +19559,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
                     arg_i = arg_i + 1
                 }
             }
-        } }
+        } } }
         arg_i = arg_i + 1
     }
 
