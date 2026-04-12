@@ -50,3 +50,13 @@ lean_lib «SounioCompositionAlgebra» where
 
 @[default_target]
 lean_lib «SounioFormal» where
+
+-- Gen 17/18: EGC proof obligations — verified by CI (lean-proofs job)
+@[default_target]
+lean_lib «SounioGradedModal» where
+
+@[default_target]
+lean_lib «SounioMeasConf» where
+
+@[default_target]
+lean_lib «SounioProofObligation» where

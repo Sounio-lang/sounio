@@ -1,5 +1,6 @@
 .PHONY: build check test test-stdlib clean fmt install help lint lint-fix \
-         ops-guardrail-local ops-infra-up ops-strict-up ops-status
+         ops-guardrail-local ops-infra-up ops-strict-up ops-status \
+         proof-check proof-regen
 
 SOUC := ./bin/souc
 
@@ -59,6 +60,20 @@ lint:                ## Lint .sio files for Rust hallucinations (LLM grammar enf
 lint-fix:            ## Apply automatic fixes to a file: make lint-fix FILE=path/to/file.sio
 	@if [ -z "$(FILE)" ]; then echo "Usage: make lint-fix FILE=path/to/file.sio"; exit 1; fi
 	@python3 scripts/dev/sounio-lint.py --fix $(FILE)
+
+proof-check:         ## Verify EGC proof obligations via lake build (requires elan/lean)
+	@echo "→ Building SounioGradedModal, SounioMeasConf, SounioProofObligation"
+	cd formal/lean4 && lake build SounioGradedModal SounioMeasConf SounioProofObligation
+	@echo "✓ EGC proof obligations verified"
+
+proof-regen:         ## Regenerate SounioProofObligation.lean from compiler --emit-proof-obligations
+	@if [ ! -f gen17.elf ]; then echo "Run 'make build' first to produce gen17.elf"; exit 1; fi
+	@echo "→ Emitting PLATINUM proof goals from lean_single.sio self-compile"
+	./gen17.elf self-hosted/compiler/lean_single.sio /tmp/t_proof.elf \
+	    --emit-proof-obligations 2>/dev/null 1>formal/lean4/SounioProofObligation.lean
+	@echo "→ Verifying generated obligations"
+	cd formal/lean4 && lake build SounioProofObligation
+	@echo "✓ Proof obligations regenerated and verified"
 
 install:             ## Install souc compiler to ~/.local/bin/souc
 	mkdir -p ~/.local/bin
