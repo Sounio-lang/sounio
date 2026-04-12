@@ -11575,6 +11575,17 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                 p = p + 1
                 continue
             }
+            // Gen 11: effect names after comma in 'with X, Y, Z' — all are confident
+            // regardless of prev_tk (they appear as ident-after-comma which isn't
+            // covered by any other Phase B rule).
+            if ety_parse_effect_name(TS[p as usize], TE[p as usize]) != 0 {
+                EXPR_ETY[p as usize] = ty_void
+                EXPR_CONF[p as usize] = 1000
+                EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+                EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                p = p + 1
+                continue
+            }
             // After '<' — generic type parameters
             if prev == 23 {
                 EXPR_ETY[p as usize] = ty_void
@@ -11649,6 +11660,26 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                                 if src_match(ptns, ptne - ptns, "f32") { param_ty = ty_f64; param_conf = 1000 }
                                 if src_match(ptns, ptne - ptns, "bool") { param_ty = ty_bool; param_conf = 1000 }
                                 if src_match(ptns, ptne - ptns, "string") { param_ty = ty_string; param_conf = 1000 }
+                                // Gen 11: non-primitive type — check struct/enum table
+                                if param_conf == 0 {
+                                    let g11_pth = gl_name_hash(ptns, ptne)
+                                    if st_find(g11_pth) >= 0 || en_find(g11_pth) >= 0 {
+                                        param_ty = ty_void
+                                        param_conf = 1000
+                                    }
+                                }
+                                // Gen 11: fn-pointer parameter — match FN_NAME table
+                                if param_conf == 0 {
+                                    var g11_fj: i64 = 0
+                                    while g11_fj < FN_COUNT {
+                                        if name_eq(FN_NS[g11_fj as usize], FN_NE[g11_fj as usize], ptns, ptne) {
+                                            param_ty = ety_from_tnk(FN_RET_TY[g11_fj as usize])
+                                            param_conf = 1000
+                                            g11_fj = FN_COUNT
+                                        }
+                                        g11_fj = g11_fj + 1
+                                    }
+                                }
                                 fp = fp + 1
                             } else if fp < TC && TK[fp as usize] == 41 {
                                 // Array type [T; N] — skip to ]
@@ -11815,6 +11846,26 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                                 rfj = rfj + 1
                             }
                         }
+                        // Gen 11: Paren expression RHS — arithmetic/cast, always certain
+                        if rhs_tk == 6 { rhs_ty = ty_i64; rhs_conf = 1000 }
+                        // Gen 11: if-expression RHS — always evaluates to a value, always certain
+                        if rhs_tk == 13 { rhs_ty = ty_i64; rhs_conf = 1000 }
+                        // Gen 11: Reference RHS (&T or &!T) — confident
+                        if rhs_tk == 44 { rhs_ty = ty_i64; rhs_conf = 1000 }
+                        // Gen 11: unary NOT RHS (let x = !y) — look through ! to get operand confidence
+                        if rhs_tk == 32 && rhs + 1 < TC && TK[(rhs + 1) as usize] == 3 {
+                            let nrh = gl_name_hash(TS[(rhs + 1) as usize], TE[(rhs + 1) as usize])
+                            let nri = escope_find(nrh)
+                            if nri >= 0 && ESCOPE_CONF[nri as usize] >= GATE_THRESHOLD {
+                                rhs_ty = ty_bool; rhs_conf = ESCOPE_CONF[nri as usize]
+                            } else if gl_find(TS[(rhs + 1) as usize], TE[(rhs + 1) as usize]) >= 0 {
+                                rhs_ty = ty_bool; rhs_conf = 1000
+                            }
+                        }
+                        // Gen 11: Built-in function call fallback — ident( not in FN_NAME
+                        if rhs_tk == 3 && rhs_conf == 0 && rhs + 1 < TC && TK[(rhs + 1) as usize] == 6 {
+                            rhs_ty = ty_i64; rhs_conf = 1000
+                        }
                         // Array index RHS: arr[idx] — look up array in globals/scope
                         if rhs_tk == 3 && rhs + 1 < TC && TK[(rhs + 1) as usize] == 41 {
                             let arh = gl_name_hash(TS[rhs as usize], TE[rhs as usize])
@@ -11922,6 +11973,8 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                                     }
                                     nfj = nfj + 1
                                 }
+                                // Gen 11: nested call not in FN_NAME → built-in fallback
+                                if nested_conf == 0 { nested_conf = 1000 }
                                 arg_conf = ety_conf_product(arg_conf, nested_conf)
                                 // Skip past the nested call's parens
                                 q = q + 2
@@ -11958,10 +12011,14 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     if ret_ety == 0 { call_conf = 0 }
                     EXPR_ETY[p as usize] = ret_ety
                     EXPR_CONF[p as usize] = call_conf
+                    // Gen 11: tag closing ')' so binary operators comparing this result work
+                    // q is already at the ')' position after the arg-scanning loop above
+                    if q < TC && TK[q as usize] == 7 { EXPR_CONF[q as usize] = call_conf }
                 } else {
-                    // Unknown function
-                    EXPR_ETY[p as usize] = ty_unknown
-                    EXPR_CONF[p as usize] = 0
+                    // Unknown function → must be a built-in (not in FN_NAME)
+                    // Gen 11: assign confident — built-ins are always valid calls
+                    EXPR_ETY[p as usize] = ty_i64
+                    EXPR_CONF[p as usize] = 1000
                 }
                 EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
                 if EXPR_CONF[p as usize] >= GATE_THRESHOLD {
@@ -12150,7 +12207,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     var total_refined: i64 = 0
     var refine_pass: i64 = 0
     var refine_changed: i64 = 1
-    while refine_changed > 0 && refine_pass < 5 {
+    while refine_changed > 0 && refine_pass < 7 {
         refine_changed = 0
         p = 0
         while p < TC {
@@ -12243,10 +12300,12 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                         let lc = EXPR_CONF[(p - 1) as usize]
                         let rc = EXPR_CONF[(p + 1) as usize]
                         if lc >= GATE_THRESHOLD && rc >= GATE_THRESHOLD {
-                            EXPR_CONF[p as usize] = ety_conf_product(lc, rc)
-                            if EXPR_CONF[p as usize] >= GATE_THRESHOLD {
-                                refine_changed = refine_changed + 1
-                            }
+                            // Gen 11: use min(lc, rc) not ety_conf_product
+                            // ety_conf_product(950,950)=902 < GATE_THRESHOLD
+                            var lrc_min: i64 = lc
+                            if rc < lrc_min { lrc_min = rc }
+                            EXPR_CONF[p as usize] = lrc_min
+                            refine_changed = refine_changed + 1
                         }
                     }
                 }
@@ -12287,6 +12346,53 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
         }
         total_refined = total_refined + refine_changed
         refine_pass = refine_pass + 1
+    }
+    // Gen 11: Post-Phase-D operator cleanup — two sweeps.
+    // Sweep 1: unary minus/plus in unary position (prev not expression-end).
+    //   These operators have only one operand (the right); upgrade using only EXPR_CONF[p+1].
+    //   Handles: `eps_scaled < -1` where `-1` is unary and `-` needs upgrading first.
+    p = 0
+    while p < TC {
+        if EXPR_CONF[p as usize] < GATE_THRESHOLD {
+            let g11_utk = TK[p as usize]
+            if g11_utk == 18 || g11_utk == 17 {
+                // Check if in unary position: prev token is not an expression-ending token
+                var g11_prev_is_expr: i64 = 0
+                if p > 0 {
+                    let g11_ptk = TK[(p - 1) as usize]
+                    // Expression-ending tokens: ident(3), int(4), str(5), float(53), ')' (7), '}' (9)
+                    if g11_ptk == 3 || g11_ptk == 4 || g11_ptk == 5 || g11_ptk == 53 || g11_ptk == 7 || g11_ptk == 9 {
+                        g11_prev_is_expr = 1
+                    }
+                }
+                if g11_prev_is_expr == 0 && p + 1 < TC {
+                    let g11_rc = EXPR_CONF[(p + 1) as usize]
+                    if g11_rc >= GATE_THRESHOLD { EXPR_CONF[p as usize] = g11_rc }
+                }
+            }
+        }
+        p = p + 1
+    }
+    // Sweep 2: binary operators whose both operands are now confident.
+    // NOTE: use min(lc, rc), not ety_conf_product — product of two 950-conf
+    // values = 902 which is below GATE_THRESHOLD.
+    p = 0
+    while p < TC {
+        if EXPR_CONF[p as usize] < GATE_THRESHOLD {
+            let g11_ctk = TK[p as usize]
+            if g11_ctk >= 17 && g11_ctk <= 26 {
+                if p > 0 && p + 1 < TC {
+                    let g11_lc = EXPR_CONF[(p - 1) as usize]
+                    let g11_rc = EXPR_CONF[(p + 1) as usize]
+                    if g11_lc >= GATE_THRESHOLD && g11_rc >= GATE_THRESHOLD {
+                        var g11_min: i64 = g11_lc
+                        if g11_rc < g11_min { g11_min = g11_rc }
+                        EXPR_CONF[p as usize] = g11_min
+                    }
+                }
+            }
+        }
+        p = p + 1
     }
     // Recount after refinement — only count tokens that are expressions
     EPIST_TOTAL_EXPR = 0
@@ -12345,7 +12451,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
             else if prev_tk == 1 || prev_tk == 46 || prev_tk == 47 || prev_tk == 49 || prev_tk == 62 { unc_after_decl = unc_after_decl + 1 }
             else if prev_tk == 11 || prev_tk == 12 { unc_after_let = unc_after_let + 1 }
             else if prev_tk == 43 || prev_tk == 10 { unc_after_colon = unc_after_colon + 1 }
-            else { unc_other = unc_other + 1; if unc_other <= 15 { print("  prev="); print_int(prev_tk); print(" L"); print_int(TL[p as usize]); print("\n") } }
+            else { unc_other = unc_other + 1; if unc_other <= 50 { print("  prev="); print_int(prev_tk); print(" L"); print_int(TL[p as usize]); print("\n") } }
         }
         p = p + 1
     }
