@@ -164,37 +164,6 @@ fn rng_uniform(state: i64) -> f64 with Div {
     (s / mf) * 2.0 - 1.0
 }
 
-// Fill `lab` (30 nodes × 8 channels) with α=0.5 synthetic. Group argument
-// selects seed family so ASD and TD draw from non-identical distributions
-// (for smoke-test effect-size; real data replaces this).
-fn fill_synthetic(lab: &![f64; 240], seed: i64, asd_bias: i32) with Mut, Div {
-    var rng = seed
-    var node: i32 = 0
-    while node < 30 {
-        rng = rng_next(rng)
-        var bucket = rng
-        if bucket < 0 { bucket = 0 - bucket }
-        let mod10 = bucket - (bucket / 10) * 10
-        // α=0.5 default; ASD nodes draw from full octonion with prob 0.7
-        var full_oct = mod10 < 5
-        if asd_bias == 1 {
-            full_oct = mod10 < 7
-        }
-        var k: i32 = 0
-        while k < 8 {
-            rng = rng_next(rng)
-            let v = rng_uniform(rng)
-            if k >= 4 && !full_oct {
-                lab[node * 8 + k] = 0.0
-            } else {
-                lab[node * 8 + k] = v
-            }
-            k = k + 1
-        }
-        node = node + 1
-    }
-}
-
 // =============================================================================
 // Main — synthetic fallback if frames.bin absent; else real ABIDE pilot
 // =============================================================================
@@ -203,6 +172,8 @@ fn main() -> i32 with IO, Mut, Div {
     let sz = file_size(path)
     let use_real = sz > 16
 
+    // CSV header (also serves as "mode" diagnostic downstream)
+    println("group,mean,p95,n_triples,subject_id")
     if use_real {
         println("# mode: real ABIDE")
         let raw = read_file(path)
@@ -215,14 +186,13 @@ fn main() -> i32 with IO, Mut, Div {
         var max_td: i64 = n_td
         if max_td > 5 { max_td = 5 }
 
-        var out_buf: [f64; 2] = [0.0; 2]
-
         let frame_size: i64 = 1400
         let header: i64 = 2
 
         var s: i64 = 0
         while s < max_asd {
             var lab: [f64; 240] = [0.0; 240]
+            var out_buf: [f64; 2] = [0.0; 2]
             var node: i32 = 0
             while node < 30 {
                 lab[node * 8 + 0] = 1.0
@@ -235,18 +205,17 @@ fn main() -> i32 with IO, Mut, Div {
                 node = node + 1
             }
             subject_stats(&!lab, &!out_buf)
-            print("{\"subject_id\": "); print_int(s)
-            print(", \"group\": \"ASD\", \"mean\": ")
-            print_f64(out_buf[0])
-            print(", \"p95\": ")
-            print_f64(out_buf[1])
-            print(", \"n_triples\": 4060}")
-            println("")
+            // CSV: group,mean,p95,n_triples,subject_id (integer last; print_int newlines)
+            print("ASD,")
+            print_f64(out_buf[0]); print(",")
+            print_f64(out_buf[1]); print(",4060,")
+            print_int(s)
             s = s + 1
         }
         s = 0
         while s < max_td {
             var lab: [f64; 240] = [0.0; 240]
+            var out_buf: [f64; 2] = [0.0; 2]
             let orig = n_asd + s
             var node: i32 = 0
             while node < 30 {
@@ -260,13 +229,10 @@ fn main() -> i32 with IO, Mut, Div {
                 node = node + 1
             }
             subject_stats(&!lab, &!out_buf)
-            print("{\"subject_id\": "); print_int(s)
-            print(", \"group\": \"TD\", \"mean\": ")
-            print_f64(out_buf[0])
-            print(", \"p95\": ")
-            print_f64(out_buf[1])
-            print(", \"n_triples\": 4060}")
-            println("")
+            print("TD,")
+            print_f64(out_buf[0]); print(",")
+            print_f64(out_buf[1]); print(",4060,")
+            print_int(s)
             s = s + 1
         }
         return 0
@@ -274,37 +240,73 @@ fn main() -> i32 with IO, Mut, Div {
 
     // ----- Synthetic self-test -----
     println("# mode: synthetic self-test (frames.bin absent)")
-    var mean_buf: [f64; 2] = [0.0; 2]
-    var p95_buf: [f64; 2] = [0.0; 2]
 
     // 5 ASD synthetic
     var sid: i32 = 0
     while sid < 5 {
         var lab: [f64; 240] = [0.0; 240]
-        fill_synthetic(&!lab, 42 + (sid as i64) * 101, 1)
+        var out_buf: [f64; 2] = [0.0; 2]
+        // Inline synthetic fill (ASD bias: α≈0.7)
+        var rng = 42 + (sid as i64) * 101
+        var node: i32 = 0
+        while node < 30 {
+            rng = rng_next(rng)
+            var bucket = rng
+            if bucket < 0 { bucket = 0 - bucket }
+            let mod10 = bucket - (bucket / 10) * 10
+            let full_oct = mod10 < 7
+            var k: i32 = 0
+            while k < 8 {
+                rng = rng_next(rng)
+                let v = rng_uniform(rng)
+                if k >= 4 && !full_oct {
+                    lab[node * 8 + k] = 0.0
+                } else {
+                    lab[node * 8 + k] = v
+                }
+                k = k + 1
+            }
+            node = node + 1
+        }
         subject_stats(&!lab, &!out_buf)
-        print("{\"subject_id\": "); print_int(sid)
-        print(", \"group\": \"ASD\", \"mean\": ")
-        print_f64(out_buf[0])
-        print(", \"p95\": ")
-        print_f64(out_buf[1])
-        print(", \"n_triples\": 4060}")
-        println("")
+        print("ASD,")
+        print_f64(out_buf[0]); print(",")
+        print_f64(out_buf[1]); print(",4060,")
+        print_int(sid)
         sid = sid + 1
     }
     // 5 TD synthetic
     sid = 0
     while sid < 5 {
         var lab: [f64; 240] = [0.0; 240]
-        fill_synthetic(&!lab, 7919 + (sid as i64) * 233, 0)
+        var out_buf: [f64; 2] = [0.0; 2]
+        // Inline synthetic fill (TD: α≈0.5)
+        var rng = 7919 + (sid as i64) * 233
+        var node: i32 = 0
+        while node < 30 {
+            rng = rng_next(rng)
+            var bucket = rng
+            if bucket < 0 { bucket = 0 - bucket }
+            let mod10 = bucket - (bucket / 10) * 10
+            let full_oct = mod10 < 5
+            var k: i32 = 0
+            while k < 8 {
+                rng = rng_next(rng)
+                let v = rng_uniform(rng)
+                if k >= 4 && !full_oct {
+                    lab[node * 8 + k] = 0.0
+                } else {
+                    lab[node * 8 + k] = v
+                }
+                k = k + 1
+            }
+            node = node + 1
+        }
         subject_stats(&!lab, &!out_buf)
-        print("{\"subject_id\": "); print_int(sid)
-        print(", \"group\": \"TD\", \"mean\": ")
-        print_f64(out_buf[0])
-        print(", \"p95\": ")
-        print_f64(out_buf[1])
-        print(", \"n_triples\": 4060}")
-        println("")
+        print("TD,")
+        print_f64(out_buf[0]); print(",")
+        print_f64(out_buf[1]); print(",4060,")
+        print_int(sid)
         sid = sid + 1
     }
 
