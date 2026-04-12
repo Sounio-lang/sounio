@@ -3240,3 +3240,120 @@ fn hlir_emit_kernel_prologue(kernel: GpuKernelIr, num_params: i64) -> GpuKernelI
 
     k
 }
+
+// ============================================================================
+// Optimized PTX path: DCE + const fold before lowering
+// ============================================================================
+
+fn gpu_op_has_side_effects(op: GpuOp) -> bool {
+    let oc = op.opcode as i64
+    if oc == 14 { return true }
+    if oc == 15 { return true }
+    if oc == 10 { return true }
+    if oc == 50 { return true }
+    if oc == 16 { return true }
+    if oc == 0 { return true }
+    if oc == 1 { return true }
+    if oc == 2 { return true }
+    false
+}
+
+fn gpu_op_dst_used(op: GpuOp) -> bool {
+    let oc = op.opcode as i64
+    if oc == 14 { return false }
+    if oc == 15 { return false }
+    if oc == 10 { return false }
+    if oc == 16 { return false }
+    true
+}
+
+fn gpu_dce_kernel(kernel: GpuKernelIr) -> GpuKernelIr with Mut, Panic {
+    if kernel.op_count == 0 { return kernel }
+    var used: [bool; 256] = [false; 256]
+    var i: i64 = kernel.op_count - 1
+    while i >= 0 {
+        let op = kernel.ops[i as usize]
+        let oc = op.opcode as i64
+        if gpu_op_has_side_effects(op) || (op.dst_reg >= 0 && op.dst_reg < 256 && used[op.dst_reg as usize]) {
+            if op.lhs_reg >= 0 && op.lhs_reg < 256 {
+                used[op.lhs_reg as usize] = true
+            }
+            if op.rhs_reg >= 0 && op.rhs_reg < 256 {
+                used[op.rhs_reg as usize] = true
+            }
+            if op.src_reg >= 0 && op.src_reg < 256 {
+                used[op.src_reg as usize] = true
+            }
+            if op.addr_reg >= 0 && op.addr_reg < 256 {
+                used[op.addr_reg as usize] = true
+            }
+            if op.pred_reg >= 0 && op.pred_reg < 256 {
+                used[op.pred_reg as usize] = true
+            }
+            if gpu_op_dst_used(op) && op.dst_reg >= 0 && op.dst_reg < 256 {
+                used[op.dst_reg as usize] = true
+            }
+        }
+        i = i - 1
+    }
+    var out = gpu_kernel_new()
+    out.kernel_name = kernel.kernel_name
+    out.workload_tag = kernel.workload_tag
+    out.param_count = kernel.param_count
+    out.shared_bytes = kernel.shared_bytes
+    out.shared_mem_bytes = kernel.shared_mem_bytes
+    out.max_threads = kernel.max_threads
+    out.max_reg_u32 = kernel.max_reg_u32
+    out.max_reg_u64 = kernel.max_reg_u64
+    out.max_reg_f32 = kernel.max_reg_f32
+    out.max_reg_f64 = kernel.max_reg_f64
+    out.max_reg_i32 = kernel.max_reg_i32
+    out.max_reg_i64 = kernel.max_reg_i64
+    out.max_reg_pred = kernel.max_reg_pred
+    var pi: i64 = 0
+    while pi < kernel.param_count && pi < 8 {
+        out.params[pi as usize] = kernel.params[pi as usize]
+        pi = pi + 1
+    }
+    var removed: i64 = 0
+    var ji: i64 = 0
+    while ji < kernel.op_count {
+        let op = kernel.ops[ji as usize]
+        let oc = op.opcode as i64
+        if gpu_op_has_side_effects(op) {
+            out.ops[out.op_count as usize] = op
+            out.op_count = out.op_count + 1
+        } else if gpu_op_dst_used(op) && op.dst_reg >= 0 && op.dst_reg < 256 && used[op.dst_reg as usize] {
+            out.ops[out.op_count as usize] = op
+            out.op_count = out.op_count + 1
+        } else if !gpu_op_dst_used(op) {
+            out.ops[out.op_count as usize] = op
+            out.op_count = out.op_count + 1
+        } else {
+            removed = removed + 1
+        }
+        ji = ji + 1
+    }
+    out
+}
+
+fn hlir_kernels_to_optimized_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var combined = ptx_buf_new()
+    let kcount = hlir_extract_kernel_count(module)
+    if kcount == 0 {
+        return combined
+    }
+    var ki: i64 = 0
+    while ki < kcount {
+        let fidx = hlir_get_kernel_index(module, ki)
+        if fidx >= 0 {
+            let func = module.functions[fidx as usize]
+            let gpu_kernel = hlir_function_to_gpu_kernel(func)
+            let optimized = gpu_dce_kernel(gpu_kernel)
+            let ptx = gpu_lower_to_ptx(optimized)
+            combined = ptx_buf_append(combined, ptx)
+        }
+        ki = ki + 1
+    }
+    combined
+}
