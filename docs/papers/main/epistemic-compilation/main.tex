@@ -96,11 +96,15 @@ at confidence $\geq 950$, code is emitted directly with zero overhead.
 We implement EGC in \sounio, a self-hosted systems programming language,
 and apply it to \lean, the \sounio compiler itself---making the compiler
 its own first application of the epistemic type system.
-Across 10 self-hosted generations, confidence rises from 26\% to 98\%
+Across 12 self-hosted generations, confidence rises from 26\% to 100\%
 monotonically, with bit-identical fixed points at every generation.
-At Generation~10, all 8,875 call sites emit direct code
-(100\% call-site certainty) with zero guard overhead---the 2-byte NOP
-guard never fires.
+At Generation~11, all 8,883 call sites emit direct code and
+all 75,924 expression tokens carry full confidence
+(100\% expression certainty) with zero guard overhead.
+Generation~12 adds the \emph{Epistemic Inspector}: per-file confidence
+breakdowns, token-level JSON export (\texttt{--dump-conf-json}), and
+the first compile-time bridge between the confidence lattice and runtime
+\texttt{Knowledge\textless T\textgreater} measurement types.
 The self-referential validation loop is closed: the epistemic system
 validates itself, and its own confidence serves as the measure of
 its completeness.
@@ -222,20 +226,25 @@ This paper makes the following contributions:
   monotone non-decreasing across inference passes.
 
 \item \textbf{The bootstrapping protocol} (\S\ref{sec:bootstrap}):
-  a 10-generation self-hosting experiment in which \lean (the \sounio
-  self-hosted compiler, 16,365 lines) applies its own epistemic engine
+  a 12-generation self-hosting experiment in which \lean (the \sounio
+  self-hosted compiler, 16,700+ lines) applies its own epistemic engine
   to its own source.
-  Confidence rises from 26\% at Generation~0 to 98\% at Generation~10,
+  Confidence rises from 26\% at Generation~0 to 100\% at Generation~11,
   with bit-identical fixed points at every generation.
   Each generation adds exactly one category of inference rules,
   demonstrating monotone convergence toward full typing.
+  Generation~11 closes the engine: all 75,924 expression tokens
+  carry full confidence.
+  Generation~12 adds observability: the Epistemic Inspector exports
+  per-file confidence breakdowns, token-level JSON, and the first
+  compile-time bridge to runtime \know{T} measurement uncertainty.
 
 \item \textbf{Codegen gates} (\S\ref{sec:gates}): a practical
   mechanism that makes quantified uncertainty visible in the binary.
   High-confidence sites emit direct instructions; low-confidence
   sites emit 2-byte NOP guards.
-  At Generation~10, 100\% of call sites are direct; overhead reaches
-  zero---the NOP guard never fires.
+  At Generation~11, 100\% of call sites and 100\% of expression tokens
+  are direct; overhead reaches zero---the NOP guard never fires.
 
 \item \textbf{Self-referential validation} (\S\ref{sec:selfref}):
   the Patient Zero test closes the validation loop.
@@ -513,14 +522,17 @@ Table~\ref{tab:generations} shows the full progression.
 \begin{table}[t]
 \centering
 \caption{%
-  Bootstrap convergence across 10 generations.
+  Bootstrap convergence across 12 generations.
   \emph{Certain} = expressions with confidence $\geq 950$.
   Binary size grows monotonically as new inference paths add code.
   Fixed-point hashes confirm reproducibility at each generation.
   Generations~7--9 resolve the three construct families that remained
   uncertain at Generation~6; Generation~10 adds generic call recognition,
   eliminating all 54 residual guarded sites and achieving 100\%
-  call-site certainty.
+  call-site certainty; Generation~11 closes the final 1,183-token gap,
+  reaching 100\% expression certainty; Generation~12 adds the epistemic
+  inspector (\texttt{--dump-conf-json}), per-file confidence breakdowns,
+  and the Knowledge\textless T\textgreater{} constructor bridge.
 }
 \label{tab:generations}
 \begin{tabular}{@{}clrrrl@{}}
@@ -538,6 +550,8 @@ Gen & New inference rules & Certain & \% & Binary & Hash (8 hex) \\
 8 & +generic instantiation    &  95,893 & 95\% & 739\,KB & \texttt{c81d4507} \\
 9 & +closure captures         &  97,913 & 97\% & 741\,KB & \texttt{f42a8e91} \\
 10 & +generic call recognition &  74,375 & 98\% & 837\,KB & \texttt{96fbae59} \\
+11 & +non-prim params, unary ops, call-result tagging &  75,924 & 100\% & 840\,KB & \texttt{644f7f8d} \\
+12 & +per-file stats, \texttt{--dump-conf-json}, Knowledge\textless T\textgreater{} bridge & 76,417 & 100\% & 848\,KB & \texttt{771dbedd} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -574,6 +588,31 @@ achieving 100\% call-site certainty ($\text{guarded} = 0$) and a
 bit-identical fixed point confirmed by SHA-256 hash comparison
 (\texttt{96fbae59}).
 
+Generation~11 closes the remaining 1,183 uncertain expression tokens
+(2\% of total) through three targeted rules:
+\begin{enumerate}
+\item \emph{Non-primitive parameter confidence}: function parameters of
+struct and enum types enter Phase~B with confidence~1000, eliminating the
+false assumption that only primitive-typed parameters are certain.
+\item \emph{Unary operator propagation}: unary \texttt{-} and \texttt{+}
+in unary position (preceding token not an expression-end) are upgraded
+from their single right operand, breaking the circular dependency between
+unary operators and their enclosing binary comparisons.
+\item \emph{Call-result tagging}: the closing \texttt{)} of each function
+call is tagged with the call's confidence, so binary operators immediately
+following a call see a confident left operand rather than the default~0.
+\end{enumerate}
+Together these rules lift expression certainty from 98\% to 100\%
+across all 75,924 tracked tokens.
+The fixed point is confirmed by SHA-256 (\texttt{644f7f8d}): the
+compiler compiled by Gen~11 is bit-identical to the compiler compiled
+by the Gen~11-produced binary, confirming full self-referential closure.
+A formal proof of epistemic completeness at Generation~11 appears in
+Appendix~\ref{appendix:proof}; a scientific benchmark using the
+2-compartment PBPK model (\texttt{examples/science/pbpk\_2comp.sio})
+confirms 100\% expression certainty with zero guarded sites and
+RK4--analytical agreement within $10^{-6}$\,mg/L.
+
 \begin{figure}[t]
 \centering
 \begin{tikzpicture}
@@ -582,10 +621,10 @@ bit-identical fixed point confirmed by SHA-256 hash comparison
   height=5.5cm,
   xlabel={Generation},
   ylabel={Confidence (\%)},
-  xtick={0,1,2,3,4,5,6,7,8,9,10},
+  xtick={0,1,2,3,4,5,6,7,8,9,10,11,12},
   ytick={20,30,40,50,60,70,80,90,100},
-  ymin=20, ymax=100,
-  xmin=-0.3, xmax=10.3,
+  ymin=20, ymax=105,
+  xmin=-0.3, xmax=12.3,
   grid=major,
   grid style={dotted, gray!50},
   tick label style={font=\small},
@@ -610,27 +649,30 @@ bit-identical fixed point confirmed by SHA-256 hash comparison
   (8, 95)
   (9, 97)
   (10, 98)
+  (11, 100)
+  (12, 100)
 };
 % Gate threshold horizontal line
 \addplot[
   dashed,
   color=red!60!black,
   line width=0.8pt,
-  domain=-0.3:10.3,
+  domain=-0.3:12.3,
 ] {95};
-\node[font=\tiny, red!60!black] at (axis cs: 9.5, 96.8) {$\theta{=}95\%$};
+\node[font=\tiny, red!60!black] at (axis cs: 10.5, 96.8) {$\theta{=}95\%$};
 
 % Annotation: Gen 5→6 jump
 \draw[->, gray!60, thin] (axis cs: 0.5, 43) -- (axis cs: 0.05, 28)
   node[above left, font=\tiny, gray!60] {};
-% Annotation: Gen 10 final value (100% call-site certainty)
+% Annotation: Gen 10 value
 \node[font=\tiny, blue!70!black] at (axis cs: 9.3, 96.5) {98\%};
-\node[font=\tiny, green!50!black] at (axis cs: 10, 100) {$\star$};
-\node[font=\tiny, green!50!black, align=center] at (axis cs: 10, 101.5) {};
+% Annotation: Gen 11 final value (100% expression certainty)
+\node[font=\tiny, green!50!black] at (axis cs: 11, 100) {$\star$};
+\node[font=\tiny, green!50!black, align=center] at (axis cs: 11, 101.5) {100\%};
 \end{axis}
 \end{tikzpicture}
 \caption{%
-  Confidence convergence across 10 bootstrap generations.
+  Confidence convergence across 11 bootstrap generations.
   Each generation adds one category of inference rules.
   The dashed line marks the 95\% target (gate threshold expressed
   as a fraction of expressions reaching $c \geq 950$).
@@ -638,9 +680,11 @@ bit-identical fixed point confirmed by SHA-256 hash comparison
   unlocking a large population of variable references.
   Generations~7--9 resolve struct fields, generic instantiation, and
   closure captures respectively, crossing the 95\% line at Generation~8.
-  Generation~10 (marked $\star$) adds generic call recognition, achieving
-  100\% call-site certainty (0 guarded sites) at 98\% overall expression
-  certainty.
+  Generation~10 adds generic call recognition, achieving 100\% call-site
+  certainty (0 guarded sites) at 98\% overall expression certainty.
+  Generation~11 (marked $\star$) closes the remaining 1,183-token gap
+  by handling non-primitive parameters, unary operators, and function
+  call result propagation, achieving 100\% expression certainty.
 }
 \label{fig:convergence}
 \end{figure}
@@ -819,7 +863,7 @@ constructs present in \lean.
 \end{axis}
 \end{tikzpicture}
 \caption{%
-  Direct vs.\ guarded call sites across 10 generations.
+  Direct vs.\ guarded call sites across 11 generations.
   Call sites grow from 8,051 (Gen~0--9) to 8,875 (Gen~10) as the compiler
   gains new function definitions; guarded sites shrink monotonically to zero.
   At Generation~10, all 8,875 call sites are direct: the guarded bar
@@ -829,20 +873,116 @@ constructs present in \lean.
 \label{fig:gates}
 \end{figure}
 
-\subsection{The R15 Tag Stack (Future Work)}
+\subsection{The R15 Runtime Tag Stack}
+\label{sec:r15}
 
-For full runtime enforcement, we have designed but not yet implemented
-a parallel tag stack using the x86-64 \texttt{r15} register,
-which is callee-saved and unused by \sounio's calling convention.
-On function entry, \texttt{r15} points to a per-thread confidence tag
-stack; each call pushes the callee's confidence.
-Guard NOP patches insert \texttt{cmp [r15], 950} / \texttt{jl trap}
-before the guarded instruction.
-This design adds zero overhead on the fast path (no \texttt{r15} write
-at high-confidence sites) and requires a single compare-and-branch at
-guarded sites.
-We leave the full implementation to future work as it requires the
-runtime linker to be complete.
+Generation~11 introduces an opt-in runtime confidence monitor via
+the \texttt{--r15-monitor} compilation flag.
+At every call site, the compiler emits a three-instruction check:
+
+\begin{verbatim}
+cmp  qword [r15 + gate_id*8], 950   ; compare side-table entry
+jge  .ok                            ; skip if confident
+ud2                                 ; UD2: SIGILL epistemic trap
+.ok:
+\end{verbatim}
+
+\noindent
+\texttt{r15} is loaded at program start (\texttt{\_start}) with the
+absolute address of a BSS side table of \texttt{i64} entries, one per
+call site.
+The trampoline initialises all entries to~1000 via a short loop before
+calling \texttt{main}.
+Each entry is independently writable at runtime, enabling a host
+process, debugger, or measurement harness to downgrade the confidence of
+specific sites and trigger the trap for testing or dynamic recalibration.
+
+At Generation~11, all 8,921 instrumented sites start with entry~$=1000$;
+the trap branch is provably dead code (static confidence 1000 $\geq$ 950).
+The compiled binary runs normally without triggering any SIGILL.
+Fixed-point hash of the instrumented binary: \texttt{a1497f5d}.
+
+\paragraph{Usage.}
+\begin{verbatim}
+souc source.sio output.elf --r15-monitor
+# Output: r15_monitor: 8921 sites instrumented,
+#         side_table_size=71368 bytes
+\end{verbatim}
+
+\paragraph{Design properties.}
+\begin{itemize}
+\item \emph{Zero overhead without flag}: the flag is opt-in;
+  without it, the NOP2 / direct path is unchanged.
+\item \emph{Per-site granularity}: each of the 8,921 call sites
+  has an independent 8-byte entry; the side table is 70\,KB.
+\item \emph{Dead-branch elimination}: at Gen~11 static confidence,
+  a simple optimizer can prove all trap branches unreachable and
+  eliminate them, recovering the direct-call baseline.
+\item \emph{Forward compatibility}: when a future dynamic measurement
+  system (e.g., Bayesian update from profiling) lowers a site's confidence
+  below 950, the trap fires at the next call, providing hard enforcement
+  of epistemic guarantees at runtime.
+\end{itemize}
+
+% ============================================================================
+\subsection{Generation~12: The Epistemic Inspector}
+\label{sec:gen12}
+% ============================================================================
+
+Generation~12 extends EGC from a \emph{compile-time analysis} into an
+\emph{observable system}, adding three capabilities that together form
+the \emph{Epistemic Inspector}.
+
+\paragraph{Per-file confidence breakdown.}
+When a program imports external modules, the global token count conflates
+user code with stdlib tokens.
+Generation~12 tracks which tokens originate from the main source file
+(identified by their source position relative to \texttt{MAIN\_SRC\_END})
+and emits a separate \texttt{epistemic\_main:} line:
+\begin{verbatim}
+epistemic:      76,417 expr, 76,417 certain (100%), 0 uncertain
+epistemic_main: 75,514 expr, 75,514 certain (100%), 0 uncertain
+\end{verbatim}
+This separates the user's certainty guarantee from the standard library's.
+
+\paragraph{Token-level JSON export (\texttt{--dump-conf-json}).}
+The new flag \texttt{--dump-conf-json} emits a JSON array of every
+expression token's position, token kind, confidence value, and source line:
+\begin{verbatim}
+{"total":1359, "certain":1359,
+ "tokens":[{"p":1,"tk":3,"conf":1000,"line":24}, ...]}
+\end{verbatim}
+Applied to \texttt{pbpk\_2comp.sio} this produces 1,359 entries, all with
+\texttt{"conf":1000}, confirming 100\% expression certainty at the
+token level.
+The JSON output is a foundation for editor tooling and the epistemic LSP
+described in §\ref{sec:selfref}.
+
+\paragraph{Knowledge\textless T\textgreater{} constructor bridge.}
+Generation~12 introduces the first connection between the compile-time
+confidence lattice and the runtime \texttt{Epistemic} type in \texttt{stdlib/epistemic/}.
+Functions named \texttt{measured} and \texttt{asserted} receive reduced
+\texttt{FN\_EFF\_CONF} values (990 and 970 respectively) instead of the
+default 1000, reflecting their semantic epistemic quality:
+a \emph{measured} value carries instrument uncertainty; an \emph{asserted}
+value carries user-claim uncertainty.
+With literal arguments at confidence 1000, call sites produce
+$\texttt{call\_conf} = 990$ and $970$ respectively --- both above the gate
+threshold of 950, so zero guarded sites are introduced.
+
+The compiler reports Knowledge\textless T\textgreater{} site statistics separately:
+\begin{verbatim}
+epistemic_ktype: 7 Knowledge<T> sites, 7 certain (100%)
+\end{verbatim}
+demonstrating that the compile-time epistemic analysis is now
+\emph{semantically aware} of measurement vs.\ constant vs.\ asserted values,
+bridging ISO~GUM measurement quality to the type-system confidence lattice.
+
+The demo program \texttt{examples/science/epistemic\_measured.sio} instantiates
+this bridge: $\texttt{dose} = \text{measured}(100, 5)$ carries
+$\texttt{EXPR\_CONF} = 990$ and $\texttt{volume} = \text{measured}(10, 0.3)$
+carries $\texttt{EXPR\_CONF} = 990$; the GUM product rule yields
+$\sigma_{C_0} / C_0 = 5.9\%$, matching the analytical result.
 
 % ============================================================================
 \section{Self-Referential Validation}
@@ -1126,5 +1266,8 @@ own correctness.
 \bibliography{refs}
 \bibliographystyle{ACM-Reference-Format}
 % ============================================================================
+
+\appendix
+\input{proof_sketch}
 
 \end{document}
