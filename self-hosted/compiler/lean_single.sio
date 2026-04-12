@@ -295,6 +295,18 @@ var EPIST_KTYPE_SITES: i64 = 0
 var EPIST_KTYPE_CERTAIN: i64 = 0
 // Gen 12: --dump-conf-json flag
 var CLI_DUMP_CONF_JSON: i64 = 0
+// Gen 13: dual-channel measurement confidence (parallel to EXPR_CONF)
+// MEAS_CONF[p] = GUM measurement quality of token p:
+//   0    = not in measurement channel (bare types, constants, compiler-internal)
+//   990  = instrument measurement ("measured" constructor)
+//   970  = user assertion ("asserted" constructor)
+//   1000 = physical constant ("constant" constructor)
+//   propagates through arithmetic: min(left, right) via Sweep 2
+var MEAS_CONF: [i64; 262144] = [0; 262144]
+// Gen 13: ESCOPE measurement quality (parallel to ESCOPE_CONF)
+var ESCOPE_MEAS: [i64; 16384] = [0; 16384]
+// Gen 13: count of tokens with MEAS_CONF > 0 after all passes
+var EPIST_MEAS_COUNT: i64 = 0
 
 fn en_find(hash: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
@@ -11519,6 +11531,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     EPIST_MAIN_HIGH = 0
     EPIST_KTYPE_SITES = 0
     EPIST_KTYPE_CERTAIN = 0
+    EPIST_MEAS_COUNT = 0
 
     // Phase A: Collect effect declarations for all registered functions
     var fi: i64 = 0
@@ -11836,6 +11849,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                 let nh = gl_name_hash(name_ns, name_ne)
                 var bind_ty: i64 = ty_unknown
                 var bind_conf: i64 = 0
+                var bind_meas_conf: i64 = 0   // Gen 13: measurement channel for this binding
                 // Check for type annotation: NAME : TYPE
                 var anno_end: i64 = p + 2
                 if p + 2 < TC && TK[(p + 2) as usize] == 43 {
@@ -11894,6 +11908,13 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                                     rhs_ty = ety_from_tnk(FN_RET_TY[rfj as usize])
                                     rhs_conf = FN_EFF_CONF[rfj as usize]
                                     if rhs_ty == 0 { rhs_conf = 0 }
+                                    // Gen 13: dual-channel — propagate measurement quality
+                                    // from constructor call to the binding being created
+                                    let g13_rns = FN_NS[rfj as usize]
+                                    let g13_rlen = FN_NE[rfj as usize] - g13_rns
+                                    if src_match(g13_rns, g13_rlen, "measured") { bind_meas_conf = 990 }
+                                    if src_match(g13_rns, g13_rlen, "asserted") { bind_meas_conf = 970 }
+                                    if src_match(g13_rns, g13_rlen, "constant") { bind_meas_conf = 1000 }
                                     break
                                 }
                                 rfj = rfj + 1
@@ -11958,6 +11979,10 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     }
                 }
                 escope_add(nh, bind_ty, bind_conf)
+                // Gen 13: store measurement quality in parallel ESCOPE channel
+                if bind_meas_conf > 0 && ESCOPE_COUNT > 0 {
+                    ESCOPE_MEAS[(ESCOPE_COUNT - 1) as usize] = bind_meas_conf
+                }
             }
             p = p + 1
             continue
@@ -12067,6 +12092,12 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     // Gen 11: tag closing ')' so binary operators comparing this result work
                     // q is already at the ')' position after the arg-scanning loop above
                     if q < TC && TK[q as usize] == 7 { EXPR_CONF[q as usize] = call_conf }
+                    // Gen 13: dual-channel — tag MEAS_CONF at constructor call sites
+                    let g13_cfns = FN_NS[call_fi as usize]
+                    let g13_cflen = FN_NE[call_fi as usize] - g13_cfns
+                    if src_match(g13_cfns, g13_cflen, "measured") { MEAS_CONF[p as usize] = 990 }
+                    if src_match(g13_cfns, g13_cflen, "asserted") { MEAS_CONF[p as usize] = 970 }
+                    if src_match(g13_cfns, g13_cflen, "constant") { MEAS_CONF[p as usize] = 1000 }
                 } else {
                     // Unknown function → must be a built-in (not in FN_NAME)
                     // Gen 11: assign confident — built-ins are always valid calls
@@ -12088,6 +12119,8 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
             if si >= 0 {
                 EXPR_ETY[p as usize] = ESCOPE_TY[si as usize]
                 EXPR_CONF[p as usize] = ESCOPE_CONF[si as usize]
+                // Gen 13: propagate measurement quality through variable reads
+                MEAS_CONF[p as usize] = ESCOPE_MEAS[si as usize]
             } else {
                 EXPR_ETY[p as usize] = ty_unknown
                 EXPR_CONF[p as usize] = 0
@@ -12429,6 +12462,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     // Sweep 2: binary operators whose both operands are now confident.
     // NOTE: use min(lc, rc), not ety_conf_product — product of two 950-conf
     // values = 902 which is below GATE_THRESHOLD.
+    // Gen 13: also propagate MEAS_CONF through operators (GUM min-rule).
     p = 0
     while p < TC {
         if EXPR_CONF[p as usize] < GATE_THRESHOLD {
@@ -12442,6 +12476,23 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                         if g11_rc < g11_min { g11_min = g11_rc }
                         EXPR_CONF[p as usize] = g11_min
                     }
+                }
+            }
+        }
+        // Gen 13: propagate MEAS_CONF regardless of EXPR_CONF certainty.
+        // If either operand is in the measurement channel, the operation is too.
+        let g13_otk = TK[p as usize]
+        if g13_otk >= 17 && g13_otk <= 26 && p > 0 && p + 1 < TC {
+            if MEAS_CONF[p as usize] == 0 {
+                let g13_lm = MEAS_CONF[(p - 1) as usize]
+                let g13_rm = MEAS_CONF[(p + 1) as usize]
+                if g13_lm > 0 || g13_rm > 0 {
+                    // min of non-zero values (0 = "not measured", not "zero quality")
+                    var g13_mm: i64 = g13_lm
+                    if g13_rm > 0 {
+                        if g13_mm == 0 || g13_rm < g13_mm { g13_mm = g13_rm }
+                    }
+                    MEAS_CONF[p as usize] = g13_mm
                 }
             }
         }
@@ -12475,6 +12526,8 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     EPIST_MAIN_HIGH = EPIST_MAIN_HIGH + 1
                 }
             }
+            // Gen 13: count tokens in measurement channel
+            if MEAS_CONF[p as usize] > 0 { EPIST_MEAS_COUNT = EPIST_MEAS_COUNT + 1 }
         }
         p = p + 1
     }
@@ -12596,12 +12649,21 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
         print_int((EPIST_KTYPE_CERTAIN * 100) / EPIST_KTYPE_SITES)
         print("%)\n")
     }
+    // Gen 13: measurement channel stats
+    if EPIST_MEAS_COUNT > 0 {
+        print("epistemic_meas: ")
+        print_int(EPIST_MEAS_COUNT)
+        print(" tokens in measurement channel (meas_conf > 0)\n")
+    }
     // Gen 12: --dump-conf-json — print token-level confidence as JSON to stdout
+    // Gen 13: adds "meas" field for measurement channel confidence
     if CLI_DUMP_CONF_JSON != 0 {
         print("{\"total\":")
         print_int(EPIST_TOTAL_EXPR)
         print(",\"certain\":")
         print_int(EPIST_HIGH_CONF)
+        print(",\"meas_tokens\":")
+        print_int(EPIST_MEAS_COUNT)
         print(",\"tokens\":[\n")
         var g12_first: i64 = 1
         var g12_tp: i64 = 0
@@ -12622,6 +12684,8 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                 print_int(g12_ctk)
                 print(",\"conf\":")
                 print_int(EXPR_CONF[g12_tp as usize])
+                print(",\"meas\":")
+                print_int(MEAS_CONF[g12_tp as usize])
                 print(",\"line\":")
                 print_int(TL[g12_tp as usize])
                 print("}")
