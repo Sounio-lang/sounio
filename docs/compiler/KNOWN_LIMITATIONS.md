@@ -24,7 +24,8 @@ Updated February 2026 after full-project audit.
 | Effects System | Production | 9 effects (IO, Mut, Alloc, Panic, Async, GPU, Prob, Div, Observe) |
 | HIR + HLIR | Production | SSA generation, async transform |
 | SIR | Production | Domain-specific IR, epistemic passes |
-| Native Backend | Production | ELF/Mach-O, epistemic runtime, continuations |
+| Ownership/Borrowing | Production | Method receiver type is now looked up from the declared signature (`scan_fnsig_param_type`). Exclusive `&!Self` receivers enforce borrow-conflict checks and ephemeral borrow tracking; shared `&Self` receivers perform read-only access checks. No heuristic string matching. |
+| Native Backend | Production | ELF/Mach-O/PE, epistemic runtime, continuations; cross-compile via `--target` |
 | Cranelift Codegen | Production | Full implementation, effect handlers |
 | Interpreter | Production | Full eval, 100+ builtins |
 | Module System | Production | 2-pass resolver, imports, hierarchical namespaces |
@@ -36,7 +37,6 @@ Updated February 2026 after full-project audit.
 
 | Component | Status | Limitations |
 |-----------|--------|-------------|
-| Ownership/Borrowing | Beta | Method receiver inference uses heuristic string matching; `infer_method_receiver_use` should look up actual method signatures |
 | LLVM Codegen | Beta | Requires LLVM 15+, feature-gated |
 | Refinement Types + SMT | Beta | Requires Z3, falls back to runtime assertions |
 | LSP | Beta | Cross-file navigation uses legacy symbol index |
@@ -108,9 +108,13 @@ The following stdlib modules are stubs or incomplete:
 
 ### Platform Support
 
-- **Linux x86-64**: Primary supported platform
-- **macOS**: Mach-O backend implemented (2,512 lines, x86-64 + ARM64), not yet wired into codegen driver
-- **Windows**: PE/COFF backend implemented (3,508 lines, x86-64 + ARM64), not yet wired into codegen driver
+- **Linux x86-64**: Primary supported platform (default)
+- **Linux aarch64**: Supported via `--target aarch64-linux`
+- **macOS x86-64**: Mach-O backend (2,512 lines) wired; cross-compile via `--target x86_64-macos`
+- **macOS ARM64**: Mach-O ARM64 backend wired; cross-compile via `--target aarch64-macos`
+- **Windows x86-64**: PE/COFF backend (3,508 lines) wired; cross-compile via `--target x86_64-windows`
+
+Cross-compiled binaries must be executed on the target OS. The compiler runs on Linux and emits the correct binary format for each target.
 
 ---
 
