@@ -67,6 +67,44 @@ check_souc_or_skip() {
     check_souc "$label" "$file"
 }
 
+build_gpu_ptx_contains() {
+    local label="$1"
+    local file="$2"
+    local needle="$3"
+    local out="/tmp/gate_ptx_${label}.ptx"
+    local log="/tmp/gate_ptx_${label}.log"
+    local _ec=0
+    timeout 30 "$SOUC" build "$file" --backend gpu -o "$out" >"$log" 2>&1 || _ec=$?
+    if [ $_ec -eq 124 ]; then
+        fail "$label" "timeout (30s)"
+    elif [ $_ec -ne 0 ]; then
+        fail "$label" "exit $_ec — $(tail -3 "$log" | tr '\n' ' ')"
+    elif rg -q "$needle" "$out"; then
+        pass "$label"
+    else
+        fail "$label" "missing PTX pattern '$needle'"
+    fi
+}
+
+run_with_gpu_runtime_contains() {
+    local label="$1"
+    local file="$2"
+    local needle="$3"
+    local log="/tmp/gate_ptx_${label}.log"
+    local _ec=0
+    rm -f "$log"
+    timeout 30 "$SOUC" run --gpu-runtime "$file" >"$log" 2>&1 || _ec=$?
+    if [ $_ec -eq 124 ]; then
+        fail "$label" "timeout (30s)"
+    elif [ $_ec -ne 0 ]; then
+        fail "$label" "exit $_ec — $(tail -5 "$log" | tr '\n' ' ')"
+    elif rg -q "$needle" "$log"; then
+        pass "$label"
+    else
+        fail "$label" "missing runtime pattern '$needle'"
+    fi
+}
+
 echo "=== GPU PTX Codegen Gate ==="
 echo "SOUC:               $SOUC"
 echo "SOUNIO_STDLIB_PATH: $SOUNIO_STDLIB_PATH"
@@ -107,6 +145,45 @@ check_souc \
 check_souc \
     "T3c_gpu_vec_scale" \
     "tests/run-pass/gpu_vec_scale.sio"
+
+# T3d
+check_souc \
+    "T3d_gpu_launch_vec_slices" \
+    "tests/run-pass/gpu_launch_vec_slices.sio"
+
+# T3e
+check_souc \
+    "T3e_gpu_vec_scalar_ops" \
+    "tests/run-pass/gpu_vec_scalar_ops.sio"
+
+# T3f
+build_gpu_ptx_contains \
+    "T3f_gpu_vec_ops_ptx_div" \
+    "tests/run-pass/gpu_vec_ops.sio" \
+    "div\\.rn\\.f64"
+
+# T3g
+build_gpu_ptx_contains \
+    "T3g_gpu_vec_scalar_ops_ptx_div" \
+    "tests/run-pass/gpu_vec_scalar_ops.sio" \
+    "div\\.rn\\.f64"
+
+# T3h
+run_with_gpu_runtime_contains \
+    "T3h_gpu_runtime_optin_launch" \
+    "tests/run-pass/gpu_launch_vec_slices.sio" \
+    "PASS: GPU launch vec_slices"
+
+# T3i
+check_souc \
+    "T3i_gpu_vec_unary" \
+    "tests/run-pass/gpu_vec_unary.sio"
+
+# T3j
+build_gpu_ptx_contains \
+    "T3j_gpu_vec_unary_ptx_neg" \
+    "tests/run-pass/gpu_vec_unary.sio" \
+    "neg\\.f64"
 
 # T4
 check_souc \
