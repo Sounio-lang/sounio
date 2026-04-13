@@ -1,0 +1,381 @@
+//@ run-pass
+//@ description: QF_LIA Fourier-Motzkin SMT solver — basic satisfiability tests
+
+// ── Solver inlined (global-array design, avoids struct-in-struct JIT bug) ────
+
+fn fm_result_unknown() -> i64 { 0 }
+fn fm_result_sat()     -> i64 { 1 }
+fn fm_result_unsat()   -> i64 { 2 }
+
+fn fm_op_gt()    -> i64 { 1 }
+fn fm_op_gt_eq() -> i64 { 2 }
+fn fm_op_lt()    -> i64 { 3 }
+fn fm_op_lt_eq() -> i64 { 4 }
+fn fm_op_eq()    -> i64 { 5 }
+fn fm_op_neq()   -> i64 { 6 }
+
+// Flat global constraint store.  Constraint i, var slot j → index i*8+j.
+// Variable IDs stored as vid+1; 0 means empty slot.
+var FM_COEFFS: [i64; 256] = [0; 256]
+var FM_VARIDS: [i64; 256] = [0; 256]
+var FM_NVARS:  [i64; 32]  = [0; 32]
+var FM_CONSTS: [i64; 32]  = [0; 32]
+var FM_STRICT: [i64; 32]  = [0; 32]
+var FM_NINEQS: i64         = 0
+
+var FM2_COEFFS: [i64; 256] = [0; 256]
+var FM2_VARIDS: [i64; 256] = [0; 256]
+var FM2_NVARS:  [i64; 32]  = [0; 32]
+var FM2_CONSTS: [i64; 32]  = [0; 32]
+var FM2_STRICT: [i64; 32]  = [0; 32]
+var FM2_NINEQS: i64         = 0
+
+var FM_VARLIST:  [i64; 8] = [0; 8]
+var FM_VARCOUNT: i64 = 0
+
+fn fm_reset() with Mut {
+    var i: i64 = 0
+    while i < 256 { FM_COEFFS[i as usize] = 0; FM_VARIDS[i as usize] = 0; i = i + 1 }
+    i = 0
+    while i < 32 { FM_NVARS[i as usize] = 0; FM_CONSTS[i as usize] = 0; FM_STRICT[i as usize] = 0; i = i + 1 }
+    FM_NINEQS = 0
+}
+
+fn fm2_reset() with Mut {
+    var i: i64 = 0
+    while i < 256 { FM2_COEFFS[i as usize] = 0; FM2_VARIDS[i as usize] = 0; i = i + 1 }
+    i = 0
+    while i < 32 { FM2_NVARS[i as usize] = 0; FM2_CONSTS[i as usize] = 0; FM2_STRICT[i as usize] = 0; i = i + 1 }
+    FM2_NINEQS = 0
+}
+
+// Return coefficient of var_id in row (primary store)
+fn fm_coeff(row: i64, var_id: i64) -> i64 {
+    let nvars = FM_NVARS[row as usize]
+    var j: i64 = 0
+    while j < nvars {
+        if FM_VARIDS[(row * 8 + j) as usize] == var_id + 1 {
+            return FM_COEFFS[(row * 8 + j) as usize]
+        }
+        j = j + 1
+    }
+    0
+}
+
+// Add single-variable constraint to primary store
+fn fm_add1(var_id: i64, coeff: i64, constant: i64, is_strict: i64) with Mut {
+    if FM_NINEQS >= 32 { return }
+    let r = FM_NINEQS as usize
+    FM_NVARS[r]      = 1
+    FM_CONSTS[r]     = constant
+    FM_STRICT[r]     = is_strict
+    FM_VARIDS[r * 8] = var_id + 1  // encode
+    FM_COEFFS[r * 8] = coeff
+    FM_NINEQS = FM_NINEQS + 1
+}
+
+// Add two-variable constraint to primary store
+fn fm_add2(va: i64, ca: i64, vb: i64, cb: i64, constant: i64, is_strict: i64) with Mut {
+    if FM_NINEQS >= 32 { return }
+    let r = FM_NINEQS as usize
+    FM_NVARS[r]          = 2
+    FM_CONSTS[r]         = constant
+    FM_STRICT[r]         = is_strict
+    FM_VARIDS[r * 8 + 0] = va + 1
+    FM_COEFFS[r * 8 + 0] = ca
+    FM_VARIDS[r * 8 + 1] = vb + 1
+    FM_COEFFS[r * 8 + 1] = cb
+    FM_NINEQS = FM_NINEQS + 1
+}
+
+// Parse "var_id op constant" into canonical form and add to primary store
+// Canonical:  coeff*var + constant ≤ 0  (or < 0 if strict)
+//   var > c   →  -var + c < 0   (coeff=-1, const=c, strict)
+//   var >= c  →  -var + c ≤ 0
+//   var < c   →   var - c < 0   (coeff=+1, const=-c, strict)
+//   var <= c  →   var - c ≤ 0
+fn fm_parse_pred(var_id: i64, op: i64, constant: i64) with Mut {
+    if op == fm_op_gt() {
+        fm_add1(var_id, -1, constant, 1)
+    } else if op == fm_op_gt_eq() {
+        fm_add1(var_id, -1, constant, 0)
+    } else if op == fm_op_lt() {
+        fm_add1(var_id, 1, 0 - constant, 1)
+    } else if op == fm_op_lt_eq() {
+        fm_add1(var_id, 1, 0 - constant, 0)
+    } else if op == fm_op_eq() {
+        fm_add1(var_id, -1, constant, 0)
+        fm_add1(var_id,  1, 0 - constant, 0)
+    }
+}
+
+// Add two-variable constraint: coeff_a*var_a + coeff_b*var_b + constant ≤ 0
+fn fm_parse_binvar(var_a: i64, coeff_a: i64, var_b: i64, coeff_b: i64,
+                   constant: i64, is_strict: i64) with Mut {
+    fm_add2(var_a, coeff_a, var_b, coeff_b, constant, is_strict)
+}
+
+fn fm_collect_vars() with Mut {
+    FM_VARCOUNT = 0
+    var i: i64 = 0
+    while i < FM_NINEQS {
+        var j: i64 = 0
+        while j < FM_NVARS[i as usize] {
+            let stored = FM_VARIDS[(i * 8 + j) as usize]
+            if stored > 0 {
+                let vid = stored - 1
+                var found = false; var k: i64 = 0
+                while k < FM_VARCOUNT {
+                    if FM_VARLIST[k as usize] == vid { found = true }
+                    k = k + 1
+                }
+                if !found && FM_VARCOUNT < 8 {
+                    FM_VARLIST[FM_VARCOUNT as usize] = vid
+                    FM_VARCOUNT = FM_VARCOUNT + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn fm_is_ground_contradiction(row: i64) -> bool {
+    if FM_NVARS[row as usize] != 0 { return false }
+    let c = FM_CONSTS[row as usize]
+    let s = FM_STRICT[row as usize]
+    if s == 1 { return c >= 0 }
+    c > 0
+}
+
+fn fm_eliminate(var_id: i64) -> i64 with Mut {
+    var pos_rows: [i64; 32] = [0; 32]; var npos: i64 = 0
+    var neg_rows: [i64; 32] = [0; 32]; var nneg: i64 = 0
+    var zer_rows: [i64; 32] = [0; 32]; var nzer: i64 = 0
+
+    var i: i64 = 0
+    while i < FM_NINEQS {
+        let c = fm_coeff(i, var_id)
+        if c > 0 { pos_rows[npos as usize] = i; npos = npos + 1 }
+        else if c < 0 { neg_rows[nneg as usize] = i; nneg = nneg + 1 }
+        else { zer_rows[nzer as usize] = i; nzer = nzer + 1 }
+        i = i + 1
+    }
+
+    fm2_reset()
+
+    // Copy zero-coeff rows to FM2
+    var z: i64 = 0
+    while z < nzer {
+        let ri = zer_rows[z as usize]
+        let dst = FM2_NINEQS
+        FM2_NVARS[dst as usize]  = FM_NVARS[ri as usize]
+        FM2_CONSTS[dst as usize] = FM_CONSTS[ri as usize]
+        FM2_STRICT[dst as usize] = FM_STRICT[ri as usize]
+        var j: i64 = 0
+        while j < FM_NVARS[ri as usize] {
+            FM2_COEFFS[(dst * 8 + j) as usize] = FM_COEFFS[(ri * 8 + j) as usize]
+            FM2_VARIDS[(dst * 8 + j) as usize] = FM_VARIDS[(ri * 8 + j) as usize]
+            j = j + 1
+        }
+        FM2_NINEQS = FM2_NINEQS + 1
+        z = z + 1
+    }
+
+    // Pairwise derivation
+    var pi: i64 = 0
+    while pi < npos {
+        let pr = pos_rows[pi as usize]
+        let cp = fm_coeff(pr, var_id)
+        var ni: i64 = 0
+        while ni < nneg {
+            let nr = neg_rows[ni as usize]
+            let cn = fm_coeff(nr, var_id)
+            let abs_cn = 0 - cn
+
+            let new_const  = abs_cn * FM_CONSTS[pr as usize] + cp * FM_CONSTS[nr as usize]
+            let new_strict = if FM_STRICT[pr as usize] == 1 || FM_STRICT[nr as usize] == 1 { 1 } else { 0 }
+
+            var dv_varids: [i64; 8] = [0; 8]
+            var dv_coeffs: [i64; 8] = [0; 8]
+            var dv_n: i64 = 0
+
+            // Vars from pos row
+            var ti: i64 = 0
+            while ti < FM_NVARS[pr as usize] {
+                let vid_s = FM_VARIDS[(pr * 8 + ti) as usize]
+                let vid   = vid_s - 1
+                let cef   = FM_COEFFS[(pr * 8 + ti) as usize]
+                if vid_s > 0 && vid != var_id && dv_n < 8 {
+                    dv_varids[dv_n as usize] = vid_s
+                    dv_coeffs[dv_n as usize] = abs_cn * cef
+                    dv_n = dv_n + 1
+                }
+                ti = ti + 1
+            }
+
+            // Vars from neg row (merge or append)
+            var ti2: i64 = 0
+            while ti2 < FM_NVARS[nr as usize] {
+                let vid_s = FM_VARIDS[(nr * 8 + ti2) as usize]
+                let vid   = vid_s - 1
+                let cef   = FM_COEFFS[(nr * 8 + ti2) as usize]
+                if vid_s > 0 && vid != var_id {
+                    var found_at: i64 = -1
+                    var si: i64 = 0
+                    while si < dv_n {
+                        if dv_varids[si as usize] == vid_s { found_at = si }
+                        si = si + 1
+                    }
+                    if found_at >= 0 {
+                        dv_coeffs[found_at as usize] = dv_coeffs[found_at as usize] + cp * cef
+                    } else if dv_n < 8 {
+                        dv_varids[dv_n as usize] = vid_s
+                        dv_coeffs[dv_n as usize] = cp * cef
+                        dv_n = dv_n + 1
+                    }
+                }
+                ti2 = ti2 + 1
+            }
+
+            // Count active variables
+            var active: i64 = 0
+            var ai: i64 = 0
+            while ai < dv_n {
+                if dv_coeffs[ai as usize] != 0 { active = active + 1 }
+                ai = ai + 1
+            }
+
+            if active == 0 {
+                // Ground constraint
+                let contradiction = if new_strict == 1 { new_const >= 0 } else { new_const > 0 }
+                if contradiction {
+                    FM_NINEQS = 0  // Mark system as done
+                    return fm_result_unsat()
+                }
+                // Trivially satisfied — drop
+            } else if FM2_NINEQS < 32 {
+                let dst = FM2_NINEQS
+                FM2_NVARS[dst as usize]  = active
+                FM2_CONSTS[dst as usize] = new_const
+                FM2_STRICT[dst as usize] = new_strict
+                var si2: i64 = 0; var slot2: i64 = 0
+                while si2 < dv_n {
+                    if dv_coeffs[si2 as usize] != 0 && slot2 < 8 {
+                        FM2_COEFFS[(dst * 8 + slot2) as usize] = dv_coeffs[si2 as usize]
+                        FM2_VARIDS[(dst * 8 + slot2) as usize] = dv_varids[si2 as usize]
+                        slot2 = slot2 + 1
+                    }
+                    si2 = si2 + 1
+                }
+                FM2_NINEQS = FM2_NINEQS + 1
+            }
+            ni = ni + 1
+        }
+        pi = pi + 1
+    }
+
+    // Copy FM2 back to FM
+    FM_NINEQS = FM2_NINEQS
+    var ci: i64 = 0
+    while ci < FM2_NINEQS {
+        FM_NVARS[ci as usize]  = FM2_NVARS[ci as usize]
+        FM_CONSTS[ci as usize] = FM2_CONSTS[ci as usize]
+        FM_STRICT[ci as usize] = FM2_STRICT[ci as usize]
+        var cj: i64 = 0
+        while cj < FM2_NVARS[ci as usize] {
+            FM_COEFFS[(ci * 8 + cj) as usize] = FM2_COEFFS[(ci * 8 + cj) as usize]
+            FM_VARIDS[(ci * 8 + cj) as usize] = FM2_VARIDS[(ci * 8 + cj) as usize]
+            cj = cj + 1
+        }
+        ci = ci + 1
+    }
+    fm_result_unknown()
+}
+
+fn fm_check_sat() -> i64 with Mut {
+    if FM_NINEQS == 0 { return fm_result_sat() }
+    fm_collect_vars()
+    if FM_VARCOUNT == 0 {
+        var i: i64 = 0
+        while i < FM_NINEQS {
+            if fm_is_ground_contradiction(i) { return fm_result_unsat() }
+            i = i + 1
+        }
+        return fm_result_sat()
+    }
+    var vi: i64 = 0
+    while vi < FM_VARCOUNT {
+        let r = fm_eliminate(FM_VARLIST[vi as usize])
+        if r == fm_result_unsat() { return fm_result_unsat() }
+        vi = vi + 1
+    }
+    var i: i64 = 0
+    while i < FM_NINEQS {
+        if fm_is_ground_contradiction(i) { return fm_result_unsat() }
+        i = i + 1
+    }
+    fm_result_sat()
+}
+
+fn print_int(n: i64) with IO { println(n as i32 as string) }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Panic {
+    var pass: i64 = 0
+    var fail: i64 = 0
+
+    // T1: x > 0  AND  x < 5  → SAT
+    fm_reset()
+    fm_parse_pred(0, fm_op_gt(), 0)   // x > 0
+    fm_parse_pred(0, fm_op_lt(), 5)   // x < 5
+    let r1 = fm_check_sat()
+    if r1 == fm_result_sat() { pass = pass + 1 }
+    else { print("T1 FAIL: expected SAT, got "); print_int(r1); fail = fail + 1 }
+
+    // T2: x > 0  AND  x < 0  → UNSAT
+    fm_reset()
+    fm_parse_pred(0, fm_op_gt(), 0)   // x > 0
+    fm_parse_pred(0, fm_op_lt(), 0)   // x < 0
+    let r2 = fm_check_sat()
+    if r2 == fm_result_unsat() { pass = pass + 1 }
+    else { print("T2 FAIL: expected UNSAT, got "); print_int(r2); fail = fail + 1 }
+
+    // T3: x >= 3  AND  x <= 2  → UNSAT
+    fm_reset()
+    fm_parse_pred(0, fm_op_gt_eq(), 3)  // x >= 3
+    fm_parse_pred(0, fm_op_lt_eq(), 2)  // x <= 2
+    let r3 = fm_check_sat()
+    if r3 == fm_result_unsat() { pass = pass + 1 }
+    else { print("T3 FAIL: expected UNSAT, got "); print_int(r3); fail = fail + 1 }
+
+    // T4: x > 0  AND  y > 0  AND  x + y <= 10  → SAT
+    fm_reset()
+    fm_parse_pred(0, fm_op_gt(), 0)             // x > 0
+    fm_parse_pred(1, fm_op_gt(), 0)             // y > 0
+    fm_parse_binvar(0, 1, 1, 1, -10, 0)         // x + y - 10 <= 0
+    let r4 = fm_check_sat()
+    if r4 == fm_result_sat() { pass = pass + 1 }
+    else { print("T4 FAIL: expected SAT, got "); print_int(r4); fail = fail + 1 }
+
+    // T5: x + y <= 5  AND  x >= 3  AND  y >= 4  → UNSAT  (3+4=7 > 5)
+    fm_reset()
+    fm_parse_binvar(0, 1, 1, 1, -5, 0)          // x + y - 5 <= 0
+    fm_parse_pred(0, fm_op_gt_eq(), 3)           // x >= 3
+    fm_parse_pred(1, fm_op_gt_eq(), 4)           // y >= 4
+    let r5 = fm_check_sat()
+    if r5 == fm_result_unsat() { pass = pass + 1 }
+    else { print("T5 FAIL: expected UNSAT, got "); print_int(r5); fail = fail + 1 }
+
+    if fail == 0 {
+        print("smt_qflia_basic: PASS (")
+        print_int(pass)
+        print("/5)\n")
+        return 0
+    }
+    print("smt_qflia_basic: FAIL (")
+    print_int(fail)
+    print(" failures)\n")
+    return 1 as i32
+}
