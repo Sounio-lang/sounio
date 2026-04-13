@@ -194,3 +194,42 @@ The analytical `64σ²` formula is directionally validated.
 The corollary: any published numerical claim from Sounio that uses `variance_of()` on a subtraction of *correlated* intermediates is wrong by construction. The Phase 2 pilot is safe only because it uses raw `f64` + bootstrap CIs rather than compiler-propagated variance.
 
 The `16σ² vs 64σ²` factor-of-4 prediction for the full Fano-triple associator chain (through `(ab)c − a(bc)`) is plausible but not yet directly measured — would require wiring the full Knowledge<f64> chain through the non-trivial octonion product, which may hit the ζ buffer bug. The minimal-case confirmation is sufficient to establish β's basic mechanism.
+
+## Root mechanism (2026-04-13 deeper read of compiler)
+
+The covariance blindness is mechanically caused by this sequence in `self-hosted/compiler/lean_single.sio`:
+
+1. **`.value` access of a `Knowledge<f64>` increments `NEXT_BUDGET_PARAM`** at every call site (lines 7424, 7499, 10219). So two `x.value` accesses seed σ² into *different* BSS channels — first into channel 0, second into channel 1. The ISO budget decomposition uses this to give each "measurement read" its own channel.
+
+2. **`emit_seed_variance_from_knowledge_x86()` zeroes all OTHER channels when it writes to its target channel** (line 5705). So after the second access, channel 0 is zeroed out and channel 1 holds σ². This is single-path-exclusive design: one channel owns the variance at any given time.
+
+3. **At the binop variance emit (line 10561)**, the check `left_var_slot >= 0 && left_var_slot == right_var_slot` fails — both operands have `EXPR_VAR_SLOT = -2` (scratch). Falls through to `emit_gate_variance_addsub_x86(-2, -2)`.
+
+4. **`emit_gate_variance_addsub_x86(-2, -2)` reads scratch for BOTH left and right** (lines 5552-5583), per channel. For the `-2` case each channel reads the current scratch value. After the right-side's access, scratch channel 1 = σ², channel 0 = 0. So: left = scratch (σ² in ch 1, else 0), right = scratch (same, σ² in ch 1, else 0). Sum: 2σ² in ch 1 — that's the `0.02` observed for `Var(x - x)`.
+
+## Proposed fix (two parts, non-trivial)
+
+Neither part is a one-liner; together they change ISO-budget semantics.
+
+**Part A: per-variable channel assignment.** Assign a budget channel at `measure()` time, store it as variable metadata (parallel array indexed by slot). `.value` access looks up the variable's assigned channel rather than incrementing `NEXT_BUDGET_PARAM`. Effect: multiple `.value` reads of the same `Knowledge<f64>` variable all seed the *same* channel, consistently.
+
+- New global: `var KNOWLEDGE_CHANNEL_FOR_SLOT: [i64; 1024] = [-1; 1024]`
+- At `let k = measure(...)`: `KNOWLEDGE_CHANNEL_FOR_SLOT[k_slot] = NEXT_BUDGET_PARAM; NEXT_BUDGET_PARAM += 1`
+- At `x.value` emit: look up the containing variable's slot, retrieve the assigned channel, emit seed into that specific channel — drop the local increment
+
+**Part B: scratch-source identity.** When both operands have `EXPR_VAR_SLOT = -2` and come from the same source variable, route to same-variant. The check is: before compiling the right operand, record `LAST_KNOWLEDGE_SOURCE_SLOT = <slot of variable whose .value was accessed>` for the left. After right compiles, compare against right's recorded source. If equal, same-path.
+
+- New globals: `var LEFT_SCRATCH_SOURCE: i64 = -1`, `var RIGHT_SCRATCH_SOURCE: i64 = -1`
+- At `.value` emit: record `EXPR_SCRATCH_SOURCE = containing_slot`
+- At binop: save `left_scratch_source = EXPR_SCRATCH_SOURCE` after left, `right_scratch_source = EXPR_SCRATCH_SOURCE` after right
+- If `left_var_slot == -2 && right_var_slot == -2 && left_scratch_source == right_scratch_source && left_scratch_source >= 0`, use `emit_variance_addsub_same_scratch_x86(op)` — a new emit function that returns 0 for sub or 4×scratch for add
+
+## Why defer the fix rather than ship it here
+
+- Part A changes ISO budget semantics (each measurement instead of each access gets a channel). This has downstream effects on `budget_of()` output for existing tests.
+- Bootstrap rebuild + gen2==gen3 verify adds 30-60 min.
+- The compiler has unrelated uncommitted GPU PTX edits from another thread; my fix would commingle in a revert if bootstrap breaks.
+- The two parts must land together or the behavior is inconsistent.
+- No Phase 2 or dissertation dependency is currently blocked on this (Phase 2 uses raw f64; dissertation has a decision gate 2026-05-15 for octonion PBPK contribution which is the first caller).
+
+Scoping as its own coordinated change after the GPU edits land is the honest move. The full mechanism above is enough for the next session to implement cleanly.
