@@ -120,7 +120,7 @@ The following stdlib modules are stubs or incomplete:
 | Feature | Dependency | Effect if Missing |
 |---------|------------|-------------------|
 | `--features llvm` | LLVM 18 (`libLLVM-18.so`) | `--backend llvm` and `--emit-llvm` active; install `llvm-18-dev` + `clang-18` |
-| `--features smt` | Z3 + cmake | Without Z3: static engine handles constants/narrowing/monotonicity; complex predicates fall back to runtime checks with W040 |
+| `--features smt` | Z3 + cmake | Without Z3: static engine handles constants/narrowing/monotonicity; QF_LIA Fourier-Motzkin tier (`smt_qflia.sio`) sits between static analysis and runtime fallback; complex predicates beyond FM fall back to runtime checks with W040 |
 | `--features gpu` | CUDA toolkit | GPU codegen works, execution requires runtime |
 
 ### Platform Support
