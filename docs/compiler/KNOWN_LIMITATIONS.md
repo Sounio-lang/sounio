@@ -88,15 +88,18 @@ The following bugs have been fixed in the self-hosted source but require a rebui
 The following stdlib modules are stubs or incomplete:
 
 - `stdlib/gpu/` - requires CUDA runtime (behind `--features gpu`)
-- `stdlib/crypto/` - requires integer FFI (JIT limitation)
-- `stdlib/compress/` - requires integer FFI (JIT limitation)
+- `stdlib/crypto/` - pure-Sounio sha256/hmac/rng are active; random.sio.disabled and hash.sio.disabled require additional algorithm work
+- `stdlib/compress/` - gzip.sio requires libz at link time; zstd.sio requires libzstd at link time (external runtime libraries, not an FFI limitation)
 - `stdlib/ffi/` - stub
 - `stdlib/autodiff/` - framework only
 - `stdlib/interop/` - stub
-- `stdlib/text/`, `stdlib/time/`, `stdlib/os/` - disabled (require type conversion from Rust unsigned types)
+- `stdlib/text/`, `stdlib/time/` - disabled (require type conversion from Rust unsigned types)
 
 ### Recently Activated Modules
 
+- `stdlib/os/process.sio` - getpid/getppid/exit/abort via extern "C" stubs (integer FFI now works)
+- `stdlib/mem/` - heap_alloc/heap_free (malloc/free stubs), arena bump allocator, box/rc/arc wrappers — all active
+- `stdlib/sync/mutex.sio` - pthread_mutex_{init,lock,trylock,unlock,destroy} via extern "C" stubs
 - `stdlib/prob/` - Beta, Normal, MCMC, random distributions (4 modules activated)
 - `stdlib/onn/` - Octonion neural network: activation, attention, conv, linear, loss, normalization, optimizer, training (8 modules)
 - `stdlib/ontology/` - LOINC, biomedical module, namespaces (3 modules)
