@@ -6090,6 +6090,9 @@ fn unary_operand_root_name(expr: Expr) -> Name {
     if expr.kind == ExprKind::ExprIndex {
         return unary_operand_name(expr.left)
     }
+    if expr.kind == ExprKind::ExprFieldAccess {
+        return unary_operand_name(expr.left)
+    }
     empty_type_name()
 }
 
@@ -12997,14 +13000,21 @@ impl Checker {
                     }
                 }
 
-                if arg_expr.kind == ExprKind::ExprIdent && implicit_release_kind != 0 {
+                let arg_is_place_like =
+                    arg_expr.kind == ExprKind::ExprIdent ||
+                    arg_expr.kind == ExprKind::ExprFieldAccess ||
+                    arg_expr.kind == ExprKind::ExprIndex
+                if arg_is_place_like && implicit_release_kind != 0 {
                     // Release borrows unconditionally after call returns.
                     // Previous logic used state delta (before_pair vs current_pair)
                     // which failed when consecutive calls borrow the same variable
                     // (the second call saw before_pair.0 == 2 from the first call's
                     // un-released borrow, and skipped the release).
                     if implicit_release_kind == 1 || implicit_release_kind == 2 {
-                        c.borrows = c.borrows.release_borrow(arg_expr.name)
+                        let release_name = unary_operand_root_name(arg_expr)
+                        if !name_is_empty(release_name) {
+                            c.borrows = c.borrows.release_borrow(release_name)
+                        }
                     }
                 }
 
@@ -13029,18 +13039,22 @@ impl Checker {
     }
 
     fn check_call_arg_borrow_boundary(self, arg_expr: Expr, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
-        if arg_expr.kind != ExprKind::ExprIdent {
+        if param_ty.kind != TypeKind::TyRef && param_ty.kind != TypeKind::TyRefMut {
+            return self
+        }
+        let borrow_name = unary_operand_root_name(arg_expr)
+        if name_is_empty(borrow_name) {
             return self
         }
         var c = self
         if param_ty.kind == TypeKind::TyRef {
-            let borrow_result = c.borrows.try_shared_borrow(arg_expr.name)
+            let borrow_result = c.borrows.try_shared_borrow(borrow_name)
             c.borrows = borrow_result.0
             if borrow_result.1 != 0 {
                 c = c.report_error_at(call_span, borrow_result.1, 0, 0, 0)
             }
         } else if param_ty.kind == TypeKind::TyRefMut {
-            let borrow_result = c.borrows.try_exclusive_borrow(arg_expr.name)
+            let borrow_result = c.borrows.try_exclusive_borrow(borrow_name)
             c.borrows = borrow_result.0
             if borrow_result.1 != 0 {
                 c = c.report_error_at(call_span, borrow_result.1, 0, 0, 0)
@@ -13250,8 +13264,12 @@ impl Checker {
             Some(arg_list) => {
                 let arg_expr = (*arg_list).head
                 let param_info = fn_param_list_get(params, idx)
+                let arg_is_place_like =
+                    arg_expr.kind == ExprKind::ExprIdent ||
+                    arg_expr.kind == ExprKind::ExprFieldAccess ||
+                    arg_expr.kind == ExprKind::ExprIndex
                 let implicit_borrow =
-                    arg_expr.kind == ExprKind::ExprIdent &&
+                    arg_is_place_like &&
                     (param_info.ty.kind == TypeKind::TyRef || param_info.ty.kind == TypeKind::TyRefMut)
 
                 var checker_for_arg = self
@@ -13279,17 +13297,20 @@ impl Checker {
                 }
                 // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
                 if has_param_info &&
-                   arg_expr.kind == ExprKind::ExprIdent &&
+                   arg_is_place_like &&
                    c.is_linear_type(arg_ty) &&
                    !implicit_borrow &&
                    c.suppress_linear_consume_depth == 0 {
-                    if c.borrows.is_borrowed(arg_expr.name) {
-                        c = c.report_error_at(call_span, 38, 0, 0, 0)
-                    } else {
-                        let consume_result = c.borrows.consume_linear(arg_expr.name)
-                        c.borrows = consume_result.0
-                        if consume_result.1 != 0 {
-                            c = c.report_error_at(call_span, 39, 0, 0, 0)
+                    let consume_name = unary_operand_root_name(arg_expr)
+                    if !name_is_empty(consume_name) {
+                        if c.borrows.is_borrowed(consume_name) {
+                            c = c.report_error_at(call_span, 38, 0, 0, 0)
+                        } else {
+                            let consume_result = c.borrows.consume_linear(consume_name)
+                            c.borrows = consume_result.0
+                            if consume_result.1 != 0 {
+                                c = c.report_error_at(call_span, 39, 0, 0, 0)
+                            }
                         }
                     }
                 }
