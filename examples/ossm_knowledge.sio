@@ -1,0 +1,258 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Octonion SSM with Epistemic Knowledge (EK) tracking
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Extends octonion_ssm.sio: every step also tracks a confidence score
+// using D3/ety_unify semantics — conf propagates as min(a.conf, b.conf).
+//
+// Weight roles:
+//   A — measured  (conf = 0.985)
+//   B — asserted  (conf = 0.965)   ← lower quality source
+//   C — measured  (conf = 0.985)
+//
+// T7: output conf ≤ 0.965 because B dominates via min-propagation.
+
+fn sqrt_o(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn abs_o(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn exp_o(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_o(10.0) * exp_o(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var s = 1.0; var t = 1.0; var i = 1
+    while i <= 20 { t = t * x / (i as f64); s = s + t; i = i + 1 }
+    s
+}
+fn sigmoid_o(x: f64) -> f64 with Mut, Div, Panic { 1.0 / (1.0 + exp_o(0.0 - x)) }
+
+var RNG_OE: i64 = 271828
+fn rand_oe() -> f64 with Mut, Div, Panic {
+    RNG_OE = (RNG_OE * 6364136223846793005 + 1442695040888963407)
+    var v = RNG_OE
+    if v < 0 { v = 0 - v }
+    (v % 10000) as f64 / 10000.0 - 0.5
+}
+
+// ─── Octonion ────────────────────────────────────────────────────────────────
+struct Oct { e: [f64; 8] }
+
+fn oct_zero() -> Oct { Oct { e: [0.0; 8] } }
+
+fn oct_mul(a: &Oct, b: &Oct) -> Oct with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]
+    o[0] = a.e[0]*b.e[0] - a.e[1]*b.e[1] - a.e[2]*b.e[2] - a.e[3]*b.e[3] - a.e[4]*b.e[4] - a.e[5]*b.e[5] - a.e[6]*b.e[6] - a.e[7]*b.e[7]
+    o[1] = a.e[0]*b.e[1] + a.e[1]*b.e[0] + a.e[2]*b.e[3] - a.e[3]*b.e[2] + a.e[4]*b.e[5] - a.e[5]*b.e[4] - a.e[6]*b.e[7] + a.e[7]*b.e[6]
+    o[2] = a.e[0]*b.e[2] + a.e[2]*b.e[0] - a.e[1]*b.e[3] + a.e[3]*b.e[1] + a.e[4]*b.e[6] - a.e[6]*b.e[4] + a.e[5]*b.e[7] - a.e[7]*b.e[5]
+    o[3] = a.e[0]*b.e[3] + a.e[3]*b.e[0] + a.e[1]*b.e[2] - a.e[2]*b.e[1] + a.e[4]*b.e[7] - a.e[7]*b.e[4] - a.e[5]*b.e[6] + a.e[6]*b.e[5]
+    o[4] = a.e[0]*b.e[4] + a.e[4]*b.e[0] - a.e[1]*b.e[5] + a.e[5]*b.e[1] - a.e[2]*b.e[6] + a.e[6]*b.e[2] - a.e[3]*b.e[7] + a.e[7]*b.e[3]
+    o[5] = a.e[0]*b.e[5] + a.e[5]*b.e[0] + a.e[1]*b.e[4] - a.e[4]*b.e[1] - a.e[2]*b.e[7] + a.e[7]*b.e[2] + a.e[3]*b.e[6] - a.e[6]*b.e[3]
+    o[6] = a.e[0]*b.e[6] + a.e[6]*b.e[0] + a.e[1]*b.e[7] - a.e[7]*b.e[1] + a.e[2]*b.e[4] - a.e[4]*b.e[2] - a.e[3]*b.e[5] + a.e[5]*b.e[3]
+    o[7] = a.e[0]*b.e[7] + a.e[7]*b.e[0] - a.e[1]*b.e[6] + a.e[6]*b.e[1] - a.e[2]*b.e[5] + a.e[5]*b.e[2] + a.e[3]*b.e[4] - a.e[4]*b.e[3]
+    Oct { e: o }
+}
+
+fn oct_add(a: &Oct, b: &Oct) -> Oct with Mut {
+    var o: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { o[i as usize] = a.e[i as usize] + b.e[i as usize]; i = i + 1 }
+    Oct { e: o }
+}
+
+fn oct_scale(a: &Oct, s: f64) -> Oct with Mut {
+    var o: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { o[i as usize] = a.e[i as usize] * s; i = i + 1 }
+    Oct { e: o }
+}
+
+fn oct_norm(a: &Oct) -> f64 with Mut, Div, Panic {
+    var s = 0.0; var i = 0
+    while i < 8 { s = s + a.e[i as usize] * a.e[i as usize]; i = i + 1 }
+    sqrt_o(s)
+}
+
+fn oct_sigmoid(a: &Oct) -> Oct with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]; var i = 0
+    while i < 8 { o[i as usize] = sigmoid_o(a.e[i as usize]); i = i + 1 }
+    Oct { e: o }
+}
+
+fn oct_associator(a: &Oct, b: &Oct, c: &Oct) -> Oct with Mut, Div, Panic {
+    let ab = oct_mul(a, b); let bc = oct_mul(b, c)
+    let ab_c = oct_mul(&ab, c); let a_bc = oct_mul(a, &bc)
+    var o: [f64; 8] = [0.0; 8]; var i = 0
+    while i < 8 { o[i as usize] = ab_c.e[i as usize] - a_bc.e[i as usize]; i = i + 1 }
+    Oct { e: o }
+}
+
+// GUM bound: σ_z ≈ sqrt(||b||²·mean(σ_a²) + ||a||²·mean(σ_b²)) per component
+fn oct_mul_unc(a: &Oct, b: &Oct, au: &Oct, bu: &Oct) -> Oct with Mut, Div, Panic {
+    var a_sq = 0.0; var b_sq = 0.0; var au_sq = 0.0; var bu_sq = 0.0; var i = 0
+    while i < 8 {
+        a_sq  = a_sq  + a.e[i as usize]  * a.e[i as usize]
+        b_sq  = b_sq  + b.e[i as usize]  * b.e[i as usize]
+        au_sq = au_sq + au.e[i as usize] * au.e[i as usize]
+        bu_sq = bu_sq + bu.e[i as usize] * bu.e[i as usize]
+        i = i + 1
+    }
+    let sigma = sqrt_o(b_sq * au_sq / 8.0 + a_sq * bu_sq / 8.0)
+    var o: [f64; 8] = [0.0; 8]; i = 0
+    while i < 8 { o[i as usize] = sigma; i = i + 1 }
+    Oct { e: o }
+}
+
+// ─── Epistemic scalar — D3 semantics in userspace ────────────────────────────
+// conf: 1.0=PLATINUM, 0.985=measured, 0.965=asserted
+// Propagates as min(a.conf, b.conf) through all operations.
+struct EK { val: f64, unc: f64, conf: f64 }
+fn ek_measured(v: f64, u: f64) -> EK { EK { val: v, unc: u, conf: 0.985 } }
+fn ek_asserted(v: f64, u: f64) -> EK { EK { val: v, unc: u, conf: 0.965 } }
+
+// ─── Global outputs ───────────────────────────────────────────────────────────
+var SSM_OUTS:   [f64; 8] = [0.0; 8]
+var SSM_UNCS:   [f64; 8] = [0.0; 8]
+var SSM_CONFS:  [f64; 8] = [0.0; 8]   // per-step epistemic confidence
+var SSM_ANORMS: [f64; 8] = [0.0; 8]
+
+// ─── Forward pass with EK confidence propagation ─────────────────────────────
+fn ossm_forward_ek(seq: &[f64; 8], A: &Oct, B: &Oct, C: &Oct,
+                   A_u: &Oct, B_u: &Oct, C_u: &Oct,
+                   a_conf: f64, b_conf: f64, c_conf: f64, x_conf: f64) with Mut, Div, Panic {
+    var h  = oct_zero()
+    var hu = Oct { e: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01] }
+    var h_conf = x_conf   // initial state confidence matches input quality
+    var t = 0
+    while t < 8 {
+        let Ah   = oct_mul(A, &h)
+        let Ah_u = oct_mul_unc(A, &h, A_u, &hu)
+        let Bx   = oct_scale(B, seq[t as usize])
+        var bxu: [f64; 8] = [0.0; 8]
+        var i = 0
+        while i < 8 {
+            bxu[i as usize] = abs_o(seq[t as usize]) * B_u.e[i as usize]
+            i = i + 1
+        }
+        let comb  = oct_add(&Ah, &Bx)
+        let new_h = oct_sigmoid(&comb)
+        var nue: [f64; 8] = [0.0; 8]
+        i = 0
+        while i < 8 {
+            let cu = sqrt_o(Ah_u.e[i as usize]*Ah_u.e[i as usize] + bxu[i as usize]*bxu[i as usize])
+            let s  = new_h.e[i as usize]
+            nue[i as usize] = abs_o(s * (1.0 - s)) * cu
+            i = i + 1
+        }
+        // Confidence: min(a_conf, h_conf, b_conf, x_conf)
+        var step_conf = a_conf
+        if h_conf   < step_conf { step_conf = h_conf   }
+        if b_conf   < step_conf { step_conf = b_conf   }
+        if x_conf   < step_conf { step_conf = x_conf   }
+
+        let assoc = oct_associator(A, &h, &Bx)
+        SSM_ANORMS[t as usize] = oct_norm(&assoc)
+
+        h      = new_h
+        hu     = Oct { e: nue }
+        h_conf = step_conf
+
+        let Ch = oct_mul(C, &h)
+        let Cu = oct_mul_unc(C, &h, C_u, &hu)
+        SSM_OUTS[t as usize] = Ch.e[0]
+        SSM_UNCS[t as usize] = Cu.e[0]
+        var out_c = c_conf
+        if h_conf < out_c { out_c = h_conf }
+        SSM_CONFS[t as usize] = out_c
+
+        t = t + 1
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+
+    // T1: e1·e2 = ±e3 (Cayley-Dickson)
+    let e1 = Oct { e: [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] }
+    let e2 = Oct { e: [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0] }
+    let p  = oct_mul(&e1, &e2)
+    var nz = 0; var nz_idx = 0; var ii = 1
+    while ii < 8 {
+        if abs_o(p.e[ii as usize]) > 0.5 { nz = nz + 1; nz_idx = ii }
+        ii = ii + 1
+    }
+    if nz == 1 && abs_o(p.e[0]) < 0.01 {
+        print("T1 PASS: e1·e2 = ±e"); print_int(nz_idx); println(" (Cayley-Dickson)")
+        passed = passed + 1
+    } else { println("T1 FAIL"); failed = failed + 1 }
+
+    // T2: EK construction — D3 confidence levels correct
+    let x_meas   = ek_measured(0.5, 0.01)
+    let x_assert = ek_asserted(0.3, 0.05)
+    if abs_o(x_meas.conf - 0.985) < 0.001 && abs_o(x_assert.conf - 0.965) < 0.001 {
+        print("T2 PASS: measured conf="); print(x_meas.conf)
+        print(", asserted conf="); print(x_assert.conf); println("")
+        passed = passed + 1
+    } else { println("T2 FAIL"); failed = failed + 1 }
+
+    // Setup SSM weights: A,C measured; B asserted (lower quality)
+    var A  = Oct { e: [0.0; 8] }; var B  = Oct { e: [0.0; 8] }; var C  = Oct { e: [0.0; 8] }
+    var Au = Oct { e: [0.0; 8] }; var Bu = Oct { e: [0.0; 8] }; var Cu = Oct { e: [0.0; 8] }
+    var wi = 0
+    while wi < 8 {
+        A.e[wi as usize]  = rand_oe() * 0.3; B.e[wi as usize] = rand_oe() * 0.3; C.e[wi as usize] = rand_oe() * 0.3
+        Au.e[wi as usize] = 0.01;             Bu.e[wi as usize] = 0.01;           Cu.e[wi as usize] = 0.01
+        wi = wi + 1
+    }
+    let seq: [f64; 8] = [0.1, 0.3, 0.0 - 0.2, 0.5, 0.0 - 0.1, 0.4, 0.2, 0.0 - 0.3]
+    // A=measured(0.985), B=asserted(0.965), C=measured(0.985), inputs=measured(0.985)
+    ossm_forward_ek(&seq, &A, &B, &C, &Au, &Bu, &Cu, 0.985, 0.965, 0.985, 0.985)
+
+    // T3: Nonzero outputs
+    var nzo = 0; var t = 0
+    while t < 8 { if abs_o(SSM_OUTS[t as usize]) > 0.001 { nzo = nzo + 1 }; t = t + 1 }
+    if nzo >= 6 { print("T3 PASS: "); print_int(nzo); println("/8 nonzero outputs"); passed = passed + 1 }
+    else { println("T3 FAIL"); failed = failed + 1 }
+
+    // T4: GUM uncertainty in all outputs
+    var uc = 0; t = 0
+    while t < 8 { if SSM_UNCS[t as usize] > 0.0 { uc = uc + 1 }; t = t + 1 }
+    if uc == 8 { println("T4 PASS: GUM uncertainty in all 8 outputs"); passed = passed + 1 }
+    else { println("T4 FAIL"); failed = failed + 1 }
+
+    // T5: Associator varies across timesteps (168-theorem signal)
+    var av = 0; t = 1
+    while t < 8 {
+        if abs_o(SSM_ANORMS[t as usize] - SSM_ANORMS[(t - 1) as usize]) > 0.0001 { av = av + 1 }
+        t = t + 1
+    }
+    if av >= 4 { print("T5 PASS: associator varies at "); print_int(av); println("/7 steps"); passed = passed + 1 }
+    else { println("T5 FAIL"); failed = failed + 1 }
+
+    // T6: Bounded uncertainty
+    var mx = 0.0; t = 0
+    while t < 8 { if SSM_UNCS[t as usize] > mx { mx = SSM_UNCS[t as usize] }; t = t + 1 }
+    if mx < 10.0 { print("T6 PASS: max σ = "); print(mx); println(" (bounded)"); passed = passed + 1 }
+    else { println("T6 FAIL"); failed = failed + 1 }
+
+    // T7: Output confidence ≤ 0.965 — B (asserted) dominates via min-propagation
+    var all_ok = 1; t = 0
+    while t < 8 { if SSM_CONFS[t as usize] > 0.965 + 0.001 { all_ok = 0 }; t = t + 1 }
+    if all_ok != 0 {
+        print("T7 PASS: output conf="); print(SSM_CONFS[0]); println(" ≤ 0.965 (asserted B dominates)")
+        passed = passed + 1
+    } else { println("T7 FAIL: conf > 0.965"); failed = failed + 1 }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}

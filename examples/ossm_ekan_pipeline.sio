@@ -1,0 +1,292 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// O-SSM → E-KAN Pipeline with Epistemic Knowledge tracking
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The associator [A,h,Bx] = (A⊗h)⊗(Bx) - A⊗(h⊗Bx) is a geometric signal
+// that real-valued SSMs cannot produce (only possible in non-associative algebras).
+// This pipeline feeds it directly into the E-KAN decoder as a distinguished input.
+//
+// Architecture:
+//   x_t (scalar) → O-SSM (8D octonion state) → y_t, σ_t, assoc_t
+//   [y[4], y[5], assoc[6], assoc[7]] → E-KAN (4→6→2) → decision + confidence
+//
+// Confidence: B weight is asserted (0.965); all else measured (0.985).
+// T6: associator inputs differ from pure SSM outputs (168-theorem signal is distinct).
+// T7: pipeline confidence ≤ 0.965 throughout.
+
+// ─── Math ────────────────────────────────────────────────────────────────────
+fn sqrt_p(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn abs_p(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn exp_p(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_p(10.0) * exp_p(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var s = 1.0; var t = 1.0; var i = 1
+    while i <= 20 { t = t * x / (i as f64); s = s + t; i = i + 1 }
+    s
+}
+fn sigmoid_p(x: f64) -> f64 with Mut, Div, Panic { 1.0 / (1.0 + exp_p(0.0 - x)) }
+
+var RNG_P: i64 = 314159
+fn rand_p() -> f64 with Mut, Div, Panic {
+    RNG_P = (RNG_P * 6364136223846793005 + 1442695040888963407)
+    var v = RNG_P
+    if v < 0 { v = 0 - v }
+    (v % 10000) as f64 / 10000.0 - 0.5
+}
+
+// ─── Octonion ────────────────────────────────────────────────────────────────
+struct Oct { e: [f64; 8] }
+fn oct_zero() -> Oct { Oct { e: [0.0; 8] } }
+fn oct_mul(a: &Oct, b: &Oct) -> Oct with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]
+    o[0] = a.e[0]*b.e[0]-a.e[1]*b.e[1]-a.e[2]*b.e[2]-a.e[3]*b.e[3]-a.e[4]*b.e[4]-a.e[5]*b.e[5]-a.e[6]*b.e[6]-a.e[7]*b.e[7]
+    o[1] = a.e[0]*b.e[1]+a.e[1]*b.e[0]+a.e[2]*b.e[3]-a.e[3]*b.e[2]+a.e[4]*b.e[5]-a.e[5]*b.e[4]-a.e[6]*b.e[7]+a.e[7]*b.e[6]
+    o[2] = a.e[0]*b.e[2]+a.e[2]*b.e[0]-a.e[1]*b.e[3]+a.e[3]*b.e[1]+a.e[4]*b.e[6]-a.e[6]*b.e[4]+a.e[5]*b.e[7]-a.e[7]*b.e[5]
+    o[3] = a.e[0]*b.e[3]+a.e[3]*b.e[0]+a.e[1]*b.e[2]-a.e[2]*b.e[1]+a.e[4]*b.e[7]-a.e[7]*b.e[4]-a.e[5]*b.e[6]+a.e[6]*b.e[5]
+    o[4] = a.e[0]*b.e[4]+a.e[4]*b.e[0]-a.e[1]*b.e[5]+a.e[5]*b.e[1]-a.e[2]*b.e[6]+a.e[6]*b.e[2]-a.e[3]*b.e[7]+a.e[7]*b.e[3]
+    o[5] = a.e[0]*b.e[5]+a.e[5]*b.e[0]+a.e[1]*b.e[4]-a.e[4]*b.e[1]-a.e[2]*b.e[7]+a.e[7]*b.e[2]+a.e[3]*b.e[6]-a.e[6]*b.e[3]
+    o[6] = a.e[0]*b.e[6]+a.e[6]*b.e[0]+a.e[1]*b.e[7]-a.e[7]*b.e[1]+a.e[2]*b.e[4]-a.e[4]*b.e[2]-a.e[3]*b.e[5]+a.e[5]*b.e[3]
+    o[7] = a.e[0]*b.e[7]+a.e[7]*b.e[0]-a.e[1]*b.e[6]+a.e[6]*b.e[1]-a.e[2]*b.e[5]+a.e[5]*b.e[2]+a.e[3]*b.e[4]-a.e[4]*b.e[3]
+    Oct { e: o }
+}
+fn oct_add(a: &Oct, b: &Oct) -> Oct with Mut {
+    var o: [f64; 8] = [0.0; 8]; var i = 0
+    while i < 8 { o[i as usize] = a.e[i as usize] + b.e[i as usize]; i = i + 1 }
+    Oct { e: o }
+}
+fn oct_scale(a: &Oct, s: f64) -> Oct with Mut {
+    var o: [f64; 8] = [0.0; 8]; var i = 0
+    while i < 8 { o[i as usize] = a.e[i as usize] * s; i = i + 1 }
+    Oct { e: o }
+}
+fn oct_norm(a: &Oct) -> f64 with Mut, Div, Panic {
+    var s = 0.0; var i = 0
+    while i < 8 { s = s + a.e[i as usize]*a.e[i as usize]; i = i + 1 }
+    sqrt_p(s)
+}
+fn oct_sigmoid(a: &Oct) -> Oct with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]; var i = 0
+    while i < 8 { o[i as usize] = sigmoid_p(a.e[i as usize]); i = i + 1 }
+    Oct { e: o }
+}
+fn oct_associator(a: &Oct, b: &Oct, c: &Oct) -> Oct with Mut, Div, Panic {
+    let ab = oct_mul(a, b); let bc = oct_mul(b, c)
+    let ab_c = oct_mul(&ab, c); let a_bc = oct_mul(a, &bc)
+    var o: [f64; 8] = [0.0; 8]; var i = 0
+    while i < 8 { o[i as usize] = ab_c.e[i as usize] - a_bc.e[i as usize]; i = i + 1 }
+    Oct { e: o }
+}
+fn oct_mul_unc(a: &Oct, b: &Oct, au: &Oct, bu: &Oct) -> Oct with Mut, Div, Panic {
+    var a2 = 0.0; var b2 = 0.0; var au2 = 0.0; var bu2 = 0.0; var i = 0
+    while i < 8 {
+        a2  = a2  + a.e[i as usize] *a.e[i as usize]
+        b2  = b2  + b.e[i as usize] *b.e[i as usize]
+        au2 = au2 + au.e[i as usize]*au.e[i as usize]
+        bu2 = bu2 + bu.e[i as usize]*bu.e[i as usize]
+        i = i + 1
+    }
+    let sigma = sqrt_p(b2*au2/8.0 + a2*bu2/8.0)
+    var o: [f64; 8] = [0.0; 8]; i = 0
+    while i < 8 { o[i as usize] = sigma; i = i + 1 }
+    Oct { e: o }
+}
+
+// ─── O-SSM globals ────────────────────────────────────────────────────────────
+var P_OUTS:   [f64; 8] = [0.0; 8]
+var P_UNCS:   [f64; 8] = [0.0; 8]
+var P_CONFS:  [f64; 8] = [0.0; 8]
+var P_ANORMS: [f64; 8] = [0.0; 8]
+
+fn ossm_run(seq: &[f64; 8], A: &Oct, B: &Oct, C: &Oct,
+            A_u: &Oct, B_u: &Oct, C_u: &Oct,
+            a_c: f64, b_c: f64, c_c: f64, x_c: f64) with Mut, Div, Panic {
+    var h = oct_zero()
+    var hu = Oct { e: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01] }
+    var h_conf = x_c
+    var t = 0
+    while t < 8 {
+        let Ah   = oct_mul(A, &h); let Ah_u = oct_mul_unc(A, &h, A_u, &hu)
+        let Bx   = oct_scale(B, seq[t as usize])
+        var bxu: [f64; 8] = [0.0; 8]; var i = 0
+        while i < 8 { bxu[i as usize] = abs_p(seq[t as usize]) * B_u.e[i as usize]; i = i + 1 }
+        let comb  = oct_add(&Ah, &Bx)
+        let new_h = oct_sigmoid(&comb)
+        var nue: [f64; 8] = [0.0; 8]; i = 0
+        while i < 8 {
+            let cu = sqrt_p(Ah_u.e[i as usize]*Ah_u.e[i as usize] + bxu[i as usize]*bxu[i as usize])
+            let s  = new_h.e[i as usize]
+            nue[i as usize] = abs_p(s*(1.0-s)) * cu
+            i = i + 1
+        }
+        var sc = a_c
+        if h_conf < sc { sc = h_conf }; if b_c < sc { sc = b_c }; if x_c < sc { sc = x_c }
+        let assoc = oct_associator(A, &h, &Bx)
+        P_ANORMS[t as usize] = oct_norm(&assoc)
+        h = new_h; hu = Oct { e: nue }; h_conf = sc
+        let Ch = oct_mul(C, &h); let Cu = oct_mul_unc(C, &h, C_u, &hu)
+        P_OUTS[t as usize]  = Ch.e[0]
+        P_UNCS[t as usize]  = Cu.e[0]
+        var oc = c_c; if h_conf < oc { oc = h_conf }
+        P_CONFS[t as usize] = oc
+        t = t + 1
+    }
+}
+
+// ─── E-KAN ────────────────────────────────────────────────────────────────────
+fn hat(x: f64, k: i64) -> f64 with Mut, Div, Panic {
+    let c = (k as f64) * 0.25; let d = abs_p(x - c) / 0.25
+    if d >= 1.0 { return 0.0 }
+    1.0 - d
+}
+struct Ev { val: f64, unc: f64, conf: f64 }
+fn edge_eval(coeffs: &[f64; 5], unc: &[f64; 5], e_conf: f64, x: f64) -> Ev with Mut, Div, Panic {
+    var val = 0.0; var vs = 0.0; var k = 0
+    while k < 5 {
+        let b = hat(x, k)
+        val = val + coeffs[k as usize] * b
+        vs  = vs  + b*b * unc[k as usize]*unc[k as usize]
+        k = k + 1
+    }
+    Ev { val: val, unc: sqrt_p(vs), conf: e_conf }
+}
+var KC1: [f64; 120] = [0.0; 120]; var KU1: [f64; 120] = [0.0; 120]; var KCF1: [f64; 24] = [0.0; 24]
+var KC2: [f64; 60]  = [0.0; 60];  var KU2: [f64; 60]  = [0.0; 60];  var KCF2: [f64; 12] = [0.0; 12]
+var KH:  [f64; 6] = [0.0; 6];  var KHU: [f64; 6] = [0.0; 6];  var KHC: [f64; 6] = [0.0; 6]
+var KO:  [f64; 2] = [0.0; 2];  var KOU: [f64; 2] = [0.0; 2];  var KOC: [f64; 2] = [0.0; 2]
+
+fn kan_run(inp: &[f64; 4], iu: &[f64; 4], inp_c: f64) with Mut, Div, Panic {
+    var j = 0
+    while j < 6 {
+        var s = 0.0; var vs = 0.0; var mc = 1.0; var i = 0
+        while i < 4 {
+            let ei = i * 6 + j
+            var c: [f64; 5] = [0.0; 5]; var u: [f64; 5] = [0.0; 5]; var k = 0
+            while k < 5 { c[k as usize] = KC1[(ei*5+k) as usize]; u[k as usize] = KU1[(ei*5+k) as usize]; k = k + 1 }
+            var x = inp[i as usize]; if x < 0.0 { x = 0.0 }; if x > 1.0 { x = 1.0 }
+            let ev = edge_eval(&c, &u, KCF1[ei as usize], x)
+            s = s + ev.val; vs = vs + ev.unc*ev.unc + iu[i as usize]*iu[i as usize]
+            if ev.conf < mc { mc = ev.conf }
+            i = i + 1
+        }
+        KH[j as usize] = s; KHU[j as usize] = sqrt_p(vs)
+        var hc = mc; if inp_c < hc { hc = inp_c }; KHC[j as usize] = hc
+        j = j + 1
+    }
+    j = 0
+    while j < 2 {
+        var s = 0.0; var vs = 0.0; var mc = 1.0; var i = 0
+        while i < 6 {
+            let ei = i * 2 + j
+            var c: [f64; 5] = [0.0; 5]; var u: [f64; 5] = [0.0; 5]; var k = 0
+            while k < 5 { c[k as usize] = KC2[(ei*5+k) as usize]; u[k as usize] = KU2[(ei*5+k) as usize]; k = k + 1 }
+            var x = KH[i as usize]; x = (x + 2.0) / 4.0; if x < 0.0 { x = 0.0 }; if x > 1.0 { x = 1.0 }
+            let ev = edge_eval(&c, &u, KCF2[ei as usize], x)
+            s = s + ev.val; vs = vs + ev.unc*ev.unc + KHU[i as usize]*KHU[i as usize]
+            if ev.conf < mc { mc = ev.conf }; if KHC[i as usize] < mc { mc = KHC[i as usize] }
+            i = i + 1
+        }
+        KO[j as usize] = s; KOU[j as usize] = sqrt_p(vs); KOC[j as usize] = mc
+        j = j + 1
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0; var failed = 0
+
+    // Init SSM weights
+    var A = Oct { e: [0.0; 8] }; var B = Oct { e: [0.0; 8] }; var C = Oct { e: [0.0; 8] }
+    var Au = Oct { e: [0.0; 8] }; var Bu = Oct { e: [0.0; 8] }; var Cu = Oct { e: [0.0; 8] }
+    var wi = 0
+    while wi < 8 {
+        A.e[wi as usize] = rand_p() * 0.3; B.e[wi as usize] = rand_p() * 0.3; C.e[wi as usize] = rand_p() * 0.3
+        Au.e[wi as usize] = 0.01; Bu.e[wi as usize] = 0.01; Cu.e[wi as usize] = 0.01
+        wi = wi + 1
+    }
+    let seq: [f64; 8] = [0.1, 0.3, 0.0 - 0.2, 0.5, 0.0 - 0.1, 0.4, 0.2, 0.0 - 0.3]
+    ossm_run(&seq, &A, &B, &C, &Au, &Bu, &Cu, 0.985, 0.965, 0.985, 0.985)
+
+    // T1: O-SSM runs — 8/8 nonzero outputs
+    var nzo = 0; var t = 0
+    while t < 8 { if abs_p(P_OUTS[t as usize]) > 0.001 { nzo = nzo + 1 }; t = t + 1 }
+    if nzo >= 6 { print("T1 PASS: O-SSM "); print_int(nzo); println("/8 nonzero outputs"); passed = passed + 1 }
+    else { println("T1 FAIL: O-SSM outputs zero"); failed = failed + 1 }
+
+    // T2: Associator is nonzero — confirms 168-theorem signal
+    var anorm_nonzero = 0; t = 0
+    while t < 8 { if P_ANORMS[t as usize] > 0.0001 { anorm_nonzero = anorm_nonzero + 1 }; t = t + 1 }
+    if anorm_nonzero >= 4 {
+        print("T2 PASS: associator nonzero at "); print_int(anorm_nonzero); println("/8 steps (168-theorem)")
+        passed = passed + 1
+    } else { println("T2 FAIL: associator zero"); failed = failed + 1 }
+
+    // Init E-KAN weights, all measured
+    var ei = 0
+    while ei < 120 { KC1[ei as usize] = rand_p() * 0.5; KU1[ei as usize] = 0.05; ei = ei + 1 }
+    ei = 0
+    while ei < 60  { KC2[ei as usize] = rand_p() * 0.5; KU2[ei as usize] = 0.05; ei = ei + 1 }
+    ei = 0; while ei < 24 { KCF1[ei as usize] = 0.985; ei = ei + 1 }
+    ei = 0; while ei < 12 { KCF2[ei as usize] = 0.985; ei = ei + 1 }
+    // Mark first 6 L1 edges as asserted
+    ei = 0; while ei < 6  { KCF1[ei as usize] = 0.965; ei = ei + 1 }
+
+    // Pipeline: use [P_OUTS[4], P_OUTS[5], P_ANORMS[6], P_ANORMS[7]] as E-KAN input
+    // P_ANORMS are associator norms — the 168-theorem signal not available to real-valued SSMs
+    let pip_inp: [f64; 4] = [P_OUTS[4], P_OUTS[5], P_ANORMS[6], P_ANORMS[7]]
+    let pip_iu:  [f64; 4] = [P_UNCS[4], P_UNCS[5], 0.001, 0.001]
+    let pip_c = P_CONFS[4]   // SSM output confidence
+    kan_run(&pip_inp, &pip_iu, pip_c)
+
+    // T3: E-KAN output nonzero
+    if abs_p(KO[0]) > 0.001 || abs_p(KO[1]) > 0.001 {
+        print("T3 PASS: E-KAN out=["); print(KO[0]); print(", "); print(KO[1]); println("]")
+        passed = passed + 1
+    } else { println("T3 FAIL: E-KAN output zero"); failed = failed + 1 }
+
+    // T4: E-KAN uncertainty nonzero
+    if KOU[0] > 0.0 && KOU[1] > 0.0 {
+        print("T4 PASS: σ=["); print(KOU[0]); print(", "); print(KOU[1]); println("]")
+        passed = passed + 1
+    } else { println("T4 FAIL"); failed = failed + 1 }
+
+    // T5: Pipeline confidence ≤ 0.965 (B asserted in O-SSM)
+    if KOC[0] <= 0.965 + 0.001 && KOC[1] <= 0.965 + 0.001 {
+        print("T5 PASS: pipeline conf="); print(KOC[0]); println(" ≤ 0.965")
+        passed = passed + 1
+    } else { println("T5 FAIL"); failed = failed + 1 }
+
+    // T6: Associator inputs differ from pure SSM value outputs (168-theorem signal is distinct)
+    // P_ANORMS[6] and P_OUTS[6] should differ (associator ≠ Re(C⊗h))
+    let assoc_input = P_ANORMS[6]
+    let ssm_output  = P_OUTS[6]
+    if abs_p(assoc_input - ssm_output) > 0.0001 {
+        print("T6 PASS: assoc_norm="); print(assoc_input); print(" ≠ ssm_out="); print(ssm_output)
+        println(" (168-theorem signal is distinct info)")
+        passed = passed + 1
+    } else { println("T6 FAIL: assoc_norm == ssm_out (degenerate)"); failed = failed + 1 }
+
+    // T7: Associator varies across steps (non-constant geometric signal)
+    var av = 0; t = 1
+    while t < 8 {
+        if abs_p(P_ANORMS[t as usize] - P_ANORMS[(t - 1) as usize]) > 0.0001 { av = av + 1 }
+        t = t + 1
+    }
+    if av >= 4 {
+        print("T7 PASS: assoc varies at "); print_int(av); println("/7 steps (dynamic 168-theorem signal)")
+        passed = passed + 1
+    } else { println("T7 FAIL"); failed = failed + 1 }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}
