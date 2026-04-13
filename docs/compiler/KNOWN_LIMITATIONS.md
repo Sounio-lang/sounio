@@ -40,8 +40,8 @@ Updated February 2026 after full-project audit.
 | LLVM Codegen | Beta | Requires LLVM 15+, feature-gated |
 | Refinement Types + SMT | Beta | Requires Z3, falls back to runtime assertions |
 | LSP | Beta | Cross-file navigation now uses module resolver symbol index (Section 27 of lsp/goto_def.sio); hover and completion stubs present |
-| REPL | Beta | 17 commands, JIT, epistemic badges |
-| Self-hosted Compiler | Beta | Phase 1.2 complete, 30K lines .sio |
+| REPL | Beta | 21 commands, JIT, epistemic badges; :type/:econf/:hist + multi-line input added |
+| Self-hosted Compiler | Beta | Phase 1.3 complete: if-let pattern matching (Some/None/Ok/Err/Enum::Variant); 30K lines .sio |
 | Ontology | Beta | 10K terms, subsumption, distance |
 | Package Manager | Beta | Manifest parsing works, no public registry exists |
 
