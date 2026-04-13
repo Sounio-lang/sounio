@@ -11736,6 +11736,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         var match_arms: i64 = 0
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
             var is_wildcard: i64 = 0
+            var is_var_bind: i64 = 0
             var disc: i64 = -1
             var arm_is_tagged: i64 = 0
             var bind_ns: i64 = 0
@@ -11801,12 +11802,59 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     let vh = gl_name_hash(TS[EP as usize], TE[EP as usize])
                     EP = EP + 1
                     disc = en_variant_value(eh, vh)
-                } else { EP = EP + 1 }
+                } else {
+                    // Variable binding pattern: `v =>` or `v if cond =>`
+                    is_var_bind = 1; bind_ns = pns; bind_ne = pne; EP = EP + 1
+                }
             }
             if arm_tk == 4 {
                 disc = TV[EP as usize]; EP = EP + 1
             }
             if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 { EP = EP + 1 }
+            // Variable binding pattern (with optional guard)
+            if is_var_bind == 1 {
+                // Bind scrutinee to the variable name
+                emit_load_var(match_slot)
+                let vb_slot = var_add(bind_ns, bind_ne)
+                if vb_slot >= 0 {
+                    emit_store_var(vb_slot)
+                    // Propagate scrutinee type to bound variable
+                    if VAR_COUNT > 0 {
+                        let vbi = VAR_COUNT - 1
+                        VAR_TY[vbi as usize] = MATCH_SCRUT_TY
+                        VAR_TY_HASH[vbi as usize] = MATCH_SCRUT_HASH
+                    }
+                }
+                // Optional guard: `if condition`
+                var vb_has_guard: i64 = 0
+                var vb_guard_skip: i64 = 0
+                if TK[EP as usize] == 13 {
+                    vb_has_guard = 1; EP = EP + 1
+                    compile_or()  // guard condition → rax
+                    em(0x48); em(0x85); em(0xc0)  // test rax, rax
+                    em(0x0f); em(0x84); vb_guard_skip = CL; em32(0)  // je guard_fail
+                }
+                if TK[EP as usize] == 52 { EP = EP + 1 }  // skip =>
+                var vb_arm_has_block: i64 = 0
+                if TK[EP as usize] == 8 { vb_arm_has_block = 1; EP = EP + 1 }
+                LAST_STMT_HAS_VALUE = 0
+                if vb_arm_has_block == 1 {
+                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                } else { compile_stmt() }
+                match_arms = match_arms + 1
+                // No guard → acts as wildcard for exhaustiveness
+                if vb_has_guard == 0 { if match_arms < 1000000 { match_arms = 1000000 } }
+                if LAST_STMT_HAS_VALUE == 1 {
+                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
+                    else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
+                } else { match_all_value = 0 }
+                if vb_has_guard == 1 {
+                    em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
+                    arm_count = arm_count + 1
+                    patch32(vb_guard_skip, CL)
+                }
+            }
             if disc >= 0 {
                 if arm_is_tagged == 1 {
                     // Tagged union match: load tag from [scrutinee + 0]
@@ -19626,6 +19674,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         var match_hash: i64 = 0
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
             var is_wildcard: i64 = 0
+            var is_var_bind: i64 = 0
             var disc: i64 = -1
             var arm_is_tagged: i64 = 0
             var bind_ns: i64 = 0; var bind_ne: i64 = 0; var has_binding: i64 = 0
@@ -19638,10 +19687,45 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 let pns = TS[EP as usize]; let pne = TE[EP as usize]
                 if pne - pns == 1 && sb(pns) == 95 { is_wildcard = 1; EP = EP + 1 }
                 else if TK[(EP + 1) as usize] == 51 { let eh = gl_name_hash(pns, pne); EP = EP + 2; let vh = gl_name_hash(TS[EP as usize], TE[EP as usize]); EP = EP + 1; disc = en_variant_value(eh, vh) }
-                else { EP = EP + 1 }
+                else { is_var_bind = 1; bind_ns = pns; bind_ne = pne; EP = EP + 1 }
             }
             if arm_tk == 4 { disc = TV[EP as usize]; EP = EP + 1 }
             if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 { EP = EP + 1 }
+            // Variable binding pattern (with optional guard) — ARM64
+            if is_var_bind == 1 {
+                emit_load_var_a64(match_slot)
+                let vb_slot_a64 = var_add(bind_ns, bind_ne)
+                if vb_slot_a64 >= 0 {
+                    emit_store_var_a64(vb_slot_a64)
+                    if VAR_COUNT > 0 { let vbi = VAR_COUNT - 1; VAR_TY[vbi as usize] = MATCH_SCRUT_TY; VAR_TY_HASH[vbi as usize] = MATCH_SCRUT_HASH }
+                }
+                var vb_has_guard_a64: i64 = 0
+                var vb_guard_skip_a64: i64 = 0
+                if TK[EP as usize] == 13 {
+                    vb_has_guard_a64 = 1; EP = EP + 1
+                    compile_or_a64()  // guard condition → x0
+                    vb_guard_skip_a64 = CL; em32(0xB4000000)  // cbz x0, guard_fail
+                }
+                if TK[EP as usize] == 52 { EP = EP + 1 }
+                var vb_arm_has_block_a64: i64 = 0
+                if TK[EP as usize] == 8 { vb_arm_has_block_a64 = 1; EP = EP + 1 }
+                LAST_STMT_HAS_VALUE = 0
+                if vb_arm_has_block_a64 == 1 {
+                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                } else { compile_stmt_a64() }
+                match_arms = match_arms + 1
+                if vb_has_guard_a64 == 0 { if match_arms < 1000000 { match_arms = 1000000 } }
+                if LAST_STMT_HAS_VALUE == 1 {
+                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
+                    else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
+                } else { match_all_value = 0 }
+                if vb_has_guard_a64 == 1 {
+                    MATCH_ENDS[arm_count as usize] = CL; em32(0x14000000)
+                    arm_count = arm_count + 1
+                    patch_branch_a64(vb_guard_skip_a64, CL)
+                }
+            }
             if disc >= 0 {
                 if arm_is_tagged == 1 {
                     emit_load_var_a64(match_slot); em32(0xF9400000); emit_push_a64()
