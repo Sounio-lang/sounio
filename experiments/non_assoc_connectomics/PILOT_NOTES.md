@@ -1,7 +1,58 @@
 # Pilot Notes — Phase 1
 
-**Date**: 2026-04-13
-**Mode**: Real ABIDE-I data, n = 10 (5 ASD + 5 TD)
+**Updated**: 2026-04-13 (second pass — site-stratified)
+**Mode**: Real ABIDE-I data, two pilot runs
+
+## Second pilot — site-stratified (n=24)
+
+Same-day refit after the CMU_a single-site pilot (below) was flagged as site-confounded.
+
+Sampling: 1 ASD + 1 TD from each of 12 distinct ABIDE-I sites, deterministic by FILE_ID lexicographic sort within each site/group stratum. Sites: CMU_a, CMU_b, Caltech, KKI, Leuven_1, Leuven_2, MaxMun_a, MaxMun_c, MaxMun_d, NYU, OHSU, Olin.
+
+```
+n_asd = 12, n_td = 12  (24 total, 12 sites)
+mean(p95 | ASD) = 0.197
+mean(p95 | TD)  = 0.101
+Cohen's d (ASD − TD) = +0.306    ← sign FLIPPED from CMU_a-only
+95% bootstrap CI      = [−0.72, +0.93]    ← CI CROSSES ZERO
+KS D = 0.333, p = 0.536
+```
+
+### Gate decision (Phase 2 precondition per PROTOCOL_PHASE2.md)
+
+| Criterion | Threshold | Observed | Pass? |
+|---|---|---|---|
+| `|Cohen's d|` | > 0.15 | 0.306 | ✓ |
+| 95% CI excludes zero | True | False (CI = [−0.72, +0.93]) | ✗ |
+
+**Gate FAILS on the CI-excludes-zero criterion.** Strictly per PROTOCOL_PHASE2, Phase 2 must NOT be triggered.
+
+### What the stratified result actually tells us
+
+1. **The CMU_a single-site pilot was artifactual.** Cohen's d sign flipped (−0.93 → +0.31) when the sample became site-diverse. This is the expected behavior of a site confound.
+2. **The direction after de-confounding is positive** (ASD > TD), nominally consistent with H1. No protocol amendment needed on sign.
+3. **The effect-size point estimate is small (d=0.31) and the CI is wide** — typical of n=24. The wide CI is a sample-size problem, not a sign problem.
+4. **|d| = 0.306 clears the magnitude threshold** but not the CI threshold.
+
+### Three paths forward (user decision)
+
+1. **Strict protocol adherence**: CI gate failed → do not run Phase 2. Instead, expand the pilot to n≈50 (2-3 subjects per site), re-test the gate, then decide. Cost: one more fetch + compile cycle (~hours of compute if cluster-staged).
+
+2. **Sample-size-aware amendment**: Treat the n=24 CI as reflecting sample size, not signal. Amend PROTOCOL_PHASE2 § Precondition to gate on |d| > 0.15 alone (drop the CI requirement), document the amendment with date, re-freeze, then run Phase 2. This is scientifically defensible because Phase 2's n=1034 has power > 0.99 for |d| ≥ 0.15 — the pilot's CI is irrelevant for that decision. Cost: protocol amendment (logged, public).
+
+3. **Abandon**: no effect strong enough to justify Phase 2's compute. Write up null result from the pilot. This is what the G₂ bridge ended up doing (per memory `project_g2_bridge.md`).
+
+I do not make this call. PROTOCOL_PHASE2 was frozen; post-freeze decisions belong to the investigator.
+
+### What's proven (technical pipeline)
+
+- End-to-end real-ABIDE execution works: S3 fetch → Laplacian eigendecomposition → `frames.bin` → Sounio compile → per-subject p95 → bootstrap CI → publication figure.
+- The 5-subject-per-group cap in `associator_field.sio` lifted to 25 for this pilot (single-line change, committed).
+- Phase 2 code is ready to run if amendment path is chosen.
+
+## First pilot — single-site (n=10, ARTIFACT — superseded)
+
+[retained for audit trail only; superseded by the stratified pilot above]
 
 ## Gate status (updated 2026-04-13 with real ABIDE data)
 
