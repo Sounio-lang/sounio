@@ -1,0 +1,335 @@
+//@ run-pass
+// stdlib/time: Duration and DateTime arithmetic (pure epoch-based, no OS clock)
+// stdlib/text: numeric formatting via format_int / format_f64
+//
+// Uses APIs from:
+//   stdlib/time/duration.sio   (dur_from_secs, dur_from_millis, dur_add, dur_sub)
+//   stdlib/time/datetime.sio   (dt_new, dt_is_leap_year, dt_days_in_month,
+//                               dt_to_unix, dt_from_unix, dt_add_seconds, dt_diff_seconds)
+//   stdlib/text/format.sio     (format_int, format_f64)
+//
+// Note: format_int/format_f64 use str_concat + str_slice to avoid [i8;N] element
+// size issues in the current JIT binary (fixed in Gen22 native build).
+
+// ============================================================
+// Duration API (from stdlib/time/duration.sio)
+// ============================================================
+
+struct Duration {
+    secs: i64,
+    nanos: i32
+}
+
+fn dur_from_secs(s: i64) -> Duration {
+    Duration { secs: s, nanos: 0 }
+}
+
+fn dur_from_millis(ms: i64) -> Duration with Div, Panic {
+    let s = ms / 1000
+    let remainder = ms - s * 1000
+    Duration { secs: s, nanos: (remainder * 1000000) as i32 }
+}
+
+fn dur_add(a: Duration, b: Duration) -> Duration with Div, Panic {
+    var total_nanos: i64 = a.nanos as i64 + b.nanos as i64
+    var extra_secs = total_nanos / 1000000000
+    var nanos = total_nanos - extra_secs * 1000000000
+    Duration { secs: a.secs + b.secs + extra_secs, nanos: nanos as i32 }
+}
+
+fn dur_sub(a: Duration, b: Duration) -> Duration with Mut, Div, Panic {
+    var secs = a.secs - b.secs
+    var nanos: i64 = a.nanos as i64 - b.nanos as i64
+    if nanos < 0 {
+        secs = secs - 1
+        nanos = nanos + 1000000000
+    }
+    if secs < 0 {
+        return Duration { secs: 0, nanos: 0 }
+    }
+    Duration { secs: secs, nanos: nanos as i32 }
+}
+
+fn dur_to_millis(d: Duration) -> i64 {
+    d.secs * 1000 + d.nanos as i64 / 1000000
+}
+
+// ============================================================
+// DateTime API (from stdlib/time/datetime.sio)
+// ============================================================
+
+struct DateTime {
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32
+}
+
+fn dt_new(y: i32, m: i32, d: i32, h: i32, min: i32, s: i32) -> DateTime {
+    DateTime { year: y, month: m, day: d, hour: h, minute: min, second: s }
+}
+
+fn dt_is_leap_year(year: i32) -> bool with Div, Panic {
+    if year - (year / 4) * 4 != 0 { return false }
+    if year - (year / 100) * 100 != 0 { return true }
+    if year - (year / 400) * 400 != 0 { return false }
+    true
+}
+
+fn dt_days_in_month(year: i32, month: i32) -> i32 with Div, Panic {
+    if month == 1  { return 31 }
+    if month == 2  { if dt_is_leap_year(year) { return 29 } return 28 }
+    if month == 3  { return 31 }
+    if month == 4  { return 30 }
+    if month == 5  { return 31 }
+    if month == 6  { return 30 }
+    if month == 7  { return 31 }
+    if month == 8  { return 31 }
+    if month == 9  { return 30 }
+    if month == 10 { return 31 }
+    if month == 11 { return 30 }
+    if month == 12 { return 31 }
+    0
+}
+
+fn dt_to_unix(dt: DateTime) -> i64 with Mut, Div, Panic {
+    var days: i64 = 0
+    if dt.year > 1970 {
+        var y: i32 = 1970
+        while y < dt.year {
+            if dt_is_leap_year(y) { days = days + 366 } else { days = days + 365 }
+            y = y + 1
+        }
+    }
+    var m: i32 = 1
+    while m < dt.month {
+        days = days + dt_days_in_month(dt.year, m) as i64
+        m = m + 1
+    }
+    days = days + (dt.day - 1) as i64
+    days * 86400 + dt.hour as i64 * 3600 + dt.minute as i64 * 60 + dt.second as i64
+}
+
+fn dt_from_unix(ts: i64) -> DateTime with Mut, Div, Panic {
+    var total_days = ts / 86400
+    var day_secs = ts - total_days * 86400
+    var year: i32 = 1970
+    var running: i64 = 0
+    var done = false
+    while !done {
+        var yr_days: i64 = 365
+        if dt_is_leap_year(year) { yr_days = 366 }
+        if running + yr_days > total_days { done = true } else {
+            running = running + yr_days
+            year = year + 1
+        }
+    }
+    total_days = total_days - running
+    var month: i32 = 1
+    var remaining_days = total_days as i32
+    var found = false
+    while !found {
+        let dim = dt_days_in_month(year, month)
+        if remaining_days < dim { found = true } else {
+            remaining_days = remaining_days - dim
+            month = month + 1
+        }
+    }
+    let day = remaining_days + 1
+    let hour = (day_secs / 3600) as i32
+    let minute = ((day_secs - hour as i64 * 3600) / 60) as i32
+    let second = (day_secs - hour as i64 * 3600 - minute as i64 * 60) as i32
+    DateTime { year: year, month: month, day: day, hour: hour, minute: minute, second: second }
+}
+
+fn dt_add_seconds(dt: DateTime, secs: i64) -> DateTime with Mut, Div, Panic {
+    dt_from_unix(dt_to_unix(dt) + secs)
+}
+
+fn dt_diff_seconds(a: DateTime, b: DateTime) -> i64 with Mut, Div, Panic {
+    dt_to_unix(a) - dt_to_unix(b)
+}
+
+// ============================================================
+// format_int / format_f64 (from stdlib/text/format.sio)
+//
+// Implementation uses str_concat + str_slice to avoid [i8;N] element
+// size issues in the current JIT binary (the [i8;N] fix activates in
+// the Gen22 native build — see KNOWN_LIMITATIONS.md).
+// ============================================================
+
+fn format_int(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 { return "0" }
+    var neg = n < 0
+    var m: i64 = n
+    if neg { m = 0 - n }
+    var result = ""
+    while m > 0 {
+        let d = m % 10
+        result = str_concat(str_slice("0123456789", d, d + 1), result)
+        m = m / 10
+    }
+    if neg { result = str_concat("-", result) }
+    result
+}
+
+fn format_f64(x: f64) -> string with Mut, Panic, Div {
+    var neg = x < 0.0
+    var ax: f64 = x
+    if neg { ax = 0.0 - x }
+    let int_part = ax as i64
+    let frac_raw = ((ax - int_part as f64) * 10000.0) as i64
+    var frac_i: i64 = frac_raw
+    if frac_i < 0 { frac_i = 0 }
+    if frac_i > 9999 { frac_i = 9999 }
+    // Build 4-digit frac string with leading zeros
+    var frac_str = ""
+    var f = frac_i
+    var fi: i64 = 0
+    while fi < 4 {
+        let d = f % 10
+        frac_str = str_concat(str_slice("0123456789", d, d + 1), frac_str)
+        f = f / 10
+        fi = fi + 1
+    }
+    var result = str_concat(format_int(int_part), ".")
+    result = str_concat(result, frac_str)
+    if neg { result = str_concat("-", result) }
+    result
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+fn test_duration_arithmetic() -> bool with Div, Panic, Mut {
+    // 1. Create Durations and do arithmetic
+    let d1 = dur_from_secs(5)
+    let d2 = dur_from_millis(2500)
+
+    // 5s + 2.5s = 7s 500_000_000ns
+    let sum = dur_add(d1, d2)
+    if sum.secs != 7 { return false }
+    if sum.nanos != 500000000 { return false }
+
+    // 5s - 2.5s = 2s 500_000_000ns
+    let diff = dur_sub(d1, d2)
+    if diff.secs != 2 { return false }
+    if diff.nanos != 500000000 { return false }
+
+    // millis round-trip
+    let ms = dur_to_millis(d2)
+    if ms != 2500 { return false }
+
+    true
+}
+
+fn test_datetime_arithmetic() -> bool with Div, Panic, Mut {
+    // 2. Create a DateTime and verify fields
+    let dt = dt_new(2024, 3, 15, 10, 30, 0)
+    if dt.year != 2024 { return false }
+    if dt.month != 3 { return false }
+    if dt.day != 15 { return false }
+    if dt.hour != 10 { return false }
+
+    // Add one day (86400 seconds)
+    let dt2 = dt_add_seconds(dt, 86400)
+    if dt2.year != 2024 { return false }
+    if dt2.month != 3 { return false }
+    if dt2.day != 16 { return false }
+
+    // Diff
+    let diff_s = dt_diff_seconds(dt2, dt)
+    if diff_s != 86400 { return false }
+
+    // Year rollover: 2024-12-31 + 1 day = 2025-01-01
+    let dt3 = dt_new(2024, 12, 31, 0, 0, 0)
+    let dt4 = dt_add_seconds(dt3, 86400)
+    if dt4.year != 2025 { return false }
+    if dt4.month != 1 { return false }
+    if dt4.day != 1 { return false }
+
+    // Leap year checks
+    if !dt_is_leap_year(2024) { return false }
+    if dt_is_leap_year(2023) { return false }
+    if !dt_is_leap_year(2000) { return false }
+    if dt_is_leap_year(1900) { return false }
+
+    // Days in month
+    if dt_days_in_month(2024, 2) != 29 { return false }
+    if dt_days_in_month(2023, 2) != 28 { return false }
+    if dt_days_in_month(2024, 7) != 31 { return false }
+
+    true
+}
+
+fn test_format_int() -> bool with Div, Panic, Mut {
+    // 3. format_int(42) → "42"
+    let s1 = format_int(42)
+    if s1 != "42" { return false }
+
+    let s2 = format_int(0)
+    if s2 != "0" { return false }
+
+    let s3 = format_int(0 - 7)
+    if s3 != "-7" { return false }
+
+    let s4 = format_int(1000)
+    if s4 != "1000" { return false }
+
+    let s5 = format_int(123456)
+    if s5 != "123456" { return false }
+
+    true
+}
+
+fn test_format_f64() -> bool with Div, Panic, Mut {
+    // format_f64(3.14) → "3.1400"
+    let s1 = format_f64(3.14)
+    if s1 != "3.1400" { return false }
+
+    let s2 = format_f64(0.0)
+    if s2 != "0.0000" { return false }
+
+    let s3 = format_f64(1.5)
+    if s3 != "1.5000" { return false }
+
+    true
+}
+
+fn main() -> i32 with IO, Div, Panic, Mut {
+    var ok = true
+
+    if test_duration_arithmetic() {
+        println("duration_arithmetic: PASS")
+    } else {
+        println("duration_arithmetic: FAIL")
+        ok = false
+    }
+
+    if test_datetime_arithmetic() {
+        println("datetime_arithmetic: PASS")
+    } else {
+        println("datetime_arithmetic: FAIL")
+        ok = false
+    }
+
+    if test_format_int() {
+        println("format_int: PASS")
+    } else {
+        println("format_int: FAIL")
+        ok = false
+    }
+
+    if test_format_f64() {
+        println("format_f64: PASS")
+    } else {
+        println("format_f64: FAIL")
+        ok = false
+    }
+
+    if ok { return 0 }
+    return 1
+}

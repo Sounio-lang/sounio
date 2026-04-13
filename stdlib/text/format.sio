@@ -1,136 +1,77 @@
 // stdlib/text/format.sio — numeric-to-string conversion
 //
 // Functions:
-//   i64_to_str(n)   -> string   (decimal, handles negatives)
-//   f64_to_str(x)   -> string   (decimal, 4 fractional digits)
+//   format_int(n: i64)   -> string   (decimal, handles negatives)
+//   format_f64(x: f64)   -> string   (decimal, 4 fractional digits)
+//   i64_to_str(n: i64)   -> string   (alias for format_int)
+//   f64_to_str(x: f64)   -> string   (alias for format_f64)
 //
-// Both use a single stack-allocated [i8; 32] buffer and str_from_bytes;
-// no heap allocation, no string concatenation.
+// Implementation uses str_concat + str_slice; no [i8;N] buffer needed.
+// The [i8;N] element-size fix activates in the Gen22+ native build;
+// this implementation works in both the JIT and native codegen.
 
 // ============================================================
-// Helpers (must precede callers)
+// format_int — i64 → decimal string
 // ============================================================
 
-// Write decimal digits of n (n >= 0) into buf starting at pos.
-// Returns (buf, new_pos). Digits are in reverse order on return.
-fn i64_digits_to_buf(n: i64, buf: [i8; 32], pos: i64) -> ([i8; 32], i64) with Mut, Div, Panic {
-    var b = buf
-    var p = pos
-    var m = n
-    while m > 0 {
-        b[p] = (48 + m % 10) as i8
-        p = p + 1
-        m = m / 10
-    }
-    (b, p)
-}
-
-// Reverse buf[start..end] in place and return the updated buffer.
-fn i8_buf_reverse(buf: [i8; 32], start: i64, end: i64) -> [i8; 32] with Mut, Div, Panic {
-    var b = buf
-    var lo = start
-    var hi = end - 1
-    while lo < hi {
-        let tmp = b[lo]
-        b[lo] = b[hi]
-        b[hi] = tmp
-        lo = lo + 1
-        hi = hi - 1
-    }
-    b
-}
-
-// ============================================================
-// i64 → decimal string
-// ============================================================
-
-fn i64_to_str(n: i64) -> string with Mut, Div, Panic {
-    var buf: [i8; 32] = [0; 32]
-
-    if n == 0 {
-        buf[0] = 48 as i8
-        return str_from_bytes(buf, 1)
-    }
-
+fn format_int(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 { return "0" }
     var neg = n < 0
     var m: i64 = n
-    if neg {
-        m = 0 - n
+    if neg { m = 0 - n }
+    var result = ""
+    while m > 0 {
+        let d = m % 10
+        result = str_concat(str_slice("0123456789", d, d + 1), result)
+        m = m / 10
     }
-
-    let (buf2, digit_end) = i64_digits_to_buf(m, buf, 0)
-    var b2 = buf2
-    var de = digit_end
-
-    if neg {
-        b2[de] = 45 as i8   // '-'
-        de = de + 1
-    }
-
-    // Digits (and sign) were written in reverse; un-reverse
-    let b3 = i8_buf_reverse(b2, 0, de)
-    str_from_bytes(b3, de)
+    if neg { result = str_concat("-", result) }
+    result
 }
 
 // ============================================================
-// f64 → decimal string (4 decimal places)
+// format_f64 — f64 → decimal string (4 fractional digits)
 // ============================================================
 //
-// Uses a single 32-byte buffer:
-//   [sign?][int digits][.][4 frac digits]
-// Maximum width: 1 + 19 + 1 + 4 = 25 bytes — well within 32.
+// Output format: ["-"]<int_part>"."<4-digit-frac>
+// Example: 3.14 → "3.1400",  -0.5 → "-0.5000"
 
-fn f64_to_str(x: f64) -> string with Mut, Div, Panic {
-    var buf: [i8; 32] = [0; 32]
-    var pos: i64 = 0
-
-    // Sign
+fn format_f64(x: f64) -> string with Mut, Panic, Div {
     var neg = x < 0.0
     var ax: f64 = x
-    if neg {
-        buf[0] = 45 as i8   // '-'
-        pos = 1
-        ax = 0.0 - x
-    }
+    if neg { ax = 0.0 - x }
 
-    // Integer part
     let int_part = ax as i64
-    let int_start = pos
-
-    if int_part == 0 {
-        buf[pos] = 48 as i8
-        pos = pos + 1
-    } else {
-        let (buf2, digit_end) = i64_digits_to_buf(int_part, buf, pos)
-        buf = buf2
-        pos = digit_end
-        buf = i8_buf_reverse(buf, int_start, pos)
-    }
-
-    // Decimal point
-    buf[pos] = 46 as i8   // '.'
-    pos = pos + 1
-
-    // Fractional part — 4 digits, zero-padded
     let frac_raw = ((ax - int_part as f64) * 10000.0) as i64
     var frac_i: i64 = frac_raw
-    if frac_i < 0 {
-        frac_i = 0
-    }
-    if frac_i > 9999 {
-        frac_i = 9999
-    }
+    if frac_i < 0 { frac_i = 0 }
+    if frac_i > 9999 { frac_i = 9999 }
 
-    // Write 4 digits right-to-left then step pos forward by 4
+    // Build 4-digit fractional string with leading zeros
+    var frac_str = ""
     var f = frac_i
-    buf[pos + 3] = (48 + f % 10) as i8
-    f = f / 10
-    buf[pos + 2] = (48 + f % 10) as i8
-    f = f / 10
-    buf[pos + 1] = (48 + f % 10) as i8
-    f = f / 10
-    buf[pos + 0] = (48 + f % 10) as i8
-    pos = pos + 4
+    var fi: i64 = 0
+    while fi < 4 {
+        let d = f % 10
+        frac_str = str_concat(str_slice("0123456789", d, d + 1), frac_str)
+        f = f / 10
+        fi = fi + 1
+    }
 
-    str_from_bytes(buf, pos)
+    var result = str_concat(format_int(int_part), ".")
+    result = str_concat(result, frac_str)
+    if neg { result = str_concat("-", result) }
+    result
+}
+
+// ============================================================
+// Aliases (backward-compatible names)
+// ============================================================
+
+fn i64_to_str(n: i64) -> string with Mut, Panic, Div {
+    format_int(n)
+}
+
+fn f64_to_str(x: f64) -> string with Mut, Panic, Div {
+    format_f64(x)
 }

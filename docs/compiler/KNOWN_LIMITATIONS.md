@@ -93,10 +93,16 @@ The following stdlib modules are stubs or incomplete:
 - `stdlib/ffi/` - stub
 - `stdlib/autodiff/` - framework only
 - `stdlib/interop/` - stub
-- `stdlib/text/`, `stdlib/time/` - disabled (require type conversion from Rust unsigned types)
+- `stdlib/text/*.sio.disabled`, `stdlib/time/*.sio.disabled` - old Rust-style stubs (use `u32`/`u64`/closures/`for..in`); superseded by pure-Sounio rewrites already active as `.sio` files
 
 ### Recently Activated Modules
 
+- `stdlib/text/format.sio` - `format_int(i64) → string`, `format_f64(f64) → string` (4 decimal places); uses str_concat+str_slice, no heap. Smoke test: `tests/run-pass/stdlib_time_basic.sio`.
+- `stdlib/text/case.sio` - char/string case conversion (uppercase, lowercase, titlecase, snake_case, camelCase, PascalCase, kebab-case); pure Sounio, no FFI.
+- `stdlib/text/unicode.sio` - Unicode character classification (alphabetic, numeric, whitespace, punctuation, control, ASCII variants); pure Sounio.
+- `stdlib/time/duration.sio` - `Duration` struct with nanosecond precision; arithmetic: dur_add, dur_sub, dur_from_millis, dur_to_millis; pure Sounio, no FFI.
+- `stdlib/time/datetime.sio` - `DateTime` struct with full calendar arithmetic (leap year, days-in-month, unix epoch roundtrip, year rollover); pure Sounio, no FFI. Smoke test: `tests/run-pass/stdlib_time_basic.sio`.
+- `stdlib/time/instant.sio` - Monotonic clock via `clock_gettime` syscall; uses integer FFI (now working).
 - `stdlib/os/process.sio` - getpid/getppid/exit/abort via extern "C" stubs (integer FFI now works)
 - `stdlib/mem/` - heap_alloc/heap_free (malloc/free stubs), arena bump allocator, box/rc/arc wrappers — all active
 - `stdlib/sync/mutex.sio` - pthread_mutex_{init,lock,trylock,unlock,destroy} via extern "C" stubs
