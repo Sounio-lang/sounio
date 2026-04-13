@@ -38,7 +38,7 @@ Updated February 2026 after full-project audit.
 | Component | Status | Limitations |
 |-----------|--------|-------------|
 | LLVM Codegen | Beta | Requires LLVM 15+, feature-gated |
-| Refinement Types + SMT | Beta | Requires Z3, falls back to runtime assertions |
+| Refinement Types + SMT | Beta | Static engine (no Z3) handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic |
 | LSP | Beta | Cross-file navigation now uses module resolver symbol index (Section 27 of lsp/goto_def.sio); hover and completion stubs present |
 | REPL | Beta | 21 commands, JIT, epistemic badges; :type/:econf/:hist + multi-line input added |
 | Self-hosted Compiler | Beta | Phase 1.3 complete: if-let pattern matching (Some/None/Ok/Err/Enum::Variant); 30K lines .sio |
@@ -119,7 +119,7 @@ The following stdlib modules are stubs or incomplete:
 | Feature | Dependency | Effect if Missing |
 |---------|------------|-------------------|
 | `--features llvm` | LLVM 15+ | Use Cranelift JIT instead |
-| `--features smt` | Z3 + cmake | Refinement types fall back to runtime checks |
+| `--features smt` | Z3 + cmake | Without Z3: static engine handles constants/narrowing/monotonicity; complex predicates fall back to runtime checks with W040 |
 | `--features gpu` | CUDA toolkit | GPU codegen works, execution requires runtime |
 
 ### Platform Support
