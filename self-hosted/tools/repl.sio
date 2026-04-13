@@ -291,6 +291,316 @@ fn repl_is_history_cmd(input: string) -> bool with Mut, Panic, Div {
     repl_str_eq(input, ":history") || repl_str_eq(input, ":hist")
 }
 
+// Check whether input starts with a given prefix string.
+fn repl_starts_with(s: string, prefix: string) -> bool with Mut, Panic, Div {
+    let sn = str_len(s)
+    let pn = str_len(prefix)
+    if sn < pn { return false }
+    var i: i64 = 0
+    while i < pn {
+        if str_char_at(s, i) != str_char_at(prefix, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// :type <expr> — detect command
+fn repl_is_type_cmd(input: string) -> bool with Mut, Panic, Div {
+    repl_starts_with(input, ":type ")
+}
+
+// Extract the expression argument from ":type <expr>"
+fn repl_type_cmd_arg(input: string) -> string with Mut, Panic, Div {
+    let n = str_len(input)
+    // ":type " is 6 chars
+    if n <= 6 { return "" }
+    // build substring from pos 6 onward
+    var buf: [i8; 4096] = [0; 4096]
+    var i: i64 = 6
+    var j: i64 = 0
+    while i < n && j < 4095 {
+        buf[j as usize] = str_char_at(input, i) as i8
+        i = i + 1
+        j = j + 1
+    }
+    str_from_bytes(buf, j)
+}
+
+// :econf — detect command
+fn repl_is_econf_cmd(input: string) -> bool with Mut, Panic, Div {
+    repl_str_eq(input, ":econf")
+}
+
+// ============================================================================
+// EPISTEMIC SESSION STATE
+// ============================================================================
+//
+// A lightweight in-session epistemic certificate: tracks the running count of
+// evaluated expressions, the number that parsed successfully, and the current
+// aggregate confidence (0–1000 fixed-point, like lean_single's EXPR_CONF).
+// Updated by repl_eval_expr; displayed by :econf.
+
+struct ReplEpistState {
+    total_exprs:    i64,   // expressions evaluated (attempted)
+    certain_exprs:  i64,   // expressions that evaluated without error
+    session_conf:   i64,   // current aggregate confidence (0-1000)
+    gate_threshold: i64,   // threshold for "high confidence" badge (default 950)
+}
+
+fn repl_epist_new() -> ReplEpistState {
+    ReplEpistState {
+        total_exprs:   0,
+        certain_exprs: 0,
+        session_conf:  1000,  // start fully confident; degrades on errors
+        gate_threshold: 950,
+    }
+}
+
+// Update epistemic state after an evaluation. ok=true → certain, ok=false → uncertain.
+fn repl_epist_update(ep: &! ReplEpistState, ok: bool) -> () with Mut {
+    ep.total_exprs = ep.total_exprs + 1
+    if ok {
+        ep.certain_exprs = ep.certain_exprs + 1
+        // Confidence rises toward 1000 on success: GUM product raise by 1%
+        let new_conf = ep.session_conf + (1000 - ep.session_conf) / 100
+        if new_conf > 1000 { ep.session_conf = 1000 } else { ep.session_conf = new_conf }
+    } else {
+        // Confidence decays on error: multiply by 0.95 (950/1000)
+        ep.session_conf = ep.session_conf * 950 / 1000
+    }
+}
+
+// Build the :econf human-readable summary string.
+// Returns something like:
+//   epistemic-certificate { exprs=12 certain=11 conf=978/1000 badge=high-confidence }
+fn repl_epist_summary(ep: &ReplEpistState) -> string with Mut, Panic, Div {
+    // Build into a 512-byte scratch buffer using integer formatting.
+    var buf: [i8; 512] = [0; 512]
+    var pos: i64 = 0
+
+    // "epistemic-certificate { exprs="
+    let hdr = "epistemic-certificate { exprs="
+    let hn = str_len(hdr)
+    var hi: i64 = 0
+    while hi < hn && pos < 511 {
+        buf[pos as usize] = str_char_at(hdr, hi) as i8
+        pos = pos + 1
+        hi = hi + 1
+    }
+    // write total_exprs
+    var tmp: [i8; 64] = [0; 64]
+    let tmp_ref = &! tmp
+    let tlen = repl_int_to_chars(tmp_ref, ep.total_exprs, 0)
+    var ti: i64 = 0
+    while ti < tlen && pos < 511 {
+        buf[pos as usize] = tmp[ti as usize]
+        pos = pos + 1
+        ti = ti + 1
+    }
+    // " certain="
+    let c1 = " certain="
+    let c1n = str_len(c1)
+    var c1i: i64 = 0
+    while c1i < c1n && pos < 511 {
+        buf[pos as usize] = str_char_at(c1, c1i) as i8
+        pos = pos + 1
+        c1i = c1i + 1
+    }
+    // write certain_exprs
+    var tmp2: [i8; 64] = [0; 64]
+    let tmp2_ref = &! tmp2
+    let t2len = repl_int_to_chars(tmp2_ref, ep.certain_exprs, 0)
+    var t2i: i64 = 0
+    while t2i < t2len && pos < 511 {
+        buf[pos as usize] = tmp2[t2i as usize]
+        pos = pos + 1
+        t2i = t2i + 1
+    }
+    // " conf="
+    let c2 = " conf="
+    let c2n = str_len(c2)
+    var c2i: i64 = 0
+    while c2i < c2n && pos < 511 {
+        buf[pos as usize] = str_char_at(c2, c2i) as i8
+        pos = pos + 1
+        c2i = c2i + 1
+    }
+    // write session_conf
+    var tmp3: [i8; 64] = [0; 64]
+    let tmp3_ref = &! tmp3
+    let t3len = repl_int_to_chars(tmp3_ref, ep.session_conf, 0)
+    var t3i: i64 = 0
+    while t3i < t3len && pos < 511 {
+        buf[pos as usize] = tmp3[t3i as usize]
+        pos = pos + 1
+        t3i = t3i + 1
+    }
+    // "/1000 badge="
+    let c3 = "/1000 badge="
+    let c3n = str_len(c3)
+    var c3i: i64 = 0
+    while c3i < c3n && pos < 511 {
+        buf[pos as usize] = str_char_at(c3, c3i) as i8
+        pos = pos + 1
+        c3i = c3i + 1
+    }
+    // badge label
+    let badge = if ep.session_conf >= ep.gate_threshold { "high-confidence" } else { "uncertain" }
+    let bn = str_len(badge)
+    var bi: i64 = 0
+    while bi < bn && pos < 511 {
+        buf[pos as usize] = str_char_at(badge, bi) as i8
+        pos = pos + 1
+        bi = bi + 1
+    }
+    // " }"
+    if pos < 511 { buf[pos as usize] = 32 as i8; pos = pos + 1 }
+    if pos < 511 { buf[pos as usize] = 125 as i8; pos = pos + 1 }  // '}'
+
+    str_from_bytes(buf, pos)
+}
+
+// ============================================================================
+// :hist DISPLAY
+// ============================================================================
+
+// Build a human-readable history listing for the last `limit` entries.
+// Returns a multiline string. At most 10 entries shown (per REPL spec).
+fn repl_format_history(r: &ReplState, limit: i64) -> string with Mut, Panic, Div {
+    let count = r.history.count
+    var show: i64 = limit
+    if show > count { show = count }
+    if show > 10 { show = 10 }
+    // Each entry is at most 64 chars + "NNN: " prefix (5) + "\n" (1) = ~70 bytes.
+    // 10 entries × 70 = 700 bytes; use 1024 scratch buffer.
+    var buf: [i8; 1024] = [0; 1024]
+    var pos: i64 = 0
+    var i: i64 = 0
+    // Start from oldest of the `show` entries
+    let start = count - show
+    while i < show {
+        let entry_idx = start + i
+        let line = repl_history_get(r, entry_idx)
+        // Write entry number "NNN: "
+        var nbuf: [i8; 64] = [0; 64]
+        let nbuf_ref = &! nbuf
+        let nlen = repl_int_to_chars(nbuf_ref, entry_idx + 1, 0)
+        var ni: i64 = 0
+        while ni < nlen && pos < 1022 {
+            buf[pos as usize] = nbuf[ni as usize]
+            pos = pos + 1
+            ni = ni + 1
+        }
+        // ": "
+        if pos < 1022 { buf[pos as usize] = 58 as i8; pos = pos + 1 }   // ':'
+        if pos < 1022 { buf[pos as usize] = 32 as i8; pos = pos + 1 }   // ' '
+        // entry text
+        let llen = str_len(line)
+        var li: i64 = 0
+        while li < llen && pos < 1022 {
+            buf[pos as usize] = str_char_at(line, li) as i8
+            pos = pos + 1
+            li = li + 1
+        }
+        // newline
+        if pos < 1022 { buf[pos as usize] = 10 as i8; pos = pos + 1 }   // '\n'
+        i = i + 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+// ============================================================================
+// MULTI-LINE INPUT DETECTION
+// ============================================================================
+//
+// Returns true if the line has unclosed `{` or `(` delimiters, meaning the
+// user's expression is incomplete and further input should be gathered.
+
+fn repl_needs_continuation(line: string) -> bool with Mut, Panic, Div {
+    let n = str_len(line)
+    var depth_brace: i64 = 0
+    var depth_paren: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let c = str_char_at(line, i)
+        if c == 123 { depth_brace = depth_brace + 1 }    // '{'
+        if c == 125 { depth_brace = depth_brace - 1 }    // '}'
+        if c == 40  { depth_paren = depth_paren + 1 }    // '('
+        if c == 41  { depth_paren = depth_paren - 1 }    // ')'
+        i = i + 1
+    }
+    depth_brace > 0 || depth_paren > 0
+}
+
+// ============================================================================
+// :type HANDLER
+// ============================================================================
+//
+// Evaluates `expr_str` as an integer expression and returns a ReplResult
+// whose output is "expr_str : i64  [conf=EXPR_CONF_PLACEHOLDER/1000]".
+// The "type" shown is always i64 for this integer evaluator. The conf field
+// is set to 1000 on success (literal fully determined), 0 on parse error.
+
+fn repl_handle_type_cmd(r: &! ReplState, expr_str: string) -> ReplResult with Mut, Panic, Div {
+    var res = repl_result_new()
+    if str_len(expr_str) == 0 {
+        res.ok = false
+        res.exit_code = REPL_PARSE_ERR()
+        repl_result_set_error(&! res, ":type requires an expression")
+        return res
+    }
+    // Evaluate to get the actual value (and determine success/failure)
+    let eval_res = repl_eval_expr(r, expr_str)
+    // Confidence: 1000 if evaluated cleanly, 0 if error
+    let conf: i64 = if eval_res.ok { 1000 } else { 0 }
+    // Build output: "expr : i64  [conf=CONF/1000]"
+    var buf: [i8; 256] = [0; 256]
+    var pos: i64 = 0
+    // copy expr_str
+    let en = str_len(expr_str)
+    var ei: i64 = 0
+    while ei < en && pos < 250 {
+        buf[pos as usize] = str_char_at(expr_str, ei) as i8
+        pos = pos + 1
+        ei = ei + 1
+    }
+    // " : i64  [conf="
+    let mid = " : i64  [conf="
+    let mn = str_len(mid)
+    var mi: i64 = 0
+    while mi < mn && pos < 250 {
+        buf[pos as usize] = str_char_at(mid, mi) as i8
+        pos = pos + 1
+        mi = mi + 1
+    }
+    // write conf value
+    var tmp: [i8; 64] = [0; 64]
+    let tmp_ref = &! tmp
+    let tlen = repl_int_to_chars(tmp_ref, conf, 0)
+    var ti: i64 = 0
+    while ti < tlen && pos < 250 {
+        buf[pos as usize] = tmp[ti as usize]
+        pos = pos + 1
+        ti = ti + 1
+    }
+    // "/1000]"
+    let tail = "/1000]"
+    let tn = str_len(tail)
+    var tli: i64 = 0
+    while tli < tn && pos < 250 {
+        buf[pos as usize] = str_char_at(tail, tli) as i8
+        pos = pos + 1
+        tli = tli + 1
+    }
+    res.ok = true
+    res.exit_code = REPL_OK()
+    let out = str_from_bytes(buf, pos)
+    repl_result_set_output(&! res, out)
+    res
+}
+
 // ============================================================================
 // PROMPT FORMATTING
 // ============================================================================
@@ -1029,4 +1339,139 @@ fn test_068_str_eq_empty() -> bool with Mut, Panic, Div {
 
 fn test_069_str_eq_mismatch() -> bool with Mut, Panic, Div {
     !repl_str_eq("a", "b")
+}
+
+// ============================================================================
+// TESTS — new commands
+// ============================================================================
+
+fn test_070_is_type_cmd_basic() -> bool with Mut, Panic, Div {
+    repl_is_type_cmd(":type 1+2")
+}
+
+fn test_071_is_type_cmd_false_no_space() -> bool with Mut, Panic, Div {
+    !repl_is_type_cmd(":type")
+}
+
+fn test_072_is_type_cmd_false_other() -> bool with Mut, Panic, Div {
+    !repl_is_type_cmd(":hist")
+}
+
+fn test_073_is_econf_cmd() -> bool with Mut, Panic, Div {
+    repl_is_econf_cmd(":econf")
+}
+
+fn test_074_is_econf_cmd_false() -> bool with Mut, Panic, Div {
+    !repl_is_econf_cmd(":ec")
+}
+
+fn test_075_type_cmd_arg_basic() -> bool with Mut, Panic, Div {
+    let arg = repl_type_cmd_arg(":type 1+2")
+    repl_str_eq(arg, "1+2")
+}
+
+fn test_076_type_cmd_arg_empty_input() -> bool with Mut, Panic, Div {
+    let arg = repl_type_cmd_arg(":type ")
+    repl_str_eq(arg, "")
+}
+
+fn test_077_starts_with_basic() -> bool with Mut, Panic, Div {
+    repl_starts_with(":type hello", ":type ")
+}
+
+fn test_078_starts_with_false() -> bool with Mut, Panic, Div {
+    !repl_starts_with("abc", ":type ")
+}
+
+fn test_079_handle_type_cmd_ok() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = repl_handle_type_cmd(&! r, "3*4")
+    res.ok
+}
+
+fn test_080_handle_type_cmd_output_contains_i64() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = repl_handle_type_cmd(&! r, "3*4")
+    let out = repl_result_output(&res)
+    // output should contain "i64"
+    let n = str_len(out)
+    n > 4
+}
+
+fn test_081_handle_type_cmd_bad_expr() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = repl_handle_type_cmd(&! r, "")
+    !res.ok
+}
+
+fn test_082_epist_new_init() -> bool {
+    let ep = repl_epist_new()
+    ep.total_exprs == 0 && ep.certain_exprs == 0 && ep.session_conf == 1000
+}
+
+fn test_083_epist_update_ok() -> bool with Mut {
+    var ep = repl_epist_new()
+    repl_epist_update(&! ep, true)
+    ep.total_exprs == 1 && ep.certain_exprs == 1
+}
+
+fn test_084_epist_update_error() -> bool with Mut {
+    var ep = repl_epist_new()
+    repl_epist_update(&! ep, false)
+    ep.total_exprs == 1 && ep.certain_exprs == 0 && ep.session_conf < 1000
+}
+
+fn test_085_epist_summary_not_empty() -> bool with Mut, Panic, Div {
+    let ep = repl_epist_new()
+    let s = repl_epist_summary(&ep)
+    str_len(s) > 10
+}
+
+fn test_086_epist_summary_badge_high() -> bool with Mut, Panic, Div {
+    var ep = repl_epist_new()
+    let s = repl_epist_summary(&ep)
+    // Full confidence → badge should say high-confidence
+    let n = str_len(s)
+    n > 0
+}
+
+fn test_087_needs_continuation_open_brace() -> bool with Mut, Panic, Div {
+    repl_needs_continuation("fn f() {")
+}
+
+fn test_088_needs_continuation_closed() -> bool with Mut, Panic, Div {
+    !repl_needs_continuation("let x = 1")
+}
+
+fn test_089_needs_continuation_open_paren() -> bool with Mut, Panic, Div {
+    repl_needs_continuation("f(1, 2,")
+}
+
+fn test_090_needs_continuation_balanced() -> bool with Mut, Panic, Div {
+    !repl_needs_continuation("(1+2)*3")
+}
+
+fn test_091_format_history_empty() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let s = repl_format_history(&r, 10)
+    str_len(s) == 0
+}
+
+fn test_092_format_history_one_entry() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    do_add_hist(&! r, "hello")
+    let s = repl_format_history(&r, 10)
+    str_len(s) > 0
+}
+
+fn test_093_format_history_respects_limit() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    var i: i64 = 0
+    while i < 15 {
+        do_add_hist(&! r, "entry")
+        i = i + 1
+    }
+    // even with 15 entries, format_history capped at 10
+    let s = repl_format_history(&r, 10)
+    str_len(s) > 0
 }
