@@ -439,7 +439,10 @@ var NEEDS_GPU_RUNTIME_DYNLINK: i64 = 0
 fn gpu_param_kind_scalar_i64() -> i64 { 1 }
 fn gpu_param_kind_slice_in_f64() -> i64 { 2 }
 fn gpu_param_kind_slice_out_f64() -> i64 { 3 }
+fn gpu_param_kind_scalar_f64() -> i64 { 4 }
 fn gpu_kernel_ptx_kind_vec_binary_f64() -> i64 { 1 }
+fn gpu_kernel_ptx_kind_stub() -> i64 { 2 }
+fn gpu_kernel_ptx_kind_vec_inplace_binary_f64() -> i64 { 3 }
 
 fn gpu_dyn_linux_x86_text_base() -> i64 { 0x400000 }
 fn gpu_dyn_linux_x86_text_off() -> i64 { 4096 }
@@ -533,6 +536,7 @@ fn fn_param_kind(fi: i64, arg_idx: i64) -> i64 with IO, Mut, Panic, Div {
     if fi < 0 || fi >= FN_COUNT { return 0 }
     scan_fn_param_type(fi, arg_idx)
     if SCAN_TY == 1 && SCAN_TY_HASH == 0 { return gpu_param_kind_scalar_i64() }
+    if SCAN_TY == 2 && SCAN_TY_HASH == 0 { return gpu_param_kind_scalar_f64() }
     if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
         let inner_ty = ref_hash_inner_ty(SCAN_TY_HASH)
         let inner_hash = ref_hash_inner_hash(SCAN_TY_HASH)
@@ -542,6 +546,136 @@ fn fn_param_kind(fi: i64, arg_idx: i64) -> i64 with IO, Mut, Panic, Div {
         }
     }
     return 0
+}
+
+fn ptx_emit_fallback_param_name(arg_idx: i64) with Mut, Panic, Div {
+    if arg_idx == 0 { ptx_emit_string("p0"); return }
+    if arg_idx == 1 { ptx_emit_string("p1"); return }
+    if arg_idx == 2 { ptx_emit_string("p2"); return }
+    if arg_idx == 3 { ptx_emit_string("p3"); return }
+    if arg_idx == 4 { ptx_emit_string("p4"); return }
+    if arg_idx == 5 { ptx_emit_string("p5"); return }
+    if arg_idx == 6 { ptx_emit_string("p6"); return }
+    ptx_emit_string("p7")
+}
+
+fn ptx_emit_fn_param_name(fi: i64, arg_idx: i64) with IO, Mut, Panic, Div {
+    if fi < 0 || fi >= FN_COUNT { ptx_emit_fallback_param_name(arg_idx); return }
+    var q = FN_NAME_TOK[fi as usize] + 1
+    if TK[q as usize] != 6 { ptx_emit_fallback_param_name(arg_idx); return }
+    q = q + 1
+    var idx: i64 = 0
+    while TK[q as usize] != 7 && TK[q as usize] != 0 {
+        if TK[q as usize] == 3 {
+            if idx == arg_idx {
+                ptx_emit_src_range(TS[q as usize], TE[q as usize])
+                return
+            }
+            q = q + 1
+            if TK[q as usize] == 43 {
+                q = q + 1
+                scan_type(q)
+                q = SCAN_TY_NEXT
+                idx = idx + 1
+            }
+        } else {
+            q = q + 1
+        }
+        if TK[q as usize] == 28 { q = q + 1 }
+    }
+    ptx_emit_fallback_param_name(arg_idx)
+}
+
+fn ptx_emit_kernel_signature(fi: i64) with IO, Mut, Panic, Div {
+    let name_tok = FN_NAME_TOK[fi as usize]
+    if name_tok < 0 || name_tok >= TC { return }
+    let n_ns = TS[name_tok as usize]
+    let n_ne = TE[name_tok as usize]
+    ptx_emit_string(".visible .entry ")
+    ptx_emit_src_range(n_ns, n_ne)
+    ptx_emit_string("(\n")
+    var arg_idx: i64 = 0
+    while arg_idx < FN_ARITY[fi as usize] && arg_idx < 8 {
+        let kind = FN_PTX_PARAM_KINDS[(fi * 8 + arg_idx) as usize]
+        ptx_emit_string("    .param ")
+        if kind == gpu_param_kind_scalar_f64() {
+            ptx_emit_string(".f64 ")
+        } else {
+            ptx_emit_string(".u64 ")
+        }
+        ptx_emit_fn_param_name(fi, arg_idx)
+        if arg_idx + 1 < FN_ARITY[fi as usize] { ptx_emit_string(",\n") } else { ptx_emit_string("\n") }
+        arg_idx = arg_idx + 1
+    }
+    ptx_emit_string(") {\n")
+}
+
+fn ptx_emit_kernel_stub(fi: i64, extent_slot: i64) with IO, Mut, Panic, Div {
+    let start_off = PTX_LEN
+    ptx_emit_string(".version 8.0\n")
+    ptx_emit_string(".target sm_80\n")
+    ptx_emit_string(".address_size 64\n\n")
+    ptx_emit_kernel_signature(fi)
+    ptx_emit_string("    ret;\n")
+    ptx_emit_string("}\n")
+    ptx_finish_fn(fi, start_off, gpu_kernel_ptx_kind_stub(), extent_slot)
+}
+
+fn ptx_data_match(off: i64, end_off: i64, text: string) -> bool with Panic, Div {
+    let n = str_len(text)
+    if off < 0 || off + n > end_off { return false }
+    var i: i64 = 0
+    while i < n {
+        if (PTX_DATA[(off + i) as usize] as i64) != str_char_at(text, i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn ptx_find_entry_start(off: i64, len: i64) -> i64 with Panic, Div {
+    let end_off = off + len
+    var p = off
+    while p < end_off {
+        if ptx_data_match(p, end_off, ".visible .entry ") { return p }
+        p = p + 1
+    }
+    return off
+}
+
+fn assemble_all_kernels_ptx() with Mut, Panic, Div {
+    let old_len = PTX_LEN
+    let scratch_off = old_len + 16
+    PTX_LEN = scratch_off
+    ptx_emit_string(".version 8.0\n")
+    ptx_emit_string(".target sm_80\n")
+    ptx_emit_string(".address_size 64\n\n")
+    var fi: i64 = 0
+    while fi < FN_COUNT {
+        if FN_PTX_SUPPORTED[fi as usize] != 0 {
+            let off = FN_PTX_OFF[fi as usize]
+            let len = FN_PTX_LEN[fi as usize]
+            if len > 0 {
+                let start = ptx_find_entry_start(off, len)
+                var p = start
+                while p < off + len {
+                    ptx_emit_byte(PTX_DATA[p as usize] as i64)
+                    p = p + 1
+                }
+                if PTX_LEN > scratch_off && (PTX_DATA[(PTX_LEN - 1) as usize] as i64) != 10 {
+                    ptx_emit_byte(10)
+                }
+                ptx_emit_byte(10)
+            }
+        }
+        fi = fi + 1
+    }
+    let final_len = PTX_LEN - scratch_off
+    var i: i64 = 0
+    while i < final_len {
+        PTX_DATA[i as usize] = PTX_DATA[(scratch_off + i) as usize]
+        i = i + 1
+    }
+    PTX_LEN = final_len
 }
 
 fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 with Mut, Panic {
@@ -576,63 +710,151 @@ fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 
     return 1
 }
 
+fn kernel_matches_supported_vec_inplace_binary_pattern(fi: i64, body_start: i64) -> i64 with Mut, Panic {
+    if fi < 0 || fi >= FN_COUNT { return 0 }
+    var saw_gpu_tid: i64 = 0
+    var saw_tid: i64 = 0
+    var saw_n: i64 = 0
+    var saw_a: i64 = 0
+    var saw_b: i64 = 0
+    var saw_add: i64 = 0
+    var p: i64 = body_start
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 8 { depth = depth + 1 }
+        if TK[p as usize] == 9 { depth = depth - 1 }
+        if TK[p as usize] == 3 {
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "gpu_thread_id_x") { saw_gpu_tid = 1 }
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "tid") { saw_tid = 1 }
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "n") { saw_n = 1 }
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "a") { saw_a = 1 }
+            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "b") { saw_b = 1 }
+        }
+        if TK[p as usize] == 17 { saw_add = 1 }
+        p = p + 1
+    }
+    if saw_gpu_tid == 0 { return 0 }
+    if saw_tid == 0 || saw_n == 0 { return 0 }
+    if saw_a == 0 || saw_b == 0 { return 0 }
+    if saw_add == 0 { return 0 }
+    return 1
+}
+
 fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO, Mut, Panic, Div {
     ptx_reset_fn_meta(fi)
     if fi < 0 || fi >= FN_COUNT { return }
-    if FN_ARITY[fi as usize] != 4 { return }
-    if fn_param_kind(fi, 0) != gpu_param_kind_scalar_i64() { return }
-    if fn_param_kind(fi, 1) != gpu_param_kind_slice_in_f64() { return }
-    if fn_param_kind(fi, 2) != gpu_param_kind_slice_in_f64() { return }
-    if fn_param_kind(fi, 3) != gpu_param_kind_slice_out_f64() { return }
-    if kernel_matches_supported_vec_binary_pattern(fi, body_start) == 0 { return }
+    if FN_ARITY[fi as usize] > 8 { return }
+    var arg_idx: i64 = 0
+    var signature_ok: i64 = 1
+    while arg_idx < FN_ARITY[fi as usize] {
+        let kind = fn_param_kind(fi, arg_idx)
+        FN_PTX_PARAM_KINDS[(fi * 8 + arg_idx) as usize] = kind
+        if kind == 0 { signature_ok = 0 }
+        arg_idx = arg_idx + 1
+    }
+    if FN_ARITY[fi as usize] == 4 &&
+       FN_PTX_PARAM_KINDS[(fi * 8 + 0) as usize] == gpu_param_kind_scalar_i64() &&
+       FN_PTX_PARAM_KINDS[(fi * 8 + 1) as usize] == gpu_param_kind_slice_in_f64() &&
+       FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] == gpu_param_kind_slice_in_f64() &&
+       FN_PTX_PARAM_KINDS[(fi * 8 + 3) as usize] == gpu_param_kind_slice_out_f64() &&
+       kernel_matches_supported_vec_binary_pattern(fi, body_start) != 0 {
 
-    let name_tok = FN_NAME_TOK[fi as usize]
-    if name_tok < 0 || name_tok >= TC { return }
-    let n_ns = TS[name_tok as usize]
-    let n_ne = TE[name_tok as usize]
-    let start_off = PTX_LEN
-    FN_PTX_PARAM_KINDS[(fi * 8 + 0) as usize] = gpu_param_kind_scalar_i64()
-    FN_PTX_PARAM_KINDS[(fi * 8 + 1) as usize] = gpu_param_kind_slice_in_f64()
-    FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = gpu_param_kind_slice_in_f64()
-    FN_PTX_PARAM_KINDS[(fi * 8 + 3) as usize] = gpu_param_kind_slice_out_f64()
+        let name_tok = FN_NAME_TOK[fi as usize]
+        if name_tok < 0 || name_tok >= TC { return }
+        let n_ns = TS[name_tok as usize]
+        let n_ne = TE[name_tok as usize]
+        let start_off = PTX_LEN
 
-    ptx_emit_string(".version 8.0\n")
-    ptx_emit_string(".target sm_80\n")
-    ptx_emit_string(".address_size 64\n\n")
-    ptx_emit_string(".visible .entry ")
-    ptx_emit_src_range(n_ns, n_ne)
-    ptx_emit_string("(\n")
-    ptx_emit_string("    .param .u64 n,\n")
-    ptx_emit_string("    .param .u64 a,\n")
-    ptx_emit_string("    .param .u64 b,\n")
-    ptx_emit_string("    .param .u64 c\n")
-    ptx_emit_string(") {\n")
-    ptx_emit_string("    .reg .u32 %r<4>;\n")
-    ptx_emit_string("    .reg .u64 %rd<8>;\n")
-    ptx_emit_string("    .reg .f64 %fd<4>;\n")
-    ptx_emit_string("    .reg .pred %p<2>;\n")
-    ptx_emit_string("    mov.u32 %r0, %tid.x;\n")
-    ptx_emit_string("    mov.u32 %r1, %ntid.x;\n")
-    ptx_emit_string("    mov.u32 %r2, %ctaid.x;\n")
-    ptx_emit_string("    mad.lo.u32 %r3, %r2, %r1, %r0;\n")
-    ptx_emit_string("    cvt.u64.u32 %rd0, %r3;\n")
-    ptx_emit_string("    ld.param.u64 %rd1, [n];\n")
-    ptx_emit_string("    setp.ge.u64 %p0, %rd0, %rd1;\n")
-    ptx_emit_string("    @%p0 ret;\n")
-    ptx_emit_string("    ld.param.u64 %rd2, [a];\n")
-    ptx_emit_string("    ld.param.u64 %rd3, [b];\n")
-    ptx_emit_string("    ld.param.u64 %rd4, [c];\n")
-    ptx_emit_string("    shl.b64 %rd5, %rd0, 3;\n")
-    ptx_emit_string("    add.u64 %rd2, %rd2, %rd5;\n")
-    ptx_emit_string("    add.u64 %rd3, %rd3, %rd5;\n")
-    ptx_emit_string("    add.u64 %rd4, %rd4, %rd5;\n")
-    ptx_emit_string("    ld.global.f64 %fd0, [%rd2];\n")
-    ptx_emit_string("    ld.global.f64 %fd1, [%rd3];\n")
-    ptx_emit_string("    add.f64 %fd2, %fd0, %fd1;\n")
-    ptx_emit_string("    st.global.f64 [%rd4], %fd2;\n")
-    ptx_emit_string("    ret;\n")
-    ptx_emit_string("}\n")
-    ptx_finish_fn(fi, start_off, gpu_kernel_ptx_kind_vec_binary_f64(), extent_slot)
+        ptx_emit_string(".version 8.0\n")
+        ptx_emit_string(".target sm_80\n")
+        ptx_emit_string(".address_size 64\n\n")
+        ptx_emit_string(".visible .entry ")
+        ptx_emit_src_range(n_ns, n_ne)
+        ptx_emit_string("(\n")
+        ptx_emit_string("    .param .u64 n,\n")
+        ptx_emit_string("    .param .u64 a,\n")
+        ptx_emit_string("    .param .u64 b,\n")
+        ptx_emit_string("    .param .u64 c\n")
+        ptx_emit_string(") {\n")
+        ptx_emit_string("    .reg .u32 %r<4>;\n")
+        ptx_emit_string("    .reg .u64 %rd<8>;\n")
+        ptx_emit_string("    .reg .f64 %fd<4>;\n")
+        ptx_emit_string("    .reg .pred %p<2>;\n")
+        ptx_emit_string("    mov.u32 %r0, %tid.x;\n")
+        ptx_emit_string("    mov.u32 %r1, %ntid.x;\n")
+        ptx_emit_string("    mov.u32 %r2, %ctaid.x;\n")
+        ptx_emit_string("    mad.lo.u32 %r3, %r2, %r1, %r0;\n")
+        ptx_emit_string("    cvt.u64.u32 %rd0, %r3;\n")
+        ptx_emit_string("    ld.param.u64 %rd1, [n];\n")
+        ptx_emit_string("    setp.ge.u64 %p0, %rd0, %rd1;\n")
+        ptx_emit_string("    @%p0 ret;\n")
+        ptx_emit_string("    ld.param.u64 %rd2, [a];\n")
+        ptx_emit_string("    ld.param.u64 %rd3, [b];\n")
+        ptx_emit_string("    ld.param.u64 %rd4, [c];\n")
+        ptx_emit_string("    shl.b64 %rd5, %rd0, 3;\n")
+        ptx_emit_string("    add.u64 %rd2, %rd2, %rd5;\n")
+        ptx_emit_string("    add.u64 %rd3, %rd3, %rd5;\n")
+        ptx_emit_string("    add.u64 %rd4, %rd4, %rd5;\n")
+        ptx_emit_string("    ld.global.f64 %fd0, [%rd2];\n")
+        ptx_emit_string("    ld.global.f64 %fd1, [%rd3];\n")
+        ptx_emit_string("    add.f64 %fd2, %fd0, %fd1;\n")
+        ptx_emit_string("    st.global.f64 [%rd4], %fd2;\n")
+        ptx_emit_string("    ret;\n")
+        ptx_emit_string("}\n")
+        ptx_finish_fn(fi, start_off, gpu_kernel_ptx_kind_vec_binary_f64(), extent_slot)
+        return
+    }
+    if FN_ARITY[fi as usize] == 3 &&
+       FN_PTX_PARAM_KINDS[(fi * 8 + 0) as usize] == gpu_param_kind_scalar_i64() &&
+       FN_PTX_PARAM_KINDS[(fi * 8 + 1) as usize] == gpu_param_kind_slice_out_f64() &&
+       FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] == gpu_param_kind_slice_in_f64() &&
+       kernel_matches_supported_vec_inplace_binary_pattern(fi, body_start) != 0 {
+
+        let name_tok = FN_NAME_TOK[fi as usize]
+        if name_tok < 0 || name_tok >= TC { return }
+        let n_ns = TS[name_tok as usize]
+        let n_ne = TE[name_tok as usize]
+        let start_off = PTX_LEN
+
+        ptx_emit_string(".version 8.0\n")
+        ptx_emit_string(".target sm_80\n")
+        ptx_emit_string(".address_size 64\n\n")
+        ptx_emit_string(".visible .entry ")
+        ptx_emit_src_range(n_ns, n_ne)
+        ptx_emit_string("(\n")
+        ptx_emit_string("    .param .u64 n,\n")
+        ptx_emit_string("    .param .u64 a,\n")
+        ptx_emit_string("    .param .u64 b\n")
+        ptx_emit_string(") {\n")
+        ptx_emit_string("    .reg .u32 %r<4>;\n")
+        ptx_emit_string("    .reg .u64 %rd<7>;\n")
+        ptx_emit_string("    .reg .f64 %fd<4>;\n")
+        ptx_emit_string("    .reg .pred %p<2>;\n")
+        ptx_emit_string("    mov.u32 %r0, %tid.x;\n")
+        ptx_emit_string("    mov.u32 %r1, %ntid.x;\n")
+        ptx_emit_string("    mov.u32 %r2, %ctaid.x;\n")
+        ptx_emit_string("    mad.lo.u32 %r3, %r2, %r1, %r0;\n")
+        ptx_emit_string("    cvt.u64.u32 %rd0, %r3;\n")
+        ptx_emit_string("    ld.param.u64 %rd1, [n];\n")
+        ptx_emit_string("    setp.ge.u64 %p0, %rd0, %rd1;\n")
+        ptx_emit_string("    @%p0 ret;\n")
+        ptx_emit_string("    ld.param.u64 %rd2, [a];\n")
+        ptx_emit_string("    ld.param.u64 %rd3, [b];\n")
+        ptx_emit_string("    shl.b64 %rd4, %rd0, 3;\n")
+        ptx_emit_string("    add.u64 %rd5, %rd2, %rd4;\n")
+        ptx_emit_string("    add.u64 %rd6, %rd3, %rd4;\n")
+        ptx_emit_string("    ld.global.f64 %fd0, [%rd5];\n")
+        ptx_emit_string("    ld.global.f64 %fd1, [%rd6];\n")
+        ptx_emit_string("    add.f64 %fd2, %fd0, %fd1;\n")
+        ptx_emit_string("    st.global.f64 [%rd5], %fd2;\n")
+        ptx_emit_string("    ret;\n")
+        ptx_emit_string("}\n")
+        ptx_finish_fn(fi, start_off, gpu_kernel_ptx_kind_vec_inplace_binary_f64(), extent_slot)
+        return
+    }
+    if signature_ok != 0 {
+        ptx_emit_kernel_stub(fi, extent_slot)
+    }
 }
 
 fn write_ptx(output: string) -> i64 with IO, Mut, Panic, Div {
@@ -659,7 +881,7 @@ fn write_ptx(output: string) -> i64 with IO, Mut, Panic, Div {
     return 0
 }
 
-fn collect_all_kernels_ptx() with Mut, Panic {
+fn collect_all_kernels_ptx() with IO, Mut, Panic {
     var fi: i64 = 0
     var kernel_count: i64 = 0
     while fi < FN_COUNT {
@@ -1556,6 +1778,12 @@ fn token_is_kernel_marker(ti: i64) -> bool with Panic, Mut {
     if ti < 0 || ti >= TC { return false }
     if TK[ti as usize] != 3 { return false }
     return src_match(TS[ti as usize], TE[ti as usize] - TS[ti as usize], "kernel")
+}
+
+fn token_is_kernel_fn_name_marker(name_ti: i64) -> bool with Panic, Mut {
+    if token_is_kernel_marker(name_ti - 1) { return true }
+    if token_is_kernel_marker(name_ti - 2) { return true }
+    return false
 }
 
 fn token_is_ident_text(ti: i64, text: string) -> bool with Panic, Mut {
@@ -9712,8 +9940,10 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 tc_error(method_tok, "await requires TaskHandle value")
                 continue
             }
-            // Built-in .len() — return compile-time array length
-            if src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 {
+            // Built-in .len() only applies to arrays and slice refs. Structs that
+            // define their own len() method must go through normal method lookup.
+            if src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 &&
+               (EXPR_TY == 8 || type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
                 EP = EP + 1  // skip 'len'
                 EP = EP + 1  // skip (
                 EP = EP + 1  // skip )
@@ -10227,13 +10457,150 @@ fn emit_kernel_cpu_direct_call_x86(fi: i64, abi_argc: i64) with Mut {
     emit_drop_call_args_x86(abi_argc + call_extra_stack_args_x86(abi_argc, 6))
 }
 
+fn emit_kernel_dispatch_vec_inplace_binary_f64_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
+    NEEDS_GPU_RUNTIME_DYNLINK = 1
+    emit_try_gpu_runtime_init_x86()
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84)
+    let cpu_fallback = CL
+    em32(0)
+
+    let n_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let a_ptr_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let a_len_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let b_ptr_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let b_len_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let module_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let func_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let dptr_a_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let dptr_b_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let grid_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let bytes_a_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let bytes_b_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let param0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let param1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let param2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+
+    emit_load_call_arg_to_rax_x86(abi_argc, 0); emit_store_var(n_slot)
+    emit_load_call_arg_to_rax_x86(abi_argc, 1); emit_store_var(a_ptr_slot)
+    emit_load_call_arg_to_rax_x86(abi_argc, 2); emit_store_var(a_len_slot)
+    emit_load_call_arg_to_rax_x86(abi_argc, 3); emit_store_var(b_ptr_slot)
+    emit_load_call_arg_to_rax_x86(abi_argc, 4); emit_store_var(b_len_slot)
+
+    emit_load_var(a_len_slot)
+    em(0x48); em(0xc1); em(0xe0); em(3)
+    emit_store_var(bytes_a_slot)
+    emit_load_var(b_len_slot)
+    em(0x48); em(0xc1); em(0xe0); em(3)
+    emit_store_var(bytes_b_slot)
+
+    emit_load_var(n_slot)
+    em(0x48); em(0x05); em32(255)
+    em(0x48); em(0xc1); em(0xe8); em(8)
+    emit_store_var(grid_slot)
+
+    emit_lea_var(module_slot); em(0x50)
+    emit_inline_cstr_from_ptx_x86(FN_PTX_OFF[fi as usize], FN_PTX_LEN[fi as usize]); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMODULELOADDATA_PTR_BSS_OFF, 2)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail = CL; em32(0)
+
+    emit_lea_var(func_slot); em(0x50)
+    emit_load_var(module_slot); em(0x50)
+    let name_tok = FN_NAME_TOK[fi as usize]
+    emit_inline_cstr_from_src_x86(TS[name_tok as usize], TE[name_tok as usize]); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMODULEGETFUNCTION_PTR_BSS_OFF, 3)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_b = CL; em32(0)
+
+    emit_lea_var(dptr_a_slot); em(0x50)
+    emit_load_var(bytes_a_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMALLOC_PTR_BSS_OFF, 2)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_c = CL; em32(0)
+    emit_lea_var(dptr_b_slot); em(0x50)
+    emit_load_var(bytes_b_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMALLOC_PTR_BSS_OFF, 2)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_d = CL; em32(0)
+
+    emit_load_var(dptr_a_slot); em(0x50)
+    emit_load_var(a_ptr_slot); em(0x50)
+    emit_load_var(bytes_a_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF, 3)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_e = CL; em32(0)
+    emit_load_var(dptr_b_slot); em(0x50)
+    emit_load_var(b_ptr_slot); em(0x50)
+    emit_load_var(bytes_b_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF, 3)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_f = CL; em32(0)
+
+    emit_load_var(n_slot); emit_store_var(param0_slot)
+    emit_load_var(dptr_a_slot); emit_store_var(param1_slot)
+    emit_load_var(dptr_b_slot); emit_store_var(param2_slot)
+    emit_lea_var(param0_slot); emit_store_var(paddr0_slot)
+    emit_lea_var(param1_slot); emit_store_var(paddr1_slot)
+    emit_lea_var(param2_slot); emit_store_var(paddr2_slot)
+
+    emit_load_var(func_slot); em(0x50)
+    emit_load_var(grid_slot); em(0x50)
+    emit_imm64(1); em(0x50)
+    emit_imm64(1); em(0x50)
+    emit_imm64(256); em(0x50)
+    emit_imm64(1); em(0x50)
+    emit_imm64(1); em(0x50)
+    emit_imm64(0); em(0x50)
+    emit_imm64(0); em(0x50)
+    emit_lea_var(paddr0_slot); em(0x50)
+    emit_imm64(0); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF, 11)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_g = CL; em32(0)
+
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUCTXSYNC_PTR_BSS_OFF, 0)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_h = CL; em32(0)
+
+    emit_load_var(a_ptr_slot); em(0x50)
+    emit_load_var(dptr_a_slot); em(0x50)
+    emit_load_var(bytes_a_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMCPYDTOH_PTR_BSS_OFF, 3)
+    em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_i = CL; em32(0)
+
+    emit_load_var(dptr_a_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
+    emit_load_var(dptr_b_slot); em(0x50)
+    emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
+    emit_drop_call_args_x86(abi_argc)
+    em(0x31); em(0xc0)
+    em(0xe9)
+    let done = CL
+    em32(0)
+
+    patch32(gpu_fail, CL)
+    patch32(gpu_fail_b, CL)
+    patch32(gpu_fail_c, CL)
+    patch32(gpu_fail_d, CL)
+    patch32(gpu_fail_e, CL)
+    patch32(gpu_fail_f, CL)
+    patch32(gpu_fail_g, CL)
+    patch32(gpu_fail_h, CL)
+    patch32(gpu_fail_i, CL)
+    emit_mark_gpu_unavailable_x86("GPU unavailable: CUDA kernel launch failed\n")
+    patch32(cpu_fallback, CL)
+    emit_kernel_cpu_direct_call_x86(fi, abi_argc)
+    patch32(done, CL)
+}
+
 fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     if fi < 0 || fi >= FN_COUNT {
         emit_drop_call_args_x86(abi_argc)
         em(0x31); em(0xc0)
         return
     }
-    if TARGET_OS != 0 || TARGET_ARCH != 0 || FN_PTX_SUPPORTED[fi as usize] == 0 || FN_PTX_KIND[fi as usize] != gpu_kernel_ptx_kind_vec_binary_f64() {
+    let ptx_kind = FN_PTX_KIND[fi as usize]
+    if TARGET_OS != 0 || TARGET_ARCH != 0 || FN_PTX_SUPPORTED[fi as usize] == 0 {
+        emit_kernel_cpu_direct_call_x86(fi, abi_argc)
+        return
+    }
+    if ptx_kind != gpu_kernel_ptx_kind_vec_binary_f64() {
         emit_kernel_cpu_direct_call_x86(fi, abi_argc)
         return
     }
@@ -11076,10 +11443,16 @@ fn resolve_field_struct_index(ns: i64, ne: i64, fh: i64) -> i64 with Panic, Div,
     if vi >= 0 && VAR_TY[vi as usize] == 6 {
         let si = st_find(VAR_TY_HASH[vi as usize])
         if si >= 0 { return si }
+    } else if vi >= 0 && VAR_TY[vi as usize] == 10 && ref_hash_inner_ty(VAR_TY_HASH[vi as usize]) == 6 {
+        let si = st_find(ref_hash_inner_hash(VAR_TY_HASH[vi as usize]))
+        if si >= 0 { return si }
     }
     let gi = gl_find(ns, ne)
     if gi >= 0 && GL_TY[gi as usize] == 6 {
         let si = st_find(GL_TY_HASH[gi as usize])
+        if si >= 0 { return si }
+    } else if gi >= 0 && GL_TY[gi as usize] == 10 && ref_hash_inner_ty(GL_TY_HASH[gi as usize]) == 6 {
+        let si = st_find(ref_hash_inner_hash(GL_TY_HASH[gi as usize]))
         if si >= 0 { return si }
     }
     var sj: i64 = 0
@@ -14295,7 +14668,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             let name_p = tok_fn_name_index(p)
             FN_IS_KERNEL[FN_COUNT as usize] = 0
             FN_IS_ASYNC[FN_COUNT as usize] = 0
-            if token_is_kernel_marker(name_p - 1) { FN_IS_KERNEL[FN_COUNT as usize] = 1 }
+            if token_is_kernel_fn_name_marker(name_p) { FN_IS_KERNEL[FN_COUNT as usize] = 1 }
             if TK[p as usize] == 77 { FN_IS_ASYNC[FN_COUNT as usize] = 1 }
             ptx_reset_fn_meta(FN_COUNT)
             p = name_p
@@ -20402,7 +20775,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     if cr != 0 { return cr }
     if TARGET_BACKEND == 1 {
         collect_all_kernels_ptx()
-        emit_ptx_header()
+        assemble_all_kernels_ptx()
         return write_ptx(out)
     }
     if TARGET_ARCH == 1 {

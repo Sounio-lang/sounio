@@ -187,7 +187,7 @@ Features: Epistemic programming, uncertainty quantification, provenance tracking
             return importlib.import_module("sounio.ontology")
         except ImportError:
             repo_root = Path(__file__).resolve().parents[3]
-            py_pkg = repo_root / "triple-sounio-ecosystem" / "sounio-py" / "python"
+            py_pkg = repo_root / "ecosystem" / "sounio-py" / "python"
             if str(py_pkg) not in sys.path:
                 sys.path.insert(0, str(py_pkg))
             return importlib.import_module("sounio.ontology")

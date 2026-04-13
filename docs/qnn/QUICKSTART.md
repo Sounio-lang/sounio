@@ -20,7 +20,7 @@ revalidated against the exact binary you are using.
 ## 1. Install & Run
 
 ```bash
-cd /home/demetrios/RustroverProjects/sounio
+cd /workspace/sounio
 export SOUC_BIN="$(pwd)/bin/souc"
 "$SOUC_BIN" check examples/qnn/01_hello_quaternion.sio
 ```

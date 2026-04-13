@@ -1107,12 +1107,10 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             out = ptx_emit_oct_norm_sq(out, op.dst_reg, op.lhs_reg, op.ty)
         }
         GpuOpcode::GpuHyperOctLinearF32 => {
-            out = ptx_push_str(out, "    // oct_linear_f32 placeholder: 8x8 mat * oct + bias\n")
-            out
+            out = ptx_emit_oct_linear_f32(out, op.dst_reg, op.lhs_reg, op.rhs_reg)
         }
         GpuOpcode::GpuHyperOctLinearF64 => {
-            out = ptx_push_str(out, "    // oct_linear_f64 placeholder: 8x8 mat * oct + bias\n")
-            out
+            out = ptx_emit_oct_linear_f64(out, op.dst_reg, op.lhs_reg, op.rhs_reg)
         }
         GpuOpcode::GpuHyperSedMulF32 => {
             out = ptx_emit_sed_mul_f32(out, op.dst_reg, op.lhs_reg, op.rhs_reg)
@@ -1145,11 +1143,11 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
         }
         GpuOpcode::GpuHyperOctLinearHmmaF16 => {
             out = ptx_push_str(out, "    // oct_linear_hmma_f16: HMMA m16n16k16 octonion linear layer\n")
-            out = ptx_emit_oct_linear_hmma_f16(out, op.dst_reg, op.lhs_reg, op.rhs_reg, op.src_reg)
+            out = ptx_emit_oct_linear_hmma_f16(out, op.dst_reg, op.lhs_reg, op.rhs_reg, op.src_reg, op.rhs_imm, op.num_regs)
         }
         GpuOpcode::GpuHyperOctLinearHmmaF32 => {
             out = ptx_push_str(out, "    // oct_linear_hmma_f32: HMMA m16n16k16 octonion linear layer (f32 accum)\n")
-            out = ptx_emit_oct_linear_hmma_f32(out, op.dst_reg, op.lhs_reg, op.rhs_reg, op.src_reg)
+            out = ptx_emit_oct_linear_hmma_f32(out, op.dst_reg, op.lhs_reg, op.rhs_reg, op.src_reg, op.rhs_imm, op.num_regs)
         }
         GpuOpcode::GpuHyperOctMulHmmaF16 => {
             out = ptx_push_str(out, "    // oct_mul_hmma_f16: HMMA tile-pair octonion multiply\n")
@@ -1556,6 +1554,98 @@ fn ptx_emit_oct_norm_sq(buf: PtxBuf, dst: i64, src_base: i64, ty: GpuType) -> Pt
     out
 }
 
+fn ptx_emit_oct_linear_f32(buf: PtxBuf, dst_base: i64, weight_base: i64, input_base: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = ptx_push_str(out, "    // oct_linear_f32: 8x8 real matrix * octonion input\n")
+    out = ptx_push_str(out, "    // dst_base=")
+    out = ptx_push_str(out, i64_to_string(dst_base))
+    out = ptx_push_str(out, " weight_base=")
+    out = ptx_push_str(out, i64_to_string(weight_base))
+    out = ptx_push_str(out, " input_base=")
+    out = ptx_push_str(out, i64_to_string(input_base))
+    out = ptx_push_str(out, "\n")
+    out = ptx_push_str(out, "    // bias is expected to be folded by the caller or emitted separately\n")
+
+    var row: i64 = 0
+    while row < 8 {
+        let dst_r = gpu_reg_f32(dst_base + row)
+        let w0_r = gpu_reg_f32(weight_base + row * 8)
+        let x0_r = gpu_reg_f32(input_base)
+        out = ptx_push_str(out, "    mul.f32 ")
+        out = ptx_push_str(out, dst_r)
+        out = ptx_push_str(out, ", ")
+        out = ptx_push_str(out, w0_r)
+        out = ptx_push_str(out, ", ")
+        out = ptx_push_str(out, x0_r)
+        out = ptx_push_str(out, ";\n")
+
+        var col: i64 = 1
+        while col < 8 {
+            let w_r = gpu_reg_f32(weight_base + row * 8 + col)
+            let x_r = gpu_reg_f32(input_base + col)
+            out = ptx_push_str(out, "    fma.rn.f32 ")
+            out = ptx_push_str(out, dst_r)
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, w_r)
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, x_r)
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, dst_r)
+            out = ptx_push_str(out, ";\n")
+            col = col + 1
+        }
+
+        row = row + 1
+    }
+    out
+}
+
+fn ptx_emit_oct_linear_f64(buf: PtxBuf, dst_base: i64, weight_base: i64, input_base: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = ptx_push_str(out, "    // oct_linear_f64: 8x8 real matrix * octonion input\n")
+    out = ptx_push_str(out, "    // dst_base=")
+    out = ptx_push_str(out, i64_to_string(dst_base))
+    out = ptx_push_str(out, " weight_base=")
+    out = ptx_push_str(out, i64_to_string(weight_base))
+    out = ptx_push_str(out, " input_base=")
+    out = ptx_push_str(out, i64_to_string(input_base))
+    out = ptx_push_str(out, "\n")
+    out = ptx_push_str(out, "    // bias is expected to be folded by the caller or emitted separately\n")
+
+    var row: i64 = 0
+    while row < 8 {
+        let dst_r = gpu_reg_f64(dst_base + row)
+        let w0_r = gpu_reg_f64(weight_base + row * 8)
+        let x0_r = gpu_reg_f64(input_base)
+        out = ptx_push_str(out, "    mul.f64 ")
+        out = ptx_push_str(out, dst_r)
+        out = ptx_push_str(out, ", ")
+        out = ptx_push_str(out, w0_r)
+        out = ptx_push_str(out, ", ")
+        out = ptx_push_str(out, x0_r)
+        out = ptx_push_str(out, ";\n")
+
+        var col: i64 = 1
+        while col < 8 {
+            let w_r = gpu_reg_f64(weight_base + row * 8 + col)
+            let x_r = gpu_reg_f64(input_base + col)
+            out = ptx_push_str(out, "    fma.rn.f64 ")
+            out = ptx_push_str(out, dst_r)
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, w_r)
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, x_r)
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, dst_r)
+            out = ptx_push_str(out, ";\n")
+            col = col + 1
+        }
+
+        row = row + 1
+    }
+    out
+}
+
 fn ptx_emit_oct_sigmoid(buf: PtxBuf, dst_base: i64, src_base: i64, ty: GpuType) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
     out = ptx_push_str(out, "    // octonion sigmoid (element-wise approximation)\n")
@@ -1721,25 +1811,34 @@ fn ptx_emit_oct_scale(buf: PtxBuf, dst_base: i64, src_base: i64, scalar_reg: i64
 fn ptx_emit_oct_pack_fragments(buf: PtxBuf, dst_base: i64, oct_a_base: i64, oct_b_base: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
     out = ptx_push_str(out, "    // pack two octonion f16 vectors into 16-wide HMMA fragment\n")
-    out = ptx_push_str(out, "    // oct_a components [0..7] -> fragment [0..7]\n")
-    out = ptx_push_str(out, "    // oct_b components [0..7] -> fragment [8..15]\n")
-    var i: i64 = 0
-    while i < 8 {
-        let dst_r = gpu_reg_u32(dst_base + i)
-        let a_r = gpu_reg_f32(oct_a_base + i)
-        let b_r = gpu_reg_f32(oct_b_base + i)
-        out = ptx_push_str(out, "    cvt.rn.f16.f32 ")
-        out = ptx_push_str(out, dst_r)
+    out = ptx_push_str(out, "    // fragment ABI: each operand base spans 8 packed .b32 regs via f16x2 pairs\n")
+    out = ptx_push_str(out, "    // oct_a pairs [0:1]..[6:7] -> fragment regs [0..3]\n")
+    out = ptx_push_str(out, "    // oct_b pairs [0:1]..[6:7] -> fragment regs [4..7]\n")
+    var pair_idx: i64 = 0
+    while pair_idx < 4 {
+        let lane_lo = pair_idx * 2
+        let lane_hi = lane_lo + 1
+        let dst_a = gpu_reg_u32(dst_base + pair_idx)
+        let a_lo = gpu_reg_f32(oct_a_base + lane_lo)
+        let a_hi = gpu_reg_f32(oct_a_base + lane_hi)
+        out = ptx_push_str(out, "    cvt.rn.f16x2.f32 ")
+        out = ptx_push_str(out, dst_a)
         out = ptx_push_str(out, ", ")
-        out = ptx_push_str(out, a_r)
-        out = ptx_push_str(out, ";\n")
-        let dst_r2 = gpu_reg_u32(dst_base + 8 + i)
-        out = ptx_push_str(out, "    cvt.rn.f16.f32 ")
-        out = ptx_push_str(out, dst_r2)
+        out = ptx_push_str(out, a_lo)
         out = ptx_push_str(out, ", ")
-        out = ptx_push_str(out, b_r)
+        out = ptx_push_str(out, a_hi)
         out = ptx_push_str(out, ";\n")
-        i = i + 1
+        let dst_b = gpu_reg_u32(dst_base + 4 + pair_idx)
+        let b_lo = gpu_reg_f32(oct_b_base + lane_lo)
+        let b_hi = gpu_reg_f32(oct_b_base + lane_hi)
+        out = ptx_push_str(out, "    cvt.rn.f16x2.f32 ")
+        out = ptx_push_str(out, dst_b)
+        out = ptx_push_str(out, ", ")
+        out = ptx_push_str(out, b_lo)
+        out = ptx_push_str(out, ", ")
+        out = ptx_push_str(out, b_hi)
+        out = ptx_push_str(out, ";\n")
+        pair_idx = pair_idx + 1
     }
     out
 }
@@ -1788,6 +1887,103 @@ fn ptx_emit_oct_sign_correct(buf: PtxBuf, dst_base: i64, src_base: i64, sign_mas
     out
 }
 
+fn ptx_hmma_sign_mask_for_output_component(k: i64) -> i64 {
+    if k == 0 { return 0 }
+    if k == 1 { return 0 }
+    if k == 2 { return 2 + 32 }
+    if k == 3 { return 2 + 128 }
+    if k == 4 { return 4 + 16 + 64 }
+    if k == 5 { return 8 + 32 + 128 }
+    if k == 6 { return 2 + 16 + 64 }
+    if k == 7 { return 4 + 16 + 128 }
+    0
+}
+
+fn ptx_emit_wmma_m16n16k16_f32_f16_f16_f32(buf: PtxBuf, dst_base: i64, frag_a_base: i64, frag_b_base: i64, acc_base: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = ptx_push_str(out, "    wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32 {")
+    var i: i64 = 0
+    while i < 8 {
+        if i > 0 { out = ptx_push_str(out, ", ") }
+        out = ptx_push_str(out, gpu_reg_f32(dst_base + i))
+        i = i + 1
+    }
+    out = ptx_push_str(out, "}, {")
+    i = 0
+    while i < 8 {
+        if i > 0 { out = ptx_push_str(out, ", ") }
+        out = ptx_push_str(out, gpu_reg_u32(frag_a_base + i))
+        i = i + 1
+    }
+    out = ptx_push_str(out, "}, {")
+    i = 0
+    while i < 8 {
+        if i > 0 { out = ptx_push_str(out, ", ") }
+        out = ptx_push_str(out, gpu_reg_u32(frag_b_base + i))
+        i = i + 1
+    }
+    out = ptx_push_str(out, "}, {")
+    i = 0
+    while i < 8 {
+        if i > 0 { out = ptx_push_str(out, ", ") }
+        out = ptx_push_str(out, gpu_reg_f32(acc_base + i))
+        i = i + 1
+    }
+    out = ptx_push_str(out, "};\n")
+    out
+}
+
+fn ptx_emit_hmma_accumulator_zero(buf: PtxBuf, dst_base: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    var k: i64 = 0
+    while k < 8 {
+        let dst_r = gpu_reg_f32(dst_base + k)
+        out = ptx_push_str(out, "    mov.f32 ")
+        out = ptx_push_str(out, dst_r)
+        out = ptx_push_str(out, ", 0f00000000;\n")
+        k = k + 1
+    }
+    out
+}
+
+fn ptx_emit_hmma_sign_correction(buf: PtxBuf, dst_base: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = ptx_push_str(out, "    // Fano plane sign correction\n")
+    var sc: i64 = 0
+    while sc < 8 {
+        let mask = ptx_hmma_sign_mask_for_output_component(sc)
+        if mask != 0 {
+            let dst_r = gpu_reg_f32(dst_base + sc)
+            out = ptx_push_str(out, "    neg.f32 ")
+            out = ptx_push_str(out, dst_r)
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, dst_r)
+            out = ptx_push_str(out, ";\n")
+        }
+        sc = sc + 1
+    }
+    out
+}
+
+fn ptx_emit_hmma_bias_add(buf: PtxBuf, dst_base: i64, bias_base: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = ptx_push_str(out, "    // add bias\n")
+    var bc: i64 = 0
+    while bc < 8 {
+        let dst_r = gpu_reg_f32(dst_base + bc)
+        let bias_r = gpu_reg_f32(bias_base + bc)
+        out = ptx_push_str(out, "    add.f32 ")
+        out = ptx_push_str(out, dst_r)
+        out = ptx_push_str(out, ", ")
+        out = ptx_push_str(out, dst_r)
+        out = ptx_push_str(out, ", ")
+        out = ptx_push_str(out, bias_r)
+        out = ptx_push_str(out, ";\n")
+        bc = bc + 1
+    }
+    out
+}
+
 fn ptx_emit_oct_mul_hmma_f16(buf: PtxBuf, dst_base: i64, lhs_base: i64, rhs_base: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
     out = ptx_push_str(out, "    // oct_mul_hmma_f16: HMMA tile-pair octonion multiply\n")
@@ -1796,27 +1992,25 @@ fn ptx_emit_oct_mul_hmma_f16(buf: PtxBuf, dst_base: i64, lhs_base: i64, rhs_base
     out = ptx_push_str(out, "..]; rhs in [")
     out = ptx_push_str(out, i64_to_string(rhs_base))
     out = ptx_push_str(out, "..]\n")
-    out = ptx_push_str(out, "    // Step 1: Pack lhs and rhs f32 -> f16 fragments\n")
-    out = ptx_push_str(out, "    // Step 2: wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32\n")
-    out = ptx_push_str(out, "    // Step 3: Fano plane sign correction on accumulator\n")
-    out = ptx_push_str(out, "    // Note: full HMMA octonion multiply emits 8 tiled HMMA ops\n")
-    out = ptx_push_str(out, "    //       with per-component sign masks from the Fano plane table\n")
-    var k: i64 = 0
-    while k < 8 {
-        out = ptx_push_str(out, "    mul.f32 ")
-        out = ptx_push_str(out, gpu_reg_f32(dst_base + k))
-        out = ptx_push_str(out, ", ")
-        out = ptx_push_str(out, gpu_reg_f32(lhs_base + k))
-        out = ptx_push_str(out, ", ")
-        out = ptx_push_str(out, gpu_reg_f32(rhs_base + k))
-        out = ptx_push_str(out, ";\n")
-        k = k + 1
-    }
+    out = ptx_push_str(out, "    // scratch ABI: u32 fragments at dst_base+8..dst_base+23, f32 accum at dst_base+24..dst_base+31\n")
+    out = ptx_push_str(out, "    // duplicate each octonion across the 16-lane fragment tile to drive the tensor-core path\n")
+    let frag_a_base = dst_base + 8
+    let frag_b_base = dst_base + 16
+    let acc_base = dst_base + 24
+    out = ptx_emit_oct_pack_fragments(out, frag_a_base, lhs_base, lhs_base)
+    out = ptx_emit_oct_pack_fragments(out, frag_b_base, rhs_base, rhs_base)
+    out = ptx_emit_hmma_accumulator_zero(out, acc_base)
+    out = ptx_emit_wmma_m16n16k16_f32_f16_f16_f32(out, acc_base, frag_a_base, frag_b_base, acc_base)
+    out = ptx_emit_hmma_sign_correction(out, acc_base)
+    out = ptx_emit_oct_unpack_fragments(out, dst_base, acc_base, -1)
+    out = ptx_push_str(out, "    // result unpacked into dst_base..dst_base+7\n")
     out
 }
 
-fn ptx_emit_oct_linear_hmma_f16(buf: PtxBuf, dst_base: i64, weight_base: i64, input_base: i64, bias_base: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+fn ptx_emit_oct_linear_hmma_f16(buf: PtxBuf, dst_base: i64, weight_base: i64, input_base: i64, bias_base: i64, tile_count: i64, output_oct_count: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
+    let tile_total = if tile_count > 0 { tile_count } else { 1 }
+    let output_total = if output_oct_count > 0 { output_oct_count } else { 1 }
     out = ptx_push_str(out, "    // oct_linear_hmma_f16: HMMA m16n16k16 octonion linear layer\n")
     out = ptx_push_str(out, "    // weight_base=")
     out = ptx_push_str(out, i64_to_string(weight_base))
@@ -1824,39 +2018,95 @@ fn ptx_emit_oct_linear_hmma_f16(buf: PtxBuf, dst_base: i64, weight_base: i64, in
     out = ptx_push_str(out, i64_to_string(input_base))
     out = ptx_push_str(out, " bias_base=")
     out = ptx_push_str(out, i64_to_string(bias_base))
+    out = ptx_push_str(out, " tile_count=")
+    out = ptx_push_str(out, i64_to_string(tile_total))
+    out = ptx_push_str(out, " output_oct_count=")
+    out = ptx_push_str(out, i64_to_string(output_total))
     out = ptx_push_str(out, "\n")
-    out = ptx_push_str(out, "    // For each output octonion component k (0..7):\n")
-    out = ptx_push_str(out, "    //   1. Zero 8 f32 accumulator regs\n")
-    out = ptx_push_str(out, "    //   2. For each input octonion j: pack weight[j] and input[j] into HMMA fragment\n")
-    out = ptx_push_str(out, "    //   3. wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32\n")
-    out = ptx_push_str(out, "    //   4. Apply Fano plane sign correction\n")
-    out = ptx_push_str(out, "    //   5. Add bias component\n")
-    out = ptx_push_str(out, "    //   6. Store to output register\n")
-    var k: i64 = 0
-    while k < 8 {
-        let dst_r = gpu_reg_f32(dst_base + k)
-        out = ptx_push_str(out, "    mov.f32 ")
-        out = ptx_push_str(out, dst_r)
-        out = ptx_push_str(out, ", 0f00000000;\n")
-        k = k + 1
+    out = ptx_push_str(out, "    // packed tile ABI: each HMMA tile consumes 8 packed .b32 regs for weight and 8 for input\n")
+    out = ptx_push_str(out, "    // fragment ABI: weight_base/input_base are packed HMMA fragment tile arrays from GpuHyperOctPackFragments\n")
+    var out_idx: i64 = 0
+    while out_idx < output_total {
+        let acc_base = dst_base + (out_idx * 8)
+        let bias_block_base = bias_base + (out_idx * 8)
+        let weight_block_base = weight_base + (out_idx * tile_total * 8)
+        out = ptx_push_str(out, "    // output octonion block ")
+        out = ptx_push_str(out, i64_to_string(out_idx))
+        out = ptx_push_str(out, " acc_base=")
+        out = ptx_push_str(out, i64_to_string(acc_base))
+        out = ptx_push_str(out, " bias_block_base=")
+        out = ptx_push_str(out, i64_to_string(bias_block_base))
+        out = ptx_push_str(out, " weight_block_base=")
+        out = ptx_push_str(out, i64_to_string(weight_block_base))
+        out = ptx_push_str(out, "\n")
+        out = ptx_emit_hmma_accumulator_zero(out, acc_base)
+        var ti: i64 = 0
+        while ti < tile_total {
+            let weight_tile_base = weight_block_base + (ti * 8)
+            let input_tile_base = input_base + (ti * 8)
+            out = ptx_push_str(out, "    // accumulate packed HMMA tile ")
+            out = ptx_push_str(out, i64_to_string(ti))
+            out = ptx_push_str(out, " weight_frag_base=")
+            out = ptx_push_str(out, i64_to_string(weight_tile_base))
+            out = ptx_push_str(out, " input_frag_base=")
+            out = ptx_push_str(out, i64_to_string(input_tile_base))
+            out = ptx_push_str(out, "\n")
+            out = ptx_emit_wmma_m16n16k16_f32_f16_f16_f32(out, acc_base, weight_tile_base, input_tile_base, acc_base)
+            ti = ti + 1
+        }
+        out = ptx_emit_hmma_sign_correction(out, acc_base)
+        out = ptx_emit_hmma_bias_add(out, acc_base, bias_block_base)
+        out = ptx_push_str(out, "    // result remains in acc_base..acc_base+7\n")
+        out_idx = out_idx + 1
     }
-    out = ptx_push_str(out, "    // HMMA tiled GEMM with Fano sign correction placeholder\n")
-    out = ptx_push_str(out, "    // (full lowering emits wmma.load/mma/store per tile pair)\n")
     out
 }
 
-fn ptx_emit_oct_linear_hmma_f32(buf: PtxBuf, dst_base: i64, weight_base: i64, input_base: i64, bias_base: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+fn ptx_emit_oct_linear_hmma_f32(buf: PtxBuf, dst_base: i64, weight_base: i64, input_base: i64, bias_base: i64, tile_count: i64, output_oct_count: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
+    let tile_total = if tile_count > 0 { tile_count } else { 1 }
+    let output_total = if output_oct_count > 0 { output_oct_count } else { 1 }
     out = ptx_push_str(out, "    // oct_linear_hmma_f32: HMMA m16n16k16 octonion linear layer (f32 accum)\n")
-    out = ptx_push_str(out, "    // Same tile structure as f16 variant but f32 accumulation path\n")
-    var k: i64 = 0
-    while k < 8 {
-        let dst_r = gpu_reg_f32(dst_base + k)
-        out = ptx_push_str(out, "    mov.f32 ")
-        out = ptx_push_str(out, dst_r)
-        out = ptx_push_str(out, ", 0f00000000;\n")
-        k = k + 1
+    out = ptx_push_str(out, "    // fragment ABI matches the f16 variant, with f32 accumulators retained in-place\n")
+    out = ptx_push_str(out, "    // tile_count=")
+    out = ptx_push_str(out, i64_to_string(tile_total))
+    out = ptx_push_str(out, " output_oct_count=")
+    out = ptx_push_str(out, i64_to_string(output_total))
+    out = ptx_push_str(out, " packed HMMA tile sequence\n")
+    var out_idx: i64 = 0
+    while out_idx < output_total {
+        let acc_base = dst_base + (out_idx * 8)
+        let bias_block_base = bias_base + (out_idx * 8)
+        let weight_block_base = weight_base + (out_idx * tile_total * 8)
+        out = ptx_push_str(out, "    // output octonion block ")
+        out = ptx_push_str(out, i64_to_string(out_idx))
+        out = ptx_push_str(out, " acc_base=")
+        out = ptx_push_str(out, i64_to_string(acc_base))
+        out = ptx_push_str(out, " bias_block_base=")
+        out = ptx_push_str(out, i64_to_string(bias_block_base))
+        out = ptx_push_str(out, " weight_block_base=")
+        out = ptx_push_str(out, i64_to_string(weight_block_base))
+        out = ptx_push_str(out, "\n")
+        out = ptx_emit_hmma_accumulator_zero(out, acc_base)
+        var ti: i64 = 0
+        while ti < tile_total {
+            let weight_tile_base = weight_block_base + (ti * 8)
+            let input_tile_base = input_base + (ti * 8)
+            out = ptx_push_str(out, "    // accumulate packed HMMA tile ")
+            out = ptx_push_str(out, i64_to_string(ti))
+            out = ptx_push_str(out, " weight_frag_base=")
+            out = ptx_push_str(out, i64_to_string(weight_tile_base))
+            out = ptx_push_str(out, " input_frag_base=")
+            out = ptx_push_str(out, i64_to_string(input_tile_base))
+            out = ptx_push_str(out, "\n")
+            out = ptx_emit_wmma_m16n16k16_f32_f16_f16_f32(out, acc_base, weight_tile_base, input_tile_base, acc_base)
+            ti = ti + 1
+        }
+        out = ptx_emit_hmma_sign_correction(out, acc_base)
+        out = ptx_emit_hmma_bias_add(out, acc_base, bias_block_base)
+        out = ptx_push_str(out, "    // f32 accumulation block remains in acc_base..acc_base+7\n")
+        out_idx = out_idx + 1
     }
-    out = ptx_push_str(out, "    // HMMA tiled GEMM with f32 accumulation placeholder\n")
+    out = ptx_push_str(out, "    // f32 accumulation path shares the same tensor-core opcode and sign-correction flow\n")
     out
 }

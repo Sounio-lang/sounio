@@ -47,7 +47,7 @@ echo
 
 # Check souc binary
 echo "3. Checking souc binary..."
-if [ -x "/home/demetrios/RustroverProjects/sounio/bin/souc" ]; then
+if [ -x "/workspace/sounio/bin/souc" ]; then
     echo "  ✓ souc binary found and executable"
 else
     echo "  ✗ souc binary not found or not executable"
@@ -57,7 +57,7 @@ echo
 
 # Check stdlib path
 echo "4. Checking Sounio stdlib..."
-if [ -d "/home/demetrios/RustroverProjects/sounio/stdlib" ]; then
+if [ -d "/workspace/sounio/stdlib" ]; then
     echo "  ✓ stdlib path found"
 else
     echo "  ✗ stdlib path not found"
@@ -90,7 +90,7 @@ echo
 
 # Test souc execution
 echo "6. Testing souc execution..."
-SOUC="/home/demetrios/RustroverProjects/sounio/bin/souc"
+SOUC="/workspace/sounio/bin/souc"
 cat > /tmp/test_kernel.sio << 'EOF'
 fn main() with IO {
     print(1 + 1)

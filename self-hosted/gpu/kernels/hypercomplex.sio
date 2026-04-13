@@ -1222,7 +1222,8 @@ fn hc_emit_reg_decls(s: HypercomplexPtxState, reg_count: i64, pred_count: i64) -
     out = hc_push_str(out, i64_to_string(pred_count))
     out = hc_push_str(out, ">;\n")
     out = hc_push_str(out, "    .reg .b64 %rd<16>;\n")
-    out = hc_push_str(out, "    .reg .b32 %r<8>;\n\n")
+    // Hypercomplex HMMA paths stage packed operand tiles in %r scratch regs.
+    out = hc_push_str(out, "    .reg .b32 %r<64>;\n\n")
     out
 }
 
@@ -1350,6 +1351,8 @@ fn hc_emit_oct_linear_hmma_f16(
     output_ptr_reg: i64
 ) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
     var out = s
+    let tile_pairs = if n_in > 0 { n_in } else { 1 }
+    let output_total = if n_out > 0 { n_out } else { 1 }
 
     out = hc_push_str(out, "    // === HMMA octonion linear layer (f16/f32) ===\n")
     out = hc_push_str(out, "    // n_in=")
@@ -1357,6 +1360,13 @@ fn hc_emit_oct_linear_hmma_f16(
     out = hc_push_str(out, " n_out=")
     out = hc_push_str(out, i64_to_string(n_out))
     out = hc_push_str(out, "\n")
+    out = hc_push_str(out, "    // packed fragment ABI: 8 .b32 regs per operand tile via f16x2 pairs\n")
+    out = hc_push_str(out, "    // tile_pairs=")
+    out = hc_push_str(out, i64_to_string(tile_pairs))
+    out = hc_push_str(out, " output_oct_count=")
+    out = hc_push_str(out, i64_to_string(output_total))
+    out = hc_push_str(out, "\n")
+    out = hc_push_str(out, "    // reference path still loads from global memory, but matches the same 8-lane packed HMMA contract as lower_to_ptx.sio\n")
 
     // Allocate f32 accumulator registers for output (8 components per octonion)
     // We process one output octonion at a time
@@ -1364,23 +1374,19 @@ fn hc_emit_oct_linear_hmma_f16(
     out = acc_alloc.0
     var acc = acc_alloc.1
 
-    // Allocate f16 fragment registers (16 wide: 2 octonions packed)
-    var frag_a: [i64; 16] = [0; 16]
-    var frag_b: [i64; 16] = [0; 16]
+    // Packed operand fragments use 8 .b32 regs per operand tile.
+    var frag_a: [i64; 8] = [0; 8]
+    var frag_b: [i64; 8] = [0; 8]
     var fi: i64 = 0
-    while fi < 16 {
-        let fa = hc_alloc_reg(out)
-        out = fa.0
-        frag_a[fi as usize] = fa.1
-        let fb = hc_alloc_reg(out)
-        out = fb.0
-        frag_b[fi as usize] = fb.1
+    while fi < 8 {
+        frag_a[fi as usize] = 8 + fi
+        frag_b[fi as usize] = 16 + fi
         fi = fi + 1
     }
 
     // For each output octonion
     var out_idx: i64 = 0
-    while out_idx < n_out {
+    while out_idx < output_total {
         out = hc_push_str(out, "    // --- output octonion ")
         out = hc_push_str(out, i64_to_string(out_idx))
         out = hc_push_str(out, " ---\n")
@@ -1394,37 +1400,37 @@ fn hc_emit_oct_linear_hmma_f16(
             ak = ak + 1
         }
 
-        // For each input octonion, pack weight tile + input tile and HMMA
-        var in_idx: i64 = 0
-        while in_idx < n_in {
-            out = hc_push_str(out, "    // load weight[")
+        // For each packed tile pair, load operand fragments and HMMA-accumulate.
+        var tile_idx: i64 = 0
+        while tile_idx < tile_pairs {
+            out = hc_push_str(out, "    // packed HMMA tile pair ")
+            out = hc_push_str(out, i64_to_string(tile_idx))
+            out = hc_push_str(out, " load weight[")
             out = hc_push_str(out, i64_to_string(out_idx))
             out = hc_push_str(out, "][")
-            out = hc_push_str(out, i64_to_string(in_idx))
+            out = hc_push_str(out, i64_to_string(tile_idx))
             out = hc_push_str(out, "] and input[")
-            out = hc_push_str(out, i64_to_string(in_idx))
+            out = hc_push_str(out, i64_to_string(tile_idx))
             out = hc_push_str(out, "]\n")
 
-            // Load weight row tile (8 f16 values) from global memory
-            // Weight is stored as (N_out*8) x (N_in*8) row-major f16
-            // Address: weight_ptr + (out_idx*8*8 + in_idx*8) * sizeof(f16)
-            let weight_offset = (out_idx * n_in * 8 + in_idx) * 8 * 2
+            // Weight is stored as packed HMMA operand tiles in row-major order.
+            let weight_offset = (out_idx * tile_pairs * 8 + tile_idx * 8) * 2
             out = hc_push_str(out, "    // weight offset = ")
             out = hc_push_str(out, i64_to_string(weight_offset))
             out = hc_push_str(out, "\n")
 
-            // Load input tile (8 f16 values) from global memory
-            let input_offset = in_idx * 8 * 2
+            // Input vector tiles are packed in the same 8-reg fragment ABI.
+            let input_offset = tile_idx * 8 * 2
             out = hc_push_str(out, "    // input offset = ")
             out = hc_push_str(out, i64_to_string(input_offset))
             out = hc_push_str(out, "\n")
 
-            // Emit wmma.load for weight (A matrix, row-major)
+            // Emit wmma.load for weight (A matrix, row-major) into packed %r regs.
             out = hc_push_str(out, "    wmma.load.a.sync.aligned.m16n16k16.global.row.f16 {")
             fi = 0
             while fi < 8 {
                 if fi > 0 { out = hc_push_str(out, ", ") }
-                out = hc_push_str(out, "%f")
+                out = hc_push_str(out, "%r")
                 out = hc_push_str(out, i64_to_string(frag_a[fi as usize]))
                 fi = fi + 1
             }
@@ -1432,12 +1438,12 @@ fn hc_emit_oct_linear_hmma_f16(
             out = hc_push_str(out, i64_to_string(weight_ptr_reg))
             out = hc_push_str(out, "];\n")
 
-            // Emit wmma.load for input (B matrix, col-major for octonion dot product)
+            // Emit wmma.load for input (B matrix, col-major for octonion dot product).
             out = hc_push_str(out, "    wmma.load.b.sync.aligned.m16n16k16.global.col.f16 {")
             fi = 0
             while fi < 8 {
                 if fi > 0 { out = hc_push_str(out, ", ") }
-                out = hc_push_str(out, "%f")
+                out = hc_push_str(out, "%r")
                 out = hc_push_str(out, i64_to_string(frag_b[fi as usize]))
                 fi = fi + 1
             }
@@ -1458,7 +1464,7 @@ fn hc_emit_oct_linear_hmma_f16(
             fi = 0
             while fi < 8 {
                 if fi > 0 { out = hc_push_str(out, ", ") }
-                out = hc_push_str(out, "%f")
+                out = hc_push_str(out, "%r")
                 out = hc_push_str(out, i64_to_string(frag_a[fi as usize]))
                 fi = fi + 1
             }
@@ -1466,7 +1472,7 @@ fn hc_emit_oct_linear_hmma_f16(
             fi = 0
             while fi < 8 {
                 if fi > 0 { out = hc_push_str(out, ", ") }
-                out = hc_push_str(out, "%f")
+                out = hc_push_str(out, "%r")
                 out = hc_push_str(out, i64_to_string(frag_b[fi as usize]))
                 fi = fi + 1
             }
@@ -1480,23 +1486,12 @@ fn hc_emit_oct_linear_hmma_f16(
             }
             out = hc_push_str(out, "};\n")
 
-            in_idx = in_idx + 1
+            tile_idx = tile_idx + 1
         }
 
-        // Apply Fano plane sign correction to accumulator
+        // Apply Fano plane sign correction using the shared HMMA utility logic.
         out = hc_push_str(out, "    // Fano plane sign correction\n")
-        var sc: i64 = 0
-        while sc < 8 {
-            let mask = hmma_sign_mask_for_output_component(sc)
-            if mask != 0 {
-                out = hc_push_str(out, "    neg.f32 %f")
-                out = hc_push_str(out, i64_to_string(acc.regs[sc as usize]))
-                out = hc_push_str(out, ", %f")
-                out = hc_push_str(out, i64_to_string(acc.regs[sc as usize]))
-                out = hc_push_str(out, ";\n")
-            }
-            sc = sc + 1
-        }
+        out = hmma_emit_full_sign_correction(out, acc.regs[0])
 
         // Add bias
         out = hc_push_str(out, "    // add bias\n")

@@ -200,7 +200,7 @@ Required sections (not necessarily in order):
 6. Documentation links:
    - Main Sounio project: link to repo
    - GUM standard: link to NIST guide
-   - Example notebooks: link to triple-sounio-ecosystem/notebooks/
+   - Example notebooks: link to ecosystem/notebooks/
    - Test suite: link to tests/
 
 7. Why epistemic computing for drug discovery:
@@ -224,7 +224,7 @@ Length: Exactly ~300 words
 
 1. **Prepare files:**
    ```bash
-   cd /home/demetrios/RustroverProjects/sounio/triple-sounio-ecosystem
+   cd /workspace/sounio/ecosystem
    touch sounio-py/README.md sounio-jupyter/README.md drug-discovery/README.md
    ```
 
@@ -261,7 +261,7 @@ Length: Exactly ~300 words
 
 ## Ecosystem-Level README (Days 13-14)
 
-After individual READMEs are done, create `/triple-sounio-ecosystem/README.md`:
+After individual READMEs are done, create `/ecosystem/README.md`:
 
 **Structure:**
 ```

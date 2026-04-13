@@ -67,7 +67,7 @@
 ### Step 1: Navigate to Docker Directory
 
 ```bash
-cd /path/to/sounio/triple-sounio-ecosystem/docker/
+cd /path/to/sounio/ecosystem/docker/
 ```
 
 ### Step 2: Auto-Start with quickstart.sh
@@ -177,7 +177,7 @@ docker-compose restart sounio-lab
 ## Directory Layout
 
 ```
-triple-sounio-ecosystem/docker/
+ecosystem/docker/
 ├── Dockerfile                   # Container definition
 ├── docker-compose.yml           # Service orchestration
 ├── jupyter_config.py            # JLab configuration
@@ -206,8 +206,8 @@ triple-sounio-ecosystem/docker/
 
 - **Language Guide:** `docs/MINIMUM_VIABLE_SOUNIO.md`
 - **Syntax Reference:** `docs/LLM_PROGRAMMING_GUIDE.md`
-- **Project README:** `triple-sounio-ecosystem/README.md`
-- **Drug-Discovery:** `triple-sounio-ecosystem/drug-discovery/`
+- **Project README:** `ecosystem/README.md`
+- **Drug-Discovery:** `ecosystem/drug-discovery/`
 
 ## Advanced: Custom Configuration
 

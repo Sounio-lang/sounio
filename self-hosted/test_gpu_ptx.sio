@@ -838,6 +838,95 @@ fn gpu_ptx_test_100_value_map_name_offsets() -> bool with Mut, Panic, Div, Alloc
     ptx_value_map_get_name(vm, 11) == "r64_3"
 }
 
+fn gpu_ptx_test_101_hmma_oct_linear_tensor_core_opcode() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_oct_linear_hmma_demo_ir()))
+    ptx_str_contains(s, ".entry oct_linear_hmma_demo") &&
+    ptx_str_contains(s, "wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32")
+}
+
+fn gpu_ptx_test_102_hmma_oct_linear_pack_bias_and_contract() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_oct_linear_hmma_demo_ir()))
+    ptx_str_contains(s, "pack two octonion f16 vectors into 16-wide HMMA fragment") &&
+    ptx_str_contains(s, "fragment ABI: each operand base spans 8 packed .b32 regs via f16x2 pairs") &&
+    ptx_str_contains(s, "cvt.rn.f16x2.f32") &&
+    ptx_str_contains(s, "fragment ABI: weight_base/input_base are packed HMMA fragment tile arrays from GpuHyperOctPackFragments") &&
+    ptx_str_contains(s, "tile_count=2") &&
+    ptx_str_contains(s, "output_oct_count=2") &&
+    ptx_str_contains(s, "accumulate packed HMMA tile 0") &&
+    ptx_str_contains(s, "accumulate packed HMMA tile 1") &&
+    ptx_str_contains(s, "output octonion block 1")
+}
+
+fn gpu_ptx_test_103_hmma_oct_linear_sign_and_unpack() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_oct_linear_hmma_demo_ir()))
+    ptx_str_contains(s, "Fano plane sign correction") &&
+    ptx_str_contains(s, "neg.f32") &&
+    ptx_str_contains(s, "unpack HMMA 16-wide accumulator into octonion output") &&
+    ptx_str_contains(s, "mov.f32 %f209, %f193") &&
+    ptx_str_contains(s, "mov.f32 %f217, %f201")
+}
+
+fn gpu_ptx_test_104_hmma_oct_linear_capability_requirement() -> bool with Mut, Panic, Div, Alloc {
+    let kernel = gpu_build_oct_linear_hmma_demo_ir()
+    let req = gpu_capability_requirement_from_op(kernel.ops[6])
+    req.requires_tensor_core && req.requires_fp16 && req.opcode == GpuOpcode::GpuHyperOctLinearHmmaF16
+}
+
+fn gpu_ptx_test_105_hmma_oct_mul_tensor_core_opcode() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_oct_mul_hmma_demo_ir()))
+    ptx_str_contains(s, ".entry oct_mul_hmma_demo") &&
+    ptx_str_contains(s, "wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32")
+}
+
+fn gpu_ptx_test_106_hmma_oct_mul_pack_and_unpack() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_oct_mul_hmma_demo_ir()))
+    ptx_str_contains(s, "scratch ABI: u32 fragments at dst_base+8..dst_base+23, f32 accum at dst_base+24..dst_base+31") &&
+    ptx_str_contains(s, "duplicate each octonion across the 16-lane fragment tile to drive the tensor-core path") &&
+    ptx_str_contains(s, "pack two octonion f16 vectors into 16-wide HMMA fragment") &&
+    ptx_str_contains(s, "cvt.rn.f16x2.f32") &&
+    ptx_str_contains(s, "unpack HMMA 16-wide accumulator into octonion output") &&
+    ptx_str_contains(s, "result unpacked into dst_base..dst_base+7") &&
+    !ptx_str_contains(s, "Note: full HMMA octonion multiply emits 8 tiled HMMA ops")
+}
+
+fn gpu_ptx_test_107_hmma_oct_mul_capability_requirement() -> bool with Mut, Panic, Div, Alloc {
+    let kernel = gpu_build_oct_mul_hmma_demo_ir()
+    let req = gpu_capability_requirement_from_op(kernel.ops[0])
+    req.requires_tensor_core && req.requires_fp16 && req.opcode == GpuOpcode::GpuHyperOctMulHmmaF16
+}
+
+fn hc_ptx_to_string(s: HypercomplexPtxState) -> string with Mut, Panic, Div, Alloc {
+    let out = hc_get_output(s)
+    str_from_bytes(out.0, out.1)
+}
+
+fn gpu_ptx_test_108_hmma_sign_masks_match_reference_layer() -> bool with Mut, Panic, Div, Alloc {
+    hmma_sign_mask_for_output_component(0) == ptx_hmma_sign_mask_for_output_component(0) &&
+    hmma_sign_mask_for_output_component(1) == ptx_hmma_sign_mask_for_output_component(1) &&
+    hmma_sign_mask_for_output_component(2) == ptx_hmma_sign_mask_for_output_component(2) &&
+    hmma_sign_mask_for_output_component(3) == ptx_hmma_sign_mask_for_output_component(3) &&
+    hmma_sign_mask_for_output_component(4) == ptx_hmma_sign_mask_for_output_component(4) &&
+    hmma_sign_mask_for_output_component(5) == ptx_hmma_sign_mask_for_output_component(5) &&
+    hmma_sign_mask_for_output_component(6) == ptx_hmma_sign_mask_for_output_component(6) &&
+    hmma_sign_mask_for_output_component(7) == ptx_hmma_sign_mask_for_output_component(7)
+}
+
+fn gpu_ptx_test_109_hmma_reference_pack_uses_packed_b32_pairs() -> bool with Mut, Panic, Div, Alloc {
+    let s = hc_ptx_to_string(hmma_emit_pack_oct_pair(hc_new(), 32, 40, 8))
+    ptx_str_contains(s, "as 8 packed .b32 regs via f16x2 pairs") &&
+    ptx_str_contains(s, "cvt.rn.f16x2.f32 %r8, %f32, %f33") &&
+    ptx_str_contains(s, "cvt.rn.f16x2.f32 %r12, %f40, %f41")
+}
+
+fn gpu_ptx_test_110_hypercomplex_hmma_reference_contract() -> bool with Mut, Panic, Div, Alloc {
+    let s = hc_ptx_to_string(hc_emit_oct_linear_hmma_f16(hc_new(), 2, 2, 4, 5, 6, 7))
+    ptx_str_contains(s, "packed fragment ABI: 8 .b32 regs per operand tile via f16x2 pairs") &&
+    ptx_str_contains(s, "tile_pairs=2 output_oct_count=2") &&
+    ptx_str_contains(s, "wmma.load.a.sync.aligned.m16n16k16.global.row.f16 {%r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15}") &&
+    ptx_str_contains(s, "wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32") &&
+    ptx_str_contains(s, "Fano plane sign correction")
+}
+
 fn run_gpu_ptx_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
     var total: i64 = 0
@@ -1062,6 +1151,26 @@ fn run_gpu_ptx_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if gpu_ptx_test_99_scan_larger_than_elemwise() { passed = passed + 1; print("  T99 OK (scan > elemwise)\n") } else { print("  FAIL T99\n") }
     total = total + 1
     if gpu_ptx_test_100_value_map_name_offsets() { passed = passed + 1; print("  T100 OK (value-map offsets)\n") } else { print("  FAIL T100\n") }
+    total = total + 1
+    if gpu_ptx_test_101_hmma_oct_linear_tensor_core_opcode() { passed = passed + 1; print("  T101 OK (hmma oct tensor-core opcode)\n") } else { print("  FAIL T101\n") }
+    total = total + 1
+    if gpu_ptx_test_102_hmma_oct_linear_pack_bias_and_contract() { passed = passed + 1; print("  T102 OK (hmma oct pack+bias contract)\n") } else { print("  FAIL T102\n") }
+    total = total + 1
+    if gpu_ptx_test_103_hmma_oct_linear_sign_and_unpack() { passed = passed + 1; print("  T103 OK (hmma oct sign+unpack)\n") } else { print("  FAIL T103\n") }
+    total = total + 1
+    if gpu_ptx_test_104_hmma_oct_linear_capability_requirement() { passed = passed + 1; print("  T104 OK (hmma oct capability req)\n") } else { print("  FAIL T104\n") }
+    total = total + 1
+    if gpu_ptx_test_105_hmma_oct_mul_tensor_core_opcode() { passed = passed + 1; print("  T105 OK (hmma oct mul tensor-core opcode)\n") } else { print("  FAIL T105\n") }
+    total = total + 1
+    if gpu_ptx_test_106_hmma_oct_mul_pack_and_unpack() { passed = passed + 1; print("  T106 OK (hmma oct mul pack+unpack)\n") } else { print("  FAIL T106\n") }
+    total = total + 1
+    if gpu_ptx_test_107_hmma_oct_mul_capability_requirement() { passed = passed + 1; print("  T107 OK (hmma oct mul capability req)\n") } else { print("  FAIL T107\n") }
+    total = total + 1
+    if gpu_ptx_test_108_hmma_sign_masks_match_reference_layer() { passed = passed + 1; print("  T108 OK (hmma sign masks agree)\n") } else { print("  FAIL T108\n") }
+    total = total + 1
+    if gpu_ptx_test_109_hmma_reference_pack_uses_packed_b32_pairs() { passed = passed + 1; print("  T109 OK (hmma ref pack ABI)\n") } else { print("  FAIL T109\n") }
+    total = total + 1
+    if gpu_ptx_test_110_hypercomplex_hmma_reference_contract() { passed = passed + 1; print("  T110 OK (hypercomplex hmma contract)\n") } else { print("  FAIL T110\n") }
 
     if passed == total { print("GPU PTX tests: all passed\n") } else { print("GPU PTX tests: suite fail\n") }
 

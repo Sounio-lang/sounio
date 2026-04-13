@@ -7,7 +7,7 @@ Complete guide to running Sounio code in Jupyter notebooks with epistemic uncert
 ## Installation
 
 ```bash
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 pip install -e .
 jupyter kernelspec install kernelspec/ --user
 jupyter kernelspec list  # should show "sounio"

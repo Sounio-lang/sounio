@@ -5,7 +5,7 @@ Active workspace:
 
 Recovered origin:
 - recovered from VM `sounio-dev-01`
-- older prompts and scripts may still mention `/home/demetrios/RustroverProjects/sounio`
+- older prompts and scripts may still mention the recovered VM-era path; treat those references as stale
 
 Safe branch:
 - `integration/sounio-dev-ready-base`

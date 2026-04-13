@@ -1,22 +1,95 @@
 // self-hosted::gpu::speculative -- Novelty 5: Speculative Epistemic Execution
-// Restores speculative classification and refinement wrapping over per-kernel summaries.
+// Restores kernel-level coarse/refinement classification and guard wrapping
+// while keeping a conservative standalone harness.
 
-struct HlirGpuLoweredModule {
-    kernel_count: i64,
-    op_counts: [i64; 64],
-    heavy_math: [bool; 64],
-    max_reg_f64: [i64; 64],
-    max_reg_pred: [i64; 64]
+enum GpuType {
+    GpuI32,
+    GpuI64,
+    GpuF32,
+    GpuF64,
+    GpuPtr,
+    GpuBool,
+    GpuTf32,
+    GpuF16,
+    GpuB32,
+    GpuB64
 }
 
-fn hlir_gpu_lowered_module_new() -> HlirGpuLoweredModule {
-    HlirGpuLoweredModule {
-        kernel_count: 0,
-        op_counts: [0; 64],
-        heavy_math: [false; 64],
-        max_reg_f64: [0; 64],
-        max_reg_pred: [0; 64]
-    }
+enum GpuOpcode {
+    GpuGetTid,
+    GpuCvt,
+    GpuMulImm,
+    GpuAdd,
+    GpuSub,
+    GpuMul,
+    GpuDiv,
+    GpuMax,
+    GpuMin,
+    GpuBarrierSync,
+    GpuGlobalLoad,
+    GpuGlobalStore,
+    GpuSharedLoad,
+    GpuSharedStore,
+    GpuSqrt,
+    GpuAbs,
+    GpuExp,
+    GpuExp2,
+    GpuSin,
+    GpuCos,
+    GpuLoad,
+    GpuStore
+}
+
+enum GpuWorkloadTag {
+    GpuWorkloadGeneral
+}
+
+struct GpuParam {
+    name: [i8; 64],
+    ty: GpuType
+}
+
+struct GpuOp {
+    opcode: GpuOpcode,
+    dst_reg: i64,
+    src_reg: i64,
+    lhs_reg: i64,
+    rhs_reg: i64,
+    addr_reg: i64,
+    rhs_imm: i64,
+    param_idx: i64,
+    axis: i64,
+    shared_addr: i64
+}
+
+struct GpuKernelIr {
+    kernel_name: [i8; 64],
+    workload_tag: GpuWorkloadTag,
+    params: [GpuParam; 8],
+    param_count: i64,
+    ops: [GpuOp; 1024],
+    op_count: i64,
+    shared_bytes: i64,
+    max_reg_u32: i64,
+    max_reg_u64: i64,
+    max_reg_f32: i64,
+    max_reg_f64: i64,
+    max_reg_i32: i64,
+    max_reg_i64: i64,
+    max_reg_pred: i64,
+    shared_mem_bytes: i64,
+    max_threads: i64,
+    num_barriers: i64,
+    cta_size_x: i64,
+    cta_size_y: i64,
+    cta_size_z: i64,
+    cluster_x: i64,
+    cluster_y: i64
+}
+
+struct HlirGpuLoweredModule {
+    kernels: [GpuKernelIr; 64],
+    kernel_count: i64
 }
 
 struct SpeculativeConfig {
@@ -34,6 +107,71 @@ struct SpeculativePlan {
     threshold_reg: i64
 }
 
+fn gpu_param_new() -> GpuParam {
+    GpuParam {
+        name: [0i8; 64],
+        ty: GpuType::GpuI32
+    }
+}
+
+fn gpu_op_new() -> GpuOp {
+    GpuOp {
+        opcode: GpuOpcode::GpuAdd,
+        dst_reg: 0 - 1,
+        src_reg: 0 - 1,
+        lhs_reg: 0 - 1,
+        rhs_reg: 0 - 1,
+        addr_reg: 0 - 1,
+        rhs_imm: 0,
+        param_idx: 0 - 1,
+        axis: 0,
+        shared_addr: 0
+    }
+}
+
+fn gpu_kernel_new() -> GpuKernelIr {
+    GpuKernelIr {
+        kernel_name: [0i8; 64],
+        workload_tag: GpuWorkloadTag::GpuWorkloadGeneral,
+        params: [
+            gpu_param_new(),
+            gpu_param_new(),
+            gpu_param_new(),
+            gpu_param_new(),
+            gpu_param_new(),
+            gpu_param_new(),
+            gpu_param_new(),
+            gpu_param_new()
+        ],
+        param_count: 0,
+        ops: [gpu_op_new(); 1024],
+        op_count: 0,
+        shared_bytes: 0,
+        max_reg_u32: 0,
+        max_reg_u64: 0,
+        max_reg_f32: 0,
+        max_reg_f64: 0,
+        max_reg_i32: 0,
+        max_reg_i64: 0,
+        max_reg_pred: 0,
+        shared_mem_bytes: 0,
+        max_threads: 0,
+        num_barriers: 0,
+        cta_size_x: 0,
+        cta_size_y: 0,
+        cta_size_z: 0,
+        cluster_x: 0,
+        cluster_y: 0
+    }
+}
+
+fn hlir_gpu_lowered_module_new() -> HlirGpuLoweredModule {
+    HlirGpuLoweredModule {
+        kernels: [gpu_kernel_new(); 64],
+        kernel_count: 0
+    }
+}
+
 fn spec_config_new() -> SpeculativeConfig {
     SpeculativeConfig {
         epsilon_threshold: 0.01,
@@ -49,17 +187,35 @@ fn spec_plan_new() -> SpeculativePlan {
         refinement_kernel_indices: [0; 32],
         coarse_count: 0,
         refinement_count: 0,
-        threshold_reg: -1
+        threshold_reg: 0 - 1
     }
 }
 
-fn is_coarse_kernel(op_count: i64, has_heavy_math: bool) -> bool {
-    if op_count > 32 {
+fn is_heavy_math_op(opcode: GpuOpcode) -> bool {
+    match opcode {
+        GpuOpcode::GpuSqrt => true,
+        GpuOpcode::GpuExp => true,
+        GpuOpcode::GpuExp2 => true,
+        GpuOpcode::GpuSin => true,
+        GpuOpcode::GpuCos => true,
+        _ => false
+    }
+}
+
+fn is_coarse_kernel(kernel: GpuKernelIr) -> bool with Mut, Panic {
+    if kernel.op_count > 32 {
         return false
     }
-    if has_heavy_math {
-        return false
+
+    var op_idx: i64 = 0
+    while op_idx < kernel.op_count && op_idx < 1024 {
+        let op = kernel.ops[op_idx as usize]
+        if is_heavy_math_op(op.opcode) {
+            return false
+        }
+        op_idx = op_idx + 1
     }
+
     true
 }
 
@@ -67,10 +223,9 @@ fn spec_classify_kernels(module: HlirGpuLoweredModule) -> SpeculativePlan with M
     var plan = spec_plan_new()
     var kernel_idx: i64 = 0
 
-    while kernel_idx < module.kernel_count {
-        let op_count = module.op_counts[kernel_idx as usize]
-        let has_heavy_math = module.heavy_math[kernel_idx as usize]
-        if is_coarse_kernel(op_count, has_heavy_math) {
+    while kernel_idx < module.kernel_count && kernel_idx < 64 {
+        let kernel: GpuKernelIr = module.kernels[kernel_idx as usize]
+        if is_coarse_kernel(kernel) {
             if plan.coarse_count < 32 {
                 plan.coarse_kernel_indices[plan.coarse_count as usize] = kernel_idx
                 plan.coarse_count = plan.coarse_count + 1
@@ -89,12 +244,16 @@ fn spec_classify_kernels(module: HlirGpuLoweredModule) -> SpeculativePlan with M
 
 fn spec_emit_branch_guard(cfg: SpeculativeConfig, eps_reg: i64, skip_label: string) -> [i8; 512] with Mut, Panic, Div {
     let _ = skip_label
-    var out: [i8; 512] = [0; 512]
+
+    var out: [i8; 512] = [0i8; 512]
     if !cfg.enabled {
         out[0] = 47
         out[1] = 47
         return out
     }
+
+    let pred_digit = (eps_reg + 1) % 10
+    let src_digit = eps_reg % 10
 
     out[0] = 115
     out[1] = 101
@@ -107,22 +266,57 @@ fn spec_emit_branch_guard(cfg: SpeculativeConfig, eps_reg: i64, skip_label: stri
     out[8] = 102
     out[9] = 54
     out[10] = 52
-    out[11] = (48 + (eps_reg % 10)) as i8
-    if cfg.epsilon_threshold > 0.0 {
-        out[12] = 64
-    }
+    out[11] = 32
+    out[12] = 37
+    out[13] = 112
+    out[14] = (48 + pred_digit) as i8
+    out[15] = 44
+    out[16] = 32
+    out[17] = 37
+    out[18] = 102
+    out[19] = (48 + src_digit) as i8
+    out[20] = 44
+    out[21] = 32
+    out[22] = 48 + ((cfg.epsilon_threshold * 10.0) as i8)
+    out[23] = 59
+    out[24] = 10
+    out[25] = 64
+    out[26] = 37
+    out[27] = 112
+    out[28] = (48 + pred_digit) as i8
+    out[29] = 32
+    out[30] = 98
+    out[31] = 114
+    out[32] = 97
+    out[33] = 32
+    out[34] = 76
+    out[35] = 95
+    out[36] = 115
+    out[37] = 107
+    out[38] = 105
+    out[39] = 112
+    out[40] = 59
+    out[41] = 10
     out
 }
 
-fn spec_wrap_refinement(module: &! HlirGpuLoweredModule, kernel_idx: i64, cfg: SpeculativeConfig, threshold_value: f64) -> () with Mut, Panic {
+fn spec_wrap_refinement(kernel: GpuKernelIr, eps_shadow_reg: i64, cfg: SpeculativeConfig, threshold_value: f64) -> GpuKernelIr with Mut, Panic {
+    let _ = eps_shadow_reg
     let _ = threshold_value
+
     if !cfg.enabled {
-        return ()
+        return kernel
     }
 
-    module.max_reg_f64[kernel_idx as usize] = module.max_reg_f64[kernel_idx as usize] + 1
-    module.max_reg_pred[kernel_idx as usize] = module.max_reg_pred[kernel_idx as usize] + 1
-    module.op_counts[kernel_idx as usize] = module.op_counts[kernel_idx as usize] + 2
+    var wrapped = kernel
+    wrapped.max_reg_f64 = wrapped.max_reg_f64 + 1
+    wrapped.max_reg_pred = wrapped.max_reg_pred + 1
+
+    if wrapped.op_count <= 1022 {
+        wrapped.op_count = wrapped.op_count + 2
+    }
+
+    wrapped
 }
 
 fn spec_run(module: HlirGpuLoweredModule, cfg: SpeculativeConfig) -> HlirGpuLoweredModule with Mut, Panic {
@@ -139,13 +333,106 @@ fn spec_run(module: HlirGpuLoweredModule, cfg: SpeculativeConfig) -> HlirGpuLowe
         if wrap_count >= cfg.max_refinement_kernels {
             break
         }
+
         let kernel_idx = plan.refinement_kernel_indices[i as usize]
-        spec_wrap_refinement(&! result, kernel_idx, cfg, cfg.epsilon_threshold)
+        let kernel: GpuKernelIr = result.kernels[kernel_idx as usize]
+        let wrapped: GpuKernelIr = spec_wrap_refinement(kernel, 1 as i64, cfg, cfg.epsilon_threshold)
+        result.kernels[kernel_idx as usize] = wrapped
+
         wrap_count = wrap_count + 1
         i = i + 1
     }
 
     result
+}
+
+fn spec_test_kernel(op_count: i64, opcode: GpuOpcode) -> GpuKernelIr with Mut, Panic {
+    var kernel = gpu_kernel_new()
+    kernel.op_count = op_count
+    kernel.max_reg_f64 = 8
+    kernel.max_reg_pred = 2
+    if op_count > 0 {
+        var op = gpu_op_new()
+        op.opcode = opcode
+        kernel.ops[0] = op
+    }
+    kernel
+}
+
+fn run_self_tests() -> i64 with IO, Mut, Panic, Div {
+    var pass: i64 = 0
+    var total: i64 = 0
+
+    total = total + 1
+    let cfg = spec_config_new()
+    if cfg.epsilon_threshold > 0.0 && cfg.enabled {
+        pass = pass + 1
+    }
+
+    total = total + 1
+    let plan0 = spec_plan_new()
+    if plan0.coarse_count == 0 && plan0.refinement_count == 0 {
+        pass = pass + 1
+    }
+
+    total = total + 1
+    if is_heavy_math_op(GpuOpcode::GpuSqrt) {
+        pass = pass + 1
+    }
+
+    total = total + 1
+    if !is_heavy_math_op(GpuOpcode::GpuAdd) {
+        pass = pass + 1
+    }
+
+    total = total + 1
+    let empty_kernel = gpu_kernel_new()
+    if is_coarse_kernel(empty_kernel) {
+        pass = pass + 1
+    }
+
+    total = total + 1
+    let large_kernel = spec_test_kernel(100, GpuOpcode::GpuAdd)
+    if !is_coarse_kernel(large_kernel) {
+        pass = pass + 1
+    }
+
+    total = total + 1
+    let heavy_kernel = spec_test_kernel(8, GpuOpcode::GpuExp)
+    if !is_coarse_kernel(heavy_kernel) {
+        pass = pass + 1
+    }
+
+    total = total + 1
+    let guard_out: [i8; 512] = spec_emit_branch_guard(cfg, 2 as i64, "L_skip_1")
+    if guard_out[0] as i32 != 0 && guard_out[25] as i32 == 64 {
+        pass = pass + 1
+    }
+
+    total = total + 1
+    let ref_kernel: GpuKernelIr = spec_test_kernel(48, GpuOpcode::GpuMul)
+    let wrapped: GpuKernelIr = spec_wrap_refinement(ref_kernel, 1 as i64, cfg, cfg.epsilon_threshold)
+    if wrapped.max_reg_f64 > ref_kernel.max_reg_f64 && wrapped.op_count > ref_kernel.op_count {
+        pass = pass + 1
+    }
+
+    total = total + 1
+    var module = hlir_gpu_lowered_module_new()
+    module.kernel_count = 2
+    module.kernels[0] = spec_test_kernel(8, GpuOpcode::GpuAdd)
+    module.kernels[1] = spec_test_kernel(64, GpuOpcode::GpuMul)
+    let result = spec_run(module, cfg)
+    if result.kernels[0].op_count == module.kernels[0].op_count && result.kernels[1].op_count > module.kernels[1].op_count {
+        pass = pass + 1
+    }
+
+    if pass == total {
+        println("10/10 self-tests passed")
+    } else {
+        println("Some tests failed")
+    }
+
+    pass
 }
 
 fn main() with IO {

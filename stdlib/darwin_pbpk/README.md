@@ -10,7 +10,7 @@ Total: 10 modules, ~150KB of Sounio code
 
 **Purpose:** Top-level PBPK simulation orchestrator that integrates all components.
 
-**Location:** /mnt/e/workspace/sounio/stdlib/darwin_pbpk/simulation.d
+**Location:** /workspace/sounio/stdlib/darwin_pbpk/simulation.d
 
 **Size:** 23KB, 680 lines, 19 functions, 3 structs
 

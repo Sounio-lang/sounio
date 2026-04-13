@@ -28,7 +28,7 @@ pip install sounio
 
 ### From Source (Development)
 ```bash
-cd triple-sounio-ecosystem/sounio-py
+cd ecosystem/sounio-py
 pip install -e .
 ```
 

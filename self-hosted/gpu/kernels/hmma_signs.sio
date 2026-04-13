@@ -112,9 +112,11 @@ fn hmma_emit_sign_correction(buf: HypercomplexPtxState, dst_base: i64, sign_mask
 // Fragment packing/unpacking PTX emitters
 // ============================================================================
 
-// Emits PTX to pack two 8-component octonion f16 vectors into a 16-wide
-// HMMA fragment. Converts f32 registers to f16 via cvt.rn.f16.f32 and
-// packs pairs into .b32 registers for HMMA consumption.
+// Emits PTX to pack two 8-component octonion vectors into the packed
+// fragment ABI used by the split PTX lowering path:
+//   - oct_a pairs [0:1]..[6:7] -> fragment regs [0..3]
+//   - oct_b pairs [0:1]..[6:7] -> fragment regs [4..7]
+// Each fragment register is a packed .b32 lane formed via cvt.rn.f16x2.f32.
 fn hmma_emit_pack_oct_pair(buf: HypercomplexPtxState, oct_a_base: i64, oct_b_base: i64, frag_reg: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
     var out = buf
     out = hc_push_str(out, "    // pack oct_a[")
@@ -123,31 +125,33 @@ fn hmma_emit_pack_oct_pair(buf: HypercomplexPtxState, oct_a_base: i64, oct_b_bas
     out = hc_push_str(out, i64_to_string(oct_b_base))
     out = hc_push_str(out, "..] -> frag[")
     out = hc_push_str(out, i64_to_string(frag_reg))
-    out = hc_push_str(out, "..]\n")
+    out = hc_push_str(out, "..] as 8 packed .b32 regs via f16x2 pairs\n")
 
-    var i: i64 = 0
-    while i < 8 {
-        out = hc_push_str(out, "    cvt.rn.f16.f32 %hx")
-        out = hc_push_str(out, i64_to_string(frag_reg + i))
+    var pair_idx: i64 = 0
+    while pair_idx < 4 {
+        let lane_lo = pair_idx * 2
+        let lane_hi = lane_lo + 1
+        out = hc_push_str(out, "    cvt.rn.f16x2.f32 %r")
+        out = hc_push_str(out, i64_to_string(frag_reg + pair_idx))
         out = hc_push_str(out, ", %f")
-        out = hc_push_str(out, i64_to_string(oct_a_base + i))
-        out = hc_push_str(out, ";\n")
-        i = i + 1
-    }
-    var j: i64 = 0
-    while j < 8 {
-        out = hc_push_str(out, "    cvt.rn.f16.f32 %hx")
-        out = hc_push_str(out, i64_to_string(frag_reg + 8 + j))
+        out = hc_push_str(out, i64_to_string(oct_a_base + lane_lo))
         out = hc_push_str(out, ", %f")
-        out = hc_push_str(out, i64_to_string(oct_b_base + j))
+        out = hc_push_str(out, i64_to_string(oct_a_base + lane_hi))
         out = hc_push_str(out, ";\n")
-        j = j + 1
+        out = hc_push_str(out, "    cvt.rn.f16x2.f32 %r")
+        out = hc_push_str(out, i64_to_string(frag_reg + 4 + pair_idx))
+        out = hc_push_str(out, ", %f")
+        out = hc_push_str(out, i64_to_string(oct_b_base + lane_lo))
+        out = hc_push_str(out, ", %f")
+        out = hc_push_str(out, i64_to_string(oct_b_base + lane_hi))
+        out = hc_push_str(out, ";\n")
+        pair_idx = pair_idx + 1
     }
     out
 }
 
 // Emits PTX to unpack 16-wide HMMA f32 accumulator result into an
-// 8-component octonion output. Takes the first 8 of 16 f32 accumulator
+// 8-component octonion output. Takes the first 8 f32 accumulator
 // registers and moves them to the destination octonion registers.
 fn hmma_emit_unpack_result(buf: HypercomplexPtxState, frag_reg: i64, oct_dst_base: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
     var out = buf
