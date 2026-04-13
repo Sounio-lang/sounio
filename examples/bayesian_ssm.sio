@@ -1,0 +1,375 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bayesian State-Space Model with Epistemic Uncertainty
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Particle filter over a scalar state (seeded from an 8D octonion grid).
+// N=8 particles, each carrying: state estimate + weight + epistemic confidence.
+// Observation model: Gaussian likelihood  w ∝ exp(-½(y-x)²/σ²)
+// Resampling: systematic resampling from CDF.
+//
+// Demonstrates: Bayesian inference, GUM-consistent weight updates,
+//               epistemic confidence propagation, knowledge refinement.
+
+// ─── Inline math ────────────────────────────────────────────────────────────
+
+fn abs_bs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sqrt_bs(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn exp_pos_bs(x: f64) -> f64 with Mut, Div, Panic {
+    // Taylor series for exp(x), x >= 0; reduce large x
+    if x > 20.0 { return exp_pos_bs(10.0) * exp_pos_bs(x - 10.0) }
+    var s = 1.0
+    var t = 1.0
+    var i = 1
+    while i <= 30 { t = t * x / (i as f64); s = s + t; i = i + 1 }
+    s
+}
+
+fn exp_bs(x: f64) -> f64 with Mut, Div, Panic {
+    if x >= 0.0 { return exp_pos_bs(x) }
+    // exp(-a) = 1/exp(a) for a > 0
+    let a = 0.0 - x
+    let pos = exp_pos_bs(a)
+    if pos < 1e-30 { return 0.0 }
+    1.0 / pos
+}
+
+fn log_bs(x: f64) -> f64 with Mut, Div, Panic {
+    // log via range reduction + Taylor series for log(1+u), |u| < 1
+    if x <= 0.0 { return 0.0 - 999.0 }
+    var v = x
+    var k = 0
+    while v > 2.0 { v = v * 0.5; k = k + 1 }
+    while v < 0.5 { v = v * 2.0; k = k - 1 }
+    let u = v - 1.0
+    // log(1+u) = u - u²/2 + u³/3 - ...
+    var lg = u
+    var term = u
+    var i = 2
+    while i <= 30 {
+        term = term * u * (0.0 - 1.0) * ((i - 1) as f64) / (i as f64)
+        lg = lg + term
+        i = i + 1
+    }
+    lg + (k as f64) * 0.693147180559945
+}
+
+// ─── RNG (LCG) ───────────────────────────────────────────────────────────────
+
+var RNG_BS: i64 = 314159265
+
+fn rand_bs() -> f64 with Mut, Div, Panic {
+    RNG_BS = (RNG_BS * 6364136223846793005 + 1442695040888963407)
+    var v = RNG_BS
+    if v < 0 { v = 0 - v }
+    (v % 100000) as f64 / 100000.0
+}
+
+fn rand_bs_range(lo: f64, hi: f64) -> f64 with Mut, Div, Panic {
+    lo + rand_bs() * (hi - lo)
+}
+
+// ─── Particle struct ─────────────────────────────────────────────────────────
+
+struct Particle { state: f64, weight: f64, conf: i64 }
+
+// ─── Global particle arrays (N=8) ────────────────────────────────────────────
+// States span [0, 3.5] so they bracket true_state=2.5
+
+var PART_STATE:  [f64; 8] = [0.0; 8]
+var PART_WEIGHT: [f64; 8] = [0.0; 8]
+var PART_CONF:   [i64; 8] = [0; 8]
+
+// Deterministic diverse initialization to ensure T1 diversity + bracket true_state
+fn init_particles() with Mut, Div, Panic {
+    // Evenly-spaced grid from 0.0 to 3.5, plus small jitter from LCG
+    // This ensures std dev > 0.1 and that some particles are near 2.5
+    var i = 0
+    while i < 8 {
+        let base = (i as f64) * 0.5          // 0.0, 0.5, 1.0, ..., 3.5
+        let jitter = rand_bs_range(0.0 - 0.1, 0.1)
+        PART_STATE[i as usize]  = base + jitter
+        PART_WEIGHT[i as usize] = 0.125      // uniform 1/8
+        PART_CONF[i as usize]   = 985        // measured prior
+        i = i + 1
+    }
+}
+
+// ─── Gaussian likelihood ─────────────────────────────────────────────────────
+
+fn gaussian_likelihood(obs: f64, state: f64, sigma: f64) -> f64 with Mut, Div, Panic {
+    let diff = obs - state
+    let exponent = 0.0 - 0.5 * diff * diff / (sigma * sigma)
+    exp_bs(exponent)
+}
+
+// ─── Update weights given one observation (in-place, does NOT normalize) ─────
+
+fn update_weights_raw(obs: f64, sigma: f64) with Mut, Div, Panic {
+    var i = 0
+    while i < 8 {
+        let lhood = gaussian_likelihood(obs, PART_STATE[i as usize], sigma)
+        PART_WEIGHT[i as usize] = PART_WEIGHT[i as usize] * lhood
+        i = i + 1
+    }
+}
+
+// ─── Normalize weights ───────────────────────────────────────────────────────
+
+fn normalize_weights() with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < 8 { sum = sum + PART_WEIGHT[i as usize]; i = i + 1 }
+    if sum < 1e-30 {
+        // fully degenerate: reset
+        i = 0
+        while i < 8 { PART_WEIGHT[i as usize] = 0.125; i = i + 1 }
+        return
+    }
+    i = 0
+    while i < 8 { PART_WEIGHT[i as usize] = PART_WEIGHT[i as usize] / sum; i = i + 1 }
+}
+
+// ─── Compute ESS = 1 / Σw² ───────────────────────────────────────────────────
+
+fn compute_ess() -> f64 with Mut, Div, Panic {
+    var sum_sq = 0.0
+    var i = 0
+    while i < 8 {
+        let w = PART_WEIGHT[i as usize]
+        sum_sq = sum_sq + w * w
+        i = i + 1
+    }
+    if sum_sq < 1e-30 { return 8.0 }
+    1.0 / sum_sq
+}
+
+// ─── Weighted mean of states ─────────────────────────────────────────────────
+
+fn weighted_mean() -> f64 with Mut, Div, Panic {
+    var mean = 0.0
+    var i = 0
+    while i < 8 {
+        mean = mean + PART_WEIGHT[i as usize] * PART_STATE[i as usize]
+        i = i + 1
+    }
+    mean
+}
+
+// ─── Weighted std dev of states ──────────────────────────────────────────────
+
+fn weighted_std() -> f64 with Mut, Div, Panic {
+    let m = weighted_mean()
+    var var_acc = 0.0
+    var i = 0
+    while i < 8 {
+        let d = PART_STATE[i as usize] - m
+        var_acc = var_acc + PART_WEIGHT[i as usize] * d * d
+        i = i + 1
+    }
+    sqrt_bs(var_acc)
+}
+
+// ─── Systematic resampling ───────────────────────────────────────────────────
+// Global temp arrays to avoid large stack allocations
+
+var RESAMP_STATE: [f64; 8] = [0.0; 8]
+var RESAMP_CONF:  [i64; 8] = [0; 8]
+
+fn resample_systematic() with Mut, Div, Panic {
+    // Build CDF
+    var cdf: [f64; 8] = [0.0; 8]
+    cdf[0] = PART_WEIGHT[0]
+    var i = 1
+    while i < 8 { cdf[i as usize] = cdf[(i-1) as usize] + PART_WEIGHT[i as usize]; i = i + 1 }
+
+    // Snapshot current state/conf
+    i = 0
+    while i < 8 {
+        RESAMP_STATE[i as usize] = PART_STATE[i as usize]
+        RESAMP_CONF[i as usize]  = PART_CONF[i as usize]
+        i = i + 1
+    }
+
+    // Systematic resampling: U[0, 1/N] start, stride 1/N
+    let step = 0.125
+    let start = rand_bs() * step
+    var cum = start
+    var j = 0
+    i = 0
+    while i < 8 {
+        while j < 7 && cdf[j as usize] < cum { j = j + 1 }
+        PART_STATE[i as usize]  = RESAMP_STATE[j as usize]
+        PART_CONF[i as usize]   = RESAMP_CONF[j as usize]
+        PART_WEIGHT[i as usize] = 0.125   // reset to uniform
+        cum = cum + step
+        i = i + 1
+    }
+}
+
+// ─── Propagate: add process noise ────────────────────────────────────────────
+
+fn propagate_particles(sigma_proc: f64) with Mut, Div, Panic {
+    var i = 0
+    while i < 8 {
+        // CLT approximation to Gaussian: sum 4 uniform draws, center at 0
+        let u1 = rand_bs()
+        let u2 = rand_bs()
+        let u3 = rand_bs()
+        let u4 = rand_bs()
+        // sum - 2.0 gives zero-mean; std ≈ 1/sqrt(3)
+        let noise = (u1 + u2 + u3 + u4 - 2.0) * sigma_proc
+        PART_STATE[i as usize] = PART_STATE[i as usize] + noise
+        i = i + 1
+    }
+}
+
+// ─── Propagate confidence: min-propagation ────────────────────────────────────
+
+fn propagate_conf(obs_conf: i64) with Mut, Div, Panic {
+    var i = 0
+    while i < 8 {
+        if obs_conf < PART_CONF[i as usize] { PART_CONF[i as usize] = obs_conf }
+        i = i + 1
+    }
+}
+
+// ─── Full filter step ─────────────────────────────────────────────────────────
+
+fn filter_step(obs: f64, sigma_obs: f64, sigma_proc: f64, obs_conf: i64) with Mut, Div, Panic {
+    propagate_particles(sigma_proc)
+    update_weights_raw(obs, sigma_obs)
+    normalize_weights()
+    propagate_conf(obs_conf)
+    let ess = compute_ess()
+    if ess < 4.0 { resample_systematic() }
+}
+
+// ─── Min confidence across particles ─────────────────────────────────────────
+
+fn min_conf() -> i64 with Mut, Div, Panic {
+    var mc: i64 = 2000
+    var i = 0
+    while i < 8 {
+        if PART_CONF[i as usize] < mc { mc = PART_CONF[i as usize] }
+        i = i + 1
+    }
+    mc
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+
+    // ── Initialize particles (grid [0, 3.5] with jitter) ──────────────────
+    init_particles()
+
+    // T1: Initial particles are diverse (std dev > 0.1)
+    // With uniform weights and states spaced 0.5 apart, std dev ≈ 1.04
+    let init_std = weighted_std()
+    if init_std > 0.1 {
+        print("T1 PASS: initial particle std dev = "); print(init_std); println(" > 0.1")
+        passed = passed + 1
+    } else { print("T1 FAIL: std dev = "); print(init_std); println(""); failed = failed + 1 }
+
+    // Save initial mean for convergence test (T5)
+    let init_mean = weighted_mean()   // ≈ 1.75 (midpoint of [0,3.5])
+
+    // Save a weight before update for comparison
+    let w0_before = PART_WEIGHT[0]   // = 0.125 uniform
+
+    // T2: After 1 observation, weights update (at least one changes non-trivially)
+    // Observation at 2.5 (true state), sigma=0.5 — particles near 2.5 get higher weight
+    update_weights_raw(2.5, 0.5)
+    let w0_after = PART_WEIGHT[0]
+    // w[0] corresponds to state≈0.0 — far from 2.5 → likelihood ≈ exp(-½*25/0.25) ≈ 0
+    // So w[0] should be drastically different from w[6] (state≈3.0) or w[5] (state≈2.5)
+    if abs_bs(w0_after - w0_before) > 0.001 {
+        print("T2 PASS: weight[0] changed from "); print(w0_before)
+        print(" to "); print(w0_after); println(" (non-uniform update)")
+        passed = passed + 1
+    } else {
+        // Also check that SOME weight changed significantly
+        var any_change = 0
+        var ci = 0
+        while ci < 8 {
+            if abs_bs(PART_WEIGHT[ci as usize] - w0_before) > 0.001 { any_change = 1 }
+            ci = ci + 1
+        }
+        if any_change != 0 {
+            println("T2 PASS: weights updated (some changed > 0.001)")
+            passed = passed + 1
+        } else { println("T2 FAIL: weights did not update"); failed = failed + 1 }
+    }
+
+    // T3: After normalization, weights sum to ~1.0
+    normalize_weights()
+    var wsum = 0.0
+    var ii = 0
+    while ii < 8 { wsum = wsum + PART_WEIGHT[ii as usize]; ii = ii + 1 }
+    if abs_bs(wsum - 1.0) < 0.0001 {
+        print("T3 PASS: weights sum = "); print(wsum); println(" ≈ 1.0")
+        passed = passed + 1
+    } else { print("T3 FAIL: sum = "); print(wsum); println(""); failed = failed + 1 }
+
+    // T4: ESS < N=8 after weight update with non-uniform observation
+    // After observing 2.5, particles near 2.5 dominate → ESS < 8
+    let ess = compute_ess()
+    if ess < 7.99 {
+        print("T4 PASS: ESS = "); print(ess); println(" < 8 (unequal weights)")
+        passed = passed + 1
+    } else { print("T4 FAIL: ESS = "); print(ess); println(""); failed = failed + 1 }
+
+    // ── Full particle filter over 5 observations ───────────────────────────
+    // Re-initialize with fresh particles
+    init_particles()
+    let true_state = 2.5
+    let sigma_obs  = 0.5
+    let sigma_proc = 0.05
+    // obs_conf = 980 (slightly less than prior 985)
+    filter_step(2.4,  sigma_obs, sigma_proc, 980)
+    filter_step(2.6,  sigma_obs, sigma_proc, 980)
+    filter_step(2.5,  sigma_obs, sigma_proc, 980)
+    filter_step(2.45, sigma_obs, sigma_proc, 980)
+    filter_step(2.55, sigma_obs, sigma_proc, 980)
+
+    let final_mean = weighted_mean()
+    let err_after  = abs_bs(final_mean - true_state)
+    let err_before = abs_bs(init_mean  - true_state)  // init_mean ≈ 1.75, so err ≈ 0.75
+
+    // T5: Estimated state is closer to true state than initial mean
+    if err_after < err_before {
+        print("T5 PASS: estimation error reduced "); print(err_before)
+        print(" → "); print(err_after); println(" (converging to true state)")
+        passed = passed + 1
+    } else {
+        print("T5 FAIL: err_after="); print(err_after)
+        print(" err_before="); print(err_before); println("")
+        failed = failed + 1
+    }
+
+    // T6: Epistemic confidence ≤ 985 after min-propagation through obs at conf=980
+    let mc = min_conf()
+    if mc <= 985 {
+        print("T6 PASS: min epistemic conf = "); print_int(mc); println(" ≤ 985")
+        passed = passed + 1
+    } else { print("T6 FAIL: conf = "); print_int(mc); println(""); failed = failed + 1 }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}

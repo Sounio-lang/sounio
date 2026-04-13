@@ -11605,6 +11605,148 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // while expr { stmts }
     if k == 15 {
         EP = EP + 1
+        // ── Phase 1.5: while let <pattern> = <expr> { ... } ──
+        if TK[EP as usize] == 11 {
+            EP = EP + 1  // skip 'let'
+            // Parse pattern (same as if-let)
+            let wl_pat_tk = TK[EP as usize]
+            var wl_disc: i64 = -1
+            var wl_is_tagged: i64 = 0
+            var wl_is_wildcard: i64 = 0
+            var wl_is_enum_variant: i64 = 0
+            var wl_bind_ns: i64 = 0
+            var wl_bind_ne: i64 = 0
+            var wl_has_binding: i64 = 0
+            // Some(v)
+            if wl_pat_tk == 57 {
+                EP = EP + 1; wl_disc = 1; wl_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    wl_bind_ns = TS[EP as usize]; wl_bind_ne = TE[EP as usize]
+                    wl_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // None
+            if wl_pat_tk == 58 { EP = EP + 1; wl_disc = 0; wl_is_tagged = 1 }
+            // Ok(v)
+            if wl_pat_tk == 59 {
+                EP = EP + 1; wl_disc = 0; wl_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    wl_bind_ns = TS[EP as usize]; wl_bind_ne = TE[EP as usize]
+                    wl_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // Err(e)
+            if wl_pat_tk == 60 {
+                EP = EP + 1; wl_disc = 1; wl_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    wl_bind_ns = TS[EP as usize]; wl_bind_ne = TE[EP as usize]
+                    wl_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // Identifier: wildcard _ or Enum::Variant [( v )]
+            if wl_pat_tk == 3 {
+                let wl_pns = TS[EP as usize]
+                let wl_pne = TE[EP as usize]
+                if wl_pne - wl_pns == 1 && sb(wl_pns) == 95 {
+                    wl_is_wildcard = 1; EP = EP + 1
+                } else if TK[(EP + 1) as usize] == 51 {
+                    let wl_eh = gl_name_hash(wl_pns, wl_pne)
+                    EP = EP + 2
+                    let wl_vh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                    EP = EP + 1
+                    wl_disc = en_variant_value(wl_eh, wl_vh)
+                    wl_is_enum_variant = 1
+                    if TK[EP as usize] == 6 {
+                        EP = EP + 1
+                        wl_bind_ns = TS[EP as usize]; wl_bind_ne = TE[EP as usize]
+                        wl_has_binding = 1; EP = EP + 1
+                        if TK[EP as usize] == 7 { EP = EP + 1 }
+                    }
+                } else {
+                    wl_is_wildcard = 1; EP = EP + 1
+                }
+            }
+            // Skip '='
+            if TK[EP as usize] == 16 { EP = EP + 1 }
+            // Pre-allocate scrutinee slot BEFORE loop top so slot is stable
+            let wl_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            // Loop top: loop back here each iteration
+            let wl_loop_top = CL
+            LOOP_TOP[LOOP_DEPTH as usize] = wl_loop_top
+            LOOP_DEPTH = LOOP_DEPTH + 1
+            let wl_saved_bc = BREAK_COUNT
+            // Evaluate scrutinee expression
+            compile_or()
+            MATCH_SCRUT_TY   = EXPR_TY
+            MATCH_SCRUT_HASH = EXPR_TY_HASH
+            // Store scrutinee into pre-allocated slot
+            emit_store_var(wl_slot)
+            // Emit pattern test; on failure jump to wl_exit (patched below)
+            var wl_je_off: i64 = 0
+            if wl_is_wildcard == 1 {
+                // Always matches — loop forever (until break)
+                wl_je_off = 0
+            } else if wl_is_tagged == 1 || wl_is_enum_variant == 1 {
+                emit_load_var(wl_slot)
+                em(0x48); em(0x8b); em(0x00)        // mov rax, [rax]   — load tag
+                em(0x50)                             // push rax
+                em(0x48); em(0xb8); em64(wl_disc)   // mov rax, disc
+                em(0x59)                             // pop rcx
+                em(0x48); em(0x39); em(0xc1)        // cmp rcx, rax
+                em(0x0f); em(0x85)                  // jne exit
+                wl_je_off = CL; em32(0)
+                // Bind inner value if pattern specifies one
+                if wl_has_binding == 1 {
+                    emit_load_var(wl_slot)
+                    em(0x48); em(0x8b); em(0x40); em(0x08)  // mov rax, [rax+8]
+                    let wl_bslot = var_add(wl_bind_ns, wl_bind_ne)
+                    if wl_bslot >= 0 {
+                        emit_store_var(wl_bslot)
+                        if wl_bslot >= 0 && VAR_COUNT > 0 {
+                            let wl_bvi = VAR_COUNT - 1
+                            if MATCH_SCRUT_TY == 11 {
+                                VAR_TY[wl_bvi as usize] = ptr_hash_inner_ty(MATCH_SCRUT_HASH)
+                                VAR_TY_HASH[wl_bvi as usize] = ptr_hash_inner_hash(MATCH_SCRUT_HASH)
+                            }
+                        }
+                    }
+                }
+            } else {
+                if wl_disc >= 0 {
+                    emit_load_var(wl_slot)
+                    em(0x50)
+                    em(0x48); em(0xb8); em64(wl_disc)
+                    em(0x59)
+                    em(0x48); em(0x39); em(0xc1)
+                    em(0x0f); em(0x85)
+                    wl_je_off = CL; em32(0)
+                }
+            }
+            // Compile body
+            if TK[EP as usize] == 8 { EP = EP + 1 }
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }
+            // Jump back to loop top
+            em(0xe9)
+            em32(wl_loop_top - (CL + 4))
+            // Patch exit: pattern-fail jump lands here
+            if wl_je_off > 0 { patch32(wl_je_off, CL) }
+            // Patch break jumps
+            var wl_bi: i64 = wl_saved_bc
+            while wl_bi < BREAK_COUNT { patch32(BREAK_PATCH[wl_bi as usize], CL); wl_bi = wl_bi + 1 }
+            BREAK_COUNT = wl_saved_bc
+            LOOP_DEPTH = LOOP_DEPTH - 1
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            return
+        }
+        // ── end while let ──
         let loop_top = CL
         LOOP_TOP[LOOP_DEPTH as usize] = loop_top
         LOOP_DEPTH = LOOP_DEPTH + 1
@@ -19712,6 +19854,128 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // while
     if k == 15 {
         EP = EP + 1
+        // ── Phase 1.5: while let <pattern> = <expr> { ... } (AArch64) ──
+        if TK[EP as usize] == 11 {
+            EP = EP + 1  // skip 'let'
+            let wl_pat_tk = TK[EP as usize]
+            var wl_disc: i64 = -1
+            var wl_is_tagged: i64 = 0
+            var wl_is_wildcard: i64 = 0
+            var wl_is_enum_variant: i64 = 0
+            var wl_bind_ns: i64 = 0
+            var wl_bind_ne: i64 = 0
+            var wl_has_binding: i64 = 0
+            // Some(v)
+            if wl_pat_tk == 57 {
+                EP = EP + 1; wl_disc = 1; wl_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    wl_bind_ns = TS[EP as usize]; wl_bind_ne = TE[EP as usize]
+                    wl_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // None
+            if wl_pat_tk == 58 { EP = EP + 1; wl_disc = 0; wl_is_tagged = 1 }
+            // Ok(v)
+            if wl_pat_tk == 59 {
+                EP = EP + 1; wl_disc = 0; wl_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    wl_bind_ns = TS[EP as usize]; wl_bind_ne = TE[EP as usize]
+                    wl_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // Err(e)
+            if wl_pat_tk == 60 {
+                EP = EP + 1; wl_disc = 1; wl_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    wl_bind_ns = TS[EP as usize]; wl_bind_ne = TE[EP as usize]
+                    wl_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // Identifier: wildcard _ or Enum::Variant [( v )]
+            if wl_pat_tk == 3 {
+                let wl_pns = TS[EP as usize]; let wl_pne = TE[EP as usize]
+                if wl_pne - wl_pns == 1 && sb(wl_pns) == 95 {
+                    wl_is_wildcard = 1; EP = EP + 1
+                } else if TK[(EP + 1) as usize] == 51 {
+                    let wl_eh = gl_name_hash(wl_pns, wl_pne)
+                    EP = EP + 2
+                    let wl_vh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                    EP = EP + 1
+                    wl_disc = en_variant_value(wl_eh, wl_vh)
+                    wl_is_enum_variant = 1
+                    if TK[EP as usize] == 6 {
+                        EP = EP + 1
+                        wl_bind_ns = TS[EP as usize]; wl_bind_ne = TE[EP as usize]
+                        wl_has_binding = 1; EP = EP + 1
+                        if TK[EP as usize] == 7 { EP = EP + 1 }
+                    }
+                } else { wl_is_wildcard = 1; EP = EP + 1 }
+            }
+            // Skip '='
+            if TK[EP as usize] == 16 { EP = EP + 1 }
+            // Pre-allocate scrutinee slot BEFORE loop top
+            let wl_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            // Loop top
+            let wl_loop_top = CL
+            LOOP_TOP[LOOP_DEPTH as usize] = wl_loop_top
+            LOOP_DEPTH = LOOP_DEPTH + 1
+            let wl_saved_bc = BREAK_COUNT
+            // Evaluate scrutinee
+            compile_or_a64()
+            MATCH_SCRUT_TY   = EXPR_TY
+            MATCH_SCRUT_HASH = EXPR_TY_HASH
+            emit_store_var_a64(wl_slot)
+            // Emit pattern test
+            var wl_cbz_off: i64 = 0
+            if wl_is_wildcard == 0 {
+                if wl_is_tagged == 1 || wl_is_enum_variant == 1 {
+                    emit_load_var_a64(wl_slot)
+                    em32(0xF9400000)   // ldr x0, [x0]  (load tag at offset 0)
+                    em32(0xD2800001 | ((wl_disc & 0xFFFF) << 5))  // mov x1, disc
+                    em32(0xEB010000)   // subs x0, x0, x1 (cmp)
+                    wl_cbz_off = CL
+                    em32(0x54000001)   // b.ne placeholder
+                    if wl_has_binding == 1 {
+                        emit_load_var_a64(wl_slot)
+                        em32(0xF9400400)   // ldr x0, [x0, #8]
+                        let wl_bslot = var_add(wl_bind_ns, wl_bind_ne)
+                        if wl_bslot >= 0 {
+                            emit_store_var_a64(wl_bslot)
+                            if VAR_COUNT > 0 {
+                                let wl_bvi = VAR_COUNT - 1
+                                if MATCH_SCRUT_TY == 11 {
+                                    VAR_TY[wl_bvi as usize] = ptr_hash_inner_ty(MATCH_SCRUT_HASH)
+                                    VAR_TY_HASH[wl_bvi as usize] = ptr_hash_inner_hash(MATCH_SCRUT_HASH)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Compile body
+            if TK[EP as usize] == 8 { EP = EP + 1 }
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }
+            // Jump back to loop top
+            let wl_rel = (wl_loop_top - CL) / 4
+            em32(0x14000000 | (wl_rel & 0x3FFFFFF))
+            // Patch exit: pattern-fail jump lands here
+            if wl_cbz_off > 0 { patch_branch_a64(wl_cbz_off, CL) }
+            // Patch break jumps
+            var wl_bi: i64 = wl_saved_bc
+            while wl_bi < BREAK_COUNT { patch_branch_a64(BREAK_PATCH[wl_bi as usize], CL); wl_bi = wl_bi + 1 }
+            BREAK_COUNT = wl_saved_bc
+            LOOP_DEPTH = LOOP_DEPTH - 1
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            return
+        }
+        // ── end while let (AArch64) ──
         let loop_top = CL
         LOOP_TOP[LOOP_DEPTH as usize] = loop_top
         LOOP_DEPTH = LOOP_DEPTH + 1
