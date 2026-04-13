@@ -748,3 +748,154 @@ fn pred_interval_implies(a: RefinementPred, b: RefinementPred) -> bool with Mut,
         false
     }
 }
+
+// ─── Static Refinement Environment ────────────────────────────────────────────
+//
+// Lightweight static proof engine — no Z3 required.
+// Handles:
+//   1. Constant folding: value is a known literal → evaluate predicate directly.
+//   2. Condition narrowing: inside `if x > 0 { ... }`, x > 0 is known true.
+//   3. Arithmetic monotonicity: x > 0 && y > 0 ⟹ x + y > 0 (via interval lattice).
+//
+// The environment is a flat array of up to 16 guard predicates accumulated from
+// enclosing `if`-condition branches.  Each predicate is a single RefinementPred.
+// When checking `x` against a target pred, we conjoin all guards whose var_name
+// matches `x` and ask whether the conjunction implies the target.
+//
+// If static proof fails → fallback to runtime assertion (current behaviour) +
+// emit `refine_hint: static_unknown` diagnostic (W041-range, code 45).
+
+struct RefineStaticEnv {
+    preds: [RefinementPred; 16],
+    count: i64,
+}
+
+fn refine_static_env_new() -> RefineStaticEnv {
+    RefineStaticEnv {
+        preds: [empty_refinement_pred(); 16],
+        count: 0,
+    }
+}
+
+fn refine_static_env_push(env: RefineStaticEnv, p: RefinementPred) -> RefineStaticEnv with Mut {
+    var out = env
+    if out.count < 16 {
+        out.preds[out.count as usize] = p
+        out.count = out.count + 1
+    }
+    out
+}
+
+// Build the conjunction of all guard predicates that share the same var_name
+// as `target`.  Returns (found, conjoined_pred).
+fn refine_static_env_gather(env: RefineStaticEnv, target_var: Name) -> (bool, RefinementPred) with Mut, Panic, Div {
+    var found = false
+    var conjoined = empty_refinement_pred()
+    var i: i64 = 0
+    while i < env.count {
+        let p = env.preds[i as usize]
+        if name_eq(p.var_name, target_var) {
+            if found {
+                // Already have one — extend to an And node using structural combine.
+                // We reuse pred_and but note it requires Alloc; to avoid that here we
+                // just check each guard individually — sufficient for atomic guards.
+                if pred_implies(p, conjoined) {
+                    // p is at least as strong; replace
+                    conjoined = p
+                }
+                // Otherwise keep the existing conjoined (under-approx).
+            } else {
+                conjoined = p
+                found = true
+            }
+        }
+        i = i + 1
+    }
+    (found, conjoined)
+}
+
+// Probe result codes (returned as i64, not an enum, to stay allocation-free):
+//   0 = StaticUnknown  — cannot prove statically
+//   1 = StaticProved   — proved without Z3
+//   2 = StaticViolated — definitely violated (compile-time error)
+
+fn refine_static_result_unknown() -> i64 { 0 }
+fn refine_static_result_proved() -> i64 { 1 }
+fn refine_static_result_violated() -> i64 { 2 }
+
+// Check whether a known integer literal `val` satisfies `pred`.
+// Returns StaticProved or StaticViolated.
+fn refine_static_check_int_literal(pred: RefinementPred, val: i64) -> i64 with Mut, Panic, Div {
+    if pred_check_int(pred, val) {
+        refine_static_result_proved()
+    } else {
+        refine_static_result_violated()
+    }
+}
+
+// Check whether a known float literal `val` satisfies `pred`.
+fn refine_static_check_float_literal(pred: RefinementPred, val: f64) -> i64 with Mut, Panic, Div {
+    if pred_check_float(pred, val) {
+        refine_static_result_proved()
+    } else {
+        refine_static_result_violated()
+    }
+}
+
+// Attempt to prove `target_pred` for variable `var_name` using guards in `env`.
+// Returns StaticProved, StaticViolated, or StaticUnknown.
+fn refine_static_check_var(env: RefineStaticEnv, var_name: Name, target_pred: RefinementPred) -> i64 with Mut, Panic, Div {
+    let gather = refine_static_env_gather(env, var_name)
+    if !gather.0 {
+        return refine_static_result_unknown()
+    }
+    let guard = gather.1
+    if pred_implies(guard, target_pred) {
+        refine_static_result_proved()
+    } else {
+        refine_static_result_unknown()
+    }
+}
+
+// Try to prove `target_pred` for the conjunction of two positive-integer guards
+// (arithmetic monotonicity): if `a > 0` and `b > 0` and target is `result > 0`
+// where result = a + b, this is trivially provable.
+// This is a special-case shortcut for the most common pattern.
+fn refine_static_check_add_monotone(env: RefineStaticEnv, la: Name, lb: Name, target_pred: RefinementPred) -> i64 with Mut, Panic, Div {
+    // Only handle target predicate of form: var > 0 or var >= 0
+    if target_pred.op != refinement_op_gt() && target_pred.op != refinement_op_gt_eq() {
+        return refine_static_result_unknown()
+    }
+    if target_pred.rhs_int != 0 {
+        return refine_static_result_unknown()
+    }
+    // Check if both summands are proven positive
+    let ga = refine_static_env_gather(env, la)
+    let gb = refine_static_env_gather(env, lb)
+    if !ga.0 || !gb.0 {
+        return refine_static_result_unknown()
+    }
+    let pos_pred_gt = pred_make_int(refinement_op_gt(), la, 0)
+    let pos_pred_ge = pred_make_int(refinement_op_gt_eq(), la, 0)
+    let a_positive = pred_implies(ga.1, pos_pred_gt) || pred_implies(ga.1, pos_pred_ge)
+    let pos_pred_gt_b = pred_make_int(refinement_op_gt(), lb, 0)
+    let pos_pred_ge_b = pred_make_int(refinement_op_gt_eq(), lb, 0)
+    let b_positive = pred_implies(gb.1, pos_pred_gt_b) || pred_implies(gb.1, pos_pred_ge_b)
+    if a_positive && b_positive {
+        refine_static_result_proved()
+    } else {
+        refine_static_result_unknown()
+    }
+}
+
+// Print the refinement proof summary line.
+// Format: "refine: proved N statically, M runtime-checked, K violations\n"
+fn refine_print_summary(n_proved: i64, n_runtime: i64, n_violated: i64) with IO {
+    print("refine: proved ")
+    print_int(n_proved)
+    print(" statically, ")
+    print_int(n_runtime)
+    print(" runtime-checked, ")
+    print_int(n_violated)
+    print(" violations\n")
+}
