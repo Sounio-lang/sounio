@@ -39,7 +39,7 @@ Updated February 2026 after full-project audit.
 |-----------|--------|-------------|
 | LLVM Codegen | Beta | Requires LLVM 15+, feature-gated |
 | Refinement Types + SMT | Beta | Requires Z3, falls back to runtime assertions |
-| LSP | Beta | Cross-file navigation uses legacy symbol index |
+| LSP | Beta | Cross-file navigation now uses module resolver symbol index (Section 27 of lsp/goto_def.sio); hover and completion stubs present |
 | REPL | Beta | 17 commands, JIT, epistemic badges |
 | Self-hosted Compiler | Beta | Phase 1.2 complete, 30K lines .sio |
 | Ontology | Beta | 10K terms, subsumption, distance |
