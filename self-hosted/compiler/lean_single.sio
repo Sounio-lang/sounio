@@ -296,6 +296,7 @@ var VAR_VARIANCE_HASH: [i64; 1024] = [0; 1024]  // β² fix: per-variable hash o
 var RT_VARIANCE_BUF_BSS_OFF: i64 = 0    // BSS offset for 1024-entry variance buffer
 var RT_VARIANCE_SCRATCH_BSS_OFF: i64 = 0 // BSS offset for single scratch cell
 var RT_VARIANCE_XFER_BSS_OFF: i64 = 0   // BSS offset for 8-slot argument transfer area
+var RT_INPUT_VAR_BSS_OFF: i64 = 0       // β⁴: per-input variance σ²[ch] storage
 var BUDGET_CHANNELS: i64 = 8             // ISO budget decomposition: K channels
 var NEXT_BUDGET_PARAM: i64 = 0           // compile-time counter for measure()/acknowledge()/require_confidence()
 var EXPR_CONFIDENCE: i64 = 1000          // compile-time confidence of current expression (0-1000)
@@ -6417,13 +6418,15 @@ fn emit_gate_guarded_inc_x86() with Mut {
     em(0x59)                                              // pop rcx
 }
 
-fn emit_gate_variance_addsub_x86(left_slot: i64, right_slot: i64) with Mut {
-    // GUM: var(a ± b) = var(a) + var(b) for uncorrelated inputs — per channel
+fn emit_gate_variance_addsub_x86(left_slot: i64, right_slot: i64, op: i64) with Mut {
+    // β⁴ forward-mode AD: propagate sensitivity per channel.
+    //   op==17 (add): sens(a+b)[ch] = sens(a)[ch] + sens(b)[ch]
+    //   op==18 (sub): sens(a-b)[ch] = sens(a)[ch] - sens(b)[ch]
     // Preserves rax (primary result) via push/pop
     em(0x50)  // push rax (save primary result)
     var ch: i64 = 0
     while ch < BUDGET_CHANNELS {
-        // Load left variance[ch] into xmm0
+        // Load left sensitivity[ch] into xmm0
         if left_slot >= 0 && left_slot < 1024 {
             em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + left_slot * 8)
             em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
@@ -6435,7 +6438,7 @@ fn emit_gate_variance_addsub_x86(left_slot: i64, right_slot: i64) with Mut {
         } else {
             em(0x66); em(0x0f); em(0x57); em(0xc0)            // xorpd xmm0, xmm0
         }
-        // Load right variance[ch] into xmm1
+        // Load right sensitivity[ch] into xmm1
         if right_slot >= 0 && right_slot < 1024 {
             em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + right_slot * 8)
             em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
@@ -6447,8 +6450,12 @@ fn emit_gate_variance_addsub_x86(left_slot: i64, right_slot: i64) with Mut {
         } else {
             em(0x66); em(0x0f); em(0x57); em(0xc9)            // xorpd xmm1, xmm1
         }
-        // addsd xmm0, xmm1 — var(a ± b) = var(a) + var(b)
-        em(0xf2); em(0x0f); em(0x58); em(0xc1)
+        // β⁴: op==17 addsd, op==18 subsd
+        if op == 17 {
+            em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
+        } else {
+            em(0xf2); em(0x0f); em(0x5c); em(0xc1)            // subsd xmm0, xmm1
+        }
         // Store xmm0 → BSS_SCRATCH[ch]
         em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)      // movq rax, xmm0
         em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
@@ -6466,14 +6473,13 @@ fn emit_gate_variance_muldiv_x86(left_slot: i64, right_slot: i64, op: i64) with 
     // Strategy: pre-compute value-dependent scalars ONCE, then loop channels.
     em(0x50)  // push rax (save primary result)
     if op == 19 {
-        // Pre-compute xmm5 = a², xmm6 = b² (value-only, channel-independent)
+        // β⁴ chain rule: sens(a·b)[ch] = a · sens(b)[ch] + b · sens(a)[ch]
+        // xmm5 = a (NOT a²), xmm6 = b (NOT b²)
         em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe9)  // movq xmm5, rcx (a)
-        em(0xf2); em(0x0f); em(0x59); em(0xed)              // mulsd xmm5, xmm5 (a²)
         em(0xf2); em(0x0f); em(0x10); em(0xf1)              // movsd xmm6, xmm1 (b)
-        em(0xf2); em(0x0f); em(0x59); em(0xf6)              // mulsd xmm6, xmm6 (b²)
         var ch: i64 = 0
         while ch < BUDGET_CHANNELS {
-            // xmm2 = var_b[ch]
+            // xmm2 = sens_b[ch]
             if right_slot >= 0 && right_slot < 1024 {
                 em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + right_slot * 8)
                 em(0x48); em(0x8b); em(0x00)
@@ -6485,12 +6491,12 @@ fn emit_gate_variance_muldiv_x86(left_slot: i64, right_slot: i64, op: i64) with 
             } else {
                 em(0x66); em(0x0f); em(0x57); em(0xd2)            // xorpd xmm2, xmm2
             }
-            // xmm0 = a² · var_b[ch]
-            em(0xf2); em(0x0f); em(0x10); em(0xc5)              // movsd xmm0, xmm5 (a²)
+            // xmm0 = a · sens_b[ch]
+            em(0xf2); em(0x0f); em(0x10); em(0xc5)              // movsd xmm0, xmm5 (a)
             em(0xf2); em(0x0f); em(0x59); em(0xc2)              // mulsd xmm0, xmm2
             // save in xmm2
             em(0xf2); em(0x0f); em(0x10); em(0xd0)              // movsd xmm2, xmm0
-            // xmm3 = var_a[ch]
+            // xmm3 = sens_a[ch]
             if left_slot >= 0 && left_slot < 1024 {
                 em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + left_slot * 8)
                 em(0x48); em(0x8b); em(0x00)
@@ -6502,10 +6508,10 @@ fn emit_gate_variance_muldiv_x86(left_slot: i64, right_slot: i64, op: i64) with 
             } else {
                 em(0x66); em(0x0f); em(0x57); em(0xdb)            // xorpd xmm3, xmm3
             }
-            // xmm0 = b² · var_a[ch]
-            em(0xf2); em(0x0f); em(0x10); em(0xc6)              // movsd xmm0, xmm6 (b²)
+            // xmm0 = b · sens_a[ch]
+            em(0xf2); em(0x0f); em(0x10); em(0xc6)              // movsd xmm0, xmm6 (b)
             em(0xf2); em(0x0f); em(0x59); em(0xc3)              // mulsd xmm0, xmm3
-            // xmm0 = a²·var_b[ch] + b²·var_a[ch]
+            // xmm0 = a·sens_b[ch] + b·sens_a[ch]
             em(0xf2); em(0x0f); em(0x58); em(0xc2)              // addsd xmm0, xmm2
             // Store → BSS_SCRATCH[ch]
             em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)    // movq rax, xmm0
@@ -6515,16 +6521,15 @@ fn emit_gate_variance_muldiv_x86(left_slot: i64, right_slot: i64, op: i64) with 
         }
     }
     if op == 20 {
-        // Pre-compute xmm5 = a², xmm6 = b², xmm7 = b⁴
+        // β⁴ chain rule: sens(a/b)[ch] = (sens(a)[ch]·b − a·sens(b)[ch]) / b²
+        // xmm5 = a, xmm6 = b, xmm7 = b²
         em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xe9)    // movq xmm5, rcx (a)
-        em(0xf2); em(0x0f); em(0x59); em(0xed)              // mulsd xmm5, xmm5 (a²)
         em(0xf2); em(0x0f); em(0x10); em(0xf1)              // movsd xmm6, xmm1 (b)
-        em(0xf2); em(0x0f); em(0x59); em(0xf6)              // mulsd xmm6, xmm6 (b²)
-        em(0xf2); em(0x0f); em(0x10); em(0xfe)              // movsd xmm7, xmm6 (b²)
-        em(0xf2); em(0x0f); em(0x59); em(0xff)              // mulsd xmm7, xmm7 (b⁴)
+        em(0xf2); em(0x0f); em(0x10); em(0xfe)              // movsd xmm7, xmm6 (b)
+        em(0xf2); em(0x0f); em(0x59); em(0xff)              // mulsd xmm7, xmm7 (b²)
         var ch: i64 = 0
         while ch < BUDGET_CHANNELS {
-            // xmm2 = var_a[ch]
+            // xmm2 = sens_a[ch]
             if left_slot >= 0 && left_slot < 1024 {
                 em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + left_slot * 8)
                 em(0x48); em(0x8b); em(0x00)
@@ -6536,9 +6541,9 @@ fn emit_gate_variance_muldiv_x86(left_slot: i64, right_slot: i64, op: i64) with 
             } else {
                 em(0x66); em(0x0f); em(0x57); em(0xd2)            // xorpd xmm2, xmm2
             }
-            // xmm2 = var_a[ch] / b²
-            em(0xf2); em(0x0f); em(0x5e); em(0xd6)              // divsd xmm2, xmm6
-            // xmm4 = var_b[ch]
+            // xmm2 = sens_a[ch] · b
+            em(0xf2); em(0x0f); em(0x59); em(0xd6)              // mulsd xmm2, xmm6 (b)
+            // xmm4 = sens_b[ch]
             if right_slot >= 0 && right_slot < 1024 {
                 em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + right_slot * 8)
                 em(0x48); em(0x8b); em(0x00)
@@ -6550,15 +6555,15 @@ fn emit_gate_variance_muldiv_x86(left_slot: i64, right_slot: i64, op: i64) with 
             } else {
                 em(0x66); em(0x0f); em(0x57); em(0xe4)            // xorpd xmm4, xmm4
             }
-            // xmm0 = a² · var_b[ch]
-            em(0xf2); em(0x0f); em(0x10); em(0xc5)              // movsd xmm0, xmm5 (a²)
+            // xmm0 = a · sens_b[ch]
+            em(0xf2); em(0x0f); em(0x10); em(0xc5)              // movsd xmm0, xmm5 (a)
             em(0xf2); em(0x0f); em(0x59); em(0xc4)              // mulsd xmm0, xmm4
-            // xmm0 = a²·var_b[ch] / b⁴
-            em(0xf2); em(0x0f); em(0x5e); em(0xc7)              // divsd xmm0, xmm7
-            // xmm0 = var_a[ch]/b² + a²·var_b[ch]/b⁴
-            em(0xf2); em(0x0f); em(0x58); em(0xc2)              // addsd xmm0, xmm2
+            // xmm2 = sens_a[ch]·b − a·sens_b[ch]
+            em(0xf2); em(0x0f); em(0x5c); em(0xd0)              // subsd xmm2, xmm0
+            // xmm2 = (sens_a[ch]·b − a·sens_b[ch]) / b²
+            em(0xf2); em(0x0f); em(0x5e); em(0xd7)              // divsd xmm2, xmm7
             // Store → BSS_SCRATCH[ch]
-            em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)    // movq rax, xmm0
+            em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xd0)    // movq rax, xmm2
             em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
             em(0x48); em(0x89); em(0x01)                         // mov [rcx], rax
             ch = ch + 1
@@ -6568,19 +6573,23 @@ fn emit_gate_variance_muldiv_x86(left_slot: i64, right_slot: i64, op: i64) with 
 }
 
 fn emit_seed_variance_from_knowledge_x86() with Mut {
-    // rax = Knowledge struct pointer. [rax+8] = variance (u²).
-    // Writes variance to BSS_SCRATCH[NEXT_BUDGET_PARAM], zeros all other channels.
-    // This is what makes the ISO budget decomposition work: each measure() seeds
-    // exactly one channel, so channels track per-parameter variance contributions.
+    // β⁴ forward-mode AD: rax = Knowledge struct pointer. [rax+8] = variance σ².
+    // Store σ² to RT_INPUT_VAR_BSS_OFF[NEXT_BUDGET_PARAM] (per-input variance).
+    // Seed scratch sensitivity = 1.0 at that channel, 0.0 at others.
     em(0x50); em(0x51)                                     // push rax; push rcx
-    em(0x48); em(0x8b); em(0x40); em(8)                    // mov rax, [rax + 8] — variance
+    em(0x48); em(0x8b); em(0x40); em(8)                    // mov rax, [rax + 8] — σ²
+    // Store σ² into per-input variance storage at channel NEXT_BUDGET_PARAM
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_INPUT_VAR_BSS_OFF + NEXT_BUDGET_PARAM * 8)
+    em(0x48); em(0x89); em(0x01)                           // mov [rcx], rax
     var ch: i64 = 0
     while ch < BUDGET_CHANNELS {
         em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
         if ch == NEXT_BUDGET_PARAM {
-            em(0x48); em(0x89); em(0x01)                   // mov [rcx], rax — seed this channel
+            // Write sensitivity 1.0 (IEEE 754: 0x3ff0000000000000)
+            em(0x48); em(0xb8); em64(0x3ff0000000000000)   // mov rax, 1.0_bits
+            em(0x48); em(0x89); em(0x01)                   // mov [rcx], rax
         } else {
-            em(0x48); em(0xc7); em(0x01); em32(0)          // mov qword [rcx], 0 — zero other channels
+            em(0x48); em(0xc7); em(0x01); em32(0)          // mov qword [rcx], 0
         }
         ch = ch + 1
     }
@@ -6588,12 +6597,16 @@ fn emit_seed_variance_from_knowledge_x86() with Mut {
 }
 
 fn emit_seed_variance_from_knowledge_to_channel_x86(target_ch: i64) with Mut {
+    // β⁴: same as above but targets an explicit channel (for β per-variable channel reuse)
     em(0x50); em(0x51)
-    em(0x48); em(0x8b); em(0x40); em(8)
+    em(0x48); em(0x8b); em(0x40); em(8)                    // mov rax, σ²
+    em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_INPUT_VAR_BSS_OFF + target_ch * 8)
+    em(0x48); em(0x89); em(0x01)                           // store σ² to per-input storage
     var ch: i64 = 0
     while ch < BUDGET_CHANNELS {
         em(0x48); em(0xb9); em64(GL_BSS_BASE + RT_VARIANCE_SCRATCH_BSS_OFF + ch * 8)
         if ch == target_ch {
+            em(0x48); em(0xb8); em64(0x3ff0000000000000)   // mov rax, 1.0_bits (sensitivity)
             em(0x48); em(0x89); em(0x01)
         } else {
             em(0x48); em(0xc7); em(0x01); em32(0)
@@ -9764,7 +9777,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             if src_match(ns, ne - ns, "variance_of") {
-                // variance_of(x) — sum all budget channels for total variance (backward compat)
+                // β⁴ forward-mode AD: Var(y) = Σ sens[y][ch]² · σ²[ch]
                 EP = EP + 1  // skip (
                 let vo_ns = TS[EP as usize]
                 let vo_ne = TE[EP as usize]
@@ -9772,14 +9785,23 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1  // skip variable name
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 if vo_slot >= 0 && vo_slot < 1024 {
-                    // xorpd xmm0, xmm0 — accumulator
-                    em(0x66); em(0x0f); em(0x57); em(0xc0)
+                    em(0x66); em(0x0f); em(0x57); em(0xc0)  // xorpd xmm0, xmm0 — accumulator
                     var ch: i64 = 0
                     while ch < BUDGET_CHANNELS {
+                        // Load sens[y][ch] into xmm1
                         em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + vo_slot * 8)
-                        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+                        em(0x48); em(0x8b); em(0x00)
                         em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
-                        em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
+                        // xmm1 = sens²
+                        em(0xf2); em(0x0f); em(0x59); em(0xc9)              // mulsd xmm1, xmm1
+                        // Load σ²[ch] into xmm2
+                        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_INPUT_VAR_BSS_OFF + ch * 8)
+                        em(0x48); em(0x8b); em(0x00)
+                        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax
+                        // xmm1 = sens²·σ²
+                        em(0xf2); em(0x0f); em(0x59); em(0xca)              // mulsd xmm1, xmm2
+                        // accumulate
+                        em(0xf2); em(0x0f); em(0x58); em(0xc1)              // addsd xmm0, xmm1
                         ch = ch + 1
                     }
                     em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
@@ -9801,37 +9823,44 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1  // skip variable name
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 if bo_slot >= 0 && bo_slot < 1024 {
-                    // First print total: sum all channels into xmm0
-                    em(0x66); em(0x0f); em(0x57); em(0xc0)            // xorpd xmm0, xmm0
+                    // β⁴ budget_of: per-channel contribution = sens²·σ²
+                    em(0x66); em(0x0f); em(0x57); em(0xc0)            // xorpd xmm0, xmm0 — total accumulator
                     var ch_t: i64 = 0
                     while ch_t < BUDGET_CHANNELS {
+                        // sens[ch_t]
                         em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch_t * 8192 + bo_slot * 8)
-                        em(0x48); em(0x8b); em(0x00)                      // mov rax, [rax]
+                        em(0x48); em(0x8b); em(0x00)
                         em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
-                        em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
+                        em(0xf2); em(0x0f); em(0x59); em(0xc9)              // mulsd xmm1, xmm1 (sens²)
+                        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_INPUT_VAR_BSS_OFF + ch_t * 8)
+                        em(0x48); em(0x8b); em(0x00)
+                        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // movq xmm2, rax (σ²)
+                        em(0xf2); em(0x0f); em(0x59); em(0xca)              // mulsd xmm1, xmm2 (sens²·σ²)
+                        em(0xf2); em(0x0f); em(0x58); em(0xc1)              // addsd xmm0, xmm1
                         ch_t = ch_t + 1
                     }
                     // Print "total="
-                    emit_print_char_lit_x86(116)  // t
-                    emit_print_char_lit_x86(111)  // o
-                    emit_print_char_lit_x86(116)  // t
-                    emit_print_char_lit_x86(97)   // a
-                    emit_print_char_lit_x86(108)  // l
-                    emit_print_char_lit_x86(61)   // =
+                    emit_print_char_lit_x86(116); emit_print_char_lit_x86(111); emit_print_char_lit_x86(116)
+                    emit_print_char_lit_x86(97);  emit_print_char_lit_x86(108); emit_print_char_lit_x86(61)
                     em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
                     emit_print_f64()
-                    emit_print_char_lit_x86(10)   // newline
-                    // Print each channel: "ch0=<val>\n"
+                    emit_print_char_lit_x86(10)
+                    // Print each channel: ch<n>=<sens²·σ²>
                     var ch: i64 = 0
                     while ch < BUDGET_CHANNELS {
-                        emit_print_char_lit_x86(99)   // c
-                        emit_print_char_lit_x86(104)  // h
-                        emit_print_char_lit_x86(48 + ch)  // digit 0-7
-                        emit_print_char_lit_x86(61)   // =
+                        emit_print_char_lit_x86(99); emit_print_char_lit_x86(104)
+                        emit_print_char_lit_x86(48 + ch); emit_print_char_lit_x86(61)
                         em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_VARIANCE_BUF_BSS_OFF + ch * 8192 + bo_slot * 8)
-                        em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+                        em(0x48); em(0x8b); em(0x00)
+                        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax (sens)
+                        em(0xf2); em(0x0f); em(0x59); em(0xc9)              // sens²
+                        em(0x48); em(0xb8); em64(GL_BSS_BASE + RT_INPUT_VAR_BSS_OFF + ch * 8)
+                        em(0x48); em(0x8b); em(0x00)
+                        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xd0)  // σ²
+                        em(0xf2); em(0x0f); em(0x59); em(0xca)              // sens²·σ²
+                        em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc8)  // movq rax, xmm1
                         emit_print_f64()
-                        emit_print_char_lit_x86(10)   // newline
+                        emit_print_char_lit_x86(10)
                         ch = ch + 1
                     }
                 }
@@ -11298,10 +11327,18 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
-        let mul_left_var_slot = EXPR_VAR_SLOT
+        var mul_left_var_slot = EXPR_VAR_SLOT
         let mul_left_scratch_src = EXPR_SCRATCH_SOURCE_SLOT  // β fix Part B
         let mul_left_hash = EXPR_VARIANCE_HASH  // β² fix
         let mul_left_conf = EXPR_CONFIDENCE
+        // β⁴: materialize left-scratch to a real slot so right's compile
+        // doesn't overwrite it.
+        if mul_left_var_slot == 0 - 2 {
+            let mul_left_tmp = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_copy_scratch_to_var_variance_x86(mul_left_tmp)
+            mul_left_var_slot = mul_left_tmp
+        }
         emit_push()
         compile_postfix()
         let right_ty = EXPR_TY
@@ -11390,34 +11427,13 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         } else {
             EPIST_GATES_DIRECT = EPIST_GATES_DIRECT + 1
         }
-        // GUM variance propagation for f64 mul/div
+        // β⁴ forward-mode AD: chain rule via gate emit. Same-variant dispatch
+        // retired — sensitivity arithmetic handles correlations naturally.
         if left_f64 == 1 && op != 29 && (mul_left_var_slot != -1 || mul_right_var_slot != -1 || EXPR_GATE[op_tok as usize] == 1) {
-            // β² fix: expression-hash dispatch
-            if mul_left_hash != 0 && mul_left_hash == mul_right_hash && mul_left_var_slot == 0 - 2 && mul_right_var_slot == 0 - 2 {
-                emit_variance_muldiv_same_scratch_x86(op)
-            } else if mul_left_hash != 0 && mul_left_hash == mul_right_hash && mul_left_var_slot >= 0 {
-                emit_variance_muldiv_same_x86(mul_left_var_slot, op)
-            } else if mul_left_var_slot >= 0 && mul_left_var_slot == mul_right_var_slot {
-                emit_variance_muldiv_same_x86(mul_left_var_slot, op)
-            } else {
-                emit_gate_variance_muldiv_x86(mul_left_var_slot, mul_right_var_slot, op)
-            }
+            emit_gate_variance_muldiv_x86(mul_left_var_slot, mul_right_var_slot, op)
             EXPR_VAR_SLOT = -2
             EXPR_SCRATCH_SOURCE_SLOT = 0 - 1
-            // β² fix: compute result hash
-            if mul_left_hash != 0 && mul_right_hash != 0 {
-                if op == 19 {
-                    EXPR_VARIANCE_HASH = mul_left_hash * 1000003 + mul_right_hash * 7 + 19
-                } else {
-                    EXPR_VARIANCE_HASH = mul_left_hash * 1000003 - mul_right_hash * 7 + 20
-                }
-            } else if mul_left_hash != 0 {
-                if op == 19 { EXPR_VARIANCE_HASH = mul_left_hash + 19 } else { EXPR_VARIANCE_HASH = mul_left_hash + 20 }
-            } else if mul_right_hash != 0 {
-                if op == 19 { EXPR_VARIANCE_HASH = mul_right_hash + 19 } else { EXPR_VARIANCE_HASH = 0 - mul_right_hash + 20 }
-            } else {
-                EXPR_VARIANCE_HASH = 0
-            }
+            EXPR_VARIANCE_HASH = 0
         }
         lhs_end_line = TL[(EP - 1) as usize]
     }
@@ -11482,10 +11498,18 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
         let left_unit = EXPR_UNIT
-        let left_var_slot = EXPR_VAR_SLOT
+        var left_var_slot = EXPR_VAR_SLOT
         let left_scratch_src = EXPR_SCRATCH_SOURCE_SLOT  // β fix Part B
         let left_vhash = EXPR_VARIANCE_HASH  // β² fix
         let left_conf = EXPR_CONFIDENCE
+        // β⁴: materialize left-scratch to a real slot so right's compile
+        // doesn't overwrite it.
+        if left_var_slot == 0 - 2 {
+            let left_tmp = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_copy_scratch_to_var_variance_x86(left_tmp)
+            left_var_slot = left_tmp
+        }
         emit_push()
         compile_multiplicative()
         let right_ty = EXPR_TY
@@ -11567,39 +11591,15 @@ fn compile_additive() with IO, Mut, Panic, Div {
                 } else {
                     EPIST_GATES_DIRECT = EPIST_GATES_DIRECT + 1
                 }
-                // GUM variance propagation: fires if any operand carries variance or gated
+                // β⁴ forward-mode AD variance propagation: sensitivity is sign-aware
+                // so gate emit with op-dispatch gives correct answer for all cases
+                // including correlated subtraction. β²'s same-variant special cases
+                // are no longer needed — chain rule handles them naturally.
                 if left_var_slot != -1 || right_var_slot != -1 || EXPR_GATE[op_tok as usize] == 1 {
-                    // β² fix: expression-hash dispatch handles v1/v2/v3 uniformly.
-                    // Two operands with identical variance derivation (same sources
-                    // composed the same way) have identical variance values; their
-                    // sum is 4× variance, difference is 0.
-                    if left_vhash != 0 && left_vhash == right_vhash && left_var_slot == 0 - 2 && right_var_slot == 0 - 2 {
-                        emit_variance_addsub_same_scratch_x86(op)
-                    } else if left_vhash != 0 && left_vhash == right_vhash && left_var_slot >= 0 {
-                        // Both in real slots, same derivation → use left's slot (values equal)
-                        emit_variance_addsub_same_x86(left_var_slot, op)
-                    } else if left_var_slot >= 0 && left_var_slot == right_var_slot {
-                        emit_variance_addsub_same_x86(left_var_slot, op)
-                    } else {
-                        emit_gate_variance_addsub_x86(left_var_slot, right_var_slot)
-                    }
+                    emit_gate_variance_addsub_x86(left_var_slot, right_var_slot, op)
                     EXPR_VAR_SLOT = -2
                     EXPR_SCRATCH_SOURCE_SLOT = 0 - 1
-                    // β² fix: compute result hash via commutative-safe combine.
-                    // Add/sub distinguishable: sub becomes (L - R) so different order matters.
-                    if left_vhash != 0 && right_vhash != 0 {
-                        if op == 17 {
-                            EXPR_VARIANCE_HASH = left_vhash * 1000003 + right_vhash * 7 + 17
-                        } else {
-                            EXPR_VARIANCE_HASH = left_vhash * 1000003 - right_vhash * 7 + 18
-                        }
-                    } else if left_vhash != 0 {
-                        if op == 17 { EXPR_VARIANCE_HASH = left_vhash + 17 } else { EXPR_VARIANCE_HASH = left_vhash + 18 }
-                    } else if right_vhash != 0 {
-                        if op == 17 { EXPR_VARIANCE_HASH = right_vhash + 17 } else { EXPR_VARIANCE_HASH = 0 - right_vhash + 18 }
-                    } else {
-                        EXPR_VARIANCE_HASH = 0
-                    }
+                    EXPR_VARIANCE_HASH = 0  // β² hashes retired under β⁴
                 }
             }
         }
@@ -15785,6 +15785,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // GUM variance transfer area: 8 slots × 8 bytes × 8 channels = 512
     RT_VARIANCE_XFER_BSS_OFF = GL_BSS_SIZE
     GL_BSS_SIZE = GL_BSS_SIZE + 64 * BUDGET_CHANNELS
+    // β⁴ forward-mode AD: per-input variance σ²[ch] storage (8 bytes × 8 channels)
+    RT_INPUT_VAR_BSS_OFF = GL_BSS_SIZE
+    GL_BSS_SIZE = GL_BSS_SIZE + 8 * BUDGET_CHANNELS
     NEXT_BUDGET_PARAM = 0
 
     print("globals: "); print_int(GL_COUNT); print(" bss="); print_int(GL_BSS_SIZE); print("\n")
