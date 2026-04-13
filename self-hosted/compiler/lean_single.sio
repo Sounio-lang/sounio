@@ -291,6 +291,8 @@ var EPIST_GATES_GUARDED: i64 = 0
 var EXPR_VAR_SLOT: i64 = -1              // slot of last loaded variable (-1 = literal, -2 = scratch)
 var EXPR_SCRATCH_SOURCE_SLOT: i64 = -1    // β fix Part B: variable slot whose variance seeded scratch (-1 = unknown)
 var KNOWLEDGE_CHANNEL_FOR_SLOT: [i64; 1024] = [0; 1024]   // β fix Part A: stores (channel+1); 0 = unassigned
+var EXPR_VARIANCE_HASH: i64 = 0           // β² fix: hash of current expression's variance derivation (0 = no variance)
+var VAR_VARIANCE_HASH: [i64; 1024] = [0; 1024]  // β² fix: per-variable hash of the expression whose variance is stored
 var RT_VARIANCE_BUF_BSS_OFF: i64 = 0    // BSS offset for 1024-entry variance buffer
 var RT_VARIANCE_SCRATCH_BSS_OFF: i64 = 0 // BSS offset for single scratch cell
 var RT_VARIANCE_XFER_BSS_OFF: i64 = 0   // BSS offset for 8-slot argument transfer area
@@ -8378,6 +8380,7 @@ fn compile_acknowledge_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     // Extract .value at offset 0: mov rax, [rax]
     em(0x48); em(0x8b); em(0x00)
     EXPR_SCRATCH_SOURCE_SLOT = ack_src_slot  // β fix Part B
+    if ack_src_slot >= 0 { EXPR_VARIANCE_HASH = ack_src_slot * 2 + 1 } else { EXPR_VARIANCE_HASH = 0 }
     EXPR_VAR_SLOT = -2  // variance in scratch
     // Set result type to inner type
     if knowledge_hash_is(ack_k_hash) {
@@ -8461,6 +8464,7 @@ fn compile_require_confidence_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     }
     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax + 0] — .value
     EXPR_SCRATCH_SOURCE_SLOT = rc_k_slot  // β fix Part B
+    if rc_k_slot >= 0 { EXPR_VARIANCE_HASH = rc_k_slot * 2 + 1 } else { EXPR_VARIANCE_HASH = 0 }
     EXPR_VAR_SLOT = -2  // variance in scratch
     // Set result type to inner type
     if knowledge_hash_is(rc_k_hash) {
@@ -10803,6 +10807,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 emit_load_var(slot)
             }
             EXPR_VAR_SLOT = slot
+            // β² fix: restore expression hash from variable's stored derivation
+            if slot >= 0 && slot < 1024 {
+                EXPR_VARIANCE_HASH = VAR_VARIANCE_HASH[slot as usize]
+            } else {
+                EXPR_VARIANCE_HASH = 0
+            }
             if vi >= 0 { EXPR_CONFIDENCE = VAR_CONFIDENCE[vi as usize] }
             EXPR_IS_F64 = var_find_is_f64(ns, ne)
             if vi >= 0 {
@@ -11194,6 +11204,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     EXPR_SCRATCH_SOURCE_SLOT = val_src_slot  // β fix Part B
+                    if val_src_slot >= 0 { EXPR_VARIANCE_HASH = val_src_slot * 2 + 1 } else { EXPR_VARIANCE_HASH = 0 }
                     EXPR_VAR_SLOT = -2  // variance in scratch
                     // Confidence from Knowledge hash eps_scaled (or inherit from variable)
                     let val_eps = knowledge_hash_eps(base_data_hash)
@@ -11289,6 +11300,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let left_hash = EXPR_TY_HASH
         let mul_left_var_slot = EXPR_VAR_SLOT
         let mul_left_scratch_src = EXPR_SCRATCH_SOURCE_SLOT  // β fix Part B
+        let mul_left_hash = EXPR_VARIANCE_HASH  // β² fix
         let mul_left_conf = EXPR_CONFIDENCE
         emit_push()
         compile_postfix()
@@ -11296,6 +11308,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let right_hash = EXPR_TY_HASH
         let mul_right_var_slot = EXPR_VAR_SLOT
         let mul_right_scratch_src = EXPR_SCRATCH_SOURCE_SLOT  // β fix Part B
+        let mul_right_hash = EXPR_VARIANCE_HASH  // β² fix
         if EXPR_CONFIDENCE > mul_left_conf { EXPR_CONFIDENCE = mul_left_conf }
         let left_has_knowledge = knowledge_hash_is(left_hash)
         let right_has_knowledge = knowledge_hash_is(right_hash)
@@ -11379,15 +11392,32 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         }
         // GUM variance propagation for f64 mul/div
         if left_f64 == 1 && op != 29 && (mul_left_var_slot != -1 || mul_right_var_slot != -1 || EXPR_GATE[op_tok as usize] == 1) {
-            if mul_left_var_slot >= 0 && mul_left_var_slot == mul_right_var_slot {
-                emit_variance_muldiv_same_x86(mul_left_var_slot, op)
-            } else if mul_left_var_slot == 0 - 2 && mul_right_var_slot == 0 - 2 && mul_left_scratch_src >= 0 && mul_left_scratch_src == mul_right_scratch_src {
+            // β² fix: expression-hash dispatch
+            if mul_left_hash != 0 && mul_left_hash == mul_right_hash && mul_left_var_slot == 0 - 2 && mul_right_var_slot == 0 - 2 {
                 emit_variance_muldiv_same_scratch_x86(op)
+            } else if mul_left_hash != 0 && mul_left_hash == mul_right_hash && mul_left_var_slot >= 0 {
+                emit_variance_muldiv_same_x86(mul_left_var_slot, op)
+            } else if mul_left_var_slot >= 0 && mul_left_var_slot == mul_right_var_slot {
+                emit_variance_muldiv_same_x86(mul_left_var_slot, op)
             } else {
                 emit_gate_variance_muldiv_x86(mul_left_var_slot, mul_right_var_slot, op)
             }
             EXPR_VAR_SLOT = -2
             EXPR_SCRATCH_SOURCE_SLOT = 0 - 1
+            // β² fix: compute result hash
+            if mul_left_hash != 0 && mul_right_hash != 0 {
+                if op == 19 {
+                    EXPR_VARIANCE_HASH = mul_left_hash * 1000003 + mul_right_hash * 7 + 19
+                } else {
+                    EXPR_VARIANCE_HASH = mul_left_hash * 1000003 - mul_right_hash * 7 + 20
+                }
+            } else if mul_left_hash != 0 {
+                if op == 19 { EXPR_VARIANCE_HASH = mul_left_hash + 19 } else { EXPR_VARIANCE_HASH = mul_left_hash + 20 }
+            } else if mul_right_hash != 0 {
+                if op == 19 { EXPR_VARIANCE_HASH = mul_right_hash + 19 } else { EXPR_VARIANCE_HASH = 0 - mul_right_hash + 20 }
+            } else {
+                EXPR_VARIANCE_HASH = 0
+            }
         }
         lhs_end_line = TL[(EP - 1) as usize]
     }
@@ -11454,6 +11484,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let left_unit = EXPR_UNIT
         let left_var_slot = EXPR_VAR_SLOT
         let left_scratch_src = EXPR_SCRATCH_SOURCE_SLOT  // β fix Part B
+        let left_vhash = EXPR_VARIANCE_HASH  // β² fix
         let left_conf = EXPR_CONFIDENCE
         emit_push()
         compile_multiplicative()
@@ -11461,6 +11492,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let right_hash = EXPR_TY_HASH
         let right_var_slot = EXPR_VAR_SLOT
         let right_scratch_src = EXPR_SCRATCH_SOURCE_SLOT  // β fix Part B
+        let right_vhash = EXPR_VARIANCE_HASH  // β² fix
         if EXPR_CONFIDENCE > left_conf { EXPR_CONFIDENCE = left_conf }
         // Unit dimension mismatch check: both operands have units and they differ
         if left_unit != 0 && EXPR_UNIT != 0 && left_unit != EXPR_UNIT {
@@ -11537,15 +11569,37 @@ fn compile_additive() with IO, Mut, Panic, Div {
                 }
                 // GUM variance propagation: fires if any operand carries variance or gated
                 if left_var_slot != -1 || right_var_slot != -1 || EXPR_GATE[op_tok as usize] == 1 {
-                    if left_var_slot >= 0 && left_var_slot == right_var_slot {
-                        emit_variance_addsub_same_x86(left_var_slot, op)
-                    } else if left_var_slot == 0 - 2 && right_var_slot == 0 - 2 && left_scratch_src >= 0 && left_scratch_src == right_scratch_src {
+                    // β² fix: expression-hash dispatch handles v1/v2/v3 uniformly.
+                    // Two operands with identical variance derivation (same sources
+                    // composed the same way) have identical variance values; their
+                    // sum is 4× variance, difference is 0.
+                    if left_vhash != 0 && left_vhash == right_vhash && left_var_slot == 0 - 2 && right_var_slot == 0 - 2 {
                         emit_variance_addsub_same_scratch_x86(op)
+                    } else if left_vhash != 0 && left_vhash == right_vhash && left_var_slot >= 0 {
+                        // Both in real slots, same derivation → use left's slot (values equal)
+                        emit_variance_addsub_same_x86(left_var_slot, op)
+                    } else if left_var_slot >= 0 && left_var_slot == right_var_slot {
+                        emit_variance_addsub_same_x86(left_var_slot, op)
                     } else {
                         emit_gate_variance_addsub_x86(left_var_slot, right_var_slot)
                     }
                     EXPR_VAR_SLOT = -2
                     EXPR_SCRATCH_SOURCE_SLOT = 0 - 1
+                    // β² fix: compute result hash via commutative-safe combine.
+                    // Add/sub distinguishable: sub becomes (L - R) so different order matters.
+                    if left_vhash != 0 && right_vhash != 0 {
+                        if op == 17 {
+                            EXPR_VARIANCE_HASH = left_vhash * 1000003 + right_vhash * 7 + 17
+                        } else {
+                            EXPR_VARIANCE_HASH = left_vhash * 1000003 - right_vhash * 7 + 18
+                        }
+                    } else if left_vhash != 0 {
+                        if op == 17 { EXPR_VARIANCE_HASH = left_vhash + 17 } else { EXPR_VARIANCE_HASH = left_vhash + 18 }
+                    } else if right_vhash != 0 {
+                        if op == 17 { EXPR_VARIANCE_HASH = right_vhash + 17 } else { EXPR_VARIANCE_HASH = 0 - right_vhash + 18 }
+                    } else {
+                        EXPR_VARIANCE_HASH = 0
+                    }
                 }
             }
         }
@@ -12963,6 +13017,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 // GUM variance: copy scratch → var slot if RHS produced variance
                 if EXPR_VAR_SLOT == -2 || EXPR_VAR_SLOT >= 0 {
                     emit_copy_scratch_to_var_variance_x86(slot)
+                }
+                // β² fix: persist expression hash so subsequent loads of this
+                // variable can detect same-derivation subtraction/addition.
+                if slot >= 0 && slot < 1024 {
+                    VAR_VARIANCE_HASH[slot as usize] = EXPR_VARIANCE_HASH
                 }
                 // Confidence gate: store compile-time confidence for this variable
                 VAR_CONFIDENCE[vix as usize] = EXPR_CONFIDENCE
@@ -21705,9 +21764,11 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     // β fix: explicit init — native BSS zeroes var inits, overriding the
     // declared -1 sentinel for EXPR_SCRATCH_SOURCE_SLOT.
     EXPR_SCRATCH_SOURCE_SLOT = 0 - 1
+    EXPR_VARIANCE_HASH = 0
     var beta_init_i: i64 = 0
     while beta_init_i < 1024 {
         KNOWLEDGE_CHANNEL_FOR_SLOT[beta_init_i as usize] = 0
+        VAR_VARIANCE_HASH[beta_init_i as usize] = 0
         beta_init_i = beta_init_i + 1
     }
     let argc = arg_count()
