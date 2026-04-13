@@ -1,0 +1,153 @@
+//@ run-pass
+// Round-trip test for stdlib/compress/deflate.sio — stored-block DEFLATE (RFC 1951 §3.2.4)
+//
+// Tests: deflate_stored → inflate_stored round-trip for a short byte sequence.
+// No external library. Pure Sounio arithmetic encoding.
+
+struct SrcBuf { data: [i64; 32768] }
+struct DstBuf { data: [i64; 65536] }
+
+struct DeflateResult {
+    ok: bool,
+    written: i64,
+    error_code: i64,
+}
+
+// One's complement (16-bit) of len
+fn nlen16(len: i64) -> i64 {
+    65535 - len
+}
+
+fn len_lo(len: i64) -> i64 { len - ((len / 256) * 256) }
+fn len_hi(len: i64) -> i64 { len / 256 }
+
+fn deflate_stored(src: &SrcBuf, src_len: i64,
+                  dst: &! DstBuf, dst_len: &! i64) -> DeflateResult with Mut, Panic {
+    if src_len < 0 || src_len > 32768 {
+        return DeflateResult { ok: false, written: 0, error_code: 1 }
+    }
+    let required = 5 + src_len
+    if required > 65536 {
+        return DeflateResult { ok: false, written: 0, error_code: 2 }
+    }
+
+    let n16 = nlen16(src_len)
+
+    (*dst).data[0] = 1
+    (*dst).data[1] = len_lo(src_len)
+    (*dst).data[2] = len_hi(src_len)
+    (*dst).data[3] = len_lo(n16)
+    (*dst).data[4] = len_hi(n16)
+
+    for i in 0..src_len {
+        (*dst).data[5 + i] = (*src).data[i]
+    }
+
+    *dst_len = required
+    DeflateResult { ok: true, written: required, error_code: 0 }
+}
+
+fn inflate_stored(src: &DstBuf, src_len: i64,
+                  dst: &! SrcBuf, dst_len: &! i64) -> DeflateResult with Mut, Panic {
+    if src_len < 5 {
+        return DeflateResult { ok: false, written: 0, error_code: 5 }
+    }
+
+    let header_byte = (*src).data[0]
+    let btype = (header_byte / 2) - ((header_byte / 2 / 2) * 2)
+    if btype != 0 {
+        return DeflateResult { ok: false, written: 0, error_code: 3 }
+    }
+
+    let len = (*src).data[1] + (*src).data[2] * 256
+    let nlen = (*src).data[3] + (*src).data[4] * 256
+
+    if nlen != nlen16(len) {
+        return DeflateResult { ok: false, written: 0, error_code: 4 }
+    }
+
+    if 5 + len > src_len || len > 32768 {
+        return DeflateResult { ok: false, written: 0, error_code: 5 }
+    }
+
+    for i in 0..len {
+        (*dst).data[i] = (*src).data[5 + i]
+    }
+
+    *dst_len = len
+    DeflateResult { ok: true, written: len, error_code: 0 }
+}
+
+fn main() -> i64 with IO, Mut, Panic {
+    // Test payload: ASCII values for "Hello, Sounio!"
+    // H=72 e=101 l=108 l=108 o=111 ,=44 32 S=83 o=111 u=117 n=110 i=105 o=111 !=33
+    let n: i64 = 14
+    var src = SrcBuf { data: [0; 32768] }
+    src.data[0]  = 72
+    src.data[1]  = 101
+    src.data[2]  = 108
+    src.data[3]  = 108
+    src.data[4]  = 111
+    src.data[5]  = 44
+    src.data[6]  = 32
+    src.data[7]  = 83
+    src.data[8]  = 111
+    src.data[9]  = 117
+    src.data[10] = 110
+    src.data[11] = 105
+    src.data[12] = 111
+    src.data[13] = 33
+
+    var compressed = DstBuf { data: [0; 65536] }
+    var comp_len: i64 = 0
+    let r1 = deflate_stored(&src, n, &!compressed, &!comp_len)
+
+    assert(r1.ok)
+    // Stored block = 5 header bytes + n data bytes
+    assert(comp_len == 5 + n)
+    // Validate header byte (BFINAL=1, BTYPE=00)
+    assert(compressed.data[0] == 1)
+    // Validate LEN bytes
+    assert(compressed.data[1] == n)
+    assert(compressed.data[2] == 0)
+    // Validate NLEN = ~LEN (16-bit) = 65535 - 14 = 65521 = 0xFF11
+    assert(compressed.data[3] == 17)   // 65521 & 0xFF = 17 (0x11)
+    assert(compressed.data[4] == 255)  // 65521 >> 8   = 255 (0xFF)
+
+    // Round-trip: inflate back
+    var recovered = SrcBuf { data: [0; 32768] }
+    var rec_len: i64 = 0
+    let r2 = inflate_stored(&compressed, comp_len, &!recovered, &!rec_len)
+
+    assert(r2.ok)
+    assert(rec_len == n)
+
+    // Verify byte equality
+    var all_match: bool = true
+    for i in 0..n {
+        if recovered.data[i] != src.data[i] {
+            all_match = false
+        }
+    }
+    assert(all_match)
+
+    // Edge case: empty block (LEN=0, NLEN=65535=0xFFFF)
+    var empty_src = SrcBuf { data: [0; 32768] }
+    var empty_dst = DstBuf { data: [0; 65536] }
+    var empty_comp_len: i64 = 0
+    let r3 = deflate_stored(&empty_src, 0, &!empty_dst, &!empty_comp_len)
+    assert(r3.ok)
+    assert(empty_comp_len == 5)
+    // NLEN of 0 = 65535 = 0xFFFF
+    assert(empty_dst.data[3] == 255)
+    assert(empty_dst.data[4] == 255)
+
+    var empty_rec = SrcBuf { data: [0; 32768] }
+    var empty_rec_len: i64 = 0
+    let r4 = inflate_stored(&empty_dst, 5, &!empty_rec, &!empty_rec_len)
+    assert(r4.ok)
+    assert(empty_rec_len == 0)
+
+    print("compress_deflate_stored: all tests passed\n")
+    return 0
+}

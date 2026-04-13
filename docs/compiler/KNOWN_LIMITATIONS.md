@@ -109,6 +109,7 @@ The following stdlib modules are stubs or incomplete:
 - `stdlib/prob/` - Beta, Normal, MCMC, random distributions (4 modules activated)
 - `stdlib/onn/` - Octonion neural network: activation, attention, conv, linear, loss, normalization, optimizer, training (8 modules)
 - `stdlib/ontology/` - LOINC, biomedical module, namespaces (3 modules)
+- `stdlib/compress/deflate.sio` - stored-block DEFLATE only (RFC 1951 BTYPE=00, no compression); gzip/zstd modules still require integer FFI
 - `stdlib/heliobiology/units.sio` - space weather units
 - `stdlib/ode/tsit5_multicomp.sio` - multi-compartment adaptive Tsit5 solver
 - `stdlib/medlang/` - full MedLang DSL (lexer, parser, AST, codegen, PK models, population, dosing) — all active
