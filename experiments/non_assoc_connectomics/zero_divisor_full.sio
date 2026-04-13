@@ -1,0 +1,187 @@
+//@ run-pass
+// Phase 2 Experiment C — sedenion zero-divisor proximity.
+//
+// For each subject, computes:
+//   F^s = (μ(v1), σ(v1), μ(v2), σ(v2), ..., μ(v8), σ(v8))   ∈ ℝ^16
+// and returns:
+//   d_ZD(F^s) = min_{(lhs, rhs) ∈ Z_168} ‖F^s − supp_point(lhs, rhs)‖
+// where Z_168 is loaded from artifacts/research/sedenion_zd_168.bin (the
+// 168 primitive projective pair classes; see preprocess_zd_supports.py).
+//
+// Support-union interpretation (protocol: 4 active indices in [1,15] per
+// pair, equal weight 1/√2 at positions sup_i): the support "point" in ℝ^16
+// has √(1/4) = 0.5 at each of the 4 support indices, 0 elsewhere. This
+// normalizes the point to unit ℓ² norm.
+//
+// frames.bin schema (v2) assumed: per-subject 8 eigenvectors × 200 ROIs ×
+// f64. If the live frames.bin is v1 (7 eigenvectors), Experiment C cannot
+// run as specified — the preprocessor must be re-run with
+// abide_preprocess.py --eigenvectors=8.
+//
+// CLI: souc run zero_divisor_full.sio -- --subject=N
+// Synthetic fallback emits d_ZD for one synthetic 16D feature.
+
+var ZD_DATA: [i32; 1024] = [0; 1024]    // loaded 168 pairs × 6 i32s = 1008 ints
+var FEATURE: [f64; 16] = [0.0; 16]
+
+// =============================================================================
+// Load sedenion_zd_168.bin (8072 bytes: i64 header + 168 × 6 i64 records).
+// Offsets are in i64 (8-byte) units per read_i64 convention.
+// Returns the number of pairs loaded (168 on success).
+// =============================================================================
+fn load_zd_binary() -> i64 with IO, Mut, Div {
+    let path = "artifacts/research/sedenion_zd_168.bin"
+    let sz = file_size(path)
+    if sz < 8 { return 0 }
+    let raw = read_file(path)
+    let n_pairs = read_i64(raw, 0)
+    if n_pairs != 168 { return 0 }
+    // Post-header at i64 offset 1; each pair is 6 i64 = 48 bytes.
+    var pi: i64 = 0
+    while pi < 168 {
+        let base = 1 + pi * 6   // i64 offset units
+        ZD_DATA[(pi * 6 + 0) as usize] = read_i64(raw, base + 0) as i32
+        ZD_DATA[(pi * 6 + 1) as usize] = read_i64(raw, base + 1) as i32
+        ZD_DATA[(pi * 6 + 2) as usize] = read_i64(raw, base + 2) as i32
+        ZD_DATA[(pi * 6 + 3) as usize] = read_i64(raw, base + 3) as i32
+        ZD_DATA[(pi * 6 + 4) as usize] = read_i64(raw, base + 4) as i32
+        ZD_DATA[(pi * 6 + 5) as usize] = read_i64(raw, base + 5) as i32
+        pi = pi + 1
+    }
+    168
+}
+
+// =============================================================================
+// Distance² from FEATURE (16-dim) to the support point for pair i.
+// Support has value 0.5 at each of the 4 indices sup0..sup3 (≤ 15), 0 elsewhere.
+// ‖F − S‖² = ‖F‖² − 2·Σ F[sup_k]·0.5 + 4·0.25
+//         = ‖F‖² − (F[s0] + F[s1] + F[s2] + F[s3]) + 1
+// =============================================================================
+fn dist_sq_to_pair(pair_idx: i64, f_norm_sq: f64) -> f64 with Mut {
+    let s0 = ZD_DATA[(pair_idx * 6 + 2) as usize] as i64
+    let s1 = ZD_DATA[(pair_idx * 6 + 3) as usize] as i64
+    let s2 = ZD_DATA[(pair_idx * 6 + 4) as usize] as i64
+    let s3 = ZD_DATA[(pair_idx * 6 + 5) as usize] as i64
+    var sum: f64 = 0.0
+    if s0 >= 0 && s0 < 16 { sum = sum + FEATURE[s0 as usize] }
+    if s1 >= 0 && s1 < 16 { sum = sum + FEATURE[s1 as usize] }
+    if s2 >= 0 && s2 < 16 { sum = sum + FEATURE[s2 as usize] }
+    if s3 >= 0 && s3 < 16 { sum = sum + FEATURE[s3 as usize] }
+    f_norm_sq - sum + 1.0
+}
+
+// =============================================================================
+// Compute min over 168 pairs of distance(FEATURE, support). Returns min distance.
+// =============================================================================
+fn min_distance() -> f64 with Mut {
+    // Precompute ‖F‖²
+    var fns: f64 = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        fns = fns + FEATURE[i as usize] * FEATURE[i as usize]
+        i = i + 1
+    }
+    var best: f64 = 1e18
+    var p: i64 = 0
+    while p < 168 {
+        let d2 = dist_sq_to_pair(p, fns)
+        if d2 < best { best = d2 }
+        p = p + 1
+    }
+    if best < 0.0 { best = 0.0 }
+    best.sqrt()
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    println("group,subject_id,d_ZD")
+
+    let n_loaded = load_zd_binary()
+    if n_loaded != 168 {
+        println("ERROR: failed to load sedenion_zd_168.bin")
+        return 1
+    }
+
+    // Parse --subject=N inline
+    var subject_arg: i64 = 0 - 1
+    let argc = arg_count()
+    var ai: i64 = 0
+    while ai < argc {
+        let a = get_arg(ai)
+        let alen = str_len(a)
+        if alen > 10 && str_char_at(a, 0) == 45 && str_char_at(a, 1) == 45 &&
+           str_char_at(a, 2) == 115 && str_char_at(a, 9) == 61 {
+            var j: i64 = 10
+            var v: i64 = 0
+            while j < alen {
+                let c = str_char_at(a, j)
+                if c >= 48 && c <= 57 { v = v * 10 + (c - 48) }
+                j = j + 1
+            }
+            subject_arg = v
+        }
+        ai = ai + 1
+    }
+
+    let path = "artifacts/research/abide/frames.bin"
+    let sz = file_size(path)
+
+    if sz > 16 && subject_arg >= 0 {
+        // Real subject mode — requires frames.bin v2 (8 eigenvectors)
+        let raw = read_file(path)
+        let n_asd = read_i64(raw, 0)
+        let n_td = read_i64(raw, 1)
+        let n_total = n_asd + n_td
+        // Heuristic v2 check: (file_size - 16) / n_total should be 12800 (1600 × 8)
+        // If it's 11200 (v1 with 7 eigenvectors), warn and bail.
+        let per_subject = (sz - 16) / n_total
+        if per_subject != 12800 {
+            print("ERROR: frames.bin schema is not v2 (got "); print_int(per_subject)
+            println(" bytes/subject; expected 12800). Re-run abide_preprocess.py with 8 eigenvectors.")
+            return 2
+        }
+        if subject_arg < n_total {
+            // Inline subject-feature load (μ, σ per eigenvector e=0..7)
+            let frame_size_v2: i64 = 1600
+            let header: i64 = 2
+            var e: i64 = 0
+            while e < 8 {
+                var sum: f64 = 0.0
+                var r: i64 = 0
+                while r < 200 {
+                    let off = header + subject_arg * frame_size_v2 + e * 200 + r
+                    sum = sum + read_f64(raw, off)
+                    r = r + 1
+                }
+                let mu = sum / 200.0
+                var ss: f64 = 0.0
+                r = 0
+                while r < 200 {
+                    let off = header + subject_arg * frame_size_v2 + e * 200 + r
+                    let d2 = read_f64(raw, off) - mu
+                    ss = ss + d2 * d2
+                    r = r + 1
+                }
+                let sigma = (ss / 199.0).sqrt()
+                FEATURE[(e * 2) as usize] = mu
+                FEATURE[(e * 2 + 1) as usize] = sigma
+                e = e + 1
+            }
+            let d = min_distance()
+            if subject_arg < n_asd { print("ASD,") } else { print("TD,") }
+            print_int(subject_arg); print(",")
+            print_f64(d)
+            println("")
+        }
+        return 0
+    }
+
+    // Synthetic fallback — fabricate a 16D feature with decaying magnitudes.
+    var c: i64 = 0
+    while c < 16 {
+        FEATURE[c as usize] = 1.0 / (1.0 + (c as f64)) * 0.3
+        c = c + 1
+    }
+    let d_syn = min_distance()
+    print("SYN,0,"); print_f64(d_syn); println("")
+    0
+}
