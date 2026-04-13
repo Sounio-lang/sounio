@@ -20434,21 +20434,300 @@ fn resolve_imports() with IO, Mut, Panic, Div {
 // Track extern function count for diagnostics
 var EXTERN_FN_COUNT: i64 = 0
 
-fn strip_extern_blocks() with IO, Mut, Panic {
-    // Phase 1: Count extern fn declarations for diagnostics
+// ─── Extern "C" stub registry ───
+// Populated by strip_extern_blocks; stubs are appended to SRC afterward.
+// Each entry stores: name bytes, arity, return type code (1=i64, 2=f64, 4=bool, 5=unit).
+// Names are copied into EXTERN_STUB_NAME_BUF to survive SRC compaction.
+var EXTERN_STUB_NAME_BUF: [i8; 4096] = [0; 4096]   // packed name bytes
+var EXTERN_STUB_NAME_OFF: [i64; 128] = [0; 128]     // byte offset of each name in buf
+var EXTERN_STUB_NAME_LEN: [i64; 128] = [0; 128]     // length of each name
+var EXTERN_STUB_ARITY:    [i64; 128] = [0; 128]     // param count
+var EXTERN_STUB_RET:      [i64; 128] = [0; 128]     // 1=i64/int, 2=f64, 4=bool, 5=unit
+var EXTERN_STUB_COUNT:    i64 = 0
+var EXTERN_STUB_BUF_OFF:  i64 = 0                   // next free offset in name buf
+
+// Parse a type keyword starting at position p in SRC; return type code.
+// Returns 1 for integer types, 2 for f64/f32, 4 for bool, 5 for unit/void, 0 for unknown.
+fn extern_parse_ret_ty(p: i64) -> i64 with Panic, Mut, Div {
+    // Skip whitespace
+    var i: i64 = p
+    while i < SRC_LEN && (sb(i) == 32 || sb(i) == 9) { i = i + 1 }
+    // i64, i32, i16, i8, u64, u32, u16, u8, usize, isize
+    if i + 2 < SRC_LEN && sb(i) == 105 && sb(i + 1) == 54 && sb(i + 2) == 52 { return 1 }  // i64
+    if i + 2 < SRC_LEN && sb(i) == 105 && sb(i + 1) == 51 && sb(i + 2) == 50 { return 1 }  // i32
+    if i + 2 < SRC_LEN && sb(i) == 105 && sb(i + 1) == 49 && sb(i + 2) == 54 { return 1 }  // i16
+    if i + 1 < SRC_LEN && sb(i) == 105 && sb(i + 1) == 56 { return 1 }                      // i8
+    if i + 2 < SRC_LEN && sb(i) == 117 && sb(i + 1) == 54 && sb(i + 2) == 52 { return 1 }  // u64
+    if i + 2 < SRC_LEN && sb(i) == 117 && sb(i + 1) == 51 && sb(i + 2) == 50 { return 1 }  // u32
+    if i + 4 < SRC_LEN && sb(i) == 117 && sb(i + 1) == 115 && sb(i + 2) == 105 && sb(i + 3) == 122 && sb(i + 4) == 101 { return 1 }  // usize
+    if i + 2 < SRC_LEN && sb(i) == 102 && sb(i + 1) == 54 && sb(i + 2) == 52 { return 2 }  // f64
+    if i + 2 < SRC_LEN && sb(i) == 102 && sb(i + 1) == 51 && sb(i + 2) == 50 { return 2 }  // f32
+    if i + 3 < SRC_LEN && sb(i) == 98 && sb(i + 1) == 111 && sb(i + 2) == 111 && sb(i + 3) == 108 { return 4 }  // bool
+    if i + 3 < SRC_LEN && sb(i) == 118 && sb(i + 1) == 111 && sb(i + 2) == 105 && sb(i + 3) == 100 { return 5 }  // void
+    return 1  // default: treat as integer
+}
+
+// Match extern stub name against a literal string (byte-by-byte comparison).
+fn extern_stub_name_eq(idx: i64, lit: string) -> i64 with Panic, Mut {
+    let noff = EXTERN_STUB_NAME_OFF[idx as usize]
+    let nlen = EXTERN_STUB_NAME_LEN[idx as usize]
+    let llen = str_len(lit)
+    if nlen != llen { return 0 }
+    var k: i64 = 0
+    while k < nlen {
+        let nb = EXTERN_STUB_NAME_BUF[(noff + k) as usize] as i64 & 0xFF
+        let lb = str_char_at(lit, k)
+        if nb != lb { return 0 }
+        k = k + 1
+    }
+    return 1
+}
+
+// Append extern stub name to SRC (for generating stub function text).
+fn append_extern_stub_name(idx: i64) with Mut, Panic {
+    let noff = EXTERN_STUB_NAME_OFF[idx as usize]
+    let nlen = EXTERN_STUB_NAME_LEN[idx as usize]
+    var k: i64 = 0
+    while k < nlen && SRC_LEN < 8388607 {
+        SRC[SRC_LEN as usize] = EXTERN_STUB_NAME_BUF[(noff + k) as usize]
+        SRC_LEN = SRC_LEN + 1
+        k = k + 1
+    }
+}
+
+// Generate Sounio stub source code for all registered extern "C" functions.
+// Called from append_native_prelude after strip_extern_blocks.
+// Each stub wraps the extern fn using the correct mechanism:
+//   - Known zero-arg integer syscalls: emit via syscall6(NR, 0,0,0,0,0,0)
+//   - Known math f64 functions: delegate to __native_*_f64
+//   - Others: emit a panic stub
+// The XMM0-vs-RAX fix is implicit here: our stubs return in RAX (Sounio convention).
+// For integer syscalls, syscall6 returns in RAX directly (correct).
+// For f64 math, __native_*_f64 returns f64 bits in RAX (correct).
+// Any future real C-ABI call would need: if ret==f64 then movq rax,xmm0 after call.
+fn append_extern_c_stubs() with Mut, Panic, Div {
+    var si: i64 = 0
+    while si < EXTERN_STUB_COUNT {
+        let ret = EXTERN_STUB_RET[si as usize]
+        let arity = EXTERN_STUB_ARITY[si as usize]
+        append_src_lit("\n")
+        // ── Zero-argument integer-returning syscalls ──
+        // getpid → Linux x86-64 syscall 39
+        if extern_stub_name_eq(si, "getpid") == 1 {
+            append_src_lit("fn getpid() -> i64 with IO { syscall6(39, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // getppid → syscall 110
+        if extern_stub_name_eq(si, "getppid") == 1 {
+            append_src_lit("fn getppid() -> i64 with IO { syscall6(110, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // gettid → syscall 186
+        if extern_stub_name_eq(si, "gettid") == 1 {
+            append_src_lit("fn gettid() -> i64 with IO { syscall6(186, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // getuid → syscall 102
+        if extern_stub_name_eq(si, "getuid") == 1 {
+            append_src_lit("fn getuid() -> i64 with IO { syscall6(102, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // getgid → syscall 104
+        if extern_stub_name_eq(si, "getgid") == 1 {
+            append_src_lit("fn getgid() -> i64 with IO { syscall6(104, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // geteuid → syscall 107
+        if extern_stub_name_eq(si, "geteuid") == 1 {
+            append_src_lit("fn geteuid() -> i64 with IO { syscall6(107, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // getegid → syscall 108
+        if extern_stub_name_eq(si, "getegid") == 1 {
+            append_src_lit("fn getegid() -> i64 with IO { syscall6(108, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // ── f64-returning math functions — delegate to native impls ──
+        // The critical register-convention fix: real C-ABI f64 returns land in XMM0.
+        // Our native implementations keep f64 as bit-patterns in RAX (Sounio convention).
+        // Using __native_* stubs means no XMM0 read is needed — RAX is already correct.
+        // (Any direct C-ABI call must emit `movq rax, xmm0` after the call for f64.)
+        if extern_stub_name_eq(si, "sqrt") == 1 {
+            append_src_lit("fn sqrt(x: f64) -> f64 with Mut, Div, Panic { __native_sqrt_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "sin") == 1 {
+            append_src_lit("fn sin(x: f64) -> f64 with Mut, Div, Panic { __native_sin_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "cos") == 1 {
+            append_src_lit("fn cos(x: f64) -> f64 with Mut, Div, Panic { __native_cos_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "exp") == 1 {
+            append_src_lit("fn exp(x: f64) -> f64 with Mut, Div, Panic { __native_exp_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "log") == 1 {
+            append_src_lit("fn log(x: f64) -> f64 with Mut, Div, Panic { __native_ln_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "ln") == 1 {
+            append_src_lit("fn ln(x: f64) -> f64 with Mut, Div, Panic { __native_ln_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "fabs") == 1 || extern_stub_name_eq(si, "abs") == 1 {
+            if ret == 2 {
+                append_src_lit("fn ")
+                append_extern_stub_name(si)
+                append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_abs_f64(x) }\n")
+            } else {
+                append_src_lit("fn ")
+                append_extern_stub_name(si)
+                append_src_lit("(x: i64) -> i64 { __native_abs_i64(x) }\n")
+            }
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "tanh") == 1 {
+            append_src_lit("fn tanh(x: f64) -> f64 with Mut, Div, Panic { __native_tanh_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "pow") == 1 {
+            // pow(x, y) = exp(y * ln(x)) — approximation using native functions
+            append_src_lit("fn pow(x: f64, y: f64) -> f64 with Mut, Div, Panic { __native_exp_f64(y * __native_ln_f64(x)) }\n")
+            si = si + 1
+            continue
+        }
+        // ── malloc/free — map to heap_alloc/heap_free ──
+        if extern_stub_name_eq(si, "malloc") == 1 {
+            append_src_lit("fn malloc(size: i64) -> i64 with IO, Alloc { heap_alloc(size) as i64 }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "free") == 1 {
+            append_src_lit("fn free(ptr: i64) with IO, Alloc { heap_free(ptr as i64) }\n")
+            si = si + 1
+            continue
+        }
+        // ── Fallback: generate panic stub ──
+        // For unknown extern "C" functions, emit a stub that panics.
+        // This preserves the type signature in the FN table so callers type-check,
+        // but fails at runtime with a clear message rather than silently returning garbage.
+        append_src_lit("fn ")
+        append_extern_stub_name(si)
+        if ret == 2 {
+            // f64 return
+            if arity == 0 { append_src_lit("() -> f64 with Panic { panic(\"unresolved extern fn\"); 0.0 }\n") }
+            else if arity == 1 { append_src_lit("(a: f64) -> f64 with Panic { panic(\"unresolved extern fn\"); 0.0 }\n") }
+            else { append_src_lit("(a: f64, b: f64) -> f64 with Panic { panic(\"unresolved extern fn\"); 0.0 }\n") }
+        } else if ret == 5 {
+            // void/unit return
+            if arity == 0 { append_src_lit("() with Panic { panic(\"unresolved extern fn\") }\n") }
+            else if arity == 1 { append_src_lit("(a: i64) with Panic { panic(\"unresolved extern fn\") }\n") }
+            else { append_src_lit("(a: i64, b: i64) with Panic { panic(\"unresolved extern fn\") }\n") }
+        } else {
+            // integer/bool return
+            if arity == 0 { append_src_lit("() -> i64 with Panic { panic(\"unresolved extern fn\"); 0 }\n") }
+            else if arity == 1 { append_src_lit("(a: i64) -> i64 with Panic { panic(\"unresolved extern fn\"); 0 }\n") }
+            else { append_src_lit("(a: i64, b: i64) -> i64 with Panic { panic(\"unresolved extern fn\"); 0 }\n") }
+        }
+        si = si + 1
+    }
+}
+
+fn strip_extern_blocks() with IO, Mut, Panic, Div {
+    EXTERN_STUB_COUNT = 0
+    EXTERN_STUB_BUF_OFF = 0
+    // Phase 1: Count extern fn declarations and collect signatures for stub generation.
+    // We parse each extern "C" { fn NAME(ARGS) -> RET; ... } block.
     var scan: i64 = 0
     while scan < SRC_LEN {
         if scan + 9 < SRC_LEN && sb(scan) == 101 && sb(scan + 1) == 120 && sb(scan + 2) == 116 && sb(scan + 3) == 101 && sb(scan + 4) == 114 && sb(scan + 5) == 110 && sb(scan + 6) == 32 && sb(scan + 7) == 34 && sb(scan + 8) == 67 && sb(scan + 9) == 34 {
-            // Count fn declarations inside this extern block
+            // Find opening { of block
             var es: i64 = scan
             while es < SRC_LEN && sb(es) != 123 { es = es + 1 }
             if es < SRC_LEN {
                 var ed: i64 = 1
                 es = es + 1
                 while es < SRC_LEN && ed > 0 {
-                    // Look for 'fn' keyword (102, 110, 32 or 10)
-                    if sb(es) == 102 && es + 1 < SRC_LEN && sb(es + 1) == 110 && es + 2 < SRC_LEN && (sb(es + 2) == 32 || sb(es + 2) == 10) {
+                    // Look for 'fn' keyword: bytes 102('f'), 110('n'), then space/newline
+                    if sb(es) == 102 && es + 1 < SRC_LEN && sb(es + 1) == 110 && es + 2 < SRC_LEN && (sb(es + 2) == 32 || sb(es + 2) == 9 || sb(es + 2) == 10) {
                         EXTERN_FN_COUNT = EXTERN_FN_COUNT + 1
+                        // Skip 'fn' and whitespace to reach function name
+                        var np: i64 = es + 2
+                        while np < SRC_LEN && (sb(np) == 32 || sb(np) == 9) { np = np + 1 }
+                        // Collect function name (alphanumeric + underscore)
+                        let name_start = np
+                        while np < SRC_LEN && (
+                            (sb(np) >= 97 && sb(np) <= 122) ||  // a-z
+                            (sb(np) >= 65 && sb(np) <= 90) ||   // A-Z
+                            (sb(np) >= 48 && sb(np) <= 57) ||   // 0-9
+                            sb(np) == 95                          // _
+                        ) { np = np + 1 }
+                        let name_len = np - name_start
+                        // Find opening paren and count parameters
+                        while np < SRC_LEN && sb(np) != 40 && sb(np) != 10 { np = np + 1 }
+                        var argc: i64 = 0
+                        if np < SRC_LEN && sb(np) == 40 {
+                            np = np + 1  // skip (
+                            // Count params: if first non-ws is ), arity=0; else count commas+1
+                            var pp: i64 = np
+                            while pp < SRC_LEN && (sb(pp) == 32 || sb(pp) == 9) { pp = pp + 1 }
+                            if pp < SRC_LEN && sb(pp) != 41 {
+                                argc = 1
+                                var pdepth: i64 = 1
+                                while pp < SRC_LEN && pdepth > 0 {
+                                    if sb(pp) == 40 { pdepth = pdepth + 1 }
+                                    if sb(pp) == 41 { pdepth = pdepth - 1; if pdepth == 0 { break } }
+                                    if sb(pp) == 44 && pdepth == 1 { argc = argc + 1 }
+                                    pp = pp + 1
+                                }
+                                np = pp + 1  // skip )
+                            } else {
+                                np = pp + 1  // skip )
+                            }
+                        }
+                        // Parse return type: look for -> after )
+                        var ret_ty: i64 = 5  // default: unit
+                        while np < SRC_LEN && sb(np) != 10 && sb(np) != 59 && !(sb(np) == 125 && ed <= 1) {
+                            // Look for -> (bytes 45, 62)
+                            if sb(np) == 45 && np + 1 < SRC_LEN && sb(np + 1) == 62 {
+                                np = np + 2
+                                ret_ty = extern_parse_ret_ty(np)
+                                break
+                            }
+                            np = np + 1
+                        }
+                        // Store in extern stub registry (if not full)
+                        if EXTERN_STUB_COUNT < 127 && name_len > 0 && EXTERN_STUB_BUF_OFF + name_len < 4095 {
+                            let si = EXTERN_STUB_COUNT
+                            EXTERN_STUB_NAME_OFF[si as usize] = EXTERN_STUB_BUF_OFF
+                            EXTERN_STUB_NAME_LEN[si as usize] = name_len
+                            var ki: i64 = 0
+                            while ki < name_len {
+                                EXTERN_STUB_NAME_BUF[(EXTERN_STUB_BUF_OFF + ki) as usize] = SRC[(name_start + ki) as usize]
+                                ki = ki + 1
+                            }
+                            EXTERN_STUB_BUF_OFF = EXTERN_STUB_BUF_OFF + name_len
+                            EXTERN_STUB_ARITY[si as usize] = argc
+                            EXTERN_STUB_RET[si as usize] = ret_ty
+                            EXTERN_STUB_COUNT = EXTERN_STUB_COUNT + 1
+                        }
                     }
                     if sb(es) == 123 { ed = ed + 1 }
                     if sb(es) == 125 { ed = ed - 1 }
@@ -20510,6 +20789,10 @@ fn strip_extern_blocks() with IO, Mut, Panic {
         r = r + 1
     }
     SRC_LEN = w
+    // Phase 3: Append Sounio stubs for each parsed extern "C" function.
+    // Stubs are appended to SRC here; append_native_prelude appends __native_* helpers after us.
+    // We call append_extern_c_stubs() which generates the correct stub for each extern fn.
+    append_extern_c_stubs()
 }
 
 fn main() -> i64 with IO, Mut, Panic, Div {
