@@ -9190,10 +9190,34 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if mfi >= 0 {
                     EP = EP + 1  // skip method name
                     EP = EP + 1  // skip (
-                    // Check if method expects a borrowed receiver
+                    // Look up declared receiver type from the method's actual signature.
+                    // This replaces heuristic string matching: &T → shared borrow,
+                    // &!T → exclusive borrow, T (by value) → move.
                     scan_fnsig_param_type(FN_SIG[mfi as usize], 0)
                     let method_expects_borrow = (SCAN_TY == 10)
-                        // If receiver is a struct value and method expects borrow, auto-borrow
+                    let method_expects_excl = method_expects_borrow && (ref_hash_mut(SCAN_TY_HASH) != 0)
+                    // Enforce borrow conflict rules for &!Self receiver on a known variable.
+                    // This mirrors the explicit `&!var` borrow path at the borrow-expression site.
+                    if method_expects_excl && LAST_EXPR_VAR_IDX >= 0 {
+                        let recv_vi = LAST_EXPR_VAR_IDX
+                        let recv_is_ref = VAR_TY[recv_vi as usize] == 10
+                        if recv_is_ref == false {
+                            if VAR_BORROW_COUNT[recv_vi as usize] > 0 {
+                                tc_linear_violation(method_tok, "cannot call &!self method: receiver is already borrowed as shared")
+                            }
+                            if VAR_BORROW_EXCL[recv_vi as usize] > 0 {
+                                tc_linear_violation(method_tok, "cannot call &!self method: exclusive borrow already active on receiver")
+                            }
+                            // Take an ephemeral exclusive borrow, released after the call.
+                            VAR_BORROW_EXCL[recv_vi as usize] = VAR_BORROW_EXCL[recv_vi as usize] + 1
+                            if IN_CALL_ARGS != 0 && CALL_ARG_BORROW_N < 32 {
+                                CALL_ARG_BORROW_VI[CALL_ARG_BORROW_N as usize] = recv_vi
+                                CALL_ARG_BORROW_EXCL[CALL_ARG_BORROW_N as usize] = 1
+                                CALL_ARG_BORROW_N = CALL_ARG_BORROW_N + 1
+                            }
+                        }
+                    }
+                    // If receiver is a struct value and method expects borrow, auto-borrow
                     if method_expects_borrow && EXPR_TY == 6 {
                         // rax already holds the pointer to the struct data:
                         //   - from a struct variable: emit_load_var(ptr_slot) loads the stored LEA address
