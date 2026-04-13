@@ -136,6 +136,17 @@ var EN: [i64; 16384] = [0; 16384]
 var EN_COUNT: i64 = 0
 var MATCH_ENDS: [i64; 32] = [0; 32]
 
+// Phase 1.4: Or-pattern arm alternatives (A | B | C => body)
+var OR_ALT_DISC:    [i64; 8] = [0; 8]   // discriminant value for each alt (-1 = none)
+var OR_ALT_TAGGED:  [i64; 8] = [0; 8]   // 1 if tagged union check (Some/None/Ok/Err)
+var OR_ALT_HAS_BIND:[i64; 8] = [0; 8]   // 1 if this alt has an inner value binding
+var OR_ALT_BIND_NS: [i64; 8] = [0; 8]   // binding name start in SRC
+var OR_ALT_BIND_NE: [i64; 8] = [0; 8]   // binding name end in SRC
+var OR_ALT_IS_WILD: [i64; 8] = [0; 8]   // 1 if wildcard _
+var OR_BODY_PATCHES:[i64; 8] = [0; 8]   // offset of je/jmp → body for each non-last alt
+var OR_BODY_PV:     [i64; 8] = [0; 8]   // 1 if OR_BODY_PATCHES[i] is a valid patch offset
+var OR_ALT_COUNT:   i64 = 0
+
 // Generic function registry (for monomorphization)
 var GEN_FN_NS: [i64; 64] = [0; 32]
 var GEN_FN_NE: [i64; 64] = [0; 32]
@@ -11811,8 +11822,138 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 disc = TV[EP as usize]; EP = EP + 1
             }
             if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 { EP = EP + 1 }
+            // Phase 1.4: Or-pattern detection (A | B | C => body)
+            var is_or_pattern: i64 = 0
+            if is_var_bind == 0 && TK[EP as usize] == 45 {
+                is_or_pattern = 1
+                // Store first alternative
+                OR_ALT_DISC[0 as usize] = disc
+                OR_ALT_TAGGED[0 as usize] = arm_is_tagged
+                OR_ALT_HAS_BIND[0 as usize] = has_binding
+                OR_ALT_BIND_NS[0 as usize] = bind_ns
+                OR_ALT_BIND_NE[0 as usize] = bind_ne
+                OR_ALT_IS_WILD[0 as usize] = is_wildcard
+                OR_ALT_COUNT = 1
+                // Parse additional alternatives
+                while TK[EP as usize] == 45 {
+                    EP = EP + 1
+                    let alt_i = OR_ALT_COUNT
+                    var a_disc: i64 = -1
+                    var a_tagged: i64 = 0
+                    var a_has_bind: i64 = 0
+                    var a_bind_ns: i64 = 0
+                    var a_bind_ne: i64 = 0
+                    var a_is_wild: i64 = 0
+                    let a_tk = TK[EP as usize]
+                    if a_tk == 57 { EP = EP + 1; a_disc = 1; a_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; a_bind_ns = TS[EP as usize]; a_bind_ne = TE[EP as usize]; a_has_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                    if a_tk == 58 { EP = EP + 1; a_disc = 0; a_tagged = 1 }
+                    if a_tk == 59 { EP = EP + 1; a_disc = 0; a_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; a_bind_ns = TS[EP as usize]; a_bind_ne = TE[EP as usize]; a_has_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                    if a_tk == 60 { EP = EP + 1; a_disc = 1; a_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; a_bind_ns = TS[EP as usize]; a_bind_ne = TE[EP as usize]; a_has_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                    if a_tk == 3 {
+                        let ans = TS[EP as usize]; let ane = TE[EP as usize]
+                        if ane - ans == 1 && sb(ans) == 95 { a_is_wild = 1; EP = EP + 1 }
+                        else if TK[(EP + 1) as usize] == 51 { let aeh = gl_name_hash(ans, ane); EP = EP + 2; let avh = gl_name_hash(TS[EP as usize], TE[EP as usize]); EP = EP + 1; a_disc = en_variant_value(aeh, avh) }
+                        else { EP = EP + 1 }
+                    }
+                    if a_tk == 4 { a_disc = TV[EP as usize]; EP = EP + 1 }
+                    OR_ALT_DISC[alt_i as usize] = a_disc
+                    OR_ALT_TAGGED[alt_i as usize] = a_tagged
+                    OR_ALT_HAS_BIND[alt_i as usize] = a_has_bind
+                    OR_ALT_BIND_NS[alt_i as usize] = a_bind_ns
+                    OR_ALT_BIND_NE[alt_i as usize] = a_bind_ne
+                    OR_ALT_IS_WILD[alt_i as usize] = a_is_wild
+                    OR_ALT_COUNT = OR_ALT_COUNT + 1
+                }
+                // Emit check sequence: non-last alts → je body; last alt → jne skip
+                var or_i: i64 = 0
+                while or_i < OR_ALT_COUNT - 1 {
+                    let oa_disc = OR_ALT_DISC[or_i as usize]
+                    let oa_tagged = OR_ALT_TAGGED[or_i as usize]
+                    let oa_is_wild = OR_ALT_IS_WILD[or_i as usize]
+                    OR_BODY_PV[or_i as usize] = 0
+                    if oa_is_wild == 1 {
+                        em(0xe9); OR_BODY_PATCHES[or_i as usize] = CL; em32(0); OR_BODY_PV[or_i as usize] = 1
+                    } else if oa_tagged == 1 {
+                        emit_load_var(match_slot)
+                        em(0x48); em(0x8b); em(0x00)
+                        em(0x50); em(0x48); em(0xb8); em64(oa_disc); em(0x59)
+                        em(0x48); em(0x39); em(0xc1)
+                        em(0x0f); em(0x84); OR_BODY_PATCHES[or_i as usize] = CL; em32(0); OR_BODY_PV[or_i as usize] = 1
+                    } else if oa_disc >= 0 {
+                        emit_load_var(match_slot)
+                        em(0x50); em(0x48); em(0xb8); em64(oa_disc); em(0x59)
+                        em(0x48); em(0x39); em(0xc1)
+                        em(0x0f); em(0x84); OR_BODY_PATCHES[or_i as usize] = CL; em32(0); OR_BODY_PV[or_i as usize] = 1
+                    }
+                    or_i = or_i + 1
+                }
+                // Last alternative: jne skip (if not wildcard)
+                let or_last = OR_ALT_COUNT - 1
+                let ol_disc = OR_ALT_DISC[or_last as usize]
+                let ol_tagged = OR_ALT_TAGGED[or_last as usize]
+                let ol_is_wild = OR_ALT_IS_WILD[or_last as usize]
+                var or_skip_patch: i64 = -1
+                if ol_is_wild == 0 && ol_tagged == 1 {
+                    emit_load_var(match_slot)
+                    em(0x48); em(0x8b); em(0x00)
+                    em(0x50); em(0x48); em(0xb8); em64(ol_disc); em(0x59)
+                    em(0x48); em(0x39); em(0xc1)
+                    em(0x0f); em(0x85); or_skip_patch = CL; em32(0)
+                } else if ol_is_wild == 0 && ol_disc >= 0 {
+                    emit_load_var(match_slot)
+                    em(0x50); em(0x48); em(0xb8); em64(ol_disc); em(0x59)
+                    em(0x48); em(0x39); em(0xc1)
+                    em(0x0f); em(0x85); or_skip_patch = CL; em32(0)
+                }
+                // Bind inner value from last alt (if it has a tagged binding)
+                let ol_has_bind = OR_ALT_HAS_BIND[or_last as usize]
+                let ol_bns = OR_ALT_BIND_NS[or_last as usize]
+                let ol_bne = OR_ALT_BIND_NE[or_last as usize]
+                if ol_has_bind == 1 && ol_tagged == 1 {
+                    emit_load_var(match_slot)
+                    em(0x48); em(0x8b); em(0x40); em(0x08)
+                    let obslot = var_add(ol_bns, ol_bne)
+                    if obslot >= 0 {
+                        emit_store_var(obslot)
+                        if VAR_COUNT > 0 {
+                            let obvi = VAR_COUNT - 1
+                            if MATCH_SCRUT_TY == 11 {
+                                VAR_TY[obvi as usize] = ptr_hash_inner_ty(MATCH_SCRUT_HASH)
+                                VAR_TY_HASH[obvi as usize] = ptr_hash_inner_hash(MATCH_SCRUT_HASH)
+                            }
+                        }
+                    }
+                }
+                // Patch all non-last body-jump offsets to current location (arm body start)
+                let or_body_start = CL
+                var pi: i64 = 0
+                while pi < OR_ALT_COUNT - 1 { if OR_BODY_PV[pi as usize] == 1 { patch32(OR_BODY_PATCHES[pi as usize], or_body_start) }; pi = pi + 1 }
+                // Check if any alt is wildcard → exhaustive
+                var or_has_wild: i64 = 0
+                var owj: i64 = 0
+                while owj < OR_ALT_COUNT { if OR_ALT_IS_WILD[owj as usize] == 1 { or_has_wild = 1 }; owj = owj + 1 }
+                if or_has_wild == 1 { if match_arms < 1000000 { match_arms = 1000000 } }
+                // Compile arm body
+                if TK[EP as usize] == 52 { EP = EP + 1 }
+                var or_arm_block: i64 = 0
+                if TK[EP as usize] == 8 { or_arm_block = 1; EP = EP + 1 }
+                LAST_STMT_HAS_VALUE = 0
+                if or_arm_block == 1 {
+                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                } else { compile_stmt() }
+                // Count each alternative as a separate arm for exhaustiveness
+                match_arms = match_arms + OR_ALT_COUNT
+                if LAST_STMT_HAS_VALUE == 1 {
+                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
+                    else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
+                } else { match_all_value = 0 }
+                em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
+                arm_count = arm_count + 1
+                if or_skip_patch >= 0 { patch32(or_skip_patch, CL) }
+            }
             // Variable binding pattern (with optional guard)
-            if is_var_bind == 1 {
+            if is_or_pattern == 0 && is_var_bind == 1 {
                 // Bind scrutinee to the variable name
                 emit_load_var(match_slot)
                 let vb_slot = var_add(bind_ns, bind_ne)
@@ -11855,7 +11996,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     patch32(vb_guard_skip, CL)
                 }
             }
-            if disc >= 0 {
+            if is_or_pattern == 0 && disc >= 0 {
                 if arm_is_tagged == 1 {
                     // Tagged union match: load tag from [scrutinee + 0]
                     emit_load_var(match_slot)
@@ -11940,7 +12081,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     patch32(skip_patch, CL)
                 }
             }
-            if is_wildcard == 1 {
+            if is_or_pattern == 0 && is_wildcard == 1 {
                 if match_arms < 1000000 { match_arms = 1000000 }
                 if TK[EP as usize] == 52 { EP = EP + 1 }
                 var arm_has_block3: i64 = 0
@@ -19691,8 +19832,125 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             if arm_tk == 4 { disc = TV[EP as usize]; EP = EP + 1 }
             if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 { EP = EP + 1 }
+            // Phase 1.4: Or-pattern detection (A | B | C => body) — ARM64
+            var is_or_pattern_a64: i64 = 0
+            if is_var_bind == 0 && TK[EP as usize] == 45 {
+                is_or_pattern_a64 = 1
+                OR_ALT_DISC[0 as usize] = disc
+                OR_ALT_TAGGED[0 as usize] = arm_is_tagged
+                OR_ALT_HAS_BIND[0 as usize] = has_binding
+                OR_ALT_BIND_NS[0 as usize] = bind_ns
+                OR_ALT_BIND_NE[0 as usize] = bind_ne
+                OR_ALT_IS_WILD[0 as usize] = is_wildcard
+                OR_ALT_COUNT = 1
+                while TK[EP as usize] == 45 {
+                    EP = EP + 1
+                    let alt_i = OR_ALT_COUNT
+                    var a_disc: i64 = -1
+                    var a_tagged: i64 = 0
+                    var a_has_bind: i64 = 0
+                    var a_bind_ns: i64 = 0
+                    var a_bind_ne: i64 = 0
+                    var a_is_wild: i64 = 0
+                    let a_tk = TK[EP as usize]
+                    if a_tk == 57 { EP = EP + 1; a_disc = 1; a_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; a_bind_ns = TS[EP as usize]; a_bind_ne = TE[EP as usize]; a_has_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                    if a_tk == 58 { EP = EP + 1; a_disc = 0; a_tagged = 1 }
+                    if a_tk == 59 { EP = EP + 1; a_disc = 0; a_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; a_bind_ns = TS[EP as usize]; a_bind_ne = TE[EP as usize]; a_has_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                    if a_tk == 60 { EP = EP + 1; a_disc = 1; a_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; a_bind_ns = TS[EP as usize]; a_bind_ne = TE[EP as usize]; a_has_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                    if a_tk == 3 {
+                        let ans = TS[EP as usize]; let ane = TE[EP as usize]
+                        if ane - ans == 1 && sb(ans) == 95 { a_is_wild = 1; EP = EP + 1 }
+                        else if TK[(EP + 1) as usize] == 51 { let aeh = gl_name_hash(ans, ane); EP = EP + 2; let avh = gl_name_hash(TS[EP as usize], TE[EP as usize]); EP = EP + 1; a_disc = en_variant_value(aeh, avh) }
+                        else { EP = EP + 1 }
+                    }
+                    if a_tk == 4 { a_disc = TV[EP as usize]; EP = EP + 1 }
+                    OR_ALT_DISC[alt_i as usize] = a_disc
+                    OR_ALT_TAGGED[alt_i as usize] = a_tagged
+                    OR_ALT_HAS_BIND[alt_i as usize] = a_has_bind
+                    OR_ALT_BIND_NS[alt_i as usize] = a_bind_ns
+                    OR_ALT_BIND_NE[alt_i as usize] = a_bind_ne
+                    OR_ALT_IS_WILD[alt_i as usize] = a_is_wild
+                    OR_ALT_COUNT = OR_ALT_COUNT + 1
+                }
+                // Emit check sequence: non-last alts → b.eq body; last alt → b.ne skip
+                var or_i: i64 = 0
+                while or_i < OR_ALT_COUNT - 1 {
+                    let oa_disc = OR_ALT_DISC[or_i as usize]
+                    let oa_tagged = OR_ALT_TAGGED[or_i as usize]
+                    let oa_is_wild = OR_ALT_IS_WILD[or_i as usize]
+                    OR_BODY_PV[or_i as usize] = 0
+                    if oa_is_wild == 1 {
+                        OR_BODY_PATCHES[or_i as usize] = CL; em32(0x14000000); OR_BODY_PV[or_i as usize] = 1
+                    } else if oa_tagged == 1 {
+                        emit_load_var_a64(match_slot); em32(0xF9400000); emit_push_a64()
+                        emit_imm64_a64(oa_disc); emit_pop_x1_a64()
+                        em32(0xEB00003F)
+                        OR_BODY_PATCHES[or_i as usize] = CL; em32(0x54000000); OR_BODY_PV[or_i as usize] = 1
+                    } else if oa_disc >= 0 {
+                        emit_load_var_a64(match_slot); emit_push_a64()
+                        emit_imm64_a64(oa_disc); emit_pop_x1_a64()
+                        em32(0xEB00003F)
+                        OR_BODY_PATCHES[or_i as usize] = CL; em32(0x54000000); OR_BODY_PV[or_i as usize] = 1
+                    }
+                    or_i = or_i + 1
+                }
+                // Last alternative: b.ne skip (if not wildcard)
+                let or_last = OR_ALT_COUNT - 1
+                let ol_disc = OR_ALT_DISC[or_last as usize]
+                let ol_tagged = OR_ALT_TAGGED[or_last as usize]
+                let ol_is_wild = OR_ALT_IS_WILD[or_last as usize]
+                var or_skip_patch_a64: i64 = -1
+                if ol_is_wild == 0 && ol_tagged == 1 {
+                    emit_load_var_a64(match_slot); em32(0xF9400000); emit_push_a64()
+                    emit_imm64_a64(ol_disc); emit_pop_x1_a64()
+                    em32(0xEB00003F)
+                    or_skip_patch_a64 = CL; em32(0x54000001)
+                } else if ol_is_wild == 0 && ol_disc >= 0 {
+                    emit_load_var_a64(match_slot); emit_push_a64()
+                    emit_imm64_a64(ol_disc); emit_pop_x1_a64()
+                    em32(0xEB00003F)
+                    or_skip_patch_a64 = CL; em32(0x54000001)
+                }
+                // Bind inner value from last alt if it has a tagged binding
+                let ol_has_bind = OR_ALT_HAS_BIND[or_last as usize]
+                let ol_bns = OR_ALT_BIND_NS[or_last as usize]
+                let ol_bne = OR_ALT_BIND_NE[or_last as usize]
+                if ol_has_bind == 1 && ol_tagged == 1 {
+                    emit_load_var_a64(match_slot)
+                    em32(0xF9400400)
+                    let obslot = var_add(ol_bns, ol_bne)
+                    if obslot >= 0 { emit_store_var_a64(obslot) }
+                }
+                // Patch all non-last body-jump offsets to current location
+                let or_body_start = CL
+                var pi: i64 = 0
+                while pi < OR_ALT_COUNT - 1 { if OR_BODY_PV[pi as usize] == 1 { patch_branch_a64(OR_BODY_PATCHES[pi as usize], or_body_start) }; pi = pi + 1 }
+                // Check exhaustiveness
+                var or_has_wild: i64 = 0
+                var owj: i64 = 0
+                while owj < OR_ALT_COUNT { if OR_ALT_IS_WILD[owj as usize] == 1 { or_has_wild = 1 }; owj = owj + 1 }
+                if or_has_wild == 1 { if match_arms < 1000000 { match_arms = 1000000 } }
+                // Compile arm body
+                if TK[EP as usize] == 52 { EP = EP + 1 }
+                var or_arm_block: i64 = 0
+                if TK[EP as usize] == 8 { or_arm_block = 1; EP = EP + 1 }
+                LAST_STMT_HAS_VALUE = 0
+                if or_arm_block == 1 {
+                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                } else { compile_stmt_a64() }
+                // Count each alternative as a separate arm for exhaustiveness
+                match_arms = match_arms + OR_ALT_COUNT
+                if LAST_STMT_HAS_VALUE == 1 {
+                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
+                    else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
+                } else { match_all_value = 0 }
+                MATCH_ENDS[arm_count as usize] = CL; em32(0x14000000)
+                arm_count = arm_count + 1
+                if or_skip_patch_a64 >= 0 { patch_branch_a64(or_skip_patch_a64, CL) }
+            }
             // Variable binding pattern (with optional guard) — ARM64
-            if is_var_bind == 1 {
+            if is_or_pattern_a64 == 0 && is_var_bind == 1 {
                 emit_load_var_a64(match_slot)
                 let vb_slot_a64 = var_add(bind_ns, bind_ne)
                 if vb_slot_a64 >= 0 {
@@ -19726,7 +19984,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     patch_branch_a64(vb_guard_skip_a64, CL)
                 }
             }
-            if disc >= 0 {
+            if is_or_pattern_a64 == 0 && disc >= 0 {
                 if arm_is_tagged == 1 {
                     emit_load_var_a64(match_slot); em32(0xF9400000); emit_push_a64()
                     emit_imm64_a64(disc); emit_pop_x1_a64()
@@ -19795,7 +20053,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     patch_branch_a64(skip_off, CL)
                 }
             }
-            if is_wildcard == 1 {
+            if is_or_pattern_a64 == 0 && is_wildcard == 1 {
                 if match_arms < 1000000 { match_arms = 1000000 }
                 if TK[EP as usize] == 52 { EP = EP + 1 }
                 var arm_has_block3: i64 = 0
