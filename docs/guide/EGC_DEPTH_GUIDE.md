@@ -277,3 +277,38 @@ sha256sum gen19.elf gen19b.elf
 The `knowledge_units: N sites` line now appears after every `knowledge_subtype:` line
 in the epistemic pass output, tracking how many `Knowledge<T>` bindings carry
 dimensional information.
+
+---
+
+## Self-Compile Numbers (Gen 20)
+
+Gen 20 verified the bootstrap fixed-point after integrating Door 2 (GPU kernel
+codegen), Door 3 (O-SSM + E-KAN Knowledge<T> examples), and the sedenion 168
+verification example. This is the first generation where the self-hosted compiler
+reports **100% PLATINUM** epistemic certainty when compiling itself (Gen0→Gen1
+shows 98% due to the older stage-0 artifact's analysis pass; Gen1→Gen2 and
+Gen2→Gen3 are both 100% PLATINUM).
+
+```
+source:    self-hosted/compiler/lean_single.sio
+lines:     20,565
+tokens:    152,303
+sha256:    4d3698974bc3d3fe1d19521e84c18eda4c181e9d366d965540b6ae11b593659f
+binary:    908,334 bytes
+knightian: 0 sites on self-compile (all expressions certain)
+platinum:  100% (Gen1→Gen2, Gen2→Gen3)
+warnings:  4 pre-existing (effect not declared, lines 772/778/779/780)
+fns:       476  code: 904,238 bytes  patches: 9,189
+```
+
+Verification (three-generation chain):
+
+```bash
+./artifacts/self-hosted/souc-self-hosted-x86_64 self-hosted/compiler/lean_single.sio /tmp/gen1.elf
+/tmp/gen1.elf self-hosted/compiler/lean_single.sio /tmp/gen2.elf
+/tmp/gen2.elf self-hosted/compiler/lean_single.sio /tmp/gen3.elf
+sha256sum /tmp/gen2.elf /tmp/gen3.elf
+# 4d3698974bc3d3fe1d19521e84c18eda4c181e9d366d965540b6ae11b593659f  /tmp/gen2.elf
+# 4d3698974bc3d3fe1d19521e84c18eda4c181e9d366d965540b6ae11b593659f  /tmp/gen3.elf
+# MATCH — fixed point confirmed
+```
