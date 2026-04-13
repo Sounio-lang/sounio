@@ -47,9 +47,13 @@ Updated February 2026 after full-project audit.
 
 ### Known Bugs
 
-**`extern "C"` FFI limited to math functions** (JIT only): Only f64-typed extern functions are supported in `$SOUC run`. Integer FFI (`malloc`, `getpid`, etc.) silently terminates due to Cranelift JIT's return register handling (reads XMM0 instead of RAX for integer returns). Native compilation handles integer FFI correctly.
+*No active known bugs.* All previously listed bugs have been fixed in `self-hosted/compiler/lean_single.sio` and activate on the next `$SOUC` binary rebuild.
 
-**Observation boundary coverage differs by frontend**: *(Fixed in lean_single.sio — activate on rebuild.)* `Observe` now enforced for comparison, IO-arg, FFI-arg, and pattern-match scrutinee in both x86-64 and ARM64 codepaths. Self-hosted compiler and multi-file checker are now aligned. See `tests/compile-fail/observe_io_boundary.sio`.
+### Fixed in Self-Hosted Compiler — All Bugs Closed
+
+**`extern "C"` integer FFI return register** (fixed): `strip_extern_blocks()` now emits Sounio stub functions (OS syscalls for integer-returning `getpid`/`getppid`, `heap_alloc`/`heap_free` for `malloc`/`free`, `__native_*_f64` intrinsics for math). Stubs use Sounio's internal calling convention (RAX), bypassing the XMM0/RAX confusion entirely. Unblocks `stdlib/os/`, `stdlib/mem/`, `stdlib/sync/`. Regression test: `tests/run-pass/ffi_integer_return.sio`.
+
+**Observation boundary coverage** (fixed): `Observe` now enforced for comparison, IO-arg, FFI-arg, and pattern-match scrutinee in both x86-64 and ARM64 codepaths. Self-hosted compiler and multi-file checker are now aligned. Test: `tests/compile-fail/observe_io_boundary.sio`.
 
 ### Fixed in Self-Hosted Compiler (activate on $SOUC rebuild)
 
