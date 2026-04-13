@@ -98,6 +98,16 @@ check_souc \
     "T3_gpu_kernel_basic" \
     "tests/run-pass/gpu_kernel_basic.sio"
 
+# T3b
+check_souc \
+    "T3b_gpu_vec_ops" \
+    "tests/run-pass/gpu_vec_ops.sio"
+
+# T3c
+check_souc \
+    "T3c_gpu_vec_scale" \
+    "tests/run-pass/gpu_vec_scale.sio"
+
 # T4
 check_souc \
     "T4_stdlib_test_gpu" \
