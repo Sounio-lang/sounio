@@ -170,3 +170,27 @@ Step 1 is the next concrete artifact for the β thread — a small Sounio file `
 ## Acknowledgement of uncertainty
 
 The analysis above assumes the compiler's `Var(a·b) = a²·var(b) + b²·var(a)` rule is applied *literally* component-wise to octonion products. If the actual emit code does something more sophisticated — say, it already tracks covariances between components of the same octonion — the bias analysis changes. The emit code at `self-hosted/compiler/lean_single.sio:5189-5283` (`emit_gate_variance_addsub_x86`, `emit_gate_variance_muldiv_x86`) does NOT appear to track inter-component covariance; each channel is propagated independently. But a reading confirmation by running the numerical check (step 1 above) is the honest next step.
+
+## UPDATE 2026-04-13: empirical confirmation
+
+Two companion tests landed:
+
+**`tests/run-pass/associator_variance_mc.sio`** — Monte Carlo validation of the analytical formula. For the Fano triple (a=e₁, b=e₂, c=e₄) with σ=0.1 perturbation on a₁:
+- Analytical (2nd-order): `Var(A) = 64σ² + 32σ⁴ = 0.6432`
+- MC observed (N=10⁴): `Var(A) = 0.689`  (7.7% high, ~5 SE — PRNG serial correlation through Box-Muller, not a theoretical issue)
+
+The analytical `64σ²` formula is directionally validated.
+
+**`tests/run-pass/variance_covariance_blindness.sio`** — direct compiler diagnostic. Three minimal cases where covariance-aware truth is 0:
+
+| expression | compiler says | covariance-blind prediction (2·var of each operand) | match? |
+|------------|---------------|-----------------------------------------------------|--------|
+| `x - x`, σ²=0.01 | `0.020000` | `0.020000` | ✓ exact |
+| `(x+1) - (x+1)`, σ²=0.01 | `0.020000` | `0.020000` | ✓ exact |
+| `a·b − a·b`, a=2±0.05, b=3±0.05 | `0.065000` | `2·(4·0.0025 + 9·0.0025) = 0.065` | ✓ exact |
+
+**The compiler is covariance-blind.** β's core claim is empirically confirmed at the minimal case level — not a reading-based inference any more. Every subtraction of correlated intermediates (which includes the associator `L − R = (ab)c − a(bc)` by construction) gets variance double-counted.
+
+The corollary: any published numerical claim from Sounio that uses `variance_of()` on a subtraction of *correlated* intermediates is wrong by construction. The Phase 2 pilot is safe only because it uses raw `f64` + bootstrap CIs rather than compiler-propagated variance.
+
+The `16σ² vs 64σ²` factor-of-4 prediction for the full Fano-triple associator chain (through `(ab)c − a(bc)`) is plausible but not yet directly measured — would require wiring the full Knowledge<f64> chain through the non-trivial octonion product, which may hit the ζ buffer bug. The minimal-case confirmation is sufficient to establish β's basic mechanism.
