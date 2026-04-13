@@ -42,7 +42,7 @@ Updated February 2026 after full-project audit.
 | Refinement Types + SMT | Beta | Static engine (no Z3) handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic |
 | LSP | Beta | Cross-file navigation now uses module resolver symbol index (Section 27 of lsp/goto_def.sio); cross-module hover and qualified completions wired via module resolver bridge |
 | REPL | Beta | 21 commands, JIT, epistemic badges; :type/:econf/:hist + multi-line input added |
-| Self-hosted Compiler | Beta | Phase 1.4 complete: or-pattern arms (A \| B \| C => body) in match; Gen 25 bootstrap; 21K lines .sio |
+| Self-hosted Compiler | Beta | Phase 1.5 complete: while let, for..in ranges (already active); struct pattern destructuring deferred to Phase 1.6; Gen 26 bootstrap; 21K lines .sio |
 | Ontology | Beta | 10K terms, subsumption, distance |
 | Package Manager | Beta | Local registry active (`~/.sounio/registry/`), `souc publish/search/list` commands; no public registry |
 
