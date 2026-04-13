@@ -170,6 +170,7 @@ var MAN_BUF_E: [i64; 128] = [0; 64]
 // Custom/Session=32, Observe=64, Audit=128, Hypothesis=256, Epistemic=512,
 // Visibility: bit 10 (1024) = is_pub, bit 11 (2048) = from_import
 // Gen 19: Deterministic=4096 (bit 12) — function provably cannot call IO
+// Gen 20: GPU=8192 (bit 13) — function dispatches work to GPU via CUDA/PTX
 var FN_EFFECTS: [i64; 16384] = [0; 16384]
 var FN_NAME_TOK: [i64; 16384] = [0; 16384]
 var FN_NEEDS_SESSION: [i64; 16384] = [0; 16384]
@@ -271,11 +272,14 @@ var EXPR_UNIT_DIM: i64 = 0
 // Fixed-point integer arithmetic only — no f64 (bootstrap determinism).
 // Type kinds: 0=unknown, 1=i64, 2=f64, 3=bool, 4=string, 5=void,
 //             10=fn, 11=array, 13=struct, 14=enum, 100=type_var
-var ETY_KIND: [i64; 16384] = [0; 16384]
-var ETY_CONF: [i64; 16384] = [0; 16384]
-var ETY_UNC:  [i64; 16384] = [0; 16384]
-var ETY_HASH: [i64; 16384] = [0; 16384]
+var ETY_KIND:     [i64; 16384] = [0; 16384]
+var ETY_CONF:     [i64; 16384] = [0; 16384]
+var ETY_UNC:      [i64; 16384] = [0; 16384]
+var ETY_HASH:     [i64; 16384] = [0; 16384]
+var ETY_UNIT_DIM: [i64; 16384] = [0; 16384]  // packed 7-field dim vector for kind=7 Knowledge<T>
 var ETY_COUNT: i64 = 0
+// Count of Knowledge<T> ETY entries with non-zero unit dimension (dimensional epistemic sites)
+var KNOWLEDGE_UNITS_COUNT: i64 = 0
 // Per-expression epistemic state (indexed by token position)
 var EXPR_ETY:  [i64; 524288] = [0; 524288]
 var EXPR_CONF: [i64; 524288] = [0; 524288]
@@ -1714,6 +1718,9 @@ fn src_match(p: i64, l: i64, kw: string) -> bool with Panic, Mut {
 
 fn token_is_kernel_marker(ti: i64) -> bool with Panic, Mut {
     if ti < 0 || ti >= TC { return false }
+    // Gen 20: Door 2 — kernel is now TK=79 (dedicated keyword token)
+    if TK[ti as usize] == 79 { return true }
+    // Fallback: also accept TK=3 with text "kernel" for older token streams
     if TK[ti as usize] != 3 { return false }
     return src_match(TS[ti as usize], TE[ti as usize] - TS[ti as usize], "kernel")
 }
@@ -3926,6 +3933,8 @@ fn lex_all() with IO, Mut, Panic, Div {
             if src_match(s, l, "trait") { k = 75 }
             if src_match(s, l, "impl") { k = 76 }
             if src_match(s, l, "unit") { k = 78 }
+            // Gen 20: Door 2 — `kernel` keyword (TK=79) for GPU kernel function declarations
+            if src_match(s, l, "kernel") { k = 79 }
             if src_match(s, l, "Some") { k = 57 }
             if src_match(s, l, "None") { k = 58 }
             if src_match(s, l, "Ok") { k = 59 }
@@ -11764,7 +11773,12 @@ fn ety_mk_unknown() -> i64 with Mut { return ety_alloc(0, 0, 1000) }
 fn ety_mk_struct() -> i64 with Mut { return ety_alloc(6, 1000, 0) }  // Gen 16 Track A: kind=6 for struct/enum
 // Gen 17 D3: Knowledge<T> as first-class ETY kind=7
 // ETY_UNC stores inner type kind (1=i64, 2=f64, etc.), ETY_CONF stores confidence bound.
-fn ety_mk_knowledge(inner_kind: i64, conf: i64) -> i64 with Mut { return ety_alloc(7, conf, inner_kind) }
+fn ety_mk_knowledge(inner_kind: i64, conf: i64, unit_dim: i64) -> i64 with Mut {
+    let id = ety_alloc(7, conf, inner_kind)
+    if id >= 0 && id < 16384 { ETY_UNIT_DIM[id as usize] = unit_dim }
+    if unit_dim != 0 { KNOWLEDGE_UNITS_COUNT = KNOWLEDGE_UNITS_COUNT + 1 }
+    return id
+}
 
 // Gen 17 D3: Epistemic subtyping for Knowledge<T>
 // Knowledge<T, c1> is a subtype of Knowledge<T, c2> when c1 >= c2
@@ -11849,6 +11863,8 @@ fn ety_from_tnk(tnk: i64) -> i64 {
 
 // GUM-correct unification (Grok's weighted average + DeepSeek's dispatch)
 var EUNIFY_CONF: i64 = 0
+var EUNIFY_UNIT_DIM: i64 = 0  // result unit dim for kind=7 Knowledge<T> binary ops
+var ETY_UNIFY_OP: i64 = 0     // operator token (17=+,18=-,19=*,20=/) set before ety_unify call
 fn ety_unify(ty_a: i64, conf_a: i64, ty_b: i64, conf_b: i64) -> i64 with Mut, Div {
     // Unknown adopts the other type
     if ety_kind(ty_a) == 0 { EUNIFY_CONF = 0; return ty_b }
@@ -11873,12 +11889,38 @@ fn ety_unify(ty_a: i64, conf_a: i64, ty_b: i64, conf_b: i64) -> i64 with Mut, Di
         EUNIFY_CONF = ety_clamp(num / den)
         return 2
     }
-    // Gen 17 D3: Knowledge<T> unification — use minimum confidence (most conservative)
-    if ety_kind(ty_a) == 7 && ety_kind(ty_b) == 7 {
-        var know_conf: i64 = ETY_CONF[ty_a as usize]
-        if ETY_CONF[ty_b as usize] < know_conf { know_conf = ETY_CONF[ty_b as usize] }
+    // Gen 17 D3 / Gen 19: Knowledge<T> unification — min confidence + dimensional propagation
+    if ety_kind(ty_a) == 7 || ety_kind(ty_b) == 7 {
+        // Confidence: min(left, right) — GUM conservative rule for epistemic types
+        var know_conf: i64 = conf_a
+        if conf_b < know_conf { know_conf = conf_b }
+        if ty_a >= 0 && ty_a < ETY_COUNT && ETY_CONF[ty_a as usize] < know_conf { know_conf = ETY_CONF[ty_a as usize] }
+        if ty_b >= 0 && ty_b < ETY_COUNT && ETY_CONF[ty_b as usize] < know_conf { know_conf = ETY_CONF[ty_b as usize] }
         EUNIFY_CONF = know_conf
-        return ty_a
+        // Dimensional propagation for arithmetic operators
+        var dim_a: i64 = 0
+        var dim_b: i64 = 0
+        if ty_a >= 0 && ty_a < ETY_COUNT { dim_a = ETY_UNIT_DIM[ty_a as usize] }
+        if ty_b >= 0 && ty_b < ETY_COUNT { dim_b = ETY_UNIT_DIM[ty_b as usize] }
+        var result_dim: i64 = 0
+        let op = ETY_UNIFY_OP
+        if op == 17 || op == 18 {
+            // +/-: require equal dims; result inherits left dim (mismatch → dimensionless)
+            result_dim = dim_a
+            if dim_a != 0 && dim_b != 0 && dim_a != dim_b { result_dim = 0 }
+        } else if op == 19 {
+            result_dim = dim_add(dim_a, dim_b)  // *: exponent addition
+        } else if op == 20 {
+            result_dim = dim_sub(dim_a, dim_b)  // /: exponent subtraction
+        } else {
+            result_dim = dim_a
+        }
+        EUNIFY_UNIT_DIM = result_dim
+        // Inner kind from whichever side is kind=7
+        var inner_k: i64 = 2
+        if ety_kind(ty_a) == 7 && ty_a >= 0 && ty_a < ETY_COUNT { inner_k = ETY_UNC[ty_a as usize] }
+        else if ety_kind(ty_b) == 7 && ty_b >= 0 && ty_b < ETY_COUNT { inner_k = ETY_UNC[ty_b as usize] }
+        return ety_mk_knowledge(inner_k, know_conf, result_dim)
     }
     // Type conflict: confidence crashes, return higher-confidence type
     EUNIFY_CONF = 0
@@ -11895,6 +11937,8 @@ fn ety_parse_effect_name(ns: i64, ne: i64) -> i64 with Panic, Mut {
     if src_match(ns, l, "Div") { return 8 }
     if src_match(ns, l, "Alloc") { return 16 }
     if src_match(ns, l, "Observe") { return 32 }
+    // Gen 20: GPU = bit 13 (8192) — above the & 1023 call-site mask, no propagation required
+    if src_match(ns, l, "GPU") { return 8192 }
     return 0
 }
 
@@ -11904,6 +11948,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     ESCOPE_COUNT = 0
     ESCOPE_LEVEL = 0
     GATE_THRESHOLD = 950
+    KNOWLEDGE_UNITS_COUNT = 0
     let ty_unknown = ety_mk_unknown()  // 0
     let ty_i64 = ety_mk_i64()          // 1
     let ty_f64 = ety_mk_f64()          // 2
@@ -12592,7 +12637,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     if src_match(g13_cfns, g13_cflen, "asserted") { d3_is_know = 1; d3_know_conf = 970 }
                     if src_match(g13_cfns, g13_cflen, "constant") { d3_is_know = 1; d3_know_conf = 1000 }
                     if d3_is_know == 1 {
-                        EXPR_ETY[p as usize] = ety_mk_knowledge(2, d3_know_conf)
+                        EXPR_ETY[p as usize] = ety_mk_knowledge(2, d3_know_conf, EXPR_UNIT_DIM)
                     }
                 } else {
                     // Unknown function → must be a built-in (not in FN_NAME)
@@ -12735,8 +12780,10 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
             if tk == 21 || tk == 22 || tk == 23 || tk == 24 || tk == 25 || tk == 26 {
                 EXPR_ETY[p as usize] = ty_bool
             } else {
-                // Arithmetic: unify operand types
+                // Arithmetic: unify operand types (set op for kind=7 dim propagation)
+                ETY_UNIFY_OP = tk
                 let unified = ety_unify(left_ty, left_conf, right_ty, right_conf)
+                ETY_UNIFY_OP = 0
                 op_conf = ety_conf_product(op_conf, EUNIFY_CONF)
                 EXPR_ETY[p as usize] = unified
             }
@@ -13292,6 +13339,10 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
     print(" sites, ")
     print_int(EPIST_KNOW_SUBTYPE_VIOLATIONS)
     print(" violations\n")
+    // Gen 19: Knowledge<T> + unit dim integration stat
+    print("knowledge_units: ")
+    print_int(KNOWLEDGE_UNITS_COUNT)
+    print(" sites with dimensional Knowledge<T>\n")
 
     // Gen 14 (Track C): confidence tier distribution
     // Emitted when total > 0 (always for non-trivial programs)
@@ -14543,6 +14594,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if src_match(ens, ene - ens, "Hypothesis") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 256; matched_builtin = 1 }
                         // Gen 19: Deterministic = bit 12 (4096) — function cannot call IO
                         if src_match(ens, ene - ens, "Deterministic") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 4096; matched_builtin = 1 }
+                        // Gen 20: GPU = bit 13 (8192) — function uses GPU dispatch (excluded from & 1023 call-site check)
+                        if src_match(ens, ene - ens, "GPU") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 8192; matched_builtin = 1 }
                         if src_match(ens, ene - ens, "Epistemic") {
                             FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 512
                             matched_builtin = 1
