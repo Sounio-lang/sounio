@@ -8596,6 +8596,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(SCAN_TY) && SCAN_TY != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(call_tok, "cannot pass Unobserved<T> to non-Unobserved parameter")
                 }
+                // Observation boundary: passing Unobserved<T> to an IO or FFI-imported function
+                // requires the caller to have `with Observe` — IO collapses epistemic uncertainty
+                if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                    if fi >= 0 && ((FN_EFFECTS[fi as usize] & 1) != 0 || (FN_EFFECTS[fi as usize] & 2048) != 0) {
+                        tc_observe_boundary(call_tok, "cannot pass Unobserved<T> to IO or FFI function — requires `with Observe`")
+                    }
+                }
                 // Mark struct variable as moved when passed by value to a function
                 // Only linear/affine structs are moved; non-linear structs are implicitly copied
                 if EXPR_TY == 6 && LAST_EXPR_VAR_IDX >= 0 {
@@ -9183,10 +9190,34 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if mfi >= 0 {
                     EP = EP + 1  // skip method name
                     EP = EP + 1  // skip (
-                    // Check if method expects a borrowed receiver
+                    // Look up declared receiver type from the method's actual signature.
+                    // This replaces heuristic string matching: &T → shared borrow,
+                    // &!T → exclusive borrow, T (by value) → move.
                     scan_fnsig_param_type(FN_SIG[mfi as usize], 0)
                     let method_expects_borrow = (SCAN_TY == 10)
-                        // If receiver is a struct value and method expects borrow, auto-borrow
+                    let method_expects_excl = method_expects_borrow && (ref_hash_mut(SCAN_TY_HASH) != 0)
+                    // Enforce borrow conflict rules for &!Self receiver on a known variable.
+                    // This mirrors the explicit `&!var` borrow path at the borrow-expression site.
+                    if method_expects_excl && LAST_EXPR_VAR_IDX >= 0 {
+                        let recv_vi = LAST_EXPR_VAR_IDX
+                        let recv_is_ref = VAR_TY[recv_vi as usize] == 10
+                        if recv_is_ref == false {
+                            if VAR_BORROW_COUNT[recv_vi as usize] > 0 {
+                                tc_linear_violation(method_tok, "cannot call &!self method: receiver is already borrowed as shared")
+                            }
+                            if VAR_BORROW_EXCL[recv_vi as usize] > 0 {
+                                tc_linear_violation(method_tok, "cannot call &!self method: exclusive borrow already active on receiver")
+                            }
+                            // Take an ephemeral exclusive borrow, released after the call.
+                            VAR_BORROW_EXCL[recv_vi as usize] = VAR_BORROW_EXCL[recv_vi as usize] + 1
+                            if IN_CALL_ARGS != 0 && CALL_ARG_BORROW_N < 32 {
+                                CALL_ARG_BORROW_VI[CALL_ARG_BORROW_N as usize] = recv_vi
+                                CALL_ARG_BORROW_EXCL[CALL_ARG_BORROW_N as usize] = 1
+                                CALL_ARG_BORROW_N = CALL_ARG_BORROW_N + 1
+                            }
+                        }
+                    }
+                    // If receiver is a struct value and method expects borrow, auto-borrow
                     if method_expects_borrow && EXPR_TY == 6 {
                         // rax already holds the pointer to the struct data:
                         //   - from a struct variable: emit_load_var(ptr_slot) loads the stored LEA address
@@ -11148,11 +11179,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let lslot = var_find(ns, ne)
         if lslot >= 0 {
             let lvi = var_find_idx(ns, ne)
-            if lvi >= 0 && VAR_TY[lvi as usize] == 11 {
+            // Accept both raw pointers (ty==11) and exclusive references (ty==10, &!T)
+            let lty = VAR_TY[lvi as usize]
+            if lvi >= 0 && (lty == 11 || lty == 10) {
                 let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
                 let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
                 if inner_ty != 6 {
-                    tc_error(field_tok, "field access through raw pointer requires struct pointee")
+                    tc_error(field_tok, "field access through pointer/ref requires struct pointee")
                 } else {
                     let si = st_find(inner_hash)
                     if si < 0 {
@@ -11166,7 +11199,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         } else if ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
                             tc_error(EP - 1, "assignment type mismatch")
                         } else if fty == 8 || type_is_struct_like(fty, fhash) {
-                            tc_error(field_tok, "raw pointer field store supports scalar fields only")
+                            tc_error(field_tok, "deref field store supports scalar fields only")
                         } else {
                             em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
                             emit_load_var(lslot)
@@ -11176,7 +11209,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     }
                 }
             } else {
-                tc_error(field_tok, "field access through raw pointer requires raw pointer binding")
+                tc_error(field_tok, "field access through deref requires ref or pointer binding")
             }
         } else {
             tc_undefined_var(name_tok)
@@ -11265,6 +11298,187 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     if k == 13 {
         let if_tok = EP
         EP = EP + 1
+
+        // ── Phase 1.3: if let <pattern> = <expr> { ... } ──
+        // Syntax: if let <pat> = <scrutinee> { <then> } [else { <alt> }]
+        // Supported patterns: Some(v), None, Ok(v), Err(e), Enum::Variant, Enum::Variant(v), _
+        if TK[EP as usize] == 11 {
+            EP = EP + 1  // skip 'let'
+            // Determine pattern kind and binding info
+            let pat_tk = TK[EP as usize]
+            var il_disc: i64 = -1          // discriminant (for tagged unions)
+            var il_is_tagged: i64 = 0      // 1 if pattern is Some/Ok/Err
+            var il_is_wildcard: i64 = 0    // 1 for _
+            var il_is_enum_variant: i64 = 0 // 1 for Enum::Variant
+            var il_bind_ns: i64 = 0
+            var il_bind_ne: i64 = 0
+            var il_has_binding: i64 = 0
+            // Some(v)
+            if pat_tk == 57 {
+                EP = EP + 1; il_disc = 1; il_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    il_bind_ns = TS[EP as usize]; il_bind_ne = TE[EP as usize]
+                    il_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // None
+            if pat_tk == 58 { EP = EP + 1; il_disc = 0; il_is_tagged = 1 }
+            // Ok(v)
+            if pat_tk == 59 {
+                EP = EP + 1; il_disc = 0; il_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    il_bind_ns = TS[EP as usize]; il_bind_ne = TE[EP as usize]
+                    il_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // Err(e)
+            if pat_tk == 60 {
+                EP = EP + 1; il_disc = 1; il_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    il_bind_ns = TS[EP as usize]; il_bind_ne = TE[EP as usize]
+                    il_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            // Identifier: wildcard _ or Enum::Variant [( v )]
+            if pat_tk == 3 {
+                let pns = TS[EP as usize]
+                let pne = TE[EP as usize]
+                // wildcard _
+                if pne - pns == 1 && sb(pns) == 95 {
+                    il_is_wildcard = 1; EP = EP + 1
+                } else if TK[(EP + 1) as usize] == 51 {
+                    // Enum::Variant form
+                    let eh = gl_name_hash(pns, pne)
+                    EP = EP + 2
+                    let vh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                    EP = EP + 1
+                    il_disc = en_variant_value(eh, vh)
+                    il_is_enum_variant = 1
+                    // optional ( binding )
+                    if TK[EP as usize] == 6 {
+                        EP = EP + 1
+                        il_bind_ns = TS[EP as usize]; il_bind_ne = TE[EP as usize]
+                        il_has_binding = 1; EP = EP + 1
+                        if TK[EP as usize] == 7 { EP = EP + 1 }
+                    }
+                } else {
+                    // bare ident pattern: treat as wildcard (always matches, binds name)
+                    il_is_wildcard = 1; EP = EP + 1
+                }
+            }
+            // Skip '='
+            if TK[EP as usize] == 16 { EP = EP + 1 }
+            // Compile scrutinee
+            compile_or()
+            // Record scrutinee type for binding propagation
+            MATCH_SCRUT_TY   = EXPR_TY
+            MATCH_SCRUT_HASH = EXPR_TY_HASH
+            // Allocate slot for scrutinee
+            let il_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(il_slot)
+            // Emit branch: for wildcard always-true (no comparison needed)
+            var il_je_off: i64 = 0
+            if il_is_wildcard == 1 {
+                // Always matches — no comparison, no jump
+                il_je_off = 0
+            } else if il_is_tagged == 1 || il_is_enum_variant == 1 {
+                // Load tag word and compare to discriminant
+                emit_load_var(il_slot)
+                em(0x48); em(0x8b); em(0x00)   // mov rax, [rax]   — load tag
+                em(0x50)                        // push rax
+                em(0x48); em(0xb8); em64(il_disc) // mov rax, disc
+                em(0x59)                        // pop rcx
+                em(0x48); em(0x39); em(0xc1)   // cmp rcx, rax
+                em(0x0f); em(0x85)              // jne fail
+                il_je_off = CL; em32(0)
+                // Bind inner value if pattern specifies one
+                if il_has_binding == 1 {
+                    emit_load_var(il_slot)
+                    em(0x48); em(0x8b); em(0x40); em(0x08) // mov rax, [rax+8]
+                    let bslot = var_add(il_bind_ns, il_bind_ne)
+                    if bslot >= 0 {
+                        emit_store_var(bslot)
+                        if bslot >= 0 && VAR_COUNT > 0 {
+                            let bvi = VAR_COUNT - 1
+                            if MATCH_SCRUT_TY == 11 {
+                                VAR_TY[bvi as usize] = ptr_hash_inner_ty(MATCH_SCRUT_HASH)
+                                VAR_TY_HASH[bvi as usize] = ptr_hash_inner_hash(MATCH_SCRUT_HASH)
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Numeric/bool: compare scrutinee to disc if disc is valid
+                if il_disc >= 0 {
+                    emit_load_var(il_slot)
+                    em(0x50)
+                    em(0x48); em(0xb8); em64(il_disc)
+                    em(0x59)
+                    em(0x48); em(0x39); em(0xc1)
+                    em(0x0f); em(0x85)
+                    il_je_off = CL; em32(0)
+                }
+            }
+            // Snapshot VAR_USED + VAR_MOVED for linear tracking
+            var il_snap: i64 = 0
+            while il_snap < VAR_COUNT {
+                CL_SAVE_USED[il_snap as usize] = VAR_USED[il_snap as usize]
+                CL_SAVE_MUT[il_snap as usize] = VAR_MOVED[il_snap as usize]
+                il_snap = il_snap + 1
+            }
+            // Compile then-body
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            if TK[EP as usize] == 8 { EP = EP + 1 }
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            let il_then_has_value = LAST_STMT_HAS_VALUE
+            let il_then_ty = LAST_STMT_TY
+            let il_then_hash = LAST_STMT_TY_HASH
+            if TK[EP as usize] == 9 { EP = EP + 1 }
+            // Handle else
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            if TK[EP as usize] == 14 {
+                EP = EP + 1
+                em(0xe9)
+                let il_jmp_off = CL; em32(0)
+                if il_je_off > 0 { patch32(il_je_off, CL) }
+                var il_lthen: i64 = 0
+                while il_lthen < VAR_COUNT {
+                    let tused = VAR_USED[il_lthen as usize]; let tmov = VAR_MOVED[il_lthen as usize]
+                    VAR_USED[il_lthen as usize] = CL_SAVE_USED[il_lthen as usize]
+                    VAR_MOVED[il_lthen as usize] = CL_SAVE_MUT[il_lthen as usize]
+                    CL_SAVE_USED[il_lthen as usize] = tused; CL_SAVE_MUT[il_lthen as usize] = tmov
+                    il_lthen = il_lthen + 1
+                }
+                if TK[EP as usize] == 13 { compile_stmt() }
+                else {
+                    LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+                    if TK[EP as usize] == 8 { EP = EP + 1 }
+                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                }
+                let il_else_has_value = LAST_STMT_HAS_VALUE
+                let il_else_ty = LAST_STMT_TY
+                let il_else_hash = LAST_STMT_TY_HASH
+                patch32(il_jmp_off, CL)
+                if il_then_has_value == 1 && il_else_has_value == 1 && il_then_ty != 5 && il_else_ty != 5 {
+                    LAST_STMT_HAS_VALUE = 1; LAST_STMT_TY = il_then_ty; LAST_STMT_TY_HASH = il_then_hash
+                    EXPR_TY = il_then_ty; EXPR_TY_HASH = il_then_hash
+                }
+            } else {
+                if il_je_off > 0 { patch32(il_je_off, CL) }
+                LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            }
+            return
+        }
+        // ── end if let ──
+
         compile_or()
         if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(EP - 1, "if condition must be bool") }
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
@@ -11505,6 +11719,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         compile_or()  // scrutinee in rax
         MATCH_SCRUT_TY = EXPR_TY
         MATCH_SCRUT_HASH = EXPR_TY_HASH
+        // Observation boundary: pattern-matching on an Unobserved<T> collapses uncertainty
+        if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+            tc_observe_boundary(EP - 1, "cannot pattern-match on Unobserved<T> — requires `with Observe`")
+        }
         // Store scrutinee in a local var (not stack — return inside arm would break stack)
         let match_slot = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + 1
@@ -13455,6 +13673,51 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
         print_int(d6count)
         print(" PLATINUM goals\n")
     }
+
+    // EGC certificate stats: platinum_sites, knightian_sites, min_conf, mean_conf
+    var egc_platinum: i64 = 0
+    var egc_knightian: i64 = 0
+    var egc_min_conf: i64 = 1000
+    var egc_conf_sum: i64 = 0
+    var egc_expr_count: i64 = 0
+    p = 0
+    while p < TC {
+        let ctk2 = TK[p as usize]
+        var is_expr2: i64 = 0
+        if ctk2 == 3 || ctk2 == 4 || ctk2 == 5 || ctk2 == 53 { is_expr2 = 1 }
+        if ctk2 == 35 || ctk2 == 36 { is_expr2 = 1 }
+        if ctk2 >= 17 && ctk2 <= 26 { is_expr2 = 1 }
+        if ctk2 == 37 { is_expr2 = 1 }
+        if ctk2 == 57 || ctk2 == 58 || ctk2 == 59 || ctk2 == 60 { is_expr2 = 1 }
+        if is_expr2 == 1 {
+            let cv = EXPR_CONF[p as usize]
+            if cv == 1000 { egc_platinum = egc_platinum + 1 }
+            if cv == 0 { egc_knightian = egc_knightian + 1 }
+            if cv < egc_min_conf { egc_min_conf = cv }
+            egc_conf_sum = egc_conf_sum + cv
+            egc_expr_count = egc_expr_count + 1
+        }
+        p = p + 1
+    }
+    var egc_mean_conf: i64 = 0
+    if egc_expr_count > 0 { egc_mean_conf = egc_conf_sum / egc_expr_count }
+    if egc_expr_count == 0 { egc_min_conf = 0 }
+    // Print structured econf line for certificate generation
+    print("econf: total=")
+    print_int(egc_expr_count)
+    print(" platinum=")
+    print_int(egc_platinum)
+    print(" gate_pass=")
+    print_int(EPIST_HIGH_CONF)
+    print(" knightian=")
+    print_int(egc_knightian)
+    print(" min=")
+    print_int(egc_min_conf)
+    print(" mean=")
+    print_int(egc_mean_conf)
+    print(" gate=")
+    print_int(GATE_THRESHOLD)
+    print("\n")
 }
 
 // ─── Top-level compiler ───
@@ -14799,6 +15062,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         } else if SCAN_TY == 8 {
                             VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                             VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                        } else if SCAN_TY == 10 && ref_hash_inner_ty(SCAN_TY_HASH) == 8 {
+                            // &![T; N] fixed-size array ref param: record element size from
+                            // inner array hash so arr[i] = v and (*arr)[i] = v use the correct
+                            // stride (1 for i8, 8 for i64). Without this, VAR_ESIZ stays at 8
+                            // (the var_add default) and i8-element arrays are accessed with
+                            // stride-8, corrupting memory.
+                            // Fixes: KNOWN_LIMITATIONS.md — "&![T;N] mutable ref mutation"
+                            VAR_ESIZ[(VAR_COUNT - 1) as usize] = arr_hash_esiz(ref_hash_inner_hash(SCAN_TY_HASH))
                         }
                         if is_kernel_fn != 0 && kernel_extent_slot == 0 && SCAN_TY == 1 {
                             kernel_extent_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]
@@ -17754,6 +18025,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         if ont_r == 0 { tc_linear_violation(call_tok, "error[E001]: Type mismatch in call argument — declared type does not match") }
                     }
                 }
+                // Observation boundary: passing Unobserved<T> to an IO or FFI-imported function
+                // requires the caller to have `with Observe` — IO collapses epistemic uncertainty
+                if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                    if fi >= 0 && ((FN_EFFECTS[fi as usize] & 1) != 0 || (FN_EFFECTS[fi as usize] & 2048) != 0) {
+                        tc_observe_boundary(call_tok, "cannot pass Unobserved<T> to IO or FFI function — requires `with Observe`")
+                    }
+                }
                 if (fi >= 0 || (call_sig > 0 && call_is_closure == 0)) && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                     emit_push_expr_as_slice_arg_a64(call_tok)
                     abi_argc = abi_argc + 2
@@ -18964,11 +19242,13 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         let lslot = var_find(ns, ne)
         if lslot >= 0 {
             let lvi = var_find_idx(ns, ne)
-            if lvi >= 0 && VAR_TY[lvi as usize] == 11 {
+            // Accept both raw pointers (ty==11) and exclusive references (ty==10, &!T)
+            let lty = VAR_TY[lvi as usize]
+            if lvi >= 0 && (lty == 11 || lty == 10) {
                 let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
                 let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
                 if inner_ty != 6 {
-                    tc_error(field_tok, "field access through raw pointer requires struct pointee")
+                    tc_error(field_tok, "field access through pointer/ref requires struct pointee")
                 } else {
                     let si = st_find(inner_hash)
                     if si < 0 {
@@ -18982,7 +19262,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                         } else if ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
                             tc_error(EP - 1, "assignment type mismatch")
                         } else if fty == 8 || type_is_struct_like(fty, fhash) {
-                            tc_error(field_tok, "raw pointer field store supports scalar fields only")
+                            tc_error(field_tok, "deref field store supports scalar fields only")
                         } else {
                             em32(0xAA0003EA)  // mov x10, x0 (value)
                             emit_load_var_a64(lslot)
@@ -18995,7 +19275,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     }
                 }
             } else {
-                tc_error(field_tok, "field access through raw pointer requires raw pointer binding")
+                tc_error(field_tok, "field access through deref requires ref or pointer binding")
             }
         } else {
             tc_undefined_var(name_tok)
@@ -19049,9 +19329,140 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         em32(0x14000000)
         return
     }
-    // if/else
+    // if/else  (with Phase 1.3 if-let support)
     if k == 13 {
         EP = EP + 1
+
+        // ── Phase 1.3: if let <pattern> = <expr> { ... } (AArch64) ──
+        if TK[EP as usize] == 11 {
+            EP = EP + 1
+            let pat_tk = TK[EP as usize]
+            var il_disc: i64 = -1
+            var il_is_tagged: i64 = 0
+            var il_is_wildcard: i64 = 0
+            var il_is_enum_variant: i64 = 0
+            var il_bind_ns: i64 = 0
+            var il_bind_ne: i64 = 0
+            var il_has_binding: i64 = 0
+            if pat_tk == 57 {
+                EP = EP + 1; il_disc = 1; il_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    il_bind_ns = TS[EP as usize]; il_bind_ne = TE[EP as usize]
+                    il_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            if pat_tk == 58 { EP = EP + 1; il_disc = 0; il_is_tagged = 1 }
+            if pat_tk == 59 {
+                EP = EP + 1; il_disc = 0; il_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    il_bind_ns = TS[EP as usize]; il_bind_ne = TE[EP as usize]
+                    il_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            if pat_tk == 60 {
+                EP = EP + 1; il_disc = 1; il_is_tagged = 1
+                if TK[EP as usize] == 6 {
+                    EP = EP + 1
+                    il_bind_ns = TS[EP as usize]; il_bind_ne = TE[EP as usize]
+                    il_has_binding = 1; EP = EP + 1
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+            }
+            if pat_tk == 3 {
+                let pns = TS[EP as usize]; let pne = TE[EP as usize]
+                if pne - pns == 1 && sb(pns) == 95 {
+                    il_is_wildcard = 1; EP = EP + 1
+                } else if TK[(EP + 1) as usize] == 51 {
+                    let eh = gl_name_hash(pns, pne)
+                    EP = EP + 2
+                    let vh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                    EP = EP + 1
+                    il_disc = en_variant_value(eh, vh)
+                    il_is_enum_variant = 1
+                    if TK[EP as usize] == 6 {
+                        EP = EP + 1
+                        il_bind_ns = TS[EP as usize]; il_bind_ne = TE[EP as usize]
+                        il_has_binding = 1; EP = EP + 1
+                        if TK[EP as usize] == 7 { EP = EP + 1 }
+                    }
+                } else { il_is_wildcard = 1; EP = EP + 1 }
+            }
+            if TK[EP as usize] == 16 { EP = EP + 1 }
+            compile_or_a64()
+            MATCH_SCRUT_TY   = EXPR_TY
+            MATCH_SCRUT_HASH = EXPR_TY_HASH
+            let il_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var_a64(il_slot)
+            var il_cbz_off: i64 = 0
+            if il_is_wildcard == 0 {
+                if il_is_tagged == 1 || il_is_enum_variant == 1 {
+                    // A64: ldr x0, [x0]; cmp x0, disc; b.ne fail
+                    emit_load_var_a64(il_slot)
+                    em32(0xF9400000)   // ldr x0, [x0]  (load tag at offset 0)
+                    // mov x1, disc
+                    em32(0xD2800001 | ((il_disc & 0xFFFF) << 5))
+                    em32(0xEB010000)   // subs x0, x0, x1 (cmp)
+                    il_cbz_off = CL
+                    em32(0x54000001)   // b.ne placeholder
+                    if il_has_binding == 1 {
+                        emit_load_var_a64(il_slot)
+                        em32(0xF9400400)   // ldr x0, [x0, #8]
+                        let bslot = var_add(il_bind_ns, il_bind_ne)
+                        if bslot >= 0 { emit_store_var_a64(bslot) }
+                    }
+                }
+            }
+            var il_snap: i64 = 0
+            while il_snap < VAR_COUNT {
+                CL_SAVE_USED[il_snap as usize] = VAR_USED[il_snap as usize]
+                CL_SAVE_MUT[il_snap as usize] = VAR_MOVED[il_snap as usize]
+                il_snap = il_snap + 1
+            }
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            if TK[EP as usize] == 8 { EP = EP + 1 }
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+            let il_then_has_value = LAST_STMT_HAS_VALUE
+            let il_then_ty = LAST_STMT_TY; let il_then_hash = LAST_STMT_TY_HASH
+            if TK[EP as usize] == 9 { EP = EP + 1 }
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            if TK[EP as usize] == 14 {
+                EP = EP + 1
+                let il_b_end_off = CL; em32(0x14000000)
+                if il_cbz_off > 0 { patch_branch_a64(il_cbz_off, CL) }
+                var il_lt: i64 = 0
+                while il_lt < VAR_COUNT {
+                    let tu = VAR_USED[il_lt as usize]; let tm = VAR_MOVED[il_lt as usize]
+                    VAR_USED[il_lt as usize] = CL_SAVE_USED[il_lt as usize]
+                    VAR_MOVED[il_lt as usize] = CL_SAVE_MUT[il_lt as usize]
+                    CL_SAVE_USED[il_lt as usize] = tu; CL_SAVE_MUT[il_lt as usize] = tm
+                    il_lt = il_lt + 1
+                }
+                if TK[EP as usize] == 13 { compile_stmt_a64() }
+                else {
+                    LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+                    if TK[EP as usize] == 8 { EP = EP + 1 }
+                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                }
+                let il_else_has_value = LAST_STMT_HAS_VALUE
+                let il_else_ty = LAST_STMT_TY; let il_else_hash = LAST_STMT_TY_HASH
+                patch_branch_a64(il_b_end_off, CL)
+                if il_then_has_value == 1 && il_else_has_value == 1 && il_then_ty != 5 && il_else_ty != 5 {
+                    LAST_STMT_HAS_VALUE = 1; LAST_STMT_TY = il_then_ty; LAST_STMT_TY_HASH = il_then_hash
+                    EXPR_TY = il_then_ty; EXPR_TY_HASH = il_then_hash
+                }
+            } else {
+                if il_cbz_off > 0 { patch_branch_a64(il_cbz_off, CL) }
+                LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            }
+            return
+        }
+        // ── end if let (AArch64) ──
+
         compile_or_a64()
         if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(EP - 1, "if condition must be bool") }
         let cbz_off = CL
@@ -19200,6 +19611,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         compile_or_a64()
         MATCH_SCRUT_TY = EXPR_TY
         MATCH_SCRUT_HASH = EXPR_TY_HASH
+        // Observation boundary: pattern-matching on an Unobserved<T> collapses uncertainty
+        if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+            tc_observe_boundary(EP - 1, "cannot pattern-match on Unobserved<T> — requires `with Observe`")
+        }
         let match_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
         emit_store_var_a64(match_slot)
         if TK[EP as usize] == 8 { EP = EP + 1 }
@@ -20335,21 +20750,300 @@ fn resolve_imports() with IO, Mut, Panic, Div {
 // Track extern function count for diagnostics
 var EXTERN_FN_COUNT: i64 = 0
 
-fn strip_extern_blocks() with IO, Mut, Panic {
-    // Phase 1: Count extern fn declarations for diagnostics
+// ─── Extern "C" stub registry ───
+// Populated by strip_extern_blocks; stubs are appended to SRC afterward.
+// Each entry stores: name bytes, arity, return type code (1=i64, 2=f64, 4=bool, 5=unit).
+// Names are copied into EXTERN_STUB_NAME_BUF to survive SRC compaction.
+var EXTERN_STUB_NAME_BUF: [i8; 4096] = [0; 4096]   // packed name bytes
+var EXTERN_STUB_NAME_OFF: [i64; 128] = [0; 128]     // byte offset of each name in buf
+var EXTERN_STUB_NAME_LEN: [i64; 128] = [0; 128]     // length of each name
+var EXTERN_STUB_ARITY:    [i64; 128] = [0; 128]     // param count
+var EXTERN_STUB_RET:      [i64; 128] = [0; 128]     // 1=i64/int, 2=f64, 4=bool, 5=unit
+var EXTERN_STUB_COUNT:    i64 = 0
+var EXTERN_STUB_BUF_OFF:  i64 = 0                   // next free offset in name buf
+
+// Parse a type keyword starting at position p in SRC; return type code.
+// Returns 1 for integer types, 2 for f64/f32, 4 for bool, 5 for unit/void, 0 for unknown.
+fn extern_parse_ret_ty(p: i64) -> i64 with Panic, Mut, Div {
+    // Skip whitespace
+    var i: i64 = p
+    while i < SRC_LEN && (sb(i) == 32 || sb(i) == 9) { i = i + 1 }
+    // i64, i32, i16, i8, u64, u32, u16, u8, usize, isize
+    if i + 2 < SRC_LEN && sb(i) == 105 && sb(i + 1) == 54 && sb(i + 2) == 52 { return 1 }  // i64
+    if i + 2 < SRC_LEN && sb(i) == 105 && sb(i + 1) == 51 && sb(i + 2) == 50 { return 1 }  // i32
+    if i + 2 < SRC_LEN && sb(i) == 105 && sb(i + 1) == 49 && sb(i + 2) == 54 { return 1 }  // i16
+    if i + 1 < SRC_LEN && sb(i) == 105 && sb(i + 1) == 56 { return 1 }                      // i8
+    if i + 2 < SRC_LEN && sb(i) == 117 && sb(i + 1) == 54 && sb(i + 2) == 52 { return 1 }  // u64
+    if i + 2 < SRC_LEN && sb(i) == 117 && sb(i + 1) == 51 && sb(i + 2) == 50 { return 1 }  // u32
+    if i + 4 < SRC_LEN && sb(i) == 117 && sb(i + 1) == 115 && sb(i + 2) == 105 && sb(i + 3) == 122 && sb(i + 4) == 101 { return 1 }  // usize
+    if i + 2 < SRC_LEN && sb(i) == 102 && sb(i + 1) == 54 && sb(i + 2) == 52 { return 2 }  // f64
+    if i + 2 < SRC_LEN && sb(i) == 102 && sb(i + 1) == 51 && sb(i + 2) == 50 { return 2 }  // f32
+    if i + 3 < SRC_LEN && sb(i) == 98 && sb(i + 1) == 111 && sb(i + 2) == 111 && sb(i + 3) == 108 { return 4 }  // bool
+    if i + 3 < SRC_LEN && sb(i) == 118 && sb(i + 1) == 111 && sb(i + 2) == 105 && sb(i + 3) == 100 { return 5 }  // void
+    return 1  // default: treat as integer
+}
+
+// Match extern stub name against a literal string (byte-by-byte comparison).
+fn extern_stub_name_eq(idx: i64, lit: string) -> i64 with Panic, Mut {
+    let noff = EXTERN_STUB_NAME_OFF[idx as usize]
+    let nlen = EXTERN_STUB_NAME_LEN[idx as usize]
+    let llen = str_len(lit)
+    if nlen != llen { return 0 }
+    var k: i64 = 0
+    while k < nlen {
+        let nb = EXTERN_STUB_NAME_BUF[(noff + k) as usize] as i64 & 0xFF
+        let lb = str_char_at(lit, k)
+        if nb != lb { return 0 }
+        k = k + 1
+    }
+    return 1
+}
+
+// Append extern stub name to SRC (for generating stub function text).
+fn append_extern_stub_name(idx: i64) with Mut, Panic {
+    let noff = EXTERN_STUB_NAME_OFF[idx as usize]
+    let nlen = EXTERN_STUB_NAME_LEN[idx as usize]
+    var k: i64 = 0
+    while k < nlen && SRC_LEN < 8388607 {
+        SRC[SRC_LEN as usize] = EXTERN_STUB_NAME_BUF[(noff + k) as usize]
+        SRC_LEN = SRC_LEN + 1
+        k = k + 1
+    }
+}
+
+// Generate Sounio stub source code for all registered extern "C" functions.
+// Called from append_native_prelude after strip_extern_blocks.
+// Each stub wraps the extern fn using the correct mechanism:
+//   - Known zero-arg integer syscalls: emit via syscall6(NR, 0,0,0,0,0,0)
+//   - Known math f64 functions: delegate to __native_*_f64
+//   - Others: emit a panic stub
+// The XMM0-vs-RAX fix is implicit here: our stubs return in RAX (Sounio convention).
+// For integer syscalls, syscall6 returns in RAX directly (correct).
+// For f64 math, __native_*_f64 returns f64 bits in RAX (correct).
+// Any future real C-ABI call would need: if ret==f64 then movq rax,xmm0 after call.
+fn append_extern_c_stubs() with Mut, Panic, Div {
+    var si: i64 = 0
+    while si < EXTERN_STUB_COUNT {
+        let ret = EXTERN_STUB_RET[si as usize]
+        let arity = EXTERN_STUB_ARITY[si as usize]
+        append_src_lit("\n")
+        // ── Zero-argument integer-returning syscalls ──
+        // getpid → Linux x86-64 syscall 39
+        if extern_stub_name_eq(si, "getpid") == 1 {
+            append_src_lit("fn getpid() -> i64 with IO { syscall6(39, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // getppid → syscall 110
+        if extern_stub_name_eq(si, "getppid") == 1 {
+            append_src_lit("fn getppid() -> i64 with IO { syscall6(110, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // gettid → syscall 186
+        if extern_stub_name_eq(si, "gettid") == 1 {
+            append_src_lit("fn gettid() -> i64 with IO { syscall6(186, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // getuid → syscall 102
+        if extern_stub_name_eq(si, "getuid") == 1 {
+            append_src_lit("fn getuid() -> i64 with IO { syscall6(102, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // getgid → syscall 104
+        if extern_stub_name_eq(si, "getgid") == 1 {
+            append_src_lit("fn getgid() -> i64 with IO { syscall6(104, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // geteuid → syscall 107
+        if extern_stub_name_eq(si, "geteuid") == 1 {
+            append_src_lit("fn geteuid() -> i64 with IO { syscall6(107, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // getegid → syscall 108
+        if extern_stub_name_eq(si, "getegid") == 1 {
+            append_src_lit("fn getegid() -> i64 with IO { syscall6(108, 0, 0, 0, 0, 0, 0) }\n")
+            si = si + 1
+            continue
+        }
+        // ── f64-returning math functions — delegate to native impls ──
+        // The critical register-convention fix: real C-ABI f64 returns land in XMM0.
+        // Our native implementations keep f64 as bit-patterns in RAX (Sounio convention).
+        // Using __native_* stubs means no XMM0 read is needed — RAX is already correct.
+        // (Any direct C-ABI call must emit `movq rax, xmm0` after the call for f64.)
+        if extern_stub_name_eq(si, "sqrt") == 1 {
+            append_src_lit("fn sqrt(x: f64) -> f64 with Mut, Div, Panic { __native_sqrt_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "sin") == 1 {
+            append_src_lit("fn sin(x: f64) -> f64 with Mut, Div, Panic { __native_sin_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "cos") == 1 {
+            append_src_lit("fn cos(x: f64) -> f64 with Mut, Div, Panic { __native_cos_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "exp") == 1 {
+            append_src_lit("fn exp(x: f64) -> f64 with Mut, Div, Panic { __native_exp_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "log") == 1 {
+            append_src_lit("fn log(x: f64) -> f64 with Mut, Div, Panic { __native_ln_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "ln") == 1 {
+            append_src_lit("fn ln(x: f64) -> f64 with Mut, Div, Panic { __native_ln_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "fabs") == 1 || extern_stub_name_eq(si, "abs") == 1 {
+            if ret == 2 {
+                append_src_lit("fn ")
+                append_extern_stub_name(si)
+                append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_abs_f64(x) }\n")
+            } else {
+                append_src_lit("fn ")
+                append_extern_stub_name(si)
+                append_src_lit("(x: i64) -> i64 { __native_abs_i64(x) }\n")
+            }
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "tanh") == 1 {
+            append_src_lit("fn tanh(x: f64) -> f64 with Mut, Div, Panic { __native_tanh_f64(x) }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "pow") == 1 {
+            // pow(x, y) = exp(y * ln(x)) — approximation using native functions
+            append_src_lit("fn pow(x: f64, y: f64) -> f64 with Mut, Div, Panic { __native_exp_f64(y * __native_ln_f64(x)) }\n")
+            si = si + 1
+            continue
+        }
+        // ── malloc/free — map to heap_alloc/heap_free ──
+        if extern_stub_name_eq(si, "malloc") == 1 {
+            append_src_lit("fn malloc(size: i64) -> i64 with IO, Alloc { heap_alloc(size) as i64 }\n")
+            si = si + 1
+            continue
+        }
+        if extern_stub_name_eq(si, "free") == 1 {
+            append_src_lit("fn free(ptr: i64) with IO, Alloc { heap_free(ptr as i64) }\n")
+            si = si + 1
+            continue
+        }
+        // ── Fallback: generate panic stub ──
+        // For unknown extern "C" functions, emit a stub that panics.
+        // This preserves the type signature in the FN table so callers type-check,
+        // but fails at runtime with a clear message rather than silently returning garbage.
+        append_src_lit("fn ")
+        append_extern_stub_name(si)
+        if ret == 2 {
+            // f64 return
+            if arity == 0 { append_src_lit("() -> f64 with Panic { panic(\"unresolved extern fn\"); 0.0 }\n") }
+            else if arity == 1 { append_src_lit("(a: f64) -> f64 with Panic { panic(\"unresolved extern fn\"); 0.0 }\n") }
+            else { append_src_lit("(a: f64, b: f64) -> f64 with Panic { panic(\"unresolved extern fn\"); 0.0 }\n") }
+        } else if ret == 5 {
+            // void/unit return
+            if arity == 0 { append_src_lit("() with Panic { panic(\"unresolved extern fn\") }\n") }
+            else if arity == 1 { append_src_lit("(a: i64) with Panic { panic(\"unresolved extern fn\") }\n") }
+            else { append_src_lit("(a: i64, b: i64) with Panic { panic(\"unresolved extern fn\") }\n") }
+        } else {
+            // integer/bool return
+            if arity == 0 { append_src_lit("() -> i64 with Panic { panic(\"unresolved extern fn\"); 0 }\n") }
+            else if arity == 1 { append_src_lit("(a: i64) -> i64 with Panic { panic(\"unresolved extern fn\"); 0 }\n") }
+            else { append_src_lit("(a: i64, b: i64) -> i64 with Panic { panic(\"unresolved extern fn\"); 0 }\n") }
+        }
+        si = si + 1
+    }
+}
+
+fn strip_extern_blocks() with IO, Mut, Panic, Div {
+    EXTERN_STUB_COUNT = 0
+    EXTERN_STUB_BUF_OFF = 0
+    // Phase 1: Count extern fn declarations and collect signatures for stub generation.
+    // We parse each extern "C" { fn NAME(ARGS) -> RET; ... } block.
     var scan: i64 = 0
     while scan < SRC_LEN {
         if scan + 9 < SRC_LEN && sb(scan) == 101 && sb(scan + 1) == 120 && sb(scan + 2) == 116 && sb(scan + 3) == 101 && sb(scan + 4) == 114 && sb(scan + 5) == 110 && sb(scan + 6) == 32 && sb(scan + 7) == 34 && sb(scan + 8) == 67 && sb(scan + 9) == 34 {
-            // Count fn declarations inside this extern block
+            // Find opening { of block
             var es: i64 = scan
             while es < SRC_LEN && sb(es) != 123 { es = es + 1 }
             if es < SRC_LEN {
                 var ed: i64 = 1
                 es = es + 1
                 while es < SRC_LEN && ed > 0 {
-                    // Look for 'fn' keyword (102, 110, 32 or 10)
-                    if sb(es) == 102 && es + 1 < SRC_LEN && sb(es + 1) == 110 && es + 2 < SRC_LEN && (sb(es + 2) == 32 || sb(es + 2) == 10) {
+                    // Look for 'fn' keyword: bytes 102('f'), 110('n'), then space/newline
+                    if sb(es) == 102 && es + 1 < SRC_LEN && sb(es + 1) == 110 && es + 2 < SRC_LEN && (sb(es + 2) == 32 || sb(es + 2) == 9 || sb(es + 2) == 10) {
                         EXTERN_FN_COUNT = EXTERN_FN_COUNT + 1
+                        // Skip 'fn' and whitespace to reach function name
+                        var np: i64 = es + 2
+                        while np < SRC_LEN && (sb(np) == 32 || sb(np) == 9) { np = np + 1 }
+                        // Collect function name (alphanumeric + underscore)
+                        let name_start = np
+                        while np < SRC_LEN && (
+                            (sb(np) >= 97 && sb(np) <= 122) ||  // a-z
+                            (sb(np) >= 65 && sb(np) <= 90) ||   // A-Z
+                            (sb(np) >= 48 && sb(np) <= 57) ||   // 0-9
+                            sb(np) == 95                          // _
+                        ) { np = np + 1 }
+                        let name_len = np - name_start
+                        // Find opening paren and count parameters
+                        while np < SRC_LEN && sb(np) != 40 && sb(np) != 10 { np = np + 1 }
+                        var argc: i64 = 0
+                        if np < SRC_LEN && sb(np) == 40 {
+                            np = np + 1  // skip (
+                            // Count params: if first non-ws is ), arity=0; else count commas+1
+                            var pp: i64 = np
+                            while pp < SRC_LEN && (sb(pp) == 32 || sb(pp) == 9) { pp = pp + 1 }
+                            if pp < SRC_LEN && sb(pp) != 41 {
+                                argc = 1
+                                var pdepth: i64 = 1
+                                while pp < SRC_LEN && pdepth > 0 {
+                                    if sb(pp) == 40 { pdepth = pdepth + 1 }
+                                    if sb(pp) == 41 { pdepth = pdepth - 1; if pdepth == 0 { break } }
+                                    if sb(pp) == 44 && pdepth == 1 { argc = argc + 1 }
+                                    pp = pp + 1
+                                }
+                                np = pp + 1  // skip )
+                            } else {
+                                np = pp + 1  // skip )
+                            }
+                        }
+                        // Parse return type: look for -> after )
+                        var ret_ty: i64 = 5  // default: unit
+                        while np < SRC_LEN && sb(np) != 10 && sb(np) != 59 && !(sb(np) == 125 && ed <= 1) {
+                            // Look for -> (bytes 45, 62)
+                            if sb(np) == 45 && np + 1 < SRC_LEN && sb(np + 1) == 62 {
+                                np = np + 2
+                                ret_ty = extern_parse_ret_ty(np)
+                                break
+                            }
+                            np = np + 1
+                        }
+                        // Store in extern stub registry (if not full)
+                        if EXTERN_STUB_COUNT < 127 && name_len > 0 && EXTERN_STUB_BUF_OFF + name_len < 4095 {
+                            let si = EXTERN_STUB_COUNT
+                            EXTERN_STUB_NAME_OFF[si as usize] = EXTERN_STUB_BUF_OFF
+                            EXTERN_STUB_NAME_LEN[si as usize] = name_len
+                            var ki: i64 = 0
+                            while ki < name_len {
+                                EXTERN_STUB_NAME_BUF[(EXTERN_STUB_BUF_OFF + ki) as usize] = SRC[(name_start + ki) as usize]
+                                ki = ki + 1
+                            }
+                            EXTERN_STUB_BUF_OFF = EXTERN_STUB_BUF_OFF + name_len
+                            EXTERN_STUB_ARITY[si as usize] = argc
+                            EXTERN_STUB_RET[si as usize] = ret_ty
+                            EXTERN_STUB_COUNT = EXTERN_STUB_COUNT + 1
+                        }
                     }
                     if sb(es) == 123 { ed = ed + 1 }
                     if sb(es) == 125 { ed = ed - 1 }
@@ -20411,6 +21105,10 @@ fn strip_extern_blocks() with IO, Mut, Panic {
         r = r + 1
     }
     SRC_LEN = w
+    // Phase 3: Append Sounio stubs for each parsed extern "C" function.
+    // Stubs are appended to SRC here; append_native_prelude appends __native_* helpers after us.
+    // We call append_extern_c_stubs() which generates the correct stub for each extern fn.
+    append_extern_c_stubs()
 }
 
 fn main() -> i64 with IO, Mut, Panic, Div {

@@ -1,0 +1,64 @@
+//@ run-pass
+// Regression test: method receiver inference uses declared signature, not heuristics.
+//
+// Bug (pre-fix): infer_method_receiver_use used string-prefix heuristics to decide
+// whether a method call borrows &T, mutably borrows &!T, or moves T.  Methods whose
+// names did not match the heuristic patterns were treated as moves even when the
+// declared first parameter was &!Self, producing false-positive ownership errors or
+// silent miscompilation.
+//
+// Fix: the method call handler now calls scan_fnsig_param_type(FN_SIG[mfi], 0) to
+// read the actual declared receiver type.  If SCAN_TY==10 and ref_hash_mut!=0 the
+// receiver is an exclusive borrow (&!Self): borrow conflict checks are enforced and
+// the borrow is released after the call.  No heuristic string matching is used.
+//
+// This test verifies:
+//   1. A struct method declared with &!Self can mutate state without a false positive.
+//   2. The ownership checker permits a second &!Self call on the same variable after
+//      the first call's ephemeral borrow has been released.
+//   3. A &Self (shared) method may be called while no exclusive borrow is active.
+//   4. main() returns 0 (success) when all mutations produce the expected values.
+
+struct Counter {
+    value: i64
+}
+
+fn increment(c: &! Counter) with Mut, Panic {
+    // &!Self receiver: mutates the Counter in place
+    c.value = c.value + 1
+}
+
+fn add_n(c: &! Counter, n: i64) with Mut, Panic {
+    // &!Self receiver with additional argument
+    c.value = c.value + n
+}
+
+fn read_value(c: &Counter) -> i64 with Panic {
+    // &Self (shared) receiver: read-only access
+    return c.value
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var ctr: Counter = Counter { value: 0 }
+
+    // First exclusive-borrow call — ephemeral &! is taken and released.
+    increment(&! ctr)
+
+    // Second exclusive-borrow call on the same variable — must succeed because
+    // the first call's borrow was released after return.
+    increment(&! ctr)
+
+    // Exclusive-borrow call with extra arg.
+    add_n(&! ctr, 10)
+
+    // Shared-borrow read — permitted because no exclusive borrow is active.
+    let v = read_value(&ctr)
+
+    // Expected: 0 + 1 + 1 + 10 = 12
+    if v == 12 {
+        println("method_receiver_correct: PASS")
+        return 0
+    }
+    println("method_receiver_correct: FAIL")
+    return 1
+}

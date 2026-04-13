@@ -1,0 +1,91 @@
+//@ run-pass
+// LSP cross-file navigation — module resolver symbol index
+//
+// Verifies the LspgSymBridge pattern introduced in lsp/goto_def.sio Section 27:
+// bridge table maps resolver symbol_id → def_id so the module-graph hierarchical
+// lookup replaces the legacy flat scan for cross-file goto-definition.
+//
+// This test is self-contained — it simulates the bridge table logic inline
+// without importing compiler internals.
+
+// Minimal bridge table: symbol_id → def_id
+struct SymBridge { sym_id: i64, def_id: i64, file_id: i64, line: i64 }
+
+fn bridge_find(table: &[SymBridge; 8], count: i64, sym_id: i64) -> i64 with Panic, Mut {
+    var i: i64 = 0
+    while i < count {
+        if table[i as usize].sym_id == sym_id { return table[i as usize].def_id }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+fn bridge_location(table: &[SymBridge; 8], count: i64, sym_id: i64) -> i64 with Panic, Mut {
+    var i: i64 = 0
+    while i < count {
+        if table[i as usize].sym_id == sym_id { return table[i as usize].line }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// Simulate mod_graph_resolve_import: qualified "mod::sym" lookup
+// Returns symbol_id on hit, -1 on miss
+fn resolve_qualified(name_mod: i64, name_sym: i64) -> i64 with Panic {
+    // Registry: mod=1,sym=10 → symbol_id=100 (file A, line 5)
+    //           mod=1,sym=20 → symbol_id=101 (file A, line 12)
+    //           mod=2,sym=30 → symbol_id=200 (file B, line 7)
+    if name_mod == 1 && name_sym == 10 { return 100 }
+    if name_mod == 1 && name_sym == 20 { return 101 }
+    if name_mod == 2 && name_sym == 30 { return 200 }
+    return 0 - 1
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // Build bridge table (3 registered symbols)
+    var tbl: [SymBridge; 8] = [SymBridge { sym_id: 0, def_id: 0, file_id: 0, line: 0 }; 8]
+    tbl[0] = SymBridge { sym_id: 100, def_id: 1, file_id: 1, line: 5  }
+    tbl[1] = SymBridge { sym_id: 101, def_id: 2, file_id: 1, line: 12 }
+    tbl[2] = SymBridge { sym_id: 200, def_id: 3, file_id: 2, line: 7  }
+    let count: i64 = 3
+
+    // T1: bridge lookup hit
+    let d1 = bridge_find(&tbl, count, 100)
+    if d1 == 1 { passed = passed + 1 }
+    else { println("T1 FAIL"); failed = failed + 1 }
+
+    // T2: bridge lookup miss returns -1
+    let d_miss = bridge_find(&tbl, count, 999)
+    if d_miss == 0 - 1 { passed = passed + 1 }
+    else { println("T2 FAIL"); failed = failed + 1 }
+
+    // T3: qualified resolve → bridge → line number
+    let sym3 = resolve_qualified(1, 10)
+    let line3 = bridge_location(&tbl, count, sym3)
+    if sym3 == 100 && line3 == 5 { passed = passed + 1 }
+    else { println("T3 FAIL"); failed = failed + 1 }
+
+    // T4: second qualified resolve → different symbol, line 12
+    let sym4 = resolve_qualified(1, 20)
+    let line4 = bridge_location(&tbl, count, sym4)
+    if sym4 == 101 && line4 == 12 { passed = passed + 1 }
+    else { println("T4 FAIL"); failed = failed + 1 }
+
+    // T5: cross-module resolve (mod=2) → def_id=3
+    let sym5 = resolve_qualified(2, 30)
+    let d5 = bridge_find(&tbl, count, sym5)
+    if sym5 == 200 && d5 == 3 { passed = passed + 1 }
+    else { println("T5 FAIL"); failed = failed + 1 }
+
+    // T6: graph miss (unknown module) → sym=-1
+    let sym_miss = resolve_qualified(99, 99)
+    if sym_miss == 0 - 1 { passed = passed + 1 }
+    else { println("T6 FAIL"); failed = failed + 1 }
+
+    if failed == 0 { println("lsp_cross_file_nav: PASS") }
+    else { println("lsp_cross_file_nav: FAIL") }
+    failed as i32
+}

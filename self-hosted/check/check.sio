@@ -164,6 +164,13 @@ struct Checker {
     ownership: OwnContext,
     trait_registry: TraitRegistry,
     impl_registry: ImplRegistry,
+    // ── Static refinement proof engine (no Z3) ──────────────────────────────
+    // Counters updated by check_refinement_literal / check_call_arg_refinement_boundary.
+    refine_static_proved: i64,    // predicates proved at compile time
+    refine_runtime_checked: i64,  // predicates deferred to runtime assertion
+    refine_violations: i64,       // predicates definitely violated (compile error)
+    // Condition-narrowing guard stack: up to 8 nested if-conditions.
+    refine_cond_env: RefineStaticEnv,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -430,6 +437,10 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         ownership: own_context_new(),
         trait_registry: trait_registry_new(),
         impl_registry: impl_register_builtins(impl_registry_new()),
+        refine_static_proved: 0,
+        refine_runtime_checked: 0,
+        refine_violations: 0,
+        refine_cond_env: refine_static_env_new(),
     }
 }
 
@@ -513,6 +524,10 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).ownership = own_context_new()
     (*raw).trait_registry = trait_registry_new()
     (*raw).impl_registry = impl_register_builtins(impl_registry_new())
+    (*raw).refine_static_proved = 0
+    (*raw).refine_runtime_checked = 0
+    (*raw).refine_violations = 0
+    (*raw).refine_cond_env = refine_static_env_new()
 }
 
 fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Div, Alloc {
@@ -595,6 +610,10 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).ownership = src.ownership
     (*dst).trait_registry = src.trait_registry
     (*dst).impl_registry = src.impl_registry
+    (*dst).refine_static_proved = src.refine_static_proved
+    (*dst).refine_runtime_checked = src.refine_runtime_checked
+    (*dst).refine_violations = src.refine_violations
+    (*dst).refine_cond_env = src.refine_cond_env
 }
 
 fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
@@ -664,6 +683,24 @@ fn checker_warning_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Al
 
 fn checker_fn_sig_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
     (*c).fn_sigs.count
+}
+
+fn checker_refine_static_proved_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).refine_static_proved
+}
+
+fn checker_refine_runtime_checked_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).refine_runtime_checked
+}
+
+fn checker_refine_violations_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).refine_violations
+}
+
+// Print the static refinement proof summary.
+// Called by the driver after check_items completes.
+fn checker_print_refine_summary_mut(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    refine_print_summary((*c).refine_static_proved, (*c).refine_runtime_checked, (*c).refine_violations)
 }
 
 // --------------------------------------------------------
