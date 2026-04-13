@@ -1,136 +1,132 @@
-// stdlib/text/format.sio — numeric-to-string conversion
+// stdlib/text/format.sio — numeric-to-string conversion and format strings
 //
 // Functions:
-//   i64_to_str(n)   -> string   (decimal, handles negatives)
-//   f64_to_str(x)   -> string   (decimal, 4 fractional digits)
+//   pub i64_to_str(n)       -> string   (decimal, handles negatives)
+//   pub f64_to_str(x)       -> string   (decimal, 4 fractional digits)
+//   pub format1(t, a)       -> string   (replace first {} with string arg)
+//   pub format2(t, a, b)    -> string   (replace first two {} with args)
+//   pub format3(t, a, b, c) -> string   (replace first three {} with args)
+//   pub format4(t, a, b, c, d) -> string
 //
-// Both use a single stack-allocated [i8; 32] buffer and str_from_bytes;
-// no heap allocation, no string concatenation.
+// Uses native string concatenation (++) and str_slice — no str_from_bytes.
 
 // ============================================================
 // Helpers (must precede callers)
 // ============================================================
 
-// Write decimal digits of n (n >= 0) into buf starting at pos.
-// Returns (buf, new_pos). Digits are in reverse order on return.
-fn i64_digits_to_buf(n: i64, buf: [i8; 32], pos: i64) -> ([i8; 32], i64) with Mut, Div, Panic {
-    var b = buf
-    var p = pos
+fn digit_char(d: i64) -> string with Panic {
+    let chars = "0123456789"
+    str_slice(chars, d, d + 1)
+}
+
+fn abs_i64(n: i64) -> i64 {
+    if n < 0 { 0 - n } else { n }
+}
+
+fn u64_to_str(n: i64) -> string with Mut, Div, Panic {
+    if n == 0 { return "0" }
     var m = n
+    var result = ""
     while m > 0 {
-        b[p] = (48 + m % 10) as i8
-        p = p + 1
+        let d = m % 10
+        result = digit_char(d) ++ result
         m = m / 10
     }
-    (b, p)
-}
-
-// Reverse buf[start..end] in place and return the updated buffer.
-fn i8_buf_reverse(buf: [i8; 32], start: i64, end: i64) -> [i8; 32] with Mut, Div, Panic {
-    var b = buf
-    var lo = start
-    var hi = end - 1
-    while lo < hi {
-        let tmp = b[lo]
-        b[lo] = b[hi]
-        b[hi] = tmp
-        lo = lo + 1
-        hi = hi - 1
-    }
-    b
+    result
 }
 
 // ============================================================
-// i64 → decimal string
+// i64 -> decimal string
 // ============================================================
 
-fn i64_to_str(n: i64) -> string with Mut, Div, Panic {
-    var buf: [i8; 32] = [0; 32]
-
-    if n == 0 {
-        buf[0] = 48 as i8
-        return str_from_bytes(buf, 1)
+pub fn i64_to_str(n: i64) -> string with Mut, Div, Panic {
+    if n == 0 { return "0" }
+    if n < 0 {
+        return "-" ++ u64_to_str(0 - n)
     }
-
-    var neg = n < 0
-    var m: i64 = n
-    if neg {
-        m = 0 - n
-    }
-
-    let (buf2, digit_end) = i64_digits_to_buf(m, buf, 0)
-    var b2 = buf2
-    var de = digit_end
-
-    if neg {
-        b2[de] = 45 as i8   // '-'
-        de = de + 1
-    }
-
-    // Digits (and sign) were written in reverse; un-reverse
-    let b3 = i8_buf_reverse(b2, 0, de)
-    str_from_bytes(b3, de)
+    u64_to_str(n)
 }
 
 // ============================================================
-// f64 → decimal string (4 decimal places)
+// f64 -> decimal string (4 fractional digits)
 // ============================================================
-//
-// Uses a single 32-byte buffer:
-//   [sign?][int digits][.][4 frac digits]
-// Maximum width: 1 + 19 + 1 + 4 = 25 bytes — well within 32.
 
-fn f64_to_str(x: f64) -> string with Mut, Div, Panic {
-    var buf: [i8; 32] = [0; 32]
-    var pos: i64 = 0
-
-    // Sign
+pub fn f64_to_str(x: f64) -> string with Mut, Div, Panic {
     var neg = x < 0.0
     var ax: f64 = x
-    if neg {
-        buf[0] = 45 as i8   // '-'
-        pos = 1
-        ax = 0.0 - x
-    }
+    if neg { ax = 0.0 - x }
 
-    // Integer part
     let int_part = ax as i64
-    let int_start = pos
-
-    if int_part == 0 {
-        buf[pos] = 48 as i8
-        pos = pos + 1
-    } else {
-        let (buf2, digit_end) = i64_digits_to_buf(int_part, buf, pos)
-        buf = buf2
-        pos = digit_end
-        buf = i8_buf_reverse(buf, int_start, pos)
-    }
-
-    // Decimal point
-    buf[pos] = 46 as i8   // '.'
-    pos = pos + 1
 
     // Fractional part — 4 digits, zero-padded
-    let frac_raw = ((ax - int_part as f64) * 10000.0) as i64
-    var frac_i: i64 = frac_raw
-    if frac_i < 0 {
-        frac_i = 0
-    }
-    if frac_i > 9999 {
-        frac_i = 9999
-    }
+    var frac_i: i64 = ((ax - int_part as f64) * 10000.0) as i64
+    if frac_i < 0 { frac_i = 0 }
+    if frac_i > 9999 { frac_i = 9999 }
 
-    // Write 4 digits right-to-left then step pos forward by 4
+    var frac_str = ""
     var f = frac_i
-    buf[pos + 3] = (48 + f % 10) as i8
-    f = f / 10
-    buf[pos + 2] = (48 + f % 10) as i8
-    f = f / 10
-    buf[pos + 1] = (48 + f % 10) as i8
-    f = f / 10
-    buf[pos + 0] = (48 + f % 10) as i8
-    pos = pos + 4
+    var digits: [string; 4] = ["", "", "", ""]
+    var i: i64 = 3
+    while i >= 0 {
+        digits[i] = digit_char(f % 10)
+        f = f / 10
+        i = i - 1
+    }
+    frac_str = digits[0] ++ digits[1] ++ digits[2] ++ digits[3]
 
-    str_from_bytes(buf, pos)
+    let int_str = i64_to_str(int_part)
+    var result = int_str ++ "." ++ frac_str
+    if neg { result = "-" ++ result }
+    result
+}
+
+// ============================================================
+// format() — {} placeholder substitution
+// ============================================================
+
+// Find the position of "{}" in a string, return -1 if not found.
+fn find_placeholder(s: string) -> i64 with Panic {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n - 1 {
+        let c = str_char_at(s, i)
+        let c2 = str_char_at(s, i + 1)
+        if c == 123 && c2 == 125 {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// Replace the first "{}" in template with value.
+fn replace_one(template: string, value: string) -> string with Mut, Panic {
+    let pos = find_placeholder(template)
+    if pos < 0 { return template }
+    let before = str_slice(template, 0, pos)
+    let after_start = pos + 2
+    let after = str_slice(template, after_start, str_len(template))
+    before ++ value ++ after
+}
+
+pub fn format1(template: string, a: string) -> string with Mut, Panic {
+    replace_one(template, a)
+}
+
+pub fn format2(template: string, a: string, b: string) -> string with Mut, Panic {
+    let s = replace_one(template, a)
+    replace_one(s, b)
+}
+
+pub fn format3(template: string, a: string, b: string, c: string) -> string with Mut, Panic {
+    let s = replace_one(template, a)
+    let s2 = replace_one(s, b)
+    replace_one(s2, c)
+}
+
+pub fn format4(template: string, a: string, b: string, c: string, d: string) -> string with Mut, Panic {
+    let s = replace_one(template, a)
+    let s2 = replace_one(s, b)
+    let s3 = replace_one(s2, c)
+    replace_one(s3, d)
 }
