@@ -44,7 +44,7 @@ Updated February 2026 after full-project audit.
 | REPL | Beta | 21 commands, JIT, epistemic badges; :type/:econf/:hist + multi-line input added |
 | Self-hosted Compiler | Beta | Phase 1.3 complete: if-let pattern matching (Some/None/Ok/Err/Enum::Variant); 30K lines .sio |
 | Ontology | Beta | 10K terms, subsumption, distance |
-| Package Manager | Beta | Manifest parsing works, no public registry exists |
+| Package Manager | Beta | Local registry active (`~/.sounio/registry/`), `souc publish/search/list` commands; no public registry |
 
 ### Known Bugs
 

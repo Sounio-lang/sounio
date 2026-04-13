@@ -17,6 +17,9 @@ Usage:
   souc build <file.sio> --emit-llvm -o <output.ll>
   souc info
   souc repl
+  souc publish <path>     — register a local package in ~/.sounio/registry/
+  souc search <name>      — search the local registry for a package
+  souc list               — list all packages in the local registry
 
 Notes:
   - Native mode compiles to an ELF before execution.
@@ -24,6 +27,7 @@ Notes:
   - `build --emit-llvm` writes LLVM IR to <output>.ll for downstream llc/clang.
   - REPL is not yet supported in native mode.
   - `check --show-ast` and `check --show-types` use native compiler summaries.
+  - Registry index: ~/.sounio/registry/index.txt (one entry per line).
 EOF
 }
 
@@ -451,6 +455,97 @@ EOF
         ;;
     esac
     ;;
+  publish)
+    pkg_path="${1:-}"
+    if [[ -z "$pkg_path" ]]; then
+      echo "error: souc publish requires a package path" >&2
+      echo "  Usage: souc publish <path>" >&2
+      exit 1
+    fi
+    pkg_path="$(abspath_path "$pkg_path")"
+    if [[ ! -d "$pkg_path" ]]; then
+      echo "error: path does not exist or is not a directory: $pkg_path" >&2
+      exit 1
+    fi
+    # Read manifest (souc.toml or package.toml or manifest.toml)
+    manifest_file=""
+    for candidate in souc.toml package.toml manifest.toml; do
+      if [[ -f "$pkg_path/$candidate" ]]; then
+        manifest_file="$pkg_path/$candidate"
+        break
+      fi
+    done
+    # Parse name and version from manifest (simple grep-based parse)
+    if [[ -n "$manifest_file" ]]; then
+      pkg_name="$(grep -m1 '^name' "$manifest_file" 2>/dev/null | sed 's/.*=\s*"\?\([^"]*\)"\?.*/\1/' | tr -d '[:space:]')"
+      pkg_version="$(grep -m1 '^version' "$manifest_file" 2>/dev/null | sed 's/.*=\s*"\?\([^"]*\)"\?.*/\1/' | tr -d '[:space:]')"
+    else
+      # Fall back to directory basename as name, version 0.0.0
+      pkg_name="$(basename "$pkg_path")"
+      pkg_version="0.0.0"
+    fi
+    if [[ -z "$pkg_name" ]]; then
+      pkg_name="$(basename "$pkg_path")"
+    fi
+    if [[ -z "$pkg_version" ]]; then
+      pkg_version="0.0.0"
+    fi
+    # Ensure registry directory exists
+    registry_dir="${HOME}/.sounio/registry"
+    registry_idx="$registry_dir/index.txt"
+    mkdir -p "$registry_dir"
+    # Check if already registered (simple name match)
+    if [[ -f "$registry_idx" ]] && grep -q "^name=$pkg_name " "$registry_idx" 2>/dev/null; then
+      echo "souc publish: updating existing entry for '$pkg_name'"
+      # Remove old entry
+      tmp_idx="$(mktemp)"
+      grep -v "^name=$pkg_name " "$registry_idx" > "$tmp_idx" || true
+      mv "$tmp_idx" "$registry_idx"
+    fi
+    # Append new entry
+    printf 'name=%s version=%s path=%s\n' "$pkg_name" "$pkg_version" "$pkg_path" >> "$registry_idx"
+    echo "souc publish: registered '$pkg_name' v$pkg_version at $pkg_path"
+    echo "  registry: $registry_idx"
+    ;;
+
+  search)
+    pkg_query="${1:-}"
+    if [[ -z "$pkg_query" ]]; then
+      echo "error: souc search requires a package name" >&2
+      echo "  Usage: souc search <name>" >&2
+      exit 1
+    fi
+    registry_idx="${HOME}/.sounio/registry/index.txt"
+    if [[ ! -f "$registry_idx" ]]; then
+      echo "souc search: local registry is empty (no index at $registry_idx)"
+      exit 0
+    fi
+    matches=0
+    while IFS= read -r line; do
+      # Extract name field
+      line_name="${line#name=}"
+      line_name="${line_name%% *}"
+      if [[ "$line_name" == "$pkg_query" ]] || [[ "$line_name" == *"$pkg_query"* ]]; then
+        echo "$line"
+        matches=$((matches + 1))
+      fi
+    done < "$registry_idx"
+    if [[ "$matches" -eq 0 ]]; then
+      echo "souc search: no packages matching '$pkg_query' in local registry"
+    fi
+    ;;
+
+  list)
+    registry_idx="${HOME}/.sounio/registry/index.txt"
+    if [[ ! -f "$registry_idx" ]] || [[ ! -s "$registry_idx" ]]; then
+      echo "souc list: local registry is empty"
+      echo "  (index: ${HOME}/.sounio/registry/index.txt)"
+      exit 0
+    fi
+    echo "Local registry (${HOME}/.sounio/registry/index.txt):"
+    cat "$registry_idx"
+    ;;
+
   *)
     echo "error: unknown subcommand: $cmd" >&2
     usage >&2
