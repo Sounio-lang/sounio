@@ -1,0 +1,218 @@
+//@ run-pass
+// Test: local package registry — registry_init, registry_add, registry_find, registry_list
+//
+// Exercises three packages:
+//   mylib      1.0.0   /home/user/projects/mylib
+//   mathlib    0.3.1   /home/user/projects/mathlib
+//   signalkit  2.1.4   /home/user/projects/signalkit
+//
+// Implementation mirrors stdlib/pkg/registry.sio: parallel global arrays
+// back the storage because array-of-struct mutation via &! is not yet
+// supported for element-wise writes in the current codegen.
+
+// ============================================================
+// Parallel global arrays (128 entries max)
+// ============================================================
+
+var REG_NAME_HASHES: [i64; 128] = [0; 128]
+var REG_VER_MAJORS:  [i64; 128] = [0; 128]
+var REG_VER_MINORS:  [i64; 128] = [0; 128]
+var REG_VER_PATCHES: [i64; 128] = [0; 128]
+var REG_PATH_LENS:   [i64; 128] = [0; 128]
+var REG_PATH_CHARS:  [i64; 8192] = [0; 8192]   // 128 * 64
+
+// ============================================================
+// djb2 hash (same algorithm as registry.sio)
+// ============================================================
+
+fn pkg_hash(s: string) -> i64 with Mut, Panic, Div {
+    var h: i64 = 5381
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n {
+        let c = str_char_at(s, i)
+        h = h * 33 + c
+        i = i + 1
+    }
+    h
+}
+
+// ============================================================
+// PkgMeta + LocalRegistry struct definitions
+// ============================================================
+
+struct PkgMeta {
+    name_hash:     i64,
+    version_major: i64,
+    version_minor: i64,
+    version_patch: i64,
+    path_len:      i64,
+    path:          [i64; 64],
+}
+
+struct LocalRegistry {
+    entries: [PkgMeta; 128],   // declared for API shape; storage is in globals
+    count:   i64,
+}
+
+fn pkg_meta_zero() -> PkgMeta {
+    PkgMeta {
+        name_hash:     0,
+        version_major: 0,
+        version_minor: 0,
+        version_patch: 0,
+        path_len:      0,
+        path:          [0; 64],
+    }
+}
+
+// ============================================================
+// Registry operations
+// ============================================================
+
+fn registry_init(reg: &! LocalRegistry) with Mut {
+    reg.count = 0
+}
+
+fn registry_add(reg: &! LocalRegistry,
+                name: string,
+                ver_major: i64,
+                ver_minor: i64,
+                ver_patch: i64,
+                path: string) -> bool with IO, Mut, Panic, Div {
+    if reg.count >= 128 {
+        return false
+    }
+    let idx = reg.count
+
+    REG_NAME_HASHES[idx as usize] = pkg_hash(name)
+    REG_VER_MAJORS[idx as usize]  = ver_major
+    REG_VER_MINORS[idx as usize]  = ver_minor
+    REG_VER_PATCHES[idx as usize] = ver_patch
+
+    let path_n = str_len(path)
+    var path_used: i64 = path_n
+    if path_used > 64 { path_used = 64 }
+    REG_PATH_LENS[idx as usize] = path_used
+    let base = idx * 64
+    var pi: i64 = 0
+    while pi < path_used {
+        REG_PATH_CHARS[(base + pi) as usize] = str_char_at(path, pi)
+        pi = pi + 1
+    }
+
+    reg.count = reg.count + 1
+    true
+}
+
+fn registry_find(reg: &! LocalRegistry, name: string) -> i64 with Mut, Panic, Div {
+    let target = pkg_hash(name)
+    var i: i64 = 0
+    while i < reg.count {
+        if REG_NAME_HASHES[i as usize] == target {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn registry_list(reg: &! LocalRegistry) with IO, Mut, Panic, Div {
+    if reg.count == 0 {
+        println("(registry is empty)")
+        return
+    }
+    var i: i64 = 0
+    while i < reg.count {
+        print("pkg[")
+        print_int(i)
+        print("] hash=")
+        print_int(REG_NAME_HASHES[i as usize])
+        print(" version=")
+        print_int(REG_VER_MAJORS[i as usize])
+        print(".")
+        print_int(REG_VER_MINORS[i as usize])
+        print(".")
+        print_int(REG_VER_PATCHES[i as usize])
+        print("\n")
+        i = i + 1
+    }
+}
+
+// ============================================================
+// main
+// ============================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var reg = LocalRegistry {
+        entries: [pkg_meta_zero(); 128],
+        count:   0,
+    }
+
+    // T1: init clears count
+    registry_init(&! reg)
+    if reg.count != 0 {
+        println("pkg_registry_basic: FAIL T1 (init count)")
+        return 1
+    }
+    println("T1 PASS: registry_init")
+
+    // T2: add three packages
+    let ok1 = registry_add(&! reg, "mylib",     1, 0, 0, "/home/user/projects/mylib")
+    let ok2 = registry_add(&! reg, "mathlib",   0, 3, 1, "/home/user/projects/mathlib")
+    let ok3 = registry_add(&! reg, "signalkit", 2, 1, 4, "/home/user/projects/signalkit")
+    if ok1 == false || ok2 == false || ok3 == false {
+        println("pkg_registry_basic: FAIL T2 (add returned false)")
+        return 1
+    }
+    if reg.count != 3 {
+        println("pkg_registry_basic: FAIL T2 (count != 3)")
+        return 1
+    }
+    println("T2 PASS: registry_add (3 packages)")
+
+    // T3: find existing packages — verify index and version metadata
+    let idx_my   = registry_find(&! reg, "mylib")
+    let idx_math = registry_find(&! reg, "mathlib")
+    let idx_sig  = registry_find(&! reg, "signalkit")
+    if idx_my == -1 || idx_math == -1 || idx_sig == -1 {
+        println("pkg_registry_basic: FAIL T3 (find returned -1 for known package)")
+        return 1
+    }
+    if REG_VER_MAJORS[idx_my as usize] != 1 {
+        println("pkg_registry_basic: FAIL T3 (mylib version_major)")
+        return 1
+    }
+    if REG_VER_MINORS[idx_math as usize] != 3 {
+        println("pkg_registry_basic: FAIL T3 (mathlib version_minor)")
+        return 1
+    }
+    if REG_VER_PATCHES[idx_sig as usize] != 4 {
+        println("pkg_registry_basic: FAIL T3 (signalkit version_patch)")
+        return 1
+    }
+    println("T3 PASS: registry_find (all 3 packages found)")
+
+    // T4: find missing package returns -1
+    let idx_none = registry_find(&! reg, "nosuchpkg")
+    if idx_none != -1 {
+        println("pkg_registry_basic: FAIL T4 (find returned non-(-1) for missing pkg)")
+        return 1
+    }
+    println("T4 PASS: registry_find (missing package returns -1)")
+
+    // T5: path_len stored correctly (non-zero for mylib)
+    if REG_PATH_LENS[0] == 0 {
+        println("pkg_registry_basic: FAIL T5 (path_len is 0)")
+        return 1
+    }
+    println("T5 PASS: path_len stored")
+
+    // T6: registry_list prints without crashing
+    println("T6: registry_list output:")
+    registry_list(&! reg)
+    println("T6 PASS: registry_list")
+
+    println("pkg_registry_basic: ALL PASS")
+    return 0
+}

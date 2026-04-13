@@ -884,11 +884,27 @@ fn repl_i64_to_string(n: i64) -> string with Mut, Panic, Div {
     str_from_bytes(buf, pos)
 }
 
+// Check whether a string contains a '.' character (dot = 46).
+// Used by repl_eval_expr to detect f64 mode.
+fn repl_has_float_literal(s: string) -> bool with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(s, i) == 46 { return true }
+        i = i + 1
+    }
+    return false
+}
+
 // ============================================================================
 // EVAL EXPRESSION
 // ============================================================================
 
 fn repl_eval_expr(r: &! ReplState, input: string) -> ReplResult with Mut, Panic, Div {
+    // If the expression contains a '.', evaluate in f64 mode
+    if repl_has_float_literal(input) {
+        return repl_eval_f64_expr(r, input)
+    }
     var res = repl_result_new()
     let triple = repl_parse_expr(input, 0)
     let val = triple.0
@@ -910,6 +926,250 @@ fn repl_eval_expr(r: &! ReplState, input: string) -> ReplResult with Mut, Panic,
         return res
     }
     let out = repl_i64_to_string(val)
+    repl_result_set_output(&! res, out)
+    res.ok = true
+    res.exit_code = REPL_OK()
+    r.last_result = res
+    r.last_result
+}
+
+// ============================================================================
+// F64 REPL ARITHMETIC
+// f64 REPL arithmetic: 3.14 * 2.0 → 6.280000
+// ============================================================================
+//
+// When any token in an expression contains '.', the REPL switches to f64 mode.
+// The f64 evaluator supports: +, -, *, /, parentheses, float literals, integer
+// literals (coerced to f64). Result is printed with 6 decimal places.
+// See repl_has_float_literal above (defined before repl_eval_expr).
+
+// Parse an f64 literal from string at position pos.
+// Handles digits before and after '.': e.g. 3.14, 2.0, 0.5, 42 (int coerced).
+// Returns (value, new_pos). On failure new_pos == pos.
+fn repl_parse_f64_lit(s: string, pos: i64) -> (f64, i64) with Mut, Panic, Div {
+    let n = str_len(s)
+    var p: i64 = pos
+    // Skip leading whitespace
+    while p < n {
+        let c = str_char_at(s, p)
+        if c == 32 || c == 9 { p = p + 1 } else { break }
+    }
+    if p >= n { return (0.0, pos) }
+    let c0 = str_char_at(s, p)
+    if c0 < 48 || c0 > 57 { return (0.0, pos) }
+    // Parse integer part
+    var int_part: f64 = 0.0
+    while p < n {
+        let c = str_char_at(s, p)
+        if c < 48 || c > 57 { break }
+        int_part = int_part * 10.0 + ((c - 48) as f64)
+        p = p + 1
+    }
+    // Check for '.'
+    if p >= n || str_char_at(s, p) != 46 {
+        return (int_part, p)
+    }
+    p = p + 1  // consume '.'
+    // Parse fractional part
+    var frac: f64 = 0.0
+    var scale: f64 = 0.1
+    while p < n {
+        let c = str_char_at(s, p)
+        if c < 48 || c > 57 { break }
+        frac = frac + ((c - 48) as f64) * scale
+        scale = scale / 10.0
+        p = p + 1
+    }
+    return (int_part + frac, p)
+}
+
+// Forward declaration: parse_f64_expr and parse_f64_factor are mutually needed.
+// We inline factor-level paren handling.
+
+// Parse f64 factor: '(' expr ')' | f64_literal
+// Returns (value, new_pos, ok)
+fn repl_parse_f64_factor(s: string, pos: i64) -> (f64, i64, bool) with Mut, Panic, Div {
+    let n = str_len(s)
+    var p: i64 = pos
+    // Skip whitespace
+    while p < n {
+        let c = str_char_at(s, p)
+        if c == 32 || c == 9 { p = p + 1 } else { break }
+    }
+    if p >= n { return (0.0, pos, false) }
+    let c = str_char_at(s, p)
+    // '(' = 40
+    if c == 40 {
+        let inner = repl_parse_f64_expr_impl(s, p + 1)
+        if !inner.2 { return (0.0, pos, false) }
+        // skip whitespace after inner
+        var after: i64 = inner.1
+        while after < n {
+            let cc = str_char_at(s, after)
+            if cc == 32 || cc == 9 { after = after + 1 } else { break }
+        }
+        if after >= n { return (0.0, pos, false) }
+        if str_char_at(s, after) != 41 { return (0.0, pos, false) }  // ')'
+        return (inner.0, after + 1, true)
+    }
+    // Try f64 literal
+    let r = repl_parse_f64_lit(s, p)
+    if r.1 == p { return (0.0, pos, false) }
+    return (r.0, r.1, true)
+}
+
+// Parse f64 term: factor { ('*' | '/') factor }
+fn repl_parse_f64_term(s: string, pos: i64) -> (f64, i64, bool) with Mut, Panic, Div {
+    let n = str_len(s)
+    let fres = repl_parse_f64_factor(s, pos)
+    if !fres.2 { return (0.0, pos, false) }
+    var val: f64 = fres.0
+    var p: i64 = fres.1
+    var running: bool = true
+    while running {
+        var p2: i64 = p
+        while p2 < n {
+            let cc = str_char_at(s, p2)
+            if cc == 32 || cc == 9 { p2 = p2 + 1 } else { break }
+        }
+        if p2 >= n {
+            running = false
+        } else {
+            let c = str_char_at(s, p2)
+            if c == 42 {  // '*'
+                let rhs = repl_parse_f64_factor(s, p2 + 1)
+                if !rhs.2 { running = false } else { val = val * rhs.0; p = rhs.1 }
+            } else if c == 47 {  // '/'
+                let rhs = repl_parse_f64_factor(s, p2 + 1)
+                if !rhs.2 { running = false } else { val = val / rhs.0; p = rhs.1 }
+            } else { running = false }
+        }
+    }
+    return (val, p, true)
+}
+
+// Parse f64 expr: term { ('+' | '-') term }
+fn repl_parse_f64_expr_impl(s: string, pos: i64) -> (f64, i64, bool) with Mut, Panic, Div {
+    let n = str_len(s)
+    let tres = repl_parse_f64_term(s, pos)
+    if !tres.2 { return (0.0, pos, false) }
+    var val: f64 = tres.0
+    var p: i64 = tres.1
+    var running: bool = true
+    while running {
+        var p2: i64 = p
+        while p2 < n {
+            let cc = str_char_at(s, p2)
+            if cc == 32 || cc == 9 { p2 = p2 + 1 } else { break }
+        }
+        if p2 >= n {
+            running = false
+        } else {
+            let c = str_char_at(s, p2)
+            if c == 43 {  // '+'
+                let rhs = repl_parse_f64_term(s, p2 + 1)
+                if !rhs.2 { running = false } else { val = val + rhs.0; p = rhs.1 }
+            } else if c == 45 {  // '-'
+                let rhs = repl_parse_f64_term(s, p2 + 1)
+                if !rhs.2 { running = false } else { val = val - rhs.0; p = rhs.1 }
+            } else { running = false }
+        }
+    }
+    return (val, p, true)
+}
+
+// Format an f64 to a string with 6 decimal places.
+// E.g. 6.28 → "6.280000", 0.0 → "0.000000"
+fn repl_f64_to_string(x: f64) -> string with Mut, Panic, Div {
+    var buf: [i8; 48] = [0; 48]
+    var pos: i64 = 0
+
+    // Handle negative
+    var v: f64 = x
+    if v < 0.0 {
+        buf[pos as usize] = 45 as i8  // '-'
+        pos = pos + 1
+        v = 0.0 - v
+    }
+
+    // Integer part via integer conversion
+    let int_part: i64 = v as i64
+    // Fractional part
+    let frac_full: f64 = (v - (int_part as f64)) * 1000000.0
+    var frac_int: i64 = frac_full as i64
+    // Round
+    if (frac_full - (frac_int as f64)) >= 0.5 { frac_int = frac_int + 1 }
+    if frac_int >= 1000000 { frac_int = 999999 }
+
+    // Write integer digits
+    var ip = int_part
+    if ip == 0 {
+        buf[pos as usize] = 48 as i8
+        pos = pos + 1
+    } else {
+        var digits: [i8; 20] = [0; 20]
+        var dcount: i64 = 0
+        while ip > 0 && dcount < 20 {
+            let d = ip % 10
+            digits[dcount as usize] = (48 + d) as i8
+            ip = ip / 10
+            dcount = dcount + 1
+        }
+        var j: i64 = dcount - 1
+        while j >= 0 {
+            if pos < 47 { buf[pos as usize] = digits[j as usize]; pos = pos + 1 }
+            j = j - 1
+        }
+    }
+
+    // '.'
+    if pos < 47 { buf[pos as usize] = 46 as i8; pos = pos + 1 }
+
+    // Write 6 fractional digits (zero-padded)
+    var frac_digits: [i8; 6] = [0; 6]
+    var fi: i64 = 5
+    var fv: i64 = frac_int
+    while fi >= 0 {
+        frac_digits[fi as usize] = (48 + fv % 10) as i8
+        fv = fv / 10
+        fi = fi - 1
+    }
+    var fj: i64 = 0
+    while fj < 6 {
+        if pos < 47 { buf[pos as usize] = frac_digits[fj as usize]; pos = pos + 1 }
+        fj = fj + 1
+    }
+
+    str_from_bytes(buf, pos)
+}
+
+// Evaluate an expression in f64 mode. Called from repl_eval_expr when a '.' is detected.
+fn repl_eval_f64_expr(r: &! ReplState, input: string) -> ReplResult with Mut, Panic, Div {
+    var res = repl_result_new()
+    let triple = repl_parse_f64_expr_impl(input, 0)
+    let val: f64 = triple.0
+    let end_pos: i64 = triple.1
+    let ok: bool = triple.2
+    if !ok {
+        res.ok = false
+        res.exit_code = REPL_PARSE_ERR()
+        repl_result_set_error(&! res, "parse error")
+        return res
+    }
+    // Check all input consumed
+    let n = str_len(input)
+    var final_pos: i64 = end_pos
+    while final_pos < n {
+        let c = str_char_at(input, final_pos)
+        if c == 32 || c == 9 { final_pos = final_pos + 1 } else { break }
+    }
+    if final_pos < n {
+        res.ok = false
+        res.exit_code = REPL_PARSE_ERR()
+        repl_result_set_error(&! res, "unexpected input")
+        return res
+    }
+    let out = repl_f64_to_string(val)
     repl_result_set_output(&! res, out)
     res.ok = true
     res.exit_code = REPL_OK()

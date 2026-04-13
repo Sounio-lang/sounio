@@ -2,7 +2,7 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
+last_validated: 2026-04-13
 validated_by: A4
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
@@ -27,6 +27,7 @@ Updated February 2026 after full-project audit.
 | Ownership/Borrowing | Production | Method receiver type is now looked up from the declared signature (`scan_fnsig_param_type`). Exclusive `&!Self` receivers enforce borrow-conflict checks and ephemeral borrow tracking; shared `&Self` receivers perform read-only access checks. No heuristic string matching. |
 | Native Backend | Production | ELF/Mach-O/PE, epistemic runtime, continuations; cross-compile via `--target` |
 | Cranelift Codegen | Production | Full implementation, effect handlers |
+| LLVM Codegen | Production | LLVM 18 wired, `--backend llvm` or `--emit-llvm`; bridge: `self-hosted/llvm/souc_emit_llvm.c` |
 | Interpreter | Production | Full eval, 100+ builtins |
 | Module System | Production | 2-pass resolver, imports, hierarchical namespaces |
 | CLI | Production | check/build/run/repl/format/doc |
@@ -37,13 +38,13 @@ Updated February 2026 after full-project audit.
 
 | Component | Status | Limitations |
 |-----------|--------|-------------|
-| LLVM Codegen | Beta | Requires LLVM 15+, feature-gated |
-| Refinement Types + SMT | Beta | Requires Z3, falls back to runtime assertions |
-| LSP | Beta | Cross-file navigation now uses module resolver symbol index (Section 27 of lsp/goto_def.sio); hover and completion stubs present |
+| LLVM Codegen | Production | Moved to Production — see above |
+| Refinement Types + SMT | Beta | Static engine (no Z3) handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic |
+| LSP | Beta | Cross-file navigation now uses module resolver symbol index (Section 27 of lsp/goto_def.sio); cross-module hover and qualified completions wired via module resolver bridge |
 | REPL | Beta | 21 commands, JIT, epistemic badges; :type/:econf/:hist + multi-line input added |
-| Self-hosted Compiler | Beta | Phase 1.3 complete: if-let pattern matching (Some/None/Ok/Err/Enum::Variant); 30K lines .sio |
+| Self-hosted Compiler | Beta | Phase 1.4 complete: or-pattern arms (A \| B \| C => body) in match; Gen 25 bootstrap; 21K lines .sio |
 | Ontology | Beta | 10K terms, subsumption, distance |
-| Package Manager | Beta | Manifest parsing works, no public registry exists |
+| Package Manager | Beta | Local registry active (`~/.sounio/registry/`), `souc publish/search/list` commands; no public registry |
 
 ### Known Bugs
 
@@ -109,6 +110,7 @@ The following stdlib modules are stubs or incomplete:
 - `stdlib/prob/` - Beta, Normal, MCMC, random distributions (4 modules activated)
 - `stdlib/onn/` - Octonion neural network: activation, attention, conv, linear, loss, normalization, optimizer, training (8 modules)
 - `stdlib/ontology/` - LOINC, biomedical module, namespaces (3 modules)
+- `stdlib/compress/deflate.sio` - stored-block DEFLATE only (RFC 1951 BTYPE=00, no compression); gzip/zstd modules still require integer FFI
 - `stdlib/heliobiology/units.sio` - space weather units
 - `stdlib/ode/tsit5_multicomp.sio` - multi-compartment adaptive Tsit5 solver
 - `stdlib/medlang/` - full MedLang DSL (lexer, parser, AST, codegen, PK models, population, dosing) — all active
@@ -117,8 +119,8 @@ The following stdlib modules are stubs or incomplete:
 
 | Feature | Dependency | Effect if Missing |
 |---------|------------|-------------------|
-| `--features llvm` | LLVM 15+ | Use Cranelift JIT instead |
-| `--features smt` | Z3 + cmake | Refinement types fall back to runtime checks |
+| `--features llvm` | LLVM 18 (`libLLVM-18.so`) | `--backend llvm` and `--emit-llvm` active; install `llvm-18-dev` + `clang-18` |
+| `--features smt` | Z3 + cmake | Without Z3: static engine handles constants/narrowing/monotonicity; QF_LIA Fourier-Motzkin tier (`smt_qflia.sio`) sits between static analysis and runtime fallback; complex predicates beyond FM fall back to runtime checks with W040 |
 | `--features gpu` | CUDA toolkit | GPU codegen works, execution requires runtime |
 
 ### Platform Support

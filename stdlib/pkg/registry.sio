@@ -1,0 +1,185 @@
+// stdlib/pkg/registry.sio — Local package registry
+//
+// Backed by ~/.sounio/registry/index.txt on disk; the in-memory
+// representation uses parallel global arrays for storage (array-of-struct
+// mutation via &! is not yet supported in the current codegen — see
+// KNOWN_LIMITATIONS.md).  The LocalRegistry struct tracks the count, while
+// parallel global arrays hold the actual data.
+//
+// Public API:
+//   registry_hash_str(s: string) -> i64
+//   pkg_meta_zero() -> PkgMeta
+//   local_registry_new() -> LocalRegistry
+//   registry_init(reg: &! LocalRegistry)
+//   registry_add(reg: &! LocalRegistry, name, ver_major, ver_minor, ver_patch, path) -> bool
+//   registry_find(reg: &! LocalRegistry, name: string) -> i64   (-1 = not found)
+//   registry_list(reg: &! LocalRegistry)
+
+// ============================================================
+// Global parallel arrays (128 entries max)
+// ============================================================
+
+var REG_NAME_HASHES:  [i64; 128] = [0; 128]
+var REG_VER_MAJORS:   [i64; 128] = [0; 128]
+var REG_VER_MINORS:   [i64; 128] = [0; 128]
+var REG_VER_PATCHES:  [i64; 128] = [0; 128]
+var REG_PATH_LENS:    [i64; 128] = [0; 128]
+// Path storage: 64 i64 slots per entry, flattened to a 128*64 array.
+// Entry i occupies slots [i*64 .. i*64+64).
+var REG_PATH_CHARS:   [i64; 8192] = [0; 8192]   // 128 * 64
+
+// ============================================================
+// djb2 hash over a string
+// ============================================================
+
+fn registry_hash_str(s: string) -> i64 with Mut, Panic, Div {
+    var h: i64 = 5381
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n {
+        let c = str_char_at(s, i)
+        h = h * 33 + c
+        i = i + 1
+    }
+    h
+}
+
+// ============================================================
+// PkgMeta — one registry entry (value type for return)
+// ============================================================
+
+struct PkgMeta {
+    name_hash:     i64,
+    version_major: i64,
+    version_minor: i64,
+    version_patch: i64,
+    path_len:      i64,
+    path:          [i64; 64],   // path chars as i64
+}
+
+// ============================================================
+// LocalRegistry — in-memory registry handle (count only)
+// ============================================================
+
+struct LocalRegistry {
+    entries: [PkgMeta; 128],   // declared for API compatibility; not used for storage
+    count:   i64,
+}
+
+// ============================================================
+// pkg_meta_zero — construct an empty PkgMeta
+// ============================================================
+
+fn pkg_meta_zero() -> PkgMeta {
+    PkgMeta {
+        name_hash:     0,
+        version_major: 0,
+        version_minor: 0,
+        version_patch: 0,
+        path_len:      0,
+        path:          [0; 64],
+    }
+}
+
+// ============================================================
+// local_registry_new — construct an empty LocalRegistry
+// ============================================================
+
+fn local_registry_new() -> LocalRegistry {
+    LocalRegistry {
+        entries: [pkg_meta_zero(); 128],
+        count:   0,
+    }
+}
+
+// ============================================================
+// registry_init — reset the count to zero
+// ============================================================
+
+fn registry_init(reg: &! LocalRegistry) with Mut {
+    reg.count = 0
+}
+
+// ============================================================
+// registry_add — append a new package entry
+//
+// Returns true on success, false if the registry is full (>= 128 entries).
+// ============================================================
+
+fn registry_add(reg: &! LocalRegistry,
+                name: string,
+                ver_major: i64,
+                ver_minor: i64,
+                ver_patch: i64,
+                path: string) -> bool with IO, Mut, Panic, Div {
+    if reg.count >= 128 {
+        return false
+    }
+    let idx = reg.count
+
+    REG_NAME_HASHES[idx as usize] = registry_hash_str(name)
+    REG_VER_MAJORS[idx as usize]  = ver_major
+    REG_VER_MINORS[idx as usize]  = ver_minor
+    REG_VER_PATCHES[idx as usize] = ver_patch
+
+    // Encode path into the flattened path char store
+    let path_n = str_len(path)
+    var path_used: i64 = path_n
+    if path_used > 64 { path_used = 64 }
+    REG_PATH_LENS[idx as usize] = path_used
+    let base = idx * 64
+    var pi: i64 = 0
+    while pi < path_used {
+        REG_PATH_CHARS[(base + pi) as usize] = str_char_at(path, pi)
+        pi = pi + 1
+    }
+
+    reg.count = reg.count + 1
+    true
+}
+
+// ============================================================
+// registry_find — search by name (djb2 hash comparison)
+//
+// Returns the index of the first matching entry, or -1.
+// ============================================================
+
+fn registry_find(reg: &! LocalRegistry, name: string) -> i64 with Mut, Panic, Div {
+    let target = registry_hash_str(name)
+    var i: i64 = 0
+    while i < reg.count {
+        if REG_NAME_HASHES[i as usize] == target {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// ============================================================
+// registry_list — print all packages to stdout
+// ============================================================
+
+fn registry_list(reg: &! LocalRegistry) with IO, Mut, Panic, Div {
+    if reg.count == 0 {
+        println("(registry is empty)")
+        return
+    }
+    var i: i64 = 0
+    while i < reg.count {
+        print("pkg[")
+        print_int(i)
+        print("] hash=")
+        print_int(REG_NAME_HASHES[i as usize])
+        print(" version=")
+        print_int(REG_VER_MAJORS[i as usize])
+        print(".")
+        print_int(REG_VER_MINORS[i as usize])
+        print(".")
+        print_int(REG_VER_PATCHES[i as usize])
+        print(" path_len=")
+        print_int(REG_PATH_LENS[i as usize])
+        print("\n")
+        i = i + 1
+    }
+}

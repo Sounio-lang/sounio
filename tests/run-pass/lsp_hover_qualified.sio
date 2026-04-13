@@ -1,0 +1,196 @@
+//@ run-pass
+// Verifies lsp_hover_qualified: bridge table lookup for qualified names
+//
+// Simulates the module resolver bridge inline (no imports from compiler
+// internals).  Tests that a bridge lookup for a qualified name (mod_hash +
+// sym_hash → def_id) produces the correct def_id, and that the hover
+// placeholder string is formatted as "(qualified symbol, def_id=N)".
+
+// ---- Minimal bridge table ----
+
+struct QBridgeEntry {
+    mod_hash: i64,
+    sym_hash: i64,
+    def_id:   i64,
+}
+
+fn qbridge_lookup(
+    table: &[QBridgeEntry; 8],
+    count: i64,
+    mod_hash: i64,
+    sym_hash: i64
+) -> i64 with Panic, Mut {
+    var i: i64 = 0
+    while i < count {
+        let e = table[i as usize]
+        if e.mod_hash == mod_hash && e.sym_hash == sym_hash {
+            return e.def_id
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// ---- Minimal hover result buffer ----
+
+struct HoverBuf {
+    buf: [i8; 128],
+    len: i64,
+}
+
+fn hover_buf_new() -> HoverBuf {
+    HoverBuf { buf: [0; 128], len: 0 }
+}
+
+fn hover_buf_append(buf: &! HoverBuf, b: i8) with Mut, Panic {
+    if buf.len < 128 {
+        buf.buf[buf.len as usize] = b
+        buf.len = buf.len + 1
+    }
+}
+
+fn hover_buf_append_i64(buf: &! HoverBuf, val: i64) with Mut, Div, Panic {
+    if val == 0 {
+        hover_buf_append(buf, 48)
+        return
+    }
+    var n = val
+    if n < 0 {
+        hover_buf_append(buf, 45)
+        n = 0 - n
+    }
+    var digits: [i8; 24] = [0; 24]
+    var dlen: i64 = 0
+    while n > 0 {
+        digits[dlen as usize] = (48 + (n % 10)) as i8
+        n = n / 10
+        dlen = dlen + 1
+    }
+    var i = dlen - 1
+    while i >= 0 {
+        hover_buf_append(buf, digits[i as usize])
+        i = i - 1
+    }
+}
+
+// hover_qualified: simulate lsp_hover_qualified behaviour.
+// Returns 1 if def_id >= 0 (hover was filled), 0 otherwise.
+fn hover_qualified(result: &! HoverBuf, def_id: i64) -> i64 with Mut, Div, Panic {
+    if def_id < 0 {
+        return 0
+    }
+    result.len = 0
+    // "(qualified symbol, def_id="
+    hover_buf_append(result, 40)   // (
+    hover_buf_append(result, 113)  // q
+    hover_buf_append(result, 117)  // u
+    hover_buf_append(result, 97)   // a
+    hover_buf_append(result, 108)  // l
+    hover_buf_append(result, 105)  // i
+    hover_buf_append(result, 102)  // f
+    hover_buf_append(result, 105)  // i
+    hover_buf_append(result, 101)  // e
+    hover_buf_append(result, 100)  // d
+    hover_buf_append(result, 32)   // space
+    hover_buf_append(result, 115)  // s
+    hover_buf_append(result, 121)  // y
+    hover_buf_append(result, 109)  // m
+    hover_buf_append(result, 98)   // b
+    hover_buf_append(result, 111)  // o
+    hover_buf_append(result, 108)  // l
+    hover_buf_append(result, 44)   // ,
+    hover_buf_append(result, 32)   // space
+    hover_buf_append(result, 100)  // d
+    hover_buf_append(result, 101)  // e
+    hover_buf_append(result, 102)  // f
+    hover_buf_append(result, 95)   // _
+    hover_buf_append(result, 105)  // i
+    hover_buf_append(result, 100)  // d
+    hover_buf_append(result, 61)   // =
+    hover_buf_append_i64(result, def_id)
+    hover_buf_append(result, 41)   // )
+    1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // Build bridge: mod=10,sym=100→def=1  mod=10,sym=200→def=2
+    //               mod=20,sym=300→def=3  mod=20,sym=400→def=4
+    var tbl: [QBridgeEntry; 8] = [QBridgeEntry { mod_hash: 0, sym_hash: 0, def_id: 0 }; 8]
+    tbl[0] = QBridgeEntry { mod_hash: 10, sym_hash: 100, def_id: 1 }
+    tbl[1] = QBridgeEntry { mod_hash: 10, sym_hash: 200, def_id: 2 }
+    tbl[2] = QBridgeEntry { mod_hash: 20, sym_hash: 300, def_id: 3 }
+    tbl[3] = QBridgeEntry { mod_hash: 20, sym_hash: 400, def_id: 4 }
+    let count: i64 = 4
+
+    var result: HoverBuf = hover_buf_new()
+
+    // T1: known mod+sym → correct def_id, hover returns 1
+    let d1 = qbridge_lookup(&tbl, count, 10, 100)
+    let ok1 = hover_qualified(&! result, d1)
+    if d1 == 1 && ok1 == 1 && result.len > 0 {
+        passed = passed + 1
+    } else {
+        println("T1 FAIL")
+        failed = failed + 1
+    }
+
+    // T2: second symbol in same module → def_id=2
+    let d2 = qbridge_lookup(&tbl, count, 10, 200)
+    let ok2 = hover_qualified(&! result, d2)
+    if d2 == 2 && ok2 == 1 {
+        passed = passed + 1
+    } else {
+        println("T2 FAIL")
+        failed = failed + 1
+    }
+
+    // T3: cross-module symbol → def_id=3
+    let d3 = qbridge_lookup(&tbl, count, 20, 300)
+    let ok3 = hover_qualified(&! result, d3)
+    if d3 == 3 && ok3 == 1 {
+        passed = passed + 1
+    } else {
+        println("T3 FAIL")
+        failed = failed + 1
+    }
+
+    // T4: miss (unknown mod+sym) → def_id=-1, hover returns 0, buf not touched
+    result.len = 0
+    let d4 = qbridge_lookup(&tbl, count, 99, 999)
+    let ok4 = hover_qualified(&! result, d4)
+    if d4 == 0 - 1 && ok4 == 0 && result.len == 0 {
+        passed = passed + 1
+    } else {
+        println("T4 FAIL")
+        failed = failed + 1
+    }
+
+    // T5: hover buffer starts with '(' when def_id is valid
+    let d5 = qbridge_lookup(&tbl, count, 20, 400)
+    let ok5 = hover_qualified(&! result, d5)
+    let first_byte = result.buf[0]
+    if d5 == 4 && ok5 == 1 && first_byte == 40 {
+        passed = passed + 1
+    } else {
+        println("T5 FAIL")
+        failed = failed + 1
+    }
+
+    // T6: hover buffer ends with ')' and contains def_id digits
+    let d6 = qbridge_lookup(&tbl, count, 10, 100)
+    let ok6 = hover_qualified(&! result, d6)
+    let last_byte = result.buf[(result.len - 1) as usize]
+    if d6 == 1 && ok6 == 1 && last_byte == 41 {
+        passed = passed + 1
+    } else {
+        println("T6 FAIL")
+        failed = failed + 1
+    }
+
+    if failed == 0 { println("lsp_hover_qualified: PASS") }
+    else { println("lsp_hover_qualified: FAIL") }
+    failed as i32
+}

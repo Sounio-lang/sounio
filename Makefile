@@ -1,4 +1,4 @@
-.PHONY: build check test test-stdlib clean fmt install help lint lint-fix \
+.PHONY: build check test test-stdlib clean fmt install llvm-backend help lint lint-fix \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status \
          proof-check proof-regen
 
@@ -74,6 +74,16 @@ proof-regen:         ## Regenerate SounioProofObligation.lean from compiler --em
 	@echo "→ Verifying generated obligations"
 	cd formal/lean4 && lake build SounioProofObligation
 	@echo "✓ Proof obligations regenerated and verified"
+
+llvm-backend:        ## Build LLVM 18 backend bridge (requires llvm-18-dev, clang)
+	@echo "→ Building souc-emit-llvm (LLVM 18 C API bridge)"
+	clang -I/usr/lib/llvm-18/include -L/usr/lib/llvm-18/lib -O2 \
+	    -o artifacts/souc-emit-llvm-x86_64 \
+	    self-hosted/llvm/souc_emit_llvm.c \
+	    -lLLVM -Wl,-rpath,/usr/lib/llvm-18/lib
+	@echo "✓ Built artifacts/souc-emit-llvm-x86_64"
+	@echo "  Usage: souc build --backend llvm <file.sio> -o <output>"
+	@echo "         souc build --emit-llvm <file.sio> -o <output.ll>"
 
 install:             ## Install souc compiler to ~/.local/bin/souc
 	mkdir -p ~/.local/bin
