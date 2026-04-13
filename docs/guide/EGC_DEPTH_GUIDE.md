@@ -249,3 +249,31 @@ sha256:   da843a52...
 binary:   889 KB
 knightian: 0 sites on self-compile (all tokens certain)
 ```
+
+## Self-Compile Numbers (Gen 19)
+
+Gen 19 verified the bootstrap fixed-point after integrating ETY_UNIT_DIM (Knowledge<T>
+entries now carry packed 7-field dimensional vectors) and dim_add/dim_sub propagation
+through `*` and `/` operators.
+
+```
+tokens:   143689
+sha256:   f22cccbb2ef303ed9eee6b2c60312c417cd3bf7f27ae6981146ab648b2fff734
+binary:   854592 bytes
+knightian: 0 sites on self-compile (all tokens certain)
+unit_table: 102+ units preloaded across SI/CGS/Imperial/Astro/Pharma/Atomic/Natural
+```
+
+Verification:
+
+```bash
+./artifacts/self-hosted/souc-self-hosted-x86_64 self-hosted/compiler/lean_single.sio gen19.elf
+./gen19.elf self-hosted/compiler/lean_single.sio gen19b.elf
+sha256sum gen19.elf gen19b.elf
+# f22cccbb2ef303ed9eee6b2c60312c417cd3bf7f27ae6981146ab648b2fff734  gen19.elf
+# f22cccbb2ef303ed9eee6b2c60312c417cd3bf7f27ae6981146ab648b2fff734  gen19b.elf
+```
+
+The `knowledge_units: N sites` line now appears after every `knowledge_subtype:` line
+in the epistemic pass output, tracking how many `Knowledge<T>` bindings carry
+dimensional information.
