@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NATIVE_BIN="${SOUC_NATIVE_BIN:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64}"
+LLVM_EMIT_BIN="${SOUC_LLVM_EMIT_BIN:-$ROOT_DIR/artifacts/souc-emit-llvm-x86_64}"
 export SOUNIO_STDLIB_PATH="${ROOT_DIR}/stdlib"
 
 usage() {
@@ -12,12 +13,15 @@ Usage:
   souc run <file.sio> [-- <program args...>]
   souc compile <file.sio> -o <output>
   souc build <file.sio> --backend native -o <output>
+  souc build <file.sio> --backend llvm -o <output>
+  souc build <file.sio> --emit-llvm -o <output.ll>
   souc info
   souc repl
 
 Notes:
   - Native mode compiles to an ELF before execution.
-  - `build` is a compatibility alias for native compilation only.
+  - `build --backend llvm` compiles via LLVM 18 (ELF output, requires libLLVM-18).
+  - `build --emit-llvm` writes LLVM IR to <output>.ll for downstream llc/clang.
   - REPL is not yet supported in native mode.
   - `check --show-ast` and `check --show-types` use native compiler summaries.
 EOF
@@ -26,6 +30,16 @@ EOF
 require_native() {
   if [[ ! -x "$NATIVE_BIN" ]]; then
     echo "error: native compiler not found at $NATIVE_BIN" >&2
+    exit 1
+  fi
+}
+
+require_llvm_emit() {
+  if [[ ! -x "$LLVM_EMIT_BIN" ]]; then
+    echo "error: LLVM 18 emitter not found at $LLVM_EMIT_BIN" >&2
+    echo "  Rebuild: clang -I/usr/lib/llvm-18/include -L/usr/lib/llvm-18/lib \\" >&2
+    echo "           -O2 -o \$ROOT/artifacts/souc-emit-llvm-x86_64 \\" >&2
+    echo "           \$ROOT/self-hosted/llvm/souc_emit_llvm.c -lLLVM" >&2
     exit 1
   fi
 }
@@ -170,6 +184,11 @@ parse_build_args() {
         printf -v "$backend_ref" '%s' "${1#--backend=}"
         shift
         ;;
+      --emit-llvm)
+        # --emit-llvm is a pseudo-backend alias
+        printf -v "$backend_ref" '%s' "emit-llvm"
+        shift
+        ;;
       --show-ast|--show-types)
         unsupported_flag "$1"
         ;;
@@ -209,12 +228,17 @@ case "$cmd" in
     ;;
   info)
     require_native
+    llvm_status="[-] LLVM 18 backend (souc-emit-llvm not built)"
+    if [[ -x "$LLVM_EMIT_BIN" ]]; then
+      llvm_status="[+] LLVM 18 backend (--backend llvm, --emit-llvm)"
+    fi
     cat <<EOF
 souc native-wrapper v1.0.0-rc1
 native compiler: $NATIVE_BIN
+llvm emitter:    $LLVM_EMIT_BIN
 [+] Native self-hosted compiler
 [-] Cranelift JIT
-[-] LLVM backend
+$llvm_status
 [-] GPU codegen
 [-] REPL
 [+] --show-ast
@@ -382,11 +406,43 @@ EOF
   build)
     require_native
     parse_build_args src out backend "$@"
+    abs_src="$(abspath_path "$src")"
+    abs_out="$(abspath_path "$out")"
     case "$backend" in
       native|selfhosted-native|"")
+        (
+          cd "$ROOT_DIR"
+          "$NATIVE_BIN" "$abs_src" "$abs_out"
+        )
+        chmod +x "$abs_out"
         ;;
-      llvm|gpu|cranelift|jit)
-        echo "error: backend '$backend' is not available in native-only mode" >&2
+      llvm)
+        # LLVM 18 backend: emit IR to a temp .ll file, then compile via clang
+        require_llvm_emit
+        tmp_ll="$(mktemp /tmp/souc-llvm-XXXXXX.ll)"
+        trap 'rm -f "$tmp_ll"' EXIT
+        # Emit LLVM IR from Sounio source
+        "$LLVM_EMIT_BIN" "$abs_src" "$tmp_ll" >&2
+        # Compile IR to native ELF via clang (with PIE, links against libc)
+        clang -fPIE "$tmp_ll" -o "$abs_out" >&2
+        chmod +x "$abs_out"
+        echo "souc: LLVM 18 backend: $src -> $out" >&2
+        ;;
+      emit-llvm)
+        # --emit-llvm: write LLVM IR to <output> (conventionally .ll)
+        require_llvm_emit
+        # Default output extension to .ll if not specified
+        if [[ "$abs_out" == "$(abspath_path a.elf)" ]]; then
+          abs_out="$(abspath_path a.ll)"
+        fi
+        "$LLVM_EMIT_BIN" "$abs_src" "$abs_out" >&2
+        echo "souc: LLVM IR written to $abs_out" >&2
+        echo "  Next steps:" >&2
+        echo "    llc $abs_out -o /tmp/out.s && clang /tmp/out.s -o /tmp/out" >&2
+        echo "    clang -fPIE $abs_out -o /tmp/out" >&2
+        ;;
+      gpu|cranelift|jit)
+        echo "error: backend '$backend' is not yet available" >&2
         exit 2
         ;;
       *)
@@ -394,13 +450,6 @@ EOF
         exit 2
         ;;
     esac
-    abs_src="$(abspath_path "$src")"
-    abs_out="$(abspath_path "$out")"
-    (
-      cd "$ROOT_DIR"
-      "$NATIVE_BIN" "$abs_src" "$abs_out"
-    )
-    chmod +x "$out"
     ;;
   *)
     echo "error: unknown subcommand: $cmd" >&2

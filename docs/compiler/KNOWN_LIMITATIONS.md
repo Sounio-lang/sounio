@@ -2,7 +2,7 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
+last_validated: 2026-04-13
 validated_by: A4
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
@@ -27,6 +27,7 @@ Updated February 2026 after full-project audit.
 | Ownership/Borrowing | Production | Method receiver type is now looked up from the declared signature (`scan_fnsig_param_type`). Exclusive `&!Self` receivers enforce borrow-conflict checks and ephemeral borrow tracking; shared `&Self` receivers perform read-only access checks. No heuristic string matching. |
 | Native Backend | Production | ELF/Mach-O/PE, epistemic runtime, continuations; cross-compile via `--target` |
 | Cranelift Codegen | Production | Full implementation, effect handlers |
+| LLVM Codegen | Production | LLVM 18 wired, `--backend llvm` or `--emit-llvm`; bridge: `self-hosted/llvm/souc_emit_llvm.c` |
 | Interpreter | Production | Full eval, 100+ builtins |
 | Module System | Production | 2-pass resolver, imports, hierarchical namespaces |
 | CLI | Production | check/build/run/repl/format/doc |
@@ -37,7 +38,7 @@ Updated February 2026 after full-project audit.
 
 | Component | Status | Limitations |
 |-----------|--------|-------------|
-| LLVM Codegen | Beta | Requires LLVM 15+, feature-gated |
+| LLVM Codegen | Production | Moved to Production — see above |
 | Refinement Types + SMT | Beta | Static engine (no Z3) handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic |
 | LSP | Beta | Cross-file navigation now uses module resolver symbol index (Section 27 of lsp/goto_def.sio); hover and completion stubs present |
 | REPL | Beta | 21 commands, JIT, epistemic badges; :type/:econf/:hist + multi-line input added |
@@ -118,7 +119,7 @@ The following stdlib modules are stubs or incomplete:
 
 | Feature | Dependency | Effect if Missing |
 |---------|------------|-------------------|
-| `--features llvm` | LLVM 15+ | Use Cranelift JIT instead |
+| `--features llvm` | LLVM 18 (`libLLVM-18.so`) | `--backend llvm` and `--emit-llvm` active; install `llvm-18-dev` + `clang-18` |
 | `--features smt` | Z3 + cmake | Without Z3: static engine handles constants/narrowing/monotonicity; complex predicates fall back to runtime checks with W040 |
 | `--features gpu` | CUDA toolkit | GPU codegen works, execution requires runtime |
 
