@@ -47,20 +47,6 @@ Updated February 2026 after full-project audit.
 
 ### Known Bugs
 
-**`&![T; N]` mutable ref mutation in interpreter** (JIT only): When passing a bare array variable by `&!` reference to a function (`fn f(arr: &![i64; 10000], ...) with Mut`), mutations inside the function are not visible to the caller in the Cranelift JIT runtime. Workaround: wrap the array in a struct and pass `&! StructWithArray`, or use explicit deref `(*arr)[i] = v`. Native compilation is unaffected.
-
-```sio
-// Works — struct wrapper pattern
-struct SortBuf { data: [i64; 10000] }
-fn sort(b: &! SortBuf) with Mut { b.data[0] = 99 }
-
-// Works — explicit deref
-fn sort_deref(arr: &![i64; 10000]) with Mut { (*arr)[0] = 99 }
-
-// Broken (JIT only) — bare array index
-fn sort_broken(arr: &![i64; 10000]) with Mut { arr[0] = 99 }
-```
-
 **`extern "C"` FFI limited to math functions** (JIT only): Only f64-typed extern functions are supported in `$SOUC run`. Integer FFI (`malloc`, `getpid`, etc.) silently terminates due to Cranelift JIT's return register handling (reads XMM0 instead of RAX for integer returns). Native compilation handles integer FFI correctly.
 
 **Observation boundary coverage differs by frontend**: The multi-file checker enforces `with Observe` across comparison, pattern-match, IO, and FFI observation boundaries. `self-hosted/compiler/lean_single.sio` currently enforces `Observe` only for comparison-triggered observation.
@@ -70,6 +56,8 @@ fn sort_broken(arr: &![i64; 10000]) with Mut { arr[0] = 99 }
 ### Fixed in Self-Hosted Compiler (activate on $SOUC rebuild)
 
 The following bugs have been fixed in the self-hosted source but require a rebuilt `$SOUC` binary to take effect:
+
+**`&![T; N]` mutable ref mutation — bare array index** (fixed): When passing a bare array variable by `&!` reference, mutations via `arr[i] = v` (bare index, without explicit deref) are now correctly written back through the pointer for all element sizes. Root cause: the parameter registration in the codegen did not set `VAR_ESIZ` for `&![T; N]` fixed-size array ref parameters, so the element stride defaulted to 8 regardless of the actual element type. For `&![i64; N]` this happened to work (stride-8 is correct), but for `&![i8; N]` the stride was wrong, causing memory corruption. Fix: after `var_add` registers the parameter slot, a new branch detects `SCAN_TY == 10` with inner type `8` and sets `VAR_ESIZ = arr_hash_esiz(ref_hash_inner_hash(SCAN_TY_HASH))`. Regression test: `tests/run-pass/array_mut_ref_bare.sio`.
 
 **Implicit `var`/`let` with `i32` type** (fixed): Integer literal narrowing now allows `var x: i32 = 5` without "expected I32, found I64" errors. Literals are compatible with annotated smaller integer types (i32, i8).
 
