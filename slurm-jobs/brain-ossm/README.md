@@ -27,6 +27,7 @@ Current verified ABIDE headline:
 |--------|---------|------|-----|
 | `submit-fractal-g2-gpu.sh` | Full benchmark suite (probe + brain + supporting) | ~5 min | 1× L4 |
 | `submit-fractal-g2-20seed-gpu.sh` | Fractal-G2 robust replay with 20-seed probe snapshot | ~6 min | 1× L4 |
+| `submit-native-cuda-smoke-gpu.sh` | Native CUDA runtime smoke for `souc run --gpu-runtime` | ~1-2 min | 1× L4 |
 | `submit-abide-preflight-gpu.sh` | ABIDE path + benchmark preflight, no training yet | ~10 sec | 0× |
 | `submit-abide-gpu.sh` | Sounio ABIDE benchmark + structured metric export | ~5-10 min | 1× L4 |
 | `submit-abide-external-baselines-gpu.sh` | External deep-sequence suite (LSTM/GRU/Transformer/TCN) | ~15-30 min | 1× L4 |
@@ -55,6 +56,53 @@ ABIDE preflight:
 cd /home/devsounio/beagle/k8s/hpc-sota
 source ops/lab-ops.sh
 lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-abide-preflight-gpu.sh
+```
+
+Native CUDA smoke:
+
+```bash
+cd /home/devsounio/beagle/k8s/hpc-sota
+source ops/lab-ops.sh
+lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-native-cuda-smoke-gpu.sh
+```
+
+Current validated status:
+
+- successful end-to-end cluster run:
+  - job `244`
+- worker:
+  - `gpuorangefs-r770-proxmox`
+- staged compiler artifact hash:
+  - `7e94c4090feb5b2f8724b2fd8f37dc46`
+- expected log lines:
+  - `PASS: GPU vec_add`
+  - `CUDA_SMOKE_OK`
+
+If the login deployment name changed on the control plane, override it directly:
+
+```bash
+cd /home/devsounio/beagle/k8s/hpc-sota
+source ops/lab-ops.sh
+LOGIN_POD_NAME=<live-login-pod> \
+  lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-native-cuda-smoke-gpu.sh
+```
+
+Or use a selector fallback instead of the default `slurm-pilot-login-slinky` deployment:
+
+```bash
+cd /home/devsounio/beagle/k8s/hpc-sota
+source ops/lab-ops.sh
+LOGIN_SELECTOR='app.kubernetes.io/name=login' \
+  lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-native-cuda-smoke-gpu.sh
+```
+
+Alternate fixture:
+
+```bash
+cd /home/devsounio/beagle/k8s/hpc-sota
+source ops/lab-ops.sh
+FIXTURE_REL=tests/run-pass/gpu_launch_vec_slices.sio \
+  lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-native-cuda-smoke-gpu.sh
 ```
 
 ABIDE benchmark only:

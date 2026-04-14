@@ -442,6 +442,7 @@ var GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF: i64 = 0
 var RT_GUARDED_OPS_BSS_OFF: i64 = 0
 
 var NEEDS_GPU_RUNTIME_DYNLINK: i64 = 0
+var GPU_FFI_LIVE_QWORDS: i64 = 0
 
 fn gpu_param_kind_scalar_i64() -> i64 { 1 }
 fn gpu_param_kind_slice_in_f64() -> i64 { 2 }
@@ -2017,6 +2018,10 @@ fn emit_load_call_arg_to_rax_x86(argc: i64, arg_idx: i64) with Mut {
     emit_load_stack_qword_to_rax_x86((argc - 1 - arg_idx) * 8)
 }
 
+fn emit_load_call_arg_bias_to_rax_x86(argc: i64, arg_idx: i64, bias_bytes: i64) with Mut {
+    emit_load_stack_qword_to_rax_x86(bias_bytes + (argc - 1 - arg_idx) * 8)
+}
+
 fn emit_call_rax_x86(argc: i64) with Mut {
     emit_setup_direct_call_args_x86(argc)
     emit_prepare_stack_call_args_x86(argc, 6)
@@ -2024,9 +2029,48 @@ fn emit_call_rax_x86(argc: i64) with Mut {
     emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
 }
 
+fn emit_gpu_ffi_call_rax_x86(argc: i64) with Mut {
+    let regc: i64 = 6
+    let extra = call_extra_stack_args_x86(argc, regc)
+    let need_pad = (GPU_FFI_LIVE_QWORDS + argc + extra) & 1
+    let bias_bytes = need_pad * 8
+    // Preserve the callee before using rax as a scratch register while
+    // materializing stack-passed arguments for wide CUDA driver calls.
+    em(0x49); em(0x89); em(0xc3)
+    if need_pad != 0 {
+        em(0x48); em(0x83); em(0xec); em(8)
+    }
+    var arg_idx: i64 = 0
+    while arg_idx < argc && arg_idx < regc {
+        emit_load_rsp_arg_x86(arg_idx, bias_bytes + (argc - 1 - arg_idx) * 8)
+        arg_idx = arg_idx + 1
+    }
+    if extra > 1 {
+        let scratch_bytes = extra * 8
+        if scratch_bytes < 128 {
+            em(0x48); em(0x83); em(0xec); em(scratch_bytes)
+        } else {
+            em(0x48); em(0x81); em(0xec); em32(scratch_bytes)
+        }
+        var i: i64 = 0
+        while i < extra {
+            emit_load_stack_qword_to_rax_x86(scratch_bytes + bias_bytes + i * 8)
+            let dst = (extra - 1 - i) * 8
+            if dst == 0 {
+                em(0x48); em(0x89); em(0x04); em(0x24)
+            } else {
+                em(0x48); em(0x89); em(0x84); em(0x24); em32(dst)
+            }
+            i = i + 1
+        }
+    }
+    em(0x41); em(0xff); em(0xd3)
+    emit_drop_call_args_x86(argc + extra + need_pad)
+}
+
 fn emit_call_abs_qword_x86(addr: i64, argc: i64) with Mut {
     emit_load_abs_qword_to_rax_x86(addr)
-    emit_call_rax_x86(argc)
+    emit_gpu_ffi_call_rax_x86(argc)
 }
 
 fn emit_jmp_rax_x86() with Mut {
@@ -2075,6 +2119,38 @@ fn emit_inline_cstr_from_ptx_x86(off: i64, len: i64) with Mut, Panic {
     em(0)
     let disp = start - (CL + 7)
     em(0x48); em(0x8d); em(0x05); em32(disp)
+}
+
+fn emit_inline_cstr_from_string_and_ptx_x86(prefix: string, off: i64, len: i64) with Mut, Panic, Div {
+    let prefix_len = str_len(prefix)
+    em(0xe9)
+    em32(prefix_len + len + 1)
+    let start = CL
+    var i: i64 = 0
+    while i < prefix_len {
+        em(str_char_at(prefix, i))
+        i = i + 1
+    }
+    i = 0
+    while i < len {
+        em(PTX_DATA[(off + i) as usize] as i64 & 0xFF)
+        i = i + 1
+    }
+    em(0)
+    let disp = start - (CL + 7)
+    em(0x48); em(0x8d); em(0x05); em32(disp)
+}
+
+fn emit_inline_kernel_module_ptx_x86(fi: i64) with Mut, Panic, Div {
+    let off = FN_PTX_OFF[fi as usize]
+    let len = FN_PTX_LEN[fi as usize]
+    let entry_off = ptx_find_entry_start(off, len)
+    let entry_len = (off + len) - entry_off
+    emit_inline_cstr_from_string_and_ptx_x86(
+        ".version 8.0\n.target sm_80\n.address_size 64\n\n",
+        entry_off,
+        entry_len
+    )
 }
 
 fn emit_gpu_diag_once_x86(msg: string) with Mut, Panic, Div {
@@ -11671,6 +11747,8 @@ fn emit_kernel_dispatch_vec_slice_f64_x86(fi: i64, abi_argc: i64) with Mut, Pani
     let role1 = FN_PTX_PARAM_ROLES[(fi * 8 + 1) as usize]
     let role2 = FN_PTX_PARAM_ROLES[(fi * 8 + 2) as usize]
     let role3 = FN_PTX_PARAM_ROLES[(fi * 8 + 3) as usize]
+    let saved_gpu_ffi_live_qwords = GPU_FFI_LIVE_QWORDS
+    GPU_FFI_LIVE_QWORDS = abi_argc
 
     NEEDS_GPU_RUNTIME_DYNLINK = 1
     emit_try_gpu_runtime_init_x86()
@@ -11695,6 +11773,7 @@ fn emit_kernel_dispatch_vec_slice_f64_x86(fi: i64, abi_argc: i64) with Mut, Pani
     let module_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let func_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let grid_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let gpu_rc_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let param0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let param1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let param2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
@@ -11744,7 +11823,7 @@ fn emit_kernel_dispatch_vec_slice_f64_x86(fi: i64, abi_argc: i64) with Mut, Pani
     emit_store_var(grid_slot)
 
     emit_lea_var(module_slot); em(0x50)
-    emit_inline_cstr_from_ptx_x86(FN_PTX_OFF[fi as usize], FN_PTX_LEN[fi as usize]); em(0x50)
+    emit_inline_kernel_module_ptx_x86(fi); em(0x50)
     emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMODULELOADDATA_PTR_BSS_OFF, 2)
     em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail = CL; em32(0)
 
@@ -11806,10 +11885,12 @@ fn emit_kernel_dispatch_vec_slice_f64_x86(fi: i64, abi_argc: i64) with Mut, Pani
     if gpu_param_kind_is_slice(kind1) { emit_load_var(arg1_dptr_slot); emit_store_var(param1_slot) }
     if gpu_param_kind_is_slice(kind2) { emit_load_var(arg2_dptr_slot); emit_store_var(param2_slot) }
     if gpu_param_kind_is_slice(kind3) { emit_load_var(arg3_dptr_slot); emit_store_var(param3_slot) }
-    emit_lea_var(param0_slot); emit_store_var(paddr0_slot)
-    emit_lea_var(param1_slot); emit_store_var(paddr1_slot)
-    emit_lea_var(param2_slot); emit_store_var(paddr2_slot)
-    emit_lea_var(param3_slot); emit_store_var(paddr3_slot)
+    // Local slots grow downward, so materialize the pointer array in reverse
+    // slot order and pass the lowest-addressed cell as kernelParams.
+    emit_lea_var(param3_slot); emit_store_var(paddr0_slot)
+    emit_lea_var(param2_slot); emit_store_var(paddr1_slot)
+    emit_lea_var(param1_slot); emit_store_var(paddr2_slot)
+    emit_lea_var(param0_slot); emit_store_var(paddr3_slot)
 
     emit_load_var(func_slot); em(0x50)
     emit_load_var(grid_slot); em(0x50)
@@ -11820,7 +11901,7 @@ fn emit_kernel_dispatch_vec_slice_f64_x86(fi: i64, abi_argc: i64) with Mut, Pani
     emit_imm64(1); em(0x50)
     emit_imm64(0); em(0x50)
     emit_imm64(0); em(0x50)
-    emit_lea_var(paddr0_slot); em(0x50)
+    emit_lea_var(paddr3_slot); em(0x50)
     emit_imm64(0); em(0x50)
     emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF, 11)
     em(0x85); em(0xc0); em(0x0f); em(0x85); let gpu_fail_i = CL; em32(0)
@@ -11884,10 +11965,27 @@ fn emit_kernel_dispatch_vec_slice_f64_x86(fi: i64, abi_argc: i64) with Mut, Pani
     if gpu_fail_k >= 0 { patch32(gpu_fail_k, CL) }
     if gpu_fail_l >= 0 { patch32(gpu_fail_l, CL) }
     if gpu_fail_m >= 0 { patch32(gpu_fail_m, CL) }
+    emit_store_var(gpu_rc_slot)
+    emit_load_var(gpu_rc_slot)
+    em(0x48); em(0x3d); em32(221)
+    em(0x0f); em(0x85)
+    let gpu_not_jit_missing = CL
+    em32(0)
+    emit_mark_gpu_unavailable_x86("GPU unavailable: libnvidia-ptxjitcompiler.so missing (CUDA rc 221)\n")
+    em(0xe9)
+    let gpu_diag_done = CL
+    em32(0)
+    patch32(gpu_not_jit_missing, CL)
+    emit_inline_cstr_from_string_x86("GPU runtime CUDA rc=")
+    emit_print_cstr()
+    emit_load_var(gpu_rc_slot)
+    emit_print_int()
     emit_mark_gpu_unavailable_x86("GPU unavailable: CUDA kernel launch failed\n")
+    patch32(gpu_diag_done, CL)
     patch32(cpu_fallback, CL)
     emit_kernel_cpu_direct_call_x86(fi, abi_argc)
     patch32(done, CL)
+    GPU_FFI_LIVE_QWORDS = saved_gpu_ffi_live_qwords
 }
 
 fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
