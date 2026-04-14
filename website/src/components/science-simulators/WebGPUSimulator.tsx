@@ -3,6 +3,10 @@ import { SimulatorShell } from './SimulatorShell';
 
 type LogLine = { text: string; type: 'info' | 'warn' | 'error' | 'success' };
 
+interface WebGPUSimulatorProps {
+  variant?: 'full' | 'hero';
+}
+
 function drawFallback(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -65,11 +69,12 @@ function drawFallback(
   }
 }
 
-export function WebGPUSimulator() {
+export function WebGPUSimulator({ variant = 'full' }: WebGPUSimulatorProps) {
+  const heroVariant = variant === 'hero';
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [uncertainty, setUncertainty] = useState(34);
-  const [density, setDensity] = useState(48);
-  const [pulse, setPulse] = useState(58);
+  const [uncertainty, setUncertainty] = useState(heroVariant ? 22 : 34);
+  const [density, setDensity] = useState(heroVariant ? 68 : 48);
+  const [pulse, setPulse] = useState(heroVariant ? 76 : 58);
   const [mode, setMode] = useState<'probing' | 'webgpu' | 'fallback'>('probing');
   const [logLines, setLogLines] = useState<LogLine[]>([]);
 
@@ -405,6 +410,53 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
       </div>
     </div>
   );
+
+  if (heroVariant) {
+    return (
+      <div className="hero-gpu-shell glass glass-specular rounded-[var(--radius-2xl)] overflow-hidden border border-[var(--glass-border)] relative z-10">
+        <div className="relative min-h-[420px] overflow-hidden bg-[linear-gradient(160deg,rgba(4,14,24,0.92),rgba(8,19,34,0.82))]">
+          <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+          <div className="absolute left-4 top-4 z-10 rounded-full border border-[rgba(255,255,255,0.12)] bg-[rgba(7,10,18,0.72)] px-3 py-1 text-[0.68rem] font-semibold uppercase tracking-[0.1em] text-[var(--color-text-secondary)]">
+            {mode === 'webgpu' ? 'Browser GPU active' : mode === 'fallback' ? 'Canvas fallback' : 'Capability probe'}
+          </div>
+          <div className="absolute inset-x-0 bottom-0 z-10 bg-[linear-gradient(180deg,transparent,rgba(3,8,16,0.94))] p-5">
+            <div className="grid gap-4 md:grid-cols-[1.2fr_0.8fr] md:items-end">
+              <div className="grid gap-2">
+                <span className="text-[0.68rem] font-semibold uppercase tracking-[0.1em] text-[var(--color-accent-gold-soft)]">
+                  Live proof object
+                </span>
+                <h3 className="text-[1.35rem] font-semibold text-[var(--color-text-primary)]">
+                  Provenance field with visible uncertainty transport
+                </h3>
+                <p className="max-w-[42ch] text-[0.9rem] text-[var(--color-text-secondary)]">
+                  A storefront-grade GPU object: WebGPU when the browser permits it, deterministic fallback when it does not.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-[var(--radius-lg)] border border-[rgba(255,255,255,0.12)] bg-[rgba(5,10,18,0.68)] px-3 py-3">
+                  <div className="text-[0.68rem] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">Lattice</div>
+                  <div className="mt-1 text-[0.95rem] font-semibold text-[var(--color-text-primary)]">{summary.lattice}</div>
+                </div>
+                <div className="rounded-[var(--radius-lg)] border border-[rgba(255,255,255,0.12)] bg-[rgba(5,10,18,0.68)] px-3 py-3">
+                  <div className="text-[0.68rem] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">Projected lanes</div>
+                  <div className="mt-1 text-[0.95rem] font-semibold text-[var(--color-text-primary)]">{summary.laneCount}</div>
+                </div>
+                <div className="rounded-[var(--radius-lg)] border border-[rgba(255,255,255,0.12)] bg-[rgba(5,10,18,0.68)] px-3 py-3">
+                  <div className="text-[0.68rem] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">Gate</div>
+                  <div className="mt-1 text-[0.95rem] font-semibold text-[var(--color-text-primary)]">{uncertainty}%</div>
+                </div>
+                <div className="rounded-[var(--radius-lg)] border border-[rgba(255,255,255,0.12)] bg-[rgba(5,10,18,0.68)] px-3 py-3">
+                  <div className="text-[0.68rem] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">Pulse</div>
+                  <div className="mt-1 text-[0.95rem] font-semibold text-[var(--color-text-primary)]">{pulse}%</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <SimulatorShell
