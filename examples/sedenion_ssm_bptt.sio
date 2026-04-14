@@ -1,0 +1,571 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S-SSM BPTT: gradient descent on α — basin of attraction + multi-basin map
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The sweep in sedenion_ssm_deep.sio maps a global minimum at α ≈ 0.2. BPTT
+// here asks two questions at once:
+//
+//   (1) Is the G₂ basin a learnable attractor of gradient flow?  Init 0.1
+//       should descend to α ≈ 0.2 with MSE ≈ 0.15 (matching the sweep).
+//   (2) What does the landscape look like elsewhere?  The sweep shows a peak
+//       at α ≈ 0.5 — expect inits 0.5 and 0.9 to fall into local minima on
+//       the far side of the barrier, with MSE worse than the global basin.
+//
+// Also verified: the Wirtinger gradient through sed_mul (grad * conj(b)) is
+// nearly exact for this scalar projection — the 16→1 projection to α averages
+// out the non-associativity error.  See finite-difference check.
+//
+// ─── Backward chain (per-timestep contributions accumulated) ──────────────────
+//   Forward : raw_t = A ⊗ h_{t-1} + B · x_t
+//             act_t = tanh(raw_t)  (elementwise)
+//             h_t   = act_t / ‖act_t‖
+//             y_t   = dot(h_t, C)
+//
+//   ∂L/∂y_t        = (2/64)·(y_t − target_t)
+//   ∂L/∂h_t        ← ∂L/∂y_t · C  + upstream ∂L/∂h_{t-1} from step t+1
+//   ∂L/∂act_t      = dnormalize(∂L/∂h_t, h_t, ‖act_t‖)
+//                   = (g − h_t · dot(h_t, g)) / ‖act_t‖
+//   ∂L/∂raw_t      = ∂L/∂act_t ⊙ (1 − act_t²)     (elementwise; act_t = h_t·‖act‖)
+//   ∂L/∂A         += sed_mul(∂L/∂raw_t, conj(h_{t-1}))   Wirtinger
+//   ∂L/∂h_{t-1}   = sed_mul(conj(A), ∂L/∂raw_t)          Wirtinger
+//
+//   A(α) = normalize(u(α)),  u(α) = a_generic + α·(zd_n − a_generic)
+//   ∂A/∂α = (du/dα − A·dot(A, du/dα)) / ‖u‖,   du/dα = zd_n − a_generic
+//   ∂L/∂α = dot(∂L/∂A, ∂A/∂α)
+//
+// B = e0 (fixed). C trained with lr_c = 1.0. α trained with lr_α = 0.01.
+
+use math::sedenion::*;
+
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+
+fn sqrt_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i: i64 = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn exp_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_s(10.0) * exp_s(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var s: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i <= 20 {
+        term = term * x / (i as f64)
+        s = s + term
+        i = i + 1
+    }
+    s
+}
+
+fn tanh_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 10.0 { return 1.0 }
+    if x < 0.0 - 10.0 { return 0.0 - 1.0 }
+    let e2: f64 = exp_s(2.0 * x)
+    (e2 - 1.0) / (e2 + 1.0)
+}
+
+fn sin_s(x: f64) -> f64 with Mut, Div, Panic {
+    let pi2: f64 = 6.28318530718
+    var xr: f64 = x
+    while xr > 3.14159265359 { xr = xr - pi2 }
+    while xr < 0.0 - 3.14159265359 { xr = xr + pi2 }
+    let x2: f64 = xr * xr
+    let x3: f64 = x2 * xr
+    let x5: f64 = x3 * x2
+    let x7: f64 = x5 * x2
+    let x9: f64 = x7 * x2
+    xr - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0
+}
+
+// ─── Target / input ───────────────────────────────────────────────────────────
+
+var TARGET: [f64; 80] = [0.0; 80]
+var INPUT:  [f64; 80] = [0.0; 80]
+
+fn init_task() with Mut, Div, Panic {
+    var t: i64 = 0
+    while t < 80 {
+        let v: f64 = sin_s((t as f64) * 6.28318530718 / 20.0)
+        TARGET[t] = v
+        INPUT[t]  = v * 0.5
+        t = t + 1
+    }
+}
+
+// ─── C weight (fixed-point storage) ───────────────────────────────────────────
+
+var WC: [i64; 16] = [0; 16]
+
+fn cg(i: i64) -> f64 with Div { (WC[i] as f64) / 100000000.0 }
+fn cs(i: i64, v: f64) with Mut { WC[i] = (v * 100000000.0) as i64 }
+
+fn get_c() -> Sedenion with Div {
+    Sedenion {
+        e0:  cg(0),  e1:  cg(1),  e2:  cg(2),  e3:  cg(3),
+        e4:  cg(4),  e5:  cg(5),  e6:  cg(6),  e7:  cg(7),
+        e8:  cg(8),  e9:  cg(9),  e10: cg(10), e11: cg(11),
+        e12: cg(12), e13: cg(13), e14: cg(14), e15: cg(15)
+    }
+}
+
+fn init_c() with Mut { var i: i64 = 0; while i < 16 { WC[i] = 0; i = i + 1 } }
+
+// ─── Hidden state trajectory + activation norm ────────────────────────────────
+
+var H0:  [f64; 64] = [0.0; 64]
+var H1:  [f64; 64] = [0.0; 64]
+var H2:  [f64; 64] = [0.0; 64]
+var H3:  [f64; 64] = [0.0; 64]
+var H4:  [f64; 64] = [0.0; 64]
+var H5:  [f64; 64] = [0.0; 64]
+var H6:  [f64; 64] = [0.0; 64]
+var H7:  [f64; 64] = [0.0; 64]
+var H8:  [f64; 64] = [0.0; 64]
+var H9:  [f64; 64] = [0.0; 64]
+var H10: [f64; 64] = [0.0; 64]
+var H11: [f64; 64] = [0.0; 64]
+var H12: [f64; 64] = [0.0; 64]
+var H13: [f64; 64] = [0.0; 64]
+var H14: [f64; 64] = [0.0; 64]
+var H15: [f64; 64] = [0.0; 64]
+
+var ACT_NORM: [f64; 64] = [0.0; 64]
+
+fn save_h(t: i64, h: Sedenion, an: f64) with Mut {
+    H0[t]  = h.e0;  H1[t]  = h.e1;  H2[t]  = h.e2;  H3[t]  = h.e3
+    H4[t]  = h.e4;  H5[t]  = h.e5;  H6[t]  = h.e6;  H7[t]  = h.e7
+    H8[t]  = h.e8;  H9[t]  = h.e9;  H10[t] = h.e10; H11[t] = h.e11
+    H12[t] = h.e12; H13[t] = h.e13; H14[t] = h.e14; H15[t] = h.e15
+    ACT_NORM[t] = an
+}
+
+fn load_h(t: i64) -> Sedenion {
+    Sedenion {
+        e0:  H0[t],  e1:  H1[t],  e2:  H2[t],  e3:  H3[t],
+        e4:  H4[t],  e5:  H5[t],  e6:  H6[t],  e7:  H7[t],
+        e8:  H8[t],  e9:  H9[t],  e10: H10[t], e11: H11[t],
+        e12: H12[t], e13: H13[t], e14: H14[t], e15: H15[t]
+    }
+}
+
+// act_t reconstructed as h_t · ACT_NORM[t]
+fn load_act(t: i64) -> Sedenion with Div { sed_scale(load_h(t), ACT_NORM[t]) }
+
+// ─── Forward pass: records h trajectory and ACT_NORM ─────────────────────────
+
+fn ssm_forward(a: Sedenion, b: Sedenion) with Mut, Div, Panic {
+    var h: Sedenion = sed_one()
+    var t: i64 = 0
+    while t < 64 {
+        let x: f64 = INPUT[t]
+        let ah: Sedenion = sed_mul(a, h)
+        let bx: Sedenion = sed_scale(b, x)
+        let raw: Sedenion = sed_add(ah, bx)
+        let act: Sedenion = sed_tanh(raw)
+        let n: f64 = sed_norm(act)
+        var hn: Sedenion = act
+        var nn: f64 = n
+        if n < 0.0000001 { nn = 0.0000001 }
+        hn = sed_scale(act, 1.0 / nn)
+        h = hn
+        save_h(t, h, nn)
+        t = t + 1
+    }
+}
+
+// ─── Loss ─────────────────────────────────────────────────────────────────────
+
+fn train_mse() -> f64 with Div, Panic {
+    let c: Sedenion = get_c()
+    var sum: f64 = 0.0
+    var t: i64 = 0
+    while t < 64 {
+        let h: Sedenion = load_h(t)
+        let y: f64 = sed_dot(h, c)
+        let err: f64 = y - TARGET[t]
+        sum = sum + err * err
+        t = t + 1
+    }
+    sum / 64.0
+}
+
+// ─── Backward: returns grad_A (accumulated); also fills grad_C global ─────────
+
+var GC: [f64; 16] = [0.0; 16]
+
+// Normalize gradient:  h = v/‖v‖  ⇒  dL/dv = (dL/dh − h·dot(h, dL/dh)) / ‖v‖
+fn dnormalize(g: Sedenion, h_unit: Sedenion, act_norm: f64) -> Sedenion with Div, Panic {
+    let dp: f64 = sed_dot(h_unit, g)
+    let proj: Sedenion = sed_scale(h_unit, dp)
+    let diff: Sedenion = sed_add(g, sed_scale(proj, 0.0 - 1.0))
+    var nn: f64 = act_norm
+    if nn < 0.0000001 { nn = 0.0000001 }
+    sed_scale(diff, 1.0 / nn)
+}
+
+// Elementwise multiply sedenion g by (1 − act²) for tanh' gradient.
+fn tanh_backward(g: Sedenion, act: Sedenion) -> Sedenion {
+    Sedenion {
+        e0:  g.e0  * (1.0 - act.e0  * act.e0),
+        e1:  g.e1  * (1.0 - act.e1  * act.e1),
+        e2:  g.e2  * (1.0 - act.e2  * act.e2),
+        e3:  g.e3  * (1.0 - act.e3  * act.e3),
+        e4:  g.e4  * (1.0 - act.e4  * act.e4),
+        e5:  g.e5  * (1.0 - act.e5  * act.e5),
+        e6:  g.e6  * (1.0 - act.e6  * act.e6),
+        e7:  g.e7  * (1.0 - act.e7  * act.e7),
+        e8:  g.e8  * (1.0 - act.e8  * act.e8),
+        e9:  g.e9  * (1.0 - act.e9  * act.e9),
+        e10: g.e10 * (1.0 - act.e10 * act.e10),
+        e11: g.e11 * (1.0 - act.e11 * act.e11),
+        e12: g.e12 * (1.0 - act.e12 * act.e12),
+        e13: g.e13 * (1.0 - act.e13 * act.e13),
+        e14: g.e14 * (1.0 - act.e14 * act.e14),
+        e15: g.e15 * (1.0 - act.e15 * act.e15)
+    }
+}
+
+// Compute ∂L/∂A (accumulated) and fill GC[0..15] with ∂L/∂C.
+// Returns grad_A sedenion.
+fn backward(a: Sedenion) -> Sedenion with Mut, Div, Panic {
+    let c: Sedenion = get_c()
+
+    // zero grad accumulators
+    var i: i64 = 0
+    while i < 16 { GC[i] = 0.0; i = i + 1 }
+    var grad_a: Sedenion = Sedenion {
+        e0:0.0, e1:0.0, e2:0.0, e3:0.0, e4:0.0, e5:0.0, e6:0.0, e7:0.0,
+        e8:0.0, e9:0.0, e10:0.0, e11:0.0, e12:0.0, e13:0.0, e14:0.0, e15:0.0
+    }
+    var grad_h_upstream: Sedenion = Sedenion {
+        e0:0.0, e1:0.0, e2:0.0, e3:0.0, e4:0.0, e5:0.0, e6:0.0, e7:0.0,
+        e8:0.0, e9:0.0, e10:0.0, e11:0.0, e12:0.0, e13:0.0, e14:0.0, e15:0.0
+    }
+
+    let a_conj: Sedenion = sed_conj(a)
+
+    // Iterate t = 63 down to 0
+    var t: i64 = 63
+    while t >= 0 {
+        let h_t: Sedenion = load_h(t)
+        let y_t: f64 = sed_dot(h_t, c)
+        let err: f64 = (y_t - TARGET[t]) * 2.0 / 64.0
+
+        // ∂L/∂C += err · h_t
+        GC[0]  = GC[0]  + err * h_t.e0
+        GC[1]  = GC[1]  + err * h_t.e1
+        GC[2]  = GC[2]  + err * h_t.e2
+        GC[3]  = GC[3]  + err * h_t.e3
+        GC[4]  = GC[4]  + err * h_t.e4
+        GC[5]  = GC[5]  + err * h_t.e5
+        GC[6]  = GC[6]  + err * h_t.e6
+        GC[7]  = GC[7]  + err * h_t.e7
+        GC[8]  = GC[8]  + err * h_t.e8
+        GC[9]  = GC[9]  + err * h_t.e9
+        GC[10] = GC[10] + err * h_t.e10
+        GC[11] = GC[11] + err * h_t.e11
+        GC[12] = GC[12] + err * h_t.e12
+        GC[13] = GC[13] + err * h_t.e13
+        GC[14] = GC[14] + err * h_t.e14
+        GC[15] = GC[15] + err * h_t.e15
+
+        // ∂L/∂h_t = err · C + grad_h_upstream
+        let from_output: Sedenion = sed_scale(c, err)
+        let grad_h_t: Sedenion = sed_add(from_output, grad_h_upstream)
+
+        // Backward through normalize and tanh
+        let act_t: Sedenion = load_act(t)
+        let grad_act: Sedenion = dnormalize(grad_h_t, h_t, ACT_NORM[t])
+        let grad_raw: Sedenion = tanh_backward(grad_act, act_t)
+
+        // Previous state (h_{-1} = sed_one())
+        var h_prev: Sedenion = sed_one()
+        if t > 0 { h_prev = load_h(t - 1) }
+
+        // ∂L/∂A += grad_raw * conj(h_prev)   [Wirtinger]
+        let grad_a_step: Sedenion = sed_mul(grad_raw, sed_conj(h_prev))
+        grad_a = sed_add(grad_a, grad_a_step)
+
+        // ∂L/∂h_{t-1} = conj(A) * grad_raw   [Wirtinger]
+        grad_h_upstream = sed_mul(a_conj, grad_raw)
+
+        t = t - 1
+    }
+
+    grad_a
+}
+
+// ─── ∂α via projection: dA/dα then dot with grad_A ────────────────────────────
+
+fn alpha_dir(a_generic: Sedenion, zd_n: Sedenion, alpha: f64) -> Sedenion with Div, Panic {
+    // u(α) = a_generic + α·(zd_n − a_generic);  A = u / ‖u‖
+    let du: Sedenion = sed_add(zd_n, sed_scale(a_generic, 0.0 - 1.0))
+    let u: Sedenion = sed_add(a_generic, sed_scale(du, alpha))
+    let un: f64 = sed_norm(u)
+    if un < 0.0000001 { return du }
+    let u_hat: Sedenion = sed_scale(u, 1.0 / un)
+    // dA/dα = (du − u_hat · dot(u_hat, du)) / ‖u‖
+    let dp: f64 = sed_dot(u_hat, du)
+    let proj: Sedenion = sed_scale(u_hat, dp)
+    let diff: Sedenion = sed_add(du, sed_scale(proj, 0.0 - 1.0))
+    sed_scale(diff, 1.0 / un)
+}
+
+fn make_a(a_generic: Sedenion, zd_n: Sedenion, alpha: f64) -> Sedenion with Div, Panic {
+    sed_normalize(sed_lerp(a_generic, zd_n, alpha))
+}
+
+// ─── Update helpers ───────────────────────────────────────────────────────────
+
+fn update_c(lr: f64) with Mut, Div {
+    var i: i64 = 0
+    while i < 16 { cs(i, cg(i) - lr * GC[i]); i = i + 1 }
+}
+
+// ─── Training driver (returns final α, final train MSE in globals) ────────────
+
+var FINAL_ALPHA: f64 = 0.0
+var FINAL_MSE:   f64 = 0.0
+var FINAL_G:     f64 = 0.0     // final |∂L/∂α|
+
+fn train_bptt(
+    a_generic: Sedenion, zd_n: Sedenion, b: Sedenion,
+    alpha_init: f64, epochs: i64, lr_alpha: f64, lr_c: f64
+) with Mut, Div, Panic {
+    init_c()
+    var alpha: f64 = alpha_init
+    var ep: i64 = 0
+    var last_g: f64 = 0.0
+    while ep < epochs {
+        var a_cur: Sedenion = make_a(a_generic, zd_n, alpha)
+        ssm_forward(a_cur, b)
+        let grad_a: Sedenion = backward(a_cur)
+        let da_dalpha: Sedenion = alpha_dir(a_generic, zd_n, alpha)
+        let g_alpha: f64 = sed_dot(grad_a, da_dalpha)
+        last_g = g_alpha
+        alpha = alpha - lr_alpha * g_alpha
+        // Clamp α to [−0.5, 1.5] so we don't wander off and divide by zero
+        if alpha < 0.0 - 0.5 { alpha = 0.0 - 0.5 }
+        if alpha > 1.5 { alpha = 1.5 }
+        update_c(lr_c)
+        ep = ep + 1
+    }
+    let a_final: Sedenion = make_a(a_generic, zd_n, alpha)
+    ssm_forward(a_final, b)
+    FINAL_ALPHA = alpha
+    FINAL_MSE   = train_mse()
+    FINAL_G     = last_g
+}
+
+// ─── Finite-difference gradient check at a single α ───────────────────────────
+// Perturb α by ±h, compute MSE, report (MSE(α+h) − MSE(α−h)) / (2h).
+// Compare to the analytical gradient at that α (with C held at 0 init).
+
+var FD_ANALYTIC: f64 = 0.0
+var FD_NUMERIC:  f64 = 0.0
+
+fn fd_grad_check(
+    a_generic: Sedenion, zd_n: Sedenion, b: Sedenion, alpha: f64
+) with Mut, Div, Panic {
+    init_c()
+    // set C to a fixed non-zero vector so gradient is non-trivial
+    var i: i64 = 0
+    while i < 16 {
+        let v: f64 = ((i as f64) - 7.5) * 0.05
+        cs(i, v)
+        i = i + 1
+    }
+    // Analytic
+    let a_cur: Sedenion = make_a(a_generic, zd_n, alpha)
+    ssm_forward(a_cur, b)
+    let grad_a: Sedenion = backward(a_cur)
+    let da_dalpha: Sedenion = alpha_dir(a_generic, zd_n, alpha)
+    FD_ANALYTIC = sed_dot(grad_a, da_dalpha)
+
+    // Numeric (central difference)
+    let h: f64 = 0.001
+    let a_plus: Sedenion = make_a(a_generic, zd_n, alpha + h)
+    ssm_forward(a_plus, b)
+    let mse_plus: f64 = train_mse()
+    let a_minus: Sedenion = make_a(a_generic, zd_n, alpha - h)
+    ssm_forward(a_minus, b)
+    let mse_minus: f64 = train_mse()
+    FD_NUMERIC = (mse_plus - mse_minus) / (2.0 * h)
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    init_task()
+
+    let zd: Sedenion = sed_known_zero_divisor()
+    let zd_n: Sedenion = sed_normalize(zd)
+    let ag_raw: Sedenion = sed_add(sed_basis(0, 1.0), sed_basis(1, 1.0))
+    let a_generic: Sedenion = sed_normalize(ag_raw)
+    let b: Sedenion = sed_one()
+
+    println("═══════════════════════════════════════════════════════")
+    println("  S-SSM BPTT: scalar alpha gradient descent")
+    println("  Three inits {0.1, 0.5, 0.9} → convergence to G2 basin?")
+    println("  lr_alpha=0.01  lr_c=1.0  epochs=200  T=80 (train=64)")
+    println("═══════════════════════════════════════════════════════")
+    println("")
+
+    // ── Finite-difference gradient sanity check at α=0.3 ─────────────────────
+    println("=== Finite-difference gradient check at alpha=0.3 ===")
+    fd_grad_check(a_generic, zd_n, b, 0.3)
+    print("  analytic grad dL/dα = "); print(FD_ANALYTIC); println("")
+    print("  numeric  grad dL/dα = "); print(FD_NUMERIC);  println("")
+    let fd_num_abs: f64 = abs_s(FD_NUMERIC)
+    let fd_diff: f64 = FD_ANALYTIC - FD_NUMERIC
+    let fd_abs_err: f64 = abs_s(fd_diff)
+    var fd_rel_err: f64 = 0.0
+    if fd_num_abs > 0.0001 { fd_rel_err = fd_abs_err / fd_num_abs }
+    print("  |abs err| = "); print(fd_abs_err)
+    print("  |rel err| = "); print(fd_rel_err); println("")
+    println("")
+
+    // ── Three BPTT runs from different α initializations ────────────────────
+    println("=== BPTT training runs ===")
+
+    train_bptt(a_generic, zd_n, b, 0.1, 200, 0.01, 1.0)
+    let alpha_from_01: f64 = FINAL_ALPHA
+    let mse_from_01:   f64 = FINAL_MSE
+    let gfinal_01:     f64 = FINAL_G
+    print("  init=0.1  final alpha="); print(alpha_from_01)
+    print("  MSE=");                   print(mse_from_01)
+    print("  |dL/dα|_end=");           print(abs_s(gfinal_01)); println("")
+
+    train_bptt(a_generic, zd_n, b, 0.5, 200, 0.01, 1.0)
+    let alpha_from_05: f64 = FINAL_ALPHA
+    let mse_from_05:   f64 = FINAL_MSE
+    let gfinal_05:     f64 = FINAL_G
+    print("  init=0.5  final alpha="); print(alpha_from_05)
+    print("  MSE=");                   print(mse_from_05)
+    print("  |dL/dα|_end=");           print(abs_s(gfinal_05)); println("")
+
+    train_bptt(a_generic, zd_n, b, 0.9, 200, 0.01, 1.0)
+    let alpha_from_09: f64 = FINAL_ALPHA
+    let mse_from_09:   f64 = FINAL_MSE
+    let gfinal_09:     f64 = FINAL_G
+    print("  init=0.9  final alpha="); print(alpha_from_09)
+    print("  MSE=");                   print(mse_from_09)
+    print("  |dL/dα|_end=");           print(abs_s(gfinal_09)); println("")
+    println("")
+
+    // Spread of converged α
+    var alpha_min: f64 = alpha_from_01
+    if alpha_from_05 < alpha_min { alpha_min = alpha_from_05 }
+    if alpha_from_09 < alpha_min { alpha_min = alpha_from_09 }
+    var alpha_max: f64 = alpha_from_01
+    if alpha_from_05 > alpha_max { alpha_max = alpha_from_05 }
+    if alpha_from_09 > alpha_max { alpha_max = alpha_from_09 }
+    let alpha_spread: f64 = alpha_max - alpha_min
+
+    println("───────────────────────────────────────────────────────")
+    print("  alpha range across inits: ["); print(alpha_min)
+    print(", ");                             print(alpha_max); println("]")
+    print("  spread = "); print(alpha_spread); println("")
+    println("───────────────────────────────────────────────────────")
+    println("")
+
+    // ── Assertions ───────────────────────────────────────────────────────────
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // T1: finite-difference and analytic agree to 1% relative error. The
+    //     Wirtinger gradient through sed_mul is exact for associative algebras
+    //     and an approximation for sedenions; the 16→1 projection to scalar α
+    //     averages the non-associativity error, giving near-exact agreement.
+    if fd_rel_err < 0.01 {
+        print("T1 PASS: |rel err| = "); print(fd_rel_err); println(" < 0.01")
+        passed = passed + 1
+    } else {
+        print("T1 FAIL: |rel err| = "); print(fd_rel_err); println("")
+        failed = failed + 1
+    }
+
+    // T2: init=0.1 converges into the G₂ basin [0.05, 0.35] (attractor test)
+    if alpha_from_01 >= 0.05 {
+        if alpha_from_01 <= 0.35 {
+            print("T2 PASS: init=0.1 -> alpha="); print(alpha_from_01)
+            println(" ∈ [0.05, 0.35]")
+            passed = passed + 1
+        } else {
+            print("T2 FAIL: init=0.1 -> alpha="); print(alpha_from_01); println("")
+            failed = failed + 1
+        }
+    } else {
+        print("T2 FAIL: init=0.1 -> alpha="); print(alpha_from_01); println("")
+        failed = failed + 1
+    }
+
+    // T3: init=0.1 final MSE < 0.25 (matches sweep α=0.2 → 0.154)
+    if mse_from_01 < 0.25 {
+        print("T3 PASS: init=0.1 MSE="); print(mse_from_01); println(" < 0.25")
+        passed = passed + 1
+    } else {
+        print("T3 FAIL: init=0.1 MSE="); print(mse_from_01); println("")
+        failed = failed + 1
+    }
+
+    // T4: init=0.1 final α within 0.05 of sweep grid optimum (0.2) — BPTT
+    //     and grid search agree on the basin minimum.
+    let alpha_dist: f64 = abs_s(alpha_from_01 - 0.2)
+    if alpha_dist <= 0.05 {
+        print("T4 PASS: init=0.1 |alpha - 0.2| = "); print(alpha_dist)
+        println(" <= 0.05")
+        passed = passed + 1
+    } else {
+        print("T4 FAIL: init=0.1 |alpha - 0.2| = "); print(alpha_dist); println("")
+        failed = failed + 1
+    }
+
+    // T5: multi-basin — inits 0.5 and 0.9 fall into local minima on the far
+    //     side of the α≈0.5 barrier with MSE strictly worse than the G₂ basin.
+    let mb_ok_05: bool = mse_from_05 > mse_from_01 + 0.05
+    let mb_ok_09: bool = mse_from_09 > mse_from_01 + 0.05
+    if mb_ok_05 {
+        if mb_ok_09 {
+            print("T5 PASS: inits 0.5, 0.9 trap at higher MSE ")
+            print("(MSE_05="); print(mse_from_05)
+            print(" MSE_09="); print(mse_from_09)
+            print(" vs G2 basin MSE="); print(mse_from_01); println(")")
+            passed = passed + 1
+        } else {
+            println("T5 FAIL: init=0.9 did not trap above G2 basin")
+            failed = failed + 1
+        }
+    } else {
+        println("T5 FAIL: init=0.5 did not trap above G2 basin")
+        failed = failed + 1
+    }
+
+    // T6: all three runs reached critical points (|dL/dα|_end < 5.0)
+    var small_grad: bool = true
+    if abs_s(gfinal_01) >= 5.0 { small_grad = false }
+    if abs_s(gfinal_05) >= 5.0 { small_grad = false }
+    if abs_s(gfinal_09) >= 5.0 { small_grad = false }
+    if small_grad {
+        println("T6 PASS: all three runs found critical points (|dL/dα| < 5.0)")
+        passed = passed + 1
+    } else {
+        println("T6 FAIL: some final |dL/dα| >= 5.0")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}
