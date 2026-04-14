@@ -1,0 +1,300 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THEOREM: Wirtinger gradient through Cayley-Dickson multiplication is EXACT
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// For f(A) = dot(grad, A*h) in any Cayley-Dickson algebra (quaternions,
+// octonions, sedenions, ...),
+//
+//   ∂f/∂A  =  grad * conj(h)                               (Wirtinger form)
+//
+// coincides *exactly* with the true componentwise gradient
+//
+//   (∂f/∂A)_j  =  dot(grad, e_j * h)
+//
+// because the adjoint relation
+//
+//   ⟨a·b, c⟩  =  ⟨a, c·conj(b)⟩
+//
+// holds in every CD algebra: conjugation is compatible with the inner
+// product by construction (|a|² = a·conj(a) = ⟨a,a⟩). This does NOT require
+// associativity or alternativity. Sedenion non-associativity shows up in
+// (ab)c ≠ a(bc); the adjoint is unaffected.
+//
+// Corollary: BPTT through sed_mul using `grad * conj(h)` is EXACT gradient
+// descent — not an approximation. This resolves the 2025 hypercomplex-NN
+// survey's "non-associativity challenge for training" worry for any CD
+// algebra. The 4-digit analytic/numeric agreement in
+// sedenion_ssm_bptt.sio was not coincidence; both compute the same quantity
+// and the tiny residual was finite-difference truncation.
+//
+// This file confirms the identity numerically at 500 random unit-sedenion
+// samples per α value, measuring `sed_mul(grad, conj(h)) − true_grad(grad,h)`
+// componentwise.
+
+use math::sedenion::*;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ─── RNG ──────────────────────────────────────────────────────────────────────
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+
+fn rng_next() -> i64 with Mut {
+    var x: i64 = RNG_A
+    let y: i64 = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r: i64 = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_pm() -> f64 with Mut, Div {
+    ((rng_next() % 2000) as f64 - 1000.0) / 1000.0
+}
+
+fn random_unit_sedenion() -> Sedenion with Mut, Div, Panic {
+    let s: Sedenion = Sedenion {
+        e0:  rand_pm(), e1:  rand_pm(), e2:  rand_pm(), e3:  rand_pm(),
+        e4:  rand_pm(), e5:  rand_pm(), e6:  rand_pm(), e7:  rand_pm(),
+        e8:  rand_pm(), e9:  rand_pm(), e10: rand_pm(), e11: rand_pm(),
+        e12: rand_pm(), e13: rand_pm(), e14: rand_pm(), e15: rand_pm()
+    }
+    sed_normalize(s)
+}
+
+fn from_arr(a: [f64; 16]) -> Sedenion {
+    Sedenion {
+        e0:  a[0],  e1:  a[1],  e2:  a[2],  e3:  a[3],
+        e4:  a[4],  e5:  a[5],  e6:  a[6],  e7:  a[7],
+        e8:  a[8],  e9:  a[9],  e10: a[10], e11: a[11],
+        e12: a[12], e13: a[13], e14: a[14], e15: a[15]
+    }
+}
+
+// ─── True gradient (exact per-component) ──────────────────────────────────────
+// (∂/∂A_j) dot(grad, A*h) = dot(grad, e_j * h) by linearity of mul in A.
+
+fn true_gradient(grad: Sedenion, h: Sedenion) -> Sedenion with Div, Panic {
+    var out: [f64; 16] = [0.0; 16]
+    var j: i64 = 0
+    while j < 16 {
+        let ej: Sedenion = sed_basis(j, 1.0)
+        let ej_h: Sedenion = sed_mul(ej, h)
+        out[j] = sed_dot(grad, ej_h)
+        j = j + 1
+    }
+    from_arr(out)
+}
+
+fn wirtinger_gradient(grad: Sedenion, h: Sedenion) -> Sedenion with Panic {
+    sed_mul(grad, sed_conj(h))
+}
+
+// ─── Per-sample residue ───────────────────────────────────────────────────────
+
+var LAST_TRUE_NORM:   f64 = 0.0
+var LAST_WIR_NORM:    f64 = 0.0
+var LAST_RES_NORM:    f64 = 0.0
+var LAST_NORM_DIFF:   f64 = 0.0
+
+fn measure_residue(grad: Sedenion, h: Sedenion) with Mut, Div, Panic {
+    let g_true: Sedenion = true_gradient(grad, h)
+    let g_wir:  Sedenion = wirtinger_gradient(grad, h)
+    let residue: Sedenion = sed_add(g_wir, sed_scale(g_true, 0.0 - 1.0))
+    let tn: f64 = sed_norm(g_true)
+    let wn: f64 = sed_norm(g_wir)
+    let rn: f64 = sed_norm(residue)
+    LAST_TRUE_NORM = tn
+    LAST_WIR_NORM  = wn
+    LAST_RES_NORM  = rn
+    LAST_NORM_DIFF = abs_s(tn - wn)
+}
+
+// ─── Accumulators ─────────────────────────────────────────────────────────────
+
+var SUM_RES:       f64 = 0.0
+var MAX_RES:       f64 = 0.0
+var SUM_NORM_DIFF: f64 = 0.0
+var MAX_NORM_DIFF: f64 = 0.0
+var COUNT:         i64 = 0
+
+fn accumulator_reset() with Mut {
+    SUM_RES = 0.0; MAX_RES = 0.0
+    SUM_NORM_DIFF = 0.0; MAX_NORM_DIFF = 0.0
+    COUNT = 0
+}
+
+fn accumulator_step() with Mut {
+    SUM_RES = SUM_RES + LAST_RES_NORM
+    if LAST_RES_NORM > MAX_RES { MAX_RES = LAST_RES_NORM }
+    SUM_NORM_DIFF = SUM_NORM_DIFF + LAST_NORM_DIFF
+    if LAST_NORM_DIFF > MAX_NORM_DIFF { MAX_NORM_DIFF = LAST_NORM_DIFF }
+    COUNT = COUNT + 1
+}
+
+var OUT_MEAN_RES:  f64 = 0.0
+var OUT_MAX_RES:   f64 = 0.0
+var OUT_MEAN_ND:   f64 = 0.0
+var OUT_MAX_ND:    f64 = 0.0
+
+fn run_residue_experiment(n_samples: i64) with Mut, Div, Panic {
+    accumulator_reset()
+    var i: i64 = 0
+    while i < n_samples {
+        let grad: Sedenion = random_unit_sedenion()
+        let h:    Sedenion = random_unit_sedenion()
+        measure_residue(grad, h)
+        accumulator_step()
+        i = i + 1
+    }
+    let denom: f64 = COUNT as f64
+    OUT_MEAN_RES = SUM_RES / denom
+    OUT_MAX_RES  = MAX_RES
+    OUT_MEAN_ND  = SUM_NORM_DIFF / denom
+    OUT_MAX_ND   = MAX_NORM_DIFF
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    rng_seed(2718281828, 3141592653)
+
+    println("═══════════════════════════════════════════════════════")
+    println("  THEOREM: Wirtinger gradient is exact for Cayley-Dickson")
+    println("  true_grad[j] = dot(grad, e_j * h)   (machine precision)")
+    println("  wir_grad     = grad * conj(h)       (Wirtinger)")
+    println("  residue r = wir − true,  over 500 random unit samples")
+    println("═══════════════════════════════════════════════════════")
+    println("")
+
+    // ── Single sanity sample ────────────────────────────────────────────────
+    let grad1: Sedenion = random_unit_sedenion()
+    let h1:    Sedenion = random_unit_sedenion()
+    measure_residue(grad1, h1)
+    println("=== Single sample sanity check ===")
+    print("  ‖true_grad‖ = "); print(LAST_TRUE_NORM); println("")
+    print("  ‖wir_grad‖  = "); print(LAST_WIR_NORM);  println("")
+    print("  ‖residue‖   = "); print(LAST_RES_NORM);  println("")
+    print("  |‖wir‖ − ‖true‖| = "); print(LAST_NORM_DIFF); println("")
+    println("")
+
+    // ── Full experiment ─────────────────────────────────────────────────────
+    println("=== 500 random unit (grad, h) pairs ===")
+    run_residue_experiment(500)
+    print("  mean ‖residue‖  = "); print(OUT_MEAN_RES); println("")
+    print("  max  ‖residue‖  = "); print(OUT_MAX_RES);  println("")
+    print("  mean |Δ‖·‖|     = "); print(OUT_MEAN_ND);  println("")
+    print("  max  |Δ‖·‖|     = "); print(OUT_MAX_ND);   println("")
+    println("")
+
+    let mean_res:  f64 = OUT_MEAN_RES
+    let max_res:   f64 = OUT_MAX_RES
+    let mean_nd:   f64 = OUT_MEAN_ND
+    let max_nd:    f64 = OUT_MAX_ND
+
+    // ── Non-associativity witness ───────────────────────────────────────────
+    // Confirm sedenions ARE non-associative (so the exact-gradient result is
+    // not trivially inherited from associativity). Scan random unit sedenion
+    // triples and report the largest associator ‖(a·b)·c − a·(b·c)‖.
+    println("=== Non-associativity witness (random triples) ===")
+    rng_seed(111, 222)
+    var best_assoc: f64 = 0.0
+    var tries: i64 = 0
+    while tries < 64 {
+        let a_na: Sedenion = random_unit_sedenion()
+        let b_na: Sedenion = random_unit_sedenion()
+        let c_na: Sedenion = random_unit_sedenion()
+        let ab_c: Sedenion = sed_mul(sed_mul(a_na, b_na), c_na)
+        let a_bc: Sedenion = sed_mul(a_na, sed_mul(b_na, c_na))
+        let diff: Sedenion = sed_add(ab_c, sed_scale(a_bc, 0.0 - 1.0))
+        let dn: f64 = sed_norm(diff)
+        if dn > best_assoc { best_assoc = dn }
+        tries = tries + 1
+    }
+    let assoc_diff_norm: f64 = best_assoc
+    print("  max over 64 random triples: ‖(a·b)·c − a·(b·c)‖ = ")
+    print(assoc_diff_norm); println("")
+    println("  (non-zero ⇒ sedenions are non-associative, as expected)")
+    println("")
+
+    println("───────────────────────────────────────────────────────")
+    println("  INTERPRETATION: mean residue norm ≈ 0 confirms")
+    println("  ⟨a·b, c⟩ = ⟨a, c·conj(b)⟩ for sedenions — the adjoint")
+    println("  identity is independent of associativity.")
+    println("  Sedenion BPTT via `grad * conj(h)` is EXACT.")
+    println("───────────────────────────────────────────────────────")
+    println("")
+
+    // ── Assertions ──────────────────────────────────────────────────────────
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // T1: mean residue is machine-precision zero
+    if mean_res < 0.0001 {
+        print("T1 PASS: mean ‖residue‖ = "); print(mean_res); println(" < 1e-4")
+        passed = passed + 1
+    } else {
+        print("T1 FAIL: mean ‖residue‖ = "); print(mean_res); println("")
+        failed = failed + 1
+    }
+
+    // T2: max residue is machine-precision zero (no bad outliers)
+    if max_res < 0.001 {
+        print("T2 PASS: max ‖residue‖ = "); print(max_res); println(" < 1e-3")
+        passed = passed + 1
+    } else {
+        print("T2 FAIL: max ‖residue‖ = "); print(max_res); println("")
+        failed = failed + 1
+    }
+
+    // T3: norms of Wirtinger and true gradients agree (both as 16-vectors)
+    if mean_nd < 0.0001 {
+        print("T3 PASS: mean |‖wir‖−‖true‖| = "); print(mean_nd); println(" < 1e-4")
+        passed = passed + 1
+    } else {
+        print("T3 FAIL: mean |‖wir‖−‖true‖| = "); print(mean_nd); println("")
+        failed = failed + 1
+    }
+
+    // T4: non-associativity witness actually exists (so the result isn't
+    //     trivially inherited from an associative algebra)
+    if assoc_diff_norm > 0.1 {
+        print("T4 PASS: non-associativity witness ‖Δ‖ = ")
+        print(assoc_diff_norm); println(" > 0.1 (sedenions genuinely non-assoc)")
+        passed = passed + 1
+    } else {
+        print("T4 FAIL: associator too small = "); print(assoc_diff_norm); println("")
+        failed = failed + 1
+    }
+
+    // T5: a fresh sample drawn with a different RNG seed also has zero residue
+    rng_seed(12345, 67890)
+    let gfs: Sedenion = random_unit_sedenion()
+    let hfs: Sedenion = random_unit_sedenion()
+    measure_residue(gfs, hfs)
+    let single_res: f64 = LAST_RES_NORM
+    if single_res < 0.0001 {
+        print("T5 PASS: fresh sample residue = "); print(single_res); println("")
+        passed = passed + 1
+    } else {
+        print("T5 FAIL: fresh residue = "); print(single_res); println("")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}
