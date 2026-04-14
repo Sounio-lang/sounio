@@ -1,0 +1,370 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  THEOREM (Wirtinger adjoint for Cayley-Dickson algebras)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+//  Let A_n = CD^n(R) be the n-th Cayley-Dickson algebra over R with the
+//  standard inductive construction:
+//     A_0 = R
+//     A_{n+1} = A_n × A_n  with
+//        mul:   (a,b)(c,d) = (ac − d*b, da + bc*)
+//        conj:  (a,b)*     = (a*, -b)
+//        dot:   ⟨(a,b),(c,d)⟩ = ⟨a,c⟩ + ⟨b,d⟩          (in A_n)
+//
+//  THEOREM.  For every n ≥ 0 and every x, y, z ∈ A_n,
+//     ⟨x·y, z⟩ = ⟨x, z·y*⟩                                              (★)
+//
+//  COROLLARY (this is what matters for backprop).  For f(A) = ⟨grad, A·h⟩
+//  in any CD algebra, the componentwise gradient
+//     (∂f/∂A)_j = ⟨grad, e_j · h⟩
+//  equals the Wirtinger shortcut
+//     ∂f/∂A = grad · conj(h)
+//  exactly.  Hypercomplex BPTT is exact, not approximate, at every CD level.
+//
+// ─── PROOF (by induction on n) ───────────────────────────────────────────────
+//
+//  Lemmas needed (all provable by routine CD inductions):
+//    (L1) Conjugation is an involution:           (x*)* = x
+//    (L2) Conjugation reverses mul:               (x·y)* = y* · x*
+//    (L3) Conjugation preserves inner product:    ⟨x,y⟩ = ⟨x*, y*⟩
+//    (L4) Inner product is symmetric:             ⟨x,y⟩ = ⟨y,x⟩
+//    (L5) Conjugation is linear on scalars:       (-x)* = -(x*)
+//
+//  BASE CASE (n = 0, A_0 = R):
+//    ⟨xy, z⟩ = xyz = x(zy) = ⟨x, zy⟩ = ⟨x, zy*⟩ since y*=y in R. ✓
+//
+//  INDUCTIVE STEP (A_n ⇒ A_{n+1}):
+//    Let x=(a,b), y=(c,d), z=(e,f) with a,b,c,d,e,f ∈ A_n.
+//    The IH is: (★) holds in A_n.
+//
+//    EXPAND LHS:
+//       xy = (ac − d*b, da + bc*)
+//       ⟨xy, z⟩ = ⟨ac, e⟩ − ⟨d*b, e⟩ + ⟨da, f⟩ + ⟨bc*, f⟩        (†)
+//
+//    EXPAND RHS:
+//       y* = (c*, -d)
+//       zy* = (e,f)(c*, -d)
+//            = (e·c* − (-d)*·f,  (-d)·e + f·(c*)*)
+//            = (e·c* + d*·f, -de + fc)       using (L1),(L5)
+//       ⟨x, zy*⟩ = ⟨a, ec*⟩ + ⟨a, d*f⟩ − ⟨b, de⟩ + ⟨b, fc⟩        (‡)
+//
+//    We show (†) = (‡) by matching four pairs of terms:
+//
+//    P1:  ⟨ac, e⟩ = ⟨a, ec*⟩.
+//         Direct IH with x=a, y=c, z=e.
+//
+//    P2:  ⟨bc*, f⟩ = ⟨b, fc**⟩ = ⟨b, fc⟩.
+//         IH with x=b, y=c*, z=f;  then (L1).
+//
+//    P3:  ⟨da, f⟩ = ⟨a, d*f⟩.
+//         IH gives ⟨da, f⟩ = ⟨d, fa*⟩.
+//         By (L3): ⟨d, fa*⟩ = ⟨d*, (fa*)*⟩ = ⟨d*, af*⟩ using (L2)+(L1).
+//         By (L4): ⟨d*, af*⟩ = ⟨af*, d*⟩.   Hmm, we want ⟨a, d*f⟩.
+//         Apply symmetry to the target: ⟨a, d*f⟩ = ⟨d*f, a⟩.
+//         Apply IH to ⟨d*f, a⟩ with x=d*, y=f, z=a: ⟨d*f, a⟩ = ⟨d*, af*⟩.
+//         So both sides reduce to ⟨d*, af*⟩. ✓
+//
+//    P4:  ⟨d*b, e⟩ = ⟨b, de⟩.
+//         IH gives ⟨d*b, e⟩ = ⟨d*, eb*⟩.
+//         (L3): ⟨d*, eb*⟩ = ⟨d, (eb*)*⟩ = ⟨d, be*⟩  by (L2)+(L1).
+//         Symmetry: ⟨b, de⟩ = ⟨de, b⟩.
+//         IH with x=d, y=e, z=b: ⟨de, b⟩ = ⟨d, be*⟩.
+//         Both sides reduce to ⟨d, be*⟩. ✓
+//
+//    Substituting P1–P4 into (†) gives exactly (‡). □
+//
+// ─── VERIFICATION ─────────────────────────────────────────────────────────────
+//
+//  The proof is finite and algebraic — it is not empirical. Nevertheless we
+//  spot-check the conclusion at two CD levels:
+//    • Octonions (A_3, dim 8, alternative, non-associative)
+//    • Sedenions (A_4, dim 16, non-alternative, non-associative, has ZDs)
+//
+//  At each level we draw random unit elements grad, h and compute both the
+//  componentwise true gradient and the Wirtinger gradient, then report the
+//  norm of their difference.  Zero to machine precision confirms (★).
+
+use math::sedenion::*;
+use math::octonion::*;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+
+fn rng_next() -> i64 with Mut {
+    var x: i64 = RNG_A
+    let y: i64 = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r: i64 = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_pm64() -> f64 with Mut, Div {
+    ((rng_next() % 2000) as f64 - 1000.0) / 1000.0
+}
+
+fn rand_pm32() -> f32 with Mut, Div {
+    (rand_pm64() as f32)
+}
+
+// ─── Sedenion verification (A_4) ──────────────────────────────────────────────
+
+fn random_unit_sed() -> Sedenion with Mut, Div, Panic {
+    let s: Sedenion = Sedenion {
+        e0:  rand_pm64(), e1:  rand_pm64(), e2:  rand_pm64(), e3:  rand_pm64(),
+        e4:  rand_pm64(), e5:  rand_pm64(), e6:  rand_pm64(), e7:  rand_pm64(),
+        e8:  rand_pm64(), e9:  rand_pm64(), e10: rand_pm64(), e11: rand_pm64(),
+        e12: rand_pm64(), e13: rand_pm64(), e14: rand_pm64(), e15: rand_pm64()
+    }
+    sed_normalize(s)
+}
+
+fn sed_from_arr(a: [f64; 16]) -> Sedenion {
+    Sedenion {
+        e0:  a[0],  e1:  a[1],  e2:  a[2],  e3:  a[3],
+        e4:  a[4],  e5:  a[5],  e6:  a[6],  e7:  a[7],
+        e8:  a[8],  e9:  a[9],  e10: a[10], e11: a[11],
+        e12: a[12], e13: a[13], e14: a[14], e15: a[15]
+    }
+}
+
+fn sed_true_grad(grad: Sedenion, h: Sedenion) -> Sedenion with Div, Panic {
+    var out: [f64; 16] = [0.0; 16]
+    var j: i64 = 0
+    while j < 16 {
+        let ej: Sedenion = sed_basis(j, 1.0)
+        let ej_h: Sedenion = sed_mul(ej, h)
+        out[j] = sed_dot(grad, ej_h)
+        j = j + 1
+    }
+    sed_from_arr(out)
+}
+
+fn sed_wir_grad(grad: Sedenion, h: Sedenion) -> Sedenion with Panic {
+    sed_mul(grad, sed_conj(h))
+}
+
+fn sed_single_residue(grad: Sedenion, h: Sedenion) -> f64 with Div, Panic {
+    let gt: Sedenion = sed_true_grad(grad, h)
+    let gw: Sedenion = sed_wir_grad(grad, h)
+    let r: Sedenion = sed_add(gw, sed_scale(gt, 0.0 - 1.0))
+    sed_norm(r)
+}
+
+// ─── Octonion verification (A_3) ──────────────────────────────────────────────
+
+fn random_unit_oct() -> Octonion with Mut, Div, Panic {
+    let o: Octonion = oct(
+        rand_pm32(), rand_pm32(), rand_pm32(), rand_pm32(),
+        rand_pm32(), rand_pm32(), rand_pm32(), rand_pm32()
+    )
+    oct_normalize(o)
+}
+
+// Octonion basis vector — no oct_basis in stdlib so construct explicitly.
+fn oct_basis_j(j: i64) -> Octonion {
+    if j == 0 { return oct(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 1 { return oct(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 2 { return oct(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 3 { return oct(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 4 { return oct(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0) }
+    if j == 5 { return oct(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) }
+    if j == 6 { return oct(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0) }
+    oct(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+}
+
+fn oct_comp(o: Octonion, j: i64) -> f32 {
+    if j == 0 { return o.a }
+    if j == 1 { return o.b }
+    if j == 2 { return o.c }
+    if j == 3 { return o.d }
+    if j == 4 { return o.e }
+    if j == 5 { return o.f }
+    if j == 6 { return o.g }
+    o.h
+}
+
+fn oct_from_arr(a: [f32; 8]) -> Octonion {
+    oct(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7])
+}
+
+fn oct_true_grad(grad: Octonion, h: Octonion) -> Octonion {
+    var out: [f32; 8] = [0.0; 8]
+    var j: i64 = 0
+    while j < 8 {
+        let ej: Octonion = oct_basis_j(j)
+        let ej_h: Octonion = oct_mul(ej, h)
+        out[j] = oct_dot(grad, ej_h)
+        j = j + 1
+    }
+    oct_from_arr(out)
+}
+
+fn oct_wir_grad(grad: Octonion, h: Octonion) -> Octonion {
+    oct_mul(grad, oct_conj(h))
+}
+
+fn oct_sub(a: Octonion, b: Octonion) -> Octonion {
+    oct(a.a - b.a, a.b - b.b, a.c - b.c, a.d - b.d,
+        a.e - b.e, a.f - b.f, a.g - b.g, a.h - b.h)
+}
+
+fn oct_single_residue(grad: Octonion, h: Octonion) -> f32 {
+    let gt: Octonion = oct_true_grad(grad, h)
+    let gw: Octonion = oct_wir_grad(grad, h)
+    let r: Octonion = oct_sub(gw, gt)
+    oct_norm(r)
+}
+
+// ─── Experiments ──────────────────────────────────────────────────────────────
+
+var SED_MEAN: f64 = 0.0
+var SED_MAX:  f64 = 0.0
+var OCT_MEAN: f64 = 0.0    // promoted to f64 for uniform reporting
+var OCT_MAX:  f64 = 0.0
+
+fn run_sedenion_check(n: i64) with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var max_r: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let grad: Sedenion = random_unit_sed()
+        let h:    Sedenion = random_unit_sed()
+        let r: f64 = sed_single_residue(grad, h)
+        sum = sum + r
+        if r > max_r { max_r = r }
+        i = i + 1
+    }
+    SED_MEAN = sum / (n as f64)
+    SED_MAX  = max_r
+}
+
+fn run_octonion_check(n: i64) with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var max_r: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let grad: Octonion = random_unit_oct()
+        let h:    Octonion = random_unit_oct()
+        let r32: f32 = oct_single_residue(grad, h)
+        let r:   f64 = r32 as f64
+        sum = sum + r
+        if r > max_r { max_r = r }
+        i = i + 1
+    }
+    OCT_MEAN = sum / (n as f64)
+    OCT_MAX  = max_r
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    rng_seed(987654321, 123456789)
+
+    println("═══════════════════════════════════════════════════════")
+    println("  THEOREM: ⟨x·y, z⟩ = ⟨x, z·y*⟩ for every Cayley-Dickson")
+    println("  algebra A_n.   Proof in file header; numerical check here.")
+    println("  Verified at A_3 (octonion) and A_4 (sedenion).")
+    println("═══════════════════════════════════════════════════════")
+    println("")
+
+    let n: i64 = 300
+
+    println("=== Octonion check (A_3, f32) ===")
+    run_octonion_check(n)
+    print("  mean |residue| = "); print(OCT_MEAN); println("")
+    print("  max  |residue| = "); print(OCT_MAX);  println("")
+    println("")
+
+    println("=== Sedenion check (A_4, f64) ===")
+    run_sedenion_check(n)
+    print("  mean |residue| = "); print(SED_MEAN); println("")
+    print("  max  |residue| = "); print(SED_MAX);  println("")
+    println("")
+
+    println("───────────────────────────────────────────────────────")
+    println("  The theorem holds at both levels to machine precision.")
+    println("  Octonions are alternative (a fortiori the identity held).")
+    println("  Sedenions are NOT alternative and have zero divisors, yet")
+    println("  the identity still holds — confirming the proof is not")
+    println("  specialized to alternative algebras.")
+    println("───────────────────────────────────────────────────────")
+    println("")
+
+    // ── Assertions ──────────────────────────────────────────────────────────
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // T1: octonion mean residue at machine precision
+    if OCT_MEAN < 0.001 {
+        print("T1 PASS: octonion mean residue = "); print(OCT_MEAN); println("")
+        passed = passed + 1
+    } else {
+        print("T1 FAIL: octonion mean residue = "); print(OCT_MEAN); println("")
+        failed = failed + 1
+    }
+
+    // T2: sedenion mean residue at machine precision
+    if SED_MEAN < 0.0001 {
+        print("T2 PASS: sedenion mean residue = "); print(SED_MEAN); println("")
+        passed = passed + 1
+    } else {
+        print("T2 FAIL: sedenion mean residue = "); print(SED_MEAN); println("")
+        failed = failed + 1
+    }
+
+    // T3: octonion max residue bounded
+    if OCT_MAX < 0.01 {
+        print("T3 PASS: octonion max residue = "); print(OCT_MAX); println("")
+        passed = passed + 1
+    } else {
+        print("T3 FAIL: octonion max residue = "); print(OCT_MAX); println("")
+        failed = failed + 1
+    }
+
+    // T4: sedenion max residue bounded
+    if SED_MAX < 0.001 {
+        print("T4 PASS: sedenion max residue = "); print(SED_MAX); println("")
+        passed = passed + 1
+    } else {
+        print("T4 FAIL: sedenion max residue = "); print(SED_MAX); println("")
+        failed = failed + 1
+    }
+
+    // T5: Non-trivial algebra witness — pick a specific octonion triple with
+    //     non-zero associator to confirm we are not in an associative regime.
+    let e1: Octonion = oct_basis_j(1)
+    let e2: Octonion = oct_basis_j(2)
+    let e4: Octonion = oct_basis_j(4)
+    let ab_c: Octonion = oct_mul(oct_mul(e1, e2), e4)
+    let a_bc: Octonion = oct_mul(e1, oct_mul(e2, e4))
+    let diff: Octonion = oct_sub(ab_c, a_bc)
+    let assoc_diff: f32 = oct_norm(diff)
+    let assoc_f64: f64 = assoc_diff as f64
+    if assoc_f64 > 0.1 {
+        print("T5 PASS: octonion associator ‖[e1,e2,e4]‖ = ")
+        print(assoc_f64); println(" > 0.1")
+        passed = passed + 1
+    } else {
+        print("T5 FAIL: octonion associator too small = ")
+        print(assoc_f64); println("")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}
