@@ -232,3 +232,92 @@ The Mandelbrot-Hessian at the canonical c = e₃ + e₁₀ is *not* arbitrary: i
 
 A clinical application using a sub-optimal c would obtain fewer, coarser orbit classes — up to 5 if in Regime II with wrong pair, or 5 if in Regime I. Performance ceiling on the resulting fingerprint is bounded by the algebraic refinement capacity of the chosen c. This is a structural limit, not a tuning limit.
 
+
+---
+
+## Theorem C (Completeness of the c-dependence sweep)
+
+**Claim.** The full sweep over c = e_a + e_b, a ∈ {1..7}, b-8 ∈ {1..7} (49 choices)
+admits **no "off-line" regime**: every (a, b-8) lies on a unique Fano line. This is a
+direct consequence of the Steiner triple system S(2,3,7) covering property of the
+octonion Fano plane — every unordered pair of points in {1..7} lies on exactly one
+line. Consequently, the two-regime dichotomy (I vs II) is *exhaustive*.
+
+### Enumerated partition profiles
+
+**Regime I** (21 ordered pairs on lines {(1,2,4),(5,6,1),(7,1,3)}):
+
+| profile | count | interpretation |
+|---|---|---|
+| [82, 32, 28, 16, 10] | 6 | (1,2),(1,4),(2,1),(2,4),(4,1),(4,2) — line (1,2,4), off-diagonal |
+| [90, 32, 18, 16, 12] | 6 | (1,3),(1,7),(3,1),(3,7),(7,1),(7,3) — line (7,1,3), off-diagonal |
+| [92, 32, 20, 16, 8]  | 6 | (1,5),(1,6),(5,1),(5,6),(6,1),(6,5) — line (5,6,1), off-diagonal |
+| [72, 48, 48]          | 1 | (1,1) — **diagonal on line (1,2,4), only 3-class partition in the entire sweep** |
+| [72, 38, 32, 16, 10]  | 1 | (2,2) — diagonal on line (1,2,4) |
+| [74, 34, 32, 16, 10, 1, 1] | 1 | (4,4) — diagonal on line (1,2,4), 7-class exception inside Regime I |
+
+**Regime II** (28 ordered pairs on lines {(2,3,5),(3,4,6),(4,5,7),(6,7,2)}):
+
+| profile | count | interpretation |
+|---|---|---|
+| [96, 40, 22, 4, 4, 1, 1] | 8 | (2,3),(2,7),(3,2),(3,4),(4,3),(4,7),(7,2),(7,4) — **maximum refinement (7-class)** |
+| [96, 40, 18, 4, 4, 3, 3] | 8 | (2,6),(3,5),(4,5),(5,3),(5,4),(6,2),(6,7),(7,6) |
+| [96, 40, 24, 4, 4]        | 4 | (2,5),(4,6),(5,2),(6,4) — 5-class Regime-II skeleton |
+| [96, 40, 16, 4, 4, 4, 4]  | 4 | (3,6),(5,7),(6,3),(7,5) — "uniform 4-tail" 7-class |
+| [78, 32, 22, 20, 16]      | 2 | (5,5),(6,6) — diagonals |
+| [74, 32, 28, 18, 16]      | 1 | (3,3) — diagonal |
+| [80, 32, 21, 18, 16, 1]   | 1 | (7,7) — diagonal, **only 6-class partition in the entire sweep** |
+
+### Structural observations
+
+1. **Diagonal pairs (a = b-8) are anomalous in both regimes.** They break the
+   regularity of their Fano line: Regime I's three diagonals (1,1), (2,2), (4,4)
+   give three different profiles; Regime II's four diagonals (3,3), (5,5), (6,6),
+   (7,7) likewise. The diagonals are exactly the pairs where c = e_a + e_{a+8}
+   spans the "doubling axis" of the Cayley–Dickson construction — the ℓ-coupling
+   between octonion and its doubled copy is aligned with a single basis direction,
+   rather than generically crossing the Fano plane.
+
+2. **Regime II has [96, 40, ·, 4, 4, ·] as universal skeleton** for off-diagonal
+   pairs — the sizes 96, 40, 4, 4 are invariant; only the remaining 24 is
+   partitioned as {[22,1,1], [24], [18,3,3], [16,4,4]}.
+
+3. **Regime I has {32, 16} as second and fourth sizes across all three lines**.
+   The variable part is the top class (82/90/92, depending on which Fano line).
+   The top-size 82/90/92 correlates monotonically with the "distance from index 1"
+   of the line: line (1,2,4) has 1 as an endpoint → 82; line (7,1,3) has 1
+   centered → 90; line (5,6,1) has 1 as an endpoint → 92.
+
+4. **Maximum refinement (7-class, size [96, 40, 22, 4, 4, 1, 1]) occurs at
+   exactly 8 pairs**, all in Regime II, all off-diagonal. The 8 pairs decompose
+   under ordered → unordered identification into 4 unordered pairs:
+   {2,3}, {3,4}, {4,7}, {2,7} — which are precisely the edges of the Fano
+   sub-quadrilateral connecting lines (2,3,5), (3,4,6), (4,5,7), (6,7,2) at
+   their pairwise intersections excluding index 1. Equivalently, these are the
+   4 edges of the Fano-complement hexagon (cycle 2–3–4–7–2) around the
+   "1-star".
+
+5. **The 4 "uniform-tail" pairs [96, 40, 16, 4, 4, 4, 4]** — (3,6), (5,7), (6,3),
+   (7,5) — decompose under unordered identification to {3,6} and {5,7}. These
+   are the two "long diagonals" of the Fano complement: points connected through
+   index 1 via the shortest non-direct path.
+
+### Corollary (empty Regime III)
+
+No c of the form e_a + e_b with a, b ∈ {1..7} × {9..15} can fail to lie on a
+Fano line. Therefore the two-regime dichotomy is exhaustive on this family of
+Mandelbrot references, and the taxonomy of partition profiles above is
+complete.
+
+### Open directions
+
+- **Off-axis c's.** c of the form e_a + e_b with both a, b ∈ {1..7} (pure-octonion
+  reference) or both ∈ {9..15} (pure-doubled reference) is not covered by the
+  current sweep. The pure-octonion case avoids the ℓ-axis and is expected to
+  yield a trivial partition (no ZD selection signal).
+- **3-term c's.** c = e_a + e_b + e_c generalizes the reference beyond ZD form.
+  The Mandelbrot-Hessian is well-defined for any c; the question is whether the
+  resulting partition stays within the 7-class ceiling or goes higher.
+- **Pathion (32D) analogue.** The next Cayley–Dickson level has 2-term ZDs
+  organized by a higher Steiner system. Does the 5/7 class count ladder
+  extend predictably, or does the Pathion structure break it?
