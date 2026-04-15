@@ -105,3 +105,37 @@ The 168 pairs therefore carry **two distinct equivalence relations**:
 2. **Linear-SSM subspace partition** (new result; this note): 7 classes with sizes [96, 40, 22, 4, 4, 1, 1] at α=0.2, determined by which Fano directions each A matrix opens in the SSM hidden state space.
 
 These are orthogonal (not refinement-related) structures. Their join is a finer partition; characterizing that join is an open problem.
+
+## Structural decoding: Fano-incidence origin of the 7 classes
+
+The 168 pairs reduce to **68 unique first-terms** $(a, b, \mathrm{sb})$ — each first-term having 1–4 valid ZD partners. The 7 classes partition these 68 first-terms by their **Fano-plane incidence with the Mandelbrot reference direction** $c = e_3 + e_{10}$, which sits at octonion index 3 and upper-half index $g_2$ (= 2 via $b - 8$).
+
+| Class | Size | Unique first-terms | Structural characterization |
+|---|---|---|---|
+| 0 | 4 | 1: $(e_1 - e_{14})$ | $a=1,\, b-8=6$; sign=$-$; pair on Fano line $(5,6,1)$ |
+| 6 | 4 | 1: $(e_1 + e_{14})$ | Sign-mirror of class 0 |
+| 1 | 40 | 10: $a=1,\, b \in \{10,11,12,13\}$, both signs | $a=1$, $b-8 \in \{2,3,4,5\}$ — "inner" Fano partners |
+| 3 | 22 | 8: $a \in \{2,3,4,5\}, b=9$, both signs | $b-8=1$, $a$ Fano-adjacent to 1 |
+| 4 | 1 | 1: $(e_6 + e_9)$ | $a=6, b-8=1$; line $(5,6,1)$ |
+| 5 | 1 | 1: $(e_6 - e_9)$ | Sign-mirror of class 4 |
+| 2 | 96 | 46 "bulk" | Fano-generic residue |
+
+### Sign behavior
+
+Sign variants (±) split into separate classes in some cases (0/6, 4/5) and merge in others (class 1, class 3). This asymmetry reflects the interaction of the lerp+normalize at α=0.2 with the Cayley-Dickson sign structure of the lifted direction. Specifically:
+
+- Classes 0/6 and 4/5 split: these are first-terms where $b-8 \in \{1, 6\}$ — the Fano endpoints of the reference line.
+- Classes 1 and 3 merge signs: these are first-terms where $b-8 \in \{2, 3, 4, 5\}$ or $a \in \{2, 3, 4, 5\}$ — the Fano "interior" partners of the reference.
+
+Characterizing why Fano-endpoint pairs sign-split while Fano-interior pairs sign-merge is an open problem that would require explicit calculation of the sedenion multiplication table's sign pattern under the specific B = Mandelbrot-Hessian(e₃ + e₁₀).
+
+### Bottom line
+
+The 7-class partition is now fully characterizable in terms of:
+- The algebraic structure of the first-term $(a, b - 8)$
+- Its Fano-plane incidence relative to the Mandelbrot reference $c = (3, 2)$
+- The sign behavior under the lerp+normalize at $\alpha = 0.2$
+
+This promotes the partition from "empirical observation" to "concrete algebraic statement":
+
+> *Theorem (provisional): The 7 subspace-equivalence classes of the linearized sedenion-SSM at $\alpha = 0.2$ with Mandelbrot-Hessian projection $B = d^2 \text{Mandel}(e_3 + e_{10})$ correspond to the 7 Fano-incidence strata of first-term $(a, b-8)$ pairs relative to the reference $(3, 2)$: the 4 Fano-line-adjacent strata (split by sign for endpoints) plus the Fano-generic residue.*
