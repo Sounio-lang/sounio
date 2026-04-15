@@ -1,0 +1,560 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Does octonion non-associativity predict clinical DDI order-dependence?
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The FDA FAERS adverse-event database (filtered for 7 specific CYP450
+// enzymes: CYP1A2, CYP2C9, CYP2C8, CYP2B6, CYP2C19, CYP2D6, CYP3A4) gives
+// 35 distinct drug-triple cocktails — one per unordered {CYP_a, CYP_b, CYP_c}
+// triple — with temporal ordering annotations (a_first, b_first) per report.
+//
+// Map the 7 CYPs to the 7 imaginary octonion basis units e_1..e_7 via the
+// `cyp_basis` column already in data/cyp_drug_mapping.csv. The associator
+//
+//     A(i, j, k) = ‖(e_i · e_j) · e_k − e_i · (e_j · e_k)‖
+//
+// is EXACTLY 0 for the 7 Fano-line triples (octonions are alternative, so
+// Fano structure forces associativity on those triples) and EXACTLY 2 for
+// the remaining 28 non-Fano triples.
+//
+// Pre-specified hypothesis, no training:
+//
+//   H1. Non-Fano CYP triples (algebra says order matters) show greater
+//       clinical order-asymmetry than Fano triples.
+//       |asymmetry| = |a_first − b_first| / temporal ≥ 0.
+//
+//   H2. Non-Fano triples hase more total adverse-event reports (more
+//       harmful cascades).
+//
+// Report Cohen's d and raw means. N is small (≤ 35, ≤ ~20 after filtering
+// temporal>0), so large effects are interesting; small effects are
+// inconclusive.
+//
+// Zero free parameters in the predictor — the associator norm is determined
+// entirely by the octonion multiplication table, not by any fit to data.
+
+use math::octonion::*;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn sqrt_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i: i64 = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn oct_basis_j(j: i64) -> Octonion {
+    if j == 0 { return oct(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 1 { return oct(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 2 { return oct(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 3 { return oct(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 4 { return oct(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0) }
+    if j == 5 { return oct(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) }
+    if j == 6 { return oct(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0) }
+    oct(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+}
+
+fn oct_sub(a: Octonion, b: Octonion) -> Octonion {
+    oct(a.a - b.a, a.b - b.b, a.c - b.c, a.d - b.d,
+        a.e - b.e, a.f - b.f, a.g - b.g, a.h - b.h)
+}
+
+fn assoc_norm(i: i64, j: i64, k: i64) -> f64 {
+    let a: Octonion = oct_basis_j(i)
+    let b: Octonion = oct_basis_j(j)
+    let c: Octonion = oct_basis_j(k)
+    let ab_c: Octonion = oct_mul(oct_mul(a, b), c)
+    let a_bc: Octonion = oct_mul(a, oct_mul(b, c))
+    let diff: Octonion = oct_sub(ab_c, a_bc)
+    let n: f32 = oct_norm(diff)
+    n as f64
+}
+
+// ─── 35 FAERS rows, hardcoded ────────────────────────────────────────────────
+// Columns: basis_a, basis_b, basis_c, fano (0/1), cases, temporal, asymmetry
+// `asymmetry` < 0 means "no temporal data, skip".
+// Source: data/faers_168_results.csv, cyp_basis from data/cyp_drug_mapping.csv.
+
+fn row_a(i: i64) -> i64 {
+    if i ==  0 { return 1 }  // CYP1A2
+    if i ==  1 { return 1 }
+    if i ==  2 { return 1 }
+    if i ==  3 { return 1 }
+    if i ==  4 { return 1 }
+    if i ==  5 { return 1 }
+    if i ==  6 { return 1 }
+    if i ==  7 { return 1 }
+    if i ==  8 { return 1 }
+    if i ==  9 { return 1 }
+    if i == 10 { return 1 }
+    if i == 11 { return 1 }
+    if i == 12 { return 1 }
+    if i == 13 { return 1 }
+    if i == 14 { return 1 }
+    if i == 15 { return 2 }  // CYP2C9
+    if i == 16 { return 2 }
+    if i == 17 { return 2 }
+    if i == 18 { return 2 }
+    if i == 19 { return 2 }
+    if i == 20 { return 2 }
+    if i == 21 { return 2 }
+    if i == 22 { return 2 }
+    if i == 23 { return 2 }
+    if i == 24 { return 2 }
+    if i == 25 { return 3 }  // CYP2C8
+    if i == 26 { return 3 }
+    if i == 27 { return 3 }
+    if i == 28 { return 3 }
+    if i == 29 { return 3 }
+    if i == 30 { return 3 }
+    if i == 31 { return 4 }  // CYP2B6
+    if i == 32 { return 4 }
+    if i == 33 { return 4 }
+    5                         // CYP2C19
+}
+
+fn row_b(i: i64) -> i64 {
+    if i ==  0 { return 2 }
+    if i ==  1 { return 2 }
+    if i ==  2 { return 2 }
+    if i ==  3 { return 2 }
+    if i ==  4 { return 2 }
+    if i ==  5 { return 3 }
+    if i ==  6 { return 3 }
+    if i ==  7 { return 3 }
+    if i ==  8 { return 3 }
+    if i ==  9 { return 4 }
+    if i == 10 { return 4 }
+    if i == 11 { return 4 }
+    if i == 12 { return 5 }
+    if i == 13 { return 5 }
+    if i == 14 { return 6 }
+    if i == 15 { return 3 }
+    if i == 16 { return 3 }
+    if i == 17 { return 3 }
+    if i == 18 { return 3 }
+    if i == 19 { return 4 }
+    if i == 20 { return 4 }
+    if i == 21 { return 4 }
+    if i == 22 { return 5 }
+    if i == 23 { return 5 }
+    if i == 24 { return 6 }
+    if i == 25 { return 4 }
+    if i == 26 { return 4 }
+    if i == 27 { return 4 }
+    if i == 28 { return 5 }
+    if i == 29 { return 5 }
+    if i == 30 { return 6 }
+    if i == 31 { return 5 }
+    if i == 32 { return 5 }
+    if i == 33 { return 6 }
+    6
+}
+
+fn row_c(i: i64) -> i64 {
+    if i ==  0 { return 3 }
+    if i ==  1 { return 4 }
+    if i ==  2 { return 5 }
+    if i ==  3 { return 6 }
+    if i ==  4 { return 7 }
+    if i ==  5 { return 4 }
+    if i ==  6 { return 5 }
+    if i ==  7 { return 6 }
+    if i ==  8 { return 7 }
+    if i ==  9 { return 5 }
+    if i == 10 { return 6 }
+    if i == 11 { return 7 }
+    if i == 12 { return 6 }
+    if i == 13 { return 7 }
+    if i == 14 { return 7 }
+    if i == 15 { return 4 }
+    if i == 16 { return 5 }
+    if i == 17 { return 6 }
+    if i == 18 { return 7 }
+    if i == 19 { return 5 }
+    if i == 20 { return 6 }
+    if i == 21 { return 7 }
+    if i == 22 { return 6 }
+    if i == 23 { return 7 }
+    if i == 24 { return 7 }
+    if i == 25 { return 5 }
+    if i == 26 { return 6 }
+    if i == 27 { return 7 }
+    if i == 28 { return 6 }
+    if i == 29 { return 7 }
+    if i == 30 { return 7 }
+    if i == 31 { return 6 }
+    if i == 32 { return 7 }
+    if i == 33 { return 7 }
+    7
+}
+
+// `fano` bit from FAERS annotation (manually extracted).
+fn row_fano(i: i64) -> i64 {
+    if i ==  1 { return 1 }    // CYP1A2+CYP2C9+CYP2B6
+    if i ==  8 { return 1 }    // CYP1A2+CYP2C8+CYP3A4
+    if i == 12 { return 1 }    // CYP1A2+CYP2C19+CYP2D6
+    if i == 16 { return 1 }    // CYP2C9+CYP2C8+CYP2C19
+    if i == 24 { return 1 }    // CYP2C9+CYP2D6+CYP3A4
+    if i == 26 { return 1 }    // CYP2C8+CYP2B6+CYP2D6
+    if i == 32 { return 1 }    // CYP2B6+CYP2C19+CYP3A4
+    0
+}
+
+// FAERS total case count per triple.
+fn row_cases(i: i64) -> i64 {
+    if i ==  0 { return  0 }
+    if i ==  1 { return  8 }
+    if i ==  2 { return 49 }
+    if i ==  3 { return  0 }
+    if i ==  4 { return 94 }
+    if i ==  5 { return  0 }
+    if i ==  6 { return  2 }
+    if i ==  7 { return  0 }
+    if i ==  8 { return  1 }
+    if i ==  9 { return 56 }
+    if i == 10 { return  0 }
+    if i == 11 { return 23 }
+    if i == 12 { return 19 }
+    if i == 13 { return 100 }
+    if i == 14 { return  3 }
+    if i == 15 { return  3 }
+    if i == 16 { return 19 }
+    if i == 17 { return  0 }
+    if i == 18 { return 17 }
+    if i == 19 { return 100 }
+    if i == 20 { return  9 }
+    if i == 21 { return 100 }
+    if i == 22 { return 93 }
+    if i == 23 { return 100 }
+    if i == 24 { return 52 }
+    if i == 25 { return 11 }
+    if i == 26 { return  1 }
+    if i == 27 { return  3 }
+    if i == 28 { return  4 }
+    if i == 29 { return 72 }
+    if i == 30 { return  1 }
+    if i == 31 { return 77 }
+    if i == 32 { return 100 }
+    if i == 33 { return 22 }
+    100
+}
+
+// Temporal-ordered case count (denominator for asymmetry).
+fn row_temporal(i: i64) -> i64 {
+    if i ==  0 { return  0 }
+    if i ==  1 { return  0 }
+    if i ==  2 { return  2 }
+    if i ==  3 { return  0 }
+    if i ==  4 { return  0 }
+    if i ==  5 { return  0 }
+    if i ==  6 { return  0 }
+    if i ==  7 { return  0 }
+    if i ==  8 { return  0 }
+    if i ==  9 { return 13 }
+    if i == 10 { return  0 }
+    if i == 11 { return  5 }
+    if i == 12 { return  7 }
+    if i == 13 { return 13 }
+    if i == 14 { return  0 }
+    if i == 15 { return  0 }
+    if i == 16 { return  4 }
+    if i == 17 { return  0 }
+    if i == 18 { return  3 }
+    if i == 19 { return 20 }
+    if i == 20 { return  2 }
+    if i == 21 { return 11 }
+    if i == 22 { return 17 }
+    if i == 23 { return 21 }
+    if i == 24 { return  7 }
+    if i == 25 { return  3 }
+    if i == 26 { return  1 }
+    if i == 27 { return  2 }
+    if i == 28 { return  2 }
+    if i == 29 { return 21 }
+    if i == 30 { return  1 }
+    if i == 31 { return 16 }
+    if i == 32 { return 10 }
+    if i == 33 { return  8 }
+    35
+}
+
+// |asymmetry| = |a_first - b_first| / temporal  (already computed in FAERS).
+fn row_asym(i: i64) -> f64 {
+    if i ==  2 { return 1.0 }
+    if i ==  9 { return 0.2308 }
+    if i == 11 { return 0.6 }
+    if i == 12 { return 0.7143 }
+    if i == 13 { return 0.5385 }
+    if i == 16 { return 0.0 }
+    if i == 18 { return 0.3333 }
+    if i == 19 { return 0.2 }
+    if i == 20 { return 0.0 }
+    if i == 21 { return 0.2727 }
+    if i == 22 { return 0.1765 }
+    if i == 23 { return 0.5238 }
+    if i == 24 { return 0.4286 }
+    if i == 25 { return 0.3333 }
+    if i == 26 { return 1.0 }
+    if i == 27 { return 0.0 }
+    if i == 28 { return 1.0 }
+    if i == 29 { return 0.4286 }
+    if i == 30 { return 1.0 }
+    if i == 31 { return 0.125 }
+    if i == 32 { return 0.2 }
+    if i == 33 { return 0.5 }
+    if i == 34 { return 0.3714 }
+    0.0 - 1.0   // no temporal data
+}
+
+fn n_rows() -> i64 { 35 }
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("═══════════════════════════════════════════════════════")
+    println("  Octonion associator vs clinical DDI order-asymmetry")
+    println("  35 CYP triples from FAERS; 7 CYPs → e_1..e_7 of A_3")
+    println("  Zero free parameters in predictor.")
+    println("═══════════════════════════════════════════════════════")
+    println("")
+
+    // Step 1: compute associator norm per row, collect into arrays.
+    // Also tally a Fano-vs-algebraic-zero disagreement count (fano column
+    // uses one labeling convention, stdlib octonion multiplication table
+    // may use another — we test the ALGEBRAIC classification, not the label).
+    var n: i64 = n_rows()
+    var row_an:   [f64; 35] = [0.0; 35]
+    var row_alg0: [i64; 35] = [0; 35]   // 1 if associator ≈ 0, else 0
+    var row_valid_asym: [i64; 35] = [0; 35]
+    var fano_algzero_disagree: i64 = 0
+
+    var i: i64 = 0
+    while i < n {
+        let a: i64 = row_a(i)
+        let b: i64 = row_b(i)
+        let c: i64 = row_c(i)
+        let an: f64 = assoc_norm(a, b, c)
+        row_an[i] = an
+        if an < 0.001 { row_alg0[i] = 1 } else { row_alg0[i] = 0 }
+        let f: i64 = row_fano(i)
+        if f != row_alg0[i] { fano_algzero_disagree = fano_algzero_disagree + 1 }
+        if row_temporal(i) > 0 { row_valid_asym[i] = 1 }
+        i = i + 1
+    }
+    print("  fano column vs computed-associator-zero disagreement: ")
+    print_int(fano_algzero_disagree); print("/"); print_int(n); println("")
+    println("  (convention difference — we classify by the COMPUTED associator)")
+    println("")
+
+    // Step 2: sum |asymmetry| into per-group arrays (asoid the f64 global-
+    // accumulator bug: collect into arrays, reduce in straight line at end).
+    var asym_alg0:    [f64; 35] = [0.0; 35]
+    var asym_algnz:   [f64; 35] = [0.0; 35]
+    var n_alg0:  i64 = 0
+    var n_algnz: i64 = 0
+
+    i = 0
+    while i < n {
+        if row_valid_asym[i] == 1 {
+            let asym_val: f64 = row_asym(i)
+            if row_alg0[i] == 1 {
+                asym_alg0[n_alg0] = asym_val
+                n_alg0 = n_alg0 + 1
+            } else {
+                asym_algnz[n_algnz] = asym_val
+                n_algnz = n_algnz + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Straight-line reductions (no nested accumulators).
+    var sum_a0: f64 = 0.0
+    var ssq_a0: f64 = 0.0
+    var k: i64 = 0
+    while k < n_alg0 {
+        sum_a0 = sum_a0 + asym_alg0[k]
+        ssq_a0 = ssq_a0 + asym_alg0[k] * asym_alg0[k]
+        k = k + 1
+    }
+    var sum_anz: f64 = 0.0
+    var ssq_anz: f64 = 0.0
+    var m: i64 = 0
+    while m < n_algnz {
+        sum_anz = sum_anz + asym_algnz[m]
+        ssq_anz = ssq_anz + asym_algnz[m] * asym_algnz[m]
+        m = m + 1
+    }
+
+    let mean_a0:  f64 = if n_alg0  > 0 { sum_a0  / (n_alg0  as f64) } else { 0.0 }
+    let mean_anz: f64 = if n_algnz > 0 { sum_anz / (n_algnz as f64) } else { 0.0 }
+    var var_a0:  f64 = 0.0
+    if n_alg0  > 1 { var_a0  = ssq_a0  / (n_alg0  as f64) - mean_a0  * mean_a0 }
+    var var_anz: f64 = 0.0
+    if n_algnz > 1 { var_anz = ssq_anz / (n_algnz as f64) - mean_anz * mean_anz }
+    if var_a0  < 0.0 { var_a0  = 0.0 }
+    if var_anz < 0.0 { var_anz = 0.0 }
+
+    let sd_a0:  f64 = sqrt_s(var_a0)
+    let sd_anz: f64 = sqrt_s(var_anz)
+    var pooled: f64 = 0.0
+    if n_alg0 + n_algnz > 2 {
+        let num: f64 = (n_alg0 as f64) * var_a0 + (n_algnz as f64) * var_anz
+        let den: f64 = (n_alg0 as f64) + (n_algnz as f64)
+        pooled = sqrt_s(num / den)
+    }
+    var cohens_d: f64 = 0.0
+    if pooled > 0.0001 {
+        cohens_d = (mean_anz - mean_a0) / pooled
+    }
+
+    // Alias for downstream reporting
+    let n_f:     i64 = n_alg0
+    let n_nf:    i64 = n_algnz
+    let mean_f:  f64 = mean_a0
+    let mean_nf: f64 = mean_anz
+    let sd_f:    f64 = sd_a0
+    let sd_nf:   f64 = sd_anz
+
+    println("=== H1: |asymmetry| by Fano group (temporal > 0 only) ===")
+    print("  Fano=1 (n=");     print_int(n_f)
+    print(")  mean|asym|=");   print(mean_f)
+    print("  sd=");            print(sd_f); println("")
+    print("  Fano=0 (n=");     print_int(n_nf)
+    print(")  mean|asym|=");   print(mean_nf)
+    print("  sd=");            print(sd_nf); println("")
+    print("  Cohen's d (non-Fano − Fano) / pooled = "); print(cohens_d); println("")
+    println("")
+
+    // Step 3: total cases by algebraic group (all 35 rows). i64 accumulators
+    // are safe — the bug is specific to f64 X=X+expr.
+    var cases_f:  i64 = 0
+    var cases_nf: i64 = 0
+    var tr_f:  i64 = 0
+    var tr_nf: i64 = 0
+    i = 0
+    while i < n {
+        let cc: i64 = row_cases(i)
+        if row_alg0[i] == 1 { cases_f = cases_f + cc; tr_f = tr_f + 1 }
+        else                { cases_nf = cases_nf + cc; tr_nf = tr_nf + 1 }
+        i = i + 1
+    }
+    let asg_cases_f:  f64 = (cases_f  as f64) / (tr_f  as f64)
+    let asg_cases_nf: f64 = (cases_nf as f64) / (tr_nf as f64)
+
+    println("=== H2: total adverse events by Fano group (all 35 rows) ===")
+    print("  Fano=1 ("); print_int(tr_f)
+    print(" triples)  cases=");  print_int(cases_f)
+    print("  mean per triple=");  print(asg_cases_f); println("")
+    print("  Fano=0 ("); print_int(tr_nf)
+    print(" triples)  cases=");  print_int(cases_nf)
+    print("  mean per triple=");  print(asg_cases_nf); println("")
+    println("")
+
+    // ── Assertions ──────────────────────────────────────────────────────────
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // T1: all 35 associator norms are binary (either 0 or 2, no intermediate).
+    //     This verifies stdlib's oct_mul produces a valid alternative-algebra
+    //     multiplication table, regardless of whether its Fano labeling matches
+    //     the FAERS annotation (they use different conventions; see the
+    //     fano-column-vs-computed disagreement count above).
+    var binary_ok: bool = true
+    var kk: i64 = 0
+    while kk < n {
+        let an: f64 = row_an[kk]
+        let near0: bool = an < 0.001
+        let near2: bool = if an > 1.9 { an < 2.1 } else { false }
+        if near0 == false {
+            if near2 == false { binary_ok = false }
+        }
+        kk = kk + 1
+    }
+    if binary_ok {
+        println("T1 PASS: all 35 associator norms are binary (0 or 2) — algebra is alternative")
+        passed = passed + 1
+    } else {
+        println("T1 FAIL: some associator norm neither 0 nor 2")
+        failed = failed + 1
+    }
+
+    // T2: both groups hase non-trivial sample sizes for the asymmetry test
+    if n_f >= 3 {
+        if n_nf >= 10 {
+            print("T2 PASS: sufficient sample ("); print_int(n_f)
+            print(" Fano, ");                      print_int(n_nf); println(" non-Fano)")
+            passed = passed + 1
+        } else {
+            println("T2 FAIL: too few non-Fano rows with temporal data")
+            failed = failed + 1
+        }
+    } else {
+        println("T2 FAIL: too few Fano rows with temporal data")
+        failed = failed + 1
+    }
+
+    // T3: REPORT the direction of H1 (this is the finding, positive or negative).
+    //     PASS always — the point is to record the observation, not require
+    //     a preregistered direction. Large |d| is interesting; small |d| honest.
+    print("T3 REPORT: mean|asym| non-Fano - Fano = ")
+    let delta: f64 = mean_nf - mean_f
+    print(delta)
+    print("  (Cohen's d=")
+    print(cohens_d); println(")")
+    if cohens_d > 0.0 {
+        println("           direction: non-Fano MORE asymmetric (matches algebra)")
+    } else {
+        println("           direction: non-Fano LESS asymmetric (unexpected)")
+    }
+    passed = passed + 1
+
+    // T4: REPORT the direction of H2.
+    print("T4 REPORT: mean cases non-Fano − Fano = ")
+    let dcases: f64 = asg_cases_nf - asg_cases_f
+    print(dcases); println("")
+    if dcases > 0.0 {
+        println("           direction: non-Fano MORE harmful (more cases)")
+    } else {
+        println("           direction: non-Fano LESS harmful (fewer cases)")
+    }
+    passed = passed + 1
+
+    // T5: across the 35 triples, the computed algebraic-zero group and
+    //     algebraic-nonzero group are both non-empty (sanity: the stdlib
+    //     multiplication table is not degenerate).
+    var count_zero:    i64 = 0
+    var count_nonzero: i64 = 0
+    var tt: i64 = 0
+    while tt < n {
+        if row_alg0[tt] == 1 { count_zero = count_zero + 1 }
+        else                 { count_nonzero = count_nonzero + 1 }
+        tt = tt + 1
+    }
+    if count_zero >= 1 {
+        if count_nonzero >= 1 {
+            print("T5 PASS: "); print_int(count_zero); print(" associative, ")
+            print_int(count_nonzero); println(" non-associative triples")
+            passed = passed + 1
+        } else {
+            println("T5 FAIL: no non-associative triples found")
+            failed = failed + 1
+        }
+    } else {
+        println("T5 FAIL: no associative triples found")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}
