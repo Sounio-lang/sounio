@@ -441,3 +441,47 @@ orbit — only across.
 This is a *negative identifiability theorem* with positive content:
 the tool measures exactly as many algebraic classes as the Fano group
 permits, no more, no less.
+
+---
+
+## Theorem F (CD ladder: Pathion ZD count)
+
+At the 32-dimensional Pathion level (one more Cayley–Dickson doubling
+from $\mathbb{S}$), the number of signed two-term zero-divisor pairs is
+
+$$|\mathrm{ZD}_2(\mathbb{P})| = 2520 = 168 \times 15.$$
+
+The 2520 pairs split cleanly by Cayley–Dickson half-membership of the
+first factor's indices:
+
+| first-term indices | count | factor of 168 |
+|---|---|---|
+| both in sedenion half $\{0..15\}$ | 504 | $\times 3$ |
+| one sedenion + one $m$-doubled $\{16..31\}$ | 1848 | $\times 11$ |
+| both in $m$-doubled half | 168 | $\times 1$ |
+
+The "both in m-doubled half" sub-family is exactly the embedded sedenion
+ZDs lifted through the new $m$-axis (index-shift by 16). The $\times 3$
+and $\times 11$ multipliers are new combinatorial structure at the
+pathion level.
+
+### Predicted scaling
+
+If the linear-SSM partition structure respects the CD ladder, the number
+of equivalence classes at the pathion level should be some combinatorial
+function of the sedenion ceiling. Two hypotheses, both testable:
+
+- **Multiplicative:** $c$-parameterized maximum refinement at 32D is
+  $7 \times 15 = 105$ classes, with sizes scaling as the three multipliers.
+- **Additive Fano:** the pathion Fano-analogue (the Steiner system
+  $S(3,4,8)$ inside 32D) admits a 15-element generalization of the
+  Fano plane, suggesting a 15-class maximum at 32D.
+
+The distinction would diagnose whether the partition is multiplicative
+under CD doubling (ladder structure) or Fano-geometric (shape structure).
+Both predictions can be tested with the linear fingerprint at $\alpha = 0.2$
+and a pathion Mandelbrot reference.
+
+**Open:** run the 2520-pair linear fingerprint at one pathion $c$ and
+count the partition. Quick-compute budget: $\sim 15 \times$ sedenion
+sweep time per $c$, so minutes per reference.
