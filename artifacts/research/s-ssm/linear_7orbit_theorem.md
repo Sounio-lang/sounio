@@ -485,3 +485,79 @@ and a pathion Mandelbrot reference.
 **Open:** run the 2520-pair linear fingerprint at one pathion $c$ and
 count the partition. Quick-compute budget: $\sim 15 \times$ sedenion
 sweep time per $c$, so minutes per reference.
+
+---
+
+## Theorem G (Pathion partition: CD-ladder monotonicity breaks)
+
+### Empirical result
+
+At the pathion (32D) level, the linear-SSM fingerprint over the 2520
+two-term ZD pairs at $\alpha = 0.2$ yields the following partition:
+
+| Mandelbrot reference $c$ | classes | top sizes |
+|---|---|---|
+| $e_3 + e_{10}$ (pure sedenion) | **27** | [1290, 348, 288, 116, 78, 64, 38, 32, 26, 24, 24, 22, …] |
+| $e_3 + e_{26}$ (pathion-$m$ engaging) | **22** | [1290, 366, 304, 116, 78, 64, 38, 32, 30, 26, 24, 24, …] |
+
+The result falsifies *both* a-priori scaling hypotheses:
+
+- **Multiplicative CD ladder** predicted 7 × 15 = 105 classes. **Not observed.**
+- **Fano-geometric $S(3,4,8)$ analogue** predicted 15 classes. **Not observed.**
+
+### Monotonicity inversion
+
+In the sedenion case, engaging the $\ell$-doubling axis via a half-half
+$c$ strictly *increased* refinement: pure-octonion $c$ gave 3 classes
+(Regime II collapsed), half-half $c$ gave up to 7 classes.
+
+At the pathion level, the analogous step *decreases* refinement:
+$c = e_3 + e_{26}$ (engaging the new $m$-axis between sedenion and
+its doubled copy) produces **22 classes**, fewer than the pure-sedenion
+reference's 27 classes.
+
+**The CD ladder is not monotone in partition depth.** The 7-class ceiling
+at 16D is a sedenion-specific resonance, not a feature that propagates
+up the Cayley–Dickson tower.
+
+### Structural reading
+
+The loss of successive algebraic axioms along the CD ladder
+($\mathbb{R} \to \mathbb{C} \to \mathbb{H} \to \mathbb{O} \to \mathbb{S}
+\to \mathbb{P}$: associativity lost at $\mathbb{O}$, alternativity lost
+at $\mathbb{S}$, further axioms at $\mathbb{P}$) manifests here as a
+*non-monotone refinement curve*:
+
+$$\text{partition classes}: 1 \to 1 \to 1 \to 3 \to 7 \to 27 \to ?$$
+
+(The first four are trivial from the real/complex/quaternion/octonion
+ZD structure — there are no 2-term ZDs below $\mathbb{S}$ at all.)
+
+The jump $7 \to 27$ is nearly 4×, close to $(15/7) \times 7 \approx 15$
+for the multiplicative pair prediction, but not exactly that. 27 factors
+as $3^3$; 1290 = 2·3·5·43 does not share a clean combinatorial factor
+with either 168 or 2520. This suggests the partition at 32D is governed
+by a *different combinatorial group* than PSL(2,7).
+
+### Candidate: $GL(5, 2)$ or $PGL(2, 7)$?
+
+The sedenion ZDs are a PSL(2,7)-torsor (168 = |PSL(2,7)|). The pathion
+2520 = 168 × 15 = 2 · 3² · 5 · 7 · ... — could this be |GL(4,2)| = 20160 / 8?
+|GL(4,2)| = |$A_8$| = 20160. 20160 / 2520 = 8 — so 2520 is an index-8
+subset of $|GL(4,2)| = |A_8|$. Plausible candidates: the pathion ZDs
+are organized by an $A_8$ or $S_7$-like permutation action on the
+extended Fano analog.
+
+This is a **new group-theoretic question** opened by direction 1 of the
+current session. Testing it requires computing invariants of the 22- and
+27-class partitions (stabilizer sizes, orbit lengths) against candidate
+groups.
+
+### Open
+
+- Is 27 universal across pure-sedenion pathion $c$'s, or $c$-dependent
+  like the sedenion case? (Analog of c-dependence Theorem at 32D.)
+- Compute orbit sizes of the 27- and 22-partitions and check for
+  compatibility with $A_8$, $GL(4,2)$, $PSL(3,2) \times S_3$, etc.
+- Does the partition at pathion level still have a subject-invariant,
+  $\alpha$-stable ceiling, or has numerical noise started to dominate?
