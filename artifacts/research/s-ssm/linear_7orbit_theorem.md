@@ -321,3 +321,63 @@ complete.
 - **Pathion (32D) analogue.** The next Cayley–Dickson level has 2-term ZDs
   organized by a higher Steiner system. Does the 5/7 class count ladder
   extend predictably, or does the Pathion structure break it?
+
+---
+
+## Theorem D (Third-element determinism & pure-octonion collapse)
+
+### D.1 — Regime II residual-24 is determined by the pair-line's third element
+
+For every Regime II c = e_a + e_{b8+8} with (a, b8) off-diagonal, the Fano line
+L = line(a, b8) has a unique third element t = L \ {a, b8}. The residual-24
+partition profile is a deterministic function of t alone:
+
+| third element t | residual-24 profile | # of c's |
+|---|---|---|
+| t ∈ {5, 6} (on line (5,6,1)) | [22, 1, 1] — **maximum refinement** | 8 |
+| t ∈ {3} (on line (7,1,3), middle) | [24] — no refinement | 4 |
+| t ∈ {7} (on line (7,1,3), end) | [18, 3, 3] | 4 |
+| t ∈ {2} (on line (1,2,4), middle) | [18, 3, 3] | 4 |
+| t ∈ {4} (on line (1,2,4), end) | [16, 4, 4, 4, 4] | 4 |
+
+The third element always lies on exactly one line-through-1 (since every
+non-1 Fano index lies on a unique line through 1). The profile partition of
+24 is therefore determined entirely by a single Fano-plane coordinate: *which
+of the 6 non-identity octonion basis indices is the third element*.
+
+This is stronger than the earlier "three-way adjacency" conjecture:
+the refinement depth is a function of a single combinatorial datum, not a
+triple.
+
+### D.2 — Pure-octonion c collapses 7-class → 3-class
+
+For c = e_a + e_b with *both* a, b ∈ {1..7} (reference entirely in the
+octonion subalgebra, no ℓ-doubling component), the partition simplifies:
+
+- **(a, b) on a Fano line through 1** (9 pairs): retain Regime I 5-class
+  profile [82/90/92, 32, ·, 16, ·], byte-identical to the half-half
+  c = e_a + e_{b+8} of the same Fano line — i.e. the doubling does not
+  refine Regime I.
+- **(a, b) on a Fano line excluding 1** (12 pairs): collapse uniformly to
+  **3-class [96, 48, 24]**, regardless of which non-1 Fano line holds (a, b)
+  and regardless of the third element.
+
+The "doubling axis" ℓ in c = e_a + e_{b+8} is therefore necessary for
+Regime II refinement to appear. Under pure-octonion c, the 7-class / 5-class
+distinction within Regime II is erased: the partition sees only the
+line-through-1 property of L(a, b) itself.
+
+### Corollary (algebraic interpretation)
+
+The Mandelbrot-Hessian B of a pure-octonion c projects entirely into the
+octonion half (first 8 sedenion components), annihilating any coupling
+through the doubled-copy ℓ-axis. The ZD pair (e_a + s_b e_b)(e_c + s_d e_d) = 0
+structure of S involves ℓ-coupling by construction (both a, c ∈ {1..7} and
+both b, d ∈ {9..15}), so a B lying in the pure-octonion half can only
+partially witness the ZD structure — reducing the partition to the "visible"
+projection, which turns out to be 3-class for Regime II and 5-class for
+Regime I.
+
+Equivalently: **refinement beyond 5-class requires the Mandelbrot reference
+to engage the Cayley–Dickson doubling.** The 7-class maximum is an essentially
+sedenion-level phenomenon, not an octonion-inherited one.
