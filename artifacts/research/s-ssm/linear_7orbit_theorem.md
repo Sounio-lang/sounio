@@ -185,3 +185,50 @@ The class-count-by-c ladder gives a discrete hierarchy of algebraic resolution:
 
 The nonlinear pipeline's 26-class fingerprint at c = e₃+e₁₀ is then the further refinement of the maximum linear 7-class via tanh + normalize contributions. Together: **7 (max linear refinement) × ~3.7 (nonlinear factor) ≈ 26 (empirical).**
 
+
+## Fine structure: Fano-line-through-1 dichotomy
+
+Exhaustive sweep over all 42 (a, b-8) combinations where both indices lie on a common Fano line reveals a sharp regime structure:
+
+**Regime I — lines through index 1** (uniform within line):
+
+| Line | 5-class profile |
+|---|---|
+| (1, 2, 4) | $[82, 32, 28, 16, 10]$ |
+| (5, 6, 1) | $[92, 32, 20, 16, 8]$ |
+| (7, 1, 3) | $[90, 32, 18, 16, 12]$ |
+
+All 6 orderings within each line produce identical size profiles. 5 classes.
+
+**Regime II — lines NOT through 1** (variable within line):
+
+| Line | Distinct partitions observed |
+|---|---|
+| (2, 3, 5) | $[96,40,22,4,4,1,1]$; $[96,40,24,4,4]$; $[96,40,18,4,4,3,3]$ |
+| (3, 4, 6) | $[96,40,22,4,4,1,1]$; $[96,40,16,4,4,4,4]$; $[96,40,24,4,4]$ |
+| (4, 5, 7) | $[96,40,22,4,4,1,1]$; $[96,40,16,4,4,4,4]$; $[96,40,18,4,4,3,3]$ |
+| (6, 7, 2) | $[96,40,22,4,4,1,1]$; $[96,40,18,4,4,3,3]$ |
+
+Always 7 classes (except the 5-class $[96,40,24,4,4]$ degenerate case), with a $[96, 40, \cdot, 4, 4, \cdot]$ skeleton. The size-24 residual splits as $[22,1,1]$, $[18,3,3]$, $[16,4,4]$, or $[24]$.
+
+## Refined theorem statement
+
+> *The linear subspace-equivalence partition of the 168 sedenion ZD pairs induced by the sedenion SSM at $\alpha \in [0.1, 0.4]$ with reference $c = e_a + e_b$ decomposes into two structural regimes determined by the Fano-line membership of $(a, b-8)$:*
+>
+> *(I) If $(a, b-8)$ lies on a Fano line containing index 1, the partition is uniform across all 6 orderings on that line and is 5-class with one of three size profiles $[82, 32, 28, 16, 10]$, $[92, 32, 20, 16, 8]$, $[90, 32, 18, 16, 12]$ depending on which of the 3 lines through 1 is chosen.*
+>
+> *(II) If $(a, b-8)$ lies on a Fano line not containing 1, the partition has skeleton $[96, 40, \cdot, 4, 4, \cdot]$ with residual 24 distributed as one of $[22,1,1]$, $[24]$, $[18,3,3]$, $[16,4,4]$ depending on the specific unordered pair within the line.*
+
+**Maximum 7-class $[96, 40, 22, 4, 4, 1, 1]$** occurs for exactly 8 pairs out of 42 Regime II configurations: $(2,3), (3,2), (3,4), (4,3), (4,7), (7,4), (7,2), (2,7)$. Structural signature: the pair's line's "third element" is Fano-adjacent to 1 via a line distinct from the pair's own line.
+
+The canonical c = e₃ + g₂ = (3, 2) satisfies this condition via:
+- Pair line: (2, 3, 5)
+- Third element: 5
+- 5 is Fano-adjacent to 1 via (5, 6, 1) — a line distinct from (2, 3, 5) ✓
+
+## Interpretive consequence
+
+The Mandelbrot-Hessian at the canonical c = e₃ + e₁₀ is *not* arbitrary: it is one of 8 structurally-equivalent choices (modulo ordering) that produce the maximum 7-class partition. Our decision to use c = e₃ + e₁₀ "by inheritance" from `sed_known_zero_divisor()` turns out to be a structurally optimal choice on the algebraic refinement ladder.
+
+A clinical application using a sub-optimal c would obtain fewer, coarser orbit classes — up to 5 if in Regime II with wrong pair, or 5 if in Regime I. Performance ceiling on the resulting fingerprint is bounded by the algebraic refinement capacity of the chosen c. This is a structural limit, not a tuning limit.
+
