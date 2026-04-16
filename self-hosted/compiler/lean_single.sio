@@ -165,6 +165,14 @@ var GEN_ST_BDY_S: [i64; 64] = [0; 32]
 var GEN_ST_BDY_E: [i64; 64] = [0; 32]
 var GEN_ST_COUNT: i64 = 0
 
+// Tuple element type cache: maps tuple hash → element types for .0 / .1 extraction
+var TUP_CACHE_KEY: [i64; 512] = [0; 512]
+var TUP_CACHE_FIRST_TY: [i64; 512] = [0; 512]
+var TUP_CACHE_FIRST_HASH: [i64; 512] = [0; 512]
+var TUP_CACHE_LAST_TY: [i64; 512] = [0; 512]
+var TUP_CACHE_LAST_HASH: [i64; 512] = [0; 512]
+var TUP_CACHE_COUNT: i64 = 0
+
 // Monomorphization instantiation pairs
 var MONO_GEN: [i64; 128] = [0; 64]
 var MONO_TY_S: [i64; 128] = [0; 64]
@@ -406,6 +414,32 @@ fn st_find(hash: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
     while i < ST_COUNT {
         if ST[(i * 130) as usize] == hash { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn tup_cache_register(tup_hash: i64, first_ty: i64, first_hash: i64, last_ty: i64, last_hash: i64) with Panic, Mut {
+    if tup_hash == 0 { return }
+    var i: i64 = 0
+    while i < TUP_CACHE_COUNT {
+        if TUP_CACHE_KEY[i as usize] == tup_hash { return }
+        i = i + 1
+    }
+    if TUP_CACHE_COUNT >= 512 { return }
+    let idx = TUP_CACHE_COUNT
+    TUP_CACHE_KEY[idx as usize] = tup_hash
+    TUP_CACHE_FIRST_TY[idx as usize] = first_ty
+    TUP_CACHE_FIRST_HASH[idx as usize] = first_hash
+    TUP_CACHE_LAST_TY[idx as usize] = last_ty
+    TUP_CACHE_LAST_HASH[idx as usize] = last_hash
+    TUP_CACHE_COUNT = TUP_CACHE_COUNT + 1
+}
+
+fn tup_cache_lookup(tup_hash: i64) -> i64 with Panic, Mut {
+    var i: i64 = 0
+    while i < TUP_CACHE_COUNT {
+        if TUP_CACHE_KEY[i as usize] == tup_hash { return i }
         i = i + 1
     }
     return -1
@@ -2057,6 +2091,8 @@ fn call_arg_type_compatible(expected_ty: i64, expected_hash: i64, actual_ty: i64
     if actual_ty == 0 && actual_hash == 0 { return true }
     // Struct element from array with no type hash — cannot verify, accept
     if (actual_ty == 6 || actual_ty == 7) && actual_hash == 0 { return true }
+    // Size-hint sentinel from tuple field extraction — cannot verify struct name, accept
+    if actual_ty == 6 && actual_hash >= 1000000007 && actual_hash < 1000001007 { return true }
     if ty_eq(expected_ty, expected_hash, actual_ty, actual_hash) { return true }
     if type_is_slice_ref(expected_ty, expected_hash) {
         if actual_ty == 10 && ref_hash_inner_ty(actual_hash) == 8 {
@@ -2387,7 +2423,14 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
         if h1 != 0 && h2 != 0 { return h1 == h2 }
         return true
     }
-    if k1 == 6 || k1 == 7 { return h1 == h2 }
+    if k1 == 6 || k1 == 7 {
+        if h1 == h2 { return true }
+        if k1 == 6 {
+            if h1 >= 1000000007 && h1 < 1000001007 { return true }
+            if h2 >= 1000000007 && h2 < 1000001007 { return true }
+        }
+        return false
+    }
     if k1 == 8 {
         let a1 = arr_hash_alen(h1)
         let a2 = arr_hash_alen(h2)
@@ -3325,6 +3368,8 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
         if first_ty == 6 && first_hash != 0 {
             let fsi = st_find(first_hash)
             if fsi >= 0 { first_nslots = st_total_size(fsi) / 8 }
+        } else if first_ty == 8 {
+            first_nslots = arr_storage_slots(first_hash)
         }
         // Skip balanced parens, count elements, track last element start.
         var td: i64 = 1
@@ -3343,14 +3388,18 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
         // Scan last element type if distinct from first.
         var last_f64: i64 = first_f64
         var last_nslots: i64 = first_nslots
+        var last_ty: i64 = first_ty
+        var last_hash: i64 = first_hash
         if last_elem_start != first_elem_start {
             scan_type(last_elem_start)
-            let last_ty = SCAN_TY
-            let last_hash = SCAN_TY_HASH
+            last_ty = SCAN_TY
+            last_hash = SCAN_TY_HASH
             if last_ty == 2 { last_f64 = 1 } else { last_f64 = 0 }
             if last_ty == 6 && last_hash != 0 {
                 let lsi = st_find(last_hash)
                 if lsi >= 0 { last_nslots = st_total_size(lsi) / 8 } else { last_nslots = 1 }
+            } else if last_ty == 8 {
+                last_nslots = arr_storage_slots(last_hash)
             } else {
                 last_nslots = 1
             }
@@ -3359,6 +3408,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
         SCAN_TY = 6
         // Hash: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
         SCAN_TY_HASH = tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots
+        tup_cache_register(SCAN_TY_HASH, first_ty, first_hash, last_ty, last_hash)
         SCAN_TY_NEXT = p
         return
     }
@@ -7475,6 +7525,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             var last_f64_flag: i64 = 0
             if last_ty == 2 { last_f64_flag = 1 }
             EXPR_TY_HASH = tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots
+            tup_cache_register(EXPR_TY_HASH, first_ty, first_hash, last_ty, last_hash)
             return
         }
         if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -9457,11 +9508,22 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 } else {
                     // Aggregate element: materialize into fresh slots; rax is pointer.
                     EXPR_IS_F64 = 0
-                    EXPR_TY = 6
-                    if tup_idx == 0 {
-                        if tup_first_slots > 0 { EXPR_TY_HASH = 1000000007 + tup_first_slots } else { EXPR_TY_HASH = 0 }
+                    let tup_ci = tup_cache_lookup(EXPR_TY_HASH)
+                    if tup_ci >= 0 {
+                        if tup_idx == 0 {
+                            EXPR_TY = TUP_CACHE_FIRST_TY[tup_ci as usize]
+                            EXPR_TY_HASH = TUP_CACHE_FIRST_HASH[tup_ci as usize]
+                        } else {
+                            EXPR_TY = TUP_CACHE_LAST_TY[tup_ci as usize]
+                            EXPR_TY_HASH = TUP_CACHE_LAST_HASH[tup_ci as usize]
+                        }
                     } else {
-                        EXPR_TY_HASH = 0
+                        EXPR_TY = 6
+                        if tup_idx == 0 {
+                            if tup_first_slots > 0 { EXPR_TY_HASH = 1000000007 + tup_first_slots } else { EXPR_TY_HASH = 0 }
+                        } else {
+                            if tup_last_slots > 0 { EXPR_TY_HASH = 1000000007 + tup_last_slots } else { EXPR_TY_HASH = 0 }
+                        }
                     }
                     var tup_mat_n: i64 = 128
                     if elem_slots > 0 { tup_mat_n = elem_slots }
@@ -15196,17 +15258,19 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     let tcount_enc = scan_ret_hash / 1000000
                     let first_enc_check = (scan_ret_hash % 1000000) / 1000
                     if first_enc_check == 0 {
-                        // Scan first element — use ty_slot_count (not ret_agg_nslots)
-                        // to match tuple construction which also uses ty_slot_count.
                         scan_type(q + 1)
+                        let sig_first_ty = SCAN_TY
+                        let sig_first_hash = SCAN_TY_HASH
                         let first_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
-                        // Scan second element (skip comma after first)
                         var second_q = SCAN_TY_NEXT
                         if TK[second_q as usize] == 28 { second_q = second_q + 1 }
                         scan_type(second_q)
+                        let sig_last_ty = SCAN_TY
+                        let sig_last_hash = SCAN_TY_HASH
                         let last_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
                         let total_nslots = first_nslots + last_nslots
                         scan_ret_hash = tcount_enc * 1000000 + first_nslots * 1000 + total_nslots
+                        tup_cache_register(scan_ret_hash, sig_first_ty, sig_first_hash, sig_last_ty, sig_last_hash)
                         SCAN_TY = scan_ret_ty
                         SCAN_TY_HASH = scan_ret_hash
                         SCAN_TY_NEXT = scan_ret_next
