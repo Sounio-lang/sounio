@@ -880,3 +880,76 @@ cortical state — they do not selectively respond.
   signal** given the EEGMMIDB result. If pursued, it should test for a
   larger scalar effect (ketamine's dissociative state produces $d \sim 1.0$
   on LZc), not for partition-selective modulation.
+
+---
+
+## Direction 3 Result v3: WITHIN-subject state classification succeeds
+
+### The correction
+
+The n=29 v2 result (group-mean $\Delta\mu$ analysis) concluded "biology is
+scalar." That conclusion was an artifact of the 7-class collapse and
+group-level aggregation. Full 168-dim fingerprint with within-subject
+cross-validation shows a different picture.
+
+### Protocol
+
+5-fold stratified CV within each of 29 subjects. For each state pair,
+logistic regression classifier on the 168-dim linear-SSM fingerprint
+(30 windows × 2 states = 60 windows per subject). Standardized features,
+$C = 1.0$.
+
+### Results
+
+| State pair | Mean accuracy | subjects > 0.55 | subjects > 0.60 | group $t_{28}$ | group $p$ |
+|---|---|---|---|---|---|
+| **EO → EC** | **0.586 ± 0.10** | 19 / 29 | 15 / 29 | **4.63** | **3.8 × 10⁻⁵** |
+| **EC → MI** | **0.584 ± 0.10** | 18 / 29 | 12 / 29 | **4.52** | **5.1 × 10⁻⁵** |
+| EC → MX | 0.547 ± 0.12 | 13 / 29 | 8 / 29 | 2.09 | 0.023 |
+| MX → MI | 0.535 ± 0.10 | 7 / 29 | 5 / 29 | 1.88 | 0.036 |
+| EO → MX | 0.526 ± 0.09 | 11 / 29 | 5 / 29 | 1.55 | 0.065 |
+| EO → MI | 0.533 ± 0.11 | 11 / 29 | 5 / 29 | 1.65 | 0.055 |
+
+### Subject-centered LOSO (cross-subject generalization)
+
+All state pairs: 49–52% accuracy across held-out subjects. Cross-subject
+classification fails universally.
+
+### Refined biological claim
+
+The 168-dim linear-SSM fingerprint carries cortical-state information
+**within each subject**, with statistically strong group-level
+significance ($p < 10^{-4}$ for EO→EC and EC→MI). However, the
+state-representation is **subject-specific**: the direction in 168-dim
+fingerprint-space along which states separate differs from subject to
+subject, and no cross-subject classifier achieves above-chance
+performance.
+
+This is consistent with the "cortical fingerprint" phenomenon in
+connectomics (Finn et al. 2015, Nature Neurosci.): individual
+connectivity patterns are subject-identifiable and task modulations
+are subject-specific.
+
+### What this changes about the arc
+
+- Theorem A–J: unchanged. Pure algebra remains clean.
+- Direction 3 v2 (biology-is-scalar verdict): **superseded**. The
+  within-subject result replaces it.
+- **Publishable claim now:** The linear-SSM fingerprint is a
+  subject-specific state discriminator with significant within-subject
+  predictive validity for cortical-state transitions in resting-task EEG.
+  The 168-dim representation is essential; the 7-class collapse is
+  insufficient.
+- **Direction for ketamine:** within-subject EO(pre) vs EO(post-drug)
+  paired design should yield the primary positive result. Between-subject
+  drug vs placebo contrasts will fail at any realistic n.
+
+### Pre-registered follow-up
+
+1. Scale to n=100 EEGMMIDB subjects (all have R01–R04 available) to
+   test whether within-subject accuracy stabilizes or improves.
+2. Determine which dimensions of the 168-dim space carry within-subject
+   state signal (per-subject LDA projection; check alignment with the
+   7-class structure).
+3. Test whether the subject-specific state directions have ANY shared
+   structure at the group level (principal components, meta-classifier).
