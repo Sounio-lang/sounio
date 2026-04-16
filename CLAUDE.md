@@ -129,7 +129,7 @@ Components: lexer, parser, ast, check, types, effects, hir, hlir,
 
 **Providers**: Grok (`grok`), GLM-5 (`glm`), MiniMax M2.7 (`minimax`, Anthropic SDK compatible), DeepSeek (`deepseek`), Ollama (`local`)
 
-**Routing config**: `.claude/offload-routing.md` — provider table, MiniMax SDK setup, routing rules
+**Routing config**: `.claude/offload-routing.md` — provider table, MiniMax SDK setup, routing rules, and **MCP Context7** path fix for remote (`~/.claude/settings.json`)
 
 **MiniMax note**: Supports Anthropic messages API via `ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic`. Models: M2.7 (204K ctx), M2.5, M2.1, M2. Supports tools, streaming, thinking.
 
@@ -157,6 +157,8 @@ llm-pipeline multi-scaffold spec.txt        # 2 providers scaffold → diff
 **Flow**: Claude designs → `/offload-expand` expands → Claude critiques
 
 ## Session Persistence
+
+Garden / metaphor dictionary (archived): `docs/archived/GARDEN_ROSETTA.md` — used by `.claude/prompts/garden.md`; not required for routine compiler work.
 
 Use `.claude/` for cross-session context:
 
