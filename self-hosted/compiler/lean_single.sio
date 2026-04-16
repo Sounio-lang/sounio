@@ -5108,6 +5108,60 @@ fn bind_struct_local_zeroinit_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
     emit_store_var(ptr_slot)
 }
 
+// Emit init code for all top-level `var NAME: TY = EXPR` declarations.
+// Called once at main's entry before the body is compiled. BSS-zero covers the
+// zero-initialized case; this catches non-zero literal and expression inits
+// (e.g. `var PI: f64 = 3.14159`, `var TUNE: i64 = 42`).
+// Array globals with repeat syntax `[V; N]` fall through to BSS zero (V must be 0
+// for correctness; other values are not yet supported).
+fn emit_global_inits_x86() with IO, Mut, Panic, Div {
+    var p: i64 = 0
+    var depth: i64 = 0
+    while p < TC {
+        let tk = TK[p as usize]
+        if tk == 8 { depth = depth + 1; p = p + 1; continue }
+        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if depth > 0 { p = p + 1; continue }
+        if tk == 12 {
+            p = p + 1
+            let gns = TS[p as usize]
+            let gne = TE[p as usize]
+            p = p + 1
+            if p < TC && TK[p as usize] == 43 {
+                p = p + 1
+                if TK[p as usize] == 41 {
+                    while p < TC && TK[p as usize] != 42 { p = p + 1 }
+                    if p < TC { p = p + 1 }
+                } else {
+                    scan_type(p)
+                    p = SCAN_TY_NEXT
+                }
+            }
+            if p < TC && TK[p as usize] == 16 {
+                p = p + 1
+                if TK[p as usize] == 41 {
+                    while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 { p = p + 1 }
+                    continue
+                }
+                let gi = gl_find(gns, gne)
+                if gi >= 0 {
+                    EP = p
+                    compile_or()
+                    let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                    em(0x48); em(0x89); em(0xc1)
+                    em(0x48); em(0xb8); em64(addr)
+                    em(0x48); em(0x89); em(0x08)
+                    p = EP
+                    continue
+                }
+            }
+            while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 { p = p + 1 }
+            continue
+        }
+        p = p + 1
+    }
+}
+
 fn copy_struct_into_local_slot_x86(slot: i64, ty_hash: i64) with Mut, Panic, Div {
     let si = st_find(ty_hash)
     if si < 0 && knowledge_hash_is(ty_hash) == false { emit_store_var(slot); return }
@@ -15477,6 +15531,24 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 abi_arg_idx = abi_arg_idx + 1
             }
             param_vi = param_vi + 1
+        }
+
+        // Emit non-zero global initializers once, at main's entry.
+        // BSS already zeros globals, so this only matters for inits like
+        // `var PI: f64 = 3.14159` where the declared value is not zero.
+        let main_ntk = FN_NAME_TOK[fn_idx as usize]
+        let main_ns = TS[main_ntk as usize]
+        let main_ne = TE[main_ntk as usize]
+        if src_match(main_ns, main_ne - main_ns, "main") {
+            let save_ep = EP
+            let save_expr_ty = EXPR_TY
+            let save_expr_ty_hash = EXPR_TY_HASH
+            let save_expr_is_f64 = EXPR_IS_F64
+            emit_global_inits_x86()
+            EP = save_ep
+            EXPR_TY = save_expr_ty
+            EXPR_TY_HASH = save_expr_ty_hash
+            EXPR_IS_F64 = save_expr_is_f64
         }
 
         // Kernels that reference GPU builtins are executed through a CPU lane loop
