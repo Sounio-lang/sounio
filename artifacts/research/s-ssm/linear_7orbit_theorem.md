@@ -826,3 +826,57 @@ admit only 7 distinct projections of any given $y$.** The subsequent
 algebraic question — what enforces the 1-dim intersections within
 each class — is now sharply posed and ready for explicit proof from
 sedenion structure constants.
+
+---
+
+## Direction 3 Result: cortical-state discrimination (n=29, EEGMMIDB)
+
+### Protocol
+
+Within-subject contrast across 4 cortical states (eyes-open R01,
+eyes-closed R02, motor execution R03, motor imagery R04). 30 subjects
+(S001–S030, one file corrupted → n=29 complete), 30 non-overlapping
+80-sample windows per run, linear-SSM 7-class fingerprint at
+$\alpha = 0.2$, $c = e_3 + e_{10}$. Per-subject mean $\mu \in \mathbb{R}^7$
+per state. Permutation null: 10,000 random sign-flips of within-subject
+$\Delta\mu$.
+
+### Results
+
+| Pair | $\|\bar{\Delta\mu}\|$ | perm $p$ | Cohen's $d$ |
+|---|---|---|---|
+| EO → MX | 0.0080 | 0.19 | 0.67 |
+| EO → EC | 0.0114 | 0.22 | 0.62 |
+| EO → MI | 0.0068 | 0.40 | 0.44 |
+| EC → MX/MI, MX → MI | < 0.005 | > 0.70 | < 0.26 |
+
+### Structural diagnosis
+
+The 7-class $\mu$ vector shifts **uniformly** from EO to other states:
+all 7 classes increase in MSE together, with sign-vote consistency
+$\ge 5/7$ negative in the EO → EC and EO → MX contrasts. Per-class
+effect sizes are statistically indistinguishable (all $t < 1$).
+
+**Consequence:** the 7-class partition is biologically inert as a
+structured biomarker. The framework detects a scalar cortical-state
+shift (global MSE increase from resting eyes-open to other conditions),
+but the *partition structure* adds no discriminative information beyond
+mean MSE. The 7 landmarks $\pi_0, \ldots, \pi_6$ all co-move with
+cortical state — they do not selectively respond.
+
+### Implication for Direction 3
+
+- **The algebra is real.** Theorems A–J stand as pure mathematical results.
+- **The biology is scalar.** The structured 7-dim readout collapses to a
+  1-dim cortical-state signal under empirical test. The partition carries
+  algebraic, not biological, information.
+- **Recommended scope statement for publication:** "The 168-pair
+  linear-SSM fingerprint produces a structurally fixed 7-class partition
+  of the sedenion zero-divisor space (Theorems A–J). Under cortical-state
+  variation, the 7-class MSE vector shifts uniformly, indicating that the
+  partition structure is an algebraic invariant of the ZD parameterization,
+  not a biologically selective feature."
+- **Ketamine vs placebo at n=30 is not expected to yield class-specific
+  signal** given the EEGMMIDB result. If pursued, it should test for a
+  larger scalar effect (ketamine's dissociative state produces $d \sim 1.0$
+  on LZc), not for partition-selective modulation.
