@@ -3314,18 +3314,51 @@ fn scan_type(p0: i64) with IO, Mut, Panic {
     SCAN_TY_ALEN = 0
     // Tuple type: (T, U, ...) — skip balanced parens, treat as aggregate
     if TK[p as usize] == 6 {
+        // Scan first element type (starts right after '(').
+        let first_elem_start = p + 1
+        scan_type(first_elem_start)
+        let first_ty = SCAN_TY
+        let first_hash = SCAN_TY_HASH
+        var first_f64: i64 = 0
+        if first_ty == 2 { first_f64 = 1 }
+        var first_nslots: i64 = 1
+        if first_ty == 6 && first_hash != 0 {
+            let fsi = st_find(first_hash)
+            if fsi >= 0 { first_nslots = st_total_size(fsi) / 8 }
+        }
+        // Skip balanced parens, count elements, track last element start.
         var td: i64 = 1
         var tcount: i64 = 1
+        var last_elem_start: i64 = first_elem_start
         p = p + 1
         while p < TC && td > 0 {
             if TK[p as usize] == 6 { td = td + 1 }
             if TK[p as usize] == 7 { td = td - 1 }
-            if td > 0 && TK[p as usize] == 28 { tcount = tcount + 1 }  // count commas
+            if td == 1 && TK[p as usize] == 28 {
+                tcount = tcount + 1
+                last_elem_start = p + 1
+            }
             p = p + 1
         }
-        // Treat tuple as a struct-like aggregate with tcount slots
+        // Scan last element type if distinct from first.
+        var last_f64: i64 = first_f64
+        var last_nslots: i64 = first_nslots
+        if last_elem_start != first_elem_start {
+            scan_type(last_elem_start)
+            let last_ty = SCAN_TY
+            let last_hash = SCAN_TY_HASH
+            if last_ty == 2 { last_f64 = 1 } else { last_f64 = 0 }
+            if last_ty == 6 && last_hash != 0 {
+                let lsi = st_find(last_hash)
+                if lsi >= 0 { last_nslots = st_total_size(lsi) / 8 } else { last_nslots = 1 }
+            } else {
+                last_nslots = 1
+            }
+        }
+        let total_nslots = first_nslots + last_nslots
         SCAN_TY = 6
-        SCAN_TY_HASH = tcount * 1000000  // synthetic tuple hash (first+total filled in later)
+        // Hash: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
+        SCAN_TY_HASH = tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots
         SCAN_TY_NEXT = p
         return
     }
@@ -7434,9 +7467,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
             em32(0 - (tup_base + total_slots - 1) * 8)
             EXPR_IS_F64 = 0
             EXPR_TY = 6
-            // Encode first_nslots and total_slots in hash for .1 offset and SRET sizing
+            // Encode first_nslots, total_slots, and per-element f64-ness.
+            // Format: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
             let first_actual = if first_nslots > 1 { first_nslots } else { 1 }
-            EXPR_TY_HASH = tup_count * 1000000 + first_actual * 1000 + total_slots
+            var first_f64_flag: i64 = 0
+            if first_ty == 2 { first_f64_flag = 1 }
+            var last_f64_flag: i64 = 0
+            if last_ty == 2 { last_f64_flag = 1 }
+            EXPR_TY_HASH = tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots
             return
         }
         if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -9404,9 +9442,17 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 }
                 if elem_slots == 1 {
                     // Scalar element: dereference the pointer so rax holds the value.
+                    let tup_first_f64 = (EXPR_TY_HASH / 10000000) % 10
+                    let tup_last_f64 = (EXPR_TY_HASH / 1000000) % 10
+                    let elem_is_f64 = if tup_idx == 0 { tup_first_f64 } else { tup_last_f64 }
                     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
-                    EXPR_IS_F64 = 0
-                    EXPR_TY = 1
+                    if elem_is_f64 == 1 {
+                        EXPR_IS_F64 = 1
+                        EXPR_TY = 2
+                    } else {
+                        EXPR_IS_F64 = 0
+                        EXPR_TY = 1
+                    }
                     EXPR_TY_HASH = 0
                 } else {
                     // Aggregate element: materialize into fresh slots; rax is pointer.
