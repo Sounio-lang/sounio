@@ -10508,6 +10508,46 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
     }
 }
 
+// Destructure a tuple-returning expression into pattern variables (A64 path).
+// ptr_slot holds the SRET pointer (x0 from the call).  tup_hash encodes the
+// element types/sizes via the standard format.  Currently handles flat 2-element tuples only.
+fn tuple_destructure_from_ptr_a64(pat_start: i64, tup_hash: i64, ptr_slot: i64) with IO, Mut, Panic, Div {
+    let tup_first_slots = (tup_hash % 1000000) / 1000
+    let tup_total_slots = tup_hash % 1000
+    let tup_last_slots = tup_total_slots - tup_first_slots
+    let tup_first_f64 = (tup_hash / 10000000) % 10
+    let tup_last_f64 = (tup_hash / 1000000) % 10
+    var pp = pat_start + 1
+    var elem_idx: i64 = 0
+    while TK[pp as usize] != 7 && TK[pp as usize] != 0 {
+        if TK[pp as usize] == 28 { pp = pp + 1; continue }
+        if TK[pp as usize] != 3 { pp = pp + 1; continue }
+        let pns = TS[pp as usize]
+        let pne = TE[pp as usize]
+        let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
+        pp = pp + 1
+        let elem_is_f64 = if elem_idx == 0 { tup_first_f64 } else { tup_last_f64 }
+        let elem_slots = if elem_idx == 0 { tup_first_slots } else { tup_last_slots }
+        let byte_off = if elem_idx == 0 { 0 } else { tup_first_slots * 8 }
+        if is_wild == 0 {
+            if elem_slots == 1 {
+                emit_load_var_a64(ptr_slot)
+                if byte_off > 0 {
+                    // add x0, x0, #byte_off  (imm12 in bits [21:10])
+                    em32(0x91000000 | (byte_off << 10))
+                }
+                // ldr x0, [x0]
+                em32(0xF9400000)
+                if elem_is_f64 == 1 { EXPR_IS_F64 = 1; EXPR_TY = 2 }
+                else { EXPR_IS_F64 = 0; EXPR_TY = 1 }
+                EXPR_TY_HASH = 0
+                tuple_bind_leaf_a64(pns, pne)
+            }
+        }
+        elem_idx = elem_idx + 1
+    }
+}
+
 fn tuple_bind_pattern_x86(pp0: i64, rp0: i64) with IO, Mut, Panic, Div {
     var pp = pp0
     var rp = rp0
@@ -19457,7 +19497,19 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             EP = pat_p
             if TK[EP as usize] == 16 { EP = EP + 1 }
-            if TK[EP as usize] != 6 { tc_error(EP, "tuple destructuring requires tuple literal") }
+            if TK[EP as usize] != 6 {
+                compile_or_a64()
+                if ret_agg_nslots(EXPR_TY, EXPR_TY_HASH) <= 0 {
+                    tc_error(EP, "tuple destructuring: RHS must be a tuple expression")
+                    return
+                }
+                let save_tup_hash = EXPR_TY_HASH
+                let sret_ptr_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(sret_ptr_slot)
+                tuple_destructure_from_ptr_a64(pat_start, save_tup_hash, sret_ptr_slot)
+                return
+            }
             tuple_bind_pattern_a64(pat_start, EP)
             EP = TUP_RHS_NEXT
             return
