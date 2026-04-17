@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
 """
-Strategy ι — Fano Taxonomy: Clustering + Phenotype Agreement
+Strategy ι — Fano Taxonomy: Clustering + phenotype agreement
 
 Loads Fano 7-vectors from ABIDE-I connectomes (n=100), clusters in R^7,
-computes Adjusted Rand Index (ARI) vs DX_GROUP/site/age/sex with
-permutation null.
+and computes Adjusted Rand Index (ARI) against real ABIDE phenotype columns
+with a permutation null.
 
-Output: silhouette plots, PCA visualization, ARI summary with p-values.
+Outputs:
+- PCA visualization
+- ARI summary with p-values
+- Aligned cohort metadata used for the run
 """
 
-import numpy as np
-import pandas as pd
+import argparse
+import json
 import os
 import struct
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_score, adjusted_rand_score
-import json
+from pathlib import Path
+
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import adjusted_rand_score, silhouette_score
+from sklearn.preprocessing import StandardScaler
 
 # ═══════════════════════════════════════════════════════════════════════
 # Load ABIDE frames and compute Fano 7-vectors
@@ -41,7 +47,208 @@ def load_frames_bin(path, limit=None):
             frame = np.frombuffer(frame_data, dtype=np.float64).reshape(7, 200)
             frames.append(frame)
             groups.append(1 if i < n_asd else 2)
+    return np.array(frames), np.array(groups), n_asd, n_td
 
+
+def extract_frame_from_roi(path):
+    """Reproduce the ROI -> Laplacian eigenframe extraction used in abide_preprocess.py."""
+    ts = np.loadtxt(path)
+    if ts.ndim != 2 or ts.shape[0] < 20 or ts.shape[1] < 8:
+        raise RuntimeError(f"Unexpected ROI shape in {path}: {ts.shape}")
+
+    n_rois = ts.shape[1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        corr = np.corrcoef(ts.T)
+    corr = np.nan_to_num(corr, nan=0.0)
+    np.fill_diagonal(corr, 0.0)
+    adj = np.maximum(corr, 0.0)
+    deg = adj.sum(axis=1)
+    lap = np.diag(deg) - adj
+    eigenvalues, eigenvectors = np.linalg.eigh(lap)
+    if len(eigenvalues) < 8:
+        raise RuntimeError(f"Not enough eigenvalues in {path}")
+
+    frame = eigenvectors[:, 1:8].T
+    if n_rois < 200:
+        padded = np.zeros((7, 200))
+        padded[:, :n_rois] = frame
+        frame = padded
+    elif n_rois > 200:
+        frame = frame[:, :200]
+    return frame
+
+
+def iter_cached_subject_rows(pheno_path, roi_dir):
+    """Yield phenotypic rows that have a cached ROI file."""
+    pheno_df = pd.read_csv(pheno_path)
+    roi_dir = Path(roi_dir)
+    kept = []
+    for _, row in pheno_df.iterrows():
+        fid = str(row.get("FILE_ID", ""))
+        if not fid or fid in ("no_filename", "nan"):
+            continue
+        roi_path = roi_dir / f"{fid}_rois_cc200.1D"
+        if not roi_path.exists():
+            continue
+        row = row.copy()
+        row["ROI_PATH"] = str(roi_path)
+        kept.append(row)
+    return pd.DataFrame(kept)
+
+
+def build_aligned_metadata(pheno_path, roi_dir, n_asd, n_td, frames_index_path=None):
+    """
+    Reconstruct the exact cohort ordering used by scripts/research/abide_preprocess.py.
+
+    Preferred source of truth:
+    1. frames_index.txt (if present)
+    2. The preprocessor contract: iterate phenotypic rows, keep cached ROI files,
+       append all ASD first, then all TD.
+    """
+    pheno_df = iter_cached_subject_rows(pheno_path, roi_dir)
+
+    if frames_index_path and Path(frames_index_path).exists():
+        ordered = []
+        by_fid = pheno_df.set_index("FILE_ID", drop=False)
+        with open(frames_index_path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                label, fid = line.split("\t", 1)
+                if fid not in by_fid.index:
+                    raise RuntimeError(f"FILE_ID {fid} from frames_index missing in phenotypic.csv")
+                row = by_fid.loc[fid]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+                ordered.append(row)
+        meta = pd.DataFrame(ordered).reset_index(drop=True)
+    else:
+        ordered = []
+        for dx_group, target_count in ((1, n_asd), (2, n_td)):
+            subset = pheno_df[pheno_df["DX_GROUP"] == dx_group]
+            kept = []
+            for _, row in subset.iterrows():
+                kept.append(row)
+                if len(kept) == target_count:
+                    break
+            if len(kept) != target_count:
+                raise RuntimeError(
+                    f"Unable to reconstruct {target_count} subjects for DX_GROUP={dx_group}; found {len(kept)}"
+                )
+            ordered.extend(kept)
+        meta = pd.DataFrame(ordered).reset_index(drop=True)
+
+    if len(meta) != n_asd + n_td:
+        raise RuntimeError(
+            f"Aligned metadata length mismatch: expected {n_asd + n_td}, got {len(meta)}"
+        )
+
+    if int((meta["DX_GROUP"] == 1).sum()) != n_asd or int((meta["DX_GROUP"] == 2).sum()) != n_td:
+        raise RuntimeError("Aligned metadata does not match frames.bin class counts")
+
+    meta = meta.copy()
+    meta["site_code"] = pd.Categorical(meta["SITE_ID"]).codes
+    meta["sex_code"] = pd.Categorical(meta["SEX"]).codes
+    meta["age_quartile"] = pd.qcut(
+        meta["AGE_AT_SCAN"],
+        q=4,
+        labels=False,
+        duplicates="drop",
+    ).astype(int)
+    return meta
+
+
+def select_site_balanced_metadata(pheno_path, roi_dir, target_subjects):
+    """
+    Build a diagnosis-balanced, near-uniform per-site cohort from cached ROI files.
+
+    Selection rule:
+    - only sites with both ASD and TD cached subjects are eligible
+    - allocate one ASD/TD pair per site in round-robin order until target reached
+    - within each site/diagnosis bucket, preserve original phenotypic row order
+    """
+    if target_subjects % 2 != 0:
+        raise ValueError("target_subjects must be even for site-balanced selection")
+
+    pheno_df = iter_cached_subject_rows(pheno_path, roi_dir)
+    per_site = {}
+    for site, site_df in pheno_df.groupby("SITE_ID", sort=True):
+        asd_rows = list(site_df[site_df["DX_GROUP"] == 1].iterrows())
+        td_rows = list(site_df[site_df["DX_GROUP"] == 2].iterrows())
+        pairs = min(len(asd_rows), len(td_rows))
+        if pairs == 0:
+            continue
+        per_site[site] = {
+            "asd_rows": asd_rows,
+            "td_rows": td_rows,
+            "pairs": pairs,
+        }
+
+    if not per_site:
+        raise RuntimeError("No sites with both ASD and TD cached subjects")
+
+    target_pairs = target_subjects // 2
+    capacity_pairs = sum(bucket["pairs"] for bucket in per_site.values())
+    if capacity_pairs < target_pairs:
+        raise RuntimeError(
+            f"Insufficient site-balanced capacity: requested {target_pairs} pairs, have {capacity_pairs}"
+        )
+
+    ordered_sites = sorted(
+        per_site.keys(),
+        key=lambda site: (-per_site[site]["pairs"], site),
+    )
+    allocated = {site: 0 for site in ordered_sites}
+    allocated_pairs = 0
+    while allocated_pairs < target_pairs:
+        progressed = False
+        for site in ordered_sites:
+            if allocated[site] >= per_site[site]["pairs"]:
+                continue
+            allocated[site] += 1
+            allocated_pairs += 1
+            progressed = True
+            if allocated_pairs == target_pairs:
+                break
+        if not progressed:
+            raise RuntimeError("Round-robin allocation stalled before reaching target_pairs")
+
+    selected_rows = []
+    for site in ordered_sites:
+        n_pairs = allocated[site]
+        if n_pairs == 0:
+            continue
+        selected_rows.extend(row for _, row in per_site[site]["asd_rows"][:n_pairs])
+        selected_rows.extend(row for _, row in per_site[site]["td_rows"][:n_pairs])
+
+    meta = pd.DataFrame(selected_rows).reset_index(drop=True)
+    if len(meta) != target_subjects:
+        raise RuntimeError(
+            f"Site-balanced metadata length mismatch: expected {target_subjects}, got {len(meta)}"
+        )
+
+    meta = meta.copy()
+    meta["site_code"] = pd.Categorical(meta["SITE_ID"]).codes
+    meta["sex_code"] = pd.Categorical(meta["SEX"]).codes
+    meta["age_quartile"] = pd.qcut(
+        meta["AGE_AT_SCAN"],
+        q=4,
+        labels=False,
+        duplicates="drop",
+    ).astype(int)
+    return meta
+
+
+def load_frames_for_metadata(meta):
+    """Compute eigenframes directly from the cached ROI files for the selected cohort."""
+    frames = []
+    groups = []
+    for i, row in enumerate(meta.itertuples(index=False), start=1):
+        if i % 20 == 0:
+            print(f"  frame {i}/{len(meta)}")
+        frames.append(extract_frame_from_roi(row.ROI_PATH))
+        groups.append(int(row.DX_GROUP))
     return np.array(frames), np.array(groups)
 
 def compute_fano_7vector(frame):
@@ -81,26 +288,97 @@ def compute_fano_7vector(frame):
 
     return fano_strength / total
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run Fano taxonomy analysis on ABIDE frames")
+    parser.add_argument(
+        "--frames-path",
+        default="artifacts/research/abide/frames.bin",
+        help="Path to frames.bin",
+    )
+    parser.add_argument(
+        "--cohort-mode",
+        choices=["frames_bin", "site_balanced"],
+        default="frames_bin",
+        help="Which cohort construction path to use",
+    )
+    parser.add_argument(
+        "--pheno-path",
+        default="/tmp/abide_pilot/phenotypic.csv",
+        help="Path to ABIDE phenotypic.csv",
+    )
+    parser.add_argument(
+        "--roi-dir",
+        default="/tmp/abide_pilot",
+        help="Directory containing cached *_rois_cc200.1D files",
+    )
+    parser.add_argument(
+        "--frames-index-path",
+        default="artifacts/research/abide/frames_index.txt",
+        help="Optional frames_index.txt written by abide_preprocess.py",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="experiments/non_assoc_connectomics",
+        help="Directory for summary artifacts",
+    )
+    parser.add_argument(
+        "--output-stem",
+        default="fano_taxonomy",
+        help="Stem for output artifact filenames",
+    )
+    parser.add_argument(
+        "--target-subjects",
+        type=int,
+        default=100,
+        help="Target cohort size for derived cohort modes such as site_balanced",
+    )
+    parser.add_argument(
+        "--n-perms",
+        type=int,
+        default=1000,
+        help="Number of permutation draws for each phenotype ARI null",
+    )
+    return parser.parse_args()
+
+
 def main():
-    # Load data
-    frames_path = "artifacts/research/abide/frames.bin"
-    pheno_path = "/tmp/abide_pilot/phenotypic.csv"
-    manifest_path = "/tmp/abide_pilot/manifest.csv"
+    args = parse_args()
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading frames.bin...")
-    frames, groups = load_frames_bin(frames_path)
-    n_total = len(frames)
-    print(f"  Loaded {n_total} subjects ({np.sum(groups==1)} ASD, {np.sum(groups==2)} TD)")
+    if args.cohort_mode == "frames_bin":
+        print("Loading frames.bin...")
+        frames, groups, n_asd, n_td = load_frames_bin(args.frames_path)
+        n_total = len(frames)
+        print(f"  Loaded {n_total} subjects ({n_asd} ASD, {n_td} TD)")
 
-    # Load phenotypic metadata
-    print("Loading phenotypic data...")
-    pheno_df = pd.read_csv(pheno_path)
-
-    # Load manifest to map file IDs
-    if os.path.exists(manifest_path):
-        manifest_df = pd.read_csv(manifest_path)
+        print("Aligning phenotype metadata to frames.bin order...")
+        meta = build_aligned_metadata(
+            args.pheno_path,
+            args.roi_dir,
+            n_asd,
+            n_td,
+            args.frames_index_path,
+        )
     else:
-        manifest_df = None
+        print(f"Building site-balanced cohort (target_subjects={args.target_subjects})...")
+        meta = select_site_balanced_metadata(
+            args.pheno_path,
+            args.roi_dir,
+            args.target_subjects,
+        )
+        n_asd = int((meta["DX_GROUP"] == 1).sum())
+        n_td = int((meta["DX_GROUP"] == 2).sum())
+        n_total = len(meta)
+        print(f"  Selected {n_total} subjects ({n_asd} ASD, {n_td} TD)")
+        print("Computing eigenframes for selected cohort...")
+        frames, groups = load_frames_for_metadata(meta)
+
+    aligned_meta_path = output_dir / f"{args.output_stem}_cohort.csv"
+    meta[
+        ["SUB_ID", "FILE_ID", "DX_GROUP", "SITE_ID", "AGE_AT_SCAN", "SEX", "age_quartile"]
+    ].to_csv(aligned_meta_path, index=False)
+    print(f"  Aligned metadata written to {aligned_meta_path}")
 
     # Compute Fano 7-vectors
     print("Computing Fano 7-vectors...")
@@ -143,25 +421,18 @@ def main():
     # ARI tests with permutation null
     # ═══════════════════════════════════════════════════════════════════
 
-    print("\nARI phenotype agreement tests (1000 permutations)...")
+    print(f"\nARI phenotype agreement tests ({args.n_perms} permutations)...")
 
     # Prepare phenotype data
     phenotype_map = {}
 
-    # DX_GROUP (ASD=1, TD=2)
-    phenotype_map['DX_GROUP'] = groups
-
-    # Site (13 sites in ABIDE)
-    phenotype_map['site'] = np.arange(n_total) % 13  # placeholder; would need actual site data
-
-    # Age (binned to quartiles)
-    phenotype_map['age_quartile'] = np.linspace(0, 3, n_total, dtype=int)
-
-    # Sex (simplified)
-    phenotype_map['sex'] = np.arange(n_total) % 2
+    phenotype_map["DX_GROUP"] = meta["DX_GROUP"].to_numpy()
+    phenotype_map["site"] = meta["site_code"].to_numpy()
+    phenotype_map["age_quartile"] = meta["age_quartile"].to_numpy()
+    phenotype_map["sex"] = meta["sex_code"].to_numpy()
 
     ari_results = {}
-    n_perms = 1000
+    n_perms = args.n_perms
 
     for pheno_name, pheno_values in phenotype_map.items():
         observed_ari = adjusted_rand_score(pheno_values, cluster_labels)
@@ -175,7 +446,7 @@ def main():
             null_aris.append(perm_ari)
 
         null_aris = np.array(null_aris)
-        p_value = np.mean(null_aris >= observed_ari)
+        p_value = (np.count_nonzero(null_aris >= observed_ari) + 1) / (n_perms + 1)
 
         ari_results[pheno_name] = {
             'observed_ari': float(observed_ari),
@@ -214,8 +485,9 @@ def main():
 
     fig.suptitle('Octonion Fano-Taxonomy: Clinical Labels vs Algebraic Structure')
     plt.tight_layout()
-    plt.savefig('experiments/non_assoc_connectomics/fano_taxonomy_pca.png', dpi=150)
-    print("  Saved: fano_taxonomy_pca.png")
+    pca_path = output_dir / f"{args.output_stem}_pca.png"
+    plt.savefig(pca_path, dpi=150)
+    print(f"  Saved: {pca_path}")
 
     # ═══════════════════════════════════════════════════════════════════
     # Summary output
@@ -223,25 +495,36 @@ def main():
 
     summary = {
         'n_total': n_total,
-        'n_asd': int(np.sum(groups == 1)),
-        'n_td': int(np.sum(groups == 2)),
+        'n_asd': n_asd,
+        'n_td': n_td,
+        'cohort_mode': args.cohort_mode,
         'optimal_k': int(optimal_k),
         'silhouette_optimal': float(silhouette_scores[optimal_k - 2]),
         'silhouette_scores': [float(s) for s in silhouette_scores],
         'cluster_sizes': [int(np.sum(cluster_labels == i)) for i in range(optimal_k)],
         'ari_results': ari_results,
         'pca_explained_variance': [float(v) for v in pca.explained_variance_ratio_[:2]],
+        'mean_simplex': [float(v) for v in fano_vectors.mean(axis=0)],
+        'cohort_metadata': {
+            'site_counts': {str(k): int(v) for k, v in meta["SITE_ID"].value_counts().sort_index().items()},
+            'sex_counts': {str(int(k)): int(v) for k, v in meta["SEX"].value_counts().sort_index().items()},
+            'age_quartile_counts': {
+                str(int(k)): int(v) for k, v in meta["age_quartile"].value_counts().sort_index().items()
+            },
+        },
     }
 
-    with open('experiments/non_assoc_connectomics/fano_taxonomy_summary.json', 'w') as f:
+    summary_path = output_dir / f"{args.output_stem}_summary.json"
+    with open(summary_path, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2)
 
     print("\nResults:")
     print(json.dumps(summary, indent=2))
 
     print("\n✓ Strategy ι complete.")
-    print("  PCA figure: experiments/non_assoc_connectomics/fano_taxonomy_pca.png")
-    print("  Summary JSON: experiments/non_assoc_connectomics/fano_taxonomy_summary.json")
+    print(f"  PCA figure: {pca_path}")
+    print(f"  Summary JSON: {summary_path}")
+    print(f"  Cohort CSV: {aligned_meta_path}")
 
 if __name__ == '__main__':
     main()
