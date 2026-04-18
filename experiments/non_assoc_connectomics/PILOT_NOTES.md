@@ -313,16 +313,28 @@ Instead of one drug per CYP (as in the original 35-triple single-drug FAERS anal
 - **Total cases**: 85,042 (original: ~4,611)
 - **Total temporal observations**: 19,289
 
+### Fano Plane Convention (Critical)
+
+The Sounio stdlib's `oct_mul` (Cayley-Dickson construction) gives specific Fano lines. These were initially set incorrectly in the Python scripts (a different but equally valid octonion labeling with zero lines in common). All results below use the **correct** Sounio Fano lines:
+
+```
+{1,2,3}, {1,4,5}, {1,6,7}, {2,4,6}, {2,5,7}, {3,4,7}, {3,5,6}
+```
+
+(CYP mapping: 1=CYP1A2, 2=CYP2C9, 3=CYP2C8, 4=CYP2B6, 5=CYP2C19, 6=CYP2D6, 7=CYP3A4)
+
+The Sounio test `oct_associator_ddi_drugbank.sio` is correct regardless — it recomputes `assoc_norm` at runtime via the stdlib. The Python scripts and CSV `fano` column were fixed after verifying against the Sounio output.
+
 ### Primary Result
 
 | Group | N triples | Mean \|asym\| | SD |
 |-------|-----------|--------------|-----|
 | Fano (assoc=0) | 7 | 0.157 | 0.103 |
-| Non-Fano (assoc≠0) | 28 | 0.171 | 0.140 |
+| Non-Fano (assoc≠0) | 28 | 0.169 | 0.140 |
 
-- **Cohen's d** = 0.178 (small)
-- **η²** = 0.005 (negligible)
-- **Permutation p** (10,000 shuffles) = 0.689
+- **Cohen's d** = 0.087 (negligible)
+- **η²** = 0.0012 (negligible)
+- **Permutation p** (10,000 shuffles) = 0.851
 
 ### Covariate Analysis
 
