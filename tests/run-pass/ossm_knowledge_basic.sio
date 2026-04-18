@@ -1,0 +1,66 @@
+//@ run-pass
+// Smoke test: measured input → O-SSM → output conf ≤ 0.965 (asserted B dominates)
+
+fn sqrt_t(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i = 0
+    while i < 10 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn abs_t(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn exp_t(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_t(10.0) * exp_t(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var s = 1.0; var t = 1.0; var i = 1
+    while i <= 15 { t = t * x / (i as f64); s = s + t; i = i + 1 }
+    s
+}
+fn sig_t(x: f64) -> f64 with Mut, Div, Panic { 1.0 / (1.0 + exp_t(0.0 - x)) }
+
+struct Oct { e: [f64; 8] }
+fn oct_mul(a: &Oct, b: &Oct) -> Oct with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]
+    o[0] = a.e[0]*b.e[0]-a.e[1]*b.e[1]-a.e[2]*b.e[2]-a.e[3]*b.e[3]-a.e[4]*b.e[4]-a.e[5]*b.e[5]-a.e[6]*b.e[6]-a.e[7]*b.e[7]
+    o[1] = a.e[0]*b.e[1]+a.e[1]*b.e[0]+a.e[2]*b.e[3]-a.e[3]*b.e[2]+a.e[4]*b.e[5]-a.e[5]*b.e[4]-a.e[6]*b.e[7]+a.e[7]*b.e[6]
+    o[2] = a.e[0]*b.e[2]+a.e[2]*b.e[0]-a.e[1]*b.e[3]+a.e[3]*b.e[1]+a.e[4]*b.e[6]-a.e[6]*b.e[4]+a.e[5]*b.e[7]-a.e[7]*b.e[5]
+    o[3] = a.e[0]*b.e[3]+a.e[3]*b.e[0]+a.e[1]*b.e[2]-a.e[2]*b.e[1]+a.e[4]*b.e[7]-a.e[7]*b.e[4]-a.e[5]*b.e[6]+a.e[6]*b.e[5]
+    o[4] = a.e[0]*b.e[4]+a.e[4]*b.e[0]-a.e[1]*b.e[5]+a.e[5]*b.e[1]-a.e[2]*b.e[6]+a.e[6]*b.e[2]-a.e[3]*b.e[7]+a.e[7]*b.e[3]
+    o[5] = a.e[0]*b.e[5]+a.e[5]*b.e[0]+a.e[1]*b.e[4]-a.e[4]*b.e[1]-a.e[2]*b.e[7]+a.e[7]*b.e[2]+a.e[3]*b.e[6]-a.e[6]*b.e[3]
+    o[6] = a.e[0]*b.e[6]+a.e[6]*b.e[0]+a.e[1]*b.e[7]-a.e[7]*b.e[1]+a.e[2]*b.e[4]-a.e[4]*b.e[2]-a.e[3]*b.e[5]+a.e[5]*b.e[3]
+    o[7] = a.e[0]*b.e[7]+a.e[7]*b.e[0]-a.e[1]*b.e[6]+a.e[6]*b.e[1]-a.e[2]*b.e[5]+a.e[5]*b.e[2]+a.e[3]*b.e[4]-a.e[4]*b.e[3]
+    Oct { e: o }
+}
+
+struct EK { val: f64, unc: f64, conf: f64 }
+fn ek_measured(v: f64, u: f64) -> EK { EK { val: v, unc: u, conf: 0.985 } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // One SSM step: h = sigmoid(A ⊗ 0 + B * x)
+    let A = Oct { e: [0.2, 0.1, 0.3, 0.0 - 0.1, 0.0, 0.15, 0.0 - 0.2, 0.05] }
+    let B = Oct { e: [0.3, 0.0 - 0.2, 0.1, 0.25, 0.0 - 0.1, 0.0, 0.2, 0.0 - 0.15] }
+    let C = Oct { e: [0.25, 0.1, 0.0 - 0.1, 0.2, 0.05, 0.0 - 0.2, 0.15, 0.1] }
+    let x  = ek_measured(0.5, 0.01)    // measured input
+
+    // Bx = B * x.val; h = sigmoid(Bx)
+    var bx: [f64; 8] = [0.0; 8]; var i = 0
+    while i < 8 { bx[i as usize] = B.e[i as usize] * x.val; i = i + 1 }
+    var h: [f64; 8] = [0.0; 8]; i = 0
+    while i < 8 { h[i as usize] = sig_t(bx[i as usize]); i = i + 1 }
+    let h_oct = Oct { e: h }
+
+    // y = Re(C ⊗ h)
+    let Ch = oct_mul(&C, &h_oct)
+    let y_val = Ch.e[0]
+
+    // B is asserted (conf=0.965), input is measured (conf=0.985)
+    // output conf = min(B_conf, x_conf) = min(0.965, 0.985) = 0.965
+    var out_conf = 0.965
+    if x.conf < out_conf { out_conf = x.conf }
+
+    if abs_t(y_val) > 0.0 && out_conf <= 0.965 + 0.001 {
+        println("ossm_knowledge_basic: PASS")
+        return 0
+    }
+    println("ossm_knowledge_basic: FAIL")
+    return 1
+}

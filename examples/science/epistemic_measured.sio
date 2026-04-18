@@ -1,0 +1,120 @@
+//@ run-pass
+//@ expect-stdout: EPISTEMIC BRIDGE PASSED
+// Epistemic Measurement Bridge — Gen 12 Knowledge<T> Demonstration
+//
+// Demonstrates Gen 12's Knowledge<T> ↔ EXPR_CONF bridge:
+// Functions named "measured" and "asserted" receive reduced FN_EFF_CONF
+// (990 and 970 respectively) rather than the default 1000, reflecting
+// their epistemic semantics — measured values carry instrument uncertainty,
+// asserted values carry user-claim uncertainty.
+//
+// This means:
+//   let x = measured(100.0, 5.0)   → EXPR_CONF[x] = 990
+//   let y = asserted(3.0, 0.5)     → EXPR_CONF[y] = 970
+//   let z = x * y                  → EXPR_CONF[z] = min(990, 970) = 970
+//
+// All values remain above the gate threshold (950), so zero guarded sites.
+// The reduced confidence propagates through arithmetic: the compiler can
+// distinguish "certainly typed" (conf=1000) from "measured value" (conf=990).
+//
+// EGC result: 100% expression certainty, 0 guarded sites.
+// epistemic_ktype line reports: Knowledge<T> constructor sites detected.
+//
+// Reference: JCGM 100:2008 "GUM — Guide to the Expression of Uncertainty in
+// Measurement", §5 (combining standard uncertainties).
+
+struct Epistemic {
+    value: f64,
+    variance: f64,
+    label: i64,     // 0=measured, 1=asserted, 2=constant
+}
+
+// Gen 12 bridge trigger: function named "measured" gets FN_EFF_CONF = 990
+fn measured(value: f64, variance: f64) -> Epistemic {
+    Epistemic { value: value, variance: variance, label: 0 }
+}
+
+// Gen 12 bridge trigger: function named "asserted" gets FN_EFF_CONF = 970
+fn asserted(value: f64, variance: f64) -> Epistemic {
+    Epistemic { value: value, variance: variance, label: 1 }
+}
+
+fn constant(value: f64) -> Epistemic {
+    Epistemic { value: value, variance: 0.0, label: 2 }
+}
+
+// GUM product rule: combined variance of x*y
+fn gum_product_variance(x: Epistemic, y: Epistemic) -> f64 with Panic, Div {
+    // σ²(xy) = x²·σ²y + y²·σ²x  (first-order Taylor, ISO GUM §5.2.2)
+    let rx = x.variance / (x.value * x.value)
+    let ry = y.variance / (y.value * y.value)
+    return (x.value * y.value) * (x.value * y.value) * (rx + ry)
+}
+
+// GUM sum rule: combined variance of x+y (independent)
+fn gum_sum_variance(x: Epistemic, y: Epistemic) -> f64 {
+    return x.variance + y.variance
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var sq: f64 = x / 2.0 + 0.5
+    var i: i64 = 0
+    while i < 30 { sq = 0.5 * (sq + x / sq); i = i + 1 }
+    return sq
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Epistemic Measurement Bridge (Gen 12) ===")
+    println("")
+
+    // Instrument measurements (FN_EFF_CONF = 990 for "measured")
+    let dose_mg   = measured(100.0, 5.0)    // dose 100 mg ± 5 mg (5% CV)
+    let v1_L      = measured(10.0, 0.3)     // volume 10 L ± 0.3 L (3% CV)
+
+    // User assertion (FN_EFF_CONF = 970 for "asserted")
+    let k12_hr    = asserted(0.5, 0.1)      // k12 0.5/hr ± 0.1 (literature value)
+
+    // Physical constant (conf = 1000, not reduced)
+    let t_24h     = constant(24.0)          // 24 hours exactly
+
+    // GUM uncertainty propagation: concentration = dose / volume
+    let c_val     = dose_mg.value / v1_L.value
+    let c_var     = gum_product_variance(
+        dose_mg,
+        Epistemic { value: 1.0 / v1_L.value, variance: v1_L.variance / (v1_L.value * v1_L.value * v1_L.value * v1_L.value), label: 0 }
+    )
+
+    // GUM relative standard uncertainty
+    let c_rsu     = sqrt_approx(c_var) / c_val
+
+    print("dose:            "); print(dose_mg.value); print(" mg  (σ="); print(sqrt_approx(dose_mg.variance)); println(" mg)")
+    print("volume:          "); print(v1_L.value);    print(" L   (σ="); print(sqrt_approx(v1_L.variance));   println(" L)")
+    print("k12:             "); print(k12_hr.value);  print(" /hr (σ="); print(sqrt_approx(k12_hr.variance)); println(" /hr)")
+    print("C0 = dose/V1:    "); print(c_val);         print(" mg/L (RSU="); print(c_rsu); println(")")
+    println("")
+
+    // Validate: dose should be 100 ± 5 mg
+    let dose_ok   = abs_f64(dose_mg.value - 100.0) < 0.01
+    let v1_ok     = abs_f64(v1_L.value - 10.0) < 0.01
+    let c0_ok     = abs_f64(c_val - 10.0) < 0.01
+    let rsu_ok    = c_rsu > 0.0 && c_rsu < 0.1  // combined RSU < 10%
+
+    print("Check: dose=100 mg ... ");  if dose_ok { println("OK") } else { println("FAIL") }
+    print("Check: V1=10 L ... ");      if v1_ok   { println("OK") } else { println("FAIL") }
+    print("Check: C0=10 mg/L ... ");   if c0_ok   { println("OK") } else { println("FAIL") }
+    print("Check: RSU < 10% ... ");    if rsu_ok  { println("OK") } else { println("FAIL") }
+    println("")
+
+    if dose_ok && v1_ok && c0_ok && rsu_ok {
+        println("EPISTEMIC BRIDGE PASSED")
+        return 0
+    }
+    println("EPISTEMIC BRIDGE FAILED")
+    return 1
+}

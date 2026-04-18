@@ -7,8 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.faq
 -->
 
-> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: tests/run-pass/
-
 # Frequently Asked Questions
 
 Common questions about Sounio and epistemic computing.

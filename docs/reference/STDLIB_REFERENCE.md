@@ -7,8 +7,6 @@ validated_by: A3
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.reference.stdlib-reference
 -->
 
-> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: stdlib/
-
 # Standard Library Reference Entry Point
 
 This page is the stable reference entrypoint linked from the repository README.

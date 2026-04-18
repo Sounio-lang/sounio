@@ -4,7 +4,7 @@
 
 The metrics.d module provides regulatory-grade validation metrics for PBPK model assessment.
 
-Location: /workspace/sounio/stdlib/darwin_pbpk/validation/metrics.d
+Location: /mnt/e/workspace/sounio/stdlib/darwin_pbpk/validation/metrics.d
 Size: 736 lines, 20KB
 
 ## Core Data Structures

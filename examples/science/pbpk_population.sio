@@ -1,0 +1,163 @@
+//@ run-pass
+//@ expect-stdout: POPULATION PBPK PASSED
+// Population PBPK Confidence Budget — 2-Compartment Model
+//
+// Simulates 5 virtual patients spanning a 5x covariate range:
+//   k_elim in {0.10, 0.15, 0.20, 0.25, 0.30} /hr (slow → fast eliminators)
+//   k12=0.5/hr, k21=0.3/hr fixed (typical inter-compartmental rates)
+//   dose=100mg IV bolus, V1=10L, V2=20L
+//
+// For each patient, RK4 integration is compared to the analytical C1(24h).
+// A patient "passes" if |C1_numerical - C1_analytical| < 0.001 mg/L.
+//
+// Population confidence budget = fraction of patients that pass.
+// EGC result: 100% expression certainty, 0 guarded sites.
+//
+// Reference: Holford N. "The Target Concentration Approach" Clin Pharmacokinet 1995.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var sq: f64 = x / 2.0 + 0.5
+    var i: i64 = 0
+    while i < 30 { sq = 0.5 * (sq + x / sq); i = i + 1 }
+    return sq
+}
+
+fn exp_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 10.0 { let h = exp_approx(x / 2.0); return h * h }
+    if x < 0.0 - 10.0 { return 1.0 / exp_approx(0.0 - x) }
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var n: i64 = 1
+    while n <= 30 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+// Analytical 2-compartment C1(t) — amounts formulation
+fn c1_analytical(
+    t: f64, dose: f64, v1: f64,
+    k12: f64, k21: f64, k_elim: f64
+) -> f64 with Mut, Panic, Div {
+    let sum_k  = k12 + k21 + k_elim
+    let disc   = sum_k * sum_k - 4.0 * k21 * k_elim
+    let sq     = sqrt_approx(disc)
+    let alpha  = (sum_k + sq) / 2.0
+    let beta_  = (sum_k - sq) / 2.0
+    let denom  = (alpha - beta_) * v1
+    let a_coef = (alpha - k21) * dose / denom
+    let b_coef = (k21 - beta_) * dose / denom
+    return a_coef * exp_approx(0.0 - alpha * t)
+         + b_coef * exp_approx(0.0 - beta_ * t)
+}
+
+// RK4 integration for one patient, returns C1(24h)
+fn rk4_c1_24h(
+    dose: f64, v1: f64, v2: f64,
+    k12: f64, k21: f64, k_elim: f64
+) -> f64 with Mut, Panic, Div {
+    var x1: f64 = dose
+    var x2: f64 = 0.0
+    let dt: f64 = 0.001
+    var step: i64 = 0
+    while step < 24000 {
+        let k1x1 = 0.0 - (k12 + k_elim) * x1 + k21 * x2
+        let k1x2 = k12 * x1 - k21 * x2
+        let mx1  = x1 + 0.5 * dt * k1x1
+        let mx2  = x2 + 0.5 * dt * k1x2
+        let k2x1 = 0.0 - (k12 + k_elim) * mx1 + k21 * mx2
+        let k2x2 = k12 * mx1 - k21 * mx2
+        let m2x1 = x1 + 0.5 * dt * k2x1
+        let m2x2 = x2 + 0.5 * dt * k2x2
+        let k3x1 = 0.0 - (k12 + k_elim) * m2x1 + k21 * m2x2
+        let k3x2 = k12 * m2x1 - k21 * m2x2
+        let ex1  = x1 + dt * k3x1
+        let ex2  = x2 + dt * k3x2
+        let k4x1 = 0.0 - (k12 + k_elim) * ex1 + k21 * ex2
+        let k4x2 = k12 * ex1 - k21 * ex2
+        x1 = x1 + (dt / 6.0) * (k1x1 + 2.0 * k2x1 + 2.0 * k3x1 + k4x1)
+        x2 = x2 + (dt / 6.0) * (k1x2 + 2.0 * k2x2 + 2.0 * k3x2 + k4x2)
+        step = step + 1
+    }
+    return x1 / v1
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Population PBPK Confidence Budget ===")
+    println("k12=0.5, k21=0.3, dose=100mg, V1=10L, V2=20L")
+    println("k_elim grid: [0.10, 0.15, 0.20, 0.25, 0.30] /hr")
+    println("")
+
+    let dose: f64 = 100.0
+    let v1:   f64 = 10.0
+    let v2:   f64 = 20.0
+    let k12:  f64 = 0.5
+    let k21:  f64 = 0.3
+
+    // 5-point k_elim covariate grid (slow → fast eliminators)
+    let ke0: f64 = 0.10
+    let ke1: f64 = 0.15
+    let ke2: f64 = 0.20
+    let ke3: f64 = 0.25
+    let ke4: f64 = 0.30
+
+    var n_pass: i64 = 0
+    var n_total: i64 = 5
+
+    // Patient 0
+    let c1_num0  = rk4_c1_24h(dose, v1, v2, k12, k21, ke0)
+    let c1_ana0  = c1_analytical(24.0, dose, v1, k12, k21, ke0)
+    let err0     = abs_f64(c1_num0 - c1_ana0)
+    print("Patient 0 (ke=0.10): C1="); print(c1_num0); print(" err="); println(err0)
+    if err0 < 0.001 { n_pass = n_pass + 1 }
+
+    // Patient 1
+    let c1_num1  = rk4_c1_24h(dose, v1, v2, k12, k21, ke1)
+    let c1_ana1  = c1_analytical(24.0, dose, v1, k12, k21, ke1)
+    let err1     = abs_f64(c1_num1 - c1_ana1)
+    print("Patient 1 (ke=0.15): C1="); print(c1_num1); print(" err="); println(err1)
+    if err1 < 0.001 { n_pass = n_pass + 1 }
+
+    // Patient 2 (reference patient from pbpk_2comp.sio)
+    let c1_num2  = rk4_c1_24h(dose, v1, v2, k12, k21, ke2)
+    let c1_ana2  = c1_analytical(24.0, dose, v1, k12, k21, ke2)
+    let err2     = abs_f64(c1_num2 - c1_ana2)
+    print("Patient 2 (ke=0.20): C1="); print(c1_num2); print(" err="); println(err2)
+    if err2 < 0.001 { n_pass = n_pass + 1 }
+
+    // Patient 3
+    let c1_num3  = rk4_c1_24h(dose, v1, v2, k12, k21, ke3)
+    let c1_ana3  = c1_analytical(24.0, dose, v1, k12, k21, ke3)
+    let err3     = abs_f64(c1_num3 - c1_ana3)
+    print("Patient 3 (ke=0.25): C1="); print(c1_num3); print(" err="); println(err3)
+    if err3 < 0.001 { n_pass = n_pass + 1 }
+
+    // Patient 4
+    let c1_num4  = rk4_c1_24h(dose, v1, v2, k12, k21, ke4)
+    let c1_ana4  = c1_analytical(24.0, dose, v1, k12, k21, ke4)
+    let err4     = abs_f64(c1_num4 - c1_ana4)
+    print("Patient 4 (ke=0.30): C1="); print(c1_num4); print(" err="); println(err4)
+    if err4 < 0.001 { n_pass = n_pass + 1 }
+
+    println("")
+    print("Population confidence budget: ")
+    print_int(n_pass)
+    print("/")
+    print_int(n_total)
+    println(" patients within tolerance")
+
+    if n_pass < n_total {
+        println("POPULATION PBPK FAILED: some patients exceeded error tolerance")
+        return 1
+    }
+    println("POPULATION PBPK PASSED")
+    return 0
+}

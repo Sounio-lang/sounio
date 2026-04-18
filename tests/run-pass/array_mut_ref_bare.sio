@@ -1,0 +1,62 @@
+//@ run-pass
+// Regression test: bare &![T; N] array parameter mutation visible to caller.
+//
+// Previously broken (JIT/codegen): when passing a bare array variable by &!
+// exclusive reference, mutations inside the callee via `arr[i] = v` (without
+// explicit deref) were not visible to the caller because the codegen path for
+// arr[i] = v on a &![T;N] parameter was not distinguishing array-refs from
+// plain scalars and emitting a byte store instead of a qword store.
+//
+// Fix in lean_single.sio: stmt_is_array_store and the primary array-read path
+// now check VAR_TY == 10 with inner type == 8 and set is_arr_ty = 1, causing
+// the correct `mov [rax + rcx*8], rdx` 8-byte store to be emitted.
+//
+// This test confirms all three mutation patterns work:
+//   1. Bare index: arr[i] = v  (was broken)
+//   2. Explicit deref: (*arr)[i] = v  (always worked)
+//   3. Struct wrapper: b.field[i] = v  (always worked)
+
+fn fill_bare(arr: &![i64; 4]) with Mut, Panic {
+    var i = 0
+    while i < 4 { arr[i as usize] = (i + 1) as i64; i = i + 1 }
+}
+
+fn fill_deref(arr: &![i64; 4]) with Mut, Panic {
+    var i = 0
+    while i < 4 { (*arr)[i as usize] = (i + 1) as i64; i = i + 1 }
+}
+
+struct Buf4 { data: [i64; 4] }
+fn fill_struct(b: &! Buf4) with Mut, Panic {
+    var i = 0
+    while i < 4 { b.data[i as usize] = (i + 1) as i64; i = i + 1 }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    // Pattern 1: bare index (was broken — regression guard)
+    var a: [i64; 4] = [0; 4]
+    fill_bare(&! a)
+    if a[0] != 1 || a[1] != 2 || a[2] != 3 || a[3] != 4 {
+        println("array_mut_ref_bare: FAIL (bare index pattern)")
+        return 1
+    }
+
+    // Pattern 2: explicit deref (always worked)
+    var b: [i64; 4] = [0; 4]
+    fill_deref(&! b)
+    if b[0] != 1 || b[1] != 2 || b[2] != 3 || b[3] != 4 {
+        println("array_mut_ref_bare: FAIL (explicit deref pattern)")
+        return 1
+    }
+
+    // Pattern 3: struct wrapper (always worked)
+    var buf: Buf4 = Buf4 { data: [0; 4] }
+    fill_struct(&! buf)
+    if buf.data[0] != 1 || buf.data[1] != 2 || buf.data[2] != 3 || buf.data[3] != 4 {
+        println("array_mut_ref_bare: FAIL (struct wrapper pattern)")
+        return 1
+    }
+
+    println("array_mut_ref_bare: PASS")
+    return 0
+}

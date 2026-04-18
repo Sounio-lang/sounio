@@ -1,0 +1,223 @@
+//@ run-pass
+//@ description: Forward-mode autodiff via dual numbers — self-contained integration tests
+
+// ============================================================================
+// MATH HELPERS (inlined from stdlib/autodiff/dual.sio)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    term = term * x / 1.0; sum = sum + term
+    term = term * x / 2.0; sum = sum + term
+    term = term * x / 3.0; sum = sum + term
+    term = term * x / 4.0; sum = sum + term
+    term = term * x / 5.0; sum = sum + term
+    term = term * x / 6.0; sum = sum + term
+    term = term * x / 7.0; sum = sum + term
+    term = term * x / 8.0; sum = sum + term
+    term = term * x / 9.0; sum = sum + term
+    term = term * x / 10.0; sum = sum + term
+    term = term * x / 11.0; sum = sum + term
+    term = term * x / 12.0; sum = sum + term
+    term = term * x / 13.0; sum = sum + term
+    term = term * x / 14.0; sum = sum + term
+    term = term * x / 15.0; sum = sum + term
+    return sum
+}
+
+fn sin_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    let x2 = y * y
+    var sum = y
+    var term = y
+    term = term * (0.0 - x2) / (2.0 * 3.0); sum = sum + term
+    term = term * (0.0 - x2) / (4.0 * 5.0); sum = sum + term
+    term = term * (0.0 - x2) / (6.0 * 7.0); sum = sum + term
+    term = term * (0.0 - x2) / (8.0 * 9.0); sum = sum + term
+    term = term * (0.0 - x2) / (10.0 * 11.0); sum = sum + term
+    term = term * (0.0 - x2) / (12.0 * 13.0); sum = sum + term
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    let x2 = y * y
+    var sum = 1.0
+    var term = 1.0
+    term = term * (0.0 - x2) / (1.0 * 2.0); sum = sum + term
+    term = term * (0.0 - x2) / (3.0 * 4.0); sum = sum + term
+    term = term * (0.0 - x2) / (5.0 * 6.0); sum = sum + term
+    term = term * (0.0 - x2) / (7.0 * 8.0); sum = sum + term
+    term = term * (0.0 - x2) / (9.0 * 10.0); sum = sum + term
+    term = term * (0.0 - x2) / (11.0 * 12.0); sum = sum + term
+    return sum
+}
+
+// ============================================================================
+// DUAL NUMBER TYPE (inlined from stdlib/autodiff/dual.sio)
+// ============================================================================
+
+struct Dual {
+    val: f64,
+    dot: f64
+}
+
+fn dual_new(val: f64, dot: f64) -> Dual {
+    return Dual { val: val, dot: dot }
+}
+
+fn dual_const(val: f64) -> Dual {
+    return Dual { val: val, dot: 0.0 }
+}
+
+fn dual_add(a: Dual, b: Dual) -> Dual {
+    return Dual { val: a.val + b.val, dot: a.dot + b.dot }
+}
+
+fn dual_sub(a: Dual, b: Dual) -> Dual {
+    return Dual { val: a.val - b.val, dot: a.dot - b.dot }
+}
+
+fn dual_mul(a: Dual, b: Dual) -> Dual {
+    return Dual {
+        val: a.val * b.val,
+        dot: a.dot * b.val + a.val * b.dot
+    }
+}
+
+fn dual_exp(a: Dual) -> Dual {
+    let e = exp_f64(a.val)
+    return Dual { val: e, dot: a.dot * e }
+}
+
+fn dual_sin(a: Dual) -> Dual {
+    return Dual { val: sin_f64(a.val), dot: a.dot * cos_f64(a.val) }
+}
+
+fn dual_cos(a: Dual) -> Dual {
+    return Dual { val: cos_f64(a.val), dot: 0.0 - a.dot * sin_f64(a.val) }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic {
+    var pass: i64 = 0
+    var fail: i64 = 0
+
+    // T1: d/dx(x²) at x=3 → 6
+    // f(x) = x², f'(x) = 2x, f'(3) = 6
+    let d1 = dual_new(3.0, 1.0)
+    let r1 = dual_mul(d1, d1)
+    if abs_f64(r1.dot - 6.0) < 0.001 {
+        print("T1 PASS\n")
+        pass = pass + 1
+    } else {
+        print("T1 FAIL\n")
+        fail = fail + 1
+    }
+
+    // T2: d/dx(x³) at x=2 → 12
+    // f(x) = x³, f'(x) = 3x², f'(2) = 12
+    let d2 = dual_new(2.0, 1.0)
+    let r2 = dual_mul(dual_mul(d2, d2), d2)
+    if abs_f64(r2.dot - 12.0) < 0.001 {
+        print("T2 PASS\n")
+        pass = pass + 1
+    } else {
+        print("T2 FAIL\n")
+        fail = fail + 1
+    }
+
+    // T3: d/dx(x² + 2x + 1) at x=1 → 4
+    // f(x) = x² + 2x + 1, f'(x) = 2x + 2, f'(1) = 4
+    let d3 = dual_new(1.0, 1.0)
+    let two3 = dual_const(2.0)
+    let one3 = dual_const(1.0)
+    let x2_3 = dual_mul(d3, d3)
+    let twox3 = dual_mul(two3, d3)
+    let r3 = dual_add(dual_add(x2_3, twox3), one3)
+    if abs_f64(r3.dot - 4.0) < 0.001 {
+        print("T3 PASS\n")
+        pass = pass + 1
+    } else {
+        print("T3 FAIL\n")
+        fail = fail + 1
+    }
+
+    // T4: d/dx(exp(x)) at x=0 → 1.0
+    // f(x) = exp(x), f'(x) = exp(x), f'(0) = 1
+    let d4 = dual_new(0.0, 1.0)
+    let r4 = dual_exp(d4)
+    if abs_f64(r4.dot - 1.0) < 0.001 {
+        print("T4 PASS\n")
+        pass = pass + 1
+    } else {
+        print("T4 FAIL\n")
+        fail = fail + 1
+    }
+
+    // T5: d/dx(sin(x)) at x=0 → 1.0 (cos(0) = 1)
+    // f(x) = sin(x), f'(x) = cos(x), f'(0) = 1
+    let d5 = dual_new(0.0, 1.0)
+    let r5 = dual_sin(d5)
+    if abs_f64(r5.dot - 1.0) < 0.001 {
+        print("T5 PASS\n")
+        pass = pass + 1
+    } else {
+        print("T5 FAIL\n")
+        fail = fail + 1
+    }
+
+    // T6: Chain rule — d/dx(exp(x²)) at x=1 → 2*exp(1) ≈ 5.436
+    // f(x) = exp(x²), f'(x) = 2x*exp(x²), f'(1) = 2*exp(1) ≈ 5.4366
+    let d6 = dual_new(1.0, 1.0)
+    let x2_6 = dual_mul(d6, d6)
+    let r6 = dual_exp(x2_6)
+    let expected6 = 2.0 * exp_f64(1.0)
+    if abs_f64(r6.dot - expected6) < 0.01 {
+        print("T6 PASS\n")
+        pass = pass + 1
+    } else {
+        print("T6 FAIL\n")
+        fail = fail + 1
+    }
+
+    if fail == 0 {
+        print("autodiff_forward_basic: ALL PASS\n")
+        return 0
+    }
+    print("autodiff_forward_basic: SOME FAIL\n")
+    return 1 as i32
+}

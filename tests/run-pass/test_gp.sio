@@ -1,47 +1,45 @@
 //@ run-pass
-//@ expect-stdout: ALL 9 TESTS PASSED
+//@ expect-stdout: ALL 12 TESTS PASSED
 //@ expect-stdout: Failed: 0
-// Stable Gaussian-process regression smoke suite for the native compiler path.
+// test_gp.sio — Tests for Gaussian process regression module
 //
-// The previous lane used a larger out-parameter-heavy copy that no longer
-// matches the current frontend's borrow model. This version keeps the GP
-// contract covered with by-value helpers that the native path executes
-// reliably today.
+// Self-contained test suite for kernels (RBF, Matern 3/2, periodic),
+// Cholesky factorization/solve, GP train/predict, log marginal likelihood,
+// and posterior variance behaviour. All helpers inlined since tests cannot import.
+//
+// References:
+//   Rasmussen & Williams (2006): "Gaussian Processes for Machine Learning"
+//   Bishop (2006): "Pattern Recognition and Machine Learning" Ch. 6
 
-fn gp_abs(x: f64) -> f64 {
-    if x < 0.0 { 0.0 - x } else { x }
-}
+// ============================================================================
+// PURE MATH HELPERS (must precede callers)
+// ============================================================================
 
-fn gp_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+fn gp_h_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn gp_h_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn gp_h_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn gp_h_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
-    var scaled = x
-    var scale_back = 1.0
-    while scaled < 1.0 {
-        scaled = scaled * 4.0
-        scale_back = scale_back * 2.0
-    }
-    while scaled > 4.0 {
-        scaled = scaled * 0.25
-        scale_back = scale_back * 0.5
-    }
-    var y = 1.5
+    var y = x
     var i = 0
-    while i < 15 {
-        y = 0.5 * (y + scaled / y)
-        i = i + 1
-    }
-    y / scale_back
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
 }
 
-fn gp_exp(x: f64) -> f64 with Mut, Div, Panic {
-    if x > 709.0 { return 1.0e308 }
-    if x < -709.0 { return 0.0 }
+fn gp_h_exp(x: f64) -> f64 with Mut, Div, Panic {
     let ln2 = 0.6931471805599453
     let inv_ln2 = 1.4426950408889634
+
+    if x > 709.0 { return 1.0e308 }
+    if x < -709.0 { return 0.0 }
+
     var k_f = x * inv_ln2
     var k: i64 = 0
     if k_f >= 0.0 { k = (k_f + 0.5) as i64 } else { k = (k_f - 0.5) as i64 }
+
     let r = x - (k as f64) * ln2
+
     var sum = 1.0
     var term = 1.0
     var n = 1
@@ -50,6 +48,7 @@ fn gp_exp(x: f64) -> f64 with Mut, Div, Panic {
         sum = sum + term
         n = n + 1
     }
+
     var result = sum
     var kabs = k
     if kabs < 0 { kabs = 0 - kabs }
@@ -65,14 +64,16 @@ fn gp_exp(x: f64) -> f64 with Mut, Div, Panic {
     result
 }
 
-fn gp_ln(x: f64) -> f64 with Mut, Div, Panic {
+fn gp_h_ln(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return -1.0e30 }
     if x == 1.0 { return 0.0 }
+
     var y = 0.0
     var a = x
     let ln2 = 0.6931471805599453
     while a > 2.0 { a = a * 0.5; y = y + ln2 }
     while a < 0.5 { a = a * 2.0; y = y - ln2 }
+
     let t = (a - 1.0) / (a + 1.0)
     let t2 = t * t
     var sum = t
@@ -86,73 +87,134 @@ fn gp_ln(x: f64) -> f64 with Mut, Div, Panic {
     y + 2.0 * sum
 }
 
-fn gp_approx(a: f64, b: f64, tol: f64) -> bool {
-    gp_abs(a - b) < tol
+fn gp_h_sin(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
 }
+
+fn gp_h_cos(x: f64) -> f64 with Mut, Div, Panic {
+    gp_h_sin(x + 1.57079632679489661923)
+}
+
+fn gp_h_pi() -> f64 { 3.14159265358979323846 }
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    gp_h_abs(a - b) < tol
+}
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
 
 struct GPData {
-    x: [f64; 64],
-    y: [f64; 64],
-    n: i64
-}
-
-struct GPHyper {
-    length_scale: f64,
-    signal_var: f64,
+    x_train: [f64; 128],
+    y_train: [f64; 128],
+    n_train: i32,
     noise_var: f64
 }
 
+struct GPHyper {
+    signal_var: f64,
+    length_scale: f64,
+    noise_var: f64,
+    kernel_type: i32,
+    extra_param: f64
+}
+
 struct GPModel {
-    hyper: GPHyper,
     L: [f64; 4096],
-    alpha: [f64; 64],
-    n: i64,
-    ok: bool
+    alpha: [f64; 128],
+    mx: [f64; 128],
+    my: [f64; 128],
+    mn: i32,
+    hyper: GPHyper,
+    log_ml: f64
 }
 
-fn kernel_rbf(x1: f64, x2: f64, hyper: GPHyper) -> f64 with Mut, Div, Panic {
-    let d = x1 - x2
-    hyper.signal_var * gp_exp(0.0 - 0.5 * d * d / (hyper.length_scale * hyper.length_scale))
+struct GPPrediction {
+    mean: f64,
+    variance: f64,
+    std_dev: f64
 }
 
-fn gp_build_kernel_matrix(data: GPData, hyper: GPHyper) -> [f64; 4096] with Mut, Div, Panic {
-    var K: [f64; 4096] = [0.0; 4096]
-    let n = data.n
-    var i: i64 = 0
-    while i < n {
-        var j: i64 = 0
-        while j < n {
-            let kval = kernel_rbf(data.x[i], data.x[j], hyper)
-            if i == j {
-                K[i * n + j] = kval + hyper.noise_var
-            } else {
-                K[i * n + j] = kval
-            }
-            j = j + 1
-        }
-        i = i + 1
-    }
-    K
+// ============================================================================
+// KERNEL FUNCTIONS
+// ============================================================================
+
+fn kernel_rbf(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div, Panic {
+    let d = x - y
+    let l = hyper.length_scale
+    hyper.signal_var * gp_h_exp(0.0 - 0.5 * d * d / (l * l))
 }
 
-fn gp_cholesky(K: [f64; 4096], n: i64) -> [f64; 4096] with Mut, Div, Panic {
-    var L: [f64; 4096] = [0.0; 4096]
-    var j: i64 = 0
+fn kernel_matern32(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div, Panic {
+    let r = gp_h_abs(x - y)
+    let l = hyper.length_scale
+    let sqrt3 = 1.7320508075688772
+    let z = sqrt3 * r / l
+    hyper.signal_var * (1.0 + z) * gp_h_exp(0.0 - z)
+}
+
+fn kernel_matern52(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div, Panic {
+    let r = gp_h_abs(x - y)
+    let l = hyper.length_scale
+    let sqrt5 = 2.2360679774997896
+    let z = sqrt5 * r / l
+    let z2 = 5.0 * r * r / (3.0 * l * l)
+    hyper.signal_var * (1.0 + z + z2) * gp_h_exp(0.0 - z)
+}
+
+fn kernel_periodic(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div, Panic {
+    let r = gp_h_abs(x - y)
+    let l = hyper.length_scale
+    let p = hyper.extra_param
+    let s = gp_h_sin(gp_h_pi() * r / p)
+    hyper.signal_var * gp_h_exp(0.0 - 2.0 * s * s / (l * l))
+}
+
+fn kernel_eval(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div, Panic {
+    if hyper.kernel_type == 0 { return kernel_rbf(x, y, hyper) }
+    if hyper.kernel_type == 1 { return kernel_matern32(x, y, hyper) }
+    if hyper.kernel_type == 2 { return kernel_matern52(x, y, hyper) }
+    if hyper.kernel_type == 3 { return kernel_periodic(x, y, hyper) }
+    kernel_rbf(x, y, hyper)
+}
+
+// ============================================================================
+// CHOLESKY FACTORIZATION AND SOLVE
+// ============================================================================
+
+fn gp_cholesky(K: &[f64; 4096], n: i32, L: &![f64; 4096]) -> bool with Mut, Div, Panic {
+    var idx = 0
+    while idx < n * n { L[idx] = 0.0; idx = idx + 1 }
+
+    var j = 0
     while j < n {
         var sum_diag = 0.0
-        var k: i64 = 0
+        var k = 0
         while k < j {
             let ljk = L[j * n + k]
             sum_diag = sum_diag + ljk * ljk
             k = k + 1
         }
         let diag_val = K[j * n + j] - sum_diag
-        if diag_val <= 1.0e-15 {
-            L[j * n + j] = 1.0e-8
-        } else {
-            L[j * n + j] = gp_sqrt(diag_val)
-        }
-        var i: i64 = j + 1
+        if diag_val <= 0.0 { return false }
+        L[j * n + j] = gp_h_sqrt(diag_val)
+
+        var i = j + 1
         while i < n {
             var sum_off = 0.0
             k = 0
@@ -165,264 +227,694 @@ fn gp_cholesky(K: [f64; 4096], n: i64) -> [f64; 4096] with Mut, Div, Panic {
         }
         j = j + 1
     }
-    L
+    true
 }
 
-fn gp_solve_lower(L: [f64; 4096], b: [f64; 64], n: i64) -> [f64; 64] with Mut, Div, Panic {
-    var x: [f64; 64] = [0.0; 64]
-    var i: i64 = 0
+fn gp_cholesky_solve(L: &[f64; 4096], b: &[f64; 128], n: i32, x: &![f64; 128]) with Mut, Div, Panic {
+    var z: [f64; 128] = [0.0; 128]
+    var i = 0
     while i < n {
         var sum = 0.0
-        var j: i64 = 0
+        var j = 0
         while j < i {
-            sum = sum + L[i * n + j] * x[j]
+            sum = sum + L[i * n + j] * z[j]
             j = j + 1
         }
-        let diag = L[i * n + i]
-        if gp_abs(diag) > 1.0e-15 {
-            x[i] = (b[i] - sum) / diag
-        }
+        z[i] = (b[i] - sum) / L[i * n + i]
         i = i + 1
     }
-    x
-}
 
-fn gp_solve_upper(L: [f64; 4096], b: [f64; 64], n: i64) -> [f64; 64] with Mut, Div, Panic {
-    var x: [f64; 64] = [0.0; 64]
-    var i: i64 = n - 1
+    i = n - 1
     while i >= 0 {
         var sum = 0.0
-        var j: i64 = i + 1
+        var j = i + 1
         while j < n {
             sum = sum + L[j * n + i] * x[j]
             j = j + 1
         }
-        let diag = L[i * n + i]
-        if gp_abs(diag) > 1.0e-15 {
-            x[i] = (b[i] - sum) / diag
-        }
+        x[i] = (z[i] - sum) / L[i * n + i]
         i = i - 1
     }
-    x
 }
 
-fn gp_cholesky_solve(L: [f64; 4096], b: [f64; 64], n: i64) -> [f64; 64] with Mut, Div, Panic {
-    let z = gp_solve_lower(L, b, n)
-    gp_solve_upper(L, z, n)
-}
-
-fn gp_dot(a: [f64; 64], b: [f64; 64], n: i64) -> f64 with Panic {
-    var sum = 0.0
-    var i: i64 = 0
+fn gp_forward_solve(L: &[f64; 4096], b: &[f64; 128], n: i32, v: &![f64; 128]) with Mut, Div, Panic {
+    var i = 0
     while i < n {
-        sum = sum + a[i] * b[i]
+        var sum = 0.0
+        var j = 0
+        while j < i {
+            sum = sum + L[i * n + j] * v[j]
+            j = j + 1
+        }
+        v[i] = (b[i] - sum) / L[i * n + i]
         i = i + 1
     }
-    sum
 }
 
-fn gp_fit(data: GPData, hyper: GPHyper) -> GPModel with Mut, Div, Panic {
-    let K = gp_build_kernel_matrix(data, hyper)
-    let L = gp_cholesky(K, data.n)
-    let alpha = gp_cholesky_solve(L, data.y, data.n)
-    GPModel {
-        hyper: hyper,
-        L: L,
-        alpha: alpha,
-        n: data.n,
-        ok: true
-    }
-}
+// ============================================================================
+// GP TRAINING
+// ============================================================================
 
-fn gp_predict(model: GPModel, data: GPData, x_star: f64) -> [f64; 2] with Mut, Div, Panic {
-    var k_star: [f64; 64] = [0.0; 64]
-    var i: i64 = 0
-    while i < model.n {
-        k_star[i] = kernel_rbf(x_star, data.x[i], model.hyper)
+fn gp_train(data: &GPData, hyper: &GPHyper, model: &!GPModel) -> bool with Mut, Div, Panic {
+    let n = data.n_train
+
+    var i = 0
+    while i < n {
+        model.mx[i] = data.x_train[i]
+        model.my[i] = data.y_train[i]
         i = i + 1
     }
-    let mean = gp_dot(k_star, model.alpha, model.n)
-    let k_ss = kernel_rbf(x_star, x_star, model.hyper)
-    let v = gp_solve_lower(model.L, k_star, model.n)
-    let vtv = gp_dot(v, v, model.n)
-    var variance = k_ss - vtv
-    if variance < 0.0 { variance = 0.0 }
-    [mean, variance]
-}
+    model.mn = n
+    var local_hyper: GPHyper = GPHyper {
+        signal_var: hyper.signal_var,
+        length_scale: hyper.length_scale,
+        noise_var: hyper.noise_var,
+        kernel_type: hyper.kernel_type,
+        extra_param: hyper.extra_param
+    }
+    model.hyper = local_hyper
 
-fn gp_log_ml(model: GPModel, data: GPData) -> f64 with Mut, Div, Panic {
-    let y_alpha = gp_dot(data.y, model.alpha, model.n)
-    var log_det = 0.0
-    var i: i64 = 0
-    while i < model.n {
-        let diag = model.L[i * model.n + i]
-        if diag > 1.0e-15 {
-            log_det = log_det + gp_ln(diag)
+    var K: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let kval = kernel_eval(data.x_train[i], data.x_train[j], hyper)
+            if i == j {
+                K[i * n + j] = kval + hyper.noise_var
+            } else {
+                K[i * n + j] = kval
+            }
+            j = j + 1
         }
         i = i + 1
     }
-    let pi = 3.14159265358979323846
-    let value = -0.5 * y_alpha - log_det - 0.5 * (model.n as f64) * gp_ln(2.0 * pi)
-    value
+
+    var local_L: [f64; 4096] = [0.0; 4096]
+    let ok = gp_cholesky(&K, n, &!local_L)
+    if !ok { return false }
+    var li: i32 = 0
+    while li < n * n { model.L[li] = local_L[li]; li = li + 1 }
+
+    var local_alpha: [f64; 128] = [0.0; 128]
+    gp_cholesky_solve(&local_L, data.y_train, n, &!local_alpha)
+    var ai: i32 = 0
+    while ai < n { model.alpha[ai] = local_alpha[ai]; ai = ai + 1 }
+
+    var data_fit = 0.0
+    i = 0
+    while i < n {
+        data_fit = data_fit + data.y_train[i] * model.alpha[i]
+        i = i + 1
+    }
+    data_fit = 0.0 - 0.5 * data_fit
+
+    var complexity = 0.0
+    i = 0
+    while i < n {
+        complexity = complexity + gp_h_ln(model.L[i * n + i])
+        i = i + 1
+    }
+    complexity = 0.0 - complexity
+
+    let norm_const = 0.0 - 0.5 * (n as f64) * gp_h_ln(2.0 * gp_h_pi())
+
+    model.log_ml = data_fit + complexity + norm_const
+    true
 }
 
-fn make_quad_data() -> GPData with Mut {
-    var d = GPData { x: [0.0; 64], y: [0.0; 64], n: 5 }
-    d.x[0] = 0.0; d.y[0] = 0.0
-    d.x[1] = 1.0; d.y[1] = 1.0
-    d.x[2] = 2.0; d.y[2] = 4.0
-    d.x[3] = 3.0; d.y[3] = 9.0
-    d.x[4] = 4.0; d.y[4] = 16.0
-    d
+// ============================================================================
+// GP PREDICTION
+// ============================================================================
+
+fn gp_predict(model: &GPModel, x_star: f64, pred: &!GPPrediction) with Mut, Div, Panic {
+    let n = model.mn
+
+    var k_star: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        k_star[i] = kernel_eval(x_star, model.mx[i], model.hyper)
+        i = i + 1
+    }
+
+    var mean = 0.0
+    i = 0
+    while i < n {
+        mean = mean + k_star[i] * model.alpha[i]
+        i = i + 1
+    }
+    pred.mean = mean
+
+    var v: [f64; 128] = [0.0; 128]
+    gp_forward_solve(model.L, &k_star, n, &!v)
+
+    let k_ss = kernel_eval(x_star, x_star, model.hyper)
+    var v_dot_v = 0.0
+    i = 0
+    while i < n {
+        v_dot_v = v_dot_v + v[i] * v[i]
+        i = i + 1
+    }
+    var variance = k_ss - v_dot_v
+    if variance < 0.0 { variance = 0.0 }
+    pred.variance = variance
+    pred.std_dev = gp_h_sqrt(variance)
 }
 
-fn make_linear_low_noise_data() -> GPData with Mut {
-    var d = GPData { x: [0.0; 64], y: [0.0; 64], n: 4 }
-    d.x[0] = 0.0; d.y[0] = 1.0
-    d.x[1] = 1.0; d.y[1] = 3.0
-    d.x[2] = 2.0; d.y[2] = 5.0
-    d.x[3] = 3.0; d.y[3] = 7.0
-    d
+fn gp_log_marginal(model: &GPModel) -> f64 {
+    model.log_ml
 }
 
-fn test_kernel_symmetry() -> bool with Mut, Div, Panic {
-    let hyper = GPHyper { length_scale: 1.5, signal_var: 2.0, noise_var: 0.01 }
-    let k12 = kernel_rbf(1.25, -0.75, hyper)
-    let k21 = kernel_rbf(-0.75, 1.25, hyper)
-    gp_approx(k12, k21, 1.0e-12)
+// ============================================================================
+// HELPER: build training data from x^2 (5 points)
+// ============================================================================
+
+fn build_quad_data(data: &!GPData) with Mut, Panic {
+    // 5 training points: x in {0.0, 1.0, 2.0, 3.0, 4.0}, y = x^2
+    data.n_train = 5
+    data.noise_var = 0.01
+
+    data.x_train[0] = 0.0
+    data.x_train[1] = 1.0
+    data.x_train[2] = 2.0
+    data.x_train[3] = 3.0
+    data.x_train[4] = 4.0
+
+    data.y_train[0] = 0.0
+    data.y_train[1] = 1.0
+    data.y_train[2] = 4.0
+    data.y_train[3] = 9.0
+    data.y_train[4] = 16.0
 }
 
-fn test_kernel_self_maximum() -> bool with Mut, Div, Panic {
-    let hyper = GPHyper { length_scale: 1.0, signal_var: 3.0, noise_var: 0.01 }
-    let k_same = kernel_rbf(2.0, 2.0, hyper)
-    let k_far = kernel_rbf(2.0, 5.0, hyper)
-    k_same > 0.0 && k_same >= k_far
+fn make_rbf_hyper() -> GPHyper {
+    GPHyper {
+        signal_var: 1.0,
+        length_scale: 1.0,
+        noise_var: 0.01,
+        kernel_type: 0,
+        extra_param: 0.0
+    }
 }
 
-fn test_cholesky_known_matrix() -> bool with Mut, Div, Panic {
+fn make_zero_model() -> GPModel {
+    GPModel {
+        L: [0.0; 4096],
+        alpha: [0.0; 128],
+        mx: [0.0; 128],
+        my: [0.0; 128],
+        mn: 0,
+        hyper: GPHyper {
+            signal_var: 0.0,
+            length_scale: 0.0,
+            noise_var: 0.0,
+            kernel_type: 0,
+            extra_param: 0.0
+        },
+        log_ml: 0.0
+    }
+}
+
+// ============================================================================
+// TEST 1: RBF kernel at same point = signal_var
+// ============================================================================
+
+fn test_rbf_same_point() -> bool with Mut, Div, Panic {
+    let hyper = make_rbf_hyper()
+    let val = kernel_rbf(2.5, 2.5, &hyper)
+    // k(x,x) = signal_var * exp(0) = signal_var = 1.0
+    approx_eq(val, 1.0, 1.0e-6)
+}
+
+// ============================================================================
+// TEST 2: RBF kernel symmetry k(x,y) = k(y,x)
+// ============================================================================
+
+fn test_rbf_symmetry() -> bool with Mut, Div, Panic {
+    let hyper = make_rbf_hyper()
+    let k_xy = kernel_rbf(1.0, 3.0, &hyper)
+    let k_yx = kernel_rbf(3.0, 1.0, &hyper)
+    approx_eq(k_xy, k_yx, 1.0e-12)
+}
+
+// ============================================================================
+// TEST 3: RBF kernel decays with distance
+// ============================================================================
+
+fn test_rbf_decay() -> bool with Mut, Div, Panic {
+    let hyper = make_rbf_hyper()
+    let k_self = kernel_rbf(2.0, 2.0, &hyper)
+    let k_near = kernel_rbf(2.0, 2.5, &hyper)
+    let k_far = kernel_rbf(2.0, 5.0, &hyper)
+    // k(x,x) > k(x,x+0.5) > k(x,x+3)
+    if k_self <= k_near { return false }
+    if k_near <= k_far { return false }
+    true
+}
+
+// ============================================================================
+// TEST 4: Cholesky of known SPD matrix [[4,2],[2,3]]
+// ============================================================================
+
+fn test_cholesky_known() -> bool with Mut, Div, Panic {
+    // K = [[4,2],[2,3]]
+    // Expected L = [[2,0],[1,sqrt(2)]]
+    // L * L^T should reconstruct K
     var K: [f64; 4096] = [0.0; 4096]
-    K[0] = 4.0; K[1] = 2.0
-    K[2] = 2.0; K[3] = 3.0
-    let L = gp_cholesky(K, 2)
-    gp_approx(L[0], 2.0, 1.0e-6) &&
-    gp_approx(L[1], 0.0, 1.0e-12) &&
-    gp_approx(L[2], 1.0, 1.0e-6) &&
-    gp_approx(L[3], 1.41421356237, 1.0e-4)
+    K[0] = 4.0
+    K[1] = 2.0
+    K[2] = 2.0
+    K[3] = 3.0
+
+    var L: [f64; 4096] = [0.0; 4096]
+    let ok = gp_cholesky(&K, 2, &!L)
+    if !ok { return false }
+
+    // Verify L[0,0] = 2.0
+    if !approx_eq(L[0], 2.0, 1.0e-6) { return false }
+    // Verify L[1,0] = 1.0
+    if !approx_eq(L[2], 1.0, 1.0e-6) { return false }
+    // Verify L[1,1] = sqrt(2) ~ 1.41421
+    if !approx_eq(L[3], 1.41421356237, 1.0e-4) { return false }
+    // Verify L[0,1] = 0.0 (upper triangle is zero)
+    if !approx_eq(L[1], 0.0, 1.0e-12) { return false }
+
+    // Roundtrip: L * L^T should give back K
+    // (L*L^T)[0,0] = L[0,0]^2 = 4.0
+    let r00 = L[0] * L[0]
+    if !approx_eq(r00, 4.0, 1.0e-6) { return false }
+    // (L*L^T)[1,0] = L[1,0]*L[0,0] = 1*2 = 2
+    let r10 = L[2] * L[0]
+    if !approx_eq(r10, 2.0, 1.0e-6) { return false }
+    // (L*L^T)[1,1] = L[1,0]^2 + L[1,1]^2 = 1 + 2 = 3
+    let r11 = L[2] * L[2] + L[3] * L[3]
+    if !approx_eq(r11, 3.0, 1.0e-6) { return false }
+
+    true
 }
 
-fn test_cholesky_solve_residual() -> bool with Mut, Div, Panic {
+// ============================================================================
+// TEST 5: Cholesky solve accuracy: K*x = b, verify residual is small
+// ============================================================================
+
+fn test_cholesky_solve() -> bool with Mut, Div, Panic {
+    // 3x3 SPD matrix: K = [[10,2,1],[2,8,3],[1,3,6]]
     var K: [f64; 4096] = [0.0; 4096]
     K[0] = 10.0; K[1] = 2.0; K[2] = 1.0
     K[3] = 2.0;  K[4] = 8.0; K[5] = 3.0
     K[6] = 1.0;  K[7] = 3.0; K[8] = 6.0
-    var b: [f64; 64] = [0.0; 64]
+
+    var L: [f64; 4096] = [0.0; 4096]
+    let ok = gp_cholesky(&K, 3, &!L)
+    if !ok { return false }
+
+    // b = [1.0, 2.0, 3.0]
+    var b: [f64; 128] = [0.0; 128]
     b[0] = 1.0; b[1] = 2.0; b[2] = 3.0
-    let L = gp_cholesky(K, 3)
-    let x = gp_cholesky_solve(L, b, 3)
-    let r0 = 10.0 * x[0] + 2.0 * x[1] + x[2] - b[0]
-    let r1 = 2.0 * x[0] + 8.0 * x[1] + 3.0 * x[2] - b[1]
-    let r2 = x[0] + 3.0 * x[1] + 6.0 * x[2] - b[2]
-    let residual = gp_sqrt(r0 * r0 + r1 * r1 + r2 * r2)
+
+    var x_sol: [f64; 128] = [0.0; 128]
+    gp_cholesky_solve(&L, &b, 3, &!x_sol)
+
+    // Compute residual: r = K*x - b
+    // r[0] = 10*x[0] + 2*x[1] + 1*x[2] - 1
+    let r0 = 10.0 * x_sol[0] + 2.0 * x_sol[1] + 1.0 * x_sol[2] - b[0]
+    let r1 = 2.0 * x_sol[0] + 8.0 * x_sol[1] + 3.0 * x_sol[2] - b[1]
+    let r2 = 1.0 * x_sol[0] + 3.0 * x_sol[1] + 6.0 * x_sol[2] - b[2]
+
+    let residual = gp_h_sqrt(r0 * r0 + r1 * r1 + r2 * r2)
     residual < 1.0e-6
 }
 
-fn test_gp_fit_succeeds() -> bool with Mut, Div, Panic {
-    let data = make_quad_data()
-    let hyper = GPHyper { length_scale: 1.5, signal_var: 5.0, noise_var: 0.01 }
-    let model = gp_fit(data, hyper)
-    model.ok && model.n == data.n
-}
+// ============================================================================
+// TEST 6: GP predict at training points: mean ~ y_train
+// ============================================================================
 
 fn test_gp_predict_at_train() -> bool with Mut, Div, Panic {
-    let data = make_quad_data()
-    let hyper = GPHyper { length_scale: 1.5, signal_var: 5.0, noise_var: 0.01 }
-    let model = gp_fit(data, hyper)
+    var data: GPData = GPData {
+        x_train: [0.0; 128],
+        y_train: [0.0; 128],
+        n_train: 0,
+        noise_var: 0.01
+    }
+    build_quad_data(&!data)
+
+    let hyper = make_rbf_hyper()
+    var model = make_zero_model()
+
+    let ok = gp_train(&data, &hyper, &!model)
+    if !ok { return false }
+
+    // Predict at each training point: mean should be close to y_train
     var max_err = 0.0
-    var i: i64 = 0
-    while i < data.n {
-        let pred = gp_predict(model, data, data.x[i])
-        let err = gp_abs(pred[0] - data.y[i])
+    var i = 0
+    while i < 5 {
+        var pred: GPPrediction = GPPrediction { mean: 0.0, variance: 0.0, std_dev: 0.0 }
+        gp_predict(&model, data.x_train[i], &!pred)
+        let err = gp_h_abs(pred.mean - data.y_train[i])
         if err > max_err { max_err = err }
         i = i + 1
     }
-    max_err < 0.5
+    // With noise_var=0.01, predictions should be within ~0.5 of training values
+    // Boundary points (x=0 and x=4) have naturally larger GP error
+    max_err < 0.25
 }
 
-fn test_gp_variance_far_vs_near() -> bool with Mut, Div, Panic {
-    let data = make_quad_data()
-    let hyper = GPHyper { length_scale: 1.5, signal_var: 5.0, noise_var: 0.01 }
-    let model = gp_fit(data, hyper)
-    let near = gp_predict(model, data, 2.0)
-    let far = gp_predict(model, data, 10.0)
-    far[1] > near[1]
+// ============================================================================
+// TEST 7: GP variance at training points is small
+// ============================================================================
+
+fn test_gp_variance_at_train() -> bool with Mut, Div, Panic {
+    var data: GPData = GPData {
+        x_train: [0.0; 128],
+        y_train: [0.0; 128],
+        n_train: 0,
+        noise_var: 0.01
+    }
+    build_quad_data(&!data)
+
+    let hyper = make_rbf_hyper()
+    var model = make_zero_model()
+
+    let ok = gp_train(&data, &hyper, &!model)
+    if !ok { return false }
+
+    // Variance at training points should be near noise_var (0.01)
+    var all_small = true
+    var i = 0
+    while i < 5 {
+        var pred: GPPrediction = GPPrediction { mean: 0.0, variance: 0.0, std_dev: 0.0 }
+        gp_predict(&model, data.x_train[i], &!pred)
+        // Posterior variance at training point should be <= noise_var
+        if pred.variance > 0.1 { all_small = false }
+        i = i + 1
+    }
+    all_small
 }
+
+// ============================================================================
+// TEST 8: GP variance increases away from training data
+// ============================================================================
+
+fn test_gp_variance_away() -> bool with Mut, Div, Panic {
+    var data: GPData = GPData {
+        x_train: [0.0; 128],
+        y_train: [0.0; 128],
+        n_train: 0,
+        noise_var: 0.01
+    }
+    build_quad_data(&!data)
+
+    let hyper = make_rbf_hyper()
+    var model = make_zero_model()
+
+    let ok = gp_train(&data, &hyper, &!model)
+    if !ok { return false }
+
+    // Variance at training point x=2.0
+    var pred_near: GPPrediction = GPPrediction { mean: 0.0, variance: 0.0, std_dev: 0.0 }
+    gp_predict(&model, 2.0, &!pred_near)
+
+    // Variance far from training data at x=10.0
+    var pred_far: GPPrediction = GPPrediction { mean: 0.0, variance: 0.0, std_dev: 0.0 }
+    gp_predict(&model, 10.0, &!pred_far)
+
+    // Variance far away should be larger than at training point
+    pred_far.variance > pred_near.variance
+}
+
+// ============================================================================
+// TEST 9: GP log marginal likelihood is finite (not NaN or inf)
+// ============================================================================
 
 fn test_gp_log_ml_finite() -> bool with Mut, Div, Panic {
-    let data = make_quad_data()
-    let hyper = GPHyper { length_scale: 1.5, signal_var: 5.0, noise_var: 0.01 }
-    let model = gp_fit(data, hyper)
-    let lml = gp_log_ml(model, data)
-    gp_abs(lml) > 1.0e-12 && lml < 0.0 && lml > -1.0e30
+    var data: GPData = GPData {
+        x_train: [0.0; 128],
+        y_train: [0.0; 128],
+        n_train: 0,
+        noise_var: 0.01
+    }
+    build_quad_data(&!data)
+
+    let hyper = make_rbf_hyper()
+    var model = make_zero_model()
+
+    let ok = gp_train(&data, &hyper, &!model)
+    if !ok { return false }
+
+    let lml = gp_log_marginal(&model)
+    // Should be a finite, reasonable number (not extremely large magnitude)
+    // A valid log ML for 5 points is typically in range [-100, 100]
+    if lml > 1.0e30 { return false }
+    if lml < -1.0e30 { return false }
+    // Check it is not zero (which would be suspicious for non-trivial data)
+    if gp_h_abs(lml) < 1.0e-20 { return false }
+    true
 }
 
-fn test_gp_low_noise_interpolation() -> bool with Mut, Div, Panic {
-    let data = make_linear_low_noise_data()
-    let hyper = GPHyper { length_scale: 2.0, signal_var: 10.0, noise_var: 1.0e-6 }
-    let model = gp_fit(data, hyper)
+// ============================================================================
+// TEST 10: GP posterior mean interpolates when noise -> 0
+// ============================================================================
+
+fn test_gp_interpolation() -> bool with Mut, Div, Panic {
+    // Use very small noise so predictions should closely match training values
+    var data: GPData = GPData {
+        x_train: [0.0; 128],
+        y_train: [0.0; 128],
+        n_train: 0,
+        noise_var: 1.0e-6
+    }
+    // 4 training points: simple linear function y = 2*x + 1
+    data.n_train = 4
+    data.x_train[0] = 0.0; data.y_train[0] = 1.0
+    data.x_train[1] = 1.0; data.y_train[1] = 3.0
+    data.x_train[2] = 2.0; data.y_train[2] = 5.0
+    data.x_train[3] = 3.0; data.y_train[3] = 7.0
+
+    var hyper: GPHyper = GPHyper {
+        signal_var: 10.0,
+        length_scale: 2.0,
+        noise_var: 1.0e-6,
+        kernel_type: 0,
+        extra_param: 0.0
+    }
+
+    var model = make_zero_model()
+    let ok = gp_train(&data, &hyper, &!model)
+    if !ok { return false }
+
+    // Predictions at training points should almost exactly match
     var max_err = 0.0
-    var i: i64 = 0
-    while i < data.n {
-        let pred = gp_predict(model, data, data.x[i])
-        let err = gp_abs(pred[0] - data.y[i])
+    var i = 0
+    while i < 4 {
+        var pred: GPPrediction = GPPrediction { mean: 0.0, variance: 0.0, std_dev: 0.0 }
+        gp_predict(&model, data.x_train[i], &!pred)
+        let err = gp_h_abs(pred.mean - data.y_train[i])
         if err > max_err { max_err = err }
         i = i + 1
     }
+    // With noise_var = 1e-6, interpolation error should be tiny
     max_err < 1.0e-3
 }
 
-fn main() -> i64 with IO, Mut, Div, Panic {
-    var passed = 0
-    var failed = 0
+// ============================================================================
+// TEST 11: Matern 3/2 kernel is positive for all inputs
+// ============================================================================
 
-    print("=== Gaussian Process Regression Tests ===\n")
+fn test_matern32_positive() -> bool with Mut, Div, Panic {
+    var hyper: GPHyper = GPHyper {
+        signal_var: 2.0,
+        length_scale: 1.5,
+        noise_var: 0.01,
+        kernel_type: 1,
+        extra_param: 0.0
+    }
 
-    print("T1: Kernel symmetry..................... ")
-    if test_kernel_symmetry() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+    // Test a range of point pairs
+    var all_pos = true
+    var i = 0
+    while i < 10 {
+        let x = (i as f64) * 0.7
+        var j = 0
+        while j < 10 {
+            let y = (j as f64) * 0.7
+            let kval = kernel_matern32(x, y, &hyper)
+            if kval <= 0.0 { all_pos = false }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    all_pos
+}
 
-    print("T2: Kernel self maximum................. ")
-    if test_kernel_self_maximum() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+// ============================================================================
+// TEST 12: Periodic kernel: k(x, x+period) ~ k(x, x)
+// ============================================================================
 
-    print("T3: Cholesky known matrix............... ")
-    if test_cholesky_known_matrix() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+fn test_periodic_kernel() -> bool with Mut, Div, Panic {
+    let period = 2.0
+    var hyper: GPHyper = GPHyper {
+        signal_var: 1.0,
+        length_scale: 1.0,
+        noise_var: 0.01,
+        kernel_type: 3,
+        extra_param: period
+    }
 
-    print("T4: Cholesky solve residual............. ")
-    if test_cholesky_solve_residual() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+    // k(x, x) = signal_var (distance 0)
+    let k_self = kernel_periodic(1.0, 1.0, &hyper)
 
-    print("T5: GP fit succeeds..................... ")
-    if test_gp_fit_succeeds() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+    // k(x, x + period) should be approximately k(x, x)
+    // since the periodic kernel has period p, sin(pi * p / p) = sin(pi) = 0
+    let k_period = kernel_periodic(1.0, 1.0 + period, &hyper)
 
-    print("T6: Train-point bounded fit............. ")
-    if test_gp_predict_at_train() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+    // Both should be approximately signal_var = 1.0
+    if !approx_eq(k_self, 1.0, 1.0e-6) { return false }
+    if !approx_eq(k_period, 1.0, 1.0e-6) { return false }
 
-    print("T7: Variance far > near................. ")
-    if test_gp_variance_far_vs_near() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+    // Also verify that at half-period it is NOT equal to k(x,x) (it should be smaller)
+    let k_half = kernel_periodic(1.0, 1.0 + period * 0.5, &hyper)
+    if k_half >= k_self { return false }
 
-    print("T8: Log marginal likelihood finite...... ")
-    if test_gp_log_ml_finite() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+    true
+}
 
-    print("T9: Low-noise interpolation............. ")
-    if test_gp_low_noise_interpolation() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+// ============================================================================
+// MAIN
+// ============================================================================
 
-    print("\nPassed: ")
-    print_int(passed)
-    print("\nFailed: ")
-    print_int(failed)
-    print("\n")
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
 
-    if failed == 0 {
-        print("ALL 9 TESTS PASSED\n")
-        0
+    // Test 1
+    print("Test  1: RBF kernel at same point = signal_var ... ")
+    if test_rbf_same_point() {
+        println("PASS")
+        pass = pass + 1
     } else {
-        1
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 2
+    print("Test  2: RBF kernel symmetry k(x,y) = k(y,x) ... ")
+    if test_rbf_symmetry() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 3
+    print("Test  3: RBF kernel decays with distance ... ")
+    if test_rbf_decay() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 4
+    print("Test  4: Cholesky of known SPD matrix ... ")
+    if test_cholesky_known() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 5
+    print("Test  5: Cholesky solve accuracy ... ")
+    if test_cholesky_solve() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 6
+    print("Test  6: GP predict at training points ... ")
+    if test_gp_predict_at_train() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 7
+    print("Test  7: GP variance at training points small ... ")
+    if test_gp_variance_at_train() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 8
+    print("Test  8: GP variance increases away from data ... ")
+    if test_gp_variance_away() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 9
+    print("Test  9: GP log marginal likelihood finite ... ")
+    if test_gp_log_ml_finite() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 10
+    print("Test 10: GP posterior mean interpolates ... ")
+    if test_gp_interpolation() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 11
+    print("Test 11: Matern 3/2 kernel positive ... ")
+    if test_matern32_positive() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 12
+    print("Test 12: Periodic kernel periodicity ... ")
+    if test_periodic_kernel() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    println("")
+    print("Passed: "); println(pass)
+    print("Failed: "); println(fail)
+    println("")
+    if fail == 0 {
+        println("ALL 12 TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
     }
 }

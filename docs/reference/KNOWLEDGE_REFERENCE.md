@@ -7,8 +7,6 @@ validated_by: A3
 source_of_truth: docs/governance/topic-registry.v1.json#website.docs.epistemic
 -->
 
-> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: stdlib/
-
 # Knowledge<T> Reference
 
 This document is the JOSS-facing API reference for Sounio's epistemic value model.

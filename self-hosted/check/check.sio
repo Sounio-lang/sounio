@@ -6,6 +6,15 @@
 // Methods return (Checker, ...) to thread state through value semantics.
 
 use check::refinement::*
+use check::types::*
+use check::defs::*
+use check::env::*
+use check::borrow::*
+use check::units::*
+use check::traits::*
+use check::ownership::*
+use parser::ast::*
+use ir::ir::*
 
 // ============================================================
 // Security limits
@@ -155,6 +164,13 @@ struct Checker {
     ownership: OwnContext,
     trait_registry: TraitRegistry,
     impl_registry: ImplRegistry,
+    // ── Static refinement proof engine (no Z3) ──────────────────────────────
+    // Counters updated by check_refinement_literal / check_call_arg_refinement_boundary.
+    refine_static_proved: i64,    // predicates proved at compile time
+    refine_runtime_checked: i64,  // predicates deferred to runtime assertion
+    refine_violations: i64,       // predicates definitely violated (compile error)
+    // Condition-narrowing guard stack: up to 8 nested if-conditions.
+    refine_cond_env: RefineStaticEnv,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -421,6 +437,10 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         ownership: own_context_new(),
         trait_registry: trait_registry_new(),
         impl_registry: impl_register_builtins(impl_registry_new()),
+        refine_static_proved: 0,
+        refine_runtime_checked: 0,
+        refine_violations: 0,
+        refine_cond_env: refine_static_env_new(),
     }
 }
 
@@ -504,6 +524,10 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).ownership = own_context_new()
     (*raw).trait_registry = trait_registry_new()
     (*raw).impl_registry = impl_register_builtins(impl_registry_new())
+    (*raw).refine_static_proved = 0
+    (*raw).refine_runtime_checked = 0
+    (*raw).refine_violations = 0
+    (*raw).refine_cond_env = refine_static_env_new()
 }
 
 fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Div, Alloc {
@@ -586,6 +610,10 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).ownership = src.ownership
     (*dst).trait_registry = src.trait_registry
     (*dst).impl_registry = src.impl_registry
+    (*dst).refine_static_proved = src.refine_static_proved
+    (*dst).refine_runtime_checked = src.refine_runtime_checked
+    (*dst).refine_violations = src.refine_violations
+    (*dst).refine_cond_env = src.refine_cond_env
 }
 
 fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
@@ -657,6 +685,24 @@ fn checker_fn_sig_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, All
     (*c).fn_sigs.count
 }
 
+fn checker_refine_static_proved_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).refine_static_proved
+}
+
+fn checker_refine_runtime_checked_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).refine_runtime_checked
+}
+
+fn checker_refine_violations_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).refine_violations
+}
+
+// Print the static refinement proof summary.
+// Called by the driver after check_items completes.
+fn checker_print_refine_summary_mut(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    refine_print_summary((*c).refine_static_proved, (*c).refine_runtime_checked, (*c).refine_violations)
+}
+
 // --------------------------------------------------------
 // Summary API (driver-facing scalar surface only)
 // --------------------------------------------------------
@@ -689,7 +735,7 @@ fn checker_const_name_eq(
     lens: &[i64; 128],
     idx: i64,
     name: Name
-) -> bool with Panic, Div {
+) -> bool with Mut, Panic, Div {
     if idx < 0 || idx >= 128 {
         return false
     }
@@ -4255,7 +4301,11 @@ impl Checker {
         } else {
             c.const_int_count = c.const_int_count + 1
         }
-        checker_const_name_write(&! c.const_int_name_bufs, &! c.const_int_name_lens, idx, name)
+        var bufs = c.const_int_name_bufs
+        var lens = c.const_int_name_lens
+        checker_const_name_write(&! bufs, &! lens, idx, name)
+        c.const_int_name_bufs = bufs
+        c.const_int_name_lens = lens
         c.const_int_known[idx as usize] = known
         c.const_int_values[idx as usize] = value
         c
@@ -5730,14 +5780,14 @@ fn contest_info_from_family_signature(family: ModelFamilyInfo, policy_id: i64) -
     info
 }
 
-fn contest_info_attach_span(info: ContestInfo, span: Span) -> ContestInfo {
+fn contest_info_attach_span(info: ContestInfo, span: Span) -> ContestInfo with Mut, Panic {
     var next = info
     next.span_start = span.start
     next.span_end = span.end
     next
 }
 
-fn contest_info_attach_family_id(info: ContestInfo, family_id: i64) -> ContestInfo {
+fn contest_info_attach_family_id(info: ContestInfo, family_id: i64) -> ContestInfo with Mut, Panic {
     var next = info
     next.family_id = family_id
     next
@@ -6088,9 +6138,6 @@ fn unary_operand_root_name(expr: Expr) -> Name {
         return expr.name
     }
     if expr.kind == ExprKind::ExprIndex {
-        return unary_operand_name(expr.left)
-    }
-    if expr.kind == ExprKind::ExprFieldAccess {
         return unary_operand_name(expr.left)
     }
     empty_type_name()
@@ -10012,13 +10059,23 @@ impl Checker {
         let rt = self.refinements.entries[ty.refinement_id as usize]
         var c = self
         if c.last_literal_kind == 1 {
-            // Integer literal — check predicate
-            if !pred_check_int(rt.predicate, c.last_literal_int) {
+            // Integer literal — static constant folding proof.
+            let result = refine_static_check_int_literal(rt.predicate, c.last_literal_int)
+            if result == refine_static_result_proved() {
+                // Statically proved: no runtime assertion needed.
+                c.refine_static_proved = c.refine_static_proved + 1
+            } else {
+                // Definitely violated at compile time.
+                c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(span, 42, 0, 0, 0)
             }
         } else if c.last_literal_kind == 2 {
-            // Float literal — check predicate
-            if !pred_check_float(rt.predicate, c.last_literal_float) {
+            // Float literal — static constant folding proof.
+            let result = refine_static_check_float_literal(rt.predicate, c.last_literal_float)
+            if result == refine_static_result_proved() {
+                c.refine_static_proved = c.refine_static_proved + 1
+            } else {
+                c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(span, 42, 0, 0, 0)
             }
         }
@@ -13000,21 +13057,14 @@ impl Checker {
                     }
                 }
 
-                let arg_is_place_like =
-                    arg_expr.kind == ExprKind::ExprIdent ||
-                    arg_expr.kind == ExprKind::ExprFieldAccess ||
-                    arg_expr.kind == ExprKind::ExprIndex
-                if arg_is_place_like && implicit_release_kind != 0 {
+                if arg_expr.kind == ExprKind::ExprIdent && implicit_release_kind != 0 {
                     // Release borrows unconditionally after call returns.
                     // Previous logic used state delta (before_pair vs current_pair)
                     // which failed when consecutive calls borrow the same variable
                     // (the second call saw before_pair.0 == 2 from the first call's
                     // un-released borrow, and skipped the release).
                     if implicit_release_kind == 1 || implicit_release_kind == 2 {
-                        let release_name = unary_operand_root_name(arg_expr)
-                        if !name_is_empty(release_name) {
-                            c.borrows = c.borrows.release_borrow(release_name)
-                        }
+                        c.borrows = c.borrows.release_borrow(arg_expr.name)
                     }
                 }
 
@@ -13039,22 +13089,18 @@ impl Checker {
     }
 
     fn check_call_arg_borrow_boundary(self, arg_expr: Expr, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
-        if param_ty.kind != TypeKind::TyRef && param_ty.kind != TypeKind::TyRefMut {
-            return self
-        }
-        let borrow_name = unary_operand_root_name(arg_expr)
-        if name_is_empty(borrow_name) {
+        if arg_expr.kind != ExprKind::ExprIdent {
             return self
         }
         var c = self
         if param_ty.kind == TypeKind::TyRef {
-            let borrow_result = c.borrows.try_shared_borrow(borrow_name)
+            let borrow_result = c.borrows.try_shared_borrow(arg_expr.name)
             c.borrows = borrow_result.0
             if borrow_result.1 != 0 {
                 c = c.report_error_at(call_span, borrow_result.1, 0, 0, 0)
             }
         } else if param_ty.kind == TypeKind::TyRefMut {
-            let borrow_result = c.borrows.try_exclusive_borrow(borrow_name)
+            let borrow_result = c.borrows.try_exclusive_borrow(arg_expr.name)
             c.borrows = borrow_result.0
             if borrow_result.1 != 0 {
                 c = c.report_error_at(call_span, borrow_result.1, 0, 0, 0)
@@ -13077,13 +13123,22 @@ impl Checker {
         var c = self
 
         if arg_expr.kind == ExprKind::ExprIntLit {
-            if !pred_check_int(expected_ref.predicate, arg_expr.int_val) {
+            // Constant folding: literal known at compile time.
+            let result = refine_static_check_int_literal(expected_ref.predicate, arg_expr.int_val)
+            if result == refine_static_result_proved() {
+                c.refine_static_proved = c.refine_static_proved + 1
+            } else {
+                c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(call_span, 42, 0, 0, 0)
             }
             return c
         }
         if arg_expr.kind == ExprKind::ExprFloatLit {
-            if !pred_check_float(expected_ref.predicate, arg_expr.float_val) {
+            let result = refine_static_check_float_literal(expected_ref.predicate, arg_expr.float_val)
+            if result == refine_static_result_proved() {
+                c.refine_static_proved = c.refine_static_proved + 1
+            } else {
+                c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(call_span, 42, 0, 0, 0)
             }
             return c
@@ -13091,7 +13146,10 @@ impl Checker {
 
         if provided_ty.refinement_id >= 0 && provided_ty.refinement_id < 128 {
             let provided_ref = c.refinements.entries[provided_ty.refinement_id as usize]
-            if !pred_implies(provided_ref.predicate, expected_ref.predicate) {
+            if pred_implies(provided_ref.predicate, expected_ref.predicate) {
+                c.refine_static_proved = c.refine_static_proved + 1
+            } else {
+                c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(call_span, 42, 0, 0, 0)
             }
             return c
@@ -13101,10 +13159,14 @@ impl Checker {
         if arg_expr.kind == ExprKind::ExprIdent {
             let const_result = c.const_int_lookup(arg_expr.name)
             if const_result.0 {
-                if !pred_check_int(expected_ref.predicate, const_result.1) {
+                let result = refine_static_check_int_literal(expected_ref.predicate, const_result.1)
+                if result == refine_static_result_proved() {
+                    c.refine_static_proved = c.refine_static_proved + 1
+                    return c
+                } else {
+                    c.refine_violations = c.refine_violations + 1
                     return c.report_error_at(call_span, 42, 0, 0, 0)
                 }
-                return c
             }
         }
 
@@ -13114,9 +13176,20 @@ impl Checker {
             if env_lookup.refinement_id >= 0 && env_lookup.refinement_id < 128 {
                 let env_ref = c.refinements.entries[env_lookup.refinement_id as usize]
                 if pred_implies(env_ref.predicate, expected_ref.predicate) {
+                    c.refine_static_proved = c.refine_static_proved + 1
                     return c
                 }
             }
+
+            // Condition-narrowing proof: use guard predicates accumulated from
+            // enclosing `if` conditions.  E.g., inside `if x > 0 { f(x) }`,
+            // x > 0 is a guard — sufficient to prove `x` satisfies `{ x > 0 }`.
+            let cond_result = refine_static_check_var(c.refine_cond_env, arg_expr.name, expected_ref.predicate)
+            if cond_result == refine_static_result_proved() {
+                c.refine_static_proved = c.refine_static_proved + 1
+                return c
+            }
+
             // Ontology-aware proof: collect ALL property predicates from
             // class + ancestors into a single conjunction, then check once.
             //
@@ -13196,19 +13269,22 @@ impl Checker {
                         ci = ci + 1
                     }
                     if pred_implies_structural(conjoined, expected_ref.predicate) {
+                        c.refine_static_proved = c.refine_static_proved + 1
                         return c
                     }
                 }
             }
         }
 
-        // Epistemic fallback: emit warning, not error — unverifiable != wrong.
+        // Epistemic fallback: static analysis exhausted — defer to runtime assertion.
         // W040 semantics: the call compiles. The predicate is NOT proven statically.
+        //   Emit refine_hint: static_unknown diagnostic (W045) alongside W040.
         //   - Debug mode (future): codegen inserts runtime assertion at this call site.
         //     If the predicate fails at runtime, panic with "refinement predicate violated".
         //   - Release mode: trust the programmer. The warning was sufficient notice.
         // To suppress: #[allow(W040)] on the call site (not yet implemented).
         // To force proof: annotate the argument with an explicit refinement type.
+        c.refine_runtime_checked = c.refine_runtime_checked + 1
         c.report_warning_at(call_span, 40, 0, 0, 0)
     }
 
@@ -13264,12 +13340,8 @@ impl Checker {
             Some(arg_list) => {
                 let arg_expr = (*arg_list).head
                 let param_info = fn_param_list_get(params, idx)
-                let arg_is_place_like =
-                    arg_expr.kind == ExprKind::ExprIdent ||
-                    arg_expr.kind == ExprKind::ExprFieldAccess ||
-                    arg_expr.kind == ExprKind::ExprIndex
                 let implicit_borrow =
-                    arg_is_place_like &&
+                    arg_expr.kind == ExprKind::ExprIdent &&
                     (param_info.ty.kind == TypeKind::TyRef || param_info.ty.kind == TypeKind::TyRefMut)
 
                 var checker_for_arg = self
@@ -13297,20 +13369,17 @@ impl Checker {
                 }
                 // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
                 if has_param_info &&
-                   arg_is_place_like &&
+                   arg_expr.kind == ExprKind::ExprIdent &&
                    c.is_linear_type(arg_ty) &&
                    !implicit_borrow &&
                    c.suppress_linear_consume_depth == 0 {
-                    let consume_name = unary_operand_root_name(arg_expr)
-                    if !name_is_empty(consume_name) {
-                        if c.borrows.is_borrowed(consume_name) {
-                            c = c.report_error_at(call_span, 38, 0, 0, 0)
-                        } else {
-                            let consume_result = c.borrows.consume_linear(consume_name)
-                            c.borrows = consume_result.0
-                            if consume_result.1 != 0 {
-                                c = c.report_error_at(call_span, 39, 0, 0, 0)
-                            }
+                    if c.borrows.is_borrowed(arg_expr.name) {
+                        c = c.report_error_at(call_span, 38, 0, 0, 0)
+                    } else {
+                        let consume_result = c.borrows.consume_linear(arg_expr.name)
+                        c.borrows = consume_result.0
+                        if consume_result.1 != 0 {
+                            c = c.report_error_at(call_span, 39, 0, 0, 0)
                         }
                     }
                 }
@@ -13362,22 +13431,40 @@ impl Checker {
         if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
             c = c.report_mismatch(e.span, 6, ty_bool(), cond_ty)
         }
-        // Check then block
+        // ── Condition narrowing ──────────────────────────────────────────────
+        // Attempt to extract a refinement predicate from the `if` condition so
+        // the then-branch can prove refinement requirements without Z3.
+        // E.g.: `if x > 0 { f(x as Pos) }` — we push `x > 0` as a guard.
+        // The saved env is restored after both branches so guards don't leak.
+        let saved_cond_env = c.refine_cond_env
+        let cond_guard = if_cond_extract_pred(e.left)
+        if cond_guard.0 {
+            c.refine_cond_env = refine_static_env_push(c.refine_cond_env, cond_guard.1)
+        }
+        // Check then block (with narrowed env)
         let then_pair = c.check_opt_block(e.block)
         c = then_pair.0
         let then_ty = then_pair.1
+        // Restore env before else branch (negation narrowing is not yet implemented
+        // — the safe choice is no narrowing in the else branch).
+        c.refine_cond_env = saved_cond_env
         // Check else
         match e.else_expr {
             Some(else_e) => {
                 let else_pair = c.check_expr(*else_e)
                 c = else_pair.0
                 let else_ty = else_pair.1
+                // Restore after else branch
+                c.refine_cond_env = saved_cond_env
                 if !types_compatible(then_ty, else_ty) {
                     c = c.report_mismatch(e.span, 7, then_ty, else_ty)
                 }
                 (c, then_ty)
             }
-            None => (c, ty_unit())
+            None => {
+                c.refine_cond_env = saved_cond_env
+                (c, ty_unit())
+            }
         }
     }
 
@@ -14181,5 +14268,78 @@ fn struct_field_list_count(opt: Option<Box<StructFieldList> >) -> i64 with Mut, 
     match opt {
         None => 0
         Some(list) => 1 + struct_field_list_count((*list).tail)
+    }
+}
+
+// ============================================================
+// Static refinement: condition guard extraction
+// ============================================================
+//
+// Extract a RefinementPred from a simple boolean expression used as an `if`
+// condition.  Recognised forms:
+//   <ident> > <int_lit>    →  pred_gt(ident, n)
+//   <ident> >= <int_lit>   →  pred_gt_eq(ident, n)
+//   <ident> < <int_lit>    →  pred_lt(ident, n)
+//   <ident> <= <int_lit>   →  pred_lt_eq(ident, n)
+//   <ident> == <int_lit>   →  pred_eq(ident, n)
+//   <ident> != <int_lit>   →  pred_neq(ident, n)
+//
+// Returns (true, pred) on success, (false, _) when the form is unrecognised.
+// Only one level of comparison is extracted; conjunctions (&&) are not yet
+// handled here (the individual guards already come from the outer env stack).
+fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (bool, RefinementPred) with Mut, Panic, Div {
+    let no_pred = (false, empty_refinement_pred())
+    match opt {
+        None => no_pred
+        Some(e) => {
+            let expr = *e
+            if expr.kind != ExprKind::ExprBinary {
+                return no_pred
+            }
+            // LHS must be an identifier
+            let lhs_ok = match expr.left {
+                Some(lhs_e) => (*lhs_e).kind == ExprKind::ExprIdent
+                None => false
+            }
+            if !lhs_ok {
+                return no_pred
+            }
+            let lhs_name = match expr.left {
+                Some(lhs_e) => (*lhs_e).name
+                None => Name { buf: [0; 128], len: 0 }
+            }
+            // RHS must be an integer literal
+            let rhs_ok = match expr.right {
+                Some(rhs_e) => (*rhs_e).kind == ExprKind::ExprIntLit
+                None => false
+            }
+            if !rhs_ok {
+                return no_pred
+            }
+            let rhs_val = match expr.right {
+                Some(rhs_e) => (*rhs_e).int_val
+                None => 0
+            }
+            // Map BinaryOp → refinement_op
+            let op = if expr.bin_op == BinaryOp::OpGt {
+                refinement_op_gt()
+            } else if expr.bin_op == BinaryOp::OpGe {
+                refinement_op_gt_eq()
+            } else if expr.bin_op == BinaryOp::OpLt {
+                refinement_op_lt()
+            } else if expr.bin_op == BinaryOp::OpLe {
+                refinement_op_lt_eq()
+            } else if expr.bin_op == BinaryOp::OpEq {
+                refinement_op_eq()
+            } else if expr.bin_op == BinaryOp::OpNe {
+                refinement_op_neq()
+            } else {
+                refinement_op_none()
+            }
+            if op == refinement_op_none() {
+                return no_pred
+            }
+            (true, pred_make_int(op, lhs_name, rhs_val))
+        }
     }
 }

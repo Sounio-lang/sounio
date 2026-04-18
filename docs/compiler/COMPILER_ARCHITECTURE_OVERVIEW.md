@@ -7,8 +7,6 @@ validated_by: A4
 source_of_truth: docs/governance/topic-registry.v1.json#website.docs.compiler
 -->
 
-> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: self-hosted/
-
 # Sounio Compiler Architecture Overview
 
 This is the current contributor-facing map of the Sounio compiler. The important correction versus older documentation is that Sounio is now best understood as a self-hosted-first compiler with an artifact-backed public workflow, not as a Rust-crate-first compiler that happens to have some self-hosted experiments.

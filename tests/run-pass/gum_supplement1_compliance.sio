@@ -1,5 +1,4 @@
 //@ run-pass
-//@ contract-adjustment: GUM Supplement 1 lane requires explicit Mut/Div and value-semantic covariance updates
 // GUM Supplement 1 compliance tests
 // Validates covariance propagation per JCGM 101:2008
 //
@@ -16,7 +15,7 @@
 // Helpers (self-contained, no imports)
 // =============================================================================
 
-fn sqrt_f64(x: f64) -> f64 with Mut, Div {
+fn sqrt_f64(x: f64) -> f64 {
     if x <= 0.0 { return 0.0 }
     var guess = x / 2.0
     if guess < 0.001 { guess = 0.001 }
@@ -46,7 +45,7 @@ struct CovMat {
     data: [f64; 300],
 }
 
-fn tri_idx(n: i32, i: i32, j: i32) -> i32 with Mut, Div {
+fn tri_idx(n: i32, i: i32, j: i32) -> i32 {
     var row = i
     var col = j
     if i > j {
@@ -60,13 +59,11 @@ fn cm_new(n: i32) -> CovMat {
     return CovMat { n: n, data: [0.0; 300] }
 }
 
-fn cm_set(m: CovMat, i: i32, j: i32, val: f64) -> CovMat with Mut, Div, Panic {
-    var out = m
-    out.data[tri_idx(out.n, i, j)] = val
-    return out
+fn cm_set(m: &!CovMat, i: i32, j: i32, val: f64) {
+    m.data[tri_idx(m.n, i, j)] = val
 }
 
-fn cm_get(m: CovMat, i: i32, j: i32) -> f64 with Mut, Div, Panic {
+fn cm_get(m: &CovMat, i: i32, j: i32) -> f64 {
     return m.data[tri_idx(m.n, i, j)]
 }
 
@@ -88,28 +85,28 @@ fn gr_new(val: f64, unc: f64) -> GR {
 // =============================================================================
 
 // y = x1 + x2, Var(y) = u1^2 + u2^2 + 2*rho*u1*u2
-fn add_correlated(a: GR, b: GR, rho: f64) -> GR with Mut, Div {
+fn add_correlated(a: GR, b: GR, rho: f64) -> GR {
     let val = a.v + b.v
     let var_y = a.u*a.u + b.u*b.u + 2.0 * rho * a.u * b.u
     return gr_new(val, sqrt_f64(abs_f64(var_y)))
 }
 
 // y = x1 - x2, Var(y) = u1^2 + u2^2 - 2*rho*u1*u2
-fn sub_correlated(a: GR, b: GR, rho: f64) -> GR with Mut, Div {
+fn sub_correlated(a: GR, b: GR, rho: f64) -> GR {
     let val = a.v - b.v
     let var_y = a.u*a.u + b.u*b.u - 2.0 * rho * a.u * b.u
     return gr_new(val, sqrt_f64(abs_f64(var_y)))
 }
 
 // y = x1 * x2, Var(y) = x2^2*u1^2 + x1^2*u2^2 + 2*x1*x2*rho*u1*u2
-fn mul_correlated(a: GR, b: GR, rho: f64) -> GR with Mut, Div {
+fn mul_correlated(a: GR, b: GR, rho: f64) -> GR {
     let val = a.v * b.v
     let var_y = b.v*b.v*a.u*a.u + a.v*a.v*b.u*b.u + 2.0*a.v*b.v*rho*a.u*b.u
     return gr_new(val, sqrt_f64(abs_f64(var_y)))
 }
 
 // y = x1 / x2
-fn div_correlated(a: GR, b: GR, rho: f64) -> GR with Mut, Div {
+fn div_correlated(a: GR, b: GR, rho: f64) -> GR {
     let val = a.v / b.v
     let c1 = 1.0 / b.v
     let c2 = 0.0 - a.v / (b.v * b.v)
@@ -123,12 +120,12 @@ fn scale(a: GR, c: f64) -> GR {
 }
 
 // 2D covariance propagation via numerical Jacobian
-fn propagate_2d(f_add: i32, x: [f64; 2], u: [f64; 2], rho: f64) -> GR with Mut, Div, Panic {
+fn propagate_2d(f_add: i32, x: [f64; 2], u: [f64; 2], rho: f64) -> GR {
     // Build 2x2 covariance matrix
     var cov = cm_new(2)
-    cov = cm_set(cov, 0, 0, u[0] * u[0])
-    cov = cm_set(cov, 1, 1, u[1] * u[1])
-    cov = cm_set(cov, 0, 1, rho * u[0] * u[1])
+    cm_set(&!cov, 0, 0, u[0] * u[0])
+    cm_set(&!cov, 1, 1, u[1] * u[1])
+    cm_set(&!cov, 0, 1, rho * u[0] * u[1])
 
     // Numerical Jacobian via central differences
     let h = 1.0e-7
@@ -161,9 +158,9 @@ fn propagate_2d(f_add: i32, x: [f64; 2], u: [f64; 2], rho: f64) -> GR with Mut, 
     let j1 = (fp1 - fm1) / (2.0 * h1)
 
     // Var(y) = j0^2*s00 + 2*j0*j1*s01 + j1^2*s11
-    let s00 = cm_get(cov, 0, 0)
-    let s01 = cm_get(cov, 0, 1)
-    let s11 = cm_get(cov, 1, 1)
+    let s00 = cm_get(&cov, 0, 0)
+    let s01 = cm_get(&cov, 0, 1)
+    let s11 = cm_get(&cov, 1, 1)
 
     let var_y = j0*j0*s00 + 2.0*j0*j1*s01 + j1*j1*s11
     return gr_new(fval, sqrt_f64(abs_f64(var_y)))
@@ -173,7 +170,7 @@ fn propagate_2d(f_add: i32, x: [f64; 2], u: [f64; 2], rho: f64) -> GR with Mut, 
 // Main: Test Suite
 // =============================================================================
 
-fn main() -> i32 with IO, Panic, Mut, Div {
+fn main() -> i32 with IO, Panic {
     println("======================================================================")
     println("  GUM Supplement 1 Compliance Test Suite")
     println("  JCGM 101:2008 — Covariance Propagation")

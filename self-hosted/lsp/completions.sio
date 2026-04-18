@@ -913,6 +913,68 @@ fn lsc_complete_path(p: &LscProvider, ctx: &LscCompletionContext, module_id: i64
     list
 }
 
+// ============================================================================
+// Section 9b: CROSS-MODULE COMPLETIONS (qualified Mod:: prefix)
+// ============================================================================
+
+// LscModSymEntry -- one entry in the module-symbol bridge table used by
+// lsp_completions_from_module.  Populated by the indexer (or test harness)
+// when symbols are registered from resolved imports.
+struct LscModSymEntry {
+    mod_hash: i64,   // hash of the module name
+    sym_hash: i64,   // hash of the exported symbol name
+    kind: i64,       // LSP completion kind (LSC_KIND_* constant)
+    detail_id: i64,  // type/detail intern ID (0 = none)
+}
+
+// Bridge table for cross-module completions (static capacity).
+let LSC_MOD_SYM_MAX: i64 = 256
+
+// lsp_completions_from_module -- cross-module completion fallback.
+//
+// Called from the completion dispatch when the user has typed a `Mod::` prefix
+// (ctx.after_colon_colon == true and the module hash is known).  Scans the
+// provided bridge table for all entries whose mod_hash matches `mod_hash` and
+// whose sym_hash starts with `prefix_hash` (non-zero prefix_hash acts as a
+// filter; zero means return all symbols in the module).
+//
+// The matched entries are appended to `list` and the updated list is returned.
+// Returns the count of newly added items.
+//
+// Parameters:
+//   table        -- slice of LscModSymEntry (capacity LSC_MOD_SYM_MAX)
+//   table_count  -- number of valid entries in table
+//   mod_hash     -- hash of the module being completed (from the Mod:: prefix)
+//   prefix_hash  -- hash of the typed symbol prefix after ::, or 0 for all
+//   list         -- existing completion list to append to
+fn lsp_completions_from_module(
+    table: &[LscModSymEntry; 256],
+    table_count: i64,
+    mod_hash: i64,
+    prefix_hash: i64,
+    list: LspCompletionList
+) -> LspCompletionList with Mut, Div, Panic {
+    var out = list
+    var added: i64 = 0
+    var i: i64 = 0
+    while i < table_count {
+        let entry = table[i as usize]
+        if entry.mod_hash == mod_hash {
+            // prefix_hash == 0 means no prefix filter; otherwise only include
+            // entries whose sym_hash equals the prefix hash (exact match or
+            // the caller may pass a partial hash that was computed the same way).
+            let match_prefix = prefix_hash == 0 || entry.sym_hash == prefix_hash
+            if match_prefix {
+                let item = lsp_completion_item_new(entry.sym_hash, entry.kind, entry.detail_id, 75)
+                out = lsp_completion_list_add(out, item)
+                added = added + 1
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
 // Complete in type position -- only type-like entries (structs, enums,
 // type params, modules).
 fn lsc_complete_type(p: &LscProvider, ctx: &LscCompletionContext) -> LspCompletionList with Mut, Div, Panic {

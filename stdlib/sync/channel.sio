@@ -1,159 +1,53 @@
-// stdlib/sync/channel — blocking shared-memory i64 channels
+// stdlib/sync/channel — Single-producer single-consumer i64 channel
 //
-// IntChannel stays a copyable ID handle so imports remain compiler-stable.
-// The backing state lives in module-global arrays shared across clone-thread
-// workers, with futex PI locking and futex wait/wake on the count slot.
+// IntChannel: bounded ring buffer for sending i64 between contexts.
+// Capacity: 1024 elements.
 
 let CHANNEL_CAP: i64 = 1024
-let CHANNEL_MAX: i64 = 32
 
-let FUTEX_WAIT: i64 = 0
-let FUTEX_WAKE: i64 = 1
-let FUTEX_LOCK_PI: i64 = 6
-let FUTEX_UNLOCK_PI: i64 = 7
-
-var CHANNEL_USED: [i64; 32] = [0; 32]
-var CHANNEL_LOCK: [i64; 32] = [0; 32]
-var CHANNEL_HEAD: [i64; 32] = [0; 32]
-var CHANNEL_TAIL: [i64; 32] = [0; 32]
-var CHANNEL_COUNT: [i64; 32] = [0; 32]
-var CHANNEL_CLOSED: [i64; 32] = [0; 32]
-var CHANNEL_BUF: [i64; 32768] = [0; 32768]
-
-pub struct IntChannel {
-    id: i64,
+struct IntChannel {
+    buf: [i64; 1024],
+    head: i64,
+    tail: i64,
+    count: i64,
+    closed: i64,
 }
 
-fn channel_slot_valid(id: i64) -> bool {
-    id >= 0 && id < CHANNEL_MAX && CHANNEL_USED[id as usize] == 1
-}
-
-fn channel_buf_index(id: i64, off: i64) -> i64 {
-    id * CHANNEL_CAP + off
-}
-
-fn channel_lock_slot(id: i64) with IO {
-    syscall6(202, &CHANNEL_LOCK[id as usize], FUTEX_LOCK_PI, 0, 0, 0, 0)
-}
-
-fn channel_unlock_slot(id: i64) with IO {
-    syscall6(202, &CHANNEL_LOCK[id as usize], FUTEX_UNLOCK_PI, 0, 0, 0, 0)
-}
-
-fn channel_wait_count(id: i64, expected: i64) with IO {
-    syscall6(202, &CHANNEL_COUNT[id as usize], FUTEX_WAIT, expected, 0, 0, 0)
-}
-
-fn channel_wake_count(id: i64, wake_count: i64) with IO {
-    syscall6(202, &CHANNEL_COUNT[id as usize], FUTEX_WAKE, wake_count, 0, 0, 0)
-}
-
-pub fn channel_new() -> IntChannel with Mut {
-    var i: i64 = 0
-    while i < CHANNEL_MAX {
-        if CHANNEL_USED[i as usize] == 0 {
-            CHANNEL_USED[i as usize] = 1
-            CHANNEL_LOCK[i as usize] = 0
-            CHANNEL_HEAD[i as usize] = 0
-            CHANNEL_TAIL[i as usize] = 0
-            CHANNEL_COUNT[i as usize] = 0
-            CHANNEL_CLOSED[i as usize] = 0
-            return IntChannel { id: i }
-        }
-        i = i + 1
+impl IntChannel {
+    fn new() -> IntChannel {
+        IntChannel { buf: [0; 1024], head: 0, tail: 0, count: 0, closed: 0 }
     }
-    IntChannel { id: -1 }
-}
 
-pub fn channel_clone(ch: &! IntChannel) -> IntChannel {
-    IntChannel { id: ch.id }
-}
-
-pub fn channel_id(ch: &! IntChannel) -> i64 {
-    ch.id
-}
-
-pub fn channel_from_id(id: i64) -> IntChannel {
-    IntChannel { id: id }
-}
-
-pub fn channel_send(ch: &! IntChannel, val: i64) -> bool with Mut, IO {
-    let id = ch.id
-    if !channel_slot_valid(id) { return false }
-    while true {
-        channel_lock_slot(id)
-        if CHANNEL_CLOSED[id as usize] == 1 {
-            channel_unlock_slot(id)
-            return false
-        }
-        let count = CHANNEL_COUNT[id as usize]
-        if count < CHANNEL_CAP {
-            let tail = CHANNEL_TAIL[id as usize]
-            CHANNEL_BUF[channel_buf_index(id, tail) as usize] = val
-            var next_tail = tail + 1
-            if next_tail >= CHANNEL_CAP { next_tail = 0 }
-            CHANNEL_TAIL[id as usize] = next_tail
-            CHANNEL_COUNT[id as usize] = count + 1
-            channel_unlock_slot(id)
-            channel_wake_count(id, 1024)
-            return true
-        }
-        channel_unlock_slot(id)
-        channel_wait_count(id, count)
+    fn send(self: &! IntChannel, val: i64) -> bool {
+        if self.closed == 1 { return false }
+        if self.count >= CHANNEL_CAP { return false }
+        self.buf[self.tail] = val
+        self.tail = (self.tail + 1) % CHANNEL_CAP
+        self.count = self.count + 1
+        true
     }
-    false
-}
 
-pub fn channel_recv(ch: &! IntChannel) -> i64 with Mut, IO {
-    let id = ch.id
-    if !channel_slot_valid(id) { return 0 }
-    while true {
-        channel_lock_slot(id)
-        let count = CHANNEL_COUNT[id as usize]
-        if count > 0 {
-            let head = CHANNEL_HEAD[id as usize]
-            let val = CHANNEL_BUF[channel_buf_index(id, head) as usize]
-            var next_head = head + 1
-            if next_head >= CHANNEL_CAP { next_head = 0 }
-            CHANNEL_HEAD[id as usize] = next_head
-            CHANNEL_COUNT[id as usize] = count - 1
-            channel_unlock_slot(id)
-            channel_wake_count(id, 1024)
-            return val
-        }
-        if CHANNEL_CLOSED[id as usize] == 1 {
-            channel_unlock_slot(id)
-            return 0
-        }
-        channel_unlock_slot(id)
-        channel_wait_count(id, count)
+    fn recv(self: &! IntChannel) -> i64 {
+        if self.count == 0 { return 0 }
+        let val = self.buf[self.head]
+        self.head = (self.head + 1) % CHANNEL_CAP
+        self.count = self.count - 1
+        val
     }
-    0
-}
 
-pub fn channel_is_empty(ch: &! IntChannel) -> bool {
-    let id = ch.id
-    if !channel_slot_valid(id) { return true }
-    CHANNEL_COUNT[id as usize] == 0
-}
+    fn is_empty(self: &IntChannel) -> bool {
+        self.count == 0
+    }
 
-pub fn channel_len(ch: &! IntChannel) -> i64 {
-    let id = ch.id
-    if !channel_slot_valid(id) { return 0 }
-    CHANNEL_COUNT[id as usize]
-}
+    fn len(self: &IntChannel) -> i64 {
+        self.count
+    }
 
-pub fn channel_close(ch: &! IntChannel) with Mut, IO {
-    let id = ch.id
-    if !channel_slot_valid(id) { return }
-    channel_lock_slot(id)
-    CHANNEL_CLOSED[id as usize] = 1
-    channel_unlock_slot(id)
-    channel_wake_count(id, 1024)
-}
+    fn close(self: &! IntChannel) {
+        self.closed = 1
+    }
 
-pub fn channel_is_closed(ch: &! IntChannel) -> bool {
-    let id = ch.id
-    if !channel_slot_valid(id) { return true }
-    CHANNEL_CLOSED[id as usize] == 1
+    fn is_closed(self: &IntChannel) -> bool {
+        self.closed == 1
+    }
 }

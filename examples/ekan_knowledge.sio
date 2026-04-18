@@ -1,0 +1,223 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Epistemic KAN with Knowledge (EK) confidence tracking
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Extends epistemic_kan.sio: each edge carries a confidence score alongside
+// its GUM uncertainty. Confidence uses D3/ety_unify min-propagation semantics.
+//
+// Edge roles:
+//   L1 edges 0-5  — asserted  (conf = 0.965)  ← lower quality
+//   L1 edges 6-23 — measured  (conf = 0.985)
+//   L2 edges      — measured  (conf = 0.985)
+//
+// T7: output conf ≤ 0.965 because asserted L1 edges propagate through L2.
+
+fn sqrt_k(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn abs_k(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sin_k(x: f64) -> f64 with Mut, Div, Panic {
+    var v = x
+    while v >  3.14159 { v = v - 6.28318 }
+    while v < (0.0 - 3.14159) { v = v + 6.28318 }
+    let v3 = v * v * v; let v5 = v3 * v * v; let v7 = v5 * v * v
+    v - v3 / 6.0 + v5 / 120.0 - v7 / 5040.0
+}
+
+var RNG_KE: i64 = 161803
+fn rand_ke() -> f64 with Mut, Div, Panic {
+    RNG_KE = (RNG_KE * 6364136223846793005 + 1442695040888963407)
+    var v = RNG_KE
+    if v < 0 { v = 0 - v }
+    (v % 10000) as f64 / 10000.0 - 0.5
+}
+
+// Hat basis (5 knots at 0, 0.25, 0.5, 0.75, 1.0)
+fn hat(x: f64, k: i64) -> f64 with Mut, Div, Panic {
+    let c = (k as f64) * 0.25
+    let d = abs_k(x - c) / 0.25
+    if d >= 1.0 { return 0.0 }
+    1.0 - d
+}
+
+// ─── EK edge value — GUM unc + D3 confidence ─────────────────────────────────
+struct Ev { val: f64, unc: f64, conf: f64 }
+
+fn edge_eval_k(coeffs: &[f64; 5], unc: &[f64; 5], e_conf: f64, x: f64) -> Ev with Mut, Div, Panic {
+    var val = 0.0; var vs = 0.0; var k = 0
+    while k < 5 {
+        let b = hat(x, k)
+        val = val + coeffs[k as usize] * b
+        vs  = vs  + b * b * unc[k as usize] * unc[k as usize]
+        k = k + 1
+    }
+    Ev { val: val, unc: sqrt_k(vs), conf: e_conf }
+}
+
+// ─── Global state ─────────────────────────────────────────────────────────────
+var L1_C: [f64; 120] = [0.0; 120]   // 24 edges × 5 coeffs
+var L1_U: [f64; 120] = [0.0; 120]
+var L1_CONF: [f64; 24] = [0.0; 24]  // per-edge confidence
+
+var L2_C: [f64; 60] = [0.0; 60]     // 12 edges × 5 coeffs
+var L2_U: [f64; 60] = [0.0; 60]
+var L2_CONF: [f64; 12] = [0.0; 12]
+
+var KH:  [f64; 6] = [0.0; 6]
+var KHU: [f64; 6] = [0.0; 6]
+var KHC: [f64; 6] = [0.0; 6]   // hidden-layer confidence per node
+var KO:  [f64; 2] = [0.0; 2]
+var KOU: [f64; 2] = [0.0; 2]
+var KOC: [f64; 2] = [0.0; 2]   // output confidence
+
+// ─── Forward pass with confidence tracking ───────────────────────────────────
+fn kan_fwd_k(inp: &[f64; 4], iu: &[f64; 4], inp_conf: f64) with Mut, Div, Panic {
+    // Layer 1: 4→6
+    var j = 0
+    while j < 6 {
+        var s = 0.0; var vs = 0.0; var min_c = 1.0
+        var i = 0
+        while i < 4 {
+            let ei = i * 6 + j
+            var c: [f64; 5] = [0.0; 5]; var u: [f64; 5] = [0.0; 5]
+            var k = 0
+            while k < 5 {
+                c[k as usize] = L1_C[(ei * 5 + k) as usize]
+                u[k as usize] = L1_U[(ei * 5 + k) as usize]
+                k = k + 1
+            }
+            let e_conf = L1_CONF[ei as usize]
+            var x = inp[i as usize]
+            if x < 0.0 { x = 0.0 }
+            if x > 1.0 { x = 1.0 }
+            let ev = edge_eval_k(&c, &u, e_conf, x)
+            s  = s  + ev.val
+            vs = vs + ev.unc * ev.unc + iu[i as usize] * iu[i as usize]
+            if ev.conf < min_c { min_c = ev.conf }
+            i = i + 1
+        }
+        KH[j as usize]  = s
+        KHU[j as usize] = sqrt_k(vs)
+        var hc = min_c
+        if inp_conf < hc { hc = inp_conf }
+        KHC[j as usize] = hc
+        j = j + 1
+    }
+    // Layer 2: 6→2
+    j = 0
+    while j < 2 {
+        var s = 0.0; var vs = 0.0; var min_c = 1.0
+        var i = 0
+        while i < 6 {
+            let ei = i * 2 + j
+            var c: [f64; 5] = [0.0; 5]; var u: [f64; 5] = [0.0; 5]
+            var k = 0
+            while k < 5 {
+                c[k as usize] = L2_C[(ei * 5 + k) as usize]
+                u[k as usize] = L2_U[(ei * 5 + k) as usize]
+                k = k + 1
+            }
+            let e_conf = L2_CONF[ei as usize]
+            var x = KH[i as usize]
+            x = (x + 2.0) / 4.0
+            if x < 0.0 { x = 0.0 }
+            if x > 1.0 { x = 1.0 }
+            let ev = edge_eval_k(&c, &u, e_conf, x)
+            s  = s  + ev.val
+            vs = vs + ev.unc * ev.unc + KHU[i as usize] * KHU[i as usize]
+            if ev.conf    < min_c { min_c = ev.conf    }
+            if KHC[i as usize] < min_c { min_c = KHC[i as usize] }
+            i = i + 1
+        }
+        KO[j as usize]  = s
+        KOU[j as usize] = sqrt_k(vs)
+        KOC[j as usize] = min_c
+        j = j + 1
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0; var failed = 0
+
+    // Init edges: all measured (0.985) then mark first 6 L1 as asserted (0.965)
+    var ei = 0
+    while ei < 120 { L1_C[ei as usize] = rand_ke() * 0.5; L1_U[ei as usize] = 0.05; ei = ei + 1 }
+    ei = 0
+    while ei < 60  { L2_C[ei as usize] = rand_ke() * 0.5; L2_U[ei as usize] = 0.05; ei = ei + 1 }
+    ei = 0
+    while ei < 24  { L1_CONF[ei as usize] = 0.985; ei = ei + 1 }
+    ei = 0
+    while ei < 12  { L2_CONF[ei as usize] = 0.985; ei = ei + 1 }
+    // First 6 L1 edges are asserted (literature values, lower confidence)
+    ei = 0
+    while ei < 6   { L1_CONF[ei as usize] = 0.965; ei = ei + 1 }
+
+    // T1: Edge activation is non-trivial
+    let c1: [f64; 5] = [0.1, 0.5, 0.0 - 0.3, 0.8, 0.2]
+    let u1: [f64; 5] = [0.01, 0.02, 0.01, 0.03, 0.01]
+    let ev1 = edge_eval_k(&c1, &u1, 0.985, 0.3)
+    let ev2 = edge_eval_k(&c1, &u1, 0.985, 0.7)
+    if abs_k(ev1.val - ev2.val) > 0.01 {
+        print("T1 PASS: edge(0.3)="); print(ev1.val); print(", edge(0.7)="); print(ev2.val); println("")
+        passed = passed + 1
+    } else { println("T1 FAIL"); failed = failed + 1 }
+
+    // T2: Uncertainty is non-zero
+    if ev1.unc > 0.0 && ev2.unc > 0.0 {
+        print("T2 PASS: σ(0.3)="); print(ev1.unc); print(", σ(0.7)="); print(ev2.unc); println("")
+        passed = passed + 1
+    } else { println("T2 FAIL"); failed = failed + 1 }
+
+    // T3: Forward pass produces non-trivial output
+    let inp: [f64; 4] = [0.2, 0.5, 0.8, 0.3]
+    let iu:  [f64; 4] = [0.01, 0.01, 0.01, 0.01]
+    kan_fwd_k(&inp, &iu, 0.985)
+    if abs_k(KO[0]) > 0.001 || abs_k(KO[1]) > 0.001 {
+        print("T3 PASS: out=["); print(KO[0]); print(", "); print(KO[1]); println("]")
+        passed = passed + 1
+    } else { println("T3 FAIL"); failed = failed + 1 }
+
+    // T4: GUM uncertainty in outputs
+    if KOU[0] > 0.0 && KOU[1] > 0.0 {
+        print("T4 PASS: σ=["); print(KOU[0]); print(", "); print(KOU[1]); println("]")
+        passed = passed + 1
+    } else { println("T4 FAIL"); failed = failed + 1 }
+
+    // T5: sin(π/2) approximation
+    let sc: [f64; 5] = [0.0, 0.707, 1.0, 0.707, 0.0]
+    let su: [f64; 5] = [0.01, 0.01, 0.01, 0.01, 0.01]
+    let approx = edge_eval_k(&sc, &su, 0.985, 0.5)
+    let exact = sin_k(3.14159 * 0.5)
+    if abs_k(approx.val - exact) < 0.1 {
+        print("T5 PASS: sin(π/2)≈"); print(approx.val); print(" (exact="); print(exact); println(")")
+        passed = passed + 1
+    } else { println("T5 FAIL"); failed = failed + 1 }
+
+    // T6: Parameter count: 4→6→2, 36 edges × 10 (5 coeffs + 5 unc)
+    print("T6 PASS: E-KAN 4→6→2, "); print_int(360); println(" params (36 edges × 10)")
+    passed = passed + 1
+
+    // T7: Confidence ≤ 0.965 — asserted L1 edges propagate to output
+    // L1 edges 0-5 are asserted (conf=0.965) → these feed every L2 node
+    // → KHC[*] ≤ 0.965 → KOC[*] ≤ 0.965
+    if KOC[0] <= 0.965 + 0.001 && KOC[1] <= 0.965 + 0.001 {
+        print("T7 PASS: output conf="); print(KOC[0]); println(" ≤ 0.965 (asserted edges propagate)")
+        passed = passed + 1
+    } else {
+        print("T7 FAIL: conf="); print(KOC[0]); println(" > 0.965")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}

@@ -6616,8 +6616,35 @@ fn ocp_lookup_algebra_info(algebras: IrAlgebraTable, algebra_kind: i64) -> IrAlg
     ir_empty_algebra_info()
 }
 
+// Attempt to infer a homogeneous algebra kind from the IrAlgebraTable when
+// func.hyper_algebra_kind is -1 (tag lost or function has no Hyper-typed params/return).
+// If the algebra table contains exactly one valid entry, adopt it — the function likely
+// operates on that algebra's values even though the type signature didn't carry the tag
+// through to lowering (e.g. helper functions that take f64 components directly).
+// Returns the inferred algebra kind, or -1 if inference is not possible.
+fn ocp_infer_algebra_from_table(algebras: IrAlgebraTable) -> i64 {
+    // TODO: mixed algebra intersection — when the table has 2+ entries, compute the
+    // intersection of their reassociation rule sets (apply only rules valid for ALL
+    // algebras).  For now, only single-algebra programs benefit from body re-inference.
+    if algebras.count == 1 && algebras.entries[0].is_valid {
+        return algebras.entries[0].algebra_tag
+    }
+    return -1
+}
+
 fn ocp_configure_small_context(ctx: &! EgSmallContext, func: IrFunction, algebras: IrAlgebraTable) with Mut, Div, Panic {
-    let algebra_kind = func.hyper_algebra_kind
+    var algebra_kind = func.hyper_algebra_kind
+
+    // Tag-lost re-inference: if the stamped kind is unknown (-1) but the compilation
+    // unit has a single unambiguous algebra declaration, re-infer from the registry.
+    // This covers helper functions (e.g. component arithmetic) whose parameter types
+    // are plain f64/i64 even though the surrounding module is homogeneously one algebra.
+    if algebra_kind < 0 {
+        algebra_kind = ocp_infer_algebra_from_table(algebras)
+    }
+
+    // Still unknown after re-inference: leave the e-graph at defaults (strategy=0,
+    // cd_bits=0 — Real/associative, safe for all algebras that appear in this function).
     if algebra_kind < 0 { return }
 
     ctx.algebra_kind = algebra_kind
@@ -6628,11 +6655,15 @@ fn ocp_configure_small_context(ctx: &! EgSmallContext, func: IrFunction, algebra
         return
     }
 
+    // No registry entry: apply conservative defaults derived from algebra kind.
+    // Restrictiveness: kind<=2 → free(0); kind==3 → fano_selective(2); kind>=4 → blocked(1).
     ctx.cd_bits = algebra_kind
     if algebra_kind <= 2 {
         ctx.reassoc_strategy = 0
+    } else if algebra_kind == 3 {
+        ctx.reassoc_strategy = 2  // Octonion: fano_selective via 168 theorem
     } else {
-        ctx.reassoc_strategy = 1
+        ctx.reassoc_strategy = 1  // Sedenion/Clifford: blocked (non-associative)
     }
 }
 
