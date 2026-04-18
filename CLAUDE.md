@@ -39,6 +39,7 @@ Operational rule:
 7. **No drift to mean** — Excellence only
 8. **Epistemic honesty** — Cite sources, acknowledge uncertainty
 9. **Edge of novelty** — Don't copy existing languages
+10. **Routing policy** — Before acting, consult `.claude/routing-policy.md` and delegate to the appropriate tier.
 
 ## Sounio Syntax (NOT Rust)
 

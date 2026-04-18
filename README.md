@@ -74,7 +74,7 @@ From the Sounio repo root:
   6. Do not propose destructive reset/clean/rebase flows to "simplify" recovery state
 - Prompt surface: [llms.txt](llms.txt)
 - Repository guide: [CLAUDE.md](CLAUDE.md)
-- Syntax and workflow guide: [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
+- Syntax and workflow guide: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md)
 - Live Hugging Face dataset: <https://huggingface.co/datasets/chiuratto-AIgourakis/sounio-code-examples>
 - Training dataset export: [datasets/sounio-code-examples/README.md](datasets/sounio-code-examples/README.md)
 - Dataset builder: [scripts/export_hf_dataset.py](scripts/export_hf_dataset.py)

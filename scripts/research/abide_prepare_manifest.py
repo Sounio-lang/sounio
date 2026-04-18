@@ -12,6 +12,15 @@ Output: abide_roi_manifest.tsv with schema:
 Usage:
   python3 scripts/research/abide_prepare_manifest.py [--output-dir /orangefs/data/abide]
   python3 scripts/research/abide_prepare_manifest.py --output-dir ./artifacts/research/abide --max-subjects 50
+  python3 scripts/research/abide_prepare_manifest.py \\
+      --output-dir ./artifacts/research/brain_ossm_local_pilot \\
+      --phenotypic-csv /tmp/abide_pilot/phenotypic.csv \\
+      --roi-dir /tmp/abide_pilot --skip-download --balanced-subjects 100
+  python3 scripts/research/abide_prepare_manifest.py \\
+      --output-dir ./artifacts/research/brain_ossm_local_site_balanced \\
+      --phenotypic-csv /tmp/abide_pilot/phenotypic.csv \\
+      --roi-dir /tmp/abide_pilot --skip-download \\
+      --sampling-mode site_balanced --balanced-subjects 100
 
 For cluster deployment:
   Copy output manifest to /orangefs/data/abide/abide_roi_manifest.tsv
@@ -53,6 +62,130 @@ def download_file(url, path):
         return False
 
 
+def resolve_phenotypic_path(args, cache_dir):
+    """Choose a phenotypic CSV source, downloading only when necessary."""
+    if args.phenotypic_csv:
+        if not os.path.exists(args.phenotypic_csv):
+            print(f"FATAL: phenotypic CSV not found: {args.phenotypic_csv}", file=sys.stderr)
+            sys.exit(1)
+        return args.phenotypic_csv
+
+    pheno_path = os.path.join(cache_dir, "phenotypic.csv")
+    if os.path.exists(pheno_path) and os.path.getsize(pheno_path) > 0:
+        return pheno_path
+
+    if args.skip_download:
+        print(f"FATAL: skip-download set and no cached phenotypic CSV at {pheno_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if not download_file(PHENO_URL, pheno_path):
+        print("FATAL: Cannot download phenotypic data", file=sys.stderr)
+        sys.exit(1)
+
+    return pheno_path
+
+
+def effective_per_class_limit(args):
+    """Return a per-class limit when a balanced cohort was requested."""
+    if args.balanced_subjects <= 0:
+        return args.max_per_class
+    if args.balanced_subjects % 2 != 0:
+        print("FATAL: --balanced-subjects must be even", file=sys.stderr)
+        sys.exit(1)
+    return args.balanced_subjects // 2
+
+
+def load_candidate_phenotypic(pheno_path, roi_dir, require_cached):
+    """Load phenotypic rows with ROI paths, optionally requiring local cache hits."""
+    import pandas as pd
+
+    pheno = pd.read_csv(pheno_path)
+    pheno = pheno[pheno["DX_GROUP"].isin([1, 2])].copy()
+    pheno["FILE_ID"] = pheno["FILE_ID"].astype(str)
+    pheno = pheno[~pheno["FILE_ID"].isin(["", "nan", "no_filename"])]
+    pheno["ROI_PATH"] = pheno["FILE_ID"].map(
+        lambda fid: os.path.join(roi_dir, f"{fid}_rois_cc200.1D")
+    )
+    pheno["HAS_ROI"] = pheno["ROI_PATH"].map(os.path.exists)
+    if require_cached:
+        pheno = pheno[pheno["HAS_ROI"]]
+    return pheno.copy()
+
+
+def select_rows_ordered(pheno_df, max_subjects, per_class_limit):
+    """Original export rule: cached ASD rows first, then cached TD rows."""
+    rows = []
+    for dx_group, label_str in ((1, "ASD"), (2, "TD")):
+        count = 0
+        subset = pheno_df[pheno_df["DX_GROUP"] == dx_group]
+        for _, row in subset.iterrows():
+            if max_subjects > 0 and len(rows) >= max_subjects:
+                break
+            if per_class_limit > 0 and count >= per_class_limit:
+                break
+            rows.append((str(row["SUB_ID"]), label_str, str(row["SITE_ID"]), str(row["FILE_ID"]), row["ROI_PATH"]))
+            count += 1
+    return rows
+
+
+def select_rows_site_balanced(pheno_df, target_subjects):
+    """
+    Diagnosis-balanced, near-uniform per-site export.
+
+    Allocate one ASD/TD pair per eligible site in round-robin order until the
+    requested target is reached. Within each site/diagnosis bucket, preserve the
+    original phenotypic row order.
+    """
+    if target_subjects <= 0 or target_subjects % 2 != 0:
+        raise ValueError("site_balanced sampling requires an even positive subject target")
+
+    per_site = {}
+    for site, site_df in pheno_df.groupby("SITE_ID", sort=True):
+        asd_rows = list(site_df[site_df["DX_GROUP"] == 1].iterrows())
+        td_rows = list(site_df[site_df["DX_GROUP"] == 2].iterrows())
+        pairs = min(len(asd_rows), len(td_rows))
+        if pairs <= 0:
+            continue
+        per_site[site] = {"asd": asd_rows, "td": td_rows, "pairs": pairs}
+
+    if not per_site:
+        raise RuntimeError("No eligible sites with both ASD and TD cached subjects")
+
+    target_pairs = target_subjects // 2
+    capacity_pairs = sum(bucket["pairs"] for bucket in per_site.values())
+    if capacity_pairs < target_pairs:
+        raise RuntimeError(
+            f"Insufficient site-balanced capacity: requested {target_pairs} pairs, have {capacity_pairs}"
+        )
+
+    ordered_sites = sorted(per_site.keys(), key=lambda site: (-per_site[site]["pairs"], site))
+    allocated = {site: 0 for site in ordered_sites}
+    allocated_pairs = 0
+    while allocated_pairs < target_pairs:
+        progressed = False
+        for site in ordered_sites:
+            if allocated[site] >= per_site[site]["pairs"]:
+                continue
+            allocated[site] += 1
+            allocated_pairs += 1
+            progressed = True
+            if allocated_pairs == target_pairs:
+                break
+        if not progressed:
+            raise RuntimeError("Site-balanced allocation stalled before reaching target")
+
+    rows = []
+    for site in ordered_sites:
+        n_pairs = allocated[site]
+        if n_pairs <= 0:
+            continue
+        for _, row in per_site[site]["asd"][:n_pairs]:
+            rows.append((str(row["SUB_ID"]), "ASD", str(row["SITE_ID"]), str(row["FILE_ID"]), row["ROI_PATH"]))
+        for _, row in per_site[site]["td"][:n_pairs]:
+            rows.append((str(row["SUB_ID"]), "TD", str(row["SITE_ID"]), str(row["FILE_ID"]), row["ROI_PATH"]))
+    return rows
+
+
 def extract_eigenvectors(ts_path):
     """Load time series → correlation → Laplacian → eigenvectors."""
     try:
@@ -63,7 +196,8 @@ def extract_eigenvectors(ts_path):
         n_timepoints = ts.shape[0]
 
         # Correlation matrix → threshold → Laplacian
-        corr = np.corrcoef(ts.T)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            corr = np.corrcoef(ts.T)
         corr = np.nan_to_num(corr, nan=0.0)
         np.fill_diagonal(corr, 0)
         adj = np.maximum(corr, 0)  # keep positive correlations
@@ -128,19 +262,29 @@ def main():
                         help="Output directory for manifest and cached files")
     parser.add_argument("--max-subjects", type=int, default=0,
                         help="Max subjects to process (0 = all)")
+    parser.add_argument("--max-per-class", type=int, default=0,
+                        help="Max subjects per diagnosis class (0 = all)")
+    parser.add_argument("--balanced-subjects", type=int, default=0,
+                        help="Balanced total subject count, split evenly across ASD/TD")
+    parser.add_argument("--phenotypic-csv", default="",
+                        help="Use an existing phenotypic CSV instead of downloading")
+    parser.add_argument("--roi-dir", default="",
+                        help="Directory containing cached *_rois_cc200.1D files")
+    parser.add_argument("--sampling-mode", choices=["ordered", "site_balanced"], default="ordered",
+                        help="ordered = original ASD-then-TD export, site_balanced = round-robin paired sites")
     parser.add_argument("--skip-download", action="store_true",
                         help="Only use already-cached .1D files")
     args = parser.parse_args()
 
     cache_dir = os.path.join(args.output_dir, "cache")
     os.makedirs(cache_dir, exist_ok=True)
+    roi_dir = args.roi_dir if args.roi_dir else cache_dir
+    per_class_limit = effective_per_class_limit(args)
 
     # 1. Download phenotypic data
-    pheno_path = os.path.join(cache_dir, "phenotypic.csv")
+    pheno_path = resolve_phenotypic_path(args, cache_dir)
     print("Step 1: Phenotypic data")
-    if not download_file(PHENO_URL, pheno_path):
-        print("FATAL: Cannot download phenotypic data", file=sys.stderr)
-        sys.exit(1)
+    print(f"  Using: {pheno_path}")
 
     import pandas as pd
     pheno = pd.read_csv(pheno_path)
@@ -150,42 +294,32 @@ def main():
 
     # 2. Process subjects
     print("\nStep 2: Processing subjects")
+    require_cached = args.skip_download or args.sampling_mode == "site_balanced"
+    cached_pheno = load_candidate_phenotypic(pheno_path, roi_dir, require_cached=require_cached)
+    if args.sampling_mode == "site_balanced":
+        target_subjects = args.balanced_subjects if args.balanced_subjects > 0 else args.max_subjects
+        selected = select_rows_site_balanced(cached_pheno, target_subjects)
+        print(f"  site_balanced selection: {len(selected)} subjects")
+    else:
+        selected = select_rows_ordered(cached_pheno, args.max_subjects, per_class_limit)
+        print(f"  ordered selection: {len(selected)} subjects")
+
     rows = []  # (subject_id, label_str, site, features_64)
-
-    def process_group(df, label_str):
-        count = 0
-        for _, row in df.iterrows():
-            if args.max_subjects > 0 and len(rows) >= args.max_subjects:
-                break
-            fid = str(row.get('FILE_ID', ''))
-            if not fid or fid == 'no_filename' or fid == 'nan':
+    for idx, (sid, label_str, site, fid, ts_path) in enumerate(selected, start=1):
+        if not os.path.exists(ts_path):
+            if args.skip_download:
                 continue
-            site = str(row.get('SITE_ID', 'unknown'))
-            sid = str(row.get('SUB_ID', fid))
-
-            ts_path = os.path.join(cache_dir, f"{fid}_rois_cc200.1D")
-
-            if not args.skip_download:
-                url = ROI_URL_TEMPLATE.format(file_id=fid)
-                if not download_file(url, ts_path):
-                    continue
-            elif not os.path.exists(ts_path):
+            url = ROI_URL_TEMPLATE.format(file_id=fid)
+            if not download_file(url, ts_path):
                 continue
-
-            result = extract_eigenvectors(ts_path)
-            if result is None:
-                continue
-            evecs, n_rois, n_tp = result
-            features = eigvecs_to_features(evecs, n_rois)
-
-            rows.append((sid, label_str, site, features))
-            count += 1
-            if count % 50 == 0:
-                print(f"  {label_str}: {count} processed")
-        print(f"  {label_str}: {count} total")
-
-    process_group(asd_df, "ASD")
-    process_group(td_df, "TD")
+        result = extract_eigenvectors(ts_path)
+        if result is None:
+            continue
+        evecs, n_rois, _ = result
+        features = eigvecs_to_features(evecs, n_rois)
+        rows.append((sid, label_str, site, features))
+        if idx % 50 == 0:
+            print(f"  processed {idx}/{len(selected)}")
 
     n_total = len(rows)
     n_asd = sum(1 for r in rows if r[1] == "ASD")
@@ -201,6 +335,12 @@ def main():
     print(f"\nStep 3: Writing manifest to {manifest_path}")
 
     with open(manifest_path, 'w') as f:
+        f.write("# schema=brain_ossm.abide.v2\n")
+        f.write("# seq_len=8\n")
+        f.write("# input_dim=8\n")
+        f.write("# feature_layout=flat\n")
+        f.write("# label_space=asd_vs_control\n")
+        f.write("# split_policy=leave_one_site_out\n")
         # Header
         cols = ["subject_id", "label", "site"] + [f"f{i}" for i in range(64)]
         f.write("\t".join(cols) + "\n")
@@ -215,8 +355,10 @@ def main():
     # 4. Verification
     print("\nStep 4: Verification")
     with open(manifest_path) as f:
-        header = f.readline().strip()
-        first_data = f.readline().strip()
+        lines = [line.strip() for line in f if line.strip()]
+    data_lines = [line for line in lines if not line.startswith("#")]
+    header = data_lines[0] if data_lines else ""
+    first_data = data_lines[1] if len(data_lines) > 1 else ""
     n_header_fields = len(header.split('\t'))
     n_data_fields = len(first_data.split('\t'))
     print(f"  Header fields: {n_header_fields} (expected 67)")

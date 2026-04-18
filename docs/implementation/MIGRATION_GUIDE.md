@@ -649,7 +649,7 @@ Then gradually work up to larger changes.
 
 **Learning Resources**:
 - `docs/guide/tutorial.md` - Language tutorial
-- `docs/LLM_PROGRAMMING_GUIDE.md` - Syntax reference
+- `docs/guide/LLM_PROGRAMMING_GUIDE.md` - Syntax reference
 - `self-hosted/test_*.sio` - Example code
 
 ### Q11: How do I report bugs?

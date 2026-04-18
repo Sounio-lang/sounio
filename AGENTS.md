@@ -25,6 +25,14 @@ Before implementation work:
 2. Confirm the current branch.
 3. Treat `/workspace/sounio` as the active development surface when operating in the promoted workspace.
 
+For non-trivial work, continue with this repo-local read order after `CLAUDE_HANDOFF.md`:
+
+1. `README.md`
+2. `AGENTS.md`
+3. `CLAUDE.md`
+4. `docs/guide/MINIMUM_VIABLE_SOUNIO.md`
+5. `docs/guide/LLM_PROGRAMMING_GUIDE.md`
+
 Important context:
 
 - This repository was recovered from VM `sounio-dev-01`.
@@ -146,6 +154,20 @@ Use:
 
 for suite execution.
 
+### Codex helper entrypoints
+Use the repo-local Codex wrappers under:
+- `scripts/codex/setup.sh`
+- `scripts/codex/action-bootstrap-smoke.sh`
+- `scripts/codex/action-build-ontology-validation-souc.sh`
+- `scripts/codex/action-ontology-harness-default.sh`
+- `scripts/codex/action-ontology-harness-diff.sh`
+- `scripts/codex/action-ontology-harness-rebuilt.sh`
+
+These wrappers should resolve the compiler through:
+- `scripts/lib/resolve_souc.sh`
+
+rather than hardcoding `./bin/souc` directly.
+
 ### Ontology validation
 When ontology work is the target, prefer the rebuilt/current-source validation path when available.
 
@@ -171,6 +193,19 @@ Report whether you are using:
   - ontology semantics
   - validation-wrapper routing
   - bootstrap/runtime repair
+
+---
+
+## Language and commit constraints
+
+- Do not add AI attribution such as `Co-Authored-By: Codex`.
+- Sounio is not Rust. Prefer repo-native syntax such as `var` and `&!`, and avoid Rust-specific macros, attributes, and closure literals.
+- For syntax and semantics, consult:
+  - `docs/guide/LLM_PROGRAMMING_GUIDE.md`
+  - `docs/compiler/KNOWN_LIMITATIONS.md`
+- For direct compiler invocations outside existing harnesses, prefer the `SOUC_BIN` resolved by `scripts/lib/resolve_souc.sh`.
+- Commit titles should follow the repo component prefix convention described in `CLAUDE.md`:
+  - `[component] Brief description`
 
 ---
 

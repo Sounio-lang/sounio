@@ -77,50 +77,34 @@
 % ============================================================================
 \begin{abstract}
 % ============================================================================
-When a compiler is written in the language it compiles, a bootstrapping paradox
-arises for type systems: you cannot use the type checker to verify the compiler
-that implements the type checker---not yet.
-The standard resolution is binary: types are either known or unknown,
-and the unknown is treated as a special \emph{dynamic} case until enough of
-the language is compiled.
-This paper argues that binary is the wrong abstraction.
+When a compiler is written in the language it compiles, the bootstrap stages
+must tolerate partial knowledge: some types are known precisely, some are only
+partially characterized, and some checks cannot yet be discharged.
+Existing gradual typing, refinement typing, provenance-aware languages, and
+uncertainty-aware systems each address parts of this problem, but they are
+usually presented separately.
 
-We introduce \emph{epistemic gradual compilation} (EGC), in which every
-type carries a \emph{confidence} value in $[0, 1000]$ following the
-ISO/IEC Guide to the Expression of Uncertainty in Measurement (GUM).
-Unknown types do not fail compilation---they produce confidence~$0$ and
-emit a 2-byte guard marker in the binary.
-As more of the type system is implemented, confidence rises monotonically;
-at confidence $\geq 950$, code is emitted directly with zero overhead.
+We introduce \emph{epistemic gradual compilation} (EGC), a compiler-oriented
+synthesis in which types and intermediate values carry explicit confidence,
+measurement uncertainty, and guarded admissibility.
+Rather than treating uncertainty as a library concern, EGC makes it visible
+to the compiler: low-confidence sites remain compilable under guards, while
+high-confidence sites lower directly to ordinary machine code.
 
-We implement EGC in \sounio, a self-hosted systems programming language,
-and apply it to \lean, the \sounio compiler itself---making the compiler
-its own first application of the epistemic type system.
-Across 14 self-hosted generations, confidence rises from 26\% to 100\%
-monotonically, with bit-identical fixed points at every generation.
-At Generation~11, all 8,883 call sites emit direct code and
-all 75,924 expression tokens carry full confidence
-(100\% expression certainty) with zero guard overhead.
-Generation~12 adds the \emph{Epistemic Inspector}: per-file confidence
-breakdowns, token-level JSON export (\texttt{--dump-conf-json}), and
-the first compile-time bridge between the confidence lattice and runtime
-\texttt{Knowledge\textless T\textgreater} measurement types.
-Generation~13 extends the bridge with a dual-channel system: a parallel
-\textsc{MEAS\_CONF} array assigns GUM measurement quality (990 for instrument
-data, 970 for literature assertions) independently of type-system certainty,
-propagating through arithmetic via the GUM min-rule.
-Generation~14 adds a four-tier confidence stratification---PLATINUM
-($c=1000$), GOLD ($c \in [950,999]$), SILVER, and BRONZE---exposing the
-fine structure of certainty within the 100\% threshold.
-Generation~15 closes the precision gap: a special case in type unification
-preserves the PLATINUM ceiling exactly ($\texttt{ety\_unify}(1000,1000)=1000$),
-lifting all tokens to PLATINUM on the self-compile; cross-module epistemic
-certificates (\texttt{.econf}) propagate verified function confidence across
-module boundaries; and three core properties---MEAS\_CONF soundness,
-PLATINUM preservation, and product monotonicity---are proved in Lean~4.
-The self-referential validation loop is closed: the epistemic system
-validates itself, and its own confidence serves as the measure of
-its completeness.
+We implement EGC in \sounio, a self-hosted systems language with epistemic
+values and confidence-aware checking, and evaluate it on the \lean compiler
+source as a demanding case study.
+Across self-hosted generations, confidence rises monotonically as inference
+and checking rules are added; by Generation~11 all 8,883 call sites emit
+direct code and all 75,924 tracked expression tokens exceed the direct-code
+threshold.
+Later generations add per-token confidence export, a separate
+\textsc{MEAS\_CONF} measurement-quality channel, and mechanized checks for key
+monotonicity and preservation properties.
+Our claim is not that prior work lacked uncertainty, provenance, or gradual
+adoption in isolation, but that bringing these ideas together at the
+language/compiler boundary yields a practical path from partial knowledge to
+self-hosted compilation.
 \end{abstract}
 
 \begin{CCSXML}
@@ -183,7 +167,8 @@ acts as an escape hatch: anything typed~$?$ is consistent with everything
 else, and casts are inserted at boundaries.
 Gradual type systems are sound---they catch inconsistencies at runtime---
 but binary: a type is either known or unknown.
-There is no mechanism to express that a type is \emph{mostly} known,
+For our target setting, there is no direct mechanism to express that a type is
+\emph{mostly} known,
 that confidence has been \emph{increasing}, or that 90\% of the compiler's
 expressions are already fully typed while 10\% remain uncertain.
 
@@ -215,7 +200,7 @@ Below the threshold, it emits a 2-byte NOP guard \texttt{66~90} that
 marks the site for later enforcement.
 
 This approach has a remarkable property we call the \emph{Patient Zero
-test}: the compiler itself is the first, and most demanding, client of
+test}: the compiler itself is an unusually demanding client of
 the epistemic type system.
 If the type system works, the compiler's own expressions should reach
 high confidence as more inference rules are added.
@@ -1074,7 +1059,7 @@ The JSON output is a foundation for editor tooling and the epistemic LSP
 described in §\ref{sec:selfref}.
 
 \paragraph{Knowledge\textless T\textgreater{} constructor bridge.}
-Generation~12 introduces the first connection between the compile-time
+Generation~12 introduces a direct connection between the compile-time
 confidence lattice and the runtime \texttt{Epistemic} type in \texttt{stdlib/epistemic/}.
 Functions named \texttt{measured} and \texttt{asserted} receive reduced
 \texttt{FN\_EFF\_CONF} values (990 and 970 respectively) instead of the
@@ -1553,30 +1538,27 @@ and uncertainty-aware type systems.
 \begin{table}[t]
 \centering
 \caption{%
-  EGC vs.\ related systems.
-  \emph{Gradual?}: supports the dynamic type~$?$.
-  \emph{GUM?}: propagates uncertainty following ISO~GUM rules.
-  \emph{Self-hosting?}: applied to the compiler's own source.
-  \emph{Overhead}: code size overhead at the direct/guarded threshold.
+  Related lines of work and the specific design space occupied by EGC.
 }
 \label{tab:comparison}
-\begin{tabular}{@{}lcccc@{}}
+\begin{tabular}{@{}lccc@{}}
 \toprule
-System & Gradual? & GUM? & Self-host? & Overhead \\
+Line of work & Gradual adoption? & Uncertainty / provenance in semantics? & Compiler self-application? \\
 \midrule
-\sounio EGC (this work) & Yes & Yes & Yes & 0.000\% \\
-Gradual Haskell~\cite{serrano2020gradual} & Yes & No & No & $\sim$5\% \\
-Rust (type inference) & No (binary) & No & Yes & 0\% \\
-TypeScript~\cite{bierman2014understanding} & Yes & No & Partial & $\sim$15\% \\
-Reticulated Python~\cite{vitousek2014design} & Yes & No & No & $\sim$8\%  \\
-uncertainties (Python)~\cite{lebigot2024uncertainties} & No & Yes & No & 10--40$\times$ \\
+\sounio EGC (this work) & Yes & Yes & Yes \\
+Gradual typing~\cite{siek2006gradual,siek2021parameterized,ye2024tdos} & Yes & No & No \\
+Liquid / refinement typing~\cite{rondon2008liquid} & Partial & No & No \\
+Language-integrated provenance~\cite{fehrenbach2018lip} & No & Provenance only & No \\
+Probabilistic / uncertain programming~\cite{bornholt2014uncertain,vandemeent2021pp} & Partial & Uncertainty only & No \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The key differentiators are the combination of GUM propagation with
-gradual semantics, and the application to a self-hosted compiler.
-No prior system demonstrates all three properties simultaneously.
+The distinguishing feature in our setting is the deliberate combination of
+gradual admissibility, measurement-aware confidence propagation, and
+self-application to a compiler implementation.
+We present this as a synthesis of nearby lines of work, not as a claim that
+uncertainty, provenance, or graduality were absent from prior systems.
 
 % ============================================================================
 \section{Related Work}
@@ -1588,19 +1570,45 @@ Siek and Taha~\cite{siek2006gradual} introduced gradual typing and the
 consistency relation.
 The refined criteria~\cite{siek2015refined} established the gradual
 guarantee as the essential soundness property.
+Recent work has strengthened the reusable meta-theory and direct operational
+semantics available for gradual languages~\cite{siek2021parameterized,ye2024tdos}.
 Castagna and Lanvin~\cite{castagna2017gradual} extended gradual typing
 to set-theoretic types.
-Our work extends gradual typing by replacing the binary $?$
-with a continuous confidence lattice and introducing GUM-compliant
-propagation rules.
+Our use of gradual ideas is narrower than a new general-purpose cast calculus:
+we reuse partial precision and guarded boundaries, then attach graded
+confidence and compiler-facing lowering decisions to those boundaries.
+
+\paragraph{Refinement and liquid types.}
+Refinement typing and liquid typing show how SMT-backed predicates can
+eliminate runtime checks and prove value-level invariants
+statically~\cite{rondon2008liquid}.
+This is directly relevant to Sounio's confidence thresholds and safety gates.
+However, refinement predicates are not the primary carrier of epistemic
+meaning in our design.
+Instead, they serve as a supporting proof mechanism for a language whose
+surface semantics already distinguishes knowledge, confidence, and
+admissibility.
 
 \paragraph{Probabilistic and uncertain types.}
 Bornholt et al.~\cite{bornholt2014uncertain} introduced \texttt{uncertain$\langle T \rangle$}
 for tracking sensing uncertainty through computation.
+Van de Meent et al.~\cite{vandemeent2021pp} survey probabilistic programming
+as a language design centered on distributions and inference.
 Mardziel et al.~\cite{mardziel2011knowledge} developed knowledge-oriented
 type systems for probabilistic programs.
-Neither combines GUM propagation with a gradual type system or applies
-the framework to self-hosting.
+These systems are close neighbors, but their primary semantic object is
+typically a distribution, a random variable, or a security/knowledge policy.
+Our emphasis is different: typed knowledge state, provenance, and guarded
+compilation in otherwise ordinary compiled programs.
+
+\paragraph{Provenance as a language feature.}
+Fehrenbach and Cheney~\cite{fehrenbach2018lip} show that provenance can be
+integrated into a language and type system rather than treated as an external
+database concern.
+That result is an important precedent for Sounio.
+The difference is scope: language-integrated provenance is query- and
+derivation-oriented, whereas Sounio uses provenance alongside confidence and
+observation to characterize ordinary compiled values and compile-time gates.
 
 \paragraph{Uncertainty in scientific computing.}
 Python's \texttt{uncertainties}~\cite{lebigot2024uncertainties} and
@@ -1608,26 +1616,24 @@ Julia's \texttt{Measurements.jl}~\cite{giordano2016measurements} provide
 operator-overloaded uncertainty arithmetic.
 These are libraries: they incur runtime overhead and provide no static
 guarantees.
-Our approach bakes uncertainty propagation into the type system,
-achieving static guarantees with near-zero overhead.
+Our approach moves uncertainty handling into the language/compiler contract,
+where it can interact with type checking, refinements, and code generation.
 
 \paragraph{Self-hosting compilers.}
 The fixed-point test traces to Thompson~\cite{thompson1984trusting}.
 Self-hosting has been demonstrated for GCC, Rust, Go, and many others.
-None of these apply an epistemic type system to the compiler's own source
-during the bootstrap process.
-The closest is Rust's borrow checker, which is used to check the
-compiler itself---but the borrow checker is binary (borrows are valid
-or not) and is not connected to any uncertainty quantification
-framework.
+We use self-hosting as a demanding stress case for epistemic compilation,
+not as a claim that self-hosting itself is novel.
+The closest analogy is that Rust applies its own safety disciplines to the
+compiler source, but without graded confidence or measurement-aware semantics.
 
 \paragraph{Measurement uncertainty in software.}
 ISO/IEC~17025~\cite{iso17025} and the GUM~\cite{jcgm2008gum} provide
 the metrology foundations.
 Wagner~\cite{wagner2022uncertainty} surveys uncertainty propagation
 in scientific software.
-Our work is the first to embed GUM compliance as a type system invariant
-rather than a library concern.
+Our contribution is to treat GUM-style propagation as part of the language and
+compiler contract rather than solely as a library convention.
 
 % ============================================================================
 \section{Conclusion}

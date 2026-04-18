@@ -13,22 +13,10 @@ asymmetry difference, resolving the marginal p=0.070 from the original.
 import csv
 import math
 import random
-import sys
 import json
 from pathlib import Path
 
-# Fano lines of the Cayley-Dickson octonion as implemented in stdlib/math/octonion.sio.
-# CYP index mapping: 1=CYP1A2, 2=CYP2C9, 3=CYP2C8, 4=CYP2B6, 5=CYP2C19, 6=CYP2D6, 7=CYP3A4.
-# Verified from the stdlib oct_mul table: assoc_norm(e_i, e_j, e_k)=0 iff {i,j,k} is a Fano line.
-FANO_TRIPLES = {
-    ("CYP1A2", "CYP2C9", "CYP2C8"),    # {1,2,3}
-    ("CYP1A2", "CYP2B6", "CYP2C19"),   # {1,4,5}
-    ("CYP1A2", "CYP2D6", "CYP3A4"),    # {1,6,7}
-    ("CYP2C9", "CYP2B6", "CYP2D6"),    # {2,4,6}
-    ("CYP2C9", "CYP2C19", "CYP3A4"),   # {2,5,7}
-    ("CYP2C8", "CYP2B6", "CYP3A4"),    # {3,4,7}
-    ("CYP2C8", "CYP2C19", "CYP2D6"),   # {3,5,6}
-}
+from ddi_campaign_lib import FANO_TRIPLES
 
 def load_data(path):
     rows = []

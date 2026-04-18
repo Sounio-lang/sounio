@@ -67,7 +67,7 @@ Backed by `stdlib/epistemic/SEMANTICS.md` invariants:
 - Every example in `examples/` is either:
   - Guaranteed to compile in CI, or
   - Marked clearly as “aspirational” and excluded from quick-start commands.
-- `docs/LLM_PROGRAMMING_GUIDE.md` stays aligned with the compiler; “known limitations” are kept current.
+- `docs/guide/LLM_PROGRAMMING_GUIDE.md` stays aligned with the compiler; “known limitations” are kept current.
 
 ## Fast Validation Loop
 
@@ -77,4 +77,3 @@ From `compiler/`:
 
 From repo root:
 - Keep `tests/run-pass` and `tests/compile-fail` runnable via the harness the project uses.
-
