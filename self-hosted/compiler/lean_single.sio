@@ -10557,6 +10557,68 @@ fn tuple_destructure_from_ptr_a64(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
     }
 }
 
+// Struct pattern destructuring: let Point { x, y } = expr  (x86-64)
+// pat_start = token index of '{'; si = struct table index; ptr_slot = saved struct pointer
+fn struct_destructure_x86(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, Panic, Div {
+    var pp = pat_start + 1
+    while TK[pp as usize] != 9 && TK[pp as usize] != 0 {
+        if TK[pp as usize] == 28 { pp = pp + 1; continue }
+        if TK[pp as usize] != 3 { pp = pp + 1; continue }
+        let pns = TS[pp as usize]
+        let pne = TE[pp as usize]
+        let fh = gl_name_hash(pns, pne)
+        pp = pp + 1
+        let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
+        if is_wild == 1 { continue }
+        let off = st_field_offset(si, fh)
+        if off < 0 { tc_error(pp - 1, "unknown struct field in pattern"); continue }
+        let fty = st_field_ty(si, fh)
+        let fhash = st_field_hash(si, fh)
+        let fslots = ty_slot_count(fty, fhash)
+        emit_load_var(ptr_slot)
+        if fty == 6 || fty == 8 || fty == 11 {
+            if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
+            EXPR_TY = fty; EXPR_TY_HASH = fhash; EXPR_IS_F64 = 0
+        } else {
+            if off == 0 { em(0x48); em(0x8b); em(0x00) }
+            else { em(0x48); em(0x8b); em(0x80); em32(off) }
+            EXPR_IS_F64 = if fty == 2 { 1 } else { 0 }
+            EXPR_TY = fty; EXPR_TY_HASH = fhash
+        }
+        tuple_bind_leaf_x86(pns, pne)
+    }
+}
+
+// Struct pattern destructuring: let Point { x, y } = expr  (ARM64)
+fn struct_destructure_a64(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, Panic, Div {
+    var pp = pat_start + 1
+    while TK[pp as usize] != 9 && TK[pp as usize] != 0 {
+        if TK[pp as usize] == 28 { pp = pp + 1; continue }
+        if TK[pp as usize] != 3 { pp = pp + 1; continue }
+        let pns = TS[pp as usize]
+        let pne = TE[pp as usize]
+        let fh = gl_name_hash(pns, pne)
+        pp = pp + 1
+        let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
+        if is_wild == 1 { continue }
+        let off = st_field_offset(si, fh)
+        if off < 0 { tc_error(pp - 1, "unknown struct field in pattern"); continue }
+        let fty = st_field_ty(si, fh)
+        let fhash = st_field_hash(si, fh)
+        emit_load_var_a64(ptr_slot)
+        if fty == 6 || fty == 8 || fty == 11 {
+            if off != 0 { em32(0x91000000 | (off << 10)) }
+            EXPR_TY = fty; EXPR_TY_HASH = fhash; EXPR_IS_F64 = 0
+        } else {
+            if off == 0 { em32(0xF9400000) }
+            else { em32(0xF9400000 | ((off / 8) << 10)) }
+            EXPR_IS_F64 = if fty == 2 { 1 } else { 0 }
+            EXPR_TY = fty; EXPR_TY_HASH = fhash
+        }
+        tuple_bind_leaf_a64(pns, pne)
+    }
+}
+
 fn tuple_bind_pattern_x86(pp0: i64, rp0: i64) with IO, Mut, Panic, Div {
     var pp = pp0
     var rp = rp0
@@ -10942,6 +11004,35 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             tuple_bind_pattern_x86(pat_start, EP)
             EP = TUP_RHS_NEXT
             return
+        }
+        // Phase 1.6: struct pattern — let TypeName { field1, field2 } = expr
+        if TK[EP as usize] == 3 && TK[(EP + 1) as usize] == 8 {
+            let sname_ns = TS[EP as usize]
+            let sname_ne = TE[EP as usize]
+            let sname_hash = gl_name_hash(sname_ns, sname_ne)
+            let si = st_find(sname_hash)
+            if si >= 0 {
+                let pat_start = EP + 1
+                var skip_p = EP + 1
+                var sdepth: i64 = 0
+                while skip_p < TC {
+                    if TK[skip_p as usize] == 8 { sdepth = sdepth + 1 }
+                    if TK[skip_p as usize] == 9 {
+                        sdepth = sdepth - 1
+                        skip_p = skip_p + 1
+                        if sdepth == 0 { break }
+                    }
+                    skip_p = skip_p + 1
+                }
+                EP = skip_p
+                if TK[EP as usize] == 16 { EP = EP + 1 }
+                compile_or()
+                let sptr_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(sptr_slot)
+                struct_destructure_x86(pat_start, si, sptr_slot)
+                return
+            }
         }
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
@@ -19524,6 +19615,35 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             tuple_bind_pattern_a64(pat_start, EP)
             EP = TUP_RHS_NEXT
             return
+        }
+        // Phase 1.6: struct pattern — let TypeName { field1, field2 } = expr (ARM64)
+        if TK[EP as usize] == 3 && TK[(EP + 1) as usize] == 8 {
+            let sname_ns = TS[EP as usize]
+            let sname_ne = TE[EP as usize]
+            let sname_hash = gl_name_hash(sname_ns, sname_ne)
+            let si = st_find(sname_hash)
+            if si >= 0 {
+                let pat_start = EP + 1
+                var skip_p = EP + 1
+                var sdepth: i64 = 0
+                while skip_p < TC {
+                    if TK[skip_p as usize] == 8 { sdepth = sdepth + 1 }
+                    if TK[skip_p as usize] == 9 {
+                        sdepth = sdepth - 1
+                        skip_p = skip_p + 1
+                        if sdepth == 0 { break }
+                    }
+                    skip_p = skip_p + 1
+                }
+                EP = skip_p
+                if TK[EP as usize] == 16 { EP = EP + 1 }
+                compile_or_a64()
+                let sptr_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(sptr_slot)
+                struct_destructure_a64(pat_start, si, sptr_slot)
+                return
+            }
         }
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
