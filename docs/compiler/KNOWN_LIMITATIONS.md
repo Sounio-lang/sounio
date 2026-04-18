@@ -2,7 +2,7 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-04-13
+last_validated: 2026-04-18
 validated_by: A4
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
@@ -70,9 +70,9 @@ The following bugs have been fixed in the self-hosted source but require a rebui
 
 **Unit type declarations** (fixed): The resolver now registers `unit` declarations as `SymUnit` (was incorrectly using `SymTypeAlias`).
 
-**String methods** (fixed): `.as_bytes()` and `.len()` are now supported on `string` types in the type checker.
+**String methods** (fixed): `.as_bytes()` returns the string as a byte array (works). `.len()` on `string` now emits a runtime null-terminated byte count (x86-64 and ARM64); previously the condition missed `EXPR_TY == 3` and leaked the string pointer as the length. Regression test: `tests/run-pass/string_len.sio`.
 
-**Turbofish syntax** (added): `func::<T, U>(args)` explicit generic type arguments are now parsed and propagated to call expressions.
+**Turbofish syntax** (added): `func::<T, U>(args)` explicit generic type arguments are now parsed and type-checked without error. Note: generic function *execution* has limited runtime support in the native backend — monomorphisation is not yet implemented; calling a generic function may produce incorrect values.
 
 **Trait definitions** (added): `trait Name { fn method(); ... }` syntax is now parsed and trait definitions are collected into the `TraitRegistry`. Builtin trait implementations (Copy, Drop, Eq, Ord, Hash, Add, Sub, Mul, Div, Display, Debug) are pre-registered for primitive types.
 
