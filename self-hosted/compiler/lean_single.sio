@@ -8885,9 +8885,23 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         emit_setup_closure_call_args_x86(argc)
                         emit_prepare_stack_call_args_x86(argc, 5)
                         emit_load_var(call_vslot)
-                        em(0x48); em(0x89); em(0xc7)
-                        em(0x48); em(0x8b); em(0x00)
-                        em(0xff); em(0xd0)
+                        // Tagged pointer dispatch: bit 0=0 → closure struct, bit 0=1 → fn ref thunk
+                        em(0x49); em(0x89); em(0xc3)          // mov r11, rax
+                        em(0xf6); em(0xc0); em(0x01)          // test al, 1
+                        em(0x75)                               // jnz rel8
+                        let hof_jnz_patch = CL
+                        em(0x00)
+                        em(0x4c); em(0x89); em(0xdf)          // struct path: mov rdi, r11
+                        em(0x49); em(0x8b); em(0x03)          // mov rax, [r11]
+                        em(0xff); em(0xd0)                    // call rax
+                        em(0xeb)                               // jmp rel8
+                        let hof_jmp_patch = CL
+                        em(0x00)
+                        CD[hof_jnz_patch as usize] = (CL - hof_jnz_patch - 1) as i8
+                        em(0x4c); em(0x89); em(0xd8)          // thunk path: mov rax, r11
+                        em(0x48); em(0x83); em(0xe0); em(0xfe) // and rax, -2
+                        em(0xff); em(0xd0)                    // call rax
+                        CD[hof_jmp_patch as usize] = (CL - hof_jmp_patch - 1) as i8
                         emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
                     } else {
                         emit_indirect_fn_call_x86(call_vslot, abi_argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
@@ -9129,12 +9143,30 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = GL_TY_HASH[gi as usize]
                 // array: rax = address (no dereference — used as pointer)
             } else {
-                // Named function reference: materialize a tiny direct-ABI wrapper.
+                // Named function reference: materialize a closure-ABI adapter thunk.
+                // Thunk: shifts args (rdi=env_ptr dropped, rsi→rdi, rdx→rsi, ...) then calls fn.
+                // Wrapped in a one-slot closure struct [thunk_ptr] for uniform HOF ABI.
                 let fri = fn_find(TS[(EP - 1) as usize], TE[(EP - 1) as usize])
                 if fri >= 0 {
-                    em(0xe9)
-                    em32(6)  // skip over `call rel32; ret`
-                    em(0xe8)
+                    let fn_arity = FN_ARITY[fri as usize]
+                    // thunk_size = 3 bytes/arg (shift) + 5 (call rel32) + 1 (ret)
+                    let thunk_size = fn_arity * 3 + 6
+                    // Align thunk to even byte so tagged-ptr bit-0 trick is safe
+                    if CL & 1 != 0 { em(0x90) }
+                    em(0xeb); em(thunk_size)  // jmp short past thunk
+                    let cl_thunk_start = CL    // always even after alignment
+                    // Emit arg shifts: reg[i] ← reg[i+1] to drop env_ptr slot
+                    // regs: rdi=0, rsi=1, rdx=2, rcx=3, r8=4, r9=5
+                    var shi: i64 = 0
+                    while shi < fn_arity {
+                        if shi == 0 { em(0x48); em(0x89); em(0xf7) }       // mov rdi, rsi
+                        else if shi == 1 { em(0x48); em(0x89); em(0xd6) }  // mov rsi, rdx
+                        else if shi == 2 { em(0x48); em(0x89); em(0xca) }  // mov rdx, rcx
+                        else if shi == 3 { em(0x49); em(0x89); em(0xc1) }  // mov rcx, r8
+                        else if shi == 4 { em(0x4d); em(0x89); em(0xc8) }  // mov r8, r9
+                        shi = shi + 1
+                    }
+                    em(0xe8)   // call rel32
                     if FN_OFF[fri as usize] >= 0 {
                         em32(FN_OFF[fri as usize] - (CL + 4))
                     } else {
@@ -9144,12 +9176,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         PATCH_COUNT = PATCH_COUNT + 1
                         em32(0)
                     }
-                    em(0xc3)
-                    em(0x48); em(0x8d); em(0x05)
-                    em32(-13)  // lea back to wrapper start
+                    em(0xc3)  // ret
+                    // Tagged thunk: lea rax, [rip+thunk_start]; or rax, 1 (bit 0 = fn ref tag)
+                    em(0x48); em(0x8d); em(0x05); em32(cl_thunk_start - (CL + 4))
+                    em(0x48); em(0x83); em(0xc8); em(0x01)  // or rax, 1
                     EXPR_TY = 9
                     EXPR_TY_HASH = FN_SIG[fri as usize]
-                    LAST_EXPR_IS_CLOSURE = 0
+                    LAST_EXPR_IS_CLOSURE = 1
                 } else {
                     if const_find_val(ns, ne) != 0 {
                         if CONST_FOUND_VAL == 0 { em(0x31); em(0xc0) }
@@ -11294,7 +11327,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     VAR_ALEN[vix as usize] = arr_hash_alen(VAR_TY_HASH[vix as usize])
                     VAR_ESIZ[vix as usize] = arr_hash_esiz(VAR_TY_HASH[vix as usize])
                 }
-                // Set closure flag if RHS was a closure expression
+                // fn-type values always need closure-ABI dispatch (tagged thunk or struct)
+                if EXPR_TY == 9 { LAST_EXPR_IS_CLOSURE = 1 }
                 VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
                 // Set linear/affine flag if RHS was a linear/affine struct literal
@@ -11412,6 +11446,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 emit_store_var(slot)
             }
             // Update closure flag on reassignment
+            if EXPR_TY == 9 { LAST_EXPR_IS_CLOSURE = 1 }
             var vi: i64 = VAR_COUNT - 1
             while vi >= 0 {
                 if name_eq(VAR_NS[vi as usize], VAR_NE[vi as usize], ns, ne) {
@@ -15789,6 +15824,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                         VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                        // fn-type parameters are always called with closure ABI (env_ptr in rdi)
+                        if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
                         if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                             let len_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]
                             let ptr_slot = NEXT_SLOT
