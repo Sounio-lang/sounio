@@ -74,7 +74,13 @@ The following bugs have been fixed in the self-hosted source but require a rebui
 
 **Turbofish + generic monomorphization** (working): Single and dual type-parameter generic functions are monomorphised and execute correctly. `func::<T>(args)` and `func::<T, U>(args)` are fully supported — the `<TPARAMS>` section is stripped from the specialised token copy, both type parameters are substituted, and the specialised function is compiled as an ordinary function. Limitation: 3+ type parameters are not yet tracked (infrastructure covers 2 params; extend `GEN_FN_TP2_S/E` and `MONO_TY2_S/E` to add a third).
 
+**Range slice half-open syntax** (fixed): `&arr[..n]` (start omitted, defaults to 0) now correctly compiles. Previously `compile_primary()` consumed the `..` token as an unrecognised primary, causing both the range-check and base-check to fail. Fix: detect `..`/`..=` at the start of the slice index and emit start=0 directly.
+
+**String `.as_bytes()`** (fixed): `.as_bytes()` on a `string` is now a recognised builtin — it passes through as a no-op (string pointer unchanged, type stays `string`), making `&bytes[..n]` range slices work on the result. Previously the method fell through to field-access dispatch, producing type 0 and causing the slice borrow to segfault.
+
 **Trait definitions** (added): `trait Name { fn method(); ... }` syntax is now parsed and trait definitions are collected into the `TraitRegistry`. Builtin trait implementations (Copy, Drop, Eq, Ord, Hash, Add, Sub, Mul, Div, Display, Debug) are pre-registered for primitive types.
+
+**`&string[..n]` slice borrow** (fixed): String variables are now accepted as slice borrow bases in `&bytes[..n]`. Element size is 1 byte, runtime length is computed via `strlen`. Result type is `&[i8]`. Previously produced "slice borrow requires array or slice base" warning and a null-pointer segfault.
 
 **Borrow release at call boundaries** (fixed): Borrows taken for function call arguments are now unconditionally released after the call returns, fixing false positive errors on consecutive calls borrowing the same variable.
 
