@@ -1,0 +1,296 @@
+//@ run-pass
+//@ expect-stdout: DARWIN POP CONFIDENCE BUDGET PASSED
+// Darwin 2-Compartment PBPK — Population Confidence Budget (Gen 16)
+//
+// N=100 virtual patients sampled from LogNormal k_elim distribution.
+// Demonstrates MEAS_CONF epistemic budget across a patient population.
+//
+// Population model:
+//   k_elim ~ LogNormal(mu=0.20/hr, sigma_ln=0.30)  [CV approx 30%]
+//   Fixed:  dose=100 mg IV bolus, V1=10 L, V2=20 L, k12=0.5/hr, k21=0.3/hr
+//
+// Epistemic sources (Gen 13 MEAS_CONF dual-channel):
+//   dose, V1, V2  : measured()  -> MEAS_CONF=990  (instrument, GUM Type A)
+//   k12, k21      : asserted()  -> MEAS_CONF=970  (literature, GUM Type B)
+//   k_elim sample : constant()  -> within-patient draw, treated as known
+//
+// Gen 16 population confidence budget:
+//   pop_confidence_pct = 100 x P(|RK4 - analytical| < 0.001 mg/L)
+//   Expected: 100% (RK4 is highly accurate for all k_elim in [0.05, 0.60])
+//
+// RNG: LCG (Numerical Recipes, a=1664525, c=1013904223, m=2^32)
+// Normal: 12-uniform sum approximation (CLT, bounded [-6,6])
+// Percentiles: P5/P50/P95 via selection sort on N=100 results
+
+// --------------------------------------------------------------------------
+// Global result arrays (population statistics)
+// --------------------------------------------------------------------------
+var g_c1_rk4: [f64; 100] = [0.0; 100]
+var g_ke_arr: [f64; 100] = [0.0; 100]
+var g_err_arr: [f64; 100] = [0.0; 100]
+var g_lcg: i64 = 42
+
+// --------------------------------------------------------------------------
+// Epistemic parameter wrapper (MEAS_CONF bridge, Gen 13)
+// --------------------------------------------------------------------------
+struct Epistemic {
+    value: f64,
+    variance: f64,
+    label: i64,
+}
+
+fn measured(value: f64, variance: f64) -> Epistemic {
+    Epistemic { value: value, variance: variance, label: 0 }
+}
+fn asserted(value: f64, variance: f64) -> Epistemic {
+    Epistemic { value: value, variance: variance, label: 1 }
+}
+fn constant(value: f64) -> Epistemic {
+    Epistemic { value: value, variance: 0.0, label: 2 }
+}
+
+// --------------------------------------------------------------------------
+// Math helpers
+// --------------------------------------------------------------------------
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var sq: f64 = x / 2.0 + 0.5
+    var i: i64 = 0
+    while i < 30 { sq = 0.5 * (sq + x / sq); i = i + 1 }
+    return sq
+}
+
+fn exp_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 10.0 { let h = exp_approx(x / 2.0); return h * h }
+    if x < 0.0 - 10.0 { return 1.0 / exp_approx(0.0 - x) }
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var n: i64 = 1
+    while n <= 30 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+// GUM relative standard uncertainty
+fn gum_rsu(e: Epistemic) -> f64 with Panic, Div {
+    if e.value == 0.0 { return 0.0 }
+    return sqrt_approx(e.variance) / abs_f64(e.value)
+}
+
+fn gum_product_rsu(x: Epistemic, y: Epistemic) -> f64 with Panic, Div {
+    let rx = gum_rsu(x)
+    let ry = gum_rsu(y)
+    return sqrt_approx(rx * rx + ry * ry)
+}
+
+// --------------------------------------------------------------------------
+// LCG random number generator (global state)
+// --------------------------------------------------------------------------
+fn lcg_step() -> i64 with Mut {
+    g_lcg = (1664525 * g_lcg + 1013904223) % 4294967296
+    return g_lcg
+}
+
+fn lcg_uniform() -> f64 with Mut, Div {
+    let s = lcg_step()
+    return (s as f64) / 4294967296.0
+}
+
+// Approximate N(0,1) via sum-of-12 uniforms (CLT approximation)
+// Mean=0, Var=1, bounded [-6,6]. Adequate for log-normal parameter sampling.
+fn normal_z() -> f64 with Mut, Div {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + lcg_uniform()
+        i = i + 1
+    }
+    return sum - 6.0
+}
+
+// --------------------------------------------------------------------------
+// Analytical 2-compartment solution: C1(t) = A*exp(-alpha*t) + B*exp(-beta*t)
+// --------------------------------------------------------------------------
+fn c1_analytical(
+    t: f64, dose: f64, v1: f64,
+    k12: f64, k21: f64, k_elim: f64
+) -> f64 with Mut, Panic, Div {
+    let sum_k = k12 + k21 + k_elim
+    let disc   = sum_k * sum_k - 4.0 * k21 * k_elim
+    let sq     = sqrt_approx(disc)
+    let alpha  = (sum_k + sq) / 2.0
+    let beta_  = (sum_k - sq) / 2.0
+    let denom  = (alpha - beta_) * v1
+    let a_coef = (alpha - k21) * dose / denom
+    let b_coef = (k21 - beta_) * dose / denom
+    return a_coef * exp_approx(0.0 - alpha * t)
+         + b_coef * exp_approx(0.0 - beta_ * t)
+}
+
+// --------------------------------------------------------------------------
+// RK4 integration: 2-compartment ODE, returns C1(24h)
+// dX1/dt = -(k12+k_elim)*X1 + k21*X2
+// dX2/dt =  k12*X1 - k21*X2
+// --------------------------------------------------------------------------
+fn rk4_c1_24h(
+    dose: f64, v1: f64, v2: f64,
+    k12: f64, k21: f64, k_elim: f64
+) -> f64 with Mut, Panic, Div {
+    var x1: f64 = dose
+    var x2: f64 = 0.0
+    let dt: f64 = 0.001
+    var step: i64 = 0
+    while step < 24000 {
+        let k1x1 = 0.0 - (k12 + k_elim) * x1 + k21 * x2
+        let k1x2 = k12 * x1 - k21 * x2
+        let mx1  = x1 + 0.5 * dt * k1x1
+        let mx2  = x2 + 0.5 * dt * k1x2
+        let k2x1 = 0.0 - (k12 + k_elim) * mx1 + k21 * mx2
+        let k2x2 = k12 * mx1 - k21 * mx2
+        let m2x1 = x1 + 0.5 * dt * k2x1
+        let m2x2 = x2 + 0.5 * dt * k2x2
+        let k3x1 = 0.0 - (k12 + k_elim) * m2x1 + k21 * m2x2
+        let k3x2 = k12 * m2x1 - k21 * m2x2
+        let ex1  = x1 + dt * k3x1
+        let ex2  = x2 + dt * k3x2
+        let k4x1 = 0.0 - (k12 + k_elim) * ex1 + k21 * ex2
+        let k4x2 = k12 * ex1 - k21 * ex2
+        x1 = x1 + (dt / 6.0) * (k1x1 + 2.0 * k2x1 + 2.0 * k3x1 + k4x1)
+        x2 = x2 + (dt / 6.0) * (k1x2 + 2.0 * k2x2 + 2.0 * k3x2 + k4x2)
+        step = step + 1
+    }
+    return x1 / v1
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Darwin Population Confidence Budget (Gen 16, N=100) ===")
+    println("2-compartment IV bolus, k_elim ~ LogNormal(mu=0.20, sigma_ln=0.30)")
+    println("")
+
+    // -----------------------------------------------------------------------
+    // Fixed epistemic parameters (same as darwin_epistemic_pbpk.sio)
+    // -----------------------------------------------------------------------
+    let dose_ep = measured(100.0, 4.0)     // 100 mg IV bolus, MEAS_CONF=990
+    let v1_ep   = measured(10.0, 0.09)     // 10 L central volume
+    let v2_ep   = measured(20.0, 0.64)     // 20 L peripheral volume
+    let k12_ep  = asserted(0.5, 0.0025)    // 0.5/hr, MEAS_CONF=970
+    let k21_ep  = asserted(0.3, 0.0009)    // 0.3/hr, MEAS_CONF=970
+
+    let dose = dose_ep.value
+    let v1   = v1_ep.value
+    let v2   = v2_ep.value
+    let k12  = k12_ep.value
+    let k21  = k21_ep.value
+
+    // GUM RSU for initial concentration (same for all patients)
+    let c0_rsu = gum_product_rsu(dose_ep, v1_ep)
+
+    // -----------------------------------------------------------------------
+    // Population loop: N=100 virtual patients
+    // k_elim_i = 0.20 * exp(0.30 * z_i),  z_i ~ N(0,1) via 12-sum CLT
+    // -----------------------------------------------------------------------
+    var n_pass: i64 = 0
+    var pat: i64 = 0
+    while pat < 100 {
+        let z   = normal_z()
+        let ke  = 0.20 * exp_approx(0.30 * z)
+        // Clamp to physiologically plausible range [0.03, 0.80] /hr
+        var ke_c: f64 = ke
+        if ke_c < 0.03 { ke_c = 0.03 }
+        if ke_c > 0.80 { ke_c = 0.80 }
+
+        let c1_n = rk4_c1_24h(dose, v1, v2, k12, k21, ke_c)
+        let c1_a = c1_analytical(24.0, dose, v1, k12, k21, ke_c)
+        let err  = abs_f64(c1_n - c1_a)
+
+        g_c1_rk4[pat as usize] = c1_n
+        g_ke_arr[pat as usize]  = ke_c
+        g_err_arr[pat as usize] = err
+
+        if err < 0.001 { n_pass = n_pass + 1 }
+        pat = pat + 1
+    }
+
+    // -----------------------------------------------------------------------
+    // Selection sort g_c1_rk4[0..99] for percentiles
+    // -----------------------------------------------------------------------
+    var si: i64 = 0
+    while si < 100 {
+        var min_idx: i64 = si
+        var sj: i64 = si + 1
+        while sj < 100 {
+            if g_c1_rk4[sj as usize] < g_c1_rk4[min_idx as usize] { min_idx = sj }
+            sj = sj + 1
+        }
+        if min_idx != si {
+            let tmp = g_c1_rk4[si as usize]
+            g_c1_rk4[si as usize] = g_c1_rk4[min_idx as usize]
+            g_c1_rk4[min_idx as usize] = tmp
+        }
+        si = si + 1
+    }
+    let p5  = g_c1_rk4[4]
+    let p50 = g_c1_rk4[49]
+    let p95 = g_c1_rk4[94]
+
+    // -----------------------------------------------------------------------
+    // Population results
+    // -----------------------------------------------------------------------
+    println("Patient population (N=100):")
+    print("  n_pass: ")
+    print_int(n_pass)
+    print("/100 (|RK4 - analytical| < 0.001 mg/L)\n")
+    println("  C1 distribution at t=24h (mg/L):")
+    print("    P5=")
+    print(p5)
+    print("  P50=")
+    print(p50)
+    print("  P95=")
+    print(p95)
+    println("")
+    print("  C0 RSU (instrument measurement): ")
+    print(c0_rsu)
+    println(" (all patients)")
+    println("")
+
+    // -----------------------------------------------------------------------
+    // Epistemic provenance summary
+    // -----------------------------------------------------------------------
+    println("Epistemic provenance (Gen 13 MEAS_CONF):")
+    println("  dose/V1/V2 : MEAS_CONF=990 (instrument, GUM Type A)")
+    println("  k12/k21    : MEAS_CONF=970 (literature, GUM Type B)")
+    println("  k_elim     : constant() per patient (LogNormal draw)")
+    println("")
+
+    // -----------------------------------------------------------------------
+    // Population confidence budget
+    // -----------------------------------------------------------------------
+    let pop_pct = (n_pass * 100) / 100
+    print("Population confidence budget: ")
+    print_int(n_pass)
+    print("/100 (")
+    print_int(pop_pct)
+    print("%) within RK4 tolerance\n")
+    println("")
+
+    // Validation
+    if n_pass < 95 {
+        println("DARWIN POP CONFIDENCE BUDGET FAILED: too many RK4 failures")
+        return 1
+    }
+    let c0_ok = abs_f64(c0_rsu - 0.036) < 0.01
+    if !c0_ok {
+        println("DARWIN POP CONFIDENCE BUDGET FAILED: C0 RSU out of range")
+        return 1
+    }
+    println("DARWIN POP CONFIDENCE BUDGET PASSED")
+    return 0
+}

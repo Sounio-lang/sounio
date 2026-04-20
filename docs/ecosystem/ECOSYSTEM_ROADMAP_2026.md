@@ -1,0 +1,147 @@
+# Roadmap do Ecossistema Sounio (2026-2027)
+**Foco:** Package Manager, Registry Público e Python Interoperability
+
+**Data:** 20 de Abril de 2026
+**Versão:** 1.0
+
+## Visão Estratégica
+
+Transformar o Sounio de uma linguagem acadêmica promissora em **a ferramenta padrão para computação científica confiável e regulatória**, especialmente em farmacologia, neurociência e ciências regulatórias.
+
+**Métrica de sucesso em 12 meses:**
+- 25 pacotes no registry público
+- `pip install sounio` com > 500 downloads/mês
+- Pelo menos 3 publicações científicas usando Sounio + Python
+- `epistemic-score` médio dos pacotes > 0.75
+
+---
+
+## Roadmap por Trimestre
+
+### **T1 2026 (Abr-Jun): Fundação (3 meses)**
+
+**Prioridade Alta**
+
+1. **sounio.toml Specification** — *Concluído*
+   - Especificação formal + parser inicial
+
+2. **CLI `souc pkg` (MVP)**
+   - `souc pkg init`
+   - `souc pkg build`
+   - `souc pkg validate`
+   - Estimativa: 4 semanas
+
+3. **sounio-py v0.1 (Core Bindings)**
+   - Classe `Knowledge`
+   - Operações aritméticas com propagação GUM
+   - Integração básica com numpy
+   - Estimativa: 5 semanas
+
+4. **Registry Local Avançado**
+   - Cache, lockfiles, resolução de dependências
+   - Estimativa: 3 semanas
+
+**Milestone T1:** `souc install epistemic-core` funciona localmente + binding Python básico.
+
+---
+
+### **T2 2026 (Jul-Set): Registry Público + Python Maturidade**
+
+**Prioridade Crítica**
+
+1. **Registry Público (registry.sounio.org)**
+   - Backend (Rust ou Sounio self-hosted)
+   - API de publish/search
+   - Web UI simples
+   - Epistemic scoring automático
+   - Estimativa: 6-7 semanas
+
+2. **sounio-py v0.2**
+   - JIT compilation (`sounio.compile()`)
+   - PBPK wrapper completo
+   - Integração com pandas/xarray
+   - Estimativa: 6 semanas
+
+3. **Pacotes Curados Iniciais (5 pacotes)**
+   - `epistemic-core`
+   - `epistemic-stats`
+   - `darwin-pbpk`
+   - `snn-fractal`
+   - `regulatory-tools`
+   - Estimativa: 4 semanas
+
+**Milestone T2:** Primeiro paper usando Sounio via Python publicado.
+
+---
+
+### **T3 2026 (Out-Dez): Ecossistema e Qualidade**
+
+1. **Ferramentas de Qualidade**
+   - `souc pkg audit --epistemic`
+   - Coverage de testes epistêmicos
+   - Verificação automática de provenance
+
+2. **sounio-py v0.3**
+   - Epistemic Neural Networks
+   - Suporte a JAX (custom vjp)
+   - Ferramentas de visualização de uncertainty
+
+3. **Documentação e Comunidade**
+   - Site docs.sounio.org com exemplos interativos
+   - Template de projeto (`souc new epistemic-model`)
+   - Discord/Forum ativo
+
+**Milestone T3:** 15 pacotes no registry, `sounio` trending em repositórios científicos.
+
+---
+
+### **T4 2026 / T1 2027: Consolidação Regulatória**
+
+- Ferramentas específicas para submissão regulatória (FDA, EMA, ANVISA)
+- Integração com PyMC, Stan e NONMEM
+- Certificação de qualidade para uso em ensaios clínicos
+- Suporte a computação em nuvem epistêmica
+
+---
+
+## Estimativa de Esforço (Homem-mês)
+
+| Área                        | Esforço | Prioridade | Dependências              |
+|----------------------------|--------|----------|--------------------------|
+| sounio.toml + CLI pkg      | 2.0    | Alta     | -                        |
+| Registry Público           | 3.5    | Crítica  | CLI pkg                  |
+| sounio-py Core             | 3.0    | Crítica  | Knowledge runtime        |
+| Pacotes Curados (5)        | 4.0    | Alta     | Registry + Python bindings |
+| Documentação + Exemplos    | 2.5    | Média    | Pacotes curados          |
+| Ferramentas de Qualidade   | 2.0    | Alta     | Registry                 |
+| **Total**                  | **17.0** | -      | -                        |
+
+**Equipe mínima recomendada:** 3-4 pessoas (1 compiler, 1 Python bindings, 1 scientific content, 1 DevRel)
+
+---
+
+## Riscos e Mitigações
+
+**Risco Alto:** Complexidade do binding Python com `Knowledge<T>`
+**Mitigação:** Começar com FFI limpo + pyo3 antes de JIT avançado.
+
+**Risco Alto:** Baixa adoção inicial
+**Mitigação:** Focar em nichos de alto valor (PBPK regulatório, epistemic ML em saúde) com cases de sucesso reais.
+
+**Risco Médio:** Manutenção do registry
+**Mitigação:** Começar com modelo simples (S3 + SQLite) antes de escalar.
+
+---
+
+**Próximos Passos Imediatos (Próximas 2 Semanas):**
+
+1. Implementar parser de `sounio.toml` no compilador
+2. Criar `sounio-py` com binding mínimo de `Knowledge`
+3. Publicar os 3 documentos criados (SOUNIO_TOML_SPEC, sounio-py README, este roadmap)
+4. Definir lista final de pacotes curados
+
+---
+
+**Este documento completa o item A4 do plano.**
+
+**Status atual do plano geral:** 4/6 todos concluídos.

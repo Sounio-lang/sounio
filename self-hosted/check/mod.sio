@@ -136,13 +136,51 @@ fn checker_to_ir_ontologies(checker: &Checker) -> IrOntologyTable with Mut, Pani
     out
 }
 
+// Mixed-Hyper optimizer metadata fix (Sprint ∞):
+//
+// When a function mixes Hyper algebras, instead of bailing entirely we compute
+// the intersection of their reassociation rule sets — that is, we pick the most
+// restrictive algebra kind present (the one whose reassoc_strategy is least
+// permissive).  ocp_configure_small_context in opt_cleanup.sio then applies
+// that conservative strategy to the small e-graph.
+//
+// Restrictiveness order:
+//   free(0) < fano_selective(2) < blocked(1)
+//   kind <= 2  → strategy 0 (free — always associative)
+//   kind == 3  → strategy 2 (fano_selective — Octonion, alternative)
+//   kind >= 4  → strategy 1 (blocked — Sedenion/Clifford, non-associative)
+//
+// When we mix e.g. Octonion(3) + Sedenion(4), the intersection is "blocked" →
+// we stamp kind 4 (Sedenion) so the optimizer sees strategy 1 (blocked).
+// When we mix Quaternion(2) + Octonion(3), we stamp kind 3 → fano_selective.
+
+// Return the reassoc_strategy for a given algebra kind.
+// Mirrors ocp_configure_small_context fallback logic in opt_cleanup.sio.
+fn checker_reassoc_strategy_for_kind(kind: i64) -> i64 {
+    if kind <= 2 { return 0 }  // Real/Complex/Quaternion: always associative
+    if kind == 3 { return 2 }  // Octonion: fano_selective
+    return 1                   // Sedenion, Clifford, unknown-large: blocked
+}
+
+// Given two algebra kinds, return the one whose reassoc_strategy is more
+// restrictive (free=0 < fano_selective=2 < blocked=1).
+fn checker_more_restrictive_alg_kind(a: i64, b: i64) -> i64 {
+    let sa = checker_reassoc_strategy_for_kind(a)
+    let sb = checker_reassoc_strategy_for_kind(b)
+    // Restrictiveness: blocked(1) > fano_selective(2) > free(0).
+    // We encode: blocked=10, fano_selective=2, free=0 for comparison.
+    let ra = if sa == 1 { 10 } else { sa }
+    let rb = if sb == 1 { 10 } else { sb }
+    if rb > ra { return b }
+    return a
+}
+
 fn checker_collect_hyper_alg_from_type_list(
     elems: Option<Box<TypeEntryList>>,
     found_alg: &! i64,
     found_any: &! i64,
     ambiguous: &! i64
 ) with Mut, Panic, Div, Alloc {
-    if *ambiguous != 0 { return }
     match elems {
         None => {}
         Some(list) => {
@@ -158,13 +196,15 @@ fn checker_collect_hyper_alg_from_type(
     found_any: &! i64,
     ambiguous: &! i64
 ) with Mut, Panic, Div, Alloc {
-    if *ambiguous != 0 { return }
     if ty.kind == TypeKind::TyHyper {
         if *found_any == 0 {
             *found_any = 1
             *found_alg = ty.algebra_kind
         } else if *found_alg != ty.algebra_kind {
+            // Mixed-Hyper: record as ambiguous but keep the more restrictive kind
+            // so that callers can apply intersection strategy instead of bailing.
             *ambiguous = 1
+            *found_alg = checker_more_restrictive_alg_kind(*found_alg, ty.algebra_kind)
         }
     }
     match ty.inner {
@@ -188,15 +228,18 @@ fn checker_infer_fn_hyper_algebra(checker: &Checker, fn_name: Name) -> i64 with 
     }
 
     var i: i64 = 0
-    while i < sig.param_count && ambiguous == 0 {
+    while i < sig.param_count {
         let param = fn_param_list_get(sig.params, i)
         checker_collect_hyper_alg_from_type(param.ty, &! found_alg, &! found_any, &! ambiguous)
         i = i + 1
     }
 
-    if ambiguous != 0 { return -1 }
+    // Mixed-Hyper: if ambiguous (2+ distinct algebra kinds in signature), return the
+    // most-restrictive kind computed by checker_collect_hyper_alg_from_type rather
+    // than bailing with -1.  The optimizer (ocp_configure_small_context) then applies
+    // the conservative intersection strategy for that kind.
     if found_any == 0 { return -1 }
-    found_alg
+    found_alg  // single kind OR most-restrictive kind when ambiguous
 }
 
 fn checker_apply_ir_metadata(checker: &Checker, module: &! IrModule) with Mut, Panic, Div, Alloc {

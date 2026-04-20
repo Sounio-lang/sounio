@@ -112,8 +112,7 @@ if [[ "${REMOTE_STAGE_READY}" != "YES" ]]; then
     mkdir -p '${STAGE_ROOT}/repo'
     tar -xzf '${STAGE_ROOT}/payload.tgz' -C '${STAGE_ROOT}/repo'
     rm -f '${STAGE_ROOT}/payload.tgz'
-    chmod +x '${STAGE_ROOT}/repo/bin/souc' '${STAGE_ROOT}/repo/artifacts/self-hosted/souc-self-hosted-x86_64'
-    '${STAGE_ROOT}/repo/bin/souc' info >/dev/null
+    chmod +x '${STAGE_ROOT}/repo/bin/souc' '${STAGE_ROOT}/repo/bin/souc-native' '${STAGE_ROOT}/repo/artifacts/self-hosted/souc-self-hosted-x86_64'
   "
 fi
 

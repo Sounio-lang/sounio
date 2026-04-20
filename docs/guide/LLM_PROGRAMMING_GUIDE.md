@@ -7,8 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm-programming-guide
 -->
 
-> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: tests/run-pass/
-
 # Sounio LLM Programming Guide
 
 Definitive syntax reference for LLMs writing Sounio code. Every example is verified from `tests/run-pass/` or working stdlib files.

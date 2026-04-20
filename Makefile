@@ -1,5 +1,6 @@
 .PHONY: build check test test-stdlib clean fmt install help lint lint-fix lint-docs \
-         docs-gen ops-guardrail-local ops-infra-up ops-strict-up ops-status
+         docs-gen ops-guardrail-local ops-infra-up ops-strict-up ops-status \
+         website-verified-snapshot
 
 SOUC := ./bin/souc
 
@@ -12,7 +13,7 @@ endif
 help:                ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-build:               ## Bootstrap compile: gen1 → gen2 → gen3 (fixed-point verification)
+build:               ## Bootstrap compile: gen1 → gen2 → gen3 → gen4 (fixed-point verification)
 	@echo "→ Stage 1: boot4.elf compiles lean_single → gen1.elf"
 	./artifacts/bootstrap/boot4.elf self-hosted/compiler/lean_single.sio gen1.elf
 	chmod +x gen1.elf
@@ -22,15 +23,18 @@ build:               ## Bootstrap compile: gen1 → gen2 → gen3 (fixed-point v
 	@echo "→ Stage 3: gen2.elf compiles lean_single → gen3.elf"
 	./gen2.elf self-hosted/compiler/lean_single.sio gen3.elf
 	chmod +x gen3.elf
+	@echo "→ Stage 4: gen3.elf compiles lean_single → gen4.elf"
+	./gen3.elf self-hosted/compiler/lean_single.sio gen4.elf
+	chmod +x gen4.elf
 	@echo "→ Verifying fixed-point..."
-	@MD5_GEN2=$$(md5sum gen2.elf | awk '{print $$1}'); \
-	 MD5_GEN3=$$(md5sum gen3.elf | awk '{print $$1}'); \
-	 if [ "$$MD5_GEN2" = "$$MD5_GEN3" ]; then \
-	   echo "✓ FIXED POINT OK ($$MD5_GEN2)"; \
+	@MD5_GEN3=$$(md5sum gen3.elf | awk '{print $$1}'); \
+	 MD5_GEN4=$$(md5sum gen4.elf | awk '{print $$1}'); \
+	 if [ "$$MD5_GEN3" = "$$MD5_GEN4" ]; then \
+	   echo "✓ FIXED POINT OK ($$MD5_GEN3)"; \
 	 else \
 	   echo "✗ FIXED POINT BROKEN"; \
-	   echo "  gen2: $$MD5_GEN2"; \
 	   echo "  gen3: $$MD5_GEN3"; \
+	   echo "  gen4: $$MD5_GEN4"; \
 	   exit 1; \
 	 fi
 
@@ -51,8 +55,8 @@ test-stdlib:         ## Run stdlib integration tests (subset)
 	$(SOUC) run tests/stdlib/bayes/test_prior_e2e.sio
 	$(SOUC) run tests/stdlib/complex/test_complex.sio
 
-clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
-	rm -f gen1.elf gen2.elf gen3.elf
+clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3, gen4)
+	rm -f gen1.elf gen2.elf gen3.elf gen4.elf
 	@echo "✓ Cleaned generated artifacts"
 
 fmt:                 ## Format .sio source code (not yet implemented)
@@ -67,6 +71,12 @@ lint-fix:            ## Apply automatic fixes to a file: make lint-fix FILE=path
 
 docs-gen:            ## Regenerate stdlib API reference from source
 	@bash scripts/build/gen_stdlib_api_md.sh
+
+website-verified-snapshot: ## Run stdlib reliability gate + refresh website verified-snapshot.json (needs SOUC_BIN)
+	@echo "→ SOUC_BIN must point to a working souc (e.g. export SOUC_BIN=/tmp/souc.elf)"
+	@bash scripts/dev/stdlib_reliability_gate.sh
+	@npm run gen:verified-snapshot --prefix website
+	@echo "✓ Updated website/src/data/verified-snapshot.json (review and git add)"
 
 lint-docs:           ## Extract and check code snippets from docs/**/*.md
 	@bash scripts/ci/check_doc_snippets.sh

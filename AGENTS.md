@@ -1,145 +1,284 @@
 # AGENTS.md
 
-## Project
+## Purpose
 
-Sounio is a self-hosted systems + scientific programming language with epistemic types. The compiler is written in Sounio itself, bootstrapped from a C stage0. **This is NOT a Rust project** — no Cargo, no rustc, no Rust toolchain needed.
+This file is the Codex-facing project contract for the Sounio repository.
 
-## Commands
+It does **not** replace `CLAUDE.md`.
+Instead:
 
-```bash
-SOUC=./bin/souc
+- `CLAUDE.md` remains the active source of truth for Claude Code behavior
+- `AGENTS.md` is the Codex-facing execution contract
+- repository facts and executable scripts override stale documentation when they disagree
 
-$SOUC check examples/file.sio          # type-check only
-$SOUC run examples/file.sio            # compile to temp ELF, execute, clean up
-$SOUC compile file.sio -o output.elf   # compile to named ELF
-$SOUC build file.sio --backend gpu -o output.ptx  # compile to PTX (GPU)
-$SOUC build file.sio --backend gpu --gpu-precision f32 -o out.ptx  # f32 GPU
-make build                             # 3-stage bootstrap (gen1→gen2→gen3) + fixed-point verify
-make test                              # full test suite (compile-fail + run-pass + stdlib + ui)
-make lint                              # lint .sio files for Rust hallucinations
-make check                             # type-check self-hosted compiler + lint gates
-```
+When in doubt, prefer:
+1. actual repo files and executable scripts
+2. committed governance docs
+3. historical prompt contracts
+4. assumptions
 
-Run a single test:
-```bash
-$SOUC run tests/run-pass/specific_test.sio
-$SOUC check tests/compile-fail/specific_test.sio
-```
+## Recovery + Remote-First Bootstrap
 
-Filter the test suite:
-```bash
-bash scripts/run_sio_test_suite.sh --filter pattern
-bash scripts/run_sio_test_suite.sh --verbose --jobs 4
-```
+Before implementation work:
 
-Lint a single file:
-```bash
-python3 scripts/dev/sounio-lint.py path/to/file.sio
-python3 scripts/dev/sounio-lint.py --fix path/to/file.sio   # auto-fix
-```
+1. Read `CLAUDE_HANDOFF.md`.
+2. Confirm the current branch.
+3. Treat `/workspace/sounio` as the active development surface when operating in the promoted workspace.
 
-## Sounio is NOT Rust — Syntax Gotchas
+For non-trivial work, continue with this repo-local read order after `CLAUDE_HANDOFF.md`:
 
-Agents frequently hallucinate Rust syntax. These will fail at compile time:
+1. `README.md`
+2. `AGENTS.md`
+3. `CLAUDE.md`
+4. `docs/guide/MINIMUM_VIABLE_SOUNIO.md`
+5. `docs/guide/LLM_PROGRAMMING_GUIDE.md`
 
-| Wrong (Rust) | Right (Sounio) |
-|---|---|
-| `let x = 5;` | `let x = 5` (no semicolons) |
-| `let mut x = 5` | `var x = 5` |
-| `&mut T` | `&!T` |
-| `assert!(cond)` | `assert(cond)` |
-| `println!("hi")` | `println("hi")` |
-| `-42` | `0 - 42` (no unary minus) |
-| `\|x\| x + 1` | named fn refs only: `let f = square` |
-| `#[test]`, `#[derive()]` | no attributes exist |
-| `x >> 4` | `x >> 4u8` (bit shifts require u8) |
+Important context:
 
-Effects are **required** on functions with side effects:
-```sio
-fn greet(name: &str) with IO { println(name) }
-fn mutate(x: &!i32) with Mut { *x = 42 }
-fn divide(a: f64, b: f64) -> f64 with Div, Panic { a / b }
-```
-Effects: `IO` (print/file), `Mut` (&! mutation), `Div` (division/modulo), `Panic` (array access, assert, casts)
+- This repository was recovered from VM `sounio-dev-01`.
+- The recovery was based on tarball import, then Git re-attachment.
+- The safe active branch is:
+  - `integration/sounio-dev-ready-base`
+- Older Claude/Codex artifacts may still reference the VM-era path:
+  - `/home/demetrios/RustroverProjects/sounio`
+- The current remote-first workspace path is:
+  - `/workspace/sounio`
 
-Helpers must be defined **before** callers (no forward references).
+Do not treat stale VM paths as the current execution surface.
+Preserve recovery state and avoid destructive "align with main" workflows unless explicitly requested.
 
-Full syntax reference: `docs/guide/LLM_PROGRAMMING_GUIDE.md`
+---
 
-## Architecture
+## Repository identity
 
-```
-Pipeline: Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR (SSA) → Codegen
-```
+Sounio is a self-hosted compiler/language repository with an epistemic/scientific focus.
+This repository contains:
 
-| Directory | Purpose |
-|---|---|
-| `self-hosted/compiler/lean_single.sio` | Main compiler source (single-file) |
-| `self-hosted/lexer/`, `parser/` | Frontend |
-| `self-hosted/check/`, `types/` | Bidirectional type inference + effects |
-| `self-hosted/ir/` | IR lowering, optimization, e-graph |
-| `self-hosted/native/` | x86-64 ELF emission |
-| `self-hosted/gpu/` | GPU backend (PTX, SPIR-V, Metal) |
-| `self-hosted/hypercomplex/` | Octonion/sedenion algebra + GPU lowering |
-| `self-hosted/gpu/kernels/` | Hypercomplex PTX emitters, O-SSM fused kernels |
-| `stdlib/` | Standard library (units, epistemic, stats, linalg…) |
-| `bootstrap/` | stage0 (C) → boot2g → self-hosted chain |
-| `tests/run-pass/` | Tests that should compile and run |
-| `tests/compile-fail/` | Tests that should fail to compile |
-| `tests/ui/` | Error message snapshots |
-| `tests/stdlib/` | Standard library tests |
+- active self-hosted compiler implementation
+- bootstrap/native compiler paths
+- ontology validation work
+- governance/docs/history for parallel agent workflows
+- ecosystem/template subtrees that are **not** the active root config for this repo
 
-## How the Compiler Works
+Do not confuse root repo config with:
+- `ecosystem/claude-code-sounio/`
+- `ecosystem/create-sounio/templates/`
 
-- `bin/souc` is a bash wrapper that delegates to the pre-built native binary at `artifacts/self-hosted/souc-self-hosted-x86_64`
-- `scripts/lib/resolve_souc.sh` is the canonical resolution logic; scripts source it to find `souc`
-- The default env `SOUNIO_REPO_HARD_NO_RUST=1` — there is no Rust build step
-- `SOUNIO_STDLIB_PATH` is set automatically by `bin/souc`; set manually if running the native binary directly
-- Linux x86-64 only
+Those are distribution/template surfaces, not the active repo root behavior.
 
-## Test Annotations
+---
 
-Tests are discovered by `//@ ` comments in the source file header:
+## Authority model
 
-```
-//@ run-pass              — expect exit 0
-//@ compile-fail          — expect exit != 0
-//@ ignore                — skip
-//@ check-only            — compile only, do not execute
-//@ expect-stdout: TEXT   — stdout must contain TEXT (run-pass)
-//@ error-pattern: TEXT   — output must contain TEXT (compile-fail)
-//@ known-failure: REASON — documented accepted failure
-//@ timeout: SECONDS      — override default 30s timeout
-```
+### Claude Code authority
+`CLAUDE.md` at repo root is the active Claude Code source of truth.
 
-Tests without a `//@ run-pass` or `//@ compile-fail` annotation are skipped.
+### Codex authority
+This file (`AGENTS.md`) is the active Codex source of truth for this repo.
 
-## Commit Format
+### Shared reality
+Executable repo scripts and actual file layout are the source of truth for:
+- compiler resolution
+- bootstrap path
+- test harness routing
+- ontology validation path
 
-```
-[component] Brief description
-```
+If a prose document disagrees with a script that is actually wired into the repo flow, trust the script and report the mismatch.
 
-Components: `lexer`, `parser`, `ast`, `check`, `types`, `effects`, `hir`, `hlir`, `codegen`, `backend`, `gpu`, `cli`, `docs`, `stdlib`, `tests`, `ontology`, `epistemic`, `lsp`, `pkg`, `sir`, `units`, `refinement`
+---
 
-No AI attribution in commits (no "Co-Authored-By").
+## Parallel-work contract
 
-## Key Constraints
+Use this division unless the user explicitly overrides it.
 
-- **No Rust toolchain** — do not run `cargo`, look for `Cargo.toml`, or assume Rust patterns
-- **ecosystem/** is distribution/template surface, not the active repo config — do not edit unless explicitly asked
-- **Self-hosted bootstrap is safety-critical** — changes to `self-hosted/compiler/lean_single.sio` or `bootstrap/` can break the fixed-point; always verify with `make build`
-- **No struct generics yet** — `Knowledge<T>` is monomorphic (f64 only); function-level generics work
-- **No closures** — named fn refs only (`let f = square`)
-- **No REPL** in native mode
-- **GPU backend available** — `souc build --backend gpu` emits PTX; octonion/sedenion lowering via Fano plane; O-SSM fused forward kernel in `self-hosted/gpu/kernels/ossm_forward.sio`
+### Claude Code
+Use for:
+- read-only repository surveys
+- inventory
+- conflict mapping
+- secondary review of diffs
+- documentation lookup with Context7 when external docs are needed
 
-## Lint → Check → Test
+### Codex
+Use for:
+- implementation
+- file creation
+- surgical refactors
+- test harness wiring
+- validation-path work
+- small reversible commits
 
-The verification order is: lint first (catches Rust hallucinations cheaply), then type-check, then test:
+### Never edit in parallel
+Do not let Codex and Claude Code edit the same file in the same phase.
 
-```bash
-make lint          # quick: scans for Rust-isms
-make check         # type-checks lean_single.sio + runs lint gates
-make test          # full test suite
-```
+If a file is under active edit by one agent, the other agent may:
+- inspect it
+- comment on it
+- review it after the edit is complete
+
+but must not write to it concurrently.
+
+---
+
+## Files that must not be edited in parallel
+
+Treat these as high-risk shared control files:
+
+- `CLAUDE.md`
+- `.claude/settings.json`
+- `.claude/settings.local.json`
+- `scripts/lib/resolve_souc.sh`
+- `scripts/run_sio_test_suite.sh`
+- `scripts/ci/build_native_souc.sh`
+- `bin/souc`
+- `.github/workflows/ci.yml`
+- `scripts/post-tool-use.sh`
+
+If a task requires changes to any of these, isolate that task and avoid concurrent edits elsewhere that depend on them.
+
+---
+
+## Canonical compiler/test resolution
+
+Do not hardcode ad hoc compiler routing if a repo resolver already exists.
+
+### Canonical resolution path
+Use:
+- `scripts/lib/resolve_souc.sh`
+
+as the canonical compiler-resolution logic unless the task explicitly targets another resolver for cleanup or compatibility reasons.
+
+### Test harness
+Use:
+- `scripts/run_sio_test_suite.sh`
+
+for suite execution.
+
+### Codex helper entrypoints
+Use the repo-local Codex wrappers under:
+- `scripts/codex/setup.sh`
+- `scripts/codex/action-bootstrap-smoke.sh`
+- `scripts/codex/action-build-ontology-validation-souc.sh`
+- `scripts/codex/action-ontology-harness-default.sh`
+- `scripts/codex/action-ontology-harness-diff.sh`
+- `scripts/codex/action-ontology-harness-rebuilt.sh`
+
+These wrappers should resolve the compiler through:
+- `scripts/lib/resolve_souc.sh`
+
+rather than hardcoding `./bin/souc` directly.
+
+### Ontology validation
+When ontology work is the target, prefer the rebuilt/current-source validation path when available.
+
+Current ontology validation scripts live under:
+- `scripts/ci/build_ontology_validation_souc.sh`
+- `scripts/ci/run_ontology_validation.sh`
+
+If these scripts are untracked or not yet canonical, do not silently assume they are CI truth.
+Report whether you are using:
+- default/stale path
+- rebuilt/current-source wrapper path
+
+---
+
+## Execution style
+
+- Keep changes small, reversible, and test-backed
+- Preserve bootstrap safety
+- Preserve legacy code until parity is proven
+- Prefer explicit failure classification over silent fallback
+- Do not claim semantic milestones more broadly than the evidence supports
+- Separate:
+  - ontology semantics
+  - validation-wrapper routing
+  - bootstrap/runtime repair
+
+---
+
+## Language and commit constraints
+
+- Do not add AI attribution such as `Co-Authored-By: Codex`.
+- Sounio is not Rust. Prefer repo-native syntax such as `var` and `&!`, and avoid Rust-specific macros, attributes, and closure literals.
+- For syntax and semantics, consult:
+  - `docs/guide/LLM_PROGRAMMING_GUIDE.md`
+  - `docs/compiler/KNOWN_LIMITATIONS.md`
+- For direct compiler invocations outside existing harnesses, prefer the `SOUC_BIN` resolved by `scripts/lib/resolve_souc.sh`.
+- Commit titles should follow the repo component prefix convention described in `CLAUDE.md`:
+  - `[component] Brief description`
+
+---
+
+## Ontology-specific rules
+
+For ontology work:
+
+- treat the rebuilt current-source wrapper as the primary semantic validation path when available
+- keep legacy ontology storage/query code until parity is proven
+- classify failures as:
+  - build/bootstrap-path
+  - harness-routing
+  - ontology-kernel/checker
+  - baseline noise
+
+Do not collapse these categories in reports.
+
+---
+
+## Context7 usage
+
+Use Context7 only for:
+- external tool/library/framework documentation
+- up-to-date Codex / MCP / Claude Code docs
+- version-specific external references
+
+Do **not** use Context7 as a substitute for repository-local truth.
+Repository-local truth must come from direct inspection of the repo.
+
+---
+
+## What not to touch unless explicitly requested
+
+Avoid editing these areas unless the task explicitly targets them:
+
+- `ecosystem/claude-code-sounio/`
+- `ecosystem/create-sounio/templates/`
+- large memory/archive artifacts
+- historical governance docs unless the task is governance cleanup
+
+---
+
+## Commit discipline
+
+Prefer commit-sized phases:
+
+1. diagnosis or plumbing
+2. implementation
+3. read-path switch
+4. tests
+5. cleanup only after green gates
+
+Do not mix:
+- semantic changes
+- bootstrap-path repairs
+- governance rewrites
+- large cleanup
+
+in one commit unless the user explicitly asks for that tradeoff.
+
+---
+
+## Reporting requirements
+
+At the end of substantial work, report:
+
+1. files changed
+2. what changed in each file
+3. commands run
+4. results
+5. whether the work used:
+   - default path
+   - rebuilt wrapper
+   - fallback path
+6. remaining blockers
+7. whether any legacy path was intentionally kept

@@ -49,7 +49,7 @@ use compiler::ontology::mod::{ontology_resolve_curie, ontology_search_text, onto
 
 // GPU pipeline imports — HLIR lowering + multi-target codegen
 use hlir::lower::{hlir_lower_module}
-use gpu::hlir_to_gpu::{hlir_extract_kernel_count, hlir_kernels_to_ptx, hlir_kernels_to_epistemic_ptx, hlir_kernels_to_tuned_ptx, hlir_kernels_to_fused_ptx, hlir_kernels_to_epistemic_fused_ptx, hlir_kernels_to_speculative_ptx, hlir_kernels_to_dag_scheduled_ptx, hlir_kernels_to_optimized_ptx, gpu_emit_dag_host_glue, gpu_emit_spec_host_glue, hlir_kernels_to_metal, hlir_kernels_to_spirv, hlir_kernels_to_epistemic_spirv}
+use gpu::hlir_to_gpu::{hlir_extract_kernel_count, hlir_kernels_to_ptx, hlir_kernels_to_epistemic_ptx, hlir_kernels_to_tuned_ptx, hlir_kernels_to_fused_ptx, hlir_kernels_to_epistemic_fused_ptx, hlir_kernels_to_speculative_ptx, hlir_kernels_to_dag_scheduled_ptx, gpu_emit_dag_host_glue, gpu_emit_spec_host_glue, hlir_kernels_to_metal, hlir_kernels_to_spirv, hlir_kernels_to_epistemic_spirv}
 use gpu::epistemic_spirv::{gpu_lower_to_epistemic_spirv, ESpvBuf, EpistemicShadowSpv}
 use gpu::ptx::{PtxBuf, ptx_buf_print, ptx_to_string}
 use gpu::metal::{MetalBuf, metal_buf_print}
@@ -1990,6 +1990,9 @@ fn run_native_v2_preview_smoke() with IO, Mut, Panic, Div, Alloc {
     if !compiler_main_test_native_v2_compile_preview_call_control() {
         panic("native-v2 preview call/control smoke failed")
     }
+    if !compiler_main_test_native_v2_compile_multi_call() {
+        panic("native-v2 multi-call widening smoke failed")
+    }
     if !compiler_main_test_native_v2_fail_closed_vector() {
         panic("native-v2 preview fail-closed smoke failed")
     }
@@ -2022,7 +2025,7 @@ fn print_help() with IO {
     println("  --emit-tokens          Print tokens to stdout")
     println("  --emit-manifest        Print epistemic audit manifest JSON to stdout")
     println("  --gpu-target <name>    GPU target profile (cuda-smXX, rocm-gfxXXX)")
-    println("  --gpu-binary-format    fatbin|cubin|hsaco|multi|optimized")
+    println("  --gpu-binary-format    fatbin|cubin|hsaco|multi")
     println("  --gpu-strict-parity    Require strict CUDA/ROCm parity checks")
     println("  --gpu-fuse-epistemic   Epistemic provenance-guided kernel fusion")
     println("  --gpu-speculative      Uncertainty-threshold speculative skip guards")
@@ -5177,6 +5180,58 @@ fn compiler_main_make_native_v2_call_module() -> IrModule with Mut, Panic, Alloc
     module
 }
 
+// Sprint widening: 3-function module modeling tests/run-pass/basic_math.sio
+// fn add(a, b) -> a + b  (2 params)
+// fn mul(a, b) -> a * b  (2 params)
+// fn main() -> { x = add(10, 32); y = mul(x, 2); return y }  (chained calls)
+fn compiler_main_make_native_v2_multi_call_module() -> IrModule with Mut, Panic, Alloc {
+    var module = ir_empty_module()
+
+    // fn add(a, b) -> a + b
+    let add_name = ir_name_from_bytes(97, 100, 100, 0, 3)
+    var add_fn = ir_empty_function()
+    add_fn.name = add_name
+    add_fn.param_count = 2
+    add_fn.param_regs[0] = 0
+    add_fn.param_regs[1] = 1
+    add_fn.reg_count = 3
+    add_fn.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    add_fn.instrs[1] = ir_return(2)
+    add_fn.instr_count = 2
+    module.functions[0] = add_fn
+
+    // fn mul(a, b) -> a * b
+    let mul_name = ir_name_from_bytes(109, 117, 108, 0, 3)
+    var mul_fn = ir_empty_function()
+    mul_fn.name = mul_name
+    mul_fn.param_count = 2
+    mul_fn.param_regs[0] = 0
+    mul_fn.param_regs[1] = 1
+    mul_fn.reg_count = 3
+    mul_fn.instrs[0] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    mul_fn.instrs[1] = ir_return(2)
+    mul_fn.instr_count = 2
+    module.functions[1] = mul_fn
+
+    // fn main() -> { x = add(10, 32); y = mul(x, 2); return y }
+    let main_name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    var main_fn = ir_empty_function()
+    main_fn.name = main_name
+    main_fn.param_count = 0
+    main_fn.reg_count = 5
+    main_fn.instrs[0] = ir_load_imm(0, 10)
+    main_fn.instrs[1] = ir_load_imm(1, 32)
+    main_fn.instrs[2] = ir_call(2, 0, add_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 1))), 2)
+    main_fn.instrs[3] = ir_load_imm(3, 2)
+    main_fn.instrs[4] = ir_call(4, 1, mul_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(2), 3))), 2)
+    main_fn.instrs[5] = ir_return(4)
+    main_fn.instr_count = 6
+    module.functions[2] = main_fn
+
+    module.fn_count = 3
+    module
+}
+
 fn compiler_main_make_native_v2_control_module() -> IrModule {
     var module = ir_empty_module()
     var func = ir_empty_function()
@@ -5335,6 +5390,21 @@ fn compiler_main_test_native_v2_compile_preview_call_control() -> bool with Mut,
     if !call_result.ok || call_result.len <= 64 { return false }
     let control_result = compile_native_v2_preview(&compiler_main_make_native_v2_control_module(), spec)
     control_result.ok && control_result.len > 64
+}
+
+// Widening: 3-function module with 2-arg helpers + chained calls (basic_math pattern)
+fn compiler_main_test_native_v2_compile_multi_call() -> bool with Mut, Panic, Div, Alloc {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let result = compile_native_v2_preview(&compiler_main_make_native_v2_multi_call_module(), spec)
+    if !result.ok || result.len <= 64 { return false }
+    // Verify the module has 3 functions compiled
+    let module = native_v2_build_machine_module(&compiler_main_make_native_v2_multi_call_module(), true)
+    if !module.supported { return false }
+    if module.fn_count != 3 { return false }
+    // All 3 functions must be legal
+    native_v2_machine_function_is_legal(module.functions[0])
+        && native_v2_machine_function_is_legal(module.functions[1])
+        && native_v2_machine_function_is_legal(module.functions[2])
 }
 
 fn compiler_main_test_native_v2_fail_closed_vector() -> bool with Mut, Panic, Div, Alloc {
@@ -25243,7 +25313,6 @@ fn run_gpu_compile_pipeline(
     let use_ep_fused = str_eq(gpu_binary_format, "epistemic-fused")
     let use_spec     = str_eq(gpu_binary_format, "speculative")
     let use_dag      = str_eq(gpu_binary_format, "dag-scheduled")
-    let use_optimized = str_eq(gpu_binary_format, "optimized")
 
     var ptx: PtxBuf = if use_epistemic {
         hlir_kernels_to_epistemic_ptx(hlir_module)
@@ -25257,8 +25326,6 @@ fn run_gpu_compile_pipeline(
         hlir_kernels_to_speculative_ptx(hlir_module)
     } else if use_dag {
         hlir_kernels_to_dag_scheduled_ptx(hlir_module)
-    } else if use_optimized {
-        hlir_kernels_to_optimized_ptx(hlir_module)
     } else {
         hlir_kernels_to_ptx(hlir_module)
     }

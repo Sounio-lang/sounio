@@ -2,24 +2,22 @@
 topic_id: website.docs.getting-started
 authority: dual
 audience: users
-last_validated: 2026-04-12
-validated_by: human
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#website.docs.getting-started
 -->
 
-> **Status**: Production | **Last validated**: 2026-04-12 | **Source**: `tests/run-pass/`, committed artifacts
-
 # Getting Started with Sounio
 
-Welcome to **Sounio**, a programming language for scientific code that needs explicit uncertainty, provenance, and gate-backed validation.
+> **Other guides**: [Scientists' Quick Start](../QUICK_START_GUIDE.md) | [LLM Quick Start](SOUNIO_QUICK_START.md) | [Conservative contract](MINIMUM_VIABLE_SOUNIO.md)
 
-This is the **canonical getting-started guide**. For the conservative "what actually works" contract, see [Minimum Viable Sounio](MINIMUM_VIABLE_SOUNIO.md). For LLMs writing Sounio, see the [LLM Programming Guide](LLM_PROGRAMMING_GUIDE.md).
+Welcome to **Sounio**, a programming language and research platform for scientific code that needs explicit uncertainty, provenance, and gate-backed validation.
 
----
+This guide is intentionally conservative. It reflects the repository state validated on March 9, 2026.
 
-## 1. Install and Verify
+## 1. Use A Real Compiler Artifact
 
-For this repository snapshot, use the checked compiler artifact under `artifacts/omega/souc-bin/`:
+For this checkout, the easiest path is the signed Linux `x86_64` JIT artifact already committed under `artifacts/omega/souc-bin/`:
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
@@ -30,32 +28,49 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 "$SOUC_BIN" --version
 "$SOUC_BIN" info
+"$SOUC_BIN" sysroot stdlib-paths
 ```
 
-Current checked-artifact status (`souc 1.0.0-beta.4`):
+In this repo snapshot, that artifact reports `souc 1.0.0-beta.4`.
 
-- Cranelift JIT enabled
-- LLVM and GPU codegen disabled in this artifact
-- SMT, LSP, ontology, distributed, and package-manager features disabled
-
-For GPU-specific workflows, there is a separate artifact:
+There is also a separate checked GPU artifact for GPU-specific workflows:
 
 ```bash
 export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
 "$SOUC_GPU_BIN" info
 "$SOUC_GPU_BIN" check examples/gpu.sio
-"$SOUC_GPU_BIN" build examples/gpu.sio --backend gpu -o /tmp/sounio-gpu.ptx
+"$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
 ```
 
-**There is no Rust build step.** Do not run `cargo build` at the repo root.
+If you need the repo to resolve a pinned binary path for you:
 
----
+```bash
+scripts/omega/omega_resolve_souc_bin.sh --print-path --allow-local-fallback
+```
 
-## 2. Your First Program
+## 2. Start With `check`
 
-Create `hello.sio`:
+The most reliable way to validate language features in this repo is `souc check`.
 
-```sio
+```bash
+"$SOUC_BIN" check examples/hello.sio
+"$SOUC_BIN" check tests/run-pass/covid_2020_kernel.sio
+"$SOUC_BIN" check tests/run-pass/vancomycin_propagation.sio
+"$SOUC_BIN" check tests/compile-fail/vancomycin_low_conf.sio
+```
+
+Expected behavior:
+
+- `examples/hello.sio` passes
+- `covid_2020_kernel.sio` passes
+- `vancomycin_propagation.sio` passes
+- `vancomycin_low_conf.sio` fails with the expected confidence-bound type error
+
+## 3. Your First Program
+
+Create a file `hello.sio`:
+
+```sounio
 fn main() with IO {
     println("Hello, Sounio!")
 }
@@ -67,139 +82,98 @@ Type-check it:
 "$SOUC_BIN" check hello.sio
 ```
 
-Run it (if your artifact supports the runtime path):
+If your selected `souc` variant supports the runtime path you need, you can then try:
 
 ```bash
 "$SOUC_BIN" run hello.sio
 ```
 
----
+## 4. What Is Actually Verified Today
 
-## 3. Key Concepts in 60 Seconds
+The gate-backed public summary in this repo is:
 
-### Variables — no semicolons, `var` for mutable
+- `artifacts/stdlib/stdlib_reliability_status.v1.json`: `81 pass / 0 fail / 1 skip / 82 total`
+- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`: `pass` for `fmri` and `darwin_pbpk`
+- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`: `pass` for 7 required hyper lanes
+- `artifacts/omega/gpu_runtime_attest_gate.v1.json`: `pass` for the current GPU runtime smoke set on the checked GPU lane
+- local science runtime regression probes are still recorded in `soft` mode unless strict CI enforcement is enabled
 
-```sio
-let x = 5
-var y = 10
-y = y + 1
-```
+For the full conservative contract, read [Minimum Viable Sounio](MINIMUM_VIABLE_SOUNIO.md).
 
-### Effects — required on functions with side effects
+## 5. Key Concepts
 
-```sio
-fn divide(a: f64, b: f64) -> f64 with Div, Panic { a / b }
-fn mutate(x: &!i32) with Mut { *x = 42 }
-fn hello() with IO { println("hi") }
-```
+### 1. Epistemic Types
 
-### Mutable references — `&!` not `&mut`
+Sounio's signature feature is the `Knowledge<T>` type:
 
-```sio
-fn increment(x: &!i32) with Mut { *x = *x + 1 }
-var counter: i32 = 0
-increment(&!counter)
-```
-
-### Epistemic types — uncertainty is tracked
-
-```sio
+```sounio
 let risky = Knowledge { value: 15.0, epsilon: 0.4 }
 let safe = Knowledge { value: 15.0, epsilon: 0.9 }
 ```
 
-### Structs, enums, arrays
+### 2. Variables
 
-```sio
-struct Point { x: f64, y: f64 }
-let p = Point { x: 1.0, y: 2.0 }
+```sounio
+let x = 5
+var y = 10
 
-enum Color { Red, Green, Blue }
-
-var buffer: [u8; 256] = [0; 256]
-let data: [i64; 4] = [1, 2, 3, 4]
+y = y + 1
 ```
 
----
+### 3. References
 
-## 4. Sounio is NOT Rust
+Sounio uses `&!` for mutable references:
 
-The syntax looks similar but semantics differ. These mistakes cause compile errors:
+```sounio
+fn increment(x: &!i32) {
+    *x = *x + 1
+}
+```
 
-| Wrong (Rust) | Right (Sounio) |
-|---|---|
-| `let x = 5;` | `let x = 5` (no semicolons) |
-| `let mut x = 5` | `var x = 5` |
-| `&mut T` | `&!T` |
-| `assert!(cond)` | `assert(cond)` |
-| `println!("hi")` | `println("hi")` |
-| `-42` | `0 - 42` (no unary minus) |
-| `\|x\| x + 1` | named fn refs only: `let f = square` |
-| `x >> 4` | `x >> 4u8` (bitshifts require u8) |
+### 4. Physical Units
 
-See [Sounio Gotchas](SOUNIO_GOTCHAS.md) for the full list.
+```sounio
+let distance: f64<m> = 100.0 m
+let time: f64<s> = 9.58 s
+let speed = distance / time
+```
 
----
+### 5. Effects
 
-## 5. Command Reference
+```sounio
+fn read_file(path: &str) -> String with IO {
+    "demo"
+}
+```
+
+## 6. Command Reference
 
 ```bash
-souc check file.sio                          # type-check only
-souc run file.sio                            # compile to temp ELF, execute
-souc compile file.sio -o output.elf          # compile to named ELF
-souc build file.sio --backend gpu -o out.ptx # GPU PTX emission
-souc fmt file.sio                            # format source
-souc info                                    # print artifact capabilities
+souc check file.sio
+souc run file.sio
+souc build file.sio -o output
+souc check file.sio --show-ast
+souc check file.sio --show-types
+souc sysroot stdlib-paths
+souc info
 ```
 
----
+## 7. Examples
 
-## 6. Verified Examples
-
-These are gate-backed and known to work:
+Prefer these when validating the repo:
 
 | File | Description |
-|---|---|
+|------|-------------|
 | `examples/hello.sio` | Hello World |
-| `tests/run-pass/for_in_loops.sio` | For-in loop variants |
-| `tests/run-pass/array_mut_ref.sio` | Mutable array references |
-| `tests/run-pass/covid_2020_kernel.sio` | Epistemic and temporal acceptance |
+| `tests/run-pass/covid_2020_kernel.sio` | Typed epistemic and temporal acceptance |
 | `tests/run-pass/vancomycin_propagation.sio` | Confidence propagation |
 | `tests/compile-fail/vancomycin_low_conf.sio` | Compile-time refusal on weak evidence |
 
-Do not assume every file under `examples/` is equally runnable. Some are exploratory or backend-dependent.
-
----
-
-## 7. What Is Actually Verified
-
-Gate-backed public summary:
-
-- `artifacts/stdlib/stdlib_reliability_status.v1.json`: `81 pass / 0 fail / 1 skip`
-- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`: `pass` for `fmri` and `darwin_pbpk`
-- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`: `pass` for 7 required hyper lanes
-
-For the full conservative contract, read [Minimum Viable Sounio](MINIMUM_VIABLE_SOUNIO.md).
-
----
-
-## 8. Self-Hosted Compiler (Contributors)
-
-The self-hosted compiler driver is `self-hosted/compiler/main.sio`:
-
-```bash
-timeout 240 "$SOUC_BIN" run self-hosted/compiler/main.sio -- --self-test
-timeout 180 "$SOUC_BIN" run self-hosted/compiler/main.sio -- --check examples/hello.sio
-```
-
----
+Do not assume every file under `examples/` is equally runnable. Some are exploratory, backend-dependent, or represent partially implemented surfaces.
 
 ## Next Steps
 
-- [Minimum Viable Sounio](MINIMUM_VIABLE_SOUNIO.md) — what actually works today
-- [Tutorial](tutorial.md) — step-by-step learning guide
-- [Cookbook](../COOKBOOK.md) — task-oriented recipes
-- [LLM Programming Guide](LLM_PROGRAMMING_GUIDE.md) — definitive syntax reference
-- [Standard Library Reference](../reference/STDLIB_REFERENCE.md) — API docs
-- [Gotchas](SOUNIO_GOTCHAS.md) — common mistakes
-- [Examples](../../examples/) — real code
+- [Minimum Viable Sounio](MINIMUM_VIABLE_SOUNIO.md)
+- [Installation Guide](../../INSTALL.md)
+- [Standard Library Reference](../reference/STDLIB_REFERENCE.md)
+- [Examples](../../tests/README.md)

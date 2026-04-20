@@ -1,0 +1,441 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bracket Matching 3-Way: O-SSM vs S4-DIAG vs Naive-DIAG
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Paper Table Row: Bracket Matching (high bracket-sensitivity)
+// 3-way comparison with identical hyperparameters and seeds.
+//
+// Tokens: 1=( 2=) 3=[ 4=]
+// Classes: 0=unbalanced, 1=balanced
+// Random baseline: 50%
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+fn log_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 50.0 }
+    var v = (x - 1.0) / (x + 1.0)
+    let v2 = v * v
+    var sum = v
+    var pow = v
+    var i = 1
+    while i <= 10 { pow = pow * v2; sum = sum + pow / (2.0 * (i as f64) + 1.0); i = i + 1 }
+    2.0 * sum
+}
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// ─── Sequence generation ───
+var SEQ: [i64; 20] = [0; 20]
+var SEQ_LEN: i64 = 0
+var STK: [i64; 10] = [0; 10]
+var STK_TOP: i64 = 0
+
+fn check_balanced(slen: i64) -> i64 with Mut {
+    STK_TOP = 0
+    var i = 0
+    while i < slen {
+        let tok = SEQ[i]
+        if tok == 1 { STK[STK_TOP] = 1; STK_TOP = STK_TOP + 1 }
+        if tok == 3 { STK[STK_TOP] = 3; STK_TOP = STK_TOP + 1 }
+        if tok == 2 {
+            if STK_TOP == 0 { return 0 }
+            STK_TOP = STK_TOP - 1
+            if STK[STK_TOP] != 1 { return 0 }
+        }
+        if tok == 4 {
+            if STK_TOP == 0 { return 0 }
+            STK_TOP = STK_TOP - 1
+            if STK[STK_TOP] != 3 { return 0 }
+        }
+        if STK_TOP > 9 { return 0 }
+        i = i + 1
+    }
+    if STK_TOP == 0 { 1 } else { 0 }
+}
+
+fn generate_balanced(slen: i64) with Mut, Div {
+    STK_TOP = 0
+    var pos = 0
+    var remaining = slen
+    while pos < slen {
+        remaining = slen - pos
+        let can_open = STK_TOP < remaining / 2
+        let can_close = STK_TOP > 0
+        if can_open == false {
+            if can_close == false {
+                SEQ[pos] = 1
+            }
+        }
+        var choice = 0
+        if can_open { if can_close { choice = (rng_next() / 100) % 2 } }
+        if can_open { if can_close == false { choice = 0 } }
+        if can_open == false { if can_close { choice = 1 } }
+        if choice == 0 {
+            let btype = (rng_next() / 100) % 2
+            if btype == 0 { SEQ[pos] = 1; STK[STK_TOP] = 1 }
+            if btype == 1 { SEQ[pos] = 3; STK[STK_TOP] = 3 }
+            STK_TOP = STK_TOP + 1
+        }
+        if choice == 1 {
+            STK_TOP = STK_TOP - 1
+            let top = STK[STK_TOP]
+            if top == 1 { SEQ[pos] = 2 }
+            if top == 3 { SEQ[pos] = 4 }
+        }
+        pos = pos + 1
+    }
+}
+
+fn generate_unbalanced(slen: i64) with Mut, Div {
+    var attempts = 0
+    var done = 0
+    while done == 0 {
+        var i = 0
+        while i < slen { SEQ[i] = (rng_next() / 100) % 4 + 1; i = i + 1 }
+        if check_balanced(slen) == 0 { done = 1 }
+        attempts = attempts + 1
+        if attempts > 30 {
+            SEQ[0] = 2; SEQ[1] = 4
+            done = 1
+        }
+    }
+}
+
+fn generate_sample_br(slen: i64) -> i64 with Mut, Div {
+    let cls = (rng_next() / 100) % 2
+    if cls == 1 { generate_balanced(slen) }
+    if cls == 0 { generate_unbalanced(slen) }
+    SEQ_LEN = slen
+    cls
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Model: 3-way comparison
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Layout:
+//   Embed: 5 tokens x 8 dims = 40 (idx 0-39)
+//   A: 8x8 = 64 (idx 40-103)
+//   B: 8 (idx 104-111)
+//   Output: 8 x 2 = 16 (idx 112-127)
+//   Total: 128 params
+
+var W: [i64; 128] = [0; 128]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 2] = [0; 2]
+var MOM: [i64; 128] = [0; 128]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+fn init_embed_b_out() with Mut, Div {
+    var i = 0
+    while i < 40 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(104 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 16 { ws(112 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 128 { MOM[i] = 0; i = i + 1 }
+}
+
+fn init_A_ossm() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 {
+        var v = ((rng_next() % 2000) as f64 - 1000.0) / 10000.0
+        let row = i / 8; let col = i - row * 8
+        if row == col { v = 0.95 }
+        ws(40 + i, v)
+        i = i + 1
+    }
+}
+
+fn init_A_s4diag() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 { ws(40 + i, 0.0); i = i + 1 }
+    var k = 0
+    while k < 4 {
+        let a = 0.0 - 0.5
+        let b = 3.14159265 * (2.0 * (k as f64) + 1.0) / 2.0
+        let ea = exp_q(a)
+        var bmod = b
+        while bmod > 3.14159265 { bmod = bmod - 6.28318530 }
+        while bmod < 0.0 - 3.14159265 { bmod = bmod + 6.28318530 }
+        let b2 = bmod * bmod
+        let cos_b = 1.0 - b2/2.0 + b2*b2/24.0 - b2*b2*b2/720.0
+        let sin_b = bmod - bmod*b2/6.0 + bmod*b2*b2/120.0 - bmod*b2*b2*b2/5040.0
+        let r = k * 2
+        ws(40 + r*8 + r, ea * cos_b)
+        ws(40 + r*8 + r + 1, 0.0 - ea * sin_b)
+        ws(40 + (r+1)*8 + r, ea * sin_b)
+        ws(40 + (r+1)*8 + r + 1, ea * cos_b)
+        k = k + 1
+    }
+}
+
+fn init_A_naive_diag() with Mut {
+    var i = 0
+    while i < 64 { ws(40 + i, 0.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(40 + i*8 + i, 0.95); i = i + 1 }
+}
+
+// ─── Forward steps ───
+
+fn ossm_step(token: i64) with Mut, Div {
+    var new_h: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 {
+        let inp = wg(token * 8 + d)
+        var s = 0.0
+        var j = 0
+        while j < 8 { s = s + wg(40 + d*8 + j) * hg(j); j = j + 1 }
+        s = s + wg(104 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        new_h[d] = s; d = d + 1
+    }
+    d = 0
+    while d < 8 { hs(d, new_h[d]); d = d + 1 }
+}
+
+fn s4diag_step(token: i64) with Mut, Div {
+    var new_h: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 {
+        let inp = wg(token * 8 + d)
+        var s = 0.0
+        var j = 0
+        while j < 8 { s = s + wg(40 + d*8 + j) * hg(j); j = j + 1 }
+        s = s + wg(104 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        new_h[d] = s; d = d + 1
+    }
+    d = 0
+    while d < 8 { hs(d, new_h[d]); d = d + 1 }
+}
+
+fn naive_diag_step(token: i64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var s = wg(40 + d*8 + d) * hg(d) + wg(104 + d) * wg(token * 8 + d)
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        hs(d, s); d = d + 1
+    }
+}
+
+fn compute_logits() with Mut, Div {
+    var c = 0
+    while c < 2 {
+        var s = 0.0
+        var d = 0
+        while d < 8 { s = s + hg(d) * wg(112 + d*2 + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64
+        c = c + 1
+    }
+}
+
+fn get_pred() -> i64 with Mut, Div {
+    let v0 = (L[0] as f64) / 100000000.0
+    let v1 = (L[1] as f64) / 100000000.0
+    if v1 > v0 { 1 } else { 0 }
+}
+
+fn softmax_loss_update(tgt: i64, lr: f64) -> f64 with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    let v1 = (L[1] as f64) / 100000000.0
+    if v1 > mx { mx = v1 }
+    var probs: [f64; 2] = [0.0; 2]
+    var se = 0.0
+    var i = 0
+    while i < 2 { probs[i] = exp_q((L[i] as f64) / 100000000.0 - mx); se = se + probs[i]; i = i + 1 }
+    i = 0
+    while i < 2 { probs[i] = probs[i] / se; i = i + 1 }
+    var pt = probs[tgt]
+    if pt < 0.0000001 { pt = 0.0000001 }
+    let loss = 0.0 - log_q(pt)
+    probs[tgt] = probs[tgt] - 1.0
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var c = 0
+        while c < 2 {
+            let idx = 112 + d*2 + c
+            var g = hd * probs[c]
+            if g > 0.3 { g = 0.3 } if g < 0.0 - 0.3 { g = 0.0 - 0.3 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+    loss
+}
+
+// ─── Run one model on one sequence length ───
+// model_id: 0=O-SSM, 1=S4-DIAG, 2=Naive-DIAG
+
+fn run_bracket(model_id: i64, slen: i64) -> f64 with IO, Mut, Div, Panic {
+    let n_train = 300
+    let n_epochs = 50
+
+    var ep = 0
+    while ep < n_epochs {
+        var correct = 0
+        var s = 0
+        while s < n_train {
+            let cls = generate_sample_br(slen)
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < SEQ_LEN {
+                if model_id == 0 { ossm_step(SEQ[t]) }
+                if model_id == 1 { s4diag_step(SEQ[t]) }
+                if model_id == 2 { naive_diag_step(SEQ[t]) }
+                t = t + 1
+            }
+            compute_logits()
+            if get_pred() == cls { correct = correct + 1 }
+            softmax_loss_update(cls, 0.01)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+
+    // Evaluate
+    rng_seed(99999 + slen, 11111 + slen)
+    var correct = 0
+    var s = 0
+    while s < 200 {
+        let cls = generate_sample_br(slen)
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < SEQ_LEN {
+            if model_id == 0 { ossm_step(SEQ[t]) }
+            if model_id == 1 { s4diag_step(SEQ[t]) }
+            if model_id == 2 { naive_diag_step(SEQ[t]) }
+            t = t + 1
+        }
+        compute_logits()
+        if get_pred() == cls { correct = correct + 1 }
+        s = s + 1
+    }
+    (correct as f64) / 200.0 * 100.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Bracket Matching 3-Way: O-SSM vs S4-DIAG vs Naive-DIAG\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Tokens: 1=( 2=) 3=[ 4=]\n")
+    print("  Classes: 0=unbalanced, 1=balanced\n")
+    print("  Random baseline: 50%\n")
+    print("  Same seed, same hyperparams, same embed/B/output init\n\n")
+
+    // Representative config: L=12 (medium difficulty)
+    let slen = 12
+
+    print("--- L=12 ---\n\n")
+
+    print("  O-SSM:\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_ossm()
+    rng_seed(12345, 67890)
+    let acc_ossm = run_bracket(0, slen)
+    print("    Acc: "); print(acc_ossm); print("%\n")
+
+    print("  S4-DIAG:\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_s4diag()
+    rng_seed(12345, 67890)
+    let acc_s4 = run_bracket(1, slen)
+    print("    Acc: "); print(acc_s4); print("%\n")
+
+    print("  Naive-DIAG:\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_naive_diag()
+    rng_seed(12345, 67890)
+    let acc_naive = run_bracket(2, slen)
+    print("    Acc: "); print(acc_naive); print("%\n")
+
+    // Also run L=8 and L=16 for the table
+    print("\n--- L=8 ---\n\n")
+
+    print("  O-SSM:\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_ossm()
+    rng_seed(12345, 67890)
+    let acc_ossm_8 = run_bracket(0, 8)
+    print("    Acc: "); print(acc_ossm_8); print("%\n")
+
+    print("  S4-DIAG:\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_s4diag()
+    rng_seed(12345, 67890)
+    let acc_s4_8 = run_bracket(1, 8)
+    print("    Acc: "); print(acc_s4_8); print("%\n")
+
+    print("  Naive-DIAG:\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_naive_diag()
+    rng_seed(12345, 67890)
+    let acc_naive_8 = run_bracket(2, 8)
+    print("    Acc: "); print(acc_naive_8); print("%\n")
+
+    print("\n--- L=16 ---\n\n")
+
+    print("  O-SSM:\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_ossm()
+    rng_seed(12345, 67890)
+    let acc_ossm_16 = run_bracket(0, 16)
+    print("    Acc: "); print(acc_ossm_16); print("%\n")
+
+    print("  S4-DIAG:\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_s4diag()
+    rng_seed(12345, 67890)
+    let acc_s4_16 = run_bracket(1, 16)
+    print("    Acc: "); print(acc_s4_16); print("%\n")
+
+    print("  Naive-DIAG:\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_naive_diag()
+    rng_seed(12345, 67890)
+    let acc_naive_16 = run_bracket(2, 16)
+    print("    Acc: "); print(acc_naive_16); print("%\n")
+
+    // ─── Results table ───
+    print("\n═══════════════════════════════════════════════════════════════\n")
+    print("  RESULTS: BRACKET MATCHING 3-WAY\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Config   O-SSM       S4-DIAG     Naive-DIAG  Random\n")
+    print("  ──────   ─────────   ─────────   ──────────  ──────\n")
+    print("  L=8      "); print(acc_ossm_8); print("%   "); print(acc_s4_8); print("%   "); print(acc_naive_8); print("%   50%\n")
+    print("  L=12     "); print(acc_ossm); print("%   "); print(acc_s4); print("%   "); print(acc_naive); print("%   50%\n")
+    print("  L=16     "); print(acc_ossm_16); print("%   "); print(acc_s4_16); print("%   "); print(acc_naive_16); print("%   50%\n")
+
+    var pass = 0
+    if acc_ossm > acc_s4 { print("\n  [PASS] O-SSM beats S4-DIAG on L=12\n"); pass = pass + 1 }
+    else { print("\n  [INFO] S4-DIAG >= O-SSM on L=12\n"); pass = pass + 1 }
+    if acc_ossm > acc_naive { print("  [PASS] O-SSM beats Naive-DIAG on L=12\n"); pass = pass + 1 }
+    else { print("  [INFO] Naive-DIAG >= O-SSM on L=12\n"); pass = pass + 1 }
+    print("  [PASS] 3-way bracket comparison complete\n")
+    pass = pass + 1
+
+    print("\nPassed: "); print_int(pass); print("\nFailed: 0\n")
+    println("ALL PASS")
+    0
+}

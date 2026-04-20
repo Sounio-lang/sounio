@@ -176,7 +176,7 @@ pub fn epistemic_dense_backward(
             let wg_unc = bk_sqrt(u2)
             let wg_conf = bk_min(dz_conf, x_conf)
 
-            grad.weight_grad = emat4_set(grad.weight_grad, k as i64, jj as i64, wg_val, wg_unc, wg_conf)
+            emat4_set(&grad.weight_grad, k, jj, wg_val, wg_unc, wg_conf)
             jj = jj + 1
         }
         k = k + 1
@@ -191,9 +191,9 @@ pub fn epistemic_dense_backward(
 
         var k2 = 0
         while k2 < 4 {
-            let w_val = emat4_get_val(layer.weights, k2 as i64, jj2 as i64)
-            let w_unc = emat4_get_unc(layer.weights, k2 as i64, jj2 as i64)
-            let w_conf = emat4_get_conf(layer.weights, k2 as i64, jj2 as i64)
+            let w_val = emat4_get_val(&layer.weights, k2, jj2)
+            let w_unc = emat4_get_unc(&layer.weights, k2, jj2)
+            let w_conf = emat4_get_conf(&layer.weights, k2, jj2)
             let dz_val = delta_z.values[k2]
             let dz_unc = delta_z.uncertainties[k2]
             let dz_conf = delta_z.confidences[k2]
@@ -225,53 +225,51 @@ pub fn epistemic_dense_backward(
 // =============================================================================
 
 pub fn epistemic_dense_update(
-    layer: EpistemicDenseLayer4,
-    grad: EpistemicLayerGrad,
+    layer: &!EpistemicDenseLayer4,
+    grad: &EpistemicLayerGrad,
     alpha: f64,
-) -> EpistemicDenseLayer4 with Mut, Div, Panic {
-    var out = layer
+) with Mut, Div, Panic {
     var k = 0
     while k < 4 {
         // update bias
-        let old_b = out.bias.values[k]
-        let old_b_unc = out.bias.uncertainties[k]
-        let old_b_conf = out.bias.confidences[k]
+        let old_b = layer.bias.values[k]
+        let old_b_unc = layer.bias.uncertainties[k]
+        let old_b_conf = layer.bias.confidences[k]
         let gb_val = grad.bias_grad.values[k]
         let gb_unc = grad.bias_grad.uncertainties[k]
         let gb_conf = grad.bias_grad.confidences[k]
 
-        out.bias.values[k] = old_b - alpha * gb_val
+        layer.bias.values[k] = old_b - alpha * gb_val
         let new_b_unc2 = old_b_unc * old_b_unc + alpha * alpha * gb_unc * gb_unc
-        out.bias.uncertainties[k] = bk_sqrt(new_b_unc2)
-        out.bias.confidences[k] = bk_min(old_b_conf, gb_conf)
+        layer.bias.uncertainties[k] = bk_sqrt(new_b_unc2)
+        layer.bias.confidences[k] = bk_min(old_b_conf, gb_conf)
 
         var j = 0
         while j < 4 {
-            let old_w = emat4_get_val(out.weights, k as i64, j as i64)
-            let old_w_unc = emat4_get_unc(out.weights, k as i64, j as i64)
-            let old_w_conf = emat4_get_conf(out.weights, k as i64, j as i64)
-            let gw_val = emat4_get_val(grad.weight_grad, k as i64, j as i64)
-            let gw_unc = emat4_get_unc(grad.weight_grad, k as i64, j as i64)
-            let gw_conf = emat4_get_conf(grad.weight_grad, k as i64, j as i64)
+            let old_w = emat4_get_val(&layer.weights, k, j)
+            let old_w_unc = emat4_get_unc(&layer.weights, k, j)
+            let old_w_conf = emat4_get_conf(&layer.weights, k, j)
+            let gw_val = emat4_get_val(&grad.weight_grad, k, j)
+            let gw_unc = emat4_get_unc(&grad.weight_grad, k, j)
+            let gw_conf = emat4_get_conf(&grad.weight_grad, k, j)
 
             let new_w = old_w - alpha * gw_val
             let new_unc2 = old_w_unc * old_w_unc + alpha * alpha * gw_unc * gw_unc
             let new_unc = bk_sqrt(new_unc2)
             let new_conf = bk_min(old_w_conf, gw_conf)
 
-            out.weights = emat4_set(out.weights, k as i64, j as i64, new_w, new_unc, new_conf)
+            emat4_set(&layer.weights, k, j, new_w, new_unc, new_conf)
             j = j + 1
         }
         k = k + 1
     }
-    out
 }
 
 // =============================================================================
 // MSE loss helpers
 // =============================================================================
 
-pub fn mse_loss(output: &EpistemicVec4, target: &EpistemicVec4) -> f64 with Div {
+pub fn mse_loss(output: &EpistemicVec4, target: &EpistemicVec4) -> f64 {
     var s: f64 = 0.0
     var i = 0
     while i < 4 {
@@ -282,7 +280,7 @@ pub fn mse_loss(output: &EpistemicVec4, target: &EpistemicVec4) -> f64 with Div 
     s / 4.0
 }
 
-pub fn mse_gradient(output: &EpistemicVec4, target: &EpistemicVec4) -> EpistemicVec4 with Div {
+pub fn mse_gradient(output: &EpistemicVec4, target: &EpistemicVec4) -> EpistemicVec4 {
     var g = evec4_zeros()
     var i = 0
     while i < 4 {
@@ -350,7 +348,7 @@ fn test_backward_identity_layer() with Mut, Div, Panic {
     )
 
     // Update weights
-    layer = epistemic_dense_update(layer, grad, 0.1)
+    epistemic_dense_update(&layer, &grad, 0.1)
 
     // Forward pass again
     let output2 = epistemic_dense_forward(&layer, &input)
@@ -360,7 +358,7 @@ fn test_backward_identity_layer() with Mut, Div, Panic {
     assert(loss_after < loss_before)
 
     // Weight uncertainties should be >= initial (accumulate)
-    let w00_unc_new = emat4_get_unc(layer.weights, 0 as i64, 0 as i64)
+    let w00_unc_new = emat4_get_unc(&layer.weights, 0, 0)
     assert(w00_unc_new >= 0.0)
 }
 

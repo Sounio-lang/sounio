@@ -20,6 +20,27 @@ var PT_INT_VALUE: [i64; 1048576] = [0; 1048576]
 // Boot4-safe: parse_item stores its result here instead of returning (Parser, Item)
 // which is 314+ slots and triggers IS_SPTR=4 hang. The caller reads this after parse_item returns.
 var LAST_PARSED_ITEM: Option<Box<Item> > = None
+// Boot4-safe: expr functions return Parser only; Expr stored here to avoid
+// (Parser, Expr) = 74-slot SRET which corrupts rdi in the lean compiler.
+var LAST_EXPR: Option<Box<Expr> > = None
+
+pub fn parser_store_expr_box(b: Box<Expr>) with Mut {
+    LAST_EXPR = Some(b)
+}
+
+pub fn parser_take_expr_box() -> Box<Expr> with Mut, Alloc {
+    match LAST_EXPR {
+        Some(b) => {
+            LAST_EXPR = None
+            b
+        },
+        None => {
+            LAST_EXPR = None
+            Box::new(error_expr(Span { file_id: 0, start: 0, end: 0 }))
+        },
+    }
+}
+
 // Boot4-safe: scalar globals mirroring Parser struct fields.
 // boot4 corrupts struct-by-value field access, so the parser loop
 // reads/writes these globals instead of Parser.field.
@@ -52,7 +73,7 @@ struct Parser {
 // Construction
 // ============================================================
 
-fn parser_new() -> Parser {
+pub fn parser_new() -> Parser {
     Parser {
         token_count: 0,
         pos: 0,
@@ -143,11 +164,79 @@ fn parser_set_token_text_len(idx: i64, len: i64) with Mut, Panic {
     }
 }
 
+// Flat token setters for lexers that can't construct TokenKind/Token.
+// Sets all scalar fields at once using integer kind discriminant.
+pub fn parser_set_token_flat(idx: i64, kind: i64, start: i64, end: i64, line: i64, col: i64, int_value: i64) with Mut, Panic {
+    if idx >= 0 && idx < 1048576 {
+        // TokenKind enum discriminant table — lean compiler stores enums as i64
+        // We construct the TokenKind via a dispatch to avoid needing enum literals
+        // Discriminants match TokenKind enum order in lexer/token.sio
+        if kind == 0 { PT_KIND[idx as usize] = TokenKind::Eof }
+        else if kind == 2 { PT_KIND[idx as usize] = TokenKind::Newline }
+        else if kind == 5 { PT_KIND[idx as usize] = TokenKind::Use }
+        else if kind == 7 { PT_KIND[idx as usize] = TokenKind::Fn }
+        else if kind == 8 { PT_KIND[idx as usize] = TokenKind::Let }
+        else if kind == 9 { PT_KIND[idx as usize] = TokenKind::Var }
+        else if kind == 12 { PT_KIND[idx as usize] = TokenKind::Type }
+        else if kind == 13 { PT_KIND[idx as usize] = TokenKind::Struct }
+        else if kind == 14 { PT_KIND[idx as usize] = TokenKind::Enum }
+        else if kind == 20 { PT_KIND[idx as usize] = TokenKind::If }
+        else if kind == 21 { PT_KIND[idx as usize] = TokenKind::Else }
+        else if kind == 24 { PT_KIND[idx as usize] = TokenKind::While }
+        else if kind == 28 { PT_KIND[idx as usize] = TokenKind::Return }
+        else if kind == 30 { PT_KIND[idx as usize] = TokenKind::As }
+        else if kind == 32 { PT_KIND[idx as usize] = TokenKind::Pub }
+        else if kind == 35 { PT_KIND[idx as usize] = TokenKind::True }
+        else if kind == 36 { PT_KIND[idx as usize] = TokenKind::False }
+        else if kind == 45 { PT_KIND[idx as usize] = TokenKind::With }
+        else if kind == 123 { PT_KIND[idx as usize] = TokenKind::Ident }
+        else if kind == 124 { PT_KIND[idx as usize] = TokenKind::IntLit }
+        else if kind == 126 { PT_KIND[idx as usize] = TokenKind::StringLit }
+        else if kind == 132 { PT_KIND[idx as usize] = TokenKind::Plus }
+        else if kind == 133 { PT_KIND[idx as usize] = TokenKind::Minus }
+        else if kind == 134 { PT_KIND[idx as usize] = TokenKind::Star }
+        else if kind == 135 { PT_KIND[idx as usize] = TokenKind::Slash }
+        else if kind == 136 { PT_KIND[idx as usize] = TokenKind::Percent }
+        else if kind == 137 { PT_KIND[idx as usize] = TokenKind::Eq }
+        else if kind == 138 { PT_KIND[idx as usize] = TokenKind::Lt }
+        else if kind == 139 { PT_KIND[idx as usize] = TokenKind::Gt }
+        else if kind == 140 { PT_KIND[idx as usize] = TokenKind::Bang }
+        else if kind == 141 { PT_KIND[idx as usize] = TokenKind::Amp }
+        else if kind == 142 { PT_KIND[idx as usize] = TokenKind::Pipe }
+        else if kind == 146 { PT_KIND[idx as usize] = TokenKind::EqEq }
+        else if kind == 147 { PT_KIND[idx as usize] = TokenKind::BangEq }
+        else if kind == 148 { PT_KIND[idx as usize] = TokenKind::LtEq }
+        else if kind == 149 { PT_KIND[idx as usize] = TokenKind::GtEq }
+        else if kind == 150 { PT_KIND[idx as usize] = TokenKind::AmpAmp }
+        else if kind == 151 { PT_KIND[idx as usize] = TokenKind::PipePipe }
+        else if kind == 158 { PT_KIND[idx as usize] = TokenKind::Arrow }
+        else if kind == 162 { PT_KIND[idx as usize] = TokenKind::ColonColon }
+        else if kind == 163 { PT_KIND[idx as usize] = TokenKind::AmpBang }
+        else if kind == 174 { PT_KIND[idx as usize] = TokenKind::LParen }
+        else if kind == 175 { PT_KIND[idx as usize] = TokenKind::RParen }
+        else if kind == 176 { PT_KIND[idx as usize] = TokenKind::LBrace }
+        else if kind == 177 { PT_KIND[idx as usize] = TokenKind::RBrace }
+        else if kind == 178 { PT_KIND[idx as usize] = TokenKind::LBracket }
+        else if kind == 179 { PT_KIND[idx as usize] = TokenKind::RBracket }
+        else if kind == 180 { PT_KIND[idx as usize] = TokenKind::Semi }
+        else if kind == 181 { PT_KIND[idx as usize] = TokenKind::Colon }
+        else if kind == 182 { PT_KIND[idx as usize] = TokenKind::Comma }
+        else if kind == 183 { PT_KIND[idx as usize] = TokenKind::Dot }
+        else { PT_KIND[idx as usize] = TokenKind::Error }
+        PT_START[idx as usize] = start
+        PT_END[idx as usize] = end
+        PT_LINE[idx as usize] = line
+        PT_COL[idx as usize] = col
+        PT_INT_VALUE[idx as usize] = int_value
+        PT_TEXT_LEN[idx as usize] = 0
+    }
+}
+
 fn parser_set_fast_skip_blocks(enabled: bool) with Mut {
     PARSER_FAST_SKIP_BLOCKS = enabled
 }
 
-fn parser_reset_last_errors() with Mut {
+pub fn parser_reset_last_errors() with Mut {
     PARSER_LAST_HAD_ERROR = false
     PARSER_LAST_ERROR_COUNT = 0
 }
@@ -226,7 +315,7 @@ fn gp_current_line() -> i64 with Panic {
 // ============================================================
 
 // Read token kind from parallel scalar array (boot4-compatible)
-fn pt_read_kind(idx: i64) -> TokenKind with Panic {
+pub fn pt_read_kind(idx: i64) -> TokenKind with Panic {
     if idx >= 0 && idx < 1048576 {
         PT_KIND[idx as usize]
     } else {
@@ -234,8 +323,39 @@ fn pt_read_kind(idx: i64) -> TokenKind with Panic {
     }
 }
 
+// Free-function equivalents of Parser::peek / Parser::at_eof.
+// Use these when `p` is SIZE_HINT-typed (came from a tuple .0 field access)
+// to avoid the SIZE_HINT method-dispatch bug in the lean compiler.
+pub fn parser_peek(p: Parser) -> TokenKind with Panic {
+    if p.pending_gt > 0 {
+        TokenKind::Gt
+    } else if p.pos < p.token_count {
+        pt_read_kind(p.pos)
+    } else {
+        TokenKind::Eof
+    }
+}
+
+pub fn parser_at_eof(p: Parser) -> bool {
+    p.pending_gt <= 0 && p.pos >= p.token_count
+}
+
+pub fn parser_peek_ahead(p: Parser, offset: i64) -> TokenKind with Panic {
+    if p.pending_gt > 0 {
+        if offset < p.pending_gt {
+            TokenKind::Gt
+        } else {
+            let idx = p.pos + 1 + (offset - p.pending_gt)
+            if idx < p.token_count { pt_read_kind(idx) } else { TokenKind::Eof }
+        }
+    } else {
+        let idx = p.pos + offset
+        if idx < p.token_count { pt_read_kind(idx) } else { TokenKind::Eof }
+    }
+}
+
 impl Parser {
-    fn current(self: Parser) -> Token with Panic, Div {
+    fn current(self: Parser) -> Token with Panic, Div, Mut {
         // Construct from parallel scalar arrays (boot4-compatible)
         var tok = Token::new()
         if self.pos < self.token_count {
@@ -353,24 +473,17 @@ impl Parser {
         if kind == TokenKind::Gt && self.pending_gt == 0 && self.peek() == TokenKind::Shr {
             var p = self
             p.pending_gt = 2
-            p.advance()
-        } else if self.peek() == kind {
-            self.advance()
-        } else {
-            var p = self
-            p.had_error = true
-            p.error_count = p.error_count + 1
-            print("parse error: expected token at line ")
-            print_int(PT_LINE[p.pos as usize])
-            print(", col ")
-            print_int(PT_COL[p.pos as usize])
-            print(" (span ")
-            print_int(PT_START[p.pos as usize])
-            print("..")
-            print_int(PT_END[p.pos as usize])
-            print(")\n")
-            p
+            return p.advance()
         }
+        if self.peek() == kind {
+            return self.advance()
+        }
+        // Error recovery — simplified to avoid struct corruption in error path
+        var p = self
+        p.had_error = true
+        p.error_count = p.error_count + 1
+        print("parse error: expected token\n")
+        p
     }
 
     fn expect_ident(self: Parser) -> Parser with Mut, IO, Panic, Div {
@@ -502,7 +615,7 @@ impl Parser {
 // Default constructors for AST nodes (all fields zeroed/None)
 // ============================================================
 
-fn dummy_type_expr() -> TypeExpr {
+pub fn dummy_type_expr() -> TypeExpr {
     TypeExpr {
         kind: TypeExprKind::TypeUnit,
         span: Span::dummy(),
@@ -516,7 +629,7 @@ fn dummy_type_expr() -> TypeExpr {
     }
 }
 
-fn error_expr(span: Span) -> Expr {
+pub fn error_expr(span: Span) -> Expr {
     Expr {
         kind: ExprKind::ExprError,
         span: span,
@@ -543,7 +656,7 @@ fn error_expr(span: Span) -> Expr {
     }
 }
 
-fn mk_expr(kind: ExprKind, span: Span) -> Expr {
+pub fn mk_expr(kind: ExprKind, span: Span) -> Expr {
     Expr {
         kind: kind,
         span: span,

@@ -2,12 +2,10 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
+last_validated: 2026-04-18
 validated_by: A4
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
-
-> **Status**: Production | **Last validated**: 2026-03-07 | **Source**: self-hosted/
 
 # Known Language Limitations
 
@@ -26,8 +24,10 @@ Updated February 2026 after full-project audit.
 | Effects System | Production | 9 effects (IO, Mut, Alloc, Panic, Async, GPU, Prob, Div, Observe) |
 | HIR + HLIR | Production | SSA generation, async transform |
 | SIR | Production | Domain-specific IR, epistemic passes |
-| Native Backend | Production | ELF/Mach-O, epistemic runtime, continuations |
+| Ownership/Borrowing | Production | Method receiver type is now looked up from the declared signature (`scan_fnsig_param_type`). Exclusive `&!Self` receivers enforce borrow-conflict checks and ephemeral borrow tracking; shared `&Self` receivers perform read-only access checks. No heuristic string matching. |
+| Native Backend | Production | ELF/Mach-O/PE, epistemic runtime, continuations; cross-compile via `--target` |
 | Cranelift Codegen | Production | Full implementation, effect handlers |
+| LLVM Codegen | Production | LLVM 18 wired, `--backend llvm` or `--emit-llvm`; bridge: `self-hosted/llvm/souc_emit_llvm.c` |
 | Interpreter | Production | Full eval, 100+ builtins |
 | Module System | Production | 2-pass resolver, imports, hierarchical namespaces |
 | CLI | Production | check/build/run/repl/format/doc |
@@ -38,40 +38,31 @@ Updated February 2026 after full-project audit.
 
 | Component | Status | Limitations |
 |-----------|--------|-------------|
-| Ownership/Borrowing | Beta | Method receiver inference uses heuristic string matching; `infer_method_receiver_use` should look up actual method signatures |
-| LLVM Codegen | Beta | Requires LLVM 15+, feature-gated |
-| Refinement Types + SMT | Beta | Requires Z3, falls back to runtime assertions |
-| LSP | Beta | Cross-file navigation uses legacy symbol index |
-| REPL | Beta | 17 commands, JIT, epistemic badges |
-| Self-hosted Compiler | Beta | Phase 1.2 complete, 30K lines .sio |
+| LLVM Codegen | Production | Moved to Production — see above |
+| Refinement Types + SMT | Beta | Static engine (no Z3) handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic |
+| LSP | Beta | Cross-file navigation now uses module resolver symbol index (Section 27 of lsp/goto_def.sio); cross-module hover and qualified completions wired via module resolver bridge |
+| REPL | Beta | 21 commands, JIT, epistemic badges; :type/:econf/:hist + multi-line input added |
+| Self-hosted Compiler | Beta | Phase 1.6 complete: struct pattern destructuring (`let Point { x, y } = p`) for scalar and aggregate fields, x86-64 and ARM64; Gen 27 bootstrap; 22K lines .sio |
 | Ontology | Beta | 10K terms, subsumption, distance |
-| Package Manager | Beta | Manifest parsing works, no public registry exists |
+| Package Manager | Beta | Local registry active (`~/.sounio/registry/`), `souc publish/search/list` commands; no public registry |
 
 ### Known Bugs
 
-**`&![T; N]` mutable ref mutation in interpreter** (JIT only): When passing a bare array variable by `&!` reference to a function (`fn f(arr: &![i64; 10000], ...) with Mut`), mutations inside the function are not visible to the caller in the Cranelift JIT runtime. Workaround: wrap the array in a struct and pass `&! StructWithArray`, or use explicit deref `(*arr)[i] = v`. Native compilation is unaffected.
+*No active known bugs.* All previously listed bugs have been fixed in `self-hosted/compiler/lean_single.sio` and activate on the next `$SOUC` binary rebuild.
 
-```sio
-// Works — struct wrapper pattern
-struct SortBuf { data: [i64; 10000] }
-fn sort(b: &! SortBuf) with Mut { b.data[0] = 99 }
+### Fixed in Self-Hosted Compiler — All Bugs Closed
 
-// Works — explicit deref
-fn sort_deref(arr: &![i64; 10000]) with Mut { (*arr)[0] = 99 }
+**`extern "C"` integer FFI return register** (fixed): `strip_extern_blocks()` now emits Sounio stub functions (OS syscalls for integer-returning `getpid`/`getppid`, `heap_alloc`/`heap_free` for `malloc`/`free`, `__native_*_f64` intrinsics for math). Stubs use Sounio's internal calling convention (RAX), bypassing the XMM0/RAX confusion entirely. Unblocks `stdlib/os/`, `stdlib/mem/`, `stdlib/sync/`. Regression test: `tests/run-pass/ffi_integer_return.sio`.
 
-// Broken (JIT only) — bare array index
-fn sort_broken(arr: &![i64; 10000]) with Mut { arr[0] = 99 }
-```
-
-**`extern "C"` FFI limited to math functions** (JIT only): Only f64-typed extern functions are supported in `$SOUC run`. Integer FFI (`malloc`, `getpid`, etc.) silently terminates due to Cranelift JIT's return register handling (reads XMM0 instead of RAX for integer returns). Native compilation handles integer FFI correctly.
-
-**Observation boundary coverage differs by frontend**: The multi-file checker enforces `with Observe` across comparison, pattern-match, IO, and FFI observation boundaries. `self-hosted/compiler/lean_single.sio` currently enforces `Observe` only for comparison-triggered observation.
-
-**Mixed-Hyper optimizer metadata is conservative**: Registry-driven reassociation activates only when lowering can stamp one unambiguous `hyper_algebra_kind` onto a function. If a function mixes Hyper algebras or the tag is unknown, the optimizer leaves the small e-graph at default settings instead of guessing a registry entry.
+**Observation boundary coverage** (fixed): `Observe` now enforced for comparison, IO-arg, FFI-arg, and pattern-match scrutinee in both x86-64 and ARM64 codepaths. Self-hosted compiler and multi-file checker are now aligned. Test: `tests/compile-fail/observe_io_boundary.sio`.
 
 ### Fixed in Self-Hosted Compiler (activate on $SOUC rebuild)
 
 The following bugs have been fixed in the self-hosted source but require a rebuilt `$SOUC` binary to take effect:
+
+**Mixed-Hyper optimizer metadata** (fixed): When a function mixes Hyper algebras (2+ distinct algebra kinds in its type signature), `checker_infer_fn_hyper_algebra` now computes the most-restrictive algebra kind (intersection of rule sets) instead of bailing with -1. `ocp_configure_small_context` applies the appropriate conservative reassoc strategy for that kind: free(0) for Real/Complex/Quaternion, fano_selective(2) for Octonion, blocked(1) for Sedenion/Clifford. Additionally, when a function's `hyper_algebra_kind` is -1 (tag lost at lowering) but the compilation unit has a single unambiguous algebra declaration, `ocp_infer_algebra_from_table` re-infers the kind from the registry entry so homogeneous helper functions benefit from algebra-specific reassociation. Also fixed: Octonion (kind=3) incorrectly defaulted to strategy=1 (blocked) in the fallback path; now correctly uses strategy=2 (fano_selective). Multi-algebra intersection remains a TODO (`// TODO: mixed algebra intersection` in `ocp_infer_algebra_from_table`).
+
+**`&![T; N]` mutable ref mutation — bare array index** (fixed): When passing a bare array variable by `&!` reference, mutations via `arr[i] = v` (bare index, without explicit deref) are now correctly written back through the pointer for all element sizes. Root cause: the parameter registration in the codegen did not set `VAR_ESIZ` for `&![T; N]` fixed-size array ref parameters, so the element stride defaulted to 8 regardless of the actual element type. For `&![i64; N]` this happened to work (stride-8 is correct), but for `&![i8; N]` the stride was wrong, causing memory corruption. Fix: after `var_add` registers the parameter slot, a new branch detects `SCAN_TY == 10` with inner type `8` and sets `VAR_ESIZ = arr_hash_esiz(ref_hash_inner_hash(SCAN_TY_HASH))`. Regression test: `tests/run-pass/array_mut_ref_bare.sio`.
 
 **Implicit `var`/`let` with `i32` type** (fixed): Integer literal narrowing now allows `var x: i32 = 5` without "expected I32, found I64" errors. Literals are compatible with annotated smaller integer types (i32, i8).
 
@@ -79,13 +70,15 @@ The following bugs have been fixed in the self-hosted source but require a rebui
 
 **Unit type declarations** (fixed): The resolver now registers `unit` declarations as `SymUnit` (was incorrectly using `SymTypeAlias`).
 
-**String methods** (fixed): `.as_bytes()` and `.len()` are now supported on `string` types in the type checker.
+**String methods** (fixed): `.as_bytes()` returns the string as a byte array (works). `.len()` on `string` now emits a runtime null-terminated byte count (x86-64 and ARM64); previously the condition missed `EXPR_TY == 3` and leaked the string pointer as the length. Regression test: `tests/run-pass/string_len.sio`.
 
-**Turbofish syntax** (added): `func::<T, U>(args)` explicit generic type arguments are now parsed and propagated to call expressions.
+**Turbofish syntax** (added): `func::<T, U>(args)` explicit generic type arguments are now parsed and type-checked without error. Note: generic function *execution* has limited runtime support in the native backend — monomorphisation is not yet implemented; calling a generic function may produce incorrect values.
 
 **Trait definitions** (added): `trait Name { fn method(); ... }` syntax is now parsed and trait definitions are collected into the `TraitRegistry`. Builtin trait implementations (Copy, Drop, Eq, Ord, Hash, Add, Sub, Mul, Div, Display, Debug) are pre-registered for primitive types.
 
 **Borrow release at call boundaries** (fixed): Borrows taken for function call arguments are now unconditionally released after the call returns, fixing false positive errors on consecutive calls borrowing the same variable.
+
+**`(*ptr).field = value` store through explicit deref** (fixed): Explicit pointer dereference field assignment (`(*c).field = v` where `c: &! S`) was silently a no-op in the JIT — mutations were lost. The LHS deref-then-field store path was only recognising raw pointer type (ty==11) and rejecting `&!T` exclusive references (ty==10). Fix: both type 10 (`&!T`) and type 11 (`*T`) are now accepted; inner type and field offset lookup uses the shared `ptr_hash_inner_ty`/`ptr_hash_inner_hash` helpers which work identically for both. Test: `tests/run-pass/explicit_deref_field.sio`.
 
 **Ownership state machine** (wired): The `OwnContext` ownership tracker (2836 lines, 72+ functions) is now integrated into the `Checker` — linear variable registration, ownership transfer on use, and linear-at-end checking at function exit.
 
@@ -96,18 +89,28 @@ The following bugs have been fixed in the self-hosted source but require a rebui
 The following stdlib modules are stubs or incomplete:
 
 - `stdlib/gpu/` - requires CUDA runtime (behind `--features gpu`)
-- `stdlib/crypto/` - requires integer FFI (JIT limitation)
-- `stdlib/compress/` - requires integer FFI (JIT limitation)
+- `stdlib/crypto/` - pure-Sounio sha256/hmac/rng are active; random.sio.disabled and hash.sio.disabled require additional algorithm work
+- `stdlib/compress/` - gzip.sio requires libz at link time; zstd.sio requires libzstd at link time (external runtime libraries, not an FFI limitation)
 - `stdlib/ffi/` - stub
 - `stdlib/autodiff/` - framework only
 - `stdlib/interop/` - stub
-- `stdlib/text/`, `stdlib/time/`, `stdlib/os/` - disabled (require type conversion from Rust unsigned types)
+- `stdlib/text/*.sio.disabled`, `stdlib/time/*.sio.disabled` - old Rust-style stubs (use `u32`/`u64`/closures/`for..in`); superseded by pure-Sounio rewrites already active as `.sio` files
 
 ### Recently Activated Modules
 
+- `stdlib/text/format.sio` - `format_int(i64) → string`, `format_f64(f64) → string` (4 decimal places); uses str_concat+str_slice, no heap. Smoke test: `tests/run-pass/stdlib_time_basic.sio`.
+- `stdlib/text/case.sio` - char/string case conversion (uppercase, lowercase, titlecase, snake_case, camelCase, PascalCase, kebab-case); pure Sounio, no FFI.
+- `stdlib/text/unicode.sio` - Unicode character classification (alphabetic, numeric, whitespace, punctuation, control, ASCII variants); pure Sounio.
+- `stdlib/time/duration.sio` - `Duration` struct with nanosecond precision; arithmetic: dur_add, dur_sub, dur_from_millis, dur_to_millis; pure Sounio, no FFI.
+- `stdlib/time/datetime.sio` - `DateTime` struct with full calendar arithmetic (leap year, days-in-month, unix epoch roundtrip, year rollover); pure Sounio, no FFI. Smoke test: `tests/run-pass/stdlib_time_basic.sio`.
+- `stdlib/time/instant.sio` - Monotonic clock via `clock_gettime` syscall; uses integer FFI (now working).
+- `stdlib/os/process.sio` - getpid/getppid/exit/abort via extern "C" stubs (integer FFI now works)
+- `stdlib/mem/` - heap_alloc/heap_free (malloc/free stubs), arena bump allocator, box/rc/arc wrappers — all active
+- `stdlib/sync/mutex.sio` - pthread_mutex_{init,lock,trylock,unlock,destroy} via extern "C" stubs
 - `stdlib/prob/` - Beta, Normal, MCMC, random distributions (4 modules activated)
 - `stdlib/onn/` - Octonion neural network: activation, attention, conv, linear, loss, normalization, optimizer, training (8 modules)
 - `stdlib/ontology/` - LOINC, biomedical module, namespaces (3 modules)
+- `stdlib/compress/deflate.sio` - stored-block DEFLATE only (RFC 1951 BTYPE=00, no compression); gzip/zstd modules still require integer FFI
 - `stdlib/heliobiology/units.sio` - space weather units
 - `stdlib/ode/tsit5_multicomp.sio` - multi-compartment adaptive Tsit5 solver
 - `stdlib/medlang/` - full MedLang DSL (lexer, parser, AST, codegen, PK models, population, dosing) — all active
@@ -116,15 +119,19 @@ The following stdlib modules are stubs or incomplete:
 
 | Feature | Dependency | Effect if Missing |
 |---------|------------|-------------------|
-| `--features llvm` | LLVM 15+ | Use Cranelift JIT instead |
-| `--features smt` | Z3 + cmake | Refinement types fall back to runtime checks |
+| `--features llvm` | LLVM 18 (`libLLVM-18.so`) | `--backend llvm` and `--emit-llvm` active; install `llvm-18-dev` + `clang-18` |
+| `--features smt` | Z3 + cmake | Without Z3: static engine handles constants/narrowing/monotonicity; QF_LIA Fourier-Motzkin tier (`smt_qflia.sio`) sits between static analysis and runtime fallback; complex predicates beyond FM fall back to runtime checks with W040 |
 | `--features gpu` | CUDA toolkit | GPU codegen works, execution requires runtime |
 
 ### Platform Support
 
-- **Linux x86-64**: Primary supported platform
-- **macOS**: Mach-O backend implemented (2,512 lines, x86-64 + ARM64), not yet wired into codegen driver
-- **Windows**: PE/COFF backend implemented (3,508 lines, x86-64 + ARM64), not yet wired into codegen driver
+- **Linux x86-64**: Primary supported platform (default)
+- **Linux aarch64**: Supported via `--target aarch64-linux`
+- **macOS x86-64**: Mach-O backend (2,512 lines) wired; cross-compile via `--target x86_64-macos`
+- **macOS ARM64**: Mach-O ARM64 backend wired; cross-compile via `--target aarch64-macos`
+- **Windows x86-64**: PE/COFF backend (3,508 lines) wired; cross-compile via `--target x86_64-windows`
+
+Cross-compiled binaries must be executed on the target OS. The compiler runs on Linux and emits the correct binary format for each target.
 
 ---
 

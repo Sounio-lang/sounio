@@ -1,141 +1,64 @@
-// stdlib/thread/pool — futex-backed shared-memory thread pool handles
+// stdlib/thread/pool — Thread pool abstraction
 //
-// ThreadPool stays a copyable ID handle. Backing state lives in module-global
-// arrays shared across clone-thread workers. Submit blocks when the pool is
-// saturated and wakes when a worker slot is completed.
+// ThreadPool: fixed-size pool of worker slots with task assignment.
 
-let POOL_MAX: i64 = 16
 let POOL_MAX_WORKERS: i64 = 64
 
-let FUTEX_WAIT: i64 = 0
-let FUTEX_WAKE: i64 = 1
-let FUTEX_LOCK_PI: i64 = 6
-let FUTEX_UNLOCK_PI: i64 = 7
-
-var POOL_USED: [i64; 16] = [0; 16]
-var POOL_LOCK: [i64; 16] = [0; 16]
-var POOL_NUM_WORKERS: [i64; 16] = [0; 16]
-var POOL_TASKS_SUBMITTED: [i64; 16] = [0; 16]
-var POOL_TASKS_COMPLETED: [i64; 16] = [0; 16]
-var POOL_ACTIVE: [i64; 16] = [0; 16]
-var POOL_SEQ: [i64; 16] = [0; 16]
-var POOL_WORKER_STATUS: [i64; 1024] = [0; 1024]
-var POOL_WORKER_TASK: [i64; 1024] = [0; 1024]
-
-pub struct ThreadPool {
-    id: i64,
+struct ThreadPool {
+    worker_status: [i64; 64],
+    worker_task: [i64; 64],
+    num_workers: i64,
+    tasks_submitted: i64,
+    tasks_completed: i64,
 }
 
-fn pool_slot_valid(id: i64) -> bool {
-    return id >= 0 && id < POOL_MAX && POOL_USED[id as usize] == 1
-}
-
-fn pool_worker_index(id: i64, worker_idx: i64) -> i64 {
-    return id * POOL_MAX_WORKERS + worker_idx
-}
-
-fn pool_lock_slot(id: i64) with IO {
-    syscall6(202, &POOL_LOCK[id as usize], FUTEX_LOCK_PI, 0, 0, 0, 0)
-}
-
-fn pool_unlock_slot(id: i64) with IO {
-    syscall6(202, &POOL_LOCK[id as usize], FUTEX_UNLOCK_PI, 0, 0, 0, 0)
-}
-
-fn pool_wait_seq(id: i64, expected: i64) with IO {
-    syscall6(202, &POOL_SEQ[id as usize], FUTEX_WAIT, expected, 0, 0, 0)
-}
-
-fn pool_wake_seq(id: i64, wake_count: i64) with IO {
-    syscall6(202, &POOL_SEQ[id as usize], FUTEX_WAKE, wake_count, 0, 0, 0)
-}
-
-pub fn thread_pool_new(num_workers: i64) -> ThreadPool with Mut {
-    var pool_id: i64 = -1
-    var i: i64 = 0
-    while i < POOL_MAX {
-        if POOL_USED[i as usize] == 0 {
-            POOL_USED[i as usize] = 1
-            POOL_LOCK[i as usize] = 0
-            POOL_ACTIVE[i as usize] = 0
-            POOL_SEQ[i as usize] = 0
-            pool_id = i
-            break
+impl ThreadPool {
+    fn new(num_workers: i64) -> ThreadPool {
+        var n = num_workers
+        if n > POOL_MAX_WORKERS { n = POOL_MAX_WORKERS }
+        if n < 1 { n = 1 }
+        ThreadPool {
+            worker_status: [0; 64],
+            worker_task: [0; 64],
+            num_workers: n,
+            tasks_submitted: 0,
+            tasks_completed: 0,
         }
-        i = i + 1
     }
-    if pool_id < 0 { return ThreadPool { id: -1 } }
-    var n = num_workers
-    if n > POOL_MAX_WORKERS { n = POOL_MAX_WORKERS }
-    if n < 1 { n = 1 }
-    POOL_NUM_WORKERS[pool_id as usize] = n
-    POOL_TASKS_SUBMITTED[pool_id as usize] = 0
-    POOL_TASKS_COMPLETED[pool_id as usize] = 0
-    var j: i64 = 0
-    while j < POOL_MAX_WORKERS {
-        let idx = pool_worker_index(pool_id, j)
-        POOL_WORKER_STATUS[idx as usize] = 0
-        POOL_WORKER_TASK[idx as usize] = 0
-        j = j + 1
-    }
-    return ThreadPool { id: pool_id }
-}
 
-pub fn thread_pool_submit(pool: &! ThreadPool, task_id: i64) -> bool with Mut, IO {
-    let id = pool.id
-    if !pool_slot_valid(id) { return false }
-    while true {
-        pool_lock_slot(id)
+    fn submit(self: &! ThreadPool, task_id: i64) -> bool {
+        // Find idle worker
         var i: i64 = 0
-        while i < POOL_NUM_WORKERS[id as usize] {
-            let idx = pool_worker_index(id, i)
-            if POOL_WORKER_STATUS[idx as usize] == 0 {
-                POOL_WORKER_STATUS[idx as usize] = 1
-                POOL_WORKER_TASK[idx as usize] = task_id
-                POOL_TASKS_SUBMITTED[id as usize] = POOL_TASKS_SUBMITTED[id as usize] + 1
-                POOL_ACTIVE[id as usize] = POOL_ACTIVE[id as usize] + 1
-                pool_unlock_slot(id)
+        while i < self.num_workers {
+            if self.worker_status[i] == 0 {
+                self.worker_status[i] = 1
+                self.worker_task[i] = task_id
+                self.tasks_submitted = self.tasks_submitted + 1
                 return true
             }
             i = i + 1
         }
-        let seq = POOL_SEQ[id as usize]
-        pool_unlock_slot(id)
-        pool_wait_seq(id, seq)
+        return false
     }
-    false
-}
 
-pub fn thread_pool_complete(pool: &! ThreadPool, worker_idx: i64) with Mut, IO {
-    let id = pool.id
-    if !pool_slot_valid(id) { return }
-    if worker_idx < 0 || worker_idx >= POOL_NUM_WORKERS[id as usize] { return }
-    let idx = pool_worker_index(id, worker_idx)
-    var wake_needed = false
-    pool_lock_slot(id)
-    if POOL_WORKER_STATUS[idx as usize] != 0 {
-        POOL_WORKER_STATUS[idx as usize] = 0
-        if POOL_ACTIVE[id as usize] > 0 {
-            POOL_ACTIVE[id as usize] = POOL_ACTIVE[id as usize] - 1
+    fn complete(self: &! ThreadPool, worker_idx: i64) {
+        if worker_idx >= 0 && worker_idx < self.num_workers {
+            self.worker_status[worker_idx] = 0
+            self.tasks_completed = self.tasks_completed + 1
         }
-        POOL_TASKS_COMPLETED[id as usize] = POOL_TASKS_COMPLETED[id as usize] + 1
-        POOL_SEQ[id as usize] = POOL_SEQ[id as usize] + 1
-        wake_needed = true
     }
-    pool_unlock_slot(id)
-    if wake_needed {
-        pool_wake_seq(id, 1024)
+
+    fn active_count(self: &ThreadPool) -> i64 {
+        var count: i64 = 0
+        var i: i64 = 0
+        while i < self.num_workers {
+            if self.worker_status[i] != 0 { count = count + 1 }
+            i = i + 1
+        }
+        count
     }
-}
 
-pub fn thread_pool_active_count(pool: &! ThreadPool) -> i64 {
-    let id = pool.id
-    if !pool_slot_valid(id) { return 0 }
-    return POOL_ACTIVE[id as usize]
-}
-
-pub fn thread_pool_total_workers(pool: &! ThreadPool) -> i64 {
-    let id = pool.id
-    if !pool_slot_valid(id) { return 0 }
-    return POOL_NUM_WORKERS[id as usize]
+    fn total_workers(self: &ThreadPool) -> i64 {
+        self.num_workers
+    }
 }

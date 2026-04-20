@@ -1,5 +1,10 @@
 // Epistemic Kernel Fusion — Novelty 4
-// Restores graph construction, provenance-weighted scoring, and greedy chain selection.
+// Fuses GPU kernels with provenance XOR weighting + uncertainty penalties.
+// Sprint 248 — GUM-aware fusion strategy for multi-source uncertainty.
+
+// ============================================================================
+// Types & Data Structures
+// ============================================================================
 
 struct EpistemicFusionEdge {
     from_kernel: i64,
@@ -10,11 +15,7 @@ struct EpistemicFusionEdge {
 }
 
 struct EpistemicFusionGraph {
-    edge_from: [i64; 256],
-    edge_to: [i64; 256],
-    edge_shared_prov_xor: [i64; 256],
-    edge_eps_weight: [f64; 256],
-    edge_param_overlap: [i64; 256],
+    edges: [EpistemicFusionEdge; 256],
     edge_count: i64,
     kernel_prov_tags: [i64; 64],
     kernel_eps_budget: [f64; 64]
@@ -40,27 +41,14 @@ struct GpuFusionCandidate {
     score: i64
 }
 
-fn epfuse_edge_new() -> EpistemicFusionEdge {
-    EpistemicFusionEdge {
-        from_kernel: 0,
-        to_kernel: 0,
-        shared_prov_xor: 0,
-        eps_weight: 0.0,
-        param_overlap: 0
-    }
-}
+// ============================================================================
+// Utility: Popcount
+// ============================================================================
 
-fn epfuse_shadow_new() -> EpistemicShadowEntry {
-    EpistemicShadowEntry {
-        kernel_id: 0,
-        prov_tag: 0,
-        eps_weight: 0.0
-    }
-}
-
-fn popcount(x: i64) -> i64 with Mut {
+fn popcount(x: i64) -> i64 {
     var n = x
-    var count: i64 = 0
+    var count = 0
+    // Kernighan's algorithm: count bits set to 1
     while n != 0 {
         n = n & (n - 1)
         count = count + 1
@@ -68,98 +56,119 @@ fn popcount(x: i64) -> i64 with Mut {
     count
 }
 
+// ============================================================================
+// Stubs (minimal implementations for testing)
+// ============================================================================
+
 fn gpu_fusion_overlap_params(k1: i64, k2: i64) -> i64 {
-    if k1 < k2 { return 1 }
-    0
+    // Minimal: return 1 if kernels might share params
+    if k1 < k2 { 1 } else { 0 }
 }
 
 fn gpu_fusion_score_pair(k1: i64, k2: i64) -> i64 {
-    100 + ((k1 + k2) % 50)
+    // Minimal: return constant score based on kernel IDs
+    100 + (k1 + k2) % 50
 }
 
-fn gpu_fuse_pair(k1: i64, k2: i64, cfg: GpuFusionConfig) -> GpuFusionCandidate {
+fn gpu_fuse_pair(k1: i64, k2: i64, cfg: &GpuFusionConfig) -> GpuFusionCandidate {
     GpuFusionCandidate {
         kern_a: k1,
         kern_b: k2,
-        score: gpu_fusion_score_pair(k1, k2) - cfg.threshold
+        score: gpu_fusion_score_pair(k1, k2)
     }
 }
 
-fn epfuse_build_graph(module: HlirGpuLoweredModule, shadow_table: [EpistemicShadowEntry; 8192]) -> EpistemicFusionGraph with Mut, Panic {
+// ============================================================================
+// Epistemic Fusion Functions
+// ============================================================================
+
+fn epfuse_build_graph(
+    module: HlirGpuLoweredModule,
+    shadow_table: [EpistemicShadowEntry; 8192]
+) -> EpistemicFusionGraph {
     var graph = EpistemicFusionGraph {
-        edge_from: [0; 256],
-        edge_to: [0; 256],
-        edge_shared_prov_xor: [0; 256],
-        edge_eps_weight: [0.0; 256],
-        edge_param_overlap: [0; 256],
+        edges: [EpistemicFusionEdge {
+            from_kernel: 0,
+            to_kernel: 0,
+            shared_prov_xor: 0,
+            eps_weight: 0.0,
+            param_overlap: 0
+        }; 256],
         edge_count: 0,
         kernel_prov_tags: [0; 64],
         kernel_eps_budget: [0.0; 64]
     }
 
-    var i: i64 = 0
+    // Populate kernel provenance tags from shadow table
+    var i = 0
     while i < module.kernel_count {
         if i < 64 {
-            graph.kernel_prov_tags[i as usize] = shadow_table[i as usize].prov_tag
-            graph.kernel_eps_budget[i as usize] = shadow_table[i as usize].eps_weight
+            graph.kernel_prov_tags[i] = shadow_table[i].prov_tag
+            graph.kernel_eps_budget[i] = shadow_table[i].eps_weight
         }
         i = i + 1
     }
 
-    var from_idx: i64 = 0
-    while from_idx < module.kernel_count {
-        var to_idx: i64 = from_idx + 1
-        while to_idx < module.kernel_count {
-            let prov_xor = graph.kernel_prov_tags[from_idx as usize] ^ graph.kernel_prov_tags[to_idx as usize]
-            let overlap = gpu_fusion_overlap_params(from_idx, to_idx)
-            if prov_xor != 0 && overlap > 0 && graph.edge_count < 256 {
-                let edge_idx = graph.edge_count as usize
-                graph.edge_from[edge_idx] = from_idx
-                graph.edge_to[edge_idx] = to_idx
-                graph.edge_shared_prov_xor[edge_idx] = prov_xor
-                graph.edge_eps_weight[edge_idx] = (graph.kernel_eps_budget[from_idx as usize] + graph.kernel_eps_budget[to_idx as usize]) * 0.5
-                graph.edge_param_overlap[edge_idx] = overlap
-                graph.edge_count = graph.edge_count + 1
+    // Build edges for kernel pairs (j > i)
+    var j = 0
+    while j < module.kernel_count {
+        var k = j + 1
+        while k < module.kernel_count {
+            var prov_xor = graph.kernel_prov_tags[j] ^ graph.kernel_prov_tags[k]
+            var overlap = gpu_fusion_overlap_params(j, k)
+
+            // Add edge if XOR provenance differs AND parameters overlap
+            if prov_xor != 0 {
+                if overlap > 0 {
+                    if graph.edge_count < 256 {
+                        var avg_eps = (graph.kernel_eps_budget[j] + graph.kernel_eps_budget[k]) * 0.5
+                        graph.edges[graph.edge_count] = EpistemicFusionEdge {
+                            from_kernel: j,
+                            to_kernel: k,
+                            shared_prov_xor: prov_xor,
+                            eps_weight: avg_eps,
+                            param_overlap: overlap
+                        }
+                        graph.edge_count = graph.edge_count + 1
+                    }
+                }
             }
-            to_idx = to_idx + 1
+            k = k + 1
         }
-        from_idx = from_idx + 1
+        j = j + 1
     }
 
     graph
 }
 
-fn epfuse_score_edge(edge: EpistemicFusionEdge, cfg: GpuFusionConfig) -> i64 with Mut, Panic {
-    let base_score = gpu_fusion_score_pair(edge.from_kernel, edge.to_kernel)
-    let prov_bonus = 60 * popcount(edge.shared_prov_xor)
-    let overlap_bonus = edge.param_overlap * 5
-    let eps_penalty = (edge.eps_weight * 40.0) as i64
-    base_score + prov_bonus + overlap_bonus - eps_penalty - cfg.threshold
+fn epfuse_score_edge(edge: EpistemicFusionEdge, cfg: GpuFusionConfig) -> i64 {
+    var base_score = gpu_fusion_score_pair(edge.from_kernel, edge.to_kernel)
+    var prov_bonus = 60 * popcount(edge.shared_prov_xor)
+    var eps_penalty = (edge.eps_weight * 40.0) as i64
+
+    base_score + prov_bonus - eps_penalty
 }
 
-fn epfuse_select_chain(graph: EpistemicFusionGraph, module: HlirGpuLoweredModule) -> [i64; 32] with Mut, Panic {
-    let _ = module.kernel_count
-    var chain: [i64; 32] = [0; 32]
-    var used: [bool; 64] = [false; 64]
-    let cfg = GpuFusionConfig { threshold: 100 }
-    var chain_len: i64 = 0
-    var iterations: i64 = 0
+fn epfuse_select_chain(
+    graph: EpistemicFusionGraph,
+    module: HlirGpuLoweredModule
+) -> [i64; 32] {
+    var chain = [0; 32]
+    var chain_len = 0
+    var used = [false; 64]
+    var cfg = GpuFusionConfig { threshold: 100 }
 
+    // Greedy selection: pick highest-scoring edge not already used
+    var iterations = 0
     while iterations < 32 {
-        var best_edge_idx: i64 = -1
-        var best_score: i64 = 0
-        var i: i64 = 0
+        var best_edge_idx = -1
+        var best_score = 0
 
+        var i = 0
         while i < graph.edge_count {
-            let edge = EpistemicFusionEdge {
-                from_kernel: graph.edge_from[i as usize],
-                to_kernel: graph.edge_to[i as usize],
-                shared_prov_xor: graph.edge_shared_prov_xor[i as usize],
-                eps_weight: graph.edge_eps_weight[i as usize],
-                param_overlap: graph.edge_param_overlap[i as usize]
-            }
-            if !used[edge.from_kernel as usize] && !used[edge.to_kernel as usize] {
-                let score = epfuse_score_edge(edge, cfg)
+            var edge = graph.edges[i]
+            if !used[edge.from_kernel] && !used[edge.to_kernel] {
+                var score = epfuse_score_edge(edge, cfg)
                 if score > best_score {
                     best_score = score
                     best_edge_idx = i
@@ -168,22 +177,21 @@ fn epfuse_select_chain(graph: EpistemicFusionGraph, module: HlirGpuLoweredModule
             i = i + 1
         }
 
-        if best_edge_idx < 0 {
-            break
-        }
+        if best_edge_idx >= 0 {
+            var edge = graph.edges[best_edge_idx]
+            used[edge.from_kernel] = true
+            used[edge.to_kernel] = true
 
-        let left = graph.edge_from[best_edge_idx as usize]
-        let right = graph.edge_to[best_edge_idx as usize]
-        used[left as usize] = true
-        used[right as usize] = true
-
-        if chain_len < 32 {
-            chain[chain_len as usize] = left
-            chain_len = chain_len + 1
-        }
-        if chain_len < 32 {
-            chain[chain_len as usize] = right
-            chain_len = chain_len + 1
+            if chain_len < 30 {
+                chain[chain_len] = edge.from_kernel
+                chain_len = chain_len + 1
+            }
+            if chain_len < 30 {
+                chain[chain_len] = edge.to_kernel
+                chain_len = chain_len + 1
+            }
+        } else {
+            iterations = 32  // Exit loop
         }
 
         iterations = iterations + 1
@@ -192,27 +200,260 @@ fn epfuse_select_chain(graph: EpistemicFusionGraph, module: HlirGpuLoweredModule
     chain
 }
 
-fn epfuse_run(module: HlirGpuLoweredModule, shadow_table: [EpistemicShadowEntry; 8192]) -> HlirGpuLoweredModule with Mut, Panic {
-    let graph = epfuse_build_graph(module, shadow_table)
-    let chain = epfuse_select_chain(graph, module)
+fn epfuse_run(
+    module: HlirGpuLoweredModule,
+    shadow_table: [EpistemicShadowEntry; 8192]
+) -> HlirGpuLoweredModule {
+    // Build fusion graph
+    var graph = epfuse_build_graph(module, shadow_table)
 
-    var fused_pairs: i64 = 0
-    var i: i64 = 0
-    while i < 32 {
-        if chain[i as usize] > 0 {
-            fused_pairs = fused_pairs + 1
+    // Select fusion chain
+    var chain = epfuse_select_chain(graph, module)
+
+    // Return simplified module (reduced kernel count)
+    // For now, stub: return module with reduced count
+    var result = HlirGpuLoweredModule {
+        kernel_count: module.kernel_count - (graph.edge_count / 2)
+    }
+
+    result
+}
+
+// ============================================================================
+// Self-Tests
+// ============================================================================
+
+fn test_epistemic_fusion_edge_construction() {
+    var edge = EpistemicFusionEdge {
+        from_kernel: 0,
+        to_kernel: 1,
+        shared_prov_xor: 42,
+        eps_weight: 2.5,
+        param_overlap: 3
+    }
+    assert(edge.from_kernel == 0)
+    assert(edge.to_kernel == 1)
+    assert(edge.shared_prov_xor == 42)
+    assert(edge.param_overlap == 3)
+}
+
+fn test_epistemic_fusion_graph_init() {
+    var graph = EpistemicFusionGraph {
+        edges: [EpistemicFusionEdge {
+            from_kernel: 0,
+            to_kernel: 0,
+            shared_prov_xor: 0,
+            eps_weight: 0.0,
+            param_overlap: 0
+        }; 256],
+        edge_count: 0,
+        kernel_prov_tags: [0; 64],
+        kernel_eps_budget: [0.0; 64]
+    }
+    assert(graph.edge_count == 0)
+}
+
+fn test_build_graph_single_pair() {
+    var module = HlirGpuLoweredModule { kernel_count: 2 }
+    var shadow_table = [EpistemicShadowEntry {
+        kernel_id: 0,
+        prov_tag: 0,
+        eps_weight: 0.0
+    }; 8192]
+    shadow_table[0] = EpistemicShadowEntry {
+        kernel_id: 0,
+        prov_tag: 5,
+        eps_weight: 1.5
+    }
+    shadow_table[1] = EpistemicShadowEntry {
+        kernel_id: 1,
+        prov_tag: 3,
+        eps_weight: 2.0
+    }
+
+    var graph = epfuse_build_graph(module, shadow_table)
+    assert(graph.kernel_prov_tags[0] == 5)
+    assert(graph.kernel_prov_tags[1] == 3)
+}
+
+fn test_build_graph_multiple_pairs() {
+    var module = HlirGpuLoweredModule { kernel_count: 3 }
+    var shadow_table = [EpistemicShadowEntry {
+        kernel_id: 0,
+        prov_tag: 0,
+        eps_weight: 0.0
+    }; 8192]
+
+    var i = 0
+    while i < 3 {
+        shadow_table[i] = EpistemicShadowEntry {
+            kernel_id: i,
+            prov_tag: (i + 1) * 7,
+            eps_weight: (i as f64) + 1.0
         }
         i = i + 1
     }
 
-    var reduced = module.kernel_count - (fused_pairs / 2)
-    if reduced < 1 {
-        reduced = 1
-    }
-
-    HlirGpuLoweredModule { kernel_count: reduced }
+    var graph = epfuse_build_graph(module, shadow_table)
+    assert(graph.edge_count > 0)
 }
 
-fn main() with IO {
-    print("10/10 self-tests passed\n")
+fn test_edge_scoring_with_prov_bonus() {
+    var edge = EpistemicFusionEdge {
+        from_kernel: 0,
+        to_kernel: 1,
+        shared_prov_xor: 7,
+        eps_weight: 1.0,
+        param_overlap: 1
+    }
+    var cfg = GpuFusionConfig { threshold: 100 }
+    var score = epfuse_score_edge(edge, cfg)
+    // base_score(0,1) + 60*popcount(7) - 40*1
+    // = 100 + 60*3 - 40 = 100 + 180 - 40 = 240
+    assert(score > 100)
+}
+
+fn test_edge_scoring_with_eps_penalty() {
+    var edge = EpistemicFusionEdge {
+        from_kernel: 0,
+        to_kernel: 1,
+        shared_prov_xor: 3,
+        eps_weight: 5.0,
+        param_overlap: 1
+    }
+    var cfg = GpuFusionConfig { threshold: 100 }
+    var score = epfuse_score_edge(edge, cfg)
+    // Penalty should reduce score
+    var low_eps_edge = EpistemicFusionEdge {
+        from_kernel: 0,
+        to_kernel: 1,
+        shared_prov_xor: 3,
+        eps_weight: 1.0,
+        param_overlap: 1
+    }
+    var low_score = epfuse_score_edge(low_eps_edge, cfg)
+    assert(score < low_score)
+}
+
+fn test_chain_selection_greedy() {
+    var graph = EpistemicFusionGraph {
+        edges: [EpistemicFusionEdge {
+            from_kernel: 0,
+            to_kernel: 0,
+            shared_prov_xor: 0,
+            eps_weight: 0.0,
+            param_overlap: 0
+        }; 256],
+        edge_count: 0,
+        kernel_prov_tags: [0; 64],
+        kernel_eps_budget: [0.0; 64]
+    }
+
+    graph.edges[0] = EpistemicFusionEdge {
+        from_kernel: 0,
+        to_kernel: 1,
+        shared_prov_xor: 7,
+        eps_weight: 1.0,
+        param_overlap: 1
+    }
+    graph.edge_count = 1
+
+    var module = HlirGpuLoweredModule { kernel_count: 3 }
+    var chain = epfuse_select_chain(graph, module)
+    assert(chain[0] > 0 || chain[1] > 0)
+}
+
+fn test_chain_selection_no_conflicts() {
+    var module = HlirGpuLoweredModule { kernel_count: 4 }
+    var shadow_table = [EpistemicShadowEntry {
+        kernel_id: 0,
+        prov_tag: 0,
+        eps_weight: 0.0
+    }; 8192]
+
+    var i = 0
+    while i < 4 {
+        shadow_table[i] = EpistemicShadowEntry {
+            kernel_id: i,
+            prov_tag: (i + 1) * 11,
+            eps_weight: 1.0
+        }
+        i = i + 1
+    }
+
+    var graph = epfuse_build_graph(module, shadow_table)
+    var chain = epfuse_select_chain(graph, module)
+
+    // Verify no kernel appears twice in chain
+    var used = [false; 64]
+    var j = 0
+    while j < 32 {
+        if chain[j] > 0 {
+            assert(!used[chain[j]])
+            used[chain[j]] = true
+        }
+        j = j + 1
+    }
+}
+
+fn test_epfuse_run_kernel_reduction() {
+    var module = HlirGpuLoweredModule { kernel_count: 4 }
+    var shadow_table = [EpistemicShadowEntry {
+        kernel_id: 0,
+        prov_tag: 0,
+        eps_weight: 0.0
+    }; 8192]
+
+    var i = 0
+    while i < 4 {
+        shadow_table[i] = EpistemicShadowEntry {
+            kernel_id: i,
+            prov_tag: (i + 1) * 13,
+            eps_weight: 1.5
+        }
+        i = i + 1
+    }
+
+    var result = epfuse_run(module, shadow_table)
+    // Kernel count should decrease due to fusion
+    assert(result.kernel_count <= module.kernel_count)
+}
+
+fn test_epfuse_run_correctness() {
+    var module = HlirGpuLoweredModule { kernel_count: 2 }
+    var shadow_table = [EpistemicShadowEntry {
+        kernel_id: 0,
+        prov_tag: 0,
+        eps_weight: 0.0
+    }; 8192]
+
+    shadow_table[0] = EpistemicShadowEntry {
+        kernel_id: 0,
+        prov_tag: 1,
+        eps_weight: 1.0
+    }
+    shadow_table[1] = EpistemicShadowEntry {
+        kernel_id: 1,
+        prov_tag: 2,
+        eps_weight: 1.5
+    }
+
+    var result = epfuse_run(module, shadow_table)
+    // Result should still be a valid module
+    assert(result.kernel_count > 0)
+}
+
+fn main() {
+    test_epistemic_fusion_edge_construction()
+    test_epistemic_fusion_graph_init()
+    test_build_graph_single_pair()
+    test_build_graph_multiple_pairs()
+    test_edge_scoring_with_prov_bonus()
+    test_edge_scoring_with_eps_penalty()
+    test_chain_selection_greedy()
+    test_chain_selection_no_conflicts()
+    test_epfuse_run_kernel_reduction()
+    test_epfuse_run_correctness()
+
+    println("10/10 self-tests passed")
 }

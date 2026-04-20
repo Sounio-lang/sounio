@@ -20,6 +20,29 @@ For decades, programming languages have treated numbers as perfect: `3.14159` is
 
 ---
 
+## We Are Here To Break The Frame
+
+Sounio is not trying to become "a language with uncertainty support."
+That framing is too small.
+Libraries already propagate error bars.
+Probabilistic languages already model distributions.
+Database and provenance systems already track lineage.
+
+The stronger bet is this:
+
+**the compiler itself should know what is known, how well it is known, where it came from, and whether the next step is epistemically admissible.**
+
+That is the boundary we want to break.
+Not better annotations.
+Not prettier wrappers.
+A new category of language and compiler where confidence, provenance, observation, and uncertainty survive contact with semantics, optimization, and code generation.
+
+Call it a **Gradual Epistemic Compiler** if the term earns its keep.
+But the ambition is explicit: we are not chasing feature parity with existing PL lines.
+We are trying to establish a new design center.
+
+---
+
 ## The Five Principles of Epistemic Computing
 
 ### 1. All Knowledge is Uncertain
@@ -156,6 +179,8 @@ Sounio is not finished. It may never be. But the principles are set:
 4. **Confidence is actionable** — The system responds to what it knows and doesn't know.
 
 5. **Standards are built-in** — Compliance is not optional.
+
+6. **Primacy is earned by proof** — Vision can run ahead, but external claims must rise only when the comparison, semantics, and evidence are strong enough to hold.
 
 If you believe that science deserves better tools—that uncertainty should be computed, not ignored—that reproducibility is a feature, not an accident—then Sounio is for you.
 
