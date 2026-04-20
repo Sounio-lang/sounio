@@ -7668,6 +7668,66 @@ fn compile_primary() with IO, Mut, Panic, Div {
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
         let name_tok = EP - 1
+        // Soft keyword: async { block } — Phase 1: eager eval, identity semantics (no thread)
+        if src_match(ns, ne - ns, "async") && TK[EP as usize] == 8 {
+            EP = EP + 1  // skip {
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
+            EXPR_TY = LAST_STMT_TY
+            EXPR_TY_HASH = LAST_STMT_TY_HASH
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+            return
+        }
+        // Soft keyword: spawn { block } — Phase 1: fork(2) + MAP_SHARED mmap result slot
+        if src_match(ns, ne - ns, "spawn") && TK[EP as usize] == 8 {
+            let sp_slot_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            let sp_fork_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0)
+            em(0x48); em(0x31); em(0xff)            // xor rdi, rdi
+            em(0xbe); em32(4096)                    // mov esi, 4096
+            em(0xba); em32(3)                       // mov edx, 3
+            em(0x41); em(0xba); em32(0x21)          // mov r10d, 0x21 (MAP_SHARED|MAP_ANONYMOUS)
+            em(0x49); em(0xc7); em(0xc0); em32(-1)  // mov r8, -1
+            em(0x4d); em(0x31); em(0xc9)            // xor r9, r9
+            em(0xb8); em32(9)                       // mov eax, 9 (SYS_mmap)
+            em(0x0f); em(0x05)                      // syscall
+            emit_store_var(sp_slot_slot)
+            em(0xb8); em32(57)                      // mov eax, 57 (SYS_fork)
+            em(0x0f); em(0x05)                      // syscall
+            emit_store_var(sp_fork_slot)
+            em(0x48); em(0x85); em(0xc0)            // test rax, rax
+            em(0x0f); em(0x85)                      // jnz rel32 (parent skips child body)
+            let sp_jnz_off = CL; em32(0)
+            // Child path: execute block, store result, exit
+            EP = EP + 1  // skip {
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
+            // Block result is in rax; save then store to shared slot
+            em(0x48); em(0x89); em(0xc6)            // mov rsi, rax  ; save block result
+            emit_load_var(sp_slot_slot)              // rax = slot_ptr
+            em(0x48); em(0x89); em(0x30)            // mov [rax], rsi  ; slot[0] = result
+            em(0x31); em(0xff)                      // xor edi, edi
+            em(0xb8); em32(60)                      // mov eax, 60 (SYS_exit)
+            em(0x0f); em(0x05)                      // syscall
+            // Parent path: patch jnz target here
+            patch32(sp_jnz_off, CL)
+            let sp_handle_base = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 2
+            emit_load_var(sp_fork_slot)
+            emit_store_var(sp_handle_base + 1)      // pid at slot+1 → [ptr+0]
+            emit_load_var(sp_slot_slot)
+            emit_store_var(sp_handle_base)          // slot_ptr at slot+0 → [ptr+8]
+            em(0x48); em(0x8d); em(0x85)
+            em32(0 - (sp_handle_base + 1) * 8)     // lea rax, [rbp + offset_of_pid]
+            EXPR_TY = 100
+            EXPR_TY_HASH = 0
+            EXPR_IS_F64 = 0
+            return
+        }
         // Box::new(expr) — heap allocate via mmap
         if TK[EP as usize] == 51 && src_match(ns, ne - ns, "Box") {
             EP = EP + 1  // skip ::
@@ -9344,6 +9404,34 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             let fns = TS[EP as usize]
             let fne = TE[EP as usize]
             let fh = gl_name_hash(fns, fne)
+            // Built-in .await — Phase 1: TaskHandle join (EXPR_TY==100) or identity
+            if src_match(fns, fne - fns, "await") {
+                EP = EP + 1  // skip 'await'
+                if EXPR_TY == 100 {
+                    // TaskHandle {pid, slot_ptr}: wait4(pid) then read slot
+                    let aw_handle_slot = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(aw_handle_slot)  // save handle ptr
+                    // Load pid = [handle + 0]
+                    emit_load_var(aw_handle_slot)
+                    em(0x48); em(0x8b); em(0x00)    // mov rax, [rax]  ; pid
+                    em(0x48); em(0x89); em(0xc7)    // mov rdi, rax    ; arg1=pid
+                    em(0x48); em(0x31); em(0xf6)    // xor rsi, rsi    ; arg2=NULL
+                    em(0x48); em(0x31); em(0xd2)    // xor rdx, rdx    ; arg3=0
+                    em(0x4d); em(0x31); em(0xd2)    // xor r10, r10    ; arg4=NULL
+                    em(0xb8); em32(61)              // mov eax, 61 (SYS_wait4)
+                    em(0x0f); em(0x05)              // syscall
+                    // Read result from slot_ptr = [handle + 8]
+                    emit_load_var(aw_handle_slot)
+                    em(0x48); em(0x8b); em(0x40); em(8)  // mov rax, [rax+8] ; slot_ptr
+                    em(0x48); em(0x8b); em(0x00)         // mov rax, [rax]   ; result
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 0
+                }
+                // else: identity — value already in rax, EXPR_TY unchanged
+                continue
+            }
             // Built-in .len() — runtime length for strings, compile-time for arrays/slices
             if src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 && (EXPR_TY == 8 || EXPR_TY == 3 || type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
                 EP = EP + 1  // skip 'len'
