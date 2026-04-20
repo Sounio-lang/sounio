@@ -7728,6 +7728,49 @@ fn compile_primary() with IO, Mut, Panic, Div {
             EXPR_IS_F64 = 0
             return
         }
+        // Soft keyword: channel::<T>() — Phase 1: pipe2(2) returns (ChanTx, ChanRx) pair
+        if src_match(ns, ne - ns, "channel") && TK[EP as usize] == 51 {
+            EP = EP + 1  // skip ::
+            // Skip turbofish <T>
+            if TK[EP as usize] == 23 {
+                EP = EP + 1  // skip <
+                var td: i64 = 1
+                while td > 0 && TK[EP as usize] != 0 {
+                    if TK[EP as usize] == 23 { td = td + 1 }
+                    if TK[EP as usize] == 24 { td = td - 1 }
+                    EP = EP + 1
+                }
+            }
+            if TK[EP as usize] == 6 { EP = EP + 1 }  // skip (
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            // Allocate one stack slot as int[2] buffer for pipe2
+            let ch_fds_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            // lea rdi, [rbp + (0 - ch_fds_slot*8)]  — fds pointer
+            em(0x48); em(0x8d); em(0xbd); em32(0 - ch_fds_slot * 8)
+            em(0x31); em(0xf6)              // xor esi, esi  (flags = 0)
+            em(0xb8); em32(293)              // mov eax, 293 (SYS_pipe2)
+            em(0x0f); em(0x05)              // syscall
+            // Sign-extend read_fd = int at [rbp + (0-ch_fds_slot*8) + 0]
+            em(0x48); em(0x63); em(0x85); em32(0 - ch_fds_slot * 8)
+            let ch_read_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(ch_read_slot)
+            // Sign-extend write_fd = int at [rbp + (0-ch_fds_slot*8) + 4]
+            em(0x48); em(0x63); em(0x85); em32(0 - ch_fds_slot * 8 + 4)
+            let ch_write_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(ch_write_slot)
+            // Build 2-slot tuple [write_fd at ptr+0, read_fd at ptr+8] for (tx, rx)
+            let ch_pair_base = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 2
+            emit_load_var(ch_write_slot)
+            emit_store_var(ch_pair_base + 1)  // write_fd at [ptr+0] → tx
+            emit_load_var(ch_read_slot)
+            emit_store_var(ch_pair_base)      // read_fd at [ptr+8] → rx
+            em(0x48); em(0x8d); em(0x85); em32(0 - (ch_pair_base + 1) * 8)
+            EXPR_TY = 6
+            EXPR_TY_HASH = 1002
+            EXPR_IS_F64 = 0
+            return
+        }
         // Box::new(expr) — heap allocate via mmap
         if TK[EP as usize] == 51 && src_match(ns, ne - ns, "Box") {
             EP = EP + 1  // skip ::
@@ -9430,6 +9473,43 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_IS_F64 = 0
                 }
                 // else: identity — value already in rax, EXPR_TY unchanged
+                continue
+            }
+            // Built-in .send(v) — Phase 1: write(fd, &v, 8) on channel tx (i64 fd)
+            if src_match(fns, fne - fns, "send") && TK[(EP + 1) as usize] == 6 && EXPR_TY == 1 {
+                EP = EP + 1  // skip 'send'
+                EP = EP + 1  // skip (
+                let ch_fd_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(ch_fd_slot)          // save fd
+                compile_or()                        // value to send in rax
+                let ch_val_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(ch_val_slot)          // save value
+                if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+                emit_load_var(ch_fd_slot)
+                em(0x48); em(0x89); em(0xc7)        // mov rdi, rax  (fd)
+                em(0x48); em(0x8d); em(0xb5); em32(0 - ch_val_slot * 8)  // lea rsi, &val
+                em(0xba); em32(8)                   // mov edx, 8
+                em(0xb8); em32(1)                   // mov eax, 1 (SYS_write)
+                em(0x0f); em(0x05)                  // syscall
+                EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                continue
+            }
+            // Built-in .recv() — Phase 1: read(fd, &buf, 8) on channel rx (i64 fd)
+            if src_match(fns, fne - fns, "recv") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 && EXPR_TY == 1 {
+                EP = EP + 1  // skip 'recv'
+                EP = EP + 1  // skip (
+                EP = EP + 1  // skip )
+                let ch_fd_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(ch_fd_slot)          // save fd
+                let ch_buf_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_load_var(ch_fd_slot)
+                em(0x48); em(0x89); em(0xc7)        // mov rdi, rax  (fd)
+                em(0x48); em(0x8d); em(0xb5); em32(0 - ch_buf_slot * 8)  // lea rsi, &buf
+                em(0xba); em32(8)                   // mov edx, 8
+                em(0x31); em(0xc0)                  // xor eax, eax  (SYS_read = 0)
+                em(0x0f); em(0x05)                  // syscall
+                emit_load_var(ch_buf_slot)
+                EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                 continue
             }
             // Built-in .len() — runtime length for strings, compile-time for arrays/slices
