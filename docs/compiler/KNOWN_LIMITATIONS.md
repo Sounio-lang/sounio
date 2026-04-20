@@ -72,7 +72,7 @@ The following bugs have been fixed in the self-hosted source but require a rebui
 
 **String methods** (fixed): `.as_bytes()` returns the string as a byte array (works). `.len()` on `string` now emits a runtime null-terminated byte count (x86-64 and ARM64); previously the condition missed `EXPR_TY == 3` and leaked the string pointer as the length. Regression test: `tests/run-pass/string_len.sio`.
 
-**Turbofish syntax** (added): `func::<T, U>(args)` explicit generic type arguments are now parsed and type-checked without error. Note: generic function *execution* has limited runtime support in the native backend — monomorphisation is not yet implemented; calling a generic function may produce incorrect values.
+**Turbofish + generic monomorphization** (working): Single and dual type-parameter generic functions are monomorphised and execute correctly. `func::<T>(args)` and `func::<T, U>(args)` are fully supported — the `<TPARAMS>` section is stripped from the specialised token copy, both type parameters are substituted, and the specialised function is compiled as an ordinary function. Limitation: 3+ type parameters are not yet tracked (infrastructure covers 2 params; extend `GEN_FN_TP2_S/E` and `MONO_TY2_S/E` to add a third).
 
 **Trait definitions** (added): `trait Name { fn method(); ... }` syntax is now parsed and trait definitions are collected into the `TraitRegistry`. Builtin trait implementations (Copy, Drop, Eq, Ord, Hash, Add, Sub, Mul, Div, Display, Debug) are pre-registered for primitive types.
 

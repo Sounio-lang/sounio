@@ -173,10 +173,16 @@ var TUP_CACHE_LAST_TY: [i64; 512] = [0; 512]
 var TUP_CACHE_LAST_HASH: [i64; 512] = [0; 512]
 var TUP_CACHE_COUNT: i64 = 0
 
+// Generic function second type-param (for fn f<T, U>)
+var GEN_FN_TP2_S: [i64; 64] = [0; 32]
+var GEN_FN_TP2_E: [i64; 64] = [0; 32]
+
 // Monomorphization instantiation pairs
 var MONO_GEN: [i64; 128] = [0; 64]
 var MONO_TY_S: [i64; 128] = [0; 64]
 var MONO_TY_E: [i64; 128] = [0; 64]
+var MONO_TY2_S: [i64; 128] = [0; 64]   // second type arg (0 if single-param)
+var MONO_TY2_E: [i64; 128] = [0; 64]
 var MONO_IS_ST: [i64; 128] = [0; 64]
 var MONO_COUNT: i64 = 0
 
@@ -7822,8 +7828,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if tf_depth > 0 { tf_p = tf_p + 1 }
             }
             if tf_depth == 0 {
+                // Use only the first type arg for mono lookup (MONO_TY_S/E stores first type)
                 let g_tys = TS[(EP + 2) as usize]
-                let g_tye = TE[(tf_p - 1) as usize]
+                let g_tye = TE[(EP + 2) as usize]
                 EP = tf_p + 1
                 var g_gi: i64 = 0
                 var g_found: i64 = 0
@@ -14706,9 +14713,15 @@ fn mono_pass() with IO, Mut, Panic, Div {
                 let gi = GEN_FN_COUNT
                 GEN_FN_NS[gi as usize] = TS[(p + 1) as usize]
                 GEN_FN_NE[gi as usize] = TE[(p + 1) as usize]
-                // Store first type parameter (for now, partial multi-arg support)
+                // Store first type parameter; also record second if present (<T, U>)
                 GEN_FN_TP_S[gi as usize] = TS[(p + 3) as usize]
                 GEN_FN_TP_E[gi as usize] = TE[(p + 3) as usize]
+                GEN_FN_TP2_S[gi as usize] = 0
+                GEN_FN_TP2_E[gi as usize] = 0
+                if TK[(p + 4) as usize] == 28 && p + 5 < TC && TK[(p + 5) as usize] == 3 {
+                    GEN_FN_TP2_S[gi as usize] = TS[(p + 5) as usize]
+                    GEN_FN_TP2_E[gi as usize] = TE[(p + 5) as usize]
+                }
                 GEN_FN_BDY_S[gi as usize] = p
                 var q: i64 = tf_p + 1
                 while q < TC && TK[q as usize] != 8 { q = q + 1 }
@@ -14790,6 +14803,8 @@ fn mono_pass() with IO, Mut, Panic, Div {
                         MONO_GEN[d_mi as usize] = d_gi
                         MONO_TY_S[d_mi as usize] = d_tys
                         MONO_TY_E[d_mi as usize] = d_tye
+                        MONO_TY2_S[d_mi as usize] = 0
+                        MONO_TY2_E[d_mi as usize] = 0
                         MONO_IS_ST[d_mi as usize] = 0
                         d_ms = mono_mangle(GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize], d_tys, d_tye)
                         MAN_BUF_S[d_mi as usize] = d_ms
@@ -14808,6 +14823,8 @@ fn mono_pass() with IO, Mut, Panic, Div {
                         MONO_GEN[d_mi as usize] = d_gi
                         MONO_TY_S[d_mi as usize] = d_tys
                         MONO_TY_E[d_mi as usize] = d_tye
+                        MONO_TY2_S[d_mi as usize] = 0
+                        MONO_TY2_E[d_mi as usize] = 0
                         MONO_IS_ST[d_mi as usize] = 1
                         d_ms = mono_mangle(GEN_ST_NS[d_gi as usize], GEN_ST_NE[d_gi as usize], d_tys, d_tye)
                         MAN_BUF_S[d_mi as usize] = d_ms
@@ -14832,8 +14849,16 @@ fn mono_pass() with IO, Mut, Panic, Div {
             if tf_depth == 0 {
                 d_cns = TS[p as usize]
                 d_cne = TE[p as usize]
+                // First type arg: token at p+3
                 d_tys = TS[(p + 3) as usize]
-                d_tye = TE[(tf_p - 1) as usize]
+                d_tye = TE[(p + 3) as usize]
+                // Second type arg: token at p+5 if p+4 is ','
+                var d_ty2s: i64 = 0
+                var d_ty2e: i64 = 0
+                if TK[(p + 4) as usize] == 28 && p + 5 < TC && TK[(p + 5) as usize] == 3 {
+                    d_ty2s = TS[(p + 5) as usize]
+                    d_ty2e = TE[(p + 5) as usize]
+                }
                 d_gi = 0
                 while d_gi < GEN_FN_COUNT {
                     if name_eq(d_cns, d_cne, GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize]) {
@@ -14842,6 +14867,8 @@ fn mono_pass() with IO, Mut, Panic, Div {
                             MONO_GEN[d_mi as usize] = d_gi
                             MONO_TY_S[d_mi as usize] = d_tys
                             MONO_TY_E[d_mi as usize] = d_tye
+                            MONO_TY2_S[d_mi as usize] = d_ty2s
+                            MONO_TY2_E[d_mi as usize] = d_ty2e
                             MONO_IS_ST[d_mi as usize] = 0
                             d_ms = mono_mangle(GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize], d_tys, d_tye)
                             MAN_BUF_S[d_mi as usize] = d_ms
@@ -14862,12 +14889,16 @@ fn mono_pass() with IO, Mut, Panic, Div {
     var m_is_st: i64 = 0
     var m_tys: i64 = 0
     var m_tye: i64 = 0
+    var m_ty2s: i64 = 0
+    var m_ty2e: i64 = 0
     var m_mns: i64 = 0
     var m_mne: i64 = 0
     var m_bs: i64 = 0
     var m_be: i64 = 0
     var m_tps: i64 = 0
     var m_tpe: i64 = 0
+    var m_tp2s: i64 = 0
+    var m_tp2e: i64 = 0
     var m_gns: i64 = 0
     var m_gne: i64 = 0
     var m_ti: i64 = 0
@@ -14880,12 +14911,16 @@ fn mono_pass() with IO, Mut, Panic, Div {
         m_is_st = MONO_IS_ST[m_i as usize]
         m_tys = MONO_TY_S[m_i as usize]
         m_tye = MONO_TY_E[m_i as usize]
+        m_ty2s = MONO_TY2_S[m_i as usize]
+        m_ty2e = MONO_TY2_E[m_i as usize]
         m_mns = MAN_BUF_S[m_i as usize]
         m_mne = MAN_BUF_E[m_i as usize]
         m_bs = 0
         m_be = 0
         m_tps = 0
         m_tpe = 0
+        m_tp2s = 0
+        m_tp2e = 0
         m_gns = 0
         m_gne = 0
         if m_is_st == 0 {
@@ -14893,6 +14928,8 @@ fn mono_pass() with IO, Mut, Panic, Div {
             m_be = GEN_FN_BDY_E[m_gi as usize]
             m_tps = GEN_FN_TP_S[m_gi as usize]
             m_tpe = GEN_FN_TP_E[m_gi as usize]
+            m_tp2s = GEN_FN_TP2_S[m_gi as usize]
+            m_tp2e = GEN_FN_TP2_E[m_gi as usize]
             m_gns = GEN_FN_NS[m_gi as usize]
             m_gne = GEN_FN_NE[m_gi as usize]
         } else {
@@ -14909,8 +14946,16 @@ fn mono_pass() with IO, Mut, Panic, Div {
             m_tk = TK[m_ti as usize]
             m_tts = TS[m_ti as usize]
             m_tte = TE[m_ti as usize]
+            // Strip <TPARAMS> from function/struct signature (depth-tracking for multi-param)
             if m_skip == 0 && m_tk == 23 && m_ti > m_bs && name_eq(TS[(m_ti - 1) as usize], TE[(m_ti - 1) as usize], m_gns, m_gne) {
-                m_ti = m_ti + 3
+                var skip_depth: i64 = 1
+                m_ti = m_ti + 1
+                while m_ti < m_be && skip_depth > 0 {
+                    if TK[m_ti as usize] == 23 { skip_depth = skip_depth + 1 }
+                    if TK[m_ti as usize] == 24 { skip_depth = skip_depth - 1 }
+                    if skip_depth > 0 { m_ti = m_ti + 1 }
+                }
+                if TK[m_ti as usize] == 24 { m_ti = m_ti + 1 }
                 m_skip = 1
                 continue
             }
@@ -14928,6 +14973,16 @@ fn mono_pass() with IO, Mut, Panic, Div {
                 TK[TC as usize] = 3
                 TS[TC as usize] = m_tys
                 TE[TC as usize] = m_tye
+                TV[TC as usize] = 0
+                TL[TC as usize] = TL[m_ti as usize]
+                TC = TC + 1
+                m_ti = m_ti + 1
+                continue
+            }
+            if m_tk == 3 && m_tp2s != 0 && name_eq(m_tts, m_tte, m_tp2s, m_tp2e) {
+                TK[TC as usize] = 3
+                TS[TC as usize] = m_ty2s
+                TE[TC as usize] = m_ty2e
                 TV[TC as usize] = 0
                 TL[TC as usize] = TL[m_ti as usize]
                 TC = TC + 1
