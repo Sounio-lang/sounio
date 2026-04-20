@@ -173,10 +173,16 @@ var TUP_CACHE_LAST_TY: [i64; 512] = [0; 512]
 var TUP_CACHE_LAST_HASH: [i64; 512] = [0; 512]
 var TUP_CACHE_COUNT: i64 = 0
 
+// Generic function second type-param (for fn f<T, U>)
+var GEN_FN_TP2_S: [i64; 64] = [0; 32]
+var GEN_FN_TP2_E: [i64; 64] = [0; 32]
+
 // Monomorphization instantiation pairs
 var MONO_GEN: [i64; 128] = [0; 64]
 var MONO_TY_S: [i64; 128] = [0; 64]
 var MONO_TY_E: [i64; 128] = [0; 64]
+var MONO_TY2_S: [i64; 128] = [0; 64]   // second type arg (0 if single-param)
+var MONO_TY2_E: [i64; 128] = [0; 64]
 var MONO_IS_ST: [i64; 128] = [0; 64]
 var MONO_COUNT: i64 = 0
 
@@ -6755,13 +6761,21 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         EP = EP + 1
         let start_slot = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + 1
-        compile_or()
-        emit_store_var(start_slot)
-        if TK[EP as usize] == 64 { tc_error(borrow_tok, "slice borrows require half-open ranges") }
+        // [..n] half-open range: start defaults to 0 when .. appears first
         if TK[EP as usize] == 63 || TK[EP as usize] == 64 {
+            if TK[EP as usize] == 64 { tc_error(borrow_tok, "slice borrows require half-open ranges") }
+            em(0x31); em(0xc0)  // xor eax, eax (start = 0)
+            emit_store_var(start_slot)
             EP = EP + 1
         } else {
-            tc_error(borrow_tok, "slice borrow requires a..b range")
+            compile_or()
+            emit_store_var(start_slot)
+            if TK[EP as usize] == 64 { tc_error(borrow_tok, "slice borrows require half-open ranges") }
+            if TK[EP as usize] == 63 || TK[EP as usize] == 64 {
+                EP = EP + 1
+            } else {
+                tc_error(borrow_tok, "slice borrow requires a..b range")
+            }
         }
         let end_slot = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + 1
@@ -6804,6 +6818,18 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
                 ok_base = 1
                 if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
+            } else if lty == 3 {
+                // String base: treat as &[i8] with runtime strlen
+                let slen_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_load_var(base_ptr_slot)
+                emit_str_len()
+                emit_store_var(slen_slot)
+                base_len_slot = slen_slot
+                esiz = 1
+                elem_ty = 1
+                ok_base = 1
+                if want_mut == 0 { allow_mut = 1 }
             }
         } else {
             let gi = gl_find(rns, rne)
@@ -7668,6 +7694,183 @@ fn compile_primary() with IO, Mut, Panic, Div {
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
         let name_tok = EP - 1
+        // Soft keyword: async { block } — Phase 1: eager eval, identity semantics (no thread)
+        if src_match(ns, ne - ns, "async") && TK[EP as usize] == 8 {
+            EP = EP + 1  // skip {
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
+            EXPR_TY = LAST_STMT_TY
+            EXPR_TY_HASH = LAST_STMT_TY_HASH
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+            return
+        }
+        // Soft keyword: spawn { block } — Phase 1: fork(2) + MAP_SHARED mmap result slot
+        if src_match(ns, ne - ns, "spawn") && TK[EP as usize] == 8 {
+            let sp_slot_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            let sp_fork_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0)
+            em(0x48); em(0x31); em(0xff)            // xor rdi, rdi
+            em(0xbe); em32(4096)                    // mov esi, 4096
+            em(0xba); em32(3)                       // mov edx, 3
+            em(0x41); em(0xba); em32(0x21)          // mov r10d, 0x21 (MAP_SHARED|MAP_ANONYMOUS)
+            em(0x49); em(0xc7); em(0xc0); em32(-1)  // mov r8, -1
+            em(0x4d); em(0x31); em(0xc9)            // xor r9, r9
+            em(0xb8); em32(9)                       // mov eax, 9 (SYS_mmap)
+            em(0x0f); em(0x05)                      // syscall
+            emit_store_var(sp_slot_slot)
+            em(0xb8); em32(57)                      // mov eax, 57 (SYS_fork)
+            em(0x0f); em(0x05)                      // syscall
+            emit_store_var(sp_fork_slot)
+            em(0x48); em(0x85); em(0xc0)            // test rax, rax
+            em(0x0f); em(0x85)                      // jnz rel32 (parent skips child body)
+            let sp_jnz_off = CL; em32(0)
+            // Child path: execute block, store result, exit
+            EP = EP + 1  // skip {
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
+            // Block result is in rax; save then store to shared slot
+            em(0x48); em(0x89); em(0xc6)            // mov rsi, rax  ; save block result
+            emit_load_var(sp_slot_slot)              // rax = slot_ptr
+            em(0x48); em(0x89); em(0x30)            // mov [rax], rsi  ; slot[0] = result
+            em(0x31); em(0xff)                      // xor edi, edi
+            em(0xb8); em32(60)                      // mov eax, 60 (SYS_exit)
+            em(0x0f); em(0x05)                      // syscall
+            // Parent path: patch jnz target here
+            patch32(sp_jnz_off, CL)
+            let sp_handle_base = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 2
+            emit_load_var(sp_fork_slot)
+            emit_store_var(sp_handle_base + 1)      // pid at slot+1 → [ptr+0]
+            emit_load_var(sp_slot_slot)
+            emit_store_var(sp_handle_base)          // slot_ptr at slot+0 → [ptr+8]
+            em(0x48); em(0x8d); em(0x85)
+            em32(0 - (sp_handle_base + 1) * 8)     // lea rax, [rbp + offset_of_pid]
+            EXPR_TY = 100
+            EXPR_TY_HASH = 0
+            EXPR_IS_F64 = 0
+            return
+        }
+        // Soft keyword: channel::<T>() — Phase 1: pipe2(2) returns (ChanTx, ChanRx) pair
+        if src_match(ns, ne - ns, "channel") && TK[EP as usize] == 51 {
+            EP = EP + 1  // skip ::
+            // Skip turbofish <T>
+            if TK[EP as usize] == 23 {
+                EP = EP + 1  // skip <
+                var td: i64 = 1
+                while td > 0 && TK[EP as usize] != 0 {
+                    if TK[EP as usize] == 23 { td = td + 1 }
+                    if TK[EP as usize] == 24 { td = td - 1 }
+                    EP = EP + 1
+                }
+            }
+            if TK[EP as usize] == 6 { EP = EP + 1 }  // skip (
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            // Allocate one stack slot as int[2] buffer for pipe2
+            let ch_fds_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            // lea rdi, [rbp + (0 - ch_fds_slot*8)]  — fds pointer
+            em(0x48); em(0x8d); em(0xbd); em32(0 - ch_fds_slot * 8)
+            em(0xbe); em32(0x80000)         // mov esi, O_CLOEXEC (flags)
+            em(0xb8); em32(293)              // mov eax, 293 (SYS_pipe2)
+            em(0x0f); em(0x05)              // syscall
+            // Sign-extend read_fd = int at [rbp + (0-ch_fds_slot*8) + 0]
+            em(0x48); em(0x63); em(0x85); em32(0 - ch_fds_slot * 8)
+            let ch_read_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(ch_read_slot)
+            // Sign-extend write_fd = int at [rbp + (0-ch_fds_slot*8) + 4]
+            em(0x48); em(0x63); em(0x85); em32(0 - ch_fds_slot * 8 + 4)
+            let ch_write_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(ch_write_slot)
+            // Build 2-slot tuple [write_fd at ptr+0, read_fd at ptr+8] for (tx, rx)
+            let ch_pair_base = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 2
+            emit_load_var(ch_write_slot)
+            emit_store_var(ch_pair_base + 1)  // write_fd at [ptr+0] → tx
+            emit_load_var(ch_read_slot)
+            emit_store_var(ch_pair_base)      // read_fd at [ptr+8] → rx
+            em(0x48); em(0x8d); em(0x85); em32(0 - (ch_pair_base + 1) * 8)
+            EXPR_TY = 6
+            EXPR_TY_HASH = 1002
+            EXPR_IS_F64 = 0
+            return
+        }
+        // Soft keyword: sleep(ms: i64) → nanosleep(2) (SYS 35), ms in milliseconds
+        if src_match(ns, ne - ns, "sleep") && TK[EP as usize] == 6 {
+            EP = EP + 1  // skip (
+            compile_or()  // ms value in rax
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            let sl_ms_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(sl_ms_slot)
+            let ts_base = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 2
+            // tv_sec = ms / 1000 (idiv), tv_nsec = (ms % 1000) * 1_000_000
+            emit_load_var(sl_ms_slot)
+            em(0xb9); em32(1000)                         // mov ecx, 1000
+            em(0x48); em(0x99)                           // cqo
+            em(0x48); em(0xf7); em(0xf9)                 // idiv rcx  ; rax=ms/1000, rdx=ms%1000
+            emit_store_var(ts_base + 1)                  // tv_sec at offset 0 (lower addr)
+            em(0x48); em(0x69); em(0xd2); em32(1000000)  // imul rdx, rdx, 1_000_000
+            em(0x48); em(0x89); em(0xd0)                 // mov rax, rdx
+            emit_store_var(ts_base)                      // tv_nsec at offset 8 (higher addr)
+            // nanosleep(&timespec, NULL)
+            em(0x48); em(0x8d); em(0xbd); em32(0 - (ts_base + 1) * 8)  // lea rdi, [rbp - (ts_base+1)*8]
+            em(0x48); em(0x31); em(0xf6)                 // xor rsi, rsi
+            em(0xb8); em32(35)                           // mov eax, 35 (SYS_nanosleep)
+            em(0x0f); em(0x05)                           // syscall
+            EXPR_TY = 0; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+            return
+        }
+        // Soft keyword: join(h1, h2) → sequential wait4, returns (r1, r2) 2-tuple
+        if src_match(ns, ne - ns, "join") && TK[EP as usize] == 6 {
+            EP = EP + 1  // skip (
+            compile_or()  // h1 TaskHandle pointer in rax
+            let j_h1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(j_h1_slot)
+            if TK[EP as usize] == 28 { EP = EP + 1 }  // skip ,
+            compile_or()  // h2 TaskHandle pointer in rax
+            let j_h2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(j_h2_slot)
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            // Await h1: wait4(pid1) + read slot1 result
+            let j_r1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_load_var(j_h1_slot)
+            em(0x48); em(0x8b); em(0x00)           // mov rax, [rax]  ; pid
+            em(0x48); em(0x89); em(0xc7)            // mov rdi, rax
+            em(0x48); em(0x31); em(0xf6)            // xor rsi, rsi
+            em(0x48); em(0x31); em(0xd2)            // xor rdx, rdx
+            em(0x4d); em(0x31); em(0xd2)            // xor r10, r10
+            em(0xb8); em32(61)                      // mov eax, 61 (SYS_wait4)
+            em(0x0f); em(0x05)                      // syscall
+            emit_load_var(j_h1_slot)
+            em(0x48); em(0x8b); em(0x40); em(8)    // mov rax, [rax+8]  ; slot_ptr
+            em(0x48); em(0x8b); em(0x00)            // mov rax, [rax]    ; result
+            emit_store_var(j_r1_slot)
+            // Await h2: wait4(pid2) + read slot2 result
+            let j_r2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_load_var(j_h2_slot)
+            em(0x48); em(0x8b); em(0x00)           // mov rax, [rax]  ; pid
+            em(0x48); em(0x89); em(0xc7)            // mov rdi, rax
+            em(0x48); em(0x31); em(0xf6)            // xor rsi, rsi
+            em(0x48); em(0x31); em(0xd2)            // xor rdx, rdx
+            em(0x4d); em(0x31); em(0xd2)            // xor r10, r10
+            em(0xb8); em32(61)                      // mov eax, 61 (SYS_wait4)
+            em(0x0f); em(0x05)                      // syscall
+            emit_load_var(j_h2_slot)
+            em(0x48); em(0x8b); em(0x40); em(8)    // mov rax, [rax+8]  ; slot_ptr
+            em(0x48); em(0x8b); em(0x00)            // mov rax, [rax]    ; result
+            emit_store_var(j_r2_slot)
+            // Build 2-tuple (r1, r2): r1 at offset 0, r2 at offset 8
+            let j_tup_base = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 2
+            emit_load_var(j_r1_slot)
+            emit_store_var(j_tup_base + 1)          // r1 at lower addr = offset 0
+            emit_load_var(j_r2_slot)
+            emit_store_var(j_tup_base)              // r2 at higher addr = offset 8
+            em(0x48); em(0x8d); em(0x85); em32(0 - (j_tup_base + 1) * 8)
+            EXPR_TY = 6; EXPR_TY_HASH = 1002; EXPR_IS_F64 = 0
+            return
+        }
         // Box::new(expr) — heap allocate via mmap
         if TK[EP as usize] == 51 && src_match(ns, ne - ns, "Box") {
             EP = EP + 1  // skip ::
@@ -7719,8 +7922,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if tf_depth > 0 { tf_p = tf_p + 1 }
             }
             if tf_depth == 0 {
+                // Use only the first type arg for mono lookup (MONO_TY_S/E stores first type)
                 let g_tys = TS[(EP + 2) as usize]
-                let g_tye = TE[(tf_p - 1) as usize]
+                let g_tye = TE[(EP + 2) as usize]
                 EP = tf_p + 1
                 var g_gi: i64 = 0
                 var g_found: i64 = 0
@@ -9259,7 +9463,12 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 tc_epistemic_cast_blocked(tp)
             }
             if src_ty == 2 && cast_ty == 2 && src_hash != 0 && cast_hash != 0 && src_hash != cast_hash {
-                tc_arity_error(tp, "incompatible unit dimensions")
+                let src_dim = unit_lookup_dim(src_hash)
+                let cast_dim = unit_lookup_dim(cast_hash)
+                // Same-dimension casts (mg→kg, s→ms) are allowed; cross-dimension (mg→s) are not
+                if src_dim == 0 || cast_dim == 0 || src_dim != cast_dim {
+                    tc_arity_error(tp, "incompatible unit dimensions")
+                }
             }
             if cast_ty == 1 && src_is_f64 == 1 {
                 em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
@@ -9344,6 +9553,80 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             let fns = TS[EP as usize]
             let fne = TE[EP as usize]
             let fh = gl_name_hash(fns, fne)
+            // Built-in .await — Phase 1: TaskHandle join (EXPR_TY==100) or identity
+            if src_match(fns, fne - fns, "await") {
+                EP = EP + 1  // skip 'await'
+                if EXPR_TY == 100 {
+                    // TaskHandle {pid, slot_ptr}: wait4(pid) then read slot
+                    let aw_handle_slot = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(aw_handle_slot)  // save handle ptr
+                    // Load pid = [handle + 0]
+                    emit_load_var(aw_handle_slot)
+                    em(0x48); em(0x8b); em(0x00)    // mov rax, [rax]  ; pid
+                    em(0x48); em(0x89); em(0xc7)    // mov rdi, rax    ; arg1=pid
+                    em(0x48); em(0x31); em(0xf6)    // xor rsi, rsi    ; arg2=NULL
+                    em(0x48); em(0x31); em(0xd2)    // xor rdx, rdx    ; arg3=0
+                    em(0x4d); em(0x31); em(0xd2)    // xor r10, r10    ; arg4=NULL
+                    em(0xb8); em32(61)              // mov eax, 61 (SYS_wait4)
+                    em(0x0f); em(0x05)              // syscall
+                    // Read result from slot_ptr = [handle + 8]
+                    emit_load_var(aw_handle_slot)
+                    em(0x48); em(0x8b); em(0x40); em(8)  // mov rax, [rax+8] ; slot_ptr
+                    em(0x48); em(0x8b); em(0x00)         // mov rax, [rax]   ; result
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 0
+                }
+                // else: identity — value already in rax, EXPR_TY unchanged
+                continue
+            }
+            // Built-in .send(v) — Phase 1: write(fd, &v, 8) on channel tx (i64 fd)
+            if src_match(fns, fne - fns, "send") && TK[(EP + 1) as usize] == 6 && EXPR_TY == 1 {
+                EP = EP + 1  // skip 'send'
+                EP = EP + 1  // skip (
+                let ch_fd_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(ch_fd_slot)          // save fd
+                compile_or()                        // value to send in rax
+                let ch_val_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(ch_val_slot)          // save value
+                if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+                emit_load_var(ch_fd_slot)
+                em(0x48); em(0x89); em(0xc7)        // mov rdi, rax  (fd)
+                em(0x48); em(0x8d); em(0xb5); em32(0 - ch_val_slot * 8)  // lea rsi, &val
+                em(0xba); em32(8)                   // mov edx, 8
+                em(0xb8); em32(1)                   // mov eax, 1 (SYS_write)
+                em(0x0f); em(0x05)                  // syscall
+                EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                continue
+            }
+            // Built-in .recv() — Phase 1: read(fd, &buf, 8) on channel rx (i64 fd)
+            if src_match(fns, fne - fns, "recv") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 && EXPR_TY == 1 {
+                EP = EP + 1  // skip 'recv'
+                EP = EP + 1  // skip (
+                EP = EP + 1  // skip )
+                let ch_fd_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(ch_fd_slot)          // save fd
+                let ch_buf_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_load_var(ch_fd_slot)
+                em(0x48); em(0x89); em(0xc7)        // mov rdi, rax  (fd)
+                em(0x48); em(0x8d); em(0xb5); em32(0 - ch_buf_slot * 8)  // lea rsi, &buf
+                em(0xba); em32(8)                   // mov edx, 8
+                em(0x31); em(0xc0)                  // xor eax, eax  (SYS_read = 0)
+                em(0x0f); em(0x05)                  // syscall
+                emit_load_var(ch_buf_slot)
+                EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                continue
+            }
+            // Built-in .as_bytes() — string → &[i8] (pass-through, keeps string ptr, type becomes 3)
+            if src_match(fns, fne - fns, "as_bytes") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 && EXPR_TY == 3 {
+                EP = EP + 1  // skip 'as_bytes'
+                EP = EP + 1  // skip (
+                EP = EP + 1  // skip )
+                // rax still holds the string pointer; type stays 3 (string/byte ptr)
+                EXPR_IS_F64 = 0
+                continue
+            }
             // Built-in .len() — runtime length for strings, compile-time for arrays/slices
             if src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 && (EXPR_TY == 8 || EXPR_TY == 3 || type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
                 EP = EP + 1  // skip 'len'
@@ -14533,9 +14816,15 @@ fn mono_pass() with IO, Mut, Panic, Div {
                 let gi = GEN_FN_COUNT
                 GEN_FN_NS[gi as usize] = TS[(p + 1) as usize]
                 GEN_FN_NE[gi as usize] = TE[(p + 1) as usize]
-                // Store first type parameter (for now, partial multi-arg support)
+                // Store first type parameter; also record second if present (<T, U>)
                 GEN_FN_TP_S[gi as usize] = TS[(p + 3) as usize]
                 GEN_FN_TP_E[gi as usize] = TE[(p + 3) as usize]
+                GEN_FN_TP2_S[gi as usize] = 0
+                GEN_FN_TP2_E[gi as usize] = 0
+                if TK[(p + 4) as usize] == 28 && p + 5 < TC && TK[(p + 5) as usize] == 3 {
+                    GEN_FN_TP2_S[gi as usize] = TS[(p + 5) as usize]
+                    GEN_FN_TP2_E[gi as usize] = TE[(p + 5) as usize]
+                }
                 GEN_FN_BDY_S[gi as usize] = p
                 var q: i64 = tf_p + 1
                 while q < TC && TK[q as usize] != 8 { q = q + 1 }
@@ -14617,6 +14906,8 @@ fn mono_pass() with IO, Mut, Panic, Div {
                         MONO_GEN[d_mi as usize] = d_gi
                         MONO_TY_S[d_mi as usize] = d_tys
                         MONO_TY_E[d_mi as usize] = d_tye
+                        MONO_TY2_S[d_mi as usize] = 0
+                        MONO_TY2_E[d_mi as usize] = 0
                         MONO_IS_ST[d_mi as usize] = 0
                         d_ms = mono_mangle(GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize], d_tys, d_tye)
                         MAN_BUF_S[d_mi as usize] = d_ms
@@ -14635,6 +14926,8 @@ fn mono_pass() with IO, Mut, Panic, Div {
                         MONO_GEN[d_mi as usize] = d_gi
                         MONO_TY_S[d_mi as usize] = d_tys
                         MONO_TY_E[d_mi as usize] = d_tye
+                        MONO_TY2_S[d_mi as usize] = 0
+                        MONO_TY2_E[d_mi as usize] = 0
                         MONO_IS_ST[d_mi as usize] = 1
                         d_ms = mono_mangle(GEN_ST_NS[d_gi as usize], GEN_ST_NE[d_gi as usize], d_tys, d_tye)
                         MAN_BUF_S[d_mi as usize] = d_ms
@@ -14659,8 +14952,16 @@ fn mono_pass() with IO, Mut, Panic, Div {
             if tf_depth == 0 {
                 d_cns = TS[p as usize]
                 d_cne = TE[p as usize]
+                // First type arg: token at p+3
                 d_tys = TS[(p + 3) as usize]
-                d_tye = TE[(tf_p - 1) as usize]
+                d_tye = TE[(p + 3) as usize]
+                // Second type arg: token at p+5 if p+4 is ','
+                var d_ty2s: i64 = 0
+                var d_ty2e: i64 = 0
+                if TK[(p + 4) as usize] == 28 && p + 5 < TC && TK[(p + 5) as usize] == 3 {
+                    d_ty2s = TS[(p + 5) as usize]
+                    d_ty2e = TE[(p + 5) as usize]
+                }
                 d_gi = 0
                 while d_gi < GEN_FN_COUNT {
                     if name_eq(d_cns, d_cne, GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize]) {
@@ -14669,6 +14970,8 @@ fn mono_pass() with IO, Mut, Panic, Div {
                             MONO_GEN[d_mi as usize] = d_gi
                             MONO_TY_S[d_mi as usize] = d_tys
                             MONO_TY_E[d_mi as usize] = d_tye
+                            MONO_TY2_S[d_mi as usize] = d_ty2s
+                            MONO_TY2_E[d_mi as usize] = d_ty2e
                             MONO_IS_ST[d_mi as usize] = 0
                             d_ms = mono_mangle(GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize], d_tys, d_tye)
                             MAN_BUF_S[d_mi as usize] = d_ms
@@ -14689,12 +14992,16 @@ fn mono_pass() with IO, Mut, Panic, Div {
     var m_is_st: i64 = 0
     var m_tys: i64 = 0
     var m_tye: i64 = 0
+    var m_ty2s: i64 = 0
+    var m_ty2e: i64 = 0
     var m_mns: i64 = 0
     var m_mne: i64 = 0
     var m_bs: i64 = 0
     var m_be: i64 = 0
     var m_tps: i64 = 0
     var m_tpe: i64 = 0
+    var m_tp2s: i64 = 0
+    var m_tp2e: i64 = 0
     var m_gns: i64 = 0
     var m_gne: i64 = 0
     var m_ti: i64 = 0
@@ -14707,12 +15014,16 @@ fn mono_pass() with IO, Mut, Panic, Div {
         m_is_st = MONO_IS_ST[m_i as usize]
         m_tys = MONO_TY_S[m_i as usize]
         m_tye = MONO_TY_E[m_i as usize]
+        m_ty2s = MONO_TY2_S[m_i as usize]
+        m_ty2e = MONO_TY2_E[m_i as usize]
         m_mns = MAN_BUF_S[m_i as usize]
         m_mne = MAN_BUF_E[m_i as usize]
         m_bs = 0
         m_be = 0
         m_tps = 0
         m_tpe = 0
+        m_tp2s = 0
+        m_tp2e = 0
         m_gns = 0
         m_gne = 0
         if m_is_st == 0 {
@@ -14720,6 +15031,8 @@ fn mono_pass() with IO, Mut, Panic, Div {
             m_be = GEN_FN_BDY_E[m_gi as usize]
             m_tps = GEN_FN_TP_S[m_gi as usize]
             m_tpe = GEN_FN_TP_E[m_gi as usize]
+            m_tp2s = GEN_FN_TP2_S[m_gi as usize]
+            m_tp2e = GEN_FN_TP2_E[m_gi as usize]
             m_gns = GEN_FN_NS[m_gi as usize]
             m_gne = GEN_FN_NE[m_gi as usize]
         } else {
@@ -14736,8 +15049,16 @@ fn mono_pass() with IO, Mut, Panic, Div {
             m_tk = TK[m_ti as usize]
             m_tts = TS[m_ti as usize]
             m_tte = TE[m_ti as usize]
+            // Strip <TPARAMS> from function/struct signature (depth-tracking for multi-param)
             if m_skip == 0 && m_tk == 23 && m_ti > m_bs && name_eq(TS[(m_ti - 1) as usize], TE[(m_ti - 1) as usize], m_gns, m_gne) {
-                m_ti = m_ti + 3
+                var skip_depth: i64 = 1
+                m_ti = m_ti + 1
+                while m_ti < m_be && skip_depth > 0 {
+                    if TK[m_ti as usize] == 23 { skip_depth = skip_depth + 1 }
+                    if TK[m_ti as usize] == 24 { skip_depth = skip_depth - 1 }
+                    if skip_depth > 0 { m_ti = m_ti + 1 }
+                }
+                if TK[m_ti as usize] == 24 { m_ti = m_ti + 1 }
                 m_skip = 1
                 continue
             }
@@ -14755,6 +15076,16 @@ fn mono_pass() with IO, Mut, Panic, Div {
                 TK[TC as usize] = 3
                 TS[TC as usize] = m_tys
                 TE[TC as usize] = m_tye
+                TV[TC as usize] = 0
+                TL[TC as usize] = TL[m_ti as usize]
+                TC = TC + 1
+                m_ti = m_ti + 1
+                continue
+            }
+            if m_tk == 3 && m_tp2s != 0 && name_eq(m_tts, m_tte, m_tp2s, m_tp2e) {
+                TK[TC as usize] = 3
+                TS[TC as usize] = m_ty2s
+                TE[TC as usize] = m_ty2e
                 TV[TC as usize] = 0
                 TL[TC as usize] = TL[m_ti as usize]
                 TC = TC + 1
@@ -17947,13 +18278,21 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             EP = EP + 1
             let start_slot = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
-            compile_or_a64()
-            emit_store_var_a64(start_slot)
-            if TK[EP as usize] == 64 { tc_error(borrow_tok, "slice borrows require half-open ranges") }
+            // [..n] half-open range: start defaults to 0 when .. appears first
             if TK[EP as usize] == 63 || TK[EP as usize] == 64 {
+                if TK[EP as usize] == 64 { tc_error(borrow_tok, "slice borrows require half-open ranges") }
+                em32(0xD2800000)  // mov x0, #0 (start = 0)
+                emit_store_var_a64(start_slot)
                 EP = EP + 1
             } else {
-                tc_error(borrow_tok, "slice borrow requires a..b range")
+                compile_or_a64()
+                emit_store_var_a64(start_slot)
+                if TK[EP as usize] == 64 { tc_error(borrow_tok, "slice borrows require half-open ranges") }
+                if TK[EP as usize] == 63 || TK[EP as usize] == 64 {
+                    EP = EP + 1
+                } else {
+                    tc_error(borrow_tok, "slice borrow requires a..b range")
+                }
             }
             let end_slot = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
@@ -17996,6 +18335,18 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
                     ok_base = 1
                     if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
+                } else if lty == 3 {
+                    // String base: treat as &[i8] with runtime strlen
+                    let slen_slot = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(base_ptr_slot)
+                    emit_str_len_a64()
+                    emit_store_var_a64(slen_slot)
+                    base_len_slot = slen_slot
+                    esiz = 1
+                    elem_ty = 1
+                    ok_base = 1
+                    if want_mut == 0 { allow_mut = 1 }
                 }
             } else {
                 let gi = gl_find(rns, rne)
@@ -19154,7 +19505,12 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 tc_epistemic_cast_blocked(tp)
             }
             if src_ty == 2 && cast_ty == 2 && src_hash != 0 && cast_hash != 0 && src_hash != cast_hash {
-                tc_arity_error(tp, "incompatible unit dimensions")
+                let src_dim = unit_lookup_dim(src_hash)
+                let cast_dim = unit_lookup_dim(cast_hash)
+                // Same-dimension casts (mg→kg, s→ms) are allowed; cross-dimension (mg→s) are not
+                if src_dim == 0 || cast_dim == 0 || src_dim != cast_dim {
+                    tc_arity_error(tp, "incompatible unit dimensions")
+                }
             }
             if cast_ty == 1 && src_is_f64 == 1 {
                 em32(0x9E670000)
@@ -19237,6 +19593,14 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             let fns = TS[EP as usize]
             let fne = TE[EP as usize]
             let fh = gl_name_hash(fns, fne)
+            // Built-in .as_bytes() — string → &[i8] pass-through (ARM64)
+            if src_match(fns, fne - fns, "as_bytes") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 && EXPR_TY == 3 {
+                EP = EP + 1  // skip 'as_bytes'
+                EP = EP + 1  // skip (
+                EP = EP + 1  // skip )
+                EXPR_IS_F64 = 0
+                continue
+            }
             // Built-in .len() — runtime length for strings, compile-time for arrays/slices (ARM64)
             if src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 && (EXPR_TY == 8 || EXPR_TY == 3 || type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
                 EP = EP + 1  // skip 'len'

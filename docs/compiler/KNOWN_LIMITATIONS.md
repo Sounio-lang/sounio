@@ -42,13 +42,13 @@ Updated February 2026 after full-project audit.
 | Refinement Types + SMT | Beta | Static engine (no Z3) handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic |
 | LSP | Beta | Cross-file navigation now uses module resolver symbol index (Section 27 of lsp/goto_def.sio); cross-module hover and qualified completions wired via module resolver bridge |
 | REPL | Beta | 21 commands, JIT, epistemic badges; :type/:econf/:hist + multi-line input added |
-| Self-hosted Compiler | Beta | Phase 1.6 complete: struct pattern destructuring (`let Point { x, y } = p`) for scalar and aggregate fields, x86-64 and ARM64; Gen 27 bootstrap; 22K lines .sio |
+| Self-hosted Compiler | Beta | Phases 1.3–1.6 + Async 1-3 + generics complete (2026-04-20). Pattern matching: if-let, while-let, or-patterns (`A \| B => body`), struct destructuring. Async: `spawn { }`/`.await`, `channel::<T>()`, `sleep(ms).await`, `join(h1, h2)` — all 11 async tests PASS. Generic monomorphization: 1–2 type params. SRET: all struct sizes including 8+ fields verified. x86-64 and ARM64. |
 | Ontology | Beta | 10K terms, subsumption, distance |
 | Package Manager | Beta | Local registry active (`~/.sounio/registry/`), `souc publish/search/list` commands; no public registry |
 
 ### Known Bugs
 
-*No active known bugs.* All previously listed bugs have been fixed in `self-hosted/compiler/lean_single.sio` and activate on the next `$SOUC` binary rebuild.
+*No active known bugs.* All previously listed bugs have been fixed in `self-hosted/compiler/lean_single.sio` and are live in the current `bin/souc-native` binary (rebuilt 2026-04-20).
 
 ### Fixed in Self-Hosted Compiler — All Bugs Closed
 
@@ -56,9 +56,9 @@ Updated February 2026 after full-project audit.
 
 **Observation boundary coverage** (fixed): `Observe` now enforced for comparison, IO-arg, FFI-arg, and pattern-match scrutinee in both x86-64 and ARM64 codepaths. Self-hosted compiler and multi-file checker are now aligned. Test: `tests/compile-fail/observe_io_boundary.sio`.
 
-### Fixed in Self-Hosted Compiler (activate on $SOUC rebuild)
+### Fixed in Self-Hosted Compiler (live in current binary)
 
-The following bugs have been fixed in the self-hosted source but require a rebuilt `$SOUC` binary to take effect:
+The following bugs were fixed in `lean_single.sio` and are active in the current `bin/souc-native` (rebuilt 2026-04-20):
 
 **Mixed-Hyper optimizer metadata** (fixed): When a function mixes Hyper algebras (2+ distinct algebra kinds in its type signature), `checker_infer_fn_hyper_algebra` now computes the most-restrictive algebra kind (intersection of rule sets) instead of bailing with -1. `ocp_configure_small_context` applies the appropriate conservative reassoc strategy for that kind: free(0) for Real/Complex/Quaternion, fano_selective(2) for Octonion, blocked(1) for Sedenion/Clifford. Additionally, when a function's `hyper_algebra_kind` is -1 (tag lost at lowering) but the compilation unit has a single unambiguous algebra declaration, `ocp_infer_algebra_from_table` re-infers the kind from the registry entry so homogeneous helper functions benefit from algebra-specific reassociation. Also fixed: Octonion (kind=3) incorrectly defaulted to strategy=1 (blocked) in the fallback path; now correctly uses strategy=2 (fano_selective). Multi-algebra intersection remains a TODO (`// TODO: mixed algebra intersection` in `ocp_infer_algebra_from_table`).
 
@@ -72,9 +72,15 @@ The following bugs have been fixed in the self-hosted source but require a rebui
 
 **String methods** (fixed): `.as_bytes()` returns the string as a byte array (works). `.len()` on `string` now emits a runtime null-terminated byte count (x86-64 and ARM64); previously the condition missed `EXPR_TY == 3` and leaked the string pointer as the length. Regression test: `tests/run-pass/string_len.sio`.
 
-**Turbofish syntax** (added): `func::<T, U>(args)` explicit generic type arguments are now parsed and type-checked without error. Note: generic function *execution* has limited runtime support in the native backend — monomorphisation is not yet implemented; calling a generic function may produce incorrect values.
+**Turbofish + generic monomorphization** (working): Single and dual type-parameter generic functions are monomorphised and execute correctly. `func::<T>(args)` and `func::<T, U>(args)` are fully supported — the `<TPARAMS>` section is stripped from the specialised token copy, both type parameters are substituted, and the specialised function is compiled as an ordinary function. Limitation: 3+ type parameters are not yet tracked (infrastructure covers 2 params; extend `GEN_FN_TP2_S/E` and `MONO_TY2_S/E` to add a third).
+
+**Range slice half-open syntax** (fixed): `&arr[..n]` (start omitted, defaults to 0) now correctly compiles. Previously `compile_primary()` consumed the `..` token as an unrecognised primary, causing both the range-check and base-check to fail. Fix: detect `..`/`..=` at the start of the slice index and emit start=0 directly.
+
+**String `.as_bytes()`** (fixed): `.as_bytes()` on a `string` is now a recognised builtin — it passes through as a no-op (string pointer unchanged, type stays `string`), making `&bytes[..n]` range slices work on the result. Previously the method fell through to field-access dispatch, producing type 0 and causing the slice borrow to segfault.
 
 **Trait definitions** (added): `trait Name { fn method(); ... }` syntax is now parsed and trait definitions are collected into the `TraitRegistry`. Builtin trait implementations (Copy, Drop, Eq, Ord, Hash, Add, Sub, Mul, Div, Display, Debug) are pre-registered for primitive types.
+
+**`&string[..n]` slice borrow** (fixed): String variables are now accepted as slice borrow bases in `&bytes[..n]`. Element size is 1 byte, runtime length is computed via `strlen`. Result type is `&[i8]`. Previously produced "slice borrow requires array or slice base" warning and a null-pointer segfault.
 
 **Borrow release at call boundaries** (fixed): Borrows taken for function call arguments are now unconditionally released after the call returns, fixing false positive errors on consecutive calls borrowing the same variable.
 
