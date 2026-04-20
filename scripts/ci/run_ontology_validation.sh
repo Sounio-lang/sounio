@@ -66,8 +66,16 @@ REBUILT_GATE_INACTIVE_RC=97
 run_mode() {
     local mode="$1"
     local output_file="$2"
+    local results_dir="${3:-}"
     local label=""
     local souc_bin=""
+
+    if [[ -n "$results_dir" ]]; then
+        mkdir -p "$results_dir"
+        export SOUNIO_TEST_RESULTS_DIR="$results_dir"
+    else
+        unset SOUNIO_TEST_RESULTS_DIR 2>/dev/null || true
+    fi
 
     if [[ -n "$output_file" ]]; then
         set +e
@@ -180,6 +188,78 @@ classify_diff() {
     echo "legacy=$legacy / kernel=$kernel"
 }
 
+emit_structured_summary() {
+    local default_results_dir="$1"
+    local rebuilt_results_dir="$2"
+
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "=== Agent Consensus Summary ==="
+        echo "note: jq not available, install jq for structured output"
+        return
+    fi
+
+    local unanimous_pass=0 unanimous_fail=0 disagreement=0 fallback_override=0 other=0
+
+    if [[ -d "$rebuilt_results_dir" ]]; then
+        for f in "$rebuilt_results_dir"/*.json; do
+            [[ -f "$f" ]] || continue
+            local status resolution
+            status=$(jq -r '.status // empty' "$f" 2>/dev/null)
+            resolution=$(jq -r '.agent_witness.resolution // empty' "$f" 2>/dev/null)
+            case "$resolution" in
+                unanimous)
+                    if [[ "$status" == "pass" ]]; then unanimous_pass=$((unanimous_pass + 1)); else unanimous_fail=$((unanimous_fail + 1)); fi
+                    ;;
+                disagreement) disagreement=$((disagreement + 1)) ;;
+                fallback_override) fallback_override=$((fallback_override + 1)) ;;
+                *) other=$((other + 1)) ;;
+            esac
+        done
+    fi
+
+    local summary_file
+    summary_file=$(mktemp /tmp/sounio-ontology-summary-XXXXXX.json)
+
+    {
+        echo "{"
+        echo "  \"unanimous_pass\": $unanimous_pass,"
+        echo "  \"unanimous_fail\": $unanimous_fail,"
+        echo "  \"disagreement\": $disagreement,"
+        echo "  \"fallback_override\": $fallback_override,"
+        echo "  \"other\": $other,"
+        echo "  \"tests\": ["
+
+        local first=1
+        while IFS= read -r name; do
+            legacy="${default_status[$name]:-missing}"
+            kernel="${rebuilt_status[$name]:-missing}"
+            local classification
+            classification=$(classify_diff "$legacy" "$kernel" "$name")
+            local witness="null"
+            if [[ -d "$rebuilt_results_dir" ]]; then
+                local f="$rebuilt_results_dir/$name.json"
+                if [[ -f "$f" ]]; then
+                    witness=$(jq -c '.agent_witness // null' "$f" 2>/dev/null)
+                fi
+            fi
+            if [[ $first -eq 1 ]]; then
+                first=0
+            else
+                echo ","
+            fi
+            echo -n "    {\"name\":\"$name\",\"legacy\":\"$legacy\",\"kernel\":\"$kernel\",\"classification\":\"$classification\",\"agent_witness\":$witness}"
+        done < <(printf '%s\n' "${!seen_names[@]}" | sort)
+        echo ""
+        echo "  ]"
+        echo "}"
+    } > "$summary_file"
+
+    echo ""
+    echo "=== Agent Consensus Summary ==="
+    cat "$summary_file"
+    rm -f "$summary_file"
+}
+
 if [[ "$MODE" != "diff" ]]; then
     run_mode "$MODE" ""
     exit 0
@@ -187,12 +267,14 @@ fi
 
 DEFAULT_OUT="$(mktemp /tmp/sounio-ontology-default-XXXXXX.log)"
 REBUILT_OUT="$(mktemp /tmp/sounio-ontology-rebuilt-XXXXXX.log)"
-trap 'rm -f "$DEFAULT_OUT" "$REBUILT_OUT"' EXIT
+DEFAULT_RESULTS="$(mktemp -d /tmp/sounio-ontology-default-results-XXXXXX)"
+REBUILT_RESULTS="$(mktemp -d /tmp/sounio-ontology-rebuilt-results-XXXXXX)"
+trap 'rm -rf "$DEFAULT_OUT" "$REBUILT_OUT" "$DEFAULT_RESULTS" "$REBUILT_RESULTS"' EXIT
 
 DEFAULT_RC=0
-run_mode "default" "$DEFAULT_OUT" || DEFAULT_RC=$?
+run_mode "default" "$DEFAULT_OUT" "$DEFAULT_RESULTS" || DEFAULT_RC=$?
 REBUILT_RC=0
-run_mode "rebuilt" "$REBUILT_OUT" || REBUILT_RC=$?
+run_mode "rebuilt" "$REBUILT_OUT" "$REBUILT_RESULTS" || REBUILT_RC=$?
 
 cat "$DEFAULT_OUT"
 echo ""
@@ -227,3 +309,5 @@ while IFS= read -r name; do
     kernel="${rebuilt_status[$name]:-missing}"
     echo "  $name :: $(classify_diff "$legacy" "$kernel" "$name")"
 done < <(printf '%s\n' "${!seen_names[@]}" | sort)
+
+emit_structured_summary "$DEFAULT_RESULTS" "$REBUILT_RESULTS"

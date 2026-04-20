@@ -90,7 +90,12 @@ JUNIT_FILE="${SOUNIO_TEST_JUNIT_FILE:-$ROOT_DIR/test-results.xml}"
 # Temporary directory for parallel execution results
 TMPDIR="${TMPDIR:-/tmp}"
 TEST_TMP=$(mktemp -d "$TMPDIR/sounio-test-XXXXXX")
-trap "rm -rf $TEST_TMP" EXIT
+if [[ -z "${SOUNIO_TEST_PRESERVE_JSON:-}" ]]; then
+    trap "rm -rf $TEST_TMP" EXIT
+fi
+if [[ -n "${SOUNIO_TEST_RESULTS_DIR:-}" ]]; then
+    mkdir -p "$SOUNIO_TEST_RESULTS_DIR"
+fi
 
 # Function to run a single test
 run_test() {
@@ -284,11 +289,23 @@ run_test() {
         fi
     fi
     
+    # Parse agent witness from raw output (if present)
+    local agent_witness=""
+    agent_witness=$(echo "$output" | sed -n 's/^agent_witness=//p' | head -n 1)
+    
     # Escape output for JSON
     local escaped_output
     escaped_output=$(echo "$test_output" | sed 's/"/\\"/g' | tr '\n' ' ' | sed 's/  */ /g' | head -c 200)
     
-    echo "{\"status\":\"$status\",\"category\":\"$category\",\"name\":\"$basename\",\"time\":$duration,\"output\":\"$escaped_output\",\"idx\":$idx}" > "$output_file"
+    local json="{\"status\":\"$status\",\"category\":\"$category\",\"name\":\"$basename\",\"time\":$duration,\"output\":\"$escaped_output\",\"idx\":$idx"
+    if [[ -n "$agent_witness" ]]; then
+        json="$json,\"agent_witness\":$agent_witness"
+    fi
+    json="$json}"
+    echo "$json" > "$output_file"
+    if [[ -n "${SOUNIO_TEST_RESULTS_DIR:-}" ]]; then
+        cp "$output_file" "$SOUNIO_TEST_RESULTS_DIR/"
+    fi
 }
 
 export SOUC_BIN ROOT_DIR FILTER TEST_TMP SOUNIO_STDLIB_PATH CI SOUNIO_GPU_AVAILABLE SOUNIO_LLVM_AVAILABLE
