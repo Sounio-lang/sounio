@@ -23,7 +23,7 @@ export const heroContent: Record<Audience, {
     cta1Label: 'See How Labs Use Sounio',
     cta1Href: '/science',
     cta2Label: 'Explore a Dosing Example',
-    cta2Href: '/docs/vancomycin-uncertainty',
+    cta2Href: '/learn/vancomycin-uncertainty',
   },
   technical: {
     badge: 'CURRENT CONTRACT \u00B7 BETA COMPILER + GATED STDLIB',
