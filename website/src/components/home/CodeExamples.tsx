@@ -174,13 +174,13 @@ export default function CodeExamples() {
   };
 
   return (
-    <section id="code" className="py-32 bg-[var(--color-surface-primary)]">
+    <section id="code" className="py-[clamp(3.5rem,7vw,6rem)] bg-[color-mix(in_srgb,var(--color-bg-alt)_74%,transparent)] border-y border-[var(--glass-border)]">
       <div className="container px-4">
-        <div className="text-center mb-16">
-          <h2 className="text-4xl md:text-5xl font-bold text-[var(--color-text-primary)] mb-4">
-            See the Difference
+        <div className="mb-[2.4rem] grid gap-[0.5rem]">
+          <h2 className="font-sans text-[clamp(1.7rem,4.2vw,3rem)] font-[750] leading-[1.1] tracking-[-0.025em] text-[var(--color-text-primary)]">
+            See the difference
           </h2>
-          <p className="text-lg text-[var(--color-text-secondary)] max-w-2xl mx-auto">
+          <p className="text-[clamp(0.96rem,2.1vw,1.1rem)] text-[var(--color-text-secondary)] max-w-[68ch]">
             {isScientist
               ? 'Your current tools compute the number. Sounio computes what you can trust about that number.'
               : 'Python computes the number. Sounio computes what you can trust.'}
