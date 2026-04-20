@@ -397,7 +397,11 @@ var MEAS_KNOW_IDX:  i64 = 0
 var KM_CACHE_VI:    [i64; 32] = [-1; 32]
 var KM_CACHE_VS:    [i64; 32] = [-1; 32]
 var KM_CACHE_SS:    [i64; 32] = [-1; 32]
+var KM_CACHE_SS_1:  [i64; 32] = [-1; 32]
 var KM_CACHE_COUNT: i64 = 0
+// β⁶ multi-channel sensitivity: channel 1 shadow buffers (∂y/∂x₁)
+var EXPR_SSHADOW_1:  i64 = -1
+var VAR_SSHADOW_1:   [i64; 1024] = [-1; 1024]
 // β⁵ Inter-procedural variance: at call sites, accumulate argument variances
 // into the return EXPR_VSHADOW (conservative GUM: var_return ≈ Σ var(argᵢ))
 var B5_ARG_VSHADOW: [i64; 16] = [-1; 16]
@@ -7022,6 +7026,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     LAST_IS_LITERAL = 0
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
+    EXPR_SSHADOW_1 = -1
     let k = TK[EP as usize]
     // Integer literal
     if k == 4 {
@@ -8357,36 +8362,45 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
+                EXPR_SSHADOW_1 = -1
                 return
             }
             if src_match(ns, ne - ns, "sensitivity_of") {
                 // sensitivity_of(x: f64, k: i64) -> f64
-                // Returns the forward-mode AD sensitivity ∂x/∂input_k via the β⁴ shadow buffer.
-                // MVP: only channel k=0 is tracked.
+                // Returns the forward-mode AD sensitivity ∂x/∂input_k via the β⁶ shadow buffers.
                 EP = EP + 1  // skip (
                 EXPR_SSHADOW = -1
+                EXPR_SSHADOW_1 = -1
                 var b4s_arg_vi: i64 = -1
                 if TK[EP as usize] == 3 {
                     b4s_arg_vi = var_find_idx(TS[EP as usize], TE[EP as usize])
                 }
                 compile_or()                          // first arg (expr)
                 if TK[EP as usize] == 28 { EP = EP + 1 }
-                compile_or()                          // second arg (k) — discard for MVP
+                // Read channel index k before compile_or advances EP
+                var b4s_k: i64 = 0
+                if TK[EP as usize] == 4 { b4s_k = TV[EP as usize] }
+                compile_or()                          // second arg (k)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 var b4s_sshadow: i64 = EXPR_SSHADOW
+                var b4s_sshadow_1: i64 = EXPR_SSHADOW_1
                 if b4s_arg_vi >= 0 && VAR_SSHADOW[b4s_arg_vi as usize] >= 0 {
                     b4s_sshadow = VAR_SSHADOW[b4s_arg_vi as usize]
                 }
-                if b4s_sshadow >= 0 {
-                    emit_load_var(b4s_sshadow)
+                if b4s_arg_vi >= 0 && VAR_SSHADOW_1[b4s_arg_vi as usize] >= 0 {
+                    b4s_sshadow_1 = VAR_SSHADOW_1[b4s_arg_vi as usize]
+                }
+                if b4s_k == 1 {
+                    if b4s_sshadow_1 >= 0 { emit_load_var(b4s_sshadow_1) } else { emit_imm64(0) }
                 } else {
-                    emit_imm64(0)
+                    if b4s_sshadow >= 0 { emit_load_var(b4s_sshadow) } else { emit_imm64(0) }
                 }
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
                 EXPR_TY_HASH = 0
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
+                EXPR_SSHADOW_1 = -1
                 return
             }
             if src_match(ns, ne - ns, "lift_knowledge") {
@@ -9477,9 +9491,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if vi >= 0 {
                 EXPR_VSHADOW = VAR_VSHADOW[vi as usize]
                 EXPR_SSHADOW = VAR_SSHADOW[vi as usize]
+                EXPR_SSHADOW_1 = VAR_SSHADOW_1[vi as usize]
             } else {
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
+                EXPR_SSHADOW_1 = -1
             }
             // Track unit for dimension checking at + and -
             if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
@@ -10045,6 +10061,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     // left_vshadow == right_vshadow in x.value - x.value → Var=0 at subtraction.
                     var b4_vseed: i64 = -1
                     var b4_sseed: i64 = -1
+                    var b4_sseed_1: i64 = -1
                     var km_cached: i64 = 0
                     if LAST_EXPR_VAR_IDX >= 0 {
                         var ci: i64 = 0
@@ -10052,6 +10069,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                             if KM_CACHE_VI[ci as usize] == LAST_EXPR_VAR_IDX {
                                 b4_vseed = KM_CACHE_VS[ci as usize]
                                 b4_sseed = KM_CACHE_SS[ci as usize]
+                                b4_sseed_1 = KM_CACHE_SS_1[ci as usize]
                                 km_cached = 1
                                 ci = KM_CACHE_COUNT
                             }
@@ -10073,7 +10091,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         let b4_valsave = NEXT_SLOT
                         NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(b4_valsave)
-                        // Sensitivity seed: 1.0 for first Knowledge channel, else 0.0
+                        // Sensitivity seed ch0: 1.0 for first Knowledge access, else 0.0
                         b4_sseed = NEXT_SLOT
                         NEXT_SLOT = NEXT_SLOT + 1
                         if MEAS_KNOW_IDX == 0 {
@@ -10082,6 +10100,15 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                             emit_imm64(0)
                         }
                         emit_store_var(b4_sseed)
+                        // Sensitivity seed ch1: 1.0 for second Knowledge access, else 0.0
+                        b4_sseed_1 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 1 {
+                            emit_imm64(4607182418800017408)    // 1.0 bits
+                        } else {
+                            emit_imm64(0)
+                        }
+                        emit_store_var(b4_sseed_1)
                         MEAS_KNOW_IDX = MEAS_KNOW_IDX + 1
                         // Restore .value (emit_imm64 overwrote rax)
                         emit_load_var(b4_valsave)
@@ -10090,11 +10117,13 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                             KM_CACHE_VI[KM_CACHE_COUNT as usize] = LAST_EXPR_VAR_IDX
                             KM_CACHE_VS[KM_CACHE_COUNT as usize] = b4_vseed
                             KM_CACHE_SS[KM_CACHE_COUNT as usize] = b4_sseed
+                            KM_CACHE_SS_1[KM_CACHE_COUNT as usize] = b4_sseed_1
                             KM_CACHE_COUNT = KM_CACHE_COUNT + 1
                         }
                     }
                     EXPR_VSHADOW = b4_vseed
                     EXPR_SSHADOW = b4_sseed
+                    EXPR_SSHADOW_1 = b4_sseed_1
                     EXPR_TY = knowledge_hash_inner_ty(base_data_hash)
                     EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -10190,6 +10219,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         // β⁴: capture LHS shadow slots and save LHS value for GUM/AD propagation
         let left_vshadow = EXPR_VSHADOW
         let left_sshadow = EXPR_SSHADOW
+        let left_sshadow_1 = EXPR_SSHADOW_1
         // β⁴: always save lval for f64 mul — needed for a²·var(b) even when var(a)=0
         var b4_lval_slot: i64 = -1
         if left_f64 == 1 {
@@ -10199,6 +10229,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         }
         EXPR_VSHADOW = -1
         EXPR_SSHADOW = -1
+        EXPR_SSHADOW_1 = -1
         emit_push()
         compile_postfix()
         let right_ty = EXPR_TY
@@ -10208,6 +10239,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         // always save rval for f64 mul — needed for b²·var(a) even when var(b)=0
         let right_vshadow = EXPR_VSHADOW
         let right_sshadow = EXPR_SSHADOW
+        let right_sshadow_1 = EXPR_SSHADOW_1
         var b4_rval_slot: i64 = -1
         if left_f64 == 1 {
             b4_rval_slot = NEXT_SLOT
@@ -10296,8 +10328,9 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         // IMPORTANT: save the arithmetic result first — shadow computation overwrites rax
         EXPR_VSHADOW = -1
         EXPR_SSHADOW = -1
+        EXPR_SSHADOW_1 = -1
         var b4_result_slot_m: i64 = -1
-        if left_f64 == 1 && op == 19 && ((left_vshadow >= 0 || right_vshadow >= 0) || (left_sshadow >= 0 || right_sshadow >= 0)) {
+        if left_f64 == 1 && op == 19 && ((left_vshadow >= 0 || right_vshadow >= 0) || (left_sshadow >= 0 || right_sshadow >= 0) || (left_sshadow_1 >= 0 || right_sshadow_1 >= 0)) {
             b4_result_slot_m = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var(b4_result_slot_m)
         }
@@ -10342,6 +10375,22 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             em(0x59); emit_f64_add_from_rcx_rax_x86()
             emit_store_var(b4s_res)
             EXPR_SSHADOW = b4s_res
+        }
+        if left_f64 == 1 && op == 19 && (left_sshadow_1 >= 0 || right_sshadow_1 >= 0) {
+            // sens_ch1(a*b) = a·sens_ch1(b) + b·sens_ch1(a)
+            let b4s1_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            if b4_lval_slot >= 0 { emit_load_var(b4_lval_slot) } else { emit_imm64(0) }
+            em(0x50)
+            if right_sshadow_1 >= 0 { emit_load_var(right_sshadow_1) } else { emit_imm64(0) }
+            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            em(0x50)
+            if b4_rval_slot >= 0 { emit_load_var(b4_rval_slot) } else { emit_imm64(0) }
+            em(0x50)
+            if left_sshadow_1 >= 0 { emit_load_var(left_sshadow_1) } else { emit_imm64(0) }
+            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            em(0x59); emit_f64_add_from_rcx_rax_x86()
+            emit_store_var(b4s1_res)
+            EXPR_SSHADOW_1 = b4s1_res
         }
         // Restore arithmetic result (shadow computation uses rax for intermediate work)
         if b4_result_slot_m >= 0 { emit_load_var(b4_result_slot_m) }
@@ -10412,8 +10461,10 @@ fn compile_additive() with IO, Mut, Panic, Div {
         // β⁴: capture LHS shadow slots
         let left_vshadow_a = EXPR_VSHADOW
         let left_sshadow_a = EXPR_SSHADOW
+        let left_sshadow_a_1 = EXPR_SSHADOW_1
         EXPR_VSHADOW = -1
         EXPR_SSHADOW = -1
+        EXPR_SSHADOW_1 = -1
         emit_push()
         compile_multiplicative()
         let right_ty = EXPR_TY
@@ -10422,6 +10473,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         // β⁴: capture RHS shadow slots
         let right_vshadow_a = EXPR_VSHADOW
         let right_sshadow_a = EXPR_SSHADOW
+        let right_sshadow_a_1 = EXPR_SSHADOW_1
         // Gen 19: unit dimension mismatch — compare packed dim vectors, not name hashes
         // This allows g + kg (both mass^1) while catching m + kg (length vs mass)
         if left_unit_dim != 0 && right_unit_dim != 0 && left_unit_dim != right_unit_dim {
@@ -10488,8 +10540,9 @@ fn compile_additive() with IO, Mut, Panic, Div {
                     // Save result first — shadow computation overwrites rax
                     EXPR_VSHADOW = -1
                     EXPR_SSHADOW = -1
+                    EXPR_SSHADOW_1 = -1
                     var b4_result_slot_a: i64 = -1
-                    if (left_vshadow_a >= 0 || right_vshadow_a >= 0) || (left_sshadow_a >= 0 || right_sshadow_a >= 0) {
+                    if (left_vshadow_a >= 0 || right_vshadow_a >= 0) || (left_sshadow_a >= 0 || right_sshadow_a >= 0) || (left_sshadow_a_1 >= 0 || right_sshadow_a_1 >= 0) {
                         b4_result_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(b4_result_slot_a)
                     }
@@ -10526,6 +10579,18 @@ fn compile_additive() with IO, Mut, Panic, Div {
                         emit_store_var(b4sa_res)
                         EXPR_SSHADOW = b4sa_res
                     }
+                    if left_sshadow_a_1 >= 0 || right_sshadow_a_1 >= 0 {
+                        // sens_ch1(a+b)=sens_ch1(a)+sens_ch1(b); sens_ch1(a-b)=sens_ch1(a)-sens_ch1(b)
+                        let b4sa1_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        if left_sshadow_a_1 >= 0 { emit_load_var(left_sshadow_a_1) } else { emit_imm64(0) }
+                        em(0x50)
+                        if right_sshadow_a_1 >= 0 { emit_load_var(right_sshadow_a_1) } else { emit_imm64(0) }
+                        em(0x59)
+                        if op == 17 { emit_f64_add_from_rcx_rax_x86() }
+                        else { emit_f64_sub_from_rcx_rax_x86() }
+                        emit_store_var(b4sa1_res)
+                        EXPR_SSHADOW_1 = b4sa1_res
+                    }
                     if b4_result_slot_a >= 0 { emit_load_var(b4_result_slot_a) }
                 } else {
                     if op == 17 { em(0x48); em(0x01); em(0xc8) }  // add rax, rcx (commutative: rcx+rax = ok)
@@ -10533,6 +10598,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
                     EXPR_TY = 1
                     EXPR_VSHADOW = -1
                     EXPR_SSHADOW = -1
+                    EXPR_SSHADOW_1 = -1
                 }
                 if left_ty == 2 { EXPR_TY_HASH = left_hash } else { EXPR_TY_HASH = 0 }
             }
@@ -11978,8 +12044,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     VAR_VSHADOW[vix as usize] = EXPR_VSHADOW
                 }
                 VAR_SSHADOW[vix as usize] = EXPR_SSHADOW
+                VAR_SSHADOW_1[vix as usize] = EXPR_SSHADOW_1
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
+                EXPR_SSHADOW_1 = -1
             }
         }
         return
@@ -12095,12 +12163,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         emit_store_var(fixed_vs)
                     }
                     VAR_SSHADOW[ty_vi as usize] = EXPR_SSHADOW
+                    VAR_SSHADOW_1[ty_vi as usize] = EXPR_SSHADOW_1
                 } else {
                     VAR_VSHADOW[ty_vi as usize] = EXPR_VSHADOW
                     VAR_SSHADOW[ty_vi as usize] = EXPR_SSHADOW
+                    VAR_SSHADOW_1[ty_vi as usize] = EXPR_SSHADOW_1
                 }
             }
-            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
+            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1
             // Update closure flag on reassignment
             if EXPR_TY == 9 { LAST_EXPR_IS_CLOSURE = 1 }
             var vi: i64 = VAR_COUNT - 1
@@ -16500,9 +16570,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             NEXT_SLOT = NEXT_SLOT + 1
         }
         FRAME_PATCH_COUNT = 0
-        // β⁴: reset shadow state for new function scope
+        // β⁴/β⁶: reset shadow state for new function scope
         EXPR_VSHADOW = -1
         EXPR_SSHADOW = -1
+        EXPR_SSHADOW_1 = -1
         MEAS_CALL_IDX = 0
         MEAS_KNOW_IDX = 0
         KM_CACHE_COUNT = 0
@@ -18378,6 +18449,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_LINEAR = 0
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
+    EXPR_SSHADOW_1 = -1
     let k = TK[EP as usize]
     // Integer literal
     if k == 4 {
@@ -19170,31 +19242,38 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_imm64_a64(0)
                 }
                 EXPR_IS_F64 = 1; EXPR_TY = 2; EXPR_TY_HASH = 0
-                EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
+                EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1
                 return
             }
             if src_match(ns, ne - ns, "sensitivity_of") {
                 EP = EP + 1
                 EXPR_SSHADOW = -1
+                EXPR_SSHADOW_1 = -1
                 var b4as_arg_vi: i64 = -1
                 if TK[EP as usize] == 3 {
                     b4as_arg_vi = var_find_idx(TS[EP as usize], TE[EP as usize])
                 }
                 compile_or_a64()
                 if TK[EP as usize] == 28 { EP = EP + 1 }
+                var b4as_k: i64 = 0
+                if TK[EP as usize] == 4 { b4as_k = TV[EP as usize] }
                 compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 var b4as_sshadow: i64 = EXPR_SSHADOW
+                var b4as_sshadow_1: i64 = EXPR_SSHADOW_1
                 if b4as_arg_vi >= 0 && VAR_SSHADOW[b4as_arg_vi as usize] >= 0 {
                     b4as_sshadow = VAR_SSHADOW[b4as_arg_vi as usize]
                 }
-                if b4as_sshadow >= 0 {
-                    emit_load_var_a64(b4as_sshadow)
+                if b4as_arg_vi >= 0 && VAR_SSHADOW_1[b4as_arg_vi as usize] >= 0 {
+                    b4as_sshadow_1 = VAR_SSHADOW_1[b4as_arg_vi as usize]
+                }
+                if b4as_k == 1 {
+                    if b4as_sshadow_1 >= 0 { emit_load_var_a64(b4as_sshadow_1) } else { emit_imm64_a64(0) }
                 } else {
-                    emit_imm64_a64(0)
+                    if b4as_sshadow >= 0 { emit_load_var_a64(b4as_sshadow) } else { emit_imm64_a64(0) }
                 }
                 EXPR_IS_F64 = 1; EXPR_TY = 2; EXPR_TY_HASH = 0
-                EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
+                EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1
                 return
             }
             if src_match(ns, ne - ns, "arg_count") {
@@ -19886,9 +19965,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 // β⁴: propagate variance/sensitivity shadow for this variable
                 EXPR_VSHADOW = VAR_VSHADOW[vi as usize]
                 EXPR_SSHADOW = VAR_SSHADOW[vi as usize]
+                EXPR_SSHADOW_1 = VAR_SSHADOW_1[vi as usize]
             } else {
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
+                EXPR_SSHADOW_1 = -1
             }
             var_mark_used(ns, ne)
         } else {
@@ -20226,7 +20307,17 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                         emit_imm64_a64(0)
                     }
                     emit_store_var_a64(b4a_sseed)
+                    // Sensitivity seed ch1: 1.0 for second Knowledge access, else 0.0
+                    let b4a_sseed_1 = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    if MEAS_KNOW_IDX == 1 {
+                        emit_imm64_a64(4607182418800017408)   // 1.0 bits
+                    } else {
+                        emit_imm64_a64(0)
+                    }
+                    emit_store_var_a64(b4a_sseed_1)
                     EXPR_SSHADOW = b4a_sseed
+                    EXPR_SSHADOW_1 = b4a_sseed_1
                     MEAS_KNOW_IDX = MEAS_KNOW_IDX + 1
                     // Restore .value (emit_imm64_a64 overwrote x0 with sensitivity seed)
                     emit_load_var_a64(b4a_valsave)
@@ -20313,6 +20404,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         // β⁴: capture LHS shadow + save LHS f64 value for GUM/AD propagation
         let b4am_left_vshadow = EXPR_VSHADOW
         let b4am_left_sshadow = EXPR_SSHADOW
+        let b4am_left_sshadow_1 = EXPR_SSHADOW_1
         // β⁴: always save lval/rval for f64 mul (a²·var(b) needs a even when var(a)=0)
         var b4am_lval_slot: i64 = -1
         if left_f64 == 1 {
@@ -20320,12 +20412,13 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_lval_slot)
         }
-        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
+        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1
         emit_push_a64()
         compile_postfix_a64()
         // β⁴: capture RHS shadow + save RHS f64 value
         let b4am_right_vshadow = EXPR_VSHADOW
         let b4am_right_sshadow = EXPR_SSHADOW
+        let b4am_right_sshadow_1 = EXPR_SSHADOW_1
         var b4am_rval_slot: i64 = -1
         if left_f64 == 1 {
             b4am_rval_slot = NEXT_SLOT
@@ -20348,9 +20441,9 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         }
         // β⁴: GUM variance propagation through *
         // Save result first — shadow computation overwrites x0
-        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
+        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1
         var b4am_result_slot: i64 = -1
-        if left_f64 == 1 && op == 19 && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || (b4am_left_sshadow >= 0 || b4am_right_sshadow >= 0)) {
+        if left_f64 == 1 && op == 19 && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || (b4am_left_sshadow >= 0 || b4am_right_sshadow >= 0) || (b4am_left_sshadow_1 >= 0 || b4am_right_sshadow_1 >= 0)) {
             b4am_result_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_result_slot)
         }
@@ -20396,6 +20489,22 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             emit_store_var_a64(b4am_sres)
             EXPR_SSHADOW = b4am_sres
         }
+        if left_f64 == 1 && op == 19 && (b4am_left_sshadow_1 >= 0 || b4am_right_sshadow_1 >= 0) {
+            // sens_ch1(a*b) = a·sens_ch1(b) + b·sens_ch1(a)
+            if b4am_lval_slot >= 0 { emit_load_var_a64(b4am_lval_slot) } else { emit_imm64_a64(0) }
+            emit_push_a64()
+            if b4am_right_sshadow_1 >= 0 { emit_load_var_a64(b4am_right_sshadow_1) } else { emit_imm64_a64(0) }
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+            emit_push_a64()
+            if b4am_rval_slot >= 0 { emit_load_var_a64(b4am_rval_slot) } else { emit_imm64_a64(0) }
+            emit_push_a64()
+            if b4am_left_sshadow_1 >= 0 { emit_load_var_a64(b4am_left_sshadow_1) } else { emit_imm64_a64(0) }
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+            let b4am_sres1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var_a64(b4am_sres1)
+            EXPR_SSHADOW_1 = b4am_sres1
+        }
         // Restore arithmetic result
         if b4am_result_slot >= 0 { emit_load_var_a64(b4am_result_slot) }
         lhs_end_line = TL[(EP - 1) as usize]
@@ -20412,12 +20521,14 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         // β⁴: capture LHS shadow
         let b4aa_left_vshadow = EXPR_VSHADOW
         let b4aa_left_sshadow = EXPR_SSHADOW
-        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
+        let b4aa_left_sshadow_1 = EXPR_SSHADOW_1
+        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1
         emit_push_a64()
         compile_multiplicative_a64()
         // β⁴: capture RHS shadow
         let b4aa_right_vshadow = EXPR_VSHADOW
         let b4aa_right_sshadow = EXPR_SSHADOW
+        let b4aa_right_sshadow_1 = EXPR_SSHADOW_1
         emit_pop_x1_a64()
         if left_f64 == 1 {
             if op == 17 { emit_f64_binop_a64(0x1E612800) }
@@ -20425,9 +20536,9 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             EXPR_IS_F64 = 1
             // β⁴: GUM variance: var(a±b) = var(a) + var(b)
             // Save result first — shadow computation overwrites x0
-            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
+            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1
             var b4aa_result_slot: i64 = -1
-            if (b4aa_left_vshadow >= 0 || b4aa_right_vshadow >= 0) || (b4aa_left_sshadow >= 0 || b4aa_right_sshadow >= 0) {
+            if (b4aa_left_vshadow >= 0 || b4aa_right_vshadow >= 0) || (b4aa_left_sshadow >= 0 || b4aa_right_sshadow >= 0) || (b4aa_left_sshadow_1 >= 0 || b4aa_right_sshadow_1 >= 0) {
                 b4aa_result_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                 emit_store_var_a64(b4aa_result_slot)
             }
@@ -20451,11 +20562,22 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
                 emit_store_var_a64(b4aa_sres)
                 EXPR_SSHADOW = b4aa_sres
             }
+            if b4aa_left_sshadow_1 >= 0 || b4aa_right_sshadow_1 >= 0 {
+                // sens_ch1(a+b)=sens_ch1(a)+sens_ch1(b); sens_ch1(a-b)=sens_ch1(a)-sens_ch1(b)
+                if b4aa_left_sshadow_1 >= 0 { emit_load_var_a64(b4aa_left_sshadow_1) } else { emit_imm64_a64(0) }
+                emit_push_a64()
+                if b4aa_right_sshadow_1 >= 0 { emit_load_var_a64(b4aa_right_sshadow_1) } else { emit_imm64_a64(0) }
+                emit_pop_x1_a64()
+                if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
+                let b4aa_sres1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(b4aa_sres1)
+                EXPR_SSHADOW_1 = b4aa_sres1
+            }
             if b4aa_result_slot >= 0 { emit_load_var_a64(b4aa_result_slot) }
         } else {
             if op == 17 { em32(0x8B000020) }
             if op == 18 { em32(0xCB000020) }
-            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
+            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1
         }
     }
 }
@@ -20824,8 +20946,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     VAR_VSHADOW[vix as usize] = EXPR_VSHADOW
                 }
                 VAR_SSHADOW[vix as usize] = EXPR_SSHADOW
+                VAR_SSHADOW_1[vix as usize] = EXPR_SSHADOW_1
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
+                EXPR_SSHADOW_1 = -1
             }
         }
         return
@@ -20924,12 +21048,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                         emit_store_var_a64(fixed_vs)
                     }
                     VAR_SSHADOW[ty_vi as usize] = EXPR_SSHADOW
+                    VAR_SSHADOW_1[ty_vi as usize] = EXPR_SSHADOW_1
                 } else {
                     VAR_VSHADOW[ty_vi as usize] = EXPR_VSHADOW
                     VAR_SSHADOW[ty_vi as usize] = EXPR_SSHADOW
+                    VAR_SSHADOW_1[ty_vi as usize] = EXPR_SSHADOW_1
                 }
             }
-            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
+            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1
             var vi: i64 = VAR_COUNT - 1
             while vi >= 0 {
                 if name_eq(VAR_NS[vi as usize], VAR_NE[vi as usize], ns, ne) { VAR_IS_CLOSURE[vi as usize] = LAST_EXPR_IS_CLOSURE; vi = -1 }
@@ -21915,8 +22041,8 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         CURRENT_RET_TY = FN_RET_TY[fn_idx as usize]
         CURRENT_RET_HASH = FN_RET_HASH[fn_idx as usize]
         VAR_COUNT = 0; NEXT_SLOT = 1; BREAK_COUNT = 0; LAST_STMT_HAS_VALUE = 0
-        // β⁴: reset shadow state for new function scope (a64)
-        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; MEAS_CALL_IDX = 0; MEAS_KNOW_IDX = 0; KM_CACHE_COUNT = 0
+        // β⁴/β⁶: reset shadow state for new function scope (a64)
+        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; MEAS_CALL_IDX = 0; MEAS_KNOW_IDX = 0; KM_CACHE_COUNT = 0
         p = p + 1
         if TK[p as usize] == 6 { p = p + 1 }
         while TK[p as usize] != 7 && TK[p as usize] != 0 {
