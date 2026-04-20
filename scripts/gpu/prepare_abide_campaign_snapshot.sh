@@ -12,6 +12,7 @@ mkdir -p \
 
 _copy() { cp -a "$1" "$2"; }
 _copy "${SRC_ROOT}/bin/souc" "${OUT_ROOT}/bin/"
+_copy "${SRC_ROOT}/bin/souc-native" "${OUT_ROOT}/bin/"
 _copy "${SRC_ROOT}/artifacts/self-hosted/souc-self-hosted-x86_64" "${OUT_ROOT}/artifacts/self-hosted/"
 _copy "${SRC_ROOT}/examples/brain_ossm_abide.sio" "${OUT_ROOT}/examples/"
 _copy "${SRC_ROOT}/scripts/research/abide_campaign_lib.py" "${OUT_ROOT}/scripts/research/"
