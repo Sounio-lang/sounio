@@ -391,6 +391,10 @@ var EXPR_SSHADOW:  i64 = -1
 var MEAS_SENS_SLOT: [i64; 32]  = [-1; 32]
 var MEAS_CALL_IDX:  i64 = 0
 var MEAS_KNOW_IDX:  i64 = 0
+// β⁵ Inter-procedural variance: at call sites, accumulate argument variances
+// into the return EXPR_VSHADOW (conservative GUM: var_return ≈ Σ var(argᵢ))
+var B5_ARG_VSHADOW: [i64; 16] = [-1; 16]
+var B5_ARG_VCOUNT:  i64 = 0
 
 // --emit-econf: print function confidence table to diagnostic stream
 // --load-econf: pre-populate FN_EFF_CONF from a previously emitted .econf
@@ -9070,8 +9074,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let prev_in_call_args = IN_CALL_ARGS
             let prev_borrow_n = CALL_ARG_BORROW_N
             IN_CALL_ARGS = 1
+            B5_ARG_VCOUNT = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or()
+                // β⁵: capture variance shadow for this argument
+                if argc < 16 { B5_ARG_VSHADOW[argc as usize] = EXPR_VSHADOW }
+                B5_ARG_VCOUNT = argc + 1
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
                 } else if call_sig > 0 {
@@ -9174,6 +9182,49 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // β⁵: propagate call-site argument variances into return EXPR_VSHADOW
+                // Conservative GUM: var_return ≈ Σᵢ var(argᵢ). Safe overestimate.
+                // Note: Sounio x86 passes f64 as integer bit-patterns in RAX — use RAX ops.
+                EXPR_VSHADOW = -1
+                if EXPR_IS_F64 == 1 {
+                    var b5_has_var: i64 = 0
+                    var b5_i: i64 = 0
+                    while b5_i < B5_ARG_VCOUNT {
+                        if B5_ARG_VSHADOW[b5_i as usize] >= 0 { b5_has_var = 1 }
+                        b5_i = b5_i + 1
+                    }
+                    if b5_has_var == 1 {
+                        // Save f64 result (RAX holds bit-cast of return value) to temp slot
+                        let b5_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var(b5_res)
+                        var b5_sum_slot: i64 = -1
+                        var b5_first: i64 = 1
+                        b5_i = 0
+                        while b5_i < B5_ARG_VCOUNT {
+                            let b5_av = B5_ARG_VSHADOW[b5_i as usize]
+                            if b5_av >= 0 {
+                                if b5_first == 1 {
+                                    b5_sum_slot = b5_av
+                                    b5_first = 0
+                                } else {
+                                    // fadd(sum, argᵢ) using RAX/RCX integer register pattern
+                                    emit_load_var(b5_sum_slot)
+                                    emit_push()                              // push rax (sum bits)
+                                    emit_load_var(b5_av)                    // rax = argᵢ variance bits
+                                    em(0x59)                                 // pop rcx (sum bits)
+                                    emit_f64_add_from_rcx_rax_x86()         // rax = f64(rcx)+f64(rax) as bits
+                                    let b5_new = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                                    emit_store_var(b5_new)
+                                    b5_sum_slot = b5_new
+                                }
+                            }
+                            b5_i = b5_i + 1
+                        }
+                        EXPR_VSHADOW = b5_sum_slot
+                        // Restore f64 result
+                        emit_load_var(b5_res)
+                    }
+                }
             } else {
                 if call_vslot >= 0 {
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
@@ -10103,8 +10154,9 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         // β⁴: capture LHS shadow slots and save LHS value for GUM/AD propagation
         let left_vshadow = EXPR_VSHADOW
         let left_sshadow = EXPR_SSHADOW
+        // β⁴: always save lval for f64 mul — needed for a²·var(b) even when var(a)=0
         var b4_lval_slot: i64 = -1
-        if left_f64 == 1 && (left_vshadow >= 0 || left_sshadow >= 0) {
+        if left_f64 == 1 {
             b4_lval_slot = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var(b4_lval_slot)
@@ -10117,10 +10169,11 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let right_hash = EXPR_TY_HASH
         let right_udim = EXPR_UNIT_DIM
         // β⁴: capture RHS shadow slots and save RHS value
+        // always save rval for f64 mul — needed for b²·var(a) even when var(b)=0
         let right_vshadow = EXPR_VSHADOW
         let right_sshadow = EXPR_SSHADOW
         var b4_rval_slot: i64 = -1
-        if left_f64 == 1 && (right_vshadow >= 0 || right_sshadow >= 0) {
+        if left_f64 == 1 {
             b4_rval_slot = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var(b4_rval_slot)
@@ -11864,8 +11917,18 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     // Gen 19: also propagate RHS expression unit dim if annotation is a known unit
                     // (unit_lookup_dim returns 0 for unknown names — no-op in that case)
                 }
-                // β⁴: capture variance and sensitivity shadow slots into the new variable
-                VAR_VSHADOW[vix as usize] = EXPR_VSHADOW
+                // β⁴/β⁵: capture variance and sensitivity shadow slots into the new variable
+                // Mutable f64 vars get a fixed runtime slot so variance_of() works across loop iterations
+                if decl_is_mut == 1 && EXPR_IS_F64 == 1 {
+                    let fixed_vs = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    VAR_VSHADOW[vix as usize] = fixed_vs
+                    if EXPR_VSHADOW >= 0 { emit_load_var(EXPR_VSHADOW) }
+                    else { emit_imm64(0) }
+                    emit_store_var(fixed_vs)
+                } else {
+                    VAR_VSHADOW[vix as usize] = EXPR_VSHADOW
+                }
                 VAR_SSHADOW[vix as usize] = EXPR_SSHADOW
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
@@ -11973,6 +12036,23 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             } else {
                 emit_store_var(slot)
             }
+            // β⁵: update variance/sensitivity shadow on var reassignment
+            if ty_vi >= 0 {
+                if VAR_MUT[ty_vi as usize] == 1 && VAR_IS_F64[ty_vi as usize] == 1 {
+                    // Fixed runtime variance slot: emit runtime update code
+                    let fixed_vs = VAR_VSHADOW[ty_vi as usize]
+                    if fixed_vs >= 0 {
+                        if EXPR_VSHADOW >= 0 { emit_load_var(EXPR_VSHADOW) }
+                        else { emit_imm64(0) }
+                        emit_store_var(fixed_vs)
+                    }
+                    VAR_SSHADOW[ty_vi as usize] = EXPR_SSHADOW
+                } else {
+                    VAR_VSHADOW[ty_vi as usize] = EXPR_VSHADOW
+                    VAR_SSHADOW[ty_vi as usize] = EXPR_SSHADOW
+                }
+            }
+            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
             // Update closure flag on reassignment
             if EXPR_TY == 9 { LAST_EXPR_IS_CLOSURE = 1 }
             var vi: i64 = VAR_COUNT - 1
@@ -19448,8 +19528,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             EP = EP + 1
             var argc: i64 = 0
             var abi_argc: i64 = 0
+            B5_ARG_VCOUNT = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or_a64()
+                // β⁵: capture variance shadow for this argument
+                if argc < 16 { B5_ARG_VSHADOW[argc as usize] = EXPR_VSHADOW }
+                B5_ARG_VCOUNT = argc + 1
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
                 } else if call_sig > 0 {
@@ -19508,6 +19592,44 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // β⁵ a64: propagate argument variances into return EXPR_VSHADOW
+                EXPR_VSHADOW = -1
+                if EXPR_IS_F64 == 1 {
+                    var b5a_has_var: i64 = 0
+                    var b5a_i: i64 = 0
+                    while b5a_i < B5_ARG_VCOUNT {
+                        if B5_ARG_VSHADOW[b5a_i as usize] >= 0 { b5a_has_var = 1 }
+                        b5a_i = b5a_i + 1
+                    }
+                    if b5a_has_var == 1 {
+                        let b5a_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b5a_res)
+                        var b5a_sum_slot: i64 = -1
+                        var b5a_first: i64 = 1
+                        b5a_i = 0
+                        while b5a_i < B5_ARG_VCOUNT {
+                            let b5a_av = B5_ARG_VSHADOW[b5a_i as usize]
+                            if b5a_av >= 0 {
+                                if b5a_first == 1 {
+                                    b5a_sum_slot = b5a_av
+                                    b5a_first = 0
+                                } else {
+                                    emit_load_var_a64(b5a_sum_slot)
+                                    emit_push_a64()
+                                    emit_load_var_a64(b5a_av)
+                                    emit_pop_x1_a64()
+                                    em32(0x1E612800)  // fadd d0,d0,d1
+                                    let b5a_new = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                                    emit_store_var_a64(b5a_new)
+                                    b5a_sum_slot = b5a_new
+                                }
+                            }
+                            b5a_i = b5a_i + 1
+                        }
+                        EXPR_VSHADOW = b5a_sum_slot
+                        emit_load_var_a64(b5a_res)
+                    }
+                }
             } else {
                 if call_vslot >= 0 {
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
@@ -20142,8 +20264,9 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         // β⁴: capture LHS shadow + save LHS f64 value for GUM/AD propagation
         let b4am_left_vshadow = EXPR_VSHADOW
         let b4am_left_sshadow = EXPR_SSHADOW
+        // β⁴: always save lval/rval for f64 mul (a²·var(b) needs a even when var(a)=0)
         var b4am_lval_slot: i64 = -1
-        if left_f64 == 1 && (b4am_left_vshadow >= 0 || b4am_left_sshadow >= 0) {
+        if left_f64 == 1 {
             b4am_lval_slot = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_lval_slot)
@@ -20155,7 +20278,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let b4am_right_vshadow = EXPR_VSHADOW
         let b4am_right_sshadow = EXPR_SSHADOW
         var b4am_rval_slot: i64 = -1
-        if left_f64 == 1 && (b4am_right_vshadow >= 0 || b4am_right_sshadow >= 0) {
+        if left_f64 == 1 {
             b4am_rval_slot = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_rval_slot)
@@ -20639,8 +20762,18 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
                 VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
-                // β⁴: capture variance/sensitivity shadow into the new variable
-                VAR_VSHADOW[vix as usize] = EXPR_VSHADOW
+                // β⁴/β⁵: capture variance/sensitivity shadow into the new variable
+                // Mutable f64 vars get a fixed runtime slot so variance_of() works across loop iterations
+                if decl_is_mut == 1 && EXPR_IS_F64 == 1 {
+                    let fixed_vs = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    VAR_VSHADOW[vix as usize] = fixed_vs
+                    if EXPR_VSHADOW >= 0 { emit_load_var_a64(EXPR_VSHADOW) }
+                    else { em32(0xD2800000) }
+                    emit_store_var_a64(fixed_vs)
+                } else {
+                    VAR_VSHADOW[vix as usize] = EXPR_VSHADOW
+                }
                 VAR_SSHADOW[vix as usize] = EXPR_SSHADOW
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
@@ -20731,6 +20864,23 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             } else {
                 emit_store_var_a64(slot)
             }
+            // β⁵: update variance/sensitivity shadow on var reassignment (a64)
+            if ty_vi >= 0 {
+                if VAR_MUT[ty_vi as usize] == 1 && VAR_IS_F64[ty_vi as usize] == 1 {
+                    // Fixed runtime variance slot: emit runtime update code
+                    let fixed_vs = VAR_VSHADOW[ty_vi as usize]
+                    if fixed_vs >= 0 {
+                        if EXPR_VSHADOW >= 0 { emit_load_var_a64(EXPR_VSHADOW) }
+                        else { em32(0xD2800000) }
+                        emit_store_var_a64(fixed_vs)
+                    }
+                    VAR_SSHADOW[ty_vi as usize] = EXPR_SSHADOW
+                } else {
+                    VAR_VSHADOW[ty_vi as usize] = EXPR_VSHADOW
+                    VAR_SSHADOW[ty_vi as usize] = EXPR_SSHADOW
+                }
+            }
+            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1
             var vi: i64 = VAR_COUNT - 1
             while vi >= 0 {
                 if name_eq(VAR_NS[vi as usize], VAR_NE[vi as usize], ns, ne) { VAR_IS_CLOSURE[vi as usize] = LAST_EXPR_IS_CLOSURE; vi = -1 }
