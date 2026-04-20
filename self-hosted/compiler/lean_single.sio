@@ -391,6 +391,13 @@ var EXPR_SSHADOW:  i64 = -1
 var MEAS_SENS_SLOT: [i64; 32]  = [-1; 32]
 var MEAS_CALL_IDX:  i64 = 0
 var MEAS_KNOW_IDX:  i64 = 0
+// β⁵ covariance: per-function cache mapping Knowledge<T> variable index → (vseed, sseed) slots
+// Reusing the same slots for repeated .value accesses on the same variable enables slot-identity
+// detection in subtraction: left_vshadow == right_vshadow → Var(x−x) = 0.
+var KM_CACHE_VI:    [i64; 32] = [-1; 32]
+var KM_CACHE_VS:    [i64; 32] = [-1; 32]
+var KM_CACHE_SS:    [i64; 32] = [-1; 32]
+var KM_CACHE_COUNT: i64 = 0
 // β⁵ Inter-procedural variance: at call sites, accumulate argument variances
 // into the return EXPR_VSHADOW (conservative GUM: var_return ≈ Σ var(argᵢ))
 var B5_ARG_VSHADOW: [i64; 16] = [-1; 16]
@@ -9464,8 +9471,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     tc_linear_violation(EP - 1, "use of moved value")
                 }
             }
-            // Track struct variable index for move marking at call site
-            if vi >= 0 && VAR_TY[vi as usize] == 6 { LAST_EXPR_VAR_IDX = vi }
+            // Track variable index for move marking (structs) and covariance cache (Knowledge<T>)
+            if vi >= 0 && (VAR_TY[vi as usize] == 6 || knowledge_hash_is(VAR_TY_HASH[vi as usize])) { LAST_EXPR_VAR_IDX = vi }
             // β⁴: propagate variance/sensitivity shadow slot for this variable
             if vi >= 0 {
                 EXPR_VSHADOW = VAR_VSHADOW[vi as usize]
@@ -10032,33 +10039,62 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     if (FN_EFFECTS[CURRENT_FN as usize] & 512) == 0 {
                         tc_epistemic_value_access(method_tok)
                     }
-                    // β⁴: save variance and seed sensitivity shadow before loading .value
+                    // β⁴/β⁵ covariance: save variance/sensitivity shadow before loading .value
                     // rax = pointer to Knowledge struct: [0]=value [8]=variance [16]=confidence
-                    em(0x50)                                   // push rax (save ptr)
-                    em(0x48); em(0x8b); em(0x40); em(8)       // mov rax, [rax+8]  (variance)
-                    let b4_vseed = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var(b4_vseed)                   // store variance shadow
-                    em(0x58)                                   // pop rax (restore ptr)
-                    em(0x48); em(0x8b); em(0x00)              // mov rax, [rax]   (.value)
-                    EXPR_VSHADOW = b4_vseed
-                    // Save .value before emitting sensitivity seed (emit_imm64 overwrites rax)
-                    let b4_valsave = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var(b4_valsave)
-                    // Sensitivity seed: 1.0 for channel MEAS_KNOW_IDX == 0, else 0.0
-                    let b4_sseed = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    if MEAS_KNOW_IDX == 0 {
-                        emit_imm64(4607182418800017408)        // 1.0 bits
-                    } else {
-                        emit_imm64(0)
+                    // β⁵: reuse vseed/sseed for the same Knowledge<T> variable so that
+                    // left_vshadow == right_vshadow in x.value - x.value → Var=0 at subtraction.
+                    var b4_vseed: i64 = -1
+                    var b4_sseed: i64 = -1
+                    var km_cached: i64 = 0
+                    if LAST_EXPR_VAR_IDX >= 0 {
+                        var ci: i64 = 0
+                        while ci < KM_CACHE_COUNT {
+                            if KM_CACHE_VI[ci as usize] == LAST_EXPR_VAR_IDX {
+                                b4_vseed = KM_CACHE_VS[ci as usize]
+                                b4_sseed = KM_CACHE_SS[ci as usize]
+                                km_cached = 1
+                                ci = KM_CACHE_COUNT
+                            }
+                            ci = ci + 1
+                        }
                     }
-                    emit_store_var(b4_sseed)
+                    if km_cached == 1 {
+                        // Reuse existing slots: just load .value; shadow slots already populated.
+                        em(0x48); em(0x8b); em(0x00)          // mov rax, [rax]   (.value)
+                    } else {
+                        em(0x50)                               // push rax (save ptr)
+                        em(0x48); em(0x8b); em(0x40); em(8)   // mov rax, [rax+8]  (variance)
+                        b4_vseed = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var(b4_vseed)               // store variance shadow
+                        em(0x58)                               // pop rax (restore ptr)
+                        em(0x48); em(0x8b); em(0x00)          // mov rax, [rax]   (.value)
+                        // Save .value before sensitivity seed (emit_imm64 overwrites rax)
+                        let b4_valsave = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var(b4_valsave)
+                        // Sensitivity seed: 1.0 for first Knowledge channel, else 0.0
+                        b4_sseed = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 0 {
+                            emit_imm64(4607182418800017408)    // 1.0 bits
+                        } else {
+                            emit_imm64(0)
+                        }
+                        emit_store_var(b4_sseed)
+                        MEAS_KNOW_IDX = MEAS_KNOW_IDX + 1
+                        // Restore .value (emit_imm64 overwrote rax)
+                        emit_load_var(b4_valsave)
+                        // Register in cache for future reuse
+                        if LAST_EXPR_VAR_IDX >= 0 && KM_CACHE_COUNT < 32 {
+                            KM_CACHE_VI[KM_CACHE_COUNT as usize] = LAST_EXPR_VAR_IDX
+                            KM_CACHE_VS[KM_CACHE_COUNT as usize] = b4_vseed
+                            KM_CACHE_SS[KM_CACHE_COUNT as usize] = b4_sseed
+                            KM_CACHE_COUNT = KM_CACHE_COUNT + 1
+                        }
+                    }
+                    EXPR_VSHADOW = b4_vseed
                     EXPR_SSHADOW = b4_sseed
-                    MEAS_KNOW_IDX = MEAS_KNOW_IDX + 1
-                    // Restore .value (emit_imm64 overwrote rax with sensitivity seed)
-                    emit_load_var(b4_valsave)
                     EXPR_TY = knowledge_hash_inner_ty(base_data_hash)
                     EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -10458,13 +10494,25 @@ fn compile_additive() with IO, Mut, Panic, Div {
                         emit_store_var(b4_result_slot_a)
                     }
                     if left_vshadow_a >= 0 || right_vshadow_a >= 0 {
-                        let b4va_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                        if left_vshadow_a >= 0 { emit_load_var(left_vshadow_a) } else { emit_imm64(0) }
-                        em(0x50)
-                        if right_vshadow_a >= 0 { emit_load_var(right_vshadow_a) } else { emit_imm64(0) }
-                        em(0x59); emit_f64_add_from_rcx_rax_x86()
-                        emit_store_var(b4va_res)
-                        EXPR_VSHADOW = b4va_res
+                        // β⁵ covariance: slot identity → Var(x−x)=0 (same shadow slot on both sides)
+                        if op == 18 && left_vshadow_a >= 0 && left_vshadow_a == right_vshadow_a {
+                            let b4va_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                            emit_imm64(0)
+                            emit_store_var(b4va_res)
+                            EXPR_VSHADOW = b4va_res
+                        } else if right_vshadow_a < 0 {
+                            EXPR_VSHADOW = left_vshadow_a  // Var(a ± 0) = Var(a), pass through
+                        } else if left_vshadow_a < 0 {
+                            EXPR_VSHADOW = right_vshadow_a  // Var(0 + b) = Var(b), pass through
+                        } else {
+                            let b4va_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var(left_vshadow_a)
+                            em(0x50)
+                            emit_load_var(right_vshadow_a)
+                            em(0x59); emit_f64_add_from_rcx_rax_x86()
+                            emit_store_var(b4va_res)
+                            EXPR_VSHADOW = b4va_res
+                        }
                     }
                     if left_sshadow_a >= 0 || right_sshadow_a >= 0 {
                         // sens(a+b)=sens(a)+sens(b); sens(a-b)=sens(a)-sens(b)
@@ -16457,6 +16505,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         EXPR_SSHADOW = -1
         MEAS_CALL_IDX = 0
         MEAS_KNOW_IDX = 0
+        KM_CACHE_COUNT = 0
 
         // Register parameters
         p = p + 1  // skip name
@@ -21867,7 +21916,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         CURRENT_RET_HASH = FN_RET_HASH[fn_idx as usize]
         VAR_COUNT = 0; NEXT_SLOT = 1; BREAK_COUNT = 0; LAST_STMT_HAS_VALUE = 0
         // β⁴: reset shadow state for new function scope (a64)
-        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; MEAS_CALL_IDX = 0; MEAS_KNOW_IDX = 0
+        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; MEAS_CALL_IDX = 0; MEAS_KNOW_IDX = 0; KM_CACHE_COUNT = 0
         p = p + 1
         if TK[p as usize] == 6 { p = p + 1 }
         while TK[p as usize] != 7 && TK[p as usize] != 0 {
