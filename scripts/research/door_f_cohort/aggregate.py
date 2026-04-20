@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Door F cohort — parse per-patient stdouts and produce cohort stats + TSV.
 
-Inputs : artifacts/research/door_f_{patient}.stdout for each patient in COHORT
+Inputs :
+  - Legacy: artifacts/research/door_f_{patient}.stdout for each in COHORT (5)
+  - Flag mode: --results-dir <dir>/door_f_<pat>.stdout + --manifest <tsv>
+               supports arbitrary N (e.g. full CHB-MIT N=24).
 Outputs:
-  - artifacts/research/door_f_cohort.tsv  (per-patient assoc/mse by window)
-  - stdout summary with:
-     * per-patient dip_depth, spike_height
-     * Wilcoxon signed-rank tests for PRE<FAR (dip) and IC>PRE5 (spike)
-     * sign test on dip-then-spike co-occurrence
-     * binomial p-value for 3/5 replication (vs chance 0.25)
+  - <TSV_OUT> (per-patient assoc/mse by window)
+  - stdout summary with per-patient dip/spike, sign-tests, binomial tests.
 """
 import re
 import os
 import sys
 import math
+import argparse
 
 COHORT    = ["chb02", "chb03", "chb05", "chb06", "chb10"]
 WINDOWS   = ["FAR", "PRE30", "PRE10", "PRE5", "IC", "POST"]
@@ -85,33 +85,78 @@ def binom_cdf_geq(k, n, p):
     return total
 
 
-def main():
-    parsed = {p: parse(STDOUT_FMT.format(p=p)) for p in COHORT}
+def read_manifest_cohort(manifest_path):
+    cohort = []
+    with open(manifest_path) as f:
+        for line in f:
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if parts[0] == "patient":
+                continue
+            cohort.append(parts[0])
+    return cohort
 
-    # Write TSV
-    os.makedirs(os.path.dirname(TSV_OUT), exist_ok=True)
-    with open(TSV_OUT, "w") as f:
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--results-dir",
+                    help="dir containing door_f_<patient>.stdout files")
+    ap.add_argument("--manifest",
+                    help="cohort manifest TSV (column 1 = patient id)")
+    ap.add_argument("--out-tsv", help="output TSV path")
+    args = ap.parse_args()
+
+    if args.manifest:
+        cohort = read_manifest_cohort(args.manifest)
+    else:
+        cohort = COHORT
+    results_dir = args.results_dir  # None => legacy path
+    tsv_out     = args.out_tsv or TSV_OUT
+
+    def stdout_path(p):
+        if results_dir:
+            return os.path.join(results_dir, f"door_f_{p}.stdout")
+        return STDOUT_FMT.format(p=p)
+
+    parsed = {}
+    for p in cohort:
+        path = stdout_path(p)
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            print(f"  SKIP {p}: missing/empty {path}", file=sys.stderr)
+            continue
+        try:
+            parsed[p] = parse(path)
+        except ValueError as e:
+            print(f"  SKIP {p}: parse error ({e})", file=sys.stderr)
+
+    effective = [p for p in cohort if p in parsed]
+    N = len(effective)
+    if N == 0:
+        sys.exit("no parseable results")
+
+    os.makedirs(os.path.dirname(tsv_out) or ".", exist_ok=True)
+    with open(tsv_out, "w") as f:
         hdr = ["patient", "baseline_mse", "baseline_assoc"]
         for w in WINDOWS:
             hdr += [f"mse_{w}", f"assoc_{w}"]
         f.write("\t".join(hdr) + "\n")
-        for p in COHORT:
+        for p in effective:
             d = parsed[p]
             row = [p, f"{d['baseline_mse']:.6f}", f"{d['baseline_assoc']:.6f}"]
             for w in WINDOWS:
                 row += [f"{d['mse'][w]:.6f}", f"{d['assoc'][w]:.6f}"]
             f.write("\t".join(row) + "\n")
-    print(f"wrote {TSV_OUT}")
+    print(f"wrote {tsv_out}  (N={N})")
     print()
 
-    # Per-patient metrics
     print("=" * 78)
-    print("  Per-patient pattern metrics")
+    print(f"  Per-patient pattern metrics  (N={N})")
     print("=" * 78)
     print(f"{'patient':<8}{'FAR':>8}{'PRE_min':>9}{'PRE5':>8}{'IC':>8}{'POST':>8}"
           f"{'dip%':>8}{'spike%':>8}  flags")
     dips, spikes, both = [], [], []
-    for p in COHORT:
+    for p in effective:
         d         = parsed[p]["assoc"]
         far       = d["FAR"]
         pre_min   = min(d["PRE30"], d["PRE10"], d["PRE5"])
@@ -127,31 +172,29 @@ def main():
 
     print()
     print("=" * 78)
-    print("  Cohort-level tests  (N=5 patients)")
+    print(f"  Cohort-level tests  (N={N} patients)")
     print("=" * 78)
-    # Wilcoxon: dip (PRE_min < FAR ⇒ FAR - PRE_min > 0)
     w1, n1, p1 = wilcoxon_signed_rank([d for d in dips])
+    n_dip   = sum(1 for d in dips   if d > 0)
+    n_spike = sum(1 for s in spikes if s > 0)
     print(f"Dip test   (H1: assoc[PRE_min] < assoc[FAR]):")
     print(f"  W+={w1:.1f}  n={n1}  Wilcoxon approx two-sided p={p1:.3f}")
-    print(f"  sign-test: {sum(1 for d in dips if d>0)}/5 positive  "
-          f"p(>=k|H0=0.5) = {binom_cdf_geq(sum(1 for d in dips if d>0), 5, 0.5):.3f}")
-    # Wilcoxon: spike (IC > PRE5)
+    print(f"  sign-test: {n_dip}/{N} positive  "
+          f"p(>=k|H0=0.5) = {binom_cdf_geq(n_dip, N, 0.5):.3f}")
     w2, n2, p2 = wilcoxon_signed_rank([s for s in spikes])
     print(f"Spike test (H1: assoc[IC] > assoc[PRE5]):")
     print(f"  W+={w2:.1f}  n={n2}  Wilcoxon approx two-sided p={p2:.3f}")
-    print(f"  sign-test: {sum(1 for s in spikes if s>0)}/5 positive  "
-          f"p(>=k|H0=0.5) = {binom_cdf_geq(sum(1 for s in spikes if s>0), 5, 0.5):.3f}")
-    # Co-occurrence
+    print(f"  sign-test: {n_spike}/{N} positive  "
+          f"p(>=k|H0=0.5) = {binom_cdf_geq(n_spike, N, 0.5):.3f}")
     k = sum(both)
-    p_chance = 0.25  # P(dip>0 AND spike>0) under independent signs each ~0.5
-    print(f"Dip-AND-Spike co-occurrence: {k}/5 patients")
-    print(f"  Binomial test P(X>={k}|H0 p=0.25) = {binom_cdf_geq(k, 5, p_chance):.3f}")
+    p_chance = 0.25
+    print(f"Dip-AND-Spike co-occurrence: {k}/{N} patients")
+    print(f"  Binomial test P(X>={k}|H0 p={p_chance}) = "
+          f"{binom_cdf_geq(k, N, p_chance):.3f}")
     print()
     print("Interpretation:")
-    print("  - If dip_test sign-test p ≤ 0.05 AND spike_test sign-test p ≤ 0.05:")
-    print("    both components of the pattern replicate at cohort level")
-    print("  - Else: pattern is not cohort-universal; report chb03 as anecdote,")
-    print("    cohort replication as partial/qualitative")
+    print("  - sign-test p <= 0.05 for both dip and spike ⇒ cohort-universal pattern")
+    print("  - else: report as observable with per-patient-replicability, not biomarker")
 
 
 if __name__ == "__main__":

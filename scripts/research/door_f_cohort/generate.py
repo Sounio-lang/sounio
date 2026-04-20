@@ -11,11 +11,18 @@ with clip(±5.0) on non-II windows (matches extract_chbmit_chb11_clean.py).
 Targets: TGT[t] = CH0[t+1] within each window (next-sample prediction).
 
 Usage:
-    python3 scripts/research/door_f_cohort/generate.py            # all cohort
-    python3 scripts/research/door_f_cohort/generate.py chb03      # one patient
+    # Legacy (5-patient hardcoded cohort from data/chbmit/):
+    python3 scripts/research/door_f_cohort/generate.py            # all
+    python3 scripts/research/door_f_cohort/generate.py chb03      # one
+
+    # Manifest-driven (any patient, EDFs anywhere — used by cluster):
+    python3 scripts/research/door_f_cohort/generate.py \\
+        --patient chb07 --edf /orangefs/.../chb07_12.edf \\
+        --onset 4920 --out /path/out.sio
 """
 import os
 import sys
+import argparse
 import pyedflib
 import numpy as np
 
@@ -117,10 +124,7 @@ def build_init_data(ii_norm, probes_norm):
     return "\n".join(parts)
 
 
-def generate(patient):
-    cfg     = COHORT[patient]
-    edf     = cfg["edf"]
-    onset   = cfg["onset"]
+def generate(patient, edf, onset, out_path):
     ii, pr  = load_windows(edf, onset)
     init    = build_init_data(ii, pr)
     header  = HEADER
@@ -133,23 +137,38 @@ def generate(patient):
         header = header.replace(k, v)
     hdr_str = f"{patient}, seizure at {onset}s, 256Hz, 16ch"
     tail    = TAIL.replace("{{PATIENT_HEADER}}", hdr_str)
-    out     = f"examples/door_f_assoc_preictal_{patient}.sio"
-    with open(out, "w") as f:
-        f.write(header)
-        f.write("\n")
-        f.write(init)
-        f.write("\n")
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    with open(out_path, "w") as f:
+        f.write(header); f.write("\n")
+        f.write(init);   f.write("\n")
         f.write(tail)
     nlines = 1 + header.count("\n") + 1 + init.count("\n") + tail.count("\n")
-    sys.stderr.write(f"Wrote {out}  ({nlines} lines)\n")
+    sys.stderr.write(f"Wrote {out_path}  ({nlines} lines)\n")
 
 
 def main():
-    targets = sys.argv[1:] if len(sys.argv) > 1 else list(COHORT.keys())
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--patient", help="patient id, e.g. chb07")
+    ap.add_argument("--edf",     help="path to EDF")
+    ap.add_argument("--onset",   type=int, help="seizure onset in seconds")
+    ap.add_argument("--out",     help="output .sio path")
+    ap.add_argument("patients",  nargs="*",
+                    help="legacy positional: patient ids from hardcoded COHORT")
+    args = ap.parse_args()
+
+    # Manifest-driven single-patient mode
+    if args.patient and args.edf and args.onset is not None and args.out:
+        generate(args.patient, args.edf, args.onset, args.out)
+        return
+
+    # Legacy cohort mode
+    targets = args.patients if args.patients else list(COHORT.keys())
     for p in targets:
         if p not in COHORT:
             raise SystemExit(f"unknown patient: {p}  (known: {list(COHORT)})")
-        generate(p)
+        cfg = COHORT[p]
+        generate(p, cfg["edf"], cfg["onset"],
+                 f"examples/door_f_assoc_preictal_{p}.sio")
 
 
 if __name__ == "__main__":
