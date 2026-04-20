@@ -477,7 +477,66 @@ extern "C" {
 - Two-arg `f64,f64→f64`: `pow`, `atan2`
 - Integer FFI (`malloc`, `getpid`, etc.) **silently terminates** — do not use.
 
-## 14. Ontology Declarations [Production]
+## 14. Async Concurrency [Production — native binary only]
+
+All async primitives use the OS fork model (not green threads or state machines). Requires `with Async` effect.
+
+```sio
+// Source: tests/run-pass/async_spawn.sio
+fn main() with IO, Async {
+    let h1 = spawn { 10 + 5 }     // fork — runs concurrently
+    let h2 = spawn { 20 + 1 }
+    let r1 = h1.await              // wait4(pid), read mmap slot
+    let r2 = h2.await
+    print("r1="); print_i64(r1)   // 15
+    print(" r2="); print_i64(r2)  // 21
+}
+```
+
+### Channels (pipe-backed)
+
+```sio
+// Source: tests/run-pass/async_channels.sio
+fn main() with IO, Async {
+    let (tx, rx) = channel::<i64>()
+    let h = spawn { tx.send(42).await }
+    let v = rx.recv().await
+    h.await
+    print_i64(v)   // 42
+}
+```
+
+### sleep(ms).await
+
+```sio
+// Source: tests/run-pass/async_sleep.sio
+fn main() with IO, Async {
+    sleep(10).await               // nanosleep — 10ms
+    let t1 = spawn { sleep(5).await; 1 }
+    let t2 = spawn { sleep(5).await; 2 }
+    let r1 = t1.await
+    let r2 = t2.await             // both ran in parallel
+}
+```
+
+### join(h1, h2)
+
+```sio
+// Source: tests/run-pass/async_join.sio
+fn main() with IO, Async {
+    let h1 = spawn { 10 }
+    let h2 = spawn { 20 }
+    let (r1, r2) = join(h1, h2)  // returns (i64, i64) tuple
+}
+```
+
+**Async rules:**
+- `spawn { expr }` requires `with Async`; the block body runs in a forked child
+- Child cannot write back to parent variables (fork COW isolation — expected)
+- `join` supports exactly 2 handles; for more handles, use sequential `.await`
+- `sleep`/`join` are soft keywords — identifiers named `sleep`/`join` are fine in other scopes
+
+## 16. Ontology Declarations [Production]
 
 ```sio
 // Source: tests/run-pass/ontology_roles_basic.sio
@@ -498,7 +557,7 @@ ontology Pharma {
 
 Classes become types usable in function signatures. Disjointness and subsumption are enforced at compile time. OWL 2 axiom semantics: SubClassOf, EquivalentClasses, DisjointClasses, object property domain/range, inverse properties.
 
-## 15. Study Blocks (PPCR / Clinical Research) [Beta]
+## 17. Study Blocks (PPCR / Clinical Research) [Beta]
 
 ```sio
 // Source: tests/run-pass/study_block_basic.sio
@@ -537,7 +596,7 @@ fn exploratory() -> i32 with Hypothesis {
 }
 ```
 
-## 16. What Does NOT Work (Verified)
+## 18. What Does NOT Work (Verified)
 
 
 | Feature | Status | Use Instead |
@@ -549,10 +608,11 @@ fn exploratory() -> i32 with Hypothesis {
 | Closure literals `\|x\| x+1` | Blocked | Named fn refs: `let f = square` |
 | Attributes `#[test]` `#[derive]` | Never | Inline tests |
 | Unary minus `-42` | Never | `0 - 42` |
-| Integer FFI (`malloc`, etc.) | Broken | Fixed-size arrays |
-| Bare `&![T;N]` mutation (interpreter) | Known bug | Struct wrapper |
+| Integer FFI (`malloc`, etc.) | Broken in JIT | Fixed-size arrays; native binary has workaround via syscall stubs |
+| Bare `&![T;N]` mutation (interpreter) | JIT only | Struct wrapper in JIT; works in native binary |
+| Async / `spawn` / `channel` | JIT: not supported | Use native binary (`./bin/souc run`) |
 
-## 17. Quick Checklist
+## 19. Quick Checklist
 
 Before submitting Sounio code:
 
@@ -566,7 +626,7 @@ Before submitting Sounio code:
 8. Named fn refs for higher-order, not closures
 9. Bare array `&!` mutation: wrap in struct if interpreter
 
-## 18. Real Code to Study
+## 20. Real Code to Study
 
 | File | What it demonstrates |
 |------|---------------------|
@@ -585,3 +645,7 @@ Before submitting Sounio code:
 | `tests/run-pass/study_block_basic.sio` | PPCR: study block with hypotheses |
 | `tests/run-pass/hypothesis_registered.sio` | Hypothesis effect, registered analysis |
 | `tests/run-pass/algebra_g2_invariants.sio` | Algebra declarations, octonions |
+| `tests/run-pass/async_spawn.sio` | spawn/await, concurrent tasks |
+| `tests/run-pass/async_channels.sio` | channel::<T>(), send, recv |
+| `tests/run-pass/async_sleep.sio` | sleep(ms).await, parallel sleep |
+| `tests/run-pass/async_join.sio` | join(h1, h2), tuple destructuring |
