@@ -7774,7 +7774,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             NEXT_SLOT = NEXT_SLOT + 1
             // lea rdi, [rbp + (0 - ch_fds_slot*8)]  — fds pointer
             em(0x48); em(0x8d); em(0xbd); em32(0 - ch_fds_slot * 8)
-            em(0x31); em(0xf6)              // xor esi, esi  (flags = 0)
+            em(0xbe); em32(0x80000)         // mov esi, O_CLOEXEC (flags)
             em(0xb8); em32(293)              // mov eax, 293 (SYS_pipe2)
             em(0x0f); em(0x05)              // syscall
             // Sign-extend read_fd = int at [rbp + (0-ch_fds_slot*8) + 0]
@@ -7795,6 +7795,80 @@ fn compile_primary() with IO, Mut, Panic, Div {
             EXPR_TY = 6
             EXPR_TY_HASH = 1002
             EXPR_IS_F64 = 0
+            return
+        }
+        // Soft keyword: sleep(ms: i64) → nanosleep(2) (SYS 35), ms in milliseconds
+        if src_match(ns, ne - ns, "sleep") && TK[EP as usize] == 6 {
+            EP = EP + 1  // skip (
+            compile_or()  // ms value in rax
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            let sl_ms_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(sl_ms_slot)
+            let ts_base = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 2
+            // tv_sec = ms / 1000 (idiv), tv_nsec = (ms % 1000) * 1_000_000
+            emit_load_var(sl_ms_slot)
+            em(0xb9); em32(1000)                         // mov ecx, 1000
+            em(0x48); em(0x99)                           // cqo
+            em(0x48); em(0xf7); em(0xf9)                 // idiv rcx  ; rax=ms/1000, rdx=ms%1000
+            emit_store_var(ts_base + 1)                  // tv_sec at offset 0 (lower addr)
+            em(0x48); em(0x69); em(0xd2); em32(1000000)  // imul rdx, rdx, 1_000_000
+            em(0x48); em(0x89); em(0xd0)                 // mov rax, rdx
+            emit_store_var(ts_base)                      // tv_nsec at offset 8 (higher addr)
+            // nanosleep(&timespec, NULL)
+            em(0x48); em(0x8d); em(0xbd); em32(0 - (ts_base + 1) * 8)  // lea rdi, [rbp - (ts_base+1)*8]
+            em(0x48); em(0x31); em(0xf6)                 // xor rsi, rsi
+            em(0xb8); em32(35)                           // mov eax, 35 (SYS_nanosleep)
+            em(0x0f); em(0x05)                           // syscall
+            EXPR_TY = 0; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+            return
+        }
+        // Soft keyword: join(h1, h2) → sequential wait4, returns (r1, r2) 2-tuple
+        if src_match(ns, ne - ns, "join") && TK[EP as usize] == 6 {
+            EP = EP + 1  // skip (
+            compile_or()  // h1 TaskHandle pointer in rax
+            let j_h1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(j_h1_slot)
+            if TK[EP as usize] == 28 { EP = EP + 1 }  // skip ,
+            compile_or()  // h2 TaskHandle pointer in rax
+            let j_h2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(j_h2_slot)
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            // Await h1: wait4(pid1) + read slot1 result
+            let j_r1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_load_var(j_h1_slot)
+            em(0x48); em(0x8b); em(0x00)           // mov rax, [rax]  ; pid
+            em(0x48); em(0x89); em(0xc7)            // mov rdi, rax
+            em(0x48); em(0x31); em(0xf6)            // xor rsi, rsi
+            em(0x48); em(0x31); em(0xd2)            // xor rdx, rdx
+            em(0x4d); em(0x31); em(0xd2)            // xor r10, r10
+            em(0xb8); em32(61)                      // mov eax, 61 (SYS_wait4)
+            em(0x0f); em(0x05)                      // syscall
+            emit_load_var(j_h1_slot)
+            em(0x48); em(0x8b); em(0x40); em(8)    // mov rax, [rax+8]  ; slot_ptr
+            em(0x48); em(0x8b); em(0x00)            // mov rax, [rax]    ; result
+            emit_store_var(j_r1_slot)
+            // Await h2: wait4(pid2) + read slot2 result
+            let j_r2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+            emit_load_var(j_h2_slot)
+            em(0x48); em(0x8b); em(0x00)           // mov rax, [rax]  ; pid
+            em(0x48); em(0x89); em(0xc7)            // mov rdi, rax
+            em(0x48); em(0x31); em(0xf6)            // xor rsi, rsi
+            em(0x48); em(0x31); em(0xd2)            // xor rdx, rdx
+            em(0x4d); em(0x31); em(0xd2)            // xor r10, r10
+            em(0xb8); em32(61)                      // mov eax, 61 (SYS_wait4)
+            em(0x0f); em(0x05)                      // syscall
+            emit_load_var(j_h2_slot)
+            em(0x48); em(0x8b); em(0x40); em(8)    // mov rax, [rax+8]  ; slot_ptr
+            em(0x48); em(0x8b); em(0x00)            // mov rax, [rax]    ; result
+            emit_store_var(j_r2_slot)
+            // Build 2-tuple (r1, r2): r1 at offset 0, r2 at offset 8
+            let j_tup_base = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 2
+            emit_load_var(j_r1_slot)
+            emit_store_var(j_tup_base + 1)          // r1 at lower addr = offset 0
+            emit_load_var(j_r2_slot)
+            emit_store_var(j_tup_base)              // r2 at higher addr = offset 8
+            em(0x48); em(0x8d); em(0x85); em32(0 - (j_tup_base + 1) * 8)
+            EXPR_TY = 6; EXPR_TY_HASH = 1002; EXPR_IS_F64 = 0
             return
         }
         // Box::new(expr) — heap allocate via mmap
