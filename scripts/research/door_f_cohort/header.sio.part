@@ -1,0 +1,245 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Door F: Pre-ictal sweep — MSE vs Associator Norm
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Data: CHB-MIT {{PATIENT}}  ({{EDF_PATH}})
+// Seizure onset at {{ONSET}}s, 256 Hz, 16 channels.
+// α fixed = 0.2 (interior optimum confirmed Door III + E)
+//
+// Door II found NO pre-ictal MSE ramp (null). MSE measures prediction error.
+// The associator ||(A⊗h)⊗x − A⊗(h⊗x)|| measures geometric non-associativity:
+// the structural coupling between brain dynamics and the sedenion gate.
+//
+// Hypothesis: assoc_ratio rises >1.0 pre-ictally while mse_ratio stays ≈1.0.
+//
+// Probe windows (each 80 samples = ~312ms at 256Hz):
+//   FAR   t={{T_FAR}}s  (−60s from onset) — far pre-ictal baseline
+//   PRE30 t={{T_PRE30}}s  (−30s)
+//   PRE10 t={{T_PRE10}}s  (−10s)
+//   PRE5  t={{T_PRE5}}s  (−5s)
+//   IC    t={{T_IC}}s  (onset, 0s)
+//   POST  t={{T_POST}}s  (+5s)
+
+use math::sedenion::*;
+
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+
+fn sqrt_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i: i64 = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn exp_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_s(10.0) * exp_s(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var s: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i <= 20 { term = term * x / (i as f64); s = s + term; i = i + 1 }
+    s
+}
+
+fn tanh_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 10.0 { return 1.0 }
+    if x < 0.0 - 10.0 { return 0.0 - 1.0 }
+    let e2 = exp_s(2.0 * x)
+    (e2 - 1.0) / (e2 + 1.0)
+}
+
+fn sed_tanh_s(s: Sedenion) -> Sedenion with Mut, Div, Panic {
+    Sedenion {
+        e0: tanh_s(s.e0),   e1: tanh_s(s.e1),   e2: tanh_s(s.e2),   e3: tanh_s(s.e3),
+        e4: tanh_s(s.e4),   e5: tanh_s(s.e5),   e6: tanh_s(s.e6),   e7: tanh_s(s.e7),
+        e8: tanh_s(s.e8),   e9: tanh_s(s.e9),   e10: tanh_s(s.e10), e11: tanh_s(s.e11),
+        e12: tanh_s(s.e12), e13: tanh_s(s.e13), e14: tanh_s(s.e14), e15: tanh_s(s.e15)
+    }
+}
+
+// ─── Sedenion gate (lerp-to-ZD parameterization, same as Door I/E) ────────────
+
+fn make_a(alpha: f64) -> Sedenion with Mut, Div, Panic {
+    let inv2: f64 = 1.0 / sqrt_s(2.0)
+    let zd0: f64 = 0.5; let zd1: f64 = 0.5; let zd4: f64 = 0.5; let zd5: f64 = 0.0 - 0.5
+    let g0: f64 = (1.0 - alpha) * inv2 + alpha * zd0
+    let g1: f64 = (1.0 - alpha) * inv2 + alpha * zd1
+    let g4: f64 =                         alpha * zd4
+    let g5: f64 =                         alpha * zd5
+    let n: f64 = sqrt_s(g0*g0 + g1*g1 + g4*g4 + g5*g5)
+    let s: f64 = if n < 0.0000001 { 1.0 } else { 1.0 / n }
+    Sedenion { e0: g0*s, e1: g1*s, e2: 0.0, e3: 0.0,
+               e4: g4*s, e5: g5*s, e6: 0.0, e7: 0.0,
+               e8: 0.0,  e9: 0.0,  e10: 0.0, e11: 0.0,
+               e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0 }
+}
+
+// ─── Readout C (scaled i64 to avoid BSS-zero f64 init bug) ───────────────────
+
+var WC: [i64; 16] = [0; 16]
+fn cg(i: i64) -> f64 with Div { (WC[i] as f64) / 100000000.0 }
+fn cs(i: i64, v: f64) with Mut { WC[i] = (v * 100000000.0) as i64 }
+fn get_c() -> Sedenion with Div {
+    Sedenion { e0:cg(0), e1:cg(1), e2:cg(2), e3:cg(3),
+               e4:cg(4), e5:cg(5), e6:cg(6), e7:cg(7),
+               e8:cg(8), e9:cg(9), e10:cg(10), e11:cg(11),
+               e12:cg(12), e13:cg(13), e14:cg(14), e15:cg(15) }
+}
+fn init_c() with Mut { var i: i64 = 0; while i < 16 { WC[i] = 0; i = i + 1 } }
+
+// ─── Hidden state for training ────────────────────────────────────────────────
+
+var H0:  [f64; 64] = [0.0; 64]   var H1:  [f64; 64] = [0.0; 64]
+var H2:  [f64; 64] = [0.0; 64]   var H3:  [f64; 64] = [0.0; 64]
+var H4:  [f64; 64] = [0.0; 64]   var H5:  [f64; 64] = [0.0; 64]
+var H6:  [f64; 64] = [0.0; 64]   var H7:  [f64; 64] = [0.0; 64]
+var H8:  [f64; 64] = [0.0; 64]   var H9:  [f64; 64] = [0.0; 64]
+var H10: [f64; 64] = [0.0; 64]   var H11: [f64; 64] = [0.0; 64]
+var H12: [f64; 64] = [0.0; 64]   var H13: [f64; 64] = [0.0; 64]
+var H14: [f64; 64] = [0.0; 64]   var H15: [f64; 64] = [0.0; 64]
+
+fn save_h(t: i64, h: Sedenion) with Mut {
+    H0[t]=h.e0; H1[t]=h.e1; H2[t]=h.e2; H3[t]=h.e3
+    H4[t]=h.e4; H5[t]=h.e5; H6[t]=h.e6; H7[t]=h.e7
+    H8[t]=h.e8; H9[t]=h.e9; H10[t]=h.e10; H11[t]=h.e11
+    H12[t]=h.e12; H13[t]=h.e13; H14[t]=h.e14; H15[t]=h.e15
+}
+
+fn load_h(t: i64) -> Sedenion {
+    Sedenion { e0:H0[t], e1:H1[t], e2:H2[t], e3:H3[t],
+               e4:H4[t], e5:H5[t], e6:H6[t], e7:H7[t],
+               e8:H8[t], e9:H9[t], e10:H10[t], e11:H11[t],
+               e12:H12[t], e13:H13[t], e14:H14[t], e15:H15[t] }
+}
+
+// ─── Data arrays ─────────────────────────────────────────────────────────────
+
+var II_CH0: [f64; 80] = [0.0; 80]
+var II_CH1: [f64; 80] = [0.0; 80]
+var II_CH2: [f64; 80] = [0.0; 80]
+var II_CH3: [f64; 80] = [0.0; 80]
+var II_CH4: [f64; 80] = [0.0; 80]
+var II_CH5: [f64; 80] = [0.0; 80]
+var II_CH6: [f64; 80] = [0.0; 80]
+var II_CH7: [f64; 80] = [0.0; 80]
+var II_CH8: [f64; 80] = [0.0; 80]
+var II_CH9: [f64; 80] = [0.0; 80]
+var II_CH10: [f64; 80] = [0.0; 80]
+var II_CH11: [f64; 80] = [0.0; 80]
+var II_CH12: [f64; 80] = [0.0; 80]
+var II_CH13: [f64; 80] = [0.0; 80]
+var II_CH14: [f64; 80] = [0.0; 80]
+var II_CH15: [f64; 80] = [0.0; 80]
+var II_TGT: [f64; 80] = [0.0; 80]
+
+var FAR_CH0: [f64; 80] = [0.0; 80]
+var FAR_CH1: [f64; 80] = [0.0; 80]
+var FAR_CH2: [f64; 80] = [0.0; 80]
+var FAR_CH3: [f64; 80] = [0.0; 80]
+var FAR_CH4: [f64; 80] = [0.0; 80]
+var FAR_CH5: [f64; 80] = [0.0; 80]
+var FAR_CH6: [f64; 80] = [0.0; 80]
+var FAR_CH7: [f64; 80] = [0.0; 80]
+var FAR_CH8: [f64; 80] = [0.0; 80]
+var FAR_CH9: [f64; 80] = [0.0; 80]
+var FAR_CH10: [f64; 80] = [0.0; 80]
+var FAR_CH11: [f64; 80] = [0.0; 80]
+var FAR_CH12: [f64; 80] = [0.0; 80]
+var FAR_CH13: [f64; 80] = [0.0; 80]
+var FAR_CH14: [f64; 80] = [0.0; 80]
+var FAR_CH15: [f64; 80] = [0.0; 80]
+var FAR_TGT: [f64; 80] = [0.0; 80]
+
+var PRE30_CH0: [f64; 80] = [0.0; 80]
+var PRE30_CH1: [f64; 80] = [0.0; 80]
+var PRE30_CH2: [f64; 80] = [0.0; 80]
+var PRE30_CH3: [f64; 80] = [0.0; 80]
+var PRE30_CH4: [f64; 80] = [0.0; 80]
+var PRE30_CH5: [f64; 80] = [0.0; 80]
+var PRE30_CH6: [f64; 80] = [0.0; 80]
+var PRE30_CH7: [f64; 80] = [0.0; 80]
+var PRE30_CH8: [f64; 80] = [0.0; 80]
+var PRE30_CH9: [f64; 80] = [0.0; 80]
+var PRE30_CH10: [f64; 80] = [0.0; 80]
+var PRE30_CH11: [f64; 80] = [0.0; 80]
+var PRE30_CH12: [f64; 80] = [0.0; 80]
+var PRE30_CH13: [f64; 80] = [0.0; 80]
+var PRE30_CH14: [f64; 80] = [0.0; 80]
+var PRE30_CH15: [f64; 80] = [0.0; 80]
+var PRE30_TGT: [f64; 80] = [0.0; 80]
+
+var PRE10_CH0: [f64; 80] = [0.0; 80]
+var PRE10_CH1: [f64; 80] = [0.0; 80]
+var PRE10_CH2: [f64; 80] = [0.0; 80]
+var PRE10_CH3: [f64; 80] = [0.0; 80]
+var PRE10_CH4: [f64; 80] = [0.0; 80]
+var PRE10_CH5: [f64; 80] = [0.0; 80]
+var PRE10_CH6: [f64; 80] = [0.0; 80]
+var PRE10_CH7: [f64; 80] = [0.0; 80]
+var PRE10_CH8: [f64; 80] = [0.0; 80]
+var PRE10_CH9: [f64; 80] = [0.0; 80]
+var PRE10_CH10: [f64; 80] = [0.0; 80]
+var PRE10_CH11: [f64; 80] = [0.0; 80]
+var PRE10_CH12: [f64; 80] = [0.0; 80]
+var PRE10_CH13: [f64; 80] = [0.0; 80]
+var PRE10_CH14: [f64; 80] = [0.0; 80]
+var PRE10_CH15: [f64; 80] = [0.0; 80]
+var PRE10_TGT: [f64; 80] = [0.0; 80]
+
+var PRE5_CH0: [f64; 80] = [0.0; 80]
+var PRE5_CH1: [f64; 80] = [0.0; 80]
+var PRE5_CH2: [f64; 80] = [0.0; 80]
+var PRE5_CH3: [f64; 80] = [0.0; 80]
+var PRE5_CH4: [f64; 80] = [0.0; 80]
+var PRE5_CH5: [f64; 80] = [0.0; 80]
+var PRE5_CH6: [f64; 80] = [0.0; 80]
+var PRE5_CH7: [f64; 80] = [0.0; 80]
+var PRE5_CH8: [f64; 80] = [0.0; 80]
+var PRE5_CH9: [f64; 80] = [0.0; 80]
+var PRE5_CH10: [f64; 80] = [0.0; 80]
+var PRE5_CH11: [f64; 80] = [0.0; 80]
+var PRE5_CH12: [f64; 80] = [0.0; 80]
+var PRE5_CH13: [f64; 80] = [0.0; 80]
+var PRE5_CH14: [f64; 80] = [0.0; 80]
+var PRE5_CH15: [f64; 80] = [0.0; 80]
+var PRE5_TGT: [f64; 80] = [0.0; 80]
+
+var IC_CH0: [f64; 80] = [0.0; 80]
+var IC_CH1: [f64; 80] = [0.0; 80]
+var IC_CH2: [f64; 80] = [0.0; 80]
+var IC_CH3: [f64; 80] = [0.0; 80]
+var IC_CH4: [f64; 80] = [0.0; 80]
+var IC_CH5: [f64; 80] = [0.0; 80]
+var IC_CH6: [f64; 80] = [0.0; 80]
+var IC_CH7: [f64; 80] = [0.0; 80]
+var IC_CH8: [f64; 80] = [0.0; 80]
+var IC_CH9: [f64; 80] = [0.0; 80]
+var IC_CH10: [f64; 80] = [0.0; 80]
+var IC_CH11: [f64; 80] = [0.0; 80]
+var IC_CH12: [f64; 80] = [0.0; 80]
+var IC_CH13: [f64; 80] = [0.0; 80]
+var IC_CH14: [f64; 80] = [0.0; 80]
+var IC_CH15: [f64; 80] = [0.0; 80]
+var IC_TGT: [f64; 80] = [0.0; 80]
+
+var POST_CH0: [f64; 80] = [0.0; 80]
+var POST_CH1: [f64; 80] = [0.0; 80]
+var POST_CH2: [f64; 80] = [0.0; 80]
+var POST_CH3: [f64; 80] = [0.0; 80]
+var POST_CH4: [f64; 80] = [0.0; 80]
+var POST_CH5: [f64; 80] = [0.0; 80]
+var POST_CH6: [f64; 80] = [0.0; 80]
+var POST_CH7: [f64; 80] = [0.0; 80]
+var POST_CH8: [f64; 80] = [0.0; 80]
+var POST_CH9: [f64; 80] = [0.0; 80]
+var POST_CH10: [f64; 80] = [0.0; 80]
+var POST_CH11: [f64; 80] = [0.0; 80]
+var POST_CH12: [f64; 80] = [0.0; 80]
+var POST_CH13: [f64; 80] = [0.0; 80]
+var POST_CH14: [f64; 80] = [0.0; 80]
+var POST_CH15: [f64; 80] = [0.0; 80]
+var POST_TGT: [f64; 80] = [0.0; 80]
