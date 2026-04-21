@@ -1,4 +1,41 @@
 import { useState, useRef } from 'react';
+import { MCQBlock } from '../common/MCQBlock';
+
+const PBPK_QUESTIONS = [
+  {
+    question: 'A 2025 Phase 1 trial of oral rapamycin (7 mg weekly) in Alzheimer\'s patients (Communications Medicine, doi:10.1038/s43856-025-00904-9) measured CSF drug levels alongside whole-blood concentrations. What was found?',
+    options: [
+      'CSF rapamycin reached ~15% of whole-blood trough, consistent with passive-diffusion estimates from logP ~4.3',
+      'CSF levels correlated with dose but stayed below the IC₅₀ for mTORC1 inhibition in neurons',
+      'Rapamycin was undetectable in CSF at every time point, yet CSF tau, neurofilament light, and Aβ40 all changed significantly',
+      'CSF levels were measurable only in patients with elevated baseline CSF/plasma albumin ratios',
+    ],
+    correct: 2,
+    explanation: 'Despite sirolimus being highly lipophilic (logP ~4.3, which normally predicts CNS penetration), CSF drug levels were below the assay detection limit at all time points. Yet CSF biomarkers of neurodegeneration changed — total tau, NfL, and Aβ40 increased significantly. This implies rapamycin\'s CNS effects operate through a peripheral mechanism (systemic mTOR inhibition, BBB regulation) rather than direct brain drug exposure. A PBPK model with no brain compartment would fail to capture this dissociation.',
+  },
+  {
+    question: 'The foundational sirolimus PBPK model (Emoto et al. 2013) uses a Qgut framework to explain bioavailability variability. Which anatomical locus does the model identify as the dominant source?',
+    options: [
+      'Hepatic first-pass via P-glycoprotein efflux at the canalicular membrane',
+      'Intestinal CYP3A activity (CYP3A4 > CYP3A5 > CYP2C8) in enterocytes',
+      'Renal tubular secretion competing with glomerular filtration',
+      'Adipose tissue sequestration reducing the effective central compartment concentration',
+    ],
+    correct: 1,
+    explanation: 'Although sirolimus is clinically described as "hepatically metabolized," the PBPK model shows intestinal CYP3A as the primary driver of first-pass variability. The Qgut model predicts ~15% oral bioavailability — matching observed values — with CYP3A4 > CYP3A5 > CYP2C8 ranked by contribution. Adipose Vd (~12 L/kg) explains distribution depth, not bioavailability variance. This is the mechanistic reason why co-administration of intestinal CYP3A inhibitors (e.g. ketoconazole) has such large effects on sirolimus AUC.',
+  },
+  {
+    question: 'Real-world rapamycin monitoring in longevity cohorts (GeroScience 2025, n=67) revealed a surprising finding about Tmax for whole-blood concentration. What is correct?',
+    options: [
+      'Tmax is 1–2 hours post-dose, consistent with the immediate-release gut-absorption peak',
+      'Tmax is bimodal at 2 h and 36 h due to lymphatic absorption and enterohepatic recirculation',
+      'Tmax is approximately 48 hours post-dose — the standard 24-hour trough sample is taken on the ascending limb',
+      'Tmax is 12 hours, dominated by slow release from the Rapamune microemulsion formulation',
+    ],
+    correct: 2,
+    explanation: 'Sirolimus binds ~95% to erythrocytes. The rapid gut-absorption peak at 1–2 hours (seen in plasma) is followed by slow redistribution into RBCs and deep tissue compartments, pushing the whole-blood Cmax to ~48 hours. Clinical 24-hour "trough" draws therefore sample the ascending phase, systematically underestimating AUC. Compounded preparations showed 31% the bioavailability of commercial Rapamune per mg, with a coefficient of variation of 0.28–0.40 across patients — exactly the kind of uncertainty that Sounio\'s GUM-propagating Knowledge<T> type is designed to make compile-time-visible.',
+  },
+];
 
 // Golden fixture from tests/fixtures/darwin_pbpk/brain_plasma_tac_golden.v1.json
 const ROWS = [
@@ -83,12 +120,26 @@ export default function PBPKRapamycinChart() {
       <div className="container px-4">
         <div className="mb-[2.4rem] grid gap-[0.5rem]">
           <h2 className="font-sans text-[clamp(1.7rem,4.2vw,3rem)] font-[750] leading-[1.1] tracking-[-0.025em] text-[var(--color-text-primary)]">
-            Rapamycin PBPK with epistemic uncertainty
+            Rapamycin PBPK: GUM uncertainty through a 14-compartment ODE
           </h2>
-          <p className="text-[clamp(0.96rem,2.1vw,1.1rem)] text-[var(--color-text-secondary)] max-w-[68ch]">
-            14-compartment Darwin PBPK model — 5 mg IV bolus, GUM uncertainty propagated through
-            the RK4 ODE solver. The gold bands show how epistemic confidence (ε) degrades
-            as the ODE integrates forward in time.
+          <p className="text-[clamp(0.96rem,2.1vw,1.1rem)] text-[var(--color-text-secondary)] max-w-[72ch] leading-[1.75]">
+            Physiologically-based pharmacokinetic (PBPK) modelling requires propagating
+            parameter uncertainty through coupled ODEs — a task that classical tools handle
+            by Monte Carlo sampling (thousands of runs) or by discarding uncertainty
+            entirely. Sounio's <strong className="text-[var(--color-text-primary)]">epistemic ODE solver</strong> propagates
+            ISO GUM uncertainty analytically through every RK4 integration step: each
+            concentration is a <code className="text-[var(--color-accent-gold-soft)] text-sm">Knowledge&lt;mg_per_L&gt;</code> value
+            carrying both a point estimate and a confidence ε ∈ [0,1].
+          </p>
+          <p className="text-[clamp(0.88rem,1.8vw,1rem)] text-[var(--color-text-secondary)] max-w-[72ch] leading-[1.75]">
+            The chart shows a 5 mg IV bolus of rapamycin in the Darwin 14-compartment model
+            (Ferron et al. 1997, CL/F = 12.4 L/h; Kahan et al. 2001, t½ = 62 ± 16 h).
+            Gold bands are GUM ±σ on blood-plasma concentration; teal dashes track the
+            brain-tissue compartment across the blood-brain barrier. Epistemic confidence
+            degrades over the 168-hour integration window as uncertainty accumulates through
+            sequential RK4 steps — a formally tracked degradation, not a silent one.
+            A function declared <code className="text-[var(--color-accent-gold-soft)] text-sm">where c.ε ≥ 0.85</code>
+            would reject the low-confidence late time-points at compile time.
           </p>
         </div>
 
@@ -237,6 +288,8 @@ export default function PBPKRapamycinChart() {
             </div>
           </div>
         </div>
+
+        <MCQBlock questions={PBPK_QUESTIONS} />
       </div>
     </section>
   );

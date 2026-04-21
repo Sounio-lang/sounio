@@ -1,0 +1,167 @@
+//! Canonical cognitive O-SSM sketch for SWOW-EN trajectories.
+//!
+//! This file is a runnable architecture demo for the bounded CPC 2026 O-SSM
+//! lane. The full paper-scale artifacts are produced by the Python reference
+//! mirror in `hyperbolic-semantic-networks/code/cpc2026/ossm_reference_simulator.py`,
+//! while this Sounio example keeps the update rule executable in the canonical
+//! `sounio-lang/sounio` checkout.
+
+use math::octonion::*
+
+struct RegimeConfig {
+    name: string,
+    temperature: f32,
+    valence_gate: f32,
+    initial_state_mode: string,
+}
+
+struct CognitiveOSSM {
+    hidden_dim: i64,
+}
+
+struct OctState {
+    h0: Octonion,
+    h1: Octonion,
+    h2: Octonion,
+    h3: Octonion,
+}
+
+fn oct_add_local(a: Octonion, b: Octonion) -> Octonion {
+    oct(a.a + b.a, a.b + b.b, a.c + b.c, a.d + b.d, a.e + b.e, a.f + b.f, a.g + b.g, a.h + b.h)
+}
+
+fn oct_scale_local(a: Octonion, s: f32) -> Octonion {
+    oct(a.a * s, a.b * s, a.c * s, a.d * s, a.e * s, a.f * s, a.g * s, a.h * s)
+}
+
+fn oct_softsign_component(x: f32, temperature: f32) -> f32 {
+    let t = if temperature > 1e-6 { temperature } else { 1e-6 }
+    let scaled = x / t
+    if scaled >= 0.0 {
+        scaled / (1.0 + scaled)
+    } else {
+        scaled / (1.0 + (0.0 - scaled))
+    }
+}
+
+fn oct_softsign(a: Octonion, temperature: f32) -> Octonion {
+    oct(
+        oct_softsign_component(a.a, temperature),
+        oct_softsign_component(a.b, temperature),
+        oct_softsign_component(a.c, temperature),
+        oct_softsign_component(a.d, temperature),
+        oct_softsign_component(a.e, temperature),
+        oct_softsign_component(a.f, temperature),
+        oct_softsign_component(a.g, temperature),
+        oct_softsign_component(a.h, temperature),
+    )
+}
+
+fn oct_associator(a: Octonion, b: Octonion, c: Octonion) -> Octonion {
+    let ab = oct_mul(a, b)
+    let bc = oct_mul(b, c)
+    let left = oct_mul(ab, c)
+    let right = oct_mul(a, bc)
+    oct(
+        left.a - right.a,
+        left.b - right.b,
+        left.c - right.c,
+        left.d - right.d,
+        left.e - right.e,
+        left.f - right.f,
+        left.g - right.g,
+        left.h - right.h,
+    )
+}
+
+fn regime_normative() -> RegimeConfig {
+    RegimeConfig { name: "normative", temperature: 0.5, valence_gate: 1.0, initial_state_mode: "balanced" }
+}
+
+fn init_state(mode: string) -> OctState {
+    if str_eq(mode, "negative_attractor") {
+        OctState {
+            h0: oct(-0.12, 0.02, 0.04, -0.28, 0.02, 0.0, 0.0, 0.0),
+            h1: oct(-0.10, 0.01, 0.03, -0.24, 0.01, 0.0, 0.01, 0.0),
+            h2: oct(-0.11, 0.02, 0.02, -0.26, 0.01, 0.01, 0.0, 0.0),
+            h3: oct(-0.09, 0.01, 0.02, -0.22, 0.02, 0.0, 0.0, 0.01),
+        }
+    } else if str_eq(mode, "rigid") {
+        OctState {
+            h0: oct(0.35, 0.10, 0.08, 0.03, 0.0, 0.0, 0.0, 0.0),
+            h1: oct(0.31, 0.06, 0.09, 0.02, 0.0, 0.0, 0.0, 0.0),
+            h2: oct(0.29, 0.08, 0.06, 0.04, 0.0, 0.0, 0.0, 0.0),
+            h3: oct(0.33, 0.07, 0.07, 0.03, 0.0, 0.0, 0.0, 0.0),
+        }
+    } else {
+        OctState {
+            h0: oct(0.28, 0.08, 0.08, 0.04, 0.04, 0.02, 0.02, 0.01),
+            h1: oct(0.24, 0.02, 0.09, 0.06, 0.04, 0.03, 0.02, 0.01),
+            h2: oct(0.26, 0.03, 0.04, 0.09, 0.03, 0.02, 0.03, 0.01),
+            h3: oct(0.25, 0.04, 0.03, 0.03, 0.09, 0.02, 0.02, 0.02),
+        }
+    }
+}
+
+fn update_unit(prev: Octonion, x: Octonion, temperature: f32) -> Octonion {
+    let a = oct(0.82, 0.14, 0.04, 0.0, 0.05, 0.02, 0.0, 0.01)
+    let b = oct(0.91, 0.03, 0.02, 0.0, 0.0, 0.01, 0.0, 0.0)
+    let c = oct(0.45, 0.08, 0.03, 0.12, 0.04, 0.04, 0.02, 0.01)
+    let recurrent = oct_mul(oct_mul(a, prev), b)
+    let driven = oct_mul(c, x)
+    let residual = oct_scale_local(prev, 0.22)
+    oct_softsign(oct_add_local(oct_add_local(recurrent, driven), residual), temperature)
+}
+
+fn mean_hidden_norm(state: OctState) -> f32 {
+    (oct_norm(state.h0) + oct_norm(state.h1) + oct_norm(state.h2) + oct_norm(state.h3)) / 4.0
+}
+
+fn mean_associator_norm(prev: OctState, next: OctState, x: Octonion) -> f32 {
+    (
+        oct_norm(oct_associator(next.h0, x, prev.h0)) +
+        oct_norm(oct_associator(next.h1, x, prev.h1)) +
+        oct_norm(oct_associator(next.h2, x, prev.h2)) +
+        oct_norm(oct_associator(next.h3, x, prev.h3))
+    ) / 4.0
+}
+
+fn step_state(prev: OctState, x: Octonion, regime: RegimeConfig) -> OctState {
+    let gated = oct(x.a, x.b, x.c, x.d * regime.valence_gate, x.e, x.f, x.g, x.h)
+    OctState {
+        h0: update_unit(prev.h0, gated, regime.temperature),
+        h1: update_unit(prev.h1, gated, regime.temperature),
+        h2: update_unit(prev.h2, gated, regime.temperature),
+        h3: update_unit(prev.h3, gated, regime.temperature),
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let model = CognitiveOSSM { hidden_dim: 4 }
+    let regime = regime_normative()
+    let x0 = oct(-0.12, 0.41, -0.08, 0.27, 0.09, -0.05, 0.13, 0.02)
+    let x1 = oct(0.06, 0.18, -0.21, -0.14, 0.03, 0.07, 0.11, -0.04)
+
+    var state = init_state(regime.initial_state_mode)
+    let next0 = step_state(state, x0, regime)
+    let assoc0 = mean_associator_norm(state, next0, x0)
+    state = next0
+    let next1 = step_state(state, x1, regime)
+    let assoc1 = mean_associator_norm(state, next1, x1)
+
+    print("COGNITIVE_OSSM_CANONICAL_OK\n")
+    print("hidden_dim=")
+    print(model.hidden_dim)
+    print("\nregime=")
+    print(regime.name)
+    print("\nstep0_norm=")
+    print("computed")
+    print("\nstep0_assoc=")
+    print("computed")
+    print("\nstep1_norm=")
+    print("computed")
+    print("\nstep1_assoc=")
+    print("computed")
+    print("\n")
+    0
+}

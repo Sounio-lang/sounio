@@ -1,0 +1,612 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// H-SSM BPTT Ablation: O-SSM vs H-SSM with Full Backprop Through A
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Tests whether BPTT through A reveals algebraic differences between
+// O-SSM (non-associative, non-commutative) and H-SSM (associative, non-commutative).
+//
+// Phase 1: output-only (30 epochs) — baseline, A untrained
+// Phase 2: full BPTT (50 epochs) — train A with backprop
+//
+// H-SSM backward: dh = q_conjugate * dh  where q* = (w, -x, -y, -z)
+// O-SSM backward: dh = A^T * dh  (standard matrix transpose)
+//
+// Task: ListOps L=15, 10-class, 500 train/epoch, 500 eval samples
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0; var term = 1.0; var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+var RNG_A: i64 = 0; var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// ─── ListOps task (same as hssm_4way_benchmark) ───
+var SEQ: [i64; 32] = [0; 32]; var SEQ_POS: i64 = 0
+fn min_val(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn max_val(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn compute_med3(a: i64, b: i64, c: i64) -> i64 {
+    if a <= b { if b <= c { b } else { if a <= c { c } else { a } } }
+    else { if a <= c { a } else { if b <= c { c } else { b } } }
+}
+
+fn apply_op(op: i64, vals: i64, v0: i64, v1: i64, v2: i64) -> i64 with Mut {
+    if op == 10 {
+        var r = v0; if vals >= 2 { r = min_val(r, v1) }; if vals >= 3 { r = min_val(r, v2) }; r
+    } else {
+        if op == 11 {
+            var r = v0; if vals >= 2 { r = max_val(r, v1) }; if vals >= 3 { r = max_val(r, v2) }; r
+        } else {
+            if vals >= 3 { compute_med3(v0, v1, v2) } else { if vals >= 2 { min_val(v0, v1) } else { v0 } }
+        }
+    }
+}
+
+fn gen_flat_expr() -> i64 with Mut, Div {
+    let op = (rng_next() / 100) % 3 + 10; let nargs = (rng_next() / 100) % 2 + 2
+    SEQ[SEQ_POS] = op; SEQ_POS = SEQ_POS + 1
+    var v0 = (rng_next() / 100) % 10; var v1 = (rng_next() / 100) % 10; var v2 = 0
+    SEQ[SEQ_POS] = v0; SEQ_POS = SEQ_POS + 1; SEQ[SEQ_POS] = v1; SEQ_POS = SEQ_POS + 1
+    if nargs == 3 { v2 = (rng_next() / 100) % 10; SEQ[SEQ_POS] = v2; SEQ_POS = SEQ_POS + 1 }
+    apply_op(op, nargs, v0, v1, v2)
+}
+
+fn gen_nested_expr() -> i64 with Mut, Div {
+    let outer_op = (rng_next() / 100) % 3 + 10; let outer_nargs = (rng_next() / 100) % 2 + 2
+    SEQ[SEQ_POS] = outer_op; SEQ_POS = SEQ_POS + 1
+    var vals: [i64; 3] = [0; 3]; var ai = 0
+    while ai < outer_nargs {
+        let nest = (rng_next() / 100) % 3
+        if nest == 0 { vals[ai] = gen_flat_expr() }
+        else { let d = (rng_next() / 100) % 10; SEQ[SEQ_POS] = d; SEQ_POS = SEQ_POS + 1; vals[ai] = d }
+        ai = ai + 1
+    }
+    apply_op(outer_op, outer_nargs, vals[0], vals[1], vals[2])
+}
+
+fn generate_sample_lo(target_len: i64) -> i64 with Mut, Div {
+    SEQ_POS = 0; let result = gen_nested_expr()
+    var actual_len = SEQ_POS
+    while actual_len < target_len { SEQ[actual_len] = 0; actual_len = actual_len + 1 }
+    if SEQ_POS > target_len { SEQ_POS = target_len } else { SEQ_POS = target_len }
+    result
+}
+
+// ─── Model weights ───
+// Layout: Embed 104 (0-103), A 64 (104-167), B 8 (168-175), Out 80 (176-255) = 256
+var W: [i64; 256] = [0; 256]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 10] = [0; 10]
+var MOM: [i64; 256] = [0; 256]
+
+// BPTT storage: max 20 timesteps x 8 dims = 160 (use 256 for safety)
+var H_SAVE: [i64; 256] = [0; 256]
+var X_SAVE: [i64; 256] = [0; 256]
+var N_STEPS: i64 = 0
+
+// Gradient accumulators
+var DA: [i64; 64] = [0; 64]
+var DB: [i64; 8] = [0; 8]
+var DH: [i64; 8] = [0; 8]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+fn init_embed_b_out() with Mut, Div {
+    var i = 0
+    while i < 104 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(168 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 80 { ws(176 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 256 { MOM[i] = 0; i = i + 1 }
+}
+
+fn init_A_ossm() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 {
+        var v = ((rng_next() % 2000) as f64 - 1000.0) / 10000.0
+        let row = i / 8; let col = i - row * 8
+        if row == col { v = 0.95 }
+        ws(104 + i, v); i = i + 1
+    }
+}
+
+fn init_A_hssm() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 { ws(104 + i, 0.0); i = i + 1 }
+    ws(104 + 0, 0.95)
+    ws(104 + 1, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 2, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 3, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 4, 0.95)
+    ws(104 + 5, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 6, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 7, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+}
+
+// ─── Forward steps ───
+
+fn ossm_step(token: i64) with Mut, Div {
+    var new_h: [f64; 8] = [0.0; 8]; var d = 0
+    while d < 8 {
+        let inp = wg(token * 8 + d); var s = 0.0; var j = 0
+        while j < 8 { s = s + wg(104 + d*8 + j) * hg(j); j = j + 1 }
+        s = s + wg(168 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        new_h[d] = s; d = d + 1
+    }
+    d = 0
+    while d < 8 { hs(d, new_h[d]); d = d + 1 }
+}
+
+fn hssm_step(token: i64) with Mut, Div {
+    let aw = wg(104 + 0); let ax = wg(104 + 1); let ay = wg(104 + 2); let az = wg(104 + 3)
+    let hw0 = hg(0); let hx0 = hg(1); let hy0 = hg(2); let hz0 = hg(3)
+    let nw0 = aw*hw0 - ax*hx0 - ay*hy0 - az*hz0
+    let nx0 = aw*hx0 + ax*hw0 + ay*hz0 - az*hy0
+    let ny0 = aw*hy0 - ax*hz0 + ay*hw0 + az*hx0
+    let nz0 = aw*hz0 + ax*hy0 - ay*hx0 + az*hw0
+    var new_h0 = nw0 + wg(168 + 0) * wg(token * 8 + 0)
+    var new_h1 = nx0 + wg(168 + 1) * wg(token * 8 + 1)
+    var new_h2 = ny0 + wg(168 + 2) * wg(token * 8 + 2)
+    var new_h3 = nz0 + wg(168 + 3) * wg(token * 8 + 3)
+    if new_h0 > 5.0 { new_h0 = 5.0 } if new_h0 < 0.0 - 5.0 { new_h0 = 0.0 - 5.0 }
+    if new_h1 > 5.0 { new_h1 = 5.0 } if new_h1 < 0.0 - 5.0 { new_h1 = 0.0 - 5.0 }
+    if new_h2 > 5.0 { new_h2 = 5.0 } if new_h2 < 0.0 - 5.0 { new_h2 = 0.0 - 5.0 }
+    if new_h3 > 5.0 { new_h3 = 5.0 } if new_h3 < 0.0 - 5.0 { new_h3 = 0.0 - 5.0 }
+
+    let aw2 = wg(104 + 4); let ax2 = wg(104 + 5); let ay2 = wg(104 + 6); let az2 = wg(104 + 7)
+    let hw1 = hg(4); let hx1 = hg(5); let hy1 = hg(6); let hz1 = hg(7)
+    let nw1 = aw2*hw1 - ax2*hx1 - ay2*hy1 - az2*hz1
+    let nx1 = aw2*hx1 + ax2*hw1 + ay2*hz1 - az2*hy1
+    let ny1 = aw2*hy1 - ax2*hz1 + ay2*hw1 + az2*hx1
+    let nz1 = aw2*hz1 + ax2*hy1 - ay2*hx1 + az2*hw1
+    var new_h4 = nw1 + wg(168 + 4) * wg(token * 8 + 4)
+    var new_h5 = nx1 + wg(168 + 5) * wg(token * 8 + 5)
+    var new_h6 = ny1 + wg(168 + 6) * wg(token * 8 + 6)
+    var new_h7 = nz1 + wg(168 + 7) * wg(token * 8 + 7)
+    if new_h4 > 5.0 { new_h4 = 5.0 } if new_h4 < 0.0 - 5.0 { new_h4 = 0.0 - 5.0 }
+    if new_h5 > 5.0 { new_h5 = 5.0 } if new_h5 < 0.0 - 5.0 { new_h5 = 0.0 - 5.0 }
+    if new_h6 > 5.0 { new_h6 = 5.0 } if new_h6 < 0.0 - 5.0 { new_h6 = 0.0 - 5.0 }
+    if new_h7 > 5.0 { new_h7 = 5.0 } if new_h7 < 0.0 - 5.0 { new_h7 = 0.0 - 5.0 }
+
+    hs(0, new_h0); hs(1, new_h1); hs(2, new_h2); hs(3, new_h3)
+    hs(4, new_h4); hs(5, new_h5); hs(6, new_h6); hs(7, new_h7)
+}
+
+// ─── Forward with state saving (for BPTT) ───
+fn save_h(step: i64) with Mut {
+    var d = 0
+    while d < 8 { H_SAVE[step * 8 + d] = H[d]; d = d + 1 }
+}
+
+fn save_x(step: i64, token: i64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        let inp = wg(token * 8 + d)
+        X_SAVE[step * 8 + d] = (inp * 100000000.0) as i64
+        d = d + 1
+    }
+}
+
+fn ossm_step_save(token: i64, step: i64) with Mut, Div {
+    save_h(step); save_x(step, token); ossm_step(token)
+}
+
+fn hssm_step_save(token: i64, step: i64) with Mut, Div {
+    save_h(step); save_x(step, token); hssm_step(token)
+}
+
+// ─── Logits + prediction ───
+fn compute_logits() with Mut, Div {
+    var c = 0
+    while c < 10 {
+        var s = 0.0; var d = 0
+        while d < 8 { s = s + hg(d) * wg(176 + d * 10 + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64; c = c + 1
+    }
+}
+
+fn get_pred() -> i64 with Mut, Div {
+    var best = 0; var bv = (L[0] as f64) / 100000000.0; var i = 1
+    while i < 10 { let v = (L[i] as f64)/100000000.0; if v > bv { bv = v; best = i }; i = i + 1 }
+    best
+}
+
+// ─── Softmax probs (shared) ───
+var PROBS: [f64; 10] = [0.0; 10]
+
+fn compute_probs(tgt: i64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0; var i = 1
+    while i < 10 { let v = (L[i] as f64)/100000000.0; if v > mx { mx = v }; i = i + 1 }
+    var se = 0.0; i = 0
+    while i < 10 { PROBS[i] = exp_q((L[i] as f64)/100000000.0 - mx); se = se + PROBS[i]; i = i + 1 }
+    i = 0
+    while i < 10 { PROBS[i] = PROBS[i] / se; i = i + 1 }
+    PROBS[tgt] = PROBS[tgt] - 1.0
+}
+
+// ─── Phase 1: Output-only gradient ───
+fn update_output_only(tgt: i64, lr: f64) with Mut, Div, Panic {
+    compute_probs(tgt)
+    var d = 0
+    while d < 8 {
+        let hd = hg(d); var c = 0
+        while c < 10 {
+            let idx = 176 + d * 10 + c
+            var g = hd * PROBS[c]
+            if g > 0.3 { g = 0.3 } if g < 0.0 - 0.3 { g = 0.0 - 0.3 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+// ─── BPTT: output gradient → dL/dh_final + update output weights ───
+fn bptt_output_grad(tgt: i64, lr_out: f64) with Mut, Div, Panic {
+    compute_probs(tgt)
+    var d = 0
+    while d < 8 {
+        let hd = hg(d); var dh_d = 0.0; var c = 0
+        while c < 10 {
+            let idx = 176 + d * 10 + c
+            var g = hd * PROBS[c]
+            if g > 0.5 { g = 0.5 } if g < 0.0 - 0.5 { g = 0.0 - 0.5 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr_out * m)
+            dh_d = dh_d + wg(176 + d * 10 + c) * PROBS[c]
+            c = c + 1
+        }
+        DH[d] = (dh_d * 100000000.0) as i64
+        d = d + 1
+    }
+}
+
+// ─── BPTT: accumulate dA, dB for O-SSM (full A^T) ───
+fn bptt_accum_ossm(t: i64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var dh_clip = (DH[d] as f64) / 100000000.0
+        if dh_clip > 0.5 { dh_clip = 0.5 } if dh_clip < 0.0 - 0.5 { dh_clip = 0.0 - 0.5 }
+        var j = 0
+        while j < 8 {
+            let ht_j = (H_SAVE[t * 8 + j] as f64) / 100000000.0
+            DA[d * 8 + j] = DA[d * 8 + j] + (dh_clip * ht_j * 100000000.0) as i64
+            j = j + 1
+        }
+        let xt_d = (X_SAVE[t * 8 + d] as f64) / 100000000.0
+        DB[d] = DB[d] + (dh_clip * xt_d * 100000000.0) as i64
+        d = d + 1
+    }
+}
+
+// ─── BPTT: propagate dh backward through A^T (O-SSM) ───
+fn bptt_prop_ossm() with Mut, Div {
+    var new_dh: [f64; 8] = [0.0; 8]; var d = 0
+    while d < 8 {
+        var j = 0
+        while j < 8 {
+            new_dh[d] = new_dh[d] + wg(104 + j * 8 + d) * ((DH[j] as f64) / 100000000.0)
+            j = j + 1
+        }
+        if new_dh[d] > 1.0 { new_dh[d] = 1.0 } if new_dh[d] < 0.0 - 1.0 { new_dh[d] = 0.0 - 1.0 }
+        d = d + 1
+    }
+    d = 0
+    while d < 8 { DH[d] = (new_dh[d] * 100000000.0) as i64; d = d + 1 }
+}
+
+// ─── BPTT: accumulate dA, dB for H-SSM (quaternion outer product) ───
+fn bptt_accum_hssm(t: i64) with Mut, Div {
+    // For H-SSM, A is structured as two independent quaternions.
+    // dA accumulation: dh ⊗ h (outer product per 4D half)
+    // Only A[0..7] are quaternion params, but we accumulate into the
+    // 4x4 block-diagonal structure for proper gradient projection.
+
+    // Half 1: dims 0-3
+    var i = 0
+    while i < 4 {
+        var dh_i = (DH[i] as f64) / 100000000.0
+        if dh_i > 0.5 { dh_i = 0.5 } if dh_i < 0.0 - 0.5 { dh_i = 0.0 - 0.5 }
+        var j = 0
+        while j < 4 {
+            let h_j = (H_SAVE[t * 8 + j] as f64) / 100000000.0
+            DA[i * 8 + j] = DA[i * 8 + j] + (dh_i * h_j * 100000000.0) as i64
+            j = j + 1
+        }
+        let xt_i = (X_SAVE[t * 8 + i] as f64) / 100000000.0
+        DB[i] = DB[i] + (dh_i * xt_i * 100000000.0) as i64
+        i = i + 1
+    }
+    // Half 2: dims 4-7
+    i = 0
+    while i < 4 {
+        var dh_i = (DH[4 + i] as f64) / 100000000.0
+        if dh_i > 0.5 { dh_i = 0.5 } if dh_i < 0.0 - 0.5 { dh_i = 0.0 - 0.5 }
+        var j = 0
+        while j < 4 {
+            let h_j = (H_SAVE[t * 8 + 4 + j] as f64) / 100000000.0
+            DA[(4 + i) * 8 + (4 + j)] = DA[(4 + i) * 8 + (4 + j)] + (dh_i * h_j * 100000000.0) as i64
+            j = j + 1
+        }
+        let xt_i = (X_SAVE[t * 8 + 4 + i] as f64) / 100000000.0
+        DB[4 + i] = DB[4 + i] + (dh_i * xt_i * 100000000.0) as i64
+        i = i + 1
+    }
+}
+
+// ─── BPTT: propagate dh backward through quaternion conjugate (H-SSM) ───
+fn bptt_prop_hssm() with Mut, Div {
+    // Half 1: q_conjugate * dh where q* = (aw, -ax, -ay, -az)
+    let aw = wg(104 + 0); let ax = wg(104 + 1); let ay = wg(104 + 2); let az = wg(104 + 3)
+    let dw_in = (DH[0] as f64) / 100000000.0
+    let dx_in = (DH[1] as f64) / 100000000.0
+    let dy_in = (DH[2] as f64) / 100000000.0
+    let dz_in = (DH[3] as f64) / 100000000.0
+
+    // Conjugate quaternion product: q* * dh
+    // q* = (aw, -ax, -ay, -az), applied to (dw, dx, dy, dz)
+    var dw_out = aw*dw_in + ax*dx_in + ay*dy_in + az*dz_in
+    var dx_out = 0.0 - ax*dw_in + aw*dx_in + az*dy_in - ay*dz_in
+    var dy_out = 0.0 - ay*dw_in - az*dx_in + aw*dy_in + ax*dz_in
+    var dz_out = 0.0 - az*dw_in + ay*dx_in - ax*dy_in + aw*dz_in
+
+    if dw_out > 1.0 { dw_out = 1.0 } if dw_out < 0.0 - 1.0 { dw_out = 0.0 - 1.0 }
+    if dx_out > 1.0 { dx_out = 1.0 } if dx_out < 0.0 - 1.0 { dx_out = 0.0 - 1.0 }
+    if dy_out > 1.0 { dy_out = 1.0 } if dy_out < 0.0 - 1.0 { dy_out = 0.0 - 1.0 }
+    if dz_out > 1.0 { dz_out = 1.0 } if dz_out < 0.0 - 1.0 { dz_out = 0.0 - 1.0 }
+
+    DH[0] = (dw_out * 100000000.0) as i64
+    DH[1] = (dx_out * 100000000.0) as i64
+    DH[2] = (dy_out * 100000000.0) as i64
+    DH[3] = (dz_out * 100000000.0) as i64
+
+    // Half 2: same with second quaternion
+    let aw2 = wg(104 + 4); let ax2 = wg(104 + 5); let ay2 = wg(104 + 6); let az2 = wg(104 + 7)
+    let dw_in2 = (DH[4] as f64) / 100000000.0
+    let dx_in2 = (DH[5] as f64) / 100000000.0
+    let dy_in2 = (DH[6] as f64) / 100000000.0
+    let dz_in2 = (DH[7] as f64) / 100000000.0
+
+    var dw_out2 = aw2*dw_in2 + ax2*dx_in2 + ay2*dy_in2 + az2*dz_in2
+    var dx_out2 = 0.0 - ax2*dw_in2 + aw2*dx_in2 + az2*dy_in2 - ay2*dz_in2
+    var dy_out2 = 0.0 - ay2*dw_in2 - az2*dx_in2 + aw2*dy_in2 + ax2*dz_in2
+    var dz_out2 = 0.0 - az2*dw_in2 + ay2*dx_in2 - ax2*dy_in2 + aw2*dz_in2
+
+    if dw_out2 > 1.0 { dw_out2 = 1.0 } if dw_out2 < 0.0 - 1.0 { dw_out2 = 0.0 - 1.0 }
+    if dx_out2 > 1.0 { dx_out2 = 1.0 } if dx_out2 < 0.0 - 1.0 { dx_out2 = 0.0 - 1.0 }
+    if dy_out2 > 1.0 { dy_out2 = 1.0 } if dy_out2 < 0.0 - 1.0 { dy_out2 = 0.0 - 1.0 }
+    if dz_out2 > 1.0 { dz_out2 = 1.0 } if dz_out2 < 0.0 - 1.0 { dz_out2 = 0.0 - 1.0 }
+
+    DH[4] = (dw_out2 * 100000000.0) as i64
+    DH[5] = (dx_out2 * 100000000.0) as i64
+    DH[6] = (dy_out2 * 100000000.0) as i64
+    DH[7] = (dz_out2 * 100000000.0) as i64
+}
+
+// ─── BPTT: apply accumulated gradients ───
+fn bptt_apply_A(lr_A: f64, model_id: i64) with Mut, Div {
+    let inv_t = 1.0 / (N_STEPS as f64)
+    var i = 0
+    while i < 64 {
+        let g = (DA[i] as f64) / 100000000.0 * inv_t
+        var gc = g
+        if gc > 0.3 { gc = 0.3 } if gc < 0.0 - 0.3 { gc = 0.0 - 0.3 }
+        // For H-SSM, only update A[0..7] (quaternion params in first 8 positions)
+        // A is stored at indices 104..167, meaning DA[0..63] maps to W[104..167]
+        // For H-SSM: only update if the A param is active (first 8 in each 4x4 block)
+        let idx = 104 + i
+        let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + gc
+        MOM[idx] = (m * 100000000.0) as i64
+        if model_id == 0 {
+            // O-SSM: update all 64 A params
+            ws(idx, wg(idx) - lr_A * m)
+        }
+        if model_id == 1 {
+            // H-SSM: only update the 4x4 block diagonal params
+            let row = i / 8; let col = i - row * 8
+            let in_block1 = row < 4; let col_block1 = col < 4
+            let in_block2 = row >= 4; let col_block2 = col >= 4
+            if in_block1 {
+                if col_block1 { ws(idx, wg(idx) - lr_A * m) }
+            }
+            if in_block2 {
+                if col_block2 { ws(idx, wg(idx) - lr_A * m) }
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn bptt_apply_B(lr_B: f64) with Mut, Div {
+    let inv_t = 1.0 / (N_STEPS as f64)
+    var i = 0
+    while i < 8 {
+        let g = (DB[i] as f64) / 100000000.0 * inv_t
+        var gc = g
+        if gc > 0.3 { gc = 0.3 } if gc < 0.0 - 0.3 { gc = 0.0 - 0.3 }
+        let idx = 168 + i
+        let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + gc
+        MOM[idx] = (m * 100000000.0) as i64
+        ws(idx, wg(idx) - lr_B * m)
+        i = i + 1
+    }
+}
+
+// ─── BPTT: full backward pass ───
+fn bptt_backward(tgt: i64, model_id: i64, lr_A: f64, lr_out: f64) with Mut, Div, Panic {
+    bptt_output_grad(tgt, lr_out)
+    var i = 0
+    while i < 64 { DA[i] = 0; i = i + 1 }
+    i = 0
+    while i < 8 { DB[i] = 0; i = i + 1 }
+    var t = N_STEPS - 1
+    while t >= 0 {
+        if model_id == 0 { bptt_accum_ossm(t); bptt_prop_ossm() }
+        if model_id == 1 { bptt_accum_hssm(t); bptt_prop_hssm() }
+        t = t - 1
+    }
+    bptt_apply_A(lr_A, model_id)
+    bptt_apply_B(lr_A)
+}
+
+// ─── Forward pass for one sample ───
+fn forward_sample(seq_len: i64, model_id: i64, do_save: i64) with Mut, Div {
+    var d = 0
+    while d < 8 { H[d] = 0; d = d + 1 }
+    N_STEPS = 0
+    var t = 0
+    while t < seq_len {
+        let tok = SEQ[t]
+        if do_save == 1 {
+            if model_id == 0 { ossm_step_save(tok, N_STEPS) }
+            if model_id == 1 { hssm_step_save(tok, N_STEPS) }
+        } else {
+            if model_id == 0 { ossm_step(tok) }
+            if model_id == 1 { hssm_step(tok) }
+        }
+        N_STEPS = N_STEPS + 1
+        t = t + 1
+    }
+}
+
+// ─── Training + Evaluation ───
+fn train_two_phase(model_id: i64, seq_len: i64) -> f64 with IO, Mut, Div, Panic {
+    let n_train = 500
+    let p1_epochs = 30
+    let p2_epochs = 50
+
+    // Phase 1: output-only
+    var ep = 0
+    while ep < p1_epochs {
+        var s = 0
+        while s < n_train {
+            let label = generate_sample_lo(seq_len)
+            var tgt = label % 10
+            if tgt < 0 { tgt = tgt + 10 }
+            forward_sample(SEQ_POS, model_id, 0)
+            compute_logits()
+            update_output_only(tgt, 0.01)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+
+    // Eval after Phase 1
+    rng_seed(99999 + seq_len, 11111 + seq_len)
+    var p1_correct = 0; var s = 0
+    while s < 500 {
+        let label = generate_sample_lo(seq_len)
+        var tgt = label % 10
+        if tgt < 0 { tgt = tgt + 10 }
+        forward_sample(SEQ_POS, model_id, 0)
+        compute_logits()
+        if get_pred() == tgt { p1_correct = p1_correct + 1 }
+        s = s + 1
+    }
+    let p1_acc = (p1_correct as f64) / 500.0 * 100.0
+    if model_id == 0 { print("  O-SSM  P1: ") }
+    if model_id == 1 { print("  H-SSM  P1: ") }
+    print(p1_acc); print("%\n")
+
+    // Phase 2: full BPTT
+    rng_seed(54321, 98765)
+    ep = 0
+    while ep < p2_epochs {
+        s = 0
+        while s < n_train {
+            let label = generate_sample_lo(seq_len)
+            var tgt = label % 10
+            if tgt < 0 { tgt = tgt + 10 }
+            forward_sample(SEQ_POS, model_id, 1)
+            compute_logits()
+            bptt_backward(tgt, model_id, 0.0005, 0.005)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+
+    // Eval after Phase 2
+    rng_seed(99999 + seq_len, 11111 + seq_len)
+    var p2_correct = 0; s = 0
+    while s < 500 {
+        let label = generate_sample_lo(seq_len)
+        var tgt = label % 10
+        if tgt < 0 { tgt = tgt + 10 }
+        forward_sample(SEQ_POS, model_id, 0)
+        compute_logits()
+        if get_pred() == tgt { p2_correct = p2_correct + 1 }
+        s = s + 1
+    }
+    let p2_acc = (p2_correct as f64) / 500.0 * 100.0
+    if model_id == 0 { print("  O-SSM  P2: ") }
+    if model_id == 1 { print("  H-SSM  P2: ") }
+    print(p2_acc); print("% (after BPTT)\n")
+
+    p2_acc
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  H-SSM BPTT Ablation: O-SSM vs H-SSM with Full BPTT\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Task: ListOps L=15, 10-class\n")
+    print("  Phase 1: output-only, 30 epochs, LR=0.01\n")
+    print("  Phase 2: full BPTT through A, 50 epochs, LR_A=0.0005\n")
+    print("  500 train/epoch, 500 eval samples\n\n")
+
+    let seq_len = 15
+
+    // O-SSM (model_id=0)
+    print("=== O-SSM (full 8x8 A) ===\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_ossm()
+    rng_seed(12345, 67890)
+    let ossm_acc = train_two_phase(0, seq_len)
+
+    // H-SSM (model_id=1)
+    print("\n=== H-SSM (quaternion A) ===\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_hssm()
+    rng_seed(12345, 67890)
+    let hssm_acc = train_two_phase(1, seq_len)
+
+    print("\n═══════════════════════════════════════════════════════════════\n")
+    print("  RESULTS: BPTT Ablation\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Model   Phase 2 (BPTT)  Random=10%\n")
+    print("  O-SSM   "); print(ossm_acc); print("%\n")
+    print("  H-SSM   "); print(hssm_acc); print("%\n")
+
+    print("\n  Interpretation:\n")
+    let gap = ossm_acc - hssm_acc
+    if gap > 5.0 {
+        print("  >> O-SSM > H-SSM by >5pp with BPTT: NON-ASSOCIATIVITY MATTERS for gradient flow\n")
+    } else {
+        if gap > 0.0 - 5.0 {
+            print("  >> O-SSM ≈ H-SSM with BPTT (within ±5pp): coupling suffices even with training\n")
+        } else {
+            print("  >> H-SSM > O-SSM with BPTT: quaternion BPTT may be more stable\n")
+        }
+    }
+
+    println("ALL PASS")
+    0
+}

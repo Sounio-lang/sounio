@@ -1,0 +1,629 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S-SSM Trainable: Gradient Descent on C, α-Sweep, Real-SSM Benchmark
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Architecture (16D sedenion hidden state):
+//   h_t = normalize(tanh(A(α) ⊗ h_{t-1} + B · x_t))
+//   y_t = dot(h_t, C)                                 (linear readout)
+//
+// Only C is trained (output projection):
+//   ∂L/∂C_i = (2/T) Σ_t (y_t − target_t) · h_t^i    (exact batch gradient)
+//
+// α parameterizes how close A is to the G₂ zero-divisor locus:
+//   A(α) = normalize(lerp(A_generic, ZD_norm, α))
+//   α=0 → normalize(e0+e1)  (generic unit sedenion, far from ZD)
+//   α=1 → normalize(e3+e10) (known zero divisor)
+//
+// Real diagonal baseline: same 48 params, no cross-channel coupling.
+//   h_t[i] = tanh(a_i·h_{t-1}[i] + b_i·x_t)  (independent per dim)
+//   y_t    = Σ_i c_i · h_t[i]
+//
+// Dataset: target[t] = sin(2π·t/20), T=80
+//   train t∈[0,63], test t∈[64,79], input x_t = t·0.1
+
+use math::sedenion::*;
+
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+
+fn sqrt_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i: i64 = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn exp_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_s(10.0) * exp_s(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var s: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i <= 20 {
+        term = term * x / (i as f64)
+        s = s + term
+        i = i + 1
+    }
+    s
+}
+
+fn tanh_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 10.0 { return 1.0 }
+    if x < 0.0 - 10.0 { return 0.0 - 1.0 }
+    let e2: f64 = exp_s(2.0 * x)
+    (e2 - 1.0) / (e2 + 1.0)
+}
+
+fn sin_s(x: f64) -> f64 with Mut, Div, Panic {
+    let pi2: f64 = 6.28318530718
+    var xr: f64 = x
+    while xr > 3.14159265359 { xr = xr - pi2 }
+    while xr < 0.0 - 3.14159265359 { xr = xr + pi2 }
+    let x2: f64 = xr * xr
+    let x3: f64 = x2 * xr
+    let x5: f64 = x3 * x2
+    let x7: f64 = x5 * x2
+    let x9: f64 = x7 * x2
+    xr - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0
+}
+
+// ─── RNG and input sequence ───────────────────────────────────────────────────
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+
+fn rng_next() -> i64 with Mut {
+    var x: i64 = RNG_A
+    let y: i64 = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r: i64 = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_small() -> f64 with Mut, Div {
+    ((rng_next() % 2000) as f64 - 1000.0) / 3000.0
+}
+
+// ─── Target and input arrays ──────────────────────────────────────────────────
+// Both use sin(2πt/20): same frequency for input and target.
+// With sinusoidal input the hidden state oscillates at the target frequency,
+// ensuring the h_t trajectory is correlated with the target (R² >> 0).
+
+var TARGET: [f64; 80] = [0.0; 80]
+var INPUT:  [f64; 80] = [0.0; 80]
+
+fn init_target() with Mut, Div, Panic {
+    var t: i64 = 0
+    while t < 80 {
+        let v: f64 = sin_s((t as f64) * 6.28318530718 / 20.0)
+        TARGET[t] = v
+        INPUT[t]  = v * 0.5    // drive system at target frequency, half amplitude
+        t = t + 1
+    }
+}
+
+// ─── S-SSM: C weight storage (output projection, trained) ─────────────────────
+
+var WC: [i64; 16] = [0; 16]
+
+fn cg(i: i64) -> f64 with Div { (WC[i] as f64) / 100000000.0 }
+fn cs(i: i64, v: f64) with Mut { WC[i] = (v * 100000000.0) as i64 }
+
+fn get_c() -> Sedenion with Div {
+    Sedenion {
+        e0:  (WC[0]  as f64) / 100000000.0,
+        e1:  (WC[1]  as f64) / 100000000.0,
+        e2:  (WC[2]  as f64) / 100000000.0,
+        e3:  (WC[3]  as f64) / 100000000.0,
+        e4:  (WC[4]  as f64) / 100000000.0,
+        e5:  (WC[5]  as f64) / 100000000.0,
+        e6:  (WC[6]  as f64) / 100000000.0,
+        e7:  (WC[7]  as f64) / 100000000.0,
+        e8:  (WC[8]  as f64) / 100000000.0,
+        e9:  (WC[9]  as f64) / 100000000.0,
+        e10: (WC[10] as f64) / 100000000.0,
+        e11: (WC[11] as f64) / 100000000.0,
+        e12: (WC[12] as f64) / 100000000.0,
+        e13: (WC[13] as f64) / 100000000.0,
+        e14: (WC[14] as f64) / 100000000.0,
+        e15: (WC[15] as f64) / 100000000.0
+    }
+}
+
+fn init_c() with Mut {
+    var i: i64 = 0
+    while i < 16 { WC[i] = 0; i = i + 1 }
+}
+
+// ─── Hidden state history: 16 parallel [f64; 64] arrays ──────────────────────
+// One per sedenion component. Avoids JIT struct-array slot corruption.
+
+var H0:  [f64; 64] = [0.0; 64]
+var H1:  [f64; 64] = [0.0; 64]
+var H2:  [f64; 64] = [0.0; 64]
+var H3:  [f64; 64] = [0.0; 64]
+var H4:  [f64; 64] = [0.0; 64]
+var H5:  [f64; 64] = [0.0; 64]
+var H6:  [f64; 64] = [0.0; 64]
+var H7:  [f64; 64] = [0.0; 64]
+var H8:  [f64; 64] = [0.0; 64]
+var H9:  [f64; 64] = [0.0; 64]
+var H10: [f64; 64] = [0.0; 64]
+var H11: [f64; 64] = [0.0; 64]
+var H12: [f64; 64] = [0.0; 64]
+var H13: [f64; 64] = [0.0; 64]
+var H14: [f64; 64] = [0.0; 64]
+var H15: [f64; 64] = [0.0; 64]
+
+fn save_h(t: i64, h: Sedenion) with Mut {
+    H0[t]  = h.e0;  H1[t]  = h.e1;  H2[t]  = h.e2;  H3[t]  = h.e3
+    H4[t]  = h.e4;  H5[t]  = h.e5;  H6[t]  = h.e6;  H7[t]  = h.e7
+    H8[t]  = h.e8;  H9[t]  = h.e9;  H10[t] = h.e10; H11[t] = h.e11
+    H12[t] = h.e12; H13[t] = h.e13; H14[t] = h.e14; H15[t] = h.e15
+}
+
+// Last train h (for test continuation) — 16 scalar globals
+var LH0:  f64 = 0.0
+var LH1:  f64 = 0.0
+var LH2:  f64 = 0.0
+var LH3:  f64 = 0.0
+var LH4:  f64 = 0.0
+var LH5:  f64 = 0.0
+var LH6:  f64 = 0.0
+var LH7:  f64 = 0.0
+var LH8:  f64 = 0.0
+var LH9:  f64 = 0.0
+var LH10: f64 = 0.0
+var LH11: f64 = 0.0
+var LH12: f64 = 0.0
+var LH13: f64 = 0.0
+var LH14: f64 = 0.0
+var LH15: f64 = 0.0
+
+fn save_last_h(h: Sedenion) with Mut {
+    LH0 = h.e0;  LH1 = h.e1;  LH2 = h.e2;  LH3 = h.e3
+    LH4 = h.e4;  LH5 = h.e5;  LH6 = h.e6;  LH7 = h.e7
+    LH8 = h.e8;  LH9 = h.e9;  LH10 = h.e10; LH11 = h.e11
+    LH12 = h.e12; LH13 = h.e13; LH14 = h.e14; LH15 = h.e15
+}
+
+fn load_last_h() -> Sedenion {
+    Sedenion {
+        e0: LH0, e1: LH1, e2: LH2, e3: LH3,
+        e4: LH4, e5: LH5, e6: LH6, e7: LH7,
+        e8: LH8, e9: LH9, e10: LH10, e11: LH11,
+        e12: LH12, e13: LH13, e14: LH14, e15: LH15
+    }
+}
+
+// ─── Gradient accumulator (shared between S-SSM and real baseline) ────────────
+
+var GC: [f64; 16] = [0.0; 16]
+
+// ─── Zero-divisor gate activity ───────────────────────────────────────────────
+
+fn ssm_gate_act(a: Sedenion) -> f64 with Div, Panic {
+    let comp_zd: Sedenion = sed_complementary_zero_divisor()
+    let product: Sedenion = sed_mul(a, comp_zd)
+    let prod_norm: f64 = sed_norm(product)
+    let a_norm: f64 = sed_norm(a)
+    let zd_norm: f64 = sed_norm(comp_zd)
+    let denom: f64 = a_norm * zd_norm
+    if denom < 0.0000001 { return 0.0 }
+    let ratio: f64 = prod_norm / denom
+    var gate: f64 = 1.0 - ratio
+    if gate < 0.0 { gate = 0.0 }
+    if gate > 1.0 { gate = 1.0 }
+    gate
+}
+
+// ─── S-SSM forward pass (64 training steps) ───────────────────────────────────
+
+fn ssm_forward_train(a: Sedenion, b: Sedenion) with Mut, Div, Panic {
+    var h: Sedenion = sed_one()
+    var t: i64 = 0
+    while t < 64 {
+        let x: f64 = INPUT[t]
+        let ah: Sedenion = sed_mul(a, h)
+        let bx: Sedenion = sed_scale(b, x)
+        let raw: Sedenion = sed_add(ah, bx)
+        let act: Sedenion = sed_tanh(raw)
+        let n: f64 = sed_norm(act)
+        var hn: Sedenion = act
+        if n > 0.0000001 { hn = sed_scale(act, 1.0 / n) }
+        h = hn
+        save_h(t, h)
+        t = t + 1
+    }
+    save_last_h(h)
+}
+
+// ─── S-SSM C gradient update ──────────────────────────────────────────────────
+
+fn ssm_update_c(lr: f64) with Mut, Div, Panic {
+    let c: Sedenion = get_c()
+    var i: i64 = 0
+    while i < 16 { GC[i] = 0.0; i = i + 1 }
+    var t: i64 = 0
+    while t < 64 {
+        let ht: Sedenion = Sedenion {
+            e0:  H0[t],  e1:  H1[t],  e2:  H2[t],  e3:  H3[t],
+            e4:  H4[t],  e5:  H5[t],  e6:  H6[t],  e7:  H7[t],
+            e8:  H8[t],  e9:  H9[t],  e10: H10[t], e11: H11[t],
+            e12: H12[t], e13: H13[t], e14: H14[t], e15: H15[t]
+        }
+        let y: f64 = sed_dot(ht, c)
+        let err: f64 = y - TARGET[t]
+        GC[0]  = GC[0]  + err * H0[t]
+        GC[1]  = GC[1]  + err * H1[t]
+        GC[2]  = GC[2]  + err * H2[t]
+        GC[3]  = GC[3]  + err * H3[t]
+        GC[4]  = GC[4]  + err * H4[t]
+        GC[5]  = GC[5]  + err * H5[t]
+        GC[6]  = GC[6]  + err * H6[t]
+        GC[7]  = GC[7]  + err * H7[t]
+        GC[8]  = GC[8]  + err * H8[t]
+        GC[9]  = GC[9]  + err * H9[t]
+        GC[10] = GC[10] + err * H10[t]
+        GC[11] = GC[11] + err * H11[t]
+        GC[12] = GC[12] + err * H12[t]
+        GC[13] = GC[13] + err * H13[t]
+        GC[14] = GC[14] + err * H14[t]
+        GC[15] = GC[15] + err * H15[t]
+        t = t + 1
+    }
+    let scale: f64 = lr * 2.0 / 64.0
+    i = 0
+    while i < 16 {
+        cs(i, cg(i) - scale * GC[i])
+        i = i + 1
+    }
+}
+
+// ─── S-SSM MSE ────────────────────────────────────────────────────────────────
+
+fn ssm_train_mse() -> f64 with Div, Panic {
+    let c: Sedenion = get_c()
+    var sum: f64 = 0.0
+    var t: i64 = 0
+    while t < 64 {
+        let ht: Sedenion = Sedenion {
+            e0:  H0[t],  e1:  H1[t],  e2:  H2[t],  e3:  H3[t],
+            e4:  H4[t],  e5:  H5[t],  e6:  H6[t],  e7:  H7[t],
+            e8:  H8[t],  e9:  H9[t],  e10: H10[t], e11: H11[t],
+            e12: H12[t], e13: H13[t], e14: H14[t], e15: H15[t]
+        }
+        let y: f64 = sed_dot(ht, c)
+        let err: f64 = y - TARGET[t]
+        sum = sum + err * err
+        t = t + 1
+    }
+    sum / 64.0
+}
+
+fn ssm_test_mse(a: Sedenion, b: Sedenion) -> f64 with Mut, Div, Panic {
+    let c: Sedenion = get_c()
+    var h: Sedenion = load_last_h()
+    var sum: f64 = 0.0
+    var t: i64 = 64
+    while t < 80 {
+        let x: f64 = INPUT[t]
+        let ah: Sedenion = sed_mul(a, h)
+        let bx: Sedenion = sed_scale(b, x)
+        let raw: Sedenion = sed_add(ah, bx)
+        let act: Sedenion = sed_tanh(raw)
+        let n: f64 = sed_norm(act)
+        var hn: Sedenion = act
+        if n > 0.0000001 { hn = sed_scale(act, 1.0 / n) }
+        h = hn
+        let y: f64 = sed_dot(h, c)
+        let err: f64 = y - TARGET[t]
+        sum = sum + err * err
+        t = t + 1
+    }
+    sum / 16.0
+}
+
+// ─── Real diagonal SSM ────────────────────────────────────────────────────────
+
+var WA_R: [f64; 16] = [0.0; 16]
+var WB_R: [f64; 16] = [0.0; 16]
+var WC_R: [i64; 16] = [0; 16]
+var H_REAL: [f64; 1024] = [0.0; 1024]
+var LAST_HR: [f64; 16] = [0.0; 16]
+
+fn cg_r(i: i64) -> f64 with Div { (WC_R[i] as f64) / 100000000.0 }
+fn cs_r(i: i64, v: f64) with Mut { WC_R[i] = (v * 100000000.0) as i64 }
+
+fn init_real() with Mut, Div {
+    var i: i64 = 0
+    while i < 16 {
+        var ai: f64 = 0.75 + abs_s(rand_small()) * 0.5
+        if ai > 0.97 { ai = 0.97 }
+        WA_R[i] = ai
+        WB_R[i] = rand_small() * 0.2
+        WC_R[i] = 0
+        i = i + 1
+    }
+}
+
+fn real_forward_train() with Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    var t: i64 = 0
+    while t < 64 {
+        let x: f64 = INPUT[t]
+        var i: i64 = 0
+        while i < 16 {
+            let new_hi: f64 = tanh_s(WA_R[i] * h[i] + WB_R[i] * x)
+            H_REAL[t * 16 + i] = new_hi
+            h[i] = new_hi
+            i = i + 1
+        }
+        t = t + 1
+    }
+    var i: i64 = 0
+    while i < 16 { LAST_HR[i] = h[i]; i = i + 1 }
+}
+
+fn real_update_c(lr: f64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 16 { GC[i] = 0.0; i = i + 1 }
+    var t: i64 = 0
+    while t < 64 {
+        var y: f64 = 0.0
+        i = 0
+        while i < 16 { y = y + cg_r(i) * H_REAL[t * 16 + i]; i = i + 1 }
+        let err: f64 = y - TARGET[t]
+        i = 0
+        while i < 16 { GC[i] = GC[i] + err * H_REAL[t * 16 + i]; i = i + 1 }
+        t = t + 1
+    }
+    let scale: f64 = lr * 2.0 / 64.0
+    i = 0
+    while i < 16 { cs_r(i, cg_r(i) - scale * GC[i]); i = i + 1 }
+}
+
+fn real_train_mse() -> f64 with Div, Panic {
+    var sum: f64 = 0.0
+    var t: i64 = 0
+    while t < 64 {
+        var y: f64 = 0.0
+        var i: i64 = 0
+        while i < 16 { y = y + cg_r(i) * H_REAL[t * 16 + i]; i = i + 1 }
+        let err: f64 = y - TARGET[t]
+        sum = sum + err * err
+        t = t + 1
+    }
+    sum / 64.0
+}
+
+fn real_test_mse() -> f64 with Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 { h[i] = LAST_HR[i]; i = i + 1 }
+    var sum: f64 = 0.0
+    var t: i64 = 64
+    while t < 80 {
+        let x: f64 = INPUT[t]
+        var y: f64 = 0.0
+        i = 0
+        while i < 16 {
+            let new_hi: f64 = tanh_s(WA_R[i] * h[i] + WB_R[i] * x)
+            h[i] = new_hi
+            y = y + cg_r(i) * new_hi
+            i = i + 1
+        }
+        let err: f64 = y - TARGET[t]
+        sum = sum + err * err
+        t = t + 1
+    }
+    sum / 16.0
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    rng_seed(31415926, 27182818)
+    init_target()
+
+    let zd: Sedenion = sed_known_zero_divisor()
+    let zd_n: Sedenion = sed_normalize(zd)
+    let ag_raw: Sedenion = sed_add(sed_basis(0, 1.0), sed_basis(1, 1.0))
+    let a_generic: Sedenion = sed_normalize(ag_raw)
+    let b: Sedenion = sed_one()    // B = e0, full-strength input gate
+
+    println("═══════════════════════════════════════════════════════")
+    println("  S-SSM Trainable: α-sweep vs Real-SSM Baseline")
+    println("  Target: sin(2πt/20)  T=80 (train=64 test=16)")
+    println("  Trained param: C (16 components)  lr=1.0  ep=100")
+    println("  Fixed: A(α)=normalize(lerp(e0+e1, ZD, α))  B=e0  input=0.5sin")
+    println("═══════════════════════════════════════════════════════")
+    println("")
+
+    var best_ssm_train: f64 = 99.0
+    var best_alpha_idx: i64 = 0
+
+    // ── Alpha = 0.00 ──────────────────────────────────────────────────────────
+    let a00: Sedenion = sed_normalize(sed_lerp(a_generic, zd_n, 0.0))
+    init_c()
+    var ep: i64 = 0
+    while ep < 100 {
+        ssm_forward_train(a00, b)
+        ssm_update_c(1.0)
+        ep = ep + 1
+    }
+    ssm_forward_train(a00, b)
+    let tr00: f64 = ssm_train_mse()
+    let te00: f64 = ssm_test_mse(a00, b)
+    print("Alpha=0.00  train="); print(tr00); print("  test="); print(te00); println("")
+    if tr00 < best_ssm_train { best_ssm_train = tr00; best_alpha_idx = 0 }
+
+    // ── Alpha = 0.25 ──────────────────────────────────────────────────────────
+    let a25: Sedenion = sed_normalize(sed_lerp(a_generic, zd_n, 0.25))
+    init_c()
+    ep = 0
+    while ep < 100 {
+        ssm_forward_train(a25, b)
+        ssm_update_c(1.0)
+        ep = ep + 1
+    }
+    ssm_forward_train(a25, b)
+    let tr25: f64 = ssm_train_mse()
+    let te25: f64 = ssm_test_mse(a25, b)
+    print("Alpha=0.25  train="); print(tr25); print("  test="); print(te25); println("")
+    if tr25 < best_ssm_train { best_ssm_train = tr25; best_alpha_idx = 1 }
+
+    // ── Alpha = 0.50 ──────────────────────────────────────────────────────────
+    let a50: Sedenion = sed_normalize(sed_lerp(a_generic, zd_n, 0.5))
+    init_c()
+    ep = 0
+    while ep < 100 {
+        ssm_forward_train(a50, b)
+        ssm_update_c(1.0)
+        ep = ep + 1
+    }
+    ssm_forward_train(a50, b)
+    let tr50: f64 = ssm_train_mse()
+    let te50: f64 = ssm_test_mse(a50, b)
+    print("Alpha=0.50  train="); print(tr50); print("  test="); print(te50); println("")
+    if tr50 < best_ssm_train { best_ssm_train = tr50; best_alpha_idx = 2 }
+
+    // ── Alpha = 0.75 ──────────────────────────────────────────────────────────
+    let a75: Sedenion = sed_normalize(sed_lerp(a_generic, zd_n, 0.75))
+    init_c()
+    ep = 0
+    while ep < 100 {
+        ssm_forward_train(a75, b)
+        ssm_update_c(1.0)
+        ep = ep + 1
+    }
+    ssm_forward_train(a75, b)
+    let tr75: f64 = ssm_train_mse()
+    let te75: f64 = ssm_test_mse(a75, b)
+    print("Alpha=0.75  train="); print(tr75); print("  test="); print(te75); println("")
+    if tr75 < best_ssm_train { best_ssm_train = tr75; best_alpha_idx = 3 }
+
+    // ── Alpha = 1.00 ──────────────────────────────────────────────────────────
+    let a10: Sedenion = sed_normalize(sed_lerp(a_generic, zd_n, 1.0))
+    init_c()
+    ep = 0
+    while ep < 100 {
+        ssm_forward_train(a10, b)
+        ssm_update_c(1.0)
+        ep = ep + 1
+    }
+    ssm_forward_train(a10, b)
+    let tr10: f64 = ssm_train_mse()
+    let te10: f64 = ssm_test_mse(a10, b)
+    print("Alpha=1.00  train="); print(tr10); print("  test="); print(te10); println("")
+    if tr10 < best_ssm_train { best_ssm_train = tr10; best_alpha_idx = 4 }
+
+    // ── Real diagonal baseline ────────────────────────────────────────────────
+    rng_seed(98765432, 11223344)
+    init_real()
+    ep = 0
+    while ep < 100 {
+        real_forward_train()
+        real_update_c(1.0)
+        ep = ep + 1
+    }
+    real_forward_train()
+    let real_tr: f64 = real_train_mse()
+    let real_te: f64 = real_test_mse()
+    print("Real-SSM    train="); print(real_tr); print("  test="); print(real_te); println("")
+
+    // ── Summary ───────────────────────────────────────────────────────────────
+    println("")
+    println("───────────────────────────────────────────────────────")
+    print("  Best S-SSM  alpha-idx="); print_int(best_alpha_idx)
+    print("  train MSE="); print(best_ssm_train); println("")
+    print("  Real-SSM baseline        train MSE="); print(real_tr); println("")
+    if best_ssm_train < real_tr {
+        println("  VERDICT: S-SSM outperforms Real-SSM (cross-coupling advantage)")
+    } else {
+        println("  VERDICT: Real-SSM competitive (both trained same C-only gradient)")
+    }
+    println("───────────────────────────────────────────────────────")
+    println("")
+
+    // ── Assertions ────────────────────────────────────────────────────────────
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // T1: sin_s accuracy — TARGET[5] = sin(5·2π/20) = sin(π/2) ≈ 1.0
+    let t5_err: f64 = abs_s(TARGET[5] - 1.0)
+    if t5_err < 0.01 {
+        print("T1 PASS: TARGET[5]=sin(π/2)="); print(TARGET[5]); println("  (sin_s accurate)")
+        passed = passed + 1
+    } else {
+        print("T1 FAIL: TARGET[5]="); print(TARGET[5]); print(" err="); print(t5_err); println("")
+        failed = failed + 1
+    }
+
+    // T2: ZD gate activity ≈ 1.0 for known zero divisor
+    let gate_zd: f64 = ssm_gate_act(zd_n)
+    if gate_zd > 0.9 {
+        print("T2 PASS: gate_act(ZD_norm)="); print(gate_zd); println(" > 0.9")
+        passed = passed + 1
+    } else {
+        print("T2 FAIL: gate_act(ZD_norm)="); print(gate_zd); println(" (expected > 0.9)")
+        failed = failed + 1
+    }
+
+    // T3: Best S-SSM train MSE < 0.45 (C=0 init gives MSE≈0.5; any step helps)
+    if best_ssm_train < 0.45 {
+        print("T3 PASS: best S-SSM train MSE="); print(best_ssm_train); println(" < 0.45")
+        passed = passed + 1
+    } else {
+        print("T3 FAIL: best S-SSM train MSE="); print(best_ssm_train); println(" (expected < 0.45)")
+        failed = failed + 1
+    }
+
+    // T4: Real baseline train MSE < 0.45
+    if real_tr < 0.45 {
+        print("T4 PASS: real-SSM train MSE="); print(real_tr); println(" < 0.45")
+        passed = passed + 1
+    } else {
+        print("T4 FAIL: real-SSM train MSE="); print(real_tr); println(" (expected < 0.45)")
+        failed = failed + 1
+    }
+
+    // T5: All MSE values finite (non-negative and < 2.0; MSE = sum-of-squares ≥ 0)
+    var all_ok: bool = true
+    if tr00 >= 2.0 { all_ok = false }
+    if tr25 >= 2.0 { all_ok = false }
+    if tr50 >= 2.0 { all_ok = false }
+    if tr75 >= 2.0 { all_ok = false }
+    if tr10 >= 2.0 { all_ok = false }
+    if real_tr >= 2.0 { all_ok = false }
+    if tr00 < 0.0 { all_ok = false }
+    if tr25 < 0.0 { all_ok = false }
+    if tr50 < 0.0 { all_ok = false }
+    if tr75 < 0.0 { all_ok = false }
+    if tr10 < 0.0 { all_ok = false }
+    if real_tr < 0.0 { all_ok = false }
+    if all_ok {
+        println("T5 PASS: all train MSE values finite in (0, 2)")
+        passed = passed + 1
+    } else {
+        println("T5 FAIL: some MSE value out of (0, 2) range")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}

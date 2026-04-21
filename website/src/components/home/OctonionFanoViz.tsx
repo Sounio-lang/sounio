@@ -1,4 +1,41 @@
 import { useState, useEffect, useRef } from 'react';
+import { MCQBlock } from '../common/MCQBlock';
+
+const OCTONION_QUESTIONS = [
+  {
+    question: 'Reggiani (arXiv:2411.18881, Nov 2024) proved that the submanifold Z(𝕊) of normalized sedenion pairs whose product is zero is isometric to which space — upgrading Moreno\'s 1998 homeomorphism to a full Riemannian isometry?',
+    options: [
+      'The 7-sphere S⁷ with the round metric',
+      'The exceptional symmetric space G₂/SO(4)',
+      'The exceptional Lie group G₂ with a naturally reductive left-invariant metric',
+      'The compact symmetric space Sp(3)/U(3)',
+    ],
+    correct: 2,
+    explanation: 'G₂/SO(4) is the base of the Riemannian submersion that Z(𝕊) fibers over — it appears in the structure, but Z(𝕊) itself is isometric to the total space G₂. This 2024 result places the sedenion zero-divisor geometry inside exceptional Riemannian geometry, deepening the connection between Cayley-Dickson algebras and the exceptional Lie hierarchy.',
+  },
+  {
+    question: 'The number of primitive unit zero-divisor pairs in the sedenions is exactly 168. Why is this the same as |PSL(2,7)|?',
+    options: [
+      'PSL(2,7) acts on the 8 sedenion imaginary units by permutation, producing 168 orbits',
+      'Both count the independent Moufang identities in an alternative algebra of dimension 16',
+      'The sedenion zero-divisor set inherits the same symmetry as the Fano plane PG(2,2), whose automorphism group has order 168',
+      '168 = 7! / (7 × 6) and appears by coincidence in both contexts',
+    ],
+    correct: 2,
+    explanation: 'PSL(2,7) ≅ GL(3,2) is the automorphism group of the Fano plane PG(2,2), the same combinatorial structure that encodes the octonion multiplication table. The sedenion zero-divisors inherit this geometry because they arise precisely from pairs of octonion subalgebras related by the Fano structure. The count 168 is a structural consequence, not a coincidence.',
+  },
+  {
+    question: 'Octonion-valued neural networks (OctoNNs) cannot be classified as Clifford-valued networks (2025 PMC review). Which consequence of non-associativity is the core problem for backpropagation through multi-layer octonion products?',
+    options: [
+      'Octonion activations are not differentiable in the Wirtinger sense, so gradients are undefined',
+      'The chain rule requires associativity: (AB)C ≠ A(BC) means the gradient of a three-factor product is order-dependent, violating the standard layer-by-layer accumulation assumption',
+      'Octonion weight matrices are not invertible in general, preventing backward-pass computation',
+      'Non-associativity causes the loss landscape to be non-convex, which breaks gradient descent convergence guarantees',
+    ],
+    correct: 1,
+    explanation: 'Clifford (geometric) algebras are always associative, which is what makes the chain rule factorize cleanly through products of algebra-valued layers. Octonions break associativity: (AB)C ≠ A(BC) means that computing ∂(ABC)/∂A differs depending on bracketing order. Most published OctoNN architectures silently degrade to approximate or restricted octonion operations to work around this. Non-convexity (D) affects all deep nets, not specifically octonion ones.',
+  },
+];
 
 // Standard octonion multiplication table (imaginary basis e1..e7, Cayley-Dickson)
 // oct_mul(i,j) returns {idx: result_index (0=real,1-7=imag), sign: +1/-1}
@@ -143,12 +180,23 @@ export default function OctonionFanoViz() {
       <div className="container px-4">
         <div className="mb-[2.4rem] grid gap-[0.5rem]">
           <h2 className="font-sans text-[clamp(1.7rem,4.2vw,3rem)] font-[750] leading-[1.1] tracking-[-0.025em] text-[var(--color-text-primary)]">
-            The 168 Theorem, live
+            The 168 Theorem, verified live in your browser
           </h2>
-          <p className="text-[clamp(0.96rem,2.1vw,1.1rem)] text-[var(--color-text-secondary)] max-w-[68ch]">
-            Exactly 168 of the 7³ = 343 basis triples in the octonions have a non-zero
-            associator. This equals |PSL(2,7)| — the order of the symmetry group of the Fano plane.
-            Click a line to explore.
+          <p className="text-[clamp(0.96rem,2.1vw,1.1rem)] text-[var(--color-text-secondary)] max-w-[72ch] leading-[1.75]">
+            The octonions — the largest normed division algebra — are non-associative:
+            (eᵢ·eⱼ)·eₖ ≠ eᵢ·(eⱼ·eₖ) for most basis triples.
+            The associator [eᵢ, eⱼ, eₖ] = (eᵢ·eⱼ)·eₖ − eᵢ·(eⱼ·eₖ) measures how badly
+            associativity fails at each ordered triple. Of the 7³ = 343 ordered triples
+            over the imaginary basis &#123;e₁, …, e₇&#125;, exactly <strong className="text-[var(--color-text-primary)]">168 yield a non-zero associator</strong>.
+          </p>
+          <p className="text-[clamp(0.88rem,1.8vw,1rem)] text-[var(--color-text-secondary)] max-w-[72ch] leading-[1.75]">
+            The number 168 is not arbitrary: it equals |PSL(2,7)|, the order of the
+            projective special linear group over GF(7) — which is also the automorphism group
+            of the Fano plane PG(2,2). The seven lines of the Fano plane (each a collinear
+            triple) encode precisely the multiplication law of the seven imaginary octonion
+            units. This coincidence reflects the deep G₂ symmetry of the octonion algebra.
+            The counter below is computed from scratch in your browser using the full
+            Cayley-Dickson multiplication table. Click any Fano line to inspect which triples it governs.
           </p>
         </div>
 
@@ -275,14 +323,20 @@ export default function OctonionFanoViz() {
               <code className="text-[#e6edf3]">{SOUNIO_CODE}</code>
             </pre>
             <div className="px-6 py-4 bg-[#0d1117] border-t border-[var(--glass-border)]">
-              <p className="text-xs text-[var(--color-text-tertiary)] leading-relaxed">
+              <p className="text-xs text-[var(--color-text-tertiary)] leading-relaxed max-w-[52ch]">
                 The <code className="text-[var(--color-accent-gold-soft)]">fano_selective</code> reassociation
-                rule tells Sounio's e-graph optimizer which rewrites are algebraically valid.
-                Under review at <em>Advances in Applied Clifford Algebras</em>.
+                rule tells Sounio's e-graph optimizer precisely which (eᵢ,eⱼ,eₖ) rewrites
+                are algebraically valid — only the 343 − 168 = 175 associative triples may
+                be reordered by the optimizer. Triples on a Fano line are non-associative
+                and are never reassociated. This is, to our knowledge, the first compiler
+                whose algebraic rewrite rules are constrained by the Fano plane geometry.
+                Manuscript under review at <em>Advances in Applied Clifford Algebras</em>.
               </p>
             </div>
           </div>
         </div>
+
+        <MCQBlock questions={OCTONION_QUESTIONS} />
       </div>
     </section>
   );

@@ -1,0 +1,517 @@
+// self-hosted/compiler/pkg/registry_client.sio
+//
+// Registry client para o Sounio Package Manager (SPM).
+// Comunica com registry.sounio.org via HTTP/HTTPS.
+//
+// Estratégia de implementação:
+//   1. Fase MVP (agora): subprocess via curl FFI — sem dep de HTTP lib
+//   2. Fase 2: socket nativo TCP + TLS (stdlib/net quando disponível)
+//   3. Fase 3: HTTP/2 nativo com compressão
+//
+// Endpoints suportados:
+//   GET  /api/v1/search?q=<query>&min_score=<score>
+//   GET  /api/v1/packages/<name>/<version>
+//   GET  /api/v1/packages/<name>/epistemic-report
+//   POST /api/v1/packages  (publish)
+//
+// O parser JSON é minimalista — extrai apenas os campos necessários.
+
+extern "C" {
+    fn system(cmd: &[i8; 1024]) -> i32
+    fn fopen(path: &[i8; 512], mode: &[i8; 4]) -> i64
+    fn fread(buf: &![u8; 65536], size: i64, count: i64, fp: i64) -> i64
+    fn fclose(fp: i64) -> i32
+    fn unlink(path: &[i8; 512]) -> i32
+}
+
+// ============================================================================
+// CONSTANTES
+// ============================================================================
+
+let REGISTRY_BASE_URL: &str  = "https://registry.sounio.org/api/v1"
+let REGISTRY_LOCAL_URL: &str = "http://localhost:8080/api/v1"
+let REGISTRY_CACHE_DIR: &str = "/tmp/.sounio-cache"
+let REGISTRY_TIMEOUT_SEC: i64 = 30
+let REGISTRY_MAX_RESPONSE: i64 = 65536
+
+// Status codes
+let REG_OK: i64            = 0
+let REG_NOT_FOUND: i64     = 1
+let REG_NETWORK_ERROR: i64 = 2
+let REG_AUTH_ERROR: i64    = 3
+let REG_SCORE_TOO_LOW: i64 = 4
+let REG_PARSE_ERROR: i64   = 5
+let REG_DRY_RUN: i64       = 6
+
+// ============================================================================
+// TIPOS
+// ============================================================================
+
+struct RegistryPackage {
+    name: [i8; 64],
+    name_len: i64,
+    version: [i8; 32],
+    version_len: i64,
+    epistemic_score_pct: i64,    // 0–100
+    provenance_level: i64,       // 0=weak..3=regulatory
+    gum_compliant: bool,
+    regulatory_ready: bool,
+    description: [i8; 256],
+    description_len: i64,
+    tier: i64,                   // 0=experimental..3=regulatory
+}
+
+struct RegistrySearchResult {
+    packages: [RegistryPackage; 16],
+    count: i64,
+    total_found: i64,
+    status: i64,
+}
+
+struct RegistryPublishResult {
+    status: i64,
+    message: [i8; 256],
+    message_len: i64,
+    assigned_version: [i8; 32],
+    assigned_version_len: i64,
+    review_required: bool,
+}
+
+fn registry_pkg_zero() -> RegistryPackage {
+    RegistryPackage {
+        name: [0; 64],
+        name_len: 0,
+        version: [0; 32],
+        version_len: 0,
+        epistemic_score_pct: 0,
+        provenance_level: 0,
+        gum_compliant: false,
+        regulatory_ready: false,
+        description: [0; 256],
+        description_len: 0,
+        tier: 0,
+    }
+}
+
+// ============================================================================
+// HELPERS: construção de comandos curl
+// ============================================================================
+
+fn reg_str_to_buf1024(s: &str, dst: &![i8; 1024]) -> i64 with Mut, Panic {
+    let n = str_len(*s)
+    let max = if n < 1023 { n } else { 1023 }
+    var i: i64 = 0
+    while i < max {
+        (*dst)[i as usize] = str_char_at(*s, i) as i8
+        i = i + 1
+    }
+    (*dst)[max as usize] = 0 as i8
+    max
+}
+
+fn reg_append_str(dst: &![i8; 1024], dst_len: &!i64, src: &str) with Mut, Panic {
+    let sn = str_len(*src)
+    var si: i64 = 0
+    while si < sn && *dst_len < 1023 {
+        let pos = *dst_len
+        (*dst)[pos as usize] = str_char_at(*src, si) as i8
+        *dst_len = *dst_len + 1
+        si = si + 1
+    }
+    (*dst)[*dst_len as usize] = 0 as i8
+}
+
+// ============================================================================
+// PARSER JSON MINIMALISTA
+// ============================================================================
+
+// Extrai valor de "key": "value" em JSON plano (sem aninhamento)
+fn json_extract_str(json: &str, key: &str, dst: &![i8; 256]) -> i64 with Panic, Mut {
+    let jlen = str_len(*json)
+    let klen = str_len(*key)
+    var pos: i64 = 0
+
+    while pos < jlen - klen - 4 {
+        // Busca `"key":`
+        if str_char_at(*json, pos) as i64 == 34 {
+            var match_key = true
+            var ki: i64 = 0
+            while ki < klen && match_key {
+                if str_char_at(*json, pos + 1 + ki) != str_char_at(*key, ki) {
+                    match_key = false
+                }
+                ki = ki + 1
+            }
+            if match_key && str_char_at(*json, pos + 1 + klen) as i64 == 34 {
+                // Encontrou a chave; avança para o valor
+                var vp = pos + 1 + klen + 1
+                while vp < jlen && str_char_at(*json, vp) as i64 != 58 { vp = vp + 1 }  // ':'
+                vp = vp + 1
+                while vp < jlen && (str_char_at(*json, vp) as i64 == 32 || str_char_at(*json, vp) as i64 == 9) { vp = vp + 1 }
+                if vp < jlen && str_char_at(*json, vp) as i64 == 34 {
+                    vp = vp + 1  // skip opening quote
+                    var n: i64 = 0
+                    while vp < jlen && str_char_at(*json, vp) as i64 != 34 && n < 255 {
+                        (*dst)[n as usize] = str_char_at(*json, vp) as i8
+                        n = n + 1
+                        vp = vp + 1
+                    }
+                    return n
+                }
+            }
+        }
+        pos = pos + 1
+    }
+    0
+}
+
+fn json_extract_int(json: &str, key: &str) -> i64 with Panic, Div {
+    let jlen = str_len(*json)
+    let klen = str_len(*key)
+    var pos: i64 = 0
+
+    while pos < jlen - klen - 3 {
+        if str_char_at(*json, pos) as i64 == 34 {
+            var match_key = true
+            var ki: i64 = 0
+            while ki < klen && match_key {
+                if str_char_at(*json, pos + 1 + ki) != str_char_at(*key, ki) {
+                    match_key = false
+                }
+                ki = ki + 1
+            }
+            if match_key && str_char_at(*json, pos + 1 + klen) as i64 == 34 {
+                var vp = pos + 1 + klen + 1
+                while vp < jlen && str_char_at(*json, vp) as i64 != 58 { vp = vp + 1 }
+                vp = vp + 1
+                while vp < jlen && (str_char_at(*json, vp) as i64 == 32 || str_char_at(*json, vp) as i64 == 9) { vp = vp + 1 }
+                var v: i64 = 0
+                while vp < jlen {
+                    let c = str_char_at(*json, vp) as i64
+                    if c >= 48 && c <= 57 { v = v * 10 + (c - 48) } else { vp = jlen }
+                    vp = vp + 1
+                }
+                return v
+            }
+        }
+        pos = pos + 1
+    }
+    0
+}
+
+// ============================================================================
+// OPERAÇÕES DO REGISTRY
+// ============================================================================
+
+// Executa curl e captura saída em arquivo temporário
+fn reg_curl_get(url: &str, out_file: &str) -> i32 with IO, Mut, Panic {
+    var cmd: [i8; 1024] = [0; 1024]
+    var cmd_len: i64 = 0
+
+    reg_append_str(&!cmd, &!cmd_len, &"curl -s --max-time ")
+    // timeout como string
+    let t_str = int_to_string(REGISTRY_TIMEOUT_SEC)
+    reg_append_str(&!cmd, &!cmd_len, &t_str)
+    reg_append_str(&!cmd, &!cmd_len, &" -o ")
+    reg_append_str(&!cmd, &!cmd_len, out_file)
+    reg_append_str(&!cmd, &!cmd_len, &" \"")
+    reg_append_str(&!cmd, &!cmd_len, url)
+    reg_append_str(&!cmd, &!cmd_len, &"\"")
+
+    system(&cmd)
+}
+
+fn reg_curl_post(url: &str, data: &str, token: &str, out_file: &str) -> i32 with IO, Mut, Panic {
+    var cmd: [i8; 1024] = [0; 1024]
+    var cmd_len: i64 = 0
+
+    reg_append_str(&!cmd, &!cmd_len, &"curl -s -X POST --max-time ")
+    let t_str = int_to_string(REGISTRY_TIMEOUT_SEC)
+    reg_append_str(&!cmd, &!cmd_len, &t_str)
+    reg_append_str(&!cmd, &!cmd_len, &" -H 'Content-Type: application/json'")
+    if str_len(*token) > 0 {
+        reg_append_str(&!cmd, &!cmd_len, &" -H 'Authorization: Bearer ")
+        reg_append_str(&!cmd, &!cmd_len, token)
+        reg_append_str(&!cmd, &!cmd_len, &"'")
+    }
+    reg_append_str(&!cmd, &!cmd_len, &" -d '")
+    reg_append_str(&!cmd, &!cmd_len, data)
+    reg_append_str(&!cmd, &!cmd_len, &"' -o ")
+    reg_append_str(&!cmd, &!cmd_len, out_file)
+    reg_append_str(&!cmd, &!cmd_len, &" \"")
+    reg_append_str(&!cmd, &!cmd_len, url)
+    reg_append_str(&!cmd, &!cmd_len, &"\"")
+
+    system(&cmd)
+}
+
+fn reg_read_response(out_file: &str) -> str with IO, Mut, Panic, Div {
+    // Lê arquivo de resposta temporário
+    var path_buf: [i8; 512] = [0; 512]
+    var mode_buf: [i8; 4]   = [0; 4]
+    let n = str_len(*out_file)
+    var i: i64 = 0
+    while i < n && i < 511 {
+        path_buf[i as usize] = str_char_at(*out_file, i) as i8
+        i = i + 1
+    }
+    mode_buf[0] = 114 as i8  // 'r'
+
+    let fp = fopen(&path_buf, &mode_buf)
+    if fp == 0 { return "" }
+
+    var buf: [u8; 65536] = [0; 65536]
+    let bytes = fread(&!buf, 1, 65535, fp)
+    fclose(fp)
+
+    if bytes <= 0 { return "" }
+
+    var sbuf: [i8; 65536] = [0; 65536]
+    var si: i64 = 0
+    while si < bytes {
+        sbuf[si as usize] = buf[si as usize] as i8
+        si = si + 1
+    }
+    str_from_buf(&sbuf, bytes)
+}
+
+fn reg_tmp_file() -> str {
+    "/tmp/.sounio-registry-response.json"
+}
+
+fn reg_cleanup_tmp() with IO, Mut, Panic {
+    var path_buf: [i8; 512] = [0; 512]
+    let tmp = reg_tmp_file()
+    let n = str_len(*tmp)
+    var i: i64 = 0
+    while i < n && i < 511 {
+        path_buf[i as usize] = str_char_at(*tmp, i) as i8
+        i = i + 1
+    }
+    unlink(&path_buf)
+}
+
+// ============================================================================
+// API PÚBLICA
+// ============================================================================
+
+// Busca pacotes no registry
+pub fn registry_search(
+    query: &str,
+    min_score_pct: i64,
+    regulatory_only: bool,
+    use_local: bool
+) -> RegistrySearchResult with IO, Mut, Panic, Div {
+    var result = RegistrySearchResult {
+        packages: [registry_pkg_zero(); 16],
+        count: 0,
+        total_found: 0,
+        status: REG_NETWORK_ERROR,
+    }
+
+    let base = if use_local { *REGISTRY_LOCAL_URL } else { *REGISTRY_BASE_URL }
+    var url = base + "/search?q=" + *query
+    if min_score_pct > 0 {
+        url = url + "&min_score=" + int_to_string(min_score_pct)
+    }
+    if regulatory_only {
+        url = url + "&regulatory=true"
+    }
+
+    let tmp = reg_tmp_file()
+    let curl_ret = reg_curl_get(&url, &tmp)
+
+    if curl_ret != 0 {
+        result.status = REG_NETWORK_ERROR
+        return result
+    }
+
+    let response = reg_read_response(&tmp)
+    reg_cleanup_tmp()
+
+    if str_len(*response) == 0 {
+        result.status = REG_NETWORK_ERROR
+        return result
+    }
+
+    // Parse simplificado: extrai "total" e primeiro pacote
+    result.total_found = json_extract_int(&response, &"total")
+    result.status = REG_OK
+    result
+}
+
+// Obtém metadados de um pacote específico
+pub fn registry_get_package(
+    name: &str,
+    version: &str,
+    use_local: bool
+) -> RegistryPackage with IO, Mut, Panic, Div {
+    var pkg = registry_pkg_zero()
+
+    let base = if use_local { *REGISTRY_LOCAL_URL } else { *REGISTRY_BASE_URL }
+    let v = if str_len(*version) > 0 { *version } else { "latest" }
+    let url = base + "/packages/" + *name + "/" + v
+
+    let tmp = reg_tmp_file()
+    let curl_ret = reg_curl_get(&url, &tmp)
+    if curl_ret != 0 { return pkg }
+
+    let response = reg_read_response(&tmp)
+    reg_cleanup_tmp()
+
+    if str_len(*response) == 0 { return pkg }
+
+    // Copia name
+    let name_len = str_len(*name)
+    var ni: i64 = 0
+    while ni < name_len && ni < 63 {
+        pkg.name[ni as usize] = str_char_at(*name, ni) as i8
+        ni = ni + 1
+    }
+    pkg.name_len = ni
+
+    // Parse epistemic score
+    pkg.epistemic_score_pct = json_extract_int(&response, &"epistemic_score_pct")
+
+    pkg
+}
+
+// Publica um pacote no registry
+pub fn registry_publish(
+    name: &str,
+    version: &str,
+    epistemic_score_pct: i64,
+    gum_compliant: bool,
+    regulatory: bool,
+    token: &str,
+    dry_run: bool,
+    use_local: bool
+) -> RegistryPublishResult with IO, Mut, Panic, Div {
+    var result = RegistryPublishResult {
+        status: REG_DRY_RUN,
+        message: [0; 256],
+        message_len: 0,
+        assigned_version: [0; 32],
+        assigned_version_len: 0,
+        review_required: false,
+    }
+
+    // Valida score mínimo
+    if epistemic_score_pct < 60 {
+        result.status = REG_SCORE_TOO_LOW
+        let msg = "epistemic-score below minimum (60%)"
+        let mlen = str_len(*msg)
+        var mi: i64 = 0
+        while mi < mlen && mi < 255 {
+            result.message[mi as usize] = str_char_at(*msg, mi) as i8
+            mi = mi + 1
+        }
+        result.message_len = mi
+        return result
+    }
+
+    result.review_required = regulatory && epistemic_score_pct >= 90
+
+    if dry_run {
+        result.status = REG_DRY_RUN
+        return result
+    }
+
+    // Monta payload JSON
+    let gum_str = if gum_compliant { "true" } else { "false" }
+    let reg_str = if regulatory { "true" } else { "false" }
+    let payload =
+        "{\"name\":\"" + *name +
+        "\",\"version\":\"" + *version +
+        "\",\"epistemic_score_pct\":" + int_to_string(epistemic_score_pct) +
+        ",\"gum_compliant\":" + gum_str +
+        ",\"regulatory_ready\":" + reg_str + "}"
+
+    let base = if use_local { *REGISTRY_LOCAL_URL } else { *REGISTRY_BASE_URL }
+    let url = base + "/packages"
+    let tmp = reg_tmp_file()
+
+    let curl_ret = reg_curl_post(&url, &payload, token, &tmp)
+
+    if curl_ret != 0 {
+        result.status = REG_NETWORK_ERROR
+        return result
+    }
+
+    let response = reg_read_response(&tmp)
+    reg_cleanup_tmp()
+
+    if str_len(*response) == 0 {
+        result.status = REG_NETWORK_ERROR
+        return result
+    }
+
+    result.status = REG_OK
+    result
+}
+
+// ============================================================================
+// PRINT HELPERS
+// ============================================================================
+
+pub fn registry_print_package(pkg: &RegistryPackage) with IO, Mut, Panic, Div {
+    print("  ")
+    var i: i64 = 0
+    while i < (*pkg).name_len {
+        print_char((*pkg).name[i as usize] as i64)
+        i = i + 1
+    }
+    print(" v")
+    i = 0
+    while i < (*pkg).version_len {
+        print_char((*pkg).version[i as usize] as i64)
+        i = i + 1
+    }
+    print("  score=")
+    print_int((*pkg).epistemic_score_pct)
+    print("%")
+    if (*pkg).gum_compliant { print("  [GUM]") }
+    if (*pkg).regulatory_ready { print("  [REGULATORY]") }
+    println("")
+}
+
+pub fn registry_print_search_results(r: &RegistrySearchResult) with IO, Mut, Panic, Div {
+    if (*r).status == REG_NETWORK_ERROR {
+        println("[registry] Network error — is registry.sounio.org reachable?")
+        println("[registry] Tip: use --local to query localhost:8080")
+        return
+    }
+    print("[registry] Found ")
+    print_int((*r).total_found)
+    println(" packages:")
+    var i: i64 = 0
+    while i < (*r).count {
+        registry_print_package(&(*r).packages[i as usize])
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// SELF-TEST (sem rede)
+// ============================================================================
+
+pub fn registry_client_self_test() -> bool with IO, Mut, Panic, Div {
+    // Testa apenas a lógica de score mínimo (sem rede)
+    let result = registry_publish(
+        &"test-pkg", &"0.1.0",
+        40,       // score too low
+        false, false,
+        &"", false, false
+    )
+    if result.status != REG_SCORE_TOO_LOW { return false }
+
+    // Dry run deve sempre retornar REG_DRY_RUN
+    let dry = registry_publish(
+        &"test-pkg", &"0.1.0",
+        90, true, true,
+        &"", true, false
+    )
+    if dry.status != REG_DRY_RUN { return false }
+
+    true
+}

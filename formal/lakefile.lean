@@ -9,4 +9,4 @@ lean_lib Sounio where
              `OctonionAlgebra, `EpistemicGemm, `EffectLinear,
              `HessianAD, `SecondOrderGUM, `NonAssocHessian,
              `TypeCheckerSoundness, `KnowledgeArithmeticSoundness,
-             `ChannelAssignmentSemantics]
+             `ChannelAssignmentSemantics, `GradientTopology]

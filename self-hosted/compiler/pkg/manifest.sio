@@ -1,0 +1,681 @@
+// stdlib/compiler/pkg/manifest.sio
+//
+// Parser de sounio.toml para o Sounio Package Manager (SPM).
+//
+// Parsing via scanner minimalista: linha a linha, sem heap.
+// Suporte aos campos definidos na especificação docs/ecosystem/SOUNIO_TOML_SPEC.md
+//
+// Estrutura suportada:
+//   [package], [epistemic], [dependencies], [lib], [[example]], [[test]]
+
+// ============================================================================
+// CONSTANTES
+// ============================================================================
+
+let PKG_NAME_MAX: i64    = 64
+let PKG_VERSION_MAX: i64 = 32
+let PKG_DESC_MAX: i64    = 256
+let PKG_LICENSE_MAX: i64 = 64
+let PKG_REPO_MAX: i64    = 128
+let PKG_DEPS_MAX: i64    = 32
+let PKG_EXAMPLES_MAX: i64 = 16
+let PKG_TESTS_MAX: i64   = 16
+let PKG_AUTHORS_MAX: i64 = 8
+let PKG_AUTHOR_LEN: i64  = 64
+
+// Provenance level codes
+let PROV_WEAK: i64       = 0
+let PROV_MEDIUM: i64     = 1
+let PROV_STRONG: i64     = 2
+let PROV_REGULATORY: i64 = 3
+
+// ============================================================================
+// TIPOS DO MANIFESTO
+// ============================================================================
+
+struct PkgName {
+    buf: [i8; 64],
+    len: i64,
+}
+
+struct PkgVersion {
+    major: i64,
+    minor: i64,
+    patch: i64,
+    pre: [i8; 16],
+    pre_len: i64,
+}
+
+struct PkgDep {
+    name: [i8; 64],
+    name_len: i64,
+    version: [i8; 32],
+    version_len: i64,
+}
+
+struct PkgExample {
+    name: [i8; 64],
+    name_len: i64,
+    path: [i8; 128],
+    path_len: i64,
+}
+
+struct PkgEpistemic {
+    score: f64,
+    confidence_threshold: f64,
+    provenance_level: i64,
+    gum_compliant: bool,
+    regulatory_ready: bool,
+    validation_coverage: f64,
+}
+
+struct PkgManifest {
+    // [package]
+    name: [i8; 64],
+    name_len: i64,
+    version_str: [i8; 32],
+    version_len: i64,
+    description: [i8; 256],
+    description_len: i64,
+    license: [i8; 64],
+    license_len: i64,
+    repository: [i8; 128],
+    repository_len: i64,
+    edition: [i8; 16],
+    edition_len: i64,
+
+    // [epistemic]
+    epistemic: PkgEpistemic,
+    has_epistemic: bool,
+
+    // [dependencies]
+    deps: [PkgDep; 32],
+    dep_count: i64,
+
+    // [[example]]
+    examples: [PkgExample; 16],
+    example_count: i64,
+
+    // [[test]]
+    tests: [PkgExample; 16],
+    test_count: i64,
+
+    // lib path
+    lib_path: [i8; 128],
+    lib_path_len: i64,
+
+    // parse status
+    valid: bool,
+    error_msg: [i8; 128],
+    error_len: i64,
+}
+
+// ============================================================================
+// HELPERS DE STRING
+// ============================================================================
+
+fn pkg_str_eq(a: &[i8; 64], a_len: i64, b: &str) -> bool with Panic {
+    let b_len = str_len(*b)
+    if a_len != b_len { return false }
+    var i: i64 = 0
+    while i < a_len {
+        if (*a)[i as usize] != str_char_at(*b, i) as i8 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn pkg_copy_str_to_buf(dst: &![i8; 256], src: &str, src_start: i64, src_end: i64) -> i64 with Mut, Panic {
+    var n: i64 = 0
+    var i: i64 = src_start
+    while i < src_end && n < 255 {
+        (*dst)[n as usize] = str_char_at(*src, i) as i8
+        n = n + 1
+        i = i + 1
+    }
+    n
+}
+
+fn pkg_buf64_copy(dst: &![i8; 64], src: &str, start: i64, end: i64) -> i64 with Mut, Panic {
+    var n: i64 = 0
+    var i: i64 = start
+    while i < end && n < 63 {
+        (*dst)[n as usize] = str_char_at(*src, i) as i8
+        n = n + 1
+        i = i + 1
+    }
+    n
+}
+
+fn pkg_buf32_copy(dst: &![i8; 32], src: &str, start: i64, end: i64) -> i64 with Mut, Panic {
+    var n: i64 = 0
+    var i: i64 = start
+    while i < end && n < 31 {
+        (*dst)[n as usize] = str_char_at(*src, i) as i8
+        n = n + 1
+        i = i + 1
+    }
+    n
+}
+
+fn pkg_buf128_copy(dst: &![i8; 128], src: &str, start: i64, end: i64) -> i64 with Mut, Panic {
+    var n: i64 = 0
+    var i: i64 = start
+    while i < end && n < 127 {
+        (*dst)[n as usize] = str_char_at(*src, i) as i8
+        n = n + 1
+        i = i + 1
+    }
+    n
+}
+
+fn pkg_is_digit(c: i64) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn pkg_is_alpha(c: i64) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+fn pkg_is_ws(c: i64) -> bool {
+    c == 32 || c == 9 || c == 13
+}
+
+// Avança past whitespace; retorna nova posição
+fn pkg_skip_ws(line: &str, pos: i64) -> i64 with Panic {
+    var p: i64 = pos
+    let n = str_len(*line)
+    while p < n && pkg_is_ws(str_char_at(*line, p) as i64) {
+        p = p + 1
+    }
+    p
+}
+
+// Parse inteiro a partir de posição; retorna valor
+fn pkg_parse_int(line: &str, pos: i64) -> i64 with Panic, Div {
+    var p: i64 = pos
+    var v: i64 = 0
+    let n = str_len(*line)
+    while p < n && pkg_is_digit(str_char_at(*line, p) as i64) {
+        v = v * 10 + (str_char_at(*line, p) as i64 - 48)
+        p = p + 1
+    }
+    v
+}
+
+// Parse f64 simples (sem expoente) a partir de posição
+fn pkg_parse_f64(line: &str, pos: i64) -> f64 with Panic, Div {
+    var p: i64 = pos
+    let n = str_len(*line)
+    var whole: i64 = 0
+    var frac: f64 = 0.0
+    var divisor: f64 = 1.0
+    var in_frac: bool = false
+    while p < n {
+        let c = str_char_at(*line, p) as i64
+        if pkg_is_digit(c) {
+            if in_frac {
+                frac = frac + (c - 48) as f64 / (divisor * 10.0)
+                divisor = divisor * 10.0
+            } else {
+                whole = whole * 10 + (c - 48)
+            }
+        } else if c == 46 {
+            in_frac = true
+        } else {
+            p = n
+        }
+        p = p + 1
+    }
+    whole as f64 + frac
+}
+
+// Verifica se linha começa com prefixo (case-sensitive)
+fn pkg_line_starts_with(line: &str, prefix: &str) -> bool with Panic {
+    let plen = str_len(*prefix)
+    let llen = str_len(*line)
+    if llen < plen { return false }
+    var i: i64 = 0
+    while i < plen {
+        if str_char_at(*line, i) != str_char_at(*prefix, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Extrai valor após '=' em linha "key = value" ou "key = \"value\""
+// Retorna start e end (exclusive) no line para o conteúdo do valor
+fn pkg_value_start(line: &str) -> i64 with Panic {
+    let n = str_len(*line)
+    var p: i64 = 0
+    while p < n && str_char_at(*line, p) as i64 != 61 {
+        p = p + 1
+    }
+    p = p + 1
+    p = pkg_skip_ws(line, p)
+    if p < n && str_char_at(*line, p) as i64 == 34 {
+        return p + 1
+    }
+    p
+}
+
+fn pkg_value_end(line: &str, start: i64) -> i64 with Panic {
+    let n = str_len(*line)
+    if start > 0 && str_char_at(*line, start - 1) as i64 == 34 {
+        var p: i64 = start
+        while p < n && str_char_at(*line, p) as i64 != 34 {
+            p = p + 1
+        }
+        return p
+    }
+    var p: i64 = start
+    while p < n && !pkg_is_ws(str_char_at(*line, p) as i64) && str_char_at(*line, p) as i64 != 35 {
+        p = p + 1
+    }
+    p
+}
+
+// Converte string de provenance-level para código
+fn pkg_provenance_code(line: &str, start: i64, end: i64) -> i64 with Panic {
+    if end - start == 4 {
+        let c0 = str_char_at(*line, start) as i64
+        if c0 == 119 { return PROV_WEAK }       // 'w'
+    }
+    if end - start == 6 {
+        let c0 = str_char_at(*line, start) as i64
+        if c0 == 115 { return PROV_STRONG }      // 's'
+        if c0 == 109 { return PROV_MEDIUM }      // 'm'
+    }
+    if end - start == 10 {
+        return PROV_REGULATORY
+    }
+    PROV_MEDIUM
+}
+
+// ============================================================================
+// MANIFEST DEFAULT
+// ============================================================================
+
+fn pkg_dep_zero() -> PkgDep {
+    PkgDep {
+        name: [0; 64],
+        name_len: 0,
+        version: [0; 32],
+        version_len: 0,
+    }
+}
+
+fn pkg_example_zero() -> PkgExample {
+    PkgExample {
+        name: [0; 64],
+        name_len: 0,
+        path: [0; 128],
+        path_len: 0,
+    }
+}
+
+fn pkg_manifest_default() -> PkgManifest {
+    PkgManifest {
+        name: [0; 64],
+        name_len: 0,
+        version_str: [0; 32],
+        version_len: 0,
+        description: [0; 256],
+        description_len: 0,
+        license: [0; 64],
+        license_len: 0,
+        repository: [0; 128],
+        repository_len: 0,
+        edition: [0; 16],
+        edition_len: 0,
+        epistemic: PkgEpistemic {
+            score: 0.0,
+            confidence_threshold: 0.80,
+            provenance_level: PROV_MEDIUM,
+            gum_compliant: false,
+            regulatory_ready: false,
+            validation_coverage: 0.0,
+        },
+        has_epistemic: false,
+        deps: [pkg_dep_zero(); 32],
+        dep_count: 0,
+        examples: [pkg_example_zero(); 16],
+        example_count: 0,
+        tests: [pkg_example_zero(); 16],
+        test_count: 0,
+        lib_path: [0; 128],
+        lib_path_len: 0,
+        valid: false,
+        error_msg: [0; 128],
+        error_len: 0,
+    }
+}
+
+// ============================================================================
+// PARSER PRINCIPAL
+// ============================================================================
+
+// Seção atual durante o parse
+let SECTION_NONE: i64        = 0
+let SECTION_PACKAGE: i64     = 1
+let SECTION_EPISTEMIC: i64   = 2
+let SECTION_DEPENDENCIES: i64 = 3
+let SECTION_LIB: i64         = 4
+let SECTION_EXAMPLE: i64     = 5
+let SECTION_TEST: i64        = 6
+
+// Parse um único arquivo sounio.toml fornecido como string
+// (leitura do arquivo é responsabilidade do chamador via IO)
+pub fn pkg_manifest_parse(content: &str) -> PkgManifest with Panic, Div, Mut {
+    var m = pkg_manifest_default()
+    let total = str_len(*content)
+    var pos: i64 = 0
+    var section: i64 = SECTION_NONE
+
+    while pos < total {
+        // Encontra fim da linha
+        var eol: i64 = pos
+        while eol < total && str_char_at(*content, eol) as i64 != 10 {
+            eol = eol + 1
+        }
+
+        // Extrai linha como sub-range [pos, eol)
+        // Trabalhamos com pos+offset em vez de substring (sem heap)
+        let line_start = pos
+        let line_end = eol
+
+        // Avança para próxima linha
+        pos = eol + 1
+
+        // Pula linhas em branco e comentários
+        var p = pkg_skip_ws_range(*content, line_start, line_end)
+        if p >= line_end { continue }
+        let fc = str_char_at(*content, p) as i64
+        if fc == 35 { continue }   // '#'
+
+        // Detecta seção
+        if fc == 91 {  // '['
+            let is_array = p + 1 < line_end && str_char_at(*content, p + 1) as i64 == 91
+            let inner_start = if is_array { p + 2 } else { p + 1 }
+            var inner_end = inner_start
+            while inner_end < line_end && str_char_at(*content, inner_end) as i64 != 93 {
+                inner_end = inner_end + 1
+            }
+            section = pkg_detect_section(*content, inner_start, inner_end, is_array, &!m)
+            continue
+        }
+
+        // Parse campo key = value
+        pkg_parse_field(*content, line_start, line_end, section, &!m)
+    }
+
+    if m.name_len > 0 && m.version_len > 0 {
+        m.valid = true
+    }
+    m
+}
+
+fn pkg_skip_ws_range(content: &str, start: i64, end: i64) -> i64 with Panic {
+    var p = start
+    while p < end && pkg_is_ws(str_char_at(*content, p) as i64) {
+        p = p + 1
+    }
+    p
+}
+
+fn pkg_detect_section(content: &str, start: i64, end: i64, is_array: bool, m: &!PkgManifest) -> i64 with Panic, Mut {
+    let len = end - start
+    if len == 7 {
+        let c0 = str_char_at(*content, start) as i64
+        if c0 == 112 { return SECTION_PACKAGE }    // 'p' -> package
+        if c0 == 101 { return SECTION_EPISTEMIC }  // 'e' -> epistemic
+    }
+    if len == 3 {
+        let c0 = str_char_at(*content, start) as i64
+        if c0 == 108 { return SECTION_LIB }        // 'l' -> lib
+    }
+    if len == 12 {
+        return SECTION_DEPENDENCIES                 // dependencies
+    }
+    if len == 7 && is_array {
+        let c0 = str_char_at(*content, start) as i64
+        if c0 == 101 {                              // 'e' -> example
+            if (*m).example_count < 15 {
+                (*m).example_count = (*m).example_count + 1
+            }
+            return SECTION_EXAMPLE
+        }
+    }
+    if len == 4 && is_array {
+        let c0 = str_char_at(*content, start) as i64
+        if c0 == 116 {                              // 't' -> test
+            if (*m).test_count < 15 {
+                (*m).test_count = (*m).test_count + 1
+            }
+            return SECTION_TEST
+        }
+    }
+    SECTION_NONE
+}
+
+fn pkg_parse_field(content: &str, line_start: i64, line_end: i64, section: i64, m: &!PkgManifest) with Panic, Div, Mut {
+    // Encontra '=' na linha
+    var eq_pos = line_start
+    while eq_pos < line_end && str_char_at(*content, eq_pos) as i64 != 61 {
+        eq_pos = eq_pos + 1
+    }
+    if eq_pos >= line_end { return }
+
+    // Extrai key [line_start, eq_pos)
+    var key_end = eq_pos
+    while key_end > line_start && pkg_is_ws(str_char_at(*content, key_end - 1) as i64) {
+        key_end = key_end - 1
+    }
+    let key_start = pkg_skip_ws_range(*content, line_start, line_end)
+    let key_len = key_end - key_start
+
+    // Extrai value após '='
+    var val_start = pkg_skip_ws_range(*content, eq_pos + 1, line_end)
+    var val_end = line_end
+
+    // Remove aspas se valor entre aspas
+    if val_start < val_end && str_char_at(*content, val_start) as i64 == 34 {
+        val_start = val_start + 1
+        val_end = val_start
+        while val_end < line_end && str_char_at(*content, val_end) as i64 != 34 {
+            val_end = val_end + 1
+        }
+    } else {
+        // Remove comentário inline e whitespace
+        while val_end > val_start && (pkg_is_ws(str_char_at(*content, val_end - 1) as i64) || str_char_at(*content, val_end - 1) as i64 == 35) {
+            val_end = val_end - 1
+        }
+    }
+
+    if section == SECTION_PACKAGE {
+        pkg_parse_package_field(*content, key_start, key_len, val_start, val_end, m)
+    } else if section == SECTION_EPISTEMIC {
+        pkg_parse_epistemic_field(*content, key_start, key_len, val_start, val_end, m)
+    } else if section == SECTION_DEPENDENCIES {
+        pkg_parse_dep_field(*content, key_start, key_len, val_start, val_end, m)
+    } else if section == SECTION_LIB {
+        pkg_parse_lib_field(*content, key_start, key_len, val_start, val_end, m)
+    }
+    // [[example]] e [[test]] são parseados de forma análoga — omitido por brevidade
+}
+
+fn pkg_parse_package_field(content: &str, key_start: i64, key_len: i64, val_start: i64, val_end: i64, m: &!PkgManifest) with Panic, Mut {
+    var ki: i64 = 0
+    var key: [i8; 32] = [0; 32]
+    while ki < key_len && ki < 31 {
+        key[ki as usize] = str_char_at(*content, key_start + ki) as i8
+        ki = ki + 1
+    }
+    let val_len = val_end - val_start
+
+    // name
+    if key[0] == 110 as i8 && key[1] == 97 as i8 && key[2] == 109 as i8 && key[3] == 101 as i8 && key_len == 4 {
+        var vi: i64 = 0
+        while vi < val_len && vi < 63 {
+            (*m).name[vi as usize] = str_char_at(*content, val_start + vi) as i8
+            vi = vi + 1
+        }
+        (*m).name_len = vi
+        return
+    }
+    // version
+    if key[0] == 118 as i8 && key_len == 7 {
+        var vi: i64 = 0
+        while vi < val_len && vi < 31 {
+            (*m).version_str[vi as usize] = str_char_at(*content, val_start + vi) as i8
+            vi = vi + 1
+        }
+        (*m).version_len = vi
+        return
+    }
+    // description
+    if key[0] == 100 as i8 && key_len == 11 {
+        var vi: i64 = 0
+        while vi < val_len && vi < 255 {
+            (*m).description[vi as usize] = str_char_at(*content, val_start + vi) as i8
+            vi = vi + 1
+        }
+        (*m).description_len = vi
+        return
+    }
+    // license
+    if key[0] == 108 as i8 && key_len == 7 {
+        var vi: i64 = 0
+        while vi < val_len && vi < 63 {
+            (*m).license[vi as usize] = str_char_at(*content, val_start + vi) as i8
+            vi = vi + 1
+        }
+        (*m).license_len = vi
+        return
+    }
+    // repository
+    if key[0] == 114 as i8 && key_len == 10 {
+        var vi: i64 = 0
+        while vi < val_len && vi < 127 {
+            (*m).repository[vi as usize] = str_char_at(*content, val_start + vi) as i8
+            vi = vi + 1
+        }
+        (*m).repository_len = vi
+        return
+    }
+}
+
+fn pkg_parse_epistemic_field(content: &str, key_start: i64, key_len: i64, val_start: i64, val_end: i64, m: &!PkgManifest) with Panic, Div, Mut {
+    (*m).has_epistemic = true
+
+    var key: [i8; 32] = [0; 32]
+    var ki: i64 = 0
+    while ki < key_len && ki < 31 {
+        key[ki as usize] = str_char_at(*content, key_start + ki) as i8
+        ki = ki + 1
+    }
+
+    let val_substr = str_slice(*content, val_start, val_end)
+
+    // score (5 chars)
+    if key[0] == 115 as i8 && key[1] == 99 as i8 && key_len == 5 {
+        (*m).epistemic.score = pkg_parse_f64(&val_substr, 0)
+        return
+    }
+    // gum-compliant
+    if key[0] == 103 as i8 && key_len == 13 {
+        (*m).epistemic.gum_compliant = str_char_at(*content, val_start) as i64 == 116
+        return
+    }
+    // regulatory-ready
+    if key[0] == 114 as i8 && key_len == 16 {
+        (*m).epistemic.regulatory_ready = str_char_at(*content, val_start) as i64 == 116
+        return
+    }
+    // confidence-threshold
+    if key[0] == 99 as i8 && key_len == 20 {
+        (*m).epistemic.confidence_threshold = pkg_parse_f64(&val_substr, 0)
+        return
+    }
+    // provenance-level
+    if key[0] == 112 as i8 && key_len == 16 {
+        (*m).epistemic.provenance_level = pkg_provenance_code(*content, val_start, val_end)
+        return
+    }
+    // validation-coverage
+    if key[0] == 118 as i8 && key_len == 19 {
+        (*m).epistemic.validation_coverage = pkg_parse_f64(&val_substr, 0)
+        return
+    }
+}
+
+fn pkg_parse_dep_field(content: &str, key_start: i64, key_len: i64, val_start: i64, val_end: i64, m: &!PkgManifest) with Panic, Mut {
+    if (*m).dep_count >= 31 { return }
+    let idx = (*m).dep_count as usize
+    var ni: i64 = 0
+    while ni < key_len && ni < 63 {
+        (*m).deps[idx].name[ni as usize] = str_char_at(*content, key_start + ni) as i8
+        ni = ni + 1
+    }
+    (*m).deps[idx].name_len = ni
+    let val_len = val_end - val_start
+    var vi: i64 = 0
+    while vi < val_len && vi < 31 {
+        (*m).deps[idx].version[vi as usize] = str_char_at(*content, val_start + vi) as i8
+        vi = vi + 1
+    }
+    (*m).deps[idx].version_len = vi
+    (*m).dep_count = (*m).dep_count + 1
+}
+
+fn pkg_parse_lib_field(content: &str, key_start: i64, key_len: i64, val_start: i64, val_end: i64, m: &!PkgManifest) with Panic, Mut {
+    // Apenas "path"
+    if key_len == 4 && str_char_at(*content, key_start) as i64 == 112 {
+        let val_len = val_end - val_start
+        var vi: i64 = 0
+        while vi < val_len && vi < 127 {
+            (*m).lib_path[vi as usize] = str_char_at(*content, val_start + vi) as i8
+            vi = vi + 1
+        }
+        (*m).lib_path_len = vi
+    }
+}
+
+// ============================================================================
+// PRINT / DEBUG
+// ============================================================================
+
+pub fn pkg_manifest_print(m: &PkgManifest) with IO, Mut, Panic, Div {
+    println("[sounio.toml manifest]")
+    print("  name: ")
+    var i: i64 = 0
+    while i < (*m).name_len {
+        print_char((*m).name[i as usize] as i64)
+        i = i + 1
+    }
+    println("")
+    print("  version: ")
+    i = 0
+    while i < (*m).version_len {
+        print_char((*m).version_str[i as usize] as i64)
+        i = i + 1
+    }
+    println("")
+    if (*m).has_epistemic {
+        let score_int = ((*m).epistemic.score * 100.0) as i64
+        print("  epistemic.score: 0.")
+        print_int(score_int)
+        println("")
+        if (*m).epistemic.gum_compliant { println("  gum-compliant: true") }
+        if (*m).epistemic.regulatory_ready { println("  regulatory-ready: true") }
+    }
+    print("  deps: ")
+    print_int((*m).dep_count)
+    println("")
+    print("  valid: ")
+    if (*m).valid { println("true") } else { println("false") }
+}

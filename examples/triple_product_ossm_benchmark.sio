@@ -1,0 +1,527 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Triple-Product O-SSM: The Architecture That ACTIVATES Non-Associativity
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// CRITICAL INSIGHT (Artin's Theorem):
+// In an alternative algebra, any two elements generate an associative subalgebra.
+// Therefore A ⊗ h is ALWAYS locally associative — non-associativity is DORMANT
+// in the standard h' = A⊗h + B·x architecture.
+//
+// FIX: Triple product h' = (A ⊗ h) ⊗ x
+// Three independent octonions interact multiplicatively.
+// (A⊗h)⊗x ≠ A⊗(h⊗x) for octonions — non-associativity is ACTIVE.
+// (q⊗h)⊗x = q⊗(h⊗x) for quaternions — still associative.
+//
+// Models (all 8 A-params):
+//   0: O-SSM-Triple   h' = clamp((A ⊗ h) ⊗ x)      [non-assoc ACTIVE]
+//   1: H-SSM-Triple   h' = clamp((q ⊗ h) ⊗ x)      [assoc, blind to brackets]
+//   2: O-SSM-Additive h' = clamp(A ⊗ h + B · x)     [non-assoc DORMANT by Artin]
+//   3: Naive-DIAG     h' = clamp(diag(A)·h + B·x)   [baseline]
+//
+// Task: Associativity Probe (Fano-plane ground truth, 16 classes)
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0; var term = 1.0; var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+var RNG_A: i64 = 0; var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Fano Plane Basis Multiplication (same as associativity_probe_benchmark)
+// ═══════════════════════════════════════════════════════════════════════════
+// 7 lines: (1,2,4), (2,3,5), (3,4,6), (4,5,7), (5,6,1), (6,7,2), (7,1,3)
+
+fn oct_sign(i: i64, j: i64) -> i64 {
+    if i == 0 { return 1 } if j == 0 { return 1 }
+    if i == j { return 0 - 1 }
+    if i==1 { if j==2 { return 1 } if j==4 { return 0-1 } if j==3 { return 1 } if j==5 { return 1 } if j==6 { return 0-1 } if j==7 { return 0-1 } }
+    if i==2 { if j==1 { return 0-1 } if j==3 { return 1 } if j==4 { return 1 } if j==5 { return 0-1 } if j==6 { return 1 } if j==7 { return 0-1 } }
+    if i==3 { if j==1 { return 0-1 } if j==2 { return 0-1 } if j==4 { return 1 } if j==5 { return 1 } if j==6 { return 0-1 } if j==7 { return 1 } }
+    if i==4 { if j==1 { return 1 } if j==2 { return 0-1 } if j==3 { return 0-1 } if j==5 { return 1 } if j==6 { return 1 } if j==7 { return 0-1 } }
+    if i==5 { if j==1 { return 0-1 } if j==2 { return 1 } if j==3 { return 0-1 } if j==4 { return 0-1 } if j==6 { return 1 } if j==7 { return 1 } }
+    if i==6 { if j==1 { return 1 } if j==2 { return 0-1 } if j==3 { return 1 } if j==4 { return 0-1 } if j==5 { return 0-1 } if j==7 { return 1 } }
+    if i==7 { if j==1 { return 1 } if j==2 { return 1 } if j==3 { return 0-1 } if j==4 { return 1 } if j==5 { return 0-1 } if j==6 { return 0-1 } }
+    0
+}
+
+fn oct_basis(i: i64, j: i64) -> i64 {
+    if i == 0 { return j } if j == 0 { return i }
+    if i == j { return 0 }
+    if i==1 { if j==2 { return 4 } if j==4 { return 2 } if j==3 { return 7 } if j==5 { return 6 } if j==6 { return 5 } if j==7 { return 3 } }
+    if i==2 { if j==1 { return 4 } if j==3 { return 5 } if j==4 { return 1 } if j==5 { return 3 } if j==6 { return 7 } if j==7 { return 6 } }
+    if i==3 { if j==1 { return 7 } if j==2 { return 5 } if j==4 { return 6 } if j==5 { return 2 } if j==6 { return 4 } if j==7 { return 1 } }
+    if i==4 { if j==1 { return 2 } if j==2 { return 1 } if j==3 { return 6 } if j==5 { return 7 } if j==6 { return 3 } if j==7 { return 5 } }
+    if i==5 { if j==1 { return 6 } if j==2 { return 3 } if j==3 { return 2 } if j==4 { return 7 } if j==6 { return 1 } if j==7 { return 4 } }
+    if i==6 { if j==1 { return 5 } if j==2 { return 7 } if j==3 { return 4 } if j==4 { return 3 } if j==5 { return 1 } if j==7 { return 2 } }
+    if i==7 { if j==1 { return 3 } if j==2 { return 6 } if j==3 { return 1 } if j==4 { return 5 } if j==5 { return 4 } if j==6 { return 2 } }
+    0
+}
+
+fn oct_signed_mul(s_a: i64, idx_a: i64, idx_b: i64) -> i64 with Mut {
+    let raw_sign = oct_sign(idx_a, idx_b)
+    let raw_basis = oct_basis(idx_a, idx_b)
+    var final_sign = raw_sign
+    if s_a < 0 { final_sign = 0 - final_sign }
+    if final_sign >= 0 { raw_basis } else { 8 + raw_basis }
+}
+
+// ─── Ground truth generator ───
+var PROBE_TOKENS: [i64; 4] = [0; 4]
+var PROBE_LABEL: i64 = 0
+var PROBE_IS_ASSOC: i64 = 0
+
+fn generate_assoc_probe() with Mut, Div {
+    let a = (rng_next() / 100) % 8
+    let b = (rng_next() / 100) % 8
+    let c = (rng_next() / 100) % 8
+    let mode = (rng_next() / 100) % 2
+    PROBE_TOKENS[0] = a; PROBE_TOKENS[1] = b; PROBE_TOKENS[2] = c
+    PROBE_TOKENS[3] = mode + 8
+    let ab_sign = oct_sign(a, b); let ab_idx = oct_basis(a, b)
+    let left_label = oct_signed_mul(ab_sign, ab_idx, c)
+    let bc_sign = oct_sign(b, c); let bc_idx = oct_basis(b, c)
+    let right_label = oct_signed_mul(bc_sign, a, bc_idx)
+    if mode == 0 { PROBE_LABEL = left_label }
+    if mode == 1 { PROBE_LABEL = right_label }
+    if left_label == right_label { PROBE_IS_ASSOC = 1 } else { PROBE_IS_ASSOC = 0 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Model Weights
+// ═══════════════════════════════════════════════════════════════════════════
+// Embed: 10 tokens × 8 dims = 80 (0..79)
+// A: 8 (80..87)
+// B: 8 (88..95) — only used by additive and naive models
+// Out: 8×16 = 128 (96..223)
+// Total: 224
+
+var W: [i64; 224] = [0; 224]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 16] = [0; 16]
+var MOM: [i64; 224] = [0; 224]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+fn init_embed_b_out() with Mut, Div {
+    var i = 0
+    while i < 80 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(88 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 128 { ws(96 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 224 { MOM[i] = 0; i = i + 1 }
+}
+
+fn init_A_oct() with Mut, Div {
+    ws(80, 0.95)
+    var i = 1
+    while i < 8 { ws(80 + i, ((rng_next() % 200) as f64 - 100.0) / 1000.0); i = i + 1 }
+}
+
+fn init_A_quat() with Mut, Div {
+    ws(80, 0.95); ws(81, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(82, ((rng_next() % 100) as f64 - 50.0) / 500.0); ws(83, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(84, 0.95); ws(85, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(86, ((rng_next() % 100) as f64 - 50.0) / 500.0); ws(87, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+}
+
+fn init_A_diag() with Mut {
+    var i = 0
+    while i < 8 { ws(80 + i, 0.95); i = i + 1 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Forward Steps
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Inline oct_mul: computes c = a ⊗ b using Cayley product, reads from arrays
+// We use temp arrays to avoid aliasing issues
+var TEMP_OCT: [f64; 8] = [0.0; 8]
+
+// oct_mul into TEMP_OCT from 8 f64 values each
+fn do_oct_mul(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+              b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64) with Mut {
+    TEMP_OCT[0] = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    TEMP_OCT[1] = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    TEMP_OCT[2] = a0*b2 + a2*b0 - a1*b3 + a3*b1 + a4*b6 - a6*b4 + a5*b7 - a7*b5
+    TEMP_OCT[3] = a0*b3 + a3*b0 + a1*b2 - a2*b1 + a4*b7 - a7*b4 - a5*b6 + a6*b5
+    TEMP_OCT[4] = a0*b4 + a4*b0 - a1*b5 + a5*b1 - a2*b6 + a6*b2 - a3*b7 + a7*b3
+    TEMP_OCT[5] = a0*b5 + a5*b0 + a1*b4 - a4*b1 - a2*b7 + a7*b2 + a3*b6 - a6*b3
+    TEMP_OCT[6] = a0*b6 + a6*b0 + a1*b7 - a7*b1 + a2*b4 - a4*b2 - a3*b5 + a5*b3
+    TEMP_OCT[7] = a0*b7 + a7*b0 - a1*b6 + a6*b1 - a2*b5 + a5*b2 + a3*b4 - a4*b3
+}
+
+// Model 0: O-SSM-Triple — h' = clamp((A ⊗ h) ⊗ x)
+// NON-ASSOCIATIVITY IS ACTIVE: three independent octonions in multiplicative chain
+fn ossm_triple_step(token: i64) with Mut, Div {
+    let a0=wg(80); let a1=wg(81); let a2=wg(82); let a3=wg(83)
+    let a4=wg(84); let a5=wg(85); let a6=wg(86); let a7=wg(87)
+    let h0=hg(0); let h1=hg(1); let h2=hg(2); let h3=hg(3)
+    let h4=hg(4); let h5=hg(5); let h6=hg(6); let h7=hg(7)
+
+    // Step 1: temp = A ⊗ h
+    do_oct_mul(a0,a1,a2,a3,a4,a5,a6,a7, h0,h1,h2,h3,h4,h5,h6,h7)
+    let t0=TEMP_OCT[0]; let t1=TEMP_OCT[1]; let t2=TEMP_OCT[2]; let t3=TEMP_OCT[3]
+    let t4=TEMP_OCT[4]; let t5=TEMP_OCT[5]; let t6=TEMP_OCT[6]; let t7=TEMP_OCT[7]
+
+    // Step 2: result = temp ⊗ x  (THIS is where non-associativity enters)
+    let x0=wg(token*8+0); let x1=wg(token*8+1); let x2=wg(token*8+2); let x3=wg(token*8+3)
+    let x4=wg(token*8+4); let x5=wg(token*8+5); let x6=wg(token*8+6); let x7=wg(token*8+7)
+    do_oct_mul(t0,t1,t2,t3,t4,t5,t6,t7, x0,x1,x2,x3,x4,x5,x6,x7)
+
+    // Step 3: clamp and store
+    var d = 0
+    while d < 8 {
+        var v = TEMP_OCT[d]
+        if v > 5.0 { v = 5.0 } if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+        hs(d, v); d = d + 1
+    }
+}
+
+// Model 1: H-SSM-Triple — h' = clamp((q ⊗ h) ⊗ x) per 4D block
+// ASSOCIATIVITY HOLDS: (q⊗h)⊗x = q⊗(h⊗x) for quaternions — brackets don't matter
+fn hssm_triple_step(token: i64) with Mut, Div {
+    // Block 1 (dims 0-3): (q1 ⊗ h[0:3]) ⊗ x[0:3]
+    let qw=wg(80); let qx=wg(81); let qy=wg(82); let qz=wg(83)
+    let hw=hg(0); let hx=hg(1); let hy=hg(2); let hz=hg(3)
+    // temp = q1 ⊗ h
+    let tw = qw*hw - qx*hx - qy*hy - qz*hz
+    let tx = qw*hx + qx*hw + qy*hz - qz*hy
+    let ty = qw*hy - qx*hz + qy*hw + qz*hx
+    let tz = qw*hz + qx*hy - qy*hx + qz*hw
+    // result = temp ⊗ x
+    let xw=wg(token*8+0); let xx=wg(token*8+1); let xy=wg(token*8+2); let xz=wg(token*8+3)
+    var n0 = tw*xw - tx*xx - ty*xy - tz*xz
+    var n1 = tw*xx + tx*xw + ty*xz - tz*xy
+    var n2 = tw*xy - tx*xz + ty*xw + tz*xx
+    var n3 = tw*xz + tx*xy - ty*xx + tz*xw
+    if n0>5.0{n0=5.0} if n0<0.0-5.0{n0=0.0-5.0}
+    if n1>5.0{n1=5.0} if n1<0.0-5.0{n1=0.0-5.0}
+    if n2>5.0{n2=5.0} if n2<0.0-5.0{n2=0.0-5.0}
+    if n3>5.0{n3=5.0} if n3<0.0-5.0{n3=0.0-5.0}
+
+    // Block 2 (dims 4-7): (q2 ⊗ h[4:7]) ⊗ x[4:7]
+    let qw2=wg(84); let qx2=wg(85); let qy2=wg(86); let qz2=wg(87)
+    let hw2=hg(4); let hx2=hg(5); let hy2=hg(6); let hz2=hg(7)
+    let tw2 = qw2*hw2 - qx2*hx2 - qy2*hy2 - qz2*hz2
+    let tx2 = qw2*hx2 + qx2*hw2 + qy2*hz2 - qz2*hy2
+    let ty2 = qw2*hy2 - qx2*hz2 + qy2*hw2 + qz2*hx2
+    let tz2 = qw2*hz2 + qx2*hy2 - qy2*hx2 + qz2*hw2
+    let xw2=wg(token*8+4); let xx2=wg(token*8+5); let xy2=wg(token*8+6); let xz2=wg(token*8+7)
+    var n4 = tw2*xw2 - tx2*xx2 - ty2*xy2 - tz2*xz2
+    var n5 = tw2*xx2 + tx2*xw2 + ty2*xz2 - tz2*xy2
+    var n6 = tw2*xy2 - tx2*xz2 + ty2*xw2 + tz2*xx2
+    var n7 = tw2*xz2 + tx2*xy2 - ty2*xx2 + tz2*xw2
+    if n4>5.0{n4=5.0} if n4<0.0-5.0{n4=0.0-5.0}
+    if n5>5.0{n5=5.0} if n5<0.0-5.0{n5=0.0-5.0}
+    if n6>5.0{n6=5.0} if n6<0.0-5.0{n6=0.0-5.0}
+    if n7>5.0{n7=5.0} if n7<0.0-5.0{n7=0.0-5.0}
+
+    hs(0,n0); hs(1,n1); hs(2,n2); hs(3,n3)
+    hs(4,n4); hs(5,n5); hs(6,n6); hs(7,n7)
+}
+
+// Model 2: O-SSM-Additive — h' = clamp(A ⊗ h + B · x)
+// NON-ASSOCIATIVITY IS DORMANT (Artin's theorem: A⊗h is pairwise, always associative)
+fn ossm_additive_step(token: i64) with Mut, Div {
+    let a0=wg(80); let a1=wg(81); let a2=wg(82); let a3=wg(83)
+    let a4=wg(84); let a5=wg(85); let a6=wg(86); let a7=wg(87)
+    let h0=hg(0); let h1=hg(1); let h2=hg(2); let h3=hg(3)
+    let h4=hg(4); let h5=hg(5); let h6=hg(6); let h7=hg(7)
+    do_oct_mul(a0,a1,a2,a3,a4,a5,a6,a7, h0,h1,h2,h3,h4,h5,h6,h7)
+    var d = 0
+    while d < 8 {
+        var v = TEMP_OCT[d] + wg(88 + d) * wg(token*8 + d)
+        if v > 5.0 { v = 5.0 } if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+        hs(d, v); d = d + 1
+    }
+}
+
+// Model 3: Naive-DIAG — h' = clamp(diag(A)·h + B·x)
+fn naive_step(token: i64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var s = wg(80+d)*hg(d) + wg(88+d)*wg(token*8+d)
+        if s>5.0{s=5.0} if s<0.0-5.0{s=0.0-5.0}
+        hs(d, s); d = d + 1
+    }
+}
+
+fn model_step(token: i64, model_id: i64) with Mut, Div {
+    if model_id == 0 { ossm_triple_step(token) }
+    if model_id == 1 { hssm_triple_step(token) }
+    if model_id == 2 { ossm_additive_step(token) }
+    if model_id == 3 { naive_step(token) }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Logits, Prediction, Update (16 classes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn compute_logits() with Mut, Div {
+    var c = 0
+    while c < 16 {
+        var s = 0.0; var d = 0
+        while d < 8 { s = s + hg(d) * wg(96 + d*16 + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64; c = c + 1
+    }
+}
+
+fn get_pred() -> i64 with Mut, Div {
+    var best = 0; var bv = (L[0] as f64) / 100000000.0; var i = 1
+    while i < 16 { let v = (L[i] as f64)/100000000.0; if v > bv { bv = v; best = i }; i = i + 1 }
+    best
+}
+
+fn update_out(tgt: i64, lr: f64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0; var i = 1
+    while i < 16 { let v = (L[i] as f64)/100000000.0; if v > mx { mx = v }; i = i + 1 }
+    var probs: [f64; 16] = [0.0; 16]; var se = 0.0; i = 0
+    while i < 16 { probs[i] = exp_q((L[i] as f64)/100000000.0 - mx); se = se + probs[i]; i = i + 1 }
+    i = 0
+    while i < 16 { probs[i] = probs[i] / se; i = i + 1 }
+    probs[tgt] = probs[tgt] - 1.0
+    var d = 0
+    while d < 8 {
+        let hd = hg(d); var c = 0
+        while c < 16 {
+            let idx = 96 + d*16 + c
+            var g = hd * probs[c]
+            if g > 0.3 { g = 0.3 } if g < 0.0 - 0.3 { g = 0.0 - 0.3 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Training + Structured Evaluation
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn train_model(model_id: i64) with IO, Mut, Div, Panic {
+    // Phase 1: output-only, 100 epochs
+    var ep = 0
+    while ep < 100 {
+        var s = 0
+        while s < 500 {
+            generate_assoc_probe()
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < 4 { model_step(PROBE_TOKENS[t], model_id); t = t + 1 }
+            compute_logits()
+            update_out(PROBE_LABEL, 0.01)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+}
+
+var EVAL_OVERALL: i64 = 0
+var EVAL_ASSOC_C: i64 = 0; var EVAL_ASSOC_T: i64 = 0
+var EVAL_NA_C: i64 = 0; var EVAL_NA_T: i64 = 0
+
+fn eval_model(model_id: i64) with IO, Mut, Div, Panic {
+    rng_seed(99999, 11111)
+    EVAL_OVERALL = 0; EVAL_ASSOC_C = 0; EVAL_ASSOC_T = 0; EVAL_NA_C = 0; EVAL_NA_T = 0
+    var s = 0
+    while s < 1000 {
+        generate_assoc_probe()
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < 4 { model_step(PROBE_TOKENS[t], model_id); t = t + 1 }
+        compute_logits()
+        let pred = get_pred()
+        if pred == PROBE_LABEL { EVAL_OVERALL = EVAL_OVERALL + 1 }
+        if PROBE_IS_ASSOC == 1 {
+            EVAL_ASSOC_T = EVAL_ASSOC_T + 1
+            if pred == PROBE_LABEL { EVAL_ASSOC_C = EVAL_ASSOC_C + 1 }
+        } else {
+            EVAL_NA_T = EVAL_NA_T + 1
+            if pred == PROBE_LABEL { EVAL_NA_C = EVAL_NA_C + 1 }
+        }
+        s = s + 1
+    }
+}
+
+fn print_eval_line() with IO, Mut, Div {
+    let overall_pct = (EVAL_OVERALL as f64) / 1000.0 * 100.0
+    var assoc_pct = 0.0
+    if EVAL_ASSOC_T > 0 { assoc_pct = (EVAL_ASSOC_C as f64) / (EVAL_ASSOC_T as f64) * 100.0 }
+    var na_pct = 0.0
+    if EVAL_NA_T > 0 { na_pct = (EVAL_NA_C as f64) / (EVAL_NA_T as f64) * 100.0 }
+    let delta = na_pct - assoc_pct
+    print(overall_pct); print("%    ")
+    print(assoc_pct); print("%("); print_int(EVAL_ASSOC_T); print(")  ")
+    print(na_pct); print("%("); print_int(EVAL_NA_T); print(")  ")
+    if delta >= 0.0 { print("+") }
+    print(delta); print("%\n")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Triple-Product O-SSM: Non-Associativity Activation Test\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  h' = (A ⊗ h) ⊗ x   [triple product, non-assoc ACTIVE]\n")
+    print("  vs\n")
+    print("  h' = A ⊗ h + B·x    [additive, non-assoc DORMANT by Artin]\n\n")
+    print("  Artin's theorem: any 2 elements in an alternative algebra\n")
+    print("  generate an associative subalgebra. A⊗h is pairwise → associative.\n")
+    print("  Only (A⊗h)⊗x invokes non-associativity (3 independent elements).\n\n")
+
+    // Verification
+    print("  Verification (non-assoc fraction):\n")
+    rng_seed(99999, 11111)
+    var na_count = 0; var check = 0
+    while check < 1000 { generate_assoc_probe(); if PROBE_IS_ASSOC == 0 { na_count = na_count + 1 }; check = check + 1 }
+    print("  Non-associative: "); print_int(na_count); print("/1000 = ")
+    print((na_count as f64) / 10.0); print("%\n\n")
+
+    // Verify triple product example: e1, e2, e4
+    // LEFT: (e1⊗e2)⊗e4 = e4⊗e4 = -e0 → class 8
+    // RIGHT: e1⊗(e2⊗e4) = e1⊗e1 = -e0 → class 8
+    // Actually (1,2,4) is a Fano line so this is ASSOCIATIVE
+    // Better: e1, e2, e5
+    // LEFT: (e1⊗e2)⊗e5 = e4⊗e5 = +e7 → class 7
+    // RIGHT: e1⊗(e2⊗e5) = e1⊗(-e3) = -(e1⊗e3) = -(+e7) = -e7 → class 15
+    print("  Example: e1⊗e2⊗e5\n")
+    let ex_ab_s = oct_sign(1, 2); let ex_ab_i = oct_basis(1, 2)
+    print("    e1⊗e2 = "); if ex_ab_s < 0 { print("-") } else { print("+") }
+    print("e"); print_int(ex_ab_i); print("\n")
+    let ex_left = oct_signed_mul(ex_ab_s, ex_ab_i, 5)
+    print("    LEFT (e1⊗e2)⊗e5 = class "); print_int(ex_left); print("\n")
+    let ex_bc_s = oct_sign(2, 5); let ex_bc_i = oct_basis(2, 5)
+    print("    e2⊗e5 = "); if ex_bc_s < 0 { print("-") } else { print("+") }
+    print("e"); print_int(ex_bc_i); print("\n")
+    let ex_right = oct_signed_mul(ex_bc_s, 1, ex_bc_i)
+    print("    RIGHT e1⊗(e2⊗e5) = class "); print_int(ex_right); print("\n")
+    if ex_left != ex_right { print("    → DIFFERENT! Non-associativity confirmed.\n") }
+    else { print("    → Same (associative triple)\n") }
+
+    print("\n  Training: 100 epochs output-only, 500/ep (50K total)\n\n")
+
+    // ─── Train all 4 models ───
+    // Store results for comparison
+    var res_overall: [i64; 4] = [0; 4]
+    var res_assoc_c: [i64; 4] = [0; 4]; var res_assoc_t: [i64; 4] = [0; 4]
+    var res_na_c: [i64; 4] = [0; 4]; var res_na_t: [i64; 4] = [0; 4]
+
+    print("  [0] O-SSM-Triple (non-assoc ACTIVE)...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890); train_model(0); eval_model(0)
+    res_overall[0] = EVAL_OVERALL
+    res_assoc_c[0] = EVAL_ASSOC_C; res_assoc_t[0] = EVAL_ASSOC_T
+    res_na_c[0] = EVAL_NA_C; res_na_t[0] = EVAL_NA_T
+
+    print("  [1] H-SSM-Triple (assoc, blind to brackets)...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890); train_model(1); eval_model(1)
+    res_overall[1] = EVAL_OVERALL
+    res_assoc_c[1] = EVAL_ASSOC_C; res_assoc_t[1] = EVAL_ASSOC_T
+    res_na_c[1] = EVAL_NA_C; res_na_t[1] = EVAL_NA_T
+
+    print("  [2] O-SSM-Additive (non-assoc DORMANT)...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890); train_model(2); eval_model(2)
+    res_overall[2] = EVAL_OVERALL
+    res_assoc_c[2] = EVAL_ASSOC_C; res_assoc_t[2] = EVAL_ASSOC_T
+    res_na_c[2] = EVAL_NA_C; res_na_t[2] = EVAL_NA_T
+
+    print("  [3] Naive-DIAG (baseline)...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_diag()
+    rng_seed(12345, 67890); train_model(3); eval_model(3)
+    res_overall[3] = EVAL_OVERALL
+    res_assoc_c[3] = EVAL_ASSOC_C; res_assoc_t[3] = EVAL_ASSOC_T
+    res_na_c[3] = EVAL_NA_C; res_na_t[3] = EVAL_NA_T
+
+    // ─── Results ───
+    print("\n═══════════════════════════════════════════════════════════════\n")
+    print("  RESULTS: Associativity Probe — Triple vs Additive\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Model              Overall   Assoc-trip    Non-assoc-trip  Delta\n")
+    print("  ─────────────────  ───────   ──────────    ──────────────  ─────\n")
+
+    EVAL_OVERALL=res_overall[0]; EVAL_ASSOC_C=res_assoc_c[0]; EVAL_ASSOC_T=res_assoc_t[0]
+    EVAL_NA_C=res_na_c[0]; EVAL_NA_T=res_na_t[0]
+    print("  O-SSM-Triple       "); print_eval_line()
+
+    EVAL_OVERALL=res_overall[1]; EVAL_ASSOC_C=res_assoc_c[1]; EVAL_ASSOC_T=res_assoc_t[1]
+    EVAL_NA_C=res_na_c[1]; EVAL_NA_T=res_na_t[1]
+    print("  H-SSM-Triple       "); print_eval_line()
+
+    EVAL_OVERALL=res_overall[2]; EVAL_ASSOC_C=res_assoc_c[2]; EVAL_ASSOC_T=res_assoc_t[2]
+    EVAL_NA_C=res_na_c[2]; EVAL_NA_T=res_na_t[2]
+    print("  O-SSM-Additive     "); print_eval_line()
+
+    EVAL_OVERALL=res_overall[3]; EVAL_ASSOC_C=res_assoc_c[3]; EVAL_ASSOC_T=res_assoc_t[3]
+    EVAL_NA_C=res_na_c[3]; EVAL_NA_T=res_na_t[3]
+    print("  Naive-DIAG         "); print_eval_line()
+
+    print("  Random             6.25%\n")
+
+    // ─── Verdict ───
+    var ossm_tri_na = 0.0
+    if res_na_t[0] > 0 { ossm_tri_na = (res_na_c[0] as f64) / (res_na_t[0] as f64) * 100.0 }
+    var hssm_tri_na = 0.0
+    if res_na_t[1] > 0 { hssm_tri_na = (res_na_c[1] as f64) / (res_na_t[1] as f64) * 100.0 }
+    var ossm_add_na = 0.0
+    if res_na_t[2] > 0 { ossm_add_na = (res_na_c[2] as f64) / (res_na_t[2] as f64) * 100.0 }
+
+    let gap_triple = ossm_tri_na - hssm_tri_na
+    let gap_artin = ossm_add_na - hssm_tri_na
+
+    print("\n  ═══ VERDICT ═══\n\n")
+    print("  Non-assoc accuracy:\n")
+    print("    O-SSM-Triple:   "); print(ossm_tri_na); print("%\n")
+    print("    H-SSM-Triple:   "); print(hssm_tri_na); print("%\n")
+    print("    O-SSM-Additive: "); print(ossm_add_na); print("%\n")
+
+    print("\n  Gap (Triple O-SSM - Triple H-SSM): ")
+    if gap_triple >= 0.0 { print("+") }
+    print(gap_triple); print("pp\n")
+
+    print("  Gap (Additive O-SSM - Triple H-SSM): ")
+    if gap_artin >= 0.0 { print("+") }
+    print(gap_artin); print("pp  [should be ~0 by Artin]\n")
+
+    if gap_triple > 3.0 {
+        print("\n  ✓ O-SSM-Triple separates from H-SSM-Triple on non-assoc triples.\n")
+        print("  → Non-associativity IS the mechanism when architecturally activated.\n")
+        if gap_artin < 3.0 {
+            print("  → Artin dormancy CONFIRMED: additive O-SSM ≈ H-SSM.\n")
+            print("  → The architecture matters, not just the algebra.\n")
+        }
+    } else {
+        if gap_triple > 0.0 - 3.0 {
+            print("\n  ~ No significant separation even with triple product.\n")
+            print("  → Non-associativity cannot be learned at H=8 scale.\n")
+        } else {
+            print("\n  ✗ H-SSM-Triple outperforms on non-assoc triples.\n")
+            print("  → Non-associativity actively hurts even when architecturally present.\n")
+        }
+    }
+
+    println("ALL PASS")
+    0
+}

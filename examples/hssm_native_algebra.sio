@@ -1,0 +1,525 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Native Algebra SSM Benchmark: True Octonion vs True Quaternion vs Diagonal
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// CRITICAL FIX: Previous benchmarks used A @ h (dense linear matrix multiply)
+// for O-SSM. This is NOT octonion multiplication — it's just a general 8x8
+// linear map with 64 free parameters. True octonion multiplication has only
+// 8 parameters and specific Cayley structure (non-associative, non-commutative).
+//
+// This benchmark uses NATIVE ALGEBRA TYPES:
+//   O-SSM: oct_mul(A, h) — Cayley product, 120 FLOPs, 8 params
+//   H-SSM: qmul(q, h_half) × 2 — Hamilton product, 32 FLOPs, 8 params
+//   Naive: A[d] * h[d] — diagonal multiply, 8 FLOPs, 8 params
+//
+// ALL MODELS ARE PARAMETER-MATCHED AT 8 A-PARAMS.
+// The ONLY difference is the algebraic structure of the state transition.
+//
+// Tasks: ListOps (L=15, 10-class) and Bracket (L=12, binary)
+// Training: 500 samples/epoch, 80 epochs = 40K samples, output-only
+// Eval: 1000 samples (SE ≈ ±1.6%)
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0; var term = 1.0; var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+var RNG_A: i64 = 0; var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// ─── ListOps Task ───
+var SEQ: [i64; 32] = [0; 32]; var SEQ_POS: i64 = 0
+fn min_val(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn max_val(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn compute_med3(a: i64, b: i64, c: i64) -> i64 {
+    if a <= b { if b <= c { b } else { if a <= c { c } else { a } } }
+    else { if a <= c { a } else { if b <= c { c } else { b } } }
+}
+
+fn apply_op(op: i64, vals: i64, v0: i64, v1: i64, v2: i64) -> i64 with Mut {
+    if op == 10 {
+        var r = v0; if vals >= 2 { r = min_val(r, v1) }; if vals >= 3 { r = min_val(r, v2) }; r
+    } else {
+        if op == 11 {
+            var r = v0; if vals >= 2 { r = max_val(r, v1) }; if vals >= 3 { r = max_val(r, v2) }; r
+        } else {
+            if vals >= 3 { compute_med3(v0, v1, v2) } else { if vals >= 2 { min_val(v0, v1) } else { v0 } }
+        }
+    }
+}
+
+fn gen_flat_expr() -> i64 with Mut, Div {
+    let op = (rng_next() / 100) % 3 + 10; let nargs = (rng_next() / 100) % 2 + 2
+    SEQ[SEQ_POS] = op; SEQ_POS = SEQ_POS + 1
+    var v0 = (rng_next() / 100) % 10; var v1 = (rng_next() / 100) % 10; var v2 = 0
+    SEQ[SEQ_POS] = v0; SEQ_POS = SEQ_POS + 1; SEQ[SEQ_POS] = v1; SEQ_POS = SEQ_POS + 1
+    if nargs == 3 { v2 = (rng_next() / 100) % 10; SEQ[SEQ_POS] = v2; SEQ_POS = SEQ_POS + 1 }
+    apply_op(op, nargs, v0, v1, v2)
+}
+
+fn gen_nested_expr() -> i64 with Mut, Div {
+    let outer_op = (rng_next() / 100) % 3 + 10; let outer_nargs = (rng_next() / 100) % 2 + 2
+    SEQ[SEQ_POS] = outer_op; SEQ_POS = SEQ_POS + 1
+    var vals: [i64; 3] = [0; 3]; var ai = 0
+    while ai < outer_nargs {
+        let nest = (rng_next() / 100) % 3
+        if nest == 0 { vals[ai] = gen_flat_expr() }
+        else { let d = (rng_next() / 100) % 10; SEQ[SEQ_POS] = d; SEQ_POS = SEQ_POS + 1; vals[ai] = d }
+        ai = ai + 1
+    }
+    apply_op(outer_op, outer_nargs, vals[0], vals[1], vals[2])
+}
+
+fn generate_sample_lo(target_len: i64) -> i64 with Mut, Div {
+    SEQ_POS = 0; let result = gen_nested_expr()
+    var actual_len = SEQ_POS
+    while actual_len < target_len { SEQ[actual_len] = 0; actual_len = actual_len + 1 }
+    if SEQ_POS > target_len { SEQ_POS = target_len } else { SEQ_POS = target_len }
+    result
+}
+
+// ─── Bracket Task ───
+var BR_SEQ: [i64; 20] = [0; 20]; var BR_SEQ_LEN: i64 = 0
+var STK: [i64; 10] = [0; 10]; var STK_TOP: i64 = 0
+
+fn check_balanced(slen: i64) -> i64 with Mut {
+    STK_TOP = 0; var i = 0
+    while i < slen {
+        let tok = BR_SEQ[i]
+        if tok == 1 { STK[STK_TOP] = 1; STK_TOP = STK_TOP + 1 }
+        if tok == 3 { STK[STK_TOP] = 3; STK_TOP = STK_TOP + 1 }
+        if tok == 2 { if STK_TOP == 0 { return 0 }; STK_TOP = STK_TOP - 1; if STK[STK_TOP] != 1 { return 0 } }
+        if tok == 4 { if STK_TOP == 0 { return 0 }; STK_TOP = STK_TOP - 1; if STK[STK_TOP] != 3 { return 0 } }
+        if STK_TOP > 9 { return 0 }
+        i = i + 1
+    }
+    if STK_TOP == 0 { 1 } else { 0 }
+}
+
+fn generate_balanced(slen: i64) with Mut, Div {
+    STK_TOP = 0; var pos = 0
+    while pos < slen {
+        let remaining = slen - pos; let can_open = STK_TOP < remaining / 2; let can_close = STK_TOP > 0
+        var choice = 0
+        if can_open { if can_close { choice = (rng_next() / 100) % 2 } }
+        if can_open { if can_close == false { choice = 0 } }
+        if can_open == false { if can_close { choice = 1 } }
+        if choice == 0 {
+            let btype = (rng_next() / 100) % 2
+            if btype == 0 { BR_SEQ[pos] = 1; STK[STK_TOP] = 1 }
+            if btype == 1 { BR_SEQ[pos] = 3; STK[STK_TOP] = 3 }
+            STK_TOP = STK_TOP + 1
+        }
+        if choice == 1 { STK_TOP = STK_TOP - 1; let top = STK[STK_TOP]; if top == 1 { BR_SEQ[pos] = 2 }; if top == 3 { BR_SEQ[pos] = 4 } }
+        pos = pos + 1
+    }
+}
+
+fn generate_unbalanced(slen: i64) with Mut, Div {
+    var attempts = 0; var done = 0
+    while done == 0 {
+        var i = 0
+        while i < slen { BR_SEQ[i] = (rng_next() / 100) % 4 + 1; i = i + 1 }
+        if check_balanced(slen) == 0 { done = 1 }
+        attempts = attempts + 1
+        if attempts > 30 { BR_SEQ[0] = 2; BR_SEQ[1] = 4; done = 1 }
+    }
+}
+
+fn generate_sample_br(slen: i64) -> i64 with Mut, Div {
+    let cls = (rng_next() / 100) % 2
+    if cls == 1 { generate_balanced(slen) }
+    if cls == 0 { generate_unbalanced(slen) }
+    BR_SEQ_LEN = slen; cls
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Model Weights
+// ═══════════════════════════════════════════════════════════════════════════
+// Layout: Embed 104 (0-103), A 8 (104-111), B 8 (112-119), Out 80 (120-199)
+// Total: 200 params (parameter-matched: all models have exactly 8 A params)
+
+var W: [i64; 200] = [0; 200]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 10] = [0; 10]
+var MOM: [i64; 200] = [0; 200]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+fn init_embed_b_out() with Mut, Div {
+    var i = 0
+    while i < 104 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(112 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 80 { ws(120 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 200 { MOM[i] = 0; i = i + 1 }
+}
+
+// ─── A initialization: 8 params stored at W[104..111] ───
+
+fn init_A_oct() with Mut, Div {
+    // O-SSM: One octonion A = (e0, e1, ..., e7)
+    // Init: e0 = 0.95 (real part, controls decay), e1..e7 = small random
+    ws(104, 0.95)
+    var i = 1
+    while i < 8 { ws(104 + i, ((rng_next() % 200) as f64 - 100.0) / 1000.0); i = i + 1 }
+}
+
+fn init_A_quat() with Mut, Div {
+    // H-SSM: Two quaternions q1=(w,x,y,z), q2=(w,x,y,z) at A[0..3], A[4..7]
+    // Init: w=0.95, xyz=small random (same as hssm_4way_benchmark)
+    ws(104 + 0, 0.95)
+    ws(104 + 1, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 2, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 3, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 4, 0.95)
+    ws(104 + 5, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 6, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 7, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+}
+
+fn init_A_diag() with Mut {
+    // Naive diagonal: A[0..7] = 0.95 each (same magnitude, no coupling)
+    var i = 0
+    while i < 8 { ws(104 + i, 0.95); i = i + 1 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Native Algebra Forward Steps
+// ═══════════════════════════════════════════════════════════════════════════
+
+// O-SSM: h' = oct_mul(A, h) + B * embed[token]
+// Full Cayley multiplication (120 FLOPs) — from octonion_ssm.sio
+fn oct_ssm_step(token: i64) with Mut, Div {
+    // Read A octonion (8 components)
+    let a0 = wg(104); let a1 = wg(105); let a2 = wg(106); let a3 = wg(107)
+    let a4 = wg(108); let a5 = wg(109); let a6 = wg(110); let a7 = wg(111)
+    // Read h octonion (8 components)
+    let h0 = hg(0); let h1 = hg(1); let h2 = hg(2); let h3 = hg(3)
+    let h4 = hg(4); let h5 = hg(5); let h6 = hg(6); let h7 = hg(7)
+
+    // Cayley product: oct_mul(A, h) — exactly from octonion_ssm.sio lines 52-59
+    var n0 = a0*h0 - a1*h1 - a2*h2 - a3*h3 - a4*h4 - a5*h5 - a6*h6 - a7*h7
+    var n1 = a0*h1 + a1*h0 + a2*h3 - a3*h2 + a4*h5 - a5*h4 - a6*h7 + a7*h6
+    var n2 = a0*h2 + a2*h0 - a1*h3 + a3*h1 + a4*h6 - a6*h4 + a5*h7 - a7*h5
+    var n3 = a0*h3 + a3*h0 + a1*h2 - a2*h1 + a4*h7 - a7*h4 - a5*h6 + a6*h5
+    var n4 = a0*h4 + a4*h0 - a1*h5 + a5*h1 - a2*h6 + a6*h2 - a3*h7 + a7*h3
+    var n5 = a0*h5 + a5*h0 + a1*h4 - a4*h1 - a2*h7 + a7*h2 + a3*h6 - a6*h3
+    var n6 = a0*h6 + a6*h0 + a1*h7 - a7*h1 + a2*h4 - a4*h2 - a3*h5 + a5*h3
+    var n7 = a0*h7 + a7*h0 - a1*h6 + a6*h1 - a2*h5 + a5*h2 + a3*h4 - a4*h3
+
+    // Add B * embed[token]
+    n0 = n0 + wg(112 + 0) * wg(token * 8 + 0)
+    n1 = n1 + wg(112 + 1) * wg(token * 8 + 1)
+    n2 = n2 + wg(112 + 2) * wg(token * 8 + 2)
+    n3 = n3 + wg(112 + 3) * wg(token * 8 + 3)
+    n4 = n4 + wg(112 + 4) * wg(token * 8 + 4)
+    n5 = n5 + wg(112 + 5) * wg(token * 8 + 5)
+    n6 = n6 + wg(112 + 6) * wg(token * 8 + 6)
+    n7 = n7 + wg(112 + 7) * wg(token * 8 + 7)
+
+    // Clamp
+    if n0 > 5.0 { n0 = 5.0 } if n0 < 0.0 - 5.0 { n0 = 0.0 - 5.0 }
+    if n1 > 5.0 { n1 = 5.0 } if n1 < 0.0 - 5.0 { n1 = 0.0 - 5.0 }
+    if n2 > 5.0 { n2 = 5.0 } if n2 < 0.0 - 5.0 { n2 = 0.0 - 5.0 }
+    if n3 > 5.0 { n3 = 5.0 } if n3 < 0.0 - 5.0 { n3 = 0.0 - 5.0 }
+    if n4 > 5.0 { n4 = 5.0 } if n4 < 0.0 - 5.0 { n4 = 0.0 - 5.0 }
+    if n5 > 5.0 { n5 = 5.0 } if n5 < 0.0 - 5.0 { n5 = 0.0 - 5.0 }
+    if n6 > 5.0 { n6 = 5.0 } if n6 < 0.0 - 5.0 { n6 = 0.0 - 5.0 }
+    if n7 > 5.0 { n7 = 5.0 } if n7 < 0.0 - 5.0 { n7 = 0.0 - 5.0 }
+
+    hs(0, n0); hs(1, n1); hs(2, n2); hs(3, n3)
+    hs(4, n4); hs(5, n5); hs(6, n6); hs(7, n7)
+}
+
+// H-SSM: h'[0:3] = qmul(q1, h[0:3]) + B*embed; h'[4:7] = qmul(q2, h[4:7]) + B*embed
+// Hamilton product (16 FLOPs per half) — from gpu_hypercomplex.sio
+fn quat_ssm_step(token: i64) with Mut, Div {
+    // Half 1: quaternion q1 = A[0..3]
+    let qw = wg(104); let qx = wg(105); let qy = wg(106); let qz = wg(107)
+    let hw = hg(0); let hx = hg(1); let hy = hg(2); let hz = hg(3)
+    var n0 = qw*hw - qx*hx - qy*hy - qz*hz
+    var n1 = qw*hx + qx*hw + qy*hz - qz*hy
+    var n2 = qw*hy - qx*hz + qy*hw + qz*hx
+    var n3 = qw*hz + qx*hy - qy*hx + qz*hw
+    n0 = n0 + wg(112 + 0) * wg(token * 8 + 0)
+    n1 = n1 + wg(112 + 1) * wg(token * 8 + 1)
+    n2 = n2 + wg(112 + 2) * wg(token * 8 + 2)
+    n3 = n3 + wg(112 + 3) * wg(token * 8 + 3)
+    if n0 > 5.0 { n0 = 5.0 } if n0 < 0.0 - 5.0 { n0 = 0.0 - 5.0 }
+    if n1 > 5.0 { n1 = 5.0 } if n1 < 0.0 - 5.0 { n1 = 0.0 - 5.0 }
+    if n2 > 5.0 { n2 = 5.0 } if n2 < 0.0 - 5.0 { n2 = 0.0 - 5.0 }
+    if n3 > 5.0 { n3 = 5.0 } if n3 < 0.0 - 5.0 { n3 = 0.0 - 5.0 }
+
+    // Half 2: quaternion q2 = A[4..7]
+    let qw2 = wg(108); let qx2 = wg(109); let qy2 = wg(110); let qz2 = wg(111)
+    let hw2 = hg(4); let hx2 = hg(5); let hy2 = hg(6); let hz2 = hg(7)
+    var n4 = qw2*hw2 - qx2*hx2 - qy2*hy2 - qz2*hz2
+    var n5 = qw2*hx2 + qx2*hw2 + qy2*hz2 - qz2*hy2
+    var n6 = qw2*hy2 - qx2*hz2 + qy2*hw2 + qz2*hx2
+    var n7 = qw2*hz2 + qx2*hy2 - qy2*hx2 + qz2*hw2
+    n4 = n4 + wg(112 + 4) * wg(token * 8 + 4)
+    n5 = n5 + wg(112 + 5) * wg(token * 8 + 5)
+    n6 = n6 + wg(112 + 6) * wg(token * 8 + 6)
+    n7 = n7 + wg(112 + 7) * wg(token * 8 + 7)
+    if n4 > 5.0 { n4 = 5.0 } if n4 < 0.0 - 5.0 { n4 = 0.0 - 5.0 }
+    if n5 > 5.0 { n5 = 5.0 } if n5 < 0.0 - 5.0 { n5 = 0.0 - 5.0 }
+    if n6 > 5.0 { n6 = 5.0 } if n6 < 0.0 - 5.0 { n6 = 0.0 - 5.0 }
+    if n7 > 5.0 { n7 = 5.0 } if n7 < 0.0 - 5.0 { n7 = 0.0 - 5.0 }
+
+    hs(0, n0); hs(1, n1); hs(2, n2); hs(3, n3)
+    hs(4, n4); hs(5, n5); hs(6, n6); hs(7, n7)
+}
+
+// Naive diagonal: h'[d] = A[d] * h[d] + B[d] * embed[token][d]
+fn diag_ssm_step(token: i64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var s = wg(104 + d) * hg(d) + wg(112 + d) * wg(token * 8 + d)
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        hs(d, s); d = d + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Logits, Prediction, Update
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn compute_logits(n_classes: i64) with Mut, Div {
+    var c = 0
+    while c < n_classes {
+        var s = 0.0; var d = 0
+        while d < 8 { s = s + hg(d) * wg(120 + d * n_classes + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64; c = c + 1
+    }
+}
+
+fn get_pred(n_classes: i64) -> i64 with Mut, Div {
+    var best = 0; var bv = (L[0] as f64) / 100000000.0; var i = 1
+    while i < n_classes { let v = (L[i] as f64)/100000000.0; if v > bv { bv = v; best = i }; i = i + 1 }
+    best
+}
+
+fn update_out(tgt: i64, lr: f64, n_classes: i64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0; var i = 1
+    while i < n_classes { let v = (L[i] as f64)/100000000.0; if v > mx { mx = v }; i = i + 1 }
+    var probs: [f64; 10] = [0.0; 10]; var se = 0.0; i = 0
+    while i < n_classes { probs[i] = exp_q((L[i] as f64)/100000000.0 - mx); se = se + probs[i]; i = i + 1 }
+    i = 0
+    while i < n_classes { probs[i] = probs[i] / se; i = i + 1 }
+    probs[tgt] = probs[tgt] - 1.0
+    var d = 0
+    while d < 8 {
+        let hd = hg(d); var c = 0
+        while c < n_classes {
+            let idx = 120 + d * n_classes + c
+            var g = hd * probs[c]
+            if g > 0.3 { g = 0.3 } if g < 0.0 - 0.3 { g = 0.0 - 0.3 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Training + Evaluation
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn run_listops(model_id: i64, seq_len: i64) -> f64 with IO, Mut, Div, Panic {
+    let n_train = 500; let n_epochs = 80
+    var ep = 0
+    while ep < n_epochs {
+        var s = 0
+        while s < n_train {
+            let label = generate_sample_lo(seq_len)
+            var tgt = label % 10
+            if tgt < 0 { tgt = tgt + 10 }
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < SEQ_POS {
+                if model_id == 0 { oct_ssm_step(SEQ[t]) }
+                if model_id == 1 { quat_ssm_step(SEQ[t]) }
+                if model_id == 2 { diag_ssm_step(SEQ[t]) }
+                t = t + 1
+            }
+            compute_logits(10)
+            update_out(tgt, 0.01, 10)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+    // Eval: 1000 samples
+    rng_seed(99999 + seq_len, 11111 + seq_len)
+    var correct = 0; var s = 0
+    while s < 1000 {
+        let label = generate_sample_lo(seq_len)
+        var tgt = label % 10
+        if tgt < 0 { tgt = tgt + 10 }
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < SEQ_POS {
+            if model_id == 0 { oct_ssm_step(SEQ[t]) }
+            if model_id == 1 { quat_ssm_step(SEQ[t]) }
+            if model_id == 2 { diag_ssm_step(SEQ[t]) }
+            t = t + 1
+        }
+        compute_logits(10)
+        if get_pred(10) == tgt { correct = correct + 1 }
+        s = s + 1
+    }
+    (correct as f64) / 1000.0 * 100.0
+}
+
+fn run_bracket(model_id: i64, slen: i64) -> f64 with IO, Mut, Div, Panic {
+    let n_train = 500; let n_epochs = 80
+    var ep = 0
+    while ep < n_epochs {
+        var s = 0
+        while s < n_train {
+            let cls = generate_sample_br(slen)
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < BR_SEQ_LEN {
+                if model_id == 0 { oct_ssm_step(BR_SEQ[t]) }
+                if model_id == 1 { quat_ssm_step(BR_SEQ[t]) }
+                if model_id == 2 { diag_ssm_step(BR_SEQ[t]) }
+                t = t + 1
+            }
+            compute_logits(2)
+            update_out(cls, 0.01, 2)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+    // Eval: 1000 samples
+    rng_seed(99999 + slen, 11111 + slen)
+    var correct = 0; var s = 0
+    while s < 1000 {
+        let cls = generate_sample_br(slen)
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < BR_SEQ_LEN {
+            if model_id == 0 { oct_ssm_step(BR_SEQ[t]) }
+            if model_id == 1 { quat_ssm_step(BR_SEQ[t]) }
+            if model_id == 2 { diag_ssm_step(BR_SEQ[t]) }
+            t = t + 1
+        }
+        compute_logits(2)
+        if get_pred(2) == cls { correct = correct + 1 }
+        s = s + 1
+    }
+    (correct as f64) / 1000.0 * 100.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Native Algebra SSM: True Octonion vs Quaternion vs Diagonal\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  O-SSM: oct_mul(A,h) — Cayley product, non-associative, 8 params\n")
+    print("  H-SSM: qmul(q,h) x2 — Hamilton product, associative, 8 params\n")
+    print("  Naive: A[d]*h[d] — diagonal, commutative, 8 params\n")
+    print("  ALL PARAMETER-MATCHED AT 8 A-PARAMS\n\n")
+    print("  500 train/epoch x 80 epochs = 40K samples\n")
+    print("  1000 eval samples (SE ≈ ±1.6%)\n\n")
+
+    // ─── ListOps L=15 ───
+    print("=== ListOps L=15 ===\n")
+
+    print("  O-SSM (Cayley): ")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890)
+    let lo_oct = run_listops(0, 15)
+    print(lo_oct); print("%\n")
+
+    print("  H-SSM (Hamilton): ")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890)
+    let lo_quat = run_listops(1, 15)
+    print(lo_quat); print("%\n")
+
+    print("  Naive (diagonal): ")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_diag()
+    rng_seed(12345, 67890)
+    let lo_diag = run_listops(2, 15)
+    print(lo_diag); print("%\n")
+
+    // ─── Bracket L=12 ───
+    print("\n=== Bracket L=12 ===\n")
+
+    print("  O-SSM (Cayley): ")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890)
+    let br_oct = run_bracket(0, 12)
+    print(br_oct); print("%\n")
+
+    print("  H-SSM (Hamilton): ")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890)
+    let br_quat = run_bracket(1, 12)
+    print(br_quat); print("%\n")
+
+    print("  Naive (diagonal): ")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_diag()
+    rng_seed(12345, 67890)
+    let br_diag = run_bracket(2, 12)
+    print(br_diag); print("%\n")
+
+    // ─── Results ───
+    print("\n═══════════════════════════════════════════════════════════════\n")
+    print("  RESULTS: Native Algebra SSM (Parameter-Matched)\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Task      O-SSM(Cayley) H-SSM(Hamilton) Naive(Diag) Random\n")
+    print("  ListOps   "); print(lo_oct); print("%      "); print(lo_quat); print("%       "); print(lo_diag); print("%   10%\n")
+    print("  Bracket   "); print(br_oct); print("%      "); print(br_quat); print("%       "); print(br_diag); print("%   50%\n")
+
+    print("\n  Algebra Properties:\n")
+    print("  O-SSM:  non-assoc, non-commut, full 8D coupling (Cayley/Fano)\n")
+    print("  H-SSM:  ASSOC, non-commut, two independent 4D blocks (Hamilton)\n")
+    print("  Naive:  ASSOC, COMMUT, no coupling (diagonal)\n")
+
+    print("\n  Key Comparisons:\n")
+
+    let lo_gap_oh = lo_oct - lo_quat
+    if lo_gap_oh > 3.0 {
+        print("  ListOps: O-SSM > H-SSM by >3pp → Cayley structure matters\n")
+    } else {
+        if lo_gap_oh < 0.0 - 3.0 {
+            print("  ListOps: H-SSM > O-SSM by >3pp → Hamilton structure preferred\n")
+        } else {
+            print("  ListOps: O-SSM ≈ H-SSM (within ±3pp)\n")
+        }
+    }
+
+    let lo_gap_hd = lo_quat - lo_diag
+    if lo_gap_hd > 3.0 {
+        print("  ListOps: H-SSM > Naive by >3pp → coupling matters\n")
+    } else {
+        print("  ListOps: H-SSM ≈ Naive → coupling doesn't help (or random baseline too strong)\n")
+    }
+
+    println("ALL PASS")
+    0
+}

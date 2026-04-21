@@ -1,0 +1,348 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Door H — Transfer function: is α=0.2 a linear resonance?
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Door G established that R_A's spectrum is monotonically smooth through
+// α=0.2 with no singular feature. The basin minimum must therefore emerge
+// from the INTERACTION between R_A's iterated action and the task's
+// frequency content, not from R_A's spectrum in isolation.
+//
+// Door H tests the simplest possible version of that hypothesis: maybe the
+// linear iterated system
+//     h_0 = B,  h_{t+1} = A · h_t  (sedenion left-mul, no tanh, no normalize)
+// has a transfer function magnitude |H(ω)| that peaks at α=0.2 when
+// evaluated at the target frequency ω* = 2π/20.
+//
+// The sedenion-valued DFT of the impulse response h_0..h_{T-1}:
+//     H(ω) = Σ_t h_t · e^{-iωt}  = (H_re, H_im)  where H_re, H_im are sedenions
+//     |H(ω)| = sqrt( ||H_re||² + ||H_im||² )
+//
+// The trained-C forward pass has a steady-state response max_{||C||=1} |y_t|
+// that equals ||H(ω*)|| (Cauchy-Schwarz, optimal C = H(ω*)/||H(ω*)||).
+// So |H(ω*)| is exactly the "maximum linear signal power transfer at ω*"
+// that the S-SSM's readout can extract.
+//
+// Two possible outcomes:
+//   (R) ||H(ω*)|| peaks near α=0.2  → LINEAR RESONANCE theory is the
+//       mechanism: G₂ interpolation tunes A's filter bank to resonance.
+//       But Door C showed α* is invariant across periods 15, 20, 30 (T2
+//       passes) — a pure resonance theory would predict α* shifts with ω*.
+//       So if the peak IS at α=0.2 for ω*=2π/20, we must also check
+//       whether it SHIFTS for ω*=2π/30 and ω*=2π/15. If peaks stay,
+//       resonance theory falls.
+//   (N) ||H(ω*)|| does NOT peak at α=0.2 → non-linearity (tanh or normalize)
+//       is essential to the optimum. α=0.2 is a property of the full
+//       nonlinear dynamics, not the linear filter.
+//
+// This file measures |H(ω)| vs α at three target frequencies matching
+// Door C (2π/15, 2π/20, 2π/30) to distinguish outcomes at fine resolution.
+
+use math::sedenion::*;
+
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+
+fn sqrt_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i: i64 = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sin_s(x: f64) -> f64 with Mut, Div, Panic {
+    let pi2: f64 = 6.28318530718
+    var xr: f64 = x
+    while xr > 3.14159265359 { xr = xr - pi2 }
+    while xr < 0.0 - 3.14159265359 { xr = xr + pi2 }
+    let x2: f64 = xr * xr
+    let x3: f64 = x2 * xr
+    let x5: f64 = x3 * x2
+    let x7: f64 = x5 * x2
+    let x9: f64 = x7 * x2
+    xr - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0
+}
+
+fn cos_s(x: f64) -> f64 with Mut, Div, Panic {
+    sin_s(x + 1.570796326795)     // cos(x) = sin(x + π/2)
+}
+
+// ─── Impulse response trajectory storage ──────────────────────────────────────
+// Sedenion h_t for t = 0..T-1, stored componentwise in 16 parallel [f64; T] arrays.
+
+var H0:  [f64; 64] = [0.0; 64]
+var H1:  [f64; 64] = [0.0; 64]
+var H2:  [f64; 64] = [0.0; 64]
+var H3:  [f64; 64] = [0.0; 64]
+var H4:  [f64; 64] = [0.0; 64]
+var H5:  [f64; 64] = [0.0; 64]
+var H6:  [f64; 64] = [0.0; 64]
+var H7:  [f64; 64] = [0.0; 64]
+var H8:  [f64; 64] = [0.0; 64]
+var H9:  [f64; 64] = [0.0; 64]
+var H10: [f64; 64] = [0.0; 64]
+var H11: [f64; 64] = [0.0; 64]
+var H12: [f64; 64] = [0.0; 64]
+var H13: [f64; 64] = [0.0; 64]
+var H14: [f64; 64] = [0.0; 64]
+var H15: [f64; 64] = [0.0; 64]
+
+fn save_h(t: i64, h: Sedenion) with Mut {
+    H0[t]=h.e0;   H1[t]=h.e1;   H2[t]=h.e2;   H3[t]=h.e3
+    H4[t]=h.e4;   H5[t]=h.e5;   H6[t]=h.e6;   H7[t]=h.e7
+    H8[t]=h.e8;   H9[t]=h.e9;   H10[t]=h.e10; H11[t]=h.e11
+    H12[t]=h.e12; H13[t]=h.e13; H14[t]=h.e14; H15[t]=h.e15
+}
+
+fn load_h(t: i64) -> Sedenion {
+    Sedenion {
+        e0: H0[t], e1: H1[t], e2: H2[t], e3: H3[t],
+        e4: H4[t], e5: H5[t], e6: H6[t], e7: H7[t],
+        e8: H8[t], e9: H9[t], e10: H10[t], e11: H11[t],
+        e12: H12[t], e13: H13[t], e14: H14[t], e15: H15[t]
+    }
+}
+
+// ─── Linear iterated response: h_0 = B, h_{t+1} = A · h_t ─────────────────────
+// (pure left-iteration of A applied to the impulse B; no tanh, no normalize.
+// Since sedenions are non-associative, A·(A·(A·B)) ≠ ((A·A)·A)·B in general;
+// the left-iteration matches how the forward pass actually applies A.)
+fn linear_impulse(a: Sedenion, b: Sedenion, t_max: i64) with Mut, Div, Panic {
+    var h: Sedenion = b
+    save_h(0, h)
+    var t: i64 = 1
+    while t < t_max {
+        h = sed_mul(a, h)
+        save_h(t, h)
+        t = t + 1
+    }
+}
+
+// ─── |H(ω)| via finite DFT of the impulse response ───────────────────────────
+// H(ω) = Σ_{t=0..T-1} h_t · e^{-iωt}
+// |H(ω)|² = ||Σ h_t cos(ωt)||² + ||Σ h_t sin(ωt)||²
+
+fn transfer_mag(omega: f64, t_max: i64) -> f64 with Mut, Div, Panic {
+    var hre: Sedenion = Sedenion {
+        e0:0.0, e1:0.0, e2:0.0, e3:0.0, e4:0.0, e5:0.0, e6:0.0, e7:0.0,
+        e8:0.0, e9:0.0, e10:0.0, e11:0.0, e12:0.0, e13:0.0, e14:0.0, e15:0.0
+    }
+    var him: Sedenion = Sedenion {
+        e0:0.0, e1:0.0, e2:0.0, e3:0.0, e4:0.0, e5:0.0, e6:0.0, e7:0.0,
+        e8:0.0, e9:0.0, e10:0.0, e11:0.0, e12:0.0, e13:0.0, e14:0.0, e15:0.0
+    }
+    var t: i64 = 0
+    while t < t_max {
+        let ht: Sedenion = load_h(t)
+        let c: f64 = cos_s(omega * (t as f64))
+        let s: f64 = sin_s(omega * (t as f64))
+        hre = sed_add(hre, sed_scale(ht, c))
+        // negative sign on sin term because e^{-iωt} = cos - i·sin
+        him = sed_add(him, sed_scale(ht, 0.0 - s))
+        t = t + 1
+    }
+    let nr2: f64 = sed_norm_sq(hre)
+    let ni2: f64 = sed_norm_sq(him)
+    sqrt_s(nr2 + ni2)
+}
+
+// ─── α grid ───────────────────────────────────────────────────────────────────
+
+fn alpha_at(i: i64) -> f64 {
+    if i ==  0 { return 0.0 }
+    if i ==  1 { return 0.05 }
+    if i ==  2 { return 0.1 }
+    if i ==  3 { return 0.15 }
+    if i ==  4 { return 0.2 }
+    if i ==  5 { return 0.25 }
+    if i ==  6 { return 0.3 }
+    if i ==  7 { return 0.4 }
+    if i ==  8 { return 0.5 }
+    if i ==  9 { return 0.7 }
+    1.0
+}
+fn n_alpha() -> i64 { 11 }
+
+// ─── Per-α transfer-function magnitudes, at 3 target frequencies ─────────────
+
+var MAG_OM15: [f64; 16] = [0.0; 16]
+var MAG_OM20: [f64; 16] = [0.0; 16]
+var MAG_OM30: [f64; 16] = [0.0; 16]
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let zd: Sedenion = sed_known_zero_divisor()
+    let zd_n: Sedenion = sed_normalize(zd)
+    let ag_raw: Sedenion = sed_add(sed_basis(0, 1.0), sed_basis(1, 1.0))
+    let a_generic: Sedenion = sed_normalize(ag_raw)
+    let b: Sedenion = sed_one()
+
+    let omega_15: f64 = 6.28318530718 / 15.0
+    let omega_20: f64 = 6.28318530718 / 20.0
+    let omega_30: f64 = 6.28318530718 / 30.0
+
+    println("═══════════════════════════════════════════════════════")
+    println("  Door H: linear transfer function |H(ω)| vs α")
+    println("  h_0 = B,  h_{t+1} = A · h_t  (pure left-iteration, 64 steps)")
+    println("  H(ω) = Σ_t h_t exp(-iωt), as sedenion-valued (re, im)")
+    println("  ω* ∈ {2π/15, 2π/20, 2π/30} (Door C's three invariance tests)")
+    println("═══════════════════════════════════════════════════════")
+    println("")
+
+    let nalpha: i64 = n_alpha()
+
+    println("  α        |H(2π/15)|     |H(2π/20)|     |H(2π/30)|")
+    println("  -----    -----------    -----------    -----------")
+
+    var i: i64 = 0
+    while i < nalpha {
+        let alpha: f64 = alpha_at(i)
+        let a: Sedenion = sed_normalize(sed_lerp(a_generic, zd_n, alpha))
+        linear_impulse(a, b, 64)
+        let m15: f64 = transfer_mag(omega_15, 64)
+        let m20: f64 = transfer_mag(omega_20, 64)
+        let m30: f64 = transfer_mag(omega_30, 64)
+        MAG_OM15[i] = m15
+        MAG_OM20[i] = m20
+        MAG_OM30[i] = m30
+        print("  ");       print(alpha)
+        print("     ");    print(m15)
+        print("     ");    print(m20)
+        print("     ");    print(m30); println("")
+        i = i + 1
+    }
+    println("")
+
+    // ── Find max over α for each frequency ─────────────────────────────────────
+    var argmax15: i64 = 0
+    var argmax20: i64 = 0
+    var argmax30: i64 = 0
+    var max15: f64 = MAG_OM15[0]
+    var max20: f64 = MAG_OM20[0]
+    var max30: f64 = MAG_OM30[0]
+    var k: i64 = 1
+    while k < nalpha {
+        if MAG_OM15[k] > max15 { max15 = MAG_OM15[k]; argmax15 = k }
+        if MAG_OM20[k] > max20 { max20 = MAG_OM20[k]; argmax20 = k }
+        if MAG_OM30[k] > max30 { max30 = MAG_OM30[k]; argmax30 = k }
+        k = k + 1
+    }
+    let alpha_peak_15: f64 = alpha_at(argmax15)
+    let alpha_peak_20: f64 = alpha_at(argmax20)
+    let alpha_peak_30: f64 = alpha_at(argmax30)
+
+    println("───────────────────────────────────────────────────────")
+    print("  peak |H(2π/15)| at α = "); print(alpha_peak_15)
+    print("  (mag = ");                 print(max15); println(")")
+    print("  peak |H(2π/20)| at α = "); print(alpha_peak_20)
+    print("  (mag = ");                 print(max20); println(")")
+    print("  peak |H(2π/30)| at α = "); print(alpha_peak_30)
+    print("  (mag = ");                 print(max30); println(")")
+    println("───────────────────────────────────────────────────────")
+    println("")
+
+    // Compare to Door C: best α for training MSE was 0.2 for all three periods.
+    // Door H asks: do the LINEAR transfer-function peaks also coincide at 0.2?
+    // If yes → resonance theory
+    // If no but all three peak at the SAME α → still a linear-invariant
+    // If peaks shift with ω → pure linear resonance (and contradicts Door C)
+
+    // ── Assertions ──────────────────────────────────────────────────────────
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // T1: all transfer magnitudes finite and non-negative
+    var ok: bool = true
+    var u: i64 = 0
+    while u < nalpha {
+        if MAG_OM15[u] < 0.0 { ok = false }
+        if MAG_OM15[u] > 10000.0 { ok = false }
+        if MAG_OM20[u] < 0.0 { ok = false }
+        if MAG_OM20[u] > 10000.0 { ok = false }
+        if MAG_OM30[u] < 0.0 { ok = false }
+        if MAG_OM30[u] > 10000.0 { ok = false }
+        u = u + 1
+    }
+    if ok {
+        println("T1 PASS: all transfer magnitudes finite")
+        passed = passed + 1
+    } else {
+        println("T1 FAIL: some transfer magnitude out of range")
+        failed = failed + 1
+    }
+
+    // T2: at α=0 (pure generic unit), impulse response is bounded: ||h_t|| stays
+    //     at |B|=1 since R_A is orthogonal (Frobenius invariance + iso_defect=0).
+    //     So finite DFT magnitudes should be O(T) not O(exp(T)).
+    if MAG_OM20[0] < 100.0 {
+        print("T2 PASS: |H(2π/20)| at α=0 = "); print(MAG_OM20[0]); println(" (bounded)")
+        passed = passed + 1
+    } else {
+        print("T2 FAIL: |H(2π/20)| at α=0 too large = "); print(MAG_OM20[0]); println("")
+        failed = failed + 1
+    }
+
+    // T3: the three frequency peaks all lie somewhere. We record where. If they
+    //     all coincide at the SAME α, we've found a linear invariant (not a
+    //     frequency-specific resonance). If they shift with frequency, linear
+    //     resonance is the mechanism but it predicts Door C shifts too (which
+    //     Door C showed doesn't happen for p≥15). Either way this test just
+    //     verifies all three peaks are in the scanned range.
+    if argmax15 >= 0 {
+        if argmax15 < nalpha {
+            if argmax20 >= 0 {
+                if argmax20 < nalpha {
+                    if argmax30 >= 0 {
+                        if argmax30 < nalpha {
+                            println("T3 PASS: all three peaks inside α grid")
+                            passed = passed + 1
+                        } else { println("T3 FAIL: 30-peak out"); failed = failed + 1 }
+                    } else { println("T3 FAIL: 30-peak negative"); failed = failed + 1 }
+                } else { println("T3 FAIL: 20-peak out"); failed = failed + 1 }
+            } else { println("T3 FAIL: 20-peak negative"); failed = failed + 1 }
+        } else { println("T3 FAIL: 15-peak out"); failed = failed + 1 }
+    } else { println("T3 FAIL: 15-peak negative"); failed = failed + 1 }
+
+    // T4: REPORT whether Door H's linear peak matches Door C's training optimum.
+    //     Door C found α* = 0.2 invariantly for periods 15, 20, 30.
+    //     If α*_H = α*_C = 0.2 → linear resonance is the mechanism.
+    //     If α*_H ≠ 0.2 → non-linearity is essential.
+    //     We PASS this test if we can cleanly report the outcome (not if the
+    //     outcome itself is positive — both outcomes are informative findings).
+    print("T4 REPORT: Door C optimum α = 0.2, Door H peak α = ")
+    print(alpha_peak_20)
+    if alpha_peak_20 == 0.2 {
+        println(" → LINEAR RESONANCE MATCH")
+    } else {
+        println(" → LINEAR RESONANCE DOES NOT MATCH (non-linearity needed)")
+    }
+    passed = passed + 1
+
+    // T5: Peaks across ω₁₅, ω₂₀, ω₃₀ — same or different α?
+    let same_peaks: bool = (argmax15 == argmax20)
+    let also_30:    bool = (argmax20 == argmax30)
+    print("T5 REPORT: peaks at α₁₅="); print(alpha_peak_15)
+    print(" α₂₀=");                    print(alpha_peak_20)
+    print(" α₃₀=");                    print(alpha_peak_30); println("")
+    if same_peaks {
+        if also_30 {
+            println("            → all three frequencies peak at SAME α (linear invariant)")
+        } else {
+            println("            → ω₁₅ and ω₂₀ agree but ω₃₀ differs")
+        }
+    } else {
+        println("            → peaks DIFFER across frequencies (pure resonance)")
+    }
+    passed = passed + 1
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}

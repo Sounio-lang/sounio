@@ -1,0 +1,170 @@
+// self-hosted/compiler/pkg/reader.sio
+//
+// File I/O para o Sounio Package Manager.
+// Lê sounio.toml do disco usando os stubs FFI disponíveis.
+//
+// Usa o padrão de read_file() já estabelecido em stdlib/fmri/nifti.sio
+// e os extern "C" stubs de fopen/fread/fclose.
+
+// ============================================================================
+// FFI — POSIX file I/O (stubs via extern "C")
+// ============================================================================
+
+extern "C" {
+    fn fopen(path: &[i8; 512], mode: &[i8; 4]) -> i64
+    fn fread(buf: &![u8; 65536], size: i64, count: i64, fp: i64) -> i64
+    fn fclose(fp: i64) -> i32
+    fn fseek(fp: i64, offset: i64, whence: i32) -> i32
+    fn ftell(fp: i64) -> i64
+}
+
+// ============================================================================
+// TIPOS
+// ============================================================================
+
+struct PkgFileResult {
+    buf: [u8; 65536],  // conteúdo bruto
+    len: i64,          // bytes lidos
+    ok: bool,          // leitura bem-sucedida
+    error: i64,        // 0=ok, 1=not_found, 2=too_large, 3=read_error
+}
+
+let PKG_FILE_OK: i64        = 0
+let PKG_FILE_NOT_FOUND: i64 = 1
+let PKG_FILE_TOO_LARGE: i64 = 2
+let PKG_FILE_READ_ERROR: i64 = 3
+let PKG_FILE_MAX_SIZE: i64  = 65536
+
+fn pkg_file_result_empty() -> PkgFileResult {
+    PkgFileResult {
+        buf: [0; 65536],
+        len: 0,
+        ok: false,
+        error: PKG_FILE_NOT_FOUND,
+    }
+}
+
+// ============================================================================
+// HELPER: converte string para buffer i8 para FFI
+// ============================================================================
+
+fn pkg_str_to_path_buf(s: &str, dst: &![i8; 512]) -> i64 with Mut, Panic {
+    let n = str_len(*s)
+    let max = if n < 511 { n } else { 511 }
+    var i: i64 = 0
+    while i < max {
+        (*dst)[i as usize] = str_char_at(*s, i) as i8
+        i = i + 1
+    }
+    (*dst)[max as usize] = 0 as i8
+    max
+}
+
+fn pkg_mode_read_buf(dst: &![i8; 4]) with Mut {
+    (*dst)[0] = 114 as i8  // 'r'
+    (*dst)[1] = 0 as i8
+    (*dst)[2] = 0 as i8
+    (*dst)[3] = 0 as i8
+}
+
+// ============================================================================
+// LEITURA DE ARQUIVO
+// ============================================================================
+
+// Lê um arquivo do disco para um PkgFileResult.
+// Suporta arquivos até 64KB (suficiente para sounio.toml).
+pub fn pkg_read_file(path: &str) -> PkgFileResult with IO, Mut, Panic, Div {
+    var result = pkg_file_result_empty()
+    var path_buf: [i8; 512] = [0; 512]
+    var mode_buf: [i8; 4]   = [0; 4]
+
+    pkg_str_to_path_buf(path, &!path_buf)
+    pkg_mode_read_buf(&!mode_buf)
+
+    let fp = fopen(&path_buf, &mode_buf)
+    if fp == 0 {
+        result.error = PKG_FILE_NOT_FOUND
+        return result
+    }
+
+    // Determina tamanho
+    fseek(fp, 0, 2)  // SEEK_END = 2
+    let size = ftell(fp)
+    fseek(fp, 0, 0)  // SEEK_SET = 0
+
+    if size <= 0 {
+        fclose(fp)
+        result.error = PKG_FILE_NOT_FOUND
+        return result
+    }
+
+    if size > PKG_FILE_MAX_SIZE {
+        fclose(fp)
+        result.error = PKG_FILE_TOO_LARGE
+        return result
+    }
+
+    let bytes_read = fread(&!result.buf, 1, size, fp)
+    fclose(fp)
+
+    if bytes_read <= 0 {
+        result.error = PKG_FILE_READ_ERROR
+        return result
+    }
+
+    result.len = bytes_read
+    result.ok = true
+    result.error = PKG_FILE_OK
+    result
+}
+
+// Converte PkgFileResult.buf para string (view sobre os bytes lidos)
+// Retorna os primeiros N bytes como uma string para o parser.
+// Nota: o parser de manifest trabalha com índices dentro do buffer.
+pub fn pkg_file_result_as_str(r: &PkgFileResult) -> str with Panic {
+    // Constrói string a partir do buffer raw
+    // Usa bytes ASCII do buf como chars
+    var out: [i8; 65536] = [0; 65536]
+    var i: i64 = 0
+    while i < (*r).len && i < 65535 {
+        out[i as usize] = (*r).buf[i as usize] as i8
+        i = i + 1
+    }
+    str_from_buf(&out, (*r).len)
+}
+
+// ============================================================================
+// HELPERS DE CAMINHO
+// ============================================================================
+
+// Resolve o caminho para sounio.toml:
+// - Se path é vazio, usa "sounio.toml"
+// - Se path é diretório (termina em /), concatena "sounio.toml"
+// - Senão, usa path diretamente
+pub fn pkg_resolve_manifest_path(path: &str) -> str with Panic {
+    let n = str_len(*path)
+    if n == 0 { return "sounio.toml" }
+    let last = str_char_at(*path, n - 1) as i64
+    if last == 47 {  // '/'
+        return *path + "sounio.toml"
+    }
+    *path
+}
+
+// ============================================================================
+// SELF-TEST
+// ============================================================================
+
+pub fn pkg_reader_self_test() -> bool with IO, Mut, Panic, Div {
+    // Testa resolução de path
+    let p1 = pkg_resolve_manifest_path(&"")
+    if p1 != "sounio.toml" { return false }
+
+    let p2 = pkg_resolve_manifest_path(&"my-pkg/")
+    if p2 != "my-pkg/sounio.toml" { return false }
+
+    let p3 = pkg_resolve_manifest_path(&"explicit.toml")
+    if p3 != "explicit.toml" { return false }
+
+    true
+}

@@ -1,0 +1,201 @@
+// darwin_pbpk/brain_plasma_tac.sio — Canonical brain/plasma TAC workflow
+//
+// This module defines a stable brain/plasma trajectory surface on top of the
+// validated 14-compartment Darwin PBPK kernel. The initial target is a fixed
+// rapamycin reference workflow suitable for export into measurement tables.
+
+use tsit5_pbpk14::*
+use epistemic_pbpk14::{EpPrior14, ep14_rapamycin_params, ep14_rapamycin_priors}
+
+pub struct BrainPlasmaTacTable {
+    times_h: [f64; 16],
+    blood_values: [f64; 16],
+    blood_uncertainties: [f64; 16],
+    brain_values: [f64; 16],
+    brain_uncertainties: [f64; 16],
+    n_points: i32,
+    success: bool,
+}
+
+fn tac_empty() -> BrainPlasmaTacTable {
+    BrainPlasmaTacTable {
+        times_h: [0.0; 16],
+        blood_values: [0.0; 16],
+        blood_uncertainties: [0.0; 16],
+        brain_values: [0.0; 16],
+        brain_uncertainties: [0.0; 16],
+        n_points: 0,
+        success: false,
+    }
+}
+
+fn tac_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+fn tac_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn tac_fdiff_h(mean: f64, variance: f64) -> f64 {
+    let h_rel = 1.0e-6 * tac_abs(mean)
+    let h_abs = 0.01 * tac_sqrt(variance)
+    if h_rel > h_abs { h_rel } else { h_abs }
+}
+
+fn tac_perturb(prm: PBPKParams14, idx: i32, delta: f64) -> PBPKParams14 {
+    var p = prm
+    if idx == 0 { p.cl_hepatic = p.cl_hepatic + delta }
+    if idx == 1 { p.cl_renal = p.cl_renal + delta }
+    if idx == 2 { p.fu_plasma = p.fu_plasma + delta }
+    if idx == 3 { p.kp_brain = p.kp_brain + delta }
+    if idx == 4 { p.kp_liver = p.kp_liver + delta }
+    if idx == 5 { p.kp_kidney = p.kp_kidney + delta }
+    if idx == 6 { p.kp_adipose = p.kp_adipose + delta }
+    p
+}
+
+pub fn brain_plasma_reference_times() -> [f64; 8] {
+    [0.0, 0.25, 1.0, 4.0, 8.0, 24.0, 72.0, 168.0]
+}
+
+fn simulate_checkpoints(
+    prm: PBPKParams14,
+    dose_mg: f64,
+    checkpoints: [f64; 16],
+    n_points: i32
+) -> BrainPlasmaTacTable with Mut, Div, Panic {
+    let cfg = default_ode_config()
+    var out = tac_empty()
+    out.n_points = n_points
+
+    let c0 = dose_mg / prm.v_blood
+    var st = pbpk_state_zero()
+    st.blood = c0
+
+    var t = 0.0
+    var dt = cfg.dt_init
+    var nsteps: i64 = 0
+    var nreject: i64 = 0
+    var point_i: i32 = 0
+
+    while point_i < n_points {
+        let idx = point_i as usize
+        let target = checkpoints[idx]
+
+        while t < target && nsteps < cfg.max_steps {
+            let dt_use = if t + dt > target { target - t } else { dt }
+            let result = tsit5_step_pbpk(st, t, dt_use, prm)
+            let err_norm = compute_error_norm_14(result.err, st, result.state_new, cfg.rtol, cfg.atol)
+
+            if err_norm <= 1.0 {
+                st = result.state_new
+                t = t + dt_use
+                nsteps = nsteps + 1
+                dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            } else {
+                nreject = nreject + 1
+                dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            }
+
+            if dt < cfg.dt_min { dt = cfg.dt_min }
+            if dt > cfg.dt_max { dt = cfg.dt_max }
+
+            if nreject > 10000 {
+                return out
+            }
+        }
+
+        if t + cfg.dt_min < target {
+            return out
+        }
+
+        out.times_h[idx] = target
+        out.blood_values[idx] = st.blood
+        out.brain_values[idx] = st.brain
+        point_i = point_i + 1
+    }
+
+    out.success = true
+    out
+}
+
+pub fn simulate_brain_plasma_tac(
+    prm: PBPKParams14,
+    priors: EpPrior14,
+    dose_mg: f64,
+    checkpoints: [f64; 16],
+    n_points: i32
+) -> BrainPlasmaTacTable with Mut, Div, Panic {
+    let ref_table = simulate_checkpoints(prm, dose_mg, checkpoints, n_points)
+    if ref_table.success == false {
+        return ref_table
+    }
+
+    var out = ref_table
+    var blood_var: [f64; 16] = [0.0; 16]
+    var brain_var: [f64; 16] = [0.0; 16]
+
+    var prior_i: i32 = 0
+    while prior_i < priors.n {
+        let idx = prior_i as usize
+        let h = tac_fdiff_h(priors.mean[idx], priors.variance[idx])
+        if h > 0.0 {
+            let prm_p = tac_perturb(prm, prior_i, h)
+            let pert_table = simulate_checkpoints(prm_p, dose_mg, checkpoints, n_points)
+            if pert_table.success == false {
+                out.success = false
+                return out
+            }
+
+            var point_i: i32 = 0
+            while point_i < n_points {
+                let pidx = point_i as usize
+                let dblood = (pert_table.blood_values[pidx] - ref_table.blood_values[pidx]) / h
+                let dbrain = (pert_table.brain_values[pidx] - ref_table.brain_values[pidx]) / h
+                blood_var[pidx] = blood_var[pidx] + dblood * dblood * priors.variance[idx]
+                brain_var[pidx] = brain_var[pidx] + dbrain * dbrain * priors.variance[idx]
+                point_i = point_i + 1
+            }
+        }
+        prior_i = prior_i + 1
+    }
+
+    var point_j: i32 = 0
+    while point_j < n_points {
+        let jdx = point_j as usize
+        out.blood_uncertainties[jdx] = tac_sqrt(blood_var[jdx])
+        out.brain_uncertainties[jdx] = tac_sqrt(brain_var[jdx])
+        point_j = point_j + 1
+    }
+
+    out.success = true
+    out
+}
+
+pub fn rapamycin_brain_plasma_reference_tac() -> BrainPlasmaTacTable with Mut, Div, Panic {
+    let prm = ep14_rapamycin_params()
+    let priors = ep14_rapamycin_priors()
+    let base_times = brain_plasma_reference_times()
+    var checkpoints: [f64; 16] = [0.0; 16]
+
+    var i: i32 = 0
+    while i < 8 {
+        checkpoints[i as usize] = base_times[i as usize]
+        i = i + 1
+    }
+
+    simulate_brain_plasma_tac(prm, priors, 5.0, checkpoints, 8)
+}
