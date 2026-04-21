@@ -8938,6 +8938,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         tc_wrong_arity(name_tok, 1, 2)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
+                    // β⁶: chain rule AD for transcendentals — capture arg shadows before call
+                    let math_s0 = EXPR_SSHADOW
+                    let math_s1 = EXPR_SSHADOW_1
+                    let math_s2 = EXPR_SSHADOW_2
+                    let math_s3 = EXPR_SSHADOW_3
+                    var math_arg_slot: i64 = -1
+                    if math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 {
+                        math_arg_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var(math_arg_slot)
+                    }
                     emit_push()
                     var math_fi: i64 = fn_find_lit("__native_sqrt_f64")
                     if src_match(ns, ne - ns, "sin") { math_fi = fn_find_lit("__native_sin_f64") }
@@ -8949,6 +8959,83 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         tc_error(name_tok, "missing native math helper")
                         emit_drop_call_args_x86(1)
                         em(0x31); em(0xc0)
+                    }
+                    // β⁶: chain rule — compute f'(arg), propagate all shadow channels
+                    EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
+                    if math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 {
+                        var math_res_slot: i64 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var(math_res_slot)
+                        // Compute f'(arg) into math_deriv_slot
+                        var math_deriv_slot: i64 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        if src_match(ns, ne - ns, "sqrt") {
+                            // f'(x) = 1/(2·sqrt(x)) = 1/(2·result)
+                            emit_imm64(4607182418800017408)  // 1.0 (IEEE 754 bits)
+                            em(0x50)
+                            emit_load_var(math_res_slot); em(0x50)
+                            emit_load_var(math_res_slot)
+                            em(0x59); emit_f64_add_from_rcx_rax_x86()  // 2·result
+                            em(0x59); emit_f64_div_from_rcx_rax_x86()  // 1/(2·result)
+                        } else if src_match(ns, ne - ns, "exp") {
+                            // f'(x) = exp(x) = result
+                            emit_load_var(math_res_slot)
+                        } else if src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") {
+                            // f'(x) = 1/arg
+                            emit_imm64(4607182418800017408)  // 1.0
+                            em(0x50)
+                            emit_load_var(math_arg_slot)
+                            em(0x59); emit_f64_div_from_rcx_rax_x86()  // 1/arg
+                        } else if src_match(ns, ne - ns, "sin") {
+                            // f'(x) = cos(arg)
+                            emit_load_var(math_arg_slot); em(0x50)
+                            let cos_fi_d = fn_find_lit("__native_cos_f64")
+                            if cos_fi_d >= 0 { emit_direct_fn_call_x86(cos_fi_d, 1) } else { emit_imm64(0) }
+                        } else if src_match(ns, ne - ns, "cos") {
+                            // f'(x) = -sin(arg): compute sin(arg) then negate sign bit
+                            emit_load_var(math_arg_slot); em(0x50)
+                            let sin_fi_d = fn_find_lit("__native_sin_f64")
+                            if sin_fi_d >= 0 { emit_direct_fn_call_x86(sin_fi_d, 1) } else { emit_imm64(0) }
+                            // negate f64 in rax: XOR sign bit
+                            em(0x48); em(0xb9)
+                            em(0x00); em(0x00); em(0x00); em(0x00); em(0x00); em(0x00); em(0x00); em(0x80)
+                            em(0x48); em(0x31); em(0xc8)  // XOR rax, rcx (rcx=0x8000000000000000)
+                        } else {
+                            emit_imm64(0)  // unknown: zero derivative
+                        }
+                        emit_store_var(math_deriv_slot)
+                        // Propagate: sens_k(f(x)) = f'(arg) · sens_k(x)
+                        if math_s0 >= 0 {
+                            let msr0 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var(math_deriv_slot); em(0x50)
+                            emit_load_var(math_s0)
+                            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+                            emit_store_var(msr0)
+                            EXPR_SSHADOW = msr0
+                        }
+                        if math_s1 >= 0 {
+                            let msr1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var(math_deriv_slot); em(0x50)
+                            emit_load_var(math_s1)
+                            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+                            emit_store_var(msr1)
+                            EXPR_SSHADOW_1 = msr1
+                        }
+                        if math_s2 >= 0 {
+                            let msr2 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var(math_deriv_slot); em(0x50)
+                            emit_load_var(math_s2)
+                            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+                            emit_store_var(msr2)
+                            EXPR_SSHADOW_2 = msr2
+                        }
+                        if math_s3 >= 0 {
+                            let msr3 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var(math_deriv_slot); em(0x50)
+                            emit_load_var(math_s3)
+                            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+                            emit_store_var(msr3)
+                            EXPR_SSHADOW_3 = msr3
+                        }
+                        emit_load_var(math_res_slot)  // restore primal result to rax
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                 }
