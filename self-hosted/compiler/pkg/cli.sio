@@ -31,6 +31,32 @@ use pkg::scorer::{
     EpistemicScore,
 }
 
+use pkg::reader::{
+    pkg_read_file,
+    pkg_resolve_manifest_path,
+    pkg_reader_self_test,
+    PKG_READ_OK, PKG_READ_NOT_FOUND, PKG_READ_TOO_LARGE,
+}
+
+use pkg::lock::{
+    sounio_lock_new,
+    lock_add_from_manifest_dep,
+    lock_emit,
+    lock_write,
+    lock_self_test,
+    SouniuLock,
+}
+
+use pkg::registry_client::{
+    registry_search,
+    registry_get_package,
+    registry_publish,
+    registry_print_search_results,
+    registry_print_package,
+    registry_client_self_test,
+    REG_OK, REG_DRY_RUN, REG_SCORE_TOO_LOW, REG_NETWORK_ERROR,
+}
+
 // ============================================================================
 // CONSTANTES DE TEMPLATE
 // ============================================================================
@@ -119,12 +145,7 @@ fn pkg_print_usage() with IO {
     println("  souc search pbpk --min-score 0.85")
 }
 
-fn pkg_read_file_stub(path: &str) -> str with IO, Mut, Panic {
-    // Stub: em produção, usa stdlib/io para leitura real de arquivo.
-    // Retorna conteúdo vazio com indicação clara.
-    println("[pkg] Note: file I/O not yet wired — reading: " + *path)
-    ""
-}
+// (pkg_read_file_stub removido — usando pkg_read_file de reader.sio)
 
 // ============================================================================
 // souc pkg init
@@ -168,67 +189,54 @@ pub fn run_pkg_build(manifest_path: &str) with IO, Mut, Panic, Div {
     println("Building package...")
     println("")
 
-    // Em produção: lê o arquivo real via IO
-    // Por ora, usa path recebido para demonstrar o fluxo
-    let content = pkg_read_file_stub(manifest_path)
+    // Resolve o caminho real para sounio.toml
+    let resolved = pkg_resolve_manifest_path(manifest_path)
+    print("[pkg] Reading: ")
+    println(*resolved)
 
-    let m = if str_len(*content) == 0 {
-        println("[pkg] Warning: could not read sounio.toml — using demo manifest")
-        pkg_manifest_default()
+    // Leitura real do arquivo via builtins read_file / file_size
+    let file_result = pkg_read_file(&resolved)
+
+    let m = if file_result.ok {
+        println("[pkg] Parsing manifest...")
+        let parsed = pkg_manifest_parse(&file_result.content)
+        if !parsed.valid {
+            println("[pkg] Error: sounio.toml parse failed — check syntax")
+            return
+        }
+        parsed
     } else {
-        pkg_manifest_parse(&content)
-    }
-
-    if !m.valid && str_len(*content) > 0 {
-        println("[pkg] Error: sounio.toml is invalid")
+        if file_result.error == PKG_READ_NOT_FOUND {
+            println("[pkg] Error: sounio.toml not found at: " + *resolved)
+            println("  Run: souc pkg init  to create one")
+        } else if file_result.error == PKG_READ_TOO_LARGE {
+            println("[pkg] Error: sounio.toml exceeds 64KB limit")
+        } else {
+            println("[pkg] Error: could not read sounio.toml")
+        }
         return
     }
 
-    // Para demo, cria manifesto com valores razoáveis
-    var demo = pkg_manifest_default()
-    demo.name_len = 4
-    demo.name[0] = 100 as i8  // d
-    demo.name[1] = 101 as i8  // e
-    demo.name[2] = 109 as i8  // m
-    demo.name[3] = 111 as i8  // o
-    demo.version_str[0] = 48 as i8  // 0
-    demo.version_str[1] = 46 as i8  // .
-    demo.version_str[2] = 49 as i8  // 1
-    demo.version_str[3] = 46 as i8  // .
-    demo.version_str[4] = 48 as i8  // 0
-    demo.version_len = 5
-    demo.valid = true
-    demo.has_epistemic = true
-    demo.epistemic.score = 0.85
-    demo.epistemic.gum_compliant = true
-    demo.epistemic.regulatory_ready = false
-    demo.epistemic.provenance_level = PROV_STRONG
-    demo.epistemic.confidence_threshold = 0.90
-    demo.dep_count = 1
-    demo.example_count = 2
-
-    let active = if m.valid { m } else { demo }
-
     println("[pkg] Manifest loaded:")
-    pkg_manifest_print(&active)
+    pkg_manifest_print(&m)
     println("")
 
     // Calcula epistemic score
     println("[pkg] Computing epistemic score...")
     let score = pkg_score_from_manifest(
-        active.epistemic.score,
-        active.epistemic.provenance_level,
-        active.epistemic.gum_compliant,
-        active.epistemic.regulatory_ready,
-        active.dep_count,
-        active.example_count
+        m.epistemic.score,
+        m.epistemic.provenance_level,
+        m.epistemic.gum_compliant,
+        m.epistemic.regulatory_ready,
+        m.dep_count,
+        m.example_count
     )
     pkg_score_print(&score)
     println("")
 
     // Validação de qualidade mínima
     if score.tier == 0 {
-        println("[pkg] Warning: epistemic score is below minimum for registry (0.60)")
+        println("[pkg] Warning: epistemic score below minimum for registry (0.60)")
         println("  Suggestions:")
         println("    - Add Knowledge<T> to your public API functions")
         println("    - Add tests that verify GUM uncertainty propagation")
@@ -236,11 +244,58 @@ pub fn run_pkg_build(manifest_path: &str) with IO, Mut, Panic, Div {
         println("    - Add examples with //@ run-pass annotations")
     }
 
+    // Gera sounio.lock para as dependências declaradas
+    println("[pkg] Generating sounio.lock...")
+    var lock = sounio_lock_new()
+    var di: i64 = 0
+    while di < m.dep_count {
+        let dep = &m.deps[di as usize]
+        // SHA-256 placeholder — substituir por hash real quando registry client retornar metadados
+        lock_add_from_manifest_dep(
+            &!lock,
+            &str_slice_from_buf64(&(*dep).name, (*dep).name_len),
+            &str_slice_from_buf64(&(*dep).version, (*dep).version_len),
+            &"0000000000000000000000000000000000000000000000000000000000000000",
+            70,    // score placeholder — registry lookup substituirá
+            false, // gum_compliant — será preenchido pelo registry
+            false, // regulatory — será preenchido pelo registry
+            true
+        )
+        di = di + 1
+    }
+
+    // Emite lock para stdout (será redirecionado para arquivo pelo CLI)
+    if lock.entry_count > 0 {
+        println("")
+        println("--- sounio.lock (preview) ---")
+        lock_emit(&lock)
+        println("----------------------------")
+        println("")
+    }
+
     println("[pkg] Build complete.")
     let score_pct = (score.total * 100.0) as i64
-    print("[pkg] Package would be published with epistemic-score: ")
+    print("[pkg] Epistemic-score: ")
     print_int(score_pct)
     println("%")
+
+    if score.tier >= 1 {
+        println("[pkg] Package is ready for: souc pkg publish")
+    }
+}
+
+// Converte buffer i8[64] para string (helper para lock wiring)
+fn str_slice_from_buf64(buf: &[i8; 64], len: i64) -> string with Panic {
+    var out = ""
+    var i: i64 = 0
+    while i < len {
+        let c = (*buf)[i as usize] as i64
+        if c >= 32 && c <= 126 {
+            out = out + str_slice(*" !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", c - 32, c - 31)
+        }
+        i = i + 1
+    }
+    out
 }
 
 // ============================================================================
@@ -337,22 +392,40 @@ pub fn run_pkg_audit(manifest_path: &str) with IO, Mut, Panic, Div {
 // souc install
 // ============================================================================
 
-pub fn run_pkg_install(name: &str, version: &str) with IO, Mut, Panic {
+pub fn run_pkg_install(name: &str, version: &str) with IO, Mut, Panic, Div {
     pkg_print_banner()
     print("Installing: ")
-    println(*name)
+    print(*name)
     if str_len(*version) > 0 {
-        print("Version: ")
-        println(*version)
+        print("@")
+        print(*version)
     }
     println("")
-    println("[pkg] Contacting registry.sounio.org...")
-    println("[pkg] Note: registry client not yet implemented.")
-    println("  This command will resolve and install from:")
-    println("  https://registry.sounio.org/api/v1/packages/" + *name)
     println("")
-    println("  Local fallback: checking ~/.sounio/registry/ ...")
-    println("[pkg] Install stub complete. Wire registry_client.sio for real install.")
+
+    let use_local = false
+    let v = if str_len(*version) > 0 { *version } else { "latest" }
+
+    print("[pkg] Querying registry for: ")
+    println(*name)
+    let pkg_meta = registry_get_package(name, &v, use_local)
+
+    if pkg_meta.name_len == 0 {
+        println("[pkg] Error: package not found or registry unreachable")
+        println("  Try: souc pkg install " + *name + " --local  (uses localhost:8080)")
+        println("  Run: scripts/dev/registry_serve.py  to start local dev registry")
+        return
+    }
+
+    println("[pkg] Found package:")
+    registry_print_package(&pkg_meta)
+    println("")
+    println("[pkg] Downloading and installing...")
+    println("[pkg] Note: download/extract not yet implemented.")
+    println("  Package metadata verified. Registry client is operational.")
+    println("")
+    println("[pkg] Next: add \"" + *name + "\" to your sounio.toml [dependencies]")
+    println("  Then run: souc pkg build  (to update sounio.lock)")
 }
 
 // ============================================================================
@@ -368,14 +441,31 @@ pub fn run_pkg_publish(dry_run: bool) with IO, Mut, Panic, Div {
     }
     println("")
 
-    // Calcula score antes de publicar
+    // Lê manifesto real
+    let file_result = pkg_read_file(&"sounio.toml")
+    let m = if file_result.ok {
+        let parsed = pkg_manifest_parse(&file_result.content)
+        if !parsed.valid {
+            println("[pkg] Error: sounio.toml is invalid — run souc pkg build first")
+            return
+        }
+        parsed
+    } else {
+        println("[pkg] Error: sounio.toml not found — run souc pkg init first")
+        return
+    }
+
     let score = pkg_score_from_manifest(
-        0.87, PROV_STRONG, true, false, 3, 4
+        m.epistemic.score,
+        m.epistemic.provenance_level,
+        m.epistemic.gum_compliant,
+        m.epistemic.regulatory_ready,
+        m.dep_count,
+        m.example_count
     )
 
     if score.tier == 0 {
-        println("[pkg] Error: package does not meet minimum epistemic quality.")
-        println("  Minimum epistemic-score for registry: 0.60")
+        println("[pkg] Error: package does not meet minimum epistemic quality (0.60)")
         let pct = (score.total * 100.0) as i64
         print("  Current score: ")
         print_int(pct)
@@ -387,21 +477,57 @@ pub fn run_pkg_publish(dry_run: bool) with IO, Mut, Panic, Div {
     pkg_score_print(&score)
     println("")
 
+    // Nome e versão do manifesto
+    let pkg_name = str_slice_from_buf64(&m.name, m.name_len)
+    let pkg_ver  = str_slice_from_buf32(&m.version_str, m.version_len)
+    let score_pct = (score.total * 100.0) as i64
+
     if score.tier == 3 {
-        println("[pkg] This is a REGULATORY-tier package.")
-        println("  Human review is required before it appears in the registry.")
-        println("  A review request will be filed at: https://registry.sounio.org/review")
+        println("[pkg] REGULATORY-tier package — human review required before publication.")
     }
 
-    if dry_run {
+    // Usa registry client
+    let pub_result = registry_publish(
+        &pkg_name, &pkg_ver,
+        score_pct,
+        m.epistemic.gum_compliant,
+        m.epistemic.regulatory_ready,
+        &"",      // token (futuro: lido de ~/.sounio/credentials)
+        dry_run,
+        false
+    )
+
+    if pub_result.status == REG_DRY_RUN {
         println("[pkg] DRY RUN complete — no changes made.")
+        print("[pkg] Would publish: ")
+        print(*pkg_name)
+        print(" v")
+        println(*pkg_ver)
         println("  Run without --dry-run to publish.")
+    } else if pub_result.status == REG_OK {
+        print("[pkg] Published: ")
+        print(*pkg_name)
+        print(" v")
+        println(*pkg_ver)
+    } else if pub_result.status == REG_SCORE_TOO_LOW {
+        println("[pkg] Registry rejected: epistemic-score below minimum (60%)")
     } else {
-        println("[pkg] Note: registry client not yet implemented.")
-        println("  Will POST to: https://registry.sounio.org/api/v1/packages")
-        println("  With SLSA provenance attestation + epistemic metadata.")
-        println("[pkg] Publish stub complete.")
+        println("[pkg] Error: registry unreachable or auth failed")
+        println("  Start local registry: scripts/dev/registry_serve.py")
     }
+}
+
+fn str_slice_from_buf32(buf: &[i8; 32], len: i64) -> string with Panic {
+    var out = ""
+    var i: i64 = 0
+    while i < len {
+        let c = (*buf)[i as usize] as i64
+        if c >= 32 && c <= 126 {
+            out = out + str_slice(*" !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", c - 32, c - 31)
+        }
+        i = i + 1
+    }
+    out
 }
 
 // ============================================================================
@@ -452,11 +578,29 @@ pub fn run_pkg_cli(subcommand: &str, args: &str, extra: &str) with IO, Mut, Pani
         return
     }
     if *subcommand == "self-test" {
-        let ok = pkg_scorer_self_test()
-        if ok {
-            println("[pkg] self-test: PASS")
+        var all_ok = true
+
+        let scorer_ok = pkg_scorer_self_test()
+        print("[pkg] scorer: ")
+        if scorer_ok { println("PASS") } else { println("FAIL"); all_ok = false }
+
+        let reader_ok = pkg_reader_self_test()
+        print("[pkg] reader: ")
+        if reader_ok { println("PASS") } else { println("FAIL"); all_ok = false }
+
+        let lock_ok = lock_self_test()
+        print("[pkg] lock:   ")
+        if lock_ok { println("PASS") } else { println("FAIL"); all_ok = false }
+
+        let reg_ok = registry_client_self_test()
+        print("[pkg] registry_client (offline): ")
+        if reg_ok { println("PASS") } else { println("FAIL"); all_ok = false }
+
+        println("")
+        if all_ok {
+            println("[pkg] ALL SELF-TESTS: PASS")
         } else {
-            println("[pkg] self-test: FAIL")
+            println("[pkg] SOME SELF-TESTS FAILED")
         }
         return
     }
