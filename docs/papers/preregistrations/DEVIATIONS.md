@@ -80,4 +80,73 @@ enumeration and the future Lean theorem are obligated to agree on the
 
 ---
 
+## Entry 0002 — 2026-04-21 — Erratum and supersedence of v1 by v2
+
+- **Timestamp (UTC):** 2026-04-21 (same calendar day as freeze; discovered during Trilho A implementation at commit `fefc6382`)
+- **Commit hash at decision:** `fefc6382` (foundation commit of `scripts/research/ossm_168_dryrun/`)
+- **Scope:** §2, hypothesis H3 (Negative-valence bias ↔ Associator parity asymmetry)
+- **Type:** Erratum with supersedence (not a within-protocol deviation)
+
+### Description
+
+During implementation of the F_1/F_2/F_3 feature computations against the
+foundation module `scripts/research/ossm_168_dryrun/`, we observed that
+the frozen definition of F_3 in v1 is identically zero by algebraic
+construction, making H3 as written untestable.
+
+The frozen definition reads:
+```
+F_3 = (1 / (T·168)) · Σ_t Σ_{(i,j,k)∈O_168}
+        | ‖[h_t[i], h_t[j], h_t[k]]‖ − ‖[h_t[k], h_t[j], h_t[i]]‖ |
+```
+Since the octonion algebra is alternative (Artin's theorem), the
+associator `[a, b, c] = (a·b)·c − a·(b·c)` is an alternating function
+of its three arguments; in particular `[c, b, a] = −[a, b, c]`, and
+therefore `‖[c, b, a]‖ = ‖[a, b, c]‖`. Every term in the F_3 sum is
+zero, for every subject, for every dataset.
+
+The bug does not affect H1 or H2: both are well-defined and non-trivial
+as written.
+
+### Resolution
+
+v1 is not amended. The tag `prereg/ossm-168-depression-v1` remains
+public, its content frozen, its SHA-256
+`63c2f60223657491829c38a57a2745fb079d48259bed306538ef32223ae4c93d`
+intact. This preserves the paper trail and respects the standard
+open-science rule that a frozen pre-registration is a historical
+record, not a mutable document.
+
+v1 is **superseded** by v2, which supplies a corrected F_3 operating on
+the sedenion state $\tilde{h}_t \in \mathbb{S}_{16}$. In sedenions the
+algebra is no longer alternative, the associator is not alternating,
+and the reversal asymmetry $\|[a,b,c]\| \neq \|[c,b,a]\|$ is generic
+rather than forbidden. The new F_3 additionally ties H3 to the 336
+primitive zero-divisor orbits of Theorem T3, keeping the feature inside
+the 168-family.
+
+The full v2 protocol is stored at
+`docs/papers/preregistrations/2026-04-21_ossm_168_depression_v2.md`,
+frozen under its own SHA-256 and tagged
+`prereg/ossm-168-depression-v2`.
+
+### Reclassification
+
+In v1: H3 is withdrawn as untestable. H1 and H2 in v1 remain valid
+confirmatory hypotheses if executed against the frozen v1 protocol.
+
+In v2: H1, H2, H3 are all confirmatory. H3 in v2 is **not** downgraded
+to exploratory because v2 is a new, coherent registration, not a drift
+from v1.
+
+### No data accessed
+
+As of commit `fefc6382`, no LEMON or MODMA signal data has been
+accessed. The supersedence therefore occurs entirely within the
+implementation phase, before any data contact. This means both v1 and
+v2 retain full confirmatory status for analyses performed against
+their respective pinned protocols.
+
+---
+
 *No further entries. Append new entries below this line.*
