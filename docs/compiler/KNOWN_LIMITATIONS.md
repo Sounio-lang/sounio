@@ -245,6 +245,28 @@ All previously planned features are implemented as of v0.99.0:
 - **Channels 4–7 in transcendentals**: Transcendental chain rule only propagates channels 0–3. Channels 4–7 are zero for transcendental outputs even if the input has active sensitivity there.
 - **Two-arg builtins (channels 4–7)**: `atan2`/`pow` handlers propagate channels 0–3 only.
 
+### Butterfly #3 — Knowledge arithmetic drops second-order shadows
+
+`compile_knowledge_muldiv_x86` at `self-hosted/compiler/lean_single.sio:5766` computes first-order variance through `Knowledge<f64> * Knowledge<f64>` (and `/`) via the delta method, but does **not** propagate `EXPR_SSHADOW_*` / `EXPR_HSHADOW_*` shadow slots.  Any downstream `hessian_of` / `sensitivity_of` on a result of direct Knowledge arithmetic silently returns zero for the Hessian/Jacobian contribution.
+
+**Policy KAS-1 (formalised in `formal/KnowledgeArithmeticSoundness.lean`)** — for second-order GUM propagation, extract `.value` from each Knowledge operand, perform scalar arithmetic, then pass the collected Jacobian / Hessian arrays to `gum_second_order_variance`:
+
+```sio
+// WRONG — shadows silently dropped:
+let kz = k1 * k2
+let v2 = gum_second_order_variance(...)  // returns first-order only
+
+// CORRECT — KAS-1 compliant:
+let x = k1.value          // shadow ch0 activates
+let y = k2.value          // shadow ch1 activates
+let z = x * y             // scalar; shadows propagate
+let j: [f64; 8] = [sensitivity_of(z, 0), sensitivity_of(z, 1), ...]
+let h: [f64; 36] = [hessian_of(z, 0, 0), hessian_of(z, 0, 1), ...]
+let v2 = gum_second_order_variance(j, h, &sigma)
+```
+
+Closing the butterfly at the compiler level requires either (a) extending the `Knowledge<T>` runtime layout with shadow-slot indices, or (b) inlining scalar shadow propagation around `compile_knowledge_muldiv_x86` (~870 lines of mechanical emission).  Both are Phase 5 architectural work and out of scope for Phase 4.  See `tests/run-pass/knowledge_kas1_policy.sio` for a concrete demonstration of both paths.
+
 ## Reporting Issues
 
 If you encounter any new issues, please report them at:
