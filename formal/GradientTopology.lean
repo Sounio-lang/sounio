@@ -1,8 +1,8 @@
 /-!
-# Sounio.GradientTopology — β⁹ Phase Verification (week-3 step B)
+# Sounio.GradientTopology — β⁹ Phase Verification (week-3 step B + week-4 step B)
 
 Formal soundness for Gradient Topology Types (GTT), the static channel-set
-discipline introduced in β⁹ week-1 and extended through week-3.
+discipline introduced in β⁹ week-1 and extended through week-4.
 
 GTT tracks, for every f64 expression, an `i64` bitmask of the Hessian input
 channels the expression depends on.  The channel of an expression is the
@@ -57,10 +57,12 @@ Out of scope (stated, not silently omitted):
     argument's topology, matching β⁵'s scope.
   * ARM64 / a64 backend mirror.  `compile_primary_a64` has no
     corresponding union capture yet (parallel work, deferred).
-  * Body-level precision.  `fn first(a, b) = a` has semantic channel
-    set `{arg₀}`; the union rule types it as `{arg₀ ∪ arg₁}`.  This is
-    over-approximation, not unsoundness.  The main theorem is
-    parameterised over a `BodyRespectsTopology` hypothesis.
+  * Body-level precision for return-position (binary fn, tail expr).
+    `fn first(a, b) = a` has semantic channel set `{arg₀}`; under the
+    week-4 body-precision rule (§7b) it types exactly at `{arg₀}`.
+    Extending to match / if-else tails, loops, and recursion is still
+    deferred.  The week-3 union rule remains as a conservative fallback
+    for unanalyzed callees.
   * Operational composition with HessianAD.  The theorem here states a
     semantic containment on channel footprints; the shadow-slot bridge
     is proved separately in `HessianAD.lean`.
@@ -392,6 +394,174 @@ theorem union_discharges_body_hypothesis :
   exact ChSet.subset_refl _
 
 -- ---------------------------------------------------------------------------
+-- §7b. Week-4 body-level precision (return-position, binary fns)
+-- ---------------------------------------------------------------------------
+
+/-- A binary function's body-precision summary: for each of the two
+    parameter positions, whether the return expression references that
+    parameter.  Corresponds to the compiler's `FN_USED_PARAMS[fi]`
+    bitmask (low two bits, for binary callees) populated at
+    function-body tail in `self-hosted/compiler/lean_single.sio`. -/
+structure UsedParams2 where
+  uses0 : Bool
+  uses1 : Bool
+
+/-- Body-precision join: union only those argument channel sets for
+    which the callee body uses the corresponding parameter position.
+    Corresponds to the compiler's call-site loop that consults
+    `FN_USED_PARAMS[fi]` and unions only the matching
+    `B9_ARG_CH_SET[i]` slots.  For a fully-used function
+    `⟨true, true⟩` this reduces to the week-3 union; for an unused
+    parameter the corresponding set is dropped. -/
+def usedUnion (U : UsedParams2) (S1 S2 : ChSet) : ChSet :=
+  ChSet.union
+    (if U.uses0 then S1 else ChSet.empty)
+    (if U.uses1 then S2 else ChSet.empty)
+
+/-- Elementary building block: `(if b then S else empty) ⊆ S` for any
+    boolean guard `b`.  The two cases reduce to `ChSet.subset_refl` and
+    `ChSet.empty_subset`. -/
+theorem ChSet.if_empty_subset_left (b : Bool) (S : ChSet) :
+    (if b then S else ChSet.empty).subset S := by
+  cases b
+  · -- if-false branch: empty ⊆ S
+    exact ChSet.empty_subset S
+  · -- if-true branch: S ⊆ S
+    exact ChSet.subset_refl S
+
+/-- Monotonicity of the `if b then · else empty` guard: the guarded
+    `S1` is a subset of the guarded `S2` whenever `S1 ⊆ S2`, for every
+    guard value `b`. -/
+theorem ChSet.if_empty_mono (b : Bool) (S1 S2 : ChSet)
+    (h : S1.subset S2) :
+    (if b then S1 else ChSet.empty).subset (if b then S2 else ChSet.empty) := by
+  cases b
+  · -- if-false branch: empty ⊆ empty
+    exact ChSet.subset_refl ChSet.empty
+  · -- if-true branch: S1 ⊆ S2 by h
+    exact h
+
+/-- **Body-precision is always a refinement of the week-3 union.**
+    `usedUnion U S1 S2 ⊆ S1 ∪ S2` for every `U`.  The compiler's
+    fallback — emitting the union-all when `FN_USED_PARAMS[fi]` is
+    unanalyzed (sentinel 0) — is always safe because the tightened
+    declared set is contained in the conservative one. -/
+theorem usedUnion_subset_union (U : UsedParams2) (S1 S2 : ChSet) :
+    (usedUnion U S1 S2).subset (S1.union S2) := by
+  unfold usedUnion
+  exact ChSet.union_subset _ _ (S1.union S2)
+    (ChSet.subset_trans _ S1 (S1.union S2)
+      (ChSet.if_empty_subset_left U.uses0 S1)
+      (ChSet.subset_union_left S1 S2))
+    (ChSet.subset_trans _ S2 (S1.union S2)
+      (ChSet.if_empty_subset_left U.uses1 S2)
+      (ChSet.subset_union_right S1 S2))
+
+/-- Monotonicity of `usedUnion` in both set arguments (for a fixed
+    `UsedParams2`).  Direct consequence of `ChSet.union_mono` applied
+    to the two guarded components. -/
+theorem usedUnion_mono (U : UsedParams2) (a1 a2 b1 b2 : ChSet)
+    (h1 : a1.subset b1) (h2 : a2.subset b2) :
+    (usedUnion U a1 a2).subset (usedUnion U b1 b2) := by
+  unfold usedUnion
+  exact ChSet.union_mono _ _ _ _
+    (ChSet.if_empty_mono U.uses0 a1 b1 h1)
+    (ChSet.if_empty_mono U.uses1 a2 b2 h2)
+
+/-- Sanity: when both parameters are used, body-precision collapses to
+    the week-3 union rule — no regression for fully-used functions. -/
+theorem usedUnion_all_used (S1 S2 : ChSet) :
+    usedUnion ⟨true, true⟩ S1 S2 = S1.union S2 := by
+  funext n
+  simp only [usedUnion, ChSet.union]
+  rfl
+
+/-- **The body-precision hypothesis.**  For every binary function `f`
+    and every argument pair, the return's footprint is contained in
+    the `usedUnion` of the argument footprints indexed by `UP f`.
+
+    Stronger than `BodyRespectsTopology`: week-3's hypothesis used
+    `v1.footprint.union v2.footprint`; week-4's uses the parameter-
+    index-filtered join.  Compiler-side, this hypothesis is discharged
+    per-function at the body-tail `FN_USED_PARAMS[fi]` capture site. -/
+def BodyRespectsUsedParams (F : FnTable) (UP : FnId → UsedParams2) : Prop :=
+  ∀ (f : FnId) (v1 v2 ret : RuntimeVal),
+    F.eval2 f v1 v2 ret →
+    ret.footprint.subset (usedUnion (UP f) v1.footprint v2.footprint)
+
+/-- Body-precision implies the week-3 union-rule hypothesis.  A function
+    table that respects `UP`'s body-precision summary also respects the
+    conservative `BodyRespectsTopology`, so `gtt_sound` continues to
+    apply — the week-3 soundness theorem is *strictly weaker* than the
+    week-4 one and the week-4 compiler still refuses only out-of-topology
+    queries. -/
+theorem bodyPrecision_implies_union_hypothesis
+    (F : FnTable) (UP : FnId → UsedParams2)
+    (h : BodyRespectsUsedParams F UP) : BodyRespectsTopology F := by
+  intro f v1 v2 ret hfn
+  have ret_sub_used := h f v1 v2 ret hfn
+  exact ChSet.subset_trans ret.footprint
+    (usedUnion (UP f) v1.footprint v2.footprint)
+    (v1.footprint.union v2.footprint)
+    ret_sub_used
+    (usedUnion_subset_union (UP f) v1.footprint v2.footprint)
+
+/-- **Body-precision soundness for direct binary user-fn calls.**
+
+    Given the strengthened hypothesis `BodyRespectsUsedParams`, the
+    declared channel set `usedUnion (UP f) S1 S2` is a sound upper
+    bound on the runtime footprint of `call2 f e1 e2`.  This is the
+    week-4 tightening: `fn first(a, b) = a` with `UP first = ⟨true,
+    false⟩` types the call at `{arg₀}` — strictly tighter than the
+    week-3 `{arg₀ ∪ arg₁}`.
+
+    The proof composes `gtt_sound` (applied to the two argument
+    sub-expressions under the weaker hypothesis, obtained from
+    `bodyPrecision_implies_union_hypothesis`) with the body-precision
+    hypothesis itself, then monotonicity. -/
+theorem gtt_sound_body
+    (F : FnTable) (UP : FnId → UsedParams2)
+    (Γ : TyEnv) (ρ : VarEnv)
+    (hΓρ : VarEnvConsistent Γ ρ)
+    (hbody : BodyRespectsUsedParams F UP) :
+    ∀ (f : FnId) (e1 e2 : Expr) (S1 S2 : ChSet) (v1 v2 ret : RuntimeVal),
+      Typing Γ e1 S1 → Typing Γ e2 S2 →
+      Eval F ρ e1 v1 → Eval F ρ e2 v2 → F.eval2 f v1 v2 ret →
+      ret.footprint.subset (usedUnion (UP f) S1 S2) := by
+  intro f e1 e2 S1 S2 v1 v2 ret hT1 hT2 hE1 hE2 hfn
+  -- Step 1: each argument's runtime footprint is contained in its
+  --         declared set, via week-3 gtt_sound under the weaker hypothesis.
+  have hbody_union : BodyRespectsTopology F :=
+    bodyPrecision_implies_union_hypothesis F UP hbody
+  have s1 : v1.footprint.subset S1 :=
+    gtt_sound F Γ ρ hΓρ hbody_union e1 S1 v1 hT1 hE1
+  have s2 : v2.footprint.subset S2 :=
+    gtt_sound F Γ ρ hΓρ hbody_union e2 S2 v2 hT2 hE2
+  -- Step 2: ret footprint is contained in the usedUnion of arg footprints.
+  have ret_sub_used : ret.footprint.subset (usedUnion (UP f) v1.footprint v2.footprint) :=
+    hbody f v1 v2 ret hfn
+  -- Step 3: monotonicity of usedUnion under pointwise subset.
+  have used_mono : (usedUnion (UP f) v1.footprint v2.footprint).subset
+                     (usedUnion (UP f) S1 S2) :=
+    usedUnion_mono (UP f) v1.footprint v2.footprint S1 S2 s1 s2
+  exact ChSet.subset_trans ret.footprint
+    (usedUnion (UP f) v1.footprint v2.footprint)
+    (usedUnion (UP f) S1 S2)
+    ret_sub_used used_mono
+
+/-- **Canary (week-4 body-precision regression).**  For
+    `fn proj_a(a, b) = a` — whose body-precision summary is
+    `UP proj_a = ⟨true, false⟩` — the call-site declared channel set
+    under body-precision is exactly `S1` (drops `S2`).  This matches
+    `tests/run-pass/gtt_body_precision_param_usage.sio` and
+    `tests/compile-fail/gtt_body_precision_unused_param_refused.sio`
+    in the repository: the first parameter's channel is in-topology,
+    the second parameter's channel is out-of-topology, and the
+    compiler's refusal of `hessian_of(r, 1, 1)` is sound. -/
+theorem canary_proj_a_only_arg0 (S1 S2 : ChSet) :
+    usedUnion ⟨true, false⟩ S1 S2 = S1.union ChSet.empty := rfl
+
+-- ---------------------------------------------------------------------------
 -- §8. A closed-form corollary matching the week-3 commit narrative
 -- ---------------------------------------------------------------------------
 
@@ -430,6 +600,11 @@ theorem regression_my_sum_topology
 | **GTT typing upper-bounds runtime footprint** (binary `call2` incl.)  | Proved  | `gtt_sound`                              |
 | Week-3 union rule discharges body-topology hypothesis                 | Proved  | `union_discharges_body_hypothesis`       |
 | Regression program types at `{ch 0} ∪ {ch 1}`                         | Proved  | `regression_my_sum_topology`             |
+| Body-precision refines week-3 union (⊆)                               | Proved  | `usedUnion_subset_union`                 |
+| Body-precision collapses to week-3 when both params used              | Proved  | `usedUnion_all_used`                     |
+| Body-precision implies week-3 body hypothesis                         | Proved  | `bodyPrecision_implies_union_hypothesis` |
+| **Body-precision soundness for binary `call2`** (week-4)              | Proved  | `gtt_sound_body`                         |
+| Canary: proj_a with UP=⟨true,false⟩ types at `{arg₀}` only            | Proved  | `canary_proj_a_only_arg0`                |
 
 ## What this file proves, in one sentence
 
@@ -446,15 +621,21 @@ at binary user-function calls is a *sound* static channel set.
    omitted here because the nested-inductive induction principle for
    `List Expr` sub-terms is enough of a footgun to warrant verification
    with a Lean toolchain on-hand.  The binary theorem is morally the
-   n-ary theorem.
-2. Body-level precision: discharging `BodyRespectsTopology` with a
-   tighter analysis than the union rule for functions like
-   `fn first(a, b) = a`.
+   n-ary theorem.  `usedUnion` generalises to `usedUnionN : UsedParamsN
+   → List ChSet → ChSet` along the same structural path.
+2. Body-level precision beyond return-position (match / if arms, loops,
+   recursion fixed-point).  Week-4 covers the return-position tail
+   fragment; richer body CFA is deferred.
 3. Closure / fn-ref indirect calls, `Expr.call2` here is direct-only.
 4. ARM64 mirror — codegen parity, not a separate semantic theorem.
+   The a64 compiler mirrors `EXPR_PARAM_USED` propagation through
+   let / load in week-4 step A; the a64 call-site tightening itself
+   remains deferred.
 5. Bridging to `HessianAD.lean` — proving that `j ∉ S ⟹ H_{j,k} = 0.0`
    via the shadow-slot semantics.  The natural next proof, spans two
-   files.
+   files.  Under `gtt_sound_body` this bridge becomes an *equality*
+   (declared set characterises shadow footprint) on the body-precision
+   fragment, rather than just a containment.
 
 ## No new axioms
 
