@@ -11796,6 +11796,50 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             compile_knowledge_muldiv_x86(op_tok, op, left_ty, left_hash, right_ty, right_hash)
             continue
         }
+        // β⁸ Phase 2: algebra-aware Hessian gate (refuses propagation over
+        // non-associative algebras unless explicitly opted in via the
+        // `reassociate: fano_selective` algebra-declaration field).
+        //
+        // Rationale: the compiler-emitted Hessian product rule at line 12012+
+        // (see formal/HessianAD.lean `hess_mul`) assumes associativity and
+        // commutativity of the underlying scalar multiplication.  For a
+        // non-associative type (octonion, sedenion, matrix, ...) the standard
+        // bilinear product-rule is mathematically invalid — an incorrect
+        // Hessian would still pass σ²_2nd ≥ σ²_1st but be garbage.
+        //
+        // This check fires when BOTH:
+        //   (a) at least one operand's type is declared `algebra ... { mul: ... }`
+        //       with `alternative` (i.e. non-associative), AND
+        //   (b) Hessian / first-order shadow propagation is live on either
+        //       operand (any EXPR_SSHADOW / EXPR_HSHADOW / left_* shadow ≥ 0).
+        //
+        // Opt-in: the algebra's declaration must include `reassociate: fano_selective`,
+        // which sets `al_reassoc_mode` to 2.  The mathematical justification (that
+        // the associator vanishes on Fano-lawful triples) is in formal/NonAssocHessian.lean.
+        if (op == 19 || op == 20) && left_ty != 0 && right_ty != 0 {
+            let left_is_algebra = al_is_algebra(left_ty, left_hash)
+            let right_is_algebra = al_is_algebra(right_ty, right_hash)
+            if left_is_algebra || right_is_algebra {
+                let h_check = left_hash
+                // pick either side's hash — the ty match check below will catch mismatches
+                let nonassoc = al_mul_is_associative(h_check) == false
+                // Active shadow detection: any first-order or upper-triangular Hessian slot.
+                let has_shadow =
+                    EXPR_SSHADOW >= 0 || EXPR_SSHADOW_1 >= 0 || EXPR_SSHADOW_2 >= 0 || EXPR_SSHADOW_3 >= 0 ||
+                    EXPR_SSHADOW_4 >= 0 || EXPR_SSHADOW_5 >= 0 || EXPR_SSHADOW_6 >= 0 || EXPR_SSHADOW_7 >= 0 ||
+                    left_sshadow >= 0 || left_sshadow_1 >= 0 || left_sshadow_2 >= 0 || left_sshadow_3 >= 0 ||
+                    left_sshadow_4 >= 0 || left_sshadow_5 >= 0 || left_sshadow_6 >= 0 || left_sshadow_7 >= 0 ||
+                    EXPR_HSHADOW_00 >= 0 || EXPR_HSHADOW_11 >= 0 || EXPR_HSHADOW_22 >= 0 ||
+                    EXPR_HSHADOW_33 >= 0 || EXPR_HSHADOW_44 >= 0 || EXPR_HSHADOW_55 >= 0 ||
+                    EXPR_HSHADOW_66 >= 0 || EXPR_HSHADOW_77 >= 0 ||
+                    left_hsh_00 >= 0 || left_hsh_11 >= 0 || left_hsh_22 >= 0 || left_hsh_33 >= 0 ||
+                    left_hsh_44 >= 0 || left_hsh_55 >= 0 || left_hsh_66 >= 0 || left_hsh_77 >= 0
+                let reassoc_l = al_reassoc_mode(h_check)
+                if nonassoc && has_shadow && reassoc_l != 2 {
+                    tc_error(op_tok, "Hessian AD over a non-associative algebra requires `reassociate: fano_selective` in the algebra declaration (see formal/NonAssocHessian.lean for the associator-correction soundness proof)")
+                }
+            }
+        }
         if left_ty != 0 && right_ty != 0 {
             if op == 29 {
                 if left_ty != 1 || right_ty != 1 { tc_error(op_tok, "modulo requires integer operands") }
