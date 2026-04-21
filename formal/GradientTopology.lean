@@ -159,10 +159,10 @@ theorem ChSet.union_idem (a : ChSet) : a.union a = a := by
 
 /-- Function identifiers.  In the compiler these are indices into
     `FN_ARITY` / `FN_RET_TY`; here we keep them abstract. -/
-def FnId : Type := Nat
+abbrev FnId : Type := Nat
 
 /-- Variable identifiers (indices into `VAR_CH_SET`). -/
-def VarId : Type := Nat
+abbrev VarId : Type := Nat
 
 /-- Minimal expression grammar for GTT reasoning.  Covers the constructs
     week-2 and week-3 wired channel-topology tracking for:
@@ -357,15 +357,16 @@ theorem gtt_sound
     cases hT with
     | tCall2 _ _ _ S1 S2 hT1 hT2 =>
       cases hE with
-      | eCall2 _ _ _ v1 v2 ret hE1 hE2 hfn =>
+      | @eCall2 _ _ _ v1 v2 _ hE1 hE2 hfn =>
         -- Step 1: each arg's runtime footprint is contained in its declared set.
         have s1 : v1.footprint.subset S1 := ih1 S1 v1 hT1 hE1
         have s2 : v2.footprint.subset S2 := ih2 S2 v2 hT2 hE2
-        -- Step 2: ret footprint is contained in the arg-union footprints.
-        have ret_sub_args : ret.footprint.subset (v1.footprint.union v2.footprint) :=
-          hbody f v1 v2 ret hfn
+        -- Step 2: ret footprint (here: `v`, the outer intro'd return) is
+        --         contained in the arg-union footprints.
+        have ret_sub_args : v.footprint.subset (v1.footprint.union v2.footprint) :=
+          hbody f v1 v2 v hfn
         -- Step 3: compose with union monotonicity.
-        exact ChSet.subset_trans ret.footprint
+        exact ChSet.subset_trans v.footprint
           (v1.footprint.union v2.footprint) (S1.union S2)
           ret_sub_args
           (ChSet.union_mono v1.footprint v2.footprint S1 S2 s1 s2)
