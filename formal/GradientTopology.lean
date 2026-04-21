@@ -385,10 +385,10 @@ def unionTable : FnTable where
 
 theorem union_discharges_body_hypothesis :
     BodyRespectsTopology unionTable := by
-  intro f v1 v2 ret h
-  show ret.footprint.subset (v1.footprint.union v2.footprint)
-  have hf : ret.footprint = v1.footprint.union v2.footprint := h
-  rw [hf]
+  intro _ v1 v2 ret h
+  -- `h : unionTable.eval2 _ v1 v2 ret` reduces to
+  -- `ret.footprint = v1.footprint.union v2.footprint`.
+  rw [show ret.footprint = v1.footprint.union v2.footprint from h]
   exact ChSet.subset_refl _
 
 -- ---------------------------------------------------------------------------
