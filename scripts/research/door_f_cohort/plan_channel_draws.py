@@ -87,37 +87,40 @@ def main():
     os.makedirs(args.out_root, exist_ok=True)
     manifest_path = os.path.join(args.out_root, "draw_manifest.tsv")
 
-    n_written = 0
     # Per-patient deterministic seed derived from (base_seed, canonical_index)
     # so that splitting the run with --only yields bit-identical .sio files
     # as the unfiltered run for the same patients.
-    with open(manifest_path, "w") as mf:
-        mf.write("patient\tdraw_id\tchannels\tsio\tedf\n")
-        for patient, edf_name, onset in rows:
-            edf_path = os.path.join(args.edf_dir, edf_name)
-            if not os.path.exists(edf_path):
-                sys.exit(f"missing EDF: {edf_path}")
-            n_ch_avail = count_channels(edf_path)
-            if n_ch_avail < args.n_ch:
-                sys.exit(f"{patient}: only {n_ch_avail} channels available, need ≥{args.n_ch}")
-            sio_dir = os.path.join(args.out_root, "sio", patient)
-            os.makedirs(sio_dir, exist_ok=True)
-            rng = np.random.default_rng(
-                np.random.SeedSequence([args.seed, canonical_idx[patient]]))
-            for d in range(args.n_draws):
-                ch = sorted(rng.choice(n_ch_avail, size=args.n_ch, replace=False).tolist())
-                sio_path = os.path.join(sio_dir, f"draw_{d:03d}.sio")
-                GEN.generate(patient, edf_path, onset, sio_path,
-                             ch_map=ch,
-                             null_pool_size=0,
-                             tail_override=tail_src)
-                mf.write(f"{patient}\t{d}\t{','.join(str(c) for c in ch)}"
-                         f"\t{sio_path}\t{edf_path}\n")
-                n_written += 1
-            sys.stderr.write(f"  {patient}: {args.n_draws} draws "
-                             f"({n_ch_avail} chans available)\n")
+    # The manifest is assembled in-memory and flushed in one write() at the
+    # end; OrangeFS/pvfs2 truncates long series of small appends on an open
+    # handle to a parallel filesystem, so a single write is essential.
+    manifest_lines = ["patient\tdraw_id\tchannels\tsio\tedf"]
+    for patient, edf_name, onset in rows:
+        edf_path = os.path.join(args.edf_dir, edf_name)
+        if not os.path.exists(edf_path):
+            sys.exit(f"missing EDF: {edf_path}")
+        n_ch_avail = count_channels(edf_path)
+        if n_ch_avail < args.n_ch:
+            sys.exit(f"{patient}: only {n_ch_avail} channels available, need ≥{args.n_ch}")
+        sio_dir = os.path.join(args.out_root, "sio", patient)
+        os.makedirs(sio_dir, exist_ok=True)
+        rng = np.random.default_rng(
+            np.random.SeedSequence([args.seed, canonical_idx[patient]]))
+        for d in range(args.n_draws):
+            ch = sorted(rng.choice(n_ch_avail, size=args.n_ch, replace=False).tolist())
+            sio_path = os.path.join(sio_dir, f"draw_{d:03d}.sio")
+            GEN.generate(patient, edf_path, onset, sio_path,
+                         ch_map=ch,
+                         null_pool_size=0,
+                         tail_override=tail_src)
+            manifest_lines.append(
+                f"{patient}\t{d}\t{','.join(str(c) for c in ch)}"
+                f"\t{sio_path}\t{edf_path}")
+        sys.stderr.write(f"  {patient}: {args.n_draws} draws "
+                         f"({n_ch_avail} chans available)\n")
 
-    sys.stderr.write(f"manifest: {manifest_path}  ({n_written} entries)\n")
+    with open(manifest_path, "w") as mf:
+        mf.write("\n".join(manifest_lines) + "\n")
+    sys.stderr.write(f"manifest: {manifest_path}  ({len(manifest_lines) - 1} entries)\n")
 
 
 if __name__ == "__main__":
