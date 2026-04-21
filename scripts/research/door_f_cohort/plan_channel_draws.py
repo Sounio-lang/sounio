@@ -68,6 +68,11 @@ def main():
                     help="alternate tail template (default template.sio.part)")
     ap.add_argument("--n-ch",     type=int, default=16,
                     help="channels per draw (must match header.sio.part; default 16)")
+    ap.add_argument("--manifest-only", action="store_true",
+                    help="re-derive the RNG draws and re-emit the draw_manifest.tsv "
+                         "without rewriting the .sio files (intended to recover "
+                         "from a truncated manifest when the .sio files already "
+                         "exist from a previous byte-identical run)")
     args = ap.parse_args()
 
     if args.n_ch != GEN.N_CH:
@@ -108,10 +113,11 @@ def main():
         for d in range(args.n_draws):
             ch = sorted(rng.choice(n_ch_avail, size=args.n_ch, replace=False).tolist())
             sio_path = os.path.join(sio_dir, f"draw_{d:03d}.sio")
-            GEN.generate(patient, edf_path, onset, sio_path,
-                         ch_map=ch,
-                         null_pool_size=0,
-                         tail_override=tail_src)
+            if not args.manifest_only:
+                GEN.generate(patient, edf_path, onset, sio_path,
+                             ch_map=ch,
+                             null_pool_size=0,
+                             tail_override=tail_src)
             manifest_lines.append(
                 f"{patient}\t{d}\t{','.join(str(c) for c in ch)}"
                 f"\t{sio_path}\t{edf_path}")
