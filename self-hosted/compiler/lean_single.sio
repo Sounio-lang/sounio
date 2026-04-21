@@ -492,6 +492,23 @@ var B5_ARG_VCOUNT:  i64 = 0
 var B9_ARG_CH_SET:   [i64; 16] = [0; 16]
 var B9_ARG_CH_COUNT: i64 = 0
 
+// β⁹ GTT week-4 — body-level precision via parameter-index tracking.
+// EXPR_PARAM_USED: bitmask of enclosing-function parameter indices that the
+// current expression depends on.  Paired with EXPR_CH_SET at every update
+// site and propagated through let/load via VAR_PARAM_USED (mirrors
+// VAR_CH_SET exactly).  FN_USED_PARAMS[fi] is the per-function summary:
+// bit 62 (FN_USED_ANALYZED = 1 << 62 = 4611686018427387904) marks the
+// function as analyzed; low 16 bits = parameter indices referenced at
+// the return-position tail.  Sentinel 0 = unanalyzed → caller falls back
+// to the week-3 conservative union over all B9_ARG_CH_SET slots.
+// B9_ARG_PARAM_USED captures each argument's EXPR_PARAM_USED so the
+// caller can forward body-precision into its own enclosing-function's
+// EXPR_PARAM_USED at the call-site return.
+var EXPR_PARAM_USED:    i64 = 0
+var VAR_PARAM_USED:     [i64; 1024] = [0; 1024]
+var FN_USED_PARAMS:     [i64; 16384] = [0; 16384]
+var B9_ARG_PARAM_USED:  [i64; 16] = [0; 16]
+
 // --emit-econf: print function confidence table to diagnostic stream
 // --load-econf: pre-populate FN_EFF_CONF from a previously emitted .econf
 var CLI_EMIT_ECONF: i64 = 0
@@ -7109,6 +7126,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_TY_HASH = 0
     // GTT: fresh primary expression starts with empty channel topology.
     EXPR_CH_SET = 0
+    EXPR_PARAM_USED = 0
     EXPR_UNIT = 0
     LAST_IS_LITERAL = 0
     EXPR_VSHADOW = -1
@@ -9232,6 +9250,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let a2_hy22 = EXPR_HSHADOW_22; let a2_hy23 = EXPR_HSHADOW_23; let a2_hy33 = EXPR_HSHADOW_33
                 // β⁹ GTT: capture y's topology before x arg overwrites EXPR_CH_SET.
                 let a2_y_ch_set = EXPR_CH_SET
+                let a2_y_param_used = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 compile_or()
                 let a2_x_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var(a2_x_slot)
@@ -9241,6 +9260,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let a2_hx22 = EXPR_HSHADOW_22; let a2_hx23 = EXPR_HSHADOW_23; let a2_hx33 = EXPR_HSHADOW_33
                 // β⁹ GTT: x's topology.  atan2(y, x) depends on both → union.
                 let a2_x_ch_set = EXPR_CH_SET
+                let a2_x_param_used = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 { tc_wrong_arity(name_tok, 2, 3); while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 } }
                 emit_load_var(a2_y_slot); em(0x50)
                 emit_load_var(a2_x_slot); em(0x50)
@@ -9439,6 +9459,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_IS_F64 = 1; EXPR_TY = 2; EXPR_TY_HASH = 0
                 // β⁹ GTT: atan2(y, x) depends on both y and x.
                 EXPR_CH_SET = a2_y_ch_set | a2_x_ch_set
+                EXPR_PARAM_USED = a2_y_param_used | a2_x_param_used
                 return
             }
             // β⁷ Tier 3: two-arg pow(x,y) = exp(y*ln(x)) with full Hessian propagation
@@ -9452,6 +9473,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let pw_hx22 = EXPR_HSHADOW_22; let pw_hx23 = EXPR_HSHADOW_23; let pw_hx33 = EXPR_HSHADOW_33
                 // β⁹ GTT: capture x's topology before y arg overwrites EXPR_CH_SET.
                 let pw_x_ch_set = EXPR_CH_SET
+                let pw_x_param_used = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 compile_or()
                 let pw_y_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var(pw_y_slot)
@@ -9461,6 +9483,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let pw_hy22 = EXPR_HSHADOW_22; let pw_hy23 = EXPR_HSHADOW_23; let pw_hy33 = EXPR_HSHADOW_33
                 // β⁹ GTT: pow(x, y) depends on both x and y.
                 let pw_y_ch_set = EXPR_CH_SET
+                let pw_y_param_used = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 { tc_wrong_arity(name_tok, 2, 3); while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 } }
                 // Compute ln(x) needed for the call and for partials
                 emit_load_var(pw_x_slot); em(0x50)
@@ -9586,6 +9609,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_IS_F64 = 1; EXPR_TY = 2; EXPR_TY_HASH = 0
                 // β⁹ GTT: pow(x, y) depends on both x and y.
                 EXPR_CH_SET = pw_x_ch_set | pw_y_ch_set
+                EXPR_PARAM_USED = pw_x_param_used | pw_y_param_used
                 return
             }
             if src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") || src_match(ns, ne - ns, "tan") || src_match(ns, ne - ns, "atan") || src_match(ns, ne - ns, "tanh") || src_match(ns, ne - ns, "asin") || src_match(ns, ne - ns, "acos") {
@@ -10179,6 +10203,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // β⁹ GTT: capture this argument's channel topology before the
                 // next arg's compile_or() overwrites EXPR_CH_SET.
                 if argc < 16 { B9_ARG_CH_SET[argc as usize] = EXPR_CH_SET }
+                // β⁹ GTT week-4: capture each arg's param-index dependency so
+                // the caller can forward body-precision into its own
+                // enclosing-fn's EXPR_PARAM_USED at the call-site return.
+                if argc < 16 { B9_ARG_PARAM_USED[argc as usize] = EXPR_PARAM_USED }
                 B9_ARG_CH_COUNT = argc + 1
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
@@ -10286,13 +10314,40 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // value's topology. Conservative upper bound; matches the
                 // atan2/pow builtin discipline. Runs before β⁵ so EXPR_CH_SET
                 // is correct regardless of whether β⁵ emits shadow ops below.
+                // β⁹ GTT week-4: body-level precision.  Consult
+                // FN_USED_PARAMS[fi] to union only those B9_ARG_CH_SET slots
+                // whose parameter index the callee body actually references at
+                // return position.  Fall back to the week-3 conservative
+                // union-all whenever the callee is unanalyzed (sentinel 0) or
+                // uses a parameter with index ≥ 16 (unrepresentable in our
+                // 16-slot shadow table).  Bit 62 = FN_USED_ANALYZED.
+                let b9_raw_used  = FN_USED_PARAMS[fi as usize]
+                let b9_analyzed  = b9_raw_used & 4611686018427387904  // bit 62
+                let b9_used_mask = b9_raw_used & 65535                // bits 0..15
+                let b9_overflow  = b9_raw_used & 4611686018427322368  // bits 16..61
                 var b9_ch_union: i64 = 0
-                var b9_i: i64 = 0
-                while b9_i < B9_ARG_CH_COUNT {
-                    if b9_i < 16 { b9_ch_union = b9_ch_union | B9_ARG_CH_SET[b9_i as usize] }
-                    b9_i = b9_i + 1
+                var b9_pu_union: i64 = 0
+                if b9_analyzed != 0 && b9_overflow == 0 {
+                    var b9_i: i64 = 0
+                    while b9_i < 16 && b9_i < B9_ARG_CH_COUNT {
+                        if (b9_used_mask & (1 << b9_i)) != 0 {
+                            b9_ch_union = b9_ch_union | B9_ARG_CH_SET[b9_i as usize]
+                            b9_pu_union = b9_pu_union | B9_ARG_PARAM_USED[b9_i as usize]
+                        }
+                        b9_i = b9_i + 1
+                    }
+                } else {
+                    var b9_i: i64 = 0
+                    while b9_i < B9_ARG_CH_COUNT {
+                        if b9_i < 16 {
+                            b9_ch_union = b9_ch_union | B9_ARG_CH_SET[b9_i as usize]
+                            b9_pu_union = b9_pu_union | B9_ARG_PARAM_USED[b9_i as usize]
+                        }
+                        b9_i = b9_i + 1
+                    }
                 }
                 EXPR_CH_SET = b9_ch_union
+                EXPR_PARAM_USED = b9_pu_union
                 // β⁵: propagate call-site argument variances into return EXPR_VSHADOW
                 // Conservative GUM: var_return ≈ Σᵢ var(argᵢ). Safe overestimate.
                 // Note: Sounio x86 passes f64 as integer bit-patterns in RAX — use RAX ops.
@@ -10626,6 +10681,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_HSHADOW_77 = VAR_HSHADOW_77[vi as usize]
                 // β⁹ GTT: restore the variable's channel topology on load.
                 EXPR_CH_SET = VAR_CH_SET[vi as usize]
+                EXPR_PARAM_USED = VAR_PARAM_USED[vi as usize]
             } else {
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
@@ -10642,6 +10698,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
                 EXPR_HSHADOW_77 = -1
                 EXPR_CH_SET = 0
+                EXPR_PARAM_USED = 0
             }
             // Track unit for dimension checking at + and -
             if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
@@ -11657,6 +11714,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     // GTT: this .value access seeds channel (MEAS_KNOW_IDX - 1),
                     // since MEAS_KNOW_IDX was just incremented above.  The topology
                     // of the resulting scalar is the singleton {just-seeded channel}.
+                    // β⁹ week-4: EXPR_PARAM_USED intentionally preserved from the
+                    // base variable load — the scalar still depends on the same
+                    // caller parameter whose Knowledge<T> we just extracted.
                     EXPR_CH_SET = 1 << (MEAS_KNOW_IDX - 1)
                     EXPR_TY = knowledge_hash_inner_ty(base_data_hash)
                     EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
@@ -11762,6 +11822,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let left_sshadow_7 = EXPR_SSHADOW_7
         // GTT: capture LHS channel topology before right operand compiles (which resets EXPR_CH_SET).
         let left_ch_set = EXPR_CH_SET
+        let left_param_used = EXPR_PARAM_USED
         let left_hsh_00 = EXPR_HSHADOW_00; let left_hsh_01 = EXPR_HSHADOW_01
         let left_hsh_02 = EXPR_HSHADOW_02; let left_hsh_03 = EXPR_HSHADOW_03
         let left_hsh_11 = EXPR_HSHADOW_11; let left_hsh_12 = EXPR_HSHADOW_12
@@ -11820,6 +11881,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let right_sshadow_7 = EXPR_SSHADOW_7
         // GTT: capture RHS channel topology before the big EXPR_* reset below.
         let right_ch_set = EXPR_CH_SET
+        let right_param_used = EXPR_PARAM_USED
         let right_hsh_00 = EXPR_HSHADOW_00; let right_hsh_01 = EXPR_HSHADOW_01
         let right_hsh_02 = EXPR_HSHADOW_02; let right_hsh_03 = EXPR_HSHADOW_03
         let right_hsh_11 = EXPR_HSHADOW_11; let right_hsh_12 = EXPR_HSHADOW_12
@@ -13273,6 +13335,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         if b4_result_slot_d >= 0 { emit_load_var(b4_result_slot_d) }
         // GTT: channel topology of a·b, a/b is the union of operand topologies.
         EXPR_CH_SET = left_ch_set | right_ch_set
+        EXPR_PARAM_USED = left_param_used | right_param_used
         lhs_end_line = TL[(EP - 1) as usize]
     }
 }
@@ -13368,6 +13431,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let left_ha_77 = EXPR_HSHADOW_77
         // β⁹ GTT: capture LHS channel topology before RHS compiles (which resets EXPR_CH_SET).
         let left_ch_set_a = EXPR_CH_SET
+        let left_param_used_a = EXPR_PARAM_USED
         EXPR_VSHADOW = -1
         EXPR_SSHADOW = -1
         EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
@@ -13389,6 +13453,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let right_unit_dim = EXPR_UNIT_DIM
         // β⁹ GTT: capture RHS channel topology before the merge resets EXPR_CH_SET.
         let right_ch_set_a = EXPR_CH_SET
+        let right_param_used_a = EXPR_PARAM_USED
         // β⁴: capture RHS shadow slots
         let right_vshadow_a = EXPR_VSHADOW
         let right_sshadow_a = EXPR_SSHADOW
@@ -13890,6 +13955,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         }
         // β⁹ GTT: channel topology of a + b, a - b is the union of operand topologies.
         EXPR_CH_SET = left_ch_set_a | right_ch_set_a
+        EXPR_PARAM_USED = left_param_used_a | right_param_used_a
     }
 }
 
@@ -15377,6 +15443,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 // β⁹ GTT: persist the RHS expression's channel topology
                 // into the newly-bound variable, then reset EXPR_CH_SET.
                 VAR_CH_SET[vix as usize] = EXPR_CH_SET
+                VAR_PARAM_USED[vix as usize] = EXPR_PARAM_USED
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
                 EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
@@ -15392,6 +15459,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
     EXPR_HSHADOW_77 = -1
                 EXPR_CH_SET = 0
+                EXPR_PARAM_USED = 0
             }
         }
         return
@@ -20058,6 +20126,23 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             param_vi = param_vi + 1
         }
 
+        // β⁹ GTT week-4: seed VAR_PARAM_USED for parameters so subsequent
+        // loads surface the correct enclosing-fn param-index dependency.
+        // Params occupy VAR slots 0..VAR_COUNT; cap indexed bits at 16
+        // (B9_ARG_CH_SET slot limit). Params >=16 get 0, which forces the
+        // body-precision gate at the caller's site to fall back to the
+        // conservative union-all rule.
+        var pu_seed: i64 = 0
+        while pu_seed < VAR_COUNT {
+            if pu_seed < 16 {
+                VAR_PARAM_USED[pu_seed as usize] = 1 << pu_seed
+            } else {
+                VAR_PARAM_USED[pu_seed as usize] = 0
+            }
+            pu_seed = pu_seed + 1
+        }
+        EXPR_PARAM_USED = 0
+
         // Emit non-zero global initializers once, at main's entry.
         // BSS already zeros globals, so this only matters for inits like
         // `var PI: f64 = 3.14159` where the declared value is not zero.
@@ -20120,6 +20205,13 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             }
             p = EP
         }
+
+        // β⁹ GTT week-4: capture body-tail EXPR_PARAM_USED into FN_USED_PARAMS
+        // so callers can tighten channel-set unions to only the params this
+        // function's return actually depends on.  Bit 62 (FN_USED_ANALYZED =
+        // 4611686018427387904) distinguishes "analyzed, no params used" from
+        // "unanalyzed" (fallback to conservative week-3 union).
+        FN_USED_PARAMS[fn_idx as usize] = EXPR_PARAM_USED | 4611686018427387904
 
         // Linear type check: warn if any linear variable was not used exactly once
         var lci: i64 = 0
@@ -23392,6 +23484,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_HSHADOW_77 = VAR_HSHADOW_77[vi as usize]
                 // β⁹ GTT: restore the variable's channel topology on load (a64 path).
                 EXPR_CH_SET = VAR_CH_SET[vi as usize]
+                EXPR_PARAM_USED = VAR_PARAM_USED[vi as usize]
             } else {
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
@@ -23408,6 +23501,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
                 EXPR_HSHADOW_77 = -1
                 EXPR_CH_SET = 0
+                EXPR_PARAM_USED = 0
             }
             var_mark_used(ns, ne)
         } else {
@@ -24491,6 +24585,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 VAR_HSHADOW_77[vix as usize] = EXPR_HSHADOW_77
                 // β⁹ GTT: persist RHS channel topology (a64 path).
                 VAR_CH_SET[vix as usize] = EXPR_CH_SET
+                VAR_PARAM_USED[vix as usize] = EXPR_PARAM_USED
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
                 EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
@@ -24506,6 +24601,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
     EXPR_HSHADOW_77 = -1
                 EXPR_CH_SET = 0
+                EXPR_PARAM_USED = 0
             }
         }
         return
@@ -25680,6 +25776,19 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             }
             param_vi_a = param_vi_a + 1
         }
+        // β⁹ GTT week-4: seed VAR_PARAM_USED for parameters (a64 mirror of
+        // x86 seeding).  The a64 call-site tightening is still deferred —
+        // this mirror only keeps load/let propagation accurate.
+        var pu_seed_a: i64 = 0
+        while pu_seed_a < VAR_COUNT {
+            if pu_seed_a < 16 {
+                VAR_PARAM_USED[pu_seed_a as usize] = 1 << pu_seed_a
+            } else {
+                VAR_PARAM_USED[pu_seed_a as usize] = 0
+            }
+            pu_seed_a = pu_seed_a + 1
+        }
+        EXPR_PARAM_USED = 0
         // Compile body
         EP = p
         var depth: i64 = 1
@@ -25688,6 +25797,11 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             compile_stmt_a64()
         }
         p = EP
+        // β⁹ GTT week-4: capture body-tail EXPR_PARAM_USED into FN_USED_PARAMS
+        // so callers in x86 (and future a64 callers) can tighten channel
+        // unions to only the params this function's return actually depends on.
+        // Bit 62 = FN_USED_ANALYZED (4611686018427387904).
+        FN_USED_PARAMS[fn_idx as usize] = EXPR_PARAM_USED | 4611686018427387904
         // Linear check
         var lci: i64 = 0
         while lci < VAR_COUNT {
