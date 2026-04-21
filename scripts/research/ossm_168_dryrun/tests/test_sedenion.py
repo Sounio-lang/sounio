@@ -3,8 +3,10 @@
 Verifies:
 - Cayley-Dickson doubling identity: (a, b) represents a + b * e_8
 - Canonical primitive zero-divisor pair (e_3 + e_10)(e_6 - e_15) = 0
-- Non-alternativity: exists triple (a, b, c) with ||[c,b,a]|| != ||[a,b,c]||
+- CD flexibility: [a, b, a] = 0, hence ||[c,b,a]|| = ||[a,b,c]|| always
+- Non-alternativity: exists a, b with [a, a, b] != 0 in S_16
 - O_168_sedenion_triples() returns exactly 168 triples with the expected form
+- v3 F_3 (L1 associator mass) is non-zero on generic states
 """
 
 from __future__ import annotations

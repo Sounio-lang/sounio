@@ -115,7 +115,7 @@ Apply Change 1 pattern to the ARM A64 handler at line ~18983.
 - Slot reset follows proven closure-handling pattern.
 
 **Validation sequence**:
-1. Current gen2 → gen3 bit-identical verify (md5=880d3180).
+1. Current gen2 → gen3 bit-identical verify (md5=1e0f256a — confirmed 2026-04-21).
 2. Apply fix. Rebuild gen1 via old compiler.
 3. Rebuild gen2 via gen1.
 4. Rebuild gen3 via gen2. Verify gen2 == gen3.
