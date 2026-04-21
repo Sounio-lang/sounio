@@ -66,22 +66,41 @@ class GUMPropagation:
     Provides numerical differentiation-based propagation for arbitrary
     functions of Knowledge inputs.
 
-    Example::
+    Two equivalent usage styles:
+
+    Style A — dict (classic)::
 
         gum = GUMPropagation()
         result = gum.propagate(
-            fn=lambda x, y: x * y / (x + y),  # parallel resistance
+            fn=lambda x, y: x * y / (x + y),
             inputs={"R1": measure(100, 2), "R2": measure(200, 5)},
         )
+
+    Style B — add_input (native-API compatible)::
+
+        gum = GUMPropagation()
+        gum.add_input("R1", measure(100, 2))
+        gum.add_input("R2", measure(200, 5))
+        result = gum.propagate(lambda args: args[0] * args[1] / (args[0] + args[1]))
+        gum.uncertainty_budget(lambda args: args[0] * args[1] / (args[0] + args[1]))
     """
 
-    def __init__(self, step_factor: float = 1e-5):
+    def __init__(self, step_factor: float = 1e-5, h: float = None):
         """
         Args:
             step_factor: relative step size for numerical differentiation
-                         (h = step_factor * |x| + 1e-10)
+            h: absolute step size override (matches Rust API)
         """
         self.step_factor = step_factor
+        self._h_override = h
+        self._registered_inputs: list[tuple[str, "Knowledge"]] = []
+
+    def add_input(self, name: str, k: "Knowledge") -> None:
+        """Register a named input (Style B / native-API)."""
+        self._registered_inputs.append((name, k))
+
+    def input_names(self) -> list[str]:
+        return [n for n, _ in self._registered_inputs]
 
     def _numerical_gradient(
         self,
@@ -97,38 +116,50 @@ class GUMPropagation:
         inputs_bwd[idx] -= h
         return (fn(*inputs_fwd) - fn(*inputs_bwd)) / (2.0 * h)
 
+    def _resolve_inputs(self, inputs_arg) -> tuple[list[str], list["Knowledge"]]:
+        """Resolve inputs from either dict (Style A) or registered list (Style B)."""
+        if inputs_arg is not None:
+            names = list(inputs_arg.keys())
+            knowls = [inputs_arg[n] for n in names]
+        elif self._registered_inputs:
+            names = [n for n, _ in self._registered_inputs]
+            knowls = [k for _, k in self._registered_inputs]
+        else:
+            raise ValueError("No inputs: use add_input() or pass inputs=dict")
+        return names, knowls
+
+    def _wrap_fn(self, fn: Callable, style_b: bool) -> Callable:
+        """For Style B, fn receives a list; unwrap to positional."""
+        if not style_b:
+            return fn
+        return lambda *args: fn(list(args))
+
     def propagate(
         self,
         fn: Callable,
-        inputs: dict[str, Knowledge],
+        inputs: dict = None,
         output_unit: str = "",
         output_source: str = "GUM-propagated",
-    ) -> Knowledge:
+    ) -> "Knowledge":
         """
         Propagate uncertainty through fn via GUM first-order method.
 
-        Args:
-            fn:           function accepting the nominal values as positional args
-            inputs:       dict of named Knowledge inputs
-            output_unit:  unit for the result
-            output_source: provenance source label
-
-        Returns:
-            Knowledge value with propagated uncertainty.
+        Style A: propagate(fn=lambda x,y: x/y, inputs={"x": k1, "y": k2})
+        Style B: propagate(fn=lambda args: args[0]/args[1])  (after add_input)
         """
-        names = list(inputs.keys())
-        knowls = [inputs[n] for n in names]
+        style_b = inputs is None and bool(self._registered_inputs)
+        names, knowls = self._resolve_inputs(inputs)
+        actual_fn = self._wrap_fn(fn, style_b)
+
         nominals = [k.value for k in knowls]
-        uncertainties = [k.uncertainty for k in knowls]
 
-        nominal_result = fn(*nominals)
+        nominal_result = actual_fn(*nominals)
 
-        # GUM: u²(y) = Σ_i (∂y/∂x_i)² * u²(x_i)
         variance = 0.0
-        for i, (nom, unc) in enumerate(zip(nominals, uncertainties)):
-            h = self.step_factor * abs(nom) + 1e-10
-            grad = self._numerical_gradient(fn, nominals, i, h)
-            variance += (grad * unc) ** 2
+        for i, (nom, unc_k) in enumerate(zip(nominals, knowls)):
+            step = self._h_override or (self.step_factor * abs(nom) + 1e-10)
+            grad = self._numerical_gradient(actual_fn, nominals, i, step)
+            variance += (grad * unc_k.uncertainty) ** 2
 
         u_combined = math.sqrt(variance)
         conf = min(k.confidence for k in knowls)
@@ -149,41 +180,40 @@ class GUMPropagation:
     def sensitivity_coefficients(
         self,
         fn: Callable,
-        inputs: dict[str, Knowledge],
-    ) -> dict[str, float]:
-        """
-        Compute sensitivity coefficients (∂y/∂x_i) for each input.
-
-        Useful for understanding which input dominates the uncertainty.
-        """
-        names = list(inputs.keys())
-        nominals = [inputs[n].value for n in names]
+        inputs: dict = None,
+    ) -> dict:
+        """Compute sensitivity coefficients ∂y/∂x_i (supports both styles)."""
+        style_b = inputs is None and bool(self._registered_inputs)
+        names, knowls = self._resolve_inputs(inputs)
+        actual_fn = self._wrap_fn(fn, style_b)
+        nominals = [k.value for k in knowls]
         coefficients = {}
         for i, name in enumerate(names):
-            h = self.step_factor * abs(nominals[i]) + 1e-10
-            grad = self._numerical_gradient(fn, nominals, i, h)
+            step = self._h_override or (self.step_factor * abs(nominals[i]) + 1e-10)
+            grad = self._numerical_gradient(actual_fn, nominals, i, step)
             coefficients[name] = grad
         return coefficients
 
     def uncertainty_budget(
         self,
         fn: Callable,
-        inputs: dict[str, Knowledge],
-    ) -> dict[str, float]:
+        inputs: dict = None,
+    ) -> dict:
         """
-        Compute the uncertainty budget: contribution (%) of each input
-        to the total output uncertainty.
+        Compute and print the uncertainty budget (supports both styles).
+        Returns dict of {name: variance_contribution}.
         """
-        names = list(inputs.keys())
-        nominals = [inputs[n].value for n in names]
-        uncertainties = [inputs[n].uncertainty for n in names]
+        style_b = inputs is None and bool(self._registered_inputs)
+        names, knowls = self._resolve_inputs(inputs)
+        actual_fn = self._wrap_fn(fn, style_b)
+        nominals = [k.value for k in knowls]
 
         contributions = {}
         total_var = 0.0
         for i, name in enumerate(names):
-            h = self.step_factor * abs(nominals[i]) + 1e-10
-            grad = self._numerical_gradient(fn, nominals, i, h)
-            var_i = (grad * uncertainties[i]) ** 2
+            step = self._h_override or (self.step_factor * abs(nominals[i]) + 1e-10)
+            grad = self._numerical_gradient(actual_fn, nominals, i, step)
+            var_i = (grad * knowls[i].uncertainty) ** 2
             contributions[name] = var_i
             total_var += var_i
 
