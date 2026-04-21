@@ -22,6 +22,7 @@
 #   CPUS           -c value (default: 16)
 #   MEM            sbatch --mem (default: 16G)
 #   TIMELIMIT      sbatch --time (default: 02:00:00)
+#   ONLY           comma-separated patient whitelist (default: full cohort)
 #
 # Output under /orangefs/training/sounio/door-f-runs/<RUN_ID>/:
 #   sio/<pat>/chunk_<NNN>.sio            generated Sounio programs
@@ -47,6 +48,11 @@ NODELIST="${NODELIST:-r770-proxmox}"
 CPUS="${CPUS:-16}"
 MEM="${MEM:-16G}"
 TIMELIMIT="${TIMELIMIT:-02:00:00}"
+ONLY="${ONLY:-}"
+ONLY_FLAG=""
+if [[ -n "${ONLY}" ]]; then
+    ONLY_FLAG="--only ${ONLY}"
+fi
 
 REQUIRED=(
     "bin/souc"
@@ -101,7 +107,8 @@ kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "
         --edf-dir      '${EDF_DIR}' \
         --out-root     '${STAGE_ROOT}' \
         --chunk-epochs ${CHUNK_EPOCHS} \
-        --radius-s     ${RADIUS_S} 2>&1 | tail -30
+        --radius-s     ${RADIUS_S} \\
+        ${ONLY_FLAG} 2>&1 | tail -30
     echo
     echo 'chunk manifest summary:'
     wc -l '${STAGE_ROOT}/chunk_manifest.tsv'
