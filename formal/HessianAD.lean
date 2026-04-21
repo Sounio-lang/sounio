@@ -14,11 +14,16 @@ mathematical counterpart and proves the structural invariants.
 
 Key correspondence with the compiler:
 
-  | Compiler emission (lean_single.sio)           | Lean definition         |
-  |----------------------------------------------|-------------------------|
-  | lines ~11412-11591 (multiply, first-order)   | `dual2Mul` (grad field) |
-  | lines ~11594+  (multiply, second-order)      | `dual2Mul` (hess field) |
-  | lines ~9320-9460 (unary chain rule)          | `dual2ApplyUnary`       |
+  | Compiler emission (lean_single.sio)          | Lean definition         |
+  |---------------------------------------------|-------------------------|
+  | lines ~11544-11671 (multiply, first-order)  | `dual2Mul` (grad field) |
+  | lines ~12012+     (multiply, second-order)  | `dual2Mul` (hess field) |
+  | lines ~9799-9950  (unary chain rule, hess)  | `dual2ApplyUnary`       |
+  | lines ~9200-9520  (atan2/pow — 2-arg chain) | (not modelled in Phase 1; Phase 2/3 concern) |
+
+(Line numbers are valid for commit `bb5e742d`.  A previous draft of this
+header incorrectly pointed "unary chain rule" at line 9320 — that is the
+`atan2` binary chain rule, not unary.)
 
 Zero-sorry guarantee.  No Mathlib dependency.  Self-contained: defines its
 own minimal `Dual2Field` typeclass to avoid import-time coupling with the
@@ -303,19 +308,39 @@ theorem mul_grad_comm (a b : Dual2 α) (k : Fin 8) :
 | Constant propagation (grad/hess)       | proved | `mul_const_left_*`, `add_const_right_*` |
 | Product val/grad commutativity         | proved | `mul_val_comm`, `mul_grad_comm` |
 
-## Compiler correspondence
+## Compiler correspondence (commit bb5e742d)
 
 Each theorem above matches a specific code path in
 `self-hosted/compiler/lean_single.sio`:
 
-- `hess_mul`    ↔ lines 11612-13064 (multiply Hessian pairs 0,0 through 7,7)
-- `hess_apply_unary` ↔ lines 9320-9460 (transcendental chain rule)
+- `hess_mul`    ↔ lines 12012+ (multiply Hessian pairs 0,0 through 7,7)
+- `hess_apply_unary` ↔ lines 9799-9950 (transcendental chain rule Hessian)
 - `grad_mul`    ↔ lines 11544-11591 (first-order multiply, ch 0-3)
                  plus lines 11592-11671 (first-order multiply, ch 4-7,
                  added in commit 43f397b5)
 - `grad_add`    ↔ lines ~13047 (add/subtract first-order)
 - `symmetric_mul` witnesses that the 36 upper-triangular pairs emitted
   by the compiler form a consistent symmetric Hessian.
+
+## Phase 1 gaps explicitly NOT covered by this file
+
+- **atan2/pow two-argument chain rule** (lines 9200-9520): modelled as a
+  specialised binary operation with distinct `faa`, `fbb`, `fab` slots.
+  Not covered by `dual2ApplyUnary` (which is strictly unary).  A separate
+  `dual2ApplyBinary` can be added when needed.
+- **`Knowledge<T>` multiplication via `compile_knowledge_muldiv_x86`**:
+  this path drops second-order shadows entirely.  Any program that wraps
+  its values in `Knowledge<T>` before arithmetic silently loses Hessian
+  information.  The current Phase 1 stdlib function `gum_second_order_variance`
+  assumes the caller operates on `.value` directly (as shown in the tests).
+- **Non-associative algebras**: `dual2Mul` assumes `mul_assoc` (Dual2Field axiom).
+  For non-associative types (octonions, sedenions, matrices), the bilinear
+  product rule is invalid.  Phase 2 introduces a compile-time gate at
+  `lean_single.sio:11803` to refuse propagation unless `@reassoc(fano)` is
+  annotated — but note: the gate is annotation-based and provides no Lean-level
+  defence against false-positive annotation.  Incorrect annotation produces
+  silently-wrong Hessians that still pass `σ²_2nd ≥ σ²_1st`.  Phase 2's
+  `NonAssocHessian.lean` will need to address this trust boundary explicitly.
 
 ## Axioms used
 
