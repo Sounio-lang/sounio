@@ -482,6 +482,16 @@ var VAR_CH_SET:  [i64; 1024] = [0; 1024]
 var B5_ARG_VSHADOW: [i64; 16] = [-1; 16]
 var B5_ARG_VCOUNT:  i64 = 0
 
+// β⁹ GTT inter-procedural topology: at user-fn call sites, union argument
+// channel sets into the return value's EXPR_CH_SET. Conservative upper
+// bound — the return is assumed to depend on every argument. Body-level
+// analysis (e.g. fn first(a,b) = a ⇒ {arg0} only) deferred to week-4+.
+// Mirrors B5_ARG_VSHADOW's placement and scope: fi >= 0 branch only;
+// closure / fn-ref indirect calls continue to leak the last arg's
+// topology (pre-existing limitation, matches B5's scope).
+var B9_ARG_CH_SET:   [i64; 16] = [0; 16]
+var B9_ARG_CH_COUNT: i64 = 0
+
 // --emit-econf: print function confidence table to diagnostic stream
 // --load-econf: pre-populate FN_EFF_CONF from a previously emitted .econf
 var CLI_EMIT_ECONF: i64 = 0
@@ -10160,11 +10170,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let prev_borrow_n = CALL_ARG_BORROW_N
             IN_CALL_ARGS = 1
             B5_ARG_VCOUNT = 0
+            B9_ARG_CH_COUNT = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or()
                 // β⁵: capture variance shadow for this argument
                 if argc < 16 { B5_ARG_VSHADOW[argc as usize] = EXPR_VSHADOW }
                 B5_ARG_VCOUNT = argc + 1
+                // β⁹ GTT: capture this argument's channel topology before the
+                // next arg's compile_or() overwrites EXPR_CH_SET.
+                if argc < 16 { B9_ARG_CH_SET[argc as usize] = EXPR_CH_SET }
+                B9_ARG_CH_COUNT = argc + 1
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
                 } else if call_sig > 0 {
@@ -10267,6 +10282,17 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // β⁹ GTT: union of argument channel sets becomes the return
+                // value's topology. Conservative upper bound; matches the
+                // atan2/pow builtin discipline. Runs before β⁵ so EXPR_CH_SET
+                // is correct regardless of whether β⁵ emits shadow ops below.
+                var b9_ch_union: i64 = 0
+                var b9_i: i64 = 0
+                while b9_i < B9_ARG_CH_COUNT {
+                    if b9_i < 16 { b9_ch_union = b9_ch_union | B9_ARG_CH_SET[b9_i as usize] }
+                    b9_i = b9_i + 1
+                }
+                EXPR_CH_SET = b9_ch_union
                 // β⁵: propagate call-site argument variances into return EXPR_VSHADOW
                 // Conservative GUM: var_return ≈ Σᵢ var(argᵢ). Safe overestimate.
                 // Note: Sounio x86 passes f64 as integer bit-patterns in RAX — use RAX ops.
