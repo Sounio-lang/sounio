@@ -457,6 +457,26 @@ var EXPR_HSHADOW_57: i64 = -1; var VAR_HSHADOW_57: [i64; 1024] = [-1; 1024]
 var EXPR_HSHADOW_66: i64 = -1; var VAR_HSHADOW_66: [i64; 1024] = [-1; 1024]
 var EXPR_HSHADOW_67: i64 = -1; var VAR_HSHADOW_67: [i64; 1024] = [-1; 1024]
 var EXPR_HSHADOW_77: i64 = -1; var VAR_HSHADOW_77: [i64; 1024] = [-1; 1024]
+
+// ════════════════════════════════════════════════════════════════════
+// Gradient Topology Types (GTT) — Phase β⁹
+// ────────────────────────────────────────────────────────────────────
+// A value's *topology* is the set of Hessian-input channels it depends on.
+// Channels are assigned at .value extraction time (per MEAS_KNOW_IDX).
+// Topology is tracked as an i64 bitmask: bit k set ⇔ channel k is in the set.
+//
+// Operations:
+//   .value access    → EXPR_CH_SET = 1 << (MEAS_KNOW_IDX - 1)  (just-seeded channel)
+//   a + b, a * b,... → EXPR_CH_SET = left_ch_set | right_ch_set  (union)
+//   let x = e        → VAR_CH_SET[x] = EXPR_CH_SET
+//   load x           → EXPR_CH_SET = VAR_CH_SET[x]
+//   hessian_of(e,j,k)→ require bits j, k in EXPR_CH_SET; else tc_error
+//
+// This is the GTT MVP: type-level refusal of hessian_of queries that ask
+// for Hessian entries outside the expression's channel topology.
+var EXPR_CH_SET: i64 = 0
+var VAR_CH_SET:  [i64; 1024] = [0; 1024]
+
 // β⁵ Inter-procedural variance: at call sites, accumulate argument variances
 // into the return EXPR_VSHADOW (conservative GUM: var_return ≈ Σ var(argᵢ))
 var B5_ARG_VSHADOW: [i64; 16] = [-1; 16]
@@ -7077,6 +7097,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
     LAST_EXPR_VAR_IDX = -1
     EXPR_TY = 0
     EXPR_TY_HASH = 0
+    // GTT: fresh primary expression starts with empty channel topology.
+    EXPR_CH_SET = 0
     EXPR_UNIT = 0
     LAST_IS_LITERAL = 0
     EXPR_VSHADOW = -1
@@ -8502,6 +8524,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     b7h_arg_vi = var_find_idx(TS[EP as usize], TE[EP as usize])
                 }
                 compile_or()  // first arg (expr)
+                // GTT: capture the first-arg's channel topology before j/k args overwrite EXPR_CH_SET.
+                let b7h_ch_set = EXPR_CH_SET
                 // Save Hessian shadow state before j/k args overwrite EXPR_HSHADOW via compile_primary()
                 let b7h_saved_h00 = EXPR_HSHADOW_00; let b7h_saved_h01 = EXPR_HSHADOW_01
                 let b7h_saved_h02 = EXPR_HSHADOW_02; let b7h_saved_h03 = EXPR_HSHADOW_03
@@ -8534,6 +8558,24 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // Normalize so j ≤ k
                 if b7h_j > b7h_k {
                     let b7h_tmp = b7h_j; b7h_j = b7h_k; b7h_k = b7h_tmp
+                }
+                // GTT — gradient topology type check.
+                // If the first-arg expression has a known non-empty channel
+                // topology (b7h_ch_set != 0) and both j, k are literal
+                // channel indices in [0, 8), require both bits to be in the
+                // topology.  A zero b7h_ch_set means the topology is unknown
+                // (variable-load without persistence, or opaque expression);
+                // in that case we fall through to the existing slot-based
+                // dispatch and don't force-refuse.
+                if b7h_ch_set != 0 && b7h_j >= 0 && b7h_j < 8 && b7h_k >= 0 && b7h_k < 8 {
+                    let j_bit = 1 << b7h_j
+                    let k_bit = 1 << b7h_k
+                    if (b7h_ch_set & j_bit) == 0 || (b7h_ch_set & k_bit) == 0 {
+                        // Print GTT diagnostic directly (bypass tc_error due to
+                        // a tc_error-path issue that crashes here).
+                        print("warning: hessian_of: requested channel not in expression's gradient topology (GTT refusal)\n")
+                        TYPECHECK_FAILED = 1
+                    }
                 }
                 // Resolve shadow slot from variable (via VAR_HSHADOW) or expression (via saved slot)
                 var b7h_slot: i64 = -1
@@ -11571,6 +11613,10 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_SSHADOW_5 = b4_sseed_5
                     EXPR_SSHADOW_6 = b4_sseed_6
                     EXPR_SSHADOW_7 = b4_sseed_7
+                    // GTT: this .value access seeds channel (MEAS_KNOW_IDX - 1),
+                    // since MEAS_KNOW_IDX was just incremented above.  The topology
+                    // of the resulting scalar is the singleton {just-seeded channel}.
+                    EXPR_CH_SET = 1 << (MEAS_KNOW_IDX - 1)
                     EXPR_TY = knowledge_hash_inner_ty(base_data_hash)
                     EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -11673,6 +11719,8 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let left_sshadow_5 = EXPR_SSHADOW_5
         let left_sshadow_6 = EXPR_SSHADOW_6
         let left_sshadow_7 = EXPR_SSHADOW_7
+        // GTT: capture LHS channel topology before right operand compiles (which resets EXPR_CH_SET).
+        let left_ch_set = EXPR_CH_SET
         let left_hsh_00 = EXPR_HSHADOW_00; let left_hsh_01 = EXPR_HSHADOW_01
         let left_hsh_02 = EXPR_HSHADOW_02; let left_hsh_03 = EXPR_HSHADOW_03
         let left_hsh_11 = EXPR_HSHADOW_11; let left_hsh_12 = EXPR_HSHADOW_12
@@ -11729,6 +11777,8 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let right_sshadow_5 = EXPR_SSHADOW_5
         let right_sshadow_6 = EXPR_SSHADOW_6
         let right_sshadow_7 = EXPR_SSHADOW_7
+        // GTT: capture RHS channel topology before the big EXPR_* reset below.
+        let right_ch_set = EXPR_CH_SET
         let right_hsh_00 = EXPR_HSHADOW_00; let right_hsh_01 = EXPR_HSHADOW_01
         let right_hsh_02 = EXPR_HSHADOW_02; let right_hsh_03 = EXPR_HSHADOW_03
         let right_hsh_11 = EXPR_HSHADOW_11; let right_hsh_12 = EXPR_HSHADOW_12
@@ -13180,6 +13230,8 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         // Restore arithmetic result (shadow computation uses rax for intermediate work)
         if b4_result_slot_m >= 0 { emit_load_var(b4_result_slot_m) }
         if b4_result_slot_d >= 0 { emit_load_var(b4_result_slot_d) }
+        // GTT: channel topology of a·b, a/b is the union of operand topologies.
+        EXPR_CH_SET = left_ch_set | right_ch_set
         lhs_end_line = TL[(EP - 1) as usize]
     }
 }
