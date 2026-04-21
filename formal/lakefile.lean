@@ -8,4 +8,5 @@ lean_lib Sounio where
   roots := #[`ElfLinker, `TypeChecker, `Effects, `LinearTypes, `Epistemic,
              `OctonionAlgebra, `EpistemicGemm, `EffectLinear,
              `HessianAD, `SecondOrderGUM, `NonAssocHessian,
-             `TypeCheckerSoundness, `KnowledgeArithmeticSoundness]
+             `TypeCheckerSoundness, `KnowledgeArithmeticSoundness,
+             `ChannelAssignmentSemantics]

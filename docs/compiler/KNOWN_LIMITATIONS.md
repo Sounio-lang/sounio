@@ -245,27 +245,29 @@ All previously planned features are implemented as of v0.99.0:
 - **Channels 4–7 in transcendentals**: Transcendental chain rule only propagates channels 0–3. Channels 4–7 are zero for transcendental outputs even if the input has active sensitivity there.
 - **Two-arg builtins (channels 4–7)**: `atan2`/`pow` handlers propagate channels 0–3 only.
 
-### Butterfly #3 — Knowledge arithmetic drops second-order shadows
+### Channel-at-`.value` semantics (resolves former "Butterfly #3")
 
-`compile_knowledge_muldiv_x86` at `self-hosted/compiler/lean_single.sio:5766` computes first-order variance through `Knowledge<f64> * Knowledge<f64>` (and `/`) via the delta method, but does **not** propagate `EXPR_SSHADOW_*` / `EXPR_HSHADOW_*` shadow slots.  Any downstream `hessian_of` / `sensitivity_of` on a result of direct Knowledge arithmetic silently returns zero for the Hessian/Jacobian contribution.
+Phase 5 re-evaluation: the MEAS_KNOW_IDX counter at `lean_single.sio:393` is incremented on every `.value` access to a Knowledge variable.  Channels are assigned **at `.value` extraction time, not at `measure()` time**.  A Knowledge struct at rest has no channel identity; it acquires one only when the user extracts `.value`.
 
-**Policy KAS-1 (formalised in `formal/KnowledgeArithmeticSoundness.lean`)** — for second-order GUM propagation, extract `.value` from each Knowledge operand, perform scalar arithmetic, then pass the collected Jacobian / Hessian arrays to `gum_second_order_variance`:
+This means the KAS-1 pattern (extract `.value` first, do scalar arithmetic) is **not a workaround** for a compiler limitation — it is the direct expression of the channel-assignment semantics.  Formalised in `formal/ChannelAssignmentSemantics.lean` (Phase 5 Lean file).
+
+`compile_knowledge_muldiv_x86` at `lean_single.sio:5766` correctly does not touch `MEAS_KNOW_IDX`; Knowledge multiplication is channel-silent.  Attempting `hessian_of((k1 * k2).value, 0, 1)` asks for `∂²/∂x_0∂x_1` of a one-input function (the single `.value` access seeds only channel 0); the result is zero by correctness of the channel-at-`.value` model, not by any bug.
+
+**The KAS-1 pattern (formalised in `formal/KnowledgeArithmeticSoundness.lean` + `formal/ChannelAssignmentSemantics.lean`)** expresses a multi-input Hessian function directly under the channel-at-`.value` semantics:
 
 ```sio
-// WRONG — shadows silently dropped:
-let kz = k1 * k2
-let v2 = gum_second_order_variance(...)  // returns first-order only
-
-// CORRECT — KAS-1 compliant:
-let x = k1.value          // shadow ch0 activates
-let y = k2.value          // shadow ch1 activates
-let z = x * y             // scalar; shadows propagate
+// Two-input Hessian function f(x, y) = x * y:
+let k1: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+let k2: Knowledge<f64> = measure(3.0, uncertainty: 0.1)
+let x = k1.value          // seeds channel 0 with 1.0, channel 1 with 0.0
+let y = k2.value          // seeds channel 1 with 1.0, channel 0 with 0.0
+let z = x * y             // scalar; shadows propagate via product rule
 let j: [f64; 8] = [sensitivity_of(z, 0), sensitivity_of(z, 1), ...]
 let h: [f64; 36] = [hessian_of(z, 0, 0), hessian_of(z, 0, 1), ...]
 let v2 = gum_second_order_variance(j, h, &sigma)
 ```
 
-Closing the butterfly at the compiler level requires either (a) extending the `Knowledge<T>` runtime layout with shadow-slot indices, or (b) inlining scalar shadow propagation around `compile_knowledge_muldiv_x86` (~870 lines of mechanical emission).  Both are Phase 5 architectural work and out of scope for Phase 4.  See `tests/run-pass/knowledge_kas1_policy.sio` for a concrete demonstration of both paths.
+Phase 5 attempted to "close the butterfly" at the compiler level (commit reverted — `self-hosted/compiler/lean_single.sio` unchanged).  The attempt added 44 cross-function shadow-bridging globals and product-rule emission inside `compile_knowledge_muldiv_x86`.  It correctly set `EXPR_SSHADOW` before the function returned, but the downstream `.value` access re-seeded channel 0 via MEAS_KNOW_IDX — overwriting the propagated shadow.  The lesson: under channel-at-`.value` semantics, there is no butterfly to close.  `tests/run-pass/knowledge_kas1_policy.sio` remains as a demonstration of the two paths; the "butterfly" path correctly returns zero under the model.
 
 ## Reporting Issues
 
