@@ -226,6 +226,25 @@ All previously planned features are implemented as of v0.99.0:
 | Forward declarations | v0.99.0 | 2-pass resolver |
 | Unit definitions | v0.99.0 | User-defined units + checking |
 
+## Hessian AD Capabilities and Architectural Limits (β⁷)
+
+`hessian_of(expr, j, k)` computes ∂²expr/∂xⱼ∂xₖ via second-order forward-mode AD.
+
+### What Works
+
+- **8 function inputs** (channels 0–7): indices 0–7 from `measure()` calls, 36 upper-triangular pairs
+- **Arithmetic**: `+`, `−`, `*`, `/` propagate full Hessian and first-order sensitivities
+- **Transcendentals (unary)**: `sqrt`, `exp`, `ln`/`log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `asin`, `acos` — full chain rule f′ and f″ in all 8 channels
+- **Two-arg builtins**: `atan2(y,x)` and `pow(x,y)` — full Hessian propagation for channels 0–3 and 10 pairs
+
+### Architectural Limitations (Tier 4 — Not Planned for Near-Term)
+
+- **Inter-procedural**: Hessian shadows do not cross user-defined function call boundaries. Workaround: inline the computation.
+- **Loop accumulation**: Hessian state resets between loop iterations; only the final body is live.
+- **Branch merging**: `if/else` branches do not merge Hessian state (no phi nodes for shadow slots).
+- **Channels 4–7 in transcendentals**: Transcendental chain rule only propagates channels 0–3. Channels 4–7 are zero for transcendental outputs even if the input has active sensitivity there.
+- **Two-arg builtins (channels 4–7)**: `atan2`/`pow` handlers propagate channels 0–3 only.
+
 ## Reporting Issues
 
 If you encounter any new issues, please report them at:
