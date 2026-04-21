@@ -135,7 +135,7 @@ def Footprint (S : ChSet) (D : Dual2 α) : Prop :=
   GradFootprint S D ∧ HessFootprint S D
 
 -- Helper: channel j absent from a union means absent from both components.
-private lemma not_union_iff (Sa Sb : ChSet) (j : Fin 8)
+private theorem not_union_iff (Sa Sb : ChSet) (j : Fin 8)
     (h : ¬ (Sa.union Sb) j.val) : ¬ Sa j.val ∧ ¬ Sb j.val := by
   simp only [ChSet.union] at h
   constructor
@@ -144,14 +144,14 @@ private lemma not_union_iff (Sa Sb : ChSet) (j : Fin 8)
 
 -- Helper: channel j absent from usedUnion implies absent from whichever
 -- component the union includes.
-private lemma not_usedUnion_left (U : UsedParams2) (Sa Sb : ChSet) (j : Fin 8)
+private theorem not_usedUnion_left (U : UsedParams2) (Sa Sb : ChSet) (j : Fin 8)
     (h : ¬ (usedUnion U Sa Sb) j.val) (hu : U.uses0 = true) : ¬ Sa j.val := by
   intro ha
   apply h
   simp only [usedUnion, ChSet.union, hu, if_true]
   simp [ha]
 
-private lemma not_usedUnion_right (U : UsedParams2) (Sa Sb : ChSet) (j : Fin 8)
+private theorem not_usedUnion_right (U : UsedParams2) (Sa Sb : ChSet) (j : Fin 8)
     (h : ¬ (usedUnion U Sa Sb) j.val) (hu : U.uses1 = true) : ¬ Sb j.val := by
   intro hb
   apply h
@@ -371,6 +371,188 @@ theorem seed_env_is_wt (vals : Fin 8 → α) :
   fun k => fp_seed k (vals k)
 
 -- ===========================================================================
+-- §11b. Tightness witness — body-precision canary over `Nat`
+-- ===========================================================================
+
+/-!
+The `bridge` theorem above establishes the *upper bound*: the declared GTT
+channel set contains the nonzero-grad support.  Body-precision (week-4
+`BTyping.call2` + `CalleeRespects`) narrows the declared set below the
+week-3 union — but that narrowing is only meaningful if the tightened set
+is *achievable*, i.e. the bound is not slack.
+
+This section exhibits an exact witness for the Phase-1 canary
+`proj_a(k1.value, k2.value)` under `UP = ⟨true, false⟩`:
+
+  * The week-4 declared set is
+      `usedUnion ⟨true,false⟩ (singleton 0) (singleton 1)`
+    which reduces pointwise to `ChSet.singleton 0` (channel 1 is dropped
+    because `proj_a` ignores its second argument).
+  * The returned `Dual2 Nat` has `grad ⟨0, _⟩ = 1` (channel 0 active) and
+    `grad ⟨1, _⟩ = 0` (channel 1 absent).
+
+Combined with `bridge`, the declared set is witnessed *exactly* — not a
+slack upper bound.  The same-shape claim about the static set is proved
+as `canary_proj_a_only_arg0` in `GradientTopology.lean:561`.
+-/
+
+/-- Concrete `Dual2Field` instance on `Nat`.  Used as the ground algebra
+    for the tightness witness, where `𝟎 = 0` and `𝟏 = 1` are decidably
+    distinct. -/
+instance instDual2FieldNat : Dual2Field Nat where
+  zero := 0
+  one  := 1
+  zero_mul := Nat.zero_mul
+  mul_zero := Nat.mul_zero
+  zero_add := Nat.zero_add
+  add_zero := Nat.add_zero
+  add_comm := Nat.add_comm
+  mul_comm := Nat.mul_comm
+  mul_assoc := Nat.mul_assoc
+
+/-- The `proj_a` callee as an abstract Dual2 operator: returns its first
+    argument, discards the second.  Models `fn proj_a(a, b) = a` which is
+    the week-4 Phase-1 compiler canary (body uses only parameter 0). -/
+def projA_body (a _b : Dual2 Nat) : Dual2 Nat := a
+
+/-- `proj_a` respects body-precision at `UP = ⟨true, false⟩`: the result's
+    footprint lies in the first argument's footprint and is independent of
+    the second.  Direct from `usedUnion ⟨true,false⟩ Sa Sb ≡ Sa` pointwise. -/
+theorem projA_respects_body_precision :
+    CalleeRespects ⟨true, false⟩ projA_body := by
+  intro Sa _Sb Da _Db hA _hB
+  refine ⟨?_, ?_⟩
+  · intro j hj
+    apply hA.1 j
+    intro ha
+    apply hj
+    simp only [usedUnion, ChSet.union, if_true, if_false]
+    simp [ha]
+  · intro j k hj
+    apply hA.2 j k
+    intro ha
+    apply hj
+    simp only [usedUnion, ChSet.union, if_true, if_false]
+    simp [ha]
+
+/-- The canary expression: `proj_a(var 0, var 1)` under `UP = ⟨true, false⟩`. -/
+def canaryE : BExpr Nat :=
+  BExpr.call2 ⟨true, false⟩ projA_body
+    (BExpr.var ⟨0, by decide⟩)
+    (BExpr.var ⟨1, by decide⟩)
+
+/-- Canary environment.  Slot 0: seed on channel 0 with value 0.
+    Slot 1: seed on channel 1 with value 0.  Slots 2-7: constant 0
+    (empty footprint).  Matches the static `canary_proj_a_only_arg0`
+    set-up in `GradientTopology.lean:561`. -/
+def canaryEnv : BEnv Nat where
+  denotation k :=
+    if k.val = 0 then dual2Seed ⟨0, by decide⟩ 0
+    else if k.val = 1 then dual2Seed ⟨1, by decide⟩ 0
+    else dual2Const 0
+  chset k :=
+    if k.val = 0 then ChSet.singleton 0
+    else if k.val = 1 then ChSet.singleton 1
+    else ChSet.empty
+
+/-- The canary environment is well-typed: each slot's denotation has
+    footprint matching its declared channel set.  Case analysis on
+    `k.val = 0` / `k.val = 1`, discharged by `fp_seed` / `fp_const`. -/
+theorem canaryEnv_wellTyped : EnvWT canaryEnv := by
+  intro k
+  by_cases h0 : k.val = 0
+  · show Footprint (canaryEnv.chset k) (canaryEnv.denotation k)
+    simp only [canaryEnv, h0, ↓reduceIte]
+    -- fp_seed ⟨0, _⟩ 0 : Footprint (ChSet.singleton (⟨0,_⟩ : Fin 8).val)
+    --                              (dual2Seed ⟨0,_⟩ 0)
+    -- and (⟨0,_⟩ : Fin 8).val = 0 by rfl
+    exact fp_seed ⟨0, by decide⟩ 0
+  · by_cases h1 : k.val = 1
+    · show Footprint (canaryEnv.chset k) (canaryEnv.denotation k)
+      simp only [canaryEnv, h0, h1, ↓reduceIte]
+      exact fp_seed ⟨1, by decide⟩ 0
+    · show Footprint (canaryEnv.chset k) (canaryEnv.denotation k)
+      simp only [canaryEnv, h0, h1, ↓reduceIte]
+      exact fp_const ChSet.empty 0
+
+/-- The canary expression types at `usedUnion ⟨true,false⟩ {0} {1}` under
+    the canary environment.  Applies `BTyping.call2` with the body-precision
+    `CalleeRespects` witness and `BTyping.var` on each argument. -/
+theorem canaryE_types :
+    BTyping canaryEnv canaryE
+      (usedUnion ⟨true, false⟩
+        (ChSet.singleton 0) (ChSet.singleton 1)) := by
+  -- The call2 rule concludes `usedUnion U (canaryEnv.chset ⟨0,_⟩)
+  -- (canaryEnv.chset ⟨1,_⟩)`.  Each of those chset reads reduces by
+  -- computation to the corresponding singleton (the `if k.val = 0` /
+  -- `if k.val = 1` branches fire).
+  have harg0 : canaryEnv.chset ⟨0, by decide⟩ = ChSet.singleton 0 := by
+    simp [canaryEnv]
+  have harg1 : canaryEnv.chset ⟨1, by decide⟩ = ChSet.singleton 1 := by
+    simp [canaryEnv]
+  have h0 : BTyping canaryEnv (BExpr.var ⟨0, by decide⟩) (ChSet.singleton 0) :=
+    harg0 ▸ BTyping.var ⟨0, by decide⟩
+  have h1 : BTyping canaryEnv (BExpr.var ⟨1, by decide⟩) (ChSet.singleton 1) :=
+    harg1 ▸ BTyping.var ⟨1, by decide⟩
+  exact BTyping.call2 ⟨true, false⟩ projA_body _ _ _ _
+    projA_respects_body_precision h0 h1
+
+/-- **Tightness witness** for the body-precision canary.
+
+    The canary `proj_a(var 0, var 1)` under `UP = ⟨true, false⟩` evaluates
+    to `dual2Seed ⟨0, _⟩ 0` (the first argument is projected through).
+    We read off two facts plus a nonzero discriminator:
+
+      * `grad ⟨0, _⟩ = 1` — slot 0 is active, matching the declared set.
+      * `grad ⟨1, _⟩ = 0` — slot 1 is absent, matching the body-precision
+        narrowing from week-3's conservative union.
+      * `1 ≠ 0` at `Nat` — the two values are decidably distinct.
+
+    Together these three facts exhibit the declared set `{0}` *exactly*:
+    the active slot is precisely slot 0. -/
+theorem gtt_hessian_bridge_tight :
+    (evalB canaryEnv canaryE).grad ⟨0, by decide⟩ = (1 : Nat) ∧
+    (evalB canaryEnv canaryE).grad ⟨1, by decide⟩ = (0 : Nat) ∧
+    ((1 : Nat) ≠ (0 : Nat)) := by
+  refine ⟨?_, ?_, ?_⟩
+  · -- evalB canary = projA_body (canaryEnv.denotation ⟨0,_⟩)
+    --                           (canaryEnv.denotation ⟨1,_⟩)
+    --              = canaryEnv.denotation ⟨0,_⟩ = dual2Seed ⟨0,_⟩ 0
+    -- so grad ⟨0,_⟩ = (if ⟨0,_⟩ = ⟨0,_⟩ then 𝟏 else 𝟎) = 1
+    show (projA_body (canaryEnv.denotation ⟨0, by decide⟩)
+                     (canaryEnv.denotation ⟨1, by decide⟩)).grad
+         ⟨0, by decide⟩ = 1
+    simp only [projA_body, canaryEnv, ↓reduceIte, dual2Seed]
+    rfl
+  · show (projA_body (canaryEnv.denotation ⟨0, by decide⟩)
+                     (canaryEnv.denotation ⟨1, by decide⟩)).grad
+         ⟨1, by decide⟩ = 0
+    simp only [projA_body, canaryEnv, ↓reduceIte, dual2Seed]
+    -- (if (⟨1,_⟩ : Fin 8) = ⟨0,_⟩ then 𝟏 else 𝟎) = 0
+    decide
+  · decide
+
+/-- **Bridge exactness for the canary.**  Combine the `bridge` upper bound
+    (established above) with `gtt_hessian_bridge_tight`:
+
+      * Upper bound ⟹ `grad ⟨1,_⟩ = 0` because channel 1 ∉ declared set.
+      * Tightness   ⟹ `grad ⟨0,_⟩ = 1 ≠ 0` because channel 0 is realised.
+
+    The declared set is thus the exact nonzero-grad support on this
+    environment, proving the body-precision narrowing is not conservative. -/
+theorem canary_bridge_exact :
+    (evalB canaryEnv canaryE).grad ⟨0, by decide⟩ ≠ (0 : Nat) ∧
+    (evalB canaryEnv canaryE).grad ⟨1, by decide⟩ = (0 : Nat) := by
+  refine ⟨?_, ?_⟩
+  · rw [gtt_hessian_bridge_tight.1]; exact gtt_hessian_bridge_tight.2.2
+  · -- Read grad ⟨1,_⟩ = 0 off the bridge theorem.  Channel 1 is absent
+    -- from `usedUnion ⟨true,false⟩ (singleton 0) (singleton 1)` because
+    -- the second `if` branch degenerates to `empty`.
+    have hfp :=
+      (bridge canaryEnv canaryEnv_wellTyped canaryE _ canaryE_types).1
+    exact hfp ⟨1, by decide⟩ (by decide)
+
+-- ===========================================================================
 -- §12. Summary
 -- ===========================================================================
 
@@ -392,6 +574,12 @@ theorem seed_env_is_wt (vals : Fin 8 → α) :
 | hessian_sparsity / gradient_sparsity corollaries       | proved  | §11                        |
 | body_precision_safety (usedUnion ⊆ union)              | proved  | §11                        |
 | seed_env_is_wt (concrete EnvWT witness)                | proved  | §11                        |
+| instDual2FieldNat (concrete ground algebra)            | def     | §11b                       |
+| projA_respects_body_precision (CalleeRespects witness) | proved  | §11b                       |
+| canaryE / canaryEnv / canaryEnv_wellTyped              | def+prv | §11b                       |
+| canaryE_types (BTyping at usedUnion ⟨true,false⟩)      | proved  | §11b                       |
+| **gtt_hessian_bridge_tight** (tightness witness)       | proved  | §11b                       |
+| **canary_bridge_exact** (upper-bound × tightness)      | proved  | §11b                       |
 
 ## Key design decisions
 
@@ -404,6 +592,15 @@ theorem seed_env_is_wt (vals : Fin 8 → α) :
 - **var types at env.chset k**: the typing rule for variables defers to the
   environment's declared channel set, matching standard type-theoretic
   practice.  `seed_env_is_wt` shows the canonical instance.
+- **Tightness via concrete Nat instance**: `gtt_hessian_bridge_tight` uses
+  `instDual2FieldNat` so that `𝟎 = 0 : Nat` and `𝟏 = 1 : Nat` are
+  decidably distinct (`by decide`).  Float would need noncomputable
+  decidability; Nat avoids that without losing generality of the
+  upper-bound theorem, which remains polymorphic over `[Dual2Field α]`.
+- **Tightness is existential, not universal**: we exhibit a specific env
+  in which the body-precision declared set is exactly the nonzero-grad
+  support.  A general statement "for every `UP` and every typing
+  derivation some env witnesses equality" is stronger and deferred.
 
 ## Remaining gaps (same as HessianAD §10)
 
