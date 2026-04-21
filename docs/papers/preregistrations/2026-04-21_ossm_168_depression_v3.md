@@ -3,7 +3,7 @@ topic_id: repo.preregistration.ossm-168-depression-v3
 authority: repo_only
 audience: researchers
 registration_date: 2026-04-21
-status: FROZEN_PENDING_COMMIT_HASH
+status: FROZEN
 supersedes: prereg/ossm-168-depression-v2
 supersedes_chain: v1 (63c2f602...) -> v2 (ca458198...) -> v3 (this)
 source_of_truth: this file
@@ -24,7 +24,7 @@ source_of_truth: this file
 **Affiliations:** PUC-SP (Biomaterials and Regenerative Medicine); Faculdade São Leopoldo Mandic
 **Repository:** github.com/agourakis82/sounio
 **Registration branch:** `integration/sounio-dev-ready-base`
-**Commit hash at registration:** `<FILLED BY git rev-parse HEAD AT FREEZE COMMIT>`
+**Commit hash at registration (freeze commit containing the SHA-256):** `a5762dde34caacd9d6f114deef154d3005bed82c`
 **SHA-256 of this document at freeze (commit 78491ea1, pre-hash-insertion):** `c403ff55beab70273da388be5fb062006fa63a7a1f455c4a80f42d5cdf5a87c7`
 
 ## 0. Binding statement
