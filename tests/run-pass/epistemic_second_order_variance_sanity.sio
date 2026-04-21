@@ -1,0 +1,154 @@
+//@ run-pass
+// Phase 1 sanity test: second-order GUM variance collapses to first-order
+// when the Hessian is identically zero (linear function).
+//
+// For f(x, y) = 3x + 4y, the Hessian is zero everywhere, so
+//   σ²_2nd(f) = J^T Σ J + ½ tr(HΣHΣ) = J^T Σ J + 0 = σ²_1st(f)
+//
+// With sigma[0,0] = 0.01, sigma[1,1] = 0.04, sigma[0,1] = 0, J = [3, 4]:
+//   σ²_1st = 9·0.01 + 16·0.04 = 0.73
+
+// =============================================================================
+// Inlined CovarianceMatrix (matches stdlib/epistemic/covariance.sio)
+// =============================================================================
+
+struct CovMat {
+    n: i32,
+    data: [f64; 300],
+}
+
+fn tri_idx_cov(n: i32, i: i32, j: i32) -> i32 with Mut {
+    var row = i
+    var col = j
+    if i > j { row = j; col = i }
+    return row * n - (row * (row - 1)) / 2 + (col - row)
+}
+
+fn cm_new(n: i32) -> CovMat {
+    return CovMat { n: n, data: [0.0; 300] }
+}
+
+fn cm_set(cov: &!CovMat, i: i32, j: i32, val: f64) with Mut {
+    let idx = tri_idx_cov(cov.n, i, j)
+    cov.data[idx] = val
+}
+
+fn cm_get(cov: &CovMat, i: i32, j: i32) -> f64 with Mut {
+    let idx = tri_idx_cov(cov.n, i, j)
+    return cov.data[idx]
+}
+
+// =============================================================================
+// Inlined second-order GUM variance (mirrors stdlib/epistemic/gum.sio)
+// =============================================================================
+
+fn hess_tri_idx_8(i: i32, j: i32) -> i32 with Mut {
+    var r = i
+    var c = j
+    if r > c { r = j; c = i }
+    return 8 * r - (r * (r - 1)) / 2 + (c - r)
+}
+
+fn hess_get_8(h: [f64; 36], i: i32, j: i32) -> f64 with Mut {
+    return h[hess_tri_idx_8(i, j)]
+}
+
+fn gum_first_order_variance(j: [f64; 8], sigma: &CovMat) -> f64 with Mut {
+    var acc: f64 = 0.0
+    var i: i32 = 0
+    while i < 8 {
+        var k: i32 = 0
+        while k < 8 {
+            acc = acc + j[i] * cm_get(sigma, i, k) * j[k]
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return acc
+}
+
+fn gum_trace_hshs(h: [f64; 36], sigma: &CovMat) -> f64 with Mut {
+    var acc: f64 = 0.0
+    var i: i32 = 0
+    while i < 8 {
+        var j: i32 = 0
+        while j < 8 {
+            let h_ij = hess_get_8(h, i, j)
+            var k: i32 = 0
+            while k < 8 {
+                let s_jk = cm_get(sigma, j, k)
+                var l: i32 = 0
+                while l < 8 {
+                    let h_kl = hess_get_8(h, k, l)
+                    let s_li = cm_get(sigma, l, i)
+                    acc = acc + h_ij * s_jk * h_kl * s_li
+                    l = l + 1
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return acc
+}
+
+fn gum_second_order_variance(j: [f64; 8], h: [f64; 36], sigma: &CovMat) -> f64 with Mut, Div {
+    let v1 = gum_first_order_variance(j, sigma)
+    let trace = gum_trace_hshs(h, sigma)
+    return v1 + 0.5 * trace
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// =============================================================================
+// Test: linear function f(x, y) = 3x + 4y
+// =============================================================================
+
+fn test_linear() -> f64 with IO, Epistemic, Mut, Div {
+    let xm: Knowledge<f64> = measure(1.0, uncertainty: 0.0)
+    let ym: Knowledge<f64> = measure(1.0, uncertainty: 0.0)
+    let x = xm.value
+    let y = ym.value
+    // f(x, y) = 3x + 4y — Hessian is identically zero
+    let z = 3.0 * x + 4.0 * y
+    // Jacobian: ∂z/∂x_k via sensitivity_of
+    let j: [f64; 8] = [
+        sensitivity_of(z, 0),
+        sensitivity_of(z, 1),
+        sensitivity_of(z, 2),
+        sensitivity_of(z, 3),
+        sensitivity_of(z, 4),
+        sensitivity_of(z, 5),
+        sensitivity_of(z, 6),
+        sensitivity_of(z, 7),
+    ]
+    // Hessian: ∂²z/∂x_j∂x_k via hessian_of — all zero for a linear function
+    var h: [f64; 36] = [0.0; 36]
+    var i: i32 = 0
+    while i < 8 {
+        var k: i32 = i
+        while k < 8 {
+            h[hess_tri_idx_8(i, k)] = hessian_of(z, i, k)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    // Build sigma: sigma[0,0] = 0.01, sigma[1,1] = 0.04, rest zero
+    var sigma = cm_new(8)
+    cm_set(&!sigma, 0, 0, 0.01)
+    cm_set(&!sigma, 1, 1, 0.04)
+    // First-order variance:  9·0.01 + 16·0.04 = 0.73
+    let sigma2_1st = gum_first_order_variance(j, &sigma)
+    // Second-order variance: should equal first-order because H = 0
+    let sigma2_2nd = gum_second_order_variance(j, h, &sigma)
+    // Return their absolute difference — must be zero
+    return abs_f64(sigma2_2nd - sigma2_1st)
+}
+
+fn main() with IO, Epistemic, Mut, Div {
+    let diff = test_linear()
+    println(diff)  // expect 0.000000
+}
