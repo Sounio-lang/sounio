@@ -26,14 +26,11 @@ const sourceChecks = [
     ],
   },
   {
-    file: 'src/components/common/Footer.astro',
+    file: 'src/pages/index.astro',
     mustContain: [
+      '/assets/emblem/emblem_badge_textperfect_optionC.svg',
       '/assets/stamps/stamp_monochrome_transparent.png',
     ],
-  },
-  {
-    file: 'src/pages/about/vision.astro',
-    mustContain: ['/assets/emblem/emblem_badge_textperfect_optionC.svg'],
   },
   {
     file: 'src/pages/science/index.astro',
@@ -42,6 +39,10 @@ const sourceChecks = [
   {
     file: 'src/pages/about/index.astro',
     mustContain: ['/assets/original-artworks/pappou_hero'],
+  },
+  {
+    file: 'src/pages/about/vision.astro',
+    mustContain: ['/assets/emblem/emblem_badge_textperfect_optionC.svg'],
   },
   {
     file: 'src/layouts/BaseLayout.astro',
