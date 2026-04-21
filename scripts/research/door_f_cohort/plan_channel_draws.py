@@ -73,10 +73,13 @@ def main():
     if args.n_ch != GEN.N_CH:
         sys.exit(f"--n-ch must equal generate.N_CH ({GEN.N_CH})")
 
-    rows = read_manifest(args.manifest)
+    rows_all = read_manifest(args.manifest)
+    canonical_idx = {p: i for i, (p, _, _) in enumerate(rows_all)}
     if args.only:
         keep = set(args.only.split(","))
-        rows = [r for r in rows if r[0] in keep]
+        rows = [r for r in rows_all if r[0] in keep]
+    else:
+        rows = rows_all
     if not rows:
         sys.exit("no patients selected")
 
@@ -84,8 +87,10 @@ def main():
     os.makedirs(args.out_root, exist_ok=True)
     manifest_path = os.path.join(args.out_root, "draw_manifest.tsv")
 
-    rng_master = np.random.default_rng(args.seed)
     n_written = 0
+    # Per-patient deterministic seed derived from (base_seed, canonical_index)
+    # so that splitting the run with --only yields bit-identical .sio files
+    # as the unfiltered run for the same patients.
     with open(manifest_path, "w") as mf:
         mf.write("patient\tdraw_id\tchannels\tsio\tedf\n")
         for patient, edf_name, onset in rows:
@@ -97,8 +102,8 @@ def main():
                 sys.exit(f"{patient}: only {n_ch_avail} channels available, need ≥{args.n_ch}")
             sio_dir = os.path.join(args.out_root, "sio", patient)
             os.makedirs(sio_dir, exist_ok=True)
-            # Use a patient-scoped RNG derived from the master seed + patient rank.
-            rng = np.random.default_rng(rng_master.integers(0, 2**63 - 1))
+            rng = np.random.default_rng(
+                np.random.SeedSequence([args.seed, canonical_idx[patient]]))
             for d in range(args.n_draws):
                 ch = sorted(rng.choice(n_ch_avail, size=args.n_ch, replace=False).tolist())
                 sio_path = os.path.join(sio_dir, f"draw_{d:03d}.sio")
