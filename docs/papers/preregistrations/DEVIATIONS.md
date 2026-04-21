@@ -149,4 +149,132 @@ their respective pinned protocols.
 
 ---
 
+## Entry 0003 — 2026-04-21 — Annotation: operational resolution of v2 F_3 triple indexing
+
+- **Timestamp (UTC):** 2026-04-21 (during Trilho A/B implementation)
+- **Commit hash at decision:** immediately follows `619da07c` (v2 registration commit)
+- **Scope:** v2, §2 H3 F_3, specifically the indexing of $(I,J,K)$ in the sum
+- **Type:** Annotation (operational resolution; not a protocol deviation)
+
+### Description
+
+v2's F_3 formula sums over $(I,J,K) \in \widetilde{\mathcal{O}}_{168}$ but the
+protocol text declares $\widetilde{\mathcal{O}}_{168}$ as "one of the two
+orbits of 168 primitive sedenion zero-divisor **pairs** under
+$\mathrm{PGL}(3,\mathbb{F}_2)$". A set of pairs and a set of ordered
+triples are not the same object; the formula does not specify how to
+extract a triple from a pair.
+
+### Resolution (deterministic, pre-data)
+
+For each of the 168 non-Fano ordered triples $(i,j,k) \in \mathcal{O}_{168}$
+(with $i,j,k \in \{1,\dots,7\}$), the corresponding sedenion triple is
+$$
+(I, J, K) \;=\; (i,\; 8+j,\; k).
+$$
+This choice is justified as follows:
+
+1. **Count preservation.** Exactly 168 triples, matching the protocol's
+   $|\widetilde{\mathcal{O}}_{168}|$.
+2. **Non-alternativity.** Any triple of the form $(I, 8+j, K)$ with
+   $I,K \in \{1,\dots,7\}$ mixes the two Cayley-Dickson halves of
+   $\mathbb{S}_{16}$ and therefore lives outside the alternative
+   octonion subalgebra, making $\|[\cdot,\cdot,\cdot]\| \neq
+   \|[\cdot_{\text{rev}}, \cdot, \cdot_{\text{rev}}]\|$ generic.
+3. **Algebraic lineage.** The triple inherits its combinatorial
+   structure directly from $\mathcal{O}_{168}$ (used for H1), keeping
+   H1 and H3 anchored to the same $\mathrm{PGL}(3,\mathbb{F}_2)$-orbit
+   of the 168 Theorem.
+
+### Reclassification
+
+None. v2 is confirmatory, and this annotation fixes the deterministic
+implementation of F_3 prior to any data access. No data has been
+accessed.
+
+### Follow-up
+
+The enumeration is produced by
+`scripts/research/ossm_168_dryrun/sedenion.py::O_168_sedenion_triples()`,
+returning a fixed length-168 tuple in lex order of $(i,j,k)$.
+
+---
+
+## Entry 0004 — 2026-04-21 — Erratum and supersedence of v2 by v3
+
+- **Timestamp (UTC):** 2026-04-21 (same calendar day; discovered during sedenion test writing)
+- **Commit hash at decision:** immediately follows `619da07c` (v2 registration commit) and the DEVIATIONS-0003 annotation
+- **Scope:** v2, §2 H3 (Negative-valence bias ↔ Associator parity asymmetry)
+- **Type:** Erratum with supersedence (not a within-protocol deviation)
+
+### Description
+
+While implementing the v2 F_3 definition in
+`scripts/research/ossm_168_dryrun/sedenion.py` and testing it against
+generic sedenion states, the author verified numerically — and then
+derived algebraically — that the v2 F_3 is also identically zero.
+
+The structural fact: **every Cayley-Dickson algebra is flexible**, i.e.
+$[x, y, x] = 0$ for all $x, y$ in $\mathbb{C}, \mathbb{H}, \mathbb{O},
+\mathbb{S}_{16}, \mathcal{T}_{32}, \dots$. Flexibility alone implies
+$[c, b, a] = -[a, b, c]$, by expanding $0 = [a+c, b, a+c] =
+[a,b,a] + [a,b,c] + [c,b,a] + [c,b,c] = [a,b,c] + [c,b,a]$. Hence
+$\|[c,b,a]\| = \|[a,b,c]\|$ throughout the CD tower.
+
+Any feature defined as a norm asymmetry under $(a \leftrightarrow c)$
+reversal therefore collapses to zero regardless of which CD algebra
+it inhabits. v2's migration from $\mathbb{O}$ to $\mathbb{S}_{16}$
+did not solve the problem; it only relocated it one rung up the
+tower that never admits the rescue. This was a genuine oversight
+of the author at v2 freeze time.
+
+### Resolution
+
+v2 is not amended. The tag `prereg/ossm-168-depression-v2` remains
+public, frozen, with its SHA-256
+`ca458198bab2f08ec13d8edbb8b8bb1da54e2cc5f615dec9e60a3f1b2f1b82a5`
+intact. Historical integrity preserved.
+
+v2 is **superseded by v3**, which abandons the "parity asymmetry"
+framing entirely and redefines F_3 as the $L^1$ mass of the sedenion
+associator on the lifted 168-orbit. This is non-zero on generic
+states and conceptually a dual of H1 at one rung higher in the CD
+tower (H1 measures $L^2$ octonion associator mass; H3 measures
+$L^1$ sedenion associator mass). H3 is renamed accordingly.
+
+v3 is stored at
+`docs/papers/preregistrations/2026-04-21_ossm_168_depression_v3.md`,
+frozen under its own SHA-256 and tagged
+`prereg/ossm-168-depression-v3`.
+
+### Reclassification
+
+In v2: H3 is withdrawn as untestable (same fate as H3 in v1).
+H1 and H2 in v2 remain valid confirmatory hypotheses.
+
+In v3: H1, H2, H3 are confirmatory. H3 in v3 is not downgraded to
+exploratory, because v3 is a new registration rather than a
+within-protocol drift from v2, and no LEMON/MODMA signal data has
+been accessed at any point in the v1 → v2 → v3 chain.
+
+### No data accessed
+
+At the time of this supersedence, commit
+`3364fbbc33a6140394a5c076447926895e9811d0` and earlier, no LEMON
+or MODMA signal data has been accessed. Both the v1 → v2 transition
+(Entry 0002) and the v2 → v3 transition (this entry) occurred purely
+in the implementation phase, before any data contact.
+
+### Honest acknowledgement
+
+Two successive algebraic errata on H3 within a single registration
+day is a clear signal that the original phrase "parity asymmetry
+via associator reversal" was not a mathematically realisable
+construct on the Cayley-Dickson tower. v3's renaming of H3 to
+"L¹ sedenion associator mass" is the author's commitment to
+align the protocol language with what the feature actually
+computes, rather than preserve an evocative but false framing.
+
+---
+
 *No further entries. Append new entries below this line.*
