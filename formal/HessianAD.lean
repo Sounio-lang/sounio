@@ -286,6 +286,102 @@ theorem mul_grad_comm (a b : Dual2 α) (k : Fin 8) :
 -- and `F.add_comm` whenever needed at the instance level.
 
 -- ---------------------------------------------------------------------------
+-- §9b. Channel footprint — GTT-HessianAD sparsity bridge
+-- ---------------------------------------------------------------------------
+
+-- Matches `ChSet` in GradientTopology.lean; redefined here to keep the two
+-- files independent and import-free.
+abbrev ShadowChSet := Nat → Bool
+
+/-- A `Dual2` value has `GradFootprint S` when every channel outside `S`
+    carries zero gradient.
+    Semantic content: `j ∉ S ⟹ ∂e/∂x_j = 0`. -/
+def GradFootprint (S : ShadowChSet) (D : Dual2 α) : Prop :=
+  ∀ j : Fin 8, ¬ S j.val → D.grad j = 𝟎
+
+/-- A `Dual2` value has `HessFootprint S` when every Hessian row indexed by a
+    channel outside `S` is identically zero.
+    Semantic content: `j ∉ S ⟹ ∀ k, ∂²e/∂x_j∂x_k = 0`.
+    Under body-precision (`gtt_sound_body` in GradientTopology.lean) the
+    declared set is exact: `j ∈ S ⟺ ∂²e/∂x_j ≠ 0` for generic inputs. -/
+def HessFootprint (S : ShadowChSet) (D : Dual2 α) : Prop :=
+  ∀ j k : Fin 8, ¬ S j.val → D.hess j k = 𝟎
+
+-- Base cases ---
+
+theorem gradFootprint_const (S : ShadowChSet) (v : α) :
+    GradFootprint S (dual2Const v) :=
+  fun _ _ => rfl
+
+theorem hessFootprint_const (S : ShadowChSet) (v : α) :
+    HessFootprint S (dual2Const v) :=
+  fun _ _ _ => rfl
+
+/-- A seed on channel `c` has zero gradient on every channel ≠ c.
+    Base case: `⊢ seed c : {c}` (GTT). -/
+theorem gradFootprint_seed (c : Fin 8) (v : α) :
+    GradFootprint (fun j => decide (j = c.val)) (dual2Seed c v) := by
+  intro j hj
+  simp only [dual2Seed]
+  have hne : j ≠ c := by
+    intro heq; apply hj; simp [heq]
+  rw [if_neg hne]
+
+theorem hessFootprint_seed (S : ShadowChSet) (c : Fin 8) (v : α) :
+    HessFootprint S (dual2Seed c v) :=
+  fun _ _ _ => rfl
+
+-- Preservation lemmas ---
+
+theorem gradFootprint_add (S : ShadowChSet) (A B : Dual2 α)
+    (hA : GradFootprint S A) (hB : GradFootprint S B) :
+    GradFootprint S (dual2Add A B) := by
+  intro j hj
+  simp only [dual2Add, hA j hj, hB j hj, F.zero_add]
+
+theorem hessFootprint_add (S : ShadowChSet) (A B : Dual2 α)
+    (hA : HessFootprint S A) (hB : HessFootprint S B) :
+    HessFootprint S (dual2Add A B) := by
+  intro j k hj
+  simp only [dual2Add, hA j k hj, hB j k hj, F.zero_add]
+
+theorem gradFootprint_mul (S : ShadowChSet) (A B : Dual2 α)
+    (hA : GradFootprint S A) (hB : GradFootprint S B) :
+    GradFootprint S (dual2Mul A B) := by
+  intro j hj
+  simp only [dual2Mul, hA j hj, hB j hj, F.mul_zero, F.zero_mul, F.add_zero]
+
+/-- Product rule preserves Hessian footprint.
+    Requires both grad and hess footprints because the bilinear product formula
+    mixes gradient cross-terms with Hessian entries:
+    `H_jk(A·B) = H_jk(A)·B.val + (A.grad j · B.grad k + A.grad k · B.grad j) + A.val · H_jk(B)`.
+    All four terms vanish when `j ∉ S` via `HessFootprint` (rows) and `GradFootprint` (columns). -/
+theorem hessFootprint_mul (S : ShadowChSet) (A B : Dual2 α)
+    (hAg : GradFootprint S A) (hBg : GradFootprint S B)
+    (hAh : HessFootprint S A) (hBh : HessFootprint S B) :
+    HessFootprint S (dual2Mul A B) := by
+  intro j k hj
+  simp only [dual2Mul, hAh j k hj, hBh j k hj, hAg j hj, hBg j hj,
+             F.zero_mul, F.mul_zero, F.zero_add, F.add_zero]
+
+theorem gradFootprint_apply_unary (S : ShadowChSet) (fv fp fpp : α) (G : Dual2 α)
+    (hG : GradFootprint S G) :
+    GradFootprint S (dual2ApplyUnary fv fp fpp G) := by
+  intro j hj
+  simp only [dual2ApplyUnary, hG j hj, F.mul_zero]
+
+/-- Unary chain rule preserves Hessian footprint.
+    Faà-di-Bruno 2nd-order: `fpp · G.grad j · G.grad k + fp · G.hess j k`.
+    When `j ∉ S`: both `G.grad j` and `G.hess j k` are zero, collapsing both
+    terms to zero independently of `fp`, `fpp`, and `G.grad k`. -/
+theorem hessFootprint_apply_unary (S : ShadowChSet) (fv fp fpp : α) (G : Dual2 α)
+    (hGg : GradFootprint S G) (hGh : HessFootprint S G) :
+    HessFootprint S (dual2ApplyUnary fv fp fpp G) := by
+  intro j k hj
+  simp only [dual2ApplyUnary, hGg j hj, hGh j k hj,
+             F.mul_zero, F.zero_mul, F.add_zero]
+
+-- ---------------------------------------------------------------------------
 -- §10. Summary
 -- ---------------------------------------------------------------------------
 
@@ -307,6 +403,8 @@ theorem mul_grad_comm (a b : Dual2 α) (k : Fin 8) :
 | Symmetry: unary chain rule             | proved | `symmetric_apply_unary` |
 | Constant propagation (grad/hess)       | proved | `mul_const_left_*`, `add_const_right_*` |
 | Product val/grad commutativity         | proved | `mul_val_comm`, `mul_grad_comm` |
+| GradFootprint: const/seed/add/mul/unary| proved | `gradFootprint_*`     |
+| HessFootprint: const/seed/add/mul/unary| proved | `hessFootprint_*`     |
 
 ## Compiler correspondence (commit bb5e742d)
 
@@ -322,7 +420,25 @@ Each theorem above matches a specific code path in
 - `symmetric_mul` witnesses that the 36 upper-triangular pairs emitted
   by the compiler form a consistent symmetric Hessian.
 
-## Phase 1 gaps explicitly NOT covered by this file
+## GTT-HessianAD Bridge (§9b)
+
+`GradFootprint` and `HessFootprint` are the inductive preservation lemmas for the
+bridge between `GradientTopology.lean` and this file.  The base cases
+(`gradFootprint_const`, `gradFootprint_seed`, `hessFootprint_const`,
+`hessFootprint_seed`) and all three arithmetic preservation steps
+(`_add`, `_mul`, `_apply_unary`) are proved here.
+
+The full inductive theorem — "if the GTT typing `⊢ e : S` holds, then the
+denotation `D` of `e` satisfies `GradFootprint S D ∧ HessFootprint S D`" —
+requires a combined evaluator model pairing `Dual2` denotations with GTT
+typing derivations.  That is deferred to `GradientTopologyBridge.lean`.
+
+Under `gtt_sound_body` (GradientTopology §7b), the containment `S ⊆ sem(e)`
+is tightened to equality on the body-precision fragment, so on that fragment
+`HessFootprint S D` characterises the nonzero Hessian support exactly
+(not just as an over-approximation).
+
+## Remaining gaps
 
 - **atan2/pow two-argument chain rule** (lines 9200-9520): modelled as a
   specialised binary operation with distinct `faa`, `fbb`, `fab` slots.
@@ -341,6 +457,7 @@ Each theorem above matches a specific code path in
   defence against false-positive annotation.  Incorrect annotation produces
   silently-wrong Hessians that still pass `σ²_2nd ≥ σ²_1st`.  Phase 2's
   `NonAssocHessian.lean` will need to address this trust boundary explicitly.
+- **Full GTT-HessianAD inductive theorem**: deferred to `GradientTopologyBridge.lean`.
 
 ## Axioms used
 
