@@ -1,0 +1,60 @@
+//@ run-pass
+//@ expect-stdout: BBB_GATE_OK
+//
+// BBB confidence-gate verdict test.
+//
+// Scenario 1: default policy (gate=0.50, dominance=0.05) on the
+//   rapamycin 5 mg IV Kpuu_AUC budget — ps_bbb (share ~9%,
+//   confidence 0.45) is a driver but fails the gate → REFUSED.
+//
+// Scenario 2: relaxed policy (gate=0.20) on the same budget — all
+//   drivers (including fu_icf conf=0.25) clear the gate → ADMITTED.
+//
+// Scenario 3: high-dominance threshold (gate=0.50, dominance=0.30)
+//   narrows drivers to {kpuu_brain (0.60) only} — passes → ADMITTED.
+
+use darwin_pbpk::bbb::bbb_gate::*
+use darwin_pbpk::bbb::bbb_gum::*
+use darwin_pbpk::bbb::bbb_priors::{bbb_rapamycin_priors}
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::epistemic_pbpk14::{ep14_rapamycin_params}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = ep14_rapamycin_params()
+    let bbb_prm = bbb_rapamycin_params()
+    let priors  = bbb_rapamycin_priors()
+
+    var checkpoints: [f64; 32] = [0.0; 32]
+    checkpoints[0]  = 0.0;  checkpoints[1]  = 0.25; checkpoints[2]  = 0.5
+    checkpoints[3]  = 1.0;  checkpoints[4]  = 2.0;  checkpoints[5]  = 4.0
+    checkpoints[6]  = 6.0;  checkpoints[7]  = 8.0;  checkpoints[8]  = 12.0
+    checkpoints[9]  = 18.0; checkpoints[10] = 24.0; checkpoints[11] = 36.0
+    checkpoints[12] = 48.0; checkpoints[13] = 72.0; checkpoints[14] = 120.0
+    checkpoints[15] = 168.0
+    let n_points = 16
+
+    let budget = bbb_gum_budget(sys_prm, bbb_prm, priors, 5.0,
+                                 checkpoints, n_points, 0.01, 0)
+
+    // ----- Scenario 1: default policy should REFUSE -----
+    let v1 = bbb_gate_evaluate(budget, 0.50, 0.05)
+    if v1.admitted { return 1 }
+    // The first failing driver should be ps_bbb (index 0), confidence 0.45
+    if v1.first_failing_idx != 0 { return 2 }
+
+    // ----- Scenario 2: relaxed gate (0.20) should ADMIT -----
+    let v2 = bbb_gate_evaluate(budget, 0.20, 0.05)
+    if v2.admitted == false { return 3 }
+
+    // ----- Scenario 3: high dominance threshold should ADMIT -----
+    let v3 = bbb_gate_evaluate(budget, 0.50, 0.30)
+    if v3.admitted == false { return 4 }
+    if v3.n_drivers != 1 { return 5 }
+    if v3.driver_idx[0] != 2 { return 6 }  // kpuu_brain
+
+    bbb_gate_print_verdict(v1)
+    println("---")
+    bbb_gate_print_verdict(v3)
+    println("BBB_GATE_OK")
+    0
+}
