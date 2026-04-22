@@ -10445,6 +10445,30 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         EXPR_TY_HASH = 0
                     }
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                    // β⁹ GTT week-9: closure / fn-ref indirect call topology.
+                    // Callee body is unknown so body-precision is unavailable;
+                    // conservatively union all in-range B9_ARG_CH_SET slots
+                    // (matches the week-3 fallback rule for direct calls).
+                    // Saturate to all-bits-set when argc ≥ 16 — same overflow
+                    // discipline as week-8 stage 2.  Without this, EXPR_CH_SET
+                    // / EXPR_PARAM_USED leak the last `compile_or()` arg's
+                    // values, which is unsound: a hessian_of(.., j, k) on the
+                    // returned value could be accepted when its true topology
+                    // requires another arg's channel.
+                    var b9c_ch_union: i64 = 0
+                    var b9c_pu_union: i64 = 0
+                    var b9c_i: i64 = 0
+                    while b9c_i < B9_ARG_CH_COUNT && b9c_i < 16 {
+                        b9c_ch_union = b9c_ch_union | B9_ARG_CH_SET[b9c_i as usize]
+                        b9c_pu_union = b9c_pu_union | B9_ARG_PARAM_USED[b9c_i as usize]
+                        b9c_i = b9c_i + 1
+                    }
+                    if argc >= 16 {
+                        b9c_ch_union = -1
+                        b9c_pu_union = -1
+                    }
+                    EXPR_CH_SET = b9c_ch_union
+                    EXPR_PARAM_USED = b9c_pu_union
                 } else {
                     tc_undefined_var(call_tok)
                     emit_drop_call_args_x86(abi_argc + call_extra_stack_args_x86(abi_argc, 6))
@@ -10452,6 +10476,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     EXPR_IS_F64 = 0
                     EXPR_TY = 0
                     EXPR_TY_HASH = 0
+                    EXPR_CH_SET = 0
+                    EXPR_PARAM_USED = 0
                 }
             }
             return
@@ -20441,16 +20467,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em(0x0F); em(0x0B)
     } else if TARGET_OS == 2 {
         // macOS x86_64 trampoline
-        // macOS entry: same argc/argv layout as Linux
+        // LC_MAIN entry arrives with argc/argv in the normal C ABI registers.
+        // Skip argv[0] so the self-hosted CLI sees <source> at argv[0].
         let argc_addr = GL_BSS_BASE - 16
         let argv_addr = GL_BSS_BASE - 8
-        em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (argc)
+        em(0x48); em(0x89); em(0xf8)            // mov rax, rdi (argc)
         em(0x48); em(0x83); em(0xe8); em(0x01)  // sub rax, 1
         em(0x48); em(0xb9); em64(argc_addr)
-        em(0x48); em(0x89); em(0x01)  // mov [rcx], rax
-        em(0x48); em(0x8d); em(0x44); em(0x24); em(16)  // lea rax, [rsp+16]
+        em(0x48); em(0x89); em(0x01)            // mov [rcx], rax
+        em(0x48); em(0x89); em(0xf0)            // mov rax, rsi (argv)
+        em(0x48); em(0x83); em(0xc0); em(0x08)  // add rax, 8
         em(0x48); em(0xb9); em64(argv_addr)
-        em(0x48); em(0x89); em(0x01)  // mov [rcx], rax
+        em(0x48); em(0x89); em(0x01)            // mov [rcx], rax
         // call main
         em(0xe8)
         let mrel = FN_OFF[main_fn as usize] - (CL + 4)
@@ -23431,12 +23459,31 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         EXPR_TY_HASH = 0
                     }
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                    // β⁹ GTT week-9 (a64 mirror): closure / fn-ref indirect
+                    // call topology — conservative union of in-range
+                    // B9_ARG_CH_SET, saturating widen at argc ≥ 16.
+                    var b9ca_ch_union: i64 = 0
+                    var b9ca_pu_union: i64 = 0
+                    var b9ca_i: i64 = 0
+                    while b9ca_i < B9_ARG_CH_COUNT && b9ca_i < 16 {
+                        b9ca_ch_union = b9ca_ch_union | B9_ARG_CH_SET[b9ca_i as usize]
+                        b9ca_pu_union = b9ca_pu_union | B9_ARG_PARAM_USED[b9ca_i as usize]
+                        b9ca_i = b9ca_i + 1
+                    }
+                    if argc >= 16 {
+                        b9ca_ch_union = -1
+                        b9ca_pu_union = -1
+                    }
+                    EXPR_CH_SET = b9ca_ch_union
+                    EXPR_PARAM_USED = b9ca_pu_union
                 } else {
                     tc_undefined_var(name_tok)
                     em32(0xD2800000)
                     EXPR_IS_F64 = 0
                     EXPR_TY = 0
                     EXPR_TY_HASH = 0
+                    EXPR_CH_SET = 0
+                    EXPR_PARAM_USED = 0
                 }
             }
             return
@@ -26106,16 +26153,17 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     if TARGET_OS == 2 {
         let argc_addr = GL_BSS_BASE - 16
         let argv_addr = GL_BSS_BASE - 8
-        em32(0xF94003E9)
-        em32(0xD1000529)
-        emit_imm64_reg_a64(10, argc_addr)
-        em32(0xF9000149)
-        em32(0x91000000 | (16 << 10) | (31 << 5) | 9)
-        emit_imm64_reg_a64(10, argv_addr)
-        em32(0xF9000149)
+        // LC_MAIN entry arrives with argc in x0 and argv in x1.
+        // Skip argv[0] so the self-hosted CLI sees <source> at argv[0].
+        em32(0xD1000409)  // sub x9, x0, #1
+        emit_image_addr_reg_a64(10, argc_addr)
+        em32(0xF9000149)  // str x9, [x10]
+        em32(0x91002029)  // add x9, x1, #8
+        emit_image_addr_reg_a64(10, argv_addr)
+        em32(0xF9000149)  // str x9, [x10]
         let mrel = (FN_OFF[main_fn as usize] - CL) / 4
         em32(0x94000000 | (mrel & 0x3FFFFFF))
-        emit_imm64_reg_a64(16, 0x2000001)
+        emit_imm64_reg_a64(16, 1)
         em32(0xD4001001)
     } else {
         let argc_addr = 0x10000000
