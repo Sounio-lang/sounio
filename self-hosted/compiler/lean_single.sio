@@ -20919,16 +20919,22 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     let page_size: i64 = 4096
     let text_vm = vm_base               // __TEXT vmaddr
     let data_vm = vm_base + 16777216    // __DATA vmaddr (BSS)
+    let macos_build_ver: i64 = 720896   // 11.0.0
 
     // Mach-O header: 32 bytes
-    // Load commands: __PAGEZERO(72) + __TEXT(72+section*80=152) + __DATA(72+section*80=152) + LC_MAIN(24)
+    // Load commands:
+    // __PAGEZERO(72) + __TEXT(72+section*80=152) + __DATA(72+section*80=152)
+    // + LC_LOAD_DYLINKER(32) + LC_UUID(24) + LC_BUILD_VERSION(24) + LC_MAIN(24)
     let hdr_size = 32
     let lc_pagezero_size = 72
     let lc_text_size = 72 + 80          // segment + 1 section (__text)
     let lc_data_size = 72 + 80          // segment + 1 section (__bss)
+    let lc_dylinker_size = 32
+    let lc_uuid_size = 24
+    let lc_build_version_size = 24
     let lc_main_size = 24
-    let ncmds = 4
-    let sizeofcmds = lc_pagezero_size + lc_text_size + lc_data_size + lc_main_size
+    let ncmds = 7
+    let sizeofcmds = lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size + lc_main_size
 
     let text_file_off = ((hdr_size + sizeofcmds + page_size - 1) / page_size) * page_size
     let text_file_size = ((CL + page_size - 1) / page_size) * page_size
@@ -20977,7 +20983,7 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w64(off+32, text_seg_vmsize)      // vmsize
     elf_w64(off+40, 0)                    // fileoff
     elf_w64(off+48, total_file_size)      // filesize
-    elf_w32(off+56, 7)                    // maxprot = rwx
+    elf_w32(off+56, 5)                    // maxprot = r-x
     elf_w32(off+60, 5)                    // initprot = r-x
     elf_w32(off+64, 1)                    // nsects = 1
     elf_w32(off+68, 0)                    // flags
@@ -20993,7 +20999,7 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w64(sec+32, text_vm + text_file_off)  // addr
     elf_w64(sec+40, CL)                       // size
     elf_w32(sec+48, text_file_off)            // offset
-    elf_w32(sec+52, 0)                        // align (2^0 = 1)
+    elf_w32(sec+52, 4)                        // align (2^4 = 16)
     elf_w32(sec+56, 0)                        // reloff
     elf_w32(sec+60, 0)                        // nreloc
     elf_w32(sec+64, 0x80000400)               // flags: PURE_INSTRUCTIONS | SOME_INSTRUCTIONS
@@ -21009,7 +21015,7 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w64(off+32, ((GL_BSS_SIZE + page_size - 1) / page_size) * page_size)  // vmsize
     elf_w64(off+40, 0)                    // fileoff
     elf_w64(off+48, 0)                    // filesize = 0 (BSS)
-    elf_w32(off+56, 7)                    // maxprot = rwx
+    elf_w32(off+56, 3)                    // maxprot = rw-
     elf_w32(off+60, 3)                    // initprot = rw-
     elf_w32(off+64, 1)                    // nsects = 1
     elf_w32(off+68, 0)                    // flags
@@ -21023,10 +21029,38 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w64(bsec+32, data_vm)                 // addr
     elf_w64(bsec+40, GL_BSS_SIZE)             // size
     elf_w32(bsec+48, 0)                       // offset = 0 (BSS)
+    elf_w32(bsec+52, 4)                       // align (2^4 = 16)
     elf_w32(bsec+64, 1)                       // flags: S_ZEROFILL
 
-    // LC_MAIN (24 bytes)
+    // LC_LOAD_DYLINKER (32 bytes)
     off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size
+    elf_w32(off, 14)                       // cmd = LC_LOAD_DYLINKER
+    elf_w32(off+4, lc_dylinker_size)       // cmdsize
+    elf_w32(off+8, 12)                     // path offset
+    elf_w8(off+12, 47); elf_w8(off+13, 117); elf_w8(off+14, 115); elf_w8(off+15, 114)   // /usr
+    elf_w8(off+16, 47); elf_w8(off+17, 108); elf_w8(off+18, 105); elf_w8(off+19, 98)    // /lib
+    elf_w8(off+20, 47); elf_w8(off+21, 100); elf_w8(off+22, 121); elf_w8(off+23, 108); elf_w8(off+24, 100); elf_w8(off+25, 0)   // /dyld
+
+    // LC_UUID (24 bytes)
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size
+    elf_w32(off, 27)                       // cmd = LC_UUID
+    elf_w32(off+4, lc_uuid_size)           // cmdsize
+    elf_w8(off+8, 83); elf_w8(off+9, 79); elf_w8(off+10, 85); elf_w8(off+11, 78)        // SOUN
+    elf_w8(off+12, 73); elf_w8(off+13, 79); elf_w8(off+14, 88); elf_w8(off+15, 2)       // IOX + macOS
+    elf_w8(off+16, CL & 255); elf_w8(off+17, (CL >> 8) & 255); elf_w8(off+18, (CL >> 16) & 255); elf_w8(off+19, (CL >> 24) & 255)
+    elf_w8(off+20, GL_BSS_SIZE & 255); elf_w8(off+21, (GL_BSS_SIZE >> 8) & 255); elf_w8(off+22, (GL_BSS_SIZE >> 16) & 255); elf_w8(off+23, (GL_BSS_SIZE >> 24) & 255)
+
+    // LC_BUILD_VERSION (24 bytes)
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size + lc_uuid_size
+    elf_w32(off, 50)                       // cmd = LC_BUILD_VERSION
+    elf_w32(off+4, lc_build_version_size) // cmdsize
+    elf_w32(off+8, 1)                      // platform = macOS
+    elf_w32(off+12, macos_build_ver)       // minos = 11.0.0
+    elf_w32(off+16, macos_build_ver)       // sdk = 11.0.0
+    elf_w32(off+20, 0)                     // ntools
+
+    // LC_MAIN (24 bytes)
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size
     elf_w32(off, 0x80000028)              // cmd = LC_MAIN
     elf_w32(off+4, lc_main_size)          // cmdsize
     elf_w64(off+8, text_file_off + TRAMP_OFF)  // entryoff (file offset of entry)
@@ -26116,13 +26150,17 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     let page_size: i64 = 16384
     let text_vm = vm_base
     let data_vm = vm_base + 16777216
+    let macos_build_ver: i64 = 720896   // 11.0.0
     let hdr_size = 32
     let lc_pagezero_size = 72
     let lc_text_size = 72 + 80
     let lc_data_size = 72 + 80
+    let lc_dylinker_size = 32
+    let lc_uuid_size = 24
+    let lc_build_version_size = 24
     let lc_main_size = 24
-    let ncmds = 4
-    let sizeofcmds = lc_pagezero_size + lc_text_size + lc_data_size + lc_main_size
+    let ncmds = 7
+    let sizeofcmds = lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size + lc_main_size
     let text_file_off = ((hdr_size + sizeofcmds + page_size - 1) / page_size) * page_size
     let text_file_size = ((CL + page_size - 1) / page_size) * page_size
     let total_file_size = text_file_off + text_file_size
@@ -26144,26 +26182,43 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w8(off+8, 95); elf_w8(off+9, 95); elf_w8(off+10, 84); elf_w8(off+11, 69); elf_w8(off+12, 88); elf_w8(off+13, 84)
     elf_w64(off+24, text_vm); elf_w64(off+32, text_seg_vmsize)
     elf_w64(off+40, 0); elf_w64(off+48, total_file_size)
-    elf_w32(off+56, 7); elf_w32(off+60, 5); elf_w32(off+64, 1)
+    elf_w32(off+56, 5); elf_w32(off+60, 5); elf_w32(off+64, 1)
     let sec = off + 72
     elf_w8(sec, 95); elf_w8(sec+1, 95); elf_w8(sec+2, 116); elf_w8(sec+3, 101); elf_w8(sec+4, 120); elf_w8(sec+5, 116)
     elf_w8(sec+16, 95); elf_w8(sec+17, 95); elf_w8(sec+18, 84); elf_w8(sec+19, 69); elf_w8(sec+20, 88); elf_w8(sec+21, 84)
     elf_w64(sec+32, text_vm + text_file_off); elf_w64(sec+40, CL)
-    elf_w32(sec+48, text_file_off); elf_w32(sec+64, 0x80000400)
+    elf_w32(sec+48, text_file_off); elf_w32(sec+52, 4); elf_w32(sec+64, 0x80000400)
     // __DATA
     off = hdr_size + lc_pagezero_size + lc_text_size
     elf_w32(off, 25); elf_w32(off+4, lc_data_size)
     elf_w8(off+8, 95); elf_w8(off+9, 95); elf_w8(off+10, 68); elf_w8(off+11, 65); elf_w8(off+12, 84); elf_w8(off+13, 65)
     elf_w64(off+24, data_vm); elf_w64(off+32, ((GL_BSS_SIZE + page_size - 1) / page_size) * page_size)
     elf_w64(off+40, 0); elf_w64(off+48, 0)
-    elf_w32(off+56, 7); elf_w32(off+60, 3); elf_w32(off+64, 1)
+    elf_w32(off+56, 3); elf_w32(off+60, 3); elf_w32(off+64, 1)
     let bsec = off + 72
     elf_w8(bsec, 95); elf_w8(bsec+1, 95); elf_w8(bsec+2, 98); elf_w8(bsec+3, 115); elf_w8(bsec+4, 115)
     elf_w8(bsec+16, 95); elf_w8(bsec+17, 95); elf_w8(bsec+18, 68); elf_w8(bsec+19, 65); elf_w8(bsec+20, 84); elf_w8(bsec+21, 65)
     elf_w64(bsec+32, data_vm); elf_w64(bsec+40, GL_BSS_SIZE)
-    elf_w32(bsec+48, 0); elf_w32(bsec+64, 1)
-    // LC_MAIN
+    elf_w32(bsec+48, 0); elf_w32(bsec+52, 4); elf_w32(bsec+64, 1)
+    // LC_LOAD_DYLINKER
     off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size
+    elf_w32(off, 14); elf_w32(off+4, lc_dylinker_size); elf_w32(off+8, 12)
+    elf_w8(off+12, 47); elf_w8(off+13, 117); elf_w8(off+14, 115); elf_w8(off+15, 114)
+    elf_w8(off+16, 47); elf_w8(off+17, 108); elf_w8(off+18, 105); elf_w8(off+19, 98)
+    elf_w8(off+20, 47); elf_w8(off+21, 100); elf_w8(off+22, 121); elf_w8(off+23, 108); elf_w8(off+24, 100); elf_w8(off+25, 0)
+    // LC_UUID
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size
+    elf_w32(off, 27); elf_w32(off+4, lc_uuid_size)
+    elf_w8(off+8, 83); elf_w8(off+9, 79); elf_w8(off+10, 85); elf_w8(off+11, 78)
+    elf_w8(off+12, 73); elf_w8(off+13, 79); elf_w8(off+14, 65); elf_w8(off+15, 2)
+    elf_w8(off+16, CL & 255); elf_w8(off+17, (CL >> 8) & 255); elf_w8(off+18, (CL >> 16) & 255); elf_w8(off+19, (CL >> 24) & 255)
+    elf_w8(off+20, GL_BSS_SIZE & 255); elf_w8(off+21, (GL_BSS_SIZE >> 8) & 255); elf_w8(off+22, (GL_BSS_SIZE >> 16) & 255); elf_w8(off+23, (GL_BSS_SIZE >> 24) & 255)
+    // LC_BUILD_VERSION
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size + lc_uuid_size
+    elf_w32(off, 50); elf_w32(off+4, lc_build_version_size)
+    elf_w32(off+8, 1); elf_w32(off+12, macos_build_ver); elf_w32(off+16, macos_build_ver); elf_w32(off+20, 0)
+    // LC_MAIN
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size
     elf_w32(off, 0x80000028); elf_w32(off+4, lc_main_size)
     elf_w64(off+8, text_file_off + TRAMP_OFF); elf_w64(off+16, 0)
     // Copy code
