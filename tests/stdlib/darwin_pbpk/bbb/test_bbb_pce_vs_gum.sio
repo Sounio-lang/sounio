@@ -1,0 +1,97 @@
+//@ run-pass
+//@ expect-stdout: BBB_PCE_VS_GUM_OK
+//
+// Polynomial Chaos Expansion (PCE) vs first-order GUM agreement on the
+// BBB Kpuu_AUC endpoint, 1-D expansion over kpuu_brain.
+//
+// Dissertation purpose: JCGM 101:2008 calls for this check.  When the
+// first-order JCGM-100 (GUM) budget is used on a nonlinear model, an
+// independent (supplementary) method is required to confirm the
+// linearisation is valid.  PCE is the spec-preferred supplement
+// because its coefficients carry analytic nonlinearity information
+// (the share of variance in higher-order He_n, n >= 2).
+//
+// Checks (all express the dissertation claim that PCE is STRICTLY
+// MORE informative than GUM on this model, not merely equivalent):
+//   1. PCE sanity: mean > 0, variance > 0, stddev matches sqrt(var).
+//   2. PCE mean agrees with GUM y_mean to within 5%.  For a nonlinear
+//      model, PCE c_0 = E[f(p)] differs from GUM's f(mean_p) by an
+//      O(σ² f'') bias; on this problem the bias turns out to be
+//      < 1%, so the 5% bound is comfortable.
+//   3. Nonlinearity share is LARGE (> 30%) — this is the key finding:
+//      the BBB Kpuu_AUC response to kpuu_brain saturates over the
+//      prior's ±3σ range, so the first-order GUM budget is
+//      insufficient.  PCE is the spec-preferred alternative
+//      (JCGM 101:2008).
+//   4. PCE variance EXCEEDS GUM's kpuu_brain contribution — the
+//      extra variance is exactly the curvature that GUM misses.
+//      Ratio PCE_var / GUM_var must be > 1.5.
+
+use darwin_pbpk::bbb::bbb_pce::*
+use darwin_pbpk::bbb::bbb_gum::*
+use darwin_pbpk::bbb::bbb_priors::{bbb_rapamycin_priors}
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::epistemic_pbpk14::{ep14_rapamycin_params}
+
+fn pce_t_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn pce_t_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = (y + x / y) * 0.5; i = i + 1 }
+    y
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = ep14_rapamycin_params()
+    let bbb_prm = bbb_rapamycin_params()
+    let priors  = bbb_rapamycin_priors()
+
+    var cp: [f64; 32] = [0.0; 32]
+    cp[0]  = 0.0;  cp[1]  = 0.25; cp[2]  = 0.5;  cp[3]  = 1.0
+    cp[4]  = 2.0;  cp[5]  = 4.0;  cp[6]  = 6.0;  cp[7]  = 8.0
+    cp[8]  = 12.0; cp[9]  = 18.0; cp[10] = 24.0; cp[11] = 36.0
+    cp[12] = 48.0; cp[13] = 72.0; cp[14] = 120.0; cp[15] = 168.0
+    let n_points = 16
+
+    let kpuu_mean = priors.mean[2]
+    let kpuu_var  = priors.variance[2]
+    let kpuu_std  = pce_t_sqrt(kpuu_var)
+
+    let pce = bbb_pce_build_kpuu_auc(
+        sys_prm, bbb_prm, kpuu_mean, kpuu_std, 0.01,
+        5.0, cp, n_points, 0.01
+    )
+
+    // --- 1. PCE sanity ---
+    if pce.mean     <= 0.0 { return 1 }
+    if pce.variance <= 0.0 { return 2 }
+    if pce_t_abs(pce.stddev * pce.stddev - pce.variance) > 1.0e-9 { return 3 }
+
+    // --- 2. PCE mean vs GUM y_mean (5% tolerance) ---
+    let gum = bbb_gum_budget(sys_prm, bbb_prm, priors, 5.0, cp, n_points, 0.01, 0)
+    let rel_mean_err = pce_t_abs(pce.mean - gum.y_mean) / gum.y_mean
+    if rel_mean_err > 0.05 { return 4 }
+
+    // --- 3. Nonlinearity share LARGE ---
+    if pce.nonlinearity_share < 0.30 { return 5 }
+
+    // --- 4. PCE variance EXCEEDS GUM kpuu_brain contribution ---
+    let gum_var_kpuu = gum.var_contrib[2]
+    let ratio = pce.variance / gum_var_kpuu
+    if ratio < 1.5 { return 6 }
+
+    bbb_pce_print(pce)
+    println("---")
+    print("GUM y_mean               = "); print_f64(gum.y_mean);        println("")
+    print("GUM var_contrib[kpuu_br] = "); print_f64(gum_var_kpuu);      println("")
+    print("PCE mean                 = "); print_f64(pce.mean);          println("")
+    print("PCE variance             = "); print_f64(pce.variance);      println("")
+    print("Rel. mean error          = "); print_f64(rel_mean_err);      println("")
+    print("PCE/GUM variance ratio   = "); print_f64(ratio);             println("")
+    println("BBB_PCE_VS_GUM_OK")
+    0
+}
