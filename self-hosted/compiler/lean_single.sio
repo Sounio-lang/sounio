@@ -489,6 +489,9 @@ var B5_ARG_VCOUNT:  i64 = 0
 // Mirrors B5_ARG_VSHADOW's placement and scope: fi >= 0 branch only;
 // closure / fn-ref indirect calls continue to leak the last arg's
 // topology (pre-existing limitation, matches B5's scope).
+// β⁹ GTT week-8 — call sites with argc ≥ 16 overflow this 16-slot
+// table; the post-call union loop saturates EXPR_CH_SET to all-bits-set
+// in that regime so the caller cannot under-approximate topology.
 var B9_ARG_CH_SET:   [i64; 16] = [0; 16]
 var B9_ARG_CH_COUNT: i64 = 0
 
@@ -10345,6 +10348,21 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         }
                         b9_i = b9_i + 1
                     }
+                }
+                // β⁹ GTT week-8: argc ≥ 16 overflows B9_ARG_CH_SET[16].
+                // The capture loop at the call site only stores slots 0..15
+                // and the union loop above only walks the same range, so
+                // any channel carried by arg 16+ would be silently dropped
+                // → under-approximation of EXPR_CH_SET.  Conservatively
+                // saturate to all-bits-set so the caller cannot accept a
+                // hessian_of(.., j, k) query whose true topology requires
+                // a dropped channel.  The body-side overflow handling at
+                // the callee entry already widens via VAR_PARAM_USED=0
+                // for params ≥ 16 (forces fall-back), but the call site
+                // itself had no widening — this closes that hole.
+                if argc >= 16 {
+                    b9_ch_union = -1
+                    b9_pu_union = -1
                 }
                 EXPR_CH_SET = b9_ch_union
                 EXPR_PARAM_USED = b9_pu_union
@@ -23335,6 +23353,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         b9a_i = b9a_i + 1
                     }
                 }
+                // β⁹ GTT week-8: argc ≥ 16 overflow widen (a64 mirror of x86).
+                if argc >= 16 {
+                    b9a_ch_union = -1
+                    b9a_pu_union = -1
+                }
                 EXPR_CH_SET = b9a_ch_union
                 EXPR_PARAM_USED = b9a_pu_union
                 // β⁵ a64: propagate argument variances into return EXPR_VSHADOW
@@ -26155,22 +26178,37 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     let lc_pagezero_size = 72
     let lc_text_size = 72 + 80
     let lc_data_size = 72 + 80
+    let lc_linkedit_size = 72
+    let lc_fixups_size = 16
+    let lc_exports_trie_size = 16
+    let lc_symtab_size = 24
+    let lc_dysymtab_size = 80
     let lc_dylinker_size = 32
     let lc_uuid_size = 24
     let lc_build_version_size = 24
     let lc_main_size = 24
-    let ncmds = 7
-    let sizeofcmds = lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size + lc_main_size
+    let lc_dylib_size = 56
+    let ncmds = 13
+    let sizeofcmds = lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size + lc_main_size + lc_dylib_size
     let text_file_off = ((hdr_size + sizeofcmds + page_size - 1) / page_size) * page_size
     let text_file_size = ((CL + page_size - 1) / page_size) * page_size
-    let total_file_size = text_file_off + text_file_size
-    let text_seg_vmsize = text_file_off + text_file_size
+    let text_seg_filesize = text_file_off + text_file_size
+    let data_seg_vmsize = ((GL_BSS_SIZE + page_size - 1) / page_size) * page_size
+    let linkedit_fixups_size = 52
+    let linkedit_exports_size = 48
+    let linkedit_fileoff = text_seg_filesize
+    let linkedit_filesize = linkedit_fixups_size + linkedit_exports_size
+    let total_file_size = text_seg_filesize + linkedit_filesize
+    let text_seg_vmsize = text_seg_filesize
+    let linkedit_vm = data_vm + data_seg_vmsize
+    let linkedit_symtab_off = linkedit_fileoff + linkedit_filesize
+    let linkedit_stroff = linkedit_symtab_off
     print("macho_arm64: code="); print_int(CL); print(" text_off="); print_int(text_file_off); print("\n")
     var i: i64 = 0
     while i < 1048576 { ELF[i as usize] = 0; i = i + 1 }
     // Header
     elf_w32(0, 0xFEEDFACF); elf_w32(4, 0x0100000C); elf_w32(8, 0)
-    elf_w32(12, 2); elf_w32(16, ncmds); elf_w32(20, sizeofcmds); elf_w32(24, 0x00000085)
+    elf_w32(12, 2); elf_w32(16, ncmds); elf_w32(20, sizeofcmds); elf_w32(24, 0x00200085)
     // __PAGEZERO
     var off = hdr_size
     elf_w32(off, 25); elf_w32(off+4, lc_pagezero_size)
@@ -26181,7 +26219,7 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w32(off, 25); elf_w32(off+4, lc_text_size)
     elf_w8(off+8, 95); elf_w8(off+9, 95); elf_w8(off+10, 84); elf_w8(off+11, 69); elf_w8(off+12, 88); elf_w8(off+13, 84)
     elf_w64(off+24, text_vm); elf_w64(off+32, text_seg_vmsize)
-    elf_w64(off+40, 0); elf_w64(off+48, total_file_size)
+    elf_w64(off+40, 0); elf_w64(off+48, text_seg_filesize)
     elf_w32(off+56, 5); elf_w32(off+60, 5); elf_w32(off+64, 1)
     let sec = off + 72
     elf_w8(sec, 95); elf_w8(sec+1, 95); elf_w8(sec+2, 116); elf_w8(sec+3, 101); elf_w8(sec+4, 120); elf_w8(sec+5, 116)
@@ -26192,35 +26230,132 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     off = hdr_size + lc_pagezero_size + lc_text_size
     elf_w32(off, 25); elf_w32(off+4, lc_data_size)
     elf_w8(off+8, 95); elf_w8(off+9, 95); elf_w8(off+10, 68); elf_w8(off+11, 65); elf_w8(off+12, 84); elf_w8(off+13, 65)
-    elf_w64(off+24, data_vm); elf_w64(off+32, ((GL_BSS_SIZE + page_size - 1) / page_size) * page_size)
-    elf_w64(off+40, 0); elf_w64(off+48, 0)
+    elf_w64(off+24, data_vm); elf_w64(off+32, data_seg_vmsize)
+    elf_w64(off+40, text_seg_filesize); elf_w64(off+48, 0)
     elf_w32(off+56, 3); elf_w32(off+60, 3); elf_w32(off+64, 1)
     let bsec = off + 72
     elf_w8(bsec, 95); elf_w8(bsec+1, 95); elf_w8(bsec+2, 98); elf_w8(bsec+3, 115); elf_w8(bsec+4, 115)
     elf_w8(bsec+16, 95); elf_w8(bsec+17, 95); elf_w8(bsec+18, 68); elf_w8(bsec+19, 65); elf_w8(bsec+20, 84); elf_w8(bsec+21, 65)
     elf_w64(bsec+32, data_vm); elf_w64(bsec+40, GL_BSS_SIZE)
     elf_w32(bsec+48, 0); elf_w32(bsec+52, 4); elf_w32(bsec+64, 1)
-    // LC_LOAD_DYLINKER
+    // __LINKEDIT
     off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size
+    elf_w32(off, 25); elf_w32(off+4, lc_linkedit_size)
+    elf_w8(off+8, 95); elf_w8(off+9, 95); elf_w8(off+10, 76); elf_w8(off+11, 73); elf_w8(off+12, 78); elf_w8(off+13, 75); elf_w8(off+14, 69); elf_w8(off+15, 68); elf_w8(off+16, 73); elf_w8(off+17, 84)
+    elf_w64(off+24, linkedit_vm); elf_w64(off+32, page_size)
+    elf_w64(off+40, linkedit_fileoff); elf_w64(off+48, linkedit_filesize)
+    elf_w32(off+56, 1); elf_w32(off+60, 1)
+    // LC_DYLD_CHAINED_FIXUPS
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size
+    elf_w32(off, 0x80000034); elf_w32(off+4, lc_fixups_size)
+    elf_w32(off+8, linkedit_fileoff); elf_w32(off+12, linkedit_fixups_size)
+    // LC_DYLD_EXPORTS_TRIE
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size
+    elf_w32(off, 0x80000033); elf_w32(off+4, lc_exports_trie_size)
+    elf_w32(off+8, linkedit_fileoff + linkedit_fixups_size); elf_w32(off+12, linkedit_exports_size)
+    // LC_SYMTAB
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size
+    elf_w32(off, 2); elf_w32(off+4, lc_symtab_size)
+    elf_w32(off+8, linkedit_symtab_off); elf_w32(off+12, 0); elf_w32(off+16, linkedit_stroff); elf_w32(off+20, 0)
+    // LC_DYSYMTAB
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size
+    elf_w32(off, 11); elf_w32(off+4, lc_dysymtab_size)
+    // LC_LOAD_DYLINKER
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size
     elf_w32(off, 14); elf_w32(off+4, lc_dylinker_size); elf_w32(off+8, 12)
     elf_w8(off+12, 47); elf_w8(off+13, 117); elf_w8(off+14, 115); elf_w8(off+15, 114)
     elf_w8(off+16, 47); elf_w8(off+17, 108); elf_w8(off+18, 105); elf_w8(off+19, 98)
     elf_w8(off+20, 47); elf_w8(off+21, 100); elf_w8(off+22, 121); elf_w8(off+23, 108); elf_w8(off+24, 100); elf_w8(off+25, 0)
     // LC_UUID
-    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size + lc_dylinker_size
     elf_w32(off, 27); elf_w32(off+4, lc_uuid_size)
     elf_w8(off+8, 83); elf_w8(off+9, 79); elf_w8(off+10, 85); elf_w8(off+11, 78)
     elf_w8(off+12, 73); elf_w8(off+13, 79); elf_w8(off+14, 65); elf_w8(off+15, 2)
     elf_w8(off+16, CL & 255); elf_w8(off+17, (CL >> 8) & 255); elf_w8(off+18, (CL >> 16) & 255); elf_w8(off+19, (CL >> 24) & 255)
     elf_w8(off+20, GL_BSS_SIZE & 255); elf_w8(off+21, (GL_BSS_SIZE >> 8) & 255); elf_w8(off+22, (GL_BSS_SIZE >> 16) & 255); elf_w8(off+23, (GL_BSS_SIZE >> 24) & 255)
     // LC_BUILD_VERSION
-    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size + lc_uuid_size
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size + lc_dylinker_size + lc_uuid_size
     elf_w32(off, 50); elf_w32(off+4, lc_build_version_size)
     elf_w32(off+8, 1); elf_w32(off+12, macos_build_ver); elf_w32(off+16, macos_build_ver); elf_w32(off+20, 0)
     // LC_MAIN
-    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size
     elf_w32(off, 0x80000028); elf_w32(off+4, lc_main_size)
     elf_w64(off+8, text_file_off + TRAMP_OFF); elf_w64(off+16, 0)
+    // LC_LOAD_DYLIB
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size + lc_main_size
+    elf_w32(off, 12); elf_w32(off+4, lc_dylib_size)
+    elf_w32(off+8, 24); elf_w32(off+12, 2); elf_w32(off+16, 88866816); elf_w32(off+20, 65536)
+    elf_w8(off+24, 47); elf_w8(off+25, 117); elf_w8(off+26, 115); elf_w8(off+27, 114)
+    elf_w8(off+28, 47); elf_w8(off+29, 108); elf_w8(off+30, 105); elf_w8(off+31, 98)
+    elf_w8(off+32, 47); elf_w8(off+33, 108); elf_w8(off+34, 105); elf_w8(off+35, 98)
+    elf_w8(off+36, 83); elf_w8(off+37, 121); elf_w8(off+38, 115); elf_w8(off+39, 116)
+    elf_w8(off+40, 101); elf_w8(off+41, 109); elf_w8(off+42, 46); elf_w8(off+43, 66)
+    elf_w8(off+44, 46); elf_w8(off+45, 100); elf_w8(off+46, 121); elf_w8(off+47, 108)
+    elf_w8(off+48, 105); elf_w8(off+49, 98); elf_w8(off+50, 0)
+    // __LINKEDIT payload: empty chained fixups for 4 segments
+    elf_w32(linkedit_fileoff, 0)
+    elf_w32(linkedit_fileoff + 4, 32)
+    elf_w32(linkedit_fileoff + 8, 52)
+    elf_w32(linkedit_fileoff + 12, 52)
+    elf_w32(linkedit_fileoff + 16, 0)
+    elf_w32(linkedit_fileoff + 20, 1)
+    elf_w32(linkedit_fileoff + 24, 0)
+    elf_w32(linkedit_fileoff + 28, 0)
+    elf_w32(linkedit_fileoff + 32, 4)
+    elf_w32(linkedit_fileoff + 36, 0)
+    elf_w32(linkedit_fileoff + 40, 0)
+    elf_w32(linkedit_fileoff + 44, 0)
+    elf_w32(linkedit_fileoff + 48, 0)
+    // __LINKEDIT payload: minimal export trie
+    let exports_off = linkedit_fileoff + linkedit_fixups_size
+    elf_w8(exports_off + 0, 0)
+    elf_w8(exports_off + 1, 1)
+    elf_w8(exports_off + 2, 95)
+    elf_w8(exports_off + 3, 0)
+    elf_w8(exports_off + 4, 18)
+    elf_w8(exports_off + 5, 0)
+    elf_w8(exports_off + 6, 0)
+    elf_w8(exports_off + 7, 0)
+    elf_w8(exports_off + 8, 0)
+    elf_w8(exports_off + 9, 2)
+    elf_w8(exports_off + 10, 0)
+    elf_w8(exports_off + 11, 0)
+    elf_w8(exports_off + 12, 0)
+    elf_w8(exports_off + 13, 3)
+    elf_w8(exports_off + 14, 0)
+    elf_w8(exports_off + 15, 168)
+    elf_w8(exports_off + 16, 6)
+    elf_w8(exports_off + 17, 0)
+    elf_w8(exports_off + 18, 0)
+    elf_w8(exports_off + 19, 2)
+    elf_w8(exports_off + 20, 95)
+    elf_w8(exports_off + 21, 109)
+    elf_w8(exports_off + 22, 104)
+    elf_w8(exports_off + 23, 95)
+    elf_w8(exports_off + 24, 101)
+    elf_w8(exports_off + 25, 120)
+    elf_w8(exports_off + 26, 101)
+    elf_w8(exports_off + 27, 99)
+    elf_w8(exports_off + 28, 117)
+    elf_w8(exports_off + 29, 116)
+    elf_w8(exports_off + 30, 101)
+    elf_w8(exports_off + 31, 95)
+    elf_w8(exports_off + 32, 104)
+    elf_w8(exports_off + 33, 101)
+    elf_w8(exports_off + 34, 97)
+    elf_w8(exports_off + 35, 100)
+    elf_w8(exports_off + 36, 101)
+    elf_w8(exports_off + 37, 114)
+    elf_w8(exports_off + 38, 0)
+    elf_w8(exports_off + 39, 9)
+    elf_w8(exports_off + 40, 109)
+    elf_w8(exports_off + 41, 97)
+    elf_w8(exports_off + 42, 105)
+    elf_w8(exports_off + 43, 110)
+    elf_w8(exports_off + 44, 0)
+    elf_w8(exports_off + 45, 13)
+    elf_w8(exports_off + 46, 0)
+    elf_w8(exports_off + 47, 0)
     // Copy code
     i = 0
     while i < CL { ELF[(text_file_off + i) as usize] = CD[i as usize]; i = i + 1 }
