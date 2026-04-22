@@ -204,6 +204,9 @@ inductive BExpr (α : Type) [Dual2Field α] : Type where
            → (Fin n → BExpr α)
            → BExpr α
   | ifE    : BExpr α → BExpr α → BExpr α → BExpr α    -- cond, then, else
+  -- `match` surface form: scrutinee + n arm bodies, mirrors GT `Expr.matchE`.
+  -- `{n}` implicit, arms via `Fin n → BExpr α` to stay strictly positive.
+  | matchE : BExpr α → {n : Nat} → (Fin n → BExpr α) → BExpr α
 
 /-- Environment: maps each variable `k : Fin 8` to its `Dual2` denotation
     and its declared GTT channel set. -/
@@ -265,6 +268,12 @@ def evalB (env : BEnv α) : BExpr α → Dual2 α
   -- soundly `Sc ∪ (S1 ∪ S2)` which matches `BTyping.ifE`.  The bridge
   -- theorem targets Footprint, not value equality.
   | .ifE c a b       => dual2Add (evalB env c) (dual2Add (evalB env a) (evalB env b))
+  -- `match` semantically selects one arm at runtime; `evalB` flattens all
+  -- arms via `foldDualAdd` so the footprint is `Sc ∪ chsetUnionFin Ss`,
+  -- matching `BTyping.matchE`.  Value component is meaningless by design —
+  -- same discipline as `.ifE` (the bridge targets Footprint, not value
+  -- equality).
+  | .matchE c arms   => dual2Add (evalB env c) (foldDualAdd (fun i => evalB env (arms i)))
 
 -- ===========================================================================
 -- §9. GTT typing relation for BExpr
@@ -301,6 +310,11 @@ inductive BTyping (env : BEnv α) : BExpr α → ChSet → Prop where
   | ifE    : ∀ (c a b : BExpr α) (Sc Sa Sb : ChSet),
       BTyping env c Sc → BTyping env a Sa → BTyping env b Sb →
       BTyping env (.ifE c a b) (Sc.union (Sa.union Sb))
+  | matchE : ∀ (c : BExpr α) {n : Nat} (arms : Fin n → BExpr α)
+               (Sc : ChSet) (Ss : Fin n → ChSet),
+      BTyping env c Sc →
+      (∀ i : Fin n, BTyping env (arms i) (Ss i)) →
+      BTyping env (.matchE c arms) (Sc.union (chsetUnionFin Ss))
 
 -- ===========================================================================
 -- §10. Bridge theorem
@@ -347,6 +361,14 @@ theorem bridge (env : BEnv α) (hwf : EnvWT env) :
       exact fp_add_union Sc (Sa.union Sb) _ _
         ihC
         (fp_add_union Sa Sb _ _ ihA ihB)
+  | matchE c arms Sc Ss _hc _hi ihC ihi =>
+      simp only [evalB]
+      -- Goal: Footprint (Sc ∪ chsetUnionFin Ss)
+      --        (dual2Add (evalB env c) (foldDualAdd (fun i => evalB env (arms i))))
+      -- fp_add_union + fp_foldDualAdd over the arm family.
+      exact fp_add_union Sc (chsetUnionFin Ss) _ _
+        ihC
+        (fp_foldDualAdd Ss (fun i => evalB env (arms i)) ihi)
 
 -- ===========================================================================
 -- §11. Corollaries
@@ -615,6 +637,7 @@ def ExprWellFormed : Expr → Prop
   | .call2 _ e1 e2  => ExprWellFormed e1 ∧ ExprWellFormed e2
   | .callN _ args   => ∀ i, ExprWellFormed (args i)
   | .ifE c e1 e2    => ExprWellFormed c ∧ ExprWellFormed e1 ∧ ExprWellFormed e2
+  | .matchE c arms  => ExprWellFormed c ∧ ∀ i, ExprWellFormed (arms i)
 
 /-- Cross-world compatibility bundle.
 
@@ -687,6 +710,7 @@ def lower (C : Compat α) : Expr → BExpr α
   | .callN (n := n) f args =>
       BExpr.callN (C.UPn f n) (C.cliftN f n) (fun i => lower C (args i))
   | .ifE c e1 e2    => BExpr.ifE (lower C c) (lower C e1) (lower C e2)
+  | .matchE c arms  => BExpr.matchE (lower C c) (fun i => lower C (arms i))
 
 -- ===========================================================================
 -- §13. Cross-world correspondence (Stage 2: lowering preserves typing)
@@ -807,6 +831,26 @@ theorem lowering_types (C : Compat α) (e : Expr) (S : ChSet)
       · -- Sc' ∪ (S1' ∪ S2') ⊆ Sc ∪ (S1 ∪ S2) via two applications of union_mono
         exact ChSet.union_mono _ _ _ _ hsubc
           (ChSet.union_mono _ _ _ _ hsub1 hsub2)
+  | @tMatch scrut n arms Sc Ss _hTc _hTi ihc ihi =>
+      intro hwf
+      simp only [ExprWellFormed] at hwf
+      -- hwf : ExprWellFormed scrut ∧ ∀ i, ExprWellFormed (arms i)
+      obtain ⟨hwfc, hwfi⟩ := hwf
+      obtain ⟨Sc', hBTc, hsubc⟩ := ihc hwfc
+      -- Skolemise the per-arm existential via Classical.axiomOfChoice
+      -- (same pattern as tCallN) to get `S' : Fin n → ChSet`.
+      have h_per_i : ∀ i, ∃ S',
+          BTyping C.env (lower C (arms i)) S' ∧ S'.subset (Ss i) :=
+        fun i => ihi i (hwfi i)
+      have ⟨S', hS'⟩ := Classical.axiomOfChoice h_per_i
+      refine ⟨Sc'.union (chsetUnionFin S'), ?_, ?_⟩
+      · show BTyping C.env
+          (BExpr.matchE (lower C scrut) (fun i => lower C (arms i)))
+          (Sc'.union (chsetUnionFin S'))
+        exact BTyping.matchE _ _ _ _ hBTc (fun i => (hS' i).1)
+      · -- Sc' ∪ chsetUnionFin S' ⊆ Sc ∪ chsetUnionFin Ss
+        exact ChSet.union_mono _ _ _ _ hsubc
+          (chsetUnionFin_mono S' Ss (fun i => (hS' i).2))
 
 -- ===========================================================================
 -- §14. Cross-world soundness (Stage 3: gtt_corresponds)
@@ -1212,6 +1256,77 @@ theorem canary_ifE_slot3_gradient_zero_float :
   decide
 
 -- ===========================================================================
+-- §14f. End-to-end `match` canary at `α = Float`
+-- ===========================================================================
+
+/-!
+Week-7-stage-1 surface: `Expr.matchE scrut arms` has a `Typing.tMatch`
+rule (conclusion `Sc ∪ chsetUnionFin Ss`, both-arms-union-style n-ary
+via week-5's `chsetUnionFin`), a single-arm `Eval.eMatchArm i`
+constructor (only the selected arm's footprint contributes), a
+`BTyping.matchE` rule, and a `bridge` case via `fp_add_union` +
+`fp_foldDualAdd` over the `dual2Add`-flattened + `foldDualAdd`-folded
+`evalB` encoding.  Compiler-side EXPR_CH_SET arm-union emission at
+`compile_stmt:~16869` (x86) / `~25748` (a64) lands in week-7 stage 2.
+
+The canary `gtCanaryExprMatch` exercises `Expr.matchE` end-to-end with
+channel seeds in scrutinee + both arms, witnessing the Stage-1 form at
+`α = Float`. -/
+
+/-- Canary `match` GT expression at arity 2: scrutinee is `value 0`,
+    arm 0 is `value 0`, arm 1 is `value 1` (mirror of `gtCanaryExprIf`'s
+    shape).  Declared type per `tMatch`:
+      `{ch 0} ∪ chsetUnionFin (fun i : Fin 2 => if i = 0 then {ch 0} else {ch 1})`. -/
+def gtCanaryExprMatch : Expr :=
+  Expr.matchE (Expr.value 0) (fun i : Fin 2 => Expr.value i.val)
+
+theorem gtCanaryExprMatch_wellFormed : ExprWellFormed gtCanaryExprMatch := by
+  show ExprWellFormed (Expr.value 0) ∧
+       ∀ i : Fin 2, ExprWellFormed (Expr.value i.val)
+  refine ⟨?_, ?_⟩
+  · -- ExprWellFormed (Expr.value 0) ≡ 0 < 8
+    show (0 < 8)
+    decide
+  · intro i
+    -- ExprWellFormed (Expr.value i.val) ≡ i.val < 8.  i.val < 2 < 8.
+    show i.val < 8
+    have : i.val < 2 := i.isLt
+    omega
+
+theorem gtCanaryExprMatch_types (Γ : TyEnv) :
+    Typing Γ gtCanaryExprMatch
+      ((ChSet.singleton 0).union
+         (chsetUnionFin (fun i : Fin 2 => ChSet.singleton i.val))) :=
+  Typing.tMatch (Expr.value 0) (fun i : Fin 2 => Expr.value i.val)
+    (ChSet.singleton 0)
+    (fun i : Fin 2 => ChSet.singleton i.val)
+    (Typing.tValue 0)
+    (fun i : Fin 2 => Typing.tValue i.val)
+
+/-- **End-to-end `match`-branch cross-world canary at `α = Float`.**
+    Exercises `lowering_types`'s `tMatch` branch (scrutinee via `ihc`
+    destructure, arms via `Classical.axiomOfChoice` — same machinery as
+    `tCallN`) and `bridge`'s `.matchE` arm (`fp_add_union` +
+    `fp_foldDualAdd` over the n-ary flat encoding). -/
+theorem canary_matchE_gtt_corresponds_float :
+    Footprint
+      ((ChSet.singleton 0).union
+         (chsetUnionFin (fun i : Fin 2 => ChSet.singleton i.val)))
+      (evalB seedEnvFloat (lower seedCompatFloat gtCanaryExprMatch)) :=
+  gtt_corresponds seedCompatFloat gtCanaryExprMatch _
+    gtCanaryExprMatch_wellFormed (gtCanaryExprMatch_types seedCompatFloat.Γ)
+
+/-- `match`-canary slot corollary: slot `⟨3,_⟩` is outside
+    `{ch 0} ∪ chsetUnionFin (fun i : Fin 2 => {ch i.val})` (which is
+    `{ch 0, ch 1}`), so its gradient is `(0.0 : Float)`. -/
+theorem canary_matchE_slot3_gradient_zero_float :
+    (evalB seedEnvFloat (lower seedCompatFloat gtCanaryExprMatch)).grad
+        ⟨3, by decide⟩
+      = (0.0 : Float) := by
+  apply canary_matchE_gtt_corresponds_float.1 ⟨3, by decide⟩
+  decide
+
+-- ===========================================================================
 -- §15. Summary
 -- ===========================================================================
 
@@ -1260,6 +1375,9 @@ theorem canary_ifE_slot3_gradient_zero_float :
 | gtCanaryExprIf / gtCanaryExprIf_{wellFormed,types}     | def+prv | §14e                       |
 | **canary_ifE_gtt_corresponds_float** (if-branch Float inhabitant) | proved | §14e                |
 | canary_ifE_slot3_gradient_zero_float                   | proved  | §14e                       |
+| gtCanaryExprMatch / gtCanaryExprMatch_{wellFormed,types}| def+prv| §14f                       |
+| **canary_matchE_gtt_corresponds_float** (match Float inhabitant) | proved | §14f                 |
+| canary_matchE_slot3_gradient_zero_float                | proved  | §14f                       |
 | **canary_gtt_corresponds_float** (Float inhabitant)    | proved  | §14c                       |
 | canary_gtt_slot2_gradient_zero_float                   | proved  | §14c                       |
 

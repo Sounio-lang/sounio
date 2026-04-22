@@ -248,6 +248,13 @@ inductive Expr : Type where
   | call2  (f : FnId) (e1 e2 : Expr): Expr
   | callN  (f : FnId) {n : Nat} (args : Fin n → Expr) : Expr
   | ifE    (cond e1 e2 : Expr)      : Expr
+  /-- `match`-expression surface form: a scrutinee followed by `n` arm
+      bodies, each a sub-expression.  Uses `{n : Nat}` + `Fin n → Expr` to
+      stay strictly positive (same discipline as `callN`).  Arm patterns
+      are intentionally abstracted away — GTT only tracks the scrutinee
+      topology and the per-arm body topologies, which is the compiler's
+      EXPR_CH_SET contract at `compile_stmt:~16474` (x86) / `~25456` (a64). -/
+  | matchE (scrut : Expr) {n : Nat} (arms : Fin n → Expr) : Expr
 
 /-- A typing environment mapping variables to their declared channel set.
     Corresponds to `VAR_CH_SET` indexed by variable slot. -/
@@ -282,6 +289,15 @@ inductive Typing (Γ : TyEnv) : Expr → ChSet → Prop where
   | tIf (cond e1 e2 : Expr) (Sc S1 S2 : ChSet)
       (hc : Typing Γ cond Sc) (h1 : Typing Γ e1 S1) (h2 : Typing Γ e2 S2) :
       Typing Γ (Expr.ifE cond e1 e2) (Sc.union (S1.union S2))
+  /-- `match` typing rule: scrutinee set + n-ary union over per-arm sets.
+      Mirrors `tIf`'s both-arms-union form but n-way, reusing the week-5
+      `chsetUnionFin` machinery.  Compiler fix at x86:~16869 / a64:~25748
+      unions `match_scrut_ch_set | match_arms_ch_union` into EXPR_CH_SET. -/
+  | tMatch (scrut : Expr) {n : Nat} (arms : Fin n → Expr)
+      (Sc : ChSet) (Ss : Fin n → ChSet)
+      (hc : Typing Γ scrut Sc)
+      (h : ∀ i : Fin n, Typing Γ (arms i) (Ss i)) :
+      Typing Γ (Expr.matchE scrut arms) (Sc.union (chsetUnionFin Ss))
 
 -- ---------------------------------------------------------------------------
 -- §4. Big-step semantics parameterised by a function table
@@ -358,6 +374,18 @@ inductive Eval (F : FnTable) (ρ : VarEnv) : Expr → RuntimeVal → Prop where
       (h2 : Eval F ρ e2 v2) :
       Eval F ρ (Expr.ifE cond e1 e2)
         ⟨v2.value, vc.footprint.union v2.footprint⟩
+  /-- `match` big-step semantics: runtime selects a single arm `i : Fin n`.
+      The result value is the selected arm's value; the footprint is the
+      union of the scrutinee's footprint and the selected arm's footprint
+      (unselected arms don't contribute — mirrors `eIfThen`/`eIfElse` n-way).
+      `i` is explicit so destructuring in `gtt_sound`'s matchE case binds
+      it directly without needing `@`-mode. -/
+  | eMatchArm (scrut : Expr) {n : Nat} (arms : Fin n → Expr) (i : Fin n)
+      (vc vi : RuntimeVal)
+      (hc : Eval F ρ scrut vc)
+      (hi : Eval F ρ (arms i) vi) :
+      Eval F ρ (Expr.matchE scrut arms)
+        ⟨vi.value, vc.footprint.union vi.footprint⟩
 
 -- ---------------------------------------------------------------------------
 -- §5. The body-respects-topology hypothesis
@@ -524,6 +552,20 @@ theorem gtt_sound
         have s2' : v2.footprint.subset (S1.union S2) :=
           ChSet.subset_trans _ S2 _ s2 (ChSet.subset_union_right S1 S2)
         exact ChSet.union_mono _ _ _ _ sc s2'
+  | matchE scrut arms ih_scrut ih_arms =>
+    intro S v hT hE
+    cases hT with
+    | tMatch _ _ Sc Ss hTc hTi =>
+      cases hE with
+      | eMatchArm _ _ i vc vi hEc hEi =>
+        -- v = ⟨vi.value, vc.footprint ∪ vi.footprint⟩
+        -- Goal: (vc.footprint ∪ vi.footprint).subset (Sc ∪ chsetUnionFin Ss)
+        have sc : vc.footprint.subset Sc := ih_scrut Sc vc hTc hEc
+        have si : vi.footprint.subset (Ss i) := ih_arms i (Ss i) vi (hTi i) hEi
+        -- vi ⊆ Ss i ⊆ chsetUnionFin Ss (subset_chsetUnionFin §2b)
+        have si' : vi.footprint.subset (chsetUnionFin Ss) :=
+          ChSet.subset_trans _ (Ss i) _ si (subset_chsetUnionFin Ss i)
+        exact ChSet.union_mono _ _ _ _ sc si'
 
 -- ---------------------------------------------------------------------------
 -- §7. The union rule is the right conservative body-discharge
