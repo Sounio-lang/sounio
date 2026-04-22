@@ -563,6 +563,237 @@ theorem canary_proj_a_only_arg0 (S1 S2 : ChSet) :
     usedUnion ⟨true, false⟩ S1 S2 = S1.union ChSet.empty := rfl
 
 -- ---------------------------------------------------------------------------
+-- §7c. N-ary body-level precision (ChSet list machinery)
+-- ---------------------------------------------------------------------------
+
+/-!
+The compiler supports n-ary user-fn calls at arity up to 16, per the
+`B9_ARG_CH_SET[16]` / `B9_ARG_PARAM_USED[16]` / `FN_USED_PARAMS[fi]`
+bitmask layout in `self-hosted/compiler/lean_single.sio:~490` and the
+call-site iteration at `compile_primary:~10300`.  §7b proves the
+soundness theorem for the binary specialisation; this section lifts the
+underlying set-theoretic union machinery to arbitrary arity and states
+the abstract n-ary soundness theorem over a list of per-argument
+runtime footprints and declared channel sets.
+
+The section closes the β⁹ week-3 "omitted here because the
+nested-inductive induction principle for `List Expr` sub-terms is
+enough of a footgun" scope note: the n-ary soundness argument is
+*purely set-theoretic* once the usedUnion / union combinators are
+lifted to `List ChSet`, so it does not require extending the `Expr`
+inductive.  Wiring this into a surface `Expr.callN (args : List Expr)`
+constructor — which would also force a matching extension in
+`GradientTopologyBridge.lean`'s `lower` / `BExpr` / `BTyping` — remains
+a follow-up, but the hard set-theoretic content is discharged here.
+-/
+
+/-- List-indexed channel-set join.  Folds `ChSet.union` right-
+    associatively over a list of channel sets; the result is the
+    smallest set containing every element of `Ss`.  N-ary analogue of
+    `ChSet.union`. -/
+def ChSet.unionL : List ChSet → ChSet
+  | []       => ChSet.empty
+  | S :: Ss  => S.union (ChSet.unionL Ss)
+
+theorem ChSet.unionL_nil : ChSet.unionL [] = ChSet.empty := rfl
+
+theorem ChSet.unionL_cons (S : ChSet) (Ss : List ChSet) :
+    ChSet.unionL (S :: Ss) = S.union (ChSet.unionL Ss) := rfl
+
+/-- Pointwise-subset relation between two lists of channel sets.  The
+    two lists must have the same length (enforced by the constructor
+    structure), and each corresponding pair must satisfy
+    `ChSet.subset`.  Used to state `unionL_mono` without `List.get`
+    indexing. -/
+inductive ChSet.subsetL : List ChSet → List ChSet → Prop where
+  | nil  : ChSet.subsetL [] []
+  | cons {S T : ChSet} {Ss Ts : List ChSet} :
+      S.subset T → ChSet.subsetL Ss Ts →
+      ChSet.subsetL (S :: Ss) (T :: Ts)
+
+theorem ChSet.subsetL_refl : ∀ (Ss : List ChSet), ChSet.subsetL Ss Ss
+  | []       => ChSet.subsetL.nil
+  | S :: Ss  => ChSet.subsetL.cons (ChSet.subset_refl S)
+                                    (ChSet.subsetL_refl Ss)
+
+/-- Every list element is a subset of the list-union.  N-ary analogue
+    of `ChSet.subset_union_left` / `ChSet.subset_union_right`. -/
+theorem ChSet.subset_unionL : ∀ (Ss : List ChSet) (S : ChSet),
+    S ∈ Ss → S.subset (ChSet.unionL Ss)
+  | [], _, h => absurd h (by simp)
+  | T :: Ss, S, h => by
+      rw [ChSet.unionL_cons]
+      rcases List.mem_cons.mp h with rfl | hmem
+      · exact ChSet.subset_union_left S (ChSet.unionL Ss)
+      · exact ChSet.subset_trans S (ChSet.unionL Ss) _
+          (ChSet.subset_unionL Ss S hmem)
+          (ChSet.subset_union_right T (ChSet.unionL Ss))
+
+/-- **Monotonicity of list-union** under pointwise subset.  N-ary
+    analogue of `ChSet.union_mono`. -/
+theorem ChSet.unionL_mono : ∀ {Ss Ts : List ChSet},
+    ChSet.subsetL Ss Ts →
+    (ChSet.unionL Ss).subset (ChSet.unionL Ts)
+  | [],      [],      _ => ChSet.subset_refl ChSet.empty
+  | S :: Ss, T :: Ts, .cons hhd htail => by
+      rw [ChSet.unionL_cons, ChSet.unionL_cons]
+      exact ChSet.union_mono S (ChSet.unionL Ss) T (ChSet.unionL Ts)
+        hhd (ChSet.unionL_mono htail)
+
+/-- N-ary analogue of `UsedParams2`: a `Bool` per parameter position.
+    Corresponds to the low bits of the compiler's `FN_USED_PARAMS[fi]`
+    bitmask, read one bit per `i` at `compile_primary:~10317`. -/
+abbrev UsedParamsL : Type := List Bool
+
+/-- N-ary body-precision join: zip a per-parameter boolean list with a
+    list of channel sets, and union only those sets whose boolean is
+    `true`.  Mirrors the compiler's loop `if (FN_USED_PARAMS[fi] & (1 <<
+    i)) != 0 then union B9_ARG_CH_SET[i] else skip`.  When either list
+    is empty the result is `empty`; length mismatches are treated as
+    truncation.  N-ary analogue of `usedUnion`. -/
+def usedUnionL : UsedParamsL → List ChSet → ChSet
+  | [],      _        => ChSet.empty
+  | _,       []       => ChSet.empty
+  | u :: U, S :: Ss =>
+      ChSet.union
+        (if u then S else ChSet.empty)
+        (usedUnionL U Ss)
+
+theorem usedUnionL_nil_left (Ss : List ChSet) :
+    usedUnionL [] Ss = ChSet.empty := rfl
+
+theorem usedUnionL_nil_right : ∀ (U : UsedParamsL),
+    usedUnionL U [] = ChSet.empty
+  | []      => rfl
+  | _ :: _  => rfl
+
+theorem usedUnionL_cons (u : Bool) (S : ChSet)
+    (U : UsedParamsL) (Ss : List ChSet) :
+    usedUnionL (u :: U) (S :: Ss) =
+      ChSet.union (if u then S else ChSet.empty) (usedUnionL U Ss) := rfl
+
+/-- **N-ary body-precision is always a refinement of the n-ary
+    union.**  The compiler's fallback — an unanalyzed callee collapses
+    to the conservative list-union — is always safe because the
+    body-precision set is contained in the conservative one.  N-ary
+    analogue of `usedUnion_subset_union`. -/
+theorem usedUnionL_subset_unionL :
+    ∀ (U : UsedParamsL) (Ss : List ChSet),
+      (usedUnionL U Ss).subset (ChSet.unionL Ss)
+  | [],      Ss      => by
+      rw [usedUnionL_nil_left]; exact ChSet.empty_subset _
+  | _ :: _, []       => by
+      rw [usedUnionL_nil_right]; exact ChSet.empty_subset _
+  | u :: U, S :: Ss  => by
+      rw [usedUnionL_cons, ChSet.unionL_cons]
+      exact ChSet.union_subset _ _ _
+        (ChSet.subset_trans _ S _
+          (ChSet.if_empty_subset_left u S)
+          (ChSet.subset_union_left S (ChSet.unionL Ss)))
+        (ChSet.subset_trans _ (ChSet.unionL Ss) _
+          (usedUnionL_subset_unionL U Ss)
+          (ChSet.subset_union_right S (ChSet.unionL Ss)))
+
+/-- Monotonicity of `usedUnionL` in the channel-set list (for a fixed
+    per-parameter bit list).  N-ary analogue of `usedUnion_mono`. -/
+theorem usedUnionL_mono :
+    ∀ (U : UsedParamsL) {Ss Ts : List ChSet},
+      ChSet.subsetL Ss Ts →
+      (usedUnionL U Ss).subset (usedUnionL U Ts)
+  | [],      _,        _,        _ => ChSet.subset_refl _
+  | _ :: _, [],        [],       _ => ChSet.subset_refl _
+  | u :: U, S :: Ss,   T :: Ts,  .cons hhd htail => by
+      rw [usedUnionL_cons, usedUnionL_cons]
+      exact ChSet.union_mono _ _ _ _
+        (ChSet.if_empty_mono u S T hhd)
+        (usedUnionL_mono U htail)
+
+/-- Sanity: when every parameter is used, `usedUnionL` collapses to
+    the conservative n-ary list-union.  N-ary analogue of
+    `usedUnion_all_used`; no regression for fully-used functions. -/
+theorem usedUnionL_all_used :
+    ∀ (Ss : List ChSet),
+      usedUnionL (List.replicate Ss.length true) Ss = ChSet.unionL Ss
+  | []      => rfl
+  | S :: Ss => by
+      show usedUnionL (true :: List.replicate Ss.length true) (S :: Ss)
+             = ChSet.unionL (S :: Ss)
+      rw [usedUnionL_cons, ChSet.unionL_cons, usedUnionL_all_used Ss]
+      show ChSet.union (if true then S else ChSet.empty) (ChSet.unionL Ss)
+             = S.union (ChSet.unionL Ss)
+      rfl
+
+/-- **Abstract n-ary body-precision soundness.**
+
+    Given
+      * `args_fps` — per-argument runtime footprints
+      * `S_args`   — per-argument declared channel sets
+      * `U`        — body-precision summary (one bit per parameter)
+      * `ret_fp`   — return-value runtime footprint
+      * `hArgs`    — each argument's fp ⊆ its declared set (pointwise)
+      * `hBody`    — return fp ⊆ `usedUnionL U args_fps`
+                     (the n-ary body-precision hypothesis, discharged
+                      compiler-side at `FN_USED_PARAMS[fi]` capture)
+
+    conclude: return fp ⊆ `usedUnionL U S_args` — the *declared* n-ary
+    body-precision set.
+
+    N-ary analogue of `gtt_sound_body`, discharging step 3
+    (monotonicity) of that theorem's chain — steps 1 and 2
+    (per-argument `gtt_sound` recursion and per-call body-precision)
+    become the explicit `hArgs` / `hBody` hypotheses here, awaiting a
+    future `Expr.callN (args : List Expr)` inductive to discharge them
+    by a `gtt_sound`-style structural recursion.  The statement is
+    set-theoretic, so it is independent of the specific
+    `Expr` / `Eval` / `FnTable` formulation and applies to any n-ary
+    call semantics that itself discharges `hBody`. -/
+theorem gtt_sound_bodyN
+    (U : UsedParamsL)
+    {args_fps S_args : List ChSet}
+    {ret_fp : ChSet}
+    (hArgs : ChSet.subsetL args_fps S_args)
+    (hBody : ret_fp.subset (usedUnionL U args_fps)) :
+    ret_fp.subset (usedUnionL U S_args) :=
+  ChSet.subset_trans ret_fp (usedUnionL U args_fps) (usedUnionL U S_args)
+    hBody
+    (usedUnionL_mono U hArgs)
+
+/-- **N-ary fallback soundness.**  When a callee's body-precision is
+    unanalyzed (compiler fallback: union-all), the return fp is bounded
+    by the n-ary list-union of declared sets.  Composes `ChSet.subset_trans`
+    + `ChSet.unionL_mono`.  N-ary analogue of `gtt_sound` at the
+    ChSet level. -/
+theorem gtt_sound_fallbackN
+    {args_fps S_args : List ChSet}
+    {ret_fp : ChSet}
+    (hArgs : ChSet.subsetL args_fps S_args)
+    (hBody : ret_fp.subset (ChSet.unionL args_fps)) :
+    ret_fp.subset (ChSet.unionL S_args) :=
+  ChSet.subset_trans ret_fp (ChSet.unionL args_fps) (ChSet.unionL S_args)
+    hBody
+    (ChSet.unionL_mono hArgs)
+
+/-- **Canary (week-5 n-ary body-precision).**  Three-argument call with
+    `UP = [true, false, false]` (first parameter used, others dropped):
+    the `usedUnionL`-computed set reduces definitionally to a union of
+    `S1` with empty tails.  Mirrors `canary_proj_a_only_arg0` lifted to
+    arity 3; witnesses that `usedUnionL` correctly drops
+    unused-parameter channel sets. -/
+theorem canary_nary_proj_a_drops_args (S1 S2 S3 : ChSet) :
+    usedUnionL [true, false, false] [S1, S2, S3]
+      = ChSet.union S1 (ChSet.union ChSet.empty
+          (ChSet.union ChSet.empty ChSet.empty)) := rfl
+
+/-- **Canary — pointwise collapse.**  Every channel of the n-ary
+    projection result equals the corresponding channel of `S1` — the
+    unused-parameter channel sets `S2` and `S3` contribute nothing. -/
+theorem canary_nary_proj_a_pointwise (S1 S2 S3 : ChSet) (n : Nat) :
+    (usedUnionL [true, false, false] [S1, S2, S3]) n = S1 n := by
+  rw [canary_nary_proj_a_drops_args]
+  show (S1 n || (false || (false || false))) = S1 n
+  cases S1 n <;> rfl
+
+-- ---------------------------------------------------------------------------
 -- §8. A closed-form corollary matching the week-3 commit narrative
 -- ---------------------------------------------------------------------------
 
@@ -606,6 +837,13 @@ theorem regression_my_sum_topology
 | Body-precision implies week-3 body hypothesis                         | Proved  | `bodyPrecision_implies_union_hypothesis` |
 | **Body-precision soundness for binary `call2`** (week-4)              | Proved  | `gtt_sound_body`                         |
 | Canary: proj_a with UP=⟨true,false⟩ types at `{arg₀}` only            | Proved  | `canary_proj_a_only_arg0`                |
+| **N-ary list-union / pointwise-subset / monotonicity** (ChSet level)  | Proved  | `ChSet.unionL_*` / `ChSet.subsetL_*`     |
+| **N-ary body-precision refines n-ary union** (`usedUnionL`)           | Proved  | `usedUnionL_subset_unionL`               |
+| N-ary body-precision collapses to union when all params used          | Proved  | `usedUnionL_all_used`                    |
+| N-ary body-precision is monotone in argument channel sets             | Proved  | `usedUnionL_mono`                        |
+| **Abstract n-ary body-precision soundness** (week-5 ChSet form)       | Proved  | `gtt_sound_bodyN`                        |
+| N-ary union-rule fallback soundness (week-3 generalised)              | Proved  | `gtt_sound_fallbackN`                    |
+| Canary: 3-ary proj_a with UP=[true,false,false] ⇒ ret ⊆ `S1`          | Proved  | `canary_nary_proj_a_drops_args`          |
 
 ## What this file proves, in one sentence
 
@@ -613,17 +851,21 @@ For every GTT-typed expression `e` with declared channel set `S`, every
 runtime value produced by evaluating `e` under a consistent variable
 environment and a body-respecting function table has channel footprint
 contained in `S`.  In particular, the week-3 inter-procedural union rule
-at binary user-function calls is a *sound* static channel set.
+at binary user-function calls is a *sound* static channel set, and the
+week-5 abstract n-ary body-precision soundness theorem
+(`gtt_sound_bodyN`) lifts the week-4 binary soundness to arbitrary
+arity at the set-theoretic level.
 
 ## What remains open
 
-1. N-ary calls (arity > 2).  The union-over-a-list rule is a routine
-   structural induction over `List.Forall₂` using `union_assoc`;
-   omitted here because the nested-inductive induction principle for
-   `List Expr` sub-terms is enough of a footgun to warrant verification
-   with a Lean toolchain on-hand.  The binary theorem is morally the
-   n-ary theorem.  `usedUnion` generalises to `usedUnionN : UsedParamsN
-   → List ChSet → ChSet` along the same structural path.
+1. **Surface-syntax n-ary wiring.**  §7c proves the n-ary soundness
+   theorem abstractly over `List ChSet` using `ChSet.unionL` /
+   `usedUnionL`; it does NOT extend the `Expr` inductive with a nested
+   `callN (args : List Expr)` constructor.  Doing so would require a
+   matching extension in `GradientTopologyBridge.lean`'s `lower` /
+   `BExpr` / `BTyping`.  The set-theoretic content — the "routine via
+   union_assoc" claim from the week-3 scope note — is discharged; only
+   the Expr surface extension remains.
 2. Body-level precision beyond return-position (match / if arms, loops,
    recursion fixed-point).  Week-4 covers the return-position tail
    fragment; richer body CFA is deferred.
