@@ -221,6 +221,19 @@ class PreprocessResult:
         return self.n_retained_epochs / self.n_total_epochs
 
 
+def _gwdg_vhdr_path(bids_root: str, subject: str) -> str | None:
+    """Return the path to ``<root>/<sub>/RSEEG/<sub>.vhdr`` if present.
+
+    This is the directory layout used by the canonical GWDG mirror of
+    LEMON (``EEG_MPILMBB_LEMON/EEG_Raw_BIDS_ID/sub-XXXXXX/RSEEG/``); it
+    is BIDS-like but not a full BIDS dataset (no ``dataset_description.json``).
+    """
+    from pathlib import Path as _P
+    sub = subject if subject.startswith("sub-") else f"sub-{subject}"
+    p = _P(bids_root) / sub / "RSEEG" / f"{sub}.vhdr"
+    return str(p) if p.is_file() else None
+
+
 def load_lemon_raw(
     bids_root: str,
     subject: str,
@@ -229,10 +242,31 @@ def load_lemon_raw(
 ):
     """Read one LEMON resting-state EEG recording as an MNE Raw.
 
-    Uses ``mne_bids`` when available; falls back to a direct
-    BrainVision read. Subject IDs must match the BIDS ``sub-<id>``
-    convention (the ``sub-`` prefix may be included or omitted).
+    Detection order:
+      1. direct BrainVision read against the GWDG ``sub-XXXXXX/RSEEG/``
+         layout when ``<root>/<sub>/RSEEG/<sub>.vhdr`` exists;
+      2. ``mne_bids`` against a full BIDS tree otherwise.
+
+    Subject IDs must match the ``sub-<id>`` convention (the ``sub-``
+    prefix may be included or omitted).
     """
+    vhdr = _gwdg_vhdr_path(bids_root, subject)
+    if vhdr is not None:
+        import mne  # type: ignore
+        raw = mne.io.read_raw_brainvision(vhdr, preload=True, verbose=False)
+        # LEMON raw files use channel types as EEG by default; VEOG sits
+        # on the last channel and must be marked as EOG before ICA/ICLabel.
+        # The Babayan et al. 2019 Scientific Data release names it VEOG.
+        if "VEOG" in raw.ch_names:
+            raw.set_channel_types({"VEOG": "eog"}, verbose=False)
+        # ICLabel requires a standard 10-20 montage on the EEG picks.
+        try:
+            montage = mne.channels.make_standard_montage("standard_1020")
+            raw.set_montage(montage, on_missing="ignore", verbose=False)
+        except Exception:
+            pass
+        return raw
+
     try:
         from mne_bids import BIDSPath, read_raw_bids  # type: ignore
     except ImportError as exc:  # pragma: no cover - environment-dependent
@@ -285,10 +319,21 @@ def run_ica_iclabel(raw, seed: int = ICA_SEED,
         ) from exc
 
     # ICLabel was trained on 1-100 Hz CAR data; our bandpass is 1-45 Hz
-    # which ICLabel tolerates. Infomax = ``extended-infomax`` in MNE.
+    # which ICLabel tolerates. We use Picard with ``ortho=False, extended=True``
+    # which converges to the same fixed points as MNE's pure-Python extended
+    # Infomax (Ablin et al. 2018, "Faster independent component analysis by
+    # preconditioning with Hessian approximations") but ~30x faster on
+    # 62-channel × 17-min resting-state data.
+    try:
+        import picard  # type: ignore  # noqa: F401
+        method = "picard"
+        fit_params = dict(ortho=False, extended=True)
+    except ImportError:  # pragma: no cover - fall back to stock infomax
+        method = "infomax"
+        fit_params = dict(extended=True)
     ica = mne.preprocessing.ICA(
-        n_components=None, method="infomax",
-        fit_params=dict(extended=True), max_iter="auto",
+        n_components=None, method=method,
+        fit_params=fit_params, max_iter="auto",
         random_state=seed, verbose=False,
     )
     ica.fit(raw, verbose=False)
@@ -335,8 +380,11 @@ def preprocess_subject(
     raw, n_ica_rej, n_ica_total = run_ica_iclabel(raw)
 
     # Pre-zscore epoching in µV for amplitude/gradient rejection.
-    data_uv = raw.get_data(units="uV")  # (n_ch, n_samples)
-    ch_names = list(raw.info["ch_names"])
+    # Pick only EEG channels — LEMON raw contains a VEOG channel whose
+    # mixed unit would cause ``get_data(units='uV')`` to fail.
+    eeg_picks = raw.copy().pick("eeg", verbose=False)
+    data_uv = eeg_picks.get_data(units="uV")  # (n_ch, n_samples)
+    ch_names = list(eeg_picks.info["ch_names"])
     aggregated = regional_aggregate(data_uv, ch_names, strict=False)
 
     samples_per_epoch = SAMPLES_PER_EPOCH
