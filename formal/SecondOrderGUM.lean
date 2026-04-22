@@ -141,31 +141,13 @@ real spectral theory — tr((HΣ)²) = Σ μ_i² where the μ_i are the real
 eigenvalues of HΣ (similar to the symmetric Σ^{1/2}·H·Σ^{1/2}) — but Lean 4
 core does not export eigendecomposition for Float-valued matrices.
 
-We declare five Float axioms here.  All are standard IEEE-754 facts for
-finite non-NaN values and can be discharged by a Mathlib-backed proof in a
-future phase.
+The seven Float arithmetic axioms (`float_zero_mul_ax`,
+`float_mul_zero_ax`, `float_zero_add_ax`, `float_add_zero_ax`,
+`float_add_comm_ax`, `float_mul_comm_ax`, `float_mul_assoc_ax`) and the
+`Dual2Field Float` instance are declared in `HessianAD.lean §11` so they
+are available to every downstream consumer of `HessianAD`.  Here we keep
+only the three order/PSD axioms specific to this module's bound proof.
 -/
-
-/-- Float `0.0 * a = 0.0`.  Holds for finite non-NaN. -/
-axiom float_zero_mul_ax (a : Float) : 0.0 * a = 0.0
-
-/-- Float `a * 0.0 = 0.0`.  Holds for finite non-NaN. -/
-axiom float_mul_zero_ax (a : Float) : a * 0.0 = 0.0
-
-/-- Float `0.0 + a = a`. -/
-axiom float_zero_add_ax (a : Float) : 0.0 + a = a
-
-/-- Float `a + 0.0 = a`. -/
-axiom float_add_zero_ax (a : Float) : a + 0.0 = a
-
-/-- Float addition is commutative (for finite non-NaN values). -/
-axiom float_add_comm_ax (a b : Float) : a + b = b + a
-
-/-- Float multiplication is commutative (for finite non-NaN values). -/
-axiom float_mul_comm_ax (a b : Float) : a * b = b * a
-
-/-- Float multiplication is associative (for finite non-NaN values). -/
-axiom float_mul_assoc_ax (a b c : Float) : (a * b) * c = a * (b * c)
 
 /-- Float ≤ is reflexive. -/
 axiom float_le_refl (a : Float) : a ≤ a
@@ -176,21 +158,6 @@ axiom float_add_le_add (a b c d : Float) : a ≤ b → c ≤ d → a + c ≤ b +
 /-- Multiplication of a non-negative Float by a non-negative Float is
     non-negative. -/
 axiom float_mul_nonneg (a b : Float) : 0.0 ≤ a → 0.0 ≤ b → 0.0 ≤ a * b
-
-/-- Float satisfies the `Dual2Field` interface (from HessianAD.lean).
-    All field proofs use the Float axioms declared above.  `noncomputable`
-    because Float is IEEE-754 and the algebraic identities are declared
-    rather than computed. -/
-noncomputable instance instDual2FieldFloat : Dual2Field Float where
-  zero := 0.0
-  one := 1.0
-  zero_mul := float_zero_mul_ax
-  mul_zero := float_mul_zero_ax
-  zero_add := float_zero_add_ax
-  add_zero := float_add_zero_ax
-  add_comm := float_add_comm_ax
-  mul_comm := float_mul_comm_ax
-  mul_assoc := float_mul_assoc_ax
 
 /-- The trace term tr(HΣHΣ) is non-negative for symmetric H and PSD Σ
     (Bhatia 2013 Prop 1.3.2).  Declared as axiom pending a Mathlib-backed

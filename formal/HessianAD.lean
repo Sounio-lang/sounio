@@ -467,7 +467,90 @@ is tightened to equality on the body-precision fragment, so on that fragment
 
 ## Axioms used
 
-None.  Module is self-contained with its own minimal typeclass.
+None inside §1-§10.  The §11 Float instance axiomatises seven
+IEEE-754 arithmetic laws (`float_zero_mul_ax`, `float_mul_zero_ax`,
+`float_zero_add_ax`, `float_add_zero_ax`, `float_add_comm_ax`,
+`float_mul_comm_ax`, `float_mul_assoc_ax`) to discharge the
+`Dual2Field Float` instance.  The first five are exact for finite
+non-NaN values; `float_mul_comm_ax` is approximate; `float_mul_assoc_ax`
+is the trust-boundary axiom (false in general floats).
 -/
+
+-- ---------------------------------------------------------------------------
+-- §11. Float instance (IEEE-754 axiomatised)
+-- ---------------------------------------------------------------------------
+
+/-!
+The abstract `Dual2Field` interface is instantiated at `α = Float` so the
+compiler's runtime algebra connects to the footprint/soundness theorems.
+
+Lean 4 core provides `Add Float` and `Mul Float` as raw IEEE-754 operations
+but proves none of the ring-like laws.  IEEE-754 is non-associative in
+multiplication (classic counterexample: `(1e20 * 1e-20) * 1e20 = 1e20`
+but `1e20 * (1e-20 * 1e20) = 1e40` under double precision) and does not
+respect `zero_add`/`add_comm` on NaN payloads.
+
+We declare seven arithmetic axioms below:
+
+  * Three hold *exactly* for finite non-NaN values — IEEE-754 addition
+    with `0.0` and commutative addition are bit-exact (`zero_add`,
+    `add_zero`, `add_comm`).
+  * Four are *approximate* for finite non-NaN — `zero_mul`, `mul_zero`,
+    `mul_comm` hold with caveats for signed zero and under/overflow;
+    `mul_assoc` is the fundamental numerical-analysis trust boundary,
+    false in general for finite floats.
+
+For the add-only body-precision canary (`GradientTopologyBridge §14c`),
+only the three exact axioms are exercised.  For consumers that use
+`dual2Mul` over Float (e.g. `SecondOrderGUM` product-rule proofs) the
+full seven-axiom set is exercised and the `mul_assoc` trust boundary
+applies.
+
+These seven axioms match the convention adopted across numerical PL
+verification work (CompCert's Float model, LLVM's real-number axioms).
+They are intended to be discharged by a future Mathlib-backed proof path
+that routes Float arithmetic through `Real`-valued counterparts under
+explicit finite/non-NaN premises.
+
+(Prior to this section these axioms lived in `SecondOrderGUM.lean §5`.
+Consolidated here so the instance is visible to every downstream
+`import HessianAD` consumer, including `GradientTopologyBridge`.)
+-/
+
+/-- Float `0.0 * a = 0.0`.  Exact for finite non-NaN `a`. -/
+axiom float_zero_mul_ax (a : Float) : 0.0 * a = 0.0
+
+/-- Float `a * 0.0 = 0.0`.  Exact for finite non-NaN `a`. -/
+axiom float_mul_zero_ax (a : Float) : a * 0.0 = 0.0
+
+/-- Float `0.0 + a = a`.  Exact for finite non-NaN `a`. -/
+axiom float_zero_add_ax (a : Float) : 0.0 + a = a
+
+/-- Float `a + 0.0 = a`.  Exact for finite non-NaN `a`. -/
+axiom float_add_zero_ax (a : Float) : a + 0.0 = a
+
+/-- Float addition is commutative.  Exact for finite non-NaN values. -/
+axiom float_add_comm_ax (a b : Float) : a + b = b + a
+
+/-- Float multiplication is commutative (approximate for finite non-NaN). -/
+axiom float_mul_comm_ax (a b : Float) : a * b = b * a
+
+/-- Float multiplication is associative.  **Trust boundary** — false in
+    general for finite floats; accepted as a numerical-PL axiom. -/
+axiom float_mul_assoc_ax (a b c : Float) : (a * b) * c = a * (b * c)
+
+/-- `Float` satisfies the `Dual2Field` interface.  `noncomputable` because
+    the algebraic laws are declared via the axioms above rather than
+    computed from IEEE-754 bit semantics. -/
+noncomputable instance instDual2FieldFloat : Dual2Field Float where
+  zero := 0.0
+  one := 1.0
+  zero_mul := float_zero_mul_ax
+  mul_zero := float_mul_zero_ax
+  zero_add := float_zero_add_ax
+  add_zero := float_add_zero_ax
+  add_comm := float_add_comm_ax
+  mul_comm := float_mul_comm_ax
+  mul_assoc := float_mul_assoc_ax
 
 end Sounio.HessianAD

@@ -494,8 +494,9 @@ get the cross-world soundness theorem `gtt_corresponds`.
 Design:
 
   * Abstract ground algebra `α` with `[Dual2Field α]` — the cross-world
-    theorem is polymorphic, instantiable at Nat (canary), Float (runtime
-    with noncomputable decidable zero), or any other Dual2Field instance.
+    theorem is polymorphic, instantiable at Nat (decidable canary, §14b),
+    Float (compiler runtime under the axiomatised HessianAD §11 instance,
+    §14c), or any other Dual2Field instance.
   * `Compat α` bundles the two environments plus the compatibility
     witnesses linking the GT `TyEnv` / `FnTable` to the B `BEnv` /
     call-lifter.
@@ -831,6 +832,97 @@ theorem canary_gtt_slot2_gradient_zero :
   decide
 
 -- ===========================================================================
+-- §14c. Cross-world canary at `α = Float` — compiler-runtime inhabitant
+-- ===========================================================================
+
+/-!
+`§14b` exhibits a concrete `Compat Nat`, proving the cross-world theorem
+is not vacuously true at the decidable ground algebra.  But the Sounio
+compiler's runtime shadow channels hold `Float`, not `Nat`.  This
+section exhibits a concrete `Compat Float` under the `Dual2Field Float`
+instance from `HessianAD §11`, closing the inhabitability gap at the
+algebra actually used by the compiler.
+
+The canary expression is *pure add* (`add (value 0) (value 1)`).
+Semantically the witness construction uses only the three IEEE-754
+axioms that are bit-exact for finite non-NaN values (`float_zero_add_ax`,
+`float_add_zero_ax`, `float_add_comm_ax`) — `fp_add_union` invokes
+`F.zero_add`, and the reified Dual2 evaluation threads through
+`dual2Add` only.
+
+However, `#print axioms canary_gtt_corresponds_float` reports the full
+seven-axiom set because Lean's dependency tracker traces every field
+of the `Dual2Field Float` instance bundle, including the four mul-laws
+that are never exercised along this witness.  This is a Lean
+bookkeeping artifact, not a semantic reliance: the `float_mul_assoc_ax`
+trust boundary is never applied inside the proof steps, only sitting
+unused in the instance record.  A typeclass refactor that splits
+`Dual2AddField` out of `Dual2Field` would tighten the reported
+footprint to match the semantic one; deferred.
+-/
+
+/-- Full-seed environment on `Float`.  Structural twin of `seedEnvNat`;
+    each `Fin 8` slot carries the corresponding channel-seed and the
+    singleton channel set matching its numeric identity. -/
+noncomputable def seedEnvFloat : BEnv Float where
+  denotation k := dual2Seed k 0.0
+  chset      k := ChSet.singleton k.val
+
+/-- The Float seed environment is well-typed. -/
+theorem seedEnvFloat_wellTyped : EnvWT seedEnvFloat :=
+  fun k => fp_seed k 0.0
+
+/-- Compatibility bundle instantiating `Compat Float` against `seedEnvFloat`.
+    Mirrors `seedCompatNat` exactly, swapping `Nat` for `Float` and using
+    the `Dual2Field Float` instance from `HessianAD §11`.  The `cliftResp`
+    proof goes through because `fp_add_union` is polymorphic over
+    `[Dual2Field α]` and invokes only `F.zero_add` — the IEEE-754-exact
+    `float_zero_add_ax`. -/
+noncomputable def seedCompatFloat : Compat Float where
+  Γ         := fun _ => ChSet.singleton 0
+  env       := seedEnvFloat
+  liftLit   := fun c => c
+  varSlot   := fun _ => ⟨0, by decide⟩
+  chanSlot  := fun k => if h : k < 8 then ⟨k, h⟩ else ⟨0, by decide⟩
+  UP        := fun _ => ⟨true, true⟩
+  clift     := fun _ => dual2Add
+  varComp   := fun _ => rfl
+  chanComp  := fun k hk => by
+    show seedEnvFloat.chset (if h : k < 8 then ⟨k, h⟩ else ⟨0, by decide⟩)
+         = ChSet.singleton k
+    simp [hk, seedEnvFloat]
+  cliftResp := fun _ Sa Sb Da Db hA hB => by
+    show Footprint (usedUnion ⟨true, true⟩ Sa Sb) (dual2Add Da Db)
+    rw [usedUnion_all_used]
+    exact fp_add_union Sa Sb Da Db hA hB
+  envWT     := seedEnvFloat_wellTyped
+
+/-- **End-to-end cross-world canary at `α = Float`.**
+
+    `gtt_corresponds` applied to `gtCanaryExpr` under `seedCompatFloat`
+    yields `Footprint ((singleton 0).union (singleton 1))
+    (evalB seedEnvFloat (lower seedCompatFloat gtCanaryExpr))`.
+    In particular: every `Fin 8` slot with `j.val ∉ {0, 1}` has zero
+    gradient and zero Hessian row on the evaluated `Dual2 Float` value. -/
+theorem canary_gtt_corresponds_float :
+    Footprint ((ChSet.singleton 0).union (ChSet.singleton 1))
+      (evalB seedEnvFloat (lower seedCompatFloat gtCanaryExpr)) :=
+  gtt_corresponds seedCompatFloat gtCanaryExpr _
+    gtCanaryExpr_wellFormed (gtCanaryExpr_types seedCompatFloat.Γ)
+
+/-- Float counterpart of `canary_gtt_slot2_gradient_zero`: slot `⟨2,_⟩`
+    has zero gradient on the evaluated `Dual2 Float` value — slot 2 is
+    outside both singleton channels, so the cross-world theorem rules
+    out any first-order contribution from that slot. -/
+theorem canary_gtt_slot2_gradient_zero_float :
+    (evalB seedEnvFloat (lower seedCompatFloat gtCanaryExpr)).grad
+        ⟨2, by decide⟩
+      = (0.0 : Float) := by
+  apply canary_gtt_corresponds_float.1 ⟨2, by decide⟩
+  -- ¬ ((ChSet.singleton 0).union (ChSet.singleton 1)) 2
+  decide
+
+-- ===========================================================================
 -- §15. Summary
 -- ===========================================================================
 
@@ -869,6 +961,10 @@ theorem canary_gtt_slot2_gradient_zero :
 | gtCanaryExpr / gtCanaryExpr_{wellFormed,types}         | def+prv | §14b                       |
 | **canary_gtt_corresponds** (end-to-end inhabitant)     | proved  | §14b                       |
 | canary_gtt_slot2_gradient_zero (concrete slot corollary)| proved | §14b                       |
+| seedEnvFloat / seedEnvFloat_wellTyped                  | def+prv | §14c                       |
+| seedCompatFloat (concrete Compat Float witness)        | def     | §14c                       |
+| **canary_gtt_corresponds_float** (Float inhabitant)    | proved  | §14c                       |
+| canary_gtt_slot2_gradient_zero_float                   | proved  | §14c                       |
 
 ## Key design decisions
 
