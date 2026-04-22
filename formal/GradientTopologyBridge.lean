@@ -1028,6 +1028,79 @@ theorem canary_gtt_slot2_gradient_zero :
   -- ¬ ((ChSet.singleton 0).union (ChSet.singleton 1)) 2
   decide
 
+/-! ### Week-9 stage 3: bridge equality (open item #4)
+
+`canary_gtt_corresponds` upper-bounds the evaluated value's gradient
+footprint by the declared GT set.  The corollary above
+(`canary_gtt_slot2_gradient_zero`) reads off one absent slot.
+
+The companion fact below — `gtt_add_canary_bridge_tight` — exhibits
+the *realisability* direction: every slot in the declared set
+`(singleton 0) ∪ (singleton 1)` is actually nonzero on the evaluated
+Dual2.  Composed with the upper bound, this gives `add_canary_bridge_exact`:
+the declared set is the *exact* nonzero-grad support on this
+environment, not merely a sound over-approximation.
+
+This generalises §11b's `canary_bridge_exact` (which exhibited the
+same property for `projA_body` on the body-precision fragment, slot 0
+active and slot 1 dropped) to a second canary that exercises a
+different constructor — `Expr.add` via `lower` → `BExpr.add` →
+`dual2Add` — so the equality result holds on the seeded-arithmetic
+fragment as well as the body-precision fragment.
+
+Proof shape mirrors `gtt_hessian_bridge_tight`: unfold `lower` and
+`evalB` on the canary, expose the underlying `dual2Add` of two
+`dual2Seed`s, then read off `grad k` by `decide` at each `Fin 8` slot.
+No new axioms; `propext` only at `α = Nat`. -/
+theorem gtt_add_canary_bridge_tight :
+    (evalB seedEnvNat (lower seedCompatNat gtCanaryExpr)).grad ⟨0, by decide⟩
+        = (1 : Nat) ∧
+    (evalB seedEnvNat (lower seedCompatNat gtCanaryExpr)).grad ⟨1, by decide⟩
+        = (1 : Nat) ∧
+    ((1 : Nat) ≠ (0 : Nat)) := by
+  refine ⟨?_, ?_, ?_⟩
+  · -- evalB canary = dual2Add (dual2Seed ⟨0,_⟩ 0) (dual2Seed ⟨1,_⟩ 0)
+    -- grad ⟨0,_⟩ = (if ⟨0,_⟩ = ⟨0,_⟩ then 1 else 0)
+    --            + (if ⟨0,_⟩ = ⟨1,_⟩ then 1 else 0)
+    --            = 1 + 0 = 1
+    show (dual2Add (seedEnvNat.denotation (seedCompatNat.chanSlot 0))
+                   (seedEnvNat.denotation (seedCompatNat.chanSlot 1))).grad
+         ⟨0, by decide⟩ = 1
+    simp only [seedEnvNat, seedCompatNat, dual2Add, dual2Seed]
+    decide
+  · show (dual2Add (seedEnvNat.denotation (seedCompatNat.chanSlot 0))
+                   (seedEnvNat.denotation (seedCompatNat.chanSlot 1))).grad
+         ⟨1, by decide⟩ = 1
+    simp only [seedEnvNat, seedCompatNat, dual2Add, dual2Seed]
+    decide
+  · decide
+
+/-- **Bridge exactness for the add canary.**  Combine
+    `canary_gtt_corresponds`'s upper bound with
+    `gtt_add_canary_bridge_tight`'s realisability:
+
+      * Slots 0 and 1 are realised (grad = 1 ≠ 0) — the declared set's
+        elements actually carry first-order sensitivity.
+      * Slot 2 (and any `j ∉ {0, 1}`) has grad = 0 — outside the
+        declared set is zero, established by the cross-world theorem.
+
+    Together: the declared GT set is the *exact* nonzero-grad support
+    on `seedEnvNat`, not merely an upper bound.  This is the bridge
+    *equality* direction for the seeded-arithmetic fragment — the
+    open-item-#4 analogue of §11b's `canary_bridge_exact` for the
+    body-precision fragment. -/
+theorem add_canary_bridge_exact :
+    (evalB seedEnvNat (lower seedCompatNat gtCanaryExpr)).grad ⟨0, by decide⟩
+        ≠ (0 : Nat) ∧
+    (evalB seedEnvNat (lower seedCompatNat gtCanaryExpr)).grad ⟨1, by decide⟩
+        ≠ (0 : Nat) ∧
+    (evalB seedEnvNat (lower seedCompatNat gtCanaryExpr)).grad ⟨2, by decide⟩
+        = (0 : Nat) := by
+  refine ⟨?_, ?_, ?_⟩
+  · rw [gtt_add_canary_bridge_tight.1]; exact gtt_add_canary_bridge_tight.2.2
+  · rw [gtt_add_canary_bridge_tight.2.1]; exact gtt_add_canary_bridge_tight.2.2
+  · exact canary_gtt_slot2_gradient_zero
+
 -- ===========================================================================
 -- §14c. Cross-world canary at `α = Float` — compiler-runtime inhabitant
 -- ===========================================================================
