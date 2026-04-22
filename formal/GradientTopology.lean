@@ -153,8 +153,71 @@ theorem ChSet.union_idem (a : ChSet) : a.union a = a := by
   simp only [ChSet.union]
   cases a n <;> rfl
 
+/-- Monotonicity of binary union under pointwise subset — the core
+    lemma for `tAdd` / `tMul` / `tCall2`.  Moved up from §6 so §2b's
+    `chsetUnionFin_mono` can reuse it. -/
+theorem ChSet.union_mono (a b c d : ChSet)
+    (hac : a.subset c) (hbd : b.subset d) : (a.union b).subset (c.union d) :=
+  ChSet.union_subset a b (c.union d)
+    (ChSet.subset_trans a c (c.union d) hac (ChSet.subset_union_left c d))
+    (ChSet.subset_trans b d (c.union d) hbd (ChSet.subset_union_right c d))
+
 -- ---------------------------------------------------------------------------
--- §3. Expression grammar and the GTT typing judgment (binary calls)
+-- §2b. Fin-indexed channel-set union (n-ary support)
+-- ---------------------------------------------------------------------------
+
+/-- `Fin n`-indexed channel-set union.  The Fin-based analogue of
+    `ChSet.unionL` (§7c) — structurally simpler for `Expr.callN`
+    reasoning because the argument type `Fin n → Expr` exposes indices
+    directly to induction.  Defined by recursion on `n`. -/
+def chsetUnionFin : {n : Nat} → (Fin n → ChSet) → ChSet
+  | 0,   _  => ChSet.empty
+  | n+1, Ss => (Ss 0).union (chsetUnionFin (fun i : Fin n => Ss i.succ))
+
+theorem chsetUnionFin_zero (Ss : Fin 0 → ChSet) :
+    chsetUnionFin Ss = ChSet.empty := rfl
+
+theorem chsetUnionFin_succ {n : Nat} (Ss : Fin (n+1) → ChSet) :
+    chsetUnionFin Ss = (Ss 0).union (chsetUnionFin (fun i : Fin n => Ss i.succ)) := rfl
+
+/-- **Monotonicity of `chsetUnionFin`** under pointwise subset.  Fin
+    analogue of `ChSet.unionL_mono` / `ChSet.union_mono`.  Proved by
+    `n`-induction. -/
+theorem chsetUnionFin_mono : {n : Nat} → (Ss Ts : Fin n → ChSet)
+    → (∀ i : Fin n, (Ss i).subset (Ts i))
+    → (chsetUnionFin Ss).subset (chsetUnionFin Ts)
+  | 0,   _,  _,  _  => by
+      rw [chsetUnionFin_zero, chsetUnionFin_zero]
+      exact ChSet.subset_refl _
+  | n+1, Ss, Ts, h => by
+      rw [chsetUnionFin_succ, chsetUnionFin_succ]
+      exact ChSet.union_mono _ _ _ _
+        (h 0)
+        (chsetUnionFin_mono _ _ (fun i : Fin n => h i.succ))
+
+/-- Membership in the Fin-indexed union: every `Ss i` is a subset of
+    `chsetUnionFin Ss`. -/
+theorem subset_chsetUnionFin : {n : Nat} → (Ss : Fin n → ChSet) → (i : Fin n)
+    → (Ss i).subset (chsetUnionFin Ss)
+  | 0,   _,  i => absurd i.isLt (by simp)
+  | n+1, Ss, i => by
+      rw [chsetUnionFin_succ]
+      -- Case on whether i = 0 or i = j.succ for some j : Fin n
+      match h : i with
+      | ⟨0,     _⟩ =>
+          -- i = 0 → Ss 0 ⊆ Ss 0 ∪ rest
+          exact ChSet.subset_union_left (Ss 0) _
+      | ⟨k+1, hk⟩ =>
+          -- i = ⟨k+1, hk⟩ = Fin.succ ⟨k, _⟩
+          have hk' : k < n := Nat.lt_of_succ_lt_succ hk
+          have : Ss ⟨k+1, hk⟩ = (fun j : Fin n => Ss j.succ) ⟨k, hk'⟩ := rfl
+          rw [this]
+          exact ChSet.subset_trans _ _ _
+            (subset_chsetUnionFin (fun j : Fin n => Ss j.succ) ⟨k, hk'⟩)
+            (ChSet.subset_union_right (Ss 0) _)
+
+-- ---------------------------------------------------------------------------
+-- §3. Expression grammar and the GTT typing judgment (binary + n-ary calls)
 -- ---------------------------------------------------------------------------
 
 /-- Function identifiers.  In the compiler these are indices into
@@ -171,10 +234,11 @@ abbrev VarId : Type := Nat
       * addition and multiplication, which union operand topologies
       * `.value` extraction at a channel keyed by the current `MEAS_KNOW_IDX`
       * direct binary user-function calls `call2 f e1 e2`, the week-3 focus
-
-    N-ary calls are modelled as structural composition over binary ones
-    in the surface compiler semantics; the file's theorem covers the
-    binary case and n-ary reduces to iterated binary applications. -/
+      * direct n-ary user-function calls `callN f args` — week-5 surface
+        extension, parameterised by `{n : Nat}` and `args : Fin n → Expr`
+        to stay strictly positive (the Lean 4 `induction` tactic rejects
+        nested inductives like `args : List Expr`, per the β⁹ week-3
+        "nested-inductive induction principle ... footgun" scope note). -/
 inductive Expr : Type where
   | lit    (c : Float)              : Expr
   | var    (x : VarId)              : Expr
@@ -182,7 +246,7 @@ inductive Expr : Type where
   | mul    (e1 e2 : Expr)           : Expr
   | value  (k : Nat)                : Expr
   | call2  (f : FnId) (e1 e2 : Expr): Expr
-  deriving Repr
+  | callN  (f : FnId) {n : Nat} (args : Fin n → Expr) : Expr
 
 /-- A typing environment mapping variables to their declared channel set.
     Corresponds to `VAR_CH_SET` indexed by variable slot. -/
@@ -211,6 +275,9 @@ inductive Typing (Γ : TyEnv) : Expr → ChSet → Prop where
   | tCall2 (f : FnId) (e1 e2 : Expr) (S1 S2 : ChSet)
       (h1 : Typing Γ e1 S1) (h2 : Typing Γ e2 S2) :
       Typing Γ (Expr.call2 f e1 e2) (S1.union S2)
+  | tCallN (f : FnId) {n : Nat} (args : Fin n → Expr) (Ss : Fin n → ChSet)
+      (h : ∀ i : Fin n, Typing Γ (args i) (Ss i)) :
+      Typing Γ (Expr.callN f args) (chsetUnionFin Ss)
 
 -- ---------------------------------------------------------------------------
 -- §4. Big-step semantics parameterised by a function table
@@ -234,6 +301,13 @@ def VarEnv : Type := VarId → RuntimeVal
     arbitrary user-defined function behaviour. -/
 structure FnTable where
   eval2 : FnId → RuntimeVal → RuntimeVal → RuntimeVal → Prop
+  /-- N-ary abstract function table (week-5).  Returns the relation
+      between an `n`-tuple of argument values and the return value for
+      function `f`.  The arity `n` is part of the relation so the same
+      `FnTable` can host callees of different arities simultaneously
+      — matching the compiler's `FN_ARITY` table at
+      `self-hosted/compiler/lean_single.sio:~485`. -/
+  evalN : FnId → (n : Nat) → (Fin n → RuntimeVal) → RuntimeVal → Prop
 
 /-- Big-step evaluation of GTT expressions.  The footprint a value carries
     is whatever the underlying arithmetic produces; addition and
@@ -258,6 +332,11 @@ inductive Eval (F : FnTable) (ρ : VarEnv) : Expr → RuntimeVal → Prop where
       (h1 : Eval F ρ e1 v1) (h2 : Eval F ρ e2 v2)
       (hfn : F.eval2 f v1 v2 ret) :
       Eval F ρ (Expr.call2 f e1 e2) ret
+  | eCallN (f : FnId) {n : Nat} (args : Fin n → Expr)
+           (vs : Fin n → RuntimeVal) (ret : RuntimeVal)
+      (h : ∀ i : Fin n, Eval F ρ (args i) (vs i))
+      (hfn : F.evalN f n vs ret) :
+      Eval F ρ (Expr.callN f args) ret
 
 -- ---------------------------------------------------------------------------
 -- §5. The body-respects-topology hypothesis
@@ -277,10 +356,24 @@ inductive Eval (F : FnTable) (ρ : VarEnv) : Expr → RuntimeVal → Prop where
     Discharging this hypothesis per function is week-4+ body-analysis
     work.  The trivial discharge — "no analysis, return footprint = arg
     union" — is `union_discharges_body_hypothesis` below. -/
-def BodyRespectsTopology (F : FnTable) : Prop :=
+def BodyRespectsTopology2 (F : FnTable) : Prop :=
   ∀ (f : FnId) (v1 v2 ret : RuntimeVal),
     F.eval2 f v1 v2 ret →
     ret.footprint.subset (v1.footprint.union v2.footprint)
+
+/-- N-ary analogue of `BodyRespectsTopology2`: for every `n`-ary callee,
+    the return's footprint is contained in the n-ary union of the
+    argument footprints.  Week-5. -/
+def BodyRespectsTopologyN (F : FnTable) : Prop :=
+  ∀ (f : FnId) (n : Nat) (vs : Fin n → RuntimeVal) (ret : RuntimeVal),
+    F.evalN f n vs ret →
+    ret.footprint.subset (chsetUnionFin (fun i => (vs i).footprint))
+
+/-- Combined body-respects hypothesis: both the binary and n-ary call
+    rules are sound.  `gtt_sound` needs both when the expression tree
+    contains a mixture of `call2` and `callN` nodes. -/
+def BodyRespectsTopology (F : FnTable) : Prop :=
+  BodyRespectsTopology2 F ∧ BodyRespectsTopologyN F
 
 -- ---------------------------------------------------------------------------
 -- §6. Main soundness theorem
@@ -293,13 +386,10 @@ def BodyRespectsTopology (F : FnTable) : Prop :=
 def VarEnvConsistent (Γ : TyEnv) (ρ : VarEnv) : Prop :=
   ∀ x : VarId, (ρ x).footprint.subset (Γ x)
 
-/-- Monotonicity of binary union under pointwise subset — the core
-    lemma for `tAdd` / `tMul` / `tCall2`. -/
-theorem ChSet.union_mono (a b c d : ChSet)
-    (hac : a.subset c) (hbd : b.subset d) : (a.union b).subset (c.union d) :=
-  ChSet.union_subset a b (c.union d)
-    (ChSet.subset_trans a c (c.union d) hac (ChSet.subset_union_left c d))
-    (ChSet.subset_trans b d (c.union d) hbd (ChSet.subset_union_right c d))
+-- `ChSet.union_mono` lives at §2 (moved up so §2b's `chsetUnionFin_mono`
+-- can reuse it).  The §6 original location is kept as this comment
+-- pointer so the §6 proof chain (`union_mono` → `gtt_sound`) still reads
+-- linearly.
 
 /-- **GTT soundness over direct binary user-fn calls.**
 
@@ -314,8 +404,9 @@ theorem ChSet.union_mono (a b c d : ChSet)
     is sound.
 
     Out of scope (stated in the header, restated here for load-bearing
-    reasons): closures / fn-refs, a64 backend, and arity > 2 user calls
-    are not modelled; the n-ary extension is routine via `union_assoc`. -/
+    reasons): closures / fn-refs, a64 backend.  Arity > 2 user calls
+    are covered via the `tCallN`/`eCallN` constructors (week-5).  The
+    closure/fn-ref indirect call case remains deferred. -/
 theorem gtt_sound
     (F : FnTable) (Γ : TyEnv) (ρ : VarEnv)
     (hΓρ : VarEnvConsistent Γ ρ)
@@ -364,12 +455,33 @@ theorem gtt_sound
         -- Step 2: ret footprint (here: `v`, the outer intro'd return) is
         --         contained in the arg-union footprints.
         have ret_sub_args : v.footprint.subset (v1.footprint.union v2.footprint) :=
-          hbody f v1 v2 v hfn
+          hbody.1 f v1 v2 v hfn
         -- Step 3: compose with union monotonicity.
         exact ChSet.subset_trans v.footprint
           (v1.footprint.union v2.footprint) (S1.union S2)
           ret_sub_args
           (ChSet.union_mono v1.footprint v2.footprint S1 S2 s1 s2)
+  | callN f args ih =>
+    -- ih : ∀ i : Fin n, ∀ S v, Typing Γ (args i) S → Eval F ρ (args i) v
+    --                    → v.footprint.subset S
+    intro S v hT hE
+    cases hT with
+    | tCallN _ _ Ss hTi =>
+      cases hE with
+      | eCallN _ _ vs _ hEi hfn =>
+        -- Step 1: each arg i's runtime footprint is contained in Ss i.
+        have si : ∀ i, (vs i).footprint.subset (Ss i) :=
+          fun i => ih i (Ss i) (vs i) (hTi i) (hEi i)
+        -- Step 2: v.footprint ⊆ chsetUnionFin (fun i => (vs i).footprint)
+        have ret_sub_args :
+            v.footprint.subset (chsetUnionFin (fun i => (vs i).footprint)) :=
+          hbody.2 f _ vs v hfn
+        -- Step 3: monotonicity.
+        exact ChSet.subset_trans v.footprint
+          (chsetUnionFin (fun i => (vs i).footprint))
+          (chsetUnionFin Ss)
+          ret_sub_args
+          (chsetUnionFin_mono _ _ si)
 
 -- ---------------------------------------------------------------------------
 -- §7. The union rule is the right conservative body-discharge
@@ -385,14 +497,20 @@ theorem gtt_sound
 def unionTable : FnTable where
   eval2 := fun _ v1 v2 ret =>
     ret.footprint = v1.footprint.union v2.footprint
+  evalN := fun _ _ vs ret =>
+    ret.footprint = chsetUnionFin (fun i => (vs i).footprint)
 
 theorem union_discharges_body_hypothesis :
     BodyRespectsTopology unionTable := by
-  intro _ v1 v2 ret h
-  -- `h : unionTable.eval2 _ v1 v2 ret` reduces to
-  -- `ret.footprint = v1.footprint.union v2.footprint`.
-  rw [show ret.footprint = v1.footprint.union v2.footprint from h]
-  exact ChSet.subset_refl _
+  refine ⟨?_, ?_⟩
+  · intro _ v1 v2 ret h
+    -- `h : unionTable.eval2 _ v1 v2 ret` reduces to
+    -- `ret.footprint = v1.footprint.union v2.footprint`.
+    rw [show ret.footprint = v1.footprint.union v2.footprint from h]
+    exact ChSet.subset_refl _
+  · intro _ _ vs ret h
+    rw [show ret.footprint = chsetUnionFin (fun i => (vs i).footprint) from h]
+    exact ChSet.subset_refl _
 
 -- ---------------------------------------------------------------------------
 -- §7b. Week-4 body-level precision (return-position, binary fns)
@@ -498,7 +616,7 @@ def BodyRespectsUsedParams (F : FnTable) (UP : FnId → UsedParams2) : Prop :=
     queries. -/
 theorem bodyPrecision_implies_union_hypothesis
     (F : FnTable) (UP : FnId → UsedParams2)
-    (h : BodyRespectsUsedParams F UP) : BodyRespectsTopology F := by
+    (h : BodyRespectsUsedParams F UP) : BodyRespectsTopology2 F := by
   intro f v1 v2 ret hfn
   have ret_sub_used := h f v1 v2 ret hfn
   exact ChSet.subset_trans ret.footprint
@@ -524,7 +642,8 @@ theorem gtt_sound_body
     (F : FnTable) (UP : FnId → UsedParams2)
     (Γ : TyEnv) (ρ : VarEnv)
     (hΓρ : VarEnvConsistent Γ ρ)
-    (hbody : BodyRespectsUsedParams F UP) :
+    (hbody : BodyRespectsUsedParams F UP)
+    (hbodyN : BodyRespectsTopologyN F) :
     ∀ (f : FnId) (e1 e2 : Expr) (S1 S2 : ChSet) (v1 v2 ret : RuntimeVal),
       Typing Γ e1 S1 → Typing Γ e2 S2 →
       Eval F ρ e1 v1 → Eval F ρ e2 v2 → F.eval2 f v1 v2 ret →
@@ -533,7 +652,7 @@ theorem gtt_sound_body
   -- Step 1: each argument's runtime footprint is contained in its
   --         declared set, via week-3 gtt_sound under the weaker hypothesis.
   have hbody_union : BodyRespectsTopology F :=
-    bodyPrecision_implies_union_hypothesis F UP hbody
+    ⟨bodyPrecision_implies_union_hypothesis F UP hbody, hbodyN⟩
   have s1 : v1.footprint.subset S1 :=
     gtt_sound F Γ ρ hΓρ hbody_union e1 S1 v1 hT1 hE1
   have s2 : v2.footprint.subset S2 :=
@@ -576,15 +695,16 @@ underlying set-theoretic union machinery to arbitrary arity and states
 the abstract n-ary soundness theorem over a list of per-argument
 runtime footprints and declared channel sets.
 
-The section closes the β⁹ week-3 "omitted here because the
-nested-inductive induction principle for `List Expr` sub-terms is
-enough of a footgun" scope note: the n-ary soundness argument is
-*purely set-theoretic* once the usedUnion / union combinators are
-lifted to `List ChSet`, so it does not require extending the `Expr`
-inductive.  Wiring this into a surface `Expr.callN (args : List Expr)`
-constructor — which would also force a matching extension in
-`GradientTopologyBridge.lean`'s `lower` / `BExpr` / `BTyping` — remains
-a follow-up, but the hard set-theoretic content is discharged here.
+**Scope note (week-5).**  §2b introduced the Fin-based `chsetUnionFin`
+and extended `Expr` with `callN` + `gtt_sound` with a `tCallN` case,
+supplanting the week-5 scope-note's "ChSet-level only" framing.  This
+§7c section's `List ChSet` machinery remains useful as an alternative
+statement shape that matches the compiler's `List`-of-16 layout at the
+call site, and `gtt_sound_bodyN` still provides the pure set-theoretic
+step-3 composition.  §7d pairs the Fin-indexed machinery with
+body-precision (`UsedParamsFin` / `usedUnionFin`) and proves
+`gtt_sound_body_callN`, the n-ary Expr-surface analogue of
+`gtt_sound_body`.
 -/
 
 /-- List-indexed channel-set join.  Folds `ChSet.union` right-
@@ -794,6 +914,200 @@ theorem canary_nary_proj_a_pointwise (S1 S2 S3 : ChSet) (n : Nat) :
   cases S1 n <;> rfl
 
 -- ---------------------------------------------------------------------------
+-- §7d. N-ary body-level precision (Fin-indexed surface machinery)
+-- ---------------------------------------------------------------------------
+
+/-!
+Week-5 surface extension.  The §2b `chsetUnionFin` combinator pairs
+naturally with a Fin-indexed per-parameter usage summary; together
+these give a direct analogue of §7b's binary body-precision
+(`UsedParams2` / `usedUnion` / `gtt_sound_body`) for `Expr.callN`.
+
+The "per-call" arity `n` is existentially quantified at the `tCallN`
+introduction and propagates through the `BodyRespectsUsedParamsFin`
+hypothesis as an explicit universal.  A single `FnId` can be called at
+different arities across the program (enforced in reality by
+`FN_ARITY` in the compiler); the Lean model keeps the arity abstract,
+and the body-precision summary is keyed by *both* `FnId` and `n`.
+-/
+
+/-- Per-parameter body-precision summary for an `n`-ary callee: a
+    `Fin n`-indexed family of booleans, one bit per parameter position.
+    Fin analogue of `UsedParams2`.  Corresponds to bits 0..(n-1) of
+    `FN_USED_PARAMS[fi]` for an `n`-ary callee, read at the call site
+    (`compile_primary:~10318`). -/
+abbrev UsedParamsFin (n : Nat) : Type := Fin n → Bool
+
+/-- N-ary body-precision join: union only those `Ss i` sets whose
+    `U i` bit is `true`.  Fin analogue of `usedUnion` / `usedUnionL`. -/
+def usedUnionFin : {n : Nat} → UsedParamsFin n → (Fin n → ChSet) → ChSet
+  | 0,   _, _  => ChSet.empty
+  | n+1, U, Ss =>
+      ChSet.union
+        (if U 0 then Ss 0 else ChSet.empty)
+        (usedUnionFin (fun i : Fin n => U i.succ)
+                      (fun i : Fin n => Ss i.succ))
+
+theorem usedUnionFin_zero (U : UsedParamsFin 0) (Ss : Fin 0 → ChSet) :
+    usedUnionFin U Ss = ChSet.empty := rfl
+
+theorem usedUnionFin_succ {n : Nat} (U : UsedParamsFin (n+1))
+    (Ss : Fin (n+1) → ChSet) :
+    usedUnionFin U Ss =
+      ChSet.union
+        (if U 0 then Ss 0 else ChSet.empty)
+        (usedUnionFin (fun i : Fin n => U i.succ)
+                      (fun i : Fin n => Ss i.succ)) := rfl
+
+/-- **N-ary body-precision is always a refinement of `chsetUnionFin`.**
+    Fin analogue of `usedUnion_subset_union`. -/
+theorem usedUnionFin_subset_chsetUnionFin :
+    {n : Nat} → (U : UsedParamsFin n) → (Ss : Fin n → ChSet)
+    → (usedUnionFin U Ss).subset (chsetUnionFin Ss)
+  | 0,   _, _  => by
+      rw [usedUnionFin_zero, chsetUnionFin_zero]
+      exact ChSet.subset_refl _
+  | n+1, U, Ss => by
+      rw [usedUnionFin_succ, chsetUnionFin_succ]
+      exact ChSet.union_mono _ _ _ _
+        (ChSet.if_empty_subset_left (U 0) (Ss 0))
+        (usedUnionFin_subset_chsetUnionFin _ _)
+
+/-- Monotonicity of `usedUnionFin` in the channel-set argument (for a
+    fixed `U`).  Fin analogue of `usedUnion_mono` / `usedUnionL_mono`. -/
+theorem usedUnionFin_mono :
+    {n : Nat} → (U : UsedParamsFin n) → (Ss Ts : Fin n → ChSet)
+    → (∀ i : Fin n, (Ss i).subset (Ts i))
+    → (usedUnionFin U Ss).subset (usedUnionFin U Ts)
+  | 0,   _, _,  _,  _ => by
+      rw [usedUnionFin_zero, usedUnionFin_zero]
+      exact ChSet.subset_refl _
+  | n+1, U, Ss, Ts, h => by
+      rw [usedUnionFin_succ, usedUnionFin_succ]
+      exact ChSet.union_mono _ _ _ _
+        (ChSet.if_empty_mono (U 0) (Ss 0) (Ts 0) (h 0))
+        (usedUnionFin_mono _ _ _ (fun i : Fin n => h i.succ))
+
+/-- Sanity: when every parameter is used, `usedUnionFin` collapses to
+    `chsetUnionFin`.  Fin analogue of `usedUnion_all_used`. -/
+theorem usedUnionFin_all_used :
+    {n : Nat} → (Ss : Fin n → ChSet)
+    → usedUnionFin (fun _ => true) Ss = chsetUnionFin Ss
+  | 0,   _  => rfl
+  | n+1, Ss => by
+      rw [usedUnionFin_succ, chsetUnionFin_succ,
+          usedUnionFin_all_used (fun i : Fin n => Ss i.succ)]
+      show ChSet.union (if true then Ss 0 else ChSet.empty) _
+             = (Ss 0).union _
+      rfl
+
+/-- **The n-ary body-precision hypothesis.**  For every `n`-ary callee
+    `f` at arity `n` and every argument tuple `vs`, the return's
+    footprint is contained in the `usedUnionFin`-indexed union of the
+    argument footprints.  Fin analogue of `BodyRespectsUsedParams`.
+
+    The summary `UP : (f : FnId) → (n : Nat) → UsedParamsFin n` is
+    keyed by both `FnId` and arity.  This matches the compiler reality:
+    `FN_USED_PARAMS[fi]` is a 16-bit mask and the `n` used bits depend
+    on `FN_ARITY[fi]`. -/
+def BodyRespectsUsedParamsFin (F : FnTable)
+    (UP : (f : FnId) → (n : Nat) → UsedParamsFin n) : Prop :=
+  ∀ (f : FnId) (n : Nat) (vs : Fin n → RuntimeVal) (ret : RuntimeVal),
+    F.evalN f n vs ret →
+    ret.footprint.subset (usedUnionFin (UP f n) (fun i => (vs i).footprint))
+
+/-- Fin-body-precision implies the n-ary union-rule hypothesis.  Fin
+    analogue of `bodyPrecision_implies_union_hypothesis`. -/
+theorem bodyPrecisionFin_implies_union_hypothesis
+    (F : FnTable)
+    (UP : (f : FnId) → (n : Nat) → UsedParamsFin n)
+    (h : BodyRespectsUsedParamsFin F UP) : BodyRespectsTopologyN F := by
+  intro f n vs ret hfn
+  exact ChSet.subset_trans ret.footprint
+    (usedUnionFin (UP f n) (fun i => (vs i).footprint))
+    (chsetUnionFin (fun i => (vs i).footprint))
+    (h f n vs ret hfn)
+    (usedUnionFin_subset_chsetUnionFin (UP f n) (fun i => (vs i).footprint))
+
+/-- **Body-precision soundness for direct n-ary user-fn calls.**
+
+    Given the strengthened hypothesis `BodyRespectsUsedParamsFin`, the
+    declared channel set `usedUnionFin (UP f n) Ss` is a sound upper
+    bound on the runtime footprint of `callN f args`.  N-ary analogue
+    of `gtt_sound_body`.
+
+    Like `gtt_sound_body`, the proof composes `gtt_sound` on each
+    sub-argument (for argument-footprint containment) with the
+    body-precision hypothesis, then monotonicity of `usedUnionFin`. -/
+theorem gtt_sound_body_callN
+    (F : FnTable)
+    (UP2 : FnId → UsedParams2)
+    (UP : (f : FnId) → (n : Nat) → UsedParamsFin n)
+    (Γ : TyEnv) (ρ : VarEnv)
+    (hΓρ : VarEnvConsistent Γ ρ)
+    (hbody2 : BodyRespectsUsedParams F UP2)
+    (hbodyN : BodyRespectsUsedParamsFin F UP) :
+    ∀ (f : FnId) {n : Nat} (args : Fin n → Expr) (Ss : Fin n → ChSet)
+      (vs : Fin n → RuntimeVal) (ret : RuntimeVal),
+      (∀ i, Typing Γ (args i) (Ss i)) →
+      (∀ i, Eval F ρ (args i) (vs i)) → F.evalN f n vs ret →
+      ret.footprint.subset (usedUnionFin (UP f n) Ss) := by
+  intro f n args Ss vs ret hTi hEi hfn
+  -- Step 1: each argument i's runtime footprint is contained in its declared set.
+  have hbody_union : BodyRespectsTopology F :=
+    ⟨bodyPrecision_implies_union_hypothesis F UP2 hbody2,
+     bodyPrecisionFin_implies_union_hypothesis F UP hbodyN⟩
+  have si : ∀ i, (vs i).footprint.subset (Ss i) :=
+    fun i => gtt_sound F Γ ρ hΓρ hbody_union (args i) (Ss i) (vs i)
+             (hTi i) (hEi i)
+  -- Step 2: ret footprint is contained in `usedUnionFin (UP f n) (fun i => (vs i).fp)`.
+  have ret_sub_used :
+      ret.footprint.subset
+        (usedUnionFin (UP f n) (fun i => (vs i).footprint)) :=
+    hbodyN f n vs ret hfn
+  -- Step 3: monotonicity of usedUnionFin under pointwise subset.
+  exact ChSet.subset_trans ret.footprint
+    (usedUnionFin (UP f n) (fun i => (vs i).footprint))
+    (usedUnionFin (UP f n) Ss)
+    ret_sub_used
+    (usedUnionFin_mono _ _ _ si)
+
+/-- **Canary — `usedUnionFin` at arity 3 drops unused-parameter sets.**
+    The Fin analogue of `canary_proj_a_only_arg0`.  Three booleans
+    (`b0, b1, b2`) controlling whether each of three channel sets
+    contributes.  When only bit 0 is set, the result is `S0 ∪ empty ∪
+    (empty ∪ empty) = S0 ∪ _`.  Witnesses that `usedUnionFin` correctly
+    gates each slot by its boolean. -/
+theorem canary_callN_proj_a_fin (S0 S1 S2 : ChSet) :
+    usedUnionFin
+        (fun i : Fin 3 => match i with
+                          | ⟨0, _⟩ => true
+                          | _      => false)
+        (fun i : Fin 3 => match i with
+                          | ⟨0, _⟩ => S0
+                          | ⟨1, _⟩ => S1
+                          | ⟨2, _⟩ => S2)
+      = ChSet.union S0 (ChSet.union ChSet.empty
+            (ChSet.union ChSet.empty ChSet.empty)) := rfl
+
+/-- **Canary — pointwise collapse at Fin surface.**  The `usedUnionFin`
+    canary evaluates to `S0 n` pointwise; unused-parameter sets `S1`,
+    `S2` contribute nothing.  Fin analogue of `canary_nary_proj_a_pointwise`. -/
+theorem canary_callN_proj_a_fin_pointwise (S0 S1 S2 : ChSet) (n : Nat) :
+    (usedUnionFin
+        (fun i : Fin 3 => match i with
+                          | ⟨0, _⟩ => true
+                          | _      => false)
+        (fun i : Fin 3 => match i with
+                          | ⟨0, _⟩ => S0
+                          | ⟨1, _⟩ => S1
+                          | ⟨2, _⟩ => S2)) n
+      = S0 n := by
+  rw [canary_callN_proj_a_fin]
+  show (S0 n || (false || (false || false))) = S0 n
+  cases S0 n <;> rfl
+
+-- ---------------------------------------------------------------------------
 -- §8. A closed-form corollary matching the week-3 commit narrative
 -- ---------------------------------------------------------------------------
 
@@ -837,6 +1151,11 @@ theorem regression_my_sum_topology
 | Body-precision implies week-3 body hypothesis                         | Proved  | `bodyPrecision_implies_union_hypothesis` |
 | **Body-precision soundness for binary `call2`** (week-4)              | Proved  | `gtt_sound_body`                         |
 | Canary: proj_a with UP=⟨true,false⟩ types at `{arg₀}` only            | Proved  | `canary_proj_a_only_arg0`                |
+| **Fin-indexed channel-set union / monotonicity / membership**         | Proved  | `chsetUnionFin_*` / `subset_chsetUnionFin` |
+| **`gtt_sound` at `Expr.callN` (week-5 surface)**                      | Proved  | `gtt_sound` (`callN` case)               |
+| **Body-precision soundness for direct n-ary `callN`** (week-5)        | Proved  | `gtt_sound_body_callN`                   |
+| Fin body-precision refines n-ary union / monotone / all-used          | Proved  | `usedUnionFin_subset_chsetUnionFin` etc. |
+| Canary: `usedUnionFin` at arity 3 collapses to `S0`                   | Proved  | `canary_callN_proj_a_fin*`               |
 | **N-ary list-union / pointwise-subset / monotonicity** (ChSet level)  | Proved  | `ChSet.unionL_*` / `ChSet.subsetL_*`     |
 | **N-ary body-precision refines n-ary union** (`usedUnionL`)           | Proved  | `usedUnionL_subset_unionL`               |
 | N-ary body-precision collapses to union when all params used          | Proved  | `usedUnionL_all_used`                    |
@@ -858,27 +1177,29 @@ arity at the set-theoretic level.
 
 ## What remains open
 
-1. **Surface-syntax n-ary wiring.**  §7c proves the n-ary soundness
-   theorem abstractly over `List ChSet` using `ChSet.unionL` /
-   `usedUnionL`; it does NOT extend the `Expr` inductive with a nested
-   `callN (args : List Expr)` constructor.  Doing so would require a
-   matching extension in `GradientTopologyBridge.lean`'s `lower` /
-   `BExpr` / `BTyping`.  The set-theoretic content — the "routine via
-   union_assoc" claim from the week-3 scope note — is discharged; only
-   the Expr surface extension remains.
-2. Body-level precision beyond return-position (match / if arms, loops,
+1. Body-level precision beyond return-position (match / if arms, loops,
    recursion fixed-point).  Week-4 covers the return-position tail
-   fragment; richer body CFA is deferred.
-3. Closure / fn-ref indirect calls, `Expr.call2` here is direct-only.
-4. ARM64 mirror — codegen parity, not a separate semantic theorem.
+   fragment; richer body CFA is deferred.  The §7d `gtt_sound_body_callN`
+   still only handles return-position n-ary calls — body-level
+   precision for `callN` arms of `match` / `if` remains to week-6+.
+2. Closure / fn-ref indirect calls, `Expr.call2` and `Expr.callN` here
+   are both direct-only.  The compiler week-3 scope leaves
+   closure-indirect calls leaking the last-arg topology (§7c docstring).
+3. ARM64 mirror — codegen parity, not a separate semantic theorem.
    The a64 compiler mirrors `EXPR_PARAM_USED` propagation through
    let / load in week-4 step A; the a64 call-site tightening itself
    remains deferred.
-5. Bridging to `HessianAD.lean` — proving that `j ∉ S ⟹ H_{j,k} = 0.0`
+4. Bridging to `HessianAD.lean` — proving that `j ∉ S ⟹ H_{j,k} = 0.0`
    via the shadow-slot semantics.  The natural next proof, spans two
    files.  Under `gtt_sound_body` this bridge becomes an *equality*
    (declared set characterises shadow footprint) on the body-precision
    fragment, rather than just a containment.
+5. **Compiler-side n-ary surface wiring.**  `Expr.callN` is now in the
+   Lean model and `gtt_sound_body_callN` proves its soundness, but the
+   compiler's `compile_primary` (line ~10205) currently emits only the
+   binary `call2`-shaped path; extending emission to a true
+   variadic call site with per-arg `B9_ARG_CH_SET[16]` iteration is
+   a week-6+ compiler task (not a Lean proof task).
 
 ## No new axioms
 

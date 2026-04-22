@@ -148,7 +148,10 @@ theorem fp_mul_union (Sa Sb : ChSet) (A B : Dual2 α)
 /-- The body-precision expression fragment.  Binary user-fn calls carry
     (a) their `UsedParams2` body-precision summary and (b) the callee as
     an abstract `Dual2 → Dual2 → Dual2` function, so the evaluator is
-    concrete without needing to know callee source code. -/
+    concrete without needing to know callee source code.  N-ary calls
+    (week-5) carry a `UsedParamsFin n` summary and a callee of type
+    `(Fin n → Dual2) → Dual2`.  The `{n : Nat}` implicit keeps `BExpr`
+    strictly positive. -/
 inductive BExpr (α : Type) [Dual2Field α] : Type where
   | const  : α → BExpr α
   | var    : Fin 8 → BExpr α
@@ -158,6 +161,11 @@ inductive BExpr (α : Type) [Dual2Field α] : Type where
   | call2  : UsedParams2
            → (Dual2 α → Dual2 α → Dual2 α)         -- callee body (abstract)
            → BExpr α → BExpr α → BExpr α
+  | callN  : {n : Nat}
+           → UsedParamsFin n
+           → ((Fin n → Dual2 α) → Dual2 α)         -- n-ary callee body
+           → (Fin n → BExpr α)
+           → BExpr α
 
 /-- Environment: maps each variable `k : Fin 8` to its `Dual2` denotation
     and its declared GTT channel set. -/
@@ -180,6 +188,15 @@ def CalleeRespects (U : UsedParams2) (f : Dual2 α → Dual2 α → Dual2 α) : 
     Footprint Sa Da → Footprint Sb Db →
     Footprint (usedUnion U Sa Sb) (f Da Db)
 
+/-- N-ary analogue of `CalleeRespects`.  For an `n`-ary callee `f` with
+    body-precision summary `U : UsedParamsFin n`, the result's footprint
+    is `usedUnionFin U` over the argument footprints.  Week-5 surface. -/
+def CalleeRespectsN {n : Nat} (U : UsedParamsFin n)
+    (f : (Fin n → Dual2 α) → Dual2 α) : Prop :=
+  ∀ (Ss : Fin n → ChSet) (Ds : Fin n → Dual2 α),
+    (∀ i, Footprint (Ss i) (Ds i)) →
+    Footprint (usedUnionFin U Ss) (f Ds)
+
 -- ===========================================================================
 -- §8. Evaluator
 -- ===========================================================================
@@ -191,6 +208,7 @@ def evalB (env : BEnv α) : BExpr α → Dual2 α
   | .mul a b         => dual2Mul  (evalB env a) (evalB env b)
   | .unary fp fpp g  => dual2ApplyUnary (evalB env g).val fp fpp (evalB env g)
   | .call2 _ f a b   => f (evalB env a) (evalB env b)
+  | .callN _ f args  => f (fun i => evalB env (args i))
 
 -- ===========================================================================
 -- §9. GTT typing relation for BExpr
@@ -218,6 +236,12 @@ inductive BTyping (env : BEnv α) : BExpr α → ChSet → Prop where
       CalleeRespects U f →
       BTyping env a Sa → BTyping env b Sb →
       BTyping env (.call2 U f a b) (usedUnion U Sa Sb)
+  | callN  : ∀ {n : Nat} (U : UsedParamsFin n)
+               (f : (Fin n → Dual2 α) → Dual2 α)
+               (args : Fin n → BExpr α) (Ss : Fin n → ChSet),
+      CalleeRespectsN U f →
+      (∀ i : Fin n, BTyping env (args i) (Ss i)) →
+      BTyping env (.callN U f args) (usedUnionFin U Ss)
 
 -- ===========================================================================
 -- §10. Bridge theorem
@@ -251,6 +275,11 @@ theorem bridge (env : BEnv α) (hwf : EnvWT env) :
       simp only [evalB]; exact fp_apply_unary Sg _ fp fpp _ ihG
   | call2 U f a b Sa Sb hcr _ha _hb ihA ihB =>
       simp only [evalB]; exact hcr Sa Sb _ _ ihA ihB
+  | callN U f args Ss hcr _hi ihi =>
+      simp only [evalB]
+      -- ihi : ∀ i, Footprint (Ss i) (evalB env (args i))
+      -- hcr : CalleeRespectsN U f
+      exact hcr Ss (fun i => evalB env (args i)) ihi
 
 -- ===========================================================================
 -- §11. Corollaries
@@ -517,6 +546,7 @@ def ExprWellFormed : Expr → Prop
   | .add e1 e2      => ExprWellFormed e1 ∧ ExprWellFormed e2
   | .mul e1 e2      => ExprWellFormed e1 ∧ ExprWellFormed e2
   | .call2 _ e1 e2  => ExprWellFormed e1 ∧ ExprWellFormed e2
+  | .callN _ args   => ∀ i, ExprWellFormed (args i)
 
 /-- Cross-world compatibility bundle.
 
@@ -541,10 +571,17 @@ structure Compat (α : Type) [Dual2Field α] where
       on the compiler side).  Matches the `UP` parameter of
       `gtt_sound_body`. -/
   UP        : FnId → UsedParams2
+  /-- N-ary body-precision summary: `FnId × arity → UsedParamsFin n`.
+      Keyed on both FnId and arity because the same `FN_USED_PARAMS[fi]`
+      bit-mask semantics apply at any arity up to 16 per the compiler. -/
+  UPn       : (f : FnId) → (n : Nat) → UsedParamsFin n
   /-- GT function id `f` → B-side functional callee.  The B side is
       functional (deterministic), so the user provides one callee per
       FnId; `cliftResp` below ensures each respects body-precision. -/
   clift     : FnId → (Dual2 α → Dual2 α → Dual2 α)
+  /-- N-ary B-side callee: `FnId × arity → n-ary functional callee`.
+      `cliftRespN` below witnesses body-precision. -/
+  cliftN    : (f : FnId) → (n : Nat) → ((Fin n → Dual2 α) → Dual2 α)
   /-- Variable compatibility: the B slot declared for `x` carries the
       channel set `Γ x`. -/
   varComp   : ∀ x : VarId, env.chset (varSlot x) = Γ x
@@ -555,6 +592,9 @@ structure Compat (α : Type) [Dual2Field α] where
       footprint footprint contained in `usedUnion (UP f) _ _`.  This is the
       B-side counterpart of `BodyRespectsUsedParams F UP` on the GT side. -/
   cliftResp : ∀ f : FnId, CalleeRespects (UP f) (clift f)
+  /-- N-ary callee body-precision witness: each `cliftN f n` respects
+      `usedUnionFin (UPn f n)`.  Week-5 analogue of `cliftResp`. -/
+  cliftRespN : ∀ (f : FnId) (n : Nat), CalleeRespectsN (UPn f n) (cliftN f n)
   /-- The B environment is well-typed: each slot's denotation has
       footprint matching its declared channel set. -/
   envWT     : EnvWT env
@@ -576,6 +616,8 @@ def lower (C : Compat α) : Expr → BExpr α
   | .add e1 e2      => BExpr.add (lower C e1) (lower C e2)
   | .mul e1 e2      => BExpr.mul (lower C e1) (lower C e2)
   | .call2 f e1 e2  => BExpr.call2 (C.UP f) (C.clift f) (lower C e1) (lower C e2)
+  | .callN (n := n) f args =>
+      BExpr.callN (C.UPn f n) (C.cliftN f n) (fun i => lower C (args i))
 
 -- ===========================================================================
 -- §13. Cross-world correspondence (Stage 2: lowering preserves typing)
@@ -657,6 +699,30 @@ theorem lowering_types (C : Compat α) (e : Expr) (S : ChSet)
         exact ChSet.subset_trans _ _ _
           (usedUnion_mono (C.UP f) S1' S2' S1 S2 hsub1 hsub2)
           (usedUnion_subset_union (C.UP f) S1 S2)
+  | @tCallN f n args Ss _hTi ih =>
+      intro hwf
+      simp only [ExprWellFormed] at hwf
+      -- hwf  : ∀ i, ExprWellFormed (args i)
+      -- ih   : ∀ i, ExprWellFormed (args i) →
+      --          ∃ S', BTyping env (lower (args i)) S' ∧ S'.subset (Ss i)
+      -- Skolemise via Classical.axiomOfChoice to extract the per-arg
+      -- witness family `S' : Fin n → ChSet` — the n-ary analogue of
+      -- tCall2's pair destructuring of `⟨S1', _⟩` and `⟨S2', _⟩`.
+      have h_per_i : ∀ i, ∃ S',
+          BTyping C.env (lower C (args i)) S' ∧ S'.subset (Ss i) :=
+        fun i => ih i (hwf i)
+      have ⟨S', hS'⟩ := Classical.axiomOfChoice h_per_i
+      refine ⟨usedUnionFin (C.UPn f n) S', ?_, ?_⟩
+      · show BTyping C.env
+          (BExpr.callN (C.UPn f n) (C.cliftN f n) (fun i => lower C (args i)))
+          (usedUnionFin (C.UPn f n) S')
+        exact BTyping.callN (C.UPn f n) (C.cliftN f n) _ _
+                (C.cliftRespN f n) (fun i => (hS' i).1)
+      · -- usedUnionFin (UPn f n) S' ⊆ chsetUnionFin S' (body-precision refines)
+        --                             ⊆ chsetUnionFin Ss (per-arg monotonicity)
+        exact ChSet.subset_trans _ (chsetUnionFin S') _
+          (usedUnionFin_subset_chsetUnionFin _ _)
+          (chsetUnionFin_mono S' Ss (fun i => (hS' i).2))
 
 -- ===========================================================================
 -- §14. Cross-world soundness (Stage 3: gtt_corresponds)
@@ -776,7 +842,9 @@ def seedCompatNat : Compat Nat where
   varSlot   := fun _ => ⟨0, by decide⟩
   chanSlot  := fun k => if h : k < 8 then ⟨k, h⟩ else ⟨0, by decide⟩
   UP        := fun _ => ⟨true, true⟩
+  UPn       := fun _ _ => fun _ => true
   clift     := fun _ => dual2Add
+  cliftN    := fun _ _ => fun _ => dual2Const 0
   varComp   := fun _ => rfl
   chanComp  := fun k hk => by
     show seedEnvNat.chset (if h : k < 8 then ⟨k, h⟩ else ⟨0, by decide⟩)
@@ -786,6 +854,21 @@ def seedCompatNat : Compat Nat where
     show Footprint (usedUnion ⟨true, true⟩ Sa Sb) (dual2Add Da Db)
     rw [usedUnion_all_used]
     exact fp_add_union Sa Sb Da Db hA hB
+  cliftRespN := fun _ _ Ss _ _ => by
+    -- cliftN is `fun _ => dual2Const 0`, which has empty footprint.
+    -- `usedUnionFin (fun _ => true) Ss = chsetUnionFin Ss` (usedUnionFin_all_used),
+    -- which contains ChSet.empty trivially; Footprint ChSet.empty (dual2Const 0)
+    -- is `fp_const 0 _`.  Any superset works because empty ⊆ anything.
+    show Footprint (usedUnionFin (fun _ => true) Ss) (dual2Const 0)
+    rw [usedUnionFin_all_used Ss]
+    -- Need: Footprint (chsetUnionFin Ss) (dual2Const 0).
+    -- fp_const gives Footprint ChSet.empty (dual2Const 0); extend via
+    -- Footprint monotonicity in the set argument.
+    constructor
+    · intro j _
+      simp only [dual2Const]
+    · intro j k _
+      simp only [dual2Const]
   envWT     := seedEnvNat_wellTyped
 
 /-- Canary GT expression: `add (value 0) (value 1)`.  Well-formed (both
@@ -885,7 +968,9 @@ noncomputable def seedCompatFloat : Compat Float where
   varSlot   := fun _ => ⟨0, by decide⟩
   chanSlot  := fun k => if h : k < 8 then ⟨k, h⟩ else ⟨0, by decide⟩
   UP        := fun _ => ⟨true, true⟩
+  UPn       := fun _ _ => fun _ => true
   clift     := fun _ => dual2Add
+  cliftN    := fun _ _ => fun _ => dual2Const (0.0 : Float)
   varComp   := fun _ => rfl
   chanComp  := fun k hk => by
     show seedEnvFloat.chset (if h : k < 8 then ⟨k, h⟩ else ⟨0, by decide⟩)
@@ -895,6 +980,14 @@ noncomputable def seedCompatFloat : Compat Float where
     show Footprint (usedUnion ⟨true, true⟩ Sa Sb) (dual2Add Da Db)
     rw [usedUnion_all_used]
     exact fp_add_union Sa Sb Da Db hA hB
+  cliftRespN := fun _ _ Ss _ _ => by
+    show Footprint (usedUnionFin (fun _ => true) Ss) (dual2Const (0.0 : Float))
+    rw [usedUnionFin_all_used Ss]
+    constructor
+    · intro j _
+      simp only [dual2Const]
+    · intro j k _
+      simp only [dual2Const]
   envWT     := seedEnvFloat_wellTyped
 
 /-- **End-to-end cross-world canary at `α = Float`.**
