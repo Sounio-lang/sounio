@@ -142,6 +142,43 @@ theorem fp_mul_union (Sa Sb : ChSet) (A B : Dual2 α)
                F.zero_mul, F.mul_zero, F.zero_add, F.add_zero]
 
 -- ===========================================================================
+-- §6b. N-ary fold-add — concrete inhabitant for `Compat.cliftN`
+-- ===========================================================================
+
+/-- Right-associative fold of `dual2Add` over a `Fin n`-indexed family:
+      `foldDualAdd [D₀, D₁, D₂] = D₀ + (D₁ + (D₂ + 𝟎))`.
+    Used as a concrete all-params-used n-ary callee for `Compat.cliftN`.
+    Polymorphic in `n : Nat`; `n = 0` produces `dual2Const 𝟎`. -/
+def foldDualAdd : {n : Nat} → (Fin n → Dual2 α) → Dual2 α
+  | 0,   _  => dual2Const 𝟎
+  | _+1, Ds => dual2Add (Ds 0) (foldDualAdd (fun i => Ds i.succ))
+
+/-- Footprint preservation for `foldDualAdd` under pointwise-footprint
+    inputs: the `chsetUnionFin` of the input channel sets bounds the
+    fold's footprint.  N-ary analogue of `fp_add_union`, proved by
+    `n`-induction reducing to repeated `fp_add_union` + `fp_const`. -/
+theorem fp_foldDualAdd : {n : Nat} →
+    ∀ (Ss : Fin n → ChSet) (Ds : Fin n → Dual2 α),
+      (∀ i, Footprint (Ss i) (Ds i)) →
+      Footprint (chsetUnionFin Ss) (foldDualAdd Ds)
+  | 0,   Ss, _,  _   => by
+      show Footprint (chsetUnionFin Ss) (dual2Const 𝟎)
+      rw [chsetUnionFin_zero]
+      exact fp_const _ _
+  | n+1, Ss, Ds, hFp => by
+      show Footprint (chsetUnionFin Ss)
+            (dual2Add (Ds 0) (foldDualAdd (fun i : Fin n => Ds i.succ)))
+      rw [chsetUnionFin_succ]
+      exact fp_add_union (Ss 0) (chsetUnionFin (fun i : Fin n => Ss i.succ))
+        (Ds 0) (foldDualAdd (fun i : Fin n => Ds i.succ))
+        (hFp 0)
+        (fp_foldDualAdd (fun i : Fin n => Ss i.succ)
+          (fun i : Fin n => Ds i.succ) (fun i => hFp i.succ))
+
+-- `foldDualAdd_respects_all_used : CalleeRespectsN (fun _ => true) foldDualAdd`
+-- lives below §8 because `CalleeRespectsN` is defined there.
+
+-- ===========================================================================
 -- §7. Bridge expression language
 -- ===========================================================================
 
@@ -196,6 +233,16 @@ def CalleeRespectsN {n : Nat} (U : UsedParamsFin n)
   ∀ (Ss : Fin n → ChSet) (Ds : Fin n → Dual2 α),
     (∀ i, Footprint (Ss i) (Ds i)) →
     Footprint (usedUnionFin U Ss) (f Ds)
+
+/-- `CalleeRespectsN`-packaged version of `fp_foldDualAdd`: `foldDualAdd`
+    respects the all-params-used body-precision summary `(fun _ => true)`.
+    Key step: `usedUnionFin (fun _ => true) = chsetUnionFin` via
+    `usedUnionFin_all_used`, then apply `fp_foldDualAdd` (§6b). -/
+theorem foldDualAdd_respects_all_used {n : Nat} :
+    CalleeRespectsN (α := α) (fun _ : Fin n => true) foldDualAdd := by
+  intro Ss Ds hFp
+  rw [usedUnionFin_all_used]
+  exact fp_foldDualAdd Ss Ds hFp
 
 -- ===========================================================================
 -- §8. Evaluator
@@ -844,7 +891,7 @@ def seedCompatNat : Compat Nat where
   UP        := fun _ => ⟨true, true⟩
   UPn       := fun _ _ => fun _ => true
   clift     := fun _ => dual2Add
-  cliftN    := fun _ _ => fun _ => dual2Const 0
+  cliftN    := fun _ _ => foldDualAdd
   varComp   := fun _ => rfl
   chanComp  := fun k hk => by
     show seedEnvNat.chset (if h : k < 8 then ⟨k, h⟩ else ⟨0, by decide⟩)
@@ -854,21 +901,7 @@ def seedCompatNat : Compat Nat where
     show Footprint (usedUnion ⟨true, true⟩ Sa Sb) (dual2Add Da Db)
     rw [usedUnion_all_used]
     exact fp_add_union Sa Sb Da Db hA hB
-  cliftRespN := fun _ _ Ss _ _ => by
-    -- cliftN is `fun _ => dual2Const 0`, which has empty footprint.
-    -- `usedUnionFin (fun _ => true) Ss = chsetUnionFin Ss` (usedUnionFin_all_used),
-    -- which contains ChSet.empty trivially; Footprint ChSet.empty (dual2Const 0)
-    -- is `fp_const 0 _`.  Any superset works because empty ⊆ anything.
-    show Footprint (usedUnionFin (fun _ => true) Ss) (dual2Const 0)
-    rw [usedUnionFin_all_used Ss]
-    -- Need: Footprint (chsetUnionFin Ss) (dual2Const 0).
-    -- fp_const gives Footprint ChSet.empty (dual2Const 0); extend via
-    -- Footprint monotonicity in the set argument.
-    constructor
-    · intro j _
-      simp only [dual2Const]
-    · intro j k _
-      simp only [dual2Const]
+  cliftRespN := fun _ _ => foldDualAdd_respects_all_used
   envWT     := seedEnvNat_wellTyped
 
 /-- Canary GT expression: `add (value 0) (value 1)`.  Well-formed (both
@@ -970,7 +1003,7 @@ noncomputable def seedCompatFloat : Compat Float where
   UP        := fun _ => ⟨true, true⟩
   UPn       := fun _ _ => fun _ => true
   clift     := fun _ => dual2Add
-  cliftN    := fun _ _ => fun _ => dual2Const (0.0 : Float)
+  cliftN    := fun _ _ => foldDualAdd
   varComp   := fun _ => rfl
   chanComp  := fun k hk => by
     show seedEnvFloat.chset (if h : k < 8 then ⟨k, h⟩ else ⟨0, by decide⟩)
@@ -980,14 +1013,7 @@ noncomputable def seedCompatFloat : Compat Float where
     show Footprint (usedUnion ⟨true, true⟩ Sa Sb) (dual2Add Da Db)
     rw [usedUnion_all_used]
     exact fp_add_union Sa Sb Da Db hA hB
-  cliftRespN := fun _ _ Ss _ _ => by
-    show Footprint (usedUnionFin (fun _ => true) Ss) (dual2Const (0.0 : Float))
-    rw [usedUnionFin_all_used Ss]
-    constructor
-    · intro j _
-      simp only [dual2Const]
-    · intro j k _
-      simp only [dual2Const]
+  cliftRespN := fun _ _ => foldDualAdd_respects_all_used
   envWT     := seedEnvFloat_wellTyped
 
 /-- **End-to-end cross-world canary at `α = Float`.**
@@ -1013,6 +1039,77 @@ theorem canary_gtt_slot2_gradient_zero_float :
       = (0.0 : Float) := by
   apply canary_gtt_corresponds_float.1 ⟨2, by decide⟩
   -- ¬ ((ChSet.singleton 0).union (ChSet.singleton 1)) 2
+  decide
+
+-- ===========================================================================
+-- §14d. End-to-end n-ary canary at `α = Float`
+-- ===========================================================================
+
+/-!
+§14c's `canary_gtt_corresponds_float` exercises `gtt_corresponds` over a
+pure-`add` GT expression — it does not touch the `tCallN` arm of
+`lowering_types`, the `BExpr.callN` arm of `bridge`, or any
+`CalleeRespectsN` witness.  The `cliftN`/`cliftRespN` fields added to
+`Compat` in week-5's `90d60e9a` commit were placeholders (constant-zero
+callee + trivial proof) rather than genuine witnesses.
+
+This section closes that honest-limit gap.  `seedCompatFloat` (above)
+now has `cliftN := fun _ _ => foldDualAdd` and
+`cliftRespN := fun _ _ => foldDualAdd_respects_all_used` — concrete
+n-ary inhabitants, no placeholder.  The canary `gtCanaryExprN` is a
+`callN`-shaped GT expression whose lowering exercises the
+`lowering_types` `tCallN` branch (including `Classical.axiomOfChoice`
+Skolemisation) and the `bridge` `.callN` arm (discharging footprint
+via `CalleeRespectsN`).  The end-to-end `canary_callN_gtt_corresponds_float`
+witnesses genuine non-vacuous n-ary use at `α = Float`.
+-/
+
+/-- Canary n-ary GT expression: `callN 0 [value 0, value 1]` — a
+    2-ary call to `FnId = 0` whose arguments are the first two channel
+    seeds.  Structurally tests the `tCallN` / `BTyping.callN` /
+    `Expr.callN` / `BExpr.callN` cascade end-to-end. -/
+def gtCanaryExprN : Expr :=
+  Expr.callN 0 (fun i : Fin 2 => Expr.value i.val)
+
+/-- `gtCanaryExprN` is well-formed: every channel index (0, 1) is < 8. -/
+theorem gtCanaryExprN_wellFormed : ExprWellFormed gtCanaryExprN := by
+  show ∀ i : Fin 2, ExprWellFormed (Expr.value i.val)
+  intro i
+  show (i.val : Nat) < 8
+  exact Nat.lt_of_lt_of_le i.isLt (by decide)
+
+/-- `gtCanaryExprN` GT-types at
+    `chsetUnionFin (fun i : Fin 2 => ChSet.singleton i.val)`
+    under any typing environment.  Proof: `tCallN` over two `tValue` instances. -/
+theorem gtCanaryExprN_types (Γ : TyEnv) :
+    Typing Γ gtCanaryExprN
+      (chsetUnionFin (fun i : Fin 2 => ChSet.singleton i.val)) :=
+  Typing.tCallN 0 _ _ (fun i => Typing.tValue i.val)
+
+/-- **End-to-end n-ary cross-world canary at `α = Float`.**
+
+    `gtt_corresponds` applied to `gtCanaryExprN` under `seedCompatFloat`
+    (with concrete `cliftN := foldDualAdd`) yields
+    `Footprint (chsetUnionFin ...) (evalB seedEnvFloat (lower
+    seedCompatFloat gtCanaryExprN))`.  Exercises the `lowering_types`
+    `tCallN` branch and the `bridge` `callN` arm on a non-placeholder
+    `Compat.cliftN` field. -/
+theorem canary_callN_gtt_corresponds_float :
+    Footprint (chsetUnionFin (fun i : Fin 2 => ChSet.singleton i.val))
+      (evalB seedEnvFloat (lower seedCompatFloat gtCanaryExprN)) :=
+  gtt_corresponds seedCompatFloat gtCanaryExprN _
+    gtCanaryExprN_wellFormed (gtCanaryExprN_types seedCompatFloat.Γ)
+
+/-- N-ary analogue of `canary_gtt_slot2_gradient_zero_float`: slot
+    `⟨3,_⟩` has zero gradient on the n-ary-evaluated Float value.
+    Slot 3 is outside `chsetUnionFin (fun i : Fin 2 => singleton i.val)
+    = singleton 0 ∪ (singleton 1 ∪ empty)`, so the cross-world theorem
+    rules out any first-order contribution from slot 3. -/
+theorem canary_callN_slot3_gradient_zero_float :
+    (evalB seedEnvFloat (lower seedCompatFloat gtCanaryExprN)).grad
+        ⟨3, by decide⟩
+      = (0.0 : Float) := by
+  apply canary_callN_gtt_corresponds_float.1 ⟨3, by decide⟩
   decide
 
 -- ===========================================================================
@@ -1054,8 +1151,13 @@ theorem canary_gtt_slot2_gradient_zero_float :
 | gtCanaryExpr / gtCanaryExpr_{wellFormed,types}         | def+prv | §14b                       |
 | **canary_gtt_corresponds** (end-to-end inhabitant)     | proved  | §14b                       |
 | canary_gtt_slot2_gradient_zero (concrete slot corollary)| proved | §14b                       |
+| foldDualAdd / fp_foldDualAdd (n-ary fold-add helper)   | def+prv | §6b                        |
+| foldDualAdd_respects_all_used (CalleeRespectsN witness)| proved  | §8                         |
 | seedEnvFloat / seedEnvFloat_wellTyped                  | def+prv | §14c                       |
-| seedCompatFloat (concrete Compat Float witness)        | def     | §14c                       |
+| seedCompatFloat (concrete Compat Float witness, real cliftN) | def | §14c                      |
+| gtCanaryExprN / gtCanaryExprN_{wellFormed,types}       | def+prv | §14d                       |
+| **canary_callN_gtt_corresponds_float** (n-ary Float inhabitant) | proved | §14d                  |
+| canary_callN_slot3_gradient_zero_float                 | proved  | §14d                       |
 | **canary_gtt_corresponds_float** (Float inhabitant)    | proved  | §14c                       |
 | canary_gtt_slot2_gradient_zero_float                   | proved  | §14c                       |
 
