@@ -1,0 +1,167 @@
+//! stdlib/algebra/sedenion.sio
+//!
+//! Sedenion algebra 𝕊₁₆ as the Cayley-Dickson doubling of the octonions.
+//!
+//! Port of `scripts/research/ossm_168_dryrun/sedenion.py`. The algebra
+//! is stored as a raw `[f64; 16]` coefficient vector so that the
+//! public API never crosses a module boundary with a large struct
+//! return — see DEVIATIONS comment at the bottom of this file.
+//!
+//! Algebraic facts exercised by the OSSM-168 prereg:
+//!   * non-commutative, non-associative, NON-alternative
+//!   * NOT a division algebra: primitive zero-divisors exist
+//!   * every CD algebra is **flexible**: [x, y, x] = 0 for all x, y,
+//!     hence [c, b, a] = −[a, b, c] throughout the CD tower
+//!     (see DEVIATIONS entry 0004 for why this kills any "parity
+//!     asymmetry" feature)
+//!
+//! Signs follow the universal Cayley-Dickson kernel `cd_sigma`
+//! (`stdlib/algebra/cayley_dickson.sio`, bits = 4 for 𝕊₁₆).
+
+use algebra::cayley_dickson::{cd_sigma}
+
+// ============================================================================
+// Algebra declaration (routing for the Fano-selective reassociation pass)
+// ----------------------------------------------------------------------------
+// Previously in `sedenion_decl.sio` (now folded in). Keeps the
+// Cayley-Dickson sigma-based sign kernel as the semantic backend for
+// the reassociation predicate, matching `octonion.sio` at the octonion
+// rung.
+// ============================================================================
+
+algebra Sedenion over f64 {
+    add: commutative, associative
+    mul: non_commutative
+    reassociate: fano_selective
+}
+
+// ============================================================================
+// Basic constructors
+// ============================================================================
+
+pub fn sed_zero(out: &![f64; 16]) with Mut {
+    var i: i64 = 0
+    while i < 16 { out[i as usize] = 0.0; i = i + 1 }
+}
+
+// Unit basis element e_i for i in 0..15 (0 is the real unit).
+pub fn sed_basis(i: i64, out: &![f64; 16]) with Mut {
+    var z: i64 = 0
+    while z < 16 { out[z as usize] = 0.0; z = z + 1 }
+    if i >= 0 && i < 16 { out[i as usize] = 1.0 }
+}
+
+// Construct (a, b) in the CD doubling: out[0..8] = a, out[8..16] = b.
+pub fn sed_from_pair(a: &[f64; 8], b: &[f64; 8], out: &![f64; 16]) with Mut {
+    var i: i64 = 0
+    while i < 8 {
+        out[i as usize] = a[i as usize]
+        out[(i + 8) as usize] = b[i as usize]
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Multiplication via the universal CD sign kernel (bits = 4)
+// ----------------------------------------------------------------------------
+// (a * b)[idx] = Σ_{i XOR j = idx} cd_sigma(i, j, 4) * a[i] * b[j].
+// Matches the explicit formula used by `sed_mul` in the Python port
+// and the `algebra Sedenion` declaration at the top of this file.
+// ============================================================================
+
+pub fn sed_mul(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut, Div, Panic {
+    var z: i64 = 0
+    while z < 16 { out[z as usize] = 0.0; z = z + 1 }
+    var i: i32 = 0
+    while i < 16 {
+        let ai = a[i as usize]
+        if ai != 0.0 {
+            var j: i32 = 0
+            while j < 16 {
+                let bj = b[j as usize]
+                if bj != 0.0 {
+                    let idx = i ^ j
+                    let sign = cd_sigma(i, j, 4)
+                    out[idx as usize] = out[idx as usize] + (sign as f64) * ai * bj
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Associator, norms
+// ============================================================================
+
+pub fn sed_associator(
+    a: &[f64; 16], b: &[f64; 16], c: &[f64; 16],
+    out: &![f64; 16]
+) with Mut, Div, Panic {
+    var ab: [f64; 16] = [0.0; 16]
+    var bc: [f64; 16] = [0.0; 16]
+    var left: [f64; 16] = [0.0; 16]
+    var right: [f64; 16] = [0.0; 16]
+    sed_mul(a, b, &!ab)
+    sed_mul(b, c, &!bc)
+    sed_mul(&ab, c, &!left)
+    sed_mul(a, &bc, &!right)
+    var i: i64 = 0
+    while i < 16 {
+        out[i as usize] = left[i as usize] - right[i as usize]
+        i = i + 1
+    }
+}
+
+pub fn sed_norm_sq(a: &[f64; 16]) -> f64 with Mut {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 16 { s = s + a[i as usize] * a[i as usize]; i = i + 1 }
+    s
+}
+
+// Componentwise L¹ norm — used by v3 F_3.
+pub fn sed_l1_norm(a: &[f64; 16]) -> f64 with Mut, Div, Panic {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        let v = a[i as usize]
+        s = s + if v < 0.0 { 0.0 - v } else { v }
+        i = i + 1
+    }
+    s
+}
+
+// ============================================================================
+// Canonical primitive zero-divisor pair (de Marrais 2000)
+// ----------------------------------------------------------------------------
+// z = e_3 + e_10,  w = e_6 − e_15.  Satisfies sed_mul(z, w) = 0.
+// Referenced by H2's feature F_2 (prereg §2).
+// ============================================================================
+
+pub fn sed_canonical_zd_z(out: &![f64; 16]) with Mut {
+    var z: i64 = 0
+    while z < 16 { out[z as usize] = 0.0; z = z + 1 }
+    out[3] = 1.0
+    out[10] = 1.0
+}
+
+pub fn sed_canonical_zd_w(out: &![f64; 16]) with Mut {
+    var z: i64 = 0
+    while z < 16 { out[z as usize] = 0.0; z = z + 1 }
+    out[6] = 1.0
+    out[15] = 0.0 - 1.0
+}
+
+// ============================================================================
+// Design note on aggregate returns
+// ----------------------------------------------------------------------------
+// Public routines take `&![f64; 16]` out-params rather than returning a
+// 16-float struct. This is intentional: the mini-native codegen
+// currently miscompiles cross-module calls that return structs carrying
+// fixed arrays of size ≥ 100 (see the note in
+// `stdlib/stats/epistemic/bootstrap.sio::bootstrap_ci_bca_mean` where
+// `ResampleResult { sample: [f64; 100], … }` was inlined for the same
+// reason). Keeping APIs on small types + out-params matches the style
+// in `octonion.sio::oct_mul` and avoids future segfault regressions.
