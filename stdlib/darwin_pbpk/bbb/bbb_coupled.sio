@@ -1,0 +1,210 @@
+// darwin_pbpk/bbb/bbb_coupled.sio — Couple BBB sub-model to systemic PBPK
+//
+// Feed-forward coupling: the systemic 14-compartment PBPK is solved
+// on its own (Tsit5 adaptive), producing a plasma trajectory.  The
+// BBB sub-model (ISF + ICF) then runs at fixed RK4 dt with a piecewise-
+// constant plasma driver interpolated from the systemic trajectory.
+//
+// The two timescales (systemic Tsit5 step ~0.01-1 h; BBB RK4 step
+// 0.01 h) interleave via outer checkpoints.  This is the standard
+// Gaohua 2016 / Liu 2020 architecture for CNS PBPK.
+//
+// Why feed-forward and not fully coupled:
+//   For a CNS-poor drug the BBB flux out of plasma is << systemic
+//   clearance (rapamycin: PS_bbb × fu_plasma = 0.024 L/h vs
+//   CL_hepatic × fu_plasma = 1.0 L/h — 40× smaller).  Neglecting the
+//   back-drain is sound to within ~2% on plasma AUC.
+
+use darwin_pbpk::bbb::bbb_core::*
+use darwin_pbpk::tsit5_pbpk14::*
+
+// ----------------------------------------------------------------------------
+// Coupled run output
+// ----------------------------------------------------------------------------
+
+pub struct BBBCoupledTrace {
+    times_h:  [f64; 32],
+    plasma:   [f64; 32],
+    isf:      [f64; 32],
+    icf:      [f64; 32],
+    isf_u:    [f64; 32],
+    icf_u:    [f64; 32],
+    kpuu_obs: [f64; 32],
+    n_points: i32,
+    auc_plasma: f64,
+    auc_isf_u:  f64,   // AUC of ISF unbound — the PK-relevant CNS exposure
+    auc_icf_u:  f64,   // AUC of ICF unbound — the PD-relevant cell-target exposure
+    kpuu_auc:   f64,   // AUC(C_isf_u) / AUC(C_plasma_u) — observed Kpuu from AUC
+}
+
+fn bbb_trace_zero() -> BBBCoupledTrace {
+    BBBCoupledTrace {
+        times_h:  [0.0; 32],
+        plasma:   [0.0; 32],
+        isf:      [0.0; 32],
+        icf:      [0.0; 32],
+        isf_u:    [0.0; 32],
+        icf_u:    [0.0; 32],
+        kpuu_obs: [0.0; 32],
+        n_points: 0,
+        auc_plasma: 0.0,
+        auc_isf_u:  0.0,
+        auc_icf_u:  0.0,
+        kpuu_auc:   0.0,
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Coupled solver
+// ----------------------------------------------------------------------------
+// Strategy:
+//   For each outer checkpoint interval [t_k, t_{k+1}]:
+//     1. Advance the systemic Tsit5 PBPK from t_k to t_{k+1}, giving
+//        C_plasma(t_{k+1}).
+//     2. Linearly interpolate C_plasma over the interval (piecewise-
+//        linear is exact for trapezoidal AUC, which is what the
+//        dissertation validation uses).
+//     3. Step the BBB RK4 sub-model over [t_k, t_{k+1}] with the
+//        interpolated plasma driver at each sub-step.
+
+fn interp_linear(t: f64, t0: f64, t1: f64, c0: f64, c1: f64) -> f64 with Div, Panic, Mut {
+    if t1 <= t0 { return c0 }
+    let alpha = (t - t0) / (t1 - t0)
+    c0 + alpha * (c1 - c0)
+}
+
+pub fn bbb_coupled_run(
+    systemic_prm: PBPKParams14,
+    bbb_prm: BBBParams,
+    dose_mg: f64,
+    checkpoints: [f64; 32],
+    n_points: i32,
+    bbb_dt: f64
+) -> BBBCoupledTrace with Mut, Div, Panic {
+    let cfg = tight_ode_config()
+    var trace = bbb_trace_zero()
+    trace.n_points = n_points
+
+    // Initial systemic state: IV bolus into central blood compartment.
+    let c0 = dose_mg / systemic_prm.v_blood
+    var sys_st = pbpk_state_zero()
+    sys_st.blood = c0
+
+    var bbb_st = bbb_state_zero()
+
+    var t = 0.0
+    var dt_sys = cfg.dt_init
+
+    // Record t = 0 checkpoint.
+    trace.times_h[0]   = 0.0
+    trace.plasma[0]    = sys_st.blood
+    trace.isf[0]       = bbb_st.c_isf
+    trace.icf[0]       = bbb_st.c_icf
+    trace.isf_u[0]     = bbb_prm.fu_isf * bbb_st.c_isf
+    trace.icf_u[0]     = bbb_prm.fu_icf * bbb_st.c_icf
+    let c_plasma_u_0   = bbb_prm.fu_plasma * sys_st.blood
+    trace.kpuu_obs[0]  = if c_plasma_u_0 > 0.0 { (bbb_prm.fu_isf * bbb_st.c_isf) / c_plasma_u_0 } else { 0.0 }
+
+    var point_i: i32 = 1
+    while point_i < n_points {
+        let idx = point_i as usize
+        let target = checkpoints[idx]
+        let c_plasma_prev = sys_st.blood
+        let t_prev = t
+
+        // ----- Advance systemic PBPK to target -----
+        var nsteps: i64 = 0
+        var nreject: i64 = 0
+        while t < target && nsteps < cfg.max_steps {
+            let dt_use = if t + dt_sys > target { target - t } else { dt_sys }
+            let result = tsit5_step_pbpk(sys_st, t, dt_use, systemic_prm)
+            let err_norm = compute_error_norm_14(result.err, sys_st, result.state_new, cfg.rtol, cfg.atol)
+            if err_norm <= 1.0 {
+                sys_st = result.state_new
+                t = t + dt_use
+                nsteps = nsteps + 1
+                dt_sys = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            } else {
+                nreject = nreject + 1
+                dt_sys = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            }
+            if dt_sys < cfg.dt_min { dt_sys = cfg.dt_min }
+            if dt_sys > cfg.dt_max { dt_sys = cfg.dt_max }
+            if nreject > 10000 { return trace }
+        }
+
+        let c_plasma_now = sys_st.blood
+
+        // ----- Step BBB sub-model over [t_prev, target] with piecewise-linear plasma -----
+        var t_bbb = t_prev
+        while t_bbb < target {
+            let dt_use = if t_bbb + bbb_dt > target { target - t_bbb } else { bbb_dt }
+            let c_mid = interp_linear(t_bbb + 0.5 * dt_use, t_prev, target, c_plasma_prev, c_plasma_now)
+            bbb_st = bbb_rk4_step(bbb_st, c_mid, dt_use, bbb_prm)
+            t_bbb = t_bbb + dt_use
+        }
+
+        // ----- Record checkpoint -----
+        let c_plasma_u_i = bbb_prm.fu_plasma * c_plasma_now
+        let c_isf_u_i    = bbb_prm.fu_isf * bbb_st.c_isf
+        let c_icf_u_i    = bbb_prm.fu_icf * bbb_st.c_icf
+        trace.times_h[idx]   = target
+        trace.plasma[idx]    = c_plasma_now
+        trace.isf[idx]       = bbb_st.c_isf
+        trace.icf[idx]       = bbb_st.c_icf
+        trace.isf_u[idx]     = c_isf_u_i
+        trace.icf_u[idx]     = c_icf_u_i
+        trace.kpuu_obs[idx]  = if c_plasma_u_i > 0.0 { c_isf_u_i / c_plasma_u_i } else { 0.0 }
+
+        point_i = point_i + 1
+    }
+
+    // ----- Trapezoidal AUC over the recorded checkpoints -----
+    var auc_p: f64 = 0.0
+    var auc_i: f64 = 0.0
+    var auc_c: f64 = 0.0
+    var k: i32 = 0
+    while k < n_points - 1 {
+        let kdx = k as usize
+        let kdx1 = (k + 1) as usize
+        let h = trace.times_h[kdx1] - trace.times_h[kdx]
+        let plasma_u_k  = bbb_prm.fu_plasma * trace.plasma[kdx]
+        let plasma_u_k1 = bbb_prm.fu_plasma * trace.plasma[kdx1]
+        auc_p = auc_p + 0.5 * h * (plasma_u_k + plasma_u_k1)
+        auc_i = auc_i + 0.5 * h * (trace.isf_u[kdx]  + trace.isf_u[kdx1])
+        auc_c = auc_c + 0.5 * h * (trace.icf_u[kdx]  + trace.icf_u[kdx1])
+        k = k + 1
+    }
+    trace.auc_plasma = auc_p
+    trace.auc_isf_u  = auc_i
+    trace.auc_icf_u  = auc_c
+    trace.kpuu_auc   = if auc_p > 0.0 { auc_i / auc_p } else { 0.0 }
+
+    trace
+}
+
+// ----------------------------------------------------------------------------
+// Dissertation-ready CSV export
+// ----------------------------------------------------------------------------
+
+pub fn bbb_coupled_print_csv(trace: BBBCoupledTrace) with IO, Mut, Panic, Div {
+    println("time_h,c_plasma_total,c_isf_total,c_icf_total,c_isf_unbound,c_icf_unbound,kpuu_observed")
+    var i: i32 = 0
+    while i < trace.n_points {
+        let idx = i as usize
+        print_f64(trace.times_h[idx]);  print(",")
+        print_f64(trace.plasma[idx]);   print(",")
+        print_f64(trace.isf[idx]);      print(",")
+        print_f64(trace.icf[idx]);      print(",")
+        print_f64(trace.isf_u[idx]);    print(",")
+        print_f64(trace.icf_u[idx]);    print(",")
+        print_f64(trace.kpuu_obs[idx])
+        println("")
+        i = i + 1
+    }
+    println("")
+    print("AUC_plasma_unbound,");  print_f64(trace.auc_plasma);  println("")
+    print("AUC_isf_unbound,");     print_f64(trace.auc_isf_u);   println("")
+    print("AUC_icf_unbound,");     print_f64(trace.auc_icf_u);   println("")
+    print("Kpuu_brain_AUC,");      print_f64(trace.kpuu_auc);    println("")
+}
