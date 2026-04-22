@@ -1,0 +1,237 @@
+// darwin_pbpk/bbb/bbb_gum.sio — GUM-through-ODE sensitivity for BBB
+//
+// First-order uncertainty propagation (JCGM 100:2008 "Guide to the
+// Expression of Uncertainty in Measurement", §5) through the coupled
+// systemic + BBB ODE.  For each output endpoint Y (e.g., Kpuu_AUC),
+// we estimate
+//
+//     var(Y) ≈ sum_i  (∂Y/∂p_i)^2 * var(p_i)
+//
+// via two-point central finite differences on the BBB input
+// parameters p_i.  The result is an ISO-format uncertainty budget:
+// one row per input parameter showing the sensitivity coefficient,
+// the variance contribution, the relative share of the total
+// combined variance, and the confidence tag.
+//
+// This is dissertation contribution 3 — an ISO uncertainty budget
+// table applied to a PBPK/CNS workflow, operationalised through the
+// same compiled ODE used for point predictions.  Existing PK/PD
+// tooling (Simcyp, NONMEM, PK-Sim) reports Monte Carlo quantiles
+// but NOT a per-parameter GUM budget; this module fills that gap.
+//
+// Endpoint definitions:
+//   Y_KPUU_AUC     — AUC(C_isf_unbound) / AUC(C_plasma_unbound)
+//   Y_AUC_ICF_U    — AUC(C_icf_unbound), the PD-relevant exposure
+//                    to the intracellular mTOR target
+
+use darwin_pbpk::bbb::bbb_core::{BBBParams}
+use darwin_pbpk::bbb::bbb_coupled::{BBBCoupledTrace, bbb_coupled_run}
+use darwin_pbpk::bbb::bbb_priors::{BBBPriors}
+use darwin_pbpk::tsit5_pbpk14::{PBPKParams14}
+
+pub fn bbb_endpoint_kpuu_auc(trace: BBBCoupledTrace) -> f64 { trace.kpuu_auc }
+pub fn bbb_endpoint_auc_icf_u(trace: BBBCoupledTrace) -> f64 { trace.auc_icf_u }
+
+// ----------------------------------------------------------------------------
+// Parameter perturbation (index-keyed)
+// ----------------------------------------------------------------------------
+
+pub fn bbb_perturb_param(prm: BBBParams, idx: i32, delta: f64) -> BBBParams with Mut, Div, Panic {
+    var p = prm
+    if idx == 0 { p.ps_bbb     = p.ps_bbb     + delta }
+    if idx == 1 { p.ps_mem     = p.ps_mem     + delta }
+    if idx == 2 { p.kpuu_brain = p.kpuu_brain + delta }
+    if idx == 3 { p.kpuu_cell  = p.kpuu_cell  + delta }
+    if idx == 4 { p.fu_plasma  = p.fu_plasma  + delta }
+    if idx == 5 { p.fu_isf     = p.fu_isf     + delta }
+    if idx == 6 { p.fu_icf     = p.fu_icf     + delta }
+    p
+}
+
+fn bbb_gum_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn bbb_gum_sqrt(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// Central-difference step size per GUM §5.1.3: h = max(rel * |mean|,
+// abs-floor × sqrt(variance)).  Matches the convention already used
+// by tac_fdiff_h in brain_plasma_tac.sio for consistency across
+// the dissertation's uncertainty harness.
+fn bbb_fdiff_h(mean: f64, variance: f64) -> f64 with Div, Panic, Mut {
+    let h_rel = 1.0e-3 * bbb_gum_abs(mean)
+    let h_abs = 0.01 * bbb_gum_sqrt(variance)
+    if h_rel > h_abs { h_rel } else { h_abs }
+}
+
+// ----------------------------------------------------------------------------
+// ISO uncertainty budget
+// ----------------------------------------------------------------------------
+
+// Parallel-array budget representation (Sounio-native; avoids nested
+// array-of-struct assignment limitations).  Row i holds the data for
+// input parameter param_idx[i].
+pub struct BBBGUMBudget {
+    n_rows:       i32,
+    param_idx:    [i32; 8],
+    mean:         [f64; 8],
+    variance:     [f64; 8],
+    confidence:   [f64; 8],
+    sensitivity:  [f64; 8],
+    var_contrib:  [f64; 8],
+    share:        [f64; 8],
+    y_mean:       f64,
+    y_variance:   f64,
+    y_stddev:     f64,
+    y_rel_stddev: f64,
+}
+
+fn bbb_gum_budget_zero() -> BBBGUMBudget {
+    BBBGUMBudget {
+        n_rows: 0,
+        param_idx: [0; 8],
+        mean: [0.0; 8], variance: [0.0; 8], confidence: [0.0; 8],
+        sensitivity: [0.0; 8], var_contrib: [0.0; 8], share: [0.0; 8],
+        y_mean: 0.0, y_variance: 0.0, y_stddev: 0.0, y_rel_stddev: 0.0,
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Budget builder (Kpuu_AUC endpoint)
+// ----------------------------------------------------------------------------
+// For each input parameter p_i with prior (mean_i, var_i):
+//   1. Pick step h_i = max(1e-3 |mean_i|, 0.01 sqrt(var_i))
+//   2. Forward run:  trace_+ = bbb_coupled_run(..., BBB_perturb(+h_i))
+//   3. Backward run: trace_- = bbb_coupled_run(..., BBB_perturb(-h_i))
+//   4. Sensitivity:  c_i = (Y(trace_+) - Y(trace_-)) / (2 h_i)
+//   5. var_contrib_i = c_i^2 * var_i
+//   6. Share_i      = var_contrib_i / sum_j var_contrib_j
+//
+// Y is selected by the `endpoint_selector` switch: 0 = Kpuu_AUC,
+// 1 = AUC_icf_u.
+
+fn bbb_gum_endpoint(trace: BBBCoupledTrace, selector: i32) -> f64 {
+    if selector == 0 { return trace.kpuu_auc }
+    if selector == 1 { return trace.auc_icf_u }
+    trace.kpuu_auc
+}
+
+pub fn bbb_gum_budget(
+    sys_prm: PBPKParams14,
+    bbb_prm: BBBParams,
+    priors:  BBBPriors,
+    dose_mg: f64,
+    checkpoints: [f64; 32],
+    n_points: i32,
+    bbb_dt: f64,
+    endpoint_selector: i32
+) -> BBBGUMBudget with Mut, Div, Panic {
+    var out = bbb_gum_budget_zero()
+    let n = priors.n
+    out.n_rows = n
+
+    // Reference run at the prior-mean parameter vector.
+    let ref_trace = bbb_coupled_run(sys_prm, bbb_prm, dose_mg, checkpoints, n_points, bbb_dt)
+    let y_mean = bbb_gum_endpoint(ref_trace, endpoint_selector)
+    out.y_mean = y_mean
+
+    var total_var: f64 = 0.0
+
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let mean_i = priors.mean[idx]
+        let var_i  = priors.variance[idx]
+        let conf_i = priors.confidence[idx]
+
+        out.param_idx[idx]  = i
+        out.mean[idx]       = mean_i
+        out.variance[idx]   = var_i
+        out.confidence[idx] = conf_i
+
+        let h = bbb_fdiff_h(mean_i, var_i)
+        if h <= 0.0 {
+            // Zero-variance parameter — sensitivity and contribution stay 0.
+            i = i + 1
+        } else {
+            let prm_plus  = bbb_perturb_param(bbb_prm, i,  h)
+            let prm_minus = bbb_perturb_param(bbb_prm, i, 0.0 - h)
+
+            let tr_plus  = bbb_coupled_run(sys_prm, prm_plus,  dose_mg, checkpoints, n_points, bbb_dt)
+            let tr_minus = bbb_coupled_run(sys_prm, prm_minus, dose_mg, checkpoints, n_points, bbb_dt)
+
+            let y_plus  = bbb_gum_endpoint(tr_plus,  endpoint_selector)
+            let y_minus = bbb_gum_endpoint(tr_minus, endpoint_selector)
+
+            let sensitivity = (y_plus - y_minus) / (2.0 * h)
+            let contrib     = sensitivity * sensitivity * var_i
+
+            out.sensitivity[idx] = sensitivity
+            out.var_contrib[idx] = contrib
+            total_var = total_var + contrib
+            i = i + 1
+        }
+    }
+
+    out.y_variance = total_var
+    out.y_stddev   = bbb_gum_sqrt(total_var)
+    out.y_rel_stddev = if bbb_gum_abs(y_mean) > 0.0 { out.y_stddev / bbb_gum_abs(y_mean) } else { 0.0 }
+
+    // Second pass: assign variance share to each row.
+    if total_var > 0.0 {
+        var k: i32 = 0
+        while k < n {
+            let kdx = k as usize
+            out.share[kdx] = out.var_contrib[kdx] / total_var
+            k = k + 1
+        }
+    }
+
+    out
+}
+
+// ----------------------------------------------------------------------------
+// ISO-format budget table export
+// ----------------------------------------------------------------------------
+
+fn bbb_gum_param_name(idx: i32) -> string {
+    if idx == 0 { return "ps_bbb" }
+    if idx == 1 { return "ps_mem" }
+    if idx == 2 { return "kpuu_brain" }
+    if idx == 3 { return "kpuu_cell" }
+    if idx == 4 { return "fu_plasma" }
+    if idx == 5 { return "fu_isf" }
+    if idx == 6 { return "fu_icf" }
+    "unknown"
+}
+
+pub fn bbb_gum_print_budget(budget: BBBGUMBudget, endpoint_label: string) with IO, Mut, Panic, Div {
+    println("ISO uncertainty budget (JCGM 100:2008 §5)")
+    print("Endpoint: ")
+    println(endpoint_label)
+    print("  y (mean)        = "); print_f64(budget.y_mean);       println("")
+    print("  u_c^2 (variance)= "); print_f64(budget.y_variance);   println("")
+    print("  u_c (stddev)    = "); print_f64(budget.y_stddev);     println("")
+    print("  u_c / |y|       = "); print_f64(budget.y_rel_stddev); println("")
+    println("")
+    println("param,mean,var_prior,confidence,sensitivity,var_contrib,share")
+    var i: i32 = 0
+    while i < budget.n_rows {
+        let idx = i as usize
+        print(bbb_gum_param_name(budget.param_idx[idx])); print(",")
+        print_f64(budget.mean[idx]);        print(",")
+        print_f64(budget.variance[idx]);    print(",")
+        print_f64(budget.confidence[idx]);  print(",")
+        print_f64(budget.sensitivity[idx]); print(",")
+        print_f64(budget.var_contrib[idx]); print(",")
+        print_f64(budget.share[idx])
+        println("")
+        i = i + 1
+    }
+}
