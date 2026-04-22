@@ -99,6 +99,49 @@ fn benjamini_hochberg(
 }
 
 // =============================================================================
+// Holm–Bonferroni (FWER step-down)
+// =============================================================================
+
+// Step-down Holm correction (Holm 1979). Controls family-wise error rate
+// strictly. For sorted p_(1) <= ... <= p_(n), adjusted p_(i) =
+// max_{k<=i} (n - k + 1) * p_(k), capped at 1.0. For n = 3 this matches
+// the primary-hypothesis test family in docs/papers/preregistrations/
+// 2026-04-21_ossm_168_depression_v3.md §8.
+pub fn holm_bonferroni(
+    p_values: [f64; 100],
+    n: i64,
+    adjusted: &![f64; 100]
+) with Mut, Div, Panic {
+    var indices: [i64; 100] = [0; 100]
+    sort_indices_by_pval(p_values, n, &!indices)
+
+    var temp: [f64; 100] = [0.0; 100]
+    var i: i64 = 0
+    while i < n {
+        let raw = p_values[indices[i as usize] as usize] * ((n - i) as f64)
+        let capped = if raw > 1.0 { 1.0 } else { raw }
+        temp[i as usize] = capped
+        i = i + 1
+    }
+
+    // Enforce monotonicity top-down (running max).
+    i = 1
+    while i < n {
+        if temp[(i - 1) as usize] > temp[i as usize] {
+            temp[i as usize] = temp[(i - 1) as usize]
+        }
+        i = i + 1
+    }
+
+    // Map back to original order.
+    i = 0
+    while i < n {
+        adjusted[indices[i as usize] as usize] = temp[i as usize]
+        i = i + 1
+    }
+}
+
+// =============================================================================
 // Significance counting
 // =============================================================================
 
@@ -151,4 +194,42 @@ fn test_bh() -> bool with Mut, Div, Panic {
     // All adjusted p-values should be <= 1.0
     let ok2 = adj[3] <= 1.0
     ok1 && ok2
+}
+
+fn test_holm() -> bool with Mut, Div, Panic {
+    // Textbook example: p = {0.01, 0.04, 0.03, 0.20}.
+    // Sorted: 0.01, 0.03, 0.04, 0.20 with multipliers 4, 3, 2, 1
+    // → raw 0.04, 0.09, 0.08, 0.20. Running max → 0.04, 0.09, 0.09, 0.20.
+    var pvals: [f64; 100] = [0.0; 100]
+    pvals[0] = 0.01
+    pvals[1] = 0.04
+    pvals[2] = 0.03
+    pvals[3] = 0.20
+
+    var adj: [f64; 100] = [0.0; 100]
+    holm_bonferroni(pvals, 4, &!adj)
+
+    let ok1 = mt_abs(adj[0] - 0.04) < 1.0e-9   // smallest p
+    let ok2 = mt_abs(adj[2] - 0.09) < 1.0e-9   // p=0.03
+    let ok3 = mt_abs(adj[1] - 0.09) < 1.0e-9   // p=0.04 capped up by monotonicity
+    let ok4 = mt_abs(adj[3] - 0.20) < 1.0e-9   // largest
+    ok1 && ok2 && ok3 && ok4
+}
+
+fn test_holm_family_of_three() -> bool with Mut, Div, Panic {
+    // Prereg v3 §8: FWER alpha = 0.05/3 over H1, H2, H3.
+    // With p = {0.005, 0.04, 0.30}, sorted multipliers 3, 2, 1:
+    // → 0.015, 0.08, 0.30 → running max → 0.015, 0.08, 0.30.
+    var pvals: [f64; 100] = [0.0; 100]
+    pvals[0] = 0.005  // H1
+    pvals[1] = 0.040  // H2
+    pvals[2] = 0.300  // H3
+
+    var adj: [f64; 100] = [0.0; 100]
+    holm_bonferroni(pvals, 3, &!adj)
+
+    let ok1 = adj[0] < 0.05           // H1 survives Holm at alpha=0.05
+    let ok2 = adj[1] > 0.05            // H2 fails
+    let ok3 = mt_abs(adj[2] - 0.30) < 1.0e-9
+    ok1 && ok2 && ok3
 }
