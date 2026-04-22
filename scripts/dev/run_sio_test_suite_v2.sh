@@ -34,7 +34,8 @@ cd "$ROOT_DIR"
 
 # Harness-local override
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
-    export SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+    export SOUNIO_SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+    unset SOUC_BIN
 fi
 if [[ -n "${SOUNIO_TEST_NATIVE_BIN:-}" ]]; then
     export SOUC_NATIVE_BIN="$SOUNIO_TEST_NATIVE_BIN"
