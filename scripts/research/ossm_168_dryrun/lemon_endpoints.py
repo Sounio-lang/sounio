@@ -9,6 +9,15 @@ Endpoint choices (given LEMON instrument availability):
   H2 anhedonia   -> BAS_Drive reversed (primary), BAS_Reward reversed (secondary)
   H3 valence/dep -> Hamilton_Scale (primary), BSL23_sumscore (secondary)
 
+BSL-23 coverage note:
+  The only canonical source for BSL23_sumscore in LEMON is the META file
+  (verified against the GWDG mirror: no BSL file exists in
+  Behavioural_Data_MPILMBB_LEMON/Emotion_and_Personality_Test_Battery_LEMON
+  or any sibling directory). LEMON administered BSL-23 selectively:
+  169/227 META rows (74.4%), or 165/220 when intersected with
+  subjects_all.txt. The H3s_F3_vs_BSL23 secondary is therefore
+  preregistered as "planned missing" and runs on the available subset.
+
 Run:
     python3 lemon_endpoints.py \
         --meta  /workspace/data/lemon/meta/META_File_IDs_Age_Gender_Education_Drug_Smoke_SKID_LEMON.csv \

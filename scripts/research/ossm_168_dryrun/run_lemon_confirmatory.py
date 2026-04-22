@@ -70,12 +70,31 @@ HYPOTHESES = [
 ]
 
 # Secondary hypotheses (reported alongside but not Holm-adjusted with the primary set)
+# H3s_F3_vs_BSL23 is preregistered as "planned missing": LEMON administered
+# BSL-23 (Bohus 2009 Borderline Symptom List) to ~74% of the cohort
+# (165/220 of subjects_all.txt), so this secondary runs on the available subset.
 SECONDARY = [
     ("H1s_F1_vs_NEO_N",          "F1",  "neo_neuroticism", +1),
     ("H2s_F2_vs_BAS_Reward",     "F2",  "bas_reward",      -1),
     ("H3s_F3_vs_NEO_N",          "F3",  "neo_neuroticism", +1),
     ("H3s_F3_vs_STAI_trait",     "F3",  "stai_trait",      +1),
+    ("H3s_F3_vs_BSL23",          "F3",  "bsl23",           +1),
 ]
+
+# Endpoints where <100% coverage is expected by LEMON study design;
+# coverage below the per-endpoint floor triggers a WARN, otherwise an INFO line.
+ENDPOINT_COVERAGE_FLOOR = {
+    "bsl23": 0.70,      # planned missing, ~74% upstream
+    "hamilton": 0.90,
+    "cerq_rumination": 0.90,
+    "bas_drive": 0.90,
+    "bas_reward": 0.90,
+    "bas_fun": 0.90,
+    "bis": 0.90,
+    "neo_neuroticism": 0.90,
+    "stai_trait": 0.90,
+    "tas_total": 0.90,
+}
 
 
 @dataclass
@@ -360,6 +379,7 @@ def main() -> None:
 
     merged, merged_path = _merge_with_endpoints(feat_rows, endpoints, args.out_dir)
     print(f"[harness] merged {len(merged)} subjects -> {merged_path}", flush=True)
+    _log_endpoint_coverage(merged)
 
     results = _run_hypothesis_tests(merged)
     results_path = args.out_dir / "results.json"
@@ -423,6 +443,37 @@ def _tests_for_set(merged: list[dict], hyp_table: list[tuple]) -> list[dict]:
     return out
 
 
+def _endpoint_coverage(merged: list[dict]) -> dict[str, dict]:
+    keys = ("hamilton", "bsl23", "cerq_rumination", "neo_neuroticism",
+            "bas_drive", "bas_fun", "bas_reward", "bis",
+            "stai_trait", "tas_total")
+    n = len(merged)
+    out: dict[str, dict] = {}
+    for k in keys:
+        vals = [r.get(k) for r in merged]
+        nn = sum(1 for v in vals if v is not None and np.isfinite(float(v)))
+        floor = ENDPOINT_COVERAGE_FLOOR.get(k, 0.90)
+        out[k] = {
+            "n_nonnull": int(nn), "n_total": int(n),
+            "coverage": (nn / n) if n else 0.0,
+            "floor": float(floor),
+            "below_floor": bool(n and (nn / n) < floor),
+        }
+    return out
+
+
+def _log_endpoint_coverage(merged: list[dict]) -> None:
+    cov = _endpoint_coverage(merged)
+    for k, rec in cov.items():
+        tag = "WARN" if rec["below_floor"] else "info"
+        print(
+            f"[harness] {tag} endpoint coverage {k:>20s}: "
+            f"{rec['n_nonnull']}/{rec['n_total']} "
+            f"({100 * rec['coverage']:.1f}%, floor={100 * rec['floor']:.0f}%)",
+            flush=True,
+        )
+
+
 def _run_hypothesis_tests(merged: list[dict]) -> dict:
     primary = _tests_for_set(merged, HYPOTHESES)
     secondary = _tests_for_set(merged, SECONDARY)
@@ -433,6 +484,7 @@ def _run_hypothesis_tests(merged: list[dict]) -> dict:
     return {
         "n_subjects_merged": len(merged),
         "n_bootstrap": BOOTSTRAP_N, "bca_ci": BCA_CI,
+        "endpoint_coverage": _endpoint_coverage(merged),
         "primary": primary, "secondary": secondary,
     }
 
