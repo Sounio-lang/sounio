@@ -37,8 +37,12 @@ let MACHO_LC_SYMTAB: i64 = 2                  // LC_SYMTAB
 let MACHO_LC_DYSYMTAB: i64 = 11               // LC_DYSYMTAB (0x0B)
 let MACHO_LC_LOAD_DYLINKER: i64 = 14          // LC_LOAD_DYLINKER (0x0E)
 let MACHO_LC_UUID: i64 = 27                   // LC_UUID (0x1B)
+let MACHO_LC_BUILD_VERSION: i64 = 50          // LC_BUILD_VERSION (0x32)
 let MACHO_LC_MAIN: i64 = 2147483688           // LC_MAIN (0x80000028)
 let MACHO_LC_LOAD_DYLIB: i64 = 12             // LC_LOAD_DYLIB (0x0C)
+
+// Platform identifiers for LC_BUILD_VERSION
+let MACHO_PLATFORM_MACOS: i64 = 1
 
 // Segment protection flags
 let MACHO_VM_PROT_NONE: i64 = 0
@@ -91,6 +95,9 @@ let MACHO_NLIST_SIZE: i64 = 16                // nlist_64 size
 let MACHO_RELOC_SIZE: i64 = 8                 // relocation_info size
 let MACHO_SYMTAB_CMD_SIZE: i64 = 24           // symtab_command size
 let MACHO_DYSYMTAB_CMD_SIZE: i64 = 80         // dysymtab_command size
+let MACHO_LOAD_DYLINKER_CMD_SIZE: i64 = 32    // dylinker_command + "/usr/lib/dyld\0"
+let MACHO_UUID_CMD_SIZE: i64 = 24             // uuid_command size
+let MACHO_BUILD_VERSION_CMD_SIZE: i64 = 24    // build_version_command size with ntools=0
 let MACHO_MAIN_CMD_SIZE: i64 = 24             // entry_point_command size
 
 // Segment name encodings (packed i64 identifiers)
@@ -282,7 +289,7 @@ fn macho_writer_new() -> MachoWriter {
         cputype: MACHO_CPU_X86_64,
         cpusubtype: MACHO_CPU_SUBTYPE_X86_64_ALL,
         filetype: MACHO_FILETYPE_EXECUTE,
-        flags: MACHO_FLAG_NOUNDEFS + MACHO_FLAG_PIE,
+        flags: MACHO_FLAG_NOUNDEFS + MACHO_FLAG_DYLDLINK + MACHO_FLAG_TWOLEVEL,
         text_vmaddr: 0,
         data_vmaddr: 0,
         linkedit_vmaddr: 0,
@@ -312,6 +319,14 @@ fn macho_low8(x: i64) -> i64 with Mut, Panic, Div {
     var n = x % 256
     if n < 0 { n = n + 256 }
     n
+}
+
+fn macho_pack_version(major: i64, minor: i64, patch: i64) -> i64 {
+    (major << 16) + (minor << 8) + patch
+}
+
+fn macho_page_size_for_cpu(cputype: i64) -> i64 {
+    if cputype == MACHO_CPU_ARM64 { 16384 } else { MACHO_PAGE_SIZE }
 }
 
 fn macho_emit_byte(w: MachoWriter, b: i64) -> MachoWriter with Mut, Panic, Div {
@@ -1121,6 +1136,64 @@ fn macho_emit_main_cmd(w: MachoWriter, entry_offset: i64, stack_size: i64) -> Ma
     out
 }
 
+fn macho_emit_load_dylinker_cmd(w: MachoWriter) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, MACHO_LC_LOAD_DYLINKER)
+    out = macho_emit_u32(out, MACHO_LOAD_DYLINKER_CMD_SIZE)
+    out = macho_emit_u32(out, 12)   // path string begins immediately after lc_str
+
+    // "/usr/lib/dyld\0"
+    out = macho_emit_byte(out, 47)   // /
+    out = macho_emit_byte(out, 117)  // u
+    out = macho_emit_byte(out, 115)  // s
+    out = macho_emit_byte(out, 114)  // r
+    out = macho_emit_byte(out, 47)   // /
+    out = macho_emit_byte(out, 108)  // l
+    out = macho_emit_byte(out, 105)  // i
+    out = macho_emit_byte(out, 98)   // b
+    out = macho_emit_byte(out, 47)   // /
+    out = macho_emit_byte(out, 100)  // d
+    out = macho_emit_byte(out, 121)  // y
+    out = macho_emit_byte(out, 108)  // l
+    out = macho_emit_byte(out, 100)  // d
+    out = macho_emit_byte(out, 0)
+    out = macho_emit_zeros(out, MACHO_LOAD_DYLINKER_CMD_SIZE - 12 - 14)
+    out
+}
+
+fn macho_emit_uuid_cmd(w: MachoWriter, code_len: i64, const_len: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, MACHO_LC_UUID)
+    out = macho_emit_u32(out, MACHO_UUID_CMD_SIZE)
+
+    // Deterministic UUID-like payload derived from this image shape.
+    out = macho_emit_byte(out, 83)  // S
+    out = macho_emit_byte(out, 79)  // O
+    out = macho_emit_byte(out, 85)  // U
+    out = macho_emit_byte(out, 78)  // N
+    out = macho_emit_byte(out, 73)  // I
+    out = macho_emit_byte(out, 79)  // O
+    out = macho_emit_byte(out, w.cputype & 255)
+    out = macho_emit_byte(out, w.filetype & 255)
+    out = macho_emit_u32(out, code_len)
+    out = macho_emit_byte(out, w.section_count & 255)
+    out = macho_emit_byte(out, w.symbol_count & 255)
+    out = macho_emit_byte(out, w.reloc_count & 255)
+    out = macho_emit_byte(out, const_len & 255)
+    out
+}
+
+fn macho_emit_build_version_cmd(w: MachoWriter, platform: i64, minos: i64, sdk: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, MACHO_LC_BUILD_VERSION)
+    out = macho_emit_u32(out, MACHO_BUILD_VERSION_CMD_SIZE)
+    out = macho_emit_u32(out, platform)
+    out = macho_emit_u32(out, minos)
+    out = macho_emit_u32(out, sdk)
+    out = macho_emit_u32(out, 0)  // ntools
+    out
+}
+
 // ============================================================================
 // Symbol table entry (nlist_64) emission
 // ============================================================================
@@ -1210,7 +1283,8 @@ fn macho_segment_section_vmsize(w: MachoWriter, segname: i64) -> i64 with Mut, P
 
 // Compute the size of all load commands for a standard executable layout:
 //   __PAGEZERO segment + __TEXT segment (with sections) + __DATA segment (with sections)
-//   + __LINKEDIT segment + LC_SYMTAB + LC_DYSYMTAB + LC_MAIN
+//   + __LINKEDIT segment + LC_LOAD_DYLINKER + LC_UUID + LC_BUILD_VERSION
+//   + LC_SYMTAB + LC_DYSYMTAB + LC_MAIN
 fn macho_compute_load_cmds_size(w: MachoWriter) -> i64 with Mut, Panic, Div {
     let text_nsects = macho_count_segment_sections(w, MACHO_SEG_TEXT)
     let data_nsects = macho_count_segment_sections(w, MACHO_SEG_DATA)
@@ -1230,8 +1304,10 @@ fn macho_compute_load_cmds_size(w: MachoWriter) -> i64 with Mut, Panic, Div {
     // __LINKEDIT: segment only
     let linkedit_size = MACHO_SEGMENT_CMD_SIZE
 
-    // LC_SYMTAB + LC_DYSYMTAB + LC_MAIN
-    let misc_cmds = MACHO_SYMTAB_CMD_SIZE + MACHO_DYSYMTAB_CMD_SIZE + MACHO_MAIN_CMD_SIZE
+    // LC_LOAD_DYLINKER + LC_UUID + LC_BUILD_VERSION + LC_SYMTAB + LC_DYSYMTAB + LC_MAIN
+    let misc_cmds = MACHO_LOAD_DYLINKER_CMD_SIZE + MACHO_UUID_CMD_SIZE
+                  + MACHO_BUILD_VERSION_CMD_SIZE + MACHO_SYMTAB_CMD_SIZE
+                  + MACHO_DYSYMTAB_CMD_SIZE + MACHO_MAIN_CMD_SIZE
 
     pagezero_size + text_cmd_size + data_cmd_size + linkedit_size + misc_cmds
 }
@@ -1240,8 +1316,9 @@ fn macho_compute_load_cmds_size(w: MachoWriter) -> i64 with Mut, Panic, Div {
 fn macho_count_load_cmds(w: MachoWriter) -> i64 with Mut, Panic, Div {
     let data_nsects = macho_count_segment_sections(w, MACHO_SEG_DATA)
 
-    // __PAGEZERO + __TEXT + __LINKEDIT + LC_SYMTAB + LC_DYSYMTAB + LC_MAIN = 6
-    var count = 6
+    // __PAGEZERO + __TEXT + __LINKEDIT + LC_LOAD_DYLINKER + LC_UUID + LC_BUILD_VERSION
+    // + LC_SYMTAB + LC_DYSYMTAB + LC_MAIN = 9
+    var count = 9
     // __DATA segment only if there are data sections
     if data_nsects > 0 {
         count = count + 1
@@ -1398,6 +1475,7 @@ fn macho_assemble_executable(
     entry_off: i64
 ) -> MachoWriter with Mut, Panic, Div {
     var out = w
+    let page_size = macho_page_size_for_cpu(out.cputype)
 
     // -- Compute layout --
     let text_nsects = macho_count_segment_sections(out, MACHO_SEG_TEXT)
@@ -1408,15 +1486,15 @@ fn macho_assemble_executable(
     let base_vmaddr: i64 = 4294967296     // 0x100000000
 
     // Text segment starts at file offset 0, extends to page boundary after code+const
-    let text_content_offset = MACHO_PAGE_SIZE
+    let text_content_offset = page_size
     let const_content_offset = macho_align_to(text_content_offset + code_len, 8)
-    let text_seg_filesize = macho_page_align(const_content_offset + const_len)
+    let text_seg_filesize = macho_align_to(const_content_offset + const_len, page_size)
 
     // Data segment offset (page-aligned after text)
     let data_seg_fileoff = text_seg_filesize
     var data_seg_filesize = 0
     if data_nsects > 0 {
-        data_seg_filesize = macho_page_align(macho_segment_section_filesize(out, MACHO_SEG_DATA))
+        data_seg_filesize = macho_align_to(macho_segment_section_filesize(out, MACHO_SEG_DATA), page_size)
     }
 
     // Linkedit offset
@@ -1427,15 +1505,15 @@ fn macho_assemble_executable(
     let strtab_offset = symtab_offset + symtab_size
     let strtab_size = out.strtab.len
     let linkedit_size = reloc_total_size + symtab_size + strtab_size
-    let linkedit_filesize = macho_page_align(linkedit_size)
+    let linkedit_filesize = macho_align_to(linkedit_size, page_size)
 
     // Virtual addresses
     let text_vmaddr = base_vmaddr
-    let text_vmsize = macho_page_align(text_seg_filesize)
+    let text_vmsize = macho_align_to(text_seg_filesize, page_size)
     let data_vmaddr = text_vmaddr + text_vmsize
-    let data_vmsize = macho_page_align(macho_segment_section_vmsize(out, MACHO_SEG_DATA))
+    let data_vmsize = macho_align_to(macho_segment_section_vmsize(out, MACHO_SEG_DATA), page_size)
     let linkedit_vmaddr = data_vmaddr + data_vmsize
-    let linkedit_vmsize = macho_page_align(linkedit_size)
+    let linkedit_vmsize = macho_align_to(linkedit_size, page_size)
 
     // -- Emit Mach-O header --
     let hdr = macho_header_new(
@@ -1491,10 +1569,20 @@ fn macho_assemble_executable(
         linkedit_vmaddr, linkedit_vmsize, linkedit_fileoff, linkedit_filesize
     ))
 
-    // 5. LC_SYMTAB
+    // 5. LC_LOAD_DYLINKER
+    out = macho_emit_load_dylinker_cmd(out)
+
+    // 6. LC_UUID
+    out = macho_emit_uuid_cmd(out, code_len, const_len)
+
+    // 7. LC_BUILD_VERSION
+    let macos_11 = macho_pack_version(11, 0, 0)
+    out = macho_emit_build_version_cmd(out, MACHO_PLATFORM_MACOS, macos_11, macos_11)
+
+    // 8. LC_SYMTAB
     out = macho_emit_symtab_cmd(out, symtab_offset, out.symbol_count, strtab_offset, strtab_size)
 
-    // 6. LC_DYSYMTAB
+    // 9. LC_DYSYMTAB
     // Count local, extern, undef symbols
     var nlocal = 0
     var nextern = 0
@@ -1520,7 +1608,7 @@ fn macho_assemble_executable(
         0, 0
     )
 
-    // 7. LC_MAIN
+    // 10. LC_MAIN
     out = macho_emit_main_cmd(out, entry_off, 0)
 
     // -- Pad to text content offset --
@@ -2322,15 +2410,15 @@ fn test_macho_compute_layout() -> i64 with Mut, Panic, Div {
 // T42: Verify load command count calculation
 fn test_macho_load_cmd_count() -> i64 with Mut, Panic, Div {
     var w = macho_writer_new()
-    // No data sections => 6 commands
+    // No data sections => 9 commands
     w = macho_add_section(w, macho_make_text_section(0, 100, 0))
     let count1 = macho_count_load_cmds(w)
-    if count1 != 6 { return 1 }
+    if count1 != 9 { return 1 }
 
-    // Add data section => 7 commands
+    // Add data section => 10 commands
     w = macho_add_section(w, macho_make_data_section(0, 50, 0))
     let count2 = macho_count_load_cmds(w)
-    if count2 != 7 { return 2 }
+    if count2 != 10 { return 2 }
     0
 }
 
@@ -2344,11 +2432,14 @@ fn test_macho_load_cmds_size() -> i64 with Mut, Panic, Div {
     // __TEXT: 72 + 1*80 = 152
     // __DATA: 0 (no data sections)
     // __LINKEDIT: 72
+    // LC_LOAD_DYLINKER: 32
+    // LC_UUID: 24
+    // LC_BUILD_VERSION: 24
     // LC_SYMTAB: 24
     // LC_DYSYMTAB: 80
     // LC_MAIN: 24
-    // Total: 72 + 152 + 72 + 24 + 80 + 24 = 424
-    if size != 424 { return 1 }
+    // Total: 72 + 152 + 72 + 32 + 24 + 24 + 24 + 80 + 24 = 504
+    if size != 504 { return 1 }
     0
 }
 
@@ -2402,6 +2493,7 @@ fn test_macho_writer_defaults() -> i64 with Mut, Panic, Div {
     if w.cputype != MACHO_CPU_X86_64 { return 5 }
     if w.filetype != MACHO_FILETYPE_EXECUTE { return 6 }
     if w.strtab.len != 0 { return 7 }
+    if w.flags != MACHO_FLAG_NOUNDEFS + MACHO_FLAG_DYLDLINK + MACHO_FLAG_TWOLEVEL { return 8 }
     0
 }
 
