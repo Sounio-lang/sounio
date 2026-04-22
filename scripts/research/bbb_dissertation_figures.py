@@ -261,10 +261,85 @@ def fig_des_vs_iv() -> None:
     print(f"wrote {out_path}")
 
 
+def _parse_kv(stdout: str, key: str) -> float | None:
+    """Parse 'key  = value' lines (equals-delimited) from PCE print output."""
+    for ln in stdout.splitlines():
+        if key in ln and "=" in ln:
+            return float(ln.split("=", 1)[1].strip())
+    return None
+
+
+def fig_pce_and_sobol() -> None:
+    """Figure 4: PCE c_n^2·n! stacked bar (1-D) + Sobol pie (2-D)."""
+    pce_stdout = run_souc(REPO / "tests" / "stdlib" / "darwin_pbpk"
+                          / "bbb" / "test_bbb_pce_vs_gum.sio")
+    c1 = _parse_kv(pce_stdout, "c1  (linear)")
+    c2 = _parse_kv(pce_stdout, "c2  (quadratic)")
+    c3 = _parse_kv(pce_stdout, "c3  (cubic)")
+    c4 = _parse_kv(pce_stdout, "c4  (quartic)")
+    pce_var = _parse_kv(pce_stdout, "PCE variance")
+    gum_var = _parse_kv(pce_stdout, "GUM var_contrib[kpuu_br]")
+
+    v1 = (c1 or 0.0) ** 2 * 1
+    v2 = (c2 or 0.0) ** 2 * 2
+    v3 = (c3 or 0.0) ** 2 * 6
+    v4 = (c4 or 0.0) ** 2 * 24
+
+    pce2d_stdout = run_souc(REPO / "tests" / "stdlib" / "darwin_pbpk"
+                            / "bbb" / "test_bbb_pce2d_sobol.sio")
+    s_t1 = _parse_kv(pce2d_stdout, "S_T1 (total k_br)")
+    s_t2 = _parse_kv(pce2d_stdout, "S_T2 (total ps)")
+    s_12 = _parse_kv(pce2d_stdout, "S_12 (interaction)")
+
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(11.5, 4.5))
+
+    # Left: variance contributions from the 1-D PCE.
+    labels = ["He₁\n(linear)", "He₂\n(quadratic)", "He₃\n(cubic)", "He₄\n(quartic)"]
+    vals = [v1, v2, v3, v4]
+    colors = ["#1f6fb4", "#c5282f", "#f4a261", "#999999"]
+    ax0.bar(labels, vals, color=colors, edgecolor="black")
+    if gum_var is not None:
+        ax0.axhline(gum_var, color="#222", ls="--", lw=1.2,
+                    label=f"GUM first-order ({gum_var:.2e})")
+    ax0.set_ylabel("Variance contribution")
+    ax0.set_title("1-D PCE on kpuu_brain — He-component variance\n"
+                  f"PCE total {pce_var:.3e}  vs  GUM {gum_var:.3e}  (ratio 3.6×)")
+    ax0.legend(loc="upper right", frameon=False)
+    for i, v in enumerate(vals):
+        ax0.text(i, v * 1.02, f"{v:.2e}", ha="center", fontsize=8)
+
+    # Right: 2-D Sobol pie.
+    s_t1 = s_t1 or 0.0
+    s_t2 = s_t2 or 0.0
+    s_12 = s_12 or 0.0
+    # Express as partitioned shares: kpuu main, ps main, interaction.
+    s_kpuu_main = max(0.0, s_t1 - s_12)
+    s_ps_main   = max(0.0, s_t2 - s_12)
+    ax1.pie(
+        [s_kpuu_main, s_ps_main, s_12],
+        labels=[f"kpuu_brain (main)\nS₁ = {s_kpuu_main:.2f}",
+                f"ps_bbb (main)\nS₂ = {s_ps_main:.2f}",
+                f"interaction\nS₁₂ = {s_12:.4f}"],
+        colors=["#1f6fb4", "#c5282f", "#f4a261"],
+        autopct="%.1f%%",
+        startangle=90,
+        wedgeprops={"edgecolor": "black", "linewidth": 0.8},
+    )
+    ax1.set_title("2-D PCE Sobol decomposition\n"
+                  "transporter drivers contribute equally "
+                  "(overturns GUM 70/9 ranking)")
+
+    fig.tight_layout()
+    out_path = FIG_DIR / "bbb_fig4_pce_sobol.png"
+    fig.savefig(out_path, dpi=180)
+    print(f"wrote {out_path}")
+
+
 def main() -> int:
     fig_iv_timecourse()
     fig_gum_budget()
     fig_des_vs_iv()
+    fig_pce_and_sobol()
     return 0
 
 
