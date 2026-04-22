@@ -26,7 +26,7 @@ Zero sorry.  No Mathlib.  No new axioms beyond `Dual2Field`.
 
 namespace Sounio.GradientTopologyBridge
 
-open Sounio.GradientTopology (ChSet UsedParams2 usedUnion usedUnion_subset_union)
+open Sounio.GradientTopology
 open Sounio.HessianAD
 
 -- ===========================================================================
@@ -471,7 +471,367 @@ theorem canary_bridge_exact :
     exact hfp ⟨1, by decide⟩ (by decide)
 
 -- ===========================================================================
--- §12. Summary
+-- §12. Cross-world correspondence (Stage 1: reification interface)
+-- ===========================================================================
+
+/-!
+This section bridges the two typing worlds formalised across
+`GradientTopology.lean` and this file:
+
+  * GT world: `Expr` / `Typing Γ e S` / `Eval F ρ e v` with scalar
+    `RuntimeVal { value : Float; footprint : ChSet }` and a relational
+    `FnTable`.  Soundness theorem: `gtt_sound` / `gtt_sound_body`.
+  * B  world: `BExpr α` / `BTyping env e S` / `evalB env e` with
+    second-order `Dual2 α` and functional callees.  Soundness theorem:
+    `bridge` (this file, §10).
+
+The two worlds speak about the same declared channel set `S : ChSet` but
+track different runtime values.  §12 gives the reification interface —
+`ExprWellFormed`, `Compat`, `lower` — that connects them.  §13 proves
+lowering preserves (tightens) typing; §14 composes that with `bridge` to
+get the cross-world soundness theorem `gtt_corresponds`.
+
+Design:
+
+  * Abstract ground algebra `α` with `[Dual2Field α]` — the cross-world
+    theorem is polymorphic, instantiable at Nat (canary), Float (runtime
+    with noncomputable decidable zero), or any other Dual2Field instance.
+  * `Compat α` bundles the two environments plus the compatibility
+    witnesses linking the GT `TyEnv` / `FnTable` to the B `BEnv` /
+    call-lifter.
+  * `Expr.value k` on the GT side emits a channel-`k` singleton; the B
+    side encodes channels as `Fin 8` slots.  The reification requires
+    `k < 8` (compiler only emits k ∈ {0..7}, there are only 8 shadow
+    channels).  `ExprWellFormed` captures this.
+-/
+
+/-- Well-formedness predicate for expressions.  The only non-trivial
+    constraint: `Expr.value k` requires `k < 8`, because the B side
+    encodes channels as `Fin 8` slots and the compiler only emits
+    shadow channels in that range. -/
+def ExprWellFormed : Expr → Prop
+  | .lit _          => True
+  | .var _          => True
+  | .value k        => k < 8
+  | .add e1 e2      => ExprWellFormed e1 ∧ ExprWellFormed e2
+  | .mul e1 e2      => ExprWellFormed e1 ∧ ExprWellFormed e2
+  | .call2 _ e1 e2  => ExprWellFormed e1 ∧ ExprWellFormed e2
+
+/-- Cross-world compatibility bundle.
+
+    Links the two typing environments (GT `TyEnv`, B `BEnv`) and provides
+    the B-side functional callee together with the body-precision
+    summary.  The compatibility hypotheses below discipline the maps so
+    the lowering preserves channel-set typing. -/
+structure Compat (α : Type) [Dual2Field α] where
+  /-- GT side: variable-to-channel-set assignment. -/
+  Γ         : TyEnv
+  /-- B side: environment mapping each Fin 8 slot to its Dual2 denotation
+      and declared channel set. -/
+  env       : BEnv α
+  /-- Lift Expr literals (`Float`) into the B ground algebra. -/
+  liftLit   : Float → α
+  /-- Each GT variable `x : VarId (= Nat)` maps to a B slot `Fin 8`. -/
+  varSlot   : VarId → Fin 8
+  /-- Each channel index (from `Expr.value k`) maps to a B slot.  Only
+      constrained for `k < 8` via `chanComp`. -/
+  chanSlot  : Nat → Fin 8
+  /-- GT function id `f` → body-precision summary (mirrors `FN_USED_PARAMS`
+      on the compiler side).  Matches the `UP` parameter of
+      `gtt_sound_body`. -/
+  UP        : FnId → UsedParams2
+  /-- GT function id `f` → B-side functional callee.  The B side is
+      functional (deterministic), so the user provides one callee per
+      FnId; `cliftResp` below ensures each respects body-precision. -/
+  clift     : FnId → (Dual2 α → Dual2 α → Dual2 α)
+  /-- Variable compatibility: the B slot declared for `x` carries the
+      channel set `Γ x`. -/
+  varComp   : ∀ x : VarId, env.chset (varSlot x) = Γ x
+  /-- Channel compatibility: for valid channels (`k < 8`), the B slot
+      for channel `k` declares the singleton channel set `{k}`. -/
+  chanComp  : ∀ k : Nat, k < 8 → env.chset (chanSlot k) = ChSet.singleton k
+  /-- Callee-lifting respects body-precision: each `clift f` has B-side
+      footprint footprint contained in `usedUnion (UP f) _ _`.  This is the
+      B-side counterpart of `BodyRespectsUsedParams F UP` on the GT side. -/
+  cliftResp : ∀ f : FnId, CalleeRespects (UP f) (clift f)
+  /-- The B environment is well-typed: each slot's denotation has
+      footprint matching its declared channel set. -/
+  envWT     : EnvWT env
+
+/-- Reify a GT `Expr` into a B `BExpr α` using a `Compat` bundle.
+
+    * Literals: `Expr.lit c` → `BExpr.const (liftLit c)`.
+    * Variables: `Expr.var x` → `BExpr.var (varSlot x)`.
+    * Channel seeds: `Expr.value k` → `BExpr.var (chanSlot k)`.  (For
+      well-formed Expr, `k < 8`; otherwise the slot is arbitrary and
+      `lowering_types` requires `ExprWellFormed` to discharge the case.)
+    * Binary arithmetic: structural.
+    * User-function calls: `Expr.call2 f e1 e2` →
+      `BExpr.call2 (UP f) (clift f) (lower e1) (lower e2)`. -/
+def lower (C : Compat α) : Expr → BExpr α
+  | .lit c          => BExpr.const (C.liftLit c)
+  | .var x          => BExpr.var (C.varSlot x)
+  | .value k        => BExpr.var (C.chanSlot k)
+  | .add e1 e2      => BExpr.add (lower C e1) (lower C e2)
+  | .mul e1 e2      => BExpr.mul (lower C e1) (lower C e2)
+  | .call2 f e1 e2  => BExpr.call2 (C.UP f) (C.clift f) (lower C e1) (lower C e2)
+
+-- ===========================================================================
+-- §13. Cross-world correspondence (Stage 2: lowering preserves typing)
+-- ===========================================================================
+
+/-- **Lowering preserves (tightens) GT typing.**
+
+    Given a `Compat` bundle and a well-formed GT expression `e` with
+    `Typing C.Γ e S`, the reified B expression `lower C e` has
+    `BTyping C.env (lower C e) S'` for some `S' ⊆ S`.
+
+    The `S' = S` refinement holds for the non-call cases (tLit, tVar,
+    tValue, tAdd, tMul produce matching sets).  The `S' ⊊ S` case arises
+    only at `tCall2`: GT's week-3 rule gives `S1.union S2` while the B
+    side's body-precision rule gives `usedUnion (UP f) S1' S2'`, which
+    can be strictly smaller when `UP f` drops an unused parameter.  The
+    `∃ S'` shape accommodates this tightening — strictly better than
+    `=`, and exactly what composition with the existing `bridge` theorem
+    needs.
+
+    Proof: structural induction on the GT typing derivation.  Each case
+    picks a witness `S'` and discharges the subset obligation using the
+    imported `ChSet.union_mono` / `usedUnion_mono` /
+    `usedUnion_subset_union` from `GradientTopology`. -/
+theorem lowering_types (C : Compat α) (e : Expr) (S : ChSet)
+    (hT : Typing C.Γ e S) :
+    ExprWellFormed e →
+    ∃ S', BTyping C.env (lower C e) S' ∧ S'.subset S := by
+  induction hT with
+  | tLit c =>
+      intro _
+      refine ⟨ChSet.empty, ?_, ChSet.subset_refl _⟩
+      show BTyping C.env (BExpr.const (C.liftLit c)) ChSet.empty
+      exact BTyping.const _
+  | tVar x =>
+      intro _
+      refine ⟨C.Γ x, ?_, ChSet.subset_refl _⟩
+      show BTyping C.env (BExpr.var (C.varSlot x)) (C.Γ x)
+      rw [← C.varComp x]
+      exact BTyping.var _
+  | tValue k =>
+      intro hwf
+      simp only [ExprWellFormed] at hwf
+      refine ⟨ChSet.singleton k, ?_, ChSet.subset_refl _⟩
+      show BTyping C.env (BExpr.var (C.chanSlot k)) (ChSet.singleton k)
+      rw [← C.chanComp k hwf]
+      exact BTyping.var _
+  | tAdd e1 e2 S1 S2 _h1 _h2 ih1 ih2 =>
+      intro hwf
+      simp only [ExprWellFormed] at hwf
+      obtain ⟨hwf1, hwf2⟩ := hwf
+      obtain ⟨S1', hBT1, hsub1⟩ := ih1 hwf1
+      obtain ⟨S2', hBT2, hsub2⟩ := ih2 hwf2
+      refine ⟨S1'.union S2', ?_, ChSet.union_mono _ _ _ _ hsub1 hsub2⟩
+      show BTyping C.env (BExpr.add (lower C e1) (lower C e2)) (S1'.union S2')
+      exact BTyping.add _ _ _ _ hBT1 hBT2
+  | tMul e1 e2 S1 S2 _h1 _h2 ih1 ih2 =>
+      intro hwf
+      simp only [ExprWellFormed] at hwf
+      obtain ⟨hwf1, hwf2⟩ := hwf
+      obtain ⟨S1', hBT1, hsub1⟩ := ih1 hwf1
+      obtain ⟨S2', hBT2, hsub2⟩ := ih2 hwf2
+      refine ⟨S1'.union S2', ?_, ChSet.union_mono _ _ _ _ hsub1 hsub2⟩
+      show BTyping C.env (BExpr.mul (lower C e1) (lower C e2)) (S1'.union S2')
+      exact BTyping.mul _ _ _ _ hBT1 hBT2
+  | tCall2 f e1 e2 S1 S2 _h1 _h2 ih1 ih2 =>
+      intro hwf
+      simp only [ExprWellFormed] at hwf
+      obtain ⟨hwf1, hwf2⟩ := hwf
+      obtain ⟨S1', hBT1, hsub1⟩ := ih1 hwf1
+      obtain ⟨S2', hBT2, hsub2⟩ := ih2 hwf2
+      refine ⟨usedUnion (C.UP f) S1' S2', ?_, ?_⟩
+      · show BTyping C.env
+              (BExpr.call2 (C.UP f) (C.clift f) (lower C e1) (lower C e2))
+              (usedUnion (C.UP f) S1' S2')
+        exact BTyping.call2 (C.UP f) (C.clift f) _ _ _ _
+                (C.cliftResp f) hBT1 hBT2
+      · -- Chain: usedUnion (UP f) S1' S2' ⊆ usedUnion (UP f) S1 S2 ⊆ S1.union S2
+        exact ChSet.subset_trans _ _ _
+          (usedUnion_mono (C.UP f) S1' S2' S1 S2 hsub1 hsub2)
+          (usedUnion_subset_union (C.UP f) S1 S2)
+
+-- ===========================================================================
+-- §14. Cross-world soundness (Stage 3: gtt_corresponds)
+-- ===========================================================================
+
+/-- **Footprint is monotone in the set argument.**
+
+    If `S' ⊆ S` and `Footprint S' D`, then `Footprint S D`.  Intuitively:
+    a looser declared set only adds channels at which the value *may* be
+    nonzero; channels already declared absent in `S'` remain absent in
+    `S`.  Contrapositive reasoning: `j ∉ S ⟹ j ∉ S'` (by subset), so
+    `hfp`'s zero conclusion transports. -/
+theorem Footprint_mono (S' S : ChSet) (hsub : S'.subset S)
+    (D : Dual2 α) (hfp : Footprint S' D) : Footprint S D := by
+  refine ⟨?_, ?_⟩
+  · intro j hj
+    apply hfp.1 j
+    intro h
+    exact hj (hsub j.val h)
+  · intro j k hj
+    apply hfp.2 j k
+    intro h
+    exact hj (hsub j.val h)
+
+/-- **Cross-world soundness theorem** (β⁹ week-4+ coherence claim).
+
+    For every well-formed GT-typed expression `e` with `Typing C.Γ e S`,
+    the second-order AD evaluation `evalB C.env (lower C e)` has
+    footprint bounded by `S`:
+
+      * `j ∉ S ⟹ (evalB env (lower e)).grad j = 𝟎`
+      * `j ∉ S ⟹ ∀ k, (evalB env (lower e)).hess j k = 𝟎`
+
+    This is the formal counterpart of the compiler's claim
+    "`hessian_of(e, j, k) = 0` whenever `j ∉ GTT(e)`": the declared
+    channel set from the GT typing judgment soundly bounds the actual
+    first- and second-order derivative support of the Dual2-evaluated
+    expression.
+
+    Proof: compose `lowering_types` (GT → B typing) with the existing
+    inductive `bridge` theorem (B typing → Footprint) using
+    `Footprint_mono` to loosen the tighter B-side set back to the GT
+    declared set.  The existing `bridge` and its corollaries remain
+    intact — this theorem is *additive*, not a replacement. -/
+theorem gtt_corresponds (C : Compat α) (e : Expr) (S : ChSet)
+    (hwf : ExprWellFormed e) (hT : Typing C.Γ e S) :
+    Footprint S (evalB C.env (lower C e)) := by
+  obtain ⟨S', hBT, hsub⟩ := lowering_types C e S hT hwf
+  have fp_tight : Footprint S' (evalB C.env (lower C e)) :=
+    bridge C.env C.envWT (lower C e) S' hBT
+  exact Footprint_mono S' S hsub _ fp_tight
+
+/-- **Cross-world Hessian sparsity corollary.**  Channel `j ∉ S` on the
+    GT side implies the full `j`-row of the output Hessian is zero —
+    compiler-level: `EXPR_HSHADOW_jk = 0` for all `k` when `j` is
+    outside the GT-declared channel set of `e`. -/
+theorem gtt_hessian_sparsity (C : Compat α) (e : Expr) (S : ChSet)
+    (hwf : ExprWellFormed e) (hT : Typing C.Γ e S)
+    (j k : Fin 8) (hj : ¬ S j.val) :
+    (evalB C.env (lower C e)).hess j k = 𝟎 :=
+  (gtt_corresponds C e S hwf hT).2 j k hj
+
+/-- **Cross-world gradient sparsity corollary.**  Channel `j ∉ S` on the
+    GT side implies `EXPR_SSHADOW_j = 0`. -/
+theorem gtt_gradient_sparsity (C : Compat α) (e : Expr) (S : ChSet)
+    (hwf : ExprWellFormed e) (hT : Typing C.Γ e S)
+    (j : Fin 8) (hj : ¬ S j.val) :
+    (evalB C.env (lower C e)).grad j = 𝟎 :=
+  (gtt_corresponds C e S hwf hT).1 j hj
+
+-- ===========================================================================
+-- §14b. Cross-world canary — end-to-end witness at `α = Nat`
+-- ===========================================================================
+
+/-!
+`§14`'s `gtt_corresponds` has four compatibility fields beyond the base
+data (`varComp`, `chanComp`, `cliftResp`, `envWT`).  This section
+exhibits a concrete `Compat Nat` that discharges all four, plus a
+concrete GT expression + typing derivation, and then applies
+`gtt_corresponds` to derive a non-vacuous Footprint.
+
+The canary Expr is `add (value 0) (value 1)` — GT-typed at
+`singleton 0 ∪ singleton 1`, lowered to `add (var ⟨0,_⟩) (var ⟨1,_⟩)`
+under a full seed environment.  The derived Footprint checks that
+gradient slots 2-7 are zero and Hessian rows 2-7 are zero for the
+evaluated Dual2 value.
+-/
+
+/-- Full-seed environment on `Nat`: each `Fin 8` slot carries the
+    corresponding seed and the singleton channel set matching its
+    numeric identity.  This is the canonical `EnvWT` instance that
+    supports all 8 channels. -/
+def seedEnvNat : BEnv Nat where
+  denotation k := dual2Seed k 0
+  chset      k := ChSet.singleton k.val
+
+/-- The seed environment is well-typed: each slot's denotation footprint
+    matches its declared channel set. -/
+theorem seedEnvNat_wellTyped : EnvWT seedEnvNat :=
+  fun k => fp_seed k 0
+
+/-- Compatibility bundle instantiating `Compat Nat` against `seedEnvNat`.
+
+    * `Γ`, `varSlot` are consistent by construction (`varComp := rfl`).
+    * `chanSlot k = ⟨k, hk⟩` for `k < 8` yields `seedEnvNat.chset (chanSlot k)
+      = ChSet.singleton k` (chanComp).
+    * `UP = ⟨true, true⟩` + `clift = dual2Add` gives `CalleeRespects` via
+      `usedUnion_all_used` + `fp_add_union`.
+    * `envWT` = `seedEnvNat_wellTyped`.
+
+    Exhibiting this witness is the inhabitability guarantee for
+    `gtt_corresponds`: the cross-world theorem is not vacuously true. -/
+def seedCompatNat : Compat Nat where
+  Γ         := fun _ => ChSet.singleton 0
+  env       := seedEnvNat
+  liftLit   := fun _ => 0
+  varSlot   := fun _ => ⟨0, by decide⟩
+  chanSlot  := fun k => if h : k < 8 then ⟨k, h⟩ else ⟨0, by decide⟩
+  UP        := fun _ => ⟨true, true⟩
+  clift     := fun _ => dual2Add
+  varComp   := fun _ => rfl
+  chanComp  := fun k hk => by
+    show seedEnvNat.chset (if h : k < 8 then ⟨k, h⟩ else ⟨0, by decide⟩)
+         = ChSet.singleton k
+    simp [hk, seedEnvNat]
+  cliftResp := fun _ Sa Sb Da Db hA hB => by
+    show Footprint (usedUnion ⟨true, true⟩ Sa Sb) (dual2Add Da Db)
+    rw [usedUnion_all_used]
+    exact fp_add_union Sa Sb Da Db hA hB
+  envWT     := seedEnvNat_wellTyped
+
+/-- Canary GT expression: `add (value 0) (value 1)`.  Well-formed (both
+    `value` channels are in `{0..7}`) and types at
+    `(singleton 0).union (singleton 1)` under any `TyEnv`. -/
+def gtCanaryExpr : Expr := Expr.add (Expr.value 0) (Expr.value 1)
+
+/-- `gtCanaryExpr` is well-formed: both channel indices (0 and 1) are < 8. -/
+theorem gtCanaryExpr_wellFormed : ExprWellFormed gtCanaryExpr := by
+  -- Unfold both defs so the goal reduces to `(0 < 8) ∧ (1 < 8)`.
+  simp only [gtCanaryExpr, ExprWellFormed]
+  exact ⟨by decide, by decide⟩
+
+/-- `gtCanaryExpr` GT-types at `(ChSet.singleton 0).union (ChSet.singleton 1)`
+    under any typing environment.  Proof: `tAdd` over two `tValue`. -/
+theorem gtCanaryExpr_types (Γ : TyEnv) :
+    Typing Γ gtCanaryExpr ((ChSet.singleton 0).union (ChSet.singleton 1)) :=
+  Typing.tAdd (Expr.value 0) (Expr.value 1)
+    (ChSet.singleton 0) (ChSet.singleton 1)
+    (Typing.tValue 0) (Typing.tValue 1)
+
+/-- **End-to-end cross-world canary.**
+
+    `gtt_corresponds` applied to `gtCanaryExpr` under `seedCompatNat`
+    yields `Footprint ((singleton 0).union (singleton 1))
+    (evalB seedEnvNat (lower seedCompatNat gtCanaryExpr))`.  In
+    particular: every `Fin 8` slot with `j.val ∉ {0, 1}` has zero
+    gradient and zero Hessian row on the evaluated Dual2 value. -/
+theorem canary_gtt_corresponds :
+    Footprint ((ChSet.singleton 0).union (ChSet.singleton 1))
+      (evalB seedEnvNat (lower seedCompatNat gtCanaryExpr)) :=
+  gtt_corresponds seedCompatNat gtCanaryExpr _
+    gtCanaryExpr_wellFormed (gtCanaryExpr_types seedCompatNat.Γ)
+
+/-- Concrete corollary of the cross-world canary: slot `⟨2, _⟩` has
+    zero gradient on the evaluated Dual2 value — slot 2 is outside both
+    singleton channels, so the cross-world theorem rules out any
+    first-order contribution from that slot. -/
+theorem canary_gtt_slot2_gradient_zero :
+    (evalB seedEnvNat (lower seedCompatNat gtCanaryExpr)).grad ⟨2, by decide⟩
+      = (0 : Nat) := by
+  apply canary_gtt_corresponds.1 ⟨2, by decide⟩
+  -- ¬ ((ChSet.singleton 0).union (ChSet.singleton 1)) 2
+  decide
+
+-- ===========================================================================
+-- §15. Summary
 -- ===========================================================================
 
 /-!
@@ -479,9 +839,10 @@ theorem canary_bridge_exact :
 
 | Property                                               | Status  | Location                   |
 |--------------------------------------------------------|---------|----------------------------|
-| ChSet / usedUnion / usedUnion_subset_union             | proved  | §1, §2                     |
-| Dual2 arithmetic (const/seed/add/mul/unary)            | def     | §3                         |
-| GradFootprint / HessFootprint / Footprint              | def     | §4                         |
+| ChSet / usedUnion / usedUnion_subset_union (imported)  | proved  | GradientTopology §2        |
+| Dual2 arithmetic (const/seed/add/mul/unary, imported)  | def     | HessianAD §1-§4            |
+| GradFootprint / HessFootprint (imported)               | def     | HessianAD §9b              |
+| Footprint (grad ∧ hess conjunction)                    | def     | §4                         |
 | not_union_iff / not_usedUnion_{left,right}             | proved  | §4 helpers                 |
 | fp_const / fp_seed                                     | proved  | §5                         |
 | fp_same_add / fp_apply_unary  (same-set)               | proved  | §5                         |
@@ -498,6 +859,16 @@ theorem canary_bridge_exact :
 | canaryE_types (BTyping at usedUnion ⟨true,false⟩)      | proved  | §11b                       |
 | **gtt_hessian_bridge_tight** (tightness witness)       | proved  | §11b                       |
 | **canary_bridge_exact** (upper-bound × tightness)      | proved  | §11b                       |
+| ExprWellFormed / Compat / lower                        | def     | §12                        |
+| **lowering_types** (GT Typing → B BTyping, tightened)  | proved  | §13                        |
+| Footprint_mono (subset → Footprint monotone)           | proved  | §14                        |
+| **gtt_corresponds** (cross-world soundness)            | proved  | §14                        |
+| gtt_hessian_sparsity / gtt_gradient_sparsity           | proved  | §14 (cross-world corollaries) |
+| seedEnvNat / seedEnvNat_wellTyped                      | def+prv | §14b                       |
+| seedCompatNat (concrete Compat Nat witness)            | def     | §14b                       |
+| gtCanaryExpr / gtCanaryExpr_{wellFormed,types}         | def+prv | §14b                       |
+| **canary_gtt_corresponds** (end-to-end inhabitant)     | proved  | §14b                       |
+| canary_gtt_slot2_gradient_zero (concrete slot corollary)| proved | §14b                       |
 
 ## Key design decisions
 
@@ -519,6 +890,25 @@ theorem canary_bridge_exact :
   in which the body-precision declared set is exactly the nonzero-grad
   support.  A general statement "for every `UP` and every typing
   derivation some env witnesses equality" is stronger and deferred.
+- **Cross-world correspondence is additive, not a replacement**: the
+  inductive `bridge` theorem (§10) remains the minimal API that
+  `hessian_sparsity`/`gradient_sparsity`/`canary_bridge_exact` consume.
+  §14's `gtt_corresponds` links the GT and B typing worlds *without*
+  replacing the clean B-side proof; it lifts the typing judgment from
+  GT's scalar/relational world (`Expr`/`Typing`/`Eval`/`FnTable`) into
+  the B world via `lower : Expr → BExpr α`, then composes with `bridge`.
+- **Existential shape of `lowering_types`**: the result is
+  `∃ S', BTyping (lower e) S' ∧ S'.subset S` rather than
+  `BTyping (lower e) S`.  At `tCall2`, GT's week-3 rule gives
+  `S1.union S2` but B's rule gives `usedUnion (UP f) S1' S2'` — strictly
+  tighter when the callee's body-precision summary drops parameters.
+  `Footprint_mono` reconciles the tightening at the final composition.
+- **Reification parameterised on a `Compat` bundle**: the user provides
+  the variable-slot map, channel-slot map, literal lifter, body-precision
+  summary, callee lifter, and the compatibility/respects witnesses.
+  Keeping all of these in one bundle avoids threading ~7 hypotheses
+  through every sub-theorem and matches the shape of §11b's `canaryEnv`
+  / `canaryE_types` setup.
 
 ## Remaining gaps (same as HessianAD §10)
 
