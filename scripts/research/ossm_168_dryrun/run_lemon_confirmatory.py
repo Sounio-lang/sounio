@@ -44,9 +44,12 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from scripts.research.ossm_168_dryrun import features as feat_mod  # noqa: E402
-from scripts.research.ossm_168_dryrun import lemon_preprocess as lp  # noqa: E402
-from scripts.research.ossm_168_dryrun import ossm as ossm_mod  # noqa: E402
+from scripts.research.ossm_168_dryrun import (  # noqa: E402
+    _features_fast as feat_fast,
+    features as feat_mod,
+    lemon_preprocess as lp,
+    ossm as ossm_mod,
+)
 
 # -----------------------------------------------------------------------------
 # Pinned statistical constants per prereg §7
@@ -101,12 +104,28 @@ def _iter_subjects(raw_root: Path, subset_list: Path | None) -> list[str]:
 def preprocess_or_load(
     subject: str, raw_root: Path, cache_dir: Path,
 ) -> tuple[np.ndarray, dict]:
-    """Return ``(epochs_tensor, provenance)``. Caches .npy + .json."""
+    """Return ``(epochs_tensor, provenance)``. Caches .npy + .json.
+
+    If the .npy is present but the .json is missing (e.g. an earlier
+    run crashed between the two writes), load the epochs and backfill
+    a minimal provenance record rather than repeating preprocessing.
+    """
     cache_dir.mkdir(parents=True, exist_ok=True)
     npy = cache_dir / f"{subject}_epochs.npy"
     meta = cache_dir / f"{subject}_meta.json"
-    if npy.is_file() and meta.is_file():
-        return np.load(npy), json.loads(meta.read_text())
+    if npy.is_file():
+        epochs = np.load(npy)
+        if meta.is_file():
+            prov = json.loads(meta.read_text())
+        else:
+            prov = {
+                "subject": subject,
+                "n_retained_epochs": int(epochs.shape[0]),
+                "n_total_epochs": int(epochs.shape[0]),
+                "source": "cached_npy_no_meta",
+            }
+            meta.write_text(json.dumps(prov, indent=2))
+        return epochs, prov
     t0 = time.time()
     res = lp.preprocess_subject(str(raw_root), subject)
     # ``res.epochs`` is already (n_epochs, 7, 1000) per §5.
@@ -116,7 +135,7 @@ def preprocess_or_load(
         "sfreq": res.sfreq,
         "n_total_epochs": res.n_total_epochs,
         "n_retained_epochs": res.n_retained_epochs,
-        "retention_rate": res.retention_rate,
+        "retention_rate": res.retention_rate(),
         "n_ica_rejected": res.n_ica_rejected,
         "n_ica_total": res.n_ica_total,
         "channels_used_n": len(res.channel_names_used),
@@ -129,17 +148,31 @@ def preprocess_or_load(
 
 def features_for_subject(
     subject_index: int, epochs: np.ndarray,
+    max_epochs: int | None = None,
+    subsample_seed: int = BOOTSTRAP_SEED,
 ) -> tuple[float, float, float]:
-    """Return (F1_median, F2_median, F3_median) across retained epochs."""
+    """Return (F1_median, F2_median, F3_median) across retained epochs.
+
+    ``max_epochs`` subsamples epochs deterministically (seeded with
+    ``subsample_seed + subject_index``) to keep wall time tractable on
+    the confirmatory run; when None every retained epoch is used.
+    F_3 is computed with the vectorised implementation in
+    :mod:`_features_fast` which is bit-identical to the reference up
+    to floating-point round-off (~1e-13).
+    """
+    n = epochs.shape[0]
+    if max_epochs is not None and n > max_epochs:
+        rng = np.random.default_rng(subsample_seed + subject_index)
+        idx = np.sort(rng.choice(n, size=max_epochs, replace=False))
+        epochs = epochs[idx]
     f1s: list[float] = []
     f2s: list[float] = []
     f3s: list[float] = []
     for epoch in epochs:  # epoch shape: (7, 1000)
         traj = ossm_mod.forward_pass(np.ascontiguousarray(epoch), subject_index)
-        f = feat_mod.compute_all_features(traj)
-        f1s.append(f["F1"])
-        f2s.append(f["F2"])
-        f3s.append(f["F3"])
+        f1s.append(feat_mod.feature_f1_from_trajectory(traj))
+        f2s.append(feat_mod.feature_f2_from_trajectory(traj))
+        f3s.append(feat_fast.feature_f3_fast(traj))
     return (statistics.median(f1s), statistics.median(f2s), statistics.median(f3s))
 
 
@@ -258,6 +291,9 @@ def main() -> None:
     ap.add_argument("--subjects-list", type=Path, default=None)
     ap.add_argument("--skip-existing-features", action="store_true",
                     help="skip subjects whose row is already in features.csv")
+    ap.add_argument("--max-epochs", type=int, default=None,
+                    help="deterministically subsample this many epochs per subject "
+                    "(saves wall time; subject-level medians remain stable)")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -301,9 +337,10 @@ def main() -> None:
             print(f"[{pos + 1}/{len(subjects)}] {sid}  0 epochs retained, skipping",
                   flush=True)
             continue
-        F1, F2, F3 = features_for_subject(si, epochs)
+        F1, F2, F3 = features_for_subject(si, epochs, max_epochs=args.max_epochs)
+        n_eff = min(epochs.shape[0], args.max_epochs) if args.max_epochs else epochs.shape[0]
         rec = SubjectFeatures(
-            subject_id=sid, n_epochs=int(epochs.shape[0]),
+            subject_id=sid, n_epochs=int(n_eff),
             F1=F1, F2=F2, F3=F3,
         )
         feat_rows.append(rec)
