@@ -23131,11 +23131,21 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             var argc: i64 = 0
             var abi_argc: i64 = 0
             B5_ARG_VCOUNT = 0
+            B9_ARG_CH_COUNT = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or_a64()
                 // β⁵: capture variance shadow for this argument
                 if argc < 16 { B5_ARG_VSHADOW[argc as usize] = EXPR_VSHADOW }
                 B5_ARG_VCOUNT = argc + 1
+                // β⁹ GTT: capture this argument's channel topology before the
+                // next arg's compile_or_a64() overwrites EXPR_CH_SET (a64 mirror
+                // of x86 path at ~10205).
+                if argc < 16 { B9_ARG_CH_SET[argc as usize] = EXPR_CH_SET }
+                // β⁹ GTT week-4: capture each arg's param-index dependency so
+                // the a64 call-site can forward body-precision into the
+                // enclosing-fn's EXPR_PARAM_USED (mirror of x86 ~10209).
+                if argc < 16 { B9_ARG_PARAM_USED[argc as usize] = EXPR_PARAM_USED }
+                B9_ARG_CH_COUNT = argc + 1
                 if fi >= 0 {
                     scan_fn_param_type(fi, argc)
                 } else if call_sig > 0 {
@@ -23194,6 +23204,42 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // β⁹ GTT a64: union of argument channel sets becomes the return
+                // value's topology (mirror of x86 compile_primary at ~10313).
+                // β⁹ GTT week-4: body-level precision — consult
+                // FN_USED_PARAMS[fi] to union only those B9_ARG_CH_SET slots
+                // whose parameter index the callee body actually references at
+                // return position.  Fall back to the week-3 conservative
+                // union-all whenever the callee is unanalyzed (sentinel 0) or
+                // uses a parameter with index ≥ 16 (unrepresentable in our
+                // 16-slot shadow table).  Bit 62 = FN_USED_ANALYZED.
+                let b9a_raw_used  = FN_USED_PARAMS[fi as usize]
+                let b9a_analyzed  = b9a_raw_used & 4611686018427387904  // bit 62
+                let b9a_used_mask = b9a_raw_used & 65535                // bits 0..15
+                let b9a_overflow  = b9a_raw_used & 4611686018427322368  // bits 16..61
+                var b9a_ch_union: i64 = 0
+                var b9a_pu_union: i64 = 0
+                if b9a_analyzed != 0 && b9a_overflow == 0 {
+                    var b9a_i: i64 = 0
+                    while b9a_i < 16 && b9a_i < B9_ARG_CH_COUNT {
+                        if (b9a_used_mask & (1 << b9a_i)) != 0 {
+                            b9a_ch_union = b9a_ch_union | B9_ARG_CH_SET[b9a_i as usize]
+                            b9a_pu_union = b9a_pu_union | B9_ARG_PARAM_USED[b9a_i as usize]
+                        }
+                        b9a_i = b9a_i + 1
+                    }
+                } else {
+                    var b9a_i: i64 = 0
+                    while b9a_i < B9_ARG_CH_COUNT {
+                        if b9a_i < 16 {
+                            b9a_ch_union = b9a_ch_union | B9_ARG_CH_SET[b9a_i as usize]
+                            b9a_pu_union = b9a_pu_union | B9_ARG_PARAM_USED[b9a_i as usize]
+                        }
+                        b9a_i = b9a_i + 1
+                    }
+                }
+                EXPR_CH_SET = b9a_ch_union
+                EXPR_PARAM_USED = b9a_pu_union
                 // β⁵ a64: propagate argument variances into return EXPR_VSHADOW
                 EXPR_VSHADOW = -1
                 if EXPR_IS_F64 == 1 {
