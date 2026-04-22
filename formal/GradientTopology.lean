@@ -1284,12 +1284,22 @@ arity at the set-theoretic level.
    files.  Under `gtt_sound_body` this bridge becomes an *equality*
    (declared set characterises shadow footprint) on the body-precision
    fragment, rather than just a containment.
-5. **Compiler-side n-ary surface wiring.**  `Expr.callN` is now in the
-   Lean model and `gtt_sound_body_callN` proves its soundness, but the
-   compiler's `compile_primary` (line ~10205) currently emits only the
-   binary `call2`-shaped path; extending emission to a true
-   variadic call site with per-arg `B9_ARG_CH_SET[16]` iteration is
-   a week-6+ compiler task (not a Lean proof task).
+5. **Compiler-side n-ary surface wiring.**  *Closed (week-8).*
+   `Expr.callN` is in the Lean model with `gtt_sound_body_callN`
+   proving its soundness; the compiler's `compile_primary` capture
+   loop and post-call union already iterate `B9_ARG_CH_SET[16]` on
+   both x86 and a64 (wired in week-3, body-precision-filtered in
+   week-4).  Week-8 stage 1 (commit `643b0f3a`) added an arity-3..5
+   regression `tests/run-pass/gtt_nary_topology.sio` and a negative
+   bound `tests/compile-fail/gtt_nary_out_of_topology.sio` (commit
+   `bb2c8fd8`), locking in the variadic union end-to-end.  Week-8
+   stage 2 closed the remaining call-site overflow hole: when
+   `argc ≥ 16` the per-arg slot table overflows, and the union loop
+   now saturates `EXPR_CH_SET` and `EXPR_PARAM_USED` to all-bits-set
+   (sound upper bound) rather than silently dropping channels carried
+   by args 16+.  Mirrored on x86 and a64.  No new Lean axioms; the
+   saturating widen only strengthens (over-approximates) the emitted
+   set, which `gtt_sound_body_callN` already accepts.
 
 ## No new axioms
 
