@@ -16072,6 +16072,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // ── end if let ──
 
         compile_or()
+        // β⁹ GTT week-6 stage-2: capture cond's channel-set topology
+        // before compile_stmt in the body overwrites EXPR_CH_SET.
+        let if_cond_ch_set = EXPR_CH_SET
         if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(EP - 1, "if condition must be bool") }
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
         em(0x0f); em(0x84)
@@ -16088,6 +16091,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         }
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        // β⁹ GTT week-6 stage-2: capture then-body's tail channel-set topology.
+        let if_then_ch_set = EXPR_CH_SET
         let then_has_value = LAST_STMT_HAS_VALUE
         let then_ty = LAST_STMT_TY
         let then_hash = LAST_STMT_TY_HASH
@@ -16122,6 +16127,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
                 if TK[EP as usize] == 9 { EP = EP + 1 }
             }
+            // β⁹ GTT week-6 stage-2: capture else-body's tail channel-set topology.
+            // Nested else-if (compile_stmt recursion) already propagates union
+            // per this same rule, so EXPR_CH_SET is the full union from the
+            // recursive call.
+            let if_else_ch_set = EXPR_CH_SET
             // Linear branch asymmetry check: compare then vs else VAR_USED
             var lchk: i64 = 0
             while lchk < VAR_COUNT {
@@ -16159,6 +16169,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 EXPR_TY = then_ty
                 EXPR_TY_HASH = then_hash
                 if then_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // β⁹ GTT week-6 stage-2: union all three arm topologies into
+                // the if-expression's EXPR_CH_SET.  Matches `Typing.tIf`'s
+                // conclusion `Sc ∪ (S1 ∪ S2)` in formal/GradientTopology.lean §3.
+                EXPR_CH_SET = if_cond_ch_set | if_then_ch_set | if_else_ch_set
             } else {
                 LAST_STMT_HAS_VALUE = 0
                 LAST_STMT_TY = 0
@@ -19539,9 +19553,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // BSS layout: [argc(8)] [argv(8)] [globals...] [aggregate return scratch]
     RET_AGG_BSS_OFF = GL_BSS_SIZE
     GL_BSS_SIZE = GL_BSS_SIZE + 1048576  // 1MB scratch for aggregate (struct/array) returns
-    // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0
+    // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0.
+    // The lean_single Mach-O path bakes absolute BSS addresses into emitted code,
+    // so macOS needs a generous fixed gap between __TEXT and __DATA.
     if TARGET_OS == 2 {
-        GL_BSS_BASE = 0x100008000 + 16    // macOS: __DATA segment at 0x100008000
+        GL_BSS_BASE = 0x101000000 + 16    // macOS: __DATA segment at 0x101000000
     } else {
         GL_BSS_BASE = 0x10000000 + 16     // Linux/Windows: BSS at 0x10000000 (256MB, never overlaps code)
     }
@@ -20361,8 +20377,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     } else if TARGET_OS == 2 {
         // macOS x86_64 trampoline
         // macOS entry: same argc/argv layout as Linux
-        let argc_addr = 0x100008000  // __DATA segment base
-        let argv_addr = 0x100008000 + 8
+        let argc_addr = GL_BSS_BASE - 16
+        let argv_addr = GL_BSS_BASE - 8
         em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (argc)
         em(0x48); em(0x83); em(0xe8); em(0x01)  // sub rax, 1
         em(0x48); em(0xb9); em64(argc_addr)
@@ -20850,12 +20866,12 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
 
 // ─── Mach-O x86_64 writer ───
 // Builds a macOS Mach-O 64-bit executable.
-// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(4GB+0x8000, BSS)
+// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(4GB+16MB, BSS)
 fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     let vm_base: i64 = 4294967296       // 0x100000000
     let page_size: i64 = 4096
     let text_vm = vm_base               // __TEXT vmaddr
-    let data_vm = vm_base + 0x8000      // __DATA vmaddr (BSS)
+    let data_vm = vm_base + 16777216    // __DATA vmaddr (BSS)
 
     // Mach-O header: 32 bytes
     // Load commands: __PAGEZERO(72) + __TEXT(72+section*80=152) + __DATA(72+section*80=152) + LC_MAIN(24)
@@ -20884,7 +20900,7 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w32(12, 2)                        // filetype = MH_EXECUTE
     elf_w32(16, ncmds)                    // ncmds
     elf_w32(20, sizeofcmds)              // sizeofcmds
-    elf_w32(24, 0x00200085)               // flags: NOUNDEFS | DYLDLINK | TWOLEVEL | PIE
+    elf_w32(24, 0x00000085)               // flags: NOUNDEFS | DYLDLINK | TWOLEVEL
 
     // LC_SEGMENT_64 __PAGEZERO (72 bytes at offset 32)
     var off = hdr_size
@@ -25141,6 +25157,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         // ── end if let (AArch64) ──
 
         compile_or_a64()
+        // β⁹ GTT week-6 stage-2: capture cond's channel-set topology
+        // (mirror of x86 compile_stmt).
+        let if_cond_ch_set_a = EXPR_CH_SET
         if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(EP - 1, "if condition must be bool") }
         let cbz_off = CL
         em32(0xB4000000)
@@ -25149,6 +25168,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         LAST_STMT_TY_HASH = 0
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        // β⁹ GTT week-6 stage-2: capture then-body's tail channel-set topology.
+        let if_then_ch_set_a = EXPR_CH_SET
         let then_has_value = LAST_STMT_HAS_VALUE
         let then_ty = LAST_STMT_TY
         let then_hash = LAST_STMT_TY_HASH
@@ -25170,6 +25191,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
                 if TK[EP as usize] == 9 { EP = EP + 1 }
             }
+            // β⁹ GTT week-6 stage-2: capture else-body's tail channel-set topology.
+            let if_else_ch_set_a = EXPR_CH_SET
             let else_has_value = LAST_STMT_HAS_VALUE
             let else_ty = LAST_STMT_TY
             let else_hash = LAST_STMT_TY_HASH
@@ -25184,6 +25207,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = then_ty
                 EXPR_TY_HASH = then_hash
                 if then_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // β⁹ GTT week-6 stage-2: union all three arm topologies — mirror
+                // of x86 compile_stmt.  Matches `Typing.tIf`'s conclusion
+                // `Sc ∪ (S1 ∪ S2)` in formal/GradientTopology.lean §3.
+                EXPR_CH_SET = if_cond_ch_set_a | if_then_ch_set_a | if_else_ch_set_a
             } else {
                 LAST_STMT_HAS_VALUE = 0
                 LAST_STMT_TY = 0
@@ -25926,8 +25953,8 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     // Trampoline
     TRAMP_OFF = CL
     if TARGET_OS == 2 {
-        let argc_addr = 0x100008000
-        let argv_addr = 0x100008000 + 8
+        let argc_addr = GL_BSS_BASE - 16
+        let argv_addr = GL_BSS_BASE - 8
         em32(0xF94003E9)
         em32(0xD1000529)
         emit_imm64_reg_a64(10, argc_addr)
@@ -25994,7 +26021,7 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     let vm_base: i64 = 4294967296
     let page_size: i64 = 16384
     let text_vm = vm_base
-    let data_vm = vm_base + 0x8000
+    let data_vm = vm_base + 16777216
     let hdr_size = 32
     let lc_pagezero_size = 72
     let lc_text_size = 72 + 80
@@ -26011,7 +26038,7 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     while i < 1048576 { ELF[i as usize] = 0; i = i + 1 }
     // Header
     elf_w32(0, 0xFEEDFACF); elf_w32(4, 0x0100000C); elf_w32(8, 0)
-    elf_w32(12, 2); elf_w32(16, ncmds); elf_w32(20, sizeofcmds); elf_w32(24, 0x00200085)
+    elf_w32(12, 2); elf_w32(16, ncmds); elf_w32(20, sizeofcmds); elf_w32(24, 0x00000085)
     // __PAGEZERO
     var off = hdr_size
     elf_w32(off, 25); elf_w32(off+4, lc_pagezero_size)

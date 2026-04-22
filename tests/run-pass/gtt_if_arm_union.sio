@@ -1,0 +1,48 @@
+//@ run-pass
+//
+// Gradient Topology Types (GTT) — β⁹ week-6 stage-2 regression (if-arm union).
+//
+// Before this fix, `compile_primary`'s if-expression path (line ~15889)
+// compiled both arms but did NOT propagate EXPR_CH_SET through them —
+// each arm's compilation overwrote EXPR_CH_SET, so the result carried
+// only the last-compiled arm's topology (usually the else arm).
+//
+// Concretely, for
+//
+//     let k0 = measure(...)
+//     let k1 = measure(...)
+//     let r = if flag { k0.value } else { k1.value }
+//     hessian_of(r, 0, 0)
+//
+// pre-fix left EXPR_CH_SET = {ch1} (else arm's), and the query
+// H_{0,0} was REFUSED at type-check because channel 0 was not in the
+// set — a real soundness hole.
+//
+// Post-fix: EXPR_CH_SET = cond_ch_set | then_ch_set | else_ch_set.
+// Both H_{0,0} and H_{1,1} queries are accepted; the runtime value
+// depends on which arm actually ran (shadow channels aren't
+// path-sensitive at Phase-1 level, but topology tracking is now
+// correctly a conservative upper bound).
+//
+// The theorem this commit catches up to: `Typing.tIf` in
+// formal/GradientTopology.lean §3 concludes at `Sc ∪ (S1 ∪ S2)`, which
+// `gtt_sound` proves is a sound runtime-footprint upper bound.
+
+fn main() with IO, Epistemic, Mut, Div {
+    let k0: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let k1: Knowledge<f64> = measure(3.0, uncertainty: 0.1)
+    let x = k0.value       // channel 0
+    let y = k1.value       // channel 1
+    let flag = true
+
+    // Pre-fix: refused (channel 0 missing from leaked {ch1}).
+    // Post-fix: accepted (union = {ch0, ch1}).
+    let r = if flag { x } else { y }
+    let h00 = hessian_of(r, 0, 0)
+    let h11 = hessian_of(r, 1, 1)
+    let h01 = hessian_of(r, 0, 1)
+
+    println(h00)
+    println(h11)
+    println(h01)
+}
