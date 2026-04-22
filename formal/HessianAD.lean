@@ -1,3 +1,5 @@
+import GradientTopology
+
 /-!
 # Sounio.HessianAD — Phase 8.2 Formal Verification
 
@@ -25,11 +27,14 @@ Key correspondence with the compiler:
 header incorrectly pointed "unary chain rule" at line 9320 — that is the
 `atan2` binary chain rule, not unary.)
 
-Zero-sorry guarantee.  No Mathlib dependency.  Self-contained: defines its
-own minimal `Dual2Field` typeclass to avoid import-time coupling with the
-pre-existing `Epistemic.lean` (which has broader dependencies).  The
-`Dual2Field Float` instance at §11 ties the abstract theorems to the
-concrete Float type used by the stdlib runtime.
+Zero-sorry guarantee.  No Mathlib dependency.  Defines its own minimal
+`Dual2Field` typeclass to avoid import-time coupling with the pre-existing
+`Epistemic.lean` (which has broader dependencies).  The `Dual2Field Float`
+instance at §11 ties the abstract theorems to the concrete Float type used
+by the stdlib runtime.
+
+Imports `GradientTopology` so the channel-set vocabulary (`ChSet`) is
+shared with §9b's footprint predicates and with `GradientTopologyBridge`.
 
 References:
   - Griewank & Walther (2008) *Evaluating Derivatives* ch. 5 (forward Hessian mode)
@@ -39,6 +44,8 @@ References:
 -/
 
 namespace Sounio.HessianAD
+
+open Sounio.GradientTopology (ChSet)
 
 -- ---------------------------------------------------------------------------
 -- §1. Minimal typeclass: what Dual2 arithmetic requires
@@ -289,14 +296,13 @@ theorem mul_grad_comm (a b : Dual2 α) (k : Fin 8) :
 -- §9b. Channel footprint — GTT-HessianAD sparsity bridge
 -- ---------------------------------------------------------------------------
 
--- Matches `ChSet` in GradientTopology.lean; redefined here to keep the two
--- files independent and import-free.
-abbrev ShadowChSet := Nat → Bool
+-- Channel sets are imported from `GradientTopology`; the `open` at the top
+-- of the namespace brings `ChSet` into scope without re-definition.
 
 /-- A `Dual2` value has `GradFootprint S` when every channel outside `S`
     carries zero gradient.
     Semantic content: `j ∉ S ⟹ ∂e/∂x_j = 0`. -/
-def GradFootprint (S : ShadowChSet) (D : Dual2 α) : Prop :=
+def GradFootprint (S : ChSet) (D : Dual2 α) : Prop :=
   ∀ j : Fin 8, ¬ S j.val → D.grad j = 𝟎
 
 /-- A `Dual2` value has `HessFootprint S` when every Hessian row indexed by a
@@ -304,16 +310,16 @@ def GradFootprint (S : ShadowChSet) (D : Dual2 α) : Prop :=
     Semantic content: `j ∉ S ⟹ ∀ k, ∂²e/∂x_j∂x_k = 0`.
     Under body-precision (`gtt_sound_body` in GradientTopology.lean) the
     declared set is exact: `j ∈ S ⟺ ∂²e/∂x_j ≠ 0` for generic inputs. -/
-def HessFootprint (S : ShadowChSet) (D : Dual2 α) : Prop :=
+def HessFootprint (S : ChSet) (D : Dual2 α) : Prop :=
   ∀ j k : Fin 8, ¬ S j.val → D.hess j k = 𝟎
 
 -- Base cases ---
 
-theorem gradFootprint_const (S : ShadowChSet) (v : α) :
+theorem gradFootprint_const (S : ChSet) (v : α) :
     GradFootprint S (dual2Const v) :=
   fun _ _ => rfl
 
-theorem hessFootprint_const (S : ShadowChSet) (v : α) :
+theorem hessFootprint_const (S : ChSet) (v : α) :
     HessFootprint S (dual2Const v) :=
   fun _ _ _ => rfl
 
@@ -327,25 +333,25 @@ theorem gradFootprint_seed (c : Fin 8) (v : α) :
     intro heq; apply hj; simp [heq]
   rw [if_neg hne]
 
-theorem hessFootprint_seed (S : ShadowChSet) (c : Fin 8) (v : α) :
+theorem hessFootprint_seed (S : ChSet) (c : Fin 8) (v : α) :
     HessFootprint S (dual2Seed c v) :=
   fun _ _ _ => rfl
 
 -- Preservation lemmas ---
 
-theorem gradFootprint_add (S : ShadowChSet) (A B : Dual2 α)
+theorem gradFootprint_add (S : ChSet) (A B : Dual2 α)
     (hA : GradFootprint S A) (hB : GradFootprint S B) :
     GradFootprint S (dual2Add A B) := by
   intro j hj
   simp only [dual2Add, hA j hj, hB j hj, F.zero_add]
 
-theorem hessFootprint_add (S : ShadowChSet) (A B : Dual2 α)
+theorem hessFootprint_add (S : ChSet) (A B : Dual2 α)
     (hA : HessFootprint S A) (hB : HessFootprint S B) :
     HessFootprint S (dual2Add A B) := by
   intro j k hj
   simp only [dual2Add, hA j k hj, hB j k hj, F.zero_add]
 
-theorem gradFootprint_mul (S : ShadowChSet) (A B : Dual2 α)
+theorem gradFootprint_mul (S : ChSet) (A B : Dual2 α)
     (hA : GradFootprint S A) (hB : GradFootprint S B) :
     GradFootprint S (dual2Mul A B) := by
   intro j hj
@@ -356,7 +362,7 @@ theorem gradFootprint_mul (S : ShadowChSet) (A B : Dual2 α)
     mixes gradient cross-terms with Hessian entries:
     `H_jk(A·B) = H_jk(A)·B.val + (A.grad j · B.grad k + A.grad k · B.grad j) + A.val · H_jk(B)`.
     All four terms vanish when `j ∉ S` via `HessFootprint` (rows) and `GradFootprint` (columns). -/
-theorem hessFootprint_mul (S : ShadowChSet) (A B : Dual2 α)
+theorem hessFootprint_mul (S : ChSet) (A B : Dual2 α)
     (hAg : GradFootprint S A) (hBg : GradFootprint S B)
     (hAh : HessFootprint S A) (hBh : HessFootprint S B) :
     HessFootprint S (dual2Mul A B) := by
@@ -364,7 +370,7 @@ theorem hessFootprint_mul (S : ShadowChSet) (A B : Dual2 α)
   simp only [dual2Mul, hAh j k hj, hBh j k hj, hAg j hj, hBg j hj,
              F.zero_mul, F.mul_zero, F.zero_add, F.add_zero]
 
-theorem gradFootprint_apply_unary (S : ShadowChSet) (fv fp fpp : α) (G : Dual2 α)
+theorem gradFootprint_apply_unary (S : ChSet) (fv fp fpp : α) (G : Dual2 α)
     (hG : GradFootprint S G) :
     GradFootprint S (dual2ApplyUnary fv fp fpp G) := by
   intro j hj
@@ -374,7 +380,7 @@ theorem gradFootprint_apply_unary (S : ShadowChSet) (fv fp fpp : α) (G : Dual2 
     Faà-di-Bruno 2nd-order: `fpp · G.grad j · G.grad k + fp · G.hess j k`.
     When `j ∉ S`: both `G.grad j` and `G.hess j k` are zero, collapsing both
     terms to zero independently of `fp`, `fpp`, and `G.grad k`. -/
-theorem hessFootprint_apply_unary (S : ShadowChSet) (fv fp fpp : α) (G : Dual2 α)
+theorem hessFootprint_apply_unary (S : ChSet) (fv fp fpp : α) (G : Dual2 α)
     (hGg : GradFootprint S G) (hGh : HessFootprint S G) :
     HessFootprint S (dual2ApplyUnary fv fp fpp G) := by
   intro j k hj

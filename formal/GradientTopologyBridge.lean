@@ -1,3 +1,6 @@
+import GradientTopology
+import HessianAD
+
 /-!
 # Sounio.GradientTopologyBridge — Full inductive GTT-HessianAD bridge theorem
 
@@ -12,124 +15,39 @@ This connects two companion files:
   - `GradientTopology.lean` (GTT typing, `usedUnion`, body-precision §7b)
   - `HessianAD.lean`        (Dual2 arithmetic, footprint preservation §9b)
 
-Self-contained: definitions repeat those in the companions verbatim so the
-file compiles independently (matching the project's no-import convention).
+Both companions are imported; `ChSet`, `UsedParams2`, `usedUnion`,
+`Dual2`, `dual2Add/Mul/...`, and `GradFootprint`/`HessFootprint` come
+from those files.  This file defines only the combined `Footprint` (grad
+∧ hess), the binary-expression fragment `BExpr`/`BTyping`/`evalB`, the
+inductive bridge theorem, and the Phase-1 canary tightness witness.
+
 Zero sorry.  No Mathlib.  No new axioms beyond `Dual2Field`.
 -/
 
 namespace Sounio.GradientTopologyBridge
 
--- ===========================================================================
--- §1. Channel sets  (mirrors GradientTopology §2)
--- ===========================================================================
-
-abbrev ChSet := Nat → Bool
-
-namespace ChSet
-  def union  (S T : ChSet) : ChSet := fun j => S j || T j
-  def empty  : ChSet := fun _ => false
-  def singleton (j : Nat) : ChSet := fun i => decide (i = j)
-  def subset (S T : ChSet) : Prop := ∀ n, S n → T n
-end ChSet
+open Sounio.GradientTopology (ChSet UsedParams2 usedUnion usedUnion_subset_union)
+open Sounio.HessianAD
 
 -- ===========================================================================
--- §2. Body-precision summary  (mirrors GradientTopology §7b)
+-- §1-§3.  Channel sets, body-precision summary, Dual2 arithmetic.
+-- All moved to their companion files; imported above.  See:
+--   - `GradientTopology.lean`: `ChSet`, `UsedParams2`, `usedUnion`, `usedUnion_subset_union`
+--   - `HessianAD.lean`:        `Dual2Field`, `Dual2`, `dual2Const/Seed/Add/Mul/ApplyUnary`
 -- ===========================================================================
-
-structure UsedParams2 where
-  uses0 : Bool
-  uses1 : Bool
-
-def usedUnion (U : UsedParams2) (S1 S2 : ChSet) : ChSet :=
-  ChSet.union
-    (if U.uses0 then S1 else ChSet.empty)
-    (if U.uses1 then S2 else ChSet.empty)
-
-theorem usedUnion_subset_union (U : UsedParams2) (S1 S2 : ChSet) :
-    (usedUnion U S1 S2).subset (S1.union S2) := by
-  intro n h
-  simp only [usedUnion, ChSet.union] at h
-  cases hu0 : U.uses0 with
-  | true =>
-    cases hu1 : U.uses1 with
-    | true  => rw [hu0, hu1] at h; simp only [if_true] at h; simp only [ChSet.union]; exact h
-    | false =>
-      rw [hu0, hu1] at h; simp only [if_true, if_false] at h
-      simp only [ChSet.union]
-      cases hs1 : S1 n with
-      | true  => simp [hs1]
-      | false => rw [hs1] at h; simp [ChSet.empty] at h
-  | false =>
-    cases hu1 : U.uses1 with
-    | true  =>
-      rw [hu0, hu1] at h; simp only [if_false, if_true] at h
-      simp only [ChSet.union]
-      cases hs2 : S2 n with
-      | true  => simp [hs2]
-      | false => rw [hs2] at h; simp [ChSet.empty] at h
-    | false => rw [hu0, hu1] at h; simp [ChSet.empty] at h
-
--- ===========================================================================
--- §3. Dual2 arithmetic  (mirrors HessianAD §1-§4)
--- ===========================================================================
-
-class Dual2Field (α : Type) extends Add α, Mul α where
-  zero      : α
-  one       : α
-  zero_mul  : ∀ a : α, zero * a = zero
-  mul_zero  : ∀ a : α, a * zero = zero
-  zero_add  : ∀ a : α, zero + a = a
-  add_zero  : ∀ a : α, a + zero = a
-  add_comm  : ∀ a b : α, a + b = b + a
-  mul_comm  : ∀ a b : α, a * b = b * a
-  mul_assoc : ∀ a b c : α, (a * b) * c = a * (b * c)
 
 variable {α : Type} [F : Dual2Field α]
 
 local notation "𝟎" => @Dual2Field.zero α F
 local notation "𝟏" => @Dual2Field.one α F
 
-structure Dual2 (α : Type) [Dual2Field α] where
-  val  : α
-  grad : Fin 8 → α
-  hess : Fin 8 → Fin 8 → α
-
-def dual2Const (v : α) : Dual2 α :=
-  ⟨v, fun _ => 𝟎, fun _ _ => 𝟎⟩
-
-def dual2Seed (k : Fin 8) (v : α) : Dual2 α :=
-  ⟨v, fun i => if i = k then 𝟏 else 𝟎, fun _ _ => 𝟎⟩
-
-def dual2Add (a b : Dual2 α) : Dual2 α :=
-  ⟨a.val + b.val,
-   fun k => a.grad k + b.grad k,
-   fun j k => a.hess j k + b.hess j k⟩
-
-def dual2Mul (a b : Dual2 α) : Dual2 α :=
-  ⟨a.val * b.val,
-   fun k => a.val * b.grad k + b.val * a.grad k,
-   fun j k =>
-     a.hess j k * b.val +
-     (a.grad j * b.grad k + a.grad k * b.grad j) +
-     a.val * b.hess j k⟩
-
-def dual2ApplyUnary (fv fp fpp : α) (g : Dual2 α) : Dual2 α :=
-  ⟨fv,
-   fun k => fp * g.grad k,
-   fun j k => fpp * g.grad j * g.grad k + fp * g.hess j k⟩
-
 -- ===========================================================================
--- §4. Footprint predicates  (mirrors HessianAD §9b)
+-- §4. Combined footprint predicate  (grad ∧ hess)
 -- ===========================================================================
 
--- We write `¬ S j.val` throughout; Lean 4 coerces `Bool → Prop` via `= true`,
--- so `¬ S j.val` means `S j.val = false` (channel j not in set S).
-
-def GradFootprint (S : ChSet) (D : Dual2 α) : Prop :=
-  ∀ j : Fin 8, ¬ S j.val → D.grad j = 𝟎
-
-def HessFootprint (S : ChSet) (D : Dual2 α) : Prop :=
-  ∀ j k : Fin 8, ¬ S j.val → D.hess j k = 𝟎
+-- `GradFootprint` / `HessFootprint` are imported from `HessianAD` (§9b).
+-- This file adds the conjunction so §5-§11 can state lemmas once instead
+-- of pair-wise.
 
 def Footprint (S : ChSet) (D : Dual2 α) : Prop :=
   GradFootprint S D ∧ HessFootprint S D

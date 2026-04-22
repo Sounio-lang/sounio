@@ -82,7 +82,7 @@ namespace Sounio.GradientTopology
 /-- A channel set is a characteristic function `Nat → Bool`.  The compiler
     represents this as an `i64` bitmask; using `Nat → Bool` here keeps the
     proofs independent of the bit-width and the concrete integer encoding. -/
-def ChSet : Type := Nat → Bool
+abbrev ChSet : Type := Nat → Bool
 
 /-- The empty channel set. -/
 def ChSet.empty : ChSet := fun _ => false
