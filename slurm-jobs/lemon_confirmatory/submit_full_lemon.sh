@@ -131,6 +131,8 @@ cat > "${SBATCH}" <<'SBATCH_EOF'
 #SBATCH --error=${RESULTS_ROOT}/logs/%A_%a.err
 
 set -euo pipefail
+cd ${STAGE_ROOT}/repo
+export PYTHONPATH=${PWD}/scripts/research
 export OMP_NUM_THREADS=${CPUS_PER_TASK}
 export OPENBLAS_NUM_THREADS=${CPUS_PER_TASK}
 export MKL_NUM_THREADS=${CPUS_PER_TASK}
@@ -189,6 +191,7 @@ sed -i \
     -e "s|\${MODE}|${MODE}|g" \
     -e "s|\${STAGE_ROOT}|${STAGE_ROOT}|g" \
     -e "s|\${RAW_ROOT}|${RAW_ROOT}|g" \
+    -e "s|\${ENDPOINTS}|${ENDPOINTS}|g" \
     -e "s|\${CACHE_DIR}|${CACHE_DIR}|g" \
     -e "s|\${MAX_EPOCHS}|${MAX_EPOCHS}|g" \
     -e "s|\${PYTHON_VENV}|${PYTHON_VENV}|g" \
@@ -222,19 +225,27 @@ AGG_SBATCH="/tmp/${RUN_ID}_agg.sbatch"
 cat > "${AGG_SBATCH}" <<'AGG_EOF'
 #!/bin/bash
 #SBATCH --job-name=${RUN_ID}-agg
+#SBATCH --partition=cpu-ops
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8G
 #SBATCH --time=00:30:00
 #SBATCH --dependency=afterok:${JOB_ID}
 #SBATCH --output=${RESULTS_ROOT}/logs/agg.out
 #SBATCH --error=${RESULTS_ROOT}/logs/agg.err
 
 set -euo pipefail
+cd ${STAGE_ROOT}/repo
+export PYTHONPATH=${PWD}/scripts/research
 
 # Concatenate per-subject features.csv into one (keep one header)
 FEAT_COMBINED="${RESULTS_ROOT}/features.csv"
-HEADER=$(head -1 $(ls "${RESULTS_ROOT}"/features/*_features.csv | head -1))
+FIRST=$(ls -1 "${RESULTS_ROOT}"/features/*_features.csv 2>/dev/null | head -1 || true)
+if [[ -z "${FIRST}" ]]; then
+    echo "WARN: no per-subject features found — aggregator will produce empty results"
+    exit 0
+fi
+HEADER=$(head -1 "${FIRST}")
 echo "${HEADER}" > "${FEAT_COMBINED}"
 for f in "${RESULTS_ROOT}"/features/*_features.csv; do
     tail -n +2 "${f}" >> "${FEAT_COMBINED}"

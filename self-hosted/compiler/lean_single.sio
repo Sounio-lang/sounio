@@ -1715,7 +1715,7 @@ fn bind_array_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic,
     VAR_TY_HASH[arr_vi as usize] = ty_hash
     em32(0xAA0003EA)  // mov x10, x0
     if LAST_LOCAL_BSS_SPILL != 0 {
-        emit_imm64_reg_a64(0, LAST_LOCAL_BSS_ADDR)
+        emit_image_addr_a64(LAST_LOCAL_BSS_ADDR)
         emit_copy_agg_to_ptr_a64(8, ty_hash)
     } else {
         emit_lea_var_a64(base + nslots - 1)
@@ -1845,9 +1845,9 @@ fn stabilize_return_agg_a64(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
     if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
     if nslots <= 0 { return }
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
-    emit_imm64_reg_a64(11, GL_BSS_BASE + RET_AGG_BSS_OFF)
+    emit_image_addr_reg_a64(11, GL_BSS_BASE + RET_AGG_BSS_OFF)
     emit_copy_words_x10_x11_a64(nslots)
-    emit_imm64_reg_a64(0, GL_BSS_BASE + RET_AGG_BSS_OFF)
+    emit_image_addr_a64(GL_BSS_BASE + RET_AGG_BSS_OFF)
 }
 
 // Load 64-bit immediate into arbitrary register
@@ -1860,6 +1860,32 @@ fn emit_imm64_reg_a64(rd: i64, v: i64) with Mut {
     if v1 != 0 { em32(0xF2A00000 | (v1 << 5) | rd) }
     if v2 != 0 { em32(0xF2C00000 | (v2 << 5) | rd) }
     if v3 != 0 { em32(0xF2E00000 | (v3 << 5) | rd) }
+}
+
+fn macho_arm64_code_vm_base() -> i64 {
+    4294967296 + 16384
+}
+
+fn emit_image_addr_reg_a64(rd: i64, v: i64) with Mut {
+    if TARGET_OS == 2 {
+        let pc = macho_arm64_code_vm_base() + CL
+        let pc_page = (pc >> 12) << 12
+        let target_page = (v >> 12) << 12
+        let page_delta = (target_page - pc_page) >> 12
+        let immlo = page_delta & 3
+        let immhi = (page_delta >> 2) & 0x7FFFF
+        em32(0x90000000 | ((immlo & 3) << 29) | ((immhi & 0x7FFFF) << 5) | rd)
+        let pageoff = v & 0xFFF
+        if pageoff != 0 {
+            em32(0x91000000 | ((pageoff & 0xFFF) << 10) | (rd << 5) | rd)
+        }
+    } else {
+        emit_imm64_reg_a64(rd, v)
+    }
+}
+
+fn emit_image_addr_a64(v: i64) with Mut {
+    emit_image_addr_reg_a64(0, v)
 }
 
 // Patch ARM64 branch instruction at off to jump to target
@@ -8314,6 +8340,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     emit_print_nl()
                 } else {
                     compile_or()
+                    // Observation boundary: println of Unobserved<T> is IO that collapses uncertainty
+                    if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                        tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
+                    }
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64()
                     } else if EXPR_TY == 3 {
@@ -15005,7 +15035,7 @@ fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
     if slot >= 0 { emit_load_var_a64(slot) }
     else {
         let gi = gl_find(ns, ne)
-        if gi >= 0 { emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+        if gi >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
         else { tc_undefined_var(name_tok); em32(0xD2800000) }
     }
     if foff != 0 {
@@ -21179,7 +21209,7 @@ fn emit_print_a64(tok: i64) with Mut, Panic, Div {
     em32(0xD2800000 | ((slen & 0xFFFF) << 5) | 2)  // movz x2, #slen
     // syscall: write
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000004)  // x16 = write syscall (macOS)
+        emit_imm64_reg_a64(16, 4)  // x16 = write syscall (macOS)
     } else {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)  // movz x8, #64 (Linux write)
     }
@@ -21200,7 +21230,7 @@ fn emit_print_cstr_a64() with Mut {
     em32(0xAA0A03E2)  // mov x2, x10
     em32(0xD2800020)  // movz x0, #1
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000004)
+        emit_imm64_reg_a64(16, 4)
     } else {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
     }
@@ -21215,7 +21245,7 @@ fn emit_print_nl_a64() with Mut {
     em32(0x910003E1)  // mov x1, sp
     em32(0xD2800022)  // movz x2, #1
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000004)
+        emit_imm64_reg_a64(16, 4)
     } else {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
     }
@@ -21231,7 +21261,7 @@ fn emit_print_char_lit_a64(ch: i64) with Mut {
     em32(0x910003E1)                                  // mov x1, sp
     em32(0xD2800022)                                  // movz x2, #1
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000004)
+        emit_imm64_reg_a64(16, 4)
     } else {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
     }
@@ -21242,7 +21272,7 @@ fn emit_print_char_lit_a64(ch: i64) with Mut {
 fn emit_assert_fail_a64() with Mut {
     em32(0xD2800020)  // movz x0, #1
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000001)
+        emit_imm64_reg_a64(16, 1)
     } else {
         em32(0xD2800000 | ((93 & 0xFFFF) << 5) | 8)
     }
@@ -21300,7 +21330,7 @@ fn emit_print_int_a64() with Mut {
     // write(1, x1, x2)
     em32(0xD2800020)  // movz x0, #1 (fd=stdout)
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000004)
+        emit_imm64_reg_a64(16, 4)
     } else {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)  // movz x8, #64 (Linux write)
     }
@@ -21327,7 +21357,7 @@ fn emit_print_u64_no_nl_a64() with Mut {
     em32(0xCB010042)                                  // sub x2, x2, x1
     em32(0xD2800020)                                  // movz x0, #1
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000004)
+        emit_imm64_reg_a64(16, 4)
     } else {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
     }
@@ -21372,7 +21402,7 @@ fn emit_print_fixed6_a64() with Mut {
     em32(0x910003E1)  // mov x1, sp
     em32(0xD28000C2)  // movz x2, #6
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000004)
+        emit_imm64_reg_a64(16, 4)
     } else {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
     }
@@ -21470,7 +21500,7 @@ fn emit_read_file_a64() with Mut, Panic {
     if TARGET_OS == 2 {
         // macOS: open(path, O_RDONLY=0)
         em32(0xD2800001)  // movz x1, #0
-        emit_imm64_reg_a64(16, 0x2000005)  // x16 = SYS_open
+        emit_imm64_reg_a64(16, 5)  // x16 = SYS_open
     } else {
         // Linux: openat(AT_FDCWD=-100, path, O_RDONLY=0)
         em32(0xAA0003E1)  // mov x1, x0
@@ -21489,7 +21519,7 @@ fn emit_read_file_a64() with Mut, Panic {
     emit_imm64_reg_a64(4, -1)  // x4 = -1
     em32(0xD2800005)  // x5 = 0
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x20000C5)
+        emit_imm64_reg_a64(16, 197)
     } else {
         em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8)  // x8 = 222 (mmap)
     }
@@ -21501,7 +21531,7 @@ fn emit_read_file_a64() with Mut, Panic {
     em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #16] (fd)
     emit_imm64_reg_a64(2, 0x400000)  // x2 = 4MB
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000003)
+        emit_imm64_reg_a64(16, 3)
     } else {
         em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // x8 = 63 (read)
     }
@@ -21519,7 +21549,7 @@ fn emit_read_file_a64() with Mut, Panic {
     // close(fd)
     em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #16]
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000006)
+        emit_imm64_reg_a64(16, 6)
     } else {
         em32(0xD2800000 | ((57 & 0xFFFF) << 5) | 8)
     }
@@ -21541,7 +21571,7 @@ fn emit_write_file_a64_flags(linux_flags: i64, macos_flags: i64) with Mut, Panic
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(1, macos_flags)
         em32(0xD2800000 | ((0x1A4 & 0xFFFF) << 5) | 2)
-        emit_imm64_reg_a64(16, 0x2000005)
+        emit_imm64_reg_a64(16, 5)
     } else {
         em32(0xAA0003E1)  // mov x1, x0
         emit_imm64_reg_a64(0, -100)
@@ -21562,7 +21592,7 @@ fn emit_write_file_a64_flags(linux_flags: i64, macos_flags: i64) with Mut, Panic
     em32(0xAA0603E1)  // mov x1, x6
     em32(0xAA0403E2)  // mov x2, x4
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000004)
+        emit_imm64_reg_a64(16, 4)
     } else {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
     }
@@ -21571,7 +21601,7 @@ fn emit_write_file_a64_flags(linux_flags: i64, macos_flags: i64) with Mut, Panic
     // close(fd)
     em32(0xAA0703E0)  // mov x0, x7
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000006)
+        emit_imm64_reg_a64(16, 6)
     } else {
         em32(0xD2800000 | ((57 & 0xFFFF) << 5) | 8)
     }
@@ -21595,7 +21625,7 @@ fn emit_file_size_a64() with Mut {
     // x0 = path
     if TARGET_OS == 2 {
         em32(0xD2800001)
-        emit_imm64_reg_a64(16, 0x2000005)
+        emit_imm64_reg_a64(16, 5)
     } else {
         em32(0xAA0003E1)
         emit_imm64_reg_a64(0, -100)
@@ -21607,7 +21637,7 @@ fn emit_file_size_a64() with Mut {
     em32(0xD1000000 | (160 << 10) | (31 << 5) | 31)  // sub sp, sp, #160
     em32(0x910003E1)  // mov x1, sp
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000153)
+        emit_imm64_reg_a64(16, 339)
     } else {
         em32(0xD2800000 | ((80 & 0xFFFF) << 5) | 8)
     }
@@ -21616,7 +21646,7 @@ fn emit_file_size_a64() with Mut {
     em32(0x91000000 | (160 << 10) | (31 << 5) | 31)     // add sp, sp, #160
     em32(0xF8410FE0)  // pop fd
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000006)
+        emit_imm64_reg_a64(16, 6)
     } else {
         em32(0xD2800000 | ((57 & 0xFFFF) << 5) | 8)
     }
@@ -21627,7 +21657,7 @@ fn emit_file_size_a64() with Mut {
 // ─── ARM64 arg_count ───
 fn emit_arg_count_a64() with Mut {
     let argc_addr = GL_BSS_BASE - 16
-    emit_imm64_a64(argc_addr)
+    emit_image_addr_a64(argc_addr)
     em32(0xF9400000)  // ldr x0, [x0]
 }
 
@@ -21635,7 +21665,7 @@ fn emit_arg_count_a64() with Mut {
 fn emit_get_arg_a64() with Mut {
     let argv_addr = GL_BSS_BASE - 8
     em32(0xAA0003E9)  // mov x9, x0
-    emit_imm64_a64(argv_addr)
+    emit_image_addr_a64(argv_addr)
     em32(0xF9400000)  // ldr x0, [x0]
     em32(0xF8697800)  // ldr x0, [x0, x9, lsl #3]
 }
@@ -21774,7 +21804,7 @@ fn emit_heap_alloc_a64() with Mut {
     em32(0x92800004)               // movn x4, #0 (fd = -1)
     em32(0xD2800005)               // movz x5, #0 (offset)
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x20000C5)
+        emit_imm64_reg_a64(16, 197)
     } else {
         em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8) // movz x8, #222 (SYS_mmap Linux)
     }
@@ -21788,7 +21818,7 @@ fn emit_heap_free_a64() with Mut {
     em32(0xD1002000)               // sub x0, x0, #8 (back to mmap base)
     em32(0xF9400001)               // ldr x1, [x0] (total size)
     if TARGET_OS == 2 {
-        emit_imm64_reg_a64(16, 0x2000049)
+        emit_imm64_reg_a64(16, 73)
     } else {
         em32(0xD2800000 | ((215 & 0xFFFF) << 5) | 8) // movz x8, #215 (SYS_munmap Linux)
     }
@@ -22437,7 +22467,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_load_var_a64(base_ptr_slot)
             } else {
                 let gi = gl_find(rns, rne)
-                if gi >= 0 { emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+                if gi >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
                 else { em32(0xD2800000) }
             }
             em32(0xAA0003EA)  // mov x10, x0
@@ -22473,7 +22503,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         }
         else {
             let gi = gl_find(rns, rne)
-            if gi >= 0 { emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+            if gi >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
             else { tc_undefined_var(EP - 1); em32(0xD2800000) }
         }
         EXPR_IS_F64 = 0
@@ -22613,7 +22643,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)
                 emit_imm64_reg_a64(4, -1)
                 em32(0xD2800005)
-                if TARGET_OS == 2 { emit_imm64_reg_a64(16, 0x20000C5) }
+                if TARGET_OS == 2 { emit_imm64_reg_a64(16, 197) }
                 else { em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8) }
                 emit_syscall_a64()
                 emit_copy_agg_to_ptr_a64(EXPR_TY, EXPR_TY_HASH)
@@ -22625,7 +22655,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)
                 emit_imm64_reg_a64(4, -1)
                 em32(0xD2800005)
-                if TARGET_OS == 2 { emit_imm64_reg_a64(16, 0x20000C5) }
+                if TARGET_OS == 2 { emit_imm64_reg_a64(16, 197) }
                 else { em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8) }
                 emit_syscall_a64()
                 emit_pop_x1_a64()
@@ -22722,6 +22752,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_print_nl_a64()
                 } else {
                     compile_or_a64()
+                    // Observation boundary: println of Unobserved<T> is IO that collapses uncertainty
+                    if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                        tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
+                    }
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64_a64()
                     } else if EXPR_TY == 3 {
@@ -22739,12 +22773,18 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             if src_match(ns, ne - ns, "print_int") {
                 EP = EP + 1; compile_or_a64()
+                if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                    tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
+                }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_print_int_a64()
                 em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
             if src_match(ns, ne - ns, "print_f64") {
                 EP = EP + 1; compile_or_a64()
+                if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                    tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
+                }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_print_f64_a64()
                 em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
@@ -23720,7 +23760,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         } else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
-                emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])
+                emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])
                 if GL[(gi * 4 + 3) as usize] == 0 { em32(0xF9400000) }
                 EXPR_TY = GL_TY[gi as usize]
                 EXPR_TY_HASH = GL_TY_HASH[gi as usize]
@@ -24678,9 +24718,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             VAR_MUT[arr_vi as usize] = decl_is_mut
             let base = ptr_slot - nslots
             if LAST_LOCAL_BSS_SPILL != 0 {
-                emit_imm64_reg_a64(11, LAST_LOCAL_BSS_ADDR)
+                emit_image_addr_reg_a64(11, LAST_LOCAL_BSS_ADDR)
                 emit_zero_words_x11_a64(nslots)
-                emit_imm64_reg_a64(0, LAST_LOCAL_BSS_ADDR)
+                emit_image_addr_a64(LAST_LOCAL_BSS_ADDR)
             } else {
                 emit_lea_var_a64(base + nslots - 1)
                 em32(0xAA0003EB)  // mov x11, x0
@@ -24871,7 +24911,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if slot >= 0 { emit_load_var_a64(slot) }
         else {
             let gi = gl_find(ns, ne)
-            if gi >= 0 { emit_imm64_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+            if gi >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
             else { tc_undefined_var(name_tok); em32(0xD2800000) }
         }
         if off != 0 {
