@@ -6,8 +6,8 @@ package sounio where
 
 lean_lib Sounio where
   roots := #[`ElfLinker, `TypeChecker, `Effects, `LinearTypes, `Epistemic,
-             `OctonionAlgebra, `EpistemicGemm, `EffectLinear,
-             `HessianAD, `SecondOrderGUM, `NonAssocHessian,
+             `OctonionAlgebra, `FanoLabellingOrbits, `EpistemicGemm,
+             `EffectLinear, `HessianAD, `SecondOrderGUM, `NonAssocHessian,
              `TypeCheckerSoundness, `KnowledgeArithmeticSoundness,
              `ChannelAssignmentSemantics, `GradientTopology,
              `GradientTopologyBridge]
