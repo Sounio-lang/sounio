@@ -2,8 +2,8 @@
 topic_id: repo.docs.guide.minimum-viable-sounio
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: 2026-04-22
+validated_by: Codex
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.minimum-viable-sounio
 -->
 
@@ -11,13 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.minimum-
 
 This guide is intentionally conservative. It describes what is currently validated by committed artifacts and repository gates, not the full ambition implied by the source tree.
 
-Snapshot date: **2026-03-07**
+Snapshot date: **2026-04-22**
 
 ## What is reliable right now
 
 ### 1. Checked compiler entry point
 
-For user-facing docs, the safest entry point is the checked JIT artifact:
+For user-facing docs, the safest entry point in this checkout is the host-aware
+checked self-hosted launcher:
 
 ```bash
 export SOUC_BIN="$(pwd)/bin/souc"
@@ -29,10 +30,19 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 Current checked-artifact status:
 
-- version `1.0.0-beta.4`
-- Cranelift JIT enabled
-- LLVM and GPU codegen disabled
-- LSP, SMT, ontology, distributed, and package-manager features disabled
+- version `1.0.0-beta.5`
+- checked host lanes:
+  - Linux `x86_64`
+  - macOS `arm64`
+  - macOS `x86_64`
+- compatibility commands:
+  - `check`
+  - `compile`
+  - `build`
+  - `run`
+  - `info`
+- Apple support is via the current self-hosted Mach-O lane, not via native-v2 completion
+- JIT is not part of the Apple support contract for this checkout
 
 There is also a separate checked GPU profile at
 `artifacts/omega/souc-bin/souc-linux-x86_64-gpu`. That profile is real and
@@ -109,6 +119,7 @@ Use these labels when describing support:
 - Do not infer support from a directory existing under `stdlib/` or `self-hosted/`.
 - Do not infer runtime maturity from `check` alone.
 - Do not describe LLVM, GPU, or LSP support for a checked artifact unless `souc info` for that specific artifact confirms it.
+- Do not treat Apple support as implying JIT parity.
 
 ## Minimal verification sequence
 
@@ -119,9 +130,9 @@ export SOUC_BIN="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" check tests/run-pass/covid_2020_kernel.sio
-"$SOUC_BIN" check tests/run-pass/vancomycin_propagation.sio
-"$SOUC_BIN" check tests/compile-fail/vancomycin_low_conf.sio
+"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 
 bash scripts/stdlib_hyper_execution_gate.sh
 bash scripts/stdlib_science_pipeline_gate.sh

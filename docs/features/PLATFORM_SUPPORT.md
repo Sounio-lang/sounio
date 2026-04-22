@@ -2,335 +2,174 @@
 topic_id: repo.docs.features.platform-support
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A6
+last_validated: 2026-04-22
+validated_by: Codex
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.features.platform-support
 -->
 
 # Platform Support
 
-This document describes the platforms supported by the Sounio compiler and runtime, along with known limitations and platform-specific considerations.
+This document describes the platform contract for the current repository checkout.
+It is intentionally conservative: support means a checked artifact, a repo workflow,
+or a CI gate proves the lane.
 
-## Supported Platforms
+## Supported Host Lanes
 
-### Tier 1: Full Support
+### Tier 1: First-Class Supported Hosts
 
-These platforms are tested in CI and guaranteed to work:
+These hosts have checked compiler artifacts and explicit CI self-host gates.
 
-| Platform | Architecture | Status | Notes |
-|----------|-------------|--------|-------|
-| Linux    | x86_64      | ✅     | Primary development platform |
-| Linux    | aarch64     | ✅     | Full support, tested in CI |
-| macOS    | aarch64 (M1+) | ✅   | Native ARM support |
-| macOS    | x86_64      | ✅     | Intel Macs |
+| Host OS | Architecture | Status | Contract |
+|---------|--------------|--------|----------|
+| Linux | x86_64 | ✅ | Checked self-hosted compiler artifact, self-host fixed-point gate, full suite lane |
+| macOS | arm64 | ✅ | Checked self-hosted compiler artifact, host-native self-host gate, Mach-O ARM64 output lane |
 
-### Tier 2: Best Effort
+### Tier 2: Supported But Not Yet Fully Gated
 
-These platforms should work but are not regularly tested:
+These lanes are part of the active contract, but do not yet have the same CI
+coverage as the Tier 1 hosts above.
 
-| Platform | Architecture | Status | Notes |
-|----------|-------------|--------|-------|
-| Windows  | x86_64      | ⚠️     | Requires MinGW/MSVC, limited testing |
-| FreeBSD  | x86_64      | ⚠️     | Should work, not tested in CI |
-| OpenBSD  | x86_64      | ⚠️     | Should work, not tested in CI |
+| Host OS | Architecture | Status | Contract |
+|---------|--------------|--------|----------|
+| macOS | x86_64 | ⚠️ | Checked self-hosted compiler artifact and Mach-O output support; no dedicated CI lane yet |
+| Linux | aarch64 | ⚠️ | Target triple is accepted and compile-only output is covered; no checked host artifact in this checkout |
 
-### Unsupported
+### Not In The Current Contract
 
-- 32-bit architectures (i686, armv7)
-- Big-endian systems (except via QEMU testing)
-- WebAssembly (planned future support)
+- Windows host support
+- 32-bit architectures
+- Big-endian hosts
+- JIT parity on macOS
+- Native-v2 parity as the baseline Apple implementation
 
-## Build Requirements
+## Compiler Artifact Lanes
 
-### Linux
+The repository currently exposes three distinct compiler lanes. Do not treat them
+as interchangeable.
 
-```bash
-# Ubuntu/Debian
-sudo apt-get install build-essential gcc make
+### 1. Checked self-hosted launcher (`bin/souc`)
 
-# Fedora/RHEL
-sudo dnf install gcc make
+This is the default repo-local entrypoint for contributors.
 
-# Build
-cd bootstrap/poseidon
-make
-cd ../..
-cargo build --release
-```
+- Host-aware wrapper around checked self-hosted artifacts
+- Supports Linux `x86_64`, macOS `arm64`, and macOS `x86_64`
+- Provides compatibility commands:
+  - `check`
+  - `compile`
+  - `build`
+  - `run`
+  - `info`
+  - `--version`
+- Also supports the raw self-hosted compiler interface:
+  - `bin/souc <source.sio> <output> [--target <triple>]`
 
-### macOS
+### 2. Omega/pinned release lane
 
-```bash
-# Install Xcode Command Line Tools
-xcode-select --install
+This lane is still important for richer Linux workflows and pinned-release
+resolution, especially for workflows that depend on capabilities outside the
+checked self-hosted launcher contract.
 
-# Build
-cd bootstrap/poseidon
-make
-cd ../..
-cargo build --release
-```
+- Resolver: `scripts/omega/omega_resolve_souc_bin.sh`
+- Primary use: pinned Linux release binaries, GPU/JIT related flows, stricter provenance workflows
+- Not the baseline for Apple support in this checkout
 
-### Windows
+### 3. Native-v2 preview lane
 
-**Option 1: MinGW-w64**
+This is an active implementation track, but it is not the support baseline for
+Apple parity.
 
-```powershell
-# Install via MSYS2
-pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make
+- Some ARM64 lowering remains preview-grade
+- Apple support in the current contract is delivered through the current
+  self-hosted Mach-O path, not through native-v2 completion
 
-# Build
-cd bootstrap\poseidon
-mingw32-make
-cd ..\..
-cargo build --release
-```
+## Native Output Targets
 
-**Option 2: MSVC**
+The self-hosted compiler accepts these target triples in the current checkout:
 
-```powershell
-# Install Visual Studio Build Tools
-# Then build with MSVC
-cd bootstrap\poseidon
-nmake /f Makefile.msvc  # (requires creation of Windows Makefile)
-cd ..\..
-cargo build --release
-```
+| Target triple | Output format | Status |
+|---------------|---------------|--------|
+| `x86_64-linux` | ELF x86_64 | ✅ |
+| `aarch64-linux` | ELF ARM64 | ✅ compile-only coverage |
+| `x86_64-macos` | Mach-O x86_64 | ✅ |
+| `aarch64-macos` | Mach-O arm64 | ✅ |
 
-## Binary Format: SOIR v1
+Cross-target outputs must be executed on the matching target OS and architecture.
 
-The Sounio Object IR (SOIR) binary format is **always little-endian**, regardless of host platform. The Poseidon VM automatically converts between little-endian and host byte order when loading bytecode.
+## What CI Proves
 
-### Endianness Handling
+### Linux `x86_64`
 
-- **Little-endian hosts** (x86_64, aarch64): No conversion needed
-- **Big-endian hosts** (POWER, SPARC): Automatic byte swapping via `platform.h`
-- **Mixed-endian hosts**: Not supported
+The main CI lane proves:
 
-The platform abstraction layer in `bootstrap/poseidon/platform.h` provides:
-- `platform_le64_to_host()` - Convert i64 from LE to host
-- `platform_host_to_le64()` - Convert i64 from host to LE
-- Similar functions for 32-bit and 16-bit values
+- host-native compiler bootstrap
+- self-host fixed point
+- representative runtime smokes
+- full test suite execution
+- additional native-v2 feature gate coverage
 
-## Native Backend
+### macOS `arm64`
 
-The native backend (`--backend=native`) produces ELF executables on Linux/BSD and Mach-O executables on macOS.
+The Apple self-host gate proves:
 
-### Linux (ELF)
+- host-native compiler bootstrap on Apple Silicon
+- self-host fixed point on Apple Silicon
+- host-native runtime smokes for representative compiled programs
+- compile-only cross-target smoke for the secondary macOS target lane
 
-- **ABI**: System V AMD64 ABI
-- **Entry point**: `_start`
-- **Syscalls**: Direct via `syscall` instruction
-- **Linking**: Static by default, no libc dependency
-- **Tested on**: Ubuntu 24.04, Fedora 40, Arch Linux
+### What CI Does Not Yet Prove
 
-### macOS (Mach-O)
+- macOS `x86_64` as a dedicated host lane
+- Linux `aarch64` as a dedicated host lane
+- Apple JIT parity
+- native-v2 as the canonical Apple implementation
 
-- **ABI**: macOS x86_64/ARM64 ABI
-- **Entry point**: `_main` (with leading underscore)
-- **Syscalls**: Via macOS syscall convention
-- **Linking**: Static linking not supported, uses libSystem.dylib
-- **Tested on**: macOS 14 (Sonoma), macOS 15 (Sequoia)
+## Recommended Usage
 
-### Windows (PE/COFF)
-
-- **Status**: Planned, not yet implemented
-- **Blocker**: Need PE/COFF linker support
-- **Workaround**: Use Cranelift JIT or VM backend on Windows
-
-## Poseidon VM
-
-The Poseidon VM is a portable C-based bytecode interpreter for SOIR v1.
-
-### Portability Features
-
-- **Pure C99**: No platform-specific assembly (except for runtime syscalls)
-- **Platform abstraction**: All OS-specific code isolated in `platform.h`
-- **Endianness-safe**: Automatic conversion from little-endian SOIR format
-- **File I/O**: Abstracted for POSIX vs Windows
-- **Path handling**: Platform-specific separators (`/` vs `\`)
-
-### Performance
-
-Approximate execution speed relative to native code:
-
-| Platform | Speed | Notes |
-|----------|-------|-------|
-| Linux x86_64 | ~5-10x slower | Baseline |
-| Linux aarch64 | ~5-10x slower | Similar to x86_64 |
-| macOS M1 | ~5-10x slower | Rosetta 2 not needed |
-| Windows | ~10-15x slower | Some overhead from Windows I/O |
-
-## Path Handling
-
-Sounio uses Rust's `std::path` for all path operations, which provides cross-platform abstractions:
-
-- **Path separators**: `/` on Unix, `\` on Windows
-- **Drive letters**: Supported on Windows (`C:\path\to\file`)
-- **UNC paths**: Supported on Windows (`\\server\share\file`)
-- **Unicode paths**: Full UTF-8 support on all platforms
-- **Spaces in paths**: Properly handled via shell quoting
-
-### Examples
+For repository work from a checkout:
 
 ```bash
-# Linux/macOS
-souc build examples/hello.sio -o /tmp/hello
+export SOUC_BIN="$(pwd)/bin/souc"
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-# Windows (both styles work)
-souc build examples/hello.sio -o C:\temp\hello.exe
-souc build examples/hello.sio -o C:/temp/hello.exe
+"$SOUC_BIN" --version
+"$SOUC_BIN" info
+"$SOUC_BIN" check examples/hello.sio
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello.out
+"$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
 ```
 
-## Known Limitations
-
-### Per-Platform
-
-**Linux**:
-- ✅ No major limitations
-
-**macOS**:
-- ⚠️ Static linking not supported (requires libSystem.dylib)
-- ⚠️ Code signing may be required on ARM Macs for JIT
-- ⚠️ Notarization required for distribution
-
-**Windows**:
-- ❌ Native backend not yet implemented
-- ⚠️ Poseidon VM requires MinGW or MSVC
-- ⚠️ Some test scripts use Bash (requires WSL or Git Bash)
-
-### Architecture-Specific
-
-**x86_64**:
-- ✅ Full support for all backends
-- ✅ AVX-512 SIMD support (with `avx512` feature flag)
-
-**aarch64**:
-- ✅ Full support for all backends
-- ✅ NEON SIMD support
-- ⚠️ Some assembly optimizations pending
-
-**Other architectures**:
-- ❌ Not supported (use Poseidon VM or Cranelift)
-
-## Performance Tuning
-
-### Compilation Flags
+For explicit target output:
 
 ```bash
-# Maximum optimization
-cargo build --release
-
-# Platform-specific optimizations
-RUSTFLAGS="-C target-cpu=native" cargo build --release
-
-# Link-time optimization
-RUSTFLAGS="-C lto=fat" cargo build --release
-
-# Profile-guided optimization (Linux only)
-cargo pgo build -- --release
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-linux-arm --target aarch64-linux
 ```
 
-### Backend Selection
+## Current Limitations
 
-For best performance on each platform:
+### Apple-specific
 
-| Platform | Best Backend | Fallback |
-|----------|-------------|----------|
-| Linux x86_64 | Native (`--backend=native`) | Cranelift JIT |
-| Linux aarch64 | Native (`--backend=native`) | Cranelift JIT |
-| macOS x86_64 | Cranelift JIT | Poseidon VM |
-| macOS ARM64 | Cranelift JIT | Poseidon VM |
-| Windows | Cranelift JIT | Poseidon VM |
+- Apple Silicon is a first-class supported host for the checked self-hosted
+  compiler lane, but JIT is not part of that parity contract.
+- macOS support currently ships as separate `arm64` and `x86_64` artifacts.
+  Universal-binary packaging is not yet part of the release contract.
+- The Apple lane is anchored to the current self-hosted Mach-O path, not to
+  native-v2 completion.
 
-### Memory Usage
+### General
 
-Typical memory usage for compilation:
+- Some repo workflows still depend on richer omega/pinned binaries rather than
+  the checked self-hosted launcher.
+- Not every historical script or archived doc describes the current host-aware
+  launcher contract.
+- Cross-target compile support is broader than host-native execution support.
 
-| Operation | Memory | Notes |
-|-----------|--------|-------|
-| Parse small file (<1000 LOC) | ~10 MB | |
-| Parse large file (10K LOC) | ~50 MB | |
-| Typecheck stdlib | ~100 MB | One-time cost |
-| Native codegen | ~20 MB per module | |
-| Full build (self-hosted) | ~500 MB peak | Parallel compilation |
+## Bottom Line
 
-## Troubleshooting
+If you want the safest statement for the current repository:
 
-### "Failed to allocate module" on Poseidon VM
-
-- **Cause**: Out of memory or corrupt SOIR file
-- **Fix**: Check file integrity, increase system memory
-
-### "Permission denied" when running executables
-
-**Linux/macOS**:
-```bash
-chmod +x ./myprogram
-./myprogram
-```
-
-**Windows**:
-- Check Windows Defender / antivirus
-- Run as Administrator if needed
-
-### "Cannot find -lc" on macOS
-
-- **Cause**: Trying to statically link (not supported on macOS)
-- **Fix**: Use dynamic linking (default) or use Poseidon VM
-
-### Slow compilation on Windows
-
-- **Cause**: Windows Defender scanning each file
-- **Fix**: Add Sounio workspace to Defender exclusions
-
-### Big-endian systems
-
-While SOIR format is little-endian, the Poseidon VM will automatically convert byte order. To test on big-endian systems:
-
-```bash
-# Install QEMU
-sudo apt-get install qemu-user
-
-# Cross-compile for big-endian
-cargo build --target powerpc64-unknown-linux-gnu
-
-# Run via QEMU
-qemu-ppc64 target/powerpc64-unknown-linux-gnu/debug/souc --version
-```
-
-## Reporting Platform Issues
-
-When reporting platform-specific bugs, please include:
-
-1. **Platform details**:
-   - OS and version (`uname -a` on Unix, `systeminfo` on Windows)
-   - Architecture (`uname -m` or `arch`)
-   - Compiler version (`gcc --version` or `rustc --version`)
-
-2. **Reproduction steps**:
-   - Minimal test case
-   - Exact commands run
-   - Expected vs actual behavior
-
-3. **Environment**:
-   - `RUST_BACKTRACE=1` output
-   - `SOUNIO_DEBUG=1` output (if relevant)
-   - Any custom build flags
-
-File issues at: https://github.com/demetrios-chiuratto/sounio/issues
-
-## Future Platform Support
-
-Planned platform additions:
-
-- **WebAssembly**: VM backend targeting WASI
-- **Windows native backend**: PE/COFF executable generation
-- **RISC-V**: Native backend for RISC-V 64-bit
-- **Mobile**: Android and iOS support via VM backend
-
-## See Also
-
-- [docs/compiler/ARCHITECTURE.md](../compiler/ARCHITECTURE.md) - Compiler architecture
-- [docs/compiler/CODE_GENERATION_ARCHITECTURE.md](../compiler/CODE_GENERATION_ARCHITECTURE.md) - Backend implementation details
-- [bootstrap/poseidon/README.md](../../bootstrap/poseidon/README.md) - Poseidon VM documentation
+- Linux `x86_64` and macOS `arm64` are the real supported hosts
+- macOS support is delivered through the checked self-hosted Mach-O compiler lane
+- JIT parity is not included in the Apple support contract
+- native-v2 remains an important future convergence path, but it is not the
+  current Apple baseline

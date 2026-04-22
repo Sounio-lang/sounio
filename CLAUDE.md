@@ -69,23 +69,30 @@ fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 }
 
 ## Build & Run
 
-The compiler is **self-hosted** (written in Sounio). Use the native wrapper:
+The compiler is **self-hosted** (written in Sounio). Use the host-aware launcher:
 
 ```bash
 SOUC=./bin/souc
 
+$SOUC --version                        # selected launcher version
+$SOUC info                             # selected host artifact + wrapper contract
 $SOUC check examples/file.sio          # type-check
-$SOUC run examples/file.sio            # compile to temp ELF, execute, clean up
-$SOUC compile file.sio -o output.elf   # direct native compilation
-$SOUC repl                             # not yet supported in native mode
+$SOUC run examples/file.sio            # compile to temp host binary, execute, clean up
+$SOUC compile file.sio -o output.out   # direct native compilation
+$SOUC compile file.sio -o out.macho --target aarch64-macos
 
-# Debug flags not yet supported in native mode:
+# Pass-through debug flags supported by the checked self-hosted launcher:
 #   --show-ast
 #   --show-types
+#   --r15-monitor
+
+# Not supported by the checked self-hosted launcher:
+#   repl
+#   sysroot ...
 
 # Bootstrap chain
-./artifacts/self-hosted/souc-self-hosted-x86_64 self-hosted/compiler/lean_single.sio gen1.elf
-./gen1.elf self-hosted/compiler/lean_single.sio gen2.elf
+./bin/souc self-hosted/compiler/lean_single.sio gen1.out
+./gen1.out self-hosted/compiler/lean_single.sio gen2.out
 ```
 
 **Stdlib path** (when outside repo): `export SOUNIO_STDLIB_PATH=$(pwd)/stdlib`
@@ -99,7 +106,7 @@ $SOUC repl                             # not yet supported in native mode
 | `self-hosted/lexer/`, `parser/` | Frontend (tokenizer, recursive descent) |
 | `self-hosted/check/`, `types/` | Bidirectional inference + effects |
 | `self-hosted/ir/` | IR lowering, optimization, e-graph |
-| `self-hosted/native/` | x86-64 ELF emission |
+| `self-hosted/native/` | Native ELF and Mach-O emission in the current self-hosted lane |
 | `self-hosted/compiler/` | Codegen drivers (lean, IR, GPU) |
 | `stdlib/epistemic/` | Knowledge<T>, uncertainty (GUM) |
 | `stdlib/units/` | Dimensional analysis |

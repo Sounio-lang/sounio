@@ -2,8 +2,8 @@
 topic_id: website.docs.getting-started
 authority: dual
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-04-22
+validated_by: Codex
 source_of_truth: docs/governance/topic-registry.v1.json#website.docs.getting-started
 -->
 
@@ -13,11 +13,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#website.docs.getting-sta
 
 Welcome to **Sounio**, a programming language and research platform for scientific code that needs explicit uncertainty, provenance, and gate-backed validation.
 
-This guide is intentionally conservative. It reflects the repository state validated on March 9, 2026.
+This guide is intentionally conservative. It reflects the repository state validated on April 22, 2026.
 
 ## 1. Use A Real Compiler Artifact
 
-For this checkout, the easiest path is the signed Linux `x86_64` JIT artifact already committed under `artifacts/omega/souc-bin/`:
+For this checkout, the easiest path is the checked self-hosted compiler launcher at `bin/souc`. It selects the matching checked artifact for Linux `x86_64`, macOS `arm64`, or macOS `x86_64`:
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
@@ -28,12 +28,14 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 "$SOUC_BIN" --version
 "$SOUC_BIN" info
-"$SOUC_BIN" sysroot stdlib-paths
+"$SOUC_BIN" check examples/hello.sio
+"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 ```
 
-In this repo snapshot, that artifact reports `souc 1.0.0-beta.4`.
+In this repo snapshot, `bin/souc` is the conservative default for local work from the repository checkout. It selects the host artifact automatically, exposes compatibility commands for `check/run/compile/build`, and still supports the raw self-hosted compiler interface when you want explicit `<source> <output>` invocation.
 
-There is also a separate checked GPU artifact for GPU-specific workflows:
+There is also a separate checked Linux `x86_64` GPU/JIT artifact for GPU-specific workflows:
 
 ```bash
 export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
@@ -48,23 +50,21 @@ If you need the repo to resolve a pinned binary path for you:
 scripts/omega/omega_resolve_souc_bin.sh --print-path --allow-local-fallback
 ```
 
-## 2. Start With `check`
+## 2. Start With Conservative Artifact Smokes
 
-The most reliable way to validate language features in this repo is `souc check`.
+The most reliable way to validate the checked self-hosted artifact is to use the compatibility commands while still proving the compiler can rebuild itself.
 
 ```bash
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" check tests/run-pass/covid_2020_kernel.sio
-"$SOUC_BIN" check tests/run-pass/vancomycin_propagation.sio
-"$SOUC_BIN" check tests/compile-fail/vancomycin_low_conf.sio
+"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
 ```
 
 Expected behavior:
 
-- `examples/hello.sio` passes
-- `covid_2020_kernel.sio` passes
-- `vancomycin_propagation.sio` passes
-- `vancomycin_low_conf.sio` fails with the expected confidence-bound type error
+- on Linux hosts, compiled outputs are native ELF binaries
+- on macOS hosts, compiled outputs are native Mach-O binaries for the selected target
+- cross-target outputs must be executed on the matching target OS/architecture
 
 ## 3. Your First Program
 
@@ -76,16 +76,10 @@ fn main() with IO {
 }
 ```
 
-Type-check it:
+Compile it:
 
 ```bash
-"$SOUC_BIN" check hello.sio
-```
-
-If your selected `souc` variant supports the runtime path you need, you can then try:
-
-```bash
-"$SOUC_BIN" run hello.sio
+"$SOUC_BIN" compile hello.sio -o /tmp/hello.out
 ```
 
 ## 4. What Is Actually Verified Today
@@ -154,9 +148,10 @@ souc run file.sio
 souc build file.sio -o output
 souc check file.sio --show-ast
 souc check file.sio --show-types
-souc sysroot stdlib-paths
 souc info
 ```
+
+Broader `sysroot` and pinned-release workflows live in the omega lane, not in the checked self-hosted launcher.
 
 ## 7. Examples
 
