@@ -197,8 +197,12 @@ sed -i \
     -e "s|\${PYTHON_VENV}|${PYTHON_VENV}|g" \
     "${SBATCH}"
 
-# Copy + submit
-kubectl -n "${NS}" cp "${SBATCH}" "${LOGIN_POD_NAME}:${STAGE_ROOT}/job.sbatch"
+# Copy + submit (tar workaround: kubectl cp sporadically writes null bytes on this cluster)
+SBATCH_BASENAME=$(basename "${SBATCH}")
+( cd "$(dirname "${SBATCH}")" && tar cf - "${SBATCH_BASENAME}" ) \
+    | kubectl -n "${NS}" exec -i "${LOGIN_POD_NAME}" -- tar xf - -C "${STAGE_ROOT}"
+kubectl -n "${NS}" exec "${LOGIN_POD_NAME}" -- \
+    mv "${STAGE_ROOT}/${SBATCH_BASENAME}" "${STAGE_ROOT}/job.sbatch"
 JOB_ID=$(kubectl -n "${NS}" exec "${LOGIN_POD_NAME}" -- \
     sbatch --parsable "${STAGE_ROOT}/job.sbatch")
 echo "submitted job ${JOB_ID} — array 0..${ARRAY_END} at parallelism ${ARRAY_PARALLELISM}"
@@ -279,7 +283,11 @@ sed -i \
     -e "s|\${PYTHON_VENV}|${PYTHON_VENV}|g" \
     "${AGG_SBATCH}"
 
-kubectl -n "${NS}" cp "${AGG_SBATCH}" "${LOGIN_POD_NAME}:${STAGE_ROOT}/agg.sbatch"
+AGG_SBATCH_BASENAME=$(basename "${AGG_SBATCH}")
+( cd "$(dirname "${AGG_SBATCH}")" && tar cf - "${AGG_SBATCH_BASENAME}" ) \
+    | kubectl -n "${NS}" exec -i "${LOGIN_POD_NAME}" -- tar xf - -C "${STAGE_ROOT}"
+kubectl -n "${NS}" exec "${LOGIN_POD_NAME}" -- \
+    mv "${STAGE_ROOT}/${AGG_SBATCH_BASENAME}" "${STAGE_ROOT}/agg.sbatch"
 AGG_JOB_ID=$(kubectl -n "${NS}" exec "${LOGIN_POD_NAME}" -- \
     sbatch --parsable "${STAGE_ROOT}/agg.sbatch")
 echo "submitted aggregator job ${AGG_JOB_ID} (depends on ${JOB_ID})"
