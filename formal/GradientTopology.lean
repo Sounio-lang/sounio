@@ -247,6 +247,7 @@ inductive Expr : Type where
   | value  (k : Nat)                : Expr
   | call2  (f : FnId) (e1 e2 : Expr): Expr
   | callN  (f : FnId) {n : Nat} (args : Fin n → Expr) : Expr
+  | ifE    (cond e1 e2 : Expr)      : Expr
 
 /-- A typing environment mapping variables to their declared channel set.
     Corresponds to `VAR_CH_SET` indexed by variable slot. -/
@@ -278,6 +279,9 @@ inductive Typing (Γ : TyEnv) : Expr → ChSet → Prop where
   | tCallN (f : FnId) {n : Nat} (args : Fin n → Expr) (Ss : Fin n → ChSet)
       (h : ∀ i : Fin n, Typing Γ (args i) (Ss i)) :
       Typing Γ (Expr.callN f args) (chsetUnionFin Ss)
+  | tIf (cond e1 e2 : Expr) (Sc S1 S2 : ChSet)
+      (hc : Typing Γ cond Sc) (h1 : Typing Γ e1 S1) (h2 : Typing Γ e2 S2) :
+      Typing Γ (Expr.ifE cond e1 e2) (Sc.union (S1.union S2))
 
 -- ---------------------------------------------------------------------------
 -- §4. Big-step semantics parameterised by a function table
@@ -337,6 +341,23 @@ inductive Eval (F : FnTable) (ρ : VarEnv) : Expr → RuntimeVal → Prop where
       (h : ∀ i : Fin n, Eval F ρ (args i) (vs i))
       (hfn : F.evalN f n vs ret) :
       Eval F ρ (Expr.callN f args) ret
+  /-- `if` big-step semantics — then-arm selected.  The result value's
+      `.value` is the then-arm's, and the footprint is the union of the
+      cond's footprint and the then-arm's footprint (the else-arm didn't
+      run, so its footprint doesn't contribute).  Both arms must admit
+      an evaluation to preserve well-formedness — matches the compiler's
+      "both arms compiled, one executed" contract. -/
+  | eIfThen (cond e1 e2 : Expr) (vc v1 : RuntimeVal)
+      (hc : Eval F ρ cond vc)
+      (h1 : Eval F ρ e1 v1) :
+      Eval F ρ (Expr.ifE cond e1 e2)
+        ⟨v1.value, vc.footprint.union v1.footprint⟩
+  /-- `if` big-step semantics — else-arm selected.  Mirror of `eIfThen`. -/
+  | eIfElse (cond e1 e2 : Expr) (vc v2 : RuntimeVal)
+      (hc : Eval F ρ cond vc)
+      (h2 : Eval F ρ e2 v2) :
+      Eval F ρ (Expr.ifE cond e1 e2)
+        ⟨v2.value, vc.footprint.union v2.footprint⟩
 
 -- ---------------------------------------------------------------------------
 -- §5. The body-respects-topology hypothesis
@@ -482,6 +503,27 @@ theorem gtt_sound
           (chsetUnionFin Ss)
           ret_sub_args
           (chsetUnionFin_mono _ _ si)
+  | ifE cond e1 e2 ihc ih1 ih2 =>
+    intro S v hT hE
+    cases hT with
+    | tIf _ _ _ Sc S1 S2 hTc hT1 hT2 =>
+      -- Case on which arm was selected at runtime.
+      cases hE with
+      | eIfThen _ _ _ vc v1 hEc hE1 =>
+        -- v = ⟨v1.value, vc.footprint ∪ v1.footprint⟩
+        -- Goal: (vc.footprint ∪ v1.footprint).subset (Sc ∪ (S1 ∪ S2))
+        have sc : vc.footprint.subset Sc := ihc Sc vc hTc hEc
+        have s1 : v1.footprint.subset S1 := ih1 S1 v1 hT1 hE1
+        -- v1 ⊆ S1 ⊆ S1 ∪ S2
+        have s1' : v1.footprint.subset (S1.union S2) :=
+          ChSet.subset_trans _ S1 _ s1 (ChSet.subset_union_left S1 S2)
+        exact ChSet.union_mono _ _ _ _ sc s1'
+      | eIfElse _ _ _ vc v2 hEc hE2 =>
+        have sc : vc.footprint.subset Sc := ihc Sc vc hTc hEc
+        have s2 : v2.footprint.subset S2 := ih2 S2 v2 hT2 hE2
+        have s2' : v2.footprint.subset (S1.union S2) :=
+          ChSet.subset_trans _ S2 _ s2 (ChSet.subset_union_right S1 S2)
+        exact ChSet.union_mono _ _ _ _ sc s2'
 
 -- ---------------------------------------------------------------------------
 -- §7. The union rule is the right conservative body-discharge
@@ -1153,6 +1195,7 @@ theorem regression_my_sum_topology
 | Canary: proj_a with UP=⟨true,false⟩ types at `{arg₀}` only            | Proved  | `canary_proj_a_only_arg0`                |
 | **Fin-indexed channel-set union / monotonicity / membership**         | Proved  | `chsetUnionFin_*` / `subset_chsetUnionFin` |
 | **`gtt_sound` at `Expr.callN` (week-5 surface)**                      | Proved  | `gtt_sound` (`callN` case)               |
+| **`gtt_sound` at `Expr.ifE` (week-6 surface, both-arms-union)**       | Proved  | `gtt_sound` (`ifE` case, 2 sub-cases)    |
 | **Body-precision soundness for direct n-ary `callN`** (week-5)        | Proved  | `gtt_sound_body_callN`                   |
 | Fin body-precision refines n-ary union / monotone / all-used          | Proved  | `usedUnionFin_subset_chsetUnionFin` etc. |
 | Canary: `usedUnionFin` at arity 3 collapses to `S0`                   | Proved  | `canary_callN_proj_a_fin*`               |
@@ -1177,11 +1220,16 @@ arity at the set-theoretic level.
 
 ## What remains open
 
-1. Body-level precision beyond return-position (match / if arms, loops,
-   recursion fixed-point).  Week-4 covers the return-position tail
-   fragment; richer body CFA is deferred.  The §7d `gtt_sound_body_callN`
-   still only handles return-position n-ary calls — body-level
-   precision for `callN` arms of `match` / `if` remains to week-6+.
+1. **`Expr.ifE` path-sensitive tightening + compiler-side arm-union
+   emission.**  Week-6 Stage 1 (current) adds `Expr.ifE` + `Typing.tIf`
+   at the both-arms-union form (`Sc ∪ (S1 ∪ S2)`).  Stage 2 would
+   tighten to a path-sensitive form tracking which arm ran at runtime,
+   AND fix the compiler soundness hole: `compile_primary` (line ~15889)
+   currently compiles both arms but doesn't propagate EXPR_CH_SET
+   through them, leaking the last-compiled arm's topology — which this
+   section's theorem *would* correctly identify as sound if fixed.
+   Body-level precision for match arms, loops, recursion fixed-point
+   remain deferred beyond that.
 2. Closure / fn-ref indirect calls, `Expr.call2` and `Expr.callN` here
    are both direct-only.  The compiler week-3 scope leaves
    closure-indirect calls leaking the last-arg topology (§7c docstring).
