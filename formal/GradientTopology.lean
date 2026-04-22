@@ -568,6 +568,102 @@ theorem gtt_sound
         exact ChSet.union_mono _ _ _ _ sc si'
 
 -- ---------------------------------------------------------------------------
+-- §6b. Week-9 path-sensitive tightening (open item #1)
+-- ---------------------------------------------------------------------------
+
+/-!
+The §6 main theorem `gtt_sound` upper-bounds an `ifE` value's footprint
+by `Sc ∪ (S1 ∪ S2)` — the typing rule's both-arms-union.  At runtime
+exactly one arm executes (`eIfThen` or `eIfElse`); the *unselected*
+arm's typing set never contributes to the actual footprint.  The
+following lemmas expose that tightening as an explicit corollary, so
+downstream proofs that have a witness for which arm ran can use the
+narrower bound `Sc ∪ S1` (resp. `Sc ∪ S2`) without re-running the
+inversion-on-`Eval` step.
+
+For `matchE` the analogue is `Sc ∪ Ss i` for the runtime-selected
+arm `i : Fin n`.
+
+These lemmas do **not** weaken `gtt_sound` — they restate its
+case-internal information at the top level for callers that already
+know which branch was taken.  No new axioms; the proofs compose
+`gtt_sound` on the cond/arm sub-expressions and `ChSet.union_mono`.
+-/
+
+/-- `if`-expression path-sensitive soundness, then-arm.  Given runtime
+    evidence that the then-arm was selected (`eIfThen`), the value's
+    footprint is bounded by `Sc ∪ S1` rather than the loose
+    `Sc ∪ (S1 ∪ S2)` from `gtt_sound`. -/
+theorem gtt_sound_ifE_then_path
+    (F : FnTable) (Γ : TyEnv) (ρ : VarEnv)
+    (hΓρ : VarEnvConsistent Γ ρ)
+    (hbody : BodyRespectsTopology F)
+    (cond e1 e2 : Expr) (Sc S1 S2 : ChSet)
+    (hTc : Typing Γ cond Sc) (hT1 : Typing Γ e1 S1) (_hT2 : Typing Γ e2 S2)
+    (vc v1 : RuntimeVal)
+    (hEc : Eval F ρ cond vc) (hE1 : Eval F ρ e1 v1) :
+    (vc.footprint.union v1.footprint).subset (Sc.union S1) := by
+  have sc : vc.footprint.subset Sc :=
+    gtt_sound F Γ ρ hΓρ hbody cond Sc vc hTc hEc
+  have s1 : v1.footprint.subset S1 :=
+    gtt_sound F Γ ρ hΓρ hbody e1 S1 v1 hT1 hE1
+  exact ChSet.union_mono _ _ _ _ sc s1
+
+/-- `if`-expression path-sensitive soundness, else-arm. -/
+theorem gtt_sound_ifE_else_path
+    (F : FnTable) (Γ : TyEnv) (ρ : VarEnv)
+    (hΓρ : VarEnvConsistent Γ ρ)
+    (hbody : BodyRespectsTopology F)
+    (cond e1 e2 : Expr) (Sc S1 S2 : ChSet)
+    (hTc : Typing Γ cond Sc) (_hT1 : Typing Γ e1 S1) (hT2 : Typing Γ e2 S2)
+    (vc v2 : RuntimeVal)
+    (hEc : Eval F ρ cond vc) (hE2 : Eval F ρ e2 v2) :
+    (vc.footprint.union v2.footprint).subset (Sc.union S2) := by
+  have sc : vc.footprint.subset Sc :=
+    gtt_sound F Γ ρ hΓρ hbody cond Sc vc hTc hEc
+  have s2 : v2.footprint.subset S2 :=
+    gtt_sound F Γ ρ hΓρ hbody e2 S2 v2 hT2 hE2
+  exact ChSet.union_mono _ _ _ _ sc s2
+
+/-- `match`-expression path-sensitive soundness.  Given runtime evidence
+    that arm `i : Fin n` was selected (`eMatchArm`), the value's
+    footprint is bounded by `Sc ∪ Ss i` rather than the loose
+    `Sc ∪ chsetUnionFin Ss` from `gtt_sound`. -/
+theorem gtt_sound_matchE_path
+    (F : FnTable) (Γ : TyEnv) (ρ : VarEnv)
+    (hΓρ : VarEnvConsistent Γ ρ)
+    (hbody : BodyRespectsTopology F)
+    (scrut : Expr) {n : Nat} (arms : Fin n → Expr)
+    (Sc : ChSet) (Ss : Fin n → ChSet)
+    (hTc : Typing Γ scrut Sc)
+    (hTi : ∀ i : Fin n, Typing Γ (arms i) (Ss i))
+    (i : Fin n)
+    (vc vi : RuntimeVal)
+    (hEc : Eval F ρ scrut vc) (hEi : Eval F ρ (arms i) vi) :
+    (vc.footprint.union vi.footprint).subset (Sc.union (Ss i)) := by
+  have sc : vc.footprint.subset Sc :=
+    gtt_sound F Γ ρ hΓρ hbody scrut Sc vc hTc hEc
+  have si : vi.footprint.subset (Ss i) :=
+    gtt_sound F Γ ρ hΓρ hbody (arms i) (Ss i) vi (hTi i) hEi
+  exact ChSet.union_mono _ _ _ _ sc si
+
+/-- Sanity corollary: the path-sensitive bound is at most as large as the
+    `gtt_sound` bound (the runtime-selected arm's set is a subset of the
+    full both-arms-union).  Witnesses that the new lemmas only
+    *strengthen* the upper bound, never contradict it. -/
+theorem ifE_path_refines_gtt_sound
+    (Sc S1 S2 : ChSet) :
+    (Sc.union S1).subset (Sc.union (S1.union S2)) := by
+  exact ChSet.union_mono Sc S1 Sc (S1.union S2)
+    (ChSet.subset_refl Sc) (ChSet.subset_union_left S1 S2)
+
+theorem matchE_path_refines_gtt_sound
+    (Sc : ChSet) {n : Nat} (Ss : Fin n → ChSet) (i : Fin n) :
+    (Sc.union (Ss i)).subset (Sc.union (chsetUnionFin Ss)) := by
+  exact ChSet.union_mono Sc (Ss i) Sc (chsetUnionFin Ss)
+    (ChSet.subset_refl Sc) (subset_chsetUnionFin Ss i)
+
+-- ---------------------------------------------------------------------------
 -- §7. The union rule is the right conservative body-discharge
 -- ---------------------------------------------------------------------------
 
@@ -1248,6 +1344,10 @@ theorem regression_my_sum_topology
 | **Abstract n-ary body-precision soundness** (week-5 ChSet form)       | Proved  | `gtt_sound_bodyN`                        |
 | N-ary union-rule fallback soundness (week-3 generalised)              | Proved  | `gtt_sound_fallbackN`                    |
 | Canary: 3-ary proj_a with UP=[true,false,false] ⇒ ret ⊆ `S1`          | Proved  | `canary_nary_proj_a_drops_args`          |
+| **Path-sensitive `ifE` then-arm bound `Sc ∪ S1`** (week-9)            | Proved  | `gtt_sound_ifE_then_path`                |
+| **Path-sensitive `ifE` else-arm bound `Sc ∪ S2`** (week-9)            | Proved  | `gtt_sound_ifE_else_path`                |
+| **Path-sensitive `matchE` selected-arm bound `Sc ∪ Ss i`** (week-9)   | Proved  | `gtt_sound_matchE_path`                  |
+| Path bounds refine `gtt_sound`'s loose union bounds                   | Proved  | `ifE_path_refines_gtt_sound` etc.        |
 
 ## What this file proves, in one sentence
 
@@ -1262,19 +1362,36 @@ arity at the set-theoretic level.
 
 ## What remains open
 
-1. **`Expr.ifE` path-sensitive tightening + compiler-side arm-union
-   emission.**  Week-6 Stage 1 (current) adds `Expr.ifE` + `Typing.tIf`
-   at the both-arms-union form (`Sc ∪ (S1 ∪ S2)`).  Stage 2 would
-   tighten to a path-sensitive form tracking which arm ran at runtime,
-   AND fix the compiler soundness hole: `compile_primary` (line ~15889)
-   currently compiles both arms but doesn't propagate EXPR_CH_SET
-   through them, leaking the last-compiled arm's topology — which this
-   section's theorem *would* correctly identify as sound if fixed.
-   Body-level precision for match arms, loops, recursion fixed-point
-   remain deferred beyond that.
-2. Closure / fn-ref indirect calls, `Expr.call2` and `Expr.callN` here
-   are both direct-only.  The compiler week-3 scope leaves
-   closure-indirect calls leaking the last-arg topology (§7c docstring).
+1. **`Expr.ifE` / `Expr.matchE` path-sensitive tightening.**  *Closed
+   (week-9).*  §6b adds `gtt_sound_ifE_then_path`,
+   `gtt_sound_ifE_else_path`, and `gtt_sound_matchE_path`: given runtime
+   evidence (`eIfThen` / `eIfElse` / `eMatchArm i`) of which arm
+   executed, the value's footprint is bounded by `Sc ∪ S1` (resp.
+   `Sc ∪ S2`, resp. `Sc ∪ Ss i`) rather than `gtt_sound`'s loose
+   `Sc ∪ (S1 ∪ S2)` / `Sc ∪ chsetUnionFin Ss`.  Both refinement
+   corollaries (`ifE_path_refines_gtt_sound`,
+   `matchE_path_refines_gtt_sound`) witness that the path bound is a
+   sub-bound of the loose one, so callers can swap the loose bound for
+   the tighter bound without weakening downstream proofs.  Compiler
+   side: the both-arms `EXPR_CH_SET` union (week-6 stage 2 + week-7
+   stage 2) is the correct over-approximation when the runtime arm
+   selection is *not* statically known; the path-sensitive bound here
+   is for *callers* that have an `Eval` witness — typically inside a
+   higher-order soundness proof, not a compile-time analysis.
+   Body-level precision for match arms / loop bodies (i.e., propagating
+   `UsedParamsFin` through arm/loop bodies) and least-fixed-point
+   topology for recursion remain deferred.
+2. Closure / fn-ref indirect calls.  *Closed (week-9, commit
+   `375efa21`).*  Compiler-side fix: `compile_primary` /
+   `compile_primary_a64` indirect-call branches now union all in-range
+   `B9_ARG_CH_SET` slots into `EXPR_CH_SET` / `EXPR_PARAM_USED`
+   (saturating widen at `argc ≥ 16`, mirror of week-8 stage 2 for the
+   direct call site).  No new Lean theorem needed — `Typing.tCallN`
+   already admits the conservative n-ary union without a body-precision
+   premise, so `gtt_sound_body_callN` covers indirect-call returns under
+   `BodyRespectsTopologyN` taken as universal-true.  Tests:
+   `tests/run-pass/gtt_indirect_call_topology.sio` +
+   `tests/compile-fail/gtt_indirect_call_out_of_topology.sio`.
 3. ARM64 mirror — codegen parity, not a separate semantic theorem.
    The a64 compiler mirrors `EXPR_PARAM_USED` propagation through
    let / load in week-4 step A; the a64 call-site tightening itself
