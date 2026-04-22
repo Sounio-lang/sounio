@@ -71,8 +71,8 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 ## Validation Surfaces
 
 - `bash paper/reproduce.sh`
-- `bash scripts/check_docs_consistency.sh`
-- `bash scripts/check_docs_registry.sh`
+- `bash scripts/dev/check_docs_consistency.sh`
+- `bash scripts/dev/check_docs_registry.sh`
 - `bash scripts/fast_gate.sh`
 - `bash scripts/paper/paper_repro_gate.sh`
 - `bash scripts/paper/paper_submission_pack.sh`

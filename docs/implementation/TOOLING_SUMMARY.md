@@ -91,8 +91,8 @@ npm --prefix website run check:locale-fallback
 For repo-native docs governance, use:
 
 ```bash
-bash scripts/check_docs_registry.sh
-bash scripts/check_docs_consistency.sh
+bash scripts/dev/check_docs_registry.sh
+bash scripts/dev/check_docs_consistency.sh
 ```
 
 ## 4. Bootstrap and IR inspection tooling
@@ -125,7 +125,7 @@ Use this rule of thumb:
 
 - public docs, examples, and ordinary validation: checked artifact + `souc check`
 - docs publishing and route integrity: `npm --prefix website run ...`
-- repo docs governance: `scripts/check_docs_registry.sh` and `scripts/check_docs_consistency.sh`
+- repo docs governance: `scripts/dev/check_docs_registry.sh` and `scripts/dev/check_docs_consistency.sh`
 - bootstrap, SOIR, and deep IR debugging: `scripts/sounio-verify`, `Makefile.verify`, and `self-hosted/ir/`
 - Rust bridge or artifact-production changes: targeted Cargo commands in the affected crate or release path
 

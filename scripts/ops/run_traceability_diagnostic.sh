@@ -40,14 +40,14 @@ run_step() {
   shift
   echo "[traceability-diag] >>> $label"
   SOUNIO_DIAG_LOG_LABEL="$label" \
-    bash "$ROOT_DIR/scripts/with_isolated_env.sh" "$@"
+    bash "$ROOT_DIR/scripts/dev/with_isolated_env.sh" "$@"
   echo "[traceability-diag] <<< $label"
 }
 
 run_step "cargo-check-rerun" cargo check -p souc
-run_step "workflow-refs-rerun" bash "$ROOT_DIR/scripts/check_workflow_script_refs.sh"
-run_step "docs-consistency-rerun" bash "$ROOT_DIR/scripts/check_docs_consistency.sh"
-run_step "docs-registry-rerun" bash "$ROOT_DIR/scripts/check_docs_registry.sh"
+run_step "workflow-refs-rerun" bash "$ROOT_DIR/scripts/dev/check_workflow_script_refs.sh"
+run_step "docs-consistency-rerun" bash "$ROOT_DIR/scripts/dev/check_docs_consistency.sh"
+run_step "docs-registry-rerun" bash "$ROOT_DIR/scripts/dev/check_docs_registry.sh"
 run_step "website-quality-rerun" npm --prefix "$ROOT_DIR/website" run check:quality
 
 if [[ "$MODE" == "full" ]]; then
@@ -55,12 +55,12 @@ if [[ "$MODE" == "full" ]]; then
   run_step "strict-file-rerun" env SOUNIO_SELFHOST_DRIVER_STRICT=1 SOUNIO_SELFHOST_STRICT=1 cargo test -p souc --lib compiler_loader::tests::test_driver_file_pipeline_compiles_simple_file -- --nocapture
   run_step "lib-test-rerun" cargo test -p souc --lib
   run_step "update-cascading-golden" cargo test -p souc e2e::golden::golden_cascading_errors -- --nocapture
-  run_step "fast_gate-rerun" bash "$ROOT_DIR/scripts/fast_gate.sh"
+  run_step "fast_gate-rerun" bash "$ROOT_DIR/scripts/dev/fast_gate.sh"
 else
   echo "[traceability-diag] quick mode: skipping strict/lib/full-gate evidence steps"
 fi
 
-bash "$ROOT_DIR/scripts/generate_release_traceability_report.sh" "$RUN_DIR"
+bash "$ROOT_DIR/scripts/paper/generate_release_traceability_report.sh" "$RUN_DIR"
 
 echo "[traceability-diag] mode=$MODE run_dir=$RUN_DIR"
 echo "$RUN_DIR"

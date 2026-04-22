@@ -63,11 +63,11 @@ if [[ "$RUN_GATES" -eq 1 ]]; then
   GATE_RESULTS+=("$gate_json")
   copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_claude_plan_consistency.log"
 
-  gate_json="$(run_gate claude_operational_contract bash scripts/claude_operational_contract_gate.sh || true)"
+  gate_json="$(run_gate claude_operational_contract bash scripts/ci/claude_operational_contract_gate.sh || true)"
   GATE_RESULTS+=("$gate_json")
   copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_claude_operational_contract.log"
 
-  gate_json="$(run_gate lsp_smoke bash scripts/lsp_smoke_gate.sh || true)"
+  gate_json="$(run_gate lsp_smoke bash scripts/ci/lsp_smoke_gate.sh || true)"
   GATE_RESULTS+=("$gate_json")
   copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_lsp_smoke.log"
 

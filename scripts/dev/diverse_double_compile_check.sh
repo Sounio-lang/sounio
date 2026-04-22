@@ -90,7 +90,7 @@ require_tool cargo
 require_tool sha256sum
 require_tool cmp
 
-bash scripts/check_no_active_cargo_jobs.sh 2>/dev/null || true
+bash scripts/ci/check_no_active_cargo_jobs.sh 2>/dev/null || true
 
 # ── build step ───────────────────────────────────────────────────────────────
 if [ "$SKIP_BUILD" -eq 0 ]; then

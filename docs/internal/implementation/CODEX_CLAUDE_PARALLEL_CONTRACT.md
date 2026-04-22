@@ -100,7 +100,7 @@ And no unresolved ownership overlap in handoff log.
 Each commit must list at least one executed check:
 
 - `python3 -m py_compile ...` (for Python changes)
-- `bash scripts/check_workflow_script_refs.sh` (for workflow/script changes)
+- `bash scripts/dev/check_workflow_script_refs.sh` (for workflow/script changes)
 - relevant gate or smoke command for behavior changes
 
 ## 8. Session Note
