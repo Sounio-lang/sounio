@@ -1393,9 +1393,17 @@ arity at the set-theoretic level.
    `tests/run-pass/gtt_indirect_call_topology.sio` +
    `tests/compile-fail/gtt_indirect_call_out_of_topology.sio`.
 3. ARM64 mirror — codegen parity, not a separate semantic theorem.
-   The a64 compiler mirrors `EXPR_PARAM_USED` propagation through
-   let / load in week-4 step A; the a64 call-site tightening itself
-   remains deferred.
+   *Closed (week-9 confirmation).*  Full a64 parity now confirmed:
+   week-4 step A propagated `EXPR_PARAM_USED` through let / load on
+   a64; week-4 Phase III commit `c38e1f0b` added the a64 call-site
+   body-precision tightening (`compile_primary_a64` ~23339 mirrors
+   the x86 `FN_USED_PARAMS[fi]` consultation at ~10331); week-8 stage
+   2 commit `757d3604` mirrored the `argc ≥ 16` saturating widen on
+   a64 (~23360); week-9 commit `375efa21` mirrored the closure /
+   fn-ref indirect-call union on a64 (~23484).  No semantic theorem
+   needed — the a64 emission discharges the same `Typing` rule as
+   x86, so `gtt_sound` / `gtt_sound_body` / `gtt_sound_body_callN`
+   apply unchanged to either backend.
 4. Bridging to `HessianAD.lean` — proving that `j ∉ S ⟹ H_{j,k} = 0.0`
    via the shadow-slot semantics.  The natural next proof, spans two
    files.  Under `gtt_sound_body` this bridge becomes an *equality*
