@@ -1,0 +1,322 @@
+// darwin_pbpk/scenarios/steady_state_runner.sio
+//
+// Multi-dose runner on top of oral_bbb_run. Accumulates exposure over
+// N consecutive doses at interval τ (hours), detects approach to
+// steady state, and reports the canonical SS endpoints:
+//
+//   C_max_ss     — peak plasma concentration in the last dosing interval
+//   C_trough_ss  — trough plasma concentration just before next dose
+//   AUC_tau_ss   — AUC over the last dosing interval
+//   t_to_90pct   — time to reach 90% of the eventual AUC_tau plateau
+//
+// Implementation: one oral_bbb_run per dose interval, carrying state
+// forward by re-seeding absorption/PBPK/BBB from the previous interval's
+// end. Keeps per-dose resolution at 16 checkpoints (half of the 32-slot
+// trace capacity, so the 14-day budget fits within a 32×14 = 448-point
+// outer reporter array without per-run overflow).
+//
+// Rapamycin regimen (defense-target demo):
+//   2 mg q24h × 14 days, oral, fasting. Target C_trough_ss 8–20 µg/L
+//   per clinical consensus (Kahan 2001; MacDonald 2000).
+
+use darwin_pbpk::absorption::*
+use darwin_pbpk::bbb::bbb_core::*
+use darwin_pbpk::scenarios::oral_rapamycin_bbb::*
+use darwin_pbpk::tsit5_pbpk14::*
+
+pub struct DosingRegimen {
+    dose_mg: f64,
+    tau_h:   f64,   // dosing interval
+    n_doses: i32,   // max N in simulation
+}
+
+pub fn rapamycin_qd_regimen(n_days: i32) -> DosingRegimen {
+    DosingRegimen { dose_mg: 2.0, tau_h: 24.0, n_doses: n_days }
+}
+
+pub struct SSIntervalResult {
+    trace:  OralBBBTrace,
+    sys_st: PBPKState14,
+    bbb_st: BBBState,
+    abs_st: AbsorptionState,
+}
+
+pub struct SteadyStateReport {
+    n_doses_run:   i32,
+    reached_ss:    bool,
+    dose_of_ss:    i32,
+    c_max_ss:      f64,
+    c_trough_ss:   f64,
+    auc_tau_ss:    f64,
+    auc_icf_tau_ss: f64,
+    t_to_90pct_h:  f64,
+    // per-dose diagnostics (max 32 doses to fit DESBBBTrace shape)
+    c_max_per_dose:    [f64; 32],
+    c_trough_per_dose: [f64; 32],
+    auc_tau_per_dose:  [f64; 32],
+}
+
+fn ssr_zero() -> SteadyStateReport {
+    SteadyStateReport {
+        n_doses_run: 0,
+        reached_ss: false,
+        dose_of_ss: 0 - 1,
+        c_max_ss: 0.0,
+        c_trough_ss: 0.0,
+        auc_tau_ss: 0.0,
+        auc_icf_tau_ss: 0.0,
+        t_to_90pct_h: 0.0,
+        c_max_per_dose:    [0.0; 32],
+        c_trough_per_dose: [0.0; 32],
+        auc_tau_per_dose:  [0.0; 32],
+    }
+}
+
+fn ssr_abs_diff(a: f64, b: f64) -> f64 with Div, Panic, Mut {
+    if a > b { return a - b }
+    b - a
+}
+
+// Build 16 checkpoints uniformly spanning [0, tau_h] (first is 0).
+fn ssr_make_checkpoints(tau_h: f64) -> [f64; 32] with Div, Panic, Mut {
+    var cp: [f64; 32] = [0.0; 32]
+    var i: i32 = 0
+    while i < 16 {
+        let idx = i as usize
+        cp[idx] = (i as f64) * tau_h / 15.0
+        i = i + 1
+    }
+    cp
+}
+
+// Run a single dose interval with already-populated initial state.
+// Returns the trace so the caller can inspect C_max/trough/AUC for it.
+fn ssr_run_one_interval(
+    sys_prm: PBPKParams14,
+    bbb_prm: BBBParams,
+    abs_prm: AbsorptionParams,
+    sys_init: PBPKState14,
+    bbb_init: BBBState,
+    abs_init: AbsorptionState,
+    tau_h: f64,
+    bbb_dt: f64
+) -> SSIntervalResult with Mut, Div, Panic {
+    // We want the per-interval run to seed from the carried-forward
+    // state, not a zero reset. The public oral_bbb_run always zeroes,
+    // so we inline the coupled loop here with supplied init state.
+    let cfg = tight_ode_config()
+    var trace = oral_trace_zero()
+    trace.n_points = 16
+
+    var sys_st = sys_init
+    var bbb_st = bbb_init
+    var abs_st = abs_init
+
+    let checkpoints = ssr_make_checkpoints(tau_h)
+
+    trace.times_h[0]  = 0.0
+    trace.plasma[0]   = sys_st.blood
+    trace.isf_u[0]    = bbb_prm.fu_isf * bbb_st.c_isf
+    trace.icf_u[0]    = bbb_prm.fu_icf * bbb_st.c_icf
+    trace.a_gut[0]    = abs_st.a_gut
+    trace.released[0] = abs_st.released_cum
+
+    var t: f64 = 0.0
+    var dt_sys = cfg.dt_init
+
+    var point_i: i32 = 1
+    while point_i < 16 {
+        let idx = point_i as usize
+        let target = checkpoints[idx]
+        let t_prev = t
+        let c_prev = sys_st.blood
+
+        var nsteps: i64 = 0
+        var nreject: i64 = 0
+        while t < target && nsteps < cfg.max_steps {
+            let dt_use = if t + dt_sys > target { target - t } else { dt_sys }
+            let released_before = abs_st.released_cum
+            let abs_next = absorption_step(abs_st, t, dt_use, abs_prm)
+            let rel_mg = abs_next.released_cum - released_before
+            var st_in = sys_st
+            if rel_mg > 0.0 {
+                st_in.blood = st_in.blood + absorption_mass_to_blood_delta(rel_mg, sys_prm.v_blood)
+            }
+            let result = tsit5_step_pbpk(st_in, t, dt_use, sys_prm)
+            let err_norm = compute_error_norm_14(result.err, st_in, result.state_new, cfg.rtol, cfg.atol)
+            if err_norm <= 1.0 {
+                sys_st = result.state_new
+                abs_st = abs_next
+                t = t + dt_use
+                nsteps = nsteps + 1
+                dt_sys = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            } else {
+                nreject = nreject + 1
+                dt_sys = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            }
+            if dt_sys < cfg.dt_min { dt_sys = cfg.dt_min }
+            if dt_sys > cfg.dt_max { dt_sys = cfg.dt_max }
+            if nreject > 10000 { return trace }
+        }
+
+        let c_now = sys_st.blood
+        var t_bbb = t_prev
+        while t_bbb < target {
+            let dt_use_bbb = if t_bbb + bbb_dt > target { target - t_bbb } else { bbb_dt }
+            let alpha = if target > t_prev { (t_bbb + 0.5 * dt_use_bbb - t_prev) / (target - t_prev) } else { 0.0 }
+            let c_mid = c_prev + alpha * (c_now - c_prev)
+            bbb_st = bbb_rk4_step(bbb_st, c_mid, dt_use_bbb, bbb_prm)
+            t_bbb = t_bbb + dt_use_bbb
+        }
+
+        trace.times_h[idx]  = target
+        trace.plasma[idx]   = c_now
+        trace.isf_u[idx]    = bbb_prm.fu_isf * bbb_st.c_isf
+        trace.icf_u[idx]    = bbb_prm.fu_icf * bbb_st.c_icf
+        trace.a_gut[idx]    = abs_st.a_gut
+        trace.released[idx] = abs_st.released_cum
+
+        point_i = point_i + 1
+    }
+
+    // Per-interval AUCs
+    var auc_p: f64 = 0.0
+    var auc_i: f64 = 0.0
+    var auc_c: f64 = 0.0
+    var k: i32 = 0
+    while k < 15 {
+        let a = k as usize
+        let b = (k + 1) as usize
+        let h = trace.times_h[b] - trace.times_h[a]
+        auc_p = auc_p + 0.5 * h * (trace.plasma[a] + trace.plasma[b])
+        auc_i = auc_i + 0.5 * h * (trace.isf_u[a]  + trace.isf_u[b])
+        auc_c = auc_c + 0.5 * h * (trace.icf_u[a]  + trace.icf_u[b])
+        k = k + 1
+    }
+    trace.auc_plasma_u = bbb_prm.fu_plasma * auc_p
+    trace.auc_isf_u    = auc_i
+    trace.auc_icf_u    = auc_c
+    trace.kpuu_auc     = if trace.auc_plasma_u > 0.0 { auc_i / trace.auc_plasma_u } else { 0.0 }
+    trace.total_released_end = abs_st.released_cum
+    trace.success = true
+    SSIntervalResult { trace: trace, sys_st: sys_st, bbb_st: bbb_st, abs_st: abs_st }
+}
+
+pub fn run_oral_multidose(
+    sys_prm: PBPKParams14,
+    bbb_prm: BBBParams,
+    abs_prm: AbsorptionParams,
+    regimen: DosingRegimen,
+    bbb_dt: f64
+) -> SteadyStateReport with Mut, Div, Panic {
+    var report = ssr_zero()
+
+    var sys_st = pbpk_state_zero()
+    var bbb_st = bbb_state_zero()
+    var abs_st = absorption_state_zero()
+
+    let max_n = if regimen.n_doses < 32 { regimen.n_doses } else { 32 }
+
+    var auc_prev: f64 = 0.0 - 1.0
+    var auc_first: f64 = 0.0
+    var reached: bool = false
+    var dose_of_ss: i32 = 0 - 1
+    var t_to_90: f64 = 0.0
+
+    var dose_i: i32 = 0
+    while dose_i < max_n {
+        // Deposit the next oral dose into the gut depot
+        abs_st.a_gut = abs_st.a_gut + regimen.dose_mg
+
+        let res = ssr_run_one_interval(
+            sys_prm, bbb_prm, abs_prm,
+            sys_st, bbb_st, abs_st,
+            regimen.tau_h, bbb_dt
+        )
+        let tr = res.trace
+
+        // Find C_max and C_trough within this interval
+        var cmax: f64 = 0.0
+        var k: i32 = 0
+        while k < 16 {
+            let idx = k as usize
+            if tr.plasma[idx] > cmax { cmax = tr.plasma[idx] }
+            k = k + 1
+        }
+        let last = 15
+        let ctrough = tr.plasma[last]
+
+        let d_idx = dose_i as usize
+        report.c_max_per_dose[d_idx]    = cmax
+        report.c_trough_per_dose[d_idx] = ctrough
+        report.auc_tau_per_dose[d_idx]  = tr.auc_plasma_u
+
+        // Steady-state detection: successive AUC_tau within 5%
+        if dose_i == 0 { auc_first = tr.auc_plasma_u }
+        if reached == false && auc_prev > 0.0 {
+            let rel = ssr_abs_diff(tr.auc_plasma_u, auc_prev) / auc_prev
+            if rel < 0.05 && dose_i >= 2 {
+                reached = true
+                dose_of_ss = dose_i
+                report.c_max_ss     = cmax
+                report.c_trough_ss  = ctrough
+                report.auc_tau_ss   = tr.auc_plasma_u
+                report.auc_icf_tau_ss = tr.auc_icf_u
+            }
+        }
+        // 90%-to-plateau: first dose whose AUC reaches 0.9 × final AUC
+        // (we approximate "final" by the latest AUC at each point)
+        if auc_prev > 0.0 {
+            let grew = tr.auc_plasma_u - auc_first
+            let cap  = tr.auc_plasma_u - auc_first + 1.0e-12
+            if grew >= 0.9 * cap && t_to_90 <= 0.0 {
+                t_to_90 = ((dose_i + 1) as f64) * regimen.tau_h
+            }
+        }
+        auc_prev = tr.auc_plasma_u
+
+        // Carry the full state forward: all 14 PBPK compartments + BBB
+        // + gut depot. This is what makes multi-dose accumulation work.
+        sys_st = res.sys_st
+        bbb_st = res.bbb_st
+        abs_st = res.abs_st
+        // Reset the per-interval released_cum counter so next dose's
+        // `released_cum - released_before` delta is per-step, not cumulative.
+        abs_st.released_cum = 0.0
+
+        dose_i = dose_i + 1
+    }
+
+    report.n_doses_run = max_n
+    report.reached_ss  = reached
+    report.dose_of_ss  = dose_of_ss
+    report.t_to_90pct_h = t_to_90
+    report
+}
+
+pub fn ssr_print_report(r: SteadyStateReport) with IO, Mut, Panic, Div {
+    println("Steady-state multi-dose report")
+    print("  n_doses_run = "); print_i64(r.n_doses_run as i64); println("")
+    if r.reached_ss {
+        print("  reached SS at dose #"); print_i64(r.dose_of_ss as i64); println("")
+        print("    C_max_ss      = "); print_f64(r.c_max_ss);       println(" mg/L")
+        print("    C_trough_ss   = "); print_f64(r.c_trough_ss);    println(" mg/L")
+        print("    AUC_tau_ss_u  = "); print_f64(r.auc_tau_ss);     println(" mg·h/L (unbound)")
+        print("    AUC_icf_tau_u = "); print_f64(r.auc_icf_tau_ss); println(" mg·h/L (unbound)")
+    } else {
+        println("  did NOT converge to SS within regimen window")
+    }
+    print("  t_to_90pct_h  = "); print_f64(r.t_to_90pct_h); println("")
+    println("")
+    println("dose,C_max,C_trough,AUC_tau_total")
+    var i: i32 = 0
+    while i < r.n_doses_run {
+        let idx = i as usize
+        print_i64((i + 1) as i64);           print(",")
+        print_f64(r.c_max_per_dose[idx]);    print(",")
+        print_f64(r.c_trough_per_dose[idx]); print(",")
+        print_f64(r.auc_tau_per_dose[idx])
+        println("")
+        i = i + 1
+    }
+}
