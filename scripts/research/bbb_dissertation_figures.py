@@ -389,12 +389,57 @@ def fig_hdmr_7d() -> None:
     print(f"wrote {out_path}")
 
 
+def fig_voi() -> None:
+    """Figure 6: Value-of-Information ranking (experimental design recommendation)."""
+    stdout = run_souc(REPO / "tests" / "stdlib" / "darwin_pbpk"
+                      / "bbb" / "test_bbb_voi.sio")
+    header, rows = extract_csv_block(stdout, "rank,param,sobol_S1")
+    params = [r[1] for r in rows]
+    sobol  = np.array([float(r[2]) for r in rows])
+    confs  = np.array([float(r[3]) for r in rows])
+    voi    = np.array([float(r[4]) for r in rows])
+
+    # Grouped bars: S_i (left) vs VoI_i (right).
+    fig, ax = plt.subplots(figsize=(9.5, 4.8))
+    y_pos = np.arange(len(params))
+    bar_h = 0.4
+    bars_s = ax.barh(y_pos - bar_h / 2, sobol, bar_h,
+                     color="#9ab7d3", edgecolor="black",
+                     label="Sobol S₁ (share)")
+    bars_v = ax.barh(y_pos + bar_h / 2, voi, bar_h,
+                     color="#c5282f", edgecolor="black",
+                     label="VoI = S · (1 − confidence)")
+    ax.set_yticks(y_pos, labels=params)
+    ax.invert_yaxis()
+    ax.set_xlabel("Share / VoI")
+    ax.set_title("Value-of-Information ranking — which measurement reduces\n"
+                 "Kpuu_AUC uncertainty most per investment\n"
+                 "(top target: kpuu_brain; runner-up: fu_icf, "
+                 "not ps_bbb despite higher Sobol)")
+    ax.legend(loc="lower right", frameon=False)
+
+    # Annotate bars with their numeric values + confidence.
+    for i, (s, v, c) in enumerate(zip(sobol, voi, confs)):
+        ax.text(s + 0.005, i - bar_h / 2, f"{s:.3f}",
+                va="center", fontsize=8)
+        ax.text(v + 0.005, i + bar_h / 2, f"{v:.3f}  (conf {c:.2f})",
+                va="center", fontsize=8)
+
+    ax.set_xlim(0, float(max(sobol.max(), voi.max())) * 1.55)
+
+    fig.tight_layout()
+    out_path = FIG_DIR / "bbb_fig6_voi.png"
+    fig.savefig(out_path, dpi=180)
+    print(f"wrote {out_path}")
+
+
 def main() -> int:
     fig_iv_timecourse()
     fig_gum_budget()
     fig_des_vs_iv()
     fig_pce_and_sobol()
     fig_hdmr_7d()
+    fig_voi()
     return 0
 
 

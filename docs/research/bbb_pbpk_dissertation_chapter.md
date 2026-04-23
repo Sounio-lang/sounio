@@ -317,6 +317,65 @@ reporting. Dissertation Section 4.4's conclusion stands:
 reporting Kpuu_AUC uncertainty on this model; JCGM 101:2008
 PCE + HDMR supplements confirm it.**
 
+### 4.6 Contribution #5 — Value-of-Information ranking
+
+`stdlib/darwin_pbpk/bbb/bbb_voi.sio` fuses the 7-D Sobol indices
+(§4.5) with the prior-confidence tags (§4.2) into a single
+*experimental-design recommendation*: which single measurement
+would shrink Kpuu_AUC uncertainty most per unit investment?
+
+The score is
+
+  VoI_i = S_i · (1 − confidence_i)
+
+which rewards high variance share (the measurement *can* change
+the endpoint) and low prior confidence (the measurement *will*
+actually update the prior). A parameter with high Sobol but
+high confidence ranks low — the literature already pins it down,
+so a new measurement is redundant. A parameter with low Sobol
+ranks low regardless of confidence — its uncertainty never
+propagates.
+
+Output on the rapamycin priors:
+
+| Rank | Parameter | Sobol S₁ | Confidence | VoI |
+|-----:|-----------|---------:|-----------:|----:|
+| 1 | **kpuu_brain** | 0.48 | 0.60 | **0.190** |
+| 2 | **fu_icf** | 0.17 | 0.25 | **0.126** |
+| 3 | ps_bbb | 0.22 | 0.45 | 0.120 |
+| 4 | fu_isf | 0.08 | 0.35 | 0.052 |
+| 5 | kpuu_cell | 0.06 | 0.30 | 0.040 |
+| 6 | ps_mem | 0.001 | 0.25 | 0.001 |
+| 7 | fu_plasma | 0.000 | 0.90 | 0.000 |
+
+Three non-obvious dissertation-level recommendations:
+
+1. **Top target is kpuu_brain**, unsurprisingly — it is both
+   dominant in variance share (48%) and only moderately confident
+   (0.60 — literature brackets 0.10–0.25 across species). A
+   human [¹¹C]-rapamycin microdialysis or PET study would reduce
+   Kpuu_AUC uncertainty the most.
+2. **Runner-up is fu_icf, not ps_bbb** — even though ps_bbb has a
+   higher Sobol index (0.22 vs 0.17), fu_icf has much weaker
+   prior confidence (0.25 vs 0.45), so the VoI reorders them.
+   Invest in brain-cell unbound-fraction measurements before
+   refining the BBB permeability estimate. This is the kind of
+   reattribution that existing PK tools cannot emit because they
+   report neither Sobol nor confidence.
+3. **fu_plasma is never a target.** Its Sobol index is zero
+   (Fridén invariance), so no measurement of it can shrink the
+   Kpuu_AUC variance — even though its prior confidence (0.90) is
+   already the highest, which the GUM budget alone would not flag
+   as "done." The VoI formulation is the only way to see this:
+   high-confidence + zero-share = correctly deprioritised.
+
+This closes the dissertation's methodological loop: prior
+uncertainty is propagated forward (§4.1 GUM, §4.4 PCE, §4.5 HDMR),
+decisions are gated on confidence (§4.3), and the decision-
+theoretic inverse problem — "which measurement shrinks the
+posterior uncertainty most" — is answered explicitly by the VoI
+ranking. No existing PK tool runs this pipeline end-to-end.
+
 ## 5. DES-flagship scenario
 
 `scenarios/des_sirolimus_bbb.sio` is the dissertation's integration
@@ -358,6 +417,7 @@ All tests under `tests/stdlib/darwin_pbpk/`, runnable via
 | `bbb/test_bbb_pce_vs_gum.sio` | 1-D PCE on kpuu_brain; validates GUM linearisation (1.5% mean error, 1.7% variance error, 1% nonlinearity) |
 | `bbb/test_bbb_pce2d_sobol.sio` | 2-D PCE + Sobol (kpuu_brain × ps_bbb): S_T1=0.68, S_T2=0.36, interaction 4% |
 | `bbb/test_bbb_hdmr_7d.sio` | 7-D Cut-HDMR Sobol over all BBB parameters (56 solver calls); fu_plasma index = 0 (Fridén) |
+| `bbb/test_bbb_voi.sio` | VoI ranking: top target kpuu_brain, runner-up fu_icf (reorders ps_bbb via confidence weighting) |
 
 ## 7. What remains
 
