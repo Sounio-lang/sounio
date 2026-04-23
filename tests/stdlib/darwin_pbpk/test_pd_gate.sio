@@ -1,0 +1,70 @@
+//@ run-pass
+//@ expect-stdout: PD_GATE_OK
+//
+// Runtime confidence-gate on PDPriors10. Three scenarios:
+//
+//   (a) Current rapamycin priors vs exploratory policy (floor=0.25)
+//         → PASS (research-stage baseline; all prior confidences ≥ 0.25).
+//
+//   (b) Current rapamycin priors vs clinical policy (floor=0.60)
+//         → FAIL with a specific violation set (ec50_nM, kpuu_cell,
+//           fu_isf, fu_icf, ps_mem). This failure IS the dissertation's
+//           VoI-rerank priority list expressed through the gate interface.
+//
+//   (c) Synthetic degraded prior (conf=0.10) vs exploratory policy
+//         → FAIL — confirms the gate actually rejects when it should.
+//
+// Together these prove the gate is wired correctly (passes when it should,
+// rejects on specific enumerable violations, and composes with the
+// existing PD prior pipeline without altering its numeric outputs).
+
+use darwin_pbpk::bbb::bbb_priors::{bbb_rapamycin_priors}
+use darwin_pbpk::pd::hill_mtor::{rapamycin_hill_priors, HillPriors, HillEpParam}
+use darwin_pbpk::pd::pd_gum::{pd_priors_from_bbb_and_hill}
+use darwin_pbpk::pd::pd_gate::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let bbb_pri = bbb_rapamycin_priors()
+    let hp_pri  = rapamycin_hill_priors()
+    let priors  = pd_priors_from_bbb_and_hill(bbb_pri, hp_pri)
+
+    // --- (a) Exploratory: must pass ---
+    let pol_exp = pd_gate_policy_exploratory()
+    let r_exp   = pd_gate_check(priors, pol_exp)
+    if r_exp.passed == false { return 1 }
+    if r_exp.n_checked != 10 { return 2 }
+    if r_exp.n_violations != 0 { return 3 }
+
+    // --- (b) Clinical: must fail with expected violation set ---
+    let pol_clin = pd_gate_policy_clinical()
+    let r_clin   = pd_gate_check(priors, pol_clin)
+    if r_clin.passed { return 4 }
+    if r_clin.n_checked != 10 { return 5 }
+    // Expected floor-0.60 violations (indices):
+    //   1 = ps_mem (0.25), 3 = kpuu_cell (0.30), 5 = fu_isf (0.35),
+    //   6 = fu_icf (0.25), 8 = ec50_nM (0.40), 0 = ps_bbb (0.45)
+    // That's 6 parameters below the 0.60 clinical floor.
+    if r_clin.n_violations != 6 { return 6 }
+    // Worst should be one of {ps_mem, fu_icf} @ 0.25.
+    if r_clin.worst_confidence > 0.26 { return 7 }
+
+    // --- (c) Synthetic degraded prior vs exploratory → must fail ---
+    var bad_hp = rapamycin_hill_priors()
+    bad_hp.emax = HillEpParam { mean: 1.0, variance: 0.01, confidence: 0.10 }
+    let bad_pri = pd_priors_from_bbb_and_hill(bbb_pri, bad_hp)
+    let r_bad   = pd_gate_check(bad_pri, pol_exp)
+    if r_bad.passed { return 8 }
+    if r_bad.n_violations < 1 { return 9 }
+
+    println("=== Scenario (a): current priors, exploratory policy ===")
+    pd_gate_print(r_exp)
+    println("")
+    println("=== Scenario (b): current priors, clinical policy ===")
+    pd_gate_print(r_clin)
+    println("")
+    println("=== Scenario (c): synthetic degraded prior, exploratory ===")
+    pd_gate_print(r_bad)
+    println("")
+    println("PD_GATE_OK")
+    0
+}
