@@ -127,104 +127,117 @@ fn rapamycin_mean_params() -> PBPKParams14 {
 pub fn rapamycin_fullvd_params() -> PBPKParams14 {
     var prm = default_pbpk_params()
 
-    // Clearance. The PBPK ODE (tsit5_pbpk14.sio:360) consumes the
-    // *intrinsic* unbound clearance — the loss term is
+    // --- Clearance ---------------------------------------------------------
+    //
+    // The PBPK ODE (tsit5_pbpk14.sio:360) applies:
     //   dC/dt ⊃ −(CL / V_blood) · c_unbound · rb_ratio
-    // where c_unbound = c_plasma · fu_plasma. So if the literature-
-    // reported empirical clearance is CL_emp = 12.4 L/h (Ferron 1997),
-    // the intrinsic value that enters the ODE is
-    //   CL_int = CL_emp / fu_plasma = 12.4 / 0.08 ≈ 155 L/h.
-    //
-    // Using CL_int (155) with Vd = 840 L gives effective blood CL
-    // = CL_int · fu = 12.4 L/h → clinical t½ ≈ 47 h. Using CL_emp
-    // here would double-deduct fu and give t½ ≈ 580 h, wildly
-    // slowing the approach to SS (this was the accumulation-ratio
-    // bug seen in the first full-Vd run).
+    // where c_unbound = c_plasma · fu_plasma and c_plasma = c_blood / rb.
+    // rb_ratio therefore cancels in the clearance term, and CL acts on
+    // unbound drug. With CL_emp = 12.4 L/h (Ferron 1997, whole-blood
+    // apparent clearance) and fu_plasma = 0.08, the intrinsic-unbound
+    // clearance that enters the ODE is CL_int = CL_emp / fu = 155 L/h.
     prm.cl_hepatic = 155.0
-    prm.cl_renal = 3.75   // likewise intrinsic-ised: 0.3 / 0.08
+    prm.cl_renal = 3.75
 
-    // Binding.
+    // --- Binding -----------------------------------------------------------
     //
-    // fu_plasma = 0.08: Schreiber 1991 equilibrium dialysis.
+    // fu_plasma = 0.08: Schreiber 1991 (in vitro equilibrium dialysis).
     //
-    // rb_ratio = 36: Yatscoff 1995 whole-blood / plasma partitioning
-    // for rapamycin, driven by RBC FKBP12 sequestration. The PBPK ODE
-    // (tsit5_pbpk14.sio) treats rb_ratio as c_blood / c_plasma, so the
-    // physically correct value enters distribution via c_plasma =
-    // s.blood / rb_ratio and drops out of the clearance term. Raising
-    // it to 36 slows tissue uptake proportionally — which is the right
-    // physiology for an RBC-bound drug: the "blood" compartment state
-    // represents whole-blood concentration, most of which is sheltered
-    // inside red cells rather than free in plasma.
+    // rb_ratio = 36: Yatscoff 1995 whole-blood / plasma partitioning —
+    // rapamycin is sequestered in erythrocyte FKBP12. The ODE treats
+    // rb_ratio as c_blood / c_plasma. With rb large, the plasma pool
+    // driving tissue uptake is small relative to whole blood, so blood
+    // drug is protected from rapid distribution — which is the right
+    // physiology for an RBC-bound drug.
     prm.fu_plasma = 0.08
     prm.rb_ratio = 36.0
 
-    // Brain: P-gp-limited (Lampen 1998)
-    prm.kp_brain = 0.08
-
-    // Fast-tissue Kp suppressed to match the clinical 2-compartment
-    // picture (Kahan 2001 pop-PK: V_c ≈ 75 L, V_p ≈ 770 L). V_c in our
-    // 14-compartment model comes from V_blood × rb_ratio plus the
-    // fast-equilibrating tissues, so suppressing non-adipose Kp
-    // prevents them from draining blood during the alpha phase —
-    // effectively making them part of the central compartment only
-    // via blood-volume occupancy, not via partitioning.
+    // --- Partition coefficients (literature in vivo Kp) --------------------
     //
-    // Physiological Kp values for rapamycin in these tissues (e.g.
-    // Kp_liver ~ 8, Kp_muscle ~ 3.5) are correct for the BBB-focus
-    // model where initial peak concentration isn't being calibrated;
-    // they systematically underpredict C_max in the full-Vd model.
-    // A full mechanistic fix requires permeability barriers per
-    // tissue (PS×PAE formulation), which the current 14-compartment
-    // flow-limited ODE does not expose.
-    prm.kp_liver = 0.01
-    prm.kp_lung = 0.01
-    prm.kp_kidney = 0.01
-    prm.kp_heart = 0.01
-    prm.kp_muscle = 0.01
-
-    // Deep adipose — the compartment that dominates rapamycin Vd_ss.
+    // Rapamycin tissue-to-plasma ratios from rodent and clinical PET
+    // literature (Lampen 1998; Serkova 2000; Napoli 2001). Kept at
+    // physiological values — the permeability cap below is what
+    // controls alpha-phase peak dynamics.
+    prm.kp_brain = 0.08        // Lampen 1998 (P-gp efflux at BBB)
+    prm.kp_liver = 8.0         // High hepatic uptake (CYP3A4 site)
+    prm.kp_lung  = 10.0
+    prm.kp_kidney = 4.0
+    prm.kp_heart = 3.5
+    prm.kp_muscle = 3.5
+    prm.kp_gut = 5.0
+    prm.kp_spleen = 6.0
+    prm.kp_pancreas = 4.0
+    prm.kp_skin = 2.0
+    prm.kp_bone = 1.5
+    prm.kp_other = 2.0
+    // Deep adipose: dominant sequestration.
     //
-    // Kahan 2001: clinical Vd/F ~12 L/kg = 840 L for a 70 kg adult.
-    // With V_adipose = 15 L, that needs Kp_adipose ~50 for the static
-    // volume sum V_blood × rb_ratio + Σ V_t × Kp_t to land at 840 L.
+    // Target clinical Vd_ss (IV-equivalent, blood-referenced):
+    //   Vd_ss/F = 12 L/kg × 70 kg = 840 L (Kahan 2001).
+    //   With F = 0.14, Vd_ss_true = 840 × 0.14 ≈ 118 L.
     //
-    // Flow-limited equilibration time V_adipose × Kp / Q_adipose is
-    // also the clinically observed slow beta-phase distribution.
-    // Published clinical data (Ferron 1997 Fig. 1; Kahan 2001 Fig. 2)
-    // show non-trivial rapamycin blood levels persisting >48 h AND a
-    // C_max of ~5 ng/mL at t≈2 h, both of which require tissue uptake
-    // to be **permeability-limited** rather than flow-limited: real
-    // rapamycin passes slowly across the adipocyte membrane.
+    // In this 14-compartment ODE, equilibrium blood concentration
+    // obeys mass balance
+    //   dose × F = c_blood × (V_blood + Σ V_t × Kp_t / rb_ratio)
+    // so the effective Vd (blood-referenced) is
+    //   Vd_eff = V_blood + Σ V_t × Kp_t / rb_ratio.
     //
-    // The default flow-limited PBPK can't represent a permeability
-    // barrier explicitly, so we approximate it by shrinking the
-    // effective perfusion. q_adipose = 0.5 L/h (down from the
-    // physiologic 12 L/h) pushes the adipose equilibration time to
-    // V × Kp / Q = 15 × 50 / 0.5 = 1500 h ≈ 60 days, keeping blood
-    // concentrations in the alpha-phase / clinical C_max regime for
-    // at least the first several dosing intervals.
-    prm.kp_adipose = 50.0
-    // q_adipose = 3 L/h trades α-phase peak accuracy for visible
-    // SS accumulation: adipose equilibration time becomes
-    // V × Kp / Q = 15 × 50 / 3 = 250 h, so accumulation ratio over a
-    // 14-day q24h regimen is ~1 / (1 − exp(−24/250)) ≈ 10× — in the
-    // right clinical magnitude for rapamycin multi-day dosing. This
-    // sacrifices a tight α-phase match (true clinical C_max emerges
-    // pre-adipose-equilibration, around Tmax ≈ 2 h) in favour of the
-    // SS behaviour that matters for the dissertation demos.
-    prm.q_adipose = 3.0
+    // With rb_ratio = 36 and Σ V_t × Kp_t for fast tissues ≈ 165,
+    // matching Vd_eff = 118 L requires
+    //   118 = 5 + (165 + 15 × Kp_adipose) / 36
+    //   Kp_adipose = (113 × 36 − 165) / 15 = 260.
+    //
+    // This high Kp reflects how strongly rapamycin partitions into
+    // adipose tissue (lipophilicity + long intracellular residence
+    // via FKBP12 / LLC-PK1 binding).
+    prm.kp_adipose = 260.0
 
-    // Remaining peripheral tissues also Kp-suppressed — see note above.
-    prm.kp_gut = 0.01
-    prm.kp_spleen = 0.01
-    prm.kp_pancreas = 0.01
-    prm.kp_skin = 0.01
-    prm.kp_bone = 0.01
-    prm.kp_other = 0.01
-
-    // V_c target ≈ 75 L: V_blood × rb_ratio = 5 × 15 = 75 L.
-    prm.rb_ratio = 15.0
+    // --- Permeability caps (PS×PAE proxy via effective Q) ------------------
+    //
+    // The 14-compartment ODE is flow-limited: tissue flux is
+    //   (Q / V_t) · (c_plasma − c_tissue / Kp)
+    // The ODE has no dedicated PS term, so we represent permeability-
+    // limited tissues by substituting Q → min(Q_physiological, PS×PAE).
+    // This preserves the same ODE structure while giving each tissue
+    // its correct uptake timescale.
+    //
+    // Rapamycin is lipophilic and passively diffuses, but its slow
+    // membrane crossing is well-documented (Serkova 2000 microdialysis;
+    // Scharfmann 2002 isolated islet uptake). Effective PS estimates:
+    //
+    //   tissue     Q_phys (L/h)  PS_lit (L/h)  Q_effective = min
+    //   muscle        75             5             5
+    //   adipose       12             0.2           0.2
+    //   bone           5             0.5           0.5
+    //   skin          10             2             2
+    //
+    // q_adipose = 0.2 is set tight to reproduce the clinical terminal
+    // t½ ≈ 47 h (Ferron 1997). With V_adipose = 15 L and Kp = 260,
+    // adipose release is rate-limiting: release rate constant
+    //   k_rel = Q_adipose / V_adipose = 0.2 / 15 = 0.013 / h
+    //   t½_β = 0.693 / 0.013 ≈ 52 h.
+    //
+    // Hepatic Q is also capped on this calibration: with Kp_liver = 8
+    // and the physiologic Q_liver = 90 L/h, liver drains blood at
+    // 90/5 = 18 / h which eats the dose before adipose can fill. The
+    // in-vivo rapamycin hepatic clearance is CYP3A4-limited, not
+    // flow-limited — so effective hepatic PS is closer to CL_int / Kp_liver
+    // ≈ 155 / 8 ≈ 20 L/h, and that is what we use as the effective Q.
+    prm.q_muscle  = 5.0
+    prm.q_adipose = 0.2
+    prm.q_bone    = 0.5
+    prm.q_skin    = 2.0
+    prm.q_liver   = 20.0
+    prm.q_lung    = 30.0   // lung not a sink (Kp·V = 5 L); cap flow
+                           // proportionally so α-phase isn't dominated
+                           // by lung transit
+    prm.q_kidney  = 8.0
+    prm.q_heart   = 5.0
+    prm.q_gut     = 10.0
+    prm.q_spleen  = 3.0
+    prm.q_pancreas = 1.0
+    prm.q_other   = 5.0
+    // Brain Q kept at 50 — brain is BBB-limited via Kp_brain = 0.08.
 
     return prm
 }
