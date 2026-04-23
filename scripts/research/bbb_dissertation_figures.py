@@ -302,8 +302,10 @@ def fig_pce_and_sobol() -> None:
         ax0.axhline(gum_var, color="#222", ls="--", lw=1.2,
                     label=f"GUM first-order ({gum_var:.2e})")
     ax0.set_ylabel("Variance contribution")
+    ratio = (pce_var or 0.0) / (gum_var or 1.0)
     ax0.set_title("1-D PCE on kpuu_brain — He-component variance\n"
-                  f"PCE total {pce_var:.3e}  vs  GUM {gum_var:.3e}  (ratio 3.6×)")
+                  f"PCE total {pce_var:.3e}  vs  GUM {gum_var:.3e}  "
+                  f"(ratio {ratio:.2f}× — linearisation validated)")
     ax0.legend(loc="upper right", frameon=False)
     for i, v in enumerate(vals):
         ax0.text(i, v * 1.02, f"{v:.2e}", ha="center", fontsize=8)
@@ -326,11 +328,63 @@ def fig_pce_and_sobol() -> None:
         wedgeprops={"edgecolor": "black", "linewidth": 0.8},
     )
     ax1.set_title("2-D PCE Sobol decomposition\n"
-                  "transporter drivers contribute equally "
-                  "(overturns GUM 70/9 ranking)")
+                  "kpuu_brain leads, ps_bbb second, interaction ~4%")
 
     fig.tight_layout()
     out_path = FIG_DIR / "bbb_fig4_pce_sobol.png"
+    fig.savefig(out_path, dpi=180)
+    print(f"wrote {out_path}")
+
+
+def fig_hdmr_7d() -> None:
+    """Figure 5: full 7-D Sobol indices from bbb_hdmr + confidence overlay."""
+    stdout = run_souc(REPO / "tests" / "stdlib" / "darwin_pbpk"
+                      / "bbb" / "test_bbb_hdmr_7d.sio")
+    header, rows = extract_csv_block(stdout, "param,sobol_S1")
+    name_to_row = {r[0]: r for r in rows}
+    # Fixed ordering to match the chapter's §4.5 table.
+    ordered = ["kpuu_brain", "ps_bbb", "fu_icf", "fu_isf",
+               "kpuu_cell", "ps_mem", "fu_plasma"]
+    # Confidence values from bbb_priors.sio.
+    conf = {"ps_bbb": 0.45, "ps_mem": 0.25, "kpuu_brain": 0.60,
+            "kpuu_cell": 0.30, "fu_plasma": 0.90,
+            "fu_isf": 0.35, "fu_icf": 0.25}
+
+    sobol = []
+    nl = []
+    confs = []
+    for n in ordered:
+        r = name_to_row[n]
+        sobol.append(float(r[1]))
+        nl.append(float(r[5]))
+        confs.append(conf[n])
+
+    fig, ax = plt.subplots(figsize=(8.5, 4.8))
+    y_pos = np.arange(len(ordered))
+    cmap = matplotlib.colormaps["viridis"]
+    colors = [cmap(c) for c in confs]
+    ax.barh(y_pos, np.array(sobol) * 100, color=colors, edgecolor="black")
+    ax.set_yticks(y_pos, labels=ordered)
+    ax.invert_yaxis()
+    ax.set_xlabel("First-order Sobol index S₁ (%)")
+    ax.set_title("7-D Cut-HDMR Sobol indices — all BBB parameters\n"
+                 "bar colour = prior confidence; "
+                 "kpuu_brain dominates (48%), fu_plasma = 0 (Fridén)")
+    for i, (s, n_share) in enumerate(zip(sobol, nl)):
+        nl_str = f"NL {n_share*100:.0f}%" if s > 0.01 else "noise"
+        ax.text(s * 100 + 0.6, i,
+                f"{s*100:.1f}%   {nl_str}",
+                va="center", fontsize=9)
+    ax.set_xlim(0, max(sobol) * 100 * 1.35 + 5)
+
+    sm = matplotlib.cm.ScalarMappable(
+        cmap=cmap, norm=matplotlib.colors.Normalize(0.0, 1.0)
+    )
+    cbar = fig.colorbar(sm, ax=ax, pad=0.02)
+    cbar.set_label("Confidence (prior)")
+
+    fig.tight_layout()
+    out_path = FIG_DIR / "bbb_fig5_hdmr_7d_sobol.png"
     fig.savefig(out_path, dpi=180)
     print(f"wrote {out_path}")
 
@@ -340,6 +394,7 @@ def main() -> int:
     fig_gum_budget()
     fig_des_vs_iv()
     fig_pce_and_sobol()
+    fig_hdmr_7d()
     return 0
 
 
