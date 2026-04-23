@@ -1,0 +1,106 @@
+// darwin_pbpk/absorption.sio — First-order oral absorption (Ka model)
+//
+// Single-compartment depot with lag time:
+//
+//   if t < tlag:   dA_gut/dt = 0
+//   else:          dA_gut/dt = -Ka * A_gut
+//
+// Drug mass flux into systemic blood:
+//
+//   J_blood(t) = F * Ka * A_gut(t)        (mg/h)
+//
+// where F = bioavailability (fraction reaching systemic circulation after
+// first-pass). For rapamycin: Ka = 1.1/h, F = 0.14, Tlag ~ 0.5 h
+// (MacDonald 2000 Transplantation; Kahan 2001 J Clin Pharmacol).
+//
+// Design choices:
+//   - Explicit analytic step: A_gut(t+dt) = A_gut(t) * exp(-Ka * dt) inside
+//     the active window. Exact for the linear ODE; avoids stiffness during
+//     the fast-absorption phase where Ka*dt can approach 1 with coarse
+//     PBPK step sizes.
+//   - The operator-split pattern mirrors scenarios/des_sirolimus_bbb.sio
+//     (Higuchi release): per outer PBPK step we (a) release mass from
+//     depot into blood, then (b) advance systemic PBPK.
+
+pub struct AbsorptionState {
+    a_gut: f64,        // current gut-depot mass (mg)
+    released_cum: f64, // cumulative mass delivered to blood (mg)
+}
+
+pub struct AbsorptionParams {
+    ka: f64,     // absorption rate constant (1/h)
+    f_bio: f64,  // bioavailability fraction [0,1]
+    tlag: f64,   // lag before absorption starts (h)
+}
+
+pub fn absorption_state_zero() -> AbsorptionState {
+    AbsorptionState { a_gut: 0.0, released_cum: 0.0 }
+}
+
+pub fn absorption_state_with_dose(dose_mg: f64) -> AbsorptionState {
+    AbsorptionState { a_gut: dose_mg, released_cum: 0.0 }
+}
+
+pub fn rapamycin_absorption_params() -> AbsorptionParams {
+    AbsorptionParams { ka: 1.1, f_bio: 0.14, tlag: 0.5 }
+}
+
+// Local exp(-x) for small-to-moderate x via series (x >= 0).
+// Sufficient accuracy for Ka*dt up to ~3. Above that we fall back to
+// repeated halving (exp(-x) = exp(-x/2)^2) which stays stable.
+fn abs_exp_neg(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 1.0 }
+    if x > 0.5 {
+        let half = abs_exp_neg(x * 0.5)
+        return half * half
+    }
+    // Taylor series for exp(-x) around 0, valid for x in [0, 0.5]
+    var term: f64 = 1.0
+    var sum: f64 = 1.0
+    var k: i32 = 1
+    while k < 16 {
+        term = term * (0.0 - x) / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    sum
+}
+
+// Advance depot by dt, returning mass flux (mg) delivered to systemic blood
+// during this step. State is updated in place via the returned new state.
+pub fn absorption_step(
+    state: AbsorptionState,
+    t: f64,
+    dt: f64,
+    p: AbsorptionParams
+) -> AbsorptionState with Div, Panic, Mut {
+    var s = state
+
+    // Entirely before lag window — no release, no decay
+    if t + dt <= p.tlag {
+        return s
+    }
+
+    // Active window within [t, t+dt]
+    let t_active_start = if t < p.tlag { p.tlag } else { t }
+    let dt_active = (t + dt) - t_active_start
+    if dt_active <= 0.0 { return s }
+
+    let decay = abs_exp_neg(p.ka * dt_active)
+    let a_before = s.a_gut
+    let a_after = a_before * decay
+    let dmass = a_before - a_after          // mass leaving gut this step
+    let to_blood = p.f_bio * dmass          // mass entering blood (mg)
+
+    s.a_gut = a_after
+    s.released_cum = s.released_cum + to_blood
+    s
+}
+
+// Convenience: convert a delivered mass (mg) into a blood-concentration
+// delta given the systemic central volume (L). Mirrors the operator-split
+// pattern from des_sirolimus_bbb.sio where release was added to sys_st.blood.
+pub fn absorption_mass_to_blood_delta(to_blood_mg: f64, v_blood_l: f64) -> f64 with Div, Panic, Mut {
+    if v_blood_l <= 0.0 { return 0.0 }
+    to_blood_mg / v_blood_l
+}
