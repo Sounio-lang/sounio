@@ -23,9 +23,80 @@ portable_size() {
     stat -c%s "$path" 2>/dev/null || stat -f%z "$path"
 }
 
+run_bootstrap_step() {
+    local compiler_bin="$1"
+    local src_path="$2"
+    local out_path="$3"
+
+    set +e
+    "$compiler_bin" "$src_path" "$out_path" >/dev/null 2>&1
+    local rc=$?
+    set -e
+
+    if [[ $rc -ne 0 ]] || [[ ! -s "$out_path" ]]; then
+        return 1
+    fi
+
+    chmod +x "$out_path"
+    return 0
+}
+
+bootstrap_direct_lean() {
+    local seed_bin="$1"
+    local stage1_bin
+    stage1_bin="$(mktemp /tmp/sounio-lean-stage1.XXXXXX)"
+
+    rm -f "$stage1_bin"
+    if ! run_bootstrap_step "$seed_bin" "$LEAN" "$stage1_bin"; then
+        rm -f "$stage1_bin"
+        return 1
+    fi
+    if ! run_bootstrap_step "$stage1_bin" "$LEAN" "$OUT"; then
+        rm -f "$stage1_bin"
+        return 1
+    fi
+
+    rm -f "$stage1_bin"
+    return 0
+}
+
+bootstrap_via_boot4_chain() {
+    local seed_bin="$1"
+    local boot4_src="$ROOT_DIR/bootstrap/boot4.sio"
+    local stage1_bin
+    local stage2_bin
+
+    if [[ ! -f "$boot4_src" ]]; then
+        return 1
+    fi
+
+    stage1_bin="$(mktemp /tmp/sounio-boot4-stage1.XXXXXX)"
+    stage2_bin="$(mktemp /tmp/sounio-boot4-stage2.XXXXXX)"
+
+    rm -f "$stage1_bin" "$stage2_bin"
+
+    if ! run_bootstrap_step "$seed_bin" "$boot4_src" "$stage1_bin"; then
+        rm -f "$stage1_bin" "$stage2_bin"
+        return 1
+    fi
+    if ! run_bootstrap_step "$stage1_bin" "$boot4_src" "$stage2_bin"; then
+        rm -f "$stage1_bin" "$stage2_bin"
+        return 1
+    fi
+    if ! run_bootstrap_step "$stage2_bin" "$LEAN" "$OUT"; then
+        rm -f "$stage1_bin" "$stage2_bin"
+        return 1
+    fi
+
+    rm -f "$stage1_bin" "$stage2_bin"
+    return 0
+}
+
 LEAN="$ROOT_DIR/self-hosted/compiler/lean_single.sio"
 OUT="${1:-/tmp/souc-native}"
 FORCE_SOURCE_BOOTSTRAP="${SOUNIO_FORCE_SOURCE_BOOTSTRAP:-0}"
+LEAN_BYTES="$(portable_size "$LEAN")"
+BOOT4_DIRECT_SRC_CAP=1048576
 
 HOST_PLATFORM="$(host_platform)"
 HOST_PREBUILTS=()
@@ -85,13 +156,18 @@ for BOOT4_ELF in \
     "$ROOT_DIR/artifacts/bootstrap/final_boot4.elf" \
     "$ROOT_DIR/bootstrap/stage0"; do
     if [ -x "$BOOT4_ELF" ]; then
-        echo "Bootstrapping native compiler via $(basename $BOOT4_ELF)..."
-        "$BOOT4_ELF" "$LEAN" /tmp/souc-s1.elf 2>/dev/null
-        if [ -f /tmp/souc-s1.elf ] && [ -s /tmp/souc-s1.elf ]; then
-            chmod +x /tmp/souc-s1.elf
-            /tmp/souc-s1.elf "$LEAN" "$OUT" 2>/dev/null
-            if [ -f "$OUT" ] && [ -s "$OUT" ]; then
-                chmod +x "$OUT"
+        if [[ "$BOOT4_ELF" != "$ROOT_DIR/bootstrap/stage0" && "$LEAN_BYTES" -gt "$BOOT4_DIRECT_SRC_CAP" ]]; then
+            echo "Bootstrapping native compiler via $(basename "$BOOT4_ELF") -> boot4.sio -> boot4.sio -> lean_single.sio..."
+            if bootstrap_via_boot4_chain "$BOOT4_ELF"; then
+                if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
+                    sounio_ad_hoc_codesign "$OUT"
+                fi
+                echo "Native compiler built: $OUT ($(portable_size "$OUT") bytes)"
+                exit 0
+            fi
+        else
+            echo "Bootstrapping native compiler via $(basename "$BOOT4_ELF")..."
+            if bootstrap_direct_lean "$BOOT4_ELF"; then
                 if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
                     sounio_ad_hoc_codesign "$OUT"
                 fi
