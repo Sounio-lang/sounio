@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.ocssm-g2-invariance-proof
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.ocssm-g2-invariance-proof
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # G₂-Invariância do Conjunto de Divisores-de-Zero em 𝕊
 
 **Status:** v1.0, 2026-04-23. Componente §5 do skeleton do preprint O-CSSM. Formalização do Fato 1 usado na construção da transformação natural `η : F_e ⇒ F_{e'}`.

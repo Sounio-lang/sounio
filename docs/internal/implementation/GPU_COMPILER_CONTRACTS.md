@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.implementation.gpu-compiler-contracts
+topic_id: repo.docs.internal.implementation.gpu-compiler-contracts
 authority: repo_only
-audience: maintainers
+audience: users
 last_validated: 2026-03-07
-validated_by: A7
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.gpu-compiler-contracts
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.gpu-compiler-contracts
 -->
 
 # GPU Compiler Contracts (Phase 0 Baseline)

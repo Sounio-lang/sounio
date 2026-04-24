@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.competitive-position-2026
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.competitive-position-2026
+-->
+
 # Sounio Competitive Position — April 2026
 
 > *Evidence-based analysis of where Sounio stands relative to Julia 1.12, Python/SciPy 2026,

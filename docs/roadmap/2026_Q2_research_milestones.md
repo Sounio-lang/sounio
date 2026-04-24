@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.roadmap.2026-q2-research-milestones
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.roadmap.2026-q2-research-milestones
+-->
+
 # Research Roadmap — Q2/Q3 2026 Milestone Document
 
 **Author**: Demetrios Chiuratto Agourakis (ORCID: 0009-0001-8671-8878)  

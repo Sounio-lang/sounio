@@ -2,9 +2,9 @@
 topic_id: repo.docs.cookbook
 authority: repo_only
 audience: users
-last_validated: 2026-04-12
-validated_by: human
-source_of_truth: tests/run-pass/
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.cookbook
 -->
 
 > **Status**: Production | **Last validated**: 2026-04-12 | **Source**: `tests/run-pass/`

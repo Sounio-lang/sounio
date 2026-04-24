@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.delta-epistemic-gradual-compilation-paper
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.delta-epistemic-gradual-compilation-paper
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Epistemic Gradual Compilation: A Self-Hosted Compiler that Applies its Type System to its Own Source
 
 **Draft — POPL 2027 submission | Numbers updated 2026-04-21 | DOUBLE-BLIND VERSION**

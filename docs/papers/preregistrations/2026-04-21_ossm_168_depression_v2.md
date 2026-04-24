@@ -1,12 +1,10 @@
 <!-- docs:meta
-topic_id: repo.preregistration.ossm-168-depression-v2
+topic_id: repo.docs.papers.preregistrations.2026-04-21-ossm-168-depression-v2
 authority: repo_only
-audience: researchers
-registration_date: 2026-04-21
-status: FROZEN
-supersedes: prereg/ossm-168-depression-v1
-supersedes_sha256: 63c2f60223657491829c38a57a2745fb079d48259bed306538ef32223ae4c93d
-source_of_truth: this file
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.preregistrations.2026-04-21-ossm-168-depression-v2
 -->
 
 # Pre-Registration v2: O-SSM-Derived Hypotheses on LEMON + MODMA

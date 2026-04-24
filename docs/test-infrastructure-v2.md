@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.test-infrastructure-v2
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.test-infrastructure-v2
+-->
+
 # Test Infrastructure V2
 
 Enhanced test suite runner with parallel execution, JUnit XML output, and new test annotations.

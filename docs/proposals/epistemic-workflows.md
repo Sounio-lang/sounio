@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.proposals.epistemic-workflows
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.proposals.epistemic-workflows
+-->
+
 # Epistemic Workflow Primitives (Proposal)
 
 **Status:** Proposed  

@@ -1,9 +1,10 @@
 <!-- docs:meta
-topic_id: website.docs.compiler.confidence-effect
-authority: draft
+topic_id: repo.docs.compiler.confidence-effect-design
+authority: repo_only
 audience: contributors
-status: mostly-implemented (see "Status correction" below)
-last_validated: 2026-04-23
+last_validated: 2026-03-07
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.confidence-effect-design
 -->
 
 # Compile-time Confidence effect — design

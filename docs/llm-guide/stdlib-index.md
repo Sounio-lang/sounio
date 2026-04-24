@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.llm-guide.stdlib-index
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm-guide.stdlib-index
+-->
+
 # Sounio Stdlib Index
 
 What's available, what's stable, how to import it. Use this before writing a function

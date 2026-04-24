@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.llm-responses.response-grok-4-3beta
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.llm-responses.response-grok-4-3beta
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 ## Response from Grok 4.3beta — 2026-04-22
 ### Track: Architecture / Formal / Safety
 ### Questions addressed: 2, 7, 11

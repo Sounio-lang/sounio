@@ -1,9 +1,10 @@
 <!-- docs:meta
-topic_id: repo.governance.docs-conventions
+topic_id: repo.docs.governance.docs-conventions
 authority: repo_only
-audience: contributors
-last_validated: 2026-04-12
-validated_by: human
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.governance.docs-conventions
 -->
 
 # Documentation Conventions

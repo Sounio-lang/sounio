@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.archived.getting-started-duplicates.readme
+authority: archived
+audience: maintainers
+last_validated: 2026-03-07
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.getting-started-duplicates.readme
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `archived`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Archived Getting-Started Duplicates
 
 These guides were consolidated on 2026-04-12. Their content has been merged into:

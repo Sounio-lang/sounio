@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.llm-collaboration-codex-backlog
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.llm-collaboration-codex-backlog
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Codex memo — implementation backlog (tracking)
 
 Source: `docs/research/llm_collaboration_codex_response.md` (questions 1, 10, 11, 12). **Not implemented** — checklist only.

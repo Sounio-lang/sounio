@@ -1,17 +1,12 @@
 <!-- docs:meta
-topic_id: repo.docs.implementation.scientific-pipelines-blockers-analyse
-authority: historical
-audience: maintainers
+topic_id: repo.docs.internal.implementation.scientific-pipelines-blockers-analyse
+authority: repo_only
+audience: users
 last_validated: 2026-03-07
-validated_by: A7
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.scientific-pipelines-blockers-analyse
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.scientific-pipelines-blockers-analyse
 -->
 
-
-<!-- docs:status-note:start -->
-> Docs status: `historical`
-> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
-<!-- docs:status-note:end -->
 
 # Análise de Blockers para Pipelines Científicos Completos no Sounio
 

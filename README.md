@@ -2,8 +2,8 @@
 topic_id: repo.frontdoor.readme
 authority: repo_only
 audience: users
-last_validated: 2026-04-22
-validated_by: Codex
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 -->
 
@@ -43,10 +43,10 @@ This is an active **research project**, not a production release. Read the [hone
 
 - Prompt surface: [llms.txt](llms.txt)
 - Repository guide: [CLAUDE.md](CLAUDE.md)
-- Syntax and workflow guide: [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
+- Syntax and workflow guide: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md)
 - Live Hugging Face dataset: <https://huggingface.co/datasets/chiuratto-AIgourakis/sounio-code-examples>
 - Training dataset export: [datasets/sounio-code-examples/README.md](datasets/sounio-code-examples/README.md)
-- Dataset builder: [scripts/export_hf_dataset.py](scripts/export_hf_dataset.py)
+- Dataset builder: [scripts/dev/export_hf_dataset.py](scripts/dev/export_hf_dataset.py)
 
 This repo now ships a root `llms.txt` for model-aware tools and a reproducible Hugging Face-style dataset export built from the Sounio test suite.
 The current published dataset lives in the maintainer namespace as a public mirror until the `sounio-lang` Hugging Face org namespace is ready.

@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.preregistration.ossm-168-depression.deviations
+topic_id: repo.docs.papers.preregistrations.deviations
 authority: repo_only
-audience: researchers
-parent_protocol: 2026-04-21_ossm_168_depression.md
-parent_tag: prereg/ossm-168-depression-v1
-parent_sha256: 63c2f60223657491829c38a57a2745fb079d48259bed306538ef32223ae4c93d
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.preregistrations.deviations
 -->
 
 # Deviations log — `prereg/ossm-168-depression-v1`

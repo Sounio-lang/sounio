@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.implementation.production-readyness
+topic_id: repo.docs.internal.implementation.production-readyness
 authority: repo_only
-audience: maintainers
+audience: users
 last_validated: 2026-03-07
-validated_by: A7
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.production-readyness
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.production-readyness
 -->
 
 # Sounio Production Readiness (Linux x86-64)

@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.commutator-associator-identity
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.commutator-associator-identity
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # The Commutator–Associator Identity
 
 **A structural Jacobian theorem for non-associative algebras, with applications to alternativity, the Cayley–Dickson tower, sedenion zero divisors, and epistemic compilation in Sounio.**

@@ -2,8 +2,8 @@
 topic_id: website.docs.getting-started
 authority: dual
 audience: users
-last_validated: 2026-04-22
-validated_by: Codex
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#website.docs.getting-started
 -->
 

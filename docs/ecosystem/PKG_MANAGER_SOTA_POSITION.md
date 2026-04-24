@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.ecosystem.pkg-manager-sota-position
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.pkg-manager-sota-position
+-->
+
 # Sounio Package Manager: Posicionamento vs Estado da Arte (2026)
 
 **Data:** 20 de Abril de 2026

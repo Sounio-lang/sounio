@@ -1,11 +1,16 @@
 <!-- docs:meta
-topic_id: repo.docs.guide.sounio-definitive-guide
-authority: repo_only
-audience: users
+topic_id: repo.docs.archived.getting-started-duplicates.sounio-definitive-guide
+authority: archived
+audience: maintainers
 last_validated: 2026-03-07
-validated_by: A5
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-definitive-guide
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.getting-started-duplicates.sounio-definitive-guide
 -->
+
+<!-- docs:status-note:start -->
+> Docs status: `archived`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
 
 # 🎯 DEFINITIVE Sounio Guide - From REAL Code Analysis
 

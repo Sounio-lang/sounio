@@ -1,11 +1,16 @@
 <!-- docs:meta
-topic_id: repo.docs.guide.sounio-quick-start
-authority: repo_only
-audience: users
+topic_id: repo.docs.archived.getting-started-duplicates.sounio-quick-start
+authority: archived
+audience: maintainers
 last_validated: 2026-03-07
-validated_by: A5
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-quick-start
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.getting-started-duplicates.sounio-quick-start
 -->
+
+<!-- docs:status-note:start -->
+> Docs status: `archived`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
 
 # Sounio Quick Start for LLMs
 

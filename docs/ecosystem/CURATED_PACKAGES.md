@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.ecosystem.curated-packages
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.curated-packages
+-->
+
 # Pacotes Curados do Ecossistema Sounio (v1.0)
 
 Este documento define a **lista inicial de pacotes oficiais** que devem ser desenvolvidos e mantidos com alto padrão de qualidade epistêmica.

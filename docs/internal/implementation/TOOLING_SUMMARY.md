@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.implementation.tooling-summary
+topic_id: repo.docs.internal.implementation.tooling-summary
 authority: repo_only
-audience: maintainers
+audience: users
 last_validated: 2026-03-07
-validated_by: A7
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.tooling-summary
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.tooling-summary
 -->
 
 # Sounio Tooling Summary

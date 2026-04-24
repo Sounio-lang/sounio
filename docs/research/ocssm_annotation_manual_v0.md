@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.ocssm-annotation-manual-v0
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.ocssm-annotation-manual-v0
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # O-CSSM — Manual de Anotação v0
 
 **Status:** v0, 2026-04-24. Escopo: fechamento operacional do §4 do `ocssm_preregistration_v0.md`. Esquema formal de anotação para as quatro categorias (a)–(d) usadas nas falsificações F1, F2, F3b.
