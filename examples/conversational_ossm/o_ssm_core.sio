@@ -1,0 +1,235 @@
+pub struct OSSMState {
+    pub h: [f64; 8],
+    pub turn: i64,
+    pub associator_norm: f64,
+    pub confidence: f64,
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn clamp01(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 }
+    if x > 1.0 { return 1.0 }
+    x
+}
+
+fn sqrt_local(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 18 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn exp_local(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_local(7.5) * exp_local(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var s = 1.0
+    var t = 1.0
+    var i: i64 = 1
+    while i <= 20 {
+        t = t * x / (i as f64)
+        s = s + t
+        i = i + 1
+    }
+    s
+}
+
+fn sigmoid_local(x: f64) -> f64 with Mut, Div, Panic {
+    1.0 / (1.0 + exp_local(0.0 - x))
+}
+
+pub fn oct_zero8() -> [f64; 8] with Mut {
+    var z: [f64; 8] = [0.0; 8]
+    z
+}
+
+pub fn oct_add_local(a: &[f64; 8], b: &[f64; 8]) -> [f64; 8] with Mut {
+    var out: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        out[i as usize] = a[i as usize] + b[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+pub fn oct_scale_local(a: &[f64; 8], s: f64) -> [f64; 8] with Mut {
+    var out: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        out[i as usize] = a[i as usize] * s
+        i = i + 1
+    }
+    out
+}
+
+fn oct_norm_sq_local(a: &[f64; 8]) -> f64 with Mut {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 8 {
+        s = s + a[i as usize] * a[i as usize]
+        i = i + 1
+    }
+    s
+}
+
+fn oct_mul_local(a: &[f64; 8], b: &[f64; 8]) -> [f64; 8] with Mut, Div, Panic, NonAssoc {
+    var o: [f64; 8] = [0.0; 8]
+    let a0 = a[0]; let a1 = a[1]; let a2 = a[2]; let a3 = a[3]
+    let a4 = a[4]; let a5 = a[5]; let a6 = a[6]; let a7 = a[7]
+    let b0 = b[0]; let b1 = b[1]; let b2 = b[2]; let b3 = b[3]
+    let b4 = b[4]; let b5 = b[5]; let b6 = b[6]; let b7 = b[7]
+    o[0] = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    o[1] = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    o[2] = a0*b2 + a2*b0 - a1*b3 + a3*b1 + a4*b6 - a6*b4 + a5*b7 - a7*b5
+    o[3] = a0*b3 + a3*b0 + a1*b2 - a2*b1 + a4*b7 - a7*b4 - a5*b6 + a6*b5
+    o[4] = a0*b4 + a4*b0 - a1*b5 + a5*b1 - a2*b6 + a6*b2 - a3*b7 + a7*b3
+    o[5] = a0*b5 + a5*b0 + a1*b4 - a4*b1 - a2*b7 + a7*b2 + a3*b6 - a6*b3
+    o[6] = a0*b6 + a6*b0 + a1*b7 - a7*b1 + a2*b4 - a4*b2 - a3*b5 + a5*b3
+    o[7] = a0*b7 + a7*b0 - a1*b6 + a6*b1 - a2*b5 + a5*b2 + a3*b4 - a4*b3
+    o
+}
+
+fn oct_associator_local(a: &[f64; 8], b: &[f64; 8], c: &[f64; 8]) -> [f64; 8] with Mut, Div, Panic, NonAssoc {
+    let ab = oct_mul_local(a, b)
+    let bc = oct_mul_local(b, c)
+    let left = oct_mul_local(&ab, c)
+    let right = oct_mul_local(a, &bc)
+    var out: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        out[i as usize] = left[i as usize] - right[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+pub fn oct_sigmoid_local(a: &[f64; 8]) -> [f64; 8] with Mut, Div, Panic {
+    var out: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        out[i as usize] = sigmoid_local(a[i as usize])
+        i = i + 1
+    }
+    out
+}
+
+pub fn state_zero() -> OSSMState with Mut {
+    OSSMState {
+        h: oct_zero8(),
+        turn: 0,
+        associator_norm: 0.0,
+        confidence: 0.92,
+    }
+}
+
+pub fn state_zero_out(out_h: &![f64; 8], out_turn: &![i64; 1], out_assoc: &![f64; 1], out_conf: &![f64; 1]) with Mut {
+    var i: i64 = 0
+    while i < 8 {
+        out_h[i as usize] = 0.0
+        i = i + 1
+    }
+    out_turn[0] = 0
+    out_assoc[0] = 0.0
+    out_conf[0] = 0.92
+}
+
+pub fn state_energy(state: &OSSMState) -> f64 with Mut, Div, Panic {
+    sqrt_local(oct_norm_sq_local(&state.h))
+}
+
+pub fn state_energy_from_h(h: &[f64; 8]) -> f64 with Mut, Div, Panic {
+    sqrt_local(oct_norm_sq_local(h))
+}
+
+pub fn o_ssm_step(prev: &OSSMState, x_raw: &[f64; 8], x_routed: &[f64; 8]) -> OSSMState with Mut, Div, Panic, NonAssoc {
+    let a: [f64; 8] = [0.82, 0.06, 0.03, 0.02, 0.03, 0.02, 0.01, 0.01]
+    let b: [f64; 8] = [0.44, 0.09, 0.06, 0.04, 0.05, 0.03, 0.02, 0.02]
+
+    let ah = oct_mul_local(&a, &prev.h)
+    let bx = oct_mul_local(&b, x_routed)
+
+    let residual = oct_scale_local(&prev.h, 0.18)
+    let sum0 = oct_add_local(&ah, &bx)
+    let sum1 = oct_add_local(&sum0, &residual)
+    let next_h = oct_sigmoid_local(&sum1)
+
+    let assoc = oct_associator_local(&prev.h, x_raw, &next_h)
+    let assoc_norm = sqrt_local(oct_norm_sq_local(&assoc))
+
+    let pressure = if assoc_norm > 1.0 { 1.0 } else { assoc_norm }
+    let next_conf = clamp01(prev.confidence * (1.0 - 0.16 * pressure) + 0.05)
+
+    OSSMState {
+        h: next_h,
+        turn: prev.turn + 1,
+        associator_norm: assoc_norm,
+        confidence: next_conf,
+    }
+}
+
+pub fn o_ssm_step_out(
+    prev_h: &[f64; 8],
+    prev_turn: i64,
+    prev_conf: f64,
+    x_raw: &[f64; 8],
+    x_routed: &[f64; 8],
+    out_h: &![f64; 8],
+    out_turn: &![i64; 1],
+    out_assoc: &![f64; 1],
+    out_conf: &![f64; 1]
+) with Mut, Div, Panic, NonAssoc {
+    let a: [f64; 8] = [0.82, 0.06, 0.03, 0.02, 0.03, 0.02, 0.01, 0.01]
+    let b: [f64; 8] = [0.44, 0.09, 0.06, 0.04, 0.05, 0.03, 0.02, 0.02]
+
+    let ah = oct_mul_local(&a, prev_h)
+    let bx = oct_mul_local(&b, x_routed)
+    let residual = oct_scale_local(prev_h, 0.18)
+    let sum0 = oct_add_local(&ah, &bx)
+    let sum1 = oct_add_local(&sum0, &residual)
+    let next_h = oct_sigmoid_local(&sum1)
+    let assoc = oct_associator_local(prev_h, x_raw, &next_h)
+    let assoc_norm = sqrt_local(oct_norm_sq_local(&assoc))
+
+    let pressure = if assoc_norm > 1.0 { 1.0 } else { assoc_norm }
+    let next_conf = clamp01(prev_conf * (1.0 - 0.16 * pressure) + 0.05)
+
+    var i: i64 = 0
+    while i < 8 {
+        out_h[i as usize] = next_h[i as usize]
+        i = i + 1
+    }
+    out_turn[0] = prev_turn + 1
+    out_assoc[0] = assoc_norm
+    out_conf[0] = next_conf
+}
+
+pub fn state_distance(a: &OSSMState, b: &OSSMState) -> f64 with Mut, Div, Panic {
+    var diff: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        diff[i as usize] = a.h[i as usize] - b.h[i as usize]
+        i = i + 1
+    }
+    sqrt_local(oct_norm_sq_local(&diff))
+}
+
+pub fn state_distance_from_h(a: &[f64; 8], b: &[f64; 8]) -> f64 with Mut, Div, Panic {
+    var diff: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        diff[i as usize] = a[i as usize] - b[i as usize]
+        i = i + 1
+    }
+    sqrt_local(oct_norm_sq_local(&diff))
+}
+
+pub fn confidence_drop(prev: &OSSMState, next: &OSSMState) -> f64 {
+    abs_f64(prev.confidence - next.confidence)
+}

@@ -1,0 +1,320 @@
+//@ run-pass
+//@ expect-stdout: CONVERSATIONAL_OSSM_AGENT_OK
+
+use o_ssm_core::{state_zero_out, o_ssm_step_out, state_energy_from_h, state_distance_from_h}
+use o_ssm_router::{print_basin_name, route_utterance_out, route_apply_weighted}
+use o_ssm_conflict::{conflict_head_out, conflict_branch_input_out}
+use cybernetic::conversation::{
+    Conversation, conversation_new, set_models, converse, agreement, model_accuracy
+}
+
+fn clamp01(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 }
+    if x > 1.0 { return 1.0 }
+    x
+}
+
+fn choose_action(assoc_norm: f64, freeze_pressure: f64, agr: f64, has_alternate: bool) -> i64 {
+    if freeze_pressure > 0.52 && has_alternate { return 3 }
+    if freeze_pressure > 0.50 && !has_alternate { return 2 }
+    if assoc_norm > 0.08 || agr < 0.72 { return 1 }
+    0
+}
+
+fn print_action(action: i64) with IO {
+    if action == 0 {
+        print("answer")
+    } else if action == 1 {
+        print("clarify")
+    } else if action == 2 {
+        print("split")
+    } else {
+        print("abstain")
+    }
+}
+
+fn print_turn_label(idx: i64) with IO {
+    print("turn=")
+    print_int(idx)
+    print(" text=")
+    if idx == 0 {
+        print("opening")
+    } else if idx == 1 {
+        print("pushback")
+    } else if idx == 2 {
+        print("internal_split")
+    } else if idx == 3 {
+        print("repair")
+    } else if idx == 4 {
+        print("alignment")
+    } else {
+        print("branch_visible")
+    }
+    print(" ")
+}
+
+fn turn_contradiction(idx: i64) -> f64 {
+    if idx == 0 { return 0.08 }
+    if idx == 1 { return 0.44 }
+    if idx == 2 { return 0.92 }
+    if idx == 3 { return 0.36 }
+    if idx == 4 { return 0.14 }
+    0.24
+}
+
+fn turn_self_signal(idx: i64) -> f64 {
+    if idx == 0 { return 0.62 }
+    if idx == 1 { return 0.58 }
+    if idx == 2 { return 0.40 }
+    if idx == 3 { return 0.54 }
+    if idx == 4 { return 0.68 }
+    0.72
+}
+
+fn turn_other_signal(idx: i64) -> f64 {
+    if idx == 0 { return 0.48 }
+    if idx == 1 { return 0.36 }
+    if idx == 2 { return 0.18 }
+    if idx == 3 { return 0.44 }
+    if idx == 4 { return 0.60 }
+    0.66
+}
+
+fn fill_turn_x(idx: i64, out: &![f64; 8]) with Mut {
+    if idx == 0 {
+        out[0] = 0.35; out[1] = 0.42; out[2] = 0.18; out[3] = 0.20
+        out[4] = 0.76; out[5] = 0.44; out[6] = 0.10; out[7] = 0.72
+        return
+    }
+    if idx == 1 {
+        out[0] = 0.08; out[1] = 0.68; out[2] = 0.40; out[3] = 0.32
+        out[4] = 0.46; out[5] = 0.30; out[6] = 0.64; out[7] = 0.34
+        return
+    }
+    if idx == 2 {
+        out[0] = 0.0 - 0.18; out[1] = 0.84; out[2] = 0.55; out[3] = 0.22
+        out[4] = 0.26; out[5] = 0.21; out[6] = 0.82; out[7] = 0.18
+        return
+    }
+    if idx == 3 {
+        out[0] = 0.12; out[1] = 0.58; out[2] = 0.46; out[3] = 0.40
+        out[4] = 0.52; out[5] = 0.38; out[6] = 0.44; out[7] = 0.48
+        return
+    }
+    if idx == 4 {
+        out[0] = 0.38; out[1] = 0.36; out[2] = 0.28; out[3] = 0.46
+        out[4] = 0.70; out[5] = 0.58; out[6] = 0.18; out[7] = 0.66
+        return
+    }
+    out[0] = 0.34; out[1] = 0.30; out[2] = 0.42; out[3] = 0.54
+    out[4] = 0.74; out[5] = 0.62; out[6] = 0.24; out[7] = 0.71
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
+    var primary_h: [f64; 8] = [0.0; 8]
+    var primary_turn: [i64; 1] = [0; 1]
+    var primary_assoc: [f64; 1] = [0.0; 1]
+    var primary_conf: [f64; 1] = [0.92; 1]
+    state_zero_out(&!primary_h, &!primary_turn, &!primary_assoc, &!primary_conf)
+
+    var alternate_h: [f64; 8] = [0.0; 8]
+    var alternate_turn: [i64; 1] = [0; 1]
+    var alternate_assoc: [f64; 1] = [0.0; 1]
+    var alternate_conf: [f64; 1] = [0.0; 1]
+    var has_alternate = false
+    var split_count: i64 = 0
+
+    var conv: Conversation = conversation_new(1, 2, 4242)
+    conv = set_models(conv, 62.0, 2.0, 38.0, 2.0)
+
+    var answers: i64 = 0
+    var clarifies: i64 = 0
+    var splits: i64 = 0
+    var abstains: i64 = 0
+
+    println("CONVERSATIONAL_OSSM_AGENT_OK")
+    println("mode table: answer | clarify | split | abstain")
+
+    var idx: i64 = 0
+    while idx < 6 {
+        var turn_x: [f64; 8] = [0.0; 8]
+        fill_turn_x(idx, &!turn_x)
+        let turn_contra = turn_contradiction(idx)
+        let turn_self = turn_self_signal(idx)
+        let turn_other = turn_other_signal(idx)
+
+        let p_val = 100.0 * clamp01(turn_self)
+        let q_val = 100.0 * clamp01(turn_other)
+        conv = set_models(conv, p_val, 1.5, q_val, 1.5)
+        conv = converse(conv)
+
+        var basin_weights: [f64; 7] = [0.0; 7]
+        var top_line: [i64; 1] = [0; 1]
+        var top_weight: [f64; 1] = [0.0; 1]
+        route_utterance_out(&turn_x, &!basin_weights, &!top_line, &!top_weight)
+
+        var routed_x: [f64; 8] = [0.0; 8]
+        route_apply_weighted(&turn_x, &basin_weights, top_line[0], top_weight[0], &!routed_x)
+
+        var next_h: [f64; 8] = [0.0; 8]
+        var next_turn: [i64; 1] = [0; 1]
+        var next_assoc: [f64; 1] = [0.0; 1]
+        var next_conf: [f64; 1] = [0.0; 1]
+        o_ssm_step_out(
+            &primary_h,
+            primary_turn[0],
+            primary_conf[0],
+            &turn_x,
+            &routed_x,
+            &!next_h,
+            &!next_turn,
+            &!next_assoc,
+            &!next_conf
+        )
+
+        var zd: [f64; 1] = [0.0; 1]
+        var freeze: [f64; 1] = [0.0; 1]
+        conflict_head_out(&next_h, &turn_x, turn_contra, &!zd, &!freeze)
+        let agr = agreement(conv)
+        let acc = model_accuracy(conv)
+
+        let action = choose_action(next_assoc[0], freeze[0], agr, has_alternate)
+
+        if action == 0 {
+            answers = answers + 1
+            var i: i64 = 0
+            while i < 8 {
+                primary_h[i as usize] = next_h[i as usize]
+                i = i + 1
+            }
+            primary_turn[0] = next_turn[0]
+            primary_assoc[0] = next_assoc[0]
+            primary_conf[0] = next_conf[0]
+
+            if has_alternate && alternate_conf[0] > primary_conf[0] {
+                var swap_h: [f64; 8] = [0.0; 8]
+                i = 0
+                while i < 8 {
+                    swap_h[i as usize] = primary_h[i as usize]
+                    primary_h[i as usize] = alternate_h[i as usize]
+                    alternate_h[i as usize] = swap_h[i as usize]
+                    i = i + 1
+                }
+                let swap_turn = primary_turn[0]
+                let swap_assoc = primary_assoc[0]
+                let swap_conf = primary_conf[0]
+                primary_turn[0] = alternate_turn[0]
+                primary_assoc[0] = alternate_assoc[0]
+                primary_conf[0] = alternate_conf[0]
+                alternate_turn[0] = swap_turn
+                alternate_assoc[0] = swap_assoc
+                alternate_conf[0] = swap_conf
+            }
+        } else if action == 1 {
+            clarifies = clarifies + 1
+            var i: i64 = 0
+            while i < 8 {
+                primary_h[i as usize] = next_h[i as usize]
+                i = i + 1
+            }
+            primary_turn[0] = next_turn[0]
+            primary_assoc[0] = next_assoc[0]
+            primary_conf[0] = next_conf[0]
+        } else if action == 2 {
+            splits = splits + 1
+            split_count = split_count + 1
+            has_alternate = true
+
+            var i: i64 = 0
+            while i < 8 {
+                primary_h[i as usize] = next_h[i as usize]
+                i = i + 1
+            }
+            primary_turn[0] = next_turn[0]
+            primary_assoc[0] = next_assoc[0]
+            primary_conf[0] = next_conf[0]
+
+            var alt_input: [f64; 8] = [0.0; 8]
+            conflict_branch_input_out(&turn_x, turn_contra, &!alt_input)
+
+            var alt_weights: [f64; 7] = [0.0; 7]
+            var alt_top_line: [i64; 1] = [0; 1]
+            var alt_top_weight: [f64; 1] = [0.0; 1]
+            route_utterance_out(&alt_input, &!alt_weights, &!alt_top_line, &!alt_top_weight)
+
+            var alt_routed: [f64; 8] = [0.0; 8]
+            route_apply_weighted(&alt_input, &alt_weights, alt_top_line[0], alt_top_weight[0], &!alt_routed)
+
+            o_ssm_step_out(
+                &primary_h,
+                primary_turn[0],
+                primary_conf[0],
+                &alt_input,
+                &alt_routed,
+                &!alternate_h,
+                &!alternate_turn,
+                &!alternate_assoc,
+                &!alternate_conf
+            )
+        } else {
+            abstains = abstains + 1
+            if has_alternate && alternate_conf[0] > primary_conf[0] {
+                var i: i64 = 0
+                while i < 8 {
+                    primary_h[i as usize] = alternate_h[i as usize]
+                    i = i + 1
+                }
+                primary_turn[0] = alternate_turn[0]
+                primary_assoc[0] = alternate_assoc[0]
+                primary_conf[0] = alternate_conf[0]
+            }
+        }
+
+        print_turn_label(idx)
+        print("basin=")
+        print_basin_name(top_line[0])
+        print(" assoc=")
+        print_f64(next_assoc[0])
+        print(" zd=")
+        print_f64(zd[0])
+        print(" agreement=")
+        print_f64(agr)
+        print(" model_err=")
+        print_f64(acc)
+        print(" mode=")
+        print_action(action)
+        print("\n")
+
+        idx = idx + 1
+    }
+
+    let energy = state_energy_from_h(&primary_h)
+    let gap = if has_alternate {
+        if primary_conf[0] > alternate_conf[0] { primary_conf[0] - alternate_conf[0] } else { alternate_conf[0] - primary_conf[0] }
+    } else { 0.0 }
+    let branch_delta = if has_alternate { state_distance_from_h(&primary_h, &alternate_h) } else { 0.0 }
+
+    print("summary answers=")
+    print_int(answers)
+    print(" clarifies=")
+    print_int(clarifies)
+    print(" splits=")
+    print_int(split_count)
+    print(" abstains=")
+    print_int(abstains)
+    print(" final_energy=")
+    print_f64(energy)
+    print(" branch_gap=")
+    print_f64(gap)
+    print(" branch_delta=")
+    print_f64(branch_delta)
+    print("\n")
+
+    if answers >= 1 && clarifies >= 1 && split_count >= 1 {
+        println("[PASS] conversational O-SSM control loop exercised")
+        0
+    } else {
+        println("[FAIL] control law did not express enough modes")
+        1
+    }
+}
