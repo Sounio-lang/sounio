@@ -2706,6 +2706,57 @@ fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     return 0
 }
 
+// PR-3: struct-field refinement enforcement. At struct-literal compile time,
+// look up the field's stored type hash against the registered refinement-type
+// aliases; if it matches an alias with an integer predicate and the just-compiled
+// RHS is a literal, apply the predicate and emit a violation on failure.
+// Field types are scanned in pass 0a before pass 1c registers aliases, so the
+// stored fhash is the alias name hash, not the resolved base hash — we use that
+// to dispatch back into REF_TYPE_DATA.
+fn try_apply_field_alias_refinement(field_hash: i64, tok: i64) with IO, Mut, Panic, Div {
+    var ref_idx: i64 = -1
+    var ref_i: i64 = 0
+    while ref_i < REF_TYPE_COUNT {
+        if REF_TYPE_HASH[ref_i as usize] == field_hash { ref_idx = ref_i; ref_i = REF_TYPE_COUNT }
+        ref_i = ref_i + 1
+    }
+    if ref_idx < 0 { return }
+    let b = ref_idx * 10
+    if REF_TYPE_DATA[(b + 2) as usize] != 1 { return }
+    if REF_TYPE_DATA[(b + 5) as usize] == 1 { return }  // f64 predicates: codegen below handles non-literal case
+    if LAST_IS_LITERAL != 1 { return }
+    let cv = LAST_LITERAL_VAL
+    let bv = REF_TYPE_DATA[(b + 4) as usize]
+    let op = REF_TYPE_DATA[(b + 3) as usize]
+    var violated: i64 = 0
+    if op == 26 && cv < bv { violated = 1 }
+    if op == 24 && cv <= bv { violated = 1 }
+    if op == 25 && cv > bv { violated = 1 }
+    if op == 23 && cv >= bv { violated = 1 }
+    if op == 21 && cv != bv { violated = 1 }
+    if op == 22 && cv == bv { violated = 1 }
+    if violated == 1 && REF_TYPE_DATA[(b + 6) as usize] == 1 {
+        let bv2 = REF_TYPE_DATA[(b + 8) as usize]
+        let op2 = REF_TYPE_DATA[(b + 7) as usize]
+        var ok2: i64 = 0
+        if op2 == 26 && cv >= bv2 { ok2 = 1 }
+        if op2 == 24 && cv > bv2 { ok2 = 1 }
+        if op2 == 25 && cv <= bv2 { ok2 = 1 }
+        if op2 == 23 && cv < bv2 { ok2 = 1 }
+        if op2 == 21 && cv == bv2 { ok2 = 1 }
+        if op2 == 22 && cv != bv2 { ok2 = 1 }
+        if ok2 == 1 { violated = 0 }
+    }
+    if violated == 1 {
+        print("error: refinement type violation — value ")
+        print_int(cv)
+        print(" does not satisfy field predicate at line ")
+        print_int(TL[tok as usize])
+        print("\n")
+        tc_mark_failed()
+    }
+}
+
 fn tc_undefined_var(tok: i64) -> i64 with IO, Mut, Panic {
     print("warning: unknown identifier at line ")
     print_int(TL[tok as usize])
@@ -10629,6 +10680,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                                 fill_repeat_struct_array_slots_x86(dst_start, fhash)
                             } else {
                                 compile_or()
+                                try_apply_field_alias_refinement(fhash, field_tok)
                                 if fty != 0 && ty_eq(fty, fhash, EXPR_TY, EXPR_TY_HASH) == false {
                                     tc_error(field_tok, "field initializer type does not match struct field")
                                 }
@@ -23725,6 +23777,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                                 fill_repeat_struct_array_slots_a64(dst_start, fhash)
                             } else {
                                 compile_or_a64()
+                                try_apply_field_alias_refinement(fhash, field_tok)
                                 if fty != 0 && ty_eq(fty, fhash, EXPR_TY, EXPR_TY_HASH) == false {
                                     tc_error(field_tok, "field initializer type does not match struct field")
                                 }
