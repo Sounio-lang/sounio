@@ -260,9 +260,14 @@ var MATCH_SCRUT_TY: i64 = 0
 var MATCH_SCRUT_HASH: i64 = 0
 
 // ─── Phase 6b: Refinement type aliases ───
-// type Name = { x: T | predicate } — stored as name hash + predicate token range
+// type Name = { x: T | predicate } — stored as name hash + predicate fields
+// PR-2: actually capture the predicate so call/binding sites can apply it.
+// Packed layout: REF_TYPE_DATA[i*10 + k] for alias i, field k.
+//   k=0 base_ty, 1 base_hash, 2 has_pred, 3 pred_op, 4 pred_bound, 5 pred_is_f64,
+//   6 has_pred2, 7 pred_op2, 8 pred_bound2, 9 pred_is_f64_2
 var REF_TYPE_HASH: [i64; 32] = [0; 32]
 var REF_TYPE_COUNT: i64 = 0
+var REF_TYPE_DATA: [i64; 320] = [0; 320]
 
 // ─── Phase 6c: Refinement predicate runtime assertions ───
 // Set by scan_type when a refinement type { x: T | pred } is scanned.
@@ -3863,10 +3868,35 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                                             SCAN_TY = 7
                                                             SCAN_TY_HASH = h
                                                         } else {
+                                                            // PR-2: refinement type alias — resolve to base type + predicate
+                                                            var ref_idx: i64 = -1
+                                                            var ref_i: i64 = 0
+                                                            while ref_i < REF_TYPE_COUNT {
+                                                                if REF_TYPE_HASH[ref_i as usize] == h { ref_idx = ref_i; ref_i = REF_TYPE_COUNT }
+                                                                ref_i = ref_i + 1
+                                                            }
+                                                            let ref_b = ref_idx * 10
+                                                            if ref_idx >= 0 && REF_TYPE_DATA[(ref_b + 0) as usize] != 0 {
+                                                                SCAN_TY = REF_TYPE_DATA[(ref_b + 0) as usize]
+                                                                SCAN_TY_HASH = REF_TYPE_DATA[(ref_b + 1) as usize]
+                                                                if REF_TYPE_DATA[(ref_b + 2) as usize] == 1 {
+                                                                    SCAN_HAS_PRED = 1
+                                                                    SCAN_PRED_OP = REF_TYPE_DATA[(ref_b + 3) as usize]
+                                                                    SCAN_PRED_BOUND = REF_TYPE_DATA[(ref_b + 4) as usize]
+                                                                    SCAN_PRED_IS_F64 = REF_TYPE_DATA[(ref_b + 5) as usize]
+                                                                }
+                                                                if REF_TYPE_DATA[(ref_b + 6) as usize] == 1 {
+                                                                    SCAN_HAS_PRED2 = 1
+                                                                    SCAN_PRED_OP2 = REF_TYPE_DATA[(ref_b + 7) as usize]
+                                                                    SCAN_PRED_BOUND2 = REF_TYPE_DATA[(ref_b + 8) as usize]
+                                                                    SCAN_PRED_IS_F64_2 = REF_TYPE_DATA[(ref_b + 9) as usize]
+                                                                }
+                                                            } else {
                                                             // Unknown type name — leave as type 0 (unresolved)
                                                             // Type checker will skip errors for type-0 operands
                                                             SCAN_TY = 0
                                                             SCAN_TY_HASH = h
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -20096,15 +20126,60 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if ttk == 61 {
             // type NAME = ...
             p = p + 1
+            var alias_idx: i64 = -1
             if p < TC && TK[p as usize] == 3 {
                 let tnh = gl_name_hash(TS[p as usize], TE[p as usize])
                 if REF_TYPE_COUNT < 32 {
-                    REF_TYPE_HASH[REF_TYPE_COUNT as usize] = tnh
+                    alias_idx = REF_TYPE_COUNT
+                    REF_TYPE_HASH[alias_idx as usize] = tnh
+                    let _b = alias_idx * 10
+                    REF_TYPE_DATA[(_b + 0) as usize] = 0
+                    REF_TYPE_DATA[(_b + 1) as usize] = 0
+                    REF_TYPE_DATA[(_b + 2) as usize] = 0
+                    REF_TYPE_DATA[(_b + 6) as usize] = 0
                     REF_TYPE_COUNT = REF_TYPE_COUNT + 1
                 }
                 p = p + 1
             }
-            // Skip = and everything to next top-level declaration
+            // Expect '=' then optional refinement body { ident : T | pred }
+            if alias_idx >= 0 && p < TC && TK[p as usize] == 16 {
+                p = p + 1
+                // Save current SCAN_HAS_PRED state (we will reuse scan_type)
+                let save_has = SCAN_HAS_PRED
+                let save_has2 = SCAN_HAS_PRED2
+                let save_op = SCAN_PRED_OP
+                let save_bound = SCAN_PRED_BOUND
+                let save_isf = SCAN_PRED_IS_F64
+                let save_op2 = SCAN_PRED_OP2
+                let save_bound2 = SCAN_PRED_BOUND2
+                let save_isf2 = SCAN_PRED_IS_F64_2
+                scan_type(p)
+                let _b2 = alias_idx * 10
+                REF_TYPE_DATA[(_b2 + 0) as usize] = SCAN_TY
+                REF_TYPE_DATA[(_b2 + 1) as usize] = SCAN_TY_HASH
+                if SCAN_HAS_PRED == 1 {
+                    REF_TYPE_DATA[(_b2 + 2) as usize] = 1
+                    REF_TYPE_DATA[(_b2 + 3) as usize] = SCAN_PRED_OP
+                    REF_TYPE_DATA[(_b2 + 4) as usize] = SCAN_PRED_BOUND
+                    REF_TYPE_DATA[(_b2 + 5) as usize] = SCAN_PRED_IS_F64
+                }
+                if SCAN_HAS_PRED2 == 1 {
+                    REF_TYPE_DATA[(_b2 + 6) as usize] = 1
+                    REF_TYPE_DATA[(_b2 + 7) as usize] = SCAN_PRED_OP2
+                    REF_TYPE_DATA[(_b2 + 8) as usize] = SCAN_PRED_BOUND2
+                    REF_TYPE_DATA[(_b2 + 9) as usize] = SCAN_PRED_IS_F64_2
+                }
+                // Restore (do not leak alias-decl predicate into outer state)
+                SCAN_HAS_PRED = save_has
+                SCAN_HAS_PRED2 = save_has2
+                SCAN_PRED_OP = save_op
+                SCAN_PRED_BOUND = save_bound
+                SCAN_PRED_IS_F64 = save_isf
+                SCAN_PRED_OP2 = save_op2
+                SCAN_PRED_BOUND2 = save_bound2
+                SCAN_PRED_IS_F64_2 = save_isf2
+            }
+            // Skip remainder to next top-level declaration
             while p < TC && TK[p as usize] != 1 && TK[p as usize] != 12 && TK[p as usize] != 46 && TK[p as usize] != 47 && TK[p as usize] != 61 && TK[p as usize] != 0 { p = p + 1 }
             continue
         }
