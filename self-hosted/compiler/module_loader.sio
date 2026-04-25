@@ -11,7 +11,7 @@
 // Named imports only — glob imports caused type-checker stack overflow
 use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Name, Program, StringList}
 use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
-use check::mod::{check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
+use check::mod::{check_program_epistemic_into, check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
 use resolve::imports::{collect_module_exports, ModuleEntry, ModuleRegistry, module_registry_find, module_registry_new, module_registry_put}
 use resolve::symbol::{SymbolKind}
@@ -20,7 +20,7 @@ use lexer::mod::{sourcefile_load, sourcefile_parse_program_loaded, sourcefile_st
 use io::file_write::{io_write_bytes_to_file, io_write_huge_binary, io_write_native_binary, io_write_native_decision_trace}
 use io::trace::{io_trace_append_byte, io_trace_append_json_string, io_trace_append_string, io_trace_bool_string, io_trace_i64_string}
 use compiler::ontology::cache::{ontology_default_home, ontology_default_mode, ontology_default_cache_dir}
-use ir::lower::{IrProgramSummary, IrLowerBoxResult, lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic, ir_empty_program_summary}
+use ir::lower::{IrProgramSummary, IrProgramSummaryResult, IrProgramSummaryBoxResult, IrProgramSummaryFlat, IrProgramSummaryFlatResult, IrFunctionBodyResult, IrLowerBoxResult, lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic, ir_empty_program_summary}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_boxed_trace, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_program_to_ir_with_epistemic_boxed_trace_ref}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
 use ir::serialize::{serialize_ir_module, deserialize_ir_module}
@@ -33,7 +33,7 @@ use native::frame::{compiler_new, NativeCompiler}
 use native::machine_ir::{native_v2_legalize_function, native_v2_lower_function_to_machine, MachineFunction}
 use native::elf::{Elf64Binary}
 use wasm::lower::{wasm_lower_module}
-use native::codegen::{compile_ir_function, compile_ir_function_v2, compile_module_streaming_begin, compile_module_streaming_finish, compile_native, finalize_compiled_elf, name_is_file_size, name_is_get_arg, name_is_get_arg_count, name_is_main, name_is_print, name_is_print_char, name_is_print_int, name_is_read_file, name_is_starts_with, name_is_str_concat, name_is_str_eq, name_is_str_len, name_is_str_slice, name_is_write_file, ERR_BACKEND_NOT_IMPLEMENTED, FORMAT_ELF64, NativeCompileResult, native_compile_result_error, native_compile_result_ok, native_matrix_mode_string, native_resolve_target, native_target_source_string, NativeTargetSpec, read_env}
+use native::codegen::{ARCH_X86_64, compile_ir_function, compile_ir_function_v2, compile_module_streaming_begin, compile_module_streaming_finish, compile_native, finalize_compiled_elf, name_is_file_size, name_is_get_arg, name_is_get_arg_count, name_is_main, name_is_print, name_is_print_char, name_is_print_int, name_is_read_file, name_is_starts_with, name_is_str_concat, name_is_str_eq, name_is_str_len, name_is_str_slice, name_is_write_file, ERR_BACKEND_NOT_IMPLEMENTED, FORMAT_ELF64, NativeCompileResult, native_compile_result_error, native_compile_result_ok, native_matrix_mode_string, native_resolve_target, native_target_source_string, NativeTargetSpec, OS_LINUX, read_env}
 
 // ============================================================
 // Path conversion: AstPath segments → string
@@ -1536,6 +1536,16 @@ fn thin_copy_huge_to_small(src: [i8; 16777216], len: i64) -> [i8; 131072] with M
     out
 }
 
+fn thin_copy_elf_to_small(src: [i8; 1048576], len: i64) -> [i8; 131072] with Mut, Panic, Div {
+    var out: [i8; 131072] = [0; 131072]
+    var i: i64 = 0
+    while i < len && i < 131072 {
+        out[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    out
+}
+
 fn thin_read_small_file(path: string) -> (bool, [i8; 131072], i64) with IO, Mut, Panic, Div {
     let len = file_size(path)
     if len <= 0 || len > 131072 || !file_exists(path) {
@@ -1551,6 +1561,14 @@ fn thin_native_compile_result_from_wide(bytes: [i8; 16777216], len: i64, format_
         return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_native_binary_too_large")
     }
     let narrow = thin_copy_huge_to_small(bytes, len)
+    native_compile_result_ok(narrow, len, format_id)
+}
+
+fn thin_native_compile_result_from_elf(bytes: [i8; 1048576], len: i64, format_id: i64) -> NativeCompileResult with Mut, Panic, Div {
+    if len <= 0 || len > 131072 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_native_binary_too_large")
+    }
+    let narrow = thin_copy_elf_to_small(bytes, len)
     native_compile_result_ok(narrow, len, format_id)
 }
 
@@ -1629,7 +1647,7 @@ fn compile_singlemodule_native_streaming_result_from_program(
 
     nc = compile_module_streaming_finish(nc, full_module)
     let elf: Elf64Binary = finalize_compiled_elf(nc, 4194304)
-    thin_native_compile_result_from_wide(elf.bytes, elf.len, FORMAT_ELF64())
+    thin_native_compile_result_from_elf(elf.bytes, elf.len, FORMAT_ELF64())
 }
 
 pub fn compile_multimodule_native_maybe_streaming(main_path: string, target_spec: NativeTargetSpec) -> (bool, NativeCompileResult) with IO, Mut, Div, Panic, Alloc {

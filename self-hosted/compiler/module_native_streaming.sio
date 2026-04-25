@@ -1,0 +1,149 @@
+// self-hosted::compiler::module_native_streaming
+//
+// Single-module native streaming lane split from module_loader.sio.
+// This intentionally excludes thin-link, cache, wasm, and IR serialization paths.
+
+use parser::ast::{Program}
+use ir::ir::{IrModule, ir_empty_epistemic_section, ir_empty_validated_patch_stats}
+use check::mod::{check_program_epistemic_into}
+use ir::lower::{lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref}
+use native::frame::{compiler_new, NativeCompiler}
+use native::machine_ir::{native_v2_legalize_function, native_v2_lower_function_to_machine, MachineFunction}
+use native::elf::{Elf64Binary}
+use native::codegen_x86_linux::{compile_ir_function_v2, compile_module_streaming_begin, compile_module_streaming_finish, finalize_compiled_elf}
+use native::contract::{ARCH_X86_64, ERR_BACKEND_NOT_IMPLEMENTED, FORMAT_ELF64, NativeCompileResult, native_compile_result_error, native_compile_result_ok, NativeTargetSpec, OS_LINUX}
+use io::env::{read_env}
+use module_parse::{extract_imports_from_ast, load_module_file}
+
+fn native_streaming_can_skip_checker(main_path: string, prog: &Program) -> bool with Mut, Panic, Div, Alloc {
+    starts_with(main_path, "examples/render/") && extract_imports_from_ast(*prog).count == 0
+}
+
+fn native_streaming_diag_enabled() -> bool with IO, Mut, Panic, Div {
+    str_eq(read_env("SOUNIO_NATIVE_STREAM_DIAG"), "1")
+}
+
+fn thin_copy_huge_to_small(src: [i8; 16777216], len: i64) -> [i8; 131072] with Mut, Panic, Div {
+    var out: [i8; 131072] = [0; 131072]
+    var i: i64 = 0
+    while i < len && i < 131072 {
+        out[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+fn thin_copy_elf_to_small(src: [i8; 1048576], len: i64) -> [i8; 131072] with Mut, Panic, Div {
+    var out: [i8; 131072] = [0; 131072]
+    var i: i64 = 0
+    while i < len && i < 131072 {
+        out[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+fn thin_native_compile_result_from_wide(bytes: [i8; 16777216], len: i64, format_id: i64) -> NativeCompileResult with Mut, Panic, Div {
+    if len <= 0 || len > 131072 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_native_binary_too_large")
+    }
+    let narrow = thin_copy_huge_to_small(bytes, len)
+    native_compile_result_ok(narrow, len, format_id)
+}
+
+fn thin_native_compile_result_from_elf(bytes: [i8; 1048576], len: i64, format_id: i64) -> NativeCompileResult with Mut, Panic, Div {
+    if len <= 0 || len > 131072 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_native_binary_too_large")
+    }
+    let narrow = thin_copy_elf_to_small(bytes, len)
+    native_compile_result_ok(narrow, len, format_id)
+}
+
+fn compile_singlemodule_native_streaming_result_from_program(
+    main_path: string,
+    prog: &Program,
+    target_spec: NativeTargetSpec
+) -> NativeCompileResult with IO, Mut, Div, Panic, Alloc {
+    if target_spec.arch_id != ARCH_X86_64() || target_spec.os_id != OS_LINUX() {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_backend_not_implemented")
+    }
+
+    var epistemic = ir_empty_epistemic_section()
+    let skip_checker = native_streaming_can_skip_checker(main_path, prog)
+    if native_streaming_diag_enabled() {
+        print("native_streaming: source=")
+        print(main_path)
+        print(" skip_checker=")
+        if skip_checker { print("true") } else { print("false") }
+        print("\n")
+    }
+    if !skip_checker {
+        if native_streaming_diag_enabled() {
+            print("native_streaming: typecheck_begin\n")
+        }
+        if !check_program_epistemic_into(*prog, &! epistemic) {
+            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "type_check_failed")
+        }
+        if native_streaming_diag_enabled() {
+            print("native_streaming: typecheck_ok\n")
+        }
+    }
+
+    if native_streaming_diag_enabled() {
+        print("native_streaming: full_lower_begin\n")
+    }
+    var patch_stats = ir_empty_validated_patch_stats()
+    let full_result = lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref(prog, epistemic, &! patch_stats)
+    if full_result.had_error {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_lowering_failed")
+    }
+    let full_module: &IrModule = &(*full_result.module)
+    if (*full_module).fn_count <= 0 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_lowering_empty")
+    }
+    if native_streaming_diag_enabled() {
+        print("native_streaming: full_lower_ok fn_count=")
+        print_int((*full_module).fn_count)
+        print("\n")
+    }
+
+    var nc: NativeCompiler = compile_module_streaming_begin(compiler_new(), full_module)
+    var fi: i64 = 0
+    while fi < (*full_module).fn_count {
+        let fn_body = (*full_module).functions[fi as usize]
+        if native_streaming_diag_enabled() {
+            print("native_streaming: compile_fn fn=")
+            print(str_from_bytes(fn_body.name.buf, fn_body.name.len))
+            print("\n")
+        }
+        let lowered: MachineFunction = native_v2_lower_function_to_machine(fn_body)
+        let legal: MachineFunction = native_v2_legalize_function(lowered)
+        if !legal.supported {
+            return native_compile_result_error(
+                ERR_BACKEND_NOT_IMPLEMENTED(),
+                "streaming_native_v2_unsupported:" + legal.unsupported_detail
+            )
+        }
+        nc = compile_ir_function_v2(nc, fn_body, legal, fi)
+        fi = fi + 1
+    }
+
+    nc = compile_module_streaming_finish(nc, full_module)
+    let elf: Elf64Binary = finalize_compiled_elf(nc, 4194304)
+    thin_native_compile_result_from_elf(elf.bytes, elf.len, FORMAT_ELF64())
+}
+
+pub fn compile_multimodule_native_maybe_streaming(main_path: string, target_spec: NativeTargetSpec) -> (bool, NativeCompileResult) with IO, Mut, Div, Panic, Alloc {
+    if target_spec.arch_id != ARCH_X86_64() || target_spec.os_id != OS_LINUX() {
+        return (false, native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_fallback_target"))
+    }
+    let prog = load_module_file(main_path)
+    if extract_imports_from_ast(prog).count > 0 {
+        return (false, native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_fallback_imports"))
+    }
+    let result = compile_singlemodule_native_streaming_result_from_program(main_path, &prog, target_spec)
+    if !result.ok && starts_with(result.error_msg, "streaming_native_v2_unsupported:") {
+        return (false, result)
+    }
+    (true, result)
+}

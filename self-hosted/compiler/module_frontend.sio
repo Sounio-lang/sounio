@@ -1,0 +1,1452 @@
+// self-hosted::compiler::module_frontend
+//
+// Multimodule frontend and IR-loading lane split from module_loader.sio.
+// Keeps frontend probes off the native/wasm/optimizer/thin-link backend surface.
+
+use parser::ast::{AstPath, empty_path, Program, StringList}
+use parser::mod::{count_items}
+use ir::ir::*
+use check::mod::{check_program_epistemic_into, check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
+use resolve::mod::{resolve_modules}
+use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_probe_summary}
+use module_parse::{extract_imports_from_ast, file_exists, load_module_file}
+
+fn string_list_seg_to_buf(sl: StringList, out: [i8; 512], pos: i64) -> ([i8; 512], i64) with Mut, Panic, Div {
+    var buf = out
+    var p = pos
+    // Copy this segment's bytes
+    var i: i64 = 0
+    while i < sl.head_len && p < 500 {
+        buf[p] = sl.head_buf[i]
+        p = p + 1
+        i = i + 1
+    }
+    (buf, p)
+}
+
+fn string_list_to_path_buf(sl: StringList, sep_a: i8, sep_b: i8, out: [i8; 512], pos: i64) -> ([i8; 512], i64) with Mut, Panic, Div, Alloc {
+    // Copy head segment
+    let head_pair = string_list_seg_to_buf(sl, out, pos)
+    // If there is a tail, add separator and recurse
+    match sl.tail {
+        None => head_pair
+        Some(next) => {
+            var buf2 = head_pair.0
+            var p2 = head_pair.1
+            if p2 < 500 {
+                buf2[p2] = sep_a
+                p2 = p2 + 1
+            }
+            if sep_b != (0 as i8) && p2 < 500 {
+                buf2[p2] = sep_b
+                p2 = p2 + 1
+            }
+            string_list_to_path_buf(*next, sep_a, sep_b, buf2, p2)
+        }
+    }
+}
+
+fn use_path_to_string(path: AstPath) -> string with Mut, Panic, Div, Alloc {
+    // Convert AstPath to "seg1::seg2::seg3" string
+    if path.seg_count == 0 {
+        return ""
+    }
+    var buf: [i8; 512] = [0; 512]
+    // Use :: as separator (58 = ':', 58 = ':')
+    let path_pair = string_list_to_path_buf(path.segments, 58 as i8, 58 as i8, buf, 0)
+    // Convert [i8; 512] to string via byte printing
+    buf_to_string(path_pair.0, path_pair.1)
+}
+
+// Check if a StringList head segment is exactly "super" (115,117,112,101,114)
+fn seg_is_super(sl: StringList) -> bool {
+    if sl.head_len != 5 { return false }
+    sl.head_buf[0] == (115 as i8) &&
+    sl.head_buf[1] == (117 as i8) &&
+    sl.head_buf[2] == (112 as i8) &&
+    sl.head_buf[3] == (101 as i8) &&
+    sl.head_buf[4] == (114 as i8)
+}
+
+// Strip the last directory component from a path buffer.
+// "/a/b/c" -> "/a/b" (returns index of last '/')
+fn buf_strip_last_dir(buf: [i8; 512], len: i64) -> ([i8; 512], i64) with Mut, Panic, Div {
+    var i = len - 1
+    while i > 0 {
+        if buf[i as usize] == (47 as i8) {
+            return (buf, i)
+        }
+        i = i - 1
+    }
+    (buf, len)
+}
+
+// Process path segments into buf, handling "super" as parent-dir navigation.
+// Each non-super segment is appended as "/seg"; "super" strips the last dir component.
+fn use_path_segs_to_buf(sl: StringList, out: [i8; 512], pos: i64) -> ([i8; 512], i64) with Mut, Panic, Div, Alloc {
+    if seg_is_super(sl) {
+        let strip_pair = buf_strip_last_dir(out, pos)
+        match sl.tail {
+            None => strip_pair
+            Some(next) => use_path_segs_to_buf(*next, strip_pair.0, strip_pair.1)
+        }
+    } else {
+        var buf2 = out
+        var p2 = pos
+        if p2 < 500 {
+            buf2[p2] = 47 as i8  // '/'
+            p2 = p2 + 1
+        }
+        let seg_pair = string_list_seg_to_buf(sl, buf2, p2)
+        match sl.tail {
+            None => seg_pair
+            Some(next) => use_path_segs_to_buf(*next, seg_pair.0, seg_pair.1)
+        }
+    }
+}
+
+fn use_path_to_file_path(path: AstPath, prefix: string) -> string with Mut, Panic, Div, Alloc {
+    // Convert AstPath to "prefix/seg1/seg2/seg3.sio" file path.
+    // "super" segments navigate up one directory level.
+    if path.seg_count == 0 {
+        return ""
+    }
+    var buf: [i8; 512] = [0; 512]
+    var pos: i64 = 0
+    // Write prefix bytes (no trailing slash — segments add their own leading slash)
+    let prefix_len = str_len(prefix)
+    var pi: i64 = 0
+    while pi < prefix_len && pos < 490 {
+        buf[pos] = str_char_at(prefix, pi) as i8
+        pos = pos + 1
+        pi = pi + 1
+    }
+    // Process all segments (super-aware)
+    let path_pair = use_path_segs_to_buf(path.segments, buf, pos)
+    // Append ".sio"
+    var final_buf = path_pair.0
+    var fp = path_pair.1
+    if fp < 508 {
+        final_buf[fp] = 46 as i8      // '.'
+        final_buf[fp + 1] = 115 as i8 // 's'
+        final_buf[fp + 2] = 105 as i8 // 'i'
+        final_buf[fp + 3] = 111 as i8 // 'o'
+        fp = fp + 4
+    }
+    buf_to_string(final_buf, fp)
+}
+
+// Convert byte buffer to VM string using str_from_bytes builtin
+fn buf_to_string(buf: [i8; 512], len: i64) -> string with Mut, Panic, Div {
+    str_from_bytes(buf, len)
+}
+
+fn path_directory(path: string) -> string with Mut, Panic, Div {
+    var path_len = str_len(path)
+    var last_slash: i64 = 0 - 1
+    var i: i64 = 0
+    while i < path_len {
+        if str_char_at(path, i) == 47 {
+            last_slash = i
+        }
+        i = i + 1
+    }
+    if last_slash < 0 {
+        return "."
+    }
+    var buf: [i8; 512] = [0; 512]
+    i = 0
+    while i <= last_slash && i < 511 {
+        buf[i] = str_char_at(path, i) as i8
+        i = i + 1
+    }
+    str_from_bytes(buf, last_slash)
+}
+
+fn empty_program() -> Program {
+    Program {
+        module_path: empty_path(),
+        items: None,
+    }
+}
+
+fn ir_epistemic_offset_id(id: i64, offset: i64) -> i64 {
+    if id >= 0 { id + offset } else { id }
+}
+
+fn ir_merge_adjust_epistemic_instr(
+    instr: IrInstr,
+    contest_offset: i64,
+    robust_offset: i64,
+    decision_offset: i64,
+    deferred_offset: i64,
+    validated_offset: i64,
+    acquisition_plan_offset: i64,
+    recourse_plan_offset: i64,
+    alternative_set_offset: i64,
+    transition_plan_offset: i64,
+    observed_transition_offset: i64,
+    rollback_certificate_offset: i64
+) -> IrInstr with Mut {
+    var out = instr
+    if out.op == IrOpcode::IrContest || out.op == IrOpcode::IrLiftKnowledge {
+        out.label_id = ir_epistemic_offset_id(out.label_id, contest_offset)
+    } else if out.op == IrOpcode::IrProveRobust {
+        out.label_id = ir_epistemic_offset_id(out.label_id, robust_offset)
+    } else if out.op == IrOpcode::IrAdmitAction {
+        out.label_id = ir_epistemic_offset_id(out.label_id, decision_offset)
+    } else if out.op == IrOpcode::IrDeferAction {
+        out.label_id = ir_epistemic_offset_id(out.label_id, deferred_offset)
+    } else if out.op == IrOpcode::IrValidated {
+        out.label_id = ir_epistemic_offset_id(out.label_id, validated_offset)
+    } else if out.op == IrOpcode::IrPlanAcquisition {
+        out.label_id = ir_epistemic_offset_id(out.label_id, acquisition_plan_offset)
+    } else if out.op == IrOpcode::IrPlanRecourse {
+        out.label_id = ir_epistemic_offset_id(out.label_id, recourse_plan_offset)
+    } else if out.op == IrOpcode::IrProposeAlternatives {
+        out.label_id = ir_epistemic_offset_id(out.label_id, alternative_set_offset)
+    } else if out.op == IrOpcode::IrCommitAlternative {
+        out.label_id = ir_epistemic_offset_id(out.label_id, transition_plan_offset)
+    } else if out.op == IrOpcode::IrObserveTransition {
+        out.label_id = ir_epistemic_offset_id(out.label_id, observed_transition_offset)
+    } else if out.op == IrOpcode::IrRollbackTransition {
+        out.label_id = ir_epistemic_offset_id(out.label_id, rollback_certificate_offset)
+    }
+    out
+}
+
+fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection) -> IrEpistemicSection with Mut, Panic, Div {
+    var merged = dst
+    let family_offset = dst.model_family_count
+    let policy_offset = dst.policy_count
+    let decision_policy_offset = dst.decision_policy_count
+    let deferral_policy_offset = dst.deferral_policy_count
+    let acquisition_policy_offset = dst.acquisition_policy_count
+    let recourse_policy_offset = dst.recourse_policy_count
+    let validation_offset = dst.validation_count
+    let mechanistic_offset = dst.mechanistic_report_count
+    let posterior_weights_offset = dst.posterior_weights_count
+    let counterexample_offset = dst.counterexample_count
+    let audit_offset = dst.audit_count
+    let contest_offset = dst.contest_count
+    let contest_witness_offset = dst.contest_witness_count
+    let robust_offset = dst.robust_proof_count
+    let decision_certificate_offset = dst.decision_certificate_count
+    let deferred_certificate_offset = dst.deferred_certificate_count
+    let deferred_reason_witness_offset = dst.deferred_reason_witness_count
+    let acquisition_plan_offset = dst.acquisition_plan_count
+    let acquisition_reason_witness_offset = dst.acquisition_reason_witness_count
+    let recourse_plan_offset = dst.recourse_plan_count
+    let recourse_reason_witness_offset = dst.recourse_reason_witness_count
+    let alternative_policy_offset = dst.alternative_policy_count
+    let alternative_frontier_offset = dst.alternative_frontier_count
+    let alternative_candidate_offset = dst.alternative_candidate_count
+    let alternative_set_offset = dst.alternative_set_count
+    let alternative_reason_witness_offset = dst.alternative_reason_witness_count
+    let transition_policy_offset = dst.transition_policy_count
+    let transition_step_offset = dst.transition_step_count
+    let transition_protocol_offset = dst.transition_protocol_count
+    let transition_plan_offset = dst.transition_plan_count
+    let transition_reason_witness_offset = dst.transition_reason_witness_count
+    let monitoring_policy_offset = dst.monitoring_policy_count
+    let observed_transition_offset = dst.observed_transition_count
+    let rollback_certificate_offset = dst.rollback_certificate_count
+    let validated_offset = dst.validated_manifest_count
+
+    var i: i64 = 0
+    while i < src.model_family_count && merged.model_family_count < IR_MAX_EPI_MODEL_FAMILIES {
+        var info = src.model_families[i]
+        info.id = merged.model_family_count
+        merged.model_families[merged.model_family_count as usize] = info
+        merged.model_family_count = merged.model_family_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.policy_count && merged.policy_count < IR_MAX_EPI_POLICIES {
+        var info = src.policies[i]
+        info.id = merged.policy_count
+        merged.policies[merged.policy_count as usize] = info
+        merged.policy_count = merged.policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.decision_policy_count && merged.decision_policy_count < IR_MAX_EPI_DECISION_POLICIES {
+        var info = src.decision_policies[i]
+        info.id = merged.decision_policy_count
+        merged.decision_policies[merged.decision_policy_count as usize] = info
+        merged.decision_policy_count = merged.decision_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.deferral_policy_count && merged.deferral_policy_count < IR_MAX_EPI_DEFERRAL_POLICIES {
+        var info = src.deferral_policies[i]
+        info.id = merged.deferral_policy_count
+        merged.deferral_policies[merged.deferral_policy_count as usize] = info
+        merged.deferral_policy_count = merged.deferral_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.acquisition_policy_count && merged.acquisition_policy_count < IR_MAX_EPI_ACQUISITION_POLICIES {
+        var info = src.acquisition_policies[i]
+        info.id = merged.acquisition_policy_count
+        merged.acquisition_policies[merged.acquisition_policy_count as usize] = info
+        merged.acquisition_policy_count = merged.acquisition_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.recourse_policy_count && merged.recourse_policy_count < IR_MAX_EPI_RECOURSE_POLICIES {
+        var info = src.recourse_policies[i]
+        info.id = merged.recourse_policy_count
+        merged.recourse_policies[merged.recourse_policy_count as usize] = info
+        merged.recourse_policy_count = merged.recourse_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.validation_count && merged.validation_count < IR_MAX_EPI_VALIDATIONS {
+        var info = src.validations[i]
+        info.id = merged.validation_count
+        merged.validations[merged.validation_count as usize] = info
+        merged.validation_count = merged.validation_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.mechanistic_report_count && merged.mechanistic_report_count < IR_MAX_EPI_MECHANISTIC_REPORTS {
+        var info = src.mechanistic_reports[i]
+        info.id = merged.mechanistic_report_count
+        merged.mechanistic_reports[merged.mechanistic_report_count as usize] = info
+        merged.mechanistic_report_count = merged.mechanistic_report_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.posterior_weights_count && merged.posterior_weights_count < IR_MAX_EPI_POSTERIOR_WEIGHTS {
+        var info = src.posterior_weights[i]
+        info.id = merged.posterior_weights_count
+        merged.posterior_weights[merged.posterior_weights_count as usize] = info
+        merged.posterior_weights_count = merged.posterior_weights_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.counterexample_count && merged.counterexample_count < IR_MAX_EPI_COUNTEREXAMPLES {
+        var info = src.counterexamples[i]
+        info.id = merged.counterexample_count
+        merged.counterexamples[merged.counterexample_count as usize] = info
+        merged.counterexample_count = merged.counterexample_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.audit_count && merged.audit_count < IR_MAX_EPI_AUDITS {
+        var info = src.audits[i]
+        info.id = merged.audit_count
+        info.family_id = ir_epistemic_offset_id(info.family_id, family_offset)
+        info.policy_id = ir_epistemic_offset_id(info.policy_id, policy_offset)
+        info.mechanistic_report_id = ir_epistemic_offset_id(info.mechanistic_report_id, mechanistic_offset)
+        info.posterior_weights_id = ir_epistemic_offset_id(info.posterior_weights_id, posterior_weights_offset)
+        info.counterexample_id = ir_epistemic_offset_id(info.counterexample_id, counterexample_offset)
+        merged.audits[merged.audit_count as usize] = info
+        merged.audit_count = merged.audit_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.contest_count && merged.contest_count < IR_MAX_EPI_CONTESTS {
+        var info = src.contests[i]
+        info.id = merged.contest_count
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.family_id = ir_epistemic_offset_id(info.family_id, family_offset)
+        info.policy_id = ir_epistemic_offset_id(info.policy_id, policy_offset)
+        info.mechanistic_report_id = ir_epistemic_offset_id(info.mechanistic_report_id, mechanistic_offset)
+        info.posterior_weights_id = ir_epistemic_offset_id(info.posterior_weights_id, posterior_weights_offset)
+        info.counterexample_id = ir_epistemic_offset_id(info.counterexample_id, counterexample_offset)
+        merged.contests[merged.contest_count as usize] = info
+        merged.contest_count = merged.contest_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.contest_witness_count && merged.contest_witness_count < IR_MAX_EPI_CONTEST_WITNESSES {
+        var info = src.contest_witnesses[i]
+        info.id = merged.contest_witness_count
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.contest_witnesses[merged.contest_witness_count as usize] = info
+        merged.contest_witness_count = merged.contest_witness_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.robust_proof_count && merged.robust_proof_count < IR_MAX_EPI_ROBUST_PROOFS {
+        var info = src.robust_proofs[i]
+        info.id = merged.robust_proof_count
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        info.policy_id = ir_epistemic_offset_id(info.policy_id, policy_offset)
+        merged.robust_proofs[merged.robust_proof_count as usize] = info
+        merged.robust_proof_count = merged.robust_proof_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.validated_manifest_count && merged.validated_manifest_count < IR_MAX_EPI_VALIDATED_MANIFESTS {
+        let src_info = src.validated_manifests[i]
+        merged.validated_manifests[merged.validated_manifest_count as usize] = IrValidatedManifestInfo {
+            id: merged.validated_manifest_count,
+            span_start: src_info.span_start,
+            span_end: src_info.span_end,
+            audit_id: ir_epistemic_offset_id(src_info.audit_id, audit_offset),
+            robust_proof_id: ir_epistemic_offset_id(src_info.robust_proof_id, robust_offset),
+            validation_id: if src_info.validation_id >= 0 {
+                src_info.validation_id + validation_offset
+            } else {
+                src_info.validation_id
+            },
+            inner_ty: src_info.inner_ty,
+        }
+        merged.validated_manifest_count = merged.validated_manifest_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.decision_certificate_count && merged.decision_certificate_count < IR_MAX_EPI_DECISION_CERTIFICATES {
+        var info = src.decision_certificates[i]
+        info.id = merged.decision_certificate_count
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.robust_proof_id = ir_epistemic_offset_id(info.robust_proof_id, robust_offset)
+        info.decision_policy_id = ir_epistemic_offset_id(info.decision_policy_id, decision_policy_offset)
+        merged.decision_certificates[merged.decision_certificate_count as usize] = info
+        merged.decision_certificate_count = merged.decision_certificate_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.deferred_certificate_count && merged.deferred_certificate_count < IR_MAX_EPI_DEFERRED_CERTIFICATES {
+        var info = src.deferred_certificates[i]
+        info.id = merged.deferred_certificate_count
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        info.robust_proof_id = ir_epistemic_offset_id(info.robust_proof_id, robust_offset)
+        info.deferral_policy_id = ir_epistemic_offset_id(info.deferral_policy_id, deferral_policy_offset)
+        merged.deferred_certificates[merged.deferred_certificate_count as usize] = info
+        merged.deferred_certificate_count = merged.deferred_certificate_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.deferred_reason_witness_count && merged.deferred_reason_witness_count < IR_MAX_EPI_DEFERRED_REASON_WITNESSES {
+        var info = src.deferred_reason_witnesses[i]
+        info.id = merged.deferred_reason_witness_count
+        info.deferred_certificate_id = ir_epistemic_offset_id(info.deferred_certificate_id, deferred_certificate_offset)
+        merged.deferred_reason_witnesses[merged.deferred_reason_witness_count as usize] = info
+        merged.deferred_reason_witness_count = merged.deferred_reason_witness_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.acquisition_plan_count && merged.acquisition_plan_count < IR_MAX_EPI_ACQUISITION_PLANS {
+        var info = src.acquisition_plans[i]
+        info.id = merged.acquisition_plan_count
+        info.deferred_certificate_id = ir_epistemic_offset_id(info.deferred_certificate_id, deferred_certificate_offset)
+        info.acquisition_policy_id = ir_epistemic_offset_id(info.acquisition_policy_id, acquisition_policy_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.acquisition_plans[merged.acquisition_plan_count as usize] = info
+        merged.acquisition_plan_count = merged.acquisition_plan_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.acquisition_reason_witness_count && merged.acquisition_reason_witness_count < IR_MAX_EPI_ACQUISITION_REASON_WITNESSES {
+        let src_info = src.acquisition_reason_witnesses[i]
+        merged.acquisition_reason_witnesses[merged.acquisition_reason_witness_count as usize] = IrAcquisitionReasonWitnessInfo {
+            id: merged.acquisition_reason_witness_count,
+            span_start: src_info.span_start,
+            span_end: src_info.span_end,
+            acquisition_plan_id: if src_info.acquisition_plan_id >= 0 {
+                src_info.acquisition_plan_id + acquisition_plan_offset
+            } else {
+                src_info.acquisition_plan_id
+            },
+        }
+        merged.acquisition_reason_witness_count = merged.acquisition_reason_witness_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.recourse_plan_count && merged.recourse_plan_count < IR_MAX_EPI_RECOURSE_PLANS {
+        var info = src.recourse_plans[i]
+        info.id = merged.recourse_plan_count
+        info.deferred_certificate_id = ir_epistemic_offset_id(info.deferred_certificate_id, deferred_certificate_offset)
+        info.recourse_policy_id = ir_epistemic_offset_id(info.recourse_policy_id, recourse_policy_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.recourse_plans[merged.recourse_plan_count as usize] = info
+        merged.recourse_plan_count = merged.recourse_plan_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.recourse_reason_witness_count && merged.recourse_reason_witness_count < IR_MAX_EPI_RECOURSE_REASON_WITNESSES {
+        var info = src.recourse_reason_witnesses[i]
+        info.id = merged.recourse_reason_witness_count
+        info.recourse_plan_id = ir_epistemic_offset_id(info.recourse_plan_id, recourse_plan_offset)
+        merged.recourse_reason_witnesses[merged.recourse_reason_witness_count as usize] = info
+        merged.recourse_reason_witness_count = merged.recourse_reason_witness_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.alternative_policy_count && merged.alternative_policy_count < IR_MAX_EPI_ALTERNATIVE_POLICIES {
+        var info = src.alternative_policies[i]
+        info.id = merged.alternative_policy_count
+        merged.alternative_policies[merged.alternative_policy_count as usize] = info
+        merged.alternative_policy_count = merged.alternative_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.alternative_frontier_count && merged.alternative_frontier_count < IR_MAX_EPI_ALTERNATIVE_FRONTIERS {
+        var info = src.alternative_frontiers[i]
+        info.id = merged.alternative_frontier_count
+        info.alternative_policy_id = ir_epistemic_offset_id(info.alternative_policy_id, alternative_policy_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        info.source_policy_id = ir_epistemic_offset_id(info.source_policy_id, recourse_policy_offset)
+        info.source_plan_id = ir_epistemic_offset_id(info.source_plan_id, recourse_plan_offset)
+        info.candidate_start = ir_epistemic_offset_id(info.candidate_start, alternative_candidate_offset)
+        merged.alternative_frontiers[merged.alternative_frontier_count as usize] = info
+        merged.alternative_frontier_count = merged.alternative_frontier_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.alternative_candidate_count && merged.alternative_candidate_count < IR_MAX_EPI_ALTERNATIVE_CANDIDATES {
+        var info = src.alternative_candidates[i]
+        info.id = merged.alternative_candidate_count
+        info.frontier_id = ir_epistemic_offset_id(info.frontier_id, alternative_frontier_offset)
+        info.source_policy_id = ir_epistemic_offset_id(info.source_policy_id, recourse_policy_offset)
+        info.source_plan_id = ir_epistemic_offset_id(info.source_plan_id, recourse_plan_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.alternative_candidates[merged.alternative_candidate_count as usize] = info
+        merged.alternative_candidate_count = merged.alternative_candidate_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.alternative_set_count && merged.alternative_set_count < IR_MAX_EPI_ALTERNATIVE_SETS {
+        var info = src.alternative_sets[i]
+        info.id = merged.alternative_set_count
+        info.frontier_id = ir_epistemic_offset_id(info.frontier_id, alternative_frontier_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        info.candidate_start = ir_epistemic_offset_id(info.candidate_start, alternative_candidate_offset)
+        merged.alternative_sets[merged.alternative_set_count as usize] = info
+        merged.alternative_set_count = merged.alternative_set_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.alternative_reason_witness_count && merged.alternative_reason_witness_count < IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES {
+        var info = src.alternative_reason_witnesses[i]
+        info.id = merged.alternative_reason_witness_count
+        info.alternative_set_id = ir_epistemic_offset_id(info.alternative_set_id, alternative_set_offset)
+        info.candidate_id = ir_epistemic_offset_id(info.candidate_id, alternative_candidate_offset)
+        merged.alternative_reason_witnesses[merged.alternative_reason_witness_count as usize] = info
+        merged.alternative_reason_witness_count = merged.alternative_reason_witness_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.transition_policy_count && merged.transition_policy_count < IR_MAX_EPI_TRANSITION_POLICIES {
+        var info = src.transition_policies[i]
+        info.id = merged.transition_policy_count
+        merged.transition_policies[merged.transition_policy_count as usize] = info
+        merged.transition_policy_count = merged.transition_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.transition_step_count && merged.transition_step_count < IR_MAX_EPI_TRANSITION_STEPS {
+        var info = src.transition_steps[i]
+        info.id = merged.transition_step_count
+        info.protocol_id = ir_epistemic_offset_id(info.protocol_id, transition_protocol_offset)
+        merged.transition_steps[merged.transition_step_count as usize] = info
+        merged.transition_step_count = merged.transition_step_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.transition_protocol_count && merged.transition_protocol_count < IR_MAX_EPI_TRANSITION_PROTOCOLS {
+        var info = src.transition_protocols[i]
+        info.id = merged.transition_protocol_count
+        info.transition_policy_id = ir_epistemic_offset_id(info.transition_policy_id, transition_policy_offset)
+        info.step_start = ir_epistemic_offset_id(info.step_start, transition_step_offset)
+        merged.transition_protocols[merged.transition_protocol_count as usize] = info
+        merged.transition_protocol_count = merged.transition_protocol_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.transition_plan_count && merged.transition_plan_count < IR_MAX_EPI_TRANSITION_PLANS {
+        var info = src.transition_plans[i]
+        info.id = merged.transition_plan_count
+        info.transition_policy_id = ir_epistemic_offset_id(info.transition_policy_id, transition_policy_offset)
+        info.transition_protocol_id = ir_epistemic_offset_id(info.transition_protocol_id, transition_protocol_offset)
+        info.alternative_option_id = ir_epistemic_offset_id(info.alternative_option_id, alternative_candidate_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.transition_plans[merged.transition_plan_count as usize] = info
+        merged.transition_plan_count = merged.transition_plan_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.transition_reason_witness_count && merged.transition_reason_witness_count < IR_MAX_EPI_TRANSITION_REASON_WITNESSES {
+        var info = src.transition_reason_witnesses[i]
+        info.id = merged.transition_reason_witness_count
+        info.transition_plan_id = ir_epistemic_offset_id(info.transition_plan_id, transition_plan_offset)
+        merged.transition_reason_witnesses[merged.transition_reason_witness_count as usize] = info
+        merged.transition_reason_witness_count = merged.transition_reason_witness_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.monitoring_policy_count && merged.monitoring_policy_count < IR_MAX_EPI_MONITORING_POLICIES {
+        var info = src.monitoring_policies[i]
+        info.id = merged.monitoring_policy_count
+        merged.monitoring_policies[merged.monitoring_policy_count as usize] = info
+        merged.monitoring_policy_count = merged.monitoring_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.observed_transition_count && merged.observed_transition_count < IR_MAX_EPI_OBSERVED_TRANSITIONS {
+        var info = src.observed_transitions[i]
+        info.id = merged.observed_transition_count
+        info.transition_plan_id = ir_epistemic_offset_id(info.transition_plan_id, transition_plan_offset)
+        info.monitoring_policy_id = ir_epistemic_offset_id(info.monitoring_policy_id, monitoring_policy_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.observed_transitions[merged.observed_transition_count as usize] = info
+        merged.observed_transition_count = merged.observed_transition_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.rollback_certificate_count && merged.rollback_certificate_count < IR_MAX_EPI_ROLLBACK_CERTIFICATES {
+        var info = src.rollback_certificates[i]
+        info.id = merged.rollback_certificate_count
+        info.transition_plan_id = ir_epistemic_offset_id(info.transition_plan_id, transition_plan_offset)
+        info.monitoring_policy_id = ir_epistemic_offset_id(info.monitoring_policy_id, monitoring_policy_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.rollback_certificates[merged.rollback_certificate_count as usize] = info
+        merged.rollback_certificate_count = merged.rollback_certificate_count + 1
+        i = i + 1
+    }
+
+    merged
+}
+
+// ============================================================
+// IR module merging
+// ============================================================
+
+fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, Div {
+    // Merge src functions into dst, adjusting fn_ids in call instructions
+    var merged = dst
+    let fn_offset = dst.fn_count  // src function IDs shift by this amount
+    let contest_offset = dst.epistemic.contest_count
+    let robust_offset = dst.epistemic.robust_proof_count
+    let decision_offset = dst.epistemic.decision_certificate_count
+    let deferred_offset = dst.epistemic.deferred_certificate_count
+    let validated_offset = dst.epistemic.validated_manifest_count
+    let acquisition_plan_offset = dst.epistemic.acquisition_plan_count
+    let recourse_plan_offset = dst.epistemic.recourse_plan_count
+    let alternative_set_offset = dst.epistemic.alternative_set_count
+    let transition_plan_offset = dst.epistemic.transition_plan_count
+    let observed_transition_offset = dst.epistemic.observed_transition_count
+    let rollback_certificate_offset = dst.epistemic.rollback_certificate_count
+
+    // Copy functions
+    var fi: i64 = 0
+    while fi < src.fn_count && merged.fn_count < IR_MAX_FUNCS {
+        var func = src.functions[fi]
+        // Preserve per-function strategy metadata across multimodule IR merges.
+        func.compile_strategy = src.functions[fi].compile_strategy
+        // Adjust call targets: shift fn_id by fn_offset
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            if func.instrs[ii].op == IrOpcode::IrCall {
+                if func.instrs[ii].fn_id >= 0 {
+                    func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
+                }
+            }
+            func.instrs[ii] = ir_merge_adjust_epistemic_instr(
+                func.instrs[ii],
+                contest_offset,
+                robust_offset,
+                decision_offset,
+                deferred_offset,
+                validated_offset,
+                acquisition_plan_offset,
+                recourse_plan_offset,
+                alternative_set_offset,
+                transition_plan_offset,
+                observed_transition_offset,
+                rollback_certificate_offset
+            )
+            ii = ii + 1
+        }
+        func.compile_strategy = src.functions[fi].compile_strategy
+        merged.functions[merged.fn_count] = func
+        merged.fn_count = merged.fn_count + 1
+        fi = fi + 1
+    }
+
+    // Merge string tables (simple append, no dedup for now)
+    var si: i64 = 0
+    while si < src.string_count && merged.string_count < IR_MAX_STRINGS {
+        merged.string_table[merged.string_count] = src.string_table[si]
+        merged.string_count = merged.string_count + 1
+        si = si + 1
+    }
+
+    merged.epistemic = ir_merge_epistemic_sections(merged.epistemic, src.epistemic)
+    merged.algebras = ir_merge_algebra_tables(merged.algebras, src.algebras)
+
+    merged
+}
+
+fn ir_merge_algebra_tables(dst: IrAlgebraTable, src: IrAlgebraTable) -> IrAlgebraTable with Mut, Panic, Div {
+    var merged = dst
+    var si: i64 = 0
+    while si < src.count && merged.count < 32 {
+        let candidate = src.entries[si]
+        if candidate.is_valid {
+            var exists: bool = false
+            var di: i64 = 0
+            while di < merged.count {
+                let entry = merged.entries[di]
+                if entry.is_valid && entry.algebra_tag == candidate.algebra_tag && ir_name_eq(entry.name, candidate.name) {
+                    exists = true
+                    di = merged.count
+                } else {
+                    di = di + 1
+                }
+            }
+            if exists == false {
+                merged.entries[merged.count as usize] = candidate
+                merged.count = merged.count + 1
+            }
+        }
+        si = si + 1
+    }
+    merged
+}
+
+fn ir_epistemic_section_is_empty(epistemic: IrEpistemicSection) -> bool {
+    epistemic.model_family_count == 0 &&
+    epistemic.policy_count == 0 &&
+    epistemic.decision_policy_count == 0 &&
+    epistemic.deferral_policy_count == 0 &&
+    epistemic.acquisition_policy_count == 0 &&
+    epistemic.recourse_policy_count == 0 &&
+    epistemic.validation_count == 0 &&
+    epistemic.mechanistic_report_count == 0 &&
+    epistemic.posterior_weights_count == 0 &&
+    epistemic.counterexample_count == 0 &&
+    epistemic.audit_count == 0 &&
+    epistemic.contest_count == 0 &&
+    epistemic.contest_witness_count == 0 &&
+    epistemic.robust_proof_count == 0 &&
+    epistemic.decision_certificate_count == 0 &&
+    epistemic.deferred_certificate_count == 0 &&
+    epistemic.deferred_reason_witness_count == 0 &&
+    epistemic.acquisition_plan_count == 0 &&
+    epistemic.acquisition_reason_witness_count == 0 &&
+    epistemic.recourse_plan_count == 0 &&
+    epistemic.recourse_reason_witness_count == 0 &&
+    epistemic.alternative_policy_count == 0 &&
+    epistemic.alternative_frontier_count == 0 &&
+    epistemic.alternative_candidate_count == 0 &&
+    epistemic.alternative_set_count == 0 &&
+    epistemic.alternative_reason_witness_count == 0 &&
+    epistemic.transition_policy_count == 0 &&
+    epistemic.transition_protocol_count == 0 &&
+    epistemic.transition_step_count == 0 &&
+    epistemic.transition_plan_count == 0 &&
+    epistemic.transition_reason_witness_count == 0 &&
+    epistemic.monitoring_policy_count == 0 &&
+    epistemic.observed_transition_count == 0 &&
+    epistemic.rollback_certificate_count == 0 &&
+    epistemic.validated_manifest_count == 0
+}
+
+// ============================================================
+// Visited-set helpers for transitive import resolution
+// ============================================================
+
+fn visited_contains(visited: [string; 64], count: i64, path: string) -> bool with Mut, Panic, Div {
+    var j: i64 = 0
+    while j < count {
+        if str_eq(visited[j], path) {
+            return true
+        }
+        j = j + 1
+    }
+    false
+}
+
+// ============================================================
+// Multi-module IR loading (shared by bytecode + native paths)
+// ============================================================
+
+pub struct MultiModuleIrResult {
+    ok: bool,
+    module: IrModule,
+    error_msg: string,
+}
+
+pub struct MultiModuleFrontendResult {
+    ok: bool,
+    error_msg: string,
+}
+
+pub struct LoadMultimoduleIrTrace {
+    loaded_modules: i64,
+    resolved_modules: i64,
+    typechecked_modules: i64,
+    summary_seeded_modules: i64,
+    body_lowered_modules: i64,
+    lowered_modules: i64,
+    merged_modules: i64,
+    last_stage: string,
+    last_module_index: i64,
+    patched_functions: i64,
+    patched_calls: i64,
+    fallback_insertions: i64,
+}
+
+pub fn empty_load_multimodule_ir_trace() -> LoadMultimoduleIrTrace {
+    LoadMultimoduleIrTrace {
+        loaded_modules: 0,
+        resolved_modules: 0,
+        typechecked_modules: 0,
+        summary_seeded_modules: 0,
+        body_lowered_modules: 0,
+        lowered_modules: 0,
+        merged_modules: 0,
+        last_stage: "init",
+        last_module_index: -1,
+        patched_functions: 0,
+        patched_calls: 0,
+        fallback_insertions: 0,
+    }
+}
+
+fn multimodule_ir_ok(m: IrModule) -> MultiModuleIrResult {
+    MultiModuleIrResult { ok: true, module: m, error_msg: "" }
+}
+
+fn multimodule_ir_error(msg: string) -> MultiModuleIrResult {
+    MultiModuleIrResult { ok: false, module: ir_empty_module(), error_msg: msg }
+}
+
+fn load_multimodule_lower_program_traced(
+    program: Program,
+    epistemic: IrEpistemicSection,
+    module_index: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> IrLowerResult with IO, Mut, Div, Panic, Alloc {
+    var patch_stats = ir_empty_validated_patch_stats()
+    trace.last_stage = "lower_summary"
+    trace.last_module_index = module_index
+    let lower_result = if ir_epistemic_section_is_empty(epistemic) {
+        lower_program_to_ir_trace(program, &! patch_stats)
+    } else {
+        lower_program_to_ir_with_epistemic_trace(program, epistemic, &! patch_stats)
+    }
+    if !lower_result.had_error {
+        trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+        trace.last_stage = "lower_bodies"
+        trace.body_lowered_modules = trace.body_lowered_modules + 1
+        trace.lowered_modules = trace.lowered_modules + 1
+        trace.patched_functions = trace.patched_functions + patch_stats.patched_functions
+        trace.patched_calls = trace.patched_calls + patch_stats.patched_calls
+        trace.fallback_insertions = trace.fallback_insertions + patch_stats.fallback_insertions
+    }
+    lower_result
+}
+
+fn multimodule_frontend_ok() -> MultiModuleFrontendResult {
+    MultiModuleFrontendResult { ok: true, error_msg: "" }
+}
+
+fn multimodule_frontend_error(msg: string) -> MultiModuleFrontendResult {
+    MultiModuleFrontendResult { ok: false, error_msg: msg }
+}
+
+pub fn module_frontend_file_maybe_has_use(path: string) -> bool with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 3 {
+        return false
+    }
+    let data = read_file(path)
+    var i: i64 = 0
+    while i + 3 < size {
+        if data[i as usize] == (117 as i8) &&
+           data[(i + 1) as usize] == (115 as i8) &&
+           data[(i + 2) as usize] == (101 as i8) &&
+           data[(i + 3) as usize] == (32 as i8) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
+    let main_prog = load_module_file(main_path)
+    let main_items = count_items(main_prog)
+
+    print("Main file: ")
+    print_int(main_items)
+    print(" items\n")
+
+    if !module_frontend_file_maybe_has_use(main_path) {
+        print("Loaded 1 modules\n")
+        print("Resolve skip: single module with no imports\n")
+        print("Type checking module 0\n")
+        var single_epistemic_no_use = ir_empty_epistemic_section()
+        if !check_program_epistemic_into(main_prog, &!single_epistemic_no_use) {
+            print("Type check failed for module 0\n")
+            return multimodule_frontend_error("type_check_failed")
+        }
+        print("Type check complete for module 0\n")
+        return multimodule_frontend_ok()
+    }
+
+    let main_imports_fast = extract_imports_from_ast(main_prog)
+    if main_imports_fast.count <= 0 {
+        print("Loaded 1 modules\n")
+        print("Resolve skip: single module with no imports\n")
+        print("Type checking module 0\n")
+        var single_epistemic = ir_empty_epistemic_section()
+        if !check_program_epistemic_into(main_prog, &!single_epistemic) {
+            print("Type check failed for module 0\n")
+            return multimodule_frontend_error("type_check_failed")
+        }
+        print("Type check complete for module 0\n")
+        return multimodule_frontend_ok()
+    }
+
+    var programs: [Program; 64] = [empty_program(); 64]
+    var file_paths: [string; 64] = [""; 64]
+    programs[0] = main_prog
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+
+    var visited_paths: [string; 64] = [""; 64]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+
+    var work_front: i64 = 0
+    var i: i64 = 0
+
+    while work_front < loaded && loaded < 64 {
+        let cur_dir = path_directory(file_paths[work_front])
+        let work_imports = extract_imports_from_ast(programs[work_front])
+        work_front = work_front + 1
+
+        i = 0
+        while i < work_imports.count && loaded < 64 {
+            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
+            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
+            var file_path = file_path_local
+            if !file_exists(file_path_local) {
+                file_path = file_path_stdlib
+            }
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    print("Loading module: ")
+                    print(file_path)
+                    print("\n")
+                    programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                } else {
+                    print("Warning: module not found: ")
+                    let path_str = use_path_to_string(work_imports.paths[i])
+                    print(path_str)
+                    print("\n")
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    print("Loaded ")
+    print_int(loaded)
+    print(" modules\n")
+
+    let main_imports = extract_imports_from_ast(programs[0])
+    let needs_resolution = loaded > 1 || main_imports.count > 0
+    if needs_resolution {
+        let resolve_result = resolve_modules(programs, loaded)
+        if resolve_result.had_error {
+            print("Module resolution failed: ")
+            print_int(resolve_result.error_count)
+            print(" errors\n")
+            return multimodule_frontend_error("module_resolution_failed")
+        }
+    } else {
+        print("Resolve skip: single module with no imports\n")
+    }
+
+    i = 0
+    while i < loaded {
+        print("Type checking module ")
+        print_int(i)
+        print("\n")
+        var epistemic = ir_empty_epistemic_section()
+        if !check_program_epistemic_into(programs[i], &!epistemic) {
+            print("Type check failed for module ")
+            print_int(i)
+            print("\n")
+            return multimodule_frontend_error("type_check_failed")
+        }
+        print("Type check complete for module ")
+        print_int(i)
+        print("\n")
+        i = i + 1
+    }
+
+    multimodule_frontend_ok()
+}
+
+pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+    let main_prog = load_module_file(main_path)
+    trace.loaded_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+
+    if !module_frontend_file_maybe_has_use(main_path) {
+        trace.resolved_modules = 1
+        var single_epistemic_no_use = ir_empty_epistemic_section()
+        trace.last_stage = "typecheck"
+        let single_artifacts_no_use = check_program_with_artifacts(main_prog)
+        if single_artifacts_no_use.had_error {
+            print("Type check failed during IR lowering for module 0\n")
+            return multimodule_ir_error("type_check_failed")
+        }
+        checker_to_ir_epistemic_into(&single_artifacts_no_use.checker, &! single_epistemic_no_use)
+        trace.typechecked_modules = 1
+        trace.last_stage = "lower_single"
+        var single_lower_result_no_use = load_multimodule_lower_program_traced(main_prog, single_epistemic_no_use, 0, trace)
+        if single_lower_result_no_use.had_error {
+            print("IR lowering failed for module 0\n")
+            return multimodule_ir_error("ir_lowering_failed")
+        }
+        checker_apply_ir_metadata(&single_artifacts_no_use.checker, &! single_lower_result_no_use.module)
+        trace.merged_modules = 1
+        trace.last_stage = "done"
+        print("Merged IR: ")
+        print_int(single_lower_result_no_use.module.fn_count)
+        print(" functions\n")
+        if single_lower_result_no_use.module.fn_count <= 0 {
+            print("IR lowering produced empty module\n")
+            return multimodule_ir_error("ir_lowering_empty_module")
+        }
+        return multimodule_ir_ok(single_lower_result_no_use.module)
+    }
+
+    let main_imports_fast = extract_imports_from_ast(main_prog)
+    if main_imports_fast.count <= 0 {
+        trace.resolved_modules = 1
+        var single_epistemic = ir_empty_epistemic_section()
+        trace.last_stage = "typecheck"
+        let single_artifacts = check_program_with_artifacts(main_prog)
+        if single_artifacts.had_error {
+            print("Type check failed during IR lowering for module 0\n")
+            return multimodule_ir_error("type_check_failed")
+        }
+        checker_to_ir_epistemic_into(&single_artifacts.checker, &! single_epistemic)
+        trace.typechecked_modules = 1
+        trace.last_stage = "lower_single"
+        var single_lower_result = load_multimodule_lower_program_traced(main_prog, single_epistemic, 0, trace)
+        if single_lower_result.had_error {
+            print("IR lowering failed for module 0\n")
+            return multimodule_ir_error("ir_lowering_failed")
+        }
+        checker_apply_ir_metadata(&single_artifacts.checker, &! single_lower_result.module)
+        trace.merged_modules = 1
+        trace.last_stage = "done"
+        print("Merged IR: ")
+        print_int(single_lower_result.module.fn_count)
+        print(" functions\n")
+        if single_lower_result.module.fn_count <= 0 {
+            print("IR lowering produced empty module\n")
+            return multimodule_ir_error("ir_lowering_empty_module")
+        }
+        return multimodule_ir_ok(single_lower_result.module)
+    }
+
+    var programs: [Program; 64] = [empty_program(); 64]
+    var file_paths: [string; 64] = [""; 64]
+    programs[0] = main_prog
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+    var visited_paths: [string; 64] = [""; 64]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+    var work_front: i64 = 0
+    var i: i64 = 0
+
+    while work_front < loaded && loaded < 64 {
+        let cur_dir = path_directory(file_paths[work_front])
+        let work_imports = extract_imports_from_ast(programs[work_front])
+        work_front = work_front + 1
+        i = 0
+        while i < work_imports.count && loaded < 64 {
+            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
+            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
+            var file_path = file_path_local
+            if !file_exists(file_path_local) {
+                file_path = file_path_stdlib
+            }
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                    trace.loaded_modules = loaded
+                    trace.last_stage = "load_deps"
+                    trace.last_module_index = loaded - 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    let main_imports = extract_imports_from_ast(programs[0])
+    let needs_resolution = loaded > 1 || main_imports.count > 0
+    if needs_resolution {
+        trace.last_stage = "resolve"
+        trace.last_module_index = loaded - 1
+        let resolve_result = resolve_modules(programs, loaded)
+        if resolve_result.had_error {
+            trace.resolved_modules = 0
+            return multimodule_ir_error("module_resolution_failed")
+        }
+        trace.resolved_modules = loaded
+    } else {
+        trace.resolved_modules = loaded
+    }
+
+    // Step 6: Lower ALL modules to IR and merge.
+    // Seed the merge with module 0 to avoid expensive empty-module initialization.
+    if loaded <= 0 {
+        trace.last_stage = "empty"
+        return multimodule_ir_error("no_modules_loaded")
+    }
+
+    var seed_epistemic = ir_empty_epistemic_section()
+    trace.last_stage = "typecheck"
+    trace.last_module_index = 0
+    let seed_artifacts = check_program_with_artifacts(programs[0])
+    if seed_artifacts.had_error {
+        print("Type check failed during IR lowering for module 0\n")
+        return multimodule_ir_error("type_check_failed")
+    }
+    checker_to_ir_epistemic_into(&seed_artifacts.checker, &! seed_epistemic)
+    trace.typechecked_modules = 1
+    var seed_lower_had_error = false
+    var merged_module = ir_empty_module()
+    {
+        var seed_lower_result = load_multimodule_lower_program_traced(programs[0], seed_epistemic, 0, trace)
+        seed_lower_had_error = seed_lower_result.had_error
+        if !seed_lower_had_error {
+            checker_apply_ir_metadata(&seed_artifacts.checker, &! seed_lower_result.module)
+            merged_module = seed_lower_result.module
+        }
+    }
+    if seed_lower_had_error {
+        print("IR lowering failed for module 0\n")
+        return multimodule_ir_error("ir_lowering_failed")
+    }
+    trace.merged_modules = 1
+
+    i = 1
+    while i < loaded {
+        var epistemic = ir_empty_epistemic_section()
+        trace.last_stage = "typecheck"
+        trace.last_module_index = i
+        let artifacts = check_program_with_artifacts(programs[i])
+        if artifacts.had_error {
+            print("Type check failed during IR lowering for module ")
+            print_int(i)
+            print("\n")
+            return multimodule_ir_error("type_check_failed")
+        }
+        checker_to_ir_epistemic_into(&artifacts.checker, &! epistemic)
+        trace.typechecked_modules = trace.typechecked_modules + 1
+        var lower_had_error = false
+        var lowered_module = ir_empty_module()
+        {
+            var lower_result = load_multimodule_lower_program_traced(programs[i], epistemic, i, trace)
+            lower_had_error = lower_result.had_error
+            if !lower_had_error {
+                checker_apply_ir_metadata(&artifacts.checker, &! lower_result.module)
+                lowered_module = lower_result.module
+            }
+        }
+        if lower_had_error {
+            print("IR lowering failed for module ")
+            print_int(i)
+            print("\n")
+            return multimodule_ir_error("ir_lowering_failed")
+        }
+        trace.last_stage = "merge"
+        merged_module = ir_merge_modules(merged_module, lowered_module)
+        trace.merged_modules = trace.merged_modules + 1
+        i = i + 1
+    }
+
+    trace.last_stage = "done"
+    trace.last_module_index = loaded - 1
+    print("Merged IR: ")
+    print_int(merged_module.fn_count)
+    print(" functions\n")
+
+    if merged_module.fn_count <= 0 {
+        print("IR lowering produced empty module\n")
+        return multimodule_ir_error("ir_lowering_empty_module")
+    }
+
+    multimodule_ir_ok(merged_module)
+}
+
+pub fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+    var trace = empty_load_multimodule_ir_trace()
+    load_multimodule_ir_traced(main_path, &! trace)
+}
+
+pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+    let main_prog = load_module_file(main_path)
+    var programs: [Program; 64] = [empty_program(); 64]
+    var file_paths: [string; 64] = [""; 64]
+    programs[0] = main_prog
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+    var visited_paths: [string; 64] = [""; 64]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+    var work_front: i64 = 0
+    var i: i64 = 0
+    trace.loaded_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+
+    while work_front < loaded && loaded < 64 {
+        let cur_dir = path_directory(file_paths[work_front])
+        let work_imports = extract_imports_from_ast(programs[work_front])
+        work_front = work_front + 1
+        i = 0
+        while i < work_imports.count && loaded < 64 {
+            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
+            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
+            var file_path = file_path_local
+            if !file_exists(file_path_local) {
+                file_path = file_path_stdlib
+            }
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                    trace.loaded_modules = loaded
+                    trace.last_stage = "load_deps"
+                    trace.last_module_index = loaded - 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    let main_imports = extract_imports_from_ast(programs[0])
+    let needs_resolution = loaded > 1 || main_imports.count > 0
+    if needs_resolution {
+        trace.last_stage = "resolve"
+        trace.last_module_index = loaded - 1
+        let resolve_result = resolve_modules(programs, loaded)
+        if resolve_result.had_error {
+            trace.resolved_modules = 0
+            return multimodule_ir_error("module_resolution_failed")
+        }
+        trace.resolved_modules = loaded
+    } else {
+        trace.resolved_modules = loaded
+    }
+
+    if loaded <= 0 {
+        trace.last_stage = "empty"
+        return multimodule_ir_error("no_modules_loaded")
+    }
+
+    var seed_epistemic = ir_empty_epistemic_section()
+    trace.last_stage = "typecheck"
+    trace.last_module_index = 0
+    let seed_artifacts = check_program_with_artifacts(programs[0])
+    if seed_artifacts.had_error {
+        print("Type check failed during IR lowering for module 0\n")
+        return multimodule_ir_error("type_check_failed")
+    }
+    checker_to_ir_epistemic_into(&seed_artifacts.checker, &! seed_epistemic)
+    trace.typechecked_modules = 1
+    trace.last_stage = "lower"
+    var seed_lower_result = lower_program_to_ir_probe_summary(programs[0])
+    if seed_lower_result.had_error {
+        print("IR lowering failed for module 0\n")
+        return multimodule_ir_error("ir_lowering_failed")
+    }
+    checker_apply_ir_metadata(&seed_artifacts.checker, &! seed_lower_result.module)
+    trace.lowered_modules = 1
+    trace.merged_modules = 1
+    var merged_module = seed_lower_result.module
+
+    i = 1
+    while i < loaded {
+        var epistemic = ir_empty_epistemic_section()
+        trace.last_stage = "typecheck"
+        trace.last_module_index = i
+        let artifacts = check_program_with_artifacts(programs[i])
+        if artifacts.had_error {
+            print("Type check failed during IR lowering for module ")
+            print_int(i)
+            print("\n")
+            return multimodule_ir_error("type_check_failed")
+        }
+        checker_to_ir_epistemic_into(&artifacts.checker, &! epistemic)
+        trace.typechecked_modules = trace.typechecked_modules + 1
+        trace.last_stage = "lower"
+        var lower_result = lower_program_to_ir_probe_summary(programs[i])
+        if lower_result.had_error {
+            print("IR lowering failed for module ")
+            print_int(i)
+            print("\n")
+            return multimodule_ir_error("ir_lowering_failed")
+        }
+        checker_apply_ir_metadata(&artifacts.checker, &! lower_result.module)
+        trace.lowered_modules = trace.lowered_modules + 1
+        trace.last_stage = "merge"
+        merged_module = ir_merge_modules(merged_module, lower_result.module)
+        trace.merged_modules = trace.merged_modules + 1
+        i = i + 1
+    }
+
+    trace.last_stage = "done"
+    trace.last_module_index = loaded - 1
+    print("Merged IR: ")
+    print_int(merged_module.fn_count)
+    print(" functions\n")
+
+    if merged_module.fn_count <= 0 {
+        print("IR lowering produced empty module\n")
+        return multimodule_ir_error("ir_lowering_empty_module")
+    }
+
+    multimodule_ir_ok(merged_module)
+}
+
+pub fn load_multimodule_ir_probe_summary(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+    var trace = empty_load_multimodule_ir_trace()
+    load_multimodule_ir_probe_summary_traced(main_path, &! trace)
+}
+
+pub fn load_multimodule_epistemic_into(main_path: string, out: &! IrEpistemicSection) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
+    let main_prog = load_module_file(main_path)
+    var programs: [Program; 64] = [empty_program(); 64]
+    var file_paths: [string; 64] = [""; 64]
+    programs[0] = main_prog
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+    var visited_paths: [string; 64] = [""; 64]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+    var work_front: i64 = 0
+    var i: i64 = 0
+
+    while work_front < loaded && loaded < 64 {
+        let cur_dir = path_directory(file_paths[work_front])
+        let work_imports = extract_imports_from_ast(programs[work_front])
+        work_front = work_front + 1
+        i = 0
+        while i < work_imports.count && loaded < 64 {
+            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
+            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
+            var file_path = file_path_local
+            if !file_exists(file_path_local) {
+                file_path = file_path_stdlib
+            }
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    let main_imports = extract_imports_from_ast(programs[0])
+    let needs_resolution = loaded > 1 || main_imports.count > 0
+    if needs_resolution {
+        let resolve_result = resolve_modules(programs, loaded)
+        if resolve_result.had_error {
+            return multimodule_frontend_error("module_resolution_failed")
+        }
+    }
+
+    if loaded == 1 {
+        if !check_program_epistemic_into(programs[0], out) {
+            return multimodule_frontend_error("type_check_failed")
+        }
+        return multimodule_frontend_ok()
+    }
+
+    var merged_epistemic = ir_empty_epistemic_section()
+    i = 0
+    while i < loaded {
+        var epistemic = ir_empty_epistemic_section()
+        if !check_program_epistemic_into(programs[i], &!epistemic) {
+            return multimodule_frontend_error("type_check_failed")
+        }
+        merged_epistemic = ir_merge_epistemic_sections(merged_epistemic, epistemic)
+        i = i + 1
+    }
+
+    (*out) = merged_epistemic
+    multimodule_frontend_ok()
+}

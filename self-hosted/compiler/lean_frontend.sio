@@ -1,0 +1,101 @@
+// self-hosted::compiler::lean_frontend
+//
+// Frontend-only lean entrypoint for parse/resolve/typecheck and IR summaries.
+// Keep this separate from lean.sio so frontend probes do not import native
+// codegen, wasm lowering, GPU backends, or the legacy module_loader path.
+
+use module_frontend::{load_multimodule_ir, module_frontend_file_maybe_has_use, preflight_multimodule_frontend}
+use module_parse::{load_module_file}
+use parser::mod::{count_items}
+
+fn lean_frontend_print_help() with IO {
+    println("Usage: souc-lean-frontend [--check|--ir-summary] <input.sio>")
+    println("")
+    println("Options:")
+    println("  --check <source.sio>      Parse, resolve and typecheck only")
+    println("  --ir-summary <source.sio> Print loaded IR function/string counts")
+    println("  --self-test               Run parser/import-scan smoke on examples/hello.sio")
+    println("  -h, --help                Print this help message")
+}
+
+fn lean_frontend_source_arg(default_path: string) -> string with IO {
+    let argc = arg_count()
+    if argc <= 0 {
+        return default_path
+    }
+    let first = get_arg(0)
+    if first == "--check" || first == "--ir-summary" {
+        if argc >= 2 {
+            return get_arg(1)
+        }
+        return default_path
+    }
+    first
+}
+
+fn lean_frontend_run_check(source_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let result = preflight_multimodule_frontend(source_path)
+    if result.ok {
+        println("souc-lean-frontend check: ok")
+        return 0
+    }
+    println("souc-lean-frontend check: failed: " + result.error_msg)
+    1
+}
+
+fn lean_frontend_run_ir_summary(source_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let result = load_multimodule_ir(source_path)
+    if !result.ok {
+        println("souc-lean-frontend ir-summary: failed: " + result.error_msg)
+        return 1
+    }
+    print("souc-lean-frontend ir-summary: functions=")
+    print_int(result.module.fn_count)
+    print(" strings=")
+    print_int(result.module.string_count)
+    print(" epistemic_contests=")
+    print_int(result.module.epistemic.contest_count)
+    print("\n")
+    0
+}
+
+fn lean_frontend_run_self_test() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let source_path = "examples/hello.sio"
+    let prog = load_module_file(source_path)
+    let item_count = count_items(prog)
+    if item_count <= 0 {
+        println("souc-lean-frontend self-test: parse failed")
+        return 1
+    }
+    if module_frontend_file_maybe_has_use(source_path) {
+        println("souc-lean-frontend self-test: unexpected import scan hit")
+        return 1
+    }
+    println("souc-lean-frontend self-test: ok")
+    0
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc <= 0 {
+        lean_frontend_print_help()
+        return 1
+    }
+    let mode = get_arg(0)
+    if mode == "-h" || mode == "--help" {
+        lean_frontend_print_help()
+        return 0
+    }
+    if mode == "--self-test" {
+        return lean_frontend_run_self_test()
+    }
+    let source_path = lean_frontend_source_arg("")
+    if source_path == "" {
+        lean_frontend_print_help()
+        return 1
+    }
+    if mode == "--ir-summary" {
+        return lean_frontend_run_ir_summary(source_path)
+    }
+    lean_frontend_run_check(source_path)
+}
