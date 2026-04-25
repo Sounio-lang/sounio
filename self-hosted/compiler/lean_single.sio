@@ -257,6 +257,9 @@ var FN_RET_PRED_BOUND: [i64; 16384] = [0; 16384]
 var FN_RET_HAS_PRED2: [i64; 16384] = [0; 16384]
 var FN_RET_PRED_OP2: [i64; 16384] = [0; 16384]
 var FN_RET_PRED_BOUND2: [i64; 16384] = [0; 16384]
+// PR-6: token index of the start of each function's return type (right after ->).
+// Populated in Pass 1; used in Pass 1c.5 to re-scan with the now-complete alias table.
+var FN_RET_TY_TOK: [i64; 16384] = [-1; 16384]
 var FN_ARITY: [i64; 16384] = [0; 16384]
 var TYPECHECK_FAILED: i64 = 0
 var SCAN_TY: i64 = 0
@@ -691,6 +694,14 @@ var GPU_RT_CUMEMFREE_PTR_BSS_OFF: i64 = 0
 var GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF: i64 = 0
 var GPU_RT_CUMEMCPYDTOH_PTR_BSS_OFF: i64 = 0
 var GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF: i64 = 0
+// β⁵ inter-procedural variance: global slot holding the return variance value
+// of the most recent f64-returning function call. Callee writes before ret;
+// caller reads after call.
+var B5_RET_VSHADOW_BSS_OFF: i64 = 0
+// β⁵ inter-procedural variance: per-argument global array (16 slots × 8 bytes).
+// Caller stores argument variance values here before a direct call;
+// callee prologue reads them into parameter VAR_VSHADOW slots.
+var B5_ARG_VSHADOW_BSS_OFF: i64 = 0
 
 var NEEDS_GPU_RUNTIME_DYNLINK: i64 = 0
 
@@ -10572,6 +10583,22 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         em(0x7d); em(0x02)   // JGE +2 (skip UD2)
                         em(0x0f); em(0x0b)   // UD2 — epistemic confidence trap
                     }
+                    // β⁵: store argument variance values into global BSS array
+                    // so callee prologue can read them into parameter shadows.
+                    // Save/restore rcx — emit_store_rax_to_abs_qword_x86 clobbers it.
+                    em(0x51)
+                    var b5_pvi: i64 = 0
+                    while b5_pvi < B5_ARG_VCOUNT && b5_pvi < 16 {
+                        let b5_avs = B5_ARG_VSHADOW[b5_pvi as usize]
+                        if b5_avs >= 0 {
+                            emit_load_var(b5_avs)
+                        } else {
+                            emit_imm64(0)
+                        }
+                        emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + b5_pvi * 8)
+                        b5_pvi = b5_pvi + 1
+                    }
+                    em(0x59)
                     emit_direct_fn_call_x86(fi, abi_argc)
                 }
                 EXPR_TY = FN_RET_TY[fi as usize]
@@ -10630,48 +10657,66 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
                 EXPR_CH_SET = b9_ch_union
                 EXPR_PARAM_USED = b9_pu_union
-                // β⁵: propagate call-site argument variances into return EXPR_VSHADOW
-                // Conservative GUM: var_return ≈ Σᵢ var(argᵢ). Safe overestimate.
-                // Note: Sounio x86 passes f64 as integer bit-patterns in RAX — use RAX ops.
+                // β⁵: read callee return variance from global BSS; fall back to
+                // conservative argument-variance sum when exact is 0 (covers
+                // callee bodies with unsupported ops like division).
                 EXPR_VSHADOW = -1
                 if EXPR_IS_F64 == 1 {
-                    var b5_has_var: i64 = 0
+                    // Save f64 result (RAX holds bit-cast of return value) to temp slot
+                    let b5_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(b5_res)
+                    // Load exact variance value from global BSS
+                    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
+                    let b5_exact_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(b5_exact_slot)
+                    // Compute conservative sum of argument variances
+                    var b5_sum_slot: i64 = -1
+                    var b5_first: i64 = 1
                     var b5_i: i64 = 0
                     while b5_i < B5_ARG_VCOUNT {
-                        if B5_ARG_VSHADOW[b5_i as usize] >= 0 { b5_has_var = 1 }
+                        let b5_av = B5_ARG_VSHADOW[b5_i as usize]
+                        if b5_av >= 0 {
+                            if b5_first == 1 {
+                                b5_sum_slot = b5_av
+                                b5_first = 0
+                            } else {
+                                emit_load_var(b5_sum_slot)
+                                emit_push()                              // push rax (sum bits)
+                                emit_load_var(b5_av)                    // rax = argᵢ variance bits
+                                em(0x59)                                 // pop rcx (sum bits)
+                                emit_f64_add_from_rcx_rax_x86()         // rax = f64(rcx)+f64(rax) as bits
+                                let b5_new = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                                emit_store_var(b5_new)
+                                b5_sum_slot = b5_new
+                            }
+                        }
                         b5_i = b5_i + 1
                     }
-                    if b5_has_var == 1 {
-                        // Save f64 result (RAX holds bit-cast of return value) to temp slot
-                        let b5_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                        emit_store_var(b5_res)
-                        var b5_sum_slot: i64 = -1
-                        var b5_first: i64 = 1
-                        b5_i = 0
-                        while b5_i < B5_ARG_VCOUNT {
-                            let b5_av = B5_ARG_VSHADOW[b5_i as usize]
-                            if b5_av >= 0 {
-                                if b5_first == 1 {
-                                    b5_sum_slot = b5_av
-                                    b5_first = 0
-                                } else {
-                                    // fadd(sum, argᵢ) using RAX/RCX integer register pattern
-                                    emit_load_var(b5_sum_slot)
-                                    emit_push()                              // push rax (sum bits)
-                                    emit_load_var(b5_av)                    // rax = argᵢ variance bits
-                                    em(0x59)                                 // pop rcx (sum bits)
-                                    emit_f64_add_from_rcx_rax_x86()         // rax = f64(rcx)+f64(rax) as bits
-                                    let b5_new = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                                    emit_store_var(b5_new)
-                                    b5_sum_slot = b5_new
-                                }
-                            }
-                            b5_i = b5_i + 1
-                        }
-                        EXPR_VSHADOW = b5_sum_slot
-                        // Restore f64 result
-                        emit_load_var(b5_res)
+                    if b5_sum_slot >= 0 {
+                        // Emit: if exact != 0, use exact; else use sum
+                        emit_load_var(b5_exact_slot)
+                        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+                        em(0x0f); em(0x85)             // jne use_exact
+                        let patch_exact = CL; em32(0)
+                        // use_sum:
+                        emit_load_var(b5_sum_slot)
+                        em(0xe9)                       // jmp done
+                        let patch_done = CL; em32(0)
+                        // use_exact:
+                        let here_exact = CL
+                        emit_load_var(b5_exact_slot)
+                        // done:
+                        let here_done = CL
+                        patch32(patch_exact, here_exact)
+                        patch32(patch_done, here_done)
+                        let b5_vslot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var(b5_vslot)
+                        EXPR_VSHADOW = b5_vslot
+                    } else if b5_exact_slot >= 0 {
+                        EXPR_VSHADOW = b5_exact_slot
                     }
+                    // Restore f64 result
+                    emit_load_var(b5_res)
                 }
             } else {
                 if call_vslot >= 0 {
@@ -16185,6 +16230,17 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             }
             lce = lce + 1
         }
+        // β⁵: store return variance to global BSS for inter-procedural propagation
+        if EXPR_IS_F64 == 1 {
+            em(0x50)  // push rax (save return value)
+            if EXPR_VSHADOW >= 0 {
+                emit_load_var(EXPR_VSHADOW)
+            } else {
+                emit_imm64(0)
+            }
+            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
+            em(0x58)  // pop rax (restore return value)
+        }
         em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
         if CURRENT_SRET_SLOT > 0 {
             em(0x41); em(0x5c)  // pop r12
@@ -19927,6 +19983,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GPU_RT_CUMEMCPYHTOD_PTR_BSS_OFF = bss_alloc_aligned(8)
     GPU_RT_CUMEMCPYDTOH_PTR_BSS_OFF = bss_alloc_aligned(8)
     GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF = bss_alloc_aligned(8)
+    B5_RET_VSHADOW_BSS_OFF = bss_alloc_aligned(8)
+    B5_ARG_VSHADOW_BSS_OFF = bss_alloc_aligned(128)
     PTX_LEN = 0
     NEEDS_GPU_RUNTIME_DYNLINK = 0
     // R15 Runtime Tag Stack: reserve BSS for side table (up to 16384 call sites × 8 bytes)
@@ -20070,6 +20128,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 if TK[q as usize] == 3 && src_match(TS[q as usize], TE[q as usize] - TS[q as usize], "chan") {
                     FN_NEEDS_SESSION[sig_fi as usize] = 1
                 }
+                // PR-6: record return-type token for Pass 1c.5 refinement re-scan
+                FN_RET_TY_TOK[sig_fi as usize] = q
                 scan_type(q)
                 var scan_ret_ty = SCAN_TY
                 var scan_ret_hash = SCAN_TY_HASH
@@ -20378,6 +20438,29 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     if CLI_SHOW_AST != 0 { dump_cli_ast_summary() }
     if CLI_SHOW_TYPES != 0 { dump_cli_type_summary() }
 
+    // Pass 1c.5: re-scan return types for refinement predicates now that the alias table is complete.
+    // Pass 1 signature scan runs before Pass 1c (type alias registration), so alias-typed returns
+    // like `-> Pos` can't resolve their predicates at sig-scan time. This pass re-scans each
+    // function's recorded return type token and (re-)populates FN_RET_HAS_PRED.
+    var rp_i: i64 = 0
+    while rp_i < FN_COUNT {
+        let rp_tok = FN_RET_TY_TOK[rp_i as usize]
+        if rp_tok >= 0 {
+            scan_type(rp_tok)
+            if SCAN_HAS_PRED == 1 && SCAN_PRED_IS_F64 == 0 {
+                FN_RET_HAS_PRED[rp_i as usize] = 1
+                FN_RET_PRED_OP[rp_i as usize] = SCAN_PRED_OP
+                FN_RET_PRED_BOUND[rp_i as usize] = SCAN_PRED_BOUND
+                if SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+                    FN_RET_HAS_PRED2[rp_i as usize] = 1
+                    FN_RET_PRED_OP2[rp_i as usize] = SCAN_PRED_OP2
+                    FN_RET_PRED_BOUND2[rp_i as usize] = SCAN_PRED_BOUND2
+                }
+            }
+        }
+        rp_i = rp_i + 1
+    }
+
     // Pass 1d: Epistemic type inference (Patient Zero)
     epistemic_infer_pass()
     // Gen 16 Track B: abort if any EpistemicComplete violations detected
@@ -20584,6 +20667,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if type_is_slice_ref(VAR_TY[param_vi as usize], VAR_TY_HASH[param_vi as usize]) {
                 emit_store_incoming_arg_x86(abi_arg_idx, VAR_LEN_SLOT[param_vi as usize])
                 abi_arg_idx = abi_arg_idx + 1
+            }
+            param_vi = param_vi + 1
+        }
+        // β⁵: load argument variance values from global BSS array into
+        // parameter VAR_VSHADOW slots so callee body sees caller variances.
+        param_vi = 0
+        while param_vi < VAR_COUNT && param_vi < 16 {
+            if VAR_IS_F64[param_vi as usize] == 1 {
+                let pvs = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + param_vi * 8)
+                emit_store_var(pvs)
+                VAR_VSHADOW[param_vi as usize] = pvs
             }
             param_vi = param_vi + 1
         }
@@ -23714,6 +23809,20 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let a64_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let a64_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
                 if bitset_is_subset(callee_eff, caller_eff) == false && !(a64_callee_imp && a64_caller_imp) { tc_effect_call_violation(call_tok, callee_eff, caller_eff) }
+                // β⁵ a64: store argument variance values into global BSS array
+                var b5a_pvi: i64 = 0
+                while b5a_pvi < B5_ARG_VCOUNT && b5a_pvi < 16 {
+                    let b5a_avs = B5_ARG_VSHADOW[b5a_pvi as usize]
+                    if b5a_avs >= 0 {
+                        emit_load_var_a64(b5a_avs)
+                    } else {
+                        emit_imm64_a64(0)
+                    }
+                    em32(0xAA0003EA)  // mov x10, x0
+                    emit_image_addr_reg_a64(11, GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + b5a_pvi * 8)
+                    em32(0xF900016A)  // str x10, [x11]
+                    b5a_pvi = b5a_pvi + 1
+                }
                 if abi_argc >= 8 { em32(0xF84107E7) }
                 if abi_argc >= 7 { em32(0xF84107E6) }
                 if abi_argc >= 6 { em32(0xF84107E5) }
@@ -23771,43 +23880,65 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
                 EXPR_CH_SET = b9a_ch_union
                 EXPR_PARAM_USED = b9a_pu_union
-                // β⁵ a64: propagate argument variances into return EXPR_VSHADOW
+                // β⁵ a64: read callee return variance from global BSS; fall back
+                // to conservative argument-variance sum when exact is 0.
                 EXPR_VSHADOW = -1
                 if EXPR_IS_F64 == 1 {
-                    var b5a_has_var: i64 = 0
+                    // Save return value to temp slot
+                    let b5a_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(b5a_res)
+                    // Load exact variance value from global BSS into x0
+                    emit_image_addr_a64(GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
+                    em32(0xF9400000)  // ldr x0, [x0]
+                    let b5a_exact_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(b5a_exact_slot)
+                    // Compute conservative sum of argument variances
+                    var b5a_sum_slot: i64 = -1
+                    var b5a_first: i64 = 1
                     var b5a_i: i64 = 0
                     while b5a_i < B5_ARG_VCOUNT {
-                        if B5_ARG_VSHADOW[b5a_i as usize] >= 0 { b5a_has_var = 1 }
+                        let b5a_av = B5_ARG_VSHADOW[b5a_i as usize]
+                        if b5a_av >= 0 {
+                            if b5a_first == 1 {
+                                b5a_sum_slot = b5a_av
+                                b5a_first = 0
+                            } else {
+                                emit_load_var_a64(b5a_sum_slot)
+                                emit_push_a64()
+                                emit_load_var_a64(b5a_av)
+                                emit_pop_x1_a64()
+                                em32(0x1E612800)  // fadd d0, d0, d1
+                                let b5a_new = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                                emit_store_var_a64(b5a_new)
+                                b5a_sum_slot = b5a_new
+                            }
+                        }
                         b5a_i = b5a_i + 1
                     }
-                    if b5a_has_var == 1 {
-                        let b5a_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                        emit_store_var_a64(b5a_res)
-                        var b5a_sum_slot: i64 = -1
-                        var b5a_first: i64 = 1
-                        b5a_i = 0
-                        while b5a_i < B5_ARG_VCOUNT {
-                            let b5a_av = B5_ARG_VSHADOW[b5a_i as usize]
-                            if b5a_av >= 0 {
-                                if b5a_first == 1 {
-                                    b5a_sum_slot = b5a_av
-                                    b5a_first = 0
-                                } else {
-                                    emit_load_var_a64(b5a_sum_slot)
-                                    emit_push_a64()
-                                    emit_load_var_a64(b5a_av)
-                                    emit_pop_x1_a64()
-                                    em32(0x1E612800)  // fadd d0,d0,d1
-                                    let b5a_new = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                                    emit_store_var_a64(b5a_new)
-                                    b5a_sum_slot = b5a_new
-                                }
-                            }
-                            b5a_i = b5a_i + 1
-                        }
-                        EXPR_VSHADOW = b5a_sum_slot
-                        emit_load_var_a64(b5a_res)
+                    if b5a_sum_slot >= 0 {
+                        // Emit: cbz x0, use_sum; use_exact: load exact; b done; use_sum: load sum; done:
+                        emit_load_var_a64(b5a_exact_slot)
+                        em32(0xB4000000)  // cbz x0, use_sum
+                        let patch_sum = CL; em32(0)
+                        // use_exact:
+                        emit_load_var_a64(b5a_exact_slot)
+                        em32(0x14000000)  // b done
+                        let patch_done = CL; em32(0)
+                        // use_sum:
+                        let here_sum = CL
+                        emit_load_var_a64(b5a_sum_slot)
+                        // done:
+                        let here_done = CL
+                        patch_branch_a64(patch_sum, here_sum)
+                        patch_branch_a64(patch_done, here_done)
+                        let b5a_vslot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b5a_vslot)
+                        EXPR_VSHADOW = b5a_vslot
+                    } else if b5a_exact_slot >= 0 {
+                        EXPR_VSHADOW = b5a_exact_slot
                     }
+                    // Restore return value
+                    emit_load_var_a64(b5a_res)
                 }
             } else {
                 if call_vslot >= 0 {
@@ -25568,6 +25699,20 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_a64(EXPR_TY, EXPR_TY_HASH)
         }
+        // β⁵: store return variance to global BSS for inter-procedural propagation
+        if EXPR_IS_F64 == 1 {
+            emit_push_a64()  // str x0, [sp, #-16]! (save return value)
+            if EXPR_VSHADOW >= 0 {
+                emit_load_var_a64(EXPR_VSHADOW)
+            } else {
+                emit_imm64_a64(0)
+            }
+            // x0 = variance value
+            em32(0xAA0003EA)  // mov x10, x0
+            emit_image_addr_reg_a64(11, GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
+            em32(0xF900016A)  // str x10, [x11]
+            emit_pop_x0_a64()  // ldr x0, [sp], #16 (restore return value)
+        }
         emit_imm64_reg_a64_patchable(9)
         em32(0x8B2963FF)  // add sp, sp, x9
         em32(0xA8C17BFD)
@@ -26483,6 +26628,19 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             if type_is_slice_ref(VAR_TY[param_vi_a as usize], VAR_TY_HASH[param_vi_a as usize]) {
                 emit_store_incoming_arg_a64(abi_arg_idx_a, VAR_LEN_SLOT[param_vi_a as usize])
                 abi_arg_idx_a = abi_arg_idx_a + 1
+            }
+            param_vi_a = param_vi_a + 1
+        }
+        // β⁵ a64: load argument variance values from global BSS array into
+        // parameter VAR_VSHADOW slots so callee body sees caller variances.
+        param_vi_a = 0
+        while param_vi_a < VAR_COUNT && param_vi_a < 16 {
+            if VAR_IS_F64[param_vi_a as usize] == 1 {
+                let pvs_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_image_addr_a64(GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + param_vi_a * 8)
+                em32(0xF9400000)  // ldr x0, [x0]
+                emit_store_var_a64(pvs_a)
+                VAR_VSHADOW[param_vi_a as usize] = pvs_a
             }
             param_vi_a = param_vi_a + 1
         }
