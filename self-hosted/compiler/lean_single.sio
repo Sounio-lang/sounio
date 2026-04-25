@@ -241,6 +241,10 @@ var VAR_USED: [i64; 1024] = [0; 1024]
 // Compile-time literal tracking for refinement predicate checks
 var LAST_IS_LITERAL: i64 = 0
 var LAST_LITERAL_VAL: i64 = 0
+// PR-4: per-variable literal tracking. Packed as VAR_LIT_DATA[idx*2+0]=has_lit,
+// [idx*2+1]=lit_val. Lets immutable `let x = -5; takes_pos(x)` propagate the
+// known value to the call-site refinement check.
+var VAR_LIT_DATA: [i64; 2048] = [0; 2048]
 var VAR_TY: [i64; 1024] = [0; 1024]
 var VAR_TY_HASH: [i64; 1024] = [0; 1024]
 var GL_TY: [i64; 1024] = [0; 1024]
@@ -2755,6 +2759,64 @@ fn try_apply_field_alias_refinement(field_hash: i64, tok: i64) with IO, Mut, Pan
         print("\n")
         tc_mark_failed()
     }
+}
+
+// PR-4: call-arg refinement enforcement. When scan_fn_param_type/scan_type populates
+// SCAN_HAS_PRED on a refined-typed parameter (`fn f(x: Pos)` with `type Pos = { v | v > 0 }`,
+// or inline `fn f(x: { v: i32 | v > 0 })`), and the just-compiled actual argument is a
+// known literal (a literal token, or an immutable `let x = -5` propagated via VAR_LIT_DATA),
+// replay the predicate at compile time and emit a violation on failure. Mirrors the
+// let-binding check at compile_stmt and the struct-field check in PR-3.
+fn try_apply_call_arg_refinement(tok: i64) with IO, Mut, Panic, Div {
+    if SCAN_HAS_PRED != 1 { return }
+    if SCAN_PRED_IS_F64 == 1 {
+        // f64 path is handled at runtime (codegen below) for non-literal cases;
+        // still clear the leaked state so the surrounding let-binding refinement
+        // check at compile_stmt does not double-report on the call result.
+        SCAN_HAS_PRED = 0
+        SCAN_HAS_PRED2 = 0
+        return
+    }
+    if LAST_IS_LITERAL != 1 {
+        SCAN_HAS_PRED = 0
+        SCAN_HAS_PRED2 = 0
+        return
+    }
+    let cv = LAST_LITERAL_VAL
+    let bv = SCAN_PRED_BOUND
+    let op = SCAN_PRED_OP
+    var violated: i64 = 0
+    if op == 26 && cv < bv { violated = 1 }
+    if op == 24 && cv <= bv { violated = 1 }
+    if op == 25 && cv > bv { violated = 1 }
+    if op == 23 && cv >= bv { violated = 1 }
+    if op == 21 && cv != bv { violated = 1 }
+    if op == 22 && cv == bv { violated = 1 }
+    if violated == 1 && SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+        let bv2 = SCAN_PRED_BOUND2
+        let op2 = SCAN_PRED_OP2
+        var ok2: i64 = 0
+        if op2 == 26 && cv >= bv2 { ok2 = 1 }
+        if op2 == 24 && cv > bv2 { ok2 = 1 }
+        if op2 == 25 && cv <= bv2 { ok2 = 1 }
+        if op2 == 23 && cv < bv2 { ok2 = 1 }
+        if op2 == 21 && cv == bv2 { ok2 = 1 }
+        if op2 == 22 && cv != bv2 { ok2 = 1 }
+        if ok2 == 1 { violated = 0 }
+    }
+    if violated == 1 {
+        print("error: refinement type violation — value ")
+        print_int(cv)
+        print(" does not satisfy parameter predicate at line ")
+        print_int(TL[tok as usize])
+        print("\n")
+        tc_mark_failed()
+    }
+    // Clear the per-arg refinement state so it does not leak past the call into
+    // the surrounding let-binding refinement check (which would otherwise fire
+    // a duplicate error on `let r = takes_pos(-5)` patterns).
+    SCAN_HAS_PRED = 0
+    SCAN_HAS_PRED2 = 0
 }
 
 fn tc_undefined_var(tok: i64) -> i64 with IO, Mut, Panic {
@@ -10382,6 +10444,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         if ont_r == 0 { tc_linear_violation(call_tok, "error[E001]: Type mismatch in call argument — declared type does not match") }
                     }
                 }
+                try_apply_call_arg_refinement(call_tok)
                 // Observation boundary: passing Unobserved<T> to non-Unobserved parameter
                 if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(SCAN_TY) && SCAN_TY != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(call_tok, "cannot pass Unobserved<T> to non-Unobserved parameter")
@@ -10821,6 +10884,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
                 if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
                 if VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
+                // PR-4: propagate tracked literal value so cross-binding refinement
+                // checks fire on `let x = -5; takes_pos(x)`.
+                if VAR_LIT_DATA[(vi * 2 + 0) as usize] == 1 {
+                    LAST_IS_LITERAL = 1
+                    LAST_LITERAL_VAL = VAR_LIT_DATA[(vi * 2 + 1) as usize]
+                }
             }
             // Use-after-move check: only for linear/affine struct variables
             if vi >= 0 && VAR_MOVED[vi as usize] == 1 && (VAR_LINEAR[vi as usize] == 1 || VAR_AFFINE[vi as usize] == 1) {
@@ -14411,6 +14480,7 @@ fn compile_gpu_launch_stmt_x86() with IO, Mut, Panic, Div {
                     if ont_r == 0 { tc_linear_violation(call_tok, "error[E001]: Type mismatch in call argument — declared type does not match") }
                 }
             }
+            try_apply_call_arg_refinement(call_tok)
             if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                 emit_push_expr_as_slice_arg_x86(call_tok)
                 abi_argc = abi_argc + 2
@@ -15480,6 +15550,12 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 let slot = var_add(ns, ne)
                 if slot < 0 { return }
                 let vix = VAR_COUNT - 1
+                // PR-4: track per-variable literal value for cross-binding refinement
+                // checks (let x = -5; takes_pos(x)). Only for immutable integer bindings.
+                if LAST_IS_LITERAL == 1 && decl_is_mut == 0 && (decl_ty == 0 || decl_ty == 1) {
+                    VAR_LIT_DATA[(vix * 2 + 0) as usize] = 1
+                    VAR_LIT_DATA[(vix * 2 + 1) as usize] = LAST_LITERAL_VAL
+                }
                 // Refinement predicate: compile-time check for constant literals.
                 if SCAN_HAS_PRED == 1 && LAST_IS_LITERAL == 1 && SCAN_PRED_IS_F64 == 0 {
                     let cv = LAST_LITERAL_VAL; let bv = SCAN_PRED_BOUND; var violated: i64 = 0
@@ -23550,6 +23626,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         if ont_r == 0 { tc_linear_violation(call_tok, "error[E001]: Type mismatch in call argument — declared type does not match") }
                     }
                 }
+                try_apply_call_arg_refinement(call_tok)
                 // Observation boundary: passing Unobserved<T> to an IO or FFI-imported function
                 // requires the caller to have `with Observe` — IO collapses epistemic uncertainty
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
