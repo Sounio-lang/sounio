@@ -251,6 +251,12 @@ var GL_TY: [i64; 1024] = [0; 1024]
 var GL_TY_HASH: [i64; 1024] = [0; 1024]
 var FN_RET_TY: [i64; 16384] = [0; 16384]
 var FN_RET_HASH: [i64; 16384] = [0; 16384]
+var FN_RET_HAS_PRED: [i64; 16384] = [0; 16384]
+var FN_RET_PRED_OP: [i64; 16384] = [0; 16384]
+var FN_RET_PRED_BOUND: [i64; 16384] = [0; 16384]
+var FN_RET_HAS_PRED2: [i64; 16384] = [0; 16384]
+var FN_RET_PRED_OP2: [i64; 16384] = [0; 16384]
+var FN_RET_PRED_BOUND2: [i64; 16384] = [0; 16384]
 var FN_ARITY: [i64; 16384] = [0; 16384]
 var TYPECHECK_FAILED: i64 = 0
 var SCAN_TY: i64 = 0
@@ -2817,6 +2823,46 @@ fn try_apply_call_arg_refinement(tok: i64) with IO, Mut, Panic, Div {
     // a duplicate error on `let r = takes_pos(-5)` patterns).
     SCAN_HAS_PRED = 0
     SCAN_HAS_PRED2 = 0
+}
+
+// PR-5: Check whether the return value of the current function violates the
+// refinement predicate on its declared return type (alias or inline refinement).
+// Only fires when the return expression is a known compile-time literal; runtime
+// values are left for the SMT backend.  Mirrors try_apply_call_arg_refinement.
+fn try_apply_return_refinement(tok: i64) with IO, Mut, Panic, Div {
+    if CURRENT_FN < 0 { return }
+    if FN_RET_HAS_PRED[CURRENT_FN as usize] != 1 { return }
+    if LAST_IS_LITERAL != 1 { return }
+    let cv = LAST_LITERAL_VAL
+    let bv = FN_RET_PRED_BOUND[CURRENT_FN as usize]
+    let op = FN_RET_PRED_OP[CURRENT_FN as usize]
+    var violated: i64 = 0
+    if op == 26 && cv < bv { violated = 1 }
+    if op == 24 && cv <= bv { violated = 1 }
+    if op == 25 && cv > bv { violated = 1 }
+    if op == 23 && cv >= bv { violated = 1 }
+    if op == 21 && cv != bv { violated = 1 }
+    if op == 22 && cv == bv { violated = 1 }
+    if violated == 1 && FN_RET_HAS_PRED2[CURRENT_FN as usize] == 1 {
+        let bv2 = FN_RET_PRED_BOUND2[CURRENT_FN as usize]
+        let op2 = FN_RET_PRED_OP2[CURRENT_FN as usize]
+        var ok2: i64 = 0
+        if op2 == 26 && cv >= bv2 { ok2 = 1 }
+        if op2 == 24 && cv > bv2 { ok2 = 1 }
+        if op2 == 25 && cv <= bv2 { ok2 = 1 }
+        if op2 == 23 && cv < bv2 { ok2 = 1 }
+        if op2 == 21 && cv == bv2 { ok2 = 1 }
+        if op2 == 22 && cv != bv2 { ok2 = 1 }
+        if ok2 == 1 { violated = 0 }
+    }
+    if violated == 1 {
+        print("error: refinement type violation — return value ")
+        print_int(cv)
+        print(" does not satisfy return type predicate at line ")
+        print_int(TL[tok as usize])
+        print("\n")
+        tc_mark_failed()
+    }
 }
 
 fn tc_undefined_var(tok: i64) -> i64 with IO, Mut, Panic {
@@ -16122,6 +16168,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 }
             }
         }
+        // PR-5: enforce refinement predicate on return value (literal/let-literal)
+        try_apply_return_refinement(EP - 1)
         // Observation boundary: returning Unobserved<T> from non-Observe function
         if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(CURRENT_RET_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
             tc_observe_boundary(EP - 1, "cannot return Unobserved<T> as non-Unobserved type")
@@ -20058,6 +20106,19 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 } else {
                     FN_RET_TY[sig_fi as usize] = SCAN_TY
                     FN_RET_HASH[sig_fi as usize] = SCAN_TY_HASH
+                    // PR-5: save integer refinement predicate on return type for
+                    // compile-time checking at return sites.  Skip f64 predicates
+                    // (those are a runtime concern).
+                    if SCAN_HAS_PRED == 1 && SCAN_PRED_IS_F64 == 0 {
+                        FN_RET_HAS_PRED[sig_fi as usize] = 1
+                        FN_RET_PRED_OP[sig_fi as usize] = SCAN_PRED_OP
+                        FN_RET_PRED_BOUND[sig_fi as usize] = SCAN_PRED_BOUND
+                        if SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+                            FN_RET_HAS_PRED2[sig_fi as usize] = 1
+                            FN_RET_PRED_OP2[sig_fi as usize] = SCAN_PRED_OP2
+                            FN_RET_PRED_BOUND2[sig_fi as usize] = SCAN_PRED_BOUND2
+                        }
+                    }
                 }
                 q = SCAN_TY_NEXT
             }
@@ -25502,6 +25563,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 }
             }
         }
+        // PR-5: enforce refinement predicate on return value (a64 mirror)
+        try_apply_return_refinement(EP - 1)
         if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_a64(EXPR_TY, EXPR_TY_HASH)
         }
