@@ -289,10 +289,18 @@ var SCAN_HAS_PRED: i64 = 0      // 1 if predicate was successfully parsed
 var SCAN_PRED_OP: i64 = 0       // comparison TK: 26=>=, 24=>, 25=<=, 23=<, 21===, 22=!=
 var SCAN_PRED_BOUND: i64 = 0    // literal bound value (i64 bits; for f64, IEEE 754)
 var SCAN_PRED_IS_F64: i64 = 0   // 1 if float predicate
-var SCAN_HAS_PRED2: i64 = 0     // 1 if second OR-predicate was parsed
+var SCAN_HAS_PRED2: i64 = 0     // 1 if second compound predicate was parsed
 var SCAN_PRED_OP2: i64 = 0      // second predicate operator
 var SCAN_PRED_BOUND2: i64 = 0   // second predicate bound
 var SCAN_PRED_IS_F64_2: i64 = 0 // 1 if second predicate is float
+// PR-6: compound predicate conjunction. 0 = OR (existing ||), 1 = AND (&&).
+// For AND: violation if EITHER predicate fails independently.
+// For OR:  violation only if BOTH predicates fail.
+var SCAN_PRED_COMPOUND_IS_AND: i64 = 0
+// PR-6: per-alias AND/OR flag (parallel to REF_TYPE_DATA).
+var REF_TYPE_IS_AND: [i64; 32] = [0; 32]
+// PR-6: per-function return-type AND/OR flag.
+var FN_RET_PRED_COMPOUND_IS_AND: [i64; 16384] = [0; 16384]
 
 // ─── Phase 6d: Unit dimension checking ───
 // Tracks unit hash of the last compiled expression sub-result.
@@ -2756,17 +2764,29 @@ fn try_apply_field_alias_refinement(field_hash: i64, tok: i64) with IO, Mut, Pan
     if op == 23 && cv >= bv { violated = 1 }
     if op == 21 && cv != bv { violated = 1 }
     if op == 22 && cv == bv { violated = 1 }
-    if violated == 1 && REF_TYPE_DATA[(b + 6) as usize] == 1 {
+    // PR-6: AND compound — check second predicate independently; OR — second pred can clear violation
+    if REF_TYPE_DATA[(b + 6) as usize] == 1 {
         let bv2 = REF_TYPE_DATA[(b + 8) as usize]
         let op2 = REF_TYPE_DATA[(b + 7) as usize]
-        var ok2: i64 = 0
-        if op2 == 26 && cv >= bv2 { ok2 = 1 }
-        if op2 == 24 && cv > bv2 { ok2 = 1 }
-        if op2 == 25 && cv <= bv2 { ok2 = 1 }
-        if op2 == 23 && cv < bv2 { ok2 = 1 }
-        if op2 == 21 && cv == bv2 { ok2 = 1 }
-        if op2 == 22 && cv != bv2 { ok2 = 1 }
-        if ok2 == 1 { violated = 0 }
+        if REF_TYPE_IS_AND[ref_idx as usize] == 1 {
+            if op2 == 26 && cv < bv2 { violated = 1 }
+            if op2 == 24 && cv <= bv2 { violated = 1 }
+            if op2 == 25 && cv > bv2 { violated = 1 }
+            if op2 == 23 && cv >= bv2 { violated = 1 }
+            if op2 == 21 && cv != bv2 { violated = 1 }
+            if op2 == 22 && cv == bv2 { violated = 1 }
+        } else {
+            if violated == 1 {
+                var ok2: i64 = 0
+                if op2 == 26 && cv >= bv2 { ok2 = 1 }
+                if op2 == 24 && cv > bv2 { ok2 = 1 }
+                if op2 == 25 && cv <= bv2 { ok2 = 1 }
+                if op2 == 23 && cv < bv2 { ok2 = 1 }
+                if op2 == 21 && cv == bv2 { ok2 = 1 }
+                if op2 == 22 && cv != bv2 { ok2 = 1 }
+                if ok2 == 1 { violated = 0 }
+            }
+        }
     }
     if violated == 1 {
         print("error: refinement type violation — value ")
@@ -2809,17 +2829,29 @@ fn try_apply_call_arg_refinement(tok: i64) with IO, Mut, Panic, Div {
     if op == 23 && cv >= bv { violated = 1 }
     if op == 21 && cv != bv { violated = 1 }
     if op == 22 && cv == bv { violated = 1 }
-    if violated == 1 && SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+    // PR-6: AND compound — check second predicate independently; OR compound — second pred can clear violation
+    if SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
         let bv2 = SCAN_PRED_BOUND2
         let op2 = SCAN_PRED_OP2
-        var ok2: i64 = 0
-        if op2 == 26 && cv >= bv2 { ok2 = 1 }
-        if op2 == 24 && cv > bv2 { ok2 = 1 }
-        if op2 == 25 && cv <= bv2 { ok2 = 1 }
-        if op2 == 23 && cv < bv2 { ok2 = 1 }
-        if op2 == 21 && cv == bv2 { ok2 = 1 }
-        if op2 == 22 && cv != bv2 { ok2 = 1 }
-        if ok2 == 1 { violated = 0 }
+        if SCAN_PRED_COMPOUND_IS_AND == 1 {
+            if op2 == 26 && cv < bv2 { violated = 1 }
+            if op2 == 24 && cv <= bv2 { violated = 1 }
+            if op2 == 25 && cv > bv2 { violated = 1 }
+            if op2 == 23 && cv >= bv2 { violated = 1 }
+            if op2 == 21 && cv != bv2 { violated = 1 }
+            if op2 == 22 && cv == bv2 { violated = 1 }
+        } else {
+            if violated == 1 {
+                var ok2: i64 = 0
+                if op2 == 26 && cv >= bv2 { ok2 = 1 }
+                if op2 == 24 && cv > bv2 { ok2 = 1 }
+                if op2 == 25 && cv <= bv2 { ok2 = 1 }
+                if op2 == 23 && cv < bv2 { ok2 = 1 }
+                if op2 == 21 && cv == bv2 { ok2 = 1 }
+                if op2 == 22 && cv != bv2 { ok2 = 1 }
+                if ok2 == 1 { violated = 0 }
+            }
+        }
     }
     if violated == 1 {
         print("error: refinement type violation — value ")
@@ -2854,17 +2886,29 @@ fn try_apply_return_refinement(tok: i64) with IO, Mut, Panic, Div {
     if op == 23 && cv >= bv { violated = 1 }
     if op == 21 && cv != bv { violated = 1 }
     if op == 22 && cv == bv { violated = 1 }
-    if violated == 1 && FN_RET_HAS_PRED2[CURRENT_FN as usize] == 1 {
+    // PR-6: AND compound — check second predicate independently; OR — second pred can clear violation
+    if FN_RET_HAS_PRED2[CURRENT_FN as usize] == 1 {
         let bv2 = FN_RET_PRED_BOUND2[CURRENT_FN as usize]
         let op2 = FN_RET_PRED_OP2[CURRENT_FN as usize]
-        var ok2: i64 = 0
-        if op2 == 26 && cv >= bv2 { ok2 = 1 }
-        if op2 == 24 && cv > bv2 { ok2 = 1 }
-        if op2 == 25 && cv <= bv2 { ok2 = 1 }
-        if op2 == 23 && cv < bv2 { ok2 = 1 }
-        if op2 == 21 && cv == bv2 { ok2 = 1 }
-        if op2 == 22 && cv != bv2 { ok2 = 1 }
-        if ok2 == 1 { violated = 0 }
+        if FN_RET_PRED_COMPOUND_IS_AND[CURRENT_FN as usize] == 1 {
+            if op2 == 26 && cv < bv2 { violated = 1 }
+            if op2 == 24 && cv <= bv2 { violated = 1 }
+            if op2 == 25 && cv > bv2 { violated = 1 }
+            if op2 == 23 && cv >= bv2 { violated = 1 }
+            if op2 == 21 && cv != bv2 { violated = 1 }
+            if op2 == 22 && cv == bv2 { violated = 1 }
+        } else {
+            if violated == 1 {
+                var ok2: i64 = 0
+                if op2 == 26 && cv >= bv2 { ok2 = 1 }
+                if op2 == 24 && cv > bv2 { ok2 = 1 }
+                if op2 == 25 && cv <= bv2 { ok2 = 1 }
+                if op2 == 23 && cv < bv2 { ok2 = 1 }
+                if op2 == 21 && cv == bv2 { ok2 = 1 }
+                if op2 == 22 && cv != bv2 { ok2 = 1 }
+                if ok2 == 1 { violated = 0 }
+            }
+        }
     }
     if violated == 1 {
         print("error: refinement type violation — return value ")
@@ -3889,9 +3933,11 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                     SCAN_HAS_PRED = 1
                                     pp = pp + 1
                                 }
-                                // Check for || and parse second predicate
-                                if SCAN_HAS_PRED == 1 && pp < TC && TK[pp as usize] == 31 {
-                                    pp = pp + 1  // skip ||
+                                // PR-6: Check for || (31) or && (30) and parse second predicate
+                                if SCAN_HAS_PRED == 1 && pp < TC && (TK[pp as usize] == 31 || TK[pp as usize] == 30) {
+                                    SCAN_PRED_COMPOUND_IS_AND = 0
+                                    if TK[pp as usize] == 30 { SCAN_PRED_COMPOUND_IS_AND = 1 }
+                                    pp = pp + 1  // skip || or &&
                                     if pp < TC && TK[pp as usize] == 3 { pp = pp + 1 }  // skip var ident
                                     if pp < TC {
                                         let pred_op2 = TK[pp as usize]
@@ -4060,6 +4106,8 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                                                     SCAN_PRED_OP2 = REF_TYPE_DATA[(ref_b + 7) as usize]
                                                                     SCAN_PRED_BOUND2 = REF_TYPE_DATA[(ref_b + 8) as usize]
                                                                     SCAN_PRED_IS_F64_2 = REF_TYPE_DATA[(ref_b + 9) as usize]
+                                                                    // PR-6: propagate AND/OR conjunction flag from alias table
+                                                                    SCAN_PRED_COMPOUND_IS_AND = REF_TYPE_IS_AND[ref_idx as usize]
                                                                 }
                                                             } else {
                                                             // Unknown type name — leave as type 0 (unresolved)
@@ -15656,16 +15704,28 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     if SCAN_PRED_OP == 23 && cv >= bv { violated = 1 } // <  : violated if cv >= bv
                     if SCAN_PRED_OP == 21 && cv != bv { violated = 1 } // == : violated if cv != bv
                     if SCAN_PRED_OP == 22 && cv == bv { violated = 1 } // != : violated if cv == bv
-                    // For OR predicate: if first violated, check second
-                    if violated == 1 && SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
-                        let bv2 = SCAN_PRED_BOUND2; var ok2: i64 = 0
-                        if SCAN_PRED_OP2 == 26 && cv >= bv2 { ok2 = 1 }
-                        if SCAN_PRED_OP2 == 24 && cv > bv2 { ok2 = 1 }
-                        if SCAN_PRED_OP2 == 25 && cv <= bv2 { ok2 = 1 }
-                        if SCAN_PRED_OP2 == 23 && cv < bv2 { ok2 = 1 }
-                        if SCAN_PRED_OP2 == 21 && cv == bv2 { ok2 = 1 }
-                        if SCAN_PRED_OP2 == 22 && cv != bv2 { ok2 = 1 }
-                        if ok2 == 1 { violated = 0 }
+                    // PR-6: AND compound — check second independently; OR — second pred can clear violation
+                    if SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+                        let bv2 = SCAN_PRED_BOUND2
+                        if SCAN_PRED_COMPOUND_IS_AND == 1 {
+                            if SCAN_PRED_OP2 == 26 && cv < bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 24 && cv <= bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 25 && cv > bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 23 && cv >= bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 21 && cv != bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 22 && cv == bv2 { violated = 1 }
+                        } else {
+                            if violated == 1 {
+                                var ok2: i64 = 0
+                                if SCAN_PRED_OP2 == 26 && cv >= bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 24 && cv > bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 25 && cv <= bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 23 && cv < bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 21 && cv == bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 22 && cv != bv2 { ok2 = 1 }
+                                if ok2 == 1 { violated = 0 }
+                            }
+                        }
                     }
                     if violated == 1 {
                         print("error: refinement type violation — value ")
@@ -20402,6 +20462,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 let save_op2 = SCAN_PRED_OP2
                 let save_bound2 = SCAN_PRED_BOUND2
                 let save_isf2 = SCAN_PRED_IS_F64_2
+                let save_is_and = SCAN_PRED_COMPOUND_IS_AND
                 scan_type(p)
                 let _b2 = alias_idx * 10
                 REF_TYPE_DATA[(_b2 + 0) as usize] = SCAN_TY
@@ -20417,6 +20478,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     REF_TYPE_DATA[(_b2 + 7) as usize] = SCAN_PRED_OP2
                     REF_TYPE_DATA[(_b2 + 8) as usize] = SCAN_PRED_BOUND2
                     REF_TYPE_DATA[(_b2 + 9) as usize] = SCAN_PRED_IS_F64_2
+                    // PR-6: store AND/OR conjunction flag alongside second predicate
+                    REF_TYPE_IS_AND[alias_idx as usize] = SCAN_PRED_COMPOUND_IS_AND
                 }
                 // Restore (do not leak alias-decl predicate into outer state)
                 SCAN_HAS_PRED = save_has
@@ -20427,6 +20490,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 SCAN_PRED_OP2 = save_op2
                 SCAN_PRED_BOUND2 = save_bound2
                 SCAN_PRED_IS_F64_2 = save_isf2
+                SCAN_PRED_COMPOUND_IS_AND = save_is_and
             }
             // Skip remainder to next top-level declaration
             while p < TC && TK[p as usize] != 1 && TK[p as usize] != 12 && TK[p as usize] != 46 && TK[p as usize] != 47 && TK[p as usize] != 61 && TK[p as usize] != 0 { p = p + 1 }
@@ -20455,6 +20519,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     FN_RET_HAS_PRED2[rp_i as usize] = 1
                     FN_RET_PRED_OP2[rp_i as usize] = SCAN_PRED_OP2
                     FN_RET_PRED_BOUND2[rp_i as usize] = SCAN_PRED_BOUND2
+                    FN_RET_PRED_COMPOUND_IS_AND[rp_i as usize] = SCAN_PRED_COMPOUND_IS_AND
                 }
             }
         }
