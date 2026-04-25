@@ -29,7 +29,7 @@ cd "$ROOT_DIR"
 # callers explicitly point the suite at an alternate compiler path/backend.
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
     export SOUNIO_SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
-    unset SOUC_BIN
+    SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
 fi
 if [[ -n "${SOUNIO_TEST_NATIVE_BIN:-}" ]]; then
     export SOUC_NATIVE_BIN="$SOUNIO_TEST_NATIVE_BIN"
@@ -37,6 +37,9 @@ fi
 
 # shellcheck source=lib/resolve_souc.sh
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
+    SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+fi
 sounio_require_souc
 
 # Ensure stdlib is discoverable for tests that import from it.

@@ -35,13 +35,16 @@ cd "$ROOT_DIR"
 # Harness-local override
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
     export SOUNIO_SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
-    unset SOUC_BIN
+    SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
 fi
 if [[ -n "${SOUNIO_TEST_NATIVE_BIN:-}" ]]; then
     export SOUC_NATIVE_BIN="$SOUNIO_TEST_NATIVE_BIN"
 fi
 
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
+    SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+fi
 sounio_require_souc
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
