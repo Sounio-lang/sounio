@@ -235,6 +235,14 @@ Use Context7 only for:
 Do **not** use Context7 as a substitute for repository-local truth.
 Repository-local truth must come from direct inspection of the repo.
 
+For OpenAI / Codex / MCP product documentation, prefer the OpenAI developer
+documentation MCP server when it is configured:
+- server id: `openaiDeveloperDocs`
+- URL: `https://developers.openai.com/mcp`
+
+This is the preferred live documentation path for Codex-specific configuration
+and workflow questions.
+
 ---
 
 ## What not to touch unless explicitly requested
