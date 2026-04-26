@@ -281,6 +281,8 @@ var SCAN_TY_HASH: i64 = 0
 var SCAN_TY_ESIZ: i64 = 8
 var SCAN_TY_ALEN: i64 = 0
 var SCAN_TY_NEXT: i64 = 0
+var RESOLVE_TY: i64 = 0
+var RESOLVE_TY_HASH: i64 = 0
 var LEX_ERROR_LINE: i64 = 0
 var LEX_ERROR_KIND: i64 = 0
 var MATCH_SCRUT_TY: i64 = 0
@@ -1945,6 +1947,27 @@ fn emit_copy_agg_to_ptr_a64(field_ty: i64, field_hash: i64) with Mut, Panic, Div
     if nslots <= 0 { return }
     em32(0xAA0003EB)  // mov x11, x0
     emit_copy_words_x10_x11_a64(nslots)
+}
+
+fn emit_store_to_pointer_offset_a64(lslot: i64, byte_off: i64, target_ty: i64, target_hash: i64) with Mut, Panic, Div {
+    if type_is_aggregate(target_ty, target_hash) {
+        em32(0xAA0003EA)  // mov x10, x0 (source aggregate pointer)
+        emit_load_var_a64(lslot)
+        if byte_off != 0 {
+            emit_imm64_reg_a64(11, byte_off)
+            em32(0x8B0B0000)  // add x0, x0, x11
+        }
+        emit_copy_agg_to_ptr_a64(target_ty, target_hash)
+        return
+    }
+    em32(0xAA0003EA)  // mov x10, x0 (scalar value)
+    emit_load_var_a64(lslot)
+    if byte_off != 0 {
+        emit_imm64_reg_a64(11, byte_off)
+        em32(0x8B0B0000)  // add x0, x0, x11
+    }
+    em32(0xF900000A)  // str x10, [x0]
+    return
 }
 
 fn fill_repeat_struct_array_slots_a64(dst_start: i64, field_hash: i64) with Mut, Panic, Div {
@@ -6163,6 +6186,21 @@ fn emit_copy_agg_to_ptr_x86(field_ty: i64, field_hash: i64) with Mut, Panic, Div
     }
 }
 
+fn emit_store_to_pointer_offset_x86(lslot: i64, byte_off: i64, target_ty: i64, target_hash: i64) with Mut, Panic, Div {
+    if type_is_aggregate(target_ty, target_hash) {
+        em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (source aggregate pointer)
+        emit_load_var(lslot)
+        if byte_off != 0 { em(0x48); em(0x8d); em(0x80); em32(byte_off) }
+        emit_copy_agg_to_ptr_x86(target_ty, target_hash)
+        return
+    }
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (scalar value)
+    emit_load_var(lslot)
+    if byte_off != 0 { em(0x48); em(0x8d); em(0x80); em32(byte_off) }
+    em(0x48); em(0x89); em(0x10)  // mov [rax], rdx
+    return
+}
+
 fn fill_repeat_struct_array_slots_x86(dst_start: i64, field_hash: i64) with Mut, Panic, Div {
     let nslots = arr_storage_slots(field_hash)
     var i: i64 = 0
@@ -8176,33 +8214,40 @@ fn compile_primary() with IO, Mut, Panic, Div {
             VAR_TY_HASH[svi as usize] = CL_SAVE_TH[svi as usize]
             svi = svi + 1
         }
-        // --- Build closure struct on OUTER stack ---
-        // Stack layout: slot N is at [rbp - N*8]. Higher slot = lower address.
-        // We want a contiguous struct at ascending addresses:
-        //   ptr[0] = fn_ptr, ptr[8] = cap_0, ptr[16] = cap_1, ...
-        // Since ptr + 8 = higher address = lower slot number:
-        //   fn_ptr  at slot (struct_base + struct_size - 1)  ← lowest address = ptr[0]
-        //   cap_0   at slot (struct_base + struct_size - 2)  ← ptr[8]
-        //   cap_i   at slot (struct_base + struct_size - 2 - i)
-        // ptr = [rbp - (struct_base + struct_size - 1) * 8]
+        // --- Build closure struct ---
+        // Zero-capture: stack-allocate (fn_ptr only, no env needed).
+        // With captures: heap-allocate via mmap so env survives the creating frame.
         let struct_size = 1 + saved_cap_count
-        let struct_base = NEXT_SLOT
-        NEXT_SLOT = NEXT_SLOT + struct_size
-        let struct_top = struct_base + struct_size - 1
-        // Store fn_ptr at slot struct_top (ptr[0])
-        em(0x48); em(0x8d); em(0x05)
-        em32(cl_start - (CL + 4))  // lea rax, [rip + offset_to_cl_start]
-        emit_store_var(struct_top)
-        // Store captures: cap_i at slot (struct_top - 1 - i) → ptr[(i+1)*8]
-        var capj: i64 = 0
-        while capj < saved_cap_count {
-            emit_load_var(CL_CAP_SLOT[capj as usize])
-            emit_store_var(struct_top - 1 - capj)
-            capj = capj + 1
+        if saved_cap_count == 0 {
+            let struct_base = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + struct_size
+            let struct_top = struct_base + struct_size - 1
+            em(0x48); em(0x8d); em(0x05)
+            em32(cl_start - (CL + 4))  // lea rax, [rip + offset_to_cl_start]
+            emit_store_var(struct_top)
+            em(0x48); em(0x8d); em(0x85)
+            em32(0 - struct_top * 8)
+        } else {
+            // heap path: mov rax, struct_size*8; mmap; save heap_ptr; fill fields
+            em(0x48); em(0xb8); em64(struct_size * 8)  // mov rax, size
+            emit_heap_alloc_x86()                       // rax = heap_ptr
+            let heap_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(heap_slot)                   // save heap_ptr
+            // store fn_ptr at [heap_ptr+0]
+            em(0x48); em(0x8b); em(0x8d); em32(0 - heap_slot * 8)  // mov rcx, heap_ptr
+            em(0x48); em(0x8d); em(0x05); em32(cl_start - (CL + 4)) // lea rax, fn_ptr
+            em(0x48); em(0x89); em(0x01)                            // mov [rcx], rax
+            // store each capture at [heap_ptr+(i+1)*8]
+            var capj: i64 = 0
+            while capj < saved_cap_count {
+                emit_load_var(CL_CAP_SLOT[capj as usize])           // rax = cap_i
+                em(0x48); em(0x8b); em(0x8d); em32(0 - heap_slot * 8) // rcx = heap_ptr
+                em(0x48); em(0x89); em(0x81); em32((capj + 1) * 8)  // [rcx+(i+1)*8] = rax
+                capj = capj + 1
+            }
+            emit_load_var(heap_slot)                    // rax = heap_ptr (return value)
         }
-        // lea rax, [rbp - struct_top*8] — pointer to closure struct
-        em(0x48); em(0x8d); em(0x85)
-        em32(0 - struct_top * 8)
         EXPR_IS_F64 = 0
         EXPR_TY = 9
         LAST_EXPR_IS_CLOSURE = 1
@@ -16608,13 +16653,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if ty_eq(inner_ty, inner_hash, rhs_ty, rhs_ty_hash) == false {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
-                if inner_ty == 8 || type_is_struct_like(inner_ty, inner_hash) {
-                    tc_error(name_tok, "dereference assignment supports scalar pointer targets only")
-                } else {
-                    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
-                    emit_load_var(lslot)
-                    em(0x48); em(0x89); em(0x10)  // mov [rax], rdx
-                }
+                emit_store_to_pointer_offset_x86(lslot, 0, inner_ty, inner_hash)
             } else {
                 tc_error(name_tok, "dereference assignment requires raw pointer binding")
             }
@@ -16658,13 +16697,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                             tc_error(field_tok, "unknown field access")
                         } else if ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
                             tc_error(EP - 1, "assignment type mismatch")
-                        } else if fty == 8 || type_is_struct_like(fty, fhash) {
-                            tc_error(field_tok, "deref field store supports scalar fields only")
                         } else {
-                            em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
-                            emit_load_var(lslot)
-                            if foff != 0 { em(0x48); em(0x8d); em(0x80); em32(foff) }
-                            em(0x48); em(0x89); em(0x10)  // mov [rax], rdx
+                            emit_store_to_pointer_offset_x86(lslot, foff, fty, fhash)
                         }
                     }
                 }
@@ -20110,27 +20144,79 @@ fn mono_pass() with IO, Mut, Panic, Div {
     }
 }
 
+fn resolve_type_leaf(ty: i64, ty_hash: i64) with Mut, Panic, Div {
+    RESOLVE_TY = ty
+    RESOLVE_TY_HASH = ty_hash
+    if ty == 0 && ty_hash != 0 {
+        if st_find(ty_hash) >= 0 {
+            RESOLVE_TY = 6
+            return
+        }
+        if en_find(ty_hash) >= 0 {
+            RESOLVE_TY = 7
+            return
+        }
+    }
+    return
+}
+
+fn resolve_type_deep(ty: i64, ty_hash: i64) with Mut, Panic, Div {
+    RESOLVE_TY = ty
+    RESOLVE_TY_HASH = ty_hash
+
+    if ty == 0 {
+        resolve_type_leaf(ty, ty_hash)
+        return
+    }
+
+    if ty == 10 && ref_hash_is(ty_hash) {
+        let ref_mode = ref_hash_mut(ty_hash)
+        let ref_inner_ty = ref_hash_inner_ty(ty_hash)
+        let ref_inner_hash = ref_hash_inner_hash(ty_hash)
+        resolve_type_deep(ref_inner_ty, ref_inner_hash)
+        let fixed_inner_ty = RESOLVE_TY
+        let fixed_inner_hash = RESOLVE_TY_HASH
+        RESOLVE_TY = 10
+        RESOLVE_TY_HASH = ref_hash_make(fixed_inner_ty, fixed_inner_hash, ref_mode)
+        return
+    }
+
+    if ty == 11 && ref_hash_is(ty_hash) {
+        let ptr_mode = ptr_hash_mut(ty_hash)
+        let ptr_inner_ty = ptr_hash_inner_ty(ty_hash)
+        let ptr_inner_hash = ptr_hash_inner_hash(ty_hash)
+        resolve_type_deep(ptr_inner_ty, ptr_inner_hash)
+        let fixed_ptr_ty = RESOLVE_TY
+        let fixed_ptr_hash = RESOLVE_TY_HASH
+        RESOLVE_TY = 11
+        if ptr_mode == 2 {
+            RESOLVE_TY_HASH = option_hash_make(fixed_ptr_ty, fixed_ptr_hash)
+            return
+        }
+        if ptr_mode == 3 {
+            RESOLVE_TY_HASH = box_hash_make(fixed_ptr_ty, fixed_ptr_hash)
+            return
+        }
+        RESOLVE_TY_HASH = ptr_hash_make(fixed_ptr_ty, fixed_ptr_hash, ptr_mode)
+        return
+    }
+
+    return
+}
+
 fn resolve_forward_struct_types() with Mut, Panic, Div {
     var fix_si: i64 = 0
     while fix_si < ST_COUNT {
         var fix_fi: i64 = 0
         while fix_fi < ST[(fix_si * 130 + 1) as usize] {
-            if ST_FTY[(fix_si * 128 + fix_fi) as usize] == 0 {
-                var fix_fh: i64 = ST_FHASH[(fix_si * 128 + fix_fi) as usize]
-                if fix_fh != 0 {
-                    if st_find(fix_fh) >= 0 {
-                        ST_FTY[(fix_si * 128 + fix_fi) as usize] = 6
-                    } else {
-                        if en_find(fix_fh) >= 0 {
-                            ST_FTY[(fix_si * 128 + fix_fi) as usize] = 7
-                        }
-                    }
-                }
-            }
+            resolve_type_deep(ST_FTY[(fix_si * 128 + fix_fi) as usize], ST_FHASH[(fix_si * 128 + fix_fi) as usize])
+            ST_FTY[(fix_si * 128 + fix_fi) as usize] = RESOLVE_TY
+            ST_FHASH[(fix_si * 128 + fix_fi) as usize] = RESOLVE_TY_HASH
             fix_fi = fix_fi + 1
         }
         fix_si = fix_si + 1
     }
+    return
 }
 
 fn compile_all() -> i64 with IO, Mut, Panic, Div {
@@ -20570,6 +20656,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         }
         p = p + 1
     }
+    resolve_forward_struct_types()
     p = 0
 
     // Pass 0c+0d: monomorphization (in separate function to limit stack usage)
@@ -26318,13 +26405,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if ty_eq(inner_ty, inner_hash, rhs_ty, rhs_ty_hash) == false {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
-                if inner_ty == 8 || type_is_struct_like(inner_ty, inner_hash) {
-                    tc_error(name_tok, "dereference assignment supports scalar pointer targets only")
-                } else {
-                    em32(0xAA0003EA)  // mov x10, x0 (value)
-                    emit_load_var_a64(lslot)
-                    em32(0xF900000A)  // str x10, [x0]
-                }
+                emit_store_to_pointer_offset_a64(lslot, 0, inner_ty, inner_hash)
             } else {
                 tc_error(name_tok, "dereference assignment requires raw pointer binding")
             }
@@ -26369,16 +26450,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                             tc_error(field_tok, "unknown field access")
                         } else if ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
                             tc_error(EP - 1, "assignment type mismatch")
-                        } else if fty == 8 || type_is_struct_like(fty, fhash) {
-                            tc_error(field_tok, "deref field store supports scalar fields only")
                         } else {
-                            em32(0xAA0003EA)  // mov x10, x0 (value)
-                            emit_load_var_a64(lslot)
-                            if foff != 0 {
-                                emit_imm64_reg_a64(11, foff)
-                                em32(0x8B0B0000)  // add x0, x0, x11
-                            }
-                            em32(0xF900000A)  // str x10, [x0]
+                            emit_store_to_pointer_offset_a64(lslot, foff, fty, fhash)
                         }
                     }
                 }
