@@ -31,6 +31,48 @@ status: lock-released
 ---
 
 agent: codex
+time_utc: 2026-04-26T02:15:00Z
+files:
+  - scripts/apple/apple_native_v2_ssh_gate.sh
+  - scripts/omega/omega_native_v2_shadow_gate.sh
+  - self-hosted/compiler/main.sio
+  - artifacts/omega/apple_os26_native_v2_ssh_gate.v1.json
+intent: implement Apple OS 26.5 native-v2 SSH orchestration while preserving the x86 native-v2 gate contract
+checks:
+  - bash -n scripts/apple/apple_native_v2_ssh_gate.sh
+  - bash -n scripts/omega/omega_native_v2_shadow_gate.sh
+  - git diff --check
+  - SOUNIO_MAC_SSH_CONNECT_TIMEOUT=2 bash scripts/apple/apple_native_v2_ssh_gate.sh
+  - bash scripts/omega/omega_native_v2_shadow_gate.sh
+status: partial
+notes:
+  - Apple SSH gate emitted not_run/ssh_unreachable for the default MacBook host in this workspace.
+  - AArch64 native-v2 runtime attestation remains not_run because full native::codegen.sio import/typecheck is dirty in this checkout; do not route it through full native::codegen import in main.sio.
+  - The omega gate still exits 139 in this checkout because plain main.sio --self-test is currently segfaulting after existing diagnostics.
+
+---
+
+agent: codex
+time_utc: 2026-04-26T02:35:00Z
+files:
+  - scripts/apple/apple_native_v2_ssh_gate.sh
+  - .codex/AGENT_HANDOFF.md
+  - .claude/AGENT_HANDOFF.md
+  - artifacts/omega/agent_handoff.log.md
+intent: continue Apple native-v2 implementation by probing smaller native-v2 AArch64 driver paths and recording the true blocker
+checks:
+  - ./bin/souc run self-hosted/main.sio -- compile --backend=native-v2 --target=aarch64-macos -o artifacts/omega/native_backend_v2_scalar_smoke.aarch64-macos.bin tests/selfhost-driver-output/ret_42.sio
+  - ./bin/souc run tests/native-v2/aarch64_macho_preview_emit.sio
+  - ./bin/souc check tests/native-v2/aarch64_macho_preview_emit.sio
+status: partial
+notes:
+  - self-hosted/main.sio native-v2 compile path fails typecheck before emission in this checkout.
+  - A synthetic IR driver importing native::codegen also fails because native::codegen.sio itself is type-dirty under current checker/import behavior.
+  - Removed the failing probe file; the Apple SSH gate now reports native_v2_aarch64_codegen_import_blocked for the native-v2 portion while preserving the maintained selfhost_host_gate Mach-O lane.
+
+---
+
+agent: codex
 time_utc: 2026-04-26T01:05:00Z
 files:
   - bin/souc-linux-x86_64
