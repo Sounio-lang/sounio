@@ -178,6 +178,12 @@ var TUP_CACHE_COUNT: i64 = 0
 var GEN_FN_TP2_S: [i64; 64] = [0; 32]
 var GEN_FN_TP2_E: [i64; 64] = [0; 32]
 
+// Inference type name ranges in SRC (set by mono_pass for bare-call literal inference)
+var INF_I64_S: i64 = 0
+var INF_I64_E: i64 = 0
+var INF_F64_S: i64 = 0
+var INF_F64_E: i64 = 0
+
 // Monomorphization instantiation pairs
 var MONO_GEN: [i64; 128] = [0; 64]
 var MONO_TY_S: [i64; 128] = [0; 64]
@@ -1881,6 +1887,15 @@ fn materialize_aggregate_expr_a64() with Mut, Panic, Div {
         emit_copy_words_x10_x11_a64(nslots)
         return
     }
+    if type_is_option_inline(EXPR_TY, EXPR_TY_HASH) {
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 2
+        em32(0xAA0003EA)
+        emit_lea_var_a64(base + 1)
+        em32(0xAA0003EB)
+        emit_copy_words_x10_x11_a64(2)
+        return
+    }
     if type_is_struct_like(EXPR_TY, EXPR_TY_HASH) {
         let nslots = struct_like_nslots(EXPR_TY_HASH)
         if nslots <= 0 { return }
@@ -1902,6 +1917,13 @@ fn copy_agg_into_struct_slots_a64(dst_start: i64, field_ty: i64, field_hash: i64
         emit_copy_words_x10_x11_a64(nslots)
         return
     }
+    if type_is_option_inline(field_ty, field_hash) {
+        em32(0xAA0003EA)
+        emit_lea_var_a64(dst_start - 1)
+        em32(0xAA0003EB)
+        emit_copy_words_x10_x11_a64(2)
+        return
+    }
     if field_ty == 6 || knowledge_hash_is(field_hash) {
         let nslots = struct_like_nslots(field_hash)
         if nslots > 0 {
@@ -1919,6 +1941,8 @@ fn emit_copy_agg_to_ptr_a64(field_ty: i64, field_hash: i64) with Mut, Panic, Div
     var nslots: i64 = 0
     if field_ty == 8 {
         nslots = arr_storage_slots(field_hash)
+    } else if type_is_option_inline(field_ty, field_hash) {
+        nslots = 2
     } else if field_ty == 6 || knowledge_hash_is(field_hash) {
         nslots = struct_like_nslots(field_hash)
     }
@@ -4316,7 +4340,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                 p = p + 1
             }
             SCAN_TY = 11
-            SCAN_TY_HASH = ptr_hash_make(inner_ty, inner_hash, 0)
+            SCAN_TY_HASH = option_hash_make(inner_ty, inner_hash)
             SCAN_TY_NEXT = p
             return
         }
@@ -4335,7 +4359,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                 p = p + 1
             }
             SCAN_TY = 11
-            SCAN_TY_HASH = ptr_hash_make(inner_ty, inner_hash, 0)
+            SCAN_TY_HASH = box_hash_make(inner_ty, inner_hash)
             SCAN_TY_NEXT = p
             return
         }
@@ -8101,6 +8125,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EP = EP + 1
         if TK[EP as usize] == 6 { EP = EP + 1 }
         compile_or()
+        let some_inner_ty = EXPR_TY
+        let some_inner_hash = EXPR_TY_HASH
         if TK[EP as usize] == 7 { EP = EP + 1 }
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + 2
@@ -8111,7 +8137,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em32(0 - (base + 1) * 8)
         EXPR_IS_F64 = 0
         EXPR_TY = 11
-        EXPR_TY_HASH = 0
+        EXPR_TY_HASH = option_hash_make(some_inner_ty, some_inner_hash)
         return
     }
     // Ok(expr) → 2-qword tagged union [tag=0, payload=expr]
@@ -8231,8 +8257,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EP = EP + 1
         compile_primary()
         compile_postfix_tail()
-        if EXPR_TY != 0 && EXPR_TY != 10 && EXPR_TY != 11 { tc_error(EP - 1, "dereference requires reference operand") }
-        if EXPR_TY == 10 || EXPR_TY == 11 {
+        if EXPR_TY != 0 && type_is_pointer_like(EXPR_TY, EXPR_TY_HASH) == false { tc_error(EP - 1, "dereference requires reference operand") }
+        if type_is_pointer_like(EXPR_TY, EXPR_TY_HASH) {
             let deref_ref_hash = EXPR_TY_HASH
             let deref_inner_hash = ptr_hash_inner_hash(deref_ref_hash)
             let deref_inner_ty = ptr_hash_inner_ty(deref_ref_hash)
@@ -8523,7 +8549,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 6 { EP = EP + 1 }  // skip (
             compile_or()  // value in rax
             if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
-            if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
+            if EXPR_TY == 8 || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                 em(0x50)                             // push src ptr
                 em(0x48); em(0x31); em(0xff)        // xor rdi, rdi
                 em(0xbe); em32(box_alloc_bytes(EXPR_TY, EXPR_TY_HASH))
@@ -8553,7 +8579,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let box_inner_hash = EXPR_TY_HASH
             EXPR_IS_F64 = 0
             EXPR_TY = 11
-            EXPR_TY_HASH = ptr_hash_make(box_inner_ty, box_inner_hash, 1)
+            EXPR_TY_HASH = box_hash_make(box_inner_ty, box_inner_hash)
             return
         }
         // Turbofish generic function: ident :: < TYPE , TYPE > (
@@ -8716,6 +8742,26 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 g_gi = g_gi + 1
             }
             if g_found == 1 { EP = EP + 3 }
+        }
+        // Bare-call inference: IDENT ( LITERAL — infer generic type from first arg literal
+        if TK[EP as usize] == 6 && GEN_FN_COUNT > 0 {
+            var inf_gi: i64 = 0
+            var inf_found: i64 = 0
+            while inf_gi < GEN_FN_COUNT && inf_found == 0 {
+                if name_eq(ns, ne, GEN_FN_NS[inf_gi as usize], GEN_FN_NE[inf_gi as usize]) {
+                    let inf_first = EP + 1
+                    var inf_tys: i64 = 0
+                    var inf_tye: i64 = 0
+                    if inf_first < TC && TK[inf_first as usize] == 53 { inf_tys = INF_F64_S; inf_tye = INF_F64_E }
+                    if inf_first < TC && TK[inf_first as usize] == 4  { inf_tys = INF_I64_S; inf_tye = INF_I64_E }
+                    if inf_tys != 0 {
+                        let inf_mi = mono_find_inst(inf_gi, 0, inf_tys, inf_tye)
+                        if inf_mi >= 0 { ns = MAN_BUF_S[inf_mi as usize]; ne = MAN_BUF_E[inf_mi as usize]; inf_found = 1 }
+                    }
+                    inf_gi = GEN_FN_COUNT
+                }
+                inf_gi = inf_gi + 1
+            }
         }
             let ident_fi = fn_find(ns, ne)
         // Function call: ident(args)
@@ -12363,9 +12409,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     if off >= 0 {
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
-                        // ty==11 (Option/Box): multi-slot; emit LEA so caller gets pointer to field
-                        // *mut T raw pointers (is_mut=1) are scalar — emit MOV to load the stored address
-                        if EXPR_TY == 8 || EXPR_TY == 6 || (EXPR_TY == 11 && ptr_hash_mut(EXPR_TY_HASH) != 1) || knowledge_hash_is(EXPR_TY_HASH) {
+                        if EXPR_TY == 8 || EXPR_TY == 6 || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                         } else {
                             if off == 0 {
@@ -12388,9 +12432,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if off >= 0 {
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
-                    // ty==11 (Option/Box): multi-slot; emit LEA so caller gets pointer to field
-                    // *mut T raw pointers (is_mut=1) are scalar — emit MOV to load the stored address
-                    if EXPR_TY == 8 || EXPR_TY == 6 || (EXPR_TY == 11 && ptr_hash_mut(EXPR_TY_HASH) != 1) || knowledge_hash_is(EXPR_TY_HASH) {
+                    if EXPR_TY == 8 || EXPR_TY == 6 || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                         if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                     } else {
                         if off == 0 {
@@ -15274,7 +15316,7 @@ fn struct_destructure_x86(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, 
         let fhash = st_field_hash(si, fh)
         let fslots = ty_slot_count(fty, fhash)
         emit_load_var(ptr_slot)
-        if fty == 6 || fty == 8 || fty == 11 {
+        if fty == 6 || fty == 8 || type_is_option_inline(fty, fhash) {
             if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
             EXPR_TY = fty; EXPR_TY_HASH = fhash; EXPR_IS_F64 = 0
         } else {
@@ -15304,7 +15346,7 @@ fn struct_destructure_a64(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, 
         let fty = st_field_ty(si, fh)
         let fhash = st_field_hash(si, fh)
         emit_load_var_a64(ptr_slot)
-        if fty == 6 || fty == 8 || fty == 11 {
+        if fty == 6 || fty == 8 || type_is_option_inline(fty, fhash) {
             if off != 0 { em32(0x91000000 | (off << 10)) }
             EXPR_TY = fty; EXPR_TY_HASH = fhash; EXPR_IS_F64 = 0
         } else {
@@ -16411,7 +16453,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let lslot = var_find(ns, ne)
         if lslot >= 0 {
             let lvi = var_find_idx(ns, ne)
-            if lvi >= 0 && VAR_TY[lvi as usize] == 11 {
+            if lvi >= 0 && VAR_TY[lvi as usize] == 11 && type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) {
                 let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
                 let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
                 if ty_eq(inner_ty, inner_hash, rhs_ty, rhs_ty_hash) == false {
@@ -16449,9 +16491,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let lslot = var_find(ns, ne)
         if lslot >= 0 {
             let lvi = var_find_idx(ns, ne)
-            // Accept both raw pointers (ty==11) and exclusive references (ty==10, &!T)
             let lty = VAR_TY[lvi as usize]
-            if lvi >= 0 && (lty == 11 || lty == 10) {
+            if lvi >= 0 && type_is_pointer_like(lty, VAR_TY_HASH[lvi as usize]) {
                 let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
                 let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
                 if inner_ty != 6 {
@@ -16690,9 +16731,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         emit_store_var(bslot)
                         if bslot >= 0 && VAR_COUNT > 0 {
                             let bvi = VAR_COUNT - 1
-                            if MATCH_SCRUT_TY == 11 {
-                                VAR_TY[bvi as usize] = ptr_hash_inner_ty(MATCH_SCRUT_HASH)
-                                VAR_TY_HASH[bvi as usize] = ptr_hash_inner_hash(MATCH_SCRUT_HASH)
+                            if type_is_option_inline(MATCH_SCRUT_TY, MATCH_SCRUT_HASH) && option_hash_is(MATCH_SCRUT_HASH) {
+                                VAR_TY[bvi as usize] = option_hash_inner_ty(MATCH_SCRUT_HASH)
+                                VAR_TY_HASH[bvi as usize] = option_hash_inner_hash(MATCH_SCRUT_HASH)
                             }
                         }
                     }
@@ -16997,9 +17038,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         emit_store_var(wl_bslot)
                         if wl_bslot >= 0 && VAR_COUNT > 0 {
                             let wl_bvi = VAR_COUNT - 1
-                            if MATCH_SCRUT_TY == 11 {
-                                VAR_TY[wl_bvi as usize] = ptr_hash_inner_ty(MATCH_SCRUT_HASH)
-                                VAR_TY_HASH[wl_bvi as usize] = ptr_hash_inner_hash(MATCH_SCRUT_HASH)
+                            if type_is_option_inline(MATCH_SCRUT_TY, MATCH_SCRUT_HASH) && option_hash_is(MATCH_SCRUT_HASH) {
+                                VAR_TY[wl_bvi as usize] = option_hash_inner_ty(MATCH_SCRUT_HASH)
+                                VAR_TY_HASH[wl_bvi as usize] = option_hash_inner_hash(MATCH_SCRUT_HASH)
                             }
                         }
                     }
@@ -17360,9 +17401,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         emit_store_var(obslot)
                         if VAR_COUNT > 0 {
                             let obvi = VAR_COUNT - 1
-                            if MATCH_SCRUT_TY == 11 {
-                                VAR_TY[obvi as usize] = ptr_hash_inner_ty(MATCH_SCRUT_HASH)
-                                VAR_TY_HASH[obvi as usize] = ptr_hash_inner_hash(MATCH_SCRUT_HASH)
+                            if type_is_option_inline(MATCH_SCRUT_TY, MATCH_SCRUT_HASH) && option_hash_is(MATCH_SCRUT_HASH) {
+                                VAR_TY[obvi as usize] = option_hash_inner_ty(MATCH_SCRUT_HASH)
+                                VAR_TY_HASH[obvi as usize] = option_hash_inner_hash(MATCH_SCRUT_HASH)
                             }
                             // β⁹ GTT week-7 follow-up: OR-pattern inner-value bound
                             // var inherits scrutinee's channel topology (same rule
@@ -17473,9 +17514,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         // Propagate inner type from Option/Result scrutinee to bound variable
                         if bslot >= 0 && VAR_COUNT > 0 {
                             let bvi = VAR_COUNT - 1
-                            if MATCH_SCRUT_TY == 11 {
-                                VAR_TY[bvi as usize] = ptr_hash_inner_ty(MATCH_SCRUT_HASH)
-                                VAR_TY_HASH[bvi as usize] = ptr_hash_inner_hash(MATCH_SCRUT_HASH)
+                            if type_is_option_inline(MATCH_SCRUT_TY, MATCH_SCRUT_HASH) && option_hash_is(MATCH_SCRUT_HASH) {
+                                VAR_TY[bvi as usize] = option_hash_inner_ty(MATCH_SCRUT_HASH)
+                                VAR_TY_HASH[bvi as usize] = option_hash_inner_hash(MATCH_SCRUT_HASH)
                             }
                             // β⁹ GTT week-7 follow-up: inner-value bound var inherits
                             // scrutinee's channel topology.  Upper-bound sound because
@@ -19513,6 +19554,17 @@ fn mono_pass() with IO, Mut, Panic, Div {
     GEN_FN_COUNT = 0
     GEN_ST_COUNT = 0
     MONO_COUNT = 0
+    // Pre-write "i64" and "f64" into SRC for bare-call literal type inference
+    INF_I64_S = SRC_LEN
+    SRC[SRC_LEN as usize] = 105; SRC_LEN = SRC_LEN + 1
+    SRC[SRC_LEN as usize] = 54;  SRC_LEN = SRC_LEN + 1
+    SRC[SRC_LEN as usize] = 52;  SRC_LEN = SRC_LEN + 1
+    INF_I64_E = SRC_LEN
+    INF_F64_S = SRC_LEN
+    SRC[SRC_LEN as usize] = 102; SRC_LEN = SRC_LEN + 1
+    SRC[SRC_LEN as usize] = 54;  SRC_LEN = SRC_LEN + 1
+    SRC[SRC_LEN as usize] = 52;  SRC_LEN = SRC_LEN + 1
+    INF_F64_E = SRC_LEN
     // Pass 0c: scan generic function and struct declarations
     var p: i64 = 0
     while p < TC {
@@ -19696,6 +19748,40 @@ fn mono_pass() with IO, Mut, Panic, Div {
                     }
                     d_gi = d_gi + 1
                 }
+            }
+        }
+        // Bare call to generic fn: IDENT ( LITERAL — infer type from first arg literal
+        if TK[p as usize] == 3 && p + 2 < TC && TK[(p + 1) as usize] == 6 {
+            d_cns = TS[p as usize]; d_cne = TE[p as usize]
+            d_gi = 0
+            while d_gi < GEN_FN_COUNT {
+                if name_eq(d_cns, d_cne, GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize]) {
+                    var sig_scan: i64 = GEN_FN_BDY_S[d_gi as usize] + 3
+                    while sig_scan < TC && TK[sig_scan as usize] != 24 { sig_scan = sig_scan + 1 }
+                    if sig_scan + 4 < TC && TK[(sig_scan + 1) as usize] == 6 && TK[(sig_scan + 3) as usize] == 43 {
+                        if TK[(sig_scan + 4) as usize] == 3 && name_eq(TS[(sig_scan + 4) as usize], TE[(sig_scan + 4) as usize], GEN_FN_TP_S[d_gi as usize], GEN_FN_TP_E[d_gi as usize]) {
+                            let inf_arg = p + 2
+                            d_tys = 0; d_tye = 0
+                            if inf_arg < TC && TK[inf_arg as usize] == 53 { d_tys = INF_F64_S; d_tye = INF_F64_E }
+                            if inf_arg < TC && TK[inf_arg as usize] == 4  { d_tys = INF_I64_S; d_tye = INF_I64_E }
+                            if d_tys != 0 && mono_find_inst(d_gi, 0, d_tys, d_tye) < 0 {
+                                d_mi = MONO_COUNT
+                                MONO_GEN[d_mi as usize] = d_gi
+                                MONO_TY_S[d_mi as usize] = d_tys
+                                MONO_TY_E[d_mi as usize] = d_tye
+                                MONO_TY2_S[d_mi as usize] = 0
+                                MONO_TY2_E[d_mi as usize] = 0
+                                MONO_IS_ST[d_mi as usize] = 0
+                                d_ms = mono_mangle(GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize], d_tys, d_tye)
+                                MAN_BUF_S[d_mi as usize] = d_ms
+                                MAN_BUF_E[d_mi as usize] = SRC_LEN
+                                MONO_COUNT = MONO_COUNT + 1
+                            }
+                        }
+                    }
+                    d_gi = GEN_FN_COUNT
+                }
+                d_gi = d_gi + 1
             }
         }
         p = p + 1
@@ -23146,6 +23232,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         EP = EP + 1
         if TK[EP as usize] == 6 { EP = EP + 1 }
         compile_or_a64()
+        let some_inner_ty_a = EXPR_TY
+        let some_inner_hash_a = EXPR_TY_HASH
         if TK[EP as usize] == 7 { EP = EP + 1 }
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + 2
@@ -23155,7 +23243,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         emit_lea_var_a64(base + 1)
         EXPR_IS_F64 = 0
         EXPR_TY = 11
-        EXPR_TY_HASH = 0
+        EXPR_TY_HASH = option_hash_make(some_inner_ty_a, some_inner_hash_a)
         return
     }
     // Ok(expr)
@@ -23394,8 +23482,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         EP = EP + 1
         compile_primary_a64()
         compile_postfix_tail_a64()
-        if EXPR_TY != 0 && EXPR_TY != 10 && EXPR_TY != 11 { tc_error(EP - 1, "dereference requires reference operand") }
-        if EXPR_TY == 10 || EXPR_TY == 11 {
+        if EXPR_TY != 0 && type_is_pointer_like(EXPR_TY, EXPR_TY_HASH) == false { tc_error(EP - 1, "dereference requires reference operand") }
+        if type_is_pointer_like(EXPR_TY, EXPR_TY_HASH) {
             let deref_ref_hash_a = EXPR_TY_HASH
             let deref_inner_hash_a = ptr_hash_inner_hash(deref_ref_hash_a)
             let deref_inner_ty_a = ptr_hash_inner_ty(deref_ref_hash_a)
@@ -23497,7 +23585,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 6 { EP = EP + 1 }
             compile_or_a64()
             if TK[EP as usize] == 7 { EP = EP + 1 }
-            if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
+            if EXPR_TY == 8 || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                 em32(0xAA0003EA)  // mov x10, x0 (src ptr)
                 em32(0xD2800000)
                 emit_imm64_reg_a64(1, box_alloc_bytes(EXPR_TY, EXPR_TY_HASH))
@@ -23529,7 +23617,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let box_inner_hash_a = EXPR_TY_HASH
             EXPR_IS_F64 = 0
             EXPR_TY = 11
-            EXPR_TY_HASH = ptr_hash_make(box_inner_ty_a, box_inner_hash_a, 1)
+            EXPR_TY_HASH = box_hash_make(box_inner_ty_a, box_inner_hash_a)
             return
         }
         // Turbofish generic function: ident :: < TYPE > (
@@ -26020,7 +26108,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         let lslot = var_find(ns, ne)
         if lslot >= 0 {
             let lvi = var_find_idx(ns, ne)
-            if lvi >= 0 && VAR_TY[lvi as usize] == 11 {
+            if lvi >= 0 && VAR_TY[lvi as usize] == 11 && type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) {
                 let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
                 let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
                 if ty_eq(inner_ty, inner_hash, rhs_ty, rhs_ty_hash) == false {
@@ -26461,9 +26549,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                             emit_store_var_a64(wl_bslot)
                             if VAR_COUNT > 0 {
                                 let wl_bvi = VAR_COUNT - 1
-                                if MATCH_SCRUT_TY == 11 {
-                                    VAR_TY[wl_bvi as usize] = ptr_hash_inner_ty(MATCH_SCRUT_HASH)
-                                    VAR_TY_HASH[wl_bvi as usize] = ptr_hash_inner_hash(MATCH_SCRUT_HASH)
+                                if type_is_option_inline(MATCH_SCRUT_TY, MATCH_SCRUT_HASH) && option_hash_is(MATCH_SCRUT_HASH) {
+                                    VAR_TY[wl_bvi as usize] = option_hash_inner_ty(MATCH_SCRUT_HASH)
+                                    VAR_TY_HASH[wl_bvi as usize] = option_hash_inner_hash(MATCH_SCRUT_HASH)
                                 }
                             }
                         }
