@@ -301,6 +301,16 @@ var SCAN_PRED_COMPOUND_IS_AND: i64 = 0
 var REF_TYPE_IS_AND: [i64; 32] = [0; 32]
 // PR-6: per-function return-type AND/OR flag.
 var FN_RET_PRED_COMPOUND_IS_AND: [i64; 16384] = [0; 16384]
+// PR-7: f64 literal tracking — set when compile_primary emits a float literal.
+var LAST_IS_LITERAL_F64: i64 = 0
+var LAST_LITERAL_F64_INT: i64 = 0
+var LAST_LITERAL_F64_FRAC: i64 = 0
+var LAST_LITERAL_F64_DENOM: i64 = 1
+// PR-7: fractional parts of f64 predicate bounds (first and second predicate).
+var SCAN_PRED_BOUND_FRAC: i64 = 0
+var SCAN_PRED_BOUND_DENOM: i64 = 1
+var SCAN_PRED_BOUND2_FRAC: i64 = 0
+var SCAN_PRED_BOUND2_DENOM: i64 = 1
 
 // ─── Phase 6d: Unit dimension checking ───
 // Tracks unit hash of the last compiled expression sub-result.
@@ -2806,10 +2816,54 @@ fn try_apply_field_alias_refinement(field_hash: i64, tok: i64) with IO, Mut, Pan
 // let-binding check at compile_stmt and the struct-field check in PR-3.
 fn try_apply_call_arg_refinement(tok: i64) with IO, Mut, Panic, Div {
     if SCAN_HAS_PRED != 1 { return }
+    // PR-7: f64 predicate — rational comparison using cross-multiplication
     if SCAN_PRED_IS_F64 == 1 {
-        // f64 path is handled at runtime (codegen below) for non-literal cases;
-        // still clear the leaked state so the surrounding let-binding refinement
-        // check at compile_stmt does not double-report on the call result.
+        if LAST_IS_LITERAL_F64 != 1 { SCAN_HAS_PRED = 0; SCAN_HAS_PRED2 = 0; return }
+        let cv_int = LAST_LITERAL_F64_INT
+        let cv_frac = LAST_LITERAL_F64_FRAC
+        let cv_denom = LAST_LITERAL_F64_DENOM
+        let bv_int = SCAN_PRED_BOUND
+        let bv_frac = SCAN_PRED_BOUND_FRAC
+        let bv_denom = SCAN_PRED_BOUND_DENOM
+        // value = (cv_int*cv_denom + cv_frac) / cv_denom; bound = (bv_int*bv_denom + bv_frac) / bv_denom
+        // compare by cross-multiplying (both denoms positive)
+        let lhs = (cv_int * cv_denom + cv_frac) * bv_denom
+        let rhs = (bv_int * bv_denom + bv_frac) * cv_denom
+        let op = SCAN_PRED_OP
+        var f64_violated: i64 = 0
+        if op == 26 && lhs < rhs { f64_violated = 1 }   // >= : violated if lhs < rhs
+        if op == 24 && lhs <= rhs { f64_violated = 1 }  // >  : violated if lhs <= rhs
+        if op == 25 && lhs > rhs { f64_violated = 1 }   // <= : violated if lhs > rhs
+        if op == 23 && lhs >= rhs { f64_violated = 1 }  // <  : violated if lhs >= rhs
+        if SCAN_HAS_PRED2 == 1 {
+            let bv2_int = SCAN_PRED_BOUND2
+            let bv2_frac = SCAN_PRED_BOUND2_FRAC
+            let bv2_denom = SCAN_PRED_BOUND2_DENOM
+            let lhs2 = (cv_int * cv_denom + cv_frac) * bv2_denom
+            let rhs2 = (bv2_int * bv2_denom + bv2_frac) * cv_denom
+            let op2 = SCAN_PRED_OP2
+            if SCAN_PRED_COMPOUND_IS_AND == 1 {
+                if op2 == 26 && lhs2 < rhs2 { f64_violated = 1 }
+                if op2 == 24 && lhs2 <= rhs2 { f64_violated = 1 }
+                if op2 == 25 && lhs2 > rhs2 { f64_violated = 1 }
+                if op2 == 23 && lhs2 >= rhs2 { f64_violated = 1 }
+            } else {
+                if f64_violated == 1 {
+                    var ok2: i64 = 0
+                    if op2 == 26 && lhs2 >= rhs2 { ok2 = 1 }
+                    if op2 == 24 && lhs2 > rhs2 { ok2 = 1 }
+                    if op2 == 25 && lhs2 <= rhs2 { ok2 = 1 }
+                    if op2 == 23 && lhs2 < rhs2 { ok2 = 1 }
+                    if ok2 == 1 { f64_violated = 0 }
+                }
+            }
+        }
+        if f64_violated == 1 {
+            print("error: refinement type violation — f64 value violates parameter predicate at line ")
+            print_int(TL[tok as usize])
+            print("\n")
+            tc_mark_failed()
+        }
         SCAN_HAS_PRED = 0
         SCAN_HAS_PRED2 = 0
         return
@@ -3928,6 +3982,10 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                 if pp < TC && TK[pp as usize] == 53 {
                                     var fbv = TV[pp as usize]
                                     if pred_neg == 1 { fbv = fbv | 0 - 9223372036854775808 }  // flip sign bit
+                                    // PR-7: capture fractional parts for rational comparison
+                                    SCAN_PRED_BOUND_FRAC = TF[pp as usize]
+                                    SCAN_PRED_BOUND_DENOM = TD[pp as usize]
+                                    if SCAN_PRED_BOUND_DENOM == 0 { SCAN_PRED_BOUND_DENOM = 1 }
                                     SCAN_PRED_BOUND = fbv
                                     SCAN_PRED_IS_F64 = 1
                                     SCAN_HAS_PRED = 1
@@ -3956,6 +4014,10 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                             if pp < TC && TK[pp as usize] == 53 {
                                                 var fbv2 = TV[pp as usize]
                                                 if pred_neg2 == 1 { fbv2 = fbv2 | 0 - 9223372036854775808 }
+                                                // PR-7: capture fractional parts for second bound
+                                                SCAN_PRED_BOUND2_FRAC = TF[pp as usize]
+                                                SCAN_PRED_BOUND2_DENOM = TD[pp as usize]
+                                                if SCAN_PRED_BOUND2_DENOM == 0 { SCAN_PRED_BOUND2_DENOM = 1 }
                                                 SCAN_PRED_BOUND2 = fbv2
                                                 SCAN_PRED_IS_F64_2 = 1
                                                 SCAN_HAS_PRED2 = 1
@@ -7447,6 +7509,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_PARAM_USED = 0
     EXPR_UNIT = 0
     LAST_IS_LITERAL = 0
+    LAST_IS_LITERAL_F64 = 0
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
     EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
@@ -7524,6 +7587,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
         EXPR_IS_F64 = 1
         EXPR_TY = 2
+        // PR-7: track f64 literal for compile-time predicate checking
+        LAST_IS_LITERAL_F64 = 1
+        LAST_LITERAL_F64_INT = fl_int
+        LAST_LITERAL_F64_FRAC = fl_frac
+        LAST_LITERAL_F64_DENOM = fl_denom
+        if LAST_LITERAL_F64_DENOM == 0 { LAST_LITERAL_F64_DENOM = 1 }
         if flit_uh != 0 { EXPR_UNIT = flit_uh; EXPR_UNIT_DIM = unit_lookup_dim(flit_uh) }
         return
     }
