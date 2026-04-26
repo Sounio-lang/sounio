@@ -667,7 +667,11 @@ fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
         if si >= 0 { return st_total_size(si) / 8 }
     }
     // Option<T> and Box<T> are 2-slot values (tag + pointer or similar)
-    if ty == 11 { return 2 }
+    // *mut T raw pointers are 1 slot (bare heap address); *const T is unhandled (same hash as Box)
+    if ty == 11 {
+        if ptr_hash_mut(ty_hash) == 1 { return 1 }
+        return 2
+    }
     if knowledge_hash_is(ty_hash) { return 3 }
     return 1
 }
@@ -3457,13 +3461,34 @@ fn dump_cli_ast_summary() with IO, Mut, Panic, Div {
     while si < ST_COUNT {
         print("struct#")
         print_int(si)
+        print(" hash=")
+        print_int(ST[(si * 130) as usize])
+        print(" fields=")
+        print_int(ST[(si * 130 + 1) as usize])
         print("\n")
+        var fi: i64 = 0
+        while fi < ST[(si * 130 + 1) as usize] {
+            print("  field")
+            print_int(fi)
+            print(" hash=")
+            print_int(ST[(si * 130 + 2 + fi) as usize])
+            print(" ty=")
+            print_int(ST_FTY[(si * 128 + fi) as usize])
+            print(" ty_hash=")
+            print_int(ST_FHASH[(si * 128 + fi) as usize])
+            print("\n")
+            fi = fi + 1
+        }
         si = si + 1
     }
     var ei: i64 = 0
     while ei < EN_COUNT {
         print("enum#")
         print_int(ei)
+        print(" hash=")
+        print_int(EN[(ei * 256) as usize])
+        print(" variants=")
+        print_int(EN[(ei * 256 + 1) as usize])
         print("\n")
         ei = ei + 1
     }
@@ -12339,7 +12364,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
                         // ty==11 (Option/Box): multi-slot; emit LEA so caller gets pointer to field
-                        if EXPR_TY == 8 || EXPR_TY == 6 || EXPR_TY == 11 || knowledge_hash_is(EXPR_TY_HASH) {
+                        // *mut T raw pointers (is_mut=1) are scalar — emit MOV to load the stored address
+                        if EXPR_TY == 8 || EXPR_TY == 6 || (EXPR_TY == 11 && ptr_hash_mut(EXPR_TY_HASH) != 1) || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                         } else {
                             if off == 0 {
@@ -12363,7 +12389,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
                     // ty==11 (Option/Box): multi-slot; emit LEA so caller gets pointer to field
-                    if EXPR_TY == 8 || EXPR_TY == 6 || EXPR_TY == 11 || knowledge_hash_is(EXPR_TY_HASH) {
+                    // *mut T raw pointers (is_mut=1) are scalar — emit MOV to load the stored address
+                    if EXPR_TY == 8 || EXPR_TY == 6 || (EXPR_TY == 11 && ptr_hash_mut(EXPR_TY_HASH) != 1) || knowledge_hash_is(EXPR_TY_HASH) {
                         if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                     } else {
                         if off == 0 {
