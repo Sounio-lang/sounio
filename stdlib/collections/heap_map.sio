@@ -1,0 +1,224 @@
+// Heap-allocated dynamic open-addressing hash maps.
+// Backed by heap_alloc / heap_free (mmap underneath).
+// Usable in native mode only (not JIT).
+//
+// HeapIntIntMap: i64 → i64, FNV-1a, linear probing, load factor 0.75.
+// Initial capacity: 64 slots, doubles on growth.
+//
+// Method API:
+//   var m = HeapIntIntMap { keys: 0 as *mut i64, vals: 0 as *mut i64,
+//                           used: 0 as *mut i64, count: 0, cap: 0 }
+//   m.insert(42, 100)
+//   let v = m.get(42)        // returns value or 0 if missing
+//   let ok = m.contains(42)
+//   m.remove(42)
+//   print_int(m.len())
+//   m.free()
+//
+// used[] values: 0=empty, 1=occupied, 2=deleted (tombstone)
+
+let HEAP_MAP_INIT_CAP: i64 = 64
+let HEAP_MAP_LOAD_NUM: i64 = 3  // load factor 3/4 = 0.75
+let HEAP_MAP_LOAD_DEN: i64 = 4
+
+// FNV-1a hash for i64 key (same as hashmap.sio)
+fn heap_map_fnv1a(key: i64) -> i64 {
+    var hash: i64 = 0x00000100000001B3
+    var k = key
+    var i: i64 = 0
+    while i < 8 {
+        let byte = k & 0xFF
+        hash = (hash ^ byte) * 0x01000193
+        k = k >> 8
+        i = i + 1
+    }
+    if hash < 0 { hash = 0 - hash }
+    return hash
+}
+
+// ============================================================
+// HeapIntIntMap — dynamic i64 → i64 map
+// ============================================================
+
+struct HeapIntIntMap {
+    keys: *mut i64,
+    vals: *mut i64,
+    used: *mut i64,
+    count: i64,
+    cap: i64,
+}
+
+impl HeapIntIntMap {
+
+    fn _alloc_arrays(self: &!HeapIntIntMap, new_cap: i64) with Alloc, Mut {
+        let bytes = new_cap * 8
+        self.keys = heap_alloc(bytes) as *mut i64
+        self.vals = heap_alloc(bytes) as *mut i64
+        self.used = heap_alloc(bytes) as *mut i64
+        // zero the used array (heap_alloc via mmap returns zeroed pages)
+        self.cap = new_cap
+    }
+
+    fn _rehash(self: &!HeapIntIntMap) with Alloc, Mut {
+        let old_cap = self.cap
+        let old_keys = self.keys
+        let old_vals = self.vals
+        let old_used = self.used
+        let new_cap = old_cap * 2
+
+        // allocate new arrays
+        let new_bytes = new_cap * 8
+        let nk = heap_alloc(new_bytes) as *mut i64
+        let nv = heap_alloc(new_bytes) as *mut i64
+        let nu = heap_alloc(new_bytes) as *mut i64
+
+        // re-insert all occupied entries into new arrays
+        var i: i64 = 0
+        while i < old_cap {
+            if read_i64(old_used, i) == 1 {
+                let key = read_i64(old_keys, i)
+                let val = read_i64(old_vals, i)
+                let h = heap_map_fnv1a(key)
+                var idx = h % new_cap
+                var probes: i64 = 0
+                while probes < new_cap {
+                    if read_i64(nu, idx) == 0 {
+                        write_i64(nk, idx, key)
+                        write_i64(nv, idx, val)
+                        write_i64(nu, idx, 1)
+                        probes = new_cap  // break
+                    }
+                    idx = (idx + 1) % new_cap
+                    probes = probes + 1
+                }
+            }
+            i = i + 1
+        }
+
+        // free old arrays
+        heap_free(old_keys as *mut i8)
+        heap_free(old_vals as *mut i8)
+        heap_free(old_used as *mut i8)
+
+        self.keys = nk
+        self.vals = nv
+        self.used = nu
+        self.cap = new_cap
+    }
+
+    fn insert(self: &!HeapIntIntMap, key: i64, val: i64) with Alloc, Mut {
+        // initialize on first insert
+        if self.cap == 0 {
+            self._alloc_arrays(HEAP_MAP_INIT_CAP)
+        }
+        // grow if load factor exceeded
+        if self.count * HEAP_MAP_LOAD_DEN >= self.cap * HEAP_MAP_LOAD_NUM {
+            self._rehash()
+        }
+        let h = heap_map_fnv1a(key)
+        var idx = h % self.cap
+        var first_tomb: i64 = -1
+        var probes: i64 = 0
+        while probes < self.cap {
+            let u = read_i64(self.used, idx)
+            if u == 0 {
+                // empty slot — insert here (or at tombstone if we saw one)
+                if first_tomb >= 0 { idx = first_tomb }
+                write_i64(self.keys, idx, key)
+                write_i64(self.vals, idx, val)
+                write_i64(self.used, idx, 1)
+                self.count = self.count + 1
+                return
+            }
+            if u == 2 {
+                // tombstone — remember first one
+                if first_tomb < 0 { first_tomb = idx }
+            }
+            if u == 1 && read_i64(self.keys, idx) == key {
+                // update existing
+                write_i64(self.vals, idx, val)
+                return
+            }
+            idx = (idx + 1) % self.cap
+            probes = probes + 1
+        }
+        // map full (shouldn't happen with load factor check)
+        if first_tomb >= 0 {
+            write_i64(self.keys, first_tomb, key)
+            write_i64(self.vals, first_tomb, val)
+            write_i64(self.used, first_tomb, 1)
+            self.count = self.count + 1
+        }
+    }
+
+    fn get(self: &HeapIntIntMap, key: i64) -> i64 {
+        if self.cap == 0 { return 0 }
+        let h = heap_map_fnv1a(key)
+        var idx = h % self.cap
+        var probes: i64 = 0
+        while probes < self.cap {
+            let u = read_i64(self.used, idx)
+            if u == 0 { return 0 }
+            if u == 1 && read_i64(self.keys, idx) == key {
+                return read_i64(self.vals, idx)
+            }
+            idx = (idx + 1) % self.cap
+            probes = probes + 1
+        }
+        return 0
+    }
+
+    fn contains(self: &HeapIntIntMap, key: i64) -> bool {
+        if self.cap == 0 { return false }
+        let h = heap_map_fnv1a(key)
+        var idx = h % self.cap
+        var probes: i64 = 0
+        while probes < self.cap {
+            let u = read_i64(self.used, idx)
+            if u == 0 { return false }
+            if u == 1 && read_i64(self.keys, idx) == key { return true }
+            idx = (idx + 1) % self.cap
+            probes = probes + 1
+        }
+        return false
+    }
+
+    fn remove(self: &!HeapIntIntMap, key: i64) with Mut {
+        if self.cap == 0 { return }
+        let h = heap_map_fnv1a(key)
+        var idx = h % self.cap
+        var probes: i64 = 0
+        while probes < self.cap {
+            let u = read_i64(self.used, idx)
+            if u == 0 { return }
+            if u == 1 && read_i64(self.keys, idx) == key {
+                write_i64(self.used, idx, 2)  // tombstone
+                self.count = self.count - 1
+                return
+            }
+            idx = (idx + 1) % self.cap
+            probes = probes + 1
+        }
+    }
+
+    fn len(self: &HeapIntIntMap) -> i64 {
+        self.count
+    }
+
+    fn cap(self: &HeapIntIntMap) -> i64 {
+        self.cap
+    }
+
+    fn free(self: &!HeapIntIntMap) with Alloc, Mut {
+        if self.cap > 0 {
+            heap_free(self.keys as *mut i8)
+            heap_free(self.vals as *mut i8)
+            heap_free(self.used as *mut i8)
+        }
+        self.keys = 0 as *mut i64
+        self.vals = 0 as *mut i64
+        self.used = 0 as *mut i64
+        self.count = 0
+        self.cap = 0
+    }
+}
