@@ -1553,6 +1553,19 @@ fn call_extra_stack_args_x86(argc: i64, regc: i64) -> i64 {
     return 0
 }
 
+fn emit_sret_destination_x86(ret_slots: i64) with Mut, Panic, Div {
+    if ret_slots * 8 >= local_bss_spill_bytes() {
+        let sret_addr = GL_BSS_BASE + bss_alloc_aligned(ret_slots * 8)
+        em(0x48); em(0xb8); em64(sret_addr)
+        return
+    }
+    let ret_base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + ret_slots
+    em(0x48); em(0x8d); em(0x85)
+    em32(0 - (ret_base + ret_slots - 1) * 8)
+    return
+}
+
 fn emit_prepare_stack_call_args_x86(argc: i64, regc: i64) with Mut {
     let extra = call_extra_stack_args_x86(argc, regc)
     if extra <= 1 { return }
@@ -1578,12 +1591,9 @@ fn emit_prepare_stack_call_args_x86(argc: i64, regc: i64) with Mut {
 fn emit_direct_fn_call_x86(fi: i64, argc: i64) with Mut, Panic, Div {
     let ret_slots = ret_agg_nslots(FN_RET_TY[fi as usize], FN_RET_HASH[fi as usize])
     if ret_slots > 0 {
-        let ret_base = NEXT_SLOT
-        NEXT_SLOT = NEXT_SLOT + ret_slots
         emit_setup_call_args_shift_x86(argc, 1)
         emit_prepare_stack_call_args_x86(argc, 5)
-        em(0x48); em(0x8d); em(0x85)
-        em32(0 - (ret_base + ret_slots - 1) * 8)
+        emit_sret_destination_x86(ret_slots)
         em(0x48); em(0x89); em(0xc7)
         em(0xe8)
         PATCH_OFF[PATCH_COUNT as usize] = CL
@@ -1608,12 +1618,9 @@ fn emit_direct_fn_call_x86(fi: i64, argc: i64) with Mut, Panic, Div {
 fn emit_indirect_fn_call_x86(ptr_slot: i64, argc: i64, ret_ty: i64, ret_hash: i64) with Mut, Panic, Div {
     let ret_slots = ret_agg_nslots(ret_ty, ret_hash)
     if ret_slots > 0 {
-        let ret_base = NEXT_SLOT
-        NEXT_SLOT = NEXT_SLOT + ret_slots
         emit_setup_call_args_shift_x86(argc, 1)
         emit_prepare_stack_call_args_x86(argc, 5)
-        em(0x48); em(0x8d); em(0x85)
-        em32(0 - (ret_base + ret_slots - 1) * 8)
+        emit_sret_destination_x86(ret_slots)
         em(0x48); em(0x89); em(0xc7)
         emit_load_var(ptr_slot)
         em(0xff); em(0xd0)
@@ -1845,8 +1852,15 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
         return
     }
     let nslots = struct_like_nslots(ty_hash)
-    let base = NEXT_SLOT
-    NEXT_SLOT = NEXT_SLOT + nslots
+    var base: i64 = 0
+    var spill_addr: i64 = 0
+    let spill = nslots * 8 >= local_bss_spill_bytes()
+    if spill {
+        spill_addr = GL_BSS_BASE + bss_alloc_aligned(nslots * 8)
+    } else {
+        base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + nslots
+    }
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     var linear_flag: i64 = 0
@@ -1854,13 +1868,20 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
     var out_ty: i64 = 0
     if knowledge_hash_is(ty_hash) == false { out_ty = 6 }
     if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, linear_flag, 0, out_ty, ty_hash) < 0 {
-        NEXT_SLOT = NEXT_SLOT - nslots - 1
+        if spill == false { NEXT_SLOT = NEXT_SLOT - nslots }
+        NEXT_SLOT = NEXT_SLOT - 1
         return
     }
     em32(0xAA0003EA)  // mov x10, x0
-    emit_lea_var_a64(base + nslots - 1)
-    em32(0xAA0003EB)  // mov x11, x0
-    emit_copy_words_x10_x11_a64(nslots)
+    if spill {
+        emit_image_addr_a64(spill_addr)
+        emit_copy_agg_to_ptr_a64(6, ty_hash)
+        emit_image_addr_a64(spill_addr)
+    } else {
+        emit_lea_var_a64(base + nslots - 1)
+        em32(0xAA0003EB)  // mov x11, x0
+        emit_copy_words_x10_x11_a64(nslots)
+    }
     emit_store_var_a64(ptr_slot)
 }
 
@@ -1897,6 +1918,14 @@ fn materialize_aggregate_expr_a64() with Mut, Panic, Div {
     if type_is_struct_like(EXPR_TY, EXPR_TY_HASH) {
         let nslots = struct_like_nslots(EXPR_TY_HASH)
         if nslots <= 0 { return }
+        if nslots * 8 >= local_bss_spill_bytes() {
+            let tmp_addr = GL_BSS_BASE + bss_alloc_aligned(nslots * 8)
+            em32(0xAA0003EA)  // mov x10, x0
+            emit_image_addr_a64(tmp_addr)
+            emit_copy_agg_to_ptr_a64(EXPR_TY, EXPR_TY_HASH)
+            emit_image_addr_a64(tmp_addr)
+            return
+        }
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + nslots
         em32(0xAA0003EA)  // mov x10, x0
@@ -2865,7 +2894,9 @@ fn tc_mark_failed() with Mut {
 fn tc_stack_frame_too_large(bytes: i64) with IO, Mut, Panic {
     print("warning: stack frame too large (")
     print_int(bytes)
-    print(" bytes) - consider using global arrays\n")
+    print(" bytes) in fn#")
+    print_int(CURRENT_FN)
+    print(" - consider using global arrays\n")
     // Not a hard error — large-struct value-semantics are valid but risky at runtime
 }
 
@@ -5781,6 +5812,16 @@ fn fn_find_lit(name: string) -> i64 with Panic, Mut, Div {
     return -1
 }
 
+fn print_fn_name(fi: i64) with IO, Mut, Panic {
+    if fi < 0 || fi >= FN_COUNT { print("<invalid>"); return }
+    var i: i64 = FN_NS[fi as usize]
+    let e = FN_NE[fi as usize]
+    while i < e {
+        print_char(SRC[i as usize] as i64)
+        i = i + 1
+    }
+}
+
 // ─── Emit helpers ───
 // mov rax, [rbp - 8*slot]
 fn emit_load_var(slot: i64) with Mut { em(0x48); em(0x8b); em(0x85); em32(0 - slot * 8) }
@@ -5922,20 +5963,35 @@ fn bind_struct_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
     // ptr_slot FIRST, then data slots. Keeps ptr safe from overwrites.
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
-    let base = NEXT_SLOT
-    NEXT_SLOT = NEXT_SLOT + nslots
+    var base: i64 = 0
+    var spill_addr: i64 = 0
+    let spill = nslots * 8 >= local_bss_spill_bytes()
+    if spill {
+        spill_addr = GL_BSS_BASE + bss_alloc_aligned(nslots * 8)
+    } else {
+        base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + nslots
+    }
     var linear_flag: i64 = 0
     var affine_flag: i64 = 0
     if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize]; affine_flag = ST_AFFINE[si as usize] }
     var out_ty: i64 = 0
     if knowledge_hash_is(ty_hash) == false { out_ty = 6 }
     if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, linear_flag, 0, out_ty, ty_hash) < 0 {
-        NEXT_SLOT = NEXT_SLOT - nslots - 1
+        if spill == false { NEXT_SLOT = NEXT_SLOT - nslots }
+        NEXT_SLOT = NEXT_SLOT - 1
         return
     }
     VAR_AFFINE[(VAR_COUNT - 1) as usize] = affine_flag
     // Copy struct data to local slots and store LEA pointer
-    emit_bulk_copy_to_slots_x86(nslots, base)
+    if spill {
+        em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
+        em(0x48); em(0xb8); em64(spill_addr)
+        emit_copy_agg_to_ptr_x86(6, ty_hash)
+        em(0x48); em(0xb8); em64(spill_addr)
+    } else {
+        emit_bulk_copy_to_slots_x86(nslots, base)
+    }
     emit_store_var(ptr_slot)
 }
 
@@ -5955,27 +6011,43 @@ fn bind_struct_local_zeroinit_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
     let nslots = struct_like_nslots(ty_hash)
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
-    let base = NEXT_SLOT
-    NEXT_SLOT = NEXT_SLOT + nslots
+    var base: i64 = 0
+    var spill_addr: i64 = 0
+    let spill = nslots * 8 >= local_bss_spill_bytes()
+    if spill {
+        spill_addr = GL_BSS_BASE + bss_alloc_aligned(nslots * 8)
+    } else {
+        base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + nslots
+    }
     var linear_flag: i64 = 0
     var affine_flag: i64 = 0
     if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize]; affine_flag = ST_AFFINE[si as usize] }
     var out_ty: i64 = 0
     if knowledge_hash_is(ty_hash) == false { out_ty = 6 }
     if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, linear_flag, 0, out_ty, ty_hash) < 0 {
-        NEXT_SLOT = NEXT_SLOT - nslots - 1
+        if spill == false { NEXT_SLOT = NEXT_SLOT - nslots }
+        NEXT_SLOT = NEXT_SLOT - 1
         return
     }
     VAR_AFFINE[(VAR_COUNT - 1) as usize] = affine_flag
     // Zero-init slots via rep stosq
-    em(0x48); em(0x8d); em(0xbd)   // lea rdi, [rbp - (base+nslots-1)*8]
-    em32(0 - (base + nslots - 1) * 8)
+    if spill {
+        em(0x48); em(0xbf); em64(spill_addr)
+    } else {
+        em(0x48); em(0x8d); em(0xbd)   // lea rdi, [rbp - (base+nslots-1)*8]
+        em32(0 - (base + nslots - 1) * 8)
+    }
     em(0x48); em(0x31); em(0xc0)   // xor rax, rax
     em(0xb9); em32(nslots)          // mov ecx, nslots
     em(0xf3); em(0x48); em(0xab)   // rep stosq
     // Store LEA pointer in ptr_slot
-    em(0x48); em(0x8d); em(0x85)   // lea rax, [rbp - (base+nslots-1)*8]
-    em32(0 - (base + nslots - 1) * 8)
+    if spill {
+        em(0x48); em(0xb8); em64(spill_addr)
+    } else {
+        em(0x48); em(0x8d); em(0x85)   // lea rax, [rbp - (base+nslots-1)*8]
+        em32(0 - (base + nslots - 1) * 8)
+    }
     emit_store_var(ptr_slot)
 }
 
@@ -6067,15 +6139,9 @@ fn copy_struct_into_local_slot_x86(slot: i64, ty_hash: i64) with Mut, Panic, Div
     let si = st_find(ty_hash)
     if si < 0 && knowledge_hash_is(ty_hash) == false { emit_store_var(slot); return }
     let nslots = struct_like_nslots(ty_hash)
-    // Struct vars are laid out as [ptr_slot, data_slots...] by bind_struct_local_*.
-    // Copy data from rax (source struct ptr, often a fresh SRET buffer) into the
-    // var's stable data slots, then re-anchor ptr_slot to those data slots.
-    // Storing only the pointer (an earlier optimization) caused `a = step(&a, dt)`
-    // to silently corrupt: the next iteration's nested SRET buffer would alias
-    // with where the previous SRET still lived through `a`'s ptr_slot.
-    let data_base = slot + 1
-    emit_bulk_copy_to_slots_x86(nslots, data_base)
-    emit_store_var(slot)
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (source ptr)
+    emit_load_var(slot)
+    emit_copy_agg_to_ptr_x86(6, ty_hash)
 }
 
 fn emit_bulk_copy_to_slots_x86(nslots: i64, base: i64) with Mut, Panic, Div {
@@ -6125,6 +6191,14 @@ fn materialize_aggregate_expr_x86() with Mut, Panic, Div {
     if type_is_struct_like(EXPR_TY, EXPR_TY_HASH) {
         let nslots = struct_like_nslots(EXPR_TY_HASH)
         if nslots <= 0 { return }
+        if nslots * 8 >= local_bss_spill_bytes() {
+            let tmp_addr = GL_BSS_BASE + bss_alloc_aligned(nslots * 8)
+            em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
+            em(0x48); em(0xb8); em64(tmp_addr)
+            emit_copy_agg_to_ptr_x86(EXPR_TY, EXPR_TY_HASH)
+            em(0x48); em(0xb8); em64(tmp_addr)
+            return
+        }
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + nslots
         emit_bulk_copy_to_slots_x86(nslots, base)
@@ -8819,12 +8893,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let static_ret_slots = ret_agg_nslots(FN_RET_TY[static_mfi as usize], FN_RET_HASH[static_mfi as usize])
                     if static_ret_slots > 0 {
                         // SRET: allocate return buffer, shift args, pass SRET ptr in rdi
-                        let static_ret_base = NEXT_SLOT
-                        NEXT_SLOT = NEXT_SLOT + static_ret_slots
                         emit_setup_call_args_shift_x86(static_argc, 1)
                         emit_prepare_stack_call_args_x86(static_argc, 5)
-                        em(0x48); em(0x8d); em(0x85)
-                        em32(0 - (static_ret_base + static_ret_slots - 1) * 8)
+                        emit_sret_destination_x86(static_ret_slots)
                         em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (SRET ptr)
                         em(0xe8)
                         PATCH_OFF[PATCH_COUNT as usize] = CL
@@ -11536,7 +11607,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         shi = shi + 1
                     }
                     em(0xe8)   // call rel32
-                    if FN_OFF[fri as usize] >= 0 {
+                    if FN_OFF[fri as usize] != -1 {
                         em32(FN_OFF[fri as usize] - (CL + 4))
                     } else {
                         PATCH_OFF[PATCH_COUNT as usize] = CL
@@ -12297,12 +12368,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     let method_ret_slots = ret_agg_nslots(FN_RET_TY[mfi as usize], FN_RET_HASH[mfi as usize])
                     if method_ret_slots > 0 {
                         // SRET: allocate return buffer, shift args, pass SRET ptr in rdi
-                        let method_ret_base = NEXT_SLOT
-                        NEXT_SLOT = NEXT_SLOT + method_ret_slots
                         emit_setup_call_args_shift_x86(margc, 1)
                         emit_prepare_stack_call_args_x86(margc, 5)
-                        em(0x48); em(0x8d); em(0x85)
-                        em32(0 - (method_ret_base + method_ret_slots - 1) * 8)
+                        emit_sret_destination_x86(method_ret_slots)
                         em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (SRET ptr)
                         em(0xe8)
                         PATCH_OFF[PATCH_COUNT as usize] = CL
@@ -21650,6 +21718,16 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         let fi = PATCH_FN[pi as usize]
         if fi >= 0 && fi < FN_COUNT && off >= 0 && off + 3 < CL {
             let target = FN_OFF[fi as usize]
+            if target == -1 {
+                print("error: unresolved function body for call target fn#")
+                print_int(fi)
+                print(" ")
+                print_fn_name(fi)
+                print(" at line ")
+                print_int(TL[FN_NAME_TOK[fi as usize] as usize])
+                print("\n")
+                return 1
+            }
             let rel = target - (off + 4)
             CD[(off) as usize] = (rel & 0xFF) as i8
             CD[(off + 1) as usize] = ((rel >> 8) & 0xFF) as i8
@@ -25047,7 +25125,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     if fn_arity >= 5 { em32(0xAA0503E4) }  // mov x4, x5
                     if fn_arity >= 6 { em32(0xAA0603E5) }  // mov x5, x6
                     if fn_arity >= 7 { em32(0xAA0703E6) }  // mov x6, x7
-                    if FN_OFF[fri as usize] >= 0 {
+                    if FN_OFF[fri as usize] != -1 {
                         let rel = (FN_OFF[fri as usize] - CL) / 4
                         em32(0x14000000 | (rel & 0x3FFFFFF))
                     } else {
@@ -27522,6 +27600,16 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         let fi = PATCH_FN[pi as usize]
         if fi >= 0 && fi < FN_COUNT && off >= 0 && off + 3 < CL {
             let target = FN_OFF[fi as usize]
+            if target == -1 {
+                print("error: unresolved function body for call target fn#")
+                print_int(fi)
+                print(" ")
+                print_fn_name(fi)
+                print(" at line ")
+                print_int(TL[FN_NAME_TOK[fi as usize] as usize])
+                print("\n")
+                return 1
+            }
             if PATCH_KIND[pi as usize] == 1 {
                 patch_adr_a64(off, target, 0)
             } else if PATCH_KIND[pi as usize] == 2 {
