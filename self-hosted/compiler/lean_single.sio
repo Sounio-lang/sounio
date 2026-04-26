@@ -672,12 +672,8 @@ fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
         let si = st_find(ty_hash)
         if si >= 0 { return st_total_size(si) / 8 }
     }
-    // Option<T> and Box<T> are 2-slot values (tag + pointer or similar)
-    // *mut T raw pointers are 1 slot (bare heap address); *const T is unhandled (same hash as Box)
-    if ty == 11 {
-        if ptr_hash_mut(ty_hash) == 1 { return 1 }
-        return 2
-    }
+    if type_is_option_inline(ty, ty_hash) { return 2 }
+    if ty == 11 { return 1 }
     if knowledge_hash_is(ty_hash) { return 3 }
     return 1
 }
@@ -2374,6 +2370,44 @@ fn ptr_hash_inner_hash(h: i64) -> i64 with Div, Mut {
     return ref_hash_inner_hash(h)
 }
 
+fn option_hash_make(inner_ty: i64, inner_hash: i64) -> i64 {
+    return ref_hash_make(inner_ty, inner_hash, 2)
+}
+
+fn option_hash_is(h: i64) -> bool with Div, Mut {
+    if h < 1125899906842624 { return false }
+    return ref_hash_mut(h) == 2
+}
+
+fn option_hash_inner_ty(h: i64) -> i64 with Div, Mut {
+    return ref_hash_inner_ty(h)
+}
+
+fn option_hash_inner_hash(h: i64) -> i64 with Div, Mut {
+    return ref_hash_inner_hash(h)
+}
+
+fn box_hash_make(inner_ty: i64, inner_hash: i64) -> i64 {
+    return ref_hash_make(inner_ty, inner_hash, 3)
+}
+
+fn box_hash_is(h: i64) -> bool with Div, Mut {
+    if h < 1125899906842624 { return false }
+    return ref_hash_mut(h) == 3
+}
+
+fn type_is_option_inline(ty: i64, ty_hash: i64) -> bool with Div, Mut {
+    if ty != 11 { return false }
+    if ty_hash == 0 { return true }
+    return option_hash_is(ty_hash)
+}
+
+fn type_is_pointer_like(ty: i64, ty_hash: i64) -> bool with Div, Mut {
+    if ty == 10 { return true }
+    if ty != 11 { return false }
+    return type_is_option_inline(ty, ty_hash) == false
+}
+
 fn type_is_slice_ref(ty: i64, ty_hash: i64) -> bool with Panic, Div, Mut {
     if ty != 10 { return false }
     if ref_hash_inner_ty(ty_hash) != 8 { return false }
@@ -2647,8 +2681,9 @@ fn type_is_struct_like(ty: i64, ty_hash: i64) -> bool {
     return false
 }
 
-fn type_is_aggregate(ty: i64, ty_hash: i64) -> bool {
+fn type_is_aggregate(ty: i64, ty_hash: i64) -> bool with Div, Mut {
     if ty == 8 { return true }
+    if type_is_option_inline(ty, ty_hash) { return true }
     return type_is_struct_like(ty, ty_hash)
 }
 
@@ -2668,6 +2703,14 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
     }
     if k1 == 11 && k2 == 11 {
         if h1 == 0 || h2 == 0 { return true }
+        if option_hash_is(h1) || option_hash_is(h2) {
+            if option_hash_is(h1) == false || option_hash_is(h2) == false { return false }
+            return ty_eq(option_hash_inner_ty(h1), option_hash_inner_hash(h1), option_hash_inner_ty(h2), option_hash_inner_hash(h2))
+        }
+        if box_hash_is(h1) || box_hash_is(h2) {
+            if box_hash_is(h1) == false || box_hash_is(h2) == false { return false }
+            return ty_eq(ptr_hash_inner_ty(h1), ptr_hash_inner_hash(h1), ptr_hash_inner_ty(h2), ptr_hash_inner_hash(h2))
+        }
         if ptr_hash_mut(h1) != ptr_hash_mut(h2) { return false }
         return ty_eq(ptr_hash_inner_ty(h1), ptr_hash_inner_hash(h1), ptr_hash_inner_ty(h2), ptr_hash_inner_hash(h2))
     }
@@ -2750,6 +2793,7 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
 
 fn ret_agg_nslots(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     if ty == 8 { return arr_storage_slots(ty_hash) }
+    if type_is_option_inline(ty, ty_hash) { return 2 }
     // Knowledge types use negative hashes, but only for type 0 (unresolved Knowledge)
     // or type 6 (struct-like). NOT for enums (ty==7) or scalars.
     if knowledge_hash_is(ty_hash) && ty != 7 && ty != 1 && ty != 4 { return 3 }
@@ -2772,6 +2816,8 @@ fn box_alloc_bytes(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     var bytes = box_page_bytes()
     if ty == 8 {
         bytes = arr_storage_slots(ty_hash) * 8
+    } else if type_is_option_inline(ty, ty_hash) {
+        bytes = 16
     } else if ty == 6 || knowledge_hash_is(ty_hash) {
         bytes = struct_like_nslots(ty_hash) * 8
     }
@@ -3465,6 +3511,22 @@ fn print_type_label(ty: i64, ty_hash: i64) with IO, Mut, Panic, Div {
         return
     }
     if ty == 11 {
+        if ty_hash == 0 {
+            print("Option<_>")
+            return
+        }
+        if option_hash_is(ty_hash) {
+            print("Option<")
+            print_type_label(option_hash_inner_ty(ty_hash), option_hash_inner_hash(ty_hash))
+            print(">")
+            return
+        }
+        if box_hash_is(ty_hash) {
+            print("Box<")
+            print_type_label(ptr_hash_inner_ty(ty_hash), ptr_hash_inner_hash(ty_hash))
+            print(">")
+            return
+        }
         if ptr_hash_mut(ty_hash) != 0 { print("*mut ") }
         else { print("*") }
         print_type_label(ptr_hash_inner_ty(ty_hash), ptr_hash_inner_hash(ty_hash))
@@ -5416,6 +5478,31 @@ fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
     return slot
 }
 
+fn var_add_option_inline(ns: i64, ne: i64, ty_hash: i64) -> i64 with Mut, Panic {
+    let tag_slot = NEXT_SLOT + 1
+    if local_meta_add(ns, ne, tag_slot, 0, 0, 16, 0, 0, 0, 0, 0, 0, 11, ty_hash) < 0 {
+        LAST_LOCAL_BSS_SPILL = 0
+        LAST_LOCAL_BSS_ADDR = 0
+        return -1
+    }
+    NEXT_SLOT = NEXT_SLOT + 2
+    LAST_LOCAL_BSS_SPILL = 0
+    LAST_LOCAL_BSS_ADDR = 0
+    return tag_slot
+}
+
+fn emit_copy_option_to_local_x86(tag_slot: i64) with Mut, Panic, Div {
+    em(0x48); em(0x89); em(0xc2)
+    emit_lea_var(tag_slot)
+    emit_copy_agg_to_ptr_x86(11, 0)
+}
+
+fn emit_copy_option_to_local_a64(tag_slot: i64) with Mut, Panic, Div {
+    em32(0xAA0003EA)
+    emit_lea_var_a64(tag_slot)
+    emit_copy_agg_to_ptr_a64(11, 0)
+}
+
 // Add a local array variable: allocate N slots, return base slot, store lea as value
 fn var_add_arr(ns: i64, ne: i64, alen: i64, esiz: i64, elem_ty: i64) -> i64 with Mut, Panic, Div {
     let storage_bytes = alen * 8
@@ -5933,9 +6020,15 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
                     EP = p
                     compile_or()
                     let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
-                    em(0x48); em(0x89); em(0xc1)
-                    em(0x48); em(0xb8); em64(addr)
-                    em(0x48); em(0x89); em(0x08)
+                    if type_is_option_inline(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) && GL[(gi * 4 + 2) as usize] >= 16 {
+                        em(0x48); em(0x89); em(0xc2)
+                        em(0x48); em(0xb8); em64(addr)
+                        emit_copy_agg_to_ptr_x86(11, GL_TY_HASH[gi as usize])
+                    } else {
+                        em(0x48); em(0x89); em(0xc1)
+                        em(0x48); em(0xb8); em64(addr)
+                        em(0x48); em(0x89); em(0x08)
+                    }
                     p = EP
                     continue
                 }
@@ -6000,6 +6093,12 @@ fn materialize_aggregate_expr_x86() with Mut, Panic, Div {
         emit_bulk_copy_to_slots_x86(nslots, base)
         return
     }
+    if type_is_option_inline(EXPR_TY, EXPR_TY_HASH) {
+        let base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 2
+        emit_bulk_copy_to_slots_x86(2, base)
+        return
+    }
     if type_is_struct_like(EXPR_TY, EXPR_TY_HASH) {
         let nslots = struct_like_nslots(EXPR_TY_HASH)
         if nslots <= 0 { return }
@@ -6013,6 +6112,8 @@ fn copy_agg_into_struct_slots_x86(dst_start: i64, field_ty: i64, field_hash: i64
     var nslots: i64 = 0
     if field_ty == 8 {
         nslots = arr_storage_slots(field_hash)
+    } else if type_is_option_inline(field_ty, field_hash) {
+        nslots = 2
     } else if field_ty == 6 || knowledge_hash_is(field_hash) {
         nslots = struct_like_nslots(field_hash)
     }
@@ -6040,6 +6141,8 @@ fn emit_copy_agg_to_ptr_x86(field_ty: i64, field_hash: i64) with Mut, Panic, Div
     var nslots: i64 = 0
     if field_ty == 8 {
         nslots = arr_storage_slots(field_hash)
+    } else if type_is_option_inline(field_ty, field_hash) {
+        nslots = 2
     } else if field_ty == 6 || knowledge_hash_is(field_hash) {
         nslots = struct_like_nslots(field_hash)
     }
@@ -11242,6 +11345,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let vi = var_find_idx(ns, ne)
             if vi >= 0 && type_is_slice_ref(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) {
                 emit_lea_var(slot)
+            } else if vi >= 0 && type_is_option_inline(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) && VAR_ESIZ[vi as usize] >= 16 {
+                emit_lea_var(slot)
             } else {
                 emit_load_var(slot)
             }
@@ -11354,7 +11459,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if gi >= 0 {
                 em(0x48); em(0xb8); em64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])  // mov rax, addr
                 if GL[(gi * 4 + 3) as usize] == 0 {
-                    em(0x48); em(0x8b); em(0x00)  // scalar: mov rax, [rax] (dereference)
+                    if type_is_option_inline(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) == false || GL[(gi * 4 + 2) as usize] < 16 {
+                        em(0x48); em(0x8b); em(0x00)  // scalar: mov rax, [rax] (dereference)
+                    }
                 }
                 EXPR_TY = GL_TY[gi as usize]
                 EXPR_TY_HASH = GL_TY_HASH[gi as usize]
@@ -15151,6 +15258,15 @@ var TUP_PAT_NEXT: i64 = 0
 var TUP_RHS_NEXT: i64 = 0
 
 fn tuple_bind_leaf_x86(ns: i64, ne: i64) with Mut, Panic, Div {
+    if type_is_option_inline(EXPR_TY, EXPR_TY_HASH) {
+        let opt_slot = var_add_option_inline(ns, ne, EXPR_TY_HASH)
+        if opt_slot < 0 { return }
+        emit_copy_option_to_local_x86(opt_slot)
+        VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 0
+        VAR_LINEAR[(VAR_COUNT - 1) as usize] = 0
+        VAR_AFFINE[(VAR_COUNT - 1) as usize] = 0
+        return
+    }
     let slot = var_add(ns, ne)
     if slot < 0 { return }
     let vix = VAR_COUNT - 1
@@ -15168,6 +15284,15 @@ fn tuple_bind_leaf_x86(ns: i64, ne: i64) with Mut, Panic, Div {
 }
 
 fn tuple_bind_leaf_a64(ns: i64, ne: i64) with Mut, Panic, Div {
+    if type_is_option_inline(EXPR_TY, EXPR_TY_HASH) {
+        let opt_slot = var_add_option_inline(ns, ne, EXPR_TY_HASH)
+        if opt_slot < 0 { return }
+        emit_copy_option_to_local_a64(opt_slot)
+        VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 0
+        VAR_LINEAR[(VAR_COUNT - 1) as usize] = 0
+        VAR_AFFINE[(VAR_COUNT - 1) as usize] = 0
+        return
+    }
     let slot = var_add(ns, ne)
     if slot < 0 { return }
     let vix = VAR_COUNT - 1
@@ -15868,6 +15993,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             // var x: StructType  (no initializer) — zero-initialize struct slots
             bind_struct_local_zeroinit_x86(ns, ne, decl_ty_hash)
             if VAR_COUNT > 0 { VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut }
+        } else if has_eq == 0 && type_is_option_inline(decl_ty, decl_ty_hash) {
+            let opt_tag_slot = var_add_option_inline(ns, ne, decl_ty_hash)
+            if opt_tag_slot >= 0 {
+                em(0x48); em(0x31); em(0xc0)
+                emit_store_var(opt_tag_slot)
+                emit_store_var(opt_tag_slot - 1)
+                VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
+            }
         } else {
             compile_or()
             if (decl_ty != 0 || decl_ty_hash != 0) && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
@@ -15902,6 +16035,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     VAR_IS_CLOSURE[avix as usize] = 0
                     VAR_MUT[avix as usize] = decl_is_mut
                     VAR_LINEAR[avix as usize] = 0
+                }
+            } else if type_is_option_inline(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_option_inline(EXPR_TY, EXPR_TY_HASH)) {
+                var bind_hash = EXPR_TY_HASH
+                if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
+                let opt_slot = var_add_option_inline(ns, ne, bind_hash)
+                if opt_slot >= 0 {
+                    emit_copy_option_to_local_x86(opt_slot)
+                    VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
                 }
             } else if type_is_struct_like(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_struct_like(EXPR_TY, EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
@@ -16239,7 +16380,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         }
         if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
         em(0x5a)  // pop rdx (value/src ptr)
-        if fty == 8 || fty == 6 || knowledge_hash_is(fhash) {
+        if fty == 8 || type_is_option_inline(fty, fhash) || fty == 6 || knowledge_hash_is(fhash) {
             emit_copy_agg_to_ptr_x86(fty, fhash)
         } else {
             em(0x48); em(0x89); em(0x10)  // mov [rax], rdx
@@ -16276,6 +16417,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             }
             if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 8 {
                 copy_array_into_local_slot_x86(slot, VAR_TY_HASH[ty_vi as usize])
+            } else if ty_vi >= 0 && type_is_option_inline(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize]) && VAR_ESIZ[ty_vi as usize] >= 16 {
+                emit_copy_option_to_local_x86(slot)
             } else if ty_vi >= 0 && type_is_struct_like(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize]) {
                 copy_struct_into_local_slot_x86(slot, VAR_TY_HASH[ty_vi as usize])
             } else {
@@ -16325,10 +16468,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
                 let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
-                // mov rcx, rax; mov rax, addr; mov [rax], rcx
-                em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (value)
-                em(0x48); em(0xb8); em64(addr)  // mov rax, addr
-                em(0x48); em(0x89); em(0x08)    // mov [rax], rcx
+                if type_is_option_inline(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) && GL[(gi * 4 + 2) as usize] >= 16 {
+                    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
+                    em(0x48); em(0xb8); em64(addr)  // mov rax, dst
+                    emit_copy_agg_to_ptr_x86(11, GL_TY_HASH[gi as usize])
+                } else {
+                    // mov rcx, rax; mov rax, addr; mov [rax], rcx
+                    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (value)
+                    em(0x48); em(0xb8); em64(addr)  // mov rax, addr
+                    em(0x48); em(0x89); em(0x08)    // mov [rax], rcx
+                }
             } else {
                 tc_undefined_var(name_tok)
             }
@@ -20458,7 +20607,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 } else {
                     // Scalar: i64, i32, bool, string
                     scan_type(p)
-                    let gix = gl_add(gns, gne, 8, 0)
+                    var scalar_bytes: i64 = 8
+                    if type_is_option_inline(SCAN_TY, SCAN_TY_HASH) { scalar_bytes = 16 }
+                    let gix = gl_add(gns, gne, scalar_bytes, 0)
                     if gix >= 0 {
                         GL_TY[gix as usize] = SCAN_TY
                         GL_TY_HASH[gix as usize] = SCAN_TY_HASH
@@ -24679,6 +24830,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let vi = var_find_idx(ns, ne)
             if vi >= 0 && type_is_slice_ref(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) {
                 emit_lea_var_a64(slot)
+            } else if vi >= 0 && type_is_option_inline(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) && VAR_ESIZ[vi as usize] >= 16 {
+                emit_lea_var_a64(slot)
             } else {
                 emit_load_var_a64(slot)
             }
@@ -24760,7 +24913,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
                 emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])
-                if GL[(gi * 4 + 3) as usize] == 0 { em32(0xF9400000) }
+                if GL[(gi * 4 + 3) as usize] == 0 {
+                    if type_is_option_inline(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) == false || GL[(gi * 4 + 2) as usize] < 16 {
+                        em32(0xF9400000)
+                    }
+                }
                 EXPR_TY = GL_TY[gi as usize]
                 EXPR_TY_HASH = GL_TY_HASH[gi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -25710,7 +25867,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 EP = SCAN_TY_NEXT
             }
         }
-        if TK[EP as usize] == 16 { EP = EP + 1 }
+        var has_eq: i64 = 0
+        if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
         if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             EP = EP + 1
             while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
@@ -25735,6 +25893,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 emit_lea_var_a64(base + nslots - 1)
             }
             emit_store_var_a64(ptr_slot)
+        } else if has_eq == 0 && type_is_option_inline(decl_ty, decl_ty_hash) {
+            let opt_tag_slot = var_add_option_inline(ns, ne, decl_ty_hash)
+            if opt_tag_slot >= 0 {
+                em32(0xD2800000)
+                emit_store_var_a64(opt_tag_slot)
+                emit_store_var_a64(opt_tag_slot - 1)
+                VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
+            }
         } else {
             compile_or_a64()
             if (decl_ty != 0 || decl_ty_hash != 0) && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
@@ -25765,6 +25931,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     VAR_IS_CLOSURE[avix as usize] = 0
                     VAR_MUT[avix as usize] = decl_is_mut
                     VAR_LINEAR[avix as usize] = 0
+                }
+            } else if type_is_option_inline(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_option_inline(EXPR_TY, EXPR_TY_HASH)) {
+                var bind_hash = EXPR_TY_HASH
+                if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
+                let opt_slot = var_add_option_inline(ns, ne, bind_hash)
+                if opt_slot >= 0 {
+                    emit_copy_option_to_local_a64(opt_slot)
+                    VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
                 }
             } else if type_is_struct_like(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_struct_like(EXPR_TY, EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
@@ -25927,7 +26101,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             em32(0x8B0B0000)  // add x0, x0, x11
         }
         emit_pop_x1_a64()
-        if fty == 8 || fty == 6 || knowledge_hash_is(fhash) {
+        if fty == 8 || type_is_option_inline(fty, fhash) || fty == 6 || knowledge_hash_is(fhash) {
             em32(0xAA0103EA)  // mov x10, x1
             emit_copy_agg_to_ptr_a64(fty, fhash)
         } else {
@@ -25956,6 +26130,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 8 {
                 copy_array_into_local_slot_a64(slot, VAR_TY_HASH[ty_vi as usize])
+            } else if ty_vi >= 0 && type_is_option_inline(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize]) && VAR_ESIZ[ty_vi as usize] >= 16 {
+                emit_copy_option_to_local_a64(slot)
             } else if ty_vi >= 0 && type_is_struct_like(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize]) {
                 copy_struct_into_local_slot_a64(slot, VAR_TY_HASH[ty_vi as usize])
             } else {
@@ -25997,9 +26173,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
                 let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
-                em32(0xAA0003E1)
-                emit_image_addr_a64(addr)
-                em32(0xF9000001)
+                if type_is_option_inline(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) && GL[(gi * 4 + 2) as usize] >= 16 {
+                    em32(0xAA0003EA)
+                    emit_image_addr_a64(addr)
+                    emit_copy_agg_to_ptr_a64(11, GL_TY_HASH[gi as usize])
+                } else {
+                    em32(0xAA0003E1)
+                    emit_image_addr_a64(addr)
+                    em32(0xF9000001)
+                }
             } else {
                 tc_undefined_var(name_tok)
             }
