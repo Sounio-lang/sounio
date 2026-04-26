@@ -1,0 +1,36 @@
+//@ compile-fail
+//@ error-pattern: Hessian AD over a non-associative algebra
+//
+// β⁸ Phase 2 compile-fail: non-associative algebra multiplication with an active
+// AD shadow slot must be refused when the algebra lacks `reassociate: fano_selective`.
+//
+// Gate location: self-hosted/compiler/lean_single.sio (op==19 binary section)
+// Formal proof:  formal/NonAssocHessian.lean — `refusal_is_sound`
+//
+// Trigger mechanism:
+//   `compile_primary()` resets EXPR_SSHADOW = -1 at entry, then each field
+//   compile also resets it.  With a SINGLE-basis algebra, `OctScalar { e0: km.value }`
+//   compiles only one field — km.value sets EXPR_SSHADOW = 0 and no subsequent
+//   field resets it.  The struct literal returns with EXPR_TY=6, EXPR_SSHADOW=0.
+//   That state is captured into left_sshadow = 0 before compiling the right operand.
+//   The gate then sees:
+//     - left_ty == 6 (algebra struct), al_is_algebra → true
+//     - al_mul_is_associative(OctScalar_hash) == false  (alternative mul)
+//     - has_shadow == true  (left_sshadow = 0 >= 0)
+//     - al_reassoc_mode == 0  (no fano_selective declared)
+//   ⇒ tc_linear_violation fires → typecheck: failed → exit 1.
+
+algebra OctScalar over f64 {
+    add: commutative, associative
+    mul: alternative, non_commutative
+    basis: e0
+}
+
+fn main() with IO, Epistemic {
+    let km: Knowledge<f64> = measure(1.0, uncertainty: 0.1)
+    let b = OctScalar { e0: 1.0 }
+    // Single-basis struct literal: only field e0=km.value, EXPR_SSHADOW=0 after literal.
+    // Gate fires: left_ty=6 (OctScalar, non-assoc), has_shadow=true, no fano_selective.
+    let z = OctScalar { e0: km.value } * b  // ERROR: non-assoc Hessian without fano_selective
+    println(0)
+}
