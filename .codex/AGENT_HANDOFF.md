@@ -19,6 +19,13 @@ Current operational notes:
 - Check `.claude/check_sio_integration_window.v1.json` before touching
   `self-hosted/check/check.sio`.
 - Use `artifacts/omega/agent_handoff.log.md` for locks on shared/high-risk files.
+- Apple native-v2 lane: `scripts/apple/apple_native_v2_ssh_gate.sh` is the
+  SSH orchestration entrypoint. It runs the maintained Apple/Mach-O
+  `selfhost_host_gate.sh` first, then currently reports `not_run` for
+  `aarch64-macos` native-v2 runtime attestation because full
+  `native::codegen.sio` import/typecheck is dirty in this checkout. Do not
+  widen `self-hosted/compiler/main.sio` back to `native::codegen::*` as a
+  shortcut; repair the codegen import boundary or add a small standalone driver.
 
 Codex's preferred role in the parallel flow:
 

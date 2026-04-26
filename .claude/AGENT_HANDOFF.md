@@ -18,6 +18,12 @@ Current operational notes:
   direction.
 - `self-hosted/check/check.sio` has a serialized window declared in
   `.claude/check_sio_integration_window.v1.json`.
+- Apple native-v2 lane: Codex added `scripts/apple/apple_native_v2_ssh_gate.sh`
+  as the SSH orchestration entrypoint. It runs the maintained Apple/Mach-O
+  `selfhost_host_gate.sh` first. Current AArch64 native-v2 runtime attestation
+  is intentionally `not_run` because full `native::codegen.sio`
+  import/typecheck is dirty in this checkout; review this lane read-only unless
+  coordinating ownership through `artifacts/omega/agent_handoff.log.md`.
 
 Claude's preferred role in the parallel flow:
 
