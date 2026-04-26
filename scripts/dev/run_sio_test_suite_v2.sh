@@ -248,10 +248,16 @@ run_test() {
         
         if [[ $exit_code -eq 124 ]]; then
             test_output="compile timed out after ${timeout_val}s"
+        elif [[ $exit_code -eq 0 ]] && echo "$output" | grep -qF "typecheck: failed"; then
+            exit_code=1
         elif [[ $exit_code -eq 0 ]]; then
             test_output="expected compile failure but passed"
+            exit_code=1
         else
             exit_code=0  # Reset - compile failure is expected
+        fi
+
+        if [[ $exit_code -ne 124 && $test_output != "expected compile failure but passed" ]]; then
             for pattern in "${error_patterns[@]}"; do
                 if ! echo "$output" | grep -qiF "$pattern"; then
                     exit_code=1
@@ -259,6 +265,9 @@ run_test() {
                     break
                 fi
             done
+            if [[ -z "$test_output" ]]; then
+                exit_code=0  # Reset - compile failure is expected
+            fi
         fi
     fi
     
