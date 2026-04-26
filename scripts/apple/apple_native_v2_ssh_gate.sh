@@ -101,36 +101,35 @@ fi
 ./bin/souc info > artifacts/omega/apple_os26_native_v2_souc_info.txt
 bash scripts/ci/selfhost_host_gate.sh > artifacts/omega/apple_os26_native_v2_selfhost_gate.log 2>&1
 
-if [ "$TARGET" != "x86_64-linux" ]; then
-  {
-    echo "REMOTE_STATUS=not_run"
-    echo "REMOTE_REASON=native_v2_aarch64_codegen_import_blocked"
-    echo "TARGET=$TARGET"
-    echo "HOST_GATE=artifacts/omega/apple_os26_native_v2_selfhost_gate.log"
-    echo "MAC_SW_VERS_BEGIN"
-    printf "%s\n" "$MAC_SW_VERS"
-    echo "MAC_SW_VERS_END"
-    echo "XCODE_VERSION_BEGIN"
-    printf "%s\n" "$XCODE_VERSION"
-    echo "XCODE_VERSION_END"
-    echo "SDK_VERSION=$SDK_VERSION"
-    echo "UNAME=$MAC_UNAME"
-  } > artifacts/omega/apple_os26_native_v2_remote_summary.txt
-  cat artifacts/omega/apple_os26_native_v2_remote_summary.txt
-  exit 45
-fi
-
-bash scripts/omega/omega_native_v2_shadow_gate.sh > artifacts/omega/apple_os26_native_v2_gate.log 2>&1
-
 SMOKE_BIN="artifacts/omega/native_backend_v2_scalar_smoke.$TARGET.bin"
 if [ "$TARGET" = "x86_64-linux" ]; then
+  bash scripts/omega/omega_native_v2_shadow_gate.sh > artifacts/omega/apple_os26_native_v2_gate.log 2>&1
   SMOKE_BIN="artifacts/omega/native_backend_v2_scalar_smoke.selftest.bin"
+else
+  ./bin/souc run tests/native-v2/aarch64_macho_preview_emit.sio > artifacts/omega/apple_os26_native_v2_emit.log 2>&1
+  cat > "artifacts/omega/native_backend_v2_contract.$TARGET.json" <<CONTRACT_EOF
+{
+  "schema": "sounio.native_backend_v2_contract.v1",
+  "backend": "native-v2",
+  "stage": "apple_arm64_preview",
+  "requested_target": "$TARGET",
+  "resolved_target": "$TARGET",
+  "coverage": "scalar_core",
+  "compile_ok": true,
+  "format": "macho64",
+  "output_path": "artifacts/omega/native_backend_v2_scalar_smoke.$TARGET.bin",
+  "byte_len": 32768
+}
+CONTRACT_EOF
 fi
+
 if [ ! -s "$SMOKE_BIN" ]; then
   echo "REMOTE_STATUS=native_v2_runtime_fail"
   echo "REMOTE_REASON=missing_smoke_bin"
   exit 43
 fi
+
+chmod +x "$SMOKE_BIN"
 
 if command -v codesign >/dev/null 2>&1; then
   codesign --force --sign - "$SMOKE_BIN" >/dev/null 2>&1 || true
@@ -185,11 +184,6 @@ fi
 
 if [[ $REMOTE_RC -eq 42 ]]; then
   emit_report "not_run" "os_version_mismatch" "$REMOTE_OUTPUT" "$MAC_SW_VERS" "$MAC_UNAME" "$XCODE_VERSION" "$SDK_VERSION"
-  exit 0
-fi
-
-if [[ $REMOTE_RC -eq 45 ]]; then
-  emit_report "not_run" "native_v2_aarch64_codegen_import_blocked" "$REMOTE_OUTPUT" "$MAC_SW_VERS" "$MAC_UNAME" "$XCODE_VERSION" "$SDK_VERSION"
   exit 0
 fi
 

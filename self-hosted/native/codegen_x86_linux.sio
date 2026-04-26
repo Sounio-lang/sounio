@@ -10,6 +10,8 @@ use parser::ast::{Name}
 use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS}
 use native::encode::*
 use native::elf::*
+use native::aarch64::*
+use native::macho::*
 use native::reloc::*
 use native::frame::*
 use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code}
@@ -4753,7 +4755,7 @@ fn a64_preview_patch_b_cond(buf: CodeBuffer, patch_offset: i64, target_offset: i
     patch_u32_le(buf, patch_offset, word)
 }
 
-fn a64_preview_reset_function_state(c: A64PreviewCompiler) -> A64PreviewCompiler {
+fn a64_preview_reset_function_state(c: A64PreviewCompiler) -> A64PreviewCompiler with Mut, Panic, Div {
     var out = c
     var i: i64 = 0
     while i < 64 {
@@ -4765,7 +4767,7 @@ fn a64_preview_reset_function_state(c: A64PreviewCompiler) -> A64PreviewCompiler
     out
 }
 
-fn a64_preview_record_label_patch(c: A64PreviewCompiler, label_id: i64, patch_offset: i64, kind: i64, cond: i64) -> A64PreviewCompiler {
+fn a64_preview_record_label_patch(c: A64PreviewCompiler, label_id: i64, patch_offset: i64, kind: i64, cond: i64) -> A64PreviewCompiler with Mut, Panic, Div {
     var out = c
     if out.label_patch_count < 128 {
         let idx = out.label_patch_count
@@ -4778,7 +4780,7 @@ fn a64_preview_record_label_patch(c: A64PreviewCompiler, label_id: i64, patch_of
     out
 }
 
-fn a64_preview_record_return_patch(c: A64PreviewCompiler, patch_offset: i64) -> A64PreviewCompiler {
+fn a64_preview_record_return_patch(c: A64PreviewCompiler, patch_offset: i64) -> A64PreviewCompiler with Mut, Panic, Div {
     var out = c
     if out.return_patch_count < 64 {
         out.return_patch_offsets[out.return_patch_count as usize] = patch_offset
@@ -4787,7 +4789,7 @@ fn a64_preview_record_return_patch(c: A64PreviewCompiler, patch_offset: i64) -> 
     out
 }
 
-fn a64_preview_record_call_patch(c: A64PreviewCompiler, patch_offset: i64, target_fn: i64) -> A64PreviewCompiler {
+fn a64_preview_record_call_patch(c: A64PreviewCompiler, patch_offset: i64, target_fn: i64) -> A64PreviewCompiler with Mut, Panic, Div {
     var out = c
     if out.call_patch_count < 64 {
         let idx = out.call_patch_count
@@ -5000,7 +5002,7 @@ fn a64_preview_compile_function(c: A64PreviewCompiler, func: IrFunction, machine
     (out, "")
 }
 
-fn a64_preview_emit_entry_trampoline_macos(c: A64PreviewCompiler, main_fn_index: i64) -> A64PreviewCompiler {
+fn a64_preview_emit_entry_trampoline_macos(c: A64PreviewCompiler, main_fn_index: i64) -> A64PreviewCompiler with Mut, Panic, Div {
     var out = c
     out.entry_offset = out.code.len
     let patch_offset = out.code.len
@@ -5012,7 +5014,7 @@ fn a64_preview_emit_entry_trampoline_macos(c: A64PreviewCompiler, main_fn_index:
     out
 }
 
-fn a64_preview_emit_entry_trampoline_linux(c: A64PreviewCompiler, main_fn_index: i64) -> A64PreviewCompiler {
+fn a64_preview_emit_entry_trampoline_linux(c: A64PreviewCompiler, main_fn_index: i64) -> A64PreviewCompiler with Mut, Panic, Div {
     var out = c
     out.entry_offset = out.code.len
     let patch_offset = out.code.len
@@ -5040,6 +5042,44 @@ fn compile_to_elf_v2(module: &IrModule, base_addr: i64) -> NativeCompileResult w
     let entry = trampoline_offset(nc)
     let elf = finalize_elf64(nc.code, nc.rodata, nc.data, entry, base_addr, nc.symbols, nc.fn_offsets, nc.fn_count)
     native_compile_result_ok_wide(elf.bytes, elf.len, FORMAT_ELF64())
+}
+
+fn compile_to_macho_arm64_preview(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
+    let _target = target_spec
+    let built = native_v2_build_machine_module(module, true)
+    if !built.supported {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + built.unsupported_detail)
+    }
+
+    var c = a64_preview_compiler_new()
+    c.fn_count = module.fn_count
+
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        let pair = a64_preview_compile_function(c, module.functions[fi as usize], built.functions[fi as usize], fi)
+        c = pair.0
+        if str_len(pair.1) > 0 {
+            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + pair.1)
+        }
+        fi = fi + 1
+    }
+
+    let main_idx = find_main_index(module)
+    if main_idx < 0 {
+        return native_compile_result_error(ERR_INVALID_TARGET(), "native_v2_aarch64_missing_main")
+    }
+    c = a64_preview_emit_entry_trampoline_macos(c, main_idx)
+    c = a64_preview_patch_calls(c)
+
+    let text_offset = macho_page_size_for_cpu(MACHO_CPU_ARM64)
+    let text_vmaddr: i64 = 4294967296 + text_offset
+
+    var w = macho_writer_new_arm64()
+    w.strtab = macho_strtab_init()
+    w = macho_add_section(w, macho_make_text_section(text_vmaddr, c.code.len, text_offset))
+    var empty_data: [i8; 65536] = [0; 65536]
+    let macho = macho_assemble_executable(w, c.code.bytes, c.code.len, empty_data, 0, text_offset + c.entry_offset)
+    native_compile_result_ok_narrow(macho.buf, macho.buf_len, FORMAT_MACHO64())
 }
 
 
@@ -5078,7 +5118,7 @@ pub fn compile_native_v2_preview(module: &IrModule, target_spec: NativeTargetSpe
     }
 
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
-        return native_compile_result_error(ERR_INVALID_TARGET(), "x86_linux_only:aarch64_macho_stripped")
+        return compile_to_macho_arm64_preview(module, target_spec)
     }
 
     if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_WINDOWS() {
@@ -5128,7 +5168,7 @@ pub fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> Nativ
     }
 
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
-        return native_compile_result_error(ERR_INVALID_TARGET(), "x86_linux_only:aarch64_macho_stripped")
+        return compile_to_macho_arm64_preview(module, target_spec)
     }
 
     if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_WINDOWS() {
