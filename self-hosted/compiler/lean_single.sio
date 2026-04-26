@@ -18100,11 +18100,21 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
 
         // Keywords that are structural (not expressions): mark confident
         // return, continue, break, while, if, else, for, match, pub, linear
-        if tk == 2 || tk == 33 || tk == 34 || tk == 15 || tk == 13 || tk == 14 || tk == 54 || tk == 48 || tk == 49 || tk == 62 || tk == 46 || tk == 47 || tk == 38 || tk == 70 || tk == 71 || tk == 72 || tk == 61 || tk == 75 || tk == 76 {
+        if tk == 2 || tk == 33 || tk == 34 || tk == 15 || tk == 13 || tk == 54 || tk == 48 || tk == 49 || tk == 62 || tk == 46 || tk == 47 || tk == 38 || tk == 70 || tk == 71 || tk == 72 || tk == 61 || tk == 75 || tk == 76 {
             EXPR_ETY[p as usize] = ty_void
             EXPR_CONF[p as usize] = 1000
             EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
             EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+            p = p + 1
+            continue
+        }
+
+        // Field access '.'
+        if tk == 14 {
+            if p > 0 {
+                EXPR_ETY[p as usize] = EXPR_ETY[(p - 1) as usize]
+                EXPR_CONF[p as usize] = EXPR_CONF[(p - 1) as usize]
+            }
             p = p + 1
             continue
         }
@@ -18249,6 +18259,25 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                                 }
                                 rfj = rfj + 1
                             }
+                            if rfj == FN_COUNT {
+                                let rlen = rne - rns
+                                if src_match(rns, rlen, "measure") || src_match(rns, rlen, "measured") {
+                                    rhs_ty = ety_mk_knowledge(2, 990, 0)
+                                    rhs_conf = 990
+                                    bind_meas_conf = 990
+                                } else if src_match(rns, rlen, "asserted") {
+                                    rhs_ty = ety_mk_knowledge(2, 970, 0)
+                                    rhs_conf = 970
+                                    bind_meas_conf = 970
+                                } else if src_match(rns, rlen, "constant") {
+                                    rhs_ty = ety_mk_knowledge(2, 1000, 0)
+                                    rhs_conf = 1000
+                                    bind_meas_conf = 1000
+                                } else {
+                                    rhs_ty = ty_i64
+                                    rhs_conf = 1000
+                                }
+                            }
                         }
                         // Gen 11: Paren expression RHS — arithmetic/cast, always certain
                         if rhs_tk == 6 { rhs_ty = ty_i64; rhs_conf = 1000 }
@@ -18289,6 +18318,16 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                             if vri >= 0 {
                                 rhs_ty = ESCOPE_TY[vri as usize]
                                 rhs_conf = ESCOPE_CONF[vri as usize]
+                                // BEGIN DEBUG
+                                if src_match(TS[rhs as usize], TE[rhs as usize] - TS[rhs as usize], "kw") || src_match(TS[rhs as usize], TE[rhs as usize] - TS[rhs as usize], "w") {
+                                    print("DEBUG let RHS: kw/w conf=")
+                                    print_int(rhs_conf)
+                                    print(" for ")
+                                    var dn: i64 = TS[(p + 1) as usize]
+                                    while dn < TE[(p + 1) as usize] { print_char(SRC[dn as usize] as i64); dn = dn + 1 }
+                                    print("\n")
+                                }
+                                // END DEBUG
                             } else {
                                 // Not in local scope — check if it's a known global
                                 let gvi = gl_find(TS[rhs as usize], TE[rhs as usize])
@@ -18320,6 +18359,20 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
 
         // Identifier → variable lookup OR function call
         if tk == 3 {
+            // Field access identifier (preceded by '.')
+            if p > 0 && TK[(p - 1) as usize] == 14 {
+                EXPR_ETY[p as usize] = EXPR_ETY[(p - 1) as usize]
+                EXPR_CONF[p as usize] = EXPR_CONF[(p - 1) as usize]
+                EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
+                if EXPR_CONF[p as usize] >= GATE_THRESHOLD {
+                    EPIST_HIGH_CONF = EPIST_HIGH_CONF + 1
+                } else {
+                    EPIST_LOW_CONF = EPIST_LOW_CONF + 1
+                }
+                p = p + 1
+                continue
+            }
+
             let ins = TS[p as usize]
             let ine = TE[p as usize]
             let ih = gl_name_hash(ins, ine)
@@ -18416,6 +18469,28 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     }
                     // Final call confidence = args × effect confidence
                     var call_conf: i64 = ety_conf_product(arg_conf, FN_EFF_CONF[call_fi as usize])
+                    var call_cmin: i64 = FN_EPISTEMIC_MIN[call_fi as usize]
+                    // BEGIN DEBUG
+                    if src_match(FN_NS[call_fi as usize], FN_NE[call_fi as usize] - FN_NS[call_fi as usize], "safe_dosing") {
+                        print("DEBUG safe_dosing: arg_conf=")
+                        print_int(arg_conf)
+                        print(" call_conf=")
+                        print_int(call_conf)
+                        print(" cmin=")
+                        print_int(call_cmin)
+                        print("\n")
+                    }
+                    // END DEBUG
+                    if call_cmin > 0 && call_conf > 0 && call_conf < call_cmin {
+                        print("error: confidence gate violation at line ")
+                        print_int(TL[p as usize])
+                        print(": args confidence ")
+                        print_int(call_conf)
+                        print(" < minconf ")
+                        print_int(call_cmin)
+                        print("\n")
+                        tc_mark_failed()
+                    }
                     if ret_ety == 0 { call_conf = 0 }
                     EXPR_ETY[p as usize] = ret_ety
                     EXPR_CONF[p as usize] = call_conf
@@ -18455,9 +18530,32 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     }
                 } else {
                     // Unknown function → must be a built-in (not in FN_NAME)
-                    // Gen 11: assign confident — built-ins are always valid calls
-                    EXPR_ETY[p as usize] = ty_i64
-                    EXPR_CONF[p as usize] = 1000
+                    if src_match(ins, ine - ins, "measure") || src_match(ins, ine - ins, "measured") {
+                        EXPR_ETY[p as usize] = ety_mk_knowledge(2, 990, EXPR_UNIT_DIM)
+                        EXPR_CONF[p as usize] = 990
+                        MEAS_CONF[p as usize] = 990
+                        EXPR_BELIEF[p as usize] = 985
+                        EXPR_PLAUS[p as usize] = 995
+                        if q < TC && TK[q as usize] == 7 { EXPR_CONF[q as usize] = 990 }
+                    } else if src_match(ins, ine - ins, "asserted") {
+                        EXPR_ETY[p as usize] = ety_mk_knowledge(2, 970, EXPR_UNIT_DIM)
+                        EXPR_CONF[p as usize] = 970
+                        MEAS_CONF[p as usize] = 970
+                        EXPR_BELIEF[p as usize] = 960
+                        EXPR_PLAUS[p as usize] = 980
+                        if q < TC && TK[q as usize] == 7 { EXPR_CONF[q as usize] = 970 }
+                    } else if src_match(ins, ine - ins, "constant") {
+                        EXPR_ETY[p as usize] = ety_mk_knowledge(2, 1000, EXPR_UNIT_DIM)
+                        EXPR_CONF[p as usize] = 1000
+                        MEAS_CONF[p as usize] = 1000
+                        EXPR_BELIEF[p as usize] = 1000
+                        EXPR_PLAUS[p as usize] = 1000
+                        if q < TC && TK[q as usize] == 7 { EXPR_CONF[q as usize] = 1000 }
+                    } else {
+                        // Gen 11: assign confident — built-ins are always valid calls
+                        EXPR_ETY[p as usize] = ty_i64
+                        EXPR_CONF[p as usize] = 1000
+                    }
                 }
                 EPIST_TOTAL_EXPR = EPIST_TOTAL_EXPR + 1
                 if EXPR_CONF[p as usize] >= GATE_THRESHOLD {

@@ -31,6 +31,29 @@ status: lock-released
 ---
 
 agent: codex
+time_utc: 2026-04-26T01:05:00Z
+files:
+  - bin/souc-linux-x86_64
+  - self-hosted/compiler/lean_single.sio
+  - scripts/ci/check_check_sio_integration_window.sh
+  - tests/compile-fail/confidence_gate_reject.sio
+  - tests/run-pass/confidence_gate_pass.sio
+intent: stabilize confidence-gate rebuild lane; remove temporary artifacts/debug prints; validate default compiler path
+checks:
+  - removed generated artifacts: --emit-econf gen1.out gen2.out out.bin
+  - ./bin/souc info
+  - bash scripts/ci/check_check_sio_integration_window.sh
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter confidence_gate --jobs 1 --verbose
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter unit_mismatch --jobs 1 --verbose
+  - ./bin/souc check tests/compile-fail/confidence_gate_reject.sio (still exits 0; fixture remains known-failure)
+  - ./bin/souc run tests/run-pass/confidence_gate_pass.sio
+  - git diff --check
+commit: pending
+status: blocked
+
+---
+
+agent: codex
 time_utc: 2026-02-26T17:27:30Z
 files:
   - self-hosted/check/refinement.sio
