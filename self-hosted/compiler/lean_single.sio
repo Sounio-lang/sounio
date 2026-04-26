@@ -555,6 +555,12 @@ var VAR_PARAM_USED:     [i64; 1024] = [0; 1024]
 var FN_USED_PARAMS:     [i64; 16384] = [0; 16384]
 var B9_ARG_PARAM_USED:  [i64; 16] = [0; 16]
 
+// β⁹ GTT loop fixed-point: snapshot VAR_CH_SET/VAR_PARAM_USED before each loop body,
+// union at exit to preserve pre-loop topology (handles 0-iteration case soundly).
+var GTT_LOOP_DEPTH:       i64 = 0
+var LOOP_SNAP_CH_SET:     [i64; 8192] = [0; 8192]
+var LOOP_SNAP_PARAM_USED: [i64; 8192] = [0; 8192]
+
 // --emit-econf: print function confidence table to diagnostic stream
 // --load-econf: pre-populate FN_EFF_CONF from a previously emitted .econf
 var CLI_EMIT_ECONF: i64 = 0
@@ -564,6 +570,28 @@ var ECONF_RAW: [i64; 65536] = [0; 65536]
 var ECONF_RAW_LEN: i64 = 0
 // Count of FN_EFF_CONF overrides applied from a loaded .econf
 var ECONF_APPLIED: i64 = 0
+
+fn gtt_loop_snapshot() with Mut {
+    let base = GTT_LOOP_DEPTH * 1024
+    var i: i64 = 0
+    while i < 1024 {
+        LOOP_SNAP_CH_SET[(base + i) as usize] = VAR_CH_SET[i as usize]
+        LOOP_SNAP_PARAM_USED[(base + i) as usize] = VAR_PARAM_USED[i as usize]
+        i = i + 1
+    }
+    GTT_LOOP_DEPTH = GTT_LOOP_DEPTH + 1
+}
+
+fn gtt_loop_union() with Mut {
+    GTT_LOOP_DEPTH = GTT_LOOP_DEPTH - 1
+    let base = GTT_LOOP_DEPTH * 1024
+    var i: i64 = 0
+    while i < 1024 {
+        VAR_CH_SET[i as usize] = VAR_CH_SET[i as usize] | LOOP_SNAP_CH_SET[(base + i) as usize]
+        VAR_PARAM_USED[i as usize] = VAR_PARAM_USED[i as usize] | LOOP_SNAP_PARAM_USED[(base + i) as usize]
+        i = i + 1
+    }
+}
 
 fn en_find(hash: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
@@ -16197,6 +16225,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     VAR_SSHADOW_2[ty_vi as usize] = EXPR_SSHADOW_2
                     VAR_SSHADOW_3[ty_vi as usize] = EXPR_SSHADOW_3
                 }
+                // β⁹ GTT: update channel topology on var reassignment (mirrors let-declaration path)
+                VAR_CH_SET[ty_vi as usize] = EXPR_CH_SET
+                VAR_PARAM_USED[ty_vi as usize] = EXPR_PARAM_USED
             }
             EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
             // Update closure flag on reassignment
@@ -16971,6 +17002,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         LOOP_TOP[LOOP_DEPTH as usize] = loop_top
         LOOP_DEPTH = LOOP_DEPTH + 1
         let saved_bc = BREAK_COUNT
+        // β⁹ GTT loop fixed-point: snapshot VAR_CH_SET before the loop runs
+        gtt_loop_snapshot()
         compile_or()
         if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(EP - 1, "while condition must be bool") }
         em(0x48); em(0x85); em(0xc0)
@@ -16981,6 +17014,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 9 { EP = EP + 1 }
         em(0xe9)
         em32(loop_top - (CL + 4))
+        // β⁹ GTT loop fixed-point: union post-body topology with pre-loop snapshot
+        gtt_loop_union()
         patch32(je_off, CL)
         // Patch all break jumps from this loop to point here
         var bi: i64 = saved_bc
@@ -17045,6 +17080,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // Both branches allocate: iter at saved_next, end at saved_next+1
         let iter_slot = saved_next
         let end_slot = saved_next + 1
+        // β⁹ GTT loop fixed-point: snapshot VAR_CH_SET before the loop runs
+        gtt_loop_snapshot()
         // For-loop structure: jmp cond; incr: iter++; cond: cmp; jge end; body; jmp incr; end:
         // This ensures 'continue' jumps to incr (not cond), so iter always increments.
         em(0xe9)
@@ -17077,6 +17114,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         em(0xe9)
         em32(incr_addr - (CL + 4))
         // end:
+        // β⁹ GTT loop fixed-point: union post-body topology with pre-loop snapshot
+        gtt_loop_union()
         patch32(je_off, CL)
         var bi: i64 = saved_bc
         while bi < BREAK_COUNT { patch32(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
