@@ -117,6 +117,14 @@ pub struct MachineFunction {
     pub is_float_slot: [i64; 256],
 }
 
+pub struct NativeV2LegalizeSummary {
+    pub supported: bool,
+    pub unsupported_detail: string,
+    pub source_instr_count: i64,
+    pub pseudo_instr_count: i64,
+    pub legal_instr_count: i64,
+}
+
 pub struct MachineModule {
     pub functions: [MachineFunction; 32],
     pub fn_count: i64,
@@ -243,6 +251,16 @@ pub fn machine_function_new() -> MachineFunction with Mut, Panic, Div {
         supported: true,
         unsupported_detail: "",
         is_float_slot: [0; 256],
+    }
+}
+
+pub fn native_v2_legalize_summary_new() -> NativeV2LegalizeSummary with Mut, Panic, Div {
+    NativeV2LegalizeSummary {
+        supported: true,
+        unsupported_detail: "",
+        source_instr_count: 0,
+        pseudo_instr_count: 0,
+        legal_instr_count: 0,
     }
 }
 
@@ -800,6 +818,239 @@ pub fn native_v2_make_float_move(dst_slot: i64, src_slot: i64) -> MachineInstr w
     mi.dst = machine_operand_stack_slot(dst_slot)
     mi.src1 = machine_operand_stack_slot(src_slot)
     mi
+}
+
+pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV2LegalizeSummary with Mut, Panic, Div {
+    var out = native_v2_legalize_summary_new()
+    out.source_instr_count = func.source_instr_count
+    out.pseudo_instr_count = func.blocks[0].instr_count
+    if !func.supported {
+        out.supported = false
+        out.unsupported_detail = func.unsupported_detail
+        return out
+    }
+
+    var is_float_slot: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < func.blocks[0].instr_count {
+        let instr = func.blocks[0].instrs[i as usize]
+
+        if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {
+            out.legal_instr_count = out.legal_instr_count + 2
+        } else if instr.opcode == MIR_OP_PSEUDO_LOAD_STRING {
+            out.legal_instr_count = out.legal_instr_count + 2
+        } else if instr.opcode == MIR_OP_PSEUDO_COPY {
+            let src_slot = machine_instr_src1_value(instr)
+            let dst_slot = machine_instr_dst_value(instr)
+            let src_is_float = if src_slot >= 0 && src_slot < 256 { is_float_slot[src_slot as usize] } else { 0 }
+            if src_is_float == 1 {
+                out.legal_instr_count = out.legal_instr_count + 1
+                if dst_slot >= 0 && dst_slot < 256 {
+                    is_float_slot[dst_slot as usize] = 1
+                }
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 2
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_BINOP {
+            let s1 = machine_instr_src1_value(instr)
+            let s2 = machine_instr_src2_value(instr)
+            let s1f = if s1 >= 0 && s1 < 256 { is_float_slot[s1 as usize] } else { 0 }
+            let s2f = if s2 >= 0 && s2 < 256 { is_float_slot[s2 as usize] } else { 0 }
+            if s1f == 1 || s2f == 1 {
+                out.legal_instr_count = out.legal_instr_count + 1
+                let dslot = machine_instr_dst_value(instr)
+                if dslot >= 0 && dslot < 256 {
+                    if machine_instr_bin_op(instr) == BinaryOp::OpAdd || machine_instr_bin_op(instr) == BinaryOp::OpSub || machine_instr_bin_op(instr) == BinaryOp::OpMul || machine_instr_bin_op(instr) == BinaryOp::OpDiv {
+                        is_float_slot[dslot as usize] = 1
+                    }
+                }
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 4
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_UNARY {
+            if machine_instr_un_op(instr) == UnaryOp::OpRef || machine_instr_un_op(instr) == UnaryOp::OpRefMut {
+                out.legal_instr_count = out.legal_instr_count + 2
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 3
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_CALL {
+            if machine_instr_call_arg_count(instr) > 6 {
+                out.supported = false
+                out.unsupported_detail = "call_arity_gt_6"
+                return out
+            }
+            out.legal_instr_count = out.legal_instr_count + 1 + (machine_instr_call_arg_count(instr) * 2)
+            if machine_instr_dst_value(instr) >= 0 {
+                out.legal_instr_count = out.legal_instr_count + 2
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_RET {
+            if machine_instr_src1_kind(instr) == MIR_OPERAND_STACK_SLOT {
+                out.legal_instr_count = out.legal_instr_count + 2
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 1
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_JUMP {
+            out.legal_instr_count = out.legal_instr_count + 1
+        } else if instr.opcode == MIR_OP_PSEUDO_BRANCH_TRUE {
+            out.legal_instr_count = out.legal_instr_count + 3
+        } else if instr.opcode == MIR_OP_PSEUDO_BRANCH_FALSE {
+            out.legal_instr_count = out.legal_instr_count + 3
+        } else if instr.opcode == MIR_OP_PSEUDO_LABEL {
+            out.legal_instr_count = out.legal_instr_count + 1
+        } else if instr.opcode == MIR_OP_PSEUDO_ALLOC {
+            out.legal_instr_count = out.legal_instr_count + 2
+        } else if instr.opcode == MIR_OP_PSEUDO_FIELD_GET {
+            out.legal_instr_count = out.legal_instr_count + 3
+        } else if instr.opcode == MIR_OP_PSEUDO_FIELD_SET {
+            out.legal_instr_count = out.legal_instr_count + 3
+        } else if instr.opcode == MIR_OP_PSEUDO_INDEX_GET {
+            out.legal_instr_count = out.legal_instr_count + 4
+        } else if instr.opcode == MIR_OP_PSEUDO_INDEX_SET {
+            out.legal_instr_count = out.legal_instr_count + 4
+        } else if instr.opcode == MIR_OP_PSEUDO_LOAD_FLOAT {
+            out.legal_instr_count = out.legal_instr_count + 1
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+                is_float_slot[machine_instr_dst_value(instr) as usize] = 1
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_INT_TO_FLOAT {
+            out.legal_instr_count = out.legal_instr_count + 1
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+                is_float_slot[machine_instr_dst_value(instr) as usize] = 1
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_FLOAT_TO_INT {
+            out.legal_instr_count = out.legal_instr_count + 1
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+                is_float_slot[machine_instr_dst_value(instr) as usize] = 0
+            }
+        } else {
+            out.supported = false
+            out.unsupported_detail = "unknown_pseudo_opcode"
+            return out
+        }
+        i = i + 1
+    }
+
+    out
+}
+
+pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeSummary with Mut, Panic, Div {
+    var out = native_v2_legalize_summary_new()
+    out.source_instr_count = (*func).instr_count
+
+    var is_float_slot: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < (*func).instr_count {
+        let instr = (*func).instrs[i as usize]
+        if instr.op == IrOpcode::IrNop {
+            i = i + 1
+            continue
+        }
+        if !native_v2_supported_ir_opcode(instr.op) {
+            out.supported = false
+            out.unsupported_detail = native_v2_ir_opcode_name(instr.op)
+            return out
+        }
+
+        out.pseudo_instr_count = out.pseudo_instr_count + 1
+        if instr.op == IrOpcode::IrLoadImm || instr.op == IrOpcode::IrLoadBool {
+            out.legal_instr_count = out.legal_instr_count + 2
+        } else if instr.op == IrOpcode::IrLoadString {
+            out.legal_instr_count = out.legal_instr_count + 2
+        } else if instr.op == IrOpcode::IrCopy {
+            let src_slot = instr.src1
+            let dst_slot = instr.dst
+            let src_is_float = if src_slot >= 0 && src_slot < 256 { is_float_slot[src_slot as usize] } else { 0 }
+            if src_is_float == 1 {
+                out.legal_instr_count = out.legal_instr_count + 1
+                if dst_slot >= 0 && dst_slot < 256 {
+                    is_float_slot[dst_slot as usize] = 1
+                }
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 2
+            }
+        } else if instr.op == IrOpcode::IrBinOp {
+            let s1 = instr.src1
+            let s2 = instr.src2
+            let s1f = if s1 >= 0 && s1 < 256 { is_float_slot[s1 as usize] } else { 0 }
+            let s2f = if s2 >= 0 && s2 < 256 { is_float_slot[s2 as usize] } else { 0 }
+            if s1f == 1 || s2f == 1 {
+                out.legal_instr_count = out.legal_instr_count + 1
+                if instr.dst >= 0 && instr.dst < 256 {
+                    if instr.bin_op == BinaryOp::OpAdd || instr.bin_op == BinaryOp::OpSub || instr.bin_op == BinaryOp::OpMul || instr.bin_op == BinaryOp::OpDiv {
+                        is_float_slot[instr.dst as usize] = 1
+                    }
+                }
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 4
+            }
+        } else if instr.op == IrOpcode::IrUnaryOp {
+            if instr.un_op == UnaryOp::OpRef || instr.un_op == UnaryOp::OpRefMut {
+                out.legal_instr_count = out.legal_instr_count + 2
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 3
+            }
+        } else if instr.op == IrOpcode::IrCall {
+            if instr.arg_count > 6 {
+                out.supported = false
+                out.unsupported_detail = "call_arity_gt_6"
+                return out
+            }
+            out.legal_instr_count = out.legal_instr_count + 1 + (instr.arg_count * 2)
+            if instr.dst >= 0 {
+                out.legal_instr_count = out.legal_instr_count + 2
+            }
+        } else if instr.op == IrOpcode::IrReturn {
+            if instr.src1 >= 0 {
+                out.legal_instr_count = out.legal_instr_count + 2
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 1
+            }
+        } else if instr.op == IrOpcode::IrJump {
+            out.legal_instr_count = out.legal_instr_count + 1
+        } else if instr.op == IrOpcode::IrBranchTrue {
+            out.legal_instr_count = out.legal_instr_count + 3
+        } else if instr.op == IrOpcode::IrBranchFalse {
+            out.legal_instr_count = out.legal_instr_count + 3
+        } else if instr.op == IrOpcode::IrLabel {
+            out.legal_instr_count = out.legal_instr_count + 1
+        } else if instr.op == IrOpcode::IrAlloc {
+            out.legal_instr_count = out.legal_instr_count + 2
+        } else if instr.op == IrOpcode::IrFieldGet {
+            out.legal_instr_count = out.legal_instr_count + 3
+        } else if instr.op == IrOpcode::IrFieldSet {
+            out.legal_instr_count = out.legal_instr_count + 3
+        } else if instr.op == IrOpcode::IrIndexGet {
+            out.legal_instr_count = out.legal_instr_count + 4
+        } else if instr.op == IrOpcode::IrIndexSet {
+            out.legal_instr_count = out.legal_instr_count + 4
+        } else if instr.op == IrOpcode::IrLoadFloat {
+            out.legal_instr_count = out.legal_instr_count + 1
+            if instr.dst >= 0 && instr.dst < 256 {
+                is_float_slot[instr.dst as usize] = 1
+            }
+        } else if instr.op == IrOpcode::IrIntToFloat {
+            out.legal_instr_count = out.legal_instr_count + 1
+            if instr.dst >= 0 && instr.dst < 256 {
+                is_float_slot[instr.dst as usize] = 1
+            }
+        } else if instr.op == IrOpcode::IrFloatToInt {
+            out.legal_instr_count = out.legal_instr_count + 1
+            if instr.dst >= 0 && instr.dst < 256 {
+                is_float_slot[instr.dst as usize] = 0
+            }
+        } else {
+            out.supported = false
+            out.unsupported_detail = "unknown_ir_opcode"
+            return out
+        }
+        i = i + 1
+    }
+
+    out
+}
+
+pub fn native_v2_legalize_ir_summary(func: IrFunction) -> NativeV2LegalizeSummary with Mut, Panic, Div {
+    native_v2_legalize_ir_summary_ref(&func)
 }
 
 pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction with Mut, Panic, Div {
