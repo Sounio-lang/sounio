@@ -109,15 +109,26 @@ var FNSIG_RET_TY: [i64; 256] = [0; 256]
 var FNSIG_RET_HASH: [i64; 256] = [0; 256]
 var FNSIG_PARAM_TY: [i64; 4096] = [0; 4096]
 var FNSIG_PARAM_HASH: [i64; 4096] = [0; 4096]
+var FNSIG_EFF: [i64; 256] = [0; 256]
 var FNSIG_COUNT: i64 = 1
 var FNSIG_SCRATCH_ARITY: i64 = 0
 var FNSIG_SCRATCH_RET_TY: i64 = 0
 var FNSIG_SCRATCH_RET_HASH: i64 = 0
+var FNSIG_SCRATCH_EFF: i64 = 0
 var FNSIG_SCRATCH_PARAM_TY: [i64; 16] = [0; 16]
 var FNSIG_SCRATCH_PARAM_HASH: [i64; 16] = [0; 16]
 var FNSIG_SCAN_DEPTH: i64 = 0
 var FNSIG_TMP_PARAM_TY: [i64; 256] = [0; 256]
 var FNSIG_TMP_PARAM_HASH: [i64; 256] = [0; 256]
+
+// Closure FNSIG inference: depth-indexed stacks (max 8 nesting levels)
+var CL_DEPTH: i64 = 0
+var CL_FNSIG_NPARAMS: [i64; 8] = [0; 8]
+var CL_FNSIG_PARAM_TY: [i64; 128] = [0; 128]
+var CL_FNSIG_PARAM_TH: [i64; 128] = [0; 128]
+var CL_FNSIG_RET_TY: [i64; 8] = [0; 8]
+var CL_FNSIG_RET_HASH: [i64; 8] = [0; 8]
+var CL_FNSIG_EFF: [i64; 8] = [0; 8]
 
 // Struct registry: flat array, up to 32 structs
 // ST[i*66+0] = name hash
@@ -205,8 +216,11 @@ var MAN_BUF_E: [i64; 128] = [0; 64]
 // Gen 20: GPU=8192 (bit 13) — function dispatches work to GPU via CUDA/PTX
 var FN_EFFECTS: [i64; 16384] = [0; 16384]
 var FN_NAME_TOK: [i64; 16384] = [0; 16384]
+var FN_BODY_OPEN: [i64; 16384] = [0; 16384]
+var FN_BODY_CLOSE: [i64; 16384] = [0; 16384]
 var FN_NEEDS_SESSION: [i64; 16384] = [0; 16384]
 var CURRENT_FN: i64 = 0
+var CURRENT_BODY_CLOSE: i64 = 0
 // When inside an `impl Type { ... }` block, this is set to Type's hash.
 // Functions registered while this is non-zero get FN_RECV_HASH set automatically.
 var CURRENT_IMPL_RECV_HASH: i64 = 0
@@ -673,6 +687,10 @@ fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
         if ty_hash >= 1000000007 && ty_hash < 1000001007 { return ty_hash - 1000000007 }
         let si = st_find(ty_hash)
         if si >= 0 { return st_total_size(si) / 8 }
+    }
+    if ty == 0 && ty_hash != 0 {
+        let fwd_si = st_find(ty_hash)
+        if fwd_si >= 0 { return st_total_size(fwd_si) / 8 }
     }
     if type_is_option_inline(ty, ty_hash) { return 2 }
     if ty == 11 { return 1 }
@@ -2849,6 +2867,10 @@ fn ret_agg_nslots(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     // Knowledge types use negative hashes, but only for type 0 (unresolved Knowledge)
     // or type 6 (struct-like). NOT for enums (ty==7) or scalars.
     if knowledge_hash_is(ty_hash) && ty != 7 && ty != 1 && ty != 4 { return 3 }
+    if ty == 0 && ty_hash != 0 {
+        let fwd_si = st_find(ty_hash)
+        if fwd_si >= 0 { return st_total_size(fwd_si) / 8 }
+    }
     if ty == 6 {
         let si = st_find(ty_hash)
         if si >= 0 { return st_total_size(si) / 8 }
@@ -3905,7 +3927,8 @@ fn fnsig_intern_scratch() -> i64 with Mut, Panic {
     while sig < FNSIG_COUNT {
         if FNSIG_ARITY[sig as usize] == FNSIG_SCRATCH_ARITY
             && FNSIG_RET_TY[sig as usize] == FNSIG_SCRATCH_RET_TY
-            && FNSIG_RET_HASH[sig as usize] == FNSIG_SCRATCH_RET_HASH {
+            && FNSIG_RET_HASH[sig as usize] == FNSIG_SCRATCH_RET_HASH
+            && FNSIG_EFF[sig as usize] == FNSIG_SCRATCH_EFF {
             var same: i64 = 1
             var pi: i64 = 0
             while pi < FNSIG_SCRATCH_ARITY {
@@ -3927,6 +3950,7 @@ fn fnsig_intern_scratch() -> i64 with Mut, Panic {
     FNSIG_ARITY[sig as usize] = FNSIG_SCRATCH_ARITY
     FNSIG_RET_TY[sig as usize] = FNSIG_SCRATCH_RET_TY
     FNSIG_RET_HASH[sig as usize] = FNSIG_SCRATCH_RET_HASH
+    FNSIG_EFF[sig as usize] = FNSIG_SCRATCH_EFF
     var pi: i64 = 0
     while pi < 16 {
         let base = sig * 16 + pi
@@ -3978,9 +4002,11 @@ fn scan_fn_type_signature(p0: i64) with IO, Mut, Panic, Div {
         ret_hash = SCAN_TY_HASH
         p = SCAN_TY_NEXT
     }
+    var eff_mask: i64 = 0
     if TK[p as usize] == 38 {
         p = p + 1
         while tok_is_effect_name(p) {
+            eff_mask = eff_mask | ety_parse_effect_name(TS[p as usize], TE[p as usize])
             p = p + 1
             if TK[p as usize] == 28 && tok_is_effect_name(p + 1) {
                 p = p + 1
@@ -3989,6 +4015,7 @@ fn scan_fn_type_signature(p0: i64) with IO, Mut, Panic, Div {
             }
         }
     }
+    FNSIG_SCRATCH_EFF = eff_mask
     FNSIG_SCRATCH_ARITY = arity
     FNSIG_SCRATCH_RET_TY = ret_ty
     FNSIG_SCRATCH_RET_HASH = ret_hash
@@ -4064,6 +4091,7 @@ fn fnsig_from_decl_name_tok(name_tok: i64) -> i64 with IO, Mut, Panic, Div {
     FNSIG_SCRATCH_ARITY = arity
     FNSIG_SCRATCH_RET_TY = ret_ty
     FNSIG_SCRATCH_RET_HASH = ret_hash
+    FNSIG_SCRATCH_EFF = 0
     i = 0
     while i < 16 {
         if i < arity {
@@ -4642,6 +4670,57 @@ fn mono_find_inst(gi: i64, is_st: i64, tys: i64, tye: i64) -> i64 with Panic, Mu
         i = i + 1
     }
     return -1
+}
+
+// For generic fn gi, find the index of the param whose type is directly T (not first).
+// Scans param list starting from the > token. Returns that param index, or -1.
+fn mono_t_param_idx(gi: i64) -> i64 with Panic, Mut {
+    var sig: i64 = GEN_FN_BDY_S[gi as usize] + 3
+    while sig < TC && TK[sig as usize] != 24 { sig = sig + 1 }
+    // sig at >; check for > ( NAME : pattern
+    if sig + 4 >= TC { return -1 }
+    if TK[(sig + 1) as usize] != 6 { return -1 }
+    if TK[(sig + 3) as usize] != 43 { return -1 }
+    // If first param type is directly T, return -1 (caller handles it)
+    if TK[(sig + 4) as usize] == 3 && name_eq(TS[(sig + 4) as usize], TE[(sig + 4) as usize], GEN_FN_TP_S[gi as usize], GEN_FN_TP_E[gi as usize]) { return -1 }
+    // Scan params for one whose type is directly T
+    var pp: i64 = sig + 2  // skip > and (
+    var pi: i64 = 0
+    while pp < TC && TK[pp as usize] != 7 {
+        if TK[pp as usize] == 3 {
+            pp = pp + 1
+            if TK[pp as usize] == 43 {
+                pp = pp + 1
+                if TK[pp as usize] == 3 && name_eq(TS[pp as usize], TE[pp as usize], GEN_FN_TP_S[gi as usize], GEN_FN_TP_E[gi as usize]) {
+                    return pi
+                } else {
+                    pp = skip_call_arg_expr(pp)
+                }
+            }
+        }
+        if TK[pp as usize] == 28 { pp = pp + 1; pi = pi + 1 }
+        else { pp = pp + 1 }
+    }
+    return -1
+}
+
+// Given generic fn gi and call arg start position, infer instance index from the T-typed arg.
+fn mono_infer_from_nth_arg(gi: i64, call_arg_start: i64) -> i64 with Panic, Mut {
+    let t_pi = mono_t_param_idx(gi)
+    if t_pi < 0 { return -1 }
+    var ap: i64 = call_arg_start
+    var ai: i64 = 0
+    while ai < t_pi && ap < TC && TK[ap as usize] != 7 {
+        ap = skip_call_arg_expr(ap)
+        if TK[ap as usize] == 28 { ap = ap + 1 }
+        ai = ai + 1
+    }
+    var inf_tys: i64 = 0
+    var inf_tye: i64 = 0
+    if TK[ap as usize] == 4  { inf_tys = INF_I64_S; inf_tye = INF_I64_E }
+    if TK[ap as usize] == 53 { inf_tys = INF_F64_S; inf_tye = INF_F64_E }
+    if inf_tys == 0 { return -1 }
+    return mono_find_inst(gi, 0, inf_tys, inf_tye)
 }
 
 // ─── Lexer ───
@@ -5820,6 +5899,27 @@ fn print_fn_name(fi: i64) with IO, Mut, Panic {
         print_char(SRC[i as usize] as i64)
         i = i + 1
     }
+}
+
+fn find_matching_body_close(open_tok: i64) -> i64 with Panic, Mut {
+    if open_tok < 0 || open_tok >= TC { return TC }
+    if TK[open_tok as usize] != 8 { return TC }
+    var q: i64 = open_tok
+    var depth: i64 = 0
+    while q < TC {
+        if TK[q as usize] == 8 { depth = depth + 1 }
+        if TK[q as usize] == 9 {
+            depth = depth - 1
+            if depth == 0 { return q }
+        }
+        q = q + 1
+    }
+    return TC
+}
+
+fn ep_before_body_close() -> bool {
+    if CURRENT_BODY_CLOSE == 0 { return true }
+    return EP < CURRENT_BODY_CLOSE
 }
 
 // ─── Emit helpers ───
@@ -7511,7 +7611,7 @@ fn compile_knowledge_literal_x86() with IO, Mut, Panic, Div {
     var saw_conf: i64 = 0
     var lit_mode: i64 = 0
     var lit_eps: i64 = -1
-    while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 {
         if TK[EP as usize] == 3 {
             let field_tok = EP
             let fns = TS[EP as usize]
@@ -8041,7 +8141,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         var idx: i64 = 0
         var elem_ty: i64 = 0
         var elem_hash: i64 = 0
-        while TK[EP as usize] != 42 && TK[EP as usize] != 0 {
+        while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 {
             compile_or()
             if idx == 0 {
                 elem_ty = EXPR_TY
@@ -8074,6 +8174,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         var zero_param_closure: i64 = 0
         if k == 31 { zero_param_closure = 1 }
         EP = EP + 1  // skip opening | or ||
+        CL_DEPTH = CL_DEPTH + 1
+        CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = 0
         // Save outer function state
         let save_vc = VAR_COUNT
         let save_ns2 = NEXT_SLOT
@@ -8156,11 +8258,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         if TK[EP as usize] == 38 {
             EP = EP + 1
-            // Gen 17 D2: skip effect list — handles Epistemic(N) parameterized effects
             while TK[EP as usize] == 3 || TK[EP as usize] == 28 {
                 if TK[EP as usize] == 3 {
+                    CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] | ety_parse_effect_name(TS[EP as usize], TE[EP as usize])
                     EP = EP + 1
-                    // skip optional (N) argument (e.g. Epistemic(970))
                     if TK[EP as usize] == 6 {
                         EP = EP + 1
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
@@ -8172,6 +8273,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
         }
         let nparams = VAR_COUNT  // user params only
+        // Save closure's param types + ret type for FNSIG construction
+        CL_FNSIG_NPARAMS[(CL_DEPTH - 1) as usize] = nparams
+        var cl_pi: i64 = 0
+        while cl_pi < nparams {
+            CL_FNSIG_PARAM_TY[((CL_DEPTH - 1) * 16 + cl_pi) as usize] = VAR_TY[cl_pi as usize]
+            CL_FNSIG_PARAM_TH[((CL_DEPTH - 1) * 16 + cl_pi) as usize] = VAR_TY_HASH[cl_pi as usize]
+            cl_pi = cl_pi + 1
+        }
+        CL_FNSIG_RET_TY[(CL_DEPTH - 1) as usize] = CURRENT_RET_TY
+        CL_FNSIG_RET_HASH[(CL_DEPTH - 1) as usize] = CURRENT_RET_HASH
         // Register outer-scope vars as captures (those not shadowed by params)
         var ci: i64 = 0
         while ci < save_vc {
@@ -8241,7 +8352,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // Compile body
         if TK[EP as usize] == 8 {
             EP = EP + 1
-            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
             if TK[EP as usize] == 9 { EP = EP + 1 }
         } else {
             compile_or()
@@ -8322,6 +8433,24 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             emit_load_var(heap_slot)                    // rax = heap_ptr (return value)
         }
+        // Build FNSIG with inferred/explicit effects for this closure
+        CL_DEPTH = CL_DEPTH - 1
+        FNSIG_SCRATCH_ARITY = CL_FNSIG_NPARAMS[CL_DEPTH as usize]
+        FNSIG_SCRATCH_RET_TY = CL_FNSIG_RET_TY[CL_DEPTH as usize]
+        FNSIG_SCRATCH_RET_HASH = CL_FNSIG_RET_HASH[CL_DEPTH as usize]
+        FNSIG_SCRATCH_EFF = CL_FNSIG_EFF[CL_DEPTH as usize]
+        svi = 0
+        while svi < 16 {
+            if svi < FNSIG_SCRATCH_ARITY {
+                FNSIG_SCRATCH_PARAM_TY[svi as usize] = CL_FNSIG_PARAM_TY[(CL_DEPTH * 16 + svi) as usize]
+                FNSIG_SCRATCH_PARAM_HASH[svi as usize] = CL_FNSIG_PARAM_TH[(CL_DEPTH * 16 + svi) as usize]
+            } else {
+                FNSIG_SCRATCH_PARAM_TY[svi as usize] = 0
+                FNSIG_SCRATCH_PARAM_HASH[svi as usize] = 0
+            }
+            svi = svi + 1
+        }
+        EXPR_TY_HASH = fnsig_intern_scratch()
         EXPR_IS_F64 = 0
         EXPR_TY = 9
         LAST_EXPR_IS_CLOSURE = 1
@@ -8426,7 +8555,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             var last_ty: i64 = 0
             var last_hash: i64 = 0
             var last_nslots: i64 = 0
-            while TK[EP as usize] == 28 {
+            while ep_before_body_close() && TK[EP as usize] == 28 {
                 EP = EP + 1  // skip ,
                 if TK[EP as usize] == 7 { break }  // trailing comma
                 compile_or()
@@ -8591,7 +8720,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         if src_match(ns, ne - ns, "async") && TK[EP as usize] == 8 {
             EP = EP + 1  // skip {
             LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
-            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
             if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
             EXPR_TY = LAST_STMT_TY
             EXPR_TY_HASH = LAST_STMT_TY_HASH
@@ -8623,7 +8752,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // Child path: execute block, store result, exit
             EP = EP + 1  // skip {
             LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
-            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
             if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
             // Block result is in rax; save then store to shared slot
             em(0x48); em(0x89); em(0xc6)            // mov rsi, rax  ; save block result
@@ -8962,7 +9091,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             if g_found == 1 { EP = EP + 3 }
         }
-        // Bare-call inference: IDENT ( LITERAL — infer generic type from first arg literal
+        // Bare-call inference: IDENT ( — infer generic type from first arg or T-typed nth param
         if TK[EP as usize] == 6 && GEN_FN_COUNT > 0 {
             var inf_gi: i64 = 0
             var inf_found: i64 = 0
@@ -8976,6 +9105,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if inf_tys != 0 {
                         let inf_mi = mono_find_inst(inf_gi, 0, inf_tys, inf_tye)
                         if inf_mi >= 0 { ns = MAN_BUF_S[inf_mi as usize]; ne = MAN_BUF_E[inf_mi as usize]; inf_found = 1 }
+                    }
+                    if inf_found == 0 {
+                        let nth_mi = mono_infer_from_nth_arg(inf_gi, EP + 1)
+                        if nth_mi >= 0 { ns = MAN_BUF_S[nth_mi as usize]; ne = MAN_BUF_E[nth_mi as usize]; inf_found = 1 }
                     }
                     inf_gi = GEN_FN_COUNT
                 }
@@ -9504,7 +9637,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                     compile_or()
-                    while TK[EP as usize] == 28 {
+                    while ep_before_body_close() && TK[EP as usize] == 28 {
                         EP = EP + 1
                         EP = skip_call_arg_expr(EP)
                     }
@@ -9519,7 +9652,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                     compile_or()
-                    while TK[EP as usize] == 28 {
+                    while ep_before_body_close() && TK[EP as usize] == 28 {
                         EP = EP + 1
                         EP = skip_call_arg_expr(EP)
                     }
@@ -9534,7 +9667,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                     compile_or()
-                    while TK[EP as usize] == 28 {
+                    while ep_before_body_close() && TK[EP as usize] == 28 {
                         EP = EP + 1
                         EP = skip_call_arg_expr(EP)
                     }
@@ -11004,6 +11137,18 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         tc_observe_boundary(call_tok, "cannot pass Unobserved<T> to IO or FFI function — requires `with Observe`")
                     }
                 }
+                // Effect transparency: fn-arg's inferred effects propagate to the call site.
+                // If the HOF param is unannotated (FNSIG_EFF=0), the closure's effects are
+                // inherited by the caller — the HOF is implicitly effect-polymorphic.
+                if SCAN_TY == 9 && EXPR_TY == 9 && EXPR_TY_HASH > 0 {
+                    let etarg_eff = FNSIG_EFF[EXPR_TY_HASH as usize]
+                    if etarg_eff != 0 && (SCAN_TY_HASH <= 0 || SCAN_TY_HASH >= 256 || FNSIG_EFF[SCAN_TY_HASH as usize] == 0) {
+                        let etcaller_eff = FN_EFFECTS[CURRENT_FN as usize] & 1023
+                        if bitset_is_subset(etarg_eff, etcaller_eff) == false {
+                            tc_effect_call_violation(call_tok, etarg_eff, etcaller_eff)
+                        }
+                    }
+                }
                 // Mark struct variable as moved when passed by value to a function
                 // Only linear/affine structs are moved; non-linear structs are implicitly copied
                 if EXPR_TY == 6 && LAST_EXPR_VAR_IDX >= 0 {
@@ -11037,6 +11182,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let caller_is_import = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
                 if bitset_is_subset(callee_eff, caller_eff) == false && !(callee_is_import && caller_is_import) {
                     tc_effect_call_violation(call_tok, callee_eff, caller_eff)
+                }
+                // Effect inference: propagate callee effects into enclosing closure body
+                if CL_DEPTH > 0 {
+                    CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] | (callee_eff & 63)
                 }
                 // Visibility check: imported non-pub function called from main module
                 let callee_is_pub = (FN_EFFECTS[fi as usize] & 1024) != 0
@@ -11296,7 +11445,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let base_slot = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + total_slots
                 // Parse field: value pairs
-                while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+                while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 {
                     if TK[EP as usize] == 3 {
                         let field_tok = EP
                         let fns = TS[EP as usize]
@@ -15042,7 +15191,7 @@ fn compile_gpu_launch_stmt_x86() with IO, Mut, Panic, Div {
             tc_error(perform_tok, "GPU.launch requires kernel function name")
             EP = skip_call_arg_expr(EP)
         }
-        while TK[EP as usize] == 28 {
+        while ep_before_body_close() && TK[EP as usize] == 28 {
             EP = EP + 1
             launch_argc = launch_argc + 1
             EP = skip_call_arg_expr(EP)
@@ -16069,7 +16218,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             // Local array: allocate slots, skip initializer [0; N], store lea
             // Skip [0; N] or [val; N] initializer
             EP = EP + 1  // skip [
-            while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
+            while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
             if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
             let nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
@@ -16832,6 +16981,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         }
         em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
         if CURRENT_SRET_SLOT > 0 {
+            em(0x4c); em(0x89); em(0xe0)  // mov rax, r12 (return SRET ptr)
             em(0x41); em(0x5c)  // pop r12
         }
         em(0x5d); em(0xc3)
@@ -17011,7 +17161,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             // Compile then-body
             LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
             if TK[EP as usize] == 8 { EP = EP + 1 }
-            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
             let il_then_has_value = LAST_STMT_HAS_VALUE
             let il_then_ty = LAST_STMT_TY
             let il_then_hash = LAST_STMT_TY_HASH
@@ -17035,7 +17185,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 else {
                     LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
                     if TK[EP as usize] == 8 { EP = EP + 1 }
-                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
                     if TK[EP as usize] == 9 { EP = EP + 1 }
                 }
                 let il_else_has_value = LAST_STMT_HAS_VALUE
@@ -17073,7 +17223,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             lsnap = lsnap + 1
         }
         if TK[EP as usize] == 8 { EP = EP + 1 }
-        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
         // β⁹ GTT week-6 stage-2: capture then-body's tail channel-set topology.
         let if_then_ch_set = EXPR_CH_SET
         let then_has_value = LAST_STMT_HAS_VALUE
@@ -17107,7 +17257,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 LAST_STMT_TY = 0
                 LAST_STMT_TY_HASH = 0
                 if TK[EP as usize] == 8 { EP = EP + 1 }
-                while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
                 if TK[EP as usize] == 9 { EP = EP + 1 }
             }
             // β⁹ GTT week-6 stage-2: capture else-body's tail channel-set topology.
@@ -17309,7 +17459,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             }
             // Compile body
             if TK[EP as usize] == 8 { EP = EP + 1 }
-            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
             if TK[EP as usize] == 9 { EP = EP + 1 }
             // Jump back to loop top
             em(0xe9)
@@ -17337,7 +17487,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         em(0x0f); em(0x84)
         let je_off = CL; em32(0)
         if TK[EP as usize] == 8 { EP = EP + 1 }
-        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
         if TK[EP as usize] == 9 { EP = EP + 1 }
         em(0xe9)
         em32(loop_top - (CL + 4))
@@ -17435,7 +17585,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         em(0x0f); em(0x84)
         let je_off = CL; em32(0)  // jz end
         if TK[EP as usize] == 8 { EP = EP + 1 }  // skip {
-        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
         if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
         // jmp incr
         em(0xe9)
@@ -17480,7 +17630,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // At the both-arms-have-value exit, EXPR_CH_SET = scrut | arms_union
         // to match `Typing.tMatch` conclusion `Sc.union (chsetUnionFin Ss)`.
         var match_arms_ch_union: i64 = 0
-        while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 {
             var is_wildcard: i64 = 0
             var is_var_bind: i64 = 0
             var disc: i64 = -1
@@ -17678,7 +17828,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 8 { or_arm_block = 1; EP = EP + 1 }
                 LAST_STMT_HAS_VALUE = 0
                 if or_arm_block == 1 {
-                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
                     if TK[EP as usize] == 9 { EP = EP + 1 }
                 } else { compile_stmt() }
                 // β⁹ GTT week-7: OR arm's tail EXPR_CH_SET into the running union.
@@ -17728,7 +17878,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 8 { vb_arm_has_block = 1; EP = EP + 1 }
                 LAST_STMT_HAS_VALUE = 0
                 if vb_arm_has_block == 1 {
-                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
                     if TK[EP as usize] == 9 { EP = EP + 1 }
                 } else { compile_stmt() }
                 // β⁹ GTT week-7: OR var-binding arm's tail EXPR_CH_SET into union.
@@ -17781,7 +17931,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     if TK[EP as usize] == 8 { arm_has_block = 1; EP = EP + 1 }
                     LAST_STMT_HAS_VALUE = 0
                     if arm_has_block == 1 {
-                        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
                         if TK[EP as usize] == 9 { EP = EP + 1 }
                     } else {
                         compile_stmt()
@@ -17816,7 +17966,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     if TK[EP as usize] == 8 { arm_has_block2 = 1; EP = EP + 1 }
                     LAST_STMT_HAS_VALUE = 0
                     if arm_has_block2 == 1 {
-                        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
                         if TK[EP as usize] == 9 { EP = EP + 1 }
                     } else {
                         compile_stmt()
@@ -17847,7 +17997,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 8 { arm_has_block3 = 1; EP = EP + 1 }
                 LAST_STMT_HAS_VALUE = 0
                 if arm_has_block3 == 1 {
-                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
                     if TK[EP as usize] == 9 { EP = EP + 1 }
                 } else {
                     compile_stmt()
@@ -20028,6 +20178,54 @@ fn mono_pass() with IO, Mut, Panic, Div {
                                 MAN_BUF_E[d_mi as usize] = SRC_LEN
                                 MONO_COUNT = MONO_COUNT + 1
                             }
+                        } else {
+                            // Extended: first param is not directly T (e.g. fn(T)->T).
+                            // Scan all params to find one with direct type T; infer from its arg.
+                            var ep_p: i64 = sig_scan + 1  // at (
+                            if TK[ep_p as usize] == 6 { ep_p = ep_p + 1 }
+                            var ep_pi: i64 = 0
+                            var ep_t_pi: i64 = -1
+                            while ep_p < TC && TK[ep_p as usize] != 7 && ep_t_pi < 0 {
+                                if TK[ep_p as usize] == 3 {
+                                    ep_p = ep_p + 1
+                                    if TK[ep_p as usize] == 43 {
+                                        ep_p = ep_p + 1
+                                        if TK[ep_p as usize] == 3 && name_eq(TS[ep_p as usize], TE[ep_p as usize], GEN_FN_TP_S[d_gi as usize], GEN_FN_TP_E[d_gi as usize]) {
+                                            ep_t_pi = ep_pi
+                                        } else {
+                                            ep_p = skip_call_arg_expr(ep_p)
+                                        }
+                                    }
+                                }
+                                if ep_t_pi >= 0 { ep_p = TC }
+                                else if TK[ep_p as usize] == 28 { ep_p = ep_p + 1; ep_pi = ep_pi + 1 }
+                                else { ep_p = ep_p + 1 }
+                            }
+                            if ep_t_pi >= 0 {
+                                var ea_p: i64 = p + 2
+                                var ea_i: i64 = 0
+                                while ea_i < ep_t_pi && ea_p < TC && TK[ea_p as usize] != 7 {
+                                    ea_p = skip_call_arg_expr(ea_p)
+                                    if TK[ea_p as usize] == 28 { ea_p = ea_p + 1 }
+                                    ea_i = ea_i + 1
+                                }
+                                d_tys = 0; d_tye = 0
+                                if TK[ea_p as usize] == 4  { d_tys = INF_I64_S; d_tye = INF_I64_E }
+                                if TK[ea_p as usize] == 53 { d_tys = INF_F64_S; d_tye = INF_F64_E }
+                                if d_tys != 0 && mono_find_inst(d_gi, 0, d_tys, d_tye) < 0 {
+                                    d_mi = MONO_COUNT
+                                    MONO_GEN[d_mi as usize] = d_gi
+                                    MONO_TY_S[d_mi as usize] = d_tys
+                                    MONO_TY_E[d_mi as usize] = d_tye
+                                    MONO_TY2_S[d_mi as usize] = 0
+                                    MONO_TY2_E[d_mi as usize] = 0
+                                    MONO_IS_ST[d_mi as usize] = 0
+                                    d_ms = mono_mangle(GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize], d_tys, d_tye)
+                                    MAN_BUF_S[d_mi as usize] = d_ms
+                                    MAN_BUF_E[d_mi as usize] = SRC_LEN
+                                    MONO_COUNT = MONO_COUNT + 1
+                                }
+                            }
                         }
                     }
                     d_gi = GEN_FN_COUNT
@@ -21088,6 +21286,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             // Scan forward to find { (start of body) — effects are between ) -> type with ... {
             var eq: i64 = p + 1
             while eq < TC && TK[eq as usize] != 8 { eq = eq + 1 }
+            if eff_fi < FN_COUNT {
+                FN_BODY_OPEN[eff_fi as usize] = eq
+                FN_BODY_CLOSE[eff_fi as usize] = find_matching_body_close(eq)
+            }
             // Scan only the function's own top-level `with`, not nested effect
             // clauses inside function-typed parameters or return types.
             var ew: i64 = p + 1
@@ -21313,18 +21515,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // Pass 2: compile each function
     p = 0
     var fn_idx: i64 = 0
-    while p < TC {
-        if TK[p as usize] != 1 || TK[(p + 1) as usize] != 3 { p = p + 1; continue }
-        p = p + 1  // skip 'fn'
+    while fn_idx < FN_COUNT {
+        p = FN_NAME_TOK[fn_idx as usize]
         let is_kernel_fn = FN_IS_KERNEL[fn_idx as usize]
-
-        // Skip generic function templates
-        if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 {
-            while p < TC && TK[p as usize] != 8 { p = p + 1 }
-            var gd: i64 = 1
-            p = p + 1
-            while p < TC && gd > 0 { if TK[p as usize] == 8 { gd = gd + 1 }; if TK[p as usize] == 9 { gd = gd - 1 }; p = p + 1 }
-            continue
+        let body_open = FN_BODY_OPEN[fn_idx as usize]
+        let body_close = FN_BODY_CLOSE[fn_idx as usize]
+        if p <= 0 || p >= TC || body_open <= 0 || body_close <= body_open || body_close > TC {
+            print("error: invalid function body span for fn#")
+            print_int(fn_idx)
+            print(" ")
+            print_fn_name(fn_idx)
+            print("\n")
+            return 1
         }
 
         // Record code offset + set current function for effects checking
@@ -21332,6 +21534,32 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         CURRENT_FN = fn_idx
         CURRENT_RET_TY = FN_RET_TY[fn_idx as usize]
         CURRENT_RET_HASH = FN_RET_HASH[fn_idx as usize]
+        if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "with_text") {
+            print("debug with_text fn#")
+            print_int(fn_idx)
+            print(" recv=")
+            print_int(FN_RECV_HASH[fn_idx as usize])
+            print(" ret=")
+            print_int(CURRENT_RET_TY)
+            print("/")
+            print_int(CURRENT_RET_HASH)
+            print(" slots=")
+            print_int(ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH))
+            print("\n")
+        }
+        if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "new") {
+            print("debug new fn#")
+            print_int(fn_idx)
+            print(" recv=")
+            print_int(FN_RECV_HASH[fn_idx as usize])
+            print(" ret=")
+            print_int(CURRENT_RET_TY)
+            print("/")
+            print_int(CURRENT_RET_HASH)
+            print(" slots=")
+            print_int(ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH))
+            print("\n")
+        }
 
         // (stub infrastructure removed — imported functions compile fully)
 
@@ -21481,7 +21709,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 } else { p = p + 1 }
             }
         }
-        if TK[p as usize] == 8 { p = p + 1 }
+        p = body_open + 1
+        CURRENT_BODY_CLOSE = body_close
 
         // Save error count before compiling this function's body
         let fn_err_before = TC_FN_ERR_COUNT
@@ -21583,7 +21812,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             em32(0)
             EP = p
             var kernel_body_depth: i64 = 1
-            while EP < TC && kernel_body_depth > 0 {
+            while EP < TC && EP < CURRENT_BODY_CLOSE && kernel_body_depth > 0 {
                 if TK[EP as usize] == 9 { kernel_body_depth = kernel_body_depth - 1; if kernel_body_depth == 0 { EP = EP + 1; continue } else { EP = EP + 1; continue } }
                 compile_stmt()
             }
@@ -21593,18 +21822,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             em(0xe9)
             em32(kernel_loop_top - (CL + 4))
             patch32(kernel_loop_end, CL)
-            p = EP
+            p = body_close + 1
         } else {
             // Compile body
             EP = p
             var depth: i64 = 1
-            let body_ns_trace = NEXT_SLOT
-            while EP < TC && depth > 0 {
+            while EP < TC && EP < CURRENT_BODY_CLOSE && depth > 0 {
                 if TK[EP as usize] == 9 { depth = depth - 1; if depth == 0 { EP = EP + 1; continue } else { EP = EP + 1; continue } }
                 compile_stmt()
             }
-            p = EP
+            p = body_close + 1
         }
+        CURRENT_BODY_CLOSE = 0
 
         // β⁹ GTT week-4: capture body-tail EXPR_PARAM_USED into FN_USED_PARAMS
         // so callers can tighten channel-set unions to only the params this
@@ -21662,6 +21891,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             }
             em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
             if CURRENT_SRET_SLOT > 0 {
+                em(0x4c); em(0x89); em(0xe0)  // mov rax, r12 (return SRET ptr)
                 em(0x41); em(0x5c)  // pop r12 (restore callee-saved)
             }
             em(0x5d); em(0xc3)
@@ -21703,6 +21933,30 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         }
 
         fn_idx = fn_idx + 1
+    }
+
+    if fn_idx != FN_COUNT {
+        print("error: function pass mismatch compiled=")
+        print_int(fn_idx)
+        print(" registered=")
+        print_int(FN_COUNT)
+        print("\n")
+        var ufi: i64 = 0
+        var ushown: i64 = 0
+        while ufi < FN_COUNT && ushown < 12 {
+            if FN_OFF[ufi as usize] == -1 {
+                print("uncompiled fn#")
+                print_int(ufi)
+                print(" ")
+                print_fn_name(ufi)
+                print(" line ")
+                print_int(TL[FN_NAME_TOK[ufi as usize] as usize])
+                print("\n")
+                ushown = ushown + 1
+            }
+            ufi = ufi + 1
+        }
+        return 1
     }
 
     if TYPECHECK_FAILED != 0 {
@@ -23262,7 +23516,7 @@ fn compile_knowledge_literal_a64() with IO, Mut, Panic, Div {
     var saw_conf: i64 = 0
     var lit_mode: i64 = 0
     var lit_eps: i64 = -1
-    while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 {
         if TK[EP as usize] == 3 {
             let field_tok = EP
             let fns = TS[EP as usize]
@@ -23481,7 +23735,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         var idx: i64 = 0
         var elem_ty: i64 = 0
         var elem_hash: i64 = 0
-        while TK[EP as usize] != 42 && TK[EP as usize] != 0 {
+        while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 {
             compile_or_a64()
             if idx == 0 {
                 elem_ty = EXPR_TY
@@ -24873,7 +25127,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let total_slots = st_total_size(si) / 8
                 let base_slot = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + total_slots
-                while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+                while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 {
                     if TK[EP as usize] == 3 {
                         let field_tok = EP
                         let fns = TS[EP as usize]
@@ -26058,7 +26312,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
         if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             EP = EP + 1
-            while TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
+            while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
             if TK[EP as usize] == 42 { EP = EP + 1 }
             let nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
@@ -26699,7 +26953,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
             if TK[EP as usize] == 8 { EP = EP + 1 }
-            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+            while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
             let il_then_has_value = LAST_STMT_HAS_VALUE
             let il_then_ty = LAST_STMT_TY; let il_then_hash = LAST_STMT_TY_HASH
             if TK[EP as usize] == 9 { EP = EP + 1 }
@@ -26720,7 +26974,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 else {
                     LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
                     if TK[EP as usize] == 8 { EP = EP + 1 }
-                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
                     if TK[EP as usize] == 9 { EP = EP + 1 }
                 }
                 let il_else_has_value = LAST_STMT_HAS_VALUE
@@ -26749,7 +27003,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
         if TK[EP as usize] == 8 { EP = EP + 1 }
-        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
         // β⁹ GTT week-6 stage-2: capture then-body's tail channel-set topology.
         let if_then_ch_set_a = EXPR_CH_SET
         let then_has_value = LAST_STMT_HAS_VALUE
@@ -26770,7 +27024,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 LAST_STMT_TY = 0
                 LAST_STMT_TY_HASH = 0
                 if TK[EP as usize] == 8 { EP = EP + 1 }
-                while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
                 if TK[EP as usize] == 9 { EP = EP + 1 }
             }
             // β⁹ GTT week-6 stage-2: capture else-body's tail channel-set topology.
@@ -26915,7 +27169,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             // Compile body
             if TK[EP as usize] == 8 { EP = EP + 1 }
-            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+            while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
             if TK[EP as usize] == 9 { EP = EP + 1 }
             // Jump back to loop top
             let wl_rel = (wl_loop_top - CL) / 4
@@ -26939,7 +27193,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         let cbz_off = CL
         em32(0xB4000000)
         if TK[EP as usize] == 8 { EP = EP + 1 }
-        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
         if TK[EP as usize] == 9 { EP = EP + 1 }
         let rel = (loop_top - CL) / 4
         em32(0x14000000 | (rel & 0x3FFFFFF))
@@ -27002,7 +27256,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         em32(0xEB00003F); em32(0x9A9FA7E0)
         let cbz_off = CL; em32(0xB4000000)
         if TK[EP as usize] == 8 { EP = EP + 1 }
-        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
         if TK[EP as usize] == 9 { EP = EP + 1 }
         let rel_bi = (incr_addr_a - CL) / 4
         em32(0x14000000 | (rel_bi & 0x3FFFFFF))
@@ -27036,7 +27290,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         var match_hash: i64 = 0
         // β⁹ GTT week-7: accumulate each arm's tail EXPR_CH_SET into this union (a64 mirror).
         var match_arms_ch_union_a: i64 = 0
-        while TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 {
             var is_wildcard: i64 = 0
             var is_var_bind: i64 = 0
             var disc: i64 = -1
@@ -27166,7 +27420,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 8 { or_arm_block = 1; EP = EP + 1 }
                 LAST_STMT_HAS_VALUE = 0
                 if or_arm_block == 1 {
-                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
                     if TK[EP as usize] == 9 { EP = EP + 1 }
                 } else { compile_stmt_a64() }
                 // β⁹ GTT week-7 (a64): OR arm's tail EXPR_CH_SET into the running union.
@@ -27207,7 +27461,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 8 { vb_arm_has_block_a64 = 1; EP = EP + 1 }
                 LAST_STMT_HAS_VALUE = 0
                 if vb_arm_has_block_a64 == 1 {
-                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
                     if TK[EP as usize] == 9 { EP = EP + 1 }
                 } else { compile_stmt_a64() }
                 // β⁹ GTT week-7 (a64): OR var-binding arm's tail EXPR_CH_SET into union.
@@ -27248,7 +27502,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     if TK[EP as usize] == 8 { arm_has_block = 1; EP = EP + 1 }
                     LAST_STMT_HAS_VALUE = 0
                     if arm_has_block == 1 {
-                        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
                         if TK[EP as usize] == 9 { EP = EP + 1 }
                     } else {
                         compile_stmt_a64()
@@ -27280,7 +27534,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     if TK[EP as usize] == 8 { arm_has_block2 = 1; EP = EP + 1 }
                     LAST_STMT_HAS_VALUE = 0
                     if arm_has_block2 == 1 {
-                        while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
                         if TK[EP as usize] == 9 { EP = EP + 1 }
                     } else {
                         compile_stmt_a64()
@@ -27311,7 +27565,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 8 { arm_has_block3 = 1; EP = EP + 1 }
                 LAST_STMT_HAS_VALUE = 0
                 if arm_has_block3 == 1 {
-                    while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+                    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
                     if TK[EP as usize] == 9 { EP = EP + 1 }
                 } else {
                     compile_stmt_a64()
@@ -27375,14 +27629,17 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     // ARM64 Pass 2: compile each function
     var p: i64 = 0
     var fn_idx: i64 = 0
-    while p < TC {
-        if TK[p as usize] != 1 || TK[(p + 1) as usize] != 3 { p = p + 1; continue }
-        p = p + 1
-        if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 {
-            while p < TC && TK[p as usize] != 8 { p = p + 1 }
-            var gd: i64 = 1; p = p + 1
-            while p < TC && gd > 0 { if TK[p as usize] == 8 { gd = gd + 1 }; if TK[p as usize] == 9 { gd = gd - 1 }; p = p + 1 }
-            continue
+    while fn_idx < FN_COUNT {
+        p = FN_NAME_TOK[fn_idx as usize]
+        let body_open = FN_BODY_OPEN[fn_idx as usize]
+        let body_close = FN_BODY_CLOSE[fn_idx as usize]
+        if p <= 0 || p >= TC || body_open <= 0 || body_close <= body_open || body_close > TC {
+            print("error: invalid function body span for fn#")
+            print_int(fn_idx)
+            print(" ")
+            print_fn_name(fn_idx)
+            print("\n")
+            return 1
         }
         FN_OFF[fn_idx as usize] = CL
         CURRENT_FN = fn_idx
@@ -27480,7 +27737,8 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 else { p = p + 1 }
             }
         }
-        if TK[p as usize] == 8 { p = p + 1 }
+        p = body_open + 1
+        CURRENT_BODY_CLOSE = body_close
         let a64_frame_patch_start = A64_FRAME_PATCH_COUNT
         // ARM64 prologue
         em32(0xA9BF7BFD)  // stp x29, x30, [sp, #-16]!
@@ -27528,11 +27786,12 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         // Compile body
         EP = p
         var depth: i64 = 1
-        while EP < TC && depth > 0 {
+        while EP < TC && EP < CURRENT_BODY_CLOSE && depth > 0 {
             if TK[EP as usize] == 9 { depth = depth - 1; if depth == 0 { EP = EP + 1; continue } else { EP = EP + 1; continue } }
             compile_stmt_a64()
         }
-        p = EP
+        p = body_close + 1
+        CURRENT_BODY_CLOSE = 0
         // β⁹ GTT week-4: capture body-tail EXPR_PARAM_USED into FN_USED_PARAMS
         // so callers in x86 (and future a64 callers) can tighten channel
         // unions to only the params this function's return actually depends on.
