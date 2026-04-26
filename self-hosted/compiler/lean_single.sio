@@ -257,6 +257,13 @@ var FN_RET_PRED_BOUND: [i64; 16384] = [0; 16384]
 var FN_RET_HAS_PRED2: [i64; 16384] = [0; 16384]
 var FN_RET_PRED_OP2: [i64; 16384] = [0; 16384]
 var FN_RET_PRED_BOUND2: [i64; 16384] = [0; 16384]
+// PR-10: f64 predicate metadata for return-type checks
+var FN_RET_PRED_IS_F64: [i64; 16384] = [0; 16384]
+var FN_RET_PRED_BOUND_FRAC: [i64; 16384] = [0; 16384]
+var FN_RET_PRED_BOUND_DENOM: [i64; 16384] = [1; 16384]
+var FN_RET_PRED_IS_F64_2: [i64; 16384] = [0; 16384]
+var FN_RET_PRED_BOUND2_FRAC: [i64; 16384] = [0; 16384]
+var FN_RET_PRED_BOUND2_DENOM: [i64; 16384] = [1; 16384]
 // PR-6: token index of the start of each function's return type (right after ->).
 // Populated in Pass 1; used in Pass 1c.5 to re-scan with the now-complete alias table.
 var FN_RET_TY_TOK: [i64; 16384] = [-1; 16384]
@@ -2929,6 +2936,54 @@ fn try_apply_call_arg_refinement(tok: i64) with IO, Mut, Panic, Div {
 fn try_apply_return_refinement(tok: i64) with IO, Mut, Panic, Div {
     if CURRENT_FN < 0 { return }
     if FN_RET_HAS_PRED[CURRENT_FN as usize] != 1 { return }
+    // PR-10: f64 return predicate check via rational comparison
+    if FN_RET_PRED_IS_F64[CURRENT_FN as usize] == 1 {
+        if LAST_IS_LITERAL_F64 != 1 { return }
+        let r10_cv_int = LAST_LITERAL_F64_INT
+        let r10_cv_frac = LAST_LITERAL_F64_FRAC
+        let r10_cv_denom = LAST_LITERAL_F64_DENOM
+        let r10_bv_int = FN_RET_PRED_BOUND[CURRENT_FN as usize]
+        let r10_bv_frac = FN_RET_PRED_BOUND_FRAC[CURRENT_FN as usize]
+        let r10_bv_denom = FN_RET_PRED_BOUND_DENOM[CURRENT_FN as usize]
+        let r10_lhs = (r10_cv_int * r10_cv_denom + r10_cv_frac) * r10_bv_denom
+        let r10_rhs = (r10_bv_int * r10_bv_denom + r10_bv_frac) * r10_cv_denom
+        let r10_op = FN_RET_PRED_OP[CURRENT_FN as usize]
+        var r10_viol: i64 = 0
+        if r10_op == 26 && r10_lhs < r10_rhs { r10_viol = 1 }
+        if r10_op == 24 && r10_lhs <= r10_rhs { r10_viol = 1 }
+        if r10_op == 25 && r10_lhs > r10_rhs { r10_viol = 1 }
+        if r10_op == 23 && r10_lhs >= r10_rhs { r10_viol = 1 }
+        if FN_RET_HAS_PRED2[CURRENT_FN as usize] == 1 {
+            let r10_bv2_int = FN_RET_PRED_BOUND2[CURRENT_FN as usize]
+            let r10_bv2_frac = FN_RET_PRED_BOUND2_FRAC[CURRENT_FN as usize]
+            let r10_bv2_denom = FN_RET_PRED_BOUND2_DENOM[CURRENT_FN as usize]
+            let r10_lhs2 = (r10_cv_int * r10_cv_denom + r10_cv_frac) * r10_bv2_denom
+            let r10_rhs2 = (r10_bv2_int * r10_bv2_denom + r10_bv2_frac) * r10_cv_denom
+            let r10_op2 = FN_RET_PRED_OP2[CURRENT_FN as usize]
+            if FN_RET_PRED_COMPOUND_IS_AND[CURRENT_FN as usize] == 1 {
+                if r10_op2 == 26 && r10_lhs2 < r10_rhs2 { r10_viol = 1 }
+                if r10_op2 == 24 && r10_lhs2 <= r10_rhs2 { r10_viol = 1 }
+                if r10_op2 == 25 && r10_lhs2 > r10_rhs2 { r10_viol = 1 }
+                if r10_op2 == 23 && r10_lhs2 >= r10_rhs2 { r10_viol = 1 }
+            } else {
+                if r10_viol == 1 {
+                    var r10_ok2: i64 = 0
+                    if r10_op2 == 26 && r10_lhs2 >= r10_rhs2 { r10_ok2 = 1 }
+                    if r10_op2 == 24 && r10_lhs2 > r10_rhs2 { r10_ok2 = 1 }
+                    if r10_op2 == 25 && r10_lhs2 <= r10_rhs2 { r10_ok2 = 1 }
+                    if r10_op2 == 23 && r10_lhs2 < r10_rhs2 { r10_ok2 = 1 }
+                    if r10_ok2 == 1 { r10_viol = 0 }
+                }
+            }
+        }
+        if r10_viol == 1 {
+            print("error: refinement type violation — f64 return value violates return type predicate at line ")
+            print_int(TL[tok as usize])
+            print("\n")
+            tc_mark_failed()
+        }
+        return
+    }
     if LAST_IS_LITERAL != 1 { return }
     let cv = LAST_LITERAL_VAL
     let bv = FN_RET_PRED_BOUND[CURRENT_FN as usize]
@@ -10608,7 +10663,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     SCAN_TY_HASH = 0
                 }
                 if (SCAN_TY == 0 || SCAN_TY == 2) && unit_lookup_dim(SCAN_TY_HASH) != 0 && EXPR_UNIT != SCAN_TY_HASH {
-                    tc_error(call_tok, "unit mismatch in call argument")
+                    tc_linear_violation(call_tok, "unit mismatch in call argument")
                 }
                 if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
                     if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
@@ -14686,7 +14741,7 @@ fn compile_gpu_launch_stmt_x86() with IO, Mut, Panic, Div {
             compile_or()
             scan_fn_param_type(fi, argc)
             if (SCAN_TY == 0 || SCAN_TY == 2) && unit_lookup_dim(SCAN_TY_HASH) != 0 && EXPR_UNIT != SCAN_TY_HASH {
-                tc_error(call_tok, "unit mismatch in call argument")
+                tc_linear_violation(call_tok, "unit mismatch in call argument")
             }
             if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
                 if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
@@ -20351,17 +20406,21 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 } else {
                     FN_RET_TY[sig_fi as usize] = SCAN_TY
                     FN_RET_HASH[sig_fi as usize] = SCAN_TY_HASH
-                    // PR-5: save integer refinement predicate on return type for
-                    // compile-time checking at return sites.  Skip f64 predicates
-                    // (those are a runtime concern).
-                    if SCAN_HAS_PRED == 1 && SCAN_PRED_IS_F64 == 0 {
+                    // PR-5/PR-10: save refinement predicate on return type for compile-time checking.
+                    if SCAN_HAS_PRED == 1 {
                         FN_RET_HAS_PRED[sig_fi as usize] = 1
                         FN_RET_PRED_OP[sig_fi as usize] = SCAN_PRED_OP
                         FN_RET_PRED_BOUND[sig_fi as usize] = SCAN_PRED_BOUND
-                        if SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+                        FN_RET_PRED_IS_F64[sig_fi as usize] = SCAN_PRED_IS_F64
+                        FN_RET_PRED_BOUND_FRAC[sig_fi as usize] = SCAN_PRED_BOUND_FRAC
+                        FN_RET_PRED_BOUND_DENOM[sig_fi as usize] = SCAN_PRED_BOUND_DENOM
+                        if SCAN_HAS_PRED2 == 1 {
                             FN_RET_HAS_PRED2[sig_fi as usize] = 1
                             FN_RET_PRED_OP2[sig_fi as usize] = SCAN_PRED_OP2
                             FN_RET_PRED_BOUND2[sig_fi as usize] = SCAN_PRED_BOUND2
+                            FN_RET_PRED_IS_F64_2[sig_fi as usize] = SCAN_PRED_IS_F64_2
+                            FN_RET_PRED_BOUND2_FRAC[sig_fi as usize] = SCAN_PRED_BOUND2_FRAC
+                            FN_RET_PRED_BOUND2_DENOM[sig_fi as usize] = SCAN_PRED_BOUND2_DENOM
                         }
                     }
                 }
@@ -20636,14 +20695,21 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         let rp_tok = FN_RET_TY_TOK[rp_i as usize]
         if rp_tok >= 0 {
             scan_type(rp_tok)
-            if SCAN_HAS_PRED == 1 && SCAN_PRED_IS_F64 == 0 {
+            // PR-10: store f64 metadata alongside integer predicates
+            if SCAN_HAS_PRED == 1 {
                 FN_RET_HAS_PRED[rp_i as usize] = 1
                 FN_RET_PRED_OP[rp_i as usize] = SCAN_PRED_OP
                 FN_RET_PRED_BOUND[rp_i as usize] = SCAN_PRED_BOUND
-                if SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+                FN_RET_PRED_IS_F64[rp_i as usize] = SCAN_PRED_IS_F64
+                FN_RET_PRED_BOUND_FRAC[rp_i as usize] = SCAN_PRED_BOUND_FRAC
+                FN_RET_PRED_BOUND_DENOM[rp_i as usize] = SCAN_PRED_BOUND_DENOM
+                if SCAN_HAS_PRED2 == 1 {
                     FN_RET_HAS_PRED2[rp_i as usize] = 1
                     FN_RET_PRED_OP2[rp_i as usize] = SCAN_PRED_OP2
                     FN_RET_PRED_BOUND2[rp_i as usize] = SCAN_PRED_BOUND2
+                    FN_RET_PRED_IS_F64_2[rp_i as usize] = SCAN_PRED_IS_F64_2
+                    FN_RET_PRED_BOUND2_FRAC[rp_i as usize] = SCAN_PRED_BOUND2_FRAC
+                    FN_RET_PRED_BOUND2_DENOM[rp_i as usize] = SCAN_PRED_BOUND2_DENOM
                     FN_RET_PRED_COMPOUND_IS_AND[rp_i as usize] = SCAN_PRED_COMPOUND_IS_AND
                 }
             }
@@ -23962,7 +24028,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     SCAN_TY_HASH = 0
                 }
                 if (SCAN_TY == 0 || SCAN_TY == 2) && unit_lookup_dim(SCAN_TY_HASH) != 0 && EXPR_UNIT != SCAN_TY_HASH {
-                    tc_error(call_tok, "unit mismatch in call argument")
+                    tc_linear_violation(call_tok, "unit mismatch in call argument")
                 }
                 if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
                     if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
