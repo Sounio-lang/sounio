@@ -12018,6 +12018,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     scan_fnsig_param_type(FN_SIG[mfi as usize], 0)
                     let method_expects_borrow = (SCAN_TY == 10)
                     let method_expects_excl = method_expects_borrow && (ref_hash_mut(SCAN_TY_HASH) != 0)
+                    // recv_vi to release after the call (-1 means no release needed here).
+                    var method_recv_borrow_vi: i64 = -1
                     // Enforce borrow conflict rules for &!Self receiver on a known variable.
                     // This mirrors the explicit `&!var` borrow path at the borrow-expression site.
                     if method_expects_excl && LAST_EXPR_VAR_IDX >= 0 {
@@ -12030,12 +12032,17 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                             if VAR_BORROW_EXCL[recv_vi as usize] > 0 {
                                 tc_linear_violation(method_tok, "cannot call &!self method: exclusive borrow already active on receiver")
                             }
-                            // Take an ephemeral exclusive borrow, released after the call.
+                            // Take an ephemeral exclusive borrow.
                             VAR_BORROW_EXCL[recv_vi as usize] = VAR_BORROW_EXCL[recv_vi as usize] + 1
                             if IN_CALL_ARGS != 0 && CALL_ARG_BORROW_N < 32 {
+                                // Nested inside another call's arg list — delegate release to
+                                // release_call_arg_borrows() when that outer call finishes.
                                 CALL_ARG_BORROW_VI[CALL_ARG_BORROW_N as usize] = recv_vi
                                 CALL_ARG_BORROW_EXCL[CALL_ARG_BORROW_N as usize] = 1
                                 CALL_ARG_BORROW_N = CALL_ARG_BORROW_N + 1
+                            } else {
+                                // Top-level statement — release directly after this call returns.
+                                method_recv_borrow_vi = recv_vi
                             }
                         }
                     }
@@ -12092,6 +12099,10 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         PATCH_COUNT = PATCH_COUNT + 1
                         em32(0)
                         emit_drop_call_args_x86(margc + call_extra_stack_args_x86(margc, 6))
+                    }
+                    // Release the receiver's exclusive borrow (top-level call case).
+                    if method_recv_borrow_vi >= 0 {
+                        VAR_BORROW_EXCL[method_recv_borrow_vi as usize] = VAR_BORROW_EXCL[method_recv_borrow_vi as usize] - 1
                     }
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
