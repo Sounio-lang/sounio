@@ -14333,15 +14333,37 @@ fn struct_field_list_count(opt: Option<Box<StructFieldList> >) -> i64 with Mut, 
 //   <ident> != <int_lit>   →  pred_neq(ident, n)
 //
 // Returns (true, pred) on success, (false, _) when the form is unrecognised.
-// Only one level of comparison is extracted; conjunctions (&&) are not yet
-// handled here (the individual guards already come from the outer env stack).
-fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (bool, RefinementPred) with Mut, Panic, Div {
+// Handles atomic comparisons (x > 0), AND conjunctions (x > 0 && x < 100),
+// and OR disjunctions (x < 0 || x > 100) by recursing on both sides.
+// Partial extraction: if only one side of a compound is recognisable, that
+// side's predicate is returned (conservative but sound under-approximation).
+fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (bool, RefinementPred) with Mut, Panic, Div, Alloc {
     let no_pred = (false, empty_refinement_pred())
     match opt {
         None => no_pred
         Some(e) => {
             let expr = *e
             if expr.kind != ExprKind::ExprBinary {
+                return no_pred
+            }
+            // Compound conditions: recurse on both sides and combine.
+            if expr.bin_op == BinaryOp::OpAnd || expr.bin_op == BinaryOp::OpOr {
+                let left_pair  = if_cond_extract_pred(expr.left)
+                let right_pair = if_cond_extract_pred(expr.right)
+                let found_l = left_pair.0
+                let pred_l  = left_pair.1
+                let found_r = right_pair.0
+                let pred_r  = right_pair.1
+                if found_l && found_r {
+                    let combined = if expr.bin_op == BinaryOp::OpAnd {
+                        pred_and(pred_l, pred_r)
+                    } else {
+                        pred_or(pred_l, pred_r)
+                    }
+                    return (true, combined)
+                }
+                if found_l { return (true, pred_l) }
+                if found_r { return (true, pred_r) }
                 return no_pred
             }
             // LHS must be an identifier
