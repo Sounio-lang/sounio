@@ -124,7 +124,7 @@ case "$HOST_PLATFORM" in
         ;;
 esac
 
-# Strategy 0: Use checked-in self-hosted native compiler
+# Strategy 0: Use checked-in self-hosted native compiler (fast path — copy)
 if [ "$FORCE_SOURCE_BOOTSTRAP" != "1" ]; then
     for NATIVE_PREBUILT in "${HOST_PREBUILTS[@]}"; do
         if [ -x "$NATIVE_PREBUILT" ]; then
@@ -139,8 +139,25 @@ if [ "$FORCE_SOURCE_BOOTSTRAP" != "1" ]; then
         fi
     done
 else
-    echo "Skipping checked-in native compiler artifacts (SOUNIO_FORCE_SOURCE_BOOTSTRAP=1)"
+    echo "Skipping checked-in native compiler artifact copy (SOUNIO_FORCE_SOURCE_BOOTSTRAP=1)"
 fi
+
+# Strategy 0.5: Staged bootstrap from checked-in binary when source bootstrap is forced.
+# boot4.elf is stale and miscompiles current lean_single.sio; use the checked-in
+# artifact as a correct seed for a staged bootstrap instead.
+for NATIVE_PREBUILT in "${HOST_PREBUILTS[@]}"; do
+    if [ -x "$NATIVE_PREBUILT" ]; then
+        echo "Staged bootstrap from checked-in artifact: $NATIVE_PREBUILT"
+        if bootstrap_direct_lean "$NATIVE_PREBUILT"; then
+            if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
+                sounio_ad_hoc_codesign "$OUT"
+            fi
+            echo "Native compiler built: $OUT ($(portable_size "$OUT") bytes)"
+            exit 0
+        fi
+        echo "warn: staged bootstrap from $NATIVE_PREBUILT failed, falling back..."
+    fi
+done
 
 # Strategy 1: Use boot4.elf (pure native, no dependencies)
 case "$HOST_PLATFORM" in
