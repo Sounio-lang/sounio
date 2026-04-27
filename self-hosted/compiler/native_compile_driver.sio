@@ -13,6 +13,7 @@
 // Sprint 107: native-v2 live path — general-purpose, JIT-safe.
 
 use lexer::mod::*
+use lexer::token::{TokenKind}
 use parser::ast::*
 use ir::ir::*
 use check::dependent::*
@@ -41,7 +42,7 @@ use wasm::encode::*
 use wasm::lower::*
 use native::codegen::*
 use parser::mod::{parse_program_preloaded, count_items}
-use parser::parser::{parser_last_error_count}
+use parser::parser::{parser_last_error_count, pt_read_kind}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
 use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref}
@@ -145,9 +146,21 @@ fn parse_i64_decimal(raw: string) -> (bool, i64) with Mut, Div {
     if negative { (true, 0 - value) } else { (true, value) }
 }
 
-// Inlined from module_loader.sio to avoid importing 3900 lines.
-fn load_source_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
-    let token_count = lex_file_to_globals(path)
+fn source_tokens_have_unsupported_items(token_count: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < token_count {
+        if pt_read_kind(i) == TokenKind::Use {
+            return 1
+        }
+        if pt_read_kind(i) == TokenKind::Struct || pt_read_kind(i) == TokenKind::Enum || pt_read_kind(i) == TokenKind::Impl {
+            return 2
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn parse_loaded_source(token_count: i64) -> Program with IO, Mut, Div, Panic, Alloc {
     parse_program_preloaded(token_count)
 }
 
@@ -182,8 +195,18 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     print(output_path)
     print("\n")
 
-    // Phase 0: Parse
-    let prog = load_source_file(source_path)
+    // Phase 0: Lex and parse
+    let token_count = lex_file_to_globals(source_path)
+    let unsupported_kind = source_tokens_have_unsupported_items(token_count)
+    if unsupported_kind == 1 {
+        print("native_compile: unsupported_use_imports\n")
+        return 2
+    }
+    if unsupported_kind == 2 {
+        print("native_compile: unsupported_structural_items\n")
+        return 2
+    }
+    let prog = parse_loaded_source(token_count)
     if parser_last_error_count() > 0 {
         print("native_compile: parse_error\n")
         return 1
@@ -212,7 +235,8 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     print("\n")
 
     // Phase 2: Streaming compile — per-function body lower + optimize + native-v2
-    var nc = compile_module_streaming_begin(compiler_new(), &summary_result.summary.module)
+    var nc = compiler_new()
+    compile_module_streaming_begin_into(&! nc, &summary_result.summary.module)
 
     var fi: i64 = 0
     while fi < fn_count {
@@ -247,8 +271,8 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         print(" instrs=")
         print_int(body_result.func.instr_count)
 
-        let lowered = native_v2_lower_function_to_machine(body_result.func)
-        let legal = native_v2_legalize_function(lowered)
+        var legal = machine_function_new()
+        native_v2_lower_legal_function_from_ir_ref(&body_result.func, &! legal)
         if !legal.supported {
             print(" unsupported=")
             print(legal.unsupported_detail)
@@ -257,18 +281,20 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
             continue
         }
 
-        nc = compile_ir_function_v2(nc, body_result.func, legal, fi)
+        compile_ir_function_v2_into(&! nc, &body_result.func, &legal, fi)
         print(" ok\n")
         fi = fi + 1
     }
 
     // Phase 3: Streaming finish (entry trampoline, relocations)
     print("native_compile: streaming_finish\n")
-    nc = compile_module_streaming_finish(nc, &summary_result.summary.module)
+    compile_module_streaming_finish_into(&! nc, &summary_result.summary.module)
 
     // Phase 4: Finalize ELF
     print("native_compile: finalize_elf_bulk\n")
-    let elf = finalize_elf64_bulk(nc.code, nc.rodata, nc.data, nc.entry_offset, 4194304, nc.symbols, nc.fn_offsets, nc.fn_count)
+    let min_data_len = runtime_context_global_slot_size() + (summary_result.summary.module.prof_counter_count * 8)
+    let final_data = string_table_new()
+    let elf = finalize_elf64_bulk_with_data_len(nc.code, nc.rodata, final_data, min_data_len, nc.entry_offset, 4194304, nc.symbols, nc.fn_offsets, nc.fn_count)
     print("native_compile: elf_size=")
     print_int(elf.len)
     print("\n")
@@ -277,6 +303,10 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     let write_ok = io_write_elf_to_file(output_path, elf)
     if !write_ok {
         print("native_compile: write_error\n")
+        return 5
+    }
+    if !io_make_executable(output_path) {
+        print("native_compile: chmod_error\n")
         return 5
     }
 
