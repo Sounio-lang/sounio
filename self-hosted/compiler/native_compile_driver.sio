@@ -73,10 +73,16 @@ let TK_RBRACE: i64 = 177
 let TK_SEMI: i64 = 180
 let TK_COLON: i64 = 181
 let TK_COMMA: i64 = 182
+let TK_DOT: i64 = 183
+let TK_USE: i64 = 5
+let TK_STRUCT: i64 = 13
+let TK_ENUM: i64 = 14
+let TK_COLONCOLON: i64 = 162
 
 var V2_LOCAL_NAMES: [Name; 64] = [empty_name(); 64]
 var V2_LOCAL_TOK_IDX: [i64; 64] = [0; 64]
 var V2_LOCAL_REGS: [i64; 64] = [0; 64]
+var V2_LOCAL_STRUCT_IDX: [i64; 64] = [0; 64]
 var V2_LOCAL_COUNT: i64 = 0
 var V2_NEXT_REG: i64 = 0
 
@@ -94,6 +100,7 @@ let V2C_LOAD_STRING: i64 = 2
 let V2C_BINOP: i64 = 3
 let V2C_CALL: i64 = 4
 let V2C_RETURN: i64 = 5
+let V2C_COPY: i64 = 6
 
 var V2_CORE_OPS: [i64; 128] = [0; 128]
 var V2_CORE_DST: [i64; 128] = [0; 128]
@@ -126,6 +133,20 @@ var V2_UFN_BINOP_CODE: [i64; 256] = [0; 256]
 var V2_UFN_FN_ID: [i64; 256] = [0; 256]
 var V2_UFN_COUNT: i64 = 0
 
+// Token count of the current source file — needed by struct-literal parser
+var V2_TOKEN_COUNT: i64 = 0
+
+// Struct layout table (flat parallel arrays, capacity 16 structs / 128 total fields)
+var STRUCT_NAME_TOKS: [i64; 16] = [0; 16]
+var STRUCT_FIELD_START: [i64; 16] = [0; 16]
+var STRUCT_FIELD_COUNT: [i64; 16] = [0; 16]
+var STRUCT_COUNT: i64 = 0
+var STRUCT_FIELDS: [i64; 128] = [0; 128]
+var STRUCT_FIELD_TOTAL: i64 = 0
+
+// Sideband written by parse_struct_lit/parse_struct_lit_ir so callers can record struct type
+var V2_LAST_STRUCT_IDX: i64 = -1
+
 struct ExprParse {
     ok: i64,
     reg: i64,
@@ -135,6 +156,11 @@ struct ExprParse {
 fn reset_locals() with Mut {
     V2_LOCAL_COUNT = 0
     V2_NEXT_REG = 0
+    var _rli: i64 = 0
+    while _rli < 64 {
+        V2_LOCAL_STRUCT_IDX[_rli as usize] = -1
+        _rli = _rli + 1
+    }
 }
 
 fn reset_core() with Mut {
@@ -199,6 +225,10 @@ fn core_append_return(src: i64) with Mut {
     let _ = core_append_base(V2C_RETURN, -1, src, -1)
 }
 
+fn core_append_copy(dst: i64, src: i64) with Mut {
+    let _ = core_append_base(V2C_COPY, dst, src, -1)
+}
+
 fn remember_local(name: Name, reg: i64) with Mut, Panic {
     if V2_LOCAL_COUNT < 64 {
         V2_LOCAL_NAMES[V2_LOCAL_COUNT as usize] = name
@@ -212,8 +242,30 @@ fn remember_local_tok(tok_idx: i64, reg: i64) with Mut, Panic {
     if idx < 64 {
         V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
         V2_LOCAL_REGS[idx as usize] = reg
+        V2_LOCAL_STRUCT_IDX[idx as usize] = -1
         V2_LOCAL_COUNT = idx + 1
     }
+}
+
+fn remember_struct_local_tok(tok_idx: i64, base_reg: i64, sidx: i64) with Mut, Panic {
+    let idx = V2_LOCAL_COUNT
+    if idx < 64 {
+        V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
+        V2_LOCAL_REGS[idx as usize] = base_reg
+        V2_LOCAL_STRUCT_IDX[idx as usize] = sidx
+        V2_LOCAL_COUNT = idx + 1
+    }
+}
+
+fn lookup_local_struct_idx_tok(tok_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_LOCAL_COUNT {
+        if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
+            return V2_LOCAL_STRUCT_IDX[i as usize]
+        }
+        i = i + 1
+    }
+    -1
 }
 
 fn toks_ident_eq(a: i64, b: i64) -> bool with Mut, Panic, Div {
@@ -436,6 +488,70 @@ fn skip_trivia(pos: i64, close: i64) -> i64 with Mut, Panic {
     p
 }
 
+// ============================================================
+// Struct layout pre-scanner
+// ============================================================
+
+fn scan_struct_decls(token_count: i64) with Mut, Panic {
+    STRUCT_COUNT = 0
+    STRUCT_FIELD_TOTAL = 0
+    var i: i64 = 0
+    while i + 1 < token_count {
+        if token_kind(i) == TK_STRUCT && token_kind(i + 1) == TK_IDENT {
+            let sidx = STRUCT_COUNT
+            if sidx < 16 {
+                STRUCT_NAME_TOKS[sidx as usize] = i + 1
+                STRUCT_FIELD_START[sidx as usize] = STRUCT_FIELD_TOTAL
+                STRUCT_FIELD_COUNT[sidx as usize] = 0
+                STRUCT_COUNT = sidx + 1
+                var j = i + 2
+                while j < token_count && token_kind(j) != TK_LBRACE { j = j + 1 }
+                j = j + 1
+                while j < token_count && token_kind(j) != TK_RBRACE {
+                    let kj = token_kind(j)
+                    if kj == TK_IDENT && STRUCT_FIELD_TOTAL < 128 {
+                        STRUCT_FIELDS[STRUCT_FIELD_TOTAL as usize] = j
+                        STRUCT_FIELD_TOTAL = STRUCT_FIELD_TOTAL + 1
+                        STRUCT_FIELD_COUNT[sidx as usize] = STRUCT_FIELD_COUNT[sidx as usize] + 1
+                        j = j + 1
+                        while j < token_count && token_kind(j) != TK_COMMA && token_kind(j) != TK_RBRACE { j = j + 1 }
+                        if j < token_count && token_kind(j) == TK_COMMA { j = j + 1 }
+                    } else if kj == TK_NEWLINE || kj == TK_SEMI {
+                        j = j + 1
+                    } else {
+                        j = j + 1
+                    }
+                }
+                i = j + 1
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+fn find_struct_idx_tok(name_tok: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < STRUCT_COUNT {
+        if toks_ident_eq(STRUCT_NAME_TOKS[i as usize], name_tok) { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn struct_field_offset_tok(sidx: i64, field_tok: i64) -> i64 with Mut, Panic, Div {
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        if toks_ident_eq(STRUCT_FIELDS[(start + fi) as usize], field_tok) { return fi }
+        fi = fi + 1
+    }
+    -1
+}
+
 fn is_cmp_op(k: i64) -> bool {
     k == TK_LT || k == TK_GT || k == TK_LE || k == TK_GE || k == TK_EQEQ || k == TK_BANGEQ
 }
@@ -580,10 +696,53 @@ fn parse_atom(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, 
     if k == TK_IDENT {
         let reg = lookup_local_tok(pos)
         if reg >= 0 {
+            if token_kind(pos + 1) == TK_DOT && token_kind(pos + 2) == TK_IDENT {
+                let sidx = lookup_local_struct_idx_tok(pos)
+                if sidx >= 0 {
+                    let foff = struct_field_offset_tok(sidx, pos + 2)
+                    if foff >= 0 {
+                        return ExprParse { ok: 1, reg: reg + foff, next: pos + 3 }
+                    }
+                }
+            }
             return ExprParse { ok: 1, reg: reg, next: pos + 1 }
+        }
+        if token_kind(pos + 1) == TK_LBRACE {
+            let lit = parse_struct_lit(func, pos, V2_TOKEN_COUNT)
+            if lit.ok != 0 { return lit }
         }
     }
     ExprParse { ok: 0, reg: -1, next: pos }
+}
+
+fn parse_struct_lit(func: &! IrFunction, pos: i64, token_count: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let sidx = find_struct_idx_tok(pos)
+    if sidx < 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
+    let fcount = STRUCT_FIELD_COUNT[sidx as usize]
+    let base_reg = V2_NEXT_REG
+    V2_NEXT_REG = V2_NEXT_REG + fcount
+    var cur = pos + 2
+    while cur < token_count {
+        let kk = token_kind(cur)
+        if kk == TK_NEWLINE || kk == TK_SEMI || kk == TK_COMMA { cur = cur + 1; continue }
+        if kk == TK_RBRACE { break }
+        if kk != TK_IDENT { break }
+        let field_tok = cur
+        let foff = struct_field_offset_tok(sidx, field_tok)
+        cur = cur + 1
+        if cur < token_count && token_kind(cur) == TK_COLON { cur = cur + 1 }
+        let val = parse_expr(func, cur)
+        if val.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
+        if foff >= 0 {
+            let slot = base_reg + foff
+            core_append_copy(slot, val.reg)
+            emit_instr(func, ir_copy(slot, val.reg))
+        }
+        cur = val.next
+        if cur < token_count && token_kind(cur) == TK_COMMA { cur = cur + 1 }
+    }
+    V2_LAST_STRUCT_IDX = sidx
+    ExprParse { ok: 1, reg: base_reg, next: cur + 1 }
 }
 
 fn binary_op_from_kind(kind: i64) -> BinaryOp {
@@ -708,13 +867,58 @@ fn parse_atom_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Di
     }
     if k == TK_IDENT {
         let reg = lookup_local_tok(pos)
-        if reg >= 0 { return ExprParse { ok: 1, reg: reg, next: pos + 1 } }
+        if reg >= 0 {
+            if token_kind(pos + 1) == TK_DOT && token_kind(pos + 2) == TK_IDENT {
+                let sidx = lookup_local_struct_idx_tok(pos)
+                if sidx >= 0 {
+                    let foff = struct_field_offset_tok(sidx, pos + 2)
+                    if foff >= 0 {
+                        return ExprParse { ok: 1, reg: reg + foff, next: pos + 3 }
+                    }
+                }
+            }
+            return ExprParse { ok: 1, reg: reg, next: pos + 1 }
+        }
+        // struct literal
+        if token_kind(pos + 1) == TK_LBRACE {
+            let lit = parse_struct_lit_ir(func, pos, V2_TOKEN_COUNT)
+            if lit.ok != 0 { return lit }
+        }
         // function call
         if token_kind(pos + 1) == TK_LPAREN {
             return parse_fn_call_ir(func, pos)
         }
     }
     ExprParse { ok: 0, reg: -1, next: pos }
+}
+
+fn parse_struct_lit_ir(func: &! IrFunction, pos: i64, token_count: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let sidx = find_struct_idx_tok(pos)
+    if sidx < 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
+    let fcount = STRUCT_FIELD_COUNT[sidx as usize]
+    let base_reg = V2_NEXT_REG
+    V2_NEXT_REG = V2_NEXT_REG + fcount
+    var cur = pos + 2
+    while cur < token_count {
+        let kk = token_kind(cur)
+        if kk == TK_NEWLINE || kk == TK_SEMI || kk == TK_COMMA { cur = cur + 1; continue }
+        if kk == TK_RBRACE { break }
+        if kk != TK_IDENT { break }
+        let field_tok = cur
+        let foff = struct_field_offset_tok(sidx, field_tok)
+        cur = cur + 1
+        if cur < token_count && token_kind(cur) == TK_COLON { cur = cur + 1 }
+        let val = parse_expr_ir(func, cur)
+        if val.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
+        if foff >= 0 {
+            let slot = base_reg + foff
+            ufn_record_copy(slot, val.reg)
+        }
+        cur = val.next
+        if cur < token_count && token_kind(cur) == TK_COMMA { cur = cur + 1 }
+    }
+    V2_LAST_STRUCT_IDX = sidx
+    ExprParse { ok: 1, reg: base_reg, next: cur + 1 }
 }
 
 fn parse_fn_call_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
@@ -859,9 +1063,15 @@ fn parse_stmt_ir(func: &! IrFunction, pos: i64, close: i64, token_count: i64) ->
         var eq_pos = p + 2
         while eq_pos < close && token_kind(eq_pos) != TK_EQ { eq_pos = eq_pos + 1 }
         if eq_pos >= close { return eq_pos }
+        V2_LAST_STRUCT_IDX = -1
         let parsed = parse_expr_ir(func, eq_pos + 1)
         if parsed.ok == 0 { return eq_pos + 1 }
-        remember_local_tok(p + 1, parsed.reg)
+        if V2_LAST_STRUCT_IDX >= 0 {
+            remember_struct_local_tok(p + 1, parsed.reg, V2_LAST_STRUCT_IDX)
+            V2_LAST_STRUCT_IDX = -1
+        } else {
+            remember_local_tok(p + 1, parsed.reg)
+        }
         return parsed.next
     }
 
@@ -1090,6 +1300,7 @@ fn lower_main_body(token_count: i64, func: &! IrFunction) -> bool with IO, Mut, 
     reset_locals()
     set_func_name_main(func)
     (*func).param_count = 0
+    V2_LAST_STRUCT_IDX = -1
 
     var pos = open_idx + 1
     var saw_return = false
@@ -1116,6 +1327,7 @@ fn lower_main_body(token_count: i64, func: &! IrFunction) -> bool with IO, Mut, 
                 print("native_compile: missing_binding_eq\n")
                 return false
             }
+            V2_LAST_STRUCT_IDX = -1
             let parsed = parse_expr(func, eq_pos + 1)
             if parsed.ok == 0 {
                 let call_p = parse_fn_call_expr(func, eq_pos + 1)
@@ -1127,7 +1339,12 @@ fn lower_main_body(token_count: i64, func: &! IrFunction) -> bool with IO, Mut, 
                 pos = call_p.next
                 continue
             }
-            remember_local_tok(local_tok, parsed.reg)
+            if V2_LAST_STRUCT_IDX >= 0 {
+                remember_struct_local_tok(local_tok, parsed.reg, V2_LAST_STRUCT_IDX)
+                V2_LAST_STRUCT_IDX = -1
+            } else {
+                remember_local_tok(local_tok, parsed.reg)
+            }
             pos = parsed.next
             continue
         }
@@ -1234,6 +1451,8 @@ fn emit_recorded_core_into(nc: &! NativeCompiler, main_fn: &IrFunction, main_fn_
         } else if op == V2C_RETURN {
             native_v2_core_emit_return_into(nc, V2_CORE_SRC1[i as usize])
             return true
+        } else if op == V2C_COPY {
+            native_v2_core_emit_copy_into(nc, V2_CORE_DST[i as usize], V2_CORE_SRC1[i as usize])
         } else {
             return false
         }
@@ -1340,7 +1559,9 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         return 1
     }
 
+    V2_TOKEN_COUNT = token_count
     scan_user_fns(token_count, 3)
+    scan_struct_decls(token_count)
 
     reset_core()
     reset_locals()
