@@ -265,3 +265,35 @@ checks:
   - two-stage bootstrap fixed point verified (rebuild2 == rebuild3)
 commit: 4cb4f46a
 status: lock-released
+
+---
+
+agent: kimi
+time_utc: 2026-04-27T19:20:00Z
+files:
+  - self-hosted/compiler/lean_single.sio
+intent: Fix Result pattern match segfault by preventing Result from incorrectly taking the Option inline-copy path in let/var assignments
+ checks:
+  - edit lean_single.sio lines 16698 and 26817
+  - rebuild bin/souc-linux-x86_64 via selfhost_host_gate.sh
+  - verify match_patterns_complete.sio no longer segfaults
+commit: pending
+status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-04-27T22:00:00Z
+files:
+  - self-hosted/compiler/lean_single.sio
+  - bin/souc-linux-x86_64
+intent: Fix Result<T,E> let/var binding segfault — bind_hash for option-inline path must only use decl_ty_hash when it is a valid option hash; otherwise Result annotation hash (H_result) poisoned VAR_TY_HASH causing type_is_option_inline to return false on load, leading to scalar load of tag-slot as pointer and segfault in match
+checks:
+  - ./bin/souc run tests/run-pass/match_patterns_complete.sio (all 10 PASS)
+  - bash scripts/ci/selfhost_host_gate.sh (PASS, stage2_sha256=8d7be6d8)
+  - bash scripts/ci/native_v2_serious_track_gate.sh (PASS)
+  - bash scripts/ci/native_v2_driver_self_compile_gate.sh (PASS)
+  - bash scripts/ci/native_v2_epistemic_science_spine_gate.sh (PASS)
+  - stage1==stage2 fixed-point (bit-identical)
+commit: pending
+status: lock-released
