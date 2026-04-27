@@ -117,6 +117,8 @@ var V2_LOCAL_STRUCT_IDX: [i64; 64] = [0; 64]
 var V2_LOCAL_IS_REF: [i64; 64] = [0; 64]
 var V2_LOCAL_COUNT: i64 = 0
 var V2_NEXT_REG: i64 = 0
+var V2_BREAK_LABEL: i64 = -1
+var V2_CONTINUE_LABEL: i64 = -1
 
 // User function registry: names → fn_ids, for resolving calls
 // Store token indices (not Name structs) because JIT can't write structs to global arrays
@@ -275,53 +277,57 @@ struct V2DriverContext {
     continue_label: i64,
 }
 
-fn v2_driver_context_new() -> V2DriverContext {
+fn v2_driver_context_new() -> V2DriverContext with Mut {
+    V2_LOCAL_COUNT = 0
+    V2_NEXT_REG = 0
+    V2_BREAK_LABEL = -1
+    V2_CONTINUE_LABEL = -1
     V2DriverContext { local_count: 0, next_reg: 0, break_label: -1, continue_label: -1 }
 }
 
 fn reset_locals(ctx: &! V2DriverContext) with Mut {
-    (*ctx).local_count = 0
-    (*ctx).next_reg = 0
-    (*ctx).break_label = -1
-    (*ctx).continue_label = -1
+    V2_LOCAL_COUNT = 0
+    V2_NEXT_REG = 0
+    V2_BREAK_LABEL = -1
+    V2_CONTINUE_LABEL = -1
 }
 
 fn remember_local_tok(ctx: &! V2DriverContext, tok_idx: i64, reg: i64) with Mut, Panic {
-    let idx = (*ctx).local_count
+    let idx = V2_LOCAL_COUNT
     if idx < 64 {
         V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
         V2_LOCAL_REGS[idx as usize] = reg
         V2_LOCAL_STRUCT_IDX[idx as usize] = -1
         V2_LOCAL_IS_REF[idx as usize] = 0
-        (*ctx).local_count = idx + 1
+        V2_LOCAL_COUNT = idx + 1
     }
 }
 
 fn remember_struct_local_tok(ctx: &! V2DriverContext, tok_idx: i64, base_reg: i64, sidx: i64) with Mut, Panic {
-    let idx = (*ctx).local_count
+    let idx = V2_LOCAL_COUNT
     if idx < 64 {
         V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
         V2_LOCAL_REGS[idx as usize] = base_reg
         V2_LOCAL_STRUCT_IDX[idx as usize] = sidx
         V2_LOCAL_IS_REF[idx as usize] = 0
-        (*ctx).local_count = idx + 1
+        V2_LOCAL_COUNT = idx + 1
     }
 }
 
 fn remember_ref_struct_local_tok(ctx: &! V2DriverContext, tok_idx: i64, reg: i64, sidx: i64) with Mut, Panic {
-    let idx = (*ctx).local_count
+    let idx = V2_LOCAL_COUNT
     if idx < 64 {
         V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
         V2_LOCAL_REGS[idx as usize] = reg
         V2_LOCAL_STRUCT_IDX[idx as usize] = sidx
         V2_LOCAL_IS_REF[idx as usize] = 1
-        (*ctx).local_count = idx + 1
+        V2_LOCAL_COUNT = idx + 1
     }
 }
 
 fn lookup_local_struct_idx_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
-    while i < (*ctx).local_count {
+    while i < V2_LOCAL_COUNT {
         if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
             return V2_LOCAL_STRUCT_IDX[i as usize]
         }
@@ -332,7 +338,7 @@ fn lookup_local_struct_idx_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 wit
 
 fn lookup_local_is_ref_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
-    while i < (*ctx).local_count {
+    while i < V2_LOCAL_COUNT {
         if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
             return V2_LOCAL_IS_REF[i as usize]
         }
@@ -359,7 +365,7 @@ fn toks_ident_eq(a: i64, b: i64) -> bool with Mut, Panic, Div {
 
 fn lookup_local_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
-    while i < (*ctx).local_count {
+    while i < V2_LOCAL_COUNT {
         if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
             return V2_LOCAL_REGS[i as usize]
         }
@@ -643,6 +649,10 @@ fn driver_global_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "DRV_LABEL_PATCH_COUNT") { return V2_GLOBAL_DRV_LABEL_PATCH_COUNT }
     if token_text_eq(tok, "DRV_ELF_BYTES") { return V2_GLOBAL_DRV_ELF_BYTES }
     if token_text_eq(tok, "DRV_ELF_LEN") { return V2_GLOBAL_DRV_ELF_LEN }
+    if token_text_eq(tok, "V2_LOCAL_COUNT") { return 70 }
+    if token_text_eq(tok, "V2_NEXT_REG") { return 71 }
+    if token_text_eq(tok, "V2_BREAK_LABEL") { return 72 }
+    if token_text_eq(tok, "V2_CONTINUE_LABEL") { return 73 }
     -1
 }
 
@@ -796,8 +806,8 @@ fn token_string_name(idx: i64) -> Name with Mut, Panic, Div {
 }
 
 fn alloc_reg(ctx: &! V2DriverContext) -> i64 with Mut {
-    let r = (*ctx).next_reg
-    (*ctx).next_reg = r + 1
+    let r = V2_NEXT_REG
+    V2_NEXT_REG = r + 1
     r
 }
 
@@ -1616,8 +1626,8 @@ fn parse_struct_lit_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_co
     let sidx = find_struct_idx_tok(pos)
     if sidx < 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
     let flat_size = STRUCT_FLAT_SIZE[sidx as usize]
-    let base_reg = (*ctx).next_reg
-    (*ctx).next_reg = (*ctx).next_reg + flat_size
+    let base_reg = V2_NEXT_REG
+    V2_NEXT_REG = V2_NEXT_REG + flat_size
     var cur = pos + 2
     while cur < token_count {
         let kk = token_kind(cur)
@@ -1663,8 +1673,8 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         let sidx = find_name_struct_idx()
         if sidx >= 0 {
             let flat_size = STRUCT_FLAT_SIZE[sidx as usize]
-            let base = (*ctx).next_reg
-            (*ctx).next_reg = base + flat_size
+            let base = V2_NEXT_REG
+            V2_NEXT_REG = base + flat_size
             let zero = alloc_reg(ctx)
             ufn_record_load_imm(zero, 0)
             var zi: i64 = 0
@@ -1749,8 +1759,8 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         }
         if consecutive == 0 {
             // Pack into a fresh consecutive block, emit copies
-            let base = (*ctx).next_reg
-            (*ctx).next_reg = (*ctx).next_reg + total_argc
+            let base = V2_NEXT_REG
+            V2_NEXT_REG = V2_NEXT_REG + total_argc
             var slot: i64 = 0
             var ai: i64 = 0
             while ai < n_args {
@@ -1802,8 +1812,8 @@ fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         let right = parse_atom_ir(func, ctx, result.next + 1)
         if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: result.next} }
         if (op_kind == TK_EQEQ || op_kind == TK_BANGEQ) && token_kind(result.next + 1) == TK_STRING {
-            let base = (*ctx).next_reg
-            (*ctx).next_reg = base + 2
+            let base = V2_NEXT_REG
+            V2_NEXT_REG = base + 2
             ufn_record_copy(base, result.reg)
             ufn_record_copy(base + 1, right.reg)
             let eq_dst = alloc_reg(ctx)
@@ -1902,13 +1912,13 @@ fn parse_while_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: 
     if p >= token_count { return pos }
     let body_end = find_matching_rbrace(p, token_count)
     if body_end < 0 { return pos }
-    let old_break = (*ctx).break_label
-    let old_continue = (*ctx).continue_label
-    (*ctx).break_label = label_end
-    (*ctx).continue_label = label_top
+    let old_break = V2_BREAK_LABEL
+    let old_continue = V2_CONTINUE_LABEL
+    V2_BREAK_LABEL = label_end
+    V2_CONTINUE_LABEL = label_top
     parse_block_ir(func, ctx, p + 1, body_end, token_count)
-    (*ctx).break_label = old_break
-    (*ctx).continue_label = old_continue
+    V2_BREAK_LABEL = old_break
+    V2_CONTINUE_LABEL = old_continue
 
     emit_jump(func, label_top)
     emit_label(func, label_end)
@@ -1959,13 +1969,13 @@ fn parse_if_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: i64
 }
 
 fn parse_block_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, token_count: i64) with IO, Mut, Panic, Div, Alloc {
-    let saved_local_count = (*ctx).local_count
+    let saved_local_count = V2_LOCAL_COUNT
     var p = skip_trivia(pos, close)
     while p < close && V2_PARSE_UNSUPPORTED == 0 {
         p = parse_stmt_ir(func, ctx, p, close, token_count)
         p = skip_trivia(p, close)
     }
-    (*ctx).local_count = saved_local_count
+    V2_LOCAL_COUNT = saved_local_count
 }
 
 fn parse_match_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
@@ -2057,8 +2067,8 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
     let k = token_kind(p)
 
     if k == TK_IDENT && token_text_eq(p, "break") {
-        if (*ctx).break_label >= 0 {
-            emit_jump(func, (*ctx).break_label)
+        if V2_BREAK_LABEL >= 0 {
+            emit_jump(func, V2_BREAK_LABEL)
             return p + 1
         }
         mark_parse_unsupported(p)
@@ -2066,8 +2076,8 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
     }
 
     if k == TK_IDENT && token_text_eq(p, "continue") {
-        if (*ctx).continue_label >= 0 {
-            emit_jump(func, (*ctx).continue_label)
+        if V2_CONTINUE_LABEL >= 0 {
+            emit_jump(func, V2_CONTINUE_LABEL)
             return p + 1
         }
         mark_parse_unsupported(p)
@@ -2083,8 +2093,8 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             while j < close && token_kind(j) != TK_SEMI { j = j + 1 }
             if j < close && token_kind(j + 1) == TK_INT {
                 let arr_size = pt_read_int_value(j + 1)
-                let arr_base = (*ctx).next_reg
-                (*ctx).next_reg = arr_base + arr_size
+                let arr_base = V2_NEXT_REG
+                V2_NEXT_REG = arr_base + arr_size
                 let zero_reg = alloc_reg(ctx)
                 ufn_record_load_imm(zero_reg, 0)
                 var ai: i64 = 0
@@ -2502,6 +2512,15 @@ fn drv_patch_u32_le(offset: i64, val: i64) with Mut, Div, Panic {
 fn drv_modrm_rr(dst: i64, src: i64) -> i64 { 192 + (src * 8) + dst }
 fn drv_modrm_rm_imm(dst: i64) -> i64 { 192 + dst }
 fn drv_ir_slot_offset(vreg: i64) -> i64 { 0 - ((vreg + 1) * 8) }
+
+fn drv_patch_frame_size(fn_id: i64, vreg_count: i64) with Mut, Div, Panic {
+    if fn_id < 0 || fn_id >= 2048 { return }
+    let fn_start = DRV_FN_OFFSETS[fn_id as usize]
+    if fn_start < 0 { return }
+    let raw = (vreg_count + 1) * 8
+    let frame = ((raw + 15) / 16) * 16
+    drv_patch_u32_le(fn_start + 7, frame)
+}
 
 fn drv_param_reg(idx: i64) -> i64 {
     if idx == 0 { return 7 }
@@ -2937,6 +2956,18 @@ fn drv_emit_movzx_rax_byte_rdi_rbx() with Mut, Div, Panic {
     drv_emit_byte(31)
 }
 
+fn drv_encode_reloc_target(kind_code: i64, target: i64) -> i64 {
+    (kind_code * 1000000000) + target
+}
+
+fn drv_decode_reloc_kind(encoded: i64) -> i64 with Div {
+    encoded / 1000000000
+}
+
+fn drv_decode_reloc_target(encoded: i64) -> i64 with Div {
+    encoded - (drv_decode_reloc_kind(encoded) * 1000000000)
+}
+
 fn drv_emit_cmp_al_mem_rsi() with Mut, Div, Panic {
     drv_emit_byte(58)
     drv_emit_byte(6)
@@ -2946,8 +2977,7 @@ fn drv_add_reloc(patch_offset: i64, kind_code: i64, target: i64) with Mut, Panic
     let idx = DRV_RELOC_COUNT
     if idx >= 0 && idx < 4096 {
         DRV_RELOC_OFFSETS[idx as usize] = patch_offset
-        DRV_RELOC_KIND[idx as usize] = kind_code
-        DRV_RELOC_TARGETS[idx as usize] = target
+        DRV_RELOC_TARGETS[idx as usize] = drv_encode_reloc_target(kind_code, target)
         DRV_RELOC_COUNT = idx + 1
     }
 }
@@ -3061,7 +3091,7 @@ fn drv_begin_function(fn_id: i64) with Mut, Panic, Div {
     }
     drv_emit_push_rbp()
     drv_emit_mov_rbp_rsp()
-    drv_emit_sub_rsp_imm32(32768)
+    drv_emit_sub_rsp_imm32(262144)
     var i: i64 = 0
     while i < V2_CURRENT_PARAM_COUNT && i < 6 {
         let vreg = V2_CURRENT_PARAM_REGS[i as usize]
@@ -3081,7 +3111,12 @@ fn drv_emit_load_imm(dst: i64, value: i64) with Mut, Panic, Div {
 fn drv_emit_load_string_offset(dst: i64, ro_off: i64) with Mut, Panic, Div {
     let lea_pos = DRV_CODE_LEN
     drv_emit_lea_rax_rip_disp32(0)
-    drv_add_rodata_reloc(lea_pos + 3, ro_off)
+    let reloc_idx = DRV_RELOC_COUNT
+    if reloc_idx >= 0 && reloc_idx < 4096 {
+        DRV_RELOC_OFFSETS[reloc_idx as usize] = lea_pos + 3
+        DRV_RELOC_TARGETS[reloc_idx as usize] = drv_encode_reloc_target(2, ro_off)
+        DRV_RELOC_COUNT = reloc_idx + 1
+    }
     drv_core_store_rax_to_temp(dst)
 }
 
@@ -3568,6 +3603,7 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
         print("\n")
         return false
     }
+    drv_patch_frame_size(fn_id, V2_NEXT_REG)
     true
 }
 
@@ -3728,8 +3764,9 @@ fn drv_apply_relocations(rodata_file_offset: i64, data_file_offset: i64) with Mu
     var i: i64 = 0
     while i < DRV_RELOC_COUNT {
         let patch_offset = DRV_RELOC_OFFSETS[i as usize]
-        let kind = DRV_RELOC_KIND[i as usize]
-        let target = DRV_RELOC_TARGETS[i as usize]
+        let encoded = DRV_RELOC_TARGETS[i as usize]
+        let kind = drv_decode_reloc_kind(encoded)
+        let target = drv_decode_reloc_target(encoded)
         if kind == 1 {
             if target >= 0 && target < 2048 {
                 let target_offset = DRV_FN_OFFSETS[target as usize]
@@ -3949,11 +3986,10 @@ fn compile_ir_module_to_elf(output_path: string, token_count: i64) -> i64 with I
     drv_emit_builtin_print_str(V2_BUILTIN_PRINT)
     drv_emit_builtin_print_int(V2_BUILTIN_PRINT_INT)
     drv_emit_builtin_print_char(V2_BUILTIN_PRINT_CHAR)
-    print("tmp:before_write\n")
-    drv_emit_builtin_write_elf(V2_BUILTIN_DRIVER_WRITE_ELF)
-    print("tmp:after_write\n")
-    drv_emit_builtin_chmod(V2_BUILTIN_DRIVER_CHMOD)
-    print("tmp:after_chmod\n")
+    if source_uses_ident(token_count, "driver_write_elf_to_file") {
+        drv_emit_builtin_write_elf(V2_BUILTIN_DRIVER_WRITE_ELF)
+        drv_emit_builtin_chmod(V2_BUILTIN_DRIVER_CHMOD)
+    }
 
     // Compile user-defined functions
     var ui: i64 = 0
