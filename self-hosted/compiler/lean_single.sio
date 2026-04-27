@@ -41,9 +41,11 @@ var TL: [i64; 1048576] = [0; 1048576]
 var TC: i64 = 0
 
 // Code output
-var CD: [i8; 67108864] = [0; 67108864]
+var CD: [i8; 134217728] = [0; 134217728]
 var CL: i64 = 0
 var CD_OVF: i64 = 0
+var CD_OVF_FN: i64 = 0
+var CD_OVF_CL: i64 = 0
 var TRAMP_OFF: i64 = 0
 
 // ELF/PE output
@@ -1252,7 +1254,7 @@ var CONST_FOUND_VAL: i64 = 0
 
 // ─── Helpers ───
 fn sb(i: i64) -> i64 with Panic, Mut { if i >= 0 && i < SRC_LEN { return SRC[i as usize] as i64 & 0xFF }; return 0 }
-fn em(b: i64) with Mut { if CL >= 67108864 { CD_OVF = 1; return } CD[CL as usize] = b as i8; CL = CL + 1 }
+fn em(b: i64) with Mut { if CL >= 134217728 { if CD_OVF == 0 { CD_OVF_FN = CURRENT_FN; CD_OVF_CL = CL } CD_OVF = 1; return } CD[CL as usize] = b as i8; CL = CL + 1 }
 fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xFF); em((v >> 24) & 0xFF) }
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
 
@@ -1969,7 +1971,7 @@ fn copy_agg_into_struct_slots_a64(dst_start: i64, field_ty: i64, field_hash: i64
         emit_copy_words_x10_x11_a64(2)
         return
     }
-    if field_ty == 6 || knowledge_hash_is(field_hash) {
+    if type_is_struct_like(field_ty, field_hash) || knowledge_hash_is(field_hash) {
         let nslots = struct_like_nslots(field_hash)
         if nslots > 0 {
             em32(0xAA0003EA)
@@ -1988,7 +1990,7 @@ fn emit_copy_agg_to_ptr_a64(field_ty: i64, field_hash: i64) with Mut, Panic, Div
         nslots = arr_storage_slots(field_hash)
     } else if type_is_option_inline(field_ty, field_hash) {
         nslots = 2
-    } else if field_ty == 6 || knowledge_hash_is(field_hash) {
+    } else if type_is_struct_like(field_ty, field_hash) || knowledge_hash_is(field_hash) {
         nslots = struct_like_nslots(field_hash)
     }
     if nslots <= 0 { return }
@@ -2019,6 +2021,28 @@ fn emit_store_to_pointer_offset_a64(lslot: i64, byte_off: i64, target_ty: i64, t
 
 fn fill_repeat_struct_array_slots_a64(dst_start: i64, field_hash: i64) with Mut, Panic, Div {
     let nslots = arr_storage_slots(field_hash)
+    let elem_hash = arr_hash_elem_hash(field_hash)
+    if elem_hash != 0 {
+        let elem_nslots = struct_like_nslots(elem_hash)
+        if elem_nslots > 0 {
+            let src_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var_a64(src_slot)
+            var j: i64 = 0
+            while j < nslots {
+                emit_imm64_a64(elem_nslots * 8)
+                emit_heap_alloc_a64()
+                em32(0xAA0003EB)  // mov x11, x0 (dest)
+                emit_load_var_a64(src_slot)
+                em32(0xAA0003EA)  // mov x10, x0 (source)
+                em32(0xAA0B03E0)  // mov x0, x11 (dest)
+                emit_copy_agg_to_ptr_a64(6, elem_hash)
+                emit_store_var_a64(dst_start - j)
+                j = j + 1
+            }
+            return
+        }
+    }
     var i: i64 = 0
     while i < nslots {
         emit_store_var_a64(dst_start - i)
@@ -2263,17 +2287,68 @@ fn arr_ty_hash(alen: i64, esiz: i64, elem_ty: i64) -> i64 {
     return alen * 32 + elem_ty * 2
 }
 
+fn arr_hash_ext_base() -> i64 {
+    return 1000000000000
+}
+
+fn arr_hash_ext_alen_scale() -> i64 {
+    return 10000000000
+}
+
+fn arr_hash_is_ext(h: i64) -> bool {
+    return h >= arr_hash_ext_base()
+}
+
+fn arr_ty_hash_with_elem(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64) -> i64 with Mut {
+    if elem_hash == 0 { return arr_ty_hash(alen, esiz, elem_ty) }
+    var esiz_bit: i64 = 0
+    if esiz == 1 { esiz_bit = 1 }
+    return arr_hash_ext_base()
+        + alen * arr_hash_ext_alen_scale()
+        + elem_hash * 32
+        + elem_ty * 2
+        + esiz_bit
+}
+
+fn arr_ty_hash_for_elem_type(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64) -> i64 with Panic, Mut {
+    if elem_hash != 0 {
+        if elem_ty == 6 || elem_ty == 7 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
+        if elem_ty == 0 && st_find(elem_hash) >= 0 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
+    }
+    return arr_ty_hash(alen, esiz, elem_ty)
+}
+
+fn arr_hash_payload(h: i64) -> i64 {
+    if arr_hash_is_ext(h) { return h - arr_hash_ext_base() }
+    return h
+}
+
+fn arr_hash_remainder(h: i64) -> i64 with Div, Mut {
+    let payload = arr_hash_payload(h)
+    if arr_hash_is_ext(h) {
+        let alen = payload / arr_hash_ext_alen_scale()
+        return payload - alen * arr_hash_ext_alen_scale()
+    }
+    return payload
+}
+
 fn arr_hash_alen(h: i64) -> i64 with Div, Mut {
+    if arr_hash_is_ext(h) { return arr_hash_payload(h) / arr_hash_ext_alen_scale() }
     return h / 32
 }
 
 fn arr_hash_esiz(h: i64) -> i64 with Div, Mut {
-    if h % 2 == 1 { return 1 }
+    if arr_hash_remainder(h) % 2 == 1 { return 1 }
     return 8
 }
 
 fn arr_hash_elem_ty(h: i64) -> i64 with Div, Mut {
-    return (h % 32) / 2
+    return (arr_hash_remainder(h) % 32) / 2
+}
+
+fn arr_hash_elem_hash(h: i64) -> i64 with Div, Mut {
+    if arr_hash_is_ext(h) == false { return 0 }
+    return arr_hash_remainder(h) / 32
 }
 
 fn arr_storage_slots(h: i64) -> i64 with Div, Mut {
@@ -2492,8 +2567,14 @@ fn type_is_array_ref(ty: i64, ty_hash: i64) -> bool with Panic, Div, Mut {
 fn slice_inner_matches(expected_hash: i64, actual_hash: i64) -> bool with Panic, Div, Mut {
     let expected_inner = ref_hash_inner_hash(expected_hash)
     let actual_inner = ref_hash_inner_hash(actual_hash)
-    return arr_hash_esiz(expected_inner) == arr_hash_esiz(actual_inner)
-        && arr_hash_elem_ty(expected_inner) == arr_hash_elem_ty(actual_inner)
+    if arr_hash_esiz(expected_inner) != arr_hash_esiz(actual_inner) { return false }
+    if arr_hash_elem_ty(expected_inner) != arr_hash_elem_ty(actual_inner) { return false }
+    let expected_elem_hash = arr_hash_elem_hash(expected_inner)
+    let actual_elem_hash = arr_hash_elem_hash(actual_inner)
+    if expected_elem_hash != 0 || actual_elem_hash != 0 {
+        return expected_elem_hash == actual_elem_hash
+    }
+    return true
 }
 
 fn call_arg_type_compatible(expected_ty: i64, expected_hash: i64, actual_ty: i64, actual_hash: i64) -> bool with Panic, Div, Mut {
@@ -2745,13 +2826,16 @@ fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic, Mut {
     return 0
 }
 
-fn type_is_struct_like(ty: i64, ty_hash: i64) -> bool {
+fn type_is_struct_like(ty: i64, ty_hash: i64) -> bool with Panic, Mut {
     if ty == 6 { return true }
+    if ty == 0 && ty_hash != 0 {
+        if st_find(ty_hash) >= 0 { return true }
+    }
     if ty == 0 && knowledge_hash_is(ty_hash) { return true }
     return false
 }
 
-fn type_is_aggregate(ty: i64, ty_hash: i64) -> bool with Div, Mut {
+fn type_is_aggregate(ty: i64, ty_hash: i64) -> bool with Panic, Div, Mut {
     if ty == 8 { return true }
     if type_is_option_inline(ty, ty_hash) { return true }
     return type_is_struct_like(ty, ty_hash)
@@ -2855,6 +2939,11 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
         let a2 = arr_hash_alen(h2)
         if arr_hash_esiz(h1) != arr_hash_esiz(h2) { return false }
         if arr_hash_elem_ty(h1) != arr_hash_elem_ty(h2) { return false }
+        let eh1 = arr_hash_elem_hash(h1)
+        let eh2 = arr_hash_elem_hash(h2)
+        if eh1 != 0 || eh2 != 0 {
+            if eh1 != eh2 { return false }
+        }
         if a1 == 0 || a2 == 0 { return true }
         return h1 == h2
     }
@@ -3746,6 +3835,23 @@ fn stmt_is_field_array_store(p0: i64) -> bool with Panic, Mut {
     return TK[p as usize] == 16
 }
 
+fn stmt_is_indexed_field_field_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 3 { return false }
+    if TK[(p0 + 1) as usize] != 50 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 41 { return false }
+    var p = p0 + 4
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    if TK[p as usize] != 50 { return false }
+    if TK[(p + 1) as usize] != 3 { return false }
+    return TK[(p + 2) as usize] == 16
+}
+
 fn stmt_is_deref_array_store(p0: i64) -> bool with Panic, Mut {
     if TK[p0 as usize] != 6 { return false }
     if TK[(p0 + 1) as usize] != 19 { return false }
@@ -4129,13 +4235,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         let first_hash = SCAN_TY_HASH
         var first_f64: i64 = 0
         if first_ty == 2 { first_f64 = 1 }
-        var first_nslots: i64 = 1
-        if first_ty == 6 && first_hash != 0 {
-            let fsi = st_find(first_hash)
-            if fsi >= 0 { first_nslots = st_total_size(fsi) / 8 }
-        } else if first_ty == 8 {
-            first_nslots = arr_storage_slots(first_hash)
-        }
+        var first_nslots: i64 = ty_slot_count(first_ty, first_hash)
         // Skip balanced parens, count elements, track last element start.
         var td: i64 = 1
         var tcount: i64 = 1
@@ -4160,14 +4260,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             last_ty = SCAN_TY
             last_hash = SCAN_TY_HASH
             if last_ty == 2 { last_f64 = 1 } else { last_f64 = 0 }
-            if last_ty == 6 && last_hash != 0 {
-                let lsi = st_find(last_hash)
-                if lsi >= 0 { last_nslots = st_total_size(lsi) / 8 } else { last_nslots = 1 }
-            } else if last_ty == 8 {
-                last_nslots = arr_storage_slots(last_hash)
-            } else {
-                last_nslots = 1
-            }
+            last_nslots = ty_slot_count(last_ty, last_hash)
         }
         let total_nslots = first_nslots + last_nslots
         SCAN_TY = 6
@@ -4346,6 +4439,8 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         let ens = TS[p as usize]
         let ene = TE[p as usize]
         let elem_ty = type_name_kind(ens, ene)
+        var elem_hash: i64 = 0
+        if elem_ty == 6 || elem_ty == 7 { elem_hash = gl_name_hash(ens, ene) }
         SCAN_TY = 8
         if src_match(ens, ene - ens, "i8") {
             SCAN_TY_ESIZ = 1
@@ -4359,7 +4454,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             p = p + 1
         }
         if TK[p as usize] == 42 { p = p + 1 }
-        SCAN_TY_HASH = arr_ty_hash(SCAN_TY_ALEN, SCAN_TY_ESIZ, elem_ty)
+        SCAN_TY_HASH = arr_ty_hash_for_elem_type(SCAN_TY_ALEN, SCAN_TY_ESIZ, elem_ty, elem_hash)
         SCAN_TY_NEXT = p
         return
     }
@@ -6311,7 +6406,7 @@ fn copy_agg_into_struct_slots_x86(dst_start: i64, field_ty: i64, field_hash: i64
         nslots = arr_storage_slots(field_hash)
     } else if type_is_option_inline(field_ty, field_hash) {
         nslots = 2
-    } else if field_ty == 6 || knowledge_hash_is(field_hash) {
+    } else if type_is_struct_like(field_ty, field_hash) || knowledge_hash_is(field_hash) {
         nslots = struct_like_nslots(field_hash)
     }
     if nslots <= 0 { emit_store_var(dst_start); return }
@@ -6340,7 +6435,7 @@ fn emit_copy_agg_to_ptr_x86(field_ty: i64, field_hash: i64) with Mut, Panic, Div
         nslots = arr_storage_slots(field_hash)
     } else if type_is_option_inline(field_ty, field_hash) {
         nslots = 2
-    } else if field_ty == 6 || knowledge_hash_is(field_hash) {
+    } else if type_is_struct_like(field_ty, field_hash) || knowledge_hash_is(field_hash) {
         nslots = struct_like_nslots(field_hash)
     }
     if nslots <= 0 { return }
@@ -6377,6 +6472,28 @@ fn emit_store_to_pointer_offset_x86(lslot: i64, byte_off: i64, target_ty: i64, t
 
 fn fill_repeat_struct_array_slots_x86(dst_start: i64, field_hash: i64) with Mut, Panic, Div {
     let nslots = arr_storage_slots(field_hash)
+    let elem_hash = arr_hash_elem_hash(field_hash)
+    if elem_hash != 0 {
+        let elem_nslots = struct_like_nslots(elem_hash)
+        if elem_nslots > 0 {
+            let src_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(src_slot)
+            var j: i64 = 0
+            while j < nslots {
+                emit_imm64(elem_nslots * 8)
+                emit_heap_alloc_x86()
+                em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (dest)
+                emit_load_var(src_slot)
+                em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (source)
+                em(0x48); em(0x89); em(0xc8)  // mov rax, rcx (dest)
+                emit_copy_agg_to_ptr_x86(6, elem_hash)
+                emit_store_var(dst_start - j)
+                j = j + 1
+            }
+            return
+        }
+    }
     var i: i64 = 0
     while i < nslots {
         emit_store_var(dst_start - i)
@@ -7714,6 +7831,68 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         EP = EP + 1
     }
     let borrow_tok = EP - 1
+    if TK[EP as usize] == 6 && TK[(EP + 1) as usize] == 19 && TK[(EP + 2) as usize] == 3 && TK[(EP + 3) as usize] == 7 {
+        let ptr_tok = EP + 2
+        let pns = TS[ptr_tok as usize]
+        let pne = TE[ptr_tok as usize]
+        EP = EP + 4
+        let pvi = var_find_idx(pns, pne)
+        if pvi >= 0 {
+            emit_load_var(VAR_SLOT[pvi as usize])
+            var inner_ty = VAR_TY[pvi as usize]
+            var inner_hash = VAR_TY_HASH[pvi as usize]
+            if type_is_pointer_like(inner_ty, inner_hash) {
+                inner_ty = ptr_hash_inner_ty(inner_hash)
+                inner_hash = ptr_hash_inner_hash(inner_hash)
+            }
+            while TK[EP as usize] == 50 {
+                EP = EP + 1
+                let f_tok = EP
+                let fh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                EP = EP + 1
+                if inner_ty == 10 && type_is_pointer_like(inner_ty, inner_hash) {
+                    inner_ty = ptr_hash_inner_ty(inner_hash)
+                    inner_hash = ptr_hash_inner_hash(inner_hash)
+                }
+                let si = st_find(inner_hash)
+                if si < 0 {
+                    tc_error(f_tok, "field borrow through deref requires struct pointee")
+                    em(0x31); em(0xc0)
+                    inner_ty = 0
+                    inner_hash = 0
+                } else {
+                    let off = st_field_offset(si, fh)
+                    if off < 0 {
+                        tc_error(f_tok, "unknown field access")
+                        em(0x31); em(0xc0)
+                        inner_ty = 0
+                        inner_hash = 0
+                    } else {
+                        if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
+                        inner_ty = st_field_ty(si, fh)
+                        inner_hash = st_field_hash(si, fh)
+                    }
+                }
+            }
+            if inner_ty == 11 && box_hash_is(inner_hash) {
+                em(0x48); em(0x8b); em(0x00)
+                inner_ty = ptr_hash_inner_ty(inner_hash)
+                inner_hash = ptr_hash_inner_hash(inner_hash)
+            }
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(inner_ty, inner_hash, 1) }
+            else { EXPR_TY_HASH = ref_hash_make(inner_ty, inner_hash, 0) }
+            return
+        }
+        tc_undefined_var(ptr_tok)
+        em(0x31); em(0xc0)
+        EXPR_IS_F64 = 0
+        EXPR_TY = 10
+        if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(0, 0, 1) }
+        else { EXPR_TY_HASH = ref_hash_make(0, 0, 0) }
+        return
+    }
     let rns = TS[EP as usize]
     let rne = TE[EP as usize]
     EP = EP + 1
@@ -7749,6 +7928,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         var base_len_const: i64 = 0
         var has_const_len: i64 = 0
         var elem_ty: i64 = 1
+        var elem_hash: i64 = 0
         var esiz: i64 = 8
         var ok_base: i64 = 0
         var allow_mut: i64 = 0
@@ -7761,6 +7941,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 base_len_slot = VAR_LEN_SLOT[lvi as usize]
                 esiz = arr_hash_esiz(inner_hash)
                 if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                elem_hash = arr_hash_elem_hash(inner_hash)
                 ok_base = 1
                 if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
             } else if lty == 8 {
@@ -7768,6 +7949,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 has_const_len = 1
                 esiz = VAR_ESIZ[lvi as usize]
                 if arr_hash_elem_ty(lhash) != 0 { elem_ty = arr_hash_elem_ty(lhash) }
+                elem_hash = arr_hash_elem_hash(lhash)
                 ok_base = 1
                 if want_mut == 0 || VAR_MUT[lvi as usize] != 0 { allow_mut = 1 }
             } else if type_is_array_ref(lty, lhash) {
@@ -7776,6 +7958,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 has_const_len = 1
                 esiz = arr_hash_esiz(inner_hash)
                 if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                elem_hash = arr_hash_elem_hash(inner_hash)
                 ok_base = 1
                 if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
             } else if lty == 3 {
@@ -7798,6 +7981,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 has_const_len = 1
                 esiz = GL[(gi * 4 + 2) as usize]
                 if arr_hash_elem_ty(GL_TY_HASH[gi as usize]) != 0 { elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize]) }
+                elem_hash = arr_hash_elem_hash(GL_TY_HASH[gi as usize])
                 ok_base = 1
                 allow_mut = 1
             }
@@ -7853,7 +8037,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         emit_lea_var(ptr_slot)
         EXPR_IS_F64 = 0
         EXPR_TY = 10
-        EXPR_TY_HASH = ref_hash_make(8, arr_ty_hash(0, esiz, elem_ty), want_mut)
+        EXPR_TY_HASH = ref_hash_make(8, arr_ty_hash_for_elem_type(0, esiz, elem_ty, elem_hash), want_mut)
         return
     }
     let slot = var_find(rns, rne)
@@ -7863,7 +8047,12 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         }
         let lalen = var_find_alen(rns, rne)
         let lty = var_find_ty(rns, rne)
-        if lalen > 0 || lty == 6 || lty == 8 {
+        let addr_vi = var_find_idx(rns, rne)
+        var lhash_for_addr: i64 = 0
+        if addr_vi >= 0 { lhash_for_addr = VAR_TY_HASH[addr_vi as usize] }
+        if TK[EP as usize] == 50 && lty == 10 && lhash_for_addr != 0 && type_is_pointer_like(lty, lhash_for_addr) {
+            emit_load_var(slot)
+        } else if lalen > 0 || lty == 6 || lty == 8 || (lty == 11 && box_hash_is(lhash_for_addr)) {
             emit_load_var(slot)
         } else {
             let off = 0 - slot * 8
@@ -7915,12 +8104,42 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
             }
         }
         }
-        // Navigate dot-chain in &var.field1.field2 before wrapping in reference type
-        EXPR_TY = VAR_TY[bvi as usize]
-        EXPR_TY_HASH = VAR_TY_HASH[bvi as usize]
-        if TK[EP as usize] == 50 { compile_postfix_tail() }
-        let inner_ty = EXPR_TY
-        let inner_hash = EXPR_TY_HASH
+        var inner_ty = VAR_TY[bvi as usize]
+        var inner_hash = VAR_TY_HASH[bvi as usize]
+        if TK[EP as usize] == 50 && inner_ty == 10 && type_is_pointer_like(inner_ty, inner_hash) {
+            inner_ty = ptr_hash_inner_ty(inner_hash)
+            inner_hash = ptr_hash_inner_hash(inner_hash)
+        }
+        while TK[EP as usize] == 50 {
+            EP = EP + 1
+            let f_tok = EP
+            let fh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+            EP = EP + 1
+            let si = st_find(inner_hash)
+            if si < 0 {
+                tc_error(f_tok, "field borrow requires struct base")
+                em(0x31); em(0xc0)
+                inner_ty = 0
+                inner_hash = 0
+            } else {
+                let off = st_field_offset(si, fh)
+                if off < 0 {
+                    tc_error(f_tok, "unknown field access")
+                    em(0x31); em(0xc0)
+                    inner_ty = 0
+                    inner_hash = 0
+                } else {
+                    if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
+                    inner_ty = st_field_ty(si, fh)
+                    inner_hash = st_field_hash(si, fh)
+                }
+            }
+        }
+        if inner_ty == 11 && box_hash_is(inner_hash) {
+            em(0x48); em(0x8b); em(0x00)
+            inner_ty = ptr_hash_inner_ty(inner_hash)
+            inner_hash = ptr_hash_inner_hash(inner_hash)
+        }
         EXPR_IS_F64 = 0
         EXPR_TY = 10
         if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(inner_ty, inner_hash, 1) }
@@ -7928,11 +8147,38 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     } else {
         let rgi = gl_find(rns, rne)
         if rgi >= 0 {
-            EXPR_TY = GL_TY[rgi as usize]
-            EXPR_TY_HASH = GL_TY_HASH[rgi as usize]
-            if TK[EP as usize] == 50 { compile_postfix_tail() }
-            let inner_ty2 = EXPR_TY
-            let inner_hash2 = EXPR_TY_HASH
+            var inner_ty2 = GL_TY[rgi as usize]
+            var inner_hash2 = GL_TY_HASH[rgi as usize]
+            while TK[EP as usize] == 50 {
+                EP = EP + 1
+                let f_tok2 = EP
+                let fh2 = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                EP = EP + 1
+                let si2 = st_find(inner_hash2)
+                if si2 < 0 {
+                    tc_error(f_tok2, "field borrow requires struct base")
+                    em(0x31); em(0xc0)
+                    inner_ty2 = 0
+                    inner_hash2 = 0
+                } else {
+                    let off2 = st_field_offset(si2, fh2)
+                    if off2 < 0 {
+                        tc_error(f_tok2, "unknown field access")
+                        em(0x31); em(0xc0)
+                        inner_ty2 = 0
+                        inner_hash2 = 0
+                    } else {
+                        if off2 != 0 { em(0x48); em(0x8d); em(0x80); em32(off2) }
+                        inner_ty2 = st_field_ty(si2, fh2)
+                        inner_hash2 = st_field_hash(si2, fh2)
+                    }
+                }
+            }
+            if inner_ty2 == 11 && box_hash_is(inner_hash2) {
+                em(0x48); em(0x8b); em(0x00)
+                inner_ty2 = ptr_hash_inner_ty(inner_hash2)
+                inner_hash2 = ptr_hash_inner_hash(inner_hash2)
+            }
             EXPR_IS_F64 = 0
             EXPR_TY = 10
             if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(inner_ty2, inner_hash2, 1) }
@@ -8075,7 +8321,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let rep_count = TV[EP as usize]
             EP = EP + 1
             if TK[EP as usize] == 42 { EP = EP + 1 }
-            let arr_hash = arr_ty_hash(rep_count, 8, elem_ty)
+            let arr_hash = arr_ty_hash_for_elem_type(rep_count, 8, elem_ty, elem_hash)
             if elem_ty == 6 {
                 // Struct element: each element occupies struct_nslots qwords
                 let s_nslots = struct_like_nslots(elem_hash)
@@ -8160,7 +8406,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         em32(0 - (base + arr_count - 1) * 8)
         EXPR_IS_F64 = 0
         EXPR_TY = 8
-        EXPR_TY_HASH = arr_ty_hash(arr_count, 8, elem_ty)
+        EXPR_TY_HASH = arr_ty_hash_for_elem_type(arr_count, 8, elem_ty, elem_hash)
         LAST_ALEN = arr_count
         return
     }
@@ -11461,7 +11707,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                             if fty == 8 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
                                 EP = EP + 1
                                 compile_or()
-                                if ty_eq(arr_hash_elem_ty(fhash), 0, EXPR_TY, EXPR_TY_HASH) == false {
+                                if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), EXPR_TY, EXPR_TY_HASH) == false {
                                     tc_error(field_tok, "array repeat element type does not match field type")
                                 }
                                 if TK[EP as usize] == 27 { EP = EP + 1 }
@@ -11524,14 +11770,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 let esz = GL[(gi * 4 + 2) as usize]
                 var elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize])
-                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
+                let elem_hash = arr_hash_elem_hash(GL_TY_HASH[gi as usize])
                 if esz == 8 {
                     // mov rcx, rax; mov rax, base; mov rax, [rax + rcx*8]
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
                     em(0x48); em(0xb8); em64(base)  // mov rax, base
                     em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
                     EXPR_TY = elem_ty
-                    EXPR_TY_HASH = 0
+                    EXPR_TY_HASH = elem_hash
                     if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else {
                     // i8 array: movsx rax, byte [rax + rcx]
@@ -11550,11 +11796,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let lesiz = var_find_esiz(ns, ne)
                     let lvi = var_find_idx(ns, ne)
                     var elem_ty = 1
+                    var elem_hash: i64 = 0
                     var is_arr_ty = 0
                     var is_slice_ty = 0
                     if lvi >= 0 {
                         elem_ty = arr_hash_elem_ty(VAR_TY_HASH[lvi as usize])
-                        // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
+                        elem_hash = arr_hash_elem_hash(VAR_TY_HASH[lvi as usize])
                         if VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
                         // &! [T; N] reference param: VAR_TY==10, inner type is array (ty==8)
                         if VAR_TY[lvi as usize] == 10 {
@@ -11564,6 +11811,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                                 if arr_hash_elem_ty(ref_hash_inner_hash(VAR_TY_HASH[lvi as usize])) != 0 {
                                     elem_ty = arr_hash_elem_ty(ref_hash_inner_hash(VAR_TY_HASH[lvi as usize]))
                                 }
+                                elem_hash = arr_hash_elem_hash(ref_hash_inner_hash(VAR_TY_HASH[lvi as usize]))
                             }
                         }
                     }
@@ -11580,7 +11828,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if is_arr_ty == 1 && lesiz == 8 {
                         em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
                         EXPR_TY = elem_ty
-                        EXPR_TY_HASH = 0
+                        EXPR_TY_HASH = elem_hash
                         if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     } else if is_arr_ty == 1 && lesiz == 1 {
                         em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
@@ -11870,12 +12118,12 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             if base_ty == 8 {
                 let esiz = arr_hash_esiz(base_hash)
                 var elem_ty = arr_hash_elem_ty(base_hash)
-                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
+                let elem_hash = arr_hash_elem_hash(base_hash)
                 LAST_ALEN = arr_hash_alen(base_hash)
                 if esiz == 8 {
                     em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8]
                     EXPR_TY = elem_ty
-                    EXPR_TY_HASH = 0
+                    EXPR_TY_HASH = elem_hash
                     if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else {
                     em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x11)  // movsx rax, byte [rcx + rdx]
@@ -11887,7 +12135,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 let inner_hash = ref_hash_inner_hash(base_hash)
                 let esiz = arr_hash_esiz(inner_hash)
                 var elem_ty = arr_hash_elem_ty(inner_hash)
-                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
+                let elem_hash = arr_hash_elem_hash(inner_hash)
                 em(0x48); em(0x8b); em(0x41); em(8)  // mov rax, [rcx + 8] (len)
                 em(0x48); em(0x39); em(0xc2)         // cmp rdx, rax
                 em(0x0f); em(0x82); let slice_ok = CL; em32(0)
@@ -11898,7 +12146,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if esiz == 8 {
                     em(0x48); em(0x8b); em(0x04); em(0xd0)  // mov rax, [rax + rdx*8]
                     EXPR_TY = elem_ty
-                    EXPR_TY_HASH = 0
+                    EXPR_TY_HASH = elem_hash
                     if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else {
                     em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x10)  // movsx rax, byte [rax + rdx]
@@ -12771,14 +13019,14 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 }
                 found = 1
             }
-            if base_data_ty == 6 {
+            if type_is_struct_like(base_data_ty, base_data_hash) {
                 let bsi = st_find(base_data_hash)
                 if bsi >= 0 {
                     let off = st_field_offset(bsi, fh)
                     if off >= 0 {
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
-                        if EXPR_TY == 8 || EXPR_TY == 6 || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
+                        if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                         } else {
                             if off == 0 {
@@ -12801,7 +13049,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if off >= 0 {
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
-                    if EXPR_TY == 8 || EXPR_TY == 6 || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
+                    if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                         if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                     } else {
                         if off == 0 {
@@ -14406,7 +14654,12 @@ fn compile_additive() with IO, Mut, Panic, Div {
                 // Leave result pointer in RAX
                 em(0x48); em(0x8d); em(0x85); em32(res_disp)  // lea rax, result[0]
                 EXPR_TY = 8; LAST_ALEN = total_len_pp
-                EXPR_TY_HASH = arr_ty_hash(total_len_pp, arr_hash_esiz(EXPR_TY_HASH), arr_hash_elem_ty(EXPR_TY_HASH))
+                EXPR_TY_HASH = arr_ty_hash_with_elem(
+                    total_len_pp,
+                    arr_hash_esiz(EXPR_TY_HASH),
+                    arr_hash_elem_ty(EXPR_TY_HASH),
+                    arr_hash_elem_hash(EXPR_TY_HASH)
+                )
             } else {
                 em(0x59)  // pop and discard — unsupported type
             }
@@ -15886,12 +16139,12 @@ fn tuple_bind_pattern_a64(pp0: i64, rp0: i64) with IO, Mut, Panic, Div {
 
 fn resolve_field_struct_index(ns: i64, ne: i64, fh: i64) -> i64 with Panic, Div, Mut {
     let vi = var_find_idx(ns, ne)
-    if vi >= 0 && VAR_TY[vi as usize] == 6 {
+    if vi >= 0 && type_is_struct_like(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) {
         let si = st_find(VAR_TY_HASH[vi as usize])
         if si >= 0 { return si }
     }
     let gi = gl_find(ns, ne)
-    if gi >= 0 && GL_TY[gi as usize] == 6 {
+    if gi >= 0 && type_is_struct_like(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) {
         let si = st_find(GL_TY_HASH[gi as usize])
         if si >= 0 { return si }
     }
@@ -15934,9 +16187,10 @@ fn compile_field_array_store_x86() with IO, Mut, Panic, Div {
         em(0x59)
         return
     }
-    if ty_eq(arr_hash_elem_ty(fhash), 0, rhs_ty, rhs_ty_hash) == false {
+    if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), rhs_ty, rhs_ty_hash) == false {
         tc_error(EP - 1, "assignment type mismatch")
     }
+    materialize_aggregate_array_element_x86(fhash)
     em(0x48); em(0x89); em(0xc2)
     em(0x59)
     let slot = var_find(ns, ne)
@@ -15988,9 +16242,10 @@ fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
         emit_pop_x1_a64()
         return
     }
-    if ty_eq(arr_hash_elem_ty(fhash), 0, rhs_ty, rhs_ty_hash) == false {
+    if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), rhs_ty, rhs_ty_hash) == false {
         tc_error(EP - 1, "assignment type mismatch")
     }
+    materialize_aggregate_array_element_a64(fhash)
     em32(0xAA0003EA)
     emit_pop_x1_a64()
     let slot = var_find(ns, ne)
@@ -16006,6 +16261,141 @@ fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
     }
     if arr_hash_esiz(fhash) == 8 { em32(0xF821780A) }
     else { em32(0x3821680A) }
+}
+
+fn resolve_struct_index_by_field(fh: i64) -> i64 with Panic, Div, Mut {
+    var si: i64 = 0
+    while si < ST_COUNT {
+        if st_field_offset(si, fh) >= 0 { return si }
+        si = si + 1
+    }
+    return -1
+}
+
+fn materialize_aggregate_array_element_x86(array_hash: i64) with Mut, Panic, Div {
+    let elem_hash = arr_hash_elem_hash(array_hash)
+    if elem_hash == 0 { return }
+    let elem_nslots = struct_like_nslots(elem_hash)
+    if elem_nslots <= 0 { return }
+    let src_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let dst_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(src_slot)
+    emit_imm64(elem_nslots * 8)
+    emit_heap_alloc_x86()
+    emit_store_var(dst_slot)
+    emit_load_var(src_slot)
+    em(0x48); em(0x89); em(0xc2)
+    emit_load_var(dst_slot)
+    emit_copy_agg_to_ptr_x86(6, elem_hash)
+}
+
+fn materialize_aggregate_array_element_a64(array_hash: i64) with Mut, Panic, Div {
+    let elem_hash = arr_hash_elem_hash(array_hash)
+    if elem_hash == 0 { return }
+    let elem_nslots = struct_like_nslots(elem_hash)
+    if elem_nslots <= 0 { return }
+    let src_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let dst_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var_a64(src_slot)
+    emit_imm64_a64(elem_nslots * 8)
+    emit_heap_alloc_a64()
+    emit_store_var_a64(dst_slot)
+    emit_load_var_a64(src_slot)
+    em32(0xAA0003EA)
+    emit_load_var_a64(dst_slot)
+    emit_copy_agg_to_ptr_a64(6, elem_hash)
+}
+
+fn compile_indexed_field_field_store_x86() with IO, Mut, Panic, Div {
+    let root_tok = EP
+    let ns = TS[EP as usize]
+    let ne = TE[EP as usize]
+    let array_field_tok = EP + 2
+    let afns = TS[array_field_tok as usize]
+    let afne = TE[array_field_tok as usize]
+    let array_fh = gl_name_hash(afns, afne)
+
+    EP = EP + 4
+    compile_or()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    if TK[EP as usize] == 50 { EP = EP + 1 }
+
+    let leaf_field_tok = EP
+    let lfns = TS[EP as usize]
+    let lfne = TE[EP as usize]
+    let leaf_fh = gl_name_hash(lfns, lfne)
+    EP = EP + 1
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+
+    em(0x50)
+    compile_or()
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+
+    let root_si = resolve_field_struct_index(ns, ne, array_fh)
+    if root_si < 0 {
+        tc_error(array_field_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    let array_off = st_field_offset(root_si, array_fh)
+    let array_ty = st_field_ty(root_si, array_fh)
+    let array_hash = st_field_hash(root_si, array_fh)
+    if array_ty != 8 {
+        tc_error(array_field_tok, "indexed field store requires array field")
+        em(0x59)
+        return
+    }
+    if arr_hash_elem_ty(array_hash) != 6 {
+        tc_error(array_field_tok, "indexed field store requires struct array element")
+        em(0x59)
+        return
+    }
+
+    var elem_si: i64 = -1
+    let elem_hash = arr_hash_elem_hash(array_hash)
+    if elem_hash != 0 { elem_si = st_find(elem_hash) }
+    if elem_si < 0 { elem_si = resolve_struct_index_by_field(leaf_fh) }
+    if elem_si < 0 {
+        tc_error(leaf_field_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    let leaf_off = st_field_offset(elem_si, leaf_fh)
+    let leaf_ty = st_field_ty(elem_si, leaf_fh)
+    let leaf_hash = st_field_hash(elem_si, leaf_fh)
+    if leaf_ty != 0 && ty_eq(leaf_ty, leaf_hash, rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+
+    em(0x48); em(0x89); em(0xc2)
+    em(0x59)
+    let slot = var_find(ns, ne)
+    if slot >= 0 { emit_load_var(slot) }
+    else {
+        let gi = gl_find(ns, ne)
+        if gi >= 0 {
+            let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+            em(0x48); em(0xb8); em64(addr)
+        } else {
+            tc_undefined_var(root_tok)
+            em(0x31); em(0xc0)
+        }
+    }
+    if array_off != 0 { em(0x48); em(0x8d); em(0x80); em32(array_off) }
+    em(0x48); em(0x8b); em(0x04); em(0xc8)
+    if leaf_off != 0 { em(0x48); em(0x8d); em(0x80); em32(leaf_off) }
+
+    if type_is_aggregate(leaf_ty, leaf_hash) {
+        emit_copy_agg_to_ptr_x86(leaf_ty, leaf_hash)
+    } else {
+        em(0x48); em(0x89); em(0x10)
+    }
 }
 
 // ─── Statement compiler ───
@@ -16183,6 +16573,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 let etns = TS[EP as usize]
                 let etne = TE[EP as usize]
                 let arr_elem_ty = type_name_kind(etns, etne)
+                var arr_elem_hash: i64 = 0
+                if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
                 if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
                 EP = EP + 1  // skip element type
                 if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ;
@@ -16191,7 +16583,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
                 is_arr = 1
                 decl_ty = 8
-                decl_ty_hash = arr_ty_hash(arr_len, arr_esiz, arr_elem_ty)
+                decl_ty_hash = arr_ty_hash_for_elem_type(arr_len, arr_esiz, arr_elem_ty, arr_elem_hash)
                 decl_is_f64 = 0
             } else {
                 scan_type(EP)
@@ -16594,6 +16986,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
+    // x.array_field[idx].field = expr
+    if stmt_is_indexed_field_field_store(EP) {
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        compile_indexed_field_field_store_x86()
+        return
+    }
+
     // x.field = expr (struct field write)
     if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
         let name_tok = EP
@@ -16766,6 +17167,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
             let esz = GL[(gi * 4 + 2) as usize]
             // rax = value, stack = index
+            materialize_aggregate_array_element_x86(GL_TY_HASH[gi as usize])
             em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
             em(0x59)  // pop rcx (index)
             em(0x48); em(0xb8); em64(base)  // mov rax, base
@@ -16783,13 +17185,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 let lvi = var_find_idx(ns, ne)
                 var is_arr_ty = 0
                 var is_slice_ty = 0
-                if lvi >= 0 && VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
+                var array_hash: i64 = 0
+                if lvi >= 0 && VAR_TY[lvi as usize] == 8 { is_arr_ty = 1; array_hash = VAR_TY_HASH[lvi as usize] }
                 if lvi >= 0 && VAR_TY[lvi as usize] == 10 {
                     if ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 {
                         is_arr_ty = 1
+                        array_hash = ref_hash_inner_hash(VAR_TY_HASH[lvi as usize])
                         if type_is_slice_ref(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) { is_slice_ty = 1 }
                     }
                 }
+                materialize_aggregate_array_element_x86(array_hash)
                 em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
                 em(0x59)  // pop rcx (index)
                 if is_slice_ty == 1 {
@@ -20953,6 +21358,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     let etns = TS[p as usize]
                     let etne = TE[p as usize]
                     let elem_ty = type_name_kind(etns, etne)
+                    var elem_hash: i64 = 0
+                    if elem_ty == 6 || elem_ty == 7 { elem_hash = gl_name_hash(etns, etne) }
                     var esiz: i64 = 8
                     if src_match(etns, etne - etns, "i8") { esiz = 1 }
                     p = p + 1
@@ -20966,7 +21373,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     let gix = gl_add(gns, gne, esiz, alen)
                     if gix >= 0 {
                         GL_TY[gix as usize] = 8
-                        GL_TY_HASH[gix as usize] = arr_ty_hash(alen, esiz, elem_ty)
+                        GL_TY_HASH[gix as usize] = arr_ty_hash_for_elem_type(alen, esiz, elem_ty, elem_hash)
                     }
                 } else {
                     // Scalar: i64, i32, bool, string
@@ -21057,7 +21464,33 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     var sig_fi: i64 = 0
     var sig_study_depth: i64 = 0   // >0 means we're inside a study block
     var sig_impl_hash: i64 = 0     // receiver hash for impl blocks
+    var sig_impl_depth: i64 = 0    // brace depth while inside an impl block
+    var sig_impl_pending_open: i64 = 0
     while p < TC {
+        if TK[p as usize] == 77 {
+            sig_impl_hash = 0
+            sig_impl_depth = 0
+            sig_impl_pending_open = 0
+            sig_study_depth = 0
+            p = p + 1
+            continue
+        }
+        if sig_impl_depth > 0 {
+            if TK[p as usize] == 8 {
+                if sig_impl_pending_open != 0 {
+                    sig_impl_pending_open = 0
+                } else {
+                    sig_impl_depth = sig_impl_depth + 1
+                }
+            }
+            if TK[p as usize] == 9 {
+                sig_impl_depth = sig_impl_depth - 1
+                if sig_impl_depth == 0 {
+                    sig_impl_hash = 0
+                    sig_impl_pending_open = 0
+                }
+            }
+        }
         // Track study block depth for implicit Hypothesis effect
         if TK[p as usize] == 71 || (TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "study")) {
             // Find opening { of study block to set study_depth
@@ -21092,6 +21525,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     if iq < TC && TK[iq as usize] == 3 { ih = gl_name_hash(TS[iq as usize], TE[iq as usize]) }
                 }
                 sig_impl_hash = ih
+                sig_impl_depth = 1
+                sig_impl_pending_open = 1
             }
         }
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
@@ -21213,7 +21648,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             }
             q = skip_signature_where_clause(q)
             // Impl block: if we're inside an impl, force receiver hash
-            if sig_impl_hash != 0 && FN_RECV_HASH[sig_fi as usize] == 0 {
+            if sig_impl_hash != 0 {
                 FN_RECV_HASH[sig_fi as usize] = sig_impl_hash
             }
             // Study block: functions inside get implicit Hypothesis effect (bit 256)
@@ -21250,6 +21685,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if FN_RET_TY[ret_fi as usize] == 8 && arr_hash_alen(FN_RET_HASH[ret_fi as usize]) == 0 {
                 let ret_esiz = arr_hash_esiz(FN_RET_HASH[ret_fi as usize])
                 let ret_elem_ty = arr_hash_elem_ty(FN_RET_HASH[ret_fi as usize])
+                let ret_elem_hash = arr_hash_elem_hash(FN_RET_HASH[ret_fi as usize])
                 var bd: i64 = 0
                 if TK[q as usize] == 8 { bd = 1; q = q + 1 }
                 while q < TC && bd > 0 {
@@ -21258,7 +21694,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     if bd == 1 && TK[q as usize] == 2 && TK[(q + 1) as usize] == 41 {
                         let ret_alen = array_lit_count(q + 1)
                         if ret_alen > 0 {
-                            FN_RET_HASH[ret_fi as usize] = arr_ty_hash(ret_alen, ret_esiz, ret_elem_ty)
+                            FN_RET_HASH[ret_fi as usize] = arr_ty_hash_for_elem_type(ret_alen, ret_esiz, ret_elem_ty, ret_elem_hash)
                         }
                         q = TC
                         bd = 0
@@ -21534,32 +21970,6 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         CURRENT_FN = fn_idx
         CURRENT_RET_TY = FN_RET_TY[fn_idx as usize]
         CURRENT_RET_HASH = FN_RET_HASH[fn_idx as usize]
-        if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "with_text") {
-            print("debug with_text fn#")
-            print_int(fn_idx)
-            print(" recv=")
-            print_int(FN_RECV_HASH[fn_idx as usize])
-            print(" ret=")
-            print_int(CURRENT_RET_TY)
-            print("/")
-            print_int(CURRENT_RET_HASH)
-            print(" slots=")
-            print_int(ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH))
-            print("\n")
-        }
-        if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "new") {
-            print("debug new fn#")
-            print_int(fn_idx)
-            print(" recv=")
-            print_int(FN_RECV_HASH[fn_idx as usize])
-            print(" ret=")
-            print_int(CURRENT_RET_TY)
-            print("/")
-            print_int(CURRENT_RET_HASH)
-            print(" slots=")
-            print_int(ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH))
-            print("\n")
-        }
 
         // (stub infrastructure removed — imported functions compile fully)
 
@@ -22082,7 +22492,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em(0x0f); em(0x05)
     }
 
-    if CD_OVF != 0 { print("error: code buffer overflow\n"); return 1 }
+    if CD_OVF != 0 { print("error: code buffer overflow at fn="); print_int(CD_OVF_FN); print(" name="); print_fn_name(CD_OVF_FN); print(" CL="); print_int(CD_OVF_CL); print(" total_fns="); print_int(FN_COUNT); print("\n"); return 1 }
     print("compile: fns="); print_int(FN_COUNT); print(" code="); print_int(CL)
     print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT)
     print(" gates[direct="); print_int(EPIST_GATES_DIRECT)
@@ -23705,11 +24115,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             EP = EP + 1
             compile_or_a64()
             let elem_ty = EXPR_TY
+            let elem_hash = EXPR_TY_HASH
             if TK[EP as usize] == 27 { EP = EP + 1 }
             let rep_count = TV[EP as usize]
             EP = EP + 1
             if TK[EP as usize] == 42 { EP = EP + 1 }
-            let arr_hash = arr_ty_hash(rep_count, 8, elem_ty)
+            let arr_hash = arr_ty_hash_for_elem_type(rep_count, 8, elem_ty, elem_hash)
             let nslots = arr_storage_slots(arr_hash)
             if nslots > 0 {
                 let base = NEXT_SLOT
@@ -23753,7 +24164,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         emit_lea_var_a64(base + arr_count - 1)
         EXPR_IS_F64 = 0
         EXPR_TY = 8
-        EXPR_TY_HASH = arr_ty_hash(arr_count, 8, elem_ty)
+        EXPR_TY_HASH = arr_ty_hash_for_elem_type(arr_count, 8, elem_ty, elem_hash)
         LAST_ALEN = arr_count
         return
     }
@@ -23918,6 +24329,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             var base_len_const: i64 = 0
             var has_const_len: i64 = 0
             var elem_ty: i64 = 1
+            var elem_hash: i64 = 0
             var esiz: i64 = 8
             var ok_base: i64 = 0
             var allow_mut: i64 = 0
@@ -23930,6 +24342,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     base_len_slot = VAR_LEN_SLOT[lvi as usize]
                     esiz = arr_hash_esiz(inner_hash)
                     if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                    elem_hash = arr_hash_elem_hash(inner_hash)
                     ok_base = 1
                     if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
                 } else if lty == 8 {
@@ -23937,6 +24350,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     has_const_len = 1
                     esiz = VAR_ESIZ[lvi as usize]
                     if arr_hash_elem_ty(lhash) != 0 { elem_ty = arr_hash_elem_ty(lhash) }
+                    elem_hash = arr_hash_elem_hash(lhash)
                     ok_base = 1
                     if want_mut == 0 || VAR_MUT[lvi as usize] != 0 { allow_mut = 1 }
                 } else if type_is_array_ref(lty, lhash) {
@@ -23945,6 +24359,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     has_const_len = 1
                     esiz = arr_hash_esiz(inner_hash)
                     if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                    elem_hash = arr_hash_elem_hash(inner_hash)
                     ok_base = 1
                     if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
                 } else if lty == 3 {
@@ -23967,6 +24382,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     has_const_len = 1
                     esiz = GL[(gi * 4 + 2) as usize]
                     if arr_hash_elem_ty(GL_TY_HASH[gi as usize]) != 0 { elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize]) }
+                    elem_hash = arr_hash_elem_hash(GL_TY_HASH[gi as usize])
                     ok_base = 1
                     allow_mut = 1
                 }
@@ -24030,7 +24446,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             emit_lea_var_a64(ptr_slot)
             EXPR_IS_F64 = 0
             EXPR_TY = 10
-            EXPR_TY_HASH = ref_hash_make(8, arr_ty_hash(0, esiz, elem_ty), want_mut)
+            EXPR_TY_HASH = ref_hash_make(8, arr_ty_hash_for_elem_type(0, esiz, elem_ty, elem_hash), want_mut)
             return
         }
         let slot = var_find(rns, rne)
@@ -24040,7 +24456,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             let lalen = var_find_alen(rns, rne)
             let lty = var_find_ty(rns, rne)
-            if lalen > 0 || lty == 6 || lty == 8 { emit_load_var_a64(slot) }
+            let lvi_for_box = var_find_idx(rns, rne)
+            var lhash_for_box: i64 = 0
+            if lvi_for_box >= 0 { lhash_for_box = VAR_TY_HASH[lvi_for_box as usize] }
+            if lalen > 0 || lty == 6 || lty == 8 || (lty == 11 && box_hash_is(lhash_for_box)) { emit_load_var_a64(slot) }
             else { emit_lea_var_a64(slot) }
         }
         else {
@@ -24051,16 +24470,29 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         EXPR_IS_F64 = 0
         EXPR_TY = 10
         if var_find_idx(rns, rne) >= 0 {
+            var inner_ty_b = VAR_TY[var_find_idx(rns, rne) as usize]
+            var inner_hash_b = VAR_TY_HASH[var_find_idx(rns, rne) as usize]
+            if inner_ty_b == 11 && box_hash_is(inner_hash_b) {
+                inner_ty_b = ptr_hash_inner_ty(inner_hash_b)
+                inner_hash_b = ptr_hash_inner_hash(inner_hash_b)
+            }
             if want_mut != 0 {
-                EXPR_TY_HASH = ref_hash_make(VAR_TY[var_find_idx(rns, rne) as usize], VAR_TY_HASH[var_find_idx(rns, rne) as usize], 1)
+                EXPR_TY_HASH = ref_hash_make(inner_ty_b, inner_hash_b, 1)
             } else {
-                EXPR_TY_HASH = ref_hash_make(VAR_TY[var_find_idx(rns, rne) as usize], VAR_TY_HASH[var_find_idx(rns, rne) as usize], 0)
+                EXPR_TY_HASH = ref_hash_make(inner_ty_b, inner_hash_b, 0)
             }
         } else {
             let rgi = gl_find(rns, rne)
             if rgi >= 0 {
-                if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 1) }
-                else { EXPR_TY_HASH = ref_hash_make(GL_TY[rgi as usize], GL_TY_HASH[rgi as usize], 0) }
+                var inner_ty_gb = GL_TY[rgi as usize]
+                var inner_hash_gb = GL_TY_HASH[rgi as usize]
+                if inner_ty_gb == 11 && box_hash_is(inner_hash_gb) {
+                    em32(0xF9400000)
+                    inner_ty_gb = ptr_hash_inner_ty(inner_hash_gb)
+                    inner_hash_gb = ptr_hash_inner_hash(inner_hash_gb)
+                }
+                if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(inner_ty_gb, inner_hash_gb, 1) }
+                else { EXPR_TY_HASH = ref_hash_make(inner_ty_gb, inner_hash_gb, 0) }
             }
             else {
                 if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(0, 0, 1) }
@@ -25143,7 +25575,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                             if fty == 8 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
                                 EP = EP + 1
                                 compile_or_a64()
-                                if ty_eq(arr_hash_elem_ty(fhash), 0, EXPR_TY, EXPR_TY_HASH) == false {
+                                if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), EXPR_TY, EXPR_TY_HASH) == false {
                                     tc_error(field_tok, "array repeat element type does not match field type")
                                 }
                                 if TK[EP as usize] == 27 { EP = EP + 1 }
@@ -25190,13 +25622,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
                 let esz = GL[(gi * 4 + 2) as usize]
                 var elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize])
-                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
+                let elem_hash = arr_hash_elem_hash(GL_TY_HASH[gi as usize])
                 em32(0xAA0003E9)
                 emit_image_addr_a64(base)
                 if esz == 8 {
                     em32(0xF8697800)
                     EXPR_TY = elem_ty
-                    EXPR_TY_HASH = 0
+                    EXPR_TY_HASH = elem_hash
                     if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 }
                 else {
@@ -25212,11 +25644,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     let lesiz = var_find_esiz(ns, ne)
                     let lvi = var_find_idx(ns, ne)
                     var elem_ty = 1
+                    var elem_hash: i64 = 0
                     var is_arr_ty = 0
                     var is_slice_ty = 0
                     if lvi >= 0 {
                         elem_ty = arr_hash_elem_ty(VAR_TY_HASH[lvi as usize])
-                        // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
+                        elem_hash = arr_hash_elem_hash(VAR_TY_HASH[lvi as usize])
                         if VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
                         if VAR_TY[lvi as usize] == 10 {
                             if ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 {
@@ -25225,6 +25658,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                                 if arr_hash_elem_ty(ref_hash_inner_hash(VAR_TY_HASH[lvi as usize])) != 0 {
                                     elem_ty = arr_hash_elem_ty(ref_hash_inner_hash(VAR_TY_HASH[lvi as usize]))
                                 }
+                                elem_hash = arr_hash_elem_hash(ref_hash_inner_hash(VAR_TY_HASH[lvi as usize]))
                             }
                         }
                     }
@@ -25242,7 +25676,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     if is_arr_ty == 1 && lesiz == 8 {
                         em32(0xF8697800)
                         EXPR_TY = elem_ty
-                        EXPR_TY_HASH = 0
+                        EXPR_TY_HASH = elem_hash
                         if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     } else if is_arr_ty == 1 && lesiz == 1 {
                         em32(0x38A96800)
@@ -25480,12 +25914,12 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             if base_ty == 8 {
                 let esiz = arr_hash_esiz(base_hash)
                 var elem_ty = arr_hash_elem_ty(base_hash)
-                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
+                let elem_hash = arr_hash_elem_hash(base_hash)
                 LAST_ALEN = arr_hash_alen(base_hash)
                 if esiz == 8 {
                     em32(0xF8697800)
                     EXPR_TY = elem_ty
-                    EXPR_TY_HASH = 0
+                    EXPR_TY_HASH = elem_hash
                     if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else {
                     em32(0x38A96800)
@@ -25497,7 +25931,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 let inner_hash = ref_hash_inner_hash(base_hash)
                 let esiz = arr_hash_esiz(inner_hash)
                 var elem_ty = arr_hash_elem_ty(inner_hash)
-                // elem_ty == 0 means struct element — leave as 0 (unknown) for type checking
+                let elem_hash = arr_hash_elem_hash(inner_hash)
                 em32(0xF940042A)  // ldr x10, [x1, #8] (len)
                 em32(0xEB00001F | (10 << 16) | (9 << 5))  // cmp x9, x10
                 let slice_ok_patch_a = CL
@@ -25508,7 +25942,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 if esiz == 8 {
                     em32(0xF8697800)
                     EXPR_TY = elem_ty
-                    EXPR_TY_HASH = 0
+                    EXPR_TY_HASH = elem_hash
                     if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else {
                     em32(0x38A96800)
@@ -25753,14 +26187,14 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 }
                 found = 1
             }
-            if base_data_ty == 6 {
+            if type_is_struct_like(base_data_ty, base_data_hash) {
                 let bsi = st_find(base_data_hash)
                 if bsi >= 0 {
                     let off = st_field_offset(bsi, fh)
                     if off >= 0 {
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
-                        if EXPR_TY == 8 || EXPR_TY == 6 || knowledge_hash_is(EXPR_TY_HASH) {
+                        if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 {
                                 emit_imm64_reg_a64(1, off)
                                 em32(0x8B010000)
@@ -25783,7 +26217,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 if off >= 0 {
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
-                    if EXPR_TY == 8 || EXPR_TY == 6 || knowledge_hash_is(EXPR_TY_HASH) {
+                    if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                         if off != 0 {
                             emit_imm64_reg_a64(1, off)
                             em32(0x8B010000)
@@ -26281,6 +26715,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 let etns = TS[EP as usize]
                 let etne = TE[EP as usize]
                 let arr_elem_ty = type_name_kind(etns, etne)
+                var arr_elem_hash: i64 = 0
+                if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
                 if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
                 EP = EP + 1
                 if TK[EP as usize] == 27 { EP = EP + 1 }
@@ -26288,7 +26724,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 42 { EP = EP + 1 }
                 is_arr = 1
                 decl_ty = 8
-                decl_ty_hash = arr_ty_hash(arr_len, arr_esiz, arr_elem_ty)
+                decl_ty_hash = arr_ty_hash_for_elem_type(arr_len, arr_esiz, arr_elem_ty, arr_elem_hash)
                 decl_is_f64 = 0
             } else {
                 scan_type(EP)
@@ -26647,6 +27083,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if gi >= 0 {
             let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
             let esz = GL[(gi * 4 + 2) as usize]
+            materialize_aggregate_array_element_a64(GL_TY_HASH[gi as usize])
             em32(0xAA0003EA)
             emit_pop_x1_a64()
             emit_image_addr_a64(base)
@@ -26660,13 +27097,16 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 let lvi = var_find_idx(ns, ne)
                 var is_arr_ty = 0
                 var is_slice_ty = 0
-                if lvi >= 0 && VAR_TY[lvi as usize] == 8 { is_arr_ty = 1 }
+                var array_hash: i64 = 0
+                if lvi >= 0 && VAR_TY[lvi as usize] == 8 { is_arr_ty = 1; array_hash = VAR_TY_HASH[lvi as usize] }
                 if lvi >= 0 && VAR_TY[lvi as usize] == 10 {
                     if ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 {
                         is_arr_ty = 1
+                        array_hash = ref_hash_inner_hash(VAR_TY_HASH[lvi as usize])
                         if type_is_slice_ref(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) { is_slice_ty = 1 }
                     }
                 }
+                materialize_aggregate_array_element_a64(array_hash)
                 em32(0xAA0003EA)
                 emit_pop_x1_a64()
                 if is_slice_ty == 1 {
