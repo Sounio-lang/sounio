@@ -73,6 +73,7 @@ let TK_RETURN: i64 = 28
 let TK_NEWLINE: i64 = 2
 let TK_IDENT: i64 = 123
 let TK_INT: i64 = 124
+let TK_FLOAT: i64 = 125
 let TK_STRING: i64 = 126
 let TK_PLUS: i64 = 132
 let TK_MINUS: i64 = 133
@@ -145,6 +146,8 @@ let V2_BUILTIN_EMPTY_NAME: i64 = 12
 let V2_BUILTIN_DRIVER_READ_FILE_TO_GLOBALS: i64 = 13
 let V2_BUILTIN_DRIVER_WRITE_ELF: i64 = 14
 let V2_BUILTIN_DRIVER_CHMOD: i64 = 15
+let V2_BUILTIN_PRINT_F64: i64 = 16
+let V2_BUILTIN_SQRT_F64: i64 = 17
 let V2_FIRST_USER_FN_ID: i64 = 32
 
 // V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
@@ -166,6 +169,8 @@ let UFN_GLOBAL_LOAD: i64 = 15
 let UFN_GLOBAL_STORE: i64 = 16
 let UFN_LOCAL_LOAD: i64 = 17
 let UFN_LOCAL_STORE: i64 = 18
+let UFN_LOAD_F64_SCALED: i64 = 19
+let UFN_F64_BINOP: i64 = 20
 
 var V2_UFN_OPS: [i64; 2048] = [0; 2048]
 var V2_UFN_DST: [i64; 2048] = [0; 2048]
@@ -178,6 +183,7 @@ var V2_UFN_FN_ID: [i64; 2048] = [0; 2048]
 var V2_UFN_RESULT_FCOUNT: [i64; 2048] = [0; 2048]
 var V2_UFN_STR_START: [i64; 2048] = [0; 2048]
 var V2_UFN_STR_END: [i64; 2048] = [0; 2048]
+var V2_UFN_FLOAT_SCALE: [i64; 2048] = [0; 2048]
 var V2_UFN_COUNT: i64 = 0
 var V2_PARSE_UNSUPPORTED: i64 = 0
 var V2_PARSE_UNSUPPORTED_TOKEN: i64 = -1
@@ -192,6 +198,7 @@ var V2_CALL_ARG_REGS: [i64; 8] = [0; 8]
 var V2_CALL_ARG_SIZES: [i64; 8] = [0; 8]
 var V2_CURRENT_PARAM_REGS: [i64; 64] = [0; 64]
 var V2_CURRENT_PARAM_COUNT: i64 = 0
+var V2_REG_IS_F64: [i64; 4096] = [0; 4096]
 
 var DRV_CODE_BYTES: [i8; 262144] = [0; 262144]
 var DRV_CODE_LEN: i64 = 0
@@ -221,6 +228,8 @@ var STRUCT_FIELDS: [i64; 128] = [0; 128]
 var STRUCT_FIELD_TOTAL: i64 = 0
 var STRUCT_FIELD_STRUCT_IDX: [i64; 128] = [0; 128]   // struct type of each field (-1 = scalar)
 var STRUCT_FIELD_FLAT_OFFSET: [i64; 128] = [0; 128]  // flat vreg offset of each field
+var STRUCT_FIELD_IS_F64: [i64; 128] = [0; 128]
+var STRUCT_FIELD_GENERIC_F64: [i64; 128] = [0; 128]
 
 // Enum layout table (capacity 16 enums / 128 total variants)
 var ENUM_NAME_TOKS: [i64; 16] = [0; 16]
@@ -232,6 +241,7 @@ var ENUM_VARIANT_TOTAL: i64 = 0
 
 // User fn return struct index (-1 = scalar return)
 var V2_USER_FN_RETURN_STRUCT_IDX: [i64; 512] = [0; 512]
+var V2_USER_FN_RETURN_IS_F64: [i64; 512] = [0; 512]
 
 // Sideband written by parse_struct_lit/parse_struct_lit_ir so callers can record struct type
 var V2_LAST_STRUCT_IDX: i64 = -1
@@ -267,6 +277,7 @@ let V2_GLOBAL_UFN_FLOAT_SCALE: i64 = 74
 let V2_GLOBAL_REG_IS_F64: i64 = 75
 let V2_GLOBAL_STRUCT_FIELD_IS_F64: i64 = 76
 let V2_GLOBAL_USER_FN_RETURN_IS_F64: i64 = 77
+let V2_GLOBAL_STRUCT_FIELD_GENERIC_F64: i64 = 78
 
 struct ExprParse {
     ok: i64,
@@ -294,6 +305,72 @@ fn reset_locals(ctx: &! V2DriverContext) with Mut {
     V2_NEXT_REG = 0
     V2_BREAK_LABEL = -1
     V2_CONTINUE_LABEL = -1
+    var i: i64 = 0
+    while i < 4096 {
+        V2_REG_IS_F64[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn mark_reg_f64(reg: i64) with Mut {
+    if reg >= 0 && reg < 4096 {
+        V2_REG_IS_F64[reg as usize] = 1
+    }
+}
+
+fn mark_reg_i64(reg: i64) with Mut {
+    if reg >= 0 && reg < 4096 {
+        V2_REG_IS_F64[reg as usize] = 0
+    }
+}
+
+fn reg_is_f64(reg: i64) -> bool {
+    if reg >= 0 && reg < 4096 {
+        return V2_REG_IS_F64[reg as usize] != 0
+    }
+    false
+}
+
+fn mark_struct_regs(base: i64, sidx: i64) with Mut {
+    if sidx < 0 { return }
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        let abs_fi = start + fi
+        let flat_off = STRUCT_FIELD_FLAT_OFFSET[abs_fi as usize]
+        let child = STRUCT_FIELD_STRUCT_IDX[abs_fi as usize]
+        if child >= 0 {
+            if STRUCT_FIELD_GENERIC_F64[abs_fi as usize] != 0 {
+                mark_struct_scalar_regs_f64(base + flat_off, child)
+            } else {
+                mark_struct_regs(base + flat_off, child)
+            }
+        } else if STRUCT_FIELD_IS_F64[abs_fi as usize] != 0 {
+            mark_reg_f64(base + flat_off)
+        } else {
+            mark_reg_i64(base + flat_off)
+        }
+        fi = fi + 1
+    }
+}
+
+fn mark_struct_scalar_regs_f64(base: i64, sidx: i64) with Mut {
+    if sidx < 0 { return }
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        let abs_fi = start + fi
+        let flat_off = STRUCT_FIELD_FLAT_OFFSET[abs_fi as usize]
+        let child = STRUCT_FIELD_STRUCT_IDX[abs_fi as usize]
+        if child >= 0 {
+            mark_struct_scalar_regs_f64(base + flat_off, child)
+        } else {
+            mark_reg_f64(base + flat_off)
+        }
+        fi = fi + 1
+    }
 }
 
 fn remember_local_tok(ctx: &! V2DriverContext, tok_idx: i64, reg: i64) with Mut, Panic {
@@ -435,7 +512,7 @@ fn token_float_mantissa(idx: i64) -> i64 with Mut, Panic, Div {
     mantissa
 }
 
-fn token_float_scale(idx: i64) -> i64 with Mut, Panic {
+fn token_float_scale(idx: i64) -> i64 with Mut, Panic, Div {
     let start = pt_read_start(idx)
     let end = pt_read_end(idx)
     var i: i64 = start
@@ -455,7 +532,7 @@ fn token_float_scale(idx: i64) -> i64 with Mut, Panic {
     scale
 }
 
-fn token_decimal_digit_count(idx: i64) -> i64 with Panic {
+fn token_decimal_digit_count(idx: i64) -> i64 with Mut, Panic, Div {
     let start = pt_read_start(idx)
     let end = pt_read_end(idx)
     var i: i64 = start
@@ -468,7 +545,7 @@ fn token_decimal_digit_count(idx: i64) -> i64 with Panic {
     count
 }
 
-fn decimal_scale_for_digits(digits: i64) -> i64 {
+fn decimal_scale_for_digits(digits: i64) -> i64 with Mut {
     var scale: i64 = 1
     var i: i64 = 0
     while i < digits {
@@ -688,6 +765,7 @@ fn driver_global_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "STRUCT_FIELD_STRUCT_IDX") { return 33 }
     if token_text_eq(tok, "STRUCT_FIELD_FLAT_OFFSET") { return 34 }
     if token_text_eq(tok, "STRUCT_FIELD_IS_F64") { return V2_GLOBAL_STRUCT_FIELD_IS_F64 }
+    if token_text_eq(tok, "STRUCT_FIELD_GENERIC_F64") { return V2_GLOBAL_STRUCT_FIELD_GENERIC_F64 }
     if token_text_eq(tok, "ENUM_NAME_TOKS") { return 35 }
     if token_text_eq(tok, "ENUM_VARIANT_START") { return 36 }
     if token_text_eq(tok, "ENUM_VARIANT_COUNT") { return 37 }
@@ -746,6 +824,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "TK_NEWLINE") { return 2 }
     if token_text_eq(tok, "TK_IDENT") { return 123 }
     if token_text_eq(tok, "TK_INT") { return 124 }
+    if token_text_eq(tok, "TK_FLOAT") { return 125 }
     if token_text_eq(tok, "TK_STRING") { return 126 }
     if token_text_eq(tok, "TK_PLUS") { return 132 }
     if token_text_eq(tok, "TK_MINUS") { return 133 }
@@ -796,6 +875,8 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_BUILTIN_DRIVER_READ_FILE_TO_GLOBALS") { return 13 }
     if token_text_eq(tok, "V2_BUILTIN_DRIVER_WRITE_ELF") { return 14 }
     if token_text_eq(tok, "V2_BUILTIN_DRIVER_CHMOD") { return 15 }
+    if token_text_eq(tok, "V2_BUILTIN_PRINT_F64") { return 16 }
+    if token_text_eq(tok, "V2_BUILTIN_SQRT_F64") { return 17 }
     if token_text_eq(tok, "V2_FIRST_USER_FN_ID") { return 32 }
 
     if token_text_eq(tok, "UFN_LOAD_IMM") { return 1 }
@@ -816,6 +897,8 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "UFN_GLOBAL_STORE") { return 16 }
     if token_text_eq(tok, "UFN_LOCAL_LOAD") { return 17 }
     if token_text_eq(tok, "UFN_LOCAL_STORE") { return 18 }
+    if token_text_eq(tok, "UFN_LOAD_F64_SCALED") { return 19 }
+    if token_text_eq(tok, "UFN_F64_BINOP") { return 20 }
 
     if token_text_eq(tok, "V2_GLOBAL_PT_KIND_CODE") { return 43 }
     if token_text_eq(tok, "V2_GLOBAL_PT_START") { return 44 }
@@ -848,6 +931,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_GLOBAL_REG_IS_F64") { return 75 }
     if token_text_eq(tok, "V2_GLOBAL_STRUCT_FIELD_IS_F64") { return 76 }
     if token_text_eq(tok, "V2_GLOBAL_USER_FN_RETURN_IS_F64") { return 77 }
+    if token_text_eq(tok, "V2_GLOBAL_STRUCT_FIELD_GENERIC_F64") { return 78 }
     -999999999
 }
 
@@ -1066,9 +1150,17 @@ fn scan_struct_field_types(token_count: i64) with Mut, Panic, Div {
     while fi < STRUCT_FIELD_TOTAL {
         let name_tok = STRUCT_FIELDS[fi as usize]
         var type_sidx: i64 = -1
+        STRUCT_FIELD_IS_F64[fi as usize] = 0
+        STRUCT_FIELD_GENERIC_F64[fi as usize] = 0
         if name_tok + 2 < token_count {
             if token_kind(name_tok + 1) == TK_COLON && token_kind(name_tok + 2) == TK_IDENT {
                 type_sidx = find_struct_idx_tok(name_tok + 2)
+                if token_text_eq(name_tok + 2, "f64") {
+                    STRUCT_FIELD_IS_F64[fi as usize] = 1
+                }
+                if name_tok + 5 < token_count && token_kind(name_tok + 3) == TK_LT && token_kind(name_tok + 4) == TK_IDENT && token_kind(name_tok + 5) == TK_GT && token_text_eq(name_tok + 4, "f64") {
+                    STRUCT_FIELD_GENERIC_F64[fi as usize] = 1
+                }
             }
         }
         STRUCT_FIELD_STRUCT_IDX[fi as usize] = type_sidx
@@ -1174,6 +1266,17 @@ fn lookup_user_fn_return_struct_idx(fn_id: i64) -> i64 with Mut {
     -1
 }
 
+fn lookup_user_fn_return_is_f64(fn_id: i64) -> bool with Mut {
+    var i: i64 = 0
+    while i < V2_USER_FN_COUNT {
+        if V2_USER_FN_IDS[i as usize] == fn_id {
+            return V2_USER_FN_RETURN_IS_F64[i as usize] != 0
+        }
+        i = i + 1
+    }
+    false
+}
+
 fn lookup_user_fn_returns_value(fn_id: i64) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < V2_USER_FN_COUNT {
@@ -1195,6 +1298,7 @@ fn builtin_fn_returns_value(fn_id: i64) -> bool {
     if fn_id == V2_BUILTIN_PRINT { return false }
     if fn_id == V2_BUILTIN_PRINT_INT { return false }
     if fn_id == V2_BUILTIN_PRINT_CHAR { return false }
+    if fn_id == V2_BUILTIN_PRINT_F64 { return false }
     true
 }
 
@@ -1240,6 +1344,32 @@ fn struct_field_type_at(sidx: i64, flat_off: i64) -> i64 with Mut {
         fi = fi + 1
     }
     -1
+}
+
+fn struct_field_is_f64_at(sidx: i64, flat_off: i64) -> bool with Mut {
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        if STRUCT_FIELD_FLAT_OFFSET[(start + fi) as usize] == flat_off {
+            return STRUCT_FIELD_IS_F64[(start + fi) as usize] != 0
+        }
+        fi = fi + 1
+    }
+    false
+}
+
+fn struct_field_generic_f64_at(sidx: i64, flat_off: i64) -> bool with Mut {
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        if STRUCT_FIELD_FLAT_OFFSET[(start + fi) as usize] == flat_off {
+            return STRUCT_FIELD_GENERIC_F64[(start + fi) as usize] != 0
+        }
+        fi = fi + 1
+    }
+    false
 }
 
 fn is_cmp_op(k: i64) -> bool {
@@ -1396,6 +1526,35 @@ fn ufn_record_binop(dst: i64, src1: i64, binop_code: i64, src2: i64) with Mut {
     }
 }
 
+fn ufn_record_load_f64_scaled(dst: i64, mantissa: i64, scale: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_LOAD_F64_SCALED
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_IMM[idx as usize] = mantissa
+        V2_UFN_FLOAT_SCALE[idx as usize] = scale
+        V2_UFN_COUNT = idx + 1
+        mark_reg_f64(dst)
+    }
+}
+
+fn ufn_record_f64_binop(dst: i64, src1: i64, binop_code: i64, src2: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_F64_BINOP
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = src1
+        V2_UFN_SRC2[idx as usize] = src2
+        V2_UFN_BINOP_CODE[idx as usize] = binop_code
+        V2_UFN_COUNT = idx + 1
+        if binop_code >= 1 && binop_code <= 4 {
+            mark_reg_f64(dst)
+        } else {
+            mark_reg_i64(dst)
+        }
+    }
+}
+
 fn ufn_record_label(label_id: i64) with Mut {
     let idx = V2_UFN_COUNT
     if idx < 2048 {
@@ -1452,6 +1611,7 @@ fn ufn_record_copy(dst: i64, src: i64) with Mut {
         V2_UFN_DST[idx as usize] = dst
         V2_UFN_SRC1[idx as usize] = src
         V2_UFN_COUNT = idx + 1
+        if reg_is_f64(src) { mark_reg_f64(dst) } else { mark_reg_i64(dst) }
     }
 }
 
@@ -1482,6 +1642,8 @@ fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
     if name_eq_text(name, "print") { return V2_BUILTIN_PRINT }
     if name_eq_text(name, "print_int") { return V2_BUILTIN_PRINT_INT }
     if name_eq_text(name, "print_char") { return V2_BUILTIN_PRINT_CHAR }
+    if name_eq_text(name, "print_f64") { return V2_BUILTIN_PRINT_F64 }
+    if name_eq_text(name, "sqrt_f64") { return V2_BUILTIN_SQRT_F64 }
     if name_eq_text(name, "arg_count") { return V2_BUILTIN_ARG_COUNT }
     if name_eq_text(name, "get_arg_count") { return V2_BUILTIN_ARG_COUNT }
     if name_eq_text(name, "get_arg") { return V2_BUILTIN_GET_ARG }
@@ -1503,6 +1665,8 @@ fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "print") { return V2_BUILTIN_PRINT }
     if token_text_eq(tok, "print_int") { return V2_BUILTIN_PRINT_INT }
     if token_text_eq(tok, "print_char") { return V2_BUILTIN_PRINT_CHAR }
+    if token_text_eq(tok, "print_f64") { return V2_BUILTIN_PRINT_F64 }
+    if token_text_eq(tok, "sqrt_f64") { return V2_BUILTIN_SQRT_F64 }
     if token_text_eq(tok, "arg_count") { return V2_BUILTIN_ARG_COUNT }
     if token_text_eq(tok, "get_arg_count") { return V2_BUILTIN_ARG_COUNT }
     if token_text_eq(tok, "get_arg") { return V2_BUILTIN_GET_ARG }
@@ -1691,6 +1855,12 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
                         if foff < 0 { break }
                         cur_reg = cur_reg + foff
                         let next_sidx = struct_field_type_at(cur_sidx, foff)
+                        if next_sidx >= 0 && struct_field_generic_f64_at(cur_sidx, foff) {
+                            mark_struct_scalar_regs_f64(cur_reg, next_sidx)
+                        }
+                        if next_sidx < 0 && struct_field_is_f64_at(cur_sidx, foff) {
+                            mark_reg_f64(cur_reg)
+                        }
                         cur = cur + 2
                         if next_sidx < 0 { V2_LAST_STRUCT_IDX = -1; break }
                         cur_sidx = next_sidx
@@ -1718,6 +1888,10 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
             let lit = parse_struct_lit_ir(func, ctx, pos, V2_TOKEN_COUNT)
             if lit.ok != 0 { return lit }
         }
+        if token_kind(pos + 1) == TK_LT && token_kind(pos + 2) == TK_IDENT && token_kind(pos + 3) == TK_GT && token_kind(pos + 4) == TK_LBRACE {
+            let lit = parse_struct_lit_ir(func, ctx, pos, V2_TOKEN_COUNT)
+            if lit.ok != 0 { return lit }
+        }
         // function call
         if token_kind(pos + 1) == TK_LPAREN {
             return parse_fn_call_ir(func, ctx, pos)
@@ -1729,10 +1903,19 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
 fn parse_struct_lit_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> ExprParse with Mut, Panic, Div, Alloc {
     let sidx = find_struct_idx_tok(pos)
     if sidx < 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    var brace_pos = pos + 1
+    var generic_f64: i64 = 0
+    if token_kind(pos + 1) == TK_LT && token_kind(pos + 2) == TK_IDENT && token_kind(pos + 3) == TK_GT && token_kind(pos + 4) == TK_LBRACE {
+        brace_pos = pos + 4
+        if token_text_eq(pos + 2, "f64") {
+            generic_f64 = 1
+        }
+    }
+    if token_kind(brace_pos) != TK_LBRACE { return ExprParse { ok: 0, reg: -1, next: pos} }
     let flat_size = STRUCT_FLAT_SIZE[sidx as usize]
     let base_reg = V2_NEXT_REG
     V2_NEXT_REG = V2_NEXT_REG + flat_size
-    var cur = pos + 2
+    var cur = brace_pos + 1
     while cur < token_count {
         let kk = token_kind(cur)
         if kk == TK_NEWLINE || kk == TK_SEMI || kk == TK_COMMA { cur = cur + 1; continue }
@@ -1762,6 +1945,11 @@ fn parse_struct_lit_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_co
         if cur < token_count && token_kind(cur) == TK_COMMA { cur = cur + 1 }
     }
     V2_LAST_STRUCT_IDX = sidx
+    if generic_f64 != 0 {
+        mark_struct_scalar_regs_f64(base_reg, sidx)
+    } else {
+        mark_struct_regs(base_reg, sidx)
+    }
     ExprParse { ok: 1, reg: base_reg, next: cur + 1}
 }
 
@@ -1892,10 +2080,18 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         while ri < ret_flat { let _ = alloc_reg(ctx); ri = ri + 1 }
         ufn_record_call_struct_result(dst, fn_id, arg0_reg, total_argc, ret_flat)
         V2_LAST_STRUCT_IDX = ret_sidx
+        if lookup_user_fn_return_is_f64(fn_id) {
+            mark_struct_scalar_regs_f64(dst, ret_sidx)
+        } else {
+            mark_struct_regs(dst, ret_sidx)
+        }
         return ExprParse { ok: 1, reg: dst, next: cur + 1}
     }
     let dst = alloc_reg(ctx)
     ufn_record_call(dst, fn_id, arg0_reg, total_argc)
+    if lookup_user_fn_return_is_f64(fn_id) || fn_id == V2_BUILTIN_SQRT_F64 {
+        mark_reg_f64(dst)
+    }
     ExprParse { ok: 1, reg: dst, next: cur + 1}
 }
 
@@ -1908,7 +2104,11 @@ fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         let right = parse_atom_ir(func, ctx, result.next + 1)
         if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: result.next} }
         let dst = alloc_reg(ctx)
-        ufn_record_binop(dst, result.reg, arith_op_to_code(op_kind), right.reg)
+        if reg_is_f64(result.reg) || reg_is_f64(right.reg) {
+            ufn_record_f64_binop(dst, result.reg, arith_op_to_code(op_kind), right.reg)
+        } else {
+            ufn_record_binop(dst, result.reg, arith_op_to_code(op_kind), right.reg)
+        }
         result = ExprParse { ok: 1, reg: dst, next: right.next}
         op_kind = token_kind(result.next)
     }
@@ -1932,7 +2132,11 @@ fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
             return ExprParse { ok: 1, reg: eq_dst, next: right.next}
         }
         let dst = alloc_reg(ctx)
-        ufn_record_binop(dst, result.reg, cmp_op_to_code(op_kind), right.reg)
+        if reg_is_f64(result.reg) || reg_is_f64(right.reg) {
+            ufn_record_f64_binop(dst, result.reg, cmp_op_to_code(op_kind), right.reg)
+        } else {
+            ufn_record_binop(dst, result.reg, cmp_op_to_code(op_kind), right.reg)
+        }
         var rn = right.next
         if token_kind(rn) == TK_AS { rn = rn + 2 }
         result = ExprParse { ok: 1, reg: dst, next: rn}
@@ -2525,11 +2729,18 @@ fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
                 register_user_fn(i + 1, next_id)
                 // scan for -> ReturnType to detect struct return
                 var ret_sidx: i64 = -1
+                var ret_is_f64: i64 = 0
                 var j = i + 2
                 while j < token_count && token_kind(j) != TK_LBRACE && token_kind(j) != TK_FN {
                     if token_kind(j) == TK_ARROW {
                         if j + 1 < token_count && token_kind(j + 1) == TK_IDENT {
                             ret_sidx = find_struct_idx_tok(j + 1)
+                            if token_text_eq(j + 1, "f64") {
+                                ret_is_f64 = 1
+                            }
+                            if j + 4 < token_count && token_kind(j + 2) == TK_LT && token_kind(j + 3) == TK_IDENT && token_kind(j + 4) == TK_GT && token_text_eq(j + 3, "f64") {
+                                ret_is_f64 = 1
+                            }
                         }
                         break
                     }
@@ -2537,6 +2748,7 @@ fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
                 }
                 if reg_idx < 512 {
                     V2_USER_FN_RETURN_STRUCT_IDX[reg_idx as usize] = ret_sidx
+                    V2_USER_FN_RETURN_IS_F64[reg_idx as usize] = ret_is_f64
                 }
                 next_id = next_id + 1
             }
@@ -2698,6 +2910,7 @@ fn drv_emit_push_rax() with Mut, Div, Panic { drv_emit_byte(80) }
 fn drv_emit_pop_rbx() with Mut, Div, Panic { drv_emit_byte(91) }
 fn drv_emit_pop_rax() with Mut, Div, Panic { drv_emit_byte(88) }
 fn drv_emit_push_rdi() with Mut, Div, Panic { drv_emit_byte(87) }
+fn drv_emit_push_rdx() with Mut, Div, Panic { drv_emit_byte(82) }
 
 fn drv_emit_mov_rbp_rsp() with Mut, Div, Panic {
     drv_emit_byte(72)
@@ -2781,6 +2994,76 @@ fn drv_core_store_rax_to_temp(temp: i64) with Mut, Div, Panic {
     drv_emit_byte(137)
     drv_emit_byte(133)
     drv_emit_u32_le(disp)
+}
+
+fn drv_emit_load_temp_to_xmm0(temp: i64) with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(15)
+    drv_emit_byte(16)
+    drv_emit_byte(133)
+    drv_emit_u32_le(drv_ir_slot_offset(temp))
+}
+
+fn drv_emit_load_temp_to_xmm1(temp: i64) with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(15)
+    drv_emit_byte(16)
+    drv_emit_byte(141)
+    drv_emit_u32_le(drv_ir_slot_offset(temp))
+}
+
+fn drv_emit_store_xmm0_to_temp(temp: i64) with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(15)
+    drv_emit_byte(17)
+    drv_emit_byte(133)
+    drv_emit_u32_le(drv_ir_slot_offset(temp))
+}
+
+fn drv_emit_movsd_xmm0_rsp() with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(15)
+    drv_emit_byte(16)
+    drv_emit_byte(4)
+    drv_emit_byte(36)
+}
+
+fn drv_emit_cvtsi2sd_xmm0_rax() with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(42)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_cvtsi2sd_xmm1_rax() with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(42)
+    drv_emit_byte(200)
+}
+
+fn drv_emit_cvttsd2si_rax_xmm0() with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(44)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_sse2_xmm0_xmm1(code: i64) with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(15)
+    drv_emit_byte(code)
+    drv_emit_byte(193)
+}
+
+fn drv_emit_ucomisd_xmm0_xmm1() with Mut, Div, Panic {
+    drv_emit_byte(102)
+    drv_emit_byte(15)
+    drv_emit_byte(46)
+    drv_emit_byte(193)
 }
 
 fn drv_emit_mov_rax_mem_rax_rbx8() with Mut, Div, Panic {
@@ -3280,6 +3563,95 @@ fn drv_emit_any_binop(dst: i64, lhs: i64, op_code: i64, rhs: i64) -> bool with M
     false
 }
 
+fn drv_emit_load_f64_scaled(dst: i64, mantissa: i64, scale: i64) with Mut, Panic, Div {
+    drv_emit_mov_rax_imm(mantissa)
+    drv_emit_cvtsi2sd_xmm0_rax()
+    drv_emit_mov_rax_imm(scale)
+    drv_emit_cvtsi2sd_xmm1_rax()
+    drv_emit_sse2_xmm0_xmm1(94)
+    drv_emit_store_xmm0_to_temp(dst)
+}
+
+fn drv_emit_f64_binop(dst: i64, lhs: i64, op_code: i64, rhs: i64) -> bool with Mut, Panic, Div {
+    drv_emit_load_temp_to_xmm0(lhs)
+    drv_emit_load_temp_to_xmm1(rhs)
+    if op_code == 1 {
+        drv_emit_sse2_xmm0_xmm1(88)
+        drv_emit_store_xmm0_to_temp(dst)
+        return true
+    }
+    if op_code == 2 {
+        drv_emit_sse2_xmm0_xmm1(92)
+        drv_emit_store_xmm0_to_temp(dst)
+        return true
+    }
+    if op_code == 3 {
+        drv_emit_sse2_xmm0_xmm1(89)
+        drv_emit_store_xmm0_to_temp(dst)
+        return true
+    }
+    if op_code == 4 {
+        drv_emit_sse2_xmm0_xmm1(94)
+        drv_emit_store_xmm0_to_temp(dst)
+        return true
+    }
+    if op_code >= 5 && op_code <= 10 {
+        drv_emit_ucomisd_xmm0_xmm1()
+        if op_code == 5 { drv_emit_setcc_al(148) }
+        else if op_code == 6 { drv_emit_setcc_al(149) }
+        else if op_code == 7 { drv_emit_setcc_al(146) }
+        else if op_code == 8 { drv_emit_setcc_al(150) }
+        else if op_code == 9 { drv_emit_setcc_al(151) }
+        else { drv_emit_setcc_al(147) }
+        drv_emit_movzx_rax_al()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    false
+}
+
+fn drv_emit_sqrt_f64(dst: i64, src: i64) with Mut, Div, Panic {
+    drv_emit_load_temp_to_xmm1(src)
+    drv_emit_sse2_xmm0_xmm1(81)
+    drv_emit_store_xmm0_to_temp(dst)
+}
+
+fn drv_emit_call_builtin0(fn_id: i64) with Mut, Panic, Div {
+    let call_pos = DRV_CODE_LEN
+    drv_emit_call_rel32_placeholder()
+    drv_add_call_reloc(call_pos + 1, fn_id)
+}
+
+fn drv_emit_print_int_from_rax() with Mut, Panic, Div {
+    drv_emit_mov_rdi_rax()
+    drv_emit_call_builtin0(V2_BUILTIN_PRINT_INT)
+}
+
+fn drv_emit_print_char_imm(ch: i64) with Mut, Panic, Div {
+    drv_emit_mov_reg_imm(7, ch)
+    drv_emit_call_builtin0(V2_BUILTIN_PRINT_CHAR)
+}
+
+fn drv_emit_print_f64_from_xmm0() with Mut, Panic, Div {
+    drv_emit_mov_rax_imm(1000)
+    drv_emit_cvtsi2sd_xmm1_rax()
+    drv_emit_sse2_xmm0_xmm1(89)
+    drv_emit_cvttsd2si_rax_xmm0()
+    drv_emit_mov_reg_imm(1, 1000)
+    drv_emit_cqo()
+    drv_emit_idiv_rcx()
+    drv_emit_push_rdx()
+    drv_emit_print_int_from_rax()
+    drv_emit_print_char_imm(46)
+    drv_emit_pop_rax()
+    drv_emit_print_int_from_rax()
+}
+
+fn drv_emit_print_f64(arg_reg: i64) with Mut, Panic, Div {
+    drv_emit_load_temp_to_xmm0(arg_reg)
+    drv_emit_print_f64_from_xmm0()
+}
+
 fn drv_emit_call_argc(dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut, Panic, Div {
     if argc >= 1 { drv_emit_load_rbp_disp32_reg(7, drv_ir_slot_offset(arg0)) }
     if argc >= 2 { drv_emit_load_rbp_disp32_reg(6, drv_ir_slot_offset(arg0 + 1)) }
@@ -3502,11 +3874,17 @@ fn compile_ufn_from_globals(fn_id: i64) -> bool with IO, Mut, Panic, Div {
         let src1_val = V2_UFN_SRC1[i as usize]
         if op == UFN_LOAD_IMM {
             drv_emit_load_imm(V2_UFN_DST[i as usize], V2_UFN_IMM[i as usize])
+        } else if op == UFN_LOAD_F64_SCALED {
+            drv_emit_load_f64_scaled(V2_UFN_DST[i as usize], V2_UFN_IMM[i as usize], V2_UFN_FLOAT_SCALE[i as usize])
         } else if op == UFN_LOAD_STRING {
             let ro_off = driver_append_ufn_string_literal(i)
             drv_emit_load_string_offset(V2_UFN_DST[i as usize], ro_off)
         } else if op == UFN_BINOP {
             if !drv_emit_any_binop(V2_UFN_DST[i as usize], src1_val, V2_UFN_BINOP_CODE[i as usize], V2_UFN_SRC2[i as usize]) {
+                return false
+            }
+        } else if op == UFN_F64_BINOP {
+            if !drv_emit_f64_binop(V2_UFN_DST[i as usize], src1_val, V2_UFN_BINOP_CODE[i as usize], V2_UFN_SRC2[i as usize]) {
                 return false
             }
         } else if op == UFN_LABEL {
@@ -3530,6 +3908,10 @@ fn compile_ufn_from_globals(fn_id: i64) -> bool with IO, Mut, Panic, Div {
             let call_fn_id = V2_UFN_FN_ID[i as usize]
             if call_fn_id == V2_BUILTIN_ARG_COUNT {
                 drv_emit_arg_count(V2_UFN_DST[i as usize])
+            } else if call_fn_id == V2_BUILTIN_PRINT_F64 {
+                drv_emit_print_f64(V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_SQRT_F64 {
+                drv_emit_sqrt_f64(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
             } else if call_fn_id == V2_BUILTIN_GET_ARG {
                 drv_emit_get_arg(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
             } else if call_fn_id == V2_BUILTIN_STR_LEN {
@@ -3628,8 +4010,12 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                 // peek at type: param_name : TypeName
                 var param_sidx: i64 = -1
                 var param_is_ref: i64 = 0
+                var param_generic_f64: i64 = 0
                 if ppos + 2 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_IDENT {
                     param_sidx = find_struct_idx_tok(ppos + 2)
+                    if ppos + 5 < open_pos && token_kind(ppos + 3) == TK_LT && token_kind(ppos + 4) == TK_IDENT && token_kind(ppos + 5) == TK_GT && token_text_eq(ppos + 4, "f64") {
+                        param_generic_f64 = 1
+                    }
                 }
                 if ppos + 3 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_AMPBANG && token_kind(ppos + 3) == TK_IDENT {
                     param_sidx = find_struct_idx_tok(ppos + 3)
@@ -3650,6 +4036,11 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                     var ri: i64 = 1
                     while ri < flat_size { let _ = alloc_reg(&! ctx); ri = ri + 1 }
                     remember_struct_local_tok(&! ctx, param_name_tok, base_vreg, param_sidx)
+                    if param_generic_f64 != 0 {
+                        mark_struct_scalar_regs_f64(base_vreg, param_sidx)
+                    } else {
+                        mark_struct_regs(base_vreg, param_sidx)
+                    }
                     var pi: i64 = 0
                     while pi < flat_size && param_idx + pi < 64 {
                         V2_CURRENT_PARAM_REGS[(param_idx + pi) as usize] = base_vreg + pi
@@ -3661,6 +4052,9 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                     // scalar param
                     let vreg = alloc_reg(&! ctx)
                     remember_local_tok(&! ctx, param_name_tok, vreg)
+                    if ppos + 2 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_IDENT && token_text_eq(ppos + 2, "f64") {
+                        mark_reg_f64(vreg)
+                    }
                     if param_idx < 64 {
                         V2_CURRENT_PARAM_REGS[param_idx as usize] = vreg
                     }

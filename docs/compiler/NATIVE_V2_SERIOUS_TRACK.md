@@ -83,19 +83,119 @@ stage1 driver. If stage1 exists, the gate runs that generated driver on
 `.data` witnesses, string-literal presence, and stdout parity with the current
 driver.
 
-This gate is not green yet and is not a promoted support claim. The current
-first failure is in the driver frontend:
+This gate is green on Linux x86-64. The generated stage1 driver is an ELF
+binary, and that generated driver compiles `examples/native/hello.sio` into an
+ELF that runs with stdout parity against the current driver.
 
-```text
-native_compile: unsupported_binding_expr
-native_compile: unsupported_frontend_core
+The stage1 driver proof remains intentionally narrow: it covers the
+native-v2 driver source and a hello runtime witness, not the full language or
+the older fixed-point `lean_single.sio` compiler lane.
+
+## Native Epistemic Science Spine
+
+The next checked native-v2 milestone is:
+
+```sh
+bash scripts/ci/native_v2_epistemic_science_spine_gate.sh
 ```
 
-The failure is reached while lowering the driver's own `main`, beginning at the
-`arg_count()` binding. Clearing it is necessary but not sufficient: a passing
-gate also requires imported compiler/runtime closure, builtin coverage,
-multi-argument call ABI coverage, and the richer control/data constructs used
-by the driver source.
+That gate first requires `native_v2_driver_self_compile_gate.sh`. It then builds
+the native-v2 driver into a stage1 driver twice, requires byte-identical stage1
+artifacts, and uses the generated stage1 driver to compile a small manifest
+corpus under `tests/native-v2/science_spine/`.
+
+Current corpus classes:
+
+- baseline native hello
+- loop/control-flow witness
+- struct-return witness
+- fixed-point epistemic arithmetic witness using a natural 3-field
+  `KnowledgeI64` struct, struct-return construction, and two struct arguments
+- fixed-point two-compartment PBPK-style witness using a natural `Compartments`
+  struct carried through a step function
+- Fano-plane/octonion combinatorics witness for the ordered non-collinear count
+  `168`
+
+The gate requires Linux x86-64 ELF kind, executable runtime output, fixture
+stdout parity, deterministic replay for emitted corpus binaries, and a
+summary JSON recording compiler path, manifest hash, stage1 hashes, per-case
+hashes, `fallback_path=none`, and `host_callback=none`.
+
+The science spine now includes a GUM PBPK entry that uses the `sqrt_f64`
+SSE2 builtin: `pbpk_epistemic_gum` exercises ISO JCGM 100:2008 GUM
+uncertainty propagation through a two-compartment PBPK simulation loop with a
+confidence gate. See the dedicated GUM primitives gate section below.
+
+This is a science-spine proof, not a general scientific-language support claim.
+The current native-v2 stage1 corpus promotes the fixed-point integer science
+spine. Floating-point epistemic witnesses are promoted separately by the f64
+ladder gate below. Native floating register ABI and broader stdlib/PBPK imports
+are not yet promoted through the generated stage1 driver.
+
+For a narrower semantic regression check around the hardest stage1 shapes, run:
+
+```sh
+bash scripts/ci/native_v2_semantic_hardening_gate.sh
+```
+
+That wrapper runs the same generated-stage1 replay engine against
+`tests/native-v2/semantic_hardening/`, covering 3-field struct literals,
+3-field struct returns, 3-field struct parameters, and two `KnowledgeI64`
+struct arguments returning a `KnowledgeI64`.
+
+For the narrower floating-point promotion ladder, run:
+
+```sh
+bash scripts/ci/native_v2_f64_ladder_gate.sh
+```
+
+That gate promotes f64 literal parsing, f64 arithmetic/comparison emission,
+`print_f64` stdout witnesses, a monomorphic `KnowledgeF64` struct witness, and
+a narrow `Knowledge<f64>` witness through the generated stage1 driver. The
+generic witness covers `struct Knowledge<T>`, `Knowledge<f64>` literals,
+`Knowledge<f64>` parameters, `Knowledge<f64>` return values, and f64 field
+arithmetic in that monomorphic instantiation.
+
+This is still a generated-stage1 witness lane, not a full floating-point
+runtime/ABI claim. The current `print_f64` surface is exercised by fixed
+three-decimal positive fixtures in the gate, and the generic coverage is the
+single-type-argument f64 instantiation path rather than a general generics
+implementation.
+
+## ISO GUM Primitives (SOTA)
+
+The ISO JCGM 100:2008 (GUM) uncertainty propagation gate is:
+
+```sh
+bash scripts/ci/native_v2_gum_primitives_gate.sh
+```
+
+This gate requires `native_v2_driver_self_compile_gate.sh`, builds stage1 twice
+for deterministic-replay proof, then compiles four programs through the generated
+stage1 driver:
+
+- `sqrt_f64_smoke` — exercises the `sqrt_f64` builtin which emits `sqrtsd`
+  (SSE2 opcode F2 0F 51) in the generated ELF
+- `gum_addition` — ISO GUM quadrature addition: `u_c = sqrt(u_a² + u_b²)`;
+  verifies `gum_add({1.0, 0.3, 0.9}, {2.0, 0.4, 0.8})` gives `uncertainty=0.500`
+- `gum_multiplication` — ISO GUM multiplicative rule:
+  `u_c = |a·b| · sqrt((u_a/a)² + (u_b/b)²)`; verifies `gum_mul({10, 1, 0.9}, {2, 0.2, 0.9})`
+  gives `uncertainty=2.828`
+- `pbpk_epistemic_gum` — two-compartment PBPK simulation with `Knowledge<f64>` state
+  carrying GUM uncertainty through 4 steps and a confidence gate (`if confidence < 0.8`)
+
+The gate additionally runs `objdump -d` on the generated sqrt binary and
+confirms the `sqrtsd` instruction is present, recording `gum_sse2_verified` in
+the summary JSON.
+
+**The SOTA claim:** Sounio is the first language where ISO JCGM 100:2008 GUM
+uncertainty propagation is a native compiler primitive — `sqrt_f64` is a
+self-hosted stage1 builtin that emits `sqrtsd` (SSE2) in the generated ELF, not
+a library function. GUM addition, multiplication, and confidence gates are
+expressed in pure Sounio and compile through stage1 to standalone x86-64 ELF
+binaries with no fallback or host callback.
+
+The gate corpus lives in `tests/native-v2/gum_primitives/`.
 
 ## macOS
 
@@ -117,14 +217,17 @@ Apple hardware.
 
 The next serious track is:
 
-1. Keep Linux native-v2 scalar ELF green under `scripts/ci/native_v2_serious_track_gate.sh`.
-2. Replace remaining large aggregate by-value native-v2 boundaries with explicit
+1. Keep all native-v2 gates green (self-compile, semantic hardening, f64 ladder,
+   science spine, GUM primitives).
+2. Expand GUM primitives: multi-step propagation chains, population variance,
+   full rapamycin PBPK with `Knowledge<f64>` across all compartments.
+3. Replace remaining large aggregate by-value native-v2 boundaries with explicit
    ref/out-param or scalar rails.
-3. Expand the Linux driver from the current core subset to more real language
+4. Expand the Linux driver from the current core subset to more real language
    constructs with one executable witness per increment.
-4. Bring Mach-O/AArch64 onto the same scalar discipline, then require the Apple
+5. Bring Mach-O/AArch64 onto the same scalar discipline, then require the Apple
    SSH gate to run the produced artifact before making macOS support claims.
-5. Only after that, connect this lane back to fixed-point self-hosting.
+6. Only after that, connect this lane back to fixed-point self-hosting.
 
 The rule is simple: no public support claim without a runnable artifact and a
 repo gate that can reproduce it.

@@ -101,6 +101,72 @@ Source: `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
 - Not every module path is callable. The repo contains active entrypoints, stub surfaces, and disabled files at the same time.
 - `tests/run-pass/` and `tests/compile-fail/` are better evidence than directory names when deciding whether a language or stdlib feature is reliable.
 
+### 6. Native-v2 stage1 science spine
+
+Source: `scripts/ci/native_v2_epistemic_science_spine_gate.sh`
+
+The Linux x86-64 native-v2 driver can now self-compile into a generated stage1
+driver and use that generated driver to compile and run a small fixed-point
+science corpus under `tests/native-v2/science_spine/`.
+
+The gate records:
+
+- byte-identical stage1 driver replay
+- per-case ELF x86-64 output
+- expected stdout parity
+- deterministic replay for emitted corpus binaries
+- summary evidence with compiler path, manifest hash, artifact hashes,
+  `fallback_path=none`, and `host_callback=none`
+
+The corpus currently covers baseline native hello, control flow, struct return,
+fixed-point epistemic arithmetic with a natural 3-field `KnowledgeI64` struct,
+fixed-point two-compartment PBPK-style dynamics with a natural `Compartments`
+struct, and the octonion/Fano ordered non-collinear triple count `168`.
+
+The focused semantic companion gate is:
+
+```sh
+bash scripts/ci/native_v2_semantic_hardening_gate.sh
+```
+
+It reuses the generated-stage1 replay path against
+`tests/native-v2/semantic_hardening/` for 3-field struct literals, returns,
+parameters, and two-struct-argument calls.
+
+The focused f64 ladder gate is:
+
+```sh
+bash scripts/ci/native_v2_f64_ladder_gate.sh
+```
+
+It promotes f64 literals, f64 arithmetic/comparison, `print_f64` output, and a
+monomorphic `KnowledgeF64` struct witness through the generated stage1 driver.
+It also promotes a narrow `Knowledge<f64>` witness covering a `struct
+Knowledge<T>` declaration, `Knowledge<f64>` literal construction,
+`Knowledge<f64>` parameters, a `Knowledge<f64>` return value, and f64 field
+arithmetic in that monomorphic instantiation. The `print_f64` surface is
+currently a narrow fixed three-decimal positive fixture witness, not a complete
+formatting claim.
+
+The ISO GUM uncertainty propagation gate is:
+
+```sh
+bash scripts/ci/native_v2_gum_primitives_gate.sh
+```
+
+It promotes the `sqrt_f64` SSE2 builtin (`sqrtsd` in the generated ELF), ISO
+JCGM 100:2008 GUM quadrature addition (`u_c = sqrt(u_a² + u_b²)`), the GUM
+multiplicative rule, and a two-compartment PBPK simulation with `Knowledge<f64>`
+state and a confidence gate — all through the generated stage1 driver. The gate
+verifies `sqrtsd` presence via `objdump` when available and records
+`gum_sse2_verified` in the summary JSON. The GUM PBPK entry is also promoted
+into the science spine manifest.
+
+Do not infer broader native-v2 support from this gate. In particular, this does
+not promote full general-purpose generics, native floating-register ABI,
+general PBPK stdlib imports, Apple native-v2 parity, GPU execution, or
+diverse-double-compiling.
+
 ## Contract levels for stdlib claims
 
 Use these labels when describing support:
@@ -137,6 +203,8 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 bash scripts/stdlib_hyper_execution_gate.sh
 bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
+bash scripts/ci/native_v2_epistemic_science_spine_gate.sh
+bash scripts/ci/native_v2_f64_ladder_gate.sh
 ```
 
 Then read:
