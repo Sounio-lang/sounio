@@ -1,305 +1,1298 @@
 // self-hosted::compiler::native_compile_driver
 //
-// General-purpose native compile driver. Produces a standalone x86-64 ELF
-// from any single-module .sio program. Avoids importing module_loader.sio
-// (~3900 lines) to stay within JIT memory budget.
-//
-// Pipeline: parse → typecheck → flat summary → optimizer → per-body compile → ELF → write
+// Native-v2 scalar compiler driver for the serious self-hosted path.
+// This driver owns the fragile generated front-end boundary: it lexes through
+// lexer::mod, reads token kind codes from parser scalar storage, builds core IR
+// directly, then feeds the existing native-v2 Machine IR and ELF pipeline.
 //
 // Usage:
 //   souc run self-hosted/compiler/native_compile_driver.sio -- <source.sio> [-o <output>]
 //   souc run self-hosted/compiler/native_compile_driver.sio -- <source.sio> <output>
-//
-// Sprint 107: native-v2 live path — general-purpose, JIT-safe.
 
-use lexer::mod::*
-use lexer::token::{TokenKind}
-use parser::ast::*
+use lexer::mod::{lex_file_to_globals}
+use lexer::cursor::*
+use parser::ast::{Name, BinaryOp, make_name, empty_name, name_eq}
+use parser::parser::{pt_read_kind_code, pt_read_start, pt_read_end, pt_read_int_value}
 use ir::ir::*
-use check::dependent::*
-use check::types::*
-use check::mod::{check_program, check_program_epistemic_into}
-use check::ownership::*
-use check::lint::*
-use check::layout::*
 use io::file_write::*
-use interop::contract::*
-use native::aarch64::*
-use native::encode::*
-use native::elf::*
+use native::elf::{string_table_new}
 use native::elf_bulk::*
-use native::macho::*
-use native::reloc::*
 use native::frame::*
-use native::lower_ir::*
 use native::machine_ir::*
-use native::gc::*
 use native::runtime_context::*
-use native::stack_maps::*
-use native::target_policy::*
-use wasm::core::*
-use wasm::encode::*
-use wasm::lower::*
-use native::codegen::*
-use parser::mod::{parse_program_preloaded, count_items}
-use parser::parser::{parser_last_error_count, pt_read_kind}
-use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref}
-use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref}
-use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
-use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
-use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
-use ir::profile::*
-use ir::inline::*
-use ir::layout::*
-use ir::opt_cleanup::*
-use ir::egraph::*
-use ir::loop_opt::*
-use ir::tailcall::*
-use native::regalloc::*
-use native::peephole::*
-
-// Helpers required by codegen dependency chain (flat-namespace resolution).
-fn char_from_i64(n: i64) -> string with Mut, Panic {
-    if n == 0 { "0" }
-    else if n == 1 { "1" }
-    else if n == 2 { "2" }
-    else if n == 3 { "3" }
-    else if n == 4 { "4" }
-    else if n == 5 { "5" }
-    else if n == 6 { "6" }
-    else if n == 7 { "7" }
-    else if n == 8 { "8" }
-    else if n == 9 { "9" }
-    else { "?" }
+use native::codegen_x86_linux::{
+    compile_ir_function_v2_from_ir_into,
+    compile_ir_function_v2_core_ir_into,
+    compile_module_streaming_begin_count_into,
+    compile_module_streaming_finish_main_rodata_len_into,
+    native_v2_core_begin_function_from_ir_into,
+    native_v2_core_emit_load_imm_into,
+    native_v2_core_emit_load_string_offset_into,
+    native_v2_rodata_append_byte_into,
+    native_v2_rodata_len_into,
+    native_v2_core_emit_binop_code_into,
+    native_v2_core_emit_call1_into,
+    native_v2_core_emit_return_into,
+    native_v2_core_begin_fn_spill_into,
+    native_v2_core_emit_any_binop_into,
+    native_v2_core_define_label_into,
+    native_v2_core_emit_jump_to_label_into,
+    native_v2_core_emit_branch_false_to_label_into,
+    native_v2_core_patch_labels_into,
+    native_v2_core_emit_copy_into,
 }
 
-fn pow10_idx(idx: i64) -> i64 {
-    if idx == 0 { 1000000000000000000 }
-    else if idx == 1 { 100000000000000000 }
-    else if idx == 2 { 10000000000000000 }
-    else if idx == 3 { 1000000000000000 }
-    else if idx == 4 { 100000000000000 }
-    else if idx == 5 { 10000000000000 }
-    else if idx == 6 { 1000000000000 }
-    else if idx == 7 { 100000000000 }
-    else if idx == 8 { 10000000000 }
-    else if idx == 9 { 1000000000 }
-    else if idx == 10 { 100000000 }
-    else if idx == 11 { 10000000 }
-    else if idx == 12 { 1000000 }
-    else if idx == 13 { 100000 }
-    else if idx == 14 { 10000 }
-    else if idx == 15 { 1000 }
-    else if idx == 16 { 100 }
-    else if idx == 17 { 10 }
-    else { 1 }
+let TK_EOF: i64 = 0
+let TK_FN: i64 = 7
+let TK_LET: i64 = 8
+let TK_VAR: i64 = 9
+let TK_IF: i64 = 20
+let TK_ELSE: i64 = 21
+let TK_WHILE: i64 = 24
+let TK_RETURN: i64 = 28
+let TK_NEWLINE: i64 = 2
+let TK_IDENT: i64 = 123
+let TK_INT: i64 = 124
+let TK_STRING: i64 = 126
+let TK_PLUS: i64 = 132
+let TK_MINUS: i64 = 133
+let TK_STAR: i64 = 134
+let TK_SLASH: i64 = 135
+let TK_EQ: i64 = 137
+let TK_LT: i64 = 138
+let TK_GT: i64 = 139
+let TK_EQEQ: i64 = 146
+let TK_BANGEQ: i64 = 147
+let TK_LE: i64 = 148
+let TK_GE: i64 = 149
+let TK_ARROW: i64 = 158
+let TK_LPAREN: i64 = 174
+let TK_RPAREN: i64 = 175
+let TK_LBRACE: i64 = 176
+let TK_RBRACE: i64 = 177
+let TK_SEMI: i64 = 180
+let TK_COLON: i64 = 181
+let TK_COMMA: i64 = 182
+
+var V2_LOCAL_NAMES: [Name; 64] = [empty_name(); 64]
+var V2_LOCAL_TOK_IDX: [i64; 64] = [0; 64]
+var V2_LOCAL_REGS: [i64; 64] = [0; 64]
+var V2_LOCAL_COUNT: i64 = 0
+var V2_NEXT_REG: i64 = 0
+
+// User function registry: names → fn_ids, for resolving calls
+// Store token indices (not Name structs) because JIT can't write structs to global arrays
+var V2_USER_FN_TOKEN_IDX: [i64; 32] = [0; 32]
+var V2_USER_FN_IDS: [i64; 32] = [0; 32]
+var V2_USER_FN_COUNT: i64 = 0
+
+// Per-function label counter (reset per user function)
+var V2_NEXT_LABEL: i64 = 0
+
+let V2C_LOAD_IMM: i64 = 1
+let V2C_LOAD_STRING: i64 = 2
+let V2C_BINOP: i64 = 3
+let V2C_CALL: i64 = 4
+let V2C_RETURN: i64 = 5
+
+var V2_CORE_OPS: [i64; 128] = [0; 128]
+var V2_CORE_DST: [i64; 128] = [0; 128]
+var V2_CORE_SRC1: [i64; 128] = [0; 128]
+var V2_CORE_SRC2: [i64; 128] = [0; 128]
+var V2_CORE_IMM: [i64; 128] = [0; 128]
+var V2_CORE_FN_ID: [i64; 128] = [0; 128]
+var V2_CORE_ARG_COUNT: [i64; 128] = [0; 128]
+var V2_CORE_STR_START: [i64; 128] = [0; 128]
+var V2_CORE_STR_END: [i64; 128] = [0; 128]
+var V2_CORE_COUNT: i64 = 0
+
+// V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
+let UFN_LOAD_IMM: i64 = 1
+let UFN_BINOP: i64 = 2
+let UFN_LABEL: i64 = 3
+let UFN_JUMP: i64 = 4
+let UFN_BRANCH_FALSE: i64 = 5
+let UFN_RETURN: i64 = 6
+let UFN_CALL: i64 = 7
+let UFN_COPY: i64 = 8
+
+var V2_UFN_OPS: [i64; 256] = [0; 256]
+var V2_UFN_DST: [i64; 256] = [0; 256]
+var V2_UFN_SRC1: [i64; 256] = [0; 256]
+var V2_UFN_SRC2: [i64; 256] = [0; 256]
+var V2_UFN_IMM: [i64; 256] = [0; 256]
+var V2_UFN_LABEL_ID: [i64; 256] = [0; 256]
+var V2_UFN_BINOP_CODE: [i64; 256] = [0; 256]
+var V2_UFN_FN_ID: [i64; 256] = [0; 256]
+var V2_UFN_COUNT: i64 = 0
+
+struct ExprParse {
+    ok: i64,
+    reg: i64,
+    next: i64,
 }
 
-fn digit_for_power(rem: i64, power: i64) -> i64 {
-    if rem <= (0 - (9 * power)) { 9 }
-    else if rem <= (0 - (8 * power)) { 8 }
-    else if rem <= (0 - (7 * power)) { 7 }
-    else if rem <= (0 - (6 * power)) { 6 }
-    else if rem <= (0 - (5 * power)) { 5 }
-    else if rem <= (0 - (4 * power)) { 4 }
-    else if rem <= (0 - (3 * power)) { 3 }
-    else if rem <= (0 - (2 * power)) { 2 }
-    else if rem <= (0 - power) { 1 }
-    else { 0 }
+fn reset_locals() with Mut {
+    V2_LOCAL_COUNT = 0
+    V2_NEXT_REG = 0
 }
 
-fn i64_to_digits_no_div(rem: i64, idx: i64, started: bool) -> string with Mut, Panic {
-    if idx >= 19 { return "" }
-    let power = pow10_idx(idx)
-    let digit = digit_for_power(rem, power)
-    let rem_next = rem + (digit * power)
-    let emit = started || digit > 0 || idx == 18
-    let head = if emit { char_from_i64(digit) } else { "" }
-    head + i64_to_digits_no_div(rem_next, idx + 1, emit)
+fn reset_core() with Mut {
+    V2_CORE_COUNT = 0
 }
 
-fn int_to_string(n: i64) -> string with Mut, Panic, Div {
-    if n == 0 { return "0" }
-    let negative = n < 0
-    let rem = if negative { n } else { 0 - n }
-    let digits = i64_to_digits_no_div(rem, 0, false)
-    if negative { "-" + digits } else { digits }
-}
-
-fn parse_i64_decimal(raw: string) -> (bool, i64) with Mut, Div {
-    if str_len(raw) == 0 { return (false, 0) }
-    var idx: i64 = 0
-    var negative = false
-    if str_char_at(raw, 0) == "-" {
-        negative = true
-        idx = 1
-        if idx >= str_len(raw) { return (false, 0) }
+fn core_append_base(op: i64, dst: i64, src1: i64, src2: i64) -> i64 with Mut {
+    let idx = V2_CORE_COUNT
+    if idx >= 0 && idx < 128 {
+        V2_CORE_OPS[idx as usize] = op
+        V2_CORE_DST[idx as usize] = dst
+        V2_CORE_SRC1[idx as usize] = src1
+        V2_CORE_SRC2[idx as usize] = src2
+        V2_CORE_IMM[idx as usize] = 0
+        V2_CORE_FN_ID[idx as usize] = 0
+        V2_CORE_ARG_COUNT[idx as usize] = 0
+        V2_CORE_STR_START[idx as usize] = 0
+        V2_CORE_STR_END[idx as usize] = 0
+        V2_CORE_COUNT = idx + 1
     }
-    var value: i64 = 0
-    while idx < str_len(raw) {
-        let ch = str_char_at(raw, idx)
-        if ch < "0" || ch > "9" { return (false, 0) }
-        value = value * 10 + ((ch as i64) - ("0" as i64))
-        idx = idx + 1
-    }
-    if negative { (true, 0 - value) } else { (true, value) }
+    idx
 }
 
-fn source_tokens_have_unsupported_items(token_count: i64) -> i64 with Mut, Panic, Div {
+fn core_append_load_imm(dst: i64, value: i64) with Mut {
+    let idx = core_append_base(V2C_LOAD_IMM, dst, -1, -1)
+    if idx >= 0 && idx < 128 {
+        V2_CORE_IMM[idx as usize] = value
+    }
+}
+
+fn core_append_load_string(dst: i64, token_idx: i64) with Mut, Panic {
+    let idx = core_append_base(V2C_LOAD_STRING, dst, -1, -1)
+    if idx >= 0 && idx < 128 {
+        V2_CORE_STR_START[idx as usize] = pt_read_start(token_idx)
+        V2_CORE_STR_END[idx as usize] = pt_read_end(token_idx)
+    }
+}
+
+fn core_binop_code_from_kind(kind: i64) -> i64 {
+    if kind == TK_MINUS { return 2 }
+    if kind == TK_STAR { return 3 }
+    if kind == TK_SLASH { return 4 }
+    1
+}
+
+fn core_append_binop(dst: i64, lhs: i64, op_kind: i64, rhs: i64) with Mut {
+    let idx = core_append_base(V2C_BINOP, dst, lhs, rhs)
+    if idx >= 0 && idx < 128 {
+        V2_CORE_IMM[idx as usize] = core_binop_code_from_kind(op_kind)
+    }
+}
+
+fn core_append_call(dst: i64, fn_id: i64, arg: i64, arg_count: i64) with Mut {
+    let idx = core_append_base(V2C_CALL, dst, arg, -1)
+    if idx >= 0 && idx < 128 {
+        V2_CORE_FN_ID[idx as usize] = fn_id
+        V2_CORE_ARG_COUNT[idx as usize] = arg_count
+    }
+}
+
+fn core_append_return(src: i64) with Mut {
+    let _ = core_append_base(V2C_RETURN, -1, src, -1)
+}
+
+fn remember_local(name: Name, reg: i64) with Mut, Panic {
+    if V2_LOCAL_COUNT < 64 {
+        V2_LOCAL_NAMES[V2_LOCAL_COUNT as usize] = name
+        V2_LOCAL_REGS[V2_LOCAL_COUNT as usize] = reg
+        V2_LOCAL_COUNT = V2_LOCAL_COUNT + 1
+    }
+}
+
+fn remember_local_tok(tok_idx: i64, reg: i64) with Mut, Panic {
+    let idx = V2_LOCAL_COUNT
+    if idx < 64 {
+        V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
+        V2_LOCAL_REGS[idx as usize] = reg
+        V2_LOCAL_COUNT = idx + 1
+    }
+}
+
+fn toks_ident_eq(a: i64, b: i64) -> bool with Mut, Panic, Div {
+    let a_start = pt_read_start(a)
+    let a_end = pt_read_end(a)
+    let b_start = pt_read_start(b)
+    let b_end = pt_read_end(b)
+    let a_len = a_end - a_start
+    let b_len = b_end - b_start
+    if a_len != b_len { return false }
     var i: i64 = 0
-    while i < token_count {
-        if pt_read_kind(i) == TokenKind::Use {
-            return 1
-        }
-        if pt_read_kind(i) == TokenKind::Struct || pt_read_kind(i) == TokenKind::Enum || pt_read_kind(i) == TokenKind::Impl {
-            return 2
+    while i < a_len {
+        if CURSOR_SOURCE[(a_start + i) as usize] != CURSOR_SOURCE[(b_start + i) as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn lookup_local_tok(tok_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_LOCAL_COUNT {
+        if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
+            return V2_LOCAL_REGS[i as usize]
         }
         i = i + 1
     }
-    0
+    -1
 }
 
-fn parse_loaded_source(token_count: i64) -> Program with IO, Mut, Div, Panic, Alloc {
-    parse_program_preloaded(token_count)
+fn lookup_local(name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_LOCAL_COUNT {
+        if name_eq(V2_LOCAL_NAMES[i as usize], name) {
+            return V2_LOCAL_REGS[i as usize]
+        }
+        i = i + 1
+    }
+    -1
 }
 
-fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
-    let argc = arg_count()
-    if argc < 1 {
-        print("native_compile: usage: native_compile_driver.sio <source.sio> [-o <output>]\n")
-        print("native_compile: usage: native_compile_driver.sio <source.sio> <output>\n")
-        return 1
-    }
-    let source_path = get_arg(0)
+fn token_kind(idx: i64) -> i64 with Panic {
+    pt_read_kind_code(idx)
+}
 
-    // Parse output path: supports both "-o <output>" and positional "<output>"
-    var output_path = "a.out"
-    if argc >= 3 {
-        let flag = get_arg(1)
-        if flag == "-o" {
-            output_path = get_arg(2)
+fn token_name(idx: i64) -> Name with Mut, Panic, Div {
+    var n = empty_name()
+    let start = pt_read_start(idx)
+    let end = pt_read_end(idx)
+    var i: i64 = start
+    while i < end && n.len < 128 {
+        n.buf[n.len as usize] = CURSOR_SOURCE[i as usize]
+        n.len = n.len + 1
+        i = i + 1
+    }
+    n
+}
+
+fn token_text_eq(idx: i64, text: string) -> bool with Mut, Panic, Div {
+    let start = pt_read_start(idx)
+    let end = pt_read_end(idx)
+    let len = end - start
+    if len != str_len(text) {
+        return false
+    }
+    var i: i64 = 0
+    while i < len {
+        if CURSOR_SOURCE[(start + i) as usize] != (str_char_at(text, i) as i8) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn fixed_name_print() -> Name with Mut {
+    var n = empty_name()
+    n.len = 5
+    n.buf[0] = 112 as i8
+    n.buf[1] = 114 as i8
+    n.buf[2] = 105 as i8
+    n.buf[3] = 110 as i8
+    n.buf[4] = 116 as i8
+    return n
+}
+
+fn fixed_name_print_int() -> Name with Mut {
+    var n = empty_name()
+    n.len = 9
+    n.buf[0] = 112 as i8
+    n.buf[1] = 114 as i8
+    n.buf[2] = 105 as i8
+    n.buf[3] = 110 as i8
+    n.buf[4] = 116 as i8
+    n.buf[5] = 95 as i8
+    n.buf[6] = 105 as i8
+    n.buf[7] = 110 as i8
+    n.buf[8] = 116 as i8
+    return n
+}
+
+fn fixed_name_print_char() -> Name with Mut {
+    var n = empty_name()
+    n.len = 10
+    n.buf[0] = 112 as i8
+    n.buf[1] = 114 as i8
+    n.buf[2] = 105 as i8
+    n.buf[3] = 110 as i8
+    n.buf[4] = 116 as i8
+    n.buf[5] = 95 as i8
+    n.buf[6] = 99 as i8
+    n.buf[7] = 104 as i8
+    n.buf[8] = 97 as i8
+    n.buf[9] = 114 as i8
+    return n
+}
+
+fn fixed_name_main() -> Name with Mut {
+    var n = empty_name()
+    n.len = 4
+    n.buf[0] = 109 as i8
+    n.buf[1] = 97 as i8
+    n.buf[2] = 105 as i8
+    n.buf[3] = 110 as i8
+    return n
+}
+
+fn set_func_name_print(func: &! IrFunction) with Mut {
+    var n = fixed_name_print()
+    (*func).name = n
+}
+
+fn set_func_name_print_int(func: &! IrFunction) with Mut {
+    var n = fixed_name_print_int()
+    (*func).name = n
+}
+
+fn set_func_name_print_char(func: &! IrFunction) with Mut {
+    var n = fixed_name_print_char()
+    (*func).name = n
+}
+
+fn set_func_name_main(func: &! IrFunction) with Mut {
+    var n = fixed_name_main()
+    (*func).name = n
+}
+
+fn token_string_name(idx: i64) -> Name with Mut, Panic, Div {
+    var n = empty_name()
+    var i = pt_read_start(idx) + 1
+    let end = pt_read_end(idx) - 1
+    while i < end && n.len < 128 {
+        let ch = CURSOR_SOURCE[i as usize]
+        if ch == 92 as i8 && i + 1 < end {
+            let esc = CURSOR_SOURCE[(i + 1) as usize]
+            if esc == 110 as i8 { n.buf[n.len as usize] = 10 as i8 }
+            else if esc == 116 as i8 { n.buf[n.len as usize] = 9 as i8 }
+            else if esc == 114 as i8 { n.buf[n.len as usize] = 13 as i8 }
+            else if esc == 34 as i8 { n.buf[n.len as usize] = 34 as i8 }
+            else if esc == 92 as i8 { n.buf[n.len as usize] = 92 as i8 }
+            else { n.buf[n.len as usize] = esc }
+            n.len = n.len + 1
+            i = i + 2
+        } else {
+            n.buf[n.len as usize] = ch
+            n.len = n.len + 1
+            i = i + 1
         }
     }
-    if argc == 2 {
-        // Positional: <source> <output> (backward compat with stable driver)
-        let arg1 = get_arg(1)
-        if arg1 != "-o" {
-            output_path = arg1
+    n
+}
+
+fn alloc_reg() -> i64 with Mut {
+    let r = V2_NEXT_REG
+    V2_NEXT_REG = r + 1
+    r
+}
+
+fn alloc_label() -> i64 with Mut {
+    let l = V2_NEXT_LABEL
+    V2_NEXT_LABEL = l + 1
+    l
+}
+
+fn reset_user_fn_label_state() with Mut {
+    V2_NEXT_LABEL = 0
+}
+
+fn register_user_fn(token_idx: i64, fn_id: i64) with Mut, Panic {
+    let idx = V2_USER_FN_COUNT
+    if idx < 32 {
+        V2_USER_FN_TOKEN_IDX[idx as usize] = token_idx
+        V2_USER_FN_IDS[idx as usize] = fn_id
+        V2_USER_FN_COUNT = idx + 1
+    }
+}
+
+fn lookup_user_fn_id(name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_USER_FN_COUNT {
+        let tok = V2_USER_FN_TOKEN_IDX[i as usize]
+        if name_eq(token_name(tok), name) {
+            return V2_USER_FN_IDS[i as usize]
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn user_fn_name_at(idx: i64) -> Name with Mut, Panic, Div {
+    token_name(V2_USER_FN_TOKEN_IDX[idx as usize])
+}
+
+fn skip_trivia(pos: i64, close: i64) -> i64 with Mut, Panic {
+    var p = pos
+    while p < close {
+        let k = token_kind(p)
+        if k == TK_NEWLINE || k == TK_SEMI { p = p + 1 }
+        else { break }
+    }
+    p
+}
+
+fn is_cmp_op(k: i64) -> bool {
+    k == TK_LT || k == TK_GT || k == TK_LE || k == TK_GE || k == TK_EQEQ || k == TK_BANGEQ
+}
+
+fn is_arith_op(k: i64) -> bool {
+    k == TK_PLUS || k == TK_MINUS || k == TK_STAR || k == TK_SLASH
+}
+
+fn binary_op_from_cmp_kind(kind: i64) -> BinaryOp {
+    if kind == TK_LT { return BinaryOp::OpLt }
+    if kind == TK_GT { return BinaryOp::OpGt }
+    if kind == TK_LE { return BinaryOp::OpLe }
+    if kind == TK_GE { return BinaryOp::OpGe }
+    if kind == TK_EQEQ { return BinaryOp::OpEq }
+    BinaryOp::OpNe
+}
+
+fn emit_instr(func: &! IrFunction, instr: IrInstr) with Mut, Panic {
+    let idx = (*func).instr_count
+    if idx >= 0 && idx < 128 {
+        (*func).instrs[idx as usize] = instr
+        (*func).instr_count = idx + 1
+    }
+}
+
+// op_kind → binop code for arith (1=add,2=sub,3=mul,4=div)
+fn arith_op_to_code(k: i64) -> i64 {
+    if k == TK_PLUS { return 1 }
+    if k == TK_MINUS { return 2 }
+    if k == TK_STAR { return 3 }
+    if k == TK_SLASH { return 4 }
+    1
+}
+
+// op_kind → binop code for cmp (5=eq,6=ne,7=lt,8=le,9=gt,10=ge)
+fn cmp_op_to_code(k: i64) -> i64 {
+    if k == TK_EQEQ { return 5 }
+    if k == TK_BANGEQ { return 6 }
+    if k == TK_LT { return 7 }
+    if k == TK_LE { return 8 }
+    if k == TK_GT { return 9 }
+    if k == TK_GE { return 10 }
+    5
+}
+
+fn ufn_record_load_imm(dst: i64, value: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_LOAD_IMM
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_IMM[idx as usize] = value
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_binop(dst: i64, src1: i64, binop_code: i64, src2: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_BINOP
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = src1
+        V2_UFN_SRC2[idx as usize] = src2
+        V2_UFN_BINOP_CODE[idx as usize] = binop_code
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_label(label_id: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_LABEL
+        V2_UFN_LABEL_ID[idx as usize] = label_id
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_jump(label_id: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_JUMP
+        V2_UFN_LABEL_ID[idx as usize] = label_id
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_branch_false(cond_reg: i64, label_id: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_BRANCH_FALSE
+        V2_UFN_SRC1[idx as usize] = cond_reg
+        V2_UFN_LABEL_ID[idx as usize] = label_id
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_return(src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_RETURN
+        V2_UFN_SRC1[idx as usize] = src
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_call(dst: i64, fn_id_val: i64, arg0: i64, argc: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_CALL
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_FN_ID[idx as usize] = fn_id_val
+        V2_UFN_SRC1[idx as usize] = arg0
+        V2_UFN_IMM[idx as usize] = argc
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_copy(dst: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_COPY
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = src
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn parse_atom(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let k = token_kind(pos)
+    if k == TK_INT {
+        let r = alloc_reg()
+        core_append_load_imm(r, pt_read_int_value(pos))
+        emit_instr(func, ir_load_imm(r, pt_read_int_value(pos)))
+        return ExprParse { ok: 1, reg: r, next: pos + 1 }
+    }
+    if k == TK_STRING {
+        let r = alloc_reg()
+        let s = token_string_name(pos)
+        core_append_load_string(r, pos)
+        emit_instr(func, ir_load_string(r, 0, s))
+        return ExprParse { ok: 1, reg: r, next: pos + 1 }
+    }
+    if k == TK_IDENT {
+        let reg = lookup_local_tok(pos)
+        if reg >= 0 {
+            return ExprParse { ok: 1, reg: reg, next: pos + 1 }
         }
     }
+    ExprParse { ok: 0, reg: -1, next: pos }
+}
 
-    print("native_compile: source=")
-    print(source_path)
-    print(" output=")
-    print(output_path)
-    print("\n")
+fn binary_op_from_kind(kind: i64) -> BinaryOp {
+    if kind == TK_MINUS { return BinaryOp::OpSub }
+    if kind == TK_STAR { return BinaryOp::OpMul }
+    if kind == TK_SLASH { return BinaryOp::OpDiv }
+    BinaryOp::OpAdd
+}
 
-    // Phase 0: Lex and parse
-    let token_count = lex_file_to_globals(source_path)
-    let unsupported_kind = source_tokens_have_unsupported_items(token_count)
-    if unsupported_kind == 1 {
-        print("native_compile: unsupported_use_imports\n")
-        return 2
+fn parse_expr(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let left = parse_atom(func, pos)
+    if left.ok == 0 {
+        return left
     }
-    if unsupported_kind == 2 {
-        print("native_compile: unsupported_structural_items\n")
-        return 2
+
+    let op_kind = token_kind(left.next)
+    if op_kind == TK_PLUS || op_kind == TK_MINUS || op_kind == TK_STAR || op_kind == TK_SLASH {
+        let right = parse_atom(func, left.next + 1)
+        if right.ok == 0 {
+            return ExprParse { ok: 0, reg: -1, next: left.next }
+        }
+        let dst = alloc_reg()
+        core_append_binop(dst, left.reg, op_kind, right.reg)
+        emit_instr(func, ir_binop(dst, left.reg, binary_op_from_kind(op_kind), right.reg))
+        return ExprParse { ok: 1, reg: dst, next: right.next }
     }
-    let prog = parse_loaded_source(token_count)
-    if parser_last_error_count() > 0 {
-        print("native_compile: parse_error\n")
-        return 1
+
+    left
+}
+
+fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
+    if name_eq(name, fixed_name_print()) { return 0 }
+    if name_eq(name, fixed_name_print_int()) { return 1 }
+    if name_eq(name, fixed_name_print_char()) { return 2 }
+    -1
+}
+
+fn parse_call_statement(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    var fn_id: i64 = -1
+    var callee = empty_name()
+    if token_text_eq(pos, "print") {
+        fn_id = 0
+        callee = fixed_name_print()
+    } else if token_text_eq(pos, "print_int") {
+        fn_id = 1
+        callee = fixed_name_print_int()
+    } else if token_text_eq(pos, "print_char") {
+        fn_id = 2
+        callee = fixed_name_print_char()
     }
-    print("native_compile: parse_ok\n")
-
-    // NOTE: Typecheck intentionally skipped. The check_program_epistemic_into
-    // call triggers JIT compilation of the entire type checker (~30GB RSS),
-    // defeating the purpose of this lightweight driver. Users should run
-    // `souc check <file>` separately before compiling.
-    let epistemic = ir_empty_epistemic_section()
-
-    // Phase 1: Flat IR summary (one-shot, no Box allocation)
-    let summary_result = lower_program_to_ir_summary_flat_owned_with_epistemic_ref(&prog, epistemic)
-    if summary_result.had_error {
-        print("native_compile: summary_lower_error\n")
-        return 2
+    if fn_id < 0 {
+        return ExprParse { ok: 0, reg: -1, next: pos }
     }
-    let fn_count = summary_result.summary.module.fn_count
-    if fn_count <= 0 {
-        print("native_compile: empty_module (no functions)\n")
-        return 2
+    if token_kind(pos + 1) != TK_LPAREN {
+        return ExprParse { ok: 0, reg: -1, next: pos }
     }
-    print("native_compile: fn_count=")
-    print_int(fn_count)
-    print("\n")
 
-    // Phase 2: Streaming compile — per-function body lower + optimize + native-v2
-    var nc = compiler_new()
-    compile_module_streaming_begin_into(&! nc, &summary_result.summary.module)
+    var argc: i64 = 0
+    var arg0_reg: i64 = -1
+    var args: Option<Box<IrRegList>> = None
+    var cur = pos + 2
+    if token_kind(cur) != TK_RPAREN {
+        let arg = parse_expr(func, cur)
+        if arg.ok == 0 {
+            return ExprParse { ok: 0, reg: -1, next: pos }
+        }
+        args = Some(Box::new(ir_reg_list_single(arg.reg)))
+        argc = 1
+        arg0_reg = arg.reg
+        cur = arg.next
+    }
+    if token_kind(cur) != TK_RPAREN {
+        return ExprParse { ok: 0, reg: -1, next: pos }
+    }
 
-    var fi: i64 = 0
-    while fi < fn_count {
-        let fn_name = summary_result.summary.module.functions[fi as usize].name
+    let dst = alloc_reg()
+    core_append_call(dst, fn_id, arg0_reg, argc)
+    emit_instr(func, ir_call(dst, fn_id, callee, args, argc))
+    ExprParse { ok: 1, reg: dst, next: cur + 1 }
+}
 
-        print("native_compile: fn=")
-        print(str_from_bytes(fn_name.buf, fn_name.len))
+// ============================================================
+// User function call expression (main path, with V2_CORE)
+// ============================================================
 
-        let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
-            &prog, &summary_result.summary, epistemic, fn_name
-        )
-        if body_result.had_error {
-            print(" body_error errors=")
-            print_int(body_result.error_count)
-            print(" instrs=")
-            print_int(body_result.func.instr_count)
-            print("\n")
-            if body_result.func.instr_count <= 0 {
-                print("native_compile: skip (no instrs)\n")
-                fi = fi + 1
-                continue
+fn parse_fn_call_expr(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let name = token_name(pos)
+    var fn_id = builtin_fn_id(name)
+    if fn_id < 0 { fn_id = lookup_user_fn_id(name) }
+    if fn_id < 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
+    if token_kind(pos + 1) != TK_LPAREN { return ExprParse { ok: 0, reg: -1, next: pos } }
+    var arg0_reg: i64 = -1
+    var argc: i64 = 0
+    var args: Option<Box<IrRegList>> = None
+    var cur = pos + 2
+    if token_kind(cur) != TK_RPAREN {
+        let arg = parse_expr(func, cur)
+        if arg.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
+        arg0_reg = arg.reg
+        argc = 1
+        args = Some(Box::new(ir_reg_list_single(arg.reg)))
+        cur = arg.next
+    }
+    if token_kind(cur) != TK_RPAREN { return ExprParse { ok: 0, reg: -1, next: pos } }
+    let dst = alloc_reg()
+    core_append_call(dst, fn_id, arg0_reg, argc)
+    emit_instr(func, ir_call(dst, fn_id, name, args, argc))
+    ExprParse { ok: 1, reg: dst, next: cur + 1 }
+}
+
+// ============================================================
+// IR-only parse functions (for user-defined functions)
+// No V2_CORE side effects; builds IrFunction directly
+// ============================================================
+
+fn parse_atom_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let k = token_kind(pos)
+    if k == TK_INT {
+        let r = alloc_reg()
+        ufn_record_load_imm(r, pt_read_int_value(pos))
+        return ExprParse { ok: 1, reg: r, next: pos + 1 }
+    }
+    if k == TK_IDENT {
+        let reg = lookup_local_tok(pos)
+        if reg >= 0 { return ExprParse { ok: 1, reg: reg, next: pos + 1 } }
+        // function call
+        if token_kind(pos + 1) == TK_LPAREN {
+            return parse_fn_call_ir(func, pos)
+        }
+    }
+    ExprParse { ok: 0, reg: -1, next: pos }
+}
+
+fn parse_fn_call_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let name = token_name(pos)
+    var fn_id = builtin_fn_id(name)
+    if fn_id < 0 { fn_id = lookup_user_fn_id(name) }
+    if fn_id < 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
+    if token_kind(pos + 1) != TK_LPAREN { return ExprParse { ok: 0, reg: -1, next: pos } }
+    var arg0_reg: i64 = -1
+    var argc: i64 = 0
+    var cur = pos + 2
+    if token_kind(cur) != TK_RPAREN {
+        let arg = parse_expr_ir(func, cur)
+        if arg.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
+        arg0_reg = arg.reg
+        argc = 1
+        cur = arg.next
+    }
+    if token_kind(cur) != TK_RPAREN { return ExprParse { ok: 0, reg: -1, next: pos } }
+    let dst = alloc_reg()
+    ufn_record_call(dst, fn_id, arg0_reg, argc)
+    ExprParse { ok: 1, reg: dst, next: cur + 1 }
+}
+
+fn parse_expr_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let left = parse_atom_ir(func, pos)
+    if left.ok == 0 { return left }
+    let op_kind = token_kind(left.next)
+    if is_arith_op(op_kind) {
+        let right = parse_atom_ir(func, left.next + 1)
+        if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: left.next } }
+        let dst = alloc_reg()
+        ufn_record_binop(dst, left.reg, arith_op_to_code(op_kind), right.reg)
+        return ExprParse { ok: 1, reg: dst, next: right.next }
+    }
+    if is_cmp_op(op_kind) {
+        let right = parse_atom_ir(func, left.next + 1)
+        if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: left.next } }
+        let dst = alloc_reg()
+        ufn_record_binop(dst, left.reg, cmp_op_to_code(op_kind), right.reg)
+        return ExprParse { ok: 1, reg: dst, next: right.next }
+    }
+    left
+}
+
+fn emit_label(func: &! IrFunction, label_id: i64) with Mut {
+    ufn_record_label(label_id)
+}
+
+fn emit_jump(func: &! IrFunction, label_id: i64) with Mut {
+    ufn_record_jump(label_id)
+}
+
+fn emit_branch_false(func: &! IrFunction, cond_reg: i64, label_id: i64) with Mut {
+    ufn_record_branch_false(cond_reg, label_id)
+}
+
+fn parse_while_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    // while COND { BODY }
+    // pos points to token AFTER 'while'
+    let label_top = alloc_label()
+    let label_end = alloc_label()
+    emit_label(func, label_top)
+
+    // parse condition expression
+    let cond = parse_expr_ir(func, pos)
+    if cond.ok == 0 { return pos }
+    emit_branch_false(func, cond.reg, label_end)
+
+    // find and parse body block
+    var p = cond.next
+    while p < token_count && token_kind(p) != TK_LBRACE { p = p + 1 }
+    if p >= token_count { return pos }
+    let body_end = find_matching_rbrace(p, token_count)
+    if body_end < 0 { return pos }
+    parse_block_ir(func, p + 1, body_end, token_count)
+
+    emit_jump(func, label_top)
+    emit_label(func, label_end)
+    body_end + 1
+}
+
+fn parse_if_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    // if COND { THEN } [else [if ...] { ELSE }]
+    // pos points to token AFTER 'if'
+    let label_else = alloc_label()
+    let label_end = alloc_label()
+
+    let cond = parse_expr_ir(func, pos)
+    if cond.ok == 0 { return pos }
+    emit_branch_false(func, cond.reg, label_else)
+
+    // parse then block
+    var p = cond.next
+    while p < token_count && token_kind(p) != TK_LBRACE { p = p + 1 }
+    if p >= token_count { return pos }
+    let then_end = find_matching_rbrace(p, token_count)
+    if then_end < 0 { return pos }
+    parse_block_ir(func, p + 1, then_end, token_count)
+    emit_jump(func, label_end)
+    emit_label(func, label_else)
+
+    // check for else
+    var after = skip_trivia(then_end + 1, token_count)
+    if after < token_count && token_kind(after) == TK_ELSE {
+        let after_else = after + 1
+        let next_t = skip_trivia(after_else, token_count)
+        if next_t < token_count && token_kind(next_t) == TK_IF {
+            let end_pos = parse_if_ir(func, next_t + 1, token_count)
+            emit_label(func, label_end)
+            return end_pos
+        }
+        if next_t < token_count && token_kind(next_t) == TK_LBRACE {
+            let else_end = find_matching_rbrace(next_t, token_count)
+            if else_end >= 0 {
+                parse_block_ir(func, next_t + 1, else_end, token_count)
+                emit_label(func, label_end)
+                return else_end + 1
             }
-            // Continue with codegen despite errors — builtins may still work
         }
+    }
+    emit_label(func, label_end)
+    then_end + 1
+}
 
-        // NOTE: IR optimizer (opt_cleanup_function) intentionally skipped.
-        // Calling it triggers JIT compilation of 30+ optimizer functions,
-        // adding ~4GB RSS. The stable driver succeeds without it.
-        // Users wanting optimized output should use the full main.sio path
-        // once a native-compiled souc binary is available.
+fn parse_block_ir(func: &! IrFunction, pos: i64, close: i64, token_count: i64) with IO, Mut, Panic, Div, Alloc {
+    var p = skip_trivia(pos, close)
+    while p < close {
+        p = parse_stmt_ir(func, p, close, token_count)
+        p = skip_trivia(p, close)
+    }
+}
 
-        print(" instrs=")
-        print_int(body_result.func.instr_count)
+fn parse_stmt_ir(func: &! IrFunction, pos: i64, close: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let p = skip_trivia(pos, close)
+    if p >= close { return close }
+    let k = token_kind(p)
 
-        var legal = machine_function_new()
-        native_v2_lower_legal_function_from_ir_ref(&body_result.func, &! legal)
-        if !legal.supported {
-            print(" unsupported=")
-            print(legal.unsupported_detail)
-            print("\n")
-            fi = fi + 1
+    if k == TK_VAR || k == TK_LET {
+        // var/let name : type = expr  OR  var name : type = expr
+        if token_kind(p + 1) != TK_IDENT { return p + 1 }
+        var eq_pos = p + 2
+        while eq_pos < close && token_kind(eq_pos) != TK_EQ { eq_pos = eq_pos + 1 }
+        if eq_pos >= close { return eq_pos }
+        let parsed = parse_expr_ir(func, eq_pos + 1)
+        if parsed.ok == 0 { return eq_pos + 1 }
+        remember_local_tok(p + 1, parsed.reg)
+        return parsed.next
+    }
+
+    if k == TK_RETURN {
+        let parsed = parse_expr_ir(func, p + 1)
+        if parsed.ok != 0 {
+            ufn_record_return(parsed.reg)
+            return parsed.next
+        }
+        return p + 1
+    }
+
+    if k == TK_WHILE {
+        return parse_while_ir(func, p + 1, token_count)
+    }
+
+    if k == TK_IF {
+        return parse_if_ir(func, p + 1, token_count)
+    }
+
+    // assignment: name = expr  (name is already a local)
+    if k == TK_IDENT && token_kind(p + 1) == TK_EQ {
+        let old_reg = lookup_local_tok(p)
+        if old_reg >= 0 {
+            let parsed = parse_expr_ir(func, p + 2)
+            if parsed.ok != 0 {
+                // Emit copy to original register slot so loop conditions see updated value
+                if parsed.reg != old_reg {
+                    ufn_record_copy(old_reg, parsed.reg)
+                }
+                return parsed.next
+            }
+        }
+    }
+
+    // call statement: name(args)  — for side-effecting calls
+    if k == TK_IDENT && token_kind(p + 1) == TK_LPAREN {
+        let call = parse_fn_call_ir(func, p)
+        if call.ok != 0 { return call.next }
+    }
+
+    // tail expression (implicit return at end of block)
+    let tail = parse_expr_ir(func, p)
+    if tail.ok != 0 {
+        ufn_record_return(tail.reg)
+        return tail.next
+    }
+
+    p + 1
+}
+
+fn find_fn_lbrace(token_count: i64, name_str_pos: i64) -> i64 with Mut, Panic, Div {
+    // Find the opening { of the function whose name token is at name_str_pos
+    var j = name_str_pos + 1
+    while j < token_count {
+        if token_kind(j) == TK_LBRACE { return j }
+        if token_kind(j) == TK_FN { return -1 }
+        j = j + 1
+    }
+    -1
+}
+
+fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
+    V2_USER_FN_COUNT = 0
+    var i: i64 = 0
+    var next_id = first_fn_id
+    while i + 1 < token_count {
+        if token_kind(i) == TK_FN && token_kind(i + 1) == TK_IDENT {
+            let fn_name = token_name(i + 1)
+            if !name_eq(fn_name, fixed_name_main()) {
+                register_user_fn(i + 1, next_id)
+                next_id = next_id + 1
+            }
+            i = i + 2
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+fn compile_ufn_from_globals(nc: &! NativeCompiler, fn_id: i64, func: &IrFunction) -> bool with IO, Mut, Panic, Div {
+    native_v2_core_begin_fn_spill_into(nc, func, fn_id)
+    var i: i64 = 0
+    while i < V2_UFN_COUNT {
+        let op = V2_UFN_OPS[i as usize]
+        let src1_val = V2_UFN_SRC1[i as usize]
+        if op == UFN_LOAD_IMM {
+            native_v2_core_emit_load_imm_into(nc, V2_UFN_DST[i as usize], V2_UFN_IMM[i as usize])
+        } else if op == UFN_BINOP {
+            if !native_v2_core_emit_any_binop_into(nc, V2_UFN_DST[i as usize], src1_val, V2_UFN_BINOP_CODE[i as usize], V2_UFN_SRC2[i as usize]) {
+                return false
+            }
+        } else if op == UFN_LABEL {
+            native_v2_core_define_label_into(nc, V2_UFN_LABEL_ID[i as usize])
+        } else if op == UFN_JUMP {
+            native_v2_core_emit_jump_to_label_into(nc, V2_UFN_LABEL_ID[i as usize])
+        } else if op == UFN_BRANCH_FALSE {
+            native_v2_core_emit_branch_false_to_label_into(nc, V2_UFN_SRC1[i as usize], V2_UFN_LABEL_ID[i as usize])
+        } else if op == UFN_RETURN {
+            native_v2_core_emit_return_into(nc, V2_UFN_SRC1[i as usize])
+        } else if op == UFN_CALL {
+            native_v2_core_emit_call1_into(nc, V2_UFN_DST[i as usize], V2_UFN_FN_ID[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_IMM[i as usize])
+        } else if op == UFN_COPY {
+            native_v2_core_emit_copy_into(nc, V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+        }
+        i = i + 1
+    }
+    native_v2_core_patch_labels_into(nc)
+    true
+}
+
+fn compile_user_fn(nc: &! NativeCompiler, fn_name: Name, fn_id: i64, token_count: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    // Find fn name_str_pos
+    var name_pos: i64 = -1
+    var i: i64 = 0
+    while i + 1 < token_count {
+        if token_kind(i) == TK_FN && token_kind(i + 1) == TK_IDENT {
+            if name_eq(token_name(i + 1), fn_name) {
+                name_pos = i + 1
+                break
+            }
+        }
+        i = i + 1
+    }
+    if name_pos < 0 { return false }
+    let open_pos = find_fn_lbrace(token_count, name_pos)
+    if open_pos < 0 { return false }
+    let close_pos = find_matching_rbrace(open_pos, token_count)
+    if close_pos < 0 { return false }
+
+    reset_locals()
+    reset_user_fn_label_state()
+    var func = ir_empty_function()
+    func.name = fn_name
+
+    // Parse parameters: fn name(param: type, ...) -> ...
+    // params are between '(' and ')'
+    var pp = name_pos + 1
+    while pp < open_pos && token_kind(pp) != TK_LPAREN { pp = pp + 1 }
+    if pp < open_pos && token_kind(pp) == TK_LPAREN {
+        var param_idx: i64 = 0
+        var ppos = pp + 1
+        while ppos < open_pos && token_kind(ppos) != TK_RPAREN {
+            if token_kind(ppos) == TK_IDENT {
+                let vreg = alloc_reg()
+                remember_local_tok(ppos, vreg)
+                if param_idx < 64 {
+                    var param_regs = func.param_regs
+                    param_regs[param_idx as usize] = vreg
+                    func.param_regs = param_regs
+                }
+                func.param_count = param_idx + 1
+                param_idx = param_idx + 1
+                // skip past colon, type, optional comma
+                ppos = ppos + 1
+                while ppos < open_pos && token_kind(ppos) != TK_COMMA && token_kind(ppos) != TK_RPAREN {
+                    ppos = ppos + 1
+                }
+                if ppos < open_pos && token_kind(ppos) == TK_COMMA { ppos = ppos + 1 }
+            } else {
+                ppos = ppos + 1
+            }
+        }
+    }
+
+    // Parse body
+    V2_UFN_COUNT = 0
+    parse_block_ir(&! func, open_pos + 1, close_pos, token_count)
+    func.reg_count = V2_NEXT_REG
+
+    if !compile_ufn_from_globals(nc, fn_id, &func) {
+        print("native_compile: user_fn_unsupported fn_id=")
+        print_int(fn_id)
+        print("\n")
+        return false
+    }
+    true
+}
+
+fn find_main_lbrace(token_count: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i + 2 < token_count {
+        if token_kind(i) == TK_FN && token_kind(i + 1) == TK_IDENT && token_text_eq(i + 1, "main") {
+            var j = i + 2
+            while j < token_count {
+                if token_kind(j) == TK_LBRACE {
+                    return j
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn find_matching_rbrace(open_idx: i64, token_count: i64) -> i64 with Mut, Panic {
+    var depth: i64 = 1
+    var i = open_idx + 1
+    while i < token_count {
+        let k = token_kind(i)
+        if k == TK_LBRACE { depth = depth + 1 }
+        if k == TK_RBRACE {
+            depth = depth - 1
+            if depth == 0 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn lower_main_body(token_count: i64, func: &! IrFunction) -> bool with IO, Mut, Panic, Div, Alloc {
+    let open_idx = find_main_lbrace(token_count)
+    if open_idx < 0 {
+        print("native_compile: missing_main\n")
+        return false
+    }
+    let close_idx = find_matching_rbrace(open_idx, token_count)
+    if close_idx < 0 {
+        print("native_compile: missing_main_close\n")
+        return false
+    }
+
+    reset_locals()
+    set_func_name_main(func)
+    (*func).param_count = 0
+
+    var pos = open_idx + 1
+    var saw_return = false
+
+    while pos < close_idx {
+        let k = token_kind(pos)
+
+        if k == TK_NEWLINE || k == TK_SEMI {
+            pos = pos + 1
             continue
         }
 
-        compile_ir_function_v2_into(&! nc, &body_result.func, &legal, fi)
-        print(" ok\n")
-        fi = fi + 1
+        if k == TK_LET || k == TK_VAR {
+            if token_kind(pos + 1) != TK_IDENT {
+                print("native_compile: unsupported_binding\n")
+                return false
+            }
+            let local_tok = pos + 1
+            var eq_pos = pos + 2
+            while eq_pos < close_idx && token_kind(eq_pos) != TK_EQ {
+                eq_pos = eq_pos + 1
+            }
+            if eq_pos >= close_idx {
+                print("native_compile: missing_binding_eq\n")
+                return false
+            }
+            let parsed = parse_expr(func, eq_pos + 1)
+            if parsed.ok == 0 {
+                let call_p = parse_fn_call_expr(func, eq_pos + 1)
+                if call_p.ok == 0 {
+                    print("native_compile: unsupported_binding_expr\n")
+                    return false
+                }
+                remember_local_tok(local_tok, call_p.reg)
+                pos = call_p.next
+                continue
+            }
+            remember_local_tok(local_tok, parsed.reg)
+            pos = parsed.next
+            continue
+        }
+
+        if k == TK_RETURN {
+            let parsed_ret = parse_expr(func, pos + 1)
+            if parsed_ret.ok == 0 {
+                print("native_compile: unsupported_return_expr\n")
+                return false
+            }
+            core_append_return(parsed_ret.reg)
+            emit_instr(func, ir_return(parsed_ret.reg))
+            saw_return = true
+            pos = parsed_ret.next
+            continue
+        }
+
+        if k == TK_IDENT && token_kind(pos + 1) == TK_LPAREN {
+            let call = parse_call_statement(func, pos)
+            if call.ok == 0 {
+                let ucall = parse_fn_call_expr(func, pos)
+                if ucall.ok == 0 {
+                    print("native_compile: unsupported_call\n")
+                    return false
+                }
+                pos = ucall.next
+                continue
+            }
+            pos = call.next
+            continue
+        }
+
+        if k == TK_INT {
+            let parsed_tail = parse_expr(func, pos)
+            if parsed_tail.ok == 0 {
+                print("native_compile: unsupported_tail_expr\n")
+                return false
+            }
+            core_append_return(parsed_tail.reg)
+            emit_instr(func, ir_return(parsed_tail.reg))
+            saw_return = true
+            pos = parsed_tail.next
+            continue
+        }
+
+        print("native_compile: unsupported_token kind=")
+        print_int(k)
+        print("\n")
+        return false
     }
 
-    // Phase 3: Streaming finish (entry trampoline, relocations)
-    print("native_compile: streaming_finish\n")
-    compile_module_streaming_finish_into(&! nc, &summary_result.summary.module)
+    if !saw_return {
+        let zero_reg = alloc_reg()
+        core_append_load_imm(zero_reg, 0)
+        emit_instr(func, ir_load_imm(zero_reg, 0))
+        core_append_return(zero_reg)
+        emit_instr(func, ir_return(zero_reg))
+    }
+    (*func).reg_count = V2_NEXT_REG
+    true
+}
 
-    // Phase 4: Finalize ELF
-    print("native_compile: finalize_elf_bulk\n")
-    let min_data_len = runtime_context_global_slot_size() + (summary_result.summary.module.prof_counter_count * 8)
+fn driver_append_string_literal_into(nc: &! NativeCompiler, idx: i64) -> i64 with Mut, Panic, Div {
+    let offset = native_v2_rodata_len_into(nc)
+    let start = V2_CORE_STR_START[idx as usize] + 1
+    let end = V2_CORE_STR_END[idx as usize] - 1
+    var i: i64 = start
+    while i < end {
+        let ch = CURSOR_SOURCE[i as usize]
+        if ch == 92 as i8 && i + 1 < end {
+            let esc = CURSOR_SOURCE[(i + 1) as usize]
+            if esc == 110 as i8 { native_v2_rodata_append_byte_into(nc, 10) }
+            else if esc == 116 as i8 { native_v2_rodata_append_byte_into(nc, 9) }
+            else if esc == 114 as i8 { native_v2_rodata_append_byte_into(nc, 13) }
+            else if esc == 34 as i8 { native_v2_rodata_append_byte_into(nc, 34) }
+            else if esc == 92 as i8 { native_v2_rodata_append_byte_into(nc, 92) }
+            else { native_v2_rodata_append_byte_into(nc, esc as i64) }
+            i = i + 2
+        } else {
+            native_v2_rodata_append_byte_into(nc, ch as i64)
+            i = i + 1
+        }
+    }
+    native_v2_rodata_append_byte_into(nc, 0)
+    offset
+}
+
+fn emit_recorded_core_into(nc: &! NativeCompiler, main_fn: &IrFunction, main_fn_id: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    native_v2_core_begin_function_from_ir_into(nc, main_fn, main_fn_id)
+    var i: i64 = 0
+    while i < V2_CORE_COUNT {
+        let op = V2_CORE_OPS[i as usize]
+        if op == V2C_LOAD_IMM {
+            native_v2_core_emit_load_imm_into(nc, V2_CORE_DST[i as usize], V2_CORE_IMM[i as usize])
+        } else if op == V2C_LOAD_STRING {
+            let ro_off = driver_append_string_literal_into(nc, i)
+            native_v2_core_emit_load_string_offset_into(nc, V2_CORE_DST[i as usize], ro_off)
+        } else if op == V2C_BINOP {
+            if !native_v2_core_emit_binop_code_into(nc, V2_CORE_DST[i as usize], V2_CORE_SRC1[i as usize], V2_CORE_IMM[i as usize], V2_CORE_SRC2[i as usize]) {
+                return false
+            }
+        } else if op == V2C_CALL {
+            native_v2_core_emit_call1_into(nc, V2_CORE_DST[i as usize], V2_CORE_FN_ID[i as usize], V2_CORE_SRC1[i as usize], V2_CORE_ARG_COUNT[i as usize])
+        } else if op == V2C_RETURN {
+            native_v2_core_emit_return_into(nc, V2_CORE_SRC1[i as usize])
+            return true
+        } else {
+            return false
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn compile_ir_module_to_elf(output_path: string, token_count: i64, main_fn: &IrFunction) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let user_fn_count = V2_USER_FN_COUNT
+    let main_fn_id = 3 + user_fn_count
+    let total_fn_count = main_fn_id + 1
+
+    var nc = compiler_new()
+    compile_module_streaming_begin_count_into(&! nc, total_fn_count)
+
+    var print_fn = ir_empty_function()
+    set_func_name_print(&! print_fn)
+    var print_int_fn = ir_empty_function()
+    set_func_name_print_int(&! print_int_fn)
+    var print_char_fn = ir_empty_function()
+    set_func_name_print_char(&! print_char_fn)
+
+    if !compile_ir_function_v2_from_ir_into(&! nc, &print_fn, 0) {
+        print("native_compile: native_v2_unsupported fn=print\n")
+        return 3
+    }
+    if !compile_ir_function_v2_from_ir_into(&! nc, &print_int_fn, 1) {
+        print("native_compile: native_v2_unsupported fn=print_int\n")
+        return 3
+    }
+    if !compile_ir_function_v2_from_ir_into(&! nc, &print_char_fn, 2) {
+        print("native_compile: native_v2_unsupported fn=print_char\n")
+        return 3
+    }
+
+    // Compile user-defined functions
+    var ui: i64 = 0
+    while ui < user_fn_count {
+        let ufn_name = user_fn_name_at(ui)
+        let ufn_id = V2_USER_FN_IDS[ui as usize]
+        if !compile_user_fn(&! nc, ufn_name, ufn_id, token_count) {
+            print("native_compile: user_fn_failed\n")
+            return 3
+        }
+        ui = ui + 1
+    }
+
+    if !emit_recorded_core_into(&! nc, main_fn, main_fn_id) {
+        print("native_compile: native_v2_unsupported fn=main\n")
+        return 3
+    }
+
+    compile_module_streaming_finish_main_rodata_len_into(&! nc, main_fn_id, nc.flat_rodata_len)
+
+    let min_data_len = runtime_context_global_slot_size()
     let final_data = string_table_new()
-    let elf = finalize_elf64_bulk_with_data_len(nc.code, nc.rodata, final_data, min_data_len, nc.entry_offset, 4194304, nc.symbols, nc.fn_offsets, nc.fn_count)
-    print("native_compile: elf_size=")
-    print_int(elf.len)
-    print("\n")
+    let elf = finalize_elf64_bulk_with_rodata_ref_data_len(nc.code, &nc.flat_rodata_bytes, nc.flat_rodata_len, final_data, min_data_len, nc.entry_offset, 4194304, nc.symbols, nc.fn_offsets, nc.fn_count)
 
-    // Phase 5: Write binary
     let write_ok = io_write_elf_to_file(output_path, elf)
     if !write_ok {
         print("native_compile: write_error\n")
@@ -316,4 +1309,46 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     print_int(elf.len)
     print("\n")
     0
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 1 {
+        print("native_compile: usage: native_compile_driver.sio <source.sio> [-o <output>]\n")
+        print("native_compile: usage: native_compile_driver.sio <source.sio> <output>\n")
+        return 1
+    }
+
+    let source_path = get_arg(0)
+    var output_path = "a.out"
+    if argc >= 3 {
+        let flag = get_arg(1)
+        if flag == "-o" {
+            output_path = get_arg(2)
+        }
+    }
+    if argc == 2 {
+        let arg1 = get_arg(1)
+        if arg1 != "-o" {
+            output_path = arg1
+        }
+    }
+
+    let token_count = lex_file_to_globals(source_path)
+    if token_count <= 0 {
+        print("native_compile: lex_error\n")
+        return 1
+    }
+
+    scan_user_fns(token_count, 3)
+
+    reset_core()
+    reset_locals()
+    var main_fn = ir_empty_function()
+    if !lower_main_body(token_count, &! main_fn) {
+        print("native_compile: unsupported_frontend_core\n")
+        return 2
+    }
+
+    compile_ir_module_to_elf(output_path, token_count, &main_fn)
 }

@@ -193,6 +193,14 @@ pub fn empty_label_patch() -> LabelPatch {
     LabelPatch { code_offset: 0, label_id: -1 }
 }
 
+// Global label-tracking arrays for native_v2 path.
+// Array element writes through &! NativeCompiler fail for large struct offsets,
+// so label state lives in module-level globals instead.
+pub var NC_V2_LABEL_OFFSETS: [i64; 256] = [0; 256]
+pub var NC_V2_LABEL_PATCH_OFFSETS: [i64; 256] = [0; 256]
+pub var NC_V2_LABEL_PATCH_IDS: [i64; 256] = [0; 256]
+pub var NC_V2_LABEL_PATCH_COUNT: i64 = 0
+
 // ============================================================================
 // Compiler state
 // ============================================================================
@@ -200,6 +208,13 @@ pub fn empty_label_patch() -> LabelPatch {
 pub struct NativeCompiler {
     pub code: CodeBuffer,
     pub relocs: RelocationTable,
+    pub flat_reloc_offsets: [i64; 4096],
+    pub flat_reloc_kind_codes: [i64; 4096],
+    pub flat_reloc_is_functions: [i64; 4096],
+    pub flat_reloc_target_indices: [i64; 4096],
+    pub flat_reloc_count: i64,
+    pub flat_rodata_bytes: [i8; 8192],
+    pub flat_rodata_len: i64,
     pub rodata: StringTable,            // String literals for .rodata
     pub data: StringTable,              // Writable .data section (profiling counters)
     pub symbols: SymbolData,            // Function name symbol table for .symtab/.strtab
@@ -214,7 +229,8 @@ pub struct NativeCompiler {
 
     // Per-function: label tracking for branches
     pub label_offsets: [i64; 256],      // label_id -> code offset (-1 = undefined)
-    pub label_patches: [LabelPatch; 256],
+    pub label_patch_code_offsets: [i64; 256],  // patch position (rel32 operand offset)
+    pub label_patch_label_ids: [i64; 256],     // which label to resolve
     pub label_patch_count: i64,
 
     // Per-function: frame info
@@ -287,6 +303,8 @@ pub fn compiler_new() -> NativeCompiler {
     var out: NativeCompiler
     out.code = code_buffer_new()
     out.relocs = reloc_table_new()
+    out.flat_reloc_count = 0
+    out.flat_rodata_len = 0
     out.rodata = string_table_new()
     out.data = string_table_new()
     out.symbols = symbol_data_new()
@@ -448,24 +466,32 @@ pub fn record_label_patch(nc: NativeCompiler, label_id: i64, rel32_offset: i64) 
 }
 
 pub fn record_label_patch_mut(nc: &! NativeCompiler, label_id: i64, rel32_offset: i64) with Mut, Panic {
-    if (*nc).label_patch_count < 256 {
-        (*nc).label_patches[(*nc).label_patch_count as usize] = LabelPatch {
-            code_offset: rel32_offset,
-            label_id: label_id,
-        }
-        (*nc).label_patch_count = (*nc).label_patch_count + 1
+    let idx = (*nc).label_patch_count
+    if idx < 256 {
+        (*nc).label_patch_code_offsets[idx as usize] = rel32_offset
+        (*nc).label_patch_label_ids[idx as usize] = label_id
+        (*nc).label_patch_count = idx + 1
     }
 }
 
+// patch_label_forwards_mut: reads label patch info from the NC_V2_LABEL_* globals
+// (written by nc_add_label_patch / nc_define_label in codegen_x86_linux.sio).
+// Direct array element writes through &! NativeCompiler fail for large struct offsets,
+// so label state lives in globals instead.
 pub fn patch_label_forwards_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
     var i = 0
-    while i < (*nc).label_patch_count {
-        let patch = (*nc).label_patches[i as usize]
-        let target = (*nc).label_offsets[patch.label_id as usize]
-        if target >= 0 {
-            let next_ip = patch.code_offset + 4
-            let rel = target - next_ip
-            (*nc).code = patch_u32_le((*nc).code, patch.code_offset, rel)
+    while i < NC_V2_LABEL_PATCH_COUNT {
+        let patch_off = NC_V2_LABEL_PATCH_OFFSETS[i as usize]
+        let patch_lid = NC_V2_LABEL_PATCH_IDS[i as usize]
+        let target = NC_V2_LABEL_OFFSETS[patch_lid as usize]
+        if target >= 0 && patch_off >= 0 && patch_off + 4 <= 65536 {
+            let rel = target - (patch_off + 4)
+            var code = (*nc).code
+            code.bytes[patch_off as usize] = low8(rel) as i8
+            code.bytes[(patch_off + 1) as usize] = low8(rel >> 8) as i8
+            code.bytes[(patch_off + 2) as usize] = low8(rel >> 16) as i8
+            code.bytes[(patch_off + 3) as usize] = low8(rel >> 24) as i8
+            (*nc).code = code
         }
         i = i + 1
     }
