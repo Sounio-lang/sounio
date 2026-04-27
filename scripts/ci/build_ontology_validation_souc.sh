@@ -175,7 +175,7 @@ smoke_check_driver() {
 DRIVER_COMPILER=""
 
 echo "==> bootstrap current lean_single.sio into $GEN1_BIN"
-if ! SOUNIO_FORCE_SOURCE_BOOTSTRAP=1 bash "$ROOT_DIR/scripts/ci/build_native_souc.sh" "$GEN1_BIN" \
+if ! bash "$ROOT_DIR/scripts/ci/build_native_souc.sh" "$GEN1_BIN" \
     >"$BOOTSTRAP_LOG" 2>&1; then
     echo "==> bootstrap failed; falling back to boot4-built versioned checker driver"
     tail -n 20 "$BOOTSTRAP_LOG" || true
