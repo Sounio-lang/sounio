@@ -171,18 +171,26 @@ classify_diff() {
     fi
     if [[ "$legacy" == "fail" && "$kernel" == "pass" ]]; then
         if is_compile_fail_fixture "$file_name"; then
-            echo "legacy false-pass / kernel true-fail"
+            echo "legacy true-fail / kernel false-pass"
         else
             echo "legacy fail / kernel pass"
         fi
         return
     fi
     if [[ "$legacy" == "pass" && "$kernel" == "fail" ]]; then
-        echo "legacy pass / kernel fail"
+        if is_compile_fail_fixture "$file_name"; then
+            echo "legacy false-pass / kernel true-fail"
+        else
+            echo "legacy pass / kernel fail"
+        fi
         return
     fi
-    if [[ "$kernel" == "fail" ]]; then
-        echo "kernel false-pass"
+    if [[ "$legacy" == "fail" && "$kernel" == "fail" ]]; then
+        if is_compile_fail_fixture "$file_name"; then
+            echo "legacy true-fail / kernel true-fail"
+        else
+            echo "legacy fail / kernel fail"
+        fi
         return
     fi
     echo "legacy=$legacy / kernel=$kernel"
@@ -203,9 +211,24 @@ emit_structured_summary() {
     if [[ -d "$rebuilt_results_dir" ]]; then
         for f in "$rebuilt_results_dir"/*.json; do
             [[ -f "$f" ]] || continue
-            local status resolution
+            local status resolution name
             status=$(jq -r '.status // empty' "$f" 2>/dev/null)
             resolution=$(jq -r '.agent_witness.resolution // empty' "$f" 2>/dev/null)
+            # Infer resolution when agent_witness is absent (common for run/compile commands)
+            if [[ -z "$resolution" ]]; then
+                name=$(jq -r '.name // empty' "$f" 2>/dev/null)
+                local legacy_status="${default_status[$name]:-missing}"
+                local kernel_status="${rebuilt_status[$name]:-missing}"
+                if [[ "$legacy_status" == "pass" && "$kernel_status" == "pass" ]]; then
+                    resolution="unanimous"
+                    status="pass"
+                elif [[ "$legacy_status" == "fail" && "$kernel_status" == "fail" ]]; then
+                    resolution="unanimous"
+                    status="fail"
+                elif [[ "$legacy_status" != "missing" && "$kernel_status" != "missing" ]]; then
+                    resolution="disagreement"
+                fi
+            fi
             case "$resolution" in
                 unanimous)
                     if [[ "$status" == "pass" ]]; then unanimous_pass=$((unanimous_pass + 1)); else unanimous_fail=$((unanimous_fail + 1)); fi
