@@ -67,6 +67,36 @@ The important repair was structural: large aggregate returns and nested
 The Linux path now uses scalar token kind codes, flat relocation arrays, and
 flat rodata bytes on `NativeCompiler`.
 
+## Driver Self-Compile Target
+
+The stricter native-v2 acceptance target is now encoded as:
+
+```sh
+bash scripts/ci/native_v2_driver_self_compile_gate.sh
+```
+
+That gate is Linux x86-64 only. It first requires
+`native_v2_serious_track_gate.sh`, then asks the current
+`native_compile_driver.sio` to compile `native_compile_driver.sio` into a
+stage1 driver. If stage1 exists, the gate runs that generated driver on
+`examples/native/hello.sio` and checks ELF kind, executable bit, `.rodata` and
+`.data` witnesses, string-literal presence, and stdout parity with the current
+driver.
+
+This gate is not green yet and is not a promoted support claim. The current
+first failure is in the driver frontend:
+
+```text
+native_compile: unsupported_binding_expr
+native_compile: unsupported_frontend_core
+```
+
+The failure is reached while lowering the driver's own `main`, beginning at the
+`arg_count()` binding. Clearing it is necessary but not sufficient: a passing
+gate also requires imported compiler/runtime closure, builtin coverage,
+multi-argument call ABI coverage, and the richer control/data constructs used
+by the driver source.
+
 ## macOS
 
 macOS is not promoted to the same runtime status yet.

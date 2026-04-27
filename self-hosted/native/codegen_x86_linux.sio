@@ -1096,6 +1096,22 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if native_v2_func_name_is_print_int(func) { return 1 }
     if native_v2_func_name_is_print_char(func) { return 2 }
     if native_v2_func_name_is_print(func) { return 3 }
+    if name_is_get_arg_count((*func).name) { return 4 }
+    if name_is_get_arg((*func).name) { return 5 }
+    if name_is_str_len((*func).name) { return 6 }
+    if name_is_str_eq((*func).name) { return 7 }
+    if name_is_str_slice((*func).name) { return 8 }
+    if name_is_starts_with((*func).name) { return 9 }
+    if name_is_str_concat((*func).name) { return 10 }
+    if name_is_read_file((*func).name) { return 11 }
+    if name_is_write_file((*func).name) { return 12 }
+    if name_is_file_size((*func).name) { return 13 }
+    if name_is_sqrt((*func).name) { return 14 }
+    if name_is_print_f64((*func).name) { return 15 }
+    if name_is_exp((*func).name) { return 16 }
+    if name_is_log((*func).name) { return 17 }
+    if name_is_sin((*func).name) { return 18 }
+    if name_is_cos((*func).name) { return 19 }
     0
 }
 
@@ -1462,6 +1478,13 @@ fn nc_emit_mov_reg_reg(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Pani
     nc_emit_byte(nc, modrm_rr(dst, src))
 }
 
+fn nc_emit_mov_rax_mem_rax_rbx8(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x04)
+    nc_emit_byte(nc, 0xd8)
+}
+
 fn nc_emit_mov_rbx_rip_disp32(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x8b)
@@ -1494,6 +1517,22 @@ fn nc_emit_lea_rax_r14_disp8(nc: &! NativeCompiler, disp: i64) with Mut, Panic, 
     nc_emit_byte(nc, 0x8d)
     nc_emit_byte(nc, 0x46)
     nc_emit_byte(nc, low8(disp))
+}
+
+fn nc_emit_sub_rax_imm8(nc: &! NativeCompiler, imm: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xe8)
+    nc_emit_byte(nc, low8(imm))
+}
+
+fn emit_sub_rax_imm8(buf: CodeBuffer, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x83)
+    b = emit_byte(b, 0xe8)
+    b = emit_byte(b, low8(imm))
+    b
 }
 
 fn nc_emit_test_rax_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -2589,6 +2628,44 @@ fn emit_builtin_get_arg(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, D
     c.code = emit_mov_rax_mem_rax_rbx8(c.code)    // mov rax, [rax + rbx*8]
     c.code = emit_ret(c.code)
     c
+}
+
+fn emit_builtin_get_arg_count_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_argc())
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_get_arg_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_argv_ptr())
+    nc_emit_mov_reg_reg(nc, 3, 7)
+    nc_emit_mov_rax_mem_rax_rbx8(nc)
+    nc_emit_ret(nc)
+}
+
+pub fn native_v2_emit_get_arg_count_function_into(nc: &! NativeCompiler, fn_index: i64) with Mut, Panic, Div {
+    reset_function_state_mut(nc)
+    (*nc).fn_offsets[fn_index as usize] = (*nc).code.len
+    emit_builtin_get_arg_count_into(nc)
+}
+
+pub fn native_v2_emit_get_arg_function_into(nc: &! NativeCompiler, fn_index: i64) with Mut, Panic, Div {
+    reset_function_state_mut(nc)
+    (*nc).fn_offsets[fn_index as usize] = (*nc).code.len
+    emit_builtin_get_arg_into(nc)
+}
+
+pub fn native_v2_core_emit_arg_count_into(nc: &! NativeCompiler, dst: i64) with Mut, Panic, Div {
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_argc())
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
+pub fn native_v2_core_emit_get_arg_into(nc: &! NativeCompiler, dst: i64, arg_reg: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, arg_reg)
+    nc_emit_mov_rdi_rax(nc)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_argv_ptr())
+    nc_emit_mov_reg_reg(nc, 3, 7)
+    nc_emit_mov_rax_mem_rax_rbx8(nc)
+    nc_core_store_rax_to_temp(nc, dst)
 }
 
 // str_len(s: *u8) -> i64
@@ -4103,7 +4180,7 @@ fn native_v2_run_machine_regalloc_ref_mut(nc: &! NativeCompiler, func: &MachineF
     (*nc).current_machine_spill_count = state.spill_count
 }
 
-fn native_v2_used_allocatable_preg_mask_ref(nc: &NativeCompiler, reg_count: i64) -> i64 {
+fn native_v2_used_allocatable_preg_mask_ref(nc: &NativeCompiler, reg_count: i64) -> i64 with Mut, Panic, Div {
     var mask: i64 = 0
     var v: i64 = 0
     while v < reg_count {
@@ -4589,7 +4666,7 @@ fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &Machine
     }
 }
 
-fn native_v2_builtin_id_for_name(name: Name) -> i64 {
+fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_print_int(name) { return 1 }
     if name_is_print_char(name) { return 2 }
     if name_is_print(name) { return 3 }
@@ -4619,8 +4696,8 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
         emit_builtin_print_str_into(nc)
         return
     }
-    if builtin_id == 4 { (*nc) = emit_builtin_get_arg_count((*nc)); return }
-    if builtin_id == 5 { (*nc) = emit_builtin_get_arg((*nc)); return }
+    if builtin_id == 4 { emit_builtin_get_arg_count_into(nc); return }
+    if builtin_id == 5 { emit_builtin_get_arg_into(nc); return }
     if builtin_id == 6 { (*nc) = emit_builtin_str_len((*nc)); return }
     if builtin_id == 7 { (*nc) = emit_builtin_str_eq((*nc)); return }
     if builtin_id == 8 { (*nc) = emit_builtin_str_slice((*nc)); return }
@@ -5111,10 +5188,64 @@ pub fn native_v2_core_emit_return_into(nc: &! NativeCompiler, src: i64) with Mut
     nc_emit_ret(nc)
 }
 
+fn nc_emit_load_rbp_disp32_reg(nc: &! NativeCompiler, reg: i64, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x80 | (reg * 8) | 5)
+    nc_emit_u32_le(nc, disp)
+}
+
+fn nc_emit_store_rbp_disp32_reg(nc: &! NativeCompiler, reg: i64, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0x80 | (reg * 8) | 5)
+    nc_emit_u32_le(nc, disp)
+}
+
+// Pass up to 4 args from consecutive vregs into SysV param regs (rdi/rsi/rdx/rcx)
+pub fn native_v2_core_emit_call_argc_into(nc: &! NativeCompiler, dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut, Panic, Div {
+    if argc >= 1 { nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(arg0)) }
+    if argc >= 2 { nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(arg0 + 1)) }
+    if argc >= 3 { nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(arg0 + 2)) }
+    if argc >= 4 { nc_emit_load_rbp_disp32_reg(nc, 1, ir_slot_offset(arg0 + 3)) }
+    let call_pos = (*nc).code.len
+    nc_emit_call_rel32_placeholder(nc)
+    nc_add_call_reloc(nc, call_pos + 1, fn_id)
+    if dst >= 0 {
+        nc_core_store_rax_to_temp(nc, dst)
+    }
+}
+
+// Return a struct: field[0] in rax, field[1] in rdx (if fcount >= 2), then epilogue
+pub fn native_v2_core_emit_return_struct_into(nc: &! NativeCompiler, base_reg: i64, fcount: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, base_reg)
+    if fcount >= 2 {
+        nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(base_reg + 1))
+    }
+    nc_emit_mov_rsp_rbp(nc)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
+}
+
+// Save rdx (second return reg) into a vreg stack slot
+pub fn native_v2_core_emit_rdx_to_temp_into(nc: &! NativeCompiler, dst: i64) with Mut, Panic, Div {
+    if dst >= 0 {
+        nc_emit_store_rbp_disp32_reg(nc, 2, ir_slot_offset(dst))
+    }
+}
+
 pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with Mut, Panic, Div, Alloc {
     let builtin_id = native_v2_builtin_id_for_func_ref(func)
     if builtin_id != 0 {
-        compile_ir_function_v2_into(nc, func, &NATIVE_V2_CODEGEN_MACHINE, fn_index)
+        if builtin_id <= 3 {
+            compile_ir_function_v2_into(nc, func, &NATIVE_V2_CODEGEN_MACHINE, fn_index)
+            return true
+        }
+        reset_function_state_mut(nc)
+        let function_offset = (*nc).code.len
+        (*nc).fn_offsets[fn_index as usize] = function_offset
+        native_compiler_add_symbol_func_ref(nc, fn_index, func)
+        native_v2_emit_builtin_by_id_into(nc, builtin_id)
         return true
     }
     compile_ir_function_v2_core_ir_into(nc, func, fn_index)
@@ -5814,8 +5945,9 @@ fn emit_entry_trampoline_heap_args_into(nc: &! NativeCompiler) with Mut, Panic, 
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
 
     nc_emit_mov_rax_mem_r14(nc)
+    nc_emit_sub_rax_imm8(nc, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_argc())
-    nc_emit_lea_rax_r14_disp8(nc, 8)
+    nc_emit_lea_rax_r14_disp8(nc, 16)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_argv_ptr())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_stdout_fd(), 1)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_stderr_fd(), 2)
@@ -5916,8 +6048,9 @@ fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) with Mu
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
 
     (*nc).code = emit_mov_rax_mem_r14((*nc).code)
+    (*nc).code = emit_sub_rax_imm8((*nc).code, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_argc())
-    (*nc).code = emit_lea_rax_r14_disp8((*nc).code, 8)
+    (*nc).code = emit_lea_rax_r14_disp8((*nc).code, 16)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_argv_ptr())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_stdout_fd(), 1)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_stderr_fd(), 2)
@@ -6019,8 +6152,9 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
 
     // M4: Store argc and argv in RuntimeContext memory.
     c.code = emit_mov_rax_mem_r14(c.code)          // rax = [r14] = argc
+    c.code = emit_sub_rax_imm8(c.code, 1)          // hide argv[0] from Sounio programs
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_argc())
-    c.code = emit_lea_rax_r14_disp8(c.code, 8)    // rax = r14 + 8 = argv pointer
+    c.code = emit_lea_rax_r14_disp8(c.code, 16)   // rax = r14 + 16 = argv[1] pointer
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_argv_ptr())
     c = emit_store_runtime_context_imm(c, runtime_context_field_stdout_fd(), 1)
     c = emit_store_runtime_context_imm(c, runtime_context_field_stderr_fd(), 2)
@@ -6290,8 +6424,9 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
     c.code = emit_mov_rax_mem_r14(c.code)
+    c.code = emit_sub_rax_imm8(c.code, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_argc())
-    c.code = emit_lea_rax_r14_disp8(c.code, 8)
+    c.code = emit_lea_rax_r14_disp8(c.code, 16)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_argv_ptr())
     c = emit_store_runtime_context_imm(c, runtime_context_field_stdout_fd(), 1)
     c = emit_store_runtime_context_imm(c, runtime_context_field_stderr_fd(), 2)
