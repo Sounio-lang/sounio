@@ -1485,6 +1485,20 @@ fn nc_emit_mov_rax_mem_rax_rbx8(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xd8)
 }
 
+fn nc_emit_load_rax_mem_rdx_rbx8(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x04)
+    nc_emit_byte(nc, 0xda)
+}
+
+fn nc_emit_store_rax_mem_rdx_rbx8(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0x04)
+    nc_emit_byte(nc, 0xda)
+}
+
 fn nc_emit_mov_rbx_rip_disp32(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x8b)
@@ -1517,6 +1531,13 @@ fn nc_emit_lea_rax_r14_disp8(nc: &! NativeCompiler, disp: i64) with Mut, Panic, 
     nc_emit_byte(nc, 0x8d)
     nc_emit_byte(nc, 0x46)
     nc_emit_byte(nc, low8(disp))
+}
+
+fn nc_emit_lea_rax_rbp_disp32(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8d)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_u32_le(nc, disp)
 }
 
 fn nc_emit_sub_rax_imm8(nc: &! NativeCompiler, imm: i64) with Mut, Panic, Div {
@@ -1659,6 +1680,12 @@ fn nc_emit_test_rdi_rdi(nc: &! NativeCompiler) with Mut, Panic, Div {
 fn nc_emit_jns_rel8(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x79)
     nc_emit_byte(nc, low8(disp))
+}
+
+fn nc_emit_neg_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xf7)
+    nc_emit_byte(nc, 0xd8)
 }
 
 fn nc_emit_neg_rdi(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -1849,6 +1876,10 @@ fn nc_emit_push_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
 
 fn nc_emit_pop_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x5b)
+}
+
+fn nc_emit_pop_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x58)
 }
 
 fn nc_emit_store_rax_rbp_disp32(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
@@ -5507,6 +5538,75 @@ pub fn native_v2_core_patch_labels_into(nc: &! NativeCompiler) with IO, Mut, Pan
 pub fn native_v2_core_emit_copy_into(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, src)
     nc_core_store_rax_to_temp(nc, dst)
+}
+
+pub fn native_v2_core_emit_temp_addr_into(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    nc_emit_lea_rax_rbp_disp32(nc, ir_slot_offset(src))
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
+pub fn native_v2_core_emit_load_ref_field_into(nc: &! NativeCompiler, dst: i64, base_ref: i64, field_offset_words: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, base_ref)
+    nc_emit_mov_reg_reg(nc, 3, 0)
+    nc_emit_load_rax_mem_rbx_disp32(nc, field_offset_words * 8)
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
+pub fn native_v2_core_emit_store_ref_field_into(nc: &! NativeCompiler, base_ref: i64, field_offset_words: i64, src: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, src)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, base_ref)
+    nc_emit_mov_reg_reg(nc, 3, 0)
+    nc_emit_pop_rax(nc)
+    nc_emit_store_rax_mem_rbx_disp32(nc, field_offset_words * 8)
+}
+
+pub fn native_v2_driver_state_base_offset() -> i64 { 4096 }
+
+pub fn native_v2_driver_state_data_len() -> i64 { 196608 }
+
+pub fn native_v2_core_emit_driver_global_load_into(nc: &! NativeCompiler, dst: i64, global_id: i64, index_reg: i64) with Mut, Panic, Div {
+    let load_pos = (*nc).code.len + 3
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_data_section_reloc(nc, load_pos, native_v2_driver_state_base_offset() + (global_id * 4096))
+    nc_emit_mov_reg_reg(nc, 2, 0)
+    nc_core_load_temp_to_rax(nc, index_reg)
+    nc_emit_mov_reg_reg(nc, 3, 0)
+    nc_emit_load_rax_mem_rdx_rbx8(nc)
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
+pub fn native_v2_core_emit_driver_global_store_into(nc: &! NativeCompiler, global_id: i64, index_reg: i64, src: i64) with Mut, Panic, Div {
+    let load_pos = (*nc).code.len + 3
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_data_section_reloc(nc, load_pos, native_v2_driver_state_base_offset() + (global_id * 4096))
+    nc_emit_mov_reg_reg(nc, 2, 0)
+    nc_core_load_temp_to_rax(nc, index_reg)
+    nc_emit_mov_reg_reg(nc, 3, 0)
+    nc_core_load_temp_to_rax(nc, src)
+    nc_emit_store_rax_mem_rdx_rbx8(nc)
+}
+
+pub fn native_v2_core_emit_local_array_load_into(nc: &! NativeCompiler, dst: i64, base_reg: i64, idx_reg: i64) with Mut, Panic, Div {
+    // dst = arr[idx_runtime]; arr[0] is at rbp + ir_slot_offset(base_reg)
+    // arr[i] = *(rbp + ir_slot_offset(base_reg) + (-i)*8)
+    nc_core_load_temp_to_rax(nc, idx_reg)
+    nc_emit_neg_rax(nc)
+    nc_emit_mov_reg_reg(nc, 3, 0)
+    nc_emit_lea_rax_rbp_disp32(nc, ir_slot_offset(base_reg))
+    nc_emit_mov_rax_mem_rax_rbx8(nc)
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
+pub fn native_v2_core_emit_local_array_store_into(nc: &! NativeCompiler, base_reg: i64, idx_reg: i64, src: i64) with Mut, Panic, Div {
+    // arr[idx_runtime] = src; arr[0] is at rbp + ir_slot_offset(base_reg)
+    nc_core_load_temp_to_rax(nc, idx_reg)
+    nc_emit_neg_rax(nc)
+    nc_emit_mov_reg_reg(nc, 3, 0)
+    nc_emit_lea_rax_rbp_disp32(nc, ir_slot_offset(base_reg))
+    nc_emit_mov_reg_reg(nc, 2, 0)
+    nc_core_load_temp_to_rax(nc, src)
+    nc_emit_store_rax_mem_rdx_rbx8(nc)
 }
 
 // ============================================================================

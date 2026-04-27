@@ -47,6 +47,12 @@ use native::codegen_x86_linux::{
     native_v2_emit_get_arg_function_into,
     native_v2_core_emit_arg_count_into,
     native_v2_core_emit_get_arg_into,
+    native_v2_core_emit_temp_addr_into,
+    native_v2_core_emit_load_ref_field_into,
+    native_v2_core_emit_store_ref_field_into,
+    native_v2_core_emit_driver_global_load_into,
+    native_v2_core_emit_driver_global_store_into,
+    native_v2_driver_state_data_len,
 }
 
 let TK_EOF: i64 = 0
@@ -66,17 +72,23 @@ let TK_MINUS: i64 = 133
 let TK_STAR: i64 = 134
 let TK_SLASH: i64 = 135
 let TK_EQ: i64 = 137
+let TK_AMPBANG: i64 = 163
 let TK_LT: i64 = 138
 let TK_GT: i64 = 139
 let TK_EQEQ: i64 = 146
 let TK_BANGEQ: i64 = 147
 let TK_LE: i64 = 148
 let TK_GE: i64 = 149
+let TK_ANDAND: i64 = 150
+let TK_OROR: i64 = 151
+let TK_BANG: i64 = 140
 let TK_ARROW: i64 = 158
 let TK_LPAREN: i64 = 174
 let TK_RPAREN: i64 = 175
 let TK_LBRACE: i64 = 176
 let TK_RBRACE: i64 = 177
+let TK_LBRACKET: i64 = 178
+let TK_RBRACKET: i64 = 179
 let TK_SEMI: i64 = 180
 let TK_COLON: i64 = 181
 let TK_COMMA: i64 = 182
@@ -84,15 +96,16 @@ let TK_DOT: i64 = 183
 let TK_USE: i64 = 5
 let TK_STRUCT: i64 = 13
 let TK_ENUM: i64 = 14
+let TK_AS: i64 = 30
 let TK_COLONCOLON: i64 = 162
 let TK_MATCH: i64 = 22
 let TK_FATARROW: i64 = 159
 let TK_UNDERSCORE: i64 = 186
 
-var V2_LOCAL_NAMES: [Name; 64] = [empty_name(); 64]
 var V2_LOCAL_TOK_IDX: [i64; 64] = [0; 64]
 var V2_LOCAL_REGS: [i64; 64] = [0; 64]
 var V2_LOCAL_STRUCT_IDX: [i64; 64] = [0; 64]
+var V2_LOCAL_IS_REF: [i64; 64] = [0; 64]
 var V2_LOCAL_COUNT: i64 = 0
 var V2_NEXT_REG: i64 = 0
 
@@ -105,13 +118,6 @@ var V2_USER_FN_COUNT: i64 = 0
 // Per-function label counter (reset per user function)
 var V2_NEXT_LABEL: i64 = 0
 
-let V2C_LOAD_IMM: i64 = 1
-let V2C_LOAD_STRING: i64 = 2
-let V2C_BINOP: i64 = 3
-let V2C_CALL: i64 = 4
-let V2C_RETURN: i64 = 5
-let V2C_COPY: i64 = 6
-
 let V2_BUILTIN_PRINT: i64 = 0
 let V2_BUILTIN_PRINT_INT: i64 = 1
 let V2_BUILTIN_PRINT_CHAR: i64 = 2
@@ -119,17 +125,6 @@ let V2_BUILTIN_ARG_COUNT: i64 = 3
 let V2_BUILTIN_GET_ARG: i64 = 4
 let V2_BUILTIN_STR_EQ: i64 = 5
 let V2_FIRST_USER_FN_ID: i64 = 6
-
-var V2_CORE_OPS: [i64; 128] = [0; 128]
-var V2_CORE_DST: [i64; 128] = [0; 128]
-var V2_CORE_SRC1: [i64; 128] = [0; 128]
-var V2_CORE_SRC2: [i64; 128] = [0; 128]
-var V2_CORE_IMM: [i64; 128] = [0; 128]
-var V2_CORE_FN_ID: [i64; 128] = [0; 128]
-var V2_CORE_ARG_COUNT: [i64; 128] = [0; 128]
-var V2_CORE_STR_START: [i64; 128] = [0; 128]
-var V2_CORE_STR_END: [i64; 128] = [0; 128]
-var V2_CORE_COUNT: i64 = 0
 
 // V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
 let UFN_LOAD_IMM: i64 = 1
@@ -143,6 +138,13 @@ let UFN_COPY: i64 = 8
 let UFN_RETURN_STRUCT: i64 = 9
 let UFN_CALL_STRUCT_RESULT: i64 = 10
 let UFN_LOAD_STRING: i64 = 11
+let UFN_TEMP_ADDR: i64 = 12
+let UFN_LOAD_REF_FIELD: i64 = 13
+let UFN_STORE_REF_FIELD: i64 = 14
+let UFN_GLOBAL_LOAD: i64 = 15
+let UFN_GLOBAL_STORE: i64 = 16
+let UFN_LOCAL_LOAD: i64 = 17
+let UFN_LOCAL_STORE: i64 = 18
 
 var V2_UFN_OPS: [i64; 256] = [0; 256]
 var V2_UFN_DST: [i64; 256] = [0; 256]
@@ -198,119 +200,73 @@ struct ExprParse {
     next: i64,
 }
 
-fn reset_locals() with Mut {
-    V2_LOCAL_COUNT = 0
-    V2_NEXT_REG = 0
-    var _rli: i64 = 0
-    while _rli < 64 {
-        V2_LOCAL_STRUCT_IDX[_rli as usize] = -1
-        _rli = _rli + 1
-    }
+struct V2DriverContext {
+    local_count: i64,
+    next_reg: i64,
 }
 
-fn reset_core() with Mut {
-    V2_CORE_COUNT = 0
+fn v2_driver_context_new() -> V2DriverContext {
+    V2DriverContext { local_count: 0, next_reg: 0 }
 }
 
-fn core_append_base(op: i64, dst: i64, src1: i64, src2: i64) -> i64 with Mut {
-    let idx = V2_CORE_COUNT
-    if idx >= 0 && idx < 128 {
-        V2_CORE_OPS[idx as usize] = op
-        V2_CORE_DST[idx as usize] = dst
-        V2_CORE_SRC1[idx as usize] = src1
-        V2_CORE_SRC2[idx as usize] = src2
-        V2_CORE_IMM[idx as usize] = 0
-        V2_CORE_FN_ID[idx as usize] = 0
-        V2_CORE_ARG_COUNT[idx as usize] = 0
-        V2_CORE_STR_START[idx as usize] = 0
-        V2_CORE_STR_END[idx as usize] = 0
-        V2_CORE_COUNT = idx + 1
-    }
-    idx
+fn reset_locals(ctx: &! V2DriverContext) with Mut {
+    (*ctx).local_count = 0
+    (*ctx).next_reg = 0
 }
 
-fn core_append_load_imm(dst: i64, value: i64) with Mut {
-    let idx = core_append_base(V2C_LOAD_IMM, dst, -1, -1)
-    if idx >= 0 && idx < 128 {
-        V2_CORE_IMM[idx as usize] = value
-    }
-}
-
-fn core_append_load_string(dst: i64, token_idx: i64) with Mut, Panic {
-    let idx = core_append_base(V2C_LOAD_STRING, dst, -1, -1)
-    if idx >= 0 && idx < 128 {
-        V2_CORE_STR_START[idx as usize] = pt_read_start(token_idx)
-        V2_CORE_STR_END[idx as usize] = pt_read_end(token_idx)
-    }
-}
-
-fn core_binop_code_from_kind(kind: i64) -> i64 {
-    if kind == TK_MINUS { return 2 }
-    if kind == TK_STAR { return 3 }
-    if kind == TK_SLASH { return 4 }
-    1
-}
-
-fn core_append_binop(dst: i64, lhs: i64, op_kind: i64, rhs: i64) with Mut {
-    let idx = core_append_base(V2C_BINOP, dst, lhs, rhs)
-    if idx >= 0 && idx < 128 {
-        V2_CORE_IMM[idx as usize] = core_binop_code_from_kind(op_kind)
-    }
-}
-
-fn core_append_call(dst: i64, fn_id: i64, arg: i64, arg_count: i64) with Mut {
-    let idx = core_append_base(V2C_CALL, dst, arg, -1)
-    if idx >= 0 && idx < 128 {
-        V2_CORE_FN_ID[idx as usize] = fn_id
-        V2_CORE_ARG_COUNT[idx as usize] = arg_count
-    }
-}
-
-fn core_append_return(src: i64) with Mut {
-    let _ = core_append_base(V2C_RETURN, -1, src, -1)
-}
-
-fn core_append_copy(dst: i64, src: i64) with Mut {
-    let _ = core_append_base(V2C_COPY, dst, src, -1)
-}
-
-fn remember_local(name: Name, reg: i64) with Mut, Panic {
-    if V2_LOCAL_COUNT < 64 {
-        V2_LOCAL_NAMES[V2_LOCAL_COUNT as usize] = name
-        V2_LOCAL_REGS[V2_LOCAL_COUNT as usize] = reg
-        V2_LOCAL_COUNT = V2_LOCAL_COUNT + 1
-    }
-}
-
-fn remember_local_tok(tok_idx: i64, reg: i64) with Mut, Panic {
-    let idx = V2_LOCAL_COUNT
+fn remember_local_tok(ctx: &! V2DriverContext, tok_idx: i64, reg: i64) with Mut, Panic {
+    let idx = (*ctx).local_count
     if idx < 64 {
         V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
         V2_LOCAL_REGS[idx as usize] = reg
         V2_LOCAL_STRUCT_IDX[idx as usize] = -1
-        V2_LOCAL_COUNT = idx + 1
+        V2_LOCAL_IS_REF[idx as usize] = 0
+        (*ctx).local_count = idx + 1
     }
 }
 
-fn remember_struct_local_tok(tok_idx: i64, base_reg: i64, sidx: i64) with Mut, Panic {
-    let idx = V2_LOCAL_COUNT
+fn remember_struct_local_tok(ctx: &! V2DriverContext, tok_idx: i64, base_reg: i64, sidx: i64) with Mut, Panic {
+    let idx = (*ctx).local_count
     if idx < 64 {
         V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
         V2_LOCAL_REGS[idx as usize] = base_reg
         V2_LOCAL_STRUCT_IDX[idx as usize] = sidx
-        V2_LOCAL_COUNT = idx + 1
+        V2_LOCAL_IS_REF[idx as usize] = 0
+        (*ctx).local_count = idx + 1
     }
 }
 
-fn lookup_local_struct_idx_tok(tok_idx: i64) -> i64 with Mut, Panic, Div {
+fn remember_ref_struct_local_tok(ctx: &! V2DriverContext, tok_idx: i64, reg: i64, sidx: i64) with Mut, Panic {
+    let idx = (*ctx).local_count
+    if idx < 64 {
+        V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
+        V2_LOCAL_REGS[idx as usize] = reg
+        V2_LOCAL_STRUCT_IDX[idx as usize] = sidx
+        V2_LOCAL_IS_REF[idx as usize] = 1
+        (*ctx).local_count = idx + 1
+    }
+}
+
+fn lookup_local_struct_idx_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
-    while i < V2_LOCAL_COUNT {
+    while i < (*ctx).local_count {
         if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
             return V2_LOCAL_STRUCT_IDX[i as usize]
         }
         i = i + 1
     }
     -1
+}
+
+fn lookup_local_is_ref_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*ctx).local_count {
+        if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
+            return V2_LOCAL_IS_REF[i as usize]
+        }
+        i = i + 1
+    }
+    0
 }
 
 fn toks_ident_eq(a: i64, b: i64) -> bool with Mut, Panic, Div {
@@ -329,21 +285,10 @@ fn toks_ident_eq(a: i64, b: i64) -> bool with Mut, Panic, Div {
     true
 }
 
-fn lookup_local_tok(tok_idx: i64) -> i64 with Mut, Panic, Div {
+fn lookup_local_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
-    while i < V2_LOCAL_COUNT {
+    while i < (*ctx).local_count {
         if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
-            return V2_LOCAL_REGS[i as usize]
-        }
-        i = i + 1
-    }
-    -1
-}
-
-fn lookup_local(name: Name) -> i64 with Mut, Panic, Div {
-    var i: i64 = 0
-    while i < V2_LOCAL_COUNT {
-        if name_eq(V2_LOCAL_NAMES[i as usize], name) {
             return V2_LOCAL_REGS[i as usize]
         }
         i = i + 1
@@ -541,6 +486,59 @@ fn set_func_name_main(func: &! IrFunction) with Mut {
     (*func).name = n
 }
 
+fn driver_global_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
+    if token_text_eq(tok, "V2_LOCAL_TOK_IDX") { return 1 }
+    if token_text_eq(tok, "V2_LOCAL_REGS") { return 2 }
+    if token_text_eq(tok, "V2_LOCAL_STRUCT_IDX") { return 3 }
+    if token_text_eq(tok, "V2_LOCAL_IS_REF") { return 4 }
+    if token_text_eq(tok, "V2_USER_FN_TOKEN_IDX") { return 5 }
+    if token_text_eq(tok, "V2_USER_FN_IDS") { return 6 }
+    if token_text_eq(tok, "V2_USER_FN_COUNT") { return 7 }
+    if token_text_eq(tok, "V2_NEXT_LABEL") { return 8 }
+    if token_text_eq(tok, "V2_UFN_OPS") { return 9 }
+    if token_text_eq(tok, "V2_UFN_DST") { return 10 }
+    if token_text_eq(tok, "V2_UFN_SRC1") { return 11 }
+    if token_text_eq(tok, "V2_UFN_SRC2") { return 12 }
+    if token_text_eq(tok, "V2_UFN_IMM") { return 13 }
+    if token_text_eq(tok, "V2_UFN_LABEL_ID") { return 14 }
+    if token_text_eq(tok, "V2_UFN_BINOP_CODE") { return 15 }
+    if token_text_eq(tok, "V2_UFN_FN_ID") { return 16 }
+    if token_text_eq(tok, "V2_UFN_RESULT_FCOUNT") { return 17 }
+    if token_text_eq(tok, "V2_UFN_STR_START") { return 18 }
+    if token_text_eq(tok, "V2_UFN_STR_END") { return 19 }
+    if token_text_eq(tok, "V2_UFN_COUNT") { return 20 }
+    if token_text_eq(tok, "V2_PARSE_UNSUPPORTED") { return 21 }
+    if token_text_eq(tok, "V2_PARSE_UNSUPPORTED_TOKEN") { return 22 }
+    if token_text_eq(tok, "V2_PARSE_UNSUPPORTED_KIND") { return 23 }
+    if token_text_eq(tok, "V2_CALL_ARG_REGS") { return 24 }
+    if token_text_eq(tok, "V2_CALL_ARG_SIZES") { return 25 }
+    if token_text_eq(tok, "STRUCT_NAME_TOKS") { return 26 }
+    if token_text_eq(tok, "STRUCT_FIELD_START") { return 27 }
+    if token_text_eq(tok, "STRUCT_FIELD_COUNT") { return 28 }
+    if token_text_eq(tok, "STRUCT_FLAT_SIZE") { return 29 }
+    if token_text_eq(tok, "STRUCT_COUNT") { return 30 }
+    if token_text_eq(tok, "STRUCT_FIELDS") { return 31 }
+    if token_text_eq(tok, "STRUCT_FIELD_TOTAL") { return 32 }
+    if token_text_eq(tok, "STRUCT_FIELD_STRUCT_IDX") { return 33 }
+    if token_text_eq(tok, "STRUCT_FIELD_FLAT_OFFSET") { return 34 }
+    if token_text_eq(tok, "ENUM_NAME_TOKS") { return 35 }
+    if token_text_eq(tok, "ENUM_VARIANT_START") { return 36 }
+    if token_text_eq(tok, "ENUM_VARIANT_COUNT") { return 37 }
+    if token_text_eq(tok, "ENUM_COUNT") { return 38 }
+    if token_text_eq(tok, "ENUM_VARIANTS") { return 39 }
+    if token_text_eq(tok, "ENUM_VARIANT_TOTAL") { return 40 }
+    if token_text_eq(tok, "V2_USER_FN_RETURN_STRUCT_IDX") { return 41 }
+    if token_text_eq(tok, "V2_LAST_STRUCT_IDX") { return 42 }
+    -1
+}
+
+fn skip_index_cast_end(pos: i64) -> i64 with Panic {
+    if token_kind(pos) == TK_AS {
+        return pos + 2
+    }
+    pos
+}
+
 fn token_string_name(idx: i64) -> Name with Mut, Panic, Div {
     var n = empty_name()
     var i = pt_read_start(idx) + 1
@@ -566,9 +564,9 @@ fn token_string_name(idx: i64) -> Name with Mut, Panic, Div {
     n
 }
 
-fn alloc_reg() -> i64 with Mut {
-    let r = V2_NEXT_REG
-    V2_NEXT_REG = r + 1
+fn alloc_reg(ctx: &! V2DriverContext) -> i64 with Mut {
+    let r = (*ctx).next_reg
+    (*ctx).next_reg = r + 1
     r
 }
 
@@ -893,6 +891,82 @@ fn ufn_record_load_string(dst: i64, token_idx: i64) with Mut, Panic {
     }
 }
 
+fn ufn_record_temp_addr(dst: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_TEMP_ADDR
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = src
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_load_ref_field(dst: i64, base_ref: i64, field_offset: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_LOAD_REF_FIELD
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = base_ref
+        V2_UFN_IMM[idx as usize] = field_offset
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_store_ref_field(base_ref: i64, field_offset: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_STORE_REF_FIELD
+        V2_UFN_SRC1[idx as usize] = base_ref
+        V2_UFN_SRC2[idx as usize] = src
+        V2_UFN_IMM[idx as usize] = field_offset
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_global_load(dst: i64, global_id: i64, index_reg: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_GLOBAL_LOAD
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = index_reg
+        V2_UFN_IMM[idx as usize] = global_id
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_global_store(global_id: i64, index_reg: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_GLOBAL_STORE
+        V2_UFN_SRC1[idx as usize] = index_reg
+        V2_UFN_SRC2[idx as usize] = src
+        V2_UFN_IMM[idx as usize] = global_id
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_local_load(dst: i64, base_reg: i64, idx_reg: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_LOCAL_LOAD
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = base_reg
+        V2_UFN_SRC2[idx as usize] = idx_reg
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_local_store(base_reg: i64, idx_reg: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 256 {
+        V2_UFN_OPS[idx as usize] = UFN_LOCAL_STORE
+        V2_UFN_SRC1[idx as usize] = base_reg
+        V2_UFN_SRC2[idx as usize] = idx_reg
+        V2_UFN_DST[idx as usize] = src
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
 fn ufn_record_binop(dst: i64, src1: i64, binop_code: i64, src2: i64) with Mut {
     let idx = V2_UFN_COUNT
     if idx < 256 {
@@ -987,137 +1061,6 @@ fn ufn_record_call_struct_result(dst: i64, fn_id: i64, arg0: i64, argc: i64, res
     }
 }
 
-fn parse_atom(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
-    let k = token_kind(pos)
-    if k == TK_INT {
-        let r = alloc_reg()
-        core_append_load_imm(r, pt_read_int_value(pos))
-        emit_instr(func, ir_load_imm(r, pt_read_int_value(pos)))
-        return ExprParse { ok: 1, reg: r, next: pos + 1 }
-    }
-    if k == TK_STRING {
-        let r = alloc_reg()
-        let s = token_string_name(pos)
-        core_append_load_string(r, pos)
-        emit_instr(func, ir_load_string(r, 0, s))
-        return ExprParse { ok: 1, reg: r, next: pos + 1 }
-    }
-    if k == TK_IDENT {
-        // enum variant: EnumName::Variant → load discriminant
-        if token_kind(pos + 1) == TK_COLONCOLON && token_kind(pos + 2) == TK_IDENT {
-            let eidx = find_enum_idx_tok(pos)
-            if eidx >= 0 {
-                let variant_val = find_enum_variant_value(eidx, pos + 2)
-                if variant_val >= 0 {
-                    let r = alloc_reg()
-                    core_append_load_imm(r, variant_val)
-                    emit_instr(func, ir_load_imm(r, variant_val))
-                    return ExprParse { ok: 1, reg: r, next: pos + 3 }
-                }
-            }
-        }
-        let reg = lookup_local_tok(pos)
-        if reg >= 0 {
-            let sidx = lookup_local_struct_idx_tok(pos)
-            if sidx >= 0 {
-                V2_LAST_STRUCT_IDX = sidx
-                // chain dot access: p.x, p.y.z, etc.
-                if token_kind(pos + 1) == TK_DOT && token_kind(pos + 2) == TK_IDENT {
-                    var cur_reg = reg
-                    var cur_sidx = sidx
-                    var cur = pos + 1
-                    while cur + 1 < V2_TOKEN_COUNT && token_kind(cur) == TK_DOT && token_kind(cur + 1) == TK_IDENT {
-                        let foff = struct_field_offset_tok(cur_sidx, cur + 1)
-                        if foff < 0 { break }
-                        cur_reg = cur_reg + foff
-                        let next_sidx = struct_field_type_at(cur_sidx, foff)
-                        cur = cur + 2
-                        if next_sidx < 0 { V2_LAST_STRUCT_IDX = -1; break }
-                        cur_sidx = next_sidx
-                        V2_LAST_STRUCT_IDX = next_sidx
-                    }
-                    return ExprParse { ok: 1, reg: cur_reg, next: cur }
-                }
-            }
-            return ExprParse { ok: 1, reg: reg, next: pos + 1 }
-        }
-        if token_kind(pos + 1) == TK_LBRACE {
-            let lit = parse_struct_lit(func, pos, V2_TOKEN_COUNT)
-            if lit.ok != 0 { return lit }
-        }
-    }
-    ExprParse { ok: 0, reg: -1, next: pos }
-}
-
-fn parse_struct_lit(func: &! IrFunction, pos: i64, token_count: i64) -> ExprParse with Mut, Panic, Div, Alloc {
-    let sidx = find_struct_idx_tok(pos)
-    if sidx < 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
-    let flat_size = STRUCT_FLAT_SIZE[sidx as usize]
-    let base_reg = V2_NEXT_REG
-    V2_NEXT_REG = V2_NEXT_REG + flat_size
-    var cur = pos + 2
-    while cur < token_count {
-        let kk = token_kind(cur)
-        if kk == TK_NEWLINE || kk == TK_SEMI || kk == TK_COMMA { cur = cur + 1; continue }
-        if kk == TK_RBRACE { break }
-        if kk != TK_IDENT { break }
-        let field_tok = cur
-        let foff = struct_field_offset_tok(sidx, field_tok)
-        cur = cur + 1
-        if cur < token_count && token_kind(cur) == TK_COLON { cur = cur + 1 }
-        V2_LAST_STRUCT_IDX = -1
-        let val = parse_expr(func, cur)
-        if val.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
-        if foff >= 0 {
-            let val_sidx = V2_LAST_STRUCT_IDX
-            if val_sidx >= 0 {
-                let inner_flat = STRUCT_FLAT_SIZE[val_sidx as usize]
-                var ci: i64 = 0
-                while ci < inner_flat {
-                    core_append_copy(base_reg + foff + ci, val.reg + ci)
-                    emit_instr(func, ir_copy(base_reg + foff + ci, val.reg + ci))
-                    ci = ci + 1
-                }
-            } else {
-                core_append_copy(base_reg + foff, val.reg)
-                emit_instr(func, ir_copy(base_reg + foff, val.reg))
-            }
-        }
-        cur = val.next
-        if cur < token_count && token_kind(cur) == TK_COMMA { cur = cur + 1 }
-    }
-    V2_LAST_STRUCT_IDX = sidx
-    ExprParse { ok: 1, reg: base_reg, next: cur + 1 }
-}
-
-fn binary_op_from_kind(kind: i64) -> BinaryOp {
-    if kind == TK_MINUS { return BinaryOp::OpSub }
-    if kind == TK_STAR { return BinaryOp::OpMul }
-    if kind == TK_SLASH { return BinaryOp::OpDiv }
-    BinaryOp::OpAdd
-}
-
-fn parse_expr(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
-    let left = parse_atom(func, pos)
-    if left.ok == 0 {
-        return left
-    }
-
-    let op_kind = token_kind(left.next)
-    if op_kind == TK_PLUS || op_kind == TK_MINUS || op_kind == TK_STAR || op_kind == TK_SLASH {
-        let right = parse_atom(func, left.next + 1)
-        if right.ok == 0 {
-            return ExprParse { ok: 0, reg: -1, next: left.next }
-        }
-        let dst = alloc_reg()
-        core_append_binop(dst, left.reg, op_kind, right.reg)
-        emit_instr(func, ir_binop(dst, left.reg, binary_op_from_kind(op_kind), right.reg))
-        return ExprParse { ok: 1, reg: dst, next: right.next }
-    }
-
-    left
-}
-
 fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
     if name_eq(name, fixed_name_print()) { return V2_BUILTIN_PRINT }
     if name_eq(name, fixed_name_print_int()) { return V2_BUILTIN_PRINT_INT }
@@ -1129,124 +1072,117 @@ fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
     -1
 }
 
-fn parse_call_statement(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
-    var fn_id: i64 = -1
-    var callee = empty_name()
-    if token_text_eq(pos, "print") {
-        fn_id = 0
-        callee = fixed_name_print()
-    } else if token_text_eq(pos, "print_int") {
-        fn_id = 1
-        callee = fixed_name_print_int()
-    } else if token_text_eq(pos, "print_char") {
-        fn_id = 2
-        callee = fixed_name_print_char()
-    }
-    if fn_id < 0 {
-        return ExprParse { ok: 0, reg: -1, next: pos }
-    }
-    if token_kind(pos + 1) != TK_LPAREN {
-        return ExprParse { ok: 0, reg: -1, next: pos }
-    }
-
-    var argc: i64 = 0
-    var arg0_reg: i64 = -1
-    var args: Option<Box<IrRegList>> = None
-    var cur = pos + 2
-    if token_kind(cur) != TK_RPAREN {
-        let arg = parse_expr(func, cur)
-        if arg.ok == 0 {
-            return ExprParse { ok: 0, reg: -1, next: pos }
-        }
-        args = Some(Box::new(ir_reg_list_single(arg.reg)))
-        argc = 1
-        arg0_reg = arg.reg
-        cur = arg.next
-    }
-    if token_kind(cur) != TK_RPAREN {
-        return ExprParse { ok: 0, reg: -1, next: pos }
-    }
-
-    let dst = alloc_reg()
-    core_append_call(dst, fn_id, arg0_reg, argc)
-    emit_instr(func, ir_call(dst, fn_id, callee, args, argc))
-    ExprParse { ok: 1, reg: dst, next: cur + 1 }
-}
-
-// ============================================================
-// User function call expression (main path, with V2_CORE)
-// ============================================================
-
-fn parse_fn_call_expr(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
-    let name = token_name(pos)
-    var fn_id = builtin_fn_id(name)
-    if fn_id < 0 { fn_id = lookup_user_fn_id(name) }
-    if fn_id < 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
-    if token_kind(pos + 1) != TK_LPAREN { return ExprParse { ok: 0, reg: -1, next: pos } }
-    var arg0_reg: i64 = -1
-    var argc: i64 = 0
-    var args: Option<Box<IrRegList>> = None
-    var cur = pos + 2
-    if token_kind(cur) != TK_RPAREN {
-        V2_LAST_STRUCT_IDX = -1
-        let arg = parse_expr(func, cur)
-        if arg.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
-        arg0_reg = arg.reg
-        argc = 1
-        if V2_LAST_STRUCT_IDX >= 0 {
-            argc = STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize]
-            V2_LAST_STRUCT_IDX = -1
-        }
-        args = Some(Box::new(ir_reg_list_single(arg.reg)))
-        cur = arg.next
-    }
-    if token_kind(cur) != TK_RPAREN { return ExprParse { ok: 0, reg: -1, next: pos } }
-    let dst = alloc_reg()
-    core_append_call(dst, fn_id, arg0_reg, argc)
-    emit_instr(func, ir_call(dst, fn_id, name, args, argc))
-    ExprParse { ok: 1, reg: dst, next: cur + 1 }
-}
-
 // ============================================================
 // IR-only parse functions (for user-defined functions)
 // No V2_CORE side effects; builds IrFunction directly
 // ============================================================
 
-fn parse_atom_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+fn parse_atom_ir(func: &! IrFunction, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
     let k = token_kind(pos)
+    if k == TK_BANG {
+        let inner = parse_atom_ir(func, ctx, pos + 1)
+        if inner.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
+        let dst = alloc_reg(ctx)
+        let zero = alloc_reg(ctx)
+        ufn_record_load_imm(zero, 0)
+        ufn_record_binop(dst, inner.reg, 5, zero)
+        return ExprParse { ok: 1, reg: dst, next: inner.next }
+    }
+    if k == TK_MINUS && token_kind(pos + 1) == TK_INT {
+        let r = alloc_reg(ctx)
+        ufn_record_load_imm(r, 0 - pt_read_int_value(pos + 1))
+        return ExprParse { ok: 1, reg: r, next: pos + 2 }
+    }
+    if k == TK_AMPBANG && token_kind(pos + 1) == TK_IDENT {
+        let base_reg = lookup_local_tok(ctx, pos + 1)
+        if base_reg >= 0 {
+            let dst = alloc_reg(ctx)
+            ufn_record_temp_addr(dst, base_reg)
+            return ExprParse { ok: 1, reg: dst, next: pos + 2 }
+        }
+        return ExprParse { ok: 0, reg: -1, next: pos }
+    }
     if k == TK_LPAREN {
-        let inner = parse_expr_ir(func, pos + 1)
+        if token_kind(pos + 1) == TK_STAR && token_kind(pos + 2) == TK_IDENT && token_kind(pos + 3) == TK_RPAREN && token_kind(pos + 4) == TK_DOT && token_kind(pos + 5) == TK_IDENT {
+            let base_ref = lookup_local_tok(ctx, pos + 2)
+            if base_ref >= 0 && lookup_local_is_ref_tok(ctx, pos + 2) != 0 {
+                let sidx = lookup_local_struct_idx_tok(ctx, pos + 2)
+                if sidx >= 0 {
+                    let foff = struct_field_offset_tok(sidx, pos + 5)
+                    if foff >= 0 {
+                        let dst = alloc_reg(ctx)
+                        ufn_record_load_ref_field(dst, base_ref, foff)
+                        let next_sidx = struct_field_type_at(sidx, foff)
+                        V2_LAST_STRUCT_IDX = next_sidx
+                        return ExprParse { ok: 1, reg: dst, next: pos + 6 }
+                    }
+                }
+            }
+        }
+        let inner = parse_expr_ir(func, ctx, pos + 1)
         if inner.ok != 0 && token_kind(inner.next) == TK_RPAREN {
             return ExprParse { ok: 1, reg: inner.reg, next: inner.next + 1 }
         }
         return ExprParse { ok: 0, reg: -1, next: pos }
     }
     if k == TK_INT {
-        let r = alloc_reg()
+        let r = alloc_reg(ctx)
         ufn_record_load_imm(r, pt_read_int_value(pos))
         return ExprParse { ok: 1, reg: r, next: pos + 1 }
     }
     if k == TK_STRING {
-        let r = alloc_reg()
+        let r = alloc_reg(ctx)
         ufn_record_load_string(r, pos)
         return ExprParse { ok: 1, reg: r, next: pos + 1 }
     }
     if k == TK_IDENT {
+        let gid = driver_global_id_tok(pos)
+        if gid >= 0 && token_kind(pos + 1) == TK_LBRACKET {
+            let idx_expr = parse_expr_ir(func, ctx, pos + 2)
+            if idx_expr.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
+            let end_pos = skip_index_cast_end(idx_expr.next)
+            if token_kind(end_pos) != TK_RBRACKET { return ExprParse { ok: 0, reg: -1, next: pos } }
+            let dst = alloc_reg(ctx)
+            ufn_record_global_load(dst, gid, idx_expr.reg)
+            return ExprParse { ok: 1, reg: dst, next: end_pos + 1 }
+        }
+        if gid >= 0 {
+            let zero = alloc_reg(ctx)
+            let dst = alloc_reg(ctx)
+            ufn_record_load_imm(zero, 0)
+            ufn_record_global_load(dst, gid, zero)
+            return ExprParse { ok: 1, reg: dst, next: pos + 1 }
+        }
         // enum variant: EnumName::Variant → load discriminant
         if token_kind(pos + 1) == TK_COLONCOLON && token_kind(pos + 2) == TK_IDENT {
             let eidx = find_enum_idx_tok(pos)
             if eidx >= 0 {
                 let variant_val = find_enum_variant_value(eidx, pos + 2)
                 if variant_val >= 0 {
-                    let r = alloc_reg()
+                    let r = alloc_reg(ctx)
                     ufn_record_load_imm(r, variant_val)
                     return ExprParse { ok: 1, reg: r, next: pos + 3 }
                 }
             }
         }
-        let reg = lookup_local_tok(pos)
+        let reg = lookup_local_tok(ctx, pos)
         if reg >= 0 {
-            let sidx = lookup_local_struct_idx_tok(pos)
+            if lookup_local_is_ref_tok(ctx, pos) != 0 {
+                return ExprParse { ok: 1, reg: reg, next: pos + 1 }
+            }
+            // local array read: ident[expr] or ident[expr as T]
+            if token_kind(pos + 1) == TK_LBRACKET {
+                let idx_expr = parse_expr_ir(func, ctx, pos + 2)
+                if idx_expr.ok != 0 {
+                    let end_pos = skip_index_cast_end(idx_expr.next)
+                    if token_kind(end_pos) == TK_RBRACKET {
+                        let dst = alloc_reg(ctx)
+                        ufn_record_local_load(dst, reg, idx_expr.reg)
+                        return ExprParse { ok: 1, reg: dst, next: end_pos + 1 }
+                    }
+                }
+            }
+            let sidx = lookup_local_struct_idx_tok(ctx, pos)
             if sidx >= 0 {
                 V2_LAST_STRUCT_IDX = sidx
                 // chain dot access: p.x, p.y.z, etc.
@@ -1264,6 +1200,18 @@ fn parse_atom_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Di
                         cur_sidx = next_sidx
                         V2_LAST_STRUCT_IDX = next_sidx
                     }
+                    // struct field array read: local.field[expr]
+                    if token_kind(cur) == TK_LBRACKET {
+                        let idx_expr = parse_expr_ir(func, ctx, cur + 1)
+                        if idx_expr.ok != 0 {
+                            let end_pos = skip_index_cast_end(idx_expr.next)
+                            if token_kind(end_pos) == TK_RBRACKET {
+                                let dst = alloc_reg(ctx)
+                                ufn_record_local_load(dst, cur_reg, idx_expr.reg)
+                                return ExprParse { ok: 1, reg: dst, next: end_pos + 1 }
+                            }
+                        }
+                    }
                     return ExprParse { ok: 1, reg: cur_reg, next: cur }
                 }
             }
@@ -1271,23 +1219,23 @@ fn parse_atom_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Di
         }
         // struct literal
         if token_kind(pos + 1) == TK_LBRACE {
-            let lit = parse_struct_lit_ir(func, pos, V2_TOKEN_COUNT)
+            let lit = parse_struct_lit_ir(func, ctx, pos, V2_TOKEN_COUNT)
             if lit.ok != 0 { return lit }
         }
         // function call
         if token_kind(pos + 1) == TK_LPAREN {
-            return parse_fn_call_ir(func, pos)
+            return parse_fn_call_ir(func, ctx, pos)
         }
     }
     ExprParse { ok: 0, reg: -1, next: pos }
 }
 
-fn parse_struct_lit_ir(func: &! IrFunction, pos: i64, token_count: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+fn parse_struct_lit_ir(func: &! IrFunction, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> ExprParse with Mut, Panic, Div, Alloc {
     let sidx = find_struct_idx_tok(pos)
     if sidx < 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
     let flat_size = STRUCT_FLAT_SIZE[sidx as usize]
-    let base_reg = V2_NEXT_REG
-    V2_NEXT_REG = V2_NEXT_REG + flat_size
+    let base_reg = (*ctx).next_reg
+    (*ctx).next_reg = (*ctx).next_reg + flat_size
     var cur = pos + 2
     while cur < token_count {
         let kk = token_kind(cur)
@@ -1299,7 +1247,7 @@ fn parse_struct_lit_ir(func: &! IrFunction, pos: i64, token_count: i64) -> ExprP
         cur = cur + 1
         if cur < token_count && token_kind(cur) == TK_COLON { cur = cur + 1 }
         V2_LAST_STRUCT_IDX = -1
-        let val = parse_expr_ir(func, cur)
+        let val = parse_expr_ir(func, ctx, cur)
         if val.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
         if foff >= 0 {
             let val_sidx = V2_LAST_STRUCT_IDX
@@ -1321,7 +1269,7 @@ fn parse_struct_lit_ir(func: &! IrFunction, pos: i64, token_count: i64) -> ExprP
     ExprParse { ok: 1, reg: base_reg, next: cur + 1 }
 }
 
-fn parse_fn_call_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+fn parse_fn_call_ir(func: &! IrFunction, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
     let name = token_name(pos)
     var fn_id = builtin_fn_id(name)
     if fn_id < 0 { fn_id = lookup_user_fn_id(name) }
@@ -1336,7 +1284,7 @@ fn parse_fn_call_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic,
             else { return ExprParse { ok: 0, reg: -1, next: pos } }
         }
         V2_LAST_STRUCT_IDX = -1
-        let arg = parse_expr_ir(func, cur)
+        let arg = parse_expr_ir(func, ctx, cur)
         if arg.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos } }
         V2_CALL_ARG_REGS[n_args as usize] = arg.reg
         var sz: i64 = 1
@@ -1365,8 +1313,8 @@ fn parse_fn_call_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic,
         }
         if consecutive == 0 {
             // Pack into a fresh consecutive block, emit copies
-            let base = V2_NEXT_REG
-            V2_NEXT_REG = V2_NEXT_REG + total_argc
+            let base = (*ctx).next_reg
+            (*ctx).next_reg = (*ctx).next_reg + total_argc
             var slot: i64 = 0
             var ai: i64 = 0
             while ai < n_args {
@@ -1389,37 +1337,75 @@ fn parse_fn_call_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic,
     let ret_sidx = lookup_user_fn_return_struct_idx(fn_id)
     if ret_sidx >= 0 {
         let ret_flat = STRUCT_FLAT_SIZE[ret_sidx as usize]
-        let dst = alloc_reg()
+        let dst = alloc_reg(ctx)
         var ri: i64 = 1
-        while ri < ret_flat { let _ = alloc_reg(); ri = ri + 1 }
+        while ri < ret_flat { let _ = alloc_reg(ctx); ri = ri + 1 }
         ufn_record_call_struct_result(dst, fn_id, arg0_reg, total_argc, ret_flat)
         V2_LAST_STRUCT_IDX = ret_sidx
         return ExprParse { ok: 1, reg: dst, next: cur + 1 }
     }
-    let dst = alloc_reg()
+    let dst = alloc_reg(ctx)
     ufn_record_call(dst, fn_id, arg0_reg, total_argc)
     ExprParse { ok: 1, reg: dst, next: cur + 1 }
 }
 
-fn parse_expr_ir(func: &! IrFunction, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
-    let left = parse_atom_ir(func, pos)
+fn parse_expr_ir(func: &! IrFunction, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let left = parse_atom_ir(func, ctx, pos)
     if left.ok == 0 { return left }
     let op_kind = token_kind(left.next)
+    var result = left
     if is_arith_op(op_kind) {
-        let right = parse_atom_ir(func, left.next + 1)
+        let right = parse_atom_ir(func, ctx, left.next + 1)
         if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: left.next } }
-        let dst = alloc_reg()
+        let dst = alloc_reg(ctx)
         ufn_record_binop(dst, left.reg, arith_op_to_code(op_kind), right.reg)
-        return ExprParse { ok: 1, reg: dst, next: right.next }
-    }
-    if is_cmp_op(op_kind) {
-        let right = parse_atom_ir(func, left.next + 1)
+        result = ExprParse { ok: 1, reg: dst, next: right.next }
+    } else if is_cmp_op(op_kind) {
+        let right = parse_atom_ir(func, ctx, left.next + 1)
         if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: left.next } }
-        let dst = alloc_reg()
+        let dst = alloc_reg(ctx)
         ufn_record_binop(dst, left.reg, cmp_op_to_code(op_kind), right.reg)
-        return ExprParse { ok: 1, reg: dst, next: right.next }
+        result = ExprParse { ok: 1, reg: dst, next: right.next }
     }
-    left
+    // Short-circuit logical operators: && and ||
+    let op2 = token_kind(result.next)
+    if op2 == TK_ANDAND {
+        let right2 = parse_expr_ir(func, ctx, result.next + 1)
+        if right2.ok != 0 {
+            let dst = alloc_reg(ctx)
+            let label_short = alloc_label()
+            let label_end = alloc_label()
+            ufn_record_branch_false(result.reg, label_short)
+            ufn_record_copy(dst, right2.reg)
+            ufn_record_jump(label_end)
+            ufn_record_label(label_short)
+            ufn_record_load_imm(dst, 0)
+            ufn_record_label(label_end)
+            return ExprParse { ok: 1, reg: dst, next: right2.next }
+        }
+    }
+    if op2 == TK_OROR {
+        let right2 = parse_expr_ir(func, ctx, result.next + 1)
+        if right2.ok != 0 {
+            let dst = alloc_reg(ctx)
+            let zero = alloc_reg(ctx)
+            let eq_zero = alloc_reg(ctx)
+            let one = alloc_reg(ctx)
+            let label_true = alloc_label()
+            let label_end = alloc_label()
+            ufn_record_load_imm(zero, 0)
+            ufn_record_binop(eq_zero, result.reg, 5, zero)
+            ufn_record_branch_false(eq_zero, label_true)
+            ufn_record_copy(dst, right2.reg)
+            ufn_record_jump(label_end)
+            ufn_record_label(label_true)
+            ufn_record_load_imm(one, 1)
+            ufn_record_copy(dst, one)
+            ufn_record_label(label_end)
+            return ExprParse { ok: 1, reg: dst, next: right2.next }
+        }
+    }
+    result
 }
 
 fn emit_label(func: &! IrFunction, label_id: i64) with Mut {
@@ -1434,7 +1420,7 @@ fn emit_branch_false(func: &! IrFunction, cond_reg: i64, label_id: i64) with Mut
     ufn_record_branch_false(cond_reg, label_id)
 }
 
-fn parse_while_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+fn parse_while_ir(func: &! IrFunction, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     // while COND { BODY }
     // pos points to token AFTER 'while'
     let label_top = alloc_label()
@@ -1442,7 +1428,7 @@ fn parse_while_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with I
     emit_label(func, label_top)
 
     // parse condition expression
-    let cond = parse_expr_ir(func, pos)
+    let cond = parse_expr_ir(func, ctx, pos)
     if cond.ok == 0 { return pos }
     emit_branch_false(func, cond.reg, label_end)
 
@@ -1452,20 +1438,20 @@ fn parse_while_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with I
     if p >= token_count { return pos }
     let body_end = find_matching_rbrace(p, token_count)
     if body_end < 0 { return pos }
-    parse_block_ir(func, p + 1, body_end, token_count)
+    parse_block_ir(func, ctx, p + 1, body_end, token_count)
 
     emit_jump(func, label_top)
     emit_label(func, label_end)
     body_end + 1
 }
 
-fn parse_if_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+fn parse_if_ir(func: &! IrFunction, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     // if COND { THEN } [else [if ...] { ELSE }]
     // pos points to token AFTER 'if'
     let label_else = alloc_label()
     let label_end = alloc_label()
 
-    let cond = parse_expr_ir(func, pos)
+    let cond = parse_expr_ir(func, ctx, pos)
     if cond.ok == 0 { return pos }
     emit_branch_false(func, cond.reg, label_else)
 
@@ -1475,7 +1461,7 @@ fn parse_if_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with IO, 
     if p >= token_count { return pos }
     let then_end = find_matching_rbrace(p, token_count)
     if then_end < 0 { return pos }
-    parse_block_ir(func, p + 1, then_end, token_count)
+    parse_block_ir(func, ctx, p + 1, then_end, token_count)
     emit_jump(func, label_end)
     emit_label(func, label_else)
 
@@ -1485,14 +1471,14 @@ fn parse_if_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with IO, 
         let after_else = after + 1
         let next_t = skip_trivia(after_else, token_count)
         if next_t < token_count && token_kind(next_t) == TK_IF {
-            let end_pos = parse_if_ir(func, next_t + 1, token_count)
+            let end_pos = parse_if_ir(func, ctx, next_t + 1, token_count)
             emit_label(func, label_end)
             return end_pos
         }
         if next_t < token_count && token_kind(next_t) == TK_LBRACE {
             let else_end = find_matching_rbrace(next_t, token_count)
             if else_end >= 0 {
-                parse_block_ir(func, next_t + 1, else_end, token_count)
+                parse_block_ir(func, ctx, next_t + 1, else_end, token_count)
                 emit_label(func, label_end)
                 return else_end + 1
             }
@@ -1502,18 +1488,18 @@ fn parse_if_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with IO, 
     then_end + 1
 }
 
-fn parse_block_ir(func: &! IrFunction, pos: i64, close: i64, token_count: i64) with IO, Mut, Panic, Div, Alloc {
+fn parse_block_ir(func: &! IrFunction, ctx: &! V2DriverContext, pos: i64, close: i64, token_count: i64) with IO, Mut, Panic, Div, Alloc {
     var p = skip_trivia(pos, close)
     while p < close && V2_PARSE_UNSUPPORTED == 0 {
-        p = parse_stmt_ir(func, p, close, token_count)
+        p = parse_stmt_ir(func, ctx, p, close, token_count)
         p = skip_trivia(p, close)
     }
 }
 
-fn parse_match_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+fn parse_match_ir(func: &! IrFunction, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     // match expr { Pattern => body, ... }
     V2_LAST_STRUCT_IDX = -1
-    let subj = parse_expr_ir(func, pos)
+    let subj = parse_expr_ir(func, ctx, pos)
     if subj.ok == 0 { return pos }
     var p = subj.next
     while p < token_count && token_kind(p) != TK_LBRACE { p = p + 1 }
@@ -1552,10 +1538,10 @@ fn parse_match_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with I
         if is_wildcard {
             if cur < close && token_kind(cur) == TK_LBRACE {
                 let arm_close = find_matching_rbrace(cur, token_count)
-                if arm_close >= 0 { parse_block_ir(func, cur + 1, arm_close, token_count); cur = arm_close + 1 }
+                if arm_close >= 0 { parse_block_ir(func, ctx, cur + 1, arm_close, token_count); cur = arm_close + 1 }
             } else {
                 V2_LAST_STRUCT_IDX = -1
-                let body = parse_expr_ir(func, cur)
+                let body = parse_expr_ir(func, ctx, cur)
                 if body.ok != 0 {
                     if V2_LAST_STRUCT_IDX >= 0 {
                         ufn_record_return_struct(body.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
@@ -1565,18 +1551,18 @@ fn parse_match_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with I
             }
             break
         } else if arm_val >= 0 {
-            let val_reg = alloc_reg()
-            let cond_reg = alloc_reg()
+            let val_reg = alloc_reg(ctx)
+            let cond_reg = alloc_reg(ctx)
             ufn_record_load_imm(val_reg, arm_val)
             ufn_record_binop(cond_reg, subj.reg, 5, val_reg)
             let label_skip = alloc_label()
             ufn_record_branch_false(cond_reg, label_skip)
             if cur < close && token_kind(cur) == TK_LBRACE {
                 let arm_close = find_matching_rbrace(cur, token_count)
-                if arm_close >= 0 { parse_block_ir(func, cur + 1, arm_close, token_count); cur = arm_close + 1 }
+                if arm_close >= 0 { parse_block_ir(func, ctx, cur + 1, arm_close, token_count); cur = arm_close + 1 }
             } else {
                 V2_LAST_STRUCT_IDX = -1
-                let body = parse_expr_ir(func, cur)
+                let body = parse_expr_ir(func, ctx, cur)
                 if body.ok != 0 {
                     if V2_LAST_STRUCT_IDX >= 0 {
                         ufn_record_return_struct(body.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
@@ -1593,7 +1579,7 @@ fn parse_match_ir(func: &! IrFunction, pos: i64, token_count: i64) -> i64 with I
     close + 1
 }
 
-fn parse_stmt_ir(func: &! IrFunction, pos: i64, close: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+fn parse_stmt_ir(func: &! IrFunction, ctx: &! V2DriverContext, pos: i64, close: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     let p = skip_trivia(pos, close)
     if p >= close { return close }
     let k = token_kind(p)
@@ -1601,27 +1587,45 @@ fn parse_stmt_ir(func: &! IrFunction, pos: i64, close: i64, token_count: i64) ->
     if k == TK_VAR || k == TK_LET {
         // var/let name : type = expr  OR  var name : type = expr
         if token_kind(p + 1) != TK_IDENT { return p + 1 }
+        // Array type declaration: var name: [T; N]  (zero-initialized, no RHS required)
+        if token_kind(p + 2) == TK_COLON && token_kind(p + 3) == TK_LBRACKET {
+            var j = p + 4
+            while j < close && token_kind(j) != TK_SEMI { j = j + 1 }
+            if j < close && token_kind(j + 1) == TK_INT {
+                let arr_size = pt_read_int_value(j + 1)
+                let arr_base = (*ctx).next_reg
+                (*ctx).next_reg = arr_base + arr_size
+                let zero_reg = alloc_reg(ctx)
+                ufn_record_load_imm(zero_reg, 0)
+                var ai: i64 = 0
+                while ai < arr_size { ufn_record_copy(arr_base + ai, zero_reg); ai = ai + 1 }
+                remember_local_tok(ctx, p + 1, arr_base)
+                var end = j + 2
+                while end < close && token_kind(end) != TK_RBRACKET { end = end + 1 }
+                return end + 1
+            }
+        }
         var eq_pos = p + 2
         while eq_pos < close && token_kind(eq_pos) != TK_EQ { eq_pos = eq_pos + 1 }
         if eq_pos >= close { return eq_pos }
         V2_LAST_STRUCT_IDX = -1
-        let parsed = parse_expr_ir(func, eq_pos + 1)
+        let parsed = parse_expr_ir(func, ctx, eq_pos + 1)
         if parsed.ok == 0 {
             mark_parse_unsupported(eq_pos + 1)
             return close
         }
         if V2_LAST_STRUCT_IDX >= 0 {
-            remember_struct_local_tok(p + 1, parsed.reg, V2_LAST_STRUCT_IDX)
+            remember_struct_local_tok(ctx, p + 1, parsed.reg, V2_LAST_STRUCT_IDX)
             V2_LAST_STRUCT_IDX = -1
         } else {
-            remember_local_tok(p + 1, parsed.reg)
+            remember_local_tok(ctx, p + 1, parsed.reg)
         }
         return parsed.next
     }
 
     if k == TK_RETURN {
         V2_LAST_STRUCT_IDX = -1
-        let parsed = parse_expr_ir(func, p + 1)
+        let parsed = parse_expr_ir(func, ctx, p + 1)
         if parsed.ok != 0 {
             if V2_LAST_STRUCT_IDX >= 0 {
                 ufn_record_return_struct(parsed.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
@@ -1636,27 +1640,100 @@ fn parse_stmt_ir(func: &! IrFunction, pos: i64, close: i64, token_count: i64) ->
     }
 
     if k == TK_WHILE {
-        return parse_while_ir(func, p + 1, token_count)
+        return parse_while_ir(func, ctx, p + 1, token_count)
     }
 
     if k == TK_IF {
-        return parse_if_ir(func, p + 1, token_count)
+        return parse_if_ir(func, ctx, p + 1, token_count)
     }
 
     if k == TK_MATCH {
-        return parse_match_ir(func, p + 1, token_count)
+        return parse_match_ir(func, ctx, p + 1, token_count)
+    }
+
+    // driver global table/scalar mutation: TABLE[idx] = expr or SCALAR = expr
+    if k == TK_IDENT {
+        let gid = driver_global_id_tok(p)
+        if gid >= 0 && token_kind(p + 1) == TK_LBRACKET {
+            let idx_expr = parse_expr_ir(func, ctx, p + 2)
+            if idx_expr.ok != 0 {
+                let end_pos = skip_index_cast_end(idx_expr.next)
+                if token_kind(end_pos) == TK_RBRACKET && token_kind(end_pos + 1) == TK_EQ {
+                    let parsed = parse_expr_ir(func, ctx, end_pos + 2)
+                    if parsed.ok != 0 {
+                        ufn_record_global_store(gid, idx_expr.reg, parsed.reg)
+                        return parsed.next
+                    }
+                    mark_parse_unsupported(end_pos + 2)
+                    return close
+                }
+            }
+        }
+        if gid >= 0 && token_kind(p + 1) == TK_EQ {
+            let parsed = parse_expr_ir(func, ctx, p + 2)
+            if parsed.ok != 0 {
+                let zero = alloc_reg(ctx)
+                ufn_record_load_imm(zero, 0)
+                ufn_record_global_store(gid, zero, parsed.reg)
+                return parsed.next
+            }
+            mark_parse_unsupported(p + 2)
+            return close
+        }
+    }
+
+    // local array write: ident[expr] = expr
+    if k == TK_IDENT && token_kind(p + 1) == TK_LBRACKET {
+        let base_reg = lookup_local_tok(ctx, p)
+        if base_reg >= 0 && lookup_local_is_ref_tok(ctx, p) == 0 {
+            let idx_expr = parse_expr_ir(func, ctx, p + 2)
+            if idx_expr.ok != 0 {
+                let end_pos = skip_index_cast_end(idx_expr.next)
+                if token_kind(end_pos) == TK_RBRACKET && token_kind(end_pos + 1) == TK_EQ {
+                    let val = parse_expr_ir(func, ctx, end_pos + 2)
+                    if val.ok != 0 {
+                        ufn_record_local_store(base_reg, idx_expr.reg, val.reg)
+                        return val.next
+                    }
+                    mark_parse_unsupported(end_pos + 2)
+                    return close
+                }
+            }
+        }
+    }
+
+    // reference field mutation: (*ctx).field = expr
+    if k == TK_LPAREN && token_kind(p + 1) == TK_STAR && token_kind(p + 2) == TK_IDENT && token_kind(p + 3) == TK_RPAREN && token_kind(p + 4) == TK_DOT && token_kind(p + 5) == TK_IDENT && token_kind(p + 6) == TK_EQ {
+        let base_ref = lookup_local_tok(ctx, p + 2)
+        if base_ref >= 0 && lookup_local_is_ref_tok(ctx, p + 2) != 0 {
+            let sidx = lookup_local_struct_idx_tok(ctx, p + 2)
+            if sidx >= 0 {
+                let foff = struct_field_offset_tok(sidx, p + 5)
+                if foff >= 0 {
+                    V2_LAST_STRUCT_IDX = -1
+                    let parsed = parse_expr_ir(func, ctx, p + 7)
+                    if parsed.ok != 0 {
+                        ufn_record_store_ref_field(base_ref, foff, parsed.reg)
+                        V2_LAST_STRUCT_IDX = -1
+                        return parsed.next
+                    }
+                    mark_parse_unsupported(p + 7)
+                    return close
+                }
+            }
+        }
     }
 
     // field mutation: p.x = expr
     if k == TK_IDENT && token_kind(p + 1) == TK_DOT && token_kind(p + 2) == TK_IDENT && token_kind(p + 3) == TK_EQ {
-        let base_reg = lookup_local_tok(p)
+        let base_reg = lookup_local_tok(ctx, p)
         if base_reg >= 0 {
-            let sidx = lookup_local_struct_idx_tok(p)
+            let sidx = lookup_local_struct_idx_tok(ctx, p)
             if sidx >= 0 {
                 let foff = struct_field_offset_tok(sidx, p + 2)
                 if foff >= 0 {
                     V2_LAST_STRUCT_IDX = -1
-                    let parsed = parse_expr_ir(func, p + 4)
+                    let parsed = parse_expr_ir(func, ctx, p + 4)
                     if parsed.ok != 0 {
                         if V2_LAST_STRUCT_IDX >= 0 {
                             let inner_flat = STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize]
@@ -1680,10 +1757,10 @@ fn parse_stmt_ir(func: &! IrFunction, pos: i64, close: i64, token_count: i64) ->
 
     // assignment: name = expr  (name is already a local)
     if k == TK_IDENT && token_kind(p + 1) == TK_EQ {
-        let old_reg = lookup_local_tok(p)
+        let old_reg = lookup_local_tok(ctx, p)
         if old_reg >= 0 {
             V2_LAST_STRUCT_IDX = -1
-            let parsed = parse_expr_ir(func, p + 2)
+            let parsed = parse_expr_ir(func, ctx, p + 2)
             if parsed.ok != 0 {
                 let asn_sidx = V2_LAST_STRUCT_IDX
                 if asn_sidx >= 0 {
@@ -1707,13 +1784,13 @@ fn parse_stmt_ir(func: &! IrFunction, pos: i64, close: i64, token_count: i64) ->
 
     // call statement: name(args)  — for side-effecting calls
     if k == TK_IDENT && token_kind(p + 1) == TK_LPAREN {
-        let call = parse_fn_call_ir(func, p)
+        let call = parse_fn_call_ir(func, ctx, p)
         if call.ok != 0 { return call.next }
     }
 
     // tail expression (implicit return at end of block)
     V2_LAST_STRUCT_IDX = -1
-    let tail = parse_expr_ir(func, p)
+    let tail = parse_expr_ir(func, ctx, p)
     if tail.ok != 0 {
         if V2_LAST_STRUCT_IDX >= 0 {
             ufn_record_return_struct(tail.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
@@ -1830,6 +1907,20 @@ fn compile_ufn_from_globals(nc: &! NativeCompiler, fn_id: i64, func: &IrFunction
             }
         } else if op == UFN_COPY {
             native_v2_core_emit_copy_into(nc, V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+        } else if op == UFN_TEMP_ADDR {
+            native_v2_core_emit_temp_addr_into(nc, V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+        } else if op == UFN_LOAD_REF_FIELD {
+            native_v2_core_emit_load_ref_field_into(nc, V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_IMM[i as usize])
+        } else if op == UFN_STORE_REF_FIELD {
+            native_v2_core_emit_store_ref_field_into(nc, V2_UFN_SRC1[i as usize], V2_UFN_IMM[i as usize], V2_UFN_SRC2[i as usize])
+        } else if op == UFN_GLOBAL_LOAD {
+            native_v2_core_emit_driver_global_load_into(nc, V2_UFN_DST[i as usize], V2_UFN_IMM[i as usize], V2_UFN_SRC1[i as usize])
+        } else if op == UFN_GLOBAL_STORE {
+            native_v2_core_emit_driver_global_store_into(nc, V2_UFN_IMM[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
+        } else if op == UFN_LOCAL_LOAD {
+            native_v2_core_emit_local_array_load_into(nc, V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
+        } else if op == UFN_LOCAL_STORE {
+            native_v2_core_emit_local_array_store_into(nc, V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize], V2_UFN_DST[i as usize])
         }
         i = i + 1
     }
@@ -1856,7 +1947,8 @@ fn compile_user_fn(nc: &! NativeCompiler, fn_name: Name, fn_id: i64, token_count
     let close_pos = find_matching_rbrace(open_pos, token_count)
     if close_pos < 0 { return false }
 
-    reset_locals()
+    var ctx = v2_driver_context_new()
+    reset_locals(&! ctx)
     reset_user_fn_label_state()
     reset_parse_unsupported()
     var func = ir_empty_function()
@@ -1874,16 +1966,31 @@ fn compile_user_fn(nc: &! NativeCompiler, fn_name: Name, fn_id: i64, token_count
                 let param_name_tok = ppos
                 // peek at type: param_name : TypeName
                 var param_sidx: i64 = -1
+                var param_is_ref: i64 = 0
                 if ppos + 2 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_IDENT {
                     param_sidx = find_struct_idx_tok(ppos + 2)
                 }
-                if param_sidx >= 0 {
+                if ppos + 3 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_AMPBANG && token_kind(ppos + 3) == TK_IDENT {
+                    param_sidx = find_struct_idx_tok(ppos + 3)
+                    param_is_ref = 1
+                }
+                if param_sidx >= 0 && param_is_ref != 0 {
+                    let vreg = alloc_reg(&! ctx)
+                    remember_ref_struct_local_tok(&! ctx, param_name_tok, vreg, param_sidx)
+                    if param_idx < 64 {
+                        var param_regs = func.param_regs
+                        param_regs[param_idx as usize] = vreg
+                        func.param_regs = param_regs
+                    }
+                    func.param_count = param_idx + 1
+                    param_idx = param_idx + 1
+                } else if param_sidx >= 0 {
                     // struct param: allocate flat_size consecutive vregs
                     let flat_size = STRUCT_FLAT_SIZE[param_sidx as usize]
-                    let base_vreg = alloc_reg()
+                    let base_vreg = alloc_reg(&! ctx)
                     var ri: i64 = 1
-                    while ri < flat_size { let _ = alloc_reg(); ri = ri + 1 }
-                    remember_struct_local_tok(param_name_tok, base_vreg, param_sidx)
+                    while ri < flat_size { let _ = alloc_reg(&! ctx); ri = ri + 1 }
+                    remember_struct_local_tok(&! ctx, param_name_tok, base_vreg, param_sidx)
                     var pi: i64 = 0
                     while pi < flat_size && param_idx + pi < 64 {
                         var param_regs = func.param_regs
@@ -1895,8 +2002,8 @@ fn compile_user_fn(nc: &! NativeCompiler, fn_name: Name, fn_id: i64, token_count
                     param_idx = param_idx + flat_size
                 } else {
                     // scalar param
-                    let vreg = alloc_reg()
-                    remember_local_tok(param_name_tok, vreg)
+                    let vreg = alloc_reg(&! ctx)
+                    remember_local_tok(&! ctx, param_name_tok, vreg)
                     if param_idx < 64 {
                         var param_regs = func.param_regs
                         param_regs[param_idx as usize] = vreg
@@ -1919,7 +2026,10 @@ fn compile_user_fn(nc: &! NativeCompiler, fn_name: Name, fn_id: i64, token_count
 
     // Parse body
     V2_UFN_COUNT = 0
-    parse_block_ir(&! func, open_pos + 1, close_pos, token_count)
+    parse_block_ir(&! func, &! ctx, open_pos + 1, close_pos, token_count)
+    let default_ret = alloc_reg(&! ctx)
+    ufn_record_load_imm(default_ret, 0)
+    ufn_record_return(default_ret)
     if V2_PARSE_UNSUPPORTED != 0 {
         print("native_compile: unsupported_frontend token=")
         print_int(V2_PARSE_UNSUPPORTED_TOKEN)
@@ -1930,7 +2040,7 @@ fn compile_user_fn(nc: &! NativeCompiler, fn_name: Name, fn_id: i64, token_count
         print("\n")
         return false
     }
-    func.reg_count = V2_NEXT_REG
+    func.reg_count = ctx.next_reg
 
     if !compile_ufn_from_globals(nc, fn_id, &func) {
         print("native_compile: user_fn_unsupported fn_id=")
@@ -2000,214 +2110,6 @@ fn driver_append_ufn_string_literal_into(nc: &! NativeCompiler, idx: i64) -> i64
     offset
 }
 
-fn lower_main_body(token_count: i64, func: &! IrFunction) -> bool with IO, Mut, Panic, Div, Alloc {
-    let open_idx = find_main_lbrace(token_count)
-    if open_idx < 0 {
-        print("native_compile: missing_main\n")
-        return false
-    }
-    let close_idx = find_matching_rbrace(open_idx, token_count)
-    if close_idx < 0 {
-        print("native_compile: missing_main_close\n")
-        return false
-    }
-
-    reset_locals()
-    set_func_name_main(func)
-    (*func).param_count = 0
-    V2_LAST_STRUCT_IDX = -1
-
-    var pos = open_idx + 1
-    var saw_return = false
-
-    while pos < close_idx {
-        let k = token_kind(pos)
-
-        if k == TK_NEWLINE || k == TK_SEMI {
-            pos = pos + 1
-            continue
-        }
-
-        if k == TK_LET || k == TK_VAR {
-            if token_kind(pos + 1) != TK_IDENT {
-                print("native_compile: unsupported_binding\n")
-                return false
-            }
-            let local_tok = pos + 1
-            var eq_pos = pos + 2
-            while eq_pos < close_idx && token_kind(eq_pos) != TK_EQ {
-                eq_pos = eq_pos + 1
-            }
-            if eq_pos >= close_idx {
-                print("native_compile: missing_binding_eq\n")
-                return false
-            }
-            V2_LAST_STRUCT_IDX = -1
-            let parsed = parse_expr(func, eq_pos + 1)
-            if parsed.ok == 0 {
-                let call_p = parse_fn_call_expr(func, eq_pos + 1)
-                if call_p.ok == 0 {
-                    print("native_compile: unsupported_binding_expr\n")
-                    return false
-                }
-                remember_local_tok(local_tok, call_p.reg)
-                pos = call_p.next
-                continue
-            }
-            if V2_LAST_STRUCT_IDX >= 0 {
-                remember_struct_local_tok(local_tok, parsed.reg, V2_LAST_STRUCT_IDX)
-                V2_LAST_STRUCT_IDX = -1
-            } else {
-                remember_local_tok(local_tok, parsed.reg)
-            }
-            pos = parsed.next
-            continue
-        }
-
-        if k == TK_RETURN {
-            let parsed_ret = parse_expr(func, pos + 1)
-            if parsed_ret.ok == 0 {
-                print("native_compile: unsupported_return_expr\n")
-                return false
-            }
-            core_append_return(parsed_ret.reg)
-            emit_instr(func, ir_return(parsed_ret.reg))
-            saw_return = true
-            pos = parsed_ret.next
-            continue
-        }
-
-        // field mutation: p.x = expr
-        if k == TK_IDENT && token_kind(pos + 1) == TK_DOT && token_kind(pos + 2) == TK_IDENT && token_kind(pos + 3) == TK_EQ {
-            let base_reg = lookup_local_tok(pos)
-            if base_reg >= 0 {
-                let sidx = lookup_local_struct_idx_tok(pos)
-                if sidx >= 0 {
-                    let foff = struct_field_offset_tok(sidx, pos + 2)
-                    if foff >= 0 {
-                        V2_LAST_STRUCT_IDX = -1
-                        let parsed = parse_expr(func, pos + 4)
-                        if parsed.ok != 0 {
-                            if V2_LAST_STRUCT_IDX >= 0 {
-                                let inner_flat = STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize]
-                                var ci: i64 = 0
-                                while ci < inner_flat {
-                                    core_append_copy(base_reg + foff + ci, parsed.reg + ci)
-                                    emit_instr(func, ir_copy(base_reg + foff + ci, parsed.reg + ci))
-                                    ci = ci + 1
-                                }
-                                V2_LAST_STRUCT_IDX = -1
-                            } else {
-                                core_append_copy(base_reg + foff, parsed.reg)
-                                emit_instr(func, ir_copy(base_reg + foff, parsed.reg))
-                            }
-                            pos = parsed.next
-                            continue
-                        }
-                    }
-                }
-            }
-        }
-
-        if k == TK_IDENT && token_kind(pos + 1) == TK_LPAREN {
-            let call = parse_call_statement(func, pos)
-            if call.ok == 0 {
-                let ucall = parse_fn_call_expr(func, pos)
-                if ucall.ok == 0 {
-                    print("native_compile: unsupported_call\n")
-                    return false
-                }
-                pos = ucall.next
-                continue
-            }
-            pos = call.next
-            continue
-        }
-
-        if k == TK_INT {
-            let parsed_tail = parse_expr(func, pos)
-            if parsed_tail.ok == 0 {
-                print("native_compile: unsupported_tail_expr\n")
-                return false
-            }
-            core_append_return(parsed_tail.reg)
-            emit_instr(func, ir_return(parsed_tail.reg))
-            saw_return = true
-            pos = parsed_tail.next
-            continue
-        }
-
-        print("native_compile: unsupported_token kind=")
-        print_int(k)
-        print("\n")
-        return false
-    }
-
-    if !saw_return {
-        let zero_reg = alloc_reg()
-        core_append_load_imm(zero_reg, 0)
-        emit_instr(func, ir_load_imm(zero_reg, 0))
-        core_append_return(zero_reg)
-        emit_instr(func, ir_return(zero_reg))
-    }
-    (*func).reg_count = V2_NEXT_REG
-    true
-}
-
-fn driver_append_string_literal_into(nc: &! NativeCompiler, idx: i64) -> i64 with Mut, Panic, Div {
-    let offset = native_v2_rodata_len_into(nc)
-    let start = V2_CORE_STR_START[idx as usize] + 1
-    let end = V2_CORE_STR_END[idx as usize] - 1
-    var i: i64 = start
-    while i < end {
-        let ch = CURSOR_SOURCE[i as usize]
-        if ch == 92 as i8 && i + 1 < end {
-            let esc = CURSOR_SOURCE[(i + 1) as usize]
-            if esc == 110 as i8 { native_v2_rodata_append_byte_into(nc, 10) }
-            else if esc == 116 as i8 { native_v2_rodata_append_byte_into(nc, 9) }
-            else if esc == 114 as i8 { native_v2_rodata_append_byte_into(nc, 13) }
-            else if esc == 34 as i8 { native_v2_rodata_append_byte_into(nc, 34) }
-            else if esc == 92 as i8 { native_v2_rodata_append_byte_into(nc, 92) }
-            else { native_v2_rodata_append_byte_into(nc, esc as i64) }
-            i = i + 2
-        } else {
-            native_v2_rodata_append_byte_into(nc, ch as i64)
-            i = i + 1
-        }
-    }
-    native_v2_rodata_append_byte_into(nc, 0)
-    offset
-}
-
-fn emit_recorded_core_into(nc: &! NativeCompiler, main_fn: &IrFunction, main_fn_id: i64) -> bool with IO, Mut, Panic, Div, Alloc {
-    native_v2_core_begin_function_from_ir_into(nc, main_fn, main_fn_id)
-    var i: i64 = 0
-    while i < V2_CORE_COUNT {
-        let op = V2_CORE_OPS[i as usize]
-        if op == V2C_LOAD_IMM {
-            native_v2_core_emit_load_imm_into(nc, V2_CORE_DST[i as usize], V2_CORE_IMM[i as usize])
-        } else if op == V2C_LOAD_STRING {
-            let ro_off = driver_append_string_literal_into(nc, i)
-            native_v2_core_emit_load_string_offset_into(nc, V2_CORE_DST[i as usize], ro_off)
-        } else if op == V2C_BINOP {
-            if !native_v2_core_emit_binop_code_into(nc, V2_CORE_DST[i as usize], V2_CORE_SRC1[i as usize], V2_CORE_IMM[i as usize], V2_CORE_SRC2[i as usize]) {
-                return false
-            }
-        } else if op == V2C_CALL {
-            native_v2_core_emit_call1_into(nc, V2_CORE_DST[i as usize], V2_CORE_FN_ID[i as usize], V2_CORE_SRC1[i as usize], V2_CORE_ARG_COUNT[i as usize])
-        } else if op == V2C_RETURN {
-            native_v2_core_emit_return_into(nc, V2_CORE_SRC1[i as usize])
-            return true
-        } else if op == V2C_COPY {
-            native_v2_core_emit_copy_into(nc, V2_CORE_DST[i as usize], V2_CORE_SRC1[i as usize])
-        } else {
-            return false
-        }
-        i = i + 1
-    }
-    false
-}
-
 fn compile_ir_module_to_elf(output_path: string, token_count: i64, main_fn: &IrFunction) -> i64 with IO, Mut, Panic, Div, Alloc {
     let user_fn_count = V2_USER_FN_COUNT
     let main_fn_id = V2_FIRST_USER_FN_ID + user_fn_count
@@ -2268,7 +2170,7 @@ fn compile_ir_module_to_elf(output_path: string, token_count: i64, main_fn: &IrF
 
     compile_module_streaming_finish_main_rodata_len_into(&! nc, main_fn_id, nc.flat_rodata_len)
 
-    let min_data_len = runtime_context_global_slot_size()
+    let min_data_len = native_v2_driver_state_data_len()
     let final_data = string_table_new()
     let elf = finalize_elf64_bulk_with_rodata_ref_data_len(nc.code, &nc.flat_rodata_bytes, nc.flat_rodata_len, final_data, min_data_len, nc.entry_offset, 4194304, nc.symbols, nc.fn_offsets, nc.fn_count)
 
@@ -2324,8 +2226,8 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     scan_enum_decls(token_count)
     scan_user_fns(token_count, V2_FIRST_USER_FN_ID)
 
-    reset_core()
-    reset_locals()
+    var ctx = v2_driver_context_new()
+    reset_locals(&! ctx)
     var main_fn = ir_empty_function()
 
     compile_ir_module_to_elf(output_path, token_count, &main_fn)
