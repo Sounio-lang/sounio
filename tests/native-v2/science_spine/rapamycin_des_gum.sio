@@ -1,0 +1,94 @@
+// Native-v2 science spine: Rapamycin Cypher DES epistemic PBPK.
+// Three-compartment model: plasma, stent-polymer, peripheral tissue.
+// ISO JCGM 100:2008 GUM uncertainty propagation via sqrt_f64 (SSE2).
+// Parameters: clearance k10=0.045, plasma->stent k12=0.08, stent->tissue k23=0.05.
+// 10 Euler steps. Confidence gate rejects below 0.75.
+// NB: all multi-op f64 chains use explicit let bindings (stage1 is left-to-right).
+
+struct KnowledgeF64 {
+    value: f64,
+    uncertainty: f64,
+    confidence: f64,
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    b
+}
+
+fn gum_add(a: KnowledgeF64, b: KnowledgeF64) -> KnowledgeF64 {
+    let ua2 = a.uncertainty * a.uncertainty
+    let ub2 = b.uncertainty * b.uncertainty
+    let sum2 = ua2 + ub2
+    let u_c = sqrt_f64(sum2)
+    let conf = min_f64(a.confidence, b.confidence)
+    KnowledgeF64 { value: a.value + b.value, uncertainty: u_c, confidence: conf }
+}
+
+fn scale(k: KnowledgeF64, f: f64) -> KnowledgeF64 {
+    KnowledgeF64 { value: k.value * f, uncertainty: k.uncertainty * f, confidence: k.confidence }
+}
+
+fn main() -> i64 with IO, Mut {
+    // Rapamycin Cypher DES: initial plasma bolus 100 ng/mL, 2% measurement uncertainty
+    var plasma = KnowledgeF64 { value: 100.0, uncertainty: 2.0, confidence: 0.9 }
+    var stent  = KnowledgeF64 { value: 0.0,   uncertainty: 0.0, confidence: 0.9 }
+    var tissue = KnowledgeF64 { value: 0.0,   uncertainty: 0.0, confidence: 0.9 }
+
+    // 10 Euler steps: k10=0.045 (clearance), k12=0.08 (plasma→stent), k23=0.05 (stent→tissue)
+    var i: i64 = 0
+    while i < 10 {
+        let cleared   = scale(plasma, 0.045)
+        let to_stent  = scale(plasma, 0.08)
+        let to_tissue = scale(stent,  0.05)
+
+        let neg_cleared   = scale(cleared,   -1.0)
+        let neg_to_stent  = scale(to_stent,  -1.0)
+        let neg_to_tissue = scale(to_tissue, -1.0)
+
+        let p1 = gum_add(plasma, neg_cleared)
+        let new_plasma = gum_add(p1, neg_to_stent)
+
+        let s1 = gum_add(stent, to_stent)
+        let new_stent = gum_add(s1, neg_to_tissue)
+
+        let new_tissue = gum_add(tissue, to_tissue)
+
+        plasma = new_plasma
+        stent  = new_stent
+        tissue = new_tissue
+        i = i + 1
+    }
+
+    // Confidence gate: reject if epistemic confidence dropped below 0.75
+    if plasma.confidence < 0.75 { return 1 }
+
+    // ISO GUM uncertainty budget: per-compartment value + uncertainty
+    print("plasma: ")
+    print_f64(plasma.value)
+    print_char(32)
+    print_f64(plasma.uncertainty)
+    print_char(10)
+    print("stent: ")
+    print_f64(stent.value)
+    print_char(32)
+    print_f64(stent.uncertainty)
+    print_char(10)
+    print("tissue: ")
+    print_f64(tissue.value)
+    print_char(32)
+    print_f64(tissue.uncertainty)
+    print_char(10)
+
+    // Combined ISO GUM budget total: sqrt(u_plasma^2 + u_stent^2 + u_tissue^2)
+    let up2 = plasma.uncertainty * plasma.uncertainty
+    let us2 = stent.uncertainty * stent.uncertainty
+    let ut2 = tissue.uncertainty * tissue.uncertainty
+    let sum3 = up2 + us2
+    let sum4 = sum3 + ut2
+    let budget = sqrt_f64(sum4)
+    print("budget: ")
+    print_f64(budget)
+    print_char(10)
+    0
+}

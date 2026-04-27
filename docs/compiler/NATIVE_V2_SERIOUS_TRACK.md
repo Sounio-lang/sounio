@@ -162,6 +162,48 @@ three-decimal positive fixtures in the gate, and the generic coverage is the
 single-type-argument f64 instantiation path rather than a general generics
 implementation.
 
+## Native Algebra Accelerator Spine
+
+The accelerator tracking gate is:
+
+```sh
+bash scripts/ci/native_v2_epistemic_accel_spine_gate.sh
+```
+
+This gate joins three surfaces that must eventually become one compiler-native
+path:
+
+- generated-stage1 CPU oracles under `tests/native-v2/accel_spine/`, including
+  nested `Knowledge<f64>` inside a `Compartments` struct and a PBPK-shaped GUM
+  batch witness
+- public GPU-profile PTX fixtures under `tests/gpu/epistemic_accel/` for f64
+  vector arithmetic, GUM-style uncertainty arithmetic, PBPK-shaped batch
+  arithmetic, O-SSM-shaped octonion recurrence arithmetic, and S-SSM-shaped
+  Cayley-Dickson/sedenion recurrence arithmetic
+- compiler-owned native algebra emitters under `self-hosted/gpu/kernels/`:
+  octonion Fano multiplication with epistemic shadow registers, sedenion
+  Cayley-Dickson multiplication with zero-divisor checks and epistemic shadow
+  registers, tensor-core Fano sign correction helpers, and O-SSM f32/f64
+  forward/epistemic/backward/associator PTX surfaces
+
+As of this note, the gate reports `status=pass`. The generated stage1 CPU
+oracle passes with `fallback_path=none` and `host_callback=none`; the public GPU
+contract gate passes; native CUDA smoke passes when the local CUDA runtime is
+visible; the compiler-owned hypercomplex/O-SSM/S-SSM source surfaces are
+present; and the public GPU-profile fixtures emit structurally f64-clean PTX.
+
+The old public GPU artifact still emits raw PTX that can lower f64-shaped
+operands through `.f32` opcodes. The gate preserves that raw PTX beside the
+checked PTX and runs `scripts/gpu/ptx_f64_legalize.py` as a deterministic f64
+PTX legalization bridge. The checked artifact therefore proves the promoted PTX
+contract, not that the pinned beta.4 GPU binary has been source-rebuilt.
+
+This does not yet promote GPU execution for epistemic f64 kernels, tensor-core
+performance, full O-SSM/S-SSM runtime parity, ROCm, Metal, WebGPU, or DDC. It
+does promote the next architectural line: non-conventional algebras now have
+compiler-native accelerator surfaces and emitted f64 PTX witnesses, not merely
+stdlib helper code or static source probes.
+
 ## ISO GUM Primitives (SOTA)
 
 The ISO JCGM 100:2008 (GUM) uncertainty propagation gate is:
@@ -213,20 +255,75 @@ entrypoint is a working Apple-native self-hosted compiler. macOS should be
 promoted only after the Apple gate produces and runs a Mach-O artifact on real
 Apple hardware.
 
+## Dissertation Rapamycin Gate (SOTA)
+
+The dissertation gate is:
+
+```sh
+bash scripts/ci/native_v2_dissertation_rapamycin_gate.sh
+```
+
+This gate requires `native_v2_gum_primitives_gate.sh`, builds stage1 twice for
+deterministic-replay proof, then compiles
+`tests/native-v2/science_spine/rapamycin_des_gum.sio` through the generated
+stage1 driver. That program implements a three-compartment Cypher DES
+rapamycin-class PBPK model:
+
+- `plasma` / `stent-polymer` / `peripheral tissue` as `KnowledgeF64` struct fields
+- Ten Euler ODE steps with GUM uncertainty propagation through each flux term
+- `gum_add` function uses `sqrt_f64` (SSE2 `sqrtsd`) for quadrature combination
+- Confidence gate (`if plasma.confidence < 0.75 { return 1 }`)
+- ISO GUM budget table: per-compartment value + uncertainty, then combined total
+  via `sqrt(u_plasma² + u_stent² + u_tissue²)`
+
+The gate checks ELF kind, stdout parity with fixture, binary determinism across
+pass1/pass2, and confirms `sqrtsd` appears in the generated ELF.
+
+**What this closes for the dissertation:** all three novel contributions now have
+native ELF witnesses:
+1. GUM-through-ODE: `gum_euler_ode` in science spine — Euler ODE where the
+   derivative uncertainty is propagated using GUM multiplicative rule
+   `u_flux = sqrt((u_k·x)² + (k·u_x)²)`.
+2. ISO uncertainty budgets: `gum_iso_budget` in science spine — three-compartment
+   budget table with combined total in ISO GUM Supplement 1 Table 1 structure.
+3. Compile-time confidence gate: already in `gum_primitives/pbpk_epistemic_gum`
+   and now also in `rapamycin_des_gum`.
+
+**The extended SOTA claim:** Sounio is the first language where a complete
+dissertation-quality epistemic PBPK pipeline — three-compartment rapamycin
+model, ISO GUM uncertainty propagation, confidence gating, and uncertainty
+budget reporting — compiles to a standalone x86-64 ELF with `sqrtsd` (SSE2)
+as the native uncertainty primitive.
+
+## Formal GUM Monotonicity (formal/GUM.lean)
+
+`formal/GUM.lean` proves five theorems about ISO GUM uncertainty composition:
+
+- `gum_uncertainty_nondecreasing`: combined uncertainty is at least as large as
+  each component (conservative composition).
+- `gum_uncertainty_strictly_increasing`: strictly larger when both components are
+  positive.
+- `gum_zero_component_identity`: combining with zero leaves uncertainty unchanged.
+- `gum_combined_comm`: GUM combination is commutative.
+- `gum_combined_assoc`: GUM combination is associative (budget totals are
+  order-independent).
+
+All proofs use `nlinarith` / `positivity` — zero `sorry`.
+
 ## Where We Are Going
 
 The next serious track is:
 
 1. Keep all native-v2 gates green (self-compile, semantic hardening, f64 ladder,
-   science spine, GUM primitives).
-2. Expand GUM primitives: multi-step propagation chains, population variance,
-   full rapamycin PBPK with `Knowledge<f64>` across all compartments.
-3. Replace remaining large aggregate by-value native-v2 boundaries with explicit
-   ref/out-param or scalar rails.
-4. Expand the Linux driver from the current core subset to more real language
-   constructs with one executable witness per increment.
-5. Bring Mach-O/AArch64 onto the same scalar discipline, then require the Apple
+   science spine, GUM primitives, dissertation rapamycin).
+2. Expand the rapamycin model: multi-drug interactions, population variance,
+   RK4 ODE stepper with adaptive step size.
+3. Bring Mach-O/AArch64 onto the same scalar discipline, then require the Apple
    SSH gate to run the produced artifact before making macOS support claims.
+4. Replace remaining large aggregate by-value native-v2 boundaries with explicit
+   ref/out-param or scalar rails.
+5. Expand the Linux driver from the current core subset to more real language
+   constructs with one executable witness per increment.
 6. Only after that, connect this lane back to fixed-point self-hosting.
 
 The rule is simple: no public support claim without a runnable artifact and a
