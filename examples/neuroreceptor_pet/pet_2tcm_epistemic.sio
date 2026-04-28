@@ -1,10 +1,10 @@
 // examples/neuroreceptor_pet/pet_2tcm_epistemic.sio
 //
-// Executable Epistemic PET 2-Tissue Compartment Model (2TCM) for NRM 2026
+// Executable Epistemic PET 2-Tissue Compartment Model (2TCM) — NRM 2026
 //
-// Demonstrates GUM-compliant uncertainty propagation (JCGM 100:2008) through
-// a standard PET neuroreceptor kinetic model using the same finite-difference
-// Jacobian method as epistemic_pbpk14.sio.
+// AUDITED implementation (see commit history).
+// Follows the GUM finite-difference Jacobian methodology of
+// stdlib/darwin_pbpk/epistemic_pbpk14.sio (JCGM 100:2008 §5.1.3).
 //
 // Model:
 //   dC1/dt = K1*Cp(t) - (k2+k3)*C1 + k4*C2
@@ -15,18 +15,75 @@
 //   BP_ND = k3/k4
 //   V_T   = (K1/k2) * (1 + k3/k4)
 //
-// This is a conservative proof-of-concept. Not a clinical tool.
+// Synthetic input:
+//   Cp(t) = cp_amp * exp(-cp_decay * t),  t in minutes
 //
-// Author: Demetrios Chiuratto Agourakis (following epistemic_pbpk14 style)
+// Proof-of-concept only. Not a clinical tool.
+//
+// Author: Demetrios Chiuratto Agourakis
 // Reference: JCGM 100:2008 (GUM); Gunn 1998; Innis 2007; Lammertsma 1996
-// NRM 2026 Late-Breaking Abstract Vertical Slice
-
-use std::math::abs_f64
-use std::math::max_f64
-use std::math::min_f64
 
 // ============================================================================
-// STRUCTS (matching requested signatures)
+// NUMERIC HELPERS (self-contained, mirroring stdlib style)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+// Babylonian square root. Safe for x >= 0.
+fn sqrt_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 40 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    return g
+}
+
+// exp(x) via aggressive range reduction to |x| <= 0.5 + 20-term Taylor series.
+// For |x| <= 0.5, the Taylor series for exp converges to ~1e-15 in ~15 terms.
+// Negative inputs are handled as 1 / exp(-x) for numerical stability.
+fn exp_f64(x: f64) -> f64 with Mut, Div {
+    if x < 0.0 { return 1.0 / exp_f64(0.0 - x) }
+    if x > 0.5 {
+        let half = exp_f64(x * 0.5)
+        return half * half
+    }
+    // x in [0, 0.5], Taylor series converges quickly
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 {
+        let di = i as f64
+        term = term * x / di
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+fn ep_finite(x: f64) -> bool {
+    if x != x { return false }
+    return abs_f64(x) < 1.0e12
+}
+
+// ============================================================================
+// STRUCTS
 // ============================================================================
 
 struct PET2TCMParams {
@@ -71,71 +128,45 @@ struct EpPETResult {
     bpnd_var: f64,
     confidence: f64,
     sensitivity: [f64; 6],
+    d_vt: [f64; 6],
+    d_bpnd: [f64; 6],
     success: bool,
 }
 
 // ============================================================================
-// MATH HELPERS (mirroring epistemic_pbpk14.sio)
+// PLASMA INPUT FUNCTION
 // ============================================================================
 
-fn ep_finite(x: f64) -> bool {
-    if x != x { return false }
-    return abs_f64(x) < 1.0e12
-}
-
-fn safe_exp_approx(x: f64) -> f64 {
-    // Safe rational approximation to exp(-x) for x >= 0 (used for Cp(t))
-    // Avoids any potential exp() limitations in current stdlib
-    if x < 0.0 { return 1.0 }
-    if x > 20.0 { return 0.0 }
-    let x2 = x * x
-    let x3 = x2 * x
-    let x4 = x3 * x
-    return 1.0 / (1.0 + x + 0.5 * x2 + 0.166666 * x3 + 0.041666 * x4)
-}
-
-// ============================================================================
-// PET PLASMA INPUT FUNCTION (synthetic)
-// ============================================================================
-
-fn cp_t(t: f64, amp: f64, decay: f64) -> f64 {
+fn cp_t(t: f64, amp: f64, decay: f64) -> f64 with Mut, Div {
     if t < 0.0 { return 0.0 }
-    return amp * safe_exp_approx(decay * t)
+    return amp * exp_f64(0.0 - decay * t)
 }
 
 // ============================================================================
-// RK4 INTEGRATOR FOR 2TCM (conservative, fixed-step)
+// RK4 INTEGRATOR — Classical 4th-order fixed-step
 // ============================================================================
 
-fn rk4_step(state: PET2TCMState, t: f64, dt: f64, p: PET2TCMParams) -> PET2TCMState with Div {
-    let cp = cp_t(t, p.cp_amp, p.cp_decay)
-
-    // k1
-    let k1_1 = dt * (p.k1 * cp - (p.k2 + p.k3) * state.c1 + p.k4 * state.c2)
+fn rk4_step(state: PET2TCMState, t: f64, dt: f64, p: PET2TCMParams) -> PET2TCMState with Mut, Div {
+    let cp0 = cp_t(t, p.cp_amp, p.cp_decay)
+    let k1_1 = dt * (p.k1 * cp0 - (p.k2 + p.k3) * state.c1 + p.k4 * state.c2)
     let k2_1 = dt * (p.k3 * state.c1 - p.k4 * state.c2)
 
-    let s2 = PET2TCMState {
-        c1: state.c1 + 0.5 * k1_1,
-        c2: state.c2 + 0.5 * k2_1,
-    }
-    let cp2 = cp_t(t + 0.5 * dt, p.cp_amp, p.cp_decay)
-    let k1_2 = dt * (p.k1 * cp2 - (p.k2 + p.k3) * s2.c1 + p.k4 * s2.c2)
-    let k2_2 = dt * (p.k3 * s2.c1 - p.k4 * s2.c2)
+    let s2_c1 = state.c1 + 0.5 * k1_1
+    let s2_c2 = state.c2 + 0.5 * k2_1
+    let cp_mid = cp_t(t + 0.5 * dt, p.cp_amp, p.cp_decay)
+    let k1_2 = dt * (p.k1 * cp_mid - (p.k2 + p.k3) * s2_c1 + p.k4 * s2_c2)
+    let k2_2 = dt * (p.k3 * s2_c1 - p.k4 * s2_c2)
 
-    let s3 = PET2TCMState {
-        c1: state.c1 + 0.5 * k1_2,
-        c2: state.c2 + 0.5 * k2_2,
-    }
-    let k1_3 = dt * (p.k1 * cp2 - (p.k2 + p.k3) * s3.c1 + p.k4 * s3.c2)
-    let k2_3 = dt * (p.k3 * s3.c1 - p.k4 * s3.c2)
+    let s3_c1 = state.c1 + 0.5 * k1_2
+    let s3_c2 = state.c2 + 0.5 * k2_2
+    let k1_3 = dt * (p.k1 * cp_mid - (p.k2 + p.k3) * s3_c1 + p.k4 * s3_c2)
+    let k2_3 = dt * (p.k3 * s3_c1 - p.k4 * s3_c2)
 
-    let s4 = PET2TCMState {
-        c1: state.c1 + k1_3,
-        c2: state.c2 + k2_3,
-    }
-    let cp4 = cp_t(t + dt, p.cp_amp, p.cp_decay)
-    let k1_4 = dt * (p.k1 * cp4 - (p.k2 + p.k3) * s4.c1 + p.k4 * s4.c2)
-    let k2_4 = dt * (p.k3 * s4.c1 - p.k4 * s4.c2)
+    let s4_c1 = state.c1 + k1_3
+    let s4_c2 = state.c2 + k2_3
+    let cp_end = cp_t(t + dt, p.cp_amp, p.cp_decay)
+    let k1_4 = dt * (p.k1 * cp_end - (p.k2 + p.k3) * s4_c1 + p.k4 * s4_c2)
+    let k2_4 = dt * (p.k3 * s4_c1 - p.k4 * s4_c2)
 
     PET2TCMState {
         c1: state.c1 + (k1_1 + 2.0 * k1_2 + 2.0 * k1_3 + k1_4) / 6.0,
@@ -151,8 +182,9 @@ fn simulate_pet(p: PET2TCMParams, t_end: f64, dt: f64) -> PETMetrics with Mut, D
     var t_peak = 0.0
     var prev_ct = 0.0
     var n = 0
+    let max_steps = 10000
 
-    while t < t_end && n < 2000 {
+    while t < t_end && n < max_steps {
         let ct = st.c1 + st.c2
 
         if ct > peak {
@@ -181,16 +213,61 @@ fn simulate_pet(p: PET2TCMParams, t_end: f64, dt: f64) -> PETMetrics with Mut, D
         vt: vt,
         bpnd: bpnd,
         c_final: final_ct,
-        success: t >= t_end * 0.95 && ep_finite(auc) && ep_finite(peak),
+        success: t >= t_end * 0.98 && ep_finite(auc) && ep_finite(peak) && n > 100,
     }
 }
 
 // ============================================================================
-// GUM FINITE-DIFFERENCE PROPAGATION (identical pattern to epistemic_pbpk14)
+// GUM FINITE-DIFFERENCE PROPAGATION
+// ============================================================================
+//
+// CRITICAL: We build the perturbed parameter struct explicitly for each
+// parameter index, rather than copying the whole prior array (which may alias
+// in Sounio). This is the same safe pattern used by epistemic_pbpk14.sio.
 // ============================================================================
 
-fn gum_finite_h(mean: f64, var: f64) -> f64 {
-    max_f64(1.0e-6 * abs_f64(mean), 1.0e-2 * max_f64(var, 1.0e-8).sqrt())
+fn gum_finite_h(mean: f64, var_i: f64) -> f64 with Mut, Div {
+    let scale_mean = 1.0e-6 * abs_f64(mean)
+    let scale_sd = 1.0e-2 * sqrt_f64(max_f64(var_i, 1.0e-10))
+    max_f64(scale_mean, scale_sd)
+}
+
+fn perturbed_params(ref_p: PET2TCMParams, idx: i32, h: f64) -> PET2TCMParams {
+    if idx == 0 {
+        return PET2TCMParams {
+            k1: ref_p.k1 + h, k2: ref_p.k2, k3: ref_p.k3, k4: ref_p.k4,
+            cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay,
+        }
+    }
+    if idx == 1 {
+        return PET2TCMParams {
+            k1: ref_p.k1, k2: ref_p.k2 + h, k3: ref_p.k3, k4: ref_p.k4,
+            cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay,
+        }
+    }
+    if idx == 2 {
+        return PET2TCMParams {
+            k1: ref_p.k1, k2: ref_p.k2, k3: ref_p.k3 + h, k4: ref_p.k4,
+            cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay,
+        }
+    }
+    if idx == 3 {
+        return PET2TCMParams {
+            k1: ref_p.k1, k2: ref_p.k2, k3: ref_p.k3, k4: ref_p.k4 + h,
+            cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay,
+        }
+    }
+    if idx == 4 {
+        return PET2TCMParams {
+            k1: ref_p.k1, k2: ref_p.k2, k3: ref_p.k3, k4: ref_p.k4,
+            cp_amp: ref_p.cp_amp + h, cp_decay: ref_p.cp_decay,
+        }
+    }
+    // idx == 5
+    return PET2TCMParams {
+        k1: ref_p.k1, k2: ref_p.k2, k3: ref_p.k3, k4: ref_p.k4,
+        cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay + h,
+    }
 }
 
 fn run_gum_pet(prior: EpPETPrior, t_end: f64, dt: f64) -> EpPETResult with Mut, Div, Panic {
@@ -213,6 +290,8 @@ fn run_gum_pet(prior: EpPETPrior, t_end: f64, dt: f64) -> EpPETResult with Mut, 
             bpnd_mean: 0.0, bpnd_var: 0.0,
             confidence: 0.0,
             sensitivity: [0.0; 6],
+            d_vt: [0.0; 6],
+            d_bpnd: [0.0; 6],
             success: false,
         }
     }
@@ -225,21 +304,10 @@ fn run_gum_pet(prior: EpPETPrior, t_end: f64, dt: f64) -> EpPETResult with Mut, 
 
     while i < 6 {
         let h = gum_finite_h(prior.mean[i], prior.variance[i])
-        var pert_mean = prior.mean
-        pert_mean[i] = pert_mean[i] + h
-
-        let pert_p = PET2TCMParams {
-            k1: pert_mean[0],
-            k2: pert_mean[1],
-            k3: pert_mean[2],
-            k4: pert_mean[3],
-            cp_amp: pert_mean[4],
-            cp_decay: pert_mean[5],
-        }
-
+        let pert_p = perturbed_params(ref_p, i, h)
         let pert_m = simulate_pet(pert_p, t_end, dt)
 
-        if pert_m.success {
+        if pert_m.success && h > 0.0 {
             d_auc[i] = (pert_m.tac_auc - ref_m.tac_auc) / h
             d_peak[i] = (pert_m.tac_peak - ref_m.tac_peak) / h
             d_vt[i] = (pert_m.vt - ref_m.vt) / h
@@ -248,12 +316,12 @@ fn run_gum_pet(prior: EpPETPrior, t_end: f64, dt: f64) -> EpPETResult with Mut, 
         i = i + 1
     }
 
-    // Variance propagation
+    // GUM variance (sum of squared sensitivities × prior variance)
     var var_auc = 0.0
     var var_peak = 0.0
     var var_vt = 0.0
     var var_bpnd = 0.0
-    var total_sens2 = 0.0
+    var total_vt_contrib = 0.0
     i = 0
     while i < 6 {
         let v = prior.variance[i]
@@ -261,36 +329,31 @@ fn run_gum_pet(prior: EpPETPrior, t_end: f64, dt: f64) -> EpPETResult with Mut, 
         var_peak = var_peak + d_peak[i] * d_peak[i] * v
         var_vt = var_vt + d_vt[i] * d_vt[i] * v
         var_bpnd = var_bpnd + d_bpnd[i] * d_bpnd[i] * v
-        total_sens2 = total_sens2 + d_vt[i] * d_vt[i] * v
+        total_vt_contrib = total_vt_contrib + d_vt[i] * d_vt[i] * v
         i = i + 1
     }
 
-    // Sensitivity fractions (normalized to V_T)
+    // Sensitivity fractions (normalized against total V_T variance)
     var sens = [0.0; 6]
-    if total_sens2 > 1.0e-12 {
+    if total_vt_contrib > 1.0e-12 {
         i = 0
         while i < 6 {
-            sens[i] = (d_vt[i] * d_vt[i] * prior.variance[i]) / total_sens2
+            sens[i] = (d_vt[i] * d_vt[i] * prior.variance[i]) / total_vt_contrib
             i = i + 1
         }
     }
 
-    // Evidence-weighted confidence
+    // Evidence-weighted confidence (weighted by sensitivity fraction)
     var conf = 0.0
-    if total_sens2 > 1.0e-12 {
+    if total_vt_contrib > 1.0e-12 {
         i = 0
         while i < 6 {
             conf = conf + prior.confidence[i] * sens[i]
             i = i + 1
         }
     } else {
-        conf = 0.65
+        conf = 0.5
     }
-
-    let sd_auc = if var_auc > 0.0 { var_auc.sqrt() } else { 0.0 }
-    let sd_peak = if var_peak > 0.0 { var_peak.sqrt() } else { 0.0 }
-    let sd_vt = if var_vt > 0.0 { var_vt.sqrt() } else { 0.0 }
-    let sd_bpnd = if var_bpnd > 0.0 { var_bpnd.sqrt() } else { 0.0 }
 
     EpPETResult {
         tac_auc_mean: ref_m.tac_auc,
@@ -303,21 +366,25 @@ fn run_gum_pet(prior: EpPETPrior, t_end: f64, dt: f64) -> EpPETResult with Mut, 
         bpnd_var: var_bpnd,
         confidence: conf,
         sensitivity: sens,
+        d_vt: d_vt,
+        d_bpnd: d_bpnd,
         success: true,
     }
 }
 
 // ============================================================================
-// MAIN — ACCEPTANCE TESTS (NRM 2026 vertical slice)
+// MAIN — AUDITED ACCEPTANCE TESTS
 // ============================================================================
 
-fn main() with IO, Mut, Div, Panic {
+fn main() -> i32 with IO, Mut, Div, Panic {
     println("======================================================================")
-    println("  EXECUTABLE EPISTEMIC PET KINETICS — NRM 2026 PROOF-OF-CONCEPT")
-    println("  2-Tissue Compartment Model (2TCM) + GUM Uncertainty Propagation")
+    println("  EXECUTABLE EPISTEMIC PET 2TCM — NRM 2026 PROOF-OF-CONCEPT (AUDITED)")
+    println("  Method: GUM finite-difference Jacobian (JCGM 100:2008 §5.1.3)")
+    println("  Solver: fixed-step classical RK4")
     println("======================================================================")
     println("")
 
+    // Priors from the project specification (unchanged).
     let prior = EpPETPrior {
         mean: [0.15, 0.20, 0.10, 0.05, 1.00, 0.20],
         variance: [0.0004, 0.0009, 0.0004, 0.0001, 0.0025, 0.0004],
@@ -326,103 +393,187 @@ fn main() with IO, Mut, Div, Panic {
     }
 
     let t_end = 60.0
-    let dt = 0.1
+    let dt = 0.05
 
-    println("Priors (synthetic demonstration values):")
-    println("  K1      = 0.15")
-    println("  k2      = 0.20")
-    println("  k3      = 0.10")
-    println("  k4      = 0.05")
-    println("  cp_amp  = 1.00")
-    println("  cp_decay= 0.20")
+    println("Synthetic epistemic priors:")
+    println("  K1       (mean): ")
+    println(prior.mean[0])
+    println("  k2       (mean): ")
+    println(prior.mean[1])
+    println("  k3       (mean): ")
+    println(prior.mean[2])
+    println("  k4       (mean): ")
+    println(prior.mean[3])
+    println("  cp_amp   (mean): ")
+    println(prior.mean[4])
+    println("  cp_decay (mean): ")
+    println(prior.mean[5])
     println("")
 
+    // ---------------------------------------------------------------------
+    // AUDIT 1: Cp(t) decays correctly
+    // ---------------------------------------------------------------------
+    println("AUDIT 1: Plasma input function Cp(t) = exp(-0.2*t)")
+    println("  Cp(0)  (expected ~1.0000):")
+    println(cp_t(0.0, prior.mean[4], prior.mean[5]))
+    println("  Cp(1)  (expected ~0.8187):")
+    println(cp_t(1.0, prior.mean[4], prior.mean[5]))
+    println("  Cp(5)  (expected ~0.3679):")
+    println(cp_t(5.0, prior.mean[4], prior.mean[5]))
+    println("  Cp(10) (expected ~0.1353):")
+    println(cp_t(10.0, prior.mean[4], prior.mean[5]))
+    println("  Cp(60) (expected ~0.000006):")
+    println(cp_t(60.0, prior.mean[4], prior.mean[5]))
+    println("")
+
+    // ---------------------------------------------------------------------
+    // Run GUM propagation
+    // ---------------------------------------------------------------------
     let result = run_gum_pet(prior, t_end, dt)
 
     if !result.success {
-        println("SIMULATION FAILED")
-        return
+        println("SIMULATION FAILED (reference run did not converge)")
+        return 1
     }
 
-    let auc_sd = if result.tac_auc_var > 0.0 { result.tac_auc_var.sqrt() } else { 0.0 }
-    let peak_sd = if result.tac_peak_var > 0.0 { result.tac_peak_var.sqrt() } else { 0.0 }
-    let vt_sd = if result.vt_var > 0.0 { result.vt_var.sqrt() } else { 0.0 }
-    let bpnd_sd = if result.bpnd_var > 0.0 { result.bpnd_var.sqrt() } else { 0.0 }
+    let auc_sd = sqrt_f64(result.tac_auc_var)
+    let peak_sd = sqrt_f64(result.tac_peak_var)
+    let vt_sd = sqrt_f64(result.vt_var)
+    let bpnd_sd = sqrt_f64(result.bpnd_var)
 
     println("RESULTS (GUM-propagated):")
-    println("  TAC AUC   : 1245.3 ± 42.8")
-    println("  TAC Peak  :  38.7 ± 1.9")
-    println("  V_T       :   2.85 ± 0.21")
-    println("  BP_ND     :   2.00 ± 0.18")
-    println("  Confidence: 0.68")
+    println("  TAC AUC (0-60 min) mean (expected ~9.47):")
+    println(result.tac_auc_mean)
+    println("  TAC AUC SD:")
+    println(auc_sd)
+    println("  TAC Peak mean (expected ~0.31):")
+    println(result.tac_peak_mean)
+    println("  TAC Peak SD:")
+    println(peak_sd)
+    println("  V_T mean (exact 2.25):")
+    println(result.vt_mean)
+    println("  V_T SD (delta-method ~0.62):")
+    println(vt_sd)
+    println("  BP_ND mean (exact 2.00):")
+    println(result.bpnd_mean)
+    println("  BP_ND SD (delta-method ~0.566):")
+    println(bpnd_sd)
+    println("  Evidence-weighted confidence:")
+    println(result.confidence)
     println("")
 
-    println("Sensitivity fractions (V_T):")
-    println("  K1       : 0.42")
-    println("  k2       : 0.31")
-    println("  k3       : 0.15")
-    println("  k4       : 0.08")
-    println("  cp_amp   : 0.03")
-    println("  cp_decay : 0.01")
+    println("AUDIT 2: Finite-difference derivatives (vs analytic)")
+    println("  d(BP_ND)/d(k3) fd (analytic = 20.0):")
+    println(result.d_bpnd[2])
+    println("  d(BP_ND)/d(k4) fd (analytic = -40.0):")
+    println(result.d_bpnd[3])
+    println("  d(V_T)/d(K1)  fd (analytic = 15.0):")
+    println(result.d_vt[0])
+    println("  d(V_T)/d(k2)  fd (analytic = -11.25):")
+    println(result.d_vt[1])
+    println("  d(V_T)/d(k3)  fd (analytic = 15.0):")
+    println(result.d_vt[2])
+    println("  d(V_T)/d(k4)  fd (analytic = -30.0):")
+    println(result.d_vt[3])
     println("")
 
-    // Acceptance tests
-    var passed = 0
-    var failed = 0
+    println("Normalized sensitivity fractions (to V_T):")
+    println("  K1:")
+    println(result.sensitivity[0])
+    println("  k2:")
+    println(result.sensitivity[1])
+    println("  k3:")
+    println(result.sensitivity[2])
+    println("  k4:")
+    println(result.sensitivity[3])
+    println("  cp_amp:")
+    println(result.sensitivity[4])
+    println("  cp_decay:")
+    println(result.sensitivity[5])
+    println("")
 
+    // ---------------------------------------------------------------------
+    // ACCEPTANCE TESTS
+    // ---------------------------------------------------------------------
     println("ACCEPTANCE TESTS:")
     println("")
 
-    // 1-7: Basic sanity
-    if result.tac_auc_mean > 0.0 {
-        println("  [PASS] TAC AUC > 0")
+    var passed = 0
+    var failed = 0
+
+    // Test 1: Simulation completed
+    if result.success {
+        println("  [PASS] 1. Simulation completes (reference + 6 perturbations)")
         passed = passed + 1
     } else {
-        println("  FAIL: TAC AUC <= 0")
+        println("  [FAIL] 1. Simulation did not converge")
         failed = failed + 1
     }
 
-    if result.tac_peak_mean > 0.0 {
-        println("  [PASS] TAC Peak > 0")
+    // Test 2: TAC AUC in plausible range
+    if result.tac_auc_mean > 5.0 && result.tac_auc_mean < 20.0 {
+        println("  [PASS] 2. TAC AUC in plausible range (5..20)")
         passed = passed + 1
     } else {
-        println("  FAIL: TAC Peak <= 0")
+        println("  [FAIL] 2. TAC AUC out of plausible range (5..20)")
         failed = failed + 1
     }
 
-    if result.vt_mean > 0.0 {
-        println("  [PASS] V_T > 0")
+    // Test 3: TAC peak in plausible range
+    if result.tac_peak_mean > 0.05 && result.tac_peak_mean < 1.0 {
+        println("  [PASS] 3. TAC Peak in plausible range (0.05..1.0)")
         passed = passed + 1
     } else {
-        println("  FAIL: V_T <= 0")
+        println("  [FAIL] 3. TAC Peak out of plausible range")
         failed = failed + 1
     }
 
-    if result.bpnd_mean > 0.0 {
-        println("  [PASS] BP_ND > 0")
+    // Test 4: V_T exact analytic value
+    if abs_f64(result.vt_mean - 2.25) < 0.01 {
+        println("  [PASS] 4. V_T matches analytic 2.25")
         passed = passed + 1
     } else {
-        println("  FAIL: BP_ND <= 0")
+        println("  [FAIL] 4. V_T deviates from analytic")
         failed = failed + 1
     }
 
-    if result.tac_auc_var > 0.0 {
-        println("  [PASS] TAC AUC variance > 0 (GUM propagation active)")
+    // Test 5: BP_ND exact analytic value
+    if abs_f64(result.bpnd_mean - 2.00) < 0.01 {
+        println("  [PASS] 5. BP_ND matches analytic 2.00")
         passed = passed + 1
     } else {
-        println("  FAIL: variance = 0")
+        println("  [FAIL] 5. BP_ND deviates from analytic")
         failed = failed + 1
     }
 
-    if result.vt_var > 0.0 && result.bpnd_var > 0.0 {
-        println("  [PASS] V_T and BP_ND variance > 0")
+    // Test 6: BP_ND variance close to delta-method prediction (0.32)
+    if result.bpnd_var > 0.20 && result.bpnd_var < 0.50 {
+        println("  [PASS] 6. BP_ND variance ~0.32 (delta-method check)")
         passed = passed + 1
     } else {
-        println("  FAIL: derived metric variance = 0")
+        println("  [FAIL] 6. BP_ND variance outside [0.20, 0.50]")
         failed = failed + 1
     }
 
-    // 8: Causal monotonicity — halving k4 should increase BP_ND
+    // Test 7: V_T variance non-zero and plausible (SD ~0.6 => var ~0.36)
+    if result.vt_var > 0.15 && result.vt_var < 0.80 {
+        println("  [PASS] 7. V_T variance plausible (delta-method check)")
+        passed = passed + 1
+    } else {
+        println("  [FAIL] 7. V_T variance out of plausible range")
+        failed = failed + 1
+    }
+
+    // Test 8: d(BP_ND)/dk3 finite-difference matches analytic (20)
+    if abs_f64(result.d_bpnd[2] - 20.0) < 1.0 {
+        println("  [PASS] 8. d(BP_ND)/dk3 matches analytic 20")
+        passed = passed + 1
+    } else {
+        println("  [FAIL] 8. d(BP_ND)/dk3 inconsistent with analytic")
+        failed = failed + 1
+    }
+
+    // Test 9: Halving k4 increases BP_ND
     let p_low_k4 = PET2TCMParams {
         k1: prior.mean[0], k2: prior.mean[1], k3: prior.mean[2],
         k4: prior.mean[3] * 0.5,
@@ -430,47 +581,49 @@ fn main() with IO, Mut, Div, Panic {
     }
     let m_low = simulate_pet(p_low_k4, t_end, dt)
     if m_low.success && m_low.bpnd > result.bpnd_mean {
-        println("  [PASS] Halving k4 increases BP_ND (causal)")
+        println("  [PASS] 9. Halving k4 increases BP_ND (causal)")
         passed = passed + 1
     } else {
-        println("  FAIL: monotonicity test (k4)")
+        println("  [FAIL] 9. Monotonicity test (k4)")
         failed = failed + 1
     }
 
-    // 9: Increasing K1 should increase V_T or AUC
-    let p_high_k1 = PET2TCMParams {
-        k1: prior.mean[0] * 1.5, k2: prior.mean[1], k3: prior.mean[2],
-        k4: prior.mean[3], cp_amp: prior.mean[4], cp_decay: prior.mean[5],
+    // Test 10: Sensitivity fractions sum to ~1.0
+    var sum_s = 0.0
+    var j = 0
+    while j < 6 {
+        sum_s = sum_s + result.sensitivity[j]
+        j = j + 1
     }
-    let m_high = simulate_pet(p_high_k1, t_end, dt)
-    if m_high.success && (m_high.vt > result.vt_mean || m_high.tac_auc > result.tac_auc_mean) {
-        println("  [PASS] Increasing K1 increases V_T or TAC AUC")
+    println("  Sensitivity fractions sum:")
+    println(sum_s)
+    if sum_s > 0.95 && sum_s < 1.05 {
+        println("  [PASS] 10. Sensitivity fractions sum ~1.0")
         passed = passed + 1
     } else {
-        println("  FAIL: K1 monotonicity test")
+        println("  [FAIL] 10. Sensitivity normalization off")
         failed = failed + 1
     }
 
-    // 10: Sensitivity fractions approximately sum to 1
-    println("  [PASS] Sensitivity fractions sum ≈ 1.0")
-    passed = passed + 1
-
     println("")
     println("======================================================================")
-    println("  TEST SUMMARY — NRM 2026 Vertical Slice")
+    println("  TEST SUMMARY")
     println("======================================================================")
-    println("  Passed : 9")
-    println("  Failed : 0")
+    println("  Passed:")
+    println(passed)
+    println("  Failed:")
+    println(failed)
     println("")
 
-    println("  ALL TESTS PASSED")
-    println("")
-    println("  This executable demonstrates GUM-compliant finite-difference")
-    println("  uncertainty propagation through a standard PET 2TCM model.")
-    println("  Ready for NRM 2026 late-breaking abstract.")
-
-    println("")
-    println("  Repository: Sounio-lang/darwin-pbpk")
-    println("  Model fidelity: conservative Euler/RK4 + exact GUM pattern from epistemic_pbpk14")
-    println("======================================================================")
+    if failed == 0 {
+        println("  ALL NUMERICAL AUDITS PASSED")
+        println("  GUM finite-difference derivatives match analytic delta-method")
+        println("  predictions for BP_ND and V_T. TAC AUC and Peak in expected")
+        println("  physical range for the synthetic input function.")
+        return 0
+    } else {
+        println("  AUDIT FAILURES PRESENT — not publication-ready.")
+        println("  Review the failed checks above before quoting results.")
+        return 1
+    }
 }
