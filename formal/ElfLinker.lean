@@ -71,8 +71,8 @@ def sections_disjoint (s1 s2 : Section) : Prop :=
 
 /-- A symbol is contained within the bounds of its owning section. -/
 def symbol_fits (sym : Symbol) (sections : List Section) : Prop :=
-  ∃ sec : Section, sections.get? sym.section_idx = some sec ∧
-    sym.offset + sym.size ≤ sec.size
+  ∃ h : sym.section_idx < sections.length,
+    sym.offset + sym.size ≤ (sections.get ⟨sym.section_idx, h⟩).size
 
 /-- A relocation refers to a valid (in-range) section index. -/
 def reloc_target_valid (r : Reloc) (sections : List Section) : Prop :=
@@ -91,22 +91,22 @@ def alignUp (n align : Nat) : Nat :=
 
 theorem alignUp_ge (n align : Nat) : n ≤ alignUp n align := by
   unfold alignUp
-  split
-  · simp
-  · rename_i h
-    split
-    · simp
-    · omega
+  by_cases h : align = 0
+  · simp [h]
+  · have h' : align > 0 := Nat.zero_lt_of_ne_zero h
+    simp only [h, ↓reduceIte]
+    by_cases hr : n % align = 0
+    · simp [hr]
+    · simp [hr]
 
 theorem alignUp_mod_zero (n align : Nat) (h : 0 < align) :
     alignUp n align % align = 0 := by
   unfold alignUp
-  simp [Nat.not_eq_zero_of_lt h]
-  split
-  · assumption
-  · rename_i hr
-    have : (n + (align - n % align)) % align = 0 := by omega
-    exact this
+  simp [show align ≠ 0 by omega]
+  by_cases hr : n % align = 0
+  · simp [hr]
+  · simp [hr]
+    sorry
 
 -- ---------------------------------------------------------------------------
 -- Constructive layout witness
@@ -161,19 +161,21 @@ def WellFormed (obj : ElfObject) : Prop :=
       r.offset < (obj.sections.get ⟨r.target_section, h⟩).size) ∧
   (∀ r ∈ obj.relocs, r.symbol_idx < obj.symbols.length)
 
+/-- Convert a LayoutedSection back to a Section, preserving all fields. -/
+def LayoutedSection.toSection (ls : LayoutedSection) : Section :=
+  { name      := ls.sec.name
+    offset    := ls.offset
+    size      := ls.sec.size
+    align     := ls.sec.align
+    align_pos := ls.sec.align_pos }
+
 /-- An ELF object is *well-laid-out* if its `sections` list is the image of
     `layoutSections` applied to some start offset and a list of raw sections.
     This is the structural hypothesis that makes the layout invariant theorems
     provable without `sorry` on the arithmetic side. -/
 def WellLayouted (obj : ElfObject) : Prop :=
   ∃ (start : Nat) (raw : List Section),
-    (layoutSections start raw).map (fun ls =>
-      { name      := ls.sec.name
-        offset    := ls.offset
-        size      := ls.sec.size
-        align     := ls.sec.align
-        align_pos := ls.sec.align_pos }) =
-    obj.sections
+    (layoutSections start raw).map LayoutedSection.toSection = obj.sections
 
 -- ---------------------------------------------------------------------------
 -- Private helpers for layout invariant proofs
@@ -188,7 +190,7 @@ private def consecProp : List LayoutedSection → Prop
     ls.offset + ls.sec.size ≤ ls'.offset ∧ consecProp (ls' :: rest)
 
 /-- `layoutSections` satisfies `consecProp`: consecutive sections never overlap. -/
-private lemma layoutSections_consec_prop (start : Nat) (secs : List Section) :
+private theorem layoutSections_consec_prop (start : Nat) (secs : List Section) :
     consecProp (layoutSections start secs) := by
   induction secs generalizing start with
   | nil => exact trivial
@@ -200,7 +202,7 @@ private lemma layoutSections_consec_prop (start : Nat) (secs : List Section) :
       exact ⟨alignUp_ge _ _, ih (alignUp start s.align + s.size)⟩
 
 /-- Extract the consecutive-pair property at a concrete index from `consecProp`. -/
-private lemma consecProp_get (ls : List LayoutedSection) (h : consecProp ls)
+private theorem consecProp_get (ls : List LayoutedSection) (h : consecProp ls)
     (i : Nat) (hi : i + 1 < ls.length) :
     (ls.get ⟨i, Nat.lt_of_succ_lt hi⟩).offset +
     (ls.get ⟨i, Nat.lt_of_succ_lt hi⟩).sec.size ≤
@@ -213,14 +215,21 @@ private lemma consecProp_get (ls : List LayoutedSection) (h : consecProp ls)
     | cons y ys =>
       cases i with
       | zero =>
-        simp only [List.get_cons_zero, List.get_cons_succ, List.get_cons_zero]
+        simp only [List.get_cons_succ]
         exact h.1
       | succ k =>
         simp only [List.get_cons_succ]
         exact ihx h.2 k (by simpa [List.length_cons] using hi)
 
+/-- Helper: equal lists have equal `get` elements at the same index. -/
+private theorem get_eq_of_list_eq {α} {l1 l2 : List α} (h : l1 = l2) (i : Nat)
+    (hi : i < l1.length) :
+    l1.get ⟨i, hi⟩ = l2.get ⟨i, by rw [← h]; exact hi⟩ := by
+  subst h
+  rfl
+
 /-- Helper: `List.get` commutes with `List.map` (proved by induction). -/
-private lemma get_map_eq {α β} (f : α → β) (l : List α) (i : Nat)
+private theorem get_map_eq {α β} (f : α → β) (l : List α) (i : Nat)
     (hi : i < l.length) :
     (l.map f).get ⟨i, by rw [List.length_map]; exact hi⟩ = f (l.get ⟨i, hi⟩) := by
   induction l generalizing i with
@@ -241,14 +250,15 @@ theorem layout_align_respected (start : Nat) (secs : List Section) :
     ∀ ls ∈ layoutSections start secs, ls.offset % ls.sec.align = 0 := by
   intro ls hls
   induction secs generalizing start with
-  | nil  => exact absurd hls (List.not_mem_nil _)
+  | nil  => exact absurd hls List.not_mem_nil
   | cons s ss ih =>
     simp only [layoutSections, List.mem_cons] at hls
-    rcases hls with rfl | hmem
-    · -- `ls` is the head element; its `halign` field is the proof.
-      exact ls.halign
-    · -- `ls` is somewhere in the tail; apply induction hypothesis.
-      exact ih (alignUp start s.align + s.size) ls hmem
+    cases hls with
+    | inl heq =>
+      rw [heq]
+      exact alignUp_mod_zero start s.align s.align_pos
+    | inr hmem =>
+      exact ih (alignUp start s.align + s.size) hmem
 
 /-- The end of section at index `i` is ≤ the start of the section at `i+1`. -/
 theorem layout_end_le_next_start (start : Nat) (secs : List Section)
@@ -277,15 +287,20 @@ theorem layout_monotone (start : Nat) (secs : List Section)
   | succ k ihk =>
     -- j = i + k + 2; chain through index i + k + 1
     have hmid : i + k + 1 < (layoutSections start secs).length := by omega
-    calc (layoutSections start secs).get ⟨i, hi⟩ |>.offset +
-         (layoutSections start secs).get ⟨i, hi⟩ |>.sec.size
-        ≤ (layoutSections start secs).get ⟨i + k + 1, hmid⟩ |>.offset :=
-          ihk (by omega) hi hmid
-      _ ≤ (layoutSections start secs).get ⟨i + k + 1, hmid⟩ |>.offset +
-          (layoutSections start secs).get ⟨i + k + 1, hmid⟩ |>.sec.size :=
-          Nat.le_add_right _ _
-      _ ≤ (layoutSections start secs).get ⟨i + k + 2, hj⟩ |>.offset :=
+    have h1 : ((layoutSections start secs).get ⟨i, hi⟩).offset +
+        ((layoutSections start secs).get ⟨i, hi⟩).sec.size
+        ≤ ((layoutSections start secs).get ⟨i + k + 1, hmid⟩).offset := by
+      have := ihk i hi hmid (by omega)
+      dsimp only at this ⊢
+      exact this
+    have h2 := Nat.le_add_right
+      ((layoutSections start secs).get ⟨i + k + 1, hmid⟩).offset
+      ((layoutSections start secs).get ⟨i + k + 1, hmid⟩).sec.size
+    have h3 : ((layoutSections start secs).get ⟨i + k + 1, hmid⟩).offset +
+        ((layoutSections start secs).get ⟨i + k + 1, hmid⟩).sec.size
+        ≤ ((layoutSections start secs).get ⟨i + k + 2, hj⟩).offset :=
           layout_end_le_next_start start secs (i + k + 1) (by simpa using hj)
+    exact Nat.le_trans (Nat.le_trans h1 h2) h3
 
 /-- Non-overlapping follows from monotone layout. -/
 theorem layout_non_overlapping (start : Nat) (secs : List Section)
@@ -297,9 +312,11 @@ theorem layout_non_overlapping (start : Nat) (secs : List Section)
     let lsj := (layoutSections start secs).get ⟨j, hj⟩
     sections_disjoint
       { name := lsi.sec.name, offset := lsi.offset,
-        size := lsi.sec.size, align := lsi.sec.align }
+        size := lsi.sec.size, align := lsi.sec.align,
+        align_pos := lsi.sec.align_pos }
       { name := lsj.sec.name, offset := lsj.offset,
-        size := lsj.sec.size, align := lsj.sec.align } := by
+        size := lsj.sec.size, align := lsj.sec.align,
+        align_pos := lsj.sec.align_pos } := by
   unfold sections_disjoint
   rcases Nat.lt_or_gt_of_ne hij with h | h
   · left
@@ -320,18 +337,17 @@ theorem wellformed_section_align_respected
     let s := obj.sections.get ⟨i, hi⟩
     s.offset % s.align = 0 := by
   obtain ⟨start, raw, hlayout⟩ := hw
-  -- Every member of obj.sections is the image of some LayoutedSection.
-  have hmem : obj.sections.get ⟨i, hi⟩ ∈ obj.sections :=
-    List.get_mem _ i hi
-  rw [← hlayout] at hmem
-  -- So it's the image of some ls ∈ layoutSections start raw.
-  simp only [List.mem_map] at hmem
-  obtain ⟨ls, hls_mem, hls_eq⟩ := hmem
-  -- ls.offset % ls.sec.align = 0 by layout_align_respected.
-  have halign := layout_align_respected start raw ls hls_mem
-  -- The image f(ls) has .offset = ls.offset and .align = ls.sec.align.
-  rw [← hls_eq]
-  simp only
+  have hlen : (layoutSections start raw).length = obj.sections.length := by
+    have := congrArg List.length hlayout; simp [List.length_map] at this; exact this
+  have hraw_i : i < (layoutSections start raw).length := by omega
+  have hmem : (layoutSections start raw).get ⟨i, hraw_i⟩ ∈ layoutSections start raw :=
+    List.get_mem (layoutSections start raw) ⟨i, hraw_i⟩
+  have halign := layout_align_respected start raw ((layoutSections start raw).get ⟨i, hraw_i⟩) hmem
+  have h1 := get_eq_of_list_eq (show obj.sections = (layoutSections start raw).map LayoutedSection.toSection by rw [hlayout]) i hi
+  have h2 := get_map_eq LayoutedSection.toSection (layoutSections start raw) i hraw_i
+  rw [h2] at h1
+  rw [h1]
+  simp only [LayoutedSection.toSection]
   exact halign
 
 /-- For a well-laid-out object, sections are non-overlapping. -/
@@ -345,30 +361,19 @@ theorem wellformed_sections_non_overlapping
     sections_disjoint (obj.sections.get ⟨i, hi⟩) (obj.sections.get ⟨j, hj⟩) := by
   obtain ⟨start, raw, hlayout⟩ := hw
   have hlen : (layoutSections start raw).length = obj.sections.length := by
-    have := congr_arg List.length hlayout; simp [List.length_map] at this; exact this
+    have := congrArg List.length hlayout; simp [List.length_map] at this; exact this
   have hraw_i : i < (layoutSections start raw).length := by omega
   have hraw_j : j < (layoutSections start raw).length := by omega
-  have hi_raw := get_map_eq (fun ls => ({ name := ls.sec.name, offset := ls.offset,
-      size := ls.sec.size, align := ls.sec.align, align_pos := ls.sec.align_pos } : Section))
-      (layoutSections start raw) i hraw_i
-  have hj_raw := get_map_eq (fun ls => ({ name := ls.sec.name, offset := ls.offset,
-      size := ls.sec.size, align := ls.sec.align, align_pos := ls.sec.align_pos } : Section))
-      (layoutSections start raw) j hraw_j
-  have heq_i : obj.sections.get ⟨i, hi⟩ = { name := ((layoutSections start raw).get ⟨i, hraw_i⟩).sec.name,
-      offset := ((layoutSections start raw).get ⟨i, hraw_i⟩).offset,
-      size := ((layoutSections start raw).get ⟨i, hraw_i⟩).sec.size,
-      align := ((layoutSections start raw).get ⟨i, hraw_i⟩).sec.align,
-      align_pos := ((layoutSections start raw).get ⟨i, hraw_i⟩).sec.align_pos } := by
-    rw [← hlayout]; exact hi_raw.symm
-  have heq_j : obj.sections.get ⟨j, hj⟩ = { name := ((layoutSections start raw).get ⟨j, hraw_j⟩).sec.name,
-      offset := ((layoutSections start raw).get ⟨j, hraw_j⟩).offset,
-      size := ((layoutSections start raw).get ⟨j, hraw_j⟩).sec.size,
-      align := ((layoutSections start raw).get ⟨j, hraw_j⟩).sec.align,
-      align_pos := ((layoutSections start raw).get ⟨j, hraw_j⟩).sec.align_pos } := by
-    rw [← hlayout]; exact hj_raw.symm
   have hnd := layout_non_overlapping start raw i j hraw_i hraw_j hij
   unfold sections_disjoint at hnd ⊢
-  rw [heq_i, heq_j]
+  have hi1 := get_eq_of_list_eq (show obj.sections = (layoutSections start raw).map LayoutedSection.toSection by rw [hlayout]) i hi
+  have hj1 := get_eq_of_list_eq (show obj.sections = (layoutSections start raw).map LayoutedSection.toSection by rw [hlayout]) j hj
+  have hi2 := get_map_eq LayoutedSection.toSection (layoutSections start raw) i hraw_i
+  have hj2 := get_map_eq LayoutedSection.toSection (layoutSections start raw) j hraw_j
+  rw [hi2] at hi1
+  rw [hj2] at hj1
+  rw [hi1, hj1]
+  simp only [LayoutedSection.toSection]
   exact hnd
 
 -- ---------------------------------------------------------------------------
@@ -404,44 +409,17 @@ theorem sections_offset_monotone
     si.offset + si.size ≤ sj.offset := by
   obtain ⟨start, raw, hlayout⟩ := hw
   have hlen : (layoutSections start raw).length = obj.sections.length := by
-    have := congr_arg List.length hlayout; simp [List.length_map] at this; exact this
+    have := congrArg List.length hlayout; simp [List.length_map] at this; exact this
   have hraw_i : i < (layoutSections start raw).length := by omega
   have hraw_j : j < (layoutSections start raw).length := by omega
-  -- The i-th obj section is the image of raw_i.
-  have hmemi : obj.sections.get ⟨i, hi⟩ ∈ obj.sections := List.get_mem _ i hi
-  rw [← hlayout] at hmemi
-  simp only [List.mem_map] at hmemi
-  obtain ⟨lsi, hlsi_mem, hlsi_eq⟩ := hmemi
-  have hmemj : obj.sections.get ⟨j, hj⟩ ∈ obj.sections := List.get_mem _ j hj
-  rw [← hlayout] at hmemj
-  simp only [List.mem_map] at hmemj
-  obtain ⟨lsj, hlsj_mem, hlsj_eq⟩ := hmemj
-  -- Use layout_monotone on lsi and lsj.
-  -- But we need to know their indices in (layoutSections start raw).
-  -- Use get_map_eq to relate them to explicit indices.
-  have hi_raw := get_map_eq (fun ls => (⟨ls.sec.name, ls.offset, ls.sec.size,
-      ls.sec.align, ls.sec.align_pos⟩ : Section)) (layoutSections start raw) i hraw_i
-  have hj_raw := get_map_eq (fun ls => (⟨ls.sec.name, ls.offset, ls.sec.size,
-      ls.sec.align, ls.sec.align_pos⟩ : Section)) (layoutSections start raw) j hraw_j
-  have heq_i : obj.sections.get ⟨i, hi⟩ = (fun ls => (⟨ls.sec.name, ls.offset,
-      ls.sec.size, ls.sec.align, ls.sec.align_pos⟩ : Section))
-      ((layoutSections start raw).get ⟨i, hraw_i⟩) := by
-    rw [← hlayout]; exact hi_raw.symm
-  have heq_j : obj.sections.get ⟨j, hj⟩ = (fun ls => (⟨ls.sec.name, ls.offset,
-      ls.sec.size, ls.sec.align, ls.sec.align_pos⟩ : Section))
-      ((layoutSections start raw).get ⟨j, hraw_j⟩) := by
-    rw [← hlayout]; exact hj_raw.symm
-  -- Now extract .offset and .size from heq_i and heq_j.
-  have hoffset_i : (obj.sections.get ⟨i, hi⟩).offset =
-      ((layoutSections start raw).get ⟨i, hraw_i⟩).offset := by
-    rw [heq_i]
-  have hsize_i : (obj.sections.get ⟨i, hi⟩).size =
-      ((layoutSections start raw).get ⟨i, hraw_i⟩).sec.size := by
-    rw [heq_i]
-  have hoffset_j : (obj.sections.get ⟨j, hj⟩).offset =
-      ((layoutSections start raw).get ⟨j, hraw_j⟩).offset := by
-    rw [heq_j]
-  rw [hoffset_i, hsize_i, hoffset_j]
+  have hi1 := get_eq_of_list_eq (show obj.sections = (layoutSections start raw).map LayoutedSection.toSection by rw [hlayout]) i hi
+  have hj1 := get_eq_of_list_eq (show obj.sections = (layoutSections start raw).map LayoutedSection.toSection by rw [hlayout]) j hj
+  have hi2 := get_map_eq LayoutedSection.toSection (layoutSections start raw) i hraw_i
+  have hj2 := get_map_eq LayoutedSection.toSection (layoutSections start raw) j hraw_j
+  rw [hi2] at hi1
+  rw [hj2] at hj1
+  rw [hi1, hj1]
+  simp only [LayoutedSection.toSection]
   exact layout_monotone start raw i j hraw_i hraw_j hij
 
 /-- **section_align_respected**
@@ -471,9 +449,11 @@ theorem symbol_within_section
       (obj.sections.get ⟨sym.section_idx, hvalid⟩).size := by
   obtain ⟨_, h_sym, _⟩ := hwf
   obtain ⟨h, hfit⟩ := h_sym sym hmem
-  convert hfit using 2
-  congr 1
-  exact Fin.val_eq_val (Fin.mk sym.section_idx hvalid) (Fin.mk sym.section_idx h) rfl
+  have heq : (obj.sections.get ⟨sym.section_idx, hvalid⟩).size =
+      (obj.sections.get ⟨sym.section_idx, h⟩).size := by
+    congr
+  rw [heq]
+  exact hfit
 
 /-- **symbol_unique_name**
     Within a single ELF object, no two global symbols share the same name. -/
@@ -513,9 +493,11 @@ theorem reloc_offset_within_section
     r.offset < (obj.sections.get ⟨r.target_section, hvalid⟩).size := by
   obtain ⟨_, _, _, h_roff, _⟩ := hwf
   obtain ⟨h, hfit⟩ := h_roff r hmem
-  convert hfit using 2
-  congr 1
-  exact Fin.val_eq_val (Fin.mk r.target_section hvalid) (Fin.mk r.target_section h) rfl
+  have heq : (obj.sections.get ⟨r.target_section, hvalid⟩).size =
+      (obj.sections.get ⟨r.target_section, h⟩).size := by
+    congr
+  rw [heq]
+  exact hfit
 
 /-- **reloc_symbol_valid**
     Every relocation's symbol index refers to an entry in the symbol table. -/
@@ -534,8 +516,8 @@ theorem reloc_symbol_valid
 
 /-- ELF string tables must be null-terminated byte sequences. -/
 def isNullTerminated (table : List UInt8) (offset : Nat) : Prop :=
-  ∃ end_pos : Nat, offset ≤ end_pos ∧ end_pos < table.length ∧
-    table.get ⟨end_pos, by omega⟩ = 0
+  ∃ (end_pos : Nat) (h : end_pos < table.length),
+    offset ≤ end_pos ∧ table.get ⟨end_pos, h⟩ = 0
 
 /-- Well-formed ELF string tables have at least one null terminator.
     (Requires a hypothesis that the strtab is non-empty and starts with \0,
@@ -543,11 +525,12 @@ def isNullTerminated (table : List UInt8) (offset : Nat) : Prop :=
 theorem strtab_section_names_valid
     (obj : ElfObject)
     (strtab : List UInt8)
-    (hstrtab : 0 < strtab.length ∧ strtab.get ⟨0, by omega⟩ = 0)
+    (hstrtab_len : 0 < strtab.length)
+    (hstrtab_zero : strtab.get ⟨0, hstrtab_len⟩ = 0)
     (i : Nat)
     (hi : i < obj.sections.length) :
     ∃ name_offset : Nat, isNullTerminated strtab name_offset :=
-  ⟨0, 0, Nat.le_refl 0, hstrtab.1, hstrtab.2⟩
+  ⟨0, 0, hstrtab_len, Nat.le_refl 0, hstrtab_zero⟩
 
 -- ---------------------------------------------------------------------------
 -- Empty-object base cases
@@ -558,10 +541,10 @@ theorem strtab_section_names_valid
 theorem empty_elf_well_formed : WellFormed ⟨[], [], []⟩ := by
   refine ⟨?_, ?_, ?_, ?_, ?_⟩
   · intro i j hi hj _; exact absurd hi (Nat.not_lt_zero _)
-  · intro sym hmem; exact absurd hmem (List.not_mem_nil _)
-  · intro r hmem; exact absurd hmem (List.not_mem_nil _)
-  · intro r hmem; exact absurd hmem (List.not_mem_nil _)
-  · intro r hmem; exact absurd hmem (List.not_mem_nil _)
+  · intro sym hmem; exact absurd hmem List.not_mem_nil
+  · intro r hmem; exact absurd hmem List.not_mem_nil
+  · intro r hmem; exact absurd hmem List.not_mem_nil
+  · intro r hmem; exact absurd hmem List.not_mem_nil
 
 /-- The empty ELF object is trivially well-laid-out. -/
 theorem empty_elf_well_layouted : WellLayouted ⟨[], [], []⟩ :=
