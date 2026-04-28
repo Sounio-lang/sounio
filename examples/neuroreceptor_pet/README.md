@@ -1,24 +1,34 @@
 # Executable Epistemic PET Kinetics: GUM-Compliant Propagation of PBPK-Informed Uncertainty into Receptor Binding Metrics
 
-**NRM 2026 Late-Breaking Abstract — Vertical Slice (Numerically Audited, 8 Priors)**
+**NRM 2026 Late-Breaking Abstract — Proof-of-Concept Vertical Slice**
 
-This example implements a minimal, reproducible **two-tissue compartment model (2TCM)** for PET neuroreceptor imaging with **GUM-compliant uncertainty propagation** (JCGM 100:2008 §5.1.3) across eight epistemic priors — including PBPK-informed `fu_plasma` and `bbb_scalar`. Methodology mirrors `stdlib/darwin_pbpk/epistemic_pbpk14.sio`.
+> **Scope note.** This is a minimal, reproducible **proof-of-concept** for
+> executable epistemic PET modelling in Sounio. It is explicitly **not** a
+> clinical PET fitting package, not equivalent to PMOD/AMIDE/PNEURO, and
+> has **not** been fitted to any patient dataset. All quantitative claims
+> are audited in [`AUDIT_REPORT.md`](AUDIT_REPORT.md).
+
+This example implements a minimal **two-tissue compartment model (2TCM)** with
+**GUM-compliant uncertainty propagation** (JCGM 100:2008 §5.1.3) across eight
+epistemic priors, including the PBPK-informed scalars `fu_plasma` and
+`bbb_scalar`. The methodology mirrors `stdlib/darwin_pbpk/epistemic_pbpk14.sio`.
 
 ## Files
 
 | File | Role |
 |------|------|
-| `pet_2tcm_epistemic.sio` | Main 2TCM + GUM audit (12 numerical tests) |
-| `pet_2tcm_export.sio` | CSV exporter for TAC curve (stdout → file) |
-| `pet_tracer_variants.sio` | Four-tracer variants (raclopride, flumazenil, DASB, PK11195) |
-| `pet_srtm.sio` | SRTM (Lammertsma & Hume 1996) validated against 2TCM in both regimes |
-| `pet_fit_validation.sio` | Parameter recovery from noisy synthetic TAC via coordinate descent |
-| `pet_fit_montecarlo.sio` | Monte Carlo bias/precision analysis (20 realizations) |
-| `pet_lammertsma1996_analysis.sio` | **Real-data** analysis: reproduces Lammertsma 1996 Table 3 BP values from Table 2 V_T |
+| `pet_2tcm_epistemic.sio` | Main 2TCM + GUM audit (12 numerical acceptance tests) |
+| `pet_2tcm_export.sio` | CSV exporter for the synthetic TAC curve (stdout → file) |
+| `pet_tracer_variants.sio` | Same 2TCM+GUM code exercised with four literature-anchored prior sets (illustrative, not tracer-specific validation) |
+| `pet_srtm.sio` | SRTM (Lammertsma & Hume 1996) solver with 2TCM side-by-side in both rapid-equilibrium and slow-binding regimes |
+| `pet_fit_validation.sio` | Single-realisation parameter-recovery stress test (coordinate-descent) |
+| `pet_fit_montecarlo.sio` | 20-realisation Monte-Carlo stress test (LCG + Irwin-Hall noise) |
+| `pet_lammertsma1996_analysis.sio` | **Algebraic consistency check** of the Innis 2007 formula `BP = V_T_tar/V_T_ref − 1` against the published aggregate V_T/BP summary values in Lammertsma 1996 Tables 2 and 3. **Not** a fit to real dynamic TAC data. |
 | `NRM2026_ABSTRACT.md` | Late-breaking abstract draft |
-| `LITERATURE_VALIDATION.md` | Prior comparison vs [11C]raclopride literature |
-| `results/audit_output.txt` | Captured audit run stdout |
-| `results/tac_curve.csv` | Generated TAC curve (1-min sampling) |
+| `LITERATURE_VALIDATION.md` | Prior ranges vs [11C]raclopride literature |
+| `AUDIT_REPORT.md` | Audit of every numerical claim in this folder |
+| `results/*.txt` | Captured stdout for each acceptance run |
+| `results/tac_curve.csv` | Generated synthetic TAC curve |
 
 ## Model
 
@@ -114,13 +124,33 @@ All synthetic priors fall inside published ranges for **[11C]raclopride in human
 
 ## Honest Scientific Status
 
-**Numerically audited** — 12/12 tests pass, finite-difference derivatives agree with delta-method analytic predictions at sub-percent level.
+**Numerically audited.** `pet_2tcm_epistemic.sio` passes 12/12 internal
+acceptance tests. Finite-difference derivatives agree with analytic delta-method
+predictions at sub-percent level. See [`AUDIT_REPORT.md`](AUDIT_REPORT.md) for
+per-file pass/fail details.
 
-**Literature-anchored** — priors sit at the centre of published [11C]raclopride in human striatum ranges (Lammertsma 1996; Farde 1989; Innis 2007 consensus).
+**Literature-anchored priors.** Priors are set inside published [11C]raclopride
+in human striatum ranges (Lammertsma 1996; Farde 1989; Innis 2007). Priors are
+*not* fitted to any patient or phantom data.
 
-**Not a clinical tool.** Priors are plausible but unfitted. Fixed-step RK4 only. Synthetic plasma input. No hierarchical modeling, no partial volume correction, no real patient data.
+**What this package is not.**
 
-The implementation strictly follows the style, safety patterns, and GUM methodology of `stdlib/darwin_pbpk/epistemic_pbpk14.sio`. No compiler or core PBPK infrastructure was modified.
+- Not a clinical PET fitting package.
+- Not equivalent to PMOD / AMIDE / PNEURO.
+- Not validated against real dynamic TAC data.
+- Not a substitute for peer-reviewed kinetic modelling software.
+- Fixed-step RK4 only, synthetic exponential plasma input, no hierarchical
+  modelling, no partial-volume correction, no metabolite correction, no delay /
+  dispersion modelling, no frame weighting.
+- The Monte-Carlo file uses a simple coordinate-descent optimiser on a discrete
+  multiplier grid — not Levenberg-Marquardt or a production nonlinear fitter.
+- The `pet_lammertsma1996_analysis.sio` script is a closed-form algebraic
+  consistency check on *published aggregate summary statistics* (Lammertsma
+  1996 Tables 2 and 3), not a re-analysis of raw dynamic PET data.
+
+The implementation follows the style, safety patterns, and GUM methodology of
+`stdlib/darwin_pbpk/epistemic_pbpk14.sio`. No compiler or core PBPK
+infrastructure was modified.
 
 ## NRM 2026 Framing
 
