@@ -158,6 +158,7 @@ See `NRM2026_ABSTRACT.md` for the late-breaking abstract draft. Core contributio
 
 ---
 
-**Repository:** Sounio-lang/darwin-pbpk
+**Repository:** Sounio-lang/sounio (https://github.com/Sounio-lang/sounio)
 **Branch:** `integration/sounio-dev-ready-base`
+**Audited commit:** `2e817fcbde01b14ac3524c09e4ae0d88d72d83c3`
 **Audit status:** 12/12 PASS as of 2026-04-28
