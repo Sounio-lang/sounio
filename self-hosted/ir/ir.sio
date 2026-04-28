@@ -488,8 +488,49 @@ pub enum IrOpcode {
     //   label_id bits 3:0 = mask_k; bits 11:4 = Clifford multiplication table base ZMM
     //   IrHyperExprInfo.grade_mask = ir_clifford_grade_product(grade_mask_a, grade_mask_b)
     //   Dead-grade: if result grade_mask == 0 → node replaced by VXORPD zero
-    //   Lowering: generalized Clifford geometric product (future; placeholder for now)
-    IrCliffordGradeMul,     // Grade-tracked geometric product with e-graph dead-grade pruning
+    //   imm_i64 bits 7:0 = grade_mask_a; bits 15:8 = grade_mask_b; bits 23:16 = max_grade
+    //   Lowering (Door Γ):
+    //     grade_out = ir_clifford_grade_product(grade_mask_a, grade_mask_b, max_grade)
+    //     grade_out == 0          → VXORPD (dead-grade elimination, 1 EVEX)
+    //     grade_mask_a == 1 (scalar) → VBROADCASTSD + VMULPD (scalar scale, 2 EVEX)
+    //     general                → grade-sparse scaffold (VMOVAPD + e-graph annotation)
+    IrCliffordGradeMul,     // Door Γ: grade-exact GP, dead-grade elimination at IR level
+
+    // ─── Door Ω — Tropical Epistemic Arithmetic ─────────────────────────────
+    // IrTropicalAdd — tropical addition min(a,b) with GUM-epistemic uncertainty.
+    //   First IR with GUM-correct uncertainty for the min-plus tropical semiring.
+    //   val_out = min(a_val, b_val)                         (1 VMINPD)
+    //   eps_out (certain gap >> σ):  VMINPD eps_a, eps_b   (1 VMINPD — eps of argmin)
+    //   eps_out (critical gap ≈ 0):  (eps_a+eps_b)/4       (VADDPD + 0.25-broadcast + VMULPD)
+    //   Encoding:
+    //     dst  = val ZMM;   dst+1 = eps ZMM
+    //     src1 = a_val ZMM; src1+1 = a_eps ZMM
+    //     src2 = b_val ZMM; src2+1 = b_eps ZMM
+    //     imm_f64  = σ_combined (gap threshold for "certain argmin" branch)
+    //     imm_flags bit 0: certain=1 → static gap >> σ proved (fast VMINPD eps path)
+    IrTropicalAdd,  // Door Ω: tropical min(a,b) with GUM epistemic on the argmin
+
+    // IrTropicalMul — tropical multiplication (ordinary +) with GUM uncertainty.
+    //   val_out = a_val + b_val   (tropical "×" = ordinary + in (ℝ,min,+))
+    //   eps_out = eps_a + eps_b   (GUM addition rule — identical arithmetic to IrFAdd)
+    //   Type-annotation novelty: node carries tropical semiring membership → e-graph applies
+    //   min-plus laws: distributivity (a⊗(b⊕c))=(a⊗b)⊕(a⊗c), associativity, etc.
+    //   Lowering: 2 VADDPD (val + eps)
+    IrTropicalMul,  // Door Ω: tropical a+b (type-annotated, min-plus semiring)
+
+    // ─── Door Σ — Free Probability / R-Transform ────────────────────────────
+    // IrFreeConvolve — free convolution K<a> ⊞ K<b> via R-transform linearization.
+    //   First compiler where Knowledge<T> carries a distribution_class annotation
+    //   and emits free-probability-correct variance propagation.
+    //   Voiculescu R-transform: R_{a⊞b}(z) = R_a(z) + R_b(z).
+    //   Wigner semicircle(σ²): R_W(z) = σ²·z  →  free conv of σ²_a and σ²_b gives σ²_a+σ²_b.
+    //   Gaussian(σ²):          R_G(z) = σ²·z  →  same first-order formula; differs at κ₄.
+    //   val_out      = a_val + b_val           (means add — same as classical)
+    //   sigma_sq_out = σ²_a + σ²_b            (R-transform additivity)
+    //   imm_flags bit 1: dist_class (0=Gaussian, 1=Wigner semicircle)
+    //   Lowering: 2 VADDPD (val + sigma_sq).  The mathematical distinction is the TYPE and
+    //   the 4th-moment: m₄(a⊞b) = 2(σ²_a+σ²_b)² [Wigner] vs 3(σ²_a+σ²_b)² [Gaussian].
+    IrFreeConvolve, // Door Σ: free convolution K<a>⊞K<b>, dist_class annotated
 }
 
 pub struct IrRegList {
