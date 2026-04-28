@@ -12,7 +12,7 @@
 
 **Objective.** We present a reproducible, executable vertical slice that propagates GUM-compliant (JCGM 100:2008 §5.1.3) epistemic uncertainty from eight priors (K1, k2, k3, k4, plasma input amplitude, plasma decay, fu_plasma, bbb_scalar) through a standard two-tissue compartment model (2TCM) to V_T and BP_ND, using the same finite-difference Jacobian methodology already validated in a 14-compartment PBPK model in the same Sounio language codebase.
 
-**Methods.** The 2TCM is integrated with a fixed-step classical RK4 (dt = 0.05 min, t = 0..60 min) against a synthetic exponential plasma input. Sensitivity coefficients c_i = ∂y/∂θ_i are obtained by symmetric forward differences with step h_i = max(10⁻⁶|μ_i|, 10⁻²·σ_i). The combined variance Var(y) = Σ c_i² Var(θ_i) is computed for TAC AUC, TAC peak, V_T, and BP_ND, together with normalized sensitivity fractions and an evidence-weighted confidence score.
+**Methods.** The 2TCM is integrated with a fixed-step classical RK4 (dt = 0.05 min, t = 0..60 min) against a synthetic exponential plasma input. The model equations are exactly those of the Lammertsma / Innis consensus formulation [Lammertsma 1996; Innis 2007], with `V_T = (K₁_eff/k₂)·(1 + k₃/k₄)` and `BP_ND = k₃/k₄`. Sensitivity coefficients `c_i = ∂y/∂θ_i` are obtained by forward differences with step `h_i = max(10⁻⁶|μ_i|, 10⁻²·σ_i)`. The combined variance `Var(y) = Σ c_i² Var(θ_i)` is computed for TAC AUC, TAC peak, V_T, and BP_ND, together with normalized sensitivity fractions and an evidence-weighted confidence score. Synthetic priors are chosen at the centre of the published [11C]raclopride human-striatum range (K₁ 0.15, k₂ 0.20, k₃ 0.10, k₄ 0.05), giving reference V_T = 2.25 and BP_ND = 2.00 — both inside the published range 2–4 and 1.5–3.0 respectively.
 
 **Results.** All 12 internal numerical audits pass. Computed values agree with analytic delta-method predictions to ≤ 0.5 %: V_T SD 0.696 (analytic 0.695), BP_ND SD 0.565 (analytic 0.566), d(BP_ND)/dk3 20.00 (analytic 20), d(V_T)/dfu 2.250 (analytic 2.25). The model correctly recovers the structural insensitivity of BP_ND to both fu_plasma and bbb_scalar (d = 0), demonstrating that GUM propagation separates kinetic-binding from PBPK-input uncertainty at the level of individual partial derivatives.
 
@@ -25,10 +25,11 @@
 This submission is **not** a clinical fitting tool. It is a minimal, fully auditable vertical slice that demonstrates the feasibility of executable epistemic PET modeling with analytic-level numerical fidelity in a strongly-typed, self-hosted language (Sounio).
 
 The scientific differentiation:
-1. **Analytic-level fidelity** of finite-difference derivatives (≤ 0.5% error vs delta-method).
-2. **Structural insensitivity** of BP_ND to fu_plasma and bbb_scalar correctly recovered.
-3. **PBPK-PET coupling** at the level of sensitivity fractions (10.4% of V_T variance attributed to fu_plasma, 10.4% to bbb_scalar in the synthetic prior set).
-4. **Full reproducibility**: single-file source + deterministic integrator + 12 internal audits + CSV export.
+1. **Analytic-level fidelity** of finite-difference derivatives (≤ 0.5 % error vs delta-method).
+2. **Literature-anchored priors** — every prior at the centre of the published [11C]raclopride human-striatum range (Lammertsma 1996; Farde 1989).
+3. **Structural insensitivity** of BP_ND to fu_plasma and bbb_scalar correctly recovered (d = 0 exactly).
+4. **PBPK-PET coupling** at the level of sensitivity fractions: 10.4 % of V_T variance attributed to fu_plasma, 10.4 % to bbb_scalar.
+5. **Full reproducibility**: single-file source + deterministic integrator + 12 internal audits + CSV export + literature-comparison table.
 
 ## Artifacts
 
@@ -36,8 +37,17 @@ The scientific differentiation:
 - Export: `examples/neuroreceptor_pet/pet_2tcm_export.sio` (CSV TAC curve)
 - Audit log: `examples/neuroreceptor_pet/results/audit_output.txt`
 - TAC curve: `examples/neuroreceptor_pet/results/tac_curve.csv`
+- Literature comparison: `examples/neuroreceptor_pet/LITERATURE_VALIDATION.md`
 - Repository: Sounio-lang/darwin-pbpk @ `integration/sounio-dev-ready-base`
 - Commit context: numerical audit commit (see `git log examples/neuroreceptor_pet/`)
+
+## Key References
+
+1. Lammertsma AA *et al.* Comparison of methods for analysis of clinical [11C]raclopride studies. *J Cereb Blood Flow Metab* 1996; 16: 42–52.
+2. Farde L *et al.* Kinetic analysis of central [11C]raclopride binding to D2-dopamine receptors. *J Cereb Blood Flow Metab* 1989; 9: 696–708.
+3. Innis RB *et al.* Consensus nomenclature for in vivo imaging of reversibly binding radioligands. *J Cereb Blood Flow Metab* 2007; 27: 1533–1539.
+4. Gunn RN *et al.* Parametric imaging of ligand-receptor binding in PET using a simplified reference region model. *Neuroimage* 1997; 6: 279–287.
+5. JCGM 100:2008. Evaluation of measurement data — Guide to the expression of uncertainty in measurement (GUM). BIPM.
 
 ## Limitations (explicitly acknowledged)
 
