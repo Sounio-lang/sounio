@@ -87,7 +87,24 @@ private theorem neg_add_cancel_right (a rest : α) : -a + (a + rest) = rest := b
 private theorem neg_mul_neg (a b : α) : -a * -b = a * b := by
   rw [F.neg_mul, F.mul_neg, F.neg_neg]
 
-private theorem neg_add_dist (a b : α) : -(a + b) = -a + -b := by sorry
+private theorem neg_add_dist (a b : α) : -(a + b) = -a + -b := by
+  have h1 : (a + b) + (-a + -b) = 𝟎 := by
+    rw [← F.add_assoc (a + b)]
+    rw [F.add_comm a b]
+    rw [F.add_assoc b]
+    rw [F.add_neg_cancel]
+    rw [F.add_zero]
+    rw [F.add_neg_cancel]
+  have h2 : (a + b) + -(a + b) = 𝟎 := F.add_neg_cancel (a + b)
+  have h3 : -(a + b) + ((a + b) + -(a + b)) = -(a + b) + ((a + b) + (-a + -b)) := by
+    rw [h2, h1]
+  rw [← F.add_assoc (-(a + b))] at h3
+  rw [F.neg_add_cancel] at h3
+  rw [F.zero_add] at h3
+  rw [← F.add_assoc (-(a + b))] at h3
+  rw [F.neg_add_cancel] at h3
+  rw [F.zero_add] at h3
+  exact h3
 
 private theorem foldl_acc_eq (xs : List α) (acc : α) :
     xs.foldl (· + ·) acc = acc + xs.foldl (· + ·) 𝟎 := by
@@ -205,7 +222,37 @@ theorem sum_error_bound
     (h_len   : terms.length = bounds.length)
     (h_bound : ∀ i : Fin terms.length,
                  |terms.get i| ≤ bounds.get ⟨i.val, h_len ▸ i.isLt⟩) :
-    |terms.foldl (· + ·) 𝟎| ≤ bounds.foldl (· + ·) 𝟎 := by sorry
+    |terms.foldl (· + ·) 𝟎| ≤ bounds.foldl (· + ·) 𝟎 := by
+  induction terms generalizing bounds with
+  | nil =>
+    simp only [List.foldl_nil]
+    rw [F.abs_zero]
+    cases bounds with
+    | nil => exact F.le_refl _
+    | cons b bs =>
+      simp only [List.length] at h_len
+      cases h_len
+  | cons t ts ih =>
+    cases bounds with
+    | nil =>
+      simp only [List.length] at h_len
+      cases h_len
+    | cons bnd bnds =>
+      simp only [List.length, Nat.succ.injEq] at h_len
+      rw [foldl_zero_cons t ts, foldl_zero_cons bnd bnds]
+      have ht : |t| ≤ bnd := by
+        have := h_bound ⟨0, Nat.zero_lt_succ _⟩
+        simp only [List.get] at this
+        exact this
+      have ih_applied : |ts.foldl (· + ·) 𝟎| ≤ bnds.foldl (· + ·) 𝟎 := by
+        apply ih bnds h_len
+        intro ⟨i, hi⟩
+        have := h_bound ⟨i + 1, Nat.succ_lt_succ hi⟩
+        simp only [List.get] at this ⊢
+        exact this
+      have step1 : |t + ts.foldl (· + ·) 𝟎| ≤ |t| + |ts.foldl (· + ·) 𝟎| := F.abs_triangle _ _
+      have step2 : |t| + |ts.foldl (· + ·) 𝟎| ≤ bnd + bnds.foldl (· + ·) 𝟎 := F.add_le_add _ _ _ _ ht ih_applied
+      exact F.le_trans _ _ _ step1 step2
 
 -- ---------------------------------------------------------------------------
 -- §9. gemm_dot_product_soundness: K-element dot product
@@ -228,10 +275,90 @@ theorem gemm_dot_product_soundness
                     bes.get ⟨i.val, h_len_b ▸ (h_tb ▸ i.isLt)⟩) :
     let true_terms := List.zipWith (· * ·) tas tbs
     let val_terms  := List.zipWith (· * ·) avs bvs
-    let eps_terms  := zipWith3 (fun av_abs ae be =>
-                        av_abs * be + be * ae + ae * be)
-                        (List.map (fun x => @AbsField.abs α F x) avs) aes bes
+    let avs_abs    := List.map (fun x => @AbsField.abs α F x) avs
+    let bvs_abs    := List.map (fun x => @AbsField.abs α F x) bvs
+    let eps_terms  := List.zipWith (· + ·)
+                        (List.zipWith (· + ·)
+                          (List.zipWith (· * ·) avs_abs bes)
+                          (List.zipWith (· * ·) bvs_abs aes))
+                        (List.zipWith (· * ·) aes bes)
     |true_terms.foldl (· + ·) 𝟎 + -(val_terms.foldl (· + ·) 𝟎)| ≤
-      eps_terms.foldl (· + ·) 𝟎 := by sorry
+      eps_terms.foldl (· + ·) 𝟎 := by
+  induction avs generalizing aes bvs bes tas tbs with
+  | nil =>
+    have htas : tas = [] := by
+      have h0 : tas.length = 0 := by simp [h_ta]
+      exact List.eq_nil_of_length_eq_zero h0
+    have hbvs : bvs = [] := by
+      have h0 : bvs.length = 0 := by
+        have h : [].length = bvs.length := h_len_ab
+        simp at h
+        exact h.symm
+      exact List.eq_nil_of_length_eq_zero h0
+    have htbs : tbs = [] := by
+      have h0 : tbs.length = 0 := by simp [h_tb, hbvs]
+      exact List.eq_nil_of_length_eq_zero h0
+    rw [htas, htbs]
+    simp only [List.zipWith, List.map, List.foldl_nil]
+    rw [F.add_neg_cancel, F.abs_zero]
+    exact F.le_refl _
+  | cons av avs ih =>
+    cases aes with
+    | nil => simp only [List.length] at h_len_a; cases h_len_a
+    | cons ae aes =>
+    cases bvs with
+    | nil => simp only [List.length] at h_len_ab; cases h_len_ab
+    | cons bv bvs =>
+    cases bes with
+    | nil => simp only [List.length] at h_len_b; cases h_len_b
+    | cons be bes =>
+    cases tas with
+    | nil => simp only [List.length] at h_ta; cases h_ta
+    | cons ta tas =>
+    cases tbs with
+    | nil => simp only [List.length] at h_tb; cases h_tb
+    | cons tb tbs =>
+    simp only [List.length, Nat.succ.injEq] at h_len_a h_len_b h_len_ab h_ta h_tb
+    simp only [List.zipWith, List.map]
+    simp only [List.foldl_cons, F.zero_add]
+    rw [foldl_acc_eq (List.zipWith (· * ·) tas tbs) (ta * tb)]
+    rw [foldl_acc_eq (List.zipWith (· * ·) avs bvs) (av * bv)]
+    rw [foldl_acc_eq
+          (List.zipWith (· + ·)
+            (List.zipWith (· + ·)
+              (List.zipWith (· * ·) (List.map (fun x => @AbsField.abs α F x) avs) bes)
+              (List.zipWith (· * ·) (List.map (fun x => @AbsField.abs α F x) bvs) aes))
+            (List.zipWith (· * ·) aes bes))
+          (|av| * be + |bv| * ae + ae * be)]
+    rw [neg_add_dist (av * bv)]
+    rw [F.add_assoc (ta * tb)]
+    rw [add_left_comm ((List.zipWith (· * ·) tas tbs).foldl (· + ·) 𝟎)]
+    rw [← F.add_assoc (ta * tb)]
+    have tri := F.abs_triangle (ta * tb + -(av * bv))
+      ((List.zipWith (· * ·) tas tbs).foldl (· + ·) 𝟎 +
+       -((List.zipWith (· * ·) avs bvs).foldl (· + ·) 𝟎))
+    have head_ae : 𝟎 ≤ ae := h_nonneg_ae ⟨0, Nat.zero_lt_succ _⟩
+    have head_be : 𝟎 ≤ be := h_nonneg_be ⟨0, Nat.zero_lt_succ _⟩
+    have head_ha : |ta + -av| ≤ ae := by
+      have := h_err_a ⟨0, Nat.zero_lt_succ _⟩
+      simp only [List.get] at this; exact this
+    have head_hb : |tb + -bv| ≤ be := by
+      have := h_err_b ⟨0, Nat.zero_lt_succ _⟩
+      simp only [List.get] at this; exact this
+    have head_bound : |ta * tb + -(av * bv)| ≤ |av| * be + |bv| * ae + ae * be :=
+      mul_error_bound ta tb av bv ae be head_ha head_hb head_ae head_be
+    have tail_bound :=
+      ih aes bvs bes tas tbs h_len_a h_len_b h_len_ab h_ta h_tb
+        (fun i => h_nonneg_ae ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+        (fun i => h_nonneg_be ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+        (fun i => by
+          have := h_err_a ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩
+          simp only [List.get] at this ⊢
+          exact this)
+        (fun i => by
+          have := h_err_b ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩
+          simp only [List.get] at this ⊢
+          exact this)
+    exact F.le_trans _ _ _ tri (F.add_le_add _ _ _ _ head_bound tail_bound)
 
 end Sounio.EpistemicGemm
