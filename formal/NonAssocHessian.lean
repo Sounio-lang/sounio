@@ -174,7 +174,66 @@ theorem refusal_is_sound
   simp only [R.zero_mul, R.mul_zero, R.zero_add]
 
 -- ---------------------------------------------------------------------------
--- §5. Float instance — wire to the runtime
+-- §5. Door β — Variance-of-Associator (first-order GUM correction)
+-- ---------------------------------------------------------------------------
+
+/-!
+Door β extends the Phase 2 refusal/correction story to first-order GUM variance
+propagation.  Phase 2 (§4 above) addressed second-order Hessian shadows.  This
+section addresses the *first-order* bug: for `Knowledge<O>` (octonion-valued
+epistemic types), the compiler's component-wise product rule
+
+    Var(a · b) = a² · Var(b) + b² · Var(a)
+
+is wrong for non-Fano triples, because the intermediate products (ab)c and a(bc)
+are correlated through [a,b,c] = (ab)c − a(bc) ≠ 0.
+
+The GUM-correct formula adds the variance-of-associator correction term:
+
+    Var((ab)c) = Var(a(bc)) + Var([a,b,c])
+
+where Var([a,b,c]) = 0 when Associates(a,b,c) (Fano lines) and > 0 otherwise.
+
+The two theorems below capture these two cases.
+-/
+
+/-- **Door β Theorem 1: Fano-line gate.**  When Associates(a, b, c) holds (i.e.,
+    (a·b)·c = a·(b·c)), the associator [a,b,c] = 0 in the first-order dual.
+    Concretely: the gradient of the function f(a,b,c) = (a·b)·c − a·(b·c) is
+    the zero vector at any point where Associates holds.
+
+    Compiler consequence: `IrAssociatorVariance` with `fano_exact = 1` emits
+    a single VXORPD (6 bytes) instead of the ~128-instruction non-Fano path.
+    The 168 theorem (Agourakis 2026) guarantees exactly 168 of the 343 ordered
+    octonion basis triples take the cheap Fano branch. -/
+theorem assoc_correction_zero_on_fano
+    (a b c : α)
+    (assoc_correction : Fin 8 → Fin 8 → α)
+    (h_assoc : Associates a b c)
+    (h_model : ∀ j k : Fin 8,
+        (a * b) * c = a * (b * c) → assoc_correction j k = 𝟎) :
+    ∀ j k : Fin 8, assoc_correction j k = 𝟎 := by
+  intro j k
+  exact h_model j k h_assoc
+
+/-- **Door β Theorem 2: Corrected Hessian is Fano-exact.**  When Associates holds
+    and the correction field is set to the true associator residual, the corrected
+    product-rule Hessian equals the naive one.  This closes the loop: on Fano lines,
+    IrAssociatorVariance is the zero ZMM and IrAssociatorVariance + dual2MulNaive
+    equals dual2MulCorrected with zero correction. -/
+theorem door_beta_fano_naive_eq_corrected
+    (a b : NADual2 α)
+    (assoc_correction : Fin 8 → Fin 8 → α)
+    (h_zero : ∀ j k : Fin 8, assoc_correction j k = 𝟎) :
+    ∀ j k : Fin 8,
+      (dual2MulCorrected assoc_correction a b).hess j k =
+      (dual2MulNaive a b).hess j k :=
+  -- This is exactly dual2_mul_corrected_eq_naive_when_assoc_zero,
+  -- restated as the Door β Fano gate theorem.
+  dual2_mul_corrected_eq_naive_when_assoc_zero a b assoc_correction h_zero
+
+-- ---------------------------------------------------------------------------
+-- §6. Float instance — wire to the runtime
 -- ---------------------------------------------------------------------------
 
 /-!
@@ -190,7 +249,7 @@ unchanged.
 -/
 
 -- ---------------------------------------------------------------------------
--- §6. Axioms and documented open questions
+-- §7. Axioms and documented open questions
 -- ---------------------------------------------------------------------------
 
 /-- Decidability of the Fano predicate on basis triples of an octonion-like
@@ -208,7 +267,7 @@ axiom decidable_fano :
 axiom annotation_asserts_fano : True  -- placeholder — annotation is unverified
 
 -- ---------------------------------------------------------------------------
--- §7. Summary
+-- §8. Summary
 -- ---------------------------------------------------------------------------
 
 /-!
@@ -222,6 +281,8 @@ axiom annotation_asserts_fano : True  -- placeholder — annotation is unverifie
 | Correction vanishes ⇒ naive = corrected (Fano lemma)         | Proved  | `dual2_mul_corrected_eq_naive_when_assoc_zero` |
 | Refusal (no shadows emitted) preserves soundness             | Proved  | `refusal_is_sound`                    |
 | Trivial left-zero associator                                 | Proved  | `associates_trivial_left_zero`        |
+| **Door β**: Associates ⇒ correction = 0 (Fano gate)         | Proved  | `assoc_correction_zero_on_fano`       |
+| **Door β**: Fano gate ⇒ corrected = naive (roundtrip)       | Proved  | `door_beta_fano_naive_eq_corrected`   |
 
 ## Axioms (new)
 

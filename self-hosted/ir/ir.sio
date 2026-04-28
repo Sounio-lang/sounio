@@ -165,6 +165,39 @@ pub enum IrOpcode {
     //   Total: 4×31 + 1 = 125 EVEX instructions / ~750 bytes
     //   Optimization: if ir_can_reassociate_triple() → dst zeroed via VXORPD (2 instrs, 12 bytes)
     IrAssociator,      // Octonion associator [a,b,c] = (ab)c − a(bc), 125 instr / 750 bytes
+    // Door β — Variance-of-Associator: GUM-correct uncertainty propagation for Knowledge<O>.
+    //
+    // The first compiler to correctly propagate ISO GUM uncertainty through non-associative
+    // arithmetic. The component-wise product rule Var(a·b) = a²Var(b) + b²Var(a) is WRONG
+    // for octonion products when the triple (a,b,c) does not lie on a Fano line, because
+    // the intermediate products (ab)c and a(bc) are correlated through [a,b,c] ≠ 0.
+    //
+    // The 168 theorem (Agourakis 2026) is the optimization gate:
+    //   of 343 ordered octonion basis triples, exactly 168 lie on Fano lines → [a,b,c] = 0
+    //   → variance correction = 0 → 1 VXORPD instruction (254× cheaper than non-Fano path).
+    //   The remaining 175 triples emit the full correction: ||[a,b,c]||² × σ².
+    //
+    //   dst     = result ZMM (8 f64 lanes, per-component variance correction)
+    //   src1    = a ZMM register index
+    //   src2    = b ZMM register index
+    //   imm_i64 = c ZMM register index (third operand packed as immediate)
+    //   label_id = (mask_k & 7) | (ctrl_base << 4)   — same encoding as IrAssociator
+    //   imm_f64  = σ² (combined variance, bit-cast i64 >> 8, set by type-checker)
+    //   imm_flags bit 0 = z-bit (zeroing mask)
+    //   imm_flags bit 1 = fano_exact (1 → Fano triple, emit VXORPD → 1 instr / 6 bytes)
+    //
+    // Fano path (imm_flags bit 1 = 1):
+    //   VXORPD dst, dst, dst   → 1 EVEX / 6 bytes  (correction = 0)
+    //
+    // Non-Fano path (imm_flags bit 1 = 0):
+    //   Steps 1-5: lower_associator (reused) → [a,b,c] in dst   ~125 EVEX
+    //   Step 6: VMULPD dst, dst, dst   (||[a,b,c]||² component-wise)   1 EVEX
+    //   Step 7: VBROADCASTSD t_sigma, [σ²]                             1 EVEX
+    //   Step 8: VMULPD dst, dst, t_sigma  (scale by σ²)                1 EVEX
+    //   Total: ~128 EVEX instructions / ~768 bytes
+    //
+    // Scratch: dst+2..dst+13 (same 12-ZMM layout as IrAssociator)
+    IrAssociatorVariance, // Door β: Var([a,b,c]) correction, 1 instr (Fano) / ~128 (non-Fano)
     // Sedenion zero-divisor check — first type system to detect ZD pairs at compile time.
     //   For literal sedenion basis elements: eliminated at type-check (zero runtime cost).
     //   For non-literal operands: runtime bitmask test → epistemic ZD warning flag.

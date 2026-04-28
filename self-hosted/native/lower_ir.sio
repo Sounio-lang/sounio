@@ -234,6 +234,8 @@ pub fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
         lower_hyper_mul_s(nc, instr)
     } else if instr.op == IrOpcode::IrAssociator {
         lower_associator(nc, instr)
+    } else if instr.op == IrOpcode::IrAssociatorVariance {
+        lower_assoc_variance(nc, instr)
     } else if instr.op == IrOpcode::IrSedZDCheck {
         lower_sed_zd_check(nc, instr)
     } else if instr.op == IrOpcode::IrG2ProjectImO {
@@ -1823,6 +1825,68 @@ pub fn lower_associator(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wi
     c.code = emit_fano_inline(c.code, a, t_bc, t_abc2, t_bj, t_aj, ctrl_base)
     // Step 5: dst = (a*b)*c − a*(b*c)  (VSUBPD with masking, 1 instr)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, dst, t_abc, t_abc2, vl, mask_k, zb)
+    c
+}
+
+// IrAssociatorVariance → Door β variance-of-associator correction
+//
+// First compiler to correctly propagate GUM uncertainty through non-associative arithmetic.
+// The 168 theorem (Agourakis 2026) is the compiler optimization gate:
+//   Fano triples (168 of 343): [a,b,c] = 0 → correction = 0 → 1 VXORPD instruction
+//   Non-Fano triples (175 of 343): correction = ||[a,b,c]||² × σ² → ~128 EVEX instructions
+//
+// Register layout: identical to IrAssociator (src1=a, src2=b, imm_i64=c index, label_id ctrl)
+// imm_flags bit 1 = fano_exact: 1 → Fano path (1 EVEX), 0 → non-Fano path (~128 EVEX)
+// imm_f64 = σ² (combined variance from KnowledgeOctonion.eps, set by type-checker)
+//
+pub fn lower_assoc_variance(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl         = 2   // ZMM
+    let mask_k     = instr.label_id & 7
+    let zb         = instr.imm_flags & 1
+    let fano_exact = (instr.imm_flags >> 1) & 1
+    let ctrl_base  = (instr.label_id >> 4) & 0xF
+    let dst        = instr.dst
+    if fano_exact == 1 {
+        // Fano path: [a,b,c] = 0 → variance correction = 0 exactly.
+        // 168 theorem: 168 of 343 octonion basis triples take this branch.
+        // VXORPD dst, dst, dst  (1 EVEX / 6 bytes)
+        c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, dst, dst, dst, vl, 0, 0)
+    } else {
+        // Non-Fano path: compute ||[a,b,c]||² × σ²
+        // Reuses IrAssociator's four-Fano-multiply + VSUBPD sequence.
+        let a          = instr.src1
+        let b          = instr.src2
+        let ci         = instr.imm_i64
+        let t_bj       = dst + 2
+        let t_aj       = dst + 4
+        let t_ab       = dst + 6
+        let t_abc      = dst + 8
+        let t_bc       = dst + 10
+        let t_abc2     = dst + 12
+        // Steps 1-4: compute [a,b,c] = (ab)c − a(bc) via four Fano multiplies (~124 EVEX)
+        c.code = emit_fano_inline(c.code, a, b, t_ab, t_bj, t_aj, ctrl_base)
+        c.code = emit_fano_inline(c.code, t_ab, ci, t_abc, t_bj, t_aj, ctrl_base)
+        c.code = emit_fano_inline(c.code, b, ci, t_bc, t_bj, t_aj, ctrl_base)
+        c.code = emit_fano_inline(c.code, a, t_bc, t_abc2, t_bj, t_aj, ctrl_base)
+        // Step 5: dst = (a*b)*c − a*(b*c)  (VSUBPD, 1 EVEX)
+        c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, dst, t_abc, t_abc2, vl, mask_k, zb)
+        // Step 6: dst = dst² component-wise = ||[a,b,c]||² per lane  (VMULPD, 1 EVEX)
+        c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, dst, dst, dst, vl, 0, 0)
+        // Step 7: load σ² into zmm0 (xmm0) via RIP-relative MOVSD, then broadcast to t_ab.
+        // Two-instruction sequence (MOVSD + VBROADCASTSD) using existing infrastructure.
+        // imm_f64 holds σ² as set by the type-checker.
+        let sigma_bits = f64_to_bits(instr.imm_f64)
+        c.rodata = data_section_add_f64(c.rodata, sigma_bits)
+        let sigma_rodata_off = c.rodata.last_offset
+        let movsd_pos = c.code.len
+        c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+        c.relocs = add_rip_reloc(c.relocs, movsd_pos + 4, sigma_rodata_off)
+        // VBROADCASTSD t_ab, xmm0 (zmm0 = register 0)  (1 EVEX)
+        c.code = emit_vbroadcastsd(c.code, t_ab, 0, vl, 0, 0)
+        // Step 8: dst = ||[a,b,c]||² × σ²  (VMULPD, 1 EVEX)
+        c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, dst, dst, t_ab, vl, mask_k, zb)
+    }
     c
 }
 

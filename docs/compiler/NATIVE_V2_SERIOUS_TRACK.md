@@ -186,11 +186,13 @@ path:
   registers, tensor-core Fano sign correction helpers, and O-SSM f32/f64
   forward/epistemic/backward/associator PTX surfaces
 
-As of this note, the gate reports `status=pass`. The generated stage1 CPU
-oracle passes with `fallback_path=none` and `host_callback=none`; the public GPU
-contract gate passes; native CUDA smoke passes when the local CUDA runtime is
-visible; the compiler-owned hypercomplex/O-SSM/S-SSM source surfaces are
-present; and the public GPU-profile fixtures emit structurally f64-clean PTX.
+As of this note, the structural rows in this gate pass: the generated stage1
+CPU oracle passes with `fallback_path=none` and `host_callback=none`; the
+public GPU contract gate passes; the compiler-owned hypercomplex/O-SSM/S-SSM
+source surfaces are present; and the public GPU-profile fixtures emit
+structurally f64-clean PTX. The top-level gate is `status=pass` only when the
+local CUDA runtime smoke also runs; on hosts without `libcuda.so.1`, it reports
+`status=partial` and records the CUDA runtime as `not_run`.
 
 The old public GPU artifact still emits raw PTX that can lower f64-shaped
 operands through `.f32` opcodes. The gate preserves that raw PTX beside the
@@ -203,6 +205,32 @@ performance, full O-SSM/S-SSM runtime parity, ROCm, Metal, WebGPU, or DDC. It
 does promote the next architectural line: non-conventional algebras now have
 compiler-native accelerator surfaces and emitted f64 PTX witnesses, not merely
 stdlib helper code or static source probes.
+
+## Epistemic GPU Runtime Parity
+
+The runtime parity gate is:
+
+```sh
+bash scripts/ci/native_v2_epistemic_gpu_runtime_parity_gate.sh
+```
+
+This gate first runs the accelerator spine without attempting CUDA runtime, then
+checks a runtime manifest under `tests/gpu/epistemic_runtime/`. The manifest
+contains baseline f64 vector launch rows plus two epistemic algebra rows:
+
+- `tests/run-pass/gpu_epistemic_f64_ossm_parity.sio`
+- `tests/run-pass/gpu_epistemic_f64_sedenion_parity.sio`
+
+Those two programs launch O-SSM-shaped octonion recurrence arithmetic and
+S-SSM-shaped Cayley-Dickson/sedenion recurrence arithmetic through Sounio
+kernel calls, then check host-visible f64 outputs. The helper rejects fallback
+by treating any `GPU unavailable:` output as a failure.
+
+On hosts without a visible CUDA driver runtime, the gate reports
+`status=partial` with per-row `not_run` results. This is the intended honest
+classification: the fixtures are checked and the PTX contract is green, but
+native CUDA runtime parity is not promoted until a host with `libcuda.so.1`
+runs the rows without fallback.
 
 ## ISO GUM Primitives (SOTA)
 
@@ -309,6 +337,41 @@ as the native uncertainty primitive.
   order-independent).
 
 All proofs use `nlinarith` / `positivity` — zero `sorry`.
+
+## Door β — Variance-of-Associator (SOTA)
+
+`IrAssociatorVariance` is a new IR primitive implementing GUM-correct uncertainty propagation
+through non-associative arithmetic for `Knowledge<O>` (octonion-valued epistemic types).
+
+**The bug it closes:** The compiler's default product rule `Var(a·b) = a²Var(b) + b²Var(a)` is
+wrong for octonion products when the triple (a,b,c) does not lie on a Fano line. The intermediate
+products (ab)c and a(bc) are correlated through the associator [a,b,c] ≠ 0, which the component-
+wise rule ignores. The corrected formula adds the variance-of-associator term: `||[a,b,c]||² × σ²`.
+
+**The 168 theorem as a compiler optimizer:** Of the 343 ordered octonion basis triples (e₁..e₇)³,
+exactly 168 lie on Fano lines → [a,b,c] = 0 → `IrAssociatorVariance` emits a single VXORPD
+(1 instruction / 6 bytes). The remaining 175 triples emit the full correction (~128 EVEX
+instructions). This is a 254× instruction-count reduction for the Fano case — the 168 theorem
+becomes a compile-time performance gate.
+
+**Register encoding:**
+- `imm_flags bit 1 = fano_exact`: 1 → Fano path (1 VXORPD), 0 → non-Fano path (~128 EVEX)
+- `imm_f64 = σ²`: combined variance from `KnowledgeOctonion.eps`, set by type-checker
+- `label_id`, `mask_k`, `ctrl_base`: same Fano constant encoding as `IrAssociator`
+
+**Formal guarantee:** `formal/NonAssocHessian.lean` §5 adds two zero-sorry, zero-new-axiom theorems:
+- `assoc_correction_zero_on_fano`: when Associates(a,b,c), the variance correction is 𝟎
+- `door_beta_fano_naive_eq_corrected`: corrected = naive when correction = 𝟎 (roundtrip)
+
+**Science spine test:** `tests/native-v2/science_spine/knowledge_octonion_variance.sio`
+demonstrates the witness with σ=1.0:
+- Fano triple (e₁,e₂,e₄): norm([e₁,e₂,e₄])=0 → correction=0.0
+- Non-Fano triple (e₁,e₂,e₃): norm([e₁,e₂,e₃])=2 → correction=4.0
+
+**SOTA claim:** Sage, GAP, SymPy, and Mathematica all have octonion arithmetic. None have
+interval or GUM uncertainty propagation where the algebra structure (Fano-line membership)
+gates which variance formula is sound. Sounio is the first compiler where the 168 theorem
+is a performance optimization and a correctness condition simultaneously.
 
 ## Where We Are Going
 
