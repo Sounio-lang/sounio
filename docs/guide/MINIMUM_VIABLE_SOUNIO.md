@@ -162,10 +162,45 @@ verifies `sqrtsd` presence via `objdump` when available and records
 `gum_sse2_verified` in the summary JSON. The GUM PBPK entry is also promoted
 into the science spine manifest.
 
+The accelerator tracking gate is:
+
+```sh
+bash scripts/ci/native_v2_epistemic_accel_spine_gate.sh
+```
+
+It promotes the current native algebra accelerator spine: generated-stage1
+nested `Knowledge<f64>` CPU oracles, public GPU-profile f64 PTX fixtures, and
+compiler-owned hypercomplex/O-SSM source probes for octonion, sedenion, HMMA
+Fano sign correction, and O-SSM f32/f64 PTX surfaces. The public GPU fixtures
+now include O-SSM-shaped octonion recurrence arithmetic and S-SSM-shaped
+Cayley-Dickson/sedenion recurrence arithmetic.
+
+The structural accelerator rows pass when the public GPU artifact can emit PTX.
+The top-level gate reports `status=partial` rather than `status=pass` on hosts
+where the native CUDA runtime smoke cannot see `libcuda.so.1`.
+
+The gate uses `scripts/gpu/ptx_f64_legalize.py` to legalize f64 parameter
+loads, f64 arithmetic opcodes, f64 immediate literals, and f64 register banks
+after the pinned public GPU artifact emits raw PTX. The raw PTX is preserved
+for root-cause comparison. This is a checked PTX contract, not a claim that the
+pinned beta.4 GPU binary has been source-rebuilt.
+
+The CUDA runtime parity gate is:
+
+```sh
+bash scripts/ci/native_v2_epistemic_gpu_runtime_parity_gate.sh
+```
+
+It checks a runtime manifest under `tests/gpu/epistemic_runtime/` with baseline
+f64 vector launch rows plus O-SSM-shaped octonion and S-SSM-shaped sedenion
+f64 runtime fixtures. This gate rejects fallback by treating `GPU unavailable:`
+as a failure. On hosts without a visible CUDA driver runtime it reports
+`status=partial` with per-row `not_run` results.
+
 Do not infer broader native-v2 support from this gate. In particular, this does
 not promote full general-purpose generics, native floating-register ABI,
-general PBPK stdlib imports, Apple native-v2 parity, GPU execution, or
-diverse-double-compiling.
+general PBPK stdlib imports, Apple native-v2 parity, epistemic f64 GPU runtime
+execution, full O-SSM/S-SSM runtime parity, or diverse-double-compiling.
 
 ## Contract levels for stdlib claims
 

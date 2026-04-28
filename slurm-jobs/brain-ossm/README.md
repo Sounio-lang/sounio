@@ -28,6 +28,8 @@ Current verified ABIDE headline:
 | `submit-fractal-g2-gpu.sh` | Full benchmark suite (probe + brain + supporting) | ~5 min | 1× L4 |
 | `submit-fractal-g2-20seed-gpu.sh` | Fractal-G2 robust replay with 20-seed probe snapshot | ~6 min | 1× L4 |
 | `submit-native-cuda-smoke-gpu.sh` | Native CUDA runtime smoke for `souc run --gpu-runtime` | ~1-2 min | 1× L4 |
+| `submit-nvidia-bare-metal-gpu.sh` | Ω-Metal NVIDIA CUBIN runtime admission/launch/writeback gate | ~1-2 min | 1× L4 |
+| `submit-nvidia-bare-metal-gpu-embedded.sh` | Ω-Metal NVIDIA CUBIN runtime gate with payload embedded in sbatch | ~1-2 min | 1× L4 |
 | `submit-abide-preflight-gpu.sh` | ABIDE path + benchmark preflight, no training yet | ~10 sec | 0× |
 | `submit-abide-gpu.sh` | Sounio ABIDE benchmark + structured metric export | ~5-10 min | 1× L4 |
 | `submit-abide-external-baselines-gpu.sh` | External deep-sequence suite (LSTM/GRU/Transformer/TCN) | ~15-30 min | 1× L4 |
@@ -65,6 +67,53 @@ cd /home/devsounio/beagle/k8s/hpc-sota
 source ops/lab-ops.sh
 lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-native-cuda-smoke-gpu.sh
 ```
+
+NVIDIA bare CUBIN runtime admission:
+
+```bash
+cd /home/devsounio/beagle/k8s/hpc-sota
+source ops/lab-ops.sh
+lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu.sh
+```
+
+From the promoted workspace pod, the same submitter can run directly through
+the login pod path:
+
+```bash
+bash slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu.sh
+```
+
+The submitter stages only the NVIDIA bare proof payload, runs
+`SOUNIO_NVIDIA_BARE_RUNTIME=1` on the `gpu-orangefs` worker, and writes the gate
+JSON under
+`/orangefs/training/sounio/slurm-smokes/nvidia-bare-metal/<RUN_ID>/results/`.
+Override `STAGE_PARENT` to use a different shared Slurm-visible staging root.
+
+If OrangeFS repo or payload staging is unhealthy, use the embedded submitter
+instead. It embeds the tiny proof payload into the sbatch script, decodes it on
+worker-local scratch, and uses OrangeFS only for the Slurm stdout file:
+
+```bash
+bash slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu-embedded.sh
+```
+
+For the current VecAddF32 runtime rung:
+
+```bash
+SOUNIO_NVIDIA_BARE_RUNTIME_RUNG=vec_add_f32 \
+  bash slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu-embedded.sh
+```
+
+NVIDIA bare CUBIN current status:
+
+- L4 Slurm worker `gpuorangefs-r770-proxmox` passed the CUDA Driver API
+  VecAddF32 rung with job `1080`.
+- The passing elementwise proof used Sounio-emitted SM80 CUBIN bytes, no PTX,
+  no `nvcc`, no `ptxas`, and no LLVM in the proof path.
+- The runtime harness allocated device buffers, passed real kernel params,
+  copied the result back with `cuMemcpyDtoH`, and matched the CPU oracle with
+  max absolute error `0`.
+- Previous StoreU32Const writeback proof: job `1078`, observed host-side `42`.
 
 Current validated status:
 

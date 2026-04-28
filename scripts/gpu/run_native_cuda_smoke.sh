@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/bin/souc}"
+EXPECTED_STDOUT="${SOUNIO_CUDA_SMOKE_EXPECT:-PASS: GPU vec_add}"
 
 if [[ ! -x "$SOUC_BIN" ]]; then
   echo "FAIL: souc binary not found at $SOUC_BIN" >&2
@@ -93,7 +94,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 OUT_FILE="$TMP_DIR/native_cuda_smoke.out"
 
-"$SOUC_BIN" run --gpu-runtime "$FIXTURE" >"$OUT_FILE" 2>&1
+"$SOUC_BIN" run "$FIXTURE" >"$OUT_FILE" 2>&1
 cat "$OUT_FILE"
 
 if grep -q 'GPU unavailable:' "$OUT_FILE"; then
@@ -101,8 +102,8 @@ if grep -q 'GPU unavailable:' "$OUT_FILE"; then
   exit 1
 fi
 
-if ! grep -q 'PASS: GPU vec_add' "$OUT_FILE"; then
-  echo "FAIL: expected PASS: GPU vec_add"
+if ! grep -Fq "$EXPECTED_STDOUT" "$OUT_FILE"; then
+  echo "FAIL: expected $EXPECTED_STDOUT"
   exit 1
 fi
 

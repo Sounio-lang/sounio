@@ -82,19 +82,19 @@ def octMul (x y : Oct) : Oct where
   e0 :=   x.e0 * y.e0 - x.e1 * y.e1 - x.e2 * y.e2 - x.e3 * y.e3
         - x.e4 * y.e4 - x.e5 * y.e5 - x.e6 * y.e6 - x.e7 * y.e7
   e1 :=   x.e0 * y.e1 + x.e1 * y.e0 + x.e2 * y.e3 - x.e3 * y.e2
-        + x.e4 * y.e5 - x.e5 * y.e4 - x.e6 * y.e7 + x.e7 * y.e6
+        - x.e4 * y.e5 + x.e5 * y.e4 + x.e6 * y.e7 - x.e7 * y.e6
   e2 :=   x.e0 * y.e2 - x.e1 * y.e3 + x.e2 * y.e0 + x.e3 * y.e1
-        + x.e4 * y.e6 - x.e5 * y.e7 - x.e6 * y.e4 + x.e7 * y.e5
+        - x.e4 * y.e6 - x.e5 * y.e7 + x.e6 * y.e4 + x.e7 * y.e5
   e3 :=   x.e0 * y.e3 + x.e1 * y.e2 - x.e2 * y.e1 + x.e3 * y.e0
-        + x.e4 * y.e7 + x.e5 * y.e6 - x.e6 * y.e5 - x.e7 * y.e4
+        - x.e4 * y.e7 + x.e5 * y.e6 - x.e6 * y.e4 + x.e7 * y.e5
   e4 :=   x.e0 * y.e4 - x.e1 * y.e5 - x.e2 * y.e6 - x.e3 * y.e7
         + x.e4 * y.e0 + x.e5 * y.e1 + x.e6 * y.e2 + x.e7 * y.e3
-  e5 :=   x.e0 * y.e5 - x.e1 * y.e4 + x.e2 * y.e7 - x.e3 * y.e6
-        + x.e4 * y.e1 + x.e5 * y.e0 + x.e6 * y.e3 - x.e7 * y.e2
-  e6 :=   x.e0 * y.e6 - x.e1 * y.e7 - x.e2 * y.e4 + x.e3 * y.e5
+  e5 :=   x.e0 * y.e5 + x.e1 * y.e4 + x.e2 * y.e7 - x.e3 * y.e6
+        - x.e4 * y.e1 + x.e5 * y.e0 - x.e6 * y.e3 + x.e7 * y.e2
+  e6 :=   x.e0 * y.e6 - x.e1 * y.e7 + x.e2 * y.e4 + x.e3 * y.e5
         - x.e4 * y.e2 + x.e5 * y.e3 + x.e6 * y.e0 - x.e7 * y.e1
-  e7 :=   x.e0 * y.e7 + x.e1 * y.e6 - x.e2 * y.e5 - x.e3 * y.e4
-        + x.e4 * y.e3 - x.e5 * y.e2 + x.e6 * y.e1 + x.e7 * y.e0
+  e7 :=   x.e0 * y.e7 - x.e1 * y.e6 + x.e2 * y.e5 + x.e3 * y.e4
+        - x.e4 * y.e3 - x.e5 * y.e2 + x.e6 * y.e1 + x.e7 * y.e0
 
 -- ---------------------------------------------------------------------------
 -- §5. Octonion conjugate and norm squared
@@ -186,7 +186,7 @@ theorem oct_one_mul (x : Oct) : octMul e0 x = x := by
 /-- Octonions are non-commutative: e₁·e₂ = +e₃ but e₂·e₁ = −e₃. -/
 theorem oct_noncommutative :
     ∃ x y : Oct, octMul x y ≠ octMul y x :=
-  ⟨e1, e2, by sorry⟩
+  ⟨e1, e2, by simp [octMul, e1, e2]⟩
 
 -- ---------------------------------------------------------------------------
 -- §12. Non-associativity  (e₁·e₂)·e₄ ≠ e₁·(e₂·e₄)
@@ -195,7 +195,7 @@ theorem oct_noncommutative :
 /-- Octonions are non-associative. -/
 theorem oct_nonassociative :
     ∃ x y z : Oct, octMul (octMul x y) z ≠ octMul x (octMul y z) :=
-  ⟨e1, e2, e4, by sorry⟩
+  ⟨e1, e2, e4, by simp [octMul, e1, e2, e4]⟩
 
 -- ---------------------------------------------------------------------------
 -- §13. Alternative laws  — the defining property of octonions
@@ -310,9 +310,9 @@ theorem oct_sq_comm_left (x : Oct) :
   simp only [octMul]; ext <;> sorry
 
 /-- x² is a real scalar (all imaginary components zero) iff x is a pure imaginary unit. -/
-theorem oct_neg_sq_scalar_e1 : octMul e1 e1 = octNeg e0 := by sorry
-theorem oct_neg_sq_scalar_e2 : octMul e2 e2 = octNeg e0 := by sorry
-theorem oct_neg_sq_scalar_e3 : octMul e3 e3 = octNeg e0 := by sorry
+theorem oct_neg_sq_scalar_e1 : octMul e1 e1 = octNeg e0 := by simp [octMul, e1, e0, octNeg]
+theorem oct_neg_sq_scalar_e2 : octMul e2 e2 = octNeg e0 := by simp [octMul, e2, e0, octNeg]
+theorem oct_neg_sq_scalar_e3 : octMul e3 e3 = octNeg e0 := by simp [octMul, e3, e0, octNeg]
 
 -- ---------------------------------------------------------------------------
 -- §20. Connection to Sounio's epistemic GEMM kernel
@@ -323,7 +323,7 @@ theorem oct_neg_sq_scalar_e3 : octMul e3 e3 = octNeg e0 := by sorry
 theorem gemm_tiling_nonassoc_caveat :
     ∃ (A B C : Oct),
       octMul A (octMul B C) ≠ octMul (octMul A B) C :=
-  ⟨e1, e2, e4, by sorry⟩
+  ⟨e1, e2, e4, by simp [octMul, e1, e2, e4]⟩
 
 /-- Safe tiling (left): same tile factor → left-alt = right-alt. -/
 theorem gemm_safe_tile_left (tile acc : Oct) :
@@ -340,34 +340,34 @@ theorem gemm_safe_tile_right (tile acc : Oct) :
 -- ---------------------------------------------------------------------------
 
 -- e₁·e₂ = +e₃   (Baez Table 1)
-theorem basis_e1_e2 : octMul e1 e2 = e3 := by sorry
+theorem basis_e1_e2 : octMul e1 e2 = e3 := by simp [octMul, e1, e2, e3]
 
 -- e₂·e₁ = −e₃   (non-commutativity witness)
-theorem basis_e2_e1 : octMul e2 e1 = octNeg e3 := by sorry
+theorem basis_e2_e1 : octMul e2 e1 = octNeg e3 := by simp [octMul, e2, e1, octNeg, e3]
 
 -- e₁·e₄ = +e₅
-theorem basis_e1_e4 : octMul e1 e4 = e5 := by sorry
+theorem basis_e1_e4 : octMul e1 e4 = e5 := by simp [octMul, e1, e4, e5]
 
 -- e₂·e₄ = +e₆
-theorem basis_e2_e4 : octMul e2 e4 = e6 := by sorry
+theorem basis_e2_e4 : octMul e2 e4 = e6 := by simp [octMul, e2, e4, e6]
 
 -- e₃·e₄ = +e₇
-theorem basis_e3_e4 : octMul e3 e4 = e7 := by sorry
+theorem basis_e3_e4 : octMul e3 e4 = e7 := by simp [octMul, e3, e4, e7]
 
 -- e₁·e₃ = −e₂
-theorem basis_e1_e3 : octMul e1 e3 = octNeg e2 := by sorry
+theorem basis_e1_e3 : octMul e1 e3 = octNeg e2 := by simp [octMul, e1, e3, octNeg, e2]
 
 -- e₃·e₁ = +e₂
-theorem basis_e3_e1 : octMul e3 e1 = e2 := by sorry
+theorem basis_e3_e1 : octMul e3 e1 = e2 := by simp [octMul, e3, e1, e2]
 
 -- eᵢ·eᵢ = −e₀  for i=1..7
-theorem basis_e1_sq : octMul e1 e1 = octNeg e0 := by sorry
-theorem basis_e2_sq : octMul e2 e2 = octNeg e0 := by sorry
-theorem basis_e3_sq : octMul e3 e3 = octNeg e0 := by sorry
-theorem basis_e4_sq : octMul e4 e4 = octNeg e0 := by sorry
-theorem basis_e5_sq : octMul e5 e5 = octNeg e0 := by sorry
-theorem basis_e6_sq : octMul e6 e6 = octNeg e0 := by sorry
-theorem basis_e7_sq : octMul e7 e7 = octNeg e0 := by sorry
+theorem basis_e1_sq : octMul e1 e1 = octNeg e0 := by simp [octMul, e1, octNeg, e0]
+theorem basis_e2_sq : octMul e2 e2 = octNeg e0 := by simp [octMul, e2, octNeg, e0]
+theorem basis_e3_sq : octMul e3 e3 = octNeg e0 := by simp [octMul, e3, octNeg, e0]
+theorem basis_e4_sq : octMul e4 e4 = octNeg e0 := by simp [octMul, e4, octNeg, e0]
+theorem basis_e5_sq : octMul e5 e5 = octNeg e0 := by simp [octMul, e5, octNeg, e0]
+theorem basis_e6_sq : octMul e6 e6 = octNeg e0 := by simp [octMul, e6, octNeg, e0]
+theorem basis_e7_sq : octMul e7 e7 = octNeg e0 := by simp [octMul, e7, octNeg, e0]
 
 -- e₀ is the identity
 theorem basis_e0_left  (x : Oct) : octMul e0 x = x := oct_one_mul x
@@ -377,26 +377,33 @@ theorem basis_e0_right (x : Oct) : octMul x e0 = x := oct_mul_one x
 -- §22. Norm of basis elements
 -- ---------------------------------------------------------------------------
 
-theorem basis_norm_e0 : octNormSq e0 = 1 := by sorry
-theorem basis_norm_e1 : octNormSq e1 = 1 := by sorry
-theorem basis_norm_e2 : octNormSq e2 = 1 := by sorry
-theorem basis_norm_e3 : octNormSq e3 = 1 := by sorry
-theorem basis_norm_e4 : octNormSq e4 = 1 := by sorry
-theorem basis_norm_e5 : octNormSq e5 = 1 := by sorry
-theorem basis_norm_e6 : octNormSq e6 = 1 := by sorry
-theorem basis_norm_e7 : octNormSq e7 = 1 := by sorry
+theorem basis_norm_e0 : octNormSq e0 = 1 := by simp [octNormSq, e0]
+theorem basis_norm_e1 : octNormSq e1 = 1 := by simp [octNormSq, e1]
+theorem basis_norm_e2 : octNormSq e2 = 1 := by simp [octNormSq, e2]
+theorem basis_norm_e3 : octNormSq e3 = 1 := by simp [octNormSq, e3]
+theorem basis_norm_e4 : octNormSq e4 = 1 := by simp [octNormSq, e4]
+theorem basis_norm_e5 : octNormSq e5 = 1 := by simp [octNormSq, e5]
+theorem basis_norm_e6 : octNormSq e6 = 1 := by simp [octNormSq, e6]
+theorem basis_norm_e7 : octNormSq e7 = 1 := by simp [octNormSq, e7]
 
 /-- All seven imaginary basis elements are unit octonions. -/
 theorem imaginary_basis_unit (i : Fin 7) :
     octNormSq ([e1, e2, e3, e4, e5, e6, e7].get i) = 1 := by
-  sorry
+  match i with
+  | ⟨0, _⟩ => simp [octNormSq, e1, List.get]
+  | ⟨1, _⟩ => simp [octNormSq, e2, List.get]
+  | ⟨2, _⟩ => simp [octNormSq, e3, List.get]
+  | ⟨3, _⟩ => simp [octNormSq, e4, List.get]
+  | ⟨4, _⟩ => simp [octNormSq, e5, List.get]
+  | ⟨5, _⟩ => simp [octNormSq, e6, List.get]
+  | ⟨6, _⟩ => simp [octNormSq, e7, List.get]
 
 -- ---------------------------------------------------------------------------
 -- §23. Non-associativity witnessed by (e₁, e₂, e₄)
 -- ---------------------------------------------------------------------------
 
 /-- (e₁·e₂)·e₄ = e₃·e₄ = e₇, but e₁·(e₂·e₄) = e₁·e₆ = −e₇. -/
-theorem assoc_failure_e1_e2_e4_lhs : octMul (octMul e1 e2) e4 = e7 := by sorry
-theorem assoc_failure_e1_e2_e4_rhs : octMul e1 (octMul e2 e4) = octNeg e7 := by sorry
+theorem assoc_failure_e1_e2_e4_lhs : octMul (octMul e1 e2) e4 = e7 := by simp [octMul, e1, e2, e4, e7]
+theorem assoc_failure_e1_e2_e4_rhs : octMul e1 (octMul e2 e4) = octNeg e7 := by simp [octMul, e1, e2, e4, octNeg, e7]
 
 end Sounio.OctonionAlgebra

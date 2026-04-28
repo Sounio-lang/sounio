@@ -6,7 +6,7 @@ using namespace metal;
 // Metal backend: self-hosted/gpu/metal.sio
 //
 // Note: emitted with float (f32) — sufficient for 1e-4 tolerance on F₃≈85.47
-// Full f64 requires Metal 4.0+ or MPS fallback
+// Source-level f64 on Metal requires an explicit Sounio lowering policy.
 kernel void sed_f3_l1_mass_kernel(
     device int*   n           [[buffer(0)]],
     device float* states_buf  [[buffer(1)]],

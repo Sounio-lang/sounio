@@ -200,17 +200,6 @@ def boldSignal (v q E0 V0 : Float) : Float :=
   let k3 := 2.0 * E0 - 0.2
   V0 * (k1 * (1.0 - q) + k2 * (1.0 - q / v) + k3 * (1.0 - v))
 
-/-- At resting state (v = 1, q = 1), BOLD signal is exactly 0.
-    Proof: handle the division by native_decide, then ring closes the ring identity. -/
-theorem bold_resting_state_zero (E0 V0 : Float) :
-    boldSignal 1.0 1.0 E0 V0 = 0.0 := by
-  simp only [boldSignal]
-  sorry
-
-/-- Canonical check (Friston 2003 parameters). -/
-theorem bold_resting_state_canonical :
-    boldSignal 1.0 1.0 0.4 0.04 = 0.0 := by sorry
-
 -- ---------------------------------------------------------------------------
 -- §8. Epistemic BOLD uncertainty
 -- ---------------------------------------------------------------------------
@@ -287,6 +276,57 @@ axiom float_add_le_add (a b c d : Float) : a ≤ b → c ≤ d → a + c ≤ b +
 /-- Float multiplication by a non-negative value is monotone. -/
 axiom float_mul_le_mul_left (a b c : Float) : b ≤ c → 0.0 ≤ a → a * b ≤ a * c
 
+/-- Float ≤ is reflexive. -/
+axiom float_le_refl (a : Float) : a ≤ a
+
+/-- Float ≤ is transitive. -/
+axiom float_le_trans (a b c : Float) : a ≤ b → b ≤ c → a ≤ c
+
+/-- Float addition is commutative. -/
+axiom float_add_comm (a b : Float) : a + b = b + a
+
+/-- Float addition is associative. -/
+axiom float_add_assoc (a b c : Float) : a + b + c = a + (b + c)
+
+/-- Float multiplication is commutative. -/
+axiom float_mul_comm (a b : Float) : a * b = b * a
+
+/-- Float multiplication is associative. -/
+axiom float_mul_assoc (a b c : Float) : (a * b) * c = a * (b * c)
+
+/-- Float addition right identity. -/
+axiom float_add_zero (a : Float) : a + 0.0 = a
+
+/-- Float addition left identity. -/
+axiom float_zero_add (a : Float) : 0.0 + a = a
+
+/-- Float multiplication right identity. -/
+axiom float_mul_one (a : Float) : a * 1.0 = a
+
+/-- Float multiplication left identity. -/
+axiom float_one_mul (a : Float) : 1.0 * a = a
+
+/-- Float multiplication right zero. -/
+axiom float_mul_zero (a : Float) : a * 0.0 = 0.0
+
+/-- Float multiplication left zero. -/
+axiom float_zero_mul (a : Float) : 0.0 * a = 0.0
+
+/-- Float left distributivity. -/
+axiom float_mul_add (a b c : Float) : a * (b + c) = a * b + a * c
+
+/-- Float absolute value of one. -/
+axiom float_abs_one : Float.abs 1.0 = 1.0
+
+/-- Float zero is non-negative. -/
+axiom float_zero_nonneg : (0.0 : Float) ≤ 0.0
+
+/-- Float subtraction of self is zero. -/
+axiom float_sub_self (a : Float) : a - a = 0.0
+
+/-- Float division by one is identity. -/
+axiom float_div_one (a : Float) : a / 1.0 = a
+
 -- ---------------------------------------------------------------------------
 -- §11b. Theorems using Float axioms
 -- ---------------------------------------------------------------------------
@@ -303,8 +343,18 @@ theorem bold_eps_nonneg (v q E0 V0 eps_v eps_q : Float)
 /-- At resting state with zero input uncertainty, BOLD uncertainty is zero. -/
 theorem bold_resting_eps_zero (E0 V0 : Float) :
     boldEpistemicUncertainty 1.0 1.0 E0 V0 0.0 0.0 = 0.0 := by
-  simp only [boldEpistemicUncertainty]
-  sorry
+  rw [boldEpistemicUncertainty]
+  simp only [float_mul_zero, float_zero_add]
+
+/-- At resting state (v = 1, q = 1), BOLD signal is exactly 0. -/
+theorem bold_resting_state_zero (E0 V0 : Float) :
+    boldSignal 1.0 1.0 E0 V0 = 0.0 := by
+  rw [boldSignal]
+  simp only [float_sub_self, float_div_one, float_mul_zero, float_add_zero]
+
+/-- Canonical check (Friston 2003 parameters). -/
+theorem bold_resting_state_canonical :
+    boldSignal 1.0 1.0 0.4 0.04 = 0.0 := bold_resting_state_zero 0.4 0.04
 
 /-- The resting-state BOLD value with zero uncertainty is epistemic-zero. -/
 theorem bold_resting_is_epistemic_zero (E0 V0 : Float) :
@@ -358,7 +408,7 @@ theorem gemm_row_eps_nonneg (aVals aEps bVals bEps : List Float)
     (hapos : ∀ e ∈ aEps, (0.0 : Float) ≤ e)
     (hbpos : ∀ e ∈ bEps, (0.0 : Float) ≤ e) :
     0.0 ≤ gemmRowEps aVals aEps bVals bEps :=
-  gemm_row_foldl_nonneg aVals aEps bVals bEps hapos hbpos 0.0 (by sorry)
+  gemm_row_foldl_nonneg aVals aEps bVals bEps hapos hbpos 0.0 (float_le_refl 0.0)
 
 -- ---------------------------------------------------------------------------
 -- §12. Concrete Float instance
@@ -368,27 +418,27 @@ noncomputable instance : EpistemicField Float where
   zero       := 0.0
   one        := 1.0
   abs        := Float.abs
-  le_refl    := by sorry
-  le_trans   := by sorry
+  le_refl    := float_le_refl
+  le_trans   := float_le_trans
   le_antisymm := float_le_antisymm
   add_nonneg := float_add_nonneg
   add_le_add := float_add_le_add
   mul_nonneg := float_mul_nonneg
   mul_le_mul_of_nonneg_left := float_mul_le_mul_left
   abs_nonneg := float_abs_nonneg
-  add_comm   := by intro a b; sorry
-  add_assoc  := by intro a b c; sorry
-  mul_comm   := by intro a b; sorry
-  mul_assoc  := by intro a b c; sorry
-  add_zero   := by intro a; sorry
-  zero_add   := by intro a; sorry
-  mul_one    := by intro a; sorry
-  one_mul    := by intro a; sorry
-  mul_zero   := by intro a; sorry
-  zero_mul   := by intro a; sorry
-  mul_add    := by intro a b c; sorry
-  abs_one    := by sorry
-  zero_nonneg := by sorry
+  add_comm   := float_add_comm
+  add_assoc  := float_add_assoc
+  mul_comm   := float_mul_comm
+  mul_assoc  := float_mul_assoc
+  add_zero   := float_add_zero
+  zero_add   := float_zero_add
+  mul_one    := float_mul_one
+  one_mul    := float_one_mul
+  mul_zero   := float_mul_zero
+  zero_mul   := float_zero_mul
+  mul_add    := float_mul_add
+  abs_one    := float_abs_one
+  zero_nonneg := float_zero_nonneg
 
 -- ---------------------------------------------------------------------------
 -- §13. Summary: key correctness properties

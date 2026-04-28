@@ -102,11 +102,23 @@ theorem alignUp_ge (n align : Nat) : n ≤ alignUp n align := by
 theorem alignUp_mod_zero (n align : Nat) (h : 0 < align) :
     alignUp n align % align = 0 := by
   unfold alignUp
-  simp [show align ≠ 0 by omega]
-  by_cases hr : n % align = 0
-  · simp [hr]
-  · simp [hr]
-    sorry
+  split
+  · simp [*]
+  · have h1 : n + (align - n % align) = align * (n / align + 1) := by
+      have h2 : n % align ≤ align := Nat.le_of_lt (Nat.mod_lt n h)
+      have h3 : n + (align - n % align) = n + align - n % align := by
+        rw [Nat.add_sub_assoc h2]
+      have h4 : n + align - n % align = align * (n / align) + n % align + align - n % align := by
+        rw [Nat.div_add_mod n align]
+      have h5 : align * (n / align) + n % align + align - n % align = align * (n / align) + align := by
+        have h6 : align * (n / align) + n % align + align = align * (n / align) + align + n % align := by
+          simp [Nat.add_assoc, Nat.add_comm (n % align)]
+        rw [h6]
+        rw [Nat.add_sub_cancel]
+      rw [h3, h4, h5]
+      simp [Nat.mul_add, Nat.mul_one]
+    rw [h1]
+    exact Nat.dvd_iff_mod_eq_zero.mp (Nat.dvd_mul_right align (n / align + 1))
 
 -- ---------------------------------------------------------------------------
 -- Constructive layout witness
