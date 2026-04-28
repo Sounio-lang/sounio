@@ -13,6 +13,8 @@ This example implements a minimal, reproducible **two-tissue compartment model (
 | `pet_tracer_variants.sio` | Four-tracer variants (raclopride, flumazenil, DASB, PK11195) |
 | `pet_srtm.sio` | SRTM (Lammertsma & Hume 1996) validated against 2TCM in both regimes |
 | `pet_fit_validation.sio` | Parameter recovery from noisy synthetic TAC via coordinate descent |
+| `pet_fit_montecarlo.sio` | Monte Carlo bias/precision analysis (20 realizations) |
+| `pet_lammertsma1996_analysis.sio` | **Real-data** analysis: reproduces Lammertsma 1996 Table 3 BP values from Table 2 V_T |
 | `NRM2026_ABSTRACT.md` | Late-breaking abstract draft |
 | `LITERATURE_VALIDATION.md` | Prior comparison vs [11C]raclopride literature |
 | `results/audit_output.txt` | Captured audit run stdout |
