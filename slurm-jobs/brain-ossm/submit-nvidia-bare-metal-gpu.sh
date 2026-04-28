@@ -26,6 +26,9 @@ FORCE_RESTAGE="${FORCE_RESTAGE:-0}"
 PAYLOAD_COPY_MODE="${PAYLOAD_COPY_MODE:-base64-chunks}"
 RUNTIME_RUNG="${SOUNIO_NVIDIA_BARE_RUNTIME_RUNG:-admission}"
 case "${RUNTIME_RUNG}" in
+  epistemic_dual_output_f32)
+    RESULT_STEM="sounio_bare_epistemic_dual_output_f32_sm80"
+    ;;
   vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32)
     RESULT_STEM="sounio_bare_vec_add_f32_sm80"
     ;;
@@ -255,6 +258,8 @@ elif obj.get('runtime', {}).get('reason') == 'runtime_epistemic_elementwise_f32_
     print('NVIDIA_BARE_RUNTIME_EPISTEMIC_ELEMENTWISE_F32_OK')
 elif obj.get('runtime', {}).get('reason') == 'runtime_epistemic_dual_lane_f32_pass':
     print('NVIDIA_BARE_RUNTIME_EPISTEMIC_DUAL_LANE_F32_OK')
+elif obj.get('runtime', {}).get('reason') == 'runtime_epistemic_dual_output_f32_pass':
+    print('NVIDIA_BARE_RUNTIME_EPISTEMIC_DUAL_OUTPUT_F32_OK')
 PY
 
 echo

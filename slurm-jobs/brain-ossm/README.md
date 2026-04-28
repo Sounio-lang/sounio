@@ -97,7 +97,15 @@ worker-local scratch, and uses OrangeFS only for the Slurm stdout file:
 bash slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu-embedded.sh
 ```
 
-For the current stronger runtime rung:
+For the single-launch dual-output runtime rung:
+
+```bash
+SOUNIO_NVIDIA_BARE_RUNTIME_RUNG=epistemic_dual_output_f32 \
+SOUNIO_NVIDIA_BARE_VEC_N=64 \
+  bash slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu-embedded.sh
+```
+
+For the previous two-launch dual-lane comparison rung:
 
 ```bash
 SOUNIO_NVIDIA_BARE_RUNTIME_RUNG=epistemic_dual_lane_f32 \
@@ -108,15 +116,17 @@ SOUNIO_NVIDIA_BARE_VEC_N=64 \
 NVIDIA bare CUBIN current status:
 
 - L4 Slurm worker `gpuorangefs-r770-proxmox` passed the CUDA Driver API
-  `epistemic_dual_lane_f32` rung with job `1083`.
-- The passing dual-lane proof used Sounio-emitted SM80 CUBIN bytes, no PTX,
-  no `nvcc`, no `ptxas`, and no LLVM in the proof path.
+  `epistemic_dual_output_f32` rung with job `1118`.
+- The passing single-launch dual-output proof used Sounio-emitted SM80 CUBIN
+  bytes, no PTX, no `nvcc`, no `ptxas`, and no LLVM in the proof path.
 - The runtime harness allocated device buffers, passed real kernel params,
-  copied both value and uncertainty results back with `cuMemcpyDtoH`, and
-  matched both CPU oracles across 64 elements with nonzero uncertainty epsilon
-  input and max absolute error `0` in both lanes.
+  launched once with `cuLaunchKernel`, copied both value and uncertainty
+  results back with `cuMemcpyDtoH`, and matched both CPU oracles across 64
+  elements with nonzero uncertainty epsilon input and max absolute error `0`
+  in both lanes.
 - CUDA probe for the passing job: driver `13020`, device `NVIDIA_L4`, compute
   capability `8.9`.
+- Previous two-launch dual-lane proof: job `1083`.
 - Previous epsilon-stressed single-output proof: job `1082`.
 - Previous VecAddF32 zero-epsilon proof: job `1080`.
 - Previous StoreU32Const writeback proof: job `1078`, observed host-side `42`.

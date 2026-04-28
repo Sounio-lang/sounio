@@ -10,7 +10,9 @@ RUNTIME_MODE="${SOUNIO_NVIDIA_BARE_RUNTIME:-0}"
 RUNTIME_RUNG="${SOUNIO_NVIDIA_BARE_RUNTIME_RUNG:-admission}"
 KERNEL_KIND="${SOUNIO_NVIDIA_BARE_KERNEL_KIND:-}"
 if [[ -z "$KERNEL_KIND" ]]; then
-  if [[ "$RUNTIME_RUNG" == "vec_add_f32" || "$RUNTIME_RUNG" == "epistemic_elementwise_f32" || "$RUNTIME_RUNG" == "epistemic_dual_lane_f32" ]]; then
+  if [[ "$RUNTIME_RUNG" == "epistemic_dual_output_f32" ]]; then
+    KERNEL_KIND="epistemic_dual_output_f32"
+  elif [[ "$RUNTIME_RUNG" == "vec_add_f32" || "$RUNTIME_RUNG" == "epistemic_elementwise_f32" || "$RUNTIME_RUNG" == "epistemic_dual_lane_f32" ]]; then
     KERNEL_KIND="vec_add_f32"
   else
     KERNEL_KIND="store_u32_const"
@@ -26,6 +28,11 @@ case "$KERNEL_KIND" in
     DEFAULT_STEM="sounio_bare_vec_add_f32_sm80"
     KERNEL_NAME="sounio_bare_vec_add_f32_sm80"
     EMITTER_HEX_LINE=2
+    ;;
+  epistemic_dual_output_f32)
+    DEFAULT_STEM="sounio_bare_epistemic_dual_output_f32_sm80"
+    KERNEL_NAME="sounio_bare_epistemic_dual_output_f32_sm80"
+    EMITTER_HEX_LINE=3
     ;;
   *)
     DEFAULT_STEM="sounio_bare_unknown_sm80"
@@ -227,6 +234,32 @@ elif kernel_kind == "vec_add_f32":
         and b"\x23\x72\x0b\x00\x05\x00\x00\x00" in blob
         and b"\x86\x79\x00\x08\x0b\x00\x00\x00" in blob
     )
+elif kernel_kind == "epistemic_dual_output_f32":
+    kind_checks["dual_output_param_size_present"] = b"\x03\x19\x40\x00" in store_info_blob
+    kind_checks["dual_output_param_cbank_span_present"] = b"\x60\x01\x40\x00" in store_info_blob
+    kind_checks["dual_output_eight_kparam_entries_present"] = store_info_blob.count(b"\x04\x17") == 8
+    kind_checks["dual_output_two_stores_present"] = (
+        (
+            b"\x86\x79\x00\x0c\x0b\x00\x00\x00" in blob
+            or b"\x86\x79\x00\x08\x0b\x00\x00\x00" in blob
+            or b"\x86\x79\x00\x08\x0c\x00\x00\x00" in blob
+        )
+        and (
+            b"\x86\x79\x00\x0e\x0f\x00\x00\x00" in blob
+            or b"\x86\x79\x00\x0e\x07\x00\x00\x00" in blob
+            or b"\x86\x79\x00\x0a\x07\x00\x00\x00" in blob
+            or b"\x86\x79\x00\x0c\x07\x00\x00\x00" in blob
+        )
+    )
+    kind_checks["dual_output_value_fadd_marker_present"] = (
+        b"\x21\x72\x0b\x02\x05\x00\x00\x00" in blob
+        or b"\x21\x72\x0c\x02\x05\x00\x00\x00" in blob
+        or b"\x23\x72\x0b\x00\x05\x00\x00\x00" in blob
+    )
+    kind_checks["dual_output_uncertainty_ffma_marker_present"] = (
+        b"\x23\x72\x0f\x00\x05\x00\x00\x00" in blob
+        or b"\x23\x72\x07\x00\x05\x00\x00\x00" in blob
+    )
 else:
     kind_checks["known_kernel_kind"] = False
 checks = {
@@ -335,7 +368,7 @@ PY
 esac
 
 case "$RUNTIME_RUNG" in
-  admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32) ;;
+  admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32|epistemic_dual_output_f32) ;;
   *)
     runtime_json="$(python3 - "$RUNTIME_RUNG" <<'PY'
 import json
@@ -344,7 +377,7 @@ print(json.dumps({
     "status": "not_run",
     "reason": "invalid_runtime_rung",
     "rung": sys.argv[1],
-    "allowed_rungs": ["admission", "launch", "store_u32_const", "vec_add_f32", "epistemic_elementwise_f32", "epistemic_dual_lane_f32"],
+    "allowed_rungs": ["admission", "launch", "store_u32_const", "vec_add_f32", "epistemic_elementwise_f32", "epistemic_dual_lane_f32", "epistemic_dual_output_f32"],
     "driver_api_harness": "scripts/gpu/nvidia_bare_driver_loader.c",
 }))
 PY
@@ -451,6 +484,11 @@ epistemic_dual_lane_f32_n = int(dual_match.group(1)) if dual_match else None
 epistemic_dual_lane_value_max_abs_err = float(dual_match.group(2)) if dual_match else None
 epistemic_dual_lane_uncertainty_max_abs_err = float(dual_match.group(3)) if dual_match else None
 epistemic_dual_lane_uncertainty_eps_nonzero = bool(int(dual_match.group(4))) if dual_match else None
+dual_output_match = re.search(r"epistemic_dual_output_f32_n=(\d+)\s+value_max_abs_err=([0-9.eE+-]+)\s+uncertainty_max_abs_err=([0-9.eE+-]+)\s+uncertainty_eps_nonzero=(\d+)", text)
+epistemic_dual_output_f32_n = int(dual_output_match.group(1)) if dual_output_match else None
+epistemic_dual_output_value_max_abs_err = float(dual_output_match.group(2)) if dual_output_match else None
+epistemic_dual_output_uncertainty_max_abs_err = float(dual_output_match.group(3)) if dual_output_match else None
+epistemic_dual_output_uncertainty_eps_nonzero = bool(int(dual_output_match.group(4))) if dual_output_match else None
 probe = {}
 for key, conv in [
     ("driver_version", int),
@@ -481,6 +519,10 @@ print(json.dumps({
     "epistemic_dual_lane_value_max_abs_err": epistemic_dual_lane_value_max_abs_err,
     "epistemic_dual_lane_uncertainty_max_abs_err": epistemic_dual_lane_uncertainty_max_abs_err,
     "epistemic_dual_lane_uncertainty_eps_nonzero": epistemic_dual_lane_uncertainty_eps_nonzero,
+    "epistemic_dual_output_f32_n": epistemic_dual_output_f32_n,
+    "epistemic_dual_output_value_max_abs_err": epistemic_dual_output_value_max_abs_err,
+    "epistemic_dual_output_uncertainty_max_abs_err": epistemic_dual_output_uncertainty_max_abs_err,
+    "epistemic_dual_output_uncertainty_eps_nonzero": epistemic_dual_output_uncertainty_eps_nonzero,
     "cuda_probe": probe,
     "rung": rung,
     "rc": int(rc),

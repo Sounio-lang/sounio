@@ -10,6 +10,7 @@
 //   vec_add_f32  launch + device vector add verification against CPU oracle
 //   epistemic_elementwise_f32  vec add kernel with nonzero epsilon lane
 //   epistemic_dual_lane_f32  two-launch value lane + uncertainty lane oracle
+//   epistemic_dual_output_f32  one launch, value + uncertainty output buffers
 
 #include <dlfcn.h>
 #include <string.h>
@@ -44,6 +45,10 @@ typedef CUresult (*cuMemFree_t)(CUdeviceptr);
 typedef CUresult (*cuMemcpyHtoD_t)(CUdeviceptr, const void *, size_t);
 typedef CUresult (*cuMemcpyDtoH_t)(void *, CUdeviceptr, size_t);
 typedef CUresult (*cuMemsetD32_t)(CUdeviceptr, unsigned int, size_t);
+
+#define CU_LAUNCH_PARAM_BUFFER_POINTER ((void *)0x01)
+#define CU_LAUNCH_PARAM_BUFFER_SIZE ((void *)0x02)
+#define CU_LAUNCH_PARAM_END ((void *)0x00)
 
 static int g_driver_version = -1;
 static int g_device_count = -1;
@@ -125,7 +130,7 @@ static unsigned char *read_all(const char *path, size_t *len_out) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <cubin> <kernel> [admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32]\n", argv[0]);
+        fprintf(stderr, "usage: %s <cubin> <kernel> [admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32|epistemic_dual_output_f32]\n", argv[0]);
         return 2;
     }
     const char *mode = argc >= 4 ? argv[3] : "admission";
@@ -134,8 +139,9 @@ int main(int argc, char **argv) {
         strcmp(mode, "store_u32_const") != 0 &&
         strcmp(mode, "vec_add_f32") != 0 &&
         strcmp(mode, "epistemic_elementwise_f32") != 0 &&
-        strcmp(mode, "epistemic_dual_lane_f32") != 0) {
-        fprintf(stderr, "usage: mode must be admission, launch, store_u32_const, vec_add_f32, epistemic_elementwise_f32, or epistemic_dual_lane_f32\n");
+        strcmp(mode, "epistemic_dual_lane_f32") != 0 &&
+        strcmp(mode, "epistemic_dual_output_f32") != 0) {
+        fprintf(stderr, "usage: mode must be admission, launch, store_u32_const, vec_add_f32, epistemic_elementwise_f32, epistemic_dual_lane_f32, or epistemic_dual_output_f32\n");
         return 2;
     }
 
@@ -189,7 +195,8 @@ int main(int argc, char **argv) {
     if (strcmp(mode, "store_u32_const") == 0 ||
         strcmp(mode, "vec_add_f32") == 0 ||
         strcmp(mode, "epistemic_elementwise_f32") == 0 ||
-        strcmp(mode, "epistemic_dual_lane_f32") == 0) {
+        strcmp(mode, "epistemic_dual_lane_f32") == 0 ||
+        strcmp(mode, "epistemic_dual_output_f32") == 0) {
         LOAD_SYM_ALIAS(cuMemAlloc, cuMemAlloc_t, "cuMemAlloc_v2", "cuMemAlloc");
         LOAD_SYM_ALIAS(cuMemFree, cuMemFree_t, "cuMemFree_v2", "cuMemFree");
         LOAD_SYM_ALIAS(cuMemcpyHtoD, cuMemcpyHtoD_t, "cuMemcpyHtoD_v2", "cuMemcpyHtoD");
@@ -283,6 +290,169 @@ int main(int argc, char **argv) {
         cuCtxDestroy(ctx);
         free(cubin);
         return 0;
+    }
+
+    if (strcmp(mode, "epistemic_dual_output_f32") == 0) {
+        uint32_t n_arg = (uint32_t)read_env_int("SOUNIO_NVIDIA_BARE_VEC_N", 64, 1, 256);
+        size_t bytes = (size_t)n_arg * sizeof(float);
+        float *h_x = (float *)calloc(n_arg, sizeof(float));
+        float *h_y = (float *)calloc(n_arg, sizeof(float));
+        float *h_ux = (float *)calloc(n_arg, sizeof(float));
+        float *h_uy = (float *)calloc(n_arg, sizeof(float));
+        float *h_eps = (float *)calloc(n_arg, sizeof(float));
+        float *h_value_out = (float *)calloc(n_arg, sizeof(float));
+        float *h_uncert_out = (float *)calloc(n_arg, sizeof(float));
+        float *h_value_expected = (float *)calloc(n_arg, sizeof(float));
+        float *h_uncert_expected = (float *)calloc(n_arg, sizeof(float));
+        CUdeviceptr d_x = 0;
+        CUdeviceptr d_y = 0;
+        CUdeviceptr d_ux = 0;
+        CUdeviceptr d_uy = 0;
+        CUdeviceptr d_eps = 0;
+        CUdeviceptr d_value_out = 0;
+        CUdeviceptr d_uncert_out = 0;
+        uint64_t x_arg = 0;
+        uint64_t y_arg = 0;
+        uint64_t ux_arg = 0;
+        uint64_t uy_arg = 0;
+        uint64_t eps_arg = 0;
+        uint64_t value_out_arg = 0;
+        uint64_t uncert_out_arg = 0;
+        float value_max_abs_err = 0.0f;
+        float uncertainty_max_abs_err = 0.0f;
+        int dual_output_failed = 0;
+
+        if (!h_x || !h_y || !h_ux || !h_uy || !h_eps || !h_value_out ||
+            !h_uncert_out || !h_value_expected || !h_uncert_expected) {
+            emit_status("fail", "host_alloc_failed", "calloc", 0);
+            dual_output_failed = 1;
+            goto dual_output_cleanup;
+        }
+
+        for (uint32_t i = 0; i < n_arg; i++) {
+            h_x[i] = (float)((int)(i % 17) - 8) * 0.5f;
+            h_y[i] = (float)((int)(i % 11) - 5) * 0.25f;
+            h_ux[i] = (float)((int)(i % 5) + 1) * 0.0625f;
+            h_uy[i] = (float)((int)(i % 7) + 1) * 0.03125f;
+            h_eps[i] = (float)((int)(i % 3) + 1) * 0.0625f;
+            h_value_expected[i] = h_x[i] + h_y[i];
+            h_uncert_expected[i] = h_ux[i] + h_uy[i] * (1.0f + h_eps[i]);
+        }
+
+#define DUAL_OUT_FAIL(reason, stage, code) do { \
+            emit_status("fail", reason, stage, code); \
+            dual_output_failed = 1; \
+            goto dual_output_cleanup; \
+        } while (0)
+
+        rc = cuMemAlloc(&d_x, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemAlloc_x_failed", "cuMemAlloc", rc);
+        rc = cuMemAlloc(&d_y, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemAlloc_y_failed", "cuMemAlloc", rc);
+        rc = cuMemAlloc(&d_ux, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemAlloc_ux_failed", "cuMemAlloc", rc);
+        rc = cuMemAlloc(&d_uy, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemAlloc_uy_failed", "cuMemAlloc", rc);
+        rc = cuMemAlloc(&d_eps, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemAlloc_eps_failed", "cuMemAlloc", rc);
+        rc = cuMemAlloc(&d_value_out, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemAlloc_value_out_failed", "cuMemAlloc", rc);
+        rc = cuMemAlloc(&d_uncert_out, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemAlloc_uncertainty_out_failed", "cuMemAlloc", rc);
+
+        rc = cuMemcpyHtoD(d_x, h_x, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemcpyHtoD_x_failed", "cuMemcpyHtoD", rc);
+        rc = cuMemcpyHtoD(d_y, h_y, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemcpyHtoD_y_failed", "cuMemcpyHtoD", rc);
+        rc = cuMemcpyHtoD(d_ux, h_ux, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemcpyHtoD_ux_failed", "cuMemcpyHtoD", rc);
+        rc = cuMemcpyHtoD(d_uy, h_uy, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemcpyHtoD_uy_failed", "cuMemcpyHtoD", rc);
+        rc = cuMemcpyHtoD(d_eps, h_eps, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemcpyHtoD_eps_failed", "cuMemcpyHtoD", rc);
+        rc = cuMemsetD32(d_value_out, 0, n_arg);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemsetD32_value_out_failed", "cuMemsetD32", rc);
+        rc = cuMemsetD32(d_uncert_out, 0, n_arg);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemsetD32_uncertainty_out_failed", "cuMemsetD32", rc);
+
+        x_arg = (uint64_t)d_x;
+        y_arg = (uint64_t)d_y;
+        ux_arg = (uint64_t)d_ux;
+        uy_arg = (uint64_t)d_uy;
+        eps_arg = (uint64_t)d_eps;
+        value_out_arg = (uint64_t)d_value_out;
+        uncert_out_arg = (uint64_t)d_uncert_out;
+        unsigned char dual_output_param_buffer[64] = {0};
+        size_t dual_output_param_size = sizeof(dual_output_param_buffer);
+        memcpy(dual_output_param_buffer + 0, &x_arg, sizeof(x_arg));
+        memcpy(dual_output_param_buffer + 8, &y_arg, sizeof(y_arg));
+        memcpy(dual_output_param_buffer + 16, &ux_arg, sizeof(ux_arg));
+        memcpy(dual_output_param_buffer + 24, &uy_arg, sizeof(uy_arg));
+        memcpy(dual_output_param_buffer + 32, &eps_arg, sizeof(eps_arg));
+        memcpy(dual_output_param_buffer + 40, &value_out_arg, sizeof(value_out_arg));
+        memcpy(dual_output_param_buffer + 48, &uncert_out_arg, sizeof(uncert_out_arg));
+        memcpy(dual_output_param_buffer + 56, &n_arg, sizeof(n_arg));
+        void *dual_output_extra[] = {
+            CU_LAUNCH_PARAM_BUFFER_POINTER, dual_output_param_buffer,
+            CU_LAUNCH_PARAM_BUFFER_SIZE, &dual_output_param_size,
+            CU_LAUNCH_PARAM_END,
+        };
+        rc = cuLaunchKernel(fn, 1, 1, 1, n_arg, 1, 1, 0, NULL, NULL, dual_output_extra);
+        if (rc != 0) DUAL_OUT_FAIL("cuLaunchKernel_failed", "cuLaunchKernel", rc);
+        rc = cuCtxSynchronize();
+        if (rc != 0) DUAL_OUT_FAIL("cuCtxSynchronize_failed", "cuCtxSynchronize", rc);
+        rc = cuMemcpyDtoH(h_value_out, d_value_out, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemcpyDtoH_value_failed", "cuMemcpyDtoH", rc);
+        rc = cuMemcpyDtoH(h_uncert_out, d_uncert_out, bytes);
+        if (rc != 0) DUAL_OUT_FAIL("cuMemcpyDtoH_uncertainty_failed", "cuMemcpyDtoH", rc);
+
+        for (uint32_t i = 0; i < n_arg; i++) {
+            float value_err = h_value_out[i] - h_value_expected[i];
+            float uncertainty_err = h_uncert_out[i] - h_uncert_expected[i];
+            if (value_err < 0.0f) value_err = -value_err;
+            if (uncertainty_err < 0.0f) uncertainty_err = -uncertainty_err;
+            if (value_err > value_max_abs_err) value_max_abs_err = value_err;
+            if (uncertainty_err > uncertainty_max_abs_err) uncertainty_max_abs_err = uncertainty_err;
+        }
+
+        if (value_max_abs_err > 0.000001f || uncertainty_max_abs_err > 0.000001f) {
+            printf("sounio_nvidia_bare_runtime status=fail reason=epistemic_dual_output_f32_mismatch stage=verify_epistemic_dual_output_f32 cuda_result=0");
+            print_cuda_probe_suffix();
+            printf(" epistemic_dual_output_f32_n=%u value_max_abs_err=%.9g uncertainty_max_abs_err=%.9g uncertainty_eps_nonzero=1 observed_value0=%.9g expected_value0=%.9g observed_uncertainty_last=%.9g expected_uncertainty_last=%.9g\n",
+                   n_arg, value_max_abs_err, uncertainty_max_abs_err,
+                   h_value_out[0], h_value_expected[0], h_uncert_out[n_arg - 1], h_uncert_expected[n_arg - 1]);
+            dual_output_failed = 1;
+            goto dual_output_cleanup;
+        }
+
+        printf("sounio_nvidia_bare_runtime status=pass reason=runtime_epistemic_dual_output_f32_pass stage=cuMemcpyDtoH cuda_result=0");
+        print_cuda_probe_suffix();
+        printf(" epistemic_dual_output_f32_n=%u value_max_abs_err=%.9g uncertainty_max_abs_err=%.9g uncertainty_eps_nonzero=1 observed_value0=%.9g expected_value0=%.9g observed_uncertainty_last=%.9g expected_uncertainty_last=%.9g\n",
+               n_arg, value_max_abs_err, uncertainty_max_abs_err,
+               h_value_out[0], h_value_expected[0], h_uncert_out[n_arg - 1], h_uncert_expected[n_arg - 1]);
+
+dual_output_cleanup:
+        if (d_uncert_out) cuMemFree(d_uncert_out);
+        if (d_value_out) cuMemFree(d_value_out);
+        if (d_eps) cuMemFree(d_eps);
+        if (d_uy) cuMemFree(d_uy);
+        if (d_ux) cuMemFree(d_ux);
+        if (d_y) cuMemFree(d_y);
+        if (d_x) cuMemFree(d_x);
+        cuModuleUnload(mod);
+        cuCtxDestroy(ctx);
+        free(cubin);
+        free(h_uncert_expected);
+        free(h_value_expected);
+        free(h_uncert_out);
+        free(h_value_out);
+        free(h_eps);
+        free(h_uy);
+        free(h_ux);
+        free(h_y);
+        free(h_x);
+#undef DUAL_OUT_FAIL
+        return dual_output_failed ? 1 : 0;
     }
 
     if (strcmp(mode, "epistemic_dual_lane_f32") == 0) {

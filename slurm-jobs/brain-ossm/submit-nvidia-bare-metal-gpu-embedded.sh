@@ -27,6 +27,9 @@ JOB_MEM="${JOB_MEM:-4G}"
 JOB_TIME="${JOB_TIME:-00:10:00}"
 RUNTIME_RUNG="${SOUNIO_NVIDIA_BARE_RUNTIME_RUNG:-admission}"
 case "${RUNTIME_RUNG}" in
+  epistemic_dual_output_f32)
+    RESULT_STEM="sounio_bare_epistemic_dual_output_f32_sm80"
+    ;;
   vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32)
     RESULT_STEM="sounio_bare_vec_add_f32_sm80"
     ;;
@@ -184,6 +187,11 @@ parts = [
     "nvidia_bare_reason=" + str(obj.get("reason")),
     "runtime_status=" + str(runtime.get("status")),
     "runtime_reason=" + str(runtime.get("reason")),
+    "runtime_stage=" + str(runtime.get("stage")),
+    "cuda_result=" + str(runtime.get("cuda_result")),
+    "dual_n=" + str(runtime.get("epistemic_dual_output_f32_n")),
+    "value_err=" + str(runtime.get("epistemic_dual_output_value_max_abs_err")),
+    "uncert_err=" + str(runtime.get("epistemic_dual_output_uncertainty_max_abs_err")),
 ]
 comment = " ".join(parts)
 print(comment)
