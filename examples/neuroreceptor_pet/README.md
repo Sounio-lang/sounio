@@ -10,9 +10,12 @@ This example implements a minimal, reproducible **two-tissue compartment model (
 |------|------|
 | `pet_2tcm_epistemic.sio` | Main 2TCM + GUM audit (12 numerical tests) |
 | `pet_2tcm_export.sio` | CSV exporter for TAC curve (stdout → file) |
-| `NRM2026_ABSTRACT.md` | Late-breaking abstract draft (~300 words) |
-| `LITERATURE_VALIDATION.md` | Literature comparison: priors vs [11C]raclopride (Lammertsma 1996, Farde 1989, Innis 2007) |
-| `results/audit_output.txt` | Captured stdout of the audit run |
+| `pet_tracer_variants.sio` | Four-tracer variants (raclopride, flumazenil, DASB, PK11195) |
+| `pet_srtm.sio` | SRTM (Lammertsma & Hume 1996) validated against 2TCM in both regimes |
+| `pet_fit_validation.sio` | Parameter recovery from noisy synthetic TAC via coordinate descent |
+| `NRM2026_ABSTRACT.md` | Late-breaking abstract draft |
+| `LITERATURE_VALIDATION.md` | Prior comparison vs [11C]raclopride literature |
+| `results/audit_output.txt` | Captured audit run stdout |
 | `results/tac_curve.csv` | Generated TAC curve (1-min sampling) |
 
 ## Model

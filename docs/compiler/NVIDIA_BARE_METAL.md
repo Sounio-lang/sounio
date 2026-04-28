@@ -26,6 +26,7 @@ Current backend identity:
 - format: `GpuBareFormat::CubinElf64`
 - first kernel: `GpuBareKernelKind::ExitOnly`
 - highest checked kernel: `GpuBareKernelKind::VecAddF32`
+- highest runtime rung: `epistemic_elementwise_f32`
 - proof mode: `GpuBareProofMode::Structural`, with optional runtime admission
   and launch rungs on NVIDIA hosts
 
@@ -71,21 +72,25 @@ That mode emits:
 Runtime evidence, as of 2026-04-28:
 
 - L4 Slurm worker `gpuorangefs-r770-proxmox`
-- latest job `1080`
+- latest job `1082`
+- CUDA driver version `13020`
+- CUDA device `NVIDIA_L4`, ordinal `0`, compute capability `8.9`
 - CUDA Driver API `cuModuleLoadData` accepted the Sounio-emitted CUBIN
 - `cuModuleGetFunction` resolved `sounio_bare_vec_add_f32_sm80`
 - `cuLaunchKernel` returned `CUDA_SUCCESS`
 - the runtime harness allocated device memory, passed real kernel parameters,
-  copied the result back with `cuMemcpyDtoH`, and matched the CPU VecAddF32
-  oracle for four elements
-- runtime reason: `runtime_vec_add_f32_pass`
+  copied the result back with `cuMemcpyDtoH`, and matched the CPU oracle for 64
+  elements with nonzero epsilon input
+- runtime reason: `runtime_epistemic_elementwise_f32_pass`
+- runtime max absolute error: `0`
 - artifact SHA-256:
   `1e11cdd111076f41f9c5e82d06bc281af3df2ab0bf58c395225f1ff8450ed58b`
 
 This is a checked elementwise proof for a Sounio-owned SM80 CUBIN envelope and
-SASS body. It is still a narrow kernel proof, not a broad public NVIDIA bare
-runtime support claim. The next rung is value lane plus uncertainty lane
-elementwise kernels.
+SASS body, including a runtime stress rung that exercises the epsilon input lane
+through the existing FFMA body. It is still a narrow kernel proof, not a broad
+public NVIDIA bare runtime support claim. The next rung is a dedicated
+dual-output value plus uncertainty kernel.
 
 Optional runtime admission mode:
 
@@ -106,8 +111,12 @@ Runtime rungs:
 - `vec_add_f32`: allocate device buffers, pass `(x, y, eps, out, n)` kernel
   parameters, call `cuLaunchKernel`, synchronize, copy the result back with
   `cuMemcpyDtoH`, and assert the output matches the CPU VecAddF32 oracle.
+- `epistemic_elementwise_f32`: run the VecAddF32 CUBIN with a larger vector and
+  nonzero epsilon lane, then assert exact CPU-oracle parity for
+  `x + y * (1 + eps)`.
 
 The runtime classifier records exact reasons such as `cuda_driver_missing`,
 `cuInit_failed`, `cuModuleLoadData_rejected`, `cuModuleGetFunction_missing`,
 `cuLaunchKernel_failed`, `runtime_admission_pass`, or
-`runtime_store_u32_const_pass`, or `runtime_vec_add_f32_pass`.
+`runtime_store_u32_const_pass`, `runtime_vec_add_f32_pass`, or
+`runtime_epistemic_elementwise_f32_pass`.

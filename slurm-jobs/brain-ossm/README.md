@@ -97,22 +97,26 @@ worker-local scratch, and uses OrangeFS only for the Slurm stdout file:
 bash slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu-embedded.sh
 ```
 
-For the current VecAddF32 runtime rung:
+For the current stronger runtime rung:
 
 ```bash
-SOUNIO_NVIDIA_BARE_RUNTIME_RUNG=vec_add_f32 \
+SOUNIO_NVIDIA_BARE_RUNTIME_RUNG=epistemic_elementwise_f32 \
+SOUNIO_NVIDIA_BARE_VEC_N=64 \
   bash slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu-embedded.sh
 ```
 
 NVIDIA bare CUBIN current status:
 
 - L4 Slurm worker `gpuorangefs-r770-proxmox` passed the CUDA Driver API
-  VecAddF32 rung with job `1080`.
+  `epistemic_elementwise_f32` rung with job `1082`.
 - The passing elementwise proof used Sounio-emitted SM80 CUBIN bytes, no PTX,
   no `nvcc`, no `ptxas`, and no LLVM in the proof path.
 - The runtime harness allocated device buffers, passed real kernel params,
-  copied the result back with `cuMemcpyDtoH`, and matched the CPU oracle with
-  max absolute error `0`.
+  copied the result back with `cuMemcpyDtoH`, and matched the CPU oracle across
+  64 elements with nonzero epsilon input and max absolute error `0`.
+- CUDA probe for the passing job: driver `13020`, device `NVIDIA_L4`, compute
+  capability `8.9`.
+- Previous VecAddF32 zero-epsilon proof: job `1080`.
 - Previous StoreU32Const writeback proof: job `1078`, observed host-side `42`.
 
 Current validated status:
