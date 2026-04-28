@@ -47,7 +47,8 @@ This submission is **not** a clinical fitting tool, a validated imaging pipeline
 - `LITERATURE_VALIDATION.md` — prior-range citations
 - `AUDIT_REPORT.md` — pass/fail audit of every numerical claim above
 - `results/*.txt` — captured stdout for each acceptance run
-- Repository: Sounio-lang/darwin-pbpk @ `integration/sounio-dev-ready-base`
+- Repository: Sounio-lang/sounio (https://github.com/Sounio-lang/sounio) @ `integration/sounio-dev-ready-base`
+- Audited commit: `2e817fcbde01b14ac3524c09e4ae0d88d72d83c3`
 
 ## Key References
 

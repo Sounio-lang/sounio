@@ -1,8 +1,9 @@
 # Audit Report — `examples/neuroreceptor_pet/`
 
 **Date:** 2026-04-28
-**Repository:** Sounio-lang/darwin-pbpk
+**Repository:** Sounio-lang/sounio (https://github.com/Sounio-lang/sounio)
 **Branch:** `integration/sounio-dev-ready-base`
+**Audited commit:** `2e817fcbde01b14ac3524c09e4ae0d88d72d83c3`
 **Audit scope:** every `.sio` file and every quantitative claim in
 `examples/neuroreceptor_pet/`.
 **Audit mode:** no new features. Verification only.
