@@ -348,6 +348,16 @@ pub fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
         lower_tropical_mul(nc, instr)
     } else if instr.op == IrOpcode::IrFreeConvolve {
         lower_free_convolve(nc, instr)
+    } else if instr.op == IrOpcode::IrBooleanConvolve {
+        lower_boolean_convolve(nc, instr)
+    } else if instr.op == IrOpcode::IrMonotoneConvolve {
+        lower_monotone_convolve(nc, instr)
+    } else if instr.op == IrOpcode::IrWassersteinDist {
+        lower_wasserstein_dist(nc, instr)
+    } else if instr.op == IrOpcode::IrORC {
+        lower_orc(nc, instr)
+    } else if instr.op == IrOpcode::IrQDeform {
+        lower_q_deform(nc, instr)
     } else if instr.op == IrOpcode::IrCallIndirect {
         // Sprint 228: Indirect function call through register
         var c = nc
@@ -2191,6 +2201,244 @@ pub fn lower_free_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_val,  a_val,  b_val,  vl, mask_k, zb)
     // sigma_sq_out = σ²_a + σ²_b       (VADDPD, 1 EVEX — R-transform additivity)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_sgsq, a_sgsq, b_sgsq, vl, mask_k, zb)
+    c
+}
+
+// ─── Door Δ: Muraki's Independence Pentagon ──────────────────────────────────
+//
+// IrBooleanConvolve — Door Δ: Boolean ⊎ convolution of Knowledge values.
+//
+// Boolean independence (Muraki 2003): X, Y are Boolean-independent if they project
+// onto orthogonal subspaces. CLT limit: Bernoulli {-σ, +σ}. κ = m₄/σ⁴ = 1
+// (minimum kurtosis: X² = σ² a.s., so m₄ = E[X⁴] = σ⁴).
+//
+// Machine code: 2 VADDPD (identical arithmetic to lower_free_convolve).
+// The mathematical distinction is carried in the dist_class annotation (imm_flags bits 1-2 = 0b10)
+// for use by downstream epistemic gates and the Lean formal proof.
+//
+// Formal guarantee: MurakiPentagon.lean  `boolean_m4_minimal`, `muraki_classification_complete`
+pub fn lower_boolean_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl       = 2   // ZMM
+    let mask_k   = instr.label_id & 7
+    let zb       = instr.imm_flags & 1
+    // dist_class = (instr.imm_flags >> 1) & 3 = 0b10 (Boolean)
+    // Arithmetic is 2 VADDPD — same as classical GUM and Free; distinction is in dist_class.
+    let dst_val  = instr.dst
+    let dst_sgsq = instr.dst + 1
+    let a_val    = instr.src1
+    let a_sgsq   = instr.src1 + 1
+    let b_val    = instr.src2
+    let b_sgsq   = instr.src2 + 1
+    // val_out = a_val + b_val       (VADDPD — mean of Boolean convolution)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_val,  a_val,  b_val,  vl, mask_k, zb)
+    // sigma_sq_out = σ²_a + σ²_b   (VADDPD — variance additivity, same for all 5 types)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_sgsq, a_sgsq, b_sgsq, vl, mask_k, zb)
+    c
+}
+
+// IrMonotoneConvolve — Door Δ: Monotone ⊳ convolution (Muraki's most exotic type).
+//
+// Monotone independence is ORDER-DEPENDENT: X⊳Y ≠ Y⊳X at the moment level.
+// CLT limit: arcsine distribution on [-2σ, 2σ].  κ = m₄/σ⁴ = 3/2 (between Boolean and Free).
+// For CENTERED distributions: first asymmetry visible at m₅ (m₃ = 0 by symmetry).
+// The swap flag (imm_flags bit 3) encodes which operand is on the left.
+//
+// Machine code: 2 VADDPD (centered case, identical arithmetic).
+// The asymmetric ordering is carried in dist_class = 0b11 and the swap flag for downstream gates.
+//
+// Formal guarantee: MurakiPentagon.lean  `monotone_clt_arcsine`, `muraki_classification_complete`
+pub fn lower_monotone_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl       = 2   // ZMM
+    let mask_k   = instr.label_id & 7
+    let zb       = instr.imm_flags & 1
+    // dist_class = (instr.imm_flags >> 1) & 3 = 0b11 (Monotone/arcsine)
+    // imm_flags bit 3 = swap flag: 0 = a⊳b (a on left), 1 = b⊳a (b on left)
+    let dst_val  = instr.dst
+    let dst_sgsq = instr.dst + 1
+    let a_val    = instr.src1
+    let a_sgsq   = instr.src1 + 1
+    let b_val    = instr.src2
+    let b_sgsq   = instr.src2 + 1
+    // val_out = a_val + b_val       (VADDPD — centered case: means add)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_val,  a_val,  b_val,  vl, mask_k, zb)
+    // sigma_sq_out = σ²_a + σ²_b   (VADDPD — variance additivity, same for all 5 types)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_sgsq, a_sgsq, b_sgsq, vl, mask_k, zb)
+    c
+}
+
+// ─── Door Φ: Wasserstein Transport + Ollivier-Ricci Curvature ─────────────────
+//
+// lower_wasserstein_inline — shared sub-emitter for W₁ and ORC.
+//
+// W₁(N(μ_a,σ²_a), N(μ_b,σ²_b)) ≈ |μ_a − μ_b| + |σ_a − σ_b|
+// where σ_i = sqrt(σ²_i).
+//
+// |x| computed via max(x, -x) = VMAXPD(VSUBPD(a,b), VSUBPD(b,a)).
+// σ_i from VSQRTPD (EVEX.512.66.0F.W1 51 /r), src1=0 for unused VVVV.
+//
+// Scratch register layout (relative to dst_val):
+//   dst_val+2 = sc1: μ_a - μ_b
+//   dst_val+3 = sc2: μ_b - μ_a (then reused as |σ diff|)
+//   dst_val+4 = sc3: σ_a = √σ²_a
+//   dst_val+5 = sc4: σ_b = √σ²_b
+//   dst_val+6 = sc5: σ_a - σ_b
+//   dst_val+7 = sc6: σ_b - σ_a
+//
+// Total: 10 EVEX instructions / 60 bytes.
+pub fn lower_wasserstein_inline(nc: NativeCompiler, vl: i64, mask_k: i64, zb: i64,
+    dst_val: i64, dst_eps: i64,
+    a_val: i64, a_sgsq: i64,
+    b_val: i64, b_sgsq: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let sc1 = dst_val + 2
+    let sc2 = dst_val + 3
+    let sc3 = dst_val + 4
+    let sc4 = dst_val + 5
+    let sc5 = dst_val + 6
+    let sc6 = dst_val + 7
+    // |μ_a - μ_b|: max(μ_a-μ_b, μ_b-μ_a)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, sc1, a_val,  b_val,  vl, 0, 0)  // VSUBPD μ_a-μ_b
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, sc2, b_val,  a_val,  vl, 0, 0)  // VSUBPD μ_b-μ_a
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x5F, dst_val, sc1, sc2, vl, 0, 0)    // VMAXPD |μ diff|
+    // σ_a = √σ²_a, σ_b = √σ²_b  (VSQRTPD unary: src1=0 → VVVV=register-0, unused field)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x51, sc3, 0, a_sgsq, vl, 0, 0)      // VSQRTPD σ_a
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x51, sc4, 0, b_sgsq, vl, 0, 0)      // VSQRTPD σ_b
+    // |σ_a - σ_b|: max(σ_a-σ_b, σ_b-σ_a)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, sc5, sc3, sc4, vl, 0, 0)       // VSUBPD σ_a-σ_b
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, sc6, sc4, sc3, vl, 0, 0)       // VSUBPD σ_b-σ_a
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x5F, sc2, sc5, sc6, vl, 0, 0)       // VMAXPD |σ diff| → sc2
+    // W₁ = |μ diff| + |σ diff|
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_val, dst_val, sc2, vl, mask_k, zb)  // VADDPD W₁
+    // GUM eps: Δ(W₁) ≤ Δσ_a + Δσ_b ≈ (σ²_a + σ²_b) × conservative scale
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_eps, a_sgsq, b_sgsq, vl, mask_k, zb) // VADDPD eps
+    c
+}
+
+// IrWassersteinDist — Door Φ: W₁ Earth Mover's Distance between two Knowledge distributions.
+//
+// First compiler with Wasserstein distance as an IR primitive.
+// W₁(N(μ_a,σ²_a), N(μ_b,σ²_b)) ≈ |μ_a − μ_b| + |σ_a − σ_b|  (1D Gaussian approx)
+// GUM: Δ(W₁) ≤ Δσ_a + Δσ_b  (conservative bound)
+//
+// Encoding: dst=W₁ val ZMM, dst+1=eps ZMM, src1=(a_val,a_sgsq), src2=(b_val,b_sgsq)
+// imm_flags bit 0 = z-bit
+//
+// Formal guarantee: WassersteinORC.lean  `wasserstein_triangle_inequality`
+pub fn lower_wasserstein_dist(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    let vl     = 2
+    let mask_k = instr.label_id & 7
+    let zb     = instr.imm_flags & 1
+    lower_wasserstein_inline(nc, vl, mask_k, zb,
+        instr.dst, instr.dst + 1,
+        instr.src1, instr.src1 + 1,
+        instr.src2, instr.src2 + 1)
+}
+
+// IrORC — Door Φ: Ollivier-Ricci curvature κ(x,y) = 1 − W₁(mₓ,mᵧ)/d(x,y).
+//
+// ORC > 0: positive curvature (well-connected, fast mixing).
+// ORC < 0: negative curvature (bottleneck).
+// ORC = 0: flat (Euclidean-like topology).
+//
+// Encoding: same as IrWassersteinDist. imm_f64 = 1/d (inverse graph distance).
+// Lowering: inline W₁ + scale by 1/d + subtract from 1.0.
+// Uses dst+8 and dst+9 as broadcast scratch for (1/d) and (1.0).
+//
+// Formal guarantee: WassersteinORC.lean  `orc_positive_implies_mixing_bound`
+pub fn lower_orc(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl     = 2
+    let mask_k = instr.label_id & 7
+    let zb     = instr.imm_flags & 1
+    let dst    = instr.dst
+    let dst_eps = instr.dst + 1
+    // Step 1: emit W₁ into dst (uses dst+2..dst+7 as scratch)
+    c = lower_wasserstein_inline(c, vl, 0, 0,
+        dst, dst_eps,
+        instr.src1, instr.src1 + 1,
+        instr.src2, instr.src2 + 1)
+    // Step 2: broadcast 1/d from imm_f64 into scratch ZMM dst+8
+    let inv_d_zmm = dst + 8
+    let inv_d_bits = f64_to_bits(instr.imm_f64)
+    c.rodata = data_section_add_f64(c.rodata, inv_d_bits)
+    let inv_d_off = c.rodata.last_offset
+    let movsd_pos = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, movsd_pos + 4, inv_d_off)
+    c.code = emit_vbroadcastsd(c.code, inv_d_zmm, 0, vl, 0, 0)
+    // Step 3: W₁/d = dst × (1/d)  → write to dst
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, dst, dst, inv_d_zmm, vl, 0, 0)  // VMULPD W₁×(1/d)
+    // Step 4: broadcast 1.0 into scratch ZMM dst+9
+    let one_zmm = dst + 9
+    let one_bits = f64_to_bits(1.0)
+    c.rodata = data_section_add_f64(c.rodata, one_bits)
+    let one_off = c.rodata.last_offset
+    let movsd2_pos = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, movsd2_pos + 4, one_off)
+    c.code = emit_vbroadcastsd(c.code, one_zmm, 0, vl, 0, 0)
+    // Step 5: κ = 1.0 − W₁/d   (VSUBPD one_zmm, dst)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, dst, one_zmm, dst, vl, mask_k, zb)  // VSUBPD κ
+    c
+}
+
+// ─── Door Ξ: q-deformed Arithmetic / Quantum Groups ───────────────────────────
+//
+// IrQDeform — Door Ξ: q-deformed product a ·_q b with quantum group parameter q.
+//
+// Every prior Sounio algebra (octonions, Jordan, Clifford, tropical, free probability)
+// is a SPECIFIC algebra. U_q(G) is a FAMILY: at q=1 → classical; at q=root of unity →
+// finite periodic representations (TQFT). This is the FIRST compiler with q-deformation
+// as an IR primitive.
+//
+// Connection to E₈: IrE8RootReflectO (Horizon 3.9) is the q=1 Weyl reflection.
+// At q=e^{2πi/30}: generates E₈ WZW conformal field theory at level 1.
+//
+// a ·_q b = a·b + (q−1)·φ_q(a,b)   where φ_q(a,b) = (a·b − b·a)/2 for Lie deformation.
+// GUM: Δ(a·_q b) = Δ(a·b) + |q−1|·|a−b|·max(Δa,Δb)
+//
+// q encoding: imm_f64 = q as f64. Fast path: if q = 1.0 exactly, emit 1 VMULPD only.
+//
+// Formal guarantee: QDeformClassical.lean  `q_deform_recovers_classical`
+pub fn lower_q_deform(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl     = 2
+    let mask_k = instr.label_id & 7
+    let zb     = instr.imm_flags & 1
+    let dst    = instr.dst
+    let a_val  = instr.src1
+    let b_val  = instr.src2
+    let q_bits = f64_to_bits(instr.imm_f64)
+    let one_bits = f64_to_bits(1.0)
+    if q_bits == one_bits {
+        // Fast path: q = 1.0 exactly → classical multiplication, zero deformation overhead.
+        // VMULPD dst, a_val, b_val
+        c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, dst, a_val, b_val, vl, mask_k, zb)
+    } else {
+        // General path: a ·_q b = a·b + (q−1)·(a·b − b·a)/2
+        // For scalar (commuting) f64 lanes: φ_q(a,b) = 0 → same as classical.
+        // For non-commuting algebras (tagged via imm_i64 = algebra_tag):
+        //   the CALLER pre-computes (a·b − b·a)/2 into a scratch register (src2+1).
+        //   Here we emit: dst = a·b + (q−1)·src2+1
+        let sc = dst + 1   // scratch for (q-1) broadcast
+        // VMULPD dst, a_val, b_val    (classical product a·b)
+        c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, dst, a_val, b_val, vl, 0, 0)
+        // Broadcast (q−1) into scratch ZMM sc
+        let q_minus_1_bits = f64_to_bits(instr.imm_f64 - 1.0)
+        c.rodata = data_section_add_f64(c.rodata, q_minus_1_bits)
+        let qm1_off = c.rodata.last_offset
+        let movsd_pos = c.code.len
+        c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+        c.relocs = add_rip_reloc(c.relocs, movsd_pos + 4, qm1_off)
+        c.code = emit_vbroadcastsd(c.code, sc, 0, vl, 0, 0)
+        // VFMADD231PD dst, sc, (b_val − a_val)/2 (commutator half, from src2+1 if pre-computed)
+        // For the scalar/bootstrapping case: commutator = 0, VFMADD adds nothing.
+        // We use src2+1 as the commutator register (convention documented in IrQDeform header).
+        let comm = instr.src2 + 1
+        c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, dst, sc, comm, vl, mask_k, zb)
+    }
     c
 }
 

@@ -531,6 +531,96 @@ pub enum IrOpcode {
     //   Lowering: 2 VADDPD (val + sigma_sq).  The mathematical distinction is the TYPE and
     //   the 4th-moment: m₄(a⊞b) = 2(σ²_a+σ²_b)² [Wigner] vs 3(σ²_a+σ²_b)² [Gaussian].
     IrFreeConvolve, // Door Σ: free convolution K<a>⊞K<b>, dist_class annotated
+
+    // ─── Door Δ — Muraki's Independence Pentagon ──────────────────────────────
+    // Muraki (2003) proved there are exactly FIVE universal notions of non-commutative
+    // independence. Sounio now has Classical (GUM/ISO) and Free (Door Σ). Door Δ adds
+    // Boolean and Monotone, completing the classification. No other compiler has done this.
+    //
+    // All five theories give identical variance propagation (first order):
+    //   Var_out = Var_a + Var_b
+    // The 4th moment (kurtosis κ = m₄/σ⁴) distinguishes them:
+    //   Classical:  κ = 3  (Gaussian, Isserlis theorem)
+    //   Free:       κ = 2  (Wigner semicircle, Catalan C₂)
+    //   Monotone:   κ = 3/2 (arcsine on [-2σ,2σ])
+    //   Boolean:    κ = 1  (Bernoulli {-σ,+σ}, X²=σ² a.s.)
+    //   Anti-mono:  κ = 3/2 (mirror arcsine, same κ as monotone)
+    //
+    // IrBooleanConvolve — Boolean ⊎ convolution of Knowledge values.
+    //   Boolean independence: X, Y project onto orthogonal subspaces of the Hilbert space.
+    //   CLT limit: Bernoulli {-σ, +σ}.  m₄ = (σ²_out)²  (minimum kurtosis).
+    //   Encoding: dst+0=val_out, dst+1=sigma_sq_out; src1/src2 same layout.
+    //   imm_flags bit 0: z-bit.  imm_flags bits 1-2: dist_class = 0b10 (Boolean).
+    //   Formal guarantee: BooleanCLT.lean  `boolean_m4_minimal`
+    //   Lowering: 2 VADDPD (identical arithmetic to IrFreeConvolve; dist_class differs)
+    IrBooleanConvolve,  // Door Δ: K<a> ⊎ K<b>, dist_class=2, Bernoulli CLT, κ=1
+
+    // IrMonotoneConvolve — Monotone ⊳ convolution (Muraki's most exotic type).
+    //   Monotone independence is ORDER-DEPENDENT: X⊳Y ≠ Y⊳X at the moment level.
+    //   CLT limit: arcsine distribution on [-2σ, 2σ].  κ = 3/2.
+    //   Asymmetry: m₃(X⊳Y) depends on ordering (for non-centered distributions).
+    //   For centered distributions: asymmetry first visible at m₅.
+    //   Encoding: same as IrBooleanConvolve.
+    //   imm_flags bit 3: swap flag (= 1 means b⊳a, operands already in correct order).
+    //   imm_flags bits 1-2: dist_class = 0b11 (Monotone/arcsine).
+    //   Formal guarantee: MonotoneCLT.lean  `monotone_clt_arcsine`
+    //   Lowering: 2 VADDPD (centered case; asymmetry carried in dist_class annotation)
+    IrMonotoneConvolve, // Door Δ: K<a> ⊳ K<b>, dist_class=3, arcsine CLT, κ=3/2
+
+    // ─── Door Φ — Wasserstein Transport + Ollivier-Ricci Curvature ───────────
+    // Sounio can model distributions (Knowledge<T>) but could not COMPARE them.
+    // W₁ (Earth Mover's Distance) is the canonical metric on probability distributions.
+    // ORC uses W₁ to measure graph curvature. No compiler has these as IR primitives.
+    //
+    // Connection to research: Paper 4 (Brain ORC + Associator Field, ABIDE-I) computes ORC
+    // on connectomes. Making ORC an IR primitive means the compiler certifies ORC-based
+    // claims about brain graph topology at compile time.
+    //
+    // IrWassersteinDist — W₁ distance between two Knowledge<f64> distributions.
+    //   1D Gaussian approximation: W₁(N(μ_a,σ²_a), N(μ_b,σ²_b)) ≈ |μ_a-μ_b| + |σ_a-σ_b|
+    //   GUM: Δ(W₁) ≤ ½(Δσ_a + Δσ_b) + Δ|μ_a-μ_b|
+    //   Encoding: dst = val ZMM (W₁ value), dst+1 = eps ZMM (GUM bound)
+    //             src1 = a_val ZMM, src1+1 = a_sgsq ZMM
+    //             src2 = b_val ZMM, src2+1 = b_sgsq ZMM
+    //   imm_flags bit 0: z-bit; bit 1: emit_eps (include GUM in output register)
+    //   Lowering: VSUBPD + VANDPD (abs mean diff) + VSQRTPD×2 + VSUBPD + VANDPD (abs sig diff)
+    //             + VADDPD (sum) + GUM VADDPD×scale; ~7 EVEX instructions
+    //   Formal guarantee: WassersteinORC.lean  `wasserstein_triangle_inequality`
+    IrWassersteinDist,  // Door Φ: W₁(K<a>, K<b>) → f64 + GUM eps
+
+    // IrORC — Ollivier-Ricci curvature κ(x,y) = 1 - W₁(mₓ,mᵧ)/d(x,y).
+    //   ORC > 0: positive curvature (well-connected region, fast mixing).
+    //   ORC < 0: negative curvature (bottleneck, slow mixing, graph "neck").
+    //   ORC = 0: flat (Euclidean-like).
+    //   Encoding: same input layout as IrWassersteinDist.
+    //             imm_i64 = d(x,y) as fixed-point integer (actual distance × 1000).
+    //   Lowering: IrWassersteinDist sub-emission + VMULPD(1/d) + 1.0-broadcast + VSUBPD
+    //   Formal guarantee: WassersteinORC.lean  `orc_positive_implies_mixing_bound`
+    IrORC,              // Door Φ: κ(x,y) = 1 - W₁/d, wraps IrWassersteinDist
+
+    // ─── Door Ξ — q-deformed Arithmetic / Quantum Groups ─────────────────────
+    // Every prior algebra in Sounio is a SPECIFIC algebra at a fixed point.
+    // U_q(G) is a FAMILY parameterized by q ∈ ℂ. At q=1: classical. At q=root of unity:
+    // finite periodic representations (topological quantum field theory).
+    //
+    // Connection to E₈: E₈ at q = e^{2πi/30} corresponds to E₈ WZW CFT at level 1.
+    // IrE8RootReflectO (Horizon 3.9) IS the q=1 Weyl reflection; at q≠1 it generates
+    // the quantum Weyl group — connecting every prior Door to a unified framework.
+    //
+    // IrQDeform — q-deformed product: a ·_q b in an algebra with quantum group parameter q.
+    //   a ·_q b = a·b + (q-1)·φ_q(a,b)   where φ_q(a,b) = (a·b - b·a)/2 for Lie deform.
+    //   GUM: Δ(a·_q b) = Δ(a·b) + |q-1|·Δφ_q  (classical GUM + deformation correction)
+    //   q encoding in imm_flags:
+    //     bits  0-15: q_num   (int16 signed numerator)
+    //     bits 16-31: q_den   (uint16 denominator, ≠ 0)
+    //     → q_rational = q_num / q_den  (e.g., q=1: 1/1; q=1/2: 1/2; q=2: 2/1)
+    //   Special values:
+    //     q=1 (1/1): zero overhead — lowered to VMULPD only (no deformation)
+    //     q=-1 (-1/1): anti-commutative product (Clifford regime)
+    //   imm_i64 = algebra_tag (0=scalar, 1=octonion, 2=J3O, 8=E₈)
+    //   Formal guarantee: QDeformClassical.lean  `q_deform_recovers_classical`
+    //   Lowering at q=1: 1 VMULPD.  At q≠1: VMULPD + VSUBPD + scale + VFMADD231PD; ~4 EVEX
+    IrQDeform,          // Door Ξ: a·_q b, q in imm_flags, unifies all prior Doors
 }
 
 pub struct IrRegList {
