@@ -10,7 +10,7 @@ RUNTIME_MODE="${SOUNIO_NVIDIA_BARE_RUNTIME:-0}"
 RUNTIME_RUNG="${SOUNIO_NVIDIA_BARE_RUNTIME_RUNG:-admission}"
 KERNEL_KIND="${SOUNIO_NVIDIA_BARE_KERNEL_KIND:-}"
 if [[ -z "$KERNEL_KIND" ]]; then
-  if [[ "$RUNTIME_RUNG" == "vec_add_f32" || "$RUNTIME_RUNG" == "epistemic_elementwise_f32" ]]; then
+  if [[ "$RUNTIME_RUNG" == "vec_add_f32" || "$RUNTIME_RUNG" == "epistemic_elementwise_f32" || "$RUNTIME_RUNG" == "epistemic_dual_lane_f32" ]]; then
     KERNEL_KIND="vec_add_f32"
   else
     KERNEL_KIND="store_u32_const"
@@ -335,7 +335,7 @@ PY
 esac
 
 case "$RUNTIME_RUNG" in
-  admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32) ;;
+  admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32) ;;
   *)
     runtime_json="$(python3 - "$RUNTIME_RUNG" <<'PY'
 import json
@@ -344,7 +344,7 @@ print(json.dumps({
     "status": "not_run",
     "reason": "invalid_runtime_rung",
     "rung": sys.argv[1],
-    "allowed_rungs": ["admission", "launch", "store_u32_const", "vec_add_f32", "epistemic_elementwise_f32"],
+    "allowed_rungs": ["admission", "launch", "store_u32_const", "vec_add_f32", "epistemic_elementwise_f32", "epistemic_dual_lane_f32"],
     "driver_api_harness": "scripts/gpu/nvidia_bare_driver_loader.c",
 }))
 PY
@@ -446,6 +446,11 @@ epi_match = re.search(r"epistemic_elementwise_f32_n=(\d+)\s+epistemic_elementwis
 epistemic_elementwise_f32_n = int(epi_match.group(1)) if epi_match else None
 epistemic_elementwise_f32_max_abs_err = float(epi_match.group(2)) if epi_match else None
 epistemic_elementwise_f32_eps_nonzero = bool(int(epi_match.group(3))) if epi_match else None
+dual_match = re.search(r"epistemic_dual_lane_f32_n=(\d+)\s+value_max_abs_err=([0-9.eE+-]+)\s+uncertainty_max_abs_err=([0-9.eE+-]+)\s+uncertainty_eps_nonzero=(\d+)", text)
+epistemic_dual_lane_f32_n = int(dual_match.group(1)) if dual_match else None
+epistemic_dual_lane_value_max_abs_err = float(dual_match.group(2)) if dual_match else None
+epistemic_dual_lane_uncertainty_max_abs_err = float(dual_match.group(3)) if dual_match else None
+epistemic_dual_lane_uncertainty_eps_nonzero = bool(int(dual_match.group(4))) if dual_match else None
 probe = {}
 for key, conv in [
     ("driver_version", int),
@@ -472,6 +477,10 @@ print(json.dumps({
     "epistemic_elementwise_f32_n": epistemic_elementwise_f32_n,
     "epistemic_elementwise_f32_max_abs_err": epistemic_elementwise_f32_max_abs_err,
     "epistemic_elementwise_f32_eps_nonzero": epistemic_elementwise_f32_eps_nonzero,
+    "epistemic_dual_lane_f32_n": epistemic_dual_lane_f32_n,
+    "epistemic_dual_lane_value_max_abs_err": epistemic_dual_lane_value_max_abs_err,
+    "epistemic_dual_lane_uncertainty_max_abs_err": epistemic_dual_lane_uncertainty_max_abs_err,
+    "epistemic_dual_lane_uncertainty_eps_nonzero": epistemic_dual_lane_uncertainty_eps_nonzero,
     "cuda_probe": probe,
     "rung": rung,
     "rc": int(rc),

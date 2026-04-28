@@ -101,10 +101,11 @@ theorem alignUp_ge (n align : Nat) : n ≤ alignUp n align := by
 
 theorem alignUp_mod_zero (n align : Nat) (h : 0 < align) :
     alignUp n align % align = 0 := by
-  unfold alignUp
-  split
-  · simp [*]
-  · have h1 : n + (align - n % align) = align * (n / align + 1) := by
+  have h_ne : align ≠ 0 := Nat.ne_of_gt h
+  by_cases hr : n % align = 0
+  · simp [alignUp, hr, h_ne]
+  · simp only [alignUp, hr, h_ne]
+    have h1 : n + (align - n % align) = align * (n / align + 1) := by
       have h2 : n % align ≤ align := Nat.le_of_lt (Nat.mod_lt n h)
       have h3 : n + (align - n % align) = n + align - n % align := by
         rw [Nat.add_sub_assoc h2]

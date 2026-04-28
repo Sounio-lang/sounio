@@ -27,7 +27,7 @@ JOB_MEM="${JOB_MEM:-4G}"
 JOB_TIME="${JOB_TIME:-00:10:00}"
 RUNTIME_RUNG="${SOUNIO_NVIDIA_BARE_RUNTIME_RUNG:-admission}"
 case "${RUNTIME_RUNG}" in
-  vec_add_f32|epistemic_elementwise_f32)
+  vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32)
     RESULT_STEM="sounio_bare_vec_add_f32_sm80"
     ;;
   *)
