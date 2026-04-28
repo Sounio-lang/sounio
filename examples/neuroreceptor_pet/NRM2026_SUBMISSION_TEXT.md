@@ -42,7 +42,7 @@ Not a clinical PET fitting package.
 
 ## Keywords
 
-PET kinetic modelling · two-tissue compartment model · binding potential (BP_ND) · distribution volume (V_T) · uncertainty propagation · GUM (JCGM 100:2008) · finite-difference Jacobian · PBPK coupling · reproducible research
+PET kinetic modelling; two-tissue compartment model; uncertainty propagation; GUM; PBPK-informed priors; reproducibility
 
 ---
 
