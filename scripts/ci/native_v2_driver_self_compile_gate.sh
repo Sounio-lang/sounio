@@ -44,6 +44,13 @@ STAGE1_FILE_LOG="$LOG_DIR/native_compile_driver.stage1.file.txt"
 HELLO_FILE_LOG="$LOG_DIR/hello.stage1.file.txt"
 HELLO_SECTIONS_LOG="$LOG_DIR/hello.stage1.readelf.sections"
 HELLO_STRINGS_LOG="$LOG_DIR/hello.stage1.strings"
+STAGE2_DRIVER="$OUT_DIR/native_compile_driver.stage2"
+STAGE3_DRIVER="$OUT_DIR/native_compile_driver.stage3"
+STAGE2_COMPILE_LOG="$LOG_DIR/native_compile_driver.stage2.compile.log"
+STAGE3_COMPILE_LOG="$LOG_DIR/native_compile_driver.stage3.compile.log"
+STAGE2_HELLO_BIN="$OUT_DIR/hello.stage2"
+STAGE2_HELLO_COMPILE_LOG="$LOG_DIR/hello.stage2.compile.log"
+STAGE2_STDOUT="$LOG_DIR/hello.stage2.stdout"
 
 printf '[native-v2-driver-self] souc=%s\n' "$SOUC_BIN"
 printf '[native-v2-driver-self] out=%s\n' "$OUT_DIR"
@@ -126,4 +133,47 @@ if command -v strings >/dev/null 2>&1; then
   grep -q 'Hello from self-hosted Sounio!' "$HELLO_STRINGS_LOG"
 fi
 
-echo "[native-v2-driver-self] PASS: baseline, stage1 driver, stage1 hello ELF, sections, strings, and stdout parity"
+# ── Stage2: stage1 native binary compiles the driver again ───────────────────
+if ! "$STAGE1_DRIVER" "$DRIVER_SRC" -o "$STAGE2_DRIVER" >"$STAGE2_COMPILE_LOG" 2>&1; then
+  echo "[native-v2-driver-self] FAIL: stage1 driver failed to compile stage2" >&2
+  tail -n 120 "$STAGE2_COMPILE_LOG" >&2 || true
+  exit 1
+fi
+if [[ ! -x "$STAGE2_DRIVER" ]]; then
+  echo "[native-v2-driver-self] FAIL: stage2 driver is not executable" >&2
+  exit 1
+fi
+
+# ── Stage2 hello parity ───────────────────────────────────────────────────────
+if ! "$STAGE2_DRIVER" "$HELLO_SRC" -o "$STAGE2_HELLO_BIN" >"$STAGE2_HELLO_COMPILE_LOG" 2>&1; then
+  echo "[native-v2-driver-self] FAIL: stage2 driver failed while compiling hello" >&2
+  tail -n 120 "$STAGE2_HELLO_COMPILE_LOG" >&2 || true
+  exit 1
+fi
+"$STAGE2_HELLO_BIN" >"$STAGE2_STDOUT" 2>/dev/null
+if ! cmp -s "$EXPECTED_STDOUT" "$STAGE2_STDOUT"; then
+  echo "[native-v2-driver-self] FAIL: stage2 hello stdout mismatch" >&2
+  diff -u "$EXPECTED_STDOUT" "$STAGE2_STDOUT" >&2 || true
+  exit 1
+fi
+
+# ── Fixed-point: stage2 compiles stage3, stage3 == stage2 ────────────────────
+if ! "$STAGE2_DRIVER" "$DRIVER_SRC" -o "$STAGE3_DRIVER" >"$STAGE3_COMPILE_LOG" 2>&1; then
+  echo "[native-v2-driver-self] FAIL: stage2 driver failed to compile stage3" >&2
+  tail -n 120 "$STAGE3_COMPILE_LOG" >&2 || true
+  exit 1
+fi
+if ! cmp -s "$STAGE2_DRIVER" "$STAGE3_DRIVER"; then
+  echo "[native-v2-driver-self] FAIL: fixed-point broken — stage2 != stage3" >&2
+  python3 -c "
+a=open('$STAGE2_DRIVER','rb').read(); b=open('$STAGE3_DRIVER','rb').read()
+diffs=[(i,a[i],b[i]) for i in range(min(len(a),len(b))) if a[i]!=b[i]]
+print(f'  {len(diffs)} byte(s) differ')
+for i,x,y in diffs[:5]: print(f'  offset 0x{i:x}: {x:02x} vs {y:02x}')
+" >&2 || true
+  exit 1
+fi
+STAGE2_MD5="$(md5sum "$STAGE2_DRIVER" | cut -d' ' -f1)"
+printf '[native-v2-driver-self] fixed-point md5=%s\n' "$STAGE2_MD5"
+
+echo "[native-v2-driver-self] PASS: baseline, stage1 driver, stage2 driver, fixed-point (stage2==stage3), hello parity across all stages"
