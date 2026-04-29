@@ -218,6 +218,7 @@ var DRV_LABEL_PATCH_COUNT: i64 = 0
 var DRV_ELF_LEN: i64 = 0
 var DRV_ELF_BYTES: [i8; 1048576] = [0; 1048576]
 var EP_TOTAL_INSTR: i64 = 0
+var EP_KNOWLEDGE_COUNT: i64 = 0   // count of Knowledge<T> token occurrences in compiled source
 
 // Struct layout table (flat parallel arrays, capacity 16 structs / 128 total fields)
 var STRUCT_NAME_TOKS: [i64; 16] = [0; 16]
@@ -280,6 +281,7 @@ let V2_GLOBAL_STRUCT_FIELD_IS_F64: i64 = 76
 let V2_GLOBAL_USER_FN_RETURN_IS_F64: i64 = 77
 let V2_GLOBAL_STRUCT_FIELD_GENERIC_F64: i64 = 78
 let V2_GLOBAL_EP_TOTAL_INSTR: i64 = 79
+let V2_GLOBAL_EP_KNOWLEDGE_COUNT: i64 = 80
 
 struct ExprParse {
     ok: i64,
@@ -804,6 +806,7 @@ fn driver_global_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "DRV_ELF_BYTES") { return V2_GLOBAL_DRV_ELF_BYTES }
     if token_text_eq(tok, "DRV_ELF_LEN") { return V2_GLOBAL_DRV_ELF_LEN }
     if token_text_eq(tok, "EP_TOTAL_INSTR") { return V2_GLOBAL_EP_TOTAL_INSTR }
+    if token_text_eq(tok, "EP_KNOWLEDGE_COUNT") { return V2_GLOBAL_EP_KNOWLEDGE_COUNT }
     if token_text_eq(tok, "V2_LOCAL_COUNT") { return 70 }
     if token_text_eq(tok, "V2_NEXT_REG") { return 71 }
     if token_text_eq(tok, "V2_BREAK_LABEL") { return 72 }
@@ -936,6 +939,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_GLOBAL_USER_FN_RETURN_IS_F64") { return 77 }
     if token_text_eq(tok, "V2_GLOBAL_STRUCT_FIELD_GENERIC_F64") { return 78 }
     if token_text_eq(tok, "V2_GLOBAL_EP_TOTAL_INSTR") { return 79 }
+    if token_text_eq(tok, "V2_GLOBAL_EP_KNOWLEDGE_COUNT") { return 80 }
     -999999999
 }
 
@@ -2774,6 +2778,18 @@ fn source_uses_ident(token_count: i64, text: string) -> bool with Mut, Panic, Di
     false
 }
 
+fn source_count_ident(token_count: i64, text: string) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < token_count {
+        if token_kind(i) == TK_IDENT && token_text_eq(i, text) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
 fn drv_low8(x: i64) -> i64 with Div {
     let q = x / 256
     let n = x - (q * 256)
@@ -2860,7 +2876,7 @@ fn drv_align_page(offset: i64) -> i64 with Div {
 }
 
 fn drv_global_stride() -> i64 { 262144 }
-fn drv_driver_data_len() -> i64 { 20971520 }
+fn drv_driver_data_len() -> i64 { 21233664 }  // 81 global slots * 262144 stride
 
 fn drv_emit_mov_reg_imm32(reg: i64, val: i64) with Mut, Div, Panic {
     drv_emit_byte(72)
@@ -4480,9 +4496,9 @@ fn drv_elf_emit_shstrtab() with Mut, Panic, Div {
 fn drv_elf_emit_epistemic() with Mut, Panic, Div {
     // magic "SIEP" (Sounio Informational EPistemic)
     drv_elf_emit_byte(83); drv_elf_emit_byte(73); drv_elf_emit_byte(69); drv_elf_emit_byte(80)
-    drv_elf_emit_u32(1)              // version = 1
-    drv_elf_emit_u64(EP_TOTAL_INSTR) // total IR instructions compiled across all functions
-    drv_elf_emit_u64(0)              // u_c_scaled: 0 for fully-deterministic compilation
+    drv_elf_emit_u32(1)                 // version = 1
+    drv_elf_emit_u64(EP_TOTAL_INSTR)    // total micro-IR instructions compiled across all functions
+    drv_elf_emit_u64(EP_KNOWLEDGE_COUNT) // count of Knowledge<T> token occurrences in compiled source
 }
 
 fn drv_finalize_elf(output_path: string, data_len: i64) -> i64 with IO, Mut, Panic, Div {
@@ -4591,6 +4607,7 @@ fn compile_ir_module_to_elf(output_path: string, token_count: i64) -> i64 with I
         return 3
     }
     EP_TOTAL_INSTR = EP_TOTAL_INSTR + V2_UFN_COUNT
+    EP_KNOWLEDGE_COUNT = source_count_ident(token_count, "Knowledge")
 
     drv_emit_entry_trampoline(main_fn_id)
     var data_len = 4096
