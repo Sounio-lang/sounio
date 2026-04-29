@@ -2279,6 +2279,7 @@ fn tok_is_effect_name(p: i64) -> bool with Panic, Mut {
     if src_match(ns, ne - ns, "Audit") { return true }
     if src_match(ns, ne - ns, "Hypothesis") { return true }
     if src_match(ns, ne - ns, "MultiTest") { return true }
+    if src_match(ns, ne - ns, "ZD") { return true }
     return false
 }
 
@@ -11987,8 +11988,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if gi >= 0 {
                 em(0x48); em(0xb8); em64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])  // mov rax, addr
                 if GL[(gi * 4 + 3) as usize] == 0 {
-                    if type_is_option_inline(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) == false || GL[(gi * 4 + 2) as usize] < 16 {
-                        em(0x48); em(0x8b); em(0x00)  // scalar: mov rax, [rax] (dereference)
+                    if type_is_struct_like(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) == false {
+                        if type_is_option_inline(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) == false || GL[(gi * 4 + 2) as usize] < 16 {
+                            em(0x48); em(0x8b); em(0x00)  // scalar: mov rax, [rax] (dereference)
+                        }
                     }
                 }
                 EXPR_TY = GL_TY[gi as usize]
@@ -18680,6 +18683,8 @@ fn ety_parse_effect_name(ns: i64, ne: i64) -> i64 with Panic, Mut {
     if src_match(ns, l, "Observe") { return 32 }
     // Gen 20: GPU = bit 13 (8192) — above the & 1023 call-site mask, no propagation required
     if src_match(ns, l, "GPU") { return 8192 }
+    // ZD = bit 14 (16384) — zero-divisor effect for sedenion-based exact erasure
+    if src_match(ns, l, "ZD") { return 16384 }
     return 0
 }
 
@@ -21855,6 +21860,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if src_match(ens, ene - ens, "Deterministic") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 4096; matched_builtin = 1 }
                         // Gen 20: GPU = bit 13 (8192) — function uses GPU dispatch (excluded from & 1023 call-site check)
                         if src_match(ens, ene - ens, "GPU") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 8192; matched_builtin = 1 }
+                        // ZD = bit 14 (16384) — zero-divisor effect for sedenion-based exact erasure
+                        if src_match(ens, ene - ens, "ZD") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 16384; matched_builtin = 1 }
                         // Gen 21 Phase A″: Confidence(N) is a reader-friendly alias for
                         // Epistemic(N). Same bit, same FN_EPISTEMIC_MIN slot. N is an
                         // integer on the 1..1000 scale (matches Knowledge<T>.confidence).
@@ -21923,6 +21930,48 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             tc_missing_effect(FN_NAME_TOK[evi as usize])
         }
         evi = evi + 1
+    }
+
+    // ZD gating: ExactlyPrivate<T>, Editable<T>, CapabilityGated<T> require `with ZD`
+    var zd_fi: i64 = 0
+    while zd_fi < FN_COUNT {
+        if (FN_EFFECTS[zd_fi as usize] & 16384) == 0 && (FN_EFFECTS[zd_fi as usize] & 2048) == 0 {
+            let fn_tok = FN_NAME_TOK[zd_fi as usize]
+            var pq: i64 = fn_tok + 1
+            if pq < TC && TK[pq as usize] == 6 {
+                var pd: i64 = 1
+                pq = pq + 1
+                while pq < TC && pd > 0 {
+                    if TK[pq as usize] == 6 { pd = pd + 1 }
+                    else if TK[pq as usize] == 7 { pd = pd - 1 }
+                    else if TK[pq as usize] == 3 {
+                        let pns = TS[pq as usize]
+                        let pne = TE[pq as usize]
+                        let pl = pne - pns
+                        if src_match(pns, pl, "ExactlyPrivate") {
+                            print("error[E201]: parameter uses ExactlyPrivate<T> without `with ZD` effect at line ")
+                            print_int(TL[fn_tok as usize])
+                            print("\n")
+                            TYPECHECK_FAILED = 1
+                        }
+                        if src_match(pns, pl, "Editable") {
+                            print("error[E202]: parameter uses Editable<T> without `with ZD` effect at line ")
+                            print_int(TL[fn_tok as usize])
+                            print("\n")
+                            TYPECHECK_FAILED = 1
+                        }
+                        if src_match(pns, pl, "CapabilityGated") {
+                            print("error[E203]: parameter uses CapabilityGated<T> without `with ZD` effect at line ")
+                            print_int(TL[fn_tok as usize])
+                            print("\n")
+                            TYPECHECK_FAILED = 1
+                        }
+                    }
+                    pq = pq + 1
+                }
+            }
+        }
+        zd_fi = zd_fi + 1
     }
 
     // Pass 1c: scan top-level type aliases (token 61)
@@ -25883,8 +25932,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if gi >= 0 {
                 emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])
                 if GL[(gi * 4 + 3) as usize] == 0 {
-                    if type_is_option_inline(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) == false || GL[(gi * 4 + 2) as usize] < 16 {
-                        em32(0xF9400000)
+                    if type_is_struct_like(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) == false {
+                        if type_is_option_inline(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) == false || GL[(gi * 4 + 2) as usize] < 16 {
+                            em32(0xF9400000)
+                        }
                     }
                 }
                 EXPR_TY = GL_TY[gi as usize]
