@@ -41,6 +41,13 @@ This is an active **research project**, not a production release. Read the [hone
 
 ## For LLMs and Code Tools
 
+- Session bootstrap:
+  1. Read [CLAUDE_HANDOFF.md](CLAUDE_HANDOFF.md)
+  2. Read [CLAUDE.md](CLAUDE.md)
+  3. Read [AGENTS.md](AGENTS.md)
+  4. Verify the current branch before editing
+  5. Treat `/workspace/sounio` as the active remote-first workspace path
+  6. Do not propose destructive reset/clean/rebase flows to "simplify" recovery state
 - Prompt surface: [llms.txt](llms.txt)
 - Repository guide: [CLAUDE.md](CLAUDE.md)
 - Syntax and workflow guide: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md)

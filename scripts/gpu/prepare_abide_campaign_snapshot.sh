@@ -22,4 +22,8 @@ _copy "${SRC_ROOT}/scripts/research/parse_brain_ossm_abide_output.py" "${OUT_ROO
 _copy "${SRC_ROOT}/scripts/research/abide_external_baselines.py" "${OUT_ROOT}/scripts/research/"
 _copy "${SRC_ROOT}/scripts/research/aggregate_brain_ossm_campaign.py" "${OUT_ROOT}/scripts/research/"
 
+if [[ -n "${ABIDE_MANIFEST_PATH:-}" && -r "${ABIDE_MANIFEST_PATH}" ]]; then
+  rsync -a "${ABIDE_MANIFEST_PATH}" "${OUT_ROOT}/abide_source_manifest.tsv"
+fi
+
 echo "${OUT_ROOT}"
