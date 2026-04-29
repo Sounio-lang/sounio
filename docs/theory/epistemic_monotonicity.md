@@ -112,3 +112,20 @@ to leak into sh_link fields, visible only in JIT-produced binaries) is a direct
 consequence of this framework: the bleed appears as a u_c_scaled discrepancy between
 JIT and native-only bootstrap chains, making it diagnosable as a confidence degradation
 rather than an unexplained byte difference.
+
+## Non-Trivial Witness
+
+The theorem is instantiated non-trivially by `examples/epistemic_witness_minimal.sio`,
+a 17-line program that uses `Knowledge<f64>` as function parameter and return types
+(two parameters + one return → 3 `Knowledge` tokens). When compiled through
+`native_compile_driver`, the output ELF carries `u_c_scaled = 3` in its SIEP section.
+
+This is meaningful because:
+- The **compiler itself** produces `u_c_scaled = 0` (it has no `Knowledge<T>` annotations).
+- An **epistemic program** produces `u_c_scaled > 0`, proving the counter is wired to source
+  content, not hardcoded.
+- **JIT mode** would produce `u_c_scaled = 0` for the same program (the JIT frontend does not
+  invoke `source_count_ident`), making the discrepancy **machine-detectable**.
+
+The witness gate (`scripts/ci/epistemic_witness_gate.sh`) asserts `u_c_scaled >= 3` for this
+program after every compilation, providing a regression detector for epistemic density.
