@@ -10,7 +10,15 @@ RUNTIME_MODE="${SOUNIO_NVIDIA_BARE_RUNTIME:-0}"
 RUNTIME_RUNG="${SOUNIO_NVIDIA_BARE_RUNTIME_RUNG:-admission}"
 KERNEL_KIND="${SOUNIO_NVIDIA_BARE_KERNEL_KIND:-}"
 if [[ -z "$KERNEL_KIND" ]]; then
-  if [[ "$RUNTIME_RUNG" == "epistemic_dual_output_f32" ]]; then
+  if [[ "$RUNTIME_RUNG" == "epistemic_dual_output_f32_sm89_l4_flags" ]]; then
+    KERNEL_KIND="epistemic_dual_output_f32_sm89_l4_flags"
+  elif [[ "$RUNTIME_RUNG" == "epistemic_dual_output_f32_sm89_l4_layout" ]]; then
+    KERNEL_KIND="epistemic_dual_output_f32_sm89_l4_layout"
+  elif [[ "$RUNTIME_RUNG" == "epistemic_dual_output_f32_l4cc_alias" ]]; then
+    KERNEL_KIND="epistemic_dual_output_f32_l4cc_alias"
+  elif [[ "$RUNTIME_RUNG" == "epistemic_dual_output_f32_sm89_l4" ]]; then
+    KERNEL_KIND="epistemic_dual_output_f32_sm89_l4"
+  elif [[ "$RUNTIME_RUNG" == "epistemic_dual_output_f32" ]]; then
     KERNEL_KIND="epistemic_dual_output_f32"
   elif [[ "$RUNTIME_RUNG" == "vec_add_f32" || "$RUNTIME_RUNG" == "epistemic_elementwise_f32" || "$RUNTIME_RUNG" == "epistemic_dual_lane_f32" ]]; then
     KERNEL_KIND="vec_add_f32"
@@ -22,21 +30,57 @@ case "$KERNEL_KIND" in
   store_u32_const)
     DEFAULT_STEM="sounio_bare_store_u32_const_sm80"
     KERNEL_NAME="sounio_bare_store_u32_const_sm80"
+    TARGET_NAME="nvidia_sm80"
+    STRUCTURAL_TARGET_LABEL="sm80"
     EMITTER_HEX_LINE=1
     ;;
   vec_add_f32)
     DEFAULT_STEM="sounio_bare_vec_add_f32_sm80"
     KERNEL_NAME="sounio_bare_vec_add_f32_sm80"
+    TARGET_NAME="nvidia_sm80"
+    STRUCTURAL_TARGET_LABEL="sm80"
     EMITTER_HEX_LINE=2
     ;;
   epistemic_dual_output_f32)
     DEFAULT_STEM="sounio_bare_epistemic_dual_output_f32_sm80"
     KERNEL_NAME="sounio_bare_epistemic_dual_output_f32_sm80"
+    TARGET_NAME="nvidia_sm80"
+    STRUCTURAL_TARGET_LABEL="sm80"
     EMITTER_HEX_LINE=3
+    ;;
+  epistemic_dual_output_f32_l4cc_alias)
+    DEFAULT_STEM="sounio_bare_epistemic_dual_output_f32_l4cc"
+    KERNEL_NAME="sounio_bare_epistemic_dual_output_f32_l4cc"
+    TARGET_NAME="nvidia_sm89_l4"
+    STRUCTURAL_TARGET_LABEL="l4cc_alias"
+    EMITTER_HEX_LINE=5
+    ;;
+  epistemic_dual_output_f32_sm89_l4)
+    DEFAULT_STEM="sounio_bare_epistemic_dual_output_f32_sm89_l4"
+    KERNEL_NAME="sounio_bare_epistemic_dual_output_f32_sm89_l4"
+    TARGET_NAME="nvidia_sm89_l4"
+    STRUCTURAL_TARGET_LABEL="sm89_l4"
+    EMITTER_HEX_LINE=4
+    ;;
+  epistemic_dual_output_f32_sm89_l4_layout)
+    DEFAULT_STEM="sounio_bare_epistemic_dual_output_f32_sm89_l4_layout"
+    KERNEL_NAME="sounio_bare_epistemic_dual_output_f32_sm89_l4"
+    TARGET_NAME="nvidia_sm89_l4"
+    STRUCTURAL_TARGET_LABEL="sm89_l4_layout"
+    EMITTER_HEX_LINE=6
+    ;;
+  epistemic_dual_output_f32_sm89_l4_flags)
+    DEFAULT_STEM="sounio_bare_epistemic_dual_output_f32_sm89_l4_flags"
+    KERNEL_NAME="sounio_bare_epistemic_dual_output_f32_sm89_l4"
+    TARGET_NAME="nvidia_sm89_l4"
+    STRUCTURAL_TARGET_LABEL="sm89_l4_flags"
+    EMITTER_HEX_LINE=7
     ;;
   *)
     DEFAULT_STEM="sounio_bare_unknown_sm80"
     KERNEL_NAME="sounio_bare_unknown_sm80"
+    TARGET_NAME="nvidia_unknown"
+    STRUCTURAL_TARGET_LABEL="unknown"
     EMITTER_HEX_LINE=1
     ;;
 esac
@@ -68,19 +112,19 @@ emit_json() {
   local structural_json="$3"
   local runtime_json="$4"
   local blockers_json="$5"
-  python3 - "$OUT_JSON" "$status" "$reason" "$structural_json" "$runtime_json" "$blockers_json" "$(to_rel "$OUT_CUBIN")" "$(to_rel "$OUT_HEX")" "$(to_rel "$LOG_PATH")" "$(to_rel "$CARTOGRAPHY_JSON")" "$KERNEL_NAME" "$KERNEL_KIND" <<'PY'
+  python3 - "$OUT_JSON" "$status" "$reason" "$structural_json" "$runtime_json" "$blockers_json" "$(to_rel "$OUT_CUBIN")" "$(to_rel "$OUT_HEX")" "$(to_rel "$LOG_PATH")" "$(to_rel "$CARTOGRAPHY_JSON")" "$KERNEL_NAME" "$KERNEL_KIND" "$TARGET_NAME" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
 
-out, status, reason, structural, runtime, blockers, cubin, hex_path, log_path, cartography, kernel, kernel_kind = sys.argv[1:]
+out, status, reason, structural, runtime, blockers, cubin, hex_path, log_path, cartography, kernel, kernel_kind, target = sys.argv[1:]
 payload = {
     "schema": "sounio.native-v2.nvidia-bare-metal-gate.v1",
     "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "status": status,
     "reason": reason,
     "backend_identity": "nvidia_bare",
-    "target": "nvidia_sm80",
+    "target": target,
     "format": "cubin_elf64",
     "kernel": kernel,
     "kernel_kind": kernel_kind,
@@ -162,7 +206,7 @@ if [[ "$scan_json" != "[]" ]]; then
   exit 1
 fi
 
-structural_json="$(python3 - "$OUT_HEX" "$OUT_CUBIN" "$KERNEL_NAME" "$KERNEL_KIND" <<'PY'
+structural_json="$(python3 - "$OUT_HEX" "$OUT_CUBIN" "$KERNEL_NAME" "$KERNEL_KIND" "$STRUCTURAL_TARGET_LABEL" <<'PY'
 import binascii
 import hashlib
 import json
@@ -175,6 +219,7 @@ hex_path = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
 kernel_name = sys.argv[3]
 kernel_kind = sys.argv[4]
+target_label = sys.argv[5]
 raw_hex = "".join(hex_path.read_text(encoding="utf-8", errors="replace").split())
 if not re.fullmatch(r"[0-9a-fA-F]+", raw_hex or ""):
     print(json.dumps({"status": "fail", "reason": "non_hex_emitter_output"}))
@@ -192,11 +237,20 @@ def cstr(table, off):
     return table[off:end].decode("utf-8", errors="replace")
 
 sections = []
+program_headers = []
 if len(blob) >= 64 and blob[:4] == b"\x7fELF":
+    phoff = struct.unpack_from("<Q", blob, 32)[0]
     shoff = struct.unpack_from("<Q", blob, 40)[0]
+    phentsize = struct.unpack_from("<H", blob, 54)[0]
+    phnum = struct.unpack_from("<H", blob, 56)[0]
     shentsize = struct.unpack_from("<H", blob, 58)[0]
     shnum = struct.unpack_from("<H", blob, 60)[0]
     shstrndx = struct.unpack_from("<H", blob, 62)[0]
+    for i in range(phnum):
+        off = phoff + i * phentsize
+        if off + 56 <= len(blob):
+            vals = struct.unpack_from("<IIQQQQQQ", blob, off)
+            program_headers.append({"index": i, "type": vals[0], "flags": vals[1], "offset": vals[2], "filesz": vals[5], "memsz": vals[6], "align": vals[7]})
     raw = []
     for i in range(shnum):
         off = shoff + i * shentsize
@@ -222,9 +276,28 @@ markers = {
 flags = struct.unpack_from("<I", blob, 48)[0] if len(blob) >= 52 else 0
 kernel_info = next((s for s in sections if s["name"] == f".nv.info.{kernel_name}"), None)
 constant0 = next((s for s in sections if s["name"] == f".nv.constant0.{kernel_name}"), None)
+text_section = next((s for s in sections if s["name"] == f".text.{kernel_name}"), None)
 store_info_blob = b""
 if kernel_info is not None:
     store_info_blob = blob[kernel_info["offset"]:kernel_info["offset"] + kernel_info["size"]]
+load_segments = [p for p in program_headers if p["type"] == 1]
+ordered_sections = sorted([s for s in sections if s["size"] > 0 and s["type"] != 8], key=lambda s: (s["offset"], s["index"]))
+sections_non_overlapping = True
+last_end = 0
+for s in ordered_sections:
+    if s["offset"] < last_end:
+        sections_non_overlapping = False
+    end = s["offset"] + s["size"]
+    if end > last_end:
+        last_end = end
+
+def covered_by_load(section):
+    if section is None:
+        return False
+    start = section["offset"]
+    end = start + section["size"]
+    return any(p["offset"] <= start and p["offset"] + p["filesz"] >= end for p in load_segments)
+
 kind_checks = {}
 if kernel_kind == "store_u32_const":
     kind_checks["store_const_42_marker_present"] = b"\x2a\x00\x00\x00" in blob
@@ -234,7 +307,14 @@ elif kernel_kind == "vec_add_f32":
         and b"\x23\x72\x0b\x00\x05\x00\x00\x00" in blob
         and b"\x86\x79\x00\x08\x0b\x00\x00\x00" in blob
     )
-elif kernel_kind == "epistemic_dual_output_f32":
+elif kernel_kind in [
+    "epistemic_dual_output_f32",
+    "epistemic_dual_output_f32_l4cc_alias",
+    "epistemic_dual_output_f32_sm89_l4",
+    "epistemic_dual_output_f32_sm89_l4_layout",
+    "epistemic_dual_output_f32_sm89_l4_flags",
+]:
+    kind_checks["dual_output_kernel_info_declared_size_present"] = kernel_info is not None and kernel_info["size"] == 172
     kind_checks["dual_output_param_size_present"] = b"\x03\x19\x40\x00" in store_info_blob
     kind_checks["dual_output_param_cbank_span_present"] = b"\x60\x01\x40\x00" in store_info_blob
     kind_checks["dual_output_eight_kparam_entries_present"] = store_info_blob.count(b"\x04\x17") == 8
@@ -262,16 +342,28 @@ elif kernel_kind == "epistemic_dual_output_f32":
     )
 else:
     kind_checks["known_kernel_kind"] = False
+if target_label == "sm89_l4_flags":
+    target_flag_key = "sm89_flags_present"
+    target_flag_value = flags == 0x590550
+elif target_label in ["sm89_l4", "sm89_l4_layout", "l4cc_alias"]:
+    target_flag_key = "sm80_compat_flags_for_sm89_l4_present"
+    target_flag_value = flags == 0x500550
+else:
+    target_flag_key = "sm80_flags_present"
+    target_flag_value = flags == 0x500550
 checks = {
     "elf_magic": blob[:4] == b"\x7fELF",
     "elf64_little_endian": len(blob) >= 6 and blob[4] == 2 and blob[5] == 1,
     "machine_cuda": len(blob) >= 20 and struct.unpack_from("<H", blob, 18)[0] == 190,
-    "sm80_flags_present": (flags & 0x550) == 0x550,
-    "text_section_present": any(s["name"] == f".text.{kernel_name}" for s in sections),
+    target_flag_key: target_flag_value,
+    "sections_non_overlapping": sections_non_overlapping,
+    "text_section_present": text_section is not None,
+    "program_header_covers_text": covered_by_load(text_section),
     "nv_info_present": any(s["name"].startswith(".nv.info") for s in sections),
     "kernel_nv_info_present": kernel_info is not None,
     "constant0_param_section_present": constant0 is not None,
     "constant0_param_window_in_bounds": constant0 is not None and constant0["size"] >= 0x174,
+    "program_header_covers_constant0": covered_by_load(constant0),
     "kparam_info_present": b"\x04\x17" in store_info_blob,
     "param_cbank_present": b"\x04\x0a" in store_info_blob,
     "cbank_param_size_present": b"\x03\x19" in store_info_blob,
@@ -279,7 +371,7 @@ checks = {
 }
 checks.update(kind_checks)
 status = "pass" if all(checks.values()) else "fail"
-reason = f"structural_sm80_{kernel_kind}_cubin_green" if status == "pass" else "structural_check_failed"
+reason = f"structural_{target_label}_{kernel_kind}_cubin_green" if status == "pass" else "structural_check_failed"
 print(json.dumps({
     "status": status,
     "reason": reason,
@@ -291,6 +383,7 @@ print(json.dumps({
     "checks": checks,
     "forbidden_payload_markers": markers,
     "sections": sections,
+    "program_headers": program_headers,
 }, sort_keys=True))
 PY
 )"
@@ -368,7 +461,7 @@ PY
 esac
 
 case "$RUNTIME_RUNG" in
-  admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32|epistemic_dual_output_f32) ;;
+  admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32|epistemic_dual_output_f32|epistemic_dual_output_f32_l4cc_alias|epistemic_dual_output_f32_sm89_l4|epistemic_dual_output_f32_sm89_l4_layout|epistemic_dual_output_f32_sm89_l4_flags) ;;
   *)
     runtime_json="$(python3 - "$RUNTIME_RUNG" <<'PY'
 import json
@@ -377,7 +470,7 @@ print(json.dumps({
     "status": "not_run",
     "reason": "invalid_runtime_rung",
     "rung": sys.argv[1],
-    "allowed_rungs": ["admission", "launch", "store_u32_const", "vec_add_f32", "epistemic_elementwise_f32", "epistemic_dual_lane_f32", "epistemic_dual_output_f32"],
+    "allowed_rungs": ["admission", "launch", "store_u32_const", "vec_add_f32", "epistemic_elementwise_f32", "epistemic_dual_lane_f32", "epistemic_dual_output_f32", "epistemic_dual_output_f32_l4cc_alias", "epistemic_dual_output_f32_sm89_l4", "epistemic_dual_output_f32_sm89_l4_layout", "epistemic_dual_output_f32_sm89_l4_flags"],
     "driver_api_harness": "scripts/gpu/nvidia_bare_driver_loader.c",
 }))
 PY
@@ -489,6 +582,16 @@ epistemic_dual_output_f32_n = int(dual_output_match.group(1)) if dual_output_mat
 epistemic_dual_output_value_max_abs_err = float(dual_output_match.group(2)) if dual_output_match else None
 epistemic_dual_output_uncertainty_max_abs_err = float(dual_output_match.group(3)) if dual_output_match else None
 epistemic_dual_output_uncertainty_eps_nonzero = bool(int(dual_output_match.group(4))) if dual_output_match else None
+dual_output_sm89_l4_match = re.search(r"epistemic_dual_output_f32_sm89_l4_n=(\d+)\s+value_max_abs_err=([0-9.eE+-]+)\s+uncertainty_max_abs_err=([0-9.eE+-]+)\s+uncertainty_eps_nonzero=(\d+)", text)
+epistemic_dual_output_f32_sm89_l4_n = int(dual_output_sm89_l4_match.group(1)) if dual_output_sm89_l4_match else None
+epistemic_dual_output_sm89_l4_value_max_abs_err = float(dual_output_sm89_l4_match.group(2)) if dual_output_sm89_l4_match else None
+epistemic_dual_output_sm89_l4_uncertainty_max_abs_err = float(dual_output_sm89_l4_match.group(3)) if dual_output_sm89_l4_match else None
+epistemic_dual_output_sm89_l4_uncertainty_eps_nonzero = bool(int(dual_output_sm89_l4_match.group(4))) if dual_output_sm89_l4_match else None
+generic_dual_output_match = re.search(re.escape(rung) + r"_n=(\d+)\s+value_max_abs_err=([0-9.eE+-]+)\s+uncertainty_max_abs_err=([0-9.eE+-]+)\s+uncertainty_eps_nonzero=(\d+)", text)
+dual_output_runtime_n = int(generic_dual_output_match.group(1)) if generic_dual_output_match else None
+dual_output_runtime_value_max_abs_err = float(generic_dual_output_match.group(2)) if generic_dual_output_match else None
+dual_output_runtime_uncertainty_max_abs_err = float(generic_dual_output_match.group(3)) if generic_dual_output_match else None
+dual_output_runtime_uncertainty_eps_nonzero = bool(int(generic_dual_output_match.group(4))) if generic_dual_output_match else None
 probe = {}
 for key, conv in [
     ("driver_version", int),
@@ -523,6 +626,14 @@ print(json.dumps({
     "epistemic_dual_output_value_max_abs_err": epistemic_dual_output_value_max_abs_err,
     "epistemic_dual_output_uncertainty_max_abs_err": epistemic_dual_output_uncertainty_max_abs_err,
     "epistemic_dual_output_uncertainty_eps_nonzero": epistemic_dual_output_uncertainty_eps_nonzero,
+    "epistemic_dual_output_f32_sm89_l4_n": epistemic_dual_output_f32_sm89_l4_n,
+    "epistemic_dual_output_sm89_l4_value_max_abs_err": epistemic_dual_output_sm89_l4_value_max_abs_err,
+    "epistemic_dual_output_sm89_l4_uncertainty_max_abs_err": epistemic_dual_output_sm89_l4_uncertainty_max_abs_err,
+    "epistemic_dual_output_sm89_l4_uncertainty_eps_nonzero": epistemic_dual_output_sm89_l4_uncertainty_eps_nonzero,
+    "dual_output_runtime_n": dual_output_runtime_n,
+    "dual_output_runtime_value_max_abs_err": dual_output_runtime_value_max_abs_err,
+    "dual_output_runtime_uncertainty_max_abs_err": dual_output_runtime_uncertainty_max_abs_err,
+    "dual_output_runtime_uncertainty_eps_nonzero": dual_output_runtime_uncertainty_eps_nonzero,
     "cuda_probe": probe,
     "rung": rung,
     "rc": int(rc),

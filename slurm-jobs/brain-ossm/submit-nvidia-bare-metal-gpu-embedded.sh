@@ -26,7 +26,21 @@ SBATCH_OUTPUT="${SBATCH_OUTPUT:-/dev/null}"
 JOB_MEM="${JOB_MEM:-4G}"
 JOB_TIME="${JOB_TIME:-00:10:00}"
 RUNTIME_RUNG="${SOUNIO_NVIDIA_BARE_RUNTIME_RUNG:-admission}"
+MATRIX_MODE="${SOUNIO_NVIDIA_BARE_MATRIX:-0}"
+MATRIX_RUNGS="${SOUNIO_NVIDIA_BARE_MATRIX_RUNGS:-epistemic_dual_output_f32 epistemic_dual_output_f32_l4cc_alias epistemic_dual_output_f32_sm89_l4 epistemic_dual_output_f32_sm89_l4_layout epistemic_dual_output_f32_sm89_l4_flags}"
 case "${RUNTIME_RUNG}" in
+  epistemic_dual_output_f32_sm89_l4_flags)
+    RESULT_STEM="sounio_bare_epistemic_dual_output_f32_sm89_l4_flags"
+    ;;
+  epistemic_dual_output_f32_sm89_l4_layout)
+    RESULT_STEM="sounio_bare_epistemic_dual_output_f32_sm89_l4_layout"
+    ;;
+  epistemic_dual_output_f32_l4cc_alias)
+    RESULT_STEM="sounio_bare_epistemic_dual_output_f32_l4cc"
+    ;;
+  epistemic_dual_output_f32_sm89_l4)
+    RESULT_STEM="sounio_bare_epistemic_dual_output_f32_sm89_l4"
+    ;;
   epistemic_dual_output_f32)
     RESULT_STEM="sounio_bare_epistemic_dual_output_f32_sm80"
     ;;
@@ -147,6 +161,124 @@ echo "CUDA_VISIBLE_DEVICES=\${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi -L || true
 ldconfig -p 2>/dev/null | grep -E 'libcuda\\.so|libnvidia-ml\\.so' || true
 
+result_stem_for_rung() {
+  case "\$1" in
+    epistemic_dual_output_f32_sm89_l4_flags)
+      printf '%s\\n' "sounio_bare_epistemic_dual_output_f32_sm89_l4_flags"
+      ;;
+    epistemic_dual_output_f32_sm89_l4_layout)
+      printf '%s\\n' "sounio_bare_epistemic_dual_output_f32_sm89_l4_layout"
+      ;;
+    epistemic_dual_output_f32_l4cc_alias)
+      printf '%s\\n' "sounio_bare_epistemic_dual_output_f32_l4cc"
+      ;;
+    epistemic_dual_output_f32_sm89_l4)
+      printf '%s\\n' "sounio_bare_epistemic_dual_output_f32_sm89_l4"
+      ;;
+    epistemic_dual_output_f32)
+      printf '%s\\n' "sounio_bare_epistemic_dual_output_f32_sm80"
+      ;;
+    vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32)
+      printf '%s\\n' "sounio_bare_vec_add_f32_sm80"
+      ;;
+    *)
+      printf '%s\\n' "sounio_bare_store_u32_const_sm80"
+      ;;
+  esac
+}
+
+if [[ '${MATRIX_MODE}' == "1" || '${MATRIX_MODE}' == "true" || '${MATRIX_MODE}' == "TRUE" || '${MATRIX_MODE}' == "yes" || '${MATRIX_MODE}' == "on" ]]; then
+  mark "nvidia_bare_phase=run_matrix"
+  MATRIX_DIR="\${RESULTS_DIR}/matrix"
+  SUMMARY_TSV="\${RESULTS_DIR}/nvidia_bare_admission_matrix.tsv"
+  SUMMARY_JSONL="\${RESULTS_DIR}/nvidia_bare_admission_matrix.jsonl"
+  mkdir -p "\${MATRIX_DIR}"
+  printf 'rung\\tkernel\\tartifact_sha256\\tstructural_status\\tstructural_reason\\truntime_status\\truntime_reason\\truntime_stage\\tcuda_result\\tdual_n\\tvalue_err\\tuncertainty_err\\tdevice\\n' > "\${SUMMARY_TSV}"
+  : > "\${SUMMARY_JSONL}"
+  matrix_rc=0
+  matrix_comment=""
+  for matrix_rung in ${MATRIX_RUNGS}; do
+    matrix_stem="\$(result_stem_for_rung "\${matrix_rung}")"
+    rung_dir="\${MATRIX_DIR}/\${matrix_rung}"
+    mkdir -p "\${rung_dir}"
+    mark "nvidia_bare_phase=matrix_rung rung=\${matrix_rung}"
+    trap - ERR
+    set +e
+    SOUNIO_NVIDIA_BARE_RUNTIME=1 \\
+    SOUNIO_NVIDIA_BARE_RUNTIME_RUNG="\${matrix_rung}" \\
+    SOUNIO_NVIDIA_BARE_VEC_N='${VEC_N}' \\
+    SOUNIO_NVIDIA_BARE_RUNTIME_LOADER="\${SOUNIO_DIR}/${DRIVER_LOADER_PAYLOAD_NAME}" \\
+    SOUNIO_NVIDIA_BARE_GATE_JSON="\${rung_dir}/native_v2_nvidia_bare_metal_gate.v1.json" \\
+    SOUNIO_NVIDIA_BARE_CUBIN="\${rung_dir}/\${matrix_stem}.cubin" \\
+    SOUNIO_NVIDIA_BARE_HEX="\${rung_dir}/\${matrix_stem}.hex" \\
+    SOUNIO_NVIDIA_BARE_CARTOGRAPHY_JSON="\${rung_dir}/nvidia_bare_cubin_cartography.v1.json" \\
+    SOUNIO_NVIDIA_BARE_GATE_LOG="\${rung_dir}/native_v2_nvidia_bare_metal_gate.log" \\
+      bash "\${SOUNIO_DIR}/scripts/ci/native_v2_nvidia_bare_metal_gate.sh" \\
+      > "\${rung_dir}/gate.stdout" 2>&1
+    rung_rc="\$?"
+    set -e
+    trap 'rc=\$?; mark "nvidia_bare_phase=failed rc=\${rc} line=\${LINENO}"; exit "\${rc}"' ERR
+
+    export MATRIX_RUNG="\${matrix_rung}"
+    export MATRIX_RC="\${rung_rc}"
+    export RUNG_DIR="\${rung_dir}"
+    export SUMMARY_TSV
+    export SUMMARY_JSONL
+    classification="\$(python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+rung = os.environ["MATRIX_RUNG"]
+rung_dir = Path(os.environ["RUNG_DIR"])
+p = rung_dir / "native_v2_nvidia_bare_metal_gate.v1.json"
+obj = json.loads(p.read_text()) if p.exists() else {}
+runtime = obj.get("runtime", {})
+structural = obj.get("structural", {})
+probe = runtime.get("cuda_probe", {})
+short = {
+    "epistemic_dual_output_f32": "control",
+    "epistemic_dual_output_f32_l4cc_alias": "alias",
+    "epistemic_dual_output_f32_sm89_l4": "squeezed",
+    "epistemic_dual_output_f32_sm89_l4_layout": "layout",
+    "epistemic_dual_output_f32_sm89_l4_flags": "flags",
+}.get(rung, rung)
+row = [
+    rung,
+    obj.get("kernel"),
+    structural.get("sha256"),
+    structural.get("status"),
+    structural.get("reason"),
+    runtime.get("status"),
+    runtime.get("reason"),
+    runtime.get("stage"),
+    runtime.get("cuda_result"),
+    runtime.get("dual_output_runtime_n"),
+    runtime.get("dual_output_runtime_value_max_abs_err"),
+    runtime.get("dual_output_runtime_uncertainty_max_abs_err"),
+    probe.get("device_name"),
+]
+with open(os.environ["SUMMARY_TSV"], "a", encoding="utf-8") as f:
+    f.write("\\t".join("" if value is None else str(value) for value in row) + "\\n")
+with open(os.environ["SUMMARY_JSONL"], "a", encoding="utf-8") as f:
+    f.write(json.dumps({"rung": rung, "rc": int(os.environ["MATRIX_RC"]), "gate": obj}, sort_keys=True) + "\\n")
+print(f"{short}:{obj.get('status')}/{runtime.get('status')}/{runtime.get('reason')}/cuda{runtime.get('cuda_result')}")
+PY
+)"
+    echo "\${classification}"
+    if [[ -n "\${matrix_comment}" ]]; then
+      matrix_comment="\${matrix_comment},\${classification}"
+    else
+      matrix_comment="\${classification}"
+    fi
+    if [[ "\${matrix_rung}" == "epistemic_dual_output_f32" && "\${classification}" != control:pass/pass/* ]]; then
+      matrix_rc=1
+    fi
+  done
+  mark "nvidia_bare_phase=matrix_done matrix_rc=\${matrix_rc} matrix=\${matrix_comment}"
+  exit "\${matrix_rc}"
+fi
+
 mark "nvidia_bare_phase=run_gate"
 trap - ERR
 set +e
@@ -180,6 +312,12 @@ if p.exists():
 else:
     obj = {}
 runtime = obj.get("runtime", {})
+def first_present(*keys):
+    for key in keys:
+        value = runtime.get(key)
+        if value is not None:
+            return value
+    return None
 parts = [
     "nvidia_bare_phase=gate_done",
     "gate_rc=" + str(gate_rc),
@@ -189,9 +327,9 @@ parts = [
     "runtime_reason=" + str(runtime.get("reason")),
     "runtime_stage=" + str(runtime.get("stage")),
     "cuda_result=" + str(runtime.get("cuda_result")),
-    "dual_n=" + str(runtime.get("epistemic_dual_output_f32_n")),
-    "value_err=" + str(runtime.get("epistemic_dual_output_value_max_abs_err")),
-    "uncert_err=" + str(runtime.get("epistemic_dual_output_uncertainty_max_abs_err")),
+    "dual_n=" + str(first_present("dual_output_runtime_n", "epistemic_dual_output_f32_sm89_l4_n", "epistemic_dual_output_f32_n")),
+    "value_err=" + str(first_present("dual_output_runtime_value_max_abs_err", "epistemic_dual_output_sm89_l4_value_max_abs_err", "epistemic_dual_output_value_max_abs_err")),
+    "uncert_err=" + str(first_present("dual_output_runtime_uncertainty_max_abs_err", "epistemic_dual_output_sm89_l4_uncertainty_max_abs_err", "epistemic_dual_output_uncertainty_max_abs_err")),
 ]
 comment = " ".join(parts)
 print(comment)

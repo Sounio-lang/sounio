@@ -97,7 +97,38 @@ worker-local scratch, and uses OrangeFS only for the Slurm stdout file:
 bash slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu-embedded.sh
 ```
 
-For the single-launch dual-output runtime rung:
+For the native SM89/L4 sibling single-launch dual-output diagnostic rung:
+
+```bash
+SOUNIO_NVIDIA_BARE_RUNTIME_RUNG=epistemic_dual_output_f32_sm89_l4_flags \
+SOUNIO_NVIDIA_BARE_VEC_N=64 \
+  bash slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu-embedded.sh
+```
+
+For the admission-delta matrix:
+
+```bash
+SOUNIO_NVIDIA_BARE_MATRIX=1 \
+SOUNIO_NVIDIA_BARE_VEC_N=64 \
+  bash slurm-jobs/brain-ossm/submit-nvidia-bare-metal-gpu-embedded.sh
+```
+
+Before trying to promote local workspace runtime claims, run the local CUDA
+device admission gate:
+
+```bash
+bash scripts/ci/local_cuda_device_admission_gate.sh
+```
+
+This gate distinguishes installed CUDA tooling from actual local device
+exposure. It writes
+`artifacts/omega/local_cuda_device_admission_gate.v1.json`, then runs the
+Sounio CUBIN runtime proof through an isolated inner gate artifact. On
+containerized workspaces without `/dev/nvidia*`, the expected status is
+`not_run`, not a failed compiler proof. Use `SOUNIO_LOCAL_CUDA_STRICT=1` when a
+real local device is required.
+
+For the SM80-generic single-launch dual-output runtime rung:
 
 ```bash
 SOUNIO_NVIDIA_BARE_RUNTIME_RUNG=epistemic_dual_output_f32 \
@@ -116,16 +147,28 @@ SOUNIO_NVIDIA_BARE_VEC_N=64 \
 NVIDIA bare CUBIN current status:
 
 - L4 Slurm worker `gpuorangefs-r770-proxmox` passed the CUDA Driver API
-  `epistemic_dual_output_f32` rung with job `1118`.
-- The passing single-launch dual-output proof used Sounio-emitted SM80 CUBIN
-  bytes, no PTX, no `nvcc`, no `ptxas`, and no LLVM in the proof path.
+  admission matrix with job `1125`.
+- The matrix shows the true SM89/L4 long-name artifact
+  `epistemic_dual_output_f32_sm89_l4_flags` admitted and launched on
+  `NVIDIA_L4` compute capability `8.9`.
+- The passing native SM89/L4 single-launch dual-output proof uses
+  Sounio-emitted CUBIN bytes, no PTX, no `nvcc`, no `ptxas`, and no LLVM in the
+  proof path. The artifact hash is
+  `66fc7266e54e9b2450496c89ac1c1dd738d335fcdbec4a76843aec907f754ef1`.
 - The runtime harness allocated device buffers, passed real kernel params,
   launched once with `cuLaunchKernel`, copied both value and uncertainty
   results back with `cuMemcpyDtoH`, and matched both CPU oracles across 64
   elements with nonzero uncertainty epsilon input and max absolute error `0`
   in both lanes.
-- CUDA probe for the passing job: driver `13020`, device `NVIDIA_L4`, compute
-  capability `8.9`.
+- CUDA probe for the passing job: driver `13020`, device `NVIDIA_L4`.
+- The previously failing squeezed SM89/L4 artifact is now locally rejected by
+  structural checks before launch because `.nv.info.<kernel>` declared `152`
+  bytes while the emitted dual-output metadata payload is `172` bytes.
+- Matrix artifact:
+  - `artifacts/omega/nvidia_bare_admission_matrix.v1.json`
+  - `artifacts/omega/nvidia_bare_admission_matrix.v1.tsv`
+- Previous SM80-compatible L4 single-launch dual-output proof: job `1123`.
+- Previous SM80-compatible single-launch dual-output proof: job `1118`.
 - Previous two-launch dual-lane proof: job `1083`.
 - Previous epsilon-stressed single-output proof: job `1082`.
 - Previous VecAddF32 zero-epsilon proof: job `1080`.

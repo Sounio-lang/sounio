@@ -26,6 +26,18 @@ FORCE_RESTAGE="${FORCE_RESTAGE:-0}"
 PAYLOAD_COPY_MODE="${PAYLOAD_COPY_MODE:-base64-chunks}"
 RUNTIME_RUNG="${SOUNIO_NVIDIA_BARE_RUNTIME_RUNG:-admission}"
 case "${RUNTIME_RUNG}" in
+  epistemic_dual_output_f32_sm89_l4_flags)
+    RESULT_STEM="sounio_bare_epistemic_dual_output_f32_sm89_l4_flags"
+    ;;
+  epistemic_dual_output_f32_sm89_l4_layout)
+    RESULT_STEM="sounio_bare_epistemic_dual_output_f32_sm89_l4_layout"
+    ;;
+  epistemic_dual_output_f32_l4cc_alias)
+    RESULT_STEM="sounio_bare_epistemic_dual_output_f32_l4cc"
+    ;;
+  epistemic_dual_output_f32_sm89_l4)
+    RESULT_STEM="sounio_bare_epistemic_dual_output_f32_sm89_l4"
+    ;;
   epistemic_dual_output_f32)
     RESULT_STEM="sounio_bare_epistemic_dual_output_f32_sm80"
     ;;
@@ -260,6 +272,14 @@ elif obj.get('runtime', {}).get('reason') == 'runtime_epistemic_dual_lane_f32_pa
     print('NVIDIA_BARE_RUNTIME_EPISTEMIC_DUAL_LANE_F32_OK')
 elif obj.get('runtime', {}).get('reason') == 'runtime_epistemic_dual_output_f32_pass':
     print('NVIDIA_BARE_RUNTIME_EPISTEMIC_DUAL_OUTPUT_F32_OK')
+elif obj.get('runtime', {}).get('reason') == 'runtime_epistemic_dual_output_f32_sm89_l4_pass':
+    print('NVIDIA_BARE_RUNTIME_EPISTEMIC_DUAL_OUTPUT_F32_SM89_L4_OK')
+elif obj.get('runtime', {}).get('reason') == 'runtime_epistemic_dual_output_f32_l4cc_alias_pass':
+    print('NVIDIA_BARE_RUNTIME_EPISTEMIC_DUAL_OUTPUT_F32_L4CC_ALIAS_OK')
+elif obj.get('runtime', {}).get('reason') == 'runtime_epistemic_dual_output_f32_sm89_l4_layout_pass':
+    print('NVIDIA_BARE_RUNTIME_EPISTEMIC_DUAL_OUTPUT_F32_SM89_L4_LAYOUT_OK')
+elif obj.get('runtime', {}).get('reason') == 'runtime_epistemic_dual_output_f32_sm89_l4_flags_pass':
+    print('NVIDIA_BARE_RUNTIME_EPISTEMIC_DUAL_OUTPUT_F32_SM89_L4_FLAGS_OK')
 PY
 
 echo

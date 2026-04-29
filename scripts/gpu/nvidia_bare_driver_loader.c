@@ -11,6 +11,10 @@
 //   epistemic_elementwise_f32  vec add kernel with nonzero epsilon lane
 //   epistemic_dual_lane_f32  two-launch value lane + uncertainty lane oracle
 //   epistemic_dual_output_f32  one launch, value + uncertainty output buffers
+//   epistemic_dual_output_f32_sm89_l4  same oracle against the SM89/L4 artifact
+//   epistemic_dual_output_f32_l4cc_alias  same oracle against same-length L4 alias artifact
+//   epistemic_dual_output_f32_sm89_l4_layout  same oracle against repaired long-name layout
+//   epistemic_dual_output_f32_sm89_l4_flags  same oracle against repaired layout with SM89 flags
 
 #include <dlfcn.h>
 #include <string.h>
@@ -89,6 +93,14 @@ static void emit_status(const char *status, const char *reason, const char *stag
     printf("\n");
 }
 
+static int is_dual_output_mode(const char *mode) {
+    return strcmp(mode, "epistemic_dual_output_f32") == 0 ||
+           strcmp(mode, "epistemic_dual_output_f32_sm89_l4") == 0 ||
+           strcmp(mode, "epistemic_dual_output_f32_l4cc_alias") == 0 ||
+           strcmp(mode, "epistemic_dual_output_f32_sm89_l4_layout") == 0 ||
+           strcmp(mode, "epistemic_dual_output_f32_sm89_l4_flags") == 0;
+}
+
 static unsigned char *read_all(const char *path, size_t *len_out) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -130,7 +142,7 @@ static unsigned char *read_all(const char *path, size_t *len_out) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <cubin> <kernel> [admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32|epistemic_dual_output_f32]\n", argv[0]);
+        fprintf(stderr, "usage: %s <cubin> <kernel> [admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32|epistemic_dual_output_f32|epistemic_dual_output_f32_l4cc_alias|epistemic_dual_output_f32_sm89_l4|epistemic_dual_output_f32_sm89_l4_layout|epistemic_dual_output_f32_sm89_l4_flags]\n", argv[0]);
         return 2;
     }
     const char *mode = argc >= 4 ? argv[3] : "admission";
@@ -140,8 +152,8 @@ int main(int argc, char **argv) {
         strcmp(mode, "vec_add_f32") != 0 &&
         strcmp(mode, "epistemic_elementwise_f32") != 0 &&
         strcmp(mode, "epistemic_dual_lane_f32") != 0 &&
-        strcmp(mode, "epistemic_dual_output_f32") != 0) {
-        fprintf(stderr, "usage: mode must be admission, launch, store_u32_const, vec_add_f32, epistemic_elementwise_f32, epistemic_dual_lane_f32, or epistemic_dual_output_f32\n");
+        !is_dual_output_mode(mode)) {
+        fprintf(stderr, "usage: mode must be admission, launch, store_u32_const, vec_add_f32, epistemic_elementwise_f32, epistemic_dual_lane_f32, or a supported epistemic_dual_output_f32 diagnostic rung\n");
         return 2;
     }
 
@@ -196,7 +208,7 @@ int main(int argc, char **argv) {
         strcmp(mode, "vec_add_f32") == 0 ||
         strcmp(mode, "epistemic_elementwise_f32") == 0 ||
         strcmp(mode, "epistemic_dual_lane_f32") == 0 ||
-        strcmp(mode, "epistemic_dual_output_f32") == 0) {
+        is_dual_output_mode(mode)) {
         LOAD_SYM_ALIAS(cuMemAlloc, cuMemAlloc_t, "cuMemAlloc_v2", "cuMemAlloc");
         LOAD_SYM_ALIAS(cuMemFree, cuMemFree_t, "cuMemFree_v2", "cuMemFree");
         LOAD_SYM_ALIAS(cuMemcpyHtoD, cuMemcpyHtoD_t, "cuMemcpyHtoD_v2", "cuMemcpyHtoD");
@@ -292,7 +304,8 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (strcmp(mode, "epistemic_dual_output_f32") == 0) {
+    if (is_dual_output_mode(mode)) {
+        const char *dual_output_label = mode;
         uint32_t n_arg = (uint32_t)read_env_int("SOUNIO_NVIDIA_BARE_VEC_N", 64, 1, 256);
         size_t bytes = (size_t)n_arg * sizeof(float);
         float *h_x = (float *)calloc(n_arg, sizeof(float));
@@ -416,19 +429,21 @@ int main(int argc, char **argv) {
         }
 
         if (value_max_abs_err > 0.000001f || uncertainty_max_abs_err > 0.000001f) {
-            printf("sounio_nvidia_bare_runtime status=fail reason=epistemic_dual_output_f32_mismatch stage=verify_epistemic_dual_output_f32 cuda_result=0");
+            printf("sounio_nvidia_bare_runtime status=fail reason=%s_mismatch stage=verify_%s cuda_result=0",
+                   dual_output_label, dual_output_label);
             print_cuda_probe_suffix();
-            printf(" epistemic_dual_output_f32_n=%u value_max_abs_err=%.9g uncertainty_max_abs_err=%.9g uncertainty_eps_nonzero=1 observed_value0=%.9g expected_value0=%.9g observed_uncertainty_last=%.9g expected_uncertainty_last=%.9g\n",
-                   n_arg, value_max_abs_err, uncertainty_max_abs_err,
+            printf(" %s_n=%u value_max_abs_err=%.9g uncertainty_max_abs_err=%.9g uncertainty_eps_nonzero=1 observed_value0=%.9g expected_value0=%.9g observed_uncertainty_last=%.9g expected_uncertainty_last=%.9g\n",
+                   dual_output_label, n_arg, value_max_abs_err, uncertainty_max_abs_err,
                    h_value_out[0], h_value_expected[0], h_uncert_out[n_arg - 1], h_uncert_expected[n_arg - 1]);
             dual_output_failed = 1;
             goto dual_output_cleanup;
         }
 
-        printf("sounio_nvidia_bare_runtime status=pass reason=runtime_epistemic_dual_output_f32_pass stage=cuMemcpyDtoH cuda_result=0");
+        printf("sounio_nvidia_bare_runtime status=pass reason=runtime_%s_pass stage=cuMemcpyDtoH cuda_result=0",
+               dual_output_label);
         print_cuda_probe_suffix();
-        printf(" epistemic_dual_output_f32_n=%u value_max_abs_err=%.9g uncertainty_max_abs_err=%.9g uncertainty_eps_nonzero=1 observed_value0=%.9g expected_value0=%.9g observed_uncertainty_last=%.9g expected_uncertainty_last=%.9g\n",
-               n_arg, value_max_abs_err, uncertainty_max_abs_err,
+        printf(" %s_n=%u value_max_abs_err=%.9g uncertainty_max_abs_err=%.9g uncertainty_eps_nonzero=1 observed_value0=%.9g expected_value0=%.9g observed_uncertainty_last=%.9g expected_uncertainty_last=%.9g\n",
+               dual_output_label, n_arg, value_max_abs_err, uncertainty_max_abs_err,
                h_value_out[0], h_value_expected[0], h_uncert_out[n_arg - 1], h_uncert_expected[n_arg - 1]);
 
 dual_output_cleanup:
