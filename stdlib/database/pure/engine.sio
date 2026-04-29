@@ -1,0 +1,129 @@
+// stdlib/database/pure/engine.sio — In-Memory SQL Engine
+
+pub fn engine_list_tables(db: &InMemoryDB) -> Vec<String> {
+    var names = Vec::new()
+    for table in db.tables {
+        names.push(table.name)
+    }
+    names
+}
+
+pub fn engine_table_row_count(db: &InMemoryDB, name: String) -> i64 {
+    var i = 0
+    while i < db.tables.len() {
+        if db.tables[i].name == name {
+            return db.tables[i].row_count
+        }
+        i = i + 1
+    }
+    0
+}
+
+pub fn engine_execute_sql(db: &! InMemoryDB, sql: String) -> QueryResult {
+    let cmd = parse_sql(sql)
+    match cmd {
+        Ok(c) => execute_cmd(db, c),
+        Err(_) => query_result_new(sql, QueryOutcome::Empty),
+    }
+}
+
+fn execute_cmd(db: &! InMemoryDB, cmd: SqlCmd) -> QueryResult {
+    match cmd {
+        SqlCmd::CreateTable(stmt) => {
+            let affected = engine_create_table(db, stmt)
+            query_result_new("".to_string(), QueryOutcome::Affected(affected))
+        }
+        SqlCmd::DropTable(stmt) => {
+            let affected = engine_drop_table(db, stmt)
+            query_result_new("".to_string(), QueryOutcome::Affected(affected))
+        }
+        SqlCmd::Insert(stmt) => {
+            let affected = engine_execute_insert(db, stmt)
+            query_result_new("".to_string(), QueryOutcome::Affected(affected))
+        }
+        SqlCmd::Select(stmt) => {
+            let rs = engine_execute_select(db, stmt)
+            match rs {
+                Ok(r) => query_result_new("".to_string(), QueryOutcome::Rows(r)),
+                Err(_) => query_result_new("".to_string(), QueryOutcome::Empty),
+            }
+        }
+    }
+}
+
+pub fn engine_create_table(db: &! InMemoryDB, stmt: CreateTableStmt) -> i64 {
+    var i = 0
+    while i < db.tables.len() {
+        if db.tables[i].name == stmt.name {
+            return 0
+        }
+        i = i + 1
+    }
+    let def = TableDef {
+        name: stmt.name,
+        columns: Vec::new(),
+        row_count: 0,
+    }
+    db.tables.push(def)
+    let td = table_data_new(stmt.name)
+    db.data.push(td)
+    1
+}
+
+pub fn engine_drop_table(db: &! InMemoryDB, stmt: DropTableStmt) -> i64 {
+    var i = 0
+    while i < db.tables.len() {
+        if db.tables[i].name == stmt.name {
+            db.tables.remove(i)
+            db.data.remove(i)
+            return 1
+        }
+        i = i + 1
+    }
+    0
+}
+
+pub fn engine_execute_select(db: &InMemoryDB, stmt: SelectStmt) -> Result<ResultSet, String> {
+    var table_idx = -1
+    var i = 0
+    while i < db.tables.len() {
+        if db.tables[i].name == stmt.from {
+            table_idx = i
+            break
+        }
+        i = i + 1
+    }
+    if table_idx < 0 {
+        return Err("Table not found".to_string())
+    }
+
+    var rs = result_set_new()
+    rs.row_count = db.data[table_idx].rows.len() as i64
+    rs.rows = db.data[table_idx].rows.clone()
+    Ok(rs)
+}
+
+pub fn engine_execute_insert(db: &! InMemoryDB, stmt: InsertStmt) -> i64 {
+    var table_idx = -1
+    var i = 0
+    while i < db.tables.len() {
+        if db.tables[i].name == stmt.table {
+            table_idx = i
+            break
+        }
+        i = i + 1
+    }
+    if table_idx < 0 {
+        return 0
+    }
+
+    var rows_inserted: i64 = 0
+    var vi = 0
+    while vi < stmt.values.len() {
+        db.data[table_idx].rows.push(stmt.values[vi].clone())
+        rows_inserted = rows_inserted + 1
+        vi = vi + 1
+    }
+    db.tables[table_idx].row_count = db.tables[table_idx].row_count + rows_inserted
+    rows_inserted
+}
