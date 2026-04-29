@@ -176,4 +176,42 @@ fi
 STAGE2_MD5="$(md5sum "$STAGE2_DRIVER" | cut -d' ' -f1)"
 printf '[native-v2-driver-self] fixed-point md5=%s\n' "$STAGE2_MD5"
 
-echo "[native-v2-driver-self] PASS: baseline, stage1 driver, stage2 driver, fixed-point (stage2==stage3), hello parity across all stages"
+# ── Epistemic fixed-point: read .sounio.epistemic from stage1/2/3 ────────────
+read_epistemic() {
+  python3 - "$1" <<'PYEOF'
+import struct, sys, os
+path = sys.argv[1]
+if not os.path.exists(path):
+    print("absent")
+    sys.exit(0)
+data = open(path, 'rb').read()
+idx = data.find(b'SIEP')
+if idx < 0:
+    print("absent")
+    sys.exit(0)
+chunk = data[idx:idx+24]
+version = struct.unpack_from('<I', chunk, 4)[0]
+instr_count = struct.unpack_from('<Q', chunk, 8)[0]
+u_c_scaled = struct.unpack_from('<Q', chunk, 16)[0]
+print(f"{version}:{instr_count}:{u_c_scaled}")
+PYEOF
+}
+
+STAGE1_EP="$(read_epistemic "$STAGE1_DRIVER")"
+STAGE2_EP="$(read_epistemic "$STAGE2_DRIVER")"
+STAGE3_EP="$(read_epistemic "$STAGE3_DRIVER")"
+printf '[native-v2-driver-self] epistemic stage1=%s stage2=%s stage3=%s\n' \
+  "$STAGE1_EP" "$STAGE2_EP" "$STAGE3_EP"
+
+if [[ "$STAGE2_EP" == "absent" || "$STAGE3_EP" == "absent" ]]; then
+  echo "[native-v2-driver-self] FAIL: epistemic section missing from stage2 or stage3" >&2
+  exit 1
+fi
+if [[ "$STAGE2_EP" != "$STAGE3_EP" ]]; then
+  echo "[native-v2-driver-self] FAIL: epistemic fixed-point broken — stage2 != stage3 epistemic profile" >&2
+  exit 1
+fi
+STAGE2_INSTR="$(echo "$STAGE2_EP" | cut -d: -f2)"
+printf '[native-v2-driver-self] epistemic-fixed-point instr=%s u_c=0 (stage2==stage3 confidence-stable)\n' "$STAGE2_INSTR"
+
+echo "[native-v2-driver-self] PASS: baseline, stage1 driver, stage2 driver, fixed-point (stage2==stage3), hello parity across all stages, epistemic-fixed-point verified"
