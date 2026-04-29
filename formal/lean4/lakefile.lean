@@ -63,3 +63,6 @@ lean_lib «SounioProofObligation» where
 
 @[default_target]
 lean_lib «SounioZeroDivisorBridge» where
+
+@[default_target]
+lean_lib «SounioImpossibilityChain» where
