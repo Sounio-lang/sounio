@@ -60,3 +60,6 @@ lean_lib «SounioMeasConf» where
 
 @[default_target]
 lean_lib «SounioProofObligation» where
+
+@[default_target]
+lean_lib «SounioZeroDivisorBridge» where
