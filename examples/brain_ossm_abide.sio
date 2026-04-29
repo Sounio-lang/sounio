@@ -1,0 +1,2535 @@
+// Brain O-SSM ABIDE Cross-Site CV
+//
+// Honest current contract:
+// - input is a frozen TSV manifest at
+//   /orangefs/training/sounio/abide-data/abide_roi_manifest.tsv
+// - each row is one subject
+// - core header: subject_id, label, site, f0..fN
+// - flat feature count must be divisible by 8
+// - optional leading `# key=value` metadata comment lines are tolerated
+// - labels are binary ASD vs control
+// - evaluation is grouped by real site holdout (leave-one-site-out)
+//
+// This benchmark is intentionally narrower than the long-term vision
+// (raw NIfTI -> ROI time series -> temporal O-SSM). It provides the first
+// runnable real-data path without overstating current ingestion maturity.
+
+var FEATURES: [f64; 1048576] = [0.0; 1048576] // 2048 * 512 (64 steps * 8 dims)
+var LABELS: [i64; 2048] = [0; 2048]         // 1=ASD, 0=Control
+var SITE_KEYS: [i64; 2048] = [0; 2048]
+var SUBJECT_SITE_TEXT: [i64; 65536] = [0; 65536] // 2048 * 32
+var SUBJECT_SITE_LEN: [i64; 2048] = [0; 2048]
+var UNIQUE_SITES: [i64; 64] = [0; 64]
+var UNIQUE_SITE_TEXT: [i64; 2048] = [0; 2048] // 64 * 32
+var UNIQUE_SITE_LEN: [i64; 64] = [0; 64]
+var UNIQUE_SITE_COUNT: i64 = 0
+var SUBJECT_COUNT: i64 = 0
+var MANIFEST_SEQ_LEN: i64 = 8
+var MANIFEST_INPUT_DIM: i64 = 8
+var MANIFEST_FEATURE_COUNT: i64 = 64
+var CFG_TRAIN_FRACTION_BP: i64 = 1000000
+var CFG_DROP_CHANNEL_FRAC_BP: i64 = 0
+var CFG_NOISE_STD_BP: i64 = 0
+var CFG_GLOBAL_TRAIN_EPOCHS: i64 = 90
+var CFG_GLOBAL_TRAIN_LR_BP: i64 = 20000
+var CFG_GLOBAL_CORE_LR_SCALE_BP: i64 = 350000
+var CFG_OCT_TRAIN_EPOCHS: i64 = 0
+var CFG_OCT_TRAIN_LR_BP: i64 = 0
+var CFG_OCT_CORE_LR_SCALE_BP: i64 = 0
+var CFG_OCT_WARMUP_EPOCHS: i64 = 0
+var CFG_OCT_PROFILE_ID: i64 = 0
+var CFG_OCT_TRAIN_MODE: i64 = 0
+var CFG_OCT_INIT_PRESET: i64 = 0
+var CFG_OCT_ASSOC_REG_BP: i64 = 0
+var CFG_OCT_ASSOC_TARGET_BP: i64 = 0
+var CFG_OCT_ASSOC_SCHEDULE_MODE: i64 = 0
+var CFG_OCT_ASSOC_SCHEDULE_START_BP: i64 = 0
+var CFG_OCT_ASSOC_SCHEDULE_MID_BP: i64 = 0
+var CFG_OCT_ASSOC_SCHEDULE_END_BP: i64 = 0
+var CFG_OCT_ASSOC_DRIFT_REG_BP: i64 = 0
+var CFG_OCT_HEAD_TRUST_REGION_BP: i64 = 0
+var CFG_OCT_HEAD_RENORM: i64 = 1
+var CFG_OCT_INPUT_PROJ_MODE: i64 = 0
+var CFG_OCT_PROJ_LR_SCALE_BP: i64 = 600000
+var CFG_OCT_PROJ_STRUCTURED_SCALE_BP: i64 = 350000
+var CFG_OCT_PROJ_DELTA_SCALE_BP: i64 = 180000
+var CFG_OCT_PROJ_HYBRID_SCALE_BP: i64 = 120000
+var CFG_H_TRAIN_EPOCHS: i64 = 0
+var CFG_H_TRAIN_LR_BP: i64 = 0
+var CFG_H_CORE_LR_SCALE_BP: i64 = 0
+var CFG_H_WARMUP_EPOCHS: i64 = 0
+var CFG_H_INIT_PRESET: i64 = 0
+var CFG_H_INPUT_PROJ_MODE: i64 = 0
+var CFG_H_PROJ_LR_SCALE_BP: i64 = 600000
+var TRAIN_MASK: [i64; 2048] = [0; 2048]
+var DROP_MASK: [i64; 64] = [0; 64]
+var FOLD_NOISE_KEY: i64 = 0
+var TRAIN_FEATURE_MEAN: [f64; 512] = [0.0; 512]
+var TRAIN_FEATURE_STD: [f64; 512] = [1.0; 512]
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+var W: [i64; 704] = [0; 704]   // hidden + assoc + summary skips + flat skip + input encoder + bias
+var MOM: [i64; 704] = [0; 704]
+var H: [i64; 16] = [0; 16]
+var A: [f64; 16] = [0.0; 16]
+var A_MOM: [i64; 16] = [0; 16]
+var ASSOC_ACC: [i64; 2] = [0; 2]
+var LOGIT: f64 = 0.0
+
+var TMP_OCT: [f64; 8] = [0.0; 8]
+var TMP_GRAD: [f64; 8] = [0.0; 8]
+var TMP_DELTA: [f64; 8] = [0.0; 8]
+var LAST_INPUT_MEAN: [f64; 8] = [0.0; 8]
+var FIRST_INPUT_STEP: [f64; 8] = [0.0; 8]
+var LAST_INPUT_STEP: [f64; 8] = [0.0; 8]
+var LAST_INPUT_FLAT: [f64; 512] = [0.0; 512]
+var RAW_INPUT_MEAN: [f64; 8] = [0.0; 8]
+var RAW_FIRST_INPUT_STEP: [f64; 8] = [0.0; 8]
+var RAW_LAST_INPUT_STEP: [f64; 8] = [0.0; 8]
+var RAW_INPUT_FLAT: [f64; 512] = [0.0; 512]
+var ENC_INPUT_MEAN: [f64; 8] = [0.0; 8]
+var ENC_FIRST_INPUT_STEP: [f64; 8] = [0.0; 8]
+var ENC_LAST_INPUT_STEP: [f64; 8] = [0.0; 8]
+var ENC_INPUT_FLAT: [f64; 512] = [0.0; 512]
+var LAST_ACC_BP: i64 = 0
+var LAST_BAL_BP: i64 = 0
+var LAST_ASSOC_BP: i64 = 0
+var LAST_TEST_N: i64 = 0
+var LAST_EVAL_OK: i64 = 0
+var LAST_SITE_BAL_BP: [i64; 64] = [0; 64]
+var LAST_SITE_ACC_BP: [i64; 64] = [0; 64]
+var LAST_SITE_ASSOC_BP: [i64; 64] = [0; 64]
+var LAST_SITE_TEST_N: [i64; 64] = [0; 64]
+var LAST_SITE_VALID: [i64; 64] = [0; 64]
+var O_SITE_BAL_SUM_BP: [i64; 64] = [0; 64]
+var O_SITE_ASSOC_SUM_BP: [i64; 64] = [0; 64]
+var O_SITE_VALID_CT: [i64; 64] = [0; 64]
+var O_SITE_TEST_N_SUM: [i64; 64] = [0; 64]
+var H_SITE_BAL_SUM_BP: [i64; 64] = [0; 64]
+var H_SITE_ASSOC_SUM_BP: [i64; 64] = [0; 64]
+var H_SITE_VALID_CT: [i64; 64] = [0; 64]
+var H_SITE_TEST_N_SUM: [i64; 64] = [0; 64]
+var PROJ_W: [i64; 64] = [0; 64]
+var PROJ_B: [i64; 8] = [0; 8]
+var PROJ_W_MOM: [i64; 64] = [0; 64]
+var PROJ_B_MOM: [i64; 8] = [0; 8]
+var PREV_ASSOC_ACC: [i64; 2] = [0; 2]
+var TRAIN_EPOCH_CURSOR: i64 = 0
+var TRAIN_EPOCH_TOTAL: i64 = 0
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn abs_i64(x: i64) -> i64 {
+    if x < 0 { 0 - x } else { x }
+}
+
+fn clip_f64(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+fn squash_pos_f64(x: f64) -> f64 with Div {
+    if x <= 0.0 { return 0.0 }
+    x / (1.0 + x)
+}
+
+fn head_count() -> i64 { 2 }
+fn head_width() -> i64 { 8 }
+fn hidden_dim() -> i64 { 16 }
+fn assoc_offset() -> i64 { 16 }
+fn input_mean_offset() -> i64 { 18 }
+fn input_delta_offset() -> i64 { 26 }
+fn step_delta_offset() -> i64 { 34 }
+fn input_flat_offset() -> i64 { 42 }
+fn encoder_scale_offset() -> i64 { 554 }
+fn encoder_bias_offset() -> i64 { 562 }
+fn bias_offset() -> i64 { 570 }
+fn head_base(head: i64) -> i64 { head * head_width() }
+fn feature_cap() -> i64 { 512 }
+
+fn bp_to_f64(v: i64) -> f64 with Div {
+    (v as f64) / 1000000.0
+}
+
+fn f64_to_bp(v: f64) -> i64 {
+    if v <= 0.0 { return 0 }
+    let scaled = v * 1000000.0 + 0.5
+    if scaled > 1000000.0 { 1000000 } else { scaled as i64 }
+}
+
+fn scaled_keep_count(total: i64, bp: i64) -> i64 with Div {
+    if total <= 0 { return 0 }
+    if bp >= 1000000 { return total }
+    var keep = (total * bp + 500000) / 1000000
+    if keep < 1 { keep = 1 }
+    if keep > total { keep = total }
+    keep
+}
+
+fn cfg_train_epochs(is_oct: i64) -> i64 {
+    if is_oct == 1 && CFG_OCT_TRAIN_EPOCHS > 0 {
+        return CFG_OCT_TRAIN_EPOCHS
+    }
+    if is_oct == 0 && CFG_H_TRAIN_EPOCHS > 0 {
+        return CFG_H_TRAIN_EPOCHS
+    }
+    CFG_GLOBAL_TRAIN_EPOCHS
+}
+
+fn cfg_train_lr(is_oct: i64) -> f64 with Div {
+    if is_oct == 1 && CFG_OCT_TRAIN_LR_BP > 0 {
+        return bp_to_f64(CFG_OCT_TRAIN_LR_BP)
+    }
+    if is_oct == 0 && CFG_H_TRAIN_LR_BP > 0 {
+        return bp_to_f64(CFG_H_TRAIN_LR_BP)
+    }
+    bp_to_f64(CFG_GLOBAL_TRAIN_LR_BP)
+}
+
+fn cfg_core_lr_scale(is_oct: i64) -> f64 with Div {
+    if is_oct == 1 && CFG_OCT_CORE_LR_SCALE_BP > 0 {
+        return bp_to_f64(CFG_OCT_CORE_LR_SCALE_BP)
+    }
+    if is_oct == 0 && CFG_H_CORE_LR_SCALE_BP > 0 {
+        return bp_to_f64(CFG_H_CORE_LR_SCALE_BP)
+    }
+    bp_to_f64(CFG_GLOBAL_CORE_LR_SCALE_BP)
+}
+
+fn cfg_warmup_epochs(is_oct: i64) -> i64 {
+    if is_oct == 1 { CFG_OCT_WARMUP_EPOCHS } else { CFG_H_WARMUP_EPOCHS }
+}
+
+fn cfg_oct_profile_id() -> i64 {
+    CFG_OCT_PROFILE_ID
+}
+
+fn cfg_assoc_reg(is_oct: i64) -> f64 with Div {
+    if is_oct == 1 { (CFG_OCT_ASSOC_REG_BP as f64) / 1000000.0 } else { 0.0 }
+}
+
+fn cfg_assoc_target(is_oct: i64) -> f64 with Div {
+    if is_oct == 1 { (CFG_OCT_ASSOC_TARGET_BP as f64) / 1000000.0 } else { 0.0 }
+}
+
+fn cfg_input_proj_mode(is_oct: i64) -> i64 {
+    if is_oct == 1 { CFG_OCT_INPUT_PROJ_MODE } else { CFG_H_INPUT_PROJ_MODE }
+}
+
+fn cfg_proj_lr_scale(is_oct: i64) -> f64 with Div {
+    if is_oct == 1 { bp_to_f64(CFG_OCT_PROJ_LR_SCALE_BP) } else { bp_to_f64(CFG_H_PROJ_LR_SCALE_BP) }
+}
+
+fn cfg_oct_train_mode() -> i64 {
+    CFG_OCT_TRAIN_MODE
+}
+
+fn cfg_assoc_schedule_mode() -> i64 {
+    CFG_OCT_ASSOC_SCHEDULE_MODE
+}
+
+fn cfg_assoc_schedule_start() -> f64 with Div {
+    bp_to_f64(CFG_OCT_ASSOC_SCHEDULE_START_BP)
+}
+
+fn cfg_assoc_schedule_mid() -> f64 with Div {
+    bp_to_f64(CFG_OCT_ASSOC_SCHEDULE_MID_BP)
+}
+
+fn cfg_assoc_schedule_end() -> f64 with Div {
+    bp_to_f64(CFG_OCT_ASSOC_SCHEDULE_END_BP)
+}
+
+fn cfg_assoc_drift_reg() -> f64 with Div {
+    bp_to_f64(CFG_OCT_ASSOC_DRIFT_REG_BP)
+}
+
+fn cfg_head_trust_region() -> f64 with Div {
+    bp_to_f64(CFG_OCT_HEAD_TRUST_REGION_BP)
+}
+
+fn cfg_head_renorm() -> i64 {
+    CFG_OCT_HEAD_RENORM
+}
+
+fn cfg_proj_structured_scale() -> f64 with Div {
+    bp_to_f64(CFG_OCT_PROJ_STRUCTURED_SCALE_BP)
+}
+
+fn cfg_proj_delta_scale() -> f64 with Div {
+    bp_to_f64(CFG_OCT_PROJ_DELTA_SCALE_BP)
+}
+
+fn cfg_proj_hybrid_scale() -> f64 with Div {
+    bp_to_f64(CFG_OCT_PROJ_HYBRID_SCALE_BP)
+}
+
+fn oct_profile_name(id: i64) -> string {
+    if id == 1 { "o_g2_transfer" }
+    else if id == 2 { "o_assoc_stable" }
+    else if id == 3 { "o_alg_v1" }
+    else if id == 4 { "o_alg_v1_mandel" }
+    else { "o_default" }
+}
+
+fn oct_train_mode_name(id: i64) -> string {
+    if id == 3 { "o_alg_v1" }
+    else if id == 4 { "o_alg_v1_mandel" }
+    else if id == 2 { "o_assoc_stable" }
+    else if id == 1 { "o_g2_transfer" }
+    else { "o_default" }
+}
+
+fn assoc_schedule_mode_name(id: i64) -> string {
+    if id == 1 { "tri_band" }
+    else { "fixed" }
+}
+
+fn proj_mode_name(mode: i64) -> string {
+    if mode == 1 { "learned_linear" }
+    else if mode == 2 { "residual_linear" }
+    else if mode == 3 { "mandelbrot_d2_residual" }
+    else if mode == 4 { "mandelbrot_d2_hybrid" }
+    else { "identity" }
+}
+
+fn lerp_f64(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+fn trust_region_clip(step: f64, radius: f64) -> f64 with Div {
+    if radius <= 0.0 { return step }
+    clip_f64(step, 0.0 - radius, radius)
+}
+
+fn md2_squash(v: f64) -> f64 with Div {
+    if v >= 0.0 {
+        v / (1.0 + v)
+    } else {
+        v / (1.0 + (0.0 - v))
+    }
+}
+
+fn mandelbrot_d2_feature(seed: f64, delta: f64) -> f64 with Mut, Div, Panic {
+    var z = clip_f64(0.55 * seed + 0.20 * delta, 0.0 - 2.0, 2.0)
+    let c = clip_f64(0.35 * seed + 0.25 * delta, 0.0 - 2.0, 2.0)
+    var dz = 1.0 + 0.10 * delta
+    var ddz = 0.0
+    var it: i64 = 0
+    while it < 3 {
+        ddz = 2.0 * (dz * dz + z * ddz)
+        dz = 2.0 * z * dz + 1.0 + 0.15 * delta
+        z = z * z + c
+        z = clip_f64(z, 0.0 - 4.0, 4.0)
+        dz = clip_f64(dz, 0.0 - 6.0, 6.0)
+        ddz = clip_f64(ddz, 0.0 - 8.0, 8.0)
+        it = it + 1
+    }
+    clip_f64(md2_squash(ddz), 0.0 - 1.5, 1.5)
+}
+
+fn scheduled_assoc_target() -> f64 with Div {
+    if cfg_assoc_schedule_mode() <= 0 || TRAIN_EPOCH_TOTAL <= 1 {
+        return cfg_assoc_target(1)
+    }
+    let denom = if TRAIN_EPOCH_TOTAL > 1 { TRAIN_EPOCH_TOTAL - 1 } else { 1 }
+    let prog = clip_f64((TRAIN_EPOCH_CURSOR as f64) / (denom as f64), 0.0, 1.0)
+    if prog <= 0.5 {
+        lerp_f64(cfg_assoc_schedule_start(), cfg_assoc_schedule_mid(), prog / 0.5)
+    } else {
+        lerp_f64(cfg_assoc_schedule_mid(), cfg_assoc_schedule_end(), (prog - 0.5) / 0.5)
+    }
+}
+
+fn scaled_optional_count(total: i64, bp: i64) -> i64 with Div {
+    if total <= 0 || bp <= 0 { return 0 }
+    if bp >= 1000000 { return total }
+    var keep = (total * bp + 500000) / 1000000
+    if keep < 0 { keep = 0 }
+    if keep > total { keep = total }
+    keep
+}
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    sum
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x != x { return 0.0 }
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i = 0
+    while i < 16 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    if g != g { return 0.0 }
+    g
+}
+
+fn sigmoid_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x >= 0.0 {
+        1.0 / (1.0 + exp_q(0.0 - x))
+    } else {
+        let ex = exp_q(x)
+        ex / (1.0 + ex)
+    }
+}
+
+fn rng_seed(a: i64, b: i64) with Mut {
+    RNG_A = a
+    RNG_B = b
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn randf() -> f64 with Mut, Div {
+    ((rng_next() % 20000) as f64 - 10000.0) / 10000.0
+}
+
+fn i64_to_string(v: i64) -> string with Mut, Panic, Div {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 {
+        neg = true
+        n = 0 - n
+    }
+    var rev: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    while n > 0 && rev_len < 31 {
+        let digit = n % 10
+        rev[rev_len as usize] = (48 + digit) as i8
+        rev_len = rev_len + 1
+        n = n / 10
+    }
+    var out: [i8; 64] = [0; 64]
+    var out_len: i64 = 0
+    if neg {
+        out[out_len as usize] = 45 as i8
+        out_len = out_len + 1
+    }
+    var i = rev_len - 1
+    while i >= 0 {
+        out[out_len as usize] = rev[i as usize]
+        out_len = out_len + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(out, out_len)
+}
+
+fn read_text_file(path: string) -> string with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 0 { return "" }
+    let raw = read_file(path)
+    str_from_bytes(raw, size)
+}
+
+fn load_run_config(path: string) -> i64 with IO, Mut, Panic, Div {
+    CFG_TRAIN_FRACTION_BP = 1000000
+    CFG_DROP_CHANNEL_FRAC_BP = 0
+    CFG_NOISE_STD_BP = 0
+    CFG_GLOBAL_TRAIN_EPOCHS = 90
+    CFG_GLOBAL_TRAIN_LR_BP = 20000
+    CFG_GLOBAL_CORE_LR_SCALE_BP = 350000
+    CFG_OCT_TRAIN_EPOCHS = 0
+    CFG_OCT_TRAIN_LR_BP = 0
+    CFG_OCT_CORE_LR_SCALE_BP = 0
+    CFG_OCT_WARMUP_EPOCHS = 0
+    CFG_OCT_PROFILE_ID = 0
+    CFG_OCT_TRAIN_MODE = 0
+    CFG_OCT_INIT_PRESET = 0
+    CFG_OCT_ASSOC_REG_BP = 0
+    CFG_OCT_ASSOC_TARGET_BP = 0
+    CFG_OCT_ASSOC_SCHEDULE_MODE = 0
+    CFG_OCT_ASSOC_SCHEDULE_START_BP = 0
+    CFG_OCT_ASSOC_SCHEDULE_MID_BP = 0
+    CFG_OCT_ASSOC_SCHEDULE_END_BP = 0
+    CFG_OCT_ASSOC_DRIFT_REG_BP = 0
+    CFG_OCT_HEAD_TRUST_REGION_BP = 0
+    CFG_OCT_HEAD_RENORM = 1
+    CFG_OCT_INPUT_PROJ_MODE = 0
+    CFG_OCT_PROJ_LR_SCALE_BP = 600000
+    CFG_OCT_PROJ_STRUCTURED_SCALE_BP = 350000
+    CFG_OCT_PROJ_DELTA_SCALE_BP = 180000
+    CFG_OCT_PROJ_HYBRID_SCALE_BP = 120000
+    CFG_H_TRAIN_EPOCHS = 0
+    CFG_H_TRAIN_LR_BP = 0
+    CFG_H_CORE_LR_SCALE_BP = 0
+    CFG_H_WARMUP_EPOCHS = 0
+    CFG_H_INIT_PRESET = 0
+    CFG_H_INPUT_PROJ_MODE = 0
+    CFG_H_PROJ_LR_SCALE_BP = 600000
+    let n = file_size(path)
+    if n <= 0 { return 0 }
+    let raw = read_file(path)
+    let bytes = raw.as_bytes()
+    var pos: i64 = 0
+    while pos < n {
+        while pos < n && (bytes[pos as usize] == 10 || bytes[pos as usize] == 13) {
+            pos = pos + 1
+        }
+        if pos >= n { break }
+        var line_end = pos
+        while line_end < n && bytes[line_end as usize] != 10 && bytes[line_end as usize] != 13 {
+            line_end = line_end + 1
+        }
+        let line = str_slice(raw, pos, line_end)
+        let line_n = str_len(line)
+        if starts_with(line, "oct_profile_id=") {
+            CFG_OCT_PROFILE_ID = parse_i64_basic(str_slice(line, 15, line_n))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_train_mode=") {
+            CFG_OCT_TRAIN_MODE = parse_i64_basic(str_slice(line, 15, line_n))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_assoc_schedule_mode=") {
+            CFG_OCT_ASSOC_SCHEDULE_MODE = parse_i64_basic(str_slice(line, 24, line_n))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_assoc_schedule_start=") {
+            CFG_OCT_ASSOC_SCHEDULE_START_BP = f64_to_bp(parse_f64_basic(str_slice(line, 25, line_n)))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_assoc_schedule_mid=") {
+            CFG_OCT_ASSOC_SCHEDULE_MID_BP = f64_to_bp(parse_f64_basic(str_slice(line, 23, line_n)))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_assoc_schedule_end=") {
+            CFG_OCT_ASSOC_SCHEDULE_END_BP = f64_to_bp(parse_f64_basic(str_slice(line, 23, line_n)))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_assoc_drift_reg=") {
+            CFG_OCT_ASSOC_DRIFT_REG_BP = f64_to_bp(parse_f64_basic(str_slice(line, 20, line_n)))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_head_trust_region=") {
+            CFG_OCT_HEAD_TRUST_REGION_BP = f64_to_bp(parse_f64_basic(str_slice(line, 22, line_n)))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_head_renorm=") {
+            CFG_OCT_HEAD_RENORM = parse_i64_basic(str_slice(line, 16, line_n))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_input_proj_mode=") {
+            CFG_OCT_INPUT_PROJ_MODE = parse_i64_basic(str_slice(line, 20, line_n))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "h_input_proj_mode=") {
+            CFG_H_INPUT_PROJ_MODE = parse_i64_basic(str_slice(line, 18, line_n))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_proj_lr_scale=") {
+            CFG_OCT_PROJ_LR_SCALE_BP = f64_to_bp(parse_f64_basic(str_slice(line, 18, line_n)))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_proj_structured_scale=") {
+            CFG_OCT_PROJ_STRUCTURED_SCALE_BP = f64_to_bp(parse_f64_basic(str_slice(line, 26, line_n)))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_proj_delta_scale=") {
+            CFG_OCT_PROJ_DELTA_SCALE_BP = f64_to_bp(parse_f64_basic(str_slice(line, 21, line_n)))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "oct_proj_hybrid_scale=") {
+            CFG_OCT_PROJ_HYBRID_SCALE_BP = f64_to_bp(parse_f64_basic(str_slice(line, 22, line_n)))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "h_proj_lr_scale=") {
+            CFG_H_PROJ_LR_SCALE_BP = f64_to_bp(parse_f64_basic(str_slice(line, 16, line_n)))
+            pos = line_end
+            continue
+        }
+
+        var value_start: i64 = 0
+        if line_end - pos > 15 &&
+           bytes[pos as usize] == 116 && bytes[(pos + 1) as usize] == 114 && bytes[(pos + 2) as usize] == 97 &&
+           bytes[(pos + 3) as usize] == 105 && bytes[(pos + 4) as usize] == 110 && bytes[(pos + 5) as usize] == 95 &&
+           bytes[(pos + 6) as usize] == 102 && bytes[(pos + 7) as usize] == 114 && bytes[(pos + 8) as usize] == 97 &&
+           bytes[(pos + 9) as usize] == 99 && bytes[(pos + 10) as usize] == 116 && bytes[(pos + 11) as usize] == 105 &&
+           bytes[(pos + 12) as usize] == 111 && bytes[(pos + 13) as usize] == 110 && bytes[(pos + 14) as usize] == 61 {
+            value_start = pos + 15
+        } else if line_end - pos > 20 &&
+           bytes[pos as usize] == 103 && bytes[(pos + 1) as usize] == 108 && bytes[(pos + 2) as usize] == 111 &&
+           bytes[(pos + 3) as usize] == 98 && bytes[(pos + 4) as usize] == 97 && bytes[(pos + 5) as usize] == 108 &&
+           bytes[(pos + 6) as usize] == 95 && bytes[(pos + 7) as usize] == 116 && bytes[(pos + 8) as usize] == 114 &&
+           bytes[(pos + 9) as usize] == 97 && bytes[(pos + 10) as usize] == 105 && bytes[(pos + 11) as usize] == 110 &&
+           bytes[(pos + 12) as usize] == 95 && bytes[(pos + 13) as usize] == 101 && bytes[(pos + 14) as usize] == 112 &&
+            bytes[(pos + 15) as usize] == 111 && bytes[(pos + 16) as usize] == 99 && bytes[(pos + 17) as usize] == 104 &&
+           bytes[(pos + 18) as usize] == 115 && bytes[(pos + 19) as usize] == 61 {
+            value_start = pos + 20
+            let digits = parse_i64_basic(str_slice(raw, value_start, line_end))
+            if digits > 0 { CFG_GLOBAL_TRAIN_EPOCHS = digits }
+            pos = line_end
+            continue
+        } else if line_end - pos > 16 &&
+           bytes[pos as usize] == 103 && bytes[(pos + 1) as usize] == 108 && bytes[(pos + 2) as usize] == 111 &&
+           bytes[(pos + 3) as usize] == 98 && bytes[(pos + 4) as usize] == 97 && bytes[(pos + 5) as usize] == 108 &&
+           bytes[(pos + 6) as usize] == 95 && bytes[(pos + 7) as usize] == 116 && bytes[(pos + 8) as usize] == 114 &&
+           bytes[(pos + 9) as usize] == 97 && bytes[(pos + 10) as usize] == 105 && bytes[(pos + 11) as usize] == 110 &&
+           bytes[(pos + 12) as usize] == 95 && bytes[(pos + 13) as usize] == 108 && bytes[(pos + 14) as usize] == 114 &&
+           bytes[(pos + 15) as usize] == 61 {
+            value_start = pos + 16
+            CFG_GLOBAL_TRAIN_LR_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+            pos = line_end
+            continue
+        } else if line_end - pos > 20 &&
+           bytes[pos as usize] == 103 && bytes[(pos + 1) as usize] == 108 && bytes[(pos + 2) as usize] == 111 &&
+           bytes[(pos + 3) as usize] == 98 && bytes[(pos + 4) as usize] == 97 && bytes[(pos + 5) as usize] == 108 &&
+           bytes[(pos + 6) as usize] == 95 && bytes[(pos + 7) as usize] == 99 && bytes[(pos + 8) as usize] == 111 &&
+           bytes[(pos + 9) as usize] == 114 && bytes[(pos + 10) as usize] == 101 && bytes[(pos + 11) as usize] == 95 &&
+           bytes[(pos + 12) as usize] == 108 && bytes[(pos + 13) as usize] == 114 && bytes[(pos + 14) as usize] == 95 &&
+           bytes[(pos + 15) as usize] == 115 && bytes[(pos + 16) as usize] == 99 && bytes[(pos + 17) as usize] == 97 &&
+           bytes[(pos + 18) as usize] == 108 && bytes[(pos + 19) as usize] == 101 && bytes[(pos + 20) as usize] == 61 {
+            value_start = pos + 21
+            CFG_GLOBAL_CORE_LR_SCALE_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+            pos = line_end
+            continue
+        } else if line_end - pos > 17 &&
+           bytes[pos as usize] == 111 && bytes[(pos + 1) as usize] == 99 && bytes[(pos + 2) as usize] == 116 &&
+           bytes[(pos + 3) as usize] == 95 && bytes[(pos + 4) as usize] == 116 && bytes[(pos + 5) as usize] == 114 &&
+           bytes[(pos + 6) as usize] == 97 && bytes[(pos + 7) as usize] == 105 && bytes[(pos + 8) as usize] == 110 &&
+           bytes[(pos + 9) as usize] == 95 && bytes[(pos + 10) as usize] == 101 && bytes[(pos + 11) as usize] == 112 &&
+           bytes[(pos + 12) as usize] == 111 && bytes[(pos + 13) as usize] == 99 && bytes[(pos + 14) as usize] == 104 &&
+           bytes[(pos + 15) as usize] == 115 && bytes[(pos + 16) as usize] == 61 {
+            value_start = pos + 17
+            let digits = parse_i64_basic(str_slice(raw, value_start, line_end))
+            if digits > 0 { CFG_OCT_TRAIN_EPOCHS = digits }
+            pos = line_end
+            continue
+        } else if line_end - pos > 13 &&
+           bytes[pos as usize] == 111 && bytes[(pos + 1) as usize] == 99 && bytes[(pos + 2) as usize] == 116 &&
+           bytes[(pos + 3) as usize] == 95 && bytes[(pos + 4) as usize] == 116 && bytes[(pos + 5) as usize] == 114 &&
+           bytes[(pos + 6) as usize] == 97 && bytes[(pos + 7) as usize] == 105 && bytes[(pos + 8) as usize] == 110 &&
+           bytes[(pos + 9) as usize] == 95 && bytes[(pos + 10) as usize] == 108 && bytes[(pos + 11) as usize] == 114 &&
+           bytes[(pos + 12) as usize] == 61 {
+            value_start = pos + 13
+            CFG_OCT_TRAIN_LR_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+            pos = line_end
+            continue
+        } else if line_end - pos > 17 &&
+           bytes[pos as usize] == 111 && bytes[(pos + 1) as usize] == 99 && bytes[(pos + 2) as usize] == 116 &&
+           bytes[(pos + 3) as usize] == 95 && bytes[(pos + 4) as usize] == 99 && bytes[(pos + 5) as usize] == 111 &&
+           bytes[(pos + 6) as usize] == 114 && bytes[(pos + 7) as usize] == 101 && bytes[(pos + 8) as usize] == 95 &&
+           bytes[(pos + 9) as usize] == 108 && bytes[(pos + 10) as usize] == 114 && bytes[(pos + 11) as usize] == 95 &&
+           bytes[(pos + 12) as usize] == 115 && bytes[(pos + 13) as usize] == 99 && bytes[(pos + 14) as usize] == 97 &&
+           bytes[(pos + 15) as usize] == 108 && bytes[(pos + 16) as usize] == 101 && bytes[(pos + 17) as usize] == 61 {
+            value_start = pos + 18
+            CFG_OCT_CORE_LR_SCALE_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+            pos = line_end
+            continue
+        } else if line_end - pos > 17 &&
+           bytes[pos as usize] == 111 && bytes[(pos + 1) as usize] == 99 && bytes[(pos + 2) as usize] == 116 &&
+           bytes[(pos + 3) as usize] == 95 && bytes[(pos + 4) as usize] == 119 && bytes[(pos + 5) as usize] == 97 &&
+           bytes[(pos + 6) as usize] == 114 && bytes[(pos + 7) as usize] == 109 && bytes[(pos + 8) as usize] == 117 &&
+           bytes[(pos + 9) as usize] == 112 && bytes[(pos + 10) as usize] == 95 && bytes[(pos + 11) as usize] == 101 &&
+           bytes[(pos + 12) as usize] == 112 && bytes[(pos + 13) as usize] == 111 && bytes[(pos + 14) as usize] == 99 &&
+           bytes[(pos + 15) as usize] == 104 && bytes[(pos + 16) as usize] == 115 && bytes[(pos + 17) as usize] == 61 {
+            value_start = pos + 18
+            CFG_OCT_WARMUP_EPOCHS = parse_i64_basic(str_slice(raw, value_start, line_end))
+            pos = line_end
+            continue
+        } else if line_end - pos > 15 &&
+           bytes[pos as usize] == 111 && bytes[(pos + 1) as usize] == 99 && bytes[(pos + 2) as usize] == 116 &&
+           bytes[(pos + 3) as usize] == 95 && bytes[(pos + 4) as usize] == 105 && bytes[(pos + 5) as usize] == 110 &&
+           bytes[(pos + 6) as usize] == 105 && bytes[(pos + 7) as usize] == 116 && bytes[(pos + 8) as usize] == 95 &&
+           bytes[(pos + 9) as usize] == 112 && bytes[(pos + 10) as usize] == 114 && bytes[(pos + 11) as usize] == 101 &&
+           bytes[(pos + 12) as usize] == 115 && bytes[(pos + 13) as usize] == 101 && bytes[(pos + 14) as usize] == 116 &&
+           bytes[(pos + 15) as usize] == 61 {
+            value_start = pos + 16
+            CFG_OCT_INIT_PRESET = parse_i64_basic(str_slice(raw, value_start, line_end))
+            pos = line_end
+            continue
+        } else if line_end - pos > 13 &&
+           bytes[pos as usize] == 111 && bytes[(pos + 1) as usize] == 99 && bytes[(pos + 2) as usize] == 116 &&
+           bytes[(pos + 3) as usize] == 95 && bytes[(pos + 4) as usize] == 97 && bytes[(pos + 5) as usize] == 115 &&
+           bytes[(pos + 6) as usize] == 115 && bytes[(pos + 7) as usize] == 111 && bytes[(pos + 8) as usize] == 99 &&
+           bytes[(pos + 9) as usize] == 95 && bytes[(pos + 10) as usize] == 114 && bytes[(pos + 11) as usize] == 101 &&
+           bytes[(pos + 12) as usize] == 103 && bytes[(pos + 13) as usize] == 61 {
+            value_start = pos + 14
+            CFG_OCT_ASSOC_REG_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+            pos = line_end
+            continue
+        } else if line_end - pos > 16 &&
+           bytes[pos as usize] == 111 && bytes[(pos + 1) as usize] == 99 && bytes[(pos + 2) as usize] == 116 &&
+           bytes[(pos + 3) as usize] == 95 && bytes[(pos + 4) as usize] == 97 && bytes[(pos + 5) as usize] == 115 &&
+           bytes[(pos + 6) as usize] == 115 && bytes[(pos + 7) as usize] == 111 && bytes[(pos + 8) as usize] == 99 &&
+           bytes[(pos + 9) as usize] == 95 && bytes[(pos + 10) as usize] == 116 && bytes[(pos + 11) as usize] == 97 &&
+           bytes[(pos + 12) as usize] == 114 && bytes[(pos + 13) as usize] == 103 && bytes[(pos + 14) as usize] == 101 &&
+           bytes[(pos + 15) as usize] == 116 && bytes[(pos + 16) as usize] == 61 {
+            value_start = pos + 17
+            CFG_OCT_ASSOC_TARGET_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+            pos = line_end
+            continue
+        } else if line_end - pos > 15 &&
+           bytes[pos as usize] == 104 && bytes[(pos + 1) as usize] == 95 && bytes[(pos + 2) as usize] == 116 &&
+           bytes[(pos + 3) as usize] == 114 && bytes[(pos + 4) as usize] == 97 && bytes[(pos + 5) as usize] == 105 &&
+           bytes[(pos + 6) as usize] == 110 && bytes[(pos + 7) as usize] == 95 && bytes[(pos + 8) as usize] == 101 &&
+           bytes[(pos + 9) as usize] == 112 && bytes[(pos + 10) as usize] == 111 && bytes[(pos + 11) as usize] == 99 &&
+           bytes[(pos + 12) as usize] == 104 && bytes[(pos + 13) as usize] == 115 && bytes[(pos + 14) as usize] == 61 {
+            value_start = pos + 15
+            let digits = parse_i64_basic(str_slice(raw, value_start, line_end))
+            if digits > 0 { CFG_H_TRAIN_EPOCHS = digits }
+            pos = line_end
+            continue
+        } else if line_end - pos > 11 &&
+           bytes[pos as usize] == 104 && bytes[(pos + 1) as usize] == 95 && bytes[(pos + 2) as usize] == 116 &&
+           bytes[(pos + 3) as usize] == 114 && bytes[(pos + 4) as usize] == 97 && bytes[(pos + 5) as usize] == 105 &&
+           bytes[(pos + 6) as usize] == 110 && bytes[(pos + 7) as usize] == 95 && bytes[(pos + 8) as usize] == 108 &&
+           bytes[(pos + 9) as usize] == 114 && bytes[(pos + 10) as usize] == 61 {
+            value_start = pos + 11
+            CFG_H_TRAIN_LR_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+            pos = line_end
+            continue
+        } else if line_end - pos > 15 &&
+           bytes[pos as usize] == 104 && bytes[(pos + 1) as usize] == 95 && bytes[(pos + 2) as usize] == 99 &&
+           bytes[(pos + 3) as usize] == 111 && bytes[(pos + 4) as usize] == 114 && bytes[(pos + 5) as usize] == 101 &&
+           bytes[(pos + 6) as usize] == 95 && bytes[(pos + 7) as usize] == 108 && bytes[(pos + 8) as usize] == 114 &&
+           bytes[(pos + 9) as usize] == 95 && bytes[(pos + 10) as usize] == 115 && bytes[(pos + 11) as usize] == 99 &&
+           bytes[(pos + 12) as usize] == 97 && bytes[(pos + 13) as usize] == 108 && bytes[(pos + 14) as usize] == 101 &&
+           bytes[(pos + 15) as usize] == 61 {
+            value_start = pos + 16
+            CFG_H_CORE_LR_SCALE_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+            pos = line_end
+            continue
+        } else if line_end - pos > 15 &&
+           bytes[pos as usize] == 104 && bytes[(pos + 1) as usize] == 95 && bytes[(pos + 2) as usize] == 119 &&
+           bytes[(pos + 3) as usize] == 97 && bytes[(pos + 4) as usize] == 114 && bytes[(pos + 5) as usize] == 109 &&
+           bytes[(pos + 6) as usize] == 117 && bytes[(pos + 7) as usize] == 112 && bytes[(pos + 8) as usize] == 95 &&
+           bytes[(pos + 9) as usize] == 101 && bytes[(pos + 10) as usize] == 112 && bytes[(pos + 11) as usize] == 111 &&
+           bytes[(pos + 12) as usize] == 99 && bytes[(pos + 13) as usize] == 104 && bytes[(pos + 14) as usize] == 115 &&
+           bytes[(pos + 15) as usize] == 61 {
+            value_start = pos + 16
+            CFG_H_WARMUP_EPOCHS = parse_i64_basic(str_slice(raw, value_start, line_end))
+            pos = line_end
+            continue
+        } else if line_end - pos > 13 &&
+           bytes[pos as usize] == 104 && bytes[(pos + 1) as usize] == 95 && bytes[(pos + 2) as usize] == 105 &&
+           bytes[(pos + 3) as usize] == 110 && bytes[(pos + 4) as usize] == 105 && bytes[(pos + 5) as usize] == 116 &&
+           bytes[(pos + 6) as usize] == 95 && bytes[(pos + 7) as usize] == 112 && bytes[(pos + 8) as usize] == 114 &&
+           bytes[(pos + 9) as usize] == 101 && bytes[(pos + 10) as usize] == 115 && bytes[(pos + 11) as usize] == 101 &&
+           bytes[(pos + 12) as usize] == 116 && bytes[(pos + 13) as usize] == 61 {
+            value_start = pos + 14
+            CFG_H_INIT_PRESET = parse_i64_basic(str_slice(raw, value_start, line_end))
+            pos = line_end
+            continue
+        } else if line_end - pos > 18 &&
+           bytes[pos as usize] == 100 && bytes[(pos + 1) as usize] == 114 && bytes[(pos + 2) as usize] == 111 &&
+           bytes[(pos + 3) as usize] == 112 && bytes[(pos + 4) as usize] == 95 && bytes[(pos + 5) as usize] == 99 &&
+           bytes[(pos + 6) as usize] == 104 && bytes[(pos + 7) as usize] == 97 && bytes[(pos + 8) as usize] == 110 &&
+           bytes[(pos + 9) as usize] == 110 && bytes[(pos + 10) as usize] == 101 && bytes[(pos + 11) as usize] == 108 &&
+           bytes[(pos + 12) as usize] == 95 && bytes[(pos + 13) as usize] == 102 && bytes[(pos + 14) as usize] == 114 &&
+           bytes[(pos + 15) as usize] == 97 && bytes[(pos + 16) as usize] == 99 && bytes[(pos + 17) as usize] == 61 {
+            value_start = pos + 18
+            CFG_DROP_CHANNEL_FRAC_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+            pos = line_end
+            continue
+        } else if line_end - pos > 10 &&
+           bytes[pos as usize] == 110 && bytes[(pos + 1) as usize] == 111 && bytes[(pos + 2) as usize] == 105 &&
+           bytes[(pos + 3) as usize] == 115 && bytes[(pos + 4) as usize] == 101 && bytes[(pos + 5) as usize] == 95 &&
+           bytes[(pos + 6) as usize] == 115 && bytes[(pos + 7) as usize] == 116 && bytes[(pos + 8) as usize] == 100 &&
+           bytes[(pos + 9) as usize] == 61 {
+            value_start = pos + 10
+            CFG_NOISE_STD_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+            pos = line_end
+            continue
+        } else {
+            pos = line_end
+            continue
+        }
+        CFG_TRAIN_FRACTION_BP = f64_to_bp(parse_f64_basic(str_slice(raw, value_start, line_end)))
+        pos = line_end
+    }
+    1
+}
+
+fn parse_decimal_digit(ch: string) -> i64 {
+    if str_eq(ch, "0") { 0 }
+    else if str_eq(ch, "1") { 1 }
+    else if str_eq(ch, "2") { 2 }
+    else if str_eq(ch, "3") { 3 }
+    else if str_eq(ch, "4") { 4 }
+    else if str_eq(ch, "5") { 5 }
+    else if str_eq(ch, "6") { 6 }
+    else if str_eq(ch, "7") { 7 }
+    else if str_eq(ch, "8") { 8 }
+    else if str_eq(ch, "9") { 9 }
+    else { -1 }
+}
+
+fn parse_i64_basic(raw: string) -> i64 with Mut, Div {
+    let len = str_len(raw)
+    if len <= 0 { return 0 }
+    var i: i64 = 0
+    var neg = false
+    if str_eq(str_slice(raw, 0, 1), "-") {
+        neg = true
+        i = 1
+    } else if str_eq(str_slice(raw, 0, 1), "+") {
+        i = 1
+    }
+    var value: i64 = 0
+    while i < len {
+        let d = parse_decimal_digit(str_slice(raw, i, i + 1))
+        if d >= 0 {
+            value = value * 10 + d
+        }
+        i = i + 1
+    }
+    if neg { 0 - value } else { value }
+}
+
+fn parse_f64_basic(raw: string) -> f64 with Mut, Div {
+    let len = str_len(raw)
+    if len <= 0 { return 0.0 }
+    var i: i64 = 0
+    var neg = false
+    if str_eq(str_slice(raw, 0, 1), "-") {
+        neg = true
+        i = 1
+    } else if str_eq(str_slice(raw, 0, 1), "+") {
+        i = 1
+    }
+    var int_part: f64 = 0.0
+    var frac_part: f64 = 0.0
+    var frac_scale: f64 = 1.0
+    var seen_dot = false
+    while i < len {
+        let ch = str_slice(raw, i, i + 1)
+        if str_eq(ch, ".") {
+            seen_dot = true
+        } else {
+            let d = parse_decimal_digit(ch)
+            if d >= 0 {
+                if !seen_dot {
+                    int_part = int_part * 10.0 + (d as f64)
+                } else {
+                    frac_scale = frac_scale * 0.1
+                    frac_part = frac_part + frac_scale * (d as f64)
+                }
+            }
+        }
+        i = i + 1
+    }
+    let value = int_part + frac_part
+    if neg { 0.0 - value } else { value }
+}
+
+fn starts_with(s: string, prefix: string) -> bool with Mut, Div {
+    let ns = str_len(s)
+    let np = str_len(prefix)
+    if np > ns { return false }
+    str_eq(str_slice(s, 0, np), prefix)
+}
+
+fn hash_djb2(s: string) -> i64 with Mut, Div {
+    let n = str_len(s)
+    var h: i64 = 5381
+    var i: i64 = 0
+    while i < n {
+        h = h * 33 + str_char_at(s, i)
+        i = i + 1
+    }
+    h
+}
+
+fn tsv_get_field(line: string, target_idx: i64) -> string with Mut, Div {
+    let n = str_len(line)
+    var field_idx: i64 = 0
+    var field_start: i64 = 0
+    var i: i64 = 0
+    while i <= n {
+        let is_end = i == n
+        let is_tab = if is_end { false } else { str_char_at(line, i) == 9 }
+        if is_end || is_tab {
+            if field_idx == target_idx {
+                return str_slice(line, field_start, i)
+            }
+            field_idx = field_idx + 1
+            field_start = i + 1
+        }
+        i = i + 1
+    }
+    ""
+}
+
+fn tsv_find_col(header: string, name: string) -> i64 with Mut, Div {
+    let n = str_len(header)
+    var idx: i64 = 0
+    var start: i64 = 0
+    var i: i64 = 0
+    while i <= n {
+        let is_end = i == n
+        let is_tab = if is_end { false } else { str_char_at(header, i) == 9 }
+        if is_end || is_tab {
+            let field = str_slice(header, start, i)
+            if str_eq(field, name) { return idx }
+            idx = idx + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn clear_subject_site_slot(subj: i64) with Mut {
+    var j: i64 = 0
+    while j < 32 {
+        SUBJECT_SITE_TEXT[(subj * 32 + j) as usize] = 0
+        j = j + 1
+    }
+    SUBJECT_SITE_LEN[subj as usize] = 0
+}
+
+fn clear_feature_slot(subj: i64) with Mut {
+    var j: i64 = 0
+    while j < feature_cap() {
+        FEATURES[(subj * feature_cap() + j) as usize] = 0.0
+        j = j + 1
+    }
+}
+
+fn site_name_for_key(key: i64) -> string {
+    if key == 6384398214 { "PITT" }
+    else if key == 6384365175 { "OLIN" }
+    else if key == 6384361156 { "OHSU" }
+    else if key == 6384500548 { "SDSU" }
+    else if key == 229441623528536 { "TRINITY" }
+    else if key == 6384582583 { "UM_1" }
+    else if key == 6384582584 { "UM_2" }
+    else if key == 193472378 { "USM" }
+    else if key == 6384712656 { "YALE" }
+    else if key == 193452586 { "CMU" }
+    else if key == 7571216318776324 { "LEUVEN_1" }
+    else if key == 7571216318776325 { "LEUVEN_2" }
+    else if key == 193461220 { "KKI" }
+    else if key == 193464961 { "NYU" }
+    else if key == 7571533227738086 { "STANFORD" }
+    else if key == 6952797911482 { "UCLA_1" }
+    else if key == 6952797911483 { "UCLA_2" }
+    else if key == 229431936355194 { "MAX_MUN" }
+    else if key == 229419007039833 { "CALTECH" }
+    else if key == 193469638 { "SBL" }
+    else { "UNKNOWN_SITE" }
+}
+
+fn label_from_string(raw: string) -> i64 with Mut, Div {
+    if str_eq(raw, "1") || str_eq(raw, "ASD") || str_eq(raw, "asd") || str_eq(raw, "AUT") || str_eq(raw, "aut") {
+        1
+    } else if str_eq(raw, "0") || str_eq(raw, "CONTROL") || str_eq(raw, "control") || str_eq(raw, "TD") || str_eq(raw, "td") || str_eq(raw, "HC") || str_eq(raw, "hc") {
+        0
+    } else {
+        -1
+    }
+}
+
+fn load_manifest(path: string) -> i64 with IO, Mut, Div, Panic {
+    SUBJECT_COUNT = 0
+    UNIQUE_SITE_COUNT = 0
+    MANIFEST_SEQ_LEN = 8
+    MANIFEST_INPUT_DIM = 8
+    MANIFEST_FEATURE_COUNT = 64
+    let n = file_size(path)
+    if n <= 0 { return 0 }
+    let raw = read_file(path)
+    let bytes = raw.as_bytes()
+    if n < 24 { return -1 }
+
+    var header_start: i64 = 0
+    while header_start < n {
+        while header_start < n && (bytes[header_start as usize] == 10 || bytes[header_start as usize] == 13) {
+            header_start = header_start + 1
+        }
+        if header_start >= n { break }
+        if bytes[header_start as usize] == 35 {
+            while header_start < n && bytes[header_start as usize] != 10 {
+                header_start = header_start + 1
+            }
+            continue
+        }
+        break
+    }
+
+    if header_start + 24 >= n ||
+       bytes[header_start as usize] != 115 || bytes[(header_start + 1) as usize] != 117 || bytes[(header_start + 2) as usize] != 98 || bytes[(header_start + 3) as usize] != 106 ||
+       bytes[(header_start + 4) as usize] != 101 || bytes[(header_start + 5) as usize] != 99 || bytes[(header_start + 6) as usize] != 116 || bytes[(header_start + 7) as usize] != 95 ||
+       bytes[(header_start + 8) as usize] != 105 || bytes[(header_start + 9) as usize] != 100 || bytes[(header_start + 10) as usize] != 9 ||
+       bytes[(header_start + 11) as usize] != 108 || bytes[(header_start + 12) as usize] != 97 || bytes[(header_start + 13) as usize] != 98 || bytes[(header_start + 14) as usize] != 101 ||
+       bytes[(header_start + 15) as usize] != 108 || bytes[(header_start + 16) as usize] != 9 ||
+       bytes[(header_start + 17) as usize] != 115 || bytes[(header_start + 18) as usize] != 105 || bytes[(header_start + 19) as usize] != 116 || bytes[(header_start + 20) as usize] != 101 ||
+       bytes[(header_start + 21) as usize] != 9 || bytes[(header_start + 22) as usize] != 102 || bytes[(header_start + 23) as usize] != 48 {
+        return -1
+    }
+
+    var pos: i64 = header_start
+    while pos < n && bytes[pos as usize] != 10 {
+        pos = pos + 1
+    }
+    if pos < n { pos = pos + 1 }
+
+    while pos < n && SUBJECT_COUNT < 2048 {
+        if bytes[pos as usize] == 10 {
+            pos = pos + 1
+            continue
+        }
+        if bytes[pos as usize] == 35 {
+            while pos < n && bytes[pos as usize] != 10 {
+                pos = pos + 1
+            }
+            if pos < n { pos = pos + 1 }
+            continue
+        }
+
+        var line_end = pos
+        while line_end < n && bytes[line_end as usize] != 10 {
+            line_end = line_end + 1
+        }
+
+        var field_idx: i64 = 0
+        var field_start = pos
+        var label: i64 = -1
+        var site_hash: i64 = 5381
+        var site_len: i64 = 0
+        clear_subject_site_slot(SUBJECT_COUNT)
+        clear_feature_slot(SUBJECT_COUNT)
+        var feature_idx: i64 = 0
+
+        var i = pos
+        while i <= line_end {
+            let at_end = i == line_end
+            let is_tab = if at_end { false } else { bytes[i as usize] == 9 }
+            if at_end || is_tab {
+                if field_idx == 1 {
+                    let len = i - field_start
+                    if len == 1 {
+                        if bytes[field_start as usize] == 49 { label = 1 }
+                        if bytes[field_start as usize] == 48 { label = 0 }
+                    } else if len == 2 {
+                        let a = bytes[field_start as usize]
+                        let b = bytes[(field_start + 1) as usize]
+                        if (a == 84 || a == 116) && (b == 68 || b == 100) { label = 0 }
+                        if (a == 72 || a == 104) && (b == 67 || b == 99) { label = 0 }
+                    } else if len == 3 {
+                        let a = bytes[field_start as usize]
+                        let b = bytes[(field_start + 1) as usize]
+                        let c = bytes[(field_start + 2) as usize]
+                        if (a == 65 || a == 97) && (b == 83 || b == 115) && (c == 68 || c == 100) { label = 1 }
+                        if (a == 65 || a == 97) && (b == 85 || b == 117) && (c == 84 || c == 116) { label = 1 }
+                    } else if len == 7 {
+                        let a0 = bytes[field_start as usize]
+                        let a1 = bytes[(field_start + 1) as usize]
+                        let a2 = bytes[(field_start + 2) as usize]
+                        let a3 = bytes[(field_start + 3) as usize]
+                        let a4 = bytes[(field_start + 4) as usize]
+                        let a5 = bytes[(field_start + 5) as usize]
+                        let a6 = bytes[(field_start + 6) as usize]
+                        if (a0 == 67 || a0 == 99) && (a1 == 79 || a1 == 111) && (a2 == 78 || a2 == 110) &&
+                           (a3 == 84 || a3 == 116) && (a4 == 82 || a4 == 114) && (a5 == 79 || a5 == 111) &&
+                           (a6 == 76 || a6 == 108) { label = 0 }
+                    }
+                } else if field_idx == 2 {
+                    var j = field_start
+                    site_hash = 5381
+                    site_len = 0
+                    while j < i {
+                        site_hash = site_hash * 33 + (bytes[j as usize] as i64)
+                        if site_len < 32 {
+                            SUBJECT_SITE_TEXT[(SUBJECT_COUNT * 32 + site_len) as usize] = bytes[j as usize] as i64
+                        }
+                        site_len = site_len + 1
+                        j = j + 1
+                    }
+                } else if field_idx >= 3 {
+                    var j = field_start
+                    var neg = false
+                    if j < i && bytes[j as usize] == 45 {
+                        neg = true
+                        j = j + 1
+                    } else if j < i && bytes[j as usize] == 43 {
+                        j = j + 1
+                    }
+                    var int_part = 0.0
+                    var frac_part = 0.0
+                    var frac_scale = 1.0
+                    var seen_dot = false
+                    while j < i {
+                        let b = bytes[j as usize]
+                        if b == 46 {
+                            seen_dot = true
+                        } else if b >= 48 && b <= 57 {
+                            let d = ((b as i64) - 48) as f64
+                            if !seen_dot {
+                                int_part = int_part * 10.0 + d
+                            } else {
+                                frac_scale = frac_scale * 0.1
+                                frac_part = frac_part + frac_scale * d
+                            }
+                        }
+                        j = j + 1
+                    }
+                    var value = int_part + frac_part
+                    if neg { value = 0.0 - value }
+                    if feature_idx < feature_cap() {
+                        FEATURES[(SUBJECT_COUNT * feature_cap() + feature_idx) as usize] = value
+                    }
+                    feature_idx = feature_idx + 1
+                }
+                field_idx = field_idx + 1
+                field_start = i + 1
+            }
+            i = i + 1
+        }
+
+        if label >= 0 && site_len > 0 && feature_idx > 0 && feature_idx <= feature_cap() && feature_idx % 8 == 0 {
+            let row_seq_len = feature_idx / 8
+            if SUBJECT_COUNT == 0 {
+                MANIFEST_SEQ_LEN = row_seq_len
+                MANIFEST_INPUT_DIM = 8
+                MANIFEST_FEATURE_COUNT = feature_idx
+            }
+            if row_seq_len == MANIFEST_SEQ_LEN && feature_idx == MANIFEST_FEATURE_COUNT {
+                LABELS[SUBJECT_COUNT as usize] = label
+                SITE_KEYS[SUBJECT_COUNT as usize] = abs_i64(site_hash)
+                SUBJECT_SITE_LEN[SUBJECT_COUNT as usize] = if site_len > 32 { 32 } else { site_len }
+                SUBJECT_COUNT = SUBJECT_COUNT + 1
+            }
+        }
+        pos = line_end
+        if pos < n { pos = pos + 1 }
+    }
+    SUBJECT_COUNT
+}
+
+fn discover_sites() -> i64 with Mut {
+    UNIQUE_SITE_COUNT = 0
+    var subj: i64 = 0
+    while subj < SUBJECT_COUNT {
+        let key = SITE_KEYS[subj as usize]
+        var exists: i64 = 0
+        var i: i64 = 0
+        while i < UNIQUE_SITE_COUNT {
+            if UNIQUE_SITES[i as usize] == key {
+                exists = 1
+                break
+            }
+            i = i + 1
+        }
+        if exists == 0 && UNIQUE_SITE_COUNT < 64 {
+            UNIQUE_SITES[UNIQUE_SITE_COUNT as usize] = key
+            UNIQUE_SITE_LEN[UNIQUE_SITE_COUNT as usize] = SUBJECT_SITE_LEN[subj as usize]
+            var j: i64 = 0
+            while j < UNIQUE_SITE_LEN[UNIQUE_SITE_COUNT as usize] {
+                UNIQUE_SITE_TEXT[(UNIQUE_SITE_COUNT * 32 + j) as usize] = SUBJECT_SITE_TEXT[(subj * 32 + j) as usize]
+                j = j + 1
+            }
+            UNIQUE_SITE_COUNT = UNIQUE_SITE_COUNT + 1
+        }
+        subj = subj + 1
+    }
+    UNIQUE_SITE_COUNT
+}
+
+fn build_train_mask(holdout_key: i64, s1: i64, s2: i64) -> i64 with Mut, Div {
+    var i: i64 = 0
+    while i < SUBJECT_COUNT {
+        TRAIN_MASK[i as usize] = 0
+        i = i + 1
+    }
+    if CFG_TRAIN_FRACTION_BP >= 1000000 {
+        var kept: i64 = 0
+        i = 0
+        while i < SUBJECT_COUNT {
+            if SITE_KEYS[i as usize] != holdout_key {
+                TRAIN_MASK[i as usize] = 1
+                kept = kept + 1
+            }
+            i = i + 1
+        }
+        return kept
+    }
+
+    var pos_total: i64 = 0
+    var neg_total: i64 = 0
+    i = 0
+    while i < SUBJECT_COUNT {
+        if SITE_KEYS[i as usize] != holdout_key {
+            if LABELS[i as usize] == 1 { pos_total = pos_total + 1 } else { neg_total = neg_total + 1 }
+        }
+        i = i + 1
+    }
+
+    let pos_target = scaled_keep_count(pos_total, CFG_TRAIN_FRACTION_BP)
+    let neg_target = scaled_keep_count(neg_total, CFG_TRAIN_FRACTION_BP)
+    var pos_keep: i64 = 0
+    var neg_keep: i64 = 0
+
+    rng_seed(s1 + holdout_key * 31 + 17, s2 + holdout_key * 131 + 29)
+    var attempts: i64 = 0
+    while attempts < SUBJECT_COUNT * 64 && (pos_keep < pos_target || neg_keep < neg_target) {
+        let subj = (rng_next() / 100) % SUBJECT_COUNT
+        if SITE_KEYS[subj as usize] != holdout_key && TRAIN_MASK[subj as usize] == 0 {
+            if LABELS[subj as usize] == 1 && pos_keep < pos_target {
+                TRAIN_MASK[subj as usize] = 1
+                pos_keep = pos_keep + 1
+            } else if LABELS[subj as usize] == 0 && neg_keep < neg_target {
+                TRAIN_MASK[subj as usize] = 1
+                neg_keep = neg_keep + 1
+            }
+        }
+        attempts = attempts + 1
+    }
+
+    i = 0
+    while i < SUBJECT_COUNT && pos_keep < pos_target {
+        if SITE_KEYS[i as usize] != holdout_key && LABELS[i as usize] == 1 && TRAIN_MASK[i as usize] == 0 {
+            TRAIN_MASK[i as usize] = 1
+            pos_keep = pos_keep + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < SUBJECT_COUNT && neg_keep < neg_target {
+        if SITE_KEYS[i as usize] != holdout_key && LABELS[i as usize] == 0 && TRAIN_MASK[i as usize] == 0 {
+            TRAIN_MASK[i as usize] = 1
+            neg_keep = neg_keep + 1
+        }
+        i = i + 1
+    }
+    pos_keep + neg_keep
+}
+
+fn prepare_dropout_mask(holdout_key: i64, s1: i64, s2: i64) with Mut, Div {
+    var dim: i64 = 0
+    while dim < 64 {
+        DROP_MASK[dim as usize] = 0
+        dim = dim + 1
+    }
+    let drop_target = scaled_optional_count(MANIFEST_INPUT_DIM, CFG_DROP_CHANNEL_FRAC_BP)
+    if drop_target <= 0 { return }
+    rng_seed(s1 + holdout_key * 43 + 101, s2 + holdout_key * 173 + 211)
+    var dropped: i64 = 0
+    var attempts: i64 = 0
+    while dropped < drop_target && attempts < MANIFEST_INPUT_DIM * 32 {
+        let pick = (rng_next() / 100) % MANIFEST_INPUT_DIM
+        if DROP_MASK[pick as usize] == 0 {
+            DROP_MASK[pick as usize] = 1
+            dropped = dropped + 1
+        }
+        attempts = attempts + 1
+    }
+}
+
+fn prepare_train_standardization() with Mut, Div, Panic {
+    var feat: i64 = 0
+    while feat < feature_cap() {
+        TRAIN_FEATURE_MEAN[feat as usize] = 0.0
+        TRAIN_FEATURE_STD[feat as usize] = 0.0
+        feat = feat + 1
+    }
+    if MANIFEST_FEATURE_COUNT <= 0 { return }
+
+    var train_n: i64 = 0
+    var subj: i64 = 0
+    while subj < SUBJECT_COUNT {
+        if TRAIN_MASK[subj as usize] == 1 {
+            let base = subj * feature_cap()
+            feat = 0
+            while feat < MANIFEST_FEATURE_COUNT {
+                TRAIN_FEATURE_MEAN[feat as usize] = TRAIN_FEATURE_MEAN[feat as usize] + FEATURES[(base + feat) as usize]
+                feat = feat + 1
+            }
+            train_n = train_n + 1
+        }
+        subj = subj + 1
+    }
+    if train_n <= 0 { return }
+
+    feat = 0
+    while feat < MANIFEST_FEATURE_COUNT {
+        TRAIN_FEATURE_MEAN[feat as usize] = TRAIN_FEATURE_MEAN[feat as usize] / (train_n as f64)
+        feat = feat + 1
+    }
+
+    subj = 0
+    while subj < SUBJECT_COUNT {
+        if TRAIN_MASK[subj as usize] == 1 {
+            let base = subj * feature_cap()
+            feat = 0
+            while feat < MANIFEST_FEATURE_COUNT {
+                let diff = FEATURES[(base + feat) as usize] - TRAIN_FEATURE_MEAN[feat as usize]
+                TRAIN_FEATURE_STD[feat as usize] = TRAIN_FEATURE_STD[feat as usize] + diff * diff
+                feat = feat + 1
+            }
+        }
+        subj = subj + 1
+    }
+
+    feat = 0
+    while feat < MANIFEST_FEATURE_COUNT {
+        var std = sqrt_q(TRAIN_FEATURE_STD[feat as usize] / (train_n as f64))
+        if std != std || std < 0.000001 { std = 1.0 }
+        TRAIN_FEATURE_STD[feat as usize] = std
+        feat = feat + 1
+    }
+}
+
+fn perturb_feature(subj: i64, step: i64, dim: i64, value: f64) -> f64 with Div {
+    var out = value
+    if dim < 64 && DROP_MASK[dim as usize] == 1 {
+        out = 0.0
+    }
+    if CFG_NOISE_STD_BP > 0 {
+        let raw = abs_i64((((subj + 1) * 1103515245) ^ ((step + 1) * 12345) ^ ((dim + 1) * 2654435761) ^ FOLD_NOISE_KEY) % 20001)
+        let unit = ((raw as f64) - 10000.0) / 10000.0
+        out = out + unit * bp_to_f64(CFG_NOISE_STD_BP)
+    }
+    out
+}
+
+fn do_oct_mul(
+    a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+    b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64
+) with Mut {
+    TMP_OCT[0] = a0 * b0 - a1 * b1 - a2 * b2 - a3 * b3 - a4 * b4 - a5 * b5 - a6 * b6 - a7 * b7
+    TMP_OCT[1] = a0 * b1 + a1 * b0 + a2 * b3 - a3 * b2 + a4 * b5 - a5 * b4 - a6 * b7 + a7 * b6
+    TMP_OCT[2] = a0 * b2 + a2 * b0 - a1 * b3 + a3 * b1 + a4 * b6 - a6 * b4 + a5 * b7 - a7 * b5
+    TMP_OCT[3] = a0 * b3 + a3 * b0 + a1 * b2 - a2 * b1 + a4 * b7 - a7 * b4 - a5 * b6 + a6 * b5
+    TMP_OCT[4] = a0 * b4 + a4 * b0 - a1 * b5 + a5 * b1 - a2 * b6 + a6 * b2 - a3 * b7 + a7 * b3
+    TMP_OCT[5] = a0 * b5 + a5 * b0 + a1 * b4 - a4 * b1 - a2 * b7 + a7 * b2 + a3 * b6 - a6 * b3
+    TMP_OCT[6] = a0 * b6 + a6 * b0 + a1 * b7 - a7 * b1 + a2 * b4 - a4 * b2 - a3 * b5 + a5 * b3
+    TMP_OCT[7] = a0 * b7 + a7 * b0 - a1 * b6 + a6 * b1 - a2 * b5 + a5 * b2 + a3 * b4 - a4 * b3
+}
+
+fn ws(i: i64, v: f64) with Mut {
+    W[i as usize] = (v * 100000000.0) as i64
+}
+
+fn wg(i: i64) -> f64 with Div {
+    (W[i as usize] as f64) / 100000000.0
+}
+
+fn proj_idx(out_dim: i64, in_dim: i64) -> i64 {
+    out_dim * 8 + in_dim
+}
+
+fn proj_ws(out_dim: i64, in_dim: i64, v: f64) with Mut {
+    PROJ_W[proj_idx(out_dim, in_dim) as usize] = (v * 100000000.0) as i64
+}
+
+fn proj_wg(out_dim: i64, in_dim: i64) -> f64 with Div {
+    (PROJ_W[proj_idx(out_dim, in_dim) as usize] as f64) / 100000000.0
+}
+
+fn proj_bs(out_dim: i64, v: f64) with Mut {
+    PROJ_B[out_dim as usize] = (v * 100000000.0) as i64
+}
+
+fn proj_bg(out_dim: i64) -> f64 with Div {
+    (PROJ_B[out_dim as usize] as f64) / 100000000.0
+}
+
+fn hs(i: i64, v: f64) with Mut {
+    H[i as usize] = (v * 100000000.0) as i64
+}
+
+fn hg(i: i64) -> f64 with Div {
+    (H[i as usize] as f64) / 100000000.0
+}
+
+fn assoc_s(head: i64, v: f64) with Mut {
+    ASSOC_ACC[head as usize] = (v * 100000000.0) as i64
+}
+
+fn assoc_g(head: i64) -> f64 with Div {
+    (ASSOC_ACC[head as usize] as f64) / 100000000.0
+}
+
+fn assoc_mean_all() -> f64 with Div {
+    var s = 0.0
+    var head: i64 = 0
+    while head < head_count() {
+        s = s + assoc_g(head)
+        head = head + 1
+    }
+    s / (head_count() as f64)
+}
+
+fn project_current_step(mode: i64) with Mut, Div, Panic {
+    var out_dim: i64 = 0
+    if mode == 1 {
+        while out_dim < 8 {
+            var s = proj_bg(out_dim)
+            var in_dim: i64 = 0
+            while in_dim < 8 {
+                s = s + TMP_GRAD[in_dim as usize] * proj_wg(out_dim, in_dim)
+                in_dim = in_dim + 1
+            }
+            TMP_OCT[out_dim as usize] = clip_f64(s, 0.0 - 4.0, 4.0)
+            out_dim = out_dim + 1
+        }
+    } else if mode == 2 {
+        while out_dim < 8 {
+            var s = proj_bg(out_dim)
+            var in_dim: i64 = 0
+            while in_dim < 8 {
+                s = s + TMP_GRAD[in_dim as usize] * proj_wg(out_dim, in_dim)
+                in_dim = in_dim + 1
+            }
+            let base = TMP_GRAD[out_dim as usize]
+            TMP_OCT[out_dim as usize] = clip_f64(base + 0.25 * (s - base), 0.0 - 4.0, 4.0)
+            out_dim = out_dim + 1
+        }
+    } else if mode == 3 || mode == 4 {
+        while out_dim < 8 {
+            let base = TMP_GRAD[out_dim as usize]
+            let delta = TMP_DELTA[out_dim as usize]
+            let struct_gate = clip_f64(0.55 + 0.45 * proj_bg(out_dim), 0.0 - 1.5, 1.5)
+            let delta_gate = clip_f64(proj_wg(out_dim, out_dim), 0.0 - 1.5, 1.5)
+            let md2 = mandelbrot_d2_feature(base, delta)
+            var s = base + cfg_proj_structured_scale() * struct_gate * md2 + cfg_proj_delta_scale() * delta_gate * delta
+            if mode == 4 {
+                var corr = proj_bg(out_dim)
+                var in_dim: i64 = 0
+                while in_dim < 8 {
+                    corr = corr + TMP_GRAD[in_dim as usize] * proj_wg(out_dim, in_dim)
+                    in_dim = in_dim + 1
+                }
+                s = s + cfg_proj_hybrid_scale() * 0.20 * (corr - base)
+            }
+            TMP_OCT[out_dim as usize] = clip_f64(s, 0.0 - 4.0, 4.0)
+            out_dim = out_dim + 1
+        }
+    } else {
+        while out_dim < 8 {
+            TMP_OCT[out_dim as usize] = TMP_GRAD[out_dim as usize]
+            out_dim = out_dim + 1
+        }
+    }
+}
+
+fn normalize_head(base: i64, is_oct: i64) with Mut, Div, Panic {
+    var nsq = 0.0
+    var i: i64 = 0
+    while i < 8 {
+        nsq = nsq + A[(base + i) as usize] * A[(base + i) as usize]
+        i = i + 1
+    }
+    let n = sqrt_q(nsq)
+    i = 0
+    while i < 8 {
+        if n > 0.000000001 {
+            A[(base + i) as usize] = A[(base + i) as usize] / n
+        } else if i == 0 {
+            A[(base + i) as usize] = 1.0
+        } else {
+            A[(base + i) as usize] = 0.0
+        }
+        i = i + 1
+    }
+    if is_oct == 0 {
+        nsq = 0.0
+        i = 0
+        while i < 4 {
+            nsq = nsq + A[(base + i) as usize] * A[(base + i) as usize]
+            i = i + 1
+        }
+        let n1 = sqrt_q(nsq)
+        i = 0
+        while i < 4 {
+            if n1 > 0.000000001 {
+                A[(base + i) as usize] = A[(base + i) as usize] / n1
+            } else if i == 0 {
+                A[(base + i) as usize] = 1.0
+            } else {
+                A[(base + i) as usize] = 0.0
+            }
+            i = i + 1
+        }
+        nsq = 0.0
+        i = 0
+        while i < 4 {
+            nsq = nsq + A[(base + 4 + i) as usize] * A[(base + 4 + i) as usize]
+            i = i + 1
+        }
+        let n2 = sqrt_q(nsq)
+        i = 0
+        while i < 4 {
+            if n2 > 0.000000001 {
+                A[(base + 4 + i) as usize] = A[(base + 4 + i) as usize] / n2
+            } else if i == 0 {
+                A[(base + 4 + i) as usize] = 1.0
+            } else {
+                A[(base + 4 + i) as usize] = 0.0
+            }
+            i = i + 1
+        }
+    }
+}
+
+fn set_g2_oct_preset(preset: i64) with Mut, Div, Panic {
+    if preset == 1 {
+        A[0] = 1.0; A[1] = 0.62; A[2] = 0.62; A[3] = 0.0;  A[4] = 0.62; A[5] = 0.0;  A[6] = 0.0;  A[7] = 0.0
+        A[8] = 1.0; A[9] = 0.58; A[10] = 0.0; A[11] = 0.58; A[12] = 0.0; A[13] = 0.0; A[14] = 0.0; A[15] = 0.58
+        ws(assoc_offset(), 0.24)
+        ws(assoc_offset() + 1, 0.24)
+        ws(input_delta_offset(), 0.08)
+        ws(input_delta_offset() + 1, 0.08)
+        ws(input_delta_offset() + 2, 0.08)
+        ws(input_delta_offset() + 3, 0.08)
+        ws(step_delta_offset(), 0.05)
+        ws(step_delta_offset() + 1, 0.05)
+        ws(step_delta_offset() + 2, 0.05)
+        ws(step_delta_offset() + 3, 0.05)
+    } else if preset == 2 {
+        A[0] = 1.0; A[1] = 0.60; A[2] = 0.0;  A[3] = 0.0;  A[4] = 0.0;  A[5] = 0.60; A[6] = 0.60; A[7] = 0.0
+        A[8] = 1.0; A[9] = 0.0;  A[10] = 0.60; A[11] = 0.60; A[12] = 0.0; A[13] = 0.0;  A[14] = 0.60; A[15] = 0.0
+        ws(assoc_offset(), 0.28)
+        ws(assoc_offset() + 1, 0.20)
+        ws(input_delta_offset() + 4, 0.08)
+        ws(input_delta_offset() + 5, 0.08)
+        ws(input_delta_offset() + 6, 0.08)
+        ws(input_delta_offset() + 7, 0.08)
+        ws(step_delta_offset() + 4, 0.05)
+        ws(step_delta_offset() + 5, 0.05)
+        ws(step_delta_offset() + 6, 0.05)
+        ws(step_delta_offset() + 7, 0.05)
+    } else if preset == 3 {
+        A[0] = 1.0; A[1] = 0.55; A[2] = 0.55; A[3] = 0.0;  A[4] = 0.55; A[5] = 0.0;  A[6] = 0.0;  A[7] = 0.0
+        A[8] = 1.0; A[9] = 0.0;  A[10] = 0.55; A[11] = 0.0; A[12] = 0.55; A[13] = 0.55; A[14] = 0.0; A[15] = 0.0
+        ws(assoc_offset(), 0.30)
+        ws(assoc_offset() + 1, 0.30)
+        var d: i64 = 0
+        while d < 8 {
+            ws(input_delta_offset() + d, 0.07)
+            ws(step_delta_offset() + d, 0.04)
+            d = d + 1
+        }
+    }
+    normalize_head(0, 1)
+    normalize_head(8, 1)
+}
+
+fn set_h_init_preset(preset: i64) with Mut, Div, Panic {
+    if preset == 1 {
+        A[0] = 1.0; A[1] = 0.35; A[2] = 0.35; A[3] = 0.0
+        A[4] = 1.0; A[5] = 0.0; A[6] = 0.35; A[7] = 0.35
+        A[8] = 1.0; A[9] = 0.35; A[10] = 0.0; A[11] = 0.35
+        A[12] = 1.0; A[13] = 0.0; A[14] = 0.35; A[15] = 0.35
+        normalize_head(0, 0)
+        normalize_head(8, 0)
+    }
+}
+
+fn init_model(is_oct: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i <= bias_offset() {
+        if i >= encoder_scale_offset() && i < encoder_bias_offset() {
+            ws(i, 1.0 + randf() / 20.0)
+        } else if i >= encoder_bias_offset() && i < bias_offset() {
+            ws(i, randf() / 50.0)
+        } else if i >= step_delta_offset() && i < input_flat_offset() {
+            ws(i, randf() / 50.0)
+        } else {
+            ws(i, randf() / 8.0)
+        }
+        MOM[i as usize] = 0
+        i = i + 1
+    }
+    var out_dim: i64 = 0
+    while out_dim < 8 {
+        proj_bs(out_dim, randf() / 60.0)
+        PROJ_B_MOM[out_dim as usize] = 0
+        var in_dim: i64 = 0
+        while in_dim < 8 {
+            var v = randf() / 60.0
+            if out_dim == in_dim {
+                v = 1.0 + randf() / 40.0
+            }
+            proj_ws(out_dim, in_dim, v)
+            PROJ_W_MOM[proj_idx(out_dim, in_dim) as usize] = 0
+            in_dim = in_dim + 1
+        }
+        out_dim = out_dim + 1
+    }
+    if is_oct == 1 && cfg_input_proj_mode(is_oct) >= 3 {
+        out_dim = 0
+        while out_dim < 8 {
+            proj_bs(out_dim, 0.65 + randf() / 40.0)
+            var in_dim: i64 = 0
+            while in_dim < 8 {
+                var v = randf() / 80.0
+                if out_dim == in_dim {
+                    v = 0.75 + randf() / 50.0
+                }
+                proj_ws(out_dim, in_dim, v)
+                in_dim = in_dim + 1
+            }
+            out_dim = out_dim + 1
+        }
+    }
+    i = 0
+    while i < hidden_dim() {
+        A_MOM[i as usize] = 0
+        i = i + 1
+    }
+    var head: i64 = 0
+    while head < head_count() {
+        let base = head_base(head)
+        i = 0
+        while i < 8 {
+            A[(base + i) as usize] = randf()
+            i = i + 1
+        }
+        normalize_head(base, is_oct)
+        head = head + 1
+    }
+    if is_oct == 1 && CFG_OCT_INIT_PRESET > 0 {
+        set_g2_oct_preset(CFG_OCT_INIT_PRESET)
+    }
+    if is_oct == 0 && CFG_H_INIT_PRESET > 0 {
+        set_h_init_preset(CFG_H_INIT_PRESET)
+    }
+}
+
+fn reset_state() with Mut {
+    var i: i64 = 0
+    while i < hidden_dim() {
+        H[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        LAST_INPUT_MEAN[i as usize] = 0.0
+        FIRST_INPUT_STEP[i as usize] = 0.0
+        LAST_INPUT_STEP[i as usize] = 0.0
+        RAW_INPUT_MEAN[i as usize] = 0.0
+        RAW_FIRST_INPUT_STEP[i as usize] = 0.0
+        RAW_LAST_INPUT_STEP[i as usize] = 0.0
+        ENC_INPUT_MEAN[i as usize] = 0.0
+        ENC_FIRST_INPUT_STEP[i as usize] = 0.0
+        ENC_LAST_INPUT_STEP[i as usize] = 0.0
+        i = i + 1
+    }
+    i = 0
+    while i < feature_cap() {
+        LAST_INPUT_FLAT[i as usize] = 0.0
+        RAW_INPUT_FLAT[i as usize] = 0.0
+        ENC_INPUT_FLAT[i as usize] = 0.0
+        i = i + 1
+    }
+    var head: i64 = 0
+    while head < head_count() {
+        hs(head_base(head), 1.0)
+        assoc_s(head, 0.0)
+        head = head + 1
+    }
+    LOGIT = 0.0
+}
+
+fn oct_step_head(head: i64, x0: f64, x1: f64, x2: f64, x3: f64, x4: f64, x5: f64, x6: f64, x7: f64) with Mut, Div, Panic {
+    let base = head_base(head)
+    do_oct_mul(A[base as usize], A[(base + 1) as usize], A[(base + 2) as usize], A[(base + 3) as usize], A[(base + 4) as usize], A[(base + 5) as usize], A[(base + 6) as usize], A[(base + 7) as usize], hg(base), hg(base + 1), hg(base + 2), hg(base + 3), hg(base + 4), hg(base + 5), hg(base + 6), hg(base + 7))
+    let t0 = TMP_OCT[0]
+    let t1 = TMP_OCT[1]
+    let t2 = TMP_OCT[2]
+    let t3 = TMP_OCT[3]
+    let t4 = TMP_OCT[4]
+    let t5 = TMP_OCT[5]
+    let t6 = TMP_OCT[6]
+    let t7 = TMP_OCT[7]
+    do_oct_mul(t0, t1, t2, t3, t4, t5, t6, t7, x0, x1, x2, x3, x4, x5, x6, x7)
+    var left: [f64; 8] = [0.0; 8]
+    var d: i64 = 0
+    while d < 8 {
+        left[d as usize] = TMP_OCT[d as usize]
+        d = d + 1
+    }
+    do_oct_mul(hg(base), hg(base + 1), hg(base + 2), hg(base + 3), hg(base + 4), hg(base + 5), hg(base + 6), hg(base + 7), x0, x1, x2, x3, x4, x5, x6, x7)
+    let hx0 = TMP_OCT[0]
+    let hx1 = TMP_OCT[1]
+    let hx2 = TMP_OCT[2]
+    let hx3 = TMP_OCT[3]
+    let hx4 = TMP_OCT[4]
+    let hx5 = TMP_OCT[5]
+    let hx6 = TMP_OCT[6]
+    let hx7 = TMP_OCT[7]
+    do_oct_mul(A[base as usize], A[(base + 1) as usize], A[(base + 2) as usize], A[(base + 3) as usize], A[(base + 4) as usize], A[(base + 5) as usize], A[(base + 6) as usize], A[(base + 7) as usize], hx0, hx1, hx2, hx3, hx4, hx5, hx6, hx7)
+    var asq = 0.0
+    var i: i64 = 0
+    while i < 8 {
+        let diff = left[i as usize] - TMP_OCT[i as usize]
+        asq = asq + diff * diff
+        i = i + 1
+    }
+    var assoc_step = sqrt_q(asq)
+    if assoc_step != assoc_step { assoc_step = 0.0 }
+    let assoc_unit = squash_pos_f64(assoc_step)
+    assoc_s(head, assoc_g(head) + assoc_unit)
+    var d: i64 = 0
+    while d < 8 {
+        var v = left[d as usize] + 0.2 * TMP_OCT[d as usize]
+        if v != v { v = 0.0 }
+        if v > 5.0 { v = 5.0 }
+        if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+        hs(base + d, v)
+        d = d + 1
+    }
+}
+
+fn quat_step_head(head: i64, x0: f64, x1: f64, x2: f64, x3: f64, x4: f64, x5: f64, x6: f64, x7: f64) with Mut, Div {
+    let base = head_base(head)
+    let qw = A[base as usize]; let qx = A[(base + 1) as usize]; let qy = A[(base + 2) as usize]; let qz = A[(base + 3) as usize]
+    let hw = hg(base); let hx = hg(base + 1); let hy = hg(base + 2); let hz = hg(base + 3)
+    let tw = qw * hw - qx * hx - qy * hy - qz * hz
+    let tx = qw * hx + qx * hw + qy * hz - qz * hy
+    let ty = qw * hy - qx * hz + qy * hw + qz * hx
+    let tz = qw * hz + qx * hy - qy * hx + qz * hw
+    var n0 = tw * x0 - tx * x1 - ty * x2 - tz * x3 + 0.2 * x0
+    var n1 = tw * x1 + tx * x0 + ty * x3 - tz * x2 + 0.2 * x1
+    var n2 = tw * x2 - tx * x3 + ty * x0 + tz * x1 + 0.2 * x2
+    var n3 = tw * x3 + tx * x2 - ty * x1 + tz * x0 + 0.2 * x3
+    let qw2 = A[(base + 4) as usize]; let qx2 = A[(base + 5) as usize]; let qy2 = A[(base + 6) as usize]; let qz2 = A[(base + 7) as usize]
+    let hw2 = hg(base + 4); let hx2 = hg(base + 5); let hy2 = hg(base + 6); let hz2 = hg(base + 7)
+    let tw2 = qw2 * hw2 - qx2 * hx2 - qy2 * hy2 - qz2 * hz2
+    let tx2 = qw2 * hx2 + qx2 * hw2 + qy2 * hz2 - qz2 * hy2
+    let ty2 = qw2 * hy2 - qx2 * hz2 + qy2 * hw2 + qz2 * hx2
+    let tz2 = qw2 * hz2 + qx2 * hy2 - qy2 * hx2 + qz2 * hw2
+    var n4 = tw2 * x4 - tx2 * x5 - ty2 * x6 - tz2 * x7 + 0.2 * x4
+    var n5 = tw2 * x5 + tx2 * x4 + ty2 * x7 - tz2 * x6 + 0.2 * x5
+    var n6 = tw2 * x6 - tx2 * x7 + ty2 * x4 + tz2 * x5 + 0.2 * x6
+    var n7 = tw2 * x7 + tx2 * x6 - ty2 * x5 + tz2 * x4 + 0.2 * x7
+    if n0 > 5.0 { n0 = 5.0 } if n0 < 0.0 - 5.0 { n0 = 0.0 - 5.0 }
+    if n1 > 5.0 { n1 = 5.0 } if n1 < 0.0 - 5.0 { n1 = 0.0 - 5.0 }
+    if n2 > 5.0 { n2 = 5.0 } if n2 < 0.0 - 5.0 { n2 = 0.0 - 5.0 }
+    if n3 > 5.0 { n3 = 5.0 } if n3 < 0.0 - 5.0 { n3 = 0.0 - 5.0 }
+    if n4 > 5.0 { n4 = 5.0 } if n4 < 0.0 - 5.0 { n4 = 0.0 - 5.0 }
+    if n5 > 5.0 { n5 = 5.0 } if n5 < 0.0 - 5.0 { n5 = 0.0 - 5.0 }
+    if n6 > 5.0 { n6 = 5.0 } if n6 < 0.0 - 5.0 { n6 = 0.0 - 5.0 }
+    if n7 > 5.0 { n7 = 5.0 } if n7 < 0.0 - 5.0 { n7 = 0.0 - 5.0 }
+    hs(base, n0); hs(base + 1, n1); hs(base + 2, n2); hs(base + 3, n3); hs(base + 4, n4); hs(base + 5, n5); hs(base + 6, n6); hs(base + 7, n7)
+}
+
+fn forward_subject(subj: i64, is_oct: i64) with Mut, Div, Panic {
+    reset_state()
+    let base = subj * feature_cap()
+    let proj_mode = cfg_input_proj_mode(is_oct)
+    var prev_raw0 = 0.0
+    var prev_raw1 = 0.0
+    var prev_raw2 = 0.0
+    var prev_raw3 = 0.0
+    var prev_raw4 = 0.0
+    var prev_raw5 = 0.0
+    var prev_raw6 = 0.0
+    var prev_raw7 = 0.0
+    var step: i64 = 0
+    while step < MANIFEST_SEQ_LEN {
+        let off = base + step * 8
+        let flat = step * 8
+        let raw0 = perturb_feature(subj, step, 0, (FEATURES[off as usize] - TRAIN_FEATURE_MEAN[flat as usize]) / TRAIN_FEATURE_STD[flat as usize])
+        let raw1 = perturb_feature(subj, step, 1, (FEATURES[(off + 1) as usize] - TRAIN_FEATURE_MEAN[(flat + 1) as usize]) / TRAIN_FEATURE_STD[(flat + 1) as usize])
+        let raw2 = perturb_feature(subj, step, 2, (FEATURES[(off + 2) as usize] - TRAIN_FEATURE_MEAN[(flat + 2) as usize]) / TRAIN_FEATURE_STD[(flat + 2) as usize])
+        let raw3 = perturb_feature(subj, step, 3, (FEATURES[(off + 3) as usize] - TRAIN_FEATURE_MEAN[(flat + 3) as usize]) / TRAIN_FEATURE_STD[(flat + 3) as usize])
+        let raw4 = perturb_feature(subj, step, 4, (FEATURES[(off + 4) as usize] - TRAIN_FEATURE_MEAN[(flat + 4) as usize]) / TRAIN_FEATURE_STD[(flat + 4) as usize])
+        let raw5 = perturb_feature(subj, step, 5, (FEATURES[(off + 5) as usize] - TRAIN_FEATURE_MEAN[(flat + 5) as usize]) / TRAIN_FEATURE_STD[(flat + 5) as usize])
+        let raw6 = perturb_feature(subj, step, 6, (FEATURES[(off + 6) as usize] - TRAIN_FEATURE_MEAN[(flat + 6) as usize]) / TRAIN_FEATURE_STD[(flat + 6) as usize])
+        let raw7 = perturb_feature(subj, step, 7, (FEATURES[(off + 7) as usize] - TRAIN_FEATURE_MEAN[(flat + 7) as usize]) / TRAIN_FEATURE_STD[(flat + 7) as usize])
+        let raw_d0 = if step > 0 { raw0 - prev_raw0 } else { 0.0 }
+        let raw_d1 = if step > 0 { raw1 - prev_raw1 } else { 0.0 }
+        let raw_d2 = if step > 0 { raw2 - prev_raw2 } else { 0.0 }
+        let raw_d3 = if step > 0 { raw3 - prev_raw3 } else { 0.0 }
+        let raw_d4 = if step > 0 { raw4 - prev_raw4 } else { 0.0 }
+        let raw_d5 = if step > 0 { raw5 - prev_raw5 } else { 0.0 }
+        let raw_d6 = if step > 0 { raw6 - prev_raw6 } else { 0.0 }
+        let raw_d7 = if step > 0 { raw7 - prev_raw7 } else { 0.0 }
+        let e0 = clip_f64(raw0 * wg(encoder_scale_offset()) + raw_d0 * wg(step_delta_offset()) + wg(encoder_bias_offset()), 0.0 - 4.0, 4.0)
+        let e1 = clip_f64(raw1 * wg(encoder_scale_offset() + 1) + raw_d1 * wg(step_delta_offset() + 1) + wg(encoder_bias_offset() + 1), 0.0 - 4.0, 4.0)
+        let e2 = clip_f64(raw2 * wg(encoder_scale_offset() + 2) + raw_d2 * wg(step_delta_offset() + 2) + wg(encoder_bias_offset() + 2), 0.0 - 4.0, 4.0)
+        let e3 = clip_f64(raw3 * wg(encoder_scale_offset() + 3) + raw_d3 * wg(step_delta_offset() + 3) + wg(encoder_bias_offset() + 3), 0.0 - 4.0, 4.0)
+        let e4 = clip_f64(raw4 * wg(encoder_scale_offset() + 4) + raw_d4 * wg(step_delta_offset() + 4) + wg(encoder_bias_offset() + 4), 0.0 - 4.0, 4.0)
+        let e5 = clip_f64(raw5 * wg(encoder_scale_offset() + 5) + raw_d5 * wg(step_delta_offset() + 5) + wg(encoder_bias_offset() + 5), 0.0 - 4.0, 4.0)
+        let e6 = clip_f64(raw6 * wg(encoder_scale_offset() + 6) + raw_d6 * wg(step_delta_offset() + 6) + wg(encoder_bias_offset() + 6), 0.0 - 4.0, 4.0)
+        let e7 = clip_f64(raw7 * wg(encoder_scale_offset() + 7) + raw_d7 * wg(step_delta_offset() + 7) + wg(encoder_bias_offset() + 7), 0.0 - 4.0, 4.0)
+        TMP_GRAD[0] = e0
+        TMP_GRAD[1] = e1
+        TMP_GRAD[2] = e2
+        TMP_GRAD[3] = e3
+        TMP_GRAD[4] = e4
+        TMP_GRAD[5] = e5
+        TMP_GRAD[6] = e6
+        TMP_GRAD[7] = e7
+        TMP_DELTA[0] = raw_d0
+        TMP_DELTA[1] = raw_d1
+        TMP_DELTA[2] = raw_d2
+        TMP_DELTA[3] = raw_d3
+        TMP_DELTA[4] = raw_d4
+        TMP_DELTA[5] = raw_d5
+        TMP_DELTA[6] = raw_d6
+        TMP_DELTA[7] = raw_d7
+        project_current_step(proj_mode)
+        let x0 = TMP_OCT[0]
+        let x1 = TMP_OCT[1]
+        let x2 = TMP_OCT[2]
+        let x3 = TMP_OCT[3]
+        let x4 = TMP_OCT[4]
+        let x5 = TMP_OCT[5]
+        let x6 = TMP_OCT[6]
+        let x7 = TMP_OCT[7]
+        prev_raw0 = raw0
+        prev_raw1 = raw1
+        prev_raw2 = raw2
+        prev_raw3 = raw3
+        prev_raw4 = raw4
+        prev_raw5 = raw5
+        prev_raw6 = raw6
+        prev_raw7 = raw7
+        RAW_INPUT_FLAT[flat as usize] = raw0
+        RAW_INPUT_FLAT[(flat + 1) as usize] = raw1
+        RAW_INPUT_FLAT[(flat + 2) as usize] = raw2
+        RAW_INPUT_FLAT[(flat + 3) as usize] = raw3
+        RAW_INPUT_FLAT[(flat + 4) as usize] = raw4
+        RAW_INPUT_FLAT[(flat + 5) as usize] = raw5
+        RAW_INPUT_FLAT[(flat + 6) as usize] = raw6
+        RAW_INPUT_FLAT[(flat + 7) as usize] = raw7
+        ENC_INPUT_FLAT[flat as usize] = e0
+        ENC_INPUT_FLAT[(flat + 1) as usize] = e1
+        ENC_INPUT_FLAT[(flat + 2) as usize] = e2
+        ENC_INPUT_FLAT[(flat + 3) as usize] = e3
+        ENC_INPUT_FLAT[(flat + 4) as usize] = e4
+        ENC_INPUT_FLAT[(flat + 5) as usize] = e5
+        ENC_INPUT_FLAT[(flat + 6) as usize] = e6
+        ENC_INPUT_FLAT[(flat + 7) as usize] = e7
+        LAST_INPUT_FLAT[flat as usize] = x0
+        LAST_INPUT_FLAT[(flat + 1) as usize] = x1
+        LAST_INPUT_FLAT[(flat + 2) as usize] = x2
+        LAST_INPUT_FLAT[(flat + 3) as usize] = x3
+        LAST_INPUT_FLAT[(flat + 4) as usize] = x4
+        LAST_INPUT_FLAT[(flat + 5) as usize] = x5
+        LAST_INPUT_FLAT[(flat + 6) as usize] = x6
+        LAST_INPUT_FLAT[(flat + 7) as usize] = x7
+        if step == 0 {
+            RAW_FIRST_INPUT_STEP[0] = raw0
+            RAW_FIRST_INPUT_STEP[1] = raw1
+            RAW_FIRST_INPUT_STEP[2] = raw2
+            RAW_FIRST_INPUT_STEP[3] = raw3
+            RAW_FIRST_INPUT_STEP[4] = raw4
+            RAW_FIRST_INPUT_STEP[5] = raw5
+            RAW_FIRST_INPUT_STEP[6] = raw6
+            RAW_FIRST_INPUT_STEP[7] = raw7
+            ENC_FIRST_INPUT_STEP[0] = e0
+            ENC_FIRST_INPUT_STEP[1] = e1
+            ENC_FIRST_INPUT_STEP[2] = e2
+            ENC_FIRST_INPUT_STEP[3] = e3
+            ENC_FIRST_INPUT_STEP[4] = e4
+            ENC_FIRST_INPUT_STEP[5] = e5
+            ENC_FIRST_INPUT_STEP[6] = e6
+            ENC_FIRST_INPUT_STEP[7] = e7
+            FIRST_INPUT_STEP[0] = x0
+            FIRST_INPUT_STEP[1] = x1
+            FIRST_INPUT_STEP[2] = x2
+            FIRST_INPUT_STEP[3] = x3
+            FIRST_INPUT_STEP[4] = x4
+            FIRST_INPUT_STEP[5] = x5
+            FIRST_INPUT_STEP[6] = x6
+            FIRST_INPUT_STEP[7] = x7
+        }
+        RAW_LAST_INPUT_STEP[0] = raw0
+        RAW_LAST_INPUT_STEP[1] = raw1
+        RAW_LAST_INPUT_STEP[2] = raw2
+        RAW_LAST_INPUT_STEP[3] = raw3
+        RAW_LAST_INPUT_STEP[4] = raw4
+        RAW_LAST_INPUT_STEP[5] = raw5
+        RAW_LAST_INPUT_STEP[6] = raw6
+        RAW_LAST_INPUT_STEP[7] = raw7
+        ENC_LAST_INPUT_STEP[0] = e0
+        ENC_LAST_INPUT_STEP[1] = e1
+        ENC_LAST_INPUT_STEP[2] = e2
+        ENC_LAST_INPUT_STEP[3] = e3
+        ENC_LAST_INPUT_STEP[4] = e4
+        ENC_LAST_INPUT_STEP[5] = e5
+        ENC_LAST_INPUT_STEP[6] = e6
+        ENC_LAST_INPUT_STEP[7] = e7
+        LAST_INPUT_STEP[0] = x0
+        LAST_INPUT_STEP[1] = x1
+        LAST_INPUT_STEP[2] = x2
+        LAST_INPUT_STEP[3] = x3
+        LAST_INPUT_STEP[4] = x4
+        LAST_INPUT_STEP[5] = x5
+        LAST_INPUT_STEP[6] = x6
+        LAST_INPUT_STEP[7] = x7
+        RAW_INPUT_MEAN[0] = RAW_INPUT_MEAN[0] + raw0
+        RAW_INPUT_MEAN[1] = RAW_INPUT_MEAN[1] + raw1
+        RAW_INPUT_MEAN[2] = RAW_INPUT_MEAN[2] + raw2
+        RAW_INPUT_MEAN[3] = RAW_INPUT_MEAN[3] + raw3
+        RAW_INPUT_MEAN[4] = RAW_INPUT_MEAN[4] + raw4
+        RAW_INPUT_MEAN[5] = RAW_INPUT_MEAN[5] + raw5
+        RAW_INPUT_MEAN[6] = RAW_INPUT_MEAN[6] + raw6
+        RAW_INPUT_MEAN[7] = RAW_INPUT_MEAN[7] + raw7
+        ENC_INPUT_MEAN[0] = ENC_INPUT_MEAN[0] + e0
+        ENC_INPUT_MEAN[1] = ENC_INPUT_MEAN[1] + e1
+        ENC_INPUT_MEAN[2] = ENC_INPUT_MEAN[2] + e2
+        ENC_INPUT_MEAN[3] = ENC_INPUT_MEAN[3] + e3
+        ENC_INPUT_MEAN[4] = ENC_INPUT_MEAN[4] + e4
+        ENC_INPUT_MEAN[5] = ENC_INPUT_MEAN[5] + e5
+        ENC_INPUT_MEAN[6] = ENC_INPUT_MEAN[6] + e6
+        ENC_INPUT_MEAN[7] = ENC_INPUT_MEAN[7] + e7
+        LAST_INPUT_MEAN[0] = LAST_INPUT_MEAN[0] + x0
+        LAST_INPUT_MEAN[1] = LAST_INPUT_MEAN[1] + x1
+        LAST_INPUT_MEAN[2] = LAST_INPUT_MEAN[2] + x2
+        LAST_INPUT_MEAN[3] = LAST_INPUT_MEAN[3] + x3
+        LAST_INPUT_MEAN[4] = LAST_INPUT_MEAN[4] + x4
+        LAST_INPUT_MEAN[5] = LAST_INPUT_MEAN[5] + x5
+        LAST_INPUT_MEAN[6] = LAST_INPUT_MEAN[6] + x6
+        LAST_INPUT_MEAN[7] = LAST_INPUT_MEAN[7] + x7
+        if is_oct == 1 {
+            oct_step_head(0, x0, x1, x2, x3, x4, x5, x6, x7)
+            oct_step_head(1, x0, x1, x2, x3, x4, x5, x6, x7)
+        } else {
+            quat_step_head(0, x0, x1, x2, x3, x4, x5, x6, x7)
+            quat_step_head(1, x0, x1, x2, x3, x4, x5, x6, x7)
+        }
+        step = step + 1
+    }
+    var d: i64 = 0
+    while d < 8 {
+        RAW_INPUT_MEAN[d as usize] = RAW_INPUT_MEAN[d as usize] / (MANIFEST_SEQ_LEN as f64)
+        ENC_INPUT_MEAN[d as usize] = ENC_INPUT_MEAN[d as usize] / (MANIFEST_SEQ_LEN as f64)
+        LAST_INPUT_MEAN[d as usize] = LAST_INPUT_MEAN[d as usize] / (MANIFEST_SEQ_LEN as f64)
+        d = d + 1
+    }
+    var s = wg(bias_offset())
+    d = 0
+    while d < hidden_dim() {
+        var proj = hg(d) * wg(d)
+        if proj != proj { proj = 0.0 }
+        s = s + proj
+        d = d + 1
+    }
+    var head: i64 = 0
+    while head < head_count() {
+        var assoc_feature_raw = assoc_g(head) / (MANIFEST_SEQ_LEN as f64)
+        if assoc_feature_raw != assoc_feature_raw { assoc_feature_raw = 0.0 }
+        assoc_s(head, assoc_feature_raw)
+        let assoc_feature = squash_pos_f64(assoc_feature_raw)
+        var assoc_proj = assoc_feature * wg(assoc_offset() + head)
+        if assoc_proj != assoc_proj { assoc_proj = 0.0 }
+        s = s + assoc_proj
+        head = head + 1
+    }
+    d = 0
+    while d < 8 {
+        var mean_proj = LAST_INPUT_MEAN[d as usize] * wg(input_mean_offset() + d)
+        if mean_proj != mean_proj { mean_proj = 0.0 }
+        s = s + mean_proj
+        var delta_feature = LAST_INPUT_STEP[d as usize] - FIRST_INPUT_STEP[d as usize]
+        var delta_proj = delta_feature * wg(input_delta_offset() + d)
+        if delta_proj != delta_proj { delta_proj = 0.0 }
+        s = s + delta_proj
+        d = d + 1
+    }
+    var flat_i: i64 = 0
+    while flat_i < MANIFEST_FEATURE_COUNT {
+        var flat_proj = LAST_INPUT_FLAT[flat_i as usize] * wg(input_flat_offset() + flat_i)
+        if flat_proj != flat_proj { flat_proj = 0.0 }
+        s = s + flat_proj
+        flat_i = flat_i + 1
+    }
+    LOGIT = clip_f64(s, 0.0 - 12.0, 12.0)
+}
+
+fn update_binary(target: i64, lr: f64, is_oct: i64, allow_core: i64) with Mut, Div, Panic {
+    let prob = sigmoid_q(LOGIT)
+    var grad = prob - (target as f64)
+    if grad > 0.5 { grad = 0.5 }
+    if grad < 0.0 - 0.5 { grad = 0.0 - 0.5 }
+    let assoc_reg = cfg_assoc_reg(is_oct)
+    let assoc_target = if is_oct == 1 { scheduled_assoc_target() } else { cfg_assoc_target(is_oct) }
+    let assoc_drift_reg = if is_oct == 1 { cfg_assoc_drift_reg() } else { 0.0 }
+    let proj_mode = cfg_input_proj_mode(is_oct)
+    var d: i64 = 0
+    while d < hidden_dim() {
+        let g = hg(d) * grad
+        let idx = d as usize
+        let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+        MOM[idx] = (m * 100000000.0) as i64
+        ws(d, wg(d) - lr * m)
+        d = d + 1
+    }
+    var head: i64 = 0
+    while head < head_count() {
+        let assoc_idx = assoc_offset() + head
+        let assoc_value = assoc_g(head)
+        let prev_assoc = (PREV_ASSOC_ACC[head as usize] as f64) / 100000000.0
+        var assoc_err = assoc_value - assoc_target
+        assoc_err = clip_f64(assoc_err, 0.0 - 2.0, 2.0)
+        let assoc_drift = clip_f64(assoc_value - prev_assoc, 0.0 - 2.0, 2.0)
+        let ag = assoc_value * grad + assoc_reg * assoc_err + assoc_drift_reg * assoc_drift
+        let am = (MOM[assoc_idx as usize] as f64) / 100000000.0 * 0.9 + ag
+        MOM[assoc_idx as usize] = (am * 100000000.0) as i64
+        ws(assoc_idx, wg(assoc_idx) - lr * am)
+        head = head + 1
+    }
+    d = 0
+    while d < 8 {
+        let mean_idx = input_mean_offset() + d
+        let mean_g = LAST_INPUT_MEAN[d as usize] * grad
+        let mean_m = (MOM[mean_idx as usize] as f64) / 100000000.0 * 0.9 + mean_g
+        MOM[mean_idx as usize] = (mean_m * 100000000.0) as i64
+        ws(mean_idx, wg(mean_idx) - lr * mean_m)
+
+        let delta_idx = input_delta_offset() + d
+        let delta_g = (LAST_INPUT_STEP[d as usize] - FIRST_INPUT_STEP[d as usize]) * grad
+        let delta_m = (MOM[delta_idx as usize] as f64) / 100000000.0 * 0.9 + delta_g
+        MOM[delta_idx as usize] = (delta_m * 100000000.0) as i64
+        ws(delta_idx, wg(delta_idx) - lr * delta_m)
+
+        let step_delta_idx = step_delta_offset() + d
+        let step_delta_g = clip_f64((RAW_LAST_INPUT_STEP[d as usize] - RAW_FIRST_INPUT_STEP[d as usize]) * grad, 0.0 - 0.5, 0.5)
+        let step_delta_m = (MOM[step_delta_idx as usize] as f64) / 100000000.0 * 0.9 + step_delta_g
+        MOM[step_delta_idx as usize] = (step_delta_m * 100000000.0) as i64
+        ws(step_delta_idx, wg(step_delta_idx) - lr * 0.25 * step_delta_m)
+        d = d + 1
+    }
+    var flat_i: i64 = 0
+    while flat_i < MANIFEST_FEATURE_COUNT {
+        let flat_idx = input_flat_offset() + flat_i
+        let flat_g = LAST_INPUT_FLAT[flat_i as usize] * grad
+        let flat_m = (MOM[flat_idx as usize] as f64) / 100000000.0 * 0.9 + flat_g
+        MOM[flat_idx as usize] = (flat_m * 100000000.0) as i64
+        ws(flat_idx, wg(flat_idx) - lr * flat_m)
+        flat_i = flat_i + 1
+    }
+    if proj_mode == 1 {
+        let lr_proj = lr * cfg_proj_lr_scale(is_oct)
+        d = 0
+        while d < 8 {
+            var state_signal = 0.5 * hg(d) * wg(d) + 0.5 * hg(8 + d) * wg(8 + d)
+            var proj_signal = grad * (0.35 * wg(input_mean_offset() + d) + 0.20 * wg(input_delta_offset() + d) + 0.10 * wg(step_delta_offset() + d) + 0.35 * state_signal)
+            proj_signal = clip_f64(proj_signal, 0.0 - 0.5, 0.5)
+            let bm = (PROJ_B_MOM[d as usize] as f64) / 100000000.0 * 0.9 + proj_signal
+            PROJ_B_MOM[d as usize] = (bm * 100000000.0) as i64
+            proj_bs(d, proj_bg(d) - lr_proj * bm)
+            var in_dim: i64 = 0
+            while in_dim < 8 {
+                let pidx = proj_idx(d, in_dim)
+                let pg = ENC_INPUT_MEAN[in_dim as usize] * proj_signal
+                let pm = (PROJ_W_MOM[pidx as usize] as f64) / 100000000.0 * 0.9 + pg
+                PROJ_W_MOM[pidx as usize] = (pm * 100000000.0) as i64
+                proj_ws(d, in_dim, proj_wg(d, in_dim) - lr_proj * pm)
+                in_dim = in_dim + 1
+            }
+            d = d + 1
+        }
+    } else if proj_mode == 3 || proj_mode == 4 {
+        let lr_proj = lr * cfg_proj_lr_scale(is_oct)
+        d = 0
+        while d < 8 {
+            var proj_signal = grad * (0.40 * wg(input_mean_offset() + d) + 0.25 * wg(input_delta_offset() + d) + 0.20 * wg(step_delta_offset() + d))
+            proj_signal = proj_signal + assoc_reg * 0.15 * assoc_g(d / 4)
+            proj_signal = trust_region_clip(proj_signal, 0.35)
+            let bm = (PROJ_B_MOM[d as usize] as f64) / 100000000.0 * 0.9 + proj_signal
+            PROJ_B_MOM[d as usize] = (bm * 100000000.0) as i64
+            proj_bs(d, proj_bg(d) - lr_proj * 0.35 * bm)
+            let diag_idx = proj_idx(d, d)
+            let diag_grad = trust_region_clip((ENC_LAST_INPUT_STEP[d as usize] - ENC_FIRST_INPUT_STEP[d as usize]) * proj_signal, 0.25)
+            let diag_m = (PROJ_W_MOM[diag_idx as usize] as f64) / 100000000.0 * 0.9 + diag_grad
+            PROJ_W_MOM[diag_idx as usize] = (diag_m * 100000000.0) as i64
+            proj_ws(d, d, proj_wg(d, d) - lr_proj * 0.30 * diag_m)
+            if proj_mode == 4 {
+                var in_dim: i64 = 0
+                while in_dim < 8 {
+                    if in_dim != d {
+                        let pidx = proj_idx(d, in_dim)
+                        let pg = trust_region_clip(ENC_INPUT_MEAN[in_dim as usize] * proj_signal * 0.20, 0.12)
+                        let pm = (PROJ_W_MOM[pidx as usize] as f64) / 100000000.0 * 0.9 + pg
+                        PROJ_W_MOM[pidx as usize] = (pm * 100000000.0) as i64
+                        proj_ws(d, in_dim, proj_wg(d, in_dim) - lr_proj * 0.12 * pm)
+                    }
+                    in_dim = in_dim + 1
+                }
+            }
+            d = d + 1
+        }
+    }
+    d = 0
+    while d < 8 {
+        var scale_g = RAW_INPUT_MEAN[d as usize] * wg(input_mean_offset() + d)
+        scale_g = scale_g + (RAW_LAST_INPUT_STEP[d as usize] - RAW_FIRST_INPUT_STEP[d as usize]) * wg(input_delta_offset() + d)
+        scale_g = scale_g + (RAW_LAST_INPUT_STEP[d as usize] - RAW_FIRST_INPUT_STEP[d as usize]) * wg(step_delta_offset() + d)
+        if proj_mode == 1 {
+            var proj_back = 0.0
+            var out_dim: i64 = 0
+            while out_dim < 8 {
+                proj_back = proj_back + proj_wg(out_dim, d) * proj_bg(out_dim)
+                out_dim = out_dim + 1
+            }
+            scale_g = scale_g + 0.2 * ENC_INPUT_MEAN[d as usize] * proj_back
+        }
+        var step: i64 = 0
+        while step < MANIFEST_SEQ_LEN {
+            let flat_idx = step * 8 + d
+            scale_g = scale_g + RAW_INPUT_FLAT[flat_idx as usize] * wg(input_flat_offset() + flat_idx)
+            step = step + 1
+        }
+        scale_g = clip_f64(scale_g * grad, 0.0 - 0.5, 0.5)
+        let scale_idx = encoder_scale_offset() + d
+        let scale_m = (MOM[scale_idx as usize] as f64) / 100000000.0 * 0.9 + scale_g
+        MOM[scale_idx as usize] = (scale_m * 100000000.0) as i64
+        ws(scale_idx, wg(scale_idx) - lr * 0.35 * scale_m)
+
+        var bias_g = wg(input_mean_offset() + d)
+        bias_g = bias_g + wg(step_delta_offset() + d)
+        step = 0
+        while step < MANIFEST_SEQ_LEN {
+            let flat_idx = step * 8 + d
+            bias_g = bias_g + wg(input_flat_offset() + flat_idx)
+            step = step + 1
+        }
+        bias_g = clip_f64(bias_g * grad, 0.0 - 0.5, 0.5)
+        let bias_idx = encoder_bias_offset() + d
+        let bias_m = (MOM[bias_idx as usize] as f64) / 100000000.0 * 0.9 + bias_g
+        MOM[bias_idx as usize] = (bias_m * 100000000.0) as i64
+        ws(bias_idx, wg(bias_idx) - lr * 0.35 * bias_m)
+        d = d + 1
+    }
+    let bg = grad
+    let bm = (MOM[bias_offset() as usize] as f64) / 100000000.0 * 0.9 + bg
+    MOM[bias_offset() as usize] = (bm * 100000000.0) as i64
+    ws(bias_offset(), wg(bias_offset()) - lr * bm)
+    if allow_core == 1 {
+        let lr_core = lr * cfg_core_lr_scale(is_oct)
+        head = 0
+        while head < head_count() {
+            let base = head_base(head)
+            let assoc_w = wg(assoc_offset() + head)
+            var assoc_err = assoc_g(head) - assoc_target
+            assoc_err = clip_f64(assoc_err, 0.0 - 2.0, 2.0)
+            let prev_assoc = (PREV_ASSOC_ACC[head as usize] as f64) / 100000000.0
+            let assoc_drift = clip_f64(assoc_g(head) - prev_assoc, 0.0 - 2.0, 2.0)
+            d = 0
+            while d < head_width() {
+                let idx = base + d
+                let state_value = hg(idx)
+                let input_mean = LAST_INPUT_MEAN[d as usize]
+                let act_scale = clip_f64(1.0 - abs_f64(state_value) / 5.0, 0.05, 1.0)
+                var core_grad = grad * input_mean * ((0.85 * wg(idx) * act_scale) + (0.15 * assoc_w))
+                core_grad = core_grad + assoc_reg * assoc_err * input_mean * 0.35
+                if is_oct == 1 && cfg_oct_train_mode() >= 3 {
+                    core_grad = core_grad + assoc_drift_reg * assoc_drift * (0.25 + 0.10 * abs_f64(input_mean))
+                    core_grad = core_grad + 0.08 * grad * TMP_DELTA[d as usize]
+                    core_grad = trust_region_clip(core_grad, cfg_head_trust_region())
+                } else {
+                    core_grad = clip_f64(core_grad, 0.0 - 0.25, 0.25)
+                }
+                let core_m = (A_MOM[idx as usize] as f64) / 100000000.0 * 0.9 + core_grad
+                A_MOM[idx as usize] = (core_m * 100000000.0) as i64
+                A[idx as usize] = clip_f64(A[idx as usize] - lr_core * core_m, 0.0 - 2.5, 2.5)
+                d = d + 1
+            }
+            if is_oct == 0 || cfg_head_renorm() != 0 {
+                normalize_head(base, is_oct)
+            }
+            head = head + 1
+        }
+    }
+    head = 0
+    while head < head_count() {
+        PREV_ASSOC_ACC[head as usize] = ASSOC_ACC[head as usize]
+        head = head + 1
+    }
+}
+
+fn mean20(xs: [f64; 20]) -> f64 with Mut, Div {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 20 {
+        s = s + xs[i as usize]
+        i = i + 1
+    }
+    s / 20.0
+}
+
+fn std20(xs: [f64; 20], mean: f64) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 20 {
+        let d = xs[i as usize] - mean
+        s = s + d * d
+        i = i + 1
+    }
+    sqrt_q(s / 20.0)
+}
+
+fn run_fold(is_oct: i64, s1: i64, s2: i64, holdout_key: i64) -> f64 with IO, Mut, Div, Panic {
+    let train_epochs = cfg_train_epochs(is_oct)
+    let train_lr = cfg_train_lr(is_oct)
+    let warmup_epochs = cfg_warmup_epochs(is_oct)
+    let train_count = build_train_mask(holdout_key, s1, s2)
+    prepare_train_standardization()
+    prepare_dropout_mask(holdout_key, s1, s2)
+    FOLD_NOISE_KEY = s1 * 97 + s2 * 193 + holdout_key * 17 + 4049
+    var subj: i64 = 0
+    rng_seed(s1 + holdout_key, s2 + holdout_key * 17)
+    init_model(is_oct)
+    TRAIN_EPOCH_TOTAL = train_epochs
+    var ep: i64 = 0
+    while ep < train_epochs {
+        TRAIN_EPOCH_CURSOR = ep
+        let allow_core = if ep >= warmup_epochs { 1 } else { 0 }
+        var seen: i64 = 0
+        while seen < train_count {
+            let subj = (rng_next() / 100) % SUBJECT_COUNT
+            if SITE_KEYS[subj as usize] != holdout_key && TRAIN_MASK[subj as usize] == 1 {
+                forward_subject(subj, is_oct)
+                update_binary(LABELS[subj as usize], train_lr, is_oct, allow_core)
+            }
+            seen = seen + 1
+        }
+        ep = ep + 1
+    }
+
+    var tp: i64 = 0
+    var tn: i64 = 0
+    var fp: i64 = 0
+    var fnn: i64 = 0
+    var test_n: i64 = 0
+    var assoc_sum = 0.0
+    var pos_n: i64 = 0
+    var neg_n: i64 = 0
+    subj = 0
+    while subj < SUBJECT_COUNT {
+        if SITE_KEYS[subj as usize] == holdout_key {
+            forward_subject(subj, is_oct)
+            let prob = sigmoid_q(LOGIT)
+            var assoc_value = assoc_mean_all()
+            if assoc_value != assoc_value { assoc_value = 0.0 }
+            assoc_sum = assoc_sum + assoc_value
+            let pred = if prob >= 0.5 { 1 } else { 0 }
+            let label = LABELS[subj as usize]
+            print("PRED\t")
+            if is_oct == 1 { print("O-SSM") } else { print("H-SSM") }
+            print("\t")
+            print_int(s1)
+            print("\t")
+            print(site_name_for_key(holdout_key))
+            print("\t")
+            print_int(label)
+            print("\t")
+            print(prob)
+            print("\t")
+            print_int(pred)
+            print("\t")
+            print(assoc_value)
+            print("\n")
+            if pred == 1 && label == 1 { tp = tp + 1 }
+            if pred == 0 && label == 0 { tn = tn + 1 }
+            if pred == 1 && label == 0 { fp = fp + 1 }
+            if pred == 0 && label == 1 { fnn = fnn + 1 }
+            if label == 1 { pos_n = pos_n + 1 } else { neg_n = neg_n + 1 }
+            test_n = test_n + 1
+        }
+        subj = subj + 1
+    }
+
+    LAST_TEST_N = test_n
+    if pos_n == 0 || neg_n == 0 || test_n == 0 {
+        LAST_EVAL_OK = 0
+        LAST_ACC_BP = 0
+        LAST_BAL_BP = 0
+        LAST_ASSOC_BP = 0
+        return 0.0
+    }
+
+    let tpr = if tp + fnn > 0 { (tp as f64) / ((tp + fnn) as f64) } else { 0.0 }
+    let tnr = if tn + fp > 0 { (tn as f64) / ((tn + fp) as f64) } else { 0.0 }
+    let bal = 50.0 * (tpr + tnr)
+    let acc = if test_n > 0 { 100.0 * ((tp + tn) as f64) / (test_n as f64) } else { 0.0 }
+    var assoc_mean = if test_n > 0 { assoc_sum / (test_n as f64) } else { 0.0 }
+    if assoc_mean != assoc_mean { assoc_mean = 0.0 }
+    LAST_EVAL_OK = 1
+    LAST_ACC_BP = (acc * 1000000.0) as i64
+    LAST_BAL_BP = (bal * 1000000.0) as i64
+    LAST_ASSOC_BP = (assoc_mean * 1000000.0) as i64
+    bal
+}
+
+fn run_one(is_oct: i64, s1: i64, s2: i64) -> f64 with IO, Mut, Div, Panic {
+    var bal_sum = 0.0
+    var acc_weight_sum = 0.0
+    var assoc_sum = 0.0
+    var eval_sites: i64 = 0
+    var total_test_n: i64 = 0
+    var reset_i: i64 = 0
+    while reset_i < 64 {
+        LAST_SITE_BAL_BP[reset_i as usize] = 0
+        LAST_SITE_ACC_BP[reset_i as usize] = 0
+        LAST_SITE_ASSOC_BP[reset_i as usize] = 0
+        LAST_SITE_TEST_N[reset_i as usize] = 0
+        LAST_SITE_VALID[reset_i as usize] = 0
+        reset_i = reset_i + 1
+    }
+    var site_i: i64 = 0
+    while site_i < UNIQUE_SITE_COUNT {
+        let bal = run_fold(is_oct, s1, s2, UNIQUE_SITES[site_i as usize])
+        if LAST_EVAL_OK == 1 {
+            bal_sum = bal_sum + bal
+            acc_weight_sum = acc_weight_sum + ((LAST_ACC_BP as f64) / 1000000.0) * (LAST_TEST_N as f64)
+            assoc_sum = assoc_sum + ((LAST_ASSOC_BP as f64) / 1000000.0)
+            total_test_n = total_test_n + LAST_TEST_N
+            eval_sites = eval_sites + 1
+            LAST_SITE_BAL_BP[site_i as usize] = LAST_BAL_BP
+            LAST_SITE_ACC_BP[site_i as usize] = LAST_ACC_BP
+            LAST_SITE_ASSOC_BP[site_i as usize] = LAST_ASSOC_BP
+            LAST_SITE_TEST_N[site_i as usize] = LAST_TEST_N
+            LAST_SITE_VALID[site_i as usize] = 1
+        }
+        site_i = site_i + 1
+    }
+
+    let bal = if eval_sites > 0 { bal_sum / (eval_sites as f64) } else { 0.0 }
+    let acc = if total_test_n > 0 { acc_weight_sum / (total_test_n as f64) } else { 0.0 }
+    let assoc_mean = if eval_sites > 0 { assoc_sum / (eval_sites as f64) } else { 0.0 }
+
+    if is_oct == 1 { print("  O-SSM    ") } else { print("  H-SSM    ") }
+    print_int(s1)
+    print("   acc="); print(acc)
+    print("% bal="); print(bal)
+    print("% sites="); print_int(eval_sites)
+    print("/"); print_int(UNIQUE_SITE_COUNT)
+    print(" test_n="); print_int(total_test_n)
+    print(" assoc="); print(assoc_mean)
+    print("\n")
+    bal
+}
+
+fn accumulate_last_sites(is_oct: i64) with Mut {
+    var site_i: i64 = 0
+    while site_i < UNIQUE_SITE_COUNT {
+        if LAST_SITE_VALID[site_i as usize] == 1 {
+            if is_oct == 1 {
+                O_SITE_BAL_SUM_BP[site_i as usize] = O_SITE_BAL_SUM_BP[site_i as usize] + LAST_SITE_BAL_BP[site_i as usize]
+                O_SITE_ASSOC_SUM_BP[site_i as usize] = O_SITE_ASSOC_SUM_BP[site_i as usize] + LAST_SITE_ASSOC_BP[site_i as usize]
+                O_SITE_VALID_CT[site_i as usize] = O_SITE_VALID_CT[site_i as usize] + 1
+                O_SITE_TEST_N_SUM[site_i as usize] = O_SITE_TEST_N_SUM[site_i as usize] + LAST_SITE_TEST_N[site_i as usize]
+            } else {
+                H_SITE_BAL_SUM_BP[site_i as usize] = H_SITE_BAL_SUM_BP[site_i as usize] + LAST_SITE_BAL_BP[site_i as usize]
+                H_SITE_ASSOC_SUM_BP[site_i as usize] = H_SITE_ASSOC_SUM_BP[site_i as usize] + LAST_SITE_ASSOC_BP[site_i as usize]
+                H_SITE_VALID_CT[site_i as usize] = H_SITE_VALID_CT[site_i as usize] + 1
+                H_SITE_TEST_N_SUM[site_i as usize] = H_SITE_TEST_N_SUM[site_i as usize] + LAST_SITE_TEST_N[site_i as usize]
+            }
+        }
+        site_i = site_i + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let local_config_path = "abide_run_config.tsv"
+    let local_manifest_path = "abide_roi_manifest.tsv"
+    let manifest_path = "/orangefs/training/sounio/abide-data/abide_roi_manifest.tsv"
+    let fallback_path = "/orangefs/data/abide/abide_roi_manifest.tsv"
+    let config_loaded = load_run_config(local_config_path)
+    var loaded = load_manifest(local_manifest_path)
+    var used_local: i64 = 0
+    var used_fallback: i64 = 0
+    if loaded > 0 {
+        used_local = 1
+    } else {
+        loaded = load_manifest(manifest_path)
+    }
+    if loaded <= 0 {
+        loaded = load_manifest(fallback_path)
+        if loaded > 0 { used_fallback = 1 }
+    }
+    if loaded <= 0 {
+        print("ABIDE manifest missing or unreadable: ")
+        print(local_manifest_path)
+        print(" (shared: ")
+        print(manifest_path)
+        print(" (fallback: ")
+        print(fallback_path)
+        print("))\n")
+        return 2
+    }
+    if SUBJECT_COUNT < 20 {
+        print("ABIDE manifest too small for benchmark: n=")
+        print_int(SUBJECT_COUNT)
+        print("\n")
+        return 3
+    }
+
+    discover_sites()
+    if UNIQUE_SITE_COUNT < 2 {
+        print("ABIDE manifest has too few sites for grouped CV: n_sites=")
+        print_int(UNIQUE_SITE_COUNT)
+        print("\n")
+        return 4
+    }
+
+    var asd_n: i64 = 0
+    var ctrl_n: i64 = 0
+    var subj: i64 = 0
+    while subj < SUBJECT_COUNT {
+        if LABELS[subj as usize] == 1 { asd_n = asd_n + 1 } else { ctrl_n = ctrl_n + 1 }
+        subj = subj + 1
+    }
+
+    println("═══════════════════════════════════════════════════════════════")
+    println("  Brain O-SSM ABIDE Cross-Site CV")
+    println("═══════════════════════════════════════════════════════════════")
+    print("  Manifest: ")
+    if used_local == 1 {
+        println(local_manifest_path)
+    } else {
+        if used_fallback == 1 { println(fallback_path) } else { println(manifest_path) }
+    }
+    print("  Subjects: "); print_int(SUBJECT_COUNT)
+    print("  (ASD="); print_int(asd_n); print(" Control="); print_int(ctrl_n); print(")\n")
+    print("  Sites: "); print_int(UNIQUE_SITE_COUNT); print(" grouped holdouts\n")
+    print("  Temporal shape: "); print_int(MANIFEST_SEQ_LEN); print(" x "); print_int(MANIFEST_INPUT_DIM); print("\n")
+    println("  Split: leave-one-site-out cross-validation")
+    if config_loaded == 1 {
+        print("  Run config: train_fraction="); print(bp_to_f64(CFG_TRAIN_FRACTION_BP))
+        print(" drop_channel_frac="); print(bp_to_f64(CFG_DROP_CHANNEL_FRAC_BP))
+        print(" noise_std="); print(bp_to_f64(CFG_NOISE_STD_BP))
+        print(" global_train_epochs="); print_int(CFG_GLOBAL_TRAIN_EPOCHS)
+        print(" global_train_lr="); print(bp_to_f64(CFG_GLOBAL_TRAIN_LR_BP))
+        print(" global_core_lr_scale="); print(bp_to_f64(CFG_GLOBAL_CORE_LR_SCALE_BP))
+        print("\n")
+        print("              oct_train_epochs="); print_int(CFG_OCT_TRAIN_EPOCHS)
+        print(" oct_train_lr="); print(bp_to_f64(CFG_OCT_TRAIN_LR_BP))
+        print(" oct_core_lr_scale="); print(bp_to_f64(CFG_OCT_CORE_LR_SCALE_BP))
+        print(" oct_warmup_epochs="); print_int(CFG_OCT_WARMUP_EPOCHS)
+        print(" oct_profile="); print(oct_profile_name(cfg_oct_profile_id()))
+        print(" oct_train_mode="); print(oct_train_mode_name(CFG_OCT_TRAIN_MODE))
+        print(" oct_init_preset="); print_int(CFG_OCT_INIT_PRESET)
+        print(" oct_assoc_reg="); print((CFG_OCT_ASSOC_REG_BP as f64) / 1000000.0)
+        print(" oct_assoc_target="); print((CFG_OCT_ASSOC_TARGET_BP as f64) / 1000000.0)
+        print(" oct_assoc_schedule="); print(assoc_schedule_mode_name(CFG_OCT_ASSOC_SCHEDULE_MODE))
+        print(" oct_assoc_schedule_start="); print(bp_to_f64(CFG_OCT_ASSOC_SCHEDULE_START_BP))
+        print(" oct_assoc_schedule_mid="); print(bp_to_f64(CFG_OCT_ASSOC_SCHEDULE_MID_BP))
+        print(" oct_assoc_schedule_end="); print(bp_to_f64(CFG_OCT_ASSOC_SCHEDULE_END_BP))
+        print(" oct_assoc_drift_reg="); print(bp_to_f64(CFG_OCT_ASSOC_DRIFT_REG_BP))
+        print(" oct_head_trust_region="); print(bp_to_f64(CFG_OCT_HEAD_TRUST_REGION_BP))
+        print(" oct_head_renorm="); print_int(CFG_OCT_HEAD_RENORM)
+        print(" oct_input_proj="); print(proj_mode_name(CFG_OCT_INPUT_PROJ_MODE))
+        print(" oct_proj_lr_scale="); print(bp_to_f64(CFG_OCT_PROJ_LR_SCALE_BP))
+        print(" oct_proj_structured_scale="); print(bp_to_f64(CFG_OCT_PROJ_STRUCTURED_SCALE_BP))
+        print(" oct_proj_delta_scale="); print(bp_to_f64(CFG_OCT_PROJ_DELTA_SCALE_BP))
+        print(" oct_proj_hybrid_scale="); print(bp_to_f64(CFG_OCT_PROJ_HYBRID_SCALE_BP))
+        print("\n")
+        print("              h_train_epochs="); print_int(CFG_H_TRAIN_EPOCHS)
+        print(" h_train_lr="); print(bp_to_f64(CFG_H_TRAIN_LR_BP))
+        print(" h_core_lr_scale="); print(bp_to_f64(CFG_H_CORE_LR_SCALE_BP))
+        print(" h_warmup_epochs="); print_int(CFG_H_WARMUP_EPOCHS)
+        print(" h_init_preset="); print_int(CFG_H_INIT_PRESET)
+        print(" h_input_proj="); print(proj_mode_name(CFG_H_INPUT_PROJ_MODE))
+        print(" h_proj_lr_scale="); print(bp_to_f64(CFG_H_PROJ_LR_SCALE_BP)); print("\n")
+    } else {
+        println("  Run config: default (full-data, no channel drop, no noise)")
+    }
+    print("\n")
+    println("  Model    Seed    Accuracy summary")
+    println("  ───────  ──────  ───────────────────────────────────────────")
+
+    println("  Seed schedule: 20 fixed seeds")
+    var seeds_a: [i64; 20] = [55555,11111,99887,22222,44444,66666,77777,88888,33333,12321,24680,13579,54321,67890,11223,44567,77889,99001,31415,27182]
+    var seeds_b: [i64; 20] = [77777,33333,44556,55555,66666,88888,11111,22222,99999,45654,86420,97531,12345,98765,33211,76544,98877,10099,92653,58979]
+    var o_bal: [f64; 20] = [0.0; 20]
+    var h_bal: [f64; 20] = [0.0; 20]
+
+    var i: i64 = 0
+    while i < 20 {
+        o_bal[i as usize] = run_one(1, seeds_a[i as usize], seeds_b[i as usize])
+        accumulate_last_sites(1)
+        i = i + 1
+    }
+    i = 0
+    while i < 20 {
+        h_bal[i as usize] = run_one(0, seeds_a[i as usize], seeds_b[i as usize])
+        accumulate_last_sites(0)
+        i = i + 1
+    }
+
+    let o_mean = mean20(o_bal)
+    let h_mean = mean20(h_bal)
+    let o_std = std20(o_bal, o_mean)
+    let h_std = std20(h_bal, h_mean)
+
+    print("\n  O-SSM balanced accuracy: "); print(o_mean); print(" ± "); print(o_std); print("\n")
+    print("  H-SSM balanced accuracy: "); print(h_mean); print(" ± "); print(h_std); print("\n")
+    print("  Gap (O-H): "); print(o_mean - h_mean); print(" pp\n")
+    println("")
+    println("  Per-site holdout summary")
+    println("  ─────────────────────────────────────────────────────────────────────────────")
+    println("  Site                             N    O-bal    H-bal    Gap      O-assoc")
+    var site_i: i64 = 0
+    while site_i < UNIQUE_SITE_COUNT {
+        let o_valid = O_SITE_VALID_CT[site_i as usize]
+        let h_valid = H_SITE_VALID_CT[site_i as usize]
+        let o_bal_site = if o_valid > 0 { (O_SITE_BAL_SUM_BP[site_i as usize] as f64) / ((o_valid as f64) * 1000000.0) } else { 0.0 }
+        let h_bal_site = if h_valid > 0 { (H_SITE_BAL_SUM_BP[site_i as usize] as f64) / ((h_valid as f64) * 1000000.0) } else { 0.0 }
+        let o_assoc_site = if o_valid > 0 { (O_SITE_ASSOC_SUM_BP[site_i as usize] as f64) / ((o_valid as f64) * 1000000.0) } else { 0.0 }
+        let site_n = if o_valid > 0 {
+            O_SITE_TEST_N_SUM[site_i as usize] / o_valid
+        } else if h_valid > 0 {
+            H_SITE_TEST_N_SUM[site_i as usize] / h_valid
+        } else {
+            0
+        }
+        print("  ")
+        print(site_name_for_key(UNIQUE_SITES[site_i as usize]))
+        print("  ")
+        print_int(site_n)
+        print("  ")
+        print(o_bal_site)
+        print("  ")
+        print(h_bal_site)
+        print("  ")
+        print(o_bal_site - h_bal_site)
+        print("  ")
+        print(o_assoc_site)
+        print("\n")
+        site_i = site_i + 1
+    }
+    println("DONE")
+    0
+}

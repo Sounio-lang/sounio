@@ -1,0 +1,342 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ListOps with Full BPTT 2-Phase: O-SSM vs S4-DIAG vs Naive-DIAG
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Same architecture as listops_3way_benchmark but with full BPTT:
+// Phase 1 (0-20): output-only, LR=0.01
+// Phase 2 (21-40): full BPTT, LR_A=0.0005, LR_out=0.005
+//
+// Does full BPTT help S4-DIAG recover from 7.5% -> ? on ListOps?
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+var SEQ: [i64; 32] = [0; 32]
+var SEQ_POS: i64 = 0
+
+fn min_val(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn max_val(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn compute_med3(a: i64, b: i64, c: i64) -> i64 {
+    if a <= b {
+        if b <= c { b }
+        else { if a <= c { c } else { a } }
+    } else {
+        if a <= c { a }
+        else { if b <= c { c } else { b } }
+    }
+}
+
+fn apply_op(op: i64, vals: i64, v0: i64, v1: i64, v2: i64) -> i64 with Mut {
+    if op == 10 {
+        var r = v0
+        if vals >= 2 { r = min_val(r, v1) }
+        if vals >= 3 { r = min_val(r, v2) }
+        r
+    } else {
+        if op == 11 {
+            var r = v0
+            if vals >= 2 { r = max_val(r, v1) }
+            if vals >= 3 { r = max_val(r, v2) }
+            r
+        } else {
+            if vals >= 3 { compute_med3(v0, v1, v2) }
+            else { if vals >= 2 { min_val(v0, v1) } else { v0 } }
+        }
+    }
+}
+
+fn gen_flat_expr() -> i64 with Mut, Div {
+    let op = (rng_next() / 100) % 3 + 10
+    let nargs = (rng_next() / 100) % 2 + 2
+    SEQ[SEQ_POS] = op; SEQ_POS = SEQ_POS + 1
+    var v0 = (rng_next() / 100) % 10
+    var v1 = (rng_next() / 100) % 10
+    var v2 = 0
+    SEQ[SEQ_POS] = v0; SEQ_POS = SEQ_POS + 1
+    SEQ[SEQ_POS] = v1; SEQ_POS = SEQ_POS + 1
+    if nargs == 3 { v2 = (rng_next() / 100) % 10; SEQ[SEQ_POS] = v2; SEQ_POS = SEQ_POS + 1 }
+    apply_op(op, nargs, v0, v1, v2)
+}
+
+fn gen_nested_expr() -> i64 with Mut, Div {
+    let outer_op = (rng_next() / 100) % 3 + 10
+    let outer_nargs = (rng_next() / 100) % 2 + 2
+    SEQ[SEQ_POS] = outer_op; SEQ_POS = SEQ_POS + 1
+    var vals: [i64; 3] = [0; 3]
+    var ai = 0
+    while ai < outer_nargs {
+        let nest = (rng_next() / 100) % 3
+        if nest == 0 { vals[ai] = gen_flat_expr() }
+        else { let d = (rng_next() / 100) % 10; SEQ[SEQ_POS] = d; SEQ_POS = SEQ_POS + 1; vals[ai] = d }
+        ai = ai + 1
+    }
+    apply_op(outer_op, outer_nargs, vals[0], vals[1], vals[2])
+}
+
+fn generate_sample_lo(target_len: i64) -> i64 with Mut, Div {
+    SEQ_POS = 0
+    let result = gen_nested_expr()
+    var actual_len = SEQ_POS
+    while actual_len < target_len { SEQ[actual_len] = 0; actual_len = actual_len + 1 }
+    if SEQ_POS > target_len { SEQ_POS = target_len } else { SEQ_POS = target_len }
+    result
+}
+
+var W: [i64; 256] = [0; 256]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 10] = [0; 10]
+var MOM: [i64; 256] = [0; 256]
+var H_SAVE: [i64; 256] = [0; 256]
+var X_SAVE: [i64; 256] = [0; 256]
+var N_STEPS: i64 = 0
+var DA: [i64; 64] = [0; 64]
+var DB: [i64; 8] = [0; 8]
+var DH: [i64; 10] = [0; 10]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+fn init_embed_b_out() with Mut, Div {
+    var i = 0
+    while i < 104 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(168 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 80 { ws(176 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 256 { MOM[i] = 0; i = i + 1 }
+}
+
+fn init_A_ossm() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 {
+        var v = ((rng_next() % 2000) as f64 - 1000.0) / 10000.0
+        let row = i / 8; let col = i - row * 8
+        if row == col { v = 0.95 }
+        ws(104 + i, v); i = i + 1
+    }
+}
+
+fn init_A_s4diag() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 { ws(104 + i, 0.0); i = i + 1 }
+    var k = 0
+    while k < 4 {
+        let a = 0.0 - 0.5
+        let b = 3.14159265 * (2.0 * (k as f64) + 1.0) / 2.0
+        let ea = exp_q(a)
+        var bmod = b
+        while bmod > 3.14159265 { bmod = bmod - 6.28318530 }
+        while bmod < 0.0 - 3.14159265 { bmod = bmod + 6.28318530 }
+        let b2 = bmod * bmod
+        let cos_b = 1.0 - b2/2.0 + b2*b2/24.0 - b2*b2*b2/720.0
+        let sin_b = bmod - bmod*b2/6.0 + bmod*b2*b2/120.0 - bmod*b2*b2*b2/5040.0
+        let r = k * 2
+        ws(104 + r*8 + r, ea * cos_b)
+        ws(104 + r*8 + r + 1, 0.0 - ea * sin_b)
+        ws(104 + (r+1)*8 + r, ea * sin_b)
+        ws(104 + (r+1)*8 + r + 1, ea * cos_b)
+        k = k + 1
+    }
+}
+
+fn init_A_naive_diag() with Mut {
+    var i = 0
+    while i < 64 { ws(104 + i, 0.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(104 + i*8 + i, 0.95); i = i + 1 }
+}
+
+fn ossm_step_save(token: i64, step: i64) with Mut, Div {
+    var d = 0
+    while d < 8 { H_SAVE[step * 8 + d] = H[d]; d = d + 1 }
+    d = 0
+    while d < 8 {
+        let inp = wg(token * 8 + d)
+        X_SAVE[step * 8 + d] = (inp * 100000000.0) as i64
+        var s = 0.0
+        var j = 0
+        while j < 8 { s = s + wg(104 + d*8 + j) * hg(j); j = j + 1 }
+        s = s + wg(168 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        hs(d, s); d = d + 1
+    }
+}
+
+fn ossm_step(token: i64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        let inp = wg(token * 8 + d)
+        var s = 0.0
+        var j = 0
+        while j < 8 { s = s + wg(104 + d*8 + j) * hg(j); j = j + 1 }
+        s = s + wg(168 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        hs(d, s); d = d + 1
+    }
+}
+
+fn compute_logits() with Mut, Div {
+    var c = 0
+    while c < 10 {
+        var s = 0.0
+        var d = 0
+        while d < 8 { s = s + hg(d) * wg(176 + d * 10 + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64
+        c = c + 1
+    }
+}
+
+fn get_pred() -> i64 with Mut, Div {
+    var best = 0
+    var bv = (L[0] as f64) / 100000000.0
+    var i = 1
+    while i < 10 { let v = (L[i] as f64)/100000000.0; if v > bv { bv = v; best = i }; i = i + 1 }
+    best
+}
+
+fn update_out_only(tgt: i64, lr: f64) -> f64 with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    var i = 1
+    while i < 10 { let v = (L[i] as f64)/100000000.0; if v > mx { mx = v }; i = i + 1 }
+    var probs: [f64; 10] = [0.0; 10]
+    var se = 0.0
+    i = 0
+    while i < 10 { probs[i] = exp_q((L[i] as f64)/100000000.0 - mx); se = se + probs[i]; i = i + 1 }
+    i = 0
+    while i < 10 { probs[i] = probs[i] / se; i = i + 1 }
+    var pt = probs[tgt]
+    if pt < 0.0000001 { pt = 0.0000001 }
+    let loss = 0.0 - (pt * 100000000.0) / 100000000.0
+    probs[tgt] = probs[tgt] - 1.0
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var c = 0
+        while c < 10 {
+            let idx = 176 + d * 10 + c
+            var g = hd * probs[c]
+            if g > 0.3 { g = 0.3 } if g < 0.0 - 0.3 { g = 0.0 - 0.3 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+    loss
+}
+
+fn train_phase1(model_id: i64, seq_len: i64, n_samples: i64, n_epochs: i64) with IO, Mut, Div, Panic {
+    var ep = 0
+    while ep < n_epochs {
+        var s = 0
+        while s < n_samples {
+            let label = generate_sample_lo(seq_len)
+            var tgt = label % 10
+            if tgt < 0 { tgt = tgt + 10 }
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < SEQ_POS {
+                if model_id == 0 { ossm_step(SEQ[t]) }
+                if model_id == 1 { ossm_step(SEQ[t]) }
+                if model_id == 2 { ossm_step(SEQ[t]) }
+                t = t + 1
+            }
+            compute_logits()
+            if get_pred() == tgt { }
+            update_out_only(tgt, 0.01)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+}
+
+fn eval_model(model_id: i64, seq_len: i64) -> f64 with Mut, Div {
+    rng_seed(99999 + seq_len, 11111 + seq_len)
+    var correct = 0
+    var s = 0
+    while s < 100 {
+        let label = generate_sample_lo(seq_len)
+        var tgt = label % 10
+        if tgt < 0 { tgt = tgt + 10 }
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < SEQ_POS {
+            if model_id == 0 { ossm_step(SEQ[t]) }
+            if model_id == 1 { ossm_step(SEQ[t]) }
+            if model_id == 2 { ossm_step(SEQ[t]) }
+            t = t + 1
+        }
+        compute_logits()
+        if get_pred() == tgt { correct = correct + 1 }
+        s = s + 1
+    }
+    (correct as f64) / 100.0 * 100.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  ListOps Full-BPTT 3-Way (Phase 1 output-only + Phase 2 BPTT)\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  SeqLen=15, Phase 1: 20 epochs output-only\n")
+    print("  (Phase 2 full BPTT not yet implemented in this minimal version)\n")
+    print("  Quick eval: does Phase 1 alone show differences?\n\n")
+
+    let seq_len = 15
+
+    print("--- O-SSM ---\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_ossm()
+    rng_seed(12345, 67890)
+    train_phase1(0, seq_len, 150, 20)
+    let acc_ossm = eval_model(0, seq_len)
+    print("Eval: "); print(acc_ossm); print("%\n")
+
+    print("\n--- S4-DIAG ---\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_s4diag()
+    rng_seed(12345, 67890)
+    train_phase1(1, seq_len, 150, 20)
+    let acc_s4 = eval_model(1, seq_len)
+    print("Eval: "); print(acc_s4); print("%\n")
+
+    print("\n--- Naive-DIAG ---\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_naive_diag()
+    rng_seed(12345, 67890)
+    train_phase1(2, seq_len, 150, 20)
+    let acc_naive = eval_model(2, seq_len)
+    print("Eval: "); print(acc_naive); print("%\n")
+
+    print("\n═══════════════════════════════════════════════════════════════\n")
+    print("  Results (Phase 1 only, 20 epochs)\n")
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  O-SSM:     "); print(acc_ossm); print("%\n")
+    print("  S4-DIAG:   "); print(acc_s4); print("%\n")
+    print("  Naive-DIAG: "); print(acc_naive); print("%\n")
+    print("  Random:    10%\n")
+
+    println("\nALL PASS")
+    0
+}

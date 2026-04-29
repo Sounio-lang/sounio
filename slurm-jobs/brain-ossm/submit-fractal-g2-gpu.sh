@@ -6,8 +6,10 @@ set -euo pipefail
 #   source ops/lab-ops.sh
 #   lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-fractal-g2-gpu.sh
 #
-# This wrapper stages the minimum self-hosted compiler payload into OrangeFS so
-# the Slurm worker never depends on /home/devsounio/sounio being mounted.
+# This wrapper intentionally avoids using OrangeFS as a payload transport.
+# It compiles benchmark ELFs locally, embeds a compressed ELF bundle into the
+# Slurm script, decodes it on worker-local /tmp, and only publishes final text
+# artifacts to OrangeFS.
 
 NS="${NS:-slurm-pilot}"
 SOUNIO_DIR="${SOUNIO_DIR:-/home/devsounio/sounio}"
@@ -16,12 +18,13 @@ LOGIN_TARGET="deploy/${LOGIN_DEPLOY_NAME}"
 RUN_ID="${RUN_ID:-brain-ossm-$(date -u +%Y%m%dT%H%M%SZ)}"
 STAGE_ROOT="/orangefs/training/sounio/brain-ossm-runs/${RUN_ID}"
 ORANGEFS_RESULTS_DIR="${ORANGEFS_RESULTS_DIR:-/orangefs/training/sounio/ossm-results}"
+PUBLISH_ORANGEFS="${PUBLISH_ORANGEFS:-0}"
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-}"
-LOCAL_SNAPSHOT_DIR="${LOCAL_SNAPSHOT_DIR:-/tmp/${RUN_ID}-snapshot}"
-LOCAL_TARBALL="${LOCAL_TARBALL:-/tmp/${RUN_ID}.tgz}"
-LOCAL_TARBALL_TMP="${LOCAL_TARBALL}.tmp"
-FORCE_RESTAGE="${FORCE_RESTAGE:-0}"
 SBATCH_FILE="/tmp/${RUN_ID}.sbatch"
+WORK_DIR="${WORK_DIR:-/tmp/${RUN_ID}-embedded}"
+PAYLOAD_TGZ="${WORK_DIR}/fractal-g2-elf-payload.tgz"
+PAYLOAD_B64="${WORK_DIR}/fractal-g2-elf-payload.b64"
+LOCAL_SBATCH="${WORK_DIR}/${RUN_ID}.sbatch"
 
 if [[ -n "${KUBECONFIG_PATH}" && -f "${KUBECONFIG_PATH}" ]]; then
   export KUBECONFIG="${KUBECONFIG_PATH}"
@@ -71,78 +74,30 @@ kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc '
   exit 1
 '
 
-echo "Staging benchmark payload to ${STAGE_ROOT}"
-kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "
-  set -euo pipefail
-  mkdir -p '${STAGE_ROOT}/repo' '${STAGE_ROOT}/results' '${STAGE_ROOT}/logs' '${ORANGEFS_RESULTS_DIR}'
-"
+rm -rf "${WORK_DIR}"
+mkdir -p "${WORK_DIR}/bin"
 
-REMOTE_STAGE_READY="$(
-  kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "
-    set -euo pipefail
-    if [[ '${FORCE_RESTAGE}' != '0' ]]; then
-      echo NO
-    elif [[ -x '${STAGE_ROOT}/repo/bin/souc' && -x '${STAGE_ROOT}/repo/artifacts/self-hosted/souc-self-hosted-x86_64' && -f '${STAGE_ROOT}/repo/examples/fractal_g2_ossm_v3.sio' ]]; then
-      echo YES
-    else
-      echo NO
-    fi
-  " | tr -d '[:space:]'
-)"
+echo "Compiling benchmark ELFs locally for embedded worker payload"
+TARGETS=(
+  "fractal_g2_ossm_v3.sio:fg2v3"
+  "brain_ossm_classifier.sio:brain_clf"
+  "hssm_native_algebra.sio:native_alg"
+  "multihead_unit_oct_benchmark.sio:mh_unit"
+  "associativity_probe_benchmark.sio:assoc_probe"
+)
 
-if [[ "${REMOTE_STAGE_READY}" == "YES" ]]; then
-  echo "Reusing remote staged repo at ${STAGE_ROOT}/repo"
-else
-  echo "Preparing fresh remote stage at ${STAGE_ROOT}/repo"
-fi
+for target in "${TARGETS[@]}"; do
+  src="${target%%:*}"
+  name="${target##*:}"
+  echo "  compiling ${src}"
+  "${SOUNIO_DIR}/bin/souc" compile "${SOUNIO_DIR}/examples/${src}" -o "${WORK_DIR}/bin/${name}.elf" >/dev/null
+done
 
-if [[ "${REMOTE_STAGE_READY}" != "YES" && ! -s "${LOCAL_TARBALL}" ]]; then
-  rm -rf "${LOCAL_SNAPSHOT_DIR}"
-  rm -f "${LOCAL_TARBALL}" "${LOCAL_TARBALL_TMP}"
-  mkdir -p \
-    "${LOCAL_SNAPSHOT_DIR}/bin" \
-    "${LOCAL_SNAPSHOT_DIR}/artifacts/self-hosted" \
-    "${LOCAL_SNAPSHOT_DIR}/examples"
-  rsync -a "${SOUNIO_DIR}/bin/souc" "${LOCAL_SNAPSHOT_DIR}/bin/"
-  rsync -a "${SOUNIO_DIR}/artifacts/self-hosted/souc-self-hosted-x86_64" "${LOCAL_SNAPSHOT_DIR}/artifacts/self-hosted/"
-  rsync -a "${SOUNIO_DIR}/stdlib/" "${LOCAL_SNAPSHOT_DIR}/stdlib/"
-  rsync -a "${SOUNIO_DIR}/examples/fractal_g2_ossm_v3.sio" "${LOCAL_SNAPSHOT_DIR}/examples/"
-  rsync -a "${SOUNIO_DIR}/examples/brain_ossm_classifier.sio" "${LOCAL_SNAPSHOT_DIR}/examples/"
-  rsync -a "${SOUNIO_DIR}/examples/hssm_native_algebra.sio" "${LOCAL_SNAPSHOT_DIR}/examples/"
-  rsync -a "${SOUNIO_DIR}/examples/multihead_unit_oct_benchmark.sio" "${LOCAL_SNAPSHOT_DIR}/examples/"
-  rsync -a "${SOUNIO_DIR}/examples/associativity_probe_benchmark.sio" "${LOCAL_SNAPSHOT_DIR}/examples/"
+tar -C "${WORK_DIR}" -czf "${PAYLOAD_TGZ}" bin
+tar -tzf "${PAYLOAD_TGZ}" >/dev/null
+base64 -w 76 "${PAYLOAD_TGZ}" > "${PAYLOAD_B64}"
 
-  tar -C "${LOCAL_SNAPSHOT_DIR}" -czf "${LOCAL_TARBALL_TMP}" \
-    bin/souc \
-    artifacts/self-hosted/souc-self-hosted-x86_64 \
-    stdlib \
-    examples/fractal_g2_ossm_v3.sio \
-    examples/brain_ossm_classifier.sio \
-    examples/hssm_native_algebra.sio \
-    examples/multihead_unit_oct_benchmark.sio \
-    examples/associativity_probe_benchmark.sio
-  tar -tzf "${LOCAL_TARBALL_TMP}" >/dev/null
-  mv -f "${LOCAL_TARBALL_TMP}" "${LOCAL_TARBALL}"
-else
-  echo "Reusing prebuilt payload tarball at ${LOCAL_TARBALL}"
-fi
-if [[ "${REMOTE_STAGE_READY}" != "YES" ]]; then
-  cat "${LOCAL_TARBALL}" | kubectl -n "${NS}" exec -i "${LOGIN_POD}" -- sh -lc "cat > '${STAGE_ROOT}/payload.tgz'"
-  kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "
-    set -euo pipefail
-    rm -rf '${STAGE_ROOT}/repo'
-    mkdir -p '${STAGE_ROOT}/repo'
-    tar -xzf '${STAGE_ROOT}/payload.tgz' -C '${STAGE_ROOT}/repo'
-    rm -f '${STAGE_ROOT}/payload.tgz'
-    chmod +x '${STAGE_ROOT}/repo/bin/souc' '${STAGE_ROOT}/repo/artifacts/self-hosted/souc-self-hosted-x86_64'
-    '${STAGE_ROOT}/repo/bin/souc' info >/dev/null
-  "
-fi
-
-SBATCH_OUTPUT="$(
-kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "
-  set -euo pipefail
-  cat >'${SBATCH_FILE}' <<'EOF'
+cat > "${LOCAL_SBATCH}" <<EOF
 #!/usr/bin/env bash
 #SBATCH -J fractal-g2-ossm
 #SBATCH -p gpu-orangefs
@@ -156,102 +111,109 @@ kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "
 #SBATCH --time=00:30:00
 set -euo pipefail
 
-RUN_ROOT='${STAGE_ROOT}'
-SOUNIO_DIR=\"\${RUN_ROOT}/repo\"
-SOUC=\"\${SOUNIO_DIR}/bin/souc\"
-BUILD_DIR=\"\$(mktemp -d /tmp/ossm-build.XXXXXX)\"
-RESULTS_DIR=\"\${RUN_ROOT}/results\"
+RUN_ROOT="/tmp/sounio-brain-ossm-runs/${RUN_ID}"
+ORANGEFS_RUN_ROOT='${STAGE_ROOT}'
+RESULTS_DIR="\${RUN_ROOT}/results"
 ORANGEFS_DIR='${ORANGEFS_RESULTS_DIR}'
-LOG_DIR=\"\${RUN_ROOT}/logs\"
+PUBLISH_ORANGEFS='${PUBLISH_ORANGEFS}'
+LOG_DIR="\${RUN_ROOT}/logs"
+BUILD_DIR="\$(mktemp -d /tmp/ossm-embedded.XXXXXX)"
 
 cleanup() {
-  rm -rf \"\${BUILD_DIR}\"
+  rm -rf "\${BUILD_DIR}"
 }
 trap cleanup EXIT
 
-copy_with_retry() {
-  local src=\"\$1\"
-  local dst=\"\$2\"
+publish_with_timeout() {
+  local src="\$1"
+  local dst="\$2"
   local attempt
-  local tmp_dst=\"\${dst}.tmp\"
-  for attempt in \$(seq 1 20); do
-    mkdir -p \"\$(dirname \"\$dst\")\" || true
-    rm -f \"\$dst\" \"\$tmp_dst\" || true
-    if cp -f \"\$src\" \"\$tmp_dst\" && [ -s \"\$tmp_dst\" ] && mv -f \"\$tmp_dst\" \"\$dst\" && [ -s \"\$dst\" ]; then
+  local tmp_dst="\${dst}.tmp"
+  for attempt in \$(seq 1 3); do
+    timeout 10s mkdir -p "\$(dirname "\$dst")" || true
+    timeout 5s rm -f "\$dst" "\$tmp_dst" || true
+    if timeout 20s cp -f "\$src" "\$tmp_dst" && [ -s "\$tmp_dst" ] && timeout 10s mv -f "\$tmp_dst" "\$dst"; then
       return 0
     fi
     sleep 1
   done
-  echo \"failed to copy \$src -> \$dst\" >&2
-  return 1
+  echo "WARN: publication skipped after timeout: \$src -> \$dst" >&2
+  return 0
 }
 
-mkdir -p \"\${RESULTS_DIR}\" \"\${ORANGEFS_DIR}\" \"\${LOG_DIR}\"
-exec > >(tee \"\${LOG_DIR}/job-\${SLURM_JOB_ID}.log\") 2>&1
+mkdir -p "\${RESULTS_DIR}" "\${LOG_DIR}"
+exec > >(tee "\${LOG_DIR}/job-\${SLURM_JOB_ID}.log") 2>&1
 
-echo '═══════════════════════════════════════════════════════════════'
-echo \"  Fractal-G2 O-SSM GPU Job — \$(date)\"
-echo \"  Host: \$(hostname), GPU: \${CUDA_VISIBLE_DEVICES:-none}\"
-echo \"  Run root: \${RUN_ROOT}\"
-echo '═══════════════════════════════════════════════════════════════'
+echo "Fractal-G2 O-SSM GPU Job"
+echo "date=\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "host=\$(hostname)"
+echo "cuda_visible_devices=\${CUDA_VISIBLE_DEVICES:-none}"
+echo "run_root=\${RUN_ROOT}"
+echo "orangefs_run_root=\${ORANGEFS_RUN_ROOT}"
 
-echo
-echo '[Phase 1] Compiling benchmarks...'
-TARGETS=(
-  'fractal_g2_ossm_v3.sio:fg2v3'
-  'brain_ossm_classifier.sio:brain_clf'
-  'hssm_native_algebra.sio:native_alg'
-  'multihead_unit_oct_benchmark.sio:mh_unit'
-  'associativity_probe_benchmark.sio:assoc_probe'
-)
-
-for target in \"\${TARGETS[@]}\"; do
-  src=\"\${target%%:*}\"
-  name=\"\${target##*:}\"
-  echo \"  Compiling \${src}...\"
-  \"\${SOUC}\" compile \"\${SOUNIO_DIR}/examples/\${src}\" -o \"\${BUILD_DIR}/\${name}.elf\" 2>&1 | tail -1
-done
-echo '  All targets compiled.'
-
-echo
-echo '[Phase 2] Running Fractal-G2 v3 (10-seed probe + ListOps)...'
-time \"\${BUILD_DIR}/fg2v3.elf\" > \"\${RESULTS_DIR}/fractal_g2_v3_results.txt\" 2>&1
-
-echo
-echo '[Phase 3] Running brain connectome classifier...'
-time \"\${BUILD_DIR}/brain_clf.elf\" > \"\${RESULTS_DIR}/brain_classifier_results.txt\" 2>&1
-
-echo
-echo '[Phase 4] Running supporting benchmarks...'
-time \"\${BUILD_DIR}/native_alg.elf\" > \"\${RESULTS_DIR}/native_algebra_results.txt\" 2>&1
-time \"\${BUILD_DIR}/mh_unit.elf\" > \"\${RESULTS_DIR}/multihead_unit_results.txt\" 2>&1
-time \"\${BUILD_DIR}/assoc_probe.elf\" > \"\${RESULTS_DIR}/assoc_probe_results.txt\" 2>&1
-
-echo
-echo '[Phase 5] Persisting results...'
-copy_with_retry \"\${RESULTS_DIR}/fractal_g2_v3_results.txt\" \"\${ORANGEFS_DIR}/fractal_g2_v3_results.txt\"
-copy_with_retry \"\${RESULTS_DIR}/brain_classifier_results.txt\" \"\${ORANGEFS_DIR}/brain_classifier_results.txt\"
-copy_with_retry \"\${RESULTS_DIR}/native_algebra_results.txt\" \"\${ORANGEFS_DIR}/native_algebra_results.txt\"
-copy_with_retry \"\${RESULTS_DIR}/multihead_unit_results.txt\" \"\${ORANGEFS_DIR}/multihead_unit_results.txt\"
-copy_with_retry \"\${RESULTS_DIR}/assoc_probe_results.txt\" \"\${ORANGEFS_DIR}/assoc_probe_results.txt\"
-copy_with_retry \"\${LOG_DIR}/job-\${SLURM_JOB_ID}.log\" \"\${ORANGEFS_DIR}/job-\${SLURM_JOB_ID}.log\"
-
-echo
-echo '═══════════════════════════════════════════════════════════════'
-echo \"  Job complete — \$(date)\"
-echo '═══════════════════════════════════════════════════════════════'
-echo
-echo 'Key results:'
-grep -E 'PROBE SUMMARY|Gap|Overall|NonAssoc|AssocNorm' \"\${RESULTS_DIR}/fractal_g2_v3_results.txt\" 2>/dev/null || true
-echo
-echo 'Brain classifier:'
-grep -E 'O-SSM|H-SSM|Accuracy' \"\${RESULTS_DIR}/brain_classifier_results.txt\" 2>/dev/null || true
+cat > "\${BUILD_DIR}/payload.b64" <<'PAYLOAD_B64_EOF'
 EOF
-  sbatch '${SBATCH_FILE}'
-  rm -f '${SBATCH_FILE}'
-  echo ---
-  squeue
-"
+
+cat "${PAYLOAD_B64}" >> "${LOCAL_SBATCH}"
+
+cat >> "${LOCAL_SBATCH}" <<'EOF'
+PAYLOAD_B64_EOF
+
+base64 -d "${BUILD_DIR}/payload.b64" > "${BUILD_DIR}/payload.tgz"
+tar -xzf "${BUILD_DIR}/payload.tgz" -C "${BUILD_DIR}"
+chmod +x "${BUILD_DIR}/bin/"*.elf
+
+echo
+echo "[Phase 1] Running Fractal-G2 v3"
+time "${BUILD_DIR}/bin/fg2v3.elf" > "${RESULTS_DIR}/fractal_g2_v3_results.txt" 2>&1
+
+echo
+echo "[Phase 2] Running brain connectome classifier"
+time "${BUILD_DIR}/bin/brain_clf.elf" > "${RESULTS_DIR}/brain_classifier_results.txt" 2>&1
+
+echo
+echo "[Phase 3] Running supporting benchmarks"
+time "${BUILD_DIR}/bin/native_alg.elf" > "${RESULTS_DIR}/native_algebra_results.txt" 2>&1
+time "${BUILD_DIR}/bin/mh_unit.elf" > "${RESULTS_DIR}/multihead_unit_results.txt" 2>&1
+time "${BUILD_DIR}/bin/assoc_probe.elf" > "${RESULTS_DIR}/assoc_probe_results.txt" 2>&1
+
+echo
+echo "[Phase 4] Persisting results"
+tar -C "${RUN_ROOT}" -czf "${RUN_ROOT}/result_bundle.tgz" results logs
+if [[ "${PUBLISH_ORANGEFS}" == "1" ]]; then
+  publish_with_timeout "${RUN_ROOT}/result_bundle.tgz" "${ORANGEFS_RUN_ROOT}/result_bundle.tgz"
+  publish_with_timeout "${RESULTS_DIR}/fractal_g2_v3_results.txt" "${ORANGEFS_DIR}/fractal_g2_v3_results.txt"
+  publish_with_timeout "${RESULTS_DIR}/brain_classifier_results.txt" "${ORANGEFS_DIR}/brain_classifier_results.txt"
+  publish_with_timeout "${RESULTS_DIR}/native_algebra_results.txt" "${ORANGEFS_DIR}/native_algebra_results.txt"
+  publish_with_timeout "${RESULTS_DIR}/multihead_unit_results.txt" "${ORANGEFS_DIR}/multihead_unit_results.txt"
+  publish_with_timeout "${RESULTS_DIR}/assoc_probe_results.txt" "${ORANGEFS_DIR}/assoc_probe_results.txt"
+  publish_with_timeout "${LOG_DIR}/job-${SLURM_JOB_ID}.log" "${ORANGEFS_DIR}/job-${SLURM_JOB_ID}.log"
+else
+  echo "OrangeFS publication skipped; worker-local bundle is authoritative for this gate"
+fi
+
+echo
+echo "Job complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "worker_result_root=${RUN_ROOT}"
+echo
+echo "Key results:"
+grep -E 'PROBE SUMMARY|Gap|Overall|NonAssoc|AssocNorm' "${RESULTS_DIR}/fractal_g2_v3_results.txt" 2>/dev/null || true
+echo
+echo "Brain classifier:"
+grep -E 'O-SSM|H-SSM|Accuracy' "${RESULTS_DIR}/brain_classifier_results.txt" 2>/dev/null || true
+EOF
+
+echo "Submitting embedded ELF payload through ${LOGIN_POD}"
+cat "${LOCAL_SBATCH}" | kubectl -n "${NS}" exec -i "${LOGIN_POD}" -- sh -lc "cat > '${SBATCH_FILE}'"
+
+SBATCH_OUTPUT="$(
+  kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "
+    set -euo pipefail
+    sbatch '${SBATCH_FILE}'
+    rm -f '${SBATCH_FILE}'
+    echo ---
+    squeue
+  "
 )"
 
 echo "${SBATCH_OUTPUT}"
@@ -273,4 +235,6 @@ echo "  JobID: ${JOB_ID}"
 echo "  Login pod: ${LOGIN_POD}"
 echo "  Stage root: ${STAGE_ROOT}"
 echo "  Stable results: ${ORANGEFS_RESULTS_DIR}"
+echo "  Payload mode: embedded worker-local ELF bundle"
+echo "  OrangeFS publish: ${PUBLISH_ORANGEFS}"
 echo "  To inspect: kubectl -n ${NS} exec ${LOGIN_TARGET} -- sacct -j ${JOB_ID} --format=JobID,JobName,Partition,Account,QOS,State,ExitCode,Start,End,NodeList"

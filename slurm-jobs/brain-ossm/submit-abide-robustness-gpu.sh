@@ -54,7 +54,7 @@ esac
 
 RUN_ID="${RUN_ID:-brain-ossm-abide-${TEMPORAL_PROFILE}-${PROFILE_TAG}-${TIMESTAMP}}"
 ORANGEFS_RESULTS_DIR="${ORANGEFS_RESULTS_DIR:-/orangefs/training/sounio/abide-robustness/${TEMPORAL_PROFILE}-${PROFILE_TAG}}"
-PERSIST_MODE="${PERSIST_MODE:-orangefs}"
+PERSIST_MODE="${PERSIST_MODE:-worker_local}"
 SBATCH_NODELIST="${SBATCH_NODELIST:-gpuorangefs-r770-proxmox}"
 SBATCH_EXCLUDE="${SBATCH_EXCLUDE:-}"
 

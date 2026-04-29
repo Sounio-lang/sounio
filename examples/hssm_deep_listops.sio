@@ -1,0 +1,422 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Deep ListOps: O-SSM vs S4-DIAG vs Naive-DIAG vs H-SSM at Depth-3
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Tests whether non-associativity matters at DEEPER nesting.
+// True recursive depth-3 generator (vs depth-1 in hssm_4way_benchmark).
+// L=30 to accommodate longer expressions.
+// 500 train/epoch, 80 epochs (40K total), 1000 eval samples (SE ≈ ±1.6%).
+//
+// If O-SSM > H-SSM by ≥3pp at depth-3: non-associativity IS the mechanism
+// If O-SSM ≈ H-SSM (±2pp): coupling suffices, non-associativity decorative
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0; var term = 1.0; var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+var RNG_A: i64 = 0; var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// ─── Expression generation with true recursive nesting ───
+var SEQ: [i64; 64] = [0; 64]
+var SEQ_POS: i64 = 0
+var SEQ_MAX: i64 = 30
+
+fn min_val(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn max_val(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn compute_med3(a: i64, b: i64, c: i64) -> i64 {
+    if a <= b { if b <= c { b } else { if a <= c { c } else { a } } }
+    else { if a <= c { a } else { if b <= c { c } else { b } } }
+}
+
+fn apply_op(op: i64, vals: i64, v0: i64, v1: i64, v2: i64) -> i64 with Mut {
+    if op == 10 {
+        var r = v0; if vals >= 2 { r = min_val(r, v1) }; if vals >= 3 { r = min_val(r, v2) }; r
+    } else {
+        if op == 11 {
+            var r = v0; if vals >= 2 { r = max_val(r, v1) }; if vals >= 3 { r = max_val(r, v2) }; r
+        } else {
+            if vals >= 3 { compute_med3(v0, v1, v2) } else { if vals >= 2 { min_val(v0, v1) } else { v0 } }
+        }
+    }
+}
+
+// Depth 0: flat expression, op(d1, d2[, d3])
+fn gen_flat_expr() -> i64 with Mut, Div {
+    if SEQ_POS >= SEQ_MAX { return (rng_next() / 100) % 10 }
+    let op = (rng_next() / 100) % 3 + 10; let nargs = (rng_next() / 100) % 2 + 2
+    SEQ[SEQ_POS] = op; SEQ_POS = SEQ_POS + 1
+    var v0 = (rng_next() / 100) % 10; var v1 = (rng_next() / 100) % 10; var v2 = 0
+    if SEQ_POS < SEQ_MAX { SEQ[SEQ_POS] = v0; SEQ_POS = SEQ_POS + 1 }
+    if SEQ_POS < SEQ_MAX { SEQ[SEQ_POS] = v1; SEQ_POS = SEQ_POS + 1 }
+    if nargs == 3 { v2 = (rng_next() / 100) % 10; if SEQ_POS < SEQ_MAX { SEQ[SEQ_POS] = v2; SEQ_POS = SEQ_POS + 1 } }
+    apply_op(op, nargs, v0, v1, v2)
+}
+
+// Depth 1: op with args that are flat_expr (40%) or raw digit (60%)
+fn gen_depth1_expr() -> i64 with Mut, Div {
+    if SEQ_POS >= SEQ_MAX { return (rng_next() / 100) % 10 }
+    let outer_op = (rng_next() / 100) % 3 + 10; let outer_nargs = (rng_next() / 100) % 2 + 2
+    SEQ[SEQ_POS] = outer_op; SEQ_POS = SEQ_POS + 1
+    var vals: [i64; 3] = [0; 3]; var ai = 0
+    while ai < outer_nargs {
+        let nest = (rng_next() / 100) % 5
+        if nest < 2 {
+            if SEQ_POS < SEQ_MAX - 2 { vals[ai] = gen_flat_expr() }
+            else { let d = (rng_next() / 100) % 10; if SEQ_POS < SEQ_MAX { SEQ[SEQ_POS] = d; SEQ_POS = SEQ_POS + 1 }; vals[ai] = d }
+        } else {
+            let d = (rng_next() / 100) % 10; if SEQ_POS < SEQ_MAX { SEQ[SEQ_POS] = d; SEQ_POS = SEQ_POS + 1 }; vals[ai] = d
+        }
+        ai = ai + 1
+    }
+    apply_op(outer_op, outer_nargs, vals[0], vals[1], vals[2])
+}
+
+// Depth 2: op with args that are depth1_expr (40%) or raw digit (60%)
+fn gen_depth2_expr() -> i64 with Mut, Div {
+    if SEQ_POS >= SEQ_MAX { return (rng_next() / 100) % 10 }
+    let outer_op = (rng_next() / 100) % 3 + 10; let outer_nargs = (rng_next() / 100) % 2 + 2
+    SEQ[SEQ_POS] = outer_op; SEQ_POS = SEQ_POS + 1
+    var vals: [i64; 3] = [0; 3]; var ai = 0
+    while ai < outer_nargs {
+        let nest = (rng_next() / 100) % 5
+        if nest < 2 {
+            if SEQ_POS < SEQ_MAX - 4 { vals[ai] = gen_depth1_expr() }
+            else { let d = (rng_next() / 100) % 10; if SEQ_POS < SEQ_MAX { SEQ[SEQ_POS] = d; SEQ_POS = SEQ_POS + 1 }; vals[ai] = d }
+        } else {
+            let d = (rng_next() / 100) % 10; if SEQ_POS < SEQ_MAX { SEQ[SEQ_POS] = d; SEQ_POS = SEQ_POS + 1 }; vals[ai] = d
+        }
+        ai = ai + 1
+    }
+    apply_op(outer_op, outer_nargs, vals[0], vals[1], vals[2])
+}
+
+// Depth 3: op with args that are depth2_expr (40%) or raw digit (60%)
+fn gen_depth3_expr() -> i64 with Mut, Div {
+    if SEQ_POS >= SEQ_MAX { return (rng_next() / 100) % 10 }
+    let outer_op = (rng_next() / 100) % 3 + 10; let outer_nargs = (rng_next() / 100) % 2 + 2
+    SEQ[SEQ_POS] = outer_op; SEQ_POS = SEQ_POS + 1
+    var vals: [i64; 3] = [0; 3]; var ai = 0
+    while ai < outer_nargs {
+        let nest = (rng_next() / 100) % 5
+        if nest < 2 {
+            if SEQ_POS < SEQ_MAX - 6 { vals[ai] = gen_depth2_expr() }
+            else { let d = (rng_next() / 100) % 10; if SEQ_POS < SEQ_MAX { SEQ[SEQ_POS] = d; SEQ_POS = SEQ_POS + 1 }; vals[ai] = d }
+        } else {
+            let d = (rng_next() / 100) % 10; if SEQ_POS < SEQ_MAX { SEQ[SEQ_POS] = d; SEQ_POS = SEQ_POS + 1 }; vals[ai] = d
+        }
+        ai = ai + 1
+    }
+    apply_op(outer_op, outer_nargs, vals[0], vals[1], vals[2])
+}
+
+fn generate_sample_deep(target_len: i64) -> i64 with Mut, Div {
+    SEQ_POS = 0; SEQ_MAX = target_len
+    let result = gen_depth3_expr()
+    var actual_len = SEQ_POS
+    while actual_len < target_len { SEQ[actual_len] = 0; actual_len = actual_len + 1 }
+    if SEQ_POS > target_len { SEQ_POS = target_len } else { SEQ_POS = target_len }
+    result
+}
+
+// ─── Models (same as hssm_4way_benchmark) ───
+var W: [i64; 256] = [0; 256]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 10] = [0; 10]
+var MOM: [i64; 256] = [0; 256]
+
+fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
+
+fn init_embed_b_out() with Mut, Div {
+    var i = 0
+    while i < 104 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(168 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 80 { ws(176 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    i = 0
+    while i < 256 { MOM[i] = 0; i = i + 1 }
+}
+
+fn init_A_ossm() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 {
+        var v = ((rng_next() % 2000) as f64 - 1000.0) / 10000.0
+        let row = i / 8; let col = i - row * 8
+        if row == col { v = 0.95 }
+        ws(104 + i, v); i = i + 1
+    }
+}
+
+fn init_A_s4diag() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 { ws(104 + i, 0.0); i = i + 1 }
+    var k = 0
+    while k < 4 {
+        let a = 0.0 - 0.5; let b = 3.14159265 * (2.0 * (k as f64) + 1.0) / 2.0; let ea = exp_q(a)
+        var bmod = b
+        while bmod > 3.14159265 { bmod = bmod - 6.28318530 }
+        while bmod < 0.0 - 3.14159265 { bmod = bmod + 6.28318530 }
+        let b2 = bmod * bmod
+        let cos_b = 1.0 - b2/2.0 + b2*b2/24.0 - b2*b2*b2/720.0
+        let sin_b = bmod - bmod*b2/6.0 + bmod*b2*b2/120.0 - bmod*b2*b2*b2/5040.0
+        let r = k * 2
+        ws(104 + r*8 + r, ea * cos_b); ws(104 + r*8 + r + 1, 0.0 - ea * sin_b)
+        ws(104 + (r+1)*8 + r, ea * sin_b); ws(104 + (r+1)*8 + r + 1, ea * cos_b)
+        k = k + 1
+    }
+}
+
+fn init_A_naive_diag() with Mut {
+    var i = 0
+    while i < 64 { ws(104 + i, 0.0); i = i + 1 }
+    i = 0
+    while i < 8 { ws(104 + i*8 + i, 0.95); i = i + 1 }
+}
+
+fn init_A_hssm() with Mut, Div, Panic {
+    var i = 0
+    while i < 64 { ws(104 + i, 0.0); i = i + 1 }
+    ws(104 + 0, 0.95)
+    ws(104 + 1, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 2, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 3, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 4, 0.95)
+    ws(104 + 5, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 6, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+    ws(104 + 7, ((rng_next() % 100) as f64 - 50.0) / 500.0)
+}
+
+// ─── Model steps ───
+fn ossm_step(token: i64) with Mut, Div {
+    var new_h: [f64; 8] = [0.0; 8]; var d = 0
+    while d < 8 {
+        let inp = wg(token * 8 + d); var s = 0.0; var j = 0
+        while j < 8 { s = s + wg(104 + d*8 + j) * hg(j); j = j + 1 }
+        s = s + wg(168 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        new_h[d] = s; d = d + 1
+    }
+    d = 0
+    while d < 8 { hs(d, new_h[d]); d = d + 1 }
+}
+
+fn s4diag_step(token: i64) with Mut, Div {
+    var new_h: [f64; 8] = [0.0; 8]; var d = 0
+    while d < 8 {
+        let inp = wg(token * 8 + d); var s = 0.0; var j = 0
+        while j < 8 { s = s + wg(104 + d*8 + j) * hg(j); j = j + 1 }
+        s = s + wg(168 + d) * inp
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        new_h[d] = s; d = d + 1
+    }
+    d = 0
+    while d < 8 { hs(d, new_h[d]); d = d + 1 }
+}
+
+fn naive_diag_step(token: i64) with Mut, Div {
+    var d = 0
+    while d < 8 {
+        var s = wg(104 + d*8 + d) * hg(d) + wg(168 + d) * wg(token * 8 + d)
+        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
+        hs(d, s); d = d + 1
+    }
+}
+
+fn hssm_step(token: i64) with Mut, Div {
+    let aw = wg(104 + 0); let ax = wg(104 + 1); let ay = wg(104 + 2); let az = wg(104 + 3)
+    let hw0 = hg(0); let hx0 = hg(1); let hy0 = hg(2); let hz0 = hg(3)
+    let nw0 = aw*hw0 - ax*hx0 - ay*hy0 - az*hz0
+    let nx0 = aw*hx0 + ax*hw0 + ay*hz0 - az*hy0
+    let ny0 = aw*hy0 - ax*hz0 + ay*hw0 + az*hx0
+    let nz0 = aw*hz0 + ax*hy0 - ay*hx0 + az*hw0
+    var new_h0 = nw0 + wg(168 + 0) * wg(token * 8 + 0)
+    var new_h1 = nx0 + wg(168 + 1) * wg(token * 8 + 1)
+    var new_h2 = ny0 + wg(168 + 2) * wg(token * 8 + 2)
+    var new_h3 = nz0 + wg(168 + 3) * wg(token * 8 + 3)
+    if new_h0 > 5.0 { new_h0 = 5.0 } if new_h0 < 0.0 - 5.0 { new_h0 = 0.0 - 5.0 }
+    if new_h1 > 5.0 { new_h1 = 5.0 } if new_h1 < 0.0 - 5.0 { new_h1 = 0.0 - 5.0 }
+    if new_h2 > 5.0 { new_h2 = 5.0 } if new_h2 < 0.0 - 5.0 { new_h2 = 0.0 - 5.0 }
+    if new_h3 > 5.0 { new_h3 = 5.0 } if new_h3 < 0.0 - 5.0 { new_h3 = 0.0 - 5.0 }
+
+    let aw2 = wg(104 + 4); let ax2 = wg(104 + 5); let ay2 = wg(104 + 6); let az2 = wg(104 + 7)
+    let hw1 = hg(4); let hx1 = hg(5); let hy1 = hg(6); let hz1 = hg(7)
+    let nw1 = aw2*hw1 - ax2*hx1 - ay2*hy1 - az2*hz1
+    let nx1 = aw2*hx1 + ax2*hw1 + ay2*hz1 - az2*hy1
+    let ny1 = aw2*hy1 - ax2*hz1 + ay2*hw1 + az2*hx1
+    let nz1 = aw2*hz1 + ax2*hy1 - ay2*hx1 + az2*hw1
+    var new_h4 = nw1 + wg(168 + 4) * wg(token * 8 + 4)
+    var new_h5 = nx1 + wg(168 + 5) * wg(token * 8 + 5)
+    var new_h6 = ny1 + wg(168 + 6) * wg(token * 8 + 6)
+    var new_h7 = nz1 + wg(168 + 7) * wg(token * 8 + 7)
+    if new_h4 > 5.0 { new_h4 = 5.0 } if new_h4 < 0.0 - 5.0 { new_h4 = 0.0 - 5.0 }
+    if new_h5 > 5.0 { new_h5 = 5.0 } if new_h5 < 0.0 - 5.0 { new_h5 = 0.0 - 5.0 }
+    if new_h6 > 5.0 { new_h6 = 5.0 } if new_h6 < 0.0 - 5.0 { new_h6 = 0.0 - 5.0 }
+    if new_h7 > 5.0 { new_h7 = 5.0 } if new_h7 < 0.0 - 5.0 { new_h7 = 0.0 - 5.0 }
+
+    hs(0, new_h0); hs(1, new_h1); hs(2, new_h2); hs(3, new_h3)
+    hs(4, new_h4); hs(5, new_h5); hs(6, new_h6); hs(7, new_h7)
+}
+
+fn compute_logits() with Mut, Div {
+    var c = 0
+    while c < 10 {
+        var s = 0.0; var d = 0
+        while d < 8 { s = s + hg(d) * wg(176 + d * 10 + c); d = d + 1 }
+        L[c] = (s * 100000000.0) as i64; c = c + 1
+    }
+}
+
+fn get_pred() -> i64 with Mut, Div {
+    var best = 0; var bv = (L[0] as f64) / 100000000.0; var i = 1
+    while i < 10 { let v = (L[i] as f64)/100000000.0; if v > bv { bv = v; best = i }; i = i + 1 }
+    best
+}
+
+fn update_out(tgt: i64, lr: f64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0; var i = 1
+    while i < 10 { let v = (L[i] as f64)/100000000.0; if v > mx { mx = v }; i = i + 1 }
+    var probs: [f64; 10] = [0.0; 10]; var se = 0.0; i = 0
+    while i < 10 { probs[i] = exp_q((L[i] as f64)/100000000.0 - mx); se = se + probs[i]; i = i + 1 }
+    i = 0
+    while i < 10 { probs[i] = probs[i] / se; i = i + 1 }
+    probs[tgt] = probs[tgt] - 1.0
+    var d = 0
+    while d < 8 {
+        let hd = hg(d); var c = 0
+        while c < 10 {
+            let idx = 176 + d * 10 + c
+            var g = hd * probs[c]
+            if g > 0.3 { g = 0.3 } if g < 0.0 - 0.3 { g = 0.0 - 0.3 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+// ─── Training + Evaluation ───
+fn run_deep_listops(model_id: i64, seq_len: i64) -> f64 with IO, Mut, Div, Panic {
+    let n_train = 500; let n_epochs = 80
+    var ep = 0
+    while ep < n_epochs {
+        var s = 0
+        while s < n_train {
+            let label = generate_sample_deep(seq_len)
+            var tgt = label % 10
+            if tgt < 0 { tgt = tgt + 10 }
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < SEQ_POS {
+                if model_id == 0 { ossm_step(SEQ[t]) }
+                if model_id == 1 { s4diag_step(SEQ[t]) }
+                if model_id == 2 { naive_diag_step(SEQ[t]) }
+                if model_id == 3 { hssm_step(SEQ[t]) }
+                t = t + 1
+            }
+            compute_logits()
+            update_out(tgt, 0.01)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+    // Eval: 1000 samples for statistical reliability
+    rng_seed(99999 + seq_len, 11111 + seq_len)
+    var correct = 0; var s = 0
+    while s < 1000 {
+        let label = generate_sample_deep(seq_len)
+        var tgt = label % 10
+        if tgt < 0 { tgt = tgt + 10 }
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < SEQ_POS {
+            if model_id == 0 { ossm_step(SEQ[t]) }
+            if model_id == 1 { s4diag_step(SEQ[t]) }
+            if model_id == 2 { naive_diag_step(SEQ[t]) }
+            if model_id == 3 { hssm_step(SEQ[t]) }
+            t = t + 1
+        }
+        compute_logits()
+        if get_pred() == tgt { correct = correct + 1 }
+        s = s + 1
+    }
+    (correct as f64) / 1000.0 * 100.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Deep ListOps (Depth-3): 4-Way Comparison\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  True recursive depth-3 nesting, L=30\n")
+    print("  500 train/epoch x 80 epochs = 40K total\n")
+    print("  1000 eval samples (SE ≈ ±1.6%)\n\n")
+
+    let seq_len = 30
+
+    print("O-SSM:      ")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_ossm()
+    rng_seed(12345, 67890)
+    let acc_ossm = run_deep_listops(0, seq_len)
+    print(acc_ossm); print("%\n")
+
+    print("S4-DIAG:    ")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_s4diag()
+    rng_seed(12345, 67890)
+    let acc_s4 = run_deep_listops(1, seq_len)
+    print(acc_s4); print("%\n")
+
+    print("Naive-DIAG: ")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_naive_diag()
+    rng_seed(12345, 67890)
+    let acc_naive = run_deep_listops(2, seq_len)
+    print(acc_naive); print("%\n")
+
+    print("H-SSM:      ")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_hssm()
+    rng_seed(12345, 67890)
+    let acc_hssm = run_deep_listops(3, seq_len)
+    print(acc_hssm); print("%\n")
+
+    print("\n═══════════════════════════════════════════════════════════════\n")
+    print("  RESULTS: Deep ListOps Depth-3, L=30\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Model       Accuracy  Random=10%\n")
+    print("  O-SSM       "); print(acc_ossm); print("%\n")
+    print("  S4-DIAG     "); print(acc_s4); print("%\n")
+    print("  Naive-DIAG  "); print(acc_naive); print("%\n")
+    print("  H-SSM       "); print(acc_hssm); print("%\n")
+
+    print("\n  Interpretation:\n")
+    let gap = acc_ossm - acc_hssm
+    if gap > 3.0 {
+        print("  >> O-SSM > H-SSM by >3pp: NON-ASSOCIATIVITY MATTERS at depth-3\n")
+    } else {
+        if gap > 0.0 - 3.0 {
+            print("  >> O-SSM ≈ H-SSM (within ±3pp): coupling suffices, non-assoc. decorative\n")
+        } else {
+            print("  >> H-SSM > O-SSM: coupling alone is sufficient (non-assoc. not needed)\n")
+        }
+    }
+
+    println("ALL PASS")
+    0
+}
