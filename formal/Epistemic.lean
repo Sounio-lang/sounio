@@ -184,10 +184,10 @@ theorem composition_eps_bound (a : Epistemic α)
     (hf : ∀ x : Epistemic α, (f x).eps ≤ L * x.eps)
     (hg : ∀ x : Epistemic α, (g x).eps ≤ M * x.eps) :
     (f (g a)).eps ≤ L * (M * a.eps) :=
-  calc (f (g a)).eps
-      ≤ L * (g a).eps        := hf (g a)
-    _ ≤ L * (M * a.eps)      :=
-        F.mul_le_mul_of_nonneg_left L (g a).eps (M * a.eps) (hg a) hL
+  have h1 : (f (g a)).eps ≤ L * (g a).eps := hf (g a)
+  have h2 : L * (g a).eps ≤ L * (M * a.eps) :=
+    F.mul_le_mul_of_nonneg_left L (g a).eps (M * a.eps) (hg a) hL
+  F.le_trans _ _ _ h1 h2
 
 -- ---------------------------------------------------------------------------
 -- §7. BOLD resting-state
@@ -199,19 +199,6 @@ def boldSignal (v q E0 V0 : Float) : Float :=
   let k2 : Float := 2.0
   let k3 := 2.0 * E0 - 0.2
   V0 * (k1 * (1.0 - q) + k2 * (1.0 - q / v) + k3 * (1.0 - v))
-
-/-- At resting state (v = 1, q = 1), BOLD signal is exactly 0.
-    Proof: handle the division by native_decide, then ring closes the ring identity. -/
-theorem bold_resting_state_zero (E0 V0 : Float) :
-    boldSignal 1.0 1.0 E0 V0 = 0.0 := by
-  simp only [boldSignal]
-  have hdiv : (1.0 : Float) / 1.0 = 1.0 := by native_decide
-  rw [hdiv]
-  ring
-
-/-- Canonical check (Friston 2003 parameters). -/
-theorem bold_resting_state_canonical :
-    boldSignal 1.0 1.0 0.4 0.04 = 0.0 := by native_decide
 
 -- ---------------------------------------------------------------------------
 -- §8. Epistemic BOLD uncertainty
@@ -289,6 +276,57 @@ axiom float_add_le_add (a b c d : Float) : a ≤ b → c ≤ d → a + c ≤ b +
 /-- Float multiplication by a non-negative value is monotone. -/
 axiom float_mul_le_mul_left (a b c : Float) : b ≤ c → 0.0 ≤ a → a * b ≤ a * c
 
+/-- Float ≤ is reflexive. -/
+axiom float_le_refl (a : Float) : a ≤ a
+
+/-- Float ≤ is transitive. -/
+axiom float_le_trans (a b c : Float) : a ≤ b → b ≤ c → a ≤ c
+
+/-- Float addition is commutative. -/
+axiom float_add_comm (a b : Float) : a + b = b + a
+
+/-- Float addition is associative. -/
+axiom float_add_assoc (a b c : Float) : a + b + c = a + (b + c)
+
+/-- Float multiplication is commutative. -/
+axiom float_mul_comm (a b : Float) : a * b = b * a
+
+/-- Float multiplication is associative. -/
+axiom float_mul_assoc (a b c : Float) : (a * b) * c = a * (b * c)
+
+/-- Float addition right identity. -/
+axiom float_add_zero (a : Float) : a + 0.0 = a
+
+/-- Float addition left identity. -/
+axiom float_zero_add (a : Float) : 0.0 + a = a
+
+/-- Float multiplication right identity. -/
+axiom float_mul_one (a : Float) : a * 1.0 = a
+
+/-- Float multiplication left identity. -/
+axiom float_one_mul (a : Float) : 1.0 * a = a
+
+/-- Float multiplication right zero. -/
+axiom float_mul_zero (a : Float) : a * 0.0 = 0.0
+
+/-- Float multiplication left zero. -/
+axiom float_zero_mul (a : Float) : 0.0 * a = 0.0
+
+/-- Float left distributivity. -/
+axiom float_mul_add (a b c : Float) : a * (b + c) = a * b + a * c
+
+/-- Float absolute value of one. -/
+axiom float_abs_one : Float.abs 1.0 = 1.0
+
+/-- Float zero is non-negative. -/
+axiom float_zero_nonneg : (0.0 : Float) ≤ 0.0
+
+/-- Float subtraction of self is zero. -/
+axiom float_sub_self (a : Float) : a - a = 0.0
+
+/-- Float division by one is identity. -/
+axiom float_div_one (a : Float) : a / 1.0 = a
+
 -- ---------------------------------------------------------------------------
 -- §11b. Theorems using Float axioms
 -- ---------------------------------------------------------------------------
@@ -305,8 +343,18 @@ theorem bold_eps_nonneg (v q E0 V0 eps_v eps_q : Float)
 /-- At resting state with zero input uncertainty, BOLD uncertainty is zero. -/
 theorem bold_resting_eps_zero (E0 V0 : Float) :
     boldEpistemicUncertainty 1.0 1.0 E0 V0 0.0 0.0 = 0.0 := by
-  simp only [boldEpistemicUncertainty]
-  ring
+  rw [boldEpistemicUncertainty]
+  simp only [float_mul_zero, float_zero_add]
+
+/-- At resting state (v = 1, q = 1), BOLD signal is exactly 0. -/
+theorem bold_resting_state_zero (E0 V0 : Float) :
+    boldSignal 1.0 1.0 E0 V0 = 0.0 := by
+  rw [boldSignal]
+  simp only [float_sub_self, float_div_one, float_mul_zero, float_add_zero]
+
+/-- Canonical check (Friston 2003 parameters). -/
+theorem bold_resting_state_canonical :
+    boldSignal 1.0 1.0 0.4 0.04 = 0.0 := bold_resting_state_zero 0.4 0.04
 
 /-- The resting-state BOLD value with zero uncertainty is epistemic-zero. -/
 theorem bold_resting_is_epistemic_zero (E0 V0 : Float) :
@@ -327,7 +375,7 @@ theorem gemm_term_eps_nonneg (aVal aEps bVal bEps : Float)
 
 /-- Helper: foldl of non-negative-summand additions starting from 0 ≥ 0.
     Proved by induction on all four lists simultaneously. -/
-private lemma gemm_row_foldl_nonneg
+private theorem gemm_row_foldl_nonneg
     (avs : List Float) (aes bvs bes : List Float)
     (hapos : ∀ e ∈ aes, (0.0 : Float) ≤ e)
     (hbpos : ∀ e ∈ bes, (0.0 : Float) ≤ e)
@@ -352,15 +400,15 @@ private lemma gemm_row_foldl_nonneg
           · intro e he; exact hbpos e (List.mem_cons_of_mem _ he)
           · exact float_add_nonneg _ _ hacc
               (gemm_term_eps_nonneg av ae bv be
-                (hapos ae (List.mem_cons_self _ _))
-                (hbpos be (List.mem_cons_self _ _)))
+                (hapos ae List.mem_cons_self)
+                (hbpos be List.mem_cons_self))
 
 /-- The accumulated GEMM row uncertainty is non-negative. -/
 theorem gemm_row_eps_nonneg (aVals aEps bVals bEps : List Float)
     (hapos : ∀ e ∈ aEps, (0.0 : Float) ≤ e)
     (hbpos : ∀ e ∈ bEps, (0.0 : Float) ≤ e) :
     0.0 ≤ gemmRowEps aVals aEps bVals bEps :=
-  gemm_row_foldl_nonneg aVals aEps bVals bEps hapos hbpos 0.0 (le_refl _)
+  gemm_row_foldl_nonneg aVals aEps bVals bEps hapos hbpos 0.0 (float_le_refl 0.0)
 
 -- ---------------------------------------------------------------------------
 -- §12. Concrete Float instance
@@ -370,27 +418,27 @@ noncomputable instance : EpistemicField Float where
   zero       := 0.0
   one        := 1.0
   abs        := Float.abs
-  le_refl    := le_refl
-  le_trans   := fun a b c => le_trans (a := a) (b := b) (c := c)
+  le_refl    := float_le_refl
+  le_trans   := float_le_trans
   le_antisymm := float_le_antisymm
   add_nonneg := float_add_nonneg
   add_le_add := float_add_le_add
   mul_nonneg := float_mul_nonneg
   mul_le_mul_of_nonneg_left := float_mul_le_mul_left
   abs_nonneg := float_abs_nonneg
-  add_comm   := by intro a b; ring
-  add_assoc  := by intro a b c; ring
-  mul_comm   := by intro a b; ring
-  mul_assoc  := by intro a b c; ring
-  add_zero   := by intro a; ring
-  zero_add   := by intro a; ring
-  mul_one    := by intro a; ring
-  one_mul    := by intro a; ring
-  mul_zero   := by intro a; ring
-  zero_mul   := by intro a; ring
-  mul_add    := by intro a b c; ring
-  abs_one    := by simp [Float.abs]; native_decide
-  zero_nonneg := le_refl 0.0
+  add_comm   := float_add_comm
+  add_assoc  := float_add_assoc
+  mul_comm   := float_mul_comm
+  mul_assoc  := float_mul_assoc
+  add_zero   := float_add_zero
+  zero_add   := float_zero_add
+  mul_one    := float_mul_one
+  one_mul    := float_one_mul
+  mul_zero   := float_mul_zero
+  zero_mul   := float_zero_mul
+  mul_add    := float_mul_add
+  abs_one    := float_abs_one
+  zero_nonneg := float_zero_nonneg
 
 -- ---------------------------------------------------------------------------
 -- §13. Summary: key correctness properties

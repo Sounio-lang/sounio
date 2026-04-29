@@ -226,7 +226,7 @@ This validates:
 CI/automation entrypoint:
 
 ```bash
-bash scripts/lsp_smoke_gate.sh
+bash scripts/ci/lsp_smoke_gate.sh
 ```
 
 Gate marker emitted on success: `LSP_SMOKE_PASS`.

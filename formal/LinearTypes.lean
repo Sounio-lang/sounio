@@ -83,14 +83,15 @@ theorem consume_linear_done (Δ : UsageEnv) (x : String) :
     (x, Mult.One) ∉ consume Δ x := by
   simp only [consume, List.mem_map, not_exists, not_and]
   intro ⟨y, m⟩ _hmem hpair
-  simp only [Prod.mk.injEq] at hpair
+  simp only [Prod.ext_iff] at hpair
   obtain ⟨hname, hmult⟩ := hpair
   -- hname : (if y == x then y else y) = x  (always true structurally)
   -- hmult : (if y == x then Mult.Zero else m) = Mult.One
   by_cases hyx : y == x
-  · simp [hyx] at hmult
-  · simp [hyx] at hmult
-    exact absurd hmult (by decide)
+  · simp [hyx] at hmult hname
+  · simp [hyx] at hmult hname
+    rw [hname] at hyx
+    simp at hyx
 
 /-- `consume` is idempotent: consuming an already-consumed variable is a no-op
     in effect (the multiplicity is already `Zero`). -/
@@ -98,8 +99,9 @@ theorem consume_idempotent (Δ : UsageEnv) (x : String) :
     consume (consume Δ x) x = consume Δ x := by
   simp only [consume, List.map_map, Function.comp]
   congr 1
-  ext ⟨y, m⟩
-  by_cases hyx : y == x <;> simp [hyx]
+  funext p
+  cases p with | mk y m =>
+  by_cases hyx : y = x <;> simp [hyx]
 
 -- ---------------------------------------------------------------------------
 -- Linear safety — structural theorems
@@ -108,7 +110,7 @@ theorem consume_idempotent (Δ : UsageEnv) (x : String) :
 /-- The empty environment is trivially linear-safe: no variables at all. -/
 theorem empty_linear_safe : LinearSafe [] := by
   intro x m hm
-  exact absurd hm (List.not_mem_nil _)
+  exact absurd hm (List.not_mem_nil)
 
 /-- Extending the environment with an unrestricted (`Many`) binding preserves
     linear-safety: the new binding cannot introduce an unused linear variable. -/
@@ -116,9 +118,9 @@ theorem extend_many_preserves_safe (Δ : UsageEnv) (x : String)
     (h : LinearSafe Δ) :
     LinearSafe ((x, Mult.Many) :: Δ) := by
   intro y m hm
-  simp only [List.mem_cons, Prod.mk.injEq] at hm
+  simp only [List.mem_cons, Prod.ext_iff] at hm
   rcases hm with ⟨hyx, hm_eq⟩ | hmem
-  · rw [← hm_eq]
+  · rw [hm_eq]
     decide
   · exact h y m hmem
 
@@ -128,9 +130,9 @@ theorem extend_zero_preserves_safe (Δ : UsageEnv) (x : String)
     (h : LinearSafe Δ) :
     LinearSafe ((x, Mult.Zero) :: Δ) := by
   intro y m hm
-  simp only [List.mem_cons, Prod.mk.injEq] at hm
+  simp only [List.mem_cons, Prod.ext_iff] at hm
   rcases hm with ⟨_, hm_eq⟩ | hmem
-  · rw [← hm_eq]; decide
+  · rw [hm_eq]; decide
   · exact h y m hmem
 
 /-- If we consume a linear variable `x` from a safe environment extended by
@@ -142,27 +144,25 @@ theorem consume_linear_preserves_safe (Δ : UsageEnv) (x : String)
   -- After consume, the list is: (x, Zero) :: consume Δ x
   -- We need that no entry in that list has multiplicity One.
   simp only [consume, List.map_cons]
-  simp only [ite_true, String.beq_self_eq_true]
+  simp only [ite_true, beq_self_eq_true]
   intro y m hm
-  simp only [List.mem_cons, Prod.mk.injEq] at hm
+  simp only [List.mem_cons, Prod.ext_iff] at hm
   rcases hm with ⟨_, hm_eq⟩ | hmem
-  · rw [← hm_eq]; decide
+  · rw [hm_eq]; decide
   · -- y comes from consume Δ x; we need m ≠ One
     simp only [List.mem_map] at hmem
     obtain ⟨⟨z, n⟩, hzn_mem, hpair⟩ := hmem
-    simp only [Prod.mk.injEq] at hpair
+    simp only [Prod.ext_iff] at hpair
     obtain ⟨hyz, hmn⟩ := hpair
     by_cases hzx : z == x
     · -- z = x, so the entry became Zero
       simp [hzx] at hmn
       rw [← hmn]; decide
     · -- z ≠ x, so the entry is unchanged: m = n
-      simp [hzx] at hmn
+      simp [hzx] at hmn hyz
       rw [← hmn]
       -- n is the original multiplicity; use hΔ
-      have hname : z = y := by
-        simp only [beq_iff_eq] at hyz
-        exact hyz.symm
+      have hname : z = y := hyz
       subst hname
       exact hΔ z n hzn_mem
 
@@ -182,26 +182,32 @@ theorem linear_use_once (Δ : UsageEnv) (x : String)
     (h : (x, Mult.One) ∈ Δ) :
     usageEnv_lookup (consume Δ x) x = some Mult.Zero := by
   simp only [usageEnv_lookup, consume]
-  induction Δ with
-  | nil => exact absurd h (List.not_mem_nil _)
-  | cons p ps ih =>
-    simp only [List.map_cons, List.find?]
+  rw [List.find?_map]
+  have h_comp : (fun p : String × Mult => p.1 == x) ∘ (fun p => if p.1 == x then (p.1, Mult.Zero) else p) = (fun p => p.1 == x) := by
+    funext p
     by_cases hpx : p.1 == x
-    · simp only [hpx, List.find?]
-      -- head matches; its value is (p.1, Zero); .2 = Zero
+    · rw [beq_iff_eq] at hpx
       simp [hpx]
-    · -- head does not match; recurse
-      simp only [hpx, List.find?]
-      -- strip head (value unchanged since p.1 ≠ x), apply IH
-      apply ih
-      simp only [List.mem_cons] at h
-      rcases h with ⟨hpair, _⟩ | hmem
-      · -- h was the head: p = (x, One), but p.1 == x is false — contradiction
-        have : p.1 = x := by
-          simp only [Prod.mk.injEq] at hpair
-          exact hpair.1
-        simp [this] at hpx
-      · exact hmem
+    · rw [beq_iff_eq] at hpx
+      simp [hpx]
+  rw [h_comp]
+  simp only [Option.map_map]
+  have hfind : ∃ p, p ∈ Δ ∧ p.1 == x := by
+    refine ⟨(x, Mult.One), h, by simp⟩
+  have hfind2 : List.find? (fun p => p.1 == x) Δ ≠ none := by
+    intro hnone
+    simp [List.find?_eq_none] at hnone
+    obtain ⟨p, hp, heq⟩ := hfind
+    rw [beq_iff_eq] at heq
+    have := hnone p.1 p.2 hp
+    contradiction
+  obtain ⟨p, hp_eq⟩ := Option.ne_none_iff_exists'.mp hfind2
+  rw [hp_eq]
+  have hpx : p.1 = x := by
+    have h_some := List.find?_some hp_eq
+    rw [beq_iff_eq] at h_some
+    exact h_some
+  simp [hpx]
 
 /-- **no_second_use** — after consuming `x`, looking up `x` never returns `One`.
 
@@ -243,12 +249,11 @@ theorem shared_ref_preserves_linear (Δ : UsageEnv) (x y : String)
     (x, Mult.One) ∈ consume Δ y := by
   simp only [consume, List.mem_map]
   refine ⟨(x, Mult.One), hx, ?_⟩
-  simp only [Prod.mk.injEq, and_true]
+  simp only [Prod.ext_iff, and_true]
   -- x ≠ y so the guard `y == x` is false; entry is unchanged.
-  have : ¬ (y == x) := by
-    simp only [beq_iff_eq]
-    exact fun h => hne h.symm
-  simp [this]
+  by_cases h : x = y
+  · contradiction
+  · simp [h]
 
 /-- Exclusive references (`&!T`) consume the linear resource.
     After taking an exclusive reference to `x`, `x`'s multiplicity becomes
@@ -272,7 +277,7 @@ theorem consumeAll_safe (Δ : UsageEnv) : LinearSafe (consumeAll Δ) := by
   intro x m hm
   simp only [consumeAll, List.mem_map] at hm
   obtain ⟨⟨y, n⟩, _, hpair⟩ := hm
-  simp only [Prod.mk.injEq] at hpair
+  simp only [Prod.ext_iff] at hpair
   obtain ⟨_, hmn⟩ := hpair
   -- hmn : (if n = One then Zero else n) = m
   split at hmn

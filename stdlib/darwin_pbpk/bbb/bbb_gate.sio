@@ -1,0 +1,138 @@
+// darwin_pbpk/bbb/bbb_gate.sio — Confidence-gated predictions
+//
+// Dissertation contribution #2: "compile-time confidence gates" —
+// mechanise the norm that a PK prediction must not leave the lab
+// unless its driving parameters meet a minimum evidence-quality
+// threshold.
+//
+// Scope note: Sounio's current compile-time machinery (Knowledge<T>
+// confidence, effects) exposes confidence at the type/effect level,
+// but the BBB workflow operates on runtime parameter structs.  This
+// module provides the corresponding runtime gate — it inspects a
+// BBBGUMBudget, finds the driving parameters (those whose share of
+// the combined variance exceeds a dominance threshold), and refuses
+// the prediction if ANY driver has confidence below the gate.  The
+// refusal is loud (non-zero exit or explicit status flag) and names
+// which parameter failed the gate.
+//
+// The runtime gate is the bridge to the compile-time version: once
+// the compiler's Knowledge<T> confidence propagation can traverse
+// ODE solves (β⁹ GTT path), the same threshold logic moves to
+// typecheck time.  Until then this module enforces the same
+// discipline at the stdlib layer.
+//
+// Default policy (rapamycin CNS workflow):
+//   - gate_confidence = 0.50
+//   - dominance_share = 0.05  (any parameter contributing >= 5% of
+//                              the combined variance is a "driver")
+//
+// Under the default policy on the rapamycin 5 mg IV budget:
+//   drivers = {kpuu_brain (0.60), ps_bbb (0.45), kpuu_cell (0.30),
+//              fu_icf (0.25)}
+//   ps_bbb  has confidence 0.45 < 0.50  → GATE REFUSES
+// The refusal is correct: ps_bbb is extrapolation-dominated, and the
+// dissertation cannot claim a defensible Kpuu_AUC value at the 0.50
+// confidence bar without additional measurements.
+
+use darwin_pbpk::bbb::bbb_gum::{BBBGUMBudget}
+
+pub struct BBBGateVerdict {
+    admitted:           bool,      // true if the prediction clears the gate
+    n_drivers:          i32,
+    driver_idx:         [i32; 8],  // parameter indices of drivers (share >= dominance)
+    driver_conf:        [f64; 8],  // confidence of each driver
+    first_failing_idx:  i32,       // -1 if admitted; else idx of first driver to fail
+    first_failing_conf: f64,       // confidence of the first failing driver
+    gate_confidence:    f64,
+    dominance_share:    f64,
+}
+
+fn bbb_gate_verdict_zero(gate_conf: f64, dom: f64) -> BBBGateVerdict {
+    BBBGateVerdict {
+        admitted: false,
+        n_drivers: 0,
+        driver_idx:  [0; 8],
+        driver_conf: [0.0; 8],
+        first_failing_idx:  0 - 1,
+        first_failing_conf: 0.0,
+        gate_confidence: gate_conf,
+        dominance_share: dom,
+    }
+}
+
+// Evaluate the gate on a budget.  Does NOT emit any output — the
+// caller decides what to do with the verdict (print, raise, return).
+pub fn bbb_gate_evaluate(
+    budget: BBBGUMBudget,
+    gate_confidence: f64,
+    dominance_share: f64
+) -> BBBGateVerdict with Mut, Div, Panic {
+    var v = bbb_gate_verdict_zero(gate_confidence, dominance_share)
+    var n_drivers: i32 = 0
+    var first_failing: i32 = 0 - 1
+    var first_failing_c: f64 = 0.0
+
+    var i: i32 = 0
+    while i < budget.n_rows {
+        let idx = i as usize
+        if budget.share[idx] >= dominance_share {
+            let ndx = n_drivers as usize
+            v.driver_idx[ndx]  = budget.param_idx[idx]
+            v.driver_conf[ndx] = budget.confidence[idx]
+            n_drivers = n_drivers + 1
+            if budget.confidence[idx] < gate_confidence {
+                if first_failing < 0 {
+                    first_failing   = budget.param_idx[idx]
+                    first_failing_c = budget.confidence[idx]
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    v.n_drivers         = n_drivers
+    v.first_failing_idx = first_failing
+    v.first_failing_conf = first_failing_c
+    v.admitted          = first_failing < 0
+    v
+}
+
+fn bbb_gate_param_name(idx: i32) -> string {
+    if idx == 0 { return "ps_bbb" }
+    if idx == 1 { return "ps_mem" }
+    if idx == 2 { return "kpuu_brain" }
+    if idx == 3 { return "kpuu_cell" }
+    if idx == 4 { return "fu_plasma" }
+    if idx == 5 { return "fu_isf" }
+    if idx == 6 { return "fu_icf" }
+    "unknown"
+}
+
+pub fn bbb_gate_print_verdict(v: BBBGateVerdict) with IO, Mut, Panic, Div {
+    println("BBB confidence gate")
+    print("  gate_confidence = "); print_f64(v.gate_confidence); println("")
+    print("  dominance_share = "); print_f64(v.dominance_share); println("")
+    print("  n_drivers       = ")
+    var n = v.n_drivers as i64
+    print_i64(n); println("")
+    println("  drivers:")
+    var i: i32 = 0
+    while i < v.n_drivers {
+        let idx = i as usize
+        print("    - "); print(bbb_gate_param_name(v.driver_idx[idx]))
+        print(" conf="); print_f64(v.driver_conf[idx])
+        println("")
+        i = i + 1
+    }
+    if v.admitted {
+        println("  verdict: ADMITTED")
+    } else {
+        print("  verdict: REFUSED — driver ")
+        print(bbb_gate_param_name(v.first_failing_idx))
+        print(" conf=")
+        print_f64(v.first_failing_conf)
+        print(" < gate=")
+        print_f64(v.gate_confidence)
+        println("")
+    }
+}

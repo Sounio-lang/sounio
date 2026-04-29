@@ -115,13 +115,13 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
 }`;
 
   return (
-    <section className="py-20 bg-[var(--color-surface-primary)]">
+    <section className="py-[clamp(3.5rem,7vw,6rem)] bg-[var(--color-bg)]">
       <div className="container px-4">
-        <div className="text-center mb-12">
-          <h2 className="text-3xl md:text-4xl font-bold text-[var(--color-text-primary)] mb-3">
+        <div className="mb-[2.4rem] grid gap-[0.5rem]">
+          <h2 className="font-sans text-[clamp(1.7rem,4.2vw,3rem)] font-[750] leading-[1.1] tracking-[-0.025em] text-[var(--color-text-primary)]">
             Try It: Live Uncertainty Propagation
           </h2>
-          <p className="text-[var(--color-text-secondary)] max-w-2xl mx-auto">
+          <p className="text-[clamp(0.96rem,2.1vw,1.1rem)] text-[var(--color-text-secondary)] max-w-[68ch]">
             {audience === 'scientist'
               ? 'Change the measurements below and watch how uncertainty flows through the calculation. This is what Sounio does automatically with every computation.'
               : 'Real-time GUM-compliant uncertainty propagation. Change inputs to see \u03B5 and provenance update live.'}

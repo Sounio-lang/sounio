@@ -1,0 +1,274 @@
+// self-hosted/compiler/pkg/scorer.sio
+//
+// Epistemic Scoring Engine para o Sounio Package Manager (SPM).
+//
+// Calcula o epistemic-score de um pacote de forma determinística,
+// combinando métricas estáticas (manifest) com métricas de cobertura de código.
+//
+// Design baseado em:
+//   - docs/ecosystem/SOUNIO_TOML_SPEC.md
+//   - docs/ecosystem/REGISTRY_ARCHITECTURE.md
+//   - stdlib/epistemic/audit_runtime.sio (PROV model)
+//   - stdlib/epistemic/confidence_gate.sio (GatePolicy)
+//
+// Pesos por dimensão (totais = 1.0):
+//   W_KNOWLEDGE_USE   = 0.35  (APIs usando Knowledge<T>)
+//   W_UNCERTAINTY_TEST = 0.25 (cobertura de testes de propagação GUM)
+//   W_PROVENANCE      = 0.20  (uso de ledger + confidence_gate)
+//   W_TEST_COVERAGE   = 0.10  (cobertura geral de testes)
+//   W_DOCS            = 0.10  (qualidade de documentação e exemplos)
+
+let W_KNOWLEDGE_USE: f64    = 0.35
+let W_UNCERTAINTY_TEST: f64 = 0.25
+let W_PROVENANCE: f64       = 0.20
+let W_TEST_COVERAGE: f64    = 0.10
+let W_DOCS: f64             = 0.10
+
+// Penalidade por nível de provenance insuficiente
+let PROV_SCORE_WEAK: f64       = 0.20
+let PROV_SCORE_MEDIUM: f64     = 0.55
+let PROV_SCORE_STRONG: f64     = 0.85
+let PROV_SCORE_REGULATORY: f64 = 1.00
+
+struct EpistemicScore {
+    total: f64,
+    knowledge_use: f64,
+    uncertainty_test: f64,
+    provenance: f64,
+    test_coverage: f64,
+    docs: f64,
+    tier: i64,         // 0=experimental, 1=community, 2=curated, 3=regulatory
+    tier_name: [i8; 16],
+    tier_name_len: i64,
+}
+
+fn scorer_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn scorer_clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo }
+    else if x > hi { hi }
+    else { x }
+}
+
+fn scorer_provenance_score(level: i64) -> f64 {
+    if level == 0 { return PROV_SCORE_WEAK }
+    if level == 1 { return PROV_SCORE_MEDIUM }
+    if level == 2 { return PROV_SCORE_STRONG }
+    PROV_SCORE_REGULATORY
+}
+
+// Tier: 0=experimental (<0.60), 1=community (0.60-0.75),
+//       2=curated (0.75-0.90), 3=regulatory (>0.90 + gum + prov_regulatory)
+fn scorer_tier(score: f64, gum: bool, prov: i64, regulatory: bool) -> i64 {
+    if score < 0.60 { return 0 }
+    if score < 0.75 { return 1 }
+    if score < 0.90 { return 2 }
+    if regulatory && gum && prov == 3 { return 3 }
+    2
+}
+
+fn scorer_tier_name(tier: i64, dst: &![i8; 16]) -> i64 with Mut, Panic {
+    if tier == 0 {
+        (*dst)[0] = 101 as i8  // e
+        (*dst)[1] = 120 as i8  // x
+        (*dst)[2] = 112 as i8  // p
+        (*dst)[3] = 101 as i8  // e
+        (*dst)[4] = 114 as i8  // r
+        (*dst)[5] = 105 as i8  // i
+        (*dst)[6] = 109 as i8  // m
+        (*dst)[7] = 101 as i8  // e
+        (*dst)[8] = 110 as i8  // n
+        (*dst)[9] = 116 as i8  // t
+        (*dst)[10] = 97 as i8  // a
+        (*dst)[11] = 108 as i8 // l
+        return 12
+    }
+    if tier == 1 {
+        (*dst)[0] = 99 as i8   // c
+        (*dst)[1] = 111 as i8  // o
+        (*dst)[2] = 109 as i8  // m
+        (*dst)[3] = 109 as i8  // m
+        (*dst)[4] = 117 as i8  // u
+        (*dst)[5] = 110 as i8  // n
+        (*dst)[6] = 105 as i8  // i
+        (*dst)[7] = 116 as i8  // t
+        (*dst)[8] = 121 as i8  // y
+        return 9
+    }
+    if tier == 2 {
+        (*dst)[0] = 99 as i8   // c
+        (*dst)[1] = 117 as i8  // u
+        (*dst)[2] = 114 as i8  // r
+        (*dst)[3] = 97 as i8   // a
+        (*dst)[4] = 116 as i8  // t
+        (*dst)[5] = 101 as i8  // e
+        (*dst)[6] = 100 as i8  // d
+        return 7
+    }
+    // regulatory
+    (*dst)[0] = 114 as i8  // r
+    (*dst)[1] = 101 as i8  // e
+    (*dst)[2] = 103 as i8  // g
+    (*dst)[3] = 117 as i8  // u
+    (*dst)[4] = 108 as i8  // l
+    (*dst)[5] = 97 as i8   // a
+    (*dst)[6] = 116 as i8  // t
+    (*dst)[7] = 111 as i8  // o
+    (*dst)[8] = 114 as i8  // r
+    (*dst)[9] = 121 as i8  // y
+    10
+}
+
+// Calcula score a partir dos metadados do manifesto + métricas observadas.
+//
+// knowledge_api_ratio:   fração de funções públicas que usam Knowledge<T>
+// gum_test_ratio:        fração de testes que testam propagação de incerteza GUM
+// confidence_gate_usage: 0..1, fração de pipelines com confidence_gate declarado
+// test_coverage:         0..1, cobertura geral de testes
+// example_count:         número de exemplos executáveis com //@ run-pass
+// doc_score:             0..1, score de documentação (calculado externamente)
+pub fn pkg_score_compute(
+    knowledge_api_ratio: f64,
+    gum_test_ratio: f64,
+    confidence_gate_usage: f64,
+    ledger_usage: f64,
+    test_coverage: f64,
+    example_count: i64,
+    doc_score: f64,
+    manifest_score: f64,
+    prov_level: i64,
+    gum_compliant: bool,
+    regulatory_ready: bool
+) -> EpistemicScore with Div, Panic, Mut {
+
+    // Provenance sub-score combina level + ledger + confidence_gate
+    let prov_base = scorer_provenance_score(prov_level)
+    let prov_gate_boost = confidence_gate_usage * 0.4
+    let prov_ledger_boost = ledger_usage * 0.4
+    let prov_gum_boost = if gum_compliant { 0.2 } else { 0.0 }
+    let provenance = scorer_clamp(prov_base * 0.5 + prov_gate_boost + prov_ledger_boost + prov_gum_boost, 0.0, 1.0)
+
+    // Docs sub-score: penaliza falta de exemplos
+    let example_bonus = scorer_clamp(example_count as f64 * 0.1, 0.0, 0.3)
+    let docs = scorer_clamp(doc_score * 0.7 + example_bonus, 0.0, 1.0)
+
+    // Se o manifesto declara um score explícito, usa como âncora (peso 20%)
+    let manifest_anchor = if manifest_score > 0.0 { manifest_score * 0.20 } else { 0.0 }
+    let computed_weight = if manifest_score > 0.0 { 0.80 } else { 1.0 }
+
+    let computed =
+        knowledge_api_ratio * W_KNOWLEDGE_USE +
+        gum_test_ratio      * W_UNCERTAINTY_TEST +
+        provenance          * W_PROVENANCE +
+        test_coverage       * W_TEST_COVERAGE +
+        docs                * W_DOCS
+
+    let total = scorer_clamp(computed * computed_weight + manifest_anchor, 0.0, 1.0)
+
+    let tier = scorer_tier(total, gum_compliant, prov_level, regulatory_ready)
+    var tier_buf: [i8; 16] = [0; 16]
+    let tier_len = scorer_tier_name(tier, &!tier_buf)
+
+    EpistemicScore {
+        total: total,
+        knowledge_use: scorer_clamp(knowledge_api_ratio, 0.0, 1.0),
+        uncertainty_test: scorer_clamp(gum_test_ratio, 0.0, 1.0),
+        provenance: provenance,
+        test_coverage: scorer_clamp(test_coverage, 0.0, 1.0),
+        docs: docs,
+        tier: tier,
+        tier_name: tier_buf,
+        tier_name_len: tier_len,
+    }
+}
+
+// Score rápido a partir apenas do manifesto (sem análise de código)
+pub fn pkg_score_from_manifest(
+    manifest_score: f64,
+    prov_level: i64,
+    gum_compliant: bool,
+    regulatory_ready: bool,
+    dep_count: i64,
+    example_count: i64
+) -> EpistemicScore with Div, Panic, Mut {
+    let doc_est = if example_count > 2 { 0.7 } else if example_count > 0 { 0.4 } else { 0.1 }
+    let test_est = if dep_count > 0 { 0.5 } else { 0.3 }
+    pkg_score_compute(
+        manifest_score,
+        if gum_compliant { 0.7 } else { 0.3 },
+        if prov_level >= 2 { 0.6 } else { 0.2 },
+        if prov_level >= 2 { 0.5 } else { 0.1 },
+        test_est,
+        example_count,
+        doc_est,
+        manifest_score,
+        prov_level,
+        gum_compliant,
+        regulatory_ready
+    )
+}
+
+pub fn pkg_score_print(s: &EpistemicScore) with IO, Mut, Panic, Div {
+    let total_pct = ((*s).total * 100.0) as i64
+    let kn_pct    = ((*s).knowledge_use * 100.0) as i64
+    let ut_pct    = ((*s).uncertainty_test * 100.0) as i64
+    let pv_pct    = ((*s).provenance * 100.0) as i64
+    let tc_pct    = ((*s).test_coverage * 100.0) as i64
+    let dc_pct    = ((*s).docs * 100.0) as i64
+
+    println("--- Epistemic Score Report ---")
+    print("  total:            "); print_int(total_pct); println("%")
+    print("  knowledge-use:    "); print_int(kn_pct);    println("% (weight 35%)")
+    print("  uncertainty-test: "); print_int(ut_pct);    println("% (weight 25%)")
+    print("  provenance:       "); print_int(pv_pct);    println("% (weight 20%)")
+    print("  test-coverage:    "); print_int(tc_pct);    println("% (weight 10%)")
+    print("  docs:             "); print_int(dc_pct);    println("% (weight 10%)")
+    print("  tier:             ")
+    var i: i64 = 0
+    while i < (*s).tier_name_len {
+        print_char((*s).tier_name[i as usize] as i64)
+        i = i + 1
+    }
+    println("")
+    if (*s).tier == 0 {
+        println("  warning: score < 0.60 — package will be marked EXPERIMENTAL in registry")
+    } else if (*s).tier == 3 {
+        println("  note: REGULATORY tier — human review required before registry publish")
+    }
+    println("------------------------------")
+}
+
+// ============================================================================
+// SELF-TEST
+// ============================================================================
+
+pub fn pkg_scorer_self_test() -> bool with IO, Div, Panic, Mut {
+    let s1 = pkg_score_compute(
+        0.90,   // knowledge_api_ratio
+        0.85,   // gum_test_ratio
+        0.70,   // confidence_gate_usage
+        0.65,   // ledger_usage
+        0.88,   // test_coverage
+        5,      // example_count
+        0.80,   // doc_score
+        0.94,   // manifest_score
+        3,      // prov_level: regulatory
+        true,   // gum_compliant
+        true    // regulatory_ready
+    )
+    // Score deve ser alto (tier 3 = regulatory)
+    if s1.total < 0.80 { return false }
+    if s1.tier != 3 { return false }
+
+    let s2 = pkg_score_compute(
+        0.10, 0.05, 0.0, 0.0, 0.20, 0, 0.0, 0.0,
+        0, false, false
+    )
+    // Score deve ser baixo (tier 0 = experimental)
+    if s2.total > 0.30 { return false }
+    if s2.tier != 0 { return false }
+
+    true
+}

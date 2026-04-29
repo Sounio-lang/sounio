@@ -9,7 +9,7 @@
 ## Deliverables Created (Days 1-3)
 
 ### 1. ✅ demo.py — End-to-End Integration Test
-**File:** `/triple-sounio-ecosystem/demo.py` (6.6 KB)
+**File:** `/ecosystem/demo.py` (6.6 KB)
 **Status:** Complete and syntax-validated
 
 **Features:**
@@ -26,7 +26,7 @@
 ---
 
 ### 2. ✅ INTEGRATION_CHECKLIST.md — Day 11-14 Validation
-**File:** `/triple-sounio-ecosystem/INTEGRATION_CHECKLIST.md` (9.3 KB)
+**File:** `/ecosystem/INTEGRATION_CHECKLIST.md` (9.3 KB)
 **Status:** Complete
 
 **Contents:**
@@ -44,7 +44,7 @@
 ---
 
 ### 3. ✅ INTEGRATION_NOTES.md — Critical Handoff Documentation
-**File:** `/triple-sounio-ecosystem/INTEGRATION_NOTES.md` (15 KB)
+**File:** `/ecosystem/INTEGRATION_NOTES.md` (15 KB)
 **Status:** Complete
 
 **Contains:**
@@ -64,7 +64,7 @@
 ---
 
 ### 4. ✅ OFFLOAD_PROMPTS.md — Documentation Tasks (Days 13-14)
-**File:** `/triple-sounio-ecosystem/OFFLOAD_PROMPTS.md` (11 KB)
+**File:** `/ecosystem/OFFLOAD_PROMPTS.md` (11 KB)
 **Status:** Complete and ready to use
 
 **Contains:**
@@ -158,7 +158,7 @@ cat INTEGRATION_CHECKLIST.md | grep "^- \[\]" | wc -l
 **Deliverable:** All 3 tests PASS (or documented SKIPs)
 
 ```bash
-cd /home/demetrios/RustroverProjects/sounio/triple-sounio-ecosystem
+cd /workspace/sounio/ecosystem
 export SOUC=...   # Set from Track C or previous build
 export SOUNIO_STDLIB_PATH=...
 python demo.py
@@ -193,7 +193,7 @@ python demo.py
 
 ```bash
 # Ecosystem README structure (after offloads):
-triple-sounio-ecosystem/
+ecosystem/
 ├── README.md                      # NEW — overview + setup
 ├── INTEGRATION_NOTES.md           # Reference
 ├── INTEGRATION_CHECKLIST.md       # Historical

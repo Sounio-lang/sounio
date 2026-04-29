@@ -11,7 +11,7 @@ Complete development environment for the Triple Sounio Ecosystem (L0 systems + e
 ### Launch the Container
 
 ```bash
-cd triple-sounio-ecosystem/docker/
+cd ecosystem/docker/
 docker-compose up --build
 ```
 
@@ -35,7 +35,7 @@ When prompted, enter the token: **sounio**
 ## Directory Structure
 
 ```
-triple-sounio-ecosystem/docker/
+ecosystem/docker/
 ├── Dockerfile              # Ubuntu 24.04 base + Python 3.12 + Jupyter
 ├── docker-compose.yml      # Service definition with volume mounts
 ├── jupyter_config.py       # Jupyter Lab configuration

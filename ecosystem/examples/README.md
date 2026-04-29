@@ -7,7 +7,7 @@ Complete end-to-end demonstrations of the Triple Sounio Ecosystem: PubChem molec
 ### Run the Complete Demo
 
 ```bash
-cd triple-sounio-ecosystem
+cd ecosystem
 
 # With all optional dependencies
 PYTHONPATH=sounio-py/python \
@@ -127,7 +127,7 @@ The report is saved in the `examples/` directory and can be viewed with any Mark
 Run the expanded integration test suite:
 
 ```bash
-cd triple-sounio-ecosystem
+cd ecosystem
 
 PYTHONPATH=sounio-py/python python3 -m pytest tests/test_integration.py -v
 ```
@@ -201,9 +201,9 @@ export PYTHONPATH="$(pwd)/sounio-py/python:$PYTHONPATH"
 
 ### pytest fails to find tests
 
-Run pytest from the triple-sounio-ecosystem directory with correct PYTHONPATH:
+Run pytest from the ecosystem directory with correct PYTHONPATH:
 ```bash
-cd triple-sounio-ecosystem
+cd ecosystem
 PYTHONPATH=sounio-py/python python3 -m pytest tests/test_integration.py
 ```
 

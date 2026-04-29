@@ -1,0 +1,846 @@
+// Seizure O-SSM Preprint Benchmark: Per-Patient + Cohen's d + Permutation + Fano
+//
+// Key fixes over seizure_perpatient.sio:
+//   - Log-normalized Hessian: log(||H_od|| + 1) for cross-patient comparability
+//   - Working Cohen's d in log-space (no overflow)
+//   - Permutation test: 200 shuffles per patient, p-value for ictal vs baseline
+//   - Fano lines + O-SSM vs H-SSM per patient
+//
+// Labels: 0=baseline, 1=interictal, 2=ictal, 3=pre_ictal, 4=post_ictal
+
+var FEATURES: [f64; 262144] = [0.0; 262144]
+var LABELS: [i64; 4096] = [0; 4096]
+var SITE_KEYS: [i64; 4096] = [0; 4096]
+var UNIQUE_SITES: [i64; 64] = [0; 64]
+var UNIQUE_SITE_COUNT: i64 = 0
+var SUBJECT_COUNT: i64 = 0
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+var W: [i64; 24] = [0; 24]
+var MOM: [i64; 24] = [0; 24]
+var HH: [i64; 8] = [0; 8]
+var HH2: [i64; 8] = [0; 8]
+var A: [f64; 8] = [0.0; 8]
+var A2: [f64; 8] = [0.0; 8]
+var SAVED_A: [f64; 8] = [0.0; 8]
+var SAVED_A2: [f64; 8] = [0.0; 8]
+var BEST_A: [f64; 8] = [0.0; 8]
+var BEST_A2: [f64; 8] = [0.0; 8]
+var BEST_W: [i64; 24] = [0; 24]
+var BEST_MOM: [i64; 24] = [0; 24]
+var ASSOC_ACC: i64 = 0
+var ASSOC_ACC2: i64 = 0
+var LOGIT: f64 = 0.0
+var TMP_OCT: [f64; 8] = [0.0; 8]
+var HESS: [i64; 64] = [0; 64]
+
+// Per-patient log-od accumulation: 5 classes × 8 patients max
+// Store as i64 scaled ×1000 (milliunits of log)
+var PP_LOG_SUM: [i64; 40] = [0; 40]
+var PP_LOG_SSQ: [i64; 40] = [0; 40]
+var PP_CT: [i64; 40] = [0; 40]
+
+// Fano and O/H-SSM per patient (log-scale)
+var PP_FANO_ICT: [i64; 56] = [0; 56]
+var PP_FANO_BAS: [i64; 56] = [0; 56]
+var PP_FANO_ICT_N: [i64; 8] = [0; 8]
+var PP_FANO_BAS_N: [i64; 8] = [0; 8]
+var PP_OSSM_LOG: [i64; 8] = [0; 8]
+var PP_HSSM_LOG: [i64; 8] = [0; 8]
+var PP_OH_N: [i64; 8] = [0; 8]
+
+// Permutation test: store holdout indices and od values for shuffling
+var PERM_OD: [i64; 1024] = [0; 1024]
+var PERM_LAB: [i64; 1024] = [0; 1024]
+var PERM_N: i64 = 0
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn ln_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 30.0 }
+    if x != x { return 0.0 }
+    // ln via Newton: solve e^y = x
+    // Start with rough estimate: ln(x) ~ (x-1) for x near 1
+    // For large x, use ln(x) = ln(x/e^k) + k
+    var y = 0.0
+    var xx = x
+    while xx > 2.718 { xx = xx / 2.718281828; y = y + 1.0 }
+    while xx < 0.368 { xx = xx * 2.718281828; y = y - 1.0 }
+    // Now xx in [0.368, 2.718], refine with series: ln(1+u) = u - u^2/2 + u^3/3...
+    let u = xx - 1.0
+    var term = u
+    var sum = u
+    var i = 2
+    while i <= 12 {
+        term = 0.0 - term * u * ((i - 1) as f64) / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    y + sum
+}
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0; var term = 1.0; var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }; sum
+}
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x != x { return 0.0 }; if x <= 0.0 { return 0.0 }
+    var g = x; var i = 0; while i < 16 { g = 0.5 * (g + x / g); i = i + 1 }
+    if g != g { return 0.0 }; g
+}
+fn sigmoid_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x >= 0.0 { 1.0 / (1.0 + exp_q(0.0 - x)) } else { let ex = exp_q(x); ex / (1.0 + ex) }
+}
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26)); RNG_B = x
+    let r = x + y; if r < 0 { 0 - r } else { r }
+}
+fn randf() -> f64 with Mut, Div { ((rng_next() % 20000) as f64 - 10000.0) / 10000.0 }
+
+fn print_int(v: i64) with IO, Mut {
+    if v < 0 { print("-"); print_int(0 - v); return }
+    if v >= 10 { print_int(v / 10) }
+    let d = v % 10
+    if d==0{print("0")}if d==1{print("1")}if d==2{print("2")}if d==3{print("3")}
+    if d==4{print("4")}if d==5{print("5")}if d==6{print("6")}if d==7{print("7")}
+    if d==8{print("8")}if d==9{print("9")}
+}
+
+fn print_f2(v: f64) with IO, Mut, Div {
+    if v < 0.0 { print("-") }
+    let av = abs_f64(v)
+    let whole = av as i64
+    let frac = ((av - (whole as f64)) * 100.0 + 0.5) as i64
+    print_int(whole); print("."); if frac < 10 { print("0") }; print_int(frac)
+}
+
+fn load_manifest(path: string) -> i64 with IO, Mut, Div, Panic {
+    SUBJECT_COUNT = 0; UNIQUE_SITE_COUNT = 0
+    let n = file_size(path)
+    if n <= 0 { return 0 }
+    let raw = read_file(path)
+    let bytes = raw.as_bytes()
+    if n < 24 { return -1 }
+    var header_start: i64 = 0
+    var seeking = true
+    while seeking && header_start < n {
+        while header_start < n && (bytes[header_start as usize] == 10 || bytes[header_start as usize] == 13) { header_start = header_start + 1 }
+        if header_start >= n { seeking = false }
+        else if bytes[header_start as usize] == 35 { while header_start < n && bytes[header_start as usize] != 10 { header_start = header_start + 1 }; if header_start < n { header_start = header_start + 1 } }
+        else { seeking = false }
+    }
+    if header_start + 24 >= n || bytes[header_start as usize] != 115 || bytes[(header_start+1) as usize] != 117 || bytes[(header_start+2) as usize] != 98 || bytes[(header_start+3) as usize] != 106 { return -1 }
+    var pos: i64 = header_start
+    while pos < n && bytes[pos as usize] != 10 { pos = pos + 1 }
+    if pos < n { pos = pos + 1 }
+    while pos < n && SUBJECT_COUNT < 4096 {
+        if bytes[pos as usize] == 10 { pos = pos + 1 }
+        else if bytes[pos as usize] == 35 { while pos < n && bytes[pos as usize] != 10 { pos = pos + 1 }; if pos < n { pos = pos + 1 } }
+        else {
+        var line_end = pos
+        while line_end < n && bytes[line_end as usize] != 10 { line_end = line_end + 1 }
+        var field_idx: i64 = 0; var field_start = pos; var label: i64 = -1; var site_hash: i64 = 5381; var feature_idx: i64 = 0
+        var i = pos
+        while i <= line_end {
+            let is_end = i == line_end
+            let is_tab = if is_end { false } else { bytes[i as usize] == 9 }
+            if is_end || is_tab {
+                if field_idx == 1 { if i > field_start { let b = bytes[field_start as usize]; if b==48{label=0}else if b==49{label=1}else if b==50{label=2}else if b==51{label=3}else if b==52{label=4} } }
+                else if field_idx == 2 { var si=field_start; while si<i{site_hash=site_hash*33+(bytes[si as usize] as i64);si=si+1} }
+                else if field_idx >= 3 && feature_idx < 64 {
+                    var val: f64=0.0; var neg=false; var seen_dot=false; var frac_scale=1.0; var si=field_start
+                    if si<i && bytes[si as usize]==45{neg=true;si=si+1}
+                    while si<i{let b=bytes[si as usize];if b==46{seen_dot=true}else if b>=48&&b<=57{if !seen_dot{val=val*10.0+((b-48) as f64)}else{frac_scale=frac_scale*0.1;val=val+frac_scale*((b-48) as f64)}};si=si+1}
+                    if neg{val=0.0-val}
+                    FEATURES[(SUBJECT_COUNT*64+feature_idx) as usize]=val
+                    feature_idx=feature_idx+1
+                }
+                field_idx=field_idx+1; field_start=i+1
+            }; i=i+1
+        }
+        if label>=0 && feature_idx>=8{LABELS[SUBJECT_COUNT as usize]=label;SITE_KEYS[SUBJECT_COUNT as usize]=site_hash;SUBJECT_COUNT=SUBJECT_COUNT+1}
+        pos=line_end+1
+        }
+    }; SUBJECT_COUNT
+}
+
+fn discover_sites() -> i64 with Mut {
+    UNIQUE_SITE_COUNT=0; var s: i64=0
+    while s<SUBJECT_COUNT{let key=SITE_KEYS[s as usize]; var exists: i64=0; var i: i64=0
+    while i<UNIQUE_SITE_COUNT{if UNIQUE_SITES[i as usize]==key{exists=1;break};i=i+1}
+    if exists==0&&UNIQUE_SITE_COUNT<64{UNIQUE_SITES[UNIQUE_SITE_COUNT as usize]=key;UNIQUE_SITE_COUNT=UNIQUE_SITE_COUNT+1};s=s+1}; UNIQUE_SITE_COUNT
+}
+
+fn ws(i: i64, v: f64) with Mut { W[i as usize]=(v*100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i as usize] as f64)/100000000.0 }
+fn hs(i: i64, v: f64) with Mut { HH[i as usize]=(v*100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (HH[i as usize] as f64)/100000000.0 }
+fn assoc_s(v: f64) with Mut { ASSOC_ACC=(v*100000000.0) as i64 }
+fn assoc_g() -> f64 with Div { (ASSOC_ACC as f64)/100000000.0 }
+
+fn h2s(i: i64, v: f64) with Mut { HH2[i as usize]=(v*100000000.0) as i64 }
+fn h2g(i: i64) -> f64 with Div { (HH2[i as usize] as f64)/100000000.0 }
+fn assoc2_s(v: f64) with Mut { ASSOC_ACC2=(v*100000000.0) as i64 }
+fn assoc2_g() -> f64 with Div { (ASSOC_ACC2 as f64)/100000000.0 }
+
+fn init_model() with Mut, Div, Panic {
+    var i: i64=0; while i<20{ws(i,randf()/6.0);MOM[i as usize]=0;i=i+1}
+    // A1: random unit octonion
+    var nsq=0.0; i=0; while i<8{A[i as usize]=randf();nsq=nsq+A[i as usize]*A[i as usize];i=i+1}
+    let n=sqrt_q(nsq); i=0
+    while i<8{if n>0.000000001{A[i as usize]=A[i as usize]/n}else if i==0{A[i as usize]=1.0}else{A[i as usize]=0.0};i=i+1}
+    // A2: random unit octonion (independent)
+    nsq=0.0; i=0; while i<8{A2[i as usize]=randf();nsq=nsq+A2[i as usize]*A2[i as usize];i=i+1}
+    let n2=sqrt_q(nsq); i=0
+    while i<8{if n2>0.000000001{A2[i as usize]=A2[i as usize]/n2}else if i==0{A2[i as usize]=1.0}else{A2[i as usize]=0.0};i=i+1}
+}
+
+fn warm_start_A(holdout_key: i64) with Mut, Div, Panic {
+    // 1D: Initialize A from mean direction of training features
+    var mean: [f64; 8] = [0.0; 8]
+    var ct: i64 = 0
+    var s: i64 = 0
+    while s < SUBJECT_COUNT {
+        if SITE_KEYS[s as usize] != holdout_key {
+            var d: i64 = 0
+            while d < 8 { mean[d as usize] = mean[d as usize] + FEATURES[(s*64+d) as usize]; d = d + 1 }
+            ct = ct + 1
+        }
+        s = s + 1
+    }
+    if ct > 0 {
+        var nsq = 0.0
+        var d: i64 = 0
+        while d < 8 { mean[d as usize] = mean[d as usize] / (ct as f64); nsq = nsq + mean[d as usize] * mean[d as usize]; d = d + 1 }
+        let n = sqrt_q(nsq)
+        if n > 0.001 { d = 0; while d < 8 { A[d as usize] = mean[d as usize] / n; d = d + 1 } }
+    }
+}
+
+fn reset_state() with Mut { var i: i64=0; while i<8{HH[i as usize]=0;HH2[i as usize]=0;i=i+1}; hs(0,1.0); h2s(0,1.0); ASSOC_ACC=0; ASSOC_ACC2=0; LOGIT=0.0 }
+
+fn do_oct_mul(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    TMP_OCT[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    TMP_OCT[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    TMP_OCT[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    TMP_OCT[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    TMP_OCT[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    TMP_OCT[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    TMP_OCT[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    TMP_OCT[7]=a0*b7+a7*b0-a1*b6+a6*b1-a2*b5+a5*b2+a3*b4-a4*b3
+}
+
+fn oct_step(x0:f64,x1:f64,x2:f64,x3:f64,x4:f64,x5:f64,x6:f64,x7:f64) with Mut,Div,Panic {
+    // Layer 1: h1 = (A1 * h1) * x + 0.2 * A1 * (h1 * x)
+    do_oct_mul(A[0],A[1],A[2],A[3],A[4],A[5],A[6],A[7],hg(0),hg(1),hg(2),hg(3),hg(4),hg(5),hg(6),hg(7))
+    let t0=TMP_OCT[0];let t1=TMP_OCT[1];let t2=TMP_OCT[2];let t3=TMP_OCT[3]
+    let t4=TMP_OCT[4];let t5=TMP_OCT[5];let t6=TMP_OCT[6];let t7=TMP_OCT[7]
+    do_oct_mul(t0,t1,t2,t3,t4,t5,t6,t7,x0,x1,x2,x3,x4,x5,x6,x7)
+    var left: [f64;8]=[0.0;8]; var d: i64=0
+    while d<8{left[d as usize]=TMP_OCT[d as usize];d=d+1}
+    do_oct_mul(hg(0),hg(1),hg(2),hg(3),hg(4),hg(5),hg(6),hg(7),x0,x1,x2,x3,x4,x5,x6,x7)
+    let hx0=TMP_OCT[0];let hx1=TMP_OCT[1];let hx2=TMP_OCT[2];let hx3=TMP_OCT[3]
+    let hx4=TMP_OCT[4];let hx5=TMP_OCT[5];let hx6=TMP_OCT[6];let hx7=TMP_OCT[7]
+    do_oct_mul(A[0],A[1],A[2],A[3],A[4],A[5],A[6],A[7],hx0,hx1,hx2,hx3,hx4,hx5,hx6,hx7)
+    var asq=0.0; d=0
+    while d<8{let diff=left[d as usize]-TMP_OCT[d as usize];asq=asq+diff*diff;d=d+1}
+    var assoc_step=sqrt_q(asq); if assoc_step!=assoc_step{assoc_step=0.0}; if assoc_step>1000.0{assoc_step=1000.0}
+    assoc_s(assoc_g()+assoc_step)
+    d=0; while d<8{var v=left[d as usize]+0.2*TMP_OCT[d as usize];if v!=v{v=0.0};if v>5.0{v=5.0}if v<0.0-5.0{v=0.0-5.0};hs(d,v);d=d+1}
+
+    // Layer 2: h2 = (A2 * h2) * h1_out + 0.2 * A2 * (h2 * h1_out)
+    let o0=hg(0);let o1=hg(1);let o2=hg(2);let o3=hg(3);let o4=hg(4);let o5=hg(5);let o6=hg(6);let o7=hg(7)
+    do_oct_mul(A2[0],A2[1],A2[2],A2[3],A2[4],A2[5],A2[6],A2[7],h2g(0),h2g(1),h2g(2),h2g(3),h2g(4),h2g(5),h2g(6),h2g(7))
+    let u0=TMP_OCT[0];let u1=TMP_OCT[1];let u2=TMP_OCT[2];let u3=TMP_OCT[3]
+    let u4=TMP_OCT[4];let u5=TMP_OCT[5];let u6=TMP_OCT[6];let u7=TMP_OCT[7]
+    do_oct_mul(u0,u1,u2,u3,u4,u5,u6,u7,o0,o1,o2,o3,o4,o5,o6,o7)
+    var left2: [f64;8]=[0.0;8]; d=0
+    while d<8{left2[d as usize]=TMP_OCT[d as usize];d=d+1}
+    do_oct_mul(h2g(0),h2g(1),h2g(2),h2g(3),h2g(4),h2g(5),h2g(6),h2g(7),o0,o1,o2,o3,o4,o5,o6,o7)
+    let r0=TMP_OCT[0];let r1=TMP_OCT[1];let r2=TMP_OCT[2];let r3=TMP_OCT[3]
+    let r4=TMP_OCT[4];let r5=TMP_OCT[5];let r6=TMP_OCT[6];let r7=TMP_OCT[7]
+    do_oct_mul(A2[0],A2[1],A2[2],A2[3],A2[4],A2[5],A2[6],A2[7],r0,r1,r2,r3,r4,r5,r6,r7)
+    var asq2=0.0; d=0
+    while d<8{let diff=left2[d as usize]-TMP_OCT[d as usize];asq2=asq2+diff*diff;d=d+1}
+    var as2=sqrt_q(asq2); if as2!=as2{as2=0.0}; if as2>1000.0{as2=1000.0}
+    assoc2_s(assoc2_g()+as2)
+    d=0; while d<8{var v=left2[d as usize]+0.2*TMP_OCT[d as usize];if v!=v{v=0.0};if v>5.0{v=5.0}if v<0.0-5.0{v=0.0-5.0};h2s(d,v);d=d+1}
+}
+
+fn forward_subject(subj: i64) with Mut,Div,Panic {
+    reset_state(); let base=subj*64; var step: i64=0
+    while step<8{let off=base+step*8;oct_step(FEATURES[off as usize],FEATURES[(off+1) as usize],FEATURES[(off+2) as usize],FEATURES[(off+3) as usize],FEATURES[(off+4) as usize],FEATURES[(off+5) as usize],FEATURES[(off+6) as usize],FEATURES[(off+7) as usize]);step=step+1}
+    var af=assoc_g()/8.0; if af!=af{af=0.0}; assoc_s(af)
+    var af2=assoc2_g()/8.0; if af2!=af2{af2=0.0}; assoc2_s(af2)
+    // Head reads from h1[0..7] (W[0..7]), h2[0..7] (W[10..17]), assoc1 (W[8]), assoc2 (W[18]), bias (W[9])
+    var s=wg(9); var d: i64=0
+    while d<8{var proj=hg(d)*wg(d);if proj!=proj{proj=0.0};s=s+proj;d=d+1}
+    d=0; while d<8{var proj=h2g(d)*wg(10+d);if proj!=proj{proj=0.0};s=s+proj;d=d+1}
+    var ap=af*wg(8); if ap!=ap{ap=0.0}; s=s+ap
+    var ap2=af2*wg(18); if ap2!=ap2{ap2=0.0}; s=s+ap2
+    LOGIT=s
+}
+
+fn update_binary(target: i64, lr: f64) with Mut,Div,Panic {
+    let prob=sigmoid_q(LOGIT); var grad=prob-(target as f64)
+    if grad>0.5{grad=0.5}if grad<0.0-0.5{grad=0.0-0.5}
+    // h1 weights [0..7]
+    var d: i64=0
+    while d<8{let g=hg(d)*grad;let m=(MOM[d as usize] as f64)/100000000.0*0.9+g;MOM[d as usize]=(m*100000000.0) as i64;ws(d,wg(d)-lr*m);d=d+1}
+    // assoc1 [8]
+    let ag=assoc_g()*grad;let am=(MOM[8] as f64)/100000000.0*0.9+ag;MOM[8]=(am*100000000.0) as i64;ws(8,wg(8)-lr*am)
+    // bias [9]
+    let bm=(MOM[9] as f64)/100000000.0*0.9+grad;MOM[9]=(bm*100000000.0) as i64;ws(9,wg(9)-lr*bm)
+    // h2 weights [10..17]
+    d=0; while d<8{let g=h2g(d)*grad;let m=(MOM[(10+d) as usize] as f64)/100000000.0*0.9+g;MOM[(10+d) as usize]=(m*100000000.0) as i64;ws(10+d,wg(10+d)-lr*m);d=d+1}
+    // assoc2 [18]
+    let ag2=assoc2_g()*grad;let am2=(MOM[18] as f64)/100000000.0*0.9+ag2;MOM[18]=(am2*100000000.0) as i64;ws(18,wg(18)-lr*am2)
+}
+
+fn compute_loss_subj(subj: i64) -> f64 with Mut,Div,Panic {
+    forward_subject(subj); let prob=sigmoid_q(LOGIT)
+    var p=prob; if p<0.0000001{p=0.0000001}; if p>0.9999999{p=0.9999999}
+    var target=0.0; if LABELS[subj as usize]==2{target=1.0}
+    0.0-(target*ln_q(p)+(1.0-target)*ln_q(1.0-p))
+}
+
+fn compute_subject_hessian(subj: i64) with Mut,Div,Panic {
+    let eps=0.01; let eps2=eps*eps; let f0=compute_loss_subj(subj)
+    var i: i64=0
+    while i<8{
+        let oi=A[i as usize]; A[i as usize]=oi+eps;let fip=compute_loss_subj(subj); A[i as usize]=oi-eps;let fim=compute_loss_subj(subj); A[i as usize]=oi
+        HESS[i*8+i]=((fip-2.0*f0+fim)/eps2*1000000.0) as i64
+        var j=i+1; while j<8{
+            let oj=A[j as usize]; A[i as usize]=oi+eps;A[j as usize]=oj+eps;let fpp=compute_loss_subj(subj)
+            A[j as usize]=oj-eps;let fpm=compute_loss_subj(subj); A[i as usize]=oi-eps;let fmm=compute_loss_subj(subj)
+            A[j as usize]=oj+eps;let fmp=compute_loss_subj(subj); A[i as usize]=oi;A[j as usize]=oj
+            let hij=((fpp-fpm-fmp+fmm)/(4.0*eps2)*1000000.0) as i64; HESS[i*8+j]=hij;HESS[j*8+i]=hij; j=j+1
+        }; i=i+1
+    }
+}
+
+fn offdiag_norm() -> i64 with Mut,Div,Panic {
+    var s: i64=0; var i: i64=0
+    while i<8{var j: i64=0;while j<8{if i!=j{let v=HESS[i*8+j];if v<0{s=s+(0-v)}else{s=s+v}};j=j+1};i=i+1}; s
+}
+
+fn hssm_offdiag() -> i64 with Mut,Div,Panic {
+    var s: i64=0; var i: i64=0
+    while i<4{var j: i64=0;while j<4{if i!=j{let v=HESS[i*8+j];if v<0{s=s+(0-v)}else{s=s+v}};j=j+1};i=i+1}; s
+}
+
+fn fano_energy(a: i64, b: i64, c: i64) -> i64 with Mut,Div,Panic {
+    var s: i64=0
+    let v1=HESS[a*8+b];if v1<0{s=s+(0-v1)}else{s=s+v1}
+    let v2=HESS[b*8+a];if v2<0{s=s+(0-v2)}else{s=s+v2}
+    let v3=HESS[a*8+c];if v3<0{s=s+(0-v3)}else{s=s+v3}
+    let v4=HESS[c*8+a];if v4<0{s=s+(0-v4)}else{s=s+v4}
+    let v5=HESS[b*8+c];if v5<0{s=s+(0-v5)}else{s=s+v5}
+    let v6=HESS[c*8+b];if v6<0{s=s+(0-v6)}else{s=s+v6}; s
+}
+
+fn log_od(od: i64) -> f64 with Mut, Div, Panic {
+    ln_q((od as f64) + 1.0)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var loaded = load_manifest("seizure_hessian_manifest.tsv")
+    if loaded <= 0 { loaded = load_manifest("/workspace/sounio/seizure_hessian_manifest.tsv") }
+    if loaded <= 0 { println("No manifest"); return 1 }
+    discover_sites()
+
+    println("================================================================")
+    println("  O-SSM HESSIAN PREPRINT: Per-Patient Analysis (Sounio Pure)")
+    println("  Log-normalized | Cohen's d | Permutation Test | Fano | O/H-SSM")
+    println("================================================================")
+    print("  Windows: "); print_int(SUBJECT_COUNT); print("  Patients: "); print_int(UNIQUE_SITE_COUNT); print("\n\n")
+
+    // Reset accumulators
+    var ri: i64 = 0
+    while ri < 40 { PP_LOG_SUM[ri as usize]=0; PP_LOG_SSQ[ri as usize]=0; PP_CT[ri as usize]=0; ri=ri+1 }
+    ri=0; while ri<8{PP_FANO_ICT_N[ri as usize]=0;PP_FANO_BAS_N[ri as usize]=0;PP_OSSM_LOG[ri as usize]=0;PP_HSSM_LOG[ri as usize]=0;PP_OH_N[ri as usize]=0;ri=ri+1}
+    ri=0; while ri<56{PP_FANO_ICT[ri as usize]=0;PP_FANO_BAS[ri as usize]=0;ri=ri+1}
+
+    var fold: i64 = 0
+    while fold < UNIQUE_SITE_COUNT {
+        let holdout_key = UNIQUE_SITES[fold as usize]
+        print("  P"); print_int(fold + 1); print("/"); print_int(UNIQUE_SITE_COUNT)
+
+        // 1A: Multi-init ensemble — try 3 seeds, keep best
+        var best_loss: f64 = 999999.0
+        var seed_trial: i64 = 0
+        while seed_trial < 3 {
+            rng_seed(55555 + holdout_key + seed_trial * 11111, 77777 + holdout_key * 17 + seed_trial * 3333)
+            init_model()
+            // 1D: Warm-start A from feature mean direction (first trial only for diversity)
+            if seed_trial == 0 { warm_start_A(holdout_key) }
+
+            // Phase 1: train head with A fixed (60 epochs)
+            var ep: i64=0
+            while ep<60{var seen: i64=0; while seen<300{
+                var subj=(rng_next()/100)%SUBJECT_COUNT
+                if SITE_KEYS[subj as usize]!=holdout_key{forward_subject(subj);var bt: i64=0;if LABELS[subj as usize]==2{bt=1};update_binary(bt,0.02)}
+                seen=seen+1};ep=ep+1}
+
+            // Phase 2: fine-tune A1+A2 via central differences + LR decay (30 epochs)
+            ep=0
+            while ep<30{
+                // 1C: LR decay: 0.01 -> 0.002 over 30 epochs
+                let lr_a = 0.01 - 0.008 * ((ep as f64) / 29.0)
+                let ga_eps = 0.005
+
+                // Baseline loss on batch of 100
+                var batch_loss=0.0; var batch_n: i64=0
+                var si: i64=0; while si<100{
+                    var subj=(rng_next()/100)%SUBJECT_COUNT
+                    if SITE_KEYS[subj as usize]!=holdout_key{batch_loss=batch_loss+compute_loss_subj(subj);batch_n=batch_n+1}
+                    si=si+1}
+                if batch_n>0{batch_loss=batch_loss/(batch_n as f64)}
+
+                // 1C: Central differences for A1 gradient
+                var gi: i64=0; while gi<8{
+                    let orig=A[gi as usize]
+                    A[gi as usize]=orig+ga_eps
+                    var lp=0.0; var bn2: i64=0; si=0; while si<100{
+                        var subj=(rng_next()/100)%SUBJECT_COUNT
+                        if SITE_KEYS[subj as usize]!=holdout_key{lp=lp+compute_loss_subj(subj);bn2=bn2+1}
+                        si=si+1}
+                    if bn2>0{lp=lp/(bn2 as f64)}
+                    A[gi as usize]=orig-ga_eps
+                    var lm=0.0; var bn3: i64=0; si=0; while si<100{
+                        var subj=(rng_next()/100)%SUBJECT_COUNT
+                        if SITE_KEYS[subj as usize]!=holdout_key{lm=lm+compute_loss_subj(subj);bn3=bn3+1}
+                        si=si+1}
+                    if bn3>0{lm=lm/(bn3 as f64)}
+                    let grad_i=(lp-lm)/(2.0*ga_eps)
+                    A[gi as usize]=orig - lr_a*grad_i
+                    gi=gi+1}
+                // Normalize A1
+                var nsq=0.0; gi=0; while gi<8{nsq=nsq+A[gi as usize]*A[gi as usize];gi=gi+1}
+                let anorm=sqrt_q(nsq); if anorm>0.001{gi=0;while gi<8{A[gi as usize]=A[gi as usize]/anorm;gi=gi+1}}
+
+                // Central differences for A2 gradient
+                gi=0; while gi<8{
+                    let orig=A2[gi as usize]
+                    A2[gi as usize]=orig+ga_eps
+                    var lp=0.0; var bn2: i64=0; si=0; while si<100{
+                        var subj=(rng_next()/100)%SUBJECT_COUNT
+                        if SITE_KEYS[subj as usize]!=holdout_key{lp=lp+compute_loss_subj(subj);bn2=bn2+1}
+                        si=si+1}
+                    if bn2>0{lp=lp/(bn2 as f64)}
+                    A2[gi as usize]=orig-ga_eps
+                    var lm=0.0; var bn3: i64=0; si=0; while si<100{
+                        var subj=(rng_next()/100)%SUBJECT_COUNT
+                        if SITE_KEYS[subj as usize]!=holdout_key{lm=lm+compute_loss_subj(subj);bn3=bn3+1}
+                        si=si+1}
+                    if bn3>0{lm=lm/(bn3 as f64)}
+                    let grad_i=(lp-lm)/(2.0*ga_eps)
+                    A2[gi as usize]=orig - lr_a*grad_i
+                    gi=gi+1}
+                // Normalize A2
+                nsq=0.0; gi=0; while gi<8{nsq=nsq+A2[gi as usize]*A2[gi as usize];gi=gi+1}
+                let a2norm=sqrt_q(nsq); if a2norm>0.001{gi=0;while gi<8{A2[gi as usize]=A2[gi as usize]/a2norm;gi=gi+1}}
+
+                // Continue head training
+                var seen: i64=0; while seen<300{
+                    var subj=(rng_next()/100)%SUBJECT_COUNT
+                    if SITE_KEYS[subj as usize]!=holdout_key{forward_subject(subj);var bt: i64=0;if LABELS[subj as usize]==2{bt=1};update_binary(bt,0.02)}
+                    seen=seen+1}
+                ep=ep+1}
+
+            // Evaluate this seed's loss
+            var trial_loss: f64 = 0.0; var trial_n: i64 = 0
+            var subj: i64 = 0
+            while subj<SUBJECT_COUNT{
+                if SITE_KEYS[subj as usize]!=holdout_key{trial_loss=trial_loss+compute_loss_subj(subj);trial_n=trial_n+1}
+                subj=subj+1}
+            if trial_n>0{trial_loss=trial_loss/(trial_n as f64)}
+
+            if trial_loss < best_loss {
+                best_loss = trial_loss
+                var ai: i64=0; while ai<8{BEST_A[ai as usize]=A[ai as usize];BEST_A2[ai as usize]=A2[ai as usize];ai=ai+1}
+                ai=0; while ai<20{BEST_W[ai as usize]=W[ai as usize];BEST_MOM[ai as usize]=MOM[ai as usize];ai=ai+1}
+            }
+            seed_trial = seed_trial + 1
+        }
+
+        // Restore best seed
+        var ai: i64=0; while ai<8{A[ai as usize]=BEST_A[ai as usize];A2[ai as usize]=BEST_A2[ai as usize];ai=ai+1}
+        ai=0; while ai<20{W[ai as usize]=BEST_W[ai as usize];MOM[ai as usize]=BEST_MOM[ai as usize];ai=ai+1}
+
+        // Test accuracy
+        var correct: i64=0; var total: i64=0; var subj: i64=0
+        while subj<SUBJECT_COUNT{if SITE_KEYS[subj as usize]==holdout_key{forward_subject(subj);let pred=if LOGIT>0.0{1}else{0};var bt: i64=0;if LABELS[subj as usize]==2{bt=1};if pred==bt{correct=correct+1};total=total+1};subj=subj+1}
+        print(" acc="); print_int(correct*100/total); print("%")
+        print(" n="); print_int(total); print("\n")
+
+        ai=0; while ai<8{SAVED_A[ai as usize]=A[ai as usize];SAVED_A2[ai as usize]=A2[ai as usize];ai=ai+1}
+
+        // Hessian on holdout — collect log(od) per class + raw for permutation
+        PERM_N = 0
+        subj=0
+        while subj<SUBJECT_COUNT{
+            if SITE_KEYS[subj as usize]==holdout_key{
+                ai=0; while ai<8{A[ai as usize]=SAVED_A[ai as usize];A2[ai as usize]=SAVED_A2[ai as usize];ai=ai+1}
+                compute_subject_hessian(subj)
+                let od=offdiag_norm()
+                let hod=hssm_offdiag()
+                let lod=log_od(od)
+                let lod_k=(lod*1000.0) as i64
+                let lhod=(ln_q((hod as f64)+1.0)*1000.0) as i64
+                let lab=LABELS[subj as usize]
+
+                if lab>=0 && lab<5{
+                    let idx=(fold*5+lab) as usize
+                    PP_LOG_SUM[idx]=PP_LOG_SUM[idx]+lod_k
+                    PP_LOG_SSQ[idx]=PP_LOG_SSQ[idx]+(lod_k/10)*(lod_k/10)
+                    PP_CT[idx]=PP_CT[idx]+1
+                }
+
+                // Store for permutation test (ictal=2 and baseline=0 only)
+                if (lab==2 || lab==0) && PERM_N<1024{
+                    PERM_OD[PERM_N as usize]=lod_k
+                    PERM_LAB[PERM_N as usize]=lab
+                    PERM_N=PERM_N+1
+                }
+
+                if lab==2{
+                    PP_OSSM_LOG[fold as usize]=PP_OSSM_LOG[fold as usize]+lod_k
+                    PP_HSSM_LOG[fold as usize]=PP_HSSM_LOG[fold as usize]+lhod
+                    PP_OH_N[fold as usize]=PP_OH_N[fold as usize]+1
+                }
+
+                // Fano lines (raw scale, ratio is scale-invariant)
+                if lab==2{
+                    PP_FANO_ICT[(fold*7+0) as usize]=PP_FANO_ICT[(fold*7+0) as usize]+fano_energy(1,2,4)
+                    PP_FANO_ICT[(fold*7+1) as usize]=PP_FANO_ICT[(fold*7+1) as usize]+fano_energy(2,3,5)
+                    PP_FANO_ICT[(fold*7+2) as usize]=PP_FANO_ICT[(fold*7+2) as usize]+fano_energy(3,4,6)
+                    PP_FANO_ICT[(fold*7+3) as usize]=PP_FANO_ICT[(fold*7+3) as usize]+fano_energy(4,5,7)
+                    PP_FANO_ICT[(fold*7+4) as usize]=PP_FANO_ICT[(fold*7+4) as usize]+fano_energy(5,6,1)
+                    PP_FANO_ICT[(fold*7+5) as usize]=PP_FANO_ICT[(fold*7+5) as usize]+fano_energy(6,7,2)
+                    PP_FANO_ICT[(fold*7+6) as usize]=PP_FANO_ICT[(fold*7+6) as usize]+fano_energy(7,1,3)
+                    PP_FANO_ICT_N[fold as usize]=PP_FANO_ICT_N[fold as usize]+1
+                } else if lab==0{
+                    PP_FANO_BAS[(fold*7+0) as usize]=PP_FANO_BAS[(fold*7+0) as usize]+fano_energy(1,2,4)
+                    PP_FANO_BAS[(fold*7+1) as usize]=PP_FANO_BAS[(fold*7+1) as usize]+fano_energy(2,3,5)
+                    PP_FANO_BAS[(fold*7+2) as usize]=PP_FANO_BAS[(fold*7+2) as usize]+fano_energy(3,4,6)
+                    PP_FANO_BAS[(fold*7+3) as usize]=PP_FANO_BAS[(fold*7+3) as usize]+fano_energy(4,5,7)
+                    PP_FANO_BAS[(fold*7+4) as usize]=PP_FANO_BAS[(fold*7+4) as usize]+fano_energy(5,6,1)
+                    PP_FANO_BAS[(fold*7+5) as usize]=PP_FANO_BAS[(fold*7+5) as usize]+fano_energy(6,7,2)
+                    PP_FANO_BAS[(fold*7+6) as usize]=PP_FANO_BAS[(fold*7+6) as usize]+fano_energy(7,1,3)
+                    PP_FANO_BAS_N[fold as usize]=PP_FANO_BAS_N[fold as usize]+1
+                }
+            }
+            subj=subj+1
+        }
+        fold=fold+1
+    }
+
+    // ═══ A. PER-PATIENT LOG-NORMALIZED ||H_od|| ═══
+    println("")
+    println("================================================================")
+    println("  A. PER-PATIENT log(||H_od||+1) BY CLASS (mean, milliunits)")
+    println("================================================================")
+    println("  Label:    baseline  interictal  ictal    pre_ictal post_ictal")
+
+    var consistent: i64=0
+    fold=0
+    while fold<UNIQUE_SITE_COUNT{
+        print("  P"); print_int(fold+1); print(":     ")
+        var ci: i64=0
+        while ci<5{
+            let c=PP_CT[(fold*5+ci) as usize]
+            if c>0{let mean=PP_LOG_SUM[(fold*5+ci) as usize]/c; print_int(mean)}else{print("-")}
+            if ci<4{print("     ")}
+            ci=ci+1
+        }
+        let bc=PP_CT[(fold*5+0) as usize]
+        let ic=PP_CT[(fold*5+2) as usize]
+        if bc>0 && ic>0{
+            let bm=PP_LOG_SUM[(fold*5+0) as usize]/bc
+            let im=PP_LOG_SUM[(fold*5+2) as usize]/ic
+            if im>bm{print("  ICT>BAS");consistent=consistent+1}else{print("  BAS>ICT")}
+        }
+        print("\n"); fold=fold+1
+    }
+    print("\n  Consistent: "); print_int(consistent); print("/"); print_int(UNIQUE_SITE_COUNT); print("\n")
+
+    // ═══ B. COHEN'S D IN LOG-SPACE ═══
+    println("")
+    println("================================================================")
+    println("  B. EFFECT SIZE: Cohen's d (log-space, ictal vs baseline)")
+    println("================================================================")
+
+    fold=0
+    while fold<UNIQUE_SITE_COUNT{
+        let ni=PP_CT[(fold*5+2) as usize]
+        let nb=PP_CT[(fold*5+0) as usize]
+        if ni>1 && nb>1{
+            let mean_i=(PP_LOG_SUM[(fold*5+2) as usize] as f64)/(ni as f64)
+            let mean_b=(PP_LOG_SUM[(fold*5+0) as usize] as f64)/(nb as f64)
+            // ssq stored as (lod_k/10)^2, so variance = ssq*100/n - mean^2
+            let var_i=((PP_LOG_SSQ[(fold*5+2) as usize] as f64)*100.0/(ni as f64)) - mean_i*mean_i
+            let var_b=((PP_LOG_SSQ[(fold*5+0) as usize] as f64)*100.0/(nb as f64)) - mean_b*mean_b
+            let pooled_var=(abs_f64(var_i)*((ni-1) as f64)+abs_f64(var_b)*((nb-1) as f64))/((ni+nb-2) as f64)
+            let pooled_sd=sqrt_q(abs_f64(pooled_var))
+            print("  P"); print_int(fold+1)
+            print(": mean_ict="); print_f2(mean_i/1000.0)
+            print(" mean_bas="); print_f2(mean_b/1000.0)
+            if pooled_sd>0.01{
+                let d_val=(mean_i-mean_b)/pooled_sd
+                print(" d="); print_f2(d_val)
+            } else {
+                print(" d=inf")
+            }
+            print("\n")
+        }
+        fold=fold+1
+    }
+
+    // ═══ C. PERMUTATION TEST ═══
+    println("")
+    println("================================================================")
+    println("  C. PERMUTATION TEST (1000 shuffles per patient)")
+    println("================================================================")
+    println("  H0: ictal and baseline have same log(||H_od||) distribution")
+    println("  p = fraction of shuffles where mean_diff >= observed")
+    println("")
+
+    fold=0
+    while fold<UNIQUE_SITE_COUNT{
+        // Recompute PERM arrays for this fold
+        let holdout_key=UNIQUE_SITES[fold as usize]
+        PERM_N=0
+        // Re-seed and retrain (must reproduce exact same model)
+        rng_seed(55555+holdout_key,77777+holdout_key*17)
+        init_model()
+        var ep: i64=0
+        while ep<80{var seen: i64=0;while seen<300{
+            var subj=(rng_next()/100)%SUBJECT_COUNT
+            if SITE_KEYS[subj as usize]!=holdout_key{forward_subject(subj);var bt: i64=0;if LABELS[subj as usize]==2{bt=1};update_binary(bt,0.02)}
+            seen=seen+1};ep=ep+1}
+        var ai: i64=0; while ai<8{SAVED_A[ai as usize]=A[ai as usize];ai=ai+1}
+
+        var subj: i64=0
+        while subj<SUBJECT_COUNT{
+            if SITE_KEYS[subj as usize]==holdout_key{
+                let lab=LABELS[subj as usize]
+                if (lab==2||lab==0) && PERM_N<1024{
+                    ai=0;while ai<8{A[ai as usize]=SAVED_A[ai as usize];ai=ai+1}
+                    compute_subject_hessian(subj)
+                    let od=offdiag_norm()
+                    PERM_OD[PERM_N as usize]=(ln_q((od as f64)+1.0)*1000.0) as i64
+                    PERM_LAB[PERM_N as usize]=lab
+                    PERM_N=PERM_N+1
+                }
+            };subj=subj+1
+        }
+
+        // Observed difference
+        var obs_ict_sum: i64=0; var obs_ict_n: i64=0
+        var obs_bas_sum: i64=0; var obs_bas_n: i64=0
+        var pi: i64=0
+        while pi<PERM_N{
+            if PERM_LAB[pi as usize]==2{obs_ict_sum=obs_ict_sum+PERM_OD[pi as usize];obs_ict_n=obs_ict_n+1}
+            else{obs_bas_sum=obs_bas_sum+PERM_OD[pi as usize];obs_bas_n=obs_bas_n+1}
+            pi=pi+1
+        }
+
+        if obs_ict_n>0 && obs_bas_n>0{
+            let obs_diff=obs_ict_sum/obs_ict_n - obs_bas_sum/obs_bas_n
+
+            rng_seed(99999+fold*7777,11111+fold*3333)
+            var exceed: i64=0
+            var perm: i64=0
+            while perm<1000{
+                // Fisher-Yates shuffle of PERM_LAB
+                var si: i64=PERM_N-1
+                while si>0{
+                    let swap_idx=rng_next()%(si+1)
+                    let tmp=PERM_LAB[si as usize]
+                    PERM_LAB[si as usize]=PERM_LAB[swap_idx as usize]
+                    PERM_LAB[swap_idx as usize]=tmp
+                    si=si-1
+                }
+
+                var sh_ict_sum: i64=0; var sh_ict_n: i64=0
+                var sh_bas_sum: i64=0; var sh_bas_n: i64=0
+                pi=0
+                while pi<PERM_N{
+                    if PERM_LAB[pi as usize]==2{sh_ict_sum=sh_ict_sum+PERM_OD[pi as usize];sh_ict_n=sh_ict_n+1}
+                    else{sh_bas_sum=sh_bas_sum+PERM_OD[pi as usize];sh_bas_n=sh_bas_n+1}
+                    pi=pi+1
+                }
+                if sh_ict_n>0 && sh_bas_n>0{
+                    let sh_diff=sh_ict_sum/sh_ict_n-sh_bas_sum/sh_bas_n
+                    if sh_diff>=obs_diff{exceed=exceed+1}
+                }
+                perm=perm+1
+            }
+
+            // Two-sided p: min(exceed, 1000-exceed)*2 / 1000
+            var p_one = (exceed as f64)/1000.0
+            var p_two = p_one
+            if p_one > 0.5 { p_two = (1.0 - p_one) }
+            p_two = p_two * 2.0
+            if p_two > 1.0 { p_two = 1.0 }
+            print("  P"); print_int(fold+1)
+            print(": obs_diff="); print_int(obs_diff)
+            print("m  exceed="); print_int(exceed); print("/1000")
+            print("  p_1="); print_f2(p_one)
+            print("  p_2="); print_f2(p_two)
+            if p_two<0.10{print(" *")}
+            if p_two<0.05{print("*")}
+            print("\n")
+        }
+        fold=fold+1
+    }
+
+    // ═══ D. FANO LINES ═══
+    println("")
+    println("================================================================")
+    println("  D. FANO LINE ICTAL/BASELINE RATIO (per patient)")
+    println("================================================================")
+    println("  e1=FP1-F7 e2=F7-T7 e3=FP2-F8 e4=F8-T8 e5=FP1-F3 e6=F3-C3 e7=FP2-F4")
+    println("")
+    print("  Pat  L0    L1    L2    L3    L4    L5    L6    Top\n")
+
+    fold=0
+    while fold<UNIQUE_SITE_COUNT{
+        let ni=PP_FANO_ICT_N[fold as usize]
+        let nb=PP_FANO_BAS_N[fold as usize]
+        print("  P"); print_int(fold+1); print("   ")
+        var max_ratio: i64=0; var max_line: i64=0
+        if ni>0 && nb>0{
+            var fl: i64=0; while fl<7{
+                let ie=PP_FANO_ICT[(fold*7+fl) as usize]/ni
+                let be=PP_FANO_BAS[(fold*7+fl) as usize]/nb
+                var ratio: i64=0
+                if be>0{ratio=ie*10/be}
+                print_int(ratio/10); print("."); print_int(ratio%10); print("x ")
+                if ratio>max_ratio{max_ratio=ratio;max_line=fl}
+                fl=fl+1}
+            print(" L"); print_int(max_line)
+        }
+        print("\n"); fold=fold+1
+    }
+
+    // ═══ E. O-SSM vs H-SSM ═══
+    println("")
+    println("================================================================")
+    println("  E. O-SSM vs H-SSM (log-space, ictal, per patient)")
+    println("================================================================")
+
+    fold=0
+    while fold<UNIQUE_SITE_COUNT{
+        let n=PP_OH_N[fold as usize]
+        if n>0{
+            let o_mean=(PP_OSSM_LOG[fold as usize] as f64)/(n as f64)/1000.0
+            let h_mean=(PP_HSSM_LOG[fold as usize] as f64)/(n as f64)/1000.0
+            print("  P"); print_int(fold+1)
+            print(": O-SSM="); print_f2(o_mean)
+            print(" H-SSM="); print_f2(h_mean)
+            print(" extra=+"); print_f2(o_mean-h_mean)
+            print("\n")
+        }
+        fold=fold+1
+    }
+
+    // ═══ F. AGGREGATE SIGN TEST (cross-patient) ═══
+    println("")
+    println("================================================================")
+    println("  F. AGGREGATE SIGN TEST (ictal > baseline across patients)")
+    println("================================================================")
+    println("  H0: P(ictal > baseline) = 0.5 for each patient")
+    println("  One-sided binomial sign test")
+    println("")
+
+    // Count patients with ictal > baseline (only those with both classes)
+    var n_testable: i64 = 0
+    var n_positive: i64 = 0
+    fold=0
+    while fold<UNIQUE_SITE_COUNT{
+        let ic=PP_CT[(fold*5+2) as usize]
+        let bc=PP_CT[(fold*5+0) as usize]
+        if ic>0 && bc>0{
+            n_testable=n_testable+1
+            let im=PP_LOG_SUM[(fold*5+2) as usize]/ic
+            let bm=PP_LOG_SUM[(fold*5+0) as usize]/bc
+            if im>bm{n_positive=n_positive+1}
+        }
+        fold=fold+1
+    }
+
+    print("  Testable patients (both ictal+baseline): "); print_int(n_testable); print("\n")
+    print("  Positive (ictal > baseline): "); print_int(n_positive); print("\n")
+    print("  Direction consistency: "); print_int(n_positive); print("/"); print_int(n_testable); print("\n")
+
+    // Binomial p-value: P(X >= n_positive | n_testable, p=0.5)
+    // For small n, compute exactly: sum_{k=n_pos}^{n} C(n,k) / 2^n
+    // C(n,k) via Pascal's triangle stored in array
+    var binom_coeff: [i64; 256] = [0; 256]
+    var row: i64 = 0
+    while row <= n_testable {
+        binom_coeff[(row * 16 + row) as usize] = 1
+        binom_coeff[(row * 16 + 0) as usize] = 1
+        var k: i64 = 1
+        while k < row {
+            binom_coeff[(row * 16 + k) as usize] = binom_coeff[((row-1)*16+k-1) as usize] + binom_coeff[((row-1)*16+k) as usize]
+            k = k + 1
+        }
+        row = row + 1
+    }
+
+    var tail_sum: i64 = 0
+    var kk: i64 = n_positive
+    while kk <= n_testable {
+        tail_sum = tail_sum + binom_coeff[(n_testable * 16 + kk) as usize]
+        kk = kk + 1
+    }
+
+    // 2^n
+    var pow2: i64 = 1
+    var pp: i64 = 0
+    while pp < n_testable { pow2 = pow2 * 2; pp = pp + 1 }
+
+    print("  Sign test p-value = "); print_int(tail_sum); print("/"); print_int(pow2)
+    let pval = (tail_sum as f64) / (pow2 as f64)
+    print(" = "); print_f2(pval)
+    if pval < 0.05 { print(" *") }
+    if pval < 0.01 { print("*") }
+    print("\n")
+
+    // Also compute mean Cohen's d across patients (signed)
+    var sum_d: f64 = 0.0
+    var n_d: i64 = 0
+    fold=0
+    while fold<UNIQUE_SITE_COUNT{
+        let ni=PP_CT[(fold*5+2) as usize]
+        let nb=PP_CT[(fold*5+0) as usize]
+        if ni>1 && nb>1{
+            let mean_i=(PP_LOG_SUM[(fold*5+2) as usize] as f64)/(ni as f64)
+            let mean_b=(PP_LOG_SUM[(fold*5+0) as usize] as f64)/(nb as f64)
+            let var_i=((PP_LOG_SSQ[(fold*5+2) as usize] as f64)*100.0/(ni as f64)) - mean_i*mean_i
+            let var_b=((PP_LOG_SSQ[(fold*5+0) as usize] as f64)*100.0/(nb as f64)) - mean_b*mean_b
+            let pooled_var=(abs_f64(var_i)*((ni-1) as f64)+abs_f64(var_b)*((nb-1) as f64))/((ni+nb-2) as f64)
+            let pooled_sd=sqrt_q(abs_f64(pooled_var))
+            if pooled_sd>0.01{
+                sum_d=sum_d+(mean_i-mean_b)/pooled_sd
+                n_d=n_d+1
+            }
+        }
+        fold=fold+1
+    }
+    if n_d>0{
+        print("  Mean Cohen's d across patients: "); print_f2(sum_d/(n_d as f64)); print("\n")
+    }
+
+    println("")
+    println("DONE")
+    0
+}

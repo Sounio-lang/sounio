@@ -55,7 +55,7 @@ run_step() {
   echo "[release-pack] >>> $label"
   if SOUNIO_DIAG_RUN_DIR="$RUN_DIR" \
     SOUNIO_DIAG_LOG_LABEL="$label" \
-    bash "$ROOT_DIR/scripts/with_isolated_env.sh" "$@"; then
+    bash "$ROOT_DIR/scripts/dev/with_isolated_env.sh" "$@"; then
     status="PASS"
   else
     status="FAIL"
@@ -95,11 +95,11 @@ run_step "07-seed-policy-root-fail-closed" cargo test -p souc --test selfhost_st
 run_step "08-seed-policy-transition-fail-closed" cargo test -p souc --test selfhost_strict_mode -- selfhost_root_transition_mode --nocapture
 run_step "09-no-legacy-env-diagnostic-smoke" bash -lc 'set -euo pipefail; cargo build -p souc --bin souc >/dev/null 2>&1; log=$(mktemp); if ./target/debug/souc run self-hosted/ --check-only >"$log" 2>&1; then :; fi; if rg -q "LEGACY_SELFHOST_ENV_REMOVED" "$log"; then echo "unexpected legacy env diagnostic in clean selfhost run"; cat "$log"; exit 1; fi'
 run_step "10-cargo-lib-tests" cargo test -p souc --lib
-run_step "11-cultural-fidelity" python3 "$ROOT_DIR/scripts/cultural_fidelity_gate.py"
+run_step "11-cultural-fidelity" python3 "$ROOT_DIR/scripts/ci/cultural_fidelity_gate.py"
 run_step "12-r2-parity-spec-lint" python3 "$ROOT_DIR/scripts/r2/parity_spec_lint.py"
 run_step "13-r2-parity-spec-exec" python3 "$ROOT_DIR/scripts/r2/parity_spec_exec.py"
-run_step "14-warning-baseline" bash "$ROOT_DIR/scripts/check_new_warnings.sh"
-run_step "14a-claude-operational-contract-gate" bash "$ROOT_DIR/scripts/claude_operational_contract_gate.sh"
+run_step "14-warning-baseline" bash "$ROOT_DIR/scripts/ci/check_new_warnings.sh"
+run_step "14a-claude-operational-contract-gate" bash "$ROOT_DIR/scripts/ci/claude_operational_contract_gate.sh"
 run_step "15-build-bootstrap-seed" bash "$ROOT_DIR/scripts/bootstrap/build_bootstrap_seed.sh"
 run_step "16-selfhost-cycle-release-byte-equality" env WORK_DIR="$RUN_DIR/selfhost-cycle-release-gate" SOUNIO_SELFHOST_RELEASE_CYCLE_SKIP_BUILD=1 SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST=bootstrap/selfhost-kernel.manifest bash "$ROOT_DIR/scripts/selfhost/selfhost_cycle_release_gate.sh"
 run_step "17-selfhost-cycle-gate-seed-root" env WORK_DIR="$RUN_DIR/selfhost-cycle-gate-seed-root" SOUNIO_SELFHOST_CYCLE_FORCE_DYNAMIC=0 SOUNIO_SELFHOST_CYCLE_SEED_ENFORCE=1 SOUNIO_SELFHOST_CYCLE_SEED_PATH=bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST=bootstrap/selfhost-kernel.manifest bash "$ROOT_DIR/scripts/selfhost/selfhost_cycle_gate.sh"

@@ -1,0 +1,78 @@
+//@ run-pass
+//@ expect-stdout: DES_BBB_COUPLED_OK
+//
+// Dissertation flagship scenario — DES sirolimus release + systemic
+// PBPK + BBB sub-model, end-to-end, 30-day (720 h) horizon.
+//
+// Clinical anchor: Cypher stent Sousa 2003 (140 µg sirolimus, ~80%
+// released by day 30 via Higuchi diffusion).  Expected brain ISF
+// unbound exposure is MUCH lower than oral dosing because the stent
+// delivers ng-level systemic concentrations.
+//
+// Checks:
+//   1. Release kinetics: total released at t = 720 h is within
+//      [60%, 90%] of the 0.14 mg dose (Higuchi fits ~80% at 30 d).
+//   2. All non-negative at every checkpoint.
+//   3. Kpuu_AUC on the released drug falls in the same Fridén
+//      range [0.10, 0.25] as the bolus IV validation — confirms
+//      the BBB model behaves consistently under a slow input.
+//   4. Brain ISF peak concentration is below the oral-bolus brain
+//      ISF peak (stent delivers < 1% of IV dose systemically).
+
+use darwin_pbpk::scenarios::des_sirolimus_bbb::*
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::epistemic_pbpk14::{ep14_rapamycin_params}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = ep14_rapamycin_params()
+    let bbb_prm = bbb_rapamycin_params()
+
+    var cp: [f64; 32] = [0.0; 32]
+    cp[0]=0.0;   cp[1]=1.0;   cp[2]=6.0;   cp[3]=12.0
+    cp[4]=24.0;  cp[5]=48.0;  cp[6]=72.0;  cp[7]=120.0
+    cp[8]=168.0; cp[9]=240.0; cp[10]=336.0; cp[11]=480.0
+    cp[12]=600.0; cp[13]=720.0
+    let n_points = 14
+
+    // Cypher stent parameters.
+    let kh = 0.00417        // mg/h^0.5
+    let total_dose = 0.14   // mg
+
+    let trace = des_bbb_run(sys_prm, bbb_prm, kh, total_dose, cp, n_points, 0.01)
+    if trace.success == false { return 1 }
+
+    // --- 1. Release kinetics ---
+    let released_end = trace.total_released_end
+    if released_end < 0.60 * total_dose { return 2 }
+    if released_end > 0.90 * total_dose { return 3 }
+
+    // --- 2. Non-negativity invariants ---
+    var k: i32 = 0
+    while k < n_points {
+        let idx = k as usize
+        if trace.plasma[idx] < 0.0 { return 4 }
+        if trace.isf_u[idx]  < 0.0 { return 5 }
+        if trace.icf_u[idx]  < 0.0 { return 6 }
+        k = k + 1
+    }
+
+    // --- 3. Kpuu_AUC in Fridén range ---
+    if trace.kpuu_auc < 0.10 { return 7 }
+    if trace.kpuu_auc > 0.25 { return 8 }
+
+    // --- 4. ISF peak well below the IV-bolus peak ---
+    // (Reference bolus brain ISF unbound peak for 5 mg IV is ~2e-4
+    // mg/L; stent at 0.14 mg total should give < 1e-5.)
+    var isf_peak = 0.0
+    var m: i32 = 0
+    while m < n_points {
+        let idx = m as usize
+        if trace.isf_u[idx] > isf_peak { isf_peak = trace.isf_u[idx] }
+        m = m + 1
+    }
+    if isf_peak > 1.0e-5 { return 9 }
+
+    des_bbb_print_csv(trace)
+    println("DES_BBB_COUPLED_OK")
+    0
+}

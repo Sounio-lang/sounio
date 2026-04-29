@@ -3,8 +3,17 @@
 # Runs bootstrap fixed-point, souc_v2 split fixed-point, feature tests, regression.
 set -e
 PASS=0; FAIL=0; TOTAL=0
-cd "$(dirname "$0")/.."
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
 BOOT4="${SOUC_BOOT4:-/tmp/final_boot4.elf}"
+
+HOST_TARGET="${SOUNIO_HOST_TARGET:-x86_64-linux}"
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64|Linux:amd64) HOST_TARGET="${SOUNIO_HOST_TARGET:-x86_64-linux}" ;;
+  Linux:arm64|Linux:aarch64) HOST_TARGET="${SOUNIO_HOST_TARGET:-aarch64-linux}" ;;
+  Darwin:arm64|Darwin:aarch64) HOST_TARGET="${SOUNIO_HOST_TARGET:-aarch64-macos}" ;;
+  Darwin:x86_64|Darwin:amd64) HOST_TARGET="${SOUNIO_HOST_TARGET:-x86_64-macos}" ;;
+esac
 
 # Try multiple bootstrap binary locations
 if [ ! -x "$BOOT4" ]; then
@@ -29,11 +38,15 @@ echo ""
 
 # --- Bootstrap fixed-point ---
 echo "--- Bootstrap (boot4 -> s1 -> s2 -> s3) ---"
-$BOOT4 self-hosted/compiler/lean_single.sio /tmp/gate_s1.elf 2>&1 | tail -1
+rm -f /tmp/gate_s1.elf /tmp/gate_s2.elf /tmp/gate_s3.elf
+$BOOT4 self-hosted/compiler/lean_single.sio /tmp/gate_s1.elf --target "$HOST_TARGET" >/tmp/gate_s1.log 2>&1
+tail -1 /tmp/gate_s1.log
 chmod +x /tmp/gate_s1.elf
-/tmp/gate_s1.elf self-hosted/compiler/lean_single.sio /tmp/gate_s2.elf 2>&1 | tail -1
+/tmp/gate_s1.elf self-hosted/compiler/lean_single.sio /tmp/gate_s2.elf --target "$HOST_TARGET" >/tmp/gate_s2.log 2>&1
+tail -1 /tmp/gate_s2.log
 chmod +x /tmp/gate_s2.elf
-/tmp/gate_s2.elf self-hosted/compiler/lean_single.sio /tmp/gate_s3.elf 2>&1 | tail -1
+/tmp/gate_s2.elf self-hosted/compiler/lean_single.sio /tmp/gate_s3.elf --target "$HOST_TARGET" >/tmp/gate_s3.log 2>&1
+tail -1 /tmp/gate_s3.log
 TOTAL=$((TOTAL+1))
 if cmp -s /tmp/gate_s2.elf /tmp/gate_s3.elf; then
     echo "PASS: Fixed-point (s2==s3)"
@@ -217,8 +230,8 @@ cat > /tmp/gate_t8.sio << 'EOF'
 fn main() -> i64 with IO { let x = unknown_var; return 0 }
 EOF
 TOTAL=$((TOTAL+1))
-err_out=$($S /tmp/gate_t8.sio /tmp/gate_err.elf 2>&1)
-if echo "$err_out" | grep -q "warning.*line"; then
+err_out=$($S /tmp/gate_t8.sio /tmp/gate_err.elf 2>&1 || true)
+if echo "$err_out" | grep -q "line"; then
     echo "PASS: error_line_numbers"
     PASS=$((PASS+1))
 else

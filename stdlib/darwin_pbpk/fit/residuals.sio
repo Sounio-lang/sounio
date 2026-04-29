@@ -1,0 +1,110 @@
+// darwin_pbpk/fit/residuals.sio — residual evaluation against TAC predictions
+
+use darwin_pbpk::brain_plasma_tac::*
+use darwin_pbpk::fit::problem::*
+use darwin_pbpk::io::mapping::{map_observation_prediction}
+use darwin_pbpk::schema::observation::{normalized_observation_count, normalized_observation_get}
+
+pub struct CalibrationResidualRow {
+    observable_id: string,
+    time_h: f64,
+    measurement: f64,
+    prediction: f64,
+    sigma: f64,
+    residual: f64,
+    weighted_residual: f64,
+}
+
+pub struct CalibrationResidualTable {
+    observable_ids: [string; 128],
+    times_h: [f64; 128],
+    measurements: [f64; 128],
+    predictions: [f64; 128],
+    sigmas: [f64; 128],
+    residuals: [f64; 128],
+    weighted_residuals: [f64; 128],
+    count: usize,
+    success: bool,
+    overflowed: bool,
+}
+
+fn residual_table_new() -> CalibrationResidualTable with Mut {
+    CalibrationResidualTable {
+        observable_ids: [""; 128],
+        times_h: [0.0; 128],
+        measurements: [0.0; 128],
+        predictions: [0.0; 128],
+        sigmas: [0.0; 128],
+        residuals: [0.0; 128],
+        weighted_residuals: [0.0; 128],
+        count: 0,
+        success: false,
+        overflowed: false,
+    }
+}
+
+fn residual_table_add(
+    table: CalibrationResidualTable,
+    observable_id: string,
+    time_h: f64,
+    measurement: f64,
+    prediction: f64,
+    sigma: f64,
+    residual: f64,
+    weighted_residual: f64
+) -> CalibrationResidualTable with Mut {
+    var out = table
+    if out.count >= 128 {
+        out.overflowed = true
+        return out
+    }
+
+    let idx = out.count
+    out.observable_ids[idx] = observable_id
+    out.times_h[idx] = time_h
+    out.measurements[idx] = measurement
+    out.predictions[idx] = prediction
+    out.sigmas[idx] = sigma
+    out.residuals[idx] = residual
+    out.weighted_residuals[idx] = weighted_residual
+    out.count = idx + 1
+    out
+}
+
+fn residual_sigma(x: f64) -> f64 {
+    if x > 1.0e-12 { x } else { 1.0 }
+}
+
+pub fn calibration_residuals(
+    problem: CalibrationProblem,
+    tac: BrainPlasmaTacTable
+) -> CalibrationResidualTable with Mut, Div, Panic {
+    var out = residual_table_new()
+    if tac.success == false {
+        return out
+    }
+
+    var i: usize = 0
+    while i < normalized_observation_count(problem.observations) {
+        let obs = normalized_observation_get(problem.observations, i)
+        let prediction = map_observation_prediction(tac, obs)
+        let sigma = residual_sigma(obs.measurement_uncertainty)
+        let residual = prediction - obs.measurement
+        let weighted = residual / sigma
+
+        out = residual_table_add(
+            out,
+            obs.observable_id,
+            obs.time_h,
+            obs.measurement,
+            prediction,
+            sigma,
+            residual,
+            weighted
+        )
+        i = i + 1
+    }
+
+    out.success = true
+    out
+}

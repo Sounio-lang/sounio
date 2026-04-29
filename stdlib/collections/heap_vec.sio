@@ -1,16 +1,17 @@
-// Heap-allocated growable vectors
-// 
-// NOTE: The heap_i64_vec_* and heap_f64_vec_* free functions work with
-// mutable struct borrows, but callers may encounter borrow checker issues
-// when mixing &! and & borrows on the same variable.
+// Heap-allocated growable vectors.
+// Backed by heap_alloc / heap_realloc / heap_free (mmap/mremap underneath).
+// Usable in native mode only (not JIT).
 //
-// For now, the recommended pattern is to use raw pointers directly as shown
-// in tests/run-pass/heap_vec_pattern.sio and heap_vec_growth.sio.
+// Method API:
+//   var v = HeapI64Vec { ptr: 0 as *mut i64, len: 0, cap: 0 }
+//   v.push(42)
+//   let x = v.get(0)
+//   print_int(v.len())
+//   v.free()
 //
-// Known issues:
-// - Method dispatch with `self: &! T` in impl blocks doesn't work (receiver 
-//   hash mismatch in compiler)
-// - Borrow checker is overly aggressive with struct field borrows
+// IMPORTANT: Always use heap_alloc for the FIRST allocation.
+// heap_realloc uses mremap which reads a header 8 bytes before the pointer —
+// it must never be called with a null/initial pointer.
 
 // ============================================
 // HeapI64Vec - 64-bit integer heap vector
@@ -21,6 +22,75 @@ struct HeapI64Vec {
     cap: i64,
 }
 
+impl HeapI64Vec {
+    fn push(self: &!HeapI64Vec, val: i64) with Alloc, Mut {
+        if self.len >= self.cap {
+            let new_cap = if self.cap == 0 { 4 } else { self.cap * 2 }
+            let new_bytes = new_cap * 8
+            if self.cap == 0 {
+                self.ptr = heap_alloc(new_bytes) as *mut i64
+            } else {
+                self.ptr = heap_realloc(self.ptr as *mut i8, new_bytes) as *mut i64
+            }
+            self.cap = new_cap
+        }
+        write_i64(self.ptr, self.len, val)
+        self.len = self.len + 1
+    }
+
+    fn pop(self: &!HeapI64Vec) -> i64 with Mut {
+        if self.len > 0 {
+            self.len = self.len - 1
+            return read_i64(self.ptr, self.len)
+        }
+        return 0
+    }
+
+    fn get(self: &HeapI64Vec, idx: i64) -> i64 {
+        if idx >= 0 && idx < self.len {
+            return read_i64(self.ptr, idx)
+        }
+        return 0
+    }
+
+    fn set(self: &!HeapI64Vec, idx: i64, val: i64) with Mut {
+        if idx >= 0 && idx < self.len {
+            write_i64(self.ptr, idx, val)
+        }
+    }
+
+    fn len(self: &HeapI64Vec) -> i64 {
+        self.len
+    }
+
+    fn cap(self: &HeapI64Vec) -> i64 {
+        self.cap
+    }
+
+    fn clear(self: &!HeapI64Vec) with Mut {
+        self.len = 0
+    }
+
+    fn contains(self: &HeapI64Vec, val: i64) -> bool {
+        var i: i64 = 0
+        while i < self.len {
+            if read_i64(self.ptr, i) == val { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    fn free(self: &!HeapI64Vec) with Alloc, Mut {
+        if self.cap > 0 {
+            heap_free(self.ptr as *mut i8)
+        }
+        self.ptr = 0 as *mut i64
+        self.len = 0
+        self.cap = 0
+    }
+}
+
+// Free-function aliases for backward compat
 fn heap_i64_vec_new() -> HeapI64Vec {
     HeapI64Vec { ptr: 0 as *mut i64, len: 0, cap: 0 }
 }
@@ -35,7 +105,11 @@ fn heap_i64_vec_push(v: &! HeapI64Vec, val: i64) with Alloc {
     if v.len >= v.cap {
         let new_cap = if v.cap == 0 { 4 } else { v.cap * 2 }
         let new_bytes = new_cap * 8
-        v.ptr = heap_realloc(v.ptr as *mut i8, new_bytes) as *mut i64
+        if v.cap == 0 {
+            v.ptr = heap_alloc(new_bytes) as *mut i64
+        } else {
+            v.ptr = heap_realloc(v.ptr as *mut i8, new_bytes) as *mut i64
+        }
         v.cap = new_cap
     }
     write_i64(v.ptr, v.len, val)
@@ -72,14 +146,16 @@ fn heap_i64_vec_cap(v: &HeapI64Vec) -> i64 {
 }
 
 fn heap_i64_vec_free(v: &! HeapI64Vec) with Alloc {
-    heap_free(v.ptr as *mut i8)
+    if v.cap > 0 {
+        heap_free(v.ptr as *mut i8)
+    }
     v.ptr = 0 as *mut i64
     v.len = 0
     v.cap = 0
 }
 
 // ============================================
-// HeapF64Vec - 64-bit float heap vector  
+// HeapF64Vec - 64-bit float heap vector
 // ============================================
 struct HeapF64Vec {
     ptr: *mut f64,
@@ -87,6 +163,76 @@ struct HeapF64Vec {
     cap: i64,
 }
 
+impl HeapF64Vec {
+    fn push(self: &!HeapF64Vec, val: f64) with Alloc, Mut {
+        if self.len >= self.cap {
+            let new_cap = if self.cap == 0 { 4 } else { self.cap * 2 }
+            let new_bytes = new_cap * 8
+            if self.cap == 0 {
+                self.ptr = heap_alloc(new_bytes) as *mut f64
+            } else {
+                self.ptr = heap_realloc(self.ptr as *mut i8, new_bytes) as *mut f64
+            }
+            self.cap = new_cap
+        }
+        write_f64(self.ptr, self.len, val)
+        self.len = self.len + 1
+    }
+
+    fn pop(self: &!HeapF64Vec) -> f64 with Mut {
+        if self.len > 0 {
+            self.len = self.len - 1
+            return read_f64(self.ptr, self.len)
+        }
+        return 0.0
+    }
+
+    fn get(self: &HeapF64Vec, idx: i64) -> f64 {
+        if idx >= 0 && idx < self.len {
+            return read_f64(self.ptr, idx)
+        }
+        return 0.0
+    }
+
+    fn set(self: &!HeapF64Vec, idx: i64, val: f64) with Mut {
+        if idx >= 0 && idx < self.len {
+            write_f64(self.ptr, idx, val)
+        }
+    }
+
+    fn len(self: &HeapF64Vec) -> i64 {
+        self.len
+    }
+
+    fn cap(self: &HeapF64Vec) -> i64 {
+        self.cap
+    }
+
+    fn clear(self: &!HeapF64Vec) with Mut {
+        self.len = 0
+    }
+
+    fn sum(self: &HeapF64Vec) -> f64 {
+        var s: f64 = 0.0
+        var i: i64 = 0
+        while i < self.len {
+            s = s + read_f64(self.ptr, i)
+            i = i + 1
+        }
+        return s
+    }
+
+    fn free(self: &!HeapF64Vec) with Alloc, Mut {
+        if self.cap > 0 {
+            heap_free(self.ptr as *mut i8)
+        }
+        self.ptr = 0 as *mut f64
+        self.len = 0
+        self.cap = 0
+    }
+}
+
+// Free-function aliases for backward compat
 fn heap_f64_vec_new() -> HeapF64Vec {
     HeapF64Vec { ptr: 0 as *mut f64, len: 0, cap: 0 }
 }
@@ -101,7 +247,11 @@ fn heap_f64_vec_push(v: &! HeapF64Vec, val: f64) with Alloc {
     if v.len >= v.cap {
         let new_cap = if v.cap == 0 { 4 } else { v.cap * 2 }
         let new_bytes = new_cap * 8
-        v.ptr = heap_realloc(v.ptr as *mut i8, new_bytes) as *mut f64
+        if v.cap == 0 {
+            v.ptr = heap_alloc(new_bytes) as *mut f64
+        } else {
+            v.ptr = heap_realloc(v.ptr as *mut i8, new_bytes) as *mut f64
+        }
         v.cap = new_cap
     }
     write_f64(v.ptr, v.len, val)
@@ -138,7 +288,9 @@ fn heap_f64_vec_cap(v: &HeapF64Vec) -> i64 {
 }
 
 fn heap_f64_vec_free(v: &! HeapF64Vec) with Alloc {
-    heap_free(v.ptr as *mut i8)
+    if v.cap > 0 {
+        heap_free(v.ptr as *mut i8)
+    }
     v.ptr = 0 as *mut f64
     v.len = 0
     v.cap = 0

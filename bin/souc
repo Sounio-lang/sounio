@@ -1,56 +1,320 @@
 #!/usr/bin/env bash
-# souc — Sounio compiler CLI wrapper
-# Translates subcommand interface to native binary interface.
-# Usage: souc <subcommand> <file.sio> [options]
-#   run     <file.sio>           — compile, execute, clean up
-#   check   <file.sio>           — compile only (type-check)
-#   compile <file.sio> -o <out>  — compile to output path
-#   <file.sio> <out.elf>         — legacy direct interface (passthrough)
-
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NATIVE="$SCRIPT_DIR/souc-native"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOST_OS="${SOUNIO_HOST_OS_OVERRIDE:-$(uname -s)}"
+HOST_ARCH="${SOUNIO_HOST_ARCH_OVERRIDE:-$(uname -m)}"
+WRAPPER_VERSION="${SOUNIO_SOUC_VERSION:-1.0.0-beta.5}"
+MACOS_CODESIGN_HELPER="$ROOT_DIR/scripts/lib/macos_codesign.sh"
 
-if [[ $# -lt 1 ]]; then
-    echo "Usage: souc <run|check|compile> <file.sio> [options]" >&2
-    exit 1
+if [[ -f "$MACOS_CODESIGN_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$MACOS_CODESIGN_HELPER"
 fi
 
-CMD="$1"
-
-case "$CMD" in
-    run)
-        if [[ $# -lt 2 ]]; then echo "Usage: souc run <file.sio>" >&2; exit 1; fi
-        SRC="$2"
-        shift 2
-        TMP_ELF="$(mktemp /tmp/souc_run_XXXXXX)"
-        cleanup() { rm -f "$TMP_ELF"; }
-        trap cleanup EXIT
-        # Collect extra flags (pass through to compiler)
-        "$NATIVE" "$SRC" "$TMP_ELF" "$@" >&2
-        chmod +x "$TMP_ELF"
-        exec "$TMP_ELF"
-        ;;
-    check)
-        if [[ $# -lt 2 ]]; then echo "Usage: souc check <file.sio>" >&2; exit 1; fi
-        SRC="$2"
-        shift 2
-        TMP_ELF="$(mktemp /tmp/souc_check_XXXXXX)"
-        cleanup() { rm -f "$TMP_ELF"; }
-        trap cleanup EXIT
-        "$NATIVE" "$SRC" "$TMP_ELF" "$@"
-        ;;
-    compile)
-        # souc compile <file.sio> -o <output>
-        if [[ $# -lt 4 ]]; then echo "Usage: souc compile <file.sio> -o <output>" >&2; exit 1; fi
-        SRC="$2"
-        OUT="$4"
-        shift 4
-        "$NATIVE" "$SRC" "$OUT" "$@"
-        ;;
+resolve_host_target() {
+  case "$HOST_OS:$HOST_ARCH" in
+    Linux:x86_64|Linux:amd64)
+      printf '%s\n' "x86_64-linux"
+      ;;
+    Linux:arm64|Linux:aarch64)
+      printf '%s\n' "aarch64-linux"
+      ;;
+    Darwin:arm64|Darwin:aarch64)
+      printf '%s\n' "aarch64-macos"
+      ;;
+    Darwin:x86_64|Darwin:amd64)
+      printf '%s\n' "x86_64-macos"
+      ;;
     *)
-        # Legacy passthrough: souc <source.sio> <output.elf> [flags]
-        exec "$NATIVE" "$@"
+      return 1
+      ;;
+  esac
+}
+
+resolve_host_binary() {
+  case "$HOST_OS:$HOST_ARCH" in
+    Linux:x86_64|Linux:amd64)
+      printf '%s\n' "$ROOT_DIR/bin/souc-linux-x86_64"
+      ;;
+    Darwin:arm64|Darwin:aarch64)
+      printf '%s\n' "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-arm64-macos"
+      ;;
+    Darwin:x86_64|Darwin:amd64)
+      printf '%s\n' "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64-macos"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [[ -n "${SOUNIO_SOUC_BIN:-}" ]]; then
+  SELECTED_BIN="$SOUNIO_SOUC_BIN"
+else
+  if ! SELECTED_BIN="$(resolve_host_binary)"; then
+    echo "error: unsupported host platform for this checkout: $HOST_OS/$HOST_ARCH" >&2
+    echo "hint: supported checked artifacts are Linux x86_64, macOS arm64, and macOS x86_64" >&2
+    exit 2
+  fi
+fi
+
+HOST_TARGET=""
+if _resolved_host_target="$(resolve_host_target 2>/dev/null)"; then
+  HOST_TARGET="$_resolved_host_target"
+fi
+
+if [[ ! -x "$SELECTED_BIN" ]]; then
+  echo "error: selected souc binary is missing or not executable: $SELECTED_BIN" >&2
+  exit 2
+fi
+
+if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
+  sounio_ad_hoc_codesign "$SELECTED_BIN"
+fi
+
+if [[ "${SOUNIO_SOUC_PRINT_PATH:-0}" == "1" ]]; then
+  printf '%s\n' "$SELECTED_BIN"
+  exit 0
+fi
+
+print_usage() {
+  cat <<EOF
+usage:
+  bin/souc check <source.sio> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
+  bin/souc compile <source.sio> -o <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
+  bin/souc build <source.sio> -o <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
+  bin/souc run <source.sio> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor] [-- <program args...>]
+  bin/souc info
+  bin/souc --version
+
+raw pass-through:
+  bin/souc <source.sio> <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
+EOF
+}
+
+print_info() {
+  cat <<EOF
+souc_wrapper_version=$WRAPPER_VERSION
+host_os=$HOST_OS
+host_arch=$HOST_ARCH
+host_target=${HOST_TARGET:-unknown}
+selected_bin=$SELECTED_BIN
+selected_interface=raw-self-hosted
+compat_commands=check,compile,build,run,info,version
+raw_interface=<source.sio> <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
+EOF
+}
+
+raw_compile_quiet() {
+  local src="$1"
+  local out="$2"
+  shift 2
+
+  local output=""
+  local rc=0
+
+  set +e
+  output="$("$SELECTED_BIN" "$src" "$out" "$@" 2>&1)"
+  rc=$?
+  set -e
+
+  if [[ $rc -ne 0 ]]; then
+    [[ -n "$output" ]] && printf '%s\n' "$output" >&2
+    return "$rc"
+  fi
+
+  if [[ "${SOUNIO_SOUC_VERBOSE:-0}" == "1" && -n "$output" ]]; then
+    printf '%s\n' "$output" >&2
+  fi
+
+  chmod +x "$out" 2>/dev/null || true
+  if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
+    sounio_ad_hoc_codesign "$out"
+  fi
+}
+
+parse_compat_args() {
+  local mode="$1"
+  shift
+
+  COMPAT_SOURCE=""
+  COMPAT_OUTPUT=""
+  COMPAT_TARGET=""
+  COMPAT_COMPILER_ARGS=()
+  COMPAT_PROGRAM_ARGS=()
+
+  local saw_program_sep=0
+
+  while [[ $# -gt 0 ]]; do
+    if [[ $saw_program_sep -eq 1 ]]; then
+      COMPAT_PROGRAM_ARGS+=("$1")
+      shift
+      continue
+    fi
+
+    case "$1" in
+      --)
+        saw_program_sep=1
+        shift
         ;;
+      -o|--out)
+        if [[ $# -lt 2 ]]; then
+          echo "error: missing output path after $1" >&2
+          exit 2
+        fi
+        COMPAT_OUTPUT="$2"
+        shift 2
+        ;;
+      --target)
+        if [[ $# -lt 2 ]]; then
+          echo "error: missing target triple after --target" >&2
+          exit 2
+        fi
+        COMPAT_TARGET="$2"
+        COMPAT_COMPILER_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --show-ast|--show-types|--r15-monitor)
+        COMPAT_COMPILER_ARGS+=("$1")
+        shift
+        ;;
+      -h|--help)
+        print_usage
+        exit 0
+        ;;
+      repl|test|fmt|lint|analyze|diagnostics|sysroot|clean|watch|serve|bench|gpu-emit|emit)
+        echo "error: unsupported command for the checked self-hosted launcher: $1" >&2
+        echo "hint: use the richer omega/pinned CLI for that workflow" >&2
+        exit 2
+        ;;
+      -*)
+        echo "error: unsupported option for wrapper compatibility mode: $1" >&2
+        echo "hint: supported wrapper flags are --target, --show-ast, --show-types, --r15-monitor, and -o/--out" >&2
+        exit 2
+        ;;
+      *)
+        if [[ -z "$COMPAT_SOURCE" ]]; then
+          COMPAT_SOURCE="$1"
+        elif [[ -z "$COMPAT_OUTPUT" && "$mode" != "run" && "$mode" != "check" ]]; then
+          COMPAT_OUTPUT="$1"
+        else
+          echo "error: unexpected positional argument in $mode mode: $1" >&2
+          exit 2
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$COMPAT_SOURCE" ]]; then
+    echo "error: missing source file for $mode" >&2
+    exit 2
+  fi
+}
+
+compat_check() {
+  parse_compat_args "check" "$@"
+
+  local tmp_dir
+  local rc=0
+  tmp_dir="$(mktemp -d)"
+
+  if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
+    raw_compile_quiet "$COMPAT_SOURCE" "$tmp_dir/check.out" "${COMPAT_COMPILER_ARGS[@]}" || rc=$?
+  else
+    raw_compile_quiet "$COMPAT_SOURCE" "$tmp_dir/check.out" || rc=$?
+  fi
+  rm -rf "$tmp_dir"
+  return "$rc"
+}
+
+compat_compile() {
+  parse_compat_args "compile" "$@"
+
+  if [[ -z "$COMPAT_OUTPUT" ]]; then
+    echo "error: compile/build mode requires -o <output> or a positional output path" >&2
+    exit 2
+  fi
+
+  local rc=0
+  if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
+    raw_compile_quiet "$COMPAT_SOURCE" "$COMPAT_OUTPUT" "${COMPAT_COMPILER_ARGS[@]}" || rc=$?
+  else
+    raw_compile_quiet "$COMPAT_SOURCE" "$COMPAT_OUTPUT" || rc=$?
+  fi
+  return "$rc"
+}
+
+compat_run() {
+  parse_compat_args "run" "$@"
+
+  if [[ -n "$HOST_TARGET" && -n "$COMPAT_TARGET" && "$COMPAT_TARGET" != "$HOST_TARGET" ]]; then
+    echo "error: run mode only executes host-native outputs in the checked self-hosted launcher" >&2
+    echo "hint: use compile for cross-target output ($COMPAT_TARGET) and run it on the matching host" >&2
+    exit 2
+  fi
+
+  local tmp_dir
+  local rc=0
+  tmp_dir="$(mktemp -d)"
+
+  local out="$tmp_dir/run.out"
+  if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
+    raw_compile_quiet "$COMPAT_SOURCE" "$out" "${COMPAT_COMPILER_ARGS[@]}" || rc=$?
+  else
+    raw_compile_quiet "$COMPAT_SOURCE" "$out" || rc=$?
+  fi
+  if [[ $rc -eq 0 ]]; then
+    "$out" "${COMPAT_PROGRAM_ARGS[@]}" || rc=$?
+  fi
+  rm -rf "$tmp_dir"
+  return "$rc"
+}
+
+if [[ $# -eq 0 ]]; then
+  print_usage >&2
+  exit 2
+fi
+
+case "$1" in
+  --version|version|-v)
+    printf 'souc %s\n' "$WRAPPER_VERSION"
+    exit 0
+    ;;
+  info)
+    print_info
+    exit 0
+    ;;
+  --help|help|-h)
+    print_usage
+    exit 0
+    ;;
+  check)
+    shift
+    compat_check "$@"
+    exit 0
+    ;;
+  compile|build)
+    shift
+    compat_compile "$@"
+    exit 0
+    ;;
+  run)
+    shift
+    compat_run "$@"
+    exit 0
+    ;;
+  repl|test|fmt|lint|analyze|diagnostics|sysroot|clean|watch|serve|bench|gpu-emit|emit)
+    echo "error: unsupported command for the checked self-hosted launcher: $1" >&2
+    echo "hint: use the richer omega/pinned CLI for that workflow" >&2
+    exit 2
+    ;;
 esac
+
+if [[ $# -ge 2 && "$1" != -* ]]; then
+  raw_compile_quiet "$1" "$2" "${@:3}"
+  exit 0
+fi
+
+exec "$SELECTED_BIN" "$@"

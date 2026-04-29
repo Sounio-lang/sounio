@@ -1,0 +1,109 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lemon-features-${SUBJECT_ID}
+  namespace: default
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: feature-extractor
+        image: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+        command: ["python3"]
+        args:
+          - "-c"
+          - |
+            import sys
+            sys.path.insert(0, '/workspace/sounio')
+            import json
+            import time
+            from pathlib import Path
+            import numpy as np
+            import torch
+
+            print(f'PyTorch: {torch.__version__}')
+            print(f'CUDA available: {torch.cuda.is_available()}')
+            if torch.cuda.is_available():
+                print(f'GPU: {torch.cuda.get_device_name(0)}')
+
+            sid = '${SUBJECT_ID}'
+            cache_dir = Path('/workspace/data/lemon/preprocessed')
+            results_dir = Path('/workspace/data/lemon/results_gpu')
+            results_dir.mkdir(parents=True, exist_ok=True)
+
+            npy = cache_dir / f'{sid}_epochs.npy'
+            if not npy.exists():
+                print(f'[{sid}] Cache not found')
+                sys.exit(1)
+
+            feat_file = results_dir / f'{sid}_features.json'
+            if feat_file.exists():
+                print(f'[{sid}] Already processed')
+                sys.exit(0)
+
+            t0 = time.time()
+            try:
+                epochs = np.load(npy)
+
+                # Load subject index
+                import csv
+                endpoints_file = '/workspace/data/lemon/endpoints.csv'
+                subject_index = None
+                with open(endpoints_file) as f:
+                    reader = csv.DictReader(f)
+                    for i, row in enumerate(reader):
+                        if row['subject_id'] == sid:
+                            subject_index = i
+                            break
+
+                if subject_index is None:
+                    print(f'[{sid}] Not in endpoints')
+                    sys.exit(1)
+
+                # GPU feature extraction
+                from scripts.research.ossm_168_dryrun.features_gpu import process_subject_gpu
+
+                F1, F2, F3 = process_subject_gpu(epochs, subject_index, max_epochs=50)
+
+                result = {
+                    'subject_id': sid,
+                    'subject_index': subject_index,
+                    'n_epochs': min(epochs.shape[0], 50),
+                    'F1': F1,
+                    'F2': F2,
+                    'F3': F3,
+                    'wall_time_s': time.time() - t0,
+                }
+
+                feat_file.write_text(json.dumps(result, indent=2))
+                print(f'[{sid}] Success: F1={F1:.4f} F2={F2:.4f} F3={F3:.4f}')
+
+            except Exception as e:
+                import traceback
+                print(f'[{sid}] Error: {e}')
+                traceback.print_exc()
+                sys.exit(1)
+        resources:
+          requests:
+            memory: "16Gi"
+            cpu: "4000m"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "32Gi"
+            cpu: "8000m"
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: sounio-workspace-pvc
+      nodeSelector:
+        accelerator: nvidia-gpu
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+  backoffLimit: 3

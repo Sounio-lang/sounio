@@ -1,0 +1,392 @@
+//@ run-pass
+// Phase 2 — per-subject null-distribution generator.
+//
+// For the assigned subject, runs 1000 S_8 octonion-channel permutations of
+// the 200-node labels and emits one (perm_id, p95) row per permutation. The
+// null distribution is used downstream in analysis_phase2.py to compute the
+// subject-level z-score statistic:
+//   z^s_B = (p95_observed^s − mean_m(p95^{s,m})) / std_m(p95^{s,m})
+//
+// Permutation preserves: each eigenvector's marginal distribution, graph
+// topology, triple count, node label norms. Destroys: the specific
+// eigenvector-to-octonion-slot alignment — the hypothesis-relevant signal.
+//
+// CLI: souc run null_permutations.sio -- --subject=N [--n-perms=1000]
+//
+// Expected runtime per subject: ~1000 × (1.6 s associator field + 0.3 s
+// quickselect) ≈ 30 minutes on a modern CPU core.
+
+// =============================================================================
+// BSS arrays
+// =============================================================================
+var LAB200: [f64; 1600] = [0.0; 1600]           // working labels (possibly permuted)
+var LAB_ORIG: [f64; 1600] = [0.0; 1600]         // unpermuted original for re-basing
+var NORMS: [f64; 1313400] = [0.0; 1313400]      // per-perm associator norm² array
+var SIGMA: [i32; 8] = [0, 1, 2, 3, 4, 5, 6, 7]  // current channel permutation
+
+// =============================================================================
+// Fano-plane associator norm² — IDENTICAL to associator_field_full.sio.
+// =============================================================================
+fn assoc_norm_sq(
+    a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+    b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64,
+    c0: f64, c1: f64, c2: f64, c3: f64, c4: f64, c5: f64, c6: f64, c7: f64,
+) -> f64 {
+    let p0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    let p1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    let p2 = a0*b2 + a2*b0 - a1*b3 + a3*b1 + a4*b6 - a6*b4 + a5*b7 - a7*b5
+    let p3 = a0*b3 + a3*b0 + a1*b2 - a2*b1 + a4*b7 - a7*b4 - a5*b6 + a6*b5
+    let p4 = a0*b4 + a4*b0 - a1*b5 + a5*b1 - a2*b6 + a6*b2 - a3*b7 + a7*b3
+    let p5 = a0*b5 + a5*b0 + a1*b4 - a4*b1 + a3*b6 - a6*b3 - a2*b7 + a7*b2
+    let p6 = a0*b6 + a6*b0 + a2*b4 - a4*b2 - a3*b5 + a5*b3 + a1*b7 - a7*b1
+    let p7 = a0*b7 + a7*b0 - a1*b6 + a6*b1 + a2*b5 - a5*b2 + a3*b4 - a4*b3
+
+    let l0 = p0*c0 - p1*c1 - p2*c2 - p3*c3 - p4*c4 - p5*c5 - p6*c6 - p7*c7
+    let l1 = p0*c1 + p1*c0 + p2*c3 - p3*c2 + p4*c5 - p5*c4 - p6*c7 + p7*c6
+    let l2 = p0*c2 + p2*c0 - p1*c3 + p3*c1 + p4*c6 - p6*c4 + p5*c7 - p7*c5
+    let l3 = p0*c3 + p3*c0 + p1*c2 - p2*c1 + p4*c7 - p7*c4 - p5*c6 + p6*c5
+    let l4 = p0*c4 + p4*c0 - p1*c5 + p5*c1 - p2*c6 + p6*c2 - p3*c7 + p7*c3
+    let l5 = p0*c5 + p5*c0 + p1*c4 - p4*c1 + p3*c6 - p6*c3 - p2*c7 + p7*c2
+    let l6 = p0*c6 + p6*c0 + p2*c4 - p4*c2 - p3*c5 + p5*c3 + p1*c7 - p7*c1
+    let l7 = p0*c7 + p7*c0 - p1*c6 + p6*c1 + p2*c5 - p5*c2 + p3*c4 - p4*c3
+
+    let q0 = b0*c0 - b1*c1 - b2*c2 - b3*c3 - b4*c4 - b5*c5 - b6*c6 - b7*c7
+    let q1 = b0*c1 + b1*c0 + b2*c3 - b3*c2 + b4*c5 - b5*c4 - b6*c7 + b7*c6
+    let q2 = b0*c2 + b2*c0 - b1*c3 + b3*c1 + b4*c6 - b6*c4 + b5*c7 - b7*c5
+    let q3 = b0*c3 + b3*c0 + b1*c2 - b2*c1 + b4*c7 - b7*c4 - b5*c6 + b6*c5
+    let q4 = b0*c4 + b4*c0 - b1*c5 + b5*c1 - b2*c6 + b6*c2 - b3*c7 + b7*c3
+    let q5 = b0*c5 + b5*c0 + b1*c4 - b4*c1 + b3*c6 - b6*c3 - b2*c7 + b7*c2
+    let q6 = b0*c6 + b6*c0 + b2*c4 - b4*c2 - b3*c5 + b5*c3 + b1*c7 - b7*c1
+    let q7 = b0*c7 + b7*c0 - b1*c6 + b6*c1 + b2*c5 - b5*c2 + b3*c4 - b4*c3
+
+    let r0 = a0*q0 - a1*q1 - a2*q2 - a3*q3 - a4*q4 - a5*q5 - a6*q6 - a7*q7
+    let r1 = a0*q1 + a1*q0 + a2*q3 - a3*q2 + a4*q5 - a5*q4 - a6*q7 + a7*q6
+    let r2 = a0*q2 + a2*q0 - a1*q3 + a3*q1 + a4*q6 - a6*q4 + a5*q7 - a7*q5
+    let r3 = a0*q3 + a3*q0 + a1*q2 - a2*q1 + a4*q7 - a7*q4 - a5*q6 + a6*q5
+    let r4 = a0*q4 + a4*q0 - a1*q5 + a5*q1 - a2*q6 + a6*q2 - a3*q7 + a7*q3
+    let r5 = a0*q5 + a5*q0 + a1*q4 - a4*q1 + a3*q6 - a6*q3 - a2*q7 + a7*q2
+    let r6 = a0*q6 + a6*q0 + a2*q4 - a4*q2 - a3*q5 + a5*q3 + a1*q7 - a7*q1
+    let r7 = a0*q7 + a7*q0 - a1*q6 + a6*q1 + a2*q5 - a5*q2 + a3*q4 - a4*q3
+
+    let d0 = l0 - r0
+    let d1 = l1 - r1
+    let d2 = l2 - r2
+    let d3 = l3 - r3
+    let d4 = l4 - r4
+    let d5 = l5 - r5
+    let d6 = l6 - r6
+    let d7 = l7 - r7
+
+    d0*d0 + d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
+}
+
+// =============================================================================
+// Quickselect (copy from associator_field_full.sio). Same algorithm.
+// =============================================================================
+fn qs_median_of_3(lo: i64, hi: i64) -> i64 with Mut {
+    let mid = lo + (hi - lo) / 2
+    if NORMS[lo as usize] > NORMS[mid as usize] {
+        let t = NORMS[lo as usize]
+        NORMS[lo as usize] = NORMS[mid as usize]
+        NORMS[mid as usize] = t
+    }
+    if NORMS[lo as usize] > NORMS[hi as usize] {
+        let t = NORMS[lo as usize]
+        NORMS[lo as usize] = NORMS[hi as usize]
+        NORMS[hi as usize] = t
+    }
+    if NORMS[mid as usize] > NORMS[hi as usize] {
+        let t = NORMS[mid as usize]
+        NORMS[mid as usize] = NORMS[hi as usize]
+        NORMS[hi as usize] = t
+    }
+    mid
+}
+
+fn quickselect_p95(n_total: i64, k: i64) -> f64 with Mut, Div {
+    var lo: i64 = 0
+    var hi: i64 = n_total - 1
+    while lo < hi {
+        if hi - lo < 8 {
+            var i = lo + 1
+            while i <= hi {
+                var j = i
+                while j > lo {
+                    if NORMS[(j - 1) as usize] > NORMS[j as usize] {
+                        let t = NORMS[(j - 1) as usize]
+                        NORMS[(j - 1) as usize] = NORMS[j as usize]
+                        NORMS[j as usize] = t
+                        j = j - 1
+                    } else {
+                        j = lo - 1
+                    }
+                }
+                i = i + 1
+            }
+            return NORMS[k as usize]
+        }
+        let pivot_idx = qs_median_of_3(lo, hi)
+        let pivot = NORMS[pivot_idx as usize]
+        let t = NORMS[pivot_idx as usize]
+        NORMS[pivot_idx as usize] = NORMS[(hi - 1) as usize]
+        NORMS[(hi - 1) as usize] = t
+        var i2: i64 = lo
+        var j2: i64 = lo
+        let pivot_pos = hi - 1
+        while j2 < pivot_pos {
+            if NORMS[j2 as usize] < pivot {
+                let t2 = NORMS[i2 as usize]
+                NORMS[i2 as usize] = NORMS[j2 as usize]
+                NORMS[j2 as usize] = t2
+                i2 = i2 + 1
+            }
+            j2 = j2 + 1
+        }
+        let t3 = NORMS[i2 as usize]
+        NORMS[i2 as usize] = NORMS[pivot_pos as usize]
+        NORMS[pivot_pos as usize] = t3
+        if k == i2 {
+            return NORMS[k as usize]
+        } else if k < i2 {
+            hi = i2 - 1
+        } else {
+            lo = i2 + 1
+        }
+    }
+    NORMS[k as usize]
+}
+
+// =============================================================================
+// PRNG + Fisher-Yates shuffle of SIGMA (reused from null_robustness.sio).
+// =============================================================================
+fn rng_next(state: i64) -> i64 with Div {
+    let a: i64 = 16807
+    let m: i64 = 2147483647
+    let q: i64 = 127773
+    let r: i64 = 2836
+    let hi = state / q
+    let lo = state - hi * q
+    let t = a * lo - r * hi
+    if t > 0 { t } else { t + m }
+}
+
+fn shuffle_sigma(rng_state: i64) -> i64 with Mut, Div {
+    // Reset SIGMA to identity first.
+    SIGMA[0] = 0; SIGMA[1] = 1; SIGMA[2] = 2; SIGMA[3] = 3
+    SIGMA[4] = 4; SIGMA[5] = 5; SIGMA[6] = 6; SIGMA[7] = 7
+    var state = rng_state
+    var i: i32 = 7
+    while i > 0 {
+        state = rng_next(state)
+        var r = state
+        if r < 0 { r = 0 - r }
+        let j = (r - (r / ((i as i64) + 1)) * ((i as i64) + 1)) as i32
+        let t = SIGMA[i as usize]
+        SIGMA[i as usize] = SIGMA[j as usize]
+        SIGMA[j as usize] = t
+        i = i - 1
+    }
+    state
+}
+
+// =============================================================================
+// Apply SIGMA to LAB_ORIG → LAB200. Each node's ch k becomes original's ch σ(k).
+// =============================================================================
+fn apply_sigma_to_labels() with Mut {
+    var node: i32 = 0
+    while node < 200 {
+        var ch: i32 = 0
+        while ch < 8 {
+            let src_ch = SIGMA[ch as usize]
+            LAB200[(node * 8 + ch) as usize] = LAB_ORIG[(node * 8 + src_ch) as usize]
+            ch = ch + 1
+        }
+        node = node + 1
+    }
+}
+
+// =============================================================================
+// Compute p95 from LAB200. Returns p95 value.
+// =============================================================================
+fn p95_from_labels() -> f64 with Mut, Div {
+    var tidx: i64 = 0
+    var i: i32 = 0
+    while i < 200 {
+        var j = i + 1
+        while j < 200 {
+            var k = j + 1
+            while k < 200 {
+                NORMS[tidx as usize] = assoc_norm_sq(
+                    LAB200[(i*8+0) as usize], LAB200[(i*8+1) as usize], LAB200[(i*8+2) as usize], LAB200[(i*8+3) as usize],
+                    LAB200[(i*8+4) as usize], LAB200[(i*8+5) as usize], LAB200[(i*8+6) as usize], LAB200[(i*8+7) as usize],
+                    LAB200[(j*8+0) as usize], LAB200[(j*8+1) as usize], LAB200[(j*8+2) as usize], LAB200[(j*8+3) as usize],
+                    LAB200[(j*8+4) as usize], LAB200[(j*8+5) as usize], LAB200[(j*8+6) as usize], LAB200[(j*8+7) as usize],
+                    LAB200[(k*8+0) as usize], LAB200[(k*8+1) as usize], LAB200[(k*8+2) as usize], LAB200[(k*8+3) as usize],
+                    LAB200[(k*8+4) as usize], LAB200[(k*8+5) as usize], LAB200[(k*8+6) as usize], LAB200[(k*8+7) as usize],
+                )
+                tidx = tidx + 1
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    quickselect_p95(1313400, 1247729)
+}
+
+// =============================================================================
+// Synthetic fallback label generator — α=0.5 mix.
+// =============================================================================
+fn rng_uniform(state: i64) -> f64 with Div {
+    let m: i64 = 2147483647
+    let s = state as f64
+    let mf = m as f64
+    (s / mf) * 2.0 - 1.0
+}
+
+fn fill_synthetic_orig(seed: i64) with Mut, Div {
+    var rng = seed
+    var node: i32 = 0
+    while node < 200 {
+        rng = rng_next(rng)
+        var bucket = rng
+        if bucket < 0 { bucket = 0 - bucket }
+        let mod10 = bucket - (bucket / 10) * 10
+        let full_oct = mod10 < 5
+        var k: i32 = 0
+        while k < 8 {
+            rng = rng_next(rng)
+            let v = rng_uniform(rng)
+            if k >= 4 && !full_oct {
+                LAB_ORIG[(node*8 + k) as usize] = 0.0
+            } else {
+                LAB_ORIG[(node*8 + k) as usize] = v
+            }
+            k = k + 1
+        }
+        node = node + 1
+    }
+}
+
+// =============================================================================
+// Subject arg + n-perms parsing (simple --subject=N --n-perms=K)
+// =============================================================================
+fn parse_int_arg(prefix: &[i8], prefix_len: i64) -> i64 with IO, Mut, Div, Panic {
+    let argc = arg_count()
+    var i: i64 = 0
+    while i < argc {
+        let a = get_arg(i)
+        let len = str_len(a)
+        if len > prefix_len + 1 {
+            // Check prefix
+            var matches: i64 = 1
+            var p: i64 = 0
+            while p < prefix_len {
+                if str_char_at(a, p) != prefix[p as usize] { matches = 0 }
+                p = p + 1
+            }
+            if matches == 1 && str_char_at(a, prefix_len) == 61 {
+                // Parse integer after '='.
+                var j: i64 = prefix_len + 1
+                var val: i64 = 0
+                while j < len {
+                    let c = str_char_at(a, j)
+                    if c >= 48 && c <= 57 {
+                        val = val * 10 + (c - 48)
+                    }
+                    j = j + 1
+                }
+                return val
+            }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("perm_id,p95")
+
+    // Parse args. --subject=N required for real-ABIDE; synthetic fallback if absent.
+    // Parse --subject=N via literal inline (avoids string-array construction).
+    var subject_arg: i64 = 0 - 1
+    var n_perms: i64 = 1000
+    let argc = arg_count()
+    var ai: i64 = 0
+    while ai < argc {
+        let a = get_arg(ai)
+        let alen = str_len(a)
+        // Look for "--subject=" (10 chars)
+        if alen > 10 && str_char_at(a, 0) == 45 && str_char_at(a, 1) == 45 &&
+           str_char_at(a, 2) == 115 && str_char_at(a, 9) == 61 {
+            var j: i64 = 10
+            var v: i64 = 0
+            while j < alen {
+                let c = str_char_at(a, j)
+                if c >= 48 && c <= 57 { v = v * 10 + (c - 48) }
+                j = j + 1
+            }
+            subject_arg = v
+        }
+        // Look for "--n-perms=" (10 chars)
+        if alen > 10 && str_char_at(a, 0) == 45 && str_char_at(a, 1) == 45 &&
+           str_char_at(a, 2) == 110 && str_char_at(a, 9) == 61 {
+            var j: i64 = 10
+            var v: i64 = 0
+            while j < alen {
+                let c = str_char_at(a, j)
+                if c >= 48 && c <= 57 { v = v * 10 + (c - 48) }
+                j = j + 1
+            }
+            n_perms = v
+        }
+        ai = ai + 1
+    }
+
+    // Load LAB_ORIG from frames.bin or synthetic.
+    let path = "artifacts/research/abide/frames.bin"
+    let sz = file_size(path)
+
+    if sz > 16 && subject_arg >= 0 {
+        let raw = read_file(path)
+        let n_asd = read_i64(raw, 0)
+        let n_td = read_i64(raw, 1)
+        let n_total = n_asd + n_td
+        if subject_arg >= n_total { return 0 }
+        let frame_size: i64 = 1400
+        let header: i64 = 2
+        var node: i32 = 0
+        while node < 200 {
+            LAB_ORIG[(node * 8 + 0) as usize] = 1.0
+            var e: i32 = 0
+            while e < 7 {
+                let off = header + subject_arg * frame_size + (e as i64) * 200 + (node as i64)
+                LAB_ORIG[(node * 8 + (e + 1)) as usize] = read_f64(raw, off) * 5.0
+                e = e + 1
+            }
+            node = node + 1
+        }
+    } else {
+        // Synthetic fallback (α=0.5 at fixed seed)
+        fill_synthetic_orig(42)
+    }
+
+    // Run n_perms permutations. Emit CSV per permutation.
+    var rng_state: i64 = 12345 + subject_arg * 1000003
+    if rng_state < 0 { rng_state = 0 - rng_state }
+    if rng_state == 0 { rng_state = 42 }
+
+    var perm_id: i64 = 0
+    while perm_id < n_perms {
+        rng_state = shuffle_sigma(rng_state)
+        apply_sigma_to_labels()
+        let p95_val = p95_from_labels()
+        print_f64(p95_val); print(",")
+        print_int(perm_id)
+        perm_id = perm_id + 1
+    }
+    0
+}

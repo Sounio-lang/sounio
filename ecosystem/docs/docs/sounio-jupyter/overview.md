@@ -161,7 +161,7 @@ pip install sounio-jupyter
 Or from source:
 
 ```bash
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 pip install -e .
 ```
 
@@ -473,4 +473,4 @@ souc run --native my_program.sio output.elf
 - [**Usage Guide**](usage.md) — Detailed walkthrough with examples
 - [**Magic Commands**](usage.md#magic-commands) — All available magics
 - [**Sounio Language**](https://github.com/sounio-org/sounio/docs/LLM_PROGRAMMING_GUIDE.md) — Learn Sounio syntax
-- [**Examples**](https://github.com/sounio-org/sounio/tree/main/triple-sounio-ecosystem/sounio-jupyter/examples) — Example notebooks
+- [**Examples**](https://github.com/sounio-org/sounio/tree/main/ecosystem/sounio-jupyter/examples) — Example notebooks

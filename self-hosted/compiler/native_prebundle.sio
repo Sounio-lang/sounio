@@ -1,0 +1,432 @@
+// self-hosted::compiler::native_prebundle
+//
+// Flatten a Sounio program with `use` imports into a single bundled .sio file,
+// ready for the native-v2 scalar driver (native_compile_driver.sio).
+//
+// Algorithm: post-order DFS on the import graph — deps emitted before the file
+// that imports them.  `module` and `use` lines are stripped from each file;
+// a `// SOURCE: <path>` marker is injected at each file boundary.
+//
+// Usage:
+//   souc run self-hosted/compiler/native_prebundle.sio -- <main.sio> -o <output.sio> [--root <dir>]
+//
+// --root defaults to "self-hosted" (repo-relative path to module search root).
+//
+// Notes:
+//   • `use` paths are resolved as: use a::b::* → <root>/a/b.sio
+//   • Up to 512 modules, 16MB output.
+//   • Run from the repo root so relative paths resolve correctly.
+
+use io::file_write::{io_write_huge_binary}
+
+// ── Output buffer (16 MB BSS) ────────────────────────────────────────────────
+var OUT: [i8; 16777216] = [0; 16777216]
+var OUT_LEN: i64 = 0
+
+// ── Visited-path registry ────────────────────────────────────────────────────
+// VBUF[i*512 .. i*512 + VLENS[i]]  =  relative module path, e.g. "native/elf.sio"
+var VBUF: [i8; 262144] = [0; 262144]
+var VLENS: [i64; 512] = [0; 512]
+var VCOUNT: i64 = 0
+
+// ── Emit-order list (post-order DFS result: indices into VBUF) ───────────────
+var ORDER: [i64; 512] = [0; 512]
+var ORDER_LEN: i64 = 0
+
+// ── Scratch file buffer for DFS collect phase ────────────────────────────────
+var FILE_DATA: [i8; 1048576] = [0; 1048576]
+var FILE_LEN: i64 = 0
+
+// ── Character helpers ─────────────────────────────────────────────────────────
+
+fn is_ident_ch(c: i8) -> bool {
+    (c >= 65 as i8 && c <= 90 as i8) ||
+    (c >= 97 as i8 && c <= 122 as i8) ||
+    (c >= 48 as i8 && c <= 57 as i8) ||
+    c == 95 as i8
+}
+
+// Convert a path byte (a-z A-Z 0-9 _ / .) to a single-char string.
+fn byte_to_str(c: i8) -> string {
+    let v = c as i64
+    if v >= 97 && v <= 122 {
+        return str_slice("abcdefghijklmnopqrstuvwxyz", v - 97, v - 96)
+    }
+    if v >= 65 && v <= 90 {
+        return str_slice("ABCDEFGHIJKLMNOPQRSTUVWXYZ", v - 65, v - 64)
+    }
+    if v >= 48 && v <= 57 {
+        return str_slice("0123456789", v - 48, v - 47)
+    }
+    if v == 95 { return "_" }
+    if v == 47 { return "/" }
+    if v == 46 { return "." }
+    if v == 45 { return "-" }
+    ""
+}
+
+// ── Output helpers ────────────────────────────────────────────────────────────
+
+fn out_byte(b: i8) with Mut, Panic {
+    if OUT_LEN < 16777215 {
+        OUT[OUT_LEN as usize] = b
+        OUT_LEN = OUT_LEN + 1
+    }
+}
+
+fn out_str(s: string) with Mut, Panic {
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n {
+        out_byte(str_char_at(s, i) as i8)
+        i = i + 1
+    }
+}
+
+// ── Visited-path registry helpers ────────────────────────────────────────────
+
+// Returns index of matching entry, -1 if not found.
+fn vpath_find(relpath: string) -> i64 with Mut {
+    let qlen = str_len(relpath)
+    var i: i64 = 0
+    while i < VCOUNT {
+        if VLENS[i as usize] == qlen {
+            let base = i * 512
+            var eq: bool = true
+            var j: i64 = 0
+            while j < qlen {
+                if VBUF[(base + j) as usize] != (str_char_at(relpath, j) as i8) {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq { return i }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Add a new entry; returns its index.
+fn vpath_add(relpath: string) -> i64 with Mut, Panic {
+    let idx = VCOUNT
+    let base = idx * 512
+    let n = str_len(relpath)
+    var j: i64 = 0
+    while j < n && j < 511 {
+        VBUF[(base + j) as usize] = str_char_at(relpath, j) as i8
+        j = j + 1
+    }
+    VLENS[idx as usize] = n
+    VCOUNT = VCOUNT + 1
+    idx
+}
+
+// Reconstruct the string for VBUF entry i.
+fn vpath_str(idx: i64) -> string with Mut {
+    let base = idx * 512
+    let n = VLENS[idx as usize]
+    var s: string = ""
+    var j: i64 = 0
+    while j < n {
+        s = str_concat(s, byte_to_str(VBUF[(base + j) as usize]))
+        j = j + 1
+    }
+    s
+}
+
+// ── Use-path extraction (raw byte scan) ──────────────────────────────────────
+//
+// Given the bytes of a `use` line (e.g. "use native::elf::*"), extract the
+// module path as a relative .sio path: "native/elf.sio".
+// Returns "" if the line cannot be parsed.
+
+fn extract_relpath(data: [i8; 1048576], line_start: i64, line_end: i64) -> string with Mut, Panic {
+    // Must start with "use "
+    if line_end - line_start < 5 { return "" }
+    if data[line_start as usize] != 117 as i8 { return "" }       // 'u'
+    if data[(line_start+1) as usize] != 115 as i8 { return "" }   // 's'
+    if data[(line_start+2) as usize] != 101 as i8 { return "" }   // 'e'
+    if data[(line_start+3) as usize] != 32 as i8 { return "" }    // ' '
+
+    var pos: i64 = line_start + 4
+    var path: string = ""
+    var first_seg: bool = true
+
+    while pos < line_end {
+        let c = data[pos as usize]
+        if is_ident_ch(c) {
+            // Read full identifier segment
+            if !first_seg {
+                path = str_concat(path, "/")
+            }
+            first_seg = false
+            while pos < line_end && is_ident_ch(data[pos as usize]) {
+                path = str_concat(path, byte_to_str(data[pos as usize]))
+                pos = pos + 1
+            }
+            // Check what follows: :: then { or * → done; :: then ident → continue
+            if pos + 1 < line_end && data[pos as usize] == 58 as i8 && data[(pos+1) as usize] == 58 as i8 {
+                let after_cc = pos + 2
+                if after_cc < line_end {
+                    let nc = data[after_cc as usize]
+                    if nc == 123 as i8 || nc == 42 as i8 {
+                        // ::{  or ::*  → module path ends here
+                        pos = line_end
+                    } else {
+                        // ::ident → keep going
+                        pos = after_cc
+                    }
+                } else {
+                    pos = line_end
+                }
+            } else {
+                // No :: follows → single-segment import (rare), stop
+                pos = line_end
+            }
+        } else {
+            pos = pos + 1
+        }
+    }
+
+    if str_len(path) == 0 { return "" }
+    str_concat(path, ".sio")
+}
+
+// ── File loading ──────────────────────────────────────────────────────────────
+
+fn load_file(fspath: string) -> i64 with IO, Mut, Panic, Div {
+    let sz = file_size(fspath)
+    if sz <= 0 { return 0 }
+    let n = if sz > 1048576 { 1048576 } else { sz }
+    let raw = read_file(fspath)
+    var i: i64 = 0
+    while i < n {
+        FILE_DATA[i as usize] = raw[i as usize]
+        i = i + 1
+    }
+    n
+}
+
+// ── DFS collect pass ──────────────────────────────────────────────────────────
+//
+// `fspath` is the actual filesystem path (key in visited registry).
+// `root` is the search dir for resolving `use` imports.
+// Post-order: deps emitted before the file that imports them.
+
+fn collect_file(fspath: string, root: string) with IO, Mut, Panic, Div {
+    if VCOUNT >= 512 { return }
+
+    // Already visited?
+    if vpath_find(fspath) >= 0 { return }
+    let idx = vpath_add(fspath)
+
+    // Load file into FILE_DATA (overwrites previous — that's intentional)
+    let n = load_file(fspath)
+    FILE_LEN = n
+    if n <= 0 {
+        print("native_prebundle: warning: cannot read ")
+        print(fspath)
+        print("\n")
+        ORDER[ORDER_LEN as usize] = idx
+        ORDER_LEN = ORDER_LEN + 1
+        return
+    }
+
+    // ── Extract use relpaths BEFORE recursing (FILE_DATA will be overwritten) ──
+    // Stack: up to 32 use paths per file, 512 chars each.
+    var use_buf: [i8; 16384] = [0; 16384]
+    var use_lens: [i64; 32] = [0; 32]
+    var use_cnt: i64 = 0
+
+    var lstart: i64 = 0
+    var li: i64 = 0
+    while li < n {
+        let ch = FILE_DATA[li as usize]
+        if ch == 10 as i8 || li == n - 1 {
+            let lend = if ch == 10 as i8 { li } else { li + 1 }
+            if lend - lstart >= 4 &&
+               FILE_DATA[lstart as usize] == 117 as i8 &&
+               FILE_DATA[(lstart+1) as usize] == 115 as i8 &&
+               FILE_DATA[(lstart+2) as usize] == 101 as i8 &&
+               FILE_DATA[(lstart+3) as usize] == 32 as i8 {
+                let dep_rel = extract_relpath(FILE_DATA, lstart, lend)
+                if str_len(dep_rel) > 0 && use_cnt < 32 {
+                    let base = use_cnt * 512
+                    let dlen = str_len(dep_rel)
+                    var di: i64 = 0
+                    while di < dlen && di < 511 {
+                        use_buf[(base + di) as usize] = str_char_at(dep_rel, di) as i8
+                        di = di + 1
+                    }
+                    use_lens[use_cnt as usize] = dlen
+                    use_cnt = use_cnt + 1
+                }
+            }
+            lstart = li + 1
+        }
+        li = li + 1
+    }
+
+    // ── Recurse into deps ────────────────────────────────────────────────────
+    var ui: i64 = 0
+    while ui < use_cnt {
+        let base = ui * 512
+        let dlen = use_lens[ui as usize]
+        var dep_rel: string = ""
+        var di: i64 = 0
+        while di < dlen {
+            dep_rel = str_concat(dep_rel, byte_to_str(use_buf[(base + di) as usize]))
+            di = di + 1
+        }
+        let dep_fspath = str_concat(str_concat(root, "/"), dep_rel)
+        collect_file(dep_fspath, root)
+        ui = ui + 1
+    }
+
+    // ── Post-order: record for emission ─────────────────────────────────────
+    ORDER[ORDER_LEN as usize] = idx
+    ORDER_LEN = ORDER_LEN + 1
+}
+
+// ── Emit pass ─────────────────────────────────────────────────────────────────
+//
+// Read file by its registered fspath, strip module/use lines, write to OUT.
+
+fn emit_file(fspath: string) with IO, Mut, Panic, Div {
+    let n = load_file(fspath)
+    if n <= 0 { return }
+
+    // SOURCE marker
+    out_str("// ----------------------------------------------------------------\n")
+    out_str("// SOURCE: ")
+    out_str(fspath)
+    out_str("\n")
+    out_str("// ----------------------------------------------------------------\n\n")
+
+    // Emit content, skipping `module` and `use` lines
+    var lstart: i64 = 0
+    var li: i64 = 0
+    while li <= n {
+        let at_end = li == n
+        let ch = if at_end { 10 as i8 } else { FILE_DATA[li as usize] }
+        if ch == 10 as i8 {
+            let lend = li
+            let llen = lend - lstart
+
+            // Skip `module ` lines
+            var skip: bool = false
+            if llen >= 7 &&
+               FILE_DATA[lstart as usize] == 109 as i8 &&
+               FILE_DATA[(lstart+1) as usize] == 111 as i8 &&
+               FILE_DATA[(lstart+2) as usize] == 100 as i8 &&
+               FILE_DATA[(lstart+3) as usize] == 117 as i8 &&
+               FILE_DATA[(lstart+4) as usize] == 108 as i8 &&
+               FILE_DATA[(lstart+5) as usize] == 101 as i8 &&
+               FILE_DATA[(lstart+6) as usize] == 32 as i8 {
+                skip = true
+            }
+            // Skip `use ` lines
+            if !skip && llen >= 4 &&
+               FILE_DATA[lstart as usize] == 117 as i8 &&
+               FILE_DATA[(lstart+1) as usize] == 115 as i8 &&
+               FILE_DATA[(lstart+2) as usize] == 101 as i8 &&
+               FILE_DATA[(lstart+3) as usize] == 32 as i8 {
+                skip = true
+            }
+            // Skip `pub use ` lines
+            if !skip && llen >= 8 &&
+               FILE_DATA[lstart as usize] == 112 as i8 &&
+               FILE_DATA[(lstart+1) as usize] == 117 as i8 &&
+               FILE_DATA[(lstart+2) as usize] == 98 as i8 &&
+               FILE_DATA[(lstart+3) as usize] == 32 as i8 &&
+               FILE_DATA[(lstart+4) as usize] == 117 as i8 &&
+               FILE_DATA[(lstart+5) as usize] == 115 as i8 &&
+               FILE_DATA[(lstart+6) as usize] == 101 as i8 &&
+               FILE_DATA[(lstart+7) as usize] == 32 as i8 {
+                skip = true
+            }
+
+            if !skip {
+                var ci: i64 = lstart
+                while ci < lend {
+                    out_byte(FILE_DATA[ci as usize])
+                    ci = ci + 1
+                }
+                out_byte(10 as i8)   // newline
+            }
+
+            lstart = li + 1
+        }
+        li = li + 1
+    }
+}
+
+// ── main ──────────────────────────────────────────────────────────────────────
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 1 {
+        print("native_prebundle: usage: native_prebundle.sio <main.sio> -o <output.sio> [--root <dir>]\n")
+        return 1
+    }
+
+    let main_path = get_arg(0)
+
+    var output_path: string = "bundled.sio"
+    var root: string = "self-hosted"
+
+    var ai: i64 = 1
+    while ai < argc {
+        let arg = get_arg(ai)
+        if str_eq(arg, "-o") && ai + 1 < argc {
+            output_path = get_arg(ai + 1)
+            ai = ai + 2
+        } else {
+            if str_eq(arg, "--root") && ai + 1 < argc {
+                root = get_arg(ai + 1)
+                ai = ai + 2
+            } else {
+                ai = ai + 1
+            }
+        }
+    }
+
+    print("native_prebundle: main=")
+    print(main_path)
+    print(" root=")
+    print(root)
+    print(" output=")
+    print(output_path)
+    print("\n")
+
+    // ── Phase 1: DFS collect ─────────────────────────────────────────────────
+    collect_file(main_path, root)
+
+    print("native_prebundle: modules=")
+    print_int(ORDER_LEN)
+    print("\n")
+
+    // ── Phase 2: Emit ─────────────────────────────────────────────────────────
+    var ei: i64 = 0
+    while ei < ORDER_LEN {
+        let vidx = ORDER[ei as usize]
+        let fspath = vpath_str(vidx)
+        emit_file(fspath)
+        ei = ei + 1
+    }
+
+    // ── Write output ──────────────────────────────────────────────────────────
+    let ok = io_write_huge_binary(output_path, OUT, OUT_LEN)
+    if ok {
+        print("native_prebundle: wrote ")
+        print(output_path)
+        print(" (")
+        print_int(OUT_LEN)
+        print(" bytes)\n")
+        return 0
+    } else {
+        print("native_prebundle: write failed\n")
+        return 1
+    }
+}

@@ -1,0 +1,141 @@
+// darwin_pbpk/bbb/scenario_gate.sio — Scenario-level VoI-weighted gate
+//
+// Dissertation contribution #4 extension: the per-parameter gate in
+// bbb_gate.sio refuses the prediction if ANY dominant driver falls
+// below the confidence threshold. Clinicians and reviewers, however,
+// reason at the scenario level — "is this IV-bolus / Cypher-stent /
+// oral-SS prediction defensible as a whole?".
+//
+// The scenario gate collapses the per-parameter confidence vector
+// into a single scenario-level score, weighted by the parameter's
+// Value of Information (S_i × (1 − conf_i) from bbb_voi.sio). A
+// scenario is ADMITTED iff its VoI-weighted confidence clears a
+// threshold. This is compatible with the existing per-parameter
+// gate: run both, require both to pass for "strong admit".
+//
+// Why VoI weighting (not uniform averaging)?
+//   Parameters that dominate endpoint variance AND have weak priors
+//   deserve more weight in the scenario verdict — they are the ones
+//   that can sink the prediction. A high-confidence but low-Sobol
+//   parameter should barely move the scenario score. VoI is exactly
+//   that joint weight.
+//
+// Formula:
+//
+//     w_i        = VoI_i = S_i × (1 − conf_i)
+//     conf_bar   = (Σ w_i × conf_i) / (Σ w_i)
+//
+// Degenerate case: if all parameters have conf = 1.0, every w_i = 0,
+// we fall back to the unweighted mean (which is 1.0). Treated as
+// ADMITTED.
+
+use darwin_pbpk::bbb::bbb_voi::{BBBVoI}
+
+pub enum ScenarioKind {
+    IVBolus,
+    CypherStent,
+    OralSteadyState,
+}
+
+pub struct ScenarioGateVerdict {
+    kind:                   ScenarioKind,
+    admitted:               bool,
+    voi_weighted_conf:      f64,
+    fallback_mean_conf:     f64,
+    used_fallback:          bool,
+    refuse_threshold:       f64,
+    weakest_driver_idx:     i32,
+    weakest_driver_voi:     f64,
+    weakest_driver_conf:    f64,
+}
+
+fn scenario_name(k: ScenarioKind) -> string {
+    match k {
+        ScenarioKind::IVBolus         => "IV-bolus",
+        ScenarioKind::CypherStent     => "Cypher-DES",
+        ScenarioKind::OralSteadyState => "oral-SS",
+    }
+}
+
+fn scenario_gate_zero(k: ScenarioKind, thr: f64) -> ScenarioGateVerdict {
+    ScenarioGateVerdict {
+        kind: k,
+        admitted: false,
+        voi_weighted_conf: 0.0,
+        fallback_mean_conf: 0.0,
+        used_fallback: false,
+        refuse_threshold: thr,
+        weakest_driver_idx: 0 - 1,
+        weakest_driver_voi: 0.0,
+        weakest_driver_conf: 1.0,
+    }
+}
+
+pub fn gate_scenario(
+    kind: ScenarioKind,
+    voi: BBBVoI,
+    refuse_threshold: f64
+) -> ScenarioGateVerdict with Mut, Div, Panic {
+    var v = scenario_gate_zero(kind, refuse_threshold)
+
+    var sum_w: f64 = 0.0
+    var sum_wc: f64 = 0.0
+    var sum_c: f64 = 0.0
+    var worst_voi: f64 = 0.0 - 1.0
+    var worst_idx: i32 = 0 - 1
+    var worst_conf: f64 = 1.0
+
+    var i: i32 = 0
+    while i < voi.n_rows {
+        let idx = i as usize
+        let w = voi.voi[idx]
+        let c = voi.confidence[idx]
+        sum_w  = sum_w + w
+        sum_wc = sum_wc + w * c
+        sum_c  = sum_c + c
+        if w > worst_voi {
+            worst_voi = w
+            worst_idx = voi.param_idx[idx]
+            worst_conf = c
+        }
+        i = i + 1
+    }
+
+    let n = voi.n_rows as f64
+    let fallback = if n > 0.0 { sum_c / n } else { 1.0 }
+    v.fallback_mean_conf = fallback
+
+    if sum_w > 1.0e-12 {
+        v.voi_weighted_conf = sum_wc / sum_w
+        v.used_fallback = false
+    } else {
+        v.voi_weighted_conf = fallback
+        v.used_fallback = true
+    }
+
+    v.weakest_driver_idx  = worst_idx
+    v.weakest_driver_voi  = worst_voi
+    v.weakest_driver_conf = worst_conf
+    v.admitted = v.voi_weighted_conf >= refuse_threshold
+    v
+}
+
+pub fn scenario_gate_print(v: ScenarioGateVerdict) with IO, Mut, Panic, Div {
+    print("Scenario gate: "); println(scenario_name(v.kind))
+    print("  refuse_threshold      = "); print_f64(v.refuse_threshold); println("")
+    print("  VoI-weighted conf     = "); print_f64(v.voi_weighted_conf); println("")
+    if v.used_fallback {
+        print("  (fallback mean conf)  = "); print_f64(v.fallback_mean_conf); println("")
+        println("  note: Σ VoI ≈ 0 → all priors strong, fell back to mean")
+    }
+    print("  weakest-VoI param idx = "); print_f64(v.weakest_driver_idx as f64); println("")
+    print("    its VoI             = "); print_f64(v.weakest_driver_voi); println("")
+    print("    its confidence      = "); print_f64(v.weakest_driver_conf); println("")
+    if v.admitted {
+        println("  scenario verdict: ADMITTED")
+    } else {
+        println("  scenario verdict: REFUSED")
+        println("    reason: VoI-weighted confidence below threshold —")
+        println("    highest-VoI parameter is the best next measurement target")
+    }
+}

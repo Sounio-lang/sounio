@@ -1,116 +1,90 @@
 #!/usr/bin/env python3
-"""
-Parse examples/brain_ossm_abide.sio output into machine-readable artifacts.
-
-This normalizes the multiline PRED trace blocks emitted by the Sounio runner and
-reuses the shared ABIDE campaign summarization helpers so the native benchmark
-produces the same overall/per-seed/per-site tables as the external baselines.
-"""
+"""Parse raw `brain_ossm_abide.sio` output into structured campaign artifacts."""
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+import re
 from pathlib import Path
 
-from abide_campaign_lib import (
-    load_manifest,
-    summarize_prediction_rows,
-    write_json,
-    write_tsv,
+from abide_campaign_lib import summarize_prediction_rows, write_json, write_tsv
+
+
+OVERALL_RE = re.compile(
+    r"^\s+(?P<model>[OH]-SSM)\s+balanced accuracy:\s+(?P<mean>-?\d+(?:\.\d+)?)\s+±\s+(?P<std>-?\d+(?:\.\d+)?)$"
 )
+GAP_RE = re.compile(r"^\s+Gap \(O-H\):\s+(?P<gap>-?\d+(?:\.\d+)?)")
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Parse brain_ossm_abide output")
-    parser.add_argument("output_path", help="Path to captured brain_ossm_abide stdout")
-    parser.add_argument(
-        "--manifest",
-        default="",
-        help="Path to the manifest used for the run; defaults to abide_roi_manifest.tsv next to the output",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default="",
-        help="Directory to write overall_metrics/per_seed/per_site/prediction_rows artifacts",
-    )
-    return parser.parse_args()
+def parse_raw_output(path: Path) -> tuple[list[dict[str, object]], dict[str, object]]:
+    prediction_rows: list[dict[str, object]] = []
+    summary: dict[str, object] = {"gap_pp": None, "raw_overall": []}
 
-
-def resolve_manifest(output_path: Path, explicit_manifest: str) -> Path | None:
-    if explicit_manifest:
-        candidate = Path(explicit_manifest)
-        return candidate if candidate.exists() else None
-
-    sibling = output_path.parent / "abide_roi_manifest.tsv"
-    if sibling.exists():
-        return sibling
-
-    return None
-
-
-def parse_prediction_rows(output_path: Path) -> list[dict[str, object]]:
-    lines = output_path.read_text(encoding="utf-8").splitlines()
-    rows: list[dict[str, object]] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if not line.startswith("PRED\t"):
-            i += 1
+    lines = path.read_text(encoding="utf-8").splitlines()
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if line.startswith("PRED"):
+            parts = [part for part in line.split("\t") if part]
+            next_idx = idx + 1
+            while len(parts) < 8 and next_idx < len(lines) and lines[next_idx].startswith("\t"):
+                parts.extend(part for part in lines[next_idx].split("\t") if part)
+                next_idx += 1
+            if len(parts) != 8:
+                raise ValueError(f"malformed prediction line: {line}")
+            _, model, seed, site, label, prob, pred, assoc = parts
+            prediction_rows.append(
+                {
+                    "model": model,
+                    "seed": int(seed),
+                    "site": site,
+                    "label": int(label),
+                    "prob": float(prob),
+                    "pred": int(pred),
+                    "assoc": None if assoc == "NA" else float(assoc),
+                }
+            )
+            idx = next_idx
             continue
 
-        if i + 3 >= len(lines):
-            raise ValueError(f"truncated PRED block near line {i + 1}")
+        idx += 1
+        overall_match = OVERALL_RE.match(line)
+        if overall_match:
+            summary["raw_overall"].append(
+                {
+                    "model": overall_match.group("model"),
+                    "balanced_accuracy_pct_mean": float(overall_match.group("mean")),
+                    "balanced_accuracy_pct_std": float(overall_match.group("std")),
+                }
+            )
+            continue
 
-        head = line.split("\t")
-        site_line = lines[i + 1].lstrip("\t").split("\t")
-        prob_line = lines[i + 2].lstrip("\t").split("\t")
-        assoc_line = lines[i + 3].lstrip("\t").split("\t")
+        gap_match = GAP_RE.match(line)
+        if gap_match:
+            summary["gap_pp"] = float(gap_match.group("gap"))
 
-        if len(head) != 3 or len(site_line) != 2 or len(prob_line) != 2 or len(assoc_line) != 1:
-            raise ValueError(f"malformed PRED block near line {i + 1}")
-
-        rows.append(
-            {
-                "model": head[1],
-                "seed": int(head[2]),
-                "site": site_line[0],
-                "label": int(site_line[1]),
-                "prob": float(prob_line[0]),
-                "pred": int(prob_line[1]),
-                "assoc": float(assoc_line[0]),
-            }
-        )
-        i += 4
-
-    if not rows:
-        raise ValueError(f"no PRED rows found in {output_path}")
-
-    return rows
+    return prediction_rows, summary
 
 
 def main() -> int:
-    args = parse_args()
-    output_path = Path(args.output_path)
-    if not output_path.exists():
-        raise SystemExit(f"output file not found: {output_path}")
+    parser = argparse.ArgumentParser(description="Parse Brain O-SSM ABIDE raw output")
+    parser.add_argument("--input", required=True, help="Raw benchmark stdout file")
+    parser.add_argument("--output-dir", required=True, help="Directory for JSON/TSV outputs")
+    args = parser.parse_args()
 
-    output_dir = Path(args.output_dir) if args.output_dir else output_path.parent
+    input_path = Path(args.input)
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    prediction_rows = parse_prediction_rows(output_path)
+    prediction_rows, raw_summary = parse_raw_output(input_path)
+    if not prediction_rows:
+        raise SystemExit("no PRED lines found in raw benchmark output; structured parse requires the new trace format")
+
     summaries = summarize_prediction_rows(prediction_rows)
-
-    manifest_path = resolve_manifest(output_path, args.manifest)
-    manifest_payload: dict[str, object] | None = None
-    if manifest_path is not None:
-        manifest_meta, _ = load_manifest(manifest_path)
-        manifest_payload = asdict(manifest_meta)
-
     payload = {
-        "schema": "brain_ossm.abide.sounio.v1",
-        "source_output": str(output_path),
-        "manifest": manifest_payload,
+        "schema": "brain_ossm.abide.structured.v1",
+        "source": str(input_path),
+        "raw_summary": raw_summary,
         "overall": summaries["overall"],
     }
     write_json(output_dir / "overall_metrics.json", payload)
@@ -183,23 +157,6 @@ def main() -> int:
         output_dir / "prediction_rows.tsv",
         prediction_rows,
         ["model", "seed", "site", "label", "prob", "pred", "assoc"],
-    )
-    write_tsv(
-        output_dir / "per_site_seed_metrics.tsv",
-        summaries["per_site_seed"],
-        [
-            "model",
-            "seed",
-            "site",
-            "subjects",
-            "accuracy_pct",
-            "balanced_accuracy_pct",
-            "macro_f1_pct",
-            "auroc_pct",
-            "brier",
-            "ece_pct",
-            "assoc_mean",
-        ],
     )
     return 0
 

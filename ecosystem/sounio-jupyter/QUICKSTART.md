@@ -21,7 +21,7 @@ A **Jupyter kernel for the Sounio epistemic computing language** that brings int
 
 ```bash
 # From the sounio-jupyter directory
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 
 # Install package in development mode
 pip install -e .

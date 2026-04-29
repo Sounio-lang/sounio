@@ -15,26 +15,26 @@ export const heroContent: Record<Audience, {
   cta2Href: string;
 }> = {
   scientist: {
-    badge: 'FOR RESEARCH LEADS \u00B7 PHARMA \u00B7 NEURO \u00B7 CLIMATE \u00B7 QUANTUM',
-    h1Line1: 'Scientific Decisions',
-    h1Line2: 'Should Show Doubt',
+    badge: 'FOR RESEARCHERS \u00B7 PHARMACOLOGY \u00B7 NEUROSCIENCE \u00B7 CLIMATE \u00B7 QUANTUM',
+    h1Line1: 'Your Calculations',
+    h1Line2: 'Hide Uncertainty',
     subtitle:
-      'Drug doses, imaging thresholds, and climate projections should carry provenance, confidence, and an explicit stop condition. Sounio is built for teams that need the software itself to say when the evidence is no longer strong enough.',
-    cta1Label: 'See the Scientific Lanes',
+      'When you compute a drug dose, an fMRI threshold, or a climate projection, the answer is a number. But how confident is that number? Where did the input data come from? What happens when the measurement error matters? Sounio is a programming language that tracks all of this automatically.',
+    cta1Label: 'See How Labs Use Sounio',
     cta1Href: '/science',
-    cta2Label: 'Read the Dosing Example',
-    cta2Href: '/docs/vancomycin-uncertainty',
+    cta2Label: 'Explore a Dosing Example',
+    cta2Href: '/learn/vancomycin-uncertainty',
   },
   technical: {
-    badge: 'CURRENT CONTRACT \u00B7 SELF-HOSTED COMPILER \u00B7 GATED STDLIB',
+    badge: 'CURRENT CONTRACT \u00B7 BETA COMPILER + GATED STDLIB',
     h1Line1: 'Scientific Code',
-    h1Line2: 'That Refuses To Bluff',
+    h1Line2: 'That Shows Its Work',
     subtitle:
-      'Sounio combines explicit uncertainty, provenance-aware types, and gate-backed compiler workflows. The strongest public promise today is not that every backend is finished, but that the compiler keeps showing where the evidence ends.',
+      'Sounio combines explicit uncertainty, provenance-aware types, and gate-backed compiler workflows. The current repo is strongest as a check-first platform with validated scientific lanes, not as a fully finished all-backends release.',
     cta1Label: 'Read the Current Contract',
     cta1Href: '/learn/getting-started',
-    cta2Label: 'Inspect the Release Surface',
-    cta2Href: '/releases',
+    cta2Label: 'Open Playground',
+    cta2Href: '/playground',
   },
 };
 

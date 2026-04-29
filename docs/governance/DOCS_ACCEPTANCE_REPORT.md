@@ -19,26 +19,26 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 
 ## Scope Summary
 
-- Total governed topics: 262
-- Repo-backed topics: 220
+- Total governed topics: 370
+- Repo-backed topics: 328
 - Website-backed topics: 55
 - Dual-canon topics: 13
-- Authority count `archived`: 12
+- Authority count `archived`: 19
 - Authority count `dual`: 13
-- Authority count `historical`: 32
-- Authority count `repo_only`: 163
+- Authority count `historical`: 70
+- Authority count `repo_only`: 226
 - Authority count `website_only`: 42
 
 ## Ownership Summary
 
 - A0: 1 topics
 - A1: 1 topics
-- A2: 123 topics
-- A3: 9 topics
-- A4: 22 topics
-- A5: 22 topics
-- A6: 40 topics
-- A7: 44 topics
+- A2: 189 topics
+- A3: 10 topics
+- A4: 26 topics
+- A5: 27 topics
+- A6: 64 topics
+- A7: 52 topics
 
 ## Locale Acceptance
 
@@ -52,19 +52,6 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 - repo.frontdoor.docs-index: docs/governance/DOCS_AUTHORITY_MATRIX.md
 - repo.governance.acceptance-report: docs/governance/topic-registry.v1.json, docs/governance/DOCS_AUTHORITY_MATRIX.md
 - repo.governance.authority-matrix: docs/governance/topic-registry.v1.json
-- repo.paper.168-theorem-preprint: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.cpt-psp.outline: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.epistemic-types.benchmarks.external-baselines-summary: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.epistemic-types.benchmarks.l4-gemm-summary: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.epistemic-types.benchmarks.nvidia-l4-benchmarks: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.epistemic-types.readme: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.kybernetes-second-order: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.oopsla2027.outline: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.paper: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.preprint: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.readme: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh, scripts/paper/paper_submission_pack.sh
-- repo.paper.sounio-arxiv-draft: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
-- repo.paper.temporality-psychiatry.draft-en: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
 - website.docs.gpu: artifacts/omega/gpu_runtime_attest_gate.v1.json
 - website.docs.vancomycin-uncertainty: website/public/docs/assets/vancomycin-ship/check_pass.png
 
@@ -74,7 +61,5 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 - `bash scripts/check_docs_consistency.sh`
 - `bash scripts/check_docs_registry.sh`
 - `bash scripts/fast_gate.sh`
-- `bash scripts/paper/paper_repro_gate.sh`
-- `bash scripts/paper/paper_submission_pack.sh`
 - `node website/scripts/check-docs-parity.mjs`
 - `npm --prefix website run check:quality`

@@ -34,21 +34,25 @@ _sounio_normalize_bool() {
 SOUNIO_REPO_HARD_NO_RUST="$(_sounio_normalize_bool "${SOUNIO_REPO_HARD_NO_RUST:-1}" "SOUNIO_REPO_HARD_NO_RUST")"
 SKIP_BUILD="$(_sounio_normalize_bool "${SKIP_BUILD:-$SOUNIO_REPO_HARD_NO_RUST}" "SKIP_BUILD")"
 
+_sounio_host_platform() {
+  local host_os="${SOUNIO_HOST_OS_OVERRIDE:-$(uname -s 2>/dev/null || echo unknown)}"
+  local host_arch="${SOUNIO_HOST_ARCH_OVERRIDE:-$(uname -m 2>/dev/null || echo unknown)}"
+  printf '%s:%s\n' "$host_os" "$host_arch"
+}
+
+_sounio_default_release_platform() {
+  case "$(_sounio_host_platform)" in
+    Linux:x86_64|Linux:amd64) printf '%s\n' "linux-x86_64" ;;
+    Linux:arm64|Linux:aarch64) printf '%s\n' "linux-aarch64" ;;
+    Darwin:arm64|Darwin:aarch64) printf '%s\n' "macos-arm64" ;;
+    Darwin:x86_64|Darwin:amd64) printf '%s\n' "macos-x86_64" ;;
+    *) printf '%s\n' "linux-x86_64" ;;
+  esac
+}
+
 # Resolve SOUC_BIN: explicit env → repo wrapper → PATH fallbacks.
 _sounio_resolve_bin() {
   local resolver="$_SOUNIO_ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh"
-  if [[ -x "$resolver" ]]; then
-    if _resolved_via_omega="$(
-      OMEGA_SOUC_REQUIRE_PINNED="${OMEGA_SOUC_REQUIRE_PINNED:-$SOUNIO_REPO_HARD_NO_RUST}" \
-      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK="${OMEGA_SOUC_ALLOW_LOCAL_FALLBACK:-0}" \
-        "$resolver" --print-path 2>/dev/null
-    )"; then
-      if [[ -n "$_resolved_via_omega" && -x "$_resolved_via_omega" ]]; then
-        echo "$_resolved_via_omega"
-        return 0
-      fi
-    fi
-  fi
   if [[ -n "${SOUC_BIN:-}" && -x "$SOUC_BIN" ]]; then
     echo "$SOUC_BIN"
     return 0
@@ -62,6 +66,42 @@ _sounio_resolve_bin() {
   if [[ -x "$compat_root_bin" ]]; then
     echo "$compat_root_bin"
     return 0
+  fi
+  case "$(_sounio_host_platform)" in
+    Linux:x86_64|Linux:amd64)
+      local linux_bin="$_SOUNIO_ROOT_DIR/bin/souc-linux-x86_64"
+      if [[ -x "$linux_bin" ]]; then
+        echo "$linux_bin"
+        return 0
+      fi
+      ;;
+    Darwin:arm64|Darwin:aarch64)
+      local macos_arm64_bin="$_SOUNIO_ROOT_DIR/artifacts/self-hosted/souc-self-hosted-arm64-macos"
+      if [[ -x "$macos_arm64_bin" ]]; then
+        echo "$macos_arm64_bin"
+        return 0
+      fi
+      ;;
+    Darwin:x86_64|Darwin:amd64)
+      local macos_x86_bin="$_SOUNIO_ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64-macos"
+      if [[ -x "$macos_x86_bin" ]]; then
+        echo "$macos_x86_bin"
+        return 0
+      fi
+      ;;
+  esac
+  if [[ -x "$resolver" ]]; then
+    if _resolved_via_omega="$(
+      SOUNIO_SOUC_PLATFORM="${SOUNIO_SOUC_PLATFORM:-$(_sounio_default_release_platform)}" \
+      OMEGA_SOUC_REQUIRE_PINNED="${OMEGA_SOUC_REQUIRE_PINNED:-$SOUNIO_REPO_HARD_NO_RUST}" \
+      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK="${OMEGA_SOUC_ALLOW_LOCAL_FALLBACK:-0}" \
+        "$resolver" --print-path 2>/dev/null
+    )"; then
+      if [[ -n "$_resolved_via_omega" && -x "$_resolved_via_omega" ]]; then
+        echo "$_resolved_via_omega"
+        return 0
+      fi
+    fi
   fi
   local debug_bin="$_SOUNIO_ROOT_DIR/target/debug/souc"
   local release_bin="$_SOUNIO_ROOT_DIR/target/release/souc"

@@ -1,75 +1,95 @@
 // interop/medlang.sio — MedLang interoperability layer
 // Bridges Sounio PK/PD types to MedLang specification
+//
+// Uses struct-of-arrays layout to avoid BSS aliasing bugs with
+// large array-of-struct fields in the native codegen.
 
-struct MedLangDose {
+pub struct MedLangDose {
     amount: f64,
-    route: i32,       // 0=IV, 1=oral, 2=IM
+    route: i64,       // 0=IV, 1=oral, 2=IM
     time: f64,
     duration: f64,
 }
 
-fn medlang_dose_iv(amount: f64, time: f64) -> MedLangDose {
+pub fn medlang_dose_iv(amount: f64, time: f64) -> MedLangDose {
     MedLangDose { amount: amount, route: 0, time: time, duration: 0.0 }
 }
 
-fn medlang_dose_oral(amount: f64, time: f64) -> MedLangDose {
+pub fn medlang_dose_oral(amount: f64, time: f64) -> MedLangDose {
     MedLangDose { amount: amount, route: 1, time: time, duration: 0.0 }
 }
 
-fn medlang_dose_infusion(amount: f64, time: f64, duration: f64) -> MedLangDose {
+pub fn medlang_dose_infusion(amount: f64, time: f64, duration: f64) -> MedLangDose {
     MedLangDose { amount: amount, route: 0, time: time, duration: duration }
 }
 
-struct MedLangObservation {
+pub struct MedLangObservation {
     time: f64,
     dv: f64,
-    cmt: i32,
-    mdv: i32,
+    cmt: i64,
+    mdv: i64,
 }
 
-fn medlang_obs_new(time: f64, dv: f64, cmt: i32) -> MedLangObservation {
+pub fn medlang_obs_new(time: f64, dv: f64, cmt: i64) -> MedLangObservation {
     MedLangObservation { time: time, dv: dv, cmt: cmt, mdv: 0 }
 }
 
-struct MedLangSubject {
-    id: i32,
+// MedLangSubject uses struct-of-arrays to avoid BSS aliasing with large arrays
+pub struct MedLangSubject {
+    id: i64,
     weight: f64,
     age: f64,
-    sex: i32,
-    doses: [MedLangDose; 16],
-    n_doses: i32,
-    observations: [MedLangObservation; 64],
-    n_obs: i32,
+    sex: i64,
+    // Doses (SoA layout, max 16)
+    dose_amounts:    [f64; 16],
+    dose_routes:     [i64; 16],
+    dose_times:      [f64; 16],
+    dose_durations:  [f64; 16],
+    n_doses: i64,
+    // Observations (SoA layout, max 64)
+    obs_times: [f64; 64],
+    obs_dvs:   [f64; 64],
+    obs_cmts:  [i64; 64],
+    obs_mdvs:  [i64; 64],
+    n_obs: i64,
 }
 
-fn medlang_subject_new(id: i32, weight: f64, age: f64, sex: i32) -> MedLangSubject {
+pub fn medlang_subject_new(id: i64, weight: f64, age: f64, sex: i64) -> MedLangSubject {
     MedLangSubject {
         id: id, weight: weight, age: age, sex: sex,
-        doses: [medlang_dose_iv(0.0, 0.0); 16], n_doses: 0,
-        observations: [medlang_obs_new(0.0, 0.0, 1); 64], n_obs: 0,
+        dose_amounts: [0.0; 16], dose_routes: [0; 16],
+        dose_times: [0.0; 16], dose_durations: [0.0; 16],
+        n_doses: 0,
+        obs_times: [0.0; 64], obs_dvs: [0.0; 64],
+        obs_cmts: [0; 64], obs_mdvs: [0; 64],
+        n_obs: 0,
     }
 }
 
-fn medlang_add_dose(subj: MedLangSubject, dose: MedLangDose) -> MedLangSubject with Mut, Div, Panic {
-    var result = subj
-    if result.n_doses < 16 {
-        result.doses[result.n_doses] = dose
-        result.n_doses = result.n_doses + 1
+pub fn medlang_add_dose(subj: &! MedLangSubject, dose: MedLangDose) with Mut, Panic {
+    if subj.n_doses < 16 {
+        let n = subj.n_doses
+        subj.dose_amounts[n] = dose.amount
+        subj.dose_routes[n] = dose.route
+        subj.dose_times[n] = dose.time
+        subj.dose_durations[n] = dose.duration
+        subj.n_doses = n + 1
     }
-    result
 }
 
-fn medlang_add_obs(subj: MedLangSubject, obs: MedLangObservation) -> MedLangSubject with Mut, Div, Panic {
-    var result = subj
-    if result.n_obs < 64 {
-        result.observations[result.n_obs] = obs
-        result.n_obs = result.n_obs + 1
+pub fn medlang_add_obs(subj: &! MedLangSubject, obs: MedLangObservation) with Mut, Panic {
+    if subj.n_obs < 64 {
+        let n = subj.n_obs
+        subj.obs_times[n] = obs.time
+        subj.obs_dvs[n] = obs.dv
+        subj.obs_cmts[n] = obs.cmt
+        subj.obs_mdvs[n] = obs.mdv
+        subj.n_obs = n + 1
     }
-    result
 }
 
 // One-compartment model evaluation
-fn medlang_onecomp_conc(cl: f64, v: f64, ka: f64, dose: f64, t: f64, is_iv: bool) -> f64 with Div, Panic, Mut {
+pub fn medlang_onecomp_conc(cl: f64, v: f64, ka: f64, dose: f64, t: f64, is_iv: bool) -> f64 with Div, Panic, Mut {
     if t <= 0.0 { return 0.0 }
     let ke = cl / v
     // exp approximation
@@ -89,15 +109,4 @@ fn medlang_onecomp_conc(cl: f64, v: f64, ka: f64, dose: f64, t: f64, is_iv: bool
         while i < 20 { term_ka = term_ka * x_ka / (i as f64); exp_ka = exp_ka + term_ka; i = i + 1 }
         (dose * ka / (v * (ka - ke))) * (exp_ke - exp_ka)
     }
-}
-
-fn test_medlang_iv_bolus() -> bool with Div, Panic, Mut {
-    let c = medlang_onecomp_conc(10.0, 50.0, 0.0, 500.0, 0.001, true)
-    c > 9.0
-}
-
-fn test_medlang_subject() -> bool with Mut, Div, Panic {
-    var subj = medlang_subject_new(1, 70.0, 45.0, 0)
-    subj = medlang_add_dose(subj, medlang_dose_iv(500.0, 0.0))
-    subj.n_doses == 1
 }

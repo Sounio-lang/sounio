@@ -35,25 +35,25 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir jupyter-lab jupyterlab ipykernel
 
 # Install sounio-py (pure Python, from local path)
-COPY triple-sounio-ecosystem/sounio-py /tmp/sounio-py
+COPY ecosystem/sounio-py /tmp/sounio-py
 RUN cd /tmp/sounio-py && pip install --no-cache-dir -e . && rm -rf /tmp/sounio-py
 
 # Install sounio-jupyter (from local path)
-COPY triple-sounio-ecosystem/sounio-jupyter /tmp/sounio-jupyter
+COPY ecosystem/sounio-jupyter /tmp/sounio-jupyter
 RUN cd /tmp/sounio-jupyter && pip install --no-cache-dir -e . && rm -rf /tmp/sounio-jupyter
 
 # Install jupyter kernel spec for sounio
 RUN python3.12 -m sounio_kernel.install
 
 # Copy drug-discovery examples
-COPY triple-sounio-ecosystem/drug-discovery/examples /home/sounio/examples
+COPY ecosystem/drug-discovery/examples /home/sounio/examples
 
 # Create work directory for notebooks
 RUN mkdir -p /home/sounio/work && \
     chown -R sounio:sounio /home/sounio
 
 # Copy jupyter config
-COPY triple-sounio-ecosystem/docker/jupyter_config.py /root/.jupyter/jupyter_lab_config.py
+COPY ecosystem/docker/jupyter_config.py /root/.jupyter/jupyter_lab_config.py
 
 # Expose Jupyter port
 EXPOSE 8888

@@ -4489,6 +4489,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     // Epistemic enforcement (170-171)
     else if code == 170 { print("accessing .value on epistemic type requires `with Epistemic` effect") }
     else if code == 171 { print("cannot cast epistemic type to its inner type; epistemic wrapping cannot be silently stripped") }
+    else if code == 172 { print("Knowledge.unwrap requires exactly one argument") }
+    else if code == 173 { print("reason must be a `string` literal") }
     else { print("unknown error") }
 }
 
@@ -10561,6 +10563,27 @@ impl Checker {
         c
     }
 
+    fn report_unit_call_mismatch(self, span: Span, arg_uid: i64, param_uid: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        c.had_error = true
+        c.error_count = c.error_count + 1
+        print("error[E041]: unit mismatch in call argument\n")
+        print("  argument unit: ")
+        if arg_uid >= 0 {
+            print_unit_dim(c.units.get_dim(arg_uid))
+        } else {
+            print("(dimensionless)")
+        }
+        print("\n  parameter unit: ")
+        if param_uid >= 0 {
+            print_unit_dim(c.units.get_dim(param_uid))
+        } else {
+            print("(dimensionless)")
+        }
+        print("\n")
+        c
+    }
+
     // --------------------------------------------------------
     // Unary expression
     // --------------------------------------------------------
@@ -10853,9 +10876,21 @@ impl Checker {
             if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
                 // "unwrap" = [117, 110, 119, 114, 97, 112]
                 let call_start_borrows = c.borrows
-                c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
-                (c, knowledge_inner(base_ty))
+                match e.args {
+                    None => {
+                        c = c.report_error_at(e.span, 172, 0, 0, 0)
+                        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                        (c, knowledge_inner(base_ty))
+                    }
+                    Some(arg_list) => {
+                        if (*arg_list).head.kind != ExprKind::ExprStringLit {
+                            c = c.report_error_at(e.span, 173, 0, 0, 0)
+                        }
+                        c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                        (c, knowledge_inner(base_ty))
+                    }
+                }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 let call_start_borrows = c.borrows
@@ -13307,6 +13342,18 @@ impl Checker {
         }
     }
 
+    fn check_call_arg_unit_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+        let expected_ty = call_ref_inner_or_self(param_ty)
+        let provided_ty = call_ref_inner_or_self(arg_ty)
+        if is_error_or_unknown(expected_ty) || is_error_or_unknown(provided_ty) {
+            return self
+        }
+        if expected_ty.unit_id >= 0 && provided_ty.unit_id >= 0 && expected_ty.unit_id != provided_ty.unit_id {
+            return self.report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
+        }
+        self
+    }
+
     fn check_call_arg_ontology_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         let expected_ty = call_ref_inner_or_self(param_ty)
         if expected_ty.ontology_id < 0 || is_error_or_unknown(expected_ty) {
@@ -13365,6 +13412,7 @@ impl Checker {
                     c = c.check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
                     c = c.check_call_arg_refinement_boundary(arg_expr, arg_ty, param_info.ty, call_span)
                     c = c.check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
+                    c = c.check_call_arg_unit_boundary(arg_ty, param_info.ty, call_span)
                     c = c.ontology_boundary_check_call_arg_contract(arg_ty, param_info.ty, call_span)
                 }
                 // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
@@ -14285,15 +14333,37 @@ fn struct_field_list_count(opt: Option<Box<StructFieldList> >) -> i64 with Mut, 
 //   <ident> != <int_lit>   →  pred_neq(ident, n)
 //
 // Returns (true, pred) on success, (false, _) when the form is unrecognised.
-// Only one level of comparison is extracted; conjunctions (&&) are not yet
-// handled here (the individual guards already come from the outer env stack).
-fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (bool, RefinementPred) with Mut, Panic, Div {
+// Handles atomic comparisons (x > 0), AND conjunctions (x > 0 && x < 100),
+// and OR disjunctions (x < 0 || x > 100) by recursing on both sides.
+// Partial extraction: if only one side of a compound is recognisable, that
+// side's predicate is returned (conservative but sound under-approximation).
+fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (bool, RefinementPred) with Mut, Panic, Div, Alloc {
     let no_pred = (false, empty_refinement_pred())
     match opt {
         None => no_pred
         Some(e) => {
             let expr = *e
             if expr.kind != ExprKind::ExprBinary {
+                return no_pred
+            }
+            // Compound conditions: recurse on both sides and combine.
+            if expr.bin_op == BinaryOp::OpAnd || expr.bin_op == BinaryOp::OpOr {
+                let left_pair  = if_cond_extract_pred(expr.left)
+                let right_pair = if_cond_extract_pred(expr.right)
+                let found_l = left_pair.0
+                let pred_l  = left_pair.1
+                let found_r = right_pair.0
+                let pred_r  = right_pair.1
+                if found_l && found_r {
+                    let combined = if expr.bin_op == BinaryOp::OpAnd {
+                        pred_and(pred_l, pred_r)
+                    } else {
+                        pred_or(pred_l, pred_r)
+                    }
+                    return (true, combined)
+                }
+                if found_l { return (true, pred_l) }
+                if found_r { return (true, pred_r) }
                 return no_pred
             }
             // LHS must be an identifier

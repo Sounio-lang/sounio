@@ -1,0 +1,222 @@
+// darwin_pbpk/drugs/haloperidol.sio — Haloperidol Systemic PBPK + BBB Parameters
+//
+// Physiological and transport parameters for haloperidol at the BBB,
+// formatted for the darwin_pbpk bbb_core.sio framework (BBBParams / BBBPriors).
+//
+// Haloperidol pharmacological identity:
+//   - First-generation antipsychotic (Janssen 1958); butyrophenone class
+//   - High D2 selectivity: Kd ~1.5 nM (Seeman 1976, radioligand binding)
+//   - Basic drug: pKa = 8.7; extensive lysosomal trapping in brain cells
+//   - High lipophilicity: LogP ≈ 4.0 → high passive BBB permeability (PS_bbb >> rapamycin)
+//   - P-gp substrate (Schinkel 1996) but net ACCUMULATION in brain (Kpuu,brain ~3)
+//     because lysosomal trapping > P-gp efflux — the opposite of rapamycin.
+//   - Strong protein binding: fu_plasma ≈ 0.08 (Haase 1981)
+//   - Therapeutic window: D2 occupancy 60-80% (Farde 1992 PET)
+//   - EPS onset: D2 occupancy > 80%
+//
+// The key contrast with rapamycin:
+//   Rapamycin:   Kpuu_brain = 0.15 (efflux-dominated, P-gp wins)
+//   Haloperidol: Kpuu_brain = 3.0  (accumulation; lysosomal trap > P-gp efflux)
+//
+// Literature:
+//   - Loryan I et al. (2014) J Pharm Sci 103:3145  [Kpuu_brain rat ~3]
+//   - Haase D et al. (1981) Arzneimittelforschung   [fu_plasma 0.08]
+//   - Schinkel AH et al. (1996) Science 274:1630    [P-gp substrate]
+//   - Gaohua L et al. (2016) Drug Metab Pharmacokinet 31:224  [BBB PS class]
+//   - Kamiie J et al. (2008) Pharm Res 25:1544      [QTAP P-gp mouse]
+//   - Uchida Y et al. (2011) Mol Pharm 8:2163       [human P-gp 6.06 fmol/µg]
+//   - Zhu Z et al. (2026) Science doi:10.1126/science.aea2100 [luminal surface]
+
+use darwin_pbpk::absorption::{AbsorptionParams}
+use darwin_pbpk::bbb::bbb_core::{BBBParams}
+use darwin_pbpk::bbb::bbb_priors::{BBBPriors}
+use darwin_pbpk::tsit5_pbpk14::{PBPKParams14}
+
+// ============================================================================
+// MEAN PARAMETERS (BBBParams)
+// ============================================================================
+// Volumes: Davies & Morris 1993 (brain compartments, 70 kg adult)
+// q_brain: cerebral blood flow (anatomical reference, not used in BBB ODE)
+// ps_bbb: lipophilic drug class (Gaohua 2016), higher than rapamycin (PS=0.30)
+// ps_mem: lipophilic basic drug; lysosomal compartment adds apparent ICF load
+// fu values: class estimates (Loryan 2014); no direct haloperidol
+//   brain microdialysis protein binding data found in primary literature.
+// kpuu_brain = 3.0 (Loryan 2014 Table 2, rat haloperidol Kp,uu in vivo)
+// kpuu_cell  = 0.5 (slight ICF depletion of free drug; lysosomal sequestration
+//   traps protonated form, so FREE concentration in cytoplasm is below ISF)
+
+pub fn haloperidol_bbb_params() -> BBBParams {
+    BBBParams {
+        v_vasc:     0.013,
+        v_isf:      0.270,
+        v_icf:      1.080,
+        q_brain:    50.0,
+        ps_bbb:     2.0,
+        ps_mem:     8.0,
+        fu_plasma:  0.08,
+        fu_isf:     0.035,
+        fu_icf:     0.010,
+        kpuu_brain: 3.0,
+        kpuu_cell:  0.5,
+    }
+}
+
+// ============================================================================
+// EPISTEMIC PRIORS (BBBPriors, 7-parameter)
+// ============================================================================
+// Follows the same index ordering as bbb_priors.sio (rapamycin):
+//   0: ps_bbb, 1: ps_mem, 2: kpuu_brain, 3: kpuu_cell,
+//   4: fu_plasma, 5: fu_isf, 6: fu_icf
+//
+// Confidence rationale uses the same scale as bbb_rapamycin_priors():
+//   0.20-0.35: assumption or single structural analogue
+//   0.40-0.55: single in vitro or extrapolated in vivo
+//   0.55-0.70: single in vivo study, moderate n
+//   0.70-0.85: replicated in vivo or measurement-grade wet-lab
+//   0.85-0.95: regulatory-submission or meta-analysis grade
+
+pub fn haloperidol_bbb_priors() -> BBBPriors with Mut, Div, Panic {
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+
+    // 0: ps_bbb (L/h) — effective BBB permeability-surface area.
+    // LogP=4 → fast passive influx. Literature PS for basic lipophilic
+    // drugs in CNS PBPK: 1-5 L/h (Gaohua 2016 class estimate).
+    // Central 2.0 L/h; inter-individual P-gp expression CV ~50%.
+    // variance = (2.0 * 0.50)^2 = 1.0
+    // confidence = 0.45 (class-level estimate; no direct haloperidol PS measurement)
+    m[0] = 2.0;    v[0] = 1.0;       c[0] = 0.45
+
+    // 1: ps_mem (L/h) — cellular membrane permeability-surface area.
+    // Lipophilic basic drug; high ps_mem drives lysosomal accumulation.
+    // Class estimate 8 L/h; CV ~60%.
+    // variance = (8.0 * 0.60)^2 = 23.04
+    // confidence = 0.30 (no direct haloperidol brain microdialysis kinetics)
+    m[1] = 8.0;    v[1] = 23.04;     c[1] = 0.30
+
+    // 2: kpuu_brain (ISF_unbound / plasma_unbound at SS).
+    // Loryan 2014 (J Pharm Sci Table 2): haloperidol rat Kp,uu,brain ≈ 3.
+    // Inter-individual variability ~30% (lysosomal pH variability, P-gp expression).
+    // Zhu 2026 (Science) confirms P-gp luminal surface localization, adding
+    // confidence to the mechanistic framework even without haloperidol-specific
+    // quantification (confidence raised 0.55→0.63 analogous to rapamycin kp_brain).
+    // variance = (3.0 * 0.30)^2 = 0.81
+    // confidence = 0.63 (Loryan 2014 primary source + Zhu 2026 mechanistic confirmation)
+    m[2] = 3.0;    v[2] = 0.81;      c[2] = 0.63
+
+    // 3: kpuu_cell (ICF_unbound / ISF_unbound at SS).
+    // Lysosomal trapping sequesters protonated haloperidol: total ICF >> ISF,
+    // but FREE ICF concentration is BELOW ISF free (trapping reduces free drug).
+    // Mean kpuu_cell = 0.5; CV ~50%.
+    // variance = (0.5 * 0.50)^2 = 0.0625
+    // confidence = 0.25 (no direct subcellular unbound measurement for haloperidol)
+    m[3] = 0.5;    v[3] = 0.0625;    c[3] = 0.25
+
+    // 4: fu_plasma — plasma unbound fraction.
+    // Haase 1981 (Arzneimittelforschung): ~8% free (92% protein-bound).
+    // Replicated across multiple equilibrium dialysis studies. CV ~15%.
+    // variance = (0.08 * 0.15)^2 = 1.44e-4
+    // confidence = 0.82 (well-characterized wet-lab, multiple sources converge)
+    m[4] = 0.08;   v[4] = 0.000144;  c[4] = 0.82
+
+    // 5: fu_isf — brain ISF unbound fraction.
+    // Basic drugs bind to ECF proteins (albumin leakage ~0.1-0.3% across BBB,
+    // GFAP, non-specific interactions). Estimated 3.5% free.
+    // CV ~40% (class estimate, no direct haloperidol brain ECF binding data).
+    // variance = (0.035 * 0.40)^2 = 1.96e-4
+    // confidence = 0.35 (class estimate; no primary haloperidol brain ECF measurement)
+    m[5] = 0.035;  v[5] = 0.000196;  c[5] = 0.35
+
+    // 6: fu_icf — brain ICF unbound fraction.
+    // Lower than fu_isf due to lysosomal accumulation and intracellular binding.
+    // Mean 1.0%; CV ~50%.
+    // variance = (0.010 * 0.50)^2 = 2.5e-5
+    // confidence = 0.20 (assumption; no subcellular measurement)
+    m[6] = 0.010;  v[6] = 0.000025;  c[6] = 0.20
+
+    BBBPriors { n: 7, mean: m, variance: v, confidence: c }
+}
+
+// ============================================================================
+// SYSTEMIC PBPK PARAMETERS (PBPKParams14)
+// ============================================================================
+// Haloperidol mean PK parameters for a 70 kg adult.
+//
+// MW: 375.86 g/mol
+// fu_plasma: 0.08 (Haase 1981; 92% protein-bound, mainly AAG)
+// Vd: ~20 L/kg = 1400 L (Forsman & Ohman 1977; extensive tissue distribution)
+//   - This large Vd comes from muscle, adipose, and brain accumulation.
+//   - Model uses tissue-realistic kp values rather than one depot.
+// CL_hepatic: ~40 L/h (~660 mL/min; Forsman 1977, hepatic extraction ~0.7)
+//   - CYP3A4/CYP2D6 primary metabolism; large first-pass effect
+// t1/2: ~21h (IV; oral apparent t1/2 longer due to distribution)
+// Blood:plasma ratio (rb_ratio): 1.0 (moderate AAG binding; negligible RBC partitioning)
+//
+// Tissue partition coefficients (Kp):
+//   Derived from Rodgers-Rowland (basic lipophilic drug, pKa=8.7, LogP=4.0):
+//   kp_liver: 18   (high first-pass site; CYP3A4/2D6 metabolic sink)
+//   kp_lung:  12   (lipophilic; lung first-pass trapping of basic drug)
+//   kp_brain: 15   (extensive accumulation; lysosomal trap in neurons)
+//   kp_muscle: 8   (large volume contributor to deep Vd)
+//   kp_adipose: 3  (moderate adipose binding vs more lipophilic drugs)
+//   Other tissues: scaled by lipophilicity class
+//
+// Note: q_brain = 44 L/h (physiological; the BBB sub-model handles the
+// actual ISF transport via ps_bbb, so systemic brain compartment uses
+// the Kp-based perfusion model. BBB is feed-forward decoupled.)
+//
+// Literature:
+//   - Forsman A & Ohman R (1977) Curr Ther Res 21:606  [PK parameters]
+//   - Haase D et al. (1981) Arzneimittelforschung      [fu, protein binding]
+//   - Cleton A et al. (1999) Pharm Res 16:1582         [tissue distribution]
+//   - Midha KK et al. (1989) Psychopharmacology 97:305 [oral SS plasma]
+
+pub fn haloperidol_pbpk_params() -> PBPKParams14 with Mut {
+    var prm: PBPKParams14 = PBPKParams14 {
+        // Volumes (L) — Davies & Morris 1993 reference human (70 kg)
+        v_blood: 5.2, v_liver: 1.69, v_kidney: 0.31, v_brain: 1.37,
+        v_heart: 0.31, v_lung: 1.17, v_muscle: 29.0, v_adipose: 18.2,
+        v_gut: 1.65, v_skin: 7.8, v_bone: 10.5, v_spleen: 0.19,
+        v_pancreas: 0.14, v_other: 4.5,
+        // Blood flows (L/h) — Davies & Morris 1993
+        q_liver: 87.0, q_kidney: 72.0, q_brain: 44.0, q_heart: 14.4,
+        q_lung: 0.0, q_muscle: 73.8, q_adipose: 18.0, q_gut: 57.6,
+        q_skin: 18.0, q_bone: 21.6, q_spleen: 10.8, q_pancreas: 4.5,
+        q_other: 18.0,
+        // Tissue partition coefficients — Rodgers-Rowland method (basic, pKa=8.7, LogP=4.0).
+        // Muscle (kp=35) and adipose (kp=12) are the primary Vd drivers:
+        //   sum(V_tissue × kp) = ~1468 L → Vd ~ 1400 L/70kg (Forsman 1977, 20 L/kg).
+        // kp_brain=15: extensive CNS accumulation (lysosomal trapping in neurons).
+        kp_liver: 18.0, kp_kidney: 8.0, kp_brain: 15.0, kp_heart: 6.0,
+        kp_lung: 12.0, kp_muscle: 35.0, kp_adipose: 12.0, kp_gut: 6.0,
+        kp_skin: 8.0, kp_bone: 6.0, kp_spleen: 8.0, kp_pancreas: 5.0,
+        kp_other: 5.0,
+        // Clearance (L/h) — hepatic extraction ~70% at liver flow 87 L/h
+        cl_hepatic: 40.0,
+        cl_renal: 0.5,
+        // Binding
+        fu_plasma: 0.08,
+        rb_ratio: 1.0,
+    }
+    return prm
+}
+
+// ============================================================================
+// ORAL ABSORPTION PARAMETERS
+// ============================================================================
+// Haloperidol oral absorption:
+//   Ka: 0.9/h (first-order; Tmax ~2-3h for oral tablet, implies Ka ~0.9)
+//   F_bio: 0.65 (65% oral bioavailability; Forsman 1977, first-pass ~35%)
+//   tlag: 0.25h (15 min lag — standard tablet dissolution)
+//
+// Note: despite high hepatic CL (intrinsic ~320 L/h), F=0.65 because
+// haloperidol is a moderate first-pass drug (hepatic extraction ratio ~0.35).
+// This differs from rapamycin (F=0.14) because haloperidol is not a
+// high-affinity CYP3A4 substrate with enterocyte P-gp efflux opposing absorption.
+//
+// Source: Forsman & Ohman 1977; Froemming et al. (1989) J Clin Psychopharmacol
+
+pub fn haloperidol_absorption_params() -> AbsorptionParams {
+    AbsorptionParams { ka: 0.9, f_bio: 0.65, tlag: 0.25 }
+}

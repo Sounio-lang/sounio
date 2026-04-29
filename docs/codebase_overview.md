@@ -132,7 +132,7 @@ The most important paths to protect when changing the compiler or docs are:
 - `self-hosted/check/`, `self-hosted/hlir/`, `self-hosted/ir/`, and backend directories you touched
 - `tests/run-pass/`, `tests/compile-fail/`, and affected stdlib tests
 - `website/src/content/docs/`, `website/src/pages/learn/`, and docs/i18n support code for docs-domain changes
-- `docs/governance/` metadata and `scripts/check_docs_registry.sh` for docs governance
+- `docs/governance/` metadata and `scripts/dev/check_docs_registry.sh` for docs governance
 
 ## 7. Current contributor checklist
 

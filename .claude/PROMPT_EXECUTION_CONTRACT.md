@@ -21,7 +21,7 @@ Canonical precedence is owned by `.claude/PLAN_CANONICAL_EXECUTION.md`
 | `minimax_error_messages.md` | MiniMax | B.3 | B.1 stable | `self-hosted/check/check.sio` | diagnostics snapshot tests | message delta report |
 | `glm_test_deignore.md` | GLM-5 | C.1 | A+B stable | `tests/*` ignores + expectations | de-ignore batches | ready/needs-fix/blocked report |
 | `deepseek_epistemic_algebra.md` | DeepSeek | C.2 | A stable | math review docs | review signoff | algebra review report |
-| `kimi_lsp_server.md` | Kimi 2.5 | LSP | independent, but no-rust strict | `tools/lsp/*`, `scripts/lsp_smoke_gate.sh` | `LSP_SMOKE_PASS` | `artifacts/omega/lsp_smoke.log` |
+| `kimi_lsp_server.md` | Kimi 2.5 | LSP | independent, but no-rust strict | `tools/lsp/*`, `scripts/ci/lsp_smoke_gate.sh` | `LSP_SMOKE_PASS` | `artifacts/omega/lsp_smoke.log` |
 
 ## Merge Policy (mandatory sequence per lane)
 

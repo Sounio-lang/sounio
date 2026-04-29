@@ -1,0 +1,84 @@
+//@ run-pass
+//@ expect-stdout: PK/PD DEMO OK
+
+// Oral rapamycin + BBB + Hill-PD demo (dissertation extensions)
+//
+// Exercises the new additions:
+//   - stdlib/darwin_pbpk/absorption.sio
+//   - stdlib/darwin_pbpk/scenarios/oral_rapamycin_bbb.sio
+//   - stdlib/darwin_pbpk/pd/hill_mtor.sio
+//
+// Single 2 mg oral rapamycin dose, 48 h simulation, BBB-aware. Expect:
+//   Tmax ≈ 2 h, non-zero C_icf by 6 h, Hill inhibition visible at peak.
+
+use darwin_pbpk::absorption::*
+use darwin_pbpk::bbb::bbb_core::*
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::drugs::rapamycin::{rapamycin_mean_params}
+use darwin_pbpk::pd::hill_mtor::*
+use darwin_pbpk::scenarios::oral_rapamycin_bbb::*
+
+fn make_checkpoints_48h() -> [f64; 32] with Div, Panic, Mut {
+    var cp: [f64; 32] = [0.0; 32]
+    // First 16 points: 0–12 h (absorption/peak region), 0.75 h spacing
+    var i: i32 = 0
+    while i < 16 {
+        let idx = i as usize
+        cp[idx] = (i as f64) * 0.75
+        i = i + 1
+    }
+    // Next 16 points: 12–48 h, 2.25 h spacing
+    var j: i32 = 0
+    while j < 16 {
+        let idx = (16 + j) as usize
+        cp[idx] = 12.0 + (j as f64 + 1.0) * 2.25
+        j = j + 1
+    }
+    cp
+}
+
+fn demo_to_nM(c_mg_per_L: f64) -> f64 with Div, Panic, Mut {
+    // Rapamycin MW = 914.17 g/mol; 1 mg/L = 1/0.91417 µmol/L = 1094 nmol/L
+    // nM = mg/L * 1094
+    c_mg_per_L * 1094.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = rapamycin_mean_params()
+    let bbb_prm = bbb_rapamycin_params()
+    let abs_prm = rapamycin_absorption_params()
+
+    let checkpoints = make_checkpoints_48h()
+    let trace = oral_bbb_run(sys_prm, bbb_prm, abs_prm, 2.0, checkpoints, 32, 0.01)
+
+    // Print a compact PK summary (not full CSV) so test stdout stays small
+    println("--- Oral Rapamycin 2 mg, 48 h ---")
+    print("C_max_plasma ≈ "); print_f64(trace.plasma[4]);  println(" mg/L (t≈3 h)")
+    print("C_plasma@24h ≈ "); print_f64(trace.plasma[23]); println(" mg/L")
+    print("C_icf@24h    ≈ "); print_f64(trace.icf_u[23] / bbb_prm.fu_icf); println(" mg/L")
+    print("Kpuu_AUC     = "); print_f64(trace.kpuu_auc);   println("")
+    print("released     = "); print_f64(trace.total_released_end); println(" mg")
+
+    // PD layer
+    let hp = rapamycin_hill_params()
+    // Convert stored ICF mg/L → nM for Hill
+    var c_nM: [f64; 32] = [0.0; 32]
+    var k: i32 = 0
+    while k < trace.n_points {
+        let idx = k as usize
+        // trace.icf_u is already the unbound ICF concentration (mg/L).
+        // Hill EC50 = 0.5 nM is defined on free drug, so feed it directly.
+        c_nM[idx] = demo_to_nM(trace.icf_u[idx])
+        k = k + 1
+    }
+    let pd = pd_from_icf_series(trace.times_h, c_nM, trace.n_points, hp)
+
+    println("--- Hill PD (mTOR inhibition) ---")
+    print("max_inhibition    = "); print_f64(pd.max_inhibition); println("")
+    print("mean_inhibition   = "); print_f64(pd.mean_inhibition); println("")
+    print("time_above_80pct  = "); print_f64(pd.time_above_80pct); println(" h")
+    print("inhibition_AUC    = "); print_f64(pd.inhibition_auc); println(" (unitless·h)")
+
+    println("PK/PD DEMO OK")
+    0
+}

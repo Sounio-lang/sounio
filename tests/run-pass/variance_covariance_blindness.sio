@@ -1,0 +1,104 @@
+//@ run-pass
+// β — DIAGNOSTIC: documents the compiler's covariance-blindness.
+// Not a known-failure: this test always passes (always returns 0) but
+// prints CONFIRMED or REFUTED depending on compiler behavior. When the
+// β fix lands and the compiler tracks covariance, the printed output
+// will flip to REFUTED — that is the expected change, not a test
+// failure.
+//
+// See docs/research/variance_of_associator.md for the full analysis
+// and tests/run-pass/associator_variance_mc.sio for the complementary
+// Monte Carlo validation of the analytical formula.
+//
+// Truth:  Var(x - x) = 0   (trivially; x - x ≡ 0)
+// Compiler expected:  Var(x - x) = Var(x) + Var(x) = 2·Var(x)   (covariance-blind)
+
+fn main() with IO, Mut, Div, Epistemic {
+    let x: Knowledge<f64> = measure(1.0, uncertainty: 0.1)
+
+    // CASE 1: y = x - x should be identically 0 with zero variance.
+    let y1 = x.value - x.value
+    let v1 = variance_of(y1)
+    print("case 1: y = x - x\n")
+    print("  value      = "); println(y1)     // 0.0 (trivial)
+    print("  var        = "); println(v1)     // compiler: 2·var(x) ≈ 0.02? truth: 0
+    print("  truth      = 0.0\n")
+    print("  var(x)     = "); println(variance_of(x.value))   // reference
+    println("")
+
+    // CASE 2: y = a·b - a·b where a, b separately measured (still correlated).
+    let a: Knowledge<f64> = measure(2.0, uncertainty: 0.05)
+    let b: Knowledge<f64> = measure(3.0, uncertainty: 0.05)
+    let prod1 = a.value * b.value
+    let prod2 = a.value * b.value
+    let y2 = prod1 - prod2
+    let v2 = variance_of(y2)
+    print("case 2: y = a·b − a·b\n")
+    print("  value      = "); println(y2)
+    print("  var        = "); println(v2)
+    print("  truth      = 0.0\n")
+    println("")
+
+    // CASE 3: same variable through different paths.
+    // y = (x + 1) - (x + 1) — topologically distinct intermediates,
+    // algebraically zero.
+    let path_a = x.value + 1.0
+    let path_b = x.value + 1.0
+    let y3 = path_a - path_b
+    let v3 = variance_of(y3)
+    print("case 3: y = (x+1) − (x+1)\n")
+    print("  value      = "); println(y3)
+    print("  var        = "); println(v3)
+    print("  truth      = 0.0\n")
+    println("")
+
+    // Diagnosis.
+    // σ = 0.1 → σ² = 0.01. Covariance-blind compiler predicts:
+    //   Var(x - x) = 2·σ² = 0.02
+    //   Var((x+1) - (x+1)) = 2·σ² = 0.02
+    //   Var(a·b - a·b) = 2·(a²·σ_b² + b²·σ_a²) = 2·(4·0.0025 + 9·0.0025) = 0.065
+    // Covariance-aware compiler would give 0 for all three.
+    let sigma_sq: f64 = 0.01   // (0.1)² = σ² for x
+    let expected_blind_v1 = 2.0 * sigma_sq                             // 0.02
+    let expected_blind_v3 = 2.0 * sigma_sq                             // 0.02
+    let expected_blind_v2 = 2.0 * (4.0 * 0.0025 + 9.0 * 0.0025)        // 0.065
+
+    println("=== β diagnosis ===")
+    print("  σ² = 0.01.  If covariance-blind, predicted:\n")
+    print("    Var(x - x)           = "); println(expected_blind_v1)
+    print("    Var((x+1)-(x+1))     = "); println(expected_blind_v3)
+    print("    Var(a·b − a·b)       = "); println(expected_blind_v2)
+    print("  Observed:\n")
+    print("    v1 = "); println(v1)
+    print("    v2 = "); println(v2)
+    print("    v3 = "); println(v3)
+
+    // Tolerance: 1% relative (inline, nested fn not allowed in this compiler).
+    let d1 = v1 - expected_blind_v1
+    let a_d1 = if d1 < 0.0 { 0.0 - d1 } else { d1 }
+    let ok_v1 = a_d1 < 0.01 * expected_blind_v1
+
+    let d2 = v2 - expected_blind_v2
+    let a_d2 = if d2 < 0.0 { 0.0 - d2 } else { d2 }
+    let ok_v2 = a_d2 < 0.01 * expected_blind_v2
+
+    let d3 = v3 - expected_blind_v3
+    let a_d3 = if d3 < 0.0 { 0.0 - d3 } else { d3 }
+    let ok_v3 = a_d3 < 0.01 * expected_blind_v3
+
+    println("")
+    if ok_v1 && ok_v2 && ok_v3 {
+        println("CONFIRMED: compiler is covariance-blind on all three cases.")
+        println("  β's core claim is directly verified.")
+        println("  Var(f - f) = 2·Var(f) instead of 0.")
+        println("  Any Knowledge<T> value produced by subtracting correlated")
+        println("  intermediates carries a spurious non-zero variance.")
+        println("  Implication: Phase 2 of the connectomics work is SAFE only")
+        println("  because it uses raw f64 + bootstrap CIs, not compiler variance.")
+    } else {
+        println("REFUTED or PARTIAL: at least one case deviates from the")
+        println("covariance-blind prediction — compiler may be doing something")
+        println("more sophisticated, or there's a bug in the test.")
+    }
+    print("DIAGNOSTIC_COMPLETE\n")
+}

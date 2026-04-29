@@ -445,6 +445,127 @@ fn mann_whitney_u(x: [f64; 100], nx: i64, y: [f64; 100], ny: i64) -> MannWhitney
 }
 
 // ============================================================================
+// SPEARMAN RANK CORRELATION
+// ============================================================================
+
+// Result of Spearman rho test
+struct SpearmanResult {
+    rho: f64,     // rank correlation in [-1, 1]
+    t_stat: f64,  // t = rho * sqrt((n - 2) / (1 - rho^2))
+    p_value: f64, // two-sided, via t-distribution with n-2 df
+    df: f64,
+}
+
+fn spearman_result_new() -> SpearmanResult {
+    SpearmanResult {
+        rho: 0.0,
+        t_stat: 0.0,
+        p_value: 1.0,
+        df: 0.0,
+    }
+}
+
+// Tie-averaged ranks (1-based). Selection-sort on indices to keep
+// memory predictable; n <= 100 is the stdlib convention.
+fn rank_f64(data: [f64; 100], n: i64) -> [f64; 100] with Mut, Div, Panic {
+    var ranks: [f64; 100] = [0.0; 100]
+    var order: [i64; 100] = [0; 100]
+    var i: i64 = 0
+    while i < n {
+        order[i as usize] = i
+        i = i + 1
+    }
+    i = 0
+    while i < n - 1 {
+        var min_idx = i
+        var j: i64 = i + 1
+        while j < n {
+            if data[order[j as usize] as usize] < data[order[min_idx as usize] as usize] {
+                min_idx = j
+            }
+            j = j + 1
+        }
+        if min_idx != i {
+            let tmp = order[i as usize]
+            order[i as usize] = order[min_idx as usize]
+            order[min_idx as usize] = tmp
+        }
+        i = i + 1
+    }
+
+    // Walk sorted order, assigning tie-averaged ranks.
+    i = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n && data[order[j as usize] as usize] == data[order[i as usize] as usize] {
+            j = j + 1
+        }
+        let tie_len = j - i
+        // Average of (i+1)..(j) in 1-based ranks.
+        let avg = ((i + 1) as f64 + (j as f64)) / 2.0
+        var k: i64 = i
+        while k < j {
+            ranks[order[k as usize] as usize] = avg
+            k = k + 1
+        }
+        i = j
+    }
+    ranks
+}
+
+// Spearman's rho via Pearson correlation on tie-averaged ranks.
+pub fn spearman_rho(x: [f64; 100], y: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {
+    if n < 2 { return 0.0 }
+    let rx = rank_f64(x, n)
+    let ry = rank_f64(y, n)
+
+    var mean_x = 0.0
+    var mean_y = 0.0
+    var i: i64 = 0
+    while i < n {
+        mean_x = mean_x + rx[i as usize]
+        mean_y = mean_y + ry[i as usize]
+        i = i + 1
+    }
+    mean_x = mean_x / (n as f64)
+    mean_y = mean_y / (n as f64)
+
+    var sxy = 0.0
+    var sxx = 0.0
+    var syy = 0.0
+    i = 0
+    while i < n {
+        let dx = rx[i as usize] - mean_x
+        let dy = ry[i as usize] - mean_y
+        sxy = sxy + dx * dy
+        sxx = sxx + dx * dx
+        syy = syy + dy * dy
+        i = i + 1
+    }
+    let denom = sqrt(sxx * syy)
+    if denom < 1.0e-12 { return 0.0 }
+    sxy / denom
+}
+
+// Full Spearman test: rho plus t-based two-sided p-value.
+pub fn spearman_test(x: [f64; 100], y: [f64; 100], n: i64) -> SpearmanResult with Mut, Div, Panic {
+    var result = spearman_result_new()
+    if n < 3 { return result }
+    let rho = spearman_rho(x, y, n)
+    result.rho = rho
+    result.df = (n - 2) as f64
+    let one_minus_r2 = 1.0 - rho * rho
+    if one_minus_r2 <= 1.0e-12 {
+        result.t_stat = if rho >= 0.0 { 1.0e12 } else { 0.0 - 1.0e12 }
+        result.p_value = 0.0
+        return result
+    }
+    result.t_stat = rho * sqrt(result.df / one_minus_r2)
+    result.p_value = t_to_p_approx(result.t_stat, result.df)
+    result
+}
+
+// ============================================================================
 // EFFECT SIZE INTERPRETATION
 // ============================================================================
 
@@ -565,4 +686,51 @@ fn test_mann_whitney() -> bool {
 
     // U should reflect clear separation
     result > 0.0
+}
+
+fn test_spearman_rho_perfect() -> bool with Mut, Div, Panic {
+    var x: [f64; 100] = [0.0; 100]
+    var y: [f64; 100] = [0.0; 100]
+    var i: i64 = 0
+    while i < 10 {
+        x[i as usize] = i as f64
+        y[i as usize] = 2.0 * (i as f64) + 1.0
+        i = i + 1
+    }
+    // Monotone-increasing pair → rho == +1 exactly.
+    let rho = spearman_rho(x, y, 10)
+    inf_abs_f64(rho - 1.0) < 1.0e-9
+}
+
+fn test_spearman_rho_reversed() -> bool with Mut, Div, Panic {
+    var x: [f64; 100] = [0.0; 100]
+    var y: [f64; 100] = [0.0; 100]
+    var i: i64 = 0
+    while i < 10 {
+        x[i as usize] = i as f64
+        y[i as usize] = 0.0 - (i as f64)
+        i = i + 1
+    }
+    // Monotone-decreasing pair → rho == -1 exactly.
+    let rho = spearman_rho(x, y, 10)
+    inf_abs_f64(rho + 1.0) < 1.0e-9
+}
+
+fn test_spearman_ties() -> bool with Mut, Div, Panic {
+    var x: [f64; 100] = [0.0; 100]
+    var y: [f64; 100] = [0.0; 100]
+    // Two tied blocks in x, matching ties in y.
+    x[0] = 1.0
+    x[1] = 1.0
+    x[2] = 2.0
+    x[3] = 2.0
+    x[4] = 3.0
+    y[0] = 5.0
+    y[1] = 5.0
+    y[2] = 6.0
+    y[3] = 6.0
+    y[4] = 7.0
+    let rho = spearman_rho(x, y, 5)
+    // Ranks are identical after tie averaging → rho == +1.
+    inf_abs_f64(rho - 1.0) < 1.0e-9
 }

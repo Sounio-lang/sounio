@@ -1,0 +1,162 @@
+// darwin_pbpk/io/observed_csv.sio — CSV parsing for PBPK observed data
+
+use darwin_pbpk::schema::observation::*
+
+fn obs_trim_string(s: string) -> string with Mut, Panic, Div {
+    let n = str_len(s)
+    var start: i64 = 0
+    while start < n {
+        let ch = str_char_at(s, start)
+        if ch != 32 && ch != 9 && ch != 10 && ch != 13 {
+            break
+        }
+        start = start + 1
+    }
+
+    var end = n
+    while end > start {
+        let ch = str_char_at(s, end - 1)
+        if ch != 32 && ch != 9 && ch != 10 && ch != 13 {
+            break
+        }
+        end = end - 1
+    }
+
+    str_slice(s, start, end)
+}
+
+fn obs_parse_f64(s: string) -> f64 with Mut, Panic, Div {
+    let n = str_len(s)
+    if n == 0 { return 0.0 }
+
+    var i: i64 = 0
+    var neg = false
+    if str_char_at(s, 0) == 45 {
+        neg = true
+        i = 1
+    } else if str_char_at(s, 0) == 43 {
+        i = 1
+    }
+
+    var int_part: f64 = 0.0
+    while i < n && str_char_at(s, i) != 46 {
+        let ch = str_char_at(s, i)
+        if ch < 48 || ch > 57 { return 0.0 }
+        int_part = int_part * 10.0 + (ch - 48) as f64
+        i = i + 1
+    }
+
+    var frac_part: f64 = 0.0
+    if i < n && str_char_at(s, i) == 46 {
+        i = i + 1
+        var scale = 0.1
+        while i < n {
+            let ch = str_char_at(s, i)
+            if ch < 48 || ch > 57 { return 0.0 }
+            frac_part = frac_part + (ch - 48) as f64 * scale
+            scale = scale * 0.1
+            i = i + 1
+        }
+    }
+
+    let value = int_part + frac_part
+    if neg { 0.0 - value } else { value }
+}
+
+fn obs_count_fields(line: string, delimiter_code: i64) -> i64 with Mut, Panic, Div {
+    let n = str_len(line)
+    if n == 0 { return 0 }
+
+    var count: i64 = 1
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(line, i) == delimiter_code {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn obs_field(line: string, delimiter_code: i64, target_idx: i64) -> string with Mut, Panic, Div {
+    let n = str_len(line)
+    var field_idx: i64 = 0
+    var start: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(line, i) == delimiter_code {
+            if field_idx == target_idx {
+                return str_slice(line, start, i)
+            }
+            field_idx = field_idx + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if field_idx == target_idx {
+        return str_slice(line, start, n)
+    }
+    ""
+}
+
+pub fn parse_observed_delimited(
+    content: string,
+    delimiter: string
+) -> RawObservationTable with Mut, Panic, Div {
+    var out = raw_observation_table_new()
+    let delimiter_code = if str_eq(delimiter, "\t") { 9 } else { 44 }
+    let n = str_len(content)
+
+    var start: i64 = 0
+    var i: i64 = 0
+    while i <= n {
+        let at_end = i == n
+        let at_newline = !at_end && str_char_at(content, i) == 10
+        if at_end || at_newline {
+            let raw_line = str_slice(content, start, i)
+            let line = obs_trim_string(raw_line)
+            if str_len(line) > 0 && str_char_at(line, 0) != 35 {
+                if obs_count_fields(line, delimiter_code) >= 12 {
+                    let subject_id = obs_trim_string(obs_field(line, delimiter_code, 0))
+                    if !str_eq(subject_id, "") && !str_eq(subject_id, "subject_id") {
+                        let time_value = obs_trim_string(obs_field(line, delimiter_code, 1))
+                        let time_unit = obs_trim_string(obs_field(line, delimiter_code, 2))
+                        let matrix = obs_trim_string(obs_field(line, delimiter_code, 3))
+                        let organ = obs_trim_string(obs_field(line, delimiter_code, 4))
+                        let compartment = obs_trim_string(obs_field(line, delimiter_code, 5))
+                        let observable_id = obs_trim_string(obs_field(line, delimiter_code, 6))
+                        let measurement = obs_trim_string(obs_field(line, delimiter_code, 7))
+                        let value_unit = obs_trim_string(obs_field(line, delimiter_code, 8))
+                        let measurement_uncertainty = obs_trim_string(obs_field(line, delimiter_code, 9))
+                        let assay = obs_trim_string(obs_field(line, delimiter_code, 10))
+                        let source = obs_trim_string(obs_field(line, delimiter_code, 11))
+
+                        out = raw_observation_table_add(
+                            out,
+                            subject_id,
+                            obs_parse_f64(time_value),
+                            time_unit,
+                            matrix,
+                            organ,
+                            compartment,
+                            observable_id,
+                            obs_parse_f64(measurement),
+                            value_unit,
+                            obs_parse_f64(measurement_uncertainty),
+                            assay,
+                            source
+                        )
+                    }
+                }
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+
+    out
+}
+
+pub fn parse_observed_csv(content: string) -> RawObservationTable with Mut, Panic, Div {
+    parse_observed_delimited(content, ",")
+}

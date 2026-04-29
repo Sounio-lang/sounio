@@ -1,0 +1,581 @@
+// examples/neuroreceptor_pet/pet_2tcm_epistemic.sio
+//
+// Executable Epistemic PET 2-Tissue Compartment Model (2TCM) — NRM 2026
+//
+// AUDITED implementation with EIGHT epistemic priors:
+//   0 = K1         (ml/cm³/min)
+//   1 = k2         (/min)
+//   2 = k3         (/min)
+//   3 = k4         (/min)
+//   4 = cp_amp     (synthetic plasma amplitude)
+//   5 = cp_decay   (/min)
+//   6 = fu_plasma  (unbound plasma fraction; PBPK-informed)
+//   7 = bbb_scalar (blood-brain transport scalar; PBPK-informed)
+//
+// Effective transport into C1 uses:
+//   K1_eff = K1 * fu_plasma * bbb_scalar
+//
+// Model:
+//   dC1/dt = K1_eff*Cp(t) - (k2+k3)*C1 + k4*C2
+//   dC2/dt = k3*C1 - k4*C2
+//   CT(t)  = C1(t) + C2(t)
+//
+// Derived:
+//   BP_ND = k3/k4                           (unaffected by fu, bbb)
+//   V_T   = (K1_eff/k2) * (1 + k3/k4)
+//
+// Synthetic input:
+//   Cp(t) = cp_amp * exp(-cp_decay * t),  t in minutes
+//
+// GUM method: finite-difference Jacobian (JCGM 100:2008 §5.1.3).
+// Mirrors the numerical pattern of stdlib/darwin_pbpk/epistemic_pbpk14.sio.
+//
+// Proof-of-concept only. Not a clinical tool.
+
+// ============================================================================
+// NUMERIC HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 40 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    return g
+}
+
+// exp(x) via aggressive range reduction to |x| <= 0.5 + 20-term Taylor.
+// Accurate to ~1e-10 across the physical range used by this example.
+fn exp_f64(x: f64) -> f64 with Mut, Div {
+    if x < 0.0 { return 1.0 / exp_f64(0.0 - x) }
+    if x > 0.5 {
+        let half = exp_f64(x * 0.5)
+        return half * half
+    }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 {
+        let di = i as f64
+        term = term * x / di
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+fn ep_finite(x: f64) -> bool {
+    if x != x { return false }
+    return abs_f64(x) < 1.0e12
+}
+
+// ============================================================================
+// STRUCTS (8 priors)
+// ============================================================================
+
+struct PET2TCMParams {
+    k1: f64,
+    k2: f64,
+    k3: f64,
+    k4: f64,
+    cp_amp: f64,
+    cp_decay: f64,
+    fu_plasma: f64,
+    bbb_scalar: f64,
+}
+
+struct PET2TCMState {
+    c1: f64,
+    c2: f64,
+}
+
+struct PETMetrics {
+    tac_auc: f64,
+    tac_peak: f64,
+    t_peak: f64,
+    vt: f64,
+    bpnd: f64,
+    c_final: f64,
+    success: bool,
+}
+
+struct EpPETPrior {
+    mean: [f64; 8],
+    variance: [f64; 8],
+    confidence: [f64; 8],
+    n: i32,
+}
+
+struct EpPETResult {
+    tac_auc_mean: f64,
+    tac_auc_var: f64,
+    tac_peak_mean: f64,
+    tac_peak_var: f64,
+    vt_mean: f64,
+    vt_var: f64,
+    bpnd_mean: f64,
+    bpnd_var: f64,
+    confidence: f64,
+    sensitivity: [f64; 8],
+    d_vt: [f64; 8],
+    d_bpnd: [f64; 8],
+    success: bool,
+}
+
+// ============================================================================
+// PLASMA INPUT FUNCTION
+// ============================================================================
+
+fn cp_t(t: f64, amp: f64, decay: f64) -> f64 with Mut, Div {
+    if t < 0.0 { return 0.0 }
+    return amp * exp_f64(0.0 - decay * t)
+}
+
+// ============================================================================
+// RK4 INTEGRATOR — uses effective K1 (K1 * fu_plasma * bbb_scalar)
+// ============================================================================
+
+fn rk4_step(state: PET2TCMState, t: f64, dt: f64, p: PET2TCMParams) -> PET2TCMState with Mut, Div {
+    let k1_eff = p.k1 * p.fu_plasma * p.bbb_scalar
+
+    let cp0 = cp_t(t, p.cp_amp, p.cp_decay)
+    let k1_1 = dt * (k1_eff * cp0 - (p.k2 + p.k3) * state.c1 + p.k4 * state.c2)
+    let k2_1 = dt * (p.k3 * state.c1 - p.k4 * state.c2)
+
+    let s2_c1 = state.c1 + 0.5 * k1_1
+    let s2_c2 = state.c2 + 0.5 * k2_1
+    let cp_mid = cp_t(t + 0.5 * dt, p.cp_amp, p.cp_decay)
+    let k1_2 = dt * (k1_eff * cp_mid - (p.k2 + p.k3) * s2_c1 + p.k4 * s2_c2)
+    let k2_2 = dt * (p.k3 * s2_c1 - p.k4 * s2_c2)
+
+    let s3_c1 = state.c1 + 0.5 * k1_2
+    let s3_c2 = state.c2 + 0.5 * k2_2
+    let k1_3 = dt * (k1_eff * cp_mid - (p.k2 + p.k3) * s3_c1 + p.k4 * s3_c2)
+    let k2_3 = dt * (p.k3 * s3_c1 - p.k4 * s3_c2)
+
+    let s4_c1 = state.c1 + k1_3
+    let s4_c2 = state.c2 + k2_3
+    let cp_end = cp_t(t + dt, p.cp_amp, p.cp_decay)
+    let k1_4 = dt * (k1_eff * cp_end - (p.k2 + p.k3) * s4_c1 + p.k4 * s4_c2)
+    let k2_4 = dt * (p.k3 * s4_c1 - p.k4 * s4_c2)
+
+    PET2TCMState {
+        c1: state.c1 + (k1_1 + 2.0 * k1_2 + 2.0 * k1_3 + k1_4) / 6.0,
+        c2: state.c2 + (k2_1 + 2.0 * k2_2 + 2.0 * k2_3 + k2_4) / 6.0,
+    }
+}
+
+fn simulate_pet(p: PET2TCMParams, t_end: f64, dt: f64) -> PETMetrics with Mut, Div, Panic {
+    var st = PET2TCMState { c1: 0.0, c2: 0.0 }
+    var t = 0.0
+    var auc = 0.0
+    var peak = 0.0
+    var t_peak = 0.0
+    var prev_ct = 0.0
+    var n = 0
+    let max_steps = 10000
+
+    while t < t_end && n < max_steps {
+        let ct = st.c1 + st.c2
+        if ct > peak {
+            peak = ct
+            t_peak = t
+        }
+        if n > 0 {
+            auc = auc + 0.5 * (ct + prev_ct) * dt
+        }
+        prev_ct = ct
+        st = rk4_step(st, t, dt, p)
+        t = t + dt
+        n = n + 1
+    }
+
+    let final_ct = st.c1 + st.c2
+    let bpnd = if p.k4 > 1.0e-9 { p.k3 / p.k4 } else { 0.0 }
+    let k1_eff = p.k1 * p.fu_plasma * p.bbb_scalar
+    let vt = if p.k2 > 1.0e-9 { (k1_eff / p.k2) * (1.0 + bpnd) } else { 0.0 }
+
+    PETMetrics {
+        tac_auc: auc,
+        tac_peak: peak,
+        t_peak: t_peak,
+        vt: vt,
+        bpnd: bpnd,
+        c_final: final_ct,
+        success: t >= t_end * 0.98 && ep_finite(auc) && ep_finite(peak) && n > 100,
+    }
+}
+
+// ============================================================================
+// GUM FINITE-DIFFERENCE PROPAGATION
+// ============================================================================
+
+fn gum_finite_h(mean: f64, var_i: f64) -> f64 with Mut, Div {
+    let scale_mean = 1.0e-6 * abs_f64(mean)
+    let scale_sd = 1.0e-2 * sqrt_f64(max_f64(var_i, 1.0e-10))
+    max_f64(scale_mean, scale_sd)
+}
+
+fn perturbed_params(ref_p: PET2TCMParams, idx: i32, h: f64) -> PET2TCMParams {
+    if idx == 0 {
+        return PET2TCMParams {
+            k1: ref_p.k1 + h, k2: ref_p.k2, k3: ref_p.k3, k4: ref_p.k4,
+            cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay,
+            fu_plasma: ref_p.fu_plasma, bbb_scalar: ref_p.bbb_scalar,
+        }
+    }
+    if idx == 1 {
+        return PET2TCMParams {
+            k1: ref_p.k1, k2: ref_p.k2 + h, k3: ref_p.k3, k4: ref_p.k4,
+            cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay,
+            fu_plasma: ref_p.fu_plasma, bbb_scalar: ref_p.bbb_scalar,
+        }
+    }
+    if idx == 2 {
+        return PET2TCMParams {
+            k1: ref_p.k1, k2: ref_p.k2, k3: ref_p.k3 + h, k4: ref_p.k4,
+            cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay,
+            fu_plasma: ref_p.fu_plasma, bbb_scalar: ref_p.bbb_scalar,
+        }
+    }
+    if idx == 3 {
+        return PET2TCMParams {
+            k1: ref_p.k1, k2: ref_p.k2, k3: ref_p.k3, k4: ref_p.k4 + h,
+            cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay,
+            fu_plasma: ref_p.fu_plasma, bbb_scalar: ref_p.bbb_scalar,
+        }
+    }
+    if idx == 4 {
+        return PET2TCMParams {
+            k1: ref_p.k1, k2: ref_p.k2, k3: ref_p.k3, k4: ref_p.k4,
+            cp_amp: ref_p.cp_amp + h, cp_decay: ref_p.cp_decay,
+            fu_plasma: ref_p.fu_plasma, bbb_scalar: ref_p.bbb_scalar,
+        }
+    }
+    if idx == 5 {
+        return PET2TCMParams {
+            k1: ref_p.k1, k2: ref_p.k2, k3: ref_p.k3, k4: ref_p.k4,
+            cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay + h,
+            fu_plasma: ref_p.fu_plasma, bbb_scalar: ref_p.bbb_scalar,
+        }
+    }
+    if idx == 6 {
+        return PET2TCMParams {
+            k1: ref_p.k1, k2: ref_p.k2, k3: ref_p.k3, k4: ref_p.k4,
+            cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay,
+            fu_plasma: ref_p.fu_plasma + h, bbb_scalar: ref_p.bbb_scalar,
+        }
+    }
+    // idx == 7
+    return PET2TCMParams {
+        k1: ref_p.k1, k2: ref_p.k2, k3: ref_p.k3, k4: ref_p.k4,
+        cp_amp: ref_p.cp_amp, cp_decay: ref_p.cp_decay,
+        fu_plasma: ref_p.fu_plasma, bbb_scalar: ref_p.bbb_scalar + h,
+    }
+}
+
+fn run_gum_pet(prior: EpPETPrior, t_end: f64, dt: f64) -> EpPETResult with Mut, Div, Panic {
+    let ref_p = PET2TCMParams {
+        k1: prior.mean[0],
+        k2: prior.mean[1],
+        k3: prior.mean[2],
+        k4: prior.mean[3],
+        cp_amp: prior.mean[4],
+        cp_decay: prior.mean[5],
+        fu_plasma: prior.mean[6],
+        bbb_scalar: prior.mean[7],
+    }
+
+    let ref_m = simulate_pet(ref_p, t_end, dt)
+
+    if !ref_m.success {
+        return EpPETResult {
+            tac_auc_mean: 0.0, tac_auc_var: 0.0,
+            tac_peak_mean: 0.0, tac_peak_var: 0.0,
+            vt_mean: 0.0, vt_var: 0.0,
+            bpnd_mean: 0.0, bpnd_var: 0.0,
+            confidence: 0.0,
+            sensitivity: [0.0; 8],
+            d_vt: [0.0; 8],
+            d_bpnd: [0.0; 8],
+            success: false,
+        }
+    }
+
+    var d_auc = [0.0; 8]
+    var d_peak = [0.0; 8]
+    var d_vt = [0.0; 8]
+    var d_bpnd = [0.0; 8]
+    var i = 0
+
+    while i < 8 {
+        let h = gum_finite_h(prior.mean[i], prior.variance[i])
+        let pert_p = perturbed_params(ref_p, i, h)
+        let pert_m = simulate_pet(pert_p, t_end, dt)
+
+        if pert_m.success && h > 0.0 {
+            d_auc[i] = (pert_m.tac_auc - ref_m.tac_auc) / h
+            d_peak[i] = (pert_m.tac_peak - ref_m.tac_peak) / h
+            d_vt[i] = (pert_m.vt - ref_m.vt) / h
+            d_bpnd[i] = (pert_m.bpnd - ref_m.bpnd) / h
+        }
+        i = i + 1
+    }
+
+    var var_auc = 0.0
+    var var_peak = 0.0
+    var var_vt = 0.0
+    var var_bpnd = 0.0
+    var total_vt_contrib = 0.0
+    i = 0
+    while i < 8 {
+        let v = prior.variance[i]
+        var_auc = var_auc + d_auc[i] * d_auc[i] * v
+        var_peak = var_peak + d_peak[i] * d_peak[i] * v
+        var_vt = var_vt + d_vt[i] * d_vt[i] * v
+        var_bpnd = var_bpnd + d_bpnd[i] * d_bpnd[i] * v
+        total_vt_contrib = total_vt_contrib + d_vt[i] * d_vt[i] * v
+        i = i + 1
+    }
+
+    var sens = [0.0; 8]
+    if total_vt_contrib > 1.0e-12 {
+        i = 0
+        while i < 8 {
+            sens[i] = (d_vt[i] * d_vt[i] * prior.variance[i]) / total_vt_contrib
+            i = i + 1
+        }
+    }
+
+    var conf = 0.0
+    if total_vt_contrib > 1.0e-12 {
+        i = 0
+        while i < 8 {
+            conf = conf + prior.confidence[i] * sens[i]
+            i = i + 1
+        }
+    } else {
+        conf = 0.5
+    }
+
+    EpPETResult {
+        tac_auc_mean: ref_m.tac_auc,
+        tac_auc_var: var_auc,
+        tac_peak_mean: ref_m.tac_peak,
+        tac_peak_var: var_peak,
+        vt_mean: ref_m.vt,
+        vt_var: var_vt,
+        bpnd_mean: ref_m.bpnd,
+        bpnd_var: var_bpnd,
+        confidence: conf,
+        sensitivity: sens,
+        d_vt: d_vt,
+        d_bpnd: d_bpnd,
+        success: true,
+    }
+}
+
+// ============================================================================
+// MAIN — AUDITED ACCEPTANCE TESTS
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  EXECUTABLE EPISTEMIC PET 2TCM — NRM 2026 (AUDITED, 8 PRIORS)")
+    println("  Method: GUM finite-difference Jacobian (JCGM 100:2008 §5.1.3)")
+    println("  PBPK coupling: fu_plasma, bbb_scalar")
+    println("======================================================================")
+    println("")
+
+    // Priors: baseline mean fu_plasma=1.0 and bbb_scalar=1.0 preserve V_T=2.25.
+    // Variance captures PBPK-informed epistemic uncertainty in plasma binding
+    // and BBB transport (typical 10% CV for receptor tracers).
+    let prior = EpPETPrior {
+        mean: [0.15, 0.20, 0.10, 0.05, 1.00, 0.20, 1.00, 1.00],
+        variance: [0.0004, 0.0009, 0.0004, 0.0001, 0.0025, 0.0004, 0.01, 0.01],
+        confidence: [0.70, 0.70, 0.60, 0.60, 0.65, 0.65, 0.55, 0.50],
+        n: 8,
+    }
+
+    let t_end = 60.0
+    let dt = 0.05
+
+    println("Synthetic epistemic priors (mean):")
+    println("  K1        ="); println(prior.mean[0])
+    println("  k2        ="); println(prior.mean[1])
+    println("  k3        ="); println(prior.mean[2])
+    println("  k4        ="); println(prior.mean[3])
+    println("  cp_amp    ="); println(prior.mean[4])
+    println("  cp_decay  ="); println(prior.mean[5])
+    println("  fu_plasma ="); println(prior.mean[6])
+    println("  bbb_scalar="); println(prior.mean[7])
+    println("")
+
+    println("AUDIT 1: Plasma input function Cp(t) = exp(-0.2*t)")
+    println("  Cp(0)  (expected ~1.0000):");  println(cp_t(0.0, prior.mean[4], prior.mean[5]))
+    println("  Cp(1)  (expected ~0.8187):");  println(cp_t(1.0, prior.mean[4], prior.mean[5]))
+    println("  Cp(5)  (expected ~0.3679):");  println(cp_t(5.0, prior.mean[4], prior.mean[5]))
+    println("  Cp(10) (expected ~0.1353):");  println(cp_t(10.0, prior.mean[4], prior.mean[5]))
+    println("  Cp(60) (expected ~6.14e-6):"); println(cp_t(60.0, prior.mean[4], prior.mean[5]))
+    println("")
+
+    let result = run_gum_pet(prior, t_end, dt)
+
+    if !result.success {
+        println("SIMULATION FAILED")
+        return 1
+    }
+
+    let auc_sd = sqrt_f64(result.tac_auc_var)
+    let peak_sd = sqrt_f64(result.tac_peak_var)
+    let vt_sd = sqrt_f64(result.vt_var)
+    let bpnd_sd = sqrt_f64(result.bpnd_var)
+
+    println("RESULTS (GUM-propagated, 8 priors):")
+    println("  TAC AUC mean (expected ~9.47):");    println(result.tac_auc_mean)
+    println("  TAC AUC SD:");                       println(auc_sd)
+    println("  TAC Peak mean (expected ~0.31):");   println(result.tac_peak_mean)
+    println("  TAC Peak SD:");                      println(peak_sd)
+    println("  V_T mean (expected exact 2.25):");   println(result.vt_mean)
+    println("  V_T SD (delta-method ~0.695):");     println(vt_sd)
+    println("  BP_ND mean (expected exact 2.00):"); println(result.bpnd_mean)
+    println("  BP_ND SD (delta-method ~0.566):");   println(bpnd_sd)
+    println("  Evidence-weighted confidence:");     println(result.confidence)
+    println("")
+
+    // d(V_T)/d(fu) = K1*bbb*(1+k3/k4)/k2 = 0.15*1*3/0.2 = 2.25
+    // d(V_T)/d(bbb) = K1*fu*(1+k3/k4)/k2 = 2.25
+    // d(BP_ND)/d(fu) = 0  (structural insensitivity — scientific insight)
+    // d(BP_ND)/d(bbb) = 0
+    println("AUDIT 2: Finite-difference derivatives")
+    println("  d(BP_ND)/d(k3)  fd (analytic = 20.0):");  println(result.d_bpnd[2])
+    println("  d(BP_ND)/d(k4)  fd (analytic = -40.0):"); println(result.d_bpnd[3])
+    println("  d(BP_ND)/d(fu)  fd (analytic = 0.0):");   println(result.d_bpnd[6])
+    println("  d(BP_ND)/d(bbb) fd (analytic = 0.0):");   println(result.d_bpnd[7])
+    println("  d(V_T)/d(K1)    fd (analytic = 15.0):");  println(result.d_vt[0])
+    println("  d(V_T)/d(k2)    fd (analytic = -11.25):");println(result.d_vt[1])
+    println("  d(V_T)/d(fu)    fd (analytic = 2.25):");  println(result.d_vt[6])
+    println("  d(V_T)/d(bbb)   fd (analytic = 2.25):");  println(result.d_vt[7])
+    println("")
+
+    println("Normalized sensitivity fractions (to V_T):")
+    println("  K1:");         println(result.sensitivity[0])
+    println("  k2:");         println(result.sensitivity[1])
+    println("  k3:");         println(result.sensitivity[2])
+    println("  k4:");         println(result.sensitivity[3])
+    println("  cp_amp:");     println(result.sensitivity[4])
+    println("  cp_decay:");   println(result.sensitivity[5])
+    println("  fu_plasma:");  println(result.sensitivity[6])
+    println("  bbb_scalar:"); println(result.sensitivity[7])
+    println("")
+
+    // ACCEPTANCE TESTS
+    println("ACCEPTANCE TESTS:")
+    println("")
+    var passed = 0
+    var failed = 0
+
+    if result.success { println("  [PASS] 1. Simulation completes"); passed = passed + 1 }
+    else { println("  [FAIL] 1. Simulation"); failed = failed + 1 }
+
+    if result.tac_auc_mean > 5.0 && result.tac_auc_mean < 20.0 {
+        println("  [PASS] 2. TAC AUC in [5, 20]"); passed = passed + 1
+    } else { println("  [FAIL] 2. TAC AUC out of range"); failed = failed + 1 }
+
+    if result.tac_peak_mean > 0.05 && result.tac_peak_mean < 1.0 {
+        println("  [PASS] 3. TAC Peak in [0.05, 1.0]"); passed = passed + 1
+    } else { println("  [FAIL] 3. TAC Peak out of range"); failed = failed + 1 }
+
+    if abs_f64(result.vt_mean - 2.25) < 0.01 {
+        println("  [PASS] 4. V_T = 2.25 analytic"); passed = passed + 1
+    } else { println("  [FAIL] 4. V_T deviates"); failed = failed + 1 }
+
+    if abs_f64(result.bpnd_mean - 2.00) < 0.01 {
+        println("  [PASS] 5. BP_ND = 2.00 analytic"); passed = passed + 1
+    } else { println("  [FAIL] 5. BP_ND deviates"); failed = failed + 1 }
+
+    // BP_ND variance analytic: 20²*0.0004 + 40²*0.0001 = 0.32; fu/bbb contribute 0
+    if result.bpnd_var > 0.20 && result.bpnd_var < 0.50 {
+        println("  [PASS] 6. BP_ND variance ~0.32 (delta-method)"); passed = passed + 1
+    } else { println("  [FAIL] 6. BP_ND variance off"); failed = failed + 1 }
+
+    // V_T variance analytic: kinetic part ~0.382 + PBPK part 2.25²*0.02 ~0.1 = ~0.48
+    if result.vt_var > 0.25 && result.vt_var < 0.80 {
+        println("  [PASS] 7. V_T variance in [0.25, 0.80] (delta-method)"); passed = passed + 1
+    } else { println("  [FAIL] 7. V_T variance off"); failed = failed + 1 }
+
+    if abs_f64(result.d_bpnd[2] - 20.0) < 1.0 {
+        println("  [PASS] 8. d(BP_ND)/dk3 matches analytic 20"); passed = passed + 1
+    } else { println("  [FAIL] 8. d(BP_ND)/dk3 off"); failed = failed + 1 }
+
+    // Structural insensitivity: fu and bbb should NOT affect BP_ND
+    if abs_f64(result.d_bpnd[6]) < 1.0e-6 && abs_f64(result.d_bpnd[7]) < 1.0e-6 {
+        println("  [PASS] 9. Structural insensitivity: BP_ND independent of fu, bbb"); passed = passed + 1
+    } else { println("  [FAIL] 9. BP_ND unexpectedly depends on fu or bbb"); failed = failed + 1 }
+
+    // Halving k4 increases BP_ND
+    let p_low_k4 = PET2TCMParams {
+        k1: prior.mean[0], k2: prior.mean[1], k3: prior.mean[2],
+        k4: prior.mean[3] * 0.5,
+        cp_amp: prior.mean[4], cp_decay: prior.mean[5],
+        fu_plasma: prior.mean[6], bbb_scalar: prior.mean[7],
+    }
+    let m_low = simulate_pet(p_low_k4, t_end, dt)
+    if m_low.success && m_low.bpnd > result.bpnd_mean {
+        println("  [PASS] 10. Halving k4 increases BP_ND"); passed = passed + 1
+    } else { println("  [FAIL] 10. Monotonicity test"); failed = failed + 1 }
+
+    // Sensitivity fractions sum ~1
+    var sum_s = 0.0
+    var j = 0
+    while j < 8 { sum_s = sum_s + result.sensitivity[j]; j = j + 1 }
+    println("  Sensitivity fractions sum:"); println(sum_s)
+    if sum_s > 0.95 && sum_s < 1.05 {
+        println("  [PASS] 11. Sensitivity fractions sum ~1.0"); passed = passed + 1
+    } else { println("  [FAIL] 11. Sensitivity normalization off"); failed = failed + 1 }
+
+    // d(V_T)/d(fu) ~ 2.25 (PBPK coupling is real and quantified)
+    if abs_f64(result.d_vt[6] - 2.25) < 0.1 {
+        println("  [PASS] 12. d(V_T)/d(fu_plasma) matches analytic 2.25"); passed = passed + 1
+    } else { println("  [FAIL] 12. PBPK coupling derivative off"); failed = failed + 1 }
+
+    println("")
+    println("======================================================================")
+    println("  TEST SUMMARY")
+    println("======================================================================")
+    println("  Passed:"); println(passed)
+    println("  Failed:"); println(failed)
+    println("")
+
+    if failed == 0 {
+        println("  ALL NUMERICAL AUDITS PASSED (12/12)")
+        println("")
+        println("  GUM-propagated V_T and BP_ND agree with analytic delta-method.")
+        println("  Structural insensitivity of BP_ND to fu_plasma / bbb_scalar is")
+        println("  correctly recovered — a scientifically meaningful result that")
+        println("  separates kinetic-binding uncertainty from PBPK input uncertainty.")
+        return 0
+    } else {
+        println("  AUDIT FAILURES — not publication-ready.")
+        return 1
+    }
+}

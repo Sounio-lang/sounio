@@ -911,11 +911,17 @@ impl Parser {
             }
             p.parse_struct_literal(path, start)
         } else {
-            // Simple identifier
+            // Simple identifier — may still carry turbofish: vec_new::<f64>()
             let span = self.current_span()
-            let p = self.advance()
+            var p = self.advance()
             var e = mk_expr(ExprKind::ExprIdent, span)
             e.name = name
+            if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Lt {
+                p = p.advance()  // skip ::
+                let ta_pair = p.parse_type_args()
+                p = ta_pair.0
+                e.type_args = Some(Box::new(ta_pair.1))
+            }
             parser_store_expr_box(Box::new(e))
             p
         }
@@ -1037,8 +1043,17 @@ impl Parser {
         let name = p.current_name()
         p = p.advance()  // skip field/method name
 
+        // Turbofish on method: base.method::<T>(args)
+        var method_type_args: Option<Box<TypeExprList>> = None
+        if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Lt {
+            p = p.advance()  // skip ::
+            let ta_pair = p.parse_type_args()
+            p = ta_pair.0
+            method_type_args = Some(Box::new(ta_pair.1))
+        }
+
         if parser_peek(p) == TokenKind::LParen {
-            // Method call: base.method(args)
+            // Method call: base.method(args) or base.method::<T>(args)
             p = p.advance()  // skip (
             var args_opt: Option<Box<ExprList>> = None
 
@@ -1066,6 +1081,7 @@ impl Parser {
             e.name = name
             e.left = Some(base)
             e.args = args_opt
+            e.type_args = method_type_args
             parser_store_expr_box(Box::new(e))
             p
         } else {

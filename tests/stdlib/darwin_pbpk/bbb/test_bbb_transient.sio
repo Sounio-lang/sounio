@@ -1,0 +1,80 @@
+//@ run-pass
+//@ expect-stdout: BBB_TRANSIENT_OK
+//
+// BBB sub-model transient kinetics validation.
+//
+// Dissertation-grade checks on the time course of C_isf and C_icf
+// under a constant plasma input:
+//
+//   1. Strict monotonic rise of C_isf and C_icf during the fill
+//      phase (no spurious oscillation or backflow at moderate dt).
+//   2. C_icf lag: at t = 5 h, C_isf > C_icf (ISF fills first because
+//      it is the direct recipient of BBB influx; ICF is one membrane
+//      downstream).
+//   3. Cell-to-ISF ratio approaches Kpuu_cell: at t = 100 h the ratio
+//      C_icf_u / C_isf_u must already be within 5% of Kpuu_cell, even
+//      though the whole ISF/ICF system is still filling — the cell
+//      membrane exchange (PS_mem = 10 L/h) is much faster than the
+//      BBB (PS_bbb = 0.3 L/h), so cell equilibration happens while
+//      the ISF is still climbing.
+//   4. Monotone approach to the analytical Kpuu_brain asymptote
+//      (observed Kpuu_brain never overshoots 0.15).
+
+use darwin_pbpk::bbb::bbb_core::*
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+
+fn trans_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let prm = bbb_rapamycin_params()
+    let c_plasma = 1.0
+    let c_plasma_u = prm.fu_plasma * c_plasma
+    let dt = 0.01
+
+    var st = bbb_state_zero()
+    var prev_isf = 0.0
+    var prev_icf = 0.0
+    var max_kpuu_obs = 0.0
+
+    var n_ticks = 0
+    let total_ticks: i32 = 10000           // t_end = 100 h
+    while n_ticks < total_ticks {
+        st = bbb_rk4_step(st, c_plasma, dt, prm)
+
+        // Monotonicity check
+        if st.c_isf < prev_isf { return 1 }
+        if st.c_icf < prev_icf { return 2 }
+
+        let kpuu_obs = (prm.fu_isf * st.c_isf) / c_plasma_u
+        if kpuu_obs > max_kpuu_obs { max_kpuu_obs = kpuu_obs }
+
+        prev_isf = st.c_isf
+        prev_icf = st.c_icf
+        n_ticks = n_ticks + 1
+    }
+
+    // ----- Lag check at t = 5 h: re-integrate fresh to t = 5 h -----
+    var st5 = bbb_state_zero()
+    var i5 = 0
+    while i5 < 500 {
+        st5 = bbb_rk4_step(st5, c_plasma, dt, prm)
+        i5 = i5 + 1
+    }
+    // ISF must lead ICF at t = 5 h.
+    if st5.c_isf <= st5.c_icf { return 3 }
+
+    // ----- Cell-equilibrium check at t = 100 h (end of main loop) -----
+    let c_isf_u_100 = prm.fu_isf * st.c_isf
+    let c_icf_u_100 = prm.fu_icf * st.c_icf
+    if c_isf_u_100 <= 0.0 { return 4 }
+    let cell_ratio = c_icf_u_100 / c_isf_u_100
+    if trans_abs(cell_ratio - prm.kpuu_cell) / prm.kpuu_cell > 0.05 { return 5 }
+
+    // ----- Monotone approach: observed Kpuu_brain never overshoots -----
+    if max_kpuu_obs > prm.kpuu_brain + 1.0e-6 { return 6 }
+
+    println("BBB_TRANSIENT_OK")
+    0
+}

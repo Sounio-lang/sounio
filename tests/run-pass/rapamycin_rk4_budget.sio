@@ -1,0 +1,136 @@
+//@ run-pass
+// ============================================================================
+// RAPAMYCIN 3-COMPARTMENT PBPK — RK4 + ISO UNCERTAINTY BUDGET (JCGM 100:2008 §8)
+// ============================================================================
+//
+// Same model as rapamycin_iso_budget.sio but with 4th-order Runge-Kutta
+// instead of Euler, validating that GUM variance propagates through all
+// four RK4 stages (k1, k2, k3, k4).
+//
+// Three uncertain pharmacokinetic parameters, each assigned a budget channel:
+//   ch0: CL_hepatic = 12.4 ± 1.24 L/h  (10% CV — TDM assay precision)
+//   ch1: Kp_brain   = 0.08 ± 0.008      (10% CV — in vitro partition assay)
+//   ch2: fu_plasma  = 0.08 ± 0.008      (10% CV — ultrafiltration assay)
+//
+// Dose: 6 mg IV rapamycin (Cypher stent loading dose)
+// Integration: 20 RK4 steps, h = 0.1 h, t_final = 2 h
+// ============================================================================
+
+// ── RHS helpers (one per compartment) ──
+
+fn rhs_blood(cb: f64, cbr: f64, cp: f64, cl: f64, kp: f64,
+             fu: f64, qb_vbl: f64, qp_vbl: f64, qsum_vbl: f64,
+             kp_periph: f64, v_blood: f64) -> f64 with Div {
+    let cl_eff = cl * fu
+    let inflow_br = qb_vbl * cbr / kp
+    let inflow_pe = qp_vbl * cp / kp_periph
+    let outflow = qsum_vbl * cb
+    let clearance = cl_eff / v_blood * cb
+    return inflow_br + inflow_pe - outflow - clearance
+}
+
+fn rhs_brain(cb: f64, cbr: f64, kp: f64, qb_vbr: f64) -> f64 with Div {
+    return qb_vbr * (cb - cbr / kp)
+}
+
+fn rhs_periph(cb: f64, cp: f64, kp_periph: f64, qp_vpe: f64) -> f64 with Div {
+    return qp_vpe * (cb - cp / kp_periph)
+}
+
+// ── Main ──
+
+fn main() with IO, Mut, Div, Epistemic {
+    // ── Uncertain parameters via measure() → seed budget channels ──
+    let k_cl: Knowledge<f64> = measure(12.4, uncertainty: 1.24)
+    let k_kp: Knowledge<f64> = measure(0.08, uncertainty: 0.008)
+    let k_fu: Knowledge<f64> = measure(0.08, uncertainty: 0.008)
+    let cl = k_cl.value          // ch0: var = 1.5376
+    let kp_brain = k_kp.value   // ch1: var = 0.000064
+    let fu = k_fu.value          // ch2: var = 0.000064
+
+    // ── Fixed physiological parameters (literature means, no uncertainty) ──
+    let v_blood = 5.0       // L
+    let v_brain = 1.4       // L
+    let v_periph = 40.0     // L
+    let q_brain = 0.7       // L/h (cerebral blood flow)
+    let q_periph = 3.9      // L/h
+    let kp_periph = 3.0     // tissue:plasma partition (peripheral)
+
+    // ── Pre-compute fixed ratios (no uncertainty) ──
+    let qb_vbl = q_brain / v_blood      // 0.14
+    let qp_vbl = q_periph / v_blood     // 0.78
+    let qsum_vbl = qb_vbl + qp_vbl     // 0.92
+    let qb_vbr = q_brain / v_brain      // 0.5
+    let qp_vpe = q_periph / v_periph    // 0.0975
+
+    // ── Initial conditions: IV bolus ──
+    var c_blood = 6.0 / v_blood   // 1.2 mg/L
+    var c_brain = 0.0
+    var c_periph = 0.0
+
+    // ── RK4 integration: 20 steps × 0.1 h = 2 h ──
+    let dt = 0.1
+    var step: i64 = 0
+    while step < 20 {
+        // ── k1: evaluate at current state ──
+        let k1b = rhs_blood(c_blood, c_brain, c_periph, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
+        let k1r = rhs_brain(c_blood, c_brain, kp_brain, qb_vbr)
+        let k1p = rhs_periph(c_blood, c_periph, kp_periph, qp_vpe)
+
+        // ── k2: evaluate at midpoint using k1 slopes ──
+        let b2 = c_blood + 0.5 * dt * k1b
+        let r2 = c_brain + 0.5 * dt * k1r
+        let p2 = c_periph + 0.5 * dt * k1p
+        let k2b = rhs_blood(b2, r2, p2, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
+        let k2r = rhs_brain(b2, r2, kp_brain, qb_vbr)
+        let k2p = rhs_periph(b2, p2, kp_periph, qp_vpe)
+
+        // ── k3: evaluate at midpoint using k2 slopes ──
+        let b3 = c_blood + 0.5 * dt * k2b
+        let r3 = c_brain + 0.5 * dt * k2r
+        let p3 = c_periph + 0.5 * dt * k2p
+        let k3b = rhs_blood(b3, r3, p3, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
+        let k3r = rhs_brain(b3, r3, kp_brain, qb_vbr)
+        let k3p = rhs_periph(b3, p3, kp_periph, qp_vpe)
+
+        // ── k4: evaluate at endpoint using k3 slopes ──
+        let b4 = c_blood + dt * k3b
+        let r4 = c_brain + dt * k3r
+        let p4 = c_periph + dt * k3p
+        let k4b = rhs_blood(b4, r4, p4, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
+        let k4r = rhs_brain(b4, r4, kp_brain, qb_vbr)
+        let k4p = rhs_periph(b4, p4, kp_periph, qp_vpe)
+
+        // ── Update: y_{n+1} = y_n + (dt/6)(k1 + 2k2 + 2k3 + k4) ──
+        let w = dt / 6.0
+        c_blood = c_blood + w * (k1b + 2.0 * k2b + 2.0 * k3b + k4b)
+        c_brain = c_brain + w * (k1r + 2.0 * k2r + 2.0 * k3r + k4r)
+        c_periph = c_periph + w * (k1p + 2.0 * k2p + 2.0 * k3p + k4p)
+
+        step = step + 1
+    }
+
+    // ── Print concentrations ──
+    print("=== Rapamycin PBPK — RK4 + ISO Budget (t=2h) ===\n")
+    print("blood="); println(c_blood)
+    print("brain="); println(c_brain)
+    print("periph="); println(c_periph)
+
+    // ── Total variance ──
+    print("var(blood)="); println(variance_of(c_blood))
+    print("var(brain)="); println(variance_of(c_brain))
+    print("var(periph)="); println(variance_of(c_periph))
+
+    // ── ISO SS8 uncertainty budget ──
+    // Which PK parameter drives the uncertainty in predicted concentrations?
+    print("\n--- Blood concentration budget (RK4) ---\n")
+    budget_of(c_blood)
+
+    print("\n--- Brain concentration budget (RK4) ---\n")
+    budget_of(c_brain)
+
+    print("\n--- Peripheral concentration budget (RK4) ---\n")
+    budget_of(c_periph)
+
+    print("PASS\n")
+}

@@ -7,5 +7,5 @@
 Run:
 
 ```bash
-python3 scripts/cultural_fidelity_gate.py --self-test
+python3 scripts/ci/cultural_fidelity_gate.py --self-test
 ```

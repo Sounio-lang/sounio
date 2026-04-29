@@ -1,0 +1,122 @@
+//@ run-pass
+// variance_of() implemented via β⁴ shadow buffer in lean_single.sio
+// Sedenion zero-divisor confidence-collapse demonstration.
+//
+// Classical Moreno (1998) / Smith (1995) result: the sedenion algebra S
+// (dimension 16, the Cayley-Dickson double of the octonions) loses
+// alternativity and contains ZERO DIVISORS — non-zero a, b in S with
+// a*b = 0. The stdlib uses the canonical example
+//
+//     a = e_3 + e_10
+//     b = e_6 - e_15
+//
+// satisfying a*b = 0 under the standard Cayley-Dickson sign convention
+// (verified against stdlib math::sedenion).
+//
+// CONFIDENCE-COLLAPSE EVENT
+// -------------------------
+// When the four scalar coefficients (alpha, beta, gamma, delta) carrying
+// the zero-divisor pair are themselves uncertain, the algebraic identity
+// a*b = 0 produces an output whose mean is exactly zero but whose GUM
+// variance is strictly positive. The signal-to-noise ratio formally
+// collapses: |E[a*b]| = 0, var(a*b) > 0.
+//
+// This is the epistemic singularity Sounio is uniquely positioned to
+// detect at the type/effect level. A first-order GUM analysis around the
+// zero-divisor locus is performed below by hand-deriving two output
+// components of the sedenion product and tracking variance through the
+// scalar arithmetic shadow buffer.
+
+use math::sedenion::{Sedenion, sed, sed_mul, sed_norm_sq}
+
+fn main() with IO, Mut, Epistemic {
+    print("Sedenion zero-divisor confidence-collapse test\n")
+    print("==============================================\n\n")
+
+    // ---- Step 1. Algebraic confirmation via stdlib sed_mul ----
+    // Use exact (non-uncertain) coefficients first to confirm the
+    // zero-divisor pair under the stdlib sign convention.
+    let a_exact = sed(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let b_exact = sed(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0)
+    let prod = sed_mul(a_exact, b_exact)
+    let prod_n2 = sed_norm_sq(prod)
+    print("Algebraic check on (e3 + e10) * (e6 - e15):\n")
+    print("  |a*b|^2 = ")
+    println(prod_n2)
+    print("  (expected: 0 -- exact zero divisor)\n\n")
+
+    // ---- Step 2. GUM uncertainty on each coefficient ----
+    // Each coefficient is measured with absolute uncertainty 0.01.
+    // The propagated variance flows through the scalar arithmetic
+    // shadow buffer (BSS_VAR slots), allowing variance_of() to read
+    // the first-order GUM variance of any derived f64.
+    let k_alpha: Knowledge<f64> = measure( 1.0, uncertainty: 0.01)  // a.e3
+    let k_beta:  Knowledge<f64> = measure( 1.0, uncertainty: 0.01)  // a.e10
+    let k_gamma: Knowledge<f64> = measure( 1.0, uncertainty: 0.01)  // b.e6
+    let k_delta: Knowledge<f64> = measure(-1.0, uncertainty: 0.01)  // b.e15
+
+    let alpha = k_alpha.value
+    let beta  = k_beta.value
+    let gamma = k_gamma.value
+    let delta = k_delta.value
+
+    print("Uncertain coefficients (sigma = 0.01 each):\n")
+    print("  alpha (a.e3)  = "); println(alpha)
+    print("  beta  (a.e10) = "); println(beta)
+    print("  gamma (b.e6)  = "); println(gamma)
+    print("  delta (b.e15) = "); println(delta)
+    print("\n")
+
+    // ---- Step 3. Hand-derived sedenion product components ----
+    // For a = alpha*e3 + beta*e10 and b = gamma*e6 + delta*e15, the
+    // Cayley-Dickson rule expanded against oct_mul_components gives:
+    //
+    //   r5  = alpha*gamma + beta*delta     (e5  component of a*b)
+    //   r12 = alpha*delta + beta*gamma     (e12 component of a*b)
+    //
+    // At the nominal locus (1, 1, 1, -1) both r5 and r12 evaluate to 0;
+    // every other r_k also vanishes (see stdlib check above).
+    let r5  = alpha * gamma + beta * delta
+    let r12 = alpha * delta + beta * gamma
+
+    print("Hand-derived components on uncertain inputs:\n")
+    print("  E[r5]  = "); println(r5)
+    print("  E[r12] = "); println(r12)
+    print("\n")
+
+    // ---- Step 4. GUM variance read-back ----
+    let var_r5  = variance_of(r5)
+    let var_r12 = variance_of(r12)
+    print("First-order GUM variance:\n")
+    print("  var(r5)  = "); println(var_r5)
+    print("  var(r12) = "); println(var_r12)
+    print("\n")
+    // Expected analytic GUM variance per component:
+    //   r = alpha*gamma + beta*delta
+    //   var(r) = gamma^2 * var(alpha) + alpha^2 * var(gamma)
+    //          + delta^2 * var(beta)  + beta^2  * var(delta)
+    //          = 4 * (0.01)^2 = 4.0e-4
+
+    // ---- Step 5. Confidence-collapse signature ----
+    // mean = 0, variance > 0  =>  signal-to-noise formally undefined.
+    if prod_n2 < 0.0000001 {
+        if var_r5 > 0.0 {
+            if var_r12 > 0.0 {
+                print("*** CONFIDENCE COLLAPSE EVENT ***\n")
+                print("|E[a*b]|  = 0       (algebraic zero divisor)\n")
+                print("var(a*b)  > 0       (uncertainty dominates)\n")
+                print("SNR       = undefined (mean = 0, variance > 0)\n")
+                print("\nSounio detected the epistemic singularity.\n")
+                print("PASS\n")
+            } else {
+                print("FAIL: var(r12) not positive\n")
+            }
+        } else {
+            print("FAIL: var(r5) not positive\n")
+        }
+    } else {
+        print("FAIL: stdlib sed_mul did not produce algebraic zero\n")
+    }
+}

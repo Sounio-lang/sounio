@@ -1,0 +1,70 @@
+//@ run-pass
+//@ expect-stdout: BBB_KPUU_STEADY_OK
+//
+// BBB sub-model steady-state Kpuu validation.
+//
+// Holds plasma concentration C_p = 1.0 mg/L constant for 200 h
+// (well past the BBB equilibration timescale for rapamycin, which
+// is ~10-15 h per Fridén 2007 / Gaohua 2016).  Confirms that the
+// 3-compartment ODE converges to the analytical steady state
+//
+//   C_isf,u / C_plasma,u  ->  Kpuu_brain            = 0.15
+//   C_icf,u / C_isf,u     ->  Kpuu_cell             = 2.0
+//   C_icf,u / C_plasma,u  ->  Kpuu_brain * Kpuu_cell = 0.30
+//
+// and that the observed Kpuu is numerically identical to the
+// analytical expressions in bbb_rapamycin_ss_c_isf_u/c_icf_u.
+
+use darwin_pbpk::bbb::bbb_core::*
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params, bbb_rapamycin_ss_c_isf_u, bbb_rapamycin_ss_c_icf_u}
+
+fn kpuu_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn kpuu_near(a: f64, b: f64, tol: f64) -> bool {
+    kpuu_abs(a - b) < tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let prm = bbb_rapamycin_params()
+    let c_plasma = 1.0        // mg/L, constant infusion target
+    // The ISF+ICF system has an effective equilibration timescale
+    // of ~60 h (set by PS_bbb × fu_plasma and the combined
+    // V_isf + V_icf × Kpuu_cell capacity).  500 h covers ~8 tau.
+    let t_end = 500.0
+    let dt    = 0.01          // h, RK4 step (well under stability floor)
+
+    let st = bbb_integrate_constant_plasma(c_plasma, t_end, dt, prm)
+
+    // Observed Kpuu values
+    let c_plasma_u = prm.fu_plasma * c_plasma
+    let c_isf_u    = bbb_c_isf_u(st, prm)
+    let c_icf_u    = bbb_c_icf_u(st, prm)
+
+    let kpuu_brain_obs = c_isf_u / c_plasma_u
+    let kpuu_cell_obs  = c_icf_u / c_isf_u
+    let kpuu_total_obs = c_icf_u / c_plasma_u
+
+    // --- Analytical-vs-numerical agreement ---
+    if kpuu_near(kpuu_brain_obs, 0.15, 0.001) == false { return 1 }
+    if kpuu_near(kpuu_cell_obs,  2.0,  0.01)  == false { return 2 }
+    if kpuu_near(kpuu_total_obs, 0.30, 0.002) == false { return 3 }
+
+    // --- Cross-check against the closed-form steady-state helpers ---
+    let ss_isf_u_analytic = bbb_rapamycin_ss_c_isf_u(c_plasma)
+    let ss_icf_u_analytic = bbb_rapamycin_ss_c_icf_u(c_plasma)
+    if kpuu_near(c_isf_u, ss_isf_u_analytic, 1.0e-4) == false { return 4 }
+    if kpuu_near(c_icf_u, ss_icf_u_analytic, 1.0e-4) == false { return 5 }
+
+    // --- Physical invariants ---
+    // All unbound concentrations are strictly positive.
+    if c_isf_u <= 0.0 { return 7 }
+    if c_icf_u <= 0.0 { return 8 }
+    // Efflux-dominated: ISF unbound < plasma unbound (Kpuu < 1 for
+    // rapamycin — the whole point of the BBB sub-model).
+    if c_isf_u >= c_plasma_u { return 9 }
+
+    println("BBB_KPUU_STEADY_OK")
+    0
+}

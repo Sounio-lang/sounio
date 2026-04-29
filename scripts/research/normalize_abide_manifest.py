@@ -38,7 +38,7 @@ def main() -> int:
         feature_layout = "explicit_seq"
 
     with output_path.open("w", encoding="utf-8", newline="") as handle:
-        handle.write("# schema=brain_ossm.abide.v2\n")
+        handle.write(f"# schema={meta.schema or 'brain_ossm.abide.v2'}\n")
         handle.write(f"# seq_len={meta.seq_len}\n")
         handle.write(f"# input_dim={meta.input_dim}\n")
         handle.write(f"# feature_layout={feature_layout}\n")
@@ -47,6 +47,9 @@ def main() -> int:
         handle.write(f"# source_manifest={meta.path}\n")
         handle.write(f"# source_subject_count={meta.subject_count}\n")
         handle.write(f"# source_site_count={meta.site_count}\n")
+        for passthrough_key in ("atlas", "feature_recipe", "roi_pooling", "time_pooling"):
+            if passthrough_key in meta.extra:
+                handle.write(f"# {passthrough_key}={meta.extra[passthrough_key]}\n")
         handle.write(f"# subject_count={len(records)}\n")
         handle.write(f"# site_count={len(filtered_sites)}\n")
         if args.max_sites:

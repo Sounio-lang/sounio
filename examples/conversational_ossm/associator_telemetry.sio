@@ -1,0 +1,240 @@
+//@ run-pass
+//@ expect-stdout: ASSOCIATOR_TELEMETRY_OK
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Associator Telemetry Module — Structural Instability Monitor
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Computes the octonion associator norm at each conversational turn:
+//   A_t = [h_{t-1}, x_t, h_t] = (h_{t-1} ⊗ x_t) ⊗ h_t - h_{t-1} ⊗ (x_t ⊗ h_t)
+//
+// The norm ||A_t|| measures sensitivity to parenthesization order.
+// High values indicate structurally fragile state transitions.
+//
+// Design note (from Codex synthesis): This is TELEMETRY, not a safety oracle.
+// We collect running statistics first. Calibration to hallucination/contradiction
+// detection comes after evidence.
+
+// ─── Math primitives ────────────────────────────────────────────────────────
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var s = 1.0; var t = 1.0; var i = 1
+    while i <= 20 { t = t * x / (i as f64); s = s + t; i = i + 1 }
+    s
+}
+
+fn sigmoid_q(x: f64) -> f64 with Mut, Div, Panic { 1.0 / (1.0 + exp_q(0.0 - x)) }
+
+// ─── Octonion ───────────────────────────────────────────────────────────────
+
+struct Oct { e: [f64; 8] }
+
+fn oct_zero() -> Oct { Oct { e: [0.0; 8] } }
+
+fn oct_mul(a: &Oct, b: &Oct) -> Oct with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]
+    let a0=a.e[0]; let a1=a.e[1]; let a2=a.e[2]; let a3=a.e[3]
+    let a4=a.e[4]; let a5=a.e[5]; let a6=a.e[6]; let a7=a.e[7]
+    let b0=b.e[0]; let b1=b.e[1]; let b2=b.e[2]; let b3=b.e[3]
+    let b4=b.e[4]; let b5=b.e[5]; let b6=b.e[6]; let b7=b.e[7]
+    o[0] = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    o[1] = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    o[2] = a0*b2 + a2*b0 - a1*b3 + a3*b1 + a4*b6 - a6*b4 + a5*b7 - a7*b5
+    o[3] = a0*b3 + a3*b0 + a1*b2 - a2*b1 + a4*b7 - a7*b4 - a5*b6 + a6*b5
+    o[4] = a0*b4 + a4*b0 - a1*b5 + a5*b1 - a2*b6 + a6*b2 - a3*b7 + a7*b3
+    o[5] = a0*b5 + a5*b0 + a1*b4 - a4*b1 - a2*b7 + a7*b2 + a3*b6 - a6*b3
+    o[6] = a0*b6 + a6*b0 + a1*b7 - a7*b1 + a2*b4 - a4*b2 - a3*b5 + a5*b3
+    o[7] = a0*b7 + a7*b0 - a1*b6 + a6*b1 - a2*b5 + a5*b2 + a3*b4 - a4*b3
+    Oct { e: o }
+}
+
+fn oct_add(a: &Oct, b: &Oct) -> Oct with Mut {
+    var o: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { o[i as usize] = a.e[i as usize] + b.e[i as usize]; i = i + 1 }
+    Oct { e: o }
+}
+
+fn oct_sigmoid(a: &Oct) -> Oct with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { o[i as usize] = sigmoid_q(a.e[i as usize]); i = i + 1 }
+    Oct { e: o }
+}
+
+fn oct_norm_sq(a: &Oct) -> f64 with Mut {
+    var s = 0.0; var i = 0
+    while i < 8 { s = s + a.e[i as usize] * a.e[i as usize]; i = i + 1 }
+    s
+}
+
+fn oct_associator(a: &Oct, b: &Oct, c: &Oct) -> Oct with Mut, Div, Panic {
+    let ab = oct_mul(a, b)
+    let bc = oct_mul(b, c)
+    let ab_c = oct_mul(&ab, c)
+    let a_bc = oct_mul(a, &bc)
+    var o: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { o[i as usize] = ab_c.e[i as usize] - a_bc.e[i as usize]; i = i + 1 }
+    Oct { e: o }
+}
+
+// ─── Running statistics ─────────────────────────────────────────────────────
+// Welford's online algorithm for mean and variance
+
+struct RunningStats {
+    n: i64,
+    mean: f64,
+    m2: f64,
+}
+
+fn stats_new() -> RunningStats { RunningStats { n: 0, mean: 0.0, m2: 0.0 } }
+
+fn stats_update(s: &RunningStats, x: f64) -> RunningStats with Mut {
+    var out = s
+    out.n = out.n + 1
+    let delta = x - out.mean
+    out.mean = out.mean + delta / (out.n as f64)
+    let delta2 = x - out.mean
+    out.m2 = out.m2 + delta * delta2
+    out
+}
+
+fn stats_variance(s: &RunningStats) -> f64 with Mut {
+    if s.n < 2 { return 0.0 }
+    s.m2 / ((s.n - 1) as f64)
+}
+
+fn stats_std(s: &RunningStats) -> f64 with Mut, Div, Panic {
+    sqrt_q(stats_variance(s))
+}
+
+// ─── Telemetry logger ───────────────────────────────────────────────────────
+
+struct TelemetryEntry {
+    turn: i64,
+    associator_norm: f64,
+    z_score: f64,
+    flag: bool,
+}
+
+// ─── Conversation simulation ────────────────────────────────────────────────
+// Same 5-turn emotional trajectory as bidirectional_ossm_v0.sio
+
+var TURNS: [Oct; 5] = [
+    Oct { e: [0.3,  0.5,  0.2,  0.1,  0.8,  0.4,  0.1,  0.7] },
+    Oct { e: [0.1,  0.7,  0.4,  0.3,  0.6,  0.5,  0.4,  0.5] },
+    Oct { e: [-0.4, 0.8,  0.6,  0.2,  0.4,  0.3,  0.7,  0.3] },
+    Oct { e: [-0.1, 0.6,  0.5,  0.4,  0.5,  0.4,  0.5,  0.4] },
+    Oct { e: [0.4,  0.4,  0.3,  0.5,  0.7,  0.6,  0.2,  0.6] },
+]
+
+// Simple forward recurrence for telemetry demo
+var PARAM_A: Oct = Oct { e: [0.82, 0.05, 0.03, 0.02, 0.04, 0.02, 0.01, 0.01] }
+var PARAM_B: Oct = Oct { e: [0.45, 0.08, 0.06, 0.04, 0.03, 0.02, 0.01, 0.01] }
+
+fn ssm_step(h_prev: &Oct, x: &Oct) -> Oct with Mut, Div, Panic {
+    let ah = oct_mul(&PARAM_A, h_prev)
+    let bx = oct_mul(&PARAM_B, x)
+    let sum = oct_add(&ah, &bx)
+    oct_sigmoid(&sum)
+}
+
+// ─── Main ───────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var h: [Oct; 5] = [oct_zero(), oct_zero(), oct_zero(), oct_zero(), oct_zero()]
+    var telemetry: [TelemetryEntry; 5] = [
+        TelemetryEntry { turn: 0, associator_norm: 0.0, z_score: 0.0, flag: false },
+        TelemetryEntry { turn: 0, associator_norm: 0.0, z_score: 0.0, flag: false },
+        TelemetryEntry { turn: 0, associator_norm: 0.0, z_score: 0.0, flag: false },
+        TelemetryEntry { turn: 0, associator_norm: 0.0, z_score: 0.0, flag: false },
+        TelemetryEntry { turn: 0, associator_norm: 0.0, z_score: 0.0, flag: false },
+    ]
+
+    // First pass: compute states and collect associator norms
+    var stats = stats_new()
+    var t: i64 = 0
+    while t < 5 {
+        if t == 0 {
+            h[t] = ssm_step(&oct_zero(), &TURNS[t])
+        } else {
+            h[t] = ssm_step(&h[t - 1], &TURNS[t])
+        }
+
+        if t >= 1 {
+            let assoc = oct_associator(&h[t - 1], &TURNS[t], &h[t])
+            let norm = sqrt_q(oct_norm_sq(&assoc))
+            telemetry[t].turn = t
+            telemetry[t].associator_norm = norm
+            stats = stats_update(&stats, norm)
+        }
+        t = t + 1
+    }
+
+    // Second pass: compute z-scores and flags
+    let std_dev = stats_std(&stats)
+    let threshold = if std_dev > 0.001 { 2.0 * std_dev } else { 0.1 }
+
+    print("ASSOCIATOR_TELEMETRY_OK\n")
+    print("turn | assoc_norm | z_score | flag\n")
+    print("-----+------------+---------+-----\n")
+
+    t = 1
+    while t < 5 {
+        let norm = telemetry[t].associator_norm
+        let z = if std_dev > 0.001 { (norm - stats.mean) / std_dev } else { 0.0 }
+        telemetry[t].z_score = z
+        let flagged = if z > 2.0 { true } else { false }
+        telemetry[t].flag = flagged
+
+        print("  ")
+        print_int(t)
+        print("  | ")
+        print_f64(norm)
+        print("    | ")
+        print_f64(z)
+        print("    | ")
+        if flagged {
+            print("HIGH")
+        } else {
+            print("ok")
+        }
+        print("\n")
+        t = t + 1
+    }
+
+    print("\nStatistics: mean=")
+    print_f64(stats.mean)
+    print(" std=")
+    print_f64(std_dev)
+    print(" threshold=")
+    print_f64(threshold)
+    print("\n")
+
+    // Sanity check: associator norms should be non-zero (non-associativity is real)
+    var total_norm = 0.0
+    t = 1
+    while t < 5 {
+        total_norm = total_norm + telemetry[t].associator_norm
+        t = t + 1
+    }
+
+    if total_norm > 0.001 {
+        print("[PASS] Non-zero associator detected — non-associativity is active\n")
+    } else {
+        print("[WARN] Associator near zero — check parameter initialization\n")
+    }
+
+    0
+}
