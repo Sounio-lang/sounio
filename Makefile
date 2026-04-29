@@ -13,28 +13,25 @@ endif
 help:                ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-build:               ## Bootstrap compile: gen1 → gen2 → gen3 → gen4 (fixed-point verification)
-	@echo "→ Stage 1: boot4.elf compiles lean_single → gen1.elf"
-	./artifacts/bootstrap/boot4.elf self-hosted/compiler/lean_single.sio gen1.elf
+build:               ## Bootstrap compile: JIT → gen1 → gen2 → gen3 (fixed-point verification)
+	@echo "→ Stage 0: JIT (bin/souc-linux-x86_64) compiles lean_single → gen1.elf"
+	./bin/souc-linux-x86_64 self-hosted/compiler/lean_single.sio gen1.elf
 	chmod +x gen1.elf
-	@echo "→ Stage 2: gen1.elf compiles lean_single → gen2.elf"
+	@echo "→ Stage 1: gen1.elf compiles lean_single → gen2.elf"
 	./gen1.elf self-hosted/compiler/lean_single.sio gen2.elf
 	chmod +x gen2.elf
-	@echo "→ Stage 3: gen2.elf compiles lean_single → gen3.elf"
+	@echo "→ Stage 2: gen2.elf compiles lean_single → gen3.elf"
 	./gen2.elf self-hosted/compiler/lean_single.sio gen3.elf
 	chmod +x gen3.elf
-	@echo "→ Stage 4: gen3.elf compiles lean_single → gen4.elf"
-	./gen3.elf self-hosted/compiler/lean_single.sio gen4.elf
-	chmod +x gen4.elf
 	@echo "→ Verifying fixed-point..."
-	@MD5_GEN3=$$(md5sum gen3.elf | awk '{print $$1}'); \
-	 MD5_GEN4=$$(md5sum gen4.elf | awk '{print $$1}'); \
-	 if [ "$$MD5_GEN3" = "$$MD5_GEN4" ]; then \
-	   echo "✓ FIXED POINT OK ($$MD5_GEN3)"; \
+	@MD5_GEN2=$$(md5sum gen2.elf | awk '{print $$1}'); \
+	 MD5_GEN3=$$(md5sum gen3.elf | awk '{print $$1}'); \
+	 if [ "$$MD5_GEN2" = "$$MD5_GEN3" ]; then \
+	   echo "✓ FIXED POINT OK ($$MD5_GEN2)"; \
 	 else \
 	   echo "✗ FIXED POINT BROKEN"; \
+	   echo "  gen2: $$MD5_GEN2"; \
 	   echo "  gen3: $$MD5_GEN3"; \
-	   echo "  gen4: $$MD5_GEN4"; \
 	   exit 1; \
 	 fi
 
@@ -55,7 +52,7 @@ test-stdlib:         ## Run stdlib integration tests (subset)
 	$(SOUC) run tests/stdlib/bayes/test_prior_e2e.sio
 	$(SOUC) run tests/stdlib/complex/test_complex.sio
 
-clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3, gen4)
+clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
 	rm -f gen1.elf gen2.elf gen3.elf gen4.elf
 	@echo "✓ Cleaned generated artifacts"
 
