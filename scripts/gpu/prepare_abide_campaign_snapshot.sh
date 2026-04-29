@@ -26,4 +26,8 @@ if [[ -n "${ABIDE_MANIFEST_PATH:-}" && -r "${ABIDE_MANIFEST_PATH}" ]]; then
   rsync -a "${ABIDE_MANIFEST_PATH}" "${OUT_ROOT}/abide_source_manifest.tsv"
 fi
 
+if [[ -n "${ABIDE_MANIFEST_PATH:-}" && -r "${ABIDE_MANIFEST_PATH}" ]]; then
+  rsync -a "${ABIDE_MANIFEST_PATH}" "${OUT_ROOT}/abide_source_manifest.tsv"
+fi
+
 echo "${OUT_ROOT}"
