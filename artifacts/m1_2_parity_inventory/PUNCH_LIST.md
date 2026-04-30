@@ -11,7 +11,8 @@ plan.
 |---|---|---|---|---|---|---|
 | `tests/run-pass` (M1.2 baseline) | 392 | 50 (12.7%) | **324** | 11 | — | 6 |
 | `tests/run-pass` (after M1.2 step 4 if/binop) | 392 | 63 (16.1%) | — | — | — | — |
-| `tests/run-pass` (after M1.2 step 2 redo) | 392 | **74 (18.9%)** | **285** | 26 | 1 | 6 |
+| `tests/run-pass` (after M1.2 step 2 redo) | 392 | 74 (18.9%) | 285 | 26 | 1 | 6 |
+| `tests/run-pass` (after Layer B1 for-loop, B2 verified-noop, B3 reverted) | 392 | **75 (19.1%)** | **279** | 33 | 1 | 4 |
 | broader (examples + tests/native* + selfhost-driver-output) | 841 | 72 (8.6%) | **416** | 34 | 10 | 309 |
 
 Headline: after step 2 (`println` redo) + step 4 partial (`if`/binop-tail),
@@ -70,13 +71,15 @@ concat, which is a different cluster).
 a benchmarking macro. Defer for M1.2 if it's macro-heavy; otherwise
 implement as a no-op inline.
 
-### 4. Assignment in expression position (~45 failures combined)
+### 4. Assignment in expression position — CLOSED (Layer B2 verification, 2026-04-30)
 
-`kind=137 text==` (22 in run-pass, 23 in broader). N-v2 likely accepts
-top-level statement-position `x = expr` but rejects `=` when it shows up
-in expression position (e.g. inside a nested expression, struct literal
-field initializer, or subscript LHS). Need to drill in to see what
-expressions are blocked.
+Re-verified at commit `00678f44`: zero `kind=137 text==` failures across
+run-pass (392 files) and broader (1235 files) corpora. The original
+~45-case estimate was stale — all sub-contexts (subscript LHS,
+struct-field-LHS, `(*p).f =`) are absorbed by `c91127fd`
+(expression-position `if` + binop tail-call) and `36030fc9` (array-init
+tail-literal). See
+[blockers/m1_2_layer_b2_assign_expr_noop.md](blockers/m1_2_layer_b2_assign_expr_noop.md).
 
 ### 5. `if` as expression (~16 failures combined)
 
@@ -102,9 +105,14 @@ expression grammar does not yet handle.
 
 ### 8. `for` / `*` / `(` (~22 failures)
 
-`kind=174 text=(` (12+6), `kind=134 text=*` (4+3), `kind=123 text=for`
-(4). Probably tuple expressions, deref operator in some position, and
-`for` loops respectively.
+- **`for` (4 cases) — CLOSED** by `870e7b66` (Layer B1, 2026-04-30):
+  added `parse_for_ir` mirroring `parse_while_ir`; lowers `for x in A..B {…}`
+  to `var x=A; while x<B {…; x=x+1}` (and `..=` → `<=`). 2 of 4 for-tests
+  in run-pass now compile; remaining 2 (`for_in_loops`,
+  `while_for_struct_patterns`) fail on unrelated features (array
+  iteration, while-let).
+- **`kind=174 text=(` (~18)** — tuple expressions / paren in some position. Open.
+- **`kind=134 text=*` (~7)** — deref operator. Open.
 
 ### 9. Defer for now (out of M1.2 scope)
 

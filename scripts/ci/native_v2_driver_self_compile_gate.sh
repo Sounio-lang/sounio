@@ -225,8 +225,26 @@ fi
 printf '[native-v2-driver-self] stage1-smoke OK ran=%d checked=%d\n' "$smoke_ran" "$smoke_checked"
 
 # ── Stage2: stage1 native binary compiles the driver again ───────────────────
-if ! "$STAGE1_DRIVER" "$DRIVER_SRC" -o "$STAGE2_DRIVER" >"$STAGE2_COMPILE_LOG" 2>&1; then
-  echo "[native-v2-driver-self] FAIL: stage1 driver failed to compile stage2" >&2
+# Wall-clock timeout. The fixed-point property only catches divergence between
+# stage2 and stage3 — it cannot detect non-termination at stage2 itself. A
+# stage1 binary that spins compiling the driver source is the recurring trap
+# (step 4 array-init, step D user-globals). Baseline self-compile is ~1s; we
+# allow 90s so a 90× slowdown still terminates and trips the explicit failure.
+SELFCOMPILE_TIMEOUT="${SOUNIO_NATIVE_V2_DRIVER_SELF_COMPILE_TIMEOUT:-90}"
+printf '[native-v2-driver-self] stage2/stage3 self-compile timeout=%ss\n' \
+  "$SELFCOMPILE_TIMEOUT"
+
+set +e
+timeout "$SELFCOMPILE_TIMEOUT" "$STAGE1_DRIVER" "$DRIVER_SRC" -o "$STAGE2_DRIVER" \
+  >"$STAGE2_COMPILE_LOG" 2>&1
+stage2_rc=$?
+set -e
+if [[ "$stage2_rc" -eq 124 ]]; then
+  echo "[native-v2-driver-self] FAIL: stage1 timed out after ${SELFCOMPILE_TIMEOUT}s compiling driver source (likely non-terminating loop in stage1 codegen — see step-D blocker note)" >&2
+  exit 1
+fi
+if [[ "$stage2_rc" -ne 0 ]]; then
+  echo "[native-v2-driver-self] FAIL: stage1 driver failed to compile stage2 (rc=$stage2_rc)" >&2
   tail -n 120 "$STAGE2_COMPILE_LOG" >&2 || true
   exit 1
 fi
@@ -249,8 +267,18 @@ if ! cmp -s "$EXPECTED_STDOUT" "$STAGE2_STDOUT"; then
 fi
 
 # ── Fixed-point: stage2 compiles stage3, stage3 == stage2 ────────────────────
-if ! "$STAGE2_DRIVER" "$DRIVER_SRC" -o "$STAGE3_DRIVER" >"$STAGE3_COMPILE_LOG" 2>&1; then
-  echo "[native-v2-driver-self] FAIL: stage2 driver failed to compile stage3" >&2
+# Same wall-clock guard as stage2 — defence in depth.
+set +e
+timeout "$SELFCOMPILE_TIMEOUT" "$STAGE2_DRIVER" "$DRIVER_SRC" -o "$STAGE3_DRIVER" \
+  >"$STAGE3_COMPILE_LOG" 2>&1
+stage3_rc=$?
+set -e
+if [[ "$stage3_rc" -eq 124 ]]; then
+  echo "[native-v2-driver-self] FAIL: stage2 timed out after ${SELFCOMPILE_TIMEOUT}s compiling driver source" >&2
+  exit 1
+fi
+if [[ "$stage3_rc" -ne 0 ]]; then
+  echo "[native-v2-driver-self] FAIL: stage2 driver failed to compile stage3 (rc=$stage3_rc)" >&2
   tail -n 120 "$STAGE3_COMPILE_LOG" >&2 || true
   exit 1
 fi
