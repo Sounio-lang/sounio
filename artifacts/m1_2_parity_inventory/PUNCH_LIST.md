@@ -9,12 +9,17 @@ plan.
 
 | Corpus | Files | ok | nv2_compile fail | nv2_run | a_bug | both_fail |
 |---|---|---|---|---|---|---|
-| `tests/run-pass` | 392 | 50 (12.7%) | **324** | 11 | — | 6 |
+| `tests/run-pass` (M1.2 baseline) | 392 | 50 (12.7%) | **324** | 11 | — | 6 |
+| `tests/run-pass` (after M1.2 step 4 if/binop) | 392 | 63 (16.1%) | — | — | — | — |
+| `tests/run-pass` (after M1.2 step 2 redo) | 392 | **74 (18.9%)** | **285** | 26 | 1 | 6 |
 | broader (examples + tests/native* + selfhost-driver-output) | 841 | 72 (8.6%) | **416** | 34 | 10 | 309 |
 
-Headline: **N-v2 currently accepts roughly 1 in 8 programs that Track A
-accepts.** The gap is real but the failure modes cluster into a small
-number of structural root-causes.
+Headline: after step 2 (`println` redo) + step 4 partial (`if`/binop-tail),
+**N-v2 accepts roughly 1 in 5 `tests/run-pass` programs** (up from 1 in 8
+pre-M1.2). `println` cluster in run-pass went from ~47 → 1 remaining (the
+surviving case uses `println("lit" ++ msg)` — concat `++`, blocked by a
+different cluster, not println itself). Broader corpus inventory was not
+re-run in step 2; see "Re-run" below.
 
 ## Root-cause clusters (sorted by leverage)
 
@@ -35,11 +40,29 @@ top-level enum variant references through the same name table that
 failures into passes, since each failing program tends to reference 1–3
 unresolved globals before it gives up.
 
-### 2. `println` builtin (~107 failures)
+### 4. Array-init `var arr: [T; N] = [...]` — PARTIALLY CLOSED (step 4 bisect, 2026-04-30)
 
-`kind=123 reason=unresolved_call text=println` — 47 in run-pass, 60 in
-broader. `print` works; `println` is just unwired. Trivially fixable
-(emit `print(s)` followed by a `\n`).
+Landed in `parse_stmt_ir` (TK_VAR/TK_LET array-decl branch): after the
+zero-fill, if `= [` follows the type, parse the RHS as either
+`[val; N]` (single element copied to every slot) or `[v0, v1, ...]`
+(comma-separated per-slot expressions). Each element is parsed through
+`parse_expr_ir` with `V2_LAST_STRUCT_IDX` reset on entry and exit.
+Stage1-smoke activated via `examples/native/array_init_tail.sio` and
+stays green through the bisect. See
+[blockers/m1_2_step4_array_init.md](blockers/m1_2_step4_array_init.md)
+for the spin-hang history and the bisect outcome note. Remaining work:
+top-level globals of the form `var NAME: [T; N] = [0; 256]` still fall
+through the non-driver global-registration path (separate task).
+
+### 2. `println` builtin — CLOSED (step 2 redo, 2026-04-30)
+
+Landed as `V2_BUILTIN_PRINTLN = 18` with parse-time expansion in
+`parse_fn_call_ir`. Dispatch is based on the argument's runtime type:
+f64 register → `print_f64 + '\n'`, leading `TK_STRING` token → `print +
+'\n'`, otherwise `print_int + '\n'`. Zero-arg `println()` emits just a
+newline. Self-compile gate (with new stage1-smoke) stays green. Post-fix
+run-pass inventory: 47 → 1 remaining (surviving case uses `++` string
+concat, which is a different cluster).
 
 ### 3. `measure` builtin (~44 failures)
 

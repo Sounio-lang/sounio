@@ -64,3 +64,40 @@ nested-loop limit in lean_single's codegen of the new branch.
    the gate level.
 3. Inspect `V2_NEXT_LABEL` / `V2_NEXT_REG` per-fn limits — the array-init
    handler uses extra labels/regs and might trip a hard cap.
+
+## 2026-04-30 follow-up — bisect outcome (step C, M1.2 A+B+C sprint)
+
+The recommended bisect (steps 1 → 2 → 3 above) was executed against
+`scripts/ci/native_v2_driver_self_compile_gate.sh` with a new
+**stage1-smoke phase** (`examples/native/array_init_tail.sio` as
+activator) so any stage1 hang would hard-fail the gate instead of
+being masked by byte-identical stage2/3 determinism.
+
+Outcome: **all three bisect steps are gate-green**, including the
+full `parse_expr_ir`-recursion form (step 3). The previously-reported
+spin did not reproduce. Most plausible explanations, in order:
+
+1. The M1.1 self-compile gate hardening (`6b37a722`) plus the cluster
+   #5/#6 speculative-rollback work (`c91127fd`) closed the interaction
+   that produced the spin — the handler's new `parse_expr_ir` calls no
+   longer hit the path that used to diverge when stage1 tried to
+   compile itself.
+2. The original handler that triggered the hang had a state-corruption
+   bug (e.g. `V2_LAST_STRUCT_IDX` left stale across per-element parses)
+   that the reconstructed bisect-3 handler does not have because it
+   resets the flag around every element parse.
+
+Either way, the handler landed is **still only local-scope**. Top-level
+globals declared as `var NAME: [T; N] = [...]` (as in
+`tests/run-pass/symbolic_test.sio`) still fall through the non-driver
+global-registration path and are reported as `unsupported_frontend`.
+Unblocking those 100+-element literal globals is a separate M1.2 task —
+register the global slot + emit rodata/bss init — and is out of scope
+for step 4 closure.
+
+**Post-bisect run-pass inventory**: ok 74 → 75, nv2_compile 285 → 279
+(−6), nv2_run 26 → 31 (+5). Five files moved from "does not compile"
+to "compiles but runtime diverges" — mostly cases that use element
+expressions the bisect-3 handler accepts but whose subsequent codegen
+is still incomplete (e.g. negative literals, f64 element path, very
+large local arrays). These are follow-up work, not step-4 regressions.
