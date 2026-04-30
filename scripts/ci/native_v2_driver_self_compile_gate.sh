@@ -154,6 +154,14 @@ SMOKE_COHORT=(
   # auto-activates as soon as M1.2 step 4 bisect lands the handler — at which
   # point stage1 must finish within SMOKE_TIMEOUT or this phase fails.
   "examples/native/array_init_tail.sio"
+  # Refinement-type non-termination canary (R2.1, post-Layer-B3 revert).
+  # The driver should fail-fast (parse-reject `{ N: T | PRED }` syntax),
+  # NOT hang. Layer B3's `&Type` param branch caused an infinite loop
+  # on this pattern — and the bug only surfaced during inventory, not
+  # during driver-self-compile, because the driver's own source has no
+  # refinement syntax. The new baseline-rc=124 → FAIL guard above turns
+  # this entry into a hard regression test for that bug class.
+  "tests/run-pass/refinement_nested_arithmetic.sio"
 )
 
 printf '[native-v2-driver-self] stage1-smoke timeout=%ss cohort=%d\n' \
@@ -176,9 +184,23 @@ for smoke_src in "${SMOKE_COHORT[@]}"; do
 
   # Self-certifying golden: capture baseline driver output; drop cases the
   # baseline can't handle rather than hardcoding expected stdout.
-  if ! timeout "$SMOKE_TIMEOUT" "$SOUC_BIN" run "$DRIVER_SRC" -- "$smoke_src" -o "$base_bin" \
-      >"$base_compile_log" 2>&1; then
-    echo "[native-v2-driver-self] smoke SKIP: baseline cannot compile $smoke_src" >&2
+  # Distinguish parse-rejection (rc!=0, rc!=124) → soft SKIP from
+  # wall-clock hang (rc==124) → hard FAIL. A baseline timeout means the
+  # driver itself is non-terminating on this input — the B3-class
+  # regression (Layer B3 `&Type` param branch hung on refinement-type
+  # syntax `{ N: T | PRED }`) we now refuse to ship past.
+  set +e
+  timeout "$SMOKE_TIMEOUT" "$SOUC_BIN" run "$DRIVER_SRC" -- "$smoke_src" -o "$base_bin" \
+    >"$base_compile_log" 2>&1
+  base_rc=$?
+  set -e
+  if [[ "$base_rc" -eq 124 ]]; then
+    echo "[native-v2-driver-self] FAIL: baseline driver hung for ${SMOKE_TIMEOUT}s compiling $smoke_src — non-termination regression" >&2
+    tail -n 20 "$base_compile_log" >&2 || true
+    exit 1
+  fi
+  if [[ "$base_rc" -ne 0 ]]; then
+    echo "[native-v2-driver-self] smoke SKIP: baseline cannot compile $smoke_src (rc=$base_rc)" >&2
     tail -n 20 "$base_compile_log" >&2 || true
     continue
   fi
