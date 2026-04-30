@@ -67,3 +67,77 @@ git checkout m1_2-step-d-user-globals-WIP
 bash scripts/ci/native_v2_driver_self_compile_gate.sh
 bash scripts/ci/lean_single_fixed_point_gate.sh
 ```
+
+## 2026-04-30 second-pass diagnosis
+
+A follow-up session on top of `b9816786` added the missing piece the first
+pass lacked: **hard-coding `USER_GLOBAL_*` as real driver-global slots**
+(81–86) in `driver_global_id_tok` + `driver_const_value_tok` + bumping
+`drv_driver_data_len` 21,233,664 → 22,806,528. Without that, stage1 fails
+with `unsupported_frontend fn=user_global_id_tok token=…i` — because the
+driver's own references to `USER_GLOBAL_COUNT` / `USER_GLOBAL_NAME_TOK`
+inside `scan_user_globals` and `user_global_id_tok` couldn't resolve
+through the hard-coded global path.
+
+With those slots hoisted, stage1 **builds** (ok, 270800 bytes) but stage1
+still **hangs** when it tries to compile itself to stage2 — and not in
+`scan_user_globals` as hypothesis 1 guessed. Instrumented debug prints
+narrowed the hang precisely:
+
+```
+dbg:scan_struct_begin        ← stage1 prints
+dbg:scan_struct_end
+dbg:scan_enum_end
+dbg:scan_user_globals_end count=0     ← confirms scan_user_globals finished;
+                                        USER_GLOBAL_COUNT=0 after, so
+                                        user_global_id_tok in the
+                                        parse-path hot loop is an O(1) no-op
+dbg:scan_user_fns_end
+dbg:user_fn_count=285
+dbg:fn[0]                    ← first user fn (id=32 = V2_FIRST_USER_FN_ID)
+dbg:cuf_begin id=32
+dbg:cuf_name name_pos=1889   ← fn name token found
+dbg:cuf_open=1896            ← `{` found
+dbg:cuf_close=1931           ← matching `}` found
+dbg:cuf_before_parse_block   ← entering parse_block_ir
+  <hang — never prints dbg:cuf_after_parse_block>
+```
+
+So:
+
+- The hang is inside **`parse_block_ir`** for the **first user fn**, which
+  is `v2_driver_context_new` — a trivial function whose body is a single
+  struct-literal tail expression.
+- It is **not** `scan_user_globals` (hypothesis 1 from the first pass).
+- It is **not** `ufn_record_user_global_*` overflow (hypothesis 2).
+- It is **not** relocation collision (hypothesis 3): the hang is in
+  stage1's parse phase, before any codegen emits relocations.
+- It is **not** `user_global_id_tok` being slow: `USER_GLOBAL_COUNT=0`
+  across the entire self-compile, so the resolver returns -1 immediately
+  on every call.
+
+The recurring pattern in stage1 failures like this ("empty fn name" in
+error output, print streams that emit raw source chars) is `print_token_text`
+being called with a `V2_USER_FN_TOKEN_IDX[k]` whose `PT_END[tok]` appears
+to cover the whole file. Diagnostic: when stage1 printed
+`dbg:fn[0]=1889 id=32 name=…` with `print_token_text(1889)` included, it
+dumped ~200k characters that looked like a full lexical dump of the
+file (all single-char punctuation tokens spaced out). This points at
+**PT_END being out-of-range for user-fn name tokens in stage1**, which is
+orthogonal to the hang but is part of the same diagnostic surface.
+
+Most plausible remaining hypothesis for the hang itself: one of the
+speculative `parse_expr_ir` rollbacks inside `parse_stmt_ir` that my
+step-D additions made reachable for `TK_IDENT`-leading statements is
+now entering a state where the rollback counter (`V2_UFN_COUNT`,
+`V2_NEXT_REG`, or `V2_LAST_STRUCT_IDX`) is not being reset correctly on
+one of the IDENT paths, causing the same tokens to re-parse forever.
+This is speculative — the stash saved on the WIP branch
+(`stash@{0}: m1.2-stepD-diagnosis-2026-04-30`) contains the debug-print
+instrumentation for the next session to continue from.
+
+**Recommended next action:** add a hard iteration cap in
+`parse_block_ir`'s outer loop (e.g. `if iter > token_count * 4 { break }`)
+which would turn the hang into a detectable infinite loop with a fn name,
+identifying the exact statement that's cycling. Then bisect with
+`user_global_id_tok` calls commented out one parse-site at a time.
