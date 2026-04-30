@@ -141,6 +141,55 @@ Cross-compiled binaries must be executed on the target OS. The compiler runs on 
 
 ---
 
+## Single-source build path (`lean_single.sio`)
+
+**Status:** active constraint. Not a bug; a maturity-stage reality that contributors must know about before editing type-system logic.
+
+### What the situation actually is
+
+The shipped compiler binary (`bin/souc-linux-x86_64`, consumed by the `bin/souc` launcher) is produced today from a **single self-hosted source file**:
+
+- `self-hosted/compiler/lean_single.sio`
+
+The modular directory layout most readers expect —
+
+- `self-hosted/lexer/`
+- `self-hosted/parser/`
+- `self-hosted/check/`
+- `self-hosted/types/`
+- `self-hosted/ir/`
+- `self-hosted/native/`
+
+— does exist, is kept in sync by hand, and describes the architectural decomposition we aim to bootstrap from. **It is not yet the source the binary is built from.** The 2-stage bootstrap recipe below uses `lean_single.sio` exclusively:
+
+```bash
+./bin/souc-linux-x86_64 self-hosted/compiler/lean_single.sio /tmp/souc-stage1
+/tmp/souc-stage1 self-hosted/compiler/lean_single.sio /tmp/souc-stage2
+cp /tmp/souc-stage2 bin/souc-linux-x86_64
+```
+
+### Implication for contributors
+
+Any change to the type system, effects table, error codes, or surface syntax **must be made in `lean_single.sio`** to reach the binary. Changes made only to the modular tree are silently absent from the shipped compiler, even if the repo builds green and the tests pass against the stale binary.
+
+Examples of this pattern in recent history:
+
+- 2026-04-20 — surgical type gates (`ExactlyPrivate`, `Editable`, `CapabilityGated`) and error codes `E201`–`E203` added to `lean_single.sio`; modular files updated in parallel.
+- 2026-04-29 — extended surgical type gates (`Composable`, `Audited`, `Revivable`, `Interpretable`), new effect bit-flags (`Witness=32768`, `Temporal=65536`, `Learn=131072`), and error codes `E204`–`E207` added to `lean_single.sio`; 2-stage bootstrap executed; `bin/souc-linux-x86_64` rebuilt.
+
+### Risk of silent divergence
+
+Because the two universes are kept in lock-step by discipline rather than by a test, a change that touches only one side can pass CI without any signal. Until an operational-parity harness lands under `tests/parity/`, reviewers of a PR that modifies type-system logic should explicitly confirm that `lean_single.sio` was touched and that a 2-stage bootstrap was run.
+
+### Planned resolution
+
+1. **Parity harness (`tests/parity/`, planned near-term).** For a fixed set of `.sio` programs drawn from `examples/` and `tests/compile-fail/`, compile via both paths and diff the stdout/stderr and exit codes (not the binaries — timestamps and symbol ordering make binary-equality unreliable). Divergence flips CI red.
+2. **Source swap (roadmap, long term).** Rebuild `bin/souc-linux-x86_64` from the modular tree and retire `lean_single.sio`. This is a multi-week refactor and is not a Wave 9 target.
+
+Until both land, treat `lean_single.sio` as the source of truth for the binary and treat the modular tree as the maintained future target.
+
+---
+
 ## Syntax Limitations - All Resolved
 
 This section documents previously-resolved limitations for historical context.
