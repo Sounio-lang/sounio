@@ -247,3 +247,18 @@ At the end of substantial work, report:
    - fallback path
 6. remaining blockers
 7. whether any legacy path was intentionally kept
+8. **LLM-offload reviews invoked** (provider, task, target, outcome) — required for any work touching math claims, clinical-pathway code, or external-facing artifacts. See `.claude/AGENT_OFFLOAD_POLICY.md`.
+
+---
+
+## LLM-offload policy (mandatory)
+
+This repository runs many parallel agents with a single human author. Pre-commit review by orthogonal LLM providers via `bin/llm-offload` is **mandatory** at the checkpoints listed in `.claude/AGENT_OFFLOAD_POLICY.md`:
+
+- **Math claims** (PK/PD, GUM, p-box, Lean statements, refinement invariants) → `bin/llm-offload -t math-review -p xai`
+- **Clinical-pathway code** (`stdlib/clinical/*`, vancomycin tests, clinical Lean) → `bin/llm-offload -t review -p deepseek`
+- **External-facing artifacts** (papers, cover letters, dissertation, IRB) → `bin/llm-offload --raw <draft> deepseek xai gemini`
+
+Every non-trivial offload appends to `.claude/llm_offload_log.md`. Bug-catching offloads require an `LLM-offload-review:` trailer in the commit message. The policy document lists fallback rules when a provider key is missing or down.
+
+**Codex agents must not skip this step**. If you find yourself about to commit a `vancomycin_*.sio`, a Lean theorem statement, or a paper draft without a logged offload review, stop and run the review first.
