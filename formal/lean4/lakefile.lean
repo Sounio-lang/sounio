@@ -84,3 +84,11 @@ lean_lib «SounioLearningDynamics» where
 
 @[default_target]
 lean_lib «SounioPathionBridge» where
+
+-- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
+@[default_target]
+lean_lib «SounioApproxCausalKnowledge» where
+
+-- M2: Vancomycin-Knightian thrust — Ferson p-box operator
+@[default_target]
+lean_lib «SounioKnightian» where
