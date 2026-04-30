@@ -104,9 +104,14 @@ expression grammar does not yet handle.
 
 ### 8. `for` / `*` / `(` (~22 failures)
 
-`kind=174 text=(` (12+6), `kind=134 text=*` (4+3), `kind=123 text=for`
-(4). Probably tuple expressions, deref operator in some position, and
-`for` loops respectively.
+- **`for` (4 cases) — CLOSED** by `870e7b66` (Layer B1, 2026-04-30):
+  added `parse_for_ir` mirroring `parse_while_ir`; lowers `for x in A..B {…}`
+  to `var x=A; while x<B {…; x=x+1}` (and `..=` → `<=`). 2 of 4 for-tests
+  in run-pass now compile; remaining 2 (`for_in_loops`,
+  `while_for_struct_patterns`) fail on unrelated features (array
+  iteration, while-let).
+- **`kind=174 text=(` (~18)** — tuple expressions / paren in some position. Open.
+- **`kind=134 text=*` (~7)** — deref operator. Open.
 
 ### 9. Defer for now (out of M1.2 scope)
 
