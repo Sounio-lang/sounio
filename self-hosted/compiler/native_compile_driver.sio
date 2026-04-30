@@ -1697,8 +1697,48 @@ fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
 // No V2_CORE side effects; builds IrFunction directly
 // ============================================================
 
+fn parse_if_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    // Expression form: `if COND { THEN_EXPR } else { ELSE_EXPR }`.
+    // Both arms must be tail-expression blocks (single expression, no statements).
+    // Returns ExprParse with reg holding the chosen value and next past the closing `}`.
+    let cond = parse_expr_ir(func, ctx, pos + 1)
+    if cond.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    var p = cond.next
+    p = skip_trivia(p, V2_TOKEN_COUNT)
+    if token_kind(p) != TK_LBRACE { return ExprParse { ok: 0, reg: -1, next: pos} }
+    let then_close = find_matching_rbrace(p, V2_TOKEN_COUNT)
+    if then_close < 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    var after_then = skip_trivia(then_close + 1, V2_TOKEN_COUNT)
+    if token_kind(after_then) != TK_ELSE { return ExprParse { ok: 0, reg: -1, next: pos} }
+    let after_else = skip_trivia(after_then + 1, V2_TOKEN_COUNT)
+    if token_kind(after_else) != TK_LBRACE { return ExprParse { ok: 0, reg: -1, next: pos} }
+    let else_close = find_matching_rbrace(after_else, V2_TOKEN_COUNT)
+    if else_close < 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+
+    let dst = alloc_reg(ctx)
+    let label_else = alloc_label()
+    let label_end = alloc_label()
+    ufn_record_branch_false(cond.reg, label_else)
+    // then arm: parse single tail expression inside the braces.
+    let then_start = skip_trivia(p + 1, then_close)
+    let then_expr = parse_expr_ir(func, ctx, then_start)
+    if then_expr.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    if then_expr.reg != dst { ufn_record_copy(dst, then_expr.reg) }
+    ufn_record_jump(label_end)
+    ufn_record_label(label_else)
+    let else_start = skip_trivia(after_else + 1, else_close)
+    let else_expr = parse_expr_ir(func, ctx, else_start)
+    if else_expr.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    if else_expr.reg != dst { ufn_record_copy(dst, else_expr.reg) }
+    ufn_record_label(label_end)
+    ExprParse { ok: 1, reg: dst, next: else_close + 1}
+}
+
 fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
     let k = token_kind(pos)
+    if k == TK_IF {
+        return parse_if_expr_ir(func, ctx, pos)
+    }
     if k == TK_BANG {
         let inner = parse_atom_ir(func, ctx, pos + 1)
         if inner.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
@@ -2666,13 +2706,25 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
     }
 
     // call statement: name(args)  — for side-effecting calls
-    // Skip this path if the call is part of a larger expression (|| or &&)
+    // Skip this path if the call is part of a larger expression (||, &&, binop, cmp, postfix).
+    // M1.2 step 4: when a tail-expression-position call is followed by a binary
+    // operator (e.g. `fib(n-1) + fib(n-2)` as a block tail), we previously
+    // swallowed the call as a statement and then choked on the operator.
+    // Now we save UFN/reg state, speculatively parse the call, and roll back
+    // if the next token continues the expression — letting the tail-expression
+    // branch below re-parse the whole thing via parse_expr_ir.
     if k == TK_IDENT && token_kind(p + 1) == TK_LPAREN {
+        let saved_ufn_count = V2_UFN_COUNT
+        let saved_next_reg = V2_NEXT_REG
+        let saved_last_struct = V2_LAST_STRUCT_IDX
         let call = parse_fn_call_ir(func, ctx, p)
         if call.ok != 0 {
             let next_k = token_kind(call.next)
             let returns_value = call_target_returns_value_tok(p)
-            if next_k != TK_OROR && next_k != TK_ANDAND && (call.next < close || !returns_value) {
+            let continues_expr = next_k == TK_OROR || next_k == TK_ANDAND
+                || is_arith_op(next_k) || is_cmp_op(next_k)
+                || next_k == TK_AS || next_k == TK_DOT || next_k == TK_LBRACKET
+            if !continues_expr && (call.next < close || !returns_value) {
                 if V2_UFN_COUNT > 0 {
                     let last_op_idx = V2_UFN_COUNT - 1
                     let last_op = V2_UFN_OPS[last_op_idx as usize]
@@ -2682,6 +2734,11 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                 }
                 return call.next
             }
+            // Roll back the speculative call so the tail-expression branch
+            // below can re-parse from `p` via parse_expr_ir.
+            V2_UFN_COUNT = saved_ufn_count
+            V2_NEXT_REG = saved_next_reg
+            V2_LAST_STRUCT_IDX = saved_last_struct
         }
     }
 
