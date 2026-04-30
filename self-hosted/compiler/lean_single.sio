@@ -2280,6 +2280,8 @@ fn tok_is_effect_name(p: i64) -> bool with Panic, Mut {
     if src_match(ns, ne - ns, "Hypothesis") { return true }
     if src_match(ns, ne - ns, "MultiTest") { return true }
     if src_match(ns, ne - ns, "ZD") { return true }
+    if src_match(ns, ne - ns, "Approx") { return true }
+    if src_match(ns, ne - ns, "Causal") { return true }
     return false
 }
 
@@ -3516,6 +3518,16 @@ fn print_effect_mask(mask: i64) with IO, Mut {
     if (mask & 512) != 0 {
         if first == 0 { print(",") }
         print("Epistemic")
+        first = 0
+    }
+    if (mask & 262144) != 0 {
+        if first == 0 { print(",") }
+        print("Approx")
+        first = 0
+    }
+    if (mask & 524288) != 0 {
+        if first == 0 { print(",") }
+        print("Causal")
     }
 }
 
@@ -11506,6 +11518,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         if bitset_is_subset(etarg_eff, etcaller_eff) == false {
                             tc_effect_call_violation(call_tok, etarg_eff, etcaller_eff)
                         }
+                        // Approx effect check for closures (bit 18)
+                        if (etarg_eff & 262144) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 262144) == 0 {
+                            tc_effect_call_violation(call_tok, 262144, FN_EFFECTS[CURRENT_FN as usize])
+                        }
+                        // Causal effect check for closures (bit 19)
+                        if (etarg_eff & 524288) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 524288) == 0 {
+                            tc_effect_call_violation(call_tok, 524288, FN_EFFECTS[CURRENT_FN as usize])
+                        }
                     }
                 }
                 // Mark struct variable as moved when passed by value to a function
@@ -11542,9 +11562,33 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if bitset_is_subset(callee_eff, caller_eff) == false && !(callee_is_import && caller_is_import) {
                     tc_effect_call_violation(call_tok, callee_eff, caller_eff)
                 }
+                // Approx effect check (bit 18) — above & 1023 mask
+                if (FN_EFFECTS[fi as usize] & 262144) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 262144) == 0 {
+                    tc_effect_call_violation(call_tok, 262144, FN_EFFECTS[CURRENT_FN as usize])
+                }
+                // Causal effect check (bit 19) — above & 1023 mask
+                if (FN_EFFECTS[fi as usize] & 524288) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 524288) == 0 {
+                    tc_effect_call_violation(call_tok, 524288, FN_EFFECTS[CURRENT_FN as usize])
+                }
+                // E067: Causal confounding detection
+                // Calling an Observe function from a Causal function without Audit = potential confounding
+                if (FN_EFFECTS[fi as usize] & 64) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 524288) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 128) == 0 {
+                    tc_mark_failed()
+                    print("error[E067]: potential confounding at line ")
+                    print_int(TL[call_tok as usize])
+                    print(" — Causal function calls Observe function without Audit (unblocked confounding path)\n")
+                }
                 // Effect inference: propagate callee effects into enclosing closure body
                 if CL_DEPTH > 0 {
                     CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] | (callee_eff & 63)
+                }
+                // Approx propagation into closures
+                if (FN_EFFECTS[fi as usize] & 262144) != 0 && CL_DEPTH > 0 {
+                    CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] | 262144
+                }
+                // Causal propagation into closures
+                if (FN_EFFECTS[fi as usize] & 524288) != 0 && CL_DEPTH > 0 {
+                    CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] | 524288
                 }
                 // Visibility check: imported non-pub function called from main module
                 let callee_is_pub = (FN_EFFECTS[fi as usize] & 1024) != 0
@@ -18786,6 +18830,10 @@ fn ety_parse_effect_name(ns: i64, ne: i64) -> i64 with Panic, Mut {
     if src_match(ns, l, "GPU") { return 8192 }
     // ZD = bit 14 (16384) — zero-divisor effect for sedenion-based exact erasure
     if src_match(ns, l, "ZD") { return 16384 }
+    // Approx = bit 18 (262144) — numerical approximation tracking
+    if src_match(ns, l, "Approx") { return 262144 }
+    // Causal = bit 19 (524288) — causal inference effect
+    if src_match(ns, l, "Causal") { return 524288 }
     return 0
 }
 
@@ -21972,6 +22020,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if src_match(ens, ene - ens, "Temporal") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 65536; matched_builtin = 1 }
                         // Learn = bit 17 (131072) — gradient-producing functions consumed by SurgicalOptimizer
                         if src_match(ens, ene - ens, "Learn") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 131072; matched_builtin = 1 }
+                        // Approx = bit 18 (262144) — numerical approximation tracking
+                        if src_match(ens, ene - ens, "Approx") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 262144; matched_builtin = 1 }
+                        // Causal = bit 19 (524288) — causal inference effect
+                        if src_match(ens, ene - ens, "Causal") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 524288; matched_builtin = 1 }
                         // Gen 21 Phase A″: Confidence(N) is a reader-friendly alias for
                         // Epistemic(N). Same bit, same FN_EPISTEMIC_MIN slot. N is an
                         // integer on the 1..1000 scale (matches Knowledge<T>.confidence).
