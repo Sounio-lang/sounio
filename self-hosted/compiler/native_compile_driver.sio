@@ -148,6 +148,9 @@ let V2_BUILTIN_DRIVER_WRITE_ELF: i64 = 14
 let V2_BUILTIN_DRIVER_CHMOD: i64 = 15
 let V2_BUILTIN_PRINT_F64: i64 = 16
 let V2_BUILTIN_SQRT_F64: i64 = 17
+// println is expanded at parse time into the appropriate typed print + a
+// trailing print_char(10). See parse_fn_call_ir and M1.2 step 2 (redo).
+let V2_BUILTIN_PRINTLN: i64 = 18
 let V2_FIRST_USER_FN_ID: i64 = 32
 
 // V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
@@ -883,6 +886,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_BUILTIN_DRIVER_CHMOD") { return 15 }
     if token_text_eq(tok, "V2_BUILTIN_PRINT_F64") { return 16 }
     if token_text_eq(tok, "V2_BUILTIN_SQRT_F64") { return 17 }
+    if token_text_eq(tok, "V2_BUILTIN_PRINTLN") { return 18 }
     if token_text_eq(tok, "V2_FIRST_USER_FN_ID") { return 32 }
 
     if token_text_eq(tok, "UFN_LOAD_IMM") { return 1 }
@@ -1307,6 +1311,7 @@ fn builtin_fn_returns_value(fn_id: i64) -> bool {
     if fn_id == V2_BUILTIN_PRINT_INT { return false }
     if fn_id == V2_BUILTIN_PRINT_CHAR { return false }
     if fn_id == V2_BUILTIN_PRINT_F64 { return false }
+    if fn_id == V2_BUILTIN_PRINTLN { return false }
     true
 }
 
@@ -1666,6 +1671,7 @@ fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
     if name_eq_text(name, "driver_read_file_to_cursor_source") { return V2_BUILTIN_DRIVER_READ_FILE_TO_GLOBALS }
     if name_eq_text(name, "driver_write_elf_to_file") { return V2_BUILTIN_DRIVER_WRITE_ELF }
     if name_eq_text(name, "driver_make_executable") { return V2_BUILTIN_DRIVER_CHMOD }
+    if name_eq_text(name, "println") { return V2_BUILTIN_PRINTLN }
     -1
 }
 
@@ -1689,6 +1695,7 @@ fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "driver_read_file_to_cursor_source") { return V2_BUILTIN_DRIVER_READ_FILE_TO_GLOBALS }
     if token_text_eq(tok, "driver_write_elf_to_file") { return V2_BUILTIN_DRIVER_WRITE_ELF }
     if token_text_eq(tok, "driver_make_executable") { return V2_BUILTIN_DRIVER_CHMOD }
+    if token_text_eq(tok, "println") { return V2_BUILTIN_PRINTLN }
     -1
 }
 
@@ -2043,6 +2050,46 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
             return ExprParse { ok: 1, reg: base, next: pos + 3}
         }
         return ExprParse { ok: 0, reg: -1, next: pos}
+    }
+    // M1.2 step 2 (redo): `println` is not a standalone builtin in codegen —
+    // it expands at parse time into a typed print call plus a trailing
+    // print_char(10). Dispatch is based on the argument's runtime type:
+    //   - f64 register (via reg_is_f64) → print_f64 + '\n'
+    //   - TK_STRING leading token → print + '\n'
+    //   - otherwise → print_int + '\n'
+    // Zero-arg form `println()` just emits a newline. Mirrors lean_single's
+    // println lowering where the type of the single argument decides between
+    // print_cstr, print_int, and print_f64 followed by a linefeed.
+    if fn_id == V2_BUILTIN_PRINTLN {
+        // Zero-arg: println() → just a newline.
+        if token_kind(pos + 2) == TK_RPAREN {
+            let nl_reg = alloc_reg(ctx)
+            let nl_dst = alloc_reg(ctx)
+            ufn_record_load_imm(nl_reg, 10)
+            ufn_record_call(nl_dst, V2_BUILTIN_PRINT_CHAR, nl_reg, 1)
+            return ExprParse { ok: 1, reg: nl_dst, next: pos + 3}
+        }
+        // Single-arg: inspect the leading arg token for the cstring heuristic
+        // BEFORE parsing (parse_expr_ir consumes the token and reg-type tracking
+        // doesn't distinguish cstring pointers from ints).
+        let arg_start_kind = token_kind(pos + 2)
+        V2_LAST_STRUCT_IDX = -1
+        let arg = parse_expr_ir(func, ctx, pos + 2)
+        if arg.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+        if token_kind(arg.next) != TK_RPAREN { return ExprParse { ok: 0, reg: -1, next: pos} }
+        var inner_fn_id = V2_BUILTIN_PRINT_INT
+        if reg_is_f64(arg.reg) {
+            inner_fn_id = V2_BUILTIN_PRINT_F64
+        } else if arg_start_kind == TK_STRING {
+            inner_fn_id = V2_BUILTIN_PRINT
+        }
+        let inner_dst = alloc_reg(ctx)
+        ufn_record_call(inner_dst, inner_fn_id, arg.reg, 1)
+        let nl_reg = alloc_reg(ctx)
+        let nl_dst = alloc_reg(ctx)
+        ufn_record_load_imm(nl_reg, 10)
+        ufn_record_call(nl_dst, V2_BUILTIN_PRINT_CHAR, nl_reg, 1)
+        return ExprParse { ok: 1, reg: nl_dst, next: arg.next + 1}
     }
     var n_args: i64 = 0
     var total_argc: i64 = 0
