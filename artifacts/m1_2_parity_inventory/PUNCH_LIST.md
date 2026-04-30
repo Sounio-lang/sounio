@@ -70,13 +70,15 @@ concat, which is a different cluster).
 a benchmarking macro. Defer for M1.2 if it's macro-heavy; otherwise
 implement as a no-op inline.
 
-### 4. Assignment in expression position (~45 failures combined)
+### 4. Assignment in expression position — CLOSED (Layer B2 verification, 2026-04-30)
 
-`kind=137 text==` (22 in run-pass, 23 in broader). N-v2 likely accepts
-top-level statement-position `x = expr` but rejects `=` when it shows up
-in expression position (e.g. inside a nested expression, struct literal
-field initializer, or subscript LHS). Need to drill in to see what
-expressions are blocked.
+Re-verified at commit `00678f44`: zero `kind=137 text==` failures across
+run-pass (392 files) and broader (1235 files) corpora. The original
+~45-case estimate was stale — all sub-contexts (subscript LHS,
+struct-field-LHS, `(*p).f =`) are absorbed by `c91127fd`
+(expression-position `if` + binop tail-call) and `36030fc9` (array-init
+tail-literal). See
+[blockers/m1_2_layer_b2_assign_expr_noop.md](blockers/m1_2_layer_b2_assign_expr_noop.md).
 
 ### 5. `if` as expression (~16 failures combined)
 
