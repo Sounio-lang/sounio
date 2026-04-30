@@ -11,7 +11,8 @@ plan.
 |---|---|---|---|---|---|---|
 | `tests/run-pass` (M1.2 baseline) | 392 | 50 (12.7%) | **324** | 11 | — | 6 |
 | `tests/run-pass` (after M1.2 step 4 if/binop) | 392 | 63 (16.1%) | — | — | — | — |
-| `tests/run-pass` (after M1.2 step 2 redo) | 392 | **74 (18.9%)** | **285** | 26 | 1 | 6 |
+| `tests/run-pass` (after M1.2 step 2 redo) | 392 | 74 (18.9%) | 285 | 26 | 1 | 6 |
+| `tests/run-pass` (after Layer B1 for-loop, B2 verified-noop, B3 reverted) | 392 | **75 (19.1%)** | **279** | 33 | 1 | 4 |
 | broader (examples + tests/native* + selfhost-driver-output) | 841 | 72 (8.6%) | **416** | 34 | 10 | 309 |
 
 Headline: after step 2 (`println` redo) + step 4 partial (`if`/binop-tail),
