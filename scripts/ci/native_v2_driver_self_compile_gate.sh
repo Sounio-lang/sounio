@@ -162,6 +162,15 @@ SMOKE_COHORT=(
   # refinement syntax. The new baseline-rc=124 → FAIL guard above turns
   # this entry into a hard regression test for that bug class.
   "tests/run-pass/refinement_nested_arithmetic.sio"
+  # HOF parameter signature regression test (post-#56-revert re-land).
+  # Validates that `find_fn_lbrace` and the parameter walker handle a
+  # `fn(T) -> T` parameter type without bailing on the inner `fn`
+  # keyword or running off the end. PR #56 was reverted because of a
+  # purported logical_ops hang that turned out to be transient; this
+  # entry pins the actual fix forward — both the baseline (with the
+  # fix) and stage1 must compile this file successfully, so any future
+  # change that re-breaks find_fn_lbrace fails the gate immediately.
+  "examples/native/hof_param_signature.sio"
 )
 
 printf '[native-v2-driver-self] stage1-smoke timeout=%ss cohort=%d\n' \
