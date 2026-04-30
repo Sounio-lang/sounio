@@ -2345,6 +2345,59 @@ fn parse_while_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: 
     body_end + 1
 }
 
+fn parse_for_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    // M1.2 Layer B1 — for x in START..END { body } / for x in START..=END { body }
+    // pos points to token AFTER 'for' (i.e. the loop variable name).
+    // Lowering: var x = START; while x </<= END { body; x = x + 1 }
+    if token_kind(pos) != TK_IDENT { return pos }
+    let var_tok = pos
+    if token_kind(pos + 1) != TK_IDENT || !token_text_eq(pos + 1, "in") { return pos }
+    let start_parse = parse_expr_ir(func, ctx, pos + 2)
+    if start_parse.ok == 0 { return pos }
+    // `..` has kind code 160, `..=` has kind code 161 (see parser.sio).
+    let range_tok = start_parse.next
+    let range_code = pt_read_kind_code(range_tok)
+    if range_code != 160 && range_code != 161 { return pos }
+    var is_inclusive: i64 = 0
+    if range_code == 161 { is_inclusive = 1 }
+    let end_parse = parse_expr_ir(func, ctx, range_tok + 1)
+    if end_parse.ok == 0 { return pos }
+    let iter_reg = alloc_reg(ctx)
+    ufn_record_copy(iter_reg, start_parse.reg)
+    remember_local_tok(ctx, var_tok, iter_reg)
+    let end_reg = alloc_reg(ctx)
+    ufn_record_copy(end_reg, end_parse.reg)
+    var bp = end_parse.next
+    while bp < token_count && token_kind(bp) != TK_LBRACE { bp = bp + 1 }
+    if bp >= token_count { return pos }
+    let body_end = find_matching_rbrace(bp, token_count)
+    if body_end < 0 { return pos }
+    let label_top = alloc_label()
+    let label_incr = alloc_label()
+    let label_end = alloc_label()
+    emit_label(func, label_top)
+    let cond_reg = alloc_reg(ctx)
+    // binop codes: 7=lt, 8=le (see cmp_op_to_code).
+    var cmp_code: i64 = 7
+    if is_inclusive != 0 { cmp_code = 8 }
+    ufn_record_binop(cond_reg, iter_reg, cmp_code, end_reg)
+    emit_branch_false(func, cond_reg, label_end)
+    let old_break = V2_BREAK_LABEL
+    let old_continue = V2_CONTINUE_LABEL
+    V2_BREAK_LABEL = label_end
+    V2_CONTINUE_LABEL = label_incr
+    parse_block_ir(func, ctx, bp + 1, body_end, token_count)
+    V2_BREAK_LABEL = old_break
+    V2_CONTINUE_LABEL = old_continue
+    emit_label(func, label_incr)
+    let one_reg = alloc_reg(ctx)
+    ufn_record_load_imm(one_reg, 1)
+    ufn_record_binop(iter_reg, iter_reg, 1, one_reg)
+    emit_jump(func, label_top)
+    emit_label(func, label_end)
+    body_end + 1
+}
+
 fn parse_if_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     // if COND { THEN } [else [if ...] { ELSE }]
     // pos points to token AFTER 'if'
@@ -2502,6 +2555,10 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
         }
         mark_parse_unsupported(p)
         return close
+    }
+
+    if k == TK_IDENT && token_text_eq(p, "for") {
+        return parse_for_ir(func, ctx, p + 1, token_count)
     }
 
     if k == TK_VAR || k == TK_LET {
