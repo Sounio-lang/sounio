@@ -126,6 +126,21 @@ run_semantic_hardening() {
   append_gate_row "$gate" "$rc" "$gate_dir" "$summary_json" "$log_path"
 }
 
+run_lean_single_fixed_point() {
+  local gate="lean_single_fixed_point"
+  local gate_dir="$OUT_DIR/$gate"
+  local log_path="$LOG_DIR/$gate.log"
+
+  mkdir -p "$gate_dir"
+  echo "[native-v2-cpu-compiler] running $gate"
+  set +e
+  SOUNIO_LEAN_SINGLE_FP_DIR="$gate_dir" \
+    bash scripts/ci/lean_single_fixed_point_gate.sh >"$log_path" 2>&1
+  local rc=$?
+  set -e
+  append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
+}
+
 emit_summary_json() {
   python3 - "$SUMMARY_JSON" "$RESULTS_TSV" "$SOUC_BIN" "$OUT_DIR" <<'PY'
 import csv
@@ -266,9 +281,10 @@ run_science_spine
 run_f64_ladder
 run_gum_primitives
 run_semantic_hardening
+run_lean_single_fixed_point
 
 if emit_summary_json; then
-  echo "[native-v2-cpu-compiler] PASS: driver self-compile, science spine, f64 ladder, GUM primitives, semantic hardening"
+  echo "[native-v2-cpu-compiler] PASS: driver self-compile, science spine, f64 ladder, GUM primitives, semantic hardening, lean_single fixed-point"
   echo "[native-v2-cpu-compiler] summary=$SUMMARY_JSON"
 else
   echo "[native-v2-cpu-compiler] FAIL: see summary=$SUMMARY_JSON" >&2
