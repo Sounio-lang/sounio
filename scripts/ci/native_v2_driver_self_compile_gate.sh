@@ -133,6 +133,97 @@ if command -v strings >/dev/null 2>&1; then
   grep -q 'Hello from self-hosted Sounio!' "$HELLO_STRINGS_LOG"
 fi
 
+# ── Stage1 smoke: confirm stage1 binary compiles+runs a cohort within a timeout.
+# The fixed-point gate (stage2==stage3) only proves determinism. A deterministic
+# codegen bug in stage1 will reproduce byte-identically in later stages and
+# silently stay green. This phase asserts stage1 actually produces working code
+# on a small cohort covering the main N-v2 surfaces (recursion+binop-in-call,
+# while+mut, logical ops, zero-init arrays, struct field access).
+SMOKE_DIR="$OUT_DIR/smoke"
+SMOKE_LOG_DIR="$LOG_DIR/smoke"
+mkdir -p "$SMOKE_DIR" "$SMOKE_LOG_DIR"
+SMOKE_TIMEOUT="${SOUNIO_NATIVE_V2_DRIVER_SELF_COMPILE_SMOKE_TIMEOUT:-10}"
+SMOKE_COHORT=(
+  "examples/native/fib.sio"
+  "examples/native/while_loop.sio"
+  "examples/native/logical_ops.sio"
+  "examples/native/array_basics.sio"
+  "examples/native/struct_basic.sio"
+  # Tail-literal array init. Currently skipped by baseline (the driver's
+  # TK_VAR array-decl branch does not yet accept `= [v0, v1, ...]`), but
+  # auto-activates as soon as M1.2 step 4 bisect lands the handler — at which
+  # point stage1 must finish within SMOKE_TIMEOUT or this phase fails.
+  "examples/native/array_init_tail.sio"
+)
+
+printf '[native-v2-driver-self] stage1-smoke timeout=%ss cohort=%d\n' \
+  "$SMOKE_TIMEOUT" "${#SMOKE_COHORT[@]}"
+
+smoke_checked=0
+smoke_ran=0
+for smoke_src in "${SMOKE_COHORT[@]}"; do
+  if [[ ! -f "$smoke_src" ]]; then
+    echo "[native-v2-driver-self] smoke SKIP: $smoke_src absent" >&2
+    continue
+  fi
+  slug="$(basename "$smoke_src" .sio)"
+  base_bin="$SMOKE_DIR/$slug.baseline"
+  s1_bin="$SMOKE_DIR/$slug.stage1"
+  base_compile_log="$SMOKE_LOG_DIR/$slug.baseline.compile.log"
+  base_stdout="$SMOKE_LOG_DIR/$slug.baseline.stdout"
+  s1_compile_log="$SMOKE_LOG_DIR/$slug.stage1.compile.log"
+  s1_stdout="$SMOKE_LOG_DIR/$slug.stage1.stdout"
+
+  # Self-certifying golden: capture baseline driver output; drop cases the
+  # baseline can't handle rather than hardcoding expected stdout.
+  if ! timeout "$SMOKE_TIMEOUT" "$SOUC_BIN" run "$DRIVER_SRC" -- "$smoke_src" -o "$base_bin" \
+      >"$base_compile_log" 2>&1; then
+    echo "[native-v2-driver-self] smoke SKIP: baseline cannot compile $smoke_src" >&2
+    tail -n 20 "$base_compile_log" >&2 || true
+    continue
+  fi
+  if [[ ! -x "$base_bin" ]]; then
+    echo "[native-v2-driver-self] smoke SKIP: baseline produced no binary for $smoke_src" >&2
+    continue
+  fi
+  if ! timeout "$SMOKE_TIMEOUT" "$base_bin" >"$base_stdout" 2>/dev/null; then
+    echo "[native-v2-driver-self] smoke SKIP: baseline binary did not complete within ${SMOKE_TIMEOUT}s on $smoke_src" >&2
+    continue
+  fi
+  smoke_checked=$((smoke_checked + 1))
+
+  # Stage1 must compile within the timeout and produce a binary that matches
+  # the baseline's stdout within the same timeout.
+  if ! timeout "$SMOKE_TIMEOUT" "$STAGE1_DRIVER" "$smoke_src" -o "$s1_bin" \
+      >"$s1_compile_log" 2>&1; then
+    echo "[native-v2-driver-self] FAIL: stage1-smoke timed out or errored compiling $smoke_src" >&2
+    echo "[native-v2-driver-self] compile log: $s1_compile_log" >&2
+    tail -n 80 "$s1_compile_log" >&2 || true
+    exit 1
+  fi
+  if [[ ! -x "$s1_bin" ]]; then
+    echo "[native-v2-driver-self] FAIL: stage1-smoke produced no executable for $smoke_src" >&2
+    tail -n 80 "$s1_compile_log" >&2 || true
+    exit 1
+  fi
+  if ! timeout "$SMOKE_TIMEOUT" "$s1_bin" >"$s1_stdout" 2>/dev/null; then
+    echo "[native-v2-driver-self] FAIL: stage1-smoke binary did not complete within ${SMOKE_TIMEOUT}s on $smoke_src" >&2
+    exit 1
+  fi
+  if ! cmp -s "$base_stdout" "$s1_stdout"; then
+    echo "[native-v2-driver-self] FAIL: stage1-smoke stdout differs from baseline on $smoke_src" >&2
+    diff -u "$base_stdout" "$s1_stdout" >&2 || true
+    exit 1
+  fi
+  smoke_ran=$((smoke_ran + 1))
+done
+
+if [[ "$smoke_ran" -eq 0 ]]; then
+  echo "[native-v2-driver-self] FAIL: stage1-smoke cohort produced zero runnable cases" >&2
+  exit 1
+fi
+printf '[native-v2-driver-self] stage1-smoke OK ran=%d checked=%d\n' "$smoke_ran" "$smoke_checked"
+
 # ── Stage2: stage1 native binary compiles the driver again ───────────────────
 if ! "$STAGE1_DRIVER" "$DRIVER_SRC" -o "$STAGE2_DRIVER" >"$STAGE2_COMPILE_LOG" 2>&1; then
   echo "[native-v2-driver-self] FAIL: stage1 driver failed to compile stage2" >&2
