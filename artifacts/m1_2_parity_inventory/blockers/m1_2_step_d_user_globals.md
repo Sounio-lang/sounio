@@ -141,3 +141,100 @@ instrumentation for the next session to continue from.
 which would turn the hang into a detectable infinite loop with a fn name,
 identifying the exact statement that's cycling. Then bisect with
 `user_global_id_tok` calls commented out one parse-site at a time.
+
+## 2026-04-30 third-pass resolution (PARTIALLY CLOSED)
+
+Third follow-up on branch `m1_2-step-d-debug-iter-cap` (forked from
+`b9816786`). Landed three commits:
+
+1. `bd9dc5ba [nv2] M1.2 step D — hoist USER_GLOBAL_* to driver-global
+   slots 81-86`. Pulled the V2_GLOBAL_USER_GLOBAL_{NAME_TOK,
+   DATA_OFFSET, ELEM_COUNT, IS_F64, COUNT, DATA_LEN} slot IDs, wired
+   them into `driver_global_id_tok` + `driver_const_value_tok`, bumped
+   `drv_driver_data_len` 21,233,664 → 22,806,528. Prerequisite: without
+   this, stage1 self-compile fails with `unsupported_frontend
+   fn=user_global_id_tok text=i` before the hang point, because the
+   driver's own references to `USER_GLOBAL_COUNT` etc. couldn't resolve.
+
+2. `f441ae04 [nv2] M1.2 step D — no-progress guard in parse_block_ir`.
+   Permanent defensive check: if `parse_stmt_ir` returns the same `p`
+   it was given, emit `native_compile: parse_block_no_progress p=? kind=?
+   text=?`, call `mark_parse_unsupported(prev_p)`, and exit the loop.
+   **Converts the stage1 hang into a diagnosable failure.**
+
+3. `88ecfaa0 [examples] M1.2 step D — canonical user-global array test`.
+   `examples/native/user_global_basic.sio` exercises a top-level `var
+   TABLE: [i64; 4] = [0; 4]` with indexed reads + writes. Verified
+   against the **baseline** (souc-compiled) driver — prints `sum=100`.
+
+### What is closed
+
+- **The hang itself.** With the no-progress guard, running stage1 on
+  the driver source now terminates with
+  `native_compile: parse_block_no_progress p=1898 kind=137 text==`
+  instead of spinning at 99% CPU. That is the first thing this blocker
+  asked for.
+- **The baseline (souc → driver) user-globals path for pure-array
+  programs.** `user_global_basic.sio` compiles and runs correctly.
+
+### What is NOT closed (blocks merge)
+
+- **Step D.0 — stage1 codegen regression.** With hoist-slots in place,
+  stage1 builds (270800 bytes) but mis-compiles **even hello.sio**:
+  `let x = 21 + 21; print_int(x)` prints `78` instead of `42`. This
+  regression is present in the WIP (`b9816786`) **before** any of
+  this branch's commits — the no-progress guard did not introduce it;
+  it just made it visible by making stage1 terminate. Verified by
+  checking out `bd9dc5ba` alone (hoist only, no loop-cap) and reproducing
+  the 42 → 78 bug.
+- Concretely: `bash scripts/ci/native_v2_driver_self_compile_gate.sh`
+  fails at `FAIL: stage1 hello stdout mismatch` on this branch.
+- `bash scripts/ci/lean_single_fixed_point_gate.sh` passes (unrelated
+  to the driver; it tests `lean_single.sio`).
+
+### Cluster #1 inventory rerun (2026-04-30)
+
+All 4 sample files from the first-pass diagnosis still fail via the
+baseline driver, for **reasons outside Step D's current array-only
+scope**:
+
+| File | Failure | Classification |
+|---|---|---|
+| `door5_epistemic_attention.sio` | `text=RNG_A` | scalar user-global → **Step D.2** |
+| `epistemic_ode_14comp.sio` | `text=EState` | struct type resolution → **Step 3b** |
+| `octonion_basic_demo.sio` | `text=Octonion` | struct type resolution → **Step 3b** |
+| `mcmc_integration.sio` | `text=e30` | scientific-notation lexer bug → **Step 3a** |
+
+None of these are the array-indexed-write case the WIP covers. A
+search of `tests/run-pass/` for files with *only* `[T; N]` top-level
+globals and no scalar globals / struct types / scientific-notation
+floats did not find any pre-existing test — `user_global_basic.sio`
+is the first.
+
+### Deferred work
+
+- **Step D.0** (merge-blocker): fix the `21 + 21 = 78` stage1 codegen
+  regression introduced by the WIP. Root cause TBD. One hypothesis is
+  that the WIP extending `compile_ufn_from_globals`'s `else if` chain
+  with `UFN_USER_GLOBAL_LOAD` / `UFN_USER_GLOBAL_STORE` cases (21, 22)
+  triggers a deep-chain mis-emit in the driver's own codegen. Bisect
+  next session by removing the two new opcode cases and retesting hello.
+- **Step D.1**: expand `scan_user_globals` to also accept `[i8; N]`,
+  `[u8; N]`, `[u32; N]`, etc. Currently i64 + f64 only.
+- **Step D.2**: top-level **scalar** user-globals (`var RNG_A: i64 = 7777`).
+  Needs init-codegen analogous to `emit_global_inits_x86`/
+  `emit_global_inits_a64` in lean_single.
+- **Step 3a**: lexer scientific-notation parse (`1.0e308` splitting into
+  `TK_FLOAT(1.0)` + `TK_IDENT(e308)`).
+- **Step 3b**: struct-type identifier resolution at use sites
+  (`Oct`, `Octonion`, `EState`, `CovMat`, `Span`, `Box`).
+
+### Pointers
+
+- Current branch: `m1_2-step-d-debug-iter-cap` (3 new commits above WIP).
+- `user_global_basic.sio` is **not** yet added to the stage1-smoke cohort
+  in `scripts/ci/native_v2_driver_self_compile_gate.sh` — doing so would
+  require Step D.0 to land first, otherwise the gate stays red.
+- Stash with unrelated stdlib/tests drift from the first diagnosis
+  session is preserved separately as
+  `stepD-unrelated-drift-drop` (do not merge into the driver PR).
