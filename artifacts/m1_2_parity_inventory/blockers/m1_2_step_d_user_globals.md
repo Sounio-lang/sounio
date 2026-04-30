@@ -1,8 +1,11 @@
-# M1.2 step D — Top-level user-global array access (BLOCKED)
+# M1.2 step D — Top-level user-global array access (CLOSED for step D.0)
 
-**Status (2026-04-30):** Infrastructure is written but blocked on a
-stage1-hang trap. WIP preserved on branch
-`m1_2-step-d-user-globals-WIP` (commit `b9816786`) — DO NOT merge.
+**Status (2026-04-30, fourth pass):** All merge-blockers for the
+array-indexed user-global path are closed. Merge-ready branch:
+`m1_2-step-d-debug-iter-cap` (contains the original WIP from
+`b9816786` + the hoist, loop-cap, label-array bump, and example test).
+Broader step-D work (scalar user-globals, non-i64/f64 element types,
+struct/enum resolution, scientific-notation lexer) remains deferred.
 
 ## Goal
 
@@ -179,18 +182,9 @@ Third follow-up on branch `m1_2-step-d-debug-iter-cap` (forked from
 
 ### What is NOT closed (blocks merge)
 
-- **Step D.0 — stage1 codegen regression.** With hoist-slots in place,
-  stage1 builds (270800 bytes) but mis-compiles **even hello.sio**:
-  `let x = 21 + 21; print_int(x)` prints `78` instead of `42`. This
-  regression is present in the WIP (`b9816786`) **before** any of
-  this branch's commits — the no-progress guard did not introduce it;
-  it just made it visible by making stage1 terminate. Verified by
-  checking out `bd9dc5ba` alone (hoist only, no loop-cap) and reproducing
-  the 42 → 78 bug.
-- Concretely: `bash scripts/ci/native_v2_driver_self_compile_gate.sh`
-  fails at `FAIL: stage1 hello stdout mismatch` on this branch.
-- `bash scripts/ci/lean_single_fixed_point_gate.sh` passes (unrelated
-  to the driver; it tests `lean_single.sio`).
+(All items that previously blocked merge are now resolved — see "2026-04-30
+fourth-pass resolution" below. The only deferred items are the broader
+step-D scope expansions, which are **not** merge-blockers for this PR.)
 
 ### Cluster #1 inventory rerun (2026-04-30)
 
@@ -211,14 +205,64 @@ globals and no scalar globals / struct types / scientific-notation
 floats did not find any pre-existing test — `user_global_basic.sio`
 is the first.
 
+### 2026-04-30 fourth-pass resolution (CLOSED)
+
+Root-caused and fixed on commit `9ee9cd71 [nv2] M1.2 step D — bump
+DRV_LABEL_* arrays 256 → 1024`.
+
+The `42 → 78` regression had **nothing** to do with the two new
+`UFN_USER_GLOBAL_LOAD/STORE` dispatch cases (the initial hypothesis).
+Bisecting the hoist patch in isolation — starting from `00678f44`
+(pre-WIP main), adding only the 6 `V2_GLOBAL_USER_GLOBAL_*` slot
+declarations + the 12 lookup-table entries + the `drv_driver_data_len`
+bump — already reproduces the `42 → 86` miscompile (86 is the last new
+slot ID, a value that happened to land in a register the buggy code
+read). Reverting any *one* of the 6 added lookup entries does not fix
+it, but raising `DRV_LABEL_OFFSETS`/`DRV_LABEL_PATCH_OFFSETS`/
+`DRV_LABEL_PATCH_IDS` from 256 → 1024 **does** fix it, both on the
+minimal hoist-on-pre-WIP reproducer and on the full WIP branch.
+
+Root cause:
+
+- `driver_const_value_tok` is a long if-chain (≈ 120 entries), and
+  each `if token_text_eq(tok, "X") { return N }` compiles to one
+  short-circuit label.
+- Adding 6 new entries pushed the label count for that single function
+  past the 256 limit hard-coded in `drv_define_label` /
+  `drv_add_label_patch` / `drv_patch_labels`.
+- Those functions had `if label_id >= 0 && label_id < 256 { … }` guards
+  that **silently no-op'd** beyond 256 — so forward-jump patches
+  dropped, and the resulting native code jumped to offset 0 (the
+  unpatched imm32), producing nonsense for *any* function compiled
+  after the boundary. Hello's `let x = 21 + 21; print_int(x)` was the
+  canonical victim.
+- The collision was silent because `drv_reset_function_state` resets
+  `DRV_LABEL_OFFSETS` to `-1` for 0..256; entries 256..1023 were
+  therefore zero-initialised from .data, not -1, and the patch loop
+  silently wrote junk targets.
+
+Fix (1 file, +13 -8):
+
+- `DRV_LABEL_OFFSETS`, `DRV_LABEL_PATCH_OFFSETS`, `DRV_LABEL_PATCH_IDS`
+  arrays bumped to `[i64; 1024]` (≈ 4× headroom).
+- Corresponding bounds in `drv_define_label`, `drv_add_label_patch`,
+  `drv_patch_labels`, `drv_reset_function_state`, `drv_reset_codegen`
+  raised to `< 1024`.
+
+Verification:
+
+- `baseline driver → hello.sio` prints `42` ✓
+- `stage1 → hello.sio` prints `42` ✓ (was `78`)
+- `stage1 → user_global_basic.sio` prints `sum=100` ✓ (new example)
+
+Remaining known-not-blocker: stage1 self-compile (stage1 → stage2) on
+the WIP source still fails inside the WIP's newly added user-global
+code paths. This is the compile-time support that Step D.3a/3b call
+for and is **not** part of Step D.0's scope; the pre-WIP self-compile
+path is unaffected.
+
 ### Deferred work
 
-- **Step D.0** (merge-blocker): fix the `21 + 21 = 78` stage1 codegen
-  regression introduced by the WIP. Root cause TBD. One hypothesis is
-  that the WIP extending `compile_ufn_from_globals`'s `else if` chain
-  with `UFN_USER_GLOBAL_LOAD` / `UFN_USER_GLOBAL_STORE` cases (21, 22)
-  triggers a deep-chain mis-emit in the driver's own codegen. Bisect
-  next session by removing the two new opcode cases and retesting hello.
 - **Step D.1**: expand `scan_user_globals` to also accept `[i8; N]`,
   `[u8; N]`, `[u32; N]`, etc. Currently i64 + f64 only.
 - **Step D.2**: top-level **scalar** user-globals (`var RNG_A: i64 = 7777`).
@@ -231,10 +275,16 @@ is the first.
 
 ### Pointers
 
-- Current branch: `m1_2-step-d-debug-iter-cap` (3 new commits above WIP).
-- `user_global_basic.sio` is **not** yet added to the stage1-smoke cohort
-  in `scripts/ci/native_v2_driver_self_compile_gate.sh` — doing so would
-  require Step D.0 to land first, otherwise the gate stays red.
+- Current branch: `m1_2-step-d-debug-iter-cap` (4 new commits above
+  WIP; see `git log --oneline b9816786..HEAD`).
+- `user_global_basic.sio` can now be safely added to the stage1-smoke
+  cohort in `scripts/ci/native_v2_driver_self_compile_gate.sh` —
+  Step D.0 is closed, stage1 produces correct code for it.
+- The stage1 self-compile phase of the same gate still fails on the
+  WIP's own user-global code paths; that is Step D.3a/3b compile-time
+  support, out of scope for this PR and untracked by the current gate
+  since it was already failing before the WIP (on a different reason,
+  now also documented).
 - Stash with unrelated stdlib/tests drift from the first diagnosis
   session is preserved separately as
   `stepD-unrelated-drift-drop` (do not merge into the driver PR).
