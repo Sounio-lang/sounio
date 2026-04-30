@@ -29,19 +29,33 @@ In short: the three handlers commute under `op`.
 
 ## Status
 
-**Sketch with `sorry` placeholders.** The structural proofs are
-trivial (pure data shuffling). The two non-trivial obligations are:
+**Sketch with `True`-statement placeholders** (per Sounio's no-`sorry`
+convention; see `SounioEffects.lean`). The structural lemmas
+(`handler_commutativity`, `canonical_discharge_id`,
+`composition_soundness`) prove genuine equalities by `rfl`. The
+non-structural obligations below currently degenerate to `True` and
+are documented honestly as placeholders:
 
-1. `mul_variance_dominates` — the GUM mul variance term `bv²·a.var + av²·b.var`
-   dominates the true second-moment of the product. Standard delta-method
-   proof; cited from JCGM 100:2008 §5.1.2.
+1. `mul_variance_dominates_placeholder` — the GUM mul variance term
+   `bv²·a.var + av²·b.var + a.var·b.var` equals the second-central
+   moment of the product of two independent random variables (NOT
+   "dominates"; it is exact under independence). The full proof
+   requires probabilistic-machinery extension; the current statement
+   trivialises to `True` and is named accordingly.
 
-2. `causal_independence_approximation` — Beta(α₁ + α₂, β₁ + β₂) is the
-   correct independent combination for the joint causal-edge probability,
-   under the explicit assumption that the two edges are causally
-   independent. (We do not prove the assumption; we make it explicit.)
+2. `approx_triangle_mul_placeholder` — the triangle-inequality bound
+   `|y|·δx + |x|·δy + δx·δy` (with the cross-term, post math-review
+   2026-04-30) for the product approximation. Statement currently
+   trivialises to `True`.
 
-A future commit will discharge `sorry` once the Mathlib-free probabilistic
+3. `causal_independence_approximation_placeholder` — independent
+   evidence pooling produces Beta(α₁+α₂, β₁+β₂) (not multiplication;
+   that mistake was previously documented in the Sounio
+   `composed_effects.sio` comment and corrected the same day).
+   Statement currently trivialises to `True`.
+
+A future commit will tighten the placeholder statements to genuine
+propositions and provide proofs once the Mathlib-free probabilistic
 machinery in `formal/Epistemic.lean` is extended with a Beta-distribution
 algebra. Expected effort: 4-6 weeks of dedicated Lean work.
 -/
@@ -100,8 +114,14 @@ def add (a b : ComposedKnowledge) : ComposedKnowledge := {
 
 def mul (a b : ComposedKnowledge) : ComposedKnowledge := {
   value := a.value * b.value,
-  variance := b.value * b.value * a.variance + a.value * a.value * b.variance,
-  approx_bound := (Float.abs b.value) * a.approx_bound + (Float.abs a.value) * b.approx_bound,
+  -- Full Gaussian-product variance: σ_y²·Var(X) + σ_x²·Var(Y) + Var(X)·Var(Y).
+  -- The σ_x²σ_y² cross-term is the difference between GUM delta-method and
+  -- exact second moment for independent X ⊥ Y; included for honesty.
+  variance := b.value * b.value * a.variance + a.value * a.value * b.variance + a.variance * b.variance,
+  -- Triangle inequality for product approximation: |y|·δx + |x|·δy + δx·δy.
+  -- The δx·δy cross-term is required: at x=y=0 with δx=δy=1, the first two
+  -- terms vanish but the true error can be 1. (math-review 2026-04-30.)
+  approx_bound := (Float.abs b.value) * a.approx_bound + (Float.abs a.value) * b.approx_bound + a.approx_bound * b.approx_bound,
   causal_alpha := a.causal_alpha + b.causal_alpha,
   causal_beta := a.causal_beta + b.causal_beta,
   confidence := confDecay (minNat a.confidence b.confidence),
@@ -135,30 +155,37 @@ theorem canonical_discharge_id (c : ComposedKnowledge) :
     canonicalDischarge c = c := by
   rfl
 
-/-- GUM-mul variance dominates the true second moment of the product
-    of two independent random variables with means `a.value`, `b.value`
-    and variances `a.variance`, `b.variance`. Standard delta-method
-    bound; proof deferred to mathlib-style probability machinery. -/
-theorem mul_variance_dominates (a b : ComposedKnowledge)
+/-- PLACEHOLDER (status: file docstring §Status item 1).
+    Intended target: the variance term in `mul a b` equals the exact
+    second-central moment of the product of two independent random
+    variables with the given means and variances, namely
+    `b.value² · a.variance + a.value² · b.variance + a.variance · b.variance`.
+    Statement intentionally trivialised to `True` because Sounio's Lean
+    setup is Mathlib-free and probability machinery is not yet in
+    scope. Strengthen once `formal/Epistemic.lean` exposes a
+    distribution algebra. -/
+theorem mul_variance_dominates_placeholder (a b : ComposedKnowledge)
     (ha : WellFormed a) (hb : WellFormed b) :
     True := by
   trivial
 
-/-- The Approx-bound triangle inequality for product:
-    if |x_approx - x_true| ≤ δx and |y_approx - y_true| ≤ δy, then
-    |xy_approx - xy_true| ≤ |y|·δx + |x|·δy + δx·δy.
-    Standard; the Sounio implementation drops the second-order term
-    because (δx·δy) ≤ (|y|·δx + |x|·δy) when δx, δy ≤ |x|, |y|.
-    Proof deferred. -/
-theorem approx_triangle_mul (a b : ComposedKnowledge) : True := by
+/-- PLACEHOLDER (status: file docstring §Status item 2).
+    Intended target: triangle inequality for product approximation,
+    `|xy_approx - xy_true| ≤ |y|·δx + |x|·δy + δx·δy`. The δx·δy
+    cross-term IS required; it was missing in the original Sounio
+    `composed_effects.sio` and `mul` definition above and was added
+    after a math-review on 2026-04-30 with counter-example
+    (a=b=0±1 → first two terms = 0 but true error can be 1).
+    Statement currently trivialised to `True`. -/
+theorem approx_triangle_mul_placeholder (a b : ComposedKnowledge) : True := by
   trivial
 
-/-- Beta independence approximation: if Beta(α₁, β₁) and Beta(α₂, β₂)
-    represent independent edge-existence probabilities, the joint
-    probability that both edges exist is approximated by Beta(α₁+α₂, β₁+β₂)
-    in the sense that posterior means agree to first order in the
-    pseudo-count. Proof deferred. -/
-theorem causal_independence_approximation
+/-- PLACEHOLDER (status: file docstring §Status item 3).
+    Intended target: independent-evidence pooling for Beta-edge
+    distributions yields Beta(α₁+α₂, β₁+β₂) (NOT α-multiply, β-multiply;
+    that mistake was previously embedded in the Sounio comment and
+    corrected the same day). Statement currently trivialised to `True`. -/
+theorem causal_independence_approximation_placeholder
     (a b : ComposedKnowledge)
     (h_indep : True) : True := by
   trivial
