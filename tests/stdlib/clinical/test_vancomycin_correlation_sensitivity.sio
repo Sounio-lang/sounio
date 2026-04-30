@@ -1,0 +1,186 @@
+//@ run-pass
+//@ expect-stdout: SENSITIVITY PASS
+
+// M2.5 — Correlation sensitivity test for the vancomycin Cmin
+// Fréchet outer enclosure.
+//
+// Claim (math-review-validated 2026-04-30): the corner-enumeration
+// band [Cmin(Vc_lo, CL_hi), Cmin(Vc_hi, CL_lo)] contains Cmin(Vc, CL)
+// almost surely for ANY joint distribution of (Vc, CL) supported on
+// the rectangle [Vc_lo, Vc_hi] × [CL_lo, CL_hi], because Cmin is
+// strictly increasing in Vc and strictly decreasing in CL on the
+// physiological domain.
+//
+// This test sanity-checks that claim runtime: it samples 50 (Vc, CL)
+// pairs at each of five correlation levels r ∈ {-0.7, -0.3, 0, +0.3,
+// +0.7} (total 250 samples) and verifies that every sample's Cmin is
+// inside the band predicted by `predict_cmin_knightian`.
+//
+// PASS criterion: all 250 samples enclosed. FAIL: any sample outside.
+//
+// Determinism: glibc-style LCG seeded at 1, state in struct wrapper
+// (per cursorrules `&!i64` JIT bug). Same as
+// tests/stdlib/epistemic/test_composed_effect_property.sio.
+
+use clinical::vancomycin_pbpk::*
+use epistemic::knightian::*
+
+struct LcgState { seed: i64 }
+
+fn lcg_next(st: &!LcgState) -> i64 with Mut, Div, Panic {
+    let s = st.seed
+    let n = (1103515245 * s + 12345) % 2147483648
+    st.seed = n
+    n
+}
+
+fn lcg_unif(st: &!LcgState) -> f64 with Mut, Div, Panic {
+    let n = lcg_next(st)
+    (n as f64) / 2147483648.0
+}
+
+fn vs_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn vs_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn vs_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// vp_exp_approx is module-internal in vancomycin_pbpk; re-implement
+// the same Padé-like approximant locally for the per-sample Cmin
+// computation (kept identical so the test exercises the same numerics).
+fn vs_exp(x: f64) -> f64 with Mut, Div, Panic {
+    // 12-term Taylor for x ∈ [-7, 0] (covers physiological θ range).
+    var y: f64 = 1.0
+    var term: f64 = 1.0
+    var k: f64 = 1.0
+    var i: i64 = 0
+    while i < 12 {
+        term = term * x / k
+        y = y + term
+        k = k + 1.0
+        i = i + 1
+    }
+    if y < 0.0 { return 0.0 }
+    y
+}
+
+fn vs_cmin(vc: f64, cl: f64, dose: f64, tau: f64) -> f64 with Mut, Div, Panic {
+    if vc <= 0.0 { return 0.0 }
+    if cl <= 0.0 { return 0.0 }
+    let ke = cl / vc
+    let exp_neg = vs_exp(0.0 - ke * tau)
+    let denom = 1.0 - exp_neg
+    if denom <= 0.0 { return 0.0 }
+    (dose / vc) * exp_neg / denom
+}
+
+struct VcClPair { vc: f64, cl: f64 }
+
+// Generate a single correlated (Vc, CL) pair in
+// [vc_lo, vc_hi] × [cl_lo, cl_hi] with target Pearson r ≈ rho.
+// Marginals are mildly distorted but the pair is guaranteed to lie
+// inside the rectangle (which is what the enclosure proof needs).
+fn corr_sample(st: &!LcgState,
+               vc_lo: f64, vc_hi: f64,
+               cl_lo: f64, cl_hi: f64,
+               rho: f64) -> VcClPair with Mut, Div, Panic {
+    let u1 = lcg_unif(st)
+    let u2 = lcg_unif(st)
+    let abs_rho = vs_abs(rho)
+    let mix = rho * (u1 - 0.5) + (1.0 - abs_rho) * (u2 - 0.5) + 0.5
+    let mix_c = vs_max(0.0, vs_min(1.0, mix))
+    let vc = vc_lo + (vc_hi - vc_lo) * u1
+    let cl = cl_lo + (cl_hi - cl_lo) * mix_c
+    VcClPair { vc: vc, cl: cl }
+}
+
+fn run_at_rho(st: &!LcgState,
+              vc_lo: f64, vc_hi: f64,
+              cl_lo: f64, cl_hi: f64,
+              dose: f64, tau: f64,
+              cmin_lo_band: f64, cmin_hi_band: f64,
+              rho: f64,
+              n: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var ok: i64 = 1
+    while i < n {
+        let pair = corr_sample(st, vc_lo, vc_hi, cl_lo, cl_hi, rho)
+        let cmin_actual = vs_cmin(pair.vc, pair.cl, dose, tau)
+        // Tolerance 1e-6 to absorb the local vs_exp vs vp_exp_approx
+        // numerical-implementation difference (both are Taylor-style
+        // for the same θ regime).
+        if cmin_actual + 0.000001 < cmin_lo_band {
+            ok = 0
+        }
+        if cmin_actual > cmin_hi_band + 0.000001 {
+            ok = 0
+        }
+        i = i + 1
+    }
+    ok
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var st = LcgState { seed: 1 }
+
+    // Vancomycin scenario from M3 vancomycin_propagation_v2.sio:
+    //   weight=70 kg, CrCl=80 mL/min, dose=1500 mg, τ=12 h,
+    //   tdm_samples=3 (post-TDM band).
+    let weight: f64 = 70.0
+    let crcl: f64 = 80.0
+    let dose: f64 = 1500.0
+    let tau: f64 = 12.0
+    let tdm: i64 = 3
+
+    let pbox = predict_cmin_knightian(weight, crcl, dose, tau, tdm)
+    let cmin_lo_band = pb_lo_mean(&pbox)
+    let cmin_hi_band = pb_hi_mean(&pbox)
+
+    // Re-derive the Vc and CL ranges for the same scenario.
+    // Mirrors vp_default + vp_band_vc/vp_band_cl with tdm=3
+    // (24 % gap collapsed to ~ 5 % per band rule).
+    let vc_nom = 0.5 * weight
+    let cl_nom = 0.05 * crcl
+    let band_vc = 0.05    // post-TDM (3+ samples)
+    let band_cl = 0.05
+    let vc_lo = vc_nom * (1.0 - band_vc)
+    let vc_hi = vc_nom * (1.0 + band_vc)
+    let cl_lo = cl_nom * (1.0 - band_cl)
+    let cl_hi = cl_nom * (1.0 + band_cl)
+
+    var pass: i64 = 1
+
+    // Five correlation flavours, 50 samples each.
+    let r1: f64 = 0.0 - 0.7
+    let r2: f64 = 0.0 - 0.3
+    let r3: f64 = 0.0
+    let r4: f64 = 0.3
+    let r5: f64 = 0.7
+    let nper: i64 = 50
+
+    if run_at_rho(&!st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                  cmin_lo_band, cmin_hi_band, r1, nper) == 0 {
+        pass = 0
+    }
+    if run_at_rho(&!st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                  cmin_lo_band, cmin_hi_band, r2, nper) == 0 {
+        pass = 0
+    }
+    if run_at_rho(&!st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                  cmin_lo_band, cmin_hi_band, r3, nper) == 0 {
+        pass = 0
+    }
+    if run_at_rho(&!st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                  cmin_lo_band, cmin_hi_band, r4, nper) == 0 {
+        pass = 0
+    }
+    if run_at_rho(&!st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                  cmin_lo_band, cmin_hi_band, r5, nper) == 0 {
+        pass = 0
+    }
+
+    if pass == 1 {
+        println("SENSITIVITY PASS")
+    } else {
+        println("SENSITIVITY FAIL")
+    }
+    0
+}

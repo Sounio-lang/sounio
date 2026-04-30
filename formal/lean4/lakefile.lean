@@ -84,3 +84,20 @@ lean_lib «SounioLearningDynamics» where
 
 @[default_target]
 lean_lib «SounioPathionBridge» where
+
+-- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
+@[default_target]
+lean_lib «SounioApproxCausalKnowledge» where
+
+-- M2: Vancomycin-Knightian thrust — Ferson p-box operator
+@[default_target]
+lean_lib «SounioKnightian» where
+
+-- M3: Vancomycin-Knightian thrust — clinical dosing safety obligation
+@[default_target]
+lean_lib «SounioVancomycinDosingSafety» where
+
+-- M2.5: Vancomycin-Knightian thrust — Fréchet outer enclosure for
+-- monotone-in-each-arg functions (joint-dependence resolution)
+@[default_target]
+lean_lib «SounioFrechet» where

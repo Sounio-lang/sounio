@@ -1,0 +1,35 @@
+# LLM Offload Audit Log
+
+**Authority**: append-only audit trail of all non-trivial `bin/llm-offload` invocations, per `.claude/AGENT_OFFLOAD_POLICY.md`.
+
+## Format
+
+Each entry is a markdown table row. New entries go at the **top** (most-recent first):
+
+| Date | Agent | Task | Provider | Target | Outcome | Commit |
+|------|-------|------|----------|--------|---------|--------|
+
+`Outcome` should be one of:
+
+- **CAUGHT_BUG** — reviewer surfaced a real defect that was fixed
+- **BLOCKED** — reviewer raised concern that delayed commit; explain in inline note
+- **CONFIRMED** — reviewer endorsed correctness; useful for high-stakes claims
+- **DISAGREEMENT** — reviewer flagged a non-issue; explain in inline note (do not silently dismiss)
+- **NO_FINDINGS** — clean review, no issues
+- **TIMEOUT / API_FAIL** — provider unavailable; substitution or deferral
+
+## Entries
+
+| Date | Agent | Task | Provider | Target | Outcome | Commit |
+|------|-------|------|----------|--------|---------|--------|
+| 2026-04-30 | Codex | math-review | waived | `SounioFrechet.lean` | WAIVED: preservation-only WIP commit before primary-sync reconciliation; not a semantic approval, requires real offload review before final PR/public claim. | (wip-preserve) |
+| 2026-04-30 | Codex | review | waived | `test_vancomycin_correlation_sensitivity.sio` | WAIVED: preservation-only WIP commit before primary-sync reconciliation; not a clinical-safety approval, requires real offload review before final PR/public claim. | (wip-preserve) |
+| 2026-04-30 | Opus 4.7 | math-review | xai (Grok 4.1) | `tests/stdlib/epistemic/test_composed_effect_property.sio` | CAUGHT_OVERREACH (1) + CAUGHT_WRONG (1) on top of 7 OK: glibc-LCG params and the 7 properties P1–P7 all approved. (1) P3/P4 comments said "non-negative inputs" but values ∈ [−100, 100]; tightened comments to be precise about which fields are non-negative-sampled. (2) P2 comment claimed "same channels (5 for P1)" but only 3 channels were checked — added causal_alpha/causal_beta commute checks for ck_add to match the intended invariant. 12/12 composed_effect tests PASS post-fix (+1 vs M1 baseline). | (uncommitted) |
+| 2026-04-30 | Opus 4.7 | math-review (post-strengthening) | xai (Grok 4.1) | `formal/lean4/SounioApproxCausalKnowledge.lean` | CAUGHT_OVERREACH (1) ×8 OK: 8 new strengthened theorem statements (`mul_variance_unfolds`, `nat_mul_variance_dominates_delta_method`, `mul_approx_bound_unfolds`, `nat_approx_triangle_with_cross_dominates_delta`, `mul_causal_alpha_sums`, `mul_causal_beta_sums`, plus pre-existing `handler_commutativity`/`canonical_discharge_id`/`composition_soundness`) all approved as accurate. OVERREACH on file docstring: top-level claim said "handlers commute under add/sub/mul/div" but only `mul` is mechanized (add textually but no `composition_soundness_add`). Fixed: restricted top-level claim to `add` and `mul` and explicitly noted `sub`/`div` are deferred. Lean build green; 11/11 composed_effect tests still PASS. | (uncommitted) |
+| 2026-04-30 | Opus 4.7 | consensus-fan-out (4-way attempted, 2-way landed) | deepseek + xai (gemini/qwen blocked on OpenRouter credits, groq invalid key) | `docs/research/knightian_operator_choice.md` | CAUGHT_OVERREACH: both providers independently flagged the **joint (Vc, CL) dependence** as the killer omission. The univariate Ferson p-box is unsound for the multivariate clinical PBPK setting because Vc and CL are empirically correlated (r ≈ 0.3–0.7, popPK literature) and the correlation is itself Knightian. Recommended pivot: keep p-box at the propagation surface, lift to **Walley neighborhood / contamination model** at the elicitation surface, and add **Fréchet-bound enclosure** in M2.5 to make the existing arithmetic copula-free sound. M2/M3 NOT rolled back; M2.5 / M3.5 / correlation-sensitivity test opened as follow-ups. Consolidated review at `docs/research/knightian_operator_consensus_2026-04-30.md`; raw transcripts archived at `/tmp/llm-offload-SSJN5i/`. | (uncommitted) |
+| 2026-04-30 | Opus 4.7 | math-review | xai (Grok 4.1) | `formal/lean4/SounioVancomycinDosingSafety.lean` | NO_FINDINGS (3 TIGHTENABLE on `True` placeholders, all consciously deferred per file Status section) | ea1c07cb |
+| 2026-04-30 | Opus 4.7 | math-review | xai (Grok 4.1) | `formal/lean4/SounioKnightian.lean` | CAUGHT_OVERREACH: `vacuous_widest` claim "widest possible gap" fails in `Float` edge case (`lo_mean < -1e18` representable). Renamed to `vacuous_widest_placeholder` with honest docstring deferring to semantic upgrade; 4 other TIGHTENABLE on `True` placeholders left as documented skeleton. Lean build green post-fix. | 8bd79138 |
+| 2026-04-30 | Opus 4.7 | math-review | xai (Grok 4.1) | `formal/lean4/SounioApproxCausalKnowledge.lean` | CAUGHT_BUG ×2: (a) `mul` def's `approx_bound` missed `δx·δy` cross-term (mirror of `composed_effects.sio` bug); (b) docstring claimed "sketch with `sorry`" but proofs used `trivial` on `True` statements (dishonest per Sounio's no-`sorry` convention). Fixed: cross-term added in `mul` def + `variance` now full Gaussian-product (incl. `Var(X)·Var(Y)` term); 3 non-trivial theorems renamed to `*_placeholder` with honest docstrings; Lean build green post-fix. | f214b0bb |
+| 2026-04-30 | Opus 4.7 | math-review | xai (Grok 4.1) | `stdlib/epistemic/knightian.sio` | CAUGHT_OVERREACH: `pb_mul_variance` comment claimed "sound (an upper bound)"; delta-method actually omits `σ_x²σ_y²` term so it underestimates by ~1% when CV ≪ 1. Fixed: added the cross-term + rewrote comment honestly noting GUM convention vs exact moment; 9 OK findings on interval-extension arithmetic, vacuous-on-zero-straddle div, projection. 9/9 knightian tests pass post-fix. | 8bd79138 |
+| 2026-04-30 | Opus 4.7 | math-review | xai (Grok 4.1) | `stdlib/epistemic/composed_effects.sio` | CAUGHT_BUG ×2: (a) `ck_mul`/`ck_div` `approx_bound` missed `δx·δy` cross-term (counter-example: a=b=0±1 → code says 0, true bound 1); (b) `ck_mul` comment said "alphas multiply" but code (correctly) sums — comment was wrong, code right. Fixed: cross-term added in mul AND div + variance now includes `Var(X)·Var(Y)` for honesty + comment rewritten "alphas SUM (independent-evidence pooling)". 11/11 composed_effect tests pass post-fix. | f214b0bb |
+| 2026-04-30 | Opus 4.7 (in-session) | math-review | xai (Grok 4.1) | `stdlib/clinical/vancomycin_pbpk.sio` `vp_cmin_point` monotonicity comment | CAUGHT_BUG: sign error on `dCmin/dVc`; corrected to `> 0` for all θ > 0; corner enumeration in `predict_cmin_knightian` flipped to `(Vc_lo, CL_hi)` for min and `(Vc_hi, CL_lo)` for max; pre-TDM band shifted `[11.30, 21.31]` → `[8.49, 24.29]` (correct, wider, REFUSE narrative strengthened); 4/4 vancomycin tests pass post-fix | ea1c07cb |
