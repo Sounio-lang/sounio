@@ -22,7 +22,7 @@ The Sounio Jupyter Kernel allows you to run Sounio code directly in Jupyter note
 ### From Source
 
 ```bash
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 pip install -e .
 
 # Register the kernel with Jupyter

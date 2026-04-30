@@ -1,0 +1,80 @@
+//@ run-pass
+// Minimal reproducer for ζ — GUM variance deep-chain bug.
+// See docs/research/zeta_variance_fix_plan.md and
+// feedback_variance_deep_chains.md for the full analysis.
+//
+// Symptom: enough distinct `let` bindings in a single function body push
+// the compiler's NEXT_SLOT counter past the 1024-slot variance shadow
+// buffer cap. Subsequent variance_of() reads return 0 or 2^63-scale garbage.
+//
+// Trigger confirmed in tests/run-pass/rapamycin_epistemic_adaptive.sio —
+// that test prints ch1=ch2=9.22e18 (exactly 2^63) after ~70 adaptive steps.
+//
+// This reproducer isolates the pattern: >300 distinct let bindings in a
+// single function, with variance propagated through a chain of function
+// calls that each emit multiple variance_addsub / variance_muldiv ops.
+//
+// Current status (2026-04-12): this test PASSES on the current compiler
+// because the slot threshold isn't hit with the minimal pattern below —
+// the bug requires the specific structure of rapamycin_epistemic_adaptive.
+// Kept as a skeleton / smoke test. A true overflow-triggering minimal
+// reproducer is an open sub-task of ζ.
+
+fn stage(x: f64, dx: f64) -> f64 {
+    x + dx
+}
+
+fn step_many(k_val: f64, k_dx: f64) -> f64 with Mut, Div, Epistemic {
+    // ~20 let bindings in one function — compounds slot count with each
+    // call site since each stage's variance propagates through SSA.
+    let a1 = stage(k_val, k_dx)
+    let a2 = stage(a1, k_dx)
+    let a3 = stage(a2, k_dx)
+    let a4 = stage(a3, k_dx)
+    let a5 = stage(a4, k_dx)
+    let a6 = stage(a5, k_dx)
+    let a7 = stage(a6, k_dx)
+    let a8 = stage(a7, k_dx)
+    let a9 = stage(a8, k_dx)
+    let a10 = stage(a9, k_dx)
+    let a11 = a10 * 1.001
+    let a12 = a11 - k_dx
+    let a13 = a12 + k_val
+    let a14 = a13 * 0.999
+    let a15 = a14 - k_val
+    let a16 = a15 + k_dx
+    let a17 = a16 * 1.0005
+    let a18 = a17 + k_dx
+    let a19 = a18 * 0.9995
+    let a20 = a19 - k_dx
+    a20
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    let k: Knowledge<f64> = measure(1.0, uncertainty: 0.01)
+    var acc = k.value
+
+    var step: i64 = 0
+    while step < 40 {
+        acc = step_many(acc, k.value * 0.01)
+        step = step + 1
+    }
+
+    print("acc=")
+    println(acc)
+
+    let v = variance_of(acc)
+    print("var(acc)=")
+    println(v)
+
+    // A valid variance here is < 1e6; the bug produces ±9.2e18 or 0.
+    if v >= 0.0 {
+        if v < 1000000.0 {
+            print("PASS\n")
+        } else {
+            print("FAIL: variance blew up (likely slot-overflow bug)\n")
+        }
+    } else {
+        print("FAIL: variance negative — garbage\n")
+    }
+}

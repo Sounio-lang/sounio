@@ -1,0 +1,159 @@
+// darwin_pbpk/pd/pd_gate.sio — Runtime confidence gate for PD priors.
+//
+// This is the runtime half of the dissertation's second novel contribution
+// (compile-time confidence gates). It enforces that every parameter in a
+// PDPriors10 set meets a minimum confidence threshold before downstream
+// consumers (sensitivity analysis, VoI ranking, dose-decision code) may
+// use it.
+//
+// Design choices:
+//   - Two canonical policies: "exploratory" (floor=0.25, matches current
+//     rapamycin research-stage priors) and "clinical" (floor=0.60, the
+//     pre-registration aspirational floor). Clinical does NOT pass the
+//     current priors — that is by design; the failure *is* the
+//     dissertation's VoI-rerank result in gate form.
+//   - Always runs to completion, returning a verdict + violation list.
+//     Consumers decide whether to halt (REJECT) or flag (WARN).
+//   - Mirrors the semantics of stdlib/epistemic/confidence_gate.sio
+//     (GatePolicy/GateResult) but is self-contained and operates on
+//     the PDPriors10 [f64; 16] arrays directly. A future commit can
+//     unify the two once confidence_gate.sio exports its surface as
+//     pub (tracked in docs/compiler/CONFIDENCE_EFFECT_DESIGN.md).
+//
+// References:
+//   - JCGM 100:2008 §4.3  — "target uncertainty"
+//   - ISO 17025:2017 §7.6 — decision rules for conformity
+//   - confidence_gate.sio  — runtime gate semantics
+
+use darwin_pbpk::pd::pd_gum::{PDPriors10}
+
+pub struct PDGatePolicy {
+    min_confidence: f64,   // Minimum acceptable confidence level (0-1)
+    action:         i32,   // 0 = REJECT, 1 = WARN
+    label:          i32,   // 0 = exploratory, 1 = clinical, 2 = strict
+}
+
+// The three policy constructors are the first dissertation entry points
+// annotated with the compile-time `Confidence(N)` effect (Gen 21 Phase C).
+// N = 950 means their own bodies must type-check at ≥ 0.95 — they do,
+// since each returns a pure struct literal over typed constants. Callers
+// must also declare `Confidence(950)` or weaker, which is the exact
+// propagation the dissertation's second novel contribution relies on.
+// See docs/compiler/CONFIDENCE_EFFECT_DESIGN.md.
+
+pub fn pd_gate_policy_exploratory() -> PDGatePolicy with Confidence(950) {
+    // Matches the current rapamycin research-stage priors: min conf is
+    // fu_icf=0.25 / ps_mem=0.25. Floor at 0.25 → all pass.
+    PDGatePolicy { min_confidence: 0.25, action: 1, label: 0 }
+}
+
+pub fn pd_gate_policy_clinical() -> PDGatePolicy with Confidence(950) {
+    // Pre-registration floor. Under the current priors this FAILS on
+    // ec50_nM (0.40), kpuu_cell (0.30), fu_isf (0.35), fu_icf (0.25),
+    // ps_mem (0.25). That failure set IS the VoI-rerank's measurement
+    // priority list, expressed at the gate interface.
+    PDGatePolicy { min_confidence: 0.60, action: 0, label: 1 }
+}
+
+pub fn pd_gate_policy_strict() -> PDGatePolicy with Confidence(950) {
+    // Post-measurement, regulatory-dossier floor.
+    PDGatePolicy { min_confidence: 0.90, action: 0, label: 2 }
+}
+
+pub struct PDGateResult {
+    passed:            bool,
+    n_checked:         i32,
+    n_violations:      i32,
+    violation_idx:     [i32; 16],   // prior indices that failed
+    violation_values:  [f64; 16],   // actual confidence values
+    worst_idx:         i32,
+    worst_confidence:  f64,
+    floor_used:        f64,
+    policy_label:      i32,
+}
+
+fn pd_gate_zero() -> PDGateResult {
+    PDGateResult {
+        passed: true,
+        n_checked: 0, n_violations: 0,
+        violation_idx: [0; 16], violation_values: [0.0; 16],
+        worst_idx: 0 - 1, worst_confidence: 1.0,
+        floor_used: 0.0, policy_label: 0,
+    }
+}
+
+pub fn pd_gate_check(priors: PDPriors10, policy: PDGatePolicy) -> PDGateResult with Mut, Div, Panic {
+    var r = pd_gate_zero()
+    r.floor_used   = policy.min_confidence
+    r.policy_label = policy.label
+
+    var i: i32 = 0
+    while i < priors.n {
+        let idx = i as usize
+        let conf = priors.confidence[idx]
+
+        r.n_checked = r.n_checked + 1
+        if conf < r.worst_confidence {
+            r.worst_confidence = conf
+            r.worst_idx = i
+        }
+
+        if conf < policy.min_confidence {
+            let vi = r.n_violations as usize
+            if (vi as i32) < 16 {
+                r.violation_idx[vi]    = i
+                r.violation_values[vi] = conf
+            }
+            r.n_violations = r.n_violations + 1
+            r.passed = false
+        }
+        i = i + 1
+    }
+    r
+}
+
+fn pd_gate_policy_name(label: i32) -> string {
+    if label == 0 { return "exploratory" }
+    if label == 1 { return "clinical"    }
+    if label == 2 { return "strict"      }
+    "unknown"
+}
+
+fn pd_gate_param_name(idx: i32) -> string {
+    if idx == 0 { return "ps_bbb"     }
+    if idx == 1 { return "ps_mem"     }
+    if idx == 2 { return "kpuu_brain" }
+    if idx == 3 { return "kpuu_cell"  }
+    if idx == 4 { return "fu_plasma"  }
+    if idx == 5 { return "fu_isf"     }
+    if idx == 6 { return "fu_icf"     }
+    if idx == 7 { return "emax"       }
+    if idx == 8 { return "ec50_nM"    }
+    if idx == 9 { return "hill_n"     }
+    "unknown"
+}
+
+pub fn pd_gate_print(r: PDGateResult) with IO, Mut, Panic, Div {
+    print("PD gate ("); print(pd_gate_policy_name(r.policy_label))
+    print(", floor = "); print_f64(r.floor_used); println(")")
+
+    if r.passed {
+        print("  VERDICT: PASSED — "); print_i64(r.n_checked as i64)
+        println(" parameters meet confidence floor")
+    } else {
+        print("  VERDICT: FAILED — "); print_i64(r.n_violations as i64)
+        print(" of "); print_i64(r.n_checked as i64)
+        println(" parameters below floor")
+        var k: i32 = 0
+        while k < r.n_violations && k < 16 {
+            let kdx = k as usize
+            print("    - "); print(pd_gate_param_name(r.violation_idx[kdx]))
+            print(" (conf = "); print_f64(r.violation_values[kdx]); println(")")
+            k = k + 1
+        }
+    }
+    if r.worst_idx >= 0 {
+        print("  worst: "); print(pd_gate_param_name(r.worst_idx))
+        print(" @ "); print_f64(r.worst_confidence); println("")
+    }
+}

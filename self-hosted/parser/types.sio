@@ -13,9 +13,7 @@ impl Parser {
     // ============================================================
 
     fn parse_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
-        print("pt:enter\n")
         let k = self.peek()
-        print("pt:peek\n")
 
         if k == TokenKind::Amp {
             self.parse_ref_type()
@@ -71,6 +69,22 @@ impl Parser {
             self.parse_fn_type()
         } else if k == TokenKind::Knowledge {
             self.parse_knowledge_type()
+        } else if k == TokenKind::Forgettable {
+            self.parse_forgettable_type()
+        } else if k == TokenKind::ExactlyPrivate {
+            self.parse_exactly_private_type()
+        } else if k == TokenKind::Editable {
+            self.parse_editable_type()
+        } else if k == TokenKind::CapabilityGated {
+            self.parse_capability_gated_type()
+        } else if k == TokenKind::Composable {
+            self.parse_composable_type()
+        } else if k == TokenKind::Audited {
+            self.parse_audited_type()
+        } else if k == TokenKind::Revivable {
+            self.parse_revivable_type()
+        } else if k == TokenKind::Interpretable {
+            self.parse_interpretable_type()
         } else if k == TokenKind::Model {
             self.parse_generic_wrapper_type(TypeExprKind::TypeModel)
         } else if k == TokenKind::Policy {
@@ -147,11 +161,8 @@ impl Parser {
     // ============================================================
 
     fn parse_named_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
-        print("pnt:enter\n")
         let start = self.current_span()
-        print("pnt:path\n")
         let pair = self.parse_type_path()
-        print("pnt:path_done\n")
         let p1 = pair.0
         let path = pair.1
 
@@ -207,14 +218,10 @@ impl Parser {
     // ============================================================
 
     fn parse_type_path(self) -> (Parser, AstPath) with Mut, IO, Panic, Div {
-        print("ptp:enter\n")
         let name = self.current_name()
-        print("ptp:name\n")
         var p = self.advance()
-        print("ptp:advance\n")
         var rev_segs = StringList { head_buf: name.buf, head_len: name.len, tail: None }
         var count: i64 = 1
-        print("ptp:while\n")
         // Avoid p.peek_ahead() method call — use free fn parser_peek_ahead.
         // Also restructure: check first part of && without calling peek_ahead in condition.
         while parser_peek(p) == TokenKind::ColonColon {
@@ -230,17 +237,13 @@ impl Parser {
             count = count + 1
             p = p.advance()  // skip ident
         }
-        print("ptp:while_done\n")
 
         // For single-segment paths (common case), skip reversal entirely
         // to avoid passing large StringList structs by value (IS_SPTR issue).
-        print("ptp:done\n")
         if count == 1 {
             (p, AstPath { segments: rev_segs, seg_count: count })
         } else {
-            print("ptp:reverse\n")
             let segs = reverse_string_list(rev_segs)
-            print("ptp:reverse_done\n")
             (p, AstPath { segments: segs, seg_count: count })
         }
     }
@@ -665,6 +668,201 @@ impl Parser {
         })
     }
 
+    // Forgettable<T> — ZD-annihilable type.
+    // Syntax: Forgettable<T> or Forgettable<T, "e3e10"> (with optional ZD locus name)
+    // Inner type stored in `inner` field; functions that use Forgettable<T>
+    // must declare the `ZD` effect so the compiler can verify exact erasure.
+    fn parse_forgettable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()   // skip 'Forgettable'
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeForgettable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // ExactlyPrivate<T> — exact-privacy wrapper: contribution to a trained model
+    // is algebraically zero in the ZD kernel (G3/G4). Stronger than DP.
+    // Requires `with ZD`.
+    fn parse_exactly_private_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeExactlyPrivate,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Editable<T> — locality-bounded model editing wrapper (G5).
+    // Edits via ZD are confined to the 4D kernel of the ZD operator.
+    fn parse_editable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeEditable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // CapabilityGated<T> — capability containment (G7): value lives in a ZD-gated
+    // subspace; can be exactly annihilated without touching orthogonal capabilities.
+    fn parse_capability_gated_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeCapabilityGated,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Composable<T> — ZD-orthogonal model merge (G8). Two Composable values
+    // combine along ZD-orthogonal complements without mutual perturbation.
+    fn parse_composable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeComposable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Audited<T> — witness-bearing surgery (G9). Every surgical operation
+    // emits a machine-checkable Lean derivation.
+    fn parse_audited_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeAudited,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Revivable<T> — time-bounded reversible surgery (G10). Surgical ops
+    // can be inverted within a Temporal window, irrevocable afterward.
+    fn parse_revivable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeRevivable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Interpretable<T> — AMI canonical-basis marker. T's internal
+    // representation admits a unique decomposition onto the 168 ZD classes.
+    fn parse_interpretable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeInterpretable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
     fn parse_epistemic_wrapper_type(self, wrapper_kind: TypeExprKind) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()
@@ -839,20 +1037,14 @@ fn reverse_effect_list_loop(current: EffectList, acc: Option<Box<EffectList>>) -
 }
 
 fn reverse_string_list(list: StringList) -> StringList with Mut, Alloc {
-    print("rsl:enter\n")
-    let result = reverse_string_list_loop(list, None)
-    print("rsl:done\n")
-    result
+    reverse_string_list_loop(list, None)
 }
 
 fn reverse_string_list_loop(current: StringList, acc: Option<Box<StringList>>) -> StringList with Mut, Alloc {
-    print("rsl_loop:enter\n")
     let next = current.tail
-    print("rsl_loop:next\n")
     let rev_node = StringList { head_buf: current.head_buf, head_len: current.head_len, tail: acc }
-    print("rsl_loop:rev_node\n")
     match next {
-        None => { print("rsl_loop:none\n"); rev_node },
+        None => rev_node,
         Some(rest) => reverse_string_list_loop(*rest, Some(Box::new(rev_node))),
     }
 }

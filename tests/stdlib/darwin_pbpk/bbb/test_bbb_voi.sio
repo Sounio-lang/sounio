@@ -1,0 +1,79 @@
+//@ run-pass
+//@ expect-stdout: BBB_VOI_OK
+//
+// Value-of-Information ranking test.
+//
+// Chains bbb_hdmr → bbb_voi to produce a dissertation-grade ranked
+// recommendation for which BBB parameter would reduce Kpuu_AUC
+// uncertainty most per unit measurement investment.
+//
+// Expected outcome on the rapamycin priors:
+//   - kpuu_brain has S ≈ 0.48 and confidence 0.60 → VoI ≈ 0.19
+//   - fu_icf     has S ≈ 0.17 and confidence 0.25 → VoI ≈ 0.13
+//   - ps_bbb     has S ≈ 0.22 and confidence 0.45 → VoI ≈ 0.12
+//   - fu_plasma  has S ≈ 0.00 and confidence 0.90 → VoI ≈ 0.00
+//
+// Top recommendation is kpuu_brain (high share × moderate-low
+// confidence).  fu_plasma is NEVER a target: its variance share
+// is zero (Fridén invariance) so no measurement tightens the
+// endpoint even if it would update the prior.
+//
+// Checks:
+//   1. Sanity: VoI_total > 0; every VoI non-negative; each
+//      VoI_i = S_i · (1 − conf_i) exactly.
+//   2. Top target is kpuu_brain (param index 2).
+//   3. fu_plasma (index 4) VoI is essentially zero.
+//   4. The runner-up is fu_icf OR ps_bbb — the dissertation's
+//      second-priority recommendation is "measure one of these
+//      before fu_isf or kpuu_cell."
+
+use darwin_pbpk::bbb::bbb_voi::*
+use darwin_pbpk::bbb::bbb_hdmr::*
+use darwin_pbpk::bbb::bbb_priors::{bbb_rapamycin_priors}
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::epistemic_pbpk14::{ep14_rapamycin_params}
+
+fn voi_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = ep14_rapamycin_params()
+    let bbb_prm = bbb_rapamycin_params()
+    let priors  = bbb_rapamycin_priors()
+
+    var cp: [f64; 32] = [0.0; 32]
+    cp[0]  = 0.0;  cp[1]  = 0.25; cp[2]  = 0.5;  cp[3]  = 1.0
+    cp[4]  = 2.0;  cp[5]  = 4.0;  cp[6]  = 6.0;  cp[7]  = 8.0
+    cp[8]  = 12.0; cp[9]  = 18.0; cp[10] = 24.0; cp[11] = 36.0
+    cp[12] = 48.0; cp[13] = 72.0; cp[14] = 120.0; cp[15] = 168.0
+    let n_points = 16
+
+    let hdmr = bbb_hdmr_build_kpuu_auc(sys_prm, bbb_prm, priors, 5.0, cp, n_points, 0.01)
+    let voi = bbb_voi_from_hdmr(hdmr, priors)
+
+    // --- 1. Formula sanity ---
+    if voi.voi_total <= 0.0 { return 1 }
+    var i: i32 = 0
+    while i < voi.n_rows {
+        let idx = i as usize
+        if voi.voi[idx] < 0.0 { return 2 }
+        let expected = voi.sobol[idx] * (1.0 - voi.confidence[idx])
+        if voi_abs(voi.voi[idx] - expected) > 1.0e-9 { return 3 }
+        i = i + 1
+    }
+
+    // --- 2. Top target is kpuu_brain (index 2) ---
+    if voi.top_idx != 2 { return 4 }
+
+    // --- 3. fu_plasma (index 4) has near-zero VoI ---
+    if voi.voi[4] > 1.0e-3 { return 5 }
+
+    // --- 4. Runner-up in {fu_icf, ps_bbb} ---
+    let runner_up = voi.rank[1]
+    if runner_up != 0 && runner_up != 6 { return 6 }  // 0 = ps_bbb, 6 = fu_icf
+
+    bbb_voi_print(voi)
+    println("BBB_VOI_OK")
+    0
+}

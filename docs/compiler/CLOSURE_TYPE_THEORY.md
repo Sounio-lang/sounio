@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.type-theory.closure-type-theory
+topic_id: repo.docs.compiler.closure-type-theory
 authority: repo_only
-audience: users
+audience: contributors
 last_validated: 2026-03-07
-validated_by: A2
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.type-theory.closure-type-theory
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.closure-type-theory
 -->
 
 # Unified Closure Type Theory

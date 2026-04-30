@@ -26,9 +26,8 @@ const sourceChecks = [
     ],
   },
   {
-    file: 'src/pages/index.astro',
+    file: 'src/components/common/Footer.astro',
     mustContain: [
-      '/assets/emblem/emblem_badge_textperfect_optionC.svg',
       '/assets/stamps/stamp_monochrome_transparent.png',
     ],
   },

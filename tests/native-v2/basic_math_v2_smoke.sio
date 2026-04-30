@@ -1,23 +1,23 @@
 // native-v2 widening smoke test
 //
-// Purpose: Prove that native-v2 lowering + legalization handles a
+// Purpose: Prove that native-v2 lowering + legalize-summary handles a
 // multi-function integer program (modeled after tests/run-pass/basic_math.sio).
 //
-// Pipeline: synthetic IR → native_v2_lower_function_to_machine → native_v2_legalize_function
+// Pipeline: synthetic IR → native_v2_legalize_ir_summary
 //
 // This test imports ONLY machine_ir + dependencies (~250KB), avoiding the
 // 2.9MB transitive closure that OOMs the JIT.
 
-use parser::ast::{Name, BinaryOp, UnaryOp, empty_name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, ir_empty_module, ir_empty_function, ir_instr_new, ir_name_from_bytes, ir_load_imm, ir_binop, ir_return, ir_call, ir_reg_list_single, ir_reg_list_cons}
-use native::machine_ir::{MachineFunction, native_v2_lower_function_to_machine, native_v2_legalize_function, native_v2_machine_function_is_legal}
+use parser::ast::{BinaryOp}
+use ir::ir::{IrFunction, IrRegList, ir_empty_function, ir_name_from_bytes, ir_load_imm, ir_binop, ir_return, ir_call, ir_reg_list_single, ir_reg_list_cons}
+use native::machine_ir::{NativeV2LegalizeSummary, native_v2_legalize_ir_summary_ref}
 
 // Build an IrRegList with two elements: [a, b]
-fn ir_reg_list_pair(a: i64, b: i64) -> Option<Box<IrRegList>> with Alloc, Mut, Panic {
+fn ir_reg_list_pair(a: i64, b: i64) -> Option<Box<IrRegList>> with Alloc, Mut, Panic, Div {
     Some(Box::new(ir_reg_list_cons(a, Some(Box::new(ir_reg_list_single(b))))))
 }
 
-// ===== Build IR module equivalent to basic_math.sio =====
+// ===== Build IR functions equivalent to basic_math.sio =====
 //
 // fn add(a: i64, b: i64) -> i64 { a + b }
 // fn mul(a: i64, b: i64) -> i64 { a * b }
@@ -27,74 +27,16 @@ fn ir_reg_list_pair(a: i64, b: i64) -> Option<Box<IrRegList>> with Alloc, Mut, P
 //     return y
 // }
 
-fn build_basic_math_module() -> IrModule with Alloc, Mut, Panic {
-    var module = ir_empty_module()
-
-    // fn add(a, b) -> a + b
-    let add_name = ir_name_from_bytes(97, 100, 100, 0, 3)   // "add"
-    var add_fn = ir_empty_function()
-    add_fn.name = add_name
-    add_fn.param_count = 2
-    add_fn.param_regs[0] = 0   // a → reg 0
-    add_fn.param_regs[1] = 1   // b → reg 1
-    add_fn.reg_count = 3
-    add_fn.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)   // reg2 = reg0 + reg1
-    add_fn.instrs[1] = ir_return(2)
-    add_fn.instr_count = 2
-    module.functions[0] = add_fn
-
-    // fn mul(a, b) -> a * b
-    let mul_name = ir_name_from_bytes(109, 117, 108, 0, 3)   // "mul"
-    var mul_fn = ir_empty_function()
-    mul_fn.name = mul_name
-    mul_fn.param_count = 2
-    mul_fn.param_regs[0] = 0   // a → reg 0
-    mul_fn.param_regs[1] = 1   // b → reg 1
-    mul_fn.reg_count = 3
-    mul_fn.instrs[0] = ir_binop(2, 0, BinaryOp::OpMul, 1)   // reg2 = reg0 * reg1
-    mul_fn.instrs[1] = ir_return(2)
-    mul_fn.instr_count = 2
-    module.functions[1] = mul_fn
-
-    // fn main() -> { x = add(10, 32); y = mul(x, 2); return y }
-    let main_name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
-    var main_fn = ir_empty_function()
-    main_fn.name = main_name
-    main_fn.param_count = 0
-    main_fn.reg_count = 5
-    main_fn.instrs[0] = ir_load_imm(0, 10)                   // reg0 = 10
-    main_fn.instrs[1] = ir_load_imm(1, 32)                   // reg1 = 32
-    main_fn.instrs[2] = ir_call(2, 0, add_name, ir_reg_list_pair(0, 1), 2)   // reg2 = add(reg0, reg1)
-    main_fn.instrs[3] = ir_load_imm(3, 2)                    // reg3 = 2
-    main_fn.instrs[4] = ir_call(4, 1, mul_name, ir_reg_list_pair(2, 3), 2)   // reg4 = mul(reg2, reg3)
-    main_fn.instrs[5] = ir_return(4)
-    main_fn.instr_count = 6
-    module.functions[2] = main_fn
-
-    module.fn_count = 3
-    module
-}
-
-fn test_lower_and_legalize(func: IrFunction, label: string) -> bool with IO, Mut, Panic, Div, Alloc {
-    let lowered = native_v2_lower_function_to_machine(func)
-    if !lowered.supported {
+fn report_summary(summary: NativeV2LegalizeSummary, label: string) -> bool with IO, Mut, Panic, Div, Alloc {
+    if !summary.supported {
         print("  FAIL ")
         print(label)
-        print(": lower unsupported=")
-        print(lowered.unsupported_detail)
+        print(": summary unsupported=")
+        print(summary.unsupported_detail)
         print("\n")
         return false
     }
-    let legal = native_v2_legalize_function(lowered)
-    if !legal.supported {
-        print("  FAIL ")
-        print(label)
-        print(": legalize unsupported=")
-        print(legal.unsupported_detail)
-        print("\n")
-        return false
-    }
-    if legal.legal_instr_count <= 0 {
+    if summary.legal_instr_count <= 0 {
         print("  FAIL ")
         print(label)
         print(": zero legal instrs\n")
@@ -103,7 +45,7 @@ fn test_lower_and_legalize(func: IrFunction, label: string) -> bool with IO, Mut
     print("  OK ")
     print(label)
     print(" instrs=")
-    print_int(legal.legal_instr_count)
+    print_int(summary.legal_instr_count)
     print("\n")
     true
 }
@@ -111,17 +53,51 @@ fn test_lower_and_legalize(func: IrFunction, label: string) -> bool with IO, Mut
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     print("=== native-v2 widening smoke: basic_math ===\n")
 
-    let module = build_basic_math_module()
+    let add_name = ir_name_from_bytes(97, 100, 100, 0, 3)   // "add"
+    var add_fn = ir_empty_function()
+    add_fn.name = add_name
+    add_fn.param_count = 2
+    add_fn.param_regs[0] = 0
+    add_fn.param_regs[1] = 1
+    add_fn.reg_count = 3
+    add_fn.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    add_fn.instrs[1] = ir_return(2)
+    add_fn.instr_count = 2
+
+    let mul_name = ir_name_from_bytes(109, 117, 108, 0, 3)   // "mul"
+    var mul_fn = ir_empty_function()
+    mul_fn.name = mul_name
+    mul_fn.param_count = 2
+    mul_fn.param_regs[0] = 0
+    mul_fn.param_regs[1] = 1
+    mul_fn.reg_count = 3
+    mul_fn.instrs[0] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    mul_fn.instrs[1] = ir_return(2)
+    mul_fn.instr_count = 2
+
+    let main_name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
+    var main_fn = ir_empty_function()
+    main_fn.name = main_name
+    main_fn.param_count = 0
+    main_fn.reg_count = 5
+    main_fn.instrs[0] = ir_load_imm(0, 10)
+    main_fn.instrs[1] = ir_load_imm(1, 32)
+    main_fn.instrs[2] = ir_call(2, 0, add_name, ir_reg_list_pair(0, 1), 2)
+    main_fn.instrs[3] = ir_load_imm(3, 2)
+    main_fn.instrs[4] = ir_call(4, 1, mul_name, ir_reg_list_pair(2, 3), 2)
+    main_fn.instrs[5] = ir_return(4)
+    main_fn.instr_count = 6
+
     var passed: i64 = 0
 
-    // Test each function through native-v2 lower + legalize
-    if test_lower_and_legalize(module.functions[0], "add(a,b)->a+b") {
+    // Test each local function through native-v2 lower + legalize summary.
+    if report_summary(native_v2_legalize_ir_summary_ref(&add_fn), "add(a,b)->a+b") {
         passed = passed + 1
     }
-    if test_lower_and_legalize(module.functions[1], "mul(a,b)->a*b") {
+    if report_summary(native_v2_legalize_ir_summary_ref(&mul_fn), "mul(a,b)->a*b") {
         passed = passed + 1
     }
-    if test_lower_and_legalize(module.functions[2], "main()->chained_calls") {
+    if report_summary(native_v2_legalize_ir_summary_ref(&main_fn), "main()->chained_calls") {
         passed = passed + 1
     }
 

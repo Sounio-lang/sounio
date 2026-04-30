@@ -1,0 +1,86 @@
+// stdlib/interp/capability_probe.sio
+//
+// Per-class capability probes — the substitute for SAE/transcoder
+// interpretability in the AMI framework.
+//
+// A "capability probe" is a small function that, given a sedenion
+// activation h and a ZD class index (0..83 for two-support primitives,
+// 0..167 for full ZD-pair classes), returns a single f64 coefficient
+// describing the activation's magnitude along that capability direction.
+//
+// Unlike SAEs (which train a dictionary of 2^N latent features for a
+// specific model), probes are STATIC: the same probe can be applied to
+// any sedenion-structured activation in any model, because the basis
+// is defined by the ZD graph, not by the data.
+//
+// Operational claim, Paper D:
+//   Every activation of a Sounio-compiled SSM admits a unique, sparse
+//   decomposition onto the 84-class two-support basis, with most mass
+//   concentrated in 2-5 fibres for typical linguistic inputs.
+
+// probe_class: simplified scalar probe for a two-support class (i_idx, j_idx).
+// Returns the squared activation magnitude along the basis direction.
+fn probe_class(h: &[f64; 16], i_idx: i64, j_idx: i64) -> f64 with Mut, Div, Panic, ZD {
+    let s = 0.707107
+    let c = (*h)[i_idx as usize] * s + (*h)[j_idx as usize] * s
+    c * c
+}
+
+// probe_fiber_mass: total squared mass of activations in a Fano fibre.
+// A fibre is characterized by its XOR label (0..6 for the 7 non-trivial
+// lines of the Fano plane structure in the sedenion multiplication).
+// For simplicity we use the XOR of the two support indices (as used in
+// SounioZeroDivisorBridge.lean's fiberPrims definition).
+fn probe_fiber_mass(h: &[f64; 16], target_label: i64) -> f64 with Mut, Div, Panic, ZD {
+    let s = 0.707107
+    var total = 0.0
+    var i = 0
+    while i < 16 {
+        var j = i + 1
+        while j < 16 {
+            let label = i ^ j
+            if label == target_label {
+                let c = (*h)[i as usize] * s + (*h)[j as usize] * s
+                total = total + c * c
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    total
+}
+
+// top_fiber: which of the 7 Fano fibres has the greatest activation mass
+// in this hidden state.  Returns an index 1..7 (0 reserved for identity).
+fn top_fiber(h: &[f64; 16]) -> i64 with Mut, Div, Panic, ZD {
+    var best_label: i64 = 1
+    var best_mass = probe_fiber_mass(h, 1)
+    var lab: i64 = 2
+    while lab <= 7 {
+        let m = probe_fiber_mass(h, lab)
+        if m > best_mass { best_mass = m; best_label = lab }
+        lab = lab + 1
+    }
+    best_label
+}
+
+// sparsity: count of classes with capability_activation above `threshold`.
+// Low sparsity (few active classes) is the AMI analogue of SAE's
+// "sparse feature activation" — but here the sparsity pattern is
+// determined by the ZD algebra, not by optimization.
+fn sparsity(h: &[f64; 16], threshold: f64) -> i64 with Mut, Div, Panic, ZD {
+    let s = 0.707107
+    var count: i64 = 0
+    var i = 0
+    while i < 16 {
+        var j = i + 1
+        while j < 16 {
+            let c = (*h)[i as usize] * s + (*h)[j as usize] * s
+            let mag = if c < 0.0 { 0.0 - c } else { c }
+            if mag > threshold { count = count + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    count
+}

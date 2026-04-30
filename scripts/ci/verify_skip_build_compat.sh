@@ -70,7 +70,7 @@ run_gate "check_golden_snapshots.sh (SKIP_BUILD=1)" \
 
 run_gate "check_new_warnings.sh (SKIP_BUILD=1)" \
   SKIP_BUILD=1 SOUNIO_REPO_HARD_NO_RUST=0 \
-  bash scripts/check_new_warnings.sh
+  bash scripts/ci/check_new_warnings.sh
 
 echo ""
 echo "=========================================="

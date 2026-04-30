@@ -93,13 +93,13 @@ python3 -m py_compile sounio_kernel/*.py
 
 ### Binary Availability
 ```bash
-/home/demetrios/RustroverProjects/sounio/bin/souc
+/workspace/sounio/bin/souc
 # ✅ Found (13MB, executable)
 ```
 
 ### Stdlib Path
 ```bash
-/home/demetrios/RustroverProjects/sounio/stdlib
+/workspace/sounio/stdlib
 # ✅ Found
 ```
 
@@ -141,7 +141,7 @@ python3 tests/test_display.py
 ## File Structure
 
 ```
-triple-sounio-ecosystem/sounio-jupyter/
+ecosystem/sounio-jupyter/
 ├── pyproject.toml
 ├── README.md
 ├── DAY1_DELIVERABLE.md
@@ -162,7 +162,7 @@ triple-sounio-ecosystem/sounio-jupyter/
 
 ```bash
 # Navigate to kernel directory
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 
 # Install in development mode (requires pip)
 pip install -e .

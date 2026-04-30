@@ -1,0 +1,635 @@
+//! stdlib/gpu/sedenion_kernels.sio
+//!
+//! GPU Metal kernels for ossm_168 hypothesis features F₁/F₂/F₃.
+//!
+//! Three feature kernels matching the pre-registration v3 spec:
+//!   F₁ — Orbit-of-168 octonion associator mass (rumination proxy)
+//!   F₂ — Proximity to sedenion zero-divisor manifold (anhedonia proxy)
+//!   F₃ — L¹ sedenion associator mass over O_168 orbit (valence proxy)
+//!
+//! GPU emission path: Sounio → HLIR → GpuKernelIr → metal.sio → MSL
+//! CPU dispatch (CPU fallback / test path): sed_f3_single / sed_f3_batch
+//!
+//! Each thread = one (subject × epoch) sedenion state.
+//! Parallelism: N threads for N states — embarrassingly parallel.
+//!
+//! Kernel body uses XOR-based flat arithmetic, no structs in GPU context:
+//!   a[m]      = h[m^I] * S[m^I, I]           (h * e_I, component m)
+//!   (p*q)[m]  = Σ_i p[i] * q[m^i] * S[i, m^i]  (full sedenion product)
+//!   assoc[m]  = ((h*eI)*(h*eJ))*(h*eK))[m] - (h*eI)*((h*eJ)*(h*eK))[m]
+//!   F₃        = (1/168) * Σ_{(I,J,K)∈O_168} Σ_m |assoc[m]|
+//!
+//! Reference: pre-registration v3 `docs/papers/preregistrations/2026-04-21_ossm_168_depression_v3.md`
+//! Python mirror: `scripts/research/ossm_168_dryrun/sedenion.py`
+
+use math::sedenion::{Sedenion, sed, sed_zero, sed_basis, sed_mul, sed_sub, sed_add};
+
+// ============================================================================
+// §1. L¹ NORM — sum of absolute values of all 16 components
+// ============================================================================
+
+fn f64_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+/// L¹ norm of a sedenion: sum of absolute component values.
+/// Non-zero on generic states; vanishes only in associative subalgebras.
+pub fn sed_l1_norm(s: Sedenion) -> f64 {
+    f64_abs(s.e0)  + f64_abs(s.e1)  + f64_abs(s.e2)  + f64_abs(s.e3) +
+    f64_abs(s.e4)  + f64_abs(s.e5)  + f64_abs(s.e6)  + f64_abs(s.e7) +
+    f64_abs(s.e8)  + f64_abs(s.e9)  + f64_abs(s.e10) + f64_abs(s.e11) +
+    f64_abs(s.e12) + f64_abs(s.e13) + f64_abs(s.e14) + f64_abs(s.e15)
+}
+
+// ============================================================================
+// §2. SEDENION ASSOCIATOR — [a, b, c] = (a*b)*c - a*(b*c)
+// ============================================================================
+
+/// Sedenion associator. Non-zero for non-associative triples.
+/// CD flexibility: [x, y, x] = 0 for all x, y (confirmed in Python dry-run).
+pub fn sed_associator(a: Sedenion, b: Sedenion, c: Sedenion) -> Sedenion {
+    let ab = sed_mul(a, b)
+    let bc = sed_mul(b, c)
+    sed_sub(sed_mul(ab, c), sed_mul(a, bc))
+}
+
+// ============================================================================
+// §3. PER-TRIPLE L¹ CONTRIBUTION
+//     Each triple (I, J, K) with I,K ∈ {1..7}, J ∈ {9..15}
+//     Contribution: ||[h̃·eI, h̃·eJ, h̃·eK]||_{L¹}
+// ============================================================================
+
+pub fn sed_triple_l1(h: Sedenion, I: i64, J: i64, K: i64) -> f64 with Mut {
+    let a = sed_mul(h, sed_basis(I, 1.0))
+    let b = sed_mul(h, sed_basis(J, 1.0))
+    let c = sed_mul(h, sed_basis(K, 1.0))
+    sed_l1_norm(sed_associator(a, b, c))
+}
+
+// ============================================================================
+// §4. KERNEL CONTEXT
+//     Precomputed on CPU, passed as GPU buffers.
+//     sign_table[256]: e_i * e_j = sign_table[i*16+j] * e_{i XOR j}
+//     triples[504]:    168 × 3 (I, J, K) O_168 orbit indices, flattened
+// ============================================================================
+
+/// Context for sedenion GPU kernels. Created on CPU once, passed to dispatch.
+pub struct SedKernelCtx {
+    n_triples: i64,
+    sign_table: [i64; 256],
+    triples: [i64; 504],
+}
+
+/// Initialize kernel context. Fills sign table from Cayley-Dickson construction
+/// and the 168 O_168 sedenion triples matching Python ossm_168_dryrun/sedenion.py.
+pub fn sed_kernel_init() -> SedKernelCtx with Mut, Div {
+    var ctx = SedKernelCtx {
+        n_triples: 168,
+        sign_table: [0; 256],
+        triples: [0; 504],
+    }
+
+    // Sign table: precomputed from Python sed_mul(sed_basis(i), sed_basis(j))[i^j]
+    // e_i * e_j = sign_table[i*16+j] * e_{i XOR j}  — all values ±1
+    ctx.sign_table[0] = 1; ctx.sign_table[1] = 1; ctx.sign_table[2] = 1; ctx.sign_table[3] = 1
+    ctx.sign_table[4] = 1; ctx.sign_table[5] = 1; ctx.sign_table[6] = 1; ctx.sign_table[7] = 1
+    ctx.sign_table[8] = 1; ctx.sign_table[9] = 1; ctx.sign_table[10] = 1; ctx.sign_table[11] = 1
+    ctx.sign_table[12] = 1; ctx.sign_table[13] = 1; ctx.sign_table[14] = 1; ctx.sign_table[15] = 1
+    ctx.sign_table[16] = 1; ctx.sign_table[17] = -1; ctx.sign_table[18] = 1; ctx.sign_table[19] = -1
+    ctx.sign_table[20] = 1; ctx.sign_table[21] = -1; ctx.sign_table[22] = -1; ctx.sign_table[23] = 1
+    ctx.sign_table[24] = 1; ctx.sign_table[25] = -1; ctx.sign_table[26] = -1; ctx.sign_table[27] = 1
+    ctx.sign_table[28] = -1; ctx.sign_table[29] = 1; ctx.sign_table[30] = 1; ctx.sign_table[31] = -1
+    ctx.sign_table[32] = 1; ctx.sign_table[33] = -1; ctx.sign_table[34] = -1; ctx.sign_table[35] = 1
+    ctx.sign_table[36] = 1; ctx.sign_table[37] = 1; ctx.sign_table[38] = -1; ctx.sign_table[39] = -1
+    ctx.sign_table[40] = 1; ctx.sign_table[41] = 1; ctx.sign_table[42] = -1; ctx.sign_table[43] = -1
+    ctx.sign_table[44] = -1; ctx.sign_table[45] = -1; ctx.sign_table[46] = 1; ctx.sign_table[47] = 1
+    ctx.sign_table[48] = 1; ctx.sign_table[49] = 1; ctx.sign_table[50] = -1; ctx.sign_table[51] = -1
+    ctx.sign_table[52] = 1; ctx.sign_table[53] = -1; ctx.sign_table[54] = 1; ctx.sign_table[55] = -1
+    ctx.sign_table[56] = 1; ctx.sign_table[57] = -1; ctx.sign_table[58] = 1; ctx.sign_table[59] = -1
+    ctx.sign_table[60] = -1; ctx.sign_table[61] = 1; ctx.sign_table[62] = -1; ctx.sign_table[63] = 1
+    ctx.sign_table[64] = 1; ctx.sign_table[65] = -1; ctx.sign_table[66] = -1; ctx.sign_table[67] = -1
+    ctx.sign_table[68] = -1; ctx.sign_table[69] = 1; ctx.sign_table[70] = 1; ctx.sign_table[71] = 1
+    ctx.sign_table[72] = 1; ctx.sign_table[73] = 1; ctx.sign_table[74] = 1; ctx.sign_table[75] = 1
+    ctx.sign_table[76] = -1; ctx.sign_table[77] = -1; ctx.sign_table[78] = -1; ctx.sign_table[79] = -1
+    ctx.sign_table[80] = 1; ctx.sign_table[81] = 1; ctx.sign_table[82] = -1; ctx.sign_table[83] = 1
+    ctx.sign_table[84] = -1; ctx.sign_table[85] = -1; ctx.sign_table[86] = -1; ctx.sign_table[87] = 1
+    ctx.sign_table[88] = 1; ctx.sign_table[89] = -1; ctx.sign_table[90] = 1; ctx.sign_table[91] = -1
+    ctx.sign_table[92] = 1; ctx.sign_table[93] = -1; ctx.sign_table[94] = 1; ctx.sign_table[95] = -1
+    ctx.sign_table[96] = 1; ctx.sign_table[97] = 1; ctx.sign_table[98] = 1; ctx.sign_table[99] = -1
+    ctx.sign_table[100] = -1; ctx.sign_table[101] = 1; ctx.sign_table[102] = -1; ctx.sign_table[103] = -1
+    ctx.sign_table[104] = 1; ctx.sign_table[105] = -1; ctx.sign_table[106] = -1; ctx.sign_table[107] = 1
+    ctx.sign_table[108] = 1; ctx.sign_table[109] = -1; ctx.sign_table[110] = -1; ctx.sign_table[111] = 1
+    ctx.sign_table[112] = 1; ctx.sign_table[113] = -1; ctx.sign_table[114] = 1; ctx.sign_table[115] = 1
+    ctx.sign_table[116] = -1; ctx.sign_table[117] = -1; ctx.sign_table[118] = 1; ctx.sign_table[119] = -1
+    ctx.sign_table[120] = 1; ctx.sign_table[121] = 1; ctx.sign_table[122] = -1; ctx.sign_table[123] = -1
+    ctx.sign_table[124] = 1; ctx.sign_table[125] = 1; ctx.sign_table[126] = -1; ctx.sign_table[127] = -1
+    ctx.sign_table[128] = 1; ctx.sign_table[129] = -1; ctx.sign_table[130] = -1; ctx.sign_table[131] = -1
+    ctx.sign_table[132] = -1; ctx.sign_table[133] = -1; ctx.sign_table[134] = -1; ctx.sign_table[135] = -1
+    ctx.sign_table[136] = -1; ctx.sign_table[137] = 1; ctx.sign_table[138] = 1; ctx.sign_table[139] = 1
+    ctx.sign_table[140] = 1; ctx.sign_table[141] = 1; ctx.sign_table[142] = 1; ctx.sign_table[143] = 1
+    ctx.sign_table[144] = 1; ctx.sign_table[145] = 1; ctx.sign_table[146] = -1; ctx.sign_table[147] = 1
+    ctx.sign_table[148] = -1; ctx.sign_table[149] = 1; ctx.sign_table[150] = 1; ctx.sign_table[151] = -1
+    ctx.sign_table[152] = -1; ctx.sign_table[153] = -1; ctx.sign_table[154] = -1; ctx.sign_table[155] = 1
+    ctx.sign_table[156] = -1; ctx.sign_table[157] = 1; ctx.sign_table[158] = 1; ctx.sign_table[159] = -1
+    ctx.sign_table[160] = 1; ctx.sign_table[161] = 1; ctx.sign_table[162] = -1; ctx.sign_table[163] = -1
+    ctx.sign_table[164] = -1; ctx.sign_table[165] = 1; ctx.sign_table[166] = 1; ctx.sign_table[167] = -1
+    ctx.sign_table[168] = 1; ctx.sign_table[169] = -1; ctx.sign_table[170] = -1; ctx.sign_table[171] = -1
+    ctx.sign_table[172] = -1; ctx.sign_table[173] = -1; ctx.sign_table[174] = 1; ctx.sign_table[175] = 1
+    ctx.sign_table[176] = 1; ctx.sign_table[177] = -1; ctx.sign_table[178] = 1; ctx.sign_table[179] = 1
+    ctx.sign_table[180] = -1; ctx.sign_table[181] = 1; ctx.sign_table[182] = -1; ctx.sign_table[183] = 1
+    ctx.sign_table[184] = -1; ctx.sign_table[185] = -1; ctx.sign_table[186] = 1; ctx.sign_table[187] = -1
+    ctx.sign_table[188] = -1; ctx.sign_table[189] = 1; ctx.sign_table[190] = -1; ctx.sign_table[191] = 1
+    ctx.sign_table[192] = 1; ctx.sign_table[193] = 1; ctx.sign_table[194] = 1; ctx.sign_table[195] = 1
+    ctx.sign_table[196] = 1; ctx.sign_table[197] = -1; ctx.sign_table[198] = -1; ctx.sign_table[199] = -1
+    ctx.sign_table[200] = -1; ctx.sign_table[201] = 1; ctx.sign_table[202] = 1; ctx.sign_table[203] = 1
+    ctx.sign_table[204] = -1; ctx.sign_table[205] = -1; ctx.sign_table[206] = -1; ctx.sign_table[207] = -1
+    ctx.sign_table[208] = 1; ctx.sign_table[209] = -1; ctx.sign_table[210] = 1; ctx.sign_table[211] = -1
+    ctx.sign_table[212] = 1; ctx.sign_table[213] = 1; ctx.sign_table[214] = 1; ctx.sign_table[215] = -1
+    ctx.sign_table[216] = -1; ctx.sign_table[217] = -1; ctx.sign_table[218] = 1; ctx.sign_table[219] = -1
+    ctx.sign_table[220] = 1; ctx.sign_table[221] = -1; ctx.sign_table[222] = 1; ctx.sign_table[223] = -1
+    ctx.sign_table[224] = 1; ctx.sign_table[225] = -1; ctx.sign_table[226] = -1; ctx.sign_table[227] = 1
+    ctx.sign_table[228] = 1; ctx.sign_table[229] = -1; ctx.sign_table[230] = 1; ctx.sign_table[231] = 1
+    ctx.sign_table[232] = -1; ctx.sign_table[233] = -1; ctx.sign_table[234] = -1; ctx.sign_table[235] = 1
+    ctx.sign_table[236] = 1; ctx.sign_table[237] = -1; ctx.sign_table[238] = -1; ctx.sign_table[239] = 1
+    ctx.sign_table[240] = 1; ctx.sign_table[241] = 1; ctx.sign_table[242] = -1; ctx.sign_table[243] = -1
+    ctx.sign_table[244] = 1; ctx.sign_table[245] = 1; ctx.sign_table[246] = -1; ctx.sign_table[247] = 1
+    ctx.sign_table[248] = -1; ctx.sign_table[249] = 1; ctx.sign_table[250] = -1; ctx.sign_table[251] = -1
+    ctx.sign_table[252] = 1; ctx.sign_table[253] = 1; ctx.sign_table[254] = -1; ctx.sign_table[255] = -1
+
+    // O_168 triples: (I, J, K) matching Python O_168_sedenion_triples()
+    // I ∈ {1..7}, J ∈ {9..15}, K ∈ {1..7} — 168 orbits of the 168 Theorem
+    ctx.triples[0] = 1; ctx.triples[1] = 10; ctx.triples[2] = 4
+    ctx.triples[3] = 1; ctx.triples[4] = 10; ctx.triples[5] = 5
+    ctx.triples[6] = 1; ctx.triples[7] = 10; ctx.triples[8] = 6
+    ctx.triples[9] = 1; ctx.triples[10] = 10; ctx.triples[11] = 7
+    ctx.triples[12] = 1; ctx.triples[13] = 11; ctx.triples[14] = 4
+    ctx.triples[15] = 1; ctx.triples[16] = 11; ctx.triples[17] = 5
+    ctx.triples[18] = 1; ctx.triples[19] = 11; ctx.triples[20] = 6
+    ctx.triples[21] = 1; ctx.triples[22] = 11; ctx.triples[23] = 7
+    ctx.triples[24] = 1; ctx.triples[25] = 12; ctx.triples[26] = 2
+    ctx.triples[27] = 1; ctx.triples[28] = 12; ctx.triples[29] = 3
+    ctx.triples[30] = 1; ctx.triples[31] = 12; ctx.triples[32] = 6
+    ctx.triples[33] = 1; ctx.triples[34] = 12; ctx.triples[35] = 7
+    ctx.triples[36] = 1; ctx.triples[37] = 13; ctx.triples[38] = 2
+    ctx.triples[39] = 1; ctx.triples[40] = 13; ctx.triples[41] = 3
+    ctx.triples[42] = 1; ctx.triples[43] = 13; ctx.triples[44] = 6
+    ctx.triples[45] = 1; ctx.triples[46] = 13; ctx.triples[47] = 7
+    ctx.triples[48] = 1; ctx.triples[49] = 14; ctx.triples[50] = 2
+    ctx.triples[51] = 1; ctx.triples[52] = 14; ctx.triples[53] = 3
+    ctx.triples[54] = 1; ctx.triples[55] = 14; ctx.triples[56] = 4
+    ctx.triples[57] = 1; ctx.triples[58] = 14; ctx.triples[59] = 5
+    ctx.triples[60] = 1; ctx.triples[61] = 15; ctx.triples[62] = 2
+    ctx.triples[63] = 1; ctx.triples[64] = 15; ctx.triples[65] = 3
+    ctx.triples[66] = 1; ctx.triples[67] = 15; ctx.triples[68] = 4
+    ctx.triples[69] = 1; ctx.triples[70] = 15; ctx.triples[71] = 5
+    ctx.triples[72] = 2; ctx.triples[73] = 9; ctx.triples[74] = 4
+    ctx.triples[75] = 2; ctx.triples[76] = 9; ctx.triples[77] = 5
+    ctx.triples[78] = 2; ctx.triples[79] = 9; ctx.triples[80] = 6
+    ctx.triples[81] = 2; ctx.triples[82] = 9; ctx.triples[83] = 7
+    ctx.triples[84] = 2; ctx.triples[85] = 11; ctx.triples[86] = 4
+    ctx.triples[87] = 2; ctx.triples[88] = 11; ctx.triples[89] = 5
+    ctx.triples[90] = 2; ctx.triples[91] = 11; ctx.triples[92] = 6
+    ctx.triples[93] = 2; ctx.triples[94] = 11; ctx.triples[95] = 7
+    ctx.triples[96] = 2; ctx.triples[97] = 12; ctx.triples[98] = 1
+    ctx.triples[99] = 2; ctx.triples[100] = 12; ctx.triples[101] = 3
+    ctx.triples[102] = 2; ctx.triples[103] = 12; ctx.triples[104] = 5
+    ctx.triples[105] = 2; ctx.triples[106] = 12; ctx.triples[107] = 7
+    ctx.triples[108] = 2; ctx.triples[109] = 13; ctx.triples[110] = 1
+    ctx.triples[111] = 2; ctx.triples[112] = 13; ctx.triples[113] = 3
+    ctx.triples[114] = 2; ctx.triples[115] = 13; ctx.triples[116] = 4
+    ctx.triples[117] = 2; ctx.triples[118] = 13; ctx.triples[119] = 6
+    ctx.triples[120] = 2; ctx.triples[121] = 14; ctx.triples[122] = 1
+    ctx.triples[123] = 2; ctx.triples[124] = 14; ctx.triples[125] = 3
+    ctx.triples[126] = 2; ctx.triples[127] = 14; ctx.triples[128] = 5
+    ctx.triples[129] = 2; ctx.triples[130] = 14; ctx.triples[131] = 7
+    ctx.triples[132] = 2; ctx.triples[133] = 15; ctx.triples[134] = 1
+    ctx.triples[135] = 2; ctx.triples[136] = 15; ctx.triples[137] = 3
+    ctx.triples[138] = 2; ctx.triples[139] = 15; ctx.triples[140] = 4
+    ctx.triples[141] = 2; ctx.triples[142] = 15; ctx.triples[143] = 6
+    ctx.triples[144] = 3; ctx.triples[145] = 9; ctx.triples[146] = 4
+    ctx.triples[147] = 3; ctx.triples[148] = 9; ctx.triples[149] = 5
+    ctx.triples[150] = 3; ctx.triples[151] = 9; ctx.triples[152] = 6
+    ctx.triples[153] = 3; ctx.triples[154] = 9; ctx.triples[155] = 7
+    ctx.triples[156] = 3; ctx.triples[157] = 10; ctx.triples[158] = 4
+    ctx.triples[159] = 3; ctx.triples[160] = 10; ctx.triples[161] = 5
+    ctx.triples[162] = 3; ctx.triples[163] = 10; ctx.triples[164] = 6
+    ctx.triples[165] = 3; ctx.triples[166] = 10; ctx.triples[167] = 7
+    ctx.triples[168] = 3; ctx.triples[169] = 12; ctx.triples[170] = 1
+    ctx.triples[171] = 3; ctx.triples[172] = 12; ctx.triples[173] = 2
+    ctx.triples[174] = 3; ctx.triples[175] = 12; ctx.triples[176] = 5
+    ctx.triples[177] = 3; ctx.triples[178] = 12; ctx.triples[179] = 6
+    ctx.triples[180] = 3; ctx.triples[181] = 13; ctx.triples[182] = 1
+    ctx.triples[183] = 3; ctx.triples[184] = 13; ctx.triples[185] = 2
+    ctx.triples[186] = 3; ctx.triples[187] = 13; ctx.triples[188] = 4
+    ctx.triples[189] = 3; ctx.triples[190] = 13; ctx.triples[191] = 7
+    ctx.triples[192] = 3; ctx.triples[193] = 14; ctx.triples[194] = 1
+    ctx.triples[195] = 3; ctx.triples[196] = 14; ctx.triples[197] = 2
+    ctx.triples[198] = 3; ctx.triples[199] = 14; ctx.triples[200] = 4
+    ctx.triples[201] = 3; ctx.triples[202] = 14; ctx.triples[203] = 7
+    ctx.triples[204] = 3; ctx.triples[205] = 15; ctx.triples[206] = 1
+    ctx.triples[207] = 3; ctx.triples[208] = 15; ctx.triples[209] = 2
+    ctx.triples[210] = 3; ctx.triples[211] = 15; ctx.triples[212] = 5
+    ctx.triples[213] = 3; ctx.triples[214] = 15; ctx.triples[215] = 6
+    ctx.triples[216] = 4; ctx.triples[217] = 9; ctx.triples[218] = 2
+    ctx.triples[219] = 4; ctx.triples[220] = 9; ctx.triples[221] = 3
+    ctx.triples[222] = 4; ctx.triples[223] = 9; ctx.triples[224] = 6
+    ctx.triples[225] = 4; ctx.triples[226] = 9; ctx.triples[227] = 7
+    ctx.triples[228] = 4; ctx.triples[229] = 10; ctx.triples[230] = 1
+    ctx.triples[231] = 4; ctx.triples[232] = 10; ctx.triples[233] = 3
+    ctx.triples[234] = 4; ctx.triples[235] = 10; ctx.triples[236] = 5
+    ctx.triples[237] = 4; ctx.triples[238] = 10; ctx.triples[239] = 7
+    ctx.triples[240] = 4; ctx.triples[241] = 11; ctx.triples[242] = 1
+    ctx.triples[243] = 4; ctx.triples[244] = 11; ctx.triples[245] = 2
+    ctx.triples[246] = 4; ctx.triples[247] = 11; ctx.triples[248] = 5
+    ctx.triples[249] = 4; ctx.triples[250] = 11; ctx.triples[251] = 6
+    ctx.triples[252] = 4; ctx.triples[253] = 13; ctx.triples[254] = 2
+    ctx.triples[255] = 4; ctx.triples[256] = 13; ctx.triples[257] = 3
+    ctx.triples[258] = 4; ctx.triples[259] = 13; ctx.triples[260] = 6
+    ctx.triples[261] = 4; ctx.triples[262] = 13; ctx.triples[263] = 7
+    ctx.triples[264] = 4; ctx.triples[265] = 14; ctx.triples[266] = 1
+    ctx.triples[267] = 4; ctx.triples[268] = 14; ctx.triples[269] = 3
+    ctx.triples[270] = 4; ctx.triples[271] = 14; ctx.triples[272] = 5
+    ctx.triples[273] = 4; ctx.triples[274] = 14; ctx.triples[275] = 7
+    ctx.triples[276] = 4; ctx.triples[277] = 15; ctx.triples[278] = 1
+    ctx.triples[279] = 4; ctx.triples[280] = 15; ctx.triples[281] = 2
+    ctx.triples[282] = 4; ctx.triples[283] = 15; ctx.triples[284] = 5
+    ctx.triples[285] = 4; ctx.triples[286] = 15; ctx.triples[287] = 6
+    ctx.triples[288] = 5; ctx.triples[289] = 9; ctx.triples[290] = 2
+    ctx.triples[291] = 5; ctx.triples[292] = 9; ctx.triples[293] = 3
+    ctx.triples[294] = 5; ctx.triples[295] = 9; ctx.triples[296] = 6
+    ctx.triples[297] = 5; ctx.triples[298] = 9; ctx.triples[299] = 7
+    ctx.triples[300] = 5; ctx.triples[301] = 10; ctx.triples[302] = 1
+    ctx.triples[303] = 5; ctx.triples[304] = 10; ctx.triples[305] = 3
+    ctx.triples[306] = 5; ctx.triples[307] = 10; ctx.triples[308] = 4
+    ctx.triples[309] = 5; ctx.triples[310] = 10; ctx.triples[311] = 6
+    ctx.triples[312] = 5; ctx.triples[313] = 11; ctx.triples[314] = 1
+    ctx.triples[315] = 5; ctx.triples[316] = 11; ctx.triples[317] = 2
+    ctx.triples[318] = 5; ctx.triples[319] = 11; ctx.triples[320] = 4
+    ctx.triples[321] = 5; ctx.triples[322] = 11; ctx.triples[323] = 7
+    ctx.triples[324] = 5; ctx.triples[325] = 12; ctx.triples[326] = 2
+    ctx.triples[327] = 5; ctx.triples[328] = 12; ctx.triples[329] = 3
+    ctx.triples[330] = 5; ctx.triples[331] = 12; ctx.triples[332] = 6
+    ctx.triples[333] = 5; ctx.triples[334] = 12; ctx.triples[335] = 7
+    ctx.triples[336] = 5; ctx.triples[337] = 14; ctx.triples[338] = 1
+    ctx.triples[339] = 5; ctx.triples[340] = 14; ctx.triples[341] = 2
+    ctx.triples[342] = 5; ctx.triples[343] = 14; ctx.triples[344] = 4
+    ctx.triples[345] = 5; ctx.triples[346] = 14; ctx.triples[347] = 7
+    ctx.triples[348] = 5; ctx.triples[349] = 15; ctx.triples[350] = 1
+    ctx.triples[351] = 5; ctx.triples[352] = 15; ctx.triples[353] = 3
+    ctx.triples[354] = 5; ctx.triples[355] = 15; ctx.triples[356] = 4
+    ctx.triples[357] = 5; ctx.triples[358] = 15; ctx.triples[359] = 6
+    ctx.triples[360] = 6; ctx.triples[361] = 9; ctx.triples[362] = 2
+    ctx.triples[363] = 6; ctx.triples[364] = 9; ctx.triples[365] = 3
+    ctx.triples[366] = 6; ctx.triples[367] = 9; ctx.triples[368] = 4
+    ctx.triples[369] = 6; ctx.triples[370] = 9; ctx.triples[371] = 5
+    ctx.triples[372] = 6; ctx.triples[373] = 10; ctx.triples[374] = 1
+    ctx.triples[375] = 6; ctx.triples[376] = 10; ctx.triples[377] = 3
+    ctx.triples[378] = 6; ctx.triples[379] = 10; ctx.triples[380] = 5
+    ctx.triples[381] = 6; ctx.triples[382] = 10; ctx.triples[383] = 7
+    ctx.triples[384] = 6; ctx.triples[385] = 11; ctx.triples[386] = 1
+    ctx.triples[387] = 6; ctx.triples[388] = 11; ctx.triples[389] = 2
+    ctx.triples[390] = 6; ctx.triples[391] = 11; ctx.triples[392] = 4
+    ctx.triples[393] = 6; ctx.triples[394] = 11; ctx.triples[395] = 7
+    ctx.triples[396] = 6; ctx.triples[397] = 12; ctx.triples[398] = 1
+    ctx.triples[399] = 6; ctx.triples[400] = 12; ctx.triples[401] = 3
+    ctx.triples[402] = 6; ctx.triples[403] = 12; ctx.triples[404] = 5
+    ctx.triples[405] = 6; ctx.triples[406] = 12; ctx.triples[407] = 7
+    ctx.triples[408] = 6; ctx.triples[409] = 13; ctx.triples[410] = 1
+    ctx.triples[411] = 6; ctx.triples[412] = 13; ctx.triples[413] = 2
+    ctx.triples[414] = 6; ctx.triples[415] = 13; ctx.triples[416] = 4
+    ctx.triples[417] = 6; ctx.triples[418] = 13; ctx.triples[419] = 7
+    ctx.triples[420] = 6; ctx.triples[421] = 15; ctx.triples[422] = 2
+    ctx.triples[423] = 6; ctx.triples[424] = 15; ctx.triples[425] = 3
+    ctx.triples[426] = 6; ctx.triples[427] = 15; ctx.triples[428] = 4
+    ctx.triples[429] = 6; ctx.triples[430] = 15; ctx.triples[431] = 5
+    ctx.triples[432] = 7; ctx.triples[433] = 9; ctx.triples[434] = 2
+    ctx.triples[435] = 7; ctx.triples[436] = 9; ctx.triples[437] = 3
+    ctx.triples[438] = 7; ctx.triples[439] = 9; ctx.triples[440] = 4
+    ctx.triples[441] = 7; ctx.triples[442] = 9; ctx.triples[443] = 5
+    ctx.triples[444] = 7; ctx.triples[445] = 10; ctx.triples[446] = 1
+    ctx.triples[447] = 7; ctx.triples[448] = 10; ctx.triples[449] = 3
+    ctx.triples[450] = 7; ctx.triples[451] = 10; ctx.triples[452] = 4
+    ctx.triples[453] = 7; ctx.triples[454] = 10; ctx.triples[455] = 6
+    ctx.triples[456] = 7; ctx.triples[457] = 11; ctx.triples[458] = 1
+    ctx.triples[459] = 7; ctx.triples[460] = 11; ctx.triples[461] = 2
+    ctx.triples[462] = 7; ctx.triples[463] = 11; ctx.triples[464] = 5
+    ctx.triples[465] = 7; ctx.triples[466] = 11; ctx.triples[467] = 6
+    ctx.triples[468] = 7; ctx.triples[469] = 12; ctx.triples[470] = 1
+    ctx.triples[471] = 7; ctx.triples[472] = 12; ctx.triples[473] = 2
+    ctx.triples[474] = 7; ctx.triples[475] = 12; ctx.triples[476] = 5
+    ctx.triples[477] = 7; ctx.triples[478] = 12; ctx.triples[479] = 6
+    ctx.triples[480] = 7; ctx.triples[481] = 13; ctx.triples[482] = 1
+    ctx.triples[483] = 7; ctx.triples[484] = 13; ctx.triples[485] = 3
+    ctx.triples[486] = 7; ctx.triples[487] = 13; ctx.triples[488] = 4
+    ctx.triples[489] = 7; ctx.triples[490] = 13; ctx.triples[491] = 6
+    ctx.triples[492] = 7; ctx.triples[493] = 14; ctx.triples[494] = 2
+    ctx.triples[495] = 7; ctx.triples[496] = 14; ctx.triples[497] = 3
+    ctx.triples[498] = 7; ctx.triples[499] = 14; ctx.triples[500] = 4
+    ctx.triples[501] = 7; ctx.triples[502] = 14; ctx.triples[503] = 5
+
+    ctx
+}
+
+// ============================================================================
+// §5. GPU KERNELS — Metal MSL emission targets
+//
+//     Kernel body uses XOR-based flat arithmetic:
+//       a[m] = h[m^I] * S[m^I, I]             (h * e_I, component m)
+//       (p*q)[m] = Σ_i p[i] * q[m^i] * S[i, m^i]
+//       assoc[m] = abc1[m] - abc2[m]
+//     No structs in kernel body — avoids SRET in GPU context.
+// ============================================================================
+
+/// F₃ GPU kernel: L¹ sedenion associator mass over O_168 orbit.
+///
+/// Each thread tid computes F₃ for sedenion state at states_buf[tid*16..].
+/// sign_tbl[256]: e_i*e_j = sign_tbl[i*16+j] * e_{i^j} (XOR index rule).
+/// triples[504]:  flattened 168×3 (I, J, K) O_168 orbit indices.
+/// out_buf[n]:    per-state F₃ output (mean L¹ associator mass).
+kernel fn sed_f3_l1_mass_kernel(
+    n: i64,
+    states_buf: &[f64],
+    sign_tbl: &[i64],
+    triples: &[i64],
+    n_triples: i64,
+    out_buf: &![f64],
+) with GPU, Div {
+    let tid = gpu_thread_id_x()
+    if tid < n {
+        let base = tid * 16
+        var total: f64 = 0.0
+        var t: i64 = 0
+        while t < n_triples {
+            let II = triples[(t * 3) as usize]
+            let JJ = triples[(t * 3 + 1) as usize]
+            let KK = triples[(t * 3 + 2) as usize]
+            // Compute L¹ norm of associator [(h*eI), (h*eJ), (h*eK)]
+            // a[m] = h[m^I]*S[m^I,I],  b[m] = h[m^J]*S[m^J,J],  c[m] = h[m^K]*S[m^K,K]
+            // abc1[m] = ((a*b)*c)[m] = Σ_i (Σ_j a[j]*b[j^i]*S[j,j^i]) * c[i^m]*S[i,i^m]
+            // abc2[m] = (a*(b*c))[m] = Σ_i a[i]*S[i,i^m] * (Σ_k b[k]*c[k^(i^m)]*S[k,k^(i^m)])
+            var l1: f64 = 0.0
+            var m: i64 = 0
+            while m < 16 {
+                var abc1_m: f64 = 0.0
+                var i: i64 = 0
+                while i < 16 {
+                    var ab_i: f64 = 0.0
+                    var j: i64 = 0
+                    while j < 16 {
+                        let ji = j ^ i
+                        let jI = j ^ II
+                        let jiJ = ji ^ JJ
+                        let a_j = states_buf[(base + jI) as usize] * (sign_tbl[(jI * 16 + II) as usize] as f64)
+                        let b_ji = states_buf[(base + jiJ) as usize] * (sign_tbl[(jiJ * 16 + JJ) as usize] as f64)
+                        let s_j_ji = sign_tbl[(j * 16 + ji) as usize] as f64
+                        ab_i = ab_i + a_j * b_ji * s_j_ji
+                        j = j + 1
+                    }
+                    let im = i ^ m
+                    let imK = im ^ KK
+                    let c_im = states_buf[(base + imK) as usize] * (sign_tbl[(imK * 16 + KK) as usize] as f64)
+                    let s_i_im = sign_tbl[(i * 16 + im) as usize] as f64
+                    abc1_m = abc1_m + ab_i * c_im * s_i_im
+                    i = i + 1
+                }
+                var abc2_m: f64 = 0.0
+                i = 0
+                while i < 16 {
+                    let iI = i ^ II
+                    let a_i = states_buf[(base + iI) as usize] * (sign_tbl[(iI * 16 + II) as usize] as f64)
+                    let im = i ^ m
+                    var bc_im: f64 = 0.0
+                    var k: i64 = 0
+                    while k < 16 {
+                        let kJ = k ^ JJ
+                        let kim = k ^ im
+                        let kimK = kim ^ KK
+                        let b_k = states_buf[(base + kJ) as usize] * (sign_tbl[(kJ * 16 + JJ) as usize] as f64)
+                        let c_kim = states_buf[(base + kimK) as usize] * (sign_tbl[(kimK * 16 + KK) as usize] as f64)
+                        let s_k_kim = sign_tbl[(k * 16 + kim) as usize] as f64
+                        bc_im = bc_im + b_k * c_kim * s_k_kim
+                        k = k + 1
+                    }
+                    let s_i_im = sign_tbl[(i * 16 + im) as usize] as f64
+                    abc2_m = abc2_m + a_i * bc_im * s_i_im
+                    i = i + 1
+                }
+                let assoc_m = abc1_m - abc2_m
+                l1 = l1 + if assoc_m < 0.0 { 0.0 - assoc_m } else { assoc_m }
+                m = m + 1
+            }
+            total = total + l1
+            t = t + 1
+        }
+        out_buf[tid as usize] = total / (n_triples as f64)
+    }
+}
+
+// ============================================================================
+// §6. CPU DISPATCH — GPU.launch wrapper
+//
+//     Dispatches sed_f3_l1_mass_kernel over N states.
+//     Caller provides flat buffers; sign_tbl and triples from SedKernelCtx.
+// ============================================================================
+
+/// Batch F₃ over N sedenion states. Dispatches to Metal GPU kernel.
+/// states[n*16]: flat buffer, states_buf[s*16+k] = component k of state s.
+/// out[n]:       output F₃ per state.
+pub fn sed_f3_batch(
+    n: i64,
+    states: &[f64],
+    sign_tbl: &[i64],
+    triples_buf: &[i64],
+    n_triples: i64,
+    out: &![f64],
+) with GPU, Mut, IO, Panic, Div {
+    let grid  = ((n + 63) / 64, 1, 1)
+    let block = (64, 1, 1)
+    perform GPU.launch(sed_f3_l1_mass_kernel, grid, block)(
+        n, states, sign_tbl, triples_buf, n_triples, out
+    )
+    perform GPU.sync()
+}
+
+// ============================================================================
+// §7. CPU FALLBACK — exact F₃ over all 168 O_168 triples
+//
+//     Verifiable CPU path used in testing and non-GPU environments.
+//     168 inline calls match Python O_168_sedenion_triples() ordering exactly.
+//     Expected: F₃(seed-20260421 state) ≈ 85.4749812048 / 168 ≈ 0.509 per triple.
+// ============================================================================
+
+/// F₃ for a single sedenion state: (1/168) * Σ_{(I,J,K)∈O_168} ||[h̃·eI, h̃·eJ, h̃·eK]||_{L¹}.
+/// Bit-compatible with Python f3_v3_l1_associator_mass() in ossm_168_dryrun/sedenion.py.
+pub fn sed_f3_single(h: Sedenion) -> f64 with Mut, Div {
+    var total: f64 = 0.0
+    total = total + sed_triple_l1(h, 1, 10, 4)
+    total = total + sed_triple_l1(h, 1, 10, 5)
+    total = total + sed_triple_l1(h, 1, 10, 6)
+    total = total + sed_triple_l1(h, 1, 10, 7)
+    total = total + sed_triple_l1(h, 1, 11, 4)
+    total = total + sed_triple_l1(h, 1, 11, 5)
+    total = total + sed_triple_l1(h, 1, 11, 6)
+    total = total + sed_triple_l1(h, 1, 11, 7)
+    total = total + sed_triple_l1(h, 1, 12, 2)
+    total = total + sed_triple_l1(h, 1, 12, 3)
+    total = total + sed_triple_l1(h, 1, 12, 6)
+    total = total + sed_triple_l1(h, 1, 12, 7)
+    total = total + sed_triple_l1(h, 1, 13, 2)
+    total = total + sed_triple_l1(h, 1, 13, 3)
+    total = total + sed_triple_l1(h, 1, 13, 6)
+    total = total + sed_triple_l1(h, 1, 13, 7)
+    total = total + sed_triple_l1(h, 1, 14, 2)
+    total = total + sed_triple_l1(h, 1, 14, 3)
+    total = total + sed_triple_l1(h, 1, 14, 4)
+    total = total + sed_triple_l1(h, 1, 14, 5)
+    total = total + sed_triple_l1(h, 1, 15, 2)
+    total = total + sed_triple_l1(h, 1, 15, 3)
+    total = total + sed_triple_l1(h, 1, 15, 4)
+    total = total + sed_triple_l1(h, 1, 15, 5)
+    total = total + sed_triple_l1(h, 2, 9, 4)
+    total = total + sed_triple_l1(h, 2, 9, 5)
+    total = total + sed_triple_l1(h, 2, 9, 6)
+    total = total + sed_triple_l1(h, 2, 9, 7)
+    total = total + sed_triple_l1(h, 2, 11, 4)
+    total = total + sed_triple_l1(h, 2, 11, 5)
+    total = total + sed_triple_l1(h, 2, 11, 6)
+    total = total + sed_triple_l1(h, 2, 11, 7)
+    total = total + sed_triple_l1(h, 2, 12, 1)
+    total = total + sed_triple_l1(h, 2, 12, 3)
+    total = total + sed_triple_l1(h, 2, 12, 5)
+    total = total + sed_triple_l1(h, 2, 12, 7)
+    total = total + sed_triple_l1(h, 2, 13, 1)
+    total = total + sed_triple_l1(h, 2, 13, 3)
+    total = total + sed_triple_l1(h, 2, 13, 4)
+    total = total + sed_triple_l1(h, 2, 13, 6)
+    total = total + sed_triple_l1(h, 2, 14, 1)
+    total = total + sed_triple_l1(h, 2, 14, 3)
+    total = total + sed_triple_l1(h, 2, 14, 5)
+    total = total + sed_triple_l1(h, 2, 14, 7)
+    total = total + sed_triple_l1(h, 2, 15, 1)
+    total = total + sed_triple_l1(h, 2, 15, 3)
+    total = total + sed_triple_l1(h, 2, 15, 4)
+    total = total + sed_triple_l1(h, 2, 15, 6)
+    total = total + sed_triple_l1(h, 3, 9, 4)
+    total = total + sed_triple_l1(h, 3, 9, 5)
+    total = total + sed_triple_l1(h, 3, 9, 6)
+    total = total + sed_triple_l1(h, 3, 9, 7)
+    total = total + sed_triple_l1(h, 3, 10, 4)
+    total = total + sed_triple_l1(h, 3, 10, 5)
+    total = total + sed_triple_l1(h, 3, 10, 6)
+    total = total + sed_triple_l1(h, 3, 10, 7)
+    total = total + sed_triple_l1(h, 3, 12, 1)
+    total = total + sed_triple_l1(h, 3, 12, 2)
+    total = total + sed_triple_l1(h, 3, 12, 5)
+    total = total + sed_triple_l1(h, 3, 12, 6)
+    total = total + sed_triple_l1(h, 3, 13, 1)
+    total = total + sed_triple_l1(h, 3, 13, 2)
+    total = total + sed_triple_l1(h, 3, 13, 4)
+    total = total + sed_triple_l1(h, 3, 13, 7)
+    total = total + sed_triple_l1(h, 3, 14, 1)
+    total = total + sed_triple_l1(h, 3, 14, 2)
+    total = total + sed_triple_l1(h, 3, 14, 4)
+    total = total + sed_triple_l1(h, 3, 14, 7)
+    total = total + sed_triple_l1(h, 3, 15, 1)
+    total = total + sed_triple_l1(h, 3, 15, 2)
+    total = total + sed_triple_l1(h, 3, 15, 5)
+    total = total + sed_triple_l1(h, 3, 15, 6)
+    total = total + sed_triple_l1(h, 4, 9, 2)
+    total = total + sed_triple_l1(h, 4, 9, 3)
+    total = total + sed_triple_l1(h, 4, 9, 6)
+    total = total + sed_triple_l1(h, 4, 9, 7)
+    total = total + sed_triple_l1(h, 4, 10, 1)
+    total = total + sed_triple_l1(h, 4, 10, 3)
+    total = total + sed_triple_l1(h, 4, 10, 5)
+    total = total + sed_triple_l1(h, 4, 10, 7)
+    total = total + sed_triple_l1(h, 4, 11, 1)
+    total = total + sed_triple_l1(h, 4, 11, 2)
+    total = total + sed_triple_l1(h, 4, 11, 5)
+    total = total + sed_triple_l1(h, 4, 11, 6)
+    total = total + sed_triple_l1(h, 4, 13, 2)
+    total = total + sed_triple_l1(h, 4, 13, 3)
+    total = total + sed_triple_l1(h, 4, 13, 6)
+    total = total + sed_triple_l1(h, 4, 13, 7)
+    total = total + sed_triple_l1(h, 4, 14, 1)
+    total = total + sed_triple_l1(h, 4, 14, 3)
+    total = total + sed_triple_l1(h, 4, 14, 5)
+    total = total + sed_triple_l1(h, 4, 14, 7)
+    total = total + sed_triple_l1(h, 4, 15, 1)
+    total = total + sed_triple_l1(h, 4, 15, 2)
+    total = total + sed_triple_l1(h, 4, 15, 5)
+    total = total + sed_triple_l1(h, 4, 15, 6)
+    total = total + sed_triple_l1(h, 5, 9, 2)
+    total = total + sed_triple_l1(h, 5, 9, 3)
+    total = total + sed_triple_l1(h, 5, 9, 6)
+    total = total + sed_triple_l1(h, 5, 9, 7)
+    total = total + sed_triple_l1(h, 5, 10, 1)
+    total = total + sed_triple_l1(h, 5, 10, 3)
+    total = total + sed_triple_l1(h, 5, 10, 4)
+    total = total + sed_triple_l1(h, 5, 10, 6)
+    total = total + sed_triple_l1(h, 5, 11, 1)
+    total = total + sed_triple_l1(h, 5, 11, 2)
+    total = total + sed_triple_l1(h, 5, 11, 4)
+    total = total + sed_triple_l1(h, 5, 11, 7)
+    total = total + sed_triple_l1(h, 5, 12, 2)
+    total = total + sed_triple_l1(h, 5, 12, 3)
+    total = total + sed_triple_l1(h, 5, 12, 6)
+    total = total + sed_triple_l1(h, 5, 12, 7)
+    total = total + sed_triple_l1(h, 5, 14, 1)
+    total = total + sed_triple_l1(h, 5, 14, 2)
+    total = total + sed_triple_l1(h, 5, 14, 4)
+    total = total + sed_triple_l1(h, 5, 14, 7)
+    total = total + sed_triple_l1(h, 5, 15, 1)
+    total = total + sed_triple_l1(h, 5, 15, 3)
+    total = total + sed_triple_l1(h, 5, 15, 4)
+    total = total + sed_triple_l1(h, 5, 15, 6)
+    total = total + sed_triple_l1(h, 6, 9, 2)
+    total = total + sed_triple_l1(h, 6, 9, 3)
+    total = total + sed_triple_l1(h, 6, 9, 4)
+    total = total + sed_triple_l1(h, 6, 9, 5)
+    total = total + sed_triple_l1(h, 6, 10, 1)
+    total = total + sed_triple_l1(h, 6, 10, 3)
+    total = total + sed_triple_l1(h, 6, 10, 5)
+    total = total + sed_triple_l1(h, 6, 10, 7)
+    total = total + sed_triple_l1(h, 6, 11, 1)
+    total = total + sed_triple_l1(h, 6, 11, 2)
+    total = total + sed_triple_l1(h, 6, 11, 4)
+    total = total + sed_triple_l1(h, 6, 11, 7)
+    total = total + sed_triple_l1(h, 6, 12, 1)
+    total = total + sed_triple_l1(h, 6, 12, 3)
+    total = total + sed_triple_l1(h, 6, 12, 5)
+    total = total + sed_triple_l1(h, 6, 12, 7)
+    total = total + sed_triple_l1(h, 6, 13, 1)
+    total = total + sed_triple_l1(h, 6, 13, 2)
+    total = total + sed_triple_l1(h, 6, 13, 4)
+    total = total + sed_triple_l1(h, 6, 13, 7)
+    total = total + sed_triple_l1(h, 6, 15, 2)
+    total = total + sed_triple_l1(h, 6, 15, 3)
+    total = total + sed_triple_l1(h, 6, 15, 4)
+    total = total + sed_triple_l1(h, 6, 15, 5)
+    total = total + sed_triple_l1(h, 7, 9, 2)
+    total = total + sed_triple_l1(h, 7, 9, 3)
+    total = total + sed_triple_l1(h, 7, 9, 4)
+    total = total + sed_triple_l1(h, 7, 9, 5)
+    total = total + sed_triple_l1(h, 7, 10, 1)
+    total = total + sed_triple_l1(h, 7, 10, 3)
+    total = total + sed_triple_l1(h, 7, 10, 4)
+    total = total + sed_triple_l1(h, 7, 10, 6)
+    total = total + sed_triple_l1(h, 7, 11, 1)
+    total = total + sed_triple_l1(h, 7, 11, 2)
+    total = total + sed_triple_l1(h, 7, 11, 5)
+    total = total + sed_triple_l1(h, 7, 11, 6)
+    total = total + sed_triple_l1(h, 7, 12, 1)
+    total = total + sed_triple_l1(h, 7, 12, 2)
+    total = total + sed_triple_l1(h, 7, 12, 5)
+    total = total + sed_triple_l1(h, 7, 12, 6)
+    total = total + sed_triple_l1(h, 7, 13, 1)
+    total = total + sed_triple_l1(h, 7, 13, 3)
+    total = total + sed_triple_l1(h, 7, 13, 4)
+    total = total + sed_triple_l1(h, 7, 13, 6)
+    total = total + sed_triple_l1(h, 7, 14, 2)
+    total = total + sed_triple_l1(h, 7, 14, 3)
+    total = total + sed_triple_l1(h, 7, 14, 4)
+    total = total + sed_triple_l1(h, 7, 14, 5)
+    total / 168.0
+}

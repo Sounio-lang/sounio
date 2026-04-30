@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.api.epistemic-api
+topic_id: repo.docs.reference.epistemic-api
 authority: repo_only
 audience: users
 last_validated: 2026-03-07
-validated_by: A2
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.api.epistemic-api
+validated_by: A3
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.reference.epistemic-api
 -->
 
 # Sounio Epistemic Gaps — API Documentation

@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.paper.temporality-psychiatry.draft-en
+topic_id: repo.docs.papers.temporality-psychiatry.draft-en
 authority: repo_only
-audience: researchers
+audience: users
 last_validated: 2026-03-07
-validated_by: A6
-source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.temporality-psychiatry.draft-en
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.temporality-psychiatry.draft-en
 -->
 
 # Three Temporalities in Psychiatry: A Framework for Time, Psychopharmacology, and High-Gain Temporal Systems

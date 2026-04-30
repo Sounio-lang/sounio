@@ -162,7 +162,7 @@ File Structure Verification:
 
 ### Quick Install
 ```bash
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 pip install -e .
 jupyter notebook
 ```

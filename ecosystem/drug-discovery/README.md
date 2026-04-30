@@ -56,7 +56,7 @@ Decision: PROCEED / HALT (with epistemic confidence)
 ### From Repository
 
 ```bash
-cd triple-sounio-ecosystem/drug-discovery
+cd ecosystem/drug-discovery
 ```
 
 No build needed—pure Sounio source.
@@ -307,7 +307,7 @@ fn pd_effect(conc: FK) -> FK with Div, Panic, Mut {
 
 Results from this pipeline can be cited as:
 
-> *Epistemic Drug Discovery: A Case Study in Uncertainty Quantification*. Sounio Epistemic Computing, 2026. Source: `triple-sounio-ecosystem/drug-discovery/`
+> *Epistemic Drug Discovery: A Case Study in Uncertainty Quantification*. Sounio Epistemic Computing, 2026. Source: `ecosystem/drug-discovery/`
 
 ## References
 

@@ -1,0 +1,164 @@
+//@ run-pass
+// Phase 1 regression: second-order GUM variance closes a >15% gap that
+// first-order (delta-method) propagation cannot see.
+//
+// Rapamycin PBPK — nonlinear regime (simplified):
+//
+//   R(C, k) = C² · k      // curvature ∂²R/∂C² = 2k is non-zero
+//
+// With C representing drug concentration and k a rate-like parameter, both
+// at ≈ unity with σ² = 0.2 (45% relative SD — typical for batch variability
+// in sirolimus pharmacokinetics per Zhang et al. 2018).
+//
+// Expected (hand-computed):
+//   J_C = 2·C·k = 2,  J_k = C² = 1        =>  J = [2, 1, 0, ...]
+//   H_CC = 2·k = 2,   H_Ck = 2·C = 2, H_kk = 0
+//   σ²_1st(R) = 4·0.2 + 1·0.2 + 0         = 1.00
+//   tr(HΣHΣ) = 4·(0.2)² + 8·(0.2)·(0.2)   = 0.48
+//   σ²_2nd(R) = 1.00 + 0.5·0.48           = 1.24
+//   ratio σ²_2nd/σ²_1st                   = 1.24  (24% first-order underestimate)
+
+// =============================================================================
+// Inlined helpers (matches stdlib/epistemic/gum.sio and covariance.sio)
+// =============================================================================
+
+struct CovMat {
+    n: i32,
+    data: [f64; 300],
+}
+
+fn tri_idx_cov(n: i32, i: i32, j: i32) -> i32 with Mut {
+    var row = i
+    var col = j
+    if i > j { row = j; col = i }
+    return row * n - (row * (row - 1)) / 2 + (col - row)
+}
+
+fn cm_new(n: i32) -> CovMat {
+    return CovMat { n: n, data: [0.0; 300] }
+}
+
+fn cm_set(cov: &!CovMat, i: i32, j: i32, val: f64) with Mut {
+    let idx = tri_idx_cov(cov.n, i, j)
+    cov.data[idx] = val
+}
+
+fn cm_get(cov: &CovMat, i: i32, j: i32) -> f64 with Mut {
+    let idx = tri_idx_cov(cov.n, i, j)
+    return cov.data[idx]
+}
+
+fn hess_tri_idx_8(i: i32, j: i32) -> i32 with Mut {
+    var r = i
+    var c = j
+    if r > c { r = j; c = i }
+    return 8 * r - (r * (r - 1)) / 2 + (c - r)
+}
+
+fn hess_get_8(h: [f64; 36], i: i32, j: i32) -> f64 with Mut {
+    return h[hess_tri_idx_8(i, j)]
+}
+
+fn gum_first_order_variance(j: [f64; 8], sigma: &CovMat) -> f64 with Mut {
+    var acc: f64 = 0.0
+    var i: i32 = 0
+    while i < 8 {
+        var k: i32 = 0
+        while k < 8 {
+            acc = acc + j[i] * cm_get(sigma, i, k) * j[k]
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return acc
+}
+
+fn gum_trace_hshs(h: [f64; 36], sigma: &CovMat) -> f64 with Mut {
+    var acc: f64 = 0.0
+    var i: i32 = 0
+    while i < 8 {
+        var j: i32 = 0
+        while j < 8 {
+            let h_ij = hess_get_8(h, i, j)
+            var k: i32 = 0
+            while k < 8 {
+                let s_jk = cm_get(sigma, j, k)
+                var l: i32 = 0
+                while l < 8 {
+                    let h_kl = hess_get_8(h, k, l)
+                    let s_li = cm_get(sigma, l, i)
+                    acc = acc + h_ij * s_jk * h_kl * s_li
+                    l = l + 1
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return acc
+}
+
+fn gum_second_order_variance(j: [f64; 8], h: [f64; 36], sigma: &CovMat) -> f64 with Mut, Div {
+    let v1 = gum_first_order_variance(j, sigma)
+    let trace = gum_trace_hshs(h, sigma)
+    return v1 + 0.5 * trace
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// =============================================================================
+// PBPK rapamycin: R(C, k) = C² · k
+// =============================================================================
+
+fn rapamycin_nonlinear_ratio() -> f64 with IO, Epistemic, Mut, Div {
+    // Drug concentration C (channel 0), rate-like k (channel 1)
+    let cm: Knowledge<f64> = measure(1.0, uncertainty: 0.0)
+    let km: Knowledge<f64> = measure(1.0, uncertainty: 0.0)
+    let c = cm.value
+    let k = km.value
+    // Nonlinear response — second-order curvature matters here
+    let r = c * c * k
+    // Collect Jacobian (channels 0..7)
+    let jac: [f64; 8] = [
+        sensitivity_of(r, 0),
+        sensitivity_of(r, 1),
+        sensitivity_of(r, 2),
+        sensitivity_of(r, 3),
+        sensitivity_of(r, 4),
+        sensitivity_of(r, 5),
+        sensitivity_of(r, 6),
+        sensitivity_of(r, 7),
+    ]
+    // Upper-triangular Hessian (36 entries).  Under GTT, r's topology is
+    // {0, 1} — only H[0,0], H[0,1], H[1,1] are in-topology and hence the
+    // only analytically non-zero entries.  Out-of-topology queries are a
+    // type error (see gtt_let_bound_out_of_topology.sio); default-init
+    // supplies the mathematical zeros for the other 33 slots.
+    var h: [f64; 36] = [0.0; 36]
+    h[0] = hessian_of(r, 0, 0)    // H_cc = 2k  = 2.0
+    h[1] = hessian_of(r, 0, 1)    // H_ck = 2c  = 2.0
+    h[8] = hessian_of(r, 1, 1)    // H_kk = 0.0
+    // Covariance: σ²_C = σ²_k = 0.2 (uncorrelated)
+    var sigma = cm_new(8)
+    cm_set(&!sigma, 0, 0, 0.2)
+    cm_set(&!sigma, 1, 1, 0.2)
+    // Compute both variances
+    let v1 = gum_first_order_variance(jac, &sigma)
+    let v2 = gum_second_order_variance(jac, h, &sigma)
+    // Return the ratio σ²_2nd / σ²_1st — expected ≈ 1.24 (24% gap)
+    return v2 / v1
+}
+
+fn main() with IO, Epistemic, Mut, Div {
+    let ratio = rapamycin_nonlinear_ratio()
+    // Gate: ratio must exceed 1.15 (first-order underestimates by ≥ 15%)
+    println(ratio)                    // expect ≈ 1.240000
+    if ratio >= 1.15 {
+        println(1)                    // 1 = gate passed
+    } else {
+        println(0)                    // 0 = gate failed
+    }
+}

@@ -1,0 +1,244 @@
+// examples/neuroreceptor_pet/pet_lammertsma1996_analysis.sio
+//
+// Algebraic consistency check of the Innis 2007 consensus relation
+//   BP_ND = V_T_target / V_T_reference - 1
+// against the PUBLISHED AGGREGATE KINETIC METRICS (V_T and BP_ND summary
+// values, not dynamic TACs) reported in:
+//
+//   Lammertsma AA, Bench CJ, Hume SP, Osman S, Gunn K, Brooks DJ,
+//   Frackowiak RSJ. Comparison of methods for analysis of clinical
+//   [11C]raclopride studies. J Cereb Blood Flow Metab 1996; 16: 42-52.
+//   doi:10.1097/00004647-199601000-00005
+//
+// Data transcribed from the paper:
+//   Table 2 — V_T (2TCM method A), cerebellum and striatum, 8 subjects.
+//   Table 3 — BP_ND (indirect method A), same 8 subjects.
+//
+// WHAT THIS IS (scope statement):
+//   - A purely algebraic verification that re-computing BP_ND from the
+//     paper's own published V_T pairs via the Innis 2007 formula yields
+//     the BP_ND values the paper itself reports in Table 3.
+//   - This is a closed-form formula consistency check on published
+//     aggregate summary statistics.
+//
+// WHAT THIS IS NOT:
+//   - Not a fit to real dynamic PET data.
+//   - Not a re-analysis of raw TAC time series.
+//   - Not a validation of the Sounio 2TCM simulator against patient scans
+//     (no patient TAC data are used here).
+//
+// Expected agreement is essentially perfect up to rounding, because both
+// the paper's Table 3 and our BP_calc are derived from the same Table 2
+// V_T pairs via the same algebraic relation. Non-trivial deviations would
+// indicate either a transcription error or a formula mismatch.
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { return 0.0 - x } ; return x }
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    return g
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  ALGEBRAIC CONSISTENCY CHECK — Innis 2007 formula")
+    println("  Published aggregate metrics: Lammertsma 1996 JCBFM 16:42-52")
+    println("  [11C]raclopride, 8 normal subjects; 2TCM method A, Tables 2 + 3")
+    println("  (This is NOT a fit to real dynamic TAC data.)")
+    println("======================================================================")
+    println("")
+
+    // ------------------------------------------------------------------
+    // Published aggregate kinetic metrics (Lammertsma 1996).
+    // Table 2, method A (2TCM): V_T cerebellum and V_T striatum (summary).
+    // Table 3, indirect method A: BP_ND published by the authors (summary).
+    // No raw dynamic TACs are used.
+    // ------------------------------------------------------------------
+    let vt_cer      = [0.43, 0.47, 0.43, 0.45, 0.45, 0.42, 0.43, 0.27]
+    let vt_str      = [1.51, 1.49, 1.23, 1.63, 1.08, 0.89, 0.65, 0.43]
+    let bp_published = [2.48, 2.13, 1.88, 2.65, 1.42, 1.09, 0.52, 0.58]
+
+    let n = 8
+
+    println("Source: Lammertsma 1996 JCBFM 16:42-52, Table 2 (V_T) + Table 3 (BP).")
+    println("  Cerebellum = reference region (no specific binding)")
+    println("  Striatum   = target region (D2/D3 binding)")
+    println("  Relation   = BP_ND = V_T_str/V_T_cer - 1  (Innis 2007 consensus)")
+    println("")
+
+    println("Per-subject analysis:")
+    println("  Subj  V_T_cer  V_T_str  BP_pub  BP_calc  abs_err")
+
+    var sum_err = 0.0
+    var sum_err_abs = 0.0
+    var sum_sq = 0.0
+    var sum_bp_pub = 0.0
+    var sum_bp_calc = 0.0
+    var sum_bp_pub2 = 0.0
+    var sum_bp_calc2 = 0.0
+    var sum_pc = 0.0
+    var max_abs_err = 0.0
+
+    var i = 0
+    while i < n {
+        let cer = vt_cer[i as usize]
+        let str = vt_str[i as usize]
+        let bp_pub = bp_published[i as usize]
+        let bp_calc = str / cer - 1.0
+        let err = bp_calc - bp_pub
+        let abs_err = abs_f64(err)
+
+        print("  "); print(i + 1); print("     ")
+        print(cer);  print("   ")
+        print(str);  print("   ")
+        print(bp_pub);  print("    ")
+        print(bp_calc); print("   ")
+        print(abs_err)
+        println("")
+
+        sum_err = sum_err + err
+        sum_err_abs = sum_err_abs + abs_err
+        sum_sq = sum_sq + err * err
+        sum_bp_pub = sum_bp_pub + bp_pub
+        sum_bp_calc = sum_bp_calc + bp_calc
+        sum_bp_pub2 = sum_bp_pub2 + bp_pub * bp_pub
+        sum_bp_calc2 = sum_bp_calc2 + bp_calc * bp_calc
+        sum_pc = sum_pc + bp_pub * bp_calc
+        if abs_err > max_abs_err { max_abs_err = abs_err }
+        i = i + 1
+    }
+
+    let nf = n as f64
+    let mean_err = sum_err / nf
+    let mean_abs_err = sum_err_abs / nf
+    let rms_err = sqrt_f64(sum_sq / nf)
+    let mean_pub = sum_bp_pub / nf
+    let mean_calc = sum_bp_calc / nf
+
+    // Pearson correlation
+    let num = sum_pc - nf * mean_pub * mean_calc
+    let den_a = sum_bp_pub2 - nf * mean_pub * mean_pub
+    let den_b = sum_bp_calc2 - nf * mean_calc * mean_calc
+    let corr = if den_a > 0.0 && den_b > 0.0 { num / sqrt_f64(den_a * den_b) } else { 0.0 }
+
+    // Mean and SD of BP_calc
+    var sd_calc_sq = 0.0
+    i = 0
+    while i < n {
+        let d = bp_published[i as usize] - mean_pub
+        sd_calc_sq = sd_calc_sq + d * d
+        i = i + 1
+    }
+    let sd_pub = sqrt_f64(sd_calc_sq / (nf - 1.0))
+
+    println("")
+    println("======================================================================")
+    println("  AGGREGATE COMPARISON (BP_calc vs BP_published)")
+    println("======================================================================")
+    println("  Mean BP published:     "); print(mean_pub);  println("  (range 0.52 .. 2.65)")
+    println("  Mean BP calculated:    "); print(mean_calc); println("")
+    println("  SD of BP published:    "); print(sd_pub);    println("")
+    println("  Mean bias (calc-pub):  "); print(mean_err);  println("")
+    println("  Mean absolute error:   "); print(mean_abs_err); println("")
+    println("  RMS error:             "); print(rms_err);   println("")
+    println("  Max absolute error:    "); print(max_abs_err); println("")
+    println("  Pearson correlation:   "); print(corr);      println("")
+    println("")
+
+    // ------------------------------------------------------------------
+    // Acceptance tests
+    // ------------------------------------------------------------------
+    var passed = 0
+    var failed = 0
+
+    // (1) Correlation must be near perfect — the relation is algebraic.
+    if corr > 0.999 {
+        println("  [PASS] Correlation r > 0.999 with published BP values")
+        passed = passed + 1
+    } else {
+        println("  [FAIL] Correlation below 0.999 — possible rounding or model mismatch")
+        failed = failed + 1
+    }
+
+    // (2) Mean absolute error should be small — only source of discrepancy
+    //     is rounding of V_T to 2 decimal places in the publication.
+    if mean_abs_err < 0.10 {
+        println("  [PASS] Mean absolute error < 0.10 BP units")
+        passed = passed + 1
+    } else {
+        println("  [FAIL] Mean absolute error exceeds 0.10 BP units")
+        failed = failed + 1
+    }
+
+    // (3) RMS error below 0.15
+    if rms_err < 0.15 {
+        println("  [PASS] RMS error < 0.15 BP units")
+        passed = passed + 1
+    } else {
+        println("  [FAIL] RMS error exceeds 0.15 BP units")
+        failed = failed + 1
+    }
+
+    // (4) Bias near zero (no systematic error expected from algebra)
+    if abs_f64(mean_err) < 0.05 {
+        println("  [PASS] Mean bias < 0.05 BP units (no systematic error)")
+        passed = passed + 1
+    } else {
+        println("  [FAIL] Systematic bias > 0.05 detected")
+        failed = failed + 1
+    }
+
+    // (5) No outlier worse than 0.20
+    if max_abs_err < 0.20 {
+        println("  [PASS] No subject worse than 0.20 BP units")
+        passed = passed + 1
+    } else {
+        println("  [FAIL] Outlier subject beyond 0.20 BP units")
+        failed = failed + 1
+    }
+
+    // (6) Published BP range should be reproduced
+    var min_calc = bp_published[0]
+    var max_calc = bp_published[0]
+    i = 0
+    while i < n {
+        let bp_c = vt_str[i as usize] / vt_cer[i as usize] - 1.0
+        if bp_c < min_calc { min_calc = bp_c }
+        if bp_c > max_calc { max_calc = bp_c }
+        i = i + 1
+    }
+    if min_calc > 0.3 && min_calc < 0.7 && max_calc > 2.3 && max_calc < 3.0 {
+        println("  [PASS] Computed BP range overlaps published [0.52, 2.65]")
+        passed = passed + 1
+    } else {
+        println("  [FAIL] Computed BP range outside published bounds")
+        failed = failed + 1
+    }
+
+    println("")
+    println("======================================================================")
+    println("  SUMMARY")
+    println("======================================================================")
+    println("  Passed:"); print(passed); println("")
+    println("  Failed:"); print(failed); println("")
+    println("")
+    if failed == 0 {
+        println("  Algebraic consistency check passes: re-computing BP_ND from")
+        println("  the paper's own Table 2 V_T pairs via BP = V_T_str/V_T_cer - 1")
+        println("  (Innis 2007) reproduces the paper's Table 3 BP values to")
+        println("  within two-decimal rounding across all 8 subjects.")
+        println("")
+        println("  Scope note: this verifies the Innis 2007 consensus FORMULA")
+        println("  against a published aggregate-metric table; it does NOT")
+        println("  validate any dynamic PET fit, nor the Sounio 2TCM simulator,")
+        println("  against real patient TAC data.")
+        return 0
+    } else {
+        println("  Algebraic consistency check failed — transcription or formula.")
+        return 1
+    }
+}

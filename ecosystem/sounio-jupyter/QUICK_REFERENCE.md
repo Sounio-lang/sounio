@@ -3,7 +3,7 @@
 ## Installation
 
 ```bash
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 pip install -e .
 jupyter kernelspec install kernelspec/ --user
 ```
@@ -98,7 +98,7 @@ struct Point { x: i32 } # Struct definition
 ## Testing
 
 ```bash
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 
 # Run all tests
 python3 tests/test_executor.py

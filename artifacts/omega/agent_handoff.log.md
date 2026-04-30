@@ -17,6 +17,38 @@ status: lock-open|lock-released|blocked
 
 ---
 
+agent: claude
+time_utc: 2026-04-26T00:00:00Z
+files:
+  - self-hosted/compiler/lean_single.sio
+  - bin/souc-linux-x86_64
+  - tests/run-pass/gtt_reassignment_topology.sio
+  - tests/run-pass/gtt_loop_topology.sio
+  - tests/run-pass/gtt_recursion_topology.sio
+  - tests/compile-fail/gtt_reassignment_wrong_channel.sio
+  - tests/compile-fail/gtt_loop_wrong_channel.sio
+  - tests/run-pass/knowledge_struct_field_ok.sio
+  - tests/compile-fail/knowledge_struct_field_type_mismatch.sio
+  - tests/compile-fail/knowledge_struct_field_epsilon_violation.sio
+intent: β¹⁰ GTT loop/recursion fixed-point (item 1) + Knowledge<T> struct-field type enforcement (item 2)
+checks:
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter gtt --jobs 1 --verbose  (17/17 PASS)
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter knowledge --jobs 1 --verbose  (22/22 PASS)
+  - md5sum gen2==gen3 for both bootstrap rounds
+notes: |
+  Item 1: x = expr reassignment never wrote VAR_CH_SET; loop snapshot+union missing.
+  Fixed: VAR_CH_SET written in reassignment path; gtt_loop_snapshot/gtt_loop_union helpers
+  added; LOOP_SNAP_CH_SET[8192] global; applied to while and for loops.
+  Fixed-point: 7a5d105c (committed in prior session).
+  Item 2: scan_type() sets SCAN_TY=0 for Knowledge<T>, so ST_FTY is 0 for Knowledge
+  fields; the guard `if fty != 0` silently bypassed all type checks.
+  Fix: added `if fty == 0 && knowledge_hash_is(fhash)` branch calling tc_linear_violation.
+  Fixed-point gen2==gen3 (md5 b35a33d9). Committed 980f49aa.
+commit: 980f49aa
+status: lock-released
+
+---
+
 agent: codex
 time_utc: 2026-02-26T17:14:00Z
 files:
@@ -27,6 +59,112 @@ checks:
   - markdown-only change
 commit: pending
 status: lock-released
+
+---
+
+agent: codex
+time_utc: 2026-04-26T08:41:20Z
+files:
+  - self-hosted/native/apple_arm64_preview.sio
+  - tests/native-v2/aarch64_macho_preview_emit.sio
+  - scripts/apple/apple_native_v2_ssh_gate.sh
+  - self-hosted/native/codegen_x86_linux.sio
+intent: push Apple native-v2 beyond orchestration by adding an isolated Apple Silicon preview emitter and wiring the Apple SSH gate to attempt Mach-O emission/runtime attestation instead of stopping at the prior import-blocked placeholder
+checks:
+  - bash -n scripts/apple/apple_native_v2_ssh_gate.sh
+  - ./bin/souc check tests/native-v2/aarch64_macho_preview_emit.sio
+  - ./bin/souc run tests/native-v2/aarch64_macho_preview_emit.sio (fixed; writes Mach-O 64-bit scalar smoke)
+notes:
+  - replaced generic MachoWriter path with a direct one-buffer scalar Mach-O emitter to avoid large by-value runtime copies
+  - moved the aarch64-macos contract sidecar into the shell gate because Sounio-side JSON string-buffer helpers corrupted the standalone sidecar length
+commit: pending
+status: lock-released
+
+---
+
+agent: codex
+time_utc: 2026-04-26T08:49:07Z
+files:
+  - self-hosted/native/apple_arm64_preview.sio
+  - tests/native-v2/aarch64_macho_preview_emit.sio
+  - scripts/apple/apple_native_v2_ssh_gate.sh
+  - artifacts/omega/native_backend_v2_scalar_smoke.aarch64-macos.bin
+  - artifacts/omega/native_backend_v2_contract.aarch64-macos.json
+intent: fix Apple native-v2 Mach-O smoke runtime crash and leave a valid scalar-core artifact/contract pair for remote Apple attestation
+checks:
+  - ./bin/souc check tests/native-v2/aarch64_macho_preview_emit.sio
+  - ./bin/souc run tests/native-v2/aarch64_macho_preview_emit.sio
+  - file artifacts/omega/native_backend_v2_scalar_smoke.aarch64-macos.bin (Mach-O 64-bit)
+  - wc -c artifacts/omega/native_backend_v2_contract.aarch64-macos.json artifacts/omega/native_backend_v2_scalar_smoke.aarch64-macos.bin (372 and 32768 bytes)
+  - bash -n scripts/apple/apple_native_v2_ssh_gate.sh
+  - git diff --check
+commit: pending
+status: lock-released
+
+---
+
+agent: codex
+time_utc: 2026-04-26T02:15:00Z
+files:
+  - scripts/apple/apple_native_v2_ssh_gate.sh
+  - scripts/omega/omega_native_v2_shadow_gate.sh
+  - self-hosted/compiler/main.sio
+  - artifacts/omega/apple_os26_native_v2_ssh_gate.v1.json
+intent: implement Apple OS 26.5 native-v2 SSH orchestration while preserving the x86 native-v2 gate contract
+checks:
+  - bash -n scripts/apple/apple_native_v2_ssh_gate.sh
+  - bash -n scripts/omega/omega_native_v2_shadow_gate.sh
+  - git diff --check
+  - SOUNIO_MAC_SSH_CONNECT_TIMEOUT=2 bash scripts/apple/apple_native_v2_ssh_gate.sh
+  - bash scripts/omega/omega_native_v2_shadow_gate.sh
+status: partial
+notes:
+  - Apple SSH gate emitted not_run/ssh_unreachable for the default MacBook host in this workspace.
+  - AArch64 native-v2 runtime attestation remains not_run because full native::codegen.sio import/typecheck is dirty in this checkout; do not route it through full native::codegen import in main.sio.
+  - The omega gate still exits 139 in this checkout because plain main.sio --self-test is currently segfaulting after existing diagnostics.
+
+---
+
+agent: codex
+time_utc: 2026-04-26T02:35:00Z
+files:
+  - scripts/apple/apple_native_v2_ssh_gate.sh
+  - .codex/AGENT_HANDOFF.md
+  - .claude/AGENT_HANDOFF.md
+  - artifacts/omega/agent_handoff.log.md
+intent: continue Apple native-v2 implementation by probing smaller native-v2 AArch64 driver paths and recording the true blocker
+checks:
+  - ./bin/souc run self-hosted/main.sio -- compile --backend=native-v2 --target=aarch64-macos -o artifacts/omega/native_backend_v2_scalar_smoke.aarch64-macos.bin tests/selfhost-driver-output/ret_42.sio
+  - ./bin/souc run tests/native-v2/aarch64_macho_preview_emit.sio
+  - ./bin/souc check tests/native-v2/aarch64_macho_preview_emit.sio
+status: partial
+notes:
+  - self-hosted/main.sio native-v2 compile path fails typecheck before emission in this checkout.
+  - A synthetic IR driver importing native::codegen also fails because native::codegen.sio itself is type-dirty under current checker/import behavior.
+  - Removed the failing probe file; the Apple SSH gate now reports native_v2_aarch64_codegen_import_blocked for the native-v2 portion while preserving the maintained selfhost_host_gate Mach-O lane.
+
+---
+
+agent: codex
+time_utc: 2026-04-26T01:05:00Z
+files:
+  - bin/souc-linux-x86_64
+  - self-hosted/compiler/lean_single.sio
+  - scripts/ci/check_check_sio_integration_window.sh
+  - tests/compile-fail/confidence_gate_reject.sio
+  - tests/run-pass/confidence_gate_pass.sio
+intent: stabilize confidence-gate rebuild lane; remove temporary artifacts/debug prints; validate default compiler path
+checks:
+  - removed generated artifacts: --emit-econf gen1.out gen2.out out.bin
+  - ./bin/souc info
+  - bash scripts/ci/check_check_sio_integration_window.sh
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter confidence_gate --jobs 1 --verbose
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter unit_mismatch --jobs 1 --verbose
+  - ./bin/souc check tests/compile-fail/confidence_gate_reject.sio (still exits 0; fixture remains known-failure)
+  - ./bin/souc run tests/run-pass/confidence_gate_pass.sio
+  - git diff --check
+commit: pending
+status: blocked
 
 ---
 
@@ -47,3 +185,115 @@ checks:
   - pending
 commit: pending
 status: lock-open
+
+---
+
+agent: codex
+time_utc: 2026-04-25T00:00:00Z
+files:
+  - .agent-orchestration/HANDOFF.md
+  - .claude/AGENT_HANDOFF.md
+  - .codex/AGENT_HANDOFF.md
+  - .roo/AGENT_HANDOFF.md
+  - .cursor/AGENT_HANDOFF.md
+  - .beagle/context/AGENT_HANDOFF.md
+  - .kimi/AGENT_HANDOFF.md
+  - artifacts/omega/agent_handoff.log.md
+intent: install shared parallel-agent startup handoff and per-agent orchestration entrypoints
+checks:
+  - markdown-only coordination change
+  - git status --short --ignored=matching .agent-orchestration .claude/AGENT_HANDOFF.md .codex/AGENT_HANDOFF.md .roo/AGENT_HANDOFF.md .cursor/AGENT_HANDOFF.md .beagle/context/AGENT_HANDOFF.md .kimi/AGENT_HANDOFF.md
+commit: pending
+status: lock-released
+
+---
+
+agent: codex
+time_utc: 2026-04-26T00:00:00Z
+files:
+  - scripts/dev/run_sio_test_suite_v2.sh
+  - tests/run-pass/g2_abide_sounio.sio
+  - tests/compile-fail/confidence_gate_reject.sio
+  - tests/compile-fail/unit_mismatch_call_arg.sio
+intent: promote real validation work after orchestration; make v2 compile-fail handling catch compiler output that says typecheck failed even when souc exits 0; validate G2 ABIDE promotion and known-failure classifications
+checks:
+  - bash -n scripts/dev/run_sio_test_suite_v2.sh
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter refinement_violation --jobs 1 --verbose
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter g2_abide_sounio --jobs 1 --verbose
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter confidence_gate_reject --jobs 1 --verbose
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter unit_mismatch_call_arg --jobs 1 --verbose
+commit: pending
+status: lock-released
+
+---
+
+agent: codex
+time_utc: 2026-04-26T00:15:00Z
+files:
+  - bin/souc-linux-x86_64
+  - self-hosted/compiler/lean_single.sio
+  - self-hosted/check/check.sio
+  - tests/compile-fail/unit_mismatch_call_arg.sio
+intent: enforce unit mismatch rejection at function call boundaries and promote fixture out of known-failure
+checks:
+  - ./bin/souc info
+  - ./bin/souc check tests/compile-fail/unit_mismatch_call_arg.sio
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter unit_mismatch_call_arg --jobs 1 --verbose
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter unit_mismatch --jobs 1 --verbose
+commit: pending
+status: lock-released
+
+---
+
+agent: codex
+time_utc: 2026-04-26T02:30:00Z
+files:
+  - self-hosted/compiler/lean_single.sio
+  - self-hosted/compiler/main.sio
+  - bin/souc-linux-x86_64
+  - scripts/omega/omega_native_v2_shadow_gate.sh
+  - scripts/apple/apple_native_v2_ssh_gate.sh
+  - artifacts/omega/apple_os26_native_v2_ssh_gate.v1.json
+  - .claude/AGENT_HANDOFF.md
+  - .codex/AGENT_HANDOFF.md
+intent: complete confidence-gate rebuild lane cleanup — remove debug prints, rebuild binary to fixed point, narrow native-v2 codegen import, add Apple SSH orchestration
+checks:
+  - bash scripts/ci/check_check_sio_integration_window.sh (PASS)
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter confidence_gate --jobs 1 (3 pass, 0 fail)
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter unit_mismatch --jobs 1 (3 pass, 1 skip)
+  - ./bin/souc info
+  - two-stage bootstrap fixed point verified (rebuild2 == rebuild3)
+commit: 4cb4f46a
+status: lock-released
+
+---
+
+agent: kimi
+time_utc: 2026-04-27T19:20:00Z
+files:
+  - self-hosted/compiler/lean_single.sio
+intent: Fix Result pattern match segfault by preventing Result from incorrectly taking the Option inline-copy path in let/var assignments
+ checks:
+  - edit lean_single.sio lines 16698 and 26817
+  - rebuild bin/souc-linux-x86_64 via selfhost_host_gate.sh
+  - verify match_patterns_complete.sio no longer segfaults
+commit: pending
+status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-04-27T22:00:00Z
+files:
+  - self-hosted/compiler/lean_single.sio
+  - bin/souc-linux-x86_64
+intent: Fix Result<T,E> let/var binding segfault — bind_hash for option-inline path must only use decl_ty_hash when it is a valid option hash; otherwise Result annotation hash (H_result) poisoned VAR_TY_HASH causing type_is_option_inline to return false on load, leading to scalar load of tag-slot as pointer and segfault in match
+checks:
+  - ./bin/souc run tests/run-pass/match_patterns_complete.sio (all 10 PASS)
+  - bash scripts/ci/selfhost_host_gate.sh (PASS, stage2_sha256=8d7be6d8)
+  - bash scripts/ci/native_v2_serious_track_gate.sh (PASS)
+  - bash scripts/ci/native_v2_driver_self_compile_gate.sh (PASS)
+  - bash scripts/ci/native_v2_epistemic_science_spine_gate.sh (PASS)
+  - stage1==stage2 fixed-point (bit-identical)
+commit: pending
+status: lock-released

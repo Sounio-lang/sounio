@@ -1,0 +1,365 @@
+// darwin_pbpk/pd/pd_gum.sio — Extended GUM budget including PD (Hill) params
+//
+// The baseline bbb_gum.sio builds a 7-D uncertainty budget on BBB
+// transport/binding parameters with Kpuu_AUC as the endpoint. This
+// module extends the analysis to a 10-D budget that adds the three
+// Hill-equation PD priors (Emax, EC50, n) and uses mTOR inhibition AUC
+// as the endpoint — the dissertation's clinically meaningful output.
+//
+// Why a separate module:
+//   - BBBPriors arrays are fixed at [_; 8]; widening them is a breaking
+//     change to bbb_gum.sio + bbb_hdmr.sio + bbb_voi.sio. Keeping those
+//     intact protects the committed contribution #3/#5 pipelines.
+//   - The 10-D budget has a different endpoint function (Y = E_AUC,
+//     not Kpuu_AUC), a different perturbation primitive (Hill params
+//     live on HillParams, not BBBParams), and a different coupling
+//     (it must run oral_bbb_run, not bbb_coupled_run, because the
+//     PD curve needs ICF exposure from an absorbed-dose scenario).
+//
+// Indexing:
+//   0–6: same BBB parameters as bbb_gum / bbb_voi (ps_bbb … fu_icf)
+//   7:   Emax
+//   8:   EC50
+//   9:   n (Hill coefficient)
+
+use darwin_pbpk::absorption::{AbsorptionParams}
+use darwin_pbpk::bbb::bbb_core::{BBBParams}
+use darwin_pbpk::bbb::bbb_gum::{bbb_perturb_param}
+use darwin_pbpk::bbb::bbb_priors::{BBBPriors}
+use darwin_pbpk::pd::hill_mtor::*
+use darwin_pbpk::scenarios::oral_rapamycin_bbb::*
+use darwin_pbpk::tsit5_pbpk14::{PBPKParams14}
+
+// ----------------------------------------------------------------------------
+// Combined 10-D priors
+// ----------------------------------------------------------------------------
+
+pub struct PDPriors10 {
+    n:          i32,
+    mean:       [f64; 16],
+    variance:   [f64; 16],
+    confidence: [f64; 16],
+}
+
+pub fn pd_priors_from_bbb_and_hill(bbb_priors: BBBPriors, hp: HillPriors) -> PDPriors10 with Mut, Div, Panic {
+    var m: [f64; 16] = [0.0; 16]
+    var v: [f64; 16] = [0.0; 16]
+    var c: [f64; 16] = [0.0; 16]
+
+    // Copy first 7 (BBB) entries
+    var i: i32 = 0
+    while i < bbb_priors.n {
+        let idx = i as usize
+        m[idx] = bbb_priors.mean[idx]
+        v[idx] = bbb_priors.variance[idx]
+        c[idx] = bbb_priors.confidence[idx]
+        i = i + 1
+    }
+
+    // Hill: Emax (7), EC50 (8), n (9)
+    m[7] = hp.emax.mean;   v[7] = hp.emax.variance;   c[7] = hp.emax.confidence
+    m[8] = hp.ec50.mean;   v[8] = hp.ec50.variance;   c[8] = hp.ec50.confidence
+    m[9] = hp.n.mean;      v[9] = hp.n.variance;      c[9] = hp.n.confidence
+
+    PDPriors10 { n: 10, mean: m, variance: v, confidence: c }
+}
+
+// ----------------------------------------------------------------------------
+// Perturbation: dispatches to BBB or Hill depending on index
+// ----------------------------------------------------------------------------
+
+pub fn pd_perturb_hill(hp: HillParams, idx: i32, delta: f64) -> HillParams with Mut, Div, Panic {
+    var p = hp
+    if idx == 7 { p.emax    = p.emax    + delta }
+    if idx == 8 { p.ec50_nM = p.ec50_nM + delta }
+    if idx == 9 { p.n       = p.n       + delta }
+    p
+}
+
+// ----------------------------------------------------------------------------
+// Endpoint: inhibition AUC under an oral scenario
+// ----------------------------------------------------------------------------
+
+fn pd_mg_to_nM(c_mg_per_L: f64) -> f64 with Div, Panic, Mut {
+    // Rapamycin MW 914.17 g/mol → 1 mg/L ≈ 1094 nmol/L
+    c_mg_per_L * 1094.0
+}
+
+pub fn pd_endpoint_inhibition_auc(
+    sys_prm: PBPKParams14,
+    bbb_prm: BBBParams,
+    abs_prm: AbsorptionParams,
+    hp:      HillParams,
+    dose_mg: f64,
+    checkpoints: [f64; 32],
+    n_points:    i32,
+    bbb_dt:      f64
+) -> f64 with Mut, Div, Panic {
+    let tr = oral_bbb_run(sys_prm, bbb_prm, abs_prm, dose_mg, checkpoints, n_points, bbb_dt)
+    var c_nM: [f64; 32] = [0.0; 32]
+    var k: i32 = 0
+    while k < tr.n_points {
+        let idx = k as usize
+        // tr.icf_u is already unbound ICF (mg/L); Hill wants free drug in nM.
+        c_nM[idx] = pd_mg_to_nM(tr.icf_u[idx])
+        k = k + 1
+    }
+    let pd = pd_from_icf_series(tr.times_h, c_nM, tr.n_points, hp)
+    pd.inhibition_auc
+}
+
+// ----------------------------------------------------------------------------
+// 10-D ISO uncertainty budget
+// ----------------------------------------------------------------------------
+
+pub struct PDGUMBudget {
+    n_rows:       i32,
+    param_idx:    [i32; 16],
+    mean:         [f64; 16],
+    variance:     [f64; 16],
+    confidence:   [f64; 16],
+    sensitivity:  [f64; 16],
+    var_contrib:  [f64; 16],
+    share:        [f64; 16],
+    y_mean:       f64,
+    y_variance:   f64,
+    y_stddev:     f64,
+    y_rel_stddev: f64,
+}
+
+fn pd_gum_zero() -> PDGUMBudget {
+    PDGUMBudget {
+        n_rows: 0,
+        param_idx: [0; 16],
+        mean: [0.0; 16], variance: [0.0; 16], confidence: [0.0; 16],
+        sensitivity: [0.0; 16], var_contrib: [0.0; 16], share: [0.0; 16],
+        y_mean: 0.0, y_variance: 0.0, y_stddev: 0.0, y_rel_stddev: 0.0,
+    }
+}
+
+fn pd_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn pd_sqrt(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn pd_fdiff_h(mean: f64, variance: f64) -> f64 with Div, Panic, Mut {
+    let h_rel = 1.0e-3 * pd_abs(mean)
+    let h_abs = 0.01 * pd_sqrt(variance)
+    if h_rel > h_abs { h_rel } else { h_abs }
+}
+
+pub fn pd_gum_budget(
+    sys_prm: PBPKParams14,
+    bbb_prm: BBBParams,
+    abs_prm: AbsorptionParams,
+    hp:      HillParams,
+    priors:  PDPriors10,
+    dose_mg: f64,
+    checkpoints: [f64; 32],
+    n_points:    i32,
+    bbb_dt:      f64
+) -> PDGUMBudget with Mut, Div, Panic {
+    var out = pd_gum_zero()
+    out.n_rows = priors.n
+
+    let y_mean = pd_endpoint_inhibition_auc(sys_prm, bbb_prm, abs_prm, hp, dose_mg, checkpoints, n_points, bbb_dt)
+    out.y_mean = y_mean
+
+    var total_var: f64 = 0.0
+    var i: i32 = 0
+    while i < priors.n {
+        let idx = i as usize
+        let mean_i = priors.mean[idx]
+        let var_i  = priors.variance[idx]
+        let conf_i = priors.confidence[idx]
+
+        out.param_idx[idx]  = i
+        out.mean[idx]       = mean_i
+        out.variance[idx]   = var_i
+        out.confidence[idx] = conf_i
+
+        let h = pd_fdiff_h(mean_i, var_i)
+        if h <= 0.0 {
+            i = i + 1
+        } else {
+            var y_plus:  f64 = y_mean
+            var y_minus: f64 = y_mean
+            if i < 7 {
+                let bbb_plus  = bbb_perturb_param(bbb_prm, i,        h)
+                let bbb_minus = bbb_perturb_param(bbb_prm, i, 0.0 -  h)
+                y_plus  = pd_endpoint_inhibition_auc(sys_prm, bbb_plus,  abs_prm, hp, dose_mg, checkpoints, n_points, bbb_dt)
+                y_minus = pd_endpoint_inhibition_auc(sys_prm, bbb_minus, abs_prm, hp, dose_mg, checkpoints, n_points, bbb_dt)
+            } else {
+                let hp_plus  = pd_perturb_hill(hp, i,        h)
+                let hp_minus = pd_perturb_hill(hp, i, 0.0 -  h)
+                y_plus  = pd_endpoint_inhibition_auc(sys_prm, bbb_prm, abs_prm, hp_plus,  dose_mg, checkpoints, n_points, bbb_dt)
+                y_minus = pd_endpoint_inhibition_auc(sys_prm, bbb_prm, abs_prm, hp_minus, dose_mg, checkpoints, n_points, bbb_dt)
+            }
+
+            let sensitivity = (y_plus - y_minus) / (2.0 * h)
+            let contrib     = sensitivity * sensitivity * var_i
+
+            out.sensitivity[idx] = sensitivity
+            out.var_contrib[idx] = contrib
+            total_var = total_var + contrib
+            i = i + 1
+        }
+    }
+
+    out.y_variance = total_var
+    out.y_stddev   = pd_sqrt(total_var)
+    out.y_rel_stddev = if pd_abs(y_mean) > 0.0 { out.y_stddev / pd_abs(y_mean) } else { 0.0 }
+
+    if total_var > 0.0 {
+        var k: i32 = 0
+        while k < priors.n {
+            let kdx = k as usize
+            out.share[kdx] = out.var_contrib[kdx] / total_var
+            k = k + 1
+        }
+    }
+
+    out
+}
+
+// ----------------------------------------------------------------------------
+// 10-D VoI rerank (parallel to bbb_voi.sio but over the expanded priors)
+// ----------------------------------------------------------------------------
+
+pub struct PDVoI10 {
+    n_rows:    i32,
+    param_idx: [i32; 16],
+    sobol:     [f64; 16],
+    confidence:[f64; 16],
+    voi:       [f64; 16],
+    rank:      [i32; 16],
+    top_idx:   i32,
+    top_voi:   f64,
+    voi_total: f64,
+}
+
+pub fn pd_voi_from_gum(budget: PDGUMBudget) -> PDVoI10 with Mut, Div, Panic {
+    var out = PDVoI10 {
+        n_rows: budget.n_rows,
+        param_idx: [0; 16], sobol: [0.0; 16], confidence: [0.0; 16],
+        voi: [0.0; 16], rank: [0; 16],
+        top_idx: 0 - 1, top_voi: 0.0, voi_total: 0.0,
+    }
+
+    var total: f64 = 0.0
+    var best_idx: i32 = 0 - 1
+    var best_voi: f64 = 0.0
+
+    var i: i32 = 0
+    while i < budget.n_rows {
+        let idx = i as usize
+        let s = budget.share[idx]               // reuse variance share as Sobol-like weight
+        let c = budget.confidence[idx]
+        let v = s * (1.0 - c)
+        out.param_idx[idx]  = budget.param_idx[idx]
+        out.sobol[idx]      = s
+        out.confidence[idx] = c
+        out.voi[idx]        = v
+        total = total + v
+        if v > best_voi { best_voi = v; best_idx = budget.param_idx[idx] }
+        i = i + 1
+    }
+
+    out.voi_total = total
+    out.top_idx   = best_idx
+    out.top_voi   = best_voi
+
+    var used: [bool; 16] = [false; 16]
+    var k: i32 = 0
+    while k < budget.n_rows {
+        var best_j: i32 = 0 - 1
+        var best_v: f64 = 0.0 - 1.0
+        var j: i32 = 0
+        while j < budget.n_rows {
+            let jdx = j as usize
+            if used[jdx] == false && out.voi[jdx] >= best_v {
+                best_v = out.voi[jdx]
+                best_j = j
+            }
+            j = j + 1
+        }
+        if best_j >= 0 {
+            out.rank[k as usize] = best_j
+            used[best_j as usize] = true
+        }
+        k = k + 1
+    }
+    out
+}
+
+// ----------------------------------------------------------------------------
+// Printing
+// ----------------------------------------------------------------------------
+
+fn pd_gum_param_name(idx: i32) -> string {
+    if idx == 0 { return "ps_bbb" }
+    if idx == 1 { return "ps_mem" }
+    if idx == 2 { return "kpuu_brain" }
+    if idx == 3 { return "kpuu_cell" }
+    if idx == 4 { return "fu_plasma" }
+    if idx == 5 { return "fu_isf" }
+    if idx == 6 { return "fu_icf" }
+    if idx == 7 { return "emax" }
+    if idx == 8 { return "ec50_nM" }
+    if idx == 9 { return "hill_n" }
+    "unknown"
+}
+
+pub fn pd_gum_print_budget(b: PDGUMBudget) with IO, Mut, Panic, Div {
+    println("ISO uncertainty budget (PD endpoint: inhibition AUC)")
+    print("  y (mean)        = "); print_f64(b.y_mean);       println("")
+    print("  u_c^2 (variance)= "); print_f64(b.y_variance);   println("")
+    print("  u_c (stddev)    = "); print_f64(b.y_stddev);     println("")
+    print("  u_c / |y|       = "); print_f64(b.y_rel_stddev); println("")
+    println("")
+    println("param,mean,var_prior,confidence,sensitivity,var_contrib,share")
+    var i: i32 = 0
+    while i < b.n_rows {
+        let idx = i as usize
+        print(pd_gum_param_name(b.param_idx[idx])); print(",")
+        print_f64(b.mean[idx]);        print(",")
+        print_f64(b.variance[idx]);    print(",")
+        print_f64(b.confidence[idx]);  print(",")
+        print_f64(b.sensitivity[idx]); print(",")
+        print_f64(b.var_contrib[idx]); print(",")
+        print_f64(b.share[idx])
+        println("")
+        i = i + 1
+    }
+}
+
+pub fn pd_voi_print(v: PDVoI10) with IO, Mut, Panic, Div {
+    println("10-D PD Value-of-Information ranking")
+    println("  VoI_i = share_i × (1 − confidence_i)")
+    print("  VoI_total  = "); print_f64(v.voi_total); println("")
+    if v.top_idx >= 0 {
+        print("  top target = "); print(pd_gum_param_name(v.top_idx))
+        print(" (VoI = "); print_f64(v.top_voi); println(")")
+    }
+    println("")
+    println("rank,param,share,confidence,VoI")
+    var k: i32 = 0
+    while k < v.n_rows {
+        let kdx = k as usize
+        let p = v.rank[kdx]
+        let pdx = p as usize
+        let rank_k = (k + 1) as i64
+        print_i64(rank_k); print(",")
+        print(pd_gum_param_name(v.param_idx[pdx])); print(",")
+        print_f64(v.sobol[pdx]);      print(",")
+        print_f64(v.confidence[pdx]); print(",")
+        print_f64(v.voi[pdx])
+        println("")
+        k = k + 1
+    }
+}

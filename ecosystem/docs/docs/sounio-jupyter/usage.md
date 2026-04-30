@@ -783,4 +783,4 @@ This is a heading.
 - [**Overview**](overview.md) — Architecture and features
 - [**Sounio Language Guide**](https://github.com/sounio-org/sounio/docs/LLM_PROGRAMMING_GUIDE.md) — Learn Sounio syntax
 - [**sounio-py Guide**](../sounio-py/quickstart.md) — Python integration
-- [**Examples**](https://github.com/sounio-org/sounio/tree/main/triple-sounio-ecosystem/sounio-jupyter/examples) — Example notebooks
+- [**Examples**](https://github.com/sounio-org/sounio/tree/main/ecosystem/sounio-jupyter/examples) — Example notebooks

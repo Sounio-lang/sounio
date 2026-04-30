@@ -1,0 +1,268 @@
+// darwin_pbpk/validation/haloperidol_d2_pet.sio
+//
+// Validation of haloperidol D2 receptor occupancy predictions against
+// clinical PET data (Farde et al. 1992, Arch Gen Psychiatry 49:538-544).
+//
+// Study design (Farde 1992):
+//   - 17 patients with schizophrenia on oral haloperidol (2-15 mg/day)
+//   - [11C]raclopride PET at striatum; D2 occupancy = 1 - BPND_treated/BPND_ctrl
+//   - Key finding: 60-80% D2 block = antipsychotic without EPS;
+//     > 80% = EPS onset; < 60% = insufficient antipsychotic effect
+//
+// Plasma concentration reference for dose-occupancy mapping:
+//   - Steady-state plasma at 2 mg/day:  ~2 ng/mL  (0.002 mg/L)
+//   - Steady-state plasma at 4-6 mg/day: ~5 ng/mL  (0.005 mg/L)
+//   - Steady-state plasma at 10 mg/day: ~12 ng/mL  (0.012 mg/L)
+//   Source: Midha KK et al. (1989) Psychopharmacology 97:305-311
+//
+// Model validation pipeline:
+//   plasma C_total (mg/L)
+//     → BBB ODE (haloperidol_bbb_params, bbb_core)
+//       → C_isf (mg/L total)
+//         → bbb_c_isf_u → C_isf_free (mg/L unbound)
+//           → d2_occupancy → fractional D2 block [0,1]
+//
+// Run:
+//   SOUNIO_STDLIB_PATH=/workspace/sounio/stdlib \
+//     ./bin/souc run stdlib/darwin_pbpk/validation/haloperidol_d2_pet.sio
+
+use darwin_pbpk::bbb::bbb_core::*
+use darwin_pbpk::drugs::haloperidol::*
+use darwin_pbpk::pd::d2_occupancy::*
+
+// ============================================================================
+// LOCAL MATH HELPERS
+// ============================================================================
+
+fn hd2_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var r: f64 = x * 0.5
+    var i: i32 = 0
+    while i < 40 {
+        r = (r + x / r) * 0.5
+        i = i + 1
+    }
+    return r
+}
+
+fn hd2_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// ============================================================================
+// HELPER: compute ISF-free and D2 occupancy at steady-state plasma C
+// ============================================================================
+// Uses bbb_integrate_constant_plasma for 24h (>> 3× BBB time constant ~0.4h).
+
+// BBB ODE steady-state: ISF eigensystem has a slow mode (τ ~ 100h) driven by
+// the large ICF volume (v_icf=1.08L) loading via ps_mem. For clinical PET
+// validation (chronic dosing at SS), the ODE must be run ≥ 5× τ ≈ 500h.
+// At dt=0.05h this is 10,000 RK4 steps — milliseconds on native binary.
+fn ss_occupancy(c_plasma: f64, bbb: BBBParams, d2: D2Params) -> f64 with Div, Panic, Mut {
+    let st = bbb_integrate_constant_plasma(c_plasma, 500.0, 0.05, bbb)
+    let c_isf_free = bbb_c_isf_u(st, bbb)
+    return d2_occupancy(c_isf_free, d2)
+}
+
+fn ss_isf_free(c_plasma: f64, bbb: BBBParams) -> f64 with Div, Panic, Mut {
+    let st = bbb_integrate_constant_plasma(c_plasma, 500.0, 0.05, bbb)
+    return bbb_c_isf_u(st, bbb)
+}
+
+fn ss_kpuu(c_plasma: f64, bbb: BBBParams) -> f64 with Div, Panic, Mut {
+    let st = bbb_integrate_constant_plasma(c_plasma, 500.0, 0.05, bbb)
+    return bbb_kpuu_observed(st, c_plasma, bbb)
+}
+
+// ============================================================================
+// MAIN — TEST SUITE
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Haloperidol D2 Receptor Occupancy — BBB/PD Validation")
+    println("  Drug: Haloperidol (first-generation antipsychotic)")
+    println("  Target: Striatal D2 receptor (Kd 1.5 nM, Seeman 1976)")
+    println("  PK/PD validation: Farde et al. 1992 (Arch Gen Psychiatry)")
+    println("  BBB: Kpuu,brain=3.0, Loryan 2014; P-gp Zhu 2026 confirmed")
+    println("======================================================================")
+    println("")
+
+    let bbb = haloperidol_bbb_params()
+    let d2  = haloperidol_d2_params()
+
+    var passed = 0
+    var failed = 0
+
+    // Plasma Cmax at steady state (literature, Midha 1989):
+    //   2 mg/day  → ~2 ng/mL  = 0.002 mg/L
+    //   4-6 mg/day → ~5 ng/mL = 0.005 mg/L  (core therapeutic range)
+    //   10 mg/day  → ~12 ng/mL= 0.012 mg/L  (EPS range)
+    //   sub-thr    → 0.5 ng/mL= 0.0005 mg/L (insufficient exposure)
+    let c_subthr = 0.0005
+    let c_2mg    = 0.002
+    let c_5mg    = 0.005
+    let c_10mg   = 0.012
+
+    // ------------------------------------------------------------------
+    // TEST 1: Therapeutic dose (4-6 mg) → D2 occupancy 60-80% (Farde 1992)
+    // ------------------------------------------------------------------
+    println("TEST 1: 4-6 mg dose → D2 occupancy in therapeutic window (60-80%)")
+    let occ_5mg = ss_occupancy(c_5mg, bbb, d2)
+    let pct_5mg = occ_5mg * 100.0
+    println("  C_plasma = 5 ng/mL (4-6 mg/day at SS)")
+    println("  D2 occupancy (%):")
+    println(pct_5mg)
+    if pct_5mg > 60.0 && pct_5mg < 80.0 {
+        println("  [PASS] Consistent with Farde 1992 therapeutic window")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected 60-80%; model outside Farde 1992 PET window")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 2: EPS dose (10 mg) → D2 occupancy > 80%
+    // ------------------------------------------------------------------
+    println("TEST 2: 10 mg dose → D2 occupancy > 80% (EPS onset threshold)")
+    let occ_10mg = ss_occupancy(c_10mg, bbb, d2)
+    let pct_10mg = occ_10mg * 100.0
+    println("  C_plasma = 12 ng/mL (10 mg/day at SS)")
+    println("  D2 occupancy (%):")
+    println(pct_10mg)
+    if pct_10mg > 80.0 {
+        println("  [PASS] Above EPS threshold — consistent with high-dose haloperidol PET")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected > 80% at 10 mg/day; EPS not predicted correctly")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 3: Sub-therapeutic exposure → D2 occupancy < 50%
+    // ------------------------------------------------------------------
+    println("TEST 3: Sub-therapeutic dose → D2 occupancy < 50%")
+    let occ_subthr = ss_occupancy(c_subthr, bbb, d2)
+    let pct_subthr = occ_subthr * 100.0
+    println("  C_plasma = 0.5 ng/mL (sub-therapeutic)")
+    println("  D2 occupancy (%):")
+    println(pct_subthr)
+    if pct_subthr < 50.0 {
+        println("  [PASS] Sub-therapeutic exposure correctly predicts insufficient D2 block")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected < 50% at sub-therapeutic concentrations")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 4: Dose-occupancy monotonicity (E_max property)
+    // ------------------------------------------------------------------
+    println("TEST 4: D2 occupancy monotonically increases with dose")
+    let occ_sub = ss_occupancy(c_subthr, bbb, d2)
+    let occ_2mg = ss_occupancy(c_2mg,    bbb, d2)
+    let occ_5   = ss_occupancy(c_5mg,    bbb, d2)
+    let occ_10  = ss_occupancy(c_10mg,   bbb, d2)
+    if occ_sub < occ_2mg && occ_2mg < occ_5 && occ_5 < occ_10 {
+        println("  [PASS] Monotone: sub-thr < 2 mg < 4-6 mg < 10 mg")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Non-monotone D2 occupancy curve")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 5: Brain accumulation — ISF_free > plasma_free (Kpuu,brain > 1)
+    // ------------------------------------------------------------------
+    println("TEST 5: Haloperidol accumulates in brain (ISF_free > plasma_free)")
+    let c_isf_f = ss_isf_free(c_5mg, bbb)
+    let c_plasma_f = c_5mg * bbb.fu_plasma
+    println("  Plasma unbound (mg/L):")
+    println(c_plasma_f)
+    println("  Brain ISF unbound (mg/L):")
+    println(c_isf_f)
+    if c_isf_f > c_plasma_f {
+        println("  [PASS] Kpuu,brain > 1: brain accumulation vs plasma (Loryan 2014)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected ISF_free > plasma_free for Kpuu,brain = 3")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 6: Kpuu,brain observed at SS ≈ 3.0 (Loryan 2014 parameter recovery)
+    // ------------------------------------------------------------------
+    println("TEST 6: Kpuu,brain recovered at SS in [2.5, 3.5] (Loryan 2014)")
+    let kpuu_ss = ss_kpuu(c_5mg, bbb)
+    println("  Kpuu,brain (ISF_free / plasma_free at SS):")
+    println(kpuu_ss)
+    if kpuu_ss > 2.5 && kpuu_ss < 3.5 {
+        println("  [PASS] Kpuu,brain consistent with Loryan 2014 rat in-vivo measurement")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected Kpuu,brain ~3.0 at steady state")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 7: D2 occupancy bounded [0, 1] across full dose range
+    // ------------------------------------------------------------------
+    println("TEST 7: D2 occupancy bounded [0, 1] across dose range")
+    let occ_zero = ss_occupancy(0.0,   bbb, d2)
+    let occ_huge = ss_occupancy(100.0, bbb, d2)
+    if occ_zero >= 0.0 && occ_zero < 0.01 && occ_huge > 0.99 && occ_huge <= 1.0 {
+        println("  [PASS] Occupancy correctly approaches 0 at no dose and 1 at saturation")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Occupancy out of [0,1] bounds")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 8: Therapeutic window detection — d2_in_window() at 4-6 mg dose
+    // ------------------------------------------------------------------
+    println("TEST 8: d2_in_window() correctly identifies therapeutic dose as in-window")
+    let in_win = d2_in_window(occ_5mg, d2)
+    let in_eps = d2_above_eps(occ_5mg, d2)
+    if in_win && !in_eps {
+        println("  [PASS] 4-6 mg dose is in therapeutic window and below EPS threshold")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Therapeutic dose misclassified by d2_in_window / d2_above_eps")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    println("======================================================================")
+    println("  HALOPERIDOL D2 PET VALIDATION — TEST SUMMARY")
+    println("======================================================================")
+    println("  Passed:")
+    println(passed)
+    println("  Failed:")
+    println(failed)
+    println("")
+    if failed == 0 {
+        println("  ALL 8 TESTS PASSED")
+        println("")
+        println("  D2 occupancy predictions validated against Farde 1992 PET data.")
+        println("  Key findings:")
+        println("    - Therapeutic window (60-80%) confirmed at 4-6 mg/day")
+        println("    - EPS threshold (>80%) confirmed at 10 mg/day")
+        println("    - Haloperidol brain accumulation: Kpuu,brain=3 recovered at SS")
+        println("    - Contrast with rapamycin: Kpuu=0.15 (efflux) vs 3.0 (accumulation)")
+        println("    - D2 occupancy framework ready for antipsychotic dose optimization")
+    } else {
+        println("  SOME TESTS FAILED — see diagnostics above")
+    }
+    println("======================================================================")
+    return 0
+}

@@ -20,6 +20,13 @@ let IR_ALG_QUATERNION: i64 = 2
 let IR_ALG_OCTONION: i64 = 3
 let IR_ALG_SEDENION: i64 = 4
 let IR_ALG_CLIFFORD: i64 = 5
+// Albert algebra: exceptional Jordan algebra J₃(O), 27-dimensional.
+// The unique exceptional simple Jordan algebra (Jordan-von Neumann-Wigner 1934).
+// Automorphism group: F₄ (52-dim, 48 roots). Connected to E₆, E₇, E₈ via Freudenthal.
+let IR_ALG_ALBERT: i64 = 6
+let IR_ALG_J3O_DIM: i64 = 27        // 3 real diagonals + 3×8 octonionic off-diagonals
+let IR_ALG_J3O_ZMM_COUNT: i64 = 4   // 4 ZMM registers per J₃(O) element (32 lanes, 5 unused)
+let IR_ALG_J3O_F4_ROOT_COUNT: i64 = 48  // F₄ Weyl orbit (48 roots)
 
 // Clifford parameters stored separately (p, q)
 // Dimension = 2^(p+q) for Clifford; powers of 2 for Cayley-Dickson tower
@@ -130,6 +137,88 @@ fn ir_artin_safe(alg: i64, n_distinct_vars: i64) -> bool {
     if alg <= 2 { return true }                    // always (associative)
     if alg == 3 && n_distinct_vars <= 2 { return true }  // Artin's theorem
     return false
+}
+
+// ============================================================
+// Sedenion zero-divisor (ZD) infrastructure — first compiler with static ZD detection.
+// Cawagas (2004): 84 primitive ZD pairs, each (a, b) with a·b = 0, a≠0, b≠0.
+// arxiv:2411.18881: ZD manifold is isometric to G₂; pairs form Stiefel V₂(ℝ⁷).
+//
+// Representation: each element encoded as a 16-bit bitmask (bit i = component eᵢ nonzero).
+// The canonical pair from de Marrais (2000): (e₃+e₁₀, e₆-e₁₅).
+//   Bitmask A = (1<<3)|(1<<10) = 0x0408
+//   Bitmask B = (1<<6)|(1<<15) = 0x8040
+// ============================================================
+
+let IR_SED_ZD_PAIR_COUNT: i64 = 84
+// Canonical ZD pair bitmasks (de Marrais 2000 / Cawagas 2004)
+let IR_SED_ZD_CANONICAL_A: i64 = 1032   // (1<<3)|(1<<10) = 8 + 1024 = 1032
+let IR_SED_ZD_CANONICAL_B: i64 = 32832  // (1<<6)|(1<<15) = 64 + 32768 = 32832
+
+// Check whether two sedenion component-presence bitmasks match the canonical ZD pair.
+// Returns true if the pair is a known zero-divisor configuration.
+// The type-checker calls this for literal sedenion operands; non-literal → IrSedZDCheck.
+fn ir_sed_is_canonical_zd(bitmask_a: i64, bitmask_b: i64) -> bool {
+    if bitmask_a == IR_SED_ZD_CANONICAL_A && bitmask_b == IR_SED_ZD_CANONICAL_B { return true }
+    if bitmask_a == IR_SED_ZD_CANONICAL_B && bitmask_b == IR_SED_ZD_CANONICAL_A { return true }
+    false
+}
+
+// Check whether a sedenion bitmask overlaps any ZD structure.
+// Conservative: returns true if the bitmask has components in both octonion halves (0-7 and 8-15).
+// Exact ZD detection requires consulting the full 84-pair table (compile-time only).
+fn ir_sed_has_zd_risk(bitmask: i64) -> bool {
+    let lower_half: i64 = 255        // bits 0-7
+    let upper_half: i64 = 65280     // bits 8-15 (0xFF00)
+    let has_lower = (bitmask & lower_half) != 0
+    let has_upper = (bitmask & upper_half) != 0
+    has_lower && has_upper
+}
+
+// ============================================================
+// Clifford algebra grade product — first IR-level grade propagation.
+// Garamon, Versor, GAL all track grade at library level; this is the first
+// implementation where grade is a first-class IR attribute (IrHyperExprInfo.grade_mask).
+//
+// Grade selection rule for Clifford geometric product:
+//   (grade-k blade) * (grade-l blade) → grades |k-l|, |k-l|+2, ..., k+l
+//   Shorthand: result_grade_mask = union over (k in grade_a, l in grade_b) of
+//              {|k-l|, |k-l|+2, ..., k+l}
+// ============================================================
+
+// Compute the grade_mask of the geometric product of two graded multivectors.
+// grade_a, grade_b: bitfields where bit k = 1 means grade-k blades are present.
+// Returns: bitmask of possible output grades (conservative union).
+// max_grade: the maximum grade in the algebra (= p+q for Cl(p,q)).
+fn ir_clifford_grade_product(grade_a: i64, grade_b: i64, max_grade: i64) -> i64 with Mut, Panic, Div {
+    var result: i64 = 0
+    var ka: i64 = 0
+    while ka <= max_grade {
+        if (grade_a >> ka) & 1 == 1 {
+            var kb: i64 = 0
+            while kb <= max_grade {
+                if (grade_b >> kb) & 1 == 1 {
+                    // Product of grade-ka and grade-kb blades → grades |ka-kb| to ka+kb, step 2
+                    let lo = if ka > kb { ka - kb } else { kb - ka }
+                    let hi = if ka + kb <= max_grade { ka + kb } else { max_grade }
+                    var g = lo
+                    while g <= hi {
+                        result = result | (1 << g)
+                        g = g + 2
+                    }
+                }
+                kb = kb + 1
+            }
+        }
+        ka = ka + 1
+    }
+    result
+}
+
+// Dead-grade predicate: can this hyper expression be pruned?
+// Returns true iff grade_known=true and grade_mask=0 (no grades present → zero multivector).
+fn ir_clifford_is_dead_grade(grade_mask: i64, grade_known: bool) -> bool {
+    grade_known && grade_mask == 0
 }
 
 // Bridge: should the optimizer reassociate a multiplication triple?

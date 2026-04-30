@@ -8,7 +8,7 @@ ART_DIR="${PLAN_BIG_STRICT_CANARY_ART_DIR:-$ROOT_DIR/artifacts/omega/plan_big_st
 RUNS_JSONL="${PLAN_BIG_STRICT_CANARY_JSONL:-$ART_DIR/runs.v1.jsonl}"
 LATEST_JSON="${PLAN_BIG_STRICT_CANARY_LATEST_JSON:-$ART_DIR/latest.v1.json}"
 GATE_STATUS_JSON="${PLAN_BIG_GATE_STATUS_JSON:-$ROOT_DIR/artifacts/omega/plan_big_gate_status.v1.json}"
-GATE_SCRIPT="${PLAN_BIG_STRICT_CANARY_GATE_SCRIPT:-$ROOT_DIR/scripts/plan_big_gate.sh}"
+GATE_SCRIPT="${PLAN_BIG_STRICT_CANARY_GATE_SCRIPT:-$ROOT_DIR/scripts/ci/plan_big_gate.sh}"
 GATE_ARGS="${PLAN_BIG_STRICT_CANARY_GATE_ARGS:---with-overnight-health --overnight-no-auto-heal --require-overnight-burnin}"
 
 usage() {
@@ -16,7 +16,7 @@ usage() {
 Usage: scripts/plan_big_strict_canary.sh [--gate-script PATH_OR_CMD] [--gate-args "ARGS"]
 
 Environment:
-  PLAN_BIG_STRICT_CANARY_GATE_SCRIPT  Gate script/command (default: scripts/plan_big_gate.sh)
+  PLAN_BIG_STRICT_CANARY_GATE_SCRIPT  Gate script/command (default: scripts/ci/plan_big_gate.sh)
   PLAN_BIG_STRICT_CANARY_GATE_ARGS    Gate args string (default: --with-overnight-health --overnight-no-auto-heal --require-overnight-burnin)
 USAGE
 }

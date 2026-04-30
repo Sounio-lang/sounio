@@ -18,7 +18,7 @@
 // MATH HELPERS (self-contained)
 // ============================================================================
 
-fn sim_sqrt(x: f64) -> f64 {
+pub fn sim_sqrt(x: f64) -> f64 with Mut, Div {
     if x <= 0.0 { return 0.0 }
     var y = x
     var i = 0
@@ -100,7 +100,7 @@ pub struct PBPKParams {
 
 pub struct PBPKState {
     pub gut: f64,
-    pub central: f64,
+    pub cen: f64,
     pub peripheral: f64,
     pub eliminated: f64,
     pub gut_unc: f64,
@@ -157,22 +157,26 @@ pub fn pbpk_params_default() -> PBPKParams {
 // u(gut₀)² = (F * u_dose)² + (dose * u_F)²
 // ============================================================================
 
-pub fn pbpk_state_initial(params: &PBPKParams) -> PBPKState {
+pub fn pbpk_state_initial(params: &PBPKParams) -> PBPKState with Mut, Div {
     let gut0 = params.dose * params.bioavailability
     let u_gut0 = sim_sqrt(
         params.bioavailability * params.bioavailability * params.dose_unc * params.dose_unc
       + params.dose * params.dose * params.bioavailability_unc * params.bioavailability_unc
     )
+    // Use computed zero to force the compiler to emit explicit zero stores
+    // (SRET buffer is stack-allocated and not pre-zeroed, so literal 0.0 fields
+    // may be skipped by the native compiler)
+    let z = gut0 - gut0
     PBPKState {
         gut: gut0,
-        central: 0.0,
-        peripheral: 0.0,
-        eliminated: 0.0,
+        cen: z,
+        peripheral: z,
+        eliminated: z,
         gut_unc: u_gut0,
-        central_unc: 0.0,
-        peripheral_unc: 0.0,
-        eliminated_unc: 0.0,
-        time: 0.0,
+        central_unc: z,
+        peripheral_unc: z,
+        eliminated_unc: z,
+        time: z,
     }
 }
 
@@ -184,7 +188,7 @@ fn dgut_val(gut: f64, ka: f64) -> f64 {
     return 0.0 - ka * gut
 }
 
-fn dgut_unc(gut: f64, gut_unc: f64, ka: f64, ka_unc: f64) -> f64 {
+pub fn dgut_unc(gut: f64, gut_unc: f64, ka: f64, ka_unc: f64) -> f64 with Mut, Div {
     let t1 = ka * gut_unc
     let t2 = gut * ka_unc
     return sim_sqrt(t1 * t1 + t2 * t2)
@@ -195,10 +199,10 @@ fn dcentral_val(gut: f64, central: f64, peripheral: f64,
     return ka * gut - (ke + k12) * central + k21 * peripheral
 }
 
-fn dcentral_unc(gut: f64, gut_unc: f64, central: f64, central_unc: f64,
+pub fn dcentral_unc(gut: f64, gut_unc: f64, central: f64, central_unc: f64,
                 peripheral: f64, peripheral_unc: f64,
                 ka: f64, ka_unc: f64, ke: f64, ke_unc: f64,
-                k12: f64, k12_unc: f64, k21: f64, k21_unc: f64) -> f64 {
+                k12: f64, k12_unc: f64, k21: f64, k21_unc: f64) -> f64 with Mut, Div {
     let u_kag = sim_sqrt((ka * gut_unc) * (ka * gut_unc) + (gut * ka_unc) * (gut * ka_unc))
     let kk = ke + k12
     let u_kkc = sim_sqrt(
@@ -217,8 +221,8 @@ fn dperipheral_val(central: f64, peripheral: f64, k12: f64, k21: f64) -> f64 {
     return k12 * central - k21 * peripheral
 }
 
-fn dperipheral_unc(central: f64, central_unc: f64, peripheral: f64, peripheral_unc: f64,
-                   k12: f64, k12_unc: f64, k21: f64, k21_unc: f64) -> f64 {
+pub fn dperipheral_unc(central: f64, central_unc: f64, peripheral: f64, peripheral_unc: f64,
+                   k12: f64, k12_unc: f64, k21: f64, k21_unc: f64) -> f64 with Mut, Div {
     let u_k12c = sim_sqrt(
         (k12 * central_unc) * (k12 * central_unc)
       + (central * k12_unc) * (central * k12_unc)
@@ -234,35 +238,34 @@ fn delim_val(central: f64, ke: f64) -> f64 {
     return ke * central
 }
 
-fn delim_unc(central: f64, central_unc: f64, ke: f64, ke_unc: f64) -> f64 {
+pub fn delim_unc(central: f64, central_unc: f64, ke: f64, ke_unc: f64) -> f64 with Mut, Div {
     let t1 = ke * central_unc
     let t2 = central * ke_unc
     return sim_sqrt(t1 * t1 + t2 * t2)
 }
 
 // Build derivative state at the given state/params
-fn deriv_at(st: PBPKState, params: &PBPKParams) -> PBPKState {
-    let dg = dgut_val(st.gut, params.ka)
-    let dc = dcentral_val(st.gut, st.central, st.peripheral,
-                           params.ka, params.ke, params.k12, params.k21)
-    let dp = dperipheral_val(st.central, st.peripheral, params.k12, params.k21)
-    let de = delim_val(st.central, params.ke)
+pub fn deriv_at(st: PBPKState, ka: f64, ke: f64, k12: f64, k21: f64,
+            ka_unc: f64, ke_unc: f64, k12_unc: f64, k21_unc: f64) -> PBPKState with Mut, Div {
+    let dg = dgut_val(st.gut, ka)
+    let dc = dcentral_val(st.gut, st.cen, st.peripheral, ka, ke, k12, k21)
+    let dp = dperipheral_val(st.cen, st.peripheral, k12, k21)
+    let de = delim_val(st.cen, ke)
 
-    let ug = dgut_unc(st.gut, st.gut_unc, params.ka, params.ka_unc)
+    let ug = dgut_unc(st.gut, st.gut_unc, ka, ka_unc)
     let uc = dcentral_unc(
-        st.gut, st.gut_unc, st.central, st.central_unc,
+        st.gut, st.gut_unc, st.cen, st.central_unc,
         st.peripheral, st.peripheral_unc,
-        params.ka, params.ka_unc, params.ke, params.ke_unc,
-        params.k12, params.k12_unc, params.k21, params.k21_unc
+        ka, ka_unc, ke, ke_unc, k12, k12_unc, k21, k21_unc
     )
     let up = dperipheral_unc(
-        st.central, st.central_unc, st.peripheral, st.peripheral_unc,
-        params.k12, params.k12_unc, params.k21, params.k21_unc
+        st.cen, st.central_unc, st.peripheral, st.peripheral_unc,
+        k12, k12_unc, k21, k21_unc
     )
-    let ue = delim_unc(st.central, st.central_unc, params.ke, params.ke_unc)
+    let ue = delim_unc(st.cen, st.central_unc, ke, ke_unc)
 
     PBPKState {
-        gut: dg, central: dc, peripheral: dp, eliminated: de,
+        gut: dg, cen: dc, peripheral: dp, eliminated: de,
         gut_unc: ug, central_unc: uc, peripheral_unc: up, eliminated_unc: ue,
         time: 0.0,
     }
@@ -277,13 +280,15 @@ fn deriv_at(st: PBPKState, params: &PBPKParams) -> PBPKState {
 // (uncorrelated derivative uncertainties — standard GUM assumption)
 // ============================================================================
 
-fn rk4_step_pbpk(st: PBPKState, dt: f64, params: &PBPKParams) -> PBPKState with Div, Panic {
-    let k1 = deriv_at(st, params)
+pub fn rk4_step_pbpk(st: PBPKState, dt: f64,
+                 ka: f64, ke: f64, k12: f64, k21: f64,
+                 ka_unc: f64, ke_unc: f64, k12_unc: f64, k21_unc: f64) -> PBPKState with Mut, Div, Panic {
+    let k1 = deriv_at(st, ka, ke, k12, k21, ka_unc, ke_unc, k12_unc, k21_unc)
 
     let h = dt * 0.5
     let st2 = PBPKState {
         gut:            st.gut            + h * k1.gut,
-        central:        st.central        + h * k1.central,
+        cen:            st.cen            + h * k1.cen,
         peripheral:     st.peripheral     + h * k1.peripheral,
         eliminated:     st.eliminated     + h * k1.eliminated,
         gut_unc:        st.gut_unc,
@@ -292,11 +297,11 @@ fn rk4_step_pbpk(st: PBPKState, dt: f64, params: &PBPKParams) -> PBPKState with 
         eliminated_unc: st.eliminated_unc,
         time:           st.time + h,
     }
-    let k2 = deriv_at(st2, params)
+    let k2 = deriv_at(st2, ka, ke, k12, k21, ka_unc, ke_unc, k12_unc, k21_unc)
 
     let st3 = PBPKState {
         gut:            st.gut            + h * k2.gut,
-        central:        st.central        + h * k2.central,
+        cen:            st.cen            + h * k2.cen,
         peripheral:     st.peripheral     + h * k2.peripheral,
         eliminated:     st.eliminated     + h * k2.eliminated,
         gut_unc:        st.gut_unc,
@@ -305,11 +310,11 @@ fn rk4_step_pbpk(st: PBPKState, dt: f64, params: &PBPKParams) -> PBPKState with 
         eliminated_unc: st.eliminated_unc,
         time:           st.time + h,
     }
-    let k3 = deriv_at(st3, params)
+    let k3 = deriv_at(st3, ka, ke, k12, k21, ka_unc, ke_unc, k12_unc, k21_unc)
 
     let st4 = PBPKState {
         gut:            st.gut            + dt * k3.gut,
-        central:        st.central        + dt * k3.central,
+        cen:            st.cen            + dt * k3.cen,
         peripheral:     st.peripheral     + dt * k3.peripheral,
         eliminated:     st.eliminated     + dt * k3.eliminated,
         gut_unc:        st.gut_unc,
@@ -318,13 +323,13 @@ fn rk4_step_pbpk(st: PBPKState, dt: f64, params: &PBPKParams) -> PBPKState with 
         eliminated_unc: st.eliminated_unc,
         time:           st.time + dt,
     }
-    let k4 = deriv_at(st4, params)
+    let k4 = deriv_at(st4, ka, ke, k12, k21, ka_unc, ke_unc, k12_unc, k21_unc)
 
     let sixth = dt / 6.0
     let s2    = sixth * sixth
 
     let gut_new        = st.gut        + sixth * (k1.gut        + 2.0 * k2.gut        + 2.0 * k3.gut        + k4.gut)
-    let central_new    = st.central    + sixth * (k1.central    + 2.0 * k2.central    + 2.0 * k3.central    + k4.central)
+    let central_new    = st.cen        + sixth * (k1.cen        + 2.0 * k2.cen        + 2.0 * k3.cen        + k4.cen)
     let peripheral_new = st.peripheral + sixth * (k1.peripheral + 2.0 * k2.peripheral + 2.0 * k3.peripheral + k4.peripheral)
     let eliminated_new = st.eliminated + sixth * (k1.eliminated + 2.0 * k2.eliminated + 2.0 * k3.eliminated + k4.eliminated)
 
@@ -347,7 +352,7 @@ fn rk4_step_pbpk(st: PBPKState, dt: f64, params: &PBPKParams) -> PBPKState with 
 
     PBPKState {
         gut:            gut_new,
-        central:        central_new,
+        cen:            central_new,
         peripheral:     peripheral_new,
         eliminated:     eliminated_new,
         gut_unc:        sim_sqrt(gut_uvar),
@@ -368,8 +373,23 @@ pub fn pbpk_simulate(params: &PBPKParams, t_end: f64, n_steps: i32) -> PBPKResul
     let steps_f = steps as f64
     let dt = t_end / steps_f
 
+    // Extract scalar params to avoid reference-through-struct ABI issues
+    let p_ka      = params.ka
+    let p_ke      = params.ke
+    let p_k12     = params.k12
+    let p_k21     = params.k21
+    let p_ka_unc  = params.ka_unc
+    let p_ke_unc  = params.ke_unc
+    let p_k12_unc = params.k12_unc
+    let p_k21_unc = params.k21_unc
+    let vd        = params.vd
+    let vd_unc    = params.vd_unc
+    let p_dose    = params.dose
+    let p_dose_unc = params.dose_unc
+    let p_bioa    = params.bioavailability
+    let p_bioa_unc = params.bioavailability_unc
+
     var st = pbpk_state_initial(params)
-    let vd = params.vd
 
     var time_pts: [f64; 256] = [0.0; 256]
     var conc_pts: [f64; 256] = [0.0; 256]
@@ -392,13 +412,13 @@ pub fn pbpk_simulate(params: &PBPKParams, t_end: f64, n_steps: i32) -> PBPKResul
 
     var i = 1
     while i <= steps {
-        st = rk4_step_pbpk(st, dt, params)
+        st = rk4_step_pbpk(st, dt, p_ka, p_ke, p_k12, p_k21, p_ka_unc, p_ke_unc, p_k12_unc, p_k21_unc)
 
-        let conc = st.central / vd
-        // u(C) = u(central/Vd): GUM division by uncertain Vd
+        let conc = st.cen / vd
+        // u(C) = u(cen/Vd): GUM division by uncertain Vd
         let u_conc = sim_sqrt(
             (st.central_unc / vd) * (st.central_unc / vd)
-          + (st.central * params.vd_unc / (vd * vd)) * (st.central * params.vd_unc / (vd * vd))
+          + (st.cen * vd_unc / (vd * vd)) * (st.cen * vd_unc / (vd * vd))
         )
 
         if i < max_pts {
@@ -428,16 +448,15 @@ pub fn pbpk_simulate(params: &PBPKParams, t_end: f64, n_steps: i32) -> PBPKResul
     let cmax_result = sim_gum_simple(cmax, cmax_unc)
 
     // Half-life = ln(2)/ke; u(t½) = ln(2) * u_ke / ke²
-    let ke    = params.ke
-    let hl    = ln2() / ke
-    let hl_u  = ln2() * params.ke_unc / (ke * ke)
+    let hl    = ln2() / p_ke
+    let hl_u  = ln2() * p_ke_unc / (p_ke * p_ke)
     let hl_result = sim_gum_simple(hl, hl_u)
 
     // Clearance = dose*F / AUC
-    let dose_f   = params.dose * params.bioavailability
+    let dose_f   = p_dose * p_bioa
     let u_dose_f = sim_sqrt(
-        (params.bioavailability * params.dose_unc) * (params.bioavailability * params.dose_unc)
-      + (params.dose * params.bioavailability_unc) * (params.dose * params.bioavailability_unc)
+        (p_bioa * p_dose_unc) * (p_bioa * p_dose_unc)
+      + (p_dose * p_bioa_unc) * (p_dose * p_bioa_unc)
     )
     let cl_result = if auc > 1.0e-15 {
         let cl_val = dose_f / auc

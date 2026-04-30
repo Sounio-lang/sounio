@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.validation.integration-guide
+topic_id: repo.docs.compiler.integration-guide
 authority: repo_only
-audience: users
+audience: contributors
 last_validated: 2026-03-07
-validated_by: A2
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.validation.integration-guide
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.integration-guide
 -->
 
 # Sounio Validation Integration Guide

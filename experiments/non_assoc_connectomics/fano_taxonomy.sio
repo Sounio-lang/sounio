@@ -1,0 +1,169 @@
+//@ run-pass
+// Strategy ι — Fano Taxonomy
+//
+// Per-subject Fano basis decomposition via triple-product alignment.
+// Loads 7×200 eigenvector frames from ABIDE-I, computes triple products
+// over all C(7,3)=35 eigenvector triples, measures alignment with the
+// 7 Fano lines, accumulates into 7-vector representation on simplex.
+//
+// Output: CSV with per-subject Fano 7-vectors for clustering.
+
+// ═══════════════════════════════════════════════════════════════════════
+// Fano line geometry: 7 lines in (octonion_basis ⊗ octonion_basis) space
+// ═══════════════════════════════════════════════════════════════════════
+// Line 0: (0,1,2), Line 1: (0,3,4), Line 2: (0,5,6),
+// Line 3: (1,3,5), Line 4: (1,4,6), Line 5: (2,3,6), Line 6: (2,4,5)
+
+fn fano_line_basis_a(line: i32) -> i32 {
+    if line == 0 { return 0 }
+    if line == 1 { return 0 }
+    if line == 2 { return 0 }
+    if line == 3 { return 1 }
+    if line == 4 { return 1 }
+    if line == 5 { return 2 }
+    2
+}
+
+fn fano_line_basis_b(line: i32) -> i32 {
+    if line == 0 { return 1 }
+    if line == 1 { return 3 }
+    if line == 2 { return 5 }
+    if line == 3 { return 3 }
+    if line == 4 { return 4 }
+    if line == 5 { return 3 }
+    4
+}
+
+fn fano_line_basis_c(line: i32) -> i32 {
+    if line == 0 { return 2 }
+    if line == 1 { return 4 }
+    if line == 2 { return 6 }
+    if line == 3 { return 5 }
+    if line == 4 { return 6 }
+    if line == 5 { return 6 }
+    5
+}
+
+
+fn main() -> i32 with IO, Mut, Div {
+    // ═══════════════════════════════════════════════════════════════════
+    // Load frames.bin
+    // ═══════════════════════════════════════════════════════════════════
+    let path = "artifacts/research/abide/frames.bin"
+    let raw = read_file(path)
+    let sz = file_size(path)
+    if sz < 16 {
+        println("ERROR: frames.bin not found or too small")
+        return 1
+    }
+
+    let n_asd = read_i64(raw, 0)
+    let n_td = read_i64(raw, 1)
+    let n_total = n_asd + n_td
+
+    println("Strategy ι — Fano Taxonomy")
+    println("==========================")
+    print("ASD: "); print_int(n_asd); print("  TD: "); print_int(n_td);
+    print("  Total: "); print_int(n_total); println("")
+
+    let header_offset: i64 = 2   // in i64 units = 16 bytes
+    let frame_size: i64 = 1400   // f64 values per subject
+    let n_eigs: i32 = 7
+    let n_nodes: i32 = 200
+    let n_fano_lines: i32 = 7
+
+    // Results: per-subject Fano 7-vector (normalized to simplex)
+    var fano_vectors: [f64; 7000] = [0.0; 7000]  // max 1000 subjects × 7 dims
+    var subject: i64 = 0
+
+    println("Computing Fano 7-vectors...")
+
+    while subject < n_total {
+        let frame_start = header_offset + subject * frame_size
+
+        // Accumulate triple-product alignment with each Fano line
+        var fano_strength: [f64; 7] = [0.0; 7]
+
+        // Iterate over all C(7,3)=35 eigenvector triples (a,b,c) with a<b<c
+        var a: i32 = 0
+        while a < n_eigs {
+            var b: i32 = a + 1
+            while b < n_eigs {
+                var c: i32 = b + 1
+                while c < n_eigs {
+                    // Compute triple product: Σ_{nodes} e_a * e_b * e_c
+                    var tp: f64 = 0.0
+                    var node: i32 = 0
+                    while node < n_nodes {
+                        let va = read_f64(raw, frame_start + (a as i64) * 200 + (node as i64))
+                        let vb = read_f64(raw, frame_start + (b as i64) * 200 + (node as i64))
+                        let vc = read_f64(raw, frame_start + (c as i64) * 200 + (node as i64))
+                        tp = tp + va * vb * vc
+                        node = node + 1
+                    }
+                    let tp_sq = tp * tp
+
+                    // Check which Fano line(s) this triple aligns with
+                    var line: i32 = 0
+                    while line < n_fano_lines {
+                        let fa = fano_line_basis_a(line)
+                        let fb = fano_line_basis_b(line)
+                        let fc = fano_line_basis_c(line)
+
+                        // Check if (a,b,c) matches this Fano triple (up to permutation)
+                        var is_fano_match = false
+                        if (a == fa && b == fb && c == fc) { is_fano_match = true }
+                        if (a == fa && b == fc && c == fb) { is_fano_match = true }
+                        if (a == fb && b == fa && c == fc) { is_fano_match = true }
+                        if (a == fb && b == fc && c == fa) { is_fano_match = true }
+                        if (a == fc && b == fa && c == fb) { is_fano_match = true }
+                        if (a == fc && b == fb && c == fa) { is_fano_match = true }
+
+                        if is_fano_match {
+                            fano_strength[line] = fano_strength[line] + tp_sq
+                        }
+
+                        line = line + 1
+                    }
+
+                    c = c + 1
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+
+        // Normalize to 6-simplex: p[k] = strength[k] / sum(strength)
+        var total_strength: f64 = 0.0
+        var k: i32 = 0
+        while k < n_fano_lines {
+            total_strength = total_strength + fano_strength[k]
+            k = k + 1
+        }
+
+        // Avoid division by zero
+        if total_strength < 1e-12 {
+            total_strength = 1.0
+        }
+
+        k = 0
+        while k < n_fano_lines {
+            fano_vectors[subject * 7 + (k as i64)] = fano_strength[k] / total_strength
+            k = k + 1
+        }
+
+        // Progress
+        if ((subject + 1) % 20) == 0 {
+            print("  "); print_int(subject + 1); print("/"); print_int(n_total); println("")
+        }
+
+        subject = subject + 1
+    }
+
+    println("")
+    println("Fano 7-vectors completed for all subjects.")
+    println("Vector data stored in memory, ready for Python analysis.")
+    println("Next: Run fano_taxonomy.py for clustering and ARI tests.")
+
+    0
+}

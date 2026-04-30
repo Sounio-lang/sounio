@@ -7,7 +7,7 @@
 # Usage:
 #   bash scripts/gen_stdlib_api_md.sh
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STDLIB_DIR="${REPO_ROOT}/stdlib"
 OUT_FILE="${REPO_ROOT}/docs/stdlib/STDLIB_API_REFERENCE.md"
 

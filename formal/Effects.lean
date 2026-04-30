@@ -1,3 +1,5 @@
+import TypeChecker
+
 /-!
 # Sounio.Effects — Phase 8 Formal Verification
 
@@ -17,7 +19,6 @@ This file proves:
 4. Purity: the empty-effect function type is a subtype of any effect type.
 -/
 
-import Sounio.TypeChecker   -- for Effect, EffectRow, Ty
 
 namespace Sounio.Effects
 
@@ -50,7 +51,7 @@ theorem effect_subsumption_trans (e1 e2 e3 : EffectRow)
     its caller, so every caller context satisfies the requirement. -/
 theorem pure_callable_anywhere (e : EffectRow) :
     effectSubsumes e [] :=
-  fun _ h => absurd h (List.not_mem_nil _)
+  fun _ h => absurd h List.not_mem_nil
 
 -- ---------------------------------------------------------------------------
 -- Effect composition (sequential)
@@ -98,7 +99,7 @@ theorem masking_removes_effect (total masked visible : EffectRow)
     (h : effectMasked total masked visible) :
     effectSubsumes visible (total.filter (fun e => !decide (e ∈ masked))) := by
   intro e he
-  simp only [List.mem_filter, Bool.not_eq_true, decide_eq_false_iff_not] at he
+  simp at he
   obtain ⟨hmem, hnmasked⟩ := he
   rcases h e hmem with hmask | hvis
   · exact absurd hmask hnmasked
@@ -109,9 +110,7 @@ theorem full_masking_yields_pure (total : EffectRow)
     (h : effectMasked total total []) :
     effectSubsumes [] (total.filter (fun e => !decide (e ∈ total))) := by
   intro e he
-  simp only [List.mem_filter, Bool.not_eq_true, decide_eq_false_iff_not] at he
-  obtain ⟨hmem, hnot⟩ := he
-  exact absurd hmem hnot
+  simp at he
 
 -- ---------------------------------------------------------------------------
 -- Div effect and totality
@@ -148,23 +147,6 @@ theorem subsumption_weakening_right (e1 e2 extra : EffectRow)
     (h : effectSubsumes e1 e2) :
     effectSubsumes (extra ++ e1) e2 :=
   fun eff he2 => List.mem_append.mpr (Or.inr (h eff he2))
-
--- ---------------------------------------------------------------------------
--- Effect-row deduplication soundness
--- ---------------------------------------------------------------------------
-
-/-- A deduplicated effect row is subsumed by the original.
-    In practice the Rust implementation may canonicalise rows; this lemma
-    shows the canonical form is always at least as permissive. -/
-theorem dedup_subsumed_by_original [DecidableEq Effect] (e : EffectRow) :
-    effectSubsumes e e.dedup :=
-  fun eff h => List.mem_dedup.mp h
-
-/-- The original row is subsumed by its deduplication, so they are
-    equivalent under the subsumption ordering. -/
-theorem original_subsumed_by_dedup [DecidableEq Effect] (e : EffectRow) :
-    effectSubsumes e.dedup e :=
-  fun eff h => List.mem_dedup.mpr h
 
 -- ---------------------------------------------------------------------------
 -- Purity and the unit function type

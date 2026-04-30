@@ -15,17 +15,19 @@ jobs:
         with:
           node-version: '20'
       - name: Workflow script references
-        run: bash scripts/check_workflow_script_refs.sh
+        run: bash scripts/dev/check_workflow_script_refs.sh
       - name: Docs consistency
-        run: bash scripts/check_docs_consistency.sh
+        run: bash scripts/dev/check_docs_consistency.sh
       - name: Docs registry
-        run: bash scripts/check_docs_registry.sh
+        run: bash scripts/dev/check_docs_registry.sh
       - name: Issue template contracts
-        run: bash scripts/check_issue_template_contracts.sh
+        run: bash scripts/ci/check_issue_template_contracts.sh
       - name: Legacy path hygiene
-        run: bash scripts/check_legacy_paths.sh
+        run: bash scripts/ci/check_legacy_paths.sh
       - name: Claude operational contract
-        run: bash scripts/claude_operational_contract_gate.sh
+        run: bash scripts/ci/claude_operational_contract_gate.sh
+      - name: Ontology validation
+        run: bash scripts/ci/run_ontology_validation.sh --mode rebuilt ontology
       - name: Upload contract artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -34,32 +36,103 @@ jobs:
           path: artifacts/omega/claude_operational_contract_status.v1.json
           retention-days: 7
 
-  native-selfhost:
-    name: Native Self-Host
+  native-selfhost-linux-x86_64:
+    name: Native Self-Host (Linux x86_64)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SOUNIO_SELFHOST_HOST_GATE_DIR: /tmp/sounio-selfhost-linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host self-host gate
+        run: bash scripts/ci/selfhost_host_gate.sh
+      - name: Feature gate (11 tests)
+        run: |
+          cp /tmp/sounio-selfhost-linux-x86_64/artifacts/souc-stage2 /tmp/final_boot4.elf
+          chmod +x /tmp/final_boot4.elf
+          bash scripts/ci/souc_v2_gate.sh
+      - name: Upload native compiler artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-compiler-linux-x86_64
+          path: /tmp/sounio-selfhost-linux-x86_64/artifacts/souc-stage2
+          retention-days: 1
+      - name: Upload Linux self-host gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfhost-gate-linux-x86_64
+          path: /tmp/sounio-selfhost-linux-x86_64
+          retention-days: 1
+
+  source-bootstrap-selfhost-linux-x86_64:
+    name: Source-Bootstrap Self-Host (Linux x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOUNIO_SELFHOST_HOST_GATE_DIR: /tmp/sounio-source-bootstrap-selfhost-linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source-bootstrap host self-host gate
+        run: bash scripts/codex/action-source-bootstrap-host-gate.sh
+      - name: Upload source-bootstrap self-host gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-bootstrap-selfhost-gate-linux-x86_64
+          path: /tmp/sounio-source-bootstrap-selfhost-linux-x86_64
+          retention-days: 1
+
+  native-selfhost-macos-arm64:
+    name: Native Self-Host (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      SOUNIO_SELFHOST_HOST_GATE_DIR: /tmp/sounio-selfhost-macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host self-host gate
+        run: bash scripts/ci/selfhost_host_gate.sh
+      - name: Upload macOS native compiler artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-compiler-macos-arm64
+          path: /tmp/sounio-selfhost-macos-arm64/artifacts/souc-stage2
+          retention-days: 1
+      - name: Upload macOS self-host gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfhost-gate-macos-arm64
+          path: /tmp/sounio-selfhost-macos-arm64
+          retention-days: 1
+
+  full-test-suite:
+    name: Full Test Suite
+    runs-on: ubuntu-24.04
+    needs: native-selfhost-linux-x86_64
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Bootstrap native compiler
+      - name: Download native compiler artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: native-compiler-linux-x86_64
+          path: /tmp
+      - name: Run full test suite
+        env:
+          SOUNIO_TEST_SOUC_BIN: /tmp/souc-stage2
+          SOUNIO_TEST_JOBS: 4
         run: |
-          bash scripts/ci/build_native_souc.sh /tmp/souc.elf
-          echo "Native compiler: $(stat -c%s /tmp/souc.elf) bytes"
-      - name: Verify self-hosting fixed-point
-        run: |
-          /tmp/souc.elf self-hosted/compiler/lean_single.sio /tmp/s2.elf 2>/dev/null
-          chmod +x /tmp/s2.elf
-          /tmp/s2.elf self-hosted/compiler/lean_single.sio /tmp/s3.elf 2>/dev/null
-          if cmp -s /tmp/s2.elf /tmp/s3.elf; then
-            echo "SELFHOST_FIXED_POINT_PASS ($(md5sum /tmp/s2.elf | cut -d' ' -f1))"
-          else
-            echo "SELFHOST_FIXED_POINT_FAIL"
-            exit 1
-          fi
-      - name: Feature gate (11 tests)
-        run: |
-          cp /tmp/souc.elf /tmp/final_boot4.elf
-          chmod +x /tmp/final_boot4.elf
-          bash scripts/souc_v2_gate.sh
+          chmod +x /tmp/souc-stage2
+          bash scripts/run_sio_test_suite.sh --format junit --jobs 4
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+          retention-days: 30
 
   sounio-lint:
     name: Sounio Lint

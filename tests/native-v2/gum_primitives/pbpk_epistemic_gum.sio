@@ -1,0 +1,75 @@
+// Native-v2 GUM primitives: epistemic PBPK with ISO uncertainty propagation.
+// Two-compartment rapamycin-class model using Knowledge<f64>.
+// GUM addition (sqrt quadrature) propagates uncertainty through each step.
+
+struct KnowledgeF64 {
+    value: f64,
+    uncertainty: f64,
+    confidence: f64,
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    b
+}
+
+fn gum_add(a: KnowledgeF64, b: KnowledgeF64) -> KnowledgeF64 {
+    let ua2 = a.uncertainty * a.uncertainty
+    let ub2 = b.uncertainty * b.uncertainty
+    let sum2 = ua2 + ub2
+    let u_c = sqrt_f64(sum2)
+    KnowledgeF64 {
+        value: a.value + b.value,
+        uncertainty: u_c,
+        confidence: min_f64(a.confidence, b.confidence),
+    }
+}
+
+fn scale_knowledge(k: KnowledgeF64, factor: f64) -> KnowledgeF64 {
+    KnowledgeF64 {
+        value: k.value * factor,
+        uncertainty: k.uncertainty * factor,
+        confidence: k.confidence,
+    }
+}
+
+fn main() -> i64 with IO, Mut, Div {
+    // Central compartment: initial dose 100 ng/mL, 2% uncertainty, 0.90 confidence
+    var central = KnowledgeF64 { value: 100.0, uncertainty: 2.0, confidence: 0.9 }
+    // Tissue compartment: initially 0
+    var tissue = KnowledgeF64 { value: 0.0, uncertainty: 0.0, confidence: 0.9 }
+
+    // Simulation: 4 steps of clearance + exchange
+    // clearance_rate: 0.05 (5% per step), exchange_rate: 0.10 (10% per step)
+    var i: i64 = 0
+    while i < 4 {
+        let cleared = scale_knowledge(central, 0.05)
+        let exchanged = scale_knowledge(central, 0.10)
+        let from_tissue = scale_knowledge(tissue, 0.10)
+
+        // new_central = central - cleared - exchanged + from_tissue
+        let neg_cleared = scale_knowledge(cleared, -1.0)
+        let neg_exchanged = scale_knowledge(exchanged, -1.0)
+        let c1 = gum_add(central, neg_cleared)
+        let c2 = gum_add(c1, neg_exchanged)
+        central = gum_add(c2, from_tissue)
+
+        // new_tissue = tissue + exchanged - from_tissue
+        let neg_from = scale_knowledge(from_tissue, -1.0)
+        let t1 = gum_add(tissue, exchanged)
+        tissue = gum_add(t1, neg_from)
+
+        i = i + 1
+    }
+
+    // Confidence gate: reject if epistemic confidence dropped below 0.80
+    if central.confidence < 0.8 { return 1 }
+
+    print_f64(central.value)
+    print_char(10)
+    print_f64(central.uncertainty)
+    print_char(10)
+    print_f64(tissue.value)
+    print_char(10)
+    0
+}

@@ -1,0 +1,402 @@
+// examples/neuroreceptor_pet/pet_fit_montecarlo.sio
+//
+// Monte Carlo parameter-recovery demonstration for PET 2TCM.
+//
+// SCOPE (proof-of-concept only):
+//   - Generate N independent noisy TACs from the same synthetic ground truth.
+//   - Fit each with a simple coordinate-descent search over a 9-point
+//     multiplicative grid per parameter.
+//   - Report mean and SD of recovered parameters across realisations.
+//   - The mean characterises bias, the SD characterises precision for
+//     this specific optimiser + noise model.
+//
+// LIMITATIONS:
+//   - The optimiser is a limited coordinate-descent on a discrete
+//     multiplier grid; it is NOT a production Levenberg-Marquardt fitter
+//     and can plateau at non-global minima. Reported bias on individual
+//     k3, k4 reflects that optimiser, not a fundamental identifiability
+//     limit.
+//   - All noise is LCG + Irwin-Hall (sum of 12 uniforms - 6): an
+//     approximate Gaussian, reproducible by seed.
+//   - Not a test-retest reproducibility claim; not a clinical fit.
+//
+// Observation (consistent with, not a reproduction of, the general PET
+// finding that macroscopic kinetic combinations tend to be more stable
+// than individual rate constants; see Lammertsma 1996 for a specific
+// report of 19-77 % standard errors on direct method-A BP estimates):
+//   - V_T and BP_ND recovered with lower CV than individual k3, k4
+//     across our 20 realisations.
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { return 0.0 - x } ; return x }
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    return g
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Div {
+    if x < 0.0 { return 1.0 / exp_f64(0.0 - x) }
+    if x > 0.5 {
+        let half = exp_f64(x * 0.5)
+        return half * half
+    }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 {
+        let di = i as f64
+        term = term * x / di
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+// --- LCG + uniform ---
+struct Rng { state: i64 }
+fn rng_next(r: Rng) -> Rng {
+    Rng { state: r.state * 6364136223846793005 + 1442695040888963407 }
+}
+fn rng_uniform(r: Rng) -> f64 {
+    let v = r.state
+    let bits = (v / 2048) - ((v / 2048) / 4503599627370496) * 4503599627370496
+    let bits2 = if bits < 0 { bits + 4503599627370496 } else { bits }
+    return (bits2 as f64) / 4503599627370496.0
+}
+
+// --- 2TCM ---
+struct P { k1: f64, k2: f64, k3: f64, k4: f64, cp_amp: f64, cp_decay: f64 }
+struct S { c1: f64, c2: f64 }
+
+fn cp_of(t: f64, amp: f64, decay: f64) -> f64 with Mut, Div {
+    if t < 0.0 { return 0.0 }
+    return amp * exp_f64(0.0 - decay * t)
+}
+
+fn rk4(st: S, t: f64, dt: f64, p: P) -> S with Mut, Div {
+    let cp0 = cp_of(t, p.cp_amp, p.cp_decay)
+    let a1 = dt * (p.k1 * cp0 - (p.k2 + p.k3) * st.c1 + p.k4 * st.c2)
+    let b1 = dt * (p.k3 * st.c1 - p.k4 * st.c2)
+    let c1m = st.c1 + 0.5 * a1
+    let c2m = st.c2 + 0.5 * b1
+    let cpm = cp_of(t + 0.5 * dt, p.cp_amp, p.cp_decay)
+    let a2 = dt * (p.k1 * cpm - (p.k2 + p.k3) * c1m + p.k4 * c2m)
+    let b2 = dt * (p.k3 * c1m - p.k4 * c2m)
+    let c1n = st.c1 + 0.5 * a2
+    let c2n = st.c2 + 0.5 * b2
+    let a3 = dt * (p.k1 * cpm - (p.k2 + p.k3) * c1n + p.k4 * c2n)
+    let b3 = dt * (p.k3 * c1n - p.k4 * c2n)
+    let c1o = st.c1 + a3
+    let c2o = st.c2 + b3
+    let cpe = cp_of(t + dt, p.cp_amp, p.cp_decay)
+    let a4 = dt * (p.k1 * cpe - (p.k2 + p.k3) * c1o + p.k4 * c2o)
+    let b4 = dt * (p.k3 * c1o - p.k4 * c2o)
+    S {
+        c1: st.c1 + (a1 + 2.0 * a2 + 2.0 * a3 + a4) / 6.0,
+        c2: st.c2 + (b1 + 2.0 * b2 + 2.0 * b3 + b4) / 6.0,
+    }
+}
+
+fn simulate_tac(p: P, obs: &![f64; 80]) with Mut, Div, Panic {
+    let t_end = 60.0
+    let dt = 0.05
+    var st = S { c1: 0.0, c2: 0.0 }
+    var t = 0.0
+    var n = 0
+    var ck = 1
+    (*obs)[0] = 0.0
+    let n_obs = 60
+    while t < t_end && n < 5000 {
+        st = rk4(st, t, dt, p)
+        t = t + dt
+        n = n + 1
+        while ck <= n_obs {
+            if t >= (ck as f64) - 1.0e-9 {
+                (*obs)[ck as usize] = st.c1 + st.c2
+                ck = ck + 1
+            } else { break }
+        }
+    }
+}
+
+fn chi2(pred: [f64; 80], obs: [f64; 80], n: i32) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < n {
+        let d = pred[i as usize] - obs[i as usize]
+        s = s + d * d
+        i = i + 1
+    }
+    return s
+}
+
+fn eval_at(k1: f64, k2: f64, k3: f64, k4: f64, obs: [f64; 80], n: i32,
+           cp_amp: f64, cp_decay: f64) -> f64 with Mut, Div, Panic {
+    let p = P { k1: k1, k2: k2, k3: k3, k4: k4, cp_amp: cp_amp, cp_decay: cp_decay }
+    var pred = [0.0; 80]
+    simulate_tac(p, &!pred)
+    return chi2(pred, obs, n + 1)
+}
+
+struct Fit { k1: f64, k2: f64, k3: f64, k4: f64, conv: bool }
+
+fn fit_2tcm(k1_0: f64, k2_0: f64, k3_0: f64, k4_0: f64,
+            obs: [f64; 80], n: i32,
+            cp_amp: f64, cp_decay: f64) -> Fit with Mut, Div, Panic {
+    var k1 = k1_0
+    var k2 = k2_0
+    var k3 = k3_0
+    var k4 = k4_0
+    var c = eval_at(k1, k2, k3, k4, obs, n, cp_amp, cp_decay)
+    var iter = 0
+    var conv = false
+    let mults = [0.80, 0.90, 0.95, 0.98, 1.0, 1.02, 1.05, 1.10, 1.20]
+    while iter < 30 {
+        let cprev = c
+        var m = 0
+        while m < 9 {
+            let tr = k1 * mults[m as usize]
+            let nc = eval_at(tr, k2, k3, k4, obs, n, cp_amp, cp_decay)
+            if nc < c { c = nc; k1 = tr }
+            m = m + 1
+        }
+        m = 0
+        while m < 9 {
+            let tr = k2 * mults[m as usize]
+            let nc = eval_at(k1, tr, k3, k4, obs, n, cp_amp, cp_decay)
+            if nc < c { c = nc; k2 = tr }
+            m = m + 1
+        }
+        m = 0
+        while m < 9 {
+            let tr = k3 * mults[m as usize]
+            let nc = eval_at(k1, k2, tr, k4, obs, n, cp_amp, cp_decay)
+            if nc < c { c = nc; k3 = tr }
+            m = m + 1
+        }
+        m = 0
+        while m < 9 {
+            let tr = k4 * mults[m as usize]
+            let nc = eval_at(k1, k2, k3, tr, obs, n, cp_amp, cp_decay)
+            if nc < c { c = nc; k4 = tr }
+            m = m + 1
+        }
+        iter = iter + 1
+        let imp = if cprev > 1.0e-12 { (cprev - c) / cprev } else { 0.0 }
+        if imp < 1.0e-5 { conv = true; break }
+    }
+    Fit { k1: k1, k2: k2, k3: k3, k4: k4, conv: conv }
+}
+
+struct Stat2 { mean: f64, sd: f64 }
+
+fn stats_of(vals: [f64; 32], n: i32) -> Stat2 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + vals[i as usize]; i = i + 1 }
+    let mean = sum / (n as f64)
+    var ssq = 0.0
+    i = 0
+    while i < n {
+        let d = vals[i as usize] - mean
+        ssq = ssq + d * d
+        i = i + 1
+    }
+    var sd = 0.0
+    if n > 1 {
+        var g = ssq / ((n - 1) as f64)
+        if g < 0.0 { g = 0.0 }
+        var s = if g < 1.0 { 1.0 } else { g }
+        var it = 0
+        while it < 40 {
+            if s > 0.0 { s = 0.5 * (s + g / s) }
+            it = it + 1
+        }
+        sd = s
+    }
+    Stat2 { mean: mean, sd: sd }
+}
+
+fn report_param(label_id: i32, true_val: f64, mean: f64, sd: f64) with IO, Mut, Div {
+    if label_id == 0 { print("  K1       ") }
+    if label_id == 1 { print("  k2       ") }
+    if label_id == 2 { print("  k3       ") }
+    if label_id == 3 { print("  k4       ") }
+    if label_id == 4 { print("  BP_ND    ") }
+    if label_id == 5 { print("  V_T      ") }
+    let bias_pct = 100.0 * (mean - true_val) / true_val
+    let cv_pct = if mean > 1.0e-9 { 100.0 * sd / mean } else { 0.0 }
+    print(true_val); print("  ")
+    print(mean);     print("  ")
+    print(sd);       print("  ")
+    print(bias_pct); print("  ")
+    print(cv_pct);   println("")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Monte Carlo parameter recovery — PET 2TCM, 20 noise realizations")
+    println("======================================================================")
+    println("")
+
+    let k1_true = 0.15
+    let k2_true = 0.20
+    let k3_true = 0.10
+    let k4_true = 0.05
+    let cp_amp = 1.00
+    let cp_decay = 0.20
+    let bp_true = k3_true / k4_true
+    let vt_true = (k1_true / k2_true) * (1.0 + bp_true)
+
+    println("Ground truth: K1=0.15 k2=0.20 k3=0.10 k4=0.05")
+    println("              BP_ND=2.00   V_T=2.25")
+    println("")
+
+    let p_true = P { k1: k1_true, k2: k2_true, k3: k3_true, k4: k4_true,
+                     cp_amp: cp_amp, cp_decay: cp_decay }
+    var tac_clean = [0.0; 80]
+    simulate_tac(p_true, &!tac_clean)
+    let n_obs = 60
+    var peak = 0.0
+    var pk = 0
+    while pk <= n_obs { if tac_clean[pk as usize] > peak { peak = tac_clean[pk as usize] }; pk = pk + 1 }
+    let noise_sd = 0.05 * peak
+
+    let n_reps = 20
+    println("Noise level: 5 % of peak")
+    println("Realizations:"); print(n_reps); println("")
+    println("")
+
+    var k1_vals = [0.0; 32]
+    var k2_vals = [0.0; 32]
+    var k3_vals = [0.0; 32]
+    var k4_vals = [0.0; 32]
+    var bp_vals = [0.0; 32]
+    var vt_vals = [0.0; 32]
+    var n_conv = 0
+
+    var rep = 0
+    while rep < n_reps {
+        var r = Rng { state: (12345 + rep * 1009) as i64 }
+        var tac_obs = [0.0; 80]
+        var i = 0
+        while i <= n_obs {
+            var sum = 0.0
+            var k = 0
+            while k < 12 {
+                r = rng_next(r)
+                sum = sum + rng_uniform(r)
+                k = k + 1
+            }
+            let z = sum - 6.0
+            tac_obs[i as usize] = tac_clean[i as usize] + noise_sd * z
+            i = i + 1
+        }
+
+        // Starting guess offset from truth
+        let fit = fit_2tcm(0.12, 0.25, 0.07, 0.04, tac_obs, n_obs, cp_amp, cp_decay)
+        if fit.conv { n_conv = n_conv + 1 }
+
+        let bp_fit = fit.k3 / fit.k4
+        let vt_fit = (fit.k1 / fit.k2) * (1.0 + bp_fit)
+
+        k1_vals[rep as usize] = fit.k1
+        k2_vals[rep as usize] = fit.k2
+        k3_vals[rep as usize] = fit.k3
+        k4_vals[rep as usize] = fit.k4
+        bp_vals[rep as usize] = bp_fit
+        vt_vals[rep as usize] = vt_fit
+
+        rep = rep + 1
+    }
+
+    let s_k1 = stats_of(k1_vals, n_reps)
+    let s_k2 = stats_of(k2_vals, n_reps)
+    let s_k3 = stats_of(k3_vals, n_reps)
+    let s_k4 = stats_of(k4_vals, n_reps)
+    let s_bp = stats_of(bp_vals, n_reps)
+    let s_vt = stats_of(vt_vals, n_reps)
+
+    println("Convergence rate:"); print(n_conv); print(" / "); print(n_reps); println("")
+    println("")
+    println("======================================================================")
+    println("  RECOVERY STATISTICS (mean ± SD, relative bias and precision)")
+    println("======================================================================")
+    println("             true      mean        SD       bias%    CV%")
+
+    report_param(0, k1_true, s_k1.mean, s_k1.sd)
+    report_param(1, k2_true, s_k2.mean, s_k2.sd)
+    report_param(2, k3_true, s_k3.mean, s_k3.sd)
+    report_param(3, k4_true, s_k4.mean, s_k4.sd)
+    report_param(4, bp_true, s_bp.mean, s_bp.sd)
+    report_param(5, vt_true, s_vt.mean, s_vt.sd)
+
+    println("")
+    println("======================================================================")
+    println("  ACCEPTANCE TESTS")
+    println("======================================================================")
+    var passed = 0
+    var failed = 0
+
+    // Convergence rate
+    if n_conv >= n_reps - 2 {
+        println("  [PASS] At least 90 % of fits converged"); passed = passed + 1
+    } else {
+        println("  [FAIL] Convergence rate below 90 %"); failed = failed + 1
+    }
+
+    let vt_bias = 100.0 * abs_f64(s_vt.mean - vt_true) / vt_true
+    if vt_bias < 5.0 {
+        println("  [PASS] V_T bias < 5 %"); passed = passed + 1
+    } else {
+        println("  [FAIL] V_T bias >= 5 %"); failed = failed + 1
+    }
+
+    let bp_bias = 100.0 * abs_f64(s_bp.mean - bp_true) / bp_true
+    if bp_bias < 10.0 {
+        println("  [PASS] BP_ND bias < 10 %"); passed = passed + 1
+    } else {
+        println("  [FAIL] BP_ND bias >= 10 %"); failed = failed + 1
+    }
+
+    let cv_vt = 100.0 * s_vt.sd / s_vt.mean
+    let cv_k3 = 100.0 * s_k3.sd / s_k3.mean
+    let cv_k4 = 100.0 * s_k4.sd / s_k4.mean
+    if cv_vt < cv_k3 && cv_vt < cv_k4 {
+        println("  [PASS] CV(V_T) < CV(k3) and < CV(k4) — identifiability hierarchy")
+        passed = passed + 1
+    } else {
+        println("  [FAIL] Expected identifiability hierarchy violated")
+        failed = failed + 1
+    }
+
+    let cv_bp = 100.0 * s_bp.sd / s_bp.mean
+    if cv_bp < cv_k3 {
+        println("  [PASS] CV(BP_ND) < CV(k3) — ratio more stable than numerator")
+        passed = passed + 1
+    } else {
+        println("  [FAIL] CV(BP_ND) >= CV(k3)"); failed = failed + 1
+    }
+
+    println("")
+    println("  Passed:"); print(passed); println("")
+    println("  Failed:"); print(failed); println("")
+    println("")
+    if failed == 0 {
+        println("  Monte Carlo recovery statistics (this coordinate-descent")
+        println("  optimiser + 5 %-peak Irwin-Hall noise, 20 realisations):")
+        println("  V_T and BP_ND show lower CV than individual k3, k4 — an")
+        println("  observation consistent with, but NOT a full reproduction of,")
+        println("  the published general behaviour that macroscopic PET")
+        println("  parameters tend to be more stable than individual rates.")
+        println("  Not a clinical identifiability claim.")
+        return 0
+    } else {
+        println("  Monte Carlo acceptance failed — review fitter or noise model.")
+        return 1
+    }
+}

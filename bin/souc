@@ -2,553 +2,319 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NATIVE_BIN="${SOUC_NATIVE_BIN:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64}"
-LLVM_EMIT_BIN="${SOUC_LLVM_EMIT_BIN:-$ROOT_DIR/artifacts/souc-emit-llvm-x86_64}"
-export SOUNIO_STDLIB_PATH="${ROOT_DIR}/stdlib"
+HOST_OS="${SOUNIO_HOST_OS_OVERRIDE:-$(uname -s)}"
+HOST_ARCH="${SOUNIO_HOST_ARCH_OVERRIDE:-$(uname -m)}"
+WRAPPER_VERSION="${SOUNIO_SOUC_VERSION:-1.0.0-beta.5}"
+MACOS_CODESIGN_HELPER="$ROOT_DIR/scripts/lib/macos_codesign.sh"
 
-usage() {
-  cat <<'EOF'
-Usage:
-  souc check <file.sio>
-  souc run <file.sio> [-- <program args...>]
-  souc compile <file.sio> -o <output>
-  souc build <file.sio> --backend native -o <output>
-  souc build <file.sio> --backend llvm -o <output>
-  souc build <file.sio> --emit-llvm -o <output.ll>
-  souc info
-  souc repl
-  souc publish <path>     — register a local package in ~/.sounio/registry/
-  souc search <name>      — search the local registry for a package
-  souc list               — list all packages in the local registry
-
-Notes:
-  - Native mode compiles to an ELF before execution.
-  - `build --backend llvm` compiles via LLVM 18 (ELF output, requires libLLVM-18).
-  - `build --emit-llvm` writes LLVM IR to <output>.ll for downstream llc/clang.
-  - REPL is not yet supported in native mode.
-  - `check --show-ast` and `check --show-types` use native compiler summaries.
-  - Registry index: ~/.sounio/registry/index.txt (one entry per line).
-EOF
-}
-
-require_native() {
-  if [[ ! -x "$NATIVE_BIN" ]]; then
-    echo "error: native compiler not found at $NATIVE_BIN" >&2
-    exit 1
-  fi
-}
-
-require_llvm_emit() {
-  if [[ ! -x "$LLVM_EMIT_BIN" ]]; then
-    echo "error: LLVM 18 emitter not found at $LLVM_EMIT_BIN" >&2
-    echo "  Rebuild: clang -I/usr/lib/llvm-18/include -L/usr/lib/llvm-18/lib \\" >&2
-    echo "           -O2 -o \$ROOT/artifacts/souc-emit-llvm-x86_64 \\" >&2
-    echo "           \$ROOT/self-hosted/llvm/souc_emit_llvm.c -lLLVM" >&2
-    exit 1
-  fi
-}
-
-unsupported_flag() {
-  echo "error: $1 is not yet supported in native mode" >&2
-  exit 2
-}
-
-abspath_path() {
-  local path="$1"
-  if [[ "$path" = /* ]]; then
-    printf '%s\n' "$path"
-  else
-    printf '%s/%s\n' "$PWD" "$path"
-  fi
-}
-
-compile_quiet() {
-  local src="$1"
-  local out="$2"
-  local log="$3"
-  shift 3
-  local abs_src abs_out
-  abs_src="$(abspath_path "$src")"
-  abs_out="$(abspath_path "$out")"
-  if (
-    cd "$ROOT_DIR"
-    "$NATIVE_BIN" "$abs_src" "$abs_out" "$@"
-  ) >"$log" 2>&1; then
-    return 0
-  fi
-  cat "$log" >&2
-  return 1
-}
-
-print_native_summary_log() {
-  local log="$1"
-  awk '
-    /^AST summary:/ { section="ast"; print; next }
-    /^Type summary:/ { section="types"; print; next }
-    /^compile: fns=/ { section=""; next }
-    section == "ast" {
-      if ($0 ~ /^struct#/ || $0 ~ /^enum#/ || $0 ~ /^global#/ || $0 ~ /^fn#/ || $0 ~ /^[(]/ || $0 ~ /^ -> /) {
-        print
-      }
-      next
-    }
-    section == "types" {
-      if ($0 ~ /^global#/ || $0 ~ /^fn#/ || $0 ~ /^: arity/ || $0 ~ /^ -> /) {
-        print
-      }
-      next
-    }
-  ' "$log"
-}
-
-parse_check_args() {
-  local src_ref="$1"
-  local show_ast_ref="$2"
-  local show_types_ref="$3"
-  shift 3
-
-  printf -v "$src_ref" '%s' ""
-  printf -v "$show_ast_ref" '%s' "0"
-  printf -v "$show_types_ref" '%s' "0"
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -h|--help)
-        cat <<'EOF'
-Type-check a Sounio source file without keeping the produced ELF
-
-Usage:
-  souc check <file.sio> [--show-ast] [--show-types]
-EOF
-        exit 0
-        ;;
-      --show-ast)
-        printf -v "$show_ast_ref" '%s' "1"
-        shift
-        ;;
-      --show-types)
-        printf -v "$show_types_ref" '%s' "1"
-        shift
-        ;;
-      -*)
-        echo "error: unsupported argument for check: $1" >&2
-        exit 2
-        ;;
-      *)
-        if [[ -z "${!src_ref}" ]]; then
-          printf -v "$src_ref" '%s' "$1"
-        else
-          echo "error: unexpected extra argument: $1" >&2
-          exit 2
-        fi
-        shift
-        ;;
-    esac
-  done
-
-  if [[ -z "${!src_ref}" ]]; then
-    echo "error: missing input .sio file" >&2
-    exit 2
-  fi
-}
-
-parse_build_args() {
-  local src_ref="$1"
-  local out_ref="$2"
-  local backend_ref="$3"
-  shift 3
-
-  printf -v "$src_ref" '%s' ""
-  printf -v "$out_ref" '%s' "a.elf"
-  printf -v "$backend_ref" '%s' "native"
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      -o)
-        if [[ $# -lt 2 ]]; then
-          echo "error: missing output after -o" >&2
-          exit 2
-        fi
-        printf -v "$out_ref" '%s' "$2"
-        shift 2
-        ;;
-      --backend)
-        if [[ $# -lt 2 ]]; then
-          echo "error: missing backend after --backend" >&2
-          exit 2
-        fi
-        printf -v "$backend_ref" '%s' "$2"
-        shift 2
-        ;;
-      --backend=*)
-        printf -v "$backend_ref" '%s' "${1#--backend=}"
-        shift
-        ;;
-      --emit-llvm)
-        # --emit-llvm is a pseudo-backend alias
-        printf -v "$backend_ref" '%s' "emit-llvm"
-        shift
-        ;;
-      --show-ast|--show-types)
-        unsupported_flag "$1"
-        ;;
-      -*)
-        echo "error: unsupported argument in native mode: $1" >&2
-        exit 2
-        ;;
-      *)
-        if [[ -z "${!src_ref}" ]]; then
-          printf -v "$src_ref" '%s' "$1"
-        else
-          echo "error: unexpected extra argument: $1" >&2
-          exit 2
-        fi
-        shift
-        ;;
-    esac
-  done
-
-  if [[ -z "${!src_ref}" ]]; then
-    echo "error: missing input .sio file" >&2
-    exit 2
-  fi
-}
-
-cmd="${1:-help}"
-if [[ $# -gt 0 ]]; then
-  shift
+if [[ -f "$MACOS_CODESIGN_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$MACOS_CODESIGN_HELPER"
 fi
 
-case "$cmd" in
-  help|-h|--help)
-    usage
-    ;;
-  version|-v|--version)
-    echo "souc native-wrapper v1.0.0-rc1"
-    ;;
-  info)
-    require_native
-    llvm_status="[-] LLVM 18 backend (souc-emit-llvm not built)"
-    if [[ -x "$LLVM_EMIT_BIN" ]]; then
-      llvm_status="[+] LLVM 18 backend (--backend llvm, --emit-llvm)"
-    fi
-    cat <<EOF
-souc native-wrapper v1.0.0-rc1
-native compiler: $NATIVE_BIN
-llvm emitter:    $LLVM_EMIT_BIN
-[+] Native self-hosted compiler
-[-] Cranelift JIT
-$llvm_status
-[-] GPU codegen
-[-] REPL
-[+] --show-ast
-[+] --show-types
+resolve_host_target() {
+  case "$HOST_OS:$HOST_ARCH" in
+    Linux:x86_64|Linux:amd64)
+      printf '%s\n' "x86_64-linux"
+      ;;
+    Linux:arm64|Linux:aarch64)
+      printf '%s\n' "aarch64-linux"
+      ;;
+    Darwin:arm64|Darwin:aarch64)
+      printf '%s\n' "aarch64-macos"
+      ;;
+    Darwin:x86_64|Darwin:amd64)
+      printf '%s\n' "x86_64-macos"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+resolve_host_binary() {
+  case "$HOST_OS:$HOST_ARCH" in
+    Linux:x86_64|Linux:amd64)
+      printf '%s\n' "$ROOT_DIR/bin/souc-linux-x86_64"
+      ;;
+    Darwin:arm64|Darwin:aarch64)
+      printf '%s\n' "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-arm64-macos"
+      ;;
+    Darwin:x86_64|Darwin:amd64)
+      printf '%s\n' "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64-macos"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [[ -n "${SOUNIO_SOUC_BIN:-}" ]]; then
+  SELECTED_BIN="$SOUNIO_SOUC_BIN"
+else
+  if ! SELECTED_BIN="$(resolve_host_binary)"; then
+    echo "error: unsupported host platform for this checkout: $HOST_OS/$HOST_ARCH" >&2
+    echo "hint: supported checked artifacts are Linux x86_64, macOS arm64, and macOS x86_64" >&2
+    exit 2
+  fi
+fi
+
+HOST_TARGET=""
+if _resolved_host_target="$(resolve_host_target 2>/dev/null)"; then
+  HOST_TARGET="$_resolved_host_target"
+fi
+
+if [[ ! -x "$SELECTED_BIN" ]]; then
+  echo "error: selected souc binary is missing or not executable: $SELECTED_BIN" >&2
+  exit 2
+fi
+
+if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
+  sounio_ad_hoc_codesign "$SELECTED_BIN"
+fi
+
+if [[ "${SOUNIO_SOUC_PRINT_PATH:-0}" == "1" ]]; then
+  printf '%s\n' "$SELECTED_BIN"
+  exit 0
+fi
+
+print_usage() {
+  cat <<EOF
+usage:
+  bin/souc check <source.sio> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
+  bin/souc compile <source.sio> -o <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
+  bin/souc build <source.sio> -o <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
+  bin/souc run <source.sio> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor] [-- <program args...>]
+  bin/souc info
+  bin/souc --version
+
+raw pass-through:
+  bin/souc <source.sio> <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
 EOF
-    ;;
-  repl)
-    echo "not yet supported in native mode" >&2
-    exit 1
-    ;;
-  check)
-    require_native
-    parse_check_args src show_ast show_types "$@"
-    tmp_out="$(mktemp /tmp/souc-check-XXXXXX.elf)"
-    tmp_log="$(mktemp /tmp/souc-check-XXXXXX.log)"
-    trap 'rm -f "$tmp_out" "$tmp_log"' EXIT
-    extra_flags=()
-    if [[ "$show_ast" == "1" ]]; then
-      extra_flags+=(--show-ast)
-    fi
-    if [[ "$show_types" == "1" ]]; then
-      extra_flags+=(--show-types)
-    fi
-    if compile_quiet "$src" "$tmp_out" "$tmp_log" "${extra_flags[@]}"; then
-      compile_ok=true
-    else
-      compile_ok=false
-    fi
-    rm -f "$tmp_out"
-    if [[ ${#extra_flags[@]} -gt 0 ]]; then
-      print_native_summary_log "$tmp_log"
-    fi
-    # Check for error messages in compiler output
-    if grep -q '^error\[E' "$tmp_log" 2>/dev/null || grep -q '^error:' "$tmp_log" 2>/dev/null; then
-      grep -E '^error' "$tmp_log"
-      exit 1
-    fi
-    if [[ "$compile_ok" != "true" ]]; then
-      echo "Compilation failed" >&2
-      cat "$tmp_log" >&2
-      exit 1
-    fi
-    echo "All checks passed"
-    # Write .econf certificate if the compiler emitted an econf: line
-    econf_line="$(grep '^econf: ' "$tmp_log" 2>/dev/null | tail -1 || true)"
-    if [[ -n "$econf_line" ]]; then
-      # Parse fields: econf: total=N platinum=N gate_pass=N knightian=N min=N mean=N gate=N
-      _egc_total=0; _egc_platinum=0; _egc_gate_pass=0; _egc_knightian=0
-      _egc_min=0; _egc_mean=0; _egc_gate=950
-      for _kv in $econf_line; do
-        case "$_kv" in
-          total=*)    _egc_total="${_kv#total=}" ;;
-          platinum=*) _egc_platinum="${_kv#platinum=}" ;;
-          gate_pass=*)_egc_gate_pass="${_kv#gate_pass=}" ;;
-          knightian=*)_egc_knightian="${_kv#knightian=}" ;;
-          min=*)      _egc_min="${_kv#min=}" ;;
-          mean=*)     _egc_mean="${_kv#mean=}" ;;
-          gate=*)     _egc_gate="${_kv#gate=}" ;;
-        esac
-      done
-      # Determine status
-      if [[ "$_egc_knightian" -gt 0 ]]; then
-        _egc_status="fail"
-      elif [[ "$_egc_gate_pass" -lt "$_egc_total" ]]; then
-        _egc_status="warn"
-      else
-        _egc_status="pass"
-      fi
-      # Determine output path: same dir as source, basename with .econf extension
-      _src_abs="$(abspath_path "$src")"
-      _src_dir="$(dirname "$_src_abs")"
-      _src_base="$(basename "$_src_abs" .sio)"
-      _econf_path="$_src_dir/$_src_base.econf"
-      # Get source basename for the "source" field
-      _src_name="$(basename "$src")"
-      _ts="$(date -u '+%Y-%m-%d' 2>/dev/null || echo '1970-01-01')"
-      printf '{
-  "sounio_econf_version": 1,
-  "source": "%s",
-  "timestamp_utc": "%s",
-  "egc": {
-    "total_expressions": %s,
-    "platinum_sites": %s,
-    "gate_pass_sites": %s,
-    "knightian_sites": %s,
-    "min_conf": %s,
-    "mean_conf": %s,
-    "gate_threshold": %s,
-    "platinum_ceiling": 1000
-  },
-  "status": "%s"
-}\n' \
-        "$_src_name" "$_ts" \
-        "$_egc_total" "$_egc_platinum" "$_egc_gate_pass" "$_egc_knightian" \
-        "$_egc_min" "$_egc_mean" "$_egc_gate" \
-        "$_egc_status" > "$_econf_path"
-      echo "econf: wrote $_econf_path (status=$_egc_status)"
-    fi
-    ;;
-  run)
-    require_native
-    src="${1:-}"
-    if [[ -z "$src" ]]; then
-      usage >&2
-      exit 1
-    fi
-    shift || true
-    if [[ "${1:-}" == "--" ]]; then
+}
+
+print_info() {
+  cat <<EOF
+souc_wrapper_version=$WRAPPER_VERSION
+host_os=$HOST_OS
+host_arch=$HOST_ARCH
+host_target=${HOST_TARGET:-unknown}
+selected_bin=$SELECTED_BIN
+selected_interface=raw-self-hosted
+compat_commands=check,compile,build,run,info,version
+raw_interface=<source.sio> <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
+EOF
+}
+
+raw_compile_quiet() {
+  local src="$1"
+  local out="$2"
+  shift 2
+
+  local output=""
+  local rc=0
+
+  set +e
+  output="$("$SELECTED_BIN" "$src" "$out" "$@" 2>&1)"
+  rc=$?
+  set -e
+
+  if [[ $rc -ne 0 ]]; then
+    [[ -n "$output" ]] && printf '%s\n' "$output" >&2
+    return "$rc"
+  fi
+
+  if [[ "${SOUNIO_SOUC_VERBOSE:-0}" == "1" && -n "$output" ]]; then
+    printf '%s\n' "$output" >&2
+  fi
+
+  chmod +x "$out" 2>/dev/null || true
+  if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
+    sounio_ad_hoc_codesign "$out"
+  fi
+}
+
+parse_compat_args() {
+  local mode="$1"
+  shift
+
+  COMPAT_SOURCE=""
+  COMPAT_OUTPUT=""
+  COMPAT_TARGET=""
+  COMPAT_COMPILER_ARGS=()
+  COMPAT_PROGRAM_ARGS=()
+
+  local saw_program_sep=0
+
+  while [[ $# -gt 0 ]]; do
+    if [[ $saw_program_sep -eq 1 ]]; then
+      COMPAT_PROGRAM_ARGS+=("$1")
       shift
+      continue
     fi
-    tmp_out="$(mktemp /tmp/souc-run-XXXXXX.elf)"
-    tmp_log="$(mktemp /tmp/souc-run-XXXXXX.log)"
-    trap 'rm -f "$tmp_out" "$tmp_log"' EXIT
-    compile_quiet "$src" "$tmp_out" "$tmp_log"
-    chmod +x "$tmp_out"
-    exec "$tmp_out" "$@"
-    ;;
-  compile)
-    require_native
-    src="${1:-}"
-    if [[ -z "$src" ]]; then
-      usage >&2
-      exit 1
-    fi
-    shift || true
-    out="a.elf"
-    extra_flags=()
-    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
-      usage
-      exit 0
-    fi
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        -o)
-          out="${2:-}"
-          if [[ -z "$out" ]]; then
-            echo "error: missing output after -o" >&2
-            exit 2
-          fi
-          shift 2
-          ;;
-        --show-ast|--show-types)
-          extra_flags+=("$1")
-          shift
-          ;;
-        *)
-          if [[ "$out" == "a.elf" ]]; then
-            out="$1"
-            shift
-          else
-            echo "error: unexpected extra argument: $1" >&2
-            exit 2
-          fi
-          ;;
-      esac
-    done
-    abs_src="$(abspath_path "$src")"
-    abs_out="$(abspath_path "$out")"
-    (
-      cd "$ROOT_DIR"
-      "$NATIVE_BIN" "$abs_src" "$abs_out" "${extra_flags[@]}"
-    )
-    chmod +x "$out"
-    ;;
-  build)
-    require_native
-    parse_build_args src out backend "$@"
-    abs_src="$(abspath_path "$src")"
-    abs_out="$(abspath_path "$out")"
-    case "$backend" in
-      native|selfhosted-native|"")
-        (
-          cd "$ROOT_DIR"
-          "$NATIVE_BIN" "$abs_src" "$abs_out"
-        )
-        chmod +x "$abs_out"
+
+    case "$1" in
+      --)
+        saw_program_sep=1
+        shift
         ;;
-      llvm)
-        # LLVM 18 backend: emit IR to a temp .ll file, then compile via clang
-        require_llvm_emit
-        tmp_ll="$(mktemp /tmp/souc-llvm-XXXXXX.ll)"
-        trap 'rm -f "$tmp_ll"' EXIT
-        # Emit LLVM IR from Sounio source
-        "$LLVM_EMIT_BIN" "$abs_src" "$tmp_ll" >&2
-        # Compile IR to native ELF via clang (with PIE, links against libc)
-        clang -fPIE "$tmp_ll" -o "$abs_out" >&2
-        chmod +x "$abs_out"
-        echo "souc: LLVM 18 backend: $src -> $out" >&2
-        ;;
-      emit-llvm)
-        # --emit-llvm: write LLVM IR to <output> (conventionally .ll)
-        require_llvm_emit
-        # Default output extension to .ll if not specified
-        if [[ "$abs_out" == "$(abspath_path a.elf)" ]]; then
-          abs_out="$(abspath_path a.ll)"
+      -o|--out)
+        if [[ $# -lt 2 ]]; then
+          echo "error: missing output path after $1" >&2
+          exit 2
         fi
-        "$LLVM_EMIT_BIN" "$abs_src" "$abs_out" >&2
-        echo "souc: LLVM IR written to $abs_out" >&2
-        echo "  Next steps:" >&2
-        echo "    llc $abs_out -o /tmp/out.s && clang /tmp/out.s -o /tmp/out" >&2
-        echo "    clang -fPIE $abs_out -o /tmp/out" >&2
+        COMPAT_OUTPUT="$2"
+        shift 2
         ;;
-      gpu|cranelift|jit)
-        echo "error: backend '$backend' is not yet available" >&2
+      --target)
+        if [[ $# -lt 2 ]]; then
+          echo "error: missing target triple after --target" >&2
+          exit 2
+        fi
+        COMPAT_TARGET="$2"
+        COMPAT_COMPILER_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --show-ast|--show-types|--r15-monitor)
+        COMPAT_COMPILER_ARGS+=("$1")
+        shift
+        ;;
+      -h|--help)
+        print_usage
+        exit 0
+        ;;
+      repl|test|fmt|lint|analyze|diagnostics|sysroot|clean|watch|serve|bench|gpu-emit|emit)
+        echo "error: unsupported command for the checked self-hosted launcher: $1" >&2
+        echo "hint: use the richer omega/pinned CLI for that workflow" >&2
+        exit 2
+        ;;
+      -*)
+        echo "error: unsupported option for wrapper compatibility mode: $1" >&2
+        echo "hint: supported wrapper flags are --target, --show-ast, --show-types, --r15-monitor, and -o/--out" >&2
         exit 2
         ;;
       *)
-        echo "error: unknown backend '$backend'" >&2
-        exit 2
+        if [[ -z "$COMPAT_SOURCE" ]]; then
+          COMPAT_SOURCE="$1"
+        elif [[ -z "$COMPAT_OUTPUT" && "$mode" != "run" && "$mode" != "check" ]]; then
+          COMPAT_OUTPUT="$1"
+        else
+          echo "error: unexpected positional argument in $mode mode: $1" >&2
+          exit 2
+        fi
+        shift
         ;;
     esac
-    ;;
-  publish)
-    pkg_path="${1:-}"
-    if [[ -z "$pkg_path" ]]; then
-      echo "error: souc publish requires a package path" >&2
-      echo "  Usage: souc publish <path>" >&2
-      exit 1
-    fi
-    pkg_path="$(abspath_path "$pkg_path")"
-    if [[ ! -d "$pkg_path" ]]; then
-      echo "error: path does not exist or is not a directory: $pkg_path" >&2
-      exit 1
-    fi
-    # Read manifest (souc.toml or package.toml or manifest.toml)
-    manifest_file=""
-    for candidate in souc.toml package.toml manifest.toml; do
-      if [[ -f "$pkg_path/$candidate" ]]; then
-        manifest_file="$pkg_path/$candidate"
-        break
-      fi
-    done
-    # Parse name and version from manifest (simple grep-based parse)
-    if [[ -n "$manifest_file" ]]; then
-      pkg_name="$(grep -m1 '^name' "$manifest_file" 2>/dev/null | sed 's/.*=\s*"\?\([^"]*\)"\?.*/\1/' | tr -d '[:space:]')"
-      pkg_version="$(grep -m1 '^version' "$manifest_file" 2>/dev/null | sed 's/.*=\s*"\?\([^"]*\)"\?.*/\1/' | tr -d '[:space:]')"
-    else
-      # Fall back to directory basename as name, version 0.0.0
-      pkg_name="$(basename "$pkg_path")"
-      pkg_version="0.0.0"
-    fi
-    if [[ -z "$pkg_name" ]]; then
-      pkg_name="$(basename "$pkg_path")"
-    fi
-    if [[ -z "$pkg_version" ]]; then
-      pkg_version="0.0.0"
-    fi
-    # Ensure registry directory exists
-    registry_dir="${HOME}/.sounio/registry"
-    registry_idx="$registry_dir/index.txt"
-    mkdir -p "$registry_dir"
-    # Check if already registered (simple name match)
-    if [[ -f "$registry_idx" ]] && grep -q "^name=$pkg_name " "$registry_idx" 2>/dev/null; then
-      echo "souc publish: updating existing entry for '$pkg_name'"
-      # Remove old entry
-      tmp_idx="$(mktemp)"
-      grep -v "^name=$pkg_name " "$registry_idx" > "$tmp_idx" || true
-      mv "$tmp_idx" "$registry_idx"
-    fi
-    # Append new entry
-    printf 'name=%s version=%s path=%s\n' "$pkg_name" "$pkg_version" "$pkg_path" >> "$registry_idx"
-    echo "souc publish: registered '$pkg_name' v$pkg_version at $pkg_path"
-    echo "  registry: $registry_idx"
-    ;;
+  done
 
-  search)
-    pkg_query="${1:-}"
-    if [[ -z "$pkg_query" ]]; then
-      echo "error: souc search requires a package name" >&2
-      echo "  Usage: souc search <name>" >&2
-      exit 1
-    fi
-    registry_idx="${HOME}/.sounio/registry/index.txt"
-    if [[ ! -f "$registry_idx" ]]; then
-      echo "souc search: local registry is empty (no index at $registry_idx)"
-      exit 0
-    fi
-    matches=0
-    while IFS= read -r line; do
-      # Extract name field
-      line_name="${line#name=}"
-      line_name="${line_name%% *}"
-      if [[ "$line_name" == "$pkg_query" ]] || [[ "$line_name" == *"$pkg_query"* ]]; then
-        echo "$line"
-        matches=$((matches + 1))
-      fi
-    done < "$registry_idx"
-    if [[ "$matches" -eq 0 ]]; then
-      echo "souc search: no packages matching '$pkg_query' in local registry"
-    fi
-    ;;
+  if [[ -z "$COMPAT_SOURCE" ]]; then
+    echo "error: missing source file for $mode" >&2
+    exit 2
+  fi
+}
 
-  list)
-    registry_idx="${HOME}/.sounio/registry/index.txt"
-    if [[ ! -f "$registry_idx" ]] || [[ ! -s "$registry_idx" ]]; then
-      echo "souc list: local registry is empty"
-      echo "  (index: ${HOME}/.sounio/registry/index.txt)"
-      exit 0
-    fi
-    echo "Local registry (${HOME}/.sounio/registry/index.txt):"
-    cat "$registry_idx"
-    ;;
+compat_check() {
+  parse_compat_args "check" "$@"
 
-  *)
-    echo "error: unknown subcommand: $cmd" >&2
-    usage >&2
-    exit 1
+  local tmp_dir
+  local rc=0
+  tmp_dir="$(mktemp -d)"
+
+  if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
+    raw_compile_quiet "$COMPAT_SOURCE" "$tmp_dir/check.out" "${COMPAT_COMPILER_ARGS[@]}" || rc=$?
+  else
+    raw_compile_quiet "$COMPAT_SOURCE" "$tmp_dir/check.out" || rc=$?
+  fi
+  rm -rf "$tmp_dir"
+  return "$rc"
+}
+
+compat_compile() {
+  parse_compat_args "compile" "$@"
+
+  if [[ -z "$COMPAT_OUTPUT" ]]; then
+    echo "error: compile/build mode requires -o <output> or a positional output path" >&2
+    exit 2
+  fi
+
+  local rc=0
+  if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
+    raw_compile_quiet "$COMPAT_SOURCE" "$COMPAT_OUTPUT" "${COMPAT_COMPILER_ARGS[@]}" || rc=$?
+  else
+    raw_compile_quiet "$COMPAT_SOURCE" "$COMPAT_OUTPUT" || rc=$?
+  fi
+  return "$rc"
+}
+
+compat_run() {
+  parse_compat_args "run" "$@"
+
+  if [[ -n "$HOST_TARGET" && -n "$COMPAT_TARGET" && "$COMPAT_TARGET" != "$HOST_TARGET" ]]; then
+    echo "error: run mode only executes host-native outputs in the checked self-hosted launcher" >&2
+    echo "hint: use compile for cross-target output ($COMPAT_TARGET) and run it on the matching host" >&2
+    exit 2
+  fi
+
+  local tmp_dir
+  local rc=0
+  tmp_dir="$(mktemp -d)"
+
+  local out="$tmp_dir/run.out"
+  if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
+    raw_compile_quiet "$COMPAT_SOURCE" "$out" "${COMPAT_COMPILER_ARGS[@]}" || rc=$?
+  else
+    raw_compile_quiet "$COMPAT_SOURCE" "$out" || rc=$?
+  fi
+  if [[ $rc -eq 0 ]]; then
+    "$out" "${COMPAT_PROGRAM_ARGS[@]}" || rc=$?
+  fi
+  rm -rf "$tmp_dir"
+  return "$rc"
+}
+
+if [[ $# -eq 0 ]]; then
+  print_usage >&2
+  exit 2
+fi
+
+case "$1" in
+  --version|version|-v)
+    printf 'souc %s\n' "$WRAPPER_VERSION"
+    exit 0
+    ;;
+  info)
+    print_info
+    exit 0
+    ;;
+  --help|help|-h)
+    print_usage
+    exit 0
+    ;;
+  check)
+    shift
+    compat_check "$@"
+    exit 0
+    ;;
+  compile|build)
+    shift
+    compat_compile "$@"
+    exit 0
+    ;;
+  run)
+    shift
+    compat_run "$@"
+    exit 0
+    ;;
+  repl|test|fmt|lint|analyze|diagnostics|sysroot|clean|watch|serve|bench|gpu-emit|emit)
+    echo "error: unsupported command for the checked self-hosted launcher: $1" >&2
+    echo "hint: use the richer omega/pinned CLI for that workflow" >&2
+    exit 2
     ;;
 esac
+
+if [[ $# -ge 2 && "$1" != -* ]]; then
+  raw_compile_quiet "$1" "$2" "${@:3}"
+  exit 0
+fi
+
+exec "$SELECTED_BIN" "$@"

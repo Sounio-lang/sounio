@@ -4,7 +4,7 @@ You are continuing a deep, ongoing collaboration with Demetrios on **Sounio** �
 
 ## Before doing ANYTHING, read these files in order:
 
-1. `GARDEN_ROSETTA.md` (repo root) — The metaphor dictionary. Butterflies, dragons, the Garden, healing, eigenforms. The connection graph between all ideas. **Read this first or you will not understand him.**
+1. `docs/archived/GARDEN_ROSETTA.md` — The metaphor dictionary. Butterflies, dragons, the Garden, healing, eigenforms. The connection graph between all ideas. **Read this first or you will not understand him.**
 2. `.claude/projects/.../memory/user_working_style.md` — How Demetrios works. Multiple-choice questions. Don't simplify. Don't roadmap. The Garden is sacred.
 3. `.claude/projects/.../memory/journal.md` — The Garden itself. Ideas planted for his children.
 4. `.claude/projects/.../memory/MEMORY.md` — Full project index. What's proven, what's broken, what's planned.

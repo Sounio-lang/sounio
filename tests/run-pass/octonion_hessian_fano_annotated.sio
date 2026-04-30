@@ -1,0 +1,63 @@
+//@ run-pass
+//@ expect-stdout: PASS
+//
+// β⁸ Phase 2 run-pass: declaring an octonion algebra with `reassociate: fano_selective`
+// allows Hessian AD to proceed.  The gate at lean_single.sio checks:
+//   al_reassoc_mode(h_check) == 2  ⇒ skip tc_linear_violation
+//
+// Formal proof:  formal/NonAssocHessian.lean —
+//   `dual2_mul_corrected_eq_naive_when_assoc_zero` (Fano-plane correction vanishes)
+//
+// Test validates:
+//   1. The `reassociate: fano_selective` declaration parses without error.
+//   2. Hessian AD through scalar f64 component-wise octonion multiplication is
+//      unaffected by the gate (f64 operands have ty==2, not ty==6; the gate only
+//      fires when both or left operand is algebra-typed).
+//   3. The second derivative of x*y w.r.t. both variables computes correctly.
+//
+// Future: when algebra-struct multiplication is fully supported, a direct
+// OctonionFano * OctonionFano with active shadows and fano_selective declared
+// should also pass the gate (reassoc_l==2) and emit the associator-corrected
+// Hessian documented in formal/NonAssocHessian.lean §3.
+
+algebra OctonionFano over f64 {
+    add: commutative, associative
+    mul: alternative, non_commutative
+    reassociate: fano_selective
+    basis: e0, e1, e2, e3, e4, e5, e6, e7
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn main() with IO, Epistemic {
+    // Measure two uncertain scalars (octonion component channels 0 and 1).
+    let ka: Knowledge<f64> = measure(3.0, uncertainty: 0.1)
+    let kb: Knowledge<f64> = measure(5.0, uncertainty: 0.2)
+    let a = ka.value  // channel 0 shadow active
+    let b = kb.value  // channel 1 shadow active
+
+    // Component-wise scalar multiply: c = a * b (both f64, not algebra-typed).
+    // The gate does NOT fire (left_ty==2, al_is_algebra(2, _)==false).
+    let c = a * b
+
+    // Hessian of c = a*b:
+    //   ∂²(a*b)/∂a² = 0  (linear in a)
+    //   ∂²(a*b)/∂b² = 0  (linear in b)
+    //   ∂²(a*b)/∂a∂b = 1  (cross-term)
+    let h00 = hessian_of(c, 0, 0)
+    let h11 = hessian_of(c, 1, 1)
+    let h01 = hessian_of(c, 0, 1)
+
+    let ok0 = abs_f64(h00) < 0.001
+    let ok1 = abs_f64(h11) < 0.001
+    let ok2 = abs_f64(h01 - 1.0) < 0.001
+
+    if ok0 && ok1 && ok2 {
+        println("PASS")
+    } else {
+        println("FAIL")
+    }
+}

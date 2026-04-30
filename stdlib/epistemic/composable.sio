@@ -1,0 +1,107 @@
+// stdlib/epistemic/composable.sio
+//
+// Composable<T> — ZD-orthogonal model merge (G8).
+//
+// Given two trained sedenion-encoded weight vectors W_A and W_B whose
+// capabilities live in *ZD-orthogonal* subspaces of the 16-dim sedenion
+// algebra, the composition W = W_A + W_B preserves each component's
+// capabilities without mutual perturbation.  Concretely:
+//
+//   - W_A lives in the 4D right-annihilator of operator `A` (say, A = e3+e10)
+//   - W_B lives in the orthogonal complement (the 12D non-kernel subspace)
+//   - Then for any capability readout r_A encoded as an inner product with
+//     a vector in W_A's subspace, <r_A, W> = <r_A, W_A> (the W_B term
+//     vanishes by orthogonality), and similarly for r_B.
+//
+// This is the algebraic foundation for `Composable<T>`, which substitutes
+// parameter-averaging (that leaks across capabilities) with a provably
+// non-interfering merge.
+//
+// All functions declare `with ZD`.  Compiler enforces via error 204.
+// Formal backing: `composition_preserves_orthogonal_complement` in
+// formal/lean4/SounioSurgicalInterventions.lean.
+// Operational benchmark: examples/zd_model_composition.sio.
+
+// zd_kernel_u1, zd_kernel_u2: the 2D orthonormal basis of the right-
+// annihilator of A = e3 + e10 used by ExactlyPrivate/Editable/Revocable.
+// We re-declare them here so the privacy path does not have to import
+// the epistemic layer for composition.
+fn zd_kernel_u1() -> [f64; 16] with Mut, ZD {
+    var v: [f64; 16] = [0.0; 16]
+    v[6]  = 0.707107
+    v[15] = 0.0 - 0.707107
+    v
+}
+
+fn zd_kernel_u2() -> [f64; 16] with Mut, ZD {
+    var v: [f64; 16] = [0.0; 16]
+    v[7]  = 0.707107
+    v[14] = 0.707107
+    v
+}
+
+// inner16: dense 16-dim inner product.
+fn inner16(a: &[f64; 16], b: &[f64; 16]) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < 16 { s = s + (*a)[i] * (*b)[i]; i = i + 1 }
+    s
+}
+
+// project_kernel: projection onto the 2D ZD kernel of A = e3+e10.
+// Exact to fp precision; the basis is orthonormal.
+fn project_kernel(v: &[f64; 16]) -> [f64; 16] with Mut, ZD {
+    let u1 = zd_kernel_u1()
+    let u2 = zd_kernel_u2()
+    let c1 = inner16(v, &u1)
+    let c2 = inner16(v, &u2)
+    var out: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 { out[i] = c1 * u1[i] + c2 * u2[i]; i = i + 1 }
+    out
+}
+
+// project_complement: v minus its kernel projection.
+fn project_complement(v: &[f64; 16]) -> [f64; 16] with Mut, ZD {
+    let k = project_kernel(v)
+    var out: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 { out[i] = (*v)[i] - k[i]; i = i + 1 }
+    out
+}
+
+// compose_orthogonal: given W_A (capabilities in kernel) and W_B
+// (capabilities in complement), return the merged weight.  Crucially,
+// the caller is responsible for the invariant that W_A is in kernel and
+// W_B in complement.  The `with ZD` effect on this function signals that
+// the compiler treats the result as ZD-structured.
+fn compose_orthogonal(w_a: &[f64; 16], w_b: &[f64; 16]) -> [f64; 16] with Mut, ZD {
+    var out: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 { out[i] = (*w_a)[i] + (*w_b)[i]; i = i + 1 }
+    out
+}
+
+// decompose_into_orthogonal: given any 16-dim weight vector w, return the
+// pair (w_kernel, w_complement) such that w = w_kernel + w_complement and
+// the two components live in ZD-orthogonal subspaces.  This is the inverse
+// of compose_orthogonal.
+fn decompose_kernel_part(w: &[f64; 16]) -> [f64; 16] with Mut, ZD {
+    project_kernel(w)
+}
+
+fn decompose_complement_part(w: &[f64; 16]) -> [f64; 16] with Mut, ZD {
+    project_complement(w)
+}
+
+// interference_residual: quantify the cross-contamination between two
+// weight vectors once composed.  For a truly ZD-orthogonal pair this
+// returns 0 (fp exact); for weights sharing capability directions it
+// returns the squared overlap.  Used for compliance auditing.
+fn interference_residual(w_a: &[f64; 16], w_b: &[f64; 16]) -> f64 with Mut, ZD {
+    let ka = project_kernel(w_a)
+    let cb = project_complement(w_b)
+    let d1 = inner16(&ka, w_b)
+    let d2 = inner16(&cb, w_a)
+    d1 * d1 + d2 * d2
+}

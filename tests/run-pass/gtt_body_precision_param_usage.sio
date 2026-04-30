@@ -1,0 +1,64 @@
+//@ run-pass
+//
+// Gradient Topology Types (GTT) — β⁹ week-4 regression.
+//
+// Week-3 unioned every argument's channel set into the return topology
+// (conservative upper bound).  For
+//
+//     fn proj_a(a: f64, b: f64) -> f64 { a }
+//     let r = proj_a(k0.value, k1.value)
+//
+// week-3 left EXPR_CH_SET(r) = {ch0, ch1} even though the body reads
+// only its first parameter.  Week-4 introduces body-level precision:
+// the compiler walks the callee's return expression, records the set
+// of parameter indices it actually depends on into FN_USED_PARAMS[fi],
+// and at each call site unions only those B9_ARG_CH_SET slots.  The
+// declared channel set becomes EXPR_CH_SET(r) = {ch0} — tight.
+//
+// This test is the positive canary: the hessian query that remains
+// inside the tightened set (H_{0,0}) still type-checks and runs.  The
+// counterpart compile-fail test (gtt_body_precision_unused_param_refused)
+// verifies that the out-of-topology query (H_{1,1}) is now refused.
+//
+// my_sum / my_square from the week-3 regression continue to type-check
+// under body-precision: my_sum's body references both params (union of
+// operand topologies = union of both args); my_square uses only one
+// arg (and only has one), so the tightened set matches what week-3
+// happened to produce by accident.
+
+fn proj_a(a: f64, b: f64) -> f64 with Epistemic {
+    a
+}
+
+fn my_sum(a: f64, b: f64) -> f64 with Epistemic {
+    a + b
+}
+
+fn my_square(x: f64) -> f64 with Epistemic {
+    x * x
+}
+
+fn main() with IO, Epistemic, Mut, Div {
+    let k0: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let k1: Knowledge<f64> = measure(3.0, uncertainty: 0.1)
+    let x = k0.value              // channel 0
+    let y = k1.value              // channel 1
+
+    // Body-precision canary: proj_a's return depends only on arg 0.
+    // EXPR_CH_SET(r0) = {ch0}.  H_{0,0} is inside the tightened set
+    // and must type-check.  The runtime value is 0.0 because
+    // inter-procedural shadow propagation is orthogonal — same pattern
+    // as the week-3 regression.
+    let r0 = proj_a(x, y)
+    let h_a = hessian_of(r0, 0, 0)
+    println(h_a)
+
+    // Regression: week-3 cross-param query on my_sum still accepted,
+    // because my_sum's body references both parameters.
+    let h_cross = hessian_of(my_sum(x, y), 0, 1)
+    println(h_cross)
+
+    // Regression: single-arg fn — body-precision agrees with week-3.
+    let h_unary = hessian_of(my_square(x), 0, 0)
+    println(h_unary)
+}

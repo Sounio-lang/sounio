@@ -15,7 +15,7 @@ if [[ -z "$RUN_DIR" || ! -d "$RUN_DIR" ]]; then
   exit 1
 fi
 
-bash scripts/generate_release_traceability_report.sh "$RUN_DIR"
+bash scripts/paper/generate_release_traceability_report.sh "$RUN_DIR"
 
 REPORT="$RUN_DIR/TRACEABILITY_MATRIX.md"
 if [[ ! -f "$REPORT" ]]; then

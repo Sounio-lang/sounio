@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-s
 
 Sounio looks like Rust but has DIFFERENT syntax and semantics. This guide covers style, patterns, and conventions.
 
-**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](../LLM_PROGRAMMING_GUIDE.md)
+**Full syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](LLM_PROGRAMMING_GUIDE.md)
 
 ## 1. Basic Syntax
 

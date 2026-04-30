@@ -35,7 +35,7 @@ fn sp_sqrt(x: f64) -> f64 with Mut, Div, Panic {
 
 // Binary search: return index i such that knots[i] <= x < knots[i+1].
 // Returns 0 for x below range, n-2 for x at/above upper boundary.
-fn spline_find_interval(knots: &[f64; 64], n: i32, x: f64) -> i32 with Mut, Div, Panic {
+pub fn spline_find_interval(knots: &[f64; 64], n: i32, x: f64) -> i32 with Mut, Div, Panic {
     if n < 2 { return 0 }
     if x <= knots[0] { return 0 }
     if x >= knots[n - 1] { return n - 2 }
@@ -61,11 +61,11 @@ fn thomas_solve(
     diag: &[f64; 64],
     sup: &[f64; 64],
     rhs: &[f64; 64],
-    sol: &![f64; 64],
     n: i32
-) with Mut, Div, Panic {
+) -> [f64; 64] with Mut, Div, Panic {
     var cp: [f64; 64] = [0.0; 64]
     var dp: [f64; 64] = [0.0; 64]
+    var sol: [f64; 64] = [0.0; 64]
 
     // Forward sweep
     if sp_abs(diag[0]) < 1.0e-30 {
@@ -96,6 +96,7 @@ fn thomas_solve(
         sol[i] = dp[i] - cp[i] * sol[i + 1]
         i = i - 1
     }
+    sol
 }
 
 // ============================================================================
@@ -175,7 +176,8 @@ pub fn spline_fit(x: &[f64; 64], y: &[f64; 64], n: i32) -> SplineCoeffs with Mut
     var diag: [f64; 64] = [0.0; 64]
     var sup:  [f64; 64] = [0.0; 64]
     var rhs:  [f64; 64] = [0.0; 64]
-    var c_int:[f64; 64] = [0.0; 64]
+    var cp: [f64; 64] = [0.0; 64]
+    var dp: [f64; 64] = [0.0; 64]
 
     var i: i32 = 0
     while i < m {
@@ -193,13 +195,37 @@ pub fn spline_fit(x: &[f64; 64], y: &[f64; 64], n: i32) -> SplineCoeffs with Mut
         i = i + 1
     }
 
-    thomas_solve(&sub, &diag, &sup, &rhs, &!c_int, m)
+    // Thomas algorithm inlined — forward sweep
+    if sp_abs(diag[0]) < 1.0e-30 {
+        cp[0] = 0.0
+        dp[0] = 0.0
+    } else {
+        cp[0] = sup[0] / diag[0]
+        dp[0] = rhs[0] / diag[0]
+    }
+    i = 1
+    while i < m {
+        let denom = diag[i] - sub[i] * cp[i - 1]
+        if sp_abs(denom) < 1.0e-30 {
+            cp[i] = 0.0
+            dp[i] = 0.0
+        } else {
+            cp[i] = sup[i] / denom
+            dp[i] = (rhs[i] - sub[i] * dp[i - 1]) / denom
+        }
+        i = i + 1
+    }
 
-    // Place interior c values; natural BCs give c[0] = c[n-1] = 0
+    // Back substitution — solve into dp, then copy to s.c
+    i = m - 2
+    while i >= 0 {
+        dp[i] = dp[i] - cp[i] * dp[i + 1]
+        i = i - 1
+    }
     s.c[0] = 0.0
     i = 0
     while i < m {
-        s.c[i + 1] = c_int[i]
+        s.c[i + 1] = dp[i]
         i = i + 1
     }
     s.c[n - 1] = 0.0
@@ -236,9 +262,26 @@ pub fn spline_eval(s: &SplineCoeffs, x_eval: f64) -> f64 with Mut, Div, Panic {
     if xc < s.x[0] { xc = s.x[0] }
     if xc > s.x[np1 - 1] { xc = s.x[np1 - 1] }
 
-    let i = spline_find_interval(&s.x, np1, xc)
+    let i = spline_find_interval_in_s(s, np1, xc)
     let dx = xc - s.x[i]
     s.a[i] + dx * (s.b[i] + dx * (s.c[i] + dx * s.d[i]))
+}
+
+fn spline_find_interval_in_s(s: &SplineCoeffs, n: i32, x: f64) -> i32 with Mut, Div, Panic {
+    if n < 2 { return 0 }
+    if x <= s.x[0] { return 0 }
+    if x >= s.x[n - 1] { return n - 2 }
+    var lo: i32 = 0
+    var hi: i32 = n - 1
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2
+        if s.x[mid] <= x {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    lo
 }
 
 // Evaluate first derivative S'(x_eval) = b + 2c*dx + 3d*dx^2.
@@ -250,7 +293,7 @@ pub fn spline_eval_deriv(s: &SplineCoeffs, x_eval: f64) -> f64 with Mut, Div, Pa
     if xc < s.x[0] { xc = s.x[0] }
     if xc > s.x[np1 - 1] { xc = s.x[np1 - 1] }
 
-    let i = spline_find_interval(&s.x, np1, xc)
+    let i = spline_find_interval_in_s(s, np1, xc)
     let dx = xc - s.x[i]
     s.b[i] + dx * (2.0 * s.c[i] + 3.0 * s.d[i] * dx)
 }
@@ -264,7 +307,7 @@ pub fn spline_eval_deriv2(s: &SplineCoeffs, x_eval: f64) -> f64 with Mut, Div, P
     if xc < s.x[0] { xc = s.x[0] }
     if xc > s.x[np1 - 1] { xc = s.x[np1 - 1] }
 
-    let i = spline_find_interval(&s.x, np1, xc)
+    let i = spline_find_interval_in_s(s, np1, xc)
     let dx = xc - s.x[i]
     2.0 * s.c[i] + 6.0 * s.d[i] * dx
 }
@@ -378,23 +421,56 @@ pub fn espline_fit(
     }
 }
 
+fn espline_find_interval(s: &EpistemicSpline, n: i32, x: f64) -> i32 with Mut, Div, Panic {
+    if n < 2 { return 0 }
+    if x <= s.coeffs.x[0] { return 0 }
+    if x >= s.coeffs.x[n - 1] { return n - 2 }
+    var lo: i32 = 0
+    var hi: i32 = n - 1
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2
+        if s.coeffs.x[mid] <= x { lo = mid } else { hi = mid }
+    }
+    lo
+}
+
+pub fn espline_eval_val(s: &EpistemicSpline, x_eval: f64) -> f64 with Mut, Div, Panic {
+    let n = s.coeffs.n
+    if n < 1 { return 0.0 }
+    if n == 1 { return s.coeffs.a[0] }
+    var xc: f64 = x_eval
+    if xc < s.coeffs.x[0] { xc = s.coeffs.x[0] }
+    if xc > s.coeffs.x[n - 1] { xc = s.coeffs.x[n - 1] }
+    let i = espline_find_interval(s, n, xc)
+    let dx = xc - s.coeffs.x[i]
+    s.coeffs.a[i] + dx * (s.coeffs.b[i] + dx * (s.coeffs.c[i] + dx * s.coeffs.d[i]))
+}
+
 // Evaluate epistemic spline: returns (value, standard_uncertainty) at x_eval.
 // Uncertainty is computed by GUM finite-difference propagation.
-pub fn espline_eval(s: &EpistemicSpline, x_eval: f64) -> (f64, f64) with Mut, Div, Panic {
-    let val = spline_eval(&s.coeffs, x_eval)
-
+pub fn espline_eval_unc(s: &EpistemicSpline, x_eval: f64) -> f64 with Mut, Div, Panic {
     let n = s.coeffs.n
     let eps = 1.0e-6
     var sum_sq: f64 = 0.0
 
+    // Copy x, a, y_unc to locals — avoids nested field reference bug
+    var lx: [f64; 64] = [0.0; 64]
+    var la: [f64; 64] = [0.0; 64]
+    var lyunc: [f64; 64] = [0.0; 64]
+    var k: i32 = 0
+    while k < n {
+        lx[k] = s.coeffs.x[k]
+        la[k] = s.coeffs.a[k]
+        lyunc[k] = s.y_unc[k]
+        k = k + 1
+    }
+
     var i: i32 = 0
     while i < n {
-        let phi_i = spline_basis_sensitivity(&s.coeffs.x, &s.coeffs.a, n, i, x_eval, eps)
-        let contrib = phi_i * s.y_unc[i]
+        let phi_i = spline_basis_sensitivity(&lx, &la, n, i, x_eval, eps)
+        let contrib = phi_i * lyunc[i]
         sum_sq = sum_sq + contrib * contrib
         i = i + 1
     }
-    let unc = sp_sqrt(sum_sq)
-
-    (val, unc)
+    sp_sqrt(sum_sq)
 }

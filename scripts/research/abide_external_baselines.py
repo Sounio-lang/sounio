@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import math
 import random
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -330,25 +331,48 @@ def main() -> int:
     device = _pick_device(torch, args.device)
 
     prediction_rows: list[dict[str, object]] = []
-    for model_name in config_payload["run_config"]["models"]:
-        for seed in seed_schedule(args.seeds):
-            prediction_rows.extend(
-                _run_one_model(
-                    torch=torch,
-                    nn=nn,
-                    records=records,
-                    meta=meta,
-                    model_name=model_name,
-                    seed=seed,
-                    epochs=args.epochs,
-                    batch_size=args.batch_size,
-                    lr=args.lr,
-                    device=device,
-                    train_fraction=args.train_fraction,
-                    drop_channel_frac=args.drop_channel_frac,
-                    noise_std=args.noise_std,
-                )
+    seed_list = seed_schedule(args.seeds)
+    model_list = config_payload["run_config"]["models"]
+    total_runs = len(model_list) * len(seed_list)
+    run_idx = 0
+    for model_name in model_list:
+        for seed in seed_list:
+            run_idx += 1
+            started = time.perf_counter()
+            print(
+                f"[external] start model={model_name} seed={seed} "
+                f"run={run_idx}/{total_runs} sites={len(sites)} "
+                f"subjects={len(records)} tf={args.train_fraction:.3f} "
+                f"drop={args.drop_channel_frac:.3f} noise={args.noise_std:.3f}",
+                flush=True,
             )
+            run_rows = _run_one_model(
+                torch=torch,
+                nn=nn,
+                records=records,
+                meta=meta,
+                model_name=model_name,
+                seed=seed,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                lr=args.lr,
+                device=device,
+                train_fraction=args.train_fraction,
+                drop_channel_frac=args.drop_channel_frac,
+                noise_std=args.noise_std,
+            )
+            prediction_rows.extend(run_rows)
+            seed_summary = summarize_prediction_rows(run_rows)["per_seed"]
+            if seed_summary:
+                metrics = seed_summary[0]
+                print(
+                    f"[external] done  model={model_name} seed={seed} "
+                    f"bal={metrics['balanced_accuracy_pct']:.6f} "
+                    f"acc={metrics['accuracy_pct']:.6f} "
+                    f"auroc={metrics['auroc_pct']:.6f} "
+                    f"elapsed_s={time.perf_counter() - started:.2f}",
+                    flush=True,
+                )
 
     summaries = summarize_prediction_rows(prediction_rows)
     payload = {

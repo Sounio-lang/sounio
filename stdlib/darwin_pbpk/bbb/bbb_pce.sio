@@ -1,0 +1,274 @@
+// darwin_pbpk/bbb/bbb_pce.sio — Polynomial Chaos Expansion over BBB
+//
+// Non-intrusive stochastic collocation PCE for the Kpuu_AUC endpoint,
+// expanded in the dominant input parameter (kpuu_brain — ~70% of the
+// combined variance per bbb_gum.sio).  Eight Gauss-Hermite quadrature
+// evaluations of the coupled systemic + BBB solver yield the PCE
+// coefficients c_0..c_4, from which:
+//
+//   E[Y]      = c_0
+//   Var[Y]    = sum_{n>=1} c_n^2 * n!             (probabilists' He)
+//   Sobol_1D  = 1.0                               (single input)
+//
+// Why this matters for the dissertation:
+//   - PCE captures the *nonlinearity* that the first-order GUM
+//     budget in bbb_gum.sio misses by construction.  Near-agreement
+//     between PCE mean/stddev and GUM y_mean / u_c is a posteriori
+//     justification of the first-order linearisation; disagreement
+//     would signal that the model's nonlinearity matters and a
+//     full PCE must be reported.
+//   - The PCE is built from exactly 8 deterministic solver
+//     evaluations vs ~32+ Monte Carlo draws for comparable SD
+//     precision — dissertation-grade reproducibility (no RNG,
+//     same coefficients every run).
+//   - The coefficient c_1 is the *linear* sensitivity (equivalent
+//     to the GUM sensitivity coefficient); c_2..c_4 are the
+//     higher-order contributions that directly quantify how far
+//     the model departs from linearity over the prior range.
+//
+// Scope: 1-D expansion on kpuu_brain with all other BBB parameters
+// held at their prior means.  A full 7-D sparse-grid PCE (Smolyak)
+// would require O(8^7 / factorial weights) evaluations; with the
+// kpuu_brain variance share at 70% the 1-D expansion captures the
+// dominant nonlinear effect.  Multivariate extension is deferred
+// until either a sparse grid or an anisotropic PCE scheme is
+// available.
+
+use darwin_pbpk::bbb::bbb_core::{BBBParams}
+use darwin_pbpk::bbb::bbb_coupled::{bbb_coupled_run}
+use darwin_pbpk::tsit5_pbpk14::{PBPKParams14}
+
+// ----------------------------------------------------------------------------
+// 8-point Gauss-Hermite nodes and weights (probabilists' N(0,1))
+// ----------------------------------------------------------------------------
+// These satisfy  ∫ f(xi) φ(xi) dxi ≈ Σ w_k f(xi_k),  xi ~ N(0,1).
+// Obtained from physicists' 8-pt Gauss-Hermite (Abramowitz & Stegun
+// 25.10) by the probabilists' rescaling xi_prob = xi_phys × √2 and
+// w_prob = w_phys / √π, so that Σ w_k = 1, Σ w_k xi_k = 0,
+// Σ w_k xi_k² = 1 (the moment identities for N(0,1)).
+
+pub fn bbb_pce_gh_node_0() -> f64 { 0.0 - 4.144547186125894 }
+pub fn bbb_pce_gh_node_1() -> f64 { 0.0 - 2.802485861287542 }
+pub fn bbb_pce_gh_node_2() -> f64 { 0.0 - 1.636519042435107 }
+pub fn bbb_pce_gh_node_3() -> f64 { 0.0 - 0.539079811351375 }
+pub fn bbb_pce_gh_node_4() -> f64 { 0.539079811351375 }
+pub fn bbb_pce_gh_node_5() -> f64 { 1.636519042435107 }
+pub fn bbb_pce_gh_node_6() -> f64 { 2.802485861287542 }
+pub fn bbb_pce_gh_node_7() -> f64 { 4.144547186125894 }
+
+// Probabilists' weights — integrate under φ(x) = (2π)^{-1/2} e^{-x²/2}.
+// Obtained from the physicists' 8-pt Gauss-Hermite weights by
+// dividing by sqrt(π); the weights sum to 1 by construction.
+pub fn bbb_pce_gh_wt_0() -> f64 { 0.00011261453491 }
+pub fn bbb_pce_gh_wt_1() -> f64 { 0.00963968330    }
+pub fn bbb_pce_gh_wt_2() -> f64 { 0.11723990768    }
+pub fn bbb_pce_gh_wt_3() -> f64 { 0.37301080711    }
+pub fn bbb_pce_gh_wt_4() -> f64 { 0.37301080711    }
+pub fn bbb_pce_gh_wt_5() -> f64 { 0.11723990768    }
+pub fn bbb_pce_gh_wt_6() -> f64 { 0.00963968330    }
+pub fn bbb_pce_gh_wt_7() -> f64 { 0.00011261453491 }
+
+pub fn bbb_pce_node_at(k: i32) -> f64 {
+    if k == 0 { return bbb_pce_gh_node_0() }
+    if k == 1 { return bbb_pce_gh_node_1() }
+    if k == 2 { return bbb_pce_gh_node_2() }
+    if k == 3 { return bbb_pce_gh_node_3() }
+    if k == 4 { return bbb_pce_gh_node_4() }
+    if k == 5 { return bbb_pce_gh_node_5() }
+    if k == 6 { return bbb_pce_gh_node_6() }
+    bbb_pce_gh_node_7()
+}
+
+pub fn bbb_pce_wt_at(k: i32) -> f64 {
+    if k == 0 { return bbb_pce_gh_wt_0() }
+    if k == 1 { return bbb_pce_gh_wt_1() }
+    if k == 2 { return bbb_pce_gh_wt_2() }
+    if k == 3 { return bbb_pce_gh_wt_3() }
+    if k == 4 { return bbb_pce_gh_wt_4() }
+    if k == 5 { return bbb_pce_gh_wt_5() }
+    if k == 6 { return bbb_pce_gh_wt_6() }
+    bbb_pce_gh_wt_7()
+}
+
+// ----------------------------------------------------------------------------
+// Probabilists' Hermite polynomials (He_n)
+// ----------------------------------------------------------------------------
+// He_0(x) = 1
+// He_1(x) = x
+// He_n(x) = x He_{n-1}(x) - (n-1) He_{n-2}(x)
+// Orthogonal under <He_m, He_n>_N = m! δ_mn.
+
+fn bbb_he_poly(n: i32, x: f64) -> f64 with Mut, Div, Panic {
+    if n == 0 { return 1.0 }
+    if n == 1 { return x }
+    var h_prev = 1.0
+    var h_curr = x
+    var k = 2
+    while k <= n {
+        let h_next = x * h_curr - ((k - 1) as f64) * h_prev
+        h_prev = h_curr
+        h_curr = h_next
+        k = k + 1
+    }
+    h_curr
+}
+
+// Integer factorial (safe for n <= 4).
+fn bbb_factorial(n: i32) -> f64 {
+    if n <= 1 { return 1.0 }
+    if n == 2 { return 2.0 }
+    if n == 3 { return 6.0 }
+    if n == 4 { return 24.0 }
+    120.0   // n=5
+}
+
+fn bbb_pce_sqrt(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 18 { y = (y + x / y) * 0.5; i = i + 1 }
+    y
+}
+
+// ----------------------------------------------------------------------------
+// PCE result container (order 4 — 5 coefficients)
+// ----------------------------------------------------------------------------
+
+pub struct BBBPCE1D {
+    // Input distribution (normal)
+    input_mean: f64,
+    input_std:  f64,
+    // PCE coefficients (He basis)
+    c0: f64,   // = E[Y]
+    c1: f64,   // linear sensitivity (compare to GUM ∂Y/∂p * sigma)
+    c2: f64,
+    c3: f64,
+    c4: f64,
+    // Derived statistics
+    mean:         f64,
+    variance:     f64,
+    stddev:       f64,
+    nonlinearity_share: f64, // (c2^2 * 2! + c3^2 * 3! + c4^2 * 4!) / variance
+    // Solver evaluations (for audit)
+    n_nodes:      i32,
+    node_x:       [f64; 8],    // physical-scale p_k
+    node_y:       [f64; 8],    // Y_k = Kpuu_AUC at node k
+}
+
+fn bbb_pce_zero() -> BBBPCE1D {
+    BBBPCE1D {
+        input_mean: 0.0, input_std: 0.0,
+        c0: 0.0, c1: 0.0, c2: 0.0, c3: 0.0, c4: 0.0,
+        mean: 0.0, variance: 0.0, stddev: 0.0, nonlinearity_share: 0.0,
+        n_nodes: 0, node_x: [0.0; 8], node_y: [0.0; 8],
+    }
+}
+
+// Build a 1-D PCE on kpuu_brain for the Kpuu_AUC endpoint.
+//
+//   input_mean, input_std:  prior mean and standard deviation of
+//                            kpuu_brain (N(mean, std)).
+//   floor:                   tiny lower bound to keep kpuu_brain
+//                            positive if a node pulls below zero.
+pub fn bbb_pce_build_kpuu_auc(
+    sys_prm:     PBPKParams14,
+    base_bbb:    BBBParams,
+    input_mean:  f64,
+    input_std:   f64,
+    floor:       f64,
+    dose_mg:     f64,
+    checkpoints: [f64; 32],
+    n_points:    i32,
+    bbb_dt:      f64
+) -> BBBPCE1D with Mut, Div, Panic {
+    var pce = bbb_pce_zero()
+    pce.input_mean = input_mean
+    pce.input_std  = input_std
+    pce.n_nodes = 8
+
+    // --- Solver evaluations at each Gauss-Hermite node ---
+    var k: i32 = 0
+    while k < 8 {
+        let kdx = k as usize
+        let xi = bbb_pce_node_at(k)
+        var p_k = input_mean + input_std * xi
+        if p_k < floor { p_k = floor }
+
+        var bbb = base_bbb
+        bbb.kpuu_brain = p_k
+
+        let trace = bbb_coupled_run(sys_prm, bbb, dose_mg, checkpoints, n_points, bbb_dt)
+        let y_k = trace.kpuu_auc
+
+        pce.node_x[kdx] = p_k
+        pce.node_y[kdx] = y_k
+        k = k + 1
+    }
+
+    // --- Coefficients c_n = sum_k w_k * Y_k * He_n(xi_k) / n! ---
+    var sum0: f64 = 0.0
+    var sum1: f64 = 0.0
+    var sum2: f64 = 0.0
+    var sum3: f64 = 0.0
+    var sum4: f64 = 0.0
+    var j: i32 = 0
+    while j < 8 {
+        let jdx = j as usize
+        let xi = bbb_pce_node_at(j)
+        let w  = bbb_pce_wt_at(j)
+        let y  = pce.node_y[jdx]
+        sum0 = sum0 + w * y * bbb_he_poly(0, xi)
+        sum1 = sum1 + w * y * bbb_he_poly(1, xi)
+        sum2 = sum2 + w * y * bbb_he_poly(2, xi)
+        sum3 = sum3 + w * y * bbb_he_poly(3, xi)
+        sum4 = sum4 + w * y * bbb_he_poly(4, xi)
+        j = j + 1
+    }
+    pce.c0 = sum0                       // /0! = 1
+    pce.c1 = sum1                       // /1! = 1
+    pce.c2 = sum2 / bbb_factorial(2)
+    pce.c3 = sum3 / bbb_factorial(3)
+    pce.c4 = sum4 / bbb_factorial(4)
+
+    // --- Derived statistics ---
+    let var1 = pce.c1 * pce.c1 * bbb_factorial(1)
+    let var2 = pce.c2 * pce.c2 * bbb_factorial(2)
+    let var3 = pce.c3 * pce.c3 * bbb_factorial(3)
+    let var4 = pce.c4 * pce.c4 * bbb_factorial(4)
+    let total = var1 + var2 + var3 + var4
+    pce.mean     = pce.c0
+    pce.variance = total
+    pce.stddev   = bbb_pce_sqrt(total)
+    pce.nonlinearity_share = if total > 0.0 { (var2 + var3 + var4) / total } else { 0.0 }
+
+    pce
+}
+
+// ----------------------------------------------------------------------------
+// Diagnostic print
+// ----------------------------------------------------------------------------
+
+pub fn bbb_pce_print(pce: BBBPCE1D) with IO, Mut, Panic, Div {
+    println("BBB PCE (1-D, order 4, He basis, 8-node Gauss-Hermite)")
+    print("  input_mean          = "); print_f64(pce.input_mean); println("")
+    print("  input_std           = "); print_f64(pce.input_std);  println("")
+    println("  coefficients:")
+    print("    c0  (mean)        = "); print_f64(pce.c0); println("")
+    print("    c1  (linear)      = "); print_f64(pce.c1); println("")
+    print("    c2  (quadratic)   = "); print_f64(pce.c2); println("")
+    print("    c3  (cubic)       = "); print_f64(pce.c3); println("")
+    print("    c4  (quartic)     = "); print_f64(pce.c4); println("")
+    println("  statistics:")
+    print("    E[Y]              = "); print_f64(pce.mean);     println("")
+    print("    u_c (stddev)      = "); print_f64(pce.stddev);   println("")
+    print("    nonlinearity share= "); print_f64(pce.nonlinearity_share); println("")
+    println("  nodes (p_k, Y_k):")
+    var k: i32 = 0
+    while k < 8 {
+        let kdx = k as usize
+        print("    p="); print_f64(pce.node_x[kdx])
+        print("  Y="); print_f64(pce.node_y[kdx])
+        println("")
+        k = k + 1
+    }
+}

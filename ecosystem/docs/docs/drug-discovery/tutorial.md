@@ -460,7 +460,7 @@ for result in trial_results {
 ### Compile & Execute
 
 ```bash
-cd triple-sounio-ecosystem/drug-discovery
+cd ecosystem/drug-discovery
 
 # Type-check
 souc check src/pipeline.sio

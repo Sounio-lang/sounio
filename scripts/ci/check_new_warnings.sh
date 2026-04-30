@@ -61,7 +61,7 @@ if [[ -s "$NEW_WARNINGS" ]]; then
   cat "$NEW_WARNINGS"
   echo
   echo "[warnings] if this is intentional, update baseline with:"
-  echo "  scripts/check_new_warnings.sh --refresh"
+  echo "  scripts/ci/check_new_warnings.sh --refresh"
   exit 1
 fi
 

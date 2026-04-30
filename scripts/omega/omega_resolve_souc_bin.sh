@@ -3,8 +3,20 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+detect_platform() {
+  local host_os="${SOUNIO_HOST_OS_OVERRIDE:-$(uname -s 2>/dev/null || echo unknown)}"
+  local host_arch="${SOUNIO_HOST_ARCH_OVERRIDE:-$(uname -m 2>/dev/null || echo unknown)}"
+  case "$host_os:$host_arch" in
+    Linux:x86_64|Linux:amd64) printf '%s\n' "linux-x86_64" ;;
+    Linux:arm64|Linux:aarch64) printf '%s\n' "linux-aarch64" ;;
+    Darwin:arm64|Darwin:aarch64) printf '%s\n' "macos-arm64" ;;
+    Darwin:x86_64|Darwin:amd64) printf '%s\n' "macos-x86_64" ;;
+    *) printf '%s\n' "linux-x86_64" ;;
+  esac
+}
+
 SOUC_VERSION="${SOUNIO_SOUC_VERSION:-1.0.0-beta.5}"
-SOUC_PLATFORM="${SOUNIO_SOUC_PLATFORM:-linux-x86_64}"
+SOUC_PLATFORM="${SOUNIO_SOUC_PLATFORM:-$(detect_platform)}"
 SOUC_VARIANT="${SOUNIO_SOUC_VARIANT:-std}"
 SOUC_RELEASE_BASE_URL="${SOUNIO_SOUC_RELEASE_BASE_URL:-https://github.com/sounio-lang/sounio/releases/download}"
 SOUC_CACHE_DIR="${SOUNIO_SOUC_CACHE_DIR:-$ROOT_DIR/artifacts/omega/souc-bin}"
@@ -62,6 +74,11 @@ resolve_local() {
   local c
   for c in \
     "${SOUC_BIN:-}" \
+    "$ROOT_DIR/bin/souc" \
+    "$ROOT_DIR/bin/souc-linux-x86_64" \
+    "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-arm64-macos" \
+    "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64-macos" \
+    "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64" \
     "$ROOT_DIR/souc" \
     "$ROOT_DIR/target/release/souc" \
     "$ROOT_DIR/target/debug/souc"; do
@@ -117,58 +134,73 @@ if [ "$SOUC_REQUIRE_PINNED" = "1" ] && [ -n "$ASSET_URL" ]; then
     SIG_TMP_PATH="$SIG_PATH.download.$$"
 
     rm -f "$BIN_TMP_PATH" "$SHA_TMP_PATH" "$SIG_TMP_PATH"
-    curl -fsSL "$ASSET_URL" -o "$BIN_TMP_PATH"
-    chmod +x "$BIN_TMP_PATH"
-    mv -f "$BIN_TMP_PATH" "$BIN_PATH"
-
-    if [ -z "$SOUC_EXPECTED_SHA256" ]; then
-      set +e
-      curl -fsSL "${ASSET_URL}.sha256" -o "$SHA_TMP_PATH"
-      sha_rc=$?
-      set -e
-      if [ "$sha_rc" -eq 0 ] && [ -s "$SHA_TMP_PATH" ]; then
-        mv -f "$SHA_TMP_PATH" "$SHA_PATH"
-        SOUC_EXPECTED_SHA256="$(awk '{print $1}' "$SHA_PATH" | tr -d '[:space:]')"
-      else
-        rm -f "$SHA_TMP_PATH"
-      fi
-    fi
-
     set +e
-    curl -fsSL "${ASSET_URL}.sig" -o "$SIG_TMP_PATH"
-    sig_rc=$?
+    curl -fsSL "$ASSET_URL" -o "$BIN_TMP_PATH"
+    bin_rc=$?
     set -e
-    if [ "$sig_rc" -eq 0 ] && [ -s "$SIG_TMP_PATH" ]; then
-      mv -f "$SIG_TMP_PATH" "$SIG_PATH"
+    if [ "$bin_rc" -eq 0 ]; then
+      chmod +x "$BIN_TMP_PATH"
+      mv -f "$BIN_TMP_PATH" "$BIN_PATH"
+
+      if [ -z "$SOUC_EXPECTED_SHA256" ]; then
+        set +e
+        curl -fsSL "${ASSET_URL}.sha256" -o "$SHA_TMP_PATH"
+        sha_rc=$?
+        set -e
+        if [ "$sha_rc" -eq 0 ] && [ -s "$SHA_TMP_PATH" ]; then
+          mv -f "$SHA_TMP_PATH" "$SHA_PATH"
+          SOUC_EXPECTED_SHA256="$(awk '{print $1}' "$SHA_PATH" | tr -d '[:space:]')"
+        else
+          rm -f "$SHA_TMP_PATH"
+        fi
+      fi
+
+      set +e
+      curl -fsSL "${ASSET_URL}.sig" -o "$SIG_TMP_PATH"
+      sig_rc=$?
+      set -e
+      if [ "$sig_rc" -eq 0 ] && [ -s "$SIG_TMP_PATH" ]; then
+        mv -f "$SIG_TMP_PATH" "$SIG_PATH"
+      else
+        rm -f "$SIG_TMP_PATH"
+      fi
+
+      VERIFY_ARGS=(
+        --binary "$BIN_PATH"
+        --out "$PROVENANCE_OUT"
+        --version "$SOUC_VERSION"
+        --platform "$SOUC_PLATFORM"
+        --asset-url "$ASSET_URL"
+        --public-key "$CANONICAL_PUBKEY"
+        --require-signature
+      )
+
+      if [ -n "$SOUC_EXPECTED_SHA256" ]; then
+        VERIFY_ARGS+=(--sha256 "$SOUC_EXPECTED_SHA256")
+      elif [ -s "$SHA_PATH" ]; then
+        VERIFY_ARGS+=(--sha256-file "$SHA_PATH")
+      fi
+
+      if [ "$sig_rc" -eq 0 ] && [ -s "$SIG_PATH" ]; then
+        VERIFY_ARGS+=(--signature-file "$SIG_PATH")
+      fi
+
+      python3 "$ROOT_DIR/scripts/omega/omega_verify_release_souc.py" "${VERIFY_ARGS[@]}" 1>&2
+      resolved="$BIN_PATH"
     else
-      rm -f "$SIG_TMP_PATH"
+      rm -f "$BIN_TMP_PATH" "$SHA_TMP_PATH" "$SIG_TMP_PATH"
+      if [ "$ALLOW_LOCAL_FALLBACK" != "1" ]; then
+        echo "error: failed to fetch pinned souc asset from $ASSET_URL" >&2
+        exit 2
+      fi
+      echo "warning: failed to fetch pinned souc asset; using local fallback" >&2
     fi
-
-    VERIFY_ARGS=(
-      --binary "$BIN_PATH"
-      --out "$PROVENANCE_OUT"
-      --version "$SOUC_VERSION"
-      --platform "$SOUC_PLATFORM"
-      --asset-url "$ASSET_URL"
-      --public-key "$CANONICAL_PUBKEY"
-      --require-signature
-    )
-
-    if [ -n "$SOUC_EXPECTED_SHA256" ]; then
-      VERIFY_ARGS+=(--sha256 "$SOUC_EXPECTED_SHA256")
-    elif [ -s "$SHA_PATH" ]; then
-      VERIFY_ARGS+=(--sha256-file "$SHA_PATH")
-    fi
-
-    if [ "$sig_rc" -eq 0 ] && [ -s "$SIG_PATH" ]; then
-      VERIFY_ARGS+=(--signature-file "$SIG_PATH")
-    fi
-
-    python3 "$ROOT_DIR/scripts/omega/omega_verify_release_souc.py" "${VERIFY_ARGS[@]}" 1>&2
-    resolved="$BIN_PATH"
   else
-    echo "error: curl required for pinned souc resolution" >&2
-    exit 2
+    if [ "$ALLOW_LOCAL_FALLBACK" != "1" ]; then
+      echo "error: curl required for pinned souc resolution" >&2
+      exit 2
+    fi
+    echo "warning: curl unavailable for pinned souc resolution; using local fallback" >&2
   fi
 fi
 

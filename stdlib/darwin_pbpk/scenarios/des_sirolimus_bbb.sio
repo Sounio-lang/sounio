@@ -1,0 +1,219 @@
+// darwin_pbpk/scenarios/des_sirolimus_bbb.sio
+//
+// DES-release + systemic PBPK + BBB sub-model, fully coupled.
+//
+// This is the dissertation flagship scenario — the first combined
+// biomaterial-release / full-body PBPK / transporter-limited BBB
+// model that reports brain ISF unbound exposure with a GUM
+// uncertainty budget attached.  Existing tools can compute any
+// ONE of these three layers in isolation; none glues all three.
+//
+// Pipeline (per outer step):
+//   1. Higuchi cumulative release adds drug mass to systemic blood
+//      (operator-split, same as scenarios/des_sirolimus.sio).
+//   2. Systemic 14-compartment PBPK advances under tight_ode_config.
+//   3. BBB sub-model (ISF + ICF) steps on the linearly-interpolated
+//      plasma driver at fixed bbb_dt = 0.01 h (RK4).
+//
+// Reference parameters:
+//   Cypher DES: K_H = 0.00417 mg/h^0.5, total_dose = 0.14 mg
+//     (Sousa 2003 Circulation 107:2274; Acharya & Park 2006).
+//   Systemic rapamycin: ep14_rapamycin_params (Ferron 1997, Schreiber 1991).
+//   BBB rapamycin:      bbb_rapamycin_params  (Lampen 1998, Fridén 2007).
+
+use darwin_pbpk::bbb::bbb_core::*
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::epistemic_pbpk14::{ep14_rapamycin_params}
+use darwin_pbpk::tsit5_pbpk14::*
+
+fn desb_sqrt(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = (y + x / y) * 0.5; i = i + 1 }
+    y
+}
+
+fn desb_higuchi_cum(kh: f64, total_dose: f64, t: f64) -> f64 with Div, Panic, Mut {
+    if t <= 0.0 { return 0.0 }
+    let q = kh * desb_sqrt(t)
+    if q > total_dose { return total_dose }
+    q
+}
+
+fn desb_higuchi_step(kh: f64, total_dose: f64, t: f64, dt: f64) -> f64 with Div, Panic, Mut {
+    let q0 = desb_higuchi_cum(kh, total_dose, t)
+    let q1 = desb_higuchi_cum(kh, total_dose, t + dt)
+    q1 - q0
+}
+
+fn desb_interp(t: f64, t0: f64, t1: f64, c0: f64, c1: f64) -> f64 with Div, Panic, Mut {
+    if t1 <= t0 { return c0 }
+    let alpha = (t - t0) / (t1 - t0)
+    c0 + alpha * (c1 - c0)
+}
+
+// ----------------------------------------------------------------------------
+// Trace container
+// ----------------------------------------------------------------------------
+
+pub struct DESBBBTrace {
+    n_points:    i32,
+    times_h:     [f64; 32],
+    plasma:      [f64; 32],
+    isf_u:       [f64; 32],
+    icf_u:       [f64; 32],
+    released:    [f64; 32],   // cumulative release (mg) at each checkpoint
+    auc_plasma_u: f64,
+    auc_isf_u:    f64,
+    auc_icf_u:    f64,
+    kpuu_auc:     f64,
+    total_released_end: f64,
+    success: bool,
+}
+
+fn desb_trace_zero() -> DESBBBTrace {
+    DESBBBTrace {
+        n_points: 0,
+        times_h:   [0.0; 32],
+        plasma:    [0.0; 32],
+        isf_u:     [0.0; 32],
+        icf_u:     [0.0; 32],
+        released:  [0.0; 32],
+        auc_plasma_u: 0.0,
+        auc_isf_u:    0.0,
+        auc_icf_u:    0.0,
+        kpuu_auc:     0.0,
+        total_released_end: 0.0,
+        success: false,
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Coupled DES + PBPK + BBB run
+// ----------------------------------------------------------------------------
+
+pub fn des_bbb_run(
+    sys_prm: PBPKParams14,
+    bbb_prm: BBBParams,
+    kh: f64,
+    total_dose: f64,
+    checkpoints: [f64; 32],
+    n_points: i32,
+    bbb_dt: f64
+) -> DESBBBTrace with Mut, Div, Panic {
+    let cfg = tight_ode_config()
+    var trace = desb_trace_zero()
+    trace.n_points = n_points
+
+    var sys_st = pbpk_state_zero()
+    var bbb_st = bbb_state_zero()
+
+    // t = 0 record (no release yet).
+    trace.times_h[0]  = 0.0
+    trace.plasma[0]   = sys_st.blood
+    trace.isf_u[0]    = bbb_prm.fu_isf * bbb_st.c_isf
+    trace.icf_u[0]    = bbb_prm.fu_icf * bbb_st.c_icf
+    trace.released[0] = 0.0
+
+    var t: f64 = 0.0
+    var dt_sys = cfg.dt_init
+
+    var point_i: i32 = 1
+    while point_i < n_points {
+        let idx = point_i as usize
+        let target = checkpoints[idx]
+        let t_prev = t
+        let c_prev = sys_st.blood
+
+        // --- Systemic PBPK with operator-split Higuchi release ---
+        var nsteps: i64 = 0
+        var nreject: i64 = 0
+        while t < target && nsteps < cfg.max_steps {
+            let dt_use = if t + dt_sys > target { target - t } else { dt_sys }
+            let rel_mg = desb_higuchi_step(kh, total_dose, t, dt_use)
+            var st_in = sys_st
+            if rel_mg > 0.0 {
+                st_in.blood = st_in.blood + rel_mg / sys_prm.v_blood
+            }
+            let result = tsit5_step_pbpk(st_in, t, dt_use, sys_prm)
+            let err_norm = compute_error_norm_14(result.err, st_in, result.state_new, cfg.rtol, cfg.atol)
+            if err_norm <= 1.0 {
+                sys_st = result.state_new
+                t = t + dt_use
+                nsteps = nsteps + 1
+                dt_sys = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            } else {
+                nreject = nreject + 1
+                dt_sys = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            }
+            if dt_sys < cfg.dt_min { dt_sys = cfg.dt_min }
+            if dt_sys > cfg.dt_max { dt_sys = cfg.dt_max }
+            if nreject > 10000 { return trace }
+        }
+
+        // --- BBB sub-model over [t_prev, target] ---
+        let c_now = sys_st.blood
+        var t_bbb = t_prev
+        while t_bbb < target {
+            let dt_use_bbb = if t_bbb + bbb_dt > target { target - t_bbb } else { bbb_dt }
+            let c_mid = desb_interp(t_bbb + 0.5 * dt_use_bbb, t_prev, target, c_prev, c_now)
+            bbb_st = bbb_rk4_step(bbb_st, c_mid, dt_use_bbb, bbb_prm)
+            t_bbb = t_bbb + dt_use_bbb
+        }
+
+        trace.times_h[idx]  = target
+        trace.plasma[idx]   = c_now
+        trace.isf_u[idx]    = bbb_prm.fu_isf * bbb_st.c_isf
+        trace.icf_u[idx]    = bbb_prm.fu_icf * bbb_st.c_icf
+        trace.released[idx] = desb_higuchi_cum(kh, total_dose, target)
+
+        point_i = point_i + 1
+    }
+
+    // --- Trapezoidal AUC ---
+    var auc_p_u: f64 = 0.0
+    var auc_i_u: f64 = 0.0
+    var auc_c_u: f64 = 0.0
+    var k: i32 = 0
+    while k < n_points - 1 {
+        let kdx = k as usize
+        let kdx1 = (k + 1) as usize
+        let h = trace.times_h[kdx1] - trace.times_h[kdx]
+        let pu_k  = bbb_prm.fu_plasma * trace.plasma[kdx]
+        let pu_k1 = bbb_prm.fu_plasma * trace.plasma[kdx1]
+        auc_p_u = auc_p_u + 0.5 * h * (pu_k + pu_k1)
+        auc_i_u = auc_i_u + 0.5 * h * (trace.isf_u[kdx]  + trace.isf_u[kdx1])
+        auc_c_u = auc_c_u + 0.5 * h * (trace.icf_u[kdx]  + trace.icf_u[kdx1])
+        k = k + 1
+    }
+    trace.auc_plasma_u = auc_p_u
+    trace.auc_isf_u    = auc_i_u
+    trace.auc_icf_u    = auc_c_u
+    trace.kpuu_auc     = if auc_p_u > 0.0 { auc_i_u / auc_p_u } else { 0.0 }
+    let last_idx = (n_points - 1) as usize
+    trace.total_released_end = trace.released[last_idx]
+    trace.success = true
+    trace
+}
+
+pub fn des_bbb_print_csv(trace: DESBBBTrace) with IO, Mut, Panic, Div {
+    println("time_h,c_plasma,c_isf_unbound,c_icf_unbound,cumulative_release_mg")
+    var i: i32 = 0
+    while i < trace.n_points {
+        let idx = i as usize
+        print_f64(trace.times_h[idx]);  print(",")
+        print_f64(trace.plasma[idx]);   print(",")
+        print_f64(trace.isf_u[idx]);    print(",")
+        print_f64(trace.icf_u[idx]);    print(",")
+        print_f64(trace.released[idx])
+        println("")
+        i = i + 1
+    }
+    println("")
+    print("AUC_plasma_unbound_mg_h_per_L,");  print_f64(trace.auc_plasma_u);       println("")
+    print("AUC_isf_unbound_mg_h_per_L,");     print_f64(trace.auc_isf_u);          println("")
+    print("AUC_icf_unbound_mg_h_per_L,");     print_f64(trace.auc_icf_u);          println("")
+    print("Kpuu_brain_AUC,");                 print_f64(trace.kpuu_auc);           println("")
+    print("Total_released_mg,");              print_f64(trace.total_released_end); println("")
+}

@@ -236,7 +236,7 @@ pip install sounio
 
 # From source
 git clone https://github.com/sounio-org/sounio.git
-cd triple-sounio-ecosystem/sounio-py
+cd ecosystem/sounio-py
 pip install -e .
 ```
 
@@ -259,5 +259,5 @@ python -c "import sounio; x = sounio.Knowledge(100, 5); print(x)"
 
 - [**Quickstart Guide**](quickstart.md) — Create your first epistemic computation
 - [**API Reference**](api.md) — Full API docs for all classes
-- [**Examples**](https://github.com/sounio-org/sounio/tree/main/triple-sounio-ecosystem/sounio-py/examples) — Runnable examples
+- [**Examples**](https://github.com/sounio-org/sounio/tree/main/ecosystem/sounio-py/examples) — Runnable examples
 - [**Sounio Language**](https://github.com/sounio-org/sounio/docs/LLM_PROGRAMMING_GUIDE.md) — Learn Sounio syntax

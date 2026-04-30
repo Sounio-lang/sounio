@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 OUT_JSON="${STDLIB_SCIENCE_STATUS_OUT:-$ROOT_DIR/artifacts/stdlib/stdlib_science_pipeline_status.v1.json}"

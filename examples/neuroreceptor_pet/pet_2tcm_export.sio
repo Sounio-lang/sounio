@@ -1,0 +1,126 @@
+// examples/neuroreceptor_pet/pet_2tcm_export.sio
+//
+// CSV export companion to pet_2tcm_epistemic.sio.
+//
+// Prints ONLY a CSV stream to stdout:
+//   t,Cp,C1,C2,CT
+//
+// Intended usage:
+//   $SOUC_BIN run examples/neuroreceptor_pet/pet_2tcm_export.sio \
+//       > examples/neuroreceptor_pet/results/tac_curve.csv
+//
+// Uses the same priors and RK4 integrator as the main audit example.
+// Deterministic and reproducible.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Div {
+    if x < 0.0 { return 1.0 / exp_f64(0.0 - x) }
+    if x > 0.5 {
+        let half = exp_f64(x * 0.5)
+        return half * half
+    }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 {
+        let di = i as f64
+        term = term * x / di
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+struct P {
+    k1: f64, k2: f64, k3: f64, k4: f64,
+    cp_amp: f64, cp_decay: f64,
+    fu: f64, bbb: f64,
+}
+
+struct S { c1: f64, c2: f64 }
+
+fn cp_of(t: f64, amp: f64, decay: f64) -> f64 with Mut, Div {
+    if t < 0.0 { return 0.0 }
+    return amp * exp_f64(0.0 - decay * t)
+}
+
+fn rk4(st: S, t: f64, dt: f64, p: P) -> S with Mut, Div {
+    let k1e = p.k1 * p.fu * p.bbb
+
+    let cp0 = cp_of(t, p.cp_amp, p.cp_decay)
+    let a1 = dt * (k1e * cp0 - (p.k2 + p.k3) * st.c1 + p.k4 * st.c2)
+    let b1 = dt * (p.k3 * st.c1 - p.k4 * st.c2)
+
+    let c1m = st.c1 + 0.5 * a1
+    let c2m = st.c2 + 0.5 * b1
+    let cpm = cp_of(t + 0.5 * dt, p.cp_amp, p.cp_decay)
+    let a2 = dt * (k1e * cpm - (p.k2 + p.k3) * c1m + p.k4 * c2m)
+    let b2 = dt * (p.k3 * c1m - p.k4 * c2m)
+
+    let c1n = st.c1 + 0.5 * a2
+    let c2n = st.c2 + 0.5 * b2
+    let a3 = dt * (k1e * cpm - (p.k2 + p.k3) * c1n + p.k4 * c2n)
+    let b3 = dt * (p.k3 * c1n - p.k4 * c2n)
+
+    let c1o = st.c1 + a3
+    let c2o = st.c2 + b3
+    let cpe = cp_of(t + dt, p.cp_amp, p.cp_decay)
+    let a4 = dt * (k1e * cpe - (p.k2 + p.k3) * c1o + p.k4 * c2o)
+    let b4 = dt * (p.k3 * c1o - p.k4 * c2o)
+
+    S {
+        c1: st.c1 + (a1 + 2.0 * a2 + 2.0 * a3 + a4) / 6.0,
+        c2: st.c2 + (b1 + 2.0 * b2 + 2.0 * b3 + b4) / 6.0,
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    let p = P {
+        k1: 0.15, k2: 0.20, k3: 0.10, k4: 0.05,
+        cp_amp: 1.00, cp_decay: 0.20,
+        fu: 1.00, bbb: 1.00,
+    }
+    let t_end = 60.0
+    let dt = 0.05
+    // Sample every 20 steps = once per 1.0 min for a compact CSV
+    let sample_every = 20
+
+    // CSV header
+    print("t,Cp,C1,C2,CT")
+    println("")
+
+    var st = S { c1: 0.0, c2: 0.0 }
+    var t = 0.0
+    var n = 0
+
+    // Emit initial sample
+    print("0.00,")
+    print(cp_of(0.0, p.cp_amp, p.cp_decay))
+    print(",0.000000,0.000000,0.000000")
+    println("")
+
+    while t < t_end && n < 5000 {
+        st = rk4(st, t, dt, p)
+        t = t + dt
+        n = n + 1
+
+        if n - (n / sample_every) * sample_every == 0 {
+            let cp_val = cp_of(t, p.cp_amp, p.cp_decay)
+            let ct = st.c1 + st.c2
+            print(t)
+            print(",")
+            print(cp_val)
+            print(",")
+            print(st.c1)
+            print(",")
+            print(st.c2)
+            print(",")
+            print(ct)
+            println("")
+        }
+    }
+}

@@ -74,10 +74,10 @@ From the Sounio repo root:
   6. Do not propose destructive reset/clean/rebase flows to "simplify" recovery state
 - Prompt surface: [llms.txt](llms.txt)
 - Repository guide: [CLAUDE.md](CLAUDE.md)
-- Syntax and workflow guide: [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
+- Syntax and workflow guide: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md)
 - Live Hugging Face dataset: <https://huggingface.co/datasets/chiuratto-AIgourakis/sounio-code-examples>
 - Training dataset export: [datasets/sounio-code-examples/README.md](datasets/sounio-code-examples/README.md)
-- Dataset builder: [scripts/export_hf_dataset.py](scripts/export_hf_dataset.py)
+- Dataset builder: [scripts/dev/export_hf_dataset.py](scripts/dev/export_hf_dataset.py)
 
 This repo now ships a root `llms.txt` for model-aware tools and a reproducible Hugging Face-style dataset export built from the Sounio test suite.
 The current published dataset lives in the maintainer namespace as a public mirror until the `sounio-lang` Hugging Face org namespace is ready.
@@ -168,7 +168,7 @@ This is an active research repository. Here's what actually works and what doesn
 | **Self-hosted compiler** | Lexer, parser, checker, codegen — compiles itself | Fixed-point verified (stage2 == stage3) |
 | **Algebra** | Clifford Cl(p,q), Cayley-Dickson CD(k), Jordan J₃(O), octonions | Verified the 168 theorem |
 | **Ontology** | OWL2 model + reasoner + query engine | 40 tests passing |
-| **Native codegen** | x86-64 ELF emission from self-hosted lean driver | Bit-identical bootstrap chain |
+| **Native codegen** | Linux ELF plus current Mach-O output lanes from the self-hosted lean driver | Linux fixed-point verified; checked macOS artifact lane present |
 | **Core stdlib** | Stats, linalg, ODE solvers, signal processing, CSV, JSON | Gate: 81 pass / 0 fail / 5 skip |
 | **Optimizer** | 1000+ e-graph rewrite rules, GVN, LICM, load sinking | 1003 tests, all FAIL=0 |
 
@@ -192,7 +192,8 @@ This is an active research repository. Here's what actually works and what doesn
 | **Ontology federation** | Has 8 hardcoded CURIEs, NOT 15M terms — federation is a stub |
 | **GPU entry point** | `gpu/lib.sio` is empty. PTX codegen exists but no end-to-end path. |
 | **Closure literals** | `\|x\| x + 1` not supported. Named fn refs work (`let f = square`). |
-| **Windows / macOS** | Linux x86-64 only. macOS Mach-O backend exists but untested. |
+| **Windows** | No checked-in Windows compiler artifact in this checkout. |
+| **AArch64 native-v2 parity** | Newer `aarch64` native-v2 lowering still has unsupported opcodes; checked macOS support currently uses the self-hosted Mach-O artifact lane. |
 
 ### Stdlib by the numbers
 
@@ -222,7 +223,7 @@ The result was verified computationally in Sounio and independently reproduced i
 
 ## Get started
 
-The repo ships a pre-built Linux x86-64 self-hosted compiler artifact plus a native wrapper. No Rust build step is required for the default workflow.
+This checkout ships checked self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` behind the host-aware `bin/souc` launcher. No Rust build step is required for the default workflow.
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
@@ -231,11 +232,12 @@ cd sounio
 export SOUC="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-$SOUC --version                              # souc native-wrapper v1.0.0-rc1
-$SOUC check examples/hello.sio              # type-check
-$SOUC run examples/epistemic_bmi.sio        # compile + execute
-$SOUC compile examples/hello.sio -o hello.elf
-$SOUC repl                                   # not yet supported in native mode
+$SOUC --version                              # souc 1.0.0-beta.5
+$SOUC info                                   # selected host artifact + wrapper contract
+$SOUC check examples/hello.sio               # type-check via checked self-hosted lane
+$SOUC compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+$SOUC run self-hosted/compiler/native_print_f64_smoke.sio
+$SOUC compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 ```
 
 For detailed setup: [INSTALL.md](INSTALL.md) · [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
@@ -251,7 +253,7 @@ For detailed setup: [INSTALL.md](INSTALL.md) · [docs/guide/MINIMUM_VIABLE_SOUNI
 | `self-hosted/lexer/`, `parser/` | Frontend (tokenizer, recursive descent) |
 | `self-hosted/check/`, `types/` | Bidirectional type inference + algebraic effects |
 | `self-hosted/ir/` | IR lowering, optimization, e-graph equality saturation |
-| `self-hosted/native/` | x86-64 ELF emission |
+| `self-hosted/native/` | Native ELF and Mach-O emission in the current self-hosted lane |
 | `self-hosted/compiler/` | Codegen drivers (lean, IR) |
 | `stdlib/epistemic/` | `Knowledge[T]`, uncertainty (GUM), provenance |
 | `stdlib/units/` | Dimensional analysis |
@@ -275,15 +277,19 @@ See [docs/MANIFESTO.md](docs/MANIFESTO.md) for the full philosophy.
 
 ## Known Limitations
 
-**Platform.** Pre-built binaries are Linux x86-64 only. macOS Mach-O backend exists but is not regularly tested. Windows is not supported.
+**Platform.** This checkout ships checked self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` behind the `bin/souc` launcher. Linux `x86_64` and macOS `arm64` are the active first-class host lanes. The newer native-v2 `aarch64` backend is still preview-grade, so Apple Silicon support in this checkout is via the self-hosted Mach-O artifact lane rather than the new preview emitter.
 
-**Native startup cost.** `bin/souc run` performs a native compilation step before execution, so there is a small startup cost compared with an in-process executor.
+**Native startup cost.** Native execution still requires producing a host binary before launch, so there is a small startup cost compared with an in-process executor.
+
+**Launcher contract.** `bin/souc` now provides compatibility commands for `check`, `run`, `compile`, and `build`, but broader omega workflows and JIT-oriented tooling still live outside the checked self-hosted launcher lane.
 
 **No struct generics (yet).** `Knowledge<T>` is currently monomorphic (f64 only). Struct-level generics are the highest-priority language feature. Function-level generics work.
 
 **No closure literals.** Named function references work (`let f = square`), but `|x| x + 1` lambda syntax is not supported.
 
-**No REPL/debug flags yet.** Native mode does not yet support `repl`, `--show-ast`, or `--show-types`.
+**No REPL yet.** The checked self-hosted launcher does not support `repl`.
+
+**Debug flags.** `--show-ast` and `--show-types` are supported as pass-through flags on the checked self-hosted launcher for `check`, `run`, `compile`, and `build`.
 
 **FFI.** `extern "C"` remains limited in scope, but the old JIT-only integer FFI failure mode is gone on the native path.
 

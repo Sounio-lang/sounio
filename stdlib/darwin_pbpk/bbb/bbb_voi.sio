@@ -1,0 +1,154 @@
+// darwin_pbpk/bbb/bbb_voi.sio — Value-of-Information (VoI) ranking
+//
+// Dissertation contribution #5 — mechanises the experimental-design
+// recommendation that falls out of combining the 7-D HDMR Sobol
+// indices with the per-parameter confidence tags.
+//
+// Core question: "If I could run exactly one measurement to shrink
+// the Kpuu_AUC uncertainty, which parameter would I target?"
+//
+// Definition:
+//
+//     VoI_i = S_i · (1 − confidence_i)
+//
+// where S_i is the first-order Sobol index from bbb_hdmr.sio (how
+// much the i-th parameter contributes to the combined variance) and
+// confidence_i ∈ [0, 1] is the prior evidence-quality tag from
+// bbb_priors.sio.  VoI is dimensionless and scales with:
+//   - variance share (high-share parameters are worth reducing)
+//   - evidence gap      (low-confidence parameters give room to
+//                        update).
+//
+// A parameter with high Sobol but high confidence (well-measured
+// already) ranks LOW — further measurements would have diminishing
+// returns.  A parameter with low Sobol ranks LOW regardless of
+// confidence — its uncertainty does not propagate to the endpoint.
+// Only the intersection (high share × weak prior) warrants
+// experimental investment.
+//
+// This is the "expected-value-of-sample-information" (EVSI) framework
+// from decision-theoretic PK (Claxton 1999; Kennedy 2000), specialised
+// to first-order Sobol weighting.  Existing PK tools (Simcyp, NONMEM,
+// PK-Sim) report neither Sobol nor confidence, so they cannot emit
+// this ranking; Sounio's epistemic-type stack is purpose-built for it.
+
+use darwin_pbpk::bbb::bbb_hdmr::{BBBHDMRResult}
+use darwin_pbpk::bbb::bbb_priors::{BBBPriors}
+
+pub struct BBBVoI {
+    n_rows:        i32,
+    param_idx:     [i32; 8],
+    sobol:         [f64; 8],
+    confidence:    [f64; 8],
+    voi:           [f64; 8],
+    rank:          [i32; 8],     // rank[k] = index in param_idx with k-th highest VoI
+    top_idx:       i32,          // param_idx of the #1 recommendation
+    top_voi:       f64,
+    voi_total:     f64,
+}
+
+fn bbb_voi_zero() -> BBBVoI {
+    BBBVoI {
+        n_rows: 0,
+        param_idx: [0; 8], sobol: [0.0; 8], confidence: [0.0; 8],
+        voi: [0.0; 8], rank: [0; 8],
+        top_idx: 0 - 1, top_voi: 0.0, voi_total: 0.0,
+    }
+}
+
+// Compute VoI from an HDMR budget + the same priors that fed it.
+pub fn bbb_voi_from_hdmr(
+    hdmr:   BBBHDMRResult,
+    priors: BBBPriors
+) -> BBBVoI with Mut, Div, Panic {
+    var out = bbb_voi_zero()
+    out.n_rows = hdmr.n_dims
+
+    var total: f64 = 0.0
+    var best_idx: i32 = 0 - 1
+    var best_voi: f64 = 0.0
+
+    var i: i32 = 0
+    while i < hdmr.n_dims {
+        let idx = i as usize
+        let s = hdmr.sobol[idx]
+        let c = priors.confidence[idx]
+        let v = s * (1.0 - c)
+        out.param_idx[idx]  = i
+        out.sobol[idx]      = s
+        out.confidence[idx] = c
+        out.voi[idx]        = v
+        total = total + v
+        if v > best_voi { best_voi = v; best_idx = i }
+        i = i + 1
+    }
+
+    out.voi_total = total
+    out.top_idx   = best_idx
+    out.top_voi   = best_voi
+
+    // Rank by VoI descending (simple selection sort, n <= 7).
+    var used: [bool; 8] = [false; 8]
+    var k: i32 = 0
+    while k < hdmr.n_dims {
+        var best_j: i32 = 0 - 1
+        var best_v: f64 = 0.0 - 1.0
+        var j: i32 = 0
+        while j < hdmr.n_dims {
+            let jdx = j as usize
+            if used[jdx] == false && out.voi[jdx] >= best_v {
+                best_v = out.voi[jdx]
+                best_j = j
+            }
+            j = j + 1
+        }
+        if best_j >= 0 {
+            out.rank[k as usize] = best_j
+            used[best_j as usize] = true
+        }
+        k = k + 1
+    }
+
+    out
+}
+
+// ----------------------------------------------------------------------------
+// Dissertation-ready report
+// ----------------------------------------------------------------------------
+
+fn bbb_voi_param_name(idx: i32) -> string {
+    if idx == 0 { return "ps_bbb" }
+    if idx == 1 { return "ps_mem" }
+    if idx == 2 { return "kpuu_brain" }
+    if idx == 3 { return "kpuu_cell" }
+    if idx == 4 { return "fu_plasma" }
+    if idx == 5 { return "fu_isf" }
+    if idx == 6 { return "fu_icf" }
+    "unknown"
+}
+
+pub fn bbb_voi_print(v: BBBVoI) with IO, Mut, Panic, Div {
+    println("BBB Value-of-Information ranking")
+    println("  VoI_i = S_i × (1 − confidence_i)")
+    print("  VoI_total  = "); print_f64(v.voi_total);  println("")
+    if v.top_idx >= 0 {
+        print("  top target = "); print(bbb_voi_param_name(v.top_idx))
+        print(" (VoI = "); print_f64(v.top_voi); println(")")
+    }
+    println("")
+    println("rank,param,sobol_S1,confidence,VoI")
+    var k: i32 = 0
+    while k < v.n_rows {
+        let kdx = k as usize
+        let p = v.rank[kdx]
+        let pdx = p as usize
+        let rank_k = (k + 1) as i64
+        print_i64(rank_k); print(",")
+        print(bbb_voi_param_name(v.param_idx[pdx])); print(",")
+        print_f64(v.sobol[pdx]);      print(",")
+        print_f64(v.confidence[pdx]); print(",")
+        print_f64(v.voi[pdx])
+        println("")
+        k = k + 1
+    }
+}

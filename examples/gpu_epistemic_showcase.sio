@@ -40,7 +40,7 @@
 // The compiler generates the uncertainty propagation math automatically.
 
 // Dilution: C_tissue = C_plasma * (V_plasma / V_tissue) * permeability
-kernel fn pharmacokinetic_dilution(n: i64) with GPU, Mut, Div, Panic {
+kernel fn pharmacokinetic_dilution(n: i64) with GPU, Div, Panic {
     var i: i64 = 0
     while i < n {
         i = i + 1
@@ -48,7 +48,7 @@ kernel fn pharmacokinetic_dilution(n: i64) with GPU, Mut, Div, Panic {
 }
 
 // Clearance: C_after = C_before * exp(-k_elim * dt)
-kernel fn pharmacokinetic_clearance(n: i64, dt: f64) with GPU, Mut, Div, Panic {
+kernel fn pharmacokinetic_clearance(n: i64, dt: f64) with GPU, Div, Panic {
     var i: i64 = 0
     while i < n {
         i = i + 1
@@ -56,7 +56,7 @@ kernel fn pharmacokinetic_clearance(n: i64, dt: f64) with GPU, Mut, Div, Panic {
 }
 
 // Sensor fusion: weighted mean of multiple noisy concentration readings
-kernel fn sensor_fusion_weighted(n: i64) with GPU, Mut, Div, Panic {
+kernel fn sensor_fusion_weighted(n: i64) with GPU, Div, Panic {
     var i: i64 = 0
     while i < n {
         i = i + 1
@@ -150,7 +150,7 @@ fn provenance_merge(prov_a: i64, prov_b: i64) -> i64 {
     prov_a ^ prov_b  // XOR hash: commutative, associative, invertible
 }
 
-fn provenance_tag(sensor_id: i64) -> i64 {
+fn provenance_tag(sensor_id: i64) -> i64 with Mut {
     // Each sensor gets a unique bit position in the provenance word
     if sensor_id < 64 {
         var bit: i64 = 1
@@ -242,8 +242,9 @@ fn select_kernel_variant(entropy: f64) -> i64 {
 // Main: Full Pipeline Demo
 // ============================================================================
 
-fn main() with Mut, Div, Panic {
+fn main() -> i32 with IO, Mut, Div, Panic {
     var pass: i64 = 0
+    var failed: i64 = 0
     var total: i64 = 0
 
     // ── Scenario: Drug Concentration from Noisy Sensors ──────────────
@@ -269,7 +270,7 @@ fn main() with Mut, Div, Panic {
     let v_ratio = v_plasma / v_tissue  // 6.0
     let u_ratio = gum_quotient(v_plasma, u_v_plasma, v_tissue, u_v_tissue)
     // u_ratio should be ~0.45 (dominated by tissue volume uncertainty)
-    if u_ratio > 0.2 && u_ratio < 1.0 { pass = pass + 1 }
+    if u_ratio > 0.2 && u_ratio < 1.0 { pass = pass + 1 } else { failed = failed + 1 }
 
     // ── T2: Tissue concentration uncertainty (GUM product chain) ─────
     total = total + 1
@@ -279,12 +280,12 @@ fn main() with Mut, Div, Panic {
     // Then: (c_plasma * v_ratio) * perm
     let u_tissue = gum_product(c_plasma * v_ratio, u_cv, perm, u_perm)
     // Full tissue concentration: 50 * 6.0 * 0.85 = 255.0 ng/mL
-    if approx_eq(c_tissue_raw, 255.0, 0.01) { pass = pass + 1 }
+    if approx_eq(c_tissue_raw, 255.0, 0.01) { pass = pass + 1 } else { failed = failed + 1 }
 
     // ── T3: Uncertainty is positive and physically reasonable ─────────
     total = total + 1
     // u_tissue should be meaningful (not zero, not absurd)
-    if u_tissue > 1.0 && u_tissue < 100.0 { pass = pass + 1 }
+    if u_tissue > 1.0 && u_tissue < 100.0 { pass = pass + 1 } else { failed = failed + 1 }
 
     // ── T4: Provenance tracking through the pipeline ─────────────────
     total = total + 1
@@ -298,7 +299,7 @@ fn main() with Mut, Div, Panic {
         provenance_merge(prov_mri, prov_assay)
     )
     // All four bits should be set: 1 | 2 | 4 | 8 = 15
-    if prov_merged == 15 { pass = pass + 1 }
+    if prov_merged == 15 { pass = pass + 1 } else { failed = failed + 1 }
 
     // ── T5: Provenance is commutative (XOR property) ─────────────────
     total = total + 1
@@ -306,7 +307,7 @@ fn main() with Mut, Div, Panic {
         provenance_merge(prov_assay, prov_mri),
         provenance_merge(prov_ct, prov_blood)
     )
-    if prov_alt == prov_merged { pass = pass + 1 }
+    if prov_alt == prov_merged { pass = pass + 1 } else { failed = failed + 1 }
 
     // ── T6: Sensor fusion (weighted mean reduces uncertainty) ────────
     total = total + 1
@@ -317,7 +318,7 @@ fn main() with Mut, Div, Panic {
     sensor_u[2] = 3.0   // Arterial line: ±3.0
     let u_fused = gum_weighted_mean_uncertainty(sensor_u, 3)
     // Fused uncertainty MUST be less than the best individual sensor
-    if u_fused < 2.0 { pass = pass + 1 }
+    if u_fused < 2.0 { pass = pass + 1 } else { failed = failed + 1 }
 
     // ── T7: Entropy-gated dispatch (low entropy → fast kernel) ───────
     total = total + 1
@@ -329,7 +330,7 @@ fn main() with Mut, Div, Panic {
     uniform_u[3] = 2.0
     let h_low = compute_epsilon_entropy(uniform_u, 4)
     let variant_low = select_kernel_variant(h_low)
-    if variant_low == 0 { pass = pass + 1 }  // Fast variant selected
+    if variant_low == 0 { pass = pass + 1 } else { failed = failed + 1 }  // Fast variant selected
 
     // ── T8: Entropy-gated dispatch (high entropy → full GUM) ────────
     total = total + 1
@@ -341,13 +342,13 @@ fn main() with Mut, Div, Panic {
     mixed_u[3] = 8.0    // Noisy
     let h_high = compute_epsilon_entropy(mixed_u, 4)
     let variant_high = select_kernel_variant(h_high)
-    if variant_high >= 1 { pass = pass + 1 }  // Adaptive or full GUM
+    if variant_high >= 1 { pass = pass + 1 } else { failed = failed + 1 }  // Adaptive or full GUM
 
     // ── T9: GUM sum rule (independent measurements add in quadrature) ─
     total = total + 1
     let u_combined = gum_sum(3.0, 4.0)
     // sqrt(9 + 16) = sqrt(25) = 5.0
-    if approx_eq(u_combined, 5.0, 0.001) { pass = pass + 1 }
+    if approx_eq(u_combined, 5.0, 0.001) { pass = pass + 1 } else { failed = failed + 1 }
 
     // ── T10: Full pipeline summary ───────────────────────────────────
     total = total + 1
@@ -358,7 +359,7 @@ fn main() with Mut, Div, Panic {
         && c_tissue_raw < 300.0
         && u_tissue > 0.0
         && prov_merged == 15
-    if result_valid { pass = pass + 1 }
+    if result_valid { pass = pass + 1 } else { failed = failed + 1 }
 
     // ── Report ───────────────────────────────────────────────────────
     println("=== WHY SOUNIO? — Epistemic GPU Showcase ===")
@@ -373,7 +374,10 @@ fn main() with Mut, Div, Panic {
     println("In Sounio:   0 lines — the compiler generates shadow lanes")
     println("")
 
-    // Print results
-    print_int(pass)
-    print("/10 tests passed\n")
+    // Report
+    println("")
+    print("Passed: "); print_int(pass); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed as i32
 }

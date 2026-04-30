@@ -25,7 +25,7 @@ import urllib.request
 
 MNIST_URL_BASE = "https://ossci-datasets.s3.amazonaws.com/mnist/"
 DATA_DIR = "/tmp/mnist_raw"
-OUTPUT = "/home/demetrios/RustroverProjects/sounio/data/smnist_600.bin"
+OUTPUT = "/workspace/sounio/data/smnist_600.bin"
 
 def download_mnist():
     os.makedirs(DATA_DIR, exist_ok=True)

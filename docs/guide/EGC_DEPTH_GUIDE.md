@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.guide.egc-depth-guide
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.egc-depth-guide
+-->
+
 # EGC Depth Levels D1–D6
 
 **Epistemic Gradual Compilation** — how Sounio tracks what the compiler knows about every expression, and how certain that knowledge is.

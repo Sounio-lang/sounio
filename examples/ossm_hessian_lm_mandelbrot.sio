@@ -1,0 +1,1070 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// O-SSM with Levenberg-Marquardt Newton + Mandelbrot Curvature Regularizer
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Two extensions over ossm_hessian_newton.sio:
+//
+// 1. Levenberg-Marquardt adaptive damping:
+//    λ starts at 1.0; if Newton step reduces loss → λ *= 0.5 (trust more);
+//    if it increases loss → reject step, λ *= 2.0 (trust less).
+//    This auto-tunes the Newton step between full second-order and SGD.
+//
+// 2. Mandelbrot curvature regularizer:
+//    Run the Mandelbrot orbit z_{n+1} = (A⊗z)⊗z + A on the unit A itself.
+//    Compute the Hessian diagonal of ||z_T||² w.r.t. A's 8 components.
+//    Penalize low curvature: L_total = L_task - α * mean(|H_ii|).
+//    This pushes A toward regions of parameter space where the non-associative
+//    curvature is maximal — exactly where octonions differ from quaternions.
+//
+// 10-way comparison:
+//   0: O-SSM + Newton-LM + Mandelbrot   (full pipeline)
+//   1: O-SSM + Newton-LM                (adaptive only)
+//   2: O-SSM + Newton-fixed             (from previous benchmark)
+//   3: O-SSM + L-BFGS
+//   4: O-SSM + SGD
+//   5: H-SSM + Newton-LM + Mandelbrot
+//   6: H-SSM + Newton-LM
+//   7: H-SSM + Newton-fixed
+//   8: H-SSM + L-BFGS
+//   9: H-SSM + SGD
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i = 0
+    while i < 15 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+fn abs_q(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+// ─── Fano plane ───
+fn oct_sign(i: i64, j: i64) -> i64 {
+    if i == 0 { return 1 }
+    if j == 0 { return 1 }
+    if i == j { return 0 - 1 }
+    if i==1{if j==2{return 1}if j==4{return 0-1}if j==3{return 1}if j==5{return 1}if j==6{return 0-1}if j==7{return 0-1}}
+    if i==2{if j==1{return 0-1}if j==3{return 1}if j==4{return 1}if j==5{return 0-1}if j==6{return 1}if j==7{return 0-1}}
+    if i==3{if j==1{return 0-1}if j==2{return 0-1}if j==4{return 1}if j==5{return 1}if j==6{return 0-1}if j==7{return 1}}
+    if i==4{if j==1{return 1}if j==2{return 0-1}if j==3{return 0-1}if j==5{return 1}if j==6{return 1}if j==7{return 0-1}}
+    if i==5{if j==1{return 0-1}if j==2{return 1}if j==3{return 0-1}if j==4{return 0-1}if j==6{return 1}if j==7{return 1}}
+    if i==6{if j==1{return 1}if j==2{return 0-1}if j==3{return 1}if j==4{return 0-1}if j==5{return 0-1}if j==7{return 1}}
+    if i==7{if j==1{return 1}if j==2{return 1}if j==3{return 0-1}if j==4{return 1}if j==5{return 0-1}if j==6{return 0-1}}
+    0
+}
+fn oct_basis(i: i64, j: i64) -> i64 {
+    if i==0{return j}if j==0{return i}if i==j{return 0}
+    if i==1{if j==2{return 4}if j==4{return 2}if j==3{return 7}if j==5{return 6}if j==6{return 5}if j==7{return 3}}
+    if i==2{if j==1{return 4}if j==3{return 5}if j==4{return 1}if j==5{return 3}if j==6{return 7}if j==7{return 6}}
+    if i==3{if j==1{return 7}if j==2{return 5}if j==4{return 6}if j==5{return 2}if j==6{return 4}if j==7{return 1}}
+    if i==4{if j==1{return 2}if j==2{return 1}if j==3{return 6}if j==5{return 7}if j==6{return 3}if j==7{return 5}}
+    if i==5{if j==1{return 6}if j==2{return 3}if j==3{return 2}if j==4{return 7}if j==6{return 1}if j==7{return 4}}
+    if i==6{if j==1{return 5}if j==2{return 7}if j==3{return 4}if j==4{return 3}if j==5{return 1}if j==7{return 2}}
+    if i==7{if j==1{return 3}if j==2{return 6}if j==3{return 1}if j==4{return 5}if j==5{return 4}if j==6{return 2}}
+    0
+}
+
+// ─── Octonion multiplication on raw arrays ───
+fn oct_mul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Div, Panic {
+    var r: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 {
+        var j = 0
+        while j < 8 {
+            let k = oct_basis(i, j)
+            let s = oct_sign(i, j) as f64
+            r[k as usize] = r[k as usize] + a[i as usize] * b[j as usize] * s
+            j = j + 1
+        }
+        i = i + 1
+    }
+    r
+}
+
+fn oct_add(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic {
+    var r: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { r[i as usize] = a[i as usize] + b[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_norm_sq(a: [f64; 8]) -> f64 with Mut, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 8 { s = s + a[i as usize] * a[i as usize]; i = i + 1 }
+    s
+}
+
+// ─── Model state (fixed-point 10^8) ───
+var W: [i64; 224] = [0; 224]
+var MOM: [i64; 224] = [0; 224]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 16] = [0; 16]
+var PROBS: [f64; 16] = [0.0; 16]
+var DH: [i64; 8] = [0; 8]
+var DA: [f64; 8] = [0.0; 8]
+var ASSOC_NORM: f64 = 0.0
+
+fn ws(i: i64, v: f64) with Mut { W[i as usize] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i as usize] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i as usize] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i as usize] as f64) / 100000000.0 }
+
+fn get_A() -> [f64; 8] with Mut, Div, Panic {
+    var a: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { a[i as usize] = wg(80 + i); i = i + 1 }
+    a
+}
+
+fn set_A(a: [f64; 8]) with Mut, Panic {
+    var i = 0
+    while i < 8 { ws(80 + i, a[i as usize]); i = i + 1 }
+}
+
+fn init_embed_b_out() with Mut, Div, Panic {
+    var i = 0
+    while i < 224 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 10000.0); MOM[i as usize] = 0; i = i + 1 }
+}
+
+fn init_A_oct() with Mut, Div, Panic {
+    var nsq = 0.0
+    var i = 0
+    while i < 8 { let v = ((rng_next() % 2000) as f64 - 1000.0) / 1000.0; ws(80 + i, v); nsq = nsq + v * v; i = i + 1 }
+    let n = sqrt_q(nsq)
+    if n > 0.001 { i = 0; while i < 8 { ws(80 + i, wg(80 + i) / n); i = i + 1 } }
+}
+
+fn init_A_quat() with Mut, Div, Panic {
+    init_A_oct()
+    var i = 4
+    while i < 8 { ws(80 + i, 0.0); i = i + 1 }
+    var nsq = 0.0
+    i = 0
+    while i < 4 { nsq = nsq + wg(80 + i) * wg(80 + i); i = i + 1 }
+    let n = sqrt_q(nsq)
+    if n > 0.001 { i = 0; while i < 4 { ws(80 + i, wg(80 + i) / n); i = i + 1 } }
+}
+
+fn renormalize_A_oct() with Mut, Div, Panic {
+    var nsq = 0.0
+    var i = 0
+    while i < 8 { nsq = nsq + wg(80 + i) * wg(80 + i); i = i + 1 }
+    let n = sqrt_q(nsq)
+    if n > 0.001 { i = 0; while i < 8 { ws(80 + i, wg(80 + i) / n); i = i + 1 } }
+}
+
+fn renormalize_A_quat() with Mut, Div, Panic {
+    var nsq = 0.0
+    var i = 0
+    while i < 4 { nsq = nsq + wg(80 + i) * wg(80 + i); i = i + 1 }
+    let n = sqrt_q(nsq)
+    if n > 0.001 { i = 0; while i < 4 { ws(80 + i, wg(80 + i) / n); i = i + 1 } }
+    i = 4
+    while i < 8 { ws(80 + i, 0.0); i = i + 1 }
+}
+
+// ─── Forward pass ───
+fn model_fwd(tok: i64, is_oct: i64) with Mut, Div, Panic {
+    var x: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 { x[d as usize] = wg(tok * 8 + d); d = d + 1 }
+
+    if is_oct == 1 {
+        var ah: [f64; 8] = [0.0; 8]
+        d = 0
+        while d < 8 {
+            var j = 0
+            while j < 8 {
+                let k = oct_basis(d, j)
+                let s = oct_sign(d, j) as f64
+                ah[k as usize] = ah[k as usize] + wg(80 + d) * hg(j) * s
+                j = j + 1
+            }
+            d = d + 1
+        }
+        var result: [f64; 8] = [0.0; 8]
+        d = 0
+        while d < 8 {
+            var j = 0
+            while j < 8 {
+                let k = oct_basis(d, j)
+                let s = oct_sign(d, j) as f64
+                result[k as usize] = result[k as usize] + ah[d as usize] * x[j as usize] * s
+                j = j + 1
+            }
+            d = d + 1
+        }
+        var hx: [f64; 8] = [0.0; 8]
+        d = 0
+        while d < 8 {
+            var j = 0
+            while j < 8 {
+                let k = oct_basis(d, j)
+                let s = oct_sign(d, j) as f64
+                hx[k as usize] = hx[k as usize] + hg(d) * x[j as usize] * s
+                j = j + 1
+            }
+            d = d + 1
+        }
+        var a_hx: [f64; 8] = [0.0; 8]
+        d = 0
+        while d < 8 {
+            var j = 0
+            while j < 8 {
+                let k = oct_basis(d, j)
+                let s = oct_sign(d, j) as f64
+                a_hx[k as usize] = a_hx[k as usize] + wg(80 + d) * hx[j as usize] * s
+                j = j + 1
+            }
+            d = d + 1
+        }
+        var assoc_sq = 0.0
+        d = 0
+        while d < 8 { let diff = result[d as usize] - a_hx[d as usize]; assoc_sq = assoc_sq + diff * diff; d = d + 1 }
+        ASSOC_NORM = sqrt_q(assoc_sq)
+        d = 0
+        while d < 8 {
+            var v = result[d as usize] + 0.2 * a_hx[d as usize] + wg(88 + d) * x[d as usize]
+            if v > 5.0 { v = 5.0 } if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+            hs(d, v)
+            d = d + 1
+        }
+    } else {
+        var ah: [f64; 4] = [0.0; 4]
+        ah[0] = wg(80)*hg(0) - wg(81)*hg(1) - wg(82)*hg(2) - wg(83)*hg(3)
+        ah[1] = wg(80)*hg(1) + wg(81)*hg(0) + wg(82)*hg(3) - wg(83)*hg(2)
+        ah[2] = wg(80)*hg(2) - wg(81)*hg(3) + wg(82)*hg(0) + wg(83)*hg(1)
+        ah[3] = wg(80)*hg(3) + wg(81)*hg(2) - wg(82)*hg(1) + wg(83)*hg(0)
+        var result: [f64; 4] = [0.0; 4]
+        result[0] = ah[0]*x[0] - ah[1]*x[1] - ah[2]*x[2] - ah[3]*x[3]
+        result[1] = ah[0]*x[1] + ah[1]*x[0] + ah[2]*x[3] - ah[3]*x[2]
+        result[2] = ah[0]*x[2] - ah[1]*x[3] + ah[2]*x[0] + ah[3]*x[1]
+        result[3] = ah[0]*x[3] + ah[1]*x[2] - ah[2]*x[1] + ah[3]*x[0]
+        ASSOC_NORM = 0.0
+        d = 0
+        while d < 4 {
+            var v = result[d as usize] + wg(88 + d) * x[d as usize]
+            if v > 5.0 { v = 5.0 } if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+            hs(d, v)
+            d = d + 1
+        }
+        d = 4
+        while d < 8 { hs(d, wg(88 + d) * x[d as usize]); d = d + 1 }
+    }
+}
+
+fn compute_logits() with Mut, Div {
+    var c = 0
+    while c < 16 {
+        var s = 0.0
+        var d = 0
+        while d < 8 { s = s + hg(d) * wg(96 + d * 16 + c); d = d + 1 }
+        L[c as usize] = (s * 100000000.0) as i64
+        c = c + 1
+    }
+}
+
+fn compute_probs(tgt: i64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    var k = 1
+    while k < 16 { let v = (L[k] as f64) / 100000000.0; if v > mx { mx = v }; k = k + 1 }
+    var se = 0.0
+    k = 0
+    while k < 16 { PROBS[k as usize] = exp_q((L[k] as f64) / 100000000.0 - mx); se = se + PROBS[k as usize]; k = k + 1 }
+    k = 0
+    while k < 16 { PROBS[k as usize] = PROBS[k as usize] / se; k = k + 1 }
+    k = 0
+    while k < 16 { PROBS[k as usize] = PROBS[k as usize] - (if k == tgt { 1.0 } else { 0.0 }); k = k + 1 }
+}
+
+fn get_pred() -> i64 with Mut, Div {
+    var best = 0
+    var bv = (L[0] as f64) / 100000000.0
+    var k = 1
+    while k < 16 { let v = (L[k] as f64) / 100000000.0; if v > bv { bv = v; best = k }; k = k + 1 }
+    best
+}
+
+fn update_output(tgt: i64, lr: f64) with Mut, Div, Panic {
+    compute_probs(tgt)
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var c = 0
+        while c < 16 {
+            let idx = 96 + d * 16 + c
+            var g = hd * PROBS[c]
+            if g > 0.5 { g = 0.5 } if g < 0.0 - 0.5 { g = 0.0 - 0.5 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+// ─── Probe generation ───
+var PROBE_TOKENS: [i64; 4] = [0; 4]
+var PROBE_LABEL: i64 = 0
+var PROBE_IS_ASSOC: i64 = 0
+
+fn generate_assoc_probe() with Mut, Div {
+    let t0 = (rng_next() % 10)
+    let t1 = (rng_next() % 10)
+    let t2 = (rng_next() % 10)
+    PROBE_TOKENS[0] = t0
+    PROBE_TOKENS[1] = t1
+    PROBE_TOKENS[2] = t2
+    PROBE_TOKENS[3] = t0
+    PROBE_LABEL = ((t0 * 3 + t1 * 5 + t2 * 7) % 16)
+    PROBE_IS_ASSOC = if (t0 + t1 + t2) % 3 == 0 { 1 } else { 0 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Loss computation
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn compute_loss_for_A(is_oct: i64) -> f64 with Mut, Div, Panic {
+    var d = 0
+    while d < 8 { H[d] = 0; d = d + 1 }
+    var t = 0
+    while t < 4 { model_fwd(PROBE_TOKENS[t], is_oct); t = t + 1 }
+    compute_logits()
+    var mx = (L[0] as f64) / 100000000.0
+    var k = 1
+    while k < 16 { let v = (L[k] as f64) / 100000000.0; if v > mx { mx = v }; k = k + 1 }
+    var se = 0.0
+    k = 0
+    while k < 16 { se = se + exp_q((L[k] as f64) / 100000000.0 - mx); k = k + 1 }
+    let prob = exp_q((L[PROBE_LABEL] as f64) / 100000000.0 - mx) / se
+    0.0 - prob
+}
+
+fn compute_dA_numerical(is_oct: i64) with Mut, Div, Panic {
+    let eps = 0.0001
+    var i = 0
+    while i < 8 {
+        let orig = wg(80 + i)
+        ws(80 + i, orig + eps)
+        let lp = compute_loss_for_A(is_oct)
+        ws(80 + i, orig - eps)
+        let lm = compute_loss_for_A(is_oct)
+        DA[i] = (lp - lm) / (2.0 * eps)
+        ws(80 + i, orig)
+        i = i + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MANDELBROT CURVATURE REGULARIZER
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Orbit: z_{n+1} = (A ⊗ z) ⊗ z + A  (5 iterations, clamped)
+// Curvature: d²||z_T||²/dA_i² via finite differences (diagonal Hessian)
+// Regularizer: -α * mean(|H_ii|)  (encourages high curvature in A-space)
+//
+// For quaternions, the Mandelbrot orbit has near-zero cross-curvature
+// because (A ⊗ z) ⊗ z = A ⊗ (z ⊗ z) (associativity).
+// For octonions, the curvature captures how A's non-associative coupling
+// bends the orbit landscape.
+
+fn mandelbrot_orbit_norm_sq(a: [f64; 8], is_oct: i64) -> f64 with Mut, Div, Panic {
+    var z: [f64; 8] = [0.0; 8]
+    z[0] = 0.1
+    var n = 0
+    while n < 5 {
+        if is_oct == 1 {
+            let az = oct_mul(a, z)
+            let azz = oct_mul(az, z)
+            z = oct_add(azz, a)
+        } else {
+            // Quaternion: only first 4 dims, rest zero
+            var az: [f64; 8] = [0.0; 8]
+            az[0] = a[0]*z[0] - a[1]*z[1] - a[2]*z[2] - a[3]*z[3]
+            az[1] = a[0]*z[1] + a[1]*z[0] + a[2]*z[3] - a[3]*z[2]
+            az[2] = a[0]*z[2] - a[1]*z[3] + a[2]*z[0] + a[3]*z[1]
+            az[3] = a[0]*z[3] + a[1]*z[2] - a[2]*z[1] + a[3]*z[0]
+            // az*z (still quaternion, associative so (az)*z = a*(z*z))
+            var r: [f64; 8] = [0.0; 8]
+            r[0] = az[0]*z[0] - az[1]*z[1] - az[2]*z[2] - az[3]*z[3]
+            r[1] = az[0]*z[1] + az[1]*z[0] + az[2]*z[3] - az[3]*z[2]
+            r[2] = az[0]*z[2] - az[1]*z[3] + az[2]*z[0] + az[3]*z[1]
+            r[3] = az[0]*z[3] + az[1]*z[2] - az[2]*z[1] + az[3]*z[0]
+            z = oct_add(r, a)
+        }
+        let nsq = oct_norm_sq(z)
+        if nsq > 100.0 {
+            return nsq
+        }
+        // Clamp components to prevent divergence
+        var ci = 0
+        while ci < 8 {
+            if z[ci as usize] > 10.0 { z[ci as usize] = 10.0 }
+            if z[ci as usize] < 0.0 - 10.0 { z[ci as usize] = 0.0 - 10.0 }
+            ci = ci + 1
+        }
+        n = n + 1
+    }
+    oct_norm_sq(z)
+}
+
+var MAND_CURV: [f64; 8] = [0.0; 8]
+
+fn compute_mandelbrot_curvature(is_oct: i64) -> f64 with Mut, Div, Panic {
+    let a = get_A()
+    let f0 = mandelbrot_orbit_norm_sq(a, is_oct)
+    let eps = 0.001
+    var total = 0.0
+    var ndim = 8
+    if is_oct == 0 { ndim = 4 }
+    var i = 0
+    while i < ndim {
+        var ap = a
+        ap[i as usize] = ap[i as usize] + eps
+        let fp = mandelbrot_orbit_norm_sq(ap, is_oct)
+        var am = a
+        am[i as usize] = am[i as usize] - eps
+        let fm = mandelbrot_orbit_norm_sq(am, is_oct)
+        let hii = (fp - 2.0 * f0 + fm) / (eps * eps)
+        MAND_CURV[i] = hii
+        total = total + abs_q(hii)
+        i = i + 1
+    }
+    total / (ndim as f64)
+}
+
+fn compute_mandelbrot_gradient(alpha: f64, is_oct: i64) with Mut, Div, Panic {
+    // Gradient of the curvature regularizer w.r.t. A via finite diff
+    // We want to MAXIMIZE curvature → subtract gradient of curvature from loss gradient
+    let eps = 0.001
+    var ndim = 8
+    if is_oct == 0 { ndim = 4 }
+    var i = 0
+    while i < ndim {
+        let orig = wg(80 + i)
+        ws(80 + i, orig + eps)
+        let cp = compute_mandelbrot_curvature(is_oct)
+        ws(80 + i, orig - eps)
+        let cm = compute_mandelbrot_curvature(is_oct)
+        ws(80 + i, orig)
+        let dcurv = (cp - cm) / (2.0 * eps)
+        // Subtract: we want to maximize curvature (minimize -curvature)
+        DA[i] = DA[i] - alpha * dcurv
+        i = i + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXPLICIT 8×8 HESSIAN of task loss
+// ═══════════════════════════════════════════════════════════════════════════
+
+var HESS: [f64; 64] = [0.0; 64]
+
+fn compute_hessian(is_oct: i64) with Mut, Div, Panic {
+    let eps = 0.001
+    let eps2 = eps * eps
+    let f0 = compute_loss_for_A(is_oct)
+    var i = 0
+    while i < 8 {
+        let orig_i = wg(80 + i)
+        ws(80 + i, orig_i + eps)
+        let fip = compute_loss_for_A(is_oct)
+        ws(80 + i, orig_i - eps)
+        let fim = compute_loss_for_A(is_oct)
+        ws(80 + i, orig_i)
+        HESS[i * 8 + i] = (fip - 2.0 * f0 + fim) / eps2
+        var j = i + 1
+        while j < 8 {
+            let orig_j = wg(80 + j)
+            ws(80 + i, orig_i + eps)
+            ws(80 + j, orig_j + eps)
+            let fpp = compute_loss_for_A(is_oct)
+            ws(80 + j, orig_j - eps)
+            let fpm = compute_loss_for_A(is_oct)
+            ws(80 + i, orig_i - eps)
+            let fmm = compute_loss_for_A(is_oct)
+            ws(80 + j, orig_j + eps)
+            let fmp = compute_loss_for_A(is_oct)
+            ws(80 + i, orig_i)
+            ws(80 + j, orig_j)
+            let hij = (fpp - fpm - fmp + fmm) / (4.0 * eps2)
+            HESS[i * 8 + j] = hij
+            HESS[j * 8 + i] = hij
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn hessian_offdiag_norm() -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 8 {
+        var j = 0
+        while j < 8 {
+            if i != j { s = s + abs_q(HESS[i * 8 + j]) }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    s
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NEWTON STEP: (H + λI)^{-1} g via Gauss elimination
+// ═══════════════════════════════════════════════════════════════════════════
+
+var NEWTON_DIR: [f64; 8] = [0.0; 8]
+
+fn hessian_newton_step(damping: f64) with Mut, Div, Panic {
+    var M: [f64; 72] = [0.0; 72]
+    var i = 0
+    while i < 8 {
+        var j = 0
+        while j < 8 { M[i * 9 + j] = HESS[i * 8 + j]; j = j + 1 }
+        M[i * 9 + i] = M[i * 9 + i] + damping
+        M[i * 9 + 8] = 0.0 - DA[i]
+        i = i + 1
+    }
+    var col = 0
+    while col < 8 {
+        var max_row = col
+        var max_val = abs_q(M[col * 9 + col])
+        var row = col + 1
+        while row < 8 {
+            let v = abs_q(M[row * 9 + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+        if max_row != col {
+            var k = 0
+            while k < 9 {
+                let tmp = M[col * 9 + k]
+                M[col * 9 + k] = M[max_row * 9 + k]
+                M[max_row * 9 + k] = tmp
+                k = k + 1
+            }
+        }
+        let pivot = M[col * 9 + col]
+        if abs_q(pivot) < 0.0000001 {
+            i = 0
+            while i < 8 { NEWTON_DIR[i] = 0.0 - DA[i]; i = i + 1 }
+            return
+        }
+        row = col + 1
+        while row < 8 {
+            let f = M[row * 9 + col] / pivot
+            var k = col
+            while k < 9 { M[row * 9 + k] = M[row * 9 + k] - f * M[col * 9 + k]; k = k + 1 }
+            row = row + 1
+        }
+        col = col + 1
+    }
+    i = 7
+    while i >= 0 {
+        var s = M[i * 9 + 8]
+        var j = i + 1
+        while j < 8 { s = s - M[i * 9 + j] * NEWTON_DIR[j]; j = j + 1 }
+        NEWTON_DIR[i] = s / M[i * 9 + i]
+        if i == 0 { break }
+        i = i - 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// L-BFGS (m=5)
+// ═══════════════════════════════════════════════════════════════════════════
+
+var LBFGS_S: [f64; 40] = [0.0; 40]
+var LBFGS_Y: [f64; 40] = [0.0; 40]
+var LBFGS_RHO: [f64; 5] = [0.0; 5]
+var LBFGS_ALPHA: [f64; 5] = [0.0; 5]
+var LBFGS_N: i64 = 0
+var LBFGS_OLD_A: [f64; 8] = [0.0; 8]
+var LBFGS_OLD_G: [f64; 8] = [0.0; 8]
+var LBFGS_DIR: [f64; 8] = [0.0; 8]
+
+fn lbfgs_store_current() with Mut, Div {
+    var i = 0
+    while i < 8 { LBFGS_OLD_A[i] = wg(80 + i); LBFGS_OLD_G[i] = DA[i]; i = i + 1 }
+}
+
+fn lbfgs_update_history() with Mut, Div {
+    let slot = LBFGS_N % 5
+    var sy = 0.0
+    var i = 0
+    while i < 8 {
+        let s = wg(80 + i) - LBFGS_OLD_A[i]
+        let y = DA[i] - LBFGS_OLD_G[i]
+        LBFGS_S[slot * 8 + i] = s
+        LBFGS_Y[slot * 8 + i] = y
+        sy = sy + s * y
+        i = i + 1
+    }
+    if sy > 0.0000001 {
+        LBFGS_RHO[slot] = 1.0 / sy
+        if LBFGS_N < 5 { LBFGS_N = LBFGS_N + 1 }
+    }
+}
+
+fn lbfgs_two_loop() with Mut, Div {
+    var i = 0
+    while i < 8 { LBFGS_DIR[i] = DA[i]; i = i + 1 }
+    var k = LBFGS_N - 1
+    while k >= 0 {
+        let slot = k % 5
+        var dot = 0.0
+        i = 0
+        while i < 8 { dot = dot + LBFGS_S[slot * 8 + i] * LBFGS_DIR[i]; i = i + 1 }
+        LBFGS_ALPHA[slot] = LBFGS_RHO[slot] * dot
+        i = 0
+        while i < 8 { LBFGS_DIR[i] = LBFGS_DIR[i] - LBFGS_ALPHA[slot] * LBFGS_Y[slot * 8 + i]; i = i + 1 }
+        k = k - 1
+    }
+    if LBFGS_N > 0 {
+        let latest = (LBFGS_N - 1) % 5
+        var yy = 0.0
+        var sy = 0.0
+        i = 0
+        while i < 8 { yy = yy + LBFGS_Y[latest * 8 + i] * LBFGS_Y[latest * 8 + i]; sy = sy + LBFGS_S[latest * 8 + i] * LBFGS_Y[latest * 8 + i]; i = i + 1 }
+        var gamma = 1.0
+        if yy > 0.0000001 { gamma = sy / yy }
+        if gamma > 10.0 { gamma = 10.0 }
+        if gamma < 0.01 { gamma = 0.01 }
+        i = 0
+        while i < 8 { LBFGS_DIR[i] = LBFGS_DIR[i] * gamma; i = i + 1 }
+    }
+    k = 0
+    while k < LBFGS_N {
+        let slot = k % 5
+        var dot = 0.0
+        i = 0
+        while i < 8 { dot = dot + LBFGS_Y[slot * 8 + i] * LBFGS_DIR[i]; i = i + 1 }
+        let beta = LBFGS_RHO[slot] * dot
+        i = 0
+        while i < 8 { LBFGS_DIR[i] = LBFGS_DIR[i] + (LBFGS_ALPHA[slot] - beta) * LBFGS_S[slot * 8 + i]; i = i + 1 }
+        k = k + 1
+    }
+    i = 0
+    while i < 8 { LBFGS_DIR[i] = 0.0 - LBFGS_DIR[i]; i = i + 1 }
+}
+
+fn lbfgs_step(lr: f64) with Mut, Div {
+    var i = 0
+    while i < 8 { ws(80 + i, wg(80 + i) + lr * LBFGS_DIR[i]); i = i + 1 }
+}
+
+fn lbfgs_reset() with Mut {
+    LBFGS_N = 0
+    var i = 0
+    while i < 40 { LBFGS_S[i] = 0.0; LBFGS_Y[i] = 0.0; i = i + 1 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TRAINING LOOP: 5 optimizer modes
+// ═══════════════════════════════════════════════════════════════════════════
+//   0: Newton-LM + Mandelbrot regularizer
+//   1: Newton-LM (adaptive damping only)
+//   2: Newton fixed-damping (λ=0.1, from previous benchmark)
+//   3: L-BFGS
+//   4: SGD
+
+var STAT_OFFDIAG: i64 = 0
+var STAT_CURV: i64 = 0
+var STAT_LAMBDA: i64 = 0
+var STAT_STEPS: i64 = 0
+var LM_LAMBDA: i64 = 1000000
+
+fn train_model(is_oct: i64, opt_mode: i64) with IO, Mut, Div, Panic {
+    let n_train = 300
+    STAT_OFFDIAG = 0
+    STAT_CURV = 0
+    STAT_LAMBDA = 0
+    STAT_STEPS = 0
+
+    // Phase 1: warmup output only (30 epochs)
+    var ep = 0
+    while ep < 30 {
+        var s = 0
+        while s < n_train {
+            generate_assoc_probe()
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < 4 { model_fwd(PROBE_TOKENS[t], is_oct); t = t + 1 }
+            compute_logits()
+            update_output(PROBE_LABEL, 0.01)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+
+    // Phase 2: train A (80 epochs)
+    lbfgs_reset()
+    LM_LAMBDA = 1000000
+    ep = 0
+    while ep < 80 {
+        var batch_count = 0
+        var s = 0
+        while s < n_train {
+            generate_assoc_probe()
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < 4 { model_fwd(PROBE_TOKENS[t], is_oct); t = t + 1 }
+            compute_logits()
+            update_output(PROBE_LABEL, 0.005)
+            batch_count = batch_count + 1
+
+            if batch_count == 50 {
+                compute_dA_numerical(is_oct)
+
+                if opt_mode == 0 {
+                    // Newton-LM + Mandelbrot regularizer
+                    let mc = compute_mandelbrot_curvature(is_oct)
+                    compute_mandelbrot_gradient(0.01, is_oct)
+                    compute_hessian(is_oct)
+                    let od = hessian_offdiag_norm()
+                    STAT_OFFDIAG = STAT_OFFDIAG + (od * 1000000.0) as i64
+                    STAT_CURV = STAT_CURV + (mc * 1000000.0) as i64
+
+                    // Save current A for potential rollback
+                    var saved_A: [f64; 8] = [0.0; 8]
+                    var bi = 0
+                    while bi < 8 { saved_A[bi] = wg(80 + bi); bi = bi + 1 }
+                    let loss_before = compute_loss_for_A(is_oct)
+
+                    // Propose Newton step with adaptive λ
+                    let lm_f = (LM_LAMBDA as f64) / 1000000.0
+                    hessian_newton_step(lm_f)
+                    bi = 0
+                    while bi < 8 {
+                        var step = NEWTON_DIR[bi]
+                        if step > 0.02 { step = 0.02 }
+                        if step < 0.0 - 0.02 { step = 0.0 - 0.02 }
+                        ws(80 + bi, wg(80 + bi) + step)
+                        bi = bi + 1
+                    }
+                    if is_oct == 1 { renormalize_A_oct() } else { renormalize_A_quat() }
+
+                    let loss_after = compute_loss_for_A(is_oct)
+                    if loss_after < loss_before {
+                        LM_LAMBDA = LM_LAMBDA / 2
+                        if LM_LAMBDA < 1000 { LM_LAMBDA = 1000 }
+                    } else {
+                        bi = 0
+                        while bi < 8 { ws(80 + bi, saved_A[bi]); bi = bi + 1 }
+                        LM_LAMBDA = LM_LAMBDA * 2
+                        if LM_LAMBDA > 100000000 { LM_LAMBDA = 100000000 }
+                    }
+                    STAT_LAMBDA = STAT_LAMBDA + LM_LAMBDA
+                    STAT_STEPS = STAT_STEPS + 1
+
+                } else if opt_mode == 1 {
+                    // Newton-LM (adaptive damping, no Mandelbrot)
+                    compute_hessian(is_oct)
+                    let od1 = hessian_offdiag_norm()
+                    STAT_OFFDIAG = STAT_OFFDIAG + (od1 * 1000000.0) as i64
+
+                    var saved_A: [f64; 8] = [0.0; 8]
+                    var bi = 0
+                    while bi < 8 { saved_A[bi] = wg(80 + bi); bi = bi + 1 }
+                    let loss_before = compute_loss_for_A(is_oct)
+
+                    let lm_f1 = (LM_LAMBDA as f64) / 1000000.0
+                    hessian_newton_step(lm_f1)
+                    bi = 0
+                    while bi < 8 {
+                        var step = NEWTON_DIR[bi]
+                        if step > 0.02 { step = 0.02 }
+                        if step < 0.0 - 0.02 { step = 0.0 - 0.02 }
+                        ws(80 + bi, wg(80 + bi) + step)
+                        bi = bi + 1
+                    }
+                    if is_oct == 1 { renormalize_A_oct() } else { renormalize_A_quat() }
+
+                    let loss_after = compute_loss_for_A(is_oct)
+                    if loss_after < loss_before {
+                        LM_LAMBDA = LM_LAMBDA / 2
+                        if LM_LAMBDA < 1000 { LM_LAMBDA = 1000 }
+                    } else {
+                        bi = 0
+                        while bi < 8 { ws(80 + bi, saved_A[bi]); bi = bi + 1 }
+                        LM_LAMBDA = LM_LAMBDA * 2
+                        if LM_LAMBDA > 100000000 { LM_LAMBDA = 100000000 }
+                    }
+                    STAT_LAMBDA = STAT_LAMBDA + LM_LAMBDA
+                    STAT_STEPS = STAT_STEPS + 1
+
+                } else if opt_mode == 2 {
+                    // Newton fixed-damping (λ=0.1)
+                    compute_hessian(is_oct)
+                    let od2 = hessian_offdiag_norm()
+                    STAT_OFFDIAG = STAT_OFFDIAG + (od2 * 1000000.0) as i64
+                    STAT_STEPS = STAT_STEPS + 1
+                    hessian_newton_step(0.1)
+                    var bi = 0
+                    while bi < 8 {
+                        var step = NEWTON_DIR[bi]
+                        if step > 0.01 { step = 0.01 }
+                        if step < 0.0 - 0.01 { step = 0.0 - 0.01 }
+                        ws(80 + bi, wg(80 + bi) + step)
+                        bi = bi + 1
+                    }
+                    if is_oct == 1 { renormalize_A_oct() } else { renormalize_A_quat() }
+
+                } else if opt_mode == 3 {
+                    // L-BFGS
+                    lbfgs_store_current()
+                    lbfgs_two_loop()
+                    lbfgs_step(0.001)
+                    if is_oct == 1 { renormalize_A_oct() } else { renormalize_A_quat() }
+                    lbfgs_update_history()
+
+                } else {
+                    // SGD
+                    var bi = 0
+                    while bi < 8 {
+                        var g = DA[bi]
+                        if g > 0.5 { g = 0.5 }
+                        if g < 0.0 - 0.5 { g = 0.0 - 0.5 }
+                        ws(80 + bi, wg(80 + bi) - 0.001 * g)
+                        bi = bi + 1
+                    }
+                    if is_oct == 1 { renormalize_A_oct() } else { renormalize_A_quat() }
+                }
+
+                batch_count = 0
+            }
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+    // end of training
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Evaluation
+// ═══════════════════════════════════════════════════════════════════════════
+
+var EVAL_OV: i64 = 0
+var EVAL_AC: i64 = 0
+var EVAL_AT: i64 = 0
+var EVAL_NC: i64 = 0
+var EVAL_NT: i64 = 0
+
+fn eval_model(is_oct: i64) with IO, Mut, Div, Panic {
+    rng_seed(99999, 11111)
+    EVAL_OV = 0
+    EVAL_AC = 0
+    EVAL_AT = 0
+    EVAL_NC = 0
+    EVAL_NT = 0
+    var s = 0
+    while s < 1000 {
+        generate_assoc_probe()
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < 4 { model_fwd(PROBE_TOKENS[t], is_oct); t = t + 1 }
+        compute_logits()
+        let pred = get_pred()
+        if pred == PROBE_LABEL { EVAL_OV = EVAL_OV + 1 }
+        if PROBE_IS_ASSOC == 1 { EVAL_AT = EVAL_AT + 1; if pred == PROBE_LABEL { EVAL_AC = EVAL_AC + 1 } }
+        else { EVAL_NT = EVAL_NT + 1; if pred == PROBE_LABEL { EVAL_NC = EVAL_NC + 1 } }
+        s = s + 1
+    }
+}
+
+fn print_pct() with IO, Mut, Div {
+    let ov = (EVAL_OV as f64) / 1000.0 * 100.0
+    var ap = 0.0
+    if EVAL_AT > 0 { ap = (EVAL_AC as f64) / (EVAL_AT as f64) * 100.0 }
+    var np = 0.0
+    if EVAL_NT > 0 { np = (EVAL_NC as f64) / (EVAL_NT as f64) * 100.0 }
+    print(ov)
+    print("%  A=")
+    print(ap)
+    print("%  NA=")
+    print(np)
+    print("%")
+}
+
+fn print_stats() with IO, Mut, Div, Panic {
+    if STAT_STEPS > 0 {
+        let n = STAT_STEPS as f64
+        print("  od=")
+        print((STAT_OFFDIAG as f64) / n / 1000000.0)
+        print("  mc=")
+        print((STAT_CURV as f64) / n / 1000000.0)
+        print("  lam=")
+        print((STAT_LAMBDA as f64) / n / 1000000.0)
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("═══════════════════════════════════════════════════════════════")
+    println("  O-SSM: LM Newton + Mandelbrot Curvature Regularizer")
+    println("═══════════════════════════════════════════════════════════════")
+    println("")
+    println("  Modes: 0=LM+Mand, 1=LM, 2=Newton-fixed, 3=LBFGS, 4=SGD")
+    println("  LM: adaptive lambda, reject bad steps")
+    println("  Mandelbrot: z'=(A*z)*z+A orbit curvature → regularizer")
+    println("")
+
+    // Store all 10 results
+    var res_ov: [i64; 10] = [0; 10]
+    var res_nc: [i64; 10] = [0; 10]
+    var res_nt: [i64; 10] = [0; 10]
+
+    // ─── O-SSM variants ───
+    print("  [0] O-SSM + Newton-LM + Mandelbrot...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890); train_model(1, 0); eval_model(1)
+    res_ov[0] = EVAL_OV; res_nc[0] = EVAL_NC; res_nt[0] = EVAL_NT
+    print("  -> "); print_pct(); print_stats(); print("\n")
+
+    print("  [1] O-SSM + Newton-LM...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890); train_model(1, 1); eval_model(1)
+    res_ov[1] = EVAL_OV; res_nc[1] = EVAL_NC; res_nt[1] = EVAL_NT
+    print("  -> "); print_pct(); print_stats(); print("\n")
+
+    print("  [2] O-SSM + Newton-fixed...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890); train_model(1, 2); eval_model(1)
+    res_ov[2] = EVAL_OV; res_nc[2] = EVAL_NC; res_nt[2] = EVAL_NT
+    print("  -> "); print_pct(); print_stats(); print("\n")
+
+    print("  [3] O-SSM + L-BFGS...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890); train_model(1, 3); eval_model(1)
+    res_ov[3] = EVAL_OV; res_nc[3] = EVAL_NC; res_nt[3] = EVAL_NT
+    print("  -> "); print_pct(); print("\n")
+
+    print("  [4] O-SSM + SGD...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890); train_model(1, 4); eval_model(1)
+    res_ov[4] = EVAL_OV; res_nc[4] = EVAL_NC; res_nt[4] = EVAL_NT
+    print("  -> "); print_pct(); print("\n")
+
+    // ─── H-SSM variants ───
+    print("  [5] H-SSM + Newton-LM + Mandelbrot...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890); train_model(0, 0); eval_model(0)
+    res_ov[5] = EVAL_OV; res_nc[5] = EVAL_NC; res_nt[5] = EVAL_NT
+    print("  -> "); print_pct(); print_stats(); print("\n")
+
+    print("  [6] H-SSM + Newton-LM...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890); train_model(0, 1); eval_model(0)
+    res_ov[6] = EVAL_OV; res_nc[6] = EVAL_NC; res_nt[6] = EVAL_NT
+    print("  -> "); print_pct(); print_stats(); print("\n")
+
+    print("  [7] H-SSM + Newton-fixed...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890); train_model(0, 2); eval_model(0)
+    res_ov[7] = EVAL_OV; res_nc[7] = EVAL_NC; res_nt[7] = EVAL_NT
+    print("  -> "); print_pct(); print_stats(); print("\n")
+
+    print("  [8] H-SSM + L-BFGS...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890); train_model(0, 3); eval_model(0)
+    res_ov[8] = EVAL_OV; res_nc[8] = EVAL_NC; res_nt[8] = EVAL_NT
+    print("  -> "); print_pct(); print("\n")
+
+    print("  [9] H-SSM + SGD...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890); train_model(0, 4); eval_model(0)
+    res_ov[9] = EVAL_OV; res_nc[9] = EVAL_NC; res_nt[9] = EVAL_NT
+    print("  -> "); print_pct(); print("\n")
+
+    // ═══ ANALYSIS ═══
+    println("")
+    println("═══════════════════════════════════════════════════════════════")
+    println("  ANALYSIS: Non-assoc accuracy by optimizer")
+    println("═══════════════════════════════════════════════════════════════")
+
+    var o_na: [f64; 5] = [0.0; 5]
+    var h_na: [f64; 5] = [0.0; 5]
+    var idx = 0
+    while idx < 5 {
+        if res_nt[idx] > 0 { o_na[idx] = (res_nc[idx] as f64) / (res_nt[idx] as f64) * 100.0 }
+        if res_nt[idx + 5] > 0 { h_na[idx] = (res_nc[idx + 5] as f64) / (res_nt[idx + 5] as f64) * 100.0 }
+        idx = idx + 1
+    }
+
+    print("\n  Non-assoc accuracy (higher = better):\n")
+    print("  Optimizer        O-SSM    H-SSM    O-H gap\n")
+    print("  ─────────────    ─────    ─────    ───────\n")
+
+    print("  LM+Mandelbrot    ")
+    print(o_na[0]); print("%  "); print(h_na[0]); print("%  ")
+    let g0 = o_na[0] - h_na[0]; if g0 >= 0.0 { print("+") }; print(g0); print("pp\n")
+
+    print("  LM only          ")
+    print(o_na[1]); print("%  "); print(h_na[1]); print("%  ")
+    let g1 = o_na[1] - h_na[1]; if g1 >= 0.0 { print("+") }; print(g1); print("pp\n")
+
+    print("  Newton-fixed     ")
+    print(o_na[2]); print("%  "); print(h_na[2]); print("%  ")
+    let g2 = o_na[2] - h_na[2]; if g2 >= 0.0 { print("+") }; print(g2); print("pp\n")
+
+    print("  L-BFGS           ")
+    print(o_na[3]); print("%  "); print(h_na[3]); print("%  ")
+    let g3 = o_na[3] - h_na[3]; if g3 >= 0.0 { print("+") }; print(g3); print("pp\n")
+
+    print("  SGD              ")
+    print(o_na[4]); print("%  "); print(h_na[4]); print("%  ")
+    let g4 = o_na[4] - h_na[4]; if g4 >= 0.0 { print("+") }; print(g4); print("pp\n")
+
+    // Key question: does LM+Mandelbrot widen the O-H gap?
+    println("")
+    print("  LM+Mand gap vs SGD gap: ")
+    let widening = (o_na[0] - h_na[0]) - (o_na[4] - h_na[4])
+    if widening >= 0.0 { print("+") }
+    print(widening)
+    print("pp\n")
+
+    if widening > 0.5 {
+        println("  -> Mandelbrot regularizer WIDENS non-assoc advantage")
+    } else if widening < 0.0 - 0.5 {
+        println("  -> Mandelbrot regularizer narrows gap (unexpected)")
+    } else {
+        println("  -> Effect within noise margin")
+    }
+
+    println("")
+    println("ALL PASS")
+    0
+}

@@ -94,7 +94,7 @@ let result = value |> transform |> display
 Until the extension is published on the VS Code Marketplace, install from source:
 
 ```bash
-cd triple-sounio-ecosystem/sounio-vscode
+cd ecosystem/sounio-vscode
 npm install
 npm run compile
 vsce package

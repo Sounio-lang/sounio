@@ -1,162 +1,4937 @@
 // self-hosted::compiler::native_compile_driver
 //
-// General-purpose native compile driver. Produces a standalone x86-64 ELF
-// from any single-module .sio program. Avoids importing module_loader.sio
-// (~3900 lines) to stay within JIT memory budget.
-//
-// Pipeline: parse → typecheck → flat summary → optimizer → per-body compile → ELF → write
+// Native-v2 scalar compiler driver for the serious self-hosted path.
+// This driver owns the fragile generated front-end boundary: it lexes through
+// lexer::mod, reads token kind codes from parser scalar storage, builds core IR
+// directly, then feeds the existing native-v2 Machine IR and ELF pipeline.
 //
 // Usage:
 //   souc run self-hosted/compiler/native_compile_driver.sio -- <source.sio> [-o <output>]
 //   souc run self-hosted/compiler/native_compile_driver.sio -- <source.sio> <output>
-//
-// Sprint 107: native-v2 live path — general-purpose, JIT-safe.
 
-use lexer::mod::*
-use parser::ast::*
+use lexer::mod::{lex_file_to_globals}
+use lexer::cursor::*
+use parser::ast::{Name, BinaryOp, make_name, empty_name, name_eq}
+use parser::parser::{pt_read_kind_code, pt_read_start, pt_read_end, pt_read_int_value}
 use ir::ir::*
-use check::dependent::*
-use check::types::*
-use check::mod::{check_program, check_program_epistemic_into}
-use check::ownership::*
-use check::lint::*
-use check::layout::*
 use io::file_write::*
-use interop::contract::*
-use native::aarch64::*
-use native::encode::*
-use native::elf::*
+use native::elf::{string_table_new}
 use native::elf_bulk::*
-use native::macho::*
-use native::reloc::*
 use native::frame::*
-use native::lower_ir::*
 use native::machine_ir::*
-use native::gc::*
 use native::runtime_context::*
-use native::stack_maps::*
-use native::target_policy::*
-use wasm::core::*
-use wasm::encode::*
-use wasm::lower::*
-use native::codegen::*
-use parser::mod::{parse_program_preloaded, count_items}
-use parser::parser::{parser_last_error_count}
-use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref}
-use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref}
-use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
-use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
-use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
-use ir::profile::*
-use ir::inline::*
-use ir::layout::*
-use ir::opt_cleanup::*
-use ir::egraph::*
-use ir::loop_opt::*
-use ir::tailcall::*
-use native::regalloc::*
-use native::peephole::*
-
-// Helpers required by codegen dependency chain (flat-namespace resolution).
-fn char_from_i64(n: i64) -> string with Mut, Panic {
-    if n == 0 { "0" }
-    else if n == 1 { "1" }
-    else if n == 2 { "2" }
-    else if n == 3 { "3" }
-    else if n == 4 { "4" }
-    else if n == 5 { "5" }
-    else if n == 6 { "6" }
-    else if n == 7 { "7" }
-    else if n == 8 { "8" }
-    else if n == 9 { "9" }
-    else { "?" }
+use native::codegen_x86_linux::{
+    compile_ir_function_v2_from_ir_into,
+    compile_ir_function_v2_core_ir_into,
+    compile_module_streaming_begin_count_into,
+    compile_module_streaming_finish_main_rodata_len_into,
+    native_v2_core_begin_function_from_ir_into,
+    native_v2_core_emit_load_imm_into,
+    native_v2_core_emit_load_string_offset_into,
+    native_v2_rodata_append_byte_into,
+    native_v2_rodata_len_into,
+    native_v2_core_emit_binop_code_into,
+    native_v2_core_emit_call1_into,
+    native_v2_core_emit_return_into,
+    native_v2_core_begin_fn_spill_into,
+    native_v2_core_emit_any_binop_into,
+    native_v2_core_define_label_into,
+    native_v2_core_emit_jump_to_label_into,
+    native_v2_core_emit_branch_false_to_label_into,
+    native_v2_core_patch_labels_into,
+    native_v2_core_emit_copy_into,
+    native_v2_core_emit_call_argc_into,
+    native_v2_core_emit_return_struct_into,
+    native_v2_core_emit_rdx_to_temp_into,
+    native_v2_emit_get_arg_count_function_into,
+    native_v2_emit_get_arg_function_into,
+    native_v2_emit_print_function_into,
+    native_v2_emit_print_int_function_into,
+    native_v2_emit_print_char_function_into,
+    native_v2_core_emit_arg_count_into,
+    native_v2_core_emit_get_arg_into,
+    native_v2_core_emit_str_len_into,
+    native_v2_core_emit_str_char_at_into,
+    native_v2_core_emit_str_eq_into,
+    native_v2_core_emit_driver_read_file_to_globals_into,
+    native_v2_core_emit_temp_addr_into,
+    native_v2_core_emit_load_ref_field_into,
+    native_v2_core_emit_store_ref_field_into,
+    native_v2_core_emit_driver_global_load_into,
+    native_v2_core_emit_driver_global_store_into,
+    native_v2_driver_state_data_len,
 }
 
-fn pow10_idx(idx: i64) -> i64 {
-    if idx == 0 { 1000000000000000000 }
-    else if idx == 1 { 100000000000000000 }
-    else if idx == 2 { 10000000000000000 }
-    else if idx == 3 { 1000000000000000 }
-    else if idx == 4 { 100000000000000 }
-    else if idx == 5 { 10000000000000 }
-    else if idx == 6 { 1000000000000 }
-    else if idx == 7 { 100000000000 }
-    else if idx == 8 { 10000000000 }
-    else if idx == 9 { 1000000000 }
-    else if idx == 10 { 100000000 }
-    else if idx == 11 { 10000000 }
-    else if idx == 12 { 1000000 }
-    else if idx == 13 { 100000 }
-    else if idx == 14 { 10000 }
-    else if idx == 15 { 1000 }
-    else if idx == 16 { 100 }
-    else if idx == 17 { 10 }
-    else { 1 }
+let TK_EOF: i64 = 0
+let TK_FN: i64 = 7
+let TK_LET: i64 = 8
+let TK_VAR: i64 = 9
+let TK_IF: i64 = 20
+let TK_ELSE: i64 = 21
+let TK_WHILE: i64 = 24
+let TK_RETURN: i64 = 28
+let TK_NEWLINE: i64 = 2
+let TK_IDENT: i64 = 123
+let TK_INT: i64 = 124
+let TK_FLOAT: i64 = 125
+let TK_STRING: i64 = 126
+let TK_PLUS: i64 = 132
+let TK_MINUS: i64 = 133
+let TK_STAR: i64 = 134
+let TK_SLASH: i64 = 135
+let TK_EQ: i64 = 137
+let TK_AMPBANG: i64 = 163
+let TK_LT: i64 = 138
+let TK_GT: i64 = 139
+let TK_EQEQ: i64 = 146
+let TK_BANGEQ: i64 = 147
+let TK_LE: i64 = 148
+let TK_GE: i64 = 149
+let TK_ANDAND: i64 = 150
+let TK_OROR: i64 = 151
+let TK_BANG: i64 = 140
+let TK_ARROW: i64 = 158
+let TK_LPAREN: i64 = 174
+let TK_RPAREN: i64 = 175
+let TK_LBRACE: i64 = 176
+let TK_RBRACE: i64 = 177
+let TK_LBRACKET: i64 = 178
+let TK_RBRACKET: i64 = 179
+let TK_SEMI: i64 = 180
+let TK_COLON: i64 = 181
+let TK_COMMA: i64 = 182
+let TK_DOT: i64 = 183
+let TK_USE: i64 = 5
+let TK_STRUCT: i64 = 13
+let TK_ENUM: i64 = 14
+let TK_AS: i64 = 30
+let TK_TRUE: i64 = 35
+let TK_FALSE: i64 = 36
+let TK_COLONCOLON: i64 = 162
+let TK_MATCH: i64 = 22
+let TK_FATARROW: i64 = 159
+let TK_UNDERSCORE: i64 = 186
+
+var V2_LOCAL_TOK_IDX: [i64; 64] = [0; 64]
+var V2_LOCAL_REGS: [i64; 64] = [0; 64]
+var V2_LOCAL_STRUCT_IDX: [i64; 64] = [0; 64]
+var V2_LOCAL_IS_REF: [i64; 64] = [0; 64]
+var V2_LOCAL_COUNT: i64 = 0
+var V2_NEXT_REG: i64 = 0
+var V2_BREAK_LABEL: i64 = -1
+var V2_CONTINUE_LABEL: i64 = -1
+
+// User function registry: names → fn_ids, for resolving calls
+// Store token indices (not Name structs) because JIT can't write structs to global arrays
+var V2_USER_FN_TOKEN_IDX: [i64; 512] = [0; 512]
+var V2_USER_FN_IDS: [i64; 512] = [0; 512]
+var V2_USER_FN_COUNT: i64 = 0
+
+// Per-function label counter (reset per user function)
+var V2_NEXT_LABEL: i64 = 0
+
+let V2_BUILTIN_PRINT: i64 = 0
+let V2_BUILTIN_PRINT_INT: i64 = 1
+let V2_BUILTIN_PRINT_CHAR: i64 = 2
+let V2_BUILTIN_ARG_COUNT: i64 = 3
+let V2_BUILTIN_GET_ARG: i64 = 4
+let V2_BUILTIN_STR_EQ: i64 = 5
+let V2_BUILTIN_STR_LEN: i64 = 6
+let V2_BUILTIN_STR_CHAR_AT: i64 = 7
+let V2_BUILTIN_PT_READ_KIND_CODE: i64 = 8
+let V2_BUILTIN_PT_READ_START: i64 = 9
+let V2_BUILTIN_PT_READ_END: i64 = 10
+let V2_BUILTIN_PT_READ_INT_VALUE: i64 = 11
+let V2_BUILTIN_EMPTY_NAME: i64 = 12
+let V2_BUILTIN_DRIVER_READ_FILE_TO_GLOBALS: i64 = 13
+let V2_BUILTIN_DRIVER_WRITE_ELF: i64 = 14
+let V2_BUILTIN_DRIVER_CHMOD: i64 = 15
+let V2_BUILTIN_PRINT_F64: i64 = 16
+let V2_BUILTIN_SQRT_F64: i64 = 17
+let V2_FIRST_USER_FN_ID: i64 = 32
+
+// V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
+let UFN_LOAD_IMM: i64 = 1
+let UFN_BINOP: i64 = 2
+let UFN_LABEL: i64 = 3
+let UFN_JUMP: i64 = 4
+let UFN_BRANCH_FALSE: i64 = 5
+let UFN_RETURN: i64 = 6
+let UFN_CALL: i64 = 7
+let UFN_COPY: i64 = 8
+let UFN_RETURN_STRUCT: i64 = 9
+let UFN_CALL_STRUCT_RESULT: i64 = 10
+let UFN_LOAD_STRING: i64 = 11
+let UFN_TEMP_ADDR: i64 = 12
+let UFN_LOAD_REF_FIELD: i64 = 13
+let UFN_STORE_REF_FIELD: i64 = 14
+let UFN_GLOBAL_LOAD: i64 = 15
+let UFN_GLOBAL_STORE: i64 = 16
+let UFN_LOCAL_LOAD: i64 = 17
+let UFN_LOCAL_STORE: i64 = 18
+let UFN_LOAD_F64_SCALED: i64 = 19
+let UFN_F64_BINOP: i64 = 20
+
+var V2_UFN_OPS: [i64; 2048] = [0; 2048]
+var V2_UFN_DST: [i64; 2048] = [0; 2048]
+var V2_UFN_SRC1: [i64; 2048] = [0; 2048]
+var V2_UFN_SRC2: [i64; 2048] = [0; 2048]
+var V2_UFN_IMM: [i64; 2048] = [0; 2048]
+var V2_UFN_LABEL_ID: [i64; 2048] = [0; 2048]
+var V2_UFN_BINOP_CODE: [i64; 2048] = [0; 2048]
+var V2_UFN_FN_ID: [i64; 2048] = [0; 2048]
+var V2_UFN_RESULT_FCOUNT: [i64; 2048] = [0; 2048]
+var V2_UFN_STR_START: [i64; 2048] = [0; 2048]
+var V2_UFN_STR_END: [i64; 2048] = [0; 2048]
+var V2_UFN_FLOAT_SCALE: [i64; 2048] = [0; 2048]
+var V2_UFN_COUNT: i64 = 0
+var V2_PARSE_UNSUPPORTED: i64 = 0
+var V2_PARSE_UNSUPPORTED_TOKEN: i64 = -1
+var V2_PARSE_UNSUPPORTED_KIND: i64 = -1
+var V2_PARSE_UNSUPPORTED_REASON: i64 = 0
+
+// Token count of the current source file — needed by struct-literal parser
+var V2_TOKEN_COUNT: i64 = 0
+
+// Temporary storage for multi-arg call parsing (up to 8 args)
+var V2_CALL_ARG_REGS: [i64; 8] = [0; 8]
+var V2_CALL_ARG_SIZES: [i64; 8] = [0; 8]
+var V2_CURRENT_PARAM_REGS: [i64; 64] = [0; 64]
+var V2_CURRENT_PARAM_COUNT: i64 = 0
+var V2_REG_IS_F64: [i64; 4096] = [0; 4096]
+
+var DRV_CODE_BYTES: [i8; 262144] = [0; 262144]
+var DRV_CODE_LEN: i64 = 0
+var DRV_RODATA_BYTES: [i8; 65536] = [0; 65536]
+var DRV_RODATA_LEN: i64 = 0
+var DRV_RELOC_OFFSETS: [i64; 4096] = [0; 4096]
+var DRV_RELOC_KIND: [i64; 4096] = [0; 4096]
+var DRV_RELOC_TARGETS: [i64; 4096] = [0; 4096]
+var DRV_RELOC_COUNT: i64 = 0
+var DRV_FN_OFFSETS: [i64; 2048] = [0; 2048]
+var DRV_FN_COUNT: i64 = 0
+var DRV_ENTRY_OFFSET: i64 = 0
+var DRV_LABEL_OFFSETS: [i64; 256] = [0; 256]
+var DRV_LABEL_PATCH_OFFSETS: [i64; 256] = [0; 256]
+var DRV_LABEL_PATCH_IDS: [i64; 256] = [0; 256]
+var DRV_LABEL_PATCH_COUNT: i64 = 0
+var DRV_ELF_LEN: i64 = 0
+var DRV_ELF_BYTES: [i8; 1048576] = [0; 1048576]
+var EP_TOTAL_INSTR: i64 = 0
+var EP_KNOWLEDGE_COUNT: i64 = 0   // count of Knowledge<T> token occurrences in compiled source
+
+// Struct layout table (flat parallel arrays, capacity 16 structs / 128 total fields)
+var STRUCT_NAME_TOKS: [i64; 16] = [0; 16]
+var STRUCT_FIELD_START: [i64; 16] = [0; 16]
+var STRUCT_FIELD_COUNT: [i64; 16] = [0; 16]
+var STRUCT_FLAT_SIZE: [i64; 16] = [0; 16]       // flattened register count per struct
+var STRUCT_COUNT: i64 = 0
+var STRUCT_FIELDS: [i64; 128] = [0; 128]
+var STRUCT_FIELD_TOTAL: i64 = 0
+var STRUCT_FIELD_STRUCT_IDX: [i64; 128] = [0; 128]   // struct type of each field (-1 = scalar)
+var STRUCT_FIELD_FLAT_OFFSET: [i64; 128] = [0; 128]  // flat vreg offset of each field
+var STRUCT_FIELD_IS_F64: [i64; 128] = [0; 128]
+var STRUCT_FIELD_GENERIC_F64: [i64; 128] = [0; 128]
+
+// Enum layout table (capacity 16 enums / 128 total variants)
+var ENUM_NAME_TOKS: [i64; 16] = [0; 16]
+var ENUM_VARIANT_START: [i64; 16] = [0; 16]
+var ENUM_VARIANT_COUNT: [i64; 16] = [0; 16]
+var ENUM_COUNT: i64 = 0
+var ENUM_VARIANTS: [i64; 128] = [0; 128]
+var ENUM_VARIANT_TOTAL: i64 = 0
+
+// User fn return struct index (-1 = scalar return)
+var V2_USER_FN_RETURN_STRUCT_IDX: [i64; 512] = [0; 512]
+var V2_USER_FN_RETURN_IS_F64: [i64; 512] = [0; 512]
+
+// Sideband written by parse_struct_lit/parse_struct_lit_ir so callers can record struct type
+var V2_LAST_STRUCT_IDX: i64 = -1
+
+let V2_GLOBAL_PT_KIND_CODE: i64 = 43
+let V2_GLOBAL_PT_START: i64 = 44
+let V2_GLOBAL_PT_END: i64 = 45
+let V2_GLOBAL_PT_INT_VALUE: i64 = 46
+let V2_GLOBAL_CURSOR_SOURCE: i64 = 47
+let V2_GLOBAL_CURSOR_SOURCE_LEN: i64 = 48
+let V2_GLOBAL_TOKEN_COUNT: i64 = 49
+let V2_GLOBAL_PARSE_UNSUPPORTED_REASON: i64 = 50
+let V2_GLOBAL_CURRENT_PARAM_REGS: i64 = 51
+let V2_GLOBAL_CURRENT_PARAM_COUNT: i64 = 52
+let V2_GLOBAL_DRV_CODE_BYTES: i64 = 53
+let V2_GLOBAL_DRV_CODE_LEN: i64 = 54
+let V2_GLOBAL_DRV_RODATA_BYTES: i64 = 55
+let V2_GLOBAL_DRV_RODATA_LEN: i64 = 56
+let V2_GLOBAL_DRV_RELOC_OFFSETS: i64 = 57
+let V2_GLOBAL_DRV_RELOC_KIND: i64 = 58
+let V2_GLOBAL_DRV_RELOC_TARGETS: i64 = 59
+let V2_GLOBAL_DRV_RELOC_COUNT: i64 = 60
+let V2_GLOBAL_DRV_FN_OFFSETS: i64 = 61
+let V2_GLOBAL_DRV_FN_COUNT: i64 = 62
+let V2_GLOBAL_DRV_ENTRY_OFFSET: i64 = 63
+let V2_GLOBAL_DRV_LABEL_OFFSETS: i64 = 64
+let V2_GLOBAL_DRV_LABEL_PATCH_OFFSETS: i64 = 65
+let V2_GLOBAL_DRV_LABEL_PATCH_IDS: i64 = 66
+let V2_GLOBAL_DRV_LABEL_PATCH_COUNT: i64 = 67
+let V2_GLOBAL_DRV_ELF_BYTES: i64 = 68
+let V2_GLOBAL_DRV_ELF_LEN: i64 = 69
+let V2_GLOBAL_UFN_FLOAT_SCALE: i64 = 74
+let V2_GLOBAL_REG_IS_F64: i64 = 75
+let V2_GLOBAL_STRUCT_FIELD_IS_F64: i64 = 76
+let V2_GLOBAL_USER_FN_RETURN_IS_F64: i64 = 77
+let V2_GLOBAL_STRUCT_FIELD_GENERIC_F64: i64 = 78
+let V2_GLOBAL_EP_TOTAL_INSTR: i64 = 79
+let V2_GLOBAL_EP_KNOWLEDGE_COUNT: i64 = 80
+
+struct ExprParse {
+    ok: i64,
+    reg: i64,
+    next: i64,
 }
 
-fn digit_for_power(rem: i64, power: i64) -> i64 {
-    if rem <= (0 - (9 * power)) { 9 }
-    else if rem <= (0 - (8 * power)) { 8 }
-    else if rem <= (0 - (7 * power)) { 7 }
-    else if rem <= (0 - (6 * power)) { 6 }
-    else if rem <= (0 - (5 * power)) { 5 }
-    else if rem <= (0 - (4 * power)) { 4 }
-    else if rem <= (0 - (3 * power)) { 3 }
-    else if rem <= (0 - (2 * power)) { 2 }
-    else if rem <= (0 - power) { 1 }
-    else { 0 }
+struct V2DriverContext {
+    local_count: i64,
+    next_reg: i64,
+    break_label: i64,
+    continue_label: i64,
 }
 
-fn i64_to_digits_no_div(rem: i64, idx: i64, started: bool) -> string with Mut, Panic {
-    if idx >= 19 { return "" }
-    let power = pow10_idx(idx)
-    let digit = digit_for_power(rem, power)
-    let rem_next = rem + (digit * power)
-    let emit = started || digit > 0 || idx == 18
-    let head = if emit { char_from_i64(digit) } else { "" }
-    head + i64_to_digits_no_div(rem_next, idx + 1, emit)
+fn v2_driver_context_new() -> V2DriverContext with Mut {
+    V2_LOCAL_COUNT = 0
+    V2_NEXT_REG = 0
+    V2_BREAK_LABEL = -1
+    V2_CONTINUE_LABEL = -1
+    V2DriverContext { local_count: 0, next_reg: 0, break_label: -1, continue_label: -1 }
 }
 
-fn int_to_string(n: i64) -> string with Mut, Panic, Div {
-    if n == 0 { return "0" }
-    let negative = n < 0
-    let rem = if negative { n } else { 0 - n }
-    let digits = i64_to_digits_no_div(rem, 0, false)
-    if negative { "-" + digits } else { digits }
-}
-
-fn parse_i64_decimal(raw: string) -> (bool, i64) with Mut, Div {
-    if str_len(raw) == 0 { return (false, 0) }
-    var idx: i64 = 0
-    var negative = false
-    if str_char_at(raw, 0) == "-" {
-        negative = true
-        idx = 1
-        if idx >= str_len(raw) { return (false, 0) }
-    }
-    var value: i64 = 0
-    while idx < str_len(raw) {
-        let ch = str_char_at(raw, idx)
-        if ch < "0" || ch > "9" { return (false, 0) }
-        value = value * 10 + ((ch as i64) - ("0" as i64))
-        idx = idx + 1
-    }
-    if negative { (true, 0 - value) } else { (true, value) }
-}
-
-// Inlined from module_loader.sio to avoid importing 3900 lines.
-fn load_source_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
-    let data = read_file(path)
-    let size = file_size(path)
-    var buf: [i8; 1048576] = [0; 1048576]
+fn reset_locals(ctx: &! V2DriverContext) with Mut {
+    V2_LOCAL_COUNT = 0
+    V2_NEXT_REG = 0
+    V2_BREAK_LABEL = -1
+    V2_CONTINUE_LABEL = -1
     var i: i64 = 0
-    while i < size && i < 1048576 {
-        buf[i as usize] = data[i as usize]
+    while i < 4096 {
+        V2_REG_IS_F64[i as usize] = 0
         i = i + 1
     }
-    let state = lex(buf, size, 0)
-    parse_program_preloaded(state.token_count)
+}
+
+fn mark_reg_f64(reg: i64) with Mut {
+    if reg >= 0 && reg < 4096 {
+        V2_REG_IS_F64[reg as usize] = 1
+    }
+}
+
+fn mark_reg_i64(reg: i64) with Mut {
+    if reg >= 0 && reg < 4096 {
+        V2_REG_IS_F64[reg as usize] = 0
+    }
+}
+
+fn reg_is_f64(reg: i64) -> bool {
+    if reg >= 0 && reg < 4096 {
+        return V2_REG_IS_F64[reg as usize] != 0
+    }
+    false
+}
+
+fn mark_struct_regs(base: i64, sidx: i64) with Mut {
+    if sidx < 0 { return }
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        let abs_fi = start + fi
+        let flat_off = STRUCT_FIELD_FLAT_OFFSET[abs_fi as usize]
+        let child = STRUCT_FIELD_STRUCT_IDX[abs_fi as usize]
+        if child >= 0 {
+            if STRUCT_FIELD_GENERIC_F64[abs_fi as usize] != 0 {
+                mark_struct_scalar_regs_f64(base + flat_off, child)
+            } else {
+                mark_struct_regs(base + flat_off, child)
+            }
+        } else if STRUCT_FIELD_IS_F64[abs_fi as usize] != 0 {
+            mark_reg_f64(base + flat_off)
+        } else {
+            mark_reg_i64(base + flat_off)
+        }
+        fi = fi + 1
+    }
+}
+
+fn mark_struct_scalar_regs_f64(base: i64, sidx: i64) with Mut {
+    if sidx < 0 { return }
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        let abs_fi = start + fi
+        let flat_off = STRUCT_FIELD_FLAT_OFFSET[abs_fi as usize]
+        let child = STRUCT_FIELD_STRUCT_IDX[abs_fi as usize]
+        if child >= 0 {
+            mark_struct_scalar_regs_f64(base + flat_off, child)
+        } else {
+            mark_reg_f64(base + flat_off)
+        }
+        fi = fi + 1
+    }
+}
+
+fn remember_local_tok(ctx: &! V2DriverContext, tok_idx: i64, reg: i64) with Mut, Panic {
+    let idx = V2_LOCAL_COUNT
+    if idx < 64 {
+        V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
+        V2_LOCAL_REGS[idx as usize] = reg
+        V2_LOCAL_STRUCT_IDX[idx as usize] = -1
+        V2_LOCAL_IS_REF[idx as usize] = 0
+        V2_LOCAL_COUNT = idx + 1
+    }
+}
+
+fn remember_struct_local_tok(ctx: &! V2DriverContext, tok_idx: i64, base_reg: i64, sidx: i64) with Mut, Panic {
+    let idx = V2_LOCAL_COUNT
+    if idx < 64 {
+        V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
+        V2_LOCAL_REGS[idx as usize] = base_reg
+        V2_LOCAL_STRUCT_IDX[idx as usize] = sidx
+        V2_LOCAL_IS_REF[idx as usize] = 0
+        V2_LOCAL_COUNT = idx + 1
+    }
+}
+
+fn remember_ref_struct_local_tok(ctx: &! V2DriverContext, tok_idx: i64, reg: i64, sidx: i64) with Mut, Panic {
+    let idx = V2_LOCAL_COUNT
+    if idx < 64 {
+        V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
+        V2_LOCAL_REGS[idx as usize] = reg
+        V2_LOCAL_STRUCT_IDX[idx as usize] = sidx
+        V2_LOCAL_IS_REF[idx as usize] = 1
+        V2_LOCAL_COUNT = idx + 1
+    }
+}
+
+fn lookup_local_struct_idx_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_LOCAL_COUNT {
+        if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
+            return V2_LOCAL_STRUCT_IDX[i as usize]
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn lookup_local_is_ref_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_LOCAL_COUNT {
+        if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
+            return V2_LOCAL_IS_REF[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn toks_ident_eq(a: i64, b: i64) -> bool with Mut, Panic, Div {
+    let a_start = pt_read_start(a)
+    let a_end = pt_read_end(a)
+    let b_start = pt_read_start(b)
+    let b_end = pt_read_end(b)
+    let a_len = a_end - a_start
+    let b_len = b_end - b_start
+    if a_len != b_len { return false }
+    var i: i64 = 0
+    while i < a_len {
+        if CURSOR_SOURCE[(a_start + i) as usize] != CURSOR_SOURCE[(b_start + i) as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn lookup_local_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_LOCAL_COUNT {
+        if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
+            return V2_LOCAL_REGS[i as usize]
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn token_kind(idx: i64) -> i64 with Panic {
+    pt_read_kind_code(idx)
+}
+
+fn token_name(idx: i64) -> Name with Mut, Panic, Div {
+    var n = empty_name()
+    let start = pt_read_start(idx)
+    let end = pt_read_end(idx)
+    var i: i64 = start
+    while i < end && n.len < 128 {
+        n.buf[n.len as usize] = CURSOR_SOURCE[i as usize]
+        n.len = n.len + 1
+        i = i + 1
+    }
+    n
+}
+
+fn token_text_eq(idx: i64, text: string) -> bool with Mut, Panic, Div {
+    let start = pt_read_start(idx)
+    let end = pt_read_end(idx)
+    let len = end - start
+    if len != str_len(text) {
+        return false
+    }
+    var i: i64 = 0
+    while i < len {
+        if CURSOR_SOURCE[(start + i) as usize] != (str_char_at(text, i) as i8) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn token_float_mantissa(idx: i64) -> i64 with Mut, Panic, Div {
+    let start = pt_read_start(idx)
+    let end = pt_read_end(idx)
+    var i: i64 = start
+    var mantissa: i64 = 0
+    while i < end {
+        let ch = CURSOR_SOURCE[i as usize]
+        if ch == 95 as i8 {
+            i = i + 1
+        } else if ch == 46 as i8 {
+            i = i + 1
+        } else if ch == 102 as i8 || ch == 70 as i8 {
+            return mantissa
+        } else if ch >= 48 as i8 && ch <= 57 as i8 {
+            mantissa = (mantissa * 10) + ((ch as i64) - 48)
+            i = i + 1
+        } else {
+            return mantissa
+        }
+    }
+    mantissa
+}
+
+fn token_float_scale(idx: i64) -> i64 with Mut, Panic, Div {
+    let start = pt_read_start(idx)
+    let end = pt_read_end(idx)
+    var i: i64 = start
+    var seen_dot: i64 = 0
+    var scale: i64 = 1
+    while i < end {
+        let ch = CURSOR_SOURCE[i as usize]
+        if ch == 46 as i8 {
+            seen_dot = 1
+        } else if ch == 102 as i8 || ch == 70 as i8 {
+            return scale
+        } else if seen_dot != 0 && ch >= 48 as i8 && ch <= 57 as i8 {
+            scale = scale * 10
+        }
+        i = i + 1
+    }
+    scale
+}
+
+fn token_decimal_digit_count(idx: i64) -> i64 with Mut, Panic, Div {
+    let start = pt_read_start(idx)
+    let end = pt_read_end(idx)
+    var i: i64 = start
+    var count: i64 = 0
+    while i < end {
+        let ch = CURSOR_SOURCE[i as usize]
+        if ch >= 48 as i8 && ch <= 57 as i8 { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+fn decimal_scale_for_digits(digits: i64) -> i64 with Mut {
+    var scale: i64 = 1
+    var i: i64 = 0
+    while i < digits {
+        scale = scale * 10
+        i = i + 1
+    }
+    scale
+}
+
+fn name_eq_text(name: Name, text: string) -> bool with Mut, Panic, Div {
+    let len = str_len(text)
+    if name.len != len {
+        return false
+    }
+    var i: i64 = 0
+    while i < len {
+        if name.buf[i as usize] != (str_char_at(text, i) as i8) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn print_token_text(idx: i64) with IO, Mut, Panic, Div {
+    let start = pt_read_start(idx)
+    let end = pt_read_end(idx)
+    var i: i64 = start
+    while i < end {
+        print_char(CURSOR_SOURCE[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+fn fixed_name_print() -> Name with Mut {
+    var n = empty_name()
+    n.len = 5
+    n.buf[0] = 112 as i8
+    n.buf[1] = 114 as i8
+    n.buf[2] = 105 as i8
+    n.buf[3] = 110 as i8
+    n.buf[4] = 116 as i8
+    return n
+}
+
+fn fixed_name_print_int() -> Name with Mut {
+    var n = empty_name()
+    n.len = 9
+    n.buf[0] = 112 as i8
+    n.buf[1] = 114 as i8
+    n.buf[2] = 105 as i8
+    n.buf[3] = 110 as i8
+    n.buf[4] = 116 as i8
+    n.buf[5] = 95 as i8
+    n.buf[6] = 105 as i8
+    n.buf[7] = 110 as i8
+    n.buf[8] = 116 as i8
+    return n
+}
+
+fn fixed_name_print_char() -> Name with Mut {
+    var n = empty_name()
+    n.len = 10
+    n.buf[0] = 112 as i8
+    n.buf[1] = 114 as i8
+    n.buf[2] = 105 as i8
+    n.buf[3] = 110 as i8
+    n.buf[4] = 116 as i8
+    n.buf[5] = 95 as i8
+    n.buf[6] = 99 as i8
+    n.buf[7] = 104 as i8
+    n.buf[8] = 97 as i8
+    n.buf[9] = 114 as i8
+    return n
+}
+
+fn fixed_name_get_arg_count() -> Name with Mut {
+    var n = empty_name()
+    n.len = 13
+    n.buf[0] = 103 as i8
+    n.buf[1] = 101 as i8
+    n.buf[2] = 116 as i8
+    n.buf[3] = 95 as i8
+    n.buf[4] = 97 as i8
+    n.buf[5] = 114 as i8
+    n.buf[6] = 103 as i8
+    n.buf[7] = 95 as i8
+    n.buf[8] = 99 as i8
+    n.buf[9] = 111 as i8
+    n.buf[10] = 117 as i8
+    n.buf[11] = 110 as i8
+    n.buf[12] = 116 as i8
+    return n
+}
+
+fn fixed_name_arg_count() -> Name with Mut {
+    var n = empty_name()
+    n.len = 9
+    n.buf[0] = 97 as i8
+    n.buf[1] = 114 as i8
+    n.buf[2] = 103 as i8
+    n.buf[3] = 95 as i8
+    n.buf[4] = 99 as i8
+    n.buf[5] = 111 as i8
+    n.buf[6] = 117 as i8
+    n.buf[7] = 110 as i8
+    n.buf[8] = 116 as i8
+    return n
+}
+
+fn fixed_name_get_arg() -> Name with Mut {
+    var n = empty_name()
+    n.len = 7
+    n.buf[0] = 103 as i8
+    n.buf[1] = 101 as i8
+    n.buf[2] = 116 as i8
+    n.buf[3] = 95 as i8
+    n.buf[4] = 97 as i8
+    n.buf[5] = 114 as i8
+    n.buf[6] = 103 as i8
+    return n
+}
+
+fn fixed_name_str_eq() -> Name with Mut {
+    var n = empty_name()
+    n.len = 6
+    n.buf[0] = 115 as i8
+    n.buf[1] = 116 as i8
+    n.buf[2] = 114 as i8
+    n.buf[3] = 95 as i8
+    n.buf[4] = 101 as i8
+    n.buf[5] = 113 as i8
+    return n
+}
+
+fn fixed_name_main() -> Name with Mut {
+    var n = empty_name()
+    n.len = 4
+    n.buf[0] = 109 as i8
+    n.buf[1] = 97 as i8
+    n.buf[2] = 105 as i8
+    n.buf[3] = 110 as i8
+    return n
+}
+
+fn set_func_name_print(func: &! IrFunction) with Mut {
+    var n = fixed_name_print()
+    (*func).name = n
+}
+
+fn set_func_name_print_int(func: &! IrFunction) with Mut {
+    var n = fixed_name_print_int()
+    (*func).name = n
+}
+
+fn set_func_name_print_char(func: &! IrFunction) with Mut {
+    var n = fixed_name_print_char()
+    (*func).name = n
+}
+
+fn set_func_name_get_arg_count(func: &! IrFunction) with Mut {
+    var n = fixed_name_get_arg_count()
+    (*func).name = n
+}
+
+fn set_func_name_get_arg(func: &! IrFunction) with Mut {
+    var n = fixed_name_get_arg()
+    (*func).name = n
+}
+
+fn set_func_name_str_eq(func: &! IrFunction) with Mut {
+    var n = fixed_name_str_eq()
+    (*func).name = n
+}
+
+fn set_func_name_main(func: &! IrFunction) with Mut {
+    var n = fixed_name_main()
+    (*func).name = n
+}
+
+fn driver_global_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
+    if token_text_eq(tok, "V2_LOCAL_TOK_IDX") { return 1 }
+    if token_text_eq(tok, "V2_LOCAL_REGS") { return 2 }
+    if token_text_eq(tok, "V2_LOCAL_STRUCT_IDX") { return 3 }
+    if token_text_eq(tok, "V2_LOCAL_IS_REF") { return 4 }
+    if token_text_eq(tok, "V2_USER_FN_TOKEN_IDX") { return 5 }
+    if token_text_eq(tok, "V2_USER_FN_IDS") { return 6 }
+    if token_text_eq(tok, "V2_USER_FN_COUNT") { return 7 }
+    if token_text_eq(tok, "V2_NEXT_LABEL") { return 8 }
+    if token_text_eq(tok, "V2_UFN_OPS") { return 9 }
+    if token_text_eq(tok, "V2_UFN_DST") { return 10 }
+    if token_text_eq(tok, "V2_UFN_SRC1") { return 11 }
+    if token_text_eq(tok, "V2_UFN_SRC2") { return 12 }
+    if token_text_eq(tok, "V2_UFN_IMM") { return 13 }
+    if token_text_eq(tok, "V2_UFN_LABEL_ID") { return 14 }
+    if token_text_eq(tok, "V2_UFN_BINOP_CODE") { return 15 }
+    if token_text_eq(tok, "V2_UFN_FN_ID") { return 16 }
+    if token_text_eq(tok, "V2_UFN_RESULT_FCOUNT") { return 17 }
+    if token_text_eq(tok, "V2_UFN_STR_START") { return 18 }
+    if token_text_eq(tok, "V2_UFN_STR_END") { return 19 }
+    if token_text_eq(tok, "V2_UFN_COUNT") { return 20 }
+    if token_text_eq(tok, "V2_UFN_FLOAT_SCALE") { return V2_GLOBAL_UFN_FLOAT_SCALE }
+    if token_text_eq(tok, "V2_REG_IS_F64") { return V2_GLOBAL_REG_IS_F64 }
+    if token_text_eq(tok, "V2_PARSE_UNSUPPORTED") { return 21 }
+    if token_text_eq(tok, "V2_PARSE_UNSUPPORTED_TOKEN") { return 22 }
+    if token_text_eq(tok, "V2_PARSE_UNSUPPORTED_KIND") { return 23 }
+    if token_text_eq(tok, "V2_PARSE_UNSUPPORTED_REASON") { return V2_GLOBAL_PARSE_UNSUPPORTED_REASON }
+    if token_text_eq(tok, "V2_CALL_ARG_REGS") { return 24 }
+    if token_text_eq(tok, "V2_CALL_ARG_SIZES") { return 25 }
+    if token_text_eq(tok, "STRUCT_NAME_TOKS") { return 26 }
+    if token_text_eq(tok, "STRUCT_FIELD_START") { return 27 }
+    if token_text_eq(tok, "STRUCT_FIELD_COUNT") { return 28 }
+    if token_text_eq(tok, "STRUCT_FLAT_SIZE") { return 29 }
+    if token_text_eq(tok, "STRUCT_COUNT") { return 30 }
+    if token_text_eq(tok, "STRUCT_FIELDS") { return 31 }
+    if token_text_eq(tok, "STRUCT_FIELD_TOTAL") { return 32 }
+    if token_text_eq(tok, "STRUCT_FIELD_STRUCT_IDX") { return 33 }
+    if token_text_eq(tok, "STRUCT_FIELD_FLAT_OFFSET") { return 34 }
+    if token_text_eq(tok, "STRUCT_FIELD_IS_F64") { return V2_GLOBAL_STRUCT_FIELD_IS_F64 }
+    if token_text_eq(tok, "STRUCT_FIELD_GENERIC_F64") { return V2_GLOBAL_STRUCT_FIELD_GENERIC_F64 }
+    if token_text_eq(tok, "ENUM_NAME_TOKS") { return 35 }
+    if token_text_eq(tok, "ENUM_VARIANT_START") { return 36 }
+    if token_text_eq(tok, "ENUM_VARIANT_COUNT") { return 37 }
+    if token_text_eq(tok, "ENUM_COUNT") { return 38 }
+    if token_text_eq(tok, "ENUM_VARIANTS") { return 39 }
+    if token_text_eq(tok, "ENUM_VARIANT_TOTAL") { return 40 }
+    if token_text_eq(tok, "V2_USER_FN_RETURN_STRUCT_IDX") { return 41 }
+    if token_text_eq(tok, "V2_USER_FN_RETURN_IS_F64") { return V2_GLOBAL_USER_FN_RETURN_IS_F64 }
+    if token_text_eq(tok, "V2_LAST_STRUCT_IDX") { return 42 }
+    if token_text_eq(tok, "PT_KIND_CODE") { return V2_GLOBAL_PT_KIND_CODE }
+    if token_text_eq(tok, "PT_START") { return V2_GLOBAL_PT_START }
+    if token_text_eq(tok, "PT_END") { return V2_GLOBAL_PT_END }
+    if token_text_eq(tok, "PT_INT_VALUE") { return V2_GLOBAL_PT_INT_VALUE }
+    if token_text_eq(tok, "CURSOR_SOURCE") { return V2_GLOBAL_CURSOR_SOURCE }
+    if token_text_eq(tok, "CURSOR_SOURCE_LEN") { return V2_GLOBAL_CURSOR_SOURCE_LEN }
+    if token_text_eq(tok, "V2_TOKEN_COUNT") { return V2_GLOBAL_TOKEN_COUNT }
+    if token_text_eq(tok, "V2_CURRENT_PARAM_REGS") { return V2_GLOBAL_CURRENT_PARAM_REGS }
+    if token_text_eq(tok, "V2_CURRENT_PARAM_COUNT") { return V2_GLOBAL_CURRENT_PARAM_COUNT }
+    if token_text_eq(tok, "DRV_CODE_BYTES") { return V2_GLOBAL_DRV_CODE_BYTES }
+    if token_text_eq(tok, "DRV_CODE_LEN") { return V2_GLOBAL_DRV_CODE_LEN }
+    if token_text_eq(tok, "DRV_RODATA_BYTES") { return V2_GLOBAL_DRV_RODATA_BYTES }
+    if token_text_eq(tok, "DRV_RODATA_LEN") { return V2_GLOBAL_DRV_RODATA_LEN }
+    if token_text_eq(tok, "DRV_RELOC_OFFSETS") { return V2_GLOBAL_DRV_RELOC_OFFSETS }
+    if token_text_eq(tok, "DRV_RELOC_KIND") { return V2_GLOBAL_DRV_RELOC_KIND }
+    if token_text_eq(tok, "DRV_RELOC_TARGETS") { return V2_GLOBAL_DRV_RELOC_TARGETS }
+    if token_text_eq(tok, "DRV_RELOC_COUNT") { return V2_GLOBAL_DRV_RELOC_COUNT }
+    if token_text_eq(tok, "DRV_FN_OFFSETS") { return V2_GLOBAL_DRV_FN_OFFSETS }
+    if token_text_eq(tok, "DRV_FN_COUNT") { return V2_GLOBAL_DRV_FN_COUNT }
+    if token_text_eq(tok, "DRV_ENTRY_OFFSET") { return V2_GLOBAL_DRV_ENTRY_OFFSET }
+    if token_text_eq(tok, "DRV_LABEL_OFFSETS") { return V2_GLOBAL_DRV_LABEL_OFFSETS }
+    if token_text_eq(tok, "DRV_LABEL_PATCH_OFFSETS") { return V2_GLOBAL_DRV_LABEL_PATCH_OFFSETS }
+    if token_text_eq(tok, "DRV_LABEL_PATCH_IDS") { return V2_GLOBAL_DRV_LABEL_PATCH_IDS }
+    if token_text_eq(tok, "DRV_LABEL_PATCH_COUNT") { return V2_GLOBAL_DRV_LABEL_PATCH_COUNT }
+    if token_text_eq(tok, "DRV_ELF_BYTES") { return V2_GLOBAL_DRV_ELF_BYTES }
+    if token_text_eq(tok, "DRV_ELF_LEN") { return V2_GLOBAL_DRV_ELF_LEN }
+    if token_text_eq(tok, "EP_TOTAL_INSTR") { return V2_GLOBAL_EP_TOTAL_INSTR }
+    if token_text_eq(tok, "EP_KNOWLEDGE_COUNT") { return V2_GLOBAL_EP_KNOWLEDGE_COUNT }
+    if token_text_eq(tok, "V2_LOCAL_COUNT") { return 70 }
+    if token_text_eq(tok, "V2_NEXT_REG") { return 71 }
+    if token_text_eq(tok, "V2_BREAK_LABEL") { return 72 }
+    if token_text_eq(tok, "V2_CONTINUE_LABEL") { return 73 }
+    -1
+}
+
+fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
+    if token_text_eq(tok, "TK_EOF") { return 0 }
+    if token_text_eq(tok, "TK_FN") { return 7 }
+    if token_text_eq(tok, "TK_LET") { return 8 }
+    if token_text_eq(tok, "TK_VAR") { return 9 }
+    if token_text_eq(tok, "TK_IF") { return 20 }
+    if token_text_eq(tok, "TK_ELSE") { return 21 }
+    if token_text_eq(tok, "TK_MATCH") { return 22 }
+    if token_text_eq(tok, "TK_WHILE") { return 24 }
+    if token_text_eq(tok, "TK_RETURN") { return 28 }
+    if token_text_eq(tok, "TK_AS") { return 30 }
+    if token_text_eq(tok, "TK_TRUE") { return 35 }
+    if token_text_eq(tok, "TK_FALSE") { return 36 }
+    if token_text_eq(tok, "TK_NEWLINE") { return 2 }
+    if token_text_eq(tok, "TK_IDENT") { return 123 }
+    if token_text_eq(tok, "TK_INT") { return 124 }
+    if token_text_eq(tok, "TK_FLOAT") { return 125 }
+    if token_text_eq(tok, "TK_STRING") { return 126 }
+    if token_text_eq(tok, "TK_PLUS") { return 132 }
+    if token_text_eq(tok, "TK_MINUS") { return 133 }
+    if token_text_eq(tok, "TK_STAR") { return 134 }
+    if token_text_eq(tok, "TK_SLASH") { return 135 }
+    if token_text_eq(tok, "TK_EQ") { return 137 }
+    if token_text_eq(tok, "TK_LT") { return 138 }
+    if token_text_eq(tok, "TK_GT") { return 139 }
+    if token_text_eq(tok, "TK_BANG") { return 140 }
+    if token_text_eq(tok, "TK_EQEQ") { return 146 }
+    if token_text_eq(tok, "TK_BANGEQ") { return 147 }
+    if token_text_eq(tok, "TK_LE") { return 148 }
+    if token_text_eq(tok, "TK_GE") { return 149 }
+    if token_text_eq(tok, "TK_ANDAND") { return 150 }
+    if token_text_eq(tok, "TK_OROR") { return 151 }
+    if token_text_eq(tok, "TK_ARROW") { return 158 }
+    if token_text_eq(tok, "TK_FATARROW") { return 159 }
+    if token_text_eq(tok, "TK_COLONCOLON") { return 162 }
+    if token_text_eq(tok, "TK_AMPBANG") { return 163 }
+    if token_text_eq(tok, "TK_LPAREN") { return 174 }
+    if token_text_eq(tok, "TK_RPAREN") { return 175 }
+    if token_text_eq(tok, "TK_LBRACE") { return 176 }
+    if token_text_eq(tok, "TK_RBRACE") { return 177 }
+    if token_text_eq(tok, "TK_LBRACKET") { return 178 }
+    if token_text_eq(tok, "TK_RBRACKET") { return 179 }
+    if token_text_eq(tok, "TK_SEMI") { return 180 }
+    if token_text_eq(tok, "TK_COLON") { return 181 }
+    if token_text_eq(tok, "TK_COMMA") { return 182 }
+    if token_text_eq(tok, "TK_DOT") { return 183 }
+    if token_text_eq(tok, "TK_USE") { return 5 }
+    if token_text_eq(tok, "TK_STRUCT") { return 13 }
+    if token_text_eq(tok, "TK_ENUM") { return 14 }
+    if token_text_eq(tok, "TK_UNDERSCORE") { return 186 }
+
+    if token_text_eq(tok, "V2_BUILTIN_PRINT") { return 0 }
+    if token_text_eq(tok, "V2_BUILTIN_PRINT_INT") { return 1 }
+    if token_text_eq(tok, "V2_BUILTIN_PRINT_CHAR") { return 2 }
+    if token_text_eq(tok, "V2_BUILTIN_ARG_COUNT") { return 3 }
+    if token_text_eq(tok, "V2_BUILTIN_GET_ARG") { return 4 }
+    if token_text_eq(tok, "V2_BUILTIN_STR_EQ") { return 5 }
+    if token_text_eq(tok, "V2_BUILTIN_STR_LEN") { return 6 }
+    if token_text_eq(tok, "V2_BUILTIN_STR_CHAR_AT") { return 7 }
+    if token_text_eq(tok, "V2_BUILTIN_PT_READ_KIND_CODE") { return 8 }
+    if token_text_eq(tok, "V2_BUILTIN_PT_READ_START") { return 9 }
+    if token_text_eq(tok, "V2_BUILTIN_PT_READ_END") { return 10 }
+    if token_text_eq(tok, "V2_BUILTIN_PT_READ_INT_VALUE") { return 11 }
+    if token_text_eq(tok, "V2_BUILTIN_EMPTY_NAME") { return 12 }
+    if token_text_eq(tok, "V2_BUILTIN_DRIVER_READ_FILE_TO_GLOBALS") { return 13 }
+    if token_text_eq(tok, "V2_BUILTIN_DRIVER_WRITE_ELF") { return 14 }
+    if token_text_eq(tok, "V2_BUILTIN_DRIVER_CHMOD") { return 15 }
+    if token_text_eq(tok, "V2_BUILTIN_PRINT_F64") { return 16 }
+    if token_text_eq(tok, "V2_BUILTIN_SQRT_F64") { return 17 }
+    if token_text_eq(tok, "V2_FIRST_USER_FN_ID") { return 32 }
+
+    if token_text_eq(tok, "UFN_LOAD_IMM") { return 1 }
+    if token_text_eq(tok, "UFN_BINOP") { return 2 }
+    if token_text_eq(tok, "UFN_LABEL") { return 3 }
+    if token_text_eq(tok, "UFN_JUMP") { return 4 }
+    if token_text_eq(tok, "UFN_BRANCH_FALSE") { return 5 }
+    if token_text_eq(tok, "UFN_RETURN") { return 6 }
+    if token_text_eq(tok, "UFN_CALL") { return 7 }
+    if token_text_eq(tok, "UFN_COPY") { return 8 }
+    if token_text_eq(tok, "UFN_RETURN_STRUCT") { return 9 }
+    if token_text_eq(tok, "UFN_CALL_STRUCT_RESULT") { return 10 }
+    if token_text_eq(tok, "UFN_LOAD_STRING") { return 11 }
+    if token_text_eq(tok, "UFN_TEMP_ADDR") { return 12 }
+    if token_text_eq(tok, "UFN_LOAD_REF_FIELD") { return 13 }
+    if token_text_eq(tok, "UFN_STORE_REF_FIELD") { return 14 }
+    if token_text_eq(tok, "UFN_GLOBAL_LOAD") { return 15 }
+    if token_text_eq(tok, "UFN_GLOBAL_STORE") { return 16 }
+    if token_text_eq(tok, "UFN_LOCAL_LOAD") { return 17 }
+    if token_text_eq(tok, "UFN_LOCAL_STORE") { return 18 }
+    if token_text_eq(tok, "UFN_LOAD_F64_SCALED") { return 19 }
+    if token_text_eq(tok, "UFN_F64_BINOP") { return 20 }
+
+    if token_text_eq(tok, "V2_GLOBAL_PT_KIND_CODE") { return 43 }
+    if token_text_eq(tok, "V2_GLOBAL_PT_START") { return 44 }
+    if token_text_eq(tok, "V2_GLOBAL_PT_END") { return 45 }
+    if token_text_eq(tok, "V2_GLOBAL_PT_INT_VALUE") { return 46 }
+    if token_text_eq(tok, "V2_GLOBAL_CURSOR_SOURCE") { return 47 }
+    if token_text_eq(tok, "V2_GLOBAL_CURSOR_SOURCE_LEN") { return 48 }
+    if token_text_eq(tok, "V2_GLOBAL_TOKEN_COUNT") { return 49 }
+    if token_text_eq(tok, "V2_GLOBAL_PARSE_UNSUPPORTED_REASON") { return 50 }
+    if token_text_eq(tok, "V2_GLOBAL_CURRENT_PARAM_REGS") { return 51 }
+    if token_text_eq(tok, "V2_GLOBAL_CURRENT_PARAM_COUNT") { return 52 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_CODE_BYTES") { return 53 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_CODE_LEN") { return 54 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_RODATA_BYTES") { return 55 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_RODATA_LEN") { return 56 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_RELOC_OFFSETS") { return 57 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_RELOC_KIND") { return 58 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_RELOC_TARGETS") { return 59 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_RELOC_COUNT") { return 60 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_FN_OFFSETS") { return 61 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_FN_COUNT") { return 62 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_ENTRY_OFFSET") { return 63 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_LABEL_OFFSETS") { return 64 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_LABEL_PATCH_OFFSETS") { return 65 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_LABEL_PATCH_IDS") { return 66 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_LABEL_PATCH_COUNT") { return 67 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_ELF_BYTES") { return 68 }
+    if token_text_eq(tok, "V2_GLOBAL_DRV_ELF_LEN") { return 69 }
+    if token_text_eq(tok, "V2_GLOBAL_UFN_FLOAT_SCALE") { return 74 }
+    if token_text_eq(tok, "V2_GLOBAL_REG_IS_F64") { return 75 }
+    if token_text_eq(tok, "V2_GLOBAL_STRUCT_FIELD_IS_F64") { return 76 }
+    if token_text_eq(tok, "V2_GLOBAL_USER_FN_RETURN_IS_F64") { return 77 }
+    if token_text_eq(tok, "V2_GLOBAL_STRUCT_FIELD_GENERIC_F64") { return 78 }
+    if token_text_eq(tok, "V2_GLOBAL_EP_TOTAL_INSTR") { return 79 }
+    if token_text_eq(tok, "V2_GLOBAL_EP_KNOWLEDGE_COUNT") { return 80 }
+    -999999999
+}
+
+fn skip_index_cast_end(pos: i64) -> i64 with Panic {
+    if token_kind(pos) == TK_AS {
+        return pos + 2
+    }
+    pos
+}
+
+fn token_string_name(idx: i64) -> Name with Mut, Panic, Div {
+    var n = empty_name()
+    var i = pt_read_start(idx) + 1
+    let end = pt_read_end(idx) - 1
+    while i < end && n.len < 128 {
+        let ch = CURSOR_SOURCE[i as usize]
+        if ch == 92 as i8 && i + 1 < end {
+            let esc = CURSOR_SOURCE[(i + 1) as usize]
+            if esc == 110 as i8 { n.buf[n.len as usize] = 10 as i8 }
+            else if esc == 116 as i8 { n.buf[n.len as usize] = 9 as i8 }
+            else if esc == 114 as i8 { n.buf[n.len as usize] = 13 as i8 }
+            else if esc == 34 as i8 { n.buf[n.len as usize] = 34 as i8 }
+            else if esc == 92 as i8 { n.buf[n.len as usize] = 92 as i8 }
+            else { n.buf[n.len as usize] = esc }
+            n.len = n.len + 1
+            i = i + 2
+        } else {
+            n.buf[n.len as usize] = ch
+            n.len = n.len + 1
+            i = i + 1
+        }
+    }
+    n
+}
+
+fn alloc_reg(ctx: &! V2DriverContext) -> i64 with Mut {
+    let r = V2_NEXT_REG
+    V2_NEXT_REG = r + 1
+    r
+}
+
+fn alloc_label() -> i64 with Mut {
+    let l = V2_NEXT_LABEL
+    V2_NEXT_LABEL = l + 1
+    l
+}
+
+fn reset_user_fn_label_state() with Mut {
+    V2_NEXT_LABEL = 0
+}
+
+fn reset_parse_unsupported() with Mut {
+    V2_PARSE_UNSUPPORTED = 0
+    V2_PARSE_UNSUPPORTED_TOKEN = -1
+    V2_PARSE_UNSUPPORTED_KIND = -1
+    V2_PARSE_UNSUPPORTED_REASON = 0
+}
+
+fn mark_parse_unsupported(pos: i64) with Mut, Panic {
+    if V2_PARSE_UNSUPPORTED == 0 {
+        V2_PARSE_UNSUPPORTED = 1
+        V2_PARSE_UNSUPPORTED_TOKEN = pos
+        V2_PARSE_UNSUPPORTED_KIND = token_kind(pos)
+    }
+}
+
+fn mark_parse_unsupported_call(pos: i64) with Mut, Panic {
+    if V2_PARSE_UNSUPPORTED == 0 {
+        V2_PARSE_UNSUPPORTED_REASON = 1
+        mark_parse_unsupported(pos)
+    }
+}
+
+fn register_user_fn(token_idx: i64, fn_id: i64) with Mut, Panic {
+    let idx = V2_USER_FN_COUNT
+    if idx < 512 {
+        V2_USER_FN_TOKEN_IDX[idx as usize] = token_idx
+        V2_USER_FN_IDS[idx as usize] = fn_id
+        V2_USER_FN_COUNT = idx + 1
+    }
+}
+
+fn lookup_user_fn_id(name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_USER_FN_COUNT {
+        let tok = V2_USER_FN_TOKEN_IDX[i as usize]
+        if name_eq(token_name(tok), name) {
+            return V2_USER_FN_IDS[i as usize]
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn lookup_user_fn_id_tok(name_tok: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_USER_FN_COUNT {
+        let tok = V2_USER_FN_TOKEN_IDX[i as usize]
+        if toks_ident_eq(tok, name_tok) {
+            return V2_USER_FN_IDS[i as usize]
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn user_fn_name_at(idx: i64) -> Name with Mut, Panic, Div {
+    token_name(V2_USER_FN_TOKEN_IDX[idx as usize])
+}
+
+fn skip_trivia(pos: i64, close: i64) -> i64 with Mut, Panic {
+    var p = pos
+    while p < close {
+        let k = token_kind(p)
+        if k == TK_NEWLINE || k == TK_SEMI { p = p + 1 }
+        else { break }
+    }
+    p
+}
+
+// ============================================================
+// Struct layout pre-scanner
+// ============================================================
+
+fn find_ident_token_text(token_count: i64, text: string) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < token_count {
+        if token_kind(i) == TK_IDENT && token_text_eq(i, text) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn find_name_struct_idx() -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < STRUCT_COUNT {
+        if token_text_eq(STRUCT_NAME_TOKS[i as usize], "Name") {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn register_builtin_name_struct(token_count: i64) with Mut, Panic, Div {
+    if find_name_struct_idx() >= 0 { return }
+    let name_tok = find_ident_token_text(token_count, "Name")
+    let buf_tok = find_ident_token_text(token_count, "buf")
+    let len_tok = find_ident_token_text(token_count, "len")
+    if name_tok < 0 || buf_tok < 0 || len_tok < 0 { return }
+    if STRUCT_COUNT >= 16 || STRUCT_FIELD_TOTAL + 2 >= 128 { return }
+    let sidx = STRUCT_COUNT
+    let fstart = STRUCT_FIELD_TOTAL
+    STRUCT_NAME_TOKS[sidx as usize] = name_tok
+    STRUCT_FIELD_START[sidx as usize] = fstart
+    STRUCT_FIELD_COUNT[sidx as usize] = 2
+    STRUCT_FLAT_SIZE[sidx as usize] = 129
+    STRUCT_FIELDS[fstart as usize] = buf_tok
+    STRUCT_FIELD_STRUCT_IDX[fstart as usize] = -1
+    STRUCT_FIELD_FLAT_OFFSET[fstart as usize] = 0
+    STRUCT_FIELDS[(fstart + 1) as usize] = len_tok
+    STRUCT_FIELD_STRUCT_IDX[(fstart + 1) as usize] = -1
+    STRUCT_FIELD_FLAT_OFFSET[(fstart + 1) as usize] = 128
+    STRUCT_FIELD_TOTAL = fstart + 2
+    STRUCT_COUNT = sidx + 1
+}
+
+fn scan_struct_decls(token_count: i64) with Mut, Panic, Div {
+    STRUCT_COUNT = 0
+    STRUCT_FIELD_TOTAL = 0
+    var i: i64 = 0
+    while i + 1 < token_count {
+        if token_kind(i) == TK_STRUCT && token_kind(i + 1) == TK_IDENT {
+            let sidx = STRUCT_COUNT
+            if sidx < 16 {
+                STRUCT_NAME_TOKS[sidx as usize] = i + 1
+                STRUCT_FIELD_START[sidx as usize] = STRUCT_FIELD_TOTAL
+                STRUCT_FIELD_COUNT[sidx as usize] = 0
+                STRUCT_COUNT = sidx + 1
+                var j = i + 2
+                while j < token_count && token_kind(j) != TK_LBRACE { j = j + 1 }
+                j = j + 1
+                while j < token_count && token_kind(j) != TK_RBRACE {
+                    let kj = token_kind(j)
+                    if kj == TK_IDENT && STRUCT_FIELD_TOTAL < 128 {
+                        STRUCT_FIELDS[STRUCT_FIELD_TOTAL as usize] = j
+                        STRUCT_FIELD_TOTAL = STRUCT_FIELD_TOTAL + 1
+                        STRUCT_FIELD_COUNT[sidx as usize] = STRUCT_FIELD_COUNT[sidx as usize] + 1
+                        j = j + 1
+                        while j < token_count && token_kind(j) != TK_COMMA && token_kind(j) != TK_RBRACE { j = j + 1 }
+                        if j < token_count && token_kind(j) == TK_COMMA { j = j + 1 }
+                    } else if kj == TK_NEWLINE || kj == TK_SEMI {
+                        j = j + 1
+                    } else {
+                        j = j + 1
+                    }
+                }
+                i = j + 1
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    scan_struct_field_types(token_count)
+    compute_struct_flat_sizes()
+    register_builtin_name_struct(token_count)
+}
+
+// Second pass: determine each field's type (struct or scalar) and flat offsets
+fn scan_struct_field_types(token_count: i64) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < STRUCT_FIELD_TOTAL {
+        let name_tok = STRUCT_FIELDS[fi as usize]
+        var type_sidx: i64 = -1
+        STRUCT_FIELD_IS_F64[fi as usize] = 0
+        STRUCT_FIELD_GENERIC_F64[fi as usize] = 0
+        if name_tok + 2 < token_count {
+            if token_kind(name_tok + 1) == TK_COLON && token_kind(name_tok + 2) == TK_IDENT {
+                type_sidx = find_struct_idx_tok(name_tok + 2)
+                if token_text_eq(name_tok + 2, "f64") {
+                    STRUCT_FIELD_IS_F64[fi as usize] = 1
+                }
+                if name_tok + 5 < token_count && token_kind(name_tok + 3) == TK_LT && token_kind(name_tok + 4) == TK_IDENT && token_kind(name_tok + 5) == TK_GT && token_text_eq(name_tok + 4, "f64") {
+                    STRUCT_FIELD_GENERIC_F64[fi as usize] = 1
+                }
+            }
+        }
+        STRUCT_FIELD_STRUCT_IDX[fi as usize] = type_sidx
+        fi = fi + 1
+    }
+}
+
+// Compute flattened register counts and offsets (iterate to handle forward refs)
+fn compute_struct_flat_sizes() with Mut {
+    var si: i64 = 0
+    while si < STRUCT_COUNT {
+        STRUCT_FLAT_SIZE[si as usize] = STRUCT_FIELD_COUNT[si as usize]
+        si = si + 1
+    }
+    var iter: i64 = 0
+    while iter < STRUCT_COUNT {
+        si = 0
+        while si < STRUCT_COUNT {
+            let start = STRUCT_FIELD_START[si as usize]
+            let count = STRUCT_FIELD_COUNT[si as usize]
+            var flat: i64 = 0
+            var fi: i64 = 0
+            while fi < count {
+                let abs_fi = start + fi
+                STRUCT_FIELD_FLAT_OFFSET[abs_fi as usize] = flat
+                let fsidx = STRUCT_FIELD_STRUCT_IDX[abs_fi as usize]
+                if fsidx >= 0 {
+                    flat = flat + STRUCT_FLAT_SIZE[fsidx as usize]
+                } else {
+                    flat = flat + 1
+                }
+                fi = fi + 1
+            }
+            STRUCT_FLAT_SIZE[si as usize] = flat
+            si = si + 1
+        }
+        iter = iter + 1
+    }
+}
+
+// Enum pre-scanner
+fn scan_enum_decls(token_count: i64) with Mut, Panic {
+    ENUM_COUNT = 0
+    ENUM_VARIANT_TOTAL = 0
+    var i: i64 = 0
+    while i + 1 < token_count {
+        if token_kind(i) == TK_ENUM && token_kind(i + 1) == TK_IDENT {
+            let eidx = ENUM_COUNT
+            if eidx < 16 {
+                ENUM_NAME_TOKS[eidx as usize] = i + 1
+                ENUM_VARIANT_START[eidx as usize] = ENUM_VARIANT_TOTAL
+                ENUM_VARIANT_COUNT[eidx as usize] = 0
+                ENUM_COUNT = eidx + 1
+                var j = i + 2
+                while j < token_count && token_kind(j) != TK_LBRACE { j = j + 1 }
+                j = j + 1
+                while j < token_count && token_kind(j) != TK_RBRACE {
+                    let kj = token_kind(j)
+                    if kj == TK_IDENT && ENUM_VARIANT_TOTAL < 128 {
+                        ENUM_VARIANTS[ENUM_VARIANT_TOTAL as usize] = j
+                        ENUM_VARIANT_TOTAL = ENUM_VARIANT_TOTAL + 1
+                        ENUM_VARIANT_COUNT[eidx as usize] = ENUM_VARIANT_COUNT[eidx as usize] + 1
+                        j = j + 1
+                        while j < token_count && token_kind(j) != TK_COMMA && token_kind(j) != TK_RBRACE { j = j + 1 }
+                        if j < token_count && token_kind(j) == TK_COMMA { j = j + 1 }
+                    } else if kj == TK_NEWLINE || kj == TK_SEMI { j = j + 1
+                    } else { j = j + 1 }
+                }
+                i = j + 1
+            } else { i = i + 1 }
+        } else { i = i + 1 }
+    }
+}
+
+fn find_enum_idx_tok(name_tok: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ENUM_COUNT {
+        if toks_ident_eq(ENUM_NAME_TOKS[i as usize], name_tok) { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn find_enum_variant_value(eidx: i64, variant_tok: i64) -> i64 with Mut, Panic, Div {
+    let start = ENUM_VARIANT_START[eidx as usize]
+    let count = ENUM_VARIANT_COUNT[eidx as usize]
+    var vi: i64 = 0
+    while vi < count {
+        if toks_ident_eq(ENUM_VARIANTS[(start + vi) as usize], variant_tok) { return vi }
+        vi = vi + 1
+    }
+    -1
+}
+
+fn lookup_user_fn_return_struct_idx(fn_id: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < V2_USER_FN_COUNT {
+        if V2_USER_FN_IDS[i as usize] == fn_id {
+            return V2_USER_FN_RETURN_STRUCT_IDX[i as usize]
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn lookup_user_fn_return_is_f64(fn_id: i64) -> bool with Mut {
+    var i: i64 = 0
+    while i < V2_USER_FN_COUNT {
+        if V2_USER_FN_IDS[i as usize] == fn_id {
+            return V2_USER_FN_RETURN_IS_F64[i as usize] != 0
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lookup_user_fn_returns_value(fn_id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_USER_FN_COUNT {
+        if V2_USER_FN_IDS[i as usize] == fn_id {
+            let name_tok = V2_USER_FN_TOKEN_IDX[i as usize]
+            var j = name_tok + 1
+            while j < V2_TOKEN_COUNT && token_kind(j) != TK_LBRACE && token_kind(j) != TK_FN {
+                if token_kind(j) == TK_ARROW { return true }
+                j = j + 1
+            }
+            return false
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn builtin_fn_returns_value(fn_id: i64) -> bool {
+    if fn_id == V2_BUILTIN_PRINT { return false }
+    if fn_id == V2_BUILTIN_PRINT_INT { return false }
+    if fn_id == V2_BUILTIN_PRINT_CHAR { return false }
+    if fn_id == V2_BUILTIN_PRINT_F64 { return false }
+    true
+}
+
+fn call_target_returns_value_tok(name_tok: i64) -> bool with Mut, Panic, Div {
+    var fn_id = builtin_fn_id_tok(name_tok)
+    if fn_id >= 0 { return builtin_fn_returns_value(fn_id) }
+    fn_id = lookup_user_fn_id_tok(name_tok)
+    if fn_id >= 0 { return lookup_user_fn_returns_value(fn_id) }
+    false
+}
+
+fn find_struct_idx_tok(name_tok: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < STRUCT_COUNT {
+        if toks_ident_eq(STRUCT_NAME_TOKS[i as usize], name_tok) { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn struct_field_offset_tok(sidx: i64, field_tok: i64) -> i64 with Mut, Panic, Div {
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        if toks_ident_eq(STRUCT_FIELDS[(start + fi) as usize], field_tok) {
+            return STRUCT_FIELD_FLAT_OFFSET[(start + fi) as usize]
+        }
+        fi = fi + 1
+    }
+    -1
+}
+
+// Returns the struct sidx of a field at positional index fi within struct sidx (-1 if scalar)
+fn struct_field_type_at(sidx: i64, flat_off: i64) -> i64 with Mut {
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        if STRUCT_FIELD_FLAT_OFFSET[(start + fi) as usize] == flat_off {
+            return STRUCT_FIELD_STRUCT_IDX[(start + fi) as usize]
+        }
+        fi = fi + 1
+    }
+    -1
+}
+
+fn struct_field_is_f64_at(sidx: i64, flat_off: i64) -> bool with Mut {
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        if STRUCT_FIELD_FLAT_OFFSET[(start + fi) as usize] == flat_off {
+            return STRUCT_FIELD_IS_F64[(start + fi) as usize] != 0
+        }
+        fi = fi + 1
+    }
+    false
+}
+
+fn struct_field_generic_f64_at(sidx: i64, flat_off: i64) -> bool with Mut {
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        if STRUCT_FIELD_FLAT_OFFSET[(start + fi) as usize] == flat_off {
+            return STRUCT_FIELD_GENERIC_F64[(start + fi) as usize] != 0
+        }
+        fi = fi + 1
+    }
+    false
+}
+
+fn is_cmp_op(k: i64) -> bool {
+    k == TK_LT || k == TK_GT || k == TK_LE || k == TK_GE || k == TK_EQEQ || k == TK_BANGEQ
+}
+
+fn is_arith_op(k: i64) -> bool {
+    k == TK_PLUS || k == TK_MINUS || k == TK_STAR || k == TK_SLASH
+}
+
+fn binary_op_from_cmp_kind(kind: i64) -> BinaryOp {
+    if kind == TK_LT { return BinaryOp::OpLt }
+    if kind == TK_GT { return BinaryOp::OpGt }
+    if kind == TK_LE { return BinaryOp::OpLe }
+    if kind == TK_GE { return BinaryOp::OpGe }
+    if kind == TK_EQEQ { return BinaryOp::OpEq }
+    BinaryOp::OpNe
+}
+
+fn emit_instr(func: &! IrFunction, instr: IrInstr) with Mut, Panic {
+    let idx = (*func).instr_count
+    if idx >= 0 && idx < 128 {
+        (*func).instrs[idx as usize] = instr
+        (*func).instr_count = idx + 1
+    }
+}
+
+// op_kind → binop code for arith (1=add,2=sub,3=mul,4=div)
+fn arith_op_to_code(k: i64) -> i64 {
+    if k == TK_PLUS { return 1 }
+    if k == TK_MINUS { return 2 }
+    if k == TK_STAR { return 3 }
+    if k == TK_SLASH { return 4 }
+    1
+}
+
+// op_kind → binop code for cmp (5=eq,6=ne,7=lt,8=le,9=gt,10=ge)
+fn cmp_op_to_code(k: i64) -> i64 {
+    if k == TK_EQEQ { return 5 }
+    if k == TK_BANGEQ { return 6 }
+    if k == TK_LT { return 7 }
+    if k == TK_LE { return 8 }
+    if k == TK_GT { return 9 }
+    if k == TK_GE { return 10 }
+    5
+}
+
+fn ufn_record_load_imm(dst: i64, value: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_LOAD_IMM
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_IMM[idx as usize] = value
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_load_string(dst: i64, token_idx: i64) with Mut, Panic {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_LOAD_STRING
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_STR_START[idx as usize] = pt_read_start(token_idx)
+        V2_UFN_STR_END[idx as usize] = pt_read_end(token_idx)
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_temp_addr(dst: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_TEMP_ADDR
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = src
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_load_ref_field(dst: i64, base_ref: i64, field_offset: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_LOAD_REF_FIELD
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = base_ref
+        V2_UFN_IMM[idx as usize] = field_offset
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_store_ref_field(base_ref: i64, field_offset: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_STORE_REF_FIELD
+        V2_UFN_SRC1[idx as usize] = base_ref
+        V2_UFN_SRC2[idx as usize] = src
+        V2_UFN_IMM[idx as usize] = field_offset
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_global_load(dst: i64, global_id: i64, index_reg: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_GLOBAL_LOAD
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = index_reg
+        V2_UFN_IMM[idx as usize] = global_id
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_global_store(global_id: i64, index_reg: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_GLOBAL_STORE
+        V2_UFN_SRC1[idx as usize] = index_reg
+        V2_UFN_SRC2[idx as usize] = src
+        V2_UFN_IMM[idx as usize] = global_id
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_local_load(dst: i64, base_reg: i64, idx_reg: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_LOCAL_LOAD
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = base_reg
+        V2_UFN_SRC2[idx as usize] = idx_reg
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_local_store(base_reg: i64, idx_reg: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_LOCAL_STORE
+        V2_UFN_SRC1[idx as usize] = base_reg
+        V2_UFN_SRC2[idx as usize] = idx_reg
+        V2_UFN_DST[idx as usize] = src
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_binop(dst: i64, src1: i64, binop_code: i64, src2: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_BINOP
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = src1
+        V2_UFN_SRC2[idx as usize] = src2
+        V2_UFN_BINOP_CODE[idx as usize] = binop_code
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_load_f64_scaled(dst: i64, mantissa: i64, scale: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_LOAD_F64_SCALED
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_IMM[idx as usize] = mantissa
+        V2_UFN_FLOAT_SCALE[idx as usize] = scale
+        V2_UFN_COUNT = idx + 1
+        mark_reg_f64(dst)
+    }
+}
+
+fn ufn_record_f64_binop(dst: i64, src1: i64, binop_code: i64, src2: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_F64_BINOP
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = src1
+        V2_UFN_SRC2[idx as usize] = src2
+        V2_UFN_BINOP_CODE[idx as usize] = binop_code
+        V2_UFN_COUNT = idx + 1
+        if binop_code >= 1 && binop_code <= 4 {
+            mark_reg_f64(dst)
+        } else {
+            mark_reg_i64(dst)
+        }
+    }
+}
+
+fn ufn_record_label(label_id: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_LABEL
+        V2_UFN_LABEL_ID[idx as usize] = label_id
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_jump(label_id: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_JUMP
+        V2_UFN_LABEL_ID[idx as usize] = label_id
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_branch_false(cond_reg: i64, label_id: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_BRANCH_FALSE
+        V2_UFN_SRC1[idx as usize] = cond_reg
+        V2_UFN_LABEL_ID[idx as usize] = label_id
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_return(src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_RETURN
+        V2_UFN_SRC1[idx as usize] = src
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_call(dst: i64, fn_id_val: i64, arg0: i64, argc: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_CALL
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_FN_ID[idx as usize] = fn_id_val
+        V2_UFN_SRC1[idx as usize] = arg0
+        V2_UFN_IMM[idx as usize] = argc
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_copy(dst: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_COPY
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = src
+        V2_UFN_COUNT = idx + 1
+        if reg_is_f64(src) { mark_reg_f64(dst) } else { mark_reg_i64(dst) }
+    }
+}
+
+fn ufn_record_return_struct(base_reg: i64, fcount: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_RETURN_STRUCT
+        V2_UFN_SRC1[idx as usize] = base_reg
+        V2_UFN_IMM[idx as usize] = fcount
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_call_struct_result(dst: i64, fn_id: i64, arg0: i64, argc: i64, result_fcount: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_CALL_STRUCT_RESULT
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_FN_ID[idx as usize] = fn_id
+        V2_UFN_SRC1[idx as usize] = arg0
+        V2_UFN_IMM[idx as usize] = argc
+        V2_UFN_RESULT_FCOUNT[idx as usize] = result_fcount
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
+    if name_eq_text(name, "print") { return V2_BUILTIN_PRINT }
+    if name_eq_text(name, "print_int") { return V2_BUILTIN_PRINT_INT }
+    if name_eq_text(name, "print_char") { return V2_BUILTIN_PRINT_CHAR }
+    if name_eq_text(name, "print_f64") { return V2_BUILTIN_PRINT_F64 }
+    if name_eq_text(name, "sqrt_f64") { return V2_BUILTIN_SQRT_F64 }
+    if name_eq_text(name, "arg_count") { return V2_BUILTIN_ARG_COUNT }
+    if name_eq_text(name, "get_arg_count") { return V2_BUILTIN_ARG_COUNT }
+    if name_eq_text(name, "get_arg") { return V2_BUILTIN_GET_ARG }
+    if name_eq_text(name, "str_eq") { return V2_BUILTIN_STR_EQ }
+    if name_eq_text(name, "str_len") { return V2_BUILTIN_STR_LEN }
+    if name_eq_text(name, "str_char_at") { return V2_BUILTIN_STR_CHAR_AT }
+    if name_eq_text(name, "pt_read_kind_code") { return V2_BUILTIN_PT_READ_KIND_CODE }
+    if name_eq_text(name, "pt_read_start") { return V2_BUILTIN_PT_READ_START }
+    if name_eq_text(name, "pt_read_end") { return V2_BUILTIN_PT_READ_END }
+    if name_eq_text(name, "pt_read_int_value") { return V2_BUILTIN_PT_READ_INT_VALUE }
+    if name_eq_text(name, "empty_name") { return V2_BUILTIN_EMPTY_NAME }
+    if name_eq_text(name, "driver_read_file_to_cursor_source") { return V2_BUILTIN_DRIVER_READ_FILE_TO_GLOBALS }
+    if name_eq_text(name, "driver_write_elf_to_file") { return V2_BUILTIN_DRIVER_WRITE_ELF }
+    if name_eq_text(name, "driver_make_executable") { return V2_BUILTIN_DRIVER_CHMOD }
+    -1
+}
+
+fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
+    if token_text_eq(tok, "print") { return V2_BUILTIN_PRINT }
+    if token_text_eq(tok, "print_int") { return V2_BUILTIN_PRINT_INT }
+    if token_text_eq(tok, "print_char") { return V2_BUILTIN_PRINT_CHAR }
+    if token_text_eq(tok, "print_f64") { return V2_BUILTIN_PRINT_F64 }
+    if token_text_eq(tok, "sqrt_f64") { return V2_BUILTIN_SQRT_F64 }
+    if token_text_eq(tok, "arg_count") { return V2_BUILTIN_ARG_COUNT }
+    if token_text_eq(tok, "get_arg_count") { return V2_BUILTIN_ARG_COUNT }
+    if token_text_eq(tok, "get_arg") { return V2_BUILTIN_GET_ARG }
+    if token_text_eq(tok, "str_eq") { return V2_BUILTIN_STR_EQ }
+    if token_text_eq(tok, "str_len") { return V2_BUILTIN_STR_LEN }
+    if token_text_eq(tok, "str_char_at") { return V2_BUILTIN_STR_CHAR_AT }
+    if token_text_eq(tok, "pt_read_kind_code") { return V2_BUILTIN_PT_READ_KIND_CODE }
+    if token_text_eq(tok, "pt_read_start") { return V2_BUILTIN_PT_READ_START }
+    if token_text_eq(tok, "pt_read_end") { return V2_BUILTIN_PT_READ_END }
+    if token_text_eq(tok, "pt_read_int_value") { return V2_BUILTIN_PT_READ_INT_VALUE }
+    if token_text_eq(tok, "empty_name") { return V2_BUILTIN_EMPTY_NAME }
+    if token_text_eq(tok, "driver_read_file_to_cursor_source") { return V2_BUILTIN_DRIVER_READ_FILE_TO_GLOBALS }
+    if token_text_eq(tok, "driver_write_elf_to_file") { return V2_BUILTIN_DRIVER_WRITE_ELF }
+    if token_text_eq(tok, "driver_make_executable") { return V2_BUILTIN_DRIVER_CHMOD }
+    -1
+}
+
+// ============================================================
+// IR-only parse functions (for user-defined functions)
+// No V2_CORE side effects; builds IrFunction directly
+// ============================================================
+
+fn parse_if_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    // Expression form: `if COND { THEN_EXPR } else { ELSE_EXPR }`.
+    // Both arms must be tail-expression blocks (single expression, no statements).
+    // Returns ExprParse with reg holding the chosen value and next past the closing `}`.
+    let cond = parse_expr_ir(func, ctx, pos + 1)
+    if cond.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    var p = cond.next
+    p = skip_trivia(p, V2_TOKEN_COUNT)
+    if token_kind(p) != TK_LBRACE { return ExprParse { ok: 0, reg: -1, next: pos} }
+    let then_close = find_matching_rbrace(p, V2_TOKEN_COUNT)
+    if then_close < 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    var after_then = skip_trivia(then_close + 1, V2_TOKEN_COUNT)
+    if token_kind(after_then) != TK_ELSE { return ExprParse { ok: 0, reg: -1, next: pos} }
+    let after_else = skip_trivia(after_then + 1, V2_TOKEN_COUNT)
+    if token_kind(after_else) != TK_LBRACE { return ExprParse { ok: 0, reg: -1, next: pos} }
+    let else_close = find_matching_rbrace(after_else, V2_TOKEN_COUNT)
+    if else_close < 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+
+    let dst = alloc_reg(ctx)
+    let label_else = alloc_label()
+    let label_end = alloc_label()
+    ufn_record_branch_false(cond.reg, label_else)
+    // then arm: parse single tail expression inside the braces.
+    let then_start = skip_trivia(p + 1, then_close)
+    let then_expr = parse_expr_ir(func, ctx, then_start)
+    if then_expr.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    if then_expr.reg != dst { ufn_record_copy(dst, then_expr.reg) }
+    ufn_record_jump(label_end)
+    ufn_record_label(label_else)
+    let else_start = skip_trivia(after_else + 1, else_close)
+    let else_expr = parse_expr_ir(func, ctx, else_start)
+    if else_expr.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    if else_expr.reg != dst { ufn_record_copy(dst, else_expr.reg) }
+    ufn_record_label(label_end)
+    ExprParse { ok: 1, reg: dst, next: else_close + 1}
+}
+
+fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let k = token_kind(pos)
+    if k == TK_IF {
+        return parse_if_expr_ir(func, ctx, pos)
+    }
+    if k == TK_BANG {
+        let inner = parse_atom_ir(func, ctx, pos + 1)
+        if inner.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+        let dst = alloc_reg(ctx)
+        let zero = alloc_reg(ctx)
+        ufn_record_load_imm(zero, 0)
+        ufn_record_binop(dst, inner.reg, 5, zero)
+        return ExprParse { ok: 1, reg: dst, next: inner.next}
+    }
+    if k == TK_MINUS && token_kind(pos + 1) == TK_INT {
+        if token_kind(pos + 2) == TK_DOT && token_kind(pos + 3) == TK_INT {
+            let r = alloc_reg(ctx)
+            let frac_digits = token_decimal_digit_count(pos + 3)
+            let scale = decimal_scale_for_digits(frac_digits)
+            let mantissa = (pt_read_int_value(pos + 1) * scale) + pt_read_int_value(pos + 3)
+            ufn_record_load_f64_scaled(r, 0 - mantissa, scale)
+            return ExprParse { ok: 1, reg: r, next: pos + 4}
+        }
+        let r = alloc_reg(ctx)
+        ufn_record_load_imm(r, 0 - pt_read_int_value(pos + 1))
+        return ExprParse { ok: 1, reg: r, next: pos + 2}
+    }
+    if k == TK_MINUS && token_kind(pos + 1) == TK_FLOAT {
+        let r = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(r, 0 - token_float_mantissa(pos + 1), token_float_scale(pos + 1))
+        return ExprParse { ok: 1, reg: r, next: pos + 2}
+    }
+    if k == TK_AMPBANG && token_kind(pos + 1) == TK_IDENT {
+        let base_reg = lookup_local_tok(ctx, pos + 1)
+        if base_reg >= 0 {
+            let dst = alloc_reg(ctx)
+            ufn_record_temp_addr(dst, base_reg)
+            return ExprParse { ok: 1, reg: dst, next: pos + 2}
+        }
+        return ExprParse { ok: 0, reg: -1, next: pos}
+    }
+    if k == TK_LPAREN {
+        if token_kind(pos + 1) == TK_STAR && token_kind(pos + 2) == TK_IDENT && token_kind(pos + 3) == TK_RPAREN && token_kind(pos + 4) == TK_DOT && token_kind(pos + 5) == TK_IDENT {
+            let base_ref = lookup_local_tok(ctx, pos + 2)
+            if base_ref >= 0 && lookup_local_is_ref_tok(ctx, pos + 2) != 0 {
+                let sidx = lookup_local_struct_idx_tok(ctx, pos + 2)
+                if sidx >= 0 {
+                    let foff = struct_field_offset_tok(sidx, pos + 5)
+                    if foff >= 0 {
+                        let dst = alloc_reg(ctx)
+                        ufn_record_load_ref_field(dst, base_ref, foff)
+                        let next_sidx = struct_field_type_at(sidx, foff)
+                        V2_LAST_STRUCT_IDX = next_sidx
+                        return ExprParse { ok: 1, reg: dst, next: pos + 6}
+                    }
+                }
+            }
+        }
+        let inner = parse_expr_ir(func, ctx, pos + 1)
+        if inner.ok != 0 {
+            var close_pos = inner.next
+            if token_kind(close_pos) == TK_AS {
+                close_pos = close_pos + 2
+            }
+            if token_kind(close_pos) == TK_RPAREN {
+                return ExprParse { ok: 1, reg: inner.reg, next: close_pos + 1}
+            }
+        }
+        return ExprParse { ok: 0, reg: -1, next: pos}
+    }
+    if k == TK_INT {
+        if token_kind(pos + 1) == TK_DOT && token_kind(pos + 2) == TK_INT {
+            let r = alloc_reg(ctx)
+            let frac_digits = token_decimal_digit_count(pos + 2)
+            let scale = decimal_scale_for_digits(frac_digits)
+            let mantissa = (pt_read_int_value(pos) * scale) + pt_read_int_value(pos + 2)
+            ufn_record_load_f64_scaled(r, mantissa, scale)
+            return ExprParse { ok: 1, reg: r, next: pos + 3}
+        }
+        let r = alloc_reg(ctx)
+        ufn_record_load_imm(r, pt_read_int_value(pos))
+        return ExprParse { ok: 1, reg: r, next: pos + 1}
+    }
+    if k == TK_FLOAT {
+        let r = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(r, token_float_mantissa(pos), token_float_scale(pos))
+        return ExprParse { ok: 1, reg: r, next: pos + 1}
+    }
+    if k == TK_TRUE {
+        let r = alloc_reg(ctx)
+        ufn_record_load_imm(r, 1)
+        return ExprParse { ok: 1, reg: r, next: pos + 1}
+    }
+    if k == TK_FALSE {
+        let r = alloc_reg(ctx)
+        ufn_record_load_imm(r, 0)
+        return ExprParse { ok: 1, reg: r, next: pos + 1}
+    }
+    if k == TK_STRING {
+        let r = alloc_reg(ctx)
+        ufn_record_load_string(r, pos)
+        return ExprParse { ok: 1, reg: r, next: pos + 1}
+    }
+    if k == TK_IDENT {
+        let cval = driver_const_value_tok(pos)
+        if cval != -999999999 {
+            let r = alloc_reg(ctx)
+            ufn_record_load_imm(r, cval)
+            return ExprParse { ok: 1, reg: r, next: pos + 1}
+        }
+        let gid = driver_global_id_tok(pos)
+        if gid >= 0 && token_kind(pos + 1) == TK_LBRACKET {
+            let idx_expr = parse_expr_ir(func, ctx, pos + 2)
+            if idx_expr.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+            let end_pos = skip_index_cast_end(idx_expr.next)
+            if token_kind(end_pos) != TK_RBRACKET { return ExprParse { ok: 0, reg: -1, next: pos} }
+            let dst = alloc_reg(ctx)
+            ufn_record_global_load(dst, gid, idx_expr.reg)
+            return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
+        }
+        if gid >= 0 {
+            let sidx = find_struct_idx_tok(pos)
+            if sidx >= 0 {
+                let flat_size = STRUCT_FLAT_SIZE[sidx as usize]
+                let base = alloc_reg(ctx)
+                var bi: i64 = 1
+                while bi < flat_size { let _ = alloc_reg(ctx); bi = bi + 1 }
+                let idx_reg = alloc_reg(ctx)
+                var ci: i64 = 0
+                while ci < flat_size {
+                    ufn_record_load_imm(idx_reg, ci)
+                    ufn_record_global_load(base + ci, gid, idx_reg)
+                    ci = ci + 1
+                }
+                mark_struct_regs(base, sidx)
+                V2_LAST_STRUCT_IDX = sidx
+                return ExprParse { ok: 1, reg: base, next: pos + 1}
+            }
+            let zero = alloc_reg(ctx)
+            let dst = alloc_reg(ctx)
+            ufn_record_load_imm(zero, 0)
+            ufn_record_global_load(dst, gid, zero)
+            return ExprParse { ok: 1, reg: dst, next: pos + 1}
+        }
+        // enum variant: EnumName::Variant → load discriminant
+        if token_kind(pos + 1) == TK_COLONCOLON && token_kind(pos + 2) == TK_IDENT {
+            let eidx = find_enum_idx_tok(pos)
+            if eidx >= 0 {
+                let variant_val = find_enum_variant_value(eidx, pos + 2)
+                if variant_val >= 0 {
+                    let r = alloc_reg(ctx)
+                    ufn_record_load_imm(r, variant_val)
+                    return ExprParse { ok: 1, reg: r, next: pos + 3}
+                }
+            }
+        }
+        let reg = lookup_local_tok(ctx, pos)
+        if reg >= 0 {
+            if lookup_local_is_ref_tok(ctx, pos) != 0 {
+                return ExprParse { ok: 1, reg: reg, next: pos + 1}
+            }
+            // local array read: ident[expr] or ident[expr as T]
+            if token_kind(pos + 1) == TK_LBRACKET {
+                let idx_expr = parse_expr_ir(func, ctx, pos + 2)
+                if idx_expr.ok != 0 {
+                    let end_pos = skip_index_cast_end(idx_expr.next)
+                    if token_kind(end_pos) == TK_RBRACKET {
+                        let dst = alloc_reg(ctx)
+                        ufn_record_local_load(dst, reg, idx_expr.reg)
+                        return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
+                    }
+                }
+            }
+            let sidx = lookup_local_struct_idx_tok(ctx, pos)
+            if sidx >= 0 {
+                V2_LAST_STRUCT_IDX = sidx
+                // chain dot access: p.x, p.y.z, etc.
+                if token_kind(pos + 1) == TK_DOT && token_kind(pos + 2) == TK_IDENT {
+                    var cur_reg = reg
+                    var cur_sidx = sidx
+                    var cur = pos + 1
+                    while cur + 1 < V2_TOKEN_COUNT && token_kind(cur) == TK_DOT && token_kind(cur + 1) == TK_IDENT {
+                        let foff = struct_field_offset_tok(cur_sidx, cur + 1)
+                        if foff < 0 { break }
+                        cur_reg = cur_reg + foff
+                        let next_sidx = struct_field_type_at(cur_sidx, foff)
+                        if next_sidx >= 0 && struct_field_generic_f64_at(cur_sidx, foff) {
+                            mark_struct_scalar_regs_f64(cur_reg, next_sidx)
+                        }
+                        if next_sidx < 0 && struct_field_is_f64_at(cur_sidx, foff) {
+                            mark_reg_f64(cur_reg)
+                        }
+                        cur = cur + 2
+                        if next_sidx < 0 { V2_LAST_STRUCT_IDX = -1; break }
+                        cur_sidx = next_sidx
+                        V2_LAST_STRUCT_IDX = next_sidx
+                    }
+                    // struct field array read: local.field[expr]
+                    if token_kind(cur) == TK_LBRACKET {
+                        let idx_expr = parse_expr_ir(func, ctx, cur + 1)
+                        if idx_expr.ok != 0 {
+                            let end_pos = skip_index_cast_end(idx_expr.next)
+                            if token_kind(end_pos) == TK_RBRACKET {
+                                let dst = alloc_reg(ctx)
+                                ufn_record_local_load(dst, cur_reg, idx_expr.reg)
+                                return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
+                            }
+                        }
+                    }
+                    return ExprParse { ok: 1, reg: cur_reg, next: cur}
+                }
+            }
+            return ExprParse { ok: 1, reg: reg, next: pos + 1}
+        }
+        // struct literal
+        if token_kind(pos + 1) == TK_LBRACE {
+            let lit = parse_struct_lit_ir(func, ctx, pos, V2_TOKEN_COUNT)
+            if lit.ok != 0 { return lit }
+        }
+        if token_kind(pos + 1) == TK_LT && token_kind(pos + 2) == TK_IDENT && token_kind(pos + 3) == TK_GT && token_kind(pos + 4) == TK_LBRACE {
+            let lit = parse_struct_lit_ir(func, ctx, pos, V2_TOKEN_COUNT)
+            if lit.ok != 0 { return lit }
+        }
+        // function call
+        if token_kind(pos + 1) == TK_LPAREN {
+            return parse_fn_call_ir(func, ctx, pos)
+        }
+    }
+    ExprParse { ok: 0, reg: -1, next: pos}
+}
+
+fn parse_struct_lit_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let sidx = find_struct_idx_tok(pos)
+    if sidx < 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    var brace_pos = pos + 1
+    var generic_f64: i64 = 0
+    if token_kind(pos + 1) == TK_LT && token_kind(pos + 2) == TK_IDENT && token_kind(pos + 3) == TK_GT && token_kind(pos + 4) == TK_LBRACE {
+        brace_pos = pos + 4
+        if token_text_eq(pos + 2, "f64") {
+            generic_f64 = 1
+        }
+    }
+    if token_kind(brace_pos) != TK_LBRACE { return ExprParse { ok: 0, reg: -1, next: pos} }
+    let flat_size = STRUCT_FLAT_SIZE[sidx as usize]
+    let base_reg = V2_NEXT_REG
+    V2_NEXT_REG = V2_NEXT_REG + flat_size
+    var cur = brace_pos + 1
+    while cur < token_count {
+        let kk = token_kind(cur)
+        if kk == TK_NEWLINE || kk == TK_SEMI || kk == TK_COMMA { cur = cur + 1; continue }
+        if kk == TK_RBRACE { break }
+        if kk != TK_IDENT { break }
+        let field_tok = cur
+        let foff = struct_field_offset_tok(sidx, field_tok)
+        cur = cur + 1
+        if cur < token_count && token_kind(cur) == TK_COLON { cur = cur + 1 }
+        V2_LAST_STRUCT_IDX = -1
+        let val = parse_expr_ir(func, ctx, cur)
+        if val.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+        if foff >= 0 {
+            let val_sidx = V2_LAST_STRUCT_IDX
+            if val_sidx >= 0 {
+                let inner_flat = STRUCT_FLAT_SIZE[val_sidx as usize]
+                var ci: i64 = 0
+                while ci < inner_flat {
+                    ufn_record_copy(base_reg + foff + ci, val.reg + ci)
+                    ci = ci + 1
+                }
+            } else {
+                ufn_record_copy(base_reg + foff, val.reg)
+            }
+        }
+        cur = val.next
+        if cur < token_count && token_kind(cur) == TK_COMMA { cur = cur + 1 }
+    }
+    V2_LAST_STRUCT_IDX = sidx
+    if generic_f64 != 0 {
+        mark_struct_scalar_regs_f64(base_reg, sidx)
+    } else {
+        mark_struct_regs(base_reg, sidx)
+    }
+    ExprParse { ok: 1, reg: base_reg, next: cur + 1}
+}
+
+fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    var fn_id = builtin_fn_id_tok(pos)
+    if fn_id < 0 { fn_id = lookup_user_fn_id_tok(pos) }
+    if fn_id < 0 {
+        mark_parse_unsupported_call(pos)
+        return ExprParse { ok: 0, reg: -1, next: pos}
+    }
+    if token_kind(pos + 1) != TK_LPAREN { return ExprParse { ok: 0, reg: -1, next: pos} }
+    if fn_id == V2_BUILTIN_EMPTY_NAME && token_kind(pos + 2) == TK_RPAREN {
+        let sidx = find_name_struct_idx()
+        if sidx >= 0 {
+            let flat_size = STRUCT_FLAT_SIZE[sidx as usize]
+            let base = V2_NEXT_REG
+            V2_NEXT_REG = base + flat_size
+            let zero = alloc_reg(ctx)
+            ufn_record_load_imm(zero, 0)
+            var zi: i64 = 0
+            while zi < flat_size {
+                ufn_record_copy(base + zi, zero)
+                zi = zi + 1
+            }
+            V2_LAST_STRUCT_IDX = sidx
+            return ExprParse { ok: 1, reg: base, next: pos + 3}
+        }
+        return ExprParse { ok: 0, reg: -1, next: pos}
+    }
+    var n_args: i64 = 0
+    var total_argc: i64 = 0
+    var cur = pos + 2
+    while token_kind(cur) != TK_RPAREN && cur < V2_TOKEN_COUNT && n_args < 8 {
+        if n_args > 0 {
+            if token_kind(cur) == TK_COMMA { cur = cur + 1 }
+            else { return ExprParse { ok: 0, reg: -1, next: pos} }
+        }
+        let saved_arg0 = V2_CALL_ARG_REGS[0]
+        let saved_arg1 = V2_CALL_ARG_REGS[1]
+        let saved_arg2 = V2_CALL_ARG_REGS[2]
+        let saved_arg3 = V2_CALL_ARG_REGS[3]
+        let saved_arg4 = V2_CALL_ARG_REGS[4]
+        let saved_arg5 = V2_CALL_ARG_REGS[5]
+        let saved_arg6 = V2_CALL_ARG_REGS[6]
+        let saved_arg7 = V2_CALL_ARG_REGS[7]
+        let saved_size0 = V2_CALL_ARG_SIZES[0]
+        let saved_size1 = V2_CALL_ARG_SIZES[1]
+        let saved_size2 = V2_CALL_ARG_SIZES[2]
+        let saved_size3 = V2_CALL_ARG_SIZES[3]
+        let saved_size4 = V2_CALL_ARG_SIZES[4]
+        let saved_size5 = V2_CALL_ARG_SIZES[5]
+        let saved_size6 = V2_CALL_ARG_SIZES[6]
+        let saved_size7 = V2_CALL_ARG_SIZES[7]
+        V2_LAST_STRUCT_IDX = -1
+        let arg = parse_expr_ir(func, ctx, cur)
+        let arg_struct_idx = V2_LAST_STRUCT_IDX
+        V2_CALL_ARG_REGS[0] = saved_arg0
+        V2_CALL_ARG_REGS[1] = saved_arg1
+        V2_CALL_ARG_REGS[2] = saved_arg2
+        V2_CALL_ARG_REGS[3] = saved_arg3
+        V2_CALL_ARG_REGS[4] = saved_arg4
+        V2_CALL_ARG_REGS[5] = saved_arg5
+        V2_CALL_ARG_REGS[6] = saved_arg6
+        V2_CALL_ARG_REGS[7] = saved_arg7
+        V2_CALL_ARG_SIZES[0] = saved_size0
+        V2_CALL_ARG_SIZES[1] = saved_size1
+        V2_CALL_ARG_SIZES[2] = saved_size2
+        V2_CALL_ARG_SIZES[3] = saved_size3
+        V2_CALL_ARG_SIZES[4] = saved_size4
+        V2_CALL_ARG_SIZES[5] = saved_size5
+        V2_CALL_ARG_SIZES[6] = saved_size6
+        V2_CALL_ARG_SIZES[7] = saved_size7
+        V2_LAST_STRUCT_IDX = arg_struct_idx
+        if arg.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+        V2_CALL_ARG_REGS[n_args as usize] = arg.reg
+        var sz: i64 = 1
+        if arg_struct_idx >= 0 {
+            sz = STRUCT_FLAT_SIZE[arg_struct_idx as usize]
+            V2_LAST_STRUCT_IDX = -1
+        }
+        V2_CALL_ARG_SIZES[n_args as usize] = sz
+        total_argc = total_argc + sz
+        n_args = n_args + 1
+        cur = arg.next
+    }
+    if token_kind(cur) != TK_RPAREN { return ExprParse { ok: 0, reg: -1, next: pos} }
+    // Determine arg0_reg: use first-arg reg if args are consecutive, else pack
+    var arg0_reg: i64 = -1
+    if total_argc > 0 {
+        arg0_reg = V2_CALL_ARG_REGS[0]
+        // Check if all args land in a single consecutive block from arg0_reg
+        var consecutive: i64 = 1
+        var expected: i64 = arg0_reg
+        var ci: i64 = 0
+        while ci < n_args {
+            if V2_CALL_ARG_REGS[ci as usize] != expected { consecutive = 0 }
+            expected = expected + V2_CALL_ARG_SIZES[ci as usize]
+            ci = ci + 1
+        }
+        if consecutive == 0 {
+            // Pack into a fresh consecutive block, emit copies
+            let base = V2_NEXT_REG
+            V2_NEXT_REG = V2_NEXT_REG + total_argc
+            var slot: i64 = 0
+            var ai: i64 = 0
+            while ai < n_args {
+                let from = V2_CALL_ARG_REGS[ai as usize]
+                let sz = V2_CALL_ARG_SIZES[ai as usize]
+                var fi: i64 = 0
+                while fi < sz {
+                    let dst_slot = base + slot + fi
+                    let src_slot = from + fi
+                    if dst_slot != src_slot { ufn_record_copy(dst_slot, src_slot) }
+                    fi = fi + 1
+                }
+                slot = slot + sz
+                ai = ai + 1
+            }
+            arg0_reg = base
+        }
+    }
+    // check if callee returns a struct
+    let ret_sidx = lookup_user_fn_return_struct_idx(fn_id)
+    if ret_sidx >= 0 {
+        let ret_flat = STRUCT_FLAT_SIZE[ret_sidx as usize]
+        let dst = alloc_reg(ctx)
+        var ri: i64 = 1
+        while ri < ret_flat { let _ = alloc_reg(ctx); ri = ri + 1 }
+        ufn_record_call_struct_result(dst, fn_id, arg0_reg, total_argc, ret_flat)
+        V2_LAST_STRUCT_IDX = ret_sidx
+        if lookup_user_fn_return_is_f64(fn_id) {
+            mark_struct_scalar_regs_f64(dst, ret_sidx)
+        } else {
+            mark_struct_regs(dst, ret_sidx)
+        }
+        return ExprParse { ok: 1, reg: dst, next: cur + 1}
+    }
+    let dst = alloc_reg(ctx)
+    ufn_record_call(dst, fn_id, arg0_reg, total_argc)
+    if lookup_user_fn_return_is_f64(fn_id) || fn_id == V2_BUILTIN_SQRT_F64 {
+        mark_reg_f64(dst)
+    }
+    ExprParse { ok: 1, reg: dst, next: cur + 1}
+}
+
+fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let left = parse_atom_ir(func, ctx, pos)
+    if left.ok == 0 { return left }
+    var result = left
+    var op_kind = token_kind(result.next)
+    while is_arith_op(op_kind) {
+        let right = parse_atom_ir(func, ctx, result.next + 1)
+        if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: result.next} }
+        let dst = alloc_reg(ctx)
+        if reg_is_f64(result.reg) || reg_is_f64(right.reg) {
+            ufn_record_f64_binop(dst, result.reg, arith_op_to_code(op_kind), right.reg)
+        } else {
+            ufn_record_binop(dst, result.reg, arith_op_to_code(op_kind), right.reg)
+        }
+        result = ExprParse { ok: 1, reg: dst, next: right.next}
+        op_kind = token_kind(result.next)
+    }
+    if is_cmp_op(op_kind) {
+        let right = parse_atom_ir(func, ctx, result.next + 1)
+        if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: result.next} }
+        if (op_kind == TK_EQEQ || op_kind == TK_BANGEQ) && token_kind(result.next + 1) == TK_STRING {
+            let base = V2_NEXT_REG
+            V2_NEXT_REG = base + 2
+            ufn_record_copy(base, result.reg)
+            ufn_record_copy(base + 1, right.reg)
+            let eq_dst = alloc_reg(ctx)
+            ufn_record_call(eq_dst, V2_BUILTIN_STR_EQ, base, 2)
+            if op_kind == TK_BANGEQ {
+                let zero = alloc_reg(ctx)
+                let ne_dst = alloc_reg(ctx)
+                ufn_record_load_imm(zero, 0)
+                ufn_record_binop(ne_dst, eq_dst, 5, zero)
+                return ExprParse { ok: 1, reg: ne_dst, next: right.next}
+            }
+            return ExprParse { ok: 1, reg: eq_dst, next: right.next}
+        }
+        let dst = alloc_reg(ctx)
+        if reg_is_f64(result.reg) || reg_is_f64(right.reg) {
+            ufn_record_f64_binop(dst, result.reg, cmp_op_to_code(op_kind), right.reg)
+        } else {
+            ufn_record_binop(dst, result.reg, cmp_op_to_code(op_kind), right.reg)
+        }
+        var rn = right.next
+        if token_kind(rn) == TK_AS { rn = rn + 2 }
+        result = ExprParse { ok: 1, reg: dst, next: rn}
+    }
+    // skip trailing 'as T' before checking logical operators (e.g. 48 as i8 && ...)
+    if token_kind(result.next) == TK_AS {
+        result = ExprParse { ok: 1, reg: result.reg, next: result.next + 2}
+    }
+    // Short-circuit logical operators: && and ||
+    let op2 = token_kind(result.next)
+    if op2 == TK_ANDAND {
+        let right2 = parse_expr_ir(func, ctx, result.next + 1)
+        if right2.ok != 0 {
+            let dst = alloc_reg(ctx)
+            let label_short = alloc_label()
+            let label_end = alloc_label()
+            ufn_record_branch_false(result.reg, label_short)
+            ufn_record_copy(dst, right2.reg)
+            ufn_record_jump(label_end)
+            ufn_record_label(label_short)
+            ufn_record_load_imm(dst, 0)
+            ufn_record_label(label_end)
+            return ExprParse { ok: 1, reg: dst, next: right2.next}
+        }
+    }
+    if op2 == TK_OROR {
+        let right2 = parse_expr_ir(func, ctx, result.next + 1)
+        if right2.ok != 0 {
+            let dst = alloc_reg(ctx)
+            let zero = alloc_reg(ctx)
+            let eq_zero = alloc_reg(ctx)
+            let one = alloc_reg(ctx)
+            let label_true = alloc_label()
+            let label_end = alloc_label()
+            ufn_record_load_imm(zero, 0)
+            ufn_record_binop(eq_zero, result.reg, 5, zero)
+            ufn_record_branch_false(eq_zero, label_true)
+            ufn_record_copy(dst, right2.reg)
+            ufn_record_jump(label_end)
+            ufn_record_label(label_true)
+            ufn_record_load_imm(one, 1)
+            ufn_record_copy(dst, one)
+            ufn_record_label(label_end)
+            return ExprParse { ok: 1, reg: dst, next: right2.next}
+        }
+    }
+    let cast_next = skip_index_cast_end(result.next)
+    if cast_next != result.next {
+        return ExprParse { ok: 1, reg: result.reg, next: cast_next}
+    }
+    result
+}
+
+fn emit_label(func: &! i64, label_id: i64) with Mut {
+    ufn_record_label(label_id)
+}
+
+fn emit_jump(func: &! i64, label_id: i64) with Mut {
+    ufn_record_jump(label_id)
+}
+
+fn emit_branch_false(func: &! i64, cond_reg: i64, label_id: i64) with Mut {
+    ufn_record_branch_false(cond_reg, label_id)
+}
+
+fn parse_while_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    // while COND { BODY }
+    // pos points to token AFTER 'while'
+    let label_top = alloc_label()
+    let label_end = alloc_label()
+    emit_label(func, label_top)
+
+    // parse condition expression
+    let cond = parse_expr_ir(func, ctx, pos)
+    if cond.ok == 0 { return pos }
+    emit_branch_false(func, cond.reg, label_end)
+
+    // find and parse body block
+    var p = cond.next
+    while p < token_count && token_kind(p) != TK_LBRACE { p = p + 1 }
+    if p >= token_count { return pos }
+    let body_end = find_matching_rbrace(p, token_count)
+    if body_end < 0 { return pos }
+    let old_break = V2_BREAK_LABEL
+    let old_continue = V2_CONTINUE_LABEL
+    V2_BREAK_LABEL = label_end
+    V2_CONTINUE_LABEL = label_top
+    parse_block_ir(func, ctx, p + 1, body_end, token_count)
+    V2_BREAK_LABEL = old_break
+    V2_CONTINUE_LABEL = old_continue
+
+    emit_jump(func, label_top)
+    emit_label(func, label_end)
+    body_end + 1
+}
+
+fn parse_if_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    // if COND { THEN } [else [if ...] { ELSE }]
+    // pos points to token AFTER 'if'
+    let label_else = alloc_label()
+    let label_end = alloc_label()
+
+    let cond = parse_expr_ir(func, ctx, pos)
+    if cond.ok == 0 { return pos }
+    emit_branch_false(func, cond.reg, label_else)
+
+    // parse then block
+    var p = cond.next
+    while p < token_count && token_kind(p) != TK_LBRACE { p = p + 1 }
+    if p >= token_count { return pos }
+    let then_end = find_matching_rbrace(p, token_count)
+    if then_end < 0 { return pos }
+    parse_block_ir(func, ctx, p + 1, then_end, token_count)
+    emit_jump(func, label_end)
+    emit_label(func, label_else)
+
+    // check for else
+    var after = skip_trivia(then_end + 1, token_count)
+    if after < token_count && token_kind(after) == TK_ELSE {
+        let after_else = after + 1
+        let next_t = skip_trivia(after_else, token_count)
+        if next_t < token_count && token_kind(next_t) == TK_IF {
+            let end_pos = parse_if_ir(func, ctx, next_t + 1, token_count)
+            emit_label(func, label_end)
+            return end_pos
+        }
+        if next_t < token_count && token_kind(next_t) == TK_LBRACE {
+            let else_end = find_matching_rbrace(next_t, token_count)
+            if else_end >= 0 {
+                parse_block_ir(func, ctx, next_t + 1, else_end, token_count)
+                emit_label(func, label_end)
+                return else_end + 1
+            }
+        }
+    }
+    emit_label(func, label_end)
+    then_end + 1
+}
+
+fn parse_block_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, token_count: i64) with IO, Mut, Panic, Div, Alloc {
+    let saved_local_count = V2_LOCAL_COUNT
+    var p = skip_trivia(pos, close)
+    while p < close && V2_PARSE_UNSUPPORTED == 0 {
+        p = parse_stmt_ir(func, ctx, p, close, token_count)
+        p = skip_trivia(p, close)
+    }
+    V2_LOCAL_COUNT = saved_local_count
+}
+
+fn parse_match_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    // match expr { Pattern => body, ... }
+    V2_LAST_STRUCT_IDX = -1
+    let subj = parse_expr_ir(func, ctx, pos)
+    if subj.ok == 0 { return pos }
+    var p = subj.next
+    while p < token_count && token_kind(p) != TK_LBRACE { p = p + 1 }
+    if p >= token_count { return pos }
+    let close = find_matching_rbrace(p, token_count)
+    if close < 0 { return pos }
+    let label_end = alloc_label()
+    var cur = p + 1
+    while cur < close {
+        cur = skip_trivia(cur, close)
+        if cur >= close { break }
+        let arm_k = token_kind(cur)
+        var is_wildcard = false
+        var arm_val: i64 = -1
+        if arm_k == TK_UNDERSCORE {
+            is_wildcard = true
+            cur = cur + 1
+        } else if arm_k == TK_IDENT {
+            if token_kind(cur + 1) == TK_COLONCOLON && token_kind(cur + 2) == TK_IDENT {
+                let eidx = find_enum_idx_tok(cur)
+                if eidx >= 0 { arm_val = find_enum_variant_value(eidx, cur + 2) }
+                cur = cur + 3
+            } else {
+                var ei: i64 = 0
+                while ei < ENUM_COUNT {
+                    let v = find_enum_variant_value(ei, cur)
+                    if v >= 0 { arm_val = v; break }
+                    ei = ei + 1
+                }
+                cur = cur + 1
+            }
+        } else { cur = cur + 1; continue }
+        cur = skip_trivia(cur, close)
+        if cur < close && token_kind(cur) == TK_FATARROW { cur = cur + 1 }
+        cur = skip_trivia(cur, close)
+        if is_wildcard {
+            if cur < close && token_kind(cur) == TK_LBRACE {
+                let arm_close = find_matching_rbrace(cur, token_count)
+                if arm_close >= 0 { parse_block_ir(func, ctx, cur + 1, arm_close, token_count); cur = arm_close + 1 }
+            } else {
+                V2_LAST_STRUCT_IDX = -1
+                let body = parse_expr_ir(func, ctx, cur)
+                if body.ok != 0 {
+                    if V2_LAST_STRUCT_IDX >= 0 {
+                        ufn_record_return_struct(body.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
+                    } else { ufn_record_return(body.reg) }
+                    cur = body.next
+                }
+            }
+            break
+        } else if arm_val >= 0 {
+            let val_reg = alloc_reg(ctx)
+            let cond_reg = alloc_reg(ctx)
+            ufn_record_load_imm(val_reg, arm_val)
+            ufn_record_binop(cond_reg, subj.reg, 5, val_reg)
+            let label_skip = alloc_label()
+            ufn_record_branch_false(cond_reg, label_skip)
+            if cur < close && token_kind(cur) == TK_LBRACE {
+                let arm_close = find_matching_rbrace(cur, token_count)
+                if arm_close >= 0 { parse_block_ir(func, ctx, cur + 1, arm_close, token_count); cur = arm_close + 1 }
+            } else {
+                V2_LAST_STRUCT_IDX = -1
+                let body = parse_expr_ir(func, ctx, cur)
+                if body.ok != 0 {
+                    if V2_LAST_STRUCT_IDX >= 0 {
+                        ufn_record_return_struct(body.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
+                    } else { ufn_record_return(body.reg) }
+                    cur = body.next
+                }
+            }
+            ufn_record_jump(label_end)
+            ufn_record_label(label_skip)
+            if cur < close && token_kind(cur) == TK_COMMA { cur = cur + 1 }
+        } else { cur = cur + 1 }
+    }
+    ufn_record_label(label_end)
+    close + 1
+}
+
+fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let p = skip_trivia(pos, close)
+    if p >= close { return close }
+    let k = token_kind(p)
+
+    if k == TK_IDENT && token_text_eq(p, "break") {
+        if V2_BREAK_LABEL >= 0 {
+            emit_jump(func, V2_BREAK_LABEL)
+            return p + 1
+        }
+        mark_parse_unsupported(p)
+        return close
+    }
+
+    if k == TK_IDENT && token_text_eq(p, "continue") {
+        if V2_CONTINUE_LABEL >= 0 {
+            emit_jump(func, V2_CONTINUE_LABEL)
+            return p + 1
+        }
+        mark_parse_unsupported(p)
+        return close
+    }
+
+    if k == TK_VAR || k == TK_LET {
+        // var/let name : type = expr  OR  var name : type = expr
+        if token_kind(p + 1) != TK_IDENT { return p + 1 }
+        // Array type declaration: var name: [T; N]  (zero-initialized, no RHS required)
+        if token_kind(p + 2) == TK_COLON && token_kind(p + 3) == TK_LBRACKET {
+            var j = p + 4
+            while j < close && token_kind(j) != TK_SEMI { j = j + 1 }
+            if j < close && token_kind(j + 1) == TK_INT {
+                let arr_size = pt_read_int_value(j + 1)
+                let arr_base = V2_NEXT_REG
+                V2_NEXT_REG = arr_base + arr_size
+                let zero_reg = alloc_reg(ctx)
+                ufn_record_load_imm(zero_reg, 0)
+                var ai: i64 = 0
+                while ai < arr_size { ufn_record_copy(arr_base + ai, zero_reg); ai = ai + 1 }
+                remember_local_tok(ctx, p + 1, arr_base)
+                var end = j + 2
+                while end < close && token_kind(end) != TK_RBRACKET { end = end + 1 }
+                return end + 1
+            }
+        }
+        var eq_pos = p + 2
+        while eq_pos < close && token_kind(eq_pos) != TK_EQ { eq_pos = eq_pos + 1 }
+        if eq_pos >= close { return eq_pos }
+        V2_LAST_STRUCT_IDX = -1
+        let parsed = parse_expr_ir(func, ctx, eq_pos + 1)
+        var let_next = parsed.next
+        var let_ok = parsed.ok
+        var let_reg = parsed.reg
+        if let_ok == 0 {
+            mark_parse_unsupported(eq_pos + 1)
+            return close
+        }
+        if V2_LAST_STRUCT_IDX >= 0 {
+            let bind_sidx = V2_LAST_STRUCT_IDX
+            let flat_size = STRUCT_FLAT_SIZE[bind_sidx as usize]
+            let bind_base = alloc_reg(ctx)
+            var bi: i64 = 1
+            while bi < flat_size { let _ = alloc_reg(ctx); bi = bi + 1 }
+            var ci: i64 = 0
+            while ci < flat_size {
+                ufn_record_copy(bind_base + ci, let_reg + ci)
+                ci = ci + 1
+            }
+            remember_struct_local_tok(ctx, p + 1, bind_base, bind_sidx)
+            V2_LAST_STRUCT_IDX = -1
+            return let_next
+        }
+        let bind_reg = alloc_reg(ctx)
+        ufn_record_copy(bind_reg, let_reg)
+        remember_local_tok(ctx, p + 1, bind_reg)
+        return let_next
+    }
+
+    if k == TK_RETURN {
+        let after_return = skip_trivia(p + 1, close)
+        if after_return >= close {
+            let zero_ret = alloc_reg(ctx)
+            ufn_record_load_imm(zero_ret, 0)
+            ufn_record_return(zero_ret)
+            return p + 1
+        }
+        V2_LAST_STRUCT_IDX = -1
+        let parsed = parse_expr_ir(func, ctx, p + 1)
+        if parsed.ok != 0 {
+            if V2_LAST_STRUCT_IDX >= 0 {
+                ufn_record_return_struct(parsed.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
+                V2_LAST_STRUCT_IDX = -1
+                return parsed.next
+            }
+            ufn_record_return(parsed.reg)
+            return parsed.next
+        }
+        mark_parse_unsupported(p + 1)
+        return close
+    }
+
+    if k == TK_WHILE {
+        return parse_while_ir(func, ctx, p + 1, token_count)
+    }
+
+    if k == TK_IF {
+        return parse_if_ir(func, ctx, p + 1, token_count)
+    }
+
+    if k == TK_MATCH {
+        return parse_match_ir(func, ctx, p + 1, token_count)
+    }
+
+    // driver global table/scalar mutation: TABLE[idx] = expr or SCALAR = expr
+    if k == TK_IDENT {
+        let gid = driver_global_id_tok(p)
+        if gid >= 0 && token_kind(p + 1) == TK_LBRACKET {
+            let idx_expr = parse_expr_ir(func, ctx, p + 2)
+            if idx_expr.ok != 0 {
+                let end_pos = skip_index_cast_end(idx_expr.next)
+                if token_kind(end_pos) == TK_RBRACKET && token_kind(end_pos + 1) == TK_EQ {
+                    let parsed = parse_expr_ir(func, ctx, end_pos + 2)
+                    if parsed.ok != 0 {
+                        ufn_record_global_store(gid, idx_expr.reg, parsed.reg)
+                        return parsed.next
+                    }
+                    mark_parse_unsupported(end_pos + 2)
+                    return close
+                }
+            }
+        }
+        if gid >= 0 && token_kind(p + 1) == TK_EQ {
+            let parsed = parse_expr_ir(func, ctx, p + 2)
+            if parsed.ok != 0 {
+                let zero = alloc_reg(ctx)
+                ufn_record_load_imm(zero, 0)
+                ufn_record_global_store(gid, zero, parsed.reg)
+                return parsed.next
+            }
+            mark_parse_unsupported(p + 2)
+            return close
+        }
+    }
+
+    // local array write: ident[expr] = expr
+    if k == TK_IDENT && token_kind(p + 1) == TK_LBRACKET {
+        let base_reg = lookup_local_tok(ctx, p)
+        if base_reg >= 0 && lookup_local_is_ref_tok(ctx, p) == 0 {
+            let idx_expr = parse_expr_ir(func, ctx, p + 2)
+            if idx_expr.ok != 0 {
+                let end_pos = skip_index_cast_end(idx_expr.next)
+                if token_kind(end_pos) == TK_RBRACKET && token_kind(end_pos + 1) == TK_EQ {
+                    let val = parse_expr_ir(func, ctx, end_pos + 2)
+                    if val.ok != 0 {
+                        ufn_record_local_store(base_reg, idx_expr.reg, val.reg)
+                        return val.next
+                    }
+                    mark_parse_unsupported(end_pos + 2)
+                    return close
+                }
+            }
+        }
+    }
+
+    // reference field mutation: (*ctx).field = expr
+    if k == TK_LPAREN && token_kind(p + 1) == TK_STAR && token_kind(p + 2) == TK_IDENT && token_kind(p + 3) == TK_RPAREN && token_kind(p + 4) == TK_DOT && token_kind(p + 5) == TK_IDENT && token_kind(p + 6) == TK_EQ {
+        let base_ref = lookup_local_tok(ctx, p + 2)
+        if base_ref >= 0 && lookup_local_is_ref_tok(ctx, p + 2) != 0 {
+            let sidx = lookup_local_struct_idx_tok(ctx, p + 2)
+            if sidx >= 0 {
+                let foff = struct_field_offset_tok(sidx, p + 5)
+                if foff >= 0 {
+                    V2_LAST_STRUCT_IDX = -1
+                    let parsed = parse_expr_ir(func, ctx, p + 7)
+                    if parsed.ok != 0 {
+                        ufn_record_store_ref_field(base_ref, foff, parsed.reg)
+                        V2_LAST_STRUCT_IDX = -1
+                        return parsed.next
+                    }
+                    mark_parse_unsupported(p + 7)
+                    return close
+                }
+            }
+        }
+    }
+
+    // field array write: p.buf[idx] = expr
+    if k == TK_IDENT && token_kind(p + 1) == TK_DOT && token_kind(p + 2) == TK_IDENT && token_kind(p + 3) == TK_LBRACKET {
+        let base_reg = lookup_local_tok(ctx, p)
+        if base_reg >= 0 {
+            let sidx = lookup_local_struct_idx_tok(ctx, p)
+            if sidx >= 0 {
+                let foff = struct_field_offset_tok(sidx, p + 2)
+                if foff >= 0 {
+                    let idx_expr = parse_expr_ir(func, ctx, p + 4)
+                    if idx_expr.ok != 0 {
+                        let end_pos = skip_index_cast_end(idx_expr.next)
+                        if token_kind(end_pos) == TK_RBRACKET && token_kind(end_pos + 1) == TK_EQ {
+                            let val = parse_expr_ir(func, ctx, end_pos + 2)
+                            if val.ok != 0 {
+                                ufn_record_local_store(base_reg + foff, idx_expr.reg, val.reg)
+                                return val.next
+                            }
+                            mark_parse_unsupported(end_pos + 2)
+                            return close
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // field mutation: p.x = expr
+    if k == TK_IDENT && token_kind(p + 1) == TK_DOT && token_kind(p + 2) == TK_IDENT && token_kind(p + 3) == TK_EQ {
+        let base_reg = lookup_local_tok(ctx, p)
+        if base_reg >= 0 {
+            let sidx = lookup_local_struct_idx_tok(ctx, p)
+            if sidx >= 0 {
+                let foff = struct_field_offset_tok(sidx, p + 2)
+                if foff >= 0 {
+                    V2_LAST_STRUCT_IDX = -1
+                    let parsed = parse_expr_ir(func, ctx, p + 4)
+                    if parsed.ok != 0 {
+                        if V2_LAST_STRUCT_IDX >= 0 {
+                            let inner_flat = STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize]
+                            var ci: i64 = 0
+                            while ci < inner_flat {
+                                ufn_record_copy(base_reg + foff + ci, parsed.reg + ci)
+                                ci = ci + 1
+                            }
+                            V2_LAST_STRUCT_IDX = -1
+                            return parsed.next
+                        }
+                        ufn_record_copy(base_reg + foff, parsed.reg)
+                        return parsed.next
+                    }
+                    mark_parse_unsupported(p + 4)
+                    return close
+                }
+            }
+        }
+    }
+
+    // assignment: name = expr  (name is already a local)
+    if k == TK_IDENT && token_kind(p + 1) == TK_EQ {
+        let old_reg = lookup_local_tok(ctx, p)
+        if old_reg >= 0 {
+            V2_LAST_STRUCT_IDX = -1
+            let parsed = parse_expr_ir(func, ctx, p + 2)
+            if parsed.ok != 0 {
+                let asn_sidx = V2_LAST_STRUCT_IDX
+                if asn_sidx >= 0 {
+                    // struct copy: update all fields
+                    let asn_flat = STRUCT_FLAT_SIZE[asn_sidx as usize]
+                    var ci: i64 = 0
+                    while ci < asn_flat {
+                        if parsed.reg + ci != old_reg + ci { ufn_record_copy(old_reg + ci, parsed.reg + ci) }
+                        ci = ci + 1
+                    }
+                    V2_LAST_STRUCT_IDX = -1
+                    return parsed.next
+                }
+                if parsed.reg != old_reg {
+                    ufn_record_copy(old_reg, parsed.reg)
+                }
+                return parsed.next
+            }
+            mark_parse_unsupported(p + 2)
+            return close
+        }
+    }
+
+    // call statement: name(args)  — for side-effecting calls
+    // Skip this path if the call is part of a larger expression (||, &&, binop, cmp, postfix).
+    // M1.2 step 4: when a tail-expression-position call is followed by a binary
+    // operator (e.g. `fib(n-1) + fib(n-2)` as a block tail), we previously
+    // swallowed the call as a statement and then choked on the operator.
+    // Now we save UFN/reg state, speculatively parse the call, and roll back
+    // if the next token continues the expression — letting the tail-expression
+    // branch below re-parse the whole thing via parse_expr_ir.
+    if k == TK_IDENT && token_kind(p + 1) == TK_LPAREN {
+        let saved_ufn_count = V2_UFN_COUNT
+        let saved_next_reg = V2_NEXT_REG
+        let saved_last_struct = V2_LAST_STRUCT_IDX
+        let call = parse_fn_call_ir(func, ctx, p)
+        if call.ok != 0 {
+            let next_k = token_kind(call.next)
+            let returns_value = call_target_returns_value_tok(p)
+            let continues_expr = next_k == TK_OROR || next_k == TK_ANDAND
+                || is_arith_op(next_k) || is_cmp_op(next_k)
+                || next_k == TK_AS || next_k == TK_DOT || next_k == TK_LBRACKET
+            if !continues_expr && (call.next < close || !returns_value) {
+                if V2_UFN_COUNT > 0 {
+                    let last_op_idx = V2_UFN_COUNT - 1
+                    let last_op = V2_UFN_OPS[last_op_idx as usize]
+                    if last_op == UFN_CALL || last_op == UFN_CALL_STRUCT_RESULT {
+                        V2_UFN_DST[last_op_idx as usize] = -1
+                    }
+                }
+                return call.next
+            }
+            // Roll back the speculative call so the tail-expression branch
+            // below can re-parse from `p` via parse_expr_ir.
+            V2_UFN_COUNT = saved_ufn_count
+            V2_NEXT_REG = saved_next_reg
+            V2_LAST_STRUCT_IDX = saved_last_struct
+        }
+    }
+
+    // tail expression (implicit return at end of block)
+    V2_LAST_STRUCT_IDX = -1
+    let tail = parse_expr_ir(func, ctx, p)
+    if tail.ok != 0 {
+        if V2_LAST_STRUCT_IDX >= 0 {
+            ufn_record_return_struct(tail.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
+            V2_LAST_STRUCT_IDX = -1
+            return tail.next
+        }
+        ufn_record_return(tail.reg)
+        return tail.next
+    }
+
+    mark_parse_unsupported(p)
+    close
+}
+
+fn find_fn_lbrace(token_count: i64, name_str_pos: i64) -> i64 with Mut, Panic, Div {
+    // Find the opening { of the function whose name token is at name_str_pos
+    var j = name_str_pos + 1
+    while j < token_count {
+        if token_kind(j) == TK_LBRACE { return j }
+        if token_kind(j) == TK_FN { return -1 }
+        j = j + 1
+    }
+    -1
+}
+
+fn skip_native_v2_driver_helper_fn(name_tok: i64) -> bool with Mut, Panic, Div {
+    if token_text_eq(name_tok, "token_name") { return true }
+    if token_text_eq(name_tok, "token_string_name") { return true }
+    if token_text_eq(name_tok, "name_eq_text") { return true }
+    if token_text_eq(name_tok, "fixed_name_print") { return true }
+    if token_text_eq(name_tok, "fixed_name_print_int") { return true }
+    if token_text_eq(name_tok, "fixed_name_print_char") { return true }
+    if token_text_eq(name_tok, "fixed_name_get_arg_count") { return true }
+    if token_text_eq(name_tok, "fixed_name_arg_count") { return true }
+    if token_text_eq(name_tok, "fixed_name_get_arg") { return true }
+    if token_text_eq(name_tok, "fixed_name_str_eq") { return true }
+    if token_text_eq(name_tok, "fixed_name_main") { return true }
+    if token_text_eq(name_tok, "set_func_name_print") { return true }
+    if token_text_eq(name_tok, "set_func_name_print_int") { return true }
+    if token_text_eq(name_tok, "set_func_name_print_char") { return true }
+    if token_text_eq(name_tok, "set_func_name_get_arg_count") { return true }
+    if token_text_eq(name_tok, "set_func_name_get_arg") { return true }
+    if token_text_eq(name_tok, "set_func_name_str_eq") { return true }
+    if token_text_eq(name_tok, "set_func_name_main") { return true }
+    if token_text_eq(name_tok, "lookup_user_fn_id") { return true }
+    if token_text_eq(name_tok, "user_fn_name_at") { return true }
+    if token_text_eq(name_tok, "builtin_fn_id") { return true }
+    if token_text_eq(name_tok, "binary_op_from_cmp_kind") { return true }
+    if token_text_eq(name_tok, "emit_instr") { return true }
+    if token_text_eq(name_tok, "driver_read_file_to_cursor_source") { return true }
+    if token_text_eq(name_tok, "driver_write_elf_to_file") { return true }
+    if token_text_eq(name_tok, "driver_make_executable") { return true }
+    false
+}
+
+fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
+    V2_USER_FN_COUNT = 0
+    var i: i64 = 0
+    var next_id = first_fn_id
+    while i + 1 < token_count {
+        if token_kind(i) == TK_FN && token_kind(i + 1) == TK_IDENT {
+            if !token_text_eq(i + 1, "main") && !skip_native_v2_driver_helper_fn(i + 1) {
+                let reg_idx = V2_USER_FN_COUNT
+                register_user_fn(i + 1, next_id)
+                // scan for -> ReturnType to detect struct return
+                var ret_sidx: i64 = -1
+                var ret_is_f64: i64 = 0
+                var j = i + 2
+                while j < token_count && token_kind(j) != TK_LBRACE && token_kind(j) != TK_FN {
+                    if token_kind(j) == TK_ARROW {
+                        if j + 1 < token_count && token_kind(j + 1) == TK_IDENT {
+                            ret_sidx = find_struct_idx_tok(j + 1)
+                            if token_text_eq(j + 1, "f64") {
+                                ret_is_f64 = 1
+                            }
+                            if j + 4 < token_count && token_kind(j + 2) == TK_LT && token_kind(j + 3) == TK_IDENT && token_kind(j + 4) == TK_GT && token_text_eq(j + 3, "f64") {
+                                ret_is_f64 = 1
+                            }
+                        }
+                        break
+                    }
+                    j = j + 1
+                }
+                if reg_idx < 512 {
+                    V2_USER_FN_RETURN_STRUCT_IDX[reg_idx as usize] = ret_sidx
+                    V2_USER_FN_RETURN_IS_F64[reg_idx as usize] = ret_is_f64
+                }
+                next_id = next_id + 1
+            }
+            i = i + 2
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+fn source_uses_ident(token_count: i64, text: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < token_count {
+        if token_kind(i) == TK_IDENT && token_text_eq(i, text) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn source_count_ident(token_count: i64, text: string) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < token_count {
+        if token_kind(i) == TK_IDENT && token_text_eq(i, text) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn drv_low8(x: i64) -> i64 with Div {
+    let q = x / 256
+    let n = x - (q * 256)
+    if n < 0 {
+        n + 256
+    } else {
+        n
+    }
+}
+
+fn drv_emit_byte(b: i64) with Mut, Div, Panic {
+    let p = DRV_CODE_LEN
+    if p >= 0 && p < 262144 {
+        DRV_CODE_BYTES[p as usize] = drv_low8(b) as i8
+        DRV_CODE_LEN = p + 1
+    }
+}
+
+fn drv_emit_u32_le(val: i64) with Mut, Div, Panic {
+    var v = val
+    if v < 0 { v = v + 4294967296 }
+    let b0 = drv_low8(v)
+    let b1 = drv_low8(v / 256)
+    let b2 = drv_low8(v / 65536)
+    let b3 = drv_low8(v / 16777216)
+    drv_emit_byte(b0)
+    drv_emit_byte(b1)
+    drv_emit_byte(b2)
+    drv_emit_byte(b3)
+}
+
+fn drv_emit_u64_le(val: i64) with Mut, Div, Panic {
+    var v = val
+    if v < 0 { v = v + 9223372036854775807 }
+    let lo = v
+    let hi = v / 4294967296
+    drv_emit_u32_le(lo)
+    drv_emit_u32_le(hi)
+}
+
+fn drv_patch_u32_le(offset: i64, val: i64) with Mut, Div, Panic {
+    if offset >= 0 && offset + 4 <= DRV_CODE_LEN {
+        var v = val
+        if v < 0 { v = v + 4294967296 }
+        let b0 = drv_low8(v)
+        let b1 = drv_low8(v / 256)
+        let b2 = drv_low8(v / 65536)
+        let b3 = drv_low8(v / 16777216)
+        DRV_CODE_BYTES[offset as usize] = b0 as i8
+        DRV_CODE_BYTES[(offset + 1) as usize] = b1 as i8
+        DRV_CODE_BYTES[(offset + 2) as usize] = b2 as i8
+        DRV_CODE_BYTES[(offset + 3) as usize] = b3 as i8
+    }
+}
+
+fn drv_modrm_rr(dst: i64, src: i64) -> i64 { 192 + (src * 8) + dst }
+fn drv_modrm_rm_imm(dst: i64) -> i64 { 192 + dst }
+fn drv_ir_slot_offset(vreg: i64) -> i64 { 0 - ((vreg + 1) * 8) }
+
+fn drv_patch_frame_size(fn_id: i64, vreg_count: i64) with Mut, Div, Panic {
+    if fn_id < 0 || fn_id >= 2048 { return }
+    let fn_start = DRV_FN_OFFSETS[fn_id as usize]
+    if fn_start < 0 { return }
+    let raw = (vreg_count + 1) * 8
+    let frame = ((raw + 15) / 16) * 16
+    drv_patch_u32_le(fn_start + 7, frame)
+}
+
+fn drv_param_reg(idx: i64) -> i64 {
+    if idx == 0 { return 7 }
+    if idx == 1 { return 6 }
+    if idx == 2 { return 2 }
+    if idx == 3 { return 1 }
+    if idx == 4 { return 8 }
+    if idx == 5 { return 9 }
+    -1
+}
+
+fn drv_align_page(offset: i64) -> i64 with Div {
+    let q = offset / 4096
+    let r = offset - (q * 4096)
+    if r == 0 { return offset }
+    offset + (4096 - r)
+}
+
+fn drv_global_stride() -> i64 { 262144 }
+fn drv_driver_data_len() -> i64 { 21233664 }  // 81 global slots * 262144 stride
+
+fn drv_emit_mov_reg_imm32(reg: i64, val: i64) with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(199)
+    drv_emit_byte(drv_modrm_rm_imm(reg))
+    drv_emit_u32_le(val)
+}
+
+fn drv_emit_mov_reg_imm64(reg: i64, val: i64) with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(184 + reg)
+    drv_emit_u64_le(val)
+}
+
+fn drv_emit_mov_reg_imm(reg: i64, val: i64) with Mut, Div, Panic {
+    if val >= -2147483648 && val <= 2147483647 {
+        drv_emit_mov_reg_imm32(reg, val)
+    } else {
+        drv_emit_mov_reg_imm64(reg, val)
+    }
+}
+
+fn drv_emit_mov_rax_imm(val: i64) with Mut, Div, Panic { drv_emit_mov_reg_imm(0, val) }
+
+fn drv_emit_mov_reg_reg(dst: i64, src: i64) with Mut, Div, Panic {
+    if dst >= 8 || src >= 8 {
+        var rex = 72
+        if src >= 8 { rex = rex + 4 }
+        if dst >= 8 { rex = rex + 1 }
+        drv_emit_byte(rex)
+        drv_emit_byte(137)
+        drv_emit_byte(drv_modrm_rr(dst - ((dst / 8) * 8), src - ((src / 8) * 8)))
+    } else {
+        drv_emit_byte(72)
+        drv_emit_byte(137)
+        drv_emit_byte(drv_modrm_rr(dst, src))
+    }
+}
+
+fn drv_emit_mov_rdi_rax() with Mut, Div, Panic { drv_emit_mov_reg_reg(7, 0) }
+
+fn drv_emit_syscall() with Mut, Div, Panic {
+    drv_emit_byte(15)
+    drv_emit_byte(5)
+}
+
+fn drv_emit_ret() with Mut, Div, Panic { drv_emit_byte(195) }
+fn drv_emit_push_rbp() with Mut, Div, Panic { drv_emit_byte(85) }
+fn drv_emit_pop_rbp() with Mut, Div, Panic { drv_emit_byte(93) }
+fn drv_emit_push_rax() with Mut, Div, Panic { drv_emit_byte(80) }
+fn drv_emit_pop_rbx() with Mut, Div, Panic { drv_emit_byte(91) }
+fn drv_emit_pop_rax() with Mut, Div, Panic { drv_emit_byte(88) }
+fn drv_emit_push_rdi() with Mut, Div, Panic { drv_emit_byte(87) }
+fn drv_emit_push_rdx() with Mut, Div, Panic { drv_emit_byte(82) }
+
+fn drv_emit_mov_rbp_rsp() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(137)
+    drv_emit_byte(229)
+}
+
+fn drv_emit_mov_rsp_rbp() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(137)
+    drv_emit_byte(236)
+}
+
+fn drv_emit_sub_rsp_imm32(val: i64) with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(129)
+    drv_emit_byte(236)
+    drv_emit_u32_le(val)
+}
+
+fn drv_emit_add_rsp_8() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(131)
+    drv_emit_byte(196)
+    drv_emit_byte(8)
+}
+
+fn drv_emit_lea_rax_rip_disp32(disp: i64) with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(141)
+    drv_emit_byte(5)
+    drv_emit_u32_le(disp)
+}
+
+fn drv_emit_lea_rax_rbp_disp32(disp: i64) with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(141)
+    drv_emit_byte(133)
+    drv_emit_u32_le(disp)
+}
+
+fn drv_emit_load_rbp_disp32_reg(reg: i64, disp: i64) with Mut, Div, Panic {
+    if reg >= 8 {
+        drv_emit_byte(76)
+        drv_emit_byte(139)
+        drv_emit_byte(128 + ((reg - 8) * 8) + 5)
+        drv_emit_u32_le(disp)
+    } else {
+        drv_emit_byte(72)
+        drv_emit_byte(139)
+        drv_emit_byte(128 + (reg * 8) + 5)
+        drv_emit_u32_le(disp)
+    }
+}
+
+fn drv_emit_store_rbp_disp32_reg(reg: i64, disp: i64) with Mut, Div, Panic {
+    if reg >= 8 {
+        drv_emit_byte(76)
+        drv_emit_byte(137)
+        drv_emit_byte(128 + ((reg - 8) * 8) + 5)
+        drv_emit_u32_le(disp)
+    } else {
+        drv_emit_byte(72)
+        drv_emit_byte(137)
+        drv_emit_byte(128 + (reg * 8) + 5)
+        drv_emit_u32_le(disp)
+    }
+}
+
+fn drv_core_load_temp_to_rax(temp: i64) with Mut, Div, Panic {
+    let disp = drv_ir_slot_offset(temp)
+    drv_emit_byte(72)
+    drv_emit_byte(139)
+    drv_emit_byte(133)
+    drv_emit_u32_le(disp)
+}
+
+fn drv_core_store_rax_to_temp(temp: i64) with Mut, Div, Panic {
+    let disp = drv_ir_slot_offset(temp)
+    drv_emit_byte(72)
+    drv_emit_byte(137)
+    drv_emit_byte(133)
+    drv_emit_u32_le(disp)
+}
+
+fn drv_emit_load_temp_to_xmm0(temp: i64) with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(15)
+    drv_emit_byte(16)
+    drv_emit_byte(133)
+    drv_emit_u32_le(drv_ir_slot_offset(temp))
+}
+
+fn drv_emit_load_temp_to_xmm1(temp: i64) with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(15)
+    drv_emit_byte(16)
+    drv_emit_byte(141)
+    drv_emit_u32_le(drv_ir_slot_offset(temp))
+}
+
+fn drv_emit_store_xmm0_to_temp(temp: i64) with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(15)
+    drv_emit_byte(17)
+    drv_emit_byte(133)
+    drv_emit_u32_le(drv_ir_slot_offset(temp))
+}
+
+fn drv_emit_movsd_xmm0_rsp() with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(15)
+    drv_emit_byte(16)
+    drv_emit_byte(4)
+    drv_emit_byte(36)
+}
+
+fn drv_emit_cvtsi2sd_xmm0_rax() with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(42)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_cvtsi2sd_xmm1_rax() with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(42)
+    drv_emit_byte(200)
+}
+
+fn drv_emit_cvttsd2si_rax_xmm0() with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(44)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_sse2_xmm0_xmm1(code: i64) with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(15)
+    drv_emit_byte(code)
+    drv_emit_byte(193)
+}
+
+fn drv_emit_ucomisd_xmm0_xmm1() with Mut, Div, Panic {
+    drv_emit_byte(102)
+    drv_emit_byte(15)
+    drv_emit_byte(46)
+    drv_emit_byte(193)
+}
+
+fn drv_emit_mov_rax_mem_rax_rbx8() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(139)
+    drv_emit_byte(4)
+    drv_emit_byte(216)
+}
+
+fn drv_emit_load_rax_mem_rdx_rbx8() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(139)
+    drv_emit_byte(4)
+    drv_emit_byte(218)
+}
+
+fn drv_emit_store_rax_mem_rdx_rbx8() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(137)
+    drv_emit_byte(4)
+    drv_emit_byte(218)
+}
+
+fn drv_emit_movzx_rax_byte_rdx_rbx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(182)
+    drv_emit_byte(4)
+    drv_emit_byte(26)
+}
+
+fn drv_emit_store_al_mem_rdx_rbx() with Mut, Div, Panic {
+    drv_emit_byte(136)
+    drv_emit_byte(4)
+    drv_emit_byte(26)
+}
+
+fn drv_emit_load_rax_mem_rbx_disp32(disp: i64) with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(139)
+    drv_emit_byte(131)
+    drv_emit_u32_le(disp)
+}
+
+fn drv_emit_store_rax_mem_rbx_disp32(disp: i64) with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(137)
+    drv_emit_byte(131)
+    drv_emit_u32_le(disp)
+}
+
+fn drv_emit_call_rel32_placeholder() with Mut, Div, Panic {
+    drv_emit_byte(232)
+    drv_emit_u32_le(0)
+}
+
+fn drv_emit_jmp_rel32() with Mut, Div, Panic {
+    drv_emit_byte(233)
+    drv_emit_u32_le(0)
+}
+
+fn drv_emit_jz_rel32() with Mut, Div, Panic {
+    drv_emit_byte(15)
+    drv_emit_byte(132)
+    drv_emit_u32_le(0)
+}
+
+fn drv_emit_jnz_rel8(disp: i64) with Mut, Div, Panic {
+    drv_emit_byte(117)
+    drv_emit_byte(disp)
+}
+
+fn drv_emit_jz_rel8(disp: i64) with Mut, Div, Panic {
+    drv_emit_byte(116)
+    drv_emit_byte(disp)
+}
+
+fn drv_emit_jns_rel8(disp: i64) with Mut, Div, Panic {
+    drv_emit_byte(121)
+    drv_emit_byte(disp)
+}
+
+fn drv_emit_jmp_rel8(disp: i64) with Mut, Div, Panic {
+    drv_emit_byte(235)
+    drv_emit_byte(disp)
+}
+
+fn drv_emit_test_rax_rax() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(133)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_test_rdi_rdi() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(133)
+    drv_emit_byte(255)
+}
+
+fn drv_emit_test_al_al() with Mut, Div, Panic {
+    drv_emit_byte(132)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_cmp_rax_rbx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(57)
+    drv_emit_byte(216)
+}
+
+fn drv_emit_setcc_al(code: i64) with Mut, Div, Panic {
+    drv_emit_byte(15)
+    drv_emit_byte(code)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_movzx_rax_al() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(182)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_add_rax_rbx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(1)
+    drv_emit_byte(216)
+}
+
+fn drv_emit_sub_rax_rbx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(41)
+    drv_emit_byte(216)
+}
+
+fn drv_emit_imul_rax_rbx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(175)
+    drv_emit_byte(195)
+}
+
+fn drv_emit_cqo() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(153)
+}
+
+fn drv_emit_idiv_rcx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(247)
+    drv_emit_byte(249)
+}
+
+fn drv_emit_xor_rdx_rdx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(49)
+    drv_emit_byte(210)
+}
+
+fn drv_emit_div_rbx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(247)
+    drv_emit_byte(243)
+}
+
+fn drv_emit_neg_rax() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(247)
+    drv_emit_byte(216)
+}
+
+fn drv_emit_neg_rdi() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(247)
+    drv_emit_byte(223)
+}
+
+fn drv_emit_neg_rax_only() with Mut, Div, Panic { drv_emit_neg_rax() }
+
+fn drv_emit_xor_rdx_rdx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(49)
+    drv_emit_byte(210)
+}
+
+fn drv_emit_div_rcx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(247)
+    drv_emit_byte(241)
+}
+
+fn drv_emit_cmp_rax_imm8(imm: i64) with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(131)
+    drv_emit_byte(248)
+    drv_emit_byte(imm)
+}
+
+fn drv_emit_jae_rel8(disp: i64) with Mut, Div, Panic {
+    drv_emit_byte(115)
+    drv_emit_byte(disp)
+}
+
+fn drv_emit_sub_rsi_imm8(imm: i64) with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(131)
+    drv_emit_byte(238)
+    drv_emit_byte(imm)
+}
+
+fn drv_emit_xor_rcx_rcx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(49)
+    drv_emit_byte(201)
+}
+
+fn drv_emit_xor_rax_rax() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(49)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_xor_r8_r8() with Mut, Div, Panic {
+    drv_emit_byte(77)
+    drv_emit_byte(49)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_inc_r8() with Mut, Div, Panic {
+    drv_emit_byte(73)
+    drv_emit_byte(255)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_test_r8_r8() with Mut, Div, Panic {
+    drv_emit_byte(77)
+    drv_emit_byte(133)
+    drv_emit_byte(192)
+}
+
+fn drv_emit_mov_byte_mem_rsi_imm8(imm: i64) with Mut, Div, Panic {
+    drv_emit_byte(198)
+    drv_emit_byte(6)
+    drv_emit_byte(imm)
+}
+
+fn drv_emit_mov_byte_mem_rsi_dl() with Mut, Div, Panic {
+    drv_emit_byte(136)
+    drv_emit_byte(22)
+}
+
+fn drv_emit_dec_rsi() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(255)
+    drv_emit_byte(206)
+}
+
+fn drv_emit_inc_rsi() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(255)
+    drv_emit_byte(198)
+}
+
+fn drv_emit_inc_rcx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(255)
+    drv_emit_byte(193)
+}
+
+fn drv_emit_inc_rdi() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(255)
+    drv_emit_byte(199)
+}
+
+fn drv_emit_add_rdx_imm8(imm: i64) with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(131)
+    drv_emit_byte(194)
+    drv_emit_byte(imm)
+}
+
+fn drv_emit_mov_rsi_rsp() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(137)
+    drv_emit_byte(230)
+}
+
+fn drv_emit_movzx_rax_byte_rdi() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(182)
+    drv_emit_byte(7)
+}
+
+fn drv_emit_movzx_rax_byte_rdi_rbx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(182)
+    drv_emit_byte(4)
+    drv_emit_byte(31)
+}
+
+fn drv_encode_reloc_target(kind_code: i64, target: i64) -> i64 {
+    (kind_code * 1000000000) + target
+}
+
+fn drv_decode_reloc_kind(encoded: i64) -> i64 with Div {
+    encoded / 1000000000
+}
+
+fn drv_decode_reloc_target(encoded: i64) -> i64 with Div {
+    encoded - (drv_decode_reloc_kind(encoded) * 1000000000)
+}
+
+fn drv_emit_cmp_al_mem_rsi() with Mut, Div, Panic {
+    drv_emit_byte(58)
+    drv_emit_byte(6)
+}
+
+fn drv_add_reloc(patch_offset: i64, kind_code: i64, target: i64) with Mut, Panic {
+    let idx = DRV_RELOC_COUNT
+    if idx >= 0 && idx < 4096 {
+        DRV_RELOC_OFFSETS[idx as usize] = patch_offset
+        DRV_RELOC_TARGETS[idx as usize] = drv_encode_reloc_target(kind_code, target)
+        DRV_RELOC_COUNT = idx + 1
+    }
+}
+
+fn drv_add_call_reloc(patch_offset: i64, target_fn: i64) with Mut, Panic {
+    drv_add_reloc(patch_offset, 1, target_fn)
+}
+
+fn drv_add_rodata_reloc(patch_offset: i64, ro_off: i64) with Mut, Panic {
+    drv_add_reloc(patch_offset, 2, ro_off)
+}
+
+fn drv_add_data_reloc(patch_offset: i64, data_off: i64) with Mut, Panic {
+    drv_add_reloc(patch_offset, 3, data_off)
+}
+
+fn drv_define_label(label_id: i64) with Mut, Panic {
+    if label_id >= 0 && label_id < 256 {
+        DRV_LABEL_OFFSETS[label_id as usize] = DRV_CODE_LEN
+    }
+}
+
+fn drv_add_label_patch(patch_offset: i64, label_id: i64) with Mut, Panic {
+    let idx = DRV_LABEL_PATCH_COUNT
+    if idx >= 0 && idx < 256 {
+        DRV_LABEL_PATCH_OFFSETS[idx as usize] = patch_offset
+        DRV_LABEL_PATCH_IDS[idx as usize] = label_id
+        DRV_LABEL_PATCH_COUNT = idx + 1
+    }
+}
+
+fn drv_patch_labels() with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < DRV_LABEL_PATCH_COUNT {
+        let off = DRV_LABEL_PATCH_OFFSETS[i as usize]
+        let lid = DRV_LABEL_PATCH_IDS[i as usize]
+        if lid >= 0 && lid < 256 {
+            let target = DRV_LABEL_OFFSETS[lid as usize]
+            let rel = target - (off + 4)
+            drv_patch_u32_le(off, rel)
+        }
+        i = i + 1
+    }
+}
+
+fn drv_reset_function_state() with Mut, Panic {
+    DRV_LABEL_PATCH_COUNT = 0
+    var i: i64 = 0
+    while i < 256 {
+        DRV_LABEL_OFFSETS[i as usize] = -1
+        i = i + 1
+    }
+}
+
+fn drv_reset_codegen(fn_count: i64) with Mut, Panic {
+    DRV_CODE_LEN = 0
+    DRV_RODATA_LEN = 0
+    DRV_RELOC_COUNT = 0
+    DRV_FN_COUNT = fn_count
+    DRV_ENTRY_OFFSET = 0
+    DRV_LABEL_PATCH_COUNT = 0
+    var i: i64 = 0
+    while i < 2048 {
+        DRV_FN_OFFSETS[i as usize] = -1
+        i = i + 1
+    }
+    i = 0
+    while i < 256 {
+        DRV_LABEL_OFFSETS[i as usize] = -1
+        i = i + 1
+    }
+}
+
+fn drv_rodata_append_byte(byte: i64) with Mut, Div, Panic {
+    let p = DRV_RODATA_LEN
+    if p >= 0 && p < 65536 {
+        DRV_RODATA_BYTES[p as usize] = drv_low8(byte) as i8
+        DRV_RODATA_LEN = p + 1
+    }
+}
+
+fn driver_append_ufn_string_literal(idx: i64) -> i64 with Mut, Panic, Div {
+    let offset = DRV_RODATA_LEN
+    let start = V2_UFN_STR_START[idx as usize] + 1
+    let end = V2_UFN_STR_END[idx as usize] - 1
+    var i: i64 = start
+    while i < end {
+        let ch = CURSOR_SOURCE[i as usize]
+        if ch == 92 as i8 && i + 1 < end {
+            let esc = CURSOR_SOURCE[(i + 1) as usize]
+            if esc == 110 as i8 { drv_rodata_append_byte(10) }
+            else if esc == 116 as i8 { drv_rodata_append_byte(9) }
+            else if esc == 114 as i8 { drv_rodata_append_byte(13) }
+            else if esc == 34 as i8 { drv_rodata_append_byte(34) }
+            else if esc == 92 as i8 { drv_rodata_append_byte(92) }
+            else { drv_rodata_append_byte(esc as i64) }
+            i = i + 2
+        } else {
+            drv_rodata_append_byte(ch as i64)
+            i = i + 1
+        }
+    }
+    drv_rodata_append_byte(0)
+    offset
+}
+
+fn drv_begin_function(fn_id: i64) with Mut, Panic, Div {
+    drv_reset_function_state()
+    if fn_id >= 0 && fn_id < 2048 {
+        DRV_FN_OFFSETS[fn_id as usize] = DRV_CODE_LEN
+    }
+    drv_emit_push_rbp()
+    drv_emit_mov_rbp_rsp()
+    drv_emit_sub_rsp_imm32(262144)
+    var i: i64 = 0
+    while i < V2_CURRENT_PARAM_COUNT && i < 6 {
+        let vreg = V2_CURRENT_PARAM_REGS[i as usize]
+        let preg = drv_param_reg(i)
+        if vreg >= 0 && preg >= 0 {
+            drv_emit_store_rbp_disp32_reg(preg, drv_ir_slot_offset(vreg))
+        }
+        i = i + 1
+    }
+}
+
+fn drv_emit_load_imm(dst: i64, value: i64) with Mut, Panic, Div {
+    drv_emit_mov_rax_imm(value)
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_load_string_offset(dst: i64, ro_off: i64) with Mut, Panic, Div {
+    let lea_pos = DRV_CODE_LEN
+    drv_emit_lea_rax_rip_disp32(0)
+    let reloc_idx = DRV_RELOC_COUNT
+    if reloc_idx >= 0 && reloc_idx < 4096 {
+        DRV_RELOC_OFFSETS[reloc_idx as usize] = lea_pos + 3
+        DRV_RELOC_TARGETS[reloc_idx as usize] = drv_encode_reloc_target(2, ro_off)
+        DRV_RELOC_COUNT = reloc_idx + 1
+    }
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_any_binop(dst: i64, lhs: i64, op_code: i64, rhs: i64) -> bool with Mut, Panic, Div {
+    if op_code == 1 {
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_push_rax()
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_pop_rbx()
+        drv_emit_add_rax_rbx()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    if op_code == 2 {
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_push_rax()
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_pop_rbx()
+        drv_emit_sub_rax_rbx()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    if op_code == 3 {
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_push_rax()
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_pop_rbx()
+        drv_emit_imul_rax_rbx()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    if op_code == 4 {
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_mov_reg_reg(1, 0)
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_cqo()
+        drv_emit_idiv_rcx()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    if op_code >= 5 && op_code <= 10 {
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_push_rax()
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_pop_rbx()
+        drv_emit_cmp_rax_rbx()
+        if op_code == 5 { drv_emit_setcc_al(148) }
+        else if op_code == 6 { drv_emit_setcc_al(149) }
+        else if op_code == 7 { drv_emit_setcc_al(156) }
+        else if op_code == 8 { drv_emit_setcc_al(158) }
+        else if op_code == 9 { drv_emit_setcc_al(159) }
+        else { drv_emit_setcc_al(157) }
+        drv_emit_movzx_rax_al()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    false
+}
+
+fn drv_emit_load_f64_scaled(dst: i64, mantissa: i64, scale: i64) with Mut, Panic, Div {
+    drv_emit_mov_rax_imm(mantissa)
+    drv_emit_cvtsi2sd_xmm0_rax()
+    drv_emit_mov_rax_imm(scale)
+    drv_emit_cvtsi2sd_xmm1_rax()
+    drv_emit_sse2_xmm0_xmm1(94)
+    drv_emit_store_xmm0_to_temp(dst)
+}
+
+fn drv_emit_f64_binop(dst: i64, lhs: i64, op_code: i64, rhs: i64) -> bool with Mut, Panic, Div {
+    drv_emit_load_temp_to_xmm0(lhs)
+    drv_emit_load_temp_to_xmm1(rhs)
+    if op_code == 1 {
+        drv_emit_sse2_xmm0_xmm1(88)
+        drv_emit_store_xmm0_to_temp(dst)
+        return true
+    }
+    if op_code == 2 {
+        drv_emit_sse2_xmm0_xmm1(92)
+        drv_emit_store_xmm0_to_temp(dst)
+        return true
+    }
+    if op_code == 3 {
+        drv_emit_sse2_xmm0_xmm1(89)
+        drv_emit_store_xmm0_to_temp(dst)
+        return true
+    }
+    if op_code == 4 {
+        drv_emit_sse2_xmm0_xmm1(94)
+        drv_emit_store_xmm0_to_temp(dst)
+        return true
+    }
+    if op_code >= 5 && op_code <= 10 {
+        drv_emit_ucomisd_xmm0_xmm1()
+        if op_code == 5 { drv_emit_setcc_al(148) }
+        else if op_code == 6 { drv_emit_setcc_al(149) }
+        else if op_code == 7 { drv_emit_setcc_al(146) }
+        else if op_code == 8 { drv_emit_setcc_al(150) }
+        else if op_code == 9 { drv_emit_setcc_al(151) }
+        else { drv_emit_setcc_al(147) }
+        drv_emit_movzx_rax_al()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    false
+}
+
+fn drv_emit_sqrt_f64(dst: i64, src: i64) with Mut, Div, Panic {
+    drv_emit_load_temp_to_xmm1(src)
+    drv_emit_sse2_xmm0_xmm1(81)
+    drv_emit_store_xmm0_to_temp(dst)
+}
+
+fn drv_emit_call_builtin0(fn_id: i64) with Mut, Panic, Div {
+    let call_pos = DRV_CODE_LEN
+    drv_emit_call_rel32_placeholder()
+    drv_add_call_reloc(call_pos + 1, fn_id)
+}
+
+fn drv_emit_print_int_from_rax() with Mut, Panic, Div {
+    drv_emit_mov_rdi_rax()
+    drv_emit_call_builtin0(V2_BUILTIN_PRINT_INT)
+}
+
+fn drv_emit_print_char_imm(ch: i64) with Mut, Panic, Div {
+    drv_emit_mov_reg_imm(7, ch)
+    drv_emit_call_builtin0(V2_BUILTIN_PRINT_CHAR)
+}
+
+fn drv_emit_print_f64_from_xmm0() with Mut, Panic, Div {
+    // Scale value by 1000: rax = trunc(value * 1000) as signed i64
+    drv_emit_mov_rax_imm(1000)
+    drv_emit_cvtsi2sd_xmm1_rax()
+    drv_emit_sse2_xmm0_xmm1(89)
+    drv_emit_cvttsd2si_rax_xmm0()
+    // Handle sign: push/pop preserves rax across print_char call (which clobbers rax)
+    // jns_rel8(17) skips: push(1) + print_char(12) + pop(1) + neg(3) = 17 bytes
+    drv_emit_test_rax_rax()
+    drv_emit_jns_rel8(17)
+    drv_emit_push_rax()
+    drv_emit_print_char_imm(45)
+    drv_emit_pop_rax()
+    drv_emit_neg_rax()
+    // Unsigned divide: rax(≥0) / 1000 → rax=int part, rdx=frac (0..999)
+    drv_emit_mov_reg_imm(1, 1000)
+    drv_emit_xor_rdx_rdx()
+    drv_emit_div_rcx()
+    // Print integer part and '.'
+    drv_emit_push_rdx()
+    drv_emit_print_int_from_rax()
+    drv_emit_print_char_imm(46)
+    drv_emit_pop_rax()
+    // Print frac as exactly 3 digits — push/pop preserves frac across each print_char call
+    // Pattern: push frac; [cmp; jae_rel8(14); pop+push+print_char('0'); ]; pop frac
+    // jae_rel8(14) skips: pop(1) + push(1) + print_char(12) = 14 bytes
+    drv_emit_push_rax()
+    drv_emit_cmp_rax_imm8(100)
+    drv_emit_jae_rel8(14)
+    drv_emit_pop_rax()
+    drv_emit_push_rax()
+    drv_emit_print_char_imm(48)
+    drv_emit_pop_rax()
+    drv_emit_push_rax()
+    drv_emit_cmp_rax_imm8(10)
+    drv_emit_jae_rel8(14)
+    drv_emit_pop_rax()
+    drv_emit_push_rax()
+    drv_emit_print_char_imm(48)
+    drv_emit_pop_rax()
+    drv_emit_print_int_from_rax()
+}
+
+fn drv_emit_print_f64(arg_reg: i64) with Mut, Panic, Div {
+    drv_emit_load_temp_to_xmm0(arg_reg)
+    drv_emit_print_f64_from_xmm0()
+}
+
+fn drv_emit_call_argc(dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut, Panic, Div {
+    if argc >= 1 { drv_emit_load_rbp_disp32_reg(7, drv_ir_slot_offset(arg0)) }
+    if argc >= 2 { drv_emit_load_rbp_disp32_reg(6, drv_ir_slot_offset(arg0 + 1)) }
+    if argc >= 3 { drv_emit_load_rbp_disp32_reg(2, drv_ir_slot_offset(arg0 + 2)) }
+    if argc >= 4 { drv_emit_load_rbp_disp32_reg(1, drv_ir_slot_offset(arg0 + 3)) }
+    if argc >= 5 { drv_emit_load_rbp_disp32_reg(8, drv_ir_slot_offset(arg0 + 4)) }
+    if argc >= 6 { drv_emit_load_rbp_disp32_reg(9, drv_ir_slot_offset(arg0 + 5)) }
+    let call_pos = DRV_CODE_LEN
+    drv_emit_call_rel32_placeholder()
+    drv_add_call_reloc(call_pos + 1, fn_id)
+    if dst >= 0 { drv_core_store_rax_to_temp(dst) }
+}
+
+fn drv_emit_call1(dst: i64, fn_id: i64, arg: i64, argc: i64) with Mut, Panic, Div {
+    if argc > 0 {
+        drv_core_load_temp_to_rax(arg)
+        drv_emit_mov_rdi_rax()
+    }
+    let call_pos = DRV_CODE_LEN
+    drv_emit_call_rel32_placeholder()
+    drv_add_call_reloc(call_pos + 1, fn_id)
+    if dst >= 0 { drv_core_store_rax_to_temp(dst) }
+}
+
+fn drv_emit_return(src: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(src)
+    drv_emit_mov_rsp_rbp()
+    drv_emit_pop_rbp()
+    drv_emit_ret()
+}
+
+fn drv_emit_return_struct(base_reg: i64, fcount: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(base_reg)
+    if fcount >= 2 { drv_emit_load_rbp_disp32_reg(2, drv_ir_slot_offset(base_reg + 1)) }
+    if fcount >= 3 { drv_emit_load_rbp_disp32_reg(1, drv_ir_slot_offset(base_reg + 2)) }
+    if fcount >= 4 { drv_emit_load_rbp_disp32_reg(8, drv_ir_slot_offset(base_reg + 3)) }
+    if fcount >= 5 { drv_emit_load_rbp_disp32_reg(9, drv_ir_slot_offset(base_reg + 4)) }
+    if fcount >= 6 { drv_emit_load_rbp_disp32_reg(10, drv_ir_slot_offset(base_reg + 5)) }
+    drv_emit_mov_rsp_rbp()
+    drv_emit_pop_rbp()
+    drv_emit_ret()
+}
+
+fn drv_emit_reg_to_temp(reg: i64, dst: i64) with Mut, Panic, Div {
+    if dst >= 0 { drv_emit_store_rbp_disp32_reg(reg, drv_ir_slot_offset(dst)) }
+}
+
+fn drv_emit_rdx_to_temp(dst: i64) with Mut, Panic, Div {
+    drv_emit_reg_to_temp(2, dst)
+}
+
+fn drv_emit_copy(dst: i64, src: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(src)
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_temp_addr(dst: i64, src: i64) with Mut, Panic, Div {
+    drv_emit_lea_rax_rbp_disp32(drv_ir_slot_offset(src))
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_load_ref_field(dst: i64, base_ref: i64, field_offset_words: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(base_ref)
+    drv_emit_mov_reg_reg(3, 0)
+    drv_emit_load_rax_mem_rbx_disp32(field_offset_words * 8)
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_store_ref_field(base_ref: i64, field_offset_words: i64, src: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(base_ref)
+    drv_emit_push_rax()
+    drv_core_load_temp_to_rax(src)
+    drv_emit_pop_rbx()
+    drv_emit_store_rax_mem_rbx_disp32(field_offset_words * 8)
+}
+
+fn drv_global_is_byte(global_id: i64) -> bool {
+    global_id == V2_GLOBAL_CURSOR_SOURCE || global_id == V2_GLOBAL_DRV_CODE_BYTES || global_id == V2_GLOBAL_DRV_RODATA_BYTES || global_id == V2_GLOBAL_DRV_ELF_BYTES
+}
+
+fn drv_emit_driver_global_load(dst: i64, global_id: i64, index_reg: i64) with Mut, Panic, Div {
+    let load_pos = DRV_CODE_LEN + 3
+    drv_emit_lea_rax_rip_disp32(0)
+    drv_add_data_reloc(load_pos, 4096 + (global_id * drv_global_stride()))
+    drv_emit_mov_reg_reg(2, 0)
+    drv_core_load_temp_to_rax(index_reg)
+    drv_emit_mov_reg_reg(3, 0)
+    if drv_global_is_byte(global_id) { drv_emit_movzx_rax_byte_rdx_rbx() }
+    else { drv_emit_load_rax_mem_rdx_rbx8() }
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_driver_global_store(global_id: i64, index_reg: i64, src: i64) with Mut, Panic, Div {
+    let load_pos = DRV_CODE_LEN + 3
+    drv_emit_lea_rax_rip_disp32(0)
+    drv_add_data_reloc(load_pos, 4096 + (global_id * drv_global_stride()))
+    drv_emit_mov_reg_reg(2, 0)
+    drv_core_load_temp_to_rax(index_reg)
+    drv_emit_mov_reg_reg(3, 0)
+    drv_core_load_temp_to_rax(src)
+    if drv_global_is_byte(global_id) { drv_emit_store_al_mem_rdx_rbx() }
+    else { drv_emit_store_rax_mem_rdx_rbx8() }
+}
+
+fn drv_emit_local_array_load(dst: i64, base_reg: i64, idx_reg: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(idx_reg)
+    drv_emit_neg_rax_only()
+    drv_emit_mov_reg_reg(3, 0)
+    drv_emit_lea_rax_rbp_disp32(drv_ir_slot_offset(base_reg))
+    drv_emit_mov_rax_mem_rax_rbx8()
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_local_array_store(base_reg: i64, idx_reg: i64, src: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(idx_reg)
+    drv_emit_neg_rax_only()
+    drv_emit_mov_reg_reg(3, 0)
+    drv_emit_lea_rax_rbp_disp32(drv_ir_slot_offset(base_reg))
+    drv_emit_mov_reg_reg(2, 0)
+    drv_core_load_temp_to_rax(src)
+    drv_emit_store_rax_mem_rdx_rbx8()
+}
+
+fn drv_emit_arg_count(dst: i64) with Mut, Panic, Div {
+    drv_emit_byte(73)
+    drv_emit_byte(139)
+    drv_emit_byte(6)
+    drv_emit_byte(72)
+    drv_emit_byte(131)
+    drv_emit_byte(232)
+    drv_emit_byte(1)
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_get_arg(dst: i64, arg_reg: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(arg_reg)
+    drv_emit_mov_reg_reg(3, 0)
+    drv_emit_byte(73)
+    drv_emit_byte(141)
+    drv_emit_byte(70)
+    drv_emit_byte(16)
+    drv_emit_mov_rax_mem_rax_rbx8()
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_str_len(dst: i64, arg_reg: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(arg_reg)
+    drv_emit_mov_reg_reg(7, 0)
+    drv_emit_xor_rcx_rcx()
+    drv_emit_movzx_rax_byte_rdi()
+    drv_emit_test_al_al()
+    drv_emit_jz_rel8(8)
+    drv_emit_inc_rdi()
+    drv_emit_inc_rcx()
+    drv_emit_jmp_rel8(-16)
+    drv_emit_mov_reg_reg(0, 1)
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_str_char_at(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(arg0_reg)
+    drv_emit_mov_reg_reg(7, 0)
+    drv_core_load_temp_to_rax(arg0_reg + 1)
+    drv_emit_mov_reg_reg(3, 0)
+    drv_emit_movzx_rax_byte_rdi_rbx()
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_str_eq(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(arg0_reg)
+    drv_emit_mov_reg_reg(7, 0)
+    drv_core_load_temp_to_rax(arg0_reg + 1)
+    drv_emit_mov_reg_reg(6, 0)
+    drv_emit_movzx_rax_byte_rdi()
+    drv_emit_cmp_al_mem_rsi()
+    drv_emit_jnz_rel8(12)
+    drv_emit_test_al_al()
+    drv_emit_jz_rel8(13)
+    drv_emit_inc_rdi()
+    drv_emit_inc_rsi()
+    drv_emit_jmp_rel8(-20)
+    drv_emit_xor_rax_rax()
+    drv_emit_jmp_rel8(7)
+    drv_emit_mov_rax_imm(1)
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_driver_read_file(dst: i64, path_reg: i64, source_global_id: i64, len_global_id: i64, max_len: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(path_reg)
+    drv_emit_mov_reg_reg(7, 0)
+    drv_emit_mov_rax_imm(2)
+    drv_emit_mov_reg_imm(6, 0)
+    drv_emit_mov_reg_imm(2, 0)
+    drv_emit_syscall()
+    drv_emit_mov_reg_reg(12, 0)
+    drv_emit_mov_reg_reg(7, 12)
+    let source_pos = DRV_CODE_LEN + 3
+    drv_emit_lea_rax_rip_disp32(0)
+    drv_add_data_reloc(source_pos, 4096 + (source_global_id * drv_global_stride()))
+    drv_emit_mov_reg_reg(6, 0)
+    drv_emit_mov_reg_imm(2, max_len)
+    drv_emit_mov_rax_imm(0)
+    drv_emit_syscall()
+    drv_core_store_rax_to_temp(dst)
+    drv_emit_push_rax()
+    let len_pos = DRV_CODE_LEN + 3
+    drv_emit_lea_rax_rip_disp32(0)
+    drv_add_data_reloc(len_pos, 4096 + (len_global_id * drv_global_stride()))
+    drv_emit_mov_reg_reg(2, 0)
+    drv_emit_mov_reg_imm(3, 0)
+    drv_emit_pop_rax()
+    drv_emit_store_rax_mem_rdx_rbx8()
+}
+
+fn compile_ufn_from_globals(fn_id: i64) -> bool with IO, Mut, Panic, Div {
+    drv_begin_function(fn_id)
+    var i: i64 = 0
+    while i < V2_UFN_COUNT {
+        let op = V2_UFN_OPS[i as usize]
+        let src1_val = V2_UFN_SRC1[i as usize]
+        if op == UFN_LOAD_IMM {
+            drv_emit_load_imm(V2_UFN_DST[i as usize], V2_UFN_IMM[i as usize])
+        } else if op == UFN_LOAD_F64_SCALED {
+            drv_emit_load_f64_scaled(V2_UFN_DST[i as usize], V2_UFN_IMM[i as usize], V2_UFN_FLOAT_SCALE[i as usize])
+        } else if op == UFN_LOAD_STRING {
+            let ro_off = driver_append_ufn_string_literal(i)
+            drv_emit_load_string_offset(V2_UFN_DST[i as usize], ro_off)
+        } else if op == UFN_BINOP {
+            if !drv_emit_any_binop(V2_UFN_DST[i as usize], src1_val, V2_UFN_BINOP_CODE[i as usize], V2_UFN_SRC2[i as usize]) {
+                return false
+            }
+        } else if op == UFN_F64_BINOP {
+            if !drv_emit_f64_binop(V2_UFN_DST[i as usize], src1_val, V2_UFN_BINOP_CODE[i as usize], V2_UFN_SRC2[i as usize]) {
+                return false
+            }
+        } else if op == UFN_LABEL {
+            drv_define_label(V2_UFN_LABEL_ID[i as usize])
+        } else if op == UFN_JUMP {
+            let jmp_pos = DRV_CODE_LEN
+            drv_emit_jmp_rel32()
+            drv_add_label_patch(jmp_pos + 1, V2_UFN_LABEL_ID[i as usize])
+        } else if op == UFN_BRANCH_FALSE {
+            drv_core_load_temp_to_rax(V2_UFN_SRC1[i as usize])
+            drv_emit_test_rax_rax()
+            let jz_pos = DRV_CODE_LEN
+            drv_emit_jz_rel32()
+            drv_add_label_patch(jz_pos + 2, V2_UFN_LABEL_ID[i as usize])
+        } else if op == UFN_RETURN {
+            drv_emit_return(V2_UFN_SRC1[i as usize])
+        } else if op == UFN_RETURN_STRUCT {
+            drv_emit_return_struct(V2_UFN_SRC1[i as usize], V2_UFN_IMM[i as usize])
+        } else if op == UFN_CALL {
+            let call_argc = V2_UFN_IMM[i as usize]
+            let call_fn_id = V2_UFN_FN_ID[i as usize]
+            if call_fn_id == V2_BUILTIN_ARG_COUNT {
+                drv_emit_arg_count(V2_UFN_DST[i as usize])
+            } else if call_fn_id == V2_BUILTIN_PRINT_F64 {
+                drv_emit_print_f64(V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_SQRT_F64 {
+                drv_emit_sqrt_f64(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_GET_ARG {
+                drv_emit_get_arg(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_STR_LEN {
+                drv_emit_str_len(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_STR_CHAR_AT {
+                drv_emit_str_char_at(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_STR_EQ {
+                drv_emit_str_eq(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_PT_READ_KIND_CODE {
+                drv_emit_driver_global_load(V2_UFN_DST[i as usize], V2_GLOBAL_PT_KIND_CODE, V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_PT_READ_START {
+                drv_emit_driver_global_load(V2_UFN_DST[i as usize], V2_GLOBAL_PT_START, V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_PT_READ_END {
+                drv_emit_driver_global_load(V2_UFN_DST[i as usize], V2_GLOBAL_PT_END, V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_PT_READ_INT_VALUE {
+                drv_emit_driver_global_load(V2_UFN_DST[i as usize], V2_GLOBAL_PT_INT_VALUE, V2_UFN_SRC1[i as usize])
+            } else if call_fn_id == V2_BUILTIN_DRIVER_READ_FILE_TO_GLOBALS {
+                drv_emit_driver_read_file(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_GLOBAL_CURSOR_SOURCE, V2_GLOBAL_CURSOR_SOURCE_LEN, drv_global_stride())
+            } else if call_argc > 1 {
+                drv_emit_call_argc(V2_UFN_DST[i as usize], V2_UFN_FN_ID[i as usize], V2_UFN_SRC1[i as usize], call_argc)
+            } else {
+                drv_emit_call1(V2_UFN_DST[i as usize], V2_UFN_FN_ID[i as usize], V2_UFN_SRC1[i as usize], call_argc)
+            }
+        } else if op == UFN_CALL_STRUCT_RESULT {
+            drv_emit_call_argc(V2_UFN_DST[i as usize], V2_UFN_FN_ID[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_IMM[i as usize])
+            let rf = V2_UFN_RESULT_FCOUNT[i as usize]
+            if V2_UFN_DST[i as usize] >= 0 {
+                if rf >= 2 { drv_emit_reg_to_temp(2, V2_UFN_DST[i as usize] + 1) }
+                if rf >= 3 { drv_emit_reg_to_temp(1, V2_UFN_DST[i as usize] + 2) }
+                if rf >= 4 { drv_emit_reg_to_temp(8, V2_UFN_DST[i as usize] + 3) }
+                if rf >= 5 { drv_emit_reg_to_temp(9, V2_UFN_DST[i as usize] + 4) }
+                if rf >= 6 { drv_emit_reg_to_temp(10, V2_UFN_DST[i as usize] + 5) }
+            }
+        } else if op == UFN_COPY {
+            drv_emit_copy(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+        } else if op == UFN_TEMP_ADDR {
+            drv_emit_temp_addr(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+        } else if op == UFN_LOAD_REF_FIELD {
+            drv_emit_load_ref_field(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_IMM[i as usize])
+        } else if op == UFN_STORE_REF_FIELD {
+            drv_emit_store_ref_field(V2_UFN_SRC1[i as usize], V2_UFN_IMM[i as usize], V2_UFN_SRC2[i as usize])
+        } else if op == UFN_GLOBAL_LOAD {
+            drv_emit_driver_global_load(V2_UFN_DST[i as usize], V2_UFN_IMM[i as usize], V2_UFN_SRC1[i as usize])
+        } else if op == UFN_GLOBAL_STORE {
+            drv_emit_driver_global_store(V2_UFN_IMM[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
+        } else if op == UFN_LOCAL_LOAD {
+            drv_emit_local_array_load(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
+        } else if op == UFN_LOCAL_STORE {
+            drv_emit_local_array_store(V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize], V2_UFN_DST[i as usize])
+        }
+        i = i + 1
+    }
+    drv_patch_labels()
+    true
+}
+
+fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    // Find fn name_str_pos
+    var name_pos: i64 = -1
+    var i: i64 = 0
+    while i + 1 < token_count {
+        if token_kind(i) == TK_FN && token_kind(i + 1) == TK_IDENT {
+            if toks_ident_eq(i + 1, fn_name_tok) {
+                name_pos = i + 1
+                i = token_count
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    if name_pos < 0 {
+        print("native_compile: unsupported_frontend fn=")
+        print_token_text(fn_name_tok)
+        print(" reason=name_not_found\n")
+        return false
+    }
+    let open_pos = find_fn_lbrace(token_count, name_pos)
+    if open_pos < 0 {
+        print("native_compile: unsupported_frontend fn=")
+        print_token_text(fn_name_tok)
+        print(" reason=no_open_brace\n")
+        return false
+    }
+    let close_pos = find_matching_rbrace(open_pos, token_count)
+    if close_pos < 0 {
+        print("native_compile: unsupported_frontend fn=")
+        print_token_text(fn_name_tok)
+        print(" reason=unbalanced_braces\n")
+        return false
+    }
+
+    var ctx = v2_driver_context_new()
+    reset_locals(&! ctx)
+    reset_user_fn_label_state()
+    reset_parse_unsupported()
+    V2_CURRENT_PARAM_COUNT = 0
+    var func: i64 = 0
+
+    // Parse parameters: fn name(param: type, ...) -> ...
+    // params are between '(' and ')'
+    var pp = name_pos + 1
+    while pp < open_pos && token_kind(pp) != TK_LPAREN { pp = pp + 1 }
+    if pp < open_pos && token_kind(pp) == TK_LPAREN {
+        var param_idx: i64 = 0
+        var ppos = pp + 1
+        while ppos < open_pos && token_kind(ppos) != TK_RPAREN {
+            if token_kind(ppos) == TK_IDENT {
+                let param_name_tok = ppos
+                // peek at type: param_name : TypeName
+                var param_sidx: i64 = -1
+                var param_is_ref: i64 = 0
+                var param_generic_f64: i64 = 0
+                if ppos + 2 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_IDENT {
+                    param_sidx = find_struct_idx_tok(ppos + 2)
+                    if ppos + 5 < open_pos && token_kind(ppos + 3) == TK_LT && token_kind(ppos + 4) == TK_IDENT && token_kind(ppos + 5) == TK_GT && token_text_eq(ppos + 4, "f64") {
+                        param_generic_f64 = 1
+                    }
+                }
+                if ppos + 3 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_AMPBANG && token_kind(ppos + 3) == TK_IDENT {
+                    param_sidx = find_struct_idx_tok(ppos + 3)
+                    param_is_ref = 1
+                }
+                if param_sidx >= 0 && param_is_ref != 0 {
+                    let vreg = alloc_reg(&! ctx)
+                    remember_ref_struct_local_tok(&! ctx, param_name_tok, vreg, param_sidx)
+                    if param_idx < 64 {
+                        V2_CURRENT_PARAM_REGS[param_idx as usize] = vreg
+                    }
+                    V2_CURRENT_PARAM_COUNT = param_idx + 1
+                    param_idx = param_idx + 1
+                } else if param_sidx >= 0 {
+                    // struct param: allocate flat_size consecutive vregs
+                    let flat_size = STRUCT_FLAT_SIZE[param_sidx as usize]
+                    let base_vreg = alloc_reg(&! ctx)
+                    var ri: i64 = 1
+                    while ri < flat_size { let _ = alloc_reg(&! ctx); ri = ri + 1 }
+                    remember_struct_local_tok(&! ctx, param_name_tok, base_vreg, param_sidx)
+                    if param_generic_f64 != 0 {
+                        mark_struct_scalar_regs_f64(base_vreg, param_sidx)
+                    } else {
+                        mark_struct_regs(base_vreg, param_sidx)
+                    }
+                    var pi: i64 = 0
+                    while pi < flat_size && param_idx + pi < 64 {
+                        V2_CURRENT_PARAM_REGS[(param_idx + pi) as usize] = base_vreg + pi
+                        pi = pi + 1
+                    }
+                    V2_CURRENT_PARAM_COUNT = param_idx + flat_size
+                    param_idx = param_idx + flat_size
+                } else {
+                    // scalar param
+                    let vreg = alloc_reg(&! ctx)
+                    remember_local_tok(&! ctx, param_name_tok, vreg)
+                    if ppos + 2 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_IDENT && token_text_eq(ppos + 2, "f64") {
+                        mark_reg_f64(vreg)
+                    }
+                    if param_idx < 64 {
+                        V2_CURRENT_PARAM_REGS[param_idx as usize] = vreg
+                    }
+                    V2_CURRENT_PARAM_COUNT = param_idx + 1
+                    param_idx = param_idx + 1
+                }
+                // skip past colon, type, optional comma
+                ppos = ppos + 1
+                while ppos < open_pos && token_kind(ppos) != TK_COMMA && token_kind(ppos) != TK_RPAREN {
+                    ppos = ppos + 1
+                }
+                if ppos < open_pos && token_kind(ppos) == TK_COMMA { ppos = ppos + 1 }
+            } else {
+                ppos = ppos + 1
+            }
+        }
+    }
+
+    // Parse body
+    V2_UFN_COUNT = 0
+    var _unused_func_ref: i64 = 0
+    parse_block_ir(&! _unused_func_ref, &! ctx, open_pos + 1, close_pos, token_count)
+    let default_ret = alloc_reg(&! ctx)
+    ufn_record_load_imm(default_ret, 0)
+    ufn_record_return(default_ret)
+    if V2_PARSE_UNSUPPORTED != 0 {
+        print("native_compile: unsupported_frontend fn=")
+        print_token_text(fn_name_tok)
+        print(" token=")
+        print_int(V2_PARSE_UNSUPPORTED_TOKEN)
+        print(" kind=")
+        print_int(V2_PARSE_UNSUPPORTED_KIND)
+        if V2_PARSE_UNSUPPORTED_REASON == 1 {
+            print(" reason=unresolved_call")
+        }
+        print(" text=")
+        print_token_text(V2_PARSE_UNSUPPORTED_TOKEN)
+        print("\n")
+        return false
+    }
+    if !compile_ufn_from_globals(fn_id) {
+        print("native_compile: user_fn_unsupported fn_id=")
+        print_int(fn_id)
+        print("\n")
+        return false
+    }
+    drv_patch_frame_size(fn_id, V2_NEXT_REG)
+    true
+}
+
+fn find_main_lbrace(token_count: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i + 2 < token_count {
+        if token_kind(i) == TK_FN && token_kind(i + 1) == TK_IDENT && token_text_eq(i + 1, "main") {
+            var j = i + 2
+            while j < token_count {
+                if token_kind(j) == TK_LBRACE {
+                    return j
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn find_matching_rbrace(open_idx: i64, token_count: i64) -> i64 with Mut, Panic {
+    var depth: i64 = 1
+    var i = open_idx + 1
+    while i < token_count {
+        let k = token_kind(i)
+        if k == TK_LBRACE { depth = depth + 1 }
+        if k == TK_RBRACE {
+            depth = depth - 1
+            if depth == 0 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn drv_begin_builtin(fn_id: i64) with Mut, Panic {
+    drv_reset_function_state()
+    if fn_id >= 0 && fn_id < 2048 {
+        DRV_FN_OFFSETS[fn_id as usize] = DRV_CODE_LEN
+    }
+}
+
+fn drv_emit_stdout_write() with Mut, Panic, Div {
+    drv_emit_mov_reg_imm(7, 1)
+    drv_emit_mov_rax_imm(1)
+    drv_emit_syscall()
+}
+
+fn drv_emit_builtin_print_str(fn_id: i64) with Mut, Panic, Div {
+    drv_begin_builtin(fn_id)
+    drv_emit_push_rbp()
+    drv_emit_mov_rbp_rsp()
+    drv_emit_mov_reg_reg(6, 7)
+    drv_emit_xor_rcx_rcx()
+    drv_emit_movzx_rax_byte_rdi()
+    drv_emit_test_al_al()
+    drv_emit_jz_rel8(8)
+    drv_emit_inc_rdi()
+    drv_emit_inc_rcx()
+    drv_emit_jmp_rel8(-16)
+    drv_emit_mov_reg_reg(2, 1)
+    drv_emit_stdout_write()
+    drv_emit_pop_rbp()
+    drv_emit_ret()
+}
+
+fn drv_emit_builtin_print_char(fn_id: i64) with Mut, Panic, Div {
+    drv_begin_builtin(fn_id)
+    drv_emit_push_rdi()
+    drv_emit_mov_rsi_rsp()
+    drv_emit_mov_reg_imm(2, 1)
+    drv_emit_stdout_write()
+    drv_emit_add_rsp_8()
+    drv_emit_ret()
+}
+
+fn drv_emit_builtin_print_int(fn_id: i64) with Mut, Panic, Div {
+    drv_begin_builtin(fn_id)
+    drv_emit_push_rbp()
+    drv_emit_mov_rbp_rsp()
+    drv_emit_sub_rsp_imm32(32)
+    drv_emit_xor_r8_r8()
+    drv_emit_test_rdi_rdi()
+    drv_emit_jns_rel8(6)
+    drv_emit_neg_rdi()
+    drv_emit_inc_r8()
+    drv_emit_mov_reg_reg(0, 7)
+    drv_emit_mov_reg_reg(6, 5)
+    drv_emit_sub_rsi_imm8(1)
+    drv_emit_xor_rcx_rcx()
+    drv_emit_xor_rdx_rdx()
+    drv_emit_mov_reg_imm(3, 10)
+    drv_emit_div_rbx()
+    drv_emit_add_rdx_imm8(48)
+    drv_emit_mov_byte_mem_rsi_dl()
+    drv_emit_dec_rsi()
+    drv_emit_inc_rcx()
+    drv_emit_test_rax_rax()
+    drv_emit_jnz_rel8(-30)
+    drv_emit_test_r8_r8()
+    drv_emit_jz_rel8(9)
+    drv_emit_mov_byte_mem_rsi_imm8(45)
+    drv_emit_dec_rsi()
+    drv_emit_inc_rcx()
+    drv_emit_inc_rsi()
+    drv_emit_mov_reg_reg(2, 1)
+    drv_emit_stdout_write()
+    drv_emit_mov_rsp_rbp()
+    drv_emit_pop_rbp()
+    drv_emit_ret()
+}
+
+fn drv_emit_builtin_write_elf(fn_id: i64) with Mut, Panic, Div {
+    drv_begin_builtin(fn_id)
+    drv_emit_mov_reg_reg(3, 6)
+    drv_emit_mov_rax_imm(2)
+    drv_emit_mov_reg_imm(6, 577)
+    drv_emit_mov_reg_imm(2, 493)
+    drv_emit_syscall()
+    drv_emit_mov_reg_reg(7, 0)
+    let data_pos = DRV_CODE_LEN + 3
+    drv_emit_lea_rax_rip_disp32(0)
+    drv_add_data_reloc(data_pos, 4096 + (V2_GLOBAL_DRV_ELF_BYTES * drv_global_stride()))
+    drv_emit_mov_reg_reg(6, 0)
+    drv_emit_mov_reg_reg(2, 3)
+    drv_emit_mov_rax_imm(1)
+    drv_emit_syscall()
+    drv_emit_ret()
+}
+
+fn drv_emit_builtin_chmod(fn_id: i64) with Mut, Panic, Div {
+    drv_begin_builtin(fn_id)
+    drv_emit_mov_rax_imm(90)
+    drv_emit_mov_reg_imm(6, 493)
+    drv_emit_syscall()
+    drv_emit_mov_rax_imm(1)
+    drv_emit_ret()
+}
+
+fn drv_emit_entry_trampoline(main_fn_id: i64) with Mut, Panic, Div {
+    DRV_ENTRY_OFFSET = DRV_CODE_LEN
+    drv_emit_byte(73)
+    drv_emit_byte(137)
+    drv_emit_byte(230)
+    let call_pos = DRV_CODE_LEN
+    drv_emit_call_rel32_placeholder()
+    drv_add_call_reloc(call_pos + 1, main_fn_id)
+    drv_emit_mov_rdi_rax()
+    drv_emit_mov_rax_imm(60)
+    drv_emit_syscall()
+    drv_emit_byte(15)
+    drv_emit_byte(11)
+}
+
+fn drv_apply_relocations(rodata_file_offset: i64, data_file_offset: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < DRV_RELOC_COUNT {
+        let patch_offset = DRV_RELOC_OFFSETS[i as usize]
+        let encoded = DRV_RELOC_TARGETS[i as usize]
+        let kind = drv_decode_reloc_kind(encoded)
+        let target = drv_decode_reloc_target(encoded)
+        if kind == 1 {
+            if target >= 0 && target < 2048 {
+                let target_offset = DRV_FN_OFFSETS[target as usize]
+                let rel = target_offset - (patch_offset + 4)
+                drv_patch_u32_le(patch_offset, rel)
+            }
+        } else if kind == 2 {
+            let next_ip = 4096 + patch_offset + 4
+            let target_va = rodata_file_offset + target
+            drv_patch_u32_le(patch_offset, target_va - next_ip)
+        } else if kind == 3 {
+            let next_ip2 = 4096 + patch_offset + 4
+            let target_va2 = data_file_offset + target
+            drv_patch_u32_le(patch_offset, target_va2 - next_ip2)
+        }
+        i = i + 1
+    }
+}
+
+fn drv_elf_emit_byte(b: i64) with Mut, Panic, Div {
+    let p = DRV_ELF_LEN
+    if p >= 0 && p < 1048576 {
+        DRV_ELF_BYTES[p as usize] = drv_low8(b) as i8
+        DRV_ELF_LEN = p + 1
+    }
+}
+
+fn drv_elf_emit_u16(v: i64) with Mut, Panic, Div {
+    let b0 = drv_low8(v)
+    let b1 = drv_low8(v / 256)
+    drv_elf_emit_byte(b0)
+    drv_elf_emit_byte(b1)
+}
+
+fn drv_elf_emit_u32(v0: i64) with Mut, Panic, Div {
+    var v = v0
+    if v < 0 { v = v + 4294967296 }
+    let b0 = drv_low8(v)
+    let b1 = drv_low8(v / 256)
+    let b2 = drv_low8(v / 65536)
+    let b3 = drv_low8(v / 16777216)
+    drv_elf_emit_byte(b0)
+    drv_elf_emit_byte(b1)
+    drv_elf_emit_byte(b2)
+    drv_elf_emit_byte(b3)
+}
+
+fn drv_elf_emit_u64(v: i64) with Mut, Panic, Div {
+    let lo = v
+    let hi = v / 4294967296
+    drv_elf_emit_u32(lo)
+    drv_elf_emit_u32(hi)
+}
+
+fn drv_elf_patch_u64(off: i64, v: i64) with Mut, Panic, Div {
+    if off >= 0 && off + 8 <= DRV_ELF_LEN {
+        let b0 = drv_low8(v)
+        let b1 = drv_low8(v / 256)
+        let b2 = drv_low8(v / 65536)
+        let b3 = drv_low8(v / 16777216)
+        let b4 = drv_low8(v / 4294967296)
+        let b5 = drv_low8(v / 1099511627776)
+        let b6 = drv_low8(v / 281474976710656)
+        let b7 = drv_low8(v / 72057594037927936)
+        DRV_ELF_BYTES[off as usize] = b0 as i8
+        DRV_ELF_BYTES[(off + 1) as usize] = b1 as i8
+        DRV_ELF_BYTES[(off + 2) as usize] = b2 as i8
+        DRV_ELF_BYTES[(off + 3) as usize] = b3 as i8
+        DRV_ELF_BYTES[(off + 4) as usize] = b4 as i8
+        DRV_ELF_BYTES[(off + 5) as usize] = b5 as i8
+        DRV_ELF_BYTES[(off + 6) as usize] = b6 as i8
+        DRV_ELF_BYTES[(off + 7) as usize] = b7 as i8
+    }
+}
+
+fn drv_elf_pad_to(target: i64) with Mut, Panic, Div {
+    var p = DRV_ELF_LEN
+    while p < target && p < 1048576 {
+        DRV_ELF_BYTES[p as usize] = 0 as i8
+        p = p + 1
+    }
+    DRV_ELF_LEN = p
+}
+
+fn drv_elf_align8() with Mut, Panic, Div {
+    let q = DRV_ELF_LEN / 8
+    let r = DRV_ELF_LEN - (q * 8)
+    if r != 0 { drv_elf_pad_to(DRV_ELF_LEN + (8 - r)) }
+}
+
+fn drv_elf_copy_code() with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < DRV_CODE_LEN {
+        drv_elf_emit_byte(DRV_CODE_BYTES[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+fn drv_elf_copy_rodata() with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < DRV_RODATA_LEN {
+        drv_elf_emit_byte(DRV_RODATA_BYTES[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+fn drv_elf_zero_bytes(count: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < count {
+        drv_elf_emit_byte(0)
+        i = i + 1
+    }
+}
+
+fn drv_elf_emit_phdr(ptype: i64, flags: i64, off: i64, vaddr: i64, filesz: i64, memsz: i64) with Mut, Panic, Div {
+    drv_elf_emit_u32(ptype)
+    drv_elf_emit_u32(flags)
+    drv_elf_emit_u64(off)
+    drv_elf_emit_u64(vaddr)
+    drv_elf_emit_u64(vaddr)
+    drv_elf_emit_u64(filesz)
+    drv_elf_emit_u64(memsz)
+    drv_elf_emit_u64(4096)
+}
+
+fn drv_elf_emit_shdr(name: i64, stype: i64, flags: i64, addr: i64, off: i64, size: i64, align: i64) with Mut, Panic, Div {
+    drv_elf_emit_u32(name)
+    drv_elf_emit_u32(stype)
+    drv_elf_emit_u64(flags)
+    drv_elf_emit_u64(addr)
+    drv_elf_emit_u64(off)
+    drv_elf_emit_u64(size)
+    drv_elf_emit_u32(0)
+    drv_elf_emit_u32(0)
+    drv_elf_emit_u64(align)
+    drv_elf_emit_u64(0)
+}
+
+fn drv_elf_emit_shstrtab() with Mut, Panic, Div {
+    drv_elf_emit_byte(0)
+    // offset 1: .text\0
+    drv_elf_emit_byte(46); drv_elf_emit_byte(116); drv_elf_emit_byte(101); drv_elf_emit_byte(120); drv_elf_emit_byte(116); drv_elf_emit_byte(0)
+    // offset 7: .rodata\0
+    drv_elf_emit_byte(46); drv_elf_emit_byte(114); drv_elf_emit_byte(111); drv_elf_emit_byte(100); drv_elf_emit_byte(97); drv_elf_emit_byte(116); drv_elf_emit_byte(97); drv_elf_emit_byte(0)
+    // offset 15: .data\0
+    drv_elf_emit_byte(46); drv_elf_emit_byte(100); drv_elf_emit_byte(97); drv_elf_emit_byte(116); drv_elf_emit_byte(97); drv_elf_emit_byte(0)
+    // offset 21: .shstrtab\0
+    drv_elf_emit_byte(46); drv_elf_emit_byte(115); drv_elf_emit_byte(104); drv_elf_emit_byte(115); drv_elf_emit_byte(116); drv_elf_emit_byte(114); drv_elf_emit_byte(116); drv_elf_emit_byte(97); drv_elf_emit_byte(98); drv_elf_emit_byte(0)
+    // offset 31: .sounio.epistemic\0
+    drv_elf_emit_byte(46); drv_elf_emit_byte(115); drv_elf_emit_byte(111); drv_elf_emit_byte(117)
+    drv_elf_emit_byte(110); drv_elf_emit_byte(105); drv_elf_emit_byte(111); drv_elf_emit_byte(46)
+    drv_elf_emit_byte(101); drv_elf_emit_byte(112); drv_elf_emit_byte(105); drv_elf_emit_byte(115)
+    drv_elf_emit_byte(116); drv_elf_emit_byte(101); drv_elf_emit_byte(109); drv_elf_emit_byte(105)
+    drv_elf_emit_byte(99); drv_elf_emit_byte(0)
+}
+
+fn drv_elf_emit_epistemic() with Mut, Panic, Div {
+    // magic "SIEP" (Sounio Informational EPistemic)
+    drv_elf_emit_byte(83); drv_elf_emit_byte(73); drv_elf_emit_byte(69); drv_elf_emit_byte(80)
+    drv_elf_emit_u32(1)                 // version = 1
+    drv_elf_emit_u64(EP_TOTAL_INSTR)    // total micro-IR instructions compiled across all functions
+    drv_elf_emit_u64(EP_KNOWLEDGE_COUNT) // count of Knowledge<T> token occurrences in compiled source
+}
+
+fn drv_finalize_elf(output_path: string, data_len: i64) -> i64 with IO, Mut, Panic, Div {
+    let base = 4194304
+    let text_off = 4096
+    let rodata_off = drv_align_page(text_off + DRV_CODE_LEN)
+    let data_off = drv_align_page(rodata_off + DRV_RODATA_LEN)
+    drv_apply_relocations(rodata_off, data_off)
+    DRV_ELF_LEN = 0
+
+    drv_elf_emit_byte(127); drv_elf_emit_byte(69); drv_elf_emit_byte(76); drv_elf_emit_byte(70)
+    drv_elf_emit_byte(2); drv_elf_emit_byte(1); drv_elf_emit_byte(1); drv_elf_emit_byte(0)
+    drv_elf_zero_bytes(8)
+    drv_elf_emit_u16(2)
+    drv_elf_emit_u16(62)
+    drv_elf_emit_u32(1)
+    drv_elf_emit_u64(base + text_off + DRV_ENTRY_OFFSET)
+    drv_elf_emit_u64(64)
+    let shoff_patch = DRV_ELF_LEN
+    drv_elf_emit_u64(0)
+    drv_elf_emit_u32(0)
+    drv_elf_emit_u16(64)
+    drv_elf_emit_u16(56)
+    drv_elf_emit_u16(3)
+    drv_elf_emit_u16(64)
+    drv_elf_emit_u16(6)
+    drv_elf_emit_u16(4)
+
+    drv_elf_emit_phdr(1, 5, text_off, base + text_off, DRV_CODE_LEN, DRV_CODE_LEN)
+    drv_elf_emit_phdr(1, 4, rodata_off, base + rodata_off, DRV_RODATA_LEN, DRV_RODATA_LEN)
+    drv_elf_emit_phdr(1, 6, data_off, base + data_off, 0, data_len)
+
+    drv_elf_pad_to(text_off)
+    drv_elf_copy_code()
+    drv_elf_pad_to(rodata_off)
+    drv_elf_copy_rodata()
+    drv_elf_pad_to(data_off)
+    drv_elf_align8()
+    let shstr_off = DRV_ELF_LEN
+    drv_elf_emit_shstrtab()
+    let shstr_size = DRV_ELF_LEN - shstr_off
+    drv_elf_align8()
+    let epistemic_off = DRV_ELF_LEN
+    drv_elf_emit_epistemic()
+    drv_elf_align8()
+    let shoff = DRV_ELF_LEN
+    drv_elf_patch_u64(shoff_patch, shoff)
+    drv_elf_emit_shdr(0, 0, 0, 0, 0, 0, 0)
+    drv_elf_emit_shdr(1, 1, 6, base + text_off, text_off, DRV_CODE_LEN, 16)
+    drv_elf_emit_shdr(7, 1, 2, base + rodata_off, rodata_off, DRV_RODATA_LEN, 8)
+    drv_elf_emit_shdr(15, 8, 3, base + data_off, data_off, data_len, 8)
+    drv_elf_emit_shdr(21, 3, 0, 0, shstr_off, shstr_size, 1)
+    drv_elf_emit_shdr(31, 1, 0, 0, epistemic_off, 24, 8)
+
+    let wrote = driver_write_elf_to_file(output_path, DRV_ELF_LEN)
+    if wrote < 0 { return -1 }
+    if !driver_make_executable(output_path) { return -1 }
+    DRV_ELF_LEN
+}
+
+fn driver_write_elf_to_file(path: string, len: i64) -> i64 with IO, Mut, Panic, Div {
+    if io_write_meg_binary(path, DRV_ELF_BYTES, len) { return len }
+    -1
+}
+
+fn driver_make_executable(path: string) -> bool with IO {
+    io_make_executable(path)
+}
+
+fn compile_ir_module_to_elf(output_path: string, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let user_fn_count = V2_USER_FN_COUNT
+    let main_fn_id = V2_FIRST_USER_FN_ID + user_fn_count
+    let total_fn_count = main_fn_id + 1
+
+    drv_reset_codegen(total_fn_count)
+
+    drv_emit_builtin_print_str(V2_BUILTIN_PRINT)
+    drv_emit_builtin_print_int(V2_BUILTIN_PRINT_INT)
+    drv_emit_builtin_print_char(V2_BUILTIN_PRINT_CHAR)
+    if source_uses_ident(token_count, "driver_write_elf_to_file") {
+        drv_emit_builtin_write_elf(V2_BUILTIN_DRIVER_WRITE_ELF)
+        drv_emit_builtin_chmod(V2_BUILTIN_DRIVER_CHMOD)
+    }
+
+    // Compile user-defined functions
+    var ui: i64 = 0
+    while ui < user_fn_count {
+        let ufn_name_tok = V2_USER_FN_TOKEN_IDX[ui as usize]
+        let ufn_id = V2_USER_FN_IDS[ui as usize]
+        if !compile_user_fn(ufn_name_tok, ufn_id, token_count) {
+            print("native_compile: user_fn_failed\n")
+            return 3
+        }
+        EP_TOTAL_INSTR = EP_TOTAL_INSTR + V2_UFN_COUNT
+        ui = ui + 1
+    }
+
+    let main_tok = find_ident_token_text(token_count, "main")
+    if main_tok < 0 {
+        print("native_compile: native_v2_unsupported fn=main\n")
+        return 3
+    }
+    let main_ok = compile_user_fn(main_tok, main_fn_id, token_count)
+    if !main_ok {
+        print("native_compile: native_v2_unsupported fn=main\n")
+        return 3
+    }
+    EP_TOTAL_INSTR = EP_TOTAL_INSTR + V2_UFN_COUNT
+    EP_KNOWLEDGE_COUNT = source_count_ident(token_count, "Knowledge")
+
+    drv_emit_entry_trampoline(main_fn_id)
+    var data_len = 4096
+    if source_uses_ident(token_count, "driver_lex_file_to_globals") {
+        data_len = drv_driver_data_len()
+    }
+    let elf_len = drv_finalize_elf(output_path, data_len)
+    if elf_len < 0 {
+        print("native_compile: write_error\n")
+        return 5
+    }
+
+    print("native_compile: ok written=")
+    print(output_path)
+    print(" size=")
+    print_int(elf_len)
+    print("\n")
+    0
+}
+
+fn driver_read_file_to_cursor_source(path: string) -> i64 with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    let data = read_file(path)
+    var n: i64 = size
+    if n < 0 { n = 0 }
+    if n > 1048576 { n = 1048576 }
+    var i: i64 = 0
+    while i < n {
+        CURSOR_SOURCE[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    CURSOR_SOURCE_LEN = n
+    n
+}
+
+fn driver_set_token_flat(idx: i64, kind: i64, start: i64, end: i64, int_value: i64) with Mut, Panic {
+    PT_KIND_CODE[idx as usize] = kind
+    PT_START[idx as usize] = start
+    PT_END[idx as usize] = end
+    PT_INT_VALUE[idx as usize] = int_value
+}
+
+fn driver_is_digit(ch: i8) -> bool {
+    ch >= 48 as i8 && ch <= 57 as i8
+}
+
+fn driver_is_ident_start(ch: i8) -> bool {
+    (ch >= 65 as i8 && ch <= 90 as i8) || (ch >= 97 as i8 && ch <= 122 as i8) || ch == 95 as i8
+}
+
+fn driver_is_ident_continue(ch: i8) -> bool {
+    driver_is_ident_start(ch) || driver_is_digit(ch)
+}
+
+fn driver_source_slice_eq_lit(start: i64, end: i64, text: string) -> bool with Mut, Panic, Div {
+    let len = end - start
+    if len != str_len(text) { return false }
+    var i: i64 = 0
+    while i < len {
+        if CURSOR_SOURCE[(start + i) as usize] != (str_char_at(text, i) as i8) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn driver_keyword_code(start: i64, end: i64) -> i64 with Mut, Panic, Div {
+    if driver_source_slice_eq_lit(start, end, "use") { return TK_USE }
+    if driver_source_slice_eq_lit(start, end, "fn") { return TK_FN }
+    if driver_source_slice_eq_lit(start, end, "let") { return TK_LET }
+    if driver_source_slice_eq_lit(start, end, "var") { return TK_VAR }
+    if driver_source_slice_eq_lit(start, end, "type") { return 12 }
+    if driver_source_slice_eq_lit(start, end, "struct") { return TK_STRUCT }
+    if driver_source_slice_eq_lit(start, end, "enum") { return TK_ENUM }
+    if driver_source_slice_eq_lit(start, end, "if") { return TK_IF }
+    if driver_source_slice_eq_lit(start, end, "else") { return TK_ELSE }
+    if driver_source_slice_eq_lit(start, end, "match") { return TK_MATCH }
+    if driver_source_slice_eq_lit(start, end, "while") { return TK_WHILE }
+    if driver_source_slice_eq_lit(start, end, "return") { return TK_RETURN }
+    if driver_source_slice_eq_lit(start, end, "as") { return TK_AS }
+    if driver_source_slice_eq_lit(start, end, "pub") { return 32 }
+    if driver_source_slice_eq_lit(start, end, "true") { return TK_TRUE }
+    if driver_source_slice_eq_lit(start, end, "false") { return TK_FALSE }
+    if driver_source_slice_eq_lit(start, end, "with") { return 45 }
+    TK_IDENT
+}
+
+fn driver_punct_kind(ch: i8, c2: i8, c3: i8) -> i64 {
+    if ch == 46 as i8 && c2 == 46 as i8 && c3 == 46 as i8 { return 172 }
+    if ch == 46 as i8 && c2 == 46 as i8 && c3 == 61 as i8 { return 161 }
+    if ch == 60 as i8 && c2 == 60 as i8 && c3 == 61 as i8 { return 166 }
+    if ch == 62 as i8 && c2 == 62 as i8 && c3 == 61 as i8 { return 167 }
+    if ch == 61 as i8 && c2 == 61 as i8 { return TK_EQEQ }
+    if ch == 33 as i8 && c2 == 61 as i8 { return TK_BANGEQ }
+    if ch == 60 as i8 && c2 == 61 as i8 { return TK_LE }
+    if ch == 62 as i8 && c2 == 61 as i8 { return TK_GE }
+    if ch == 38 as i8 && c2 == 38 as i8 { return TK_ANDAND }
+    if ch == 124 as i8 && c2 == 124 as i8 { return TK_OROR }
+    if ch == 60 as i8 && c2 == 60 as i8 { return 152 }
+    if ch == 62 as i8 && c2 == 62 as i8 { return 153 }
+    if ch == 43 as i8 && c2 == 61 as i8 { return 154 }
+    if ch == 45 as i8 && c2 == 61 as i8 { return 155 }
+    if ch == 42 as i8 && c2 == 61 as i8 { return 156 }
+    if ch == 47 as i8 && c2 == 61 as i8 { return 157 }
+    if ch == 37 as i8 && c2 == 61 as i8 { return 168 }
+    if ch == 38 as i8 && c2 == 61 as i8 { return 170 }
+    if ch == 124 as i8 && c2 == 61 as i8 { return 165 }
+    if ch == 94 as i8 && c2 == 61 as i8 { return 169 }
+    if ch == 45 as i8 && c2 == 62 as i8 { return TK_ARROW }
+    if ch == 61 as i8 && c2 == 62 as i8 { return TK_FATARROW }
+    if ch == 60 as i8 && c2 == 45 as i8 { return 171 }
+    if ch == 38 as i8 && c2 == 33 as i8 { return TK_AMPBANG }
+    if ch == 58 as i8 && c2 == 58 as i8 { return TK_COLONCOLON }
+    if ch == 46 as i8 && c2 == 46 as i8 { return 160 }
+    if ch == 43 as i8 && c2 == 43 as i8 { return 164 }
+    if ch == 43 as i8 && c2 == 45 as i8 { return 173 }
+    if ch == 43 as i8 { return TK_PLUS }
+    if ch == 45 as i8 { return TK_MINUS }
+    if ch == 42 as i8 { return TK_STAR }
+    if ch == 47 as i8 { return TK_SLASH }
+    if ch == 37 as i8 { return 136 }
+    if ch == 61 as i8 { return TK_EQ }
+    if ch == 60 as i8 { return TK_LT }
+    if ch == 62 as i8 { return TK_GT }
+    if ch == 33 as i8 { return TK_BANG }
+    if ch == 38 as i8 { return 141 }
+    if ch == 124 as i8 { return 142 }
+    if ch == 94 as i8 { return 143 }
+    if ch == 126 as i8 { return 144 }
+    if ch == 63 as i8 { return 145 }
+    if ch == 40 as i8 { return TK_LPAREN }
+    if ch == 41 as i8 { return TK_RPAREN }
+    if ch == 123 as i8 { return TK_LBRACE }
+    if ch == 125 as i8 { return TK_RBRACE }
+    if ch == 91 as i8 { return TK_LBRACKET }
+    if ch == 93 as i8 { return TK_RBRACKET }
+    if ch == 59 as i8 { return TK_SEMI }
+    if ch == 58 as i8 { return TK_COLON }
+    if ch == 44 as i8 { return TK_COMMA }
+    if ch == 46 as i8 { return TK_DOT }
+    if ch == 64 as i8 { return 184 }
+    if ch == 35 as i8 { return 185 }
+    if ch == 95 as i8 { return TK_UNDERSCORE }
+    1
+}
+
+fn driver_punct_width(kind: i64) -> i64 {
+    if kind == 161 || kind == 166 || kind == 167 || kind == 172 { return 3 }
+    if kind == TK_EQEQ || kind == TK_BANGEQ || kind == TK_LE || kind == TK_GE { return 2 }
+    if kind == TK_ANDAND || kind == TK_OROR || kind == TK_ARROW || kind == TK_FATARROW { return 2 }
+    if kind == TK_AMPBANG || kind == TK_COLONCOLON { return 2 }
+    if kind >= 152 && kind <= 160 { return 2 }
+    if kind >= 164 && kind <= 171 { return 2 }
+    if kind == 173 { return 2 }
+    1
+}
+
+fn driver_lex_source_to_globals(n: i64) -> i64 with Mut, Panic, Div {
+    CURSOR_SOURCE_LEN = n
+    var pos: i64 = 0
+    var tc: i64 = 0
+    while pos < n {
+        let ch = CURSOR_SOURCE[pos as usize]
+        if ch == 32 as i8 || ch == 9 as i8 || ch == 10 as i8 || ch == 13 as i8 {
+            pos = pos + 1
+        } else if ch == 47 as i8 && pos + 1 < n && CURSOR_SOURCE[(pos + 1) as usize] == 47 as i8 {
+            while pos < n && CURSOR_SOURCE[pos as usize] != 10 as i8 {
+                pos = pos + 1
+            }
+        } else if driver_is_ident_start(ch) {
+            let start = pos
+            pos = pos + 1
+            while pos < n && driver_is_ident_continue(CURSOR_SOURCE[pos as usize]) {
+                pos = pos + 1
+            }
+            let kind_val = driver_keyword_code(start, pos)
+            PT_KIND_CODE[tc as usize] = kind_val
+            PT_START[tc as usize] = start
+            PT_END[tc as usize] = pos
+            PT_INT_VALUE[tc as usize] = 0
+            tc = tc + 1
+        } else if driver_is_digit(ch) {
+            let start = pos
+            var value: i64 = 0
+            while pos < n && driver_is_digit(CURSOR_SOURCE[pos as usize]) {
+                value = value * 10 + ((CURSOR_SOURCE[pos as usize] - 48 as i8) as i64)
+                pos = pos + 1
+            }
+            PT_KIND_CODE[tc as usize] = TK_INT
+            PT_START[tc as usize] = start
+            PT_END[tc as usize] = pos
+            PT_INT_VALUE[tc as usize] = value
+            tc = tc + 1
+        } else if ch == 34 as i8 {
+            let start = pos
+            pos = pos + 1
+            while pos < n && CURSOR_SOURCE[pos as usize] != 34 as i8 {
+                if CURSOR_SOURCE[pos as usize] == 92 as i8 && pos + 1 < n {
+                    pos = pos + 2
+                } else {
+                    pos = pos + 1
+                }
+            }
+            if pos < n && CURSOR_SOURCE[pos as usize] == 34 as i8 { pos = pos + 1 }
+            PT_KIND_CODE[tc as usize] = TK_STRING
+            PT_START[tc as usize] = start
+            PT_END[tc as usize] = pos
+            PT_INT_VALUE[tc as usize] = 0
+            tc = tc + 1
+        } else {
+            let start = pos
+            var c2: i8 = 0 as i8
+            var c3: i8 = 0 as i8
+            if pos + 1 < n { c2 = CURSOR_SOURCE[(pos + 1) as usize] }
+            if pos + 2 < n { c3 = CURSOR_SOURCE[(pos + 2) as usize] }
+            let kind = driver_punct_kind(ch, c2, c3)
+            let width = driver_punct_width(kind)
+            PT_KIND_CODE[tc as usize] = kind
+            PT_START[tc as usize] = start
+            PT_END[tc as usize] = start + width
+            PT_INT_VALUE[tc as usize] = 0
+            tc = tc + 1
+            pos = pos + width
+        }
+    }
+    PT_KIND_CODE[tc as usize] = TK_EOF
+    PT_START[tc as usize] = pos
+    PT_END[tc as usize] = pos
+    PT_INT_VALUE[tc as usize] = 0
+    tc
+}
+
+fn driver_lex_file_to_globals(path: string) -> i64 with IO, Mut, Panic, Div {
+    let n = driver_read_file_to_cursor_source(path)
+    if n <= 0 { return 0 }
+    driver_lex_source_to_globals(n)
 }
 
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
@@ -166,9 +4941,8 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         print("native_compile: usage: native_compile_driver.sio <source.sio> <output>\n")
         return 1
     }
-    let source_path = get_arg(0)
 
-    // Parse output path: supports both "-o <output>" and positional "<output>"
+    let source_path = get_arg(0)
     var output_path = "a.out"
     if argc >= 3 {
         let flag = get_arg(1)
@@ -177,121 +4951,20 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         }
     }
     if argc == 2 {
-        // Positional: <source> <output> (backward compat with stable driver)
         let arg1 = get_arg(1)
         if arg1 != "-o" {
             output_path = arg1
         }
     }
 
-    print("native_compile: source=")
-    print(source_path)
-    print(" output=")
-    print(output_path)
-    print("\n")
-
-    // Phase 0: Parse
-    let prog = load_source_file(source_path)
-    if parser_last_error_count() > 0 {
-        print("native_compile: parse_error\n")
+    let token_count = driver_lex_file_to_globals(source_path)
+    if token_count <= 0 {
+        print("native_compile: lex_error\n")
         return 1
     }
-    print("native_compile: parse_ok\n")
-
-    // NOTE: Typecheck intentionally skipped. The check_program_epistemic_into
-    // call triggers JIT compilation of the entire type checker (~30GB RSS),
-    // defeating the purpose of this lightweight driver. Users should run
-    // `souc check <file>` separately before compiling.
-    let epistemic = ir_empty_epistemic_section()
-
-    // Phase 1: Flat IR summary (one-shot, no Box allocation)
-    let summary_result = lower_program_to_ir_summary_flat_owned_with_epistemic_ref(&prog, epistemic)
-    if summary_result.had_error {
-        print("native_compile: summary_lower_error\n")
-        return 2
-    }
-    let fn_count = summary_result.summary.module.fn_count
-    if fn_count <= 0 {
-        print("native_compile: empty_module (no functions)\n")
-        return 2
-    }
-    print("native_compile: fn_count=")
-    print_int(fn_count)
-    print("\n")
-
-    // Phase 2: Streaming compile — per-function body lower + optimize + native-v2
-    var nc = compile_module_streaming_begin(compiler_new(), &summary_result.summary.module)
-
-    var fi: i64 = 0
-    while fi < fn_count {
-        let fn_name = summary_result.summary.module.functions[fi as usize].name
-
-        print("native_compile: fn=")
-        print(str_from_bytes(fn_name.buf, fn_name.len))
-
-        let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
-            &prog, &summary_result.summary, epistemic, fn_name
-        )
-        if body_result.had_error {
-            print(" body_error errors=")
-            print_int(body_result.error_count)
-            print(" instrs=")
-            print_int(body_result.func.instr_count)
-            print("\n")
-            if body_result.func.instr_count <= 0 {
-                print("native_compile: skip (no instrs)\n")
-                fi = fi + 1
-                continue
-            }
-            // Continue with codegen despite errors — builtins may still work
-        }
-
-        // NOTE: IR optimizer (opt_cleanup_function) intentionally skipped.
-        // Calling it triggers JIT compilation of 30+ optimizer functions,
-        // adding ~4GB RSS. The stable driver succeeds without it.
-        // Users wanting optimized output should use the full main.sio path
-        // once a native-compiled souc binary is available.
-
-        print(" instrs=")
-        print_int(body_result.func.instr_count)
-
-        let lowered = native_v2_lower_function_to_machine(body_result.func)
-        let legal = native_v2_legalize_function(lowered)
-        if !legal.supported {
-            print(" unsupported=")
-            print(legal.unsupported_detail)
-            print("\n")
-            fi = fi + 1
-            continue
-        }
-
-        nc = compile_ir_function_v2(nc, body_result.func, legal, fi)
-        print(" ok\n")
-        fi = fi + 1
-    }
-
-    // Phase 3: Streaming finish (entry trampoline, relocations)
-    print("native_compile: streaming_finish\n")
-    nc = compile_module_streaming_finish(nc, &summary_result.summary.module)
-
-    // Phase 4: Finalize ELF
-    print("native_compile: finalize_elf_bulk\n")
-    let elf = finalize_elf64_bulk(nc.code, nc.rodata, nc.data, nc.entry_offset, 4194304, nc.symbols, nc.fn_offsets, nc.fn_count)
-    print("native_compile: elf_size=")
-    print_int(elf.len)
-    print("\n")
-
-    // Phase 5: Write binary
-    let write_ok = io_write_elf_to_file(output_path, elf)
-    if !write_ok {
-        print("native_compile: write_error\n")
-        return 5
-    }
-
-    print("native_compile: ok written=")
-    print(output_path)
-    print(" size=")
-    print_int(elf.len)
-    print("\n")
-    0
+    V2_TOKEN_COUNT = token_count
+    scan_struct_decls(token_count)
+    scan_enum_decls(token_count)
+    scan_user_fns(token_count, V2_FIRST_USER_FN_ID)
+    return compile_ir_module_to_elf(output_path, token_count)
 }

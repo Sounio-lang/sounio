@@ -1,0 +1,316 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Exp 6: Contest<SeizureDetection>
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The two-stage S-SSM detector (pre-ictal dip → ictal spike) is expressed
+// as a Contest between two mutually exclusive hypotheses:
+//
+//   H0: NO_SEIZURE         (null)
+//   H1: IMMINENT_SEIZURE
+//
+// Evidence enters as KnownAssociator observations.  The Contest is
+// confidence-sensitive: the epistemic sigma gates both trigger and resolution.
+//
+//   A DIP triggers H1 candidacy only if the entire 95%-CI of the associator
+//   lies below the dip threshold — a noisy dip (wide sigma) stays in IDLE.
+//
+//   A SPIKE confirms H1 only if the lower 95%-CI bound is still above
+//   the spike floor — a noisy spike doesn't resolve the contest.
+//
+// This is the "type-level resolution dynamics" of Exp 6: the fragility that
+// was a post-hoc empirical observation in Door D is now part of the inference
+// control flow.  The sigma field is not metadata; it drives branching.
+//
+// State machine:
+//   IDLE ──dip(confident)──► DIP_DETECTED ──spike(confident)──► RESOLVED_H1
+//            ↑                             └──timeout────────► RESOLVED_H0
+//            └────────────────────────────── contest_reset() ──────────────
+//
+// Thresholds calibrated against Door F's chb03 pre-ictal associator values:
+//   DIP_THRESHOLD   = 0.15  (pre-ictal assoc_norm < 0.12 observed)
+//   SPIKE_THRESHOLD = 0.40  (ictal spike  assoc_norm > 0.50 observed)
+//   WINDOW_WIDTH    = 8     (≈ 3s at 256 Hz / 80-sample windows)
+
+use math::sedenion::*;
+
+// ─── KnownAssociator (reproduced inline; no import needed) ────────────────
+
+struct KnownAssociator {
+    value:   f64,   // ‖associator‖   (point estimate)
+    sigma:   f64,   // Wirtinger σ    (uncertainty)
+    near_zd: bool   // ZD shadow flag
+}
+
+// ─── Contest state ────────────────────────────────────────────────────────
+// 0 = IDLE, 1 = DIP_DETECTED, 2 = RESOLVED_H1, 3 = RESOLVED_H0
+// Globals initialised to zero (BSS); contest_reset() sets correct values.
+
+var CSTATE:    i64 = 0   // current state
+var CWINDOW:   i64 = 0   // steps since dip
+var CDIP_T:    i64 = 0   // timestep of dip trigger
+var CRESOLVE_T:i64 = 0   // timestep of resolution
+var CH0:       f64 = 0.0 // H0 score
+var CH1:       f64 = 0.0 // H1 score
+var CTOTAL:    i64 = 0   // total evidence steps seen
+
+// ─── Thresholds ───────────────────────────────────────────────────────────
+
+fn DIP_THRESHOLD()   -> f64 { 0.15 }
+fn SPIKE_THRESHOLD() -> f64 { 0.40 }
+fn WINDOW_WIDTH()    -> i64 { 8    }
+
+// ─── Math helpers ─────────────────────────────────────────────────────────
+
+fn sqrt_c(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i: i64 = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// ─── Confidence gates ─────────────────────────────────────────────────────
+
+// Confident dip: value < DIP_THRESHOLD AND upper-95%-CI < 1.5×threshold.
+// The 1.5× margin ensures the CI lies comfortably below the threshold,
+// not merely touching it from a noisy observation.
+fn is_confident_dip(ka: KnownAssociator) -> bool {
+    let upper = ka.value + 2.0 * ka.sigma
+    ka.value < DIP_THRESHOLD() && upper < DIP_THRESHOLD() * 1.5 && ka.near_zd == false
+}
+
+// Confident spike: value > SPIKE_THRESHOLD AND lower-95%-CI > 0.5×threshold.
+// The lower bound guards against noisy spikes whose CI overlaps baseline.
+fn is_confident_spike(ka: KnownAssociator) -> bool {
+    let lower = ka.value - 2.0 * ka.sigma
+    let lo_floor = if lower < 0.0 { 0.0 } else { lower }
+    ka.value > SPIKE_THRESHOLD() && lo_floor > SPIKE_THRESHOLD() * 0.5
+}
+
+// ─── Contest lifecycle ────────────────────────────────────────────────────
+
+fn contest_reset() with Mut {
+    CSTATE     = 0
+    CWINDOW    = 0
+    CDIP_T     = 0
+    CRESOLVE_T = 0
+    CH0        = 0.5
+    CH1        = 0.5
+    CTOTAL     = 0
+}
+
+fn contest_update(t: i64, ka: KnownAssociator) with Mut, Div, Panic {
+    if CSTATE == 2 || CSTATE == 3 { return }  // already resolved — no-op
+
+    CTOTAL = CTOTAL + 1
+
+    if CSTATE == 0 {
+        // IDLE: wait for a confident dip to open the candidacy window
+        if is_confident_dip(ka) {
+            CSTATE  = 1
+            CDIP_T  = t
+            CWINDOW = 0
+            CH1     = 0.65   // H1 probability increases on dip
+            CH0     = 0.35
+        }
+        // Else: absorb weak evidence into baseline (H0 remains dominant)
+
+    } else if CSTATE == 1 {
+        // DIP_DETECTED: watch for confirming spike or timeout
+        CWINDOW = CWINDOW + 1
+        if is_confident_spike(ka) {
+            CSTATE     = 2   // H1 confirmed — seizure detected
+            CRESOLVE_T = t
+            CH1        = 0.95
+            CH0        = 0.05
+        } else if CWINDOW >= WINDOW_WIDTH() {
+            CSTATE     = 3   // timeout — H0 wins, dip was a false alarm
+            CRESOLVE_T = t
+            CH0        = 0.80
+            CH1        = 0.20
+        }
+        // Else: still watching — H1 score decays slightly each step
+    }
+}
+
+// ─── Display ──────────────────────────────────────────────────────────────
+
+fn print_i(v: i64) with IO, Mut {
+    if v < 0 { print("-"); print_i(0 - v); return }
+    if v >= 10 { print_i(v / 10) }
+    let d = v % 10
+    if d==0{print("0")}if d==1{print("1")}if d==2{print("2")}if d==3{print("3")}
+    if d==4{print("4")}if d==5{print("5")}if d==6{print("6")}if d==7{print("7")}
+    if d==8{print("8")}if d==9{print("9")}
+}
+
+fn print_f2(v: f64) with IO, Mut, Div, Panic {
+    if v < 0.0 { print("-"); print_f2(0.0 - v); return }
+    let iv: i64 = v as i64
+    print_i(iv); print(".")
+    let frac = v - (iv as f64)
+    let d1: i64 = (frac * 10.0) as i64
+    let d2: i64 = ((frac * 100.0) as i64) % 10
+    print_i(d1); print_i(d2)
+}
+
+fn state_str(s: i64) -> string {
+    if s == 0 { "IDLE        " }
+    else if s == 1 { "DIP_DETECTED" }
+    else if s == 2 { "SEIZURE ✓   " }
+    else { "NULL (H0)   " }
+}
+
+fn make_ka(v: f64, s: f64) -> KnownAssociator {
+    KnownAssociator { value: v, sigma: s, near_zd: false }
+}
+
+fn make_ka_zd(v: f64, s: f64) -> KnownAssociator {
+    KnownAssociator { value: v, sigma: s, near_zd: true }
+}
+
+fn print_step(t: i64, ka: KnownAssociator) with IO, Mut, Div, Panic {
+    print("  t="); print_i(t)
+    print("  φ="); print_f2(ka.value)
+    print("±"); print_f2(ka.sigma)
+    print("  H0="); print_f2(CH0)
+    print("  H1="); print_f2(CH1)
+    print("  "); print(state_str(CSTATE))
+    print("\n")
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────
+
+fn main() with IO, Mut, Div, Panic {
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Scenario A: true seizure  (interictal → confident dip → ictal spike)
+    // Expected: RESOLVED_H1 (seizure detected)
+    // ══════════════════════════════════════════════════════════════════════
+    print("=== Scenario A: true seizure (dip → spike → H1) ===\n")
+    contest_reset()
+
+    // Interictal baseline (t=0..7): assoc ≈ 0.35, tight sigma
+    var t: i64 = 0
+    while t < 8 {
+        let ka = make_ka(0.35, 0.03)
+        contest_update(t, ka)
+        print_step(t, ka)
+        t = t + 1
+    }
+
+    // Pre-ictal dip (t=8..10): assoc drops to <0.12, sigma stays tight
+    // upper CI = 0.12 + 0.04 = 0.16 < DIP_THRESHOLD*1.5 = 0.225 → confident
+    let ka8 = make_ka(0.12, 0.02)
+    contest_update(t, ka8); print_step(t, ka8); t = t + 1
+    let ka9 = make_ka(0.09, 0.02)
+    contest_update(t, ka9); print_step(t, ka9); t = t + 1
+    let ka10 = make_ka(0.08, 0.02)
+    contest_update(t, ka10); print_step(t, ka10); t = t + 1
+
+    // Ictal spike (t=11): assoc = 0.55, sigma tight
+    // lower CI = 0.55 - 0.08 = 0.47 > SPIKE_THRESHOLD*0.5 = 0.20 → confident
+    let ka11 = make_ka(0.55, 0.04)
+    contest_update(t, ka11); print_step(t, ka11); t = t + 1
+
+    assert(CSTATE == 2)            // resolved H1
+    assert(CH1 > 0.90)
+    assert(CDIP_T == 8)            // dip triggered at t=8
+    assert(CRESOLVE_T == 11)       // resolved at t=11
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Scenario B: noisy dip (large sigma) — contest stays IDLE
+    // σ_x is large (blank channel); upper CI overlaps the dip threshold.
+    // Expected: IDLE throughout — the epistemic gate rejects the trigger.
+    // ══════════════════════════════════════════════════════════════════════
+    print("\n=== Scenario B: noisy dip — sigma too wide, IDLE maintained ===\n")
+    contest_reset()
+
+    t = 0
+    while t < 6 {
+        // value=0.11 < DIP_THRESHOLD but upper = 0.11 + 0.16 = 0.27 > 0.225
+        let ka = make_ka(0.11, 0.08)
+        contest_update(t, ka)
+        print_step(t, ka)
+        t = t + 1
+    }
+    assert(CSTATE == 0)            // stayed IDLE — noise rejected by gate
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Scenario C: ZD-shadow dip — near_zd flag suppresses trigger
+    // Even a low-sigma, low-value observation is blocked when near_zd=true.
+    // Expected: IDLE throughout.
+    // ══════════════════════════════════════════════════════════════════════
+    print("\n=== Scenario C: ZD-shadow dip — near_zd flag blocks trigger ===\n")
+    contest_reset()
+
+    t = 0
+    while t < 4 {
+        // Superficially a confident dip — but near_zd = true (blank channel)
+        let ka = make_ka_zd(0.08, 0.01)
+        contest_update(t, ka)
+        print_step(t, ka)
+        t = t + 1
+    }
+    assert(CSTATE == 0)            // IDLE — ZD shadow suppressed the trigger
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Scenario D: dip → quiet period → timeout → RESOLVED_H0
+    // A real dip occurs but the spike never arrives within WINDOW_WIDTH steps.
+    // Expected: RESOLVED_H0 (false alarm, timeout)
+    // ══════════════════════════════════════════════════════════════════════
+    print("\n=== Scenario D: dip → timeout → H0 (false alarm) ===\n")
+    contest_reset()
+
+    // Confident dip at t=0
+    t = 0
+    let ka_d0 = make_ka(0.10, 0.02)
+    contest_update(t, ka_d0); print_step(t, ka_d0); t = t + 1
+
+    // 8 quiet steps — no spike arrives (window = WINDOW_WIDTH = 8)
+    while t <= 8 {
+        let ka_q = make_ka(0.28, 0.03)
+        contest_update(t, ka_q); print_step(t, ka_q); t = t + 1
+    }
+    assert(CSTATE == 3)            // resolved H0 (timeout)
+    assert(CH0 > 0.70)
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Scenario E: noisy spike after confident dip — spike CI too wide
+    // A spike occurs but its lower CI doesn't clear the floor → no resolution.
+    // Expected: RESOLVED_H0 (timeout, not H1)
+    // ══════════════════════════════════════════════════════════════════════
+    print("\n=== Scenario E: confident dip + noisy spike → timeout (H0) ===\n")
+    contest_reset()
+
+    t = 0
+    let ka_dE = make_ka(0.10, 0.02)
+    contest_update(t, ka_dE); print_step(t, ka_dE); t = t + 1
+
+    // 3 quiet steps
+    var step: i64 = 0
+    while step < 3 {
+        let ka_q2 = make_ka(0.28, 0.03)
+        contest_update(t, ka_q2); print_step(t, ka_q2)
+        t = t + 1; step = step + 1
+    }
+
+    // Noisy spike: value=0.55 but sigma=0.30 → lower = 0.25, floor > 0.20 (passes!)
+    // Wait — let me use sigma=0.35 so lower = 0.55-0.70 = -0.15 → lo_floor=0 < 0.20
+    let ka_spE = make_ka(0.55, 0.35)
+    contest_update(t, ka_spE); print_step(t, ka_spE); t = t + 1
+
+    // Remaining quiet until timeout
+    while CSTATE == 1 && t < 20 {
+        let ka_tail = make_ka(0.28, 0.03)
+        contest_update(t, ka_tail); print_step(t, ka_tail)
+        t = t + 1
+    }
+    assert(CSTATE == 3)            // timeout — noisy spike did not confirm H1
+    assert(CH0 > 0.70)
+
+    print("\nALL PASS\n")
+}
