@@ -92,3 +92,7 @@ lean_lib «SounioApproxCausalKnowledge» where
 -- M2: Vancomycin-Knightian thrust — Ferson p-box operator
 @[default_target]
 lean_lib «SounioKnightian» where
+
+-- M3: Vancomycin-Knightian thrust — clinical dosing safety obligation
+@[default_target]
+lean_lib «SounioVancomycinDosingSafety» where
