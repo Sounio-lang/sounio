@@ -66,3 +66,21 @@ lean_lib «SounioZeroDivisorBridge» where
 
 @[default_target]
 lean_lib «SounioImpossibilityChain» where
+
+@[default_target]
+lean_lib «SounioSurgicalInterventions» where
+
+@[default_target]
+lean_lib «SounioSurgicalCalculus» where
+
+@[default_target]
+lean_lib «SounioInterpBasis» where
+
+@[default_target]
+lean_lib «SounioRegulatory» where
+
+@[default_target]
+lean_lib «SounioLearningDynamics» where
+
+@[default_target]
+lean_lib «SounioPathionBridge» where

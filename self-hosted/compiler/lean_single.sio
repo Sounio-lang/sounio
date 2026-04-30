@@ -6320,6 +6320,10 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
                         em(0x48); em(0x89); em(0xc2)
                         em(0x48); em(0xb8); em64(addr)
                         emit_copy_agg_to_ptr_x86(11, GL_TY_HASH[gi as usize])
+                    } else if type_is_struct_like(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) || knowledge_hash_is(GL_TY_HASH[gi as usize]) {
+                        em(0x48); em(0x89); em(0xc2)
+                        em(0x48); em(0xb8); em64(addr)
+                        emit_copy_agg_to_ptr_x86(6, GL_TY_HASH[gi as usize])
                     } else {
                         em(0x48); em(0x89); em(0xc1)
                         em(0x48); em(0xb8); em64(addr)
@@ -17153,6 +17157,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
                     em(0x48); em(0xb8); em64(addr)  // mov rax, dst
                     emit_copy_agg_to_ptr_x86(11, GL_TY_HASH[gi as usize])
+                } else if type_is_struct_like(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) || knowledge_hash_is(GL_TY_HASH[gi as usize]) {
+                    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
+                    em(0x48); em(0xb8); em64(addr)  // mov rax, dst
+                    emit_copy_agg_to_ptr_x86(6, GL_TY_HASH[gi as usize])
                 } else {
                     // mov rcx, rax; mov rax, addr; mov [rax], rcx
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (value)
@@ -21441,6 +21449,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     scan_type(p)
                     var scalar_bytes: i64 = 8
                     if type_is_option_inline(SCAN_TY, SCAN_TY_HASH) { scalar_bytes = 16 }
+                    if type_is_struct_like(SCAN_TY, SCAN_TY_HASH) || knowledge_hash_is(SCAN_TY_HASH) {
+                        scalar_bytes = struct_like_nslots(SCAN_TY_HASH) * 8
+                    }
                     let gix = gl_add(gns, gne, scalar_bytes, 0)
                     if gix >= 0 {
                         GL_TY[gix as usize] = SCAN_TY
@@ -21862,6 +21873,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if src_match(ens, ene - ens, "GPU") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 8192; matched_builtin = 1 }
                         // ZD = bit 14 (16384) — zero-divisor effect for sedenion-based exact erasure
                         if src_match(ens, ene - ens, "ZD") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 16384; matched_builtin = 1 }
+                        // Witness = bit 15 (32768) — required alongside ZD by Audited<T>
+                        if src_match(ens, ene - ens, "Witness") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 32768; matched_builtin = 1 }
+                        // Temporal = bit 16 (65536) — required alongside ZD by Revivable<T>
+                        if src_match(ens, ene - ens, "Temporal") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 65536; matched_builtin = 1 }
+                        // Learn = bit 17 (131072) — gradient-producing functions consumed by SurgicalOptimizer
+                        if src_match(ens, ene - ens, "Learn") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 131072; matched_builtin = 1 }
                         // Gen 21 Phase A″: Confidence(N) is a reader-friendly alias for
                         // Epistemic(N). Same bit, same FN_EPISTEMIC_MIN slot. N is an
                         // integer on the 1..1000 scale (matches Knowledge<T>.confidence).
@@ -21932,10 +21949,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         evi = evi + 1
     }
 
-    // ZD gating: ExactlyPrivate<T>, Editable<T>, CapabilityGated<T> require `with ZD`
+    // ZD gating: ExactlyPrivate<T>, Editable<T>, CapabilityGated<T>,
+    // Composable<T>, Interpretable<T> require `with ZD`.
+    // Audited<T> additionally requires `with Witness`.
+    // Revivable<T> additionally requires `with Temporal`.
     var zd_fi: i64 = 0
     while zd_fi < FN_COUNT {
-        if (FN_EFFECTS[zd_fi as usize] & 16384) == 0 && (FN_EFFECTS[zd_fi as usize] & 2048) == 0 {
+        let zd_fx = FN_EFFECTS[zd_fi as usize]
+        if (zd_fx & 2048) == 0 {
+            let need_zd = (zd_fx & 16384) == 0
+            let need_witness = (zd_fx & 32768) == 0
+            let need_temporal = (zd_fx & 65536) == 0
             let fn_tok = FN_NAME_TOK[zd_fi as usize]
             var pq: i64 = fn_tok + 1
             if pq < TC && TK[pq as usize] == 6 {
@@ -21948,20 +21972,48 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         let pns = TS[pq as usize]
                         let pne = TE[pq as usize]
                         let pl = pne - pns
-                        if src_match(pns, pl, "ExactlyPrivate") {
+                        if need_zd && src_match(pns, pl, "ExactlyPrivate") {
                             print("error[E201]: parameter uses ExactlyPrivate<T> without `with ZD` effect at line ")
                             print_int(TL[fn_tok as usize])
                             print("\n")
                             TYPECHECK_FAILED = 1
                         }
-                        if src_match(pns, pl, "Editable") {
+                        if need_zd && src_match(pns, pl, "Editable") {
                             print("error[E202]: parameter uses Editable<T> without `with ZD` effect at line ")
                             print_int(TL[fn_tok as usize])
                             print("\n")
                             TYPECHECK_FAILED = 1
                         }
-                        if src_match(pns, pl, "CapabilityGated") {
+                        if need_zd && src_match(pns, pl, "CapabilityGated") {
                             print("error[E203]: parameter uses CapabilityGated<T> without `with ZD` effect at line ")
+                            print_int(TL[fn_tok as usize])
+                            print("\n")
+                            TYPECHECK_FAILED = 1
+                        }
+                        if need_zd && src_match(pns, pl, "Composable") {
+                            print("error[E204]: parameter uses Composable<T> without `with ZD` effect at line ")
+                            print_int(TL[fn_tok as usize])
+                            print("\n")
+                            TYPECHECK_FAILED = 1
+                        }
+                        if src_match(pns, pl, "Audited") {
+                            if need_zd || need_witness {
+                                print("error[E205]: parameter uses Audited<T> without `with ZD, Witness` effects at line ")
+                                print_int(TL[fn_tok as usize])
+                                print("\n")
+                                TYPECHECK_FAILED = 1
+                            }
+                        }
+                        if src_match(pns, pl, "Revivable") {
+                            if need_zd || need_temporal {
+                                print("error[E206]: parameter uses Revivable<T> without `with ZD, Temporal` effects at line ")
+                                print_int(TL[fn_tok as usize])
+                                print("\n")
+                                TYPECHECK_FAILED = 1
+                            }
+                        }
+                        if need_zd && src_match(pns, pl, "Interpretable") {
+                            print("error[E207]: parameter uses Interpretable<T> without `with ZD` effect at line ")
                             print_int(TL[fn_tok as usize])
                             print("\n")
                             TYPECHECK_FAILED = 1
@@ -27199,6 +27251,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     em32(0xAA0003EA)
                     emit_image_addr_a64(addr)
                     emit_copy_agg_to_ptr_a64(11, GL_TY_HASH[gi as usize])
+                } else if type_is_struct_like(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) || knowledge_hash_is(GL_TY_HASH[gi as usize]) {
+                    em32(0xAA0003EA)
+                    emit_image_addr_a64(addr)
+                    emit_copy_agg_to_ptr_a64(6, GL_TY_HASH[gi as usize])
                 } else {
                     em32(0xAA0003E1)
                     emit_image_addr_a64(addr)
