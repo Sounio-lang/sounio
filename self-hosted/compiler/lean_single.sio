@@ -6340,6 +6340,99 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
     }
 }
 
+fn emit_global_inits_a64() with IO, Mut, Panic, Div {
+    var p: i64 = 0
+    var depth: i64 = 0
+    while p < TC {
+        let tk = TK[p as usize]
+        if tk == 8 { depth = depth + 1; p = p + 1; continue }
+        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if depth > 0 { p = p + 1; continue }
+        if tk == 12 {
+            p = p + 1
+            let gns = TS[p as usize]
+            let gne = TE[p as usize]
+            p = p + 1
+            if p < TC && TK[p as usize] == 43 {
+                p = p + 1
+                if TK[p as usize] == 41 {
+                    while p < TC && TK[p as usize] != 42 { p = p + 1 }
+                    if p < TC { p = p + 1 }
+                } else {
+                    scan_type(p)
+                    p = SCAN_TY_NEXT
+                }
+            }
+            if p < TC && TK[p as usize] == 16 {
+                p = p + 1
+                if TK[p as usize] == 41 {
+                    // Array repeat initializer: [V; N]
+                    let gi_arr = gl_find(gns, gne)
+                    if gi_arr >= 0 {
+                        p = p + 1                              // skip [
+                        EP = p
+                        compile_or_a64()                       // value V in x0
+                        p = EP
+                        if p < TC && TK[p as usize] == 27 { p = p + 1 }   // skip ;
+                        if p < TC && TK[p as usize] == 4 { p = p + 1 }    // skip N literal
+                        if p < TC && TK[p as usize] == 42 { p = p + 1 }   // skip ]
+                        let base = GL_BSS_BASE + GL[(gi_arr * 4 + 1) as usize]
+                        let esiz = GL[(gi_arr * 4 + 2) as usize]
+                        let alen = GL[(gi_arr * 4 + 3) as usize]
+                        if alen > 0 {
+                            em32(0xAA0003E2)                   // mov x2, x0 (save value)
+                            emit_image_addr_a64(base)           // x0 = base
+                            if esiz == 1 {
+                                // byte fill loop: x0=dst, x2=byte, x1=counter
+                                em32(0xAA0003E3)               // mov x3, x0 (save dst)
+                                emit_imm64_reg_a64(1, alen)    // x1 = alen
+                                let loop_off = CL
+                                em32(0x39000062)               // strb w2, [x3]
+                                em32(0x91000463)               // add x3, x3, #1
+                                em32(0xF1000421)               // subs x1, x1, #1
+                                let br_off = CL
+                                let rel = (loop_off - br_off) / 4
+                                em32(0x54000001 | ((rel & 0x7FFFF) << 5))  // b.ne loop
+                            } else {
+                                em32(0xAA0003ED)               // mov x13, x2 (value)
+                                em32(0xAA0003EB)               // mov x11, x0 (dest)
+                                emit_fill_words_x13_x11_a64(alen)
+                            }
+                        }
+                        continue
+                    }
+                    while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 { p = p + 1 }
+                    continue
+                }
+                let gi = gl_find(gns, gne)
+                if gi >= 0 {
+                    EP = p
+                    compile_or_a64()
+                    let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                    if type_is_option_inline(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) && GL[(gi * 4 + 2) as usize] >= 16 {
+                        em32(0xAA0003EA)
+                        emit_image_addr_a64(addr)
+                        emit_copy_agg_to_ptr_a64(11, GL_TY_HASH[gi as usize])
+                    } else if type_is_struct_like(GL_TY[gi as usize], GL_TY_HASH[gi as usize]) || knowledge_hash_is(GL_TY_HASH[gi as usize]) {
+                        em32(0xAA0003EA)
+                        emit_image_addr_a64(addr)
+                        emit_copy_agg_to_ptr_a64(6, GL_TY_HASH[gi as usize])
+                    } else {
+                        em32(0xAA0003E1)
+                        emit_image_addr_a64(addr)
+                        em32(0xF9000001)
+                    }
+                    p = EP
+                    continue
+                }
+            }
+            while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 { p = p + 1 }
+            continue
+        }
+        p = p + 1
+    }
+}
+
 fn copy_struct_into_local_slot_x86(slot: i64, ty_hash: i64) with Mut, Panic, Div {
     let si = st_find(ty_hash)
     if si < 0 && knowledge_hash_is(ty_hash) == false { emit_store_var(slot); return }
@@ -28425,6 +28518,21 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             pu_seed_a = pu_seed_a + 1
         }
         EXPR_PARAM_USED = 0
+        // Emit non-zero global initializers once, at main's entry.
+        let main_ntk_a = FN_NAME_TOK[fn_idx as usize]
+        let main_ns_a = TS[main_ntk_a as usize]
+        let main_ne_a = TE[main_ntk_a as usize]
+        if src_match(main_ns_a, main_ne_a - main_ns_a, "main") {
+            let save_ep_a = EP
+            let save_expr_ty_a = EXPR_TY
+            let save_expr_ty_hash_a = EXPR_TY_HASH
+            let save_expr_is_f64_a = EXPR_IS_F64
+            emit_global_inits_a64()
+            EP = save_ep_a
+            EXPR_TY = save_expr_ty_a
+            EXPR_TY_HASH = save_expr_ty_hash_a
+            EXPR_IS_F64 = save_expr_is_f64_a
+        }
         // Compile body
         EP = p
         var depth: i64 = 1
