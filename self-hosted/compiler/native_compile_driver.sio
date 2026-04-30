@@ -174,6 +174,10 @@ let UFN_LOCAL_LOAD: i64 = 17
 let UFN_LOCAL_STORE: i64 = 18
 let UFN_LOAD_F64_SCALED: i64 = 19
 let UFN_F64_BINOP: i64 = 20
+// M1.2 step D — user-global array access (top-level `var NAME: [T; N]`).
+// Reads/writes are lowered via a rip-relative lea into .data + rbx*8 index.
+let UFN_USER_GLOBAL_LOAD: i64 = 21
+let UFN_USER_GLOBAL_STORE: i64 = 22
 
 var V2_UFN_OPS: [i64; 2048] = [0; 2048]
 var V2_UFN_DST: [i64; 2048] = [0; 2048]
@@ -202,6 +206,17 @@ var V2_CALL_ARG_SIZES: [i64; 8] = [0; 8]
 var V2_CURRENT_PARAM_REGS: [i64; 64] = [0; 64]
 var V2_CURRENT_PARAM_COUNT: i64 = 0
 var V2_REG_IS_F64: [i64; 4096] = [0; 4096]
+
+// M1.2 step D — user-global registry. Top-level `var NAME: [T; N]` decls
+// (NAME not in the driver's hard-coded global table) land here. Each slot
+// records the identifier token, the byte offset into .data, the element
+// count, and whether the element type is f64.
+var USER_GLOBAL_NAME_TOK: [i64; 64] = [0; 64]
+var USER_GLOBAL_DATA_OFFSET: [i64; 64] = [0; 64]
+var USER_GLOBAL_ELEM_COUNT: [i64; 64] = [0; 64]
+var USER_GLOBAL_IS_F64: [i64; 64] = [0; 64]
+var USER_GLOBAL_COUNT: i64 = 0
+var USER_GLOBAL_DATA_LEN: i64 = 0
 
 var DRV_CODE_BYTES: [i8; 262144] = [0; 262144]
 var DRV_CODE_LEN: i64 = 0
@@ -909,6 +924,8 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "UFN_LOCAL_STORE") { return 18 }
     if token_text_eq(tok, "UFN_LOAD_F64_SCALED") { return 19 }
     if token_text_eq(tok, "UFN_F64_BINOP") { return 20 }
+    if token_text_eq(tok, "UFN_USER_GLOBAL_LOAD") { return 21 }
+    if token_text_eq(tok, "UFN_USER_GLOBAL_STORE") { return 22 }
 
     if token_text_eq(tok, "V2_GLOBAL_PT_KIND_CODE") { return 43 }
     if token_text_eq(tok, "V2_GLOBAL_PT_START") { return 44 }
@@ -1505,6 +1522,28 @@ fn ufn_record_global_store(global_id: i64, index_reg: i64, src: i64) with Mut {
     }
 }
 
+fn ufn_record_user_global_load(dst: i64, user_global_idx: i64, index_reg: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_USER_GLOBAL_LOAD
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = index_reg
+        V2_UFN_IMM[idx as usize] = user_global_idx
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_user_global_store(user_global_idx: i64, index_reg: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_USER_GLOBAL_STORE
+        V2_UFN_SRC1[idx as usize] = index_reg
+        V2_UFN_SRC2[idx as usize] = src
+        V2_UFN_IMM[idx as usize] = user_global_idx
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
 fn ufn_record_local_load(dst: i64, base_reg: i64, idx_reg: i64) with Mut {
     let idx = V2_UFN_COUNT
     if idx < 2048 {
@@ -1859,6 +1898,21 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
             if token_kind(end_pos) != TK_RBRACKET { return ExprParse { ok: 0, reg: -1, next: pos} }
             let dst = alloc_reg(ctx)
             ufn_record_global_load(dst, gid, idx_expr.reg)
+            return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
+        }
+        // M1.2 step D — user-declared top-level global array read: `NAME[expr]`.
+        // Placed after driver_global_id_tok so driver-internal names continue
+        // to resolve through the existing hard-coded path when the driver
+        // self-compiles.
+        let ugid = user_global_id_tok(pos)
+        if ugid >= 0 && token_kind(pos + 1) == TK_LBRACKET {
+            let idx_expr = parse_expr_ir(func, ctx, pos + 2)
+            if idx_expr.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+            let end_pos = skip_index_cast_end(idx_expr.next)
+            if token_kind(end_pos) != TK_RBRACKET { return ExprParse { ok: 0, reg: -1, next: pos} }
+            let dst = alloc_reg(ctx)
+            ufn_record_user_global_load(dst, ugid, idx_expr.reg)
+            if USER_GLOBAL_IS_F64[ugid as usize] != 0 { mark_reg_f64(dst) }
             return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
         }
         if gid >= 0 {
@@ -2679,6 +2733,23 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             mark_parse_unsupported(p + 2)
             return close
         }
+        // M1.2 step D — user-global indexed store: `NAME[expr] = expr`.
+        let ugid = user_global_id_tok(p)
+        if ugid >= 0 && token_kind(p + 1) == TK_LBRACKET {
+            let idx_expr = parse_expr_ir(func, ctx, p + 2)
+            if idx_expr.ok != 0 {
+                let end_pos = skip_index_cast_end(idx_expr.next)
+                if token_kind(end_pos) == TK_RBRACKET && token_kind(end_pos + 1) == TK_EQ {
+                    let parsed = parse_expr_ir(func, ctx, end_pos + 2)
+                    if parsed.ok != 0 {
+                        ufn_record_user_global_store(ugid, idx_expr.reg, parsed.reg)
+                        return parsed.next
+                    }
+                    mark_parse_unsupported(end_pos + 2)
+                    return close
+                }
+            }
+        }
     }
 
     // local array write: ident[expr] = expr
@@ -2902,6 +2973,91 @@ fn skip_native_v2_driver_helper_fn(name_tok: i64) -> bool with Mut, Panic, Div {
     if token_text_eq(name_tok, "driver_write_elf_to_file") { return true }
     if token_text_eq(name_tok, "driver_make_executable") { return true }
     false
+}
+
+// M1.2 step D — identify user-globals by their declaring identifier token.
+// Returns the index into USER_GLOBAL_* arrays, or -1 if the token does not
+// name a registered user-global. Matching uses the shared ident-equality
+// helper so the bound identifier in `NAME[i]` reads/writes matches the
+// declaration-site token.
+fn user_global_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < USER_GLOBAL_COUNT {
+        if toks_ident_eq(USER_GLOBAL_NAME_TOK[i as usize], tok) { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// M1.2 step D — top-level scan for user-declared globals of the form
+// `var NAME: [T; N]` (with or without a trailing `= [...]`). Skips any
+// matching name that is already a hard-coded driver global, so the
+// self-compile path continues to use drv_emit_driver_global_*. Non-scalar
+// element types other than i64/f64 are skipped (handled as unsupported).
+fn scan_user_globals(token_count: i64) with Mut, Panic, Div {
+    USER_GLOBAL_COUNT = 0
+    USER_GLOBAL_DATA_LEN = 0
+    var depth: i64 = 0
+    var i: i64 = 0
+    while i < token_count {
+        let k = token_kind(i)
+        if k == TK_LBRACE { depth = depth + 1; i = i + 1 }
+        else if k == TK_RBRACE { depth = depth - 1; i = i + 1 }
+        else if depth == 0 && k == TK_VAR && i + 7 < token_count
+                && token_kind(i + 1) == TK_IDENT
+                && token_kind(i + 2) == TK_COLON
+                && token_kind(i + 3) == TK_LBRACKET {
+            // Skip if NAME is already a hard-coded driver global (e.g. DRV_RODATA_BYTES).
+            let name_tok = i + 1
+            if driver_global_id_tok(name_tok) >= 0 {
+                i = i + 4
+            } else {
+                // Scan to matching `]` at depth 0, noting the `; INT ]` shape.
+                var sc = i + 4
+                while sc < token_count && token_kind(sc) != TK_SEMI && token_kind(sc) != TK_RBRACKET {
+                    sc = sc + 1
+                }
+                if sc < token_count && token_kind(sc) == TK_SEMI
+                        && sc + 2 < token_count && token_kind(sc + 1) == TK_INT
+                        && token_kind(sc + 2) == TK_RBRACKET {
+                    let elem_count = pt_read_int_value(sc + 1)
+                    let elem_type_tok = i + 4
+                    var is_f64: i64 = 0
+                    if token_text_eq(elem_type_tok, "f64") { is_f64 = 1 }
+                    // Accept i64 and f64 element types only. Others (i8, u32, etc.)
+                    // are skipped; their references fall through to the unsupported
+                    // path, which is the previous behaviour.
+                    let accept_type = token_text_eq(elem_type_tok, "i64") || is_f64 != 0
+                    if accept_type && USER_GLOBAL_COUNT < 64 {
+                        let idx = USER_GLOBAL_COUNT
+                        USER_GLOBAL_NAME_TOK[idx as usize] = name_tok
+                        USER_GLOBAL_DATA_OFFSET[idx as usize] = USER_GLOBAL_DATA_LEN
+                        USER_GLOBAL_ELEM_COUNT[idx as usize] = elem_count
+                        USER_GLOBAL_IS_F64[idx as usize] = is_f64
+                        USER_GLOBAL_DATA_LEN = USER_GLOBAL_DATA_LEN + elem_count * 8
+                        USER_GLOBAL_COUNT = idx + 1
+                    }
+                    // Advance past the type `]` and an optional `= [...]` initializer.
+                    i = sc + 3
+                    if i < token_count && token_kind(i) == TK_EQ
+                            && i + 1 < token_count && token_kind(i + 1) == TK_LBRACKET {
+                        var bd: i64 = 1
+                        i = i + 2
+                        while i < token_count && bd > 0 {
+                            let kk = token_kind(i)
+                            if kk == TK_LBRACKET { bd = bd + 1 }
+                            if kk == TK_RBRACKET { bd = bd - 1 }
+                            i = i + 1
+                        }
+                    }
+                } else {
+                    i = i + 1
+                }
+            }
+        } else {
+            i = i + 1
+        }
+    }
 }
 
 fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
@@ -4006,6 +4162,34 @@ fn drv_emit_driver_global_store(global_id: i64, index_reg: i64, src: i64) with M
     else { drv_emit_store_rax_mem_rdx_rbx8() }
 }
 
+// M1.2 step D — user-global load: `rax = data[user_global_offset + idx*8]`.
+// Uses kind=3 relocations (already wired in drv_apply_relocations) which
+// patch the rip-relative lea to the .data file offset. The index register
+// is loaded into rbx and rdx holds the base; indexed load is 8 bytes.
+fn drv_emit_user_global_load(dst: i64, ug_idx: i64, index_reg: i64) with Mut, Panic, Div {
+    let data_offset = USER_GLOBAL_DATA_OFFSET[ug_idx as usize]
+    let load_pos = DRV_CODE_LEN + 3
+    drv_emit_lea_rax_rip_disp32(0)
+    drv_add_data_reloc(load_pos, data_offset)
+    drv_emit_mov_reg_reg(2, 0)
+    drv_core_load_temp_to_rax(index_reg)
+    drv_emit_mov_reg_reg(3, 0)
+    drv_emit_load_rax_mem_rdx_rbx8()
+    drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_user_global_store(ug_idx: i64, index_reg: i64, src: i64) with Mut, Panic, Div {
+    let data_offset = USER_GLOBAL_DATA_OFFSET[ug_idx as usize]
+    let load_pos = DRV_CODE_LEN + 3
+    drv_emit_lea_rax_rip_disp32(0)
+    drv_add_data_reloc(load_pos, data_offset)
+    drv_emit_mov_reg_reg(2, 0)
+    drv_core_load_temp_to_rax(index_reg)
+    drv_emit_mov_reg_reg(3, 0)
+    drv_core_load_temp_to_rax(src)
+    drv_emit_store_rax_mem_rdx_rbx8()
+}
+
 fn drv_emit_local_array_load(dst: i64, base_reg: i64, idx_reg: i64) with Mut, Panic, Div {
     drv_core_load_temp_to_rax(idx_reg)
     drv_emit_neg_rax_only()
@@ -4211,6 +4395,10 @@ fn compile_ufn_from_globals(fn_id: i64) -> bool with IO, Mut, Panic, Div {
             drv_emit_local_array_load(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
         } else if op == UFN_LOCAL_STORE {
             drv_emit_local_array_store(V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize], V2_UFN_DST[i as usize])
+        } else if op == UFN_USER_GLOBAL_LOAD {
+            drv_emit_user_global_load(V2_UFN_DST[i as usize], V2_UFN_IMM[i as usize], V2_UFN_SRC1[i as usize])
+        } else if op == UFN_USER_GLOBAL_STORE {
+            drv_emit_user_global_store(V2_UFN_IMM[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
         }
         i = i + 1
     }
@@ -4806,6 +4994,13 @@ fn compile_ir_module_to_elf(output_path: string, token_count: i64) -> i64 with I
     var data_len = 4096
     if source_uses_ident(token_count, "driver_lex_file_to_globals") {
         data_len = drv_driver_data_len()
+    } else if USER_GLOBAL_DATA_LEN > 0 {
+        // M1.2 step D — user-globals land in the .data BSS region (file-size
+        // 0 in the PHDR, mem-size data_len), so the loader zero-fills all
+        // declared slots. Round up to 8 for alignment and keep a minimum of
+        // 4096 so very small user programs still get a full page.
+        let aligned = (USER_GLOBAL_DATA_LEN + 7) / 8 * 8
+        if aligned > data_len { data_len = aligned }
     }
     let elf_len = drv_finalize_elf(output_path, data_len)
     if elf_len < 0 {
@@ -5069,6 +5264,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     V2_TOKEN_COUNT = token_count
     scan_struct_decls(token_count)
     scan_enum_decls(token_count)
+    scan_user_globals(token_count)
     scan_user_fns(token_count, V2_FIRST_USER_FN_ID)
     return compile_ir_module_to_elf(output_path, token_count)
 }
