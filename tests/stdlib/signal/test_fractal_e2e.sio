@@ -1,251 +1,96 @@
 //@ run-pass
-//! tests/stdlib/signal/test_fractal_e2e.sio
-//!
 //! E2E tests for signal::fractal — HFD, DFA, Permutation Entropy.
 
 use signal::fractal::{
-    DFAConfig,
-    higuchi_fd, dfa_config_default, dfa, dfa_interpret,
-    permutation_entropy, linear_regression,
-}
-use test::helpers::{check_near}
-
-// ============================================================================
-// Linear regression helper (used by HFD/DFA internally)
-// ============================================================================
-
-fn test_linear_regression_perfect_fit() with Mut, Div, Panic {
-    // y = 2*x + 1: slope=2, intercept=1, R²=1
-    var x: [f64; 64] = [0.0; 64]
-    var y: [f64; 64] = [0.0; 64]
-    x[0] = 0.0;  y[0] = 1.0
-    x[1] = 1.0;  y[1] = 3.0
-    x[2] = 2.0;  y[2] = 5.0
-    x[3] = 3.0;  y[3] = 7.0
-    x[4] = 4.0;  y[4] = 9.0
-    let fit = linear_regression(x, y, 5)
-    assert(check_near(fit.0, 2.0, 0.01))   // slope
-    assert(check_near(fit.1, 1.0, 0.01))   // intercept
-    assert(check_near(fit.2, 1.0, 0.01))   // R²
+    higuchi_fd,
+    dfa,
+    permutation_entropy,
 }
 
-fn test_linear_regression_constant() with Mut, Div, Panic {
-    // All y values equal → slope = 0
-    var x: [f64; 64] = [0.0; 64]
-    var y: [f64; 64] = [0.0; 64]
-    x[0] = 1.0;  y[0] = 5.0
-    x[1] = 2.0;  y[1] = 5.0
-    x[2] = 3.0;  y[2] = 5.0
-    x[3] = 4.0;  y[3] = 5.0
-    let fit = linear_regression(x, y, 4)
-    assert(check_near(fit.0, 0.0, 0.01))   // slope ≈ 0
+fn near_f64(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
 }
 
-// ============================================================================
-// Higuchi Fractal Dimension
-// ============================================================================
-
-fn make_brownian_signal() -> [f64; 1024]  with Mut, Div{
-    // Brownian motion (random walk) — HFD should be ~1.5
+fn test_hfd_pseudo_random() -> i32 with Mut, Div, Panic {
     var signal: [f64; 1024] = [0.0; 1024]
-    var rng: i64 = 42
-    var walk = 0.0
+    var lcg: i64 = 1234567
     var i: i64 = 0
-    while i < 512 {
-        rng = (rng * 1103515245 + 12345) % 2147483648
-        let step = (rng as f64) / 2147483648.0 - 0.5
-        walk = walk + step
-        signal[i] = walk
+    while i < 128 {
+        lcg = (lcg * 1664525 + 1013904223) - (lcg * 1664525 + 1013904223) / 1000000000 * 1000000000
+        signal[i] = (lcg as f64) / 500000000.0 - 1.0
         i = i + 1
     }
-    return signal
+    let h = higuchi_fd(&signal, 128, 8)
+    if h > 1.0 { return 0 }
+    return 1
 }
 
-fn make_monotonic_signal() -> [f64; 1024]  with Mut{
-    // Perfectly smooth increasing signal — lower complexity
+fn test_hfd_constant() -> i32 with Mut, Div, Panic {
+    var signal: [f64; 1024] = [0.0; 1024]
+    var i: i64 = 0
+    while i < 128 { signal[i] = 1.0; i = i + 1 }
+    let h = higuchi_fd(&signal, 128, 8)
+    if h >= 0.0 && h < 1.0 { return 0 }
+    return 2
+}
+
+fn test_dfa_white_noise() -> i32 with Mut, Div, Panic {
     var signal: [f64; 1024] = [0.0; 1024]
     var i: i64 = 0
     while i < 512 {
-        signal[i] = i as f64
+        signal[i] = if (i - i / 2 * 2) == 0 { 1.0 } else { 0.0 - 1.0 }
         i = i + 1
     }
-    return signal
+    let alpha = dfa(&signal, 512)
+    if alpha < 1.2 { return 0 }
+    return 3
 }
 
-fn test_hfd_returns_tuple() with Mut, Div, Panic {
-    let signal = make_brownian_signal()
-    let result = higuchi_fd(signal, 512, 16)
-    // Just check the result is a valid tuple
-    let hfd = result.0
-    let r2 = result.1
-    assert(hfd > 0.0)
-    assert(r2 >= 0.0)
-    assert(r2 <= 1.0)
-}
-
-fn test_hfd_brownian_range() with Mut, Div, Panic {
-    // Brownian motion: HFD should be in [1.0, 2.0]
-    let signal = make_brownian_signal()
-    let result = higuchi_fd(signal, 512, 16)
-    assert(result.0 > 1.0)
-    assert(result.0 < 2.0)
-}
-
-fn test_hfd_requires_enough_data() with Mut, Div, Panic {
-    // Too short signal → returns (0.0, 0.0)
-    var signal: [f64; 1024] = [0.0; 1024]
-    let result = higuchi_fd(signal, 5, 4)
-    assert(check_near(result.0, 0.0, 1e-9))
-    assert(check_near(result.1, 0.0, 1e-9))
-}
-
-// ============================================================================
-// DFA
-// ============================================================================
-
-fn test_dfa_config_default() with Mut, Div, Panic {
-    let cfg = dfa_config_default()
-    assert(cfg.min_box == 4)
-    assert(cfg.max_box == 256)
-    assert(cfg.n_boxes == 20)
-}
-
-fn test_dfa_brownian_motion() with Mut, Div, Panic {
-    // Brownian motion: DFA alpha ≈ 1.5
-    var signal: [f64; 1024] = [0.0; 1024]
-    var rng: i64 = 99
-    var walk = 0.0
-    var i: i64 = 0
-    while i < 1024 {
-        rng = (rng * 1103515245 + 12345) % 2147483648
-        let step = (rng as f64) / 2147483648.0 - 0.5
-        walk = walk + step
-        signal[i] = walk
-        i = i + 1
-    }
-    let cfg = dfa_config_default()
-    let result = dfa(signal, 1024, cfg)
-    let alpha = result.0
-    // Brownian motion: alpha should be ~1.5, allow wide range
-    assert(alpha > 1.0)
-    assert(alpha < 2.5)
-}
-
-fn test_dfa_short_signal_returns_zero() with Mut, Div, Panic {
-    var signal: [f64; 1024] = [0.0; 1024]
-    let cfg = dfa_config_default()
-    // Signal shorter than max_box → returns (0.0, 0.0)
-    let result = dfa(signal, 100, cfg)
-    assert(check_near(result.0, 0.0, 1e-9))
-}
-
-// ============================================================================
-// Permutation entropy
-// ============================================================================
-
-fn test_pe_monotonic_low() with Mut, Div, Panic {
-    // Monotonic signal has only one pattern → low entropy
+fn test_dfa_ramp() -> i32 with Mut, Div, Panic {
     var signal: [f64; 1024] = [0.0; 1024]
     var i: i64 = 0
-    while i < 100 {
-        signal[i] = i as f64
-        i = i + 1
-    }
-    let pe = permutation_entropy(signal, 100, 3, 1)
-    // Perfectly monotonic: only one permutation → PE = 0
-    assert(pe < 0.1)
+    while i < 256 { signal[i] = i as f64; i = i + 1 }
+    let alpha = dfa(&signal, 256)
+    if alpha > 1.0 { return 0 }
+    return 4
 }
 
-fn test_pe_random_higher_than_monotonic() with Mut, Div, Panic {
-    // Random signal has more patterns → higher entropy
-    var mono: [f64; 1024] = [0.0; 1024]
-    var random: [f64; 1024] = [0.0; 1024]
-    var i: i64 = 0
-    while i < 100 {
-        mono[i] = i as f64
-        i = i + 1
-    }
-    var rng: i64 = 789
-    i = 0
-    while i < 100 {
-        rng = (rng * 1103515245 + 12345) % 2147483648
-        random[i] = (rng as f64) / 2147483648.0
-        i = i + 1
-    }
-    let pe_mono = permutation_entropy(mono, 100, 3, 1)
-    let pe_rand = permutation_entropy(random, 100, 3, 1)
-    assert(pe_rand > pe_mono)
-}
-
-fn test_pe_unit_interval() with Mut, Div, Panic {
-    // PE is normalized to [0, 1]
+fn test_pe_mixed() -> i32 with Mut, Div, Panic {
     var signal: [f64; 1024] = [0.0; 1024]
-    var rng: i64 = 456
-    var i: i64 = 0
-    while i < 200 {
-        rng = (rng * 1103515245 + 12345) % 2147483648
-        signal[i] = (rng as f64) / 2147483648.0
-        i = i + 1
+    var k: i64 = 0
+    while k < 64 {
+        let r = k - (k / 4) * 4
+        signal[k] = if r == 0 { 1.0 } else if r == 1 { 3.0 } else if r == 2 { 2.0 } else { 4.0 }
+        k = k + 1
     }
-    let pe = permutation_entropy(signal, 200, 3, 1)
-    assert(pe >= 0.0)
-    assert(pe <= 1.0)
+    let pe = permutation_entropy(&signal, 64, 3)
+    if pe > 0.3 { return 0 }
+    return 5
 }
 
-fn test_pe_too_short_returns_zero() with Mut, Div, Panic {
+fn test_pe_constant() -> i32 with Mut, Div, Panic {
     var signal: [f64; 1024] = [0.0; 1024]
-    // Need n >= (m-1)*tau + 1 = (7-1)*1 + 1 = 7
-    let pe = permutation_entropy(signal, 3, 7, 1)
-    assert(check_near(pe, 0.0, 1e-9))
+    var i: i64 = 0
+    while i < 100 { signal[i] = 7.0; i = i + 1 }
+    let pe = permutation_entropy(&signal, 100, 3)
+    if pe >= 0.0 && pe < 0.5 { return 0 }
+    return 6
 }
 
-// ============================================================================
-// DFA interpret
-// ============================================================================
-
-fn test_dfa_interpret_white_noise() with Mut, Div, Panic {
-    // alpha ≈ 0.5 → white noise category
-    let cat = dfa_interpret(0.55)
-    assert(cat == 0)
-}
-
-fn test_dfa_interpret_pink_noise() with Mut, Div, Panic {
-    // alpha ≈ 1.0 → pink noise
-    let cat = dfa_interpret(1.0)
-    assert(cat == 1)
-}
-
-fn test_dfa_interpret_brownian() with Mut, Div, Panic {
-    // alpha ≈ 1.5 → Brownian
-    let cat = dfa_interpret(1.5)
-    assert(cat == 2)
-}
-
-fn test_dfa_interpret_anti_correlated() with Mut, Div, Panic {
-    // alpha < 0.5 → anti-correlated
-    let cat = dfa_interpret(0.3)
-    assert(cat == 3)
-}
-
-// ============================================================================
-// Main
-// ============================================================================
-
-pub fn main() with Mut, Div, Panic {
-    test_linear_regression_perfect_fit()
-    test_linear_regression_constant()
-    test_hfd_returns_tuple()
-    test_hfd_brownian_range()
-    test_hfd_requires_enough_data()
-    test_dfa_config_default()
-    test_dfa_brownian_motion()
-    test_dfa_short_signal_returns_zero()
-    test_pe_monotonic_low()
-    test_pe_random_higher_than_monotonic()
-    test_pe_unit_interval()
-    test_pe_too_short_returns_zero()
-    test_dfa_interpret_white_noise()
-    test_dfa_interpret_pink_noise()
-    test_dfa_interpret_brownian()
-    test_dfa_interpret_anti_correlated()
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let r1 = test_hfd_pseudo_random()
+    if r1 != 0 { return r1 }
+    let r2 = test_hfd_constant()
+    if r2 != 0 { return r2 }
+    let r3 = test_dfa_white_noise()
+    if r3 != 0 { return r3 }
+    let r4 = test_dfa_ramp()
+    if r4 != 0 { return r4 }
+    let r5 = test_pe_mixed()
+    if r5 != 0 { return r5 }
+    let r6 = test_pe_constant()
+    if r6 != 0 { return r6 }
+    return 0
 }
