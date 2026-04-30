@@ -8,14 +8,21 @@ algebraic effects `Approx`, `Causal`, `Knowledge` compose without
 information loss when the underlying values use the canonical
 `ComposedKnowledge` representation.
 
-## Top-level claim
+## Top-level claim — scope of this file
 
-For any well-formed inputs `a b : ComposedKnowledge` and any of the
-arithmetic operations `add`, `sub`, `mul`, `div` (denoted `op`),
+For any well-formed inputs `a b : ComposedKnowledge` and the arithmetic
+operations *currently mechanized in this file* (`add` and `mul`),
 discharging the three effects in any order produces values that
 agree on every channel up to a confidence-decay equivalence.
 
-In short: the three handlers commute under `op`.
+In short: the three handlers commute under `add` and `mul`.
+
+`sub` and `div` are defined in the Sounio source `composed_effects.sio`
+(`ck_sub`, `ck_div`) but their Lean mirrors and the corresponding
+`composition_soundness_*` theorems are deferred. They are textually
+symmetric to `add` and `mul` respectively, but the property must be
+stated and proven explicitly; until then, do not extend the
+"handlers commute" claim to them.
 
 ## References
 
@@ -29,35 +36,50 @@ In short: the three handlers commute under `op`.
 
 ## Status
 
-**Sketch with `True`-statement placeholders** (per Sounio's no-`sorry`
-convention; see `SounioEffects.lean`). The structural lemmas
-(`handler_commutativity`, `canonical_discharge_id`,
-`composition_soundness`) prove genuine equalities by `rfl`. The
-non-structural obligations below currently degenerate to `True` and
-are documented honestly as placeholders:
+Two layers per claim, per Sounio's no-`sorry` convention:
 
-1. `mul_variance_dominates_placeholder` — the GUM mul variance term
-   `bv²·a.var + av²·b.var + a.var·b.var` equals the second-central
-   moment of the product of two independent random variables (NOT
-   "dominates"; it is exact under independence). The full proof
-   requires probabilistic-machinery extension; the current statement
-   trivialises to `True` and is named accordingly.
+1. **Algebraic-identity layer** (Float, `rfl`-proved). The `_unfolds`
+   theorems state that the corresponding component of `mul a b`
+   equals an explicit closed-form expression. These are provable by
+   `rfl` because they unfold the definition; they are not `True`
+   and they pin the algebraic content precisely.
 
-2. `approx_triangle_mul_placeholder` — the triangle-inequality bound
-   `|y|·δx + |x|·δy + δx·δy` (with the cross-term, post math-review
-   2026-04-30) for the product approximation. Statement currently
-   trivialises to `True`.
+2. **Substance layer** (`Nat`-shadow, structurally proved). For each
+   claim that requires inequality reasoning (variance domination,
+   triangle inequality, causal pooling), a `nat_*` theorem in `Nat`
+   captures the *mathematical content* of the claim using only core
+   Lean's `Nat` algebra — no Mathlib, no Float postulates, no axioms.
 
-3. `causal_independence_approximation_placeholder` — independent
-   evidence pooling produces Beta(α₁+α₂, β₁+β₂) (not multiplication;
-   that mistake was previously documented in the Sounio
-   `composed_effects.sio` comment and corrected the same day).
-   Statement currently trivialises to `True`.
+What this gives us today:
+- `mul_variance_unfolds` — the variance term equals
+  `b.value²·a.var + a.value²·b.var + a.var·b.var` exactly. This is
+  the second-central moment of the product of two independent random
+  variables (full Gaussian-product, not delta-method).
+- `nat_mul_variance_dominates_delta_method` — in the discretised
+  (`Nat`) shadow, the full Gaussian-product variance dominates the
+  GUM delta-method approximation, because the cross-term `var_x·var_y`
+  is non-negative. This is the substantive claim that the cross-term
+  matters; it is what motivated the math-review fix on
+  `composed_effects.sio` and on `mul` above.
+- `mul_approx_bound_unfolds` — the approx bound equals
+  `|y|·δx + |x|·δy + δx·δy` exactly.
+- `nat_approx_triangle_with_cross_dominates_delta` — the cross-term
+  domination at the substance layer.
+- `mul_causal_alpha_sums` / `mul_causal_beta_sums` — independent
+  evidence pooling produces Beta(α₁+α₂, β₁+β₂). Pinned by `rfl`.
 
-A future commit will tighten the placeholder statements to genuine
-propositions and provide proofs once the Mathlib-free probabilistic
-machinery in `formal/Epistemic.lean` is extended with a Beta-distribution
-algebra. Expected effort: 4-6 weeks of dedicated Lean work.
+What remains deferred (genuinely non-trivial):
+- A Real- or Mathlib-grounded version of the variance-domination
+  theorem on Float. Would require either importing Mathlib's
+  `Mathlib.Analysis.NormedSpace.Real` and a Float-Real correspondence,
+  or extending the in-tree `formal/Epistemic.lean` with a
+  Mathlib-free Real algebra. Either is 4-6 weeks of dedicated Lean
+  work and is *not* attempted here.
+- Probabilistic semantics for the Beta-edge causal-pooling claim.
+  The Sounio model uses Beta(α, β) parameters; the formal claim
+  "two independent observations of evidence pool by α+α', β+β'" is
+  a textbook conjugate-update fact, but a Lean proof needs a
+  Beta-distribution algebra. Also deferred.
 -/
 
 namespace Sounio.ApproxCausalKnowledge
@@ -155,40 +177,77 @@ theorem canonical_discharge_id (c : ComposedKnowledge) :
     canonicalDischarge c = c := by
   rfl
 
-/-- PLACEHOLDER (status: file docstring §Status item 1).
-    Intended target: the variance term in `mul a b` equals the exact
-    second-central moment of the product of two independent random
-    variables with the given means and variances, namely
-    `b.value² · a.variance + a.value² · b.variance + a.variance · b.variance`.
-    Statement intentionally trivialised to `True` because Sounio's Lean
-    setup is Mathlib-free and probability machinery is not yet in
-    scope. Strengthen once `formal/Epistemic.lean` exposes a
-    distribution algebra. -/
-theorem mul_variance_dominates_placeholder (a b : ComposedKnowledge)
-    (ha : WellFormed a) (hb : WellFormed b) :
-    True := by
-  trivial
+/-- Algebraic-identity layer (Float, `rfl`-proved).
+    The variance term of `mul a b` equals the *full Gaussian-product*
+    variance — second-central moment of the product of two independent
+    random variables with the given means and variances:
+        b.value² · a.var + a.value² · b.var + a.var · b.var
+    The third (cross-)term distinguishes the exact moment from the
+    GUM delta-method approximation; it was added in the
+    2026-04-30 math-review fix.
+-/
+theorem mul_variance_unfolds (a b : ComposedKnowledge) :
+    (mul a b).variance =
+      b.value * b.value * a.variance
+      + a.value * a.value * b.variance
+      + a.variance * b.variance := by
+  rfl
 
-/-- PLACEHOLDER (status: file docstring §Status item 2).
-    Intended target: triangle inequality for product approximation,
-    `|xy_approx - xy_true| ≤ |y|·δx + |x|·δy + δx·δy`. The δx·δy
-    cross-term IS required; it was missing in the original Sounio
-    `composed_effects.sio` and `mul` definition above and was added
-    after a math-review on 2026-04-30 with counter-example
-    (a=b=0±1 → first two terms = 0 but true error can be 1).
-    Statement currently trivialised to `True`. -/
-theorem approx_triangle_mul_placeholder (a b : ComposedKnowledge) : True := by
-  trivial
+/-- Substance layer (`Nat`-shadow, structurally proved).
+    In a discretised semiring (`Nat`), the full Gaussian-product
+    variance dominates the GUM delta-method approximation, because the
+    cross-term `var_x · var_y ≥ 0`. This is the proposition that
+    motivates carrying the cross-term: shedding it always *under-*estimates
+    the true variance, which is unsafe for a Knightian safety gate.
+-/
+theorem nat_mul_variance_dominates_delta_method
+    (av bv vary varx : Nat) :
+    bv * bv * varx + av * av * vary
+      ≤ bv * bv * varx + av * av * vary + varx * vary := by
+  exact Nat.le_add_right _ _
 
-/-- PLACEHOLDER (status: file docstring §Status item 3).
-    Intended target: independent-evidence pooling for Beta-edge
-    distributions yields Beta(α₁+α₂, β₁+β₂) (NOT α-multiply, β-multiply;
-    that mistake was previously embedded in the Sounio comment and
-    corrected the same day). Statement currently trivialised to `True`. -/
-theorem causal_independence_approximation_placeholder
-    (a b : ComposedKnowledge)
-    (h_indep : True) : True := by
-  trivial
+/-- Algebraic-identity layer (Float, `rfl`-proved).
+    The `approx_bound` field of `mul a b` equals the standard product
+    triangle inequality with the δx·δy cross-term:
+        |y|·δx + |x|·δy + δx·δy
+    Counter-example for the no-cross-term version (which was the
+    pre-2026-04-30 bug): a = b with value=0, approx_bound=1; without
+    the cross-term the bound is 0, but the true product error can
+    be ±1. The cross-term is required for soundness.
+-/
+theorem mul_approx_bound_unfolds (a b : ComposedKnowledge) :
+    (mul a b).approx_bound =
+      (Float.abs b.value) * a.approx_bound
+      + (Float.abs a.value) * b.approx_bound
+      + a.approx_bound * b.approx_bound := by
+  rfl
+
+/-- Substance layer (`Nat`-shadow, structurally proved).
+    With `δx, δy ≥ 0`, the triangle bound *with* cross-term is at
+    least as large as the bound without it. So omitting the
+    cross-term gives an unsound under-estimate; including it never
+    sacrifices soundness. -/
+theorem nat_approx_triangle_with_cross_dominates_delta
+    (absx absy dx dy : Nat) :
+    absy * dx + absx * dy
+      ≤ absy * dx + absx * dy + dx * dy := by
+  exact Nat.le_add_right _ _
+
+/-- Algebraic-identity layer (Float, `rfl`-proved).
+    Independent-evidence pooling sums the Beta α-parameters:
+        (mul a b).causal_alpha = a.causal_alpha + b.causal_alpha
+    This is the conjugate-update rule for two independent observations.
+    The pre-2026-04-30 Sounio comment incorrectly claimed multiplication;
+    the code (and now this Lean mirror) correctly sums.
+-/
+theorem mul_causal_alpha_sums (a b : ComposedKnowledge) :
+    (mul a b).causal_alpha = a.causal_alpha + b.causal_alpha := by
+  rfl
+
+/-- Companion identity for the Beta β-parameter. -/
+theorem mul_causal_beta_sums (a b : ComposedKnowledge) :
+    (mul a b).causal_beta = a.causal_beta + b.causal_beta := by
+  rfl
 
 -- ================================================================
 -- §6. Composition theorem (top-level)
