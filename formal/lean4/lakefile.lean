@@ -96,3 +96,8 @@ lean_lib «SounioKnightian» where
 -- M3: Vancomycin-Knightian thrust — clinical dosing safety obligation
 @[default_target]
 lean_lib «SounioVancomycinDosingSafety» where
+
+-- M2.5: Vancomycin-Knightian thrust — Fréchet outer enclosure for
+-- monotone-in-each-arg functions (joint-dependence resolution)
+@[default_target]
+lean_lib «SounioFrechet» where
