@@ -1928,6 +1928,33 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         let reg = lookup_local_tok(ctx, pos)
         if reg >= 0 {
             if lookup_local_is_ref_tok(ctx, pos) != 0 {
+                // M1.2: ref-local postfix — `r.field` and `r.field[idx]`
+                let ref_sidx = lookup_local_struct_idx_tok(ctx, pos)
+                if ref_sidx >= 0 && token_kind(pos + 1) == TK_DOT && token_kind(pos + 2) == TK_IDENT {
+                    let foff = struct_field_offset_tok(ref_sidx, pos + 2)
+                    if foff >= 0 {
+                        let field_sidx = struct_field_type_at(ref_sidx, foff)
+                        // ref.field[idx] (scalar load from field array)
+                        if token_kind(pos + 3) == TK_LBRACKET {
+                            let idx_expr = parse_expr_ir(func, ctx, pos + 4)
+                            if idx_expr.ok != 0 {
+                                let end_pos = skip_index_cast_end(idx_expr.next)
+                                if token_kind(end_pos) == TK_RBRACKET {
+                                    let base_field = alloc_reg(ctx)
+                                    ufn_record_load_ref_field(base_field, reg, foff)
+                                    let dst = alloc_reg(ctx)
+                                    ufn_record_local_load(dst, base_field, idx_expr.reg)
+                                    return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
+                                }
+                            }
+                        }
+                        let dst = alloc_reg(ctx)
+                        ufn_record_load_ref_field(dst, reg, foff)
+                        if struct_field_is_f64_at(ref_sidx, foff) { mark_reg_f64(dst) }
+                        V2_LAST_STRUCT_IDX = field_sidx
+                        return ExprParse { ok: 1, reg: dst, next: pos + 3}
+                    }
+                }
                 return ExprParse { ok: 1, reg: reg, next: pos + 1}
             }
             // local array read: ident[expr] or ident[expr as T]
@@ -2851,7 +2878,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
         }
     }
 
-    // field mutation: p.x = expr
+    // field mutation: p.x = expr  (M1.2: handles ref via store_ref_field)
     if k == TK_IDENT && token_kind(p + 1) == TK_DOT && token_kind(p + 2) == TK_IDENT && token_kind(p + 3) == TK_EQ {
         let base_reg = lookup_local_tok(ctx, p)
         if base_reg >= 0 {
@@ -2859,9 +2886,15 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             if sidx >= 0 {
                 let foff = struct_field_offset_tok(sidx, p + 2)
                 if foff >= 0 {
+                    let is_ref_lv = lookup_local_is_ref_tok(ctx, p)
                     V2_LAST_STRUCT_IDX = -1
                     let parsed = parse_expr_ir(func, ctx, p + 4)
                     if parsed.ok != 0 {
+                        if is_ref_lv != 0 {
+                            ufn_record_store_ref_field(base_reg, foff, parsed.reg)
+                            V2_LAST_STRUCT_IDX = -1
+                            return parsed.next
+                        }
                         if V2_LAST_STRUCT_IDX >= 0 {
                             let inner_flat = STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize]
                             var ci: i64 = 0
@@ -4397,6 +4430,12 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                     }
                 }
                 if ppos + 3 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_AMPBANG && token_kind(ppos + 3) == TK_IDENT {
+                    param_sidx = find_struct_idx_tok(ppos + 3)
+                    param_is_ref = 1
+                }
+                // M1.2: plain `& TypeName` (immutable ref) — register as ref struct local
+                // (TK_AMP = 141; using literal to avoid hoisted-const ambiguity)
+                if ppos + 3 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == 141 && token_kind(ppos + 3) == TK_IDENT {
                     param_sidx = find_struct_idx_tok(ppos + 3)
                     param_is_ref = 1
                 }
