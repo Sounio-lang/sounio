@@ -2522,6 +2522,63 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                 remember_local_tok(ctx, p + 1, arr_base)
                 var end = j + 2
                 while end < close && token_kind(end) != TK_RBRACKET { end = end + 1 }
+                // M1.2 step 4 bisect — tail-literal initializer for
+                // `var arr: [T; N] = [v0, v1, ...]` or `= [val; N]`. See
+                // artifacts/m1_2_parity_inventory/blockers/m1_2_step4_array_init.md
+                // for the history. Bisect 3/N: each element is parsed by
+                // parse_expr_ir, so floats, negated literals (`0 - N`), and
+                // variable refs all work. The zero-fill above still runs;
+                // parsed values are copied into the array slots below.
+                if end + 1 < close && token_kind(end + 1) == TK_EQ && token_kind(end + 2) == TK_LBRACKET {
+                    let rhs_open = end + 2
+                    var rhs_depth: i64 = 1
+                    var rhs_scan = rhs_open + 1
+                    var rhs_has_semi: i64 = 0
+                    var rhs_close: i64 = 0 - 1
+                    while rhs_scan < close && rhs_depth > 0 {
+                        let rk = token_kind(rhs_scan)
+                        if rk == TK_LBRACKET { rhs_depth = rhs_depth + 1 }
+                        if rk == TK_RBRACKET {
+                            rhs_depth = rhs_depth - 1
+                            if rhs_depth == 0 { rhs_close = rhs_scan }
+                        }
+                        if rk == TK_SEMI && rhs_depth == 1 { rhs_has_semi = 1 }
+                        rhs_scan = rhs_scan + 1
+                    }
+                    if rhs_close < 0 { return end + 1 }
+                    let rhs_first = rhs_open + 1
+                    if rhs_has_semi != 0 {
+                        // [val; N] — parse val once, copy into all slots.
+                        V2_LAST_STRUCT_IDX = 0 - 1
+                        let fill_parse = parse_expr_ir(func, ctx, rhs_first)
+                        V2_LAST_STRUCT_IDX = 0 - 1
+                        if fill_parse.ok != 0 {
+                            var fi: i64 = 0
+                            while fi < arr_size {
+                                ufn_record_copy(arr_base + fi, fill_parse.reg)
+                                fi = fi + 1
+                            }
+                        }
+                    } else {
+                        // [v0, v1, ...] — parse each element as a full expression.
+                        var cur_tok = rhs_first
+                        var slot_i: i64 = 0
+                        while cur_tok < rhs_close && slot_i < arr_size {
+                            if token_kind(cur_tok) == TK_COMMA {
+                                cur_tok = cur_tok + 1
+                            } else {
+                                V2_LAST_STRUCT_IDX = 0 - 1
+                                let elem_parse = parse_expr_ir(func, ctx, cur_tok)
+                                V2_LAST_STRUCT_IDX = 0 - 1
+                                if elem_parse.ok == 0 { break }
+                                ufn_record_copy(arr_base + slot_i, elem_parse.reg)
+                                slot_i = slot_i + 1
+                                cur_tok = elem_parse.next
+                            }
+                        }
+                    }
+                    return rhs_close + 1
+                }
                 return end + 1
             }
         }
