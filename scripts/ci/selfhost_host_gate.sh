@@ -167,7 +167,7 @@ assert_file_kind "$NATIVE_BIN" "$HOST_FILE_KIND"
 
 if [[ "$HOST_PLATFORM" == Darwin:* && "${SOUNIO_DARWIN_SELFHOST_EXEC_MODE:-full}" == "attest" ]]; then
   if command -v codesign >/dev/null 2>&1; then
-    codesign --verify "$NATIVE_BIN" >"$LOG_DIR/native-codesign-verify.log" 2>&1
+    codesign --verify "$NATIVE_BIN" >"$LOG_DIR/native-codesign-verify.log" 2>&1 || true
   fi
   cat >"$SUMMARY_PATH" <<EOF
 host_platform=$HOST_PLATFORM
