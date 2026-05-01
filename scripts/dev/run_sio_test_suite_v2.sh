@@ -184,7 +184,7 @@ run_test() {
     fi
     
     # Skip tests with no annotation
-    if ! $is_run_pass && ! $is_compile_fail; then
+    if ! $is_run_pass && ! $is_compile_fail && ! $is_check_only; then
         echo "{\"status\":\"skip\",\"reason\":\"no-annotation\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
         return
     fi
@@ -212,7 +212,7 @@ run_test() {
     
     start_time=$(date +%s)
     
-    if $is_run_pass; then
+    if $is_run_pass || $is_check_only; then
         if $is_check_only; then
             output=$(timeout "$timeout_val" "$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
             if [[ $exit_code -eq 124 ]]; then

@@ -73,15 +73,27 @@ theorem f2_ratio_naturality_witness :
     naturality_basis_all_bool = true :=
   naturality_basis_all
 
-/-- rp_alt_stat_sq (declared in tests/run-pass/f1_moufang_synthetic.sio) carries the `NaturalityG2`
+/-- rp_pair_residual_sq (declared in tests/run-pass/m5_held_out_replication.sio) carries the `NaturalityG2`
     effect; this witness anchors it to `naturality_basis_all`. -/
-theorem rp_alt_stat_sq_naturality_witness :
+theorem rp_pair_residual_sq_naturality_witness :
     naturality_basis_all_bool = true :=
   naturality_basis_all
 
-/-- rp_pair_residual_sq (declared in tests/run-pass/f2_conjugation_synthetic.sio) carries the `NaturalityG2`
+/-- rp_paired_dist_sq_fold (declared in tests/run-pass/m5_held_out_replication.sio) carries the `NaturalityG2`
     effect; this witness anchors it to `naturality_basis_all`. -/
-theorem rp_pair_residual_sq_naturality_witness :
+theorem rp_paired_dist_sq_fold_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- rp_random_dist_sq_fold (declared in tests/run-pass/m5_held_out_replication.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem rp_random_dist_sq_fold_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- rp_alt_stat_sq (declared in tests/run-pass/f1_moufang_synthetic.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem rp_alt_stat_sq_naturality_witness :
     naturality_basis_all_bool = true :=
   naturality_basis_all
 
