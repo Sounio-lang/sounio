@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.examples.neuroreceptor-pet.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.neuroreceptor-pet.readme
+-->
+
 # Executable Epistemic PET Kinetics: GUM-Compliant Propagation of PBPK-Informed Uncertainty into Receptor Binding Metrics
 
 **NRM 2026 Late-Breaking Abstract — Proof-of-Concept Vertical Slice**

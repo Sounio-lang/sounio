@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.rustless-cutover
 -->
 
-
 # Rustless Cutover - Sounio Self-Hosting Documentation
 
 **Last Updated**: 2026-02-13

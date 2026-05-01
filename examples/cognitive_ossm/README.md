@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.examples.cognitive-ossm.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.cognitive-ossm.readme
+-->
+
 # Cognitive O-SSM (Canonical Sounio Lane)
 
 This directory is the canonical `sounio-lang/sounio` side of the SWOW-EN O-SSM integration.

@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.summary-v0.2.0
 -->
 
-
 # Sounio v0.2.0 Development Summary
 
 **Date:** 2026-02-27  

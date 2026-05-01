@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.plan-typesystem-performance-staticanalysis-migration
 -->
 
-
 # Sounio Development Plan
 ## Type System, Performance, Static Analysis & Migration Tools
 

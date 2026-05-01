@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.examples.neuroreceptor-pet.results.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.neuroreceptor-pet.results.readme
+-->
+
 # results/
 
 Generated numerical outputs from `pet_2tcm_epistemic.sio` (audit) and `pet_2tcm_export.sio` (TAC curve).

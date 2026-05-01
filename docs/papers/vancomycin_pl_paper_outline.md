@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.papers.vancomycin-pl-paper-outline
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.vancomycin-pl-paper-outline
+-->
+
 # PL Paper Draft Outline — POPL/ICFP 2027 target
 
 **Working title**: *Algebraic Effects for Knightian Uncertainty: A Verified Clinical Decision Support Foundation*

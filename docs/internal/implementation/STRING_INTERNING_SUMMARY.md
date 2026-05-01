@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.string-interning-summary
 -->
 
-
 # String Interning Implementation - COMPLETE ✅
 
 ## Overview

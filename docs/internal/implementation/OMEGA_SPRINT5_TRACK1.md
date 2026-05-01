@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.omega-sprint5-track1
 -->
 
-
 # Omega Sprint 5 Track 1
 
 ## Goal

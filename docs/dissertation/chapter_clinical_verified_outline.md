@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.dissertation.chapter-clinical-verified-outline
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.chapter-clinical-verified-outline
+-->
+
 # Dissertation Chapter Outline — *Verified Clinical Decision Support under Knightian Uncertainty*
 
 **Working title (chapter)**: *Sounio for Verified Clinical Decision Support: Vancomycin under Knightian Uncertainty*

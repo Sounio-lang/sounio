@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.native-v2-serious-track
+authority: repo_only
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.native-v2-serious-track
+-->
+
 # Native V2 Serious Track
 
 Status date: 2026-04-27.

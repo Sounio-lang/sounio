@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.irb-protocol-draft
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.irb-protocol-draft
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # IRB Protocol Draft — Vancomycin Verified CDS Retrospective Cohort
 
 **Status**: M0 deliverable. Drafted for institutional review submission. Final submission pending PI institutional details.

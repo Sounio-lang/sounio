@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.m0-baseline-inventory
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.m0-baseline-inventory
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # M0 Baseline Inventory — What Already Runs
 
 **Purpose**: snapshot of what Sounio infrastructure exists *before* the vancomycin-Knightian thrust starts. Used to scope M1-M3 and to detect breakage during the project.

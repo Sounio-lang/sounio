@@ -1,11 +1,16 @@
 <!-- docs:meta
 topic_id: repo.docs.research.ocssm-preregistration-20260615
-authority: pre-registration
-audience: researchers, reviewers
-last_validated: 2026-05-01
-validated_by: Claude Opus 4.7 (1M context) — DRAFT, awaiting human PI sign-off
-source_of_truth: this file's SHA-256 hash, posted to OSF before wk-11 lock
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.ocssm-preregistration-20260615
 -->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
 
 # O-CSSM Pre-Registration — Confirmatory Test Plan
 
