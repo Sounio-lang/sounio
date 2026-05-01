@@ -33,8 +33,8 @@ expected_file_kind() {
   case "$1" in
     x86_64-linux) printf '%s\n' "ELF 64-bit LSB executable, x86-64" ;;
     aarch64-linux) printf '%s\n' "ELF 64-bit LSB executable, ARM aarch64" ;;
-    aarch64-macos) printf '%s\n' "Mach-O 64-bit arm64 executable" ;;
-    x86_64-macos) printf '%s\n' "Mach-O 64-bit x86_64 executable" ;;
+    aarch64-macos) printf '%s\n' "Mach-O 64-bit arm64 executable|Mach-O 64-bit executable arm64" ;;
+    x86_64-macos) printf '%s\n' "Mach-O 64-bit x86_64 executable|Mach-O 64-bit executable x86_64" ;;
     *)
       echo "error: unsupported target triple: $1" >&2
       return 1
@@ -71,14 +71,20 @@ assert_file_kind() {
   local path="$1"
   local expected="$2"
   local actual
+  local variant
 
   actual="$(file "$path" 2>/dev/null || true)"
-  if [[ "$actual" != *"$expected"* ]]; then
-    echo "error: unexpected artifact kind for $path" >&2
-    echo "expected fragment: $expected" >&2
-    echo "actual: $actual" >&2
-    exit 1
-  fi
+  IFS='|' read -r -a expected_variants <<<"$expected"
+  for variant in "${expected_variants[@]}"; do
+    if [[ "$actual" == *"$variant"* ]]; then
+      return 0
+    fi
+  done
+
+  echo "error: unexpected artifact kind for $path" >&2
+  echo "expected fragment: $expected" >&2
+  echo "actual: $actual" >&2
+  exit 1
 }
 
 assert_output_equals() {
