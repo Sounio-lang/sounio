@@ -152,6 +152,36 @@ Walley ε-contamination credal set as the elicitation operator.
   cost-of-ambiguity calculations (deferred M5+). Float-Real lift
   of both `SounioFrechet.lean` and `SounioWalley.lean` (4–6 weeks).
 
+### Substrate-generality demonstration [DONE 2026-05-01]
+
+Empirical demonstration that the M2.5 Fréchet enclosure is
+**drug-agnostic** — a property of Cmin's monotone (↑Vc, ↓CL)
+functional shape, not of vancomycin's specific PK estimates.
+
+- [x] `stdlib/clinical/aminoglycoside_pbpk.sio` adds
+      `AminoglycosidePKParams` substrate + drug factories
+      `agent_gentamicin` (Hilf 1989/Begg 1995: 0.25 L/kg, 0.06
+      L/h/CrCl) and `agent_amikacin` (Marsot 2017: 0.30 L/kg,
+      0.06 L/h/CrCl). Both reuse `pb_apply2_monotone_inc_dec`
+      from `knightian.sio` *unchanged*. Therapeutic windows
+      drug-specific: gent 0.5–2.0 mg/L, amik 4.0–8.0 mg/L.
+- [x] 12-term Maclaurin for `exp` (vs vancomycin's 5-term) to
+      handle aminoglycoside q12h regime where |ke·τ| ≈ 2.3
+      exceeds the 5-term safe range. Truncation analysis
+      math-review-validated (Grok 4.1 caught a 60× over-claim on
+      the 9-term version).
+- [x] `tests/stdlib/clinical/test_aminoglycoside_correlation_sensitivity.sio`
+      runs 500 deterministic LCG samples (50 per ρ × 5 ρ × 2 drugs)
+      verifying every sample's Cmin is enclosed by the predicted
+      Knightian band → MULTI-DRUG SENSITIVITY PASS.
+- [x] Math-review of the substrate-generality claim:
+      `bin/llm-offload -t math-review -p xai -i /tmp/aminoglycoside_review.md`
+      → 8/9 OK + 1 CAUGHT_BUG (Maclaurin error claim, fixed).
+- **Implication**: any future renally-cleared drug whose Cmin has
+  the same 1-compartment IV bolus structure inherits the Fréchet
+  soundness theorem with zero new derivation work — only the popPK
+  parameters and therapeutic window need to be supplied.
+
 ## Pivot Log
 
 | Date | From | To | Reason |
@@ -191,6 +221,8 @@ Walley ε-contamination credal set as the elicitation operator.
 | 2026-05-01 | `stdlib/epistemic/walley.sio` | M3.5 Walley elicitation surface (CredalSet + two lifts) |
 | 2026-05-01 | `formal/lean4/SounioWalley.lean` | M3.5 Lean structural soundness (5 theorems, Nat-shadow) |
 | 2026-05-01 | `tests/stdlib/epistemic/test_walley_*.sio` (5 files) | M3.5 round-trip + Fréchet composition tests |
+| 2026-05-01 | `stdlib/clinical/aminoglycoside_pbpk.sio` | Substrate-generality: gentamicin + amikacin Cmin reusing pb_apply2_monotone_inc_dec |
+| 2026-05-01 | `tests/stdlib/clinical/test_aminoglycoside_correlation_sensitivity.sio` | Multi-drug correlation-sensitivity test (500 enclosed samples, 5 ρ × 50 × 2 drugs) |
 
 ## LLM Review Notes
 
