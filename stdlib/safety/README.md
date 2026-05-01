@@ -1,0 +1,3 @@
+# stdlib/safety
+
+Safety utilities.

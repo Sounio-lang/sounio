@@ -1,0 +1,3 @@
+# stdlib/web
+
+Web utilities.
