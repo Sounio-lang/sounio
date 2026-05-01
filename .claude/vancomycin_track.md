@@ -101,9 +101,56 @@ Direct response to the consensus pushback recorded in M0 row of the Pivot Log
       explicit "no independence assumption" disclosure with link to
       the theorem and the empirical sensitivity test.
 - **Open follow-up**: M3.5 (Walley neighborhood model at the
-  elicitation surface, lift to p-box at propagation) — deferred.
+  elicitation surface, lift to p-box at propagation) — **landed
+  2026-05-01, see below**.
   Float-Real lift of `SounioFrechet.lean` (4–6 weeks, requires
   Mathlib import or in-tree Float order theory) — deferred.
+
+### M3.5 — Walley elicitation surface [DONE 2026-05-01]
+
+Direct response to the consensus pushback: complete the
+elicitation/propagation split announced in M2.5 by adding the
+Walley ε-contamination credal set as the elicitation operator.
+
+- [x] **M3.5.0 Math-review-first** (`bin/llm-offload -t math-review
+      -p xai -i /tmp/m35_walley_thesis.md`) caught two real bugs in
+      the proposed design: (a) variance upper bound was missing the
+      cross-term `ε(1−ε)(μ_0−μ_Q)²` (UNSOUND counter-example
+      provided); (b) Fréchet on mean rectangle under-encloses
+      nonlinear monotone f. Both fixed before any code was written.
+- [x] **M3.5.1** `stdlib/epistemic/walley.sio` — `CredalSet` struct
+      + `cs_neighborhood` / `cs_precise` / `cs_vacuous` constructors
+      + `credal_to_pbox` (mean-band lift, sound variance bound) +
+      `credal_to_support_pbox` (support-band lift for nonlinear
+      monotone propagation) + 5/5 self-test smoke checks PASS.
+- [x] **M3.5.2** `formal/lean4/SounioWalley.lean` — five
+      structural theorems mechanised in core Lean 4 (Nat-shadow, no
+      Mathlib, no `axiom`, no `sorry`):
+      - `walley_collapse_at_zero_nat` (precise recovery at ε = 0)
+      - `walley_collapse_gap_zero_nat` (gap = 0 at ε = 0)
+      - `walley_vacuous_lo_at_one_nat` / `_hi_at_one_nat` /
+        `_gap_at_one_nat` (full-support band at ε = 1)
+      - `walley_gap_monotone_in_epsilon_nat` (gap monotone in ε)
+      - `walley_frechet_composition_holds` (composition with M2.5
+        Fréchet on support rectangle).
+      Lakefile entry added; `lake build SounioWalley` green.
+- [x] **M3.5.3** Five round-trip tests in
+      `tests/stdlib/epistemic/test_walley_*.sio`:
+      `_collapse`, `_vacuous`, `_width_monotone`,
+      `_support_lift`, `_frechet_compose` — all PASS via
+      `bash scripts/run_sio_test_suite.sh walley`.
+- [x] **M3.5.4** Math-review of the implementation
+      (`/tmp/m35_implementation_review.md`) — Grok 4.1 returned
+      11/11 OK, NO_FINDINGS. Variance bound, Lean theorems, and
+      Fréchet composition all confirmed.
+- [x] **M3.5.5** `docs/research/knightian_operator_choice.md` §7
+      added: documents the Walley landing, the operator-surface
+      table, and the math-review record. Audit-log entries added
+      to `.claude/llm_offload_log.md` for both the thesis review
+      and the implementation review.
+- **Open follow-up**: Klibanoff smooth-ambiguity wrapper for
+  cost-of-ambiguity calculations (deferred M5+). Float-Real lift
+  of both `SounioFrechet.lean` and `SounioWalley.lean` (4–6 weeks).
 
 ## Pivot Log
 
@@ -141,6 +188,9 @@ Direct response to the consensus pushback recorded in M0 row of the Pivot Log
 | 2026-04-30 | `docs/papers/cover_letters/popl_cover_letter.md` | M6 POPL cover letter |
 | 2026-04-30 | `docs/papers/cover_letters/cp_cover_letter.md` | M6 CP cover letter |
 | 2026-04-30 | `docs/papers/cover_letters/dissertation_committee_memo.md` | M6 committee memo |
+| 2026-05-01 | `stdlib/epistemic/walley.sio` | M3.5 Walley elicitation surface (CredalSet + two lifts) |
+| 2026-05-01 | `formal/lean4/SounioWalley.lean` | M3.5 Lean structural soundness (5 theorems, Nat-shadow) |
+| 2026-05-01 | `tests/stdlib/epistemic/test_walley_*.sio` (5 files) | M3.5 round-trip + Fréchet composition tests |
 
 ## LLM Review Notes
 

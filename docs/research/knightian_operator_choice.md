@@ -180,10 +180,118 @@ applicability must be verified case by case — any future model
 introduction MUST run the same math-review (`-t math-review`) check
 before relying on `pb_apply2_monotone_*`.
 
+## §7 — M3.5 update: Walley elicitation surface added (2026-05-01)
+
+The deferred M3.5 milestone (Walley neighborhood model for the
+elicitation surface) has now been mechanised. The elicitation /
+propagation split announced in §6 is fully realised:
+
+- **Elicitation surface** (`stdlib/epistemic/walley.sio`):
+  `CredalSet` parametrises ε-contamination credal sets
+  `M_ε(P0, [s_lo, s_hi])` (Berger 1990; Walley 1991 §2.9). Two
+  distinct lifts to p-box are exposed:
+
+  - `credal_to_pbox` — bounds the **mean** `E_P(X)` over `P ∈ M_ε`.
+    Sharp on `lo_mean` / `hi_mean`; variance is a sound upper bound
+    `(1 − ε)·σ²_0 + ε·R²` where `R = max(|μ_0 − s_lo|, |s_hi − μ_0|)`.
+
+  - `credal_to_support_pbox` — bounds the **support** of `P` (vacuous
+    Popoviciu). This is the lift that must be fed into Fréchet
+    propagation (`pb_apply2_monotone_*`) for nonlinear monotone f, so
+    the enclosure dominates realised values of `f(X, Y)` rather than
+    just `E[f(X, Y)]`.
+
+- **Propagation surface** (M2.5 — `pb_apply2_monotone_*`):
+  unchanged. The composition `credal_to_support_pbox ∘
+  pb_apply2_monotone_inc_dec` provides a copula-free outer enclosure
+  of `f(X, Y)` for any joint distribution with marginals in
+  `M_ε(C_X) × M_ε(C_Y)`.
+
+### Math-review record
+
+Two math-reviews via `bin/llm-offload -t math-review -p xai`:
+
+1. **M3.5.0 thesis review** (2026-04-30) — caught two real bugs in
+   the proposed design:
+   - Variance upper bound was missing the cross-term
+     `ε(1 − ε)(μ_0 − μ_Q)²`; my originally proposed formula
+     `(1 − ε)·σ²_0 + ε·((s_hi − s_lo)/2)²` was UNSOUND
+     (counter-example: μ=0, s_lo=0, s_hi=2, σ²_0=0, Q = δ_2, ε = ½
+     gives Var_P = 1 > claimed 0.5).
+   - Fréchet on the **mean rectangle** under-encloses `f(X, Y)`
+     for nonlinear monotone f, because realised values lie outside
+     `[lo_mean, hi_mean]`. The fix is to feed the **support
+     rectangle** (`credal_to_support_pbox`) into Fréchet.
+
+   The implementation was revised to use `Var_P(X) ≤ E_P[(X − μ_0)²]`
+   (sound, no missing cross-term) and to expose two distinct lifts.
+
+2. **M3.5 implementation review** (2026-05-01) — 11/11 findings
+   `[OK]`. No bugs flagged. The corrected variance bound is sound,
+   the support-vs-mean dichotomy resolves Bug B, the Lean theorems
+   are complete, and the composition with M2.5 Fréchet is correct.
+
+### Lean discharge
+
+Five structural theorems mechanised in `formal/lean4/SounioWalley.lean`,
+all proven in core Lean 4 (Nat-shadow, no `axiom`, no `sorry`, no
+Mathlib):
+
+- `walley_collapse_at_zero_nat` — at ε = 0, the lifted band
+  collapses to a point (precise / Knowledge-recovery).
+- `walley_collapse_gap_zero_nat` — gap is zero at ε = 0.
+- `walley_vacuous_lo_at_one_nat` / `_hi_at_one_nat` /
+  `_gap_at_one_nat` — at ε = 1, the band fills the support.
+- `walley_gap_monotone_in_epsilon_nat` — the gap is non-decreasing
+  in ε. Sound elicitation invariant: increasing Knightian doubt
+  cannot tighten the posterior.
+- `walley_frechet_composition_holds` — direct reduction of the
+  Walley → Fréchet composition to
+  `Sounio.Frechet.frechet_enclosure_monotone_inc_dec_nat`.
+
+### Test evidence
+
+Five `tests/stdlib/epistemic/test_walley_*.sio` round-trip tests,
+all green via `bash scripts/run_sio_test_suite.sh walley`:
+
+- `test_walley_collapse.sio` (ε = 0 → precise p-box).
+- `test_walley_vacuous.sio` (ε = 1 → full-support band, R²
+  variance).
+- `test_walley_width_monotone.sio` (11-point ε sweep, monotone +
+  endpoint check + linear midpoint).
+- `test_walley_support_lift.sio` (support lift independent of
+  μ_0/ε/σ²_0 — three different `CredalSet`s share the same
+  `credal_to_support_pbox` output).
+- `test_walley_frechet_compose.sio` (composition with
+  `pb_apply2_monotone_inc_dec` for `f(x, y) = x/y`; 16-point grid
+  sample verifies enclosure soundness).
+
+### Operator surface (final)
+
+| Surface | Module | Bounds | Use |
+|---|---|---|---|
+| Elicitation (mean band) | `walley.sio :: credal_to_pbox` | `E_P(X)` | linear-in-X aggregation, decision of "is the mean in range?" |
+| Elicitation (support band) | `walley.sio :: credal_to_support_pbox` | `supp(P)` | feeder for nonlinear monotone propagation |
+| Propagation | `knightian.sio :: pb_apply2_monotone_*` | `f(X, Y)` realisation | Fréchet enclosure, no copula assumption |
+| Decision gate | `knightian.sio :: pb_within / pb_strictly_*` | yes/no / refuse | safety gate, conservative refusal |
+
+The three operator surfaces compose without information loss, each
+bound is provably sound, and each soundness claim is mechanised in
+core Lean 4 (Nat-shadow). This realises the §1 design goal of
+"epistemic honesty + operational tractability + verified soundness."
+
 ## Status
 
-**M2 LOCKED. M2.5 LANDED.** M3.5 (Walley neighborhood model for
-elicitation surface; lift to p-box at propagation surface via
-Fréchet) deferred as the next operator-level milestone. Re-open
-the operator decision only if a future PBPK model violates
+**M2 LOCKED. M2.5 LANDED. M3.5 LANDED.** The Walley elicitation
+surface and the Fréchet propagation surface compose. The remaining
+operator-level work is:
+
+- Ferson-Klibanoff bridge: smooth-ambiguity wrapper over the same
+  `CredalSet` to give a Bayesian decision-theoretic surface for
+  cost-of-Knightian-uncertainty calculations (deferred as M5+).
+- Float-Real lift: replace the `Nat`-shadow theorems with
+  Mathlib-free Float ordered-field theorems for end-to-end
+  mechanised soundness (deferred 4-6 weeks).
+
+Re-open the operator decision only if a future PBPK model violates
 per-argument monotonicity.
