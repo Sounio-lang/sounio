@@ -297,3 +297,33 @@ checks:
   - stage1==stage2 fixed-point (bit-identical)
 commit: pending
 status: lock-released
+
+---
+
+agent: codex
+time_utc: 2026-04-30T23:59:12Z
+files:
+  - self-hosted/compiler/lean_single.sio
+intent: Complete NaturalityG2 effect wiring — add missing registrations in tok_is_effect_name, FN_EFFECTS inline matcher, print_effect_mask, direct-call propagation checks, fn-pointer-call propagation checks, and closure propagation
+checks:
+  - not run: pending rebuild
+commit: pending
+status: lock-open
+
+---
+
+agent: codex
+time_utc: 2026-05-01T00:15:00Z
+files:
+  - self-hosted/compiler/lean_single.sio
+  - bin/souc-linux-x86_64
+intent: Complete NaturalityG2 effect wiring — add missing registrations in tok_is_effect_name, FN_EFFECTS inline matcher, print_effect_mask, direct-call propagation checks, fn-pointer-call propagation checks, and closure propagation. Rebuild compiler to fixed point.
+checks:
+  - bash scripts/ci/selfhost_host_gate.sh (PASS, stage2_sha256=75fe4fae)
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter naturality_g2 --jobs 1 (2 pass, 0 fail)
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter approx --jobs 1 (3 pass, 0 fail)
+  - bash scripts/dev/run_sio_test_suite_v2.sh --filter causal --jobs 1 (2 pass, 0 fail)
+  - bash scripts/ci/check_check_sio_integration_window.sh (PASS)
+  - bin/llm-offload -t math-review -p xai (NO MATHEMATICAL CONTENT TO REVIEW)
+commit: pending
+status: lock-released

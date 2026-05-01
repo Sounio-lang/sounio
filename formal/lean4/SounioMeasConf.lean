@@ -22,13 +22,13 @@ namespace EGC
 -- ─────────────────────────────────────────────────────────────────────────────
 
 /-- Confidence values live in [0, 1000]. -/
-def Conf := { c : ℕ // c ≤ 1000 }
+def Conf := { c : Nat // c ≤ 1000 }
 
 /-- The maximum confidence: PLATINUM. -/
-def platinum : Conf := ⟨1000, le_refl 1000⟩
+def platinum : Conf := ⟨1000, Nat.le_refl 1000⟩
 
 /-- The gate threshold: certainty boundary. -/
-def gate_threshold : ℕ := 950
+def gate_threshold : Nat := 950
 
 /-- A token is *certain* when its confidence meets the gate. -/
 def certain (c : Conf) : Prop := c.val ≥ gate_threshold
@@ -42,44 +42,45 @@ theorem platinum_is_certain : certain platinum := by
 -- ─────────────────────────────────────────────────────────────────────────────
 
 /-- Clamp to [0, 1000]. -/
-def clamp (n : ℕ) : ℕ := min n 1000
+def clamp (n : Nat) : Nat := min n 1000
 
 /-- The GUM product rule for confidence (serial uncertainty combination). -/
-def conf_product (a b : ℕ) : ℕ := clamp (a * b / 1000)
+def conf_product (a b : Nat) : Nat := clamp (a * b / 1000)
 
 /-- conf_product is bounded by 1000. -/
-theorem conf_product_bounded (a b : ℕ) : conf_product a b ≤ 1000 := by
+theorem conf_product_bounded (a b : Nat) : conf_product a b ≤ 1000 := by
   simp [conf_product, clamp]
+  exact Nat.min_le_right _ _
 
 /-- conf_product of two PLATINUM values is PLATINUM. -/
 theorem conf_product_platinum : conf_product 1000 1000 = 1000 := by
   simp [conf_product, clamp]
 
 /-- conf_product is monotone in the left argument. -/
-theorem conf_product_mono_left (a a' b : ℕ) (h : a ≤ a') (hb : b ≤ 1000) :
+theorem conf_product_mono_left (a a' b : Nat) (h : a ≤ a') (hb : b ≤ 1000) :
     conf_product a b ≤ conf_product a' b := by
-  simp only [conf_product, clamp, Nat.min_def]
-  split_ifs <;>
-  · apply Nat.div_le_div_right
-    exact Nat.mul_le_mul_right b h
+  simp only [conf_product, clamp]
+  apply Nat.le_min_of_le_of_le
+  · exact Nat.le_trans (Nat.min_le_left _ _) (Nat.div_le_div_right (Nat.mul_le_mul_right b h))
+  · exact Nat.min_le_right _ _
 
 /-- conf_product is monotone in the right argument. -/
-theorem conf_product_mono_right (a b b' : ℕ) (h : b ≤ b') (ha : a ≤ 1000) :
+theorem conf_product_mono_right (a b b' : Nat) (h : b ≤ b') (ha : a ≤ 1000) :
     conf_product a b ≤ conf_product a b' := by
-  simp only [conf_product, clamp, Nat.min_def]
-  split_ifs <;>
-  · apply Nat.div_le_div_right
-    exact Nat.mul_le_mul_left a h
+  simp only [conf_product, clamp]
+  apply Nat.le_min_of_le_of_le
+  · exact Nat.le_trans (Nat.min_le_left _ _) (Nat.div_le_div_right (Nat.mul_le_mul_left a h))
+  · exact Nat.min_le_right _ _
 
 /-- If either operand is 0 the product is 0. -/
-theorem conf_product_zero_left (b : ℕ) : conf_product 0 b = 0 := by
+theorem conf_product_zero_left (b : Nat) : conf_product 0 b = 0 := by
   simp [conf_product, clamp]
 
-theorem conf_product_zero_right (a : ℕ) : conf_product a 0 = 0 := by
+theorem conf_product_zero_right (a : Nat) : conf_product a 0 = 0 := by
   simp [conf_product, clamp]
 
 /-- conf_product is symmetric. -/
-theorem conf_product_comm (a b : ℕ) : conf_product a b = conf_product b a := by
+theorem conf_product_comm (a b : Nat) : conf_product a b = conf_product b a := by
   simp [conf_product, Nat.mul_comm]
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -93,33 +94,37 @@ inductive MeasSource where
   | Constant  -- exact physical constant→ MEAS_CONF = 1000
 
 /-- Map source to quality integer. -/
-def meas_base : MeasSource → ℕ
+def meas_base : MeasSource → Nat
   | .Measured => 990
   | .Asserted => 970
   | .Constant => 1000
 
 /-- GUM min-rule: derived MEAS_CONF = min of inputs. -/
-def meas_propagate (m1 m2 : ℕ) : ℕ := min m1 m2
+def meas_propagate (m1 m2 : Nat) : Nat := min m1 m2
 
-theorem meas_propagate_bounded (m1 m2 : ℕ) (h1 : m1 ≤ 1000) (h2 : m2 ≤ 1000) :
+theorem meas_propagate_bounded (m1 m2 : Nat) (h1 : m1 ≤ 1000) (h2 : m2 ≤ 1000) :
     meas_propagate m1 m2 ≤ 1000 := by
-  simp [meas_propagate]; omega
+  simp [meas_propagate]
+  exact Nat.le_trans (Nat.min_le_left m1 m2) h1
 
-theorem meas_propagate_le_left (m1 m2 : ℕ) : meas_propagate m1 m2 ≤ m1 :=
+theorem meas_propagate_le_left (m1 m2 : Nat) : meas_propagate m1 m2 ≤ m1 :=
   Nat.min_le_left m1 m2
 
-theorem meas_propagate_le_right (m1 m2 : ℕ) : meas_propagate m1 m2 ≤ m2 :=
+theorem meas_propagate_le_right (m1 m2 : Nat) : meas_propagate m1 m2 ≤ m2 :=
   Nat.min_le_right m1 m2
 
-theorem meas_propagate_mono_left (m1 m1' m2 : ℕ) (h : m1 ≤ m1') :
+theorem meas_propagate_mono_left (m1 m1' m2 : Nat) (h : m1 ≤ m1') :
     meas_propagate m1 m2 ≤ meas_propagate m1' m2 := by
-  simp only [meas_propagate, Nat.min_def]
-  split_ifs <;> omega
+  simp only [meas_propagate]
+  apply Nat.le_min_of_le_of_le
+  · exact Nat.le_trans (Nat.min_le_left _ _) h
+  · exact Nat.min_le_right _ _
 
 /-- A Constant combined with any source has MEAS_CONF = that source. -/
-theorem meas_constant_neutral (m : ℕ) (hm : m ≤ 1000) :
+theorem meas_constant_neutral (m : Nat) (hm : m ≤ 1000) :
     meas_propagate 1000 m = m := by
-  simp [meas_propagate]; omega
+  simp [meas_propagate]
+  exact Nat.min_eq_right hm
 
 /-- Measured × Measured = 990. -/
 theorem meas_measured_measured :
@@ -136,11 +141,11 @@ theorem meas_measured_asserted :
 -- ─────────────────────────────────────────────────────────────────────────────
 
 /-- The original Gen 14 formula (without PLATINUM special case). -/
-def unify_conf_formula (a b : ℕ) : ℕ :=
+def unify_conf_formula (a b : Nat) : Nat :=
   clamp ((a * a + b * b) / (a + b + 1))
 
 /-- The Gen 15 formula: special-case PLATINUM preservation. -/
-def unify_conf_gen15 (a b : ℕ) : ℕ :=
+def unify_conf_gen15 (a b : Nat) : Nat :=
   if a = 1000 ∧ b = 1000 then 1000
   else unify_conf_formula a b
 
@@ -154,19 +159,19 @@ theorem unify_formula_platinum_is_not_platinum :
   simp [unify_conf_formula, clamp]
 
 /-- The Gen 15 formula agrees with Gen 14 below PLATINUM. -/
-theorem unify_gen15_agrees_below_platinum (a b : ℕ) (h : ¬(a = 1000 ∧ b = 1000)) :
+theorem unify_gen15_agrees_below_platinum (a b : Nat) (h : ¬(a = 1000 ∧ b = 1000)) :
     unify_conf_gen15 a b = unify_conf_formula a b := by
   simp [unify_conf_gen15, h]
 
 /-- Gen 15 output is bounded by 1000. -/
-theorem unify_gen15_bounded (a b : ℕ) : unify_conf_gen15 a b ≤ 1000 := by
+theorem unify_gen15_bounded (a b : Nat) : unify_conf_gen15 a b ≤ 1000 := by
   unfold unify_conf_gen15
   by_cases h : a = 1000 ∧ b = 1000
   · simp [h]
   · simp [h]; unfold unify_conf_formula clamp; exact Nat.min_le_right _ _
 
 /-- PLATINUM certainty is preserved by Gen 15 unify. -/
-theorem unify_gen15_certain_inputs (a b : ℕ)
+theorem unify_gen15_certain_inputs (a b : Nat)
     (ha : a = 1000) (hb : b = 1000) :
     unify_conf_gen15 a b ≥ gate_threshold := by
   subst ha; subst hb
@@ -177,21 +182,21 @@ theorem unify_gen15_certain_inputs (a b : ℕ)
 -- §5  Epistemic completeness invariant
 -- ─────────────────────────────────────────────────────────────────────────────
 
-structure TokenArray (n : ℕ) where
-  conf : Fin n → ℕ
+structure TokenArray (n : Nat) where
+  conf : Fin n → Nat
   conf_bounded : ∀ i, conf i ≤ 1000
 
-def epistemically_complete {n : ℕ} (T : TokenArray n) : Prop :=
+def epistemically_complete {n : Nat} (T : TokenArray n) : Prop :=
   ∀ i : Fin n, T.conf i ≥ gate_threshold
 
-def platinum_complete {n : ℕ} (T : TokenArray n) : Prop :=
+def platinum_complete {n : Nat} (T : TokenArray n) : Prop :=
   ∀ i : Fin n, T.conf i = 1000
 
-theorem platinum_implies_complete {n : ℕ} (T : TokenArray n)
+theorem platinum_implies_complete {n : Nat} (T : TokenArray n)
     (h : platinum_complete T) : epistemically_complete T := by
   intro i; rw [h i]; simp [gate_threshold]
 
-theorem update_platinum_preserves {n : ℕ} (T : TokenArray n)
+theorem update_platinum_preserves {n : Nat} (T : TokenArray n)
     (k : Fin n) (hT : epistemically_complete T) :
     epistemically_complete { T with conf := fun i => if i = k then 1000 else T.conf i,
                                     conf_bounded := by
@@ -210,7 +215,7 @@ inductive Prov where
   | Leaf    : MeasSource → Prov
   | Product : Prov → Prov → Prov
 
-def prov_meas : Prov → ℕ
+def prov_meas : Prov → Nat
   | .Leaf s       => meas_base s
   | .Product p q  => meas_propagate (prov_meas p) (prov_meas q)
 
@@ -218,10 +223,7 @@ theorem prov_meas_bounded (p : Prov) : prov_meas p ≤ 1000 := by
   induction p with
   | Leaf s =>
     simp [prov_meas, meas_base]
-    match s with
-    | .Measured => norm_num
-    | .Asserted => norm_num
-    | .Constant => norm_num
+    cases s <;> decide
   | Product p q ihp ihq =>
     simp [prov_meas]
     exact meas_propagate_bounded _ _ ihp ihq
@@ -242,7 +244,7 @@ theorem prov_meas_le_any_leaf (p : Prov) (s : MeasSource)
 -- ─────────────────────────────────────────────────────────────────────────────
 
 /-- MAIN RESULT 1 — MEAS_CONF min-rule is conservative. -/
-theorem meas_conf_soundness (m1 m2 : ℕ) :
+theorem meas_conf_soundness (m1 m2 : Nat) :
     meas_propagate m1 m2 ≤ m1 ∧ meas_propagate m1 m2 ≤ m2 :=
   ⟨meas_propagate_le_left m1 m2, meas_propagate_le_right m1 m2⟩
 
@@ -251,13 +253,13 @@ theorem gen15_platinum_preservation : unify_conf_gen15 1000 1000 = 1000 :=
   ety_unify_platinum_preservation
 
 /-- MAIN RESULT 3 — Confidence product monotonicity. -/
-theorem conf_product_monotone (a a' b b' : ℕ)
+theorem conf_product_monotone (a a' b b' : Nat)
     (ha : a ≤ a') (hb : b ≤ b') (ha' : a' ≤ 1000) (hb' : b' ≤ 1000) :
     conf_product a b ≤ conf_product a' b' :=
-  Nat.le_trans (conf_product_mono_left a a' b ha hb') (conf_product_mono_right a' b b' hb ha')
+  Nat.le_trans (conf_product_mono_left a a' b ha (Nat.le_trans hb hb')) (conf_product_mono_right a' b b' hb ha')
 
 /-- MAIN RESULT 4 — Epistemic completeness is preserved by PLATINUM updates. -/
-theorem completeness_monotone_under_platinum_update {n : ℕ}
+theorem completeness_monotone_under_platinum_update {n : Nat}
     (T : TokenArray n) (k : Fin n)
     (hT : epistemically_complete T) :
     epistemically_complete { T with
@@ -273,9 +275,9 @@ theorem completeness_monotone_under_platinum_update {n : ℕ}
 -- ─────────────────────────────────────────────────────────────────────────────
 
 structure EpistemicInterval where
-  belief : ℕ
-  conf   : ℕ
-  plaus  : ℕ
+  belief : Nat
+  conf   : Nat
+  plaus  : Nat
   belief_le_conf : belief ≤ conf
   conf_le_plaus  : conf ≤ plaus
   plaus_bounded  : plaus ≤ 1000
@@ -288,26 +290,26 @@ theorem belief_le_conf_le_plaus (ei : EpistemicInterval) :
 
 /-- Corollary: a certain token (belief = plaus) has zero Knightian gap. -/
 theorem certain_zero_knightian_gap (ei : EpistemicInterval) (h : ei.belief = ei.plaus) :
-    ei.plaus - ei.belief = 0 := by omega
+    ei.plaus - ei.belief = 0 := by simp [h, Nat.sub_self]
 
 /-- Corollary: at measured() sites, the belief interval covers [985, 995]. -/
 theorem measured_interval_valid :
     let ei : EpistemicInterval := {
       belief := 985, conf := 990, plaus := 995,
-      belief_le_conf := by norm_num,
-      conf_le_plaus  := by norm_num,
-      plaus_bounded  := by norm_num }
+      belief_le_conf := by decide,
+      conf_le_plaus  := by decide,
+      plaus_bounded  := by decide }
     ei.belief ≤ ei.conf ∧ ei.conf ≤ ei.plaus :=
-  ⟨by norm_num, by norm_num⟩
+  ⟨by decide, by decide⟩
 
 /-- Corollary: at asserted() sites, the belief interval covers [960, 980]. -/
 theorem asserted_interval_valid :
     let ei : EpistemicInterval := {
       belief := 960, conf := 970, plaus := 980,
-      belief_le_conf := by norm_num,
-      conf_le_plaus  := by norm_num,
-      plaus_bounded  := by norm_num }
+      belief_le_conf := by decide,
+      conf_le_plaus  := by decide,
+      plaus_bounded  := by decide }
     ei.belief ≤ ei.conf ∧ ei.conf ≤ ei.plaus :=
-  ⟨by norm_num, by norm_num⟩
+  ⟨by decide, by decide⟩
 
 end EGC

@@ -33,8 +33,8 @@ expected_file_kind() {
   case "$1" in
     x86_64-linux) printf '%s\n' "ELF 64-bit LSB executable, x86-64" ;;
     aarch64-linux) printf '%s\n' "ELF 64-bit LSB executable, ARM aarch64" ;;
-    aarch64-macos) printf '%s\n' "Mach-O 64-bit arm64 executable" ;;
-    x86_64-macos) printf '%s\n' "Mach-O 64-bit x86_64 executable" ;;
+    aarch64-macos) printf '%s\n' "Mach-O 64-bit arm64 executable|Mach-O 64-bit executable arm64" ;;
+    x86_64-macos) printf '%s\n' "Mach-O 64-bit x86_64 executable|Mach-O 64-bit executable x86_64" ;;
     *)
       echo "error: unsupported target triple: $1" >&2
       return 1
@@ -71,14 +71,20 @@ assert_file_kind() {
   local path="$1"
   local expected="$2"
   local actual
+  local variant
 
   actual="$(file "$path" 2>/dev/null || true)"
-  if [[ "$actual" != *"$expected"* ]]; then
-    echo "error: unexpected artifact kind for $path" >&2
-    echo "expected fragment: $expected" >&2
-    echo "actual: $actual" >&2
-    exit 1
-  fi
+  IFS='|' read -r -a expected_variants <<<"$expected"
+  for variant in "${expected_variants[@]}"; do
+    if [[ "$actual" == *"$variant"* ]]; then
+      return 0
+    fi
+  done
+
+  echo "error: unexpected artifact kind for $path" >&2
+  echo "expected fragment: $expected" >&2
+  echo "actual: $actual" >&2
+  exit 1
 }
 
 assert_output_equals() {
@@ -155,7 +161,27 @@ CROSS_SMOKE_BIN="$ARTIFACT_DIR/cross-smoke"
 echo "SELFHOST_HOST_GATE_START host_platform=$HOST_PLATFORM host_target=$HOST_TARGET work_dir=$WORK_DIR"
 
 bash "$ROOT_DIR/scripts/ci/build_native_souc.sh" "$NATIVE_BIN" >"$LOG_DIR/build-native.log" 2>&1
+chmod +x "$NATIVE_BIN" 2>/dev/null || true
+maybe_codesign "$NATIVE_BIN"
 assert_file_kind "$NATIVE_BIN" "$HOST_FILE_KIND"
+
+if [[ "$HOST_PLATFORM" == Darwin:* && "${SOUNIO_DARWIN_SELFHOST_EXEC_MODE:-full}" == "attest" ]]; then
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --verify "$NATIVE_BIN" >"$LOG_DIR/native-codesign-verify.log" 2>&1 || true
+  fi
+  cat >"$SUMMARY_PATH" <<EOF
+host_platform=$HOST_PLATFORM
+host_target=$HOST_TARGET
+mode=attest
+reason=darwin_host_execution_blocked
+native_bin=$NATIVE_BIN
+native_bin_sha256=$(portable_sha256 "$NATIVE_BIN")
+native_bin_bytes=$(portable_size "$NATIVE_BIN")
+EOF
+  echo "SELFHOST_HOST_GATE_ATTEST host_platform=$HOST_PLATFORM host_target=$HOST_TARGET native_sha256=$(portable_sha256 "$NATIVE_BIN") reason=darwin_host_execution_blocked"
+  echo "SELFHOST_HOST_GATE_ARTIFACT_DIR=$WORK_DIR"
+  exit 0
+fi
 
 "$NATIVE_BIN" self-hosted/compiler/lean_single.sio "$STAGE2_BIN" --target "$HOST_TARGET" >"$LOG_DIR/stage2.log" 2>&1
 chmod +x "$STAGE2_BIN" 2>/dev/null || true

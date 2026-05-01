@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.quick-fixes-summary
 -->
 
-
 # Quick Fixes for Dead Code - Implementation Summary ✅
 
 ## What Was Built

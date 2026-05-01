@@ -1,0 +1,179 @@
+// stdlib/dialogue/trajectory.sio
+//
+// `Trajectory` — finite ordered sequence of `Utterance` values, the dyadic
+// dialogue object that the homology functor `F: C_dial → C_𝕆` operates on.
+//
+// Plan reference: project_octonion_homology_functor.md, M2a (wk 5 of the
+// "savage" five-month push). The mathematical role is described in the
+// O-CSSM preprint draft §4: a Trajectory is a finite path in the dialogue
+// category C_dial; F maps it to a single octonion via fold.
+//
+// SHAPE NOTE — flat-array layout (not array-of-struct).
+// The plan originally specified `utts: [Utterance; 256]`. The native
+// compiler indexing path collapses dynamic indexing into nested arrays-of-
+// structs to a single slot (verified empirically 2026-04-30 on
+// `claude/approx-effect`; lean_single.sio struct-array stride is broken).
+// Per `feedback_native_compiler_limits.md` the documented workaround is to
+// flatten: parallel arrays per field, dimension-major. This loses no
+// semantics — the i-th utterance is reconstructed by reading column i of
+// each parallel array.
+//
+// Cap T ≤ 256 utterances/trajectory matches the BSS-safe bound documented
+// in `ocssm_functoriality_check_toy.md`. Payload width 16 matches the
+// preprint §4.1 embedding pre-projection dimension.
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn traj_max_len() -> i64 { return 256 }
+fn traj_payload_dim() -> i64 { return 16 }
+
+// ============================================================================
+// STRUCT
+// ============================================================================
+//
+// Speaker:  i64, ≥ 0; convention 0 = A, 1 = B for dyadic dialogue
+// Hash:     deterministic content hash of the utterance surface form
+// Affect:   integer code 0..N for affect class (annotation-defined)
+// Rupture:  0 = no rupture, 1 = repair marker, 2 = topic break
+// Dim:      effective dimension of `payload[i, *]` (≤ 16)
+// Payload:  pre-embedding feature vector; 256 × 16 = 4096 f64 cells
+
+pub struct Trajectory {
+    len: i64,
+    speakers: [i64; 256],
+    hashes:   [i64; 256],
+    affects:  [i64; 256],
+    ruptures: [i64; 256],
+    dims:     [i64; 256],
+    payload:  [f64; 4096],
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+// Returns an empty trajectory. `len = 0` means no utterances; all parallel
+// arrays are zero-initialised.
+pub fn traj_empty() -> Trajectory {
+    let zi: [i64; 256] = [0; 256]
+    let zf: [f64; 4096] = [0.0; 4096]
+    return Trajectory {
+        len: 0,
+        speakers: zi,
+        hashes:   zi,
+        affects:  zi,
+        ruptures: zi,
+        dims:     zi,
+        payload:  zf,
+    }
+}
+
+// ============================================================================
+// MUTATION (in-place push)
+// ============================================================================
+//
+// Returns the new length. If the trajectory is at capacity, returns the
+// existing length unchanged (silent drop — caller must check len == max).
+//
+// The payload row is left zero. Use `traj_set_payload(&t, i, j, v)` to
+// populate after push.
+
+pub fn traj_push(t: &Trajectory, speaker: i64, hash: i64,
+                 affect: i64, rupture: i64, dim: i64) -> i64 with Mut {
+    let i: i64 = t.len
+    if i >= traj_max_len() { return i }
+    t.speakers[i as usize] = speaker
+    t.hashes[i as usize]   = hash
+    t.affects[i as usize]  = affect
+    t.ruptures[i as usize] = rupture
+    t.dims[i as usize]     = dim
+    t.len = i + 1
+    return t.len
+}
+
+// Set a single payload cell. Bounds: 0 ≤ i < t.len, 0 ≤ j < traj_payload_dim().
+pub fn traj_set_payload(t: &Trajectory, i: i64, j: i64, v: f64) with Mut {
+    if i < 0 { return }
+    if i >= t.len { return }
+    if j < 0 { return }
+    if j >= traj_payload_dim() { return }
+    let off: i64 = i * traj_payload_dim() + j
+    t.payload[off as usize] = v
+}
+
+// ============================================================================
+// READ HELPERS
+// ============================================================================
+
+pub fn traj_speaker(t: &Trajectory, i: i64) -> i64 {
+    if i < 0 { return -1 }
+    if i >= t.len { return -1 }
+    return t.speakers[i as usize]
+}
+
+pub fn traj_hash(t: &Trajectory, i: i64) -> i64 {
+    if i < 0 { return 0 }
+    if i >= t.len { return 0 }
+    return t.hashes[i as usize]
+}
+
+pub fn traj_affect(t: &Trajectory, i: i64) -> i64 {
+    if i < 0 { return 0 }
+    if i >= t.len { return 0 }
+    return t.affects[i as usize]
+}
+
+pub fn traj_rupture(t: &Trajectory, i: i64) -> i64 {
+    if i < 0 { return 0 }
+    if i >= t.len { return 0 }
+    return t.ruptures[i as usize]
+}
+
+pub fn traj_dim(t: &Trajectory, i: i64) -> i64 {
+    if i < 0 { return 0 }
+    if i >= t.len { return 0 }
+    return t.dims[i as usize]
+}
+
+pub fn traj_payload_at(t: &Trajectory, i: i64, j: i64) -> f64 {
+    if i < 0 { return 0.0 }
+    if i >= t.len { return 0.0 }
+    if j < 0 { return 0.0 }
+    if j >= traj_payload_dim() { return 0.0 }
+    let off: i64 = i * traj_payload_dim() + j
+    return t.payload[off as usize]
+}
+
+pub fn traj_len(t: &Trajectory) -> i64 {
+    return t.len
+}
+
+// ============================================================================
+// AGGREGATES (i64 — used by F1/F2 hash-domain tests)
+// ============================================================================
+
+// Number of utterances by speaker (0 = A, 1 = B in dyadic case). Returns -1
+// if speaker is out of range.
+pub fn traj_count_speaker(t: &Trajectory, speaker: i64) -> i64 with Mut {
+    if speaker < 0 { return -1 }
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < t.len {
+        if t.speakers[i as usize] == speaker { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// Number of rupture markers (rupture > 0). Used by §6.5 (iii) cai test.
+pub fn traj_count_rupture(t: &Trajectory) -> i64 with Mut {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < t.len {
+        if t.ruptures[i as usize] > 0 { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}

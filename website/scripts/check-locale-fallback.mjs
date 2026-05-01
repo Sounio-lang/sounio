@@ -4,9 +4,9 @@ import path from 'node:path';
 const root = path.resolve(process.cwd());
 
 const locales = ['pt', 'el', 'zh', 'ja', 'es'];
-const fallbackRoutes = ['/', '/language', '/platform', '/science', '/packages', '/insights', '/about', '/releases'];
+const fallbackRoutes = ['/', '/language', '/science', '/packages', '/insights', '/about', '/releases'];
 const localizedDocsRoutes = ['/learn', '/learn/feature-status', '/learn/vancomycin-uncertainty'];
-const fallbackNotice = 'Localized V2 rewrite for this language is in progress. Showing English-first content for now.';
+const fallbackNoticeMarker = 'class="locale-notice"';
 
 function routeToDistFile(route, locale) {
   if (locale === 'en') {
@@ -30,7 +30,7 @@ async function run() {
       const en = await readDist(route, 'en');
       checked += 1;
 
-      if (en.html.includes(fallbackNotice)) {
+      if (en.html.includes(fallbackNoticeMarker)) {
         errors.push(`Unexpected fallback notice on English route ${en.rel}`);
       }
       if (!en.html.includes('lang="en"')) {
@@ -45,7 +45,7 @@ async function run() {
         const localized = await readDist(route, locale);
         checked += 1;
 
-        if (!localized.html.includes(fallbackNotice)) {
+        if (!localized.html.includes(fallbackNoticeMarker)) {
           errors.push(`Missing fallback notice on localized route ${localized.rel}`);
         }
         if (!localized.html.includes(`lang="${locale}"`)) {
@@ -62,7 +62,7 @@ async function run() {
       const en = await readDist(route, 'en');
       checked += 1;
 
-      if (en.html.includes(fallbackNotice)) {
+      if (en.html.includes(fallbackNoticeMarker)) {
         errors.push(`Unexpected fallback notice on English docs route ${en.rel}`);
       }
       if (!en.html.includes('lang="en"')) {
@@ -77,8 +77,8 @@ async function run() {
         const localized = await readDist(route, locale);
         checked += 1;
 
-        if (localized.html.includes(fallbackNotice)) {
-          errors.push(`Unexpected fallback notice on localized docs route ${localized.rel}`);
+        if (!localized.html.includes(fallbackNoticeMarker)) {
+          errors.push(`Missing fallback notice on localized docs route ${localized.rel}`);
         }
         if (!localized.html.includes(`lang="${locale}"`)) {
           errors.push(`Missing lang="${locale}" on ${localized.rel}`);

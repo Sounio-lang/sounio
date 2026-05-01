@@ -1,0 +1,54 @@
+//@ run-pass
+//@ expect-stdout: V2 PASS
+
+// Vancomycin propagation v2 — upgrade from v1 (KnowledgeF64) to
+// stdlib/epistemic/knightian.sio + stdlib/clinical/vancomycin_pbpk.sio.
+//
+// The v1 test showed conservative GUM propagation. v2 uses the full
+// Knightian PBox + 2-compartment population PK + refinement-style
+// runtime contracts, and demonstrates:
+//
+//   1. The standard 1000 mg q12h regimen for an ICU patient with
+//      moderate renal function fails the Knightian safety gate
+//      (PBox crosses 20 mg/L upper toxicity boundary).
+//
+//   2. Reducing dose to 750 mg q12h pulls the entire Knightian
+//      band into therapeutic [10, 20] mg/L → SAFE.
+//
+//   3. Contract violations (out-of-range weight) produce a vacuous
+//      PBox without panicking the pipeline.
+//
+// This is the operational unit-test for the M3 milestone.
+
+use clinical::vancomycin_pbpk::*
+use epistemic::knightian::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let weight = 78.5
+    let crcl = 65.0
+
+    // Pre-TDM (no samples): wide Knightian band, refuse 1000 mg q12h
+    let cmin_pre = predict_cmin_knightian(weight, crcl, 1000.0, 12.0, 0)
+    let safe_pre = is_safe_dose(&cmin_pre, 10.0, 20.0, 800)
+
+    // Post-TDM (3 trough samples): narrow Knightian band, prescribe approved
+    let cmin_post = predict_cmin_knightian(weight, crcl, 1000.0, 12.0, 3)
+    let safe_post = is_safe_dose(&cmin_post, 10.0, 20.0, 800)
+
+    // Contract violation: weight 15 kg below allowed [30, 200]
+    let cmin_bad = predict_cmin_knightian(15.0, crcl, 1000.0, 12.0, 0)
+    let bad_blocked = pb_confidence(&cmin_bad) == 0
+
+    if !safe_pre && safe_post && bad_blocked {
+        println("V2 PASS")
+    } else {
+        if safe_pre {
+            println("V2 FAIL: pre-TDM not refused")
+        } else if !safe_post {
+            println("V2 FAIL: post-TDM not safe")
+        } else {
+            println("V2 FAIL: contract not enforced")
+        }
+    }
+    0
+}

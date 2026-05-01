@@ -32,19 +32,37 @@ else
 fi
 cd "$ROOT_DIR"
 
-# Harness-local override
+# Harness-local override. SOUNIO_TEST_SOUC_BIN may point at one of two
+# distinct interfaces:
+#
+#   1. A wrapper-style executable that accepts the harness subcommand
+#      interface (check/run/compile/info), e.g. the rebuilt ontology
+#      validation wrapper produced by scripts/ci/build_ontology_validation_souc.sh.
+#      These are bash scripts (#!/usr/bin/env bash). Use them directly as
+#      $SOUC_BIN so the harness calls them as `$SOUC_BIN check file.sio`.
+#
+#   2. A raw self-hosted ELF binary, e.g. the CI `souc-stage2` artifact,
+#      which only accepts the raw `<src> <out>` interface and would treat
+#      `check` as a source path. For these, route through the repo wrapper
+#      at bin/souc, which translates the subcommands to the raw interface
+#      via SOUNIO_SOUC_BIN.
+#
+# We discriminate by sniffing the first two bytes for a shebang.
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
-    export SOUNIO_SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
-    SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+    if [[ -r "$SOUNIO_TEST_SOUC_BIN" ]] \
+       && [[ "$(head -c 2 "$SOUNIO_TEST_SOUC_BIN" 2>/dev/null)" == "#!" ]]; then
+        export SOUNIO_SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+        SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+    else
+        export SOUNIO_SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+        unset SOUC_BIN
+    fi
 fi
 if [[ -n "${SOUNIO_TEST_NATIVE_BIN:-}" ]]; then
     export SOUC_NATIVE_BIN="$SOUNIO_TEST_NATIVE_BIN"
 fi
 
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
-if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
-    SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
-fi
 sounio_require_souc
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
@@ -184,7 +202,7 @@ run_test() {
     fi
     
     # Skip tests with no annotation
-    if ! $is_run_pass && ! $is_compile_fail; then
+    if ! $is_run_pass && ! $is_compile_fail && ! $is_check_only; then
         echo "{\"status\":\"skip\",\"reason\":\"no-annotation\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
         return
     fi
@@ -212,7 +230,7 @@ run_test() {
     
     start_time=$(date +%s)
     
-    if $is_run_pass; then
+    if $is_run_pass || $is_check_only; then
         if $is_check_only; then
             output=$(timeout "$timeout_val" "$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
             if [[ $exit_code -eq 124 ]]; then

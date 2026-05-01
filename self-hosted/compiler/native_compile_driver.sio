@@ -80,9 +80,19 @@ let TK_MINUS: i64 = 133
 let TK_STAR: i64 = 134
 let TK_SLASH: i64 = 135
 let TK_EQ: i64 = 137
+let TK_AMP: i64 = 141
 let TK_AMPBANG: i64 = 163
 let TK_LT: i64 = 138
 let TK_GT: i64 = 139
+let TK_SHL: i64 = 152
+let TK_SHR: i64 = 153
+let TK_DOTDOT: i64 = 160
+let TK_PLUSPLUS: i64 = 164
+let TK_OREQ: i64 = 165
+let TK_PCTEQ: i64 = 168
+let TK_XOREQ: i64 = 169
+let TK_AMPEQ: i64 = 170
+let TK_LARROW: i64 = 171
 let TK_EQEQ: i64 = 146
 let TK_BANGEQ: i64 = 147
 let TK_LE: i64 = 148
@@ -214,9 +224,17 @@ var DRV_RELOC_COUNT: i64 = 0
 var DRV_FN_OFFSETS: [i64; 2048] = [0; 2048]
 var DRV_FN_COUNT: i64 = 0
 var DRV_ENTRY_OFFSET: i64 = 0
-var DRV_LABEL_OFFSETS: [i64; 256] = [0; 256]
-var DRV_LABEL_PATCH_OFFSETS: [i64; 256] = [0; 256]
-var DRV_LABEL_PATCH_IDS: [i64; 256] = [0; 256]
+// M1.2 R2.2 — bumped from 256 to 1024. The 10 new TK_* resolver
+// entries added in this commit-set push driver_const_value_tok past
+// the 256-label threshold; the original tables silently dropped
+// patches and stage1 mis-compiled hello.sio (42 → 76/78). Same root
+// cause as PR #53's `21+21=78` bug. Bumping these arrays is the
+// surgical fix; the rest of PR #53 (USER_GLOBAL_* slots,
+// scan_user_globals scaffold) stays reverted pending separate
+// diagnosis of the BSS-corruption bug it introduced.
+var DRV_LABEL_OFFSETS: [i64; 1024] = [0; 1024]
+var DRV_LABEL_PATCH_OFFSETS: [i64; 1024] = [0; 1024]
+var DRV_LABEL_PATCH_IDS: [i64; 1024] = [0; 1024]
 var DRV_LABEL_PATCH_COUNT: i64 = 0
 var DRV_ELF_LEN: i64 = 0
 var DRV_ELF_BYTES: [i8; 1048576] = [0; 1048576]
@@ -843,16 +861,26 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "TK_LT") { return 138 }
     if token_text_eq(tok, "TK_GT") { return 139 }
     if token_text_eq(tok, "TK_BANG") { return 140 }
+    if token_text_eq(tok, "TK_AMP") { return 141 }
     if token_text_eq(tok, "TK_EQEQ") { return 146 }
     if token_text_eq(tok, "TK_BANGEQ") { return 147 }
     if token_text_eq(tok, "TK_LE") { return 148 }
     if token_text_eq(tok, "TK_GE") { return 149 }
     if token_text_eq(tok, "TK_ANDAND") { return 150 }
     if token_text_eq(tok, "TK_OROR") { return 151 }
+    if token_text_eq(tok, "TK_SHL") { return 152 }
+    if token_text_eq(tok, "TK_SHR") { return 153 }
     if token_text_eq(tok, "TK_ARROW") { return 158 }
     if token_text_eq(tok, "TK_FATARROW") { return 159 }
+    if token_text_eq(tok, "TK_DOTDOT") { return 160 }
     if token_text_eq(tok, "TK_COLONCOLON") { return 162 }
     if token_text_eq(tok, "TK_AMPBANG") { return 163 }
+    if token_text_eq(tok, "TK_PLUSPLUS") { return 164 }
+    if token_text_eq(tok, "TK_OREQ") { return 165 }
+    if token_text_eq(tok, "TK_PCTEQ") { return 168 }
+    if token_text_eq(tok, "TK_XOREQ") { return 169 }
+    if token_text_eq(tok, "TK_AMPEQ") { return 170 }
+    if token_text_eq(tok, "TK_LARROW") { return 171 }
     if token_text_eq(tok, "TK_LPAREN") { return 174 }
     if token_text_eq(tok, "TK_RPAREN") { return 175 }
     if token_text_eq(tok, "TK_LBRACE") { return 176 }
@@ -2921,11 +2949,12 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
 }
 
 fn find_fn_lbrace(token_count: i64, name_str_pos: i64) -> i64 with Mut, Panic, Div {
-    // Find the opening { of the function whose name token is at name_str_pos
     var j = name_str_pos + 1
     while j < token_count {
         if token_kind(j) == TK_LBRACE { return j }
-        if token_kind(j) == TK_FN { return -1 }
+        if token_kind(j) == TK_FN && j + 1 < token_count && token_kind(j + 1) == TK_IDENT {
+            return -1
+        }
         j = j + 1
     }
     -1
@@ -3661,14 +3690,14 @@ fn drv_add_data_reloc(patch_offset: i64, data_off: i64) with Mut, Panic {
 }
 
 fn drv_define_label(label_id: i64) with Mut, Panic {
-    if label_id >= 0 && label_id < 256 {
+    if label_id >= 0 && label_id < 1024 {
         DRV_LABEL_OFFSETS[label_id as usize] = DRV_CODE_LEN
     }
 }
 
 fn drv_add_label_patch(patch_offset: i64, label_id: i64) with Mut, Panic {
     let idx = DRV_LABEL_PATCH_COUNT
-    if idx >= 0 && idx < 256 {
+    if idx >= 0 && idx < 1024 {
         DRV_LABEL_PATCH_OFFSETS[idx as usize] = patch_offset
         DRV_LABEL_PATCH_IDS[idx as usize] = label_id
         DRV_LABEL_PATCH_COUNT = idx + 1
@@ -3680,7 +3709,7 @@ fn drv_patch_labels() with Mut, Div, Panic {
     while i < DRV_LABEL_PATCH_COUNT {
         let off = DRV_LABEL_PATCH_OFFSETS[i as usize]
         let lid = DRV_LABEL_PATCH_IDS[i as usize]
-        if lid >= 0 && lid < 256 {
+        if lid >= 0 && lid < 1024 {
             let target = DRV_LABEL_OFFSETS[lid as usize]
             let rel = target - (off + 4)
             drv_patch_u32_le(off, rel)
@@ -4394,9 +4423,18 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                     V2_CURRENT_PARAM_COUNT = param_idx + 1
                     param_idx = param_idx + 1
                 }
-                // skip past colon, type, optional comma
                 ppos = ppos + 1
-                while ppos < open_pos && token_kind(ppos) != TK_COMMA && token_kind(ppos) != TK_RPAREN {
+                var paren_depth: i64 = 0
+                var angle_depth: i64 = 0
+                while ppos < open_pos {
+                    let tk = token_kind(ppos)
+                    if paren_depth == 0 && angle_depth == 0 {
+                        if tk == TK_COMMA || tk == TK_RPAREN { break }
+                    }
+                    if tk == TK_LPAREN { paren_depth = paren_depth + 1 }
+                    else if tk == TK_RPAREN { paren_depth = paren_depth - 1 }
+                    else if tk == TK_LT { angle_depth = angle_depth + 1 }
+                    else if tk == TK_GT { angle_depth = angle_depth - 1 }
                     ppos = ppos + 1
                 }
                 if ppos < open_pos && token_kind(ppos) == TK_COMMA { ppos = ppos + 1 }

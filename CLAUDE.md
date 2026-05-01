@@ -186,18 +186,29 @@ The AI/HPC cluster control plane is at `/home/devsounio/beagle/k8s/hpc-sota`. Be
 
 Prefer proven wrappers from `ops/lab-ops.sh` over ad hoc `sbatch` or `kubectl` commands.
 
-## LLM Offload
+## LLM Offload (mandatory checkpoints)
 
-Route bulk/routine tasks to external providers before using Claude:
+**Policy is normative**: see [`.claude/AGENT_OFFLOAD_POLICY.md`](.claude/AGENT_OFFLOAD_POLICY.md).
+
+Mandatory pre-commit reviews:
+
+- **Math claims** (PK formulas, GUM, p-box, Lean theorem statements, refinement invariants): run `bin/llm-offload -t math-review -p xai` before commit.
+- **Clinical-pathway code** (`stdlib/clinical/*`, vancomycin tests, clinical Lean obligations): run `bin/llm-offload -t review -p deepseek` before commit.
+- **External-facing artifacts** (papers, cover letters, dissertation, IRB protocols): fan out `bin/llm-offload --raw <draft> deepseek xai gemini` before submission.
+
+Each non-trivial offload appends to [`.claude/llm_offload_log.md`](.claude/llm_offload_log.md). When a review catches a bug, the commit message must include an `LLM-offload-review:` trailer (format in the policy doc).
+
+Optional but encouraged:
 
 ```bash
-llm-offload -t expand -p grok       # outline → prose
-llm-offload -t scaffold -p glm      # boilerplate code
-llm-offload -t review -p deepseek   # second opinion
-llm-offload -t paraphrase -p minimax # rewrite
+bin/llm-offload -t expand -p gemini -i outline.md     # outline → prose
+bin/llm-offload -t scaffold -p deepseek -i spec.md    # boilerplate
+bin/llm-offload -t paraphrase -p qwen -i letter.md    # tone shifts
+bin/llm-offload --status                              # which keys are loaded
+bin/llm-offload --list-tasks                          # available tasks
 ```
 
-Routing config: `.claude/offload-routing.md`
+Routing reference: [`.claude/offload-routing.md`](.claude/offload-routing.md). Task-specific system prompts: `.claude/offload-tasks/<task>.md`.
 
 ## Session Persistence
 

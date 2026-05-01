@@ -2282,6 +2282,7 @@ fn tok_is_effect_name(p: i64) -> bool with Panic, Mut {
     if src_match(ns, ne - ns, "ZD") { return true }
     if src_match(ns, ne - ns, "Approx") { return true }
     if src_match(ns, ne - ns, "Causal") { return true }
+    if src_match(ns, ne - ns, "NaturalityG2") { return true }
     return false
 }
 
@@ -3528,6 +3529,11 @@ fn print_effect_mask(mask: i64) with IO, Mut {
     if (mask & 524288) != 0 {
         if first == 0 { print(",") }
         print("Causal")
+        first = 0
+    }
+    if (mask & 1048576) != 0 {
+        if first == 0 { print(",") }
+        print("NaturalityG2")
     }
 }
 
@@ -4908,12 +4914,30 @@ fn lex_all() with IO, Mut, Panic, Div {
                 while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
             }
             // Check for float: digits.digits (dot followed by digit, not .field)
+            // When integer part is zero, leading fractional zeros are absorbed
+            // into a synthetic negative exponent rather than into denom — this
+            // prevents `0.000…001` (24 zeros) from parsing as 0.0 because the
+            // 18-digit frac/denom budget would otherwise be exhausted by zeros
+            // before the significant digit is reached.
+            var lit_leading_zeros: i64 = 0
             if p < SRC_LEN && sb(p) == 46 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57 {
                 is_float = 1
                 p = p + 1  // skip .
                 FL_FRAC_DIGITS = 0
+                let int_zero: i64 = if v == 0 { 1 } else { 0 }
+                var seen_nonzero: i64 = 0
                 while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
-                    if FL_FRAC_DIGITS < 18 { frac = frac * 10 + sb(p) - 48; denom = denom * 10; FL_FRAC_DIGITS = FL_FRAC_DIGITS + 1 }
+                    let d = sb(p) - 48
+                    if int_zero == 1 && seen_nonzero == 0 && d == 0 {
+                        lit_leading_zeros = lit_leading_zeros + 1
+                    } else {
+                        seen_nonzero = 1
+                        if FL_FRAC_DIGITS < 18 {
+                            frac = frac * 10 + d
+                            denom = denom * 10
+                            FL_FRAC_DIGITS = FL_FRAC_DIGITS + 1
+                        }
+                    }
                     p = p + 1
                 }
             }
@@ -4944,10 +4968,12 @@ fn lex_all() with IO, Mut, Panic, Div {
             if is_float == 1 {
                 // Store mantissa parts without applying the exponent (avoids i64 overflow
                 // for large exponents like 1.0e30). The signed exponent is stored in TX
-                // and applied at codegen time via SSE2 multiply/divide.
+                // and applied at codegen time via SSE2 multiply/divide. Leading zeros
+                // absorbed during fractional-digit accumulation are folded into TX so
+                // tiny literals like 1e-24 written as 0.000…001 don't truncate.
                 TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p
                 TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom
-                TX[TC as usize] = exp_sign * exp_val
+                TX[TC as usize] = exp_sign * exp_val - lit_leading_zeros
                 TU[TC as usize] = lit_unit_hash
                 TL[TC as usize] = cur_line; TC = TC + 1; continue
             }
@@ -7102,71 +7128,23 @@ fn emit_print_nan_x86() with Mut {
     em(0x48); em(0x83); em(0xc4); em(8)
 }
 
-// print_f64: rax = f64 bits → print decimal with 6 decimal places
-fn emit_print_f64() with Mut, Panic {
-    em(0x41); em(0x54)  // push r12
-    em(0x41); em(0x55)  // push r13
-    em(0x41); em(0x56)  // push r14
-    em(0x49); em(0x89); em(0xc4)  // mov r12, rax
-    em(0x4c); em(0x89); em(0xe0)  // mov rax, r12
-    em(0x48); em(0xb9); em64(9223372036854775807)
-    em(0x48); em(0x21); em(0xc8)  // and rax, rcx
-    em(0x48); em(0x85); em(0xc0)
-    em(0x0f); em(0x84); let zero_patch_a = CL; em32(0)
-    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax
-    em(0x48); em(0xc1); em(0xe9); em(52)  // shr rcx, 52
-    em(0x48); em(0x81); em(0xf9); em32(2047)  // cmp rcx, 2047
-    em(0x0f); em(0x84); let nan_patch = CL; em32(0)
-    em(0x48); em(0x85); em(0xc9)
-    em(0x0f); em(0x84); let zero_patch_b = CL; em32(0)
-    em(0x49); em(0x0f); em(0xba); em(0xe4); em(63)  // bt r12, 63
-    em(0x0f); em(0x83); let sign_done_patch = CL; em32(0)
-    emit_print_char_lit_x86(45)
-    patch32(sign_done_patch, CL)
-    em(0x49); em(0x0f); em(0xba); em(0xf4); em(63)  // btr r12, 63
-    em(0x66); em(0x49); em(0x0f); em(0x6e); em(0xc4)  // movq xmm0, r12
-    em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0)  // cvttsd2si rax, xmm0
-    em(0x49); em(0x89); em(0xc5)  // mov r13, rax
-    em(0x66); em(0x49); em(0x0f); em(0x6e); em(0xc4)  // movq xmm0, r12
-    em(0xf2); em(0x49); em(0x0f); em(0x2a); em(0xcd)  // cvtsi2sd xmm1, r13
-    em(0xf2); em(0x0f); em(0x5c); em(0xc1)            // subsd xmm0, xmm1
-    em(0x48); em(0xb8); em64(4696837146684686336)  // 1000000.0
-    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
-    em(0xf2); em(0x0f); em(0x59); em(0xc1)            // mulsd xmm0, xmm1
-    em(0x48); em(0xb8); em64(4602678819172646912)  // 0.5
-    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
-    em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
-    em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0)  // cvttsd2si rax, xmm0
-    em(0x48); em(0x3d); em32(1000000)                 // cmp rax, 1000000
-    em(0x0f); em(0x8c); let frac_ok_patch = CL; em32(0)
-    em(0x31); em(0xc0)                                // xor eax, eax
-    em(0x49); em(0xff); em(0xc5)                      // inc r13
-    patch32(frac_ok_patch, CL)
-    em(0x49); em(0x89); em(0xc6)  // mov r14, rax
-    em(0x4c); em(0x89); em(0xe8)  // mov rax, r13
-    emit_print_u64_no_nl_x86()
-    emit_print_char_lit_x86(46)
-    em(0x4c); em(0x89); em(0xf0)  // mov rax, r14
-    emit_print_fixed6_x86()
-    em(0xe9); let done_after_norm = CL; em32(0)
-    let zero_label = CL
-    em(0x31); em(0xc0)
-    emit_print_u64_no_nl_x86()
-    emit_print_char_lit_x86(46)
-    em(0x31); em(0xc0)
-    emit_print_fixed6_x86()
-    em(0xe9); let done_after_zero = CL; em32(0)
-    let nan_label = CL
-    emit_print_nan_x86()
-    let done_label = CL
-    patch32(zero_patch_a, zero_label)
-    patch32(zero_patch_b, zero_label)
-    patch32(nan_patch, nan_label)
-    patch32(done_after_norm, done_label)
-    patch32(done_after_zero, done_label)
-    em(0x41); em(0x5e)  // pop r14
-    em(0x41); em(0x5d)  // pop r13
-    em(0x41); em(0x5c)  // pop r12
+// print_f64: rax = f64 bits → dispatch to __native_print_f64_n(x, 6).
+// The previous body inlined the conversion via cvttsd2si, which saturates
+// for |x| ≥ 2^63 (printing "9223372036854775808" for any 1e24-scale
+// input) and silently rounds tiny values to "0.000000". The Sounio-source
+// helper handles both via scientific notation; this dispatch keeps the
+// API stable while routing through the corrected formatter.
+fn emit_print_f64() with Mut, Panic, Div {
+    em(0x50)                                 // push rax  (f64 bits)
+    em(0x48); em(0xb8); em64(6)              // mov rax, 6
+    em(0x50)                                 // push rax  (decimals=6)
+    let fmt_fi = fn_find_lit("__native_print_f64_n")
+    if fmt_fi >= 0 {
+        emit_direct_fn_call_x86(fmt_fi, 2)
+    } else {
+        emit_drop_call_args_x86(2)
+        em(0x31); em(0xc0)
+    }
 }
 
 fn emit_read_i64() with Mut {
@@ -9710,7 +9688,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            if src_match(ns, ne - ns, "measure") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "measure") {
                 compile_measure_call_x86(name_tok)
                 return
             }
@@ -11526,6 +11504,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         if (etarg_eff & 524288) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 524288) == 0 {
                             tc_effect_call_violation(call_tok, 524288, FN_EFFECTS[CURRENT_FN as usize])
                         }
+                        // NaturalityG2 effect check for closures (bit 20)
+                        if (etarg_eff & 1048576) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 1048576) == 0 {
+                            tc_effect_call_violation(call_tok, 1048576, FN_EFFECTS[CURRENT_FN as usize])
+                        }
                     }
                 }
                 // Mark struct variable as moved when passed by value to a function
@@ -11570,6 +11552,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if (FN_EFFECTS[fi as usize] & 524288) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 524288) == 0 {
                     tc_effect_call_violation(call_tok, 524288, FN_EFFECTS[CURRENT_FN as usize])
                 }
+                // NaturalityG2 effect check (bit 20) — above & 1023 mask
+                if (FN_EFFECTS[fi as usize] & 1048576) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 1048576) == 0 {
+                    tc_effect_call_violation(call_tok, 1048576, FN_EFFECTS[CURRENT_FN as usize])
+                }
                 // E067: Causal confounding detection
                 // Calling an Observe function from a Causal function without Audit = potential confounding
                 if (FN_EFFECTS[fi as usize] & 64) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 524288) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 128) == 0 {
@@ -11589,6 +11575,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // Causal propagation into closures
                 if (FN_EFFECTS[fi as usize] & 524288) != 0 && CL_DEPTH > 0 {
                     CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] | 524288
+                }
+                // NaturalityG2 propagation into closures
+                if (FN_EFFECTS[fi as usize] & 1048576) != 0 && CL_DEPTH > 0 {
+                    CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] | 1048576
                 }
                 // Visibility check: imported non-pub function called from main module
                 let callee_is_pub = (FN_EFFECTS[fi as usize] & 1024) != 0
@@ -11834,7 +11824,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             return
         }
-        if TK[EP as usize] == 8 && src_match(ns, ne - ns, "Knowledge") {
+        if TK[EP as usize] == 8 && src_match(ns, ne - ns, "Knowledge") && st_find(gl_name_hash(ns, ne)) < 0 {
             compile_knowledge_literal_x86()
             return
         }
@@ -18834,6 +18824,11 @@ fn ety_parse_effect_name(ns: i64, ne: i64) -> i64 with Panic, Mut {
     if src_match(ns, l, "Approx") { return 262144 }
     // Causal = bit 19 (524288) — causal inference effect
     if src_match(ns, l, "Causal") { return 524288 }
+    // NaturalityG2 = bit 20 (1048576) — homology functor F: C_dial → C_𝕆
+    // is G₂-equivariant. Functions carrying this effect will emit a Lean
+    // obligation at IR-emit time (deferred to M4). For now, declaring the
+    // effect is enough to type-check.
+    if src_match(ns, l, "NaturalityG2") { return 1048576 }
     return 0
 }
 
@@ -22024,6 +22019,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if src_match(ens, ene - ens, "Approx") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 262144; matched_builtin = 1 }
                         // Causal = bit 19 (524288) — causal inference effect
                         if src_match(ens, ene - ens, "Causal") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 524288; matched_builtin = 1 }
+                        // NaturalityG2 = bit 20 (1048576) — homology functor F: C_dial → C_𝕆
+                        if src_match(ens, ene - ens, "NaturalityG2") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 1048576; matched_builtin = 1 }
                         // Gen 21 Phase A″: Confidence(N) is a reader-friendly alias for
                         // Epistemic(N). Same bit, same FN_EPISTEMIC_MIN slot. N is an
                         // integer on the 1..1000 scale (matches Knowledge<T>.confidence).
@@ -25172,7 +25169,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            if src_match(ns, ne - ns, "measure") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "measure") {
                 compile_measure_call_a64(name_tok)
                 return
             }
@@ -25886,7 +25883,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             return
         }
-        if TK[EP as usize] == 8 && src_match(ns, ne - ns, "Knowledge") {
+        if TK[EP as usize] == 8 && src_match(ns, ne - ns, "Knowledge") && st_find(gl_name_hash(ns, ne)) < 0 {
             compile_knowledge_literal_a64()
             return
         }
@@ -28977,6 +28974,72 @@ fn print_imp_path() with IO, Mut, Panic {
     }
 }
 
+fn imp_append_lit_to_path(pos: i64, lit: string) -> i64 with Mut, Panic, Div {
+    var p = pos
+    let n = str_len(lit)
+    var i: i64 = 0
+    while i < n && p < 4095 {
+        IMP_PATH[p as usize] = str_char_at(lit, i) as i8
+        p = p + 1
+        i = i + 1
+    }
+    p
+}
+
+fn imp_raw_stem_len(raw_len: i64) -> i64 with Panic {
+    if raw_len > 4 &&
+       IMP_RAW_PATH[(raw_len - 4) as usize] == 46 &&
+       IMP_RAW_PATH[(raw_len - 3) as usize] == 115 &&
+       IMP_RAW_PATH[(raw_len - 2) as usize] == 105 &&
+       IMP_RAW_PATH[(raw_len - 1) as usize] == 111 {
+        return raw_len - 4
+    }
+    raw_len
+}
+
+fn imp_build_package_path_from_raw(raw_len: i64) -> i64 with Mut, Panic, Div {
+    let stem_len = imp_raw_stem_len(raw_len)
+    if stem_len <= 0 {
+        IMP_PATH[0 as usize] = 0
+        return 0
+    }
+
+    var root_end: i64 = 0
+    while root_end < stem_len && IMP_RAW_PATH[root_end as usize] != 47 {
+        root_end = root_end + 1
+    }
+
+    var p: i64 = 0
+    p = imp_append_lit_to_path(p, "packages/")
+
+    var i: i64 = 0
+    while i < root_end && p < 4095 {
+        var c = IMP_RAW_PATH[i as usize]
+        if c == 95 { c = 45 } // import_name -> package-name
+        IMP_PATH[p as usize] = c
+        p = p + 1
+        i = i + 1
+    }
+
+    p = imp_append_lit_to_path(p, "/src")
+    if root_end < stem_len {
+        IMP_PATH[p as usize] = 47
+        p = p + 1
+        i = root_end + 1
+        while i < stem_len && p < 4095 {
+            IMP_PATH[p as usize] = IMP_RAW_PATH[i as usize]
+            p = p + 1
+            i = i + 1
+        }
+        p = imp_append_lit_to_path(p, ".sio")
+    } else {
+        p = imp_append_lit_to_path(p, "/lib.sio")
+    }
+
+    IMP_PATH[p as usize] = 0
+    p
+}
+
 fn set_base_dir_from_src_path(ps: i64, pe: i64) with Mut, Panic {
     var last_slash: i64 = -1
     var i: i64 = ps
@@ -29028,15 +29091,26 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("    f\n")
     append_src_lit("}\n\n")
 
+    // Range-reduced Newton: scale x into [1, 4) so Newton starts well-conditioned.
+    // For x < 1, multiply by 4^k until v ∈ [1, 4); sqrt(x) = sqrt(v) / 2^k.
+    // Without this, Newton from y₀ = x with x ~ 10⁻¹⁵ halves each step and
+    // needs ≫ 20 iterations to reach the true sqrt — returning ~10⁻⁶ instead
+    // of ~10⁻⁸. Range reduction is bit-deterministic.
     append_src_lit("fn __native_sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {\n")
     append_src_lit("    if x <= 0.0 { return 0.0 }\n")
-    append_src_lit("    var y = x\n")
+    append_src_lit("    var v: f64 = x\n")
+    append_src_lit("    var s: f64 = 1.0\n")
+    append_src_lit("    while v < 1.0 {\n")
+    append_src_lit("        v = v * 4.0\n")
+    append_src_lit("        s = s * 2.0\n")
+    append_src_lit("    }\n")
+    append_src_lit("    var y: f64 = v\n")
     append_src_lit("    var i: i64 = 0\n")
     append_src_lit("    while i < 20 {\n")
-    append_src_lit("        y = 0.5 * (y + x / y)\n")
+    append_src_lit("        y = 0.5 * (y + v / y)\n")
     append_src_lit("        i = i + 1\n")
     append_src_lit("    }\n")
-    append_src_lit("    y\n")
+    append_src_lit("    y / s\n")
     append_src_lit("}\n\n")
 
     append_src_lit("fn __native_ln_f64(x: f64) -> f64 with Mut, Div, Panic {\n")
@@ -29225,6 +29299,13 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("    }\n")
     append_src_lit("}\n\n")
 
+    // Range-aware f64 printer: switches to scientific notation when the
+    // value is too large for the i64 mantissa cast (≥ 1e15) or too small
+    // for the requested fixed-decimal precision (rounds to all zeros).
+    // Without these guards, very large values saturate via cvttsd2si to
+    // the i64-MIN bit pattern (printing "9223372036854775808" for any
+    // 1e24-scale input) and very small values silently print as
+    // "0.000000".
     append_src_lit("fn __native_print_f64_n(x: f64, decimals: i64) with IO, Mut, Panic, Div {\n")
     append_src_lit("    if x != x { print(\"nan\"); return }\n")
     append_src_lit("    var d = decimals\n")
@@ -29235,8 +29316,6 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("        print_char(45)\n")
     append_src_lit("        y = 0.0 - y\n")
     append_src_lit("    }\n")
-    append_src_lit("    let whole_f = __native_floor_f64(y)\n")
-    append_src_lit("    var whole = whole_f as i64\n")
     append_src_lit("    var scale_i: i64 = 0\n")
     append_src_lit("    var scale_int: i64 = 1\n")
     append_src_lit("    while scale_i < d {\n")
@@ -29244,6 +29323,52 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("        scale_i = scale_i + 1\n")
     append_src_lit("    }\n")
     append_src_lit("    let scale = scale_int as f64\n")
+    // OVERFLOW guard: |y| ≥ 1e15 → scientific. The threshold is below the
+    // i64 saturation point (~9.2e18) and above the f64-exact integer bound
+    // (2^53 ≈ 9e15) where the fixed-decimal path starts losing precision.
+    append_src_lit("    if y >= 1000000000000000.0 {\n")
+    append_src_lit("        var exp_e: i64 = 0\n")
+    append_src_lit("        while y >= 10.0 {\n")
+    append_src_lit("            y = y / 10.0\n")
+    append_src_lit("            exp_e = exp_e + 1\n")
+    append_src_lit("        }\n")
+    append_src_lit("        let whole_e = y as i64\n")
+    append_src_lit("        __native_print_u64_no_nl(whole_e)\n")
+    append_src_lit("        if d > 0 {\n")
+    append_src_lit("            print_char(46)\n")
+    append_src_lit("            var fe = ((y - (whole_e as f64)) * scale + 0.5) as i64\n")
+    append_src_lit("            if fe >= scale_int { fe = scale_int - 1 }\n")
+    append_src_lit("            __native_print_fixed_digits(fe, d)\n")
+    append_src_lit("        }\n")
+    append_src_lit("        print_char(101)\n")
+    append_src_lit("        __native_print_u64_no_nl(exp_e)\n")
+    append_src_lit("        return\n")
+    append_src_lit("    }\n")
+    // UNDERFLOW guard: 0 < y < 0.5 / scale_int → fixed path rounds to all
+    // zeros. Switch to scientific so callers can see the magnitude.
+    append_src_lit("    let tiny_thresh = 0.5 / scale\n")
+    append_src_lit("    if y > 0.0 && y < tiny_thresh {\n")
+    append_src_lit("        var exp_e: i64 = 0\n")
+    append_src_lit("        while y < 1.0 {\n")
+    append_src_lit("            y = y * 10.0\n")
+    append_src_lit("            exp_e = exp_e + 1\n")
+    append_src_lit("        }\n")
+    append_src_lit("        let whole_e = y as i64\n")
+    append_src_lit("        __native_print_u64_no_nl(whole_e)\n")
+    append_src_lit("        if d > 0 {\n")
+    append_src_lit("            print_char(46)\n")
+    append_src_lit("            var fe = ((y - (whole_e as f64)) * scale + 0.5) as i64\n")
+    append_src_lit("            if fe >= scale_int { fe = scale_int - 1 }\n")
+    append_src_lit("            __native_print_fixed_digits(fe, d)\n")
+    append_src_lit("        }\n")
+    append_src_lit("        print_char(101)\n")
+    append_src_lit("        print_char(45)\n")
+    append_src_lit("        __native_print_u64_no_nl(exp_e)\n")
+    append_src_lit("        return\n")
+    append_src_lit("    }\n")
+    // FIXED-DECIMAL path for in-range values.
+    append_src_lit("    let whole_f = __native_floor_f64(y)\n")
+    append_src_lit("    var whole = whole_f as i64\n")
     append_src_lit("    var frac = ((y - whole_f) * scale + 0.5) as i64\n")
     append_src_lit("    if frac >= scale_int {\n")
     append_src_lit("        whole = whole + 1\n")
@@ -29528,6 +29653,43 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     copy_len = str_len(raw)
                     fsz = file_size(IMP_PATH)
                     // mod.sio fallback for raw path
+                    if copy_len <= 0 {
+                        var mfp: i64 = fp_len - 4
+                        var mi: i64 = 0
+                        while mi < mfp {
+                            MOD_PATH[mi as usize] = IMP_PATH[mi as usize]
+                            mi = mi + 1
+                        }
+                        MOD_PATH[mfp as usize] = 47
+                        MOD_PATH[(mfp+1) as usize] = 109
+                        MOD_PATH[(mfp+2) as usize] = 111
+                        MOD_PATH[(mfp+3) as usize] = 100
+                        MOD_PATH[(mfp+4) as usize] = 46
+                        MOD_PATH[(mfp+5) as usize] = 115
+                        MOD_PATH[(mfp+6) as usize] = 105
+                        MOD_PATH[(mfp+7) as usize] = 111
+                        mfp = mfp + 8
+                        MOD_PATH[mfp as usize] = 0
+                        raw = read_file(MOD_PATH)
+                        copy_len = str_len(raw)
+                        fsz = file_size(MOD_PATH)
+                        if copy_len > 0 {
+                            mi = 0
+                            while mi < mfp {
+                                IMP_PATH[mi as usize] = MOD_PATH[mi as usize]
+                                mi = mi + 1
+                            }
+                            fp_len = mfp
+                            IMP_PATH[fp_len as usize] = 0
+                        }
+                    }
+                }
+                if copy_len <= 0 {
+                    fp_len = imp_build_package_path_from_raw(raw_len)
+                    raw = read_file(IMP_PATH)
+                    copy_len = str_len(raw)
+                    fsz = file_size(IMP_PATH)
+                    // mod.sio fallback for packages/<pkg>/src/<module>.sio
                     if copy_len <= 0 {
                         var mfp: i64 = fp_len - 4
                         var mi: i64 = 0

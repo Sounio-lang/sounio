@@ -1,0 +1,224 @@
+// tools/ocssm/f2_conjugation.sio
+//
+// F2 — Conjugation under speaker reversal for the homology functor F.
+//
+// Plan reference: project_octonion_homology_functor.md M3 (wk 12-14).
+// Preprint reference: ocssm_preprint_skeleton.md §6.2.
+//
+// CONTRACT:
+//
+//   The homology claim is that swapping the dyadic speaker order
+//   corresponds to octonion conjugation in 𝕆:
+//
+//     For a σ-pair (A → B, B → A):
+//       e(B → A) ≈ conj(e(A → B))
+//
+//   where conj(x_0, x_1, ..., x_7) = (x_0, -x_1, ..., -x_7) is octonion
+//   conjugation. The F2 statistic measures the mean discrepancy:
+//
+//     d_paired = mean_{σ-pair (u, v)} ‖e(v) − conj(e(u))‖²
+//     d_random = mean over random shuffles of the same set
+//     ratio = d_random / d_paired
+//
+//   Threshold: ratio ≥ 5.0 to PASS (i.e. paired pairs are at least 5×
+//   tighter than random; the conjugation hypothesis carries weight).
+//   Bound τ_conj on absolute distance: d_paired ≤ 0.10 (preprint §6.2).
+//
+// CURRENT STATE (M3a — wired 2026-05-01):
+//
+//   The corpus loader (tools/ocssm/swda_loader.py) generates a binary
+//   trajectory with planted σ-pair structure.  The binary is read by
+//   `traj_load_binary` below.  The synthetic baseline (8-turn inline)
+//   is kept as a fallback when the binary is absent.
+//
+//   The F2 pairing logic was corrected in M3a: d_paired now samples
+//   only complete σ-pairs (turn i, turn i+1) stepping by 2, not every
+//   consecutive opposite-speaker edge.  This matches the preprint
+//   definition and avoids inflating d_paired with B→A transitions that
+//   are not part of the conjugation claim.
+
+use stdlib::math::pure::*
+use stdlib::dialogue::trajectory::*
+use stdlib::dialogue::embed::*
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+// Octonion conjugation: (x_0, -x_1, ..., -x_7).
+fn f2_conj(v: &[f64; 8], out: &![f64; 8]) with Mut {
+    out[0] = v[0]
+    out[1] = 0.0 - v[1]
+    out[2] = 0.0 - v[2]
+    out[3] = 0.0 - v[3]
+    out[4] = 0.0 - v[4]
+    out[5] = 0.0 - v[5]
+    out[6] = 0.0 - v[6]
+    out[7] = 0.0 - v[7]
+}
+
+// Squared distance between two 8-vectors.
+fn f2_dist_sq(a: &[f64; 8], b: &[f64; 8]) -> f64 with Mut {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 {
+        let d: f64 = a[i as usize] - b[i as usize]
+        s = s + d * d
+        i = i + 1
+    }
+    return s
+}
+
+// Squared conjugation residual ‖embed(b) − conj(embed(a))‖² for a single
+// (a, b) hash pair.
+fn f2_pair_residual_sq(hash_a: i64, hash_b: i64) -> f64 with Mut, Div, Panic, NaturalityG2 {
+    var ea: [f64; 8] = [0.0; 8]
+    var eb: [f64; 8] = [0.0; 8]
+    embed_into(hash_a, &ea)
+    embed_into(hash_b, &eb)
+    var ca: [f64; 8] = [0.0; 8]
+    f2_conj(&ea, &!ca)
+    return f2_dist_sq(&eb, &ca)
+}
+
+// ============================================================================
+// BINARY TRAJECTORY LOADER
+// ============================================================================
+//
+// Format (little-endian):
+//   Magic:    b"TRJ\0"  (4 bytes)
+//   Version:  i64       (8 bytes)
+//   Count:    i64       (8 bytes)
+//   Per utt:  speaker, hash, affect, rupture, dim  (5 × i64 = 40 bytes)
+
+fn traj_load_binary(t: &Trajectory, path: string) -> i64 with IO, Mut, Panic {
+    let raw: string = read_file(path)
+    let sz: i64 = file_size(path)
+    if sz < 16 {
+        return 0
+    }
+    let version: i64 = read_i64(raw, 0)
+    if version != 1 {
+        return 0
+    }
+    let n: i64 = read_i64(raw, 1)
+    if n < 2 {
+        return 0
+    }
+    if sz < 16 + n * 40 {
+        return 0
+    }
+    // Each utterance is 5 i64s = 40 bytes = 5 slots at 8-byte indices.
+    // First utterance starts at byte 16 = index 2.
+    var idx: i64 = 2
+    var i: i64 = 0
+    while i < n {
+        let speaker: i64 = read_i64(raw, idx)
+        let hash_val: i64 = read_i64(raw, idx + 1)
+        let affect: i64 = read_i64(raw, idx + 2)
+        let rupture: i64 = read_i64(raw, idx + 3)
+        let dim: i64 = read_i64(raw, idx + 4)
+        let _len: i64 = traj_push(t, speaker, hash_val, affect, rupture, dim)
+        idx = idx + 5
+        i = i + 1
+    }
+    return n
+}
+
+// ============================================================================
+// AGGREGATES
+// ============================================================================
+//
+// d_paired: mean over complete σ-pairs (turn i, turn i+1) stepping by 2.
+// This matches the preprint definition: a σ-pair is a single exchange
+// (A speaks, B replies), not every consecutive opposite-speaker edge.
+
+pub fn f2_paired_dist_sq(t: &Trajectory) -> f64 with Mut, Div, Panic, NaturalityG2 {
+    let n: i64 = traj_len(t)
+    if n < 2 { return 0.0 }
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < n - 1 {
+        let sa: i64 = traj_speaker(t, i)
+        let sb: i64 = traj_speaker(t, i + 1)
+        if sa != sb {
+            sum = sum + f2_pair_residual_sq(traj_hash(t, i), traj_hash(t, i + 1))
+            count = count + 1
+        }
+        i = i + 2
+    }
+    if count == 0 { return 0.0 }
+    return sum / (count as f64)
+}
+
+pub fn f2_random_dist_sq(t: &Trajectory) -> f64 with Mut, Div, Panic, NaturalityG2 {
+    let n: i64 = traj_len(t)
+    if n < 2 { return 0.0 }
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let j: i64 = (i + 3) - ((i + 3) / n) * n
+        if j != i {
+            sum = sum + f2_pair_residual_sq(traj_hash(t, i), traj_hash(t, j))
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if count == 0 { return 0.0 }
+    return sum / (count as f64)
+}
+
+// ratio = d_random / d_paired. Returns 0.0 if d_paired is degenerate.
+pub fn f2_ratio(t: &Trajectory) -> f64 with Mut, Div, Panic, NaturalityG2 {
+    let dp: f64 = f2_paired_dist_sq(t)
+    let dr: f64 = f2_random_dist_sq(t)
+    if dp < 0.0000000001 { return 0.0 }
+    return dr / dp
+}
+
+// ============================================================================
+// MAIN — reads binary corpus, falls back to synthetic 8-turn baseline
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic, NaturalityG2 {
+    var t: Trajectory = traj_empty()
+    let loaded: i64 = traj_load_binary(&t, "tests/fixtures/f2_swda.bin")
+
+    if loaded < 2 {
+        // Fallback: synthetic alternating-speaker trajectory
+        let _0: i64 = traj_push(&t, 0, 1001, 1, 0, 8)
+        let _1: i64 = traj_push(&t, 1, 2002, 1, 0, 8)
+        let _2: i64 = traj_push(&t, 0, 1003, 1, 0, 8)
+        let _3: i64 = traj_push(&t, 1, 2004, 1, 0, 8)
+        let _4: i64 = traj_push(&t, 0, 1005, 1, 0, 8)
+        let _5: i64 = traj_push(&t, 1, 2006, 1, 0, 8)
+        let _6: i64 = traj_push(&t, 0, 1007, 1, 0, 8)
+        let _7: i64 = traj_push(&t, 1, 2008, 1, 0, 8)
+    }
+
+    let dp: f64 = f2_paired_dist_sq(&t)
+    let dr: f64 = f2_random_dist_sq(&t)
+    let r: f64 = f2_ratio(&t)
+
+    print("F2 d_paired^2 = "); println(dp)
+    print("F2 d_random^2 = "); println(dr)
+    print("F2 ratio (random/paired) = "); println(r)
+
+    var ok: i64 = 1
+    if r < 5.0 { ok = 0 }
+    if dp > 0.10 { ok = 0 }
+    if dp <= 0.0 { ok = 0 }
+
+    if ok == 1 {
+        print("PASS  (ratio >= 5.0 and d_paired <= 0.10)\n")
+    } else {
+        if loaded < 2 {
+            print("FAIL  (fallback synthetic data does not meet M3a criteria)\n")
+        } else {
+            print("FAIL  (binary corpus does not meet M3a criteria)\n")
+        }
+    }
+    return 0
+}
