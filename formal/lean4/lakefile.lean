@@ -107,3 +107,10 @@ lean_lib «SounioFrechet» where
 -- gap-monotone-in-ε)
 @[default_target]
 lean_lib «SounioWalley» where
+
+-- M3.5+: Klibanoff–Marinacci–Mukerji smooth-ambiguity certainty-
+-- equivalent operator (boundary theorems: alpha=0 collapse,
+-- lambda=0/1 Walley alignment, Fréchet composition)
+@[default_target]
+lean_lib «SounioKlibanoff» where
+
