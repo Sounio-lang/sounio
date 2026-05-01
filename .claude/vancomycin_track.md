@@ -37,13 +37,19 @@ PI: Demetrios Chiuratto Agourakis (`demetrios@agourakis.med.br`)
 - [x] Gate: `cd formal/lean4 && lake build SounioVancomycinDosingSafety` → success
 - **Clinical narrative validated**: pre-TDM (0 samples) → REFUSE; post-TDM (3 samples) → PRESCRIBE; contract-violation → BLOCK.
 
-### M4 — Cohort [DONE 2026-04-30]
+### M4 — Cohort [SKELETON COMPLETE 2026-05-01]
 - [x] `scripts/clinical/process_tdm_cohort.sh` (driver pipeline)
-- [x] `scripts/clinical/data_synthetic/tdm_cohort_synthetic_v1.csv` (20 patients, plumbing-only)
-- [x] `scripts/clinical/README.md` (synthetic caveats)
+- [x] `scripts/clinical/data_synthetic/tdm_cohort_synthetic_v1.csv` (20 patients, plumbing-only — superseded by v2)
+- [x] `scripts/clinical/data_synthetic/tdm_cohort_synthetic_v2.csv` (200 patients, popPK-driven, 2026-05-01)
+- [x] `scripts/clinical/data_synthetic/generate_realistic_cohort.py` (Roberts 2011 ICU vancomycin popPK; deterministic seed; reproducible)
+- [x] `scripts/clinical/etl/mimic_iv_vancomycin.sql` (credential-gated MIMIC-IV extract; same schema as v2)
+- [x] `scripts/clinical/etl/extract_mimic_iv.sh` (driver supporting BigQuery + PostgreSQL modes; gates on `bq` / `$MIMIC_PG_URI`)
+- [x] `scripts/clinical/README.md` (updated 2026-05-01 with credential flow + reproducibility smoke)
 - [x] `docs/research/m4_validation_framework.md` (pre-registered analysis plan)
 - [x] Smoke run (skeleton) — pipeline plumbing verified
-- **Real cohort awaits**: IRB approval (institutional) or MIMIC-IV ETL (public fallback). The pipeline accepts the same CSV schema; no Sounio code change needed when real data lands.
+- [x] V2 distributions verified consistent with published ICU TDM literature (Lodise 2009, Rybak 2020):
+       29% subtherapeutic / 42% therapeutic / 29% toxic Cmin; 26% AKI; 72% cure.
+- **Real cohort awaits**: IRB approval (institutional) or MIMIC-IV credentialed access (PhysioNet CITI + DUA + GCP service account). The pipeline accepts the same CSV schema; no Sounio code change needed when real data lands.
 
 ### M5 — Drafts [DONE 2026-04-30]
 - [x] `docs/papers/vancomycin_pl_paper_outline.md` (POPL/ICFP 2027 target)
@@ -151,6 +157,95 @@ Walley ε-contamination credal set as the elicitation operator.
 - **Open follow-up**: Klibanoff smooth-ambiguity wrapper for
   cost-of-ambiguity calculations (deferred M5+). Float-Real lift
   of both `SounioFrechet.lean` and `SounioWalley.lean` (4–6 weeks).
+
+### M3.5+ — Klibanoff smooth-ambiguity CE [DONE 2026-05-01]
+
+Closes the operator surface with a parametric continuum between
+Walley-vacuous (α→∞ pessimism) and GUM-precise (α=0 risk
+neutrality) using the Klibanoff–Marinacci–Mukerji (2005) smooth-
+ambiguity model.
+
+- [x] **Math-review-first** (`bin/llm-offload -t math-review -p xai
+      -i /tmp/klibanoff_thesis.md`) caught one real bug: claim of
+      `α→∞ ⇒ CE = s_lo` (always) was wrong — correct is
+      `min{x_i : w_i(λ) > 0}`. With λ=0 (no contam mass on s_lo),
+      min is over {μ_0, s_hi} = μ_0. Both implementation and Lean
+      theorems use the corrected formula.
+- [x] `stdlib/epistemic/klibanoff.sio` — CARA φ_α with range-
+      reduced `kl_exp` (halve-square; rel err < 10⁻¹² for |x|≤50)
+      and `kl_log` (halve to [0.5,1] + 32-term Taylor; abs err
+      < 4×10⁻¹²); closed-form boundaries `kl_precise_ce` /
+      `kl_walley_ce` and the smooth `kl_smooth_ce` via log-sum-exp
+      shifted to min(x_i). `kl_sandwich_holds` development gate.
+      7/7 self-test smoke checks PASS.
+- [x] `formal/lean4/SounioKlibanoff.lean` — 5 structural theorems
+      proven in Nat-shadow:
+      - `kl_precise_ce_collapse_at_zero_eps`
+      - `kl_walley_ce_at_lambda_one` (s_lo at λ=1, given s_lo ≤ μ_0)
+      - `kl_walley_ce_at_lambda_zero` (μ_0 at λ=0, given μ_0 ≤ s_hi)
+      - `kl_precise_ce_at_lambda_one_equals_lift_lo` (boundary
+        coincidence with M3.5 Walley.lift_lo)
+      - `kl_walley_compose_inc_dec_holds` (composition with M2.5
+        Fréchet for monotone-(↑x, ↓y) f)
+      Lakefile entry added; `lake build SounioKlibanoff` green.
+- [x] 3 round-trip tests
+      (`tests/stdlib/epistemic/test_klibanoff_*.sio`): boundary
+      (5 invariants), α-sweep (8-point monotonicity 0→5 + sandwich
+      at every α), λ-sweep (5-point linearity at α=0 + smooth
+      mono at α>0). All 3 PASS.
+- [x] **Implementation math-review** — Grok 4.1 returned 15/15 OK,
+      NO_FINDINGS. CARA formula matches KMM eq. 1 + Thm. 1;
+      sandwich, log-sum-exp shift, range reductions, Lean
+      coverage, sandwich tolerance all sound.
+- **Operator surface**:
+
+      | level     | module               | operator                    |
+      |-----------|----------------------|-----------------------------|
+      | precise   | knowledge.sio        | μ_0 (GUM)                   |
+      | Walley-lo | walley.sio           | (1-ε)·μ_0 + ε·s_lo          |
+      | smooth-α  | klibanoff.sio        | CE_α(C; λ)                  |
+      | Walley-vac| walley.sio (ε=1)     | s_lo                        |
+
+      The smooth-α operator is the principled bridge between
+      Bayesian and maxmin postures with α as the elicitation knob.
+
+### Float-Real lift roadmap — Track 2 / Stage 1 [DONE 2026-05-01]
+
+First step in the multi-stage discharge from `Nat`-shadow proofs
+to bounded-soundness `Float` mechanisation.
+
+- [x] **Stage 0 → Stage 1 investigation** — Lean 4 core ships
+      `Rat.le_trans`, `Rat.mul_le_mul_of_nonneg_*`, `Rat.add_*`,
+      `exact_mod_cast`. `Float.le` exists but has no transitivity
+      proof; Mathlib detour explicitly NOT recommended (CI cost,
+      version-drift, in-tree philosophy).
+- [x] `formal/lean4/SounioFrechetRat.lean` — Rat-stage lift of
+      `SounioFrechet.lean`:
+      - `frechet_enclosure_monotone_inc_dec_rat`
+      - `frechet_enclosure_monotone_inc_inc_rat`
+      - `frechet_enclosure_monotone_dec_dec_rat`
+      - `walley_gap_monotone_in_epsilon_rat` (with explicit
+        `0 ≤ s_hi − s_lo` hypothesis since Rat is a ring with
+        negatives)
+      - `vancomycin_cmin_frechet_enclosure_rat` (substrate-
+        generality at the Rat stage)
+      - `nat_to_rat_monotone` (Stage 0 → Stage 1 bridge)
+      All proofs use only Lean 4 core lemmas. No Mathlib, no
+      axiom, no sorry. Lakefile entry added; `lake build
+      SounioFrechetRat` green.
+- [x] `docs/research/lean_float_real_roadmap.md` documents:
+      Stage 0 ✅ (Nat) — Stage 1 ✅ (Rat) — Stage 2 ⏳ (Real,
+      2-3 weeks, in-tree Real-from-Cauchy or density argument) —
+      Stage 3 ⏳ (Float bounded-soundness, 4-6 weeks, IEEE-754
+      ulp accounting via Higham 2002 §2.4). End-state Float
+      theorem: "bounded-sound modulo k·ε_machine" (~10⁻¹⁵ for
+      clinical PK regimes — 16 orders of magnitude below
+      clinical relevance).
+- [x] **Math-review** — Grok 4.1 returned 11/11 OK, NO_FINDINGS.
+      Theorem proofs verified, multi-stage roadmap pedagogically
+      sound, IEEE-754 bounded-soundness statement correct
+      (denormal/NaN subtleties scoped to finite clinical
+      positives), no killer omission.
 
 ### Substrate-generality demonstration [DONE 2026-05-01]
 
