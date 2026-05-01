@@ -129,6 +129,29 @@ lean_lib «SounioOrderedCarrier» where
 @[default_target]
 lean_lib «SounioFrechetGeneric» where
 
+-- Track 2 / Stage 3a (Route A): Mathlib-free SounioReal as the
+-- rational subset of ℝ, with OrderedCarrier instance inherited
+-- from Rat (Cauchy completion deferred)
+@[default_target]
+lean_lib «SounioRealOrder» where
+
+-- Track 2 / Stage 3b: BoundedOrderedCarrier typeclass for
+-- IEEE-754 Float with relaxed laws + bounded-Fréchet theorem
+-- (Float instance deferred to external IEEE-754 model)
+@[default_target]
+lean_lib «SounioFloatBounded» where
+
+-- Track 3: Stage 2 lift of M3.5 Walley elicitation theorems
+-- (collapse-at-zero, vacuous-at-one, gap-monotone, Fréchet
+-- composition) over OrderedCarrier
+@[default_target]
+lean_lib «SounioWalleyGeneric» where
+
+-- Track 3: Stage 2 lift of M3.5+ Klibanoff boundary theorems
+-- (lambda=0/1 walley CE, Fréchet composition) over OrderedCarrier
+@[default_target]
+lean_lib «SounioKlibanoffGeneric» where
+
 -- M4: Octonion homology functor — discrete G₂ naturality skeleton
 -- (Fano-permutation enumeration + naturality square + concrete
 -- decideable closure on the canonical basis embed)

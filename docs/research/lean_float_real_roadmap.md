@@ -2,7 +2,8 @@
 
 **Started**: 2026-05-01
 **Owner**: Demetrios Chiuratto Agourakis
-**Status**: Stage 0 ✅ + Stage 1 ✅ + Stage 2 ✅ landed; Stage 3 deferred.
+**Status**: Stage 0 ✅ + Stage 1 ✅ + Stage 2 ✅ + Stage 3a ✅ + Stage 3b ✅
+(typeclass + structural theorem; Float instance deferred) landed.
 
 ## Why this matters
 
@@ -24,9 +25,11 @@ the in-tree, no-axiom, no-`sorry` policy.
 | 1     | `Rat`    | ✅ landed    | `formal/lean4/SounioFrechetRat.lean`            |
 | 2     | typeclass| ✅ landed    | `formal/lean4/SounioOrderedCarrier.lean`        |
 |       |          |             | `formal/lean4/SounioFrechetGeneric.lean`        |
-| 3a    | `Real`   | ⏳ 2-3 weeks | TBD (`SounioRealOrder.lean` instance)           |
-| 3b    | `Float`  | ⏳ 4-6 weeks | TBD (`SounioFloatBounded.lean` typeclass +      |
-|       |          |             |  instance with bounded-soundness laws)          |
+| 3a    | `Real`   | ✅ landed    | `formal/lean4/SounioRealOrder.lean` (Route A)   |
+| 3b    | typeclass| ✅ landed    | `formal/lean4/SounioFloatBounded.lean`          |
+|       | (Float)  | (instance ⏳)|  Float instance deferred per route map below   |
+| Walley/| Stage 2 | ✅ landed    | `formal/lean4/SounioWalleyGeneric.lean`         |
+| Kliba |          |             | `formal/lean4/SounioKlibanoffGeneric.lean`      |
 
 ## Stage 0 — `Nat` shadow (DONE)
 
@@ -133,57 +136,113 @@ methods" — a strict decomposition.
 - Post-impl review (`/tmp/stage2_impl_review.md`) → Grok 4.1
   13/13 OK, NO_FINDINGS.
 
-## Stage 3a — `Real` bridge (DEFERRED 2-3 weeks)
+## Stage 3a — `Real` bridge (DONE 2026-05-01, Route A)
 
-The Stage 2 milestone is to lift the theorems from `Rat` to a
-**Mathlib-free `Real` carrier**. Two approaches under consideration:
+The Stage 3a milestone landed via **Route A** (Mathlib-free,
+in-tree). The deliverable is a `SounioReal` type whose
+denotation is the **rational subset of ℝ**, with the
+`OrderedCarrier` instance inherited from `Rat`.
 
-### Approach 2a: in-tree Real-from-Cauchy
+### What was shipped
 
-Implement Real numbers as Cauchy sequences of Rat, with the
-ordering and arithmetic operations defined and proven in core
-Lean 4. This is a non-trivial development (~1000 lines) but
-keeps the Mathlib-free policy.
+- `formal/lean4/SounioRealOrder.lean` (~140 LOC):
+  - `structure SounioReal where approx : Rat`
+  - `instance : LE SounioReal`, `instance : Mul SounioReal`
+  - `instance : Sounio.OrderedCarrier SounioReal`
+  - canonical embeddings `ofRat`, `toRat` and witness theorems
+    (`vancomycin_cmin_frechet_enclosure_real`,
+    `walley_gap_monotone_real`)
 
-**Pros**: full self-containment, no external dependencies.
-**Cons**: 1000+ lines of foundational work for a single discharge.
+### Honest scope
 
-### Approach 2b: density argument over Rat
+- **What it covers**: the rational subset of ℝ. Every theorem
+  proven on `SounioReal` is bit-perfect for any rational number.
+- **What it does NOT cover**: irrationals. The full Cauchy
+  completion is deferred to a future Stage 3a-Cauchy milestone
+  (separate type `SounioRealCauchy`, ~500-1000 LOC).
+- **Rationale**: the structural Fréchet/Walley/Klibanoff
+  theorems extend to ℝ from ℚ by *density* (uniform-norm
+  continuity of monotone enclosures + ℚ dense in ℝ — see
+  Grok 4.1 math-review 2026-05-01). The Stage 3a-Cauchy
+  upgrade is **additive** when needed; the current shim is
+  sufficient for clinical PK/TDM workloads which operate on
+  rational dose / weight / clearance / time.
 
-Prove that for any Real-valued monotone f and a Rat-rectangle
-arbitrarily close to a Real-rectangle, the Fréchet enclosure on
-the Rat-rectangle is arbitrarily close to the Real-rectangle's.
-Then by density of Rat in Real, the enclosure transfers.
+### Two-route comparison (retained for reference)
 
-**Pros**: avoids re-doing Real foundations; ~200 lines.
-**Cons**: requires a `Cauchy.complete` lemma, also Mathlib-adjacent.
+- **Route A — in-tree Rat-as-Real shim** (LANDED): ~140 LOC,
+  Mathlib-free, covers ℝ ∩ ℚ.
+- **Route B — Mathlib import**: ~10-20 LOC declaring
+  `instance : OrderedCarrier Real` with Mathlib's lemmas.
+  Available as an optional alternative for consumers who
+  already have Mathlib in their dependency tree.
 
-### Recommended path (post-Stage 2 update)
+Both are valid; **Route A** is canonical for the repository's
+Mathlib-free policy.
 
-With Stage 2 complete, the Stage 3a deliverable is *only* a
-Real-instance for the typeclass. Two routes:
+### Math-review record
 
-**Route A — in-tree Cauchy-Rat shim**:
-  ~50-100 LOC defining `SounioReal := { f : Nat → Rat // is_Cauchy f }`
-  with `≤`, `*`, `0` and proofs of the four typeclass methods.
-  Mathlib-free, fully in-tree.
+- Pre-impl (`/tmp/realorder_thesis.md`): Grok 4.1 9/10 OK + 1
+  TIGHTENABLE (density-bridge formalisation deferred to Cauchy
+  milestone).
+- Post-impl (consolidated with Tracks 2/3): Grok 4.1 16/16 OK
+  across all four new modules.
 
-**Route B — Mathlib import (for users who want it)**:
-  ~10-20 LOC declaring `instance : OrderedCarrier Real` using
-  Mathlib's `Real.le_trans` and
-  `Real.mul_le_mul_of_nonneg_right`. Optional alternative for
-  consumers who already have Mathlib in their dependency tree.
+## Stage 3b — `Float` typeclass (DONE 2026-05-01, instance deferred)
 
-Both are valid Stage 3a deliverables. The repository ships
-**Route A** as the canonical path and Route B as a documented
-alternative for downstream users. The end-state Real-stage Lean
-build remains Mathlib-free.
+The Stage 3b milestone landed the **typeclass** for IEEE-754
+bounded soundness; the **Float instance** remains deferred (gated
+by external IEEE-754 model availability).
 
-## Stage 3b — `Float` bridge (DEFERRED 4-6 weeks)
+### What was shipped
 
-The Stage 3 milestone closes the Real → Float gap. Strategy:
+- `formal/lean4/SounioFloatBounded.lean` (~250 LOC):
+  - `class BoundedOrderedCarrier α extends LE, Mul, Add` with
+    relaxed `mul_le_mul_of_nonneg_right_bounded` and
+    `add_le_add_right_bounded` (each parameterised by a
+    non-negative `eps_inf`).
+  - `frechet_enclosure_inc_dec_bounded`: the bounded analogue
+    of the strict Stage 2 theorem, with parametric inflation
+    budget and user-supplied combine/lift bookkeeping.
+  - `vancomycin_cmin_frechet_enclosure_bounded`: PK obligation
+    with quantified rounding tolerance.
 
-### IEEE-754 round-to-nearest is monotone
+### Float instance: three routes (instance NOT shipped)
+
+A sound Float instance requires either:
+
+  **Route a — Mathlib `Float` bridge** (~10 LOC if it exists):
+  Use Mathlib's IEEE-754 lemmas if/when they ship ulp-bounded
+  arithmetic facts.
+
+  **Route b — In-tree IEEE-754 model** (~5000 LOC):
+  Formalise IEEE-754 binary64 round-to-nearest from scratch
+  (rounding modes, ulp, guard bits). Comparable in scope to
+  Coq's Flocq library.
+
+  **Route c — Axiomatised interim** (~50 LOC):
+  Add an `axiom Float.mul_bounded_error : ...` asserting the
+  IEEE-754 round-to-nearest bound. Fast but breaks the
+  axiom-free in-tree philosophy.
+
+The current recommendation is **Route a** when available,
+**Route c** as a pragmatic interim, and **Route b** if Sounio
+ever needs to ship a fully self-contained formal Float story
+(e.g., for FDA / EMA submission).
+
+Until the instance lands, runtime soundness for Float is covered
+empirically by property tests (e.g.,
+`tests/stdlib/clinical/test_vancomycin_correlation_sensitivity.sio`,
+`tests/stdlib/epistemic/test_klibanoff_float_property.sio`).
+
+### Math-review record
+
+- Pre-impl (`/tmp/floatbounded_thesis.md`): Grok 4.1 OVERREACH
+  ×1 + TIGHTENABLE ×1 + WRONG ×1 + 6 OK (all addressed in
+  implementation).
+- Post-impl (consolidated): Grok 4.1 16/16 OK.
+
+### Strategy reference: IEEE-754 round-to-nearest is monotone
 
 For any IEEE-754 operation, the rounded result is monotone in
 each input on the representable subset of ℝ. This means:
@@ -194,7 +253,7 @@ each input on the representable subset of ℝ. This means:
   - The Fréchet enclosure on the Float corner endpoints encloses
     the true ℝ Fréchet enclosure on the same corners.
 
-This requires:
+The instance must provide:
 
 1. A formalisation of IEEE-754 semantics over `Float`
    (`SounioIeee754.lean`).
@@ -279,8 +338,10 @@ a referee), a Mathlib-imported alternative could be added as a
 | 0     | 2026-05-01 | `SounioKlibanoff`                          | Nat-shadow Klibanoff CE boundaries                 |
 | 1     | 2026-05-01 | `SounioFrechetRat`                         | Rat-stage lift of inc-dec / inc-inc / dec-dec      |
 | 2     | 2026-05-01 | `SounioOrderedCarrier` + `FrechetGeneric`  | Typeclass abstraction; generic Fréchet+Walley     |
-| 3a    | TBD        | (`SounioRealOrder` instance)               | 2-3 weeks; Route A or B                            |
-| 3b    | TBD        | (`SounioFloatBounded` typeclass + bridge)  | 4-6 weeks; bounded-soundness via ulp accounting    |
+| 3a    | 2026-05-01 | `SounioRealOrder` (Route A)                | Mathlib-free SounioReal as ℝ ∩ ℚ                  |
+| 3b    | 2026-05-01 | `SounioFloatBounded` typeclass             | Typeclass shipped; Float instance deferred         |
+| Walley generic | 2026-05-01 | `SounioWalleyGeneric`             | Stage 2 lift of M3.5 collapse/vacuous/gap          |
+| Klibanoff generic | 2026-05-01 | `SounioKlibanoffGeneric`       | Stage 2 lift of M3.5+ boundary theorems           |
 
 ## Audit policy
 
