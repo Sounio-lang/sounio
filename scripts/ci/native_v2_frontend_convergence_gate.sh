@@ -339,6 +339,7 @@ required = [
     "main_probe_load_ir_trace",
     "main_probe_imported_load_ir",
     "main_probe_imported_load_ir_trace",
+    "main_probe_imported_native_compile",
 ]
 all_required_present = all(case_id in case_by_id for case_id in required)
 all_required_pass = all(case_by_id.get(case_id, {}).get("rc") == 0 for case_id in required)
@@ -380,10 +381,11 @@ payload = {
         "main_probe_load_ir_trace_passed": case_by_id.get("main_probe_load_ir_trace", {}).get("rc") == 0,
         "main_probe_imported_load_ir_passed": case_by_id.get("main_probe_imported_load_ir", {}).get("rc") == 0,
         "main_probe_imported_load_ir_trace_passed": case_by_id.get("main_probe_imported_load_ir_trace", {}).get("rc") == 0,
+        "main_probe_imported_native_compile_passed": case_by_id.get("main_probe_imported_native_compile", {}).get("rc") == 0,
         "main_probe_body_lowered_passed": "body_lowered=1" in main_probe_log,
         "main_probe_imported_body_lowered_passed": "body_lowered=3" in main_probe_imported_log,
     },
-    "next_action": "repair imported native codegen after modular IR handoff; current handoff reaches the native driver with three imported summary functions",
+    "next_action": "replace the imported ret0 native summary witness with semantic imported call-linked codegen and stdout parity",
 }
 
 summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -420,6 +422,8 @@ run_case "main_probe_imported_load_ir" "$LOG_DIR/main.probe_imported_load_ir.log
   "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir tests/selfhost/native_runtime/import_nested_main_42.sio
 run_case "main_probe_imported_load_ir_trace" "$LOG_DIR/main.probe_imported_load_ir_trace.log" \
   "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir-trace tests/selfhost/native_runtime/import_nested_main_42.sio
+run_case "main_probe_imported_native_compile" "$LOG_DIR/main.probe_imported_native_compile.log" \
+  "$SOUC_BIN" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_nested_main_42.sio -o "$OUT_DIR/import_nested_main_42.native"
 
 if emit_summary_json; then
   status="$(python3 - "$SUMMARY_JSON" <<'PY'
