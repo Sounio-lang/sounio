@@ -28,8 +28,18 @@ cd "$ROOT_DIR"
 # Harness-local override: keep repo-wide default behavior untouched unless
 # callers explicitly point the suite at an alternate compiler path/backend.
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
-    export SOUNIO_SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
-    SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+    # See run_sio_test_suite_v2.sh for the discrimination rationale: script
+    # wrappers (e.g. the rebuilt ontology validation wrapper) speak the
+    # harness subcommand interface directly, while raw self-hosted ELFs
+    # (e.g. CI `souc-stage2`) must be routed through bin/souc.
+    if [[ -r "$SOUNIO_TEST_SOUC_BIN" ]] \
+       && [[ "$(head -c 2 "$SOUNIO_TEST_SOUC_BIN" 2>/dev/null)" == "#!" ]]; then
+        export SOUNIO_SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+        SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+    else
+        export SOUNIO_SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
+        unset SOUC_BIN
+    fi
 fi
 if [[ -n "${SOUNIO_TEST_NATIVE_BIN:-}" ]]; then
     export SOUC_NATIVE_BIN="$SOUNIO_TEST_NATIVE_BIN"
@@ -37,9 +47,6 @@ fi
 
 # shellcheck source=lib/resolve_souc.sh
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
-if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
-    SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
-fi
 sounio_require_souc
 
 # Ensure stdlib is discoverable for tests that import from it.
