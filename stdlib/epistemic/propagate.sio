@@ -232,8 +232,62 @@ pub fn product_correlated(
 }
 
 // ============================================================================
-// MONTE CARLO PROPAGATION
+// FINITE-DIFF JACOBIAN HELPERS (for bivariate propagation)
 // ============================================================================
+
+// Propagate bivariate f(x,y) with uncertainty via central-difference Jacobian.
+// Uses delta method: Var(f) ≈ (df/dx)²·Var(x) + (df/dy)²·Var(y)
+// plus cross-term for correlated propagation.
+pub fn propagate_fn_2d<F>(
+    f: F,
+    x: Epistemic,
+    y: Epistemic,
+) -> Epistemic
+where F: fn(f64, f64) -> f64
+{
+    let eps = 1.0e-7
+
+    // Central differences for partial derivatives
+    let hx = if x.val != 0.0 { eps * abs_f64(x.val) } else { eps }
+    let hy = if y.val != 0.0 { eps * abs_f64(y.val) } else { eps }
+
+    let f_xy = f(x.val, y.val)
+    let f_xp = f(x.val + hx, y.val)
+    let f_xm = f(x.val - hx, y.val)
+    let f_yp = f(x.val, y.val + hy)
+    let f_ym = f(x.val, y.val - hy)
+
+    let df_dx = (f_xp - f_xm) / (2.0 * hx)
+    let df_dy = (f_yp - f_ym) / (2.0 * hy)
+
+    let variance = df_dx * df_dx * x.variance + df_dy * df_dy * y.variance
+
+    Epistemic {
+        val: f_xy,
+        variance: max_f64(variance, 0.0),
+        confidence: ep_combine(x.confidence, y.confidence),
+    }
+}
+
+// Bivariate propagation with explicit partial derivatives (analytical)
+pub fn propagate_2d_analytic(
+    f_val: f64,
+    df_dx: f64, x: Epistemic,
+    df_dy: f64, y: Epistemic
+) -> Epistemic {
+    let variance = df_dx * df_dx * x.variance + df_dy * df_dy * y.variance
+    Epistemic {
+        val: f_val,
+        variance: max_f64(variance, 0.0),
+        confidence: ep_combine(x.confidence, y.confidence),
+    }
+}
+
+// ============================================================================
+// MONTE CARLO PROPAGATION (using xoshiro)
+// ============================================================================
+
+use random::xoshiro::{Xoshiro256, xoshiro_seed, standard_normal}
 
 // Monte Carlo variance propagation for arbitrary functions
 pub fn monte_carlo<F>(
@@ -247,13 +301,11 @@ where F: fn(f64) -> f64
 
     var sum = 0.0
     var sum_sq = 0.0
-    var rng_state = 12345_u64
+    var rng = xoshiro_seed(12345)
 
     var i = 0
     while i < n_samples {
-        let (u1, u2, new_state) = random_pair(rng_state)
-        rng_state = new_state
-        let z = sqrt_f64(-2.0 * ln_f64(u1)) * cos_f64(2.0 * 3.141592653589793 * u2)
+        let z = standard_normal(&!rng)
         let sample = x.val + z * std
 
         let y = f(sample)
@@ -288,16 +340,12 @@ where F: fn(f64, f64) -> f64
 
     var sum = 0.0
     var sum_sq = 0.0
-    var rng_state = 67890_u64
+    var rng = xoshiro_seed(67890)
 
     var i = 0
     while i < n_samples {
-        let (u1, u2, s1) = random_pair(rng_state)
-        let (u3, u4, s2) = random_pair(s1)
-        rng_state = s2
-
-        let z1 = sqrt_f64(-2.0 * ln_f64(u1)) * cos_f64(2.0 * 3.141592653589793 * u2)
-        let z2 = sqrt_f64(-2.0 * ln_f64(u3)) * cos_f64(2.0 * 3.141592653589793 * u4)
+        let z1 = standard_normal(&!rng)
+        let z2 = standard_normal(&!rng)
 
         let sample_x = x.val + z1 * std_x
         let sample_y = y.val + z2 * std_y
@@ -323,6 +371,10 @@ where F: fn(f64, f64) -> f64
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
 
 fn exp_f64(x: f64) -> f64 with Mut {
     if x > 10.0 { return 22026.465794806718 * exp_f64(x - 10.0) }
