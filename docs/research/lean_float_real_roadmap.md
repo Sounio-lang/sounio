@@ -2,7 +2,7 @@
 
 **Started**: 2026-05-01
 **Owner**: Demetrios Chiuratto Agourakis
-**Status**: Stage 0 ✅ + Stage 1 ✅ landed; Stages 2–3 deferred.
+**Status**: Stage 0 ✅ + Stage 1 ✅ + Stage 2 ✅ landed; Stage 3 deferred.
 
 ## Why this matters
 
@@ -22,8 +22,11 @@ the in-tree, no-axiom, no-`sorry` policy.
 |       |          |             | `formal/lean4/SounioWalley.lean`                |
 |       |          |             | `formal/lean4/SounioKlibanoff.lean`             |
 | 1     | `Rat`    | ✅ landed    | `formal/lean4/SounioFrechetRat.lean`            |
-| 2     | `Real`   | ⏳ 2-3 weeks | TBD (`SounioFrechetReal.lean`)                  |
-| 3     | `Float`  | ⏳ 4-6 weeks | TBD (`SounioFrechetFloat.lean`)                 |
+| 2     | typeclass| ✅ landed    | `formal/lean4/SounioOrderedCarrier.lean`        |
+|       |          |             | `formal/lean4/SounioFrechetGeneric.lean`        |
+| 3a    | `Real`   | ⏳ 2-3 weeks | TBD (`SounioRealOrder.lean` instance)           |
+| 3b    | `Float`  | ⏳ 4-6 weeks | TBD (`SounioFloatBounded.lean` typeclass +      |
+|       |          |             |  instance with bounded-soundness laws)          |
 
 ## Stage 0 — `Nat` shadow (DONE)
 
@@ -68,7 +71,69 @@ structural reusability of the Sounio Fréchet substrate.
 The Rat-typed Vancomycin Cmin obligation is also discharged,
 demonstrating substrate-generality at this stage.
 
-## Stage 2 — `Real` bridge (DEFERRED 2-3 weeks)
+## Stage 2 — typeclass abstraction (DONE 2026-05-01)
+
+Stage 2 unifies the Stage 0 (`Nat`) and Stage 1 (`Rat`) proofs by
+declaring a Mathlib-free typeclass `Sounio.OrderedCarrier α`
+capturing the *minimal algebraic content* the structural theorems
+require, and re-stating the Fréchet/Walley theorems generically
+over any instance.
+
+### Files landed
+
+- `formal/lean4/SounioOrderedCarrier.lean` — typeclass definition
+  and `Nat` / `Int` / `Rat` instances.
+- `formal/lean4/SounioFrechetGeneric.lean` — generic Fréchet
+  enclosure (3 variants: inc-dec, inc-inc, dec-dec) + Walley
+  gap-monotonicity, plus Stage 0 / Stage 1 specialisation
+  corollaries.
+
+### Typeclass shape (Mathlib-free)
+
+```lean
+class OrderedCarrier (α : Type) extends LE α, Mul α where
+  zero : α
+  le_trans :
+    ∀ {a b c : α}, a ≤ b → b ≤ c → a ≤ c
+  mul_le_mul_of_nonneg_right :
+    ∀ {a b : α} (c : α), a ≤ b → zero ≤ c → a * c ≤ b * c
+```
+
+Four fields, no parent class beyond Lean 4 core's `LE` and `Mul`.
+The minimum sufficient set for the Fréchet (uses only `le_trans`)
++ Walley gap monotonicity (uses `mul_le_mul_of_nonneg_right`).
+
+### Subsumption verification
+
+`SounioFrechetGeneric.frechet_enclosure_inc_dec_nat` and
+`..._rat` are stated as direct applications of the generic
+theorem. By typeclass resolution, Lean 4 picks up the canonical
+`Nat`/`Rat` instances from `SounioOrderedCarrier.lean` and the
+generic proof discharges the carrier-specific obligation
+**without any new content**. The Stage 0 / Stage 1 source files
+remain available for independent inspection but are no longer the
+*authoritative* proofs of the structural content.
+
+### What this unblocks
+
+The Real / Float instances now require **only** the typeclass
+methods (≤ 10 lines each), not a full re-proof of the
+Fréchet / Walley theorems. This collapses the Stage 3 effort
+budget from "4-6 weeks of theorem migration" to
+"4-6 weeks of carrier-specific proof obligations on the typeclass
+methods" — a strict decomposition.
+
+### Math-review record
+
+- Pre-impl thesis (`/tmp/stage2_thesis.md`) → Grok 4.1 8/10 OK +
+  1 TIGHTENABLE (Mathlib `Preorder` suggestion declined since it
+  isn't in Lean 4 core) + 1 OVERREACH (Real bridge cost: ~10-20
+  LOC with Mathlib import vs. ~50-100 LOC in-tree — accepted,
+  document both options).
+- Post-impl review (`/tmp/stage2_impl_review.md`) → Grok 4.1
+  13/13 OK, NO_FINDINGS.
+
+## Stage 3a — `Real` bridge (DEFERRED 2-3 weeks)
 
 The Stage 2 milestone is to lift the theorems from `Rat` to a
 **Mathlib-free `Real` carrier**. Two approaches under consideration:
@@ -93,16 +158,28 @@ Then by density of Rat in Real, the enclosure transfers.
 **Pros**: avoids re-doing Real foundations; ~200 lines.
 **Cons**: requires a `Cauchy.complete` lemma, also Mathlib-adjacent.
 
-### Recommended path
+### Recommended path (post-Stage 2 update)
 
-Start with **Approach 2b** with a minimal `Real`-as-Cauchy-Rat
-shim that exposes only the ordering structure
-(no analysis, no calculus). This is enough for the structural
-Fréchet/Walley/Klibanoff content. The `Real`-shim should live in
-`formal/lean4/SounioRealOrder.lean` and import nothing from
-Mathlib.
+With Stage 2 complete, the Stage 3a deliverable is *only* a
+Real-instance for the typeclass. Two routes:
 
-## Stage 3 — `Float` bridge (DEFERRED 4-6 weeks)
+**Route A — in-tree Cauchy-Rat shim**:
+  ~50-100 LOC defining `SounioReal := { f : Nat → Rat // is_Cauchy f }`
+  with `≤`, `*`, `0` and proofs of the four typeclass methods.
+  Mathlib-free, fully in-tree.
+
+**Route B — Mathlib import (for users who want it)**:
+  ~10-20 LOC declaring `instance : OrderedCarrier Real` using
+  Mathlib's `Real.le_trans` and
+  `Real.mul_le_mul_of_nonneg_right`. Optional alternative for
+  consumers who already have Mathlib in their dependency tree.
+
+Both are valid Stage 3a deliverables. The repository ships
+**Route A** as the canonical path and Route B as a documented
+alternative for downstream users. The end-state Real-stage Lean
+build remains Mathlib-free.
+
+## Stage 3b — `Float` bridge (DEFERRED 4-6 weeks)
 
 The Stage 3 milestone closes the Real → Float gap. Strategy:
 
@@ -195,14 +272,15 @@ a referee), a Mathlib-imported alternative could be added as a
 
 ## Status table (updates here as stages land)
 
-| Stage | Date       | PR / Commit                       | Notes                                          |
-|-------|------------|------------------------------------|------------------------------------------------|
-| 0     | 2026-04-30 | Initial (`SounioFrechet`)          | Nat-shadow Fréchet enclosure                   |
-| 0     | 2026-04-30 | `SounioKnightian` / `Walley`       | Nat-shadow Walley elicitation                  |
-| 0     | 2026-05-01 | `SounioKlibanoff`                  | Nat-shadow Klibanoff CE boundaries             |
-| 1     | 2026-05-01 | `SounioFrechetRat`                 | Rat-stage lift of inc-dec / inc-inc / dec-dec  |
-| 2     | TBD        | (`SounioRealOrder` + bridge)        | 2-3 weeks; Approach 2b recommended             |
-| 3     | TBD        | (`SounioIeee754` + bridge)         | 4-6 weeks; bounded-soundness via ulp accounting|
+| Stage | Date       | PR / Commit                                | Notes                                              |
+|-------|------------|--------------------------------------------|----------------------------------------------------|
+| 0     | 2026-04-30 | Initial (`SounioFrechet`)                  | Nat-shadow Fréchet enclosure                       |
+| 0     | 2026-04-30 | `SounioKnightian` / `Walley`               | Nat-shadow Walley elicitation                      |
+| 0     | 2026-05-01 | `SounioKlibanoff`                          | Nat-shadow Klibanoff CE boundaries                 |
+| 1     | 2026-05-01 | `SounioFrechetRat`                         | Rat-stage lift of inc-dec / inc-inc / dec-dec      |
+| 2     | 2026-05-01 | `SounioOrderedCarrier` + `FrechetGeneric`  | Typeclass abstraction; generic Fréchet+Walley     |
+| 3a    | TBD        | (`SounioRealOrder` instance)               | 2-3 weeks; Route A or B                            |
+| 3b    | TBD        | (`SounioFloatBounded` typeclass + bridge)  | 4-6 weeks; bounded-soundness via ulp accounting    |
 
 ## Audit policy
 
