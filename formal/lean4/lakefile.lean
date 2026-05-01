@@ -152,6 +152,20 @@ lean_lib «SounioWalleyGeneric» where
 @[default_target]
 lean_lib «SounioKlibanoffGeneric» where
 
+-- Stage 3a-Cauchy: irrational extension of SounioReal via
+-- Cauchy sequences (structure + LE eventual + reflexivity +
+-- transitivity + ofRat bridge; full OrderedCarrier instance
+-- deferred as obligation prop)
+@[default_target]
+lean_lib «SounioRealCauchy» where
+
+-- Stage 3b Float instance via Route C: 4 axioms for IEEE-754
+-- binary64 typeclass methods, with the BoundedOrderedCarrier
+-- Float instance built on top. Axiomatic interim until Route A
+-- (Mathlib bridge) or Route B (in-tree IEEE-754) lands.
+@[default_target]
+lean_lib «SounioFloatInstance» where
+
 -- M4: Octonion homology functor — discrete G₂ naturality skeleton
 -- (Fano-permutation enumeration + naturality square + concrete
 -- decideable closure on the canonical basis embed)

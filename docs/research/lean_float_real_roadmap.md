@@ -2,8 +2,11 @@
 
 **Started**: 2026-05-01
 **Owner**: Demetrios Chiuratto Agourakis
-**Status**: Stage 0 ✅ + Stage 1 ✅ + Stage 2 ✅ + Stage 3a ✅ + Stage 3b ✅
-(typeclass + structural theorem; Float instance deferred) landed.
+**Status**: Stage 0 ✅ + Stage 1 ✅ + Stage 2 ✅ + Stage 3a (Route A
++ Cauchy structural) ✅ + Stage 3b (typeclass + Route C Float
+instance) ✅ landed. Full Cauchy `OrderedCarrier` instance and
+Mathlib/in-tree IEEE-754 discharge of axioms remain as future
+milestones.
 
 ## Why this matters
 
@@ -26,8 +29,11 @@ the in-tree, no-axiom, no-`sorry` policy.
 | 2     | typeclass| ✅ landed    | `formal/lean4/SounioOrderedCarrier.lean`        |
 |       |          |             | `formal/lean4/SounioFrechetGeneric.lean`        |
 | 3a    | `Real`   | ✅ landed    | `formal/lean4/SounioRealOrder.lean` (Route A)   |
+| 3a-C  | `Real`   | ✅ structural| `formal/lean4/SounioRealCauchy.lean`            |
+|       | (Cauchy) | (full ⏳)    |  IsCauchy + LE_p + bridges; Mul/full-OC defer  |
 | 3b    | typeclass| ✅ landed    | `formal/lean4/SounioFloatBounded.lean`          |
-|       | (Float)  | (instance ⏳)|  Float instance deferred per route map below   |
+| 3b-F  | `Float`  | ✅ axiomatic | `formal/lean4/SounioFloatInstance.lean` (RtC)   |
+|       |          | (Mathlib ⏳) |  4 axioms per Higham 2002 §2.4; cookbook eps   |
 | Walley/| Stage 2 | ✅ landed    | `formal/lean4/SounioWalleyGeneric.lean`         |
 | Kliba |          |             | `formal/lean4/SounioKlibanoffGeneric.lean`      |
 
@@ -188,6 +194,54 @@ Mathlib-free policy.
 - Post-impl (consolidated with Tracks 2/3): Grok 4.1 16/16 OK
   across all four new modules.
 
+## Stage 3a-Cauchy — irrational extension (DONE 2026-05-01, structural)
+
+The Stage 3a-Cauchy milestone landed `SounioRealCauchy.lean`
+which extends `SounioReal` (rational subset of ℝ) with a
+genuine Cauchy-sequence construction that *can* represent
+irrationals. The deliverable is **structural**: the type, the
+ordering, and the bridge to `SounioReal` are provided; the full
+`OrderedCarrier` instance for `SounioRealCauchy` is deferred to
+a future complete-milestone (~200-400 LOC ε-N analysis).
+
+### What was shipped
+
+- `formal/lean4/SounioRealCauchy.lean` (~250 LOC):
+  - `IsCauchy : (Nat → Rat) → Prop` predicate
+  - `structure SounioRealCauchy where seq, cauchy : ...`
+  - `LE` instance via **pointwise eventual ordering**
+    (`f ≤_p g iff ∃ N, ∀ n ≥ N, f n ≤ g n`)
+  - Reflexivity and transitivity of `≤_p` (proved without ε/2
+    splitting, since the pointwise version doesn't need it)
+  - `ofRat`, `ofSounioReal` constant-sequence bridges
+  - `MulPreservesCauchy : Prop` (deferred lemma)
+  - `OrderedCarrierObligation_RealCauchy : Prop` (full
+    obligation stated)
+
+### Why pointwise eventual order
+
+The canonical real-line order on Cauchy sequences is the
+ε-quantified `f ≤_ε g iff ∀ ε > 0, ∃ N, ∀ n ≥ N, f n ≤ g n + ε`.
+Transitivity of `≤_ε` requires the ε/2 splitting argument,
+which in turn requires `Rat.div_pos` (`0 < ε → 0 < ε / 2`).
+Lean 4 core does NOT ship `Rat.div_pos` directly — it would
+need to be derived from `Rat.mul_pos` + `Rat.inv_pos`, which is
+non-trivial without `ring`/`field_simp` (Mathlib).
+
+We sidestep this by using `≤_p`, which is **strictly stronger**
+than `≤_ε` and provides transitivity for free via
+`Rat.le_trans`. For the structural Sounio theorems
+(Fréchet/Walley/Klibanoff), `≤_p` is sufficient because all
+arguments use only `le_trans` + monotonicity-by-hypothesis.
+
+### Math-review record
+
+- Pre-impl (`/tmp/cauchy_float_thesis.md`): 5/5 OK on key
+  Cauchy questions + the `≤_p` redesign approved.
+- Post-impl (`/tmp/cauchy_float_postimpl_review.md`): 17/18
+  OK (1 WRONG was on the Float counter-example arithmetic in
+  Stage 3b-F, not Cauchy).
+
 ## Stage 3b — `Float` typeclass (DONE 2026-05-01, instance deferred)
 
 The Stage 3b milestone landed the **typeclass** for IEEE-754
@@ -241,6 +295,62 @@ empirically by property tests (e.g.,
   ×1 + TIGHTENABLE ×1 + WRONG ×1 + 6 OK (all addressed in
   implementation).
 - Post-impl (consolidated): Grok 4.1 16/16 OK.
+
+## Stage 3b-F — Float instance Route C (DONE 2026-05-01)
+
+The Stage 3b-F milestone landed `SounioFloatInstance.lean` —
+the **Route C axiomatic interim** Float instance for
+`BoundedOrderedCarrier`. This file:
+
+  - Declares **4 explicit axioms** corresponding to IEEE-754
+    binary64 facts, each cited to Higham 2002 §2.4/2.5:
+    - `Float.le_trans`
+    - `Float.zero_le_zero`
+    - `Float.mul_le_mul_of_nonneg_right_bounded`
+    - `Float.add_le_add_right_bounded`
+  - Provides `instance : BoundedOrderedCarrier Float` built on
+    the axioms.
+  - Provides `vancomycin_cmin_frechet_enclosure_float` as a
+    direct specialisation of the bounded-Fréchet theorem.
+  - Documents the user cookbook: `eps_inf ≥ k · ε_machine ·
+    max(|a|, |b|, |c|, |a·c|, |b·c|)` per Higham.
+
+### Critical design lesson
+
+The math-review (pre-impl) caught a BUG in the original axiom
+draft: a fixed-bound axiom like `|fl(a · b) - (a · b)| ≤ 0.0001`
+is **mathematically wrong** for IEEE-754, since the rounding
+error scales with operand magnitude as `ulp/2 ∝ |a · b| · 2⁻⁵²`.
+For `a = b = 10¹⁰`, the actual half-ulp is `~1.1 × 10⁴` —
+eight orders of magnitude above 0.0001.
+
+The fix: axiomatise the typeclass methods **directly** with
+per-call `eps_inf` parameters (already part of
+`BoundedOrderedCarrier`). The user computes the correct ulp
+budget from operand magnitudes; the axiom asserts that any
+sufficient `eps_inf` discharges the typeclass law. This is the
+"right" Route C: axioms exactly mirror typeclass methods, and
+soundness obligation is pushed to the call site where operand
+magnitudes are known.
+
+### Discharge route to Route A or B
+
+When Mathlib provides `Float` ulp-bounded arithmetic lemmas
+(Route A) or Sounio formalises an in-tree IEEE-754 model
+(Route B, ~5000 LOC, comparable to Coq's Flocq), this file's
+`axiom` declarations become `theorem`s with proofs. Downstream
+consumers continue to work without modification — they only
+depend on the typeclass interface.
+
+### Math-review record
+
+- Pre-impl (`/tmp/cauchy_float_thesis.md`): BUG ×1
+  (fixed-bound axiom unsound, addressed by per-call eps_inf
+  redesign) + TIGHTENABLE ×1 (Route C honesty, addressed by
+  WARNING header + counter-example docstring) + 6 OK.
+- Post-impl (`/tmp/cauchy_float_postimpl_review.md`): WRONG ×1
+  (counter-example arithmetic numerically off, qualitative
+  point unchanged, addressed by corrected docstring) + 17 OK.
 
 ### Strategy reference: IEEE-754 round-to-nearest is monotone
 
@@ -339,7 +449,9 @@ a referee), a Mathlib-imported alternative could be added as a
 | 1     | 2026-05-01 | `SounioFrechetRat`                         | Rat-stage lift of inc-dec / inc-inc / dec-dec      |
 | 2     | 2026-05-01 | `SounioOrderedCarrier` + `FrechetGeneric`  | Typeclass abstraction; generic Fréchet+Walley     |
 | 3a    | 2026-05-01 | `SounioRealOrder` (Route A)                | Mathlib-free SounioReal as ℝ ∩ ℚ                  |
+| 3a-C  | 2026-05-01 | `SounioRealCauchy`                         | Cauchy structure + LE_p; Mul/full-OC deferred     |
 | 3b    | 2026-05-01 | `SounioFloatBounded` typeclass             | Typeclass shipped; Float instance deferred         |
+| 3b-F  | 2026-05-01 | `SounioFloatInstance` (Route C, axiomatic) | 4 IEEE-754 axioms; instance + demo theorem        |
 | Walley generic | 2026-05-01 | `SounioWalleyGeneric`             | Stage 2 lift of M3.5 collapse/vacuous/gap          |
 | Klibanoff generic | 2026-05-01 | `SounioKlibanoffGeneric`       | Stage 2 lift of M3.5+ boundary theorems           |
 
