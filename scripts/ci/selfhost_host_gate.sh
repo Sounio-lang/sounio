@@ -161,6 +161,8 @@ CROSS_SMOKE_BIN="$ARTIFACT_DIR/cross-smoke"
 echo "SELFHOST_HOST_GATE_START host_platform=$HOST_PLATFORM host_target=$HOST_TARGET work_dir=$WORK_DIR"
 
 bash "$ROOT_DIR/scripts/ci/build_native_souc.sh" "$NATIVE_BIN" >"$LOG_DIR/build-native.log" 2>&1
+chmod +x "$NATIVE_BIN" 2>/dev/null || true
+maybe_codesign "$NATIVE_BIN"
 assert_file_kind "$NATIVE_BIN" "$HOST_FILE_KIND"
 
 "$NATIVE_BIN" self-hosted/compiler/lean_single.sio "$STAGE2_BIN" --target "$HOST_TARGET" >"$LOG_DIR/stage2.log" 2>&1
