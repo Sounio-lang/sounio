@@ -4914,12 +4914,30 @@ fn lex_all() with IO, Mut, Panic, Div {
                 while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
             }
             // Check for float: digits.digits (dot followed by digit, not .field)
+            // When integer part is zero, leading fractional zeros are absorbed
+            // into a synthetic negative exponent rather than into denom — this
+            // prevents `0.000…001` (24 zeros) from parsing as 0.0 because the
+            // 18-digit frac/denom budget would otherwise be exhausted by zeros
+            // before the significant digit is reached.
+            var lit_leading_zeros: i64 = 0
             if p < SRC_LEN && sb(p) == 46 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57 {
                 is_float = 1
                 p = p + 1  // skip .
                 FL_FRAC_DIGITS = 0
+                let int_zero: i64 = if v == 0 { 1 } else { 0 }
+                var seen_nonzero: i64 = 0
                 while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
-                    if FL_FRAC_DIGITS < 18 { frac = frac * 10 + sb(p) - 48; denom = denom * 10; FL_FRAC_DIGITS = FL_FRAC_DIGITS + 1 }
+                    let d = sb(p) - 48
+                    if int_zero == 1 && seen_nonzero == 0 && d == 0 {
+                        lit_leading_zeros = lit_leading_zeros + 1
+                    } else {
+                        seen_nonzero = 1
+                        if FL_FRAC_DIGITS < 18 {
+                            frac = frac * 10 + d
+                            denom = denom * 10
+                            FL_FRAC_DIGITS = FL_FRAC_DIGITS + 1
+                        }
+                    }
                     p = p + 1
                 }
             }
@@ -4950,10 +4968,12 @@ fn lex_all() with IO, Mut, Panic, Div {
             if is_float == 1 {
                 // Store mantissa parts without applying the exponent (avoids i64 overflow
                 // for large exponents like 1.0e30). The signed exponent is stored in TX
-                // and applied at codegen time via SSE2 multiply/divide.
+                // and applied at codegen time via SSE2 multiply/divide. Leading zeros
+                // absorbed during fractional-digit accumulation are folded into TX so
+                // tiny literals like 1e-24 written as 0.000…001 don't truncate.
                 TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p
                 TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom
-                TX[TC as usize] = exp_sign * exp_val
+                TX[TC as usize] = exp_sign * exp_val - lit_leading_zeros
                 TU[TC as usize] = lit_unit_hash
                 TL[TC as usize] = cur_line; TC = TC + 1; continue
             }
