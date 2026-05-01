@@ -18,6 +18,7 @@ var IMP_LOADED_OFFS: [i64; 1024] = [0; 1024]
 var IMP_LOADED_LENS: [i64; 1024] = [0; 1024]
 var IMP_PATHS_USED: i64 = 0
 var IMP_COUNT: i64 = 0
+var IMPORT_RESOLUTION_FAILED: i64 = 0
 var BASE_DIR: [i8; 512] = [0; 512]
 var BASE_DIR_LEN: i64 = 0
 var CLI_SHOW_AST: i64 = 0
@@ -29641,6 +29642,37 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         IMP_PATH[fp_len as usize] = 0
                     }
                 }
+                // lib.sio fallback for stdlib/<module>.sio directory roots
+                if copy_len <= 0 {
+                    var lfp: i64 = fp_len - 4
+                    var li: i64 = 0
+                    while li < lfp {
+                        MOD_PATH[li as usize] = IMP_PATH[li as usize]
+                        li = li + 1
+                    }
+                    MOD_PATH[lfp as usize] = 47
+                    MOD_PATH[(lfp+1) as usize] = 108
+                    MOD_PATH[(lfp+2) as usize] = 105
+                    MOD_PATH[(lfp+3) as usize] = 98
+                    MOD_PATH[(lfp+4) as usize] = 46
+                    MOD_PATH[(lfp+5) as usize] = 115
+                    MOD_PATH[(lfp+6) as usize] = 105
+                    MOD_PATH[(lfp+7) as usize] = 111
+                    lfp = lfp + 8
+                    MOD_PATH[lfp as usize] = 0
+                    raw = read_file(MOD_PATH)
+                    copy_len = str_len(raw)
+                    fsz = file_size(MOD_PATH)
+                    if copy_len > 0 {
+                        li = 0
+                        while li < lfp {
+                            IMP_PATH[li as usize] = MOD_PATH[li as usize]
+                            li = li + 1
+                        }
+                        fp_len = lfp
+                        IMP_PATH[fp_len as usize] = 0
+                    }
+                }
                 if copy_len <= 0 {
                     fp_len = raw_len
                     raw_i = 0
@@ -29778,6 +29810,7 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 }
             }
             if copy_len <= 0 {
+                IMPORT_RESOLUTION_FAILED = 1
                 print("error: unreadable import: ")
                 print_imp_path()
                 print("\n")
@@ -29806,14 +29839,17 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 }
                 if already == 0 {
                     if IMP_COUNT >= 1024 {
+                        IMPORT_RESOLUTION_FAILED = 1
                         print("error: import dedup table full: ")
                         print_imp_path()
                         print("\n")
                     } else if IMP_PATHS_USED + fp_len > 262144 {
+                        IMPORT_RESOLUTION_FAILED = 1
                         print("error: import path table full: ")
                         print_imp_path()
                         print("\n")
                     } else if copy_len >= 8388608 || SRC_LEN + fp_len + copy_len + 3 >= 8388608 {
+                        IMPORT_RESOLUTION_FAILED = 1
                         print("error: import too large for SRC buffer: ")
                         print_imp_path()
                         print(" (")
@@ -29840,6 +29876,7 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         }
                         if ci != copy_len {
                             SRC_LEN = prev_src_len
+                            IMPORT_RESOLUTION_FAILED = 1
                             print("error: import copy truncated: ")
                             print_imp_path()
                             print("\n")
@@ -30370,6 +30407,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     MAIN_SRC_END = sz
     print("source: "); print(src); print(" "); print_int(sz); print(" bytes\n")
     resolve_imports()
+    if IMPORT_RESOLUTION_FAILED != 0 { return 1 }
     strip_extern_blocks()
     append_native_prelude()
     print("total source: "); print_int(SRC_LEN); print(" bytes\n")
