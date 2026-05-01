@@ -259,6 +259,7 @@ pub fn parser_set_token_flat(idx: i64, kind: i64, start: i64, end: i64, line: i6
         else if kind == 185 { PT_KIND[idx as usize] = TokenKind::Hash }
         else if kind == 186 { PT_KIND[idx as usize] = TokenKind::Underscore }
         else { PT_KIND[idx as usize] = TokenKind::Error }
+        PT_KIND_CODE[idx as usize] = kind
         PT_START[idx as usize] = start
         PT_END[idx as usize] = end
         PT_LINE[idx as usize] = line
@@ -350,10 +351,174 @@ fn gp_current_line() -> i64 with Panic {
 // Token access
 // ============================================================
 
-// Read token kind from parallel scalar array (boot4-compatible)
+fn token_kind_from_flat_code(kind: i64) -> TokenKind {
+    if kind == 0 { return TokenKind::Eof }
+    if kind == 2 { return TokenKind::Newline }
+    if kind == 5 { return TokenKind::Use }
+    if kind == 7 { return TokenKind::Fn }
+    if kind == 8 { return TokenKind::Let }
+    if kind == 9 { return TokenKind::Var }
+    if kind == 12 { return TokenKind::Type }
+    if kind == 13 { return TokenKind::Struct }
+    if kind == 14 { return TokenKind::Enum }
+    if kind == 20 { return TokenKind::If }
+    if kind == 21 { return TokenKind::Else }
+    if kind == 24 { return TokenKind::While }
+    if kind == 28 { return TokenKind::Return }
+    if kind == 30 { return TokenKind::As }
+    if kind == 32 { return TokenKind::Pub }
+    if kind == 35 { return TokenKind::True }
+    if kind == 36 { return TokenKind::False }
+    if kind == 45 { return TokenKind::With }
+    if kind == 123 { return TokenKind::Ident }
+    if kind == 124 { return TokenKind::IntLit }
+    if kind == 125 { return TokenKind::FloatLit }
+    if kind == 126 { return TokenKind::StringLit }
+    if kind == 127 { return TokenKind::CharLit }
+    if kind == 128 { return TokenKind::BoolLit }
+    if kind == 129 { return TokenKind::HexLit }
+    if kind == 130 { return TokenKind::BinLit }
+    if kind == 131 { return TokenKind::OctLit }
+    if kind == 132 { return TokenKind::Plus }
+    if kind == 133 { return TokenKind::Minus }
+    if kind == 134 { return TokenKind::Star }
+    if kind == 135 { return TokenKind::Slash }
+    if kind == 136 { return TokenKind::Percent }
+    if kind == 137 { return TokenKind::Eq }
+    if kind == 138 { return TokenKind::Lt }
+    if kind == 139 { return TokenKind::Gt }
+    if kind == 140 { return TokenKind::Bang }
+    if kind == 141 { return TokenKind::Amp }
+    if kind == 142 { return TokenKind::Pipe }
+    if kind == 143 { return TokenKind::Caret }
+    if kind == 144 { return TokenKind::Tilde }
+    if kind == 145 { return TokenKind::Question }
+    if kind == 146 { return TokenKind::EqEq }
+    if kind == 147 { return TokenKind::BangEq }
+    if kind == 148 { return TokenKind::LtEq }
+    if kind == 149 { return TokenKind::GtEq }
+    if kind == 150 { return TokenKind::AmpAmp }
+    if kind == 151 { return TokenKind::PipePipe }
+    if kind == 152 { return TokenKind::Shl }
+    if kind == 153 { return TokenKind::Shr }
+    if kind == 154 { return TokenKind::PlusEq }
+    if kind == 155 { return TokenKind::MinusEq }
+    if kind == 156 { return TokenKind::StarEq }
+    if kind == 157 { return TokenKind::SlashEq }
+    if kind == 158 { return TokenKind::Arrow }
+    if kind == 159 { return TokenKind::FatArrow }
+    if kind == 160 { return TokenKind::DotDot }
+    if kind == 161 { return TokenKind::DotDotEq }
+    if kind == 162 { return TokenKind::ColonColon }
+    if kind == 163 { return TokenKind::AmpBang }
+    if kind == 164 { return TokenKind::PlusPlus }
+    if kind == 165 { return TokenKind::PipeEq }
+    if kind == 166 { return TokenKind::ShlEq }
+    if kind == 167 { return TokenKind::ShrEq }
+    if kind == 168 { return TokenKind::PercentEq }
+    if kind == 169 { return TokenKind::CaretEq }
+    if kind == 170 { return TokenKind::AmpEq }
+    if kind == 171 { return TokenKind::LeftArrow }
+    if kind == 172 { return TokenKind::DotDotDot }
+    if kind == 173 { return TokenKind::PlusMinus }
+    if kind == 174 { return TokenKind::LParen }
+    if kind == 175 { return TokenKind::RParen }
+    if kind == 176 { return TokenKind::LBrace }
+    if kind == 177 { return TokenKind::RBrace }
+    if kind == 178 { return TokenKind::LBracket }
+    if kind == 179 { return TokenKind::RBracket }
+    if kind == 180 { return TokenKind::Semi }
+    if kind == 181 { return TokenKind::Colon }
+    if kind == 182 { return TokenKind::Comma }
+    if kind == 183 { return TokenKind::Dot }
+    if kind == 184 { return TokenKind::At }
+    if kind == 185 { return TokenKind::Hash }
+    if kind == 186 { return TokenKind::Underscore }
+    TokenKind::Error
+}
+
+// Read token kind from parallel scalar code array. Avoid reading PT_KIND for
+// high-valued variants because the boot4 global enum array corrupts them.
 pub fn pt_read_kind(idx: i64) -> TokenKind with Panic {
     if idx >= 0 && idx < 1048576 {
-        PT_KIND[idx as usize]
+        let code = PT_KIND_CODE[idx as usize]
+        let start = PT_START[idx as usize]
+        let end = PT_END[idx as usize]
+        let len = end - start
+        if code == 0 && len == 0 {
+            return TokenKind::Eof
+        }
+        if len == 1 {
+            let ch = CURSOR_SOURCE[start as usize]
+            if ch == (40 as i8) { return TokenKind::LParen }
+            if ch == (41 as i8) { return TokenKind::RParen }
+            if ch == (123 as i8) { return TokenKind::LBrace }
+            if ch == (125 as i8) { return TokenKind::RBrace }
+            if ch == (91 as i8) { return TokenKind::LBracket }
+            if ch == (93 as i8) { return TokenKind::RBracket }
+            if ch == (59 as i8) { return TokenKind::Semi }
+            if ch == (58 as i8) { return TokenKind::Colon }
+            if ch == (44 as i8) { return TokenKind::Comma }
+            if ch == (46 as i8) { return TokenKind::Dot }
+            if ch == (35 as i8) { return TokenKind::Hash }
+            if ch >= (48 as i8) && ch <= (57 as i8) { return TokenKind::IntLit }
+        }
+        if len == 2 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            if a == (102 as i8) && b == (110 as i8) { return TokenKind::Fn }
+            if a == (58 as i8) && b == (58 as i8) { return TokenKind::ColonColon }
+            if a == (45 as i8) && b == (62 as i8) { return TokenKind::Arrow }
+        }
+        if len == 3 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            if a == (117 as i8) && b == (115 as i8) && c == (101 as i8) { return TokenKind::Use }
+            if a == (108 as i8) && b == (101 as i8) && c == (116 as i8) { return TokenKind::Let }
+            if a == (118 as i8) && b == (97 as i8) && c == (114 as i8) { return TokenKind::Var }
+        }
+        if len == 4 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            let d = CURSOR_SOURCE[(start + 3) as usize]
+            if a == (119 as i8) && b == (105 as i8) && c == (116 as i8) && d == (104 as i8) { return TokenKind::With }
+        }
+        if len == 6 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            let d = CURSOR_SOURCE[(start + 3) as usize]
+            let e = CURSOR_SOURCE[(start + 4) as usize]
+            let f = CURSOR_SOURCE[(start + 5) as usize]
+            if a == (114 as i8) && b == (101 as i8) && c == (116 as i8) && d == (117 as i8) && e == (114 as i8) && f == (110 as i8) {
+                return TokenKind::Return
+            }
+        }
+        if len > 0 {
+            let ch0 = CURSOR_SOURCE[start as usize]
+            if (ch0 >= (97 as i8) && ch0 <= (122 as i8)) ||
+               (ch0 >= (65 as i8) && ch0 <= (90 as i8)) ||
+               ch0 == (95 as i8) {
+                return TokenKind::Ident
+            }
+        }
+        if code == 185 {
+            if len == 1 && CURSOR_SOURCE[start as usize] == (35 as i8) {
+                return TokenKind::Hash
+            }
+            return TokenKind::Ident
+        }
+        if code == 123 {
+            return TokenKind::Ident
+        }
+        if len == 2 &&
+           CURSOR_SOURCE[start as usize] == (102 as i8) &&
+           CURSOR_SOURCE[(start + 1) as usize] == (110 as i8) {
+            return TokenKind::Fn
+        }
+        token_kind_from_flat_code(code)
     } else {
         TokenKind::Eof
     }
