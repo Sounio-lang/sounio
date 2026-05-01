@@ -19,6 +19,72 @@ namespace Sounio.Obligations
 
 open Sounio.NaturalityG2
 
+/-- embed_row_into (declared in stdlib/dialogue/embed.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem embed_row_into_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- embed_into (declared in stdlib/dialogue/embed.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem embed_into_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- f1_alt_stat_sq (declared in tools/ocssm/f1_moufang.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem f1_alt_stat_sq_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- f1_compute_sq (declared in tools/ocssm/f1_moufang.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem f1_compute_sq_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- main (declared in tools/ocssm/f1_moufang.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem main_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- f2_pair_residual_sq (declared in tools/ocssm/f2_conjugation.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem f2_pair_residual_sq_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- f2_paired_dist_sq (declared in tools/ocssm/f2_conjugation.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem f2_paired_dist_sq_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- f2_random_dist_sq (declared in tools/ocssm/f2_conjugation.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem f2_random_dist_sq_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- f2_ratio (declared in tools/ocssm/f2_conjugation.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem f2_ratio_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- rp_alt_stat_sq (declared in tests/run-pass/f1_moufang_synthetic.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem rp_alt_stat_sq_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
+/-- rp_pair_residual_sq (declared in tests/run-pass/f2_conjugation_synthetic.sio) carries the `NaturalityG2`
+    effect; this witness anchors it to `naturality_basis_all`. -/
+theorem rp_pair_residual_sq_naturality_witness :
+    naturality_basis_all_bool = true :=
+  naturality_basis_all
+
 /-- f_const_one (declared in tests/run-pass/naturality_g2_effect.sio) carries the `NaturalityG2`
     effect; this witness anchors it to `naturality_basis_all`. -/
 theorem f_const_one_naturality_witness :
@@ -34,12 +100,6 @@ theorem f_double_naturality_witness :
 /-- f_mixed (declared in tests/run-pass/naturality_g2_effect.sio) carries the `NaturalityG2`
     effect; this witness anchors it to `naturality_basis_all`. -/
 theorem f_mixed_naturality_witness :
-    naturality_basis_all_bool = true :=
-  naturality_basis_all
-
-/-- main (declared in tests/run-pass/naturality_g2_effect.sio) carries the `NaturalityG2`
-    effect; this witness anchors it to `naturality_basis_all`. -/
-theorem main_naturality_witness :
     naturality_basis_all_bool = true :=
   naturality_basis_all
 
