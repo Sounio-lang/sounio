@@ -119,6 +119,16 @@ lean_lib «SounioKlibanoff» where
 @[default_target]
 lean_lib «SounioFrechetRat» where
 
+-- Track 2 / Stage 2: typeclass abstraction (Mathlib-free) capturing
+-- the minimal algebraic content of the Sounio epistemic theorems
+@[default_target]
+lean_lib «SounioOrderedCarrier» where
+
+-- Track 2 / Stage 2: generic Fréchet enclosure proven once over
+-- any OrderedCarrier; Nat/Rat versions are direct specialisations
+@[default_target]
+lean_lib «SounioFrechetGeneric» where
+
 -- M4: Octonion homology functor — discrete G₂ naturality skeleton
 -- (Fano-permutation enumeration + naturality square + concrete
 -- decideable closure on the canonical basis embed)
