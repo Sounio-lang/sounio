@@ -119,3 +119,9 @@ lean_lib «SounioKlibanoff» where
 @[default_target]
 lean_lib «SounioFrechetRat» where
 
+-- M4: Octonion homology functor — discrete G₂ naturality skeleton
+-- (Fano-permutation enumeration + naturality square + concrete
+-- decideable closure on the canonical basis embed)
+@[default_target]
+lean_lib «SounioNaturalityG2» where
+
