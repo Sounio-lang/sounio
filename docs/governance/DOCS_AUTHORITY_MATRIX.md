@@ -301,6 +301,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.llm-collaboration-synthesis-grok-codex | historical | docs/research/llm_collaboration_synthesis_grok_codex.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.llm-responses.response-grok-4-3beta | historical | docs/research/llm_responses/response_grok_4_3beta.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m0-baseline-inventory | historical | docs/research/m0_baseline_inventory.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.m3-naturality-residual | historical | docs/research/m3_naturality_residual.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m4-validation-framework | historical | docs/research/m4_validation_framework.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ocssm-annotation-manual-v0 | historical | docs/research/ocssm_annotation_manual_v0.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ocssm-functoriality-check-toy | historical | docs/research/ocssm_functoriality_check_toy.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
