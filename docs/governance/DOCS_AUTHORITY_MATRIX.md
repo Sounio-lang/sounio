@@ -86,6 +86,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.compiler.native-v2-serious-track | repo_only | docs/compiler/NATIVE_V2_SERIOUS_TRACK.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.nvidia-bare-metal | repo_only | docs/compiler/NVIDIA_BARE_METAL.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.octonion-algebra | repo_only | docs/compiler/OCTONION_ALGEBRA.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.compiler.package-import-resolution | repo_only | docs/compiler/PACKAGE_IMPORT_RESOLUTION.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.phase2-optimizations | repo_only | docs/compiler/PHASE2_OPTIMIZATIONS.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.release-v0.29.0 | repo_only | docs/compiler/RELEASE_v0.29.0.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.sir-passes | repo_only | docs/compiler/SIR_PASSES.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
