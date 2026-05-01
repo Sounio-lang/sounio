@@ -114,3 +114,8 @@ lean_lib «SounioWalley» where
 @[default_target]
 lean_lib «SounioKlibanoff» where
 
+-- Track 2 / Stage 1: Rat-shadow lift of SounioFrechet.lean — first
+-- step in the Float-Real lift roadmap (Nat → Rat → ℝ → Float)
+@[default_target]
+lean_lib «SounioFrechetRat» where
+
