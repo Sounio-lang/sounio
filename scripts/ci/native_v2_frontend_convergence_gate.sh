@@ -150,6 +150,7 @@ main_probe_plain_log = log_of("main_probe_load_ir")
 main_probe_log = log_of("main_probe_load_ir_trace")
 main_probe_imported_plain_log = log_of("main_probe_imported_load_ir")
 main_probe_imported_log = log_of("main_probe_imported_load_ir_trace")
+main_probe_imported_stdout_log = log_of("main_probe_imported_stdout_native_compile")
 
 if case_by_id.get("cpu_umbrella", {}).get("rc", 0) != 0:
     failure_classes.append("cpu_umbrella")
@@ -326,6 +327,22 @@ elif "body_lowered=3" not in main_probe_imported_log:
         "case_id": "main_probe_imported_load_ir_trace",
     })
 
+if case_by_id.get("main_probe_imported_stdout_native_compile", {}).get("rc", 0) != 0:
+    if "Segmentation fault" in main_probe_imported_stdout_log:
+        reason = "main_probe_imported_stdout_native_compile_segfault"
+        failure_classes.append("imported_stdout_native_runtime")
+    elif "stdout_mismatch" in main_probe_imported_stdout_log:
+        reason = "main_probe_imported_stdout_native_stdout_mismatch"
+        failure_classes.append("imported_stdout_native_parity")
+    else:
+        reason = "main_probe_imported_stdout_native_compile_failed"
+        failure_classes.append("imported_stdout_native")
+    classifications.append({
+        "class": failure_classes[-1],
+        "reason": reason,
+        "case_id": "main_probe_imported_stdout_native_compile",
+    })
+
 required = [
     "cpu_umbrella",
     "lean_frontend_check",
@@ -340,6 +357,7 @@ required = [
     "main_probe_imported_load_ir",
     "main_probe_imported_load_ir_trace",
     "main_probe_imported_native_compile",
+    "main_probe_imported_stdout_native_compile",
 ]
 all_required_present = all(case_id in case_by_id for case_id in required)
 all_required_pass = all(case_by_id.get(case_id, {}).get("rc") == 0 for case_id in required)
@@ -382,10 +400,11 @@ payload = {
         "main_probe_imported_load_ir_passed": case_by_id.get("main_probe_imported_load_ir", {}).get("rc") == 0,
         "main_probe_imported_load_ir_trace_passed": case_by_id.get("main_probe_imported_load_ir_trace", {}).get("rc") == 0,
         "main_probe_imported_native_compile_passed": case_by_id.get("main_probe_imported_native_compile", {}).get("rc") == 0,
+        "main_probe_imported_stdout_native_compile_passed": case_by_id.get("main_probe_imported_stdout_native_compile", {}).get("rc") == 0,
         "main_probe_body_lowered_passed": "body_lowered=1" in main_probe_log,
         "main_probe_imported_body_lowered_passed": "body_lowered=3" in main_probe_imported_log,
     },
-    "next_action": "promote the simple imported source-summary IR chain to full AST-lowered imported native codegen and stdout parity",
+    "next_action": "promote use-bearing imported modules from source-summary body recognition to full AST-lowered imported native codegen",
 }
 
 summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -425,6 +444,9 @@ run_case "main_probe_imported_load_ir_trace" "$LOG_DIR/main.probe_imported_load_
 run_case "main_probe_imported_native_compile" "$LOG_DIR/main.probe_imported_native_compile.log" \
   bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_nested_main_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
   bash "$SOUC_BIN" "$OUT_DIR/import_nested_main_42.native"
+run_case "main_probe_imported_stdout_native_compile" "$LOG_DIR/main.probe_imported_stdout_native_compile.log" \
+  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_nested_print_42.sio -o "$2" && chmod +x "$2" && "$2" > "$3"; rc=$?; test "$rc" -eq 0 || exit 1; cmp -s "$3" "$4" || { echo stdout_mismatch; od -An -tx1 "$3"; exit 1; }' \
+  bash "$SOUC_BIN" "$OUT_DIR/import_nested_print_42.native" "$OUT_DIR/import_nested_print_42.stdout" "$ROOT_DIR/tests/selfhost/native_runtime/import_nested_print_42.expected"
 
 if emit_summary_json; then
   status="$(python3 - "$SUMMARY_JSON" <<'PY'

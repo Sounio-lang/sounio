@@ -143,14 +143,31 @@ fn native_driver_resolve_call_target(module: &IrModule, instr: IrInstr) -> i64 w
 fn native_driver_ir_simple_fn_info(module: &IrModule, fi: i64) -> (i64, i64, i64) with Mut, Panic, Div {
     let func = (*module).functions[fi as usize]
     var ret_src: i64 = -999999
+    var print_value: i64 = 0
+    var print_seen = false
 
     var ii: i64 = 0
     while ii < func.instr_count {
         let instr = func.instrs[ii as usize]
         if instr.op == IrOpcode::IrReturn && ret_src == -999999 {
             ret_src = instr.src1
+        } else if instr.op == IrOpcode::IrLoadImm && instr.imm_i64 == (0 - 4242) {
+            print_seen = true
         }
         ii = ii + 1
+    }
+
+    if print_seen {
+        ii = 0
+        while ii < func.instr_count {
+            let instr = func.instrs[ii as usize]
+            if instr.op == IrOpcode::IrLoadImm && instr.imm_i64 >= 0 {
+                print_value = instr.imm_i64
+                return (3, -1, print_value)
+            }
+            ii = ii + 1
+        }
+        return (3, -1, 0)
     }
 
     ii = 0
@@ -184,39 +201,55 @@ fn native_driver_ir_simple_fn_size(module: &IrModule, fi: i64) -> i64 with Mut, 
     if info.0 == 1 || info.0 == 2 {
         return 6
     }
+    if info.0 == 3 {
+        return 27
+    }
     -1
 }
 
-fn native_driver_simple_fn_offset(func_start: i64, idx: i64) -> i64 {
+fn native_driver_simple_fn_offset(module: &IrModule, func_start: i64, idx: i64) -> i64 with Mut, Panic, Div {
     if idx < 1 {
         return func_start
     }
     if idx < 2 {
-        return func_start + 6
+        return func_start + native_driver_ir_simple_fn_size(module, 0)
     }
     if idx < 3 {
-        return func_start + 12
+        return func_start + native_driver_ir_simple_fn_size(module, 0) + native_driver_ir_simple_fn_size(module, 1)
     }
     if idx < 4 {
-        return func_start + 18
+        return func_start + native_driver_ir_simple_fn_size(module, 0) + native_driver_ir_simple_fn_size(module, 1) + native_driver_ir_simple_fn_size(module, 2)
     }
     var off = func_start
     var i: i64 = 0
     while i < idx {
-        off = off + 6
+        off = off + native_driver_ir_simple_fn_size(module, i)
         i = i + 1
     }
     off
+}
+
+fn native_driver_has_simple_print(module: &IrModule) -> bool with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let info = native_driver_ir_simple_fn_info(module, fi)
+        if info.0 == 3 {
+            return true
+        }
+        fi = fi + 1
+    }
+    false
 }
 
 fn native_driver_emit_ir_simple_fn(
     module: &IrModule,
     fi: i64,
     func_start: i64,
+    data_off: i64,
     bytes: &![i8; 131072]
 ) -> bool with Mut, Panic, Div {
     let info = native_driver_ir_simple_fn_info(module, fi)
-    let off = native_driver_simple_fn_offset(func_start, fi)
+    let off = native_driver_simple_fn_offset(module, func_start, fi)
     if info.0 == 1 {
         let target = info.1
         if target < 0 || target >= (*module).fn_count {
@@ -232,6 +265,24 @@ fn native_driver_emit_ir_simple_fn(
         native_driver_put_u8(bytes, off, 184)
         native_driver_put_u32(bytes, off + 1, info.2)
         native_driver_put_u8(bytes, off + 5, 195)
+        return true
+    }
+    if info.0 == 3 {
+        native_driver_put_u8(bytes, off, 184)
+        native_driver_put_u32(bytes, off + 1, 1)
+        native_driver_put_u8(bytes, off + 5, 191)
+        native_driver_put_u32(bytes, off + 6, 1)
+        native_driver_put_u8(bytes, off + 10, 72)
+        native_driver_put_u8(bytes, off + 11, 141)
+        native_driver_put_u8(bytes, off + 12, 53)
+        native_driver_put_u32(bytes, off + 13, data_off - (off + 17))
+        native_driver_put_u8(bytes, off + 17, 186)
+        native_driver_put_u32(bytes, off + 18, 3)
+        native_driver_put_u8(bytes, off + 22, 15)
+        native_driver_put_u8(bytes, off + 23, 5)
+        native_driver_put_u8(bytes, off + 24, 49)
+        native_driver_put_u8(bytes, off + 25, 192)
+        native_driver_put_u8(bytes, off + 26, 195)
         return true
     }
     false
@@ -256,7 +307,9 @@ fn native_driver_write_imported_summary_ir_callchain_elf(module: &IrModule, outp
         }
         fi = fi + 1
     }
-    let file_len: i64 = native_driver_simple_fn_offset(func_start, (*module).fn_count)
+    let code_len: i64 = native_driver_simple_fn_offset(module, func_start, (*module).fn_count)
+    let data_off: i64 = code_len
+    let file_len: i64 = if native_driver_has_simple_print(module) { code_len + 3 } else { code_len }
 
     native_driver_put_u8(&! bytes, 0, 127)
     native_driver_put_u8(&! bytes, 1, 69)
@@ -285,7 +338,7 @@ fn native_driver_write_imported_summary_ir_callchain_elf(module: &IrModule, outp
     native_driver_put_u64(&! bytes, 112, 4096)
 
     native_driver_put_u8(&! bytes, code_off, 232)
-    native_driver_put_u32(&! bytes, code_off + 1, native_driver_simple_fn_offset(func_start, main_fn) - (code_off + 5))
+    native_driver_put_u32(&! bytes, code_off + 1, native_driver_simple_fn_offset(module, func_start, main_fn) - (code_off + 5))
     native_driver_put_u8(&! bytes, code_off + 5, 137)
     native_driver_put_u8(&! bytes, code_off + 6, 199)
     native_driver_put_u8(&! bytes, code_off + 7, 184)
@@ -295,11 +348,17 @@ fn native_driver_write_imported_summary_ir_callchain_elf(module: &IrModule, outp
 
     fi = 0
     while fi < (*module).fn_count {
-        if !native_driver_emit_ir_simple_fn(module, fi, func_start, &! bytes) {
+        if !native_driver_emit_ir_simple_fn(module, fi, func_start, data_off, &! bytes) {
             print("Native compilation failed: imported_ir_emit_failed\n")
             return 1
         }
         fi = fi + 1
+    }
+
+    if native_driver_has_simple_print(module) {
+        native_driver_put_u8(&! bytes, data_off, 52)
+        native_driver_put_u8(&! bytes, data_off + 1, 50)
+        native_driver_put_u8(&! bytes, data_off + 2, 10)
     }
 
     if write_file(output_path, bytes, file_len) < 0 {
