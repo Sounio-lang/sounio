@@ -47,12 +47,19 @@ Mirrors `stdlib/epistemic/composed_effects.sio`, `formal/lean4/SounioApproxCausa
 
 ## 5. The Knightian Operator: Ferson p-boxes
 
-Mirrors `stdlib/epistemic/knightian.sio`, `formal/lean4/SounioKnightian.lean`.
+Mirrors `stdlib/epistemic/knightian.sio`, `formal/lean4/SounioKnightian.lean`,
+`formal/lean4/SounioFrechet.lean`.
 
 - 5.1 Why p-boxes: rationale doc `docs/research/knightian_operator_choice.md`. Walley vs Klibanoff trade-offs.
 - 5.2 PBox arithmetic: addition, subtraction, multiplication (corner enumeration), division (zero-straddle vacuous).
 - 5.3 Containment soundness theorem.
-- 5.4 Connection to parenthesization-invariance (sedenions, `HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md`): the directional projection lever.
+- 5.4 **Joint dependence and the Fréchet outer enclosure (M2.5).**
+  - 5.4.1 Anticipated reviewer pushback: univariate p-boxes bound only marginal CDFs, so a joint computation `f(X, Y)` requires a copula assumption — typically independence — which fails for correlated PBPK parameters such as vancomycin (Vc, CL).
+  - 5.4.2 **Resolution.** When `f` is C¹ with strict per-argument monotonicity on the marginal rectangle, the corner-enumeration band `[f(a, d), f(b, c)]` is the Fréchet (point-mass) outer enclosure: it contains `f(X, Y)` almost surely for any joint distribution on the rectangle, regardless of copula. (Theorem in `formal/lean4/SounioFrechet.lean`; math-review-validated 2026-04-30.)
+  - 5.4.3 Conservatism factor (per math-review Q4): ~1× the true 95%-CI under counter-monotonic `r ≈ -0.7`; ~2.6× under co-monotonic `r ≈ +0.7`. Acceptable for a safety gate; explicitly disclosed.
+  - 5.4.4 Empirical verification: `tests/stdlib/clinical/test_vancomycin_correlation_sensitivity.sio` runs 250 deterministic samples (50 each at `r ∈ {-0.7, -0.3, 0, +0.3, +0.7}`) through the actual Cmin function and confirms the enclosure for every sample.
+  - 5.4.5 Limit of applicability: monotonicity must hold uniformly on the marginal rectangle; the technique fails on saddle / non-monotone regions. Vancomycin satisfies the hypothesis on all physiological positive parameters.
+- 5.5 Connection to parenthesization-invariance (sedenions, `HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md`): the directional projection lever.
 
 ## 6. Refinement Types and Lean Export
 
@@ -108,6 +115,7 @@ Sounio establishes that Knightian uncertainty is *expressible*, *composable*, an
 
 Anticipated objections and pre-emption:
 
-- **"Why not Walley credal sets?"** § 5.1 + decision document; cited operational acceptance.
-- **"Lean proofs are mostly trivial / sorry"** Acknowledge; the structural part is real, the probabilistic obligation is explicitly deferred with effort estimate.
+- **"Why not Walley credal sets?"** § 5.1 + decision document; cited operational acceptance. M3.5 follow-up uses Walley neighborhood at the *elicitation* surface and lifts to p-box at propagation via Fréchet bounds.
+- **"Lean proofs are mostly trivial / sorry"** Acknowledge; the structural part is real, the probabilistic obligation is explicitly deferred with effort estimate. The Fréchet enclosure theorems in `SounioFrechet.lean` are fully proven (no `axiom`, no `sorry`) at the `Nat` level; the Float-Real lift is the deferred Mathlib milestone.
+- **"You assume independent (Vc, CL)"** §5.4 explicitly: NO. The Fréchet outer enclosure holds for any joint distribution on the marginal rectangle. Math-review-validated theorem; 250-sample empirical sanity check across five correlation values in [-0.7, 0.7]; reproducible by `bash scripts/run_sio_test_suite.sh sensitivity`.
 - **"Synthetic cohort dilutes empirical claim"** § 8.4 footnote: no inferential analysis on synthetic data; real cohort gates the empirical claim.

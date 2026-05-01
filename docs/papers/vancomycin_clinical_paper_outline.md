@@ -38,6 +38,8 @@ Demographics, renal function, dosing, troughs, microbiology, outcomes, concomita
 ### 2.3 Sounio CDS pipeline
 Brief: Knightian PBox over Vc, CL inputs (band width parametric on TDM samples observed); 2-compartment forward simulation; Lean-verified safety gate. Detailed PL machinery in supplement and `vancomycin_pl_paper_outline.md`.
 
+**Joint-dependence treatment of (Vc, CL).** Vancomycin Vc and CL are correlated in population PK literature (typical r ≈ 0.3–0.7, varying with renal/obesity/critical-illness state). The Sounio CDS does NOT assume independence and does NOT fix a copula. Instead, it relies on the Fréchet (point-mass) outer enclosure for monotone-in-each-arg functions: because Cmin is strictly increasing in Vc and strictly decreasing in CL on the physiological domain, the corner-enumeration band `[Cmin(Vc_lo, CL_hi), Cmin(Vc_hi, CL_lo)]` contains the true Cmin almost surely for *any* joint distribution of (Vc, CL) supported on the marginal Knightian rectangle. The enclosure is sharp under the counter-monotonic copula and conservative (factor ≈ 2.6× the true 95%-CI width) under co-monotonic `r ≈ +0.7`. Theorem and Lean discharge: `formal/lean4/SounioFrechet.lean`. Empirical verification across 5 correlation values (n = 250 samples): `tests/stdlib/clinical/test_vancomycin_correlation_sensitivity.sio`. Mathematical refs: Moore (1966), Williamson & Downs (1990), Ferson et al. (2003).
+
 ### 2.4 Bayesian SOTA comparator
 NONMEM or pmetrics implementation of Roberts 2011 popPK with Bayesian forecasting. Posterior mean Cmin / AUC₂₄ with 95% credible intervals.
 
@@ -111,3 +113,4 @@ PI is the creator of Sounio. Mitigation per IRB protocol § 6: pre-registered pl
 - "Why not just MC?" — Knightian / p-box subsumes MC under choice of distribution; MC alone cannot represent distributional uncertainty.
 - "Why is this not a Bayesian model with hyper-priors?" — Klibanoff-style smooth ambiguity is one alternative; we discuss in `knightian_operator_choice.md` why p-box was chosen.
 - "How do you justify the band widths (±15%/±10%)?" — pre-TDM bands match Roberts 2011 inter-individual CV; post-TDM bands match the typical posterior CV after 2-3 observations. Sensitivity analysis included in supplement.
+- "You are assuming Vc and CL are independent" — explicitly NO; § 2.3 details the Fréchet outer enclosure that holds copula-free for monotone-in-each-arg PBPK functions. Lean theorem + 250-sample empirical verification across r ∈ [-0.7, 0.7]. The enclosure trades tightness for soundness; the conservatism factor is disclosed.

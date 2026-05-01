@@ -59,6 +59,52 @@ PI: Demetrios Chiuratto Agourakis (`demetrios@agourakis.med.br`)
 ### Track-progress [DONE 2026-04-30]
 - [x] This file.
 
+### M2.5 — Fréchet outer enclosure (joint-dependence resolution) [DONE 2026-05-01]
+
+Direct response to the consensus pushback recorded in M0 row of the Pivot Log
+(2026-04-30) and consolidated in
+`docs/research/knightian_operator_consensus_2026-04-30.md`.
+
+- [x] Math-review-first checkpoint (per `.claude/AGENT_OFFLOAD_POLICY.md`):
+      `bin/llm-offload -t math-review -p xai -i /tmp/m25_math_thesis.md` →
+      Grok 4.1 validated 7/7 questions (the central theorem, vancomycin
+      monotonicity, naming, conservatism factor, applicability limits,
+      canonical refs, no clinical omission).
+- [x] `stdlib/epistemic/knightian.sio` adds three Fréchet wrappers:
+      `pb_apply2_monotone_inc_dec`, `pb_apply2_monotone_inc_inc`,
+      `pb_apply2_monotone_dec_dec`. Self-test `FRECHET_OK` integrated.
+- [x] `stdlib/clinical/vancomycin_pbpk.sio` `predict_cmin_knightian`
+      header now contains the explicit Fréchet soundness statement
+      and links to the wrapper. Body unchanged (corner enumeration
+      was already correct; M2.5 is the *justification*, not new
+      arithmetic).
+- [x] `tests/stdlib/clinical/test_vancomycin_correlation_sensitivity.sio`:
+      250 deterministic LCG samples (50 each at
+      r ∈ {-0.7, -0.3, 0, +0.3, +0.7}) — every sample's actual Cmin is
+      enclosed by `predict_cmin_knightian`. PASS.
+- [x] `formal/lean4/SounioFrechet.lean`:
+      - `frechet_enclosure_monotone_inc_dec_nat`
+      - `frechet_enclosure_monotone_inc_inc_nat`
+      - `frechet_enclosure_monotone_dec_dec_nat`
+      - `vancomycin_cmin_frechet_enclosure_obligation` (Prop) and its
+        proof `vancomycin_cmin_frechet_enclosure` by direct
+        instantiation of the abstract theorem.
+      All proofs are Mathlib-free, use only `Nat.le_trans` + supplied
+      monotonicity hypotheses. No `axiom`, no `sorry`. Lean build
+      green; Grok math-review approved 5/5.
+- [x] `docs/research/knightian_operator_choice.md` adds §6 documenting
+      the resolution and the consensus-derived Lean budget revision.
+- [x] `docs/papers/vancomycin_pl_paper_outline.md` §5.4 adds the
+      Fréchet sub-section with the conservatism factor disclosure;
+      reviewer pre-empt note added.
+- [x] `docs/papers/vancomycin_clinical_paper_outline.md` §2.3 adds
+      explicit "no independence assumption" disclosure with link to
+      the theorem and the empirical sensitivity test.
+- **Open follow-up**: M3.5 (Walley neighborhood model at the
+  elicitation surface, lift to p-box at propagation) — deferred.
+  Float-Real lift of `SounioFrechet.lean` (4–6 weeks, requires
+  Mathlib import or in-tree Float order theory) — deferred.
+
 ## Pivot Log
 
 | Date | From | To | Reason |
