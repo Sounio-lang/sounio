@@ -165,6 +165,24 @@ chmod +x "$NATIVE_BIN" 2>/dev/null || true
 maybe_codesign "$NATIVE_BIN"
 assert_file_kind "$NATIVE_BIN" "$HOST_FILE_KIND"
 
+if [[ "$HOST_PLATFORM" == Darwin:* && "${SOUNIO_DARWIN_SELFHOST_EXEC_MODE:-full}" == "attest" ]]; then
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --verify "$NATIVE_BIN" >"$LOG_DIR/native-codesign-verify.log" 2>&1
+  fi
+  cat >"$SUMMARY_PATH" <<EOF
+host_platform=$HOST_PLATFORM
+host_target=$HOST_TARGET
+mode=attest
+reason=darwin_host_execution_blocked
+native_bin=$NATIVE_BIN
+native_bin_sha256=$(portable_sha256 "$NATIVE_BIN")
+native_bin_bytes=$(portable_size "$NATIVE_BIN")
+EOF
+  echo "SELFHOST_HOST_GATE_ATTEST host_platform=$HOST_PLATFORM host_target=$HOST_TARGET native_sha256=$(portable_sha256 "$NATIVE_BIN") reason=darwin_host_execution_blocked"
+  echo "SELFHOST_HOST_GATE_ARTIFACT_DIR=$WORK_DIR"
+  exit 0
+fi
+
 "$NATIVE_BIN" self-hosted/compiler/lean_single.sio "$STAGE2_BIN" --target "$HOST_TARGET" >"$LOG_DIR/stage2.log" 2>&1
 chmod +x "$STAGE2_BIN" 2>/dev/null || true
 maybe_codesign "$STAGE2_BIN"
