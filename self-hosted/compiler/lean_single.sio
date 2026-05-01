@@ -7128,71 +7128,23 @@ fn emit_print_nan_x86() with Mut {
     em(0x48); em(0x83); em(0xc4); em(8)
 }
 
-// print_f64: rax = f64 bits → print decimal with 6 decimal places
-fn emit_print_f64() with Mut, Panic {
-    em(0x41); em(0x54)  // push r12
-    em(0x41); em(0x55)  // push r13
-    em(0x41); em(0x56)  // push r14
-    em(0x49); em(0x89); em(0xc4)  // mov r12, rax
-    em(0x4c); em(0x89); em(0xe0)  // mov rax, r12
-    em(0x48); em(0xb9); em64(9223372036854775807)
-    em(0x48); em(0x21); em(0xc8)  // and rax, rcx
-    em(0x48); em(0x85); em(0xc0)
-    em(0x0f); em(0x84); let zero_patch_a = CL; em32(0)
-    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax
-    em(0x48); em(0xc1); em(0xe9); em(52)  // shr rcx, 52
-    em(0x48); em(0x81); em(0xf9); em32(2047)  // cmp rcx, 2047
-    em(0x0f); em(0x84); let nan_patch = CL; em32(0)
-    em(0x48); em(0x85); em(0xc9)
-    em(0x0f); em(0x84); let zero_patch_b = CL; em32(0)
-    em(0x49); em(0x0f); em(0xba); em(0xe4); em(63)  // bt r12, 63
-    em(0x0f); em(0x83); let sign_done_patch = CL; em32(0)
-    emit_print_char_lit_x86(45)
-    patch32(sign_done_patch, CL)
-    em(0x49); em(0x0f); em(0xba); em(0xf4); em(63)  // btr r12, 63
-    em(0x66); em(0x49); em(0x0f); em(0x6e); em(0xc4)  // movq xmm0, r12
-    em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0)  // cvttsd2si rax, xmm0
-    em(0x49); em(0x89); em(0xc5)  // mov r13, rax
-    em(0x66); em(0x49); em(0x0f); em(0x6e); em(0xc4)  // movq xmm0, r12
-    em(0xf2); em(0x49); em(0x0f); em(0x2a); em(0xcd)  // cvtsi2sd xmm1, r13
-    em(0xf2); em(0x0f); em(0x5c); em(0xc1)            // subsd xmm0, xmm1
-    em(0x48); em(0xb8); em64(4696837146684686336)  // 1000000.0
-    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
-    em(0xf2); em(0x0f); em(0x59); em(0xc1)            // mulsd xmm0, xmm1
-    em(0x48); em(0xb8); em64(4602678819172646912)  // 0.5
-    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
-    em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
-    em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0)  // cvttsd2si rax, xmm0
-    em(0x48); em(0x3d); em32(1000000)                 // cmp rax, 1000000
-    em(0x0f); em(0x8c); let frac_ok_patch = CL; em32(0)
-    em(0x31); em(0xc0)                                // xor eax, eax
-    em(0x49); em(0xff); em(0xc5)                      // inc r13
-    patch32(frac_ok_patch, CL)
-    em(0x49); em(0x89); em(0xc6)  // mov r14, rax
-    em(0x4c); em(0x89); em(0xe8)  // mov rax, r13
-    emit_print_u64_no_nl_x86()
-    emit_print_char_lit_x86(46)
-    em(0x4c); em(0x89); em(0xf0)  // mov rax, r14
-    emit_print_fixed6_x86()
-    em(0xe9); let done_after_norm = CL; em32(0)
-    let zero_label = CL
-    em(0x31); em(0xc0)
-    emit_print_u64_no_nl_x86()
-    emit_print_char_lit_x86(46)
-    em(0x31); em(0xc0)
-    emit_print_fixed6_x86()
-    em(0xe9); let done_after_zero = CL; em32(0)
-    let nan_label = CL
-    emit_print_nan_x86()
-    let done_label = CL
-    patch32(zero_patch_a, zero_label)
-    patch32(zero_patch_b, zero_label)
-    patch32(nan_patch, nan_label)
-    patch32(done_after_norm, done_label)
-    patch32(done_after_zero, done_label)
-    em(0x41); em(0x5e)  // pop r14
-    em(0x41); em(0x5d)  // pop r13
-    em(0x41); em(0x5c)  // pop r12
+// print_f64: rax = f64 bits → dispatch to __native_print_f64_n(x, 6).
+// The previous body inlined the conversion via cvttsd2si, which saturates
+// for |x| ≥ 2^63 (printing "9223372036854775808" for any 1e24-scale
+// input) and silently rounds tiny values to "0.000000". The Sounio-source
+// helper handles both via scientific notation; this dispatch keeps the
+// API stable while routing through the corrected formatter.
+fn emit_print_f64() with Mut, Panic, Div {
+    em(0x50)                                 // push rax  (f64 bits)
+    em(0x48); em(0xb8); em64(6)              // mov rax, 6
+    em(0x50)                                 // push rax  (decimals=6)
+    let fmt_fi = fn_find_lit("__native_print_f64_n")
+    if fmt_fi >= 0 {
+        emit_direct_fn_call_x86(fmt_fi, 2)
+    } else {
+        emit_drop_call_args_x86(2)
+        em(0x31); em(0xc0)
+    }
 }
 
 fn emit_read_i64() with Mut {
@@ -29281,6 +29233,13 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("    }\n")
     append_src_lit("}\n\n")
 
+    // Range-aware f64 printer: switches to scientific notation when the
+    // value is too large for the i64 mantissa cast (≥ 1e15) or too small
+    // for the requested fixed-decimal precision (rounds to all zeros).
+    // Without these guards, very large values saturate via cvttsd2si to
+    // the i64-MIN bit pattern (printing "9223372036854775808" for any
+    // 1e24-scale input) and very small values silently print as
+    // "0.000000".
     append_src_lit("fn __native_print_f64_n(x: f64, decimals: i64) with IO, Mut, Panic, Div {\n")
     append_src_lit("    if x != x { print(\"nan\"); return }\n")
     append_src_lit("    var d = decimals\n")
@@ -29291,8 +29250,6 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("        print_char(45)\n")
     append_src_lit("        y = 0.0 - y\n")
     append_src_lit("    }\n")
-    append_src_lit("    let whole_f = __native_floor_f64(y)\n")
-    append_src_lit("    var whole = whole_f as i64\n")
     append_src_lit("    var scale_i: i64 = 0\n")
     append_src_lit("    var scale_int: i64 = 1\n")
     append_src_lit("    while scale_i < d {\n")
@@ -29300,6 +29257,52 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("        scale_i = scale_i + 1\n")
     append_src_lit("    }\n")
     append_src_lit("    let scale = scale_int as f64\n")
+    // OVERFLOW guard: |y| ≥ 1e15 → scientific. The threshold is below the
+    // i64 saturation point (~9.2e18) and above the f64-exact integer bound
+    // (2^53 ≈ 9e15) where the fixed-decimal path starts losing precision.
+    append_src_lit("    if y >= 1000000000000000.0 {\n")
+    append_src_lit("        var exp_e: i64 = 0\n")
+    append_src_lit("        while y >= 10.0 {\n")
+    append_src_lit("            y = y / 10.0\n")
+    append_src_lit("            exp_e = exp_e + 1\n")
+    append_src_lit("        }\n")
+    append_src_lit("        let whole_e = y as i64\n")
+    append_src_lit("        __native_print_u64_no_nl(whole_e)\n")
+    append_src_lit("        if d > 0 {\n")
+    append_src_lit("            print_char(46)\n")
+    append_src_lit("            var fe = ((y - (whole_e as f64)) * scale + 0.5) as i64\n")
+    append_src_lit("            if fe >= scale_int { fe = scale_int - 1 }\n")
+    append_src_lit("            __native_print_fixed_digits(fe, d)\n")
+    append_src_lit("        }\n")
+    append_src_lit("        print_char(101)\n")
+    append_src_lit("        __native_print_u64_no_nl(exp_e)\n")
+    append_src_lit("        return\n")
+    append_src_lit("    }\n")
+    // UNDERFLOW guard: 0 < y < 0.5 / scale_int → fixed path rounds to all
+    // zeros. Switch to scientific so callers can see the magnitude.
+    append_src_lit("    let tiny_thresh = 0.5 / scale\n")
+    append_src_lit("    if y > 0.0 && y < tiny_thresh {\n")
+    append_src_lit("        var exp_e: i64 = 0\n")
+    append_src_lit("        while y < 1.0 {\n")
+    append_src_lit("            y = y * 10.0\n")
+    append_src_lit("            exp_e = exp_e + 1\n")
+    append_src_lit("        }\n")
+    append_src_lit("        let whole_e = y as i64\n")
+    append_src_lit("        __native_print_u64_no_nl(whole_e)\n")
+    append_src_lit("        if d > 0 {\n")
+    append_src_lit("            print_char(46)\n")
+    append_src_lit("            var fe = ((y - (whole_e as f64)) * scale + 0.5) as i64\n")
+    append_src_lit("            if fe >= scale_int { fe = scale_int - 1 }\n")
+    append_src_lit("            __native_print_fixed_digits(fe, d)\n")
+    append_src_lit("        }\n")
+    append_src_lit("        print_char(101)\n")
+    append_src_lit("        print_char(45)\n")
+    append_src_lit("        __native_print_u64_no_nl(exp_e)\n")
+    append_src_lit("        return\n")
+    append_src_lit("    }\n")
+    // FIXED-DECIMAL path for in-range values.
+    append_src_lit("    let whole_f = __native_floor_f64(y)\n")
+    append_src_lit("    var whole = whole_f as i64\n")
     append_src_lit("    var frac = ((y - whole_f) * scale + 0.5) as i64\n")
     append_src_lit("    if frac >= scale_int {\n")
     append_src_lit("        whole = whole + 1\n")
