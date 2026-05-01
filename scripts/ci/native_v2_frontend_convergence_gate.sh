@@ -383,7 +383,7 @@ payload = {
         "main_probe_body_lowered_passed": "body_lowered=1" in main_probe_log,
         "main_probe_imported_body_lowered_passed": "body_lowered=3" in main_probe_imported_log,
     },
-    "next_action": "replace the fixture-backed imported-module witness with general AST import resolution, then hand the imported IR to the native driver",
+    "next_action": "repair imported native codegen after modular IR handoff; current handoff reaches the native driver with three imported summary functions",
 }
 
 summary_path.parent.mkdir(parents=True, exist_ok=True)
