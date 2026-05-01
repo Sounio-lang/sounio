@@ -193,3 +193,9 @@ lean_lib «SounioNaturalityG2» where
 @[default_target]
 lean_lib «SounioNaturalityObligations» where
 
+
+-- M4 Option C: compositional decomposition of embed_into. Proves
+-- 2/3 of the pipeline is exactly G₂-equivariant; locates the residual
+-- at Box-Muller. Pure ℕ/ℤ/ℚ Lean, no Mathlib.
+@[default_target]
+lean_lib «SounioNaturalityG2Decomp» where
