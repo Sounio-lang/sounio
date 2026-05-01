@@ -385,7 +385,7 @@ payload = {
         "main_probe_body_lowered_passed": "body_lowered=1" in main_probe_log,
         "main_probe_imported_body_lowered_passed": "body_lowered=3" in main_probe_imported_log,
     },
-    "next_action": "replace the imported exit-code ELF witness with real call-linked imported codegen and then add stdout parity",
+    "next_action": "replace the hardcoded imported call-chain ELF witness with IR-derived call-linked imported codegen and stdout parity",
 }
 
 summary_path.parent.mkdir(parents=True, exist_ok=True)
