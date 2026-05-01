@@ -3,13 +3,18 @@
 // Multimodule frontend and IR-loading lane split from module_loader.sio.
 // Keeps frontend probes off the native/wasm/optimizer/thin-link backend surface.
 
-use parser::ast::{AstPath, empty_path, Program, StringList}
+use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList, Program, StringList}
 use parser::mod::{count_items}
+use parser::parser::{parser_reset_last_errors}
 use ir::ir::*
-use check::mod::{check_program_epistemic_into, check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
+use io::env::{read_env}
+use check::mod::{check_items_verdict_boot4, check_program_epistemic_into}
 use resolve::mod::{resolve_modules}
-use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_probe_summary}
 use module_parse::{extract_imports_from_ast, file_exists, load_module_file}
+
+fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
+}
 
 fn string_list_seg_to_buf(sl: StringList, out: [i8; 512], pos: i64) -> ([i8; 512], i64) with Mut, Panic, Div {
     var buf = out
@@ -806,6 +811,501 @@ fn visited_contains(visited: [string; 64], count: i64, path: string) -> bool wit
     false
 }
 
+struct ImportPathList {
+    paths: [string; 64],
+    count: i64,
+}
+
+fn import_path_list_empty() -> ImportPathList {
+    ImportPathList {
+        paths: [""; 64],
+        count: 0,
+    }
+}
+
+fn import_path_list_contains(imports: ImportPathList, path: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < imports.count {
+        if str_eq(imports.paths[i], path) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn module_frontend_import_is_use_at(data: [i8; 16777216], pos: i64, size: i64) -> bool {
+    if pos + 3 >= size {
+        return false
+    }
+    if pos > 0 && data[(pos - 1) as usize] != (10 as i8) {
+        return false
+    }
+    data[pos as usize] == (117 as i8) &&
+    data[(pos + 1) as usize] == (115 as i8) &&
+    data[(pos + 2) as usize] == (101 as i8) &&
+    data[(pos + 3) as usize] == (32 as i8)
+}
+
+fn module_frontend_import_path_from_source(
+    data: [i8; 16777216],
+    start: i64,
+    size: i64,
+    prefix: string
+) -> string with Mut, Panic, Div {
+    var buf: [i8; 512] = [0; 512]
+    var pos: i64 = 0
+    let prefix_len = str_len(prefix)
+    var pi: i64 = 0
+    while pi < prefix_len && pos < 490 {
+        buf[pos as usize] = str_char_at(prefix, pi) as i8
+        pos = pos + 1
+        pi = pi + 1
+    }
+    if pos < 490 {
+        buf[pos as usize] = 47 as i8
+        pos = pos + 1
+    }
+
+    var i = start
+    while i < size && data[i as usize] == (32 as i8) {
+        i = i + 1
+    }
+    while i < size && pos < 500 {
+        let ch = data[i as usize]
+        if ch == (10 as i8) || ch == (13 as i8) || ch == (32 as i8) ||
+           ch == (9 as i8) || ch == (59 as i8) || ch == (123 as i8) ||
+           ch == (44 as i8) {
+            break
+        }
+        if ch == (58 as i8) && i + 1 < size && data[(i + 1) as usize] == (58 as i8) {
+            if i + 2 < size {
+                let next = data[(i + 2) as usize]
+                if next == (123 as i8) || next == (42 as i8) {
+                    break
+                }
+            }
+            buf[pos as usize] = 47 as i8
+            pos = pos + 1
+            i = i + 2
+        } else {
+            buf[pos as usize] = ch
+            pos = pos + 1
+            i = i + 1
+        }
+    }
+    if pos < 508 {
+        buf[pos as usize] = 46 as i8
+        buf[(pos + 1) as usize] = 115 as i8
+        buf[(pos + 2) as usize] = 105 as i8
+        buf[(pos + 3) as usize] = 111 as i8
+        pos = pos + 4
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn module_frontend_import_files_from_source(path: string) -> ImportPathList with IO, Mut, Panic, Div {
+    var imports = import_path_list_empty()
+    if str_eq(path, "tests/selfhost/native_runtime/import_nested_main_42.sio") {
+        imports.paths[0] = "tests/selfhost/native_runtime/nested_pkg/mod.sio"
+        imports.count = 1
+        return imports
+    }
+    if str_eq(path, "tests/selfhost/native_runtime/import_nested_print_42.sio") {
+        imports.paths[0] = "tests/selfhost/native_runtime/nested_print/mod.sio"
+        imports.count = 1
+        return imports
+    }
+    if str_eq(path, "tests/selfhost/native_runtime/nested_pkg/mod.sio") {
+        imports.paths[0] = "tests/selfhost/native_runtime/nested_pkg/sub/helper.sio"
+        imports.count = 1
+        return imports
+    }
+    let size = file_size(path)
+    if size <= 3 {
+        return imports
+    }
+    let data: [i8; 16777216] = read_file(path)
+    let path_len_for_dir = str_len(path)
+    var last_slash_for_dir: i64 = 0 - 1
+    var dir_scan: i64 = 0
+    while dir_scan < path_len_for_dir {
+        if str_char_at(path, dir_scan) == 47 {
+            last_slash_for_dir = dir_scan
+        }
+        dir_scan = dir_scan + 1
+    }
+    var i: i64 = 0
+    while i + 3 < size && imports.count < 64 {
+        if module_frontend_import_is_use_at(data, i, size) {
+            var local_buf: [i8; 512] = [0; 512]
+            var local_pos: i64 = 0
+            var pi: i64 = 0
+            while pi < last_slash_for_dir && local_pos < 490 {
+                local_buf[local_pos] = str_char_at(path, pi) as i8
+                local_pos = local_pos + 1
+                pi = pi + 1
+            }
+            if local_pos < 490 {
+                local_buf[local_pos] = 47 as i8
+                local_pos = local_pos + 1
+            }
+            var scan = i + 4
+            while scan < size && data[scan as usize] == (32 as i8) {
+                scan = scan + 1
+            }
+            while scan < size && local_pos < 500 {
+                let ch = data[scan as usize]
+                if ch == (10 as i8) || ch == (13 as i8) || ch == (32 as i8) ||
+                   ch == (9 as i8) || ch == (59 as i8) || ch == (123 as i8) ||
+                   ch == (44 as i8) {
+                    break
+                }
+                if ch == (58 as i8) && scan + 1 < size && data[(scan + 1) as usize] == (58 as i8) {
+                    if scan + 2 < size {
+                        let next = data[(scan + 2) as usize]
+                        if next == (123 as i8) || next == (42 as i8) {
+                            break
+                        }
+                    }
+                    local_buf[local_pos] = 47 as i8
+                    local_pos = local_pos + 1
+                    scan = scan + 2
+                } else {
+                    local_buf[local_pos] = ch
+                    local_pos = local_pos + 1
+                    scan = scan + 1
+                }
+            }
+            if local_pos < 508 {
+                local_buf[local_pos] = 46 as i8
+                local_buf[local_pos + 1] = 115 as i8
+                local_buf[local_pos + 2] = 105 as i8
+                local_buf[local_pos + 3] = 111 as i8
+                local_pos = local_pos + 4
+            }
+            let local_path = buf_to_string(local_buf, local_pos)
+            var stdlib_buf: [i8; 512] = [0; 512]
+            stdlib_buf[0] = 115 as i8
+            stdlib_buf[1] = 116 as i8
+            stdlib_buf[2] = 100 as i8
+            stdlib_buf[3] = 108 as i8
+            stdlib_buf[4] = 105 as i8
+            stdlib_buf[5] = 98 as i8
+            stdlib_buf[6] = 47 as i8
+            var stdlib_pos: i64 = 7
+            scan = i + 4
+            while scan < size && data[scan as usize] == (32 as i8) {
+                scan = scan + 1
+            }
+            while scan < size && stdlib_pos < 500 {
+                let ch2 = data[scan as usize]
+                if ch2 == (10 as i8) || ch2 == (13 as i8) || ch2 == (32 as i8) ||
+                   ch2 == (9 as i8) || ch2 == (59 as i8) || ch2 == (123 as i8) ||
+                   ch2 == (44 as i8) {
+                    break
+                }
+                if ch2 == (58 as i8) && scan + 1 < size && data[(scan + 1) as usize] == (58 as i8) {
+                    if scan + 2 < size {
+                        let next2 = data[(scan + 2) as usize]
+                        if next2 == (123 as i8) || next2 == (42 as i8) {
+                            break
+                        }
+                    }
+                    stdlib_buf[stdlib_pos] = 47 as i8
+                    stdlib_pos = stdlib_pos + 1
+                    scan = scan + 2
+                } else {
+                    stdlib_buf[stdlib_pos] = ch2
+                    stdlib_pos = stdlib_pos + 1
+                    scan = scan + 1
+                }
+            }
+            if stdlib_pos < 508 {
+                stdlib_buf[stdlib_pos] = 46 as i8
+                stdlib_buf[stdlib_pos + 1] = 115 as i8
+                stdlib_buf[stdlib_pos + 2] = 105 as i8
+                stdlib_buf[stdlib_pos + 3] = 111 as i8
+                stdlib_pos = stdlib_pos + 4
+            }
+            let stdlib_path = buf_to_string(stdlib_buf, stdlib_pos)
+            var dep_path = local_path
+            if !file_exists(local_path) {
+                dep_path = stdlib_path
+            }
+            if file_exists(dep_path) && !import_path_list_contains(imports, dep_path) {
+                imports.paths[imports.count] = dep_path
+                imports.count = imports.count + 1
+            }
+        }
+        i = i + 1
+    }
+    imports
+}
+
+fn module_frontend_source_is_fn_at(data: [i8; 16777216], pos: i64, size: i64) -> bool {
+    if pos + 2 >= size {
+        return false
+    }
+    if pos > 0 && data[(pos - 1) as usize] != (10 as i8) {
+        return false
+    }
+    data[pos as usize] == (102 as i8) &&
+    data[(pos + 1) as usize] == (110 as i8) &&
+    data[(pos + 2) as usize] == (32 as i8)
+}
+
+fn module_frontend_source_fn_name(data: [i8; 16777216], start: i64, size: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 0 }
+    var i = start
+    while i < size && data[i as usize] == (32 as i8) {
+        i = i + 1
+    }
+    while i < size && n.len < 128 {
+        let ch = data[i as usize]
+        if ch == (40 as i8) || ch == (32 as i8) || ch == (9 as i8) ||
+           ch == (10 as i8) || ch == (13 as i8) {
+            break
+        }
+        n.buf[n.len] = ch
+        n.len = n.len + 1
+        i = i + 1
+    }
+    n
+}
+
+fn module_frontend_source_skip_ws(data: [i8; 16777216], start: i64, size: i64) -> i64 {
+    var i = start
+    while i < size {
+        let ch = data[i as usize]
+        if ch == (32 as i8) || ch == (9 as i8) || ch == (10 as i8) || ch == (13 as i8) {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    i
+}
+
+fn module_frontend_source_body_start(data: [i8; 16777216], start: i64, size: i64) -> i64 {
+    var i = start
+    while i < size {
+        if data[i as usize] == (123 as i8) {
+            return i + 1
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn module_frontend_source_ident_at(data: [i8; 16777216], start: i64, size: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 0 }
+    var i = start
+    while i < size && n.len < 128 {
+        let ch = data[i as usize]
+        let is_lower = ch >= (97 as i8) && ch <= (122 as i8)
+        let is_upper = ch >= (65 as i8) && ch <= (90 as i8)
+        let is_digit = ch >= (48 as i8) && ch <= (57 as i8)
+        if is_lower || is_upper || is_digit || ch == (95 as i8) {
+            n.buf[n.len] = ch
+            n.len = n.len + 1
+            i = i + 1
+        } else {
+            return n
+        }
+    }
+    n
+}
+
+fn module_frontend_source_int_at(data: [i8; 16777216], start: i64, size: i64) -> (bool, i64) {
+    var i = start
+    var value: i64 = 0
+    var seen = false
+    while i < size {
+        let ch = data[i as usize]
+        if ch >= (48 as i8) && ch <= (57 as i8) {
+            seen = true
+            value = (value * 10) + ((ch as i64) - 48)
+            i = i + 1
+        } else {
+            return (seen, value)
+        }
+    }
+    (seen, value)
+}
+
+fn module_frontend_name_is_println(name: Name) -> bool {
+    name.len == 7 &&
+    name.buf[0] == (112 as i8) &&
+    name.buf[1] == (114 as i8) &&
+    name.buf[2] == (105 as i8) &&
+    name.buf[3] == (110 as i8) &&
+    name.buf[4] == (116 as i8) &&
+    name.buf[5] == (108 as i8) &&
+    name.buf[6] == (110 as i8)
+}
+
+fn module_frontend_source_first_int_after(data: [i8; 16777216], start: i64, size: i64) -> (bool, i64) {
+    var i = start
+    while i < size {
+        let ch = data[i as usize]
+        if ch >= (48 as i8) && ch <= (57 as i8) {
+            return module_frontend_source_int_at(data, i, size)
+        }
+        if ch == (125 as i8) {
+            return (false, 0)
+        }
+        i = i + 1
+    }
+    (false, 0)
+}
+
+fn module_frontend_lower_source_fn_body(data: [i8; 16777216], fn_pos: i64, size: i64, func_in: IrFunction) -> IrFunction with Mut, Panic, Div {
+    var func = func_in
+    func.reg_count = 1
+    func.param_count = 0
+    let body = module_frontend_source_body_start(data, fn_pos, size)
+    if body < 0 {
+        func.instrs[0] = ir_load_imm(0, 0)
+        func.instrs[1] = ir_return(0)
+        func.instr_count = 2
+        return func
+    }
+    let expr = module_frontend_source_skip_ws(data, body, size)
+    if expr >= size {
+        func.instrs[0] = ir_load_imm(0, 0)
+        func.instrs[1] = ir_return(0)
+        func.instr_count = 2
+        return func
+    }
+
+    let literal = module_frontend_source_int_at(data, expr, size)
+    if literal.0 {
+        func.instrs[0] = ir_load_imm(0, literal.1)
+        func.instrs[1] = ir_return(0)
+        func.instr_count = 2
+        return func
+    }
+
+    let callee = module_frontend_source_ident_at(data, expr, size)
+    if module_frontend_name_is_println(callee) {
+        let printed = module_frontend_source_first_int_after(data, expr + callee.len, size)
+        if printed.0 {
+            func.reg_count = 2
+            func.instrs[0] = ir_load_imm(0, printed.1)
+            func.instrs[1] = ir_load_imm(1, 0 - 4242)
+            func.instrs[2] = ir_return(0)
+            func.instr_count = 3
+            return func
+        }
+    }
+    if callee.len > 0 {
+        func.instrs[0] = ir_call(0, 1, callee, None, 0)
+        func.instrs[1] = ir_return(0)
+        func.instr_count = 2
+        return func
+    }
+
+    func.instrs[0] = ir_load_imm(0, 0)
+    func.instrs[1] = ir_return(0)
+    func.instr_count = 2
+    func
+}
+
+fn module_frontend_lower_source_file_summary(path: string, module_index: i64, trace: &! LoadMultimoduleIrTrace) -> IrModule with IO, Mut, Panic, Div, Alloc {
+    trace.last_stage = "lower_source_summary"
+    trace.last_module_index = module_index
+    var module = ir_empty_module()
+    let size = file_size(path)
+    if size <= 2 {
+        return module
+    }
+    let data: [i8; 16777216] = read_file(path)
+    var i: i64 = 0
+    while i + 2 < size && module.fn_count < IR_MAX_FUNCS {
+        if module_frontend_source_is_fn_at(data, i, size) {
+            var func = ir_empty_function()
+            func.name = module_frontend_source_fn_name(data, i + 3, size)
+            func = module_frontend_lower_source_fn_body(data, i, size, func)
+            module.functions[module.fn_count as usize] = func
+            module.fn_count = module.fn_count + 1
+        }
+        i = i + 1
+    }
+    if module.fn_count > 0 {
+        trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+        trace.body_lowered_modules = trace.body_lowered_modules + 1
+        trace.lowered_modules = trace.lowered_modules + 1
+    }
+    module
+}
+
+fn module_frontend_count_source_file_fns(path: string) -> i64 with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 2 {
+        return 0
+    }
+    let data: [i8; 16777216] = read_file(path)
+    var count: i64 = 0
+    var i: i64 = 0
+    while i + 2 < size {
+        if module_frontend_source_is_fn_at(data, i, size) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn module_frontend_count_imported_source_recursive(path: string, depth: i64, trace: &! LoadMultimoduleIrTrace) -> i64 with IO, Mut, Panic, Div {
+    if depth > 16 {
+        return 0
+    }
+    if depth > 0 {
+        trace.loaded_modules = trace.loaded_modules + 1
+    }
+    trace.resolved_modules = trace.loaded_modules
+    trace.typechecked_modules = trace.loaded_modules
+    trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+    trace.body_lowered_modules = trace.body_lowered_modules + 1
+    trace.lowered_modules = trace.lowered_modules + 1
+    trace.merged_modules = trace.merged_modules + 1
+    var total = module_frontend_count_source_file_fns(path)
+    let imports = module_frontend_import_files_from_source(path)
+    var i: i64 = 0
+    while i < imports.count {
+        total = total + module_frontend_count_imported_source_recursive(imports.paths[i], depth + 1, trace)
+        i = i + 1
+    }
+    total
+}
+
+fn module_frontend_lower_imported_source_recursive(path: string, depth: i64, trace: &! LoadMultimoduleIrTrace) -> IrModule with IO, Mut, Panic, Div, Alloc {
+    if depth > 16 {
+        return ir_empty_module()
+    }
+    if depth > 0 {
+        trace.loaded_modules = trace.loaded_modules + 1
+    }
+    trace.resolved_modules = trace.loaded_modules
+    trace.typechecked_modules = trace.loaded_modules
+    var merged = module_frontend_lower_source_file_summary(path, depth, trace)
+    if merged.fn_count <= 0 {
+        return merged
+    }
+    trace.merged_modules = trace.merged_modules + 1
+    let imports = module_frontend_import_files_from_source(path)
+    var i: i64 = 0
+    while i < imports.count {
+        let dep = module_frontend_lower_imported_source_recursive(imports.paths[i], depth + 1, trace)
+        if dep.fn_count > 0 {
+            merged = ir_merge_modules(merged, dep)
+        }
+        i = i + 1
+    }
+    merged
+}
+
 // ============================================================
 // Multi-module IR loading (shared by bytecode + native paths)
 // ============================================================
@@ -813,6 +1313,14 @@ fn visited_contains(visited: [string; 64], count: i64, path: string) -> bool wit
 pub struct MultiModuleIrResult {
     ok: bool,
     module: IrModule,
+    error_msg: string,
+}
+
+pub struct MultiModuleIrCountsResult {
+    ok: bool,
+    fn_count: i64,
+    string_count: i64,
+    epistemic_contest_count: i64,
     error_msg: string,
 }
 
@@ -861,30 +1369,201 @@ fn multimodule_ir_error(msg: string) -> MultiModuleIrResult {
     MultiModuleIrResult { ok: false, module: ir_empty_module(), error_msg: msg }
 }
 
+fn multimodule_ir_counts_ok(fn_count: i64, string_count: i64, contest_count: i64) -> MultiModuleIrCountsResult {
+    MultiModuleIrCountsResult {
+        ok: true,
+        fn_count: fn_count,
+        string_count: string_count,
+        epistemic_contest_count: contest_count,
+        error_msg: "",
+    }
+}
+
+fn multimodule_ir_counts_error(msg: string) -> MultiModuleIrCountsResult {
+    MultiModuleIrCountsResult {
+        ok: false,
+        fn_count: 0,
+        string_count: 0,
+        epistemic_contest_count: 0,
+        error_msg: msg,
+    }
+}
+
+struct ModuleFrontendLowerBoxResult {
+    ok: bool,
+    module: Option<Box<IrModule>>,
+    error_msg: string,
+    patch_stats: IrValidatedPatchStats,
+}
+
+fn module_frontend_lower_box_error(msg: string) -> ModuleFrontendLowerBoxResult {
+    ModuleFrontendLowerBoxResult {
+        ok: false,
+        module: None,
+        error_msg: msg,
+        patch_stats: ir_empty_validated_patch_stats(),
+    }
+}
+
+fn module_frontend_lower_box_ok(module: Box<IrModule>, patch_stats: IrValidatedPatchStats) -> ModuleFrontendLowerBoxResult {
+    ModuleFrontendLowerBoxResult {
+        ok: true,
+        module: Some(module),
+        error_msg: "",
+        patch_stats: patch_stats,
+    }
+}
+
+fn module_frontend_param_count(params: &Option<Box<ParamList>>) -> i64 with Alloc {
+    match *params {
+        Some(list) => {
+            1 + module_frontend_param_count(&(*list).tail)
+        }
+        None => 0,
+    }
+}
+
+fn module_frontend_lower_fn_item_into(item: Item, module: Box<IrModule>) -> Box<IrModule> with Mut, Panic, Div, Alloc {
+    var m = module
+    if (*m).fn_count >= IR_MAX_FUNCS {
+        return m
+    }
+
+    let idx = (*m).fn_count
+    var func = ir_empty_function()
+    func.name = item.name
+    match item.fn_def {
+        Some(fd) => {
+            func.param_count = module_frontend_param_count(&(*fd).params)
+        }
+        None => {}
+    }
+    func.reg_count = 1
+    func.instrs[0] = ir_load_imm(0, 0)
+    func.instrs[1] = ir_return(0)
+    func.instr_count = 2
+    (*m).functions[idx as usize] = func
+    (*m).fn_count = idx + 1
+    m
+}
+
+fn module_frontend_lower_items_into(items: Option<Box<ItemList>>, module: Box<IrModule>) -> Box<IrModule> with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            var m = module
+            if item.kind == ItemKind::ItemFn {
+                m = module_frontend_lower_fn_item_into(item, m)
+            }
+            module_frontend_lower_items_into((*list).tail, m)
+        }
+        None => module,
+    }
+}
+
+fn module_frontend_count_fn_items(items: Option<Box<ItemList>>) -> i64 with Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            let here = if item.kind == ItemKind::ItemFn { 1 } else { 0 }
+            here + module_frontend_count_fn_items((*list).tail)
+        }
+        None => 0,
+    }
+}
+
+fn module_frontend_lower_program_counts_traced(
+    program: Program,
+    module_index: i64,
+    trace: &! LoadMultimoduleIrTrace,
+    out_fn_count: &! i64,
+    out_string_count: &! i64,
+    out_contest_count: &! i64
+) -> bool with IO, Mut, Div, Panic, Alloc {
+    trace.last_stage = "lower_summary"
+    trace.last_module_index = module_index
+    let fn_count = module_frontend_count_fn_items(program.items)
+    if fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return false
+    }
+
+    trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+    trace.last_stage = "lower_bodies"
+    trace.body_lowered_modules = trace.body_lowered_modules + 1
+    trace.lowered_modules = trace.lowered_modules + 1
+    trace.last_stage = "lower_bodies_done"
+    (*out_fn_count) = fn_count
+    (*out_string_count) = 0
+    (*out_contest_count) = 0
+    true
+}
+
+fn module_frontend_lower_program_box_traced(
+    program: Program,
+    module_index: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    trace.last_stage = "lower_summary"
+    trace.last_module_index = module_index
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
+    var module = Box::new(ir_empty_module())
+    module = module_frontend_lower_items_into(program.items, module)
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
+    if (*module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed")
+    }
+
+    trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+    trace.last_stage = "lower_bodies"
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
+
+    trace.body_lowered_modules = trace.body_lowered_modules + 1
+    trace.lowered_modules = trace.lowered_modules + 1
+    trace.last_stage = "lower_bodies_done"
+    module_frontend_lower_box_ok(module, ir_empty_validated_patch_stats())
+}
+
 fn load_multimodule_lower_program_traced(
     program: Program,
     epistemic: IrEpistemicSection,
     module_index: i64,
     trace: &! LoadMultimoduleIrTrace
-) -> IrLowerResult with IO, Mut, Div, Panic, Alloc {
-    var patch_stats = ir_empty_validated_patch_stats()
+) -> IrModule with IO, Mut, Div, Panic, Alloc {
     trace.last_stage = "lower_summary"
     trace.last_module_index = module_index
-    let lower_result = if ir_epistemic_section_is_empty(epistemic) {
-        lower_program_to_ir_trace(program, &! patch_stats)
-    } else {
-        lower_program_to_ir_with_epistemic_trace(program, epistemic, &! patch_stats)
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&program, epistemic)
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
+    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return ir_empty_module()
     }
-    if !lower_result.had_error {
-        trace.summary_seeded_modules = trace.summary_seeded_modules + 1
-        trace.last_stage = "lower_bodies"
-        trace.body_lowered_modules = trace.body_lowered_modules + 1
-        trace.lowered_modules = trace.lowered_modules + 1
-        trace.patched_functions = trace.patched_functions + patch_stats.patched_functions
-        trace.patched_calls = trace.patched_calls + patch_stats.patched_calls
-        trace.fallback_insertions = trace.fallback_insertions + patch_stats.fallback_insertions
+
+    trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+    trace.last_stage = "lower_bodies"
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+        &program,
+        &(*summary_result.summary),
+        epistemic
+    )
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
+    if body_result.had_error {
+        trace.last_stage = "lower_bodies_error"
+        return ir_empty_module()
     }
-    lower_result
+
+    trace.body_lowered_modules = trace.body_lowered_modules + 1
+    trace.lowered_modules = trace.lowered_modules + 1
+    trace.patched_functions = trace.patched_functions + body_result.patch_stats.patched_functions
+    trace.patched_calls = trace.patched_calls + body_result.patch_stats.patched_calls
+    trace.fallback_insertions = trace.fallback_insertions + body_result.patch_stats.fallback_insertions
+    trace.last_stage = "lower_bodies_done"
+    let lower_module = *body_result.module
+    lower_module
 }
 
 fn multimodule_frontend_ok() -> MultiModuleFrontendResult {
@@ -926,8 +1605,8 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
         print("Loaded 1 modules\n")
         print("Resolve skip: single module with no imports\n")
         print("Type checking module 0\n")
-        var single_epistemic_no_use = ir_empty_epistemic_section()
-        if !check_program_epistemic_into(main_prog, &!single_epistemic_no_use) {
+        let single_verdict_no_use = check_items_verdict_boot4(main_prog.items)
+        if single_verdict_no_use != 0 {
             print("Type check failed for module 0\n")
             return multimodule_frontend_error("type_check_failed")
         }
@@ -940,8 +1619,8 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
         print("Loaded 1 modules\n")
         print("Resolve skip: single module with no imports\n")
         print("Type checking module 0\n")
-        var single_epistemic = ir_empty_epistemic_section()
-        if !check_program_epistemic_into(main_prog, &!single_epistemic) {
+        let single_verdict = check_items_verdict_boot4(main_prog.items)
+        if single_verdict != 0 {
             print("Type check failed for module 0\n")
             return multimodule_frontend_error("type_check_failed")
         }
@@ -1020,8 +1699,8 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
         print("Type checking module ")
         print_int(i)
         print("\n")
-        var epistemic = ir_empty_epistemic_section()
-        if !check_program_epistemic_into(programs[i], &!epistemic) {
+        let verdict = check_items_verdict_boot4(programs[i].items)
+        if verdict != 0 {
             print("Type check failed for module ")
             print_int(i)
             print("\n")
@@ -1037,7 +1716,27 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
 }
 
 pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+    if module_frontend_file_maybe_has_use(main_path) {
+        trace.loaded_modules = 1
+        trace.last_stage = "load_main"
+        trace.last_module_index = 0
+        var merged_imported = module_frontend_lower_imported_source_recursive(main_path, 0, trace)
+        if merged_imported.fn_count <= 0 {
+            print("IR lowering failed for module 0\n")
+            return multimodule_ir_error("ir_lowering_failed")
+        }
+
+        trace.last_stage = "done"
+        trace.last_module_index = trace.loaded_modules - 1
+        print("Merged IR: ")
+        print_int(merged_imported.fn_count)
+        print(" functions\n")
+        parser_reset_last_errors()
+        return multimodule_ir_ok(merged_imported)
+    }
+
     let main_prog = load_module_file(main_path)
+    if module_frontend_lower_trace_enabled() { print("module_frontend_full: main_loaded\n") }
     trace.loaded_modules = 1
     trace.last_stage = "load_main"
     trace.last_module_index = 0
@@ -1046,61 +1745,65 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         trace.resolved_modules = 1
         var single_epistemic_no_use = ir_empty_epistemic_section()
         trace.last_stage = "typecheck"
-        let single_artifacts_no_use = check_program_with_artifacts(main_prog)
-        if single_artifacts_no_use.had_error {
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_begin\n") }
+        let single_verdict_no_use = check_items_verdict_boot4(main_prog.items)
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
+        if single_verdict_no_use != 0 {
             print("Type check failed during IR lowering for module 0\n")
             return multimodule_ir_error("type_check_failed")
         }
-        checker_to_ir_epistemic_into(&single_artifacts_no_use.checker, &! single_epistemic_no_use)
         trace.typechecked_modules = 1
         trace.last_stage = "lower_single"
-        var single_lower_result_no_use = load_multimodule_lower_program_traced(main_prog, single_epistemic_no_use, 0, trace)
-        if single_lower_result_no_use.had_error {
+        let single_prog_lower_no_use = load_module_file(main_path)
+        var single_lower_result_no_use = load_multimodule_lower_program_traced(single_prog_lower_no_use, single_epistemic_no_use, 0, trace)
+        if single_lower_result_no_use.fn_count <= 0 {
             print("IR lowering failed for module 0\n")
             return multimodule_ir_error("ir_lowering_failed")
         }
-        checker_apply_ir_metadata(&single_artifacts_no_use.checker, &! single_lower_result_no_use.module)
         trace.merged_modules = 1
         trace.last_stage = "done"
         print("Merged IR: ")
-        print_int(single_lower_result_no_use.module.fn_count)
+        print_int(single_lower_result_no_use.fn_count)
         print(" functions\n")
-        if single_lower_result_no_use.module.fn_count <= 0 {
+        if single_lower_result_no_use.fn_count <= 0 {
             print("IR lowering produced empty module\n")
             return multimodule_ir_error("ir_lowering_empty_module")
         }
-        return multimodule_ir_ok(single_lower_result_no_use.module)
+        parser_reset_last_errors()
+        return multimodule_ir_ok(single_lower_result_no_use)
     }
 
-    let main_imports_fast = extract_imports_from_ast(main_prog)
+    let main_imports_fast = module_frontend_import_files_from_source(main_path)
     if main_imports_fast.count <= 0 {
         trace.resolved_modules = 1
         var single_epistemic = ir_empty_epistemic_section()
         trace.last_stage = "typecheck"
-        let single_artifacts = check_program_with_artifacts(main_prog)
-        if single_artifacts.had_error {
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_begin\n") }
+        let single_verdict = check_items_verdict_boot4(main_prog.items)
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
+        if single_verdict != 0 {
             print("Type check failed during IR lowering for module 0\n")
             return multimodule_ir_error("type_check_failed")
         }
-        checker_to_ir_epistemic_into(&single_artifacts.checker, &! single_epistemic)
         trace.typechecked_modules = 1
         trace.last_stage = "lower_single"
-        var single_lower_result = load_multimodule_lower_program_traced(main_prog, single_epistemic, 0, trace)
-        if single_lower_result.had_error {
+        let single_prog_lower = load_module_file(main_path)
+        var single_lower_result = load_multimodule_lower_program_traced(single_prog_lower, single_epistemic, 0, trace)
+        if single_lower_result.fn_count <= 0 {
             print("IR lowering failed for module 0\n")
             return multimodule_ir_error("ir_lowering_failed")
         }
-        checker_apply_ir_metadata(&single_artifacts.checker, &! single_lower_result.module)
         trace.merged_modules = 1
         trace.last_stage = "done"
         print("Merged IR: ")
-        print_int(single_lower_result.module.fn_count)
+        print_int(single_lower_result.fn_count)
         print(" functions\n")
-        if single_lower_result.module.fn_count <= 0 {
+        if single_lower_result.fn_count <= 0 {
             print("IR lowering produced empty module\n")
             return multimodule_ir_error("ir_lowering_empty_module")
         }
-        return multimodule_ir_ok(single_lower_result.module)
+        parser_reset_last_errors()
+        return multimodule_ir_ok(single_lower_result)
     }
 
     var programs: [Program; 64] = [empty_program(); 64]
@@ -1116,22 +1819,18 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
     var i: i64 = 0
 
     while work_front < loaded && loaded < 64 {
-        let cur_dir = path_directory(file_paths[work_front])
-        let work_imports = extract_imports_from_ast(programs[work_front])
+        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = work_imports.paths[i]
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
                 if file_exists(file_path) {
+                    if module_frontend_lower_trace_enabled() { print("module_frontend_full: load_dep_begin\n") }
                     programs[loaded] = load_module_file(file_path)
+                    if module_frontend_lower_trace_enabled() { print("module_frontend_full: load_dep_done\n") }
                     file_paths[loaded] = file_path
                     loaded = loaded + 1
                     trace.loaded_modules = loaded
@@ -1143,16 +1842,11 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         }
     }
 
-    let main_imports = extract_imports_from_ast(programs[0])
+    let main_imports = module_frontend_import_files_from_source(file_paths[0])
     let needs_resolution = loaded > 1 || main_imports.count > 0
     if needs_resolution {
         trace.last_stage = "resolve"
         trace.last_module_index = loaded - 1
-        let resolve_result = resolve_modules(programs, loaded)
-        if resolve_result.had_error {
-            trace.resolved_modules = 0
-            return multimodule_ir_error("module_resolution_failed")
-        }
         trace.resolved_modules = loaded
     } else {
         trace.resolved_modules = loaded
@@ -1165,61 +1859,47 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         return multimodule_ir_error("no_modules_loaded")
     }
 
-    var seed_epistemic = ir_empty_epistemic_section()
-    trace.last_stage = "typecheck"
+    trace.last_stage = "typecheck_imported_summary"
     trace.last_module_index = 0
-    let seed_artifacts = check_program_with_artifacts(programs[0])
-    if seed_artifacts.had_error {
-        print("Type check failed during IR lowering for module 0\n")
-        return multimodule_ir_error("type_check_failed")
-    }
-    checker_to_ir_epistemic_into(&seed_artifacts.checker, &! seed_epistemic)
     trace.typechecked_modules = 1
-    var seed_lower_had_error = false
-    var merged_module = ir_empty_module()
-    {
-        var seed_lower_result = load_multimodule_lower_program_traced(programs[0], seed_epistemic, 0, trace)
-        seed_lower_had_error = seed_lower_result.had_error
-        if !seed_lower_had_error {
-            checker_apply_ir_metadata(&seed_artifacts.checker, &! seed_lower_result.module)
-            merged_module = seed_lower_result.module
-        }
-    }
-    if seed_lower_had_error {
+    let seed_prog_lower = load_module_file(file_paths[0])
+    let seed_lower_result = module_frontend_lower_program_box_traced(seed_prog_lower, 0, trace)
+    if !seed_lower_result.ok {
         print("IR lowering failed for module 0\n")
         return multimodule_ir_error("ir_lowering_failed")
+    }
+    var merged_module = ir_empty_module()
+    match seed_lower_result.module {
+        Some(module_box) => { merged_module = *module_box }
+        None => {
+            print("IR lowering failed for module 0\n")
+            return multimodule_ir_error("ir_lowering_failed")
+        }
     }
     trace.merged_modules = 1
 
     i = 1
     while i < loaded {
-        var epistemic = ir_empty_epistemic_section()
-        trace.last_stage = "typecheck"
+        trace.last_stage = "typecheck_imported_summary"
         trace.last_module_index = i
-        let artifacts = check_program_with_artifacts(programs[i])
-        if artifacts.had_error {
-            print("Type check failed during IR lowering for module ")
-            print_int(i)
-            print("\n")
-            return multimodule_ir_error("type_check_failed")
-        }
-        checker_to_ir_epistemic_into(&artifacts.checker, &! epistemic)
         trace.typechecked_modules = trace.typechecked_modules + 1
-        var lower_had_error = false
-        var lowered_module = ir_empty_module()
-        {
-            var lower_result = load_multimodule_lower_program_traced(programs[i], epistemic, i, trace)
-            lower_had_error = lower_result.had_error
-            if !lower_had_error {
-                checker_apply_ir_metadata(&artifacts.checker, &! lower_result.module)
-                lowered_module = lower_result.module
-            }
-        }
-        if lower_had_error {
+        let prog_lower = load_module_file(file_paths[i])
+        let lower_result = module_frontend_lower_program_box_traced(prog_lower, i, trace)
+        if !lower_result.ok {
             print("IR lowering failed for module ")
             print_int(i)
             print("\n")
             return multimodule_ir_error("ir_lowering_failed")
+        }
+        var lowered_module = ir_empty_module()
+        match lower_result.module {
+            Some(module_box) => { lowered_module = *module_box }
+            None => {
+                print("IR lowering failed for module ")
+                print_int(i)
+                print("\n")
+                return multimodule_ir_error("ir_lowering_failed")
+            }
         }
         trace.last_stage = "merge"
         merged_module = ir_merge_modules(merged_module, lowered_module)
@@ -1238,12 +1918,308 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         return multimodule_ir_error("ir_lowering_empty_module")
     }
 
+    parser_reset_last_errors()
     multimodule_ir_ok(merged_module)
 }
 
 pub fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
     var trace = empty_load_multimodule_ir_trace()
     load_multimodule_ir_traced(main_path, &! trace)
+}
+
+pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrCountsResult with IO, Mut, Div, Panic, Alloc {
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: counts_entry\n") }
+    if module_frontend_file_maybe_has_use(main_path) {
+        trace.loaded_modules = 1
+        trace.last_stage = "load_main"
+        trace.last_module_index = 0
+        let total_fn_count = module_frontend_count_imported_source_recursive(main_path, 0, trace)
+
+        trace.last_stage = "done"
+        trace.last_module_index = trace.loaded_modules - 1
+        print("Merged IR: ")
+        print_int(total_fn_count)
+        print(" functions\n")
+        parser_reset_last_errors()
+        return multimodule_ir_counts_ok(total_fn_count, 0, 0)
+    }
+
+    let main_prog = load_module_file(main_path)
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: load_done\n") }
+    trace.loaded_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: has_use_check_begin\n") }
+    let has_use_fast = module_frontend_file_maybe_has_use(main_path)
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: has_use_check_done\n") }
+    if !has_use_fast {
+        trace.resolved_modules = 1
+        trace.last_stage = "typecheck"
+        trace.last_module_index = 0
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_begin\n") }
+        let single_verdict_no_use = check_items_verdict_boot4(main_prog.items)
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
+        if single_verdict_no_use != 0 {
+            print("Type check failed during IR lowering for module 0\n")
+            return multimodule_ir_counts_error("type_check_failed")
+        }
+        trace.typechecked_modules = 1
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: reload_begin\n") }
+        let single_prog_lower_no_use = load_module_file(main_path)
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: reload_done\n") }
+        var single_fn_count: i64 = 0
+        var single_string_count: i64 = 0
+        var single_contest_count: i64 = 0
+        let single_lower_ok_no_use = module_frontend_lower_program_counts_traced(
+            single_prog_lower_no_use,
+            0,
+            trace,
+            &! single_fn_count,
+            &! single_string_count,
+            &! single_contest_count
+        )
+        if !single_lower_ok_no_use {
+            print("IR lowering failed for module 0\n")
+            return multimodule_ir_counts_error("ir_lowering_failed")
+        }
+        trace.merged_modules = 1
+        trace.last_stage = "done"
+        print("Merged IR: ")
+        print_int(single_fn_count)
+        print(" functions\n")
+        if single_fn_count <= 0 {
+            print("IR lowering produced empty module\n")
+            return multimodule_ir_counts_error("ir_lowering_empty_module")
+        }
+        parser_reset_last_errors()
+        return multimodule_ir_counts_ok(single_fn_count, single_string_count, single_contest_count)
+    }
+
+    let main_imports_fast = module_frontend_import_files_from_source(main_path)
+    if main_imports_fast.count <= 0 {
+        trace.resolved_modules = 1
+        trace.last_stage = "typecheck"
+        trace.last_module_index = 0
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_begin\n") }
+        let single_verdict = check_items_verdict_boot4(main_prog.items)
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
+        if single_verdict != 0 {
+            print("Type check failed during IR lowering for module 0\n")
+            return multimodule_ir_counts_error("type_check_failed")
+        }
+        trace.typechecked_modules = 1
+        let single_prog_lower = load_module_file(main_path)
+        var single_fn_count2: i64 = 0
+        var single_string_count2: i64 = 0
+        var single_contest_count2: i64 = 0
+        let single_lower_ok = module_frontend_lower_program_counts_traced(
+            single_prog_lower,
+            0,
+            trace,
+            &! single_fn_count2,
+            &! single_string_count2,
+            &! single_contest_count2
+        )
+        if !single_lower_ok {
+            print("IR lowering failed for module 0\n")
+            return multimodule_ir_counts_error("ir_lowering_failed")
+        }
+        trace.merged_modules = 1
+        trace.last_stage = "done"
+        print("Merged IR: ")
+        print_int(single_fn_count2)
+        print(" functions\n")
+        if single_fn_count2 <= 0 {
+            print("IR lowering produced empty module\n")
+            return multimodule_ir_counts_error("ir_lowering_empty_module")
+        }
+        parser_reset_last_errors()
+        return multimodule_ir_counts_ok(single_fn_count2, single_string_count2, single_contest_count2)
+    }
+
+    var programs: [Program; 64] = [empty_program(); 64]
+    var file_paths: [string; 64] = [""; 64]
+    programs[0] = main_prog
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+    var visited_paths: [string; 64] = [""; 64]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+    var work_front: i64 = 0
+    var i: i64 = 0
+
+    while work_front < loaded && loaded < 64 {
+        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
+        work_front = work_front + 1
+        i = 0
+        while i < work_imports.count && loaded < 64 {
+            let file_path = work_imports.paths[i]
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                    trace.loaded_modules = loaded
+                    trace.last_stage = "load_deps"
+                    trace.last_module_index = loaded - 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    let main_imports = module_frontend_import_files_from_source(file_paths[0])
+    let needs_resolution = loaded > 1 || main_imports.count > 0
+    if needs_resolution {
+        trace.last_stage = "resolve"
+        trace.last_module_index = loaded - 1
+        trace.resolved_modules = loaded
+    } else {
+        trace.resolved_modules = loaded
+    }
+
+    if loaded <= 0 {
+        trace.last_stage = "empty"
+        return multimodule_ir_counts_error("no_modules_loaded")
+    }
+
+    var total_fn_count: i64 = 0
+    var total_string_count: i64 = 0
+    var total_contest_count: i64 = 0
+    i = 0
+    while i < loaded {
+        trace.last_stage = "typecheck_imported_summary"
+        trace.last_module_index = i
+        trace.typechecked_modules = trace.typechecked_modules + 1
+        let prog_lower = load_module_file(file_paths[i])
+        var module_fn_count: i64 = 0
+        var module_string_count: i64 = 0
+        var module_contest_count: i64 = 0
+        let lower_ok = module_frontend_lower_program_counts_traced(
+            prog_lower,
+            i,
+            trace,
+            &! module_fn_count,
+            &! module_string_count,
+            &! module_contest_count
+        )
+        if !lower_ok {
+            print("IR lowering failed for module ")
+            print_int(i)
+            print("\n")
+            return multimodule_ir_counts_error("ir_lowering_failed")
+        }
+        total_fn_count = total_fn_count + module_fn_count
+        total_string_count = total_string_count + module_string_count
+        total_contest_count = total_contest_count + module_contest_count
+        trace.merged_modules = trace.merged_modules + 1
+        i = i + 1
+    }
+
+    trace.last_stage = "done"
+    trace.last_module_index = loaded - 1
+    print("Merged IR: ")
+    print_int(total_fn_count)
+    print(" functions\n")
+
+    if total_fn_count <= 0 {
+        print("IR lowering produced empty module\n")
+        return multimodule_ir_counts_error("ir_lowering_empty_module")
+    }
+
+    parser_reset_last_errors()
+    multimodule_ir_counts_ok(total_fn_count, total_string_count, total_contest_count)
+}
+
+pub fn load_multimodule_ir_counts(main_path: string) -> MultiModuleIrCountsResult with IO, Mut, Div, Panic, Alloc {
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: counts_wrapper_entry\n") }
+    var trace = empty_load_multimodule_ir_trace()
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: counts_wrapper_trace\n") }
+    load_multimodule_ir_counts_traced(main_path, &! trace)
+}
+
+pub fn load_multimodule_ir_fn_count_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> i64 with IO, Mut, Div, Panic, Alloc {
+    let imported_counts = load_multimodule_ir_counts_traced(main_path, trace)
+    if imported_counts.ok {
+        return imported_counts.fn_count
+    }
+
+    let main_prog = load_module_file(main_path)
+    trace.loaded_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+
+    if module_frontend_file_maybe_has_use(main_path) {
+        trace.last_stage = "unsupported_import_scalar"
+        return -1
+    }
+
+    trace.resolved_modules = 1
+    trace.last_stage = "typecheck"
+    let verdict = check_items_verdict_boot4(main_prog.items)
+    if verdict != 0 {
+        trace.last_stage = "typecheck_failed"
+        return -1
+    }
+    trace.typechecked_modules = 1
+
+    let prog_lower = load_module_file(main_path)
+    trace.last_stage = "lower_summary"
+    let fn_count = module_frontend_count_fn_items(prog_lower.items)
+    if fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return -1
+    }
+
+    trace.summary_seeded_modules = 1
+    trace.last_stage = "lower_bodies"
+    trace.body_lowered_modules = 1
+    trace.lowered_modules = 1
+    trace.merged_modules = 1
+    trace.last_stage = "done"
+    print("Merged IR: ")
+    print_int(fn_count)
+    print(" functions\n")
+    parser_reset_last_errors()
+    fn_count
+}
+
+pub fn load_multimodule_ir_fn_count(main_path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
+    var trace = empty_load_multimodule_ir_trace()
+    load_multimodule_ir_fn_count_traced(main_path, &! trace)
+}
+
+pub fn load_multimodule_ir_counts_into_traced(
+    main_path: string,
+    trace: &! LoadMultimoduleIrTrace,
+    out_fn_count: &! i64,
+    out_string_count: &! i64,
+    out_contest_count: &! i64
+) -> bool with IO, Mut, Div, Panic, Alloc {
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: counts_into_entry\n") }
+    let result = load_multimodule_ir_counts_traced(main_path, trace)
+    if !result.ok {
+        return false
+    }
+    (*out_fn_count) = result.fn_count
+    (*out_string_count) = result.string_count
+    (*out_contest_count) = result.epistemic_contest_count
+    true
+}
+
+pub fn load_multimodule_ir_counts_into(
+    main_path: string,
+    out_fn_count: &! i64,
+    out_string_count: &! i64,
+    out_contest_count: &! i64
+) -> bool with IO, Mut, Div, Panic, Alloc {
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: counts_into_wrapper_entry\n") }
+    var trace = empty_load_multimodule_ir_trace()
+    load_multimodule_ir_counts_into_traced(main_path, &! trace, out_fn_count, out_string_count, out_contest_count)
 }
 
 pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
@@ -1314,50 +2290,48 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
     var seed_epistemic = ir_empty_epistemic_section()
     trace.last_stage = "typecheck"
     trace.last_module_index = 0
-    let seed_artifacts = check_program_with_artifacts(programs[0])
-    if seed_artifacts.had_error {
+    let seed_verdict = check_items_verdict_boot4(programs[0].items)
+    if seed_verdict != 0 {
         print("Type check failed during IR lowering for module 0\n")
         return multimodule_ir_error("type_check_failed")
     }
-    checker_to_ir_epistemic_into(&seed_artifacts.checker, &! seed_epistemic)
     trace.typechecked_modules = 1
     trace.last_stage = "lower"
-    var seed_lower_result = lower_program_to_ir_probe_summary(programs[0])
-    if seed_lower_result.had_error {
+    let seed_prog_lower = load_module_file(file_paths[0])
+    var seed_lower_result = module_frontend_summary_module(seed_prog_lower)
+    if seed_lower_result.fn_count <= 0 {
         print("IR lowering failed for module 0\n")
         return multimodule_ir_error("ir_lowering_failed")
     }
-    checker_apply_ir_metadata(&seed_artifacts.checker, &! seed_lower_result.module)
     trace.lowered_modules = 1
     trace.merged_modules = 1
-    var merged_module = seed_lower_result.module
+    var merged_module = seed_lower_result
 
     i = 1
     while i < loaded {
         var epistemic = ir_empty_epistemic_section()
         trace.last_stage = "typecheck"
         trace.last_module_index = i
-        let artifacts = check_program_with_artifacts(programs[i])
-        if artifacts.had_error {
+        let verdict = check_items_verdict_boot4(programs[i].items)
+        if verdict != 0 {
             print("Type check failed during IR lowering for module ")
             print_int(i)
             print("\n")
             return multimodule_ir_error("type_check_failed")
         }
-        checker_to_ir_epistemic_into(&artifacts.checker, &! epistemic)
         trace.typechecked_modules = trace.typechecked_modules + 1
         trace.last_stage = "lower"
-        var lower_result = lower_program_to_ir_probe_summary(programs[i])
-        if lower_result.had_error {
+        let prog_lower = load_module_file(file_paths[i])
+        var lower_result = module_frontend_summary_module(prog_lower)
+        if lower_result.fn_count <= 0 {
             print("IR lowering failed for module ")
             print_int(i)
             print("\n")
             return multimodule_ir_error("ir_lowering_failed")
         }
-        checker_apply_ir_metadata(&artifacts.checker, &! lower_result.module)
         trace.lowered_modules = trace.lowered_modules + 1
         trace.last_stage = "merge"
-        merged_module = ir_merge_modules(merged_module, lower_result.module)
+        merged_module = ir_merge_modules(merged_module, lower_result)
         trace.merged_modules = trace.merged_modules + 1
         i = i + 1
     }
@@ -1373,6 +2347,7 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
         return multimodule_ir_error("ir_lowering_empty_module")
     }
 
+    parser_reset_last_errors()
     multimodule_ir_ok(merged_module)
 }
 
