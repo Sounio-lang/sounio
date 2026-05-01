@@ -144,8 +144,12 @@ self_log = log_of("lean_frontend_self_test")
 hello_log = log_of("lean_frontend_hello_check")
 ir_log = log_of("lean_frontend_hello_ir_summary")
 modular_ir_log = log_of("lean_modular_hello_ir_summary")
+imported_ir_log = log_of("lean_frontend_imported_ir_summary")
+imported_modular_ir_log = log_of("lean_modular_imported_ir_summary")
 main_probe_plain_log = log_of("main_probe_load_ir")
 main_probe_log = log_of("main_probe_load_ir_trace")
+main_probe_imported_plain_log = log_of("main_probe_imported_load_ir")
+main_probe_imported_log = log_of("main_probe_imported_load_ir_trace")
 
 if case_by_id.get("cpu_umbrella", {}).get("rc", 0) != 0:
     failure_classes.append("cpu_umbrella")
@@ -218,6 +222,32 @@ if case_by_id.get("lean_modular_hello_ir_summary", {}).get("rc", 0) != 0:
         "case_id": "lean_modular_hello_ir_summary",
     })
 
+if case_by_id.get("lean_frontend_imported_ir_summary", {}).get("rc", 0) != 0:
+    if "souc-lean-frontend ir-summary: functions=" not in imported_ir_log:
+        reason = "lean_frontend_imported_ir_summary_missing_success_witness"
+        failure_classes.append("imported_ir_loader")
+    else:
+        reason = "lean_frontend_imported_ir_summary_failed"
+        failure_classes.append("imported_ir_loader")
+    classifications.append({
+        "class": failure_classes[-1],
+        "reason": reason,
+        "case_id": "lean_frontend_imported_ir_summary",
+    })
+
+if case_by_id.get("lean_modular_imported_ir_summary", {}).get("rc", 0) != 0:
+    if "souc-lean ir-summary: functions=" not in imported_modular_ir_log:
+        reason = "lean_modular_imported_ir_summary_missing_success_witness"
+        failure_classes.append("imported_ir_loader")
+    else:
+        reason = "lean_modular_imported_ir_summary_failed"
+        failure_classes.append("imported_ir_loader")
+    classifications.append({
+        "class": failure_classes[-1],
+        "reason": reason,
+        "case_id": "lean_modular_imported_ir_summary",
+    })
+
 if case_by_id.get("main_probe_load_ir", {}).get("rc", 0) != 0:
     if "Segmentation fault" in main_probe_plain_log:
         reason = "main_probe_load_ir_segfault"
@@ -257,6 +287,45 @@ elif "body_lowered=1" not in main_probe_log:
         "case_id": "main_probe_load_ir_trace",
     })
 
+if case_by_id.get("main_probe_imported_load_ir", {}).get("rc", 0) != 0:
+    if "Segmentation fault" in main_probe_imported_plain_log:
+        reason = "main_probe_imported_load_ir_segfault"
+        failure_classes.append("imported_ir_loader_runtime")
+    elif "probe_load_ir: ok" not in main_probe_imported_plain_log:
+        reason = "main_probe_imported_load_ir_missing_ok"
+        failure_classes.append("imported_ir_loader")
+    else:
+        reason = "main_probe_imported_load_ir_failed"
+        failure_classes.append("imported_ir_loader")
+    classifications.append({
+        "class": failure_classes[-1],
+        "reason": reason,
+        "case_id": "main_probe_imported_load_ir",
+    })
+
+if case_by_id.get("main_probe_imported_load_ir_trace", {}).get("rc", 0) != 0:
+    if "Segmentation fault" in main_probe_imported_log:
+        reason = "main_probe_imported_load_ir_trace_segfault"
+        failure_classes.append("imported_ir_loader_runtime")
+    elif "probe_load_ir_trace: ok" not in main_probe_imported_log:
+        reason = "main_probe_imported_load_ir_trace_missing_ok"
+        failure_classes.append("imported_ir_loader")
+    else:
+        reason = "main_probe_imported_load_ir_trace_failed"
+        failure_classes.append("imported_ir_loader")
+    classifications.append({
+        "class": failure_classes[-1],
+        "reason": reason,
+        "case_id": "main_probe_imported_load_ir_trace",
+    })
+elif "body_lowered=3" not in main_probe_imported_log:
+    failure_classes.append("imported_ir_body_lowering")
+    classifications.append({
+        "class": "imported_ir_body_lowering",
+        "reason": "main_probe_imported_load_ir_trace_missing_body_lowered_3_witness",
+        "case_id": "main_probe_imported_load_ir_trace",
+    })
+
 required = [
     "cpu_umbrella",
     "lean_frontend_check",
@@ -264,8 +333,12 @@ required = [
     "lean_frontend_hello_check",
     "lean_frontend_hello_ir_summary",
     "lean_modular_hello_ir_summary",
+    "lean_frontend_imported_ir_summary",
+    "lean_modular_imported_ir_summary",
     "main_probe_load_ir",
     "main_probe_load_ir_trace",
+    "main_probe_imported_load_ir",
+    "main_probe_imported_load_ir_trace",
 ]
 all_required_present = all(case_id in case_by_id for case_id in required)
 all_required_pass = all(case_by_id.get(case_id, {}).get("rc") == 0 for case_id in required)
@@ -301,11 +374,16 @@ payload = {
         "lean_frontend_hello_check_passed": case_by_id.get("lean_frontend_hello_check", {}).get("rc") == 0,
         "lean_frontend_hello_ir_summary_passed": case_by_id.get("lean_frontend_hello_ir_summary", {}).get("rc") == 0,
         "lean_modular_hello_ir_summary_passed": case_by_id.get("lean_modular_hello_ir_summary", {}).get("rc") == 0,
+        "lean_frontend_imported_ir_summary_passed": case_by_id.get("lean_frontend_imported_ir_summary", {}).get("rc") == 0,
+        "lean_modular_imported_ir_summary_passed": case_by_id.get("lean_modular_imported_ir_summary", {}).get("rc") == 0,
         "main_probe_load_ir_passed": case_by_id.get("main_probe_load_ir", {}).get("rc") == 0,
         "main_probe_load_ir_trace_passed": case_by_id.get("main_probe_load_ir_trace", {}).get("rc") == 0,
+        "main_probe_imported_load_ir_passed": case_by_id.get("main_probe_imported_load_ir", {}).get("rc") == 0,
+        "main_probe_imported_load_ir_trace_passed": case_by_id.get("main_probe_imported_load_ir_trace", {}).get("rc") == 0,
         "main_probe_body_lowered_passed": "body_lowered=1" in main_probe_log,
+        "main_probe_imported_body_lowered_passed": "body_lowered=3" in main_probe_imported_log,
     },
-    "next_action": "extend the scalar body-lowered frontend witness from single-module hello into imported modules and native driver handoff",
+    "next_action": "replace the fixture-backed imported-module witness with general AST import resolution, then hand the imported IR to the native driver",
 }
 
 summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -330,10 +408,18 @@ run_case "lean_frontend_hello_ir_summary" "$LOG_DIR/lean_frontend.hello_ir_summa
   "$SOUC_BIN" run self-hosted/compiler/lean_frontend.sio -- --ir-summary examples/hello.sio
 run_case "lean_modular_hello_ir_summary" "$LOG_DIR/lean_modular.hello_ir_summary.log" \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --ir-summary examples/hello.sio
+run_case "lean_frontend_imported_ir_summary" "$LOG_DIR/lean_frontend.imported_ir_summary.log" \
+  "$SOUC_BIN" run self-hosted/compiler/lean_frontend.sio -- --ir-summary tests/selfhost/native_runtime/import_nested_main_42.sio
+run_case "lean_modular_imported_ir_summary" "$LOG_DIR/lean_modular.imported_ir_summary.log" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --ir-summary tests/selfhost/native_runtime/import_nested_main_42.sio
 run_case "main_probe_load_ir" "$LOG_DIR/main.probe_load_ir.log" \
   "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir examples/hello.sio
 run_case "main_probe_load_ir_trace" "$LOG_DIR/main.probe_load_ir_trace.log" \
   "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir-trace examples/hello.sio
+run_case "main_probe_imported_load_ir" "$LOG_DIR/main.probe_imported_load_ir.log" \
+  "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir tests/selfhost/native_runtime/import_nested_main_42.sio
+run_case "main_probe_imported_load_ir_trace" "$LOG_DIR/main.probe_imported_load_ir_trace.log" \
+  "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir-trace tests/selfhost/native_runtime/import_nested_main_42.sio
 
 if emit_summary_json; then
   status="$(python3 - "$SUMMARY_JSON" <<'PY'
