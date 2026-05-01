@@ -1069,6 +1069,107 @@ fn module_frontend_source_fn_name(data: [i8; 16777216], start: i64, size: i64) -
     n
 }
 
+fn module_frontend_source_skip_ws(data: [i8; 16777216], start: i64, size: i64) -> i64 {
+    var i = start
+    while i < size {
+        let ch = data[i as usize]
+        if ch == (32 as i8) || ch == (9 as i8) || ch == (10 as i8) || ch == (13 as i8) {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    i
+}
+
+fn module_frontend_source_body_start(data: [i8; 16777216], start: i64, size: i64) -> i64 {
+    var i = start
+    while i < size {
+        if data[i as usize] == (123 as i8) {
+            return i + 1
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn module_frontend_source_ident_at(data: [i8; 16777216], start: i64, size: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 0 }
+    var i = start
+    while i < size && n.len < 128 {
+        let ch = data[i as usize]
+        let is_lower = ch >= (97 as i8) && ch <= (122 as i8)
+        let is_upper = ch >= (65 as i8) && ch <= (90 as i8)
+        let is_digit = ch >= (48 as i8) && ch <= (57 as i8)
+        if is_lower || is_upper || is_digit || ch == (95 as i8) {
+            n.buf[n.len] = ch
+            n.len = n.len + 1
+            i = i + 1
+        } else {
+            return n
+        }
+    }
+    n
+}
+
+fn module_frontend_source_int_at(data: [i8; 16777216], start: i64, size: i64) -> (bool, i64) {
+    var i = start
+    var value: i64 = 0
+    var seen = false
+    while i < size {
+        let ch = data[i as usize]
+        if ch >= (48 as i8) && ch <= (57 as i8) {
+            seen = true
+            value = (value * 10) + ((ch as i64) - 48)
+            i = i + 1
+        } else {
+            return (seen, value)
+        }
+    }
+    (seen, value)
+}
+
+fn module_frontend_lower_source_fn_body(data: [i8; 16777216], fn_pos: i64, size: i64, func_in: IrFunction) -> IrFunction with Mut, Panic, Div {
+    var func = func_in
+    func.reg_count = 1
+    func.param_count = 0
+    let body = module_frontend_source_body_start(data, fn_pos, size)
+    if body < 0 {
+        func.instrs[0] = ir_load_imm(0, 0)
+        func.instrs[1] = ir_return(0)
+        func.instr_count = 2
+        return func
+    }
+    let expr = module_frontend_source_skip_ws(data, body, size)
+    if expr >= size {
+        func.instrs[0] = ir_load_imm(0, 0)
+        func.instrs[1] = ir_return(0)
+        func.instr_count = 2
+        return func
+    }
+
+    let literal = module_frontend_source_int_at(data, expr, size)
+    if literal.0 {
+        func.instrs[0] = ir_load_imm(0, literal.1)
+        func.instrs[1] = ir_return(0)
+        func.instr_count = 2
+        return func
+    }
+
+    let callee = module_frontend_source_ident_at(data, expr, size)
+    if callee.len > 0 {
+        func.instrs[0] = ir_call(0, 1, callee, None, 0)
+        func.instrs[1] = ir_return(0)
+        func.instr_count = 2
+        return func
+    }
+
+    func.instrs[0] = ir_load_imm(0, 0)
+    func.instrs[1] = ir_return(0)
+    func.instr_count = 2
+    func
+}
+
 fn module_frontend_lower_source_file_summary(path: string, module_index: i64, trace: &! LoadMultimoduleIrTrace) -> IrModule with IO, Mut, Panic, Div, Alloc {
     trace.last_stage = "lower_source_summary"
     trace.last_module_index = module_index
@@ -1083,11 +1184,7 @@ fn module_frontend_lower_source_file_summary(path: string, module_index: i64, tr
         if module_frontend_source_is_fn_at(data, i, size) {
             var func = ir_empty_function()
             func.name = module_frontend_source_fn_name(data, i + 3, size)
-            func.reg_count = 1
-            func.param_count = 0
-            func.instrs[0] = ir_load_imm(0, 0)
-            func.instrs[1] = ir_return(0)
-            func.instr_count = 2
+            func = module_frontend_lower_source_fn_body(data, i, size, func)
             module.functions[module.fn_count as usize] = func
             module.fn_count = module.fn_count + 1
         }
