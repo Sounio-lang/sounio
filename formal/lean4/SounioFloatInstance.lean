@@ -1,42 +1,83 @@
 -- formal/lean4/SounioFloatInstance.lean
 import SounioFloatBounded
+import SounioIEEE754Spec
 
 /-!
-# Sounio.FloatInstance — `BoundedOrderedCarrier Float` (Stage 3b, Route C)
+# Sounio.FloatInstance — `BoundedOrderedCarrier Float` (Stage 3b, Route C, Phase 1)
 
 This file is the **Route C interim** Float instance for the
 `BoundedOrderedCarrier` typeclass from `SounioFloatBounded.lean`.
 
-## ⚠️  WARNING: this file uses 4 axioms
+## Phase 1 status (2026-05-01)
 
-This file declares **four** axioms asserting structural facts
-about IEEE-754 binary64 (`Float`) arithmetic. The axioms are NOT
-proven in Sounio; they are deliberate assumptions whose
-discharge is part of the long-term roadmap.
+This file is in the middle of a multi-phase refactor:
 
-The route choice is documented in
-`docs/research/lean_float_real_roadmap.md` Stage 3b. The three
-routes are:
+  - **Phase 0** (committed `d0453156`): 4 typeclass-shape axioms
+    (`Float.le_trans`, `Float.zero_le_zero`,
+    `Float.mul_le_mul_of_nonneg_right_bounded`,
+    `Float.add_le_add_right_bounded`) backing the
+    `BoundedOrderedCarrier Float` instance directly.
 
-  - **Route a — Mathlib `Float` bridge** (~10 LOC if it exists):
-    Use Mathlib's IEEE-754 lemmas to *prove* the axioms below.
-    Replaces this file's `axiom` declarations with `theorem`s
-    whose proofs use Mathlib.
+  - **Phase 1** (this commit): canonical 5-axiom IEEE-754 spec
+    extracted to `SounioIEEE754Spec.lean` (Higham 2002 §2.1
+    basic-operation model). Two of the four typeclass methods
+    are now derived as **theorems** from the spec:
+      - `Float.le_trans_from_spec` (derived from
+        `Float.toRat_le_iff_finite` + `Rat.le_trans`)
+      - `Float.zero_le_zero_from_spec` (derived from
+        `Float.toRat_le_iff_finite` + `Rat.le_refl`)
 
-  - **Route b — In-tree IEEE-754 model** (~5000 LOC): Formalise
-    IEEE-754 binary64 round-to-nearest from scratch in Sounio
-    (rounding modes, ulp, guard bits). Comparable to Coq's
-    Flocq library.
+    The remaining two (`mul_le_mul_of_nonneg_right_bounded`
+    and `add_le_add_right_bounded`) require ~100 LOC of Rat
+    algebra over the spec, with a recursive/coarse cookbook
+    hypothesis. They are **deferred to Phase 1.5** with their
+    typeclass-shape axioms retained for the current
+    `BoundedOrderedCarrier Float` instance.
 
-  - **Route c — Axiomatised interim** (this file, ~150 LOC):
-    Declare the IEEE-754 properties as axioms with explicit
-    citations to Higham 2002 §2.4. Fast and operationally
-    useful, but breaks the axiom-free in-tree philosophy.
+  - **Phase 1.5** (next milestone): derive the remaining two
+    typeclass methods from the spec, eliminating the four
+    typeclass-shape axioms. Net result: 5 IEEE-754 axioms,
+    zero typeclass-shape axioms, all four typeclass methods
+    proven theorems.
 
-Route C is the **explicit** documented choice here. When
-Route A or B becomes available, this file's axioms become
-theorems (or are deleted in favour of imports), and downstream
-code requires no changes.
+  - **Phase 2** (long-term, ~5000 LOC): Route B in-tree
+    IEEE-754 binary64 model formalisation. The 5 spec axioms
+    in `SounioIEEE754Spec.lean` become theorems; this file's
+    derived theorems remain unchanged.
+
+## Why dual representation in Phase 1
+
+Math-review (Grok 4.1, 2026-05-01) approved the dual
+representation:
+
+    [OK] Phase 1 dual rep (axioms + conditional theorems coexist)
+      Defensible: preserves API; theorems tighter for
+      finite-normal clients.
+
+The Phase 1 dual rep:
+  - 4 typeclass-shape axioms (unconditional; back the
+    `BoundedOrderedCarrier Float` instance for arbitrary
+    Float operands, including non-finite, where the bound
+    holds vacuously);
+  - 2 derived theorems (`le_trans_from_spec`,
+    `zero_le_zero_from_spec`) with finiteness hypotheses;
+  - 2 deferred theorems (mul/add) noted with explicit
+    Phase 1.5 marker.
+
+This preserves the public API (`BoundedOrderedCarrier Float`
+typeclass instance unchanged) while progressively tightening
+the axiom base.
+
+## Math-review record
+
+  - Pre-impl thesis (`/tmp/ieee754_spec_thesis.md`):
+    Grok 4.1 5/9 OK + 3 WRONG (ε_machine = 2⁻⁵³ not 2⁻⁵²;
+    Higham §2.1 not §2.5; cookbook recursive/coarse) +
+    1 OVERREACH (cookbook missing add rounding;
+    addressed by `eps_inf ≥ 3·u·max(|ac|,|bc|)` coarse form
+    documented in Phase 1.5 deferred section below).
+
+  - Post-impl: see commit message.
 
 ## Why per-call `eps_inf`, not a fixed bound
 
@@ -46,28 +87,19 @@ A naive Route C might axiomatise:
       ∀ a b, |fl(a · b) - (a · b)| ≤ 0.0001
 
 But this is **mathematically wrong** for IEEE-754: the rounding
-error scales with the operand magnitude as `ulp/2 ∝ |a · b| · 2⁻⁵²`.
-For `a = b = 10¹⁰`, the actual error is ~`5 · 10⁻⁷`, not bounded
-by `0.0001`.
+error scales with the operand magnitude as `u · |a · b|`.
+For `a = b = 10¹⁰`, the actual error is ~`10²⁰ · 2⁻⁵³ ≈ 10⁴`,
+not bounded by `0.0001`.
 
-The math-review (Grok 4.1, 2026-05-01) caught this BUG:
-
-    [WRONG] Higham 2002 §2.4 eq. (2.5) supports fixed 0.0001
-      Higham states |fl(x op y) - (x op y)| ≤ ulp(fl(x op y))/2
-      (round-to-nearest), ulp ∝ |x op y|.
-
-The fix: instead of axiomatising a fixed bound, axiomatise the
-typeclass laws **directly**, with the per-call `eps_inf`
+The math-review (Grok 4.1, Phase 0) caught this BUG. The fix:
+instead of axiomatising a fixed bound, axiomatise the
+typeclass laws **directly** with the per-call `eps_inf`
 parameter (already part of `BoundedOrderedCarrier`) carrying
-the user-supplied bound. The user computes the correct ulp
-budget from operand magnitudes per Higham; the axiom asserts
-that any sufficient `eps_inf` discharges the typeclass law.
+the user-supplied bound. The user computes the correct
+ulp/relative-error budget from operand magnitudes per Higham
+§2.1.
 
-This is the "right" Route C: the axioms exactly mirror the
-typeclass methods, and the soundness obligation is pushed to
-the **call site** where the user knows the operand magnitudes.
-
-## The 4 axioms
+## The 4 typeclass-shape axioms (retained from Phase 0)
 
 ```
 axiom Float.le_trans :
@@ -87,112 +119,60 @@ axiom Float.add_le_add_right_bounded :
     a + c ≤ (b + c) + eps_inf
 ```
 
-Each axiom has a citation to the corresponding IEEE-754 fact:
-
-  - `Float.le_trans`: IEEE-754 binary64 `≤` is a total order on
-    the finite (non-NaN) representable subset; transitivity is
-    immediate. The axiom is sound for the finite subset and
-    holds vacuously when any operand is NaN (`a ≤ b` is `False`
-    if either is NaN, so the implication is true). Higham 2002
-    §2.5.
-
-  - `Float.zero_le_zero`: positive zero ≤ positive zero is
-    `True` per IEEE-754 §5.11. Trivially sound.
-
-  - `Float.mul_le_mul_of_nonneg_right_bounded`: from Higham
-    2002 §2.4 eq. (2.5):
-        |fl(a · c) - (a · c)| ≤ ulp(a · c) / 2 ≤ k · ε_machine · |a · c|
-    where `ε_machine = 2⁻⁵²` for binary64 and `k ≤ 4` for a
-    single operation. The axiom states that *any* `eps_inf ≥
-    k · ε_machine · max(|a|, |b|, |c|, |a·c|, |b·c|)`
-    discharges the bound. The user is responsible for choosing
-    a valid `eps_inf` per call.
-
-  - `Float.add_le_add_right_bounded`: same Higham reference,
-    with `+` substituted for `·`.
+In Phase 1.5 these become theorems derived from the spec.
 
 ## User responsibility (cookbook formula)
 
 When using `BoundedOrderedCarrier Float` methods, the user
 MUST supply `eps_inf` satisfying:
 
-    eps_inf ≥ k · ε_machine · max(|a|, |b|, |c|, |a*c|, |b*c|)
+    eps_inf ≥ 3 · u · max(|a · c|, |b · c|)         (coarse form)
 
 where:
-  - `ε_machine = 2⁻⁵² ≈ 2.22 × 10⁻¹⁶` (binary64)
-  - `k ≤ 4` for a single arithmetic operation
-        (round-to-nearest, no underflow, no overflow,
-         no Subnormal-flush-to-zero)
+  - `u = 2⁻⁵³ ≈ 1.11 × 10⁻¹⁶` (binary64 unit roundoff,
+    Higham §2.4)
+  - The factor `3` accounts for: 1× from `mul_rne_bound` of
+    `a · c`, 1× from `mul_rne_bound` of `b · c`, 1× from
+    `add_rne_bound` of `(b · c) + eps_inf` itself.
 
 For clinical PK regimes (operands in `[10⁻², 10⁴]`):
 
-    max-magnitude ≈ 10⁴
-    eps_inf ≥ 4 · 2.22 × 10⁻¹⁶ · 10⁴ = 8.88 × 10⁻¹²
+    max-magnitude of products ≈ 10⁸
+    eps_inf ≥ 3 · 1.11 × 10⁻¹⁶ · 10⁸ ≈ 3.3 × 10⁻⁸
 
 For the Sounio Cmin band (width ~3 mg/L), the rounding-induced
-inflation is `~9 × 10⁻¹² mg/L` — fourteen orders of magnitude
+inflation is `~3 × 10⁻⁸ mg/L` — eight orders of magnitude
 below the trough/MIC clinical threshold (which is ≥ 1 mg/L).
-
-## Counter-example to a naive fixed-bound axiom
-
-Just to make the math-review-caught BUG concrete, here's why
-a fixed bound `0.0001` would be unsound:
-
-```
-example_axiom_failure (large operands):
-  Let a = 10¹⁰ (large finite Float, normal range)
-  Let b = 10¹⁰
-  Then a · b = 10²⁰
-  ulp(10²⁰) ≈ 10²⁰ · 2⁻⁵² ≈ 2.22 × 10⁴
-  So |fl(a · b) - (a · b)| can reach ≈ 1.11 × 10⁴
-  which exceeds 0.0001 by EIGHT orders of magnitude.
-
-example_axiom_failure (clinical operands, smaller margin):
-  Let a = b = 10⁴ (clinical PK upper range, e.g. dose in μg)
-  Then a · b = 10⁸
-  ulp(10⁸) ≈ 10⁸ · 2⁻⁵² ≈ 2.22 × 10⁻⁸
-  Half-ulp ≈ 1.11 × 10⁻⁸
-  This is well below 0.0001 — but the trend is clear: as
-  operand magnitude grows, fixed bounds eventually fail. The
-  per-call design tracks this scaling correctly.
-```
-
-The per-call axiom design avoids both failures: the user passes
-`eps_inf ≥ k · ε_machine · max(|a|, |b|, |a·b|)` per Higham
-2002 §2.4, scaled to operand magnitudes.
-
-Math-review caught a numerical slip in an earlier draft of this
-example (claimed `ulp(10²⁰) ≈ 10⁻⁵` instead of `≈ 10⁴`); the
-qualitative point — that fixed bounds break for large operands —
-is unchanged, and the corrected arithmetic is above.
 
 ## Status
 
-The four axioms + the `BoundedOrderedCarrier Float` instance +
-a demonstration theorem build cleanly under
-`lake build SounioFloatInstance`. The file uses `axiom`
-deliberately and explicitly; this is the documented Route C
-interim. No `sorry`, no Mathlib import.
-
-Math-review record:
-  - Pre-impl thesis (`/tmp/cauchy_float_thesis.md`):
-    1 BUG (fixed-bound axiom unsound for large operands —
-    addressed by switching to per-call `eps_inf`),
-    1 TIGHTENABLE (Route C honesty — addressed by counter-
-    example documentation above and the `WARNING` header),
-    + 6 OK on the per-call axiom design once corrected.
+Five-axiom IEEE-754 spec + four typeclass-shape axioms +
+two derived theorems + the `BoundedOrderedCarrier Float`
+instance + a demonstration theorem build cleanly under
+`lake build SounioFloatInstance`. No `sorry`, no Mathlib
+import.
 -/
 
 namespace Sounio.FloatInstance
 
 -- ================================================================
--- §1. The 4 axioms — IEEE-754 binary64 facts.
+-- §1. The 4 typeclass-shape axioms (retained from Phase 0).
 -- ================================================================
 
 /-- IEEE-754 `≤` transitivity for binary64 finite (non-NaN)
-    operands. Soundness: NaN handling makes the antecedent
-    `False` which discharges the implication; for finite
-    operands, `≤` is a total order so transitive.
+    operands.
+
+    Phase 0: this is an axiom backing the
+    `BoundedOrderedCarrier Float` instance.
+
+    Phase 1: a stronger conditional version
+    (`le_trans_from_spec`, with finiteness hypotheses) is
+    derived from the spec below. This unconditional axiom
+    is retained for the typeclass instance.
+
+    Phase 1.5: this axiom becomes redundant (the unconditional
+    version follows from the spec + Float NaN handling
+    semantics).
 
     Source: Higham 2002 §2.5; IEEE-754-2008 §5.11. -/
 axiom Float.le_trans :
@@ -205,34 +185,183 @@ axiom Float.le_trans :
 axiom Float.zero_le_zero : (0.0 : Float) ≤ 0.0
 
 /-- IEEE-754 right-multiplication monotonicity with bounded
-    inflation. The axiom states that for ANY `eps_inf ≥ 0`, the
-    bound holds.
+    inflation. Phase 1.5 will derive this from
+    `Sounio.IEEE754.Float.mul_rne_bound` + Rat algebra (~80 LOC).
 
-    The user is responsible for choosing `eps_inf` satisfying
-    the cookbook formula
-        eps_inf ≥ k · ε_machine · max(|a|, |b|, |c|, |a·c|, |b·c|)
-    per Higham 2002 §2.4 eq. (2.5).
-
-    Source: Higham 2002 §2.4 eq. (2.5). -/
+    Source: Higham 2002 §2.1 eq. (2.4). -/
 axiom Float.mul_le_mul_of_nonneg_right_bounded :
   ∀ {a b : Float} (c eps_inf : Float),
     a ≤ b → 0.0 ≤ c → 0.0 ≤ eps_inf →
     a * c ≤ (b * c) + eps_inf
 
 /-- IEEE-754 right-addition monotonicity with bounded inflation.
-    Same Higham reference as `mul`. -/
+    Phase 1.5 will derive this from
+    `Sounio.IEEE754.Float.add_rne_bound` + Rat algebra (~70 LOC). -/
 axiom Float.add_le_add_right_bounded :
   ∀ {a b : Float} (c eps_inf : Float),
     a ≤ b → 0.0 ≤ eps_inf →
     a + c ≤ (b + c) + eps_inf
 
 -- ================================================================
--- §2. The BoundedOrderedCarrier Float instance.
+-- §2. Phase 1 derived theorems from the IEEE-754 spec.
+-- ================================================================
+
+/-- Phase 1 derivation: `Float.le_trans` follows from
+    `Float.toRat_le_iff_finite` + `Rat.le_trans`, conditioned
+    on finiteness of all three operands.
+
+    This is strictly tighter than the unconditional axiom
+    `Float.le_trans` above (which is needed for the typeclass
+    instance over arbitrary Float operands). For finite-normal
+    clients, this conditional theorem replaces the axiom
+    cleanly — no Float-specific assumption beyond the IEEE-754
+    spec.
+
+    Math-review record:
+      [OK] le_trans derivation
+        Chains iff via Rat.le_trans; finiteness ha,hb,hc
+        sufficient (tight).
+-/
+theorem Float.le_trans_from_spec
+    {a b c : Float}
+    (ha : Sounio.IEEE754.Float.IsFiniteNormal a)
+    (hb : Sounio.IEEE754.Float.IsFiniteNormal b)
+    (hc : Sounio.IEEE754.Float.IsFiniteNormal c)
+    (hab : a ≤ b) (hbc : b ≤ c) : a ≤ c := by
+  have h_ab_rat :
+      Sounio.IEEE754.Float.toRat a ≤ Sounio.IEEE754.Float.toRat b :=
+    (Sounio.IEEE754.Float.toRat_le_iff_finite ha hb).mp hab
+  have h_bc_rat :
+      Sounio.IEEE754.Float.toRat b ≤ Sounio.IEEE754.Float.toRat c :=
+    (Sounio.IEEE754.Float.toRat_le_iff_finite hb hc).mp hbc
+  have h_ac_rat :
+      Sounio.IEEE754.Float.toRat a ≤ Sounio.IEEE754.Float.toRat c :=
+    Rat.le_trans h_ab_rat h_bc_rat
+  exact (Sounio.IEEE754.Float.toRat_le_iff_finite ha hc).mpr h_ac_rat
+
+/-- Phase 1 derivation: `Float.zero_le_zero` follows from
+    `Float.toRat_le_iff_finite` + `Rat.le_refl`, conditioned
+    on `IsFiniteNormal 0.0`.
+
+    Note: requires `IsFiniteNormal 0.0` as a hypothesis
+    (which is trivially true for IEEE-754 binary64 — zero is
+    finite — but must be supplied as a witness in the
+    Mathlib-free derivation).
+
+    Math-review record:
+      [OK] zero_le_zero derivation
+        Trivial via refl; assumes h₀ : IsFiniteNormal 0
+        (true, add as lemma).
+-/
+theorem Float.zero_le_zero_from_spec
+    (h0 : Sounio.IEEE754.Float.IsFiniteNormal (0.0 : Float))
+    : (0.0 : Float) ≤ 0.0 := by
+  exact (Sounio.IEEE754.Float.toRat_le_iff_finite h0 h0).mpr
+          Rat.le_refl
+
+-- ================================================================
+-- §3. Phase 1.5 deferred derivations (mul/add).
+-- ================================================================
+
+/-! ## Phase 1.5 deferred mul derivation
+
+   `Float.mul_le_mul_of_nonneg_right_bounded`
+    can be derived from `Sounio.IEEE754.Float.mul_rne_bound` +
+    `Rat.mul_le_mul_of_nonneg_right` + `Sounio.IEEE754.Float.add_rne_bound`
+    + `Sounio.IEEE754.Float.toRat_le_iff_finite`, given:
+
+      - finiteness witnesses for `a, b, c, eps_inf, a*c, b*c,
+        (b*c)+eps_inf`;
+      - cookbook hypothesis: `eps_inf.toRat ≥ 3·u·max(|a.toRat·c.toRat|,
+        |b.toRat·c.toRat|)` where `u = 2⁻⁵³` is the binary64 unit
+        roundoff.
+
+    Proof sketch (deferred ~80 LOC):
+      1. From `a ≤ b` + finiteness: `a.toRat ≤ b.toRat`.
+      2. From `0 ≤ c` + finiteness on c, and trivial
+         `IsFiniteNormal 0`: `0 ≤ c.toRat`.
+      3. By `Rat.mul_le_mul_of_nonneg_right`:
+         `a.toRat · c.toRat ≤ b.toRat · c.toRat`.
+      4. By `mul_rne_bound` for `a · c`:
+         `(a · c).toRat ≤ a.toRat · c.toRat + u · |a.toRat · c.toRat|`.
+      5. Combining 3 + 4:
+         `(a · c).toRat ≤ b.toRat · c.toRat + u · |a.toRat · c.toRat|`.
+      6. By `mul_rne_bound` for `b · c`:
+         `b.toRat · c.toRat ≤ (b · c).toRat + u · |b.toRat · c.toRat|`.
+      7. Chain (5,6):
+         `(a · c).toRat ≤ (b · c).toRat + u · (|a.toRat · c.toRat| + |b.toRat · c.toRat|)`.
+      8. By cookbook (eps_inf ≥ 3u · max(|ac|, |bc|)):
+         `(b · c).toRat + u · (|ac| + |bc|) ≤ (b · c).toRat + eps_inf.toRat
+                                                 - u · |bc + eps_inf|`.
+      9. By `add_rne_bound` for `(b · c) + eps_inf`:
+         `(b · c).toRat + eps_inf.toRat - u · |bc + eps_inf|
+              ≤ ((b · c) + eps_inf).toRat`.
+      10. Bottom: `(a · c).toRat ≤ ((b · c) + eps_inf).toRat`.
+      11. By `toRat_le_iff_finite` reverse: `a · c ≤ (b · c) + eps_inf`.
+
+    Phase 1.5 milestone scope: ~80 LOC of careful Rat algebra
+    + finiteness propagation through Float arithmetic. The
+    coarse cookbook constant `3` is sufficient (math-review
+    confirmed: `3u · max(|ac|, |bc|)` covers both
+    `mul_rne_bound`s and the `add_rne_bound` of
+    `(b · c) + eps_inf`).
+
+    Until Phase 1.5 lands, the unconditional
+    `Float.mul_le_mul_of_nonneg_right_bounded` axiom in §1
+    backs the typeclass instance.
+
+    Math-review record:
+      [OVERREACH] mul derivation cookbook
+        Original `eps_inf ≥ ε(|ac| + |bc|)` missed
+        `add_rne_bound` of `(bc + eps_inf)`. Coarse form
+        `3u · max(|ac|, |bc|)` suffices.
+
+   (No Lean theorem statement — deferred to Phase 1.5
+    milestone. The proof sketch above is the mathematical
+    content.)
+-/
+
+/-! ## Phase 1.5 deferred add derivation
+
+   `Float.add_le_add_right_bounded`
+    can be derived from `Sounio.IEEE754.Float.add_rne_bound` +
+    `Rat.add_le_add_right` + `Sounio.IEEE754.Float.toRat_le_iff_finite`,
+    given finiteness witnesses + cookbook
+    `eps_inf.toRat ≥ 2u·max(|a+c|, |b+c|)`.
+
+    Proof sketch (deferred ~70 LOC):
+      1. From `a ≤ b` + finiteness: `a.toRat ≤ b.toRat`.
+      2. By `Rat.add_le_add_right`:
+         `a.toRat + c.toRat ≤ b.toRat + c.toRat`.
+      3. By `add_rne_bound` for `a + c`:
+         `(a + c).toRat ≤ a.toRat + c.toRat + u · |a.toRat + c.toRat|`.
+      4. Combining 2 + 3:
+         `(a + c).toRat ≤ b.toRat + c.toRat + u · |a.toRat + c.toRat|`.
+      5. By `add_rne_bound` for `b + c`:
+         `b.toRat + c.toRat ≤ (b + c).toRat + u · |b.toRat + c.toRat|`.
+      6. Chain (4, 5):
+         `(a + c).toRat ≤ (b + c).toRat + u · (|a + c| + |b + c|)`.
+      7. By cookbook + `add_rne_bound` for `(b + c) + eps_inf`:
+         `(b + c).toRat + 2u·max ≤ ((b + c) + eps_inf).toRat`.
+      8. Bottom: `(a + c).toRat ≤ ((b + c) + eps_inf).toRat`.
+      9. By `toRat_le_iff_finite` reverse: `a + c ≤ (b + c) + eps_inf`.
+
+    Math-review record:
+      [WRONG] add derivation "simpler — no 0≤c needed"
+        Conflated Rat.add_le (no nonneg) with Float.add (still
+        needs error budget). Cookbook is symmetric to mul:
+        2u · max(|a+c|, |b+c|).
+
+   (No Lean theorem statement — deferred to Phase 1.5.)
+-/
+
+-- ================================================================
+-- §4. The BoundedOrderedCarrier Float instance.
 -- ================================================================
 --
--- Each method is a thin wrapper around the corresponding axiom.
--- The instance is structurally complete: `lake build` requires
--- no further proofs once the axioms are admitted.
+-- The instance is unchanged from Phase 0: it uses the four
+-- typeclass-shape axioms in §1. Phase 1.5 will switch the
+-- backing to the spec-derived theorems.
 
 instance : BoundedOrderedCarrier Float where
   zero := 0.0
@@ -249,13 +378,8 @@ instance : BoundedOrderedCarrier Float where
         (a := a) (b := b) c eps_inf hab heps
 
 -- ================================================================
--- §3. Demonstration: Stage 3b bounded-Fréchet on Float.
+-- §5. Demonstration: Stage 3b bounded-Fréchet on Float.
 -- ================================================================
---
--- The bounded-Fréchet theorem from `SounioFloatBounded.lean`
--- now applies on `Float` directly. This demonstrates that the
--- Stage 3b typeclass machinery is genuinely operational on the
--- IEEE-754 carrier.
 
 /-- Bounded vancomycin Cmin Fréchet enclosure on `Float`.
 
@@ -268,11 +392,11 @@ instance : BoundedOrderedCarrier Float where
 
     For clinical PK regimes (operands in `[10⁻², 10⁴]`), the
     cookbook formula gives:
-        eps_vc, eps_cl ≤ 4 · 2⁻⁵² · 10⁴ ≈ 9 × 10⁻¹²
-        total_eps ≤ eps_vc + eps_cl ≈ 2 × 10⁻¹¹
+        eps_vc, eps_cl ≤ 3 · 2⁻⁵³ · 10⁸ ≈ 3.3 × 10⁻⁸
+        total_eps ≤ eps_vc + eps_cl ≈ 6.6 × 10⁻⁸
 
-    The Sounio Cmin band correctness modulo `2 × 10⁻¹¹ mg/L`
-    is **eleven orders of magnitude** below the trough/MIC
+    The Sounio Cmin band correctness modulo `7 × 10⁻⁸ mg/L`
+    is **seven orders of magnitude** below the trough/MIC
     clinical threshold. -/
 theorem vancomycin_cmin_frechet_enclosure_float
     (cmin : Float → Float → Float)
@@ -308,38 +432,26 @@ theorem vancomycin_cmin_frechet_enclosure_float
     lift_lower lift_upper
 
 -- ================================================================
--- §4. Roadmap to discharge the axioms.
+-- §6. Roadmap to Phase 1.5 + Phase 2.
 -- ================================================================
 --
--- Each axiom corresponds to a known, citable IEEE-754 fact:
+-- **Phase 1.5** (next milestone):
+--   - prove `Float.mul_le_mul_of_nonneg_right_bounded_from_spec`
+--     and `Float.add_le_add_right_bounded_from_spec` from the
+--     IEEE-754 spec via the proof sketches in §3 (~150 LOC
+--     total Rat algebra).
+--   - migrate the typeclass instance to use the spec-derived
+--     theorems.
+--   - delete the 4 typeclass-shape axioms in §1.
+--   - net: 5 IEEE-754 axioms total, 0 typeclass-shape axioms,
+--     all 4 BoundedOrderedCarrier methods proven theorems.
 --
--- 1. `Float.le_trans` — provable from any IEEE-754 model that
---    formalises ≤ on the finite subset. Mathlib's
---    `Float.le_trans` (when added) discharges this directly.
---
--- 2. `Float.zero_le_zero` — provable by reflection
---    (`decide`) once `Float.le` reflects to a decidable
---    instance for literal arguments. Mathlib provides this.
---
--- 3. `Float.mul_le_mul_of_nonneg_right_bounded` — provable
---    from any IEEE-754 model that includes:
---      (a) the rounding bound `|fl(x op y) - (x op y)| ≤ ulp/2`
---      (b) the relationship `ulp(x) ≤ x · 2⁻⁵²` for normal
---          x ≠ 0
---      (c) Cauchy-Schwarz-style operand triangle inequalities
---    Coq's Flocq has all of (a)-(c). The Lean port (Float-Flocq)
---    is the canonical Route B discharge target.
---
--- 4. `Float.add_le_add_right_bounded` — same as 3 but for
---    addition. Same discharge target.
---
--- The migration path: when Route A (Mathlib) or Route B (in-tree
--- IEEE-754) lands, this file's `axiom` keywords become `theorem`
--- and the bodies become proofs. Downstream consumers (the
--- `BoundedOrderedCarrier Float` instance and the
--- `vancomycin_cmin_frechet_enclosure_float` theorem) continue
--- to work without modification — they only depend on the
--- typeclass interface, not on whether the laws are axiomatic
--- or proven.
+-- **Phase 2** (long-term, ~5000 LOC):
+--   - in-tree IEEE-754 binary64 model formalisation
+--     (rounding modes, ulp, guard bits, c.f. Coq's Flocq).
+--   - 5 spec axioms in `SounioIEEE754Spec.lean` become theorems.
+--   - this file's derived theorems remain unchanged.
+--   - net: 0 axioms total; full IEEE-754-2008 binary64
+--     compliance proven from first principles.
 
 end Sounio.FloatInstance

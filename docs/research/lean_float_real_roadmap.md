@@ -4,10 +4,18 @@
 **Owner**: Demetrios Chiuratto Agourakis
 **Status**: Stage 0 ✅ + Stage 1 ✅ + Stage 2 ✅ + Stage 3a (Route A
 + Cauchy structural) ✅ + Stage 3a-Cauchy partial ✅ + Stage 3b
-(typeclass + Route C Float instance) ✅ landed. Full
-`MulPreservesCauchy` for `OrderedCarrier SounioRealCauchy` and
-Mathlib/in-tree IEEE-754 discharge of axioms remain as future
-milestones.
+(typeclass + Route C Float instance) ✅ + Stage 3b-F Phase 1
+(canonical 5-axiom IEEE-754 spec + 2 derived theorems) ✅ landed.
+
+**Pending milestones**:
+  - Full `MulPreservesCauchy` for `OrderedCarrier
+    SounioRealCauchy` (~150 LOC ε-N analysis, planned as
+    `SounioRealCauchyMul.lean`).
+  - Phase 1.5: derive `mul_le_mul_bounded_from_spec` and
+    `add_le_add_bounded_from_spec` from the IEEE-754 spec
+    (~150 LOC), eliminating the 4 typeclass-shape axioms.
+  - Phase 2 / Route B: in-tree IEEE-754 binary64 model
+    (~5000 LOC, c.f. Coq Flocq) discharging the 5 spec axioms.
 
 ## Why this matters
 
@@ -37,6 +45,8 @@ the in-tree, no-axiom, no-`sorry` policy.
 | 3b    | typeclass| ✅ landed    | `formal/lean4/SounioFloatBounded.lean`          |
 | 3b-F  | `Float`  | ✅ axiomatic | `formal/lean4/SounioFloatInstance.lean` (RtC)   |
 |       |          | (Mathlib ⏳) |  4 axioms per Higham 2002 §2.4; cookbook eps   |
+| 3b-F-1| `Float`  | ✅ Phase 1   | `formal/lean4/SounioIEEE754Spec.lean`           |
+|       |          | (1.5 ⏳)     |  + `SounioFloatInstance.lean` dual-rep refactor |
 | Walley/| Stage 2 | ✅ landed    | `formal/lean4/SounioWalleyGeneric.lean`         |
 | Kliba |          |             | `formal/lean4/SounioKlibanoffGeneric.lean`      |
 
@@ -458,6 +468,8 @@ a referee), a Mathlib-imported alternative could be added as a
 | Walley generic | 2026-05-01 | `SounioWalleyGeneric`             | Stage 2 lift of M3.5 collapse/vacuous/gap          |
 | Klibanoff generic | 2026-05-01 | `SounioKlibanoffGeneric`       | Stage 2 lift of M3.5+ boundary theorems           |
 | 3a-C-P| 2026-05-01 | `SounioRealCauchyPartial`                  | Easy half: mul_le_mul_pointwise + OC-modulo-MulPres + ≤_p→≤_ε |
+| 3b-F-1| 2026-05-01 | `SounioIEEE754Spec` (Phase 1)              | 5 canonical IEEE-754 axioms; Higham §2.1 + 2u→3u   |
+| 3b-F-1| 2026-05-01 | `SounioFloatInstance` (refactor)           | 2 derived theorems from spec; mul/add → Phase 1.5  |
 
 ## Stage 3a-Cauchy partial (DONE — 2026-05-01)
 
@@ -484,6 +496,47 @@ Math-review record:
     Mul-instance non-conflict, subsumption, `≤_p → ≤_ε`).
   - Post-impl: 4/5 OK + 1 OVERREACH on naming. File renamed
     `Complete.lean → Partial.lean` per review.
+
+## Stage 3b-F Phase 1 — canonical IEEE-754 spec (DONE — 2026-05-01)
+
+`SounioIEEE754Spec.lean` extracts the IEEE-754 binary64
+specification to a separate module with **5 canonical
+axioms** drawn from Higham 2002 §2.1 (basic-operation model)
+and IEEE-754-2008 §5.11 (total order):
+
+  1. `Float.toRat : Float → Rat`
+  2. `Float.IsFiniteNormal : Float → Prop`
+  3. `Float.toRat_le_iff_finite`: ≤ matches Rat ≤ on finite
+     normal subset
+  4. `Float.mul_rne_bound`: Higham §2.1 multiplication
+     relative-error bound (`u = 2⁻⁵³`)
+  5. `Float.add_rne_bound`: Higham §2.1 addition
+
+`SounioFloatInstance.lean` is refactored to import the spec
+and adopt a Phase 1 dual representation:
+  - 4 typeclass-shape axioms retained (back the
+    unconditional `BoundedOrderedCarrier Float` instance);
+  - 2 derived theorems (`Float.le_trans_from_spec`,
+    `Float.zero_le_zero_from_spec`) proven from the spec
+    with finiteness hypotheses;
+  - 2 deferred theorems (`mul_le_mul_bounded_from_spec`,
+    `add_le_add_bounded_from_spec`) documented with explicit
+    proof sketches in `/-! ## Phase 1.5 deferred ... -/`
+    blocks.
+
+Math-review caught **3 critical bugs** in the thesis pre-impl:
+  - `ε_machine = 2⁻⁵²` was `ulp(1)`, not unit roundoff.
+    Corrected to `u = 2⁻⁵³` (Higham §2.4).
+  - Citation `Higham §2.5` is summation γ_n bound. Corrected
+    to `§2.1` basic-operation model.
+  - Cookbook `eps_inf ≥ ε(|ac| + |bc|)` missed `add_rne_bound`
+    of `(bc + eps_inf)`. Corrected coarse form `3u·max(|ac|,
+    |bc|)` documented in deferred derivation.
+
+Phase 1 ships meaningful axiom-canonicalisation progress
+without breaking the typeclass instance API. Phase 1.5 will
+discharge the remaining 2 theorems and delete the 4 typeclass-
+shape axioms (net: 5 spec axioms only).
 
 ## Audit policy
 

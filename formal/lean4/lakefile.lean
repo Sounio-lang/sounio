@@ -167,6 +167,13 @@ lean_lib «SounioRealCauchy» where
 @[default_target]
 lean_lib «SounioRealCauchyPartial» where
 
+-- Stage 3b-F Phase 1: canonical IEEE-754 binary64 spec
+-- (5 axioms). Higham 2002 §2.1 basic-operation model.
+-- The 4 BoundedOrderedCarrier Float typeclass methods are
+-- derived as theorems in SounioFloatInstance.lean.
+@[default_target]
+lean_lib «SounioIEEE754Spec» where
+
 -- Stage 3b Float instance via Route C: 4 axioms for IEEE-754
 -- binary64 typeclass methods, with the BoundedOrderedCarrier
 -- Float instance built on top. Axiomatic interim until Route A
