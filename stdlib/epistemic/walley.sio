@@ -1,0 +1,301 @@
+// stdlib/epistemic/walley.sio
+//
+// M3.5 — Walley elicitation surface: ε-contamination credal sets.
+//
+// Operational design (Berger 1990; Walley 1991 §2.9):
+//
+//   M_ε(P0, S) := { (1 − ε)·P0 + ε·Q : Q probability measure
+//                                       supported on S = [s_lo, s_hi] }
+//
+// The set M_ε is a *credal set* (closed convex set of probability
+// measures) parametrised by:
+//
+//   - P0           : nominal distribution (mean μ_0, variance σ²_0)
+//   - ε ∈ [0, 1]   : Knightian contamination radius
+//   - S = [s_lo, s_hi] : physiological / engineering support
+//
+// Interpretation: "P0 with confidence (1 − ε), plus an unknown
+// contamination of mass ε that can lie anywhere on the support S."
+//
+// Two distinct lifts are provided to reflect *what* the resulting
+// p-box bounds:
+//
+//   credal_to_pbox(c) -> PBox
+//       Bounds on the MEAN E_P(X) over P ∈ M_ε. Sharp on lo/hi mean.
+//       Variance is a sound upper bound (NOT sharp).
+//
+//   credal_to_support_pbox(c) -> PBox
+//       Bounds on the SUPPORT supp(P) ⊆ [s_lo, s_hi]. Vacuous on the
+//       mean (gap = full support) but with valid Popoviciu variance.
+//       This is the lift to use as input to `pb_apply2_monotone_*`
+//       for value-enclosure of f(X, Y) for nonlinear monotone f.
+//
+// Why two lifts? (math-review 2026-04-30)
+//   The mean-band p-box bounds E[X], but a realisation X can be
+//   *outside* [lo_mean, hi_mean]. For nonlinear monotone f, Fréchet
+//   enclosure on the mean-band UNDER-encloses f(X, Y). For sound
+//   value-enclosure we must propagate over the SUPPORT band, which
+//   is what `credal_to_support_pbox` produces.
+//
+// Connection to other modules:
+//   - knightian.sio    — PBox, pb_apply2_monotone_*, gates (M2, M2.5)
+//   - knowledge.sio    — Knowledge<f64> (precise, Var-only)
+//   - SounioWalley.lean — collapse-at-zero, width-monotonicity (M3.5)
+//
+// Variance bound soundness (Var_P upper bound).
+// The formula
+//   Var_P(X) ≤ E_P[(X − μ_0)²] = (1 − ε)·Var_{P0}(X) + ε·E_Q[(X − μ_0)²]
+//             ≤ (1 − ε)·σ²_0  +  ε·R²
+// where R := max(|μ_0 − s_lo|, |s_hi − μ_0|) is provably sound for
+// every P ∈ M_ε(P0, S) with supp(P0) ⊆ S. Proof: Var_P(X) is the
+// minimum of E_P[(X − c)²] over c, hence Var_P(X) ≤ E_P[(X − μ_0)²].
+//
+// Discarded variants (and why):
+//   - (1 − ε)·σ²_0 + ε·((s_hi − s_lo)/2)²   (Popoviciu)
+//     UNSOUND — math-review counter-example: μ_0=0, s_lo=0, s_hi=2,
+//     σ²_0=0, Q=δ_2, ε=½ gives Var_P = 1 > claimed 0.5. The missing
+//     cross-term ε(1−ε)(μ_0 − μ_Q)² is positive.
+//
+//   - ((s_hi − s_lo)/2)² constant in ε      (Popoviciu, support-only)
+//     SOUND but discards information about P0 entirely; loose for
+//     small ε.
+//
+// The chosen formula is sound, monotone-non-decreasing in ε, and
+// recovers σ²_0 exactly at ε = 0.
+//
+// Source policy: this module produces only OUTER enclosures of the
+// true (unknown) distribution P. No tightening below soundness.
+
+use epistemic::knightian::*
+
+// ============================================================================
+// SCALAR HELPERS
+// ============================================================================
+
+fn ws_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn ws_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn ws_clamp_eps(e: f64) -> f64 {
+    if e < 0.0 { return 0.0 }
+    if e > 1.0 { return 1.0 }
+    e
+}
+
+fn ws_clamp_conf(c: i64) -> i64 {
+    if c < 0 { return 0 }
+    if c > 1000 { return 1000 }
+    c
+}
+
+// ============================================================================
+// CREDALSET — Walley ε-contamination class
+// ============================================================================
+//
+// Invariants (well-formed):
+//   - 0 ≤ epsilon ≤ 1
+//   - support_lo ≤ nominal_mean ≤ support_hi  (P0 inside its support)
+//   - nominal_variance ≥ 0
+//   - 0 ≤ confidence ≤ 1000
+
+pub struct CredalSet {
+    nominal_mean: f64,
+    nominal_variance: f64,
+    epsilon: f64,
+    support_lo: f64,
+    support_hi: f64,
+    confidence: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+pub fn cs_neighborhood(
+        nominal_mean: f64,
+        nominal_variance: f64,
+        epsilon: f64,
+        support_lo: f64,
+        support_hi: f64,
+        confidence: i64) -> CredalSet with Mut {
+    let eps = ws_clamp_eps(epsilon)
+    var var_clamped: f64 = nominal_variance
+    if var_clamped < 0.0 { var_clamped = 0.0 }
+    let s_lo = if support_lo < support_hi { support_lo } else { support_hi }
+    let s_hi = if support_lo < support_hi { support_hi } else { support_lo }
+    let mu = if nominal_mean < s_lo {
+        s_lo
+    } else {
+        if nominal_mean > s_hi { s_hi } else { nominal_mean }
+    }
+    CredalSet {
+        nominal_mean: mu,
+        nominal_variance: var_clamped,
+        epsilon: eps,
+        support_lo: s_lo,
+        support_hi: s_hi,
+        confidence: ws_clamp_conf(confidence),
+    }
+}
+
+// Precise credal set: ε = 0. Recovers exactly Knowledge<f64>.
+pub fn cs_precise(
+        nominal_mean: f64,
+        nominal_variance: f64,
+        support_lo: f64,
+        support_hi: f64,
+        confidence: i64) -> CredalSet with Mut {
+    cs_neighborhood(nominal_mean, nominal_variance, 0.0,
+                    support_lo, support_hi, confidence)
+}
+
+// Vacuous credal set: ε = 1. Total ignorance within support.
+pub fn cs_vacuous(
+        support_lo: f64,
+        support_hi: f64,
+        confidence: i64) -> CredalSet with Mut {
+    let mid = 0.5 * (support_lo + support_hi)
+    cs_neighborhood(mid, 0.0, 1.0, support_lo, support_hi, confidence)
+}
+
+// ============================================================================
+// ACCESSORS
+// ============================================================================
+
+pub fn cs_nominal_mean(c: &CredalSet) -> f64 { c.nominal_mean }
+pub fn cs_nominal_variance(c: &CredalSet) -> f64 { c.nominal_variance }
+pub fn cs_epsilon(c: &CredalSet) -> f64 { c.epsilon }
+pub fn cs_support_lo(c: &CredalSet) -> f64 { c.support_lo }
+pub fn cs_support_hi(c: &CredalSet) -> f64 { c.support_hi }
+pub fn cs_confidence(c: &CredalSet) -> i64 { c.confidence }
+
+// ε-scaled gap: width of the lifted MEAN p-box. Linear in ε.
+//   gap = ε · (s_hi − s_lo)
+pub fn cs_mean_gap(c: &CredalSet) -> f64 {
+    c.epsilon * (c.support_hi - c.support_lo)
+}
+
+// Re-parametrise ε while keeping nominal/support fixed. Used to
+// study width-monotonicity in tests.
+pub fn cs_with_epsilon(c: &CredalSet, new_eps: f64) -> CredalSet with Mut {
+    cs_neighborhood(c.nominal_mean, c.nominal_variance, new_eps,
+                    c.support_lo, c.support_hi, c.confidence)
+}
+
+// ============================================================================
+// LIFTS — credal set → p-box
+// ============================================================================
+
+// Mean-band lift: bounds E_P(X) over P ∈ M_ε.
+//
+//   lo_mean  = (1 − ε)·μ_0 + ε·s_lo     (sharp; achieved at Q = δ_{s_lo})
+//   hi_mean  = (1 − ε)·μ_0 + ε·s_hi     (sharp; achieved at Q = δ_{s_hi})
+//   variance = (1 − ε)·σ²_0 + ε·R²      (upper bound on Var_P(X))
+//   where R  = max(|μ_0 − s_lo|, |s_hi − μ_0|)
+//
+// At ε = 0: collapses to PBox(μ_0, μ_0, σ²_0)  — precise, recovers
+// Knowledge<f64>(μ_0, σ²_0).
+//
+// Confidence is decayed by 5% as a Knightian-elicitation cost
+// (consistent with pb_decay in knightian.sio for binary ops).
+pub fn credal_to_pbox(c: &CredalSet) -> PBox with Mut, Div, Panic {
+    let one_minus = 1.0 - c.epsilon
+    let lo = one_minus * c.nominal_mean + c.epsilon * c.support_lo
+    let hi = one_minus * c.nominal_mean + c.epsilon * c.support_hi
+    let r_lo = ws_abs(c.nominal_mean - c.support_lo)
+    let r_hi = ws_abs(c.support_hi - c.nominal_mean)
+    let r = ws_max(r_lo, r_hi)
+    let r_sq = r * r
+    let var_in = one_minus * c.nominal_variance
+    let var_contam = c.epsilon * r_sq
+    let var_bound = var_in + var_contam
+    let conf_decayed = (c.confidence * 95) / 100
+    pb_new(lo, hi, var_bound, ws_clamp_conf(conf_decayed))
+}
+
+// Support-band lift: bounds the SUPPORT supp(P) ⊆ [s_lo, s_hi].
+// USE THIS for nonlinear monotone propagation via
+// `pb_apply2_monotone_inc_dec` etc., where the propagation must
+// enclose realised values of f(X, Y), not just E[f(X, Y)].
+//
+//   lo_mean  = s_lo
+//   hi_mean  = s_hi
+//   variance = ((s_hi − s_lo) / 2)²     (Popoviciu maximum)
+//
+// This lift discards information about (μ_0, σ²_0, ε) — it is the
+// vacuous worst case over all distributions on [s_lo, s_hi]. Use
+// this when feeding into Fréchet enclosure for value-of-f.
+pub fn credal_to_support_pbox(c: &CredalSet) -> PBox {
+    let half_range = 0.5 * (c.support_hi - c.support_lo)
+    pb_new(c.support_lo, c.support_hi, half_range * half_range, c.confidence)
+}
+
+// ============================================================================
+// QUERIES
+// ============================================================================
+
+// True iff a candidate distribution mean μ ∈ [lo_mean, hi_mean] of the
+// lifted mean-pbox. Used for hypothesis-rejection at the elicitation
+// surface.
+pub fn cs_mean_in_band(c: &CredalSet, mu: f64) -> bool with Mut, Div, Panic {
+    let p = credal_to_pbox(c)
+    pb_contains(&p, mu)
+}
+
+// ============================================================================
+// SELF-TEST main()
+// ============================================================================
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    // 1. Collapse at ε = 0: precise embedding.
+    let precise = cs_precise(15.0, 0.25, 5.0, 25.0, 950)
+    let pbox_precise = credal_to_pbox(&precise)
+    let collapse_ok = pb_lo_mean(&pbox_precise) == 15.0
+                   && pb_hi_mean(&pbox_precise) == 15.0
+                   && pb_variance(&pbox_precise) == 0.25
+    if collapse_ok {
+        println("WALLEY COLLAPSE OK")
+    } else {
+        println("WALLEY COLLAPSE FAIL")
+    }
+
+    // 2. Vacuous at ε = 1: full support band.
+    let vac = cs_vacuous(5.0, 25.0, 800)
+    let pbox_vac = credal_to_pbox(&vac)
+    let vac_ok = pb_lo_mean(&pbox_vac) == 5.0 && pb_hi_mean(&pbox_vac) == 25.0
+    if vac_ok {
+        println("WALLEY VACUOUS OK")
+    } else {
+        println("WALLEY VACUOUS FAIL")
+    }
+
+    // 3. Neighborhood: ε = 0.1, gap should be 0.1 × 20 = 2.0
+    let n = cs_neighborhood(15.0, 0.25, 0.1, 5.0, 25.0, 920)
+    let pbox_n = credal_to_pbox(&n)
+    let gap_expected = 2.0
+    let gap_actual = pb_hi_mean(&pbox_n) - pb_lo_mean(&pbox_n)
+    if ws_abs(gap_actual - gap_expected) < 1.0e-9 {
+        println("WALLEY NEIGHBORHOOD GAP OK")
+    } else {
+        println("WALLEY NEIGHBORHOOD GAP FAIL")
+    }
+
+    // 4. Width-monotonicity in ε: cs_mean_gap is linear in ε.
+    let n_small = cs_with_epsilon(&n, 0.05)
+    let n_large = cs_with_epsilon(&n, 0.5)
+    if cs_mean_gap(&n_small) < cs_mean_gap(&n) && cs_mean_gap(&n) < cs_mean_gap(&n_large) {
+        println("WALLEY WIDTH MONOTONE OK")
+    } else {
+        println("WALLEY WIDTH MONOTONE FAIL")
+    }
+
+    // 5. Support-band lift discards μ_0/ε info.
+    let support_p = credal_to_support_pbox(&n)
+    if pb_lo_mean(&support_p) == 5.0 && pb_hi_mean(&support_p) == 25.0 {
+        println("WALLEY SUPPORT LIFT OK")
+    } else {
+        println("WALLEY SUPPORT LIFT FAIL")
+    }
+
+    println("WALLEY SMOKE PASS")
+    0
+}

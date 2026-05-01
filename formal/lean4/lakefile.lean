@@ -101,3 +101,9 @@ lean_lib «SounioVancomycinDosingSafety» where
 -- monotone-in-each-arg functions (joint-dependence resolution)
 @[default_target]
 lean_lib «SounioFrechet» where
+
+-- M3.5: Vancomycin-Knightian thrust — Walley ε-contamination credal
+-- set elicitation surface (collapse-at-zero, vacuous-at-one,
+-- gap-monotone-in-ε)
+@[default_target]
+lean_lib «SounioWalley» where
