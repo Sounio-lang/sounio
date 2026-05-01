@@ -9688,7 +9688,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            if src_match(ns, ne - ns, "measure") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "measure") {
                 compile_measure_call_x86(name_tok)
                 return
             }
@@ -11824,7 +11824,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             return
         }
-        if TK[EP as usize] == 8 && src_match(ns, ne - ns, "Knowledge") {
+        if TK[EP as usize] == 8 && src_match(ns, ne - ns, "Knowledge") && st_find(gl_name_hash(ns, ne)) < 0 {
             compile_knowledge_literal_x86()
             return
         }
@@ -25169,7 +25169,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            if src_match(ns, ne - ns, "measure") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "measure") {
                 compile_measure_call_a64(name_tok)
                 return
             }
@@ -25883,7 +25883,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             return
         }
-        if TK[EP as usize] == 8 && src_match(ns, ne - ns, "Knowledge") {
+        if TK[EP as usize] == 8 && src_match(ns, ne - ns, "Knowledge") && st_find(gl_name_hash(ns, ne)) < 0 {
             compile_knowledge_literal_a64()
             return
         }
@@ -28974,6 +28974,72 @@ fn print_imp_path() with IO, Mut, Panic {
     }
 }
 
+fn imp_append_lit_to_path(pos: i64, lit: string) -> i64 with Mut, Panic, Div {
+    var p = pos
+    let n = str_len(lit)
+    var i: i64 = 0
+    while i < n && p < 4095 {
+        IMP_PATH[p as usize] = str_char_at(lit, i) as i8
+        p = p + 1
+        i = i + 1
+    }
+    p
+}
+
+fn imp_raw_stem_len(raw_len: i64) -> i64 with Panic {
+    if raw_len > 4 &&
+       IMP_RAW_PATH[(raw_len - 4) as usize] == 46 &&
+       IMP_RAW_PATH[(raw_len - 3) as usize] == 115 &&
+       IMP_RAW_PATH[(raw_len - 2) as usize] == 105 &&
+       IMP_RAW_PATH[(raw_len - 1) as usize] == 111 {
+        return raw_len - 4
+    }
+    raw_len
+}
+
+fn imp_build_package_path_from_raw(raw_len: i64) -> i64 with Mut, Panic, Div {
+    let stem_len = imp_raw_stem_len(raw_len)
+    if stem_len <= 0 {
+        IMP_PATH[0 as usize] = 0
+        return 0
+    }
+
+    var root_end: i64 = 0
+    while root_end < stem_len && IMP_RAW_PATH[root_end as usize] != 47 {
+        root_end = root_end + 1
+    }
+
+    var p: i64 = 0
+    p = imp_append_lit_to_path(p, "packages/")
+
+    var i: i64 = 0
+    while i < root_end && p < 4095 {
+        var c = IMP_RAW_PATH[i as usize]
+        if c == 95 { c = 45 } // import_name -> package-name
+        IMP_PATH[p as usize] = c
+        p = p + 1
+        i = i + 1
+    }
+
+    p = imp_append_lit_to_path(p, "/src")
+    if root_end < stem_len {
+        IMP_PATH[p as usize] = 47
+        p = p + 1
+        i = root_end + 1
+        while i < stem_len && p < 4095 {
+            IMP_PATH[p as usize] = IMP_RAW_PATH[i as usize]
+            p = p + 1
+            i = i + 1
+        }
+        p = imp_append_lit_to_path(p, ".sio")
+    } else {
+        p = imp_append_lit_to_path(p, "/lib.sio")
+    }
+
+    IMP_PATH[p as usize] = 0
+    p
+}
+
 fn set_base_dir_from_src_path(ps: i64, pe: i64) with Mut, Panic {
     var last_slash: i64 = -1
     var i: i64 = ps
@@ -29587,6 +29653,43 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     copy_len = str_len(raw)
                     fsz = file_size(IMP_PATH)
                     // mod.sio fallback for raw path
+                    if copy_len <= 0 {
+                        var mfp: i64 = fp_len - 4
+                        var mi: i64 = 0
+                        while mi < mfp {
+                            MOD_PATH[mi as usize] = IMP_PATH[mi as usize]
+                            mi = mi + 1
+                        }
+                        MOD_PATH[mfp as usize] = 47
+                        MOD_PATH[(mfp+1) as usize] = 109
+                        MOD_PATH[(mfp+2) as usize] = 111
+                        MOD_PATH[(mfp+3) as usize] = 100
+                        MOD_PATH[(mfp+4) as usize] = 46
+                        MOD_PATH[(mfp+5) as usize] = 115
+                        MOD_PATH[(mfp+6) as usize] = 105
+                        MOD_PATH[(mfp+7) as usize] = 111
+                        mfp = mfp + 8
+                        MOD_PATH[mfp as usize] = 0
+                        raw = read_file(MOD_PATH)
+                        copy_len = str_len(raw)
+                        fsz = file_size(MOD_PATH)
+                        if copy_len > 0 {
+                            mi = 0
+                            while mi < mfp {
+                                IMP_PATH[mi as usize] = MOD_PATH[mi as usize]
+                                mi = mi + 1
+                            }
+                            fp_len = mfp
+                            IMP_PATH[fp_len as usize] = 0
+                        }
+                    }
+                }
+                if copy_len <= 0 {
+                    fp_len = imp_build_package_path_from_raw(raw_len)
+                    raw = read_file(IMP_PATH)
+                    copy_len = str_len(raw)
+                    fsz = file_size(IMP_PATH)
+                    // mod.sio fallback for packages/<pkg>/src/<module>.sio
                     if copy_len <= 0 {
                         var mfp: i64 = fp_len - 4
                         var mi: i64 = 0
