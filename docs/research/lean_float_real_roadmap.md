@@ -3,8 +3,9 @@
 **Started**: 2026-05-01
 **Owner**: Demetrios Chiuratto Agourakis
 **Status**: Stage 0 ✅ + Stage 1 ✅ + Stage 2 ✅ + Stage 3a (Route A
-+ Cauchy structural) ✅ + Stage 3b (typeclass + Route C Float
-instance) ✅ landed. Full Cauchy `OrderedCarrier` instance and
++ Cauchy structural) ✅ + Stage 3a-Cauchy partial ✅ + Stage 3b
+(typeclass + Route C Float instance) ✅ landed. Full
+`MulPreservesCauchy` for `OrderedCarrier SounioRealCauchy` and
 Mathlib/in-tree IEEE-754 discharge of axioms remain as future
 milestones.
 
@@ -31,6 +32,8 @@ the in-tree, no-axiom, no-`sorry` policy.
 | 3a    | `Real`   | ✅ landed    | `formal/lean4/SounioRealOrder.lean` (Route A)   |
 | 3a-C  | `Real`   | ✅ structural| `formal/lean4/SounioRealCauchy.lean`            |
 |       | (Cauchy) | (full ⏳)    |  IsCauchy + LE_p + bridges; Mul/full-OC defer  |
+| 3a-C-P| `Real`   | ✅ partial   | `formal/lean4/SounioRealCauchyPartial.lean`     |
+|       | (Cauchy) | (mul ⏳)     |  mul_le_mul_of_nonneg_right + OC-modulo-MulPres |
 | 3b    | typeclass| ✅ landed    | `formal/lean4/SounioFloatBounded.lean`          |
 | 3b-F  | `Float`  | ✅ axiomatic | `formal/lean4/SounioFloatInstance.lean` (RtC)   |
 |       |          | (Mathlib ⏳) |  4 axioms per Higham 2002 §2.4; cookbook eps   |
@@ -454,6 +457,33 @@ a referee), a Mathlib-imported alternative could be added as a
 | 3b-F  | 2026-05-01 | `SounioFloatInstance` (Route C, axiomatic) | 4 IEEE-754 axioms; instance + demo theorem        |
 | Walley generic | 2026-05-01 | `SounioWalleyGeneric`             | Stage 2 lift of M3.5 collapse/vacuous/gap          |
 | Klibanoff generic | 2026-05-01 | `SounioKlibanoffGeneric`       | Stage 2 lift of M3.5+ boundary theorems           |
+| 3a-C-P| 2026-05-01 | `SounioRealCauchyPartial`                  | Easy half: mul_le_mul_pointwise + OC-modulo-MulPres + ≤_p→≤_ε |
+
+## Stage 3a-Cauchy partial (DONE — 2026-05-01)
+
+`SounioRealCauchyPartial.lean` makes incremental progress on
+closing `OrderedCarrierObligation_RealCauchy`. It proves the
+**easy half** (`mul_le_mul_of_nonneg_right_pointwise` over `≤_p`
+given Cauchy witnesses for the products) and the
+`OrderedCarrierObligation_RealCauchy_holds_given_mulPres`
+decomposition (the obligation discharges given
+`MulPreservesCauchy` as a hypothesis).
+
+The hard half (`MulPreservesCauchy`: ε-N proof that pointwise
+products of Cauchy sequences are Cauchy) is deferred to a
+future `SounioRealCauchyMul.lean` milestone (~150 LOC of Rat
+algebra + boundedness lemma).
+
+The file also ships `le_p_implies_le_eps`, the canonical
+`≤_p → ≤_ε` lift, demonstrating that the pointwise eventual
+order suffices for all structural Sounio theorems and lifts
+to the canonical real-line order on demand.
+
+Math-review record:
+  - Pre-impl thesis: 8/8 OK (boundedness, ε/(2K) splitting,
+    Mul-instance non-conflict, subsumption, `≤_p → ≤_ε`).
+  - Post-impl: 4/5 OK + 1 OVERREACH on naming. File renamed
+    `Complete.lean → Partial.lean` per review.
 
 ## Audit policy
 
