@@ -167,3 +167,4 @@ a permanent defensive measure.
 
 **Next step:** Re-implement step D user-global infrastructure (USER_GLOBAL_*)
 without the memory corruption that caused PR #53's revert. The `examples/native/user_global_basic.sio` test file is ready but NOT yet in the smoke cohort (baseline driver can't handle it yet — that's expected until step D lands).
+
