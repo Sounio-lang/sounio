@@ -141,3 +141,30 @@ instrumentation for the next session to continue from.
 which would turn the hang into a detectable infinite loop with a fn name,
 identifying the exact statement that's cycling. Then bisect with
 `user_global_id_tok` calls commented out one parse-site at a time.
+
+---
+
+## 2026-05-01 — No-progress guard landed; self-compile gate clean
+
+Commit `21d19869` added the no-progress guard to `parse_block_ir`. The guard
+detects when `parse_stmt_ir` returns without advancing (`p <= prev_p`) and
+converts the infinite loop into a `native_compile: parse_block_no_progress`
+diagnostic + `unsupported_frontend` error.
+
+The full gate now passes:
+```
+[native-v2-driver-self] stage1-smoke OK ran=7 checked=7
+[native-v2-driver-self] fixed-point md5=45165e0a04cd57fd1bec63bfa104f4e0
+[native-v2-driver-self] PASS: baseline, stage1 driver, stage2 driver,
+  fixed-point (stage2==stage3), hello parity across all stages,
+  epistemic-fixed-point verified
+```
+
+No `parse_block_no_progress` messages were emitted during the full gate run,
+confirming that the original hang (stage1 → stage2) was caused by PR #53's
+user-global infrastructure (since reverted). The no-progress guard remains as
+a permanent defensive measure.
+
+**Next step:** Re-implement step D user-global infrastructure (USER_GLOBAL_*)
+without the memory corruption that caused PR #53's revert. The `examples/native/user_global_basic.sio` test file is ready but NOT yet in the smoke cohort (baseline driver can't handle it yet — that's expected until step D lands).
+
