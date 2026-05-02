@@ -2842,9 +2842,25 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             if sidx >= 0 {
                 let foff = struct_field_offset_tok(sidx, p + 2)
                 if foff >= 0 {
+                    let base_is_ref = lookup_local_is_ref_tok(ctx, p)
                     V2_LAST_STRUCT_IDX = -1
                     let parsed = parse_expr_ir(func, ctx, p + 4)
                     if parsed.ok != 0 {
+                        if base_is_ref != 0 {
+                            if V2_LAST_STRUCT_IDX >= 0 {
+                                let inner_flat = STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize]
+                                var ci: i64 = 0
+                                while ci < inner_flat {
+                                    ufn_record_store_ref_field(base_reg, foff + ci, parsed.reg + ci)
+                                    ci = ci + 1
+                                }
+                                V2_LAST_STRUCT_IDX = -1
+                                return parsed.next
+                            }
+                            ufn_record_store_ref_field(base_reg, foff, parsed.reg)
+                            V2_LAST_STRUCT_IDX = -1
+                            return parsed.next
+                        }
                         if V2_LAST_STRUCT_IDX >= 0 {
                             let inner_flat = STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize]
                             var ci: i64 = 0
@@ -2856,6 +2872,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                             return parsed.next
                         }
                         ufn_record_copy(base_reg + foff, parsed.reg)
+                        V2_LAST_STRUCT_IDX = -1
                         return parsed.next
                     }
                     mark_parse_unsupported(p + 4)
@@ -4052,7 +4069,7 @@ fn drv_emit_temp_addr(dst: i64, src: i64) with Mut, Panic, Div {
 fn drv_emit_load_ref_field(dst: i64, base_ref: i64, field_offset_words: i64) with Mut, Panic, Div {
     drv_core_load_temp_to_rax(base_ref)
     drv_emit_mov_reg_reg(3, 0)
-    drv_emit_load_rax_mem_rbx_disp32(field_offset_words * 8)
+    drv_emit_load_rax_mem_rbx_disp32(0 - (field_offset_words * 8))
     drv_core_store_rax_to_temp(dst)
 }
 
@@ -4061,7 +4078,7 @@ fn drv_emit_store_ref_field(base_ref: i64, field_offset_words: i64, src: i64) wi
     drv_emit_push_rax()
     drv_core_load_temp_to_rax(src)
     drv_emit_pop_rbx()
-    drv_emit_store_rax_mem_rbx_disp32(field_offset_words * 8)
+    drv_emit_store_rax_mem_rbx_disp32(0 - (field_offset_words * 8))
 }
 
 fn drv_global_is_byte(global_id: i64) -> bool {
