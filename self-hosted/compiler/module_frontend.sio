@@ -1198,6 +1198,24 @@ fn module_frontend_source_body_start(data: [i8; 16777216], start: i64, size: i64
     -1
 }
 
+fn module_frontend_source_body_end(data: [i8; 16777216], start: i64, size: i64) -> i64 {
+    var i = start
+    var depth: i64 = 0
+    while i < size {
+        let ch = data[i as usize]
+        if ch == (123 as i8) {
+            depth = depth + 1
+        } else if ch == (125 as i8) {
+            if depth == 0 {
+                return i
+            }
+            depth = depth - 1
+        }
+        i = i + 1
+    }
+    size
+}
+
 fn module_frontend_source_ident_at(data: [i8; 16777216], start: i64, size: i64) -> Name with Mut, Panic, Div {
     var n = Name { buf: [0; 128], len: 0 }
     var i = start
@@ -1232,6 +1250,20 @@ fn module_frontend_source_int_at(data: [i8; 16777216], start: i64, size: i64) ->
         }
     }
     (seen, value)
+}
+
+fn module_frontend_source_find_fn(data: [i8; 16777216], size: i64, target: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i + 2 < size {
+        if module_frontend_source_is_fn_at(data, i, size) {
+            let name = module_frontend_source_fn_name(data, i + 3, size)
+            if ir_name_eq(name, target) {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    0 - 1
 }
 
 fn module_frontend_name_is_println(name: Name) -> bool {
@@ -1282,6 +1314,79 @@ fn module_frontend_force_i64_return(func_in: IrFunction, value: i64) -> IrFuncti
     func.instrs[1] = ir_return(0)
     func.instr_count = 2
     func
+}
+
+fn module_frontend_try_eval_source_expr_i64(data: [i8; 16777216], start: i64, end: i64) -> (bool, i64) with Mut, Panic, Div {
+    var i = module_frontend_source_skip_ws(data, start, end)
+    var total: i64 = 0
+    var seen = false
+    var expect_term = true
+    while i < end {
+        i = module_frontend_source_skip_ws(data, i, end)
+        if i >= end {
+            break
+        }
+        let ch = data[i as usize]
+        if ch == (59 as i8) || ch == (10 as i8) || ch == (13 as i8) {
+            break
+        }
+        if ch == (43 as i8) {
+            if expect_term {
+                return (false, 0)
+            }
+            expect_term = true
+            i = i + 1
+        } else if ch >= (48 as i8) && ch <= (57 as i8) {
+            if !expect_term {
+                return (false, 0)
+            }
+            let literal = module_frontend_source_int_at(data, i, end)
+            if literal.0 == false {
+                return (false, 0)
+            }
+            total = total + literal.1
+            seen = true
+            expect_term = false
+            while i < end {
+                let digit = data[i as usize]
+                if digit >= (48 as i8) && digit <= (57 as i8) {
+                    i = i + 1
+                } else {
+                    break
+                }
+            }
+        } else {
+            return (false, 0)
+        }
+    }
+    if !seen || expect_term {
+        return (false, 0)
+    }
+    (true, total)
+}
+
+fn module_frontend_try_eval_source_fn_i64(data: [i8; 16777216], size: i64, fn_name: Name) -> (bool, i64) with Mut, Panic, Div {
+    let fn_pos = module_frontend_source_find_fn(data, size, fn_name)
+    if fn_pos < 0 {
+        return (false, 0)
+    }
+    let body = module_frontend_source_body_start(data, fn_pos, size)
+    if body < 0 {
+        return (false, 0)
+    }
+    let end = module_frontend_source_body_end(data, body, size)
+    var expr = module_frontend_source_skip_ws(data, body, end)
+    if expr + 6 < end &&
+       data[expr as usize] == (114 as i8) &&
+       data[(expr + 1) as usize] == (101 as i8) &&
+       data[(expr + 2) as usize] == (116 as i8) &&
+       data[(expr + 3) as usize] == (117 as i8) &&
+       data[(expr + 4) as usize] == (114 as i8) &&
+       data[(expr + 5) as usize] == (110 as i8) &&
+       data[(expr + 6) as usize] == (32 as i8) {
+        expr = module_frontend_source_skip_ws(data, expr + 7, end)
+    }
+    module_frontend_try_eval_source_expr_i64(data, expr, end)
 }
 
 fn module_frontend_try_eval_source_entry_i64(dep_path: string) -> (bool, i64) with IO, Mut, Panic, Div {
@@ -1384,6 +1489,11 @@ fn module_frontend_lower_source_fn_body(path: string, data: [i8; 16777216], fn_p
         func.instrs[1] = ir_return(0)
         func.instr_count = 2
         return func
+    }
+
+    let body_value = module_frontend_try_eval_source_fn_i64(data, size, func.name)
+    if body_value.0 {
+        return module_frontend_force_i64_return(func, body_value.1)
     }
 
     let literal = module_frontend_source_int_at(data, expr, size)
