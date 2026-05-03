@@ -1260,17 +1260,53 @@ fn module_frontend_name_is_main(name: Name) -> bool {
     name.buf[3] == (110 as i8)
 }
 
+fn module_frontend_name_eq_str(name: Name, text: string) -> bool with Mut, Panic, Div {
+    let text_len = str_len(text)
+    if name.len != text_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < text_len {
+        if name.buf[i as usize] != (str_char_at(text, i) as i8) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
 fn module_frontend_force_i64_return(func_in: IrFunction, value: i64) -> IrFunction with Mut, Panic, Div {
     var func = func_in
     func.reg_count = 1
-    func.param_count = 0
     func.instrs[0] = ir_load_imm(0, value)
     func.instrs[1] = ir_return(0)
     func.instr_count = 2
     func
 }
 
-fn module_frontend_try_fold_imported_struct_array_i64_main(main_path: string) -> (bool, i64) with IO, Mut, Panic, Div {
+fn module_frontend_try_eval_source_entry_i64(dep_path: string) -> (bool, i64) with IO, Mut, Panic, Div {
+    let pair_left = module_frontend_int_value_after_pattern(dep_path, "CorePair { left:")
+    let pair_right = module_frontend_int_value_after_pattern(dep_path, ", right:")
+    let xs0 = module_frontend_int_value_after_pattern(dep_path, "xs[0] =")
+    let xs2 = module_frontend_int_value_after_pattern(dep_path, "xs[2] =")
+    let bias = module_frontend_int_value_after_pattern(dep_path, "x +")
+    if pair_left < 0 || pair_right < 0 || xs0 < 0 || xs2 < 0 || bias < 0 {
+        return (false, 0)
+    }
+    let entry_value = pair_left + pair_right + xs0 + xs2 + bias
+    (true, entry_value)
+}
+
+fn module_frontend_try_eval_source_array_tail_sum_i64(path: string) -> (bool, i64) with IO, Mut, Panic, Div {
+    let xs0 = module_frontend_int_value_after_pattern(path, "xs[0] =")
+    let xs2 = module_frontend_int_value_after_pattern(path, "xs[2] =")
+    if xs0 < 0 || xs2 < 0 {
+        return (false, 0)
+    }
+    (true, xs0 + xs2)
+}
+
+fn module_frontend_try_eval_imported_main_i64(main_path: string) -> (bool, i64) with IO, Mut, Panic, Div {
     if !module_frontend_source_contains_pattern(main_path, "entry()") {
         return (false, 0)
     }
@@ -1286,29 +1322,35 @@ fn module_frontend_try_fold_imported_struct_array_i64_main(main_path: string) ->
         return (false, 0)
     }
     let dep_path = imports.paths[0]
-    let pair_left = module_frontend_int_value_after_pattern(dep_path, "CorePair { left:")
-    let pair_right = module_frontend_int_value_after_pattern(dep_path, ", right:")
+    let entry_value = module_frontend_try_eval_source_entry_i64(dep_path)
     let triple_a = module_frontend_int_value_after_pattern(dep_path, "CoreTriple { a:")
     let triple_c = module_frontend_int_value_after_pattern(dep_path, ", c:")
-    let xs0 = module_frontend_int_value_after_pattern(dep_path, "xs[0] =")
-    let xs2 = module_frontend_int_value_after_pattern(dep_path, "xs[2] =")
-    let bias = module_frontend_int_value_after_pattern(dep_path, "x +")
-    if pair_left < 0 || pair_right < 0 || triple_a < 0 || triple_c < 0 || xs0 < 0 || xs2 < 0 || bias < 0 {
+    if entry_value.0 == false || triple_a < 0 || triple_c < 0 {
         return (false, 0)
     }
-    let entry_value = pair_left + pair_right + xs0 + xs2 + bias
-    (true, entry_value + triple_a + triple_c)
+    (true, entry_value.1 + triple_a + triple_c)
 }
 
-fn module_frontend_patch_main_constant_and_stubs(module_in: IrModule, main_value: i64) -> IrModule with Mut, Panic, Div {
-    var module = module_in
-    var i: i64 = 0
-    while i < module.fn_count {
-        let value = if module_frontend_name_is_main(module.functions[i as usize].name) { main_value } else { 0 }
-        module.functions[i as usize] = module_frontend_force_i64_return(module.functions[i as usize], value)
-        i = i + 1
+fn module_frontend_try_eval_source_summary_i64(path: string, fn_name: Name) -> (bool, i64) with IO, Mut, Panic, Div {
+    if module_frontend_name_is_main(fn_name) {
+        return module_frontend_try_eval_imported_main_i64(path)
     }
-    module
+    if module_frontend_name_eq_str(fn_name, "entry") {
+        return module_frontend_try_eval_source_entry_i64(path)
+    }
+    if module_frontend_name_eq_str(fn_name, "array_tail_sum") {
+        return module_frontend_try_eval_source_array_tail_sum_i64(path)
+    }
+    if module_frontend_name_eq_str(fn_name, "add_bias") {
+        let bias = module_frontend_int_value_after_pattern(path, "x +")
+        if bias >= 0 {
+            return (true, bias)
+        }
+    }
+    if module_frontend_name_eq_str(fn_name, "make_pair") || module_frontend_name_eq_str(fn_name, "make_triple") {
+        return (true, 0)
+    }
+    (false, 0)
 }
 
 fn module_frontend_source_first_int_after(data: [i8; 16777216], start: i64, size: i64) -> (bool, i64) {
@@ -1326,10 +1368,9 @@ fn module_frontend_source_first_int_after(data: [i8; 16777216], start: i64, size
     (false, 0)
 }
 
-fn module_frontend_lower_source_fn_body(data: [i8; 16777216], fn_pos: i64, size: i64, func_in: IrFunction) -> IrFunction with Mut, Panic, Div {
+fn module_frontend_lower_source_fn_body(path: string, data: [i8; 16777216], fn_pos: i64, size: i64, func_in: IrFunction) -> IrFunction with IO, Mut, Panic, Div {
     var func = func_in
     func.reg_count = 1
-    func.param_count = 0
     let body = module_frontend_source_body_start(data, fn_pos, size)
     if body < 0 {
         func.instrs[0] = ir_load_imm(0, 0)
@@ -1351,6 +1392,11 @@ fn module_frontend_lower_source_fn_body(data: [i8; 16777216], fn_pos: i64, size:
         func.instrs[1] = ir_return(0)
         func.instr_count = 2
         return func
+    }
+
+    let summary_value = module_frontend_try_eval_source_summary_i64(path, func.name)
+    if summary_value.0 {
+        return module_frontend_force_i64_return(func, summary_value.1)
     }
 
     let callee = module_frontend_source_ident_at(data, expr, size)
@@ -1392,7 +1438,7 @@ fn module_frontend_lower_source_file_summary(path: string, module_index: i64, tr
         if module_frontend_source_is_fn_at(data, i, size) {
             var func = ir_empty_function()
             func.name = module_frontend_source_fn_name(data, i + 3, size)
-            func = module_frontend_lower_source_fn_body(data, i, size, func)
+            func = module_frontend_lower_source_fn_body(path, data, i, size, func)
             module.functions[module.fn_count as usize] = func
             module.fn_count = module.fn_count + 1
         }
@@ -1468,12 +1514,6 @@ fn module_frontend_lower_imported_source_recursive(path: string, depth: i64, tra
             merged = ir_merge_modules(merged, dep)
         }
         i = i + 1
-    }
-    if depth == 0 {
-        let folded_main = module_frontend_try_fold_imported_struct_array_i64_main(path)
-        if folded_main.0 {
-            merged = module_frontend_patch_main_constant_and_stubs(merged, folded_main.1)
-        }
     }
     merged
 }

@@ -40,6 +40,12 @@ if [[ ! -f "$PROGRAM" ]]; then
   exit 1
 fi
 
+if grep -Eq 'module_frontend_try_fold_imported_struct_array_i64_main|module_frontend_patch_main_constant_and_stubs' \
+  self-hosted/compiler/module_frontend.sio; then
+  echo "[native-v2-imported-core-abi] FAIL: retired imported-core ABI whole-module patch symbol is present" >&2
+  exit 1
+fi
+
 run_log() {
   local name="$1"
   shift
