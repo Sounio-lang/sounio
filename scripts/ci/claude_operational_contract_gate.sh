@@ -47,6 +47,9 @@ CHECKS+=("$check_json")
 check_json="$(run_check check_sio_window bash scripts/ci/check_check_sio_integration_window.sh || true)"
 CHECKS+=("$check_json")
 
+check_json="$(run_check parallel_blocker_contract bash scripts/ci/check_parallel_blocker_contract.sh || true)"
+CHECKS+=("$check_json")
+
 checks_joined=""
 for item in "${CHECKS[@]}"; do
   if [[ -n "$checks_joined" ]]; then

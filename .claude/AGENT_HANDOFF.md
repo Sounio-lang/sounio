@@ -4,8 +4,9 @@ Start here for parallel Sounio work:
 
 1. Read `CLAUDE_HANDOFF.md`.
 2. Read `AGENTS.md`.
-3. Read `.agent-orchestration/HANDOFF.md`.
-4. Use `.claude/MEMORY_LANES.md` to pick only the memory lane needed.
+3. Read `.claude/PARALLEL_BLOCKER_CONTRACT.md`.
+4. Read `.agent-orchestration/HANDOFF.md`.
+5. Use `.claude/MEMORY_LANES.md` to pick only the memory lane needed.
 
 Current operational notes:
 
@@ -18,6 +19,9 @@ Current operational notes:
   direction.
 - `self-hosted/check/check.sio` has a serialized window declared in
   `.claude/check_sio_integration_window.v1.json`.
+- Any blocker left for another agent must use the severity, failure class,
+  evidence level, ownership, and `Next-Command` shape from
+  `.claude/PARALLEL_BLOCKER_CONTRACT.md`.
 - Apple native-v2 lane: Codex added `scripts/apple/apple_native_v2_ssh_gate.sh`
   as the SSH orchestration entrypoint. It runs the maintained Apple/Mach-O
   `selfhost_host_gate.sh` first. Current AArch64 native-v2 runtime attestation

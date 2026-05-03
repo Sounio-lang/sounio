@@ -83,6 +83,15 @@ If a prose document disagrees with a script that is actually wired into the repo
 
 Use this division unless the user explicitly overrides it.
 
+Blocker ownership, severity, evidence level, handoff shape, and merge eligibility
+for parallel work are governed by:
+
+- `.claude/PARALLEL_BLOCKER_CONTRACT.md`
+
+If an agent leaves a blocker for another agent, it must use that contract's
+Blocker-ID, severity, class, evidence, owner, worktree, branch, acceptance gate,
+and next-action fields.
+
 ### Claude Code
 Use for:
 - read-only repository surveys
@@ -166,6 +175,7 @@ Report whether you are using:
 - Preserve bootstrap safety
 - Preserve legacy code until parity is proven
 - Prefer explicit failure classification over silent fallback
+- Classify remaining blockers using `.claude/PARALLEL_BLOCKER_CONTRACT.md`
 - Do not claim semantic milestones more broadly than the evidence supports
 - Separate:
   - ontology semantics
@@ -247,7 +257,8 @@ At the end of substantial work, report:
    - fallback path
 6. remaining blockers
 7. whether any legacy path was intentionally kept
-8. **LLM-offload reviews invoked** (provider, task, target, outcome) — required for any work touching math claims, clinical-pathway code, or external-facing artifacts. See `.claude/AGENT_OFFLOAD_POLICY.md`.
+8. blocker contract status for any unresolved blocker: Blocker-ID, severity, class, evidence level, owner, acceptance gate, and next action
+9. **LLM-offload reviews invoked** (provider, task, target, outcome) — required for any work touching math claims, clinical-pathway code, or external-facing artifacts. See `.claude/AGENT_OFFLOAD_POLICY.md`.
 
 ---
 
