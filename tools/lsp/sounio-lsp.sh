@@ -63,6 +63,13 @@ verify_pinned_souc() {
     fi
 }
 
+is_ci_native_wrapper() {
+    local candidate="$1"
+    [[ "$candidate" == "$SOUNIO_ROOT/scripts/ci/souc-native-wrapper.sh" ]] \
+        && [[ -n "${SOUC_NATIVE_BIN:-}" ]] \
+        && [[ -x "${SOUC_NATIVE_BIN:-}" ]]
+}
+
 resolve_souc_for_lsp() {
     local strict="$1"
     local explicit="${SOUNIO_LSP_SOUC_BIN:-}"
@@ -88,12 +95,20 @@ resolve_souc_for_lsp() {
     if [[ "$strict" == "1" ]]; then
         case "$candidate" in
             "$SOUNIO_ROOT"/.pinned-souc/*|"$SOUNIO_ROOT"/artifacts/omega/souc-bin/*) ;;
+            "$SOUNIO_ROOT"/scripts/ci/souc-native-wrapper.sh)
+                if ! is_ci_native_wrapper "$candidate"; then
+                    echo "error: strict no-rust mode requires executable SOUC_NATIVE_BIN for native wrapper" >&2
+                    return 1
+                fi
+                ;;
             *)
                 echo "error: strict no-rust mode requires pinned souc under .pinned-souc/ or artifacts/omega/souc-bin/" >&2
                 return 1
                 ;;
         esac
-        verify_pinned_souc "$candidate" || return 1
+        if ! is_ci_native_wrapper "$candidate"; then
+            verify_pinned_souc "$candidate" || return 1
+        fi
     fi
 
     printf '%s\n' "$candidate"

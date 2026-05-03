@@ -1906,10 +1906,68 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         if token_kind(pos + 1) == TK_DOT && token_kind(pos + 2) == TK_INT {
             let r = alloc_reg(ctx)
             let frac_digits = token_decimal_digit_count(pos + 2)
-            let scale = decimal_scale_for_digits(frac_digits)
-            let mantissa = (pt_read_int_value(pos) * scale) + pt_read_int_value(pos + 2)
+            var scale: i64 = decimal_scale_for_digits(frac_digits)
+            var mantissa: i64 = (pt_read_int_value(pos) * scale) + pt_read_int_value(pos + 2)
+            var next_pos: i64 = pos + 3
+            // Optional sci-notation exponent. driver_lex_source_to_globals splits
+            // `1.0e10` into INT DOT INT IDENT(e10) and `1.0e-10` into
+            // INT DOT INT IDENT(e) MINUS INT. Inline detection (not a helper
+            // call) keeps the driver's user fn count below the PT_END/fn-name
+            // corruption threshold tracked in issue #71.
+            if token_kind(next_pos) == TK_IDENT {
+                let exp_start = pt_read_start(next_pos)
+                let exp_end = pt_read_end(next_pos)
+                if exp_end > exp_start {
+                    let first_ch = CURSOR_SOURCE[exp_start as usize]
+                    if first_ch == 101 as i8 || first_ch == 69 as i8 {
+                        // Walk remaining chars: must be all digits to qualify.
+                        var ei: i64 = exp_start + 1
+                        var all_digits: i64 = 1
+                        var inline_value: i64 = 0
+                        while ei < exp_end {
+                            let ch = CURSOR_SOURCE[ei as usize]
+                            if ch >= 48 as i8 && ch <= 57 as i8 {
+                                inline_value = inline_value * 10 + ((ch as i64) - 48)
+                                ei = ei + 1
+                            } else {
+                                all_digits = 0
+                                ei = exp_end
+                            }
+                        }
+                        if all_digits != 0 {
+                            let inline_digits = exp_end - exp_start - 1
+                            if inline_digits > 0 {
+                                // `eN` form: positive exponent encoded inline.
+                                var pi: i64 = 0
+                                while pi < inline_value { mantissa = mantissa * 10; pi = pi + 1 }
+                                next_pos = next_pos + 1
+                            } else {
+                                // bare `e`/`E` followed by [+/-] INT.
+                                let sign_tok = next_pos + 1
+                                let digits_tok = next_pos + 2
+                                if token_kind(sign_tok) == TK_MINUS && token_kind(digits_tok) == TK_INT {
+                                    let neg_val = pt_read_int_value(digits_tok)
+                                    var pi: i64 = 0
+                                    while pi < neg_val { scale = scale * 10; pi = pi + 1 }
+                                    next_pos = digits_tok + 1
+                                } else if token_kind(sign_tok) == TK_PLUS && token_kind(digits_tok) == TK_INT {
+                                    let pos_val = pt_read_int_value(digits_tok)
+                                    var pi: i64 = 0
+                                    while pi < pos_val { mantissa = mantissa * 10; pi = pi + 1 }
+                                    next_pos = digits_tok + 1
+                                } else if token_kind(sign_tok) == TK_INT {
+                                    let plain_val = pt_read_int_value(sign_tok)
+                                    var pi: i64 = 0
+                                    while pi < plain_val { mantissa = mantissa * 10; pi = pi + 1 }
+                                    next_pos = sign_tok + 1
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             ufn_record_load_f64_scaled(r, mantissa, scale)
-            return ExprParse { ok: 1, reg: r, next: pos + 3}
+            return ExprParse { ok: 1, reg: r, next: next_pos }
         }
         let r = alloc_reg(ctx)
         ufn_record_load_imm(r, pt_read_int_value(pos))
@@ -2006,6 +2064,33 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         let reg = lookup_local_tok(ctx, pos)
         if reg >= 0 {
             if lookup_local_is_ref_tok(ctx, pos) != 0 {
+                // M1.2: ref-local postfix — `r.field` and `r.field[idx]`
+                let ref_sidx = lookup_local_struct_idx_tok(ctx, pos)
+                if ref_sidx >= 0 && token_kind(pos + 1) == TK_DOT && token_kind(pos + 2) == TK_IDENT {
+                    let foff = struct_field_offset_tok(ref_sidx, pos + 2)
+                    if foff >= 0 {
+                        let field_sidx = struct_field_type_at(ref_sidx, foff)
+                        // ref.field[idx] (scalar load from field array)
+                        if token_kind(pos + 3) == TK_LBRACKET {
+                            let idx_expr = parse_expr_ir(func, ctx, pos + 4)
+                            if idx_expr.ok != 0 {
+                                let end_pos = skip_index_cast_end(idx_expr.next)
+                                if token_kind(end_pos) == TK_RBRACKET {
+                                    let base_field = alloc_reg(ctx)
+                                    ufn_record_load_ref_field(base_field, reg, foff)
+                                    let dst = alloc_reg(ctx)
+                                    ufn_record_local_load(dst, base_field, idx_expr.reg)
+                                    return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
+                                }
+                            }
+                        }
+                        let dst = alloc_reg(ctx)
+                        ufn_record_load_ref_field(dst, reg, foff)
+                        if struct_field_is_f64_at(ref_sidx, foff) { mark_reg_f64(dst) }
+                        V2_LAST_STRUCT_IDX = field_sidx
+                        return ExprParse { ok: 1, reg: dst, next: pos + 3}
+                    }
+                }
                 return ExprParse { ok: 1, reg: reg, next: pos + 1}
             }
             // local array read: ident[expr] or ident[expr as T]
@@ -2946,7 +3031,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
         }
     }
 
-    // field mutation: p.x = expr
+    // field mutation: p.x = expr  (M1.2: handles ref via store_ref_field)
     if k == TK_IDENT && token_kind(p + 1) == TK_DOT && token_kind(p + 2) == TK_IDENT && token_kind(p + 3) == TK_EQ {
         let base_reg = lookup_local_tok(ctx, p)
         if base_reg >= 0 {
@@ -2954,9 +3039,15 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             if sidx >= 0 {
                 let foff = struct_field_offset_tok(sidx, p + 2)
                 if foff >= 0 {
+                    let is_ref_lv = lookup_local_is_ref_tok(ctx, p)
                     V2_LAST_STRUCT_IDX = -1
                     let parsed = parse_expr_ir(func, ctx, p + 4)
                     if parsed.ok != 0 {
+                        if is_ref_lv != 0 {
+                            ufn_record_store_ref_field(base_reg, foff, parsed.reg)
+                            V2_LAST_STRUCT_IDX = -1
+                            return parsed.next
+                        }
                         if V2_LAST_STRUCT_IDX >= 0 {
                             let inner_flat = STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize]
                             var ci: i64 = 0
@@ -4609,6 +4700,12 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                     }
                 }
                 if ppos + 3 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_AMPBANG && token_kind(ppos + 3) == TK_IDENT {
+                    param_sidx = find_struct_idx_tok(ppos + 3)
+                    param_is_ref = 1
+                }
+                // M1.2: plain `& TypeName` (immutable ref) — register as ref struct local
+                // (TK_AMP = 141; using literal to avoid hoisted-const ambiguity)
+                if ppos + 3 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == 141 && token_kind(ppos + 3) == TK_IDENT {
                     param_sidx = find_struct_idx_tok(ppos + 3)
                     param_is_ref = 1
                 }
