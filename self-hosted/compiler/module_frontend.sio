@@ -1316,7 +1316,25 @@ fn module_frontend_force_i64_return(func_in: IrFunction, value: i64) -> IrFuncti
     func
 }
 
-fn module_frontend_try_eval_source_expr_i64(data: [i8; 16777216], start: i64, end: i64) -> (bool, i64) with Mut, Panic, Div {
+fn module_frontend_source_strip_return_prefix(data: [i8; 16777216], start: i64, end: i64) -> i64 {
+    var expr = module_frontend_source_skip_ws(data, start, end)
+    if expr + 6 < end &&
+       data[expr as usize] == (114 as i8) &&
+       data[(expr + 1) as usize] == (101 as i8) &&
+       data[(expr + 2) as usize] == (116 as i8) &&
+       data[(expr + 3) as usize] == (117 as i8) &&
+       data[(expr + 4) as usize] == (114 as i8) &&
+       data[(expr + 5) as usize] == (110 as i8) &&
+       data[(expr + 6) as usize] == (32 as i8) {
+        return module_frontend_source_skip_ws(data, expr + 7, end)
+    }
+    expr
+}
+
+fn module_frontend_try_eval_source_expr_i64(data: [i8; 16777216], start: i64, end: i64, size: i64, depth: i64) -> (bool, i64) with Mut, Panic, Div {
+    if depth > 16 {
+        return (false, 0)
+    }
     var i = module_frontend_source_skip_ws(data, start, end)
     var total: i64 = 0
     var seen = false
@@ -1356,7 +1374,40 @@ fn module_frontend_try_eval_source_expr_i64(data: [i8; 16777216], start: i64, en
                 }
             }
         } else {
-            return (false, 0)
+            if !expect_term {
+                return (false, 0)
+            }
+            let callee = module_frontend_source_ident_at(data, i, end)
+            if callee.len <= 0 {
+                return (false, 0)
+            }
+            var j = i + callee.len
+            j = module_frontend_source_skip_ws(data, j, end)
+            if j >= end || data[j as usize] != (40 as i8) {
+                return (false, 0)
+            }
+            j = module_frontend_source_skip_ws(data, j + 1, end)
+            if j >= end || data[j as usize] != (41 as i8) {
+                return (false, 0)
+            }
+            let fn_pos = module_frontend_source_find_fn(data, size, callee)
+            if fn_pos < 0 {
+                return (false, 0)
+            }
+            let body = module_frontend_source_body_start(data, fn_pos, size)
+            if body < 0 {
+                return (false, 0)
+            }
+            let body_end = module_frontend_source_body_end(data, body, size)
+            let call_expr = module_frontend_source_strip_return_prefix(data, body, body_end)
+            let call_value = module_frontend_try_eval_source_expr_i64(data, call_expr, body_end, size, depth + 1)
+            if call_value.0 == false {
+                return (false, 0)
+            }
+            total = total + call_value.1
+            seen = true
+            expect_term = false
+            i = j + 1
         }
     }
     if !seen || expect_term {
@@ -1375,18 +1426,8 @@ fn module_frontend_try_eval_source_fn_i64(data: [i8; 16777216], size: i64, fn_na
         return (false, 0)
     }
     let end = module_frontend_source_body_end(data, body, size)
-    var expr = module_frontend_source_skip_ws(data, body, end)
-    if expr + 6 < end &&
-       data[expr as usize] == (114 as i8) &&
-       data[(expr + 1) as usize] == (101 as i8) &&
-       data[(expr + 2) as usize] == (116 as i8) &&
-       data[(expr + 3) as usize] == (117 as i8) &&
-       data[(expr + 4) as usize] == (114 as i8) &&
-       data[(expr + 5) as usize] == (110 as i8) &&
-       data[(expr + 6) as usize] == (32 as i8) {
-        expr = module_frontend_source_skip_ws(data, expr + 7, end)
-    }
-    module_frontend_try_eval_source_expr_i64(data, expr, end)
+    let expr = module_frontend_source_strip_return_prefix(data, body, end)
+    module_frontend_try_eval_source_expr_i64(data, expr, end, size, 0)
 }
 
 fn module_frontend_try_eval_source_entry_i64(dep_path: string) -> (bool, i64) with IO, Mut, Panic, Div {
