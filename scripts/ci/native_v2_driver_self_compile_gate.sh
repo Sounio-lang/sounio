@@ -41,6 +41,7 @@ STAGE1_STDOUT="$LOG_DIR/hello.stage1.stdout"
 STAGE1_STDERR="$LOG_DIR/hello.stage1.stderr"
 EXPECTED_STDOUT="$LOG_DIR/hello.expected.stdout"
 STAGE1_FILE_LOG="$LOG_DIR/native_compile_driver.stage1.file.txt"
+STAGE1_SECTIONS_LOG="$LOG_DIR/native_compile_driver.stage1.readelf.sections"
 HELLO_FILE_LOG="$LOG_DIR/hello.stage1.file.txt"
 HELLO_SECTIONS_LOG="$LOG_DIR/hello.stage1.readelf.sections"
 HELLO_STRINGS_LOG="$LOG_DIR/hello.stage1.strings"
@@ -48,12 +49,47 @@ STAGE2_DRIVER="$OUT_DIR/native_compile_driver.stage2"
 STAGE3_DRIVER="$OUT_DIR/native_compile_driver.stage3"
 STAGE2_COMPILE_LOG="$LOG_DIR/native_compile_driver.stage2.compile.log"
 STAGE3_COMPILE_LOG="$LOG_DIR/native_compile_driver.stage3.compile.log"
+STAGE2_SECTIONS_LOG="$LOG_DIR/native_compile_driver.stage2.readelf.sections"
+STAGE3_SECTIONS_LOG="$LOG_DIR/native_compile_driver.stage3.readelf.sections"
 STAGE2_HELLO_BIN="$OUT_DIR/hello.stage2"
 STAGE2_HELLO_COMPILE_LOG="$LOG_DIR/hello.stage2.compile.log"
 STAGE2_STDOUT="$LOG_DIR/hello.stage2.stdout"
 
 printf '[native-v2-driver-self] souc=%s\n' "$SOUC_BIN"
 printf '[native-v2-driver-self] out=%s\n' "$OUT_DIR"
+
+check_driver_elf_layout() {
+  local bin="$1"
+  local log="$2"
+  local label="$3"
+  if ! command -v readelf >/dev/null 2>&1; then
+    return 0
+  fi
+  readelf -W -S "$bin" >"$log"
+  for section_name in '\.text' '\.rodata' '\.data' '\.shstrtab' '\.sounio\.epistemic'; do
+    if ! grep -q "$section_name" "$log"; then
+      echo "[native-v2-driver-self] FAIL: $label missing ELF section $section_name" >&2
+      cat "$log" >&2 || true
+      exit 1
+    fi
+  done
+
+  local data_hex
+  data_hex="$(awk '$3 == ".data" { print $7; exit }' "$log")"
+  if [[ -z "$data_hex" ]]; then
+    echo "[native-v2-driver-self] FAIL: $label missing .data size in readelf output" >&2
+    cat "$log" >&2 || true
+    exit 1
+  fi
+
+  local data_size=$((16#$data_hex))
+  local min_driver_data_size=$((0x5101000))
+  if (( data_size < min_driver_data_size )); then
+    echo "[native-v2-driver-self] FAIL: $label driver data segment too small: 0x${data_hex} < 0x5101000" >&2
+    echo "[native-v2-driver-self]       issue-71 guard: 1MiB driver-global slots must not overlap DRV_ELF_BYTES with .rodata/.shstrtab" >&2
+    exit 1
+  fi
+}
 
 bash scripts/ci/native_v2_serious_track_gate.sh >"$BASELINE_GATE_LOG" 2>&1
 
@@ -91,6 +127,7 @@ if command -v file >/dev/null 2>&1; then
   file "$STAGE1_DRIVER" >"$STAGE1_FILE_LOG"
   grep -q 'ELF 64-bit LSB executable, x86-64' "$STAGE1_FILE_LOG"
 fi
+check_driver_elf_layout "$STAGE1_DRIVER" "$STAGE1_SECTIONS_LOG" "stage1 driver"
 
 if ! "$STAGE1_DRIVER" "$HELLO_SRC" -o "$STAGE1_HELLO_BIN" >"$STAGE1_HELLO_COMPILE_LOG" 2>&1; then
   echo "[native-v2-driver-self] FAIL: stage1 driver failed while compiling hello" >&2
@@ -283,6 +320,7 @@ if [[ ! -x "$STAGE2_DRIVER" ]]; then
   echo "[native-v2-driver-self] FAIL: stage2 driver is not executable" >&2
   exit 1
 fi
+check_driver_elf_layout "$STAGE2_DRIVER" "$STAGE2_SECTIONS_LOG" "stage2 driver"
 
 # ── Stage2 hello parity ───────────────────────────────────────────────────────
 if ! "$STAGE2_DRIVER" "$HELLO_SRC" -o "$STAGE2_HELLO_BIN" >"$STAGE2_HELLO_COMPILE_LOG" 2>&1; then
@@ -323,6 +361,7 @@ for i,x,y in diffs[:5]: print(f'  offset 0x{i:x}: {x:02x} vs {y:02x}')
 " >&2 || true
   exit 1
 fi
+check_driver_elf_layout "$STAGE3_DRIVER" "$STAGE3_SECTIONS_LOG" "stage3 driver"
 STAGE2_MD5="$(md5sum "$STAGE2_DRIVER" | cut -d' ' -f1)"
 printf '[native-v2-driver-self] fixed-point md5=%s\n' "$STAGE2_MD5"
 
