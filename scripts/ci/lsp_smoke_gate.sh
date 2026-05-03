@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LOG_PATH="${LSP_SMOKE_LOG_PATH:-$ROOT_DIR/artifacts/omega/lsp_smoke.log}"
 STATUS_PATH="${LSP_SMOKE_STATUS_PATH:-$ROOT_DIR/artifacts/omega/lsp_smoke_status.v1.json}"
 
