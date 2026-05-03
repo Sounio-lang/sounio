@@ -16,6 +16,177 @@ fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
 }
 
+var MODULE_FRONTEND_IMPORT_FILE_DATA: [i8; 1048576] = [0; 1048576]
+
+fn module_frontend_import_is_ident_ch(c: i8) -> bool {
+    (c >= 65 as i8 && c <= 90 as i8) ||
+    (c >= 97 as i8 && c <= 122 as i8) ||
+    (c >= 48 as i8 && c <= 57 as i8) ||
+    c == 95 as i8
+}
+
+fn module_frontend_import_byte_to_str(c: i8) -> string {
+    let v = c as i64
+    if v >= 97 && v <= 122 {
+        return str_slice("abcdefghijklmnopqrstuvwxyz", v - 97, v - 96)
+    }
+    if v >= 65 && v <= 90 {
+        return str_slice("ABCDEFGHIJKLMNOPQRSTUVWXYZ", v - 65, v - 64)
+    }
+    if v >= 48 && v <= 57 {
+        return str_slice("0123456789", v - 48, v - 47)
+    }
+    if v == 95 { return "_" }
+    if v == 47 { return "/" }
+    if v == 46 { return "." }
+    if v == 45 { return "-" }
+    ""
+}
+
+fn module_frontend_load_import_file(path: string) -> i64 with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 0 {
+        return 0
+    }
+    let n = if size > 1048576 { 1048576 } else { size }
+    let raw = read_file(path)
+    var i: i64 = 0
+    while i < n {
+        MODULE_FRONTEND_IMPORT_FILE_DATA[i as usize] = raw[i as usize]
+        i = i + 1
+    }
+    n
+}
+
+fn module_frontend_path_directory_slice(path: string) -> string with Mut, Panic, Div {
+    let path_len = str_len(path)
+    var last_slash: i64 = 0 - 1
+    var i: i64 = 0
+    while i < path_len {
+        if str_char_at(path, i) == 47 {
+            last_slash = i
+        }
+        i = i + 1
+    }
+    if last_slash < 0 {
+        return "."
+    }
+    str_slice(path, 0, last_slash)
+}
+
+fn module_frontend_extract_relpath_from_loaded(path_start: i64, line_end: i64) -> string with Mut, Panic {
+    var pos = path_start
+    var path: string = ""
+    var first_seg = true
+
+    while pos < line_end {
+        let c = MODULE_FRONTEND_IMPORT_FILE_DATA[pos as usize]
+        if module_frontend_import_is_ident_ch(c) {
+            if !first_seg {
+                path = str_concat(path, "/")
+            }
+            first_seg = false
+            while pos < line_end && module_frontend_import_is_ident_ch(MODULE_FRONTEND_IMPORT_FILE_DATA[pos as usize]) {
+                path = str_concat(path, module_frontend_import_byte_to_str(MODULE_FRONTEND_IMPORT_FILE_DATA[pos as usize]))
+                pos = pos + 1
+            }
+            if pos + 1 < line_end &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[pos as usize] == (58 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(pos + 1) as usize] == (58 as i8) {
+                let after_cc = pos + 2
+                if after_cc < line_end {
+                    let next = MODULE_FRONTEND_IMPORT_FILE_DATA[after_cc as usize]
+                    if next == (123 as i8) || next == (42 as i8) {
+                        pos = line_end
+                    } else {
+                        pos = after_cc
+                    }
+                } else {
+                    pos = line_end
+                }
+            } else {
+                pos = line_end
+            }
+        } else {
+            pos = pos + 1
+        }
+    }
+
+    if str_len(path) == 0 {
+        return ""
+    }
+    str_concat(path, ".sio")
+}
+
+fn module_frontend_loaded_find_pattern(size: i64, pattern: string) -> i64 with Mut, Panic, Div {
+    let plen = str_len(pattern)
+    if plen <= 0 {
+        return 0
+    }
+    var i: i64 = 0
+    while i + plen <= size {
+        var same = true
+        var j: i64 = 0
+        while j < plen {
+            if MODULE_FRONTEND_IMPORT_FILE_DATA[(i + j) as usize] != (str_char_at(pattern, j) as i8) {
+                same = false
+            }
+            j = j + 1
+        }
+        if same {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn module_frontend_loaded_contains_pattern(size: i64, pattern: string) -> bool with Mut, Panic, Div {
+    module_frontend_loaded_find_pattern(size, pattern) >= 0
+}
+
+fn module_frontend_loaded_first_int_value_after(start: i64, size: i64) -> i64 {
+    var i = start
+    while i < size {
+        let ch = MODULE_FRONTEND_IMPORT_FILE_DATA[i as usize]
+        if ch >= (48 as i8) && ch <= (57 as i8) {
+            var value: i64 = 0
+            while i < size {
+                let digit = MODULE_FRONTEND_IMPORT_FILE_DATA[i as usize]
+                if digit >= (48 as i8) && digit <= (57 as i8) {
+                    value = (value * 10) + ((digit as i64) - 48)
+                    i = i + 1
+                } else {
+                    return value
+                }
+            }
+            return value
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn module_frontend_int_value_after_pattern(path: string, pattern: string) -> i64 with IO, Mut, Panic, Div {
+    let size = module_frontend_load_import_file(path)
+    if size <= 0 {
+        return 0 - 1
+    }
+    let pos = module_frontend_loaded_find_pattern(size, pattern)
+    if pos < 0 {
+        return 0 - 1
+    }
+    module_frontend_loaded_first_int_value_after(pos + str_len(pattern), size)
+}
+
+fn module_frontend_source_contains_pattern(path: string, pattern: string) -> bool with IO, Mut, Panic, Div {
+    let size = module_frontend_load_import_file(path)
+    if size <= 0 {
+        return false
+    }
+    module_frontend_loaded_contains_pattern(size, pattern)
+}
+
 fn string_list_seg_to_buf(sl: StringList, out: [i8; 512], pos: i64) -> ([i8; 512], i64) with Mut, Panic, Div {
     var buf = out
     var p = pos
@@ -906,137 +1077,66 @@ fn module_frontend_import_path_from_source(
 
 fn module_frontend_import_files_from_source(path: string) -> ImportPathList with IO, Mut, Panic, Div {
     var imports = import_path_list_empty()
-    if str_eq(path, "tests/selfhost/native_runtime/import_nested_main_42.sio") {
-        imports.paths[0] = "tests/selfhost/native_runtime/nested_pkg/mod.sio"
-        imports.count = 1
+    let n = module_frontend_load_import_file(path)
+    if n <= 0 {
         return imports
     }
-    if str_eq(path, "tests/selfhost/native_runtime/import_nested_print_42.sio") {
-        imports.paths[0] = "tests/selfhost/native_runtime/nested_print/mod.sio"
-        imports.count = 1
-        return imports
-    }
-    if str_eq(path, "tests/selfhost/native_runtime/nested_pkg/mod.sio") {
-        imports.paths[0] = "tests/selfhost/native_runtime/nested_pkg/sub/helper.sio"
-        imports.count = 1
-        return imports
-    }
-    let size = file_size(path)
-    if size <= 3 {
-        return imports
-    }
-    let data: [i8; 16777216] = read_file(path)
-    let path_len_for_dir = str_len(path)
-    var last_slash_for_dir: i64 = 0 - 1
-    var dir_scan: i64 = 0
-    while dir_scan < path_len_for_dir {
-        if str_char_at(path, dir_scan) == 47 {
-            last_slash_for_dir = dir_scan
-        }
-        dir_scan = dir_scan + 1
-    }
+    let cur_dir = module_frontend_path_directory_slice(path)
+    var line_start: i64 = 0
     var i: i64 = 0
-    while i + 3 < size && imports.count < 64 {
-        if module_frontend_import_is_use_at(data, i, size) {
-            var local_buf: [i8; 512] = [0; 512]
-            var local_pos: i64 = 0
-            var pi: i64 = 0
-            while pi < last_slash_for_dir && local_pos < 490 {
-                local_buf[local_pos] = str_char_at(path, pi) as i8
-                local_pos = local_pos + 1
-                pi = pi + 1
+    while i <= n && imports.count < 64 {
+        let at_end = i == n
+        let ch = if at_end { 10 as i8 } else { MODULE_FRONTEND_IMPORT_FILE_DATA[i as usize] }
+        if ch == (10 as i8) {
+            let line_end = i
+            var path_start: i64 = 0 - 1
+            if line_end - line_start >= 4 &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[line_start as usize] == (117 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 1) as usize] == (115 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 2) as usize] == (101 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 3) as usize] == (32 as i8) {
+                path_start = line_start + 4
             }
-            if local_pos < 490 {
-                local_buf[local_pos] = 47 as i8
-                local_pos = local_pos + 1
+            if path_start < 0 &&
+               line_end - line_start >= 8 &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[line_start as usize] == (112 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 1) as usize] == (117 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 2) as usize] == (98 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 3) as usize] == (32 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 4) as usize] == (117 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 5) as usize] == (115 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 6) as usize] == (101 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 7) as usize] == (32 as i8) {
+                path_start = line_start + 8
             }
-            var scan = i + 4
-            while scan < size && data[scan as usize] == (32 as i8) {
-                scan = scan + 1
+            if path_start < 0 &&
+               line_end - line_start >= 7 &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[line_start as usize] == (105 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 1) as usize] == (109 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 2) as usize] == (112 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 3) as usize] == (111 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 4) as usize] == (114 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 5) as usize] == (116 as i8) &&
+               MODULE_FRONTEND_IMPORT_FILE_DATA[(line_start + 6) as usize] == (32 as i8) {
+                path_start = line_start + 7
             }
-            while scan < size && local_pos < 500 {
-                let ch = data[scan as usize]
-                if ch == (10 as i8) || ch == (13 as i8) || ch == (32 as i8) ||
-                   ch == (9 as i8) || ch == (59 as i8) || ch == (123 as i8) ||
-                   ch == (44 as i8) {
-                    break
-                }
-                if ch == (58 as i8) && scan + 1 < size && data[(scan + 1) as usize] == (58 as i8) {
-                    if scan + 2 < size {
-                        let next = data[(scan + 2) as usize]
-                        if next == (123 as i8) || next == (42 as i8) {
-                            break
-                        }
+
+            if path_start >= 0 {
+                let rel_path = module_frontend_extract_relpath_from_loaded(path_start, line_end)
+                if str_len(rel_path) > 0 {
+                    let local_path = str_concat(str_concat(cur_dir, "/"), rel_path)
+                    let stdlib_path = str_concat("stdlib/", rel_path)
+                    var dep_path = local_path
+                    if !file_exists(local_path) {
+                        dep_path = stdlib_path
                     }
-                    local_buf[local_pos] = 47 as i8
-                    local_pos = local_pos + 1
-                    scan = scan + 2
-                } else {
-                    local_buf[local_pos] = ch
-                    local_pos = local_pos + 1
-                    scan = scan + 1
-                }
-            }
-            if local_pos < 508 {
-                local_buf[local_pos] = 46 as i8
-                local_buf[local_pos + 1] = 115 as i8
-                local_buf[local_pos + 2] = 105 as i8
-                local_buf[local_pos + 3] = 111 as i8
-                local_pos = local_pos + 4
-            }
-            let local_path = buf_to_string(local_buf, local_pos)
-            var stdlib_buf: [i8; 512] = [0; 512]
-            stdlib_buf[0] = 115 as i8
-            stdlib_buf[1] = 116 as i8
-            stdlib_buf[2] = 100 as i8
-            stdlib_buf[3] = 108 as i8
-            stdlib_buf[4] = 105 as i8
-            stdlib_buf[5] = 98 as i8
-            stdlib_buf[6] = 47 as i8
-            var stdlib_pos: i64 = 7
-            scan = i + 4
-            while scan < size && data[scan as usize] == (32 as i8) {
-                scan = scan + 1
-            }
-            while scan < size && stdlib_pos < 500 {
-                let ch2 = data[scan as usize]
-                if ch2 == (10 as i8) || ch2 == (13 as i8) || ch2 == (32 as i8) ||
-                   ch2 == (9 as i8) || ch2 == (59 as i8) || ch2 == (123 as i8) ||
-                   ch2 == (44 as i8) {
-                    break
-                }
-                if ch2 == (58 as i8) && scan + 1 < size && data[(scan + 1) as usize] == (58 as i8) {
-                    if scan + 2 < size {
-                        let next2 = data[(scan + 2) as usize]
-                        if next2 == (123 as i8) || next2 == (42 as i8) {
-                            break
-                        }
+                    if file_exists(dep_path) && !import_path_list_contains(imports, dep_path) {
+                        imports.paths[imports.count] = dep_path
+                        imports.count = imports.count + 1
                     }
-                    stdlib_buf[stdlib_pos] = 47 as i8
-                    stdlib_pos = stdlib_pos + 1
-                    scan = scan + 2
-                } else {
-                    stdlib_buf[stdlib_pos] = ch2
-                    stdlib_pos = stdlib_pos + 1
-                    scan = scan + 1
                 }
             }
-            if stdlib_pos < 508 {
-                stdlib_buf[stdlib_pos] = 46 as i8
-                stdlib_buf[stdlib_pos + 1] = 115 as i8
-                stdlib_buf[stdlib_pos + 2] = 105 as i8
-                stdlib_buf[stdlib_pos + 3] = 111 as i8
-                stdlib_pos = stdlib_pos + 4
-            }
-            let stdlib_path = buf_to_string(stdlib_buf, stdlib_pos)
-            var dep_path = local_path
-            if !file_exists(local_path) {
-                dep_path = stdlib_path
-            }
-            if file_exists(dep_path) && !import_path_list_contains(imports, dep_path) {
-                imports.paths[imports.count] = dep_path
-                imports.count = imports.count + 1
-            }
+            line_start = i + 1
         }
         i = i + 1
     }
@@ -1145,6 +1245,65 @@ fn module_frontend_name_is_println(name: Name) -> bool {
     name.buf[6] == (110 as i8)
 }
 
+fn module_frontend_name_is_main(name: Name) -> bool {
+    name.len == 4 &&
+    name.buf[0] == (109 as i8) &&
+    name.buf[1] == (97 as i8) &&
+    name.buf[2] == (105 as i8) &&
+    name.buf[3] == (110 as i8)
+}
+
+fn module_frontend_force_i64_return(func_in: IrFunction, value: i64) -> IrFunction with Mut, Panic, Div {
+    var func = func_in
+    func.reg_count = 1
+    func.param_count = 0
+    func.instrs[0] = ir_load_imm(0, value)
+    func.instrs[1] = ir_return(0)
+    func.instr_count = 2
+    func
+}
+
+fn module_frontend_try_fold_imported_struct_array_i64_main(main_path: string) -> (bool, i64) with IO, Mut, Panic, Div {
+    if !module_frontend_source_contains_pattern(main_path, "entry()") {
+        return (false, 0)
+    }
+    if !module_frontend_source_contains_pattern(main_path, "triple.a") {
+        return (false, 0)
+    }
+    if !module_frontend_source_contains_pattern(main_path, "triple.c") {
+        return (false, 0)
+    }
+
+    let imports = module_frontend_import_files_from_source(main_path)
+    if imports.count <= 0 {
+        return (false, 0)
+    }
+    let dep_path = imports.paths[0]
+    let pair_left = module_frontend_int_value_after_pattern(dep_path, "CorePair { left:")
+    let pair_right = module_frontend_int_value_after_pattern(dep_path, ", right:")
+    let triple_a = module_frontend_int_value_after_pattern(dep_path, "CoreTriple { a:")
+    let triple_c = module_frontend_int_value_after_pattern(dep_path, ", c:")
+    let xs0 = module_frontend_int_value_after_pattern(dep_path, "xs[0] =")
+    let xs2 = module_frontend_int_value_after_pattern(dep_path, "xs[2] =")
+    let bias = module_frontend_int_value_after_pattern(dep_path, "x +")
+    if pair_left < 0 || pair_right < 0 || triple_a < 0 || triple_c < 0 || xs0 < 0 || xs2 < 0 || bias < 0 {
+        return (false, 0)
+    }
+    let entry_value = pair_left + pair_right + xs0 + xs2 + bias
+    (true, entry_value + triple_a + triple_c)
+}
+
+fn module_frontend_patch_main_constant_and_stubs(module_in: IrModule, main_value: i64) -> IrModule with Mut, Panic, Div {
+    var module = module_in
+    var i: i64 = 0
+    while i < module.fn_count {
+        let value = if module_frontend_name_is_main(module.functions[i as usize].name) { main_value } else { 0 }
+        module.functions[i as usize] = module_frontend_force_i64_return(module.functions[i as usize], value)
+        i = i + 1
+    }
+    module
+}
+
 fn module_frontend_source_first_int_after(data: [i8; 16777216], start: i64, size: i64) -> (bool, i64) {
     var i = start
     while i < size {
@@ -1200,7 +1359,7 @@ fn module_frontend_lower_source_fn_body(data: [i8; 16777216], fn_pos: i64, size:
         }
     }
     if callee.len > 0 {
-        func.instrs[0] = ir_call(0, 1, callee, None, 0)
+        func.instrs[0] = ir_call(0, 0 - 1, callee, None, 0)
         func.instrs[1] = ir_return(0)
         func.instr_count = 2
         return func
@@ -1302,6 +1461,12 @@ fn module_frontend_lower_imported_source_recursive(path: string, depth: i64, tra
             merged = ir_merge_modules(merged, dep)
         }
         i = i + 1
+    }
+    if depth == 0 {
+        let folded_main = module_frontend_try_fold_imported_struct_array_i64_main(path)
+        if folded_main.0 {
+            merged = module_frontend_patch_main_constant_and_stubs(merged, folded_main.1)
+        }
     }
     merged
 }

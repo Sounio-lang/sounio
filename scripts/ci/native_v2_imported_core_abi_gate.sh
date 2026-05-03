@@ -26,9 +26,8 @@ OUT_DIR="${SOUNIO_NATIVE_V2_IMPORTED_CORE_ABI_DIR:-$(mktemp -d /tmp/sounio-nativ
 LOG_DIR="$OUT_DIR/logs"
 ARTIFACT_DIR="$OUT_DIR/artifacts"
 PROGRAM="tests/selfhost/native_runtime/import_core_abi_42.sio"
-BUNDLE="$ARTIFACT_DIR/import_core_abi_42.bundle.sio"
 ELF="$ARTIFACT_DIR/import_core_abi_42.native"
-SUMMARY_JSON="$ARTIFACT_DIR/native_v2_imported_core_abi.v1.json"
+SUMMARY_JSON="$ARTIFACT_DIR/native_v2_imported_core_abi.v2.json"
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 
@@ -50,36 +49,32 @@ run_log() {
 
 run_log frontend_convergence bash scripts/ci/native_v2_frontend_convergence_gate.sh
 
-run_log prebundle \
-  "$SOUC_BIN" run self-hosted/compiler/native_prebundle.sio -- "$PROGRAM" -o "$BUNDLE" --root tests/selfhost/native_runtime
+run_log imported_ir_trace \
+  bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/main.sio -- --probe-load-ir-trace "$PROGRAM"
 
-if [[ ! -s "$BUNDLE" ]]; then
-  echo "[native-v2-imported-core-abi] FAIL: bundle not produced" >&2
-  cat "$LOG_DIR/prebundle.log" >&2 || true
-  exit 1
-fi
-
-source_markers="$(awk 'BEGIN { n = 0 } /^\/\/ SOURCE:/ { n += 1 } END { print n }' "$BUNDLE")"
-if [[ "$source_markers" -ne 2 ]]; then
-  echo "[native-v2-imported-core-abi] FAIL: expected 2 SOURCE markers, got $source_markers" >&2
-  exit 1
-fi
-
-if grep -Eq '^(use |module )' "$BUNDLE"; then
-  echo "[native-v2-imported-core-abi] FAIL: bundle still contains use/module lines" >&2
-  grep -En '^(use |module )' "$BUNDLE" >&2 || true
-  exit 1
-fi
-
-if ! grep -q '^// SOURCE: tests/selfhost/native_runtime/import_core_abi/mod.sio$' "$BUNDLE" ||
-   ! grep -q '^// SOURCE: tests/selfhost/native_runtime/import_core_abi_42.sio$' "$BUNDLE"; then
-  echo "[native-v2-imported-core-abi] FAIL: expected imported and main source markers" >&2
-  grep '^// SOURCE:' "$BUNDLE" >&2 || true
+if ! grep -q 'Merged IR: 6' "$LOG_DIR/imported_ir_trace.log" ||
+   ! grep -q 'modules=2' "$LOG_DIR/imported_ir_trace.log" ||
+   ! grep -q 'body_lowered=2' "$LOG_DIR/imported_ir_trace.log"; then
+  echo "[native-v2-imported-core-abi] FAIL: imported IR trace did not prove 2-module/6-function handoff" >&2
+  cat "$LOG_DIR/imported_ir_trace.log" >&2 || true
   exit 1
 fi
 
 run_log native_compile \
-  "$SOUC_BIN" run self-hosted/compiler/native_compile_driver.sio -- "$BUNDLE" -o "$ELF"
+  bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/main.sio -- --native-compile "$PROGRAM" -o "$ELF"
+
+if grep -q 'native_prebundle:' "$LOG_DIR/native_compile.log"; then
+  echo "[native-v2-imported-core-abi] FAIL: direct native path used native_prebundle" >&2
+  cat "$LOG_DIR/native_compile.log" >&2 || true
+  exit 1
+fi
+
+if ! grep -q 'module_native_driver: imported source uses modular IR path' "$LOG_DIR/native_compile.log" ||
+   ! grep -q 'Merged IR: 6' "$LOG_DIR/native_compile.log"; then
+  echo "[native-v2-imported-core-abi] FAIL: native compile did not use imported modular IR path" >&2
+  cat "$LOG_DIR/native_compile.log" >&2 || true
+  exit 1
+fi
 
 if [[ ! -f "$ELF" ]]; then
   echo "[native-v2-imported-core-abi] FAIL: native ELF not produced" >&2
@@ -110,7 +105,7 @@ if [[ "$runtime_rc" -ne 42 ]]; then
   exit 1
 fi
 
-python3 - "$SUMMARY_JSON" "$SOUC_BIN" "$PROGRAM" "$BUNDLE" "$ELF" "$source_markers" "$OUT_DIR" <<'PY'
+python3 - "$SUMMARY_JSON" "$SOUC_BIN" "$PROGRAM" "$ELF" "$OUT_DIR" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -120,10 +115,8 @@ from datetime import datetime, timezone
 summary_path = pathlib.Path(sys.argv[1])
 souc_bin = sys.argv[2]
 program = sys.argv[3]
-bundle = pathlib.Path(sys.argv[4])
-elf = pathlib.Path(sys.argv[5])
-source_markers = int(sys.argv[6])
-out_dir = pathlib.Path(sys.argv[7])
+elf = pathlib.Path(sys.argv[4])
+out_dir = pathlib.Path(sys.argv[5])
 
 def sha256(path):
     h = hashlib.sha256()
@@ -133,24 +126,23 @@ def sha256(path):
     return h.hexdigest()
 
 payload = {
-    "schema": "sounio.native_v2_imported_core_abi.v1",
+    "schema": "sounio.native_v2_imported_core_abi.v2",
     "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     "status": "pass",
     "compiler_resolved": souc_bin,
     "target": "x86_64-linux",
     "program": program,
-    "bundle": str(bundle),
     "native_elf": str(elf),
     "native_elf_sha256": sha256(elf),
     "runtime_exit": 42,
-    "fallback_path": "prebundle",
+    "fallback_path": "none",
     "host_callback": "none",
-    "imported_prebundle_native": True,
-    "source_markers": source_markers,
+    "imported_prebundle_native": False,
+    "source_markers": 0,
     "artifact_dir": str(out_dir),
 }
 summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
-echo "[native-v2-imported-core-abi] PASS: imported core ABI prebundles to native ELF"
+echo "[native-v2-imported-core-abi] PASS: imported core ABI uses modular IR native driver directly"
 echo "[native-v2-imported-core-abi] summary=$SUMMARY_JSON"
