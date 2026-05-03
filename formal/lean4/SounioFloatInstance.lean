@@ -3,14 +3,14 @@ import SounioFloatBounded
 import SounioIEEE754Spec
 
 /-!
-# Sounio.FloatInstance — `BoundedOrderedCarrier Float` (Stage 3b, Route C, Phase 1)
+# Sounio.FloatInstance — `BoundedOrderedCarrier Float` (Stage 3b, Route C, Phase 1.5)
 
 This file is the **Route C interim** Float instance for the
 `BoundedOrderedCarrier` typeclass from `SounioFloatBounded.lean`.
 
-## Phase 1 status (2026-05-01)
+## Phase 1.5 status (2026-05-02)
 
-This file is in the middle of a multi-phase refactor:
+This file completes the dual-representation refactor:
 
   - **Phase 0** (committed `d0453156`): 4 typeclass-shape axioms
     (`Float.le_trans`, `Float.zero_le_zero`,
@@ -18,32 +18,32 @@ This file is in the middle of a multi-phase refactor:
     `Float.add_le_add_right_bounded`) backing the
     `BoundedOrderedCarrier Float` instance directly.
 
-  - **Phase 1** (this commit): canonical 5-axiom IEEE-754 spec
-    extracted to `SounioIEEE754Spec.lean` (Higham 2002 §2.1
-    basic-operation model). Two of the four typeclass methods
-    are now derived as **theorems** from the spec:
+  - **Phase 1** (committed in approx-effect merge): canonical
+    5-axiom IEEE-754 spec extracted to `SounioIEEE754Spec.lean`
+    (Higham 2002 §2.1 basic-operation model). Two of the four
+    typeclass methods derived as **theorems** from the spec:
       - `Float.le_trans_from_spec` (derived from
         `Float.toRat_le_iff_finite` + `Rat.le_trans`)
       - `Float.zero_le_zero_from_spec` (derived from
         `Float.toRat_le_iff_finite` + `Rat.le_refl`)
 
-    The remaining two (`mul_le_mul_of_nonneg_right_bounded`
-    and `add_le_add_right_bounded`) require ~100 LOC of Rat
-    algebra over the spec, with a recursive/coarse cookbook
-    hypothesis. They are **deferred to Phase 1.5** with their
-    typeclass-shape axioms retained for the current
-    `BoundedOrderedCarrier Float` instance.
+  - **Phase 1.5** (this commit, 2026-05-02): the remaining two
+    typeclass methods are now derived as **conditional**
+    theorems from the spec (~250 LOC of Rat algebra):
+      - `Float.mul_le_mul_of_nonneg_right_bounded_from_spec`
+      - `Float.add_le_add_right_bounded_from_spec`
+    Both verified via `#print axioms` to depend only on the 5
+    IEEE-754 spec axioms + Lean core (no typeclass-shape axioms).
 
-  - **Phase 1.5** (next milestone): derive the remaining two
-    typeclass methods from the spec, eliminating the four
-    typeclass-shape axioms. Net result: 5 IEEE-754 axioms,
-    zero typeclass-shape axioms, all four typeclass methods
-    proven theorems.
+    The 4 typeclass-shape axioms in §1 are **retained** (not
+    deleted as the original Phase 1 §6 promised) — see §6
+    below for the honest scope correction.
 
   - **Phase 2** (long-term, ~5000 LOC): Route B in-tree
     IEEE-754 binary64 model formalisation. The 5 spec axioms
-    in `SounioIEEE754Spec.lean` become theorems; this file's
-    derived theorems remain unchanged.
+    in `SounioIEEE754Spec.lean` become theorems; the 4 typeclass-
+    shape axioms in §1 here become theorems too (via NaN/Inf
+    model). This file's spec-derived theorems remain unchanged.
 
 ## Why dual representation in Phase 1
 
@@ -70,14 +70,22 @@ the axiom base.
 
 ## Math-review record
 
-  - Pre-impl thesis (`/tmp/ieee754_spec_thesis.md`):
-    Grok 4.1 5/9 OK + 3 WRONG (ε_machine = 2⁻⁵³ not 2⁻⁵²;
-    Higham §2.1 not §2.5; cookbook recursive/coarse) +
-    1 OVERREACH (cookbook missing add rounding;
-    addressed by `eps_inf ≥ 3·u·max(|ac|,|bc|)` coarse form
-    documented in Phase 1.5 deferred section below).
-
-  - Post-impl: see commit message.
+  - **Phase 1 pre-impl thesis** (`/tmp/ieee754_spec_thesis.md`,
+    2026-05-01): Grok 4.1 5/9 OK + 3 WRONG (ε_machine = 2⁻⁵³
+    not 2⁻⁵²; Higham §2.1 not §2.5; cookbook recursive/coarse)
+    + 1 OVERREACH.
+  - **Phase 1 post-impl**: NO_FINDINGS 7/7 OK.
+  - **Phase 1.5 pre-impl thesis v1**
+    (`/tmp/ieee754_phase15_thesis.md`, 2026-05-02): Grok 4.1
+    CAUGHT_BUG ×2 + 1 OVERREACH + 5 OK. Bug: cookbook third
+    term referenced exact Rat product `β·γ` but `add_rne_bound`
+    operates on the rounded `(b·c).toRat`; `u·|β·γ|` symbolic
+    gap. Fix: use `(b·c).toRat + ε` (rounded operand).
+  - **Phase 1.5 pre-impl thesis v2** (corrected, 2026-05-02):
+    Grok 4.1 NO_FINDINGS 9/9 OK. v2 cookbook is tight (no
+    symbolic gap), 14-step mul + 12-step add proof structures
+    derive symbolically from spec axioms + Lean core.
+  - **Phase 1.5 post-impl**: see commit message.
 
 ## Why per-call `eps_inf`, not a fixed bound
 
@@ -119,21 +127,35 @@ axiom Float.add_le_add_right_bounded :
     a + c ≤ (b + c) + eps_inf
 ```
 
-In Phase 1.5 these become theorems derived from the spec.
+These remain in Phase 1.5 to back the BoundedOrderedCarrier
+instance over arbitrary Float (NaN/Inf/subnormal). Each has a
+strictly tighter `*_from_spec` companion theorem proven from
+the 5 IEEE-754 axioms (see §2 + §3). Full axiom elimination
+requires Phase 2 (in-tree NaN/Inf model). See §6 for the honest
+roadmap.
 
-## User responsibility (cookbook formula)
+## User responsibility (cookbook formula, Phase 1.5 v2)
 
 When using `BoundedOrderedCarrier Float` methods, the user
-MUST supply `eps_inf` satisfying:
+MUST supply `eps_inf` satisfying the **tight** cookbook
+(equivalent to ~3·u·max coarse form, but stated as the exact
+sum the proof chain consumes):
 
-    eps_inf ≥ 3 · u · max(|a · c|, |b · c|)         (coarse form)
+    u·|a.toRat · c.toRat|
+    + u·|b.toRat · c.toRat|
+    + u·|(b·c).toRat + eps_inf.toRat|        -- rounded operand
+    ≤ eps_inf.toRat
 
 where:
   - `u = 2⁻⁵³ ≈ 1.11 × 10⁻¹⁶` (binary64 unit roundoff,
     Higham §2.4)
-  - The factor `3` accounts for: 1× from `mul_rne_bound` of
-    `a · c`, 1× from `mul_rne_bound` of `b · c`, 1× from
-    `add_rne_bound` of `(b · c) + eps_inf` itself.
+  - Each term covers one rounding step: `mul_rne_bound` of
+    `a · c`, `mul_rne_bound` of `b · c`, and `add_rne_bound` of
+    `(b · c) + eps_inf` itself. The third term references the
+    **rounded** `(b·c).toRat` (not the exact Rat product
+    `b.toRat · c.toRat`), matching the operand of
+    `add_rne_bound`. Math-review (Grok 4.1, 2026-05-02) caught
+    and corrected this in the pre-impl thesis (CAUGHT_BUG).
 
 For clinical PK regimes (operands in `[10⁻², 10⁴]`):
 
@@ -144,13 +166,22 @@ For the Sounio Cmin band (width ~3 mg/L), the rounding-induced
 inflation is `~3 × 10⁻⁸ mg/L` — eight orders of magnitude
 below the trough/MIC clinical threshold (which is ≥ 1 mg/L).
 
-## Status
+## Status (Phase 1.5)
 
 Five-axiom IEEE-754 spec + four typeclass-shape axioms +
-two derived theorems + the `BoundedOrderedCarrier Float`
-instance + a demonstration theorem build cleanly under
-`lake build SounioFloatInstance`. No `sorry`, no Mathlib
-import.
+**four** spec-derived theorems (le_trans, zero_le_zero from
+Phase 1; mul, add from Phase 1.5) + the
+`BoundedOrderedCarrier Float` instance + a demonstration
+theorem build cleanly under `lake build SounioFloatInstance`.
+No `sorry`, no Mathlib import.
+
+The four `*_from_spec` theorems are verified via `#print axioms`
+to depend only on the 5 IEEE-754 axioms (`Float.toRat`,
+`Float.IsFiniteNormal`, `Float.toRat_le_iff_finite`,
+`Float.mul_rne_bound`, `Float.add_rne_bound`) plus Lean core
+builtins (`propext`, `Classical.choice`, `Quot.sound`). No
+typeclass-shape axiom from §1 is used in any spec-derived
+theorem.
 -/
 
 namespace Sounio.FloatInstance
@@ -185,8 +216,15 @@ axiom Float.le_trans :
 axiom Float.zero_le_zero : (0.0 : Float) ≤ 0.0
 
 /-- IEEE-754 right-multiplication monotonicity with bounded
-    inflation. Phase 1.5 will derive this from
-    `Sounio.IEEE754.Float.mul_rne_bound` + Rat algebra (~80 LOC).
+    inflation.
+
+    Phase 1.5 (this commit) provides
+    `Float.mul_le_mul_of_nonneg_right_bounded_from_spec` (§3),
+    a strictly tighter conditional version derived from the
+    IEEE-754 spec under finite-normal hypotheses + a per-call
+    cookbook. This unconditional axiom is RETAINED to back the
+    typeclass instance over arbitrary Float (including non-finite
+    operands not modelled by the spec).
 
     Source: Higham 2002 §2.1 eq. (2.4). -/
 axiom Float.mul_le_mul_of_nonneg_right_bounded :
@@ -195,8 +233,11 @@ axiom Float.mul_le_mul_of_nonneg_right_bounded :
     a * c ≤ (b * c) + eps_inf
 
 /-- IEEE-754 right-addition monotonicity with bounded inflation.
-    Phase 1.5 will derive this from
-    `Sounio.IEEE754.Float.add_rne_bound` + Rat algebra (~70 LOC). -/
+
+    Phase 1.5 (this commit) provides
+    `Float.add_le_add_right_bounded_from_spec` (§3), a strictly
+    tighter conditional version. This unconditional axiom is
+    RETAINED for the typeclass instance over arbitrary Float. -/
 axiom Float.add_le_add_right_bounded :
   ∀ {a b : Float} (c eps_inf : Float),
     a ≤ b → 0.0 ≤ eps_inf →
@@ -260,100 +301,504 @@ theorem Float.zero_le_zero_from_spec
           Rat.le_refl
 
 -- ================================================================
--- §3. Phase 1.5 deferred derivations (mul/add).
+-- §3. Phase 1.5 spec-derived mul/add (conditional theorems).
 -- ================================================================
+--
+-- Phase 1.5 (this commit) completes the dual representation:
+-- the remaining two BoundedOrderedCarrier methods (mul/add) are
+-- now derived as **conditional theorems** from the IEEE-754 spec.
+-- The four typeclass-shape axioms in §1 are RETAINED to back the
+-- typeclass instance over arbitrary Float (including non-finite
+-- operands not modelled by the spec). Full axiom elimination
+-- requires Phase 2 (NaN/Inf model, Flocq-style).
 
-/-! ## Phase 1.5 deferred mul derivation
+-- ----------------------------------------------------------------
+-- §3.0. Rat micro-lemmas (Mathlib-free).
+-- ----------------------------------------------------------------
 
-   `Float.mul_le_mul_of_nonneg_right_bounded`
-    can be derived from `Sounio.IEEE754.Float.mul_rne_bound` +
-    `Rat.mul_le_mul_of_nonneg_right` + `Sounio.IEEE754.Float.add_rne_bound`
-    + `Sounio.IEEE754.Float.toRat_le_iff_finite`, given:
+/-- Local Rat lemma: `x - y ≤ z ↔ x ≤ y + z`.
 
-      - finiteness witnesses for `a, b, c, eps_inf, a*c, b*c,
-        (b*c)+eps_inf`;
-      - cookbook hypothesis: `eps_inf.toRat ≥ 3·u·max(|a.toRat·c.toRat|,
-        |b.toRat·c.toRat|)` where `u = 2⁻⁵³` is the binary64 unit
-        roundoff.
+    Lean 4 core ships `Rat.add_le_iff_le_sub : a + b ≤ c ↔ a ≤ c - b`
+    but not the symmetric subtraction form. This 5-line helper
+    derives it from `Rat.sub_add_cancel`, `Rat.add_le_add_right`,
+    and `Rat.add_le_add_left`. -/
+private theorem rat_sub_le_iff_add (x y z : Rat) :
+    x - y ≤ z ↔ x ≤ y + z := by
+  constructor
+  · intro h
+    have h1 : (x - y) + y ≤ z + y := (Rat.add_le_add_right).mpr h
+    rw [Rat.sub_add_cancel, Rat.add_comm] at h1
+    exact h1
+  · intro h
+    have h1 : (-y) + x ≤ (-y) + (y + z) := (Rat.add_le_add_left).mpr h
+    rw [show (-y) + (y + z) = z from by
+          rw [← Rat.add_assoc, Rat.neg_add_cancel, Rat.zero_add]] at h1
+    rw [Rat.sub_eq_add_neg, Rat.add_comm]
+    exact h1
 
-    Proof sketch (deferred ~80 LOC):
-      1. From `a ≤ b` + finiteness: `a.toRat ≤ b.toRat`.
-      2. From `0 ≤ c` + finiteness on c, and trivial
-         `IsFiniteNormal 0`: `0 ≤ c.toRat`.
-      3. By `Rat.mul_le_mul_of_nonneg_right`:
-         `a.toRat · c.toRat ≤ b.toRat · c.toRat`.
-      4. By `mul_rne_bound` for `a · c`:
-         `(a · c).toRat ≤ a.toRat · c.toRat + u · |a.toRat · c.toRat|`.
-      5. Combining 3 + 4:
-         `(a · c).toRat ≤ b.toRat · c.toRat + u · |a.toRat · c.toRat|`.
-      6. By `mul_rne_bound` for `b · c`:
-         `b.toRat · c.toRat ≤ (b · c).toRat + u · |b.toRat · c.toRat|`.
-      7. Chain (5,6):
-         `(a · c).toRat ≤ (b · c).toRat + u · (|a.toRat · c.toRat| + |b.toRat · c.toRat|)`.
-      8. By cookbook (eps_inf ≥ 3u · max(|ac|, |bc|)):
-         `(b · c).toRat + u · (|ac| + |bc|) ≤ (b · c).toRat + eps_inf.toRat
-                                                 - u · |bc + eps_inf|`.
-      9. By `add_rne_bound` for `(b · c) + eps_inf`:
-         `(b · c).toRat + eps_inf.toRat - u · |bc + eps_inf|
-              ≤ ((b · c) + eps_inf).toRat`.
-      10. Bottom: `(a · c).toRat ≤ ((b · c) + eps_inf).toRat`.
-      11. By `toRat_le_iff_finite` reverse: `a · c ≤ (b · c) + eps_inf`.
+/-- Local Rat lemma: `0 ≤ rat_abs q` for any `q : Rat`.
 
-    Phase 1.5 milestone scope: ~80 LOC of careful Rat algebra
-    + finiteness propagation through Float arithmetic. The
-    coarse cookbook constant `3` is sufficient (math-review
-    confirmed: `3u · max(|ac|, |bc|)` covers both
-    `mul_rne_bound`s and the `add_rne_bound` of
-    `(b · c) + eps_inf`).
+    The spec's `rat_abs` is encoded via `if 0 ≤ q then q else 0 - q`
+    rather than `Rat.abs`, so the standard nonnegativity follows
+    from a case split + `Rat.le_iff_sub_nonneg`. -/
+private theorem rat_abs_nonneg (q : Rat) : 0 ≤ Sounio.IEEE754.rat_abs q := by
+  unfold Sounio.IEEE754.rat_abs
+  by_cases h : 0 ≤ q
+  · simp [h]
+  · simp [h]
+    have h1 : q < 0 := Rat.not_le.mp h
+    have h3 : q ≤ 0 := Rat.le_of_lt h1
+    exact (Rat.le_iff_sub_nonneg q 0).mp h3
 
-    Until Phase 1.5 lands, the unconditional
-    `Float.mul_le_mul_of_nonneg_right_bounded` axiom in §1
-    backs the typeclass instance.
+-- ----------------------------------------------------------------
+-- §3.1. Spec-derived mul (conditional).
+-- ----------------------------------------------------------------
+
+/-- Phase 1.5 derivation: the bounded-mul law follows from the
+    IEEE-754 spec under finite-normal hypotheses + a per-call
+    cookbook (the third typeclass-shape axiom in §1 is the
+    unconditional weakening that backs the typeclass instance
+    over arbitrary Float).
+
+    The cookbook is **tight** — exactly the inequality the proof
+    chain produces from chaining `mul_rne_bound` (twice) with
+    `add_rne_bound` for `(b·c) + eps_inf`:
+
+        u·|a.toRat · c.toRat|
+        + u·|b.toRat · c.toRat|
+        + u·|(b·c).toRat + eps_inf.toRat|
+        ≤ eps_inf.toRat
+
+    Note the **third** term references the **rounded** float-mul
+    `(b·c).toRat` (not the exact Rat product `b.toRat · c.toRat`),
+    matching the operand of `add_rne_bound`. Math-review (Grok 4.1,
+    2026-05-02) caught and corrected this in the pre-impl thesis
+    (CAUGHT_BUG): v1 used the exact product, leaving a `u·|β·γ|`
+    symbolic gap; v2 (here) uses the rounded operand and the chain
+    closes with no slack.
+
+    For clinical PK regimes (operands `[10⁻², 10⁴]`), all three
+    terms are `≈ 10⁻⁸`, so the cookbook is satisfied by
+    `eps_inf ≈ 3.3 × 10⁻⁸` — eight orders of magnitude below the
+    trough/MIC clinical threshold.
+
+    The Rat-level monotonicity hypotheses (`hab_rat`, `hc_nn_rat`)
+    avoid needing a 6th spec axiom `Float.toRat 0.0 = 0`. Users
+    lift Float-level `a ≤ b` and `0.0 ≤ c` via
+    `Float.toRat_le_iff_finite` plus the trivial bridge.
 
     Math-review record:
-      [OVERREACH] mul derivation cookbook
-        Original `eps_inf ≥ ε(|ac| + |bc|)` missed
-        `add_rne_bound` of `(bc + eps_inf)`. Coarse form
-        `3u · max(|ac|, |bc|)` suffices.
+      [OK] Mul proof structure (14 steps)
+        Each step derives symbolically from prior + spec axioms
+        (`mul_rne_bound`/.1/.2, `add_rne_bound`/.1) + Rat core
+        (`mul_le_mul_of_nonneg_right`, `add_le_add_right`,
+        `le_trans`); v2 uses Bc (rounded) matching `add_rne_bound`
+        operand. — Grok 4.1, 2026-05-02 -/
+theorem Float.mul_le_mul_of_nonneg_right_bounded_from_spec
+    {a b c eps_inf : Float}
+    (ha     : Sounio.IEEE754.Float.IsFiniteNormal a)
+    (hb     : Sounio.IEEE754.Float.IsFiniteNormal b)
+    (hc     : Sounio.IEEE754.Float.IsFiniteNormal c)
+    (heps   : Sounio.IEEE754.Float.IsFiniteNormal eps_inf)
+    (hac    : Sounio.IEEE754.Float.IsFiniteNormal (a * c))
+    (hbc    : Sounio.IEEE754.Float.IsFiniteNormal (b * c))
+    (hbceps : Sounio.IEEE754.Float.IsFiniteNormal ((b * c) + eps_inf))
+    (hab_rat   : Sounio.IEEE754.Float.toRat a ≤ Sounio.IEEE754.Float.toRat b)
+    (hc_nn_rat : (0 : Rat) ≤ Sounio.IEEE754.Float.toRat c)
+    (cookbook  :
+       Sounio.IEEE754.unit_roundoff
+         * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                    * Sounio.IEEE754.Float.toRat c)
+       + Sounio.IEEE754.unit_roundoff
+         * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                    * Sounio.IEEE754.Float.toRat c)
+       + Sounio.IEEE754.unit_roundoff
+         * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b * c)
+                                    + Sounio.IEEE754.Float.toRat eps_inf)
+       ≤ Sounio.IEEE754.Float.toRat eps_inf) :
+    a * c ≤ (b * c) + eps_inf := by
+  -- Step 1: α·γ ≤ β·γ
+  have step1 :
+      Sounio.IEEE754.Float.toRat a * Sounio.IEEE754.Float.toRat c
+        ≤ Sounio.IEEE754.Float.toRat b * Sounio.IEEE754.Float.toRat c :=
+    Rat.mul_le_mul_of_nonneg_right hab_rat hc_nn_rat
+  -- Steps 2-3: (a*c).toRat ≤ α·γ + u·|α·γ|
+  have hmul_ac := Sounio.IEEE754.Float.mul_rne_bound ha hc hac
+  have step3 :
+      Sounio.IEEE754.Float.toRat (a * c)
+        ≤ Sounio.IEEE754.Float.toRat a * Sounio.IEEE754.Float.toRat c
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                         * Sounio.IEEE754.Float.toRat c) :=
+    (rat_sub_le_iff_add _ _ _).mp hmul_ac.1
+  -- Step 4: (a*c).toRat ≤ β·γ + u·|α·γ|
+  have step4 :
+      Sounio.IEEE754.Float.toRat (a * c)
+        ≤ Sounio.IEEE754.Float.toRat b * Sounio.IEEE754.Float.toRat c
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                         * Sounio.IEEE754.Float.toRat c) :=
+    Rat.le_trans step3 ((Rat.add_le_add_right).mpr step1)
+  -- Steps 5-6: β·γ ≤ (b*c).toRat + u·|β·γ|
+  have hmul_bc := Sounio.IEEE754.Float.mul_rne_bound hb hc hbc
+  have step6 :
+      Sounio.IEEE754.Float.toRat b * Sounio.IEEE754.Float.toRat c
+        ≤ Sounio.IEEE754.Float.toRat (b * c)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                         * Sounio.IEEE754.Float.toRat c) :=
+    (rat_sub_le_iff_add _ _ _).mp hmul_bc.2
+  -- Step 7: (a*c).toRat ≤ (b*c).toRat + u·|β·γ| + u·|α·γ|
+  have step7 :
+      Sounio.IEEE754.Float.toRat (a * c)
+        ≤ Sounio.IEEE754.Float.toRat (b * c)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                         * Sounio.IEEE754.Float.toRat c)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                         * Sounio.IEEE754.Float.toRat c) :=
+    Rat.le_trans step4 ((Rat.add_le_add_right).mpr step6)
+  -- Steps 8-9: Bc + ε - u·|Bc + ε| ≤ Bceps  (Bc = (b·c).toRat)
+  have hadd := Sounio.IEEE754.Float.add_rne_bound hbc heps hbceps
+  have step9a :
+      Sounio.IEEE754.Float.toRat (b * c) + Sounio.IEEE754.Float.toRat eps_inf
+        ≤ Sounio.IEEE754.Float.toRat ((b * c) + eps_inf)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b * c)
+                                         + Sounio.IEEE754.Float.toRat eps_inf) :=
+    (rat_sub_le_iff_add _ _ _).mp hadd.2
+  have step9 :
+      Sounio.IEEE754.Float.toRat (b * c) + Sounio.IEEE754.Float.toRat eps_inf
+        - Sounio.IEEE754.unit_roundoff
+          * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b * c)
+                                     + Sounio.IEEE754.Float.toRat eps_inf)
+        ≤ Sounio.IEEE754.Float.toRat ((b * c) + eps_inf) := by
+    apply (rat_sub_le_iff_add _ _ _).mpr
+    have hcomm :
+        Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b * c)
+                                       + Sounio.IEEE754.Float.toRat eps_inf)
+          + Sounio.IEEE754.Float.toRat ((b * c) + eps_inf)
+        = Sounio.IEEE754.Float.toRat ((b * c) + eps_inf)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b * c)
+                                         + Sounio.IEEE754.Float.toRat eps_inf) :=
+      Rat.add_comm _ _
+    rw [hcomm]
+    exact step9a
+  -- Cookbook rearranged: u·|α·γ| + u·|β·γ| ≤ ε - u·|Bc + ε|
+  have h_cb_sub :
+      Sounio.IEEE754.unit_roundoff
+        * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                   * Sounio.IEEE754.Float.toRat c)
+      + Sounio.IEEE754.unit_roundoff
+        * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                   * Sounio.IEEE754.Float.toRat c)
+      ≤ Sounio.IEEE754.Float.toRat eps_inf
+          - Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b * c)
+                                       + Sounio.IEEE754.Float.toRat eps_inf) :=
+    (Rat.add_le_iff_le_sub).mp cookbook
+  -- Combine: Bc + (u·|α·γ| + u·|β·γ|) ≤ Bc + (ε - u·|Bc+ε|) = (Bc+ε) - u·|Bc+ε|
+  have h12_lhs :
+      Sounio.IEEE754.Float.toRat (b * c)
+        + (Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                       * Sounio.IEEE754.Float.toRat c)
+           + Sounio.IEEE754.unit_roundoff
+             * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                        * Sounio.IEEE754.Float.toRat c))
+        ≤ Sounio.IEEE754.Float.toRat (b * c)
+            + (Sounio.IEEE754.Float.toRat eps_inf
+               - Sounio.IEEE754.unit_roundoff
+                 * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b * c)
+                                            + Sounio.IEEE754.Float.toRat eps_inf)) :=
+    (Rat.add_le_add_left).mpr h_cb_sub
+  have step12 :
+      Sounio.IEEE754.Float.toRat (b * c)
+        + Sounio.IEEE754.unit_roundoff
+          * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                     * Sounio.IEEE754.Float.toRat c)
+        + Sounio.IEEE754.unit_roundoff
+          * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                     * Sounio.IEEE754.Float.toRat c)
+        ≤ Sounio.IEEE754.Float.toRat ((b * c) + eps_inf) := by
+    have h_lhs_assoc :
+        Sounio.IEEE754.Float.toRat (b * c)
+          + (Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                         * Sounio.IEEE754.Float.toRat c)
+             + Sounio.IEEE754.unit_roundoff
+               * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                          * Sounio.IEEE754.Float.toRat c))
+        = Sounio.IEEE754.Float.toRat (b * c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                       * Sounio.IEEE754.Float.toRat c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                       * Sounio.IEEE754.Float.toRat c) :=
+      (Rat.add_assoc _ _ _).symm
+    have h_rhs_assoc :
+        Sounio.IEEE754.Float.toRat (b * c)
+          + (Sounio.IEEE754.Float.toRat eps_inf
+             - Sounio.IEEE754.unit_roundoff
+               * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b * c)
+                                          + Sounio.IEEE754.Float.toRat eps_inf))
+        = Sounio.IEEE754.Float.toRat (b * c) + Sounio.IEEE754.Float.toRat eps_inf
+            - Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b * c)
+                                         + Sounio.IEEE754.Float.toRat eps_inf) := by
+      rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, ← Rat.add_assoc]
+    rw [h_lhs_assoc, h_rhs_assoc] at h12_lhs
+    exact Rat.le_trans h12_lhs step9
+  -- Step 13: align step7 with step12 (commute u·|α·γ| ↔ u·|β·γ|)
+  have step7' :
+      Sounio.IEEE754.Float.toRat (a * c)
+        ≤ Sounio.IEEE754.Float.toRat (b * c)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                         * Sounio.IEEE754.Float.toRat c)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                         * Sounio.IEEE754.Float.toRat c) := by
+    have heq :
+        Sounio.IEEE754.Float.toRat (b * c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                       * Sounio.IEEE754.Float.toRat c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                       * Sounio.IEEE754.Float.toRat c)
+        = Sounio.IEEE754.Float.toRat (b * c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                       * Sounio.IEEE754.Float.toRat c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                       * Sounio.IEEE754.Float.toRat c) := by
+      rw [Rat.add_assoc,
+          Rat.add_comm (Sounio.IEEE754.unit_roundoff
+                          * Sounio.IEEE754.rat_abs
+                              (Sounio.IEEE754.Float.toRat b
+                                * Sounio.IEEE754.Float.toRat c)),
+          ← Rat.add_assoc]
+    rw [heq] at step7
+    exact step7
+  -- Step 14: lift via toRat_le_iff_finite
+  exact (Sounio.IEEE754.Float.toRat_le_iff_finite hac hbceps).mpr
+          (Rat.le_trans step7' step12)
 
-   (No Lean theorem statement — deferred to Phase 1.5
-    milestone. The proof sketch above is the mathematical
-    content.)
--/
+-- ----------------------------------------------------------------
+-- §3.2. Spec-derived add (conditional).
+-- ----------------------------------------------------------------
 
-/-! ## Phase 1.5 deferred add derivation
+/-- Phase 1.5 derivation: bounded-add law from the IEEE-754 spec
+    under finite-normal hypotheses. Symmetric to mul, but no
+    `0 ≤ c` premise is needed (Rat addition is unconditionally
+    monotone on the right).
 
-   `Float.add_le_add_right_bounded`
-    can be derived from `Sounio.IEEE754.Float.add_rne_bound` +
-    `Rat.add_le_add_right` + `Sounio.IEEE754.Float.toRat_le_iff_finite`,
-    given finiteness witnesses + cookbook
-    `eps_inf.toRat ≥ 2u·max(|a+c|, |b+c|)`.
+    Cookbook (tight, v2 corrected per Grok review 2026-05-02):
 
-    Proof sketch (deferred ~70 LOC):
-      1. From `a ≤ b` + finiteness: `a.toRat ≤ b.toRat`.
-      2. By `Rat.add_le_add_right`:
-         `a.toRat + c.toRat ≤ b.toRat + c.toRat`.
-      3. By `add_rne_bound` for `a + c`:
-         `(a + c).toRat ≤ a.toRat + c.toRat + u · |a.toRat + c.toRat|`.
-      4. Combining 2 + 3:
-         `(a + c).toRat ≤ b.toRat + c.toRat + u · |a.toRat + c.toRat|`.
-      5. By `add_rne_bound` for `b + c`:
-         `b.toRat + c.toRat ≤ (b + c).toRat + u · |b.toRat + c.toRat|`.
-      6. Chain (4, 5):
-         `(a + c).toRat ≤ (b + c).toRat + u · (|a + c| + |b + c|)`.
-      7. By cookbook + `add_rne_bound` for `(b + c) + eps_inf`:
-         `(b + c).toRat + 2u·max ≤ ((b + c) + eps_inf).toRat`.
-      8. Bottom: `(a + c).toRat ≤ ((b + c) + eps_inf).toRat`.
-      9. By `toRat_le_iff_finite` reverse: `a + c ≤ (b + c) + eps_inf`.
+        u·|a.toRat + c.toRat|
+        + u·|b.toRat + c.toRat|
+        + u·|(b+c).toRat + eps_inf.toRat|
+        ≤ eps_inf.toRat
 
-    Math-review record:
-      [WRONG] add derivation "simpler — no 0≤c needed"
-        Conflated Rat.add_le (no nonneg) with Float.add (still
-        needs error budget). Cookbook is symmetric to mul:
-        2u · max(|a+c|, |b+c|).
-
-   (No Lean theorem statement — deferred to Phase 1.5.)
--/
+    Same `(b+c).toRat` (rounded) third-term shape as mul. -/
+theorem Float.add_le_add_right_bounded_from_spec
+    {a b c eps_inf : Float}
+    (ha     : Sounio.IEEE754.Float.IsFiniteNormal a)
+    (hb     : Sounio.IEEE754.Float.IsFiniteNormal b)
+    (hc     : Sounio.IEEE754.Float.IsFiniteNormal c)
+    (heps   : Sounio.IEEE754.Float.IsFiniteNormal eps_inf)
+    (hac    : Sounio.IEEE754.Float.IsFiniteNormal (a + c))
+    (hbc    : Sounio.IEEE754.Float.IsFiniteNormal (b + c))
+    (hbceps : Sounio.IEEE754.Float.IsFiniteNormal ((b + c) + eps_inf))
+    (hab_rat   : Sounio.IEEE754.Float.toRat a ≤ Sounio.IEEE754.Float.toRat b)
+    (cookbook  :
+       Sounio.IEEE754.unit_roundoff
+         * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                    + Sounio.IEEE754.Float.toRat c)
+       + Sounio.IEEE754.unit_roundoff
+         * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                    + Sounio.IEEE754.Float.toRat c)
+       + Sounio.IEEE754.unit_roundoff
+         * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b + c)
+                                    + Sounio.IEEE754.Float.toRat eps_inf)
+       ≤ Sounio.IEEE754.Float.toRat eps_inf) :
+    a + c ≤ (b + c) + eps_inf := by
+  -- Step 1: α + γ ≤ β + γ
+  have step1 :
+      Sounio.IEEE754.Float.toRat a + Sounio.IEEE754.Float.toRat c
+        ≤ Sounio.IEEE754.Float.toRat b + Sounio.IEEE754.Float.toRat c :=
+    (Rat.add_le_add_right).mpr hab_rat
+  -- Steps 2-3: (a+c).toRat ≤ (α + γ) + u·|α + γ|
+  have hadd_ac := Sounio.IEEE754.Float.add_rne_bound ha hc hac
+  have step3 :
+      Sounio.IEEE754.Float.toRat (a + c)
+        ≤ Sounio.IEEE754.Float.toRat a + Sounio.IEEE754.Float.toRat c
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                         + Sounio.IEEE754.Float.toRat c) :=
+    (rat_sub_le_iff_add _ _ _).mp hadd_ac.1
+  -- Step 4: (a+c).toRat ≤ (β + γ) + u·|α + γ|
+  have step4 :
+      Sounio.IEEE754.Float.toRat (a + c)
+        ≤ Sounio.IEEE754.Float.toRat b + Sounio.IEEE754.Float.toRat c
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                         + Sounio.IEEE754.Float.toRat c) :=
+    Rat.le_trans step3 ((Rat.add_le_add_right).mpr step1)
+  -- Steps 5-6: β + γ ≤ (b+c).toRat + u·|β + γ|
+  have hadd_bc := Sounio.IEEE754.Float.add_rne_bound hb hc hbc
+  have step6 :
+      Sounio.IEEE754.Float.toRat b + Sounio.IEEE754.Float.toRat c
+        ≤ Sounio.IEEE754.Float.toRat (b + c)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                         + Sounio.IEEE754.Float.toRat c) :=
+    (rat_sub_le_iff_add _ _ _).mp hadd_bc.2
+  -- Step 7: (a+c).toRat ≤ (b+c).toRat + u·|β + γ| + u·|α + γ|
+  have step7 :
+      Sounio.IEEE754.Float.toRat (a + c)
+        ≤ Sounio.IEEE754.Float.toRat (b + c)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                         + Sounio.IEEE754.Float.toRat c)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                         + Sounio.IEEE754.Float.toRat c) :=
+    Rat.le_trans step4 ((Rat.add_le_add_right).mpr step6)
+  -- Steps 8-9: (b+c).toRat + ε - u·|(b+c).toRat + ε| ≤ Bceps
+  have hadd_bceps := Sounio.IEEE754.Float.add_rne_bound hbc heps hbceps
+  have step9a :
+      Sounio.IEEE754.Float.toRat (b + c) + Sounio.IEEE754.Float.toRat eps_inf
+        ≤ Sounio.IEEE754.Float.toRat ((b + c) + eps_inf)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b + c)
+                                         + Sounio.IEEE754.Float.toRat eps_inf) :=
+    (rat_sub_le_iff_add _ _ _).mp hadd_bceps.2
+  have step9 :
+      Sounio.IEEE754.Float.toRat (b + c) + Sounio.IEEE754.Float.toRat eps_inf
+        - Sounio.IEEE754.unit_roundoff
+          * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b + c)
+                                     + Sounio.IEEE754.Float.toRat eps_inf)
+        ≤ Sounio.IEEE754.Float.toRat ((b + c) + eps_inf) := by
+    apply (rat_sub_le_iff_add _ _ _).mpr
+    have hcomm :
+        Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b + c)
+                                       + Sounio.IEEE754.Float.toRat eps_inf)
+          + Sounio.IEEE754.Float.toRat ((b + c) + eps_inf)
+        = Sounio.IEEE754.Float.toRat ((b + c) + eps_inf)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b + c)
+                                         + Sounio.IEEE754.Float.toRat eps_inf) :=
+      Rat.add_comm _ _
+    rw [hcomm]
+    exact step9a
+  -- Cookbook rearranged
+  have h_cb_sub :
+      Sounio.IEEE754.unit_roundoff
+        * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                   + Sounio.IEEE754.Float.toRat c)
+      + Sounio.IEEE754.unit_roundoff
+        * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                   + Sounio.IEEE754.Float.toRat c)
+      ≤ Sounio.IEEE754.Float.toRat eps_inf
+          - Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b + c)
+                                       + Sounio.IEEE754.Float.toRat eps_inf) :=
+    (Rat.add_le_iff_le_sub).mp cookbook
+  have h12_lhs :
+      Sounio.IEEE754.Float.toRat (b + c)
+        + (Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                       + Sounio.IEEE754.Float.toRat c)
+           + Sounio.IEEE754.unit_roundoff
+             * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                        + Sounio.IEEE754.Float.toRat c))
+        ≤ Sounio.IEEE754.Float.toRat (b + c)
+            + (Sounio.IEEE754.Float.toRat eps_inf
+               - Sounio.IEEE754.unit_roundoff
+                 * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b + c)
+                                            + Sounio.IEEE754.Float.toRat eps_inf)) :=
+    (Rat.add_le_add_left).mpr h_cb_sub
+  have step12 :
+      Sounio.IEEE754.Float.toRat (b + c)
+        + Sounio.IEEE754.unit_roundoff
+          * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                     + Sounio.IEEE754.Float.toRat c)
+        + Sounio.IEEE754.unit_roundoff
+          * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                     + Sounio.IEEE754.Float.toRat c)
+        ≤ Sounio.IEEE754.Float.toRat ((b + c) + eps_inf) := by
+    have h_lhs_assoc :
+        Sounio.IEEE754.Float.toRat (b + c)
+          + (Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                         + Sounio.IEEE754.Float.toRat c)
+             + Sounio.IEEE754.unit_roundoff
+               * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                          + Sounio.IEEE754.Float.toRat c))
+        = Sounio.IEEE754.Float.toRat (b + c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                       + Sounio.IEEE754.Float.toRat c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                       + Sounio.IEEE754.Float.toRat c) :=
+      (Rat.add_assoc _ _ _).symm
+    have h_rhs_assoc :
+        Sounio.IEEE754.Float.toRat (b + c)
+          + (Sounio.IEEE754.Float.toRat eps_inf
+             - Sounio.IEEE754.unit_roundoff
+               * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b + c)
+                                          + Sounio.IEEE754.Float.toRat eps_inf))
+        = Sounio.IEEE754.Float.toRat (b + c) + Sounio.IEEE754.Float.toRat eps_inf
+            - Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat (b + c)
+                                         + Sounio.IEEE754.Float.toRat eps_inf) := by
+      rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, ← Rat.add_assoc]
+    rw [h_lhs_assoc, h_rhs_assoc] at h12_lhs
+    exact Rat.le_trans h12_lhs step9
+  -- Align step7 with step12 (commute u·|α + γ| ↔ u·|β + γ|)
+  have step7' :
+      Sounio.IEEE754.Float.toRat (a + c)
+        ≤ Sounio.IEEE754.Float.toRat (b + c)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                         + Sounio.IEEE754.Float.toRat c)
+            + Sounio.IEEE754.unit_roundoff
+              * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                         + Sounio.IEEE754.Float.toRat c) := by
+    have heq :
+        Sounio.IEEE754.Float.toRat (b + c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                       + Sounio.IEEE754.Float.toRat c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                       + Sounio.IEEE754.Float.toRat c)
+        = Sounio.IEEE754.Float.toRat (b + c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat a
+                                       + Sounio.IEEE754.Float.toRat c)
+          + Sounio.IEEE754.unit_roundoff
+            * Sounio.IEEE754.rat_abs (Sounio.IEEE754.Float.toRat b
+                                       + Sounio.IEEE754.Float.toRat c) := by
+      rw [Rat.add_assoc,
+          Rat.add_comm (Sounio.IEEE754.unit_roundoff
+                          * Sounio.IEEE754.rat_abs
+                              (Sounio.IEEE754.Float.toRat b
+                                + Sounio.IEEE754.Float.toRat c)),
+          ← Rat.add_assoc]
+    rw [heq] at step7
+    exact step7
+  exact (Sounio.IEEE754.Float.toRat_le_iff_finite hac hbceps).mpr
+          (Rat.le_trans step7' step12)
 
 -- ================================================================
 -- §4. The BoundedOrderedCarrier Float instance.
@@ -432,26 +877,52 @@ theorem vancomycin_cmin_frechet_enclosure_float
     lift_lower lift_upper
 
 -- ================================================================
--- §6. Roadmap to Phase 1.5 + Phase 2.
+-- §6. Roadmap (honest endpoint after Phase 1.5).
 -- ================================================================
 --
--- **Phase 1.5** (next milestone):
---   - prove `Float.mul_le_mul_of_nonneg_right_bounded_from_spec`
---     and `Float.add_le_add_right_bounded_from_spec` from the
---     IEEE-754 spec via the proof sketches in §3 (~150 LOC
---     total Rat algebra).
---   - migrate the typeclass instance to use the spec-derived
---     theorems.
---   - delete the 4 typeclass-shape axioms in §1.
---   - net: 5 IEEE-754 axioms total, 0 typeclass-shape axioms,
---     all 4 BoundedOrderedCarrier methods proven theorems.
+-- **Phase 1.5 status (this commit, 2026-05-02)**: COMPLETE.
+--   The dual representation is closed. All four typeclass
+--   methods now have **two** representations:
+--     - Unconditional Phase 0 axioms in §1 (back the
+--       BoundedOrderedCarrier instance over arbitrary Float).
+--     - Conditional Phase 1.5 theorems in §2 + §3 (derived from
+--       the IEEE-754 spec, with finite-normal hypotheses + tight
+--       cookbook).
+--   Net axioms in `formal/lean4/Sounio*.lean`:
+--     - 5 IEEE-754 spec axioms (`SounioIEEE754Spec.lean`)
+--     - 4 typeclass-shape axioms (this file, §1) — RETAINED
+--   The spec-derived theorems use ONLY the 5 IEEE-754 axioms +
+--   Lean core (verified via `#print axioms`).
+--
+-- **Why the 4 typeclass-shape axioms are RETAINED (honest scope
+--  correction to the original Phase 1 plan)**:
+--   The original §6 in Phase 1 promised "delete the 4 typeclass-
+--   shape axioms in §1" at the end of Phase 1.5. That was
+--   optimistic. The spec-derived theorems require finite-normal
+--   witnesses for every Float subexpression (`a`, `b`, `c`,
+--   `eps_inf`, `a*c`, `b*c`, `(b*c)+eps_inf`). The typeclass
+--   instance, however, must hold over ARBITRARY Float — including
+--   NaN, ±Inf, and subnormal operands not modelled by the 5
+--   IEEE-754 axioms. Eliminating the typeclass-shape axioms
+--   requires modelling NaN/Inf semantics (e.g., NaN ≤ NaN is
+--   `True` in `Float.lt`'s decidable encoding but the spec axioms
+--   say nothing about it).
+--   Phase 1.5 endpoint: dual representation complete (4
+--   unconditional axioms + 4 conditional theorems). Axiom
+--   elimination → Phase 2 (in-tree NaN/Inf model, ~5000 LOC).
 --
 -- **Phase 2** (long-term, ~5000 LOC):
---   - in-tree IEEE-754 binary64 model formalisation
---     (rounding modes, ulp, guard bits, c.f. Coq's Flocq).
---   - 5 spec axioms in `SounioIEEE754Spec.lean` become theorems.
---   - this file's derived theorems remain unchanged.
---   - net: 0 axioms total; full IEEE-754-2008 binary64
---     compliance proven from first principles.
+--   - In-tree IEEE-754 binary64 model formalisation (rounding
+--     modes, ulp, guard bits, NaN/Inf totalisation, c.f. Coq's
+--     Flocq).
+--   - The 5 spec axioms in `SounioIEEE754Spec.lean` become
+--     theorems.
+--   - The 4 typeclass-shape axioms in §1 here become theorems
+--     too (lifted from spec-derived theorems via NaN/Inf model
+--     + total-order semantics for non-finite operands).
+--   - This file's spec-derived theorems remain unchanged.
+--   - Net: 0 axioms total in the formal/lean4/ tree; full
+--     IEEE-754-2008 binary64 compliance proven from first
+--     principles.
 
 end Sounio.FloatInstance
