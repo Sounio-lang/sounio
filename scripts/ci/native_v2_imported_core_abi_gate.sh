@@ -66,7 +66,7 @@ if ! grep -q 'Merged IR: 6' "$LOG_DIR/imported_ir_summary.log" ||
 fi
 
 run_log native_compile \
-  bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/lean.sio -- "$PROGRAM" -o "$ELF"
+  bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/lean.sio -- --native-compile "$PROGRAM" -o "$ELF"
 
 if grep -q 'native_prebundle:' "$LOG_DIR/native_compile.log"; then
   echo "[native-v2-imported-core-abi] FAIL: direct native path used native_prebundle" >&2

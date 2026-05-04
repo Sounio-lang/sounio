@@ -472,8 +472,12 @@ core_required = [
     "lean_modular_hello_ir_summary",
     "lean_frontend_imported_ir_summary",
     "lean_modular_imported_ir_summary",
+    "lean_modular_probe_load_ir",
+    "lean_modular_probe_load_ir_trace",
+    "lean_modular_native_compile_alias",
     "lean_modular_expr_mixed_native_compile",
     "lean_modular_expr_paren_native_compile",
+    "lean_modular_expr_uneg_native_compile",
 ]
 legacy_main_cases = [
     "main_probe_load_ir",
@@ -571,8 +575,12 @@ payload = {
         "lean_modular_hello_ir_summary_passed": case_by_id.get("lean_modular_hello_ir_summary", {}).get("rc") == 0,
         "lean_frontend_imported_ir_summary_passed": case_by_id.get("lean_frontend_imported_ir_summary", {}).get("rc") == 0,
         "lean_modular_imported_ir_summary_passed": case_by_id.get("lean_modular_imported_ir_summary", {}).get("rc") == 0,
+        "lean_modular_probe_load_ir_passed": case_by_id.get("lean_modular_probe_load_ir", {}).get("rc") == 0,
+        "lean_modular_probe_load_ir_trace_passed": case_by_id.get("lean_modular_probe_load_ir_trace", {}).get("rc") == 0,
+        "lean_modular_native_compile_alias_passed": case_by_id.get("lean_modular_native_compile_alias", {}).get("rc") == 0,
         "lean_modular_expr_mixed_native_compile_passed": case_by_id.get("lean_modular_expr_mixed_native_compile", {}).get("rc") == 0,
         "lean_modular_expr_paren_native_compile_passed": case_by_id.get("lean_modular_expr_paren_native_compile", {}).get("rc") == 0,
+        "lean_modular_expr_uneg_native_compile_passed": case_by_id.get("lean_modular_expr_uneg_native_compile", {}).get("rc") == 0,
         "main_probe_load_ir_passed": case_by_id.get("main_probe_load_ir", {}).get("rc") == 0,
         "main_probe_load_ir_trace_passed": case_by_id.get("main_probe_load_ir_trace", {}).get("rc") == 0,
         "main_probe_imported_load_ir_passed": case_by_id.get("main_probe_imported_load_ir", {}).get("rc") == 0,
@@ -621,6 +629,15 @@ run_case "lean_frontend_imported_ir_summary" "$LOG_DIR/lean_frontend.imported_ir
   "$SOUC_BIN" run self-hosted/compiler/lean_frontend.sio -- --ir-summary tests/selfhost/native_runtime/import_nested_main_42.sio
 run_case "lean_modular_imported_ir_summary" "$LOG_DIR/lean_modular.imported_ir_summary.log" \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --ir-summary tests/selfhost/native_runtime/import_nested_main_42.sio
+run_case "lean_modular_probe_load_ir" "$LOG_DIR/lean_modular.probe_load_ir.log" \
+  bash -c 'set -o pipefail; "$1" run self-hosted/compiler/lean.sio -- --probe-load-ir examples/hello.sio | grep -q "probe_load_ir: ok"' \
+  bash "$SOUC_BIN"
+run_case "lean_modular_probe_load_ir_trace" "$LOG_DIR/lean_modular.probe_load_ir_trace.log" \
+  bash -c 'out="$("$1" run self-hosted/compiler/lean.sio -- --probe-load-ir-trace tests/selfhost/native_runtime/import_nested_main_42.sio 2>&1)"; printf "%s\n" "$out"; grep -q "body_lowered=3" <<<"$out" && grep -q "probe_load_ir_trace: ok" <<<"$out"' \
+  bash "$SOUC_BIN"
+run_case "lean_modular_native_compile_alias" "$LOG_DIR/lean_modular.native_compile_alias.log" \
+  bash -c '"$1" run self-hosted/compiler/lean.sio -- --native-compile tests/selfhost/native_runtime/import_core_abi_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+  bash "$SOUC_BIN" "$OUT_DIR/import_core_abi_42.lean.native"
 run_case "lean_modular_expr_mixed_native_compile" "$LOG_DIR/lean_modular.expr_mixed_native_compile.log" \
   bash -c '"$1" run self-hosted/compiler/lean.sio -- tests/selfhost/native_runtime/import_expr_mixed_23.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 23' \
   bash "$SOUC_BIN" "$OUT_DIR/import_expr_mixed_23.lean.native"
