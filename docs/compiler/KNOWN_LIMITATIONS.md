@@ -135,7 +135,7 @@ The following stdlib modules are stubs or incomplete:
 - **Linux aarch64**: Supported via `--target aarch64-linux`
 - **macOS x86-64**: Mach-O backend (2,512 lines) wired; cross-compile via `--target x86_64-macos`
 - **macOS ARM64**: Mach-O ARM64 backend wired; cross-compile via `--target aarch64-macos`
-- **Windows x86-64**: PE/COFF backend (3,508 lines) wired; cross-compile via `--target x86_64-windows`
+- **Windows x86-64**: PE/COFF backend (3,508 lines) wired; cross-compile via `--target x86_64-windows`. No pre-built .exe shipped in this checkout.
 
 Cross-compiled binaries must be executed on the target OS. The compiler runs on Linux and emits the correct binary format for each target.
 

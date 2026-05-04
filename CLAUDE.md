@@ -88,7 +88,7 @@ Test directories: `tests/run-pass/`, `tests/compile-fail/`, `tests/ui/`, `tests/
 | `assert!(cond)` | `assert(cond)` |
 | `println!("hi")` | `println("hi")` |
 | `#[test]`, `#[derive()]` | No attributes |
-| `\|x\| x + 1` | Named fn refs: `let f = square` |
+| `\|x\| x + 1` | Closure literals — `|x| x + 1` works |
 | `-42` | `0 - 42` (no unary minus) |
 | `x >> 4` | `x >> 4u8` (bit shifts require u8) |
 
@@ -169,8 +169,7 @@ No AI attribution in commits.
 
 ## Known Limitations
 
-- `Knowledge<T>` is monomorphic (f64 only) — struct-level generics in progress
-- No closure literals — use named fn refs (`let f = square`)
+- `Knowledge<T>` supports struct-level generics (f64, bool, struct types work)
 - No unary minus — write `0 - x`
 - No REPL/`--show-ast`/`--show-types` in native mode yet
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
