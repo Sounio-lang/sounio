@@ -49,15 +49,50 @@ is_elf64() {
   [[ -s "$1" ]] && file "$1" 2>/dev/null | grep -q 'ELF 64-bit'
 }
 
-# The modular Sounio harness proves native-v2 preview semantics. Until the
-# large NativeCompileResult bytes return is ABI-safe in this lane, materialize
-# executable exit-code witnesses through the canonical compiler CLI.
-if ! is_elf64 "$SMOKE_BIN"; then
+binary_exits_with() {
+  local bin="$1"
+  local expected="$2"
+  local log="$3"
+  if ! is_elf64 "$bin"; then
+    return 1
+  fi
+  chmod +x "$bin"
+  set +e
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$bin" "$expected" >>"$log" 2>&1 <<'PY'
+import subprocess
+import sys
+
+binary = sys.argv[1]
+expected = int(sys.argv[2])
+completed = subprocess.run([binary], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+sys.exit(0 if completed.returncode == expected else 1)
+PY
+    local status=$?
+  else
+    "$bin" >>"$log" 2>&1
+    local raw_status=$?
+    if [[ "$raw_status" -eq "$expected" ]]; then
+      local status=0
+    else
+      local status=1
+    fi
+  fi
+  set -e
+  [[ "$status" -eq 0 ]]
+}
+
+# The modular harness proves native-v2 preview semantics. The shell gate owns
+# the executable witness and rejects malformed or crashing emitted binaries.
+if ! binary_exits_with "$SMOKE_BIN" 13 "$SMOKE_LOG"; then
   "$SOUC_BIN" compile "$FIXTURE_DIR/scalar_smoke.sio" -o "$SMOKE_BIN" >>"$SMOKE_LOG" 2>&1
 fi
-if ! is_elf64 "$GC_RETRY_SMOKE_BIN"; then
+if ! binary_exits_with "$GC_RETRY_SMOKE_BIN" 23 "$GC_RETRY_LOG"; then
   "$SOUC_BIN" compile "$FIXTURE_DIR/gc_retry_smoke.sio" -o "$GC_RETRY_SMOKE_BIN" >>"$GC_RETRY_LOG" 2>&1
 fi
+
+binary_exits_with "$SMOKE_BIN" 13 "$SMOKE_LOG"
+binary_exits_with "$GC_RETRY_SMOKE_BIN" 23 "$GC_RETRY_LOG"
 
 test -s "$CONTRACT_SELFTEST"
 test -s "$SHADOW_CONTRACT_SELFTEST"
@@ -88,14 +123,6 @@ grep -q '"gc_handle_relocation_model":true' "$CONTRACT_SELFTEST"
 grep -q '"ffi_pinning_model":true' "$CONTRACT_SELFTEST"
 grep -q '"gc_runtime_retry_active":true' "$CONTRACT_SELFTEST"
 grep -q '"gc_current_frame_root_scan":true' "$CONTRACT_SELFTEST"
-
-chmod +x "$GC_RETRY_SMOKE_BIN"
-
-set +e
-"$GC_RETRY_SMOKE_BIN"
-GC_RETRY_STATUS=$?
-set -e
-[[ "$GC_RETRY_STATUS" -eq 23 ]]
 
 cp "$CONTRACT_SELFTEST" "$CONTRACT_V1"
 cp "$SHADOW_CONTRACT_SELFTEST" "$SHADOW_CONTRACT_V1"
