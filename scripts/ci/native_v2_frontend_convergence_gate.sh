@@ -27,6 +27,12 @@ SUMMARY_JSON="${SOUNIO_NATIVE_V2_FRONTEND_SUMMARY:-$ARTIFACT_DIR/native_v2_front
 RESULTS_TSV="$ARTIFACT_DIR/results.tsv"
 STRICT_MODE="${SOUNIO_NATIVE_V2_FRONTEND_STRICT:-0}"
 RUN_CPU_UMBRELLA="${SOUNIO_NATIVE_V2_FRONTEND_RUN_CPU_UMBRELLA:-1}"
+RUN_LEGACY_MAIN="${SOUNIO_NATIVE_V2_FRONTEND_RUN_LEGACY_MAIN:-0}"
+REQUIRE_LEGACY_MAIN="${SOUNIO_NATIVE_V2_FRONTEND_REQUIRE_LEGACY_MAIN:-0}"
+
+if [[ "$REQUIRE_LEGACY_MAIN" =~ ^(1|true|True|TRUE|yes|Yes|YES|on|On|ON)$ ]]; then
+  RUN_LEGACY_MAIN=1
+fi
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 
@@ -72,7 +78,7 @@ run_cpu_umbrella() {
 }
 
 emit_summary_json() {
-  python3 - "$SUMMARY_JSON" "$RESULTS_TSV" "$SOUC_BIN" "$OUT_DIR" "$STRICT_MODE" "$ROOT_DIR" <<'PY'
+  python3 - "$SUMMARY_JSON" "$RESULTS_TSV" "$SOUC_BIN" "$OUT_DIR" "$STRICT_MODE" "$ROOT_DIR" "$RUN_LEGACY_MAIN" "$REQUIRE_LEGACY_MAIN" <<'PY'
 import csv
 import json
 import pathlib
@@ -85,6 +91,8 @@ souc_bin = sys.argv[3]
 out_dir = pathlib.Path(sys.argv[4])
 strict_mode = sys.argv[5].lower() in {"1", "true", "yes", "on"}
 root = pathlib.Path(sys.argv[6])
+run_legacy_main = sys.argv[7].lower() in {"1", "true", "yes", "on"}
+require_legacy_main = sys.argv[8].lower() in {"1", "true", "yes", "on"}
 
 def read(path):
     try:
@@ -455,7 +463,7 @@ if case_by_id.get("main_probe_imported_stdout_native_compile", {}).get("rc", 0) 
         "case_id": "main_probe_imported_stdout_native_compile",
     })
 
-required = [
+core_required = [
     "cpu_umbrella",
     "lean_frontend_check",
     "lean_frontend_self_test",
@@ -464,6 +472,10 @@ required = [
     "lean_modular_hello_ir_summary",
     "lean_frontend_imported_ir_summary",
     "lean_modular_imported_ir_summary",
+    "lean_modular_expr_mixed_native_compile",
+    "lean_modular_expr_paren_native_compile",
+]
+legacy_main_cases = [
     "main_probe_load_ir",
     "main_probe_load_ir_trace",
     "main_probe_imported_load_ir",
@@ -476,15 +488,49 @@ required = [
     "main_probe_imported_expr_lets_native_compile",
     "main_probe_imported_expr_multilet_native_compile",
     "main_probe_imported_expr_sub_native_compile",
+    "main_probe_imported_expr_mul_native_compile",
+    "main_probe_imported_expr_mixed_native_compile",
     "main_probe_imported_chain_native_compile",
     "main_probe_imported_stdout_native_compile",
 ]
+required = core_required + (legacy_main_cases if require_legacy_main else [])
+
+legacy_main_case_set = set(legacy_main_cases)
+classified_case_ids = {classification.get("case_id") for classification in classifications}
+for case_id in legacy_main_cases:
+    entry = case_by_id.get(case_id)
+    if entry and entry.get("rc") != 0 and case_id not in classified_case_ids:
+        classifications.append({
+            "class": "legacy_main_unclassified",
+            "reason": f"{case_id}_failed",
+            "case_id": case_id,
+        })
+
+for classification in classifications:
+    if classification.get("case_id") in legacy_main_case_set:
+        classification["compatibility_surface"] = "legacy_main_sio"
+        classification["blocking"] = require_legacy_main
+        classification["legacy_class"] = classification.get("class")
+        classification["class"] = "legacy_main_compatibility"
+    else:
+        classification["blocking"] = True
+
+blocking_classifications = [c for c in classifications if c.get("blocking", True)]
+legacy_main_present = [case_by_id[case_id] for case_id in legacy_main_cases if case_id in case_by_id]
+legacy_main_fail_count = sum(1 for entry in legacy_main_present if entry["rc"] != 0)
+if not run_legacy_main:
+    legacy_main_status = "skipped"
+elif legacy_main_fail_count == 0 and len(legacy_main_present) == len(legacy_main_cases):
+    legacy_main_status = "pass"
+else:
+    legacy_main_status = "fail"
+
 all_required_present = all(case_id in case_by_id for case_id in required)
 all_required_pass = all(case_by_id.get(case_id, {}).get("rc") == 0 for case_id in required)
 
-if all_required_present and all_required_pass and not classifications:
+if all_required_present and all_required_pass and not blocking_classifications:
     status = "pass"
-elif classifications:
+elif blocking_classifications:
     status = "partial"
 else:
     status = "fail"
@@ -494,6 +540,11 @@ payload = {
     "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "status": status,
     "strict_mode": strict_mode,
+    "legacy_main_run": run_legacy_main,
+    "legacy_main_required": require_legacy_main,
+    "legacy_main_status": legacy_main_status,
+    "legacy_main_fail_count": legacy_main_fail_count,
+    "legacy_main_blocking": require_legacy_main,
     "compiler_resolved": souc_bin,
     "target": "x86_64-linux",
     "fallback_path": "none",
@@ -503,8 +554,13 @@ payload = {
     "case_count": len(cases),
     "pass_count": sum(1 for c in cases if c["rc"] == 0),
     "fail_count": sum(1 for c in cases if c["rc"] != 0),
+    "required_cases": required,
+    "core_required_cases": core_required,
+    "legacy_main_cases": legacy_main_cases,
     "classifications": classifications,
+    "blocking_classifications": blocking_classifications,
     "failure_classes": sorted(set(failure_classes)),
+    "blocking_failure_classes": sorted(set(c["class"] for c in blocking_classifications)),
     "cases": cases,
     "acceptance": {
         "cpu_umbrella_passed": case_by_id.get("cpu_umbrella", {}).get("rc") == 0,
@@ -515,6 +571,8 @@ payload = {
         "lean_modular_hello_ir_summary_passed": case_by_id.get("lean_modular_hello_ir_summary", {}).get("rc") == 0,
         "lean_frontend_imported_ir_summary_passed": case_by_id.get("lean_frontend_imported_ir_summary", {}).get("rc") == 0,
         "lean_modular_imported_ir_summary_passed": case_by_id.get("lean_modular_imported_ir_summary", {}).get("rc") == 0,
+        "lean_modular_expr_mixed_native_compile_passed": case_by_id.get("lean_modular_expr_mixed_native_compile", {}).get("rc") == 0,
+        "lean_modular_expr_paren_native_compile_passed": case_by_id.get("lean_modular_expr_paren_native_compile", {}).get("rc") == 0,
         "main_probe_load_ir_passed": case_by_id.get("main_probe_load_ir", {}).get("rc") == 0,
         "main_probe_load_ir_trace_passed": case_by_id.get("main_probe_load_ir_trace", {}).get("rc") == 0,
         "main_probe_imported_load_ir_passed": case_by_id.get("main_probe_imported_load_ir", {}).get("rc") == 0,
@@ -529,10 +587,12 @@ payload = {
         "main_probe_imported_expr_sub_native_compile_passed": case_by_id.get("main_probe_imported_expr_sub_native_compile", {}).get("rc") == 0,
         "main_probe_imported_chain_native_compile_passed": case_by_id.get("main_probe_imported_chain_native_compile", {}).get("rc") == 0,
         "main_probe_imported_stdout_native_compile_passed": case_by_id.get("main_probe_imported_stdout_native_compile", {}).get("rc") == 0,
+        "main_probe_imported_expr_mul_native_compile_passed": case_by_id.get("main_probe_imported_expr_mul_native_compile", {}).get("rc") == 0,
+        "main_probe_imported_expr_mixed_native_compile_passed": case_by_id.get("main_probe_imported_expr_mixed_native_compile", {}).get("rc") == 0,
         "main_probe_body_lowered_passed": "body_lowered=1" in main_probe_log,
         "main_probe_imported_body_lowered_passed": "body_lowered=3" in main_probe_imported_log,
     },
-    "next_action": "promote use-bearing imported modules from source-summary body recognition to full AST-lowered imported native codegen",
+    "next_action": "keep main.sio isolated as a legacy compatibility shim; promote new compiler work through lean.sio and module_* entrypoints",
 }
 
 summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -561,50 +621,60 @@ run_case "lean_frontend_imported_ir_summary" "$LOG_DIR/lean_frontend.imported_ir
   "$SOUC_BIN" run self-hosted/compiler/lean_frontend.sio -- --ir-summary tests/selfhost/native_runtime/import_nested_main_42.sio
 run_case "lean_modular_imported_ir_summary" "$LOG_DIR/lean_modular.imported_ir_summary.log" \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --ir-summary tests/selfhost/native_runtime/import_nested_main_42.sio
-run_case "main_probe_load_ir" "$LOG_DIR/main.probe_load_ir.log" \
-  "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir examples/hello.sio
-run_case "main_probe_load_ir_trace" "$LOG_DIR/main.probe_load_ir_trace.log" \
-  "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir-trace examples/hello.sio
-run_case "main_probe_imported_load_ir" "$LOG_DIR/main.probe_imported_load_ir.log" \
-  "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir tests/selfhost/native_runtime/import_nested_main_42.sio
-run_case "main_probe_imported_load_ir_trace" "$LOG_DIR/main.probe_imported_load_ir_trace.log" \
-  "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir-trace tests/selfhost/native_runtime/import_nested_main_42.sio
-run_case "main_probe_imported_native_compile" "$LOG_DIR/main.probe_imported_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_nested_main_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_nested_main_42.native"
-run_case "main_probe_imported_call_target_native_compile" "$LOG_DIR/main.probe_imported_call_target_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_call_target_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_call_target_42.native"
-run_case "main_probe_imported_core_entry_native_compile" "$LOG_DIR/main.probe_imported_core_entry_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_core_entry_22.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 22' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_core_entry_22.native"
-run_case "main_probe_imported_expr_eval_native_compile" "$LOG_DIR/main.probe_imported_expr_eval_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_eval_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_expr_eval_42.native"
-run_case "main_probe_imported_expr_calls_native_compile" "$LOG_DIR/main.probe_imported_expr_calls_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_calls_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_expr_calls_42.native"
-run_case "main_probe_imported_expr_lets_native_compile" "$LOG_DIR/main.probe_imported_expr_lets_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_lets_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_expr_lets_42.native"
-run_case "main_probe_imported_expr_multilet_native_compile" "$LOG_DIR/main.probe_imported_expr_multilet_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_multilet_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_expr_multilet_42.native"
-run_case "main_probe_imported_expr_sub_native_compile" "$LOG_DIR/main.probe_imported_expr_sub_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_sub_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_expr_sub_42.native"
-run_case "main_probe_imported_expr_mul_native_compile" "$LOG_DIR/main.probe_imported_expr_mul_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_mul_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_expr_mul_42.native"
-run_case "main_probe_imported_expr_mixed_native_compile" "$LOG_DIR/main.probe_imported_expr_mixed_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_mixed_23.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 23' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_expr_mixed_23.native"
-run_case "main_probe_imported_chain_native_compile" "$LOG_DIR/main.probe_imported_chain_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_chain_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_chain_42.native"
-run_case "main_probe_imported_stdout_native_compile" "$LOG_DIR/main.probe_imported_stdout_native_compile.log" \
-  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_nested_print_42.sio -o "$2" && chmod +x "$2" && "$2" > "$3"; rc=$?; test "$rc" -eq 0 || exit 1; cmp -s "$3" "$4" || { echo stdout_mismatch; od -An -tx1 "$3"; exit 1; }' \
-  bash "$SOUC_BIN" "$OUT_DIR/import_nested_print_42.native" "$OUT_DIR/import_nested_print_42.stdout" "$ROOT_DIR/tests/selfhost/native_runtime/import_nested_print_42.expected"
+run_case "lean_modular_expr_mixed_native_compile" "$LOG_DIR/lean_modular.expr_mixed_native_compile.log" \
+  bash -c '"$1" run self-hosted/compiler/lean.sio -- tests/selfhost/native_runtime/import_expr_mixed_23.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 23' \
+  bash "$SOUC_BIN" "$OUT_DIR/import_expr_mixed_23.lean.native"
+run_case "lean_modular_expr_paren_native_compile" "$LOG_DIR/lean_modular.expr_paren_native_compile.log" \
+  bash -c '"$1" run self-hosted/compiler/lean.sio -- tests/selfhost/native_runtime/import_expr_paren_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+  bash "$SOUC_BIN" "$OUT_DIR/import_expr_paren_42.lean.native"
+if [[ "$RUN_LEGACY_MAIN" =~ ^(1|true|True|TRUE|yes|Yes|YES|on|On|ON)$ ]]; then
+  run_case "main_probe_load_ir" "$LOG_DIR/main.probe_load_ir.log" \
+    "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir examples/hello.sio
+  run_case "main_probe_load_ir_trace" "$LOG_DIR/main.probe_load_ir_trace.log" \
+    "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir-trace examples/hello.sio
+  run_case "main_probe_imported_load_ir" "$LOG_DIR/main.probe_imported_load_ir.log" \
+    "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir tests/selfhost/native_runtime/import_nested_main_42.sio
+  run_case "main_probe_imported_load_ir_trace" "$LOG_DIR/main.probe_imported_load_ir_trace.log" \
+    "$SOUC_BIN" run self-hosted/compiler/main.sio -- --probe-load-ir-trace tests/selfhost/native_runtime/import_nested_main_42.sio
+  run_case "main_probe_imported_native_compile" "$LOG_DIR/main.probe_imported_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_nested_main_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_nested_main_42.native"
+  run_case "main_probe_imported_call_target_native_compile" "$LOG_DIR/main.probe_imported_call_target_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_call_target_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_call_target_42.native"
+  run_case "main_probe_imported_core_entry_native_compile" "$LOG_DIR/main.probe_imported_core_entry_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_core_entry_22.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 22' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_core_entry_22.native"
+  run_case "main_probe_imported_expr_eval_native_compile" "$LOG_DIR/main.probe_imported_expr_eval_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_eval_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_expr_eval_42.native"
+  run_case "main_probe_imported_expr_calls_native_compile" "$LOG_DIR/main.probe_imported_expr_calls_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_calls_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_expr_calls_42.native"
+  run_case "main_probe_imported_expr_lets_native_compile" "$LOG_DIR/main.probe_imported_expr_lets_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_lets_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_expr_lets_42.native"
+  run_case "main_probe_imported_expr_multilet_native_compile" "$LOG_DIR/main.probe_imported_expr_multilet_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_multilet_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_expr_multilet_42.native"
+  run_case "main_probe_imported_expr_sub_native_compile" "$LOG_DIR/main.probe_imported_expr_sub_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_sub_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_expr_sub_42.native"
+  run_case "main_probe_imported_expr_mul_native_compile" "$LOG_DIR/main.probe_imported_expr_mul_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_mul_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_expr_mul_42.native"
+  run_case "main_probe_imported_expr_mixed_native_compile" "$LOG_DIR/main.probe_imported_expr_mixed_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_mixed_23.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 23' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_expr_mixed_23.native"
+  run_case "main_probe_imported_chain_native_compile" "$LOG_DIR/main.probe_imported_chain_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_chain_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_chain_42.native"
+  run_case "main_probe_imported_stdout_native_compile" "$LOG_DIR/main.probe_imported_stdout_native_compile.log" \
+    bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_nested_print_42.sio -o "$2" && chmod +x "$2" && "$2" > "$3"; rc=$?; test "$rc" -eq 0 || exit 1; cmp -s "$3" "$4" || { echo stdout_mismatch; od -An -tx1 "$3"; exit 1; }' \
+    bash "$SOUC_BIN" "$OUT_DIR/import_nested_print_42.native" "$OUT_DIR/import_nested_print_42.stdout" "$ROOT_DIR/tests/selfhost/native_runtime/import_nested_print_42.expected"
+else
+  echo "[native-v2-frontend] skipping legacy main.sio probes (set SOUNIO_NATIVE_V2_FRONTEND_RUN_LEGACY_MAIN=1 to audit)"
+fi
 
 if emit_summary_json; then
   status="$(python3 - "$SUMMARY_JSON" <<'PY'
