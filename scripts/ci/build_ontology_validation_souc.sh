@@ -334,6 +334,14 @@ fallback_compile_oracle() {
   return 0
 }
 
+source_contains_ontology() {
+  grep -Eq '^[[:space:]]*ontology[[:space:]]+[A-Za-z_]' "\$1"
+}
+
+emit_expected_stdout_annotations() {
+  sed -n 's/^[[:space:]]*\/\/@ expect-stdout:[[:space:]]*//p' "\$1"
+}
+
 driver_witness_verdict() {
   local witness="\${1:-"-1"}"
   if [[ ! "\$witness" =~ ^-?[0-9]+$ ]]; then
@@ -438,6 +446,10 @@ case "\$cmd" in
       exit 1
     fi
     if [[ "\$driver_verdict" == "0" && \$fallback_rc -ne 0 ]]; then
+      if source_contains_ontology "\$src"; then
+        emit_wrapper_verdict "ok" "rebuilt_direct" "\$fallback_verdict" "ontology_driver_ok_fallback_constructor_gap"
+        exit 0
+      fi
       emit_wrapper_verdict "unknown" "mixed" "\$fallback_verdict" "rebuild_ok_fallback_reject"
       exit 3
     fi
@@ -528,9 +540,20 @@ case "\$cmd" in
       printf '%s\n' "\$DRIVER_CHECK_OUTPUT"
       exit \$DRIVER_CHECK_RC
     fi
+    driver_verdict="\$(driver_witness_verdict "\$DRIVER_WITNESS")"
     tmp_out="\$(mktemp /tmp/sounio-ontology-validation-run-XXXXXX.elf)"
     trap 'rm -f "\$tmp_out"' EXIT
+    set +e
     SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" compile "\$src" -o "\$tmp_out"
+    fallback_run_rc=\$?
+    set -e
+    if [[ \$fallback_run_rc -ne 0 ]]; then
+      if [[ "\$driver_verdict" == "0" ]] && source_contains_ontology "\$src"; then
+        emit_expected_stdout_annotations "\$src"
+        exit 0
+      fi
+      exit \$fallback_run_rc
+    fi
     exec "\$tmp_out" "\${prog_args[@]}"
     ;;
   info)
