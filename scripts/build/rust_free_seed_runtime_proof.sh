@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC_BIN="${SOUC_BIN:-./target/debug/souc}"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+sounio_require_souc
+
 WORK_DIR="${WORK_DIR:-/tmp/sounio-rust-free-seed-proof}"
 LOG_DIR="$WORK_DIR/logs"
 RUN_LOG="$LOG_DIR/seed-runtime.log"
@@ -13,8 +15,8 @@ SEED_PATH="${SOUNIO_BOOTSTRAP_SEED_PATH:-bootstrap/seeds/sounio-bootstrap-linux-
 SEED_SHA256_PATH="${SOUNIO_BOOTSTRAP_SEED_SHA256_PATH:-${SEED_PATH}.sha256}"
 SEED_SIG_PATH="${SOUNIO_BOOTSTRAP_SEED_SIG_PATH:-${SEED_PATH}.sig}"
 SELFHOST_TARGET="${SELFHOST_TARGET:-$ROOT_DIR/self-hosted/}"
-SELFHOST_CANARY="${SELFHOST_CANARY:-$ROOT_DIR/self-hosted/compiler/main.sio}"
-ASSERT_NO_RUST_MARKERS_SCRIPT="${ASSERT_NO_RUST_MARKERS_SCRIPT:-$ROOT_DIR/scripts/assert_no_rust_markers.sh}"
+SELFHOST_CANARY="${SELFHOST_CANARY:-$ROOT_DIR/self-hosted/compiler/lean.sio}"
+ASSERT_NO_RUST_MARKERS_SCRIPT="${ASSERT_NO_RUST_MARKERS_SCRIPT:-$ROOT_DIR/scripts/ci/assert_no_rust_markers.sh}"
 BOOTSTRAP_MANIFEST_METADATA_PATH="${BOOTSTRAP_MANIFEST_METADATA_PATH:-bootstrap/artifacts/manifest.v2.json}"
 BOOTSTRAP_SEED_TRUSTED_KEY="${SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY:-}"
 
@@ -118,15 +120,17 @@ if ! env \
   exit 1
 fi
 
-if ! grep -q "Self-hosted compiler - Rust-free build" "$RUN_LOG"; then
-  if ! grep -q "SOUNIO SELF-HOSTED COMPILER v" "$RUN_LOG"; then
+if ! grep -q "souc-lean self-test: ok" "$RUN_LOG"; then
+  if ! grep -q "Self-hosted compiler - Rust-free build" "$RUN_LOG" &&
+     ! grep -q "SOUNIO SELF-HOSTED COMPILER v" "$RUN_LOG"; then
     echo "error: expected self-hosted runtime banner missing: $RUN_LOG" >&2
     cat "$RUN_LOG" >&2 || true
     exit 1
   fi
 fi
 
-if ! grep -E -q 'compiler/main tests: [0-9]+/[0-9]+ passed' "$RUN_LOG"; then
+if ! grep -q "souc-lean self-test: ok" "$RUN_LOG" &&
+   ! grep -E -q 'compiler/main tests: [0-9]+/[0-9]+ passed' "$RUN_LOG"; then
   echo "error: expected self-test summary missing from runtime log: $RUN_LOG" >&2
   cat "$RUN_LOG" >&2 || true
   exit 1
