@@ -18371,8 +18371,79 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             emit_store_var(end_slot_a)
             if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
         } else {
-            // START..END or START..=END form
-            compile_or()  // START in rax
+            // START..END or START..=END form, OR array/vec iteration
+            compile_or()  // evaluate 'in' expression
+            // for x in arr { body } — array iteration
+            if EXPR_TY == 8 {
+                let farr_hash = EXPR_TY_HASH
+                let farr_alen = arr_hash_alen(farr_hash)
+                let farr_esiz = arr_hash_esiz(farr_hash)
+                let farr_elem_ty = arr_hash_elem_ty(farr_hash)
+                let farr_elem_hash = arr_hash_elem_hash(farr_hash)
+                // Save array pointer (rax) in a hidden slot
+                let farr_ptr = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(farr_ptr)
+                // Bind loop variable to each element
+                let farr_x = var_add(vns, vne)
+                if farr_x < 0 { return }
+                let farr_x_vi = VAR_COUNT - 1
+                VAR_TY[farr_x_vi as usize] = farr_elem_ty
+                VAR_TY_HASH[farr_x_vi as usize] = farr_elem_hash
+                if farr_elem_ty == 2 { VAR_IS_F64[farr_x_vi as usize] = 1 }
+                // Hidden index = 0
+                let farr_idx = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                em(0x31); em(0xc0)  // xor rax, rax
+                emit_store_var(farr_idx)
+                // Hidden end = alen
+                let farr_end = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_imm64(farr_alen)
+                emit_store_var(farr_end)
+                gtt_loop_snapshot()
+                em(0xe9); let farr_jcond = CL; em32(0)  // jmp cond
+                let farr_incr = CL
+                LOOP_TOP[LOOP_DEPTH as usize] = farr_incr
+                LOOP_DEPTH = LOOP_DEPTH + 1
+                let farr_sbc = BREAK_COUNT
+                // incr: idx++
+                emit_load_var(farr_idx)
+                em(0x48); em(0x83); em(0xc0); em(1)  // add rax, 1
+                emit_store_var(farr_idx)
+                // cond: idx < end
+                let farr_cond = CL
+                patch32(farr_jcond, farr_cond)
+                emit_load_var(farr_idx); em(0x50)      // push idx
+                emit_load_var(farr_end); em(0x59)      // pop rcx = idx
+                em(0x48); em(0x39); em(0xc1)           // cmp rcx, rax
+                em(0x0f); em(0x9c); em(0xc0)           // setl al
+                em(0x48); em(0x0f); em(0xb6); em(0xc0) // movzx rax, al
+                em(0x48); em(0x85); em(0xc0)           // test rax, rax
+                em(0x0f); em(0x84); let farr_je = CL; em32(0)
+                // Load x = arr[idx]
+                emit_load_var(farr_idx)
+                em(0x48); em(0x89); em(0xc1)           // mov rcx, rax
+                emit_load_var(farr_ptr)                // rax = ptr
+                if farr_esiz == 8 {
+                    em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax+rcx*8]
+                } else {
+                    em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, [rax+rcx]
+                }
+                emit_store_var(farr_x)
+                if TK[EP as usize] == 8 { EP = EP + 1 }
+                while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                if TK[EP as usize] == 9 { EP = EP + 1 }
+                em(0xe9); em32(farr_incr - (CL + 4))
+                gtt_loop_union()
+                patch32(farr_je, CL)
+                var farr_bi: i64 = farr_sbc
+                while farr_bi < BREAK_COUNT { patch32(BREAK_PATCH[farr_bi as usize], CL); farr_bi = farr_bi + 1 }
+                BREAK_COUNT = farr_sbc
+                LOOP_DEPTH = LOOP_DEPTH - 1
+                LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+                return
+            }
             if EXPR_TY != 0 && EXPR_TY != 1 { tc_error_hard(EP - 1, "for range start must be integer") }
             let iter_slot_r = var_add(vns, vne)
             if iter_slot_r < 0 { return }
