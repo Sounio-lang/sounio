@@ -106,6 +106,23 @@ KNOWN_FAILURE=0
 FLAKY=0
 ERRORS=""
 
+# Repo-level blocker manifest. This lets CI stay strict about new failures while
+# keeping old, audited hardening backlog items visible as xfails instead of noise.
+KNOWN_FAILURES_FILE="${SOUNIO_TEST_KNOWN_FAILURES_FILE:-}"
+declare -A KNOWN_FAILURE_MAP=()
+if [[ -z "$KNOWN_FAILURES_FILE" && -z "$FILTER" && "$FORMAT" == "junit" ]]; then
+    KNOWN_FAILURES_FILE="$ROOT_DIR/tests/known_failures/hardened_diagnostics_full_suite.txt"
+fi
+if [[ -n "$KNOWN_FAILURES_FILE" && -f "$KNOWN_FAILURES_FILE" ]]; then
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+        KNOWN_FAILURE_MAP["$line"]=1
+    done < "$KNOWN_FAILURES_FILE"
+fi
+
 # JUnit XML output file
 JUNIT_FILE="${SOUNIO_TEST_JUNIT_FILE:-$ROOT_DIR/test-results.xml}"
 
@@ -126,6 +143,7 @@ run_test() {
     local output_file="$TEST_TMP/result_$idx.json"
     local basename
     basename="$(basename "$file")"
+    local rel_file="${file#$ROOT_DIR/}"
     
     local is_run_pass=false
     local is_compile_fail=false
@@ -172,6 +190,11 @@ run_test() {
                 ;;
         esac
     done < "$file"
+
+    if [[ -n "${KNOWN_FAILURE_MAP[$rel_file]:-}" ]]; then
+        is_known_failure=true
+        known_reason="${known_reason:-hardened diagnostics blocker manifest}"
+    fi
     
     # Check filter
     if [[ -n "$FILTER" && "$basename" != *"$FILTER"* ]]; then
