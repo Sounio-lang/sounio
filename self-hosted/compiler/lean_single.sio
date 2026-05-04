@@ -3017,11 +3017,12 @@ fn tc_stack_frame_too_large(bytes: i64) with IO, Mut, Panic {
 }
 
 fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
-    print("warning: ")
+    print("error: ")
     print(msg)
     print(" at line ")
     print_int(TL[tok as usize])
     print("\n")
+    tc_mark_failed()
     return 0
 }
 
@@ -3303,9 +3304,10 @@ fn try_apply_return_refinement(tok: i64) with IO, Mut, Panic, Div {
 }
 
 fn tc_undefined_var(tok: i64) -> i64 with IO, Mut, Panic {
-    print("warning: unknown identifier at line ")
+    print("error: unknown identifier at line ")
     print_int(TL[tok as usize])
     print("\n")
+    tc_mark_failed()
     return 0
 }
 
@@ -3346,7 +3348,7 @@ fn tc_arity_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
 }
 
 fn tc_epistemic_boundary(tok: i64) -> i64 with IO, Mut, Panic {
-    print("error: Type mismatch — expected confidence level not satisfied: Knowledge ε boundary violation at line ")
+    print("error[P0003]: Type mismatch — expected confidence level not satisfied: Knowledge ε boundary violation at line ")
     print_int(TL[tok as usize])
     print("\n")
     tc_mark_failed()
@@ -3821,9 +3823,14 @@ fn dump_cli_type_summary() with IO, Mut, Panic, Div {
 }
 
 fn tc_wrong_arity(tok: i64, expected: i64, got: i64) -> i64 with IO, Mut, Panic {
-    print("warning: arity mismatch at line ")
+    print("error: argument arity mismatch at line ")
     print_int(TL[tok as usize])
+    print(": expected ")
+    print_int(expected)
+    print(", got ")
+    print_int(got)
     print("\n")
+    tc_mark_failed()
     return 0
 }
 
@@ -11754,6 +11761,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
             } else {
                 if call_vslot >= 0 {
+                    if call_sig <= 0 {
+                        tc_error(call_tok, "value is not callable")
+                    }
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
                     if call_is_closure == 1 {
                         emit_setup_closure_call_args_x86(argc)
@@ -11838,6 +11848,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let total_slots = st_total_size(si) / 8
                 let base_slot = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + total_slots
+                var seen_field_mask: i64 = 0
                 // Parse field: value pairs
                 while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 {
                     if TK[EP as usize] == 3 {
@@ -11851,6 +11862,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         let fty = st_field_ty(si, fh)
                         let fhash = st_field_hash(si, fh)
                         if foff >= 0 {
+                            let field_count = ST[(si * 130 + 1) as usize]
+                            var seen_i: i64 = 0
+                            while seen_i < field_count {
+                                if ST[(si * 130 + 2 + seen_i) as usize] == fh {
+                                    if seen_i < 62 { seen_field_mask = seen_field_mask | (1 << seen_i) }
+                                    seen_i = field_count
+                                }
+                                seen_i = seen_i + 1
+                            }
                             let dst_start = base_slot + total_slots - 1 - foff / 8
                             if fty == 8 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
                                 EP = EP + 1
@@ -11888,6 +11908,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     }
                     if TK[EP as usize] == 28 { EP = EP + 1 }  // skip comma
                 }
+                let required_fields = ST[(si * 130 + 1) as usize]
+                var miss_i: i64 = 0
+                while miss_i < required_fields {
+                    if miss_i < 62 && (seen_field_mask & (1 << miss_i)) == 0 {
+                        tc_error(EP - 1, "missing field in struct literal")
+                        miss_i = required_fields
+                    } else {
+                        miss_i = miss_i + 1
+                    }
+                }
                 if TK[EP as usize] == 9 { EP = EP + 1 }  // skip }
                 // lea rax, [rbp - (base_slot+total_slots-1)*8] — pointer to struct data (lowest addr)
                 em(0x48); em(0x8d); em(0x85)
@@ -11911,6 +11941,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 41 {
             EP = EP + 1  // skip [
             compile_or()  // index in rax
+            if EXPR_TY != 0 && EXPR_TY != 1 {
+                tc_error(EP - 1, "array index must be integer")
+            }
             if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // skip 'as usize'
             if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
             let gi = gl_find(ns, ne)
@@ -11985,6 +12018,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         EXPR_IS_F64 = 0
                     } else {
                         // Non-array local pointer (e.g. read_file result): byte access
+                        if lvi >= 0 && VAR_TY[lvi as usize] != 0 && VAR_TY[lvi as usize] != 3 {
+                            tc_error(name_tok, "value is not indexable")
+                        }
                         em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
                         EXPR_TY = 1
                         EXPR_TY_HASH = 0
@@ -12261,6 +12297,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             emit_push()
             EP = EP + 1
             compile_or()
+            if EXPR_TY != 0 && EXPR_TY != 1 {
+                tc_error(EP - 1, "array index must be integer")
+            }
             if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
             if TK[EP as usize] == 42 { EP = EP + 1 }
             em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (index)
@@ -12305,6 +12344,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_IS_F64 = 0
                 }
             } else {
+                if base_ty != 0 && base_ty != 3 {
+                    tc_error(EP - 1, "value is not indexable")
+                }
                 em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x11)  // movsx rax, byte [rcx + rdx]
                 EXPR_TY = 1
                 EXPR_TY_HASH = 0
@@ -12955,6 +12997,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 4 {
                 let tup_idx = TV[EP as usize]
                 EP = EP + 1
+                if tup_idx > 1 {
+                    tc_error(method_tok, "tuple index out of bounds")
+                }
                 let tup_first_slots = (EXPR_TY_HASH % 1000000) / 1000
                 let tup_total_slots = EXPR_TY_HASH % 1000
                 let tup_last_slots = tup_total_slots - tup_first_slots
@@ -13213,6 +13258,14 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 }
                 si = si + 1
             }
+            if found == 0 {
+                if TK[EP as usize] == 6 {
+                    tc_error(method_tok, "unknown method")
+                } else {
+                    tc_error(method_tok, "unknown field access")
+                }
+                em(0x31); em(0xc0)
+            }
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             continue
         }
@@ -13228,6 +13281,17 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let op_tok = EP
         let op = TK[EP as usize]
         EP = EP + 1
+        let rhs_start = EP
+        var rhs_const_known: i64 = 0
+        var rhs_const_val: i64 = 0
+        if TK[rhs_start as usize] == 4 {
+            rhs_const_known = 1
+            rhs_const_val = TV[rhs_start as usize]
+        }
+        if TK[rhs_start as usize] == 6 && TK[(rhs_start + 1) as usize] == 4 && TK[(rhs_start + 2) as usize] == 18 && TK[(rhs_start + 3) as usize] == 4 {
+            rhs_const_known = 1
+            rhs_const_val = TV[(rhs_start + 1) as usize] - TV[(rhs_start + 3) as usize]
+        }
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
@@ -13288,6 +13352,10 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_77 = -1
         emit_push()
         compile_postfix()
+        if (op == 20 || op == 29) && rhs_const_known != 0 && rhs_const_val == 0 {
+            if op == 20 { tc_error(op_tok, "division by zero") }
+            else { tc_error(op_tok, "modulo by zero") }
+        }
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
         let right_udim = EXPR_UNIT_DIM
@@ -16762,7 +16830,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             EP = EP + 1  // skip [
             while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
             if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
-            let nslots = arr_len
+            var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
             let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
             if ptr_slot < 0 { return }
@@ -16811,7 +16879,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if type_has_knowledge(decl_ty, decl_ty_hash) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                     tc_epistemic_boundary(EP)
                 } else {
-                    tc_error(EP - 1, "initializer type does not match declaration")
+                    print("error: Type mismatch: expected ")
+                    print_type_label(decl_ty, decl_ty_hash)
+                    print(", got ")
+                    print_type_label(EXPR_TY, EXPR_TY_HASH)
+                    print(" at line ")
+                    print_int(TL[(EP - 1) as usize])
+                    print("\n")
+                    tc_mark_failed()
                 }
             }
             // Observation boundary: Unobserved<T> assigned to non-Unobserved binding
@@ -17217,6 +17292,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         if slot >= 0 {
             let ty_vi = var_find_idx(ns, ne)
             if ty_vi >= 0 {
+                if VAR_MUT[ty_vi as usize] == 0 {
+                    tc_error(name_tok, "assignment to immutable binding requires var/Mut")
+                }
                 if ty_eq(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize], rhs_ty, rhs_ty_hash) == false {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
@@ -17549,6 +17627,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // continue (33)
     if k == 33 {
+        if LOOP_DEPTH <= 0 {
+            tc_error(EP, "continue outside loop")
+            EP = EP + 1
+            return
+        }
         EP = EP + 1
         if LOOP_DEPTH > 0 {
             em(0xe9)
@@ -17560,6 +17643,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // break (34) — emit jmp rel32 placeholder, patched when while loop ends
     if k == 34 {
+        if LOOP_DEPTH <= 0 {
+            tc_error(EP, "break outside loop")
+            EP = EP + 1
+            return
+        }
         EP = EP + 1
         em(0xe9)  // jmp rel32
         BREAK_PATCH[BREAK_COUNT as usize] = CL
@@ -21131,6 +21219,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if TK[p as usize] == 77 {
             pass0a_depth = 0; p = p + 1; continue
         }
+        if pass0a_depth == 0 && TK[p as usize] == 2 {
+            tc_error(p, "return outside function body is invalid module item")
+            p = p + 1
+            continue
+        }
         // Gen 19: unit NAME;  or  unit NAME = SCALE * BASE_UNIT;
         // Registers NAME as a user-declared unit in UNIT_HASH_TABLE.
         // Minimal form: unit mg;  — just registers the hash (dim looked up from preloaded table)
@@ -21485,6 +21578,23 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         p = p + 1
     }
     resolve_forward_struct_types()
+    var rec_si: i64 = 0
+    while rec_si < ST_COUNT {
+        let rec_base = rec_si * 130
+        let rec_hash = ST[rec_base as usize]
+        let rec_fields = ST[(rec_base + 1) as usize]
+        var rec_fi: i64 = 0
+        while rec_fi < rec_fields {
+            if ST_FTY[(rec_si * 128 + rec_fi) as usize] == 6 && ST_FHASH[(rec_si * 128 + rec_fi) as usize] == rec_hash {
+                print("error: infinite recursive type\n")
+                tc_mark_failed()
+                rec_fi = rec_fields
+            } else {
+                rec_fi = rec_fi + 1
+            }
+        }
+        rec_si = rec_si + 1
+    }
     print("st_count: "); print_int(ST_COUNT); print(" depth_end: "); print_int(pass0a_depth); print("\n")
     // Also scan enums in the same pass
     p = 0
@@ -22618,9 +22728,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                             if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                                 tc_epistemic_boundary(EP)
                             } else {
-                                print("warning: tail type mismatch at line ")
+                                print("error: Type mismatch: expected ")
+                                print_type_label(CURRENT_RET_TY, CURRENT_RET_HASH)
+                                print(", got ")
+                                print_type_label(LAST_STMT_TY, LAST_STMT_TY_HASH)
+                                print(" at line ")
                                 print_int(TL[(EP - 1) as usize])
                                 print("\n")
+                                tc_mark_failed()
                             }
                         }
                     }
@@ -25822,6 +25937,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
             } else {
                 if call_vslot >= 0 {
+                    if call_sig <= 0 {
+                        tc_error(call_tok, "value is not callable")
+                    }
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
                     if call_is_closure == 1 {
                         if argc >= 7 { em32(0xF84107E7) }
@@ -25897,6 +26015,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let total_slots = st_total_size(si) / 8
                 let base_slot = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + total_slots
+                var seen_field_mask: i64 = 0
                 while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 {
                     if TK[EP as usize] == 3 {
                         let field_tok = EP
@@ -25909,6 +26028,15 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         let fty = st_field_ty(si, fh)
                         let fhash = st_field_hash(si, fh)
                         if foff >= 0 {
+                            let field_count = ST[(si * 130 + 1) as usize]
+                            var seen_i: i64 = 0
+                            while seen_i < field_count {
+                                if ST[(si * 130 + 2 + seen_i) as usize] == fh {
+                                    if seen_i < 62 { seen_field_mask = seen_field_mask | (1 << seen_i) }
+                                    seen_i = field_count
+                                }
+                                seen_i = seen_i + 1
+                            }
                             let dst_start = base_slot + total_slots - 1 - foff / 8
                             if fty == 8 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
                                 EP = EP + 1
@@ -25940,6 +26068,16 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     }
                     if TK[EP as usize] == 28 { EP = EP + 1 }
                 }
+                let required_fields = ST[(si * 130 + 1) as usize]
+                var miss_i: i64 = 0
+                while miss_i < required_fields {
+                    if miss_i < 62 && (seen_field_mask & (1 << miss_i)) == 0 {
+                        tc_error(EP - 1, "missing field in struct literal")
+                        miss_i = required_fields
+                    } else {
+                        miss_i = miss_i + 1
+                    }
+                }
                 if TK[EP as usize] == 9 { EP = EP + 1 }
                 emit_lea_var_a64(base_slot + total_slots - 1)
                 EXPR_IS_F64 = 0
@@ -25953,6 +26091,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 41 {
             EP = EP + 1
             compile_or_a64()
+            if EXPR_TY != 0 && EXPR_TY != 1 {
+                tc_error(EP - 1, "array index must be integer")
+            }
             if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
             if TK[EP as usize] == 42 { EP = EP + 1 }
             let gi = gl_find(ns, ne)
@@ -26022,6 +26163,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         EXPR_TY_HASH = 0
                         EXPR_IS_F64 = 0
                     } else {
+                        if lvi >= 0 && VAR_TY[lvi as usize] != 0 && VAR_TY[lvi as usize] != 3 {
+                            tc_error(name_tok, "value is not indexable")
+                        }
                         em32(0x38A96800)
                         EXPR_TY = 1
                         EXPR_TY_HASH = 0
@@ -26246,6 +26390,9 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             emit_push_a64()
             EP = EP + 1
             compile_or_a64()
+            if EXPR_TY != 0 && EXPR_TY != 1 {
+                tc_error(EP - 1, "array index must be integer")
+            }
             if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
             if TK[EP as usize] == 42 { EP = EP + 1 }
             em32(0xAA0003E9)  // mov x9, x0 (index)
@@ -26291,6 +26438,9 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     EXPR_IS_F64 = 0
                 }
             } else {
+                if base_ty != 0 && base_ty != 3 {
+                    tc_error(EP - 1, "value is not indexable")
+                }
                 em32(0x38A96800)
                 EXPR_TY = 1
                 EXPR_TY_HASH = 0
@@ -26571,6 +26721,14 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 }
                 si = si + 1
             }
+            if found == 0 {
+                if TK[EP as usize] == 6 {
+                    tc_error(method_tok, "unknown method")
+                } else {
+                    tc_error(method_tok, "unknown field access")
+                }
+                em32(0xD2800000)
+            }
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             continue
         }
@@ -26584,8 +26742,20 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
     var lhs_end_line: i64 = TL[(EP - 1) as usize]
     while TK[EP as usize] == 19 || TK[EP as usize] == 20 || TK[EP as usize] == 29 {
         if EXPR_TY == 11 && TK[EP as usize] == 19 && TL[EP as usize] > lhs_end_line { return }
+        let op_tok = EP
         let op = TK[EP as usize]
         EP = EP + 1
+        let rhs_start = EP
+        var rhs_const_known: i64 = 0
+        var rhs_const_val: i64 = 0
+        if TK[rhs_start as usize] == 4 {
+            rhs_const_known = 1
+            rhs_const_val = TV[rhs_start as usize]
+        }
+        if TK[rhs_start as usize] == 6 && TK[(rhs_start + 1) as usize] == 4 && TK[(rhs_start + 2) as usize] == 18 && TK[(rhs_start + 3) as usize] == 4 {
+            rhs_const_known = 1
+            rhs_const_val = TV[(rhs_start + 1) as usize] - TV[(rhs_start + 3) as usize]
+        }
         let left_f64 = EXPR_IS_F64
         // β⁴: capture LHS shadow + save LHS f64 value for GUM/AD propagation
         let b4am_left_vshadow = EXPR_VSHADOW
@@ -26603,6 +26773,10 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
         emit_push_a64()
         compile_postfix_a64()
+        if (op == 20 || op == 29) && rhs_const_known != 0 && rhs_const_val == 0 {
+            if op == 20 { tc_error(op_tok, "division by zero") }
+            else { tc_error(op_tok, "modulo by zero") }
+        }
         // β⁴: capture RHS shadow + save RHS f64 value
         let b4am_right_vshadow = EXPR_VSHADOW
         let b4am_right_sshadow = EXPR_SSHADOW
@@ -27090,7 +27264,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             EP = EP + 1
             while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
             if TK[EP as usize] == 42 { EP = EP + 1 }
-            let nslots = arr_len
+            var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
             let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
             if ptr_slot < 0 { return }
@@ -27124,7 +27298,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if type_has_knowledge(decl_ty, decl_ty_hash) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                     tc_epistemic_boundary(EP)
                 } else {
-                    tc_error(EP - 1, "initializer type does not match declaration")
+                    print("error: Type mismatch: expected ")
+                    print_type_label(decl_ty, decl_ty_hash)
+                    print(", got ")
+                    print_type_label(EXPR_TY, EXPR_TY_HASH)
+                    print(" at line ")
+                    print_int(TL[(EP - 1) as usize])
+                    print("\n")
+                    tc_mark_failed()
                 }
             }
             if type_is_slice_ref(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
@@ -27341,6 +27522,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if slot >= 0 {
             let ty_vi = var_find_idx(ns, ne)
             if ty_vi >= 0 {
+                if VAR_MUT[ty_vi as usize] == 0 {
+                    tc_error(name_tok, "assignment to immutable binding requires var/Mut")
+                }
                 if ty_eq(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize], rhs_ty, rhs_ty_hash) == false {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
@@ -27627,6 +27811,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     }
     // continue
     if k == 33 {
+        if LOOP_DEPTH <= 0 {
+            tc_error(EP, "continue outside loop")
+            EP = EP + 1
+            return
+        }
         EP = EP + 1
         if LOOP_DEPTH > 0 {
             let rel = (LOOP_TOP[(LOOP_DEPTH - 1) as usize] - CL) / 4
@@ -27636,6 +27825,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     }
     // break
     if k == 34 {
+        if LOOP_DEPTH <= 0 {
+            tc_error(EP, "break outside loop")
+            EP = EP + 1
+            return
+        }
         EP = EP + 1
         BREAK_PATCH[BREAK_COUNT as usize] = CL
         BREAK_COUNT = BREAK_COUNT + 1
@@ -28626,9 +28820,14 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                             if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                                 tc_epistemic_boundary(EP)
                             } else {
-                                print("warning: tail type mismatch at line ")
+                                print("error: Type mismatch: expected ")
+                                print_type_label(CURRENT_RET_TY, CURRENT_RET_HASH)
+                                print(", got ")
+                                print_type_label(LAST_STMT_TY, LAST_STMT_TY_HASH)
+                                print(" at line ")
                                 print_int(TL[(EP - 1) as usize])
                                 print("\n")
+                                tc_mark_failed()
                             }
                         }
                     }
