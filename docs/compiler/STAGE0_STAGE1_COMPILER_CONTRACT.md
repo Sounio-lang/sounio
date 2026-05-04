@@ -78,11 +78,11 @@ Only after Stage1 parity is green should `lean_single.sio` and `main.sio` be red
 B1 diagnostic harness contract:
 Compile-fail UI tests must be rejected by the binary used by the harness. The sentinel fixture is `tests/ui/type/assign_to_immut.sio`.
 
-B2 Stage1 typecheck drift:
-`lean.sio` and `lean_frontend.sio` currently need explicit classification when they fail `souc check`. These failures belong to the Stage1 checker/import API lane, not the Stage0 bootstrap lane.
+B2 Stage1 typecheck contract:
+`lean.sio` and `lean_frontend.sio` must pass `souc check` under the checked compiler. If this regresses, the failure belongs to the Stage1 checker/import API lane, not the Stage0 bootstrap lane.
 
-B3 Stage1 runtime frontend drift:
-`lean_frontend.sio --self-test` and `lean_frontend.sio --check examples/hello.sio` are the first runtime probes. They must become required pass before Stage1 promotion.
+B3 Stage1 runtime frontend contract:
+`lean.sio --self-test`, `lean_frontend.sio --self-test`, and `lean_frontend.sio --check examples/hello.sio` are required Stage1 runtime probes.
 
 B4 native driver parity:
 `module_native_driver.sio` must keep the streaming-first, legacy-fallback shape until native-v2 supports the required IR surface.

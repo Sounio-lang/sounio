@@ -130,6 +130,43 @@ known_blocker_cmd() {
   fi
 }
 
+required_cmd_ok() {
+  local name="$1"
+  local reason="$2"
+  shift 2
+  local log_path="$LOG_DIR/$name.log"
+  set +e
+  timeout "$TIMEOUT_SECS" "$@" >"$log_path" 2>&1
+  local rc=$?
+  set -e
+
+  if [[ $rc -eq 0 ]]; then
+    pass_case "$name" "pass" "$reason" "$log_path" "$@"
+  else
+    fail_case "$name" "fail" "required_command_failed:rc_$rc:$reason" "$log_path" "$@"
+  fi
+}
+
+required_cmd_pattern() {
+  local name="$1"
+  local reason="$2"
+  local pattern="$3"
+  shift 3
+  local log_path="$LOG_DIR/$name.log"
+  set +e
+  timeout "$TIMEOUT_SECS" "$@" >"$log_path" 2>&1
+  local rc=$?
+  set -e
+
+  if [[ $rc -eq 0 ]] && grep -Eq "$pattern" "$log_path"; then
+    pass_case "$name" "pass" "$reason" "$log_path" "$@"
+  elif [[ $rc -eq 0 ]]; then
+    fail_case "$name" "fail" "required_pattern_missing:$reason" "$log_path" "$@"
+  else
+    fail_case "$name" "fail" "required_command_failed:rc_$rc:$reason" "$log_path" "$@"
+  fi
+}
+
 known_blocker_file_size_over() {
   local name="$1"
   local path="$2"
@@ -169,34 +206,32 @@ required_rejects_with_pattern \
   "assignment to immutable binding|typecheck: failed|Mut" \
   "$SOUC_BIN" compile tests/ui/type/assign_to_immut.sio -o "$WORK_DIR/assign_to_immut.elf"
 
-known_blocker_cmd \
+required_cmd_ok \
   "stage1_lean_check" \
   "B2_stage1_full_compiler_check_drift" \
-  "field access through pointer/ref|Mut borrow requires mutable binding|Type mismatch|typecheck: failed" \
   "$SOUC_BIN" check self-hosted/compiler/lean.sio
 
-known_blocker_cmd \
+required_cmd_ok \
   "stage1_frontend_check" \
   "B2_stage1_frontend_check_drift" \
-  "missing field in struct literal|typecheck: failed" \
   "$SOUC_BIN" check self-hosted/compiler/lean_frontend.sio
 
-known_blocker_cmd \
+required_cmd_pattern \
   "stage1_lean_self_test" \
   "B3_stage1_full_compiler_runtime_self_test_drift" \
-  "field access through pointer/ref|Mut borrow requires mutable binding|Type mismatch|typecheck: failed" \
+  "souc-lean self-test: ok" \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --self-test
 
-known_blocker_cmd \
+required_cmd_pattern \
   "stage1_frontend_self_test" \
   "B3_stage1_frontend_runtime_self_test_drift" \
-  "assignment type mismatch|missing field in struct literal|typecheck: failed" \
+  "souc-lean-frontend self-test: ok" \
   "$SOUC_BIN" run self-hosted/compiler/lean_frontend.sio -- --self-test
 
-known_blocker_cmd \
+required_cmd_pattern \
   "stage1_frontend_hello_check" \
   "B3_stage1_frontend_examples_hello_check_drift" \
-  "assignment type mismatch|missing field in struct literal|typecheck: failed|souc-lean-frontend check: failed" \
+  "souc-lean-frontend check: ok" \
   "$SOUC_BIN" run self-hosted/compiler/lean_frontend.sio -- --check examples/hello.sio
 
 known_blocker_file_size_over \
