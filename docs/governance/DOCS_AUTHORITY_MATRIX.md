@@ -91,6 +91,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.compiler.release-v0.29.0 | repo_only | docs/compiler/RELEASE_v0.29.0.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.sir-passes | repo_only | docs/compiler/SIR_PASSES.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.softwarex-revision-plan | repo_only | docs/compiler/SOFTWAREX_REVISION_PLAN.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.compiler.stage0-stage1-compiler-contract | repo_only | docs/compiler/STAGE0_STAGE1_COMPILER_CONTRACT.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.technical-report | repo_only | docs/compiler/TECHNICAL_REPORT.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.unit-runtime-checking | repo_only | docs/compiler/UNIT_RUNTIME_CHECKING.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.contributor-guide.benchmark-guide | repo_only | docs/contributor-guide/BENCHMARK_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
