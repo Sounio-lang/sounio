@@ -596,6 +596,9 @@ run_case "main_probe_imported_expr_sub_native_compile" "$LOG_DIR/main.probe_impo
 run_case "main_probe_imported_expr_mul_native_compile" "$LOG_DIR/main.probe_imported_expr_mul_native_compile.log" \
   bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_mul_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
   bash "$SOUC_BIN" "$OUT_DIR/import_expr_mul_42.native"
+run_case "main_probe_imported_expr_mixed_native_compile" "$LOG_DIR/main.probe_imported_expr_mixed_native_compile.log" \
+  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_mixed_23.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 23' \
+  bash "$SOUC_BIN" "$OUT_DIR/import_expr_mixed_23.native"
 run_case "main_probe_imported_chain_native_compile" "$LOG_DIR/main.probe_imported_chain_native_compile.log" \
   bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_chain_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
   bash "$SOUC_BIN" "$OUT_DIR/import_chain_42.native"
