@@ -653,6 +653,12 @@ run_case "lean_modular_expr_cmp_native_compile" "$LOG_DIR/lean_modular.expr_cmp_
 run_case "lean_modular_expr_bool_native_compile" "$LOG_DIR/lean_modular.expr_bool_native_compile.log" \
   bash -c '"$1" run self-hosted/compiler/lean.sio -- tests/selfhost/native_runtime/import_expr_bool_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
   bash "$SOUC_BIN" "$OUT_DIR/import_expr_bool_42.lean.native"
+run_case "lean_modular_expr_if_native_compile" "$LOG_DIR/lean_modular.expr_if_native_compile.log" \
+  bash -c '"$1" run self-hosted/compiler/lean.sio -- tests/selfhost/native_runtime/import_expr_if_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+  bash "$SOUC_BIN" "$OUT_DIR/import_expr_if_42.lean.native"
+run_case "lean_modular_expr_if_else_native_compile" "$LOG_DIR/lean_modular.expr_if_else_native_compile.log" \
+  bash -c '"$1" run self-hosted/compiler/lean.sio -- tests/selfhost/native_runtime/import_expr_if_else_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+  bash "$SOUC_BIN" "$OUT_DIR/import_expr_if_else_42.lean.native"
 if [[ "$RUN_COMPAT_AUDIT" =~ ^(1|true|True|TRUE|yes|Yes|YES|on|On|ON)$ ]]; then
   run_case "lean_compat_load_ir" "$LOG_DIR/lean_compat.probe_load_ir.log" \
     "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --probe-load-ir examples/hello.sio

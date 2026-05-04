@@ -1381,6 +1381,39 @@ fn module_frontend_source_is_return_at(data: [i8; 16777216], pos: i64, end: i64)
     data[(pos + 6) as usize] == (32 as i8)
 }
 
+fn module_frontend_source_is_if_at(data: [i8; 16777216], pos: i64, end: i64) -> bool {
+    if pos + 2 >= end {
+        return false
+    }
+    data[pos as usize] == (105 as i8) &&
+    data[(pos + 1) as usize] == (102 as i8) &&
+    data[(pos + 2) as usize] == (32 as i8)
+}
+
+fn module_frontend_source_is_else_at(data: [i8; 16777216], pos: i64, end: i64) -> bool {
+    if pos + 4 >= end {
+        return false
+    }
+    data[pos as usize] == (101 as i8) &&
+    data[(pos + 1) as usize] == (108 as i8) &&
+    data[(pos + 2) as usize] == (115 as i8) &&
+    data[(pos + 3) as usize] == (101 as i8) &&
+    (data[(pos + 4) as usize] == (32 as i8) || data[(pos + 4) as usize] == (123 as i8))
+}
+
+fn module_frontend_source_brace_close(data: [i8; 16777216], open: i64, end: i64) -> i64 {
+    var depth = 1
+    var k = open + 1
+    while k < end && depth > 0 {
+        let bc = data[k as usize]
+        if bc == (123 as i8) { depth = depth + 1 }
+        else if bc == (125 as i8) { depth = depth - 1 }
+        k = k + 1
+    }
+    if depth != 0 { return -1 }
+    k - 1
+}
+
 fn module_frontend_lookup_source_local_i64(name: Name, local_name: Name, local_value: i64, has_local: bool) -> (bool, i64) with Mut, Panic, Div {
     if has_local && ir_name_eq(name, local_name) {
         return (true, local_value)
@@ -1478,6 +1511,51 @@ fn module_frontend_try_eval_source_body_i64(data: [i8; 16777216], body: i64, end
             let expr_start = module_frontend_source_strip_return_prefix(data, pos, end)
             let expr_end = module_frontend_source_line_end(data, expr_start, end)
             return module_frontend_try_eval_source_expr_i64_with_locals4(data, expr_start, expr_end, size, depth, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
+        } else if module_frontend_source_is_if_at(data, pos, end) {
+            let cond_start = module_frontend_source_skip_ws(data, pos + 3, end)
+            var brace_open = cond_start
+            while brace_open < end && data[brace_open as usize] != (123 as i8) {
+                brace_open = brace_open + 1
+            }
+            if brace_open >= end {
+                return (false, 0)
+            }
+            let brace_close = module_frontend_source_brace_close(data, brace_open, end)
+            if brace_close < 0 {
+                return (false, 0)
+            }
+            let cond = module_frontend_try_eval_source_expr_i64_with_locals4(data, cond_start, brace_open, size, depth, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
+            if cond.0 == false {
+                return (false, 0)
+            }
+            if cond.1 != 0 {
+                let inner = module_frontend_source_skip_ws(data, brace_open + 1, brace_close)
+                if !module_frontend_source_is_return_at(data, inner, brace_close) {
+                    return (false, 0)
+                }
+                let ret_start = module_frontend_source_strip_return_prefix(data, inner, brace_close)
+                let ret_end = module_frontend_source_line_end(data, ret_start, brace_close)
+                return module_frontend_try_eval_source_expr_i64_with_locals4(data, ret_start, ret_end, brace_close, depth, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
+            }
+            let after = module_frontend_source_skip_ws(data, brace_close + 1, end)
+            if module_frontend_source_is_else_at(data, after, end) {
+                var else_brace = module_frontend_source_skip_ws(data, after + 4, end)
+                if else_brace >= end || data[else_brace as usize] != (123 as i8) {
+                    return (false, 0)
+                }
+                let else_close = module_frontend_source_brace_close(data, else_brace, end)
+                if else_close < 0 {
+                    return (false, 0)
+                }
+                let einner = module_frontend_source_skip_ws(data, else_brace + 1, else_close)
+                if !module_frontend_source_is_return_at(data, einner, else_close) {
+                    return (false, 0)
+                }
+                let eret_start = module_frontend_source_strip_return_prefix(data, einner, else_close)
+                let eret_end = module_frontend_source_line_end(data, eret_start, else_close)
+                return module_frontend_try_eval_source_expr_i64_with_locals4(data, eret_start, eret_end, else_close, depth, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
+            }
+            pos = brace_close + 1
         } else {
             return (false, 0)
         }
