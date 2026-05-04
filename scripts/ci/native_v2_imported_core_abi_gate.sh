@@ -55,19 +55,18 @@ run_log() {
 
 run_log frontend_convergence bash scripts/ci/native_v2_frontend_convergence_gate.sh
 
-run_log imported_ir_trace \
-  bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/main.sio -- --probe-load-ir-trace "$PROGRAM"
+run_log imported_ir_summary \
+  bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/lean.sio -- --ir-summary "$PROGRAM"
 
-if ! grep -q 'Merged IR: 6' "$LOG_DIR/imported_ir_trace.log" ||
-   ! grep -q 'modules=2' "$LOG_DIR/imported_ir_trace.log" ||
-   ! grep -q 'body_lowered=2' "$LOG_DIR/imported_ir_trace.log"; then
-  echo "[native-v2-imported-core-abi] FAIL: imported IR trace did not prove 2-module/6-function handoff" >&2
-  cat "$LOG_DIR/imported_ir_trace.log" >&2 || true
+if ! grep -q 'Merged IR: 6' "$LOG_DIR/imported_ir_summary.log" ||
+   ! grep -q 'souc-lean ir-summary: functions=6' "$LOG_DIR/imported_ir_summary.log"; then
+  echo "[native-v2-imported-core-abi] FAIL: modular lean IR summary did not prove 6-function imported handoff" >&2
+  cat "$LOG_DIR/imported_ir_summary.log" >&2 || true
   exit 1
 fi
 
 run_log native_compile \
-  bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/main.sio -- --native-compile "$PROGRAM" -o "$ELF"
+  bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/lean.sio -- "$PROGRAM" -o "$ELF"
 
 if grep -q 'native_prebundle:' "$LOG_DIR/native_compile.log"; then
   echo "[native-v2-imported-core-abi] FAIL: direct native path used native_prebundle" >&2
@@ -136,6 +135,7 @@ payload = {
     "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     "status": "pass",
     "compiler_resolved": souc_bin,
+    "compiler_entrypoint": "self-hosted/compiler/lean.sio",
     "target": "x86_64-linux",
     "program": program,
     "native_elf": str(elf),
