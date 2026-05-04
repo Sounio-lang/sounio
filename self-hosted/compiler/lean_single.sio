@@ -142,6 +142,12 @@ var ST: [i64; 133120] = [0; 133120]
 var ST_FTY: [i64; 131072] = [0; 131072]
 var ST_FHASH: [i64; 131072] = [0; 131072]
 var ST_COUNT: i64 = 0
+// Field-name source positions for collision-safe lookup (concatenated SRC buffer)
+var ST_FNS: [i64; 131072] = [0; 131072]
+var ST_FNE: [i64; 131072] = [0; 131072]
+// Query bounds for struct field lookup collision resolution
+var ST_QUERY_NS: i64 = -1
+var ST_QUERY_NE: i64 = -1
 
 // Enum registry: flat array, up to 64 enums
 // EN[i*256+0] = name hash
@@ -711,7 +717,17 @@ fn st_field_offset(si: i64, field_hash: i64) -> i64 with Panic, Div, Mut {
     var fi: i64 = 0
     var off: i64 = 0
     while fi < fc {
-        if ST[(base + 2 + fi) as usize] == field_hash { return off * 8 }
+        if ST[(base + 2 + fi) as usize] == field_hash {
+            if ST_QUERY_NS >= 0 {
+                let fns = ST_FNS[(si * 128 + fi) as usize]
+                let fne = ST_FNE[(si * 128 + fi) as usize]
+                if src_region_eq(ST_QUERY_NS, ST_QUERY_NE - ST_QUERY_NS, fns, fne - fns) {
+                    return off * 8
+                }
+            } else {
+                return off * 8
+            }
+        }
         off = off + st_field_slots_idx(si, fi)
         fi = fi + 1
     }
@@ -723,7 +739,17 @@ fn st_field_ty(si: i64, field_hash: i64) -> i64 with Panic, Mut {
     let fc = ST[(base + 1) as usize]
     var fi: i64 = 0
     while fi < fc {
-        if ST[(base + 2 + fi) as usize] == field_hash { return ST_FTY[(si * 128 + fi) as usize] }
+        if ST[(base + 2 + fi) as usize] == field_hash {
+            if ST_QUERY_NS >= 0 {
+                let fns = ST_FNS[(si * 128 + fi) as usize]
+                let fne = ST_FNE[(si * 128 + fi) as usize]
+                if src_region_eq(ST_QUERY_NS, ST_QUERY_NE - ST_QUERY_NS, fns, fne - fns) {
+                    return ST_FTY[(si * 128 + fi) as usize]
+                }
+            } else {
+                return ST_FTY[(si * 128 + fi) as usize]
+            }
+        }
         fi = fi + 1
     }
     return 0
@@ -734,7 +760,17 @@ fn st_field_hash(si: i64, field_hash: i64) -> i64 with Panic, Mut {
     let fc = ST[(base + 1) as usize]
     var fi: i64 = 0
     while fi < fc {
-        if ST[(base + 2 + fi) as usize] == field_hash { return ST_FHASH[(si * 128 + fi) as usize] }
+        if ST[(base + 2 + fi) as usize] == field_hash {
+            if ST_QUERY_NS >= 0 {
+                let fns = ST_FNS[(si * 128 + fi) as usize]
+                let fne = ST_FNE[(si * 128 + fi) as usize]
+                if src_region_eq(ST_QUERY_NS, ST_QUERY_NE - ST_QUERY_NS, fns, fne - fns) {
+                    return ST_FHASH[(si * 128 + fi) as usize]
+                }
+            } else {
+                return ST_FHASH[(si * 128 + fi) as usize]
+            }
+        }
         fi = fi + 1
     }
     return 0
@@ -2155,6 +2191,14 @@ fn src_match(p: i64, l: i64, kw: string) -> bool with Panic, Mut {
     if l != str_len(kw) { return false }
     var i: i64 = 0
     while i < l { if sb(p + i) != str_char_at(kw, i) { return false }; i = i + 1 }
+    return true
+}
+
+// Compare two source regions byte-for-byte (for struct field collision resolution)
+fn src_region_eq(p1: i64, l1: i64, p2: i64, l2: i64) -> bool with Panic, Mut {
+    if l1 != l2 { return false }
+    var i: i64 = 0
+    while i < l1 { if sb(p1 + i) != sb(p2 + i) { return false }; i = i + 1 }
     return true
 }
 
@@ -8009,6 +8053,8 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                     inner_ty = 0
                     inner_hash = 0
                 } else {
+                    ST_QUERY_NS = TS[f_tok as usize]
+                    ST_QUERY_NE = TE[f_tok as usize]
                     let off = st_field_offset(si, fh)
                     if off < 0 {
                         tc_error(f_tok, "unknown field access")
@@ -8019,6 +8065,8 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                         if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                         inner_ty = st_field_ty(si, fh)
                         inner_hash = st_field_hash(si, fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
                     }
                 }
             }
@@ -8270,6 +8318,8 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 inner_ty = 0
                 inner_hash = 0
             } else {
+                ST_QUERY_NS = TS[f_tok as usize]
+                ST_QUERY_NE = TE[f_tok as usize]
                 let off = st_field_offset(si, fh)
                 if off < 0 {
                     tc_error(f_tok, "unknown field access")
@@ -8280,6 +8330,8 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                     if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                     inner_ty = st_field_ty(si, fh)
                     inner_hash = st_field_hash(si, fh)
+                ST_QUERY_NS = -1
+                ST_QUERY_NE = -1
                 }
             }
         }
@@ -8309,6 +8361,8 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                     inner_ty2 = 0
                     inner_hash2 = 0
                 } else {
+                    ST_QUERY_NS = TS[f_tok2 as usize]
+                    ST_QUERY_NE = TE[f_tok2 as usize]
                     let off2 = st_field_offset(si2, fh2)
                     if off2 < 0 {
                         tc_error(f_tok2, "unknown field access")
@@ -8319,6 +8373,8 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                         if off2 != 0 { em(0x48); em(0x8d); em(0x80); em32(off2) }
                         inner_ty2 = st_field_ty(si2, fh2)
                         inner_hash2 = st_field_hash(si2, fh2)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
                     }
                 }
             }
@@ -11925,16 +11981,24 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         let fh = gl_name_hash(fns, fne)
                         EP = EP + 1  // skip field name
                         if TK[EP as usize] == 43 { EP = EP + 1 }  // skip :
+                    ST_QUERY_NS = fns
+                    ST_QUERY_NE = fne
                         let foff = st_field_offset(si, fh)
                         let fty = st_field_ty(si, fh)
                         let fhash = st_field_hash(si, fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
                         if foff >= 0 {
                             let field_count = ST[(si * 130 + 1) as usize]
                             var seen_i: i64 = 0
                             while seen_i < field_count {
                                 if ST[(si * 130 + 2 + seen_i) as usize] == fh {
-                                    if seen_i < 62 { seen_field_mask = seen_field_mask | (1 << seen_i) }
-                                    seen_i = field_count
+                                    let decl_fns = ST_FNS[(si * 128 + seen_i) as usize]
+                                    let decl_fne = ST_FNE[(si * 128 + seen_i) as usize]
+                                    if src_region_eq(fns, fne - fns, decl_fns, decl_fne - decl_fns) {
+                                        if seen_i < 62 { seen_field_mask = seen_field_mask | (1 << seen_i) }
+                                        seen_i = field_count
+                                    }
                                 }
                                 seen_i = seen_i + 1
                             }
@@ -13284,10 +13348,14 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             if type_is_struct_like(base_data_ty, base_data_hash) {
                 let bsi = st_find(base_data_hash)
                 if bsi >= 0 {
+                    ST_QUERY_NS = fns
+                    ST_QUERY_NE = fne
                     let off = st_field_offset(bsi, fh)
                     if off >= 0 {
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
                         if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                         } else {
@@ -13307,10 +13375,14 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             }
             var si: i64 = 0
             while si < ST_COUNT && found == 0 {
+                ST_QUERY_NS = fns
+                ST_QUERY_NE = fne
                 let off = st_field_offset(si, fh)
                 if off >= 0 {
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
+                ST_QUERY_NS = -1
+                ST_QUERY_NE = -1
                     if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                         if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                     } else {
@@ -16235,10 +16307,14 @@ fn struct_destructure_x86(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, 
         pp = pp + 1
         let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
         if is_wild == 1 { continue }
+        ST_QUERY_NS = pns
+        ST_QUERY_NE = pne
         let off = st_field_offset(si, fh)
         if off < 0 { tc_error(pp - 1, "unknown struct field in pattern"); continue }
         let fty = st_field_ty(si, fh)
         let fhash = st_field_hash(si, fh)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
         let fslots = ty_slot_count(fty, fhash)
         emit_load_var(ptr_slot)
         if fty == 6 || fty == 8 || type_is_option_inline(fty, fhash) {
@@ -16266,10 +16342,14 @@ fn struct_destructure_a64(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, 
         pp = pp + 1
         let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
         if is_wild == 1 { continue }
+        ST_QUERY_NS = pns
+        ST_QUERY_NE = pne
         let off = st_field_offset(si, fh)
         if off < 0 { tc_error(pp - 1, "unknown struct field in pattern"); continue }
         let fty = st_field_ty(si, fh)
         let fhash = st_field_hash(si, fh)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
         emit_load_var_a64(ptr_slot)
         if fty == 6 || fty == 8 || type_is_option_inline(fty, fhash) {
             if off != 0 { em32(0x91000000 | (off << 10)) }
@@ -16458,15 +16538,23 @@ fn compile_field_array_store_x86() with IO, Mut, Panic, Div {
     compile_or()
     let rhs_ty = EXPR_TY
     let rhs_ty_hash = EXPR_TY_HASH
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
     let si = resolve_field_struct_index(ns, ne, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
     if si < 0 {
         tc_error(field_tok, "unknown field access")
         em(0x59)
         return
     }
+                    ST_QUERY_NS = fns
+                    ST_QUERY_NE = fne
     let foff = st_field_offset(si, fh)
     let fty = st_field_ty(si, fh)
     let fhash = st_field_hash(si, fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
     if fty != 8 {
         tc_error(field_tok, "indexed field store requires array field")
         em(0x59)
@@ -16519,9 +16607,13 @@ fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
         emit_pop_x1_a64()
         return
     }
+                    ST_QUERY_NS = fns
+                    ST_QUERY_NE = fne
     let foff = st_field_offset(si, fh)
     let fty = st_field_ty(si, fh)
     let fhash = st_field_hash(si, fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
     if fty != 8 {
         tc_error(field_tok, "indexed field store requires array field")
         emit_pop_x1_a64()
@@ -16628,9 +16720,13 @@ fn compile_indexed_field_field_store_x86() with IO, Mut, Panic, Div {
         em(0x59)
         return
     }
+                    ST_QUERY_NS = afns
+                    ST_QUERY_NE = afne
     let array_off = st_field_offset(root_si, array_fh)
     let array_ty = st_field_ty(root_si, array_fh)
     let array_hash = st_field_hash(root_si, array_fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
     if array_ty != 8 {
         tc_error(array_field_tok, "indexed field store requires array field")
         em(0x59)
@@ -16645,15 +16741,23 @@ fn compile_indexed_field_field_store_x86() with IO, Mut, Panic, Div {
     var elem_si: i64 = -1
     let elem_hash = arr_hash_elem_hash(array_hash)
     if elem_hash != 0 { elem_si = st_find(elem_hash) }
+    ST_QUERY_NS = lfns
+    ST_QUERY_NE = lfne
     if elem_si < 0 { elem_si = resolve_struct_index_by_field(leaf_fh) }
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
     if elem_si < 0 {
         tc_error(leaf_field_tok, "unknown field access")
         em(0x59)
         return
     }
+                    ST_QUERY_NS = lfns
+                    ST_QUERY_NE = lfne
     let leaf_off = st_field_offset(elem_si, leaf_fh)
     let leaf_ty = st_field_ty(elem_si, leaf_fh)
     let leaf_hash = st_field_hash(elem_si, leaf_fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
     if leaf_ty != 0 && ty_eq(leaf_ty, leaf_hash, rhs_ty, rhs_ty_hash) == false {
         tc_error(EP - 1, "assignment type mismatch")
     }
@@ -17298,14 +17402,22 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         compile_or()  // value in rax
         let rhs_ty = EXPR_TY
         let rhs_ty_hash = EXPR_TY_HASH
+        ST_QUERY_NS = fns
+        ST_QUERY_NE = fne
         let si = resolve_field_struct_index(ns, ne, fh)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
         if si < 0 {
             tc_error(field_tok, "unknown field access")
             return
         }
+        ST_QUERY_NS = fns
+        ST_QUERY_NE = fne
         let off = st_field_offset(si, fh)
         let fty = st_field_ty(si, fh)
         let fhash = st_field_hash(si, fh)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
         if fty != 0 && ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
             tc_error(EP - 1, "assignment type mismatch")
         }
@@ -17604,9 +17716,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     if si < 0 {
                         tc_error(field_tok, "unknown field access")
                     } else {
+                    ST_QUERY_NS = TS[field_tok as usize]
+                    ST_QUERY_NE = TE[field_tok as usize]
                         let foff = st_field_offset(si, fh)
                         let fty = st_field_ty(si, fh)
                         let fhash = st_field_hash(si, fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
                         if foff < 0 {
                             tc_error(field_tok, "unknown field access")
                         } else if ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
@@ -21139,6 +21255,8 @@ fn mono_pass() with IO, Mut, Panic, Div {
                                 let rfh = gl_name_hash(TS[p as usize], TE[p as usize])
                                 let rffi = rfc
                                 ST[(rbase + 2 + rfc) as usize] = rfh
+                                ST_FNS[(rsi * 128 + rffi) as usize] = TS[p as usize]
+                                ST_FNE[(rsi * 128 + rffi) as usize] = TE[p as usize]
                                 p = p + 1
                                 if TK[p as usize] == 43 {
                                     p = p + 1
@@ -21432,6 +21550,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     if TK[fp as usize] == 3 && fp + 1 < TC && TK[(fp + 1) as usize] == 43 { break }
                     if TK[fp as usize] == 3 {
                         ST[(abase + 2 + fi) as usize] = gl_name_hash(TS[fp as usize], TE[fp as usize])
+                        ST_FNS[(asi * 128 + fi) as usize] = TS[fp as usize]
+                        ST_FNE[(asi * 128 + fi) as usize] = TE[fp as usize]
                         ST_FTY[(asi * 128 + fi) as usize] = alg_base_ty
                         ST_FHASH[(asi * 128 + fi) as usize] = 0
                         fi = fi + 1
@@ -21599,6 +21719,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         let fh = gl_name_hash(TS[p as usize], TE[p as usize])
                         let ffi = fc
                         ST[(base + 2 + fc) as usize] = fh
+                        ST_FNS[(si * 128 + ffi) as usize] = TS[p as usize]
+                        ST_FNE[(si * 128 + ffi) as usize] = TE[p as usize]
                         p = p + 1
                         // Skip : type
                         if TK[p as usize] == 43 {
@@ -26120,16 +26242,24 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         let fh = gl_name_hash(fns, fne)
                         EP = EP + 1
                         if TK[EP as usize] == 43 { EP = EP + 1 }
+                    ST_QUERY_NS = fns
+                    ST_QUERY_NE = fne
                         let foff = st_field_offset(si, fh)
                         let fty = st_field_ty(si, fh)
                         let fhash = st_field_hash(si, fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
                         if foff >= 0 {
                             let field_count = ST[(si * 130 + 1) as usize]
                             var seen_i: i64 = 0
                             while seen_i < field_count {
                                 if ST[(si * 130 + 2 + seen_i) as usize] == fh {
-                                    if seen_i < 62 { seen_field_mask = seen_field_mask | (1 << seen_i) }
-                                    seen_i = field_count
+                                    let decl_fns = ST_FNS[(si * 128 + seen_i) as usize]
+                                    let decl_fne = ST_FNE[(si * 128 + seen_i) as usize]
+                                    if src_region_eq(fns, fne - fns, decl_fns, decl_fne - decl_fns) {
+                                        if seen_i < 62 { seen_field_mask = seen_field_mask | (1 << seen_i) }
+                                        seen_i = field_count
+                                    }
                                 }
                                 seen_i = seen_i + 1
                             }
@@ -26776,10 +26906,14 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             if type_is_struct_like(base_data_ty, base_data_hash) {
                 let bsi = st_find(base_data_hash)
                 if bsi >= 0 {
+                    ST_QUERY_NS = fns
+                    ST_QUERY_NE = fne
                     let off = st_field_offset(bsi, fh)
                     if off >= 0 {
                         EXPR_TY = st_field_ty(bsi, fh)
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
                         if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 {
                                 emit_imm64_reg_a64(1, off)
@@ -26799,10 +26933,14 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             var si: i64 = 0
             while si < ST_COUNT && found == 0 {
+                ST_QUERY_NS = fns
+                ST_QUERY_NE = fne
                 let off = st_field_offset(si, fh)
                 if off >= 0 {
                     EXPR_TY = st_field_ty(si, fh)
                     EXPR_TY_HASH = st_field_hash(si, fh)
+                ST_QUERY_NS = -1
+                ST_QUERY_NE = -1
                     if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                         if off != 0 {
                             emit_imm64_reg_a64(1, off)
@@ -27564,14 +27702,22 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         compile_or_a64()
         let rhs_ty = EXPR_TY
         let rhs_ty_hash = EXPR_TY_HASH
+        ST_QUERY_NS = fns
+        ST_QUERY_NE = fne
         let si = resolve_field_struct_index(ns, ne, fh)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
         if si < 0 {
             tc_error(field_tok, "unknown field access")
             return
         }
+        ST_QUERY_NS = fns
+        ST_QUERY_NE = fne
         let off = st_field_offset(si, fh)
         let fty = st_field_ty(si, fh)
         let fhash = st_field_hash(si, fh)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
         if fty != 0 && ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
             tc_error(EP - 1, "assignment type mismatch")
         }
@@ -27832,9 +27978,13 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     if si < 0 {
                         tc_error(field_tok, "unknown field access")
                     } else {
+                    ST_QUERY_NS = TS[field_tok as usize]
+                    ST_QUERY_NE = TE[field_tok as usize]
                         let foff = st_field_offset(si, fh)
                         let fty = st_field_ty(si, fh)
                         let fhash = st_field_hash(si, fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
                         if foff < 0 {
                             tc_error(field_tok, "unknown field access")
                         } else if ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
