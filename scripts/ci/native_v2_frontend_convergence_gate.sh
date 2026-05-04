@@ -156,6 +156,7 @@ main_probe_imported_expr_eval_log = log_of("main_probe_imported_expr_eval_native
 main_probe_imported_expr_calls_log = log_of("main_probe_imported_expr_calls_native_compile")
 main_probe_imported_expr_lets_log = log_of("main_probe_imported_expr_lets_native_compile")
 main_probe_imported_expr_multilet_log = log_of("main_probe_imported_expr_multilet_native_compile")
+main_probe_imported_expr_sub_log = log_of("main_probe_imported_expr_sub_native_compile")
 main_probe_imported_chain_log = log_of("main_probe_imported_chain_native_compile")
 main_probe_imported_stdout_log = log_of("main_probe_imported_stdout_native_compile")
 
@@ -412,6 +413,19 @@ if case_by_id.get("main_probe_imported_expr_multilet_native_compile", {}).get("r
         "case_id": "main_probe_imported_expr_multilet_native_compile",
     })
 
+if case_by_id.get("main_probe_imported_expr_sub_native_compile", {}).get("rc", 0) != 0:
+    if "Segmentation fault" in main_probe_imported_expr_sub_log:
+        reason = "main_probe_imported_expr_sub_native_compile_segfault"
+        failure_classes.append("imported_expr_sub_native_runtime")
+    else:
+        reason = "main_probe_imported_expr_sub_native_compile_failed"
+        failure_classes.append("imported_expr_sub_native")
+    classifications.append({
+        "class": failure_classes[-1],
+        "reason": reason,
+        "case_id": "main_probe_imported_expr_sub_native_compile",
+    })
+
 if case_by_id.get("main_probe_imported_chain_native_compile", {}).get("rc", 0) != 0:
     if "Segmentation fault" in main_probe_imported_chain_log:
         reason = "main_probe_imported_chain_native_compile_segfault"
@@ -461,6 +475,7 @@ required = [
     "main_probe_imported_expr_calls_native_compile",
     "main_probe_imported_expr_lets_native_compile",
     "main_probe_imported_expr_multilet_native_compile",
+    "main_probe_imported_expr_sub_native_compile",
     "main_probe_imported_chain_native_compile",
     "main_probe_imported_stdout_native_compile",
 ]
@@ -511,6 +526,7 @@ payload = {
         "main_probe_imported_expr_calls_native_compile_passed": case_by_id.get("main_probe_imported_expr_calls_native_compile", {}).get("rc") == 0,
         "main_probe_imported_expr_lets_native_compile_passed": case_by_id.get("main_probe_imported_expr_lets_native_compile", {}).get("rc") == 0,
         "main_probe_imported_expr_multilet_native_compile_passed": case_by_id.get("main_probe_imported_expr_multilet_native_compile", {}).get("rc") == 0,
+        "main_probe_imported_expr_sub_native_compile_passed": case_by_id.get("main_probe_imported_expr_sub_native_compile", {}).get("rc") == 0,
         "main_probe_imported_chain_native_compile_passed": case_by_id.get("main_probe_imported_chain_native_compile", {}).get("rc") == 0,
         "main_probe_imported_stdout_native_compile_passed": case_by_id.get("main_probe_imported_stdout_native_compile", {}).get("rc") == 0,
         "main_probe_body_lowered_passed": "body_lowered=1" in main_probe_log,
@@ -574,6 +590,9 @@ run_case "main_probe_imported_expr_lets_native_compile" "$LOG_DIR/main.probe_imp
 run_case "main_probe_imported_expr_multilet_native_compile" "$LOG_DIR/main.probe_imported_expr_multilet_native_compile.log" \
   bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_multilet_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
   bash "$SOUC_BIN" "$OUT_DIR/import_expr_multilet_42.native"
+run_case "main_probe_imported_expr_sub_native_compile" "$LOG_DIR/main.probe_imported_expr_sub_native_compile.log" \
+  bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_expr_sub_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
+  bash "$SOUC_BIN" "$OUT_DIR/import_expr_sub_42.native"
 run_case "main_probe_imported_chain_native_compile" "$LOG_DIR/main.probe_imported_chain_native_compile.log" \
   bash -c '"$1" run self-hosted/compiler/main.sio -- --native-compile tests/selfhost/native_runtime/import_chain_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
   bash "$SOUC_BIN" "$OUT_DIR/import_chain_42.native"
