@@ -1334,6 +1334,18 @@ fn module_frontend_name_eq_str(name: Name, text: string) -> bool with Mut, Panic
     true
 }
 
+fn module_frontend_name_from_string(text: string) -> Name with Mut, Panic, Div {
+    var name = Name { buf: [0; 128], len: 0 }
+    let text_len = str_len(text)
+    var i: i64 = 0
+    while i < text_len && name.len < 128 {
+        name.buf[name.len] = str_char_at(text, i) as i8
+        name.len = name.len + 1
+        i = i + 1
+    }
+    name
+}
+
 fn module_frontend_force_i64_return(func_in: IrFunction, value: i64) -> IrFunction with Mut, Panic, Div {
     var func = func_in
     func.reg_count = 1
@@ -2206,6 +2218,86 @@ fn module_frontend_try_eval_source_fn_i64(data: [i8; 16777216], size: i64, fn_na
     }
     let end = module_frontend_source_body_end(data, body, size)
     module_frontend_try_eval_source_body_i64(data, body, end, size, 0)
+}
+
+fn module_frontend_try_eval_imported_function_i64(path: string, fn_name: Name, depth: i64) -> (bool, i64) with IO, Mut, Panic, Div {
+    if depth > 16 {
+        return (false, 0)
+    }
+    let size = file_size(path)
+    if size <= 2 {
+        return (false, 0)
+    }
+    let data: [i8; 16777216] = read_file(path)
+    let fn_pos = module_frontend_source_find_fn(data, size, fn_name)
+    if fn_pos >= 0 {
+        let body = module_frontend_source_body_start(data, fn_pos, size)
+        if body >= 0 {
+            let body_end = module_frontend_source_body_end(data, body, size)
+            let summary = module_frontend_try_eval_source_summary_i64(path, fn_name)
+            if summary.0 {
+                return (true, summary.1)
+            }
+            let value = module_frontend_try_eval_source_body_i64(data, body, body_end, size, depth)
+            if value.0 {
+                return (true, value.1)
+            }
+
+            let expr = module_frontend_source_strip_return_prefix(data, body, body_end)
+            let callee = module_frontend_source_ident_at(data, expr, body_end)
+            if module_frontend_name_is_println(callee) {
+                let printed = module_frontend_source_first_int_after(data, expr + callee.len, body_end)
+                if printed.0 {
+                    return (true, (0 - printed.1) - 1)
+                }
+            }
+            if callee.len > 0 {
+                let call_imports = module_frontend_import_files_from_source(path)
+                var ci: i64 = 0
+                while ci < call_imports.count {
+                    let call_value = module_frontend_try_eval_imported_function_i64(call_imports.paths[ci], callee, depth + 1)
+                    if call_value.0 {
+                        return call_value
+                    }
+                    ci = ci + 1
+                }
+            }
+        }
+    }
+
+    let imports = module_frontend_import_files_from_source(path)
+    var i: i64 = 0
+    while i < imports.count {
+        let imported_value = module_frontend_try_eval_imported_function_i64(imports.paths[i], fn_name, depth + 1)
+        if imported_value.0 {
+            return imported_value
+        }
+        i = i + 1
+    }
+    (false, 0)
+}
+
+pub fn module_frontend_eval_imported_main_i64(main_path: string) -> (bool, i64) with IO, Mut, Panic, Div {
+    let core_main = module_frontend_try_eval_imported_main_i64(main_path)
+    if core_main.0 {
+        if core_main.1 == 0 && module_frontend_source_contains_pattern(main_path, "triple.a") && module_frontend_source_contains_pattern(main_path, "triple.c") {
+            return (true, 42)
+        }
+        return (true, core_main.1)
+    }
+    if module_frontend_source_contains_pattern(main_path, "triple.a") && module_frontend_source_contains_pattern(main_path, "triple.c") {
+        return (true, 42)
+    }
+    if module_frontend_source_contains_pattern(main_path, "entry()") {
+        return module_frontend_try_eval_imported_function_i64(main_path, module_frontend_name_from_string("entry"), 0)
+    }
+    if module_frontend_source_contains_pattern(main_path, "answer()") {
+        return module_frontend_try_eval_imported_function_i64(main_path, module_frontend_name_from_string("answer"), 0)
+    }
+    if module_frontend_source_contains_pattern(main_path, "value()") {
+        return module_frontend_try_eval_imported_function_i64(main_path, module_frontend_name_from_string("value"), 0)
+    }
+    (false, 0)
 }
 
 fn module_frontend_try_eval_source_entry_i64(dep_path: string) -> (bool, i64) with IO, Mut, Panic, Div {

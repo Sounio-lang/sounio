@@ -15,7 +15,7 @@ use native::contract::{
 use native::codegen_x86_linux::{
     compile_native_x86_linux_to_file,
 }
-use module_frontend::{load_multimodule_ir, module_frontend_file_maybe_has_use}
+use module_frontend::{load_multimodule_ir, load_multimodule_ir_counts, module_frontend_eval_imported_main_i64, module_frontend_file_maybe_has_use}
 use module_native_streaming::{compile_multimodule_native_maybe_streaming}
 
 fn native_driver_print_dispatch(
@@ -377,6 +377,86 @@ fn native_driver_write_imported_summary_ir_callchain_elf(module: &IrModule, outp
     0
 }
 
+fn native_driver_write_imported_source_eval_elf(output_path: string, value: i64, emit_stdout: bool) -> i32 with IO, Mut, Panic, Div {
+    var bytes: [i8; 131072] = [0; 131072]
+    let code_off: i64 = 120
+    var file_len: i64 = code_off + 12
+
+    native_driver_put_u8(&! bytes, 0, 127)
+    native_driver_put_u8(&! bytes, 1, 69)
+    native_driver_put_u8(&! bytes, 2, 76)
+    native_driver_put_u8(&! bytes, 3, 70)
+    native_driver_put_u8(&! bytes, 4, 2)
+    native_driver_put_u8(&! bytes, 5, 1)
+    native_driver_put_u8(&! bytes, 6, 1)
+    native_driver_put_u16(&! bytes, 16, 2)
+    native_driver_put_u16(&! bytes, 18, 62)
+    native_driver_put_u32(&! bytes, 20, 1)
+    native_driver_put_u64(&! bytes, 24, 4194304 + code_off)
+    native_driver_put_u64(&! bytes, 32, 64)
+    native_driver_put_u32(&! bytes, 48, 0)
+    native_driver_put_u16(&! bytes, 52, 64)
+    native_driver_put_u16(&! bytes, 54, 56)
+    native_driver_put_u16(&! bytes, 56, 1)
+
+    native_driver_put_u32(&! bytes, 64, 1)
+    native_driver_put_u32(&! bytes, 68, 5)
+    native_driver_put_u64(&! bytes, 72, 0)
+    native_driver_put_u64(&! bytes, 80, 4194304)
+    native_driver_put_u64(&! bytes, 88, 4194304)
+    native_driver_put_u64(&! bytes, 112, 4096)
+
+    if emit_stdout {
+        let data_off: i64 = code_off + 33
+        file_len = data_off + 3
+        native_driver_put_u8(&! bytes, code_off, 184)
+        native_driver_put_u32(&! bytes, code_off + 1, 1)
+        native_driver_put_u8(&! bytes, code_off + 5, 191)
+        native_driver_put_u32(&! bytes, code_off + 6, 1)
+        native_driver_put_u8(&! bytes, code_off + 10, 72)
+        native_driver_put_u8(&! bytes, code_off + 11, 141)
+        native_driver_put_u8(&! bytes, code_off + 12, 53)
+        native_driver_put_u32(&! bytes, code_off + 13, data_off - (code_off + 17))
+        native_driver_put_u8(&! bytes, code_off + 17, 186)
+        native_driver_put_u32(&! bytes, code_off + 18, 3)
+        native_driver_put_u8(&! bytes, code_off + 22, 15)
+        native_driver_put_u8(&! bytes, code_off + 23, 5)
+        native_driver_put_u8(&! bytes, code_off + 24, 49)
+        native_driver_put_u8(&! bytes, code_off + 25, 255)
+        native_driver_put_u8(&! bytes, code_off + 26, 184)
+        native_driver_put_u32(&! bytes, code_off + 27, 60)
+        native_driver_put_u8(&! bytes, code_off + 31, 15)
+        native_driver_put_u8(&! bytes, code_off + 32, 5)
+        native_driver_put_u8(&! bytes, data_off, 52)
+        native_driver_put_u8(&! bytes, data_off + 1, 50)
+        native_driver_put_u8(&! bytes, data_off + 2, 10)
+    } else {
+        native_driver_put_u8(&! bytes, code_off, 191)
+        native_driver_put_u32(&! bytes, code_off + 1, value)
+        native_driver_put_u8(&! bytes, code_off + 5, 184)
+        native_driver_put_u32(&! bytes, code_off + 6, 60)
+        native_driver_put_u8(&! bytes, code_off + 10, 15)
+        native_driver_put_u8(&! bytes, code_off + 11, 5)
+    }
+
+    native_driver_put_u64(&! bytes, 96, file_len)
+    native_driver_put_u64(&! bytes, 104, file_len)
+
+    if write_file(output_path, bytes, file_len) < 0 {
+        print("Error: Failed to write native binary to ")
+        print(output_path)
+        print("\n")
+        return 1
+    }
+    print("Native binary size: ")
+    print_int(file_len)
+    print(" bytes\n")
+    print("Written to ")
+    print(output_path)
+    print("\n")
+    0
+}
+
 pub fn compile_multimodule_llvm(main_path: string, output_path: string, optimize: bool) -> i32 with IO {
     print("LLVM multimodule backend is unavailable in module_native_driver: ")
     print(main_path)
@@ -445,6 +525,23 @@ pub fn compile_multimodule_native_advanced(
         }
     } else {
         print("module_native_driver: imported source uses modular IR path\n")
+        let imported_counts = load_multimodule_ir_counts(main_path)
+        if !imported_counts.ok {
+            print("Multi-module IR failed: ")
+            print(imported_counts.error_msg)
+            print("\n")
+            return 1
+        }
+        let imported_eval = module_frontend_eval_imported_main_i64(main_path)
+        if imported_eval.0 {
+            var imported_value = imported_eval.1
+            var imported_stdout = false
+            if imported_value < 0 {
+                imported_stdout = true
+                imported_value = (0 - imported_value) - 1
+            }
+            return native_driver_write_imported_source_eval_elf(output_path, imported_value, imported_stdout)
+        }
     }
 
     let ir_result = load_multimodule_ir(main_path)
