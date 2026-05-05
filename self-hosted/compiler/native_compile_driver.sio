@@ -126,6 +126,7 @@ var V2_LOCAL_TOK_IDX: [i64; 64] = [0; 64]
 var V2_LOCAL_REGS: [i64; 64] = [0; 64]
 var V2_LOCAL_STRUCT_IDX: [i64; 64] = [0; 64]
 var V2_LOCAL_IS_REF: [i64; 64] = [0; 64]
+var V2_LOCAL_ALEN: [i64; 64] = [0; 64]
 var V2_LOCAL_COUNT: i64 = 0
 var V2_NEXT_REG: i64 = 0
 var V2_BREAK_LABEL: i64 = -1
@@ -436,8 +437,32 @@ fn remember_local_tok(ctx: &! V2DriverContext, tok_idx: i64, reg: i64) with Mut,
         V2_LOCAL_REGS[idx as usize] = reg
         V2_LOCAL_STRUCT_IDX[idx as usize] = -1
         V2_LOCAL_IS_REF[idx as usize] = 0
+        V2_LOCAL_ALEN[idx as usize] = 0
         V2_LOCAL_COUNT = idx + 1
     }
+}
+
+fn remember_local_arr_tok(ctx: &! V2DriverContext, tok_idx: i64, base_reg: i64, alen: i64) with Mut, Panic {
+    let idx = V2_LOCAL_COUNT
+    if idx < 64 {
+        V2_LOCAL_TOK_IDX[idx as usize] = tok_idx
+        V2_LOCAL_REGS[idx as usize] = base_reg
+        V2_LOCAL_STRUCT_IDX[idx as usize] = -1
+        V2_LOCAL_IS_REF[idx as usize] = 0
+        V2_LOCAL_ALEN[idx as usize] = alen
+        V2_LOCAL_COUNT = idx + 1
+    }
+}
+
+fn lookup_local_alen_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_LOCAL_COUNT {
+        if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
+            return V2_LOCAL_ALEN[i as usize]
+        }
+        i = i + 1
+    }
+    0
 }
 
 fn remember_struct_local_tok(ctx: &! V2DriverContext, tok_idx: i64, base_reg: i64, sidx: i64) with Mut, Panic {
@@ -2542,11 +2567,54 @@ fn parse_while_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: 
 
 fn parse_for_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     // M1.2 Layer B1 — for x in START..END { body } / for x in START..=END { body }
+    //                 for x in arr { body }           (array iteration, arr: [T; N])
     // pos points to token AFTER 'for' (i.e. the loop variable name).
-    // Lowering: var x = START; while x </<= END { body; x = x + 1 }
     if token_kind(pos) != TK_IDENT { return pos }
     let var_tok = pos
     if token_kind(pos + 1) != TK_IDENT || !token_text_eq(pos + 1, "in") { return pos }
+    // Check for array iteration: for x in IDENT { body } where IDENT is a local array
+    if token_kind(pos + 2) == TK_IDENT && token_kind(pos + 3) == TK_LBRACE {
+        let arr_tok = pos + 2
+        let arr_base_reg = lookup_local_tok(ctx, arr_tok)
+        let arr_alen = lookup_local_alen_tok(ctx, arr_tok)
+        if arr_base_reg >= 0 && arr_alen > 0 {
+            // for x in arr { body } — iterate arr[0..arr_alen]
+            let body_start = pos + 3
+            let body_end = find_matching_rbrace(body_start, token_count)
+            if body_end < 0 { return pos }
+            let idx_reg = alloc_reg(ctx)
+            ufn_record_load_imm(idx_reg, 0)
+            let end_reg = alloc_reg(ctx)
+            ufn_record_load_imm(end_reg, arr_alen)
+            let elem_reg = alloc_reg(ctx)
+            remember_local_tok(ctx, var_tok, elem_reg)
+            let label_top = alloc_label()
+            let label_incr = alloc_label()
+            let label_end = alloc_label()
+            // cond check at top
+            emit_label(func, label_top)
+            let cond_reg = alloc_reg(ctx)
+            // binop code 7 = lt
+            ufn_record_binop(cond_reg, idx_reg, 7, end_reg)
+            emit_branch_false(func, cond_reg, label_end)
+            // load arr[idx] into elem_reg
+            ufn_record_local_load(elem_reg, arr_base_reg, idx_reg)
+            let old_break = V2_BREAK_LABEL
+            let old_continue = V2_CONTINUE_LABEL
+            V2_BREAK_LABEL = label_end
+            V2_CONTINUE_LABEL = label_incr
+            parse_block_ir(func, ctx, body_start + 1, body_end, token_count)
+            V2_BREAK_LABEL = old_break
+            V2_CONTINUE_LABEL = old_continue
+            emit_label(func, label_incr)
+            let one_reg = alloc_reg(ctx)
+            ufn_record_load_imm(one_reg, 1)
+            ufn_record_binop(idx_reg, idx_reg, 1, one_reg)  // idx = idx + 1
+            emit_jump(func, label_top)
+            emit_label(func, label_end)
+            return body_end + 1
+        }
+    }
     let start_parse = parse_expr_ir(func, ctx, pos + 2)
     if start_parse.ok == 0 { return pos }
     // `..` has kind code 160, `..=` has kind code 161 (see parser.sio).
@@ -2788,7 +2856,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                 ufn_record_load_imm(zero_reg, 0)
                 var ai: i64 = 0
                 while ai < arr_size { ufn_record_copy(arr_base + ai, zero_reg); ai = ai + 1 }
-                remember_local_tok(ctx, p + 1, arr_base)
+                remember_local_arr_tok(ctx, p + 1, arr_base, arr_size)
                 var end = j + 2
                 while end < close && token_kind(end) != TK_RBRACKET { end = end + 1 }
                 // M1.2 step 4 bisect — tail-literal initializer for
