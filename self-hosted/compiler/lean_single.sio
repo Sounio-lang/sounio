@@ -18444,6 +18444,94 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
                 return
             }
+            // for x in vec { body } — struct iteration (requires .data: [T;N] and .len: i64)
+            // after compile_or(), rax = pointer to struct data (ptr_slot contents)
+            if type_is_struct_like(EXPR_TY, EXPR_TY_HASH) {
+                let fvec_si = st_find(EXPR_TY_HASH)
+                if fvec_si >= 0 {
+                    let fvec_hash_len  = hash_3(108, 101, 110)        // "len"
+                    let fvec_hash_data = hash_4(100, 97, 116, 97)     // "data"
+                    let fvec_len_off   = st_field_offset(fvec_si, fvec_hash_len)
+                    let fvec_data_off  = st_field_offset(fvec_si, fvec_hash_data)
+                    let fvec_data_fty  = st_field_ty(fvec_si, fvec_hash_data)
+                    let fvec_data_fhash = st_field_hash(fvec_si, fvec_hash_data)
+                    if fvec_len_off >= 0 && fvec_data_off >= 0 && fvec_data_fty == 8 {
+                        let fvec_esiz      = arr_hash_esiz(fvec_data_fhash)
+                        let fvec_elem_ty   = arr_hash_elem_ty(fvec_data_fhash)
+                        let fvec_elem_hash = arr_hash_elem_hash(fvec_data_fhash)
+                        // Save struct pointer in a hidden slot
+                        let fvec_ptr = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var(fvec_ptr)
+                        // Bind loop variable
+                        let fvec_x = var_add(vns, vne)
+                        if fvec_x < 0 { return }
+                        let fvec_x_vi = VAR_COUNT - 1
+                        VAR_TY[fvec_x_vi as usize]      = fvec_elem_ty
+                        VAR_TY_HASH[fvec_x_vi as usize] = fvec_elem_hash
+                        if fvec_elem_ty == 2 { VAR_IS_F64[fvec_x_vi as usize] = 1 }
+                        // Hidden index slot = 0
+                        let fvec_idx = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        em(0x31); em(0xc0)  // xor eax, eax
+                        emit_store_var(fvec_idx)
+                        // Hidden end slot = struct.len (runtime load from [ptr + len_off])
+                        let fvec_end = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_load_var(fvec_ptr)
+                        // mov rax, [rax + fvec_len_off]
+                        em(0x48); em(0x8b); em(0x80); em32(fvec_len_off)
+                        emit_store_var(fvec_end)
+                        gtt_loop_snapshot()
+                        em(0xe9); let fvec_jcond = CL; em32(0)
+                        let fvec_incr = CL
+                        LOOP_TOP[LOOP_DEPTH as usize] = fvec_incr
+                        LOOP_DEPTH = LOOP_DEPTH + 1
+                        let fvec_sbc = BREAK_COUNT
+                        // incr: idx++
+                        emit_load_var(fvec_idx)
+                        em(0x48); em(0x83); em(0xc0); em(1)  // add rax, 1
+                        emit_store_var(fvec_idx)
+                        // cond: idx < end
+                        let fvec_cond = CL
+                        patch32(fvec_jcond, fvec_cond)
+                        emit_load_var(fvec_idx); em(0x50)       // push idx
+                        emit_load_var(fvec_end); em(0x59)       // pop rcx = end
+                        em(0x48); em(0x39); em(0xc1)            // cmp rcx, rax
+                        em(0x0f); em(0x9c); em(0xc0)            // setl al
+                        em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
+                        em(0x48); em(0x85); em(0xc0)            // test rax, rax
+                        em(0x0f); em(0x84); let fvec_je = CL; em32(0)
+                        // Load x = ptr->data[idx]
+                        emit_load_var(fvec_idx)
+                        em(0x48); em(0x89); em(0xc1)            // mov rcx, rax (idx)
+                        emit_load_var(fvec_ptr)                 // rax = struct ptr
+                        // advance rax to data base pointer (rax += data_off)
+                        if fvec_data_off > 0 {
+                            em(0x48); em(0x81); em(0xc0); em32(fvec_data_off)  // add rax, imm32
+                        }
+                        // rax = data_ptr, rcx = idx
+                        if fvec_esiz == 8 {
+                            em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax+rcx*8]
+                        } else {
+                            em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, [rax+rcx]
+                        }
+                        emit_store_var(fvec_x)
+                        if TK[EP as usize] == 8 { EP = EP + 1 }
+                        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                        if TK[EP as usize] == 9 { EP = EP + 1 }
+                        em(0xe9); em32(fvec_incr - (CL + 4))
+                        gtt_loop_union()
+                        patch32(fvec_je, CL)
+                        var fvec_bi: i64 = fvec_sbc
+                        while fvec_bi < BREAK_COUNT { patch32(BREAK_PATCH[fvec_bi as usize], CL); fvec_bi = fvec_bi + 1 }
+                        BREAK_COUNT = fvec_sbc
+                        LOOP_DEPTH = LOOP_DEPTH - 1
+                        LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+                        return
+                    }
+                }
+            }
             if EXPR_TY != 0 && EXPR_TY != 1 { tc_error_hard(EP - 1, "for range start must be integer") }
             let iter_slot_r = var_add(vns, vne)
             if iter_slot_r < 0 { return }
