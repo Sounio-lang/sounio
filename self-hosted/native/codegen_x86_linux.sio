@@ -7589,6 +7589,122 @@ pub fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> Nativ
     native_compile_result_error(ERR_INVALID_TARGET(), "invalid_target")
 }
 
+// Ref-based ELF finalization — avoids large-struct SRET and by-value array copies.
+// Reads nc state via reference and writes the ELF directly to output_path.
+fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
+    var bin: Elf64Binary
+
+    let code_len = (*nc).code.len
+    let rodata_len = (*nc).rodata.len
+    let raw_data_len = (*nc).data.len
+    let min_data_len = (*nc).prof_counter_data_base + ((*nc).prof_counter_count * 8)
+    let actual_data_len = if raw_data_len < min_data_len { min_data_len } else { raw_data_len }
+    let entry = (*nc).entry_offset
+    let fn_count = (*nc).fn_count
+
+    let text_offset: i64 = 4096
+    let rodata_offset: i64 = align_page(text_offset + code_len)
+    let data_offset: i64 = if actual_data_len > 0 { align_page(rodata_offset + rodata_len) } else { 0 }
+
+    var phnum: i64 = 2
+    if rodata_len > 0 { phnum = phnum + 1 }
+    if actual_data_len > 0 { phnum = phnum + 1 }
+
+    let text_va_base: i64 = base_addr + text_offset
+
+    elf_builder_emit_program_headers_ref(&! bin, entry, base_addr, phnum, elf_machine_x86_64(), code_len, rodata_len, rodata_offset, actual_data_len, data_offset)
+
+    while bin.len < text_offset { elf_emit_byte_ref(&! bin, 0) }
+    var ci: i64 = 0
+    while ci < code_len {
+        elf_emit_byte_ref(&! bin, (*nc).code.bytes[ci as usize] as i64)
+        ci = ci + 1
+    }
+
+    if rodata_len > 0 {
+        while bin.len < rodata_offset { elf_emit_byte_ref(&! bin, 0) }
+        var ri: i64 = 0
+        while ri < rodata_len {
+            elf_emit_byte_ref(&! bin, (*nc).rodata.bytes[ri as usize] as i64)
+            ri = ri + 1
+        }
+    }
+
+    if actual_data_len > 0 {
+        while bin.len < data_offset { elf_emit_byte_ref(&! bin, 0) }
+        var di: i64 = 0
+        while di < actual_data_len {
+            let db: i8 = if di < raw_data_len { (*nc).data.bytes[di as usize] } else { 0 as i8 }
+            elf_emit_byte_ref(&! bin, db as i64)
+            di = di + 1
+        }
+    }
+
+    var strtab_offset: i64 = 0
+    var strtab_size: i64 = 0
+    var symtab_offset: i64 = 0
+    var symtab_size: i64 = 0
+
+    strtab_offset = bin.len
+    let strtab_emit_len = if (*nc).symbols.strtab_len > 0 { (*nc).symbols.strtab_len } else { 1 }
+    var si: i64 = 0
+    while si < strtab_emit_len {
+        elf_emit_byte_ref(&! bin, (*nc).symbols.strtab[si as usize] as i64)
+        si = si + 1
+    }
+    strtab_size = bin.len - strtab_offset
+
+    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    symtab_offset = bin.len
+    emit_symtab_entry_ref(&! bin, 0, 0, 0, 0, 0, 0)
+    var fsi: i64 = 0
+    while fsi < fn_count {
+        let fn_name_off = (*nc).symbols.name_offsets[fsi as usize]
+        let fn_va = text_va_base + (*nc).fn_offsets[fsi as usize]
+        emit_symtab_entry_ref(&! bin, fn_name_off, 2, 1, 1, fn_va, 0)
+        fsi = fsi + 1
+    }
+    symtab_size = bin.len - symtab_offset
+
+    var noteprop_offset: i64 = 0
+    var noteprop_size: i64 = 0
+    var shstrtab_offset: i64 = 0
+    var shstrtab_size: i64 = 0
+    elf_builder_emit_note_and_shstrtab_ref(&! bin, elf_machine_x86_64(), &! noteprop_offset, &! noteprop_size, &! shstrtab_offset, &! shstrtab_size)
+
+    var shoff: i64 = 0
+    var shnum: i64 = 0
+    var shstrndx: i64 = 0
+    elf_builder_emit_section_headers_ref(&! bin, base_addr, text_offset, code_len, rodata_offset, rodata_len, data_offset, actual_data_len, symtab_offset, symtab_size, strtab_offset, strtab_size, noteprop_offset, noteprop_size, shstrtab_offset, shstrtab_size, &! shoff, &! shnum, &! shstrndx)
+    elf_builder_patch_header_ref(&! bin, shoff, shnum, shstrndx)
+
+    let elf_len = bin.len
+    if elf_len <= 0 {
+        print("Native compilation failed: finalize_empty_elf\n")
+        return 1
+    }
+
+    var narrow: [i8; 131072] = [0; 131072]
+    var ni: i64 = 0
+    while ni < elf_len && ni < 131072 {
+        narrow[ni as usize] = bin.bytes[ni as usize]
+        ni = ni + 1
+    }
+    if write_file(output_path, narrow, elf_len) < 0 {
+        print("Error: Failed to write native binary to ")
+        print(output_path)
+        print("\n")
+        return 1
+    }
+    print("Native binary size: ")
+    print_int(elf_len)
+    print(" bytes\n")
+    print("Written to ")
+    print(output_path)
+    print("\n")
+    0
+}
+
 pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     compile_module_streaming_begin_into(&! nc, module)
@@ -7602,27 +7718,7 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
         fi = fi + 1
     }
     compile_module_streaming_finish_into(&! nc, module)
-    let elf = finalize_compiled_elf(nc, 4194304)
-    let result = native_compile_result_ok_elf(elf.bytes, elf.len, FORMAT_ELF64())
-    if !result.ok {
-        print("Native compilation failed: ")
-        print(result.error_msg)
-        print("\n")
-        return 1
-    }
-    if write_file(output_path, result.bytes, result.len) < 0 {
-        print("Error: Failed to write native binary to ")
-        print(output_path)
-        print("\n")
-        return 1
-    }
-    print("Native binary size: ")
-    print_int(result.len)
-    print(" bytes\n")
-    print("Written to ")
-    print(output_path)
-    print("\n")
-    0
+    compile_native_finalize_and_write_ref(&! nc, 4194304, output_path)
 }
 
 fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
