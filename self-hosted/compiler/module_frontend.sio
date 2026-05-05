@@ -17,6 +17,11 @@ fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
 }
 
 var MODULE_FRONTEND_IMPORT_FILE_DATA: [i8; 1048576] = [0; 1048576]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT: i64 = 0
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES: [i64; 64] = [0; 64]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS: [i64; 64] = [0; 64]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES: [i64; 64] = [0; 64]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES: [i64; 64] = [0; 64]
 
 fn module_frontend_import_is_ident_ch(c: i8) -> bool {
     (c >= 65 as i8 && c <= 90 as i8) ||
@@ -2833,6 +2838,191 @@ fn multimodule_frontend_ok() -> MultiModuleFrontendResult {
 
 fn multimodule_frontend_error(msg: string) -> MultiModuleFrontendResult {
     MultiModuleFrontendResult { ok: false, error_msg: msg }
+}
+
+fn module_frontend_source_name_hash_at(data: [i8; 16777216], start: i64, size: i64) -> i64 with Panic, Div {
+    var hash: i64 = 5381
+    var i = start
+    while i < size && data[i as usize] == (32 as i8) {
+        i = i + 1
+    }
+    while i < size {
+        let ch = data[i as usize]
+        if ch == (40 as i8) || ch == (32 as i8) || ch == (9 as i8) ||
+           ch == (10 as i8) || ch == (13 as i8) {
+            return hash
+        }
+        hash = (hash * 33) + (ch as i64)
+        i = i + 1
+    }
+    hash
+}
+
+fn module_frontend_imported_simple_global_reset() with Mut, Panic {
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT = 0
+    var i: i64 = 0
+    while i < 64 {
+        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[i as usize] = 0
+        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[i as usize] = 0
+        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[i as usize] = 0
+        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn module_frontend_imported_simple_global_push_fn(
+    path: string,
+    data: [i8; 16777216],
+    fn_pos: i64,
+    size: i64
+) with IO, Mut, Panic, Div {
+    if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT >= 64 {
+        return
+    }
+    let idx = MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT
+    let fn_name = module_frontend_source_fn_name(data, fn_pos + 3, size)
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, fn_pos + 3, size)
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = 0
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = 0
+
+    let body = module_frontend_source_body_start(data, fn_pos, size)
+    if body >= 0 {
+        let expr = module_frontend_source_skip_ws(data, body, size)
+        let body_value = module_frontend_try_eval_source_fn_i64(data, size, fn_name)
+        if body_value.0 {
+            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
+            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = body_value.1
+        } else {
+            let literal = module_frontend_source_int_at(data, expr, size)
+            if literal.0 {
+                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
+                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = literal.1
+            } else {
+                let summary_value = module_frontend_try_eval_source_summary_i64(path, fn_name)
+                if summary_value.0 {
+                    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
+                    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = summary_value.1
+                } else {
+                    let callee = module_frontend_source_ident_at(data, expr, size)
+                    if module_frontend_name_is_println(callee) {
+                        let printed = module_frontend_source_first_int_after(data, expr + callee.len, size)
+                        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 3
+                        if printed.0 {
+                            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = printed.1
+                        }
+                    } else if callee.len > 0 {
+                        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 1
+                        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, expr, size)
+                    }
+                }
+            }
+        }
+    }
+
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT = idx + 1
+}
+
+fn module_frontend_lower_source_file_simple_global(
+    path: string,
+    module_index: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> bool with IO, Mut, Panic, Div {
+    trace.last_stage = "lower_source_simple_global"
+    trace.last_module_index = module_index
+    let start_fn_count = MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT
+    let size = file_size(path)
+    if size <= 2 {
+        return true
+    }
+    let data: [i8; 16777216] = read_file(path)
+    var i: i64 = 0
+    while i + 2 < size && MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT < 64 {
+        if module_frontend_source_is_fn_at(data, i, size) {
+            module_frontend_imported_simple_global_push_fn(path, data, i, size)
+        }
+        i = i + 1
+    }
+    if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT > start_fn_count {
+        trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+        trace.body_lowered_modules = trace.body_lowered_modules + 1
+        trace.lowered_modules = trace.lowered_modules + 1
+        trace.merged_modules = trace.merged_modules + 1
+    }
+    true
+}
+
+fn module_frontend_lower_imported_simple_global_recursive(
+    path: string,
+    depth: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> bool with IO, Mut, Panic, Div {
+    if depth > 16 {
+        return true
+    }
+    if depth > 0 {
+        trace.loaded_modules = trace.loaded_modules + 1
+    }
+    trace.resolved_modules = trace.loaded_modules
+    trace.typechecked_modules = trace.loaded_modules
+    if !module_frontend_lower_source_file_simple_global(path, depth, trace) {
+        return false
+    }
+    let imports = module_frontend_import_files_from_source(path)
+    var i: i64 = 0
+    while i < imports.count {
+        if !module_frontend_lower_imported_simple_global_recursive(imports.paths[i], depth + 1, trace) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn load_multimodule_imported_simple_ir_global(main_path: string) -> MultiModuleFrontendResult with IO, Mut, Div, Panic {
+    var trace = empty_load_multimodule_ir_trace()
+    module_frontend_imported_simple_global_reset()
+    if !module_frontend_file_maybe_has_use(main_path) {
+        return multimodule_frontend_error("not_imported_source")
+    }
+    trace.loaded_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+    if !module_frontend_lower_imported_simple_global_recursive(main_path, 0, &! trace) {
+        print("IR lowering failed for imported source\n")
+        return multimodule_frontend_error("ir_lowering_failed")
+    }
+    if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT <= 0 {
+        print("IR lowering failed for imported source\n")
+        return multimodule_frontend_error("ir_lowering_failed")
+    }
+    trace.last_stage = "done"
+    trace.last_module_index = trace.loaded_modules - 1
+    print("Merged IR: ")
+    print_int(MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT)
+    print(" functions\n")
+    parser_reset_last_errors()
+    multimodule_frontend_ok()
+}
+
+pub fn imported_simple_ir_global_fn_count() -> i64 {
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT
+}
+
+pub fn imported_simple_ir_global_fn_name_hash(idx: i64) -> i64 with Panic {
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[idx as usize]
+}
+
+pub fn imported_simple_ir_global_fn_kind(idx: i64) -> i64 with Panic {
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize]
+}
+
+pub fn imported_simple_ir_global_fn_target_hash(idx: i64) -> i64 with Panic {
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize]
+}
+
+pub fn imported_simple_ir_global_fn_value(idx: i64) -> i64 with Panic {
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize]
 }
 
 pub fn module_frontend_algebra_law_self_test() -> i64 with Mut, Div, Panic {
