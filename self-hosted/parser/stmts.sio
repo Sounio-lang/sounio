@@ -5,7 +5,29 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_take_expr_box, parser_advance, parser_assign_op_code, error_expr}
+
+// Lean compiler safety: keep assignment targets out of the local frame while
+// recursively parsing the RHS. Holding both Boxes locally corrupts some nested
+// parenthesized RHS parses in the split compiler path.
+var LAST_ASSIGN_TARGET: Option<Box<Expr>> = None
+
+fn stmt_store_assign_target(target: Box<Expr>) with Mut {
+    LAST_ASSIGN_TARGET = Some(target)
+}
+
+fn stmt_take_assign_target() -> Box<Expr> with Mut, Alloc {
+    match LAST_ASSIGN_TARGET {
+        Some(target) => {
+            LAST_ASSIGN_TARGET = None
+            target
+        },
+        None => {
+            LAST_ASSIGN_TARGET = None
+            Box::new(error_expr(Span { file_id: 0, start: 0, end: 0 }))
+        },
+    }
+}
 
 impl Parser {
     // ============================================================
@@ -145,16 +167,16 @@ impl Parser {
     fn parse_expr_or_assign_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p1 = self.parse_expr()
-        let lhs_box = parser_take_expr_box()
 
-        let k = parser_peek(p1)
-        if k == TokenKind::Eq || k == TokenKind::PlusEq || k == TokenKind::MinusEq
-            || k == TokenKind::StarEq || k == TokenKind::SlashEq || k == TokenKind::PercentEq {
+        let assign_code = parser_assign_op_code(p1)
+        if assign_code >= 0 {
             // Assignment
-            let op = parse_assign_op(k)
-            var p = p1.advance()  // skip operator
-            p = p.parse_expr()
+            stmt_store_assign_target(parser_take_expr_box())
+            var p = parser_advance(p1)  // skip operator
+            p = parse_expr_entry(p)
             let rhs_box = parser_take_expr_box()
+            let lhs_box = stmt_take_assign_target()
+            let op = assign_op_from_code(assign_code)
             let span = p.span_from(start)
             (p, Stmt {
                 kind: StmtKind::StmtAssign,
@@ -167,6 +189,7 @@ impl Parser {
             })
         } else {
             // Expression statement
+            let lhs_box = parser_take_expr_box()
             let span = p1.span_from(start)
             (p1, Stmt {
                 kind: StmtKind::StmtExpr,
@@ -195,6 +218,15 @@ fn parse_assign_op(kind: TokenKind) -> AssignOp {
         TokenKind::PercentEq => AssignOp::AssignRem,
         _ => AssignOp::AssignEq,
     }
+}
+
+fn assign_op_from_code(code: i64) -> AssignOp {
+    if code == 1 { return AssignOp::AssignAdd }
+    if code == 2 { return AssignOp::AssignSub }
+    if code == 3 { return AssignOp::AssignMul }
+    if code == 4 { return AssignOp::AssignDiv }
+    if code == 5 { return AssignOp::AssignRem }
+    AssignOp::AssignEq
 }
 
 fn stmt_list_append(list: StmtList, node: StmtList) -> StmtList with Mut, Alloc {
