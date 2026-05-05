@@ -5354,6 +5354,33 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     false
 }
 
+fn nc_core_emit_println_i64_literal_sentinel_into(nc: &! NativeCompiler, value: i64) -> bool with Mut, Panic, Div {
+    if value < 0 || value > 999 {
+        return false
+    }
+
+    let rodata_offset = native_v2_rodata_len_into(nc)
+    if value >= 100 {
+        native_v2_rodata_append_byte_into(nc, 48 + ((value / 100) % 10))
+    }
+    if value >= 10 {
+        native_v2_rodata_append_byte_into(nc, 48 + ((value / 10) % 10))
+    }
+    native_v2_rodata_append_byte_into(nc, 48 + (value % 10))
+    native_v2_rodata_append_byte_into(nc, 10)
+
+    let write_len = native_v2_rodata_len_into(nc) - rodata_offset
+    let lea_pos = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, lea_pos + 3, rodata_offset)
+    nc_emit_mov_reg_reg(nc, 6, 0)
+    nc_emit_mov_rdi_imm(nc, 1)
+    nc_emit_mov_reg_imm(nc, 2, write_len)
+    nc_emit_mov_rax_imm(nc, 1)
+    nc_emit_syscall(nc)
+    true
+}
+
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with Mut, Panic, Div, Alloc {
     nc_v2_reset_label_state()
     reset_function_state_mut(nc)
@@ -5370,8 +5397,24 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     while i < (*func).instr_count {
         let instr_op = (*func).instrs[i as usize].op
         if instr_op == IrOpcode::IrLoadImm {
-            nc_emit_mov_rax_imm(nc, (*func).instrs[i as usize].imm_i64)
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            let imm_value = (*func).instrs[i as usize].imm_i64
+            if imm_value == (0 - 4242) {
+                if i < 1 {
+                    return false
+                }
+                let prev_instr = (*func).instrs[(i - 1) as usize]
+                if prev_instr.op != IrOpcode::IrLoadImm {
+                    return false
+                }
+                if !nc_core_emit_println_i64_literal_sentinel_into(nc, prev_instr.imm_i64) {
+                    return false
+                }
+                nc_emit_mov_rax_imm(nc, 0)
+                nc_core_store_rax_to_temp(nc, prev_instr.dst)
+            } else {
+                nc_emit_mov_rax_imm(nc, imm_value)
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            }
         } else if instr_op == IrOpcode::IrLoadString {
             let str_offset = nc_rodata_add_ir_instr_name(nc, func, i)
             let lea_pos = (*nc).code.len
@@ -7332,7 +7375,7 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     var bytes: [i8; 131072] = [0; 131072]
     let text_offset: i64 = 4096
     let code_len = (*nc).code.len
-    let rodata_len = (*nc).rodata.len
+    let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
     let raw_data_len = (*nc).data.len
     var data_len = if raw_data_len < runtime_context_global_slot_size() { runtime_context_global_slot_size() } else { raw_data_len }
     if data_len > 8192 { data_len = 8192 }
@@ -7397,7 +7440,8 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
 
     i = 0
     while i < rodata_len && (rodata_offset + i) < 131072 {
-        bytes[(rodata_offset + i) as usize] = (*nc).rodata.bytes[i as usize]
+        let rb: i8 = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_bytes[i as usize] } else { (*nc).rodata.bytes[i as usize] }
+        bytes[(rodata_offset + i) as usize] = rb
         i = i + 1
     }
 
@@ -7622,7 +7666,7 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
     NATIVE_ELF_OFF = 0
 
     let code_len = (*nc).code.len
-    let rodata_len = (*nc).rodata.len
+    let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
     let raw_data_len = (*nc).data.len
     let min_data_len = (*nc).prof_counter_data_base + ((*nc).prof_counter_count * 8)
     let actual_data_len = if raw_data_len < min_data_len { min_data_len } else { raw_data_len }
@@ -7729,7 +7773,8 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
         NATIVE_ELF_OFF = rodata_offset
         var ri: i64 = 0
         while ri < rodata_len {
-            NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = (*nc).rodata.bytes[ri as usize]
+            let rb: i8 = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_bytes[ri as usize] } else { (*nc).rodata.bytes[ri as usize] }
+            NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = rb
             NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
             ri = ri + 1
         }
