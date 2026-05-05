@@ -7,7 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, ir_name_eq}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -34,6 +34,11 @@ use io::trace::{io_trace_append_byte, io_trace_append_string, io_trace_append_js
 // They will be wired into the lowering pass in Horizon 3.2 (vector IR ops).
 
 var NATIVE_V2_CODEGEN_MACHINE: MachineFunction = machine_function_new()
+// BSS buffer for ELF output — module-scope so it is NOT stack-allocated.
+// 16MB handles the largest expected self-hosted compiler binary (~2-4MB).
+var NATIVE_ELF_BUF: [i8; 16777216] = [0; 16777216]
+// Write cursor — module-scope avoids &! i64 ref mutation issues in helper fns.
+var NATIVE_ELF_OFF: i64 = 0
 
 // ============================================================================
 // Native dispatcher contracts (Sprint 1)
@@ -4042,7 +4047,7 @@ fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_f
         if kind_code == 1 && native_v2_reloc_is_call_patch(nc, patch_offset) {
             if is_function == 1 {
                 let target_idx = target_index
-                if target_idx < (*nc).fn_count {
+                if target_idx >= 0 && target_idx < (*nc).fn_count {
                     let target_offset = (*nc).fn_offsets[target_idx as usize]
                     let rel32 = target_offset - (patch_offset + 4)
                     nc_patch_u32_le(nc, patch_offset, rel32)
@@ -7589,18 +7594,39 @@ pub fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> Nativ
     native_compile_result_error(ERR_INVALID_TARGET(), "invalid_target")
 }
 
-// Ref-based ELF finalization — avoids large-struct SRET and by-value array copies.
-// Reads nc state via reference and writes the ELF directly to output_path.
+// ELF helpers writing directly into NATIVE_ELF_BUF/NATIVE_ELF_OFF (module globals).
+// Using only global direct writes avoids all ref-mutation and struct-field bugs.
+fn nc_elf_put_u8(val: i64) with Mut, Panic {
+    NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = (val & 255) as i8
+    NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
+}
+fn nc_elf_put_u16(val: i64) with Mut, Panic {
+    nc_elf_put_u8(val & 255)
+    nc_elf_put_u8((val >> 8) & 255)
+}
+fn nc_elf_put_u32(val: i64) with Mut, Panic {
+    nc_elf_put_u8(val & 255)
+    nc_elf_put_u8((val >> 8) & 255)
+    nc_elf_put_u8((val >> 16) & 255)
+    nc_elf_put_u8((val >> 24) & 255)
+}
+fn nc_elf_put_u64(val: i64) with Mut, Panic {
+    nc_elf_put_u32(val)
+    nc_elf_put_u32(val >> 32)
+}
+
+// ELF finalization using the module-level NATIVE_ELF_BUF/NATIVE_ELF_OFF (BSS).
+// Avoids (*struct_ref).array_field[idx]=val (drops writes) and stack-allocated
+// large arrays (overflows 8MB thread stack).
 fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
-    var bin: Elf64Binary
+    NATIVE_ELF_OFF = 0
 
     let code_len = (*nc).code.len
     let rodata_len = (*nc).rodata.len
     let raw_data_len = (*nc).data.len
     let min_data_len = (*nc).prof_counter_data_base + ((*nc).prof_counter_count * 8)
     let actual_data_len = if raw_data_len < min_data_len { min_data_len } else { raw_data_len }
-    let entry = (*nc).entry_offset
-    let fn_count = (*nc).fn_count
+    let entry_offset = (*nc).entry_offset
 
     let text_offset: i64 = 4096
     let rodata_offset: i64 = align_page(text_offset + code_len)
@@ -7610,94 +7636,131 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
     if rodata_len > 0 { phnum = phnum + 1 }
     if actual_data_len > 0 { phnum = phnum + 1 }
 
-    let text_va_base: i64 = base_addr + text_offset
+    let entry_va = base_addr + text_offset + entry_offset
 
-    elf_builder_emit_program_headers_ref(&! bin, entry, base_addr, phnum, elf_machine_x86_64(), code_len, rodata_len, rodata_offset, actual_data_len, data_offset)
+    // ELF ident (16 bytes)
+    nc_elf_put_u8(0x7f)
+    nc_elf_put_u8(0x45)
+    nc_elf_put_u8(0x4c)
+    nc_elf_put_u8(0x46)
+    nc_elf_put_u8(2)
+    nc_elf_put_u8(1)
+    nc_elf_put_u8(1)
+    nc_elf_put_u8(0)
+    var pad: i64 = 0
+    while pad < 8 { nc_elf_put_u8(0); pad = pad + 1 }
+    // e_type(2) e_machine(2) e_version(4)
+    nc_elf_put_u16(2)
+    nc_elf_put_u16(0x3e)
+    nc_elf_put_u32(1)
+    // e_entry e_phoff e_shoff
+    nc_elf_put_u64(entry_va)
+    nc_elf_put_u64(64)
+    nc_elf_put_u64(0)
+    // e_flags(4) e_ehsize(2) e_phentsize(2) e_phnum(2) e_shentsize(2) e_shnum(2) e_shstrndx(2)
+    nc_elf_put_u32(0)
+    nc_elf_put_u16(64)
+    nc_elf_put_u16(56)
+    nc_elf_put_u16(phnum)
+    nc_elf_put_u16(0)
+    nc_elf_put_u16(0)
+    nc_elf_put_u16(0)
 
-    while bin.len < text_offset { elf_emit_byte_ref(&! bin, 0) }
+    // PT_LOAD text (R+X)
+    let text_va = base_addr + text_offset
+    nc_elf_put_u32(1)
+    nc_elf_put_u32(5)
+    nc_elf_put_u64(text_offset)
+    nc_elf_put_u64(text_va)
+    nc_elf_put_u64(text_va)
+    nc_elf_put_u64(code_len)
+    nc_elf_put_u64(code_len)
+    nc_elf_put_u64(4096)
+
+    // PT_LOAD rodata (R)
+    if rodata_len > 0 {
+        let rodata_va = base_addr + rodata_offset
+        nc_elf_put_u32(1)
+        nc_elf_put_u32(4)
+        nc_elf_put_u64(rodata_offset)
+        nc_elf_put_u64(rodata_va)
+        nc_elf_put_u64(rodata_va)
+        nc_elf_put_u64(rodata_len)
+        nc_elf_put_u64(rodata_len)
+        nc_elf_put_u64(4096)
+    }
+
+    // PT_LOAD data (R+W)
+    if actual_data_len > 0 {
+        let data_va = base_addr + data_offset
+        nc_elf_put_u32(1)
+        nc_elf_put_u32(6)
+        nc_elf_put_u64(data_offset)
+        nc_elf_put_u64(data_va)
+        nc_elf_put_u64(data_va)
+        nc_elf_put_u64(actual_data_len)
+        nc_elf_put_u64(actual_data_len)
+        nc_elf_put_u64(4096)
+    }
+
+    // PT_GNU_STACK (R+W, non-exec stack)
+    nc_elf_put_u32(0x6474e551)
+    nc_elf_put_u32(6)
+    nc_elf_put_u64(0)
+    nc_elf_put_u64(0)
+    nc_elf_put_u64(0)
+    nc_elf_put_u64(0)
+    nc_elf_put_u64(0)
+    nc_elf_put_u64(16)
+
+    // Advance to text section (BSS already zeroed, no explicit padding needed)
+    NATIVE_ELF_OFF = text_offset
+
+    // Copy code bytes — direct BSS write + struct-ref read (both work)
     var ci: i64 = 0
     while ci < code_len {
-        elf_emit_byte_ref(&! bin, (*nc).code.bytes[ci as usize] as i64)
+        NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = (*nc).code.bytes[ci as usize]
+        NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
         ci = ci + 1
     }
 
+    // Copy rodata bytes
     if rodata_len > 0 {
-        while bin.len < rodata_offset { elf_emit_byte_ref(&! bin, 0) }
+        NATIVE_ELF_OFF = rodata_offset
         var ri: i64 = 0
         while ri < rodata_len {
-            elf_emit_byte_ref(&! bin, (*nc).rodata.bytes[ri as usize] as i64)
+            NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = (*nc).rodata.bytes[ri as usize]
+            NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
             ri = ri + 1
         }
     }
 
+    // Copy data bytes
     if actual_data_len > 0 {
-        while bin.len < data_offset { elf_emit_byte_ref(&! bin, 0) }
+        NATIVE_ELF_OFF = data_offset
         var di: i64 = 0
         while di < actual_data_len {
             let db: i8 = if di < raw_data_len { (*nc).data.bytes[di as usize] } else { 0 as i8 }
-            elf_emit_byte_ref(&! bin, db as i64)
+            NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = db
+            NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
             di = di + 1
         }
     }
 
-    var strtab_offset: i64 = 0
-    var strtab_size: i64 = 0
-    var symtab_offset: i64 = 0
-    var symtab_size: i64 = 0
-
-    strtab_offset = bin.len
-    let strtab_emit_len = if (*nc).symbols.strtab_len > 0 { (*nc).symbols.strtab_len } else { 1 }
-    var si: i64 = 0
-    while si < strtab_emit_len {
-        elf_emit_byte_ref(&! bin, (*nc).symbols.strtab[si as usize] as i64)
-        si = si + 1
-    }
-    strtab_size = bin.len - strtab_offset
-
-    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
-    symtab_offset = bin.len
-    emit_symtab_entry_ref(&! bin, 0, 0, 0, 0, 0, 0)
-    var fsi: i64 = 0
-    while fsi < fn_count {
-        let fn_name_off = (*nc).symbols.name_offsets[fsi as usize]
-        let fn_va = text_va_base + (*nc).fn_offsets[fsi as usize]
-        emit_symtab_entry_ref(&! bin, fn_name_off, 2, 1, 1, fn_va, 0)
-        fsi = fsi + 1
-    }
-    symtab_size = bin.len - symtab_offset
-
-    var noteprop_offset: i64 = 0
-    var noteprop_size: i64 = 0
-    var shstrtab_offset: i64 = 0
-    var shstrtab_size: i64 = 0
-    elf_builder_emit_note_and_shstrtab_ref(&! bin, elf_machine_x86_64(), &! noteprop_offset, &! noteprop_size, &! shstrtab_offset, &! shstrtab_size)
-
-    var shoff: i64 = 0
-    var shnum: i64 = 0
-    var shstrndx: i64 = 0
-    elf_builder_emit_section_headers_ref(&! bin, base_addr, text_offset, code_len, rodata_offset, rodata_len, data_offset, actual_data_len, symtab_offset, symtab_size, strtab_offset, strtab_size, noteprop_offset, noteprop_size, shstrtab_offset, shstrtab_size, &! shoff, &! shnum, &! shstrndx)
-    elf_builder_patch_header_ref(&! bin, shoff, shnum, shstrndx)
-
-    let elf_len = bin.len
-    if elf_len <= 0 {
+    let elf_size = NATIVE_ELF_OFF
+    if elf_size <= 0 {
         print("Native compilation failed: finalize_empty_elf\n")
         return 1
     }
 
-    var narrow: [i8; 131072] = [0; 131072]
-    var ni: i64 = 0
-    while ni < elf_len && ni < 131072 {
-        narrow[ni as usize] = bin.bytes[ni as usize]
-        ni = ni + 1
-    }
-    if write_file(output_path, narrow, elf_len) < 0 {
+    if write_file(output_path, NATIVE_ELF_BUF, elf_size) < 0 {
         print("Error: Failed to write native binary to ")
         print(output_path)
         print("\n")
         return 1
     }
     print("Native binary size: ")
-    print_int(elf_len)
+    print_int(elf_size)
     print(" bytes\n")
     print("Written to ")
     print(output_path)
@@ -7710,7 +7773,30 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
     compile_module_streaming_begin_into(&! nc, module)
     var fi: i64 = 0
     while fi < (*module).fn_count {
-        let fn_body = (*module).functions[fi as usize]
+        var fn_body = (*module).functions[fi as usize]
+        // Resolve named calls (fn_id = -1) emitted by module_frontend_ir_named_call.
+        // Main modules lower cross-module calls with fn_id=-1 and the callee name stored
+        // in instr.name. We must patch these to the merged module position before emitting
+        // call relocations, otherwise apply_relocations_into indexes fn_offsets[-1].
+        var ii: i64 = 0
+        while ii < fn_body.instr_count {
+            if fn_body.instrs[ii as usize].op == IrOpcode::IrCall && fn_body.instrs[ii as usize].fn_id < 0 {
+                let call_name = fn_body.instrs[ii as usize].name
+                var ji: i64 = 0
+                var found_ji: i64 = 0 - 1
+                while ji < (*module).fn_count {
+                    if ir_name_eq((*module).functions[ji as usize].name, call_name) {
+                        found_ji = ji
+                        ji = (*module).fn_count
+                    }
+                    ji = ji + 1
+                }
+                if found_ji >= 0 {
+                    fn_body.instrs[ii as usize].fn_id = found_ji
+                }
+            }
+            ii = ii + 1
+        }
         if !compile_ir_function_v2_from_ir_into(&! nc, &fn_body, fi) {
             print("Native compilation failed: native_driver_function_codegen_failed\n")
             return 1
@@ -7718,6 +7804,12 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
         fi = fi + 1
     }
     compile_module_streaming_finish_into(&! nc, module)
+    let reloc_rodata_off: i64 = align_page(4096 + nc.code.len)
+    let reloc_min_data = nc.prof_counter_data_base + (nc.prof_counter_count * 8)
+    let reloc_eff_data = if nc.data.len < reloc_min_data { reloc_min_data } else { nc.data.len }
+    let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
+    let reloc_data_off = if reloc_eff_data > 0 { align_page(reloc_rodata_off + reloc_eff_rodata) } else { 0 }
+    apply_relocations_into(&! nc, reloc_rodata_off, reloc_data_off)
     compile_native_finalize_and_write_ref(&! nc, 4194304, output_path)
 }
 
