@@ -1030,9 +1030,8 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     ptx_finish_fn(fi, start_off, gpu_kernel_ptx_kind_vec_binary_f64(), extent_slot)
 }
 
-// Hash: pack name length + first 6 bytes into i64 (avoids sb()-based comparison during lookup)
+// Hash: length + sum of (byte * position) — collision-resistant for same-prefix names
 fn gl_name_hash(ns: i64, ne: i64) -> i64 with Panic, Mut {
-    // Hash: length + sum of (byte * position) — collision-resistant for same-prefix names
     let l = ne - ns
     var h: i64 = l * 1000003
     var hi: i64 = 0
@@ -3357,9 +3356,10 @@ fn try_apply_return_refinement(tok: i64) with IO, Mut, Panic, Div {
 }
 
 fn tc_undefined_var(tok: i64) -> i64 with IO, Mut, Panic {
-    print("warning: unknown identifier at line ")
+    print("error: unknown identifier at line ")
     print_int(TL[tok as usize])
     print("\n")
+    tc_mark_failed()
     return 0
 }
 
@@ -3368,7 +3368,7 @@ fn tc_duplicate_fn(tok: i64) -> i64 with IO, Mut, Panic {
 }
 
 fn tc_duplicate_param(tok: i64) -> i64 with IO, Mut, Panic {
-    tc_error(tok, "duplicate parameter name")
+    tc_error_hard(tok, "duplicate parameter name")
 }
 
 fn tc_missing_effect(tok: i64) -> i64 with IO, Mut, Panic {
@@ -8253,7 +8253,13 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     let slot = var_find(rns, rne)
     if slot >= 0 {
         if want_mut != 0 && var_find_is_mut(rns, rne) == 0 {
-            tc_error(borrow_tok, "Mut borrow requires mutable binding")
+            // Allow &! on fields of &!T parameters (exclusive ref params are reborrow-safe)
+            let chk_vi = var_find_idx(rns, rne)
+            let chk_ty = if chk_vi >= 0 { VAR_TY[chk_vi as usize] } else { 0 }
+            let chk_hash = if chk_vi >= 0 { VAR_TY_HASH[chk_vi as usize] } else { 0 }
+            if chk_ty != 10 || ref_hash_mut(chk_hash) == 0 {
+                tc_error_hard(borrow_tok, "Mut borrow requires mutable binding")
+            }
         }
         let lalen = var_find_alen(rns, rne)
         let lty = var_find_ty(rns, rne)
@@ -19019,7 +19025,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         var ai: i64 = 0
         while ai < arm_count { patch32(MATCH_ENDS[ai as usize], CL); ai = ai + 1 }
         if MATCH_SCRUT_TY == 7 && match_arms < 1000000 && match_arms < en_variant_count(MATCH_SCRUT_HASH) {
-            tc_error(EP - 1, "match must be exhaustive")
+            tc_error_hard(EP - 1, "match must be exhaustive")
             LAST_STMT_HAS_VALUE = 0
             LAST_STMT_TY = 0
             LAST_STMT_TY_HASH = 0
@@ -25346,7 +25352,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         let slot = var_find(rns, rne)
         if slot >= 0 {
             if want_mut != 0 && var_find_is_mut(rns, rne) == 0 {
-                tc_error(borrow_tok, "Mut borrow requires mutable binding")
+                let achk_vi = var_find_idx(rns, rne)
+                let achk_ty = if achk_vi >= 0 { VAR_TY[achk_vi as usize] } else { 0 }
+                let achk_hash = if achk_vi >= 0 { VAR_TY_HASH[achk_vi as usize] } else { 0 }
+                if achk_ty != 10 || ref_hash_mut(achk_hash) == 0 {
+                    tc_error_hard(borrow_tok, "Mut borrow requires mutable binding")
+                }
             }
             let lalen = var_find_alen(rns, rne)
             let lty = var_find_ty(rns, rne)
@@ -29051,7 +29062,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         var ai: i64 = 0
         while ai < arm_count { patch_branch_a64(MATCH_ENDS[ai as usize], CL); ai = ai + 1 }
         if MATCH_SCRUT_TY == 7 && match_arms < 1000000 && match_arms < en_variant_count(MATCH_SCRUT_HASH) {
-            tc_error(EP - 1, "match must be exhaustive")
+            tc_error_hard(EP - 1, "match must be exhaustive")
             LAST_STMT_HAS_VALUE = 0
             LAST_STMT_TY = 0
             LAST_STMT_TY_HASH = 0
