@@ -1,51 +1,26 @@
 // self-hosted::compiler::lean
 //
-// Lean modular compiler entrypoint.
-// This keeps the day-to-day CLI path off compiler/main.sio's embedded
-// self-test/backend laboratory while reusing the split frontend and native
-// driver modules.
+// Lean modular frontend-safe entrypoint.
+// Keep check/IR/probe modes off compiler/main.sio's embedded laboratory and
+// away from native-driver imports. Compile modes are intentionally classified
+// here so backend/runtime faults cannot poison frontend-only proof lanes.
 
-use module_frontend::{load_multimodule_ir, load_multimodule_ir_fn_count, preflight_multimodule_frontend}
-use module_native_driver::{compile_multimodule_llvm, compile_multimodule_native_advanced}
-use ir::ir::{ir_algebra_info_for_tag}
-
-struct LeanOptions {
-    input_file: string,
-    output_file: string,
-    target: string,
-    matrix: string,
-    explicit_target: bool,
-    optimize: bool,
-    verbose: bool,
-    help: bool,
-    self_test: bool,
-    check_only: bool,
-    ir_summary: bool,
-    probe_load_ir: bool,
-    probe_load_ir_trace: bool,
-    algebra_law_self_test: bool,
-    cache_dir: string,
-    cache_mode: string,
-    cache_stats: bool,
-    gpu_target: string,
-    gpu_binary_format: string,
-    gpu_strict_parity: bool,
-}
+use module_frontend::{load_multimodule_ir_fn_count, module_frontend_algebra_law_self_test, preflight_multimodule_frontend}
 
 fn lean_print_help() with IO {
     println("Usage: souc-lean [options] <input.sio>")
     println("")
     println("Options:")
-    println("  -o, --output <file>       Output file (default: a.out)")
-    println("  -t, --target <target>     Target: native, x86_64-linux, wasm, llvm")
-    println("  --matrix <mode>           Native target matrix mode (default: auto)")
-    println("  -O, --optimize            Request optimization")
+    println("  -o, --output <file>       Accepted for CLI compatibility")
+    println("  -t, --target <target>     Accepted for CLI compatibility")
+    println("  --matrix <mode>           Accepted for CLI compatibility")
+    println("  -O, --optimize            Accepted for CLI compatibility")
     println("  --check <source.sio>      Parse, resolve and typecheck only")
     println("  --ir-summary <source.sio> Print loaded IR function/string counts")
     println("  --probe-load-ir <source.sio>  Compatibility alias for modular IR load")
     println("  --probe-load-ir-trace <source.sio>  Compatibility alias with body count")
-    println("  --native-compile <source.sio>  Compatibility alias for native target")
-    println("  --algebra-law-self-test  Check CD-tower reassoc_strategy decisions")
+    println("  --native-compile <source.sio>  Classified unsupported in frontend-safe driver")
+    println("  --algebra-law-self-test  Classified unsupported in frontend-safe driver")
     println("  --self-test               Run lean CLI/import-contract smoke")
     println("  --cache-dir <dir>         Accepted for CLI compatibility")
     println("  --cache-mode <mode>       Accepted for CLI compatibility")
@@ -53,141 +28,44 @@ fn lean_print_help() with IO {
     println("  --gpu-target <name>       Accepted for CLI compatibility")
     println("  --gpu-binary-format <fmt> Accepted for CLI compatibility")
     println("  --gpu-strict-parity       Accepted for CLI compatibility")
-    println("  -v, --verbose             Print dispatch details")
+    println("  -v, --verbose             Accepted for CLI compatibility")
     println("  -h, --help                Print this help message")
 }
 
-fn lean_empty_options() -> LeanOptions {
-    LeanOptions {
-        input_file: "",
-        output_file: "a.out",
-        target: "native",
-        matrix: "auto",
-        explicit_target: false,
-        optimize: false,
-        verbose: false,
-        help: false,
-        self_test: false,
-        check_only: false,
-        ir_summary: false,
-        probe_load_ir: false,
-        probe_load_ir_trace: false,
-        algebra_law_self_test: false,
-        cache_dir: "",
-        cache_mode: "off",
-        cache_stats: false,
-        gpu_target: "",
-        gpu_binary_format: "",
-        gpu_strict_parity: false,
+fn lean_arg_after_flag(default_path: string) -> string with IO {
+    let argc = arg_count()
+    if argc >= 2 {
+        return get_arg(1)
     }
+    default_path
 }
 
-fn lean_parse_options() -> LeanOptions with IO, Mut, Panic, Div {
-    var opts = lean_empty_options()
+fn lean_flag_takes_value(arg: string) -> bool with Mut, Panic, Div {
+    if arg == "-o" || arg == "--output" { return true }
+    if arg == "-t" || arg == "--target" { return true }
+    if arg == "--matrix" { return true }
+    if arg == "--cache-dir" { return true }
+    if arg == "--cache-mode" { return true }
+    if arg == "--gpu-target" { return true }
+    if arg == "--gpu-binary-format" { return true }
+    false
+}
+
+fn lean_first_source_arg(default_path: string) -> string with IO, Mut, Panic, Div {
     let argc = arg_count()
     var i: i64 = 0
     while i < argc {
         let arg = get_arg(i)
-        if arg == "-o" || arg == "--output" {
-            i = i + 1
-            if i < argc {
-                opts.output_file = get_arg(i)
-            }
-        } else if arg == "-t" || arg == "--target" {
-            i = i + 1
-            if i < argc {
-                opts.target = get_arg(i)
-                opts.explicit_target = true
-            }
-        } else if arg == "--matrix" {
-            i = i + 1
-            if i < argc {
-                opts.matrix = get_arg(i)
-            }
-        } else if arg == "-O" || arg == "--optimize" {
-            opts.optimize = true
-        } else if arg == "-v" || arg == "--verbose" {
-            opts.verbose = true
-        } else if arg == "--self-test" {
-            opts.self_test = true
-        } else if arg == "--check" {
-            opts.check_only = true
-            i = i + 1
-            if i < argc {
-                opts.input_file = get_arg(i)
-            }
-        } else if arg == "--ir-summary" {
-            opts.ir_summary = true
-            i = i + 1
-            if i < argc {
-                opts.input_file = get_arg(i)
-            }
-        } else if arg == "--probe-load-ir" {
-            opts.probe_load_ir = true
-            i = i + 1
-            if i < argc {
-                opts.input_file = get_arg(i)
-            }
-        } else if arg == "--probe-load-ir-trace" {
-            opts.probe_load_ir_trace = true
-            i = i + 1
-            if i < argc {
-                opts.input_file = get_arg(i)
-            }
-        } else if arg == "--native-compile" {
-            opts.target = "native"
-            i = i + 1
-            if i < argc {
-                opts.input_file = get_arg(i)
-            }
-        } else if arg == "--algebra-law-self-test" {
-            opts.algebra_law_self_test = true
-        } else if arg == "--cache-dir" {
-            i = i + 1
-            if i < argc {
-                opts.cache_dir = get_arg(i)
-            }
-        } else if arg == "--cache-mode" {
-            i = i + 1
-            if i < argc {
-                opts.cache_mode = get_arg(i)
-            }
-        } else if arg == "--cache-stats" {
-            opts.cache_stats = true
-        } else if arg == "--gpu-target" {
-            i = i + 1
-            if i < argc {
-                opts.gpu_target = get_arg(i)
-            }
-        } else if arg == "--gpu-binary-format" {
-            i = i + 1
-            if i < argc {
-                opts.gpu_binary_format = get_arg(i)
-            }
-        } else if arg == "--gpu-strict-parity" {
-            opts.gpu_strict_parity = true
-        } else if arg == "-h" || arg == "--help" {
-            opts.help = true
-            lean_print_help()
-        } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
-            opts.input_file = arg
+        if lean_flag_takes_value(arg) {
+            i = i + 2
+            continue
+        }
+        if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
+            return arg
         }
         i = i + 1
     }
-    opts
-}
-
-fn lean_print_options(opts: LeanOptions) with IO {
-    println("souc-lean: modular compiler entrypoint")
-    println("  input:  " + opts.input_file)
-    println("  output: " + opts.output_file)
-    println("  target: " + opts.target)
-    println("  matrix: " + opts.matrix)
-    if opts.optimize {
-        println("  optimize: true")
-    } else {
-        println("  optimize: false")
-    }
+    default_path
 }
 
 fn lean_run_check(source_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
@@ -237,14 +115,19 @@ fn lean_run_probe_load_ir(source_path: string, trace: bool) -> i64 with IO, Mut,
     0
 }
 
+fn lean_run_compile_classified(source_path: string) -> i64 with IO {
+    println("souc-lean compile: unsupported_in_frontend_safe_driver")
+    println("souc-lean compile: native_driver_isolated")
+    println("souc-lean compile: use module_native_driver lane for backend work")
+    if source_path != "" {
+        println("souc-lean compile: input=" + source_path)
+    }
+    1
+}
+
 fn lean_run_algebra_law_self_test() -> i64 with IO, Mut, Div, Panic {
-    let quaternion = ir_algebra_info_for_tag(2)
-    let octonion = ir_algebra_info_for_tag(3)
-    let sedenion = ir_algebra_info_for_tag(4)
-    let quat_ok = quaternion.mul_associative && quaternion.mul_alternative && quaternion.reassoc_strategy == 0
-    let oct_ok = !octonion.mul_associative && octonion.mul_alternative && octonion.reassoc_strategy == 2
-    let sed_ok = !sedenion.mul_associative && !sedenion.mul_alternative && sedenion.reassoc_strategy == 1
-    if quat_ok && oct_ok && sed_ok {
+    let rc = module_frontend_algebra_law_self_test()
+    if rc == 0 {
         println("souc-lean algebra-law-self-test: T1201 OK")
         return 0
     }
@@ -252,67 +135,77 @@ fn lean_run_algebra_law_self_test() -> i64 with IO, Mut, Div, Panic {
     1
 }
 
-fn lean_run_compile(opts: LeanOptions) -> i64 with IO, Mut, Panic, Div, Alloc {
-    if opts.target == "llvm" {
-        return compile_multimodule_llvm(opts.input_file, opts.output_file, opts.optimize) as i64
-    }
-    compile_multimodule_native_advanced(
-        opts.input_file,
-        opts.output_file,
-        opts.target,
-        opts.matrix,
-        opts.explicit_target,
-        opts.gpu_target,
-        opts.gpu_binary_format,
-        opts.gpu_strict_parity,
-        opts.optimize,
-        false,
-        "",
-        opts.cache_dir,
-        opts.cache_mode,
-        opts.cache_stats
-    ) as i64
-}
-
-fn lean_run_self_test() -> i64 with IO {
-    let rc = compile_multimodule_llvm("examples/hello.sio", "/tmp/sounio-lean-self-test.ll", false)
-    if rc == 1 {
+fn lean_run_self_test() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let result = preflight_multimodule_frontend("examples/hello.sio")
+    if result.ok {
         println("souc-lean self-test: ok")
         return 0
     }
-    println("souc-lean self-test: unexpected llvm backend status")
+    println("souc-lean self-test: failed: " + result.error_msg)
     1
 }
 
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
-    let opts = lean_parse_options()
-    if opts.help {
-        return 0
-    }
-    if opts.self_test {
-        return lean_run_self_test()
-    }
-    if opts.algebra_law_self_test {
-        return lean_run_algebra_law_self_test()
-    }
-    if opts.input_file == "" {
+    let argc = arg_count()
+    if argc <= 0 {
         lean_print_help()
         return 1
     }
-    if opts.verbose {
-        lean_print_options(opts)
+    let mode = get_arg(0)
+    if mode == "-h" || mode == "--help" {
+        lean_print_help()
+        return 0
     }
-    if opts.check_only {
-        return lean_run_check(opts.input_file)
+    if mode == "--self-test" {
+        return lean_run_self_test()
     }
-    if opts.ir_summary {
-        return lean_run_ir_summary(opts.input_file)
+    if mode == "--algebra-law-self-test" {
+        return lean_run_algebra_law_self_test()
     }
-    if opts.probe_load_ir {
-        return lean_run_probe_load_ir(opts.input_file, false)
+    if mode == "--check" {
+        let source_path = lean_arg_after_flag("")
+        if source_path == "" {
+            lean_print_help()
+            return 1
+        }
+        return lean_run_check(source_path)
     }
-    if opts.probe_load_ir_trace {
-        return lean_run_probe_load_ir(opts.input_file, true)
+    if mode == "--ir-summary" {
+        let source_path = lean_arg_after_flag("")
+        if source_path == "" {
+            lean_print_help()
+            return 1
+        }
+        return lean_run_ir_summary(source_path)
     }
-    lean_run_compile(opts)
+    if mode == "--probe-load-ir" {
+        let source_path = lean_arg_after_flag("")
+        if source_path == "" {
+            lean_print_help()
+            return 1
+        }
+        return lean_run_probe_load_ir(source_path, false)
+    }
+    if mode == "--probe-load-ir-trace" {
+        let source_path = lean_arg_after_flag("")
+        if source_path == "" {
+            lean_print_help()
+            return 1
+        }
+        return lean_run_probe_load_ir(source_path, true)
+    }
+    if mode == "--native-compile" {
+        let source_path = lean_arg_after_flag("")
+        if source_path == "" {
+            lean_print_help()
+            return 1
+        }
+        return lean_run_compile_classified(source_path)
+    }
+    let source_path = lean_first_source_arg("")
+    if source_path == "" {
+        lean_print_help()
+        return 1
+    }
+    lean_run_compile_classified(source_path)
 }

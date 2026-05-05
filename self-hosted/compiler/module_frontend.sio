@@ -2715,6 +2715,19 @@ fn multimodule_frontend_error(msg: string) -> MultiModuleFrontendResult {
     MultiModuleFrontendResult { ok: false, error_msg: msg }
 }
 
+pub fn module_frontend_algebra_law_self_test() -> i64 with Mut, Div, Panic {
+    let quaternion = ir_algebra_info_for_tag(2)
+    let octonion = ir_algebra_info_for_tag(3)
+    let sedenion = ir_algebra_info_for_tag(4)
+    let quat_ok = quaternion.mul_associative && quaternion.mul_alternative && quaternion.reassoc_strategy == 0
+    let oct_ok = !octonion.mul_associative && octonion.mul_alternative && octonion.reassoc_strategy == 2
+    let sed_ok = !sedenion.mul_associative && !sedenion.mul_alternative && sedenion.reassoc_strategy == 1
+    if quat_ok && oct_ok && sed_ok {
+        return 0
+    }
+    1
+}
+
 pub fn module_frontend_file_maybe_has_use(path: string) -> bool with IO, Mut, Panic, Div {
     let size = file_size(path)
     if size <= 3 {
@@ -2794,7 +2807,7 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
         return multimodule_frontend_ok()
     }
 
-    let main_imports_fast = extract_imports_from_ast(main_prog)
+    let main_imports_fast = module_frontend_import_files_from_source(main_path)
     if main_imports_fast.count <= 0 {
         print("Loaded 1 modules\n")
         print("Resolve skip: single module with no imports\n")
@@ -2808,91 +2821,15 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
         return multimodule_frontend_ok()
     }
 
-    var programs: [Program; 64] = [empty_program(); 64]
-    var file_paths: [string; 64] = [""; 64]
-    programs[0] = main_prog
-    file_paths[0] = main_path
-    var loaded: i64 = 1
-
-    var visited_paths: [string; 64] = [""; 64]
-    var visited_count: i64 = 0
-    visited_paths[0] = main_path
-    visited_count = 1
-
-    var work_front: i64 = 0
-    var i: i64 = 0
-
-    while work_front < loaded && loaded < 64 {
-        let cur_dir = path_directory(file_paths[work_front])
-        let work_imports = extract_imports_from_ast(programs[work_front])
-        work_front = work_front + 1
-
-        i = 0
-        while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
-            if !visited_contains(visited_paths, visited_count, file_path) {
-                visited_paths[visited_count] = file_path
-                visited_count = visited_count + 1
-                if file_exists(file_path) {
-                    print("Loading module: ")
-                    print(file_path)
-                    print("\n")
-                    programs[loaded] = load_module_file(file_path)
-                    file_paths[loaded] = file_path
-                    loaded = loaded + 1
-                } else {
-                    print("Warning: module not found: ")
-                    let path_str = use_path_to_string(work_imports.paths[i])
-                    print(path_str)
-                    print("\n")
-                }
-            }
-            i = i + 1
-        }
+    let imported_summary = load_multimodule_ir_counts(main_path)
+    if imported_summary.ok {
+        print("Imported frontend summary: ok\n")
+        return multimodule_frontend_ok()
     }
-
-    print("Loaded ")
-    print_int(loaded)
-    print(" modules\n")
-
-    let main_imports = extract_imports_from_ast(programs[0])
-    let needs_resolution = loaded > 1 || main_imports.count > 0
-    if needs_resolution {
-        let resolve_result = resolve_modules(programs, loaded)
-        if resolve_result.had_error {
-            print("Module resolution failed: ")
-            print_int(resolve_result.error_count)
-            print(" errors\n")
-            return multimodule_frontend_error("module_resolution_failed")
-        }
-    } else {
-        print("Resolve skip: single module with no imports\n")
-    }
-
-    i = 0
-    while i < loaded {
-        print("Type checking module ")
-        print_int(i)
-        print("\n")
-        let verdict = check_items_verdict_boot4(programs[i].items)
-        if verdict != 0 {
-            print("Type check failed for module ")
-            print_int(i)
-            print("\n")
-            return multimodule_frontend_error("type_check_failed")
-        }
-        print("Type check complete for module ")
-        print_int(i)
-        print("\n")
-        i = i + 1
-    }
-
-    multimodule_frontend_ok()
+    print("Imported frontend summary: failed: ")
+    print(imported_summary.error_msg)
+    print("\n")
+    multimodule_frontend_error(imported_summary.error_msg)
 }
 
 pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
