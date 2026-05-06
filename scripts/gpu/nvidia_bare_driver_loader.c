@@ -9,6 +9,7 @@
 //   store_u32_const  launch + device writeback verification for 42
 //   vec_add_f32  launch + device vector add verification against CPU oracle
 //   vec_sub_f32  launch + device vector subtract verification against CPU oracle
+//   vec_mul_f32  launch + device vector multiply verification against CPU oracle
 //   fma_f32  launch + device affine fused multiply-add verification
 //   epistemic_elementwise_f32  vec add kernel with nonzero epsilon lane
 //   epistemic_dual_lane_f32  two-launch value lane + uncertainty lane oracle
@@ -144,7 +145,7 @@ static unsigned char *read_all(const char *path, size_t *len_out) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <cubin> <kernel> [admission|launch|store_u32_const|vec_add_f32|vec_sub_f32|fma_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32|epistemic_dual_output_f32|epistemic_dual_output_f32_l4cc_alias|epistemic_dual_output_f32_sm89_l4|epistemic_dual_output_f32_sm89_l4_layout|epistemic_dual_output_f32_sm89_l4_flags]\n", argv[0]);
+        fprintf(stderr, "usage: %s <cubin> <kernel> [admission|launch|store_u32_const|vec_add_f32|vec_sub_f32|vec_mul_f32|fma_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32|epistemic_dual_output_f32|epistemic_dual_output_f32_l4cc_alias|epistemic_dual_output_f32_sm89_l4|epistemic_dual_output_f32_sm89_l4_layout|epistemic_dual_output_f32_sm89_l4_flags]\n", argv[0]);
         return 2;
     }
     const char *mode = argc >= 4 ? argv[3] : "admission";
@@ -153,11 +154,12 @@ int main(int argc, char **argv) {
         strcmp(mode, "store_u32_const") != 0 &&
         strcmp(mode, "vec_add_f32") != 0 &&
         strcmp(mode, "vec_sub_f32") != 0 &&
+        strcmp(mode, "vec_mul_f32") != 0 &&
         strcmp(mode, "fma_f32") != 0 &&
         strcmp(mode, "epistemic_elementwise_f32") != 0 &&
         strcmp(mode, "epistemic_dual_lane_f32") != 0 &&
         !is_dual_output_mode(mode)) {
-        fprintf(stderr, "usage: mode must be admission, launch, store_u32_const, vec_add_f32, vec_sub_f32, fma_f32, epistemic_elementwise_f32, epistemic_dual_lane_f32, or a supported epistemic_dual_output_f32 diagnostic rung\n");
+        fprintf(stderr, "usage: mode must be admission, launch, store_u32_const, vec_add_f32, vec_sub_f32, vec_mul_f32, fma_f32, epistemic_elementwise_f32, epistemic_dual_lane_f32, or a supported epistemic_dual_output_f32 diagnostic rung\n");
         return 2;
     }
 
@@ -211,6 +213,7 @@ int main(int argc, char **argv) {
     if (strcmp(mode, "store_u32_const") == 0 ||
         strcmp(mode, "vec_add_f32") == 0 ||
         strcmp(mode, "vec_sub_f32") == 0 ||
+        strcmp(mode, "vec_mul_f32") == 0 ||
         strcmp(mode, "fma_f32") == 0 ||
         strcmp(mode, "epistemic_elementwise_f32") == 0 ||
         strcmp(mode, "epistemic_dual_lane_f32") == 0 ||
@@ -631,13 +634,15 @@ dual_cleanup:
 
     if (strcmp(mode, "vec_add_f32") == 0 ||
         strcmp(mode, "vec_sub_f32") == 0 ||
+        strcmp(mode, "vec_mul_f32") == 0 ||
         strcmp(mode, "fma_f32") == 0 ||
         strcmp(mode, "epistemic_elementwise_f32") == 0) {
         const char *vec_label = mode;
         int subtract = strcmp(mode, "vec_sub_f32") == 0;
+        int multiply = strcmp(mode, "vec_mul_f32") == 0;
         int fma = strcmp(mode, "fma_f32") == 0;
         int epistemic = strcmp(mode, "epistemic_elementwise_f32") == 0;
-        uint32_t n_arg = (uint32_t)read_env_int("SOUNIO_NVIDIA_BARE_VEC_N", (epistemic || fma) ? 64 : 16, 1, 256);
+        uint32_t n_arg = (uint32_t)read_env_int("SOUNIO_NVIDIA_BARE_VEC_N", (epistemic || fma || multiply) ? 64 : 16, 1, 256);
         size_t bytes = (size_t)n_arg * sizeof(float);
         float *h_x = (float *)calloc(n_arg, sizeof(float));
         float *h_y = (float *)calloc(n_arg, sizeof(float));
@@ -662,9 +667,9 @@ dual_cleanup:
         }
 
         for (uint32_t i = 0; i < n_arg; i++) {
-            h_x[i] = (float)((int)(i % 17) - 8) * 0.5f;
+            h_x[i] = multiply ? 0.0f : (float)((int)(i % 17) - 8) * 0.5f;
             h_y[i] = (float)((int)(i % 11) - 5) * 1.25f;
-            h_eps[i] = subtract ? -2.0f : ((epistemic || fma) ? ((float)((int)(i % 7) - 3) * 0.03125f) : 0.0f);
+            h_eps[i] = subtract ? -2.0f : ((multiply || epistemic || fma) ? ((float)((int)(i % 7) - 3) * 0.03125f) - (multiply ? 1.0f : 0.0f) : 0.0f);
             h_expected[i] = h_x[i] + h_y[i] * (1.0f + h_eps[i]);
         }
 
@@ -716,18 +721,18 @@ dual_cleanup:
             printf(" %s_n=%u %s_max_abs_err=%.9g %s_eps_nonzero=%d observed0=%.9g expected0=%.9g observed_last=%.9g expected_last=%.9g\n",
                    vec_label, n_arg,
                    vec_label, max_abs_err,
-                   vec_label, (epistemic || subtract || fma),
+                   vec_label, (epistemic || subtract || multiply || fma),
                    h_out[0], h_expected[0], h_out[n_arg - 1], h_expected[n_arg - 1]);
             vec_failed = 1;
             goto vec_cleanup;
         }
         printf("sounio_nvidia_bare_runtime status=pass reason=%s stage=cuMemcpyDtoH cuda_result=0",
-               fma ? "runtime_fma_f32_pass" : (subtract ? "runtime_vec_sub_f32_pass" : (epistemic ? "runtime_epistemic_elementwise_f32_pass" : "runtime_vec_add_f32_pass")));
+               multiply ? "runtime_vec_mul_f32_pass" : (fma ? "runtime_fma_f32_pass" : (subtract ? "runtime_vec_sub_f32_pass" : (epistemic ? "runtime_epistemic_elementwise_f32_pass" : "runtime_vec_add_f32_pass"))));
         print_cuda_probe_suffix();
         printf(" %s_n=%u %s_max_abs_err=%.9g %s_eps_nonzero=%d observed0=%.9g expected0=%.9g observed_last=%.9g expected_last=%.9g\n",
                vec_label, n_arg,
                vec_label, max_abs_err,
-               vec_label, (epistemic || subtract || fma),
+               vec_label, (epistemic || subtract || multiply || fma),
                h_out[0], h_expected[0], h_out[n_arg - 1], h_expected[n_arg - 1]);
 
 vec_cleanup:

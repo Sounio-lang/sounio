@@ -102,17 +102,17 @@ Supported profiles are intentionally explicit:
 
 - `vec_add_f32`
 - `vec_sub_f32`
+- `vec_mul_f32`
 - `fma_f32`
 - `epistemic_elementwise_f32`
 - `epistemic_dual_output_f32`
 - `store_u32_const`
 
-These six profiles are runtime-backed: each maps to an owned CUBIN runtime
+These seven profiles are runtime-backed: each maps to an owned CUBIN runtime
 rung and may pass `--require-runtime` on a CUDA Driver API host.
 
 Kretikos also accepts a wider structural-only source set:
 
-- `vec_mul_f32`
 - `vec_div_f32`
 - `vec_add_f64`
 
@@ -157,6 +157,11 @@ epsilon lane. The runtime oracle interprets the inputs as `c + a * b` by
 setting `c = x`, `a = y`, and `b = 1 + epsilon`. This is a runtime-backed
 affine FMA rung, not a claim of general FMA lowering for arbitrary source
 expressions.
+
+`vec_mul_f32` uses that same owned affine elementwise kernel ABI with `x = 0`,
+`y = a`, and `epsilon = b - 1`, so the GPU computes `a * b`. This is a
+runtime-backed multiplication rung, not a claim of arbitrary source
+multiplication lowering.
 
 `examples/kretikos/structural_manifest.tsv` covers the remaining
 structural-only PTX
