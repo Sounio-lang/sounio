@@ -7,10 +7,10 @@
 # and an in-tree Sounio-owned CUBIN emitter surface under self-hosted/gpu/.
 #
 # Usage:
-#   kretikos check <source.sio>          — compile-check a GPU kernel source file
-#   kretikos run <source.sio>            — native CPU fallback, serial thread IDs
-#   kretikos build <source.sio> -o <out> — PTX via checked GPU artifact if present
-#   kretikos emit-cubin                  — list Sounio-owned CUBIN preview surface
+#   kretikos check <source.sio>                 - compile-check a GPU kernel source file
+#   kretikos run <source.sio>                   - native CPU fallback, serial thread IDs
+#   kretikos build <source.sio> [opts] -o <out> - PTX via checked GPU artifact if present
+#   kretikos emit-cubin <kind> -o <file.cubin>  - emit a real CUBIN from in-tree emitter
 #
 # GPU builtins recognized in kernel fn bodies:
 #   gpu_thread_id_x()  gpu_thread_id_y()  gpu_thread_id_z()
@@ -78,16 +78,75 @@ case "$CMD" in
         fi
         ;;
     emit-cubin)
-        echo "kretikos: Sounio-owned CUBIN emitter preview"
-        echo "Current kernel surfaces in self-hosted/gpu/nvidia_bare.sio:"
-        echo "  exit_only              — minimal kernel that returns immediately"
-        echo "  store_u32_const        — stores a constant u32 to output"
-        echo "  vec_add_f32            — f32 vector addition (SM80)"
-        echo "  epistemic_dual_f32     — epistemic dual-lane f32 output"
-        echo ""
-        echo "Direct CLI emission is not wired yet."
-        echo "For now, compile self-hosted/gpu/nvidia_bare.sio with a main()"
-        echo "that calls gpu_bare_emit_sm80_<kind>_cubin() and writes bytes."
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_cubin.sio"
+        DRIVER_ELF="/tmp/kretikos-emit-cubin.elf"
+
+        # Parse args: emit-cubin <kind> -o <file>
+        KIND=""
+        OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$KIND" ]]; then
+                        KIND="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$KIND" ]]; then
+            echo "usage: kretikos emit-cubin <kind> -o <file.cubin>" >&2
+            echo "" >&2
+            echo "Supported kinds:" >&2
+            echo "  exit_only          - minimal kernel that returns immediately" >&2
+            echo "  store_u32_const    - stores a constant u32 to output" >&2
+            echo "  vec_add_f32        - f32 vector addition (SM80)" >&2
+            echo "  epistemic_dual_f32 - epistemic dual-lane f32 output (SM80)" >&2
+            exit 1
+        fi
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        # Compile driver if missing or stale
+        if [[ ! -x "$DRIVER_ELF" || "$DRIVER_SRC" -nt "$DRIVER_ELF" ]]; then
+            rm -f "$DRIVER_ELF"
+            "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+                echo "error: failed to compile CUBIN emitter driver" >&2
+                exit 1
+            }
+            chmod +x "$DRIVER_ELF"
+        fi
+
+        # Run driver -> decimal bytes on stdout -> python -> binary file
+        "$DRIVER_ELF" "$KIND" | python3 -c "import sys; sys.stdout.buffer.write(bytes(int(line.strip()) for line in sys.stdin if line.strip()))" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: CUBIN emitted - $OUT ($bytes bytes)"
+
+        # Quick structural validation
+        if command -v file >/dev/null 2>&1; then
+            magic=$(file -b "$OUT" 2>/dev/null || true)
+            if [[ "$magic" == *"NVIDIA CUDA"* ]]; then
+                echo "kretikos: structural validation OK - $magic"
+            else
+                echo "kretikos: warning - file magic does not match NVIDIA CUDA: $magic" >&2
+            fi
+        fi
         ;;
     info)
         echo "Kretikos GPU Compiler"
@@ -105,7 +164,7 @@ case "$CMD" in
         echo "  gpu_sync_threads()       — recognized; CPU fallback is a no-op"
         echo ""
         echo "PTX backend:     self-hosted/gpu/ptx_advanced.sio"
-        echo "CUBIN backend:   self-hosted/gpu/nvidia_bare.sio"
+        echo "CUBIN emitter:   self-hosted/gpu/nvidia_bare.sio  (live via 'emit-cubin')"
         echo "SPIR-V backend:  self-hosted/gpu/spirv_lower.sio"
         ;;
     *)
