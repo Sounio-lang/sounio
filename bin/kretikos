@@ -1,0 +1,121 @@
+#!/bin/bash
+# Kretikos GPU Compiler — Bare-metal GPU compilation wrapper
+#
+# Kretikos (Κρητικός) = Cretan. Like Ariadne's thread through the Labyrinth,
+# this compiler gives you a direct, visible line to every warp, every block,
+# every thread. No hidden runtime. No opaque abstractions.
+#
+# Usage:
+#   kretikos check <source.sio>          — typecheck a GPU kernel source file
+#   kretikos run <source.sio>            — compile and run on CPU fallback
+#   kretikos build <source.sio> -o <out> — compile to PTX (requires GPU artifact)
+#   kretikos emit-cubin <kind>           — emit a bare-metal CUBIN binary
+#
+# Bare-metal builtins available in kernel fn bodies:
+#   gpu_thread_id_x()  gpu_thread_id_y()  gpu_thread_id_z()
+#   gpu_block_id_x()   gpu_block_id_y()   gpu_block_id_z()
+#   gpu_block_dim_x()  gpu_block_dim_y()  gpu_block_dim_z()
+#   gpu_sync_threads()
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Resolve the compiler binary
+SOUC_BIN="${SOUNIO_KRETIKOS_COMPILER:-$SCRIPT_DIR/souc-linux-x86_64}"
+if [[ ! -x "$SOUC_BIN" ]]; then
+    SOUC_BIN="$SCRIPT_DIR/souc"
+fi
+if [[ ! -x "$SOUC_BIN" ]]; then
+    echo "error: Kretikos compiler not found. Set SOUNIO_KRETIKOS_COMPILER." >&2
+    exit 1
+fi
+
+export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+
+CMD="${1:-}"
+shift 2>/dev/null || true
+
+case "$CMD" in
+    check)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos check <source.sio>" >&2
+            exit 1
+        fi
+        "$SOUC_BIN" "$1" /tmp/kretikos-check.elf >/dev/null 2>&1
+        echo "kretikos: check OK — bare-metal surface accepted"
+        ;;
+    run)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos run <source.sio>" >&2
+            exit 1
+        fi
+        OUT="/tmp/kretikos-run.elf"
+        rm -f "$OUT"
+        "$SOUC_BIN" "$1" "$OUT"
+        chmod +x "$OUT"
+        "$OUT"
+        ;;
+    build)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos build <source.sio> -o <output.ptx>" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        # Delegate to checked GPU artifact if available
+        GPU_ARTIFACT="$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+        if [[ -x "$GPU_ARTIFACT" ]]; then
+            "$GPU_ARTIFACT" build "$SRC" --backend gpu "$@"
+        else
+            echo "error: GPU artifact not found at $GPU_ARTIFACT" >&2
+            echo "hint: CPU fallback compilation available via 'kretikos run'" >&2
+            exit 1
+        fi
+        ;;
+    emit-cubin)
+        echo "kretikos: bare-metal CUBIN emitter"
+        echo "Available kernel kinds:"
+        echo "  exit_only              — minimal kernel that returns immediately"
+        echo "  store_u32_const        — stores a constant u32 to output"
+        echo "  vec_add_f32            — f32 vector addition (SM80)"
+        echo "  epistemic_dual_f32     — epistemic dual-lane f32 output"
+        echo ""
+        echo "To emit: compile self-hosted/gpu/nvidia_bare.sio with a main()"
+        echo "that calls gpu_bare_emit_sm80_<kind>_cubin() and writes bytes."
+        ;;
+    info)
+        echo "Kretikos GPU Compiler"
+        echo "====================="
+        echo "Compiler: $SOUC_BIN"
+        echo "Stdlib:   $SOUNIO_STDLIB_PATH"
+        echo ""
+        echo "Bare-metal builtins:"
+        echo "  gpu_thread_id_{x,y,z}()  — thread index within block"
+        echo "  gpu_block_id_{x,y,z}()   — block index within grid"
+        echo "  gpu_block_dim_{x,y,z}()  — threads per block"
+        echo "  gpu_sync_threads()       — intra-block barrier"
+        echo ""
+        echo "PTX backend:     self-hosted/gpu/ptx_advanced.sio"
+        echo "CUBIN backend:   self-hosted/gpu/nvidia_bare.sio"
+        echo "SPIR-V backend:  self-hosted/gpu/spirv_lower.sio"
+        ;;
+    *)
+        echo "Kretikos GPU Compiler — Bare-metal GPU compilation"
+        echo ""
+        echo "Usage: kretikos <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  check <source.sio>       Typecheck a GPU kernel source file"
+        echo "  run <source.sio>         Compile and execute on CPU fallback"
+        echo "  build <source.sio> -o <out>  Emit PTX (requires GPU artifact)"
+        echo "  emit-cubin               List available bare-metal CUBIN kernels"
+        echo "  info                     Show compiler configuration"
+        echo ""
+        echo "Environment:"
+        echo "  SOUNIO_KRETIKOS_COMPILER — path to souc binary"
+        echo "  SOUNIO_STDLIB_PATH       — path to stdlib directory"
+        exit 1
+        ;;
+esac
