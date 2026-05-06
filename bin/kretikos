@@ -3,14 +3,19 @@
 #
 # Kretikos (Κρητικός) = Cretan. Like Ariadne's thread through the Labyrinth,
 # this compiler is the named path for Sounio's GPU work: source-level thread
-# builtins today, PTX artifact emission when the GPU profile compiler is present,
-# and an in-tree Sounio-owned CUBIN emitter surface under self-hosted/gpu/.
+# builtins today, deterministic CPU fallback, in-tree PTX/CUBIN artifact
+# templates, and bundles that keep runtime claims explicit.
 #
 # Usage:
 #   kretikos check <source.sio>                 - compile-check a GPU kernel source file
 #   kretikos run <source.sio>                   - native CPU fallback, serial thread IDs
-#   kretikos build <source.sio> [opts] -o <out> - PTX via checked GPU artifact if present
-#   kretikos emit-cubin <kind> -o <file.cubin>  - emit a real CUBIN from in-tree emitter
+#   kretikos build <source.sio> [opts] -o <out>  - PTX via checked GPU artifact if present
+#   kretikos emit-ptx <pattern> -o <file.ptx>   - emit PTX template from in-tree emitter
+#   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
+#   kretikos bundle [-o <dir>]                  - emit PTX+CUBIN plus bundle manifest
+#
+# Supported PTX patterns: vec_add
+# Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, epistemic_dual_f32
 #
 # GPU builtins recognized in kernel fn bodies:
 #   gpu_thread_id_x()  gpu_thread_id_y()  gpu_thread_id_z()
@@ -22,6 +27,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+KRETIKOS_SELF="$SCRIPT_DIR/kretikos"
 
 # Resolve the compiler binary
 SOUC_BIN="${SOUNIO_KRETIKOS_COMPILER:-$SCRIPT_DIR/souc-linux-x86_64}"
@@ -34,6 +40,39 @@ if [[ ! -x "$SOUC_BIN" ]]; then
 fi
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+
+__kretikos_file_size() {
+    if [[ ! -f "$1" ]]; then
+        echo "error: file not found: $1" >&2
+        return 1
+    fi
+    stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || {
+        echo "error: could not stat file: $1" >&2
+        return 1
+    }
+}
+
+__kretikos_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "error: sha256sum or shasum is required" >&2
+        return 1
+    fi
+}
+
+__kretikos_repo_path() {
+    local path="$1"
+    if [[ "$path" == "$ROOT_DIR" ]]; then
+        echo "."
+    elif [[ "$path" == "$ROOT_DIR/"* ]]; then
+        echo "${path#$ROOT_DIR/}"
+    else
+        echo "$path"
+    fi
+}
 
 CMD="${1:-}"
 shift 2>/dev/null || true
@@ -62,7 +101,7 @@ case "$CMD" in
     build)
         if [[ $# -lt 1 ]]; then
             echo "usage: kretikos build <source.sio> [options] -o <output.ptx>" >&2
-        echo "note: requires artifacts/omega/souc-bin/souc-linux-x86_64-gpu" >&2
+            echo "note: requires artifacts/omega/souc-bin/souc-linux-x86_64-gpu for full kernel lowering" >&2
             exit 1
         fi
         SRC="$1"
@@ -73,13 +112,102 @@ case "$CMD" in
             "$GPU_ARTIFACT" build "$SRC" --backend gpu "$@"
         else
             echo "error: GPU artifact not found at $GPU_ARTIFACT" >&2
-            echo "hint: 'kretikos run' executes a serial native CPU fallback, not GPU simulation" >&2
+            echo "hint: 'kretikos run' executes a serial native CPU fallback" >&2
+            echo "hint: 'kretikos emit-ptx vec_add -o kernel.ptx' emits PTX for the built-in vec_add pattern" >&2
+            echo "hint: 'kretikos emit-cubin <kind> -o kernel.cubin' emits a CUBIN template from in-tree emitters" >&2
             exit 1
         fi
         ;;
+    emit-ptx)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_ptx.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-ptx.XXXXXX")" || {
+            echo "error: failed to create temporary PTX driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        # Parse args: emit-ptx <pattern> -o <file>
+        PATTERN=""
+        OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" ]]; then
+            echo "usage: kretikos emit-ptx <pattern> -o <file.ptx>" >&2
+            echo "" >&2
+            echo "Supported patterns:" >&2
+            echo "  vec_add - f32 vector addition (SM50 PTX target)" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            vec_add) ;;
+            *)
+                echo "error: unsupported PTX pattern '$PATTERN'" >&2
+                echo "supported PTX patterns: vec_add" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile PTX emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        "$DRIVER_ELF" "$PATTERN" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: PTX template emitted - $OUT ($bytes bytes)"
+
+        # Structural validation. This is intentionally not a ptxas/runtime claim.
+        if grep -Eq "^\\.version [0-9]+\\.[0-9]+" "$OUT" && grep -Eq "^\\.target sm_[0-9]+" "$OUT" && grep -q "\\.visible .entry" "$OUT" && grep -Eq "(ret;|exit;|trap;|bra)" "$OUT"; then
+            echo "kretikos: structural validation OK - PTX directives present"
+        else
+            echo "kretikos: structural validation failed - PTX markers missing" >&2
+            exit 1
+        fi
+        ;;
+
     emit-cubin)
         DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_cubin.sio"
-        DRIVER_ELF="/tmp/kretikos-emit-cubin.elf"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-cubin.XXXXXX")" || {
+            echo "error: failed to create temporary CUBIN driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
 
         # Parse args: emit-cubin <kind> -o <file>
         KIND=""
@@ -117,26 +245,44 @@ case "$CMD" in
             exit 1
         fi
 
+        case "$KIND" in
+            exit_only|store_u32_const|vec_add_f32|epistemic_dual_f32) ;;
+            *)
+                echo "error: unsupported CUBIN kind '$KIND'" >&2
+                echo "supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, epistemic_dual_f32" >&2
+                exit 1
+                ;;
+        esac
+
         if [[ -z "$OUT" ]]; then
             echo "error: -o <output> is required" >&2
             exit 1
         fi
 
-        # Compile driver if missing or stale
-        if [[ ! -x "$DRIVER_ELF" || "$DRIVER_SRC" -nt "$DRIVER_ELF" ]]; then
-            rm -f "$DRIVER_ELF"
-            "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
-                echo "error: failed to compile CUBIN emitter driver" >&2
-                exit 1
-            }
-            chmod +x "$DRIVER_ELF"
-        fi
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile CUBIN emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
 
         # Run driver -> decimal bytes on stdout -> python -> binary file
-        "$DRIVER_ELF" "$KIND" | python3 -c "import sys; sys.stdout.buffer.write(bytes(int(line.strip()) for line in sys.stdin if line.strip()))" > "$OUT"
+        "$DRIVER_ELF" "$KIND" | python3 -c "import sys
+out = bytearray()
+for raw in sys.stdin:
+    line = raw.strip()
+    if not line:
+        continue
+    try:
+        value = int(line)
+    except ValueError:
+        raise SystemExit(f'non-integer byte emitted: {line!r}')
+    if value < 0 or value > 255:
+        raise SystemExit(f'byte out of range: {value}')
+    out.append(value)
+sys.stdout.buffer.write(bytes(out))" > "$OUT"
 
         bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
-        echo "kretikos: CUBIN emitted - $OUT ($bytes bytes)"
+        echo "kretikos: CUBIN template emitted - $OUT ($bytes bytes)"
 
         # Quick structural validation
         if command -v file >/dev/null 2>&1; then
@@ -147,6 +293,216 @@ case "$CMD" in
                 echo "kretikos: warning - file magic does not match NVIDIA CUDA: $magic" >&2
             fi
         fi
+        python3 - "$OUT" <<'PY' || {
+import struct
+import sys
+
+with open(sys.argv[1], "rb") as fh:
+    data = fh.read(64)
+
+if len(data) < 20 or data[0:4] != b"\x7fELF" or data[4] != 2:
+    raise SystemExit(1)
+
+if struct.unpack_from("<H", data, 18)[0] != 190:
+    raise SystemExit(1)
+PY
+            echo "kretikos: structural validation failed - CUBIN is not ELF64 CUDA (e_machine=190)" >&2
+            exit 1
+        }
+        ;;
+    bundle)
+        OUT_DIR=""
+        PTX_PATTERN="vec_add"
+        CUBIN_KIND="epistemic_dual_f32"
+        FORCE=0
+
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output-dir)
+                    OUT_DIR="$2"
+                    shift 2
+                    ;;
+                --ptx-pattern)
+                    PTX_PATTERN="$2"
+                    shift 2
+                    ;;
+                --cubin-kind)
+                    CUBIN_KIND="$2"
+                    shift 2
+                    ;;
+                -f|--force)
+                    FORCE=1
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ -z "$OUT_DIR" ]]; then
+            OLD_UMASK="$(umask)"
+            umask 077
+            OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-bundle.XXXXXX")" || {
+                echo "error: failed to create temporary bundle directory" >&2
+                exit 1
+            }
+            umask "$OLD_UMASK"
+        else
+            mkdir -p "$OUT_DIR"
+        fi
+        PTX_OUT="$OUT_DIR/kretikos_${PTX_PATTERN}.ptx"
+        CUBIN_OUT="$OUT_DIR/kretikos_${CUBIN_KIND}.cubin"
+        MANIFEST_OUT="$OUT_DIR/kretikos_bundle.v1.json"
+        PTX_REL="$(basename "$PTX_OUT")"
+        CUBIN_REL="$(basename "$CUBIN_OUT")"
+        COMPILER_PATH="$(__kretikos_repo_path "$SOUC_BIN")"
+        STDLIB_PATH="$(__kretikos_repo_path "$SOUNIO_STDLIB_PATH")"
+
+        if [[ "$FORCE" -ne 1 ]] && [[ -e "$PTX_OUT" || -e "$CUBIN_OUT" || -e "$MANIFEST_OUT" ]]; then
+            echo "error: bundle output already exists in $OUT_DIR; use --force to overwrite" >&2
+            exit 1
+        fi
+
+        "$KRETIKOS_SELF" emit-ptx "$PTX_PATTERN" -o "$PTX_OUT"
+        "$KRETIKOS_SELF" emit-cubin "$CUBIN_KIND" -o "$CUBIN_OUT"
+
+        PTX_BYTES="$(__kretikos_file_size "$PTX_OUT")" || exit 1
+        CUBIN_BYTES="$(__kretikos_file_size "$CUBIN_OUT")" || exit 1
+        PTX_SHA="$(__kretikos_sha256 "$PTX_OUT")" || exit 1
+        CUBIN_SHA="$(__kretikos_sha256 "$CUBIN_OUT")" || exit 1
+        PTX_VERSION="$(awk '/^\.version/ { print $2; exit }' "$PTX_OUT")"
+        PTX_TARGET="$(awk '/^\.target/ { print $2; exit }' "$PTX_OUT")"
+        CUBIN_MAGIC="$(file -b "$CUBIN_OUT" 2>/dev/null || echo "unknown")"
+        CUBIN_MACHINE="$(python3 - "$CUBIN_OUT" <<'PY'
+import struct
+import sys
+
+with open(sys.argv[1], "rb") as fh:
+    data = fh.read(64)
+
+if len(data) < 20 or data[0:4] != b"\x7fELF" or data[4] != 2:
+    raise SystemExit(1)
+
+machine = struct.unpack_from("<H", data, 18)[0]
+if machine != 190:
+    raise SystemExit(1)
+
+print(machine)
+PY
+        )" || {
+            echo "kretikos: structural validation failed - CUBIN is not ELF64 CUDA (e_machine=190)" >&2
+            exit 1
+        }
+
+        if command -v ptxas >/dev/null 2>&1; then
+            PTXAS_STATUS="available_but_not_run_by_bundle"
+        else
+            PTXAS_STATUS="not_available"
+        fi
+        if command -v nvdisasm >/dev/null 2>&1; then
+            NVDISASM_STATUS="available_but_not_run_by_bundle"
+        else
+            NVDISASM_STATUS="not_available"
+        fi
+        GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+        python3 - "$MANIFEST_OUT" "$GENERATED_AT" "$COMPILER_PATH" "$STDLIB_PATH" \
+            "$PTX_PATTERN" "$PTX_REL" "$PTX_BYTES" "$PTX_SHA" "$PTX_VERSION" "$PTX_TARGET" \
+            "$CUBIN_KIND" "$CUBIN_REL" "$CUBIN_BYTES" "$CUBIN_SHA" "$CUBIN_MAGIC" \
+            "$CUBIN_MACHINE" "$PTXAS_STATUS" "$NVDISASM_STATUS" <<'PY'
+import json
+import sys
+
+(
+    manifest_out,
+    generated_at,
+    compiler,
+    stdlib,
+    ptx_pattern,
+    ptx_path,
+    ptx_bytes,
+    ptx_sha,
+    ptx_version,
+    ptx_target,
+    cubin_kind,
+    cubin_path,
+    cubin_bytes,
+    cubin_sha,
+    cubin_magic,
+    cubin_machine,
+    ptxas_status,
+    nvdisasm_status,
+) = sys.argv[1:]
+
+payload = {
+    "schema": "sounio.kretikos.bundle.v1",
+    "status": "emitted",
+    "generated_at_utc": generated_at,
+    "bundle_root": ".",
+    "compiler": compiler,
+    "stdlib": stdlib,
+    "contract": {
+        "identity": "Kretikos is the Sounio-owned GPU compiler lane.",
+        "ptx": "PTX text template emitted by self-hosted/gpu/ptx.sio through bin/kretikos.",
+        "cubin": "NVIDIA CUDA ELF/CUBIN byte template emitted by self-hosted/gpu/nvidia_bare.sio through bin/kretikos.",
+        "runtime": "This bundle is structural. Runtime execution requires the CUDA Driver API gate on a GPU host."
+    },
+    "structural_checks": {
+        "class": "structural_bundle",
+        "ptx_markers_checked": True,
+        "cubin_file_magic_observed": cubin_magic,
+        "cubin_elf64_magic_checked": True,
+        "cubin_elf_machine_checked": int(cubin_machine),
+        "ptxas": ptxas_status,
+        "nvdisasm": nvdisasm_status,
+        "runtime_execution": "not_claimed"
+    },
+    "artifacts": [
+        {
+            "kind": "ptx",
+            "pattern": ptx_pattern,
+            "path": ptx_path,
+            "bytes": int(ptx_bytes),
+            "sha256": ptx_sha,
+            "ptx_version": ptx_version,
+            "target": ptx_target,
+            "required_markers": [".version", ".target", ".visible .entry"]
+        },
+        {
+            "kind": "cubin",
+            "kernel": cubin_kind,
+            "path": cubin_path,
+            "bytes": int(cubin_bytes),
+            "sha256": cubin_sha,
+            "file_magic": cubin_magic,
+            "elf_machine": int(cubin_machine),
+            "target": "nvidia-cuda-elf"
+        }
+    ],
+    "boundaries": [
+        "does_not_claim_user_kernel_lowering",
+        "does_not_claim_semantic_kernel_correctness",
+        "does_not_claim_total_gpu_backend_completeness",
+        "does_not_claim_parallel_cpu_fallback",
+        "does_not_claim_ptxas_assembly",
+        "does_not_claim_nvdisasm_validation",
+        "does_not_claim_runtime_execution_without_cuda_driver_gate",
+        "does_not_claim_unchecked_gpu_alloc_surface"
+    ]
+}
+
+with open(manifest_out, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+
+        echo "kretikos: bundle manifest - $MANIFEST_OUT"
         ;;
     info)
         echo "Kretikos GPU Compiler"
@@ -163,8 +519,9 @@ case "$CMD" in
         echo "  gpu_block_dim_y/z()      — recognized; CPU fallback returns 1"
         echo "  gpu_sync_threads()       — recognized; CPU fallback is a no-op"
         echo ""
-        echo "PTX backend:     self-hosted/gpu/ptx_advanced.sio"
-        echo "CUBIN emitter:   self-hosted/gpu/nvidia_bare.sio  (live via 'emit-cubin')"
+        echo "PTX templates:   self-hosted/gpu/ptx.sio  (live via 'emit-ptx vec_add')"
+        echo "CUBIN templates: self-hosted/gpu/nvidia_bare.sio  (live via 'emit-cubin')"
+        echo "Artifact bundle: 'kretikos bundle' (or '-o <dir>' for a stable path)"
         echo "SPIR-V backend:  self-hosted/gpu/spirv_lower.sio"
         ;;
     *)
@@ -173,11 +530,16 @@ case "$CMD" in
         echo "Usage: kretikos <command> [args]"
         echo ""
         echo "Commands:"
-        echo "  check <source.sio>       Compile-check a GPU kernel source file"
-        echo "  run <source.sio>         Native CPU fallback, serial thread IDs"
-        echo "  build <source.sio> -o <out>  Emit PTX via checked GPU artifact if present"
-        echo "  emit-cubin               List Sounio-owned CUBIN preview surface"
-        echo "  info                     Show compiler configuration"
+        echo "  check <source.sio>                Compile-check a GPU kernel source file"
+        echo "  run <source.sio>                  Native CPU fallback, serial thread IDs"
+        echo "  build <source.sio> [opts] -o <out>  Emit PTX via checked GPU artifact if present"
+        echo "  emit-ptx <pattern> -o <file.ptx>  Emit PTX template from in-tree emitter"
+        echo "  emit-cubin <kind> -o <file.cubin> Emit CUBIN template from in-tree emitter"
+        echo "  bundle [-o <dir>]                 Emit PTX+CUBIN plus bundle manifest"
+        echo "  info                              Show compiler configuration"
+        echo ""
+        echo "Supported PTX patterns: vec_add"
+        echo "Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, epistemic_dual_f32"
         echo ""
         echo "Environment:"
         echo "  SOUNIO_KRETIKOS_COMPILER — path to souc binary"

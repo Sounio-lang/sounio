@@ -21,6 +21,7 @@ Artifacts covered:
 - `artifacts/omega/gpu_runtime_attest_gate.v1.json`
 - `artifacts/omega/gpu_public_contract.v1.json`
 - `artifacts/omega/gpu_comprehensive_run.v1.json`
+- Kretikos local artifact bundles emitted by `bin/kretikos bundle`
 
 Primary scripts:
 
@@ -29,6 +30,7 @@ Primary scripts:
 - `scripts/omega/omega_gpu_runtime_attest_gate.sh`
 - `scripts/omega/omega_gpu_public_contract_gate.sh`
 - `scripts/omega/omega_gpu_comprehensive_run.sh`
+- `bin/kretikos`
 
 ## Shared Status Semantics
 
@@ -37,6 +39,36 @@ Primary scripts:
 - All non-pass states include typed `blockers`.
 - `required` mode is fail-closed.
 - `auto` mode reports `not_run` for non-pass paths.
+
+## `sounio.kretikos.bundle.v1`
+
+Purpose: show the local Kretikos CLI can emit both GPU artifact families from
+in-tree Sounio emitters, record hashes, and keep structural evidence separate
+from runtime/assembler validation.
+
+Produced by:
+
+```bash
+bin/kretikos bundle -o /tmp/kretikos-bundle
+```
+
+Required top-level fields:
+
+- `schema = "sounio.kretikos.bundle.v1"`
+- `status = "emitted"`
+- `generated_at_utc`
+- `compiler`
+- `stdlib`
+- `contract` with separate PTX, CUBIN, and runtime-boundary descriptions
+- `structural_checks` with structural-check class, CUBIN ELF machine check
+  (`e_machine = 190`), and unavailable-tool status
+- `artifacts[]` containing one PTX record and one CUBIN record
+- `artifacts[].sha256`
+- `boundaries[]` listing non-claims
+
+This bundle is structural. Runtime execution still belongs to the CUDA Driver
+API gate on a GPU host. PTX assembler or disassembler evidence must be recorded
+separately when `ptxas`/`nvdisasm` are available.
 
 ## Blocker Taxonomy
 
