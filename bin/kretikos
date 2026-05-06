@@ -11,12 +11,16 @@
 #   kretikos run <source.sio>                   - native CPU fallback, serial thread IDs
 #   kretikos build <source.sio> [opts] -o <out>  - PTX via checked GPU artifact if present
 #   kretikos emit-ptx <pattern> -o <file.ptx>   - emit PTX template from in-tree emitter
+#   kretikos emit-metal <pattern> -o <file.metal> - emit MSL template from in-tree emitter
+#   kretikos emit-spirv <pattern> -o <file.spv>  - emit SPIR-V template from in-tree emitter
+#   kretikos emulate                            - run CPU emulation self-check
 #   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
 #   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
 #   kretikos profile-source <source.sio>         - classify a real source file for Kretikos
 #   kretikos run-source <source.sio> -o <dir>    - check and validate a source profile
 #
-# Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma
+# Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64, store_u32_const
+# Supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check
 # Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, vec_sub_f32, vec_mul_f32, fma_f32, epistemic_dual_f32
 #
 # Runtime-backed source profiles:
@@ -692,7 +696,11 @@ PY
             echo "error: GPU artifact not found at $GPU_ARTIFACT" >&2
             echo "hint: 'kretikos run' executes a serial native CPU fallback" >&2
             echo "hint: 'kretikos emit-ptx <pattern> -o kernel.ptx' emits PTX for built-in patterns" >&2
-            echo "hint: supported patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma" >&2
+            echo "hint: supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma" >&2
+            echo "hint: 'kretikos emit-metal <pattern> -o kernel.metal' emits MSL for built-in patterns" >&2
+            echo "hint: supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check" >&2
+            echo "hint: 'kretikos emit-spirv exit_only -o kernel.spv' emits a SPIR-V template" >&2
+            echo "hint: 'kretikos emulate' runs CPU emulation self-check" >&2
             echo "hint: 'kretikos emit-cubin <kind> -o kernel.cubin' emits a CUBIN template from in-tree emitters" >&2
             exit 1
         fi
@@ -738,20 +746,25 @@ PY
             echo "usage: kretikos emit-ptx <pattern> -o <file.ptx>" >&2
             echo "" >&2
             echo "Supported patterns:" >&2
-            echo "  vec_add     - f32 vector addition (SM50 PTX target)" >&2
-            echo "  vec_sub     - f32 vector subtraction" >&2
-            echo "  vec_mul     - f32 vector multiplication" >&2
-            echo "  vec_div     - f32 vector division" >&2
-            echo "  vec_add_f64 - f64 vector addition" >&2
-            echo "  fma         - f32 fused multiply-add (a*b+c)" >&2
+            echo "  vec_add         - f32 vector addition (SM50 PTX target)" >&2
+            echo "  vec_sub         - f32 vector subtraction" >&2
+            echo "  vec_mul         - f32 vector multiplication" >&2
+            echo "  vec_div         - f32 vector division" >&2
+            echo "  vec_add_f64     - f64 vector addition" >&2
+            echo "  vec_sub_f64     - f64 vector subtraction" >&2
+            echo "  vec_mul_f64     - f64 vector multiplication" >&2
+            echo "  vec_div_f64     - f64 vector division" >&2
+            echo "  fma             - f32 fused multiply-add (a*b+c)" >&2
+            echo "  fma_f64         - f64 fused multiply-add (a*b+c)" >&2
+            echo "  store_u32_const - store constant u32 per thread" >&2
             exit 1
         fi
 
         case "$PATTERN" in
-            vec_add|vec_sub|vec_mul|vec_div|vec_add_f64|fma) ;;
+            vec_add|vec_sub|vec_mul|vec_div|vec_add_f64|vec_sub_f64|vec_mul_f64|vec_div_f64|fma|fma_f64|store_u32_const) ;;
             *)
                 echo "error: unsupported PTX pattern '$PATTERN'" >&2
-                echo "supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma" >&2
+                echo "supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64, store_u32_const" >&2
                 exit 1
                 ;;
         esac
@@ -779,6 +792,198 @@ PY
             echo "kretikos: structural validation failed - PTX markers missing" >&2
             exit 1
         fi
+        ;;
+
+    emit-metal)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_metal.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-metal.XXXXXX")" || {
+            echo "error: failed to create temporary Metal driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        # Parse args: emit-metal <pattern> -o <file>
+        PATTERN=""
+        OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" ]]; then
+            echo "usage: kretikos emit-metal <pattern> -o <file.metal>" >&2
+            echo "" >&2
+            echo "Supported patterns:" >&2
+            echo "  vec_add          - f32 vector addition (MSL compute kernel)" >&2
+            echo "  ossm_oct_step    - octonion OSSM step with f64-checked f32 policy" >&2
+            echo "  sedenion_cd_step - sedenion Cayley-Dickson step with f64-checked f32 policy" >&2
+            echo "  self-check       - run internal smoke tests" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            vec_add|ossm_oct_step|sedenion_cd_step|self-check) ;;
+            *)
+                echo "error: unsupported Metal pattern '$PATTERN'" >&2
+                echo "supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile Metal emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        "$DRIVER_ELF" "$PATTERN" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: MSL template emitted - $OUT ($bytes bytes)"
+
+        # Structural validation for MSL compute shaders (skip for self-check)
+        if [[ "$PATTERN" == "self-check" ]]; then
+            if grep -q "PASS metal_self_check\|FAIL metal_self_check" "$OUT"; then
+                echo "kretikos: self-check result captured in $OUT"
+            else
+                echo "kretikos: self-check result missing" >&2
+                exit 1
+            fi
+        else
+            if grep -q "#include <metal_stdlib>" "$OUT" && grep -q "kernel void" "$OUT" && grep -q "using namespace metal" "$OUT"; then
+                echo "kretikos: structural validation OK - MSL compute markers present"
+            else
+                echo "kretikos: structural validation failed - MSL markers missing" >&2
+                exit 1
+            fi
+        fi
+        ;;
+
+    emit-spirv)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_spirv.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-spirv.XXXXXX")" || {
+            echo "error: failed to create temporary SPIR-V driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        # Parse args: emit-spirv <pattern> -o <file>
+        PATTERN=""
+        OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" ]]; then
+            echo "usage: kretikos emit-spirv <pattern> -o <file.spv>" >&2
+            echo "" >&2
+            echo "Supported patterns:" >&2
+            echo "  exit_only - minimal kernel that returns immediately" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            exit_only) ;;
+            *)
+                echo "error: unsupported SPIR-V pattern '$PATTERN'" >&2
+                echo "supported SPIR-V patterns: exit_only" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile SPIR-V emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        "$DRIVER_ELF" "$PATTERN" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: SPIR-V template emitted - $OUT ($bytes bytes)"
+
+        # Structural validation: first word must be SPIR-V magic (119734787 = 0x07230203)
+        first_word="$(head -n1 "$OUT")"
+        if [[ "$first_word" == "119734787" ]]; then
+            echo "kretikos: structural validation OK - SPIR-V magic word present"
+        else
+            echo "kretikos: structural validation failed - SPIR-V magic word missing (got '$first_word')" >&2
+            exit 1
+        fi
+        ;;
+
+    emulate)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emulate.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emulate.XXXXXX")" || {
+            echo "error: failed to create temporary emulation directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile CPU emulation driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        "$DRIVER_ELF"
         ;;
 
     emit-cubin)
@@ -1456,7 +1661,12 @@ PY
         echo "  gpu_sync_threads()       — recognized; CPU fallback is a no-op"
         echo ""
         echo "PTX templates:   self-hosted/gpu/ptx.sio  (live via 'emit-ptx <pattern>')"
-        echo "Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma"
+        echo "Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64, store_u32_const"
+        echo "MSL templates:   self-hosted/gpu/metal.sio  (live via 'emit-metal <pattern>')"
+        echo "Supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check"
+        echo "SPIR-V templates: self-hosted/gpu/spirv.sio  (live via 'emit-spirv <pattern>')"
+        echo "Supported SPIR-V patterns: exit_only"
+        echo "CPU emulation:   self-hosted/gpu/runtime/cpu_interpreter.sio  (live via 'emulate')"
         echo "CUBIN templates: self-hosted/gpu/nvidia_bare.sio  (live via 'emit-cubin')"
         echo "Artifact bundle: 'kretikos bundle' (or '-o <dir>' for a stable path)"
         echo "Optional validation: '--validate-toolchain' and '--validate-runtime'"
@@ -1472,6 +1682,9 @@ PY
         echo "  run <source.sio>                  Native CPU fallback, serial thread IDs"
         echo "  build <source.sio> [opts] -o <out>  Emit PTX via checked GPU artifact if present"
         echo "  emit-ptx <pattern> -o <file.ptx>  Emit PTX template from in-tree emitter"
+        echo "  emit-metal <pattern> -o <file.metal> Emit MSL template from in-tree emitter"
+        echo "  emit-spirv <pattern> -o <file.spv> Emit SPIR-V template from in-tree emitter"
+        echo "  emulate                            Run CPU emulation self-check"
         echo "  emit-cubin <kind> -o <file.cubin> Emit CUBIN template from in-tree emitter"
         echo "  bundle [-o <dir>]                 Emit PTX+CUBIN plus bundle manifest"
         echo "  profile-source <source.sio>       Classify a checked source file for Kretikos"
