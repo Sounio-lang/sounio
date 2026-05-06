@@ -166,6 +166,9 @@ let V2_BUILTIN_SQRT_F64: i64 = 17
 // println is expanded at parse time into the appropriate typed print + a
 // trailing print_char(10). See parse_fn_call_ir and M1.2 step 2 (redo).
 let V2_BUILTIN_PRINTLN: i64 = 18
+// assert is expanded inline: if cond==0, call sys_exit_1 (id 20); else skip.
+let V2_BUILTIN_ASSERT: i64 = 19
+let V2_BUILTIN_SYS_EXIT_1: i64 = 20
 let V2_FIRST_USER_FN_ID: i64 = 32
 
 // V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
@@ -193,6 +196,8 @@ let UFN_F64_BINOP: i64 = 20
 // Reads/writes are lowered via a rip-relative lea into .data + rbx*8 index.
 let UFN_USER_GLOBAL_LOAD: i64 = 21
 let UFN_USER_GLOBAL_STORE: i64 = 22
+// Pointer-based array element load: dst = *(ptr_reg_value + idx * 8)
+let UFN_REF_ARRAY_LOAD: i64 = 23
 
 var V2_UFN_OPS: [i64; 2048] = [0; 2048]
 var V2_UFN_DST: [i64; 2048] = [0; 2048]
@@ -986,6 +991,8 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_BUILTIN_PRINT_F64") { return 16 }
     if token_text_eq(tok, "V2_BUILTIN_SQRT_F64") { return 17 }
     if token_text_eq(tok, "V2_BUILTIN_PRINTLN") { return 18 }
+    if token_text_eq(tok, "V2_BUILTIN_ASSERT") { return 19 }
+    if token_text_eq(tok, "V2_BUILTIN_SYS_EXIT_1") { return 20 }
     if token_text_eq(tok, "V2_FIRST_USER_FN_ID") { return 32 }
 
     if token_text_eq(tok, "UFN_LOAD_IMM") { return 1 }
@@ -1010,6 +1017,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "UFN_F64_BINOP") { return 20 }
     if token_text_eq(tok, "UFN_USER_GLOBAL_LOAD") { return 21 }
     if token_text_eq(tok, "UFN_USER_GLOBAL_STORE") { return 22 }
+    if token_text_eq(tok, "UFN_REF_ARRAY_LOAD") { return 23 }
 
     if token_text_eq(tok, "V2_GLOBAL_PT_KIND_CODE") { return 43 }
     if token_text_eq(tok, "V2_GLOBAL_PT_START") { return 44 }
@@ -1419,6 +1427,7 @@ fn builtin_fn_returns_value(fn_id: i64) -> bool {
     if fn_id == V2_BUILTIN_PRINT_CHAR { return false }
     if fn_id == V2_BUILTIN_PRINT_F64 { return false }
     if fn_id == V2_BUILTIN_PRINTLN { return false }
+    if fn_id == V2_BUILTIN_ASSERT { return false }
     true
 }
 
@@ -1664,6 +1673,17 @@ fn ufn_record_local_store(base_reg: i64, idx_reg: i64, src: i64) with Mut {
     }
 }
 
+fn ufn_record_ref_array_load(dst: i64, ptr_reg: i64, idx_reg: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_REF_ARRAY_LOAD
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = ptr_reg
+        V2_UFN_SRC2[idx as usize] = idx_reg
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
 fn ufn_record_binop(dst: i64, src1: i64, binop_code: i64, src2: i64) with Mut {
     let idx = V2_UFN_COUNT
     if idx < 2048 {
@@ -1809,6 +1829,7 @@ fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
     if name_eq_text(name, "driver_write_elf_to_file") { return V2_BUILTIN_DRIVER_WRITE_ELF }
     if name_eq_text(name, "driver_make_executable") { return V2_BUILTIN_DRIVER_CHMOD }
     if name_eq_text(name, "println") { return V2_BUILTIN_PRINTLN }
+    if name_eq_text(name, "assert") { return V2_BUILTIN_ASSERT }
     -1
 }
 
@@ -1833,6 +1854,7 @@ fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "driver_write_elf_to_file") { return V2_BUILTIN_DRIVER_WRITE_ELF }
     if token_text_eq(tok, "driver_make_executable") { return V2_BUILTIN_DRIVER_CHMOD }
     if token_text_eq(tok, "println") { return V2_BUILTIN_PRINTLN }
+    if token_text_eq(tok, "assert") { return V2_BUILTIN_ASSERT }
     -1
 }
 
@@ -1930,6 +1952,15 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
             return ExprParse { ok: 1, reg: dst, next: pos + 2}
         }
         return ExprParse { ok: 0, reg: -1, next: pos}
+    }
+    // Immutable reference &ident (treated identically to &! for codegen purposes).
+    if k == TK_AMP && token_kind(pos + 1) == TK_IDENT {
+        let base_reg = lookup_local_tok(ctx, pos + 1)
+        if base_reg >= 0 {
+            let dst = alloc_reg(ctx)
+            ufn_record_temp_addr(dst, base_reg)
+            return ExprParse { ok: 1, reg: dst, next: pos + 2}
+        }
     }
     if k == TK_LPAREN {
         if token_kind(pos + 1) == TK_STAR && token_kind(pos + 2) == TK_IDENT && token_kind(pos + 3) == TK_RPAREN && token_kind(pos + 4) == TK_DOT && token_kind(pos + 5) == TK_IDENT {
@@ -2149,6 +2180,18 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
                         return ExprParse { ok: 1, reg: dst, next: pos + 3}
                     }
                 }
+                // ref-array indexed load: ref[idx] → UFN_REF_ARRAY_LOAD
+                if token_kind(pos + 1) == TK_LBRACKET {
+                    let idx_expr = parse_expr_ir(func, ctx, pos + 2)
+                    if idx_expr.ok != 0 {
+                        let end_pos = skip_index_cast_end(idx_expr.next)
+                        if token_kind(end_pos) == TK_RBRACKET {
+                            let dst = alloc_reg(ctx)
+                            ufn_record_ref_array_load(dst, reg, idx_expr.reg)
+                            return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
+                        }
+                    }
+                }
                 return ExprParse { ok: 1, reg: reg, next: pos + 1}
             }
             // local array read: ident[expr] or ident[expr as T]
@@ -2339,6 +2382,24 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         ufn_record_load_imm(nl_reg, 10)
         ufn_record_call(nl_dst, V2_BUILTIN_PRINT_CHAR, nl_reg, 1)
         return ExprParse { ok: 1, reg: nl_dst, next: arg.next + 1}
+    }
+    // assert(cond): inline expansion — branch around a sys_exit(1) call.
+    // Semantics: if cond == 0 → exit(1); else → continue.
+    if fn_id == V2_BUILTIN_ASSERT {
+        if token_kind(pos + 2) == TK_RPAREN { return ExprParse { ok: 0, reg: -1, next: pos} }
+        let cond = parse_expr_ir(func, ctx, pos + 2)
+        if cond.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+        if token_kind(cond.next) != TK_RPAREN { return ExprParse { ok: 0, reg: -1, next: pos} }
+        let zero = alloc_reg(ctx)
+        ufn_record_load_imm(zero, 0)
+        let eq_zero = alloc_reg(ctx)
+        ufn_record_binop(eq_zero, cond.reg, 5, zero)
+        let label_ok = alloc_label()
+        ufn_record_branch_false(eq_zero, label_ok)
+        let fail_dst = alloc_reg(ctx)
+        ufn_record_call(fail_dst, V2_BUILTIN_SYS_EXIT_1, 0, 0)
+        ufn_record_label(label_ok)
+        return ExprParse { ok: 1, reg: fail_dst, next: cond.next + 1}
     }
     var n_args: i64 = 0
     var total_argc: i64 = 0
@@ -2951,20 +3012,37 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                 let arr_size = pt_read_int_value(j + 1)
                 let arr_base = V2_NEXT_REG
                 V2_NEXT_REG = arr_base + arr_size
-                let zero_reg = alloc_reg(ctx)
-                ufn_record_load_imm(zero_reg, 0)
-                var ai: i64 = 0
-                while ai < arr_size { ufn_record_copy(arr_base + ai, zero_reg); ai = ai + 1 }
                 remember_local_arr_tok(ctx, p + 1, arr_base, arr_size)
                 var end = j + 2
                 while end < close && token_kind(end) != TK_RBRACKET { end = end + 1 }
+                // Lookahead: detect `= [val; N]` to avoid redundant zero-fill.
+                // Without this, a 1024-element array would emit 2048 copies
+                // (zero-fill + re-fill), exceeding the UFN buffer limit.
+                var has_semi_init: i64 = 0
+                if end + 1 < close && token_kind(end + 1) == TK_EQ && token_kind(end + 2) == TK_LBRACKET {
+                    var la_depth: i64 = 1
+                    var la = end + 3
+                    while la < close && la_depth > 0 {
+                        let lk = token_kind(la)
+                        if lk == TK_LBRACKET { la_depth = la_depth + 1 }
+                        if lk == TK_RBRACKET { la_depth = la_depth - 1 }
+                        if lk == TK_SEMI && la_depth == 1 { has_semi_init = 1 }
+                        la = la + 1
+                    }
+                }
+                // Zero-fill only when no [val; N] initializer covers all slots.
+                if has_semi_init == 0 {
+                    let zero_reg = alloc_reg(ctx)
+                    ufn_record_load_imm(zero_reg, 0)
+                    var ai: i64 = 0
+                    while ai < arr_size { ufn_record_copy(arr_base + ai, zero_reg); ai = ai + 1 }
+                }
                 // M1.2 step 4 bisect — tail-literal initializer for
                 // `var arr: [T; N] = [v0, v1, ...]` or `= [val; N]`. See
                 // artifacts/m1_2_parity_inventory/blockers/m1_2_step4_array_init.md
                 // for the history. Bisect 3/N: each element is parsed by
                 // parse_expr_ir, so floats, negated literals (`0 - N`), and
-                // variable refs all work. The zero-fill above still runs;
-                // parsed values are copied into the array slots below.
+                // variable refs all work.
                 if end + 1 < close && token_kind(end + 1) == TK_EQ && token_kind(end + 2) == TK_LBRACKET {
                     let rhs_open = end + 2
                     var rhs_depth: i64 = 1
@@ -4733,6 +4811,21 @@ fn drv_emit_local_array_store(base_reg: i64, idx_reg: i64, src: i64) with Mut, P
     drv_emit_store_rax_mem_rdx_rbx8()
 }
 
+fn drv_emit_ref_array_load(dst: i64, ptr_reg: i64, idx_reg: i64) with Mut, Panic, Div {
+    // Stack arrays grow downward: a[i] is at *(ptr - i*8).
+    // 1) rcx = -index; 2) rax = ptr value; 3) rax = *(rax + rcx*8) = *(ptr - i*8)
+    drv_core_load_temp_to_rax(idx_reg)
+    drv_emit_neg_rax_only()
+    drv_emit_mov_reg_reg(1, 0)
+    drv_core_load_temp_to_rax(ptr_reg)
+    // mov rax, [rax + rcx*8]  →  48 8B 04 C8
+    drv_emit_byte(72)
+    drv_emit_byte(139)
+    drv_emit_byte(4)
+    drv_emit_byte(200)
+    drv_core_store_rax_to_temp(dst)
+}
+
 fn drv_emit_arg_count(dst: i64) with Mut, Panic, Div {
     drv_emit_byte(73)
     drv_emit_byte(139)
@@ -4934,6 +5027,8 @@ fn compile_ufn_from_globals(fn_id: i64) -> bool with IO, Mut, Panic, Div {
             drv_emit_user_global_load(V2_UFN_DST[i as usize], V2_UFN_IMM[i as usize], V2_UFN_SRC1[i as usize])
         } else if op == UFN_USER_GLOBAL_STORE {
             drv_emit_user_global_store(V2_UFN_IMM[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
+        } else if op == UFN_REF_ARRAY_LOAD {
+            drv_emit_ref_array_load(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
         }
         i = i + 1
     }
@@ -5015,6 +5110,11 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                     param_sidx = find_struct_idx_tok(ppos + 3)
                     param_is_ref = 1
                 }
+                // `& [T; N]` — ref-to-array param: IS_REF=1, sidx=-1.
+                // (TK_AMP=141, TK_LBRACKET=178; using literals for hoisted-const safety)
+                if ppos + 3 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == 141 && token_kind(ppos + 3) == 178 {
+                    param_is_ref = 1
+                }
                 if param_sidx >= 0 && param_is_ref != 0 {
                     let vreg = alloc_reg(&! ctx)
                     remember_ref_struct_local_tok(&! ctx, param_name_tok, vreg, param_sidx)
@@ -5042,6 +5142,15 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                     }
                     V2_CURRENT_PARAM_COUNT = param_idx + flat_size
                     param_idx = param_idx + flat_size
+                } else if param_is_ref != 0 {
+                    // ref-array param (& [T; N]): IS_REF=1, sidx=-1
+                    let vreg = alloc_reg(&! ctx)
+                    remember_ref_struct_local_tok(&! ctx, param_name_tok, vreg, -1)
+                    if param_idx < 64 {
+                        V2_CURRENT_PARAM_REGS[param_idx as usize] = vreg
+                    }
+                    V2_CURRENT_PARAM_COUNT = param_idx + 1
+                    param_idx = param_idx + 1
                 } else {
                     // scalar param
                     let vreg = alloc_reg(&! ctx)
@@ -5250,6 +5359,15 @@ fn drv_emit_builtin_chmod(fn_id: i64) with Mut, Panic, Div {
     drv_emit_syscall()
     drv_emit_mov_rax_imm(1)
     drv_emit_ret()
+}
+
+fn drv_emit_builtin_sys_exit_1(fn_id: i64) with Mut, Panic, Div {
+    drv_begin_builtin(fn_id)
+    drv_emit_mov_reg_imm(7, 1)
+    drv_emit_mov_rax_imm(60)
+    drv_emit_syscall()
+    drv_emit_byte(15)
+    drv_emit_byte(11)
 }
 
 fn drv_emit_entry_trampoline(main_fn_id: i64) with Mut, Panic, Div {
@@ -5518,6 +5636,9 @@ fn compile_ir_module_to_elf(output_path: string, token_count: i64) -> i64 with I
     if source_uses_ident(token_count, "driver_write_elf_to_file") {
         drv_emit_builtin_write_elf(V2_BUILTIN_DRIVER_WRITE_ELF)
         drv_emit_builtin_chmod(V2_BUILTIN_DRIVER_CHMOD)
+    }
+    if source_uses_ident(token_count, "assert") {
+        drv_emit_builtin_sys_exit_1(V2_BUILTIN_SYS_EXIT_1)
     }
 
     // Compile user-defined functions
