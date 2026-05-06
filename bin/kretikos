@@ -13,6 +13,8 @@
 #   kretikos emit-ptx <pattern> -o <file.ptx>   - emit PTX template from in-tree emitter
 #   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
 #   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
+#   kretikos profile-source <source.sio>         - classify a real source file for Kretikos
+#   kretikos run-source <source.sio> -o <dir>    - check, bundle, and runtime-validate a source profile
 #
 # Supported PTX patterns: vec_add
 # Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, epistemic_dual_f32
@@ -80,6 +82,76 @@ __kretikos_token_value() {
     tr ' ' '\n' <<<"$text" | awk -F= -v k="$key" '$1 == k { print $2; exit }'
 }
 
+__kretikos_check_source() {
+    local src="$1"
+    if [[ -x "$SCRIPT_DIR/souc" ]]; then
+        "$SCRIPT_DIR/souc" check "$src"
+    else
+        local out="${TMPDIR:-/tmp}/kretikos-check.elf"
+        rm -f "$out"
+        "$SOUC_BIN" "$src" "$out" >/dev/null
+        rm -f "$out"
+    fi
+}
+
+__kretikos_normalize_profile() {
+    tr '[:upper:]' '[:lower:]' <<<"$1" | tr '-' '_'
+}
+
+__kretikos_source_profile_record() {
+    local src="$1"
+    if [[ ! -f "$src" ]]; then
+        echo "error: source not found: $src" >&2
+        return 1
+    fi
+
+    local directive profile
+    directive="$(awk '
+        /^[[:space:]]*\/\/[[:space:]]*kretikos:[[:space:]]*profile[[:space:]]*=/ {
+            sub(/^[[:space:]]*\/\/[[:space:]]*kretikos:[[:space:]]*profile[[:space:]]*=[[:space:]]*/, "")
+            print $1
+            exit
+        }
+    ' "$src")"
+    profile="$(__kretikos_normalize_profile "$directive")"
+
+    if [[ -z "$profile" ]]; then
+        if grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*epistemic_dual' "$src"; then
+            profile="epistemic_dual_output_f32"
+        elif grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*epistemic.*vec.*add' "$src"; then
+            profile="epistemic_elementwise_f32"
+        elif grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*(vec_add|vector_add|add_vec)' "$src"; then
+            profile="vec_add_f32"
+        elif grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*store.*(u32|const)' "$src"; then
+            profile="store_u32_const"
+        fi
+    fi
+
+    case "$profile" in
+        store|store_u32|store_const|store_u32_const)
+            echo "store_u32_const|store_u32_const|store_u32_const|sounio_bare_store_u32_const_sm80|source_profile"
+            ;;
+        vec_add|vector_add|add_vec|vec_add_f32)
+            echo "vec_add_f32|vec_add_f32|vec_add_f32|sounio_bare_vec_add_f32_sm80|source_profile"
+            ;;
+        epistemic_elementwise|epistemic_elementwise_f32|epistemic_vec_add|epistemic_vec_add_f32)
+            echo "epistemic_elementwise_f32|vec_add_f32|epistemic_elementwise_f32|sounio_bare_vec_add_f32_sm80|source_profile"
+            ;;
+        epistemic_dual|epistemic_dual_f32|epistemic_dual_output|epistemic_dual_output_f32)
+            echo "epistemic_dual_output_f32|epistemic_dual_f32|epistemic_dual_output_f32|sounio_bare_epistemic_dual_output_f32_sm80|source_profile"
+            ;;
+        *)
+            echo "error: unsupported Kretikos source profile for $src" >&2
+            echo "hint: add one of these directives near the top of the file:" >&2
+            echo "  // kretikos: profile=vec_add_f32" >&2
+            echo "  // kretikos: profile=epistemic_elementwise_f32" >&2
+            echo "  // kretikos: profile=epistemic_dual_output_f32" >&2
+            echo "  // kretikos: profile=store_u32_const" >&2
+            return 1
+            ;;
+    esac
+}
+
 CMD="${1:-}"
 shift 2>/dev/null || true
 
@@ -89,7 +161,7 @@ case "$CMD" in
             echo "usage: kretikos check <source.sio>" >&2
             exit 1
         fi
-        "$SOUC_BIN" "$1" /tmp/kretikos-check.elf >/dev/null 2>&1
+        __kretikos_check_source "$1" >/dev/null 2>&1
         echo "kretikos: check OK — GPU builtin surface accepted"
         echo "kretikos: CPU fallback is serial: thread/block IDs are deterministic stubs"
         ;;
@@ -103,6 +175,155 @@ case "$CMD" in
         "$SOUC_BIN" "$1" "$OUT"
         chmod +x "$OUT"
         "$OUT"
+        ;;
+    profile-source)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos profile-source <source.sio>" >&2
+            exit 1
+        fi
+        SRC="$1"
+        record="$(__kretikos_source_profile_record "$SRC")"
+        IFS='|' read -r PROFILE CUBIN_KIND RUNTIME_RUNG KERNEL_NAME CLASS <<<"$record"
+        echo "kretikos: source profile - profile=$PROFILE cubin_kind=$CUBIN_KIND runtime_rung=$RUNTIME_RUNG kernel=$KERNEL_NAME class=$CLASS"
+        echo "kretikos: source contract - checked Sounio file selects a supported GPU runtime profile"
+        ;;
+    run-source)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos run-source <source.sio> [-o <dir>] [--force] [--validate-toolchain] [--require-runtime]" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        OUT_DIR=""
+        FORCE=0
+        TOOLCHAIN_ARGS=()
+        RUNTIME_ARGS=(--validate-runtime)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output-dir)
+                    OUT_DIR="$2"
+                    shift 2
+                    ;;
+                -f|--force)
+                    FORCE=1
+                    shift
+                    ;;
+                --validate-toolchain)
+                    TOOLCHAIN_ARGS=(--validate-toolchain)
+                    shift
+                    ;;
+                --require-toolchain)
+                    TOOLCHAIN_ARGS=(--require-toolchain)
+                    shift
+                    ;;
+                --validate-runtime)
+                    RUNTIME_ARGS=(--validate-runtime)
+                    shift
+                    ;;
+                --require-runtime)
+                    RUNTIME_ARGS=(--require-runtime)
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ ! -f "$SRC" ]]; then
+            echo "error: source not found: $SRC" >&2
+            exit 1
+        fi
+        if [[ -z "$OUT_DIR" ]]; then
+            OLD_UMASK="$(umask)"
+            umask 077
+            OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-source.XXXXXX")" || {
+                echo "error: failed to create temporary source-run directory" >&2
+                exit 1
+            }
+            umask "$OLD_UMASK"
+        fi
+
+        __kretikos_check_source "$SRC" >/dev/null
+        record="$(__kretikos_source_profile_record "$SRC")"
+        IFS='|' read -r PROFILE CUBIN_KIND RUNTIME_RUNG KERNEL_NAME CLASS <<<"$record"
+
+        BUNDLE_ARGS=(bundle -o "$OUT_DIR" --cubin-kind "$CUBIN_KIND" --runtime-rung "$RUNTIME_RUNG")
+        if [[ "$FORCE" -eq 1 ]]; then
+            BUNDLE_ARGS+=(--force)
+        fi
+        BUNDLE_ARGS+=("${TOOLCHAIN_ARGS[@]}" "${RUNTIME_ARGS[@]}")
+        "$KRETIKOS_SELF" "${BUNDLE_ARGS[@]}"
+
+        SOURCE_SHA="$(__kretikos_sha256 "$SRC")" || exit 1
+        SOURCE_BYTES="$(__kretikos_file_size "$SRC")" || exit 1
+        SOURCE_PATH="$(__kretikos_repo_path "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")")"
+        SOURCE_MANIFEST="$OUT_DIR/kretikos_source_profile.v1.json"
+        python3 - "$SOURCE_MANIFEST" "$SOURCE_PATH" "$SOURCE_BYTES" "$SOURCE_SHA" \
+            "$PROFILE" "$CUBIN_KIND" "$RUNTIME_RUNG" "$KERNEL_NAME" "$(basename "$OUT_DIR")" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+(
+    manifest_out,
+    source_path,
+    source_bytes,
+    source_sha,
+    profile,
+    cubin_kind,
+    runtime_rung,
+    kernel_name,
+    bundle_root,
+) = sys.argv[1:]
+
+payload = {
+    "schema": "sounio.kretikos.source-profile.v1",
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "source": {
+        "path": source_path,
+        "bytes": int(source_bytes),
+        "sha256": source_sha,
+    },
+    "profile": profile,
+    "cubin_kind": cubin_kind,
+    "runtime_rung": runtime_rung,
+    "kernel": kernel_name,
+    "bundle_manifest": "kretikos_bundle.v1.json",
+    "bundle_root": bundle_root,
+    "status": "profiled",
+    "boundaries": [
+        "source_must_typecheck_before_profile_selection",
+        "profile_selection_is_explicit_or_shape_limited",
+        "does_not_claim_arbitrary_sounio_gpu_lowering",
+        "does_not_claim_general_pointer_or_allocator_lowering",
+        "runtime_validation_applies_to_selected_profile_only",
+    ],
+}
+with open(manifest_out, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+        runtime_summary="$(python3 - "$OUT_DIR/kretikos_bundle.v1.json" <<'PY'
+import json
+import sys
+obj = json.load(open(sys.argv[1], encoding="utf-8"))
+runtime = obj.get("runtime_validation") or {}
+print("{}/{} rung={} kernel={}".format(
+    runtime.get("status"),
+    runtime.get("reason"),
+    runtime.get("rung"),
+    runtime.get("kernel"),
+))
+PY
+        )"
+        echo "kretikos: source profile manifest - $SOURCE_MANIFEST"
+        echo "kretikos: source runtime validation - $runtime_summary"
         ;;
     build)
         if [[ $# -lt 1 ]]; then
@@ -880,10 +1101,13 @@ PY
         echo "  emit-ptx <pattern> -o <file.ptx>  Emit PTX template from in-tree emitter"
         echo "  emit-cubin <kind> -o <file.cubin> Emit CUBIN template from in-tree emitter"
         echo "  bundle [-o <dir>]                 Emit PTX+CUBIN plus bundle manifest"
+        echo "  profile-source <source.sio>       Classify a checked source file for Kretikos"
+        echo "  run-source <source.sio> -o <dir>  Check, bundle, and runtime-validate source profile"
         echo "  info                              Show compiler configuration"
         echo ""
         echo "Supported PTX patterns: vec_add"
         echo "Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, epistemic_dual_f32"
+        echo "Supported source profiles: vec_add_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, store_u32_const"
         echo "Bundle validation: --validate-toolchain, --require-toolchain, --validate-runtime, --require-runtime"
         echo ""
         echo "Environment:"

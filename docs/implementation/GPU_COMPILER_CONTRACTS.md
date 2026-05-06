@@ -51,6 +51,8 @@ Produced by:
 ```bash
 bin/kretikos bundle -o /tmp/kretikos-bundle
 bin/kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
+bin/kretikos run-source examples/kretikos/real_vec_add.sio -o /tmp/kretikos-source --validate-toolchain --validate-runtime
+slurm-jobs/kretikos/submit-kretikos-source.sh examples/kretikos/real_vec_add.sio
 ```
 
 Required top-level fields:
@@ -86,6 +88,38 @@ Local non-GPU hosts must report exact reasons such as `ptxas_missing`,
 not silently promote structural evidence to runtime proof. Toolchain and
 runtime validation apply only to the predefined PTX/CUBIN artifact templates
 selected by the bundle. They do not validate arbitrary user-written kernels.
+
+## Real Source Profile Lane
+
+`bin/kretikos run-source <source.sio>` is the first ready-to-run source path.
+It checks the Sounio file first, classifies it into a supported Kretikos source
+profile, emits the matching owned CUBIN bundle, and runs the selected CUDA
+Driver API validation rung when runtime validation is enabled.
+
+Supported profiles are intentionally explicit:
+
+- `vec_add_f32`
+- `epistemic_elementwise_f32`
+- `epistemic_dual_output_f32`
+- `store_u32_const`
+
+A source file may declare the profile with:
+
+```sounio
+// kretikos: profile=vec_add_f32
+```
+
+The Slurm entrypoint is:
+
+```bash
+slurm-jobs/kretikos/submit-kretikos-source.sh examples/kretikos/real_vec_add.sio
+```
+
+That script embeds the source, Kretikos, stdlib slice, CUBIN emitters, and a
+prebuilt CUDA Driver API loader into the sbatch payload. It runs from GPU-worker
+local scratch and records the runtime verdict in the Slurm job comment. This is
+ready for real source files that fit one of the profiles above; it is not yet a
+claim of arbitrary Sounio GPU lowering.
 
 ## Blocker Taxonomy
 
