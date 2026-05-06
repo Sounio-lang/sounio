@@ -102,11 +102,12 @@ Supported profiles are intentionally explicit:
 
 - `vec_add_f32`
 - `vec_sub_f32`
+- `fma_f32`
 - `epistemic_elementwise_f32`
 - `epistemic_dual_output_f32`
 - `store_u32_const`
 
-These five profiles are runtime-backed: each maps to an owned CUBIN runtime
+These six profiles are runtime-backed: each maps to an owned CUBIN runtime
 rung and may pass `--require-runtime` on a CUDA Driver API host.
 
 Kretikos also accepts a wider structural-only source set:
@@ -114,7 +115,6 @@ Kretikos also accepts a wider structural-only source set:
 - `vec_mul_f32`
 - `vec_div_f32`
 - `vec_add_f64`
-- `fma_f32`
 
 Structural-only profiles must still typecheck as Sounio source and must emit
 owned PTX through `bin/kretikos emit-ptx`, but they intentionally report
@@ -151,6 +151,12 @@ profile is ready for user code.
 `vec_add_f32`; the runtime oracle sets epsilon to `-2.0`, so the GPU computes
 `x + y * (1 + epsilon) = x - y`. This is a runtime-backed CUBIN rung, not a
 claim of arbitrary subtraction lowering.
+
+`fma_f32` uses that same owned affine elementwise kernel ABI with a nonzero
+epsilon lane. The runtime oracle interprets the inputs as `c + a * b` by
+setting `c = x`, `a = y`, and `b = 1 + epsilon`. This is a runtime-backed
+affine FMA rung, not a claim of general FMA lowering for arbitrary source
+expressions.
 
 `examples/kretikos/structural_manifest.tsv` covers the remaining
 structural-only PTX
