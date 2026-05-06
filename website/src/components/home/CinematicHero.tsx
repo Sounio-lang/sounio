@@ -16,8 +16,8 @@ const proofPoints = [
     value: 'Self-hosted fixed point',
   },
   {
-    label: 'GPU lane',
-    value: 'PTX surface in-tree',
+    label: 'Kretikos GPU',
+    value: 'Bare-metal compiler',
   },
   {
     label: 'Pressure',
