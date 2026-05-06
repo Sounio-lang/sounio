@@ -101,16 +101,16 @@ Driver API validation rung when runtime validation is enabled.
 Supported profiles are intentionally explicit:
 
 - `vec_add_f32`
+- `vec_sub_f32`
 - `epistemic_elementwise_f32`
 - `epistemic_dual_output_f32`
 - `store_u32_const`
 
-These four profiles are runtime-backed: each maps to an owned CUBIN runtime
+These five profiles are runtime-backed: each maps to an owned CUBIN runtime
 rung and may pass `--require-runtime` on a CUDA Driver API host.
 
 Kretikos also accepts a wider structural-only source set:
 
-- `vec_sub_f32`
 - `vec_mul_f32`
 - `vec_div_f32`
 - `vec_add_f64`
@@ -147,7 +147,13 @@ claim of arbitrary Sounio GPU lowering.
 runtime-backed source profile and is the promotion gate before claiming a new
 profile is ready for user code.
 
-`examples/kretikos/structural_manifest.tsv` covers the structural-only PTX
+`vec_sub_f32` currently uses the same owned affine elementwise kernel ABI as
+`vec_add_f32`; the runtime oracle sets epsilon to `-2.0`, so the GPU computes
+`x + y * (1 + epsilon) = x - y`. This is a runtime-backed CUBIN rung, not a
+claim of arbitrary subtraction lowering.
+
+`examples/kretikos/structural_manifest.tsv` covers the remaining
+structural-only PTX
 profiles. Its default `--validate-runtime` mode is allowed to pass with
 `profile_not_runtime_backed` rows because that is an honest non-runtime
 classification, not a runtime proof. Running the same manifest with
