@@ -17,7 +17,7 @@ const proofPoints = [
   },
   {
     label: 'Kretikos GPU',
-    value: 'Bare-metal compiler',
+    value: 'GPU compiler lane',
   },
   {
     label: 'Pressure',

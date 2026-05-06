@@ -1,33 +1,32 @@
 ---
 title: "Kretikos GPU Compiler"
-description: "Bare-metal GPU compiler with total thread control. No hidden runtime. No opaque abstractions. Every thread_id, block_id, and warp instruction is visible."
+description: "GPU compiler lane with checked thread builtins, serial CPU fallback, PTX artifact routing, and a Sounio-owned CUBIN preview."
 domain: "gpu"
 icon: "🏛️"
 topic_id: "website.showcases.gpu"
 authority: "website_only"
 audience: "researchers"
 last_validated: "2026-05-06"
-validated_by: "Kimi"
+validated_by: "Codex"
 source_of_truth: "docs/governance/topic-registry.v1.json#website.showcases.gpu"
 ---
 
 # Kretikos GPU Compiler
 
 **Kretikos** (Κρητικός) = Cretan. Like Ariadne's thread through the Labyrinth of Knossos,
-this compiler gives you a direct, visible line to every warp, every block, every thread.
-No CUDA runtime hiding register allocation. No driver API obfuscating memory movement.
-You see the bare metal. You control every instruction.
+this is the named path for Sounio's GPU compiler work: source-level thread builtins,
+PTX artifact routing, and an in-tree Sounio-owned CUBIN emitter preview.
 
 ## Executive reading
 
-Most languages wave at GPU ambition and hide the truth behind runtime APIs.
-Kretikos does the opposite: it exposes the bare-metal surface as a first-class
-language feature, then proves it works with inspectable artifacts.
+Most languages wave at GPU ambition and hide the current boundary.
+Kretikos does the opposite: it exposes a bounded GPU surface as a first-class
+language feature, then ties each claim to an inspectable artifact or command.
 
-- Bare-metal builtins compile today: `gpu_thread_id_x()`, `gpu_block_id_x()`, `gpu_block_dim_x()`, `gpu_sync_threads()`
-- Multi-dimensional indexing: x, y, z axes for threads, blocks, and dimensions
-- PTX emission path exists and produces real artifacts
-- CPU fallback path ensures kernels run deterministically without hardware
+- Checked x-axis builtins compile today: `gpu_thread_id_x()`, `gpu_block_id_x()`, `gpu_block_dim_x()`, `gpu_sync_threads()`
+- y/z builtin spellings are recognized; the native CPU fallback returns deterministic stubs
+- PTX emission is routed through the checked GPU artifact when that artifact is present
+- CPU fallback path is deterministic and serial; it is not a parallel GPU simulator
 - The backend source — PTX emitter, SPIR-V lowerer, CUDA ELF generator — lives in-tree at `self-hosted/gpu/`
 
 ## What Kretikos proves
@@ -36,8 +35,8 @@ A language serious about scientific software must not delegate GPU honesty to a
 black-box runtime. Kretikos demonstrates that Sounio can:
 
 - expose thread indexing as source-level syntax, not driver-level magic
-- emit PTX that a skeptical reader can inspect instruction-by-instruction
-- run kernels on CPU fallback with deterministic thread simulation
+- route PTX emission through artifact-producing compiler surfaces
+- run kernels on a deterministic serial CPU fallback for syntax/runtime smoke
 - keep the compiler, runtime, and narrative aligned under real pressure
 
 ## Bare-metal syntax
@@ -49,39 +48,25 @@ kernel fn vec_add(n: i64) with GPU {
     let bdim = gpu_block_dim_x()
     let i = bid * bdim + tid
     if i >= n { return }
-    // This thread owns element i. No runtime hiding the indexing.
-}
-
-kernel fn matmul_tile(n: i64) with GPU {
-    let tx = gpu_thread_id_x()
-    let ty = gpu_thread_id_y()
-    let bx = gpu_block_id_x()
-    let by = gpu_block_id_y()
-    let bdx = gpu_block_dim_x()
-    let bdy = gpu_block_dim_y()
-    // 2D tile indexing with total control
-    let row = by * bdy + ty
-    let col = bx * bdx + tx
-    if row >= n || col >= n { return }
-    gpu_sync_threads()
+    // This thread owns element i.
 }
 
 fn main() with GPU, IO {
-    let grid = (16, 16, 1)
-    let block = (32, 32, 1)
+    let grid = (16, 1, 1)
+    let block = (64, 1, 1)
     perform GPU.launch(vec_add, grid, block)(1024)
-    perform GPU.launch(matmul_tile, grid, block)(512)
     perform GPU.sync()
 }
 ```
 
-This is not aspirational syntax. These builtins compile through the self-hosted
-compiler and execute on the CPU fallback path today.
+This is the checked public shape today: 1D indexing plus deterministic CPU
+fallback. Broader y/z lowering and richer memory surfaces are separate promotion
+lanes.
 
 ## Verified commands
 
 ```bash
-# Compile and run on CPU fallback (no GPU hardware required)
+# Compile and run on serial CPU fallback (no GPU hardware required)
 souc examples/kernel_source_level.sio /tmp/kretikos_demo.elf
 /tmp/kretikos_demo.elf
 
@@ -94,16 +79,18 @@ export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
 
 GPU work is where language marketing goes to die. It is easy to sketch intrinsics
 or promise tensor-core support. It is much harder to keep a self-hosted compiler,
-a bare-metal surface, and a storefront narrative aligned while real bugs surface
+a bounded GPU surface, and a storefront narrative aligned while real bugs surface
 in stack alignment, launch parameters, and PTX module loading.
 
 Kretikos is valuable not only because it accelerates compute, but because it
-forces the language to reveal whether its honesty survives contact with bare metal.
+forces the language to reveal whether its honesty survives contact with backend
+artifacts.
 
 ## Support tier
 
-- bare-metal builtins: `gpu_thread_id_{x,y,z}`, `gpu_block_id_{x,y,z}`, `gpu_block_dim_{x,y,z}`, `gpu_sync_threads()` — self-hosted compiler
-- PTX emission: `build --backend gpu` — checked GPU artifact
+- checked builtins: `gpu_thread_id_x`, `gpu_block_id_x`, `gpu_block_dim_x`, `gpu_sync_threads` — self-hosted compiler
+- recognized CPU-fallback stubs: y/z thread/block IDs return `0`; y/z block dimensions return `1`
+- PTX emission: `build --backend gpu` through the checked GPU artifact
 - backend source: `self-hosted/gpu/ptx_advanced.sio`, `self-hosted/gpu/nvidia_bare.sio`, `self-hosted/gpu/spirv_lower.sio`
 - attested targets: CUDA `sm_80`, ROCm `gfx942`
 
@@ -113,6 +100,7 @@ Kretikos does **not** claim:
 - that every GPU backend is production-complete
 - that multi-dimensional kernels emit PTX for all patterns (currently pattern-matched)
 - that `gpu.alloc<T>()` or shared-memory abstractions are checked public surface
+- that the CPU fallback simulates a parallel GPU grid
 
-The honest claim is narrower and therefore stronger: there is a real bare-metal
-GPU compiler here, and every claim is bounded by artifacts you can read.
+The honest claim is narrower and therefore stronger: there is a real GPU compiler
+lane here, and every claim is bounded by artifacts you can read.
