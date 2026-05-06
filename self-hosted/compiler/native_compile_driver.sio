@@ -965,6 +965,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "TK_OR") { return 142 }
     if token_text_eq(tok, "TK_XOR") { return 143 }
     if token_text_eq(tok, "TK_TILDE") { return 144 }
+    if token_text_eq(tok, "TK_MATCH") { return 22 }
 
     if token_text_eq(tok, "V2_BUILTIN_PRINT") { return 0 }
     if token_text_eq(tok, "V2_BUILTIN_PRINT_INT") { return 1 }
@@ -1881,6 +1882,9 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
     let k = token_kind(pos)
     if k == TK_IF {
         return parse_if_expr_ir(func, ctx, pos)
+    }
+    if k == TK_MATCH {
+        return parse_match_expr_ir(func, ctx, pos)
     }
     if k == TK_BANG {
         let inner = parse_atom_ir(func, ctx, pos + 1)
@@ -2837,6 +2841,76 @@ fn parse_match_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_count: 
     }
     ufn_record_label(label_end)
     close + 1
+}
+
+// Value-producing match expression: match SUBJ { pat => expr, ... }
+// Returns ExprParse with dst register holding the matched arm's value.
+// Handles integer literals, enum variants, and _ wildcard arms.
+fn parse_match_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let subj = parse_expr_ir(func, ctx, pos + 1)
+    if subj.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    var p = subj.next
+    while p < V2_TOKEN_COUNT && token_kind(p) != TK_LBRACE { p = p + 1 }
+    if p >= V2_TOKEN_COUNT { return ExprParse { ok: 0, reg: -1, next: pos} }
+    let close = find_matching_rbrace(p, V2_TOKEN_COUNT)
+    if close < 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+    let dst = alloc_reg(ctx)
+    let label_end = alloc_label()
+    var cur = p + 1
+    while cur < close {
+        cur = skip_trivia(cur, close)
+        if cur >= close { break }
+        let arm_k = token_kind(cur)
+        var is_wildcard: bool = false
+        var arm_const: i64 = -999999999
+        if arm_k == TK_UNDERSCORE {
+            is_wildcard = true
+            cur = cur + 1
+        } else if arm_k == TK_INT {
+            arm_const = pt_read_int_value(cur)
+            cur = cur + 1
+        } else if arm_k == TK_MINUS && token_kind(cur + 1) == TK_INT {
+            arm_const = 0 - pt_read_int_value(cur + 1)
+            cur = cur + 2
+        } else if arm_k == TK_IDENT {
+            if token_kind(cur + 1) == TK_COLONCOLON && token_kind(cur + 2) == TK_IDENT {
+                let eidx = find_enum_idx_tok(cur)
+                if eidx >= 0 { arm_const = find_enum_variant_value(eidx, cur + 2) }
+                cur = cur + 3
+            } else {
+                var ei: i64 = 0
+                while ei < ENUM_COUNT {
+                    let v = find_enum_variant_value(ei, cur)
+                    if v >= 0 { arm_const = v; break }
+                    ei = ei + 1
+                }
+                cur = cur + 1
+            }
+        } else { cur = cur + 1; continue }
+        cur = skip_trivia(cur, close)
+        if cur < close && token_kind(cur) == TK_FATARROW { cur = cur + 1 }
+        cur = skip_trivia(cur, close)
+        let label_skip = alloc_label()
+        if !is_wildcard {
+            let val_reg = alloc_reg(ctx)
+            let cond_reg = alloc_reg(ctx)
+            ufn_record_load_imm(val_reg, arm_const)
+            ufn_record_binop(cond_reg, subj.reg, 5, val_reg)
+            ufn_record_branch_false(cond_reg, label_skip)
+        }
+        V2_LAST_STRUCT_IDX = -1
+        let arm_expr = parse_expr_ir(func, ctx, cur)
+        if arm_expr.ok != 0 {
+            if arm_expr.reg != dst { ufn_record_copy(dst, arm_expr.reg) }
+            cur = arm_expr.next
+        }
+        ufn_record_jump(label_end)
+        ufn_record_label(label_skip)
+        if cur < close && token_kind(cur) == TK_COMMA { cur = cur + 1 }
+        if is_wildcard { break }
+    }
+    ufn_record_label(label_end)
+    ExprParse { ok: 1, reg: dst, next: close + 1}
 }
 
 fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
