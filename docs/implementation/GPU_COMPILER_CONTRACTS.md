@@ -105,6 +105,25 @@ Supported profiles are intentionally explicit:
 - `epistemic_dual_output_f32`
 - `store_u32_const`
 
+These four profiles are runtime-backed: each maps to an owned CUBIN runtime
+rung and may pass `--require-runtime` on a CUDA Driver API host.
+
+Kretikos also accepts a wider structural-only source set:
+
+- `vec_sub_f32`
+- `vec_mul_f32`
+- `vec_div_f32`
+- `vec_add_f64`
+- `fma_f32`
+
+Structural-only profiles must still typecheck as Sounio source and must emit
+owned PTX through `bin/kretikos emit-ptx`, but they intentionally report
+`runtime_validation.status = "not_run"` and
+`runtime_validation.reason = "profile_not_runtime_backed"`. They fail closed
+under `--require-runtime` until an owned CUBIN/runtime rung exists. This is the
+parallel-agent blocker contract: a source profile can be admitted at the
+Kretikos front door without being promoted to runtime-ready.
+
 A source file may declare the profile with:
 
 ```sounio
@@ -128,6 +147,13 @@ claim of arbitrary Sounio GPU lowering.
 runtime-backed source profile and is the promotion gate before claiming a new
 profile is ready for user code.
 
+`examples/kretikos/structural_manifest.tsv` covers the structural-only PTX
+profiles. Its default `--validate-runtime` mode is allowed to pass with
+`profile_not_runtime_backed` rows because that is an honest non-runtime
+classification, not a runtime proof. Running the same manifest with
+`--require-runtime` is expected to fail until those profiles gain CUBIN/runtime
+support.
+
 ## Blocker Taxonomy
 
 Canonical blocker classes:
@@ -143,6 +169,7 @@ Canonical blocker classes:
 - `remote_env_missing`
 - `pinned_version_mismatch`
 - `gpu_backend_unavailable`
+- `profile_not_runtime_backed`
 - `runtime_test_fail`
 - `public_contract_mismatch`
 - `public_example_fail`

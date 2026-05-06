@@ -14,10 +14,16 @@
 #   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
 #   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
 #   kretikos profile-source <source.sio>         - classify a real source file for Kretikos
-#   kretikos run-source <source.sio> -o <dir>    - check, bundle, and runtime-validate a source profile
+#   kretikos run-source <source.sio> -o <dir>    - check and validate a source profile
 #
 # Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma
 # Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, epistemic_dual_f32
+#
+# Runtime-backed source profiles:
+#   store_u32_const, vec_add_f32, epistemic_elementwise_f32, epistemic_dual_output_f32
+#
+# Structural-only source profiles:
+#   vec_sub_f32, vec_mul_f32, vec_div_f32, vec_add_f64, fma_f32
 #
 # GPU builtins recognized in kernel fn bodies:
 #   gpu_thread_id_x()  gpu_thread_id_y()  gpu_thread_id_z()
@@ -129,21 +135,41 @@ __kretikos_source_profile_record() {
 
     case "$profile" in
         store|store_u32|store_const|store_u32_const)
-            echo "store_u32_const|store_u32_const|store_u32_const|sounio_bare_store_u32_const_sm80|source_profile"
+            echo "store_u32_const|store_u32_const|store_u32_const|sounio_bare_store_u32_const_sm80|source_profile||1"
             ;;
         vec_add|vector_add|add_vec|vec_add_f32)
-            echo "vec_add_f32|vec_add_f32|vec_add_f32|sounio_bare_vec_add_f32_sm80|source_profile"
+            echo "vec_add_f32|vec_add_f32|vec_add_f32|sounio_bare_vec_add_f32_sm80|source_profile|vec_add|1"
             ;;
         epistemic_elementwise|epistemic_elementwise_f32|epistemic_vec_add|epistemic_vec_add_f32)
-            echo "epistemic_elementwise_f32|vec_add_f32|epistemic_elementwise_f32|sounio_bare_vec_add_f32_sm80|source_profile"
+            echo "epistemic_elementwise_f32|vec_add_f32|epistemic_elementwise_f32|sounio_bare_vec_add_f32_sm80|source_profile|vec_add|1"
             ;;
         epistemic_dual|epistemic_dual_f32|epistemic_dual_output|epistemic_dual_output_f32)
-            echo "epistemic_dual_output_f32|epistemic_dual_f32|epistemic_dual_output_f32|sounio_bare_epistemic_dual_output_f32_sm80|source_profile"
+            echo "epistemic_dual_output_f32|epistemic_dual_f32|epistemic_dual_output_f32|sounio_bare_epistemic_dual_output_f32_sm80|source_profile||1"
+            ;;
+        vec_sub|vector_sub|sub_vec|vec_sub_f32)
+            echo "vec_sub_f32||profile_not_runtime_backed||source_profile|vec_sub|0"
+            ;;
+        vec_mul|vector_mul|mul_vec|vec_mul_f32)
+            echo "vec_mul_f32||profile_not_runtime_backed||source_profile|vec_mul|0"
+            ;;
+        vec_div|vector_div|div_vec|vec_div_f32)
+            echo "vec_div_f32||profile_not_runtime_backed||source_profile|vec_div|0"
+            ;;
+        vec_add_f64|vector_add_f64|add_vec_f64)
+            echo "vec_add_f64||profile_not_runtime_backed||source_profile|vec_add_f64|0"
+            ;;
+        fma|fma_f32|vec_fma|vec_fma_f32)
+            echo "fma_f32||profile_not_runtime_backed||source_profile|fma|0"
             ;;
         *)
             echo "error: unsupported Kretikos source profile for $src" >&2
             echo "hint: add one of these directives near the top of the file:" >&2
             echo "  // kretikos: profile=vec_add_f32" >&2
+            echo "  // kretikos: profile=vec_sub_f32" >&2
+            echo "  // kretikos: profile=vec_mul_f32" >&2
+            echo "  // kretikos: profile=vec_div_f32" >&2
+            echo "  // kretikos: profile=vec_add_f64" >&2
+            echo "  // kretikos: profile=fma_f32" >&2
             echo "  // kretikos: profile=epistemic_elementwise_f32" >&2
             echo "  // kretikos: profile=epistemic_dual_output_f32" >&2
             echo "  // kretikos: profile=store_u32_const" >&2
@@ -183,9 +209,14 @@ case "$CMD" in
         fi
         SRC="$1"
         record="$(__kretikos_source_profile_record "$SRC")"
-        IFS='|' read -r PROFILE CUBIN_KIND RUNTIME_RUNG KERNEL_NAME CLASS <<<"$record"
-        echo "kretikos: source profile - profile=$PROFILE cubin_kind=$CUBIN_KIND runtime_rung=$RUNTIME_RUNG kernel=$KERNEL_NAME class=$CLASS"
-        echo "kretikos: source contract - checked Sounio file selects a supported GPU runtime profile"
+        IFS='|' read -r PROFILE CUBIN_KIND RUNTIME_RUNG KERNEL_NAME CLASS PTX_PATTERN RUNTIME_BACKED <<<"$record"
+        echo "kretikos: source profile - profile=$PROFILE cubin_kind=$CUBIN_KIND runtime_rung=$RUNTIME_RUNG kernel=$KERNEL_NAME class=$CLASS ptx_pattern=$PTX_PATTERN runtime_backed=$RUNTIME_BACKED"
+        if [[ "$RUNTIME_BACKED" == "1" ]]; then
+            echo "kretikos: source contract - checked Sounio file selects a runtime-backed GPU profile"
+        else
+            echo "kretikos: source contract - checked Sounio file selects a structural-only PTX profile"
+            echo "kretikos: source blocker - profile_not_runtime_backed"
+        fi
         ;;
     run-source)
         if [[ $# -lt 1 ]]; then
@@ -197,7 +228,11 @@ case "$CMD" in
         OUT_DIR=""
         FORCE=0
         TOOLCHAIN_ARGS=()
+        TOOLCHAIN_MODE="off"
+        REQUIRE_TOOLCHAIN=0
         RUNTIME_ARGS=(--validate-runtime)
+        RUNTIME_MODE="auto"
+        REQUIRE_RUNTIME=0
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 -o|--output-dir)
@@ -210,18 +245,25 @@ case "$CMD" in
                     ;;
                 --validate-toolchain)
                     TOOLCHAIN_ARGS=(--validate-toolchain)
+                    TOOLCHAIN_MODE="auto"
                     shift
                     ;;
                 --require-toolchain)
                     TOOLCHAIN_ARGS=(--require-toolchain)
+                    TOOLCHAIN_MODE="required"
+                    REQUIRE_TOOLCHAIN=1
                     shift
                     ;;
                 --validate-runtime)
                     RUNTIME_ARGS=(--validate-runtime)
+                    RUNTIME_MODE="auto"
+                    REQUIRE_RUNTIME=0
                     shift
                     ;;
                 --require-runtime)
                     RUNTIME_ARGS=(--require-runtime)
+                    RUNTIME_MODE="required"
+                    REQUIRE_RUNTIME=1
                     shift
                     ;;
                 -*)
@@ -251,7 +293,109 @@ case "$CMD" in
 
         __kretikos_check_source "$SRC" >/dev/null
         record="$(__kretikos_source_profile_record "$SRC")"
-        IFS='|' read -r PROFILE CUBIN_KIND RUNTIME_RUNG KERNEL_NAME CLASS <<<"$record"
+        IFS='|' read -r PROFILE CUBIN_KIND RUNTIME_RUNG KERNEL_NAME CLASS PTX_PATTERN RUNTIME_BACKED <<<"$record"
+
+        SOURCE_SHA="$(__kretikos_sha256 "$SRC")" || exit 1
+        SOURCE_BYTES="$(__kretikos_file_size "$SRC")" || exit 1
+        SOURCE_PATH="$(__kretikos_repo_path "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")")"
+        SOURCE_MANIFEST="$OUT_DIR/kretikos_source_profile.v1.json"
+
+        if [[ "$RUNTIME_BACKED" != "1" ]]; then
+            if [[ -z "$PTX_PATTERN" ]]; then
+                echo "error: structural profile $PROFILE has no PTX pattern" >&2
+                exit 1
+            fi
+            PTX_OUT="$OUT_DIR/kretikos_${PTX_PATTERN}.ptx"
+            if [[ "$FORCE" -ne 1 ]] && [[ -e "$PTX_OUT" || -e "$SOURCE_MANIFEST" ]]; then
+                echo "error: source output already exists in $OUT_DIR; use --force to overwrite" >&2
+                exit 1
+            fi
+
+            "$KRETIKOS_SELF" emit-ptx "$PTX_PATTERN" -o "$PTX_OUT"
+            PTX_SHA="$(__kretikos_sha256 "$PTX_OUT")" || exit 1
+            PTX_BYTES="$(__kretikos_file_size "$PTX_OUT")" || exit 1
+            python3 - "$SOURCE_MANIFEST" "$SOURCE_PATH" "$SOURCE_BYTES" "$SOURCE_SHA" \
+                "$PROFILE" "$PTX_PATTERN" "$(basename "$PTX_OUT")" "$PTX_BYTES" "$PTX_SHA" \
+                "$TOOLCHAIN_MODE" "$RUNTIME_MODE" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+(
+    manifest_out,
+    source_path,
+    source_bytes,
+    source_sha,
+    profile,
+    ptx_pattern,
+    ptx_path,
+    ptx_bytes,
+    ptx_sha,
+    toolchain_mode,
+    runtime_mode,
+) = sys.argv[1:]
+
+payload = {
+    "schema": "sounio.kretikos.source-profile.v1",
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "source": {
+        "path": source_path,
+        "bytes": int(source_bytes),
+        "sha256": source_sha,
+    },
+    "profile": profile,
+    "profile_kind": "structural_only",
+    "runtime_backed": False,
+    "ptx_pattern": ptx_pattern,
+    "cubin_kind": None,
+    "runtime_rung": None,
+    "kernel": None,
+    "bundle_manifest": None,
+    "bundle_root": ".",
+    "status": "structural_only",
+    "ptx_artifact": {
+        "path": ptx_path,
+        "bytes": int(ptx_bytes),
+        "sha256": ptx_sha,
+    },
+    "toolchain_validation": {
+        "mode": toolchain_mode,
+        "status": "not_run",
+        "reason": "source_profile_not_runtime_backed",
+    },
+    "runtime_validation": {
+        "mode": runtime_mode,
+        "validation_scope": "not_available_for_structural_only_profile",
+        "status": "not_run",
+        "reason": "profile_not_runtime_backed",
+        "rung": None,
+        "kernel": None,
+    },
+    "boundaries": [
+        "source_must_typecheck_before_profile_selection",
+        "profile_selection_is_explicit_or_shape_limited",
+        "does_not_claim_arbitrary_sounio_gpu_lowering",
+        "does_not_claim_general_pointer_or_allocator_lowering",
+        "does_not_claim_runtime_execution_for_structural_only_profile",
+        "does_not_claim_cubin_emission_for_structural_only_profile",
+    ],
+}
+with open(manifest_out, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+            echo "kretikos: source profile manifest - $SOURCE_MANIFEST"
+            echo "kretikos: source runtime validation - not_run/profile_not_runtime_backed rung= kernel="
+            if [[ "$REQUIRE_TOOLCHAIN" -eq 1 ]]; then
+                echo "kretikos: required toolchain validation failed - source profile is structural-only" >&2
+                exit 1
+            fi
+            if [[ "$REQUIRE_RUNTIME" -eq 1 ]]; then
+                echo "kretikos: required runtime validation failed - profile_not_runtime_backed" >&2
+                exit 1
+            fi
+            exit 0
+        fi
 
         BUNDLE_ARGS=(bundle -o "$OUT_DIR" --cubin-kind "$CUBIN_KIND" --runtime-rung "$RUNTIME_RUNG")
         if [[ "$FORCE" -eq 1 ]]; then
@@ -260,12 +404,8 @@ case "$CMD" in
         BUNDLE_ARGS+=("${TOOLCHAIN_ARGS[@]}" "${RUNTIME_ARGS[@]}")
         "$KRETIKOS_SELF" "${BUNDLE_ARGS[@]}"
 
-        SOURCE_SHA="$(__kretikos_sha256 "$SRC")" || exit 1
-        SOURCE_BYTES="$(__kretikos_file_size "$SRC")" || exit 1
-        SOURCE_PATH="$(__kretikos_repo_path "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")")"
-        SOURCE_MANIFEST="$OUT_DIR/kretikos_source_profile.v1.json"
         python3 - "$SOURCE_MANIFEST" "$SOURCE_PATH" "$SOURCE_BYTES" "$SOURCE_SHA" \
-            "$PROFILE" "$CUBIN_KIND" "$RUNTIME_RUNG" "$KERNEL_NAME" "$(basename "$OUT_DIR")" <<'PY'
+            "$PROFILE" "$CUBIN_KIND" "$RUNTIME_RUNG" "$KERNEL_NAME" "$(basename "$OUT_DIR")" "$PTX_PATTERN" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -280,6 +420,7 @@ from datetime import datetime, timezone
     runtime_rung,
     kernel_name,
     bundle_root,
+    ptx_pattern,
 ) = sys.argv[1:]
 
 payload = {
@@ -291,6 +432,9 @@ payload = {
         "sha256": source_sha,
     },
     "profile": profile,
+    "profile_kind": "runtime_backed",
+    "runtime_backed": True,
+    "ptx_pattern": ptx_pattern,
     "cubin_kind": cubin_kind,
     "runtime_rung": runtime_rung,
     "kernel": kernel_name,
@@ -391,7 +535,7 @@ PY
         MANIFEST_DIR="$(cd "$(dirname "$MANIFEST")" && pwd)"
         SUMMARY_TSV="$OUT_DIR/kretikos_source_corpus.tsv"
         CORPUS_JSON="$OUT_DIR/kretikos_source_corpus.v1.json"
-        printf 'label\tsource\trc\truntime_status\truntime_reason\truntime_rung\tkernel\tdevice_name\tcc_major\tcc_minor\tcase_dir\n' >"$SUMMARY_TSV"
+        printf 'label\tsource\trc\tprofile_kind\truntime_backed\tptx_pattern\truntime_status\truntime_reason\truntime_rung\tkernel\tdevice_name\tcc_major\tcc_minor\tcase_dir\n' >"$SUMMARY_TSV"
 
         total=0
         failed=0
@@ -428,17 +572,51 @@ PY
             total=$((total + 1))
 
             if [[ -f "$CASE_DIR/kretikos_bundle.v1.json" ]]; then
-                row="$(python3 - "$label" "$SRC" "$case_rc" "$CASE_DIR" "$CASE_DIR/kretikos_bundle.v1.json" <<'PY'
+                row="$(python3 - "$label" "$SRC" "$case_rc" "$CASE_DIR" "$CASE_DIR/kretikos_bundle.v1.json" "$CASE_DIR/kretikos_source_profile.v1.json" <<'PY'
 import json
+import os
 import sys
 
-label, source, rc, case_dir, bundle_path = sys.argv[1:]
+label, source, rc, case_dir, bundle_path, source_profile_path = sys.argv[1:]
 obj = json.load(open(bundle_path, encoding="utf-8"))
+source_profile = {}
+if os.path.exists(source_profile_path):
+    source_profile = json.load(open(source_profile_path, encoding="utf-8"))
 runtime = obj.get("runtime_validation") or {}
 fields = [
     label,
     source,
     rc,
+    source_profile.get("profile_kind", "runtime_backed"),
+    source_profile.get("runtime_backed", True),
+    source_profile.get("ptx_pattern"),
+    runtime.get("status"),
+    runtime.get("reason"),
+    runtime.get("rung"),
+    runtime.get("kernel"),
+    runtime.get("device_name"),
+    runtime.get("cc_major"),
+    runtime.get("cc_minor"),
+    case_dir,
+]
+print("\t".join("" if value is None else str(value) for value in fields))
+PY
+                )"
+            elif [[ -f "$CASE_DIR/kretikos_source_profile.v1.json" ]]; then
+                row="$(python3 - "$label" "$SRC" "$case_rc" "$CASE_DIR" "$CASE_DIR/kretikos_source_profile.v1.json" <<'PY'
+import json
+import sys
+
+label, source, rc, case_dir, source_profile_path = sys.argv[1:]
+obj = json.load(open(source_profile_path, encoding="utf-8"))
+runtime = obj.get("runtime_validation") or {}
+fields = [
+    label,
+    source,
+    rc,
+    obj.get("profile_kind"),
+    obj.get("runtime_backed"),
+    obj.get("ptx_pattern"),
     runtime.get("status"),
     runtime.get("reason"),
     runtime.get("rung"),
@@ -452,7 +630,7 @@ print("\t".join("" if value is None else str(value) for value in fields))
 PY
                 )"
             else
-                row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$label" "$SRC" "$case_rc" "fail" "bundle_manifest_missing" "" "" "" "" "" "$CASE_DIR")"
+                row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$label" "$SRC" "$case_rc" "" "" "" "fail" "bundle_manifest_missing" "" "" "" "" "" "$CASE_DIR")"
             fi
             printf '%s\n' "$row" >>"$SUMMARY_TSV"
             if [[ "$case_rc" -ne 0 ]]; then
