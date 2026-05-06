@@ -121,6 +121,10 @@ let TK_COLONCOLON: i64 = 162
 let TK_MATCH: i64 = 22
 let TK_FATARROW: i64 = 159
 let TK_UNDERSCORE: i64 = 186
+let TK_PCT: i64 = 136
+let TK_OR: i64 = 142
+let TK_XOR: i64 = 143
+let TK_TILDE: i64 = 144
 
 var V2_LOCAL_TOK_IDX: [i64; 64] = [0; 64]
 var V2_LOCAL_REGS: [i64; 64] = [0; 64]
@@ -957,6 +961,10 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "TK_STRUCT") { return 13 }
     if token_text_eq(tok, "TK_ENUM") { return 14 }
     if token_text_eq(tok, "TK_UNDERSCORE") { return 186 }
+    if token_text_eq(tok, "TK_PCT") { return 136 }
+    if token_text_eq(tok, "TK_OR") { return 142 }
+    if token_text_eq(tok, "TK_XOR") { return 143 }
+    if token_text_eq(tok, "TK_TILDE") { return 144 }
 
     if token_text_eq(tok, "V2_BUILTIN_PRINT") { return 0 }
     if token_text_eq(tok, "V2_BUILTIN_PRINT_INT") { return 1 }
@@ -1488,7 +1496,9 @@ fn is_cmp_op(k: i64) -> bool {
 }
 
 fn is_arith_op(k: i64) -> bool {
-    k == TK_PLUS || k == TK_MINUS || k == TK_STAR || k == TK_SLASH
+    k == TK_PLUS || k == TK_MINUS || k == TK_STAR || k == TK_SLASH ||
+    k == TK_AMP || k == TK_OR || k == TK_XOR || k == TK_PCT ||
+    k == TK_SHL || k == TK_SHR
 }
 
 fn binary_op_from_cmp_kind(kind: i64) -> BinaryOp {
@@ -1508,12 +1518,18 @@ fn emit_instr(func: &! IrFunction, instr: IrInstr) with Mut, Panic {
     }
 }
 
-// op_kind → binop code for arith (1=add,2=sub,3=mul,4=div)
+// op_kind → binop code for arith (1=add,2=sub,3=mul,4=div,11=and,12=or,13=xor,14=shl,15=shr,16=rem)
 fn arith_op_to_code(k: i64) -> i64 {
     if k == TK_PLUS { return 1 }
     if k == TK_MINUS { return 2 }
     if k == TK_STAR { return 3 }
     if k == TK_SLASH { return 4 }
+    if k == TK_AMP { return 11 }
+    if k == TK_OR { return 12 }
+    if k == TK_XOR { return 13 }
+    if k == TK_SHL { return 14 }
+    if k == TK_SHR { return 15 }
+    if k == TK_PCT { return 16 }
     1
 }
 
@@ -1873,6 +1889,15 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         let zero = alloc_reg(ctx)
         ufn_record_load_imm(zero, 0)
         ufn_record_binop(dst, inner.reg, 5, zero)
+        return ExprParse { ok: 1, reg: dst, next: inner.next}
+    }
+    if k == TK_TILDE {
+        let inner = parse_atom_ir(func, ctx, pos + 1)
+        if inner.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+        let dst = alloc_reg(ctx)
+        let neg1 = alloc_reg(ctx)
+        ufn_record_load_imm(neg1, -1)
+        ufn_record_binop(dst, inner.reg, 13, neg1)
         return ExprParse { ok: 1, reg: dst, next: inner.next}
     }
     if k == TK_MINUS && token_kind(pos + 1) == TK_INT {
@@ -3910,6 +3935,55 @@ fn drv_emit_div_rcx() with Mut, Div, Panic {
     drv_emit_byte(241)
 }
 
+// AND rax, rbx  (48 21 D8)
+fn drv_emit_and_rax_rbx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(33)
+    drv_emit_byte(216)
+}
+
+// OR rax, rbx  (48 09 D8)
+fn drv_emit_or_rax_rbx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(9)
+    drv_emit_byte(216)
+}
+
+// XOR rax, rbx  (48 31 D8)
+fn drv_emit_xor_rax_rbx_bitwise() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(49)
+    drv_emit_byte(216)
+}
+
+// MOV rcx, rax  (48 89 C1)
+fn drv_emit_mov_rcx_rax() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(137)
+    drv_emit_byte(193)
+}
+
+// SAL rax, cl  (48 D3 E0) — signed left shift
+fn drv_emit_sal_rax_cl() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(211)
+    drv_emit_byte(224)
+}
+
+// SAR rax, cl  (48 D3 F8) — arithmetic right shift
+fn drv_emit_sar_rax_cl() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(211)
+    drv_emit_byte(248)
+}
+
+// IDIV rbx — remainder lands in rdx
+fn drv_emit_idiv_rbx() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(247)
+    drv_emit_byte(251)
+}
+
 fn drv_emit_cmp_rax_imm8(imm: i64) with Mut, Div, Panic {
     drv_emit_byte(72)
     drv_emit_byte(131)
@@ -4257,6 +4331,61 @@ fn drv_emit_any_binop(dst: i64, lhs: i64, op_code: i64, rhs: i64) -> bool with M
         else { drv_emit_setcc_al(157) }
         drv_emit_movzx_rax_al()
         drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    // 11=and, 12=or, 13=xor
+    if op_code == 11 {
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_push_rax()
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_pop_rbx()
+        drv_emit_and_rax_rbx()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    if op_code == 12 {
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_push_rax()
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_pop_rbx()
+        drv_emit_or_rax_rbx()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    if op_code == 13 {
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_push_rax()
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_pop_rbx()
+        drv_emit_xor_rax_rbx_bitwise()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    // 14=shl, 15=shr — shift amount in rcx
+    if op_code == 14 {
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_mov_rcx_rax()
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_sal_rax_cl()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    if op_code == 15 {
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_mov_rcx_rax()
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_sar_rax_cl()
+        drv_core_store_rax_to_temp(dst)
+        return true
+    }
+    // 16=rem — idiv, remainder in rdx
+    if op_code == 16 {
+        drv_core_load_temp_to_rax(rhs)
+        drv_emit_mov_reg_reg(1, 0)
+        drv_core_load_temp_to_rax(lhs)
+        drv_emit_cqo()
+        drv_emit_idiv_rcx()
+        drv_emit_rdx_to_temp(dst)
         return true
     }
     false
