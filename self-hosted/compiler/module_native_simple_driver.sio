@@ -1,0 +1,299 @@
+// self-hosted::compiler::module_native_simple_driver
+//
+// Minimal imported-simple-IR native writer for the modular lean CLI.
+// Keep this file free of the full native codegen imports: lean.sio must be
+// runnable for frontend probes without paying the heavy backend/global-init cost.
+
+use module_frontend::{
+    imported_simple_ir_global_fn_count,
+    imported_simple_ir_global_fn_kind,
+    imported_simple_ir_global_fn_name_hash,
+    imported_simple_ir_global_fn_target_hash,
+    imported_simple_ir_global_fn_value,
+    load_multimodule_imported_simple_ir_global,
+    module_frontend_file_maybe_has_use
+}
+
+fn simple_driver_put_u8(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic {
+    (*buf)[pos] = (val & 255) as i8
+}
+
+fn simple_driver_put_u16(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
+    simple_driver_put_u8(buf, pos, val)
+    simple_driver_put_u8(buf, pos + 1, val >> 8)
+}
+
+fn simple_driver_put_u32(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
+    simple_driver_put_u8(buf, pos, val)
+    simple_driver_put_u8(buf, pos + 1, val >> 8)
+    simple_driver_put_u8(buf, pos + 2, val >> 16)
+    simple_driver_put_u8(buf, pos + 3, val >> 24)
+}
+
+fn simple_driver_put_u64(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
+    simple_driver_put_u32(buf, pos, val)
+    simple_driver_put_u32(buf, pos + 4, val >> 32)
+}
+
+fn simple_driver_find_fn(name: string) -> i64 with Panic {
+    var name_hash: i64 = 5381
+    var ni: i64 = 0
+    while ni < str_len(name) {
+        name_hash = (name_hash * 33) + str_char_at(name, ni)
+        ni = ni + 1
+    }
+    var fi: i64 = 0
+    let count = imported_simple_ir_global_fn_count()
+    while fi < count {
+        if imported_simple_ir_global_fn_name_hash(fi) == name_hash {
+            return fi
+        }
+        fi = fi + 1
+    }
+    -1
+}
+
+fn simple_driver_fn_size(fi: i64) -> i64 with Panic {
+    let kind = imported_simple_ir_global_fn_kind(fi)
+    if kind == 1 || kind == 2 {
+        return 6
+    }
+    if kind == 3 {
+        return 27
+    }
+    -1
+}
+
+fn simple_driver_fn_offset(func_start: i64, idx: i64) -> i64 with Panic {
+    var off = func_start
+    var i: i64 = 0
+    while i < idx {
+        off = off + simple_driver_fn_size(i)
+        i = i + 1
+    }
+    off
+}
+
+fn simple_driver_has_print() -> bool with Panic {
+    var fi: i64 = 0
+    let count = imported_simple_ir_global_fn_count()
+    while fi < count {
+        if imported_simple_ir_global_fn_kind(fi) == 3 {
+            return true
+        }
+        fi = fi + 1
+    }
+    false
+}
+
+fn simple_driver_emit_fn(
+    fi: i64,
+    func_start: i64,
+    data_off: i64,
+    bytes: &![i8; 131072]
+) -> bool with Mut, Panic, Div {
+    let kind = imported_simple_ir_global_fn_kind(fi)
+    let off = simple_driver_fn_offset(func_start, fi)
+    if kind == 1 {
+        let target_hash = imported_simple_ir_global_fn_target_hash(fi)
+        var target: i64 = 0 - 1
+        var ti: i64 = 0
+        let count = imported_simple_ir_global_fn_count()
+        while ti < count {
+            if imported_simple_ir_global_fn_name_hash(ti) == target_hash {
+                target = ti
+                ti = count
+            } else {
+                ti = ti + 1
+            }
+        }
+        if target < 0 || target >= imported_simple_ir_global_fn_count() {
+            return false
+        }
+        let target_off = simple_driver_fn_offset(func_start, target)
+        let rel = target_off - (off + 5)
+        simple_driver_put_u8(bytes, off, 232)
+        simple_driver_put_u32(bytes, off + 1, rel)
+        simple_driver_put_u8(bytes, off + 5, 195)
+        return true
+    }
+    if kind == 2 {
+        simple_driver_put_u8(bytes, off, 184)
+        simple_driver_put_u32(bytes, off + 1, imported_simple_ir_global_fn_value(fi))
+        simple_driver_put_u8(bytes, off + 5, 195)
+        return true
+    }
+    if kind == 3 {
+        simple_driver_put_u8(bytes, off, 184)
+        simple_driver_put_u32(bytes, off + 1, 1)
+        simple_driver_put_u8(bytes, off + 5, 191)
+        simple_driver_put_u32(bytes, off + 6, 1)
+        simple_driver_put_u8(bytes, off + 10, 72)
+        simple_driver_put_u8(bytes, off + 11, 141)
+        simple_driver_put_u8(bytes, off + 12, 53)
+        simple_driver_put_u32(bytes, off + 13, data_off - (off + 17))
+        simple_driver_put_u8(bytes, off + 17, 186)
+        simple_driver_put_u32(bytes, off + 18, 3)
+        simple_driver_put_u8(bytes, off + 22, 15)
+        simple_driver_put_u8(bytes, off + 23, 5)
+        simple_driver_put_u8(bytes, off + 24, 49)
+        simple_driver_put_u8(bytes, off + 25, 192)
+        simple_driver_put_u8(bytes, off + 26, 195)
+        return true
+    }
+    false
+}
+
+fn simple_driver_write_imported_simple_ir_elf(output_path: string) -> i32 with IO, Mut, Panic, Div {
+    var bytes: [i8; 131072] = [0; 131072]
+    let code_off: i64 = 120
+    let func_start: i64 = code_off + 14
+    let fn_count = imported_simple_ir_global_fn_count()
+    let main_fn = simple_driver_find_fn("main")
+    if main_fn < 0 {
+        print("Native compilation failed: imported_simple_ir_missing_main\n")
+        return 1
+    }
+
+    var fi: i64 = 0
+    while fi < fn_count {
+        let fn_size = simple_driver_fn_size(fi)
+        if fn_size < 0 {
+            print("Native compilation failed: imported_simple_ir_unsupported_function_shape\n")
+            return 1
+        }
+        fi = fi + 1
+    }
+    let code_len: i64 = simple_driver_fn_offset(func_start, fn_count)
+    let data_off: i64 = code_len
+    let file_len: i64 = if simple_driver_has_print() { code_len + 3 } else { code_len }
+
+    simple_driver_put_u8(&! bytes, 0, 127)
+    simple_driver_put_u8(&! bytes, 1, 69)
+    simple_driver_put_u8(&! bytes, 2, 76)
+    simple_driver_put_u8(&! bytes, 3, 70)
+    simple_driver_put_u8(&! bytes, 4, 2)
+    simple_driver_put_u8(&! bytes, 5, 1)
+    simple_driver_put_u8(&! bytes, 6, 1)
+    simple_driver_put_u16(&! bytes, 16, 2)
+    simple_driver_put_u16(&! bytes, 18, 62)
+    simple_driver_put_u32(&! bytes, 20, 1)
+    simple_driver_put_u64(&! bytes, 24, 4194304 + code_off)
+    simple_driver_put_u64(&! bytes, 32, 64)
+    simple_driver_put_u32(&! bytes, 48, 0)
+    simple_driver_put_u16(&! bytes, 52, 64)
+    simple_driver_put_u16(&! bytes, 54, 56)
+    simple_driver_put_u16(&! bytes, 56, 1)
+
+    simple_driver_put_u32(&! bytes, 64, 1)
+    simple_driver_put_u32(&! bytes, 68, 5)
+    simple_driver_put_u64(&! bytes, 72, 0)
+    simple_driver_put_u64(&! bytes, 80, 4194304)
+    simple_driver_put_u64(&! bytes, 88, 4194304)
+    simple_driver_put_u64(&! bytes, 96, file_len)
+    simple_driver_put_u64(&! bytes, 104, file_len)
+    simple_driver_put_u64(&! bytes, 112, 4096)
+
+    simple_driver_put_u8(&! bytes, code_off, 232)
+    simple_driver_put_u32(&! bytes, code_off + 1, simple_driver_fn_offset(func_start, main_fn) - (code_off + 5))
+    simple_driver_put_u8(&! bytes, code_off + 5, 137)
+    simple_driver_put_u8(&! bytes, code_off + 6, 199)
+    simple_driver_put_u8(&! bytes, code_off + 7, 184)
+    simple_driver_put_u32(&! bytes, code_off + 8, 60)
+    simple_driver_put_u8(&! bytes, code_off + 12, 15)
+    simple_driver_put_u8(&! bytes, code_off + 13, 5)
+
+    fi = 0
+    while fi < fn_count {
+        if !simple_driver_emit_fn(fi, func_start, data_off, &! bytes) {
+            print("Native compilation failed: imported_simple_ir_emit_failed\n")
+            return 1
+        }
+        fi = fi + 1
+    }
+
+    if simple_driver_has_print() {
+        simple_driver_put_u8(&! bytes, data_off, 52)
+        simple_driver_put_u8(&! bytes, data_off + 1, 50)
+        simple_driver_put_u8(&! bytes, data_off + 2, 10)
+    }
+
+    if write_file(output_path, bytes, file_len) < 0 {
+        print("Error: Failed to write native binary to ")
+        print(output_path)
+        print("\n")
+        return 1
+    }
+    print("Native binary size: ")
+    print_int(file_len)
+    print(" bytes\n")
+    print("Written to ")
+    print(output_path)
+    print("\n")
+    0
+}
+
+pub fn compile_imported_simple_native_advanced(
+    main_path: string,
+    output_path: string,
+    requested_target: string,
+    requested_matrix: string,
+    gpu_target: string,
+    gpu_binary_format: string,
+    gpu_strict_parity: bool,
+    optimize: bool,
+    use_profile: bool,
+    use_profile_path: string,
+    cache_dir: string,
+    cache_mode: string,
+    cache_stats: bool
+) -> i32 with IO, Mut, Div, Panic {
+    if requested_target == "wasm" {
+        print("WASM backend is unavailable in module_native_simple_driver: ")
+        print(main_path)
+        print("\n")
+        return 1
+    }
+    if optimize || use_profile || str_len(use_profile_path) > 0 || str_len(cache_dir) > 0 || cache_stats {
+        print("module_native_driver: optimizer/profile/cache lane not split yet; using uncached modular path\n")
+    }
+    if str_len(cache_mode) > 0 && cache_mode != "off" {
+        print("module_native_driver: cache_mode ignored until thin-link parity lands\n")
+    }
+
+    print("Native dispatch: requested=")
+    print(requested_target)
+    print(" resolved=x86_64-linux matrix=")
+    print(requested_matrix)
+    if str_len(gpu_target) > 0 {
+        print(" gpu_target=")
+        print(gpu_target)
+    }
+    if str_len(gpu_binary_format) > 0 {
+        print(" gpu_binary_format=")
+        print(gpu_binary_format)
+    }
+    print(" gpu_strict_parity=")
+    if gpu_strict_parity {
+        print("true")
+    } else {
+        print("false")
+    }
+    print("\n")
+
+    if !module_frontend_file_maybe_has_use(main_path) {
+        print("module_native_driver: non-imported source requires full native driver split\n")
+        return 1
+    }
+
+    print("module_native_driver: imported source uses modular IR path\n")
+    print("module_native_driver: imported source uses compact modular IR table path\n")
+    let imported_ir_status = load_multimodule_imported_simple_ir_global(main_path)
+    if imported_ir_status.ok {
+        return simple_driver_write_imported_simple_ir_elf(output_path)
+    }
+    print("module_native_driver: compact IR load failed: ")
+    print(imported_ir_status.error_msg)
+    print("\n")
+    1
+}
