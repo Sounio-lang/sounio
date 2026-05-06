@@ -27,12 +27,8 @@ SUMMARY_JSON="${SOUNIO_NATIVE_V2_FRONTEND_SUMMARY:-$ARTIFACT_DIR/native_v2_front
 RESULTS_TSV="$ARTIFACT_DIR/results.tsv"
 STRICT_MODE="${SOUNIO_NATIVE_V2_FRONTEND_STRICT:-0}"
 RUN_CPU_UMBRELLA="${SOUNIO_NATIVE_V2_FRONTEND_RUN_CPU_UMBRELLA:-1}"
-RUN_COMPAT_AUDIT="${SOUNIO_NATIVE_V2_FRONTEND_RUN_COMPAT_AUDIT:-${SOUNIO_NATIVE_V2_FRONTEND_RUN_LEGACY_MAIN:-0}}"
-REQUIRE_COMPAT_AUDIT="${SOUNIO_NATIVE_V2_FRONTEND_REQUIRE_COMPAT_AUDIT:-${SOUNIO_NATIVE_V2_FRONTEND_REQUIRE_LEGACY_MAIN:-0}}"
-
-if [[ "$REQUIRE_COMPAT_AUDIT" =~ ^(1|true|True|TRUE|yes|Yes|YES|on|On|ON)$ ]]; then
-  RUN_COMPAT_AUDIT=1
-fi
+RUN_COMPAT_AUDIT=1
+REQUIRE_COMPAT_AUDIT=1
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 
@@ -480,8 +476,6 @@ core_required = [
     "lean_modular_expr_uneg_native_compile",
     "lean_modular_expr_while_native_compile",
     "lean_modular_expr_else_if_native_compile",
-]
-compat_audit_cases = [
     "lean_compat_load_ir",
     "lean_compat_load_ir_trace",
     "lean_compat_imported_load_ir",
@@ -499,7 +493,8 @@ compat_audit_cases = [
     "lean_compat_imported_chain_native_compile",
     "lean_compat_imported_stdout_native_compile",
 ]
-required = core_required + (compat_audit_cases if require_compat_audit else [])
+compat_audit_cases = []
+required = core_required
 
 compat_audit_case_set = set(compat_audit_cases)
 classified_case_ids = {classification.get("case_id") for classification in classifications}
@@ -522,14 +517,9 @@ for classification in classifications:
         classification["blocking"] = True
 
 blocking_classifications = [c for c in classifications if c.get("blocking", True)]
-compat_audit_present = [case_by_id[case_id] for case_id in compat_audit_cases if case_id in case_by_id]
-compat_audit_fail_count = sum(1 for entry in compat_audit_present if entry["rc"] != 0)
-if not run_compat_audit:
-    compat_audit_status = "skipped"
-elif compat_audit_fail_count == 0 and len(compat_audit_present) == len(compat_audit_cases):
-    compat_audit_status = "pass"
-else:
-    compat_audit_status = "fail"
+compat_audit_present = []
+compat_audit_fail_count = 0
+compat_audit_status = "promoted_to_core"
 
 all_required_present = all(case_id in case_by_id for case_id in required)
 all_required_pass = all(case_by_id.get(case_id, {}).get("rc") == 0 for case_id in required)
@@ -604,7 +594,7 @@ payload = {
         "lean_compat_body_lowered_passed": "body_lowered=1" in lean_compat_log,
         "lean_compat_imported_body_lowered_passed": "body_lowered=3" in lean_compat_imported_log,
     },
-    "next_action": "keep the legacy compatibility shim isolated; promote new compiler work through lean.sio and module_* entrypoints",
+    "next_action": "all compat cases are core_required; next: native_compile_driver modular self-compile and Task C blocker",
 }
 
 summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -669,8 +659,7 @@ run_case "lean_modular_expr_while_native_compile" "$LOG_DIR/lean_modular.expr_wh
 run_case "lean_modular_expr_else_if_native_compile" "$LOG_DIR/lean_modular.expr_else_if_native_compile.log" \
   bash -c '"$1" run self-hosted/compiler/lean.sio -- tests/selfhost/native_runtime/import_expr_else_if_42.sio -o "$2" && chmod +x "$2" && "$2"; rc=$?; test "$rc" -eq 42' \
   bash "$SOUC_BIN" "$OUT_DIR/import_expr_else_if_42.lean.native"
-if [[ "$RUN_COMPAT_AUDIT" =~ ^(1|true|True|TRUE|yes|Yes|YES|on|On|ON)$ ]]; then
-  run_case "lean_compat_load_ir" "$LOG_DIR/lean_compat.probe_load_ir.log" \
+run_case "lean_compat_load_ir" "$LOG_DIR/lean_compat.probe_load_ir.log" \
     "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --probe-load-ir examples/hello.sio
   run_case "lean_compat_load_ir_trace" "$LOG_DIR/lean_compat.probe_load_ir_trace.log" \
     "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --probe-load-ir-trace examples/hello.sio
@@ -714,9 +703,6 @@ if [[ "$RUN_COMPAT_AUDIT" =~ ^(1|true|True|TRUE|yes|Yes|YES|on|On|ON)$ ]]; then
   run_case "lean_compat_imported_stdout_native_compile" "$LOG_DIR/lean_compat.probe_imported_stdout_native_compile.log" \
     bash -c '"$1" run self-hosted/compiler/lean.sio -- --native-compile tests/selfhost/native_runtime/import_nested_print_42.sio -o "$2" && chmod +x "$2" && "$2" > "$3"; rc=$?; test "$rc" -eq 0 || exit 1; cmp -s "$3" "$4" || { echo stdout_mismatch; od -An -tx1 "$3"; exit 1; }' \
     bash "$SOUC_BIN" "$OUT_DIR/import_nested_print_42.native" "$OUT_DIR/import_nested_print_42.stdout" "$ROOT_DIR/tests/selfhost/native_runtime/import_nested_print_42.expected"
-else
-  echo "[native-v2-frontend] skipping modular compatibility probes (set SOUNIO_NATIVE_V2_FRONTEND_RUN_COMPAT_AUDIT=1 to audit)"
-fi
 
 if emit_summary_json; then
   status="$(python3 - "$SUMMARY_JSON" <<'PY'
