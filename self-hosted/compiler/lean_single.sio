@@ -3941,6 +3941,29 @@ fn stmt_is_indexed_field_field_store(p0: i64) -> bool with Panic, Mut {
     return TK[(p + 2) as usize] == 16
 }
 
+fn stmt_is_field_array_array_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 3 { return false }
+    if TK[(p0 + 1) as usize] != 50 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 41 { return false }
+    var p = p0 + 4
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    if TK[p as usize] != 41 { return false }
+    p = p + 1
+    var depth2: i64 = 1
+    while p < TC && depth2 > 0 {
+        if TK[p as usize] == 41 { depth2 = depth2 + 1 }
+        if TK[p as usize] == 42 { depth2 = depth2 - 1 }
+        p = p + 1
+    }
+    return TK[p as usize] == 16
+}
+
 fn stmt_is_deref_array_store(p0: i64) -> bool with Panic, Mut {
     if TK[p0 as usize] != 6 { return false }
     if TK[(p0 + 1) as usize] != 19 { return false }
@@ -4527,13 +4550,14 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         if TK[p as usize] == 41 {
             scan_type(p)
             let inner_ty = SCAN_TY
+            let inner_hash = SCAN_TY_HASH
             p = SCAN_TY_NEXT
             SCAN_TY = 8
             SCAN_TY_ESIZ = 8
             if TK[p as usize] == 27 { p = p + 1 }
             if TK[p as usize] == 4 { SCAN_TY_ALEN = TV[p as usize]; p = p + 1 }
             if TK[p as usize] == 42 { p = p + 1 }
-            SCAN_TY_HASH = arr_ty_hash(SCAN_TY_ALEN, SCAN_TY_ESIZ, inner_ty)
+            SCAN_TY_HASH = arr_ty_hash_with_elem(SCAN_TY_ALEN, SCAN_TY_ESIZ, inner_ty, inner_hash)
             SCAN_TY_NEXT = p
             return
         }
@@ -6765,6 +6789,31 @@ fn fill_repeat_struct_array_slots_x86(dst_start: i64, field_hash: i64) with Mut,
                 em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (source)
                 em(0x48); em(0x89); em(0xc8)  // mov rax, rcx (dest)
                 emit_copy_agg_to_ptr_x86(6, elem_hash)
+                emit_store_var(dst_start - j)
+                j = j + 1
+            }
+            return
+        }
+        // nested array: elem is itself an array — create separate copy per outer slot
+        let inner_nslots = arr_storage_slots(elem_hash)
+        if inner_nslots > 0 {
+            let src_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(src_slot)
+            var j: i64 = 0
+            while j < nslots {
+                // allocate inner_nslots * 8 bytes for this outer slot's copy
+                emit_imm64(inner_nslots * 8)
+                emit_heap_alloc_x86()
+                // rax = new inner array ptr; set up copy from src
+                let new_ptr_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(new_ptr_slot)          // save new ptr
+                emit_load_var(src_slot)               // rax = src ptr
+                em(0x48); em(0x89); em(0xc2)          // mov rdx, rax (src)
+                emit_load_var(new_ptr_slot)           // rax = dst ptr
+                emit_copy_agg_to_ptr_x86(8, elem_hash)  // copy inner_nslots qwords
+                emit_load_var(new_ptr_slot)
                 emit_store_var(dst_start - j)
                 j = j + 1
             }
@@ -12564,7 +12613,14 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 var elem_ty = arr_hash_elem_ty(base_hash)
                 let elem_hash = arr_hash_elem_hash(base_hash)
                 LAST_ALEN = arr_hash_alen(base_hash)
-                if esiz == 8 {
+                if elem_ty == 8 && elem_hash != 0 {
+                    // nested array stored as pointer-per-slot: load pointer to inner array
+                    // rcx = outer array base, rdx = outer index
+                    em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8]
+                    EXPR_TY = 8
+                    EXPR_TY_HASH = elem_hash
+                    EXPR_IS_F64 = 0
+                } else if esiz == 8 {
                     em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8]
                     EXPR_TY = elem_ty
                     EXPR_TY_HASH = elem_hash
@@ -16710,6 +16766,126 @@ fn compile_field_array_store_x86() with IO, Mut, Panic, Div {
     }
 }
 
+fn compile_field_array_array_store_x86() with IO, Mut, Panic, Div {
+    // Handles: ident.field[outer_idx][inner_idx] = val
+    let name_tok = EP
+    let ns = TS[EP as usize]
+    let ne = TE[EP as usize]
+    let field_tok = EP + 2
+    let fns = TS[(EP + 2) as usize]
+    let fne = TE[(EP + 2) as usize]
+    let fh = gl_name_hash(fns, fne)
+    EP = EP + 4
+    // compile outer index
+    let slot_outer = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    compile_or()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    emit_store_var(slot_outer)
+    // skip inner [
+    if TK[EP as usize] == 41 { EP = EP + 1 }
+    // compile inner index
+    let slot_inner = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    compile_or()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    emit_store_var(slot_inner)
+    // skip =
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+    // compile RHS value
+    compile_or()
+    let slot_val = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(slot_val)
+    // resolve field
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let si = resolve_field_struct_index(ns, ne, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if si < 0 {
+        tc_error(field_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let foff = st_field_offset(si, fh)
+    let fty = st_field_ty(si, fh)
+    let fhash = st_field_hash(si, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if fty != 8 {
+        tc_error(field_tok, "double-indexed field requires array field")
+        return
+    }
+    let inner_hash = arr_hash_elem_hash(fhash)
+    if inner_hash == 0 {
+        tc_error(field_tok, "field element is not a nested array type")
+        return
+    }
+    let inner_esiz = arr_hash_esiz(inner_hash)
+    let outer_stride = arr_storage_slots(inner_hash) * 8
+    // load base address of struct variable
+    let slot = var_find(ns, ne)
+    if slot >= 0 { emit_load_var(slot) }
+    else {
+        let gi = gl_find(ns, ne)
+        if gi >= 0 {
+            let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+            em(0x48); em(0xb8); em64(addr)
+        } else {
+            tc_undefined_var(name_tok)
+            em(0x31); em(0xc0)
+        }
+    }
+    // rax = base; add field offset: rax = base + foff (pointer to outer array)
+    if foff != 0 { em(0x48); em(0x8d); em(0x80); em32(foff) }
+    // load inner-array pointer: [outer_base + outer_idx * 8]
+    // rax = outer array base, load outer_idx into rcx
+    emit_load_var(slot_outer)                           // rax = outer_idx
+    em(0x48); em(0x89); em(0xc1)                        // mov rcx, rax (outer_idx)
+    // need outer_base again — save it first via a temp slot
+    let slot_outer_base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    // reload outer array base
+    let slot2 = var_find(ns, ne)
+    if slot2 >= 0 { emit_load_var(slot2) }
+    else {
+        let gi2 = gl_find(ns, ne)
+        if gi2 >= 0 {
+            let addr2 = GL_BSS_BASE + GL[(gi2 * 4 + 1) as usize]
+            em(0x48); em(0xb8); em64(addr2)
+        } else {
+            em(0x31); em(0xc0)
+        }
+    }
+    if foff != 0 { em(0x48); em(0x8d); em(0x80); em32(foff) }
+    emit_store_var(slot_outer_base)                     // save outer array base
+    // load inner array pointer: [outer_base + outer_idx * 8]
+    emit_load_var(slot_outer_base)                      // rax = outer array base
+    em(0x48); em(0x8b); em(0x04); em(0xc8)              // mov rax, [rax + rcx*8]
+    // rax = inner array pointer; save it
+    let slot_inner_ptr = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(slot_inner_ptr)
+    // load inner_idx into rcx
+    emit_load_var(slot_inner)
+    em(0x48); em(0x89); em(0xc1)                        // mov rcx, rax (inner_idx)
+    // load val into rdx
+    emit_load_var(slot_val)
+    em(0x48); em(0x89); em(0xc2)                        // mov rdx, rax (val)
+    // reload inner array pointer into rax
+    emit_load_var(slot_inner_ptr)
+    // store: [rax + rcx * inner_esiz] = rdx
+    if inner_esiz == 8 {
+        em(0x48); em(0x89); em(0x14); em(0xc8)          // mov [rax + rcx*8], rdx
+    } else {
+        em(0x88); em(0x14); em(0x08)                    // mov [rax + rcx], dl
+    }
+}
+
 fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
     let name_tok = EP
     let ns = TS[EP as usize]; let ne = TE[EP as usize]
@@ -17487,6 +17663,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 EXPR_PARAM_USED = 0
             }
         }
+        return
+    }
+
+    // x.field[outer][inner] = expr (nested array double-subscript store)
+    if stmt_is_field_array_array_store(EP) {
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        compile_field_array_array_store_x86()
         return
     }
 
