@@ -13,6 +13,12 @@ export function CustomCursor() {
       return;
     }
 
+    // Respect OS “reduce motion” — keep native cursor semantics
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (reduceMotion.matches) {
+      return;
+    }
+
     const moveCursor = (e: MouseEvent) => {
       cursorX.set(e.clientX);
       cursorY.set(e.clientY);
