@@ -12,7 +12,7 @@
 #   kretikos build <source.sio> [opts] -o <out>  - PTX via checked GPU artifact if present
 #   kretikos emit-ptx <pattern> -o <file.ptx>   - emit PTX template from in-tree emitter
 #   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
-#   kretikos bundle [-o <dir>]                  - emit PTX+CUBIN plus bundle manifest
+#   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
 #
 # Supported PTX patterns: vec_add
 # Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, epistemic_dual_f32
@@ -72,6 +72,12 @@ __kretikos_repo_path() {
     else
         echo "$path"
     fi
+}
+
+__kretikos_token_value() {
+    local text="$1"
+    local key="$2"
+    tr ' ' '\n' <<<"$text" | awk -F= -v k="$key" '$1 == k { print $2; exit }'
 }
 
 CMD="${1:-}"
@@ -315,6 +321,9 @@ PY
         PTX_PATTERN="vec_add"
         CUBIN_KIND="epistemic_dual_f32"
         FORCE=0
+        TOOLCHAIN_MODE="off"
+        RUNTIME_MODE="off"
+        RUNTIME_RUNG=""
 
         while [[ $# -gt 0 ]]; do
             case "$1" in
@@ -334,6 +343,34 @@ PY
                     FORCE=1
                     shift
                     ;;
+                --validate-toolchain)
+                    TOOLCHAIN_MODE="auto"
+                    shift
+                    ;;
+                --require-toolchain)
+                    TOOLCHAIN_MODE="required"
+                    shift
+                    ;;
+                --toolchain-mode)
+                    TOOLCHAIN_MODE="$2"
+                    shift 2
+                    ;;
+                --validate-runtime)
+                    RUNTIME_MODE="auto"
+                    shift
+                    ;;
+                --require-runtime)
+                    RUNTIME_MODE="required"
+                    shift
+                    ;;
+                --runtime-mode)
+                    RUNTIME_MODE="$2"
+                    shift 2
+                    ;;
+                --runtime-rung)
+                    RUNTIME_RUNG="$2"
+                    shift 2
+                    ;;
                 -*)
                     echo "error: unknown option $1" >&2
                     exit 1
@@ -344,6 +381,21 @@ PY
                     ;;
             esac
         done
+
+        case "$TOOLCHAIN_MODE" in
+            off|auto|required) ;;
+            *)
+                echo "error: --toolchain-mode must be off, auto, or required" >&2
+                exit 1
+                ;;
+        esac
+        case "$RUNTIME_MODE" in
+            off|auto|required) ;;
+            *)
+                echo "error: --runtime-mode must be off, auto, or required" >&2
+                exit 1
+                ;;
+        esac
 
         if [[ -z "$OUT_DIR" ]]; then
             OLD_UMASK="$(umask)"
@@ -359,18 +411,59 @@ PY
         PTX_OUT="$OUT_DIR/kretikos_${PTX_PATTERN}.ptx"
         CUBIN_OUT="$OUT_DIR/kretikos_${CUBIN_KIND}.cubin"
         MANIFEST_OUT="$OUT_DIR/kretikos_bundle.v1.json"
+        PTXAS_CUBIN_OUT="$OUT_DIR/kretikos_${PTX_PATTERN}.ptxas.cubin"
+        PTXAS_LOG_OUT="$OUT_DIR/kretikos_ptxas.log"
+        NVDISASM_OUT="$OUT_DIR/kretikos_${CUBIN_KIND}.nvdisasm.txt"
+        NVDISASM_LOG_OUT="$OUT_DIR/kretikos_nvdisasm.log"
+        RUNTIME_LOADER_OUT="$OUT_DIR/kretikos_nvidia_bare_loader"
+        RUNTIME_LOG_OUT="$OUT_DIR/kretikos_runtime.log"
         PTX_REL="$(basename "$PTX_OUT")"
         CUBIN_REL="$(basename "$CUBIN_OUT")"
+        PTXAS_CUBIN_REL="$(basename "$PTXAS_CUBIN_OUT")"
+        PTXAS_LOG_REL="$(basename "$PTXAS_LOG_OUT")"
+        NVDISASM_REL="$(basename "$NVDISASM_OUT")"
+        NVDISASM_LOG_REL="$(basename "$NVDISASM_LOG_OUT")"
+        RUNTIME_LOG_REL="$(basename "$RUNTIME_LOG_OUT")"
         COMPILER_PATH="$(__kretikos_repo_path "$SOUC_BIN")"
         STDLIB_PATH="$(__kretikos_repo_path "$SOUNIO_STDLIB_PATH")"
 
-        if [[ "$FORCE" -ne 1 ]] && [[ -e "$PTX_OUT" || -e "$CUBIN_OUT" || -e "$MANIFEST_OUT" ]]; then
+        if [[ "$FORCE" -ne 1 ]] && [[ -e "$PTX_OUT" || -e "$CUBIN_OUT" || -e "$MANIFEST_OUT" || -e "$PTXAS_CUBIN_OUT" || -e "$PTXAS_LOG_OUT" || -e "$NVDISASM_OUT" || -e "$NVDISASM_LOG_OUT" || -e "$RUNTIME_LOG_OUT" ]]; then
             echo "error: bundle output already exists in $OUT_DIR; use --force to overwrite" >&2
             exit 1
         fi
 
         "$KRETIKOS_SELF" emit-ptx "$PTX_PATTERN" -o "$PTX_OUT"
         "$KRETIKOS_SELF" emit-cubin "$CUBIN_KIND" -o "$CUBIN_OUT"
+
+        KERNEL_NAME=""
+        DEFAULT_RUNTIME_RUNG=""
+        if [[ "$RUNTIME_MODE" != "off" ]]; then
+            case "$CUBIN_KIND" in
+                exit_only)
+                    KERNEL_NAME="sounio_bare_exit_sm80"
+                    DEFAULT_RUNTIME_RUNG="admission"
+                    ;;
+                store_u32_const)
+                    KERNEL_NAME="sounio_bare_store_u32_const_sm80"
+                    DEFAULT_RUNTIME_RUNG="store_u32_const"
+                    ;;
+                vec_add_f32)
+                    KERNEL_NAME="sounio_bare_vec_add_f32_sm80"
+                    DEFAULT_RUNTIME_RUNG="vec_add_f32"
+                    ;;
+                epistemic_dual_f32)
+                    KERNEL_NAME="sounio_bare_epistemic_dual_output_f32_sm80"
+                    DEFAULT_RUNTIME_RUNG="epistemic_dual_output_f32"
+                    ;;
+                *)
+                    echo "error: unsupported CUBIN kind '$CUBIN_KIND'" >&2
+                    exit 1
+                    ;;
+            esac
+            if [[ -z "$RUNTIME_RUNG" ]]; then
+                RUNTIME_RUNG="$DEFAULT_RUNTIME_RUNG"
+            fi
+        fi
 
         PTX_BYTES="$(__kretikos_file_size "$PTX_OUT")" || exit 1
         CUBIN_BYTES="$(__kretikos_file_size "$CUBIN_OUT")" || exit 1
@@ -400,22 +493,165 @@ PY
             exit 1
         }
 
-        if command -v ptxas >/dev/null 2>&1; then
-            PTXAS_STATUS="available_but_not_run_by_bundle"
-        else
-            PTXAS_STATUS="not_available"
+        PTXAS_STATUS="off"
+        PTXAS_REASON="disabled"
+        PTXAS_PATH=""
+        PTXAS_RC=""
+        PTXAS_BYTES=""
+        PTXAS_SHA=""
+        if [[ "$TOOLCHAIN_MODE" != "off" ]]; then
+            if ! command -v ptxas >/dev/null 2>&1; then
+                PTXAS_STATUS="not_run"
+                PTXAS_REASON="ptxas_missing"
+                printf 'status=not_run reason=ptxas_missing\n' >"$PTXAS_LOG_OUT"
+                if [[ "$TOOLCHAIN_MODE" == "required" ]]; then
+                    echo "kretikos: required PTX assembler validation failed - ptxas missing" >&2
+                    exit 1
+                fi
+            else
+                PTXAS_PATH="$(command -v ptxas)"
+                set +e
+                "$PTXAS_PATH" "$PTX_OUT" -o "$PTXAS_CUBIN_OUT" >"$PTXAS_LOG_OUT" 2>&1
+                PTXAS_RC=$?
+                set -e
+                if [[ "$PTXAS_RC" -eq 0 ]]; then
+                    PTXAS_STATUS="pass"
+                    PTXAS_REASON="ptxas_assembly_pass"
+                    PTXAS_BYTES="$(__kretikos_file_size "$PTXAS_CUBIN_OUT")" || exit 1
+                    PTXAS_SHA="$(__kretikos_sha256 "$PTXAS_CUBIN_OUT")" || exit 1
+                else
+                    PTXAS_STATUS="fail"
+                    PTXAS_REASON="ptxas_assembly_failed"
+                    echo "kretikos: PTX assembler validation failed; see $PTXAS_LOG_OUT" >&2
+                    if [[ "$TOOLCHAIN_MODE" == "required" ]]; then
+                        exit 1
+                    fi
+                fi
+            fi
         fi
-        if command -v nvdisasm >/dev/null 2>&1; then
-            NVDISASM_STATUS="available_but_not_run_by_bundle"
-        else
-            NVDISASM_STATUS="not_available"
+
+        NVDISASM_STATUS="off"
+        NVDISASM_REASON="disabled"
+        NVDISASM_PATH=""
+        NVDISASM_RC=""
+        if [[ "$TOOLCHAIN_MODE" != "off" ]]; then
+            if ! command -v nvdisasm >/dev/null 2>&1; then
+                NVDISASM_STATUS="not_run"
+                NVDISASM_REASON="nvdisasm_missing"
+                printf 'status=not_run reason=nvdisasm_missing\n' >"$NVDISASM_LOG_OUT"
+                if [[ "$TOOLCHAIN_MODE" == "required" ]]; then
+                    echo "kretikos: required disassembler validation failed - nvdisasm missing" >&2
+                    exit 1
+                fi
+            else
+                NVDISASM_PATH="$(command -v nvdisasm)"
+                set +e
+                "$NVDISASM_PATH" "$CUBIN_OUT" >"$NVDISASM_OUT" 2>"$NVDISASM_LOG_OUT"
+                NVDISASM_RC=$?
+                set -e
+                if [[ "$NVDISASM_RC" -eq 0 ]]; then
+                    NVDISASM_STATUS="pass"
+                    NVDISASM_REASON="nvdisasm_pass"
+                else
+                    NVDISASM_STATUS="fail"
+                    NVDISASM_REASON="nvdisasm_failed"
+                    echo "kretikos: disassembler validation failed; see $NVDISASM_LOG_OUT" >&2
+                    if [[ "$TOOLCHAIN_MODE" == "required" ]]; then
+                        exit 1
+                    fi
+                fi
+            fi
+        fi
+
+        RUNTIME_STATUS="off"
+        RUNTIME_REASON="disabled"
+        RUNTIME_RC=""
+        RUNTIME_STAGE=""
+        RUNTIME_CUDA_RESULT=""
+        RUNTIME_DRIVER_VERSION=""
+        RUNTIME_DEVICE_COUNT=""
+        RUNTIME_CC_MAJOR=""
+        RUNTIME_CC_MINOR=""
+        RUNTIME_DEVICE_NAME=""
+        if [[ "$RUNTIME_MODE" != "off" ]]; then
+            KRETIKOS_CC="${CC:-}"
+            if [[ -z "$KRETIKOS_CC" || ! -x "$(command -v "$KRETIKOS_CC" 2>/dev/null || true)" ]]; then
+                KRETIKOS_CC=""
+                for candidate in cc gcc clang; do
+                    if command -v "$candidate" >/dev/null 2>&1; then
+                        KRETIKOS_CC="$(command -v "$candidate")"
+                        break
+                    fi
+                done
+            fi
+            if [[ -z "$KRETIKOS_CC" ]]; then
+                RUNTIME_STATUS="not_run"
+                RUNTIME_REASON="c_compiler_missing"
+                if [[ "$RUNTIME_MODE" == "required" ]]; then
+                    echo "kretikos: required runtime validation failed - C compiler missing" >&2
+                    exit 1
+                fi
+            elif [[ ! -f "$ROOT_DIR/scripts/gpu/nvidia_bare_driver_loader.c" ]]; then
+                RUNTIME_STATUS="not_run"
+                RUNTIME_REASON="loader_source_missing"
+                if [[ "$RUNTIME_MODE" == "required" ]]; then
+                    echo "kretikos: required runtime validation failed - loader source missing" >&2
+                    exit 1
+                fi
+            else
+                set +e
+                "$KRETIKOS_CC" -O2 "$ROOT_DIR/scripts/gpu/nvidia_bare_driver_loader.c" -ldl -o "$RUNTIME_LOADER_OUT" >"$RUNTIME_LOG_OUT" 2>&1
+                loader_cc_rc=$?
+                set -e
+                if [[ "$loader_cc_rc" -ne 0 ]]; then
+                    RUNTIME_STATUS="not_run"
+                    RUNTIME_REASON="loader_compile_failed"
+                    RUNTIME_RC="$loader_cc_rc"
+                    if [[ "$RUNTIME_MODE" == "required" ]]; then
+                        echo "kretikos: required runtime validation failed - loader compile failed" >&2
+                        exit 1
+                    fi
+                else
+                    set +e
+                    "$RUNTIME_LOADER_OUT" "$CUBIN_OUT" "$KERNEL_NAME" "$RUNTIME_RUNG" >>"$RUNTIME_LOG_OUT" 2>&1
+                    RUNTIME_RC=$?
+                    set -e
+                    RUNTIME_LINE="$(grep 'sounio_nvidia_bare_runtime status=' "$RUNTIME_LOG_OUT" | tail -n 1 || true)"
+                    RUNTIME_STATUS="$(__kretikos_token_value "$RUNTIME_LINE" "status")"
+                    RUNTIME_REASON="$(__kretikos_token_value "$RUNTIME_LINE" "reason")"
+                    RUNTIME_STAGE="$(__kretikos_token_value "$RUNTIME_LINE" "stage")"
+                    RUNTIME_CUDA_RESULT="$(__kretikos_token_value "$RUNTIME_LINE" "cuda_result")"
+                    RUNTIME_DRIVER_VERSION="$(__kretikos_token_value "$RUNTIME_LINE" "driver_version")"
+                    RUNTIME_DEVICE_COUNT="$(__kretikos_token_value "$RUNTIME_LINE" "device_count")"
+                    RUNTIME_CC_MAJOR="$(__kretikos_token_value "$RUNTIME_LINE" "cc_major")"
+                    RUNTIME_CC_MINOR="$(__kretikos_token_value "$RUNTIME_LINE" "cc_minor")"
+                    RUNTIME_DEVICE_NAME="$(__kretikos_token_value "$RUNTIME_LINE" "device_name")"
+                    if [[ -z "$RUNTIME_STATUS" ]]; then
+                        RUNTIME_STATUS="fail"
+                        RUNTIME_REASON="runtime_status_parse_failed"
+                    fi
+                    if [[ "$RUNTIME_STATUS" == "fail" ]]; then
+                        echo "kretikos: runtime validation $RUNTIME_STATUS - $RUNTIME_REASON; see $RUNTIME_LOG_OUT" >&2
+                    fi
+                    if [[ "$RUNTIME_MODE" == "required" && "$RUNTIME_STATUS" != "pass" ]]; then
+                        echo "kretikos: runtime validation $RUNTIME_STATUS - $RUNTIME_REASON; see $RUNTIME_LOG_OUT" >&2
+                        exit 1
+                    fi
+                fi
+            fi
         fi
         GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
         python3 - "$MANIFEST_OUT" "$GENERATED_AT" "$COMPILER_PATH" "$STDLIB_PATH" \
             "$PTX_PATTERN" "$PTX_REL" "$PTX_BYTES" "$PTX_SHA" "$PTX_VERSION" "$PTX_TARGET" \
             "$CUBIN_KIND" "$CUBIN_REL" "$CUBIN_BYTES" "$CUBIN_SHA" "$CUBIN_MAGIC" \
-            "$CUBIN_MACHINE" "$PTXAS_STATUS" "$NVDISASM_STATUS" <<'PY'
+            "$CUBIN_MACHINE" "$TOOLCHAIN_MODE" "$PTXAS_STATUS" "$PTXAS_REASON" "$PTXAS_PATH" \
+            "$PTXAS_RC" "$PTXAS_CUBIN_REL" "$PTXAS_LOG_REL" "$PTXAS_BYTES" "$PTXAS_SHA" \
+            "$NVDISASM_STATUS" "$NVDISASM_REASON" "$NVDISASM_PATH" "$NVDISASM_RC" \
+            "$NVDISASM_REL" "$NVDISASM_LOG_REL" "$RUNTIME_MODE" "$RUNTIME_STATUS" \
+            "$RUNTIME_REASON" "$RUNTIME_RC" "$RUNTIME_RUNG" "$KERNEL_NAME" "$RUNTIME_LOG_REL" \
+            "$RUNTIME_STAGE" "$RUNTIME_CUDA_RESULT" "$RUNTIME_DRIVER_VERSION" "$RUNTIME_DEVICE_COUNT" \
+            "$RUNTIME_CC_MAJOR" "$RUNTIME_CC_MINOR" "$RUNTIME_DEVICE_NAME" <<'PY'
 import json
 import sys
 
@@ -436,9 +672,69 @@ import sys
     cubin_sha,
     cubin_magic,
     cubin_machine,
+    toolchain_mode,
     ptxas_status,
+    ptxas_reason,
+    ptxas_path,
+    ptxas_rc,
+    ptxas_cubin_path,
+    ptxas_log_path,
+    ptxas_bytes,
+    ptxas_sha,
     nvdisasm_status,
+    nvdisasm_reason,
+    nvdisasm_path,
+    nvdisasm_rc,
+    nvdisasm_path_out,
+    nvdisasm_log_path,
+    runtime_mode,
+    runtime_status,
+    runtime_reason,
+    runtime_rc,
+    runtime_rung,
+    runtime_kernel,
+    runtime_log_path,
+    runtime_stage,
+    runtime_cuda_result,
+    runtime_driver_version,
+    runtime_device_count,
+    runtime_cc_major,
+    runtime_cc_minor,
+    runtime_device_name,
 ) = sys.argv[1:]
+
+def maybe_int(value):
+    if value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+def file_record(path, bytes_value="", sha=""):
+    record = {"path": path}
+    if bytes_value:
+        record["bytes"] = int(bytes_value)
+    if sha:
+        record["sha256"] = sha
+    return record
+
+boundaries = [
+    "does_not_claim_user_kernel_lowering",
+    "does_not_claim_semantic_kernel_correctness",
+    "does_not_claim_total_gpu_backend_completeness",
+    "does_not_claim_parallel_cpu_fallback",
+    "does_not_claim_unchecked_gpu_alloc_surface",
+    "does_not_claim_ptxas_semantic_correctness",
+    "does_not_claim_nvdisasm_semantic_correctness",
+    "does_not_claim_runtime_generalization_beyond_selected_rung",
+]
+if ptxas_status != "pass":
+    boundaries.append("does_not_claim_ptxas_assembly")
+if nvdisasm_status != "pass":
+    boundaries.append("does_not_claim_nvdisasm_validation")
+if runtime_status != "pass":
+    boundaries.append("does_not_claim_selected_runtime_execution")
 
 payload = {
     "schema": "sounio.kretikos.bundle.v1",
@@ -459,9 +755,43 @@ payload = {
         "cubin_file_magic_observed": cubin_magic,
         "cubin_elf64_magic_checked": True,
         "cubin_elf_machine_checked": int(cubin_machine),
-        "ptxas": ptxas_status,
-        "nvdisasm": nvdisasm_status,
-        "runtime_execution": "not_claimed"
+    },
+    "toolchain_validation": {
+        "mode": toolchain_mode,
+        "scope": "predefined_ptx_and_cubin_templates_only",
+        "ptxas": {
+            "status": ptxas_status,
+            "reason": ptxas_reason,
+            "path": ptxas_path,
+            "return_code": maybe_int(ptxas_rc),
+            "output_cubin": file_record(ptxas_cubin_path, ptxas_bytes, ptxas_sha) if ptxas_status == "pass" else None,
+            "log_path": ptxas_log_path if ptxas_status != "off" else None,
+        },
+        "nvdisasm": {
+            "status": nvdisasm_status,
+            "reason": nvdisasm_reason,
+            "path": nvdisasm_path,
+            "return_code": maybe_int(nvdisasm_rc),
+            "output_path": nvdisasm_path_out if nvdisasm_status == "pass" else None,
+            "log_path": nvdisasm_log_path if nvdisasm_status != "off" else None,
+        },
+    },
+    "runtime_validation": {
+        "mode": runtime_mode,
+        "validation_scope": "selected_predefined_cubin_rung_only",
+        "status": runtime_status,
+        "reason": runtime_reason,
+        "return_code": maybe_int(runtime_rc),
+        "rung": runtime_rung,
+        "kernel": runtime_kernel,
+        "log_path": runtime_log_path if runtime_status != "off" else None,
+        "stage": runtime_stage,
+        "cuda_result": maybe_int(runtime_cuda_result),
+        "driver_version": maybe_int(runtime_driver_version),
+        "device_count": maybe_int(runtime_device_count),
+        "cc_major": maybe_int(runtime_cc_major),
+        "cc_minor": maybe_int(runtime_cc_minor),
+        "device_name": runtime_device_name,
     },
     "artifacts": [
         {
@@ -485,16 +815,7 @@ payload = {
             "target": "nvidia-cuda-elf"
         }
     ],
-    "boundaries": [
-        "does_not_claim_user_kernel_lowering",
-        "does_not_claim_semantic_kernel_correctness",
-        "does_not_claim_total_gpu_backend_completeness",
-        "does_not_claim_parallel_cpu_fallback",
-        "does_not_claim_ptxas_assembly",
-        "does_not_claim_nvdisasm_validation",
-        "does_not_claim_runtime_execution_without_cuda_driver_gate",
-        "does_not_claim_unchecked_gpu_alloc_surface"
-    ]
+    "boundaries": boundaries
 }
 
 with open(manifest_out, "w", encoding="utf-8") as fh:
@@ -503,6 +824,12 @@ with open(manifest_out, "w", encoding="utf-8") as fh:
 PY
 
         echo "kretikos: bundle manifest - $MANIFEST_OUT"
+        if [[ "$TOOLCHAIN_MODE" != "off" ]]; then
+            echo "kretikos: toolchain validation - ptxas=$PTXAS_STATUS/$PTXAS_REASON nvdisasm=$NVDISASM_STATUS/$NVDISASM_REASON"
+        fi
+        if [[ "$RUNTIME_MODE" != "off" ]]; then
+            echo "kretikos: runtime validation - $RUNTIME_STATUS/$RUNTIME_REASON rung=$RUNTIME_RUNG kernel=$KERNEL_NAME"
+        fi
         ;;
     info)
         echo "Kretikos GPU Compiler"
@@ -522,6 +849,7 @@ PY
         echo "PTX templates:   self-hosted/gpu/ptx.sio  (live via 'emit-ptx vec_add')"
         echo "CUBIN templates: self-hosted/gpu/nvidia_bare.sio  (live via 'emit-cubin')"
         echo "Artifact bundle: 'kretikos bundle' (or '-o <dir>' for a stable path)"
+        echo "Optional validation: '--validate-toolchain' and '--validate-runtime'"
         echo "SPIR-V backend:  self-hosted/gpu/spirv_lower.sio"
         ;;
     *)
@@ -540,6 +868,7 @@ PY
         echo ""
         echo "Supported PTX patterns: vec_add"
         echo "Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, epistemic_dual_f32"
+        echo "Bundle validation: --validate-toolchain, --require-toolchain, --validate-runtime, --require-runtime"
         echo ""
         echo "Environment:"
         echo "  SOUNIO_KRETIKOS_COMPILER — path to souc binary"

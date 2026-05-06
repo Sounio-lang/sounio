@@ -50,6 +50,7 @@ Produced by:
 
 ```bash
 bin/kretikos bundle -o /tmp/kretikos-bundle
+bin/kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
 ```
 
 Required top-level fields:
@@ -62,13 +63,27 @@ Required top-level fields:
 - `contract` with separate PTX, CUBIN, and runtime-boundary descriptions
 - `structural_checks` with structural-check class, CUBIN ELF machine check
   (`e_machine = 190`), and unavailable-tool status
+- `toolchain_validation` with `mode`, `ptxas`, and `nvdisasm` records
+- `runtime_validation` with `mode`, CUDA Driver API status, selected runtime
+  rung, kernel name, and log path
 - `artifacts[]` containing one PTX record and one CUBIN record
 - `artifacts[].sha256`
 - `boundaries[]` listing non-claims
 
-This bundle is structural. Runtime execution still belongs to the CUDA Driver
-API gate on a GPU host. PTX assembler or disassembler evidence must be recorded
-separately when `ptxas`/`nvdisasm` are available.
+By default this bundle is structural. Optional validation modes are:
+
+- `--validate-toolchain`: run `ptxas`/`nvdisasm` when available and record
+  exact `not_run` reasons otherwise.
+- `--require-toolchain`: fail closed unless `ptxas` and `nvdisasm` validate.
+- `--validate-runtime`: build `scripts/gpu/nvidia_bare_driver_loader.c` and
+  attempt the selected CUDA Driver API rung when a driver/device is available.
+- `--require-runtime`: fail closed unless that runtime rung passes.
+
+Local non-GPU hosts must report exact reasons such as `ptxas_missing`,
+`nvdisasm_missing`, `c_compiler_missing`, or `cuda_driver_missing`; they must
+not silently promote structural evidence to runtime proof. Toolchain and
+runtime validation apply only to the predefined PTX/CUBIN artifact templates
+selected by the bundle. They do not validate arbitrary user-written kernels.
 
 ## Blocker Taxonomy
 
