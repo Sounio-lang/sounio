@@ -52,7 +52,9 @@ Produced by:
 bin/kretikos bundle -o /tmp/kretikos-bundle
 bin/kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
 bin/kretikos run-source examples/kretikos/real_vec_add.sio -o /tmp/kretikos-source --validate-toolchain --validate-runtime
+bin/kretikos run-manifest examples/kretikos/manifest.tsv -o /tmp/kretikos-corpus --validate-toolchain --validate-runtime
 slurm-jobs/kretikos/submit-kretikos-source.sh examples/kretikos/real_vec_add.sio
+slurm-jobs/kretikos/submit-kretikos-manifest.sh examples/kretikos/manifest.tsv
 ```
 
 Required top-level fields:
@@ -113,6 +115,7 @@ The Slurm entrypoint is:
 
 ```bash
 slurm-jobs/kretikos/submit-kretikos-source.sh examples/kretikos/real_vec_add.sio
+slurm-jobs/kretikos/submit-kretikos-manifest.sh examples/kretikos/manifest.tsv
 ```
 
 That script embeds the source, Kretikos, stdlib slice, CUBIN emitters, and a
@@ -120,6 +123,10 @@ prebuilt CUDA Driver API loader into the sbatch payload. It runs from GPU-worker
 local scratch and records the runtime verdict in the Slurm job comment. This is
 ready for real source files that fit one of the profiles above; it is not yet a
 claim of arbitrary Sounio GPU lowering.
+
+`examples/kretikos/manifest.tsv` is the canonical corpus smoke. It covers every
+runtime-backed source profile and is the promotion gate before claiming a new
+profile is ready for user code.
 
 ## Blocker Taxonomy
 

@@ -16,7 +16,7 @@
 #   kretikos profile-source <source.sio>         - classify a real source file for Kretikos
 #   kretikos run-source <source.sio> -o <dir>    - check, bundle, and runtime-validate a source profile
 #
-# Supported PTX patterns: vec_add
+# Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma
 # Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, epistemic_dual_f32
 #
 # GPU builtins recognized in kernel fn bodies:
@@ -325,6 +325,176 @@ PY
         echo "kretikos: source profile manifest - $SOURCE_MANIFEST"
         echo "kretikos: source runtime validation - $runtime_summary"
         ;;
+    run-manifest)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos run-manifest <manifest.tsv> [-o <dir>] [--force] [--validate-toolchain] [--require-runtime]" >&2
+            exit 1
+        fi
+        MANIFEST="$1"
+        shift
+        OUT_DIR=""
+        FORCE=0
+        TOOLCHAIN_ARGS=()
+        RUNTIME_ARGS=(--validate-runtime)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output-dir)
+                    OUT_DIR="$2"
+                    shift 2
+                    ;;
+                -f|--force)
+                    FORCE=1
+                    shift
+                    ;;
+                --validate-toolchain)
+                    TOOLCHAIN_ARGS=(--validate-toolchain)
+                    shift
+                    ;;
+                --require-toolchain)
+                    TOOLCHAIN_ARGS=(--require-toolchain)
+                    shift
+                    ;;
+                --validate-runtime)
+                    RUNTIME_ARGS=(--validate-runtime)
+                    shift
+                    ;;
+                --require-runtime)
+                    RUNTIME_ARGS=(--require-runtime)
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ ! -f "$MANIFEST" ]]; then
+            echo "error: manifest not found: $MANIFEST" >&2
+            exit 1
+        fi
+        if [[ -z "$OUT_DIR" ]]; then
+            OLD_UMASK="$(umask)"
+            umask 077
+            OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-corpus.XXXXXX")" || {
+                echo "error: failed to create temporary corpus directory" >&2
+                exit 1
+            }
+            umask "$OLD_UMASK"
+        fi
+        mkdir -p "$OUT_DIR"
+
+        MANIFEST_DIR="$(cd "$(dirname "$MANIFEST")" && pwd)"
+        SUMMARY_TSV="$OUT_DIR/kretikos_source_corpus.tsv"
+        CORPUS_JSON="$OUT_DIR/kretikos_source_corpus.v1.json"
+        printf 'label\tsource\trc\truntime_status\truntime_reason\truntime_rung\tkernel\tdevice_name\tcc_major\tcc_minor\tcase_dir\n' >"$SUMMARY_TSV"
+
+        total=0
+        failed=0
+        while IFS=$'\t' read -r label source rest || [[ -n "${label:-}" ]]; do
+            [[ -z "${label:-}" ]] && continue
+            [[ "$label" == \#* ]] && continue
+            if [[ -z "${source:-}" ]]; then
+                source="$label"
+                label="$(basename "$source" .sio)"
+            fi
+            case "$source" in
+                /*) SRC="$source" ;;
+                *)
+                    if [[ -f "$MANIFEST_DIR/$source" ]]; then
+                        SRC="$MANIFEST_DIR/$source"
+                    else
+                        SRC="$ROOT_DIR/$source"
+                    fi
+                    ;;
+            esac
+            SAFE_LABEL="$(printf '%s' "$label" | tr -cs 'A-Za-z0-9_.-' '_' | sed 's/^_*//;s/_*$//')"
+            if [[ -z "$SAFE_LABEL" ]]; then
+                SAFE_LABEL="case_$total"
+            fi
+            CASE_DIR="$OUT_DIR/$SAFE_LABEL"
+            mkdir -p "$CASE_DIR"
+
+            RUN_ARGS=(run-source "$SRC" -o "$CASE_DIR" --force)
+            RUN_ARGS+=("${TOOLCHAIN_ARGS[@]}" "${RUNTIME_ARGS[@]}")
+            set +e
+            "$KRETIKOS_SELF" "${RUN_ARGS[@]}" >"$CASE_DIR/kretikos_run_source.stdout" 2>"$CASE_DIR/kretikos_run_source.stderr"
+            case_rc=$?
+            set -e
+            total=$((total + 1))
+
+            if [[ -f "$CASE_DIR/kretikos_bundle.v1.json" ]]; then
+                row="$(python3 - "$label" "$SRC" "$case_rc" "$CASE_DIR" "$CASE_DIR/kretikos_bundle.v1.json" <<'PY'
+import json
+import sys
+
+label, source, rc, case_dir, bundle_path = sys.argv[1:]
+obj = json.load(open(bundle_path, encoding="utf-8"))
+runtime = obj.get("runtime_validation") or {}
+fields = [
+    label,
+    source,
+    rc,
+    runtime.get("status"),
+    runtime.get("reason"),
+    runtime.get("rung"),
+    runtime.get("kernel"),
+    runtime.get("device_name"),
+    runtime.get("cc_major"),
+    runtime.get("cc_minor"),
+    case_dir,
+]
+print("\t".join("" if value is None else str(value) for value in fields))
+PY
+                )"
+            else
+                row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$label" "$SRC" "$case_rc" "fail" "bundle_manifest_missing" "" "" "" "" "" "$CASE_DIR")"
+            fi
+            printf '%s\n' "$row" >>"$SUMMARY_TSV"
+            if [[ "$case_rc" -ne 0 ]]; then
+                failed=$((failed + 1))
+            fi
+        done <"$MANIFEST"
+
+        python3 - "$CORPUS_JSON" "$MANIFEST" "$SUMMARY_TSV" "$total" "$failed" <<'PY'
+import csv
+import json
+import sys
+from datetime import datetime, timezone
+
+out, manifest, summary_tsv, total, failed = sys.argv[1:]
+with open(summary_tsv, encoding="utf-8") as fh:
+    rows = list(csv.DictReader(fh, delimiter="\t"))
+payload = {
+    "schema": "sounio.kretikos.source-corpus.v1",
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "manifest": manifest,
+    "summary_tsv": "kretikos_source_corpus.tsv",
+    "total": int(total),
+    "failed": int(failed),
+    "status": "pass" if int(failed) == 0 else "fail",
+    "cases": rows,
+    "boundaries": [
+        "corpus_contains_supported_source_profiles_only",
+        "each_source_must_typecheck_before_profile_selection",
+        "runtime_validation_applies_per_selected_profile",
+        "does_not_claim_arbitrary_sounio_gpu_lowering",
+    ],
+}
+with open(out, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+
+        echo "kretikos: source corpus summary - $SUMMARY_TSV"
+        echo "kretikos: source corpus manifest - $CORPUS_JSON"
+        echo "kretikos: source corpus result - total=$total failed=$failed"
+        [[ "$failed" -eq 0 ]]
+        ;;
     build)
         if [[ $# -lt 1 ]]; then
             echo "usage: kretikos build <source.sio> [options] -o <output.ptx>" >&2
@@ -340,7 +510,8 @@ PY
         else
             echo "error: GPU artifact not found at $GPU_ARTIFACT" >&2
             echo "hint: 'kretikos run' executes a serial native CPU fallback" >&2
-            echo "hint: 'kretikos emit-ptx vec_add -o kernel.ptx' emits PTX for the built-in vec_add pattern" >&2
+            echo "hint: 'kretikos emit-ptx <pattern> -o kernel.ptx' emits PTX for built-in patterns" >&2
+            echo "hint: supported patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma" >&2
             echo "hint: 'kretikos emit-cubin <kind> -o kernel.cubin' emits a CUBIN template from in-tree emitters" >&2
             exit 1
         fi
@@ -386,15 +557,20 @@ PY
             echo "usage: kretikos emit-ptx <pattern> -o <file.ptx>" >&2
             echo "" >&2
             echo "Supported patterns:" >&2
-            echo "  vec_add - f32 vector addition (SM50 PTX target)" >&2
+            echo "  vec_add     - f32 vector addition (SM50 PTX target)" >&2
+            echo "  vec_sub     - f32 vector subtraction" >&2
+            echo "  vec_mul     - f32 vector multiplication" >&2
+            echo "  vec_div     - f32 vector division" >&2
+            echo "  vec_add_f64 - f64 vector addition" >&2
+            echo "  fma         - f32 fused multiply-add (a*b+c)" >&2
             exit 1
         fi
 
         case "$PATTERN" in
-            vec_add) ;;
+            vec_add|vec_sub|vec_mul|vec_div|vec_add_f64|fma) ;;
             *)
                 echo "error: unsupported PTX pattern '$PATTERN'" >&2
-                echo "supported PTX patterns: vec_add" >&2
+                echo "supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma" >&2
                 exit 1
                 ;;
         esac
@@ -1083,7 +1259,8 @@ PY
         echo "  gpu_block_dim_y/z()      — recognized; CPU fallback returns 1"
         echo "  gpu_sync_threads()       — recognized; CPU fallback is a no-op"
         echo ""
-        echo "PTX templates:   self-hosted/gpu/ptx.sio  (live via 'emit-ptx vec_add')"
+        echo "PTX templates:   self-hosted/gpu/ptx.sio  (live via 'emit-ptx <pattern>')"
+        echo "Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma"
         echo "CUBIN templates: self-hosted/gpu/nvidia_bare.sio  (live via 'emit-cubin')"
         echo "Artifact bundle: 'kretikos bundle' (or '-o <dir>' for a stable path)"
         echo "Optional validation: '--validate-toolchain' and '--validate-runtime'"
@@ -1103,9 +1280,9 @@ PY
         echo "  bundle [-o <dir>]                 Emit PTX+CUBIN plus bundle manifest"
         echo "  profile-source <source.sio>       Classify a checked source file for Kretikos"
         echo "  run-source <source.sio> -o <dir>  Check, bundle, and runtime-validate source profile"
+        echo "  run-manifest <manifest.tsv> -o <dir> Run a source-profile corpus"
         echo "  info                              Show compiler configuration"
         echo ""
-        echo "Supported PTX patterns: vec_add"
         echo "Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, epistemic_dual_f32"
         echo "Supported source profiles: vec_add_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, store_u32_const"
         echo "Bundle validation: --validate-toolchain, --require-toolchain, --validate-runtime, --require-runtime"

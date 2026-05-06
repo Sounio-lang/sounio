@@ -291,13 +291,17 @@ int main(int argc, char **argv) {
         rc = cuMemFree(d_out);
         if (rc != 0) { emit_status("fail", "cuMemFree_failed", "cuMemFree", rc); cuModuleUnload(mod); cuCtxDestroy(ctx); free(cubin); return 1; }
         if (observed != 42u) {
-            printf("sounio_nvidia_bare_runtime status=fail reason=store_u32_const_mismatch stage=verify_store_u32_const cuda_result=0 observed_u32=%u expected_u32=42\n", observed);
+            printf("sounio_nvidia_bare_runtime status=fail reason=store_u32_const_mismatch stage=verify_store_u32_const cuda_result=0");
+            print_cuda_probe_suffix();
+            printf(" observed_u32=%u expected_u32=42\n", observed);
             cuModuleUnload(mod);
             cuCtxDestroy(ctx);
             free(cubin);
             return 1;
         }
-        printf("sounio_nvidia_bare_runtime status=pass reason=runtime_store_u32_const_pass stage=cuMemcpyDtoH cuda_result=0 observed_u32=%u expected_u32=42\n", observed);
+        printf("sounio_nvidia_bare_runtime status=pass reason=runtime_store_u32_const_pass stage=cuMemcpyDtoH cuda_result=0");
+        print_cuda_probe_suffix();
+        printf(" observed_u32=%u expected_u32=42\n", observed);
         cuModuleUnload(mod);
         cuCtxDestroy(ctx);
         free(cubin);
