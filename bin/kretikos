@@ -574,69 +574,85 @@ PY
         RUNTIME_CC_MINOR=""
         RUNTIME_DEVICE_NAME=""
         if [[ "$RUNTIME_MODE" != "off" ]]; then
-            KRETIKOS_CC="${CC:-}"
-            if [[ -z "$KRETIKOS_CC" || ! -x "$(command -v "$KRETIKOS_CC" 2>/dev/null || true)" ]]; then
-                KRETIKOS_CC=""
-                for candidate in cc gcc clang; do
-                    if command -v "$candidate" >/dev/null 2>&1; then
-                        KRETIKOS_CC="$(command -v "$candidate")"
-                        break
+            RUNTIME_LOADER_CMD="${SOUNIO_KRETIKOS_RUNTIME_LOADER:-}"
+            if [[ -n "$RUNTIME_LOADER_CMD" ]]; then
+                if [[ ! -x "$RUNTIME_LOADER_CMD" ]]; then
+                    RUNTIME_STATUS="not_run"
+                    RUNTIME_REASON="runtime_loader_not_executable"
+                    if [[ "$RUNTIME_MODE" == "required" ]]; then
+                        echo "kretikos: required runtime validation failed - runtime loader not executable" >&2
+                        exit 1
                     fi
-                done
-            fi
-            if [[ -z "$KRETIKOS_CC" ]]; then
-                RUNTIME_STATUS="not_run"
-                RUNTIME_REASON="c_compiler_missing"
-                if [[ "$RUNTIME_MODE" == "required" ]]; then
-                    echo "kretikos: required runtime validation failed - C compiler missing" >&2
-                    exit 1
-                fi
-            elif [[ ! -f "$ROOT_DIR/scripts/gpu/nvidia_bare_driver_loader.c" ]]; then
-                RUNTIME_STATUS="not_run"
-                RUNTIME_REASON="loader_source_missing"
-                if [[ "$RUNTIME_MODE" == "required" ]]; then
-                    echo "kretikos: required runtime validation failed - loader source missing" >&2
-                    exit 1
+                    RUNTIME_LOADER_CMD=""
                 fi
             else
-                set +e
-                "$KRETIKOS_CC" -O2 "$ROOT_DIR/scripts/gpu/nvidia_bare_driver_loader.c" -ldl -o "$RUNTIME_LOADER_OUT" >"$RUNTIME_LOG_OUT" 2>&1
-                loader_cc_rc=$?
-                set -e
-                if [[ "$loader_cc_rc" -ne 0 ]]; then
+                KRETIKOS_CC="${CC:-}"
+                if [[ -z "$KRETIKOS_CC" || ! -x "$(command -v "$KRETIKOS_CC" 2>/dev/null || true)" ]]; then
+                    KRETIKOS_CC=""
+                    for candidate in cc gcc clang; do
+                        if command -v "$candidate" >/dev/null 2>&1; then
+                            KRETIKOS_CC="$(command -v "$candidate")"
+                            break
+                        fi
+                    done
+                fi
+                if [[ -z "$KRETIKOS_CC" ]]; then
                     RUNTIME_STATUS="not_run"
-                    RUNTIME_REASON="loader_compile_failed"
-                    RUNTIME_RC="$loader_cc_rc"
+                    RUNTIME_REASON="c_compiler_missing"
                     if [[ "$RUNTIME_MODE" == "required" ]]; then
-                        echo "kretikos: required runtime validation failed - loader compile failed" >&2
+                        echo "kretikos: required runtime validation failed - C compiler missing" >&2
+                        exit 1
+                    fi
+                elif [[ ! -f "$ROOT_DIR/scripts/gpu/nvidia_bare_driver_loader.c" ]]; then
+                    RUNTIME_STATUS="not_run"
+                    RUNTIME_REASON="loader_source_missing"
+                    if [[ "$RUNTIME_MODE" == "required" ]]; then
+                        echo "kretikos: required runtime validation failed - loader source missing" >&2
                         exit 1
                     fi
                 else
                     set +e
-                    "$RUNTIME_LOADER_OUT" "$CUBIN_OUT" "$KERNEL_NAME" "$RUNTIME_RUNG" >>"$RUNTIME_LOG_OUT" 2>&1
-                    RUNTIME_RC=$?
+                    "$KRETIKOS_CC" -O2 "$ROOT_DIR/scripts/gpu/nvidia_bare_driver_loader.c" -ldl -o "$RUNTIME_LOADER_OUT" >"$RUNTIME_LOG_OUT" 2>&1
+                    loader_cc_rc=$?
                     set -e
-                    RUNTIME_LINE="$(grep 'sounio_nvidia_bare_runtime status=' "$RUNTIME_LOG_OUT" | tail -n 1 || true)"
-                    RUNTIME_STATUS="$(__kretikos_token_value "$RUNTIME_LINE" "status")"
-                    RUNTIME_REASON="$(__kretikos_token_value "$RUNTIME_LINE" "reason")"
-                    RUNTIME_STAGE="$(__kretikos_token_value "$RUNTIME_LINE" "stage")"
-                    RUNTIME_CUDA_RESULT="$(__kretikos_token_value "$RUNTIME_LINE" "cuda_result")"
-                    RUNTIME_DRIVER_VERSION="$(__kretikos_token_value "$RUNTIME_LINE" "driver_version")"
-                    RUNTIME_DEVICE_COUNT="$(__kretikos_token_value "$RUNTIME_LINE" "device_count")"
-                    RUNTIME_CC_MAJOR="$(__kretikos_token_value "$RUNTIME_LINE" "cc_major")"
-                    RUNTIME_CC_MINOR="$(__kretikos_token_value "$RUNTIME_LINE" "cc_minor")"
-                    RUNTIME_DEVICE_NAME="$(__kretikos_token_value "$RUNTIME_LINE" "device_name")"
-                    if [[ -z "$RUNTIME_STATUS" ]]; then
-                        RUNTIME_STATUS="fail"
-                        RUNTIME_REASON="runtime_status_parse_failed"
+                    if [[ "$loader_cc_rc" -ne 0 ]]; then
+                        RUNTIME_STATUS="not_run"
+                        RUNTIME_REASON="loader_compile_failed"
+                        RUNTIME_RC="$loader_cc_rc"
+                        if [[ "$RUNTIME_MODE" == "required" ]]; then
+                            echo "kretikos: required runtime validation failed - loader compile failed" >&2
+                            exit 1
+                        fi
+                    else
+                        RUNTIME_LOADER_CMD="$RUNTIME_LOADER_OUT"
                     fi
-                    if [[ "$RUNTIME_STATUS" == "fail" ]]; then
-                        echo "kretikos: runtime validation $RUNTIME_STATUS - $RUNTIME_REASON; see $RUNTIME_LOG_OUT" >&2
-                    fi
-                    if [[ "$RUNTIME_MODE" == "required" && "$RUNTIME_STATUS" != "pass" ]]; then
-                        echo "kretikos: runtime validation $RUNTIME_STATUS - $RUNTIME_REASON; see $RUNTIME_LOG_OUT" >&2
-                        exit 1
-                    fi
+                fi
+            fi
+            if [[ -n "$RUNTIME_LOADER_CMD" ]]; then
+                set +e
+                "$RUNTIME_LOADER_CMD" "$CUBIN_OUT" "$KERNEL_NAME" "$RUNTIME_RUNG" >>"$RUNTIME_LOG_OUT" 2>&1
+                RUNTIME_RC=$?
+                set -e
+                RUNTIME_LINE="$(grep 'sounio_nvidia_bare_runtime status=' "$RUNTIME_LOG_OUT" | tail -n 1 || true)"
+                RUNTIME_STATUS="$(__kretikos_token_value "$RUNTIME_LINE" "status")"
+                RUNTIME_REASON="$(__kretikos_token_value "$RUNTIME_LINE" "reason")"
+                RUNTIME_STAGE="$(__kretikos_token_value "$RUNTIME_LINE" "stage")"
+                RUNTIME_CUDA_RESULT="$(__kretikos_token_value "$RUNTIME_LINE" "cuda_result")"
+                RUNTIME_DRIVER_VERSION="$(__kretikos_token_value "$RUNTIME_LINE" "driver_version")"
+                RUNTIME_DEVICE_COUNT="$(__kretikos_token_value "$RUNTIME_LINE" "device_count")"
+                RUNTIME_CC_MAJOR="$(__kretikos_token_value "$RUNTIME_LINE" "cc_major")"
+                RUNTIME_CC_MINOR="$(__kretikos_token_value "$RUNTIME_LINE" "cc_minor")"
+                RUNTIME_DEVICE_NAME="$(__kretikos_token_value "$RUNTIME_LINE" "device_name")"
+                if [[ -z "$RUNTIME_STATUS" ]]; then
+                    RUNTIME_STATUS="fail"
+                    RUNTIME_REASON="runtime_status_parse_failed"
+                fi
+                if [[ "$RUNTIME_STATUS" == "fail" ]]; then
+                    echo "kretikos: runtime validation $RUNTIME_STATUS - $RUNTIME_REASON; see $RUNTIME_LOG_OUT" >&2
+                fi
+                if [[ "$RUNTIME_MODE" == "required" && "$RUNTIME_STATUS" != "pass" ]]; then
+                    echo "kretikos: runtime validation $RUNTIME_STATUS - $RUNTIME_REASON; see $RUNTIME_LOG_OUT" >&2
+                    exit 1
                 fi
             fi
         fi
@@ -872,6 +888,7 @@ PY
         echo ""
         echo "Environment:"
         echo "  SOUNIO_KRETIKOS_COMPILER — path to souc binary"
+        echo "  SOUNIO_KRETIKOS_RUNTIME_LOADER — prebuilt CUDA Driver API loader for runtime validation"
         echo "  SOUNIO_STDLIB_PATH       — path to stdlib directory"
         exit 1
         ;;

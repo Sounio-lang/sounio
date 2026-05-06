@@ -77,6 +77,8 @@ By default this bundle is structural. Optional validation modes are:
 - `--require-toolchain`: fail closed unless `ptxas` and `nvdisasm` validate.
 - `--validate-runtime`: build `scripts/gpu/nvidia_bare_driver_loader.c` and
   attempt the selected CUDA Driver API rung when a driver/device is available.
+  Hosts without a C compiler may set `SOUNIO_KRETIKOS_RUNTIME_LOADER` to an
+  executable prebuilt loader.
 - `--require-runtime`: fail closed unless that runtime rung passes.
 
 Local non-GPU hosts must report exact reasons such as `ptxas_missing`,
