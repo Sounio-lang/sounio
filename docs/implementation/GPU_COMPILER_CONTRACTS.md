@@ -176,6 +176,31 @@ classification, not a runtime proof. Running the same manifest with
 `--require-runtime` is expected to fail until those profiles gain CUBIN/runtime
 support.
 
+### Current f64 Runtime Blocker
+
+`vec_add_f64` is intentionally structural-only. The Kretikos PTX front door can
+emit a checked f64 template containing `ld.global.f64`, `add.f64`, and
+`st.global.f64`, but the runtime corpus does not yet have an owned f64
+CUDA ELF/CUBIN emitter and CUDA Driver API validation rung. It must not be
+moved from `examples/kretikos/structural_manifest.tsv` into
+`examples/kretikos/manifest.tsv` until one of these contracts is satisfied:
+
+- `self-hosted/gpu/nvidia_bare.sio` emits a loadable owned f64 CUBIN, and the
+  corresponding Kretikos runtime rung passes on the NVIDIA L4 Slurm lane.
+- A separate assembler-backed f64 lane is explicitly named as such, keeps
+  assembler provenance in the bundle, and does not claim the owned-CUBIN proof
+  path.
+
+The executable blocker gate is:
+
+```bash
+scripts/ci/kretikos_f64_blocker_gate.sh
+```
+
+That gate proves all three facts together: the Sounio source checks, the f64
+PTX template is emitted structurally, and `--require-runtime` still fails
+closed with `profile_not_runtime_backed`.
+
 ## Blocker Taxonomy
 
 Canonical blocker classes:
