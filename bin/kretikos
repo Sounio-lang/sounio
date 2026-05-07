@@ -188,7 +188,7 @@ __kretikos_source_profile_record() {
     profile="$(__kretikos_normalize_profile "$directive")"
 
     if [[ -z "$profile" ]]; then
-        if grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*epistemic_dual' "$src"; then
+        if grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*(epistemic_dual|knowledge_dual)' "$src"; then
             profile="epistemic_dual_output_f32"
         elif grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*epistemic.*vec.*add' "$src"; then
             profile="epistemic_elementwise_f32"
@@ -1746,8 +1746,6 @@ common_checks = {
     "has_gpu_kernel": re.search(r"\bkernel\s+fn\s+[A-Za-z_][A-Za-z0-9_]*", code) is not None and "with GPU" in raw,
     "has_thread_index": "gpu_thread_id_x()" in code and "gpu_block_id_x()" in code and "gpu_block_dim_x()" in code,
     "has_bounds_guard": re.search(r"\bif\s+i\s*<\s*n\b", code) is not None,
-    "has_f32_input_a": re.search(r"\ba\s*:\s*&\s*\[\s*f32\s*;\s*32\s*\]", code) is not None,
-    "has_f32_input_b": re.search(r"\bb\s*:\s*&\s*\[\s*f32\s*;\s*32\s*\]", code) is not None,
     "has_mut_f32_output": re.search(r"\bout\s*:\s*&!\s*\[\s*f32\s*;\s*32\s*\]", code) is not None,
 }
 
@@ -1783,9 +1781,28 @@ binary_shapes = [
 ]
 
 matches = []
+has_f32_input_a = re.search(r"\ba\s*:\s*&\s*\[\s*f32\s*;\s*32\s*\]", code) is not None
+has_f32_input_b = re.search(r"\bb\s*:\s*&\s*\[\s*f32\s*;\s*32\s*\]", code) is not None
+has_knowledge_input_a = re.search(r"\ba\s*:\s*Knowledge\s*<\s*f32\s*>", code) is not None
+has_knowledge_input_b = re.search(r"\bb\s*:\s*Knowledge\s*<\s*f32\s*>", code) is not None
 has_f32_input_ua = re.search(r"\bua\s*:\s*&\s*\[\s*f32\s*;\s*32\s*\]", code) is not None
 has_f32_input_ub = re.search(r"\bub\s*:\s*&\s*\[\s*f32\s*;\s*32\s*\]", code) is not None
 has_mut_f32_output_u = re.search(r"\bout_u\s*:\s*&!\s*\[\s*f32\s*;\s*32\s*\]", code) is not None
+knowledge_value_lane = (
+    re.search(r"\blet\s+av\s*=\s*a\s*\.\s*value\b", code) is not None
+    and re.search(r"\blet\s+bv\s*=\s*b\s*\.\s*value\b", code) is not None
+    and re.search(r"\(\s*\*\s*out\s*\)\s*\[[^\]]+\]\s*=\s*av\s*\+\s*bv\b", code) is not None
+)
+knowledge_epsilon_lane = (
+    re.search(r"\blet\s+au\s*=\s*a\s*\.\s*epsilon\s+as\s+f32\b", code) is not None
+    and re.search(r"\blet\s+bu\s*=\s*b\s*\.\s*epsilon\s+as\s+f32\b", code) is not None
+    and re.search(
+        r"\(\s*\*\s*out_u\s*\)\s*\[[^\]]+\]\s*=\s*"
+        r"\(?\s*au\s*\*\s*au\s*\)?\s*\+\s*"
+        r"\(?\s*bu\s*\*\s*bu\s*\)?",
+        code,
+    ) is not None
+)
 dual_value_lane = re.search(
     r"\(\s*\*\s*out\s*\)\s*\[[^\]]+\]\s*=\s*"
     r"\(\s*\*\s*a\s*\)\s*\[[^\]]+\]\s*\+\s*"
@@ -1801,7 +1818,7 @@ dual_uncertainty_lane = re.search(
     code,
 ) is not None
 for shape in binary_shapes:
-    if re.search(
+    if has_f32_input_a and has_f32_input_b and re.search(
         r"\(\s*\*\s*out\s*\)\s*\[[^\]]+\]\s*=\s*"
         r"\(\s*\*\s*a\s*\)\s*\[[^\]]+\]\s*" + shape["operator"] + r"\s*"
         r"\(\s*\*\s*b\s*\)\s*\[[^\]]+\]",
@@ -1868,14 +1885,44 @@ if dual_value_lane and dual_uncertainty_lane and has_f32_input_ua and has_f32_in
         ],
     }]
 
+if knowledge_value_lane and knowledge_epsilon_lane and has_knowledge_input_a and has_knowledge_input_b and has_mut_f32_output_u:
+    matches = [{
+        "recognized_pattern": "indexed_f32_knowledge_dual_output",
+        "kaxi_pattern": "source_epistemic_dual_output_f32",
+        "runtime_rung": "epistemic_dual_output_f32",
+        "operator": "knowledge_value_plus_epsilon_sum_of_squares",
+        "semantic": "knowledge_dual_lane:f32",
+        "semantic_ops": [
+            "thread_index:i=block_id_x*block_dim_x+thread_id_x",
+            "guard:i<n",
+            "field:a.value",
+            "field:b.value",
+            "add:f32:value",
+            "store_global:out[i]",
+            "field:a.epsilon",
+            "field:b.epsilon",
+            "cast:f64_to_f32:epsilon",
+            "mul:f32:epsilon_a^2",
+            "mul:f32:epsilon_b^2",
+            "add:f32:epsilon",
+            "store_global:out_u[i]",
+        ],
+    }]
+
 checks = {
     **common_checks,
+    "has_f32_input_a": has_f32_input_a,
+    "has_f32_input_b": has_f32_input_b,
+    "has_knowledge_input_a": has_knowledge_input_a,
+    "has_knowledge_input_b": has_knowledge_input_b,
     "has_f32_input_c": has_f32_input_c,
     "has_f32_input_ua": has_f32_input_ua,
     "has_f32_input_ub": has_f32_input_ub,
     "has_mut_f32_output_u": has_mut_f32_output_u,
     "has_epistemic_dual_value_lane": dual_value_lane,
     "has_epistemic_dual_uncertainty_lane": dual_uncertainty_lane,
+    "has_knowledge_value_lane": knowledge_value_lane,
+    "has_knowledge_epsilon_lane": knowledge_epsilon_lane,
     "has_supported_arithmetic_shape": len(matches) == 1,
     "recognized_shape_count": len(matches),
 }

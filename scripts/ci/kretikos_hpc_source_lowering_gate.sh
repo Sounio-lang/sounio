@@ -45,6 +45,8 @@ from pathlib import Path
 gate_json, source, doctor_log, source_log, artifact_json = sys.argv[1:]
 artifact_path = Path(artifact_json)
 artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+source_name = Path(source).name
+expected_recognized_pattern = "indexed_f32_knowledge_dual_output" if "knowledge_dual" in source_name else "indexed_f32_epistemic_dual_output"
 runtime = artifact.get("runtime_validation") or {}
 cert = artifact.get("kaxi_certificate") or {}
 cert_payload = cert.get("certificate") or {}
@@ -74,8 +76,12 @@ if lowering.get("profile_hint") != "none":
     failures.append({"kind": "profile_hint_not_none", "profile_hint": lowering.get("profile_hint")})
 if lowering.get("fallback_path") != "none":
     failures.append({"kind": "fallback_path_not_none", "fallback_path": lowering.get("fallback_path")})
-if lowering.get("recognized_pattern") != "indexed_f32_epistemic_dual_output":
-    failures.append({"kind": "recognized_pattern_mismatch", "recognized_pattern": lowering.get("recognized_pattern")})
+if lowering.get("recognized_pattern") != expected_recognized_pattern:
+    failures.append({
+        "kind": "recognized_pattern_mismatch",
+        "recognized_pattern": lowering.get("recognized_pattern"),
+        "expected": expected_recognized_pattern,
+    })
 if lowering.get("kaxi_pattern") != "source_epistemic_dual_output_f32":
     failures.append({"kind": "kaxi_pattern_mismatch", "kaxi_pattern": lowering.get("kaxi_pattern")})
 if cert_runtime.get("status") != "pass":
@@ -114,6 +120,7 @@ payload = {
         "schema": cert_payload.get("schema"),
         "profile": (cert_payload.get("profile") or {}).get("name"),
         "recognized_pattern": lowering.get("recognized_pattern"),
+        "expected_recognized_pattern": expected_recognized_pattern,
         "kaxi_pattern": lowering.get("kaxi_pattern"),
         "profile_hint": lowering.get("profile_hint"),
         "fallback_path": lowering.get("fallback_path"),
@@ -129,7 +136,7 @@ payload = {
         "source_has_no_profile_directive_and_must_lower_through_kaxi_lower_source",
         "certificate_must_be_source_lowering_not_profile_level",
         "runtime_acceptance_requires_cuda_driver_load_launch_and_copyback",
-        "does_not_claim_first_class_knowledge_generic_lowering",
+        "does_not_claim_arbitrary_knowledge_generic_lowering",
         "does_not_claim_arbitrary_sounio_gpu_lowering",
     ],
 }

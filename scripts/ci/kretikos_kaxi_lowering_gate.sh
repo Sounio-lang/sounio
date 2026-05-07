@@ -13,6 +13,8 @@ NEGATIVE_STDERR="$OUT_DIR/profile_directive_negative.stderr"
 GATE_JSON="$OUT_DIR/kretikos_kaxi_lowering_gate.v1.json"
 LOWERING_CERTIFICATE="$OUT_DIR/epistemic_dual_output_f32.kaxi-lowering-certificate.json"
 LOWERING_CERTIFICATE_WORK="$OUT_DIR/epistemic_dual_output_f32.lowering-certificate.d"
+KNOWLEDGE_LOWERING_CERTIFICATE="$OUT_DIR/knowledge_dual_output_f32.kaxi-lowering-certificate.json"
+KNOWLEDGE_LOWERING_CERTIFICATE_WORK="$OUT_DIR/knowledge_dual_output_f32.lowering-certificate.d"
 
 lowering_cases=(
   "vec_add_f32|examples/kretikos/lower_vec_add_f32.sio|source_vec_add_f32|indexed_f32_vector_add|add"
@@ -21,6 +23,7 @@ lowering_cases=(
   "vec_div_f32|examples/kretikos/lower_vec_div_f32.sio|source_vec_div_f32|indexed_f32_vector_div|div"
   "fma_f32|examples/kretikos/lower_fma_f32.sio|source_fma_f32|indexed_f32_affine_mad|mul,add"
   "epistemic_dual_output_f32|examples/kretikos/lower_epistemic_dual_output_f32.sio|source_epistemic_dual_output_f32|indexed_f32_epistemic_dual_output|add,mul"
+  "knowledge_dual_output_f32|examples/kretikos/lower_knowledge_dual_output_f32.sio|source_epistemic_dual_output_f32|indexed_f32_knowledge_dual_output|add,mul"
 )
 
 echo "kretikos_kaxi_lowering_gate: shell"
@@ -75,7 +78,7 @@ if lowering.get("recognized_pattern") != recognized_pattern:
 if not lowering.get("source_lowered_to_kaxi"):
     raise SystemExit(f"source_lowered_to_kaxi_not_true:{label}")
 store_count = obj.get("kaxi", {}).get("epistemic_lanes", {}).get("store_global_count", 0)
-required_stores = 2 if label == "epistemic_dual_output_f32" else 1
+required_stores = 2 if kaxi_pattern == "source_epistemic_dual_output_f32" else 1
 if store_count < required_stores:
     raise SystemExit(f"store_global_count_missing:{label}")
 PY
@@ -116,6 +119,41 @@ if obj.get("kaxi", {}).get("epistemic_lanes", {}).get("store_global_count", 0) <
     raise SystemExit("lowering_certificate_dual_store_count_missing")
 PY
 
+echo "kretikos_kaxi_lowering_gate: lowering-certificate label=knowledge_dual_output_f32"
+./bin/kretikos kaxi-lowering-certificate \
+  examples/kretikos/lower_knowledge_dual_output_f32.sio \
+  -o "$KNOWLEDGE_LOWERING_CERTIFICATE" \
+  --work-dir "$KNOWLEDGE_LOWERING_CERTIFICATE_WORK" \
+  --force
+
+python3 - "$KNOWLEDGE_LOWERING_CERTIFICATE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if obj.get("status") != "pass":
+    raise SystemExit(f"knowledge_lowering_certificate_status_not_pass:{obj.get('status')}:{obj.get('failures')}")
+if obj.get("schema") != "sounio.kretikos.kaxi-lowering-certificate.v1":
+    raise SystemExit(f"knowledge_lowering_certificate_schema_mismatch:{obj.get('schema')}")
+lowering = obj.get("lowering", {})
+if lowering.get("profile_hint") != "none":
+    raise SystemExit(f"knowledge_lowering_certificate_profile_hint_not_none:{lowering.get('profile_hint')}")
+if lowering.get("fallback_path") != "none":
+    raise SystemExit(f"knowledge_lowering_certificate_fallback_path_not_none:{lowering.get('fallback_path')}")
+if lowering.get("recognized_pattern") != "indexed_f32_knowledge_dual_output":
+    raise SystemExit(f"knowledge_lowering_certificate_recognized_pattern_mismatch:{lowering.get('recognized_pattern')}")
+if lowering.get("kaxi_pattern") != "source_epistemic_dual_output_f32":
+    raise SystemExit(f"knowledge_lowering_certificate_kaxi_pattern_mismatch:{lowering.get('kaxi_pattern')}")
+if obj.get("profile", {}).get("name") != "epistemic_dual_output_f32":
+    raise SystemExit(f"knowledge_lowering_certificate_profile_mismatch:{obj.get('profile', {}).get('name')}")
+runtime = obj.get("runtime", {}).get("runtime_validation", {})
+if runtime.get("rung") != "epistemic_dual_output_f32":
+    raise SystemExit(f"knowledge_lowering_certificate_runtime_rung_mismatch:{runtime.get('rung')}")
+if obj.get("kaxi", {}).get("epistemic_lanes", {}).get("store_global_count", 0) < 2:
+    raise SystemExit("knowledge_lowering_certificate_dual_store_count_missing")
+PY
+
 echo "kretikos_kaxi_lowering_gate: negative profile-directive rejection source=$PROFILE_SOURCE"
 if ./bin/kretikos kaxi-lower-source "$PROFILE_SOURCE" -o "$OUT_DIR/profile_directive_negative.json" >"$NEGATIVE_STDOUT" 2>"$NEGATIVE_STDERR"; then
   cat "$NEGATIVE_STDOUT"
@@ -125,7 +163,7 @@ if ./bin/kretikos kaxi-lower-source "$PROFILE_SOURCE" -o "$OUT_DIR/profile_direc
 fi
 grep -q "profile_directive_present" "$NEGATIVE_STDERR"
 
-python3 - "$GATE_JSON" "$OUT_DIR" "$NEGATIVE_STDERR" "$LOWERING_CERTIFICATE" "${lowering_cases[@]}" <<'PY'
+python3 - "$GATE_JSON" "$OUT_DIR" "$NEGATIVE_STDERR" "$LOWERING_CERTIFICATE" "$KNOWLEDGE_LOWERING_CERTIFICATE" "${lowering_cases[@]}" <<'PY'
 import hashlib
 import json
 import sys
@@ -136,7 +174,8 @@ gate_json = Path(sys.argv[1])
 out_dir = Path(sys.argv[2])
 negative_stderr = Path(sys.argv[3])
 lowering_certificate_path = Path(sys.argv[4])
-case_specs = sys.argv[5:]
+knowledge_lowering_certificate_path = Path(sys.argv[5])
+case_specs = sys.argv[6:]
 
 failures = []
 cases = []
@@ -168,7 +207,7 @@ for spec in case_specs:
     if not lowering_contract.get("source_lowered_to_kaxi"):
         failures.append({"kind": "source_lowered_to_kaxi_not_true", "label": label})
     store_count = witness.get("epistemic_lanes", {}).get("store_global_count", 0)
-    required_stores = 2 if label == "epistemic_dual_output_f32" else 1
+    required_stores = 2 if kaxi_pattern == "source_epistemic_dual_output_f32" else 1
     if store_count < required_stores:
         failures.append({
             "kind": "store_global_count_below_required",
@@ -208,6 +247,8 @@ if "profile_directive_present" not in negative_stderr.read_text(encoding="utf-8"
 
 lowering_certificate = json.loads(lowering_certificate_path.read_text(encoding="utf-8"))
 cert_runtime = lowering_certificate.get("runtime", {}).get("runtime_validation", {})
+knowledge_lowering_certificate = json.loads(knowledge_lowering_certificate_path.read_text(encoding="utf-8"))
+knowledge_cert_runtime = knowledge_lowering_certificate.get("runtime", {}).get("runtime_validation", {})
 if lowering_certificate.get("status") != "pass":
     failures.append({
         "kind": "lowering_certificate_status_not_pass",
@@ -220,6 +261,25 @@ if lowering_certificate.get("lowering", {}).get("fallback_path") != "none":
     failures.append({"kind": "lowering_certificate_fallback_path_not_none"})
 if cert_runtime.get("rung") != "epistemic_dual_output_f32":
     failures.append({"kind": "lowering_certificate_runtime_rung_mismatch", "rung": cert_runtime.get("rung")})
+if knowledge_lowering_certificate.get("status") != "pass":
+    failures.append({
+        "kind": "knowledge_lowering_certificate_status_not_pass",
+        "status": knowledge_lowering_certificate.get("status"),
+        "failures": knowledge_lowering_certificate.get("failures", []),
+    })
+if knowledge_lowering_certificate.get("lowering", {}).get("profile_hint") != "none":
+    failures.append({"kind": "knowledge_lowering_certificate_profile_hint_not_none"})
+if knowledge_lowering_certificate.get("lowering", {}).get("fallback_path") != "none":
+    failures.append({"kind": "knowledge_lowering_certificate_fallback_path_not_none"})
+if knowledge_lowering_certificate.get("lowering", {}).get("recognized_pattern") != "indexed_f32_knowledge_dual_output":
+    failures.append({
+        "kind": "knowledge_lowering_certificate_recognized_pattern_mismatch",
+        "recognized_pattern": knowledge_lowering_certificate.get("lowering", {}).get("recognized_pattern"),
+    })
+if knowledge_lowering_certificate.get("lowering", {}).get("kaxi_pattern") != "source_epistemic_dual_output_f32":
+    failures.append({"kind": "knowledge_lowering_certificate_kaxi_pattern_mismatch"})
+if knowledge_cert_runtime.get("rung") != "epistemic_dual_output_f32":
+    failures.append({"kind": "knowledge_lowering_certificate_runtime_rung_mismatch", "rung": knowledge_cert_runtime.get("rung")})
 
 payload = {
     "schema": "sounio.kretikos.kaxi-source-lowering-gate.v1",
@@ -240,6 +300,19 @@ payload = {
         "runtime_reason": cert_runtime.get("reason"),
         "runtime_rung": cert_runtime.get("rung"),
         "runtime_kernel": cert_runtime.get("kernel"),
+    },
+    "knowledge_lowering_certificate": {
+        "path": knowledge_lowering_certificate_path.name,
+        "sha256": hashlib.sha256(knowledge_lowering_certificate_path.read_bytes()).hexdigest(),
+        "schema": knowledge_lowering_certificate.get("schema"),
+        "status": knowledge_lowering_certificate.get("status"),
+        "profile": knowledge_lowering_certificate.get("profile", {}).get("name"),
+        "recognized_pattern": knowledge_lowering_certificate.get("lowering", {}).get("recognized_pattern"),
+        "kaxi_pattern": knowledge_lowering_certificate.get("lowering", {}).get("kaxi_pattern"),
+        "runtime_status": knowledge_cert_runtime.get("status"),
+        "runtime_reason": knowledge_cert_runtime.get("reason"),
+        "runtime_rung": knowledge_cert_runtime.get("rung"),
+        "runtime_kernel": knowledge_cert_runtime.get("kernel"),
     },
     "negative_cases": [
         {
