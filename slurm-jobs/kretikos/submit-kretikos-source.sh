@@ -264,11 +264,25 @@ case "\${SOURCE_PROFILE}" in
     if [[ "\${CERTIFY_KAXI}" == "1" ]]; then
       mark "kretikos_source=running phase=kaxi_certificate profile=\${SOURCE_PROFILE}"
       KAXI_CERT_JSON="\${CERT_DIR}/kaxi_certificate.v1.json"
-      ./bin/kretikos kaxi-certificate "\${SOUNIO_DIR}/\${SOURCE_PAYLOAD_NAME}" \
-        -o "\${KAXI_CERT_JSON}" \
-        --work-dir "\${CERT_DIR}/work" \
-        --force \
-        --require-runtime > "\${CERT_LOG}" 2>&1
+      KAXI_CERT_KIND="profile"
+      if ! grep -Eq '^[[:space:]]*//[[:space:]]*kretikos:[[:space:]]*profile[[:space:]]*=' "\${SOUNIO_DIR}/\${SOURCE_PAYLOAD_NAME}" \
+        && ./bin/kretikos kaxi-lower-source "\${SOUNIO_DIR}/\${SOURCE_PAYLOAD_NAME}" \
+          -o "\${CERT_DIR}/kaxi_lowering_probe.json" \
+          --asm-output "\${CERT_DIR}/kaxi_lowering_probe.kaxi" \
+          --kaxi-witness-output "\${CERT_DIR}/kaxi_lowering_probe.witness.json" >/dev/null 2>&1; then
+        KAXI_CERT_KIND="source_lowering"
+        ./bin/kretikos kaxi-lowering-certificate "\${SOUNIO_DIR}/\${SOURCE_PAYLOAD_NAME}" \
+          -o "\${KAXI_CERT_JSON}" \
+          --work-dir "\${CERT_DIR}/work" \
+          --force \
+          --require-runtime > "\${CERT_LOG}" 2>&1
+      else
+        ./bin/kretikos kaxi-certificate "\${SOUNIO_DIR}/\${SOURCE_PAYLOAD_NAME}" \
+          -o "\${KAXI_CERT_JSON}" \
+          --work-dir "\${CERT_DIR}/work" \
+          --force \
+          --require-runtime > "\${CERT_LOG}" 2>&1
+      fi
       python3 - "\${KAXI_CERT_JSON}" "\${SOURCE_PROFILE}" <<'PY'
 import json
 import sys
@@ -289,10 +303,10 @@ if runtime.get("rung") != expected_profile:
     raise SystemExit(f"kaxi_certificate_runtime_rung_mismatch:{runtime.get('rung')}!={expected_profile}")
 PY
       KAXI_CERT_STATUS="pass"
-      KAXI_CERT_REASON="runtime_backed_certificate_pass"
+      KAXI_CERT_REASON="runtime_backed_\${KAXI_CERT_KIND}_certificate_pass"
       KAXI_CERT_WORKER_PATH="\${KAXI_CERT_JSON}"
       KAXI_CERT_PUBLISHED_PATH="certificate/kaxi_certificate.v1.json"
-      mark "\${comment} cert=pass"
+      mark "\${comment} cert=pass cert_kind=\${KAXI_CERT_KIND}"
     else
       KAXI_CERT_STATUS="not_run"
       KAXI_CERT_REASON="certification_disabled"

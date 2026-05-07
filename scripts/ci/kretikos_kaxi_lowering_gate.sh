@@ -11,6 +11,8 @@ PROFILE_SOURCE="examples/kretikos/real_vec_add.sio"
 NEGATIVE_STDOUT="$OUT_DIR/profile_directive_negative.stdout"
 NEGATIVE_STDERR="$OUT_DIR/profile_directive_negative.stderr"
 GATE_JSON="$OUT_DIR/kretikos_kaxi_lowering_gate.v1.json"
+LOWERING_CERTIFICATE="$OUT_DIR/epistemic_dual_output_f32.kaxi-lowering-certificate.json"
+LOWERING_CERTIFICATE_WORK="$OUT_DIR/epistemic_dual_output_f32.lowering-certificate.d"
 
 lowering_cases=(
   "vec_add_f32|examples/kretikos/lower_vec_add_f32.sio|source_vec_add_f32|indexed_f32_vector_add|add"
@@ -79,6 +81,41 @@ if store_count < required_stores:
 PY
 done
 
+echo "kretikos_kaxi_lowering_gate: lowering-certificate label=epistemic_dual_output_f32"
+./bin/kretikos kaxi-lowering-certificate \
+  examples/kretikos/lower_epistemic_dual_output_f32.sio \
+  -o "$LOWERING_CERTIFICATE" \
+  --work-dir "$LOWERING_CERTIFICATE_WORK" \
+  --force
+
+python3 - "$LOWERING_CERTIFICATE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if obj.get("status") != "pass":
+    raise SystemExit(f"lowering_certificate_status_not_pass:{obj.get('status')}:{obj.get('failures')}")
+if obj.get("schema") != "sounio.kretikos.kaxi-lowering-certificate.v1":
+    raise SystemExit(f"lowering_certificate_schema_mismatch:{obj.get('schema')}")
+lowering = obj.get("lowering", {})
+if lowering.get("profile_hint") != "none":
+    raise SystemExit(f"lowering_certificate_profile_hint_not_none:{lowering.get('profile_hint')}")
+if lowering.get("fallback_path") != "none":
+    raise SystemExit(f"lowering_certificate_fallback_path_not_none:{lowering.get('fallback_path')}")
+if lowering.get("recognized_pattern") != "indexed_f32_epistemic_dual_output":
+    raise SystemExit(f"lowering_certificate_recognized_pattern_mismatch:{lowering.get('recognized_pattern')}")
+if lowering.get("kaxi_pattern") != "source_epistemic_dual_output_f32":
+    raise SystemExit(f"lowering_certificate_kaxi_pattern_mismatch:{lowering.get('kaxi_pattern')}")
+if obj.get("profile", {}).get("name") != "epistemic_dual_output_f32":
+    raise SystemExit(f"lowering_certificate_profile_mismatch:{obj.get('profile', {}).get('name')}")
+runtime = obj.get("runtime", {}).get("runtime_validation", {})
+if runtime.get("rung") != "epistemic_dual_output_f32":
+    raise SystemExit(f"lowering_certificate_runtime_rung_mismatch:{runtime.get('rung')}")
+if obj.get("kaxi", {}).get("epistemic_lanes", {}).get("store_global_count", 0) < 2:
+    raise SystemExit("lowering_certificate_dual_store_count_missing")
+PY
+
 echo "kretikos_kaxi_lowering_gate: negative profile-directive rejection source=$PROFILE_SOURCE"
 if ./bin/kretikos kaxi-lower-source "$PROFILE_SOURCE" -o "$OUT_DIR/profile_directive_negative.json" >"$NEGATIVE_STDOUT" 2>"$NEGATIVE_STDERR"; then
   cat "$NEGATIVE_STDOUT"
@@ -88,7 +125,7 @@ if ./bin/kretikos kaxi-lower-source "$PROFILE_SOURCE" -o "$OUT_DIR/profile_direc
 fi
 grep -q "profile_directive_present" "$NEGATIVE_STDERR"
 
-python3 - "$GATE_JSON" "$OUT_DIR" "$NEGATIVE_STDERR" "${lowering_cases[@]}" <<'PY'
+python3 - "$GATE_JSON" "$OUT_DIR" "$NEGATIVE_STDERR" "$LOWERING_CERTIFICATE" "${lowering_cases[@]}" <<'PY'
 import hashlib
 import json
 import sys
@@ -98,7 +135,8 @@ from pathlib import Path
 gate_json = Path(sys.argv[1])
 out_dir = Path(sys.argv[2])
 negative_stderr = Path(sys.argv[3])
-case_specs = sys.argv[4:]
+lowering_certificate_path = Path(sys.argv[4])
+case_specs = sys.argv[5:]
 
 failures = []
 cases = []
@@ -168,6 +206,21 @@ for spec in case_specs:
 if "profile_directive_present" not in negative_stderr.read_text(encoding="utf-8"):
     failures.append({"kind": "negative_profile_directive_rejection_missing"})
 
+lowering_certificate = json.loads(lowering_certificate_path.read_text(encoding="utf-8"))
+cert_runtime = lowering_certificate.get("runtime", {}).get("runtime_validation", {})
+if lowering_certificate.get("status") != "pass":
+    failures.append({
+        "kind": "lowering_certificate_status_not_pass",
+        "status": lowering_certificate.get("status"),
+        "failures": lowering_certificate.get("failures", []),
+    })
+if lowering_certificate.get("lowering", {}).get("profile_hint") != "none":
+    failures.append({"kind": "lowering_certificate_profile_hint_not_none"})
+if lowering_certificate.get("lowering", {}).get("fallback_path") != "none":
+    failures.append({"kind": "lowering_certificate_fallback_path_not_none"})
+if cert_runtime.get("rung") != "epistemic_dual_output_f32":
+    failures.append({"kind": "lowering_certificate_runtime_rung_mismatch", "rung": cert_runtime.get("rung")})
+
 payload = {
     "schema": "sounio.kretikos.kaxi-source-lowering-gate.v1",
     "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -175,6 +228,19 @@ payload = {
     "out_dir": str(out_dir),
     "case_count": len(cases),
     "cases": cases,
+    "lowering_certificate": {
+        "path": lowering_certificate_path.name,
+        "sha256": hashlib.sha256(lowering_certificate_path.read_bytes()).hexdigest(),
+        "schema": lowering_certificate.get("schema"),
+        "status": lowering_certificate.get("status"),
+        "profile": lowering_certificate.get("profile", {}).get("name"),
+        "recognized_pattern": lowering_certificate.get("lowering", {}).get("recognized_pattern"),
+        "kaxi_pattern": lowering_certificate.get("lowering", {}).get("kaxi_pattern"),
+        "runtime_status": cert_runtime.get("status"),
+        "runtime_reason": cert_runtime.get("reason"),
+        "runtime_rung": cert_runtime.get("rung"),
+        "runtime_kernel": cert_runtime.get("kernel"),
+    },
     "negative_cases": [
         {
             "name": "profile_directive_rejected",
@@ -189,6 +255,7 @@ payload = {
         "gate_requires_profile_hint_none",
         "gate_requires_fallback_path_none",
         "gate_rejects_legacy_profile_directive_path",
+        "gate_proves_source_lowering_certificate_braids_lowering_kaxi_and_runtime_bundle_evidence",
         "gate_does_not_claim_arbitrary_sounio_gpu_lowering",
         "gate_does_not_replace_slurm_cuda_runtime_authority",
     ],
