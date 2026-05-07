@@ -15,6 +15,7 @@
 #   kretikos emit-spirv <pattern> -o <file.spv>  - emit SPIR-V template from in-tree emitter
 #   kretikos emit-kaxi <pattern> -o <file.kaxi>  - emit K-AXI epistemic assembly template
 #   kretikos kaxi-witness <pattern> -o <file.json> - emit K-AXI assembly plus evidence JSON
+#   kretikos kaxi-source-witness <source.sio> -o <file.json> - link checked source to K-AXI evidence
 #   kretikos emulate                            - run CPU emulation self-check
 #   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
 #   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
@@ -835,6 +836,7 @@ PY
             echo "hint: 'kretikos emit-spirv exit_only -o kernel.spv' emits a SPIR-V template" >&2
             echo "hint: 'kretikos emit-kaxi exit_only -o kernel.kaxi' emits a K-AXI assembly template" >&2
             echo "hint: 'kretikos kaxi-witness epistemic_dual_output_f32 -o witness.json' emits K-AXI evidence" >&2
+            echo "hint: 'kretikos kaxi-source-witness examples/kretikos/real_epistemic_dual_output.sio -o source-witness.json' links source to K-AXI evidence" >&2
             echo "hint: 'kretikos emulate' runs CPU emulation self-check" >&2
             echo "hint: 'kretikos emit-cubin <kind> -o kernel.cubin' emits a CUBIN template from in-tree emitters" >&2
             exit 1
@@ -1388,6 +1390,182 @@ PY
 
         echo "kretikos: K-AXI witness emitted - $OUT"
         echo "kretikos: K-AXI witness assembly - $ASM_OUT"
+        ;;
+
+    kaxi-source-witness)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos kaxi-source-witness <source.sio> -o <file.json> [--asm-output <file.kaxi>] [--kaxi-witness-output <file.json>]" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        OUT=""
+        ASM_OUT=""
+        KAXI_WITNESS_OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --asm-output)
+                    ASM_OUT="$2"
+                    shift 2
+                    ;;
+                --kaxi-witness-output)
+                    KAXI_WITNESS_OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-source-witness <source.sio> -o <file.json> [--asm-output <file.kaxi>] [--kaxi-witness-output <file.json>]" >&2
+            exit 1
+        fi
+        if [[ ! -f "$SRC" ]]; then
+            echo "error: source not found: $SRC" >&2
+            exit 1
+        fi
+
+        case "$OUT" in
+            *.json) OUT_STEM="${OUT%.json}" ;;
+            *) OUT_STEM="$OUT" ;;
+        esac
+        if [[ -z "$ASM_OUT" ]]; then
+            ASM_OUT="${OUT_STEM}.kaxi"
+        fi
+        if [[ -z "$KAXI_WITNESS_OUT" ]]; then
+            KAXI_WITNESS_OUT="${OUT_STEM}.kaxi-witness.json"
+        fi
+
+        mkdir -p "$(dirname "$OUT")" "$(dirname "$ASM_OUT")" "$(dirname "$KAXI_WITNESS_OUT")"
+        CHECK_LOG="${OUT}.check.log"
+        __kretikos_check_source "$SRC" >"$CHECK_LOG" 2>&1 || {
+            cat "$CHECK_LOG" >&2
+            echo "error: source check failed before K-AXI source witness: $SRC" >&2
+            exit 1
+        }
+
+        record="$(__kretikos_source_profile_record "$SRC")"
+        IFS='|' read -r PROFILE CUBIN_KIND RUNTIME_RUNG KERNEL_NAME CLASS PTX_PATTERN RUNTIME_BACKED <<<"$record"
+        case "$PROFILE" in
+            vec_add_f32)
+                KAXI_PATTERN="vec_add"
+                ;;
+            epistemic_elementwise_f32)
+                KAXI_PATTERN="epistemic_elementwise_f32"
+                ;;
+            epistemic_dual_output_f32)
+                KAXI_PATTERN="epistemic_dual_output_f32"
+                ;;
+            *)
+                echo "error: K-AXI source witness does not yet support profile '$PROFILE'" >&2
+                echo "supported source profiles for K-AXI witness: vec_add_f32, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
+                exit 1
+                ;;
+        esac
+
+        "$KRETIKOS_SELF" kaxi-witness "$KAXI_PATTERN" -o "$KAXI_WITNESS_OUT" --asm-output "$ASM_OUT" >/dev/null
+
+        SOURCE_SHA="$(__kretikos_sha256 "$SRC")" || exit 1
+        SOURCE_BYTES="$(__kretikos_file_size "$SRC")" || exit 1
+        SOURCE_PATH="$(__kretikos_repo_path "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")")"
+        CHECK_SHA="$(__kretikos_sha256 "$CHECK_LOG")" || exit 1
+        CHECK_BYTES="$(__kretikos_file_size "$CHECK_LOG")" || exit 1
+        KAXI_WITNESS_SHA="$(__kretikos_sha256 "$KAXI_WITNESS_OUT")" || exit 1
+
+        python3 - "$OUT" "$SOURCE_PATH" "$SOURCE_BYTES" "$SOURCE_SHA" \
+            "$CHECK_LOG" "$CHECK_BYTES" "$CHECK_SHA" \
+            "$PROFILE" "$CUBIN_KIND" "$RUNTIME_RUNG" "$KERNEL_NAME" "$RUNTIME_BACKED" "$KAXI_PATTERN" \
+            "$KAXI_WITNESS_OUT" "$KAXI_WITNESS_SHA" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+(
+    out_path,
+    source_path,
+    source_bytes,
+    source_sha,
+    check_log,
+    check_bytes,
+    check_sha,
+    profile,
+    cubin_kind,
+    runtime_rung,
+    kernel_name,
+    runtime_backed,
+    kaxi_pattern,
+    kaxi_witness_path,
+    kaxi_witness_sha,
+) = sys.argv[1:]
+
+witness_path = Path(kaxi_witness_path)
+witness = json.loads(witness_path.read_text(encoding="utf-8"))
+failures = []
+if witness.get("status") != "pass":
+    failures.append({"kind": "kaxi_witness_status_not_pass", "status": witness.get("status")})
+if witness.get("failures"):
+    failures.append({"kind": "kaxi_witness_failures", "failures": witness.get("failures")})
+if not witness.get("assembly", {}).get("seq_dense_zero_based"):
+    failures.append({"kind": "kaxi_sequence_not_dense_zero_based"})
+
+payload = {
+    "schema": "sounio.kretikos.kaxi-source-witness.v1",
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "status": "pass" if not failures else "fail",
+    "source": {
+        "path": source_path,
+        "bytes": int(source_bytes),
+        "sha256": source_sha,
+        "check": {
+            "status": "pass",
+            "log_path": check_log,
+            "bytes": int(check_bytes),
+            "sha256": check_sha,
+        },
+    },
+    "profile": {
+        "name": profile,
+        "runtime_backed": runtime_backed == "1",
+        "cubin_kind": cubin_kind,
+        "runtime_rung": runtime_rung,
+        "kernel": kernel_name,
+    },
+    "kaxi": {
+        "pattern": kaxi_pattern,
+        "semantic_profile": witness.get("semantic_profile"),
+        "witness_path": str(witness_path),
+        "witness_sha256": kaxi_witness_sha,
+        "assembly": witness.get("assembly", {}),
+        "epistemic_lanes": witness.get("epistemic_lanes", {}),
+    },
+    "failures": failures,
+    "boundaries": [
+        "source_must_typecheck_before_kaxi_profile_selection",
+        "source_profile_selection_is_explicit_or_shape_limited",
+        "source_witness_links_source_hash_to_kaxi_witness_hash",
+        "source_witness_does_not_claim_arbitrary_sounio_gpu_lowering",
+        "source_witness_does_not_replace_slurm_cuda_runtime_authority",
+    ],
+}
+Path(out_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+if failures:
+    raise SystemExit(json.dumps(failures))
+PY
+
+        echo "kretikos: K-AXI source witness emitted - $OUT"
+        echo "kretikos: K-AXI source witness profile - source=$SOURCE_PATH profile=$PROFILE kaxi_pattern=$KAXI_PATTERN"
         ;;
 
     emulate)
@@ -2302,6 +2480,7 @@ PY
         echo "  emit-spirv <pattern> -o <file.spv> Emit SPIR-V template (exit_only, vec_add, tid_kernel, self-check)"
         echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check)"
         echo "  kaxi-witness <pattern> -o <file.json> Emit K-AXI assembly plus witness JSON"
+        echo "  kaxi-source-witness <source.sio> -o <file.json> Link checked source to K-AXI evidence"
         echo "  emulate                            Run CPU emulation self-check (f32, f64, i32)"
         echo "  emit-cubin <kind> -o <file.cubin> Emit CUBIN template from in-tree emitter"
         echo "  bundle [-o <dir>]                 Emit PTX+CUBIN plus bundle manifest"

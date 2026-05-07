@@ -56,6 +56,35 @@ grep -q "add r" "$OUT_DIR/epistemic_dual_output_f32.kaxi"
 grep -q "mul r" "$OUT_DIR/epistemic_dual_output_f32.kaxi"
 grep -q "store_global r" "$OUT_DIR/epistemic_dual_output_f32.kaxi"
 
+source_witnesses=(
+  "epistemic_elementwise_f32:examples/kretikos/real_epistemic_elementwise.sio"
+  "epistemic_dual_output_f32:examples/kretikos/real_epistemic_dual_output.sio"
+)
+
+for item in "${source_witnesses[@]}"; do
+  label="${item%%:*}"
+  src="${item#*:}"
+  source_witness="$OUT_DIR/${label}.kaxi-source-witness.json"
+  source_log="$OUT_DIR/${label}.source-witness.out"
+  echo "kretikos_kaxi_gate: source-witness label=$label source=$src witness=$source_witness"
+  ./bin/kretikos kaxi-source-witness "$src" -o "$source_witness" >"$source_log" 2>&1
+  cat "$source_log"
+  python3 - "$source_witness" "$label" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+label = sys.argv[2]
+if obj.get("status") != "pass":
+    raise SystemExit(f"source_witness_status_not_pass:{obj.get('status')}")
+if obj.get("profile", {}).get("name") != label:
+    raise SystemExit(f"source_witness_profile_mismatch:{obj.get('profile', {}).get('name')} != {label}")
+if obj.get("failures"):
+    raise SystemExit(f"source_witness_failures:{obj['failures']}")
+PY
+done
+
 python3 - "$GATE_JSON" "$OUT_DIR" "$SELF_CHECK_LOG" "${patterns[@]}" <<'PY'
 import hashlib
 import json
@@ -93,16 +122,32 @@ for pattern in patterns:
         "has_variance_annotation": "var=+" in text or "var=0%" in text,
     })
 
+source_cases = []
+for source_path in sorted(out_dir.glob("*.kaxi-source-witness.json")):
+    obj = json.loads(source_path.read_text(encoding="utf-8"))
+    source_cases.append({
+        "witness": source_path.name,
+        "witness_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "source": obj.get("source", {}).get("path"),
+        "source_sha256": obj.get("source", {}).get("sha256"),
+        "profile": obj.get("profile", {}).get("name"),
+        "kaxi_pattern": obj.get("kaxi", {}).get("pattern"),
+        "semantic_profile": obj.get("kaxi", {}).get("semantic_profile"),
+        "status": obj.get("status"),
+    })
+
 payload = {
     "schema": "sounio.kretikos.kaxi-gate.v1",
     "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "status": "pass",
     "self_check_log": self_check_log.name,
     "cases": cases,
+    "source_cases": source_cases,
     "boundaries": [
         "kaxi_is_sounio_owned_epistemic_gpu_assembly",
         "gate_proves_self_hosted_emitter_compiles_and_emits_structural_artifacts",
         "gate_proves_kaxi_witness_json_for_each_profile",
+        "gate_proves_checked_source_to_kaxi_witness_link_for_epistemic_profiles",
         "gate_proves_profile_level_lowering_for_explicit_kretikos_epistemic_profiles",
         "gate_does_not_claim_arbitrary_sounio_gpu_lowering",
         "gate_does_not_replace_slurm_cuda_runtime_authority",
