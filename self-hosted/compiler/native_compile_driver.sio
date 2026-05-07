@@ -3058,7 +3058,10 @@ fn parse_term_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
     result
 }
 
-fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+// Additive level: handles + and - on top of parse_term_ir.
+// Separated from parse_expr_ir so that comparison RHS can use this level,
+// making `x == 0 - 1` parse as `x == (0 - 1)` rather than `(x == 0) - 1`.
+fn parse_additive_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
     let left = parse_term_ir(func, ctx, pos)
     if left.ok == 0 { return left }
     var result = left
@@ -3075,8 +3078,16 @@ fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         result = ExprParse { ok: 1, reg: dst, next: right.next}
         op_kind = token_kind(result.next)
     }
+    result
+}
+
+fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let left = parse_additive_ir(func, ctx, pos)
+    if left.ok == 0 { return left }
+    var result = left
+    var op_kind = token_kind(result.next)
     if is_cmp_op(op_kind) {
-        let right = parse_term_ir(func, ctx, result.next + 1)
+        let right = parse_additive_ir(func, ctx, result.next + 1)
         if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: result.next} }
         if (op_kind == TK_EQEQ || op_kind == TK_BANGEQ) && token_kind(result.next + 1) == TK_STRING {
             let base = V2_NEXT_REG
@@ -3895,7 +3906,13 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                         if token_kind(end_pos) == TK_RBRACKET && token_kind(end_pos + 1) == TK_EQ {
                             let val = parse_expr_ir(func, ctx, end_pos + 2)
                             if val.ok != 0 {
-                                ufn_record_local_store(base_reg + foff, idx_expr.reg, val.reg)
+                                let base_is_ref = lookup_local_is_ref_tok(ctx, p)
+                                if base_is_ref != 0 && foff == 0 {
+                                    // ref to struct: pointer in base_reg slot; dereference + downward index
+                                    ufn_record_ref_array_store(base_reg, idx_expr.reg, val.reg)
+                                } else {
+                                    ufn_record_local_store(base_reg + foff, idx_expr.reg, val.reg)
+                                }
                                 return val.next
                             }
                             mark_parse_unsupported(end_pos + 2)
