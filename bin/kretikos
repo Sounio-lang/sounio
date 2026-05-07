@@ -16,6 +16,7 @@
 #   kretikos emit-kaxi <pattern> -o <file.kaxi>  - emit K-AXI epistemic assembly template
 #   kretikos kaxi-witness <pattern> -o <file.json> - emit K-AXI assembly plus evidence JSON
 #   kretikos kaxi-source-witness <source.sio> -o <file.json> - link checked source to K-AXI evidence
+#   kretikos kaxi-lower-source <source.sio> -o <file.json> - recognize checked source and lower to K-AXI evidence
 #   kretikos kaxi-certificate <source.sio> -o <file.json> - braid source, K-AXI, and runtime bundle evidence
 #   kretikos emulate                            - run CPU emulation self-check
 #   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
@@ -838,6 +839,7 @@ PY
             echo "hint: 'kretikos emit-kaxi exit_only -o kernel.kaxi' emits a K-AXI assembly template" >&2
             echo "hint: 'kretikos kaxi-witness epistemic_dual_output_f32 -o witness.json' emits K-AXI evidence" >&2
             echo "hint: 'kretikos kaxi-source-witness examples/kretikos/real_epistemic_dual_output.sio -o source-witness.json' links source to K-AXI evidence" >&2
+            echo "hint: 'kretikos kaxi-lower-source examples/kretikos/lower_vec_add_f32.sio -o lowering.json' recognizes source and emits K-AXI evidence" >&2
             echo "hint: 'kretikos kaxi-certificate examples/kretikos/real_epistemic_dual_output.sio -o certificate.json' braids source, K-AXI, and runtime bundle evidence" >&2
             echo "hint: 'kretikos emulate' runs CPU emulation self-check" >&2
             echo "hint: 'kretikos emit-cubin <kind> -o kernel.cubin' emits a CUBIN template from in-tree emitters" >&2
@@ -1176,6 +1178,7 @@ PY
             echo "  vec_mul                   - kernel with GetTid + Mul ops" >&2
             echo "  vec_div                   - kernel with GetTid + Div ops" >&2
             echo "  fma                       - kernel with GetTid + FMA ops" >&2
+            echo "  source_vec_add_f32        - checked-source vec-add lowering sketch" >&2
             echo "  epistemic_elementwise_f32 - value+epsilon lane arithmetic sketch" >&2
             echo "  epistemic_dual_output_f32 - separate value/uncertainty output sketch" >&2
             echo "  self-check                - run K-AXI self-check suite" >&2
@@ -1183,10 +1186,10 @@ PY
         fi
 
         case "$PATTERN" in
-            exit_only|vec_add|vec_sub|vec_mul|vec_div|fma|epistemic_elementwise_f32|epistemic_dual_output_f32|self-check) ;;
+            exit_only|vec_add|vec_sub|vec_mul|vec_div|fma|source_vec_add_f32|epistemic_elementwise_f32|epistemic_dual_output_f32|self-check) ;;
             *)
                 echo "error: unsupported K-AXI pattern '$PATTERN'" >&2
-                echo "supported K-AXI patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check" >&2
+                echo "supported K-AXI patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check" >&2
                 exit 1
                 ;;
         esac
@@ -1255,15 +1258,15 @@ PY
 
         if [[ -z "$PATTERN" || -z "$OUT" ]]; then
             echo "usage: kretikos kaxi-witness <pattern> -o <file.json> [--asm-output <file.kaxi>]" >&2
-            echo "supported K-AXI witness patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
+            echo "supported K-AXI witness patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f32, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
             exit 1
         fi
 
         case "$PATTERN" in
-            exit_only|vec_add|vec_sub|vec_mul|vec_div|fma|epistemic_elementwise_f32|epistemic_dual_output_f32) ;;
+            exit_only|vec_add|vec_sub|vec_mul|vec_div|fma|source_vec_add_f32|epistemic_elementwise_f32|epistemic_dual_output_f32) ;;
             *)
                 echo "error: unsupported K-AXI witness pattern '$PATTERN'" >&2
-                echo "supported K-AXI witness patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
+                echo "supported K-AXI witness patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f32, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
                 exit 1
                 ;;
         esac
@@ -1342,6 +1345,11 @@ expectations = {
         "forbidden": [],
         "semantic": "value_lane_fma",
     },
+    "source_vec_add_f32": {
+        "required": ["get_tid", "load_global", "add", "store_global", "ret"],
+        "forbidden": [],
+        "semantic": "lowered_indexed_f32_vector_add",
+    },
     "epistemic_elementwise_f32": {
         "required": ["get_tid", "load_global", "fma", "store_global", "ret"],
         "forbidden": [],
@@ -1366,6 +1374,8 @@ if pattern == "epistemic_dual_output_f32":
     uncertainty_lane = next((line for line in instructions if line.startswith("mul ")), "")
 elif pattern == "epistemic_elementwise_f32":
     value_lane = next((line for line in instructions if line.startswith("fma ")), "")
+elif pattern == "source_vec_add_f32":
+    value_lane = next((line for line in instructions if line.startswith("add ")), "")
 elif pattern in {"vec_add", "vec_sub", "vec_mul", "vec_div", "fma"}:
     value_lane = next((line for line in instructions if line.startswith(spec["required"][1] + " ")), "")
 
@@ -1606,6 +1616,267 @@ PY
 
         echo "kretikos: K-AXI source witness emitted - $OUT"
         echo "kretikos: K-AXI source witness profile - source=$SOURCE_PATH profile=$PROFILE kaxi_pattern=$KAXI_PATTERN"
+        ;;
+
+    kaxi-lower-source)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos kaxi-lower-source <source.sio> -o <file.json> [--asm-output <file.kaxi>] [--kaxi-witness-output <file.json>]" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        OUT=""
+        ASM_OUT=""
+        KAXI_WITNESS_OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --asm-output)
+                    ASM_OUT="$2"
+                    shift 2
+                    ;;
+                --kaxi-witness-output)
+                    KAXI_WITNESS_OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-lower-source <source.sio> -o <file.json> [--asm-output <file.kaxi>] [--kaxi-witness-output <file.json>]" >&2
+            exit 1
+        fi
+        if [[ ! -f "$SRC" ]]; then
+            echo "error: source not found: $SRC" >&2
+            exit 1
+        fi
+
+        case "$OUT" in
+            *.json) OUT_STEM="${OUT%.json}" ;;
+            *) OUT_STEM="$OUT" ;;
+        esac
+        if [[ -z "$ASM_OUT" ]]; then
+            ASM_OUT="${OUT_STEM}.kaxi"
+        fi
+        if [[ -z "$KAXI_WITNESS_OUT" ]]; then
+            KAXI_WITNESS_OUT="${OUT_STEM}.kaxi-witness.json"
+        fi
+        RECOGNITION_OUT="${OUT_STEM}.recognition.json"
+
+        mkdir -p "$(dirname "$OUT")" "$(dirname "$ASM_OUT")" "$(dirname "$KAXI_WITNESS_OUT")" "$(dirname "$RECOGNITION_OUT")"
+        CHECK_LOG="${OUT}.check.log"
+        __kretikos_check_source "$SRC" >"$CHECK_LOG" 2>&1 || {
+            cat "$CHECK_LOG" >&2
+            echo "error: source check failed before K-AXI source lowering: $SRC" >&2
+            exit 1
+        }
+
+        python3 - "$SRC" "$RECOGNITION_OUT" <<'PY' || {
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+src_path, out_path = sys.argv[1:]
+source = Path(src_path)
+raw = source.read_text(encoding="utf-8")
+code = re.sub(r"//.*", "", raw)
+flat = re.sub(r"\s+", " ", code)
+
+checks = {
+    "profile_directive_absent": re.search(r"//\s*kretikos\s*:\s*profile\s*=", raw, re.IGNORECASE) is None,
+    "has_gpu_kernel": re.search(r"\bkernel\s+fn\s+[A-Za-z_][A-Za-z0-9_]*", code) is not None and "with GPU" in raw,
+    "has_thread_index": "gpu_thread_id_x()" in code and "gpu_block_id_x()" in code and "gpu_block_dim_x()" in code,
+    "has_bounds_guard": re.search(r"\bif\s+i\s*<\s*n\b", code) is not None,
+    "has_f32_input_a": re.search(r"\ba\s*:\s*&\s*\[\s*f32\s*;\s*32\s*\]", code) is not None,
+    "has_f32_input_b": re.search(r"\bb\s*:\s*&\s*\[\s*f32\s*;\s*32\s*\]", code) is not None,
+    "has_mut_f32_output": re.search(r"\bout\s*:\s*&!\s*\[\s*f32\s*;\s*32\s*\]", code) is not None,
+    "has_indexed_vec_add": re.search(
+        r"\(\s*\*\s*out\s*\)\s*\[[^\]]+\]\s*=\s*\(\s*\*\s*a\s*\)\s*\[[^\]]+\]\s*\+\s*\(\s*\*\s*b\s*\)\s*\[[^\]]+\]",
+        code,
+    ) is not None,
+}
+
+failures = [{"kind": name} for name, ok in checks.items() if not ok]
+payload = {
+    "schema": "sounio.kretikos.source-lowering-recognition.v1",
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "status": "pass" if not failures else "fail",
+    "source": str(source),
+    "profile_hint": "none" if checks["profile_directive_absent"] else "present",
+    "profile_directive_present": not checks["profile_directive_absent"],
+    "source_lowered_to_kaxi": not failures,
+    "fallback_path": "none",
+    "recognized_pattern": "indexed_f32_vector_add" if not failures else None,
+    "kaxi_pattern": "source_vec_add_f32" if not failures else None,
+    "runtime_rung": "vec_add_f32" if not failures else None,
+    "semantic_ops": [
+        "thread_index:i=block_id_x*block_dim_x+thread_id_x",
+        "guard:i<n",
+        "load_global:a[i]",
+        "load_global:b[i]",
+        "add:f32",
+        "store_global:out[i]",
+    ] if not failures else [],
+    "checks": checks,
+    "failures": failures,
+    "boundaries": [
+        "recognizer_rejects_profile_directives",
+        "recognizer_is_shape_limited_to_indexed_f32_vec_add",
+        "recognizer_does_not_parse_arbitrary_sounio_gpu_programs",
+    ],
+}
+Path(out_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+if failures:
+    raise SystemExit(json.dumps(failures))
+PY
+            cat "$RECOGNITION_OUT" >&2
+            echo "error: K-AXI source lowering recognizer failed: $SRC" >&2
+            exit 1
+        }
+
+        KAXI_PATTERN="$(python3 - "$RECOGNITION_OUT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(obj.get("kaxi_pattern", ""))
+PY
+)"
+        if [[ "$KAXI_PATTERN" != "source_vec_add_f32" ]]; then
+            echo "error: unsupported recognized K-AXI lowering pattern '$KAXI_PATTERN'" >&2
+            exit 1
+        fi
+
+        "$KRETIKOS_SELF" kaxi-witness "$KAXI_PATTERN" -o "$KAXI_WITNESS_OUT" --asm-output "$ASM_OUT" >/dev/null
+
+        SOURCE_SHA="$(__kretikos_sha256 "$SRC")" || exit 1
+        SOURCE_BYTES="$(__kretikos_file_size "$SRC")" || exit 1
+        SOURCE_PATH="$(__kretikos_repo_path "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")")"
+        CHECK_SHA="$(__kretikos_sha256 "$CHECK_LOG")" || exit 1
+        CHECK_BYTES="$(__kretikos_file_size "$CHECK_LOG")" || exit 1
+        RECOGNITION_SHA="$(__kretikos_sha256 "$RECOGNITION_OUT")" || exit 1
+        RECOGNITION_BYTES="$(__kretikos_file_size "$RECOGNITION_OUT")" || exit 1
+        KAXI_WITNESS_SHA="$(__kretikos_sha256 "$KAXI_WITNESS_OUT")" || exit 1
+
+        python3 - "$OUT" "$SOURCE_PATH" "$SOURCE_BYTES" "$SOURCE_SHA" \
+            "$CHECK_LOG" "$CHECK_BYTES" "$CHECK_SHA" \
+            "$RECOGNITION_OUT" "$RECOGNITION_BYTES" "$RECOGNITION_SHA" \
+            "$KAXI_WITNESS_OUT" "$KAXI_WITNESS_SHA" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+(
+    out_path,
+    source_path,
+    source_bytes,
+    source_sha,
+    check_log,
+    check_bytes,
+    check_sha,
+    recognition_path,
+    recognition_bytes,
+    recognition_sha,
+    kaxi_witness_path,
+    kaxi_witness_sha,
+) = sys.argv[1:]
+
+recognition = json.loads(Path(recognition_path).read_text(encoding="utf-8"))
+witness_path = Path(kaxi_witness_path)
+witness = json.loads(witness_path.read_text(encoding="utf-8"))
+failures = []
+if recognition.get("status") != "pass":
+    failures.append({"kind": "recognition_status_not_pass", "status": recognition.get("status")})
+if recognition.get("profile_hint") != "none":
+    failures.append({"kind": "profile_hint_not_none", "profile_hint": recognition.get("profile_hint")})
+if recognition.get("fallback_path") != "none":
+    failures.append({"kind": "fallback_path_not_none", "fallback_path": recognition.get("fallback_path")})
+if not recognition.get("source_lowered_to_kaxi"):
+    failures.append({"kind": "source_not_lowered_to_kaxi"})
+if witness.get("status") != "pass":
+    failures.append({"kind": "kaxi_witness_status_not_pass", "status": witness.get("status")})
+if witness.get("pattern") != recognition.get("kaxi_pattern"):
+    failures.append({
+        "kind": "kaxi_pattern_mismatch",
+        "recognition": recognition.get("kaxi_pattern"),
+        "witness": witness.get("pattern"),
+    })
+if not witness.get("assembly", {}).get("seq_dense_zero_based"):
+    failures.append({"kind": "kaxi_sequence_not_dense_zero_based"})
+if witness.get("epistemic_lanes", {}).get("store_global_count", 0) < 1:
+    failures.append({"kind": "lowered_vec_add_requires_store_global"})
+
+payload = {
+    "schema": "sounio.kretikos.kaxi-source-lowering.v1",
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "status": "pass" if not failures else "fail",
+    "source": {
+        "path": source_path,
+        "bytes": int(source_bytes),
+        "sha256": source_sha,
+        "check": {
+            "status": "pass",
+            "log_path": check_log,
+            "bytes": int(check_bytes),
+            "sha256": check_sha,
+        },
+    },
+    "lowering": {
+        "mode": "source_to_kaxi",
+        "source_lowered_to_kaxi": recognition.get("source_lowered_to_kaxi"),
+        "profile_hint": recognition.get("profile_hint"),
+        "fallback_path": recognition.get("fallback_path"),
+        "recognized_pattern": recognition.get("recognized_pattern"),
+        "kaxi_pattern": recognition.get("kaxi_pattern"),
+        "runtime_rung": recognition.get("runtime_rung"),
+        "semantic_ops": recognition.get("semantic_ops", []),
+        "recognition": {
+            "path": recognition_path,
+            "bytes": int(recognition_bytes),
+            "sha256": recognition_sha,
+            "checks": recognition.get("checks", {}),
+        },
+    },
+    "kaxi": {
+        "pattern": witness.get("pattern"),
+        "semantic_profile": witness.get("semantic_profile"),
+        "witness_path": str(witness_path),
+        "witness_sha256": kaxi_witness_sha,
+        "assembly": witness.get("assembly", {}),
+        "epistemic_lanes": witness.get("epistemic_lanes", {}),
+    },
+    "failures": failures,
+    "boundaries": [
+        "source_must_typecheck_before_kaxi_lowering",
+        "profile_directives_are_rejected_for_source_lowering",
+        "source_lowering_links_source_hash_to_kaxi_witness_hash",
+        "source_lowering_is_shape_limited_to_indexed_f32_vec_add",
+        "source_lowering_does_not_claim_general_gpu_backend_completeness",
+        "source_lowering_does_not_replace_slurm_cuda_runtime_authority",
+    ],
+}
+Path(out_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+if failures:
+    raise SystemExit(json.dumps(failures))
+PY
+
+        echo "kretikos: K-AXI source lowering emitted - $OUT"
+        echo "kretikos: K-AXI source lowering pattern - source=$SOURCE_PATH recognized=indexed_f32_vector_add kaxi_pattern=$KAXI_PATTERN profile_hint=none fallback_path=none"
         ;;
 
     kaxi-certificate)
@@ -2758,9 +3029,10 @@ PY
         echo "  emit-ptx <pattern> -o <file.ptx>  Emit PTX template from in-tree emitter"
         echo "  emit-metal <pattern> -o <file.metal> Emit MSL template from in-tree emitter"
         echo "  emit-spirv <pattern> -o <file.spv> Emit SPIR-V template (exit_only, vec_add, tid_kernel, self-check)"
-        echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check)"
+        echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, source_vec_add_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check)"
         echo "  kaxi-witness <pattern> -o <file.json> Emit K-AXI assembly plus witness JSON"
         echo "  kaxi-source-witness <source.sio> -o <file.json> Link checked source to K-AXI evidence"
+        echo "  kaxi-lower-source <source.sio> -o <file.json> Recognize checked source and lower to K-AXI evidence without a profile hint"
         echo "  kaxi-certificate <source.sio> -o <file.json> Braid checked source, K-AXI, and runtime bundle evidence"
         echo "  emulate                            Run CPU emulation self-check (f32, f64, i32)"
         echo "  emit-cubin <kind> -o <file.cubin> Emit CUBIN template from in-tree emitter"
