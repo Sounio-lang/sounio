@@ -50,13 +50,7 @@ if [[ -z "${summary_line}" ]]; then
   exit 1
 fi
 
-# Comment=kaxi_matrix passed=12/12 failed=
-if echo "${summary_line}" | grep -qE 'passed=12/12 failed= *$|passed=12/12 failed=$'; then
-  echo "kretikos_kaxi_l4_launch_gate: PASS"
-  exit 0
-fi
-
-# If matrix expanded later, accept passed=N/N with empty failed list
+# Comment=kaxi_matrix passed=N/N failed=
 if echo "${summary_line}" | grep -qE 'passed=([0-9]+)/\1 failed= *$'; then
   echo "kretikos_kaxi_l4_launch_gate: PASS"
   exit 0

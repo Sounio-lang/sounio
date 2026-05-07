@@ -48,20 +48,23 @@ trap cleanup EXIT
 mkdir -p "${STAGE_DIR}"
 
 # ----- declare cases as parallel arrays ---------------------------------
-# (name|mode|threads|mem-words|init-mem|init-var|expected-mem|expected-var)
+# (name|mode|blocks|threads|mem-words|init-mem|init-var|expected-mem|expected-var)
+# init-mem of "_seq_" means seed mem with [1..mem-words] sequence (test multi-block).
 CASES=(
-  "vec_add|basic|8|8|1,2,3,4,5,6,7,8||2,4,6,8,10,12,14,16|"
-  "vec_add|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,4,6,8,10,12,14,16|2,2,2,2,2,2,2,2"
-  "vec_sub|basic|8|8|1,2,3,4,5,6,7,8||0,0,0,0,0,0,0,0|"
-  "vec_sub|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|0,0,0,0,0,0,0,0|2,2,2,2,2,2,2,2"
-  "vec_mul|basic|8|8|1,2,3,4,5,6,7,8||1,4,9,16,25,36,49,64|"
-  "vec_mul|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|1,4,9,16,25,36,49,64|2,8,18,32,50,72,98,128"
-  "vec_div|basic|8|8|1,2,3,4,5,6,7,8||1,1,1,1,1,1,1,1|"
-  "vec_div|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|1,1,1,1,1,1,1,1|2,2,2,2,2,2,2,2"
-  "fma|basic|8|8|1,2,3,4,5,6,7,8||2,6,12,20,30,42,56,72|"
-  "fma|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,6,12,20,30,42,56,72|3,9,19,33,51,73,99,129"
-  "edo|basic|8|8|1,2,3,4,5,6,7,8||8,32,72,128,200,288,392,512|"
-  "edo|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|8,32,72,128,200,288,392,512|64,256,576,1024,1600,2304,3136,4096"
+  "vec_add|basic|1|8|8|1,2,3,4,5,6,7,8||2,4,6,8,10,12,14,16|"
+  "vec_add|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,4,6,8,10,12,14,16|2,2,2,2,2,2,2,2"
+  "vec_sub|basic|1|8|8|1,2,3,4,5,6,7,8||0,0,0,0,0,0,0,0|"
+  "vec_sub|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|0,0,0,0,0,0,0,0|2,2,2,2,2,2,2,2"
+  "vec_mul|basic|1|8|8|1,2,3,4,5,6,7,8||1,4,9,16,25,36,49,64|"
+  "vec_mul|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|1,4,9,16,25,36,49,64|2,8,18,32,50,72,98,128"
+  "vec_div|basic|1|8|8|1,2,3,4,5,6,7,8||1,1,1,1,1,1,1,1|"
+  "vec_div|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|1,1,1,1,1,1,1,1|2,2,2,2,2,2,2,2"
+  "fma|basic|1|8|8|1,2,3,4,5,6,7,8||2,6,12,20,30,42,56,72|"
+  "fma|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,6,12,20,30,42,56,72|3,9,19,33,51,73,99,129"
+  "edo|basic|1|8|8|1,2,3,4,5,6,7,8||8,32,72,128,200,288,392,512|"
+  "edo|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|8,32,72,128,200,288,392,512|64,256,576,1024,1600,2304,3136,4096"
+  "mb_double|basic|4|8|32|_seq_||2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64|"
+  "mb_double|basic|8|8|64|_seq_||2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102,104,106,108,110,112,114,116,118,120,122,124,126,128|"
 )
 # Map short names → kretikos pattern names
 declare -A PATTERN_FOR
@@ -71,20 +74,21 @@ PATTERN_FOR[vec_mul]=source_vec_mul_f32
 PATTERN_FOR[vec_div]=source_vec_div_f32
 PATTERN_FOR[fma]=source_fma_f32
 PATTERN_FOR[edo]=source_epistemic_dual_output_f32
+PATTERN_FOR[mb_double]=mb_vec_double_f32
 
 # ----- build PTX for every case (locally, both basic + epistemic) -------
 echo "[0/3] generating ${#CASES[@]} PTX kernels"
 INDEX=0
 > "${STAGE_DIR}/cases.tsv"
 for c in "${CASES[@]}"; do
-  IFS='|' read -r name mode threads mw imem ivar emem evar <<<"$c"
+  IFS='|' read -r name mode blocks threads mw imem ivar emem evar <<<"$c"
   pat="${PATTERN_FOR[$name]}"
   [[ -z "$pat" ]] && { echo "unknown name: $name" >&2; exit 1; }
   ptx="${STAGE_DIR}/case_${INDEX}.ptx"
   EMIT_FLAGS=()
   [[ "$mode" == "epistemic" ]] && EMIT_FLAGS+=(--epistemic)
   "${ROOT_DIR}/bin/kretikos" kaxi-emit-ptx "$pat" "${EMIT_FLAGS[@]}" -o "$ptx" >/dev/null
-  echo "${INDEX}|${name}|${mode}|${threads}|${mw}|${imem}|${ivar}|${emem}|${evar}" >> "${STAGE_DIR}/cases.tsv"
+  echo "${INDEX}|${name}|${mode}|${blocks}|${threads}|${mw}|${imem}|${ivar}|${emem}|${evar}" >> "${STAGE_DIR}/cases.tsv"
   INDEX=$((INDEX+1))
 done
 
@@ -101,11 +105,15 @@ chmod +x runner
 PASSED=0
 TOTAL=0
 FAILED_LIST=""
-while IFS='|' read -r idx name mode threads mw imem ivar emem evar; do
+while IFS='|' read -r idx name mode blocks threads mw imem ivar emem evar; do
   TOTAL=$((TOTAL+1))
-  ARGS=("case_${idx}.ptx" --threads "$threads" --mem-words "$mw")
+  ARGS=("case_${idx}.ptx" --blocks "$blocks" --threads "$threads" --mem-words "$mw")
   [[ "$mode" == "epistemic" ]] && ARGS+=(--epistemic)
-  [[ -n "$imem" ]] && ARGS+=(--init-mem "$imem")
+  if [[ "$imem" == "_seq_" ]]; then
+    ARGS+=(--init-seq)
+  elif [[ -n "$imem" ]]; then
+    ARGS+=(--init-mem "$imem")
+  fi
   [[ -n "$ivar" ]] && ARGS+=(--init-var "$ivar")
   out="$(./runner "${ARGS[@]}" 2>&1)"
   rc=$?

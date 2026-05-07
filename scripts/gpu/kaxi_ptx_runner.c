@@ -107,9 +107,12 @@ int main(int argc, char **argv) {
     const char *kname = "kaxi_kernel";
     int epistemic = 0;
     unsigned int threads = 1;
+    unsigned int blocks = 1;
     int mem_words = 16;
     const char *init_mem_csv = NULL;
     const char *init_var_csv = NULL;
+    int verify_init_seq = 0;  // if set, init mem to [1..mem_words] before launch
+    int print_count = -1;     // override print count (default = mem_words)
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--kernel") == 0 && i + 1 < argc) { kname = argv[++i]; }
@@ -117,12 +120,17 @@ int main(int argc, char **argv) {
             i++; epistemic = (strcmp(argv[i], "epistemic") == 0);
         }
         else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) { threads = (unsigned)atoi(argv[++i]); }
+        else if (strcmp(argv[i], "--blocks") == 0 && i + 1 < argc) { blocks = (unsigned)atoi(argv[++i]); }
         else if (strcmp(argv[i], "--mem-words") == 0 && i + 1 < argc) { mem_words = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--init-mem") == 0 && i + 1 < argc) { init_mem_csv = argv[++i]; }
         else if (strcmp(argv[i], "--init-var") == 0 && i + 1 < argc) { init_var_csv = argv[++i]; }
+        else if (strcmp(argv[i], "--init-seq") == 0) { verify_init_seq = 1; }
+        else if (strcmp(argv[i], "--print-count") == 0 && i + 1 < argc) { print_count = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--epistemic") == 0) { epistemic = 1; }
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); return 2; }
     }
+    if (print_count < 0) print_count = mem_words;
+    if (print_count > mem_words) print_count = mem_words;
     if (mem_words < 1 || mem_words > 1024) {
         fprintf(stderr, "mem-words out of range\n"); return 2;
     }
@@ -201,6 +209,11 @@ int main(int argc, char **argv) {
         parse_csv_i64(init_mem_csv, host, mem_words);
         cuMemcpyHtoD(d_mem, host, bytes);
         free(host);
+    } else if (verify_init_seq) {
+        int64_t *host = (int64_t *)calloc(mem_words, sizeof(int64_t));
+        for (int k = 0; k < mem_words; k++) host[k] = k + 1;  // 1, 2, 3, ...
+        cuMemcpyHtoD(d_mem, host, bytes);
+        free(host);
     }
 
     if (epistemic) {
@@ -220,7 +233,7 @@ int main(int argc, char **argv) {
     args[1] = epistemic ? (void *)&d_var : NULL;
 
     rc = cuLaunchKernel(fn,
-        /*grid*/ 1, 1, 1,
+        /*grid*/ blocks, 1, 1,
         /*block*/ threads, 1, 1,
         /*shmem*/ 0,
         /*stream*/ NULL,
@@ -242,11 +255,11 @@ int main(int argc, char **argv) {
     emit_status("pass", "launch_pass", "cuMemcpyDtoH", 0);
 
     printf("MEM:");
-    for (int i = 0; i < mem_words; i++) printf(" %lld", (long long)h_mem[i]);
+    for (int i = 0; i < print_count; i++) printf(" %lld", (long long)h_mem[i]);
     printf("\n");
     if (epistemic) {
         printf("VAR:");
-        for (int i = 0; i < mem_words; i++) printf(" %lld", (long long)h_var[i]);
+        for (int i = 0; i < print_count; i++) printf(" %lld", (long long)h_var[i]);
         printf("\n");
     }
     printf("device=%s cc=%d.%d\n", name, cc_major, cc_minor);
