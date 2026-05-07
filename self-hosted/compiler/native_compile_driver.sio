@@ -2022,6 +2022,7 @@ fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
     if name_eq_text(name, "print_char") { return V2_BUILTIN_PRINT_CHAR }
     if name_eq_text(name, "print_f64") { return V2_BUILTIN_PRINT_F64 }
     if name_eq_text(name, "sqrt_f64") { return V2_BUILTIN_SQRT_F64 }
+    if name_eq_text(name, "sqrt") { return V2_BUILTIN_SQRT_F64 }
     if name_eq_text(name, "arg_count") { return V2_BUILTIN_ARG_COUNT }
     if name_eq_text(name, "get_arg_count") { return V2_BUILTIN_ARG_COUNT }
     if name_eq_text(name, "get_arg") { return V2_BUILTIN_GET_ARG }
@@ -2047,6 +2048,7 @@ fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "print_char") { return V2_BUILTIN_PRINT_CHAR }
     if token_text_eq(tok, "print_f64") { return V2_BUILTIN_PRINT_F64 }
     if token_text_eq(tok, "sqrt_f64") { return V2_BUILTIN_SQRT_F64 }
+    if token_text_eq(tok, "sqrt") { return V2_BUILTIN_SQRT_F64 }
     if token_text_eq(tok, "measure") { return V2_BUILTIN_MEASURE }
     if token_text_eq(tok, "arg_count") { return V2_BUILTIN_ARG_COUNT }
     if token_text_eq(tok, "get_arg_count") { return V2_BUILTIN_ARG_COUNT }
@@ -2482,7 +2484,7 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
                 }
                 return ExprParse { ok: 1, reg: reg, next: pos + 1}
             }
-            // arr.len() — static array length intrinsic
+            // arr.len() or str.len() — static array length or runtime str_len
             if token_kind(pos + 1) == TK_DOT && token_kind(pos + 2) == TK_IDENT && token_text_eq(pos + 2, "len") && token_kind(pos + 3) == TK_LPAREN && token_kind(pos + 4) == TK_RPAREN {
                 let alen = lookup_local_alen_tok(ctx, pos)
                 if alen > 0 {
@@ -2490,6 +2492,10 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
                     ufn_record_load_imm(r, alen)
                     return ExprParse { ok: 1, reg: r, next: pos + 5}
                 }
+                // fall back to runtime str_len for string locals
+                let dst = alloc_reg(ctx)
+                ufn_record_call(dst, V2_BUILTIN_STR_LEN, reg, 1)
+                return ExprParse { ok: 1, reg: dst, next: pos + 5}
             }
             // local array read: ident[expr] or ident[expr as T]
             if token_kind(pos + 1) == TK_LBRACKET {
@@ -3001,6 +3007,19 @@ fn parse_term_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
             result = ExprParse { ok: 1, reg: conv, next: result.next + 2}
         } else {
             result = ExprParse { ok: 1, reg: result.reg, next: result.next + 2}
+        }
+    }
+    // Postfix .method() chain on any expression result.
+    // Handles: expr.sqrt(), expr.method(args) when V2_LAST_STRUCT_IDX is known.
+    if token_kind(result.next) == TK_DOT && token_kind(result.next + 1) == TK_IDENT && token_kind(result.next + 2) == TK_LPAREN {
+        if token_text_eq(result.next + 1, "sqrt") && token_kind(result.next + 3) == TK_RPAREN {
+            let sqrt_dst = alloc_reg(ctx)
+            mark_reg_f64(sqrt_dst)
+            ufn_record_call(sqrt_dst, V2_BUILTIN_SQRT_F64, result.reg, 1)
+            result = ExprParse { ok: 1, reg: sqrt_dst, next: result.next + 4}
+        } else if V2_LAST_STRUCT_IDX >= 0 {
+            let mres = parse_method_call_ir(func, ctx, result.next + 1, result.reg, V2_LAST_STRUCT_IDX)
+            if mres.ok != 0 { result = mres }
         }
     }
     var op_kind = token_kind(result.next)
@@ -3517,6 +3536,25 @@ fn parse_stmt_deref_idx_store(func: &! i64, ctx: &! V2DriverContext, p: i64, clo
     p
 }
 
+fn parse_stmt_deref_scalar_store(func: &! i64, ctx: &! V2DriverContext, p: i64, close: i64) -> i64 with Mut, Panic, Div, Alloc {
+    // (*ref) = expr — plain scalar deref write
+    if token_kind(p) != TK_LPAREN { return p }
+    if token_kind(p + 1) != TK_STAR { return p }
+    if token_kind(p + 2) != TK_IDENT { return p }
+    if token_kind(p + 3) != TK_RPAREN { return p }
+    if token_kind(p + 4) != TK_EQ { return p }
+    let base_ref = lookup_local_tok(ctx, p + 2)
+    if base_ref < 0 { return p }
+    if lookup_local_is_ref_tok(ctx, p + 2) == 0 { return p }
+    let rhs = parse_expr_ir(func, ctx, p + 5)
+    if rhs.ok != 0 {
+        ufn_record_store_ref_field(base_ref, 0, rhs.reg)
+        return rhs.next
+    }
+    mark_parse_unsupported(p + 5)
+    close
+}
+
 fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     let p = skip_trivia(pos, close)
     if p >= close { return close }
@@ -3796,6 +3834,10 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
     // (*arr)[idx] = expr — ref-array indexed write via deref-then-index
     let deref_idx_next = parse_stmt_deref_idx_store(func, ctx, p, close)
     if deref_idx_next > p { return deref_idx_next }
+
+    // (*ref) = expr — plain scalar deref write
+    let deref_scalar_next = parse_stmt_deref_scalar_store(func, ctx, p, close)
+    if deref_scalar_next > p { return deref_scalar_next }
 
     // reference field mutation: (*ctx).field = expr
     if k == TK_LPAREN && token_kind(p + 1) == TK_STAR && token_kind(p + 2) == TK_IDENT && token_kind(p + 3) == TK_RPAREN && token_kind(p + 4) == TK_DOT && token_kind(p + 5) == TK_IDENT && token_kind(p + 6) == TK_EQ {
