@@ -16,6 +16,7 @@
 #   kretikos emit-kaxi <pattern> -o <file.kaxi>  - emit K-AXI epistemic assembly template
 #   kretikos kaxi-witness <pattern> -o <file.json> - emit K-AXI assembly plus evidence JSON
 #   kretikos kaxi-source-witness <source.sio> -o <file.json> - link checked source to K-AXI evidence
+#   kretikos kaxi-certificate <source.sio> -o <file.json> - braid source, K-AXI, and runtime bundle evidence
 #   kretikos emulate                            - run CPU emulation self-check
 #   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
 #   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
@@ -837,6 +838,7 @@ PY
             echo "hint: 'kretikos emit-kaxi exit_only -o kernel.kaxi' emits a K-AXI assembly template" >&2
             echo "hint: 'kretikos kaxi-witness epistemic_dual_output_f32 -o witness.json' emits K-AXI evidence" >&2
             echo "hint: 'kretikos kaxi-source-witness examples/kretikos/real_epistemic_dual_output.sio -o source-witness.json' links source to K-AXI evidence" >&2
+            echo "hint: 'kretikos kaxi-certificate examples/kretikos/real_epistemic_dual_output.sio -o certificate.json' braids source, K-AXI, and runtime bundle evidence" >&2
             echo "hint: 'kretikos emulate' runs CPU emulation self-check" >&2
             echo "hint: 'kretikos emit-cubin <kind> -o kernel.cubin' emits a CUBIN template from in-tree emitters" >&2
             exit 1
@@ -1566,6 +1568,246 @@ PY
 
         echo "kretikos: K-AXI source witness emitted - $OUT"
         echo "kretikos: K-AXI source witness profile - source=$SOURCE_PATH profile=$PROFILE kaxi_pattern=$KAXI_PATTERN"
+        ;;
+
+    kaxi-certificate)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos kaxi-certificate <source.sio> -o <file.json> [--work-dir <dir>] [--force] [--require-runtime]" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        OUT=""
+        WORK_DIR=""
+        FORCE=0
+        RUNTIME_ARG=(--validate-runtime)
+        RUNTIME_MODE="auto"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --work-dir)
+                    WORK_DIR="$2"
+                    shift 2
+                    ;;
+                --force)
+                    FORCE=1
+                    shift
+                    ;;
+                --validate-runtime)
+                    RUNTIME_ARG=(--validate-runtime)
+                    RUNTIME_MODE="auto"
+                    shift
+                    ;;
+                --require-runtime)
+                    RUNTIME_ARG=(--require-runtime)
+                    RUNTIME_MODE="required"
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-certificate <source.sio> -o <file.json> [--work-dir <dir>] [--force] [--require-runtime]" >&2
+            exit 1
+        fi
+        if [[ ! -f "$SRC" ]]; then
+            echo "error: source not found: $SRC" >&2
+            exit 1
+        fi
+
+        case "$OUT" in
+            *.json) OUT_STEM="${OUT%.json}" ;;
+            *) OUT_STEM="$OUT" ;;
+        esac
+        if [[ -z "$WORK_DIR" ]]; then
+            WORK_DIR="${OUT_STEM}.certificate.d"
+        fi
+        if [[ -e "$OUT" && "$FORCE" -ne 1 ]]; then
+            echo "error: certificate output already exists: $OUT (use --force)" >&2
+            exit 1
+        fi
+        if [[ -e "$WORK_DIR" && "$FORCE" -ne 1 ]]; then
+            echo "error: certificate work dir already exists: $WORK_DIR (use --force)" >&2
+            exit 1
+        fi
+        if [[ "$FORCE" -eq 1 ]]; then
+            rm -rf "$WORK_DIR"
+        fi
+        mkdir -p "$(dirname "$OUT")" "$WORK_DIR"
+
+        SOURCE_WITNESS="$WORK_DIR/kaxi_source_witness.json"
+        KAXI_WITNESS="$WORK_DIR/kaxi_witness.json"
+        KAXI_ASM="$WORK_DIR/kaxi_source.kaxi"
+        RUNTIME_DIR="$WORK_DIR/runtime"
+        RUN_SOURCE_LOG="$WORK_DIR/run_source.out"
+
+        "$KRETIKOS_SELF" kaxi-source-witness "$SRC" \
+            -o "$SOURCE_WITNESS" \
+            --asm-output "$KAXI_ASM" \
+            --kaxi-witness-output "$KAXI_WITNESS" >/dev/null
+
+        mkdir -p "$RUNTIME_DIR"
+        "$KRETIKOS_SELF" run-source "$SRC" -o "$RUNTIME_DIR" --force "${RUNTIME_ARG[@]}" >"$RUN_SOURCE_LOG" 2>&1 || {
+            cat "$RUN_SOURCE_LOG" >&2
+            echo "error: K-AXI certificate runtime/profile bundle step failed" >&2
+            exit 1
+        }
+
+        python3 - "$OUT" "$SRC" "$WORK_DIR" "$SOURCE_WITNESS" "$KAXI_WITNESS" "$KAXI_ASM" \
+            "$RUNTIME_DIR/kretikos_source_profile.v1.json" "$RUNTIME_DIR/kretikos_bundle.v1.json" "$RUN_SOURCE_LOG" "$RUNTIME_MODE" <<'PY'
+import hashlib
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+(
+    out_path,
+    source_arg,
+    work_dir,
+    source_witness_path,
+    kaxi_witness_path,
+    kaxi_asm_path,
+    runtime_profile_path,
+    bundle_path,
+    run_source_log_path,
+    runtime_mode,
+) = sys.argv[1:]
+
+def read_json(path):
+    p = Path(path)
+    if not p.is_file():
+        return None
+    return json.loads(p.read_text(encoding="utf-8"))
+
+def file_record(path):
+    p = Path(path)
+    if not p.is_file():
+        return None
+    data = p.read_bytes()
+    return {
+        "path": str(p),
+        "bytes": p.stat().st_size,
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+source_witness = read_json(source_witness_path)
+kaxi_witness = read_json(kaxi_witness_path)
+runtime_profile = read_json(runtime_profile_path)
+bundle = read_json(bundle_path)
+runtime_validation = (bundle or {}).get("runtime_validation") or {}
+
+failures = []
+if source_witness is None:
+    failures.append({"kind": "missing_source_witness", "path": source_witness_path})
+elif source_witness.get("status") != "pass":
+    failures.append({"kind": "source_witness_not_pass", "status": source_witness.get("status")})
+
+if kaxi_witness is None:
+    failures.append({"kind": "missing_kaxi_witness", "path": kaxi_witness_path})
+elif kaxi_witness.get("status") != "pass":
+    failures.append({"kind": "kaxi_witness_not_pass", "status": kaxi_witness.get("status")})
+
+if runtime_profile is None:
+    failures.append({"kind": "missing_runtime_source_profile", "path": runtime_profile_path})
+if bundle is None:
+    failures.append({"kind": "missing_runtime_bundle", "path": bundle_path})
+
+if source_witness and runtime_profile:
+    source_a = source_witness.get("source") or {}
+    source_b = runtime_profile.get("source") or {}
+    if source_a.get("sha256") != source_b.get("sha256"):
+        failures.append({
+            "kind": "source_hash_mismatch",
+            "kaxi_source_sha256": source_a.get("sha256"),
+            "runtime_source_sha256": source_b.get("sha256"),
+        })
+    profile_a = (source_witness.get("profile") or {}).get("name")
+    profile_b = runtime_profile.get("profile")
+    if profile_a != profile_b:
+        failures.append({
+            "kind": "profile_mismatch",
+            "kaxi_profile": profile_a,
+            "runtime_profile": profile_b,
+        })
+
+if source_witness and bundle:
+    profile = source_witness.get("profile") or {}
+    if profile.get("runtime_rung") != runtime_validation.get("rung"):
+        failures.append({
+            "kind": "runtime_rung_mismatch",
+            "source_witness_rung": profile.get("runtime_rung"),
+            "bundle_rung": runtime_validation.get("rung"),
+        })
+    if profile.get("kernel") != runtime_validation.get("kernel"):
+        failures.append({
+            "kind": "runtime_kernel_mismatch",
+            "source_witness_kernel": profile.get("kernel"),
+            "bundle_kernel": runtime_validation.get("kernel"),
+        })
+
+if runtime_mode == "required" and runtime_validation.get("status") != "pass":
+    failures.append({
+        "kind": "runtime_required_but_not_pass",
+        "status": runtime_validation.get("status"),
+        "reason": runtime_validation.get("reason"),
+    })
+
+payload = {
+    "schema": "sounio.kretikos.kaxi-certificate.v1",
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "status": "pass" if not failures else "fail",
+    "source": (source_witness or {}).get("source"),
+    "profile": (source_witness or {}).get("profile"),
+    "kaxi": (source_witness or {}).get("kaxi"),
+    "runtime": {
+        "mode": runtime_mode,
+        "source_profile": runtime_profile,
+        "bundle_status": (bundle or {}).get("status"),
+        "structural_checks": (bundle or {}).get("structural_checks"),
+        "artifacts": (bundle or {}).get("artifacts"),
+        "runtime_validation": runtime_validation,
+        "toolchain_validation": (bundle or {}).get("toolchain_validation"),
+    },
+    "artifact_records": {
+        "source_witness": file_record(source_witness_path),
+        "kaxi_witness": file_record(kaxi_witness_path),
+        "kaxi_assembly": file_record(kaxi_asm_path),
+        "runtime_source_profile": file_record(runtime_profile_path),
+        "runtime_bundle": file_record(bundle_path),
+        "run_source_log": file_record(run_source_log_path),
+    },
+    "work_dir": work_dir,
+    "source_arg": source_arg,
+    "failures": failures,
+    "boundaries": [
+        "certificate_braids_checked_source_kaxi_witness_and_runtime_bundle_hashes",
+        "source_must_typecheck_before_certificate_profile_selection",
+        "kaxi_evidence_is_profile_level_for_explicit_kretikos_patterns",
+        "runtime_validation_applies_to_selected_predefined_cubin_rung_only",
+        "local_cuda_not_run_is_classified_and_slurm_remains_runtime_authority",
+        "certificate_does_not_claim_arbitrary_sounio_gpu_lowering",
+        "certificate_does_not_claim_general_gpu_backend_completeness",
+    ],
+}
+Path(out_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+if failures:
+    raise SystemExit(json.dumps(failures))
+PY
+
+        echo "kretikos: K-AXI certificate emitted - $OUT"
+        echo "kretikos: K-AXI certificate work dir - $WORK_DIR"
         ;;
 
     emulate)
@@ -2481,6 +2723,7 @@ PY
         echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check)"
         echo "  kaxi-witness <pattern> -o <file.json> Emit K-AXI assembly plus witness JSON"
         echo "  kaxi-source-witness <source.sio> -o <file.json> Link checked source to K-AXI evidence"
+        echo "  kaxi-certificate <source.sio> -o <file.json> Braid checked source, K-AXI, and runtime bundle evidence"
         echo "  emulate                            Run CPU emulation self-check (f32, f64, i32)"
         echo "  emit-cubin <kind> -o <file.cubin> Emit CUBIN template from in-tree emitter"
         echo "  bundle [-o <dir>]                 Emit PTX+CUBIN plus bundle manifest"

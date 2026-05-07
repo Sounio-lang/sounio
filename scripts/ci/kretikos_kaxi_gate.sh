@@ -85,6 +85,34 @@ if obj.get("failures"):
 PY
 done
 
+for item in "${source_witnesses[@]}"; do
+  label="${item%%:*}"
+  src="${item#*:}"
+  certificate="$OUT_DIR/${label}.kaxi-certificate.json"
+  cert_work="$OUT_DIR/${label}.certificate.d"
+  cert_log="$OUT_DIR/${label}.certificate.out"
+  echo "kretikos_kaxi_gate: certificate label=$label source=$src certificate=$certificate"
+  ./bin/kretikos kaxi-certificate "$src" -o "$certificate" --work-dir "$cert_work" --force >"$cert_log" 2>&1
+  cat "$cert_log"
+  python3 - "$certificate" "$label" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+label = sys.argv[2]
+if obj.get("status") != "pass":
+    raise SystemExit(f"certificate_status_not_pass:{obj.get('status')}")
+if obj.get("profile", {}).get("name") != label:
+    raise SystemExit(f"certificate_profile_mismatch:{obj.get('profile', {}).get('name')} != {label}")
+if obj.get("failures"):
+    raise SystemExit(f"certificate_failures:{obj['failures']}")
+runtime = obj.get("runtime", {}).get("runtime_validation", {})
+if runtime.get("rung") != label:
+    raise SystemExit(f"certificate_runtime_rung_mismatch:{runtime.get('rung')} != {label}")
+PY
+done
+
 python3 - "$GATE_JSON" "$OUT_DIR" "$SELF_CHECK_LOG" "${patterns[@]}" <<'PY'
 import hashlib
 import json
@@ -136,6 +164,25 @@ for source_path in sorted(out_dir.glob("*.kaxi-source-witness.json")):
         "status": obj.get("status"),
     })
 
+certificate_cases = []
+for cert_path in sorted(out_dir.glob("*.kaxi-certificate.json")):
+    obj = json.loads(cert_path.read_text(encoding="utf-8"))
+    runtime = obj.get("runtime", {}).get("runtime_validation", {})
+    certificate_cases.append({
+        "certificate": cert_path.name,
+        "certificate_sha256": hashlib.sha256(cert_path.read_bytes()).hexdigest(),
+        "source": obj.get("source", {}).get("path"),
+        "source_sha256": obj.get("source", {}).get("sha256"),
+        "profile": obj.get("profile", {}).get("name"),
+        "kaxi_pattern": obj.get("kaxi", {}).get("pattern"),
+        "semantic_profile": obj.get("kaxi", {}).get("semantic_profile"),
+        "runtime_status": runtime.get("status"),
+        "runtime_reason": runtime.get("reason"),
+        "runtime_rung": runtime.get("rung"),
+        "runtime_kernel": runtime.get("kernel"),
+        "status": obj.get("status"),
+    })
+
 payload = {
     "schema": "sounio.kretikos.kaxi-gate.v1",
     "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -143,11 +190,13 @@ payload = {
     "self_check_log": self_check_log.name,
     "cases": cases,
     "source_cases": source_cases,
+    "certificate_cases": certificate_cases,
     "boundaries": [
         "kaxi_is_sounio_owned_epistemic_gpu_assembly",
         "gate_proves_self_hosted_emitter_compiles_and_emits_structural_artifacts",
         "gate_proves_kaxi_witness_json_for_each_profile",
         "gate_proves_checked_source_to_kaxi_witness_link_for_epistemic_profiles",
+        "gate_proves_kaxi_certificate_braids_source_kaxi_and_runtime_bundle_evidence",
         "gate_proves_profile_level_lowering_for_explicit_kretikos_epistemic_profiles",
         "gate_does_not_claim_arbitrary_sounio_gpu_lowering",
         "gate_does_not_replace_slurm_cuda_runtime_authority",
