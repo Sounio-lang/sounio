@@ -318,6 +318,11 @@ let v2 = gum_second_order_variance(j, h, &sigma)
 
 Phase 5 attempted to "close the butterfly" at the compiler level (commit reverted — `self-hosted/compiler/lean_single.sio` unchanged).  The attempt added 44 cross-function shadow-bridging globals and product-rule emission inside `compile_knowledge_muldiv_x86`.  It correctly set `EXPR_SSHADOW` before the function returned, but the downstream `.value` access re-seeded channel 0 via MEAS_KNOW_IDX — overwriting the propagated shadow.  The lesson: under channel-at-`.value` semantics, there is no butterfly to close.  `tests/run-pass/knowledge_kas1_policy.sio` remains as a demonstration of the two paths; the "butterfly" path correctly returns zero under the model.
 
+## Native linking / FFI (open)
+
+- **Dynamic `.so` linking / GOT–PLT**: The native toolchain emits statically linked executables on the default bring-up path. Relocation metadata records `R_X86_64_PLT32` for ET_REL objects (`self-hosted/native/reloc.sio`), but wiring arbitrary shared-library symbols end-to-end (libc-style `-lfoo`, full GOT/PLT for external calls) remains future work. FFI tests that require `libzstd` stay behind `//@ ignore` until dynamic link and stable stubs land consistently.
+- **`*const u8` in callee position**: Passing `expr as *const u8` can still produce arity/type mismatch diagnostics versus `*mut u8` in some FFI-heavy shapes; stdlib wrappers prefer `*mut u8` until call lowering treats `*const T` and `*mut T` uniformly at the invocation site. See the header comment in `tests/stdlib/compress/test_zstd_e2e.sio`.
+
 ## Reporting Issues
 
 If you encounter any new issues, please report them at:
