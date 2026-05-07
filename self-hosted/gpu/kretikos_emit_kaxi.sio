@@ -436,6 +436,66 @@ pub fn kaxi_emit_epistemic_dual_output_f32_asm() -> KaxiAsmBuf with Mut, Panic, 
     gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 8)
 }
 
+// PBPK explicit Euler step (single compartment, integer arithmetic):
+//   C_new = C + dt * (k_in - k_out * C)
+// With k_in=10, k_out=2, dt=1, equilibrium ≈ 5. Per-thread C[tid] from mem.
+// Demonstrates GUM variance propagation: σ²(C_new) = σ²(C)*(1-dt*k_out)² in
+// a chain of mul, sub, mul, add operations.
+pub fn kaxi_emit_pbpk_euler_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+
+    opcodes[0] = GPU_IR_GET_TID
+    dsts[0] = 0
+
+    opcodes[1] = GPU_IR_LOAD_GLOBAL
+    dsts[1] = 1
+    src_a[1] = 0
+
+    opcodes[2] = GPU_IR_MUL_IMM
+    dsts[2] = 2
+    imm[2] = 10
+
+    opcodes[3] = GPU_IR_MUL_IMM
+    dsts[3] = 3
+    imm[3] = 2
+
+    opcodes[4] = GPU_IR_MUL_IMM
+    dsts[4] = 4
+    imm[4] = 1
+
+    opcodes[5] = GPU_IR_MUL
+    dsts[5] = 5
+    src_a[5] = 3
+    src_b[5] = 1
+
+    opcodes[6] = GPU_IR_SUB
+    dsts[6] = 6
+    src_a[6] = 2
+    src_b[6] = 5
+
+    opcodes[7] = GPU_IR_MUL
+    dsts[7] = 7
+    src_a[7] = 4
+    src_b[7] = 6
+
+    opcodes[8] = GPU_IR_ADD
+    dsts[8] = 8
+    src_a[8] = 1
+    src_b[8] = 7
+
+    opcodes[9] = GPU_IR_STORE_GLOBAL
+    src_a[9] = 8
+    src_b[9] = 0
+
+    opcodes[10] = GPU_IR_RET
+
+    gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 11)
+}
+
 // Multi-block doubling kernel: idx = bid*ntid + tid; mem[idx] = 2*mem[idx]
 // Exercises get_tid + get_bid + get_ntid + global indexing across blocks.
 pub fn kaxi_emit_mb_vec_double_f32_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
@@ -539,6 +599,8 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         buf = kaxi_emit_epistemic_dual_output_f32_asm()
     } else if str_eq(pattern, "mb_vec_double_f32") {
         buf = kaxi_emit_mb_vec_double_f32_asm()
+    } else if str_eq(pattern, "pbpk_euler") {
+        buf = kaxi_emit_pbpk_euler_asm()
     } else if str_eq(pattern, "self-check") {
         let ok = kaxi_self_check()
         if ok {

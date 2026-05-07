@@ -95,6 +95,20 @@ static int parse_csv_i64(const char *s, int64_t *out, int max) {
     return n;
 }
 
+static int parse_csv_f32(const char *s, float *out, int max) {
+    int n = 0;
+    const char *p = s;
+    while (*p && n < max) {
+        char *end = NULL;
+        float v = strtof(p, &end);
+        if (end == p) break;
+        out[n++] = v;
+        p = end;
+        while (*p == ',' || *p == ' ') p++;
+    }
+    return n;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <ptx_or_cubin> [--kernel NAME] [--mode basic|epistemic]\n", argv[0]);
@@ -106,6 +120,7 @@ int main(int argc, char **argv) {
     const char *path = argv[1];
     const char *kname = "kaxi_kernel";
     int epistemic = 0;
+    int f32_type = 0;         // 0 = i64 (8 bytes), 1 = f32 (4 bytes)
     unsigned int threads = 1;
     unsigned int blocks = 1;
     int mem_words = 16;
@@ -127,6 +142,9 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--init-seq") == 0) { verify_init_seq = 1; }
         else if (strcmp(argv[i], "--print-count") == 0 && i + 1 < argc) { print_count = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--epistemic") == 0) { epistemic = 1; }
+        else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) {
+            i++; f32_type = (strcmp(argv[i], "f32") == 0);
+        }
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); return 2; }
     }
     if (print_count < 0) print_count = mem_words;
@@ -198,22 +216,37 @@ int main(int argc, char **argv) {
     rc = cuModuleGetFunction(&fn, mod, kname);
     if (rc != 0) { emit_status("fail", "cuModuleGetFunction_rejected", "cuModuleGetFunction", rc); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
 
-    size_t bytes = (size_t)mem_words * sizeof(int64_t);
+    size_t elem = f32_type ? sizeof(float) : sizeof(int64_t);
+    size_t bytes = (size_t)mem_words * elem;
     CUdeviceptr d_mem = 0, d_var = 0;
     rc = cuMemAlloc(&d_mem, bytes);
     if (rc != 0) { emit_status("fail", "cuMemAlloc_failed", "cuMemAlloc(mem)", rc); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
     cuMemsetD8(d_mem, 0, bytes);
 
     if (init_mem_csv) {
-        int64_t *host = (int64_t *)calloc(mem_words, sizeof(int64_t));
-        parse_csv_i64(init_mem_csv, host, mem_words);
-        cuMemcpyHtoD(d_mem, host, bytes);
-        free(host);
+        if (f32_type) {
+            float *host = (float *)calloc(mem_words, sizeof(float));
+            parse_csv_f32(init_mem_csv, host, mem_words);
+            cuMemcpyHtoD(d_mem, host, bytes);
+            free(host);
+        } else {
+            int64_t *host = (int64_t *)calloc(mem_words, sizeof(int64_t));
+            parse_csv_i64(init_mem_csv, host, mem_words);
+            cuMemcpyHtoD(d_mem, host, bytes);
+            free(host);
+        }
     } else if (verify_init_seq) {
-        int64_t *host = (int64_t *)calloc(mem_words, sizeof(int64_t));
-        for (int k = 0; k < mem_words; k++) host[k] = k + 1;  // 1, 2, 3, ...
-        cuMemcpyHtoD(d_mem, host, bytes);
-        free(host);
+        if (f32_type) {
+            float *host = (float *)calloc(mem_words, sizeof(float));
+            for (int k = 0; k < mem_words; k++) host[k] = (float)(k + 1);
+            cuMemcpyHtoD(d_mem, host, bytes);
+            free(host);
+        } else {
+            int64_t *host = (int64_t *)calloc(mem_words, sizeof(int64_t));
+            for (int k = 0; k < mem_words; k++) host[k] = k + 1;
+            cuMemcpyHtoD(d_mem, host, bytes);
+            free(host);
+        }
     }
 
     if (epistemic) {
@@ -221,10 +254,17 @@ int main(int argc, char **argv) {
         if (rc != 0) { emit_status("fail", "cuMemAlloc_failed", "cuMemAlloc(var)", rc); cuMemFree(d_mem); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
         cuMemsetD8(d_var, 0, bytes);
         if (init_var_csv) {
-            int64_t *host = (int64_t *)calloc(mem_words, sizeof(int64_t));
-            parse_csv_i64(init_var_csv, host, mem_words);
-            cuMemcpyHtoD(d_var, host, bytes);
-            free(host);
+            if (f32_type) {
+                float *host = (float *)calloc(mem_words, sizeof(float));
+                parse_csv_f32(init_var_csv, host, mem_words);
+                cuMemcpyHtoD(d_var, host, bytes);
+                free(host);
+            } else {
+                int64_t *host = (int64_t *)calloc(mem_words, sizeof(int64_t));
+                parse_csv_i64(init_var_csv, host, mem_words);
+                cuMemcpyHtoD(d_var, host, bytes);
+                free(host);
+            }
         }
     }
 
@@ -243,8 +283,8 @@ int main(int argc, char **argv) {
     rc = cuCtxSynchronize();
     if (rc != 0) { emit_status("fail", "cuCtxSynchronize_failed", "cuCtxSynchronize", rc); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
 
-    int64_t *h_mem = (int64_t *)calloc(mem_words, sizeof(int64_t));
-    int64_t *h_var = epistemic ? (int64_t *)calloc(mem_words, sizeof(int64_t)) : NULL;
+    void *h_mem = calloc(mem_words, elem);
+    void *h_var = epistemic ? calloc(mem_words, elem) : NULL;
     rc = cuMemcpyDtoH(h_mem, d_mem, bytes);
     if (rc != 0) { emit_status("fail", "cuMemcpyDtoH_failed", "cuMemcpyDtoH(mem)", rc); free(h_mem); if (h_var) free(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
     if (epistemic) {
@@ -255,11 +295,23 @@ int main(int argc, char **argv) {
     emit_status("pass", "launch_pass", "cuMemcpyDtoH", 0);
 
     printf("MEM:");
-    for (int i = 0; i < print_count; i++) printf(" %lld", (long long)h_mem[i]);
+    if (f32_type) {
+        float *m = (float *)h_mem;
+        for (int i = 0; i < print_count; i++) printf(" %.6g", m[i]);
+    } else {
+        int64_t *m = (int64_t *)h_mem;
+        for (int i = 0; i < print_count; i++) printf(" %lld", (long long)m[i]);
+    }
     printf("\n");
     if (epistemic) {
         printf("VAR:");
-        for (int i = 0; i < print_count; i++) printf(" %lld", (long long)h_var[i]);
+        if (f32_type) {
+            float *v = (float *)h_var;
+            for (int i = 0; i < print_count; i++) printf(" %.6g", v[i]);
+        } else {
+            int64_t *v = (int64_t *)h_var;
+            for (int i = 0; i < print_count; i++) printf(" %lld", (long long)v[i]);
+        }
         printf("\n");
     }
     printf("device=%s cc=%d.%d\n", name, cc_major, cc_minor);

@@ -50,6 +50,7 @@ mkdir -p "${STAGE_DIR}"
 # ----- declare cases as parallel arrays ---------------------------------
 # (name|mode|blocks|threads|mem-words|init-mem|init-var|expected-mem|expected-var)
 # init-mem of "_seq_" means seed mem with [1..mem-words] sequence (test multi-block).
+# mode: basic | epistemic | f32   (f32 → uses --f32 lowering, --type f32 runner)
 CASES=(
   "vec_add|basic|1|8|8|1,2,3,4,5,6,7,8||2,4,6,8,10,12,14,16|"
   "vec_add|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,4,6,8,10,12,14,16|2,2,2,2,2,2,2,2"
@@ -63,6 +64,11 @@ CASES=(
   "fma|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,6,12,20,30,42,56,72|3,9,19,33,51,73,99,129"
   "edo|basic|1|8|8|1,2,3,4,5,6,7,8||8,32,72,128,200,288,392,512|"
   "edo|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|8,32,72,128,200,288,392,512|64,256,576,1024,1600,2304,3136,4096"
+  "vec_add|f32|1|8|8|1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5||3,5,7,9,11,13,15,17|"
+  "vec_mul|f32|1|8|8|1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5||2.25,6.25,12.25,20.25,30.25,42.25,56.25,72.25|"
+  "fma|f32|1|8|8|2,3,4,5,6,7,8,9||6,12,20,30,42,56,72,90|"
+  "pbpk|basic|1|8|8|1,2,3,4,5,6,7,8||9,8,7,6,5,4,3,2|"
+  "pbpk|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|9,8,7,6,5,4,3,2|5,5,5,5,5,5,5,5"
   "mb_double|basic|4|8|32|_seq_||2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64|"
   "mb_double|basic|8|8|64|_seq_||2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102,104,106,108,110,112,114,116,118,120,122,124,126,128|"
 )
@@ -76,6 +82,7 @@ PATTERN_FOR[vec_div]=source_vec_div_f32
 PATTERN_FOR[fma]=source_fma_f32
 PATTERN_FOR[edo]=source_epistemic_dual_output_f32
 PATTERN_FOR[mb_double]=mb_vec_double_f32
+PATTERN_FOR[pbpk]=pbpk_euler
 
 # Programmatically generate large multi-block cases (256, 1024 elements).
 # Each writes mem[i] = 2*(i+1).
@@ -98,6 +105,7 @@ for c in "${CASES[@]}"; do
   ptx="${STAGE_DIR}/case_${INDEX}.ptx"
   EMIT_FLAGS=()
   [[ "$mode" == "epistemic" ]] && EMIT_FLAGS+=(--epistemic)
+  [[ "$mode" == "f32" ]] && EMIT_FLAGS+=(--f32)
   "${ROOT_DIR}/bin/kretikos" kaxi-emit-ptx "$pat" "${EMIT_FLAGS[@]}" -o "$ptx" >/dev/null
   echo "${INDEX}|${name}|${mode}|${blocks}|${threads}|${mw}|${imem}|${ivar}|${emem}|${evar}" >> "${STAGE_DIR}/cases.tsv"
   INDEX=$((INDEX+1))
@@ -120,6 +128,7 @@ while IFS='|' read -r idx name mode blocks threads mw imem ivar emem evar; do
   TOTAL=$((TOTAL+1))
   ARGS=("case_${idx}.ptx" --blocks "$blocks" --threads "$threads" --mem-words "$mw")
   [[ "$mode" == "epistemic" ]] && ARGS+=(--epistemic)
+  [[ "$mode" == "f32" ]] && ARGS+=(--type f32)
   if [[ "$imem" == "_seq_" ]]; then
     ARGS+=(--init-seq)
   elif [[ -n "$imem" ]]; then

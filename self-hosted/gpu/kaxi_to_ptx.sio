@@ -501,6 +501,170 @@ pub fn kaxi_transpile_line_to_ptx_epistemic(asm: KaxiAsmBuf, line_start: i64, li
     ""
 }
 
+// ---------------------------------------------------------------------------
+// f32 lowering — same K-AXI text, but value regs are .f32 and arithmetic
+// uses add/sub/mul/div/fma.rn.f32. Element stride 4 bytes.
+// ---------------------------------------------------------------------------
+//
+// Two register banks coexist:
+//   .reg .b64 %rd<70>;  — addresses, get_tid/bid/ntid (always integer)
+//   .reg .f32 %f<70>;   — values, all f32 arithmetic
+//
+// load_global rD, addr=rA  → ld.global.f32 %fD,  [&mem + rA*4]
+// store_global rD, addr=rA → st.global.f32 [&mem + rA*4], %fD
+// add r3, r1, r2           → add.rn.f32 %f3, %f1, %f2
+// fma r3, r1, r2           → fma.rn.f32 %f3, %f1, %f2, %f1   (a*b+a, matches u64 path)
+// get_tid r0               → %rd0 = tid (f0 unused for tid registers)
+
+pub fn kaxi_transpile_to_ptx_f32(asm: KaxiAsmBuf) -> string with Mut, Panic, Div, Alloc {
+    var out: KaxiAsmBuf = kaxi_asm_new()
+    out = kaxi_asm_push_str(out, ".version 7.0\n")
+    out = kaxi_asm_push_str(out, ".target sm_50\n")
+    out = kaxi_asm_push_str(out, ".address_size 64\n\n")
+    out = kaxi_asm_push_str(out, ".visible .entry kaxi_kernel(\n")
+    out = kaxi_asm_push_str(out, "    .param .u64 param_mem\n")
+    out = kaxi_asm_push_str(out, ")\n{\n")
+    out = kaxi_asm_push_str(out, "    .reg .b64 %rd<70>;\n")
+    out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+    out = kaxi_asm_push_str(out, "    .reg .f32 %f<70>;\n")
+    out = kaxi_asm_push_str(out, "    .reg .pred %p<8>;\n\n")
+    out = kaxi_asm_push_str(out, "    ld.param.u64 %rd63, [param_mem];\n")
+
+    var line_start: i64 = 0
+    var i: i64 = 0
+    var instr_idx: i64 = 0
+    while i <= asm.len {
+        let is_end = i == asm.len
+        let is_newline = if i < asm.len { asm.data[i as usize] as i8 == 10 } else { true }
+        if is_end || is_newline {
+            let line_len = i - line_start
+            if line_len > 0 {
+                let first_char = asm.data[line_start as usize] as i8
+                if first_char != 59 && first_char != 0 {
+                    let p = kaxi_transpile_line_to_ptx_f32(asm, line_start, line_len)
+                    out = kaxi_asm_push_str(out, "L")
+                    out = kaxi_asm_push_str(out, ptx_int_to_string(instr_idx))
+                    out = kaxi_asm_push_str(out, ":\n")
+                    if str_len(p) > 0 {
+                        out = kaxi_asm_push_str(out, p)
+                    } else {
+                        out = kaxi_asm_push_str(out, "    // unhandled\n")
+                    }
+                    instr_idx = instr_idx + 1
+                }
+            }
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+    out = kaxi_asm_push_str(out, "}\n")
+    kaxi_asm_to_string(out)
+}
+
+fn fr(idx: i64) -> string with Mut, Panic, Div {
+    "%f" + ptx_int_to_string(idx)
+}
+
+fn ptx_addr_compute_f32(addr_reg: i64) -> string with Mut, Panic, Div, Alloc {
+    "    mul.lo.u64 %rd64, " + rd(addr_reg) + ", 4;\n"
+    + "    add.u64 %rd64, %rd63, %rd64;\n"
+}
+
+pub fn kaxi_transpile_line_to_ptx_f32(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
+    let c0 = asm.data[line_start as usize] as i8
+    let c1 = if line_len > 1 { asm.data[(line_start + 1) as usize] as i8 } else { 0 }
+    let c2 = if line_len > 2 { asm.data[(line_start + 2) as usize] as i8 } else { 0 }
+
+    if c0 == 97 && c1 == 100 && c2 == 100 {
+        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+        if dst >= 0 && src_a >= 0 && src_b >= 0 {
+            return "    add.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+        }
+    }
+    else if c0 == 115 && c1 == 117 && c2 == 98 {
+        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+        if dst >= 0 && src_a >= 0 && src_b >= 0 {
+            return "    sub.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+        }
+    }
+    else if c0 == 109 && c1 == 117 && c2 == 108 {
+        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+        if dst >= 0 && src_a >= 0 && src_b >= 0 {
+            return "    mul.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+        }
+    }
+    else if c0 == 100 && c1 == 105 && c2 == 118 {
+        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+        if dst >= 0 && src_a >= 0 && src_b >= 0 {
+            return "    div.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+        }
+    }
+    else if c0 == 102 && c1 == 109 && c2 == 97 {
+        // fma: dst = a*b + a (matches u64/c semantics)
+        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+        if dst >= 0 && src_a >= 0 && src_b >= 0 {
+            return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_a) + ";\n"
+        }
+    }
+    else if c0 == 108 && c1 == 111 && c2 == 97 {
+        if line_len > 11 && asm.data[(line_start + 5) as usize] as i8 == 103 {
+            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
+            if dst >= 0 && addr >= 0 {
+                return ptx_addr_compute_f32(addr)
+                     + "    ld.global.f32 " + fr(dst) + ", [%rd64];\n"
+            }
+        }
+        // load_imm and load_shared not supported in f32 mode (yet)
+    }
+    else if c0 == 115 && c1 == 116 && c2 == 111 {
+        if line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 103 {
+            let src = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
+            if src >= 0 && addr >= 0 {
+                return ptx_addr_compute_f32(addr)
+                     + "    st.global.f32 [%rd64], " + fr(src) + ";\n"
+            }
+        }
+    }
+    else if c0 == 103 && c1 == 101 && c2 == 116 {
+        let kind = if line_len > 4 { asm.data[(line_start + 4) as usize] as i8 } else { 116 }
+        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+        if dst >= 0 {
+            if kind == 98 {
+                return "    mov.u32 %r1, %ctaid.x;\n"
+                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
+            }
+            else if kind == 110 {
+                return "    mov.u32 %r1, %ntid.x;\n"
+                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
+            }
+            else {
+                return "    mov.u32 %r1, %tid.x;\n"
+                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
+            }
+        }
+    }
+    else if c0 == 114 && c1 == 101 && c2 == 116 {
+        return "    ret;\n"
+    }
+    else if c0 == 110 && c1 == 111 && c2 == 112 {
+        return "    // nop\n"
+    }
+
+    ""
+}
+
 // Parsers (independent copies — kaxi_to_c.sio's are private)
 
 fn ptx_parse_reg(asm: KaxiAsmBuf, line_start: i64, line_len: i64, prefix: string, nth: i64) -> i64 with Mut, Panic {
