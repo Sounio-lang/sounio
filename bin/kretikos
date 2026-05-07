@@ -1233,6 +1233,105 @@ PY
         fi
         ;;
 
+    kaxi-emit-ptx)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_kaxi_to_ptx.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-kaxi-to-ptx.XXXXXX")" || {
+            echo "error: failed to create temporary K-AXI→PTX driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        PATTERN=""
+        OUT=""
+        VALIDATE_PTXAS=1
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --no-ptxas)
+                    VALIDATE_PTXAS=0
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" || -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-emit-ptx <pattern> -o <file.ptx> [--no-ptxas]" >&2
+            echo "" >&2
+            echo "Lowers a K-AXI pattern through the kaxi_to_ptx transpiler to" >&2
+            echo "ptxas-assemblable PTX (.target sm_50)." >&2
+            echo "" >&2
+            echo "Supported patterns (mirror of emit-kaxi):" >&2
+            echo "  exit_only, vec_add, vec_sub, vec_mul, vec_div, fma" >&2
+            echo "  source_{vec_add,vec_sub,vec_mul,vec_div,fma,epistemic_dual_output}_f32" >&2
+            echo "  epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            exit_only|vec_add|vec_sub|vec_mul|vec_div|fma|source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32|source_epistemic_dual_output_f32|epistemic_elementwise_f32|epistemic_dual_output_f32) ;;
+            *)
+                echo "error: unsupported K-AXI→PTX pattern '$PATTERN'" >&2
+                exit 1
+                ;;
+        esac
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile K-AXI→PTX driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        mkdir -p "$(dirname "$OUT")"
+        "$DRIVER_ELF" "$PATTERN" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: K-AXI→PTX emitted - $OUT ($bytes bytes)"
+
+        # Structural validation
+        if ! grep -q ".visible .entry" "$OUT"; then
+            echo "kretikos: structural validation failed - .visible .entry missing" >&2
+            exit 1
+        fi
+        if ! grep -q "ret;" "$OUT"; then
+            echo "kretikos: structural validation failed - ret; missing" >&2
+            exit 1
+        fi
+        echo "kretikos: structural validation OK - PTX directives present"
+
+        # ptxas validation
+        if [[ "$VALIDATE_PTXAS" -eq 1 ]] && command -v ptxas >/dev/null 2>&1; then
+            CUBIN_OUT="${OUT%.ptx}.cubin"
+            if ptxas -arch=sm_50 -o "$CUBIN_OUT" "$OUT" 2>"$DRIVER_DIR/ptxas.err"; then
+                cubin_bytes=$(stat -c%s "$CUBIN_OUT" 2>/dev/null || stat -f%z "$CUBIN_OUT" 2>/dev/null || echo "?")
+                echo "kretikos: ptxas validation OK - $CUBIN_OUT ($cubin_bytes bytes, sm_50)"
+            else
+                echo "kretikos: ptxas validation FAILED" >&2
+                cat "$DRIVER_DIR/ptxas.err" >&2
+                exit 1
+            fi
+        fi
+        ;;
+
     kaxi-witness)
         PATTERN=""
         OUT=""
@@ -3536,6 +3635,7 @@ PY
         echo "  emit-metal <pattern> -o <file.metal> Emit MSL template from in-tree emitter"
         echo "  emit-spirv <pattern> -o <file.spv> Emit SPIR-V template (exit_only, vec_add, tid_kernel, self-check)"
         echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, source_vec_*_f32, source_fma_f32, source_epistemic_dual_output_f32, epistemic_elementwise_f32, self-check)"
+        echo "  kaxi-emit-ptx <pattern> -o <file.ptx> Lower K-AXI pattern to ptxas-assemblable PTX (sm_50, ptxas-validated)"
         echo "  kaxi-witness <pattern> -o <file.json> Emit K-AXI assembly plus witness JSON"
         echo "  kaxi-source-witness <source.sio> -o <file.json> Link checked source to K-AXI evidence"
         echo "  kaxi-lower-source <source.sio> -o <file.json> Recognize checked source and lower to K-AXI evidence without a profile hint"
