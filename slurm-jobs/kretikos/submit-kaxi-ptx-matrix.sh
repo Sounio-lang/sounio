@@ -122,6 +122,39 @@ INIT_2CMB_C2=$(seq 1 256 | awk '{ printf "%s0", (NR>1?",":"") }')
 CASES+=("pbpk2c_mb|f32_2c|8|32|256|_seq_|${INIT_2CMB_C2}|${EMEM_2CMB}|${EVAR_2CMB}")
 PATTERN_FOR[pbpk2c_mb]=pbpk_2comp_mb
 
+# Multi-block 4-step coupled 2-compartment at 1024 threads (32×32):
+# Expected computed via per-thread f32 simulation of the EXACT op sequence
+# the kernel executes (so f32 rounding matches bit-exactly).
+EMEM_2C4MB=$(python3 -c "
+import struct
+def step(c1, c2, k_in=1.0, k12=0.5, k21=0.25, dt=0.5):
+    def f32(x): return struct.unpack('f', struct.pack('f', x))[0]
+    kc1=f32(k12*c1); kc2=f32(k21*c2); di=f32(k_in-kc1); d1=f32(di+kc2)
+    dd=f32(dt*d1); c1n=f32(c1+dd); df=f32(kc1-kc2); ddf=f32(dt*df); c2n=f32(c2+ddf)
+    return c1n, c2n
+out=[]
+for i in range(1024):
+    c1,c2 = float(i+1), 0.0
+    for _ in range(4): c1,c2 = step(c1,c2)
+    out.append(f'{c1:g}')
+print(','.join(out))")
+EVAR_2C4MB=$(python3 -c "
+import struct
+def step(c1, c2, k_in=1.0, k12=0.5, k21=0.25, dt=0.5):
+    def f32(x): return struct.unpack('f', struct.pack('f', x))[0]
+    kc1=f32(k12*c1); kc2=f32(k21*c2); di=f32(k_in-kc1); d1=f32(di+kc2)
+    dd=f32(dt*d1); c1n=f32(c1+dd); df=f32(kc1-kc2); ddf=f32(dt*df); c2n=f32(c2+ddf)
+    return c1n, c2n
+out=[]
+for i in range(1024):
+    c1,c2 = float(i+1), 0.0
+    for _ in range(4): c1,c2 = step(c1,c2)
+    out.append(f'{c2:g}')
+print(','.join(out))")
+INIT_2C4MB_C2=$(seq 1 1024 | awk '{ printf "%s0", (NR>1?",":"") }')
+CASES+=("pbpk2c4_mb|f32_2c|32|32|1024|_seq_|${INIT_2C4MB_C2}|${EMEM_2C4MB}|${EVAR_2C4MB}")
+PATTERN_FOR[pbpk2c4_mb]=pbpk_2comp_4step_mb
+
 # ----- build PTX for every case (locally, both basic + epistemic) -------
 echo "[0/3] generating ${#CASES[@]} PTX kernels"
 INDEX=0
