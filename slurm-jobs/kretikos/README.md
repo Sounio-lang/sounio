@@ -33,7 +33,7 @@ Single source:
 
 ```bash
 WAIT_TIMEOUT_SECONDS=420 \
-  slurm-jobs/kretikos/submit-kretikos-source.sh \
+  ./bin/kretikos hpc source \
   examples/kretikos/real_vec_add_f64.sio
 ```
 
@@ -41,9 +41,21 @@ Full Kretikos source manifest:
 
 ```bash
 WAIT_TIMEOUT_SECONDS=420 \
-  slurm-jobs/kretikos/submit-kretikos-manifest.sh \
+  ./bin/kretikos hpc manifest \
   examples/kretikos/manifest.tsv
 ```
+
+CI-style acceptance gate:
+
+```bash
+WAIT_TIMEOUT_SECONDS=420 \
+  bash scripts/ci/kretikos_hpc_slurm_runtime_gate.sh
+```
+
+The lower-level submitters remain available at:
+
+- `slurm-jobs/kretikos/submit-kretikos-source.sh`
+- `slurm-jobs/kretikos/submit-kretikos-manifest.sh`
 
 Useful environment overrides:
 
@@ -87,14 +99,13 @@ Validated on 2026-05-07 UTC with:
 
 ```bash
 WAIT_TIMEOUT_SECONDS=420 \
-  slurm-jobs/kretikos/submit-kretikos-manifest.sh \
-  examples/kretikos/manifest.tsv
+  bash scripts/ci/kretikos_hpc_slurm_runtime_gate.sh
 ```
 
 Result:
 
 - `kretikos_manifest_result total=13 failed=0`
-- jobs `1244` through `1256`
+- jobs `1260` through `1272`
 - node `gpuorangefs-r770-proxmox`
 - device `NVIDIA_L4`
 - compute capability `8.9`

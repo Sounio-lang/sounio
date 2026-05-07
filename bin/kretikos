@@ -18,6 +18,8 @@
 #   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
 #   kretikos profile-source <source.sio>         - classify a real source file for Kretikos
 #   kretikos run-source <source.sio> -o <dir>    - check and validate a source profile
+#   kretikos hpc source <source.sio>             - run source runtime proof on Slurm GPU worker
+#   kretikos hpc manifest <manifest.tsv>         - run manifest runtime proof on Slurm GPU workers
 #
 # Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64, store_u32_const
 # Supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check
@@ -102,6 +104,60 @@ __kretikos_check_source() {
         "$SOUC_BIN" "$src" "$out" >/dev/null
         rm -f "$out"
     fi
+}
+
+__kretikos_hpc_require_script() {
+    local script="$1"
+    if [[ ! -x "$script" ]]; then
+        echo "error: missing executable Kretikos HPC bridge: $script" >&2
+        return 1
+    fi
+}
+
+__kretikos_hpc_doctor() {
+    local ns="${NS:-slurm-pilot}"
+    local kubectl_bin="${KUBECTL_BIN:-kubectl}"
+    local login_pod_name="${LOGIN_POD_NAME:-}"
+    local login_selector="${LOGIN_SELECTOR:-app.kubernetes.io/name=login}"
+    local login_pod=""
+
+    echo "Kretikos HPC Runtime Bridge"
+    echo "==========================="
+    echo "namespace: $ns"
+
+    if ! command -v "$kubectl_bin" >/dev/null 2>&1; then
+        echo "kubectl:   NOT FOUND ($kubectl_bin)" >&2
+        return 1
+    fi
+    echo "kubectl:   FOUND at $(command -v "$kubectl_bin")"
+
+    if [[ -n "$login_pod_name" ]]; then
+        login_pod="$login_pod_name"
+    else
+        login_pod="$("$kubectl_bin" -n "$ns" get pods \
+            -l "$login_selector" \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    fi
+
+    if [[ -z "$login_pod" ]]; then
+        echo "login pod: NOT FOUND selector=$login_selector" >&2
+        return 1
+    fi
+    echo "login pod: $login_pod"
+
+    "$kubectl_bin" -n "$ns" exec "$login_pod" -- bash -lc '
+        set -euo pipefail
+        test -S /run/slurm/sack.socket
+        scontrol ping >/dev/null
+        printf "slurm:     READY\n"
+        printf "sbatch:    "
+        command -v sbatch
+        if command -v sinfo >/dev/null 2>&1; then
+            printf "gpu view:\n"
+            sinfo -h -o "%P %a %l %D %G" | head -10
+        fi
+    '
 }
 
 __kretikos_normalize_profile() {
@@ -695,6 +751,65 @@ PY
         echo "kretikos: source corpus manifest - $CORPUS_JSON"
         echo "kretikos: source corpus result - total=$total failed=$failed"
         [[ "$failed" -eq 0 ]]
+        ;;
+    hpc|slurm)
+        SUBCMD="${1:-}"
+        shift 2>/dev/null || true
+        case "$SUBCMD" in
+            doctor)
+                __kretikos_hpc_doctor
+                ;;
+            source|run-source)
+                if [[ $# -lt 1 ]]; then
+                    echo "usage: kretikos hpc source <source.sio>" >&2
+                    exit 1
+                fi
+                HPC_SOURCE_SCRIPT="$ROOT_DIR/slurm-jobs/kretikos/submit-kretikos-source.sh"
+                __kretikos_hpc_require_script "$HPC_SOURCE_SCRIPT"
+                "$HPC_SOURCE_SCRIPT" "$@"
+                ;;
+            manifest|run-manifest)
+                if [[ $# -lt 1 ]]; then
+                    echo "usage: kretikos hpc manifest <manifest.tsv>" >&2
+                    exit 1
+                fi
+                HPC_MANIFEST_SCRIPT="$ROOT_DIR/slurm-jobs/kretikos/submit-kretikos-manifest.sh"
+                __kretikos_hpc_require_script "$HPC_MANIFEST_SCRIPT"
+                "$HPC_MANIFEST_SCRIPT" "$@"
+                ;;
+            ""|-h|--help)
+                echo "usage: kretikos hpc <doctor|source|manifest> [args]" >&2
+                echo "  kretikos hpc doctor" >&2
+                echo "  kretikos hpc source <source.sio>" >&2
+                echo "  kretikos hpc manifest <manifest.tsv>" >&2
+                ;;
+            *)
+                echo "error: unknown Kretikos HPC subcommand: $SUBCMD" >&2
+                echo "usage: kretikos hpc <doctor|source|manifest> [args]" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    hpc-doctor|slurm-doctor)
+        __kretikos_hpc_doctor
+        ;;
+    hpc-source|slurm-source)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos hpc-source <source.sio>" >&2
+            exit 1
+        fi
+        HPC_SOURCE_SCRIPT="$ROOT_DIR/slurm-jobs/kretikos/submit-kretikos-source.sh"
+        __kretikos_hpc_require_script "$HPC_SOURCE_SCRIPT"
+        "$HPC_SOURCE_SCRIPT" "$@"
+        ;;
+    hpc-manifest|slurm-manifest)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos hpc-manifest <manifest.tsv>" >&2
+            exit 1
+        fi
+        HPC_MANIFEST_SCRIPT="$ROOT_DIR/slurm-jobs/kretikos/submit-kretikos-manifest.sh"
+        __kretikos_hpc_require_script "$HPC_MANIFEST_SCRIPT"
+        "$HPC_MANIFEST_SCRIPT" "$@"
         ;;
     build)
         if [[ $# -lt 1 ]]; then
@@ -1900,6 +2015,7 @@ PY
         echo "CUBIN templates: self-hosted/gpu/nvidia_bare.sio  (live via 'emit-cubin')"
         echo "Artifact bundle: 'kretikos bundle' (or '-o <dir>' for a stable path)"
         echo "Optional validation: '--validate-toolchain' and '--validate-runtime'"
+        echo "HPC runtime:     'kretikos hpc source <source.sio>' or 'kretikos hpc manifest <manifest.tsv>'"
         echo "SPIR-V backend:  self-hosted/gpu/spirv_lower.sio"
         ;;
     *)
@@ -1920,6 +2036,9 @@ PY
         echo "  profile-source <source.sio>       Classify a checked source file for Kretikos"
         echo "  run-source <source.sio> -o <dir>  Check, bundle, and runtime-validate source profile"
         echo "  run-manifest <manifest.tsv> -o <dir> Run a source-profile corpus"
+        echo "  hpc doctor                       Check Slurm/Kubernetes runtime bridge"
+        echo "  hpc source <source.sio>           Submit one source to the Slurm GPU worker"
+        echo "  hpc manifest <manifest.tsv>       Submit a source corpus to the Slurm GPU worker"
         echo "  detect-cuda                       Detect CUDA toolchain (nvcc, ptxas, libcuda)"
         echo "  info                              Show compiler configuration"
         echo ""
