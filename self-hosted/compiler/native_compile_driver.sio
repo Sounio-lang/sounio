@@ -198,6 +198,8 @@ let UFN_USER_GLOBAL_LOAD: i64 = 21
 let UFN_USER_GLOBAL_STORE: i64 = 22
 // Pointer-based array element load: dst = *(ptr_reg_value + idx * 8)
 let UFN_REF_ARRAY_LOAD: i64 = 23
+// Pointer-based array element store: *(ptr_reg_value - idx * 8) = val
+let UFN_REF_ARRAY_STORE: i64 = 24
 
 var V2_UFN_OPS: [i64; 2048] = [0; 2048]
 var V2_UFN_DST: [i64; 2048] = [0; 2048]
@@ -467,6 +469,17 @@ fn lookup_local_alen_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut,
     var i: i64 = 0
     while i < V2_LOCAL_COUNT {
         if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
+            return V2_LOCAL_ALEN[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn lookup_local_alen_by_reg(ctx: &! V2DriverContext, reg: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < V2_LOCAL_COUNT {
+        if V2_LOCAL_REGS[i as usize] == reg {
             return V2_LOCAL_ALEN[i as usize]
         }
         i = i + 1
@@ -1018,6 +1031,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "UFN_USER_GLOBAL_LOAD") { return 21 }
     if token_text_eq(tok, "UFN_USER_GLOBAL_STORE") { return 22 }
     if token_text_eq(tok, "UFN_REF_ARRAY_LOAD") { return 23 }
+    if token_text_eq(tok, "UFN_REF_ARRAY_STORE") { return 24 }
 
     if token_text_eq(tok, "V2_GLOBAL_PT_KIND_CODE") { return 43 }
     if token_text_eq(tok, "V2_GLOBAL_PT_START") { return 44 }
@@ -1510,6 +1524,13 @@ fn is_arith_op(k: i64) -> bool {
     k == TK_AMP || k == TK_OR || k == TK_XOR || k == TK_PCT ||
     k == TK_SHL || k == TK_SHR
 }
+fn is_mul_op(k: i64) -> bool {
+    k == TK_STAR || k == TK_SLASH || k == TK_PCT
+}
+fn is_additive_op(k: i64) -> bool {
+    k == TK_PLUS || k == TK_MINUS ||
+    k == TK_AMP || k == TK_OR || k == TK_XOR || k == TK_SHL || k == TK_SHR
+}
 
 fn binary_op_from_cmp_kind(kind: i64) -> BinaryOp {
     if kind == TK_LT { return BinaryOp::OpLt }
@@ -1680,6 +1701,17 @@ fn ufn_record_ref_array_load(dst: i64, ptr_reg: i64, idx_reg: i64) with Mut {
         V2_UFN_DST[idx as usize] = dst
         V2_UFN_SRC1[idx as usize] = ptr_reg
         V2_UFN_SRC2[idx as usize] = idx_reg
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_ref_array_store(ptr_reg: i64, idx_reg: i64, val_reg: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_REF_ARRAY_STORE
+        V2_UFN_DST[idx as usize] = ptr_reg
+        V2_UFN_SRC1[idx as usize] = idx_reg
+        V2_UFN_SRC2[idx as usize] = val_reg
         V2_UFN_COUNT = idx + 1
     }
 }
@@ -1944,6 +1976,30 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         ufn_record_load_f64_scaled(r, 0 - token_float_mantissa(pos + 1), token_float_scale(pos + 1))
         return ExprParse { ok: 1, reg: r, next: pos + 2}
     }
+    if k == TK_MINUS {
+        let inner = parse_atom_ir(func, ctx, pos + 1)
+        if inner.ok != 0 {
+            let zero = alloc_reg(ctx)
+            let dst = alloc_reg(ctx)
+            if reg_is_f64(inner.reg) {
+                ufn_record_load_f64_scaled(zero, 0, 1)
+                mark_reg_f64(dst)
+                ufn_record_f64_binop(dst, zero, 2, inner.reg)
+            } else {
+                ufn_record_load_imm(zero, 0)
+                ufn_record_binop(dst, zero, 2, inner.reg)
+            }
+            return ExprParse { ok: 1, reg: dst, next: inner.next}
+        }
+    }
+    if k == TK_STAR && token_kind(pos + 1) == TK_IDENT {
+        let reg = lookup_local_tok(ctx, pos + 1)
+        if reg >= 0 && lookup_local_is_ref_tok(ctx, pos + 1) != 0 {
+            let dst = alloc_reg(ctx)
+            ufn_record_load_ref_field(dst, reg, 0)
+            return ExprParse { ok: 1, reg: dst, next: pos + 2}
+        }
+    }
     if k == TK_AMPBANG && token_kind(pos + 1) == TK_IDENT {
         let base_reg = lookup_local_tok(ctx, pos + 1)
         if base_reg >= 0 {
@@ -2188,6 +2244,7 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
                         if token_kind(end_pos) == TK_RBRACKET {
                             let dst = alloc_reg(ctx)
                             ufn_record_ref_array_load(dst, reg, idx_expr.reg)
+                            if reg_is_f64(reg) { mark_reg_f64(dst) }
                             return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
                         }
                     }
@@ -2202,6 +2259,7 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
                     if token_kind(end_pos) == TK_RBRACKET {
                         let dst = alloc_reg(ctx)
                         ufn_record_local_load(dst, reg, idx_expr.reg)
+                        if reg_is_f64(reg) { mark_reg_f64(dst) }
                         return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
                     }
                 }
@@ -2446,11 +2504,18 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         V2_CALL_ARG_SIZES[7] = saved_size7
         V2_LAST_STRUCT_IDX = arg_struct_idx
         if arg.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
-        V2_CALL_ARG_REGS[n_args as usize] = arg.reg
         var sz: i64 = 1
         if arg_struct_idx >= 0 {
             sz = STRUCT_FLAT_SIZE[arg_struct_idx as usize]
             V2_LAST_STRUCT_IDX = -1
+            V2_CALL_ARG_REGS[n_args as usize] = arg.reg
+        } else if lookup_local_alen_by_reg(ctx, arg.reg) > 0 {
+            // bare local array: pass address-of first element (pointer)
+            let addr_vreg = alloc_reg(ctx)
+            ufn_record_temp_addr(addr_vreg, arg.reg)
+            V2_CALL_ARG_REGS[n_args as usize] = addr_vreg
+        } else {
+            V2_CALL_ARG_REGS[n_args as usize] = arg.reg
         }
         V2_CALL_ARG_SIZES[n_args as usize] = sz
         total_argc = total_argc + sz
@@ -2517,12 +2582,12 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
     ExprParse { ok: 1, reg: dst, next: cur + 1}
 }
 
-fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+fn parse_term_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
     let left = parse_atom_ir(func, ctx, pos)
     if left.ok == 0 { return left }
     var result = left
     var op_kind = token_kind(result.next)
-    while is_arith_op(op_kind) {
+    while is_mul_op(op_kind) {
         let right = parse_atom_ir(func, ctx, result.next + 1)
         if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: result.next} }
         let dst = alloc_reg(ctx)
@@ -2534,8 +2599,28 @@ fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         result = ExprParse { ok: 1, reg: dst, next: right.next}
         op_kind = token_kind(result.next)
     }
+    result
+}
+
+fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse with Mut, Panic, Div, Alloc {
+    let left = parse_term_ir(func, ctx, pos)
+    if left.ok == 0 { return left }
+    var result = left
+    var op_kind = token_kind(result.next)
+    while is_additive_op(op_kind) {
+        let right = parse_term_ir(func, ctx, result.next + 1)
+        if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: result.next} }
+        let dst = alloc_reg(ctx)
+        if reg_is_f64(result.reg) || reg_is_f64(right.reg) {
+            ufn_record_f64_binop(dst, result.reg, arith_op_to_code(op_kind), right.reg)
+        } else {
+            ufn_record_binop(dst, result.reg, arith_op_to_code(op_kind), right.reg)
+        }
+        result = ExprParse { ok: 1, reg: dst, next: right.next}
+        op_kind = token_kind(result.next)
+    }
     if is_cmp_op(op_kind) {
-        let right = parse_atom_ir(func, ctx, result.next + 1)
+        let right = parse_term_ir(func, ctx, result.next + 1)
         if right.ok == 0 { return ExprParse { ok: 0, reg: -1, next: result.next} }
         if (op_kind == TK_EQEQ || op_kind == TK_BANGEQ) && token_kind(result.next + 1) == TK_STRING {
             let base = V2_NEXT_REG
@@ -2974,6 +3059,27 @@ fn parse_match_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprP
     ExprParse { ok: 1, reg: dst, next: close + 1}
 }
 
+fn parse_stmt_deref_idx_store(func: &! i64, ctx: &! V2DriverContext, p: i64, close: i64) -> i64 with Mut, Panic, Div, Alloc {
+    // (*arr)[idx] = expr — ref-array indexed write
+    if token_kind(p) == TK_LPAREN && token_kind(p + 1) == TK_STAR && token_kind(p + 2) == TK_IDENT && token_kind(p + 3) == TK_RPAREN && token_kind(p + 4) == TK_LBRACKET {
+        let base_ref = lookup_local_tok(ctx, p + 2)
+        if base_ref >= 0 && lookup_local_is_ref_tok(ctx, p + 2) != 0 {
+            let idx_expr = parse_expr_ir(func, ctx, p + 5)
+            if idx_expr.ok != 0 {
+                let end_pos = skip_index_cast_end(idx_expr.next)
+                if token_kind(end_pos) == TK_RBRACKET && token_kind(end_pos + 1) == TK_EQ {
+                    let val = parse_expr_ir(func, ctx, end_pos + 2)
+                    if val.ok != 0 {
+                        ufn_record_ref_array_store(base_ref, idx_expr.reg, val.reg)
+                        return val.next
+                    }
+                }
+            }
+        }
+    }
+    p
+}
+
 fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, token_count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     let p = skip_trivia(pos, close)
     if p >= close { return close }
@@ -3231,6 +3337,28 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             }
         }
     }
+
+    // ref-array param indexed write: arr[idx] = expr where arr is &![T; N]
+    if k == TK_IDENT && token_kind(p + 1) == TK_LBRACKET {
+        let base_reg = lookup_local_tok(ctx, p)
+        if base_reg >= 0 && lookup_local_is_ref_tok(ctx, p) != 0 && lookup_local_struct_idx_tok(ctx, p) < 0 {
+            let idx_expr = parse_expr_ir(func, ctx, p + 2)
+            if idx_expr.ok != 0 {
+                let end_pos = skip_index_cast_end(idx_expr.next)
+                if token_kind(end_pos) == TK_RBRACKET && token_kind(end_pos + 1) == TK_EQ {
+                    let val = parse_expr_ir(func, ctx, end_pos + 2)
+                    if val.ok != 0 {
+                        ufn_record_ref_array_store(base_reg, idx_expr.reg, val.reg)
+                        return val.next
+                    }
+                }
+            }
+        }
+    }
+
+    // (*arr)[idx] = expr — ref-array indexed write via deref-then-index
+    let deref_idx_next = parse_stmt_deref_idx_store(func, ctx, p, close)
+    if deref_idx_next > p { return deref_idx_next }
 
     // reference field mutation: (*ctx).field = expr
     if k == TK_LPAREN && token_kind(p + 1) == TK_STAR && token_kind(p + 2) == TK_IDENT && token_kind(p + 3) == TK_RPAREN && token_kind(p + 4) == TK_DOT && token_kind(p + 5) == TK_IDENT && token_kind(p + 6) == TK_EQ {
@@ -3677,6 +3805,8 @@ fn drv_param_reg(idx: i64) -> i64 {
     if idx == 3 { return 1 }
     if idx == 4 { return 8 }
     if idx == 5 { return 9 }
+    if idx == 6 { return 10 }
+    if idx == 7 { return 11 }
     -1
 }
 
@@ -3817,6 +3947,15 @@ fn drv_core_load_temp_to_rax(temp: i64) with Mut, Div, Panic {
     drv_emit_byte(72)
     drv_emit_byte(139)
     drv_emit_byte(133)
+    drv_emit_u32_le(disp)
+}
+
+fn drv_core_load_temp_to_rdx(temp: i64) with Mut, Div, Panic {
+    // mov rdx, [rbp + disp32]  →  48 8B 95 disp32
+    let disp = drv_ir_slot_offset(temp)
+    drv_emit_byte(72)
+    drv_emit_byte(139)
+    drv_emit_byte(149)
     drv_emit_u32_le(disp)
 }
 
@@ -4405,7 +4544,7 @@ fn drv_begin_function(fn_id: i64) with Mut, Panic, Div {
     drv_emit_mov_rbp_rsp()
     drv_emit_sub_rsp_imm32(262144)
     var i: i64 = 0
-    while i < V2_CURRENT_PARAM_COUNT && i < 6 {
+    while i < V2_CURRENT_PARAM_COUNT && i < 8 {
         let vreg = V2_CURRENT_PARAM_REGS[i as usize]
         let preg = drv_param_reg(i)
         if vreg >= 0 && preg >= 0 {
@@ -4667,6 +4806,8 @@ fn drv_emit_call_argc(dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut, Pani
     if argc >= 4 { drv_emit_load_rbp_disp32_reg(1, drv_ir_slot_offset(arg0 + 3)) }
     if argc >= 5 { drv_emit_load_rbp_disp32_reg(8, drv_ir_slot_offset(arg0 + 4)) }
     if argc >= 6 { drv_emit_load_rbp_disp32_reg(9, drv_ir_slot_offset(arg0 + 5)) }
+    if argc >= 7 { drv_emit_load_rbp_disp32_reg(10, drv_ir_slot_offset(arg0 + 6)) }
+    if argc >= 8 { drv_emit_load_rbp_disp32_reg(11, drv_ir_slot_offset(arg0 + 7)) }
     let call_pos = DRV_CODE_LEN
     drv_emit_call_rel32_placeholder()
     drv_add_call_reloc(call_pos + 1, fn_id)
@@ -4824,6 +4965,21 @@ fn drv_emit_ref_array_load(dst: i64, ptr_reg: i64, idx_reg: i64) with Mut, Panic
     drv_emit_byte(4)
     drv_emit_byte(200)
     drv_core_store_rax_to_temp(dst)
+}
+
+fn drv_emit_ref_array_store(ptr_reg: i64, idx_reg: i64, val_reg: i64) with Mut, Panic, Div {
+    // Stack arrays grow downward: a[i] is at *(ptr - i*8).
+    // 1) rcx = -index; 2) rax = ptr value; 3) rdx = val; 4) [rax + rcx*8] = rdx
+    drv_core_load_temp_to_rax(idx_reg)
+    drv_emit_neg_rax_only()
+    drv_emit_mov_reg_reg(1, 0)
+    drv_core_load_temp_to_rax(ptr_reg)
+    drv_core_load_temp_to_rdx(val_reg)
+    // mov [rax + rcx*8], rdx  →  48 89 14 C8
+    drv_emit_byte(72)
+    drv_emit_byte(137)
+    drv_emit_byte(20)
+    drv_emit_byte(200)
 }
 
 fn drv_emit_arg_count(dst: i64) with Mut, Panic, Div {
@@ -5029,6 +5185,8 @@ fn compile_ufn_from_globals(fn_id: i64) -> bool with IO, Mut, Panic, Div {
             drv_emit_user_global_store(V2_UFN_IMM[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
         } else if op == UFN_REF_ARRAY_LOAD {
             drv_emit_ref_array_load(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
+        } else if op == UFN_REF_ARRAY_STORE {
+            drv_emit_ref_array_store(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
         }
         i = i + 1
     }
@@ -5112,8 +5270,22 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                 }
                 // `& [T; N]` — ref-to-array param: IS_REF=1, sidx=-1.
                 // (TK_AMP=141, TK_LBRACKET=178; using literals for hoisted-const safety)
+                var param_arr_is_f64: i64 = 0
                 if ppos + 3 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == 141 && token_kind(ppos + 3) == 178 {
                     param_is_ref = 1
+                    if ppos + 4 < open_pos && token_kind(ppos + 4) == TK_IDENT && token_text_eq(ppos + 4, "f64") { param_arr_is_f64 = 1 }
+                }
+                // `&! [T; N]` — exclusive ref-to-array param: IS_REF=1, sidx=-1.
+                // (TK_AMPBANG=163, TK_LBRACKET=178; using literals for hoisted-const safety)
+                if ppos + 3 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == 163 && token_kind(ppos + 3) == 178 {
+                    param_is_ref = 1
+                    if ppos + 4 < open_pos && token_kind(ppos + 4) == TK_IDENT && token_text_eq(ppos + 4, "f64") { param_arr_is_f64 = 1 }
+                }
+                // `[T; N]` — by-value array param: treat as ref (caller passes address, callee uses pointer access)
+                // Token sequence: name : [ T ; N ] (TK_LBRACKET=178, TK_SEMI=180)
+                if ppos + 5 < open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == 178 && token_kind(ppos + 3) == TK_IDENT && token_kind(ppos + 4) == 180 && token_kind(ppos + 5) == TK_INT {
+                    param_is_ref = 1
+                    if token_text_eq(ppos + 3, "f64") { param_arr_is_f64 = 1 }
                 }
                 if param_sidx >= 0 && param_is_ref != 0 {
                     let vreg = alloc_reg(&! ctx)
@@ -5146,6 +5318,7 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                     // ref-array param (& [T; N]): IS_REF=1, sidx=-1
                     let vreg = alloc_reg(&! ctx)
                     remember_ref_struct_local_tok(&! ctx, param_name_tok, vreg, -1)
+                    if param_arr_is_f64 != 0 { mark_reg_f64(vreg) }
                     if param_idx < 64 {
                         V2_CURRENT_PARAM_REGS[param_idx as usize] = vreg
                     }
