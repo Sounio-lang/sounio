@@ -625,7 +625,24 @@ pub fn kaxi_transpile_line_to_ptx_f32(asm: KaxiAsmBuf, line_start: i64, line_len
                      + "    ld.global.f32 " + fr(dst) + ", [%rd64];\n"
             }
         }
-        // load_imm and load_shared not supported in f32 mode (yet)
+        else if line_len > 8 && asm.data[(line_start + 8) as usize] as i8 == 102 {
+            // load_immf rD, fimm=HEX  — f32 hex literal
+            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+            let hex = ptx_parse_fimm_hex(asm, line_start, line_len)
+            if dst >= 0 && str_len(hex) == 8 {
+                return "    mov.f32 " + fr(dst) + ", 0f" + hex + ";\n"
+            }
+        }
+        else {
+            // load_imm rD, imm=N  — integer immediate as f32 (cvt)
+            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+            let imm = ptx_parse_imm_after(asm, line_start, line_len, "imm=")
+            if dst >= 0 {
+                return "    mov.u64 " + rd(dst) + ", " + ptx_int_to_string(imm) + ";\n"
+                     + "    mov.u32 %r2, " + ptx_int_to_string(imm) + ";\n"
+                     + "    cvt.rn.f32.s32 " + fr(dst) + ", %r2;\n"
+            }
+        }
     }
     else if c0 == 115 && c1 == 116 && c2 == 111 {
         if line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 103 {
@@ -818,6 +835,15 @@ pub fn kaxi_transpile_line_to_ptx_f32_epistemic(asm: KaxiAsmBuf, line_start: i64
                      + "    ld.global.f32 " + fv(dst) + ", [%rd65];\n"
             }
         }
+        else if line_len > 8 && asm.data[(line_start + 8) as usize] as i8 == 102 {
+            // load_immf rD, fimm=HEX  — f32 hex literal, variance ← 0
+            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+            let hex = ptx_parse_fimm_hex(asm, line_start, line_len)
+            if dst >= 0 && str_len(hex) == 8 {
+                return "    mov.f32 " + fr(dst) + ", 0f" + hex + ";\n"
+                     + "    mov.f32 " + fv(dst) + ", 0f00000000;\n"
+            }
+        }
         else {
             // load_imm rD, imm=N — set value to N (as f32) and variance to 0
             let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
@@ -990,6 +1016,48 @@ fn ptx_parse_reg_after(asm: KaxiAsmBuf, line_start: i64, line_len: i64, needle: 
         pos = pos + 1
     }
     0 - 1
+}
+
+// Read 8 hex chars after "fimm=" in a K-AXI line. Returns "" if not found.
+pub fn ptx_parse_fimm_hex(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
+    var pos: i64 = line_start
+    let end_pos = line_start + line_len
+    let needle = "fimm="
+    let nlen = str_len(needle)
+    while pos + nlen <= end_pos {
+        var found = true
+        var ni: i64 = 0
+        while ni < nlen {
+            if asm.data[(pos + ni) as usize] as i8 != str_char_at(needle, ni) {
+                found = false
+            }
+            ni = ni + 1
+        }
+        if found {
+            pos = pos + nlen
+            var out_buf: KaxiAsmBuf = kaxi_asm_new()
+            var taken: i64 = 0
+            while taken < 8 && pos < end_pos {
+                let ch = asm.data[pos as usize] as i8
+                let is_digit = ch >= 48 && ch <= 57
+                let is_lo = ch >= 97 && ch <= 102
+                let is_hi = ch >= 65 && ch <= 70
+                if is_digit || is_lo || is_hi {
+                    out_buf = kaxi_asm_push_byte(out_buf, ch)
+                    pos = pos + 1
+                    taken = taken + 1
+                } else {
+                    break
+                }
+            }
+            if taken == 8 {
+                return kaxi_asm_to_string(out_buf)
+            }
+            return ""
+        }
+        pos = pos + 1
+    }
+    ""
 }
 
 fn ptx_parse_setp_cmp(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
