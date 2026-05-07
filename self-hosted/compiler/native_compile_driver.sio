@@ -169,6 +169,9 @@ let V2_BUILTIN_PRINTLN: i64 = 18
 // assert is expanded inline: if cond==0, call sys_exit_1 (id 20); else skip.
 let V2_BUILTIN_ASSERT: i64 = 19
 let V2_BUILTIN_SYS_EXIT_1: i64 = 20
+// measure(v, uncertainty: u) → Knowledge<f64>{value, uncertainty}
+// Handled entirely at parse time: allocates 2 contiguous f64 registers.
+let V2_BUILTIN_MEASURE: i64 = 21
 let V2_FIRST_USER_FN_ID: i64 = 32
 
 // V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
@@ -1023,6 +1026,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_BUILTIN_PRINTLN") { return 18 }
     if token_text_eq(tok, "V2_BUILTIN_ASSERT") { return 19 }
     if token_text_eq(tok, "V2_BUILTIN_SYS_EXIT_1") { return 20 }
+    if token_text_eq(tok, "V2_BUILTIN_MEASURE") { return 21 }
     if token_text_eq(tok, "V2_FIRST_USER_FN_ID") { return 32 }
 
     if token_text_eq(tok, "UFN_LOAD_IMM") { return 1 }
@@ -1264,6 +1268,48 @@ fn register_builtin_name_struct(token_count: i64) with Mut, Panic, Div {
     STRUCT_COUNT = sidx + 1
 }
 
+fn find_knowledge_struct_idx() -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < STRUCT_COUNT {
+        if token_text_eq(STRUCT_NAME_TOKS[i as usize], "Knowledge") { return i }
+        i = i + 1
+    }
+    -1
+}
+
+// Register Knowledge<T> as a synthetic 2-field struct {value: f64, uncertainty: f64}.
+// Only registers if "Knowledge", "value", and "uncertainty" tokens exist in the source
+// (they do whenever the source uses measure() or accesses .value/.uncertainty).
+fn register_builtin_knowledge_struct(token_count: i64) with Mut, Panic, Div {
+    if find_knowledge_struct_idx() >= 0 { return }
+    let k_tok = find_ident_token_text(token_count, "Knowledge")
+    let v_tok = find_ident_token_text(token_count, "value")
+    let u_tok = find_ident_token_text(token_count, "uncertainty")
+    if k_tok < 0 || v_tok < 0 { return }
+    if STRUCT_COUNT >= 16 || STRUCT_FIELD_TOTAL + 2 >= 128 { return }
+    let sidx = STRUCT_COUNT
+    let fstart = STRUCT_FIELD_TOTAL
+    STRUCT_NAME_TOKS[sidx as usize] = k_tok
+    STRUCT_FIELD_START[sidx as usize] = fstart
+    STRUCT_FLAT_SIZE[sidx as usize] = 2
+    STRUCT_FIELDS[fstart as usize] = v_tok
+    STRUCT_FIELD_STRUCT_IDX[fstart as usize] = -1
+    STRUCT_FIELD_IS_F64[fstart as usize] = 1
+    STRUCT_FIELD_FLAT_OFFSET[fstart as usize] = 0
+    if u_tok >= 0 {
+        STRUCT_FIELD_COUNT[sidx as usize] = 2
+        STRUCT_FIELDS[(fstart + 1) as usize] = u_tok
+        STRUCT_FIELD_STRUCT_IDX[(fstart + 1) as usize] = -1
+        STRUCT_FIELD_IS_F64[(fstart + 1) as usize] = 1
+        STRUCT_FIELD_FLAT_OFFSET[(fstart + 1) as usize] = 1
+        STRUCT_FIELD_TOTAL = fstart + 2
+    } else {
+        STRUCT_FIELD_COUNT[sidx as usize] = 1
+        STRUCT_FIELD_TOTAL = fstart + 1
+    }
+    STRUCT_COUNT = sidx + 1
+}
+
 fn scan_struct_decls(token_count: i64) with Mut, Panic, Div {
     STRUCT_COUNT = 0
     STRUCT_FIELD_TOTAL = 0
@@ -1305,6 +1351,7 @@ fn scan_struct_decls(token_count: i64) with Mut, Panic, Div {
     scan_struct_field_types(token_count)
     compute_struct_flat_sizes()
     register_builtin_name_struct(token_count)
+    register_builtin_knowledge_struct(token_count)
 }
 
 // Second pass: determine each field's type (struct or scalar) and flat offsets
@@ -1949,6 +1996,7 @@ fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "print_char") { return V2_BUILTIN_PRINT_CHAR }
     if token_text_eq(tok, "print_f64") { return V2_BUILTIN_PRINT_F64 }
     if token_text_eq(tok, "sqrt_f64") { return V2_BUILTIN_SQRT_F64 }
+    if token_text_eq(tok, "measure") { return V2_BUILTIN_MEASURE }
     if token_text_eq(tok, "arg_count") { return V2_BUILTIN_ARG_COUNT }
     if token_text_eq(tok, "get_arg_count") { return V2_BUILTIN_ARG_COUNT }
     if token_text_eq(tok, "get_arg") { return V2_BUILTIN_GET_ARG }
@@ -2406,6 +2454,60 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
             return parse_fn_call_ir(func, ctx, pos)
         }
     }
+    // Array literal [v; N] or [v0, v1, ...] as an expression.
+    // Used when an array value is needed inline, e.g. inside a struct literal
+    // field: `Buf4 { data: [1, 2, 3, 4] }`. Registers are naturally contiguous
+    // because alloc_reg increments V2_NEXT_REG sequentially.
+    if k == TK_LBRACKET {
+        let arr_base = V2_NEXT_REG
+        var ac = pos + 1
+        // Check for [v; N] fill syntax
+        if token_kind(ac) != TK_RBRACKET {
+            // Scan for a `;` at depth 0 to detect fill syntax
+            var depth2: i64 = 1
+            var sc = ac
+            var semi_at: i64 = -1
+            while sc < V2_TOKEN_COUNT && depth2 > 0 {
+                let sk = token_kind(sc)
+                if sk == TK_LBRACKET { depth2 = depth2 + 1 }
+                else if sk == TK_RBRACKET { depth2 = depth2 - 1 }
+                else if sk == TK_SEMI && depth2 == 1 { semi_at = sc; break }
+                sc = sc + 1
+            }
+            if semi_at >= 0 && token_kind(semi_at + 1) == TK_INT {
+                // [v; N] fill syntax
+                let fill_n = pt_read_int_value(semi_at + 1)
+                V2_NEXT_REG = arr_base + fill_n
+                let fill_val = parse_expr_ir(func, ctx, ac)
+                if fill_val.ok != 0 {
+                    var fi: i64 = 0
+                    while fi < fill_n {
+                        ufn_record_copy(arr_base + fi, fill_val.reg)
+                        fi = fi + 1
+                    }
+                    // find closing ]
+                    var ec = semi_at + 2
+                    while ec < V2_TOKEN_COUNT && token_kind(ec) != TK_RBRACKET { ec = ec + 1 }
+                    if token_kind(ec) == TK_RBRACKET {
+                        return ExprParse { ok: 1, reg: arr_base, next: ec + 1}
+                    }
+                }
+                return ExprParse { ok: 0, reg: -1, next: pos}
+            }
+        }
+        // [v0, v1, ...] element list: parse greedily; alloc_reg is sequential
+        // so elements land at arr_base, arr_base+1, ... naturally.
+        while ac < V2_TOKEN_COUNT && token_kind(ac) != TK_RBRACKET {
+            if token_kind(ac) == TK_COMMA { ac = ac + 1; continue }
+            let ep = parse_expr_ir(func, ctx, ac)
+            if ep.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+            ac = ep.next
+        }
+        if token_kind(ac) == TK_RBRACKET {
+            return ExprParse { ok: 1, reg: arr_base, next: ac + 1}
+        }
+        return ExprParse { ok: 0, reg: -1, next: pos}
+    }
     ExprParse { ok: 0, reg: -1, next: pos}
 }
 
@@ -2536,6 +2638,63 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
     }
     // assert(cond): inline expansion — branch around a sys_exit(1) call.
     // Semantics: if cond == 0 → exit(1); else → continue.
+    // measure(v, uncertainty: u) → Knowledge<f64>{value=v, uncertainty=u}
+    // Pre-allocates 2 contiguous f64 registers, then parses positional value
+    // and optional named `uncertainty:` argument, copying each into place.
+    if fn_id == V2_BUILTIN_MEASURE {
+        let k_sidx = find_knowledge_struct_idx()
+        // Pre-allocate 2 registers for the Knowledge struct
+        let base_reg = V2_NEXT_REG
+        V2_NEXT_REG = base_reg + 2
+        mark_reg_f64(base_reg)
+        mark_reg_f64(base_reg + 1)
+        var mc = pos + 2  // skip 'measure' and '('
+        // parse value argument
+        var val_done: i64 = 0
+        if token_kind(mc) != TK_RPAREN {
+            let vp = parse_expr_ir(func, ctx, mc)
+            if vp.ok != 0 {
+                ufn_record_copy(base_reg, vp.reg)
+                mc = vp.next
+                val_done = 1
+            }
+        }
+        if val_done == 0 {
+            let zero_reg = alloc_reg(ctx)
+            ufn_record_load_imm(zero_reg, 0)
+            ufn_record_copy(base_reg, zero_reg)
+        }
+        // skip optional comma
+        if token_kind(mc) == TK_COMMA { mc = mc + 1 }
+        // parse optional named 'uncertainty: u'
+        var unc_done: i64 = 0
+        if token_kind(mc) == TK_IDENT && token_text_eq(mc, "uncertainty") && token_kind(mc + 1) == TK_COLON {
+            mc = mc + 2  // skip 'uncertainty:'
+            let up = parse_expr_ir(func, ctx, mc)
+            if up.ok != 0 {
+                ufn_record_copy(base_reg + 1, up.reg)
+                mc = up.next
+                unc_done = 1
+            }
+        } else if token_kind(mc) != TK_RPAREN {
+            // positional uncertainty (second arg without label)
+            let up = parse_expr_ir(func, ctx, mc)
+            if up.ok != 0 {
+                ufn_record_copy(base_reg + 1, up.reg)
+                mc = up.next
+                unc_done = 1
+            }
+        }
+        if unc_done == 0 {
+            let zero_reg2 = alloc_reg(ctx)
+            ufn_record_load_imm(zero_reg2, 0)
+            ufn_record_copy(base_reg + 1, zero_reg2)
+        }
+        // skip closing ')'
+        if token_kind(mc) == TK_RPAREN { mc = mc + 1 }
+        if k_sidx >= 0 { V2_LAST_STRUCT_IDX = k_sidx }
+        return ExprParse { ok: 1, reg: base_reg, next: mc}
+    }
     if fn_id == V2_BUILTIN_ASSERT {
         if token_kind(pos + 2) == TK_RPAREN { return ExprParse { ok: 0, reg: -1, next: pos} }
         let cond = parse_expr_ir(func, ctx, pos + 2)
