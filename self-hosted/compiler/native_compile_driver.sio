@@ -200,6 +200,8 @@ let UFN_USER_GLOBAL_STORE: i64 = 22
 let UFN_REF_ARRAY_LOAD: i64 = 23
 // Pointer-based array element store: *(ptr_reg_value - idx * 8) = val
 let UFN_REF_ARRAY_STORE: i64 = 24
+// Integer-to-float conversion: cvtsi2sd xmm0, rax; store to dst
+let UFN_CVT_I64_TO_F64: i64 = 25
 
 var V2_UFN_OPS: [i64; 2048] = [0; 2048]
 var V2_UFN_DST: [i64; 2048] = [0; 2048]
@@ -1032,6 +1034,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "UFN_USER_GLOBAL_STORE") { return 22 }
     if token_text_eq(tok, "UFN_REF_ARRAY_LOAD") { return 23 }
     if token_text_eq(tok, "UFN_REF_ARRAY_STORE") { return 24 }
+    if token_text_eq(tok, "UFN_CVT_I64_TO_F64") { return 25 }
 
     if token_text_eq(tok, "V2_GLOBAL_PT_KIND_CODE") { return 43 }
     if token_text_eq(tok, "V2_GLOBAL_PT_START") { return 44 }
@@ -1702,6 +1705,17 @@ fn ufn_record_ref_array_load(dst: i64, ptr_reg: i64, idx_reg: i64) with Mut {
         V2_UFN_SRC1[idx as usize] = ptr_reg
         V2_UFN_SRC2[idx as usize] = idx_reg
         V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_cvt_i64_to_f64(dst: i64, src: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 2048 {
+        V2_UFN_OPS[idx as usize] = UFN_CVT_I64_TO_F64
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_SRC1[idx as usize] = src
+        V2_UFN_COUNT = idx + 1
+        mark_reg_f64(dst)
     }
 }
 
@@ -2648,9 +2662,16 @@ fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         if token_kind(rn) == TK_AS { rn = rn + 2 }
         result = ExprParse { ok: 1, reg: dst, next: rn}
     }
-    // skip trailing 'as T' before checking logical operators (e.g. 48 as i8 && ...)
+    // skip trailing 'as T'; if 'as f64' and source is integer, emit cvtsi2sd
     if token_kind(result.next) == TK_AS {
-        result = ExprParse { ok: 1, reg: result.reg, next: result.next + 2}
+        let cast_type_tok = result.next + 1
+        if token_kind(cast_type_tok) == TK_IDENT && token_text_eq(cast_type_tok, "f64") && !reg_is_f64(result.reg) {
+            let conv_reg = alloc_reg(ctx)
+            ufn_record_cvt_i64_to_f64(conv_reg, result.reg)
+            result = ExprParse { ok: 1, reg: conv_reg, next: result.next + 2}
+        } else {
+            result = ExprParse { ok: 1, reg: result.reg, next: result.next + 2}
+        }
     }
     // Short-circuit logical operators: && and ||
     let op2 = token_kind(result.next)
@@ -4015,6 +4036,12 @@ fn drv_emit_cvtsi2sd_xmm1_rax() with Mut, Div, Panic {
     drv_emit_byte(200)
 }
 
+fn drv_emit_cvt_i64_to_f64(dst: i64, src: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(src)
+    drv_emit_cvtsi2sd_xmm0_rax()
+    drv_emit_store_xmm0_to_temp(dst)
+}
+
 fn drv_emit_cvttsd2si_rax_xmm0() with Mut, Div, Panic {
     drv_emit_byte(242)
     drv_emit_byte(72)
@@ -5187,6 +5214,8 @@ fn compile_ufn_from_globals(fn_id: i64) -> bool with IO, Mut, Panic, Div {
             drv_emit_ref_array_load(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
         } else if op == UFN_REF_ARRAY_STORE {
             drv_emit_ref_array_store(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_SRC2[i as usize])
+        } else if op == UFN_CVT_I64_TO_F64 {
+            drv_emit_cvt_i64_to_f64(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
         }
         i = i + 1
     }
