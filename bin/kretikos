@@ -14,6 +14,7 @@
 #   kretikos emit-metal <pattern> -o <file.metal> - emit MSL template from in-tree emitter
 #   kretikos emit-spirv <pattern> -o <file.spv>  - emit SPIR-V template from in-tree emitter
 #   kretikos emit-kaxi <pattern> -o <file.kaxi>  - emit K-AXI epistemic assembly template
+#   kretikos kaxi-witness <pattern> -o <file.json> - emit K-AXI assembly plus evidence JSON
 #   kretikos emulate                            - run CPU emulation self-check
 #   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
 #   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
@@ -833,6 +834,7 @@ PY
             echo "hint: supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check" >&2
             echo "hint: 'kretikos emit-spirv exit_only -o kernel.spv' emits a SPIR-V template" >&2
             echo "hint: 'kretikos emit-kaxi exit_only -o kernel.kaxi' emits a K-AXI assembly template" >&2
+            echo "hint: 'kretikos kaxi-witness epistemic_dual_output_f32 -o witness.json' emits K-AXI evidence" >&2
             echo "hint: 'kretikos emulate' runs CPU emulation self-check" >&2
             echo "hint: 'kretikos emit-cubin <kind> -o kernel.cubin' emits a CUBIN template from in-tree emitters" >&2
             exit 1
@@ -1211,6 +1213,181 @@ PY
                 exit 1
             fi
         fi
+        ;;
+
+    kaxi-witness)
+        PATTERN=""
+        OUT=""
+        ASM_OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --asm-output)
+                    ASM_OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" || -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-witness <pattern> -o <file.json> [--asm-output <file.kaxi>]" >&2
+            echo "supported K-AXI witness patterns: exit_only, vec_add, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            exit_only|vec_add|epistemic_elementwise_f32|epistemic_dual_output_f32) ;;
+            *)
+                echo "error: unsupported K-AXI witness pattern '$PATTERN'" >&2
+                echo "supported K-AXI witness patterns: exit_only, vec_add, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -z "$ASM_OUT" ]]; then
+            case "$OUT" in
+                *.json) ASM_OUT="${OUT%.json}.kaxi" ;;
+                *) ASM_OUT="$OUT.kaxi" ;;
+            esac
+        fi
+
+        mkdir -p "$(dirname "$OUT")" "$(dirname "$ASM_OUT")"
+        LOG_OUT="${OUT}.emit.log"
+        "$0" emit-kaxi "$PATTERN" -o "$ASM_OUT" >"$LOG_OUT" 2>&1 || {
+            cat "$LOG_OUT" >&2
+            echo "error: failed to emit K-AXI assembly for witness pattern '$PATTERN'" >&2
+            exit 1
+        }
+
+        python3 - "$PATTERN" "$ASM_OUT" "$OUT" "$LOG_OUT" <<'PY'
+import hashlib
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+pattern, asm_path, out_path, log_path = sys.argv[1:]
+asm = Path(asm_path)
+out = Path(out_path)
+log = Path(log_path)
+text = asm.read_text(encoding="utf-8")
+raw_lines = text.splitlines()
+instructions = [line.strip() for line in raw_lines if line.strip() and not line.lstrip().startswith(";")]
+opcodes = [line.split()[0] for line in instructions]
+seqs = []
+for line in instructions:
+    match = re.search(r"seq=([0-9]+)", line)
+    if match:
+        seqs.append(int(match.group(1)))
+
+def contains(prefix):
+    return any(line.startswith(prefix) for line in instructions)
+
+def count(prefix):
+    return sum(1 for line in instructions if line.startswith(prefix))
+
+expectations = {
+    "exit_only": {
+        "required": ["ret"],
+        "forbidden": ["add", "mul", "fma", "store_global"],
+        "semantic": "control_minimal",
+    },
+    "vec_add": {
+        "required": ["get_tid", "add", "ret"],
+        "forbidden": [],
+        "semantic": "value_lane_only",
+    },
+    "epistemic_elementwise_f32": {
+        "required": ["get_tid", "load_global", "fma", "store_global", "ret"],
+        "forbidden": [],
+        "semantic": "value_with_epsilon_lane",
+    },
+    "epistemic_dual_output_f32": {
+        "required": ["get_tid", "load_global", "add", "mul", "store_global", "ret"],
+        "forbidden": [],
+        "semantic": "separate_value_and_uncertainty_outputs",
+    },
+}
+spec = expectations[pattern]
+missing = [name for name in spec["required"] if not contains(name)]
+forbidden_present = [name for name in spec["forbidden"] if contains(name)]
+seq_monotonic = seqs == list(range(len(seqs)))
+variance_lines = [line for line in instructions if "var=+" in line or "var=0%" in line]
+stores = [line for line in instructions if line.startswith("store_global")]
+value_lane = ""
+uncertainty_lane = ""
+if pattern == "epistemic_dual_output_f32":
+    value_lane = next((line for line in instructions if line.startswith("add ")), "")
+    uncertainty_lane = next((line for line in instructions if line.startswith("mul ")), "")
+elif pattern == "epistemic_elementwise_f32":
+    value_lane = next((line for line in instructions if line.startswith("fma ")), "")
+
+failures = []
+if missing:
+    failures.append({"kind": "missing_required_opcode", "opcodes": missing})
+if forbidden_present:
+    failures.append({"kind": "forbidden_opcode_present", "opcodes": forbidden_present})
+if not seq_monotonic:
+    failures.append({"kind": "sequence_not_dense_zero_based", "seqs": seqs})
+if pattern.startswith("epistemic_") and not variance_lines:
+    failures.append({"kind": "missing_variance_annotations"})
+if pattern == "epistemic_dual_output_f32" and len(stores) < 2:
+    failures.append({"kind": "dual_output_requires_two_store_global_ops", "stores": stores})
+
+payload = {
+    "schema": "sounio.kretikos.kaxi-witness.v1",
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "status": "pass" if not failures else "fail",
+    "pattern": pattern,
+    "semantic_profile": spec["semantic"],
+    "assembly": {
+        "path": str(asm),
+        "bytes": asm.stat().st_size,
+        "sha256": hashlib.sha256(asm.read_bytes()).hexdigest(),
+        "instruction_count": len(instructions),
+        "opcodes": opcodes,
+        "seqs": seqs,
+        "seq_dense_zero_based": seq_monotonic,
+        "variance_annotation_count": len(variance_lines),
+    },
+    "epistemic_lanes": {
+        "value_lane_instruction": value_lane,
+        "uncertainty_lane_instruction": uncertainty_lane,
+        "store_global_count": len(stores),
+    },
+    "emitter_log": str(log),
+    "failures": failures,
+    "boundaries": [
+        "witness_is_profile_level_for_explicit_kretikos_patterns",
+        "witness_proves_kaxi_assembly_shape_and_dense_sequence_numbers",
+        "witness_does_not_claim_arbitrary_sounio_gpu_lowering",
+        "witness_does_not_replace_slurm_cuda_runtime_authority",
+    ],
+}
+out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+if failures:
+    raise SystemExit(json.dumps(failures))
+PY
+
+        echo "kretikos: K-AXI witness emitted - $OUT"
+        echo "kretikos: K-AXI witness assembly - $ASM_OUT"
         ;;
 
     emulate)
@@ -2124,6 +2301,7 @@ PY
         echo "  emit-metal <pattern> -o <file.metal> Emit MSL template from in-tree emitter"
         echo "  emit-spirv <pattern> -o <file.spv> Emit SPIR-V template (exit_only, vec_add, tid_kernel, self-check)"
         echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check)"
+        echo "  kaxi-witness <pattern> -o <file.json> Emit K-AXI assembly plus witness JSON"
         echo "  emulate                            Run CPU emulation self-check (f32, f64, i32)"
         echo "  emit-cubin <kind> -o <file.cubin> Emit CUBIN template from in-tree emitter"
         echo "  bundle [-o <dir>]                 Emit PTX+CUBIN plus bundle manifest"

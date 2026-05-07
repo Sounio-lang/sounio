@@ -27,12 +27,26 @@ patterns=(
 
 for pattern in "${patterns[@]}"; do
   out="$OUT_DIR/${pattern}.kaxi"
+  witness="$OUT_DIR/${pattern}.kaxi-witness.json"
   log="$OUT_DIR/${pattern}.emit.out"
-  echo "kretikos_kaxi_gate: emit pattern=$pattern out=$out"
-  ./bin/kretikos emit-kaxi "$pattern" -o "$out" >"$log" 2>&1
+  echo "kretikos_kaxi_gate: witness pattern=$pattern out=$out witness=$witness"
+  ./bin/kretikos kaxi-witness "$pattern" -o "$witness" --asm-output "$out" >"$log" 2>&1
   cat "$log"
   grep -q "K-AXI epistemic kernel assembly" "$out"
   grep -q "ret seq=" "$out"
+  python3 - "$witness" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if obj.get("status") != "pass":
+    raise SystemExit(f"witness_status_not_pass:{obj.get('status')}")
+if not obj.get("assembly", {}).get("seq_dense_zero_based"):
+    raise SystemExit("witness_sequence_not_dense_zero_based")
+if obj.get("failures"):
+    raise SystemExit(f"witness_failures:{obj['failures']}")
+PY
 done
 
 grep -q "add r" "$OUT_DIR/vec_add.kaxi"
@@ -57,14 +71,21 @@ patterns = sys.argv[4:]
 cases = []
 for pattern in patterns:
     path = out_dir / f"{pattern}.kaxi"
+    witness_path = out_dir / f"{pattern}.kaxi-witness.json"
     text = path.read_text(encoding="utf-8")
+    witness = json.loads(witness_path.read_text(encoding="utf-8"))
     lines = [line for line in text.splitlines() if line and not line.startswith(";")]
     cases.append({
         "pattern": pattern,
         "artifact": path.name,
+        "witness": witness_path.name,
+        "witness_sha256": hashlib.sha256(witness_path.read_bytes()).hexdigest(),
         "bytes": path.stat().st_size,
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "instruction_count": len(lines),
+        "semantic_profile": witness.get("semantic_profile"),
+        "seq_dense_zero_based": witness.get("assembly", {}).get("seq_dense_zero_based"),
+        "store_global_count": witness.get("epistemic_lanes", {}).get("store_global_count"),
         "has_add": "add r" in text,
         "has_mul": "mul r" in text,
         "has_fma": "fma r" in text,
@@ -81,6 +102,7 @@ payload = {
     "boundaries": [
         "kaxi_is_sounio_owned_epistemic_gpu_assembly",
         "gate_proves_self_hosted_emitter_compiles_and_emits_structural_artifacts",
+        "gate_proves_kaxi_witness_json_for_each_profile",
         "gate_proves_profile_level_lowering_for_explicit_kretikos_epistemic_profiles",
         "gate_does_not_claim_arbitrary_sounio_gpu_lowering",
         "gate_does_not_replace_slurm_cuda_runtime_authority",
