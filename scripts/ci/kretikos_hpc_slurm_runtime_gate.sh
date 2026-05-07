@@ -84,7 +84,11 @@ jobs = [case.get("job_id", "") for case in cases if case.get("job_id")]
 artifact_dirs = [case.get("artifact_dir", "") for case in cases if case.get("artifact_dir")]
 artifact_jsons = [case.get("artifact_json", "") for case in cases if case.get("artifact_json")]
 artifact_runtimes = []
+kaxi_certificates = []
 missing_artifacts = []
+missing_certificates = []
+bad_certificates = []
+kaxi_supported_profiles = {"vec_add_f32", "epistemic_elementwise_f32", "epistemic_dual_output_f32"}
 
 for case in cases:
     artifact_json = case.get("artifact_json", "")
@@ -106,6 +110,88 @@ for case in cases:
         "kernel": runtime.get("kernel"),
         "device": runtime.get("device_name"),
     })
+    profile = (obj.get("source_profile") or {}).get("profile") or case.get("label")
+    cert = obj.get("kaxi_certificate") or {}
+    cert_runtime = cert.get("runtime_validation") or {}
+    cert_payload = cert.get("certificate") or {}
+    published_path = cert.get("published_path")
+    fetched_certificate = None
+    if published_path:
+        fetched_path = artifact_path.parent / published_path
+        if fetched_path.is_file():
+            fetched_certificate = json.load(fetched_path.open(encoding="utf-8"))
+        elif profile in kaxi_supported_profiles:
+            missing_certificates.append({
+                "label": case.get("label"),
+                "profile": profile,
+                "path": str(fetched_path),
+                "reason": "published_certificate_not_found",
+            })
+    if fetched_certificate is not None:
+        fetched_runtime = fetched_certificate.get("runtime", {}).get("runtime_validation") or {}
+        if fetched_certificate.get("status") != cert_payload.get("status"):
+            bad_certificates.append({
+                "label": case.get("label"),
+                "profile": profile,
+                "reason": "embedded_and_fetched_certificate_status_mismatch",
+                "embedded_status": cert_payload.get("status"),
+                "fetched_status": fetched_certificate.get("status"),
+            })
+        if fetched_runtime.get("status") != cert_runtime.get("status"):
+            bad_certificates.append({
+                "label": case.get("label"),
+                "profile": profile,
+                "reason": "embedded_and_fetched_runtime_status_mismatch",
+                "embedded_runtime_status": cert_runtime.get("status"),
+                "fetched_runtime_status": fetched_runtime.get("status"),
+            })
+    kaxi_certificates.append({
+        "label": case.get("label"),
+        "profile": profile,
+        "status": cert.get("status"),
+        "reason": cert.get("reason"),
+        "published_path": published_path,
+        "certificate_status": cert_payload.get("status"),
+        "certificate_schema": cert_payload.get("schema"),
+        "kaxi_pattern": cert.get("kaxi_pattern"),
+        "semantic_profile": cert.get("semantic_profile"),
+        "runtime_status": cert_runtime.get("status"),
+        "runtime_reason": cert_runtime.get("reason"),
+        "runtime_rung": cert_runtime.get("rung"),
+        "runtime_kernel": cert_runtime.get("kernel"),
+        "fetched": fetched_certificate is not None,
+    })
+    if profile in kaxi_supported_profiles:
+        if cert.get("status") != "pass":
+            bad_certificates.append({
+                "label": case.get("label"),
+                "profile": profile,
+                "reason": "kaxi_certificate_status_not_pass",
+                "status": cert.get("status"),
+                "detail": cert.get("reason"),
+            })
+        if cert_payload.get("status") != "pass":
+            bad_certificates.append({
+                "label": case.get("label"),
+                "profile": profile,
+                "reason": "kaxi_certificate_payload_not_pass",
+                "status": cert_payload.get("status"),
+            })
+        if cert_runtime.get("status") != "pass":
+            bad_certificates.append({
+                "label": case.get("label"),
+                "profile": profile,
+                "reason": "kaxi_certificate_runtime_not_pass",
+                "status": cert_runtime.get("status"),
+                "runtime_reason": cert_runtime.get("reason"),
+            })
+        if cert_runtime.get("rung") != profile:
+            bad_certificates.append({
+                "label": case.get("label"),
+                "profile": profile,
+                "reason": "kaxi_certificate_runtime_rung_mismatch",
+                "runtime_rung": cert_runtime.get("rung"),
+            })
 
 if int(failed) == 0 and missing_artifacts:
     raise SystemExit(f"missing fetched artifacts: {missing_artifacts}")
@@ -113,6 +199,10 @@ if int(failed) == 0 and missing_artifacts:
 bad_artifacts = [row for row in artifact_runtimes if row.get("status") != "pass"]
 if int(failed) == 0 and bad_artifacts:
     raise SystemExit(f"artifact runtime did not pass: {bad_artifacts}")
+if int(failed) == 0 and missing_certificates:
+    raise SystemExit(f"missing K-AXI certificates: {missing_certificates}")
+if int(failed) == 0 and bad_certificates:
+    raise SystemExit(f"K-AXI certificate did not pass: {bad_certificates}")
 
 payload = {
     "schema": "sounio.kretikos.hpc-slurm-runtime-gate.v1",
@@ -128,6 +218,7 @@ payload = {
     "artifact_dirs": artifact_dirs,
     "artifact_jsons": artifact_jsons,
     "artifact_runtimes": artifact_runtimes,
+    "kaxi_certificates": kaxi_certificates,
     "doctor_log": str(Path(doctor_log).name),
     "manifest_log": str(Path(manifest_log).name),
     "summary_tsv": str(Path(summary_tsv).name),
@@ -136,6 +227,7 @@ payload = {
         "local_workspace_is_build_and_inspection_host",
         "slurm_worker_is_cuda_runtime_authority",
         "runtime_acceptance_requires_cuda_driver_load_launch_and_copyback",
+        "supported_kaxi_profiles_must_publish_a_runtime_backed_kaxi_certificate",
         "worker_side_ptxas_or_nvdisasm_missing_is_not_a_runtime_failure",
         "each_worker_result_must_publish_and_fetch_a_json_artifact",
         "does_not_claim_arbitrary_sounio_gpu_lowering",

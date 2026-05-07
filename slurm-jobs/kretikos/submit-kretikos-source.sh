@@ -27,6 +27,7 @@ WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-300}"
 KRETIKOS_VEC_N="${KRETIKOS_VEC_N:-64}"
 KRETIKOS_HPC_PUBLISH_RESULTS="${KRETIKOS_HPC_PUBLISH_RESULTS:-1}"
 KRETIKOS_HPC_FETCH_RESULTS="${KRETIKOS_HPC_FETCH_RESULTS:-1}"
+KRETIKOS_HPC_CERTIFY_KAXI="${KRETIKOS_HPC_CERTIFY_KAXI:-1}"
 KRETIKOS_HPC_LOCAL_ARTIFACT_DIR="${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR:-}"
 KRETIKOS_HPC_WORKER_NODE="${KRETIKOS_HPC_WORKER_NODE:-${SBATCH_NODELIST#gpuorangefs-}}"
 KRETIKOS_HPC_WORKER_POD_LABEL="${KRETIKOS_HPC_WORKER_POD_LABEL:-app.kubernetes.io/instance=slurm-pilot-worker-gpuorangefs}"
@@ -41,6 +42,7 @@ Environment:
   KRETIKOS_VEC_N=<n>           vector runtime length, clamped by loader (default: 64)
   KRETIKOS_HPC_PUBLISH_RESULTS=0|1 preserve worker-local artifact directory (default: 1)
   KRETIKOS_HPC_FETCH_RESULTS=0|1   fetch published artifacts back locally (default: 1)
+  KRETIKOS_HPC_CERTIFY_KAXI=0|1    emit runtime-backed K-AXI certificates when supported (default: 1)
   KRETIKOS_HPC_LOCAL_ARTIFACT_DIR=<dir> local result directory override
   KRETIKOS_HPC_WORKER_NODE=<node>      Kubernetes worker node (default: SBATCH_NODELIST without gpuorangefs-)
   KRETIKOS_HPC_WORKER_POD_LABEL=<label-selector> worker pod selector
@@ -120,6 +122,8 @@ tar -C "${ROOT_DIR}" -czf "${LOCAL_TARBALL}" \
   bin/souc-linux-x86_64 \
   self-hosted/gpu/kretikos_emit_ptx.sio \
   self-hosted/gpu/kretikos_emit_cubin.sio \
+  self-hosted/gpu/kretikos_emit_kaxi.sio \
+  self-hosted/gpu/kaxi_backend.sio \
   self-hosted/gpu/ptx.sio \
   self-hosted/gpu/nvidia_bare.sio \
   scripts/gpu/nvidia_bare_driver_loader.c \
@@ -149,8 +153,11 @@ set -euo pipefail
 LOCAL_ROOT="${KRETIKOS_HPC_WORKER_TMP}/${RUN_ID}-\${SLURM_JOB_ID:-manual}"
 SOUNIO_DIR="\${LOCAL_ROOT}/repo"
 BUNDLE_DIR="\${LOCAL_ROOT}/bundle"
+CERT_DIR="\${LOCAL_ROOT}/kaxi-certificate"
 LOG_FILE="\${LOCAL_ROOT}/kretikos-source.log"
+CERT_LOG="\${LOCAL_ROOT}/kretikos-kaxi-certificate.log"
 PUBLISH_RESULTS="${KRETIKOS_HPC_PUBLISH_RESULTS}"
+CERTIFY_KAXI="${KRETIKOS_HPC_CERTIFY_KAXI}"
 SOURCE_PAYLOAD_NAME="${SOURCE_PAYLOAD_NAME}"
 LOADER_PAYLOAD_NAME="${LOADER_PAYLOAD_NAME}"
 KRETIKOS_VEC_N="${KRETIKOS_VEC_N}"
@@ -175,7 +182,7 @@ fail() {
 trap 'fail "\$?" "\$LINENO"' ERR
 
 rm -rf "\${LOCAL_ROOT}"
-mkdir -p "\${SOUNIO_DIR}" "\${BUNDLE_DIR}"
+mkdir -p "\${SOUNIO_DIR}" "\${BUNDLE_DIR}" "\${CERT_DIR}"
 mark "kretikos_source=running phase=decode_payload"
 cat > "\${LOCAL_ROOT}/payload.tgz.b64" <<'PAYLOAD_EOF'
 ${PAYLOAD_B64}
@@ -239,25 +246,105 @@ PY
 )"
 mark "\${comment}"
 
+KAXI_CERT_STATUS="not_run"
+KAXI_CERT_REASON="profile_not_supported"
+KAXI_CERT_WORKER_PATH=""
+KAXI_CERT_PUBLISHED_PATH=""
+SOURCE_PROFILE="\$(python3 - "\${BUNDLE_DIR}/kretikos_source_profile.v1.json" <<'PY'
+import json
+import sys
+
+source = json.load(open(sys.argv[1], encoding="utf-8"))
+print(source.get("profile") or "")
+PY
+)"
+
+case "\${SOURCE_PROFILE}" in
+  vec_add_f32|epistemic_elementwise_f32|epistemic_dual_output_f32)
+    if [[ "\${CERTIFY_KAXI}" == "1" ]]; then
+      mark "kretikos_source=running phase=kaxi_certificate profile=\${SOURCE_PROFILE}"
+      KAXI_CERT_JSON="\${CERT_DIR}/kaxi_certificate.v1.json"
+      ./bin/kretikos kaxi-certificate "\${SOUNIO_DIR}/\${SOURCE_PAYLOAD_NAME}" \
+        -o "\${KAXI_CERT_JSON}" \
+        --work-dir "\${CERT_DIR}/work" \
+        --force \
+        --require-runtime > "\${CERT_LOG}" 2>&1
+      python3 - "\${KAXI_CERT_JSON}" "\${SOURCE_PROFILE}" <<'PY'
+import json
+import sys
+
+obj = json.load(open(sys.argv[1], encoding="utf-8"))
+expected_profile = sys.argv[2]
+runtime = obj.get("runtime", {}).get("runtime_validation", {})
+profile = obj.get("profile", {}).get("name")
+if obj.get("status") != "pass":
+    raise SystemExit(f"kaxi_certificate_not_pass:{obj.get('status')}")
+if profile != expected_profile:
+    raise SystemExit(f"kaxi_certificate_profile_mismatch:{profile}!={expected_profile}")
+if obj.get("failures"):
+    raise SystemExit(f"kaxi_certificate_failures:{obj.get('failures')}")
+if runtime.get("status") != "pass":
+    raise SystemExit(f"kaxi_certificate_runtime_not_pass:{runtime.get('status')}/{runtime.get('reason')}")
+if runtime.get("rung") != expected_profile:
+    raise SystemExit(f"kaxi_certificate_runtime_rung_mismatch:{runtime.get('rung')}!={expected_profile}")
+PY
+      KAXI_CERT_STATUS="pass"
+      KAXI_CERT_REASON="runtime_backed_certificate_pass"
+      KAXI_CERT_WORKER_PATH="\${KAXI_CERT_JSON}"
+      KAXI_CERT_PUBLISHED_PATH="certificate/kaxi_certificate.v1.json"
+      mark "\${comment} cert=pass"
+    else
+      KAXI_CERT_STATUS="not_run"
+      KAXI_CERT_REASON="certification_disabled"
+      printf 'status=not_run reason=certification_disabled profile=%s\n' "\${SOURCE_PROFILE}" > "\${CERT_LOG}"
+    fi
+    ;;
+  *)
+    printf 'status=not_run reason=profile_not_supported profile=%s\n' "\${SOURCE_PROFILE}" > "\${CERT_LOG}"
+    ;;
+esac
+
 if [[ "\${PUBLISH_RESULTS}" == "1" ]]; then
   PUBLISH_DIR="\${LOCAL_ROOT}/publish"
-  mkdir -p "\${PUBLISH_DIR}/bundle"
+  mkdir -p "\${PUBLISH_DIR}/bundle" "\${PUBLISH_DIR}/certificate"
   tar -C "\${BUNDLE_DIR}" -cf - . | tar -C "\${PUBLISH_DIR}/bundle" -xf -
+  if [[ -f "\${CERT_DIR}/kaxi_certificate.v1.json" ]]; then
+    tar -C "\${CERT_DIR}" -cf - . | tar -C "\${PUBLISH_DIR}/certificate" -xf -
+  fi
   cp "\${LOG_FILE}" "\${PUBLISH_DIR}/kretikos-source.log"
+  cp "\${CERT_LOG}" "\${PUBLISH_DIR}/kretikos-kaxi-certificate.log"
   printf '%s\n' "\${comment}" > "\${PUBLISH_DIR}/comment.txt"
   printf '%s\n' "\${LOCAL_ROOT}" > "\${PUBLISH_DIR}/worker_run_dir.txt"
   printf '%s\n' "\$(hostname)" > "\${PUBLISH_DIR}/worker_host.txt"
   python3 - "\${PUBLISH_DIR}/kretikos_hpc_source_result.v1.json" \
     "\${SLURM_JOB_ID:-unknown}" "\$(hostname)" "\${comment}" \
     "\${BUNDLE_DIR}/kretikos_bundle.v1.json" \
-    "\${BUNDLE_DIR}/kretikos_source_profile.v1.json" <<'PY'
+    "\${BUNDLE_DIR}/kretikos_source_profile.v1.json" \
+    "\${KAXI_CERT_STATUS}" "\${KAXI_CERT_REASON}" "\${KAXI_CERT_WORKER_PATH}" \
+    "\${KAXI_CERT_PUBLISHED_PATH}" "\${CERT_LOG}" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
-out, job_id, host, comment, bundle_path, source_path = sys.argv[1:]
+(
+    out,
+    job_id,
+    host,
+    comment,
+    bundle_path,
+    source_path,
+    kaxi_cert_status,
+    kaxi_cert_reason,
+    kaxi_cert_worker_path,
+    kaxi_cert_published_path,
+    kaxi_cert_log_path,
+) = sys.argv[1:]
 bundle = json.load(open(bundle_path, encoding="utf-8"))
 source = json.load(open(source_path, encoding="utf-8"))
+certificate = None
+if kaxi_cert_worker_path and Path(kaxi_cert_worker_path).is_file():
+    certificate = json.load(open(kaxi_cert_worker_path, encoding="utf-8"))
 payload = {
     "schema": "sounio.kretikos.hpc-source-result.v1",
     "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -268,10 +355,23 @@ payload = {
     "bundle": bundle,
     "runtime_validation": bundle.get("runtime_validation") or {},
     "toolchain_validation": bundle.get("toolchain_validation") or {},
+    "kaxi_certificate": {
+        "status": kaxi_cert_status,
+        "reason": kaxi_cert_reason,
+        "worker_path": kaxi_cert_worker_path or None,
+        "published_path": kaxi_cert_published_path or None,
+        "log_path": kaxi_cert_log_path,
+        "certificate": certificate,
+        "runtime_validation": (certificate or {}).get("runtime", {}).get("runtime_validation") if certificate else None,
+        "profile": (certificate or {}).get("profile", {}).get("name") if certificate else source.get("profile"),
+        "kaxi_pattern": (certificate or {}).get("kaxi", {}).get("pattern") if certificate else None,
+        "semantic_profile": (certificate or {}).get("kaxi", {}).get("semantic_profile") if certificate else None,
+    },
     "boundaries": [
         "payload_was_embedded_in_sbatch_not_read_from_orangefs",
         "runtime_execution_happened_on_slurm_gpu_worker",
         "published_results_are_post_run_evidence",
+        "kaxi_certificate_requires_worker_runtime_pass_for_supported_profiles",
         "worker_side_ptxas_or_nvdisasm_missing_is_not_a_runtime_failure",
     ],
 }

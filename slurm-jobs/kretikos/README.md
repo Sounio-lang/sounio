@@ -73,6 +73,8 @@ Useful environment overrides:
   default `1`
 - `KRETIKOS_HPC_FETCH_RESULTS`: fetch published artifacts back locally, default
   `1`
+- `KRETIKOS_HPC_CERTIFY_KAXI`: emit runtime-backed K-AXI certificates for
+  supported profiles, default `1`
 - `KRETIKOS_HPC_LOCAL_ARTIFACT_DIR`: local result directory override for a
   single-source run
 - `KRETIKOS_HPC_WORKER_NODE`: Kubernetes node hosting the Slurm worker, default
@@ -85,9 +87,11 @@ Fetched source-run artifacts include:
 
 - `kretikos_hpc_source_result.v1.json`
 - `kretikos-source.log`
+- `kretikos-kaxi-certificate.log`
 - `comment.txt`
 - `bundle/kretikos_bundle.v1.json`
 - `bundle/kretikos_source_profile.v1.json`
+- `certificate/kaxi_certificate.v1.json` for K-AXI-supported profiles
 - emitted PTX/CUBIN artifacts and validation logs for that profile
 
 ## Acceptance Boundary
@@ -136,3 +140,5 @@ Result:
 - final reason `runtime_epistemic_dual_output_f32_pass`
 - each source job preserved a worker-local `publish/` directory and fetched a
   `kretikos_hpc_source_result.v1.json` artifact back to the control workspace
+- K-AXI-supported profiles now publish a `certificate/kaxi_certificate.v1.json`
+  whose embedded runtime validation must pass on the worker
