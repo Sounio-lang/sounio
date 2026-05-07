@@ -315,9 +315,12 @@ var ENUM_VARIANT_TOTAL: i64 = 0
 // User fn return struct index (-1 = scalar return)
 var V2_USER_FN_RETURN_STRUCT_IDX: [i64; 512] = [0; 512]
 var V2_USER_FN_RETURN_IS_F64: [i64; 512] = [0; 512]
+var V2_USER_FN_RETURN_ARR_SIZE: [i64; 512] = [0; 512]
 
 // Sideband written by parse_struct_lit/parse_struct_lit_ir so callers can record struct type
 var V2_LAST_STRUCT_IDX: i64 = -1
+// Sideband set when a fn-call returns [T; N] — consumed by let-binding
+var V2_LAST_ARR_LEN: i64 = 0
 
 let V2_GLOBAL_PT_KIND_CODE: i64 = 43
 let V2_GLOBAL_PT_START: i64 = 44
@@ -1436,6 +1439,10 @@ fn scan_struct_field_types(token_count: i64) with Mut, Panic, Div {
                 if semi_pos < token_count && token_kind(semi_pos) == TK_SEMI && token_kind(semi_pos + 1) == TK_INT {
                     STRUCT_FIELD_ARRAY_SIZE[fi as usize] = pt_read_int_value(semi_pos + 1)
                 }
+                // Mark element type as f64 when array element type is f64
+                if token_kind(name_tok + 3) == TK_IDENT && token_text_eq(name_tok + 3, "f64") {
+                    STRUCT_FIELD_IS_F64[fi as usize] = 1
+                }
             }
         }
         // Algebra basis fields have no type annotation (e.g. `basis: x, y`).
@@ -1561,6 +1568,17 @@ fn lookup_user_fn_return_is_f64(fn_id: i64) -> bool with Mut {
         i = i + 1
     }
     false
+}
+
+fn lookup_user_fn_return_arr_size(fn_id: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < V2_USER_FN_COUNT {
+        if V2_USER_FN_IDS[i as usize] == fn_id {
+            return V2_USER_FN_RETURN_ARR_SIZE[i as usize]
+        }
+        i = i + 1
+    }
+    0
 }
 
 fn lookup_user_fn_returns_value(fn_id: i64) -> bool with Mut, Panic, Div {
@@ -2478,6 +2496,7 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
                                         ufn_record_binop(combined_reg, idx_expr.reg, 0, foff_reg)
                                         ufn_record_ref_array_load(dst, reg, combined_reg)
                                     }
+                                    if struct_field_is_f64_at(ref_sidx, foff) { mark_reg_f64(dst) }
                                     return ExprParse { ok: 1, reg: dst, next: end_pos + 1}
                                 }
                             }
@@ -2862,7 +2881,15 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         if arg_struct_idx >= 0 {
             sz = STRUCT_FLAT_SIZE[arg_struct_idx as usize]
             V2_LAST_STRUCT_IDX = -1
-            V2_CALL_ARG_REGS[n_args as usize] = arg.reg
+            if sz > 6 {
+                // Large struct: pass as pointer to first field (single register)
+                let addr_vreg = alloc_reg(ctx)
+                ufn_record_temp_addr(addr_vreg, arg.reg)
+                V2_CALL_ARG_REGS[n_args as usize] = addr_vreg
+                sz = 1
+            } else {
+                V2_CALL_ARG_REGS[n_args as usize] = arg.reg
+            }
         } else if lookup_local_alen_by_reg(ctx, arg.reg) > 0 {
             // bare local array: pass address-of first element (pointer)
             let addr_vreg = alloc_reg(ctx)
@@ -2926,6 +2953,16 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         } else {
             mark_struct_regs(dst, ret_sidx)
         }
+        return ExprParse { ok: 1, reg: dst, next: cur + 1}
+    }
+    // check if callee returns [T; N] array
+    let ret_arr_sz = lookup_user_fn_return_arr_size(fn_id)
+    if ret_arr_sz > 0 {
+        let dst = alloc_reg(ctx)
+        var ri: i64 = 1
+        while ri < ret_arr_sz { let _ = alloc_reg(ctx); ri = ri + 1 }
+        ufn_record_call_struct_result(dst, fn_id, arg0_reg, total_argc, ret_arr_sz)
+        V2_LAST_ARR_LEN = ret_arr_sz
         return ExprParse { ok: 1, reg: dst, next: cur + 1}
     }
     let dst = alloc_reg(ctx)
@@ -2999,6 +3036,16 @@ fn parse_method_call_ir(func: &! i64, ctx: &! V2DriverContext, method_tok: i64, 
         while ri < ret_flat { let _ = alloc_reg(ctx); ri = ri + 1 }
         ufn_record_call_struct_result(dst, fn_id, arg0_reg, total_argc, ret_flat)
         V2_LAST_STRUCT_IDX = ret_sidx
+        return ExprParse { ok: 1, reg: dst, next: cur + 1}
+    }
+    // check if callee returns [T; N] array (method call variant)
+    let ret_arr_sz2 = lookup_user_fn_return_arr_size(fn_id)
+    if ret_arr_sz2 > 0 {
+        let dst = alloc_reg(ctx)
+        var ri: i64 = 1
+        while ri < ret_arr_sz2 { let _ = alloc_reg(ctx); ri = ri + 1 }
+        ufn_record_call_struct_result(dst, fn_id, arg0_reg, total_argc, ret_arr_sz2)
+        V2_LAST_ARR_LEN = ret_arr_sz2
         return ExprParse { ok: 1, reg: dst, next: cur + 1}
     }
     let dst = alloc_reg(ctx)
@@ -3712,6 +3759,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
         while eq_pos < close && token_kind(eq_pos) != TK_EQ { eq_pos = eq_pos + 1 }
         if eq_pos >= close { return eq_pos }
         V2_LAST_STRUCT_IDX = -1
+        V2_LAST_ARR_LEN = 0
         let parsed = parse_expr_ir(func, ctx, eq_pos + 1)
         var let_next = parsed.next
         var let_ok = parsed.ok
@@ -3735,6 +3783,13 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             V2_LAST_STRUCT_IDX = -1
             return let_next
         }
+        // let name = fn_returning_array() — register result as local array
+        if V2_LAST_ARR_LEN > 0 {
+            let arr_len = V2_LAST_ARR_LEN
+            V2_LAST_ARR_LEN = 0
+            remember_local_arr_tok(ctx, p + 1, let_reg, arr_len)
+            return let_next
+        }
         let bind_reg = alloc_reg(ctx)
         ufn_record_copy(bind_reg, let_reg)
         remember_local_tok(ctx, p + 1, bind_reg)
@@ -3750,11 +3805,18 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             return p + 1
         }
         V2_LAST_STRUCT_IDX = -1
+        V2_LAST_ARR_LEN = 0
         let parsed = parse_expr_ir(func, ctx, p + 1)
         if parsed.ok != 0 {
             if V2_LAST_STRUCT_IDX >= 0 {
                 ufn_record_return_struct(parsed.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
                 V2_LAST_STRUCT_IDX = -1
+                return parsed.next
+            }
+            // Return of a local [T; N] array — use struct-return path
+            let ret_alen = lookup_local_alen_by_reg(ctx, parsed.reg)
+            if ret_alen > 0 {
+                ufn_record_return_struct(parsed.reg, ret_alen)
                 return parsed.next
             }
             ufn_record_return(parsed.reg)
@@ -4208,9 +4270,10 @@ fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
             if !token_text_eq(i + 1, "main") && !skip_native_v2_driver_helper_fn(i + 1) {
                 let reg_idx = V2_USER_FN_COUNT
                 register_user_fn(i + 1, next_id)
-                // scan for -> ReturnType to detect struct return
+                // scan for -> ReturnType to detect struct/array return
                 var ret_sidx: i64 = -1
                 var ret_is_f64: i64 = 0
+                var ret_arr_size: i64 = 0
                 var j = i + 2
                 while j < token_count && token_kind(j) != TK_LBRACE && token_kind(j) != TK_FN {
                     if token_kind(j) == TK_ARROW {
@@ -4223,6 +4286,10 @@ fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
                                 ret_is_f64 = 1
                             }
                         }
+                        // detect -> [T; N] array return (TK_LBRACKET=178, TK_SEMI=180)
+                        if j + 4 < token_count && token_kind(j + 1) == 178 && token_kind(j + 3) == 180 && token_kind(j + 4) == TK_INT {
+                            ret_arr_size = pt_read_int_value(j + 4)
+                        }
                         break
                     }
                     j = j + 1
@@ -4230,6 +4297,7 @@ fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
                 if reg_idx < 512 {
                     V2_USER_FN_RETURN_STRUCT_IDX[reg_idx as usize] = ret_sidx
                     V2_USER_FN_RETURN_IS_F64[reg_idx as usize] = ret_is_f64
+                    V2_USER_FN_RETURN_ARR_SIZE[reg_idx as usize] = ret_arr_size
                 }
                 next_id = next_id + 1
             }
@@ -5928,6 +5996,14 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
             V2_CURRENT_FN_SRET_VREG = alloc_reg(&! ctx)
         }
     }
+    // Also enable SRET for functions returning large arrays ([T; N] with N > 6)
+    if V2_CURRENT_FN_SRET == 0 {
+        let fn_ret_arr = lookup_user_fn_return_arr_size(fn_id)
+        if fn_ret_arr > 6 {
+            V2_CURRENT_FN_SRET = 1
+            V2_CURRENT_FN_SRET_VREG = alloc_reg(&! ctx)
+        }
+    }
 
     // Parse parameters: fn name(param: type, ...) -> ...
     // params are between '(' and ')'
@@ -5987,24 +6063,33 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                     V2_CURRENT_PARAM_COUNT = param_idx + 1
                     param_idx = param_idx + 1
                 } else if param_sidx >= 0 {
-                    // struct param: allocate flat_size consecutive vregs
                     let flat_size = STRUCT_FLAT_SIZE[param_sidx as usize]
-                    let base_vreg = alloc_reg(&! ctx)
-                    var ri: i64 = 1
-                    while ri < flat_size { let _ = alloc_reg(&! ctx); ri = ri + 1 }
-                    remember_struct_local_tok(&! ctx, param_name_tok, base_vreg, param_sidx)
-                    if param_generic_f64 != 0 {
-                        mark_struct_scalar_regs_f64(base_vreg, param_sidx)
+                    if flat_size > 6 {
+                        // Large struct: caller passes pointer (single register)
+                        let vreg = alloc_reg(&! ctx)
+                        remember_ref_struct_local_tok(&! ctx, param_name_tok, vreg, param_sidx)
+                        if param_idx < 64 { V2_CURRENT_PARAM_REGS[param_idx as usize] = vreg }
+                        V2_CURRENT_PARAM_COUNT = param_idx + 1
+                        param_idx = param_idx + 1
                     } else {
-                        mark_struct_regs(base_vreg, param_sidx)
+                        // Small struct: allocate flat_size consecutive vregs
+                        let base_vreg = alloc_reg(&! ctx)
+                        var ri: i64 = 1
+                        while ri < flat_size { let _ = alloc_reg(&! ctx); ri = ri + 1 }
+                        remember_struct_local_tok(&! ctx, param_name_tok, base_vreg, param_sidx)
+                        if param_generic_f64 != 0 {
+                            mark_struct_scalar_regs_f64(base_vreg, param_sidx)
+                        } else {
+                            mark_struct_regs(base_vreg, param_sidx)
+                        }
+                        var pi: i64 = 0
+                        while pi < flat_size && param_idx + pi < 64 {
+                            V2_CURRENT_PARAM_REGS[(param_idx + pi) as usize] = base_vreg + pi
+                            pi = pi + 1
+                        }
+                        V2_CURRENT_PARAM_COUNT = param_idx + flat_size
+                        param_idx = param_idx + flat_size
                     }
-                    var pi: i64 = 0
-                    while pi < flat_size && param_idx + pi < 64 {
-                        V2_CURRENT_PARAM_REGS[(param_idx + pi) as usize] = base_vreg + pi
-                        pi = pi + 1
-                    }
-                    V2_CURRENT_PARAM_COUNT = param_idx + flat_size
-                    param_idx = param_idx + flat_size
                 } else if param_is_ref != 0 {
                     // ref-array param (& [T; N]): IS_REF=1, sidx=-1
                     let vreg = alloc_reg(&! ctx)
