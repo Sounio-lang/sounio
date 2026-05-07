@@ -20,6 +20,10 @@ SCHEMA = "sounio.omega.kaxi-certificate-inclusion-proofs.v1"
 ATTESTATION_SCHEMA = "sounio.omega.kaxi-certificate-attestation.v1"
 DEFAULT_REQUIRED_PROFILES = (
     "vec_add_f32",
+    "vec_sub_f32",
+    "vec_mul_f32",
+    "vec_div_f32",
+    "fma_f32",
     "epistemic_elementwise_f32",
     "epistemic_dual_output_f32",
 )

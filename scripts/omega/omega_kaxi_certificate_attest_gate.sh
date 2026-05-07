@@ -11,7 +11,7 @@ OUT_JSON="${OMEGA_KAXI_CERT_ATTEST_OUT:-$ROOT_DIR/artifacts/omega/kaxi_certifica
 LOG_PATH="${OMEGA_KAXI_CERT_ATTEST_LOG:-$ROOT_DIR/artifacts/omega/kaxi_certificate_attestation.log}"
 WORK_DIR="${OMEGA_KAXI_CERT_ATTEST_WORK_DIR:-$(mktemp -d /tmp/omega-kaxi-cert-attest.XXXXXX)}"
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-600}"
-REQUIRED_PROFILES="${OMEGA_KAXI_CERT_REQUIRED_PROFILES:-vec_add_f32,epistemic_elementwise_f32,epistemic_dual_output_f32}"
+REQUIRED_PROFILES="${OMEGA_KAXI_CERT_REQUIRED_PROFILES:-vec_add_f32,vec_sub_f32,vec_mul_f32,vec_div_f32,fma_f32,epistemic_elementwise_f32,epistemic_dual_output_f32}"
 
 case "$MODE" in
   auto|required|off) ;;

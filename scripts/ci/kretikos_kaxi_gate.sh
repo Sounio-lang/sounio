@@ -18,9 +18,30 @@ echo "kretikos_kaxi_gate: self-check"
 cat "$SELF_CHECK_LOG"
 grep -q "PASS kaxi_self_check" "$SELF_CHECK_LOG"
 
+echo "kretikos_kaxi_gate: end-to-end-sim"
+E2E_LOG="$OUT_DIR/kaxi_end_to_end.out"
+E2E_ELF="$OUT_DIR/kaxi_end_to_end.elf"
+"$ROOT_DIR/bin/souc-linux-x86_64" "$ROOT_DIR/self-hosted/gpu/test_kaxi_driver.sio" "$E2E_ELF" >"$E2E_LOG" 2>&1 || {
+  cat "$E2E_LOG"
+  echo "kretikos_kaxi_gate: end-to-end-sim compile FAILED"
+  exit 1
+}
+chmod +x "$E2E_ELF"
+"$E2E_ELF" >"$E2E_LOG" 2>&1 || {
+  cat "$E2E_LOG"
+  echo "kretikos_kaxi_gate: end-to-end-sim run FAILED"
+  exit 1
+}
+cat "$E2E_LOG"
+grep -q "PASS kaxi_end_to_end" "$E2E_LOG"
+
 patterns=(
   exit_only
   vec_add
+  vec_sub
+  vec_mul
+  vec_div
+  fma
   epistemic_elementwise_f32
   epistemic_dual_output_f32
 )
@@ -50,6 +71,10 @@ PY
 done
 
 grep -q "add r" "$OUT_DIR/vec_add.kaxi"
+grep -q "sub r" "$OUT_DIR/vec_sub.kaxi"
+grep -q "mul r" "$OUT_DIR/vec_mul.kaxi"
+grep -q "div r" "$OUT_DIR/vec_div.kaxi"
+grep -q "fma r" "$OUT_DIR/fma.kaxi"
 grep -q "fma r" "$OUT_DIR/epistemic_elementwise_f32.kaxi"
 grep -q "store_global r" "$OUT_DIR/epistemic_elementwise_f32.kaxi"
 grep -q "add r" "$OUT_DIR/epistemic_dual_output_f32.kaxi"
@@ -57,6 +82,11 @@ grep -q "mul r" "$OUT_DIR/epistemic_dual_output_f32.kaxi"
 grep -q "store_global r" "$OUT_DIR/epistemic_dual_output_f32.kaxi"
 
 source_witnesses=(
+  "vec_add_f32:examples/kretikos/real_vec_add.sio"
+  "vec_sub_f32:examples/kretikos/real_vec_sub.sio"
+  "vec_mul_f32:examples/kretikos/real_vec_mul.sio"
+  "vec_div_f32:examples/kretikos/real_vec_div.sio"
+  "fma_f32:examples/kretikos/real_fma_f32.sio"
   "epistemic_elementwise_f32:examples/kretikos/real_epistemic_elementwise.sio"
   "epistemic_dual_output_f32:examples/kretikos/real_epistemic_dual_output.sio"
 )
@@ -144,7 +174,9 @@ for pattern in patterns:
         "seq_dense_zero_based": witness.get("assembly", {}).get("seq_dense_zero_based"),
         "store_global_count": witness.get("epistemic_lanes", {}).get("store_global_count"),
         "has_add": "add r" in text,
+        "has_sub": "sub r" in text,
         "has_mul": "mul r" in text,
+        "has_div": "div r" in text,
         "has_fma": "fma r" in text,
         "has_store_global": "store_global r" in text,
         "has_variance_annotation": "var=+" in text or "var=0%" in text,
@@ -195,9 +227,9 @@ payload = {
         "kaxi_is_sounio_owned_epistemic_gpu_assembly",
         "gate_proves_self_hosted_emitter_compiles_and_emits_structural_artifacts",
         "gate_proves_kaxi_witness_json_for_each_profile",
-        "gate_proves_checked_source_to_kaxi_witness_link_for_epistemic_profiles",
+        "gate_proves_checked_source_to_kaxi_witness_link_for_supported_profiles",
         "gate_proves_kaxi_certificate_braids_source_kaxi_and_runtime_bundle_evidence",
-        "gate_proves_profile_level_lowering_for_explicit_kretikos_epistemic_profiles",
+        "gate_proves_profile_level_lowering_for_explicit_kretikos_kaxi_profiles",
         "gate_does_not_claim_arbitrary_sounio_gpu_lowering",
         "gate_does_not_replace_slurm_cuda_runtime_authority",
     ],

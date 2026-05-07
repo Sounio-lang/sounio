@@ -260,7 +260,7 @@ PY
 )"
 
 case "\${SOURCE_PROFILE}" in
-  vec_add_f32|epistemic_elementwise_f32|epistemic_dual_output_f32)
+  vec_add_f32|vec_sub_f32|vec_mul_f32|vec_div_f32|fma_f32|epistemic_elementwise_f32|epistemic_dual_output_f32)
     if [[ "\${CERTIFY_KAXI}" == "1" ]]; then
       mark "kretikos_source=running phase=kaxi_certificate profile=\${SOURCE_PROFILE}"
       KAXI_CERT_JSON="\${CERT_DIR}/kaxi_certificate.v1.json"

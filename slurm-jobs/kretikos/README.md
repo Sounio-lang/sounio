@@ -124,14 +124,14 @@ pass.
 Validated on 2026-05-07 UTC with:
 
 ```bash
-WAIT_TIMEOUT_SECONDS=420 \
+WAIT_TIMEOUT_SECONDS=700 \
   bash scripts/ci/kretikos_hpc_slurm_runtime_gate.sh
 ```
 
 Result:
 
 - `kretikos_manifest_result total=13 failed=0`
-- jobs `1277` through `1289`
+- jobs `1305` through `1317`
 - node `gpuorangefs-r770-proxmox`
 - device `NVIDIA_L4`
 - compute capability `8.9`
@@ -140,5 +140,9 @@ Result:
 - final reason `runtime_epistemic_dual_output_f32_pass`
 - each source job preserved a worker-local `publish/` directory and fetched a
   `kretikos_hpc_source_result.v1.json` artifact back to the control workspace
-- K-AXI-supported profiles now publish a `certificate/kaxi_certificate.v1.json`
-  whose embedded runtime validation must pass on the worker
+- K-AXI-supported profiles now include `vec_add_f32`, `vec_sub_f32`,
+  `vec_mul_f32`, `vec_div_f32`, `fma_f32`, `epistemic_elementwise_f32`, and
+  `epistemic_dual_output_f32`
+- each K-AXI-supported profile publishes a
+  `certificate/kaxi_certificate.v1.json` whose embedded runtime validation must
+  pass on the worker

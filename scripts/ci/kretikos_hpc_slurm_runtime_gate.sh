@@ -88,7 +88,15 @@ kaxi_certificates = []
 missing_artifacts = []
 missing_certificates = []
 bad_certificates = []
-kaxi_supported_profiles = {"vec_add_f32", "epistemic_elementwise_f32", "epistemic_dual_output_f32"}
+kaxi_supported_profiles = {
+    "vec_add_f32",
+    "vec_sub_f32",
+    "vec_mul_f32",
+    "vec_div_f32",
+    "fma_f32",
+    "epistemic_elementwise_f32",
+    "epistemic_dual_output_f32",
+}
 
 for case in cases:
     artifact_json = case.get("artifact_json", "")
