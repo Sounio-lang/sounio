@@ -59,6 +59,11 @@ make lint-fix FILE=path/to/file.sio
 # Type-check compiler + CI gates
 make check
 
+# Solo / self-hosted-only workflow (skips Cargo steps inside gates):
+#   SKIP_BUILD=1 bash scripts/dev/fast_gate.sh
+#   SKIP_BUILD=1 make check
+# Omit SKIP_BUILD when you need workspace `cargo test` / `cargo run` parity with CI Rust jobs.
+
 # Doctor the workspace
 bash scripts/dev/doctor_workspace.sh
 ```
