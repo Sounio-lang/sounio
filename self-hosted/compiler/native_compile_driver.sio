@@ -4331,6 +4331,15 @@ fn drv_emit_cvttsd2si_rax_xmm0() with Mut, Div, Panic {
     drv_emit_byte(192)
 }
 
+// cvtsd2si rax, xmm0 (round-to-nearest, not truncate) — for print_f64 rounding
+fn drv_emit_cvtsd2si_rounding_rax_xmm0() with Mut, Div, Panic {
+    drv_emit_byte(242)
+    drv_emit_byte(72)
+    drv_emit_byte(15)
+    drv_emit_byte(45)
+    drv_emit_byte(192)
+}
+
 fn drv_emit_sse2_xmm0_xmm1(code: i64) with Mut, Div, Panic {
     drv_emit_byte(242)
     drv_emit_byte(15)
@@ -5075,21 +5084,20 @@ fn drv_emit_print_char_imm(ch: i64) with Mut, Panic, Div {
 }
 
 fn drv_emit_print_f64_from_xmm0() with Mut, Panic, Div {
-    // Scale value by 1000: rax = trunc(value * 1000) as signed i64
-    drv_emit_mov_rax_imm(1000)
+    // Scale value by 1000000 then round-to-nearest: rax = round(value * 1000000)
+    drv_emit_mov_rax_imm(1000000)
     drv_emit_cvtsi2sd_xmm1_rax()
     drv_emit_sse2_xmm0_xmm1(89)
-    drv_emit_cvttsd2si_rax_xmm0()
-    // Handle sign: push/pop preserves rax across print_char call (which clobbers rax)
-    // jns_rel8(17) skips: push(1) + print_char(12) + pop(1) + neg(3) = 17 bytes
+    drv_emit_cvtsd2si_rounding_rax_xmm0()
+    // Handle sign: jns_rel8(17) skips push(1)+print_char(12)+pop(1)+neg(3)=17 bytes
     drv_emit_test_rax_rax()
     drv_emit_jns_rel8(17)
     drv_emit_push_rax()
     drv_emit_print_char_imm(45)
     drv_emit_pop_rax()
     drv_emit_neg_rax()
-    // Unsigned divide: rax(≥0) / 1000 → rax=int part, rdx=frac (0..999)
-    drv_emit_mov_reg_imm(1, 1000)
+    // Unsigned divide rax/1000000 → rax=int part, rdx=frac(0..999999)
+    drv_emit_mov_reg_imm(1, 1000000)
     drv_emit_xor_rdx_rdx()
     drv_emit_div_rcx()
     // Print integer part and '.'
@@ -5097,9 +5105,31 @@ fn drv_emit_print_f64_from_xmm0() with Mut, Panic, Div {
     drv_emit_print_int_from_rax()
     drv_emit_print_char_imm(46)
     drv_emit_pop_rax()
-    // Print frac as exactly 3 digits — push/pop preserves frac across each print_char call
-    // Pattern: push frac; [cmp; jae_rel8(14); pop+push+print_char('0'); ]; pop frac
-    // jae_rel8(14) skips: pop(1) + push(1) + print_char(12) = 14 bytes
+    // Split frac into high3 (rax/1000) and low3 (rax%1000); save low3 on stack
+    drv_emit_mov_reg_imm(1, 1000)
+    drv_emit_xor_rdx_rdx()
+    drv_emit_div_rcx()
+    drv_emit_push_rdx()
+    // Print high3 (rax, 0..999) as 3 digits with leading zeros.
+    // Pattern per digit: push n; cmp n,T; jae_rel8(14); pop+push+print('0'); [TARGET]: pop n
+    // jae_rel8(14) skips pop(1)+push(1)+print_char(12)=14 bytes; TARGET is the following pop
+    drv_emit_push_rax()
+    drv_emit_cmp_rax_imm8(100)
+    drv_emit_jae_rel8(14)
+    drv_emit_pop_rax()
+    drv_emit_push_rax()
+    drv_emit_print_char_imm(48)
+    drv_emit_pop_rax()
+    drv_emit_push_rax()
+    drv_emit_cmp_rax_imm8(10)
+    drv_emit_jae_rel8(14)
+    drv_emit_pop_rax()
+    drv_emit_push_rax()
+    drv_emit_print_char_imm(48)
+    drv_emit_pop_rax()
+    drv_emit_print_int_from_rax()
+    // Print low3 (stack top, 0..999) as 3 digits with leading zeros
+    drv_emit_pop_rax()
     drv_emit_push_rax()
     drv_emit_cmp_rax_imm8(100)
     drv_emit_jae_rel8(14)
