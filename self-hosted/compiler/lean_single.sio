@@ -791,6 +791,14 @@ fn st_total_size(si: i64) -> i64 with Panic, Div, Mut {
 var GL: [i64; 4096] = [0; 4096]
 var GL_COUNT: i64 = 0
 var GL_BSS_SIZE: i64 = 0
+
+// Side-table for arr_ty_hash_with_elem: avoids overflow in the linear encoding
+// for large FNV-1a struct hashes (masked to 0x1FFFFFFFFF ≈ 137B).
+var EXT_ARR_ALEN:      [i64; 4096] = [0; 4096]
+var EXT_ARR_ESIZ:      [i64; 4096] = [0; 4096]
+var EXT_ARR_ELEM_TY:   [i64; 4096] = [0; 4096]
+var EXT_ARR_ELEM_HASH: [i64; 4096] = [0; 4096]
+var EXT_ARR_COUNT: i64 = 0
 var GL_BSS_BASE: i64 = 0
 var RET_AGG_BSS_OFF: i64 = 0
 var LIMIT_ERROR_KIND: i64 = 0
@@ -2359,13 +2367,25 @@ fn arr_hash_is_ext(h: i64) -> bool {
 
 fn arr_ty_hash_with_elem(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64) -> i64 with Mut {
     if elem_hash == 0 { return arr_ty_hash(alen, esiz, elem_ty) }
-    var esiz_bit: i64 = 0
-    if esiz == 1 { esiz_bit = 1 }
-    return arr_hash_ext_base()
-        + alen * arr_hash_ext_alen_scale()
-        + elem_hash * 32
-        + elem_ty * 2
-        + esiz_bit
+    // Search existing side-table entries for a match
+    var i: i64 = 0
+    while i < EXT_ARR_COUNT {
+        if EXT_ARR_ALEN[i as usize] == alen
+            && EXT_ARR_ESIZ[i as usize] == esiz
+            && EXT_ARR_ELEM_TY[i as usize] == elem_ty
+            && EXT_ARR_ELEM_HASH[i as usize] == elem_hash {
+            return arr_hash_ext_base() + i
+        }
+        i = i + 1
+    }
+    // Register new entry
+    EXT_ARR_ALEN[EXT_ARR_COUNT as usize]      = alen
+    EXT_ARR_ESIZ[EXT_ARR_COUNT as usize]      = esiz
+    EXT_ARR_ELEM_TY[EXT_ARR_COUNT as usize]   = elem_ty
+    EXT_ARR_ELEM_HASH[EXT_ARR_COUNT as usize] = elem_hash
+    let idx = EXT_ARR_COUNT
+    EXT_ARR_COUNT = EXT_ARR_COUNT + 1
+    return arr_hash_ext_base() + idx
 }
 
 fn arr_ty_hash_for_elem_type(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64) -> i64 with Panic, Mut {
@@ -2390,23 +2410,42 @@ fn arr_hash_remainder(h: i64) -> i64 with Div, Mut {
     return payload
 }
 
+fn arr_hash_is_real_ext(h: i64) -> bool with Mut {
+    if arr_hash_is_ext(h) == false { return false }
+    let idx = arr_hash_payload(h)
+    return idx >= 0 && idx < EXT_ARR_COUNT
+}
+
 fn arr_hash_alen(h: i64) -> i64 with Div, Mut {
+    if arr_hash_is_real_ext(h) {
+        let idx = arr_hash_payload(h)
+        return EXT_ARR_ALEN[idx as usize]
+    }
     if arr_hash_is_ext(h) { return arr_hash_payload(h) / arr_hash_ext_alen_scale() }
     return h / 32
 }
 
 fn arr_hash_esiz(h: i64) -> i64 with Div, Mut {
+    if arr_hash_is_real_ext(h) {
+        let idx = arr_hash_payload(h)
+        return EXT_ARR_ESIZ[idx as usize]
+    }
     if arr_hash_remainder(h) % 2 == 1 { return 1 }
     return 8
 }
 
 fn arr_hash_elem_ty(h: i64) -> i64 with Div, Mut {
+    if arr_hash_is_real_ext(h) {
+        let idx = arr_hash_payload(h)
+        return EXT_ARR_ELEM_TY[idx as usize]
+    }
     return (arr_hash_remainder(h) % 32) / 2
 }
 
 fn arr_hash_elem_hash(h: i64) -> i64 with Div, Mut {
-    if arr_hash_is_ext(h) == false { return 0 }
-    return arr_hash_remainder(h) / 32
+    if arr_hash_is_real_ext(h) == false { return 0 }
+    let idx = arr_hash_payload(h)
+    return EXT_ARR_ELEM_HASH[idx as usize]
 }
 
 fn arr_storage_slots(h: i64) -> i64 with Div, Mut {
