@@ -41,7 +41,7 @@ check:               ## Type-check self-hosted compiler and run lint gates
 	@echo "→ Regenerating stdlib API reference"
 	@bash scripts/build/gen_stdlib_api_md.sh
 	@echo "→ Running lint gates..."
-	@bash scripts/ci/full_gate.sh 2>&1 | tail -30
+	@bash -o pipefail -c 'bash scripts/dev/full_gate.sh 2>&1 | tail -40'
 
 test:                ## Run full test suite (compile-fail + run-pass + stdlib)
 	@echo "→ Running full test suite"

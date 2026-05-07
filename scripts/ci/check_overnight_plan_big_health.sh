@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 OUT_JSON="${PLAN_BIG_OVERNIGHT_HEALTH_JSON:-$ROOT_DIR/artifacts/omega/overnight_plan_big_health.v1.json}"

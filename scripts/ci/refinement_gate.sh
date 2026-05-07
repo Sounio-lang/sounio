@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
 REQUIRE_ZERO_SKIPS="${SOUNIO_REFINEMENT_GATE_REQUIRE_ZERO_SKIPS:-0}"

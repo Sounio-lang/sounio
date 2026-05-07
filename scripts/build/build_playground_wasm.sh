@@ -15,7 +15,8 @@
 # The script is also wired as `npm run build:wasm` in website/package.json.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Script lives at scripts/build/ — repo root is two levels up.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT_DIR="${REPO_ROOT}/website/public/wasm"
 
 mkdir -p "${OUT_DIR}"

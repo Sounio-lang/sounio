@@ -387,6 +387,9 @@ done
 for f in "$ROOT_DIR"/tests/stdlib/*/test_*.sio; do
     [[ -f "$f" ]] && TEST_FILES+=("$f")
 done
+for f in "$ROOT_DIR"/tests/gpu/*.sio; do
+    [[ -f "$f" ]] && TEST_FILES+=("$f")
+done
 
 echo "Found ${#TEST_FILES[@]} test files"
 echo ""

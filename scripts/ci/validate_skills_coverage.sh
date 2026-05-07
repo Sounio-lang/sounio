@@ -9,7 +9,7 @@
 # Exit 0 if all pass, exit 1 if any fail.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 PASS=0; FAIL=0; TOTAL=0

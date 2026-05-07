@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 RUN_GATES=0
@@ -59,7 +59,7 @@ extract_json_field_or() {
 declare -a GATE_RESULTS
 
 if [[ "$RUN_GATES" -eq 1 ]]; then
-  gate_json="$(run_gate claude_plan_consistency bash scripts/check_claude_plan_consistency.sh || true)"
+  gate_json="$(run_gate claude_plan_consistency bash scripts/ci/check_claude_plan_consistency.sh || true)"
   GATE_RESULTS+=("$gate_json")
   copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_claude_plan_consistency.log"
 
@@ -71,11 +71,11 @@ if [[ "$RUN_GATES" -eq 1 ]]; then
   GATE_RESULTS+=("$gate_json")
   copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_lsp_smoke.log"
 
-  gate_json="$(run_gate ui_type_deignore bash scripts/ui_type_deignore_audit.sh || true)"
+  gate_json="$(run_gate ui_type_deignore bash scripts/ci/ui_type_deignore_audit.sh || true)"
   GATE_RESULTS+=("$gate_json")
   copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_ui_type_deignore.log"
 
-  gate_json="$(run_gate ui_type_backlog_quality bash scripts/ui_type_backlog_quality_gate.sh || true)"
+  gate_json="$(run_gate ui_type_backlog_quality bash scripts/ci/ui_type_backlog_quality_gate.sh || true)"
   GATE_RESULTS+=("$gate_json")
   copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_ui_type_backlog_quality.log"
 fi

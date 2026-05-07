@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 DEFAULT_RUN_DIR="$ROOT_DIR/artifacts/diagnostic/$TS"
 RUN_DIR="${SOUNIO_RELEASE_PACK_RUN_DIR:-$DEFAULT_RUN_DIR}"
