@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { SimulatorShell } from './SimulatorShell';
 
 type LogLine = { text: string; type: 'info' | 'warn' | 'error' | 'success' };

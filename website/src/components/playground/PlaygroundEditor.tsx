@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type KeyboardEvent } from 'react';
 
 interface PlaygroundEditorProps {
   initialCode?: string;
@@ -323,7 +323,7 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
 
   const handleRun = useCallback(async () => {
     if (!wasmApi) {
-      setOutput('WASM runtime is not ready. Build assets with: ../scripts/build_playground_wasm.sh');
+      setOutput('WASM runtime is not ready. Build assets with: bash scripts/build/build_playground_wasm.sh (repo root)');
       return;
     }
 
@@ -373,7 +373,7 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
   }, []);
 
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
+    (e: KeyboardEvent) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         handleRun();

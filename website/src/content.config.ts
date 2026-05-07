@@ -1,11 +1,22 @@
-import { defineCollection, z } from 'astro:content';
+import { defineCollection } from 'astro:content';
+import { file, glob } from 'astro/loaders';
+import { z } from 'astro/zod';
 
-// Supported locales
-const locales = ['en', 'pt', 'el', 'zh', 'ja', 'es'] as const;
+const registryPackageSchema = z.object({
+  name: z.string(),
+  version: z.string(),
+  description: z.string(),
+  repository: z.optional(z.url()),
+  documentation: z.optional(z.url()),
+  keywords: z.array(z.string()).default([]),
+  author: z.string().optional(),
+  license: z.string().default('MIT'),
+  downloads: z.number().optional(),
+  featured: z.boolean().default(false),
+});
 
-// Documentation collection
-const docsCollection = defineCollection({
-  type: 'content',
+const docs = defineCollection({
+  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/docs' }),
   schema: z.object({
     title: z.string(),
     description: z.string().optional(),
@@ -21,9 +32,8 @@ const docsCollection = defineCollection({
   }),
 });
 
-// Showcases collection (domain applications)
-const showcasesCollection = defineCollection({
-  type: 'content',
+const showcases = defineCollection({
+  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/showcases' }),
   schema: z.object({
     title: z.string(),
     description: z.string(),
@@ -40,13 +50,12 @@ const showcasesCollection = defineCollection({
   }),
 });
 
-// Tutorials collection (interactive learning)
-const tutorialsCollection = defineCollection({
-  type: 'content',
+const tutorials = defineCollection({
+  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/tutorials' }),
   schema: z.object({
     title: z.string(),
     description: z.string(),
-    series: z.string(), // e.g., "getting-started", "epistemic-computing"
+    series: z.string(),
     order: z.number(),
     estimatedMinutes: z.number().optional(),
     prerequisites: z.array(z.string()).optional(),
@@ -60,9 +69,8 @@ const tutorialsCollection = defineCollection({
   }),
 });
 
-// Blog collection
-const blogCollection = defineCollection({
-  type: 'content',
+const blog = defineCollection({
+  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/blog' }),
   schema: z.object({
     title: z.string(),
     description: z.string(),
@@ -82,31 +90,16 @@ const blogCollection = defineCollection({
   }),
 });
 
-// Package registry collection
-const registryCollection = defineCollection({
-  type: 'data',
+const registry = defineCollection({
+  loader: file('src/content/registry/packages.json', {
+    parser: (text: string) => {
+      const parsed = JSON.parse(text) as { packages: unknown[] };
+      return [{ id: 'packages', packages: parsed.packages }];
+    },
+  }),
   schema: z.object({
-    packages: z.array(
-      z.object({
-        name: z.string(),
-        version: z.string(),
-        description: z.string(),
-        repository: z.string().url().optional(),
-        documentation: z.string().url().optional(),
-        keywords: z.array(z.string()).default([]),
-        author: z.string().optional(),
-        license: z.string().default('MIT'),
-        downloads: z.number().optional(),
-        featured: z.boolean().default(false),
-      })
-    ),
+    packages: z.array(registryPackageSchema),
   }),
 });
 
-export const collections = {
-  docs: docsCollection,
-  showcases: showcasesCollection,
-  tutorials: tutorialsCollection,
-  blog: blogCollection,
-  registry: registryCollection,
-};
+export const collections = { docs, showcases, tutorials, blog, registry };

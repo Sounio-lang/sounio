@@ -1,4 +1,4 @@
-import React from 'react';
+import type { CSSProperties } from 'react';
 
 interface Props {
   text: string;
@@ -15,7 +15,7 @@ export function KineticText({ text, className = 'section-heading' }: Props) {
           key={index}
           className="kinetic-text-letter inline-block whitespace-pre"
           aria-hidden="true"
-          style={{ ['--kinetic-index' as '--kinetic-index']: index } as React.CSSProperties}
+          style={{ ['--kinetic-index' as '--kinetic-index']: index } as CSSProperties}
         >
           {letter === ' ' ? '\u00A0' : letter}
         </span>

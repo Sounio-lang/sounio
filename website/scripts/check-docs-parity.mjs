@@ -16,8 +16,8 @@ function fail(errors) {
   process.exit(1);
 }
 
-function compareByTopicId(expected, actual) {
-  return new Map(expected.map((topic) => [topic.topic_id, topic]));
+function compareByTopicId(topics) {
+  return new Map(topics.map((topic) => [topic.topic_id, topic]));
 }
 
 const expectedRegistry = await buildGovernedTopicRegistry(repoRoot);

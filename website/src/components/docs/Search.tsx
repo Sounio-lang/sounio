@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, type MouseEvent } from 'react';
 
 declare global {
   interface Window {
@@ -15,6 +15,10 @@ declare global {
     };
   }
 }
+
+type PagefindSearchResult = {
+  data: () => Promise<{ title: string; excerpt: string; url: string }>;
+};
 
 interface SearchResult {
   title: string;
@@ -60,7 +64,7 @@ export default function Search({ locale, strings }: Props) {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
+  const searchTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const ensurePagefind = useCallback(async () => {
     if (window.pagefind) return window.pagefind;
@@ -129,7 +133,7 @@ export default function Search({ locale, strings }: Props) {
       const pagefind = await ensurePagefind();
       const search = await pagefind.search(q);
       const formattedResults = await Promise.all(
-        search.results.slice(0, 10).map(async (result) => {
+        search.results.slice(0, 10).map(async (result: PagefindSearchResult) => {
           const data = await result.data();
           return {
             title: data.title,
@@ -170,7 +174,7 @@ export default function Search({ locale, strings }: Props) {
     setResults([]);
   };
 
-  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+  const handleBackdropClick = (e: MouseEvent<HTMLDivElement>) => {
     if (e.target === e.currentTarget) {
       closeModal();
     }

@@ -60,7 +60,6 @@ const selfhost = loadJson("artifacts/omega/selfhost_verification_report.v1.json"
 const lsp = loadJson("artifacts/omega/lsp_smoke_status.v1.json");
 const gpu = loadJson("artifacts/omega/gpu_runtime_attest_gate.v1.json");
 const bootstrap = loadJson("artifacts/omega/bootstrap_full_gate_status.v1.json");
-const nativeLaneMatrix = loadJson("artifacts/stdlib/native_lane_matrix.v1.json");
 
 // ---------------------------------------------------------------------------
 // Build normalized status object
@@ -146,6 +145,9 @@ const status = {
     scienceLanes: {
       label: "Scientific Pipelines",
       level: artifactToLevel(pick(science, "status_summary")),
+      reason: science
+        ? `lanes=${Object.keys(science?.lanes ?? {}).length}, status_summary=${pick(science, "status_summary") ?? "n/a"}`
+        : "artifact missing",
       lanes: Object.entries(science?.lanes ?? {}).map(([key, lane]) => ({
         id: key,
         label: key,
@@ -158,6 +160,9 @@ const status = {
     hyperLanes: {
       label: "Hyper-Execution Neural Lanes",
       level: artifactToLevel(pick(hyper, "status_summary")),
+      reason: hyper
+        ? `lanes=${(hyper?.lane_statuses ?? []).length}, status_summary=${pick(hyper, "status_summary") ?? "n/a"}`
+        : "artifact missing",
       lanes: (hyper?.lane_statuses ?? []).map((lane) => ({
         id: lane.lane,
         label: lane.lane,

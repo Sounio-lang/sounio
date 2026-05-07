@@ -101,9 +101,6 @@ export default function SounioPlayground() {
     setRunning(false);
   }, [shimMod, source, mode]);
 
-  const hasErrors = result?.diagnostics.some(d => d.severity === 'error') ?? false;
-  const hasWarnings = result?.diagnostics.some(d => d.severity === 'warning') ?? false;
-
   return (
     <section className="py-[clamp(3.5rem,7vw,6rem)] bg-[var(--color-bg)]">
       <div className="container px-4">

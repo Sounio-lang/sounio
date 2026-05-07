@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import PrecisionDosingScenario from './PrecisionDosingScenario';
 import PolypharmacyScenario from './PolypharmacyScenario';
 import CausalEfficacyScenario from './CausalEfficacyScenario';

@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import { useRef, useEffect } from 'react';
 import { useScroll } from 'framer-motion';
 
 export function EpistemicFluidCanvas() {
@@ -58,7 +58,7 @@ export function EpistemicFluidCanvas() {
     let height = 0;
     let orderProgress = 0;
 
-    const unsubscribe = scrollYProgress.onChange((v) => {
+    const unsubscribe = scrollYProgress.on('change', (v) => {
       orderProgress = v; // 0 to 1
     });
 
