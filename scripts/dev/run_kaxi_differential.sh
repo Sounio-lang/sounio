@@ -88,7 +88,7 @@ for idx, (name, sim_mem, warp_mem, c_code) in enumerate(kernel_blocks):
     c_vals = [int(x) for x in c_mem_match.group(1).strip().split()]
 
     # Compare
-    WARP_ONLY = {"multi_lane", "divergent", "vote_ballot", "shuffle_xor", "warp_reduce_add"}
+    WARP_ONLY = {"multi_lane", "divergent", "vote_ballot", "shuffle_xor", "warp_reduce_add", "nested_divergence", "selp"}
     if name in WARP_ONLY:
         if warp_vals != c_vals:
             print(f"FAIL {name}: WARP_MEM != C_MEM")
