@@ -102,6 +102,10 @@ Supported profiles are intentionally explicit:
 
 - `vec_add_f32`
 - `vec_add_f64`
+- `vec_sub_f64`
+- `vec_mul_f64`
+- `vec_div_f64`
+- `fma_f64`
 - `vec_sub_f32`
 - `vec_mul_f32`
 - `vec_div_f32`
@@ -110,7 +114,7 @@ Supported profiles are intentionally explicit:
 - `epistemic_dual_output_f32`
 - `store_u32_const`
 
-These nine profiles are runtime-backed: each maps to an owned CUBIN runtime
+These thirteen profiles are runtime-backed: each maps to an owned CUBIN runtime
 rung and may pass `--require-runtime` on a CUDA Driver API host.
 
 Kretikos may later accept a wider structural-only source set. Structural-only
@@ -164,12 +168,20 @@ multiplication lowering.
 `numerator / denominator`. This is a runtime-backed division rung, not a claim
 of arbitrary source division lowering.
 
-`vec_add_f64` is the first double-precision runtime rung. Its PTX front door
-emits `ld.global.f64`, `add.f64`, and `st.global.f64`, and its owned CUBIN
-runtime path uses a three-parameter double ABI: `x`, `y`, and `out`. The CUDA
-Driver API oracle checks `out[i] = x[i] + y[i]` with a double-precision
-tolerance. This is a runtime-backed vector-add rung, not a claim of arbitrary
-f64 source lowering.
+The f64 vector rungs use owned SM80 CUBINs assembled from Kretikos PTX and
+embedded in `self-hosted/gpu/nvidia_bare.sio` as canonical byte chunks.
+`vec_add_f64`, `vec_sub_f64`, `vec_mul_f64`, and `vec_div_f64` use a
+three-parameter double ABI: `x`, `y`, and `out`. Their PTX front doors emit
+`ld.global.f64`, the selected f64 arithmetic opcode, and `st.global.f64`. The
+CUDA Driver API oracle checks the selected operation against a double-precision
+CPU oracle. These are runtime-backed vector rungs, not a claim of arbitrary f64
+source lowering.
+
+`fma_f64` uses the four-parameter double ABI: `a`, `b`, `c`, and `out`. Its PTX
+front door emits `fma.rn.f64`, and the CUDA Driver API oracle checks
+`out[i] = a[i] * b[i] + c[i]` with a double-precision tolerance. This is a
+runtime-backed fused multiply-add rung, not a claim of general f64 expression
+lowering.
 
 `examples/kretikos/structural_manifest.tsv` covers any remaining
 structural-only PTX profiles. It is currently empty beyond its header.
@@ -180,10 +192,11 @@ The executable f64 local gate is:
 scripts/ci/kretikos_f64_runtime_gate.sh
 ```
 
-That gate proves the Sounio source checks, the f64 PTX template is emitted, the
-owned CUBIN is CUDA ELF64 with the `sounio_bare_vec_add_f64_sm80` symbol, and
-the Kretikos bundle selects the `vec_add_f64` runtime rung. The full runtime
-proof is the Slurm/L4 manifest lane with `--require-runtime`.
+That gate proves the Sounio source checks for every runtime-backed f64 profile,
+the f64 PTX templates are emitted, the owned CUBINs are CUDA ELF64 with the
+expected `sounio_bare_vec_*_f64_sm80` symbols, and the Kretikos bundle selects
+the matching f64 runtime rung. The full runtime proof is the Slurm/L4 manifest
+lane with `--require-runtime`.
 
 ## Blocker Taxonomy
 
