@@ -1810,23 +1810,66 @@ PY
     detect-cuda)
         echo "CUDA Toolchain Detection"
         echo "========================"
-        if command -v nvcc >/dev/null 2>&1; then
-            NVCC_PATH=$(command -v nvcc)
-            NVCC_VERSION=$(nvcc --version 2>/dev/null | grep "release" | head -1 || echo "unknown version")
-            echo "nvcc:    FOUND at $NVCC_PATH"
-            echo "         $NVCC_VERSION"
+
+        kretikos_detect_cuda_tool() {
+            local tool="$1"
+            local version_line="$2"
+            local tool_path
+
+            if tool_path=$(command -v "$tool" 2>/dev/null); then
+                printf '%-12s FOUND at %s\n' "$tool:" "$tool_path"
+                if [[ -n "$version_line" ]]; then
+                    echo "             $version_line"
+                fi
+            else
+                printf '%-12s NOT FOUND\n' "$tool:"
+            fi
+        }
+
+        NVCC_VERSION=$(nvcc --version 2>/dev/null | grep "release" | head -1 || true)
+        PTXAS_VERSION=$(ptxas --version 2>/dev/null | grep "release" | head -1 || true)
+        NVDISASM_VERSION=$(nvdisasm --version 2>/dev/null | grep "release" | head -1 || true)
+        CUOBJDUMP_VERSION=$(cuobjdump --version 2>/dev/null | grep "release" | head -1 || true)
+
+        kretikos_detect_cuda_tool nvcc "$NVCC_VERSION"
+        kretikos_detect_cuda_tool ptxas "$PTXAS_VERSION"
+        kretikos_detect_cuda_tool nvdisasm "$NVDISASM_VERSION"
+        kretikos_detect_cuda_tool cuobjdump "$CUOBJDUMP_VERSION"
+
+        if command -v nvidia-smi >/dev/null 2>&1; then
+            SMI_PATH=$(command -v nvidia-smi)
+            echo "nvidia-smi:  FOUND at $SMI_PATH"
+            SMI_OUT=$(mktemp "${TMPDIR:-/tmp}/kretikos-nvidia-smi.XXXXXX")
+            SMI_ERR=$(mktemp "${TMPDIR:-/tmp}/kretikos-nvidia-smi.XXXXXX")
+            if nvidia-smi >"$SMI_OUT" 2>"$SMI_ERR"; then
+                SMI_STATUS=$(grep -E "Driver Version|CUDA Version" "$SMI_OUT" | head -1 || true)
+                [[ -n "$SMI_STATUS" ]] && echo "             $SMI_STATUS"
+            else
+                SMI_REASON=$(head -1 "$SMI_ERR" 2>/dev/null || true)
+                [[ -z "$SMI_REASON" ]] && SMI_REASON="driver/device unavailable"
+                echo "             status=not_run reason=$SMI_REASON"
+            fi
+            rm -f "$SMI_OUT" "$SMI_ERR"
         else
-            echo "nvcc:    NOT FOUND"
+            echo "nvidia-smi:  NOT FOUND"
         fi
-        if command -v ptxas >/dev/null 2>&1; then
-            PTXAS_PATH=$(command -v ptxas)
-            echo "ptxas:   FOUND at $PTXAS_PATH"
-        else
-            echo "ptxas:   NOT FOUND"
+
+        LDCONFIG_BIN=""
+        if command -v ldconfig >/dev/null 2>&1; then
+            LDCONFIG_BIN=$(command -v ldconfig)
+        elif [[ -x /sbin/ldconfig ]]; then
+            LDCONFIG_BIN=/sbin/ldconfig
+        elif [[ -x /usr/sbin/ldconfig ]]; then
+            LDCONFIG_BIN=/usr/sbin/ldconfig
         fi
-        if ldconfig -p 2>/dev/null | grep -q libcuda; then
-            LIBCUDA=$(ldconfig -p 2>/dev/null | grep libcuda | head -1 | awk '{print $1 " => " $4}')
+
+        if [[ -n "$LDCONFIG_BIN" ]] && "$LDCONFIG_BIN" -p 2>/dev/null | grep -q 'libcuda\.so'; then
+            LIBCUDA=$("$LDCONFIG_BIN" -p 2>/dev/null | grep 'libcuda\.so' | head -1 | awk '{print $1 " => " $NF}')
             echo "libcuda: FOUND ($LIBCUDA)"
+        elif [[ -e /usr/lib/x86_64-linux-gnu/libcuda.so || -e /usr/lib/x86_64-linux-gnu/libcuda.so.1 ]]; then
+            echo "libcuda: FOUND (/usr/lib/x86_64-linux-gnu/libcuda.so)"
+        elif [[ -e /usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so ]]; then
+            echo "libcuda: FOUND_STUB (/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so)"
         else
             echo "libcuda: NOT FOUND"
         fi
