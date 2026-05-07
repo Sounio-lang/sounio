@@ -73,6 +73,7 @@ CASES=(
   "pbpk4|f32|1|8|8|1,2,3,4,5,6,7,8||4.75,4.8125,4.875,4.9375,5,5.0625,5.125,5.1875|"
   "pbpk4|f32e|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|4.75,4.8125,4.875,4.9375,5,5.0625,5.125,5.1875|2.44141,2.44141,2.44141,2.44141,2.44141,2.44141,2.44141,2.44141"
   "pbpk8|f32|1|8|8|1,2,3,4,5,6,7,8||4.98438,4.98828,4.99219,4.99609,5,5.00391,5.00781,5.01172|"
+  "pbpk2c|f32_2c|1|8|8|1,2,3,4,5,6,7,8|0,0,0,0,0,0,0,0|1.25,2,2.75,3.5,4.25,5,5.75,6.5|0.25,0.5,0.75,1,1.25,1.5,1.75,2"
   "mb_double|basic|4|8|32|_seq_||2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64|"
   "mb_double|basic|8|8|64|_seq_||2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102,104,106,108,110,112,114,116,118,120,122,124,126,128|"
 )
@@ -89,6 +90,7 @@ PATTERN_FOR[mb_double]=mb_vec_double_f32
 PATTERN_FOR[pbpk]=pbpk_euler
 PATTERN_FOR[pbpk4]=pbpk_4step
 PATTERN_FOR[pbpk8]=pbpk_8step
+PATTERN_FOR[pbpk2c]=pbpk_2comp
 
 # Programmatically generate large multi-block cases (256, 1024 elements).
 # Each writes mem[i] = 2*(i+1).
@@ -120,6 +122,7 @@ for c in "${CASES[@]}"; do
   [[ "$mode" == "epistemic" ]] && EMIT_FLAGS+=(--epistemic)
   [[ "$mode" == "f32" ]] && EMIT_FLAGS+=(--f32)
   [[ "$mode" == "f32e" ]] && EMIT_FLAGS+=(--f32-epistemic)
+  [[ "$mode" == "f32_2c" ]] && EMIT_FLAGS+=(--f32-2c)
   "${ROOT_DIR}/bin/kretikos" kaxi-emit-ptx "$pat" "${EMIT_FLAGS[@]}" -o "$ptx" >/dev/null
   echo "${INDEX}|${name}|${mode}|${blocks}|${threads}|${mw}|${imem}|${ivar}|${emem}|${evar}" >> "${STAGE_DIR}/cases.tsv"
   INDEX=$((INDEX+1))
@@ -144,6 +147,7 @@ while IFS='|' read -r idx name mode blocks threads mw imem ivar emem evar; do
   [[ "$mode" == "epistemic" ]] && ARGS+=(--epistemic)
   [[ "$mode" == "f32" ]] && ARGS+=(--type f32)
   [[ "$mode" == "f32e" ]] && ARGS+=(--epistemic --type f32)
+  [[ "$mode" == "f32_2c" ]] && ARGS+=(--epistemic --type f32)
   if [[ "$imem" == "_seq_" ]]; then
     ARGS+=(--init-seq)
   elif [[ -n "$imem" ]]; then
