@@ -1,7 +1,8 @@
 // self-hosted/gpu/kaxi_to_c.sio — K-AXI → C transpiler
 //
 // Generates host-runnable C code from K-AXI assembly text.
-// Output is a single function: void kaxi_kernel(int tid, long long mem[1024], long long shared_mem[256])
+// Uses global per-lane register/predicate arrays for cross-lane ops.
+// Emits goto labels for branch/reconverge divergence.
 
 use gpu::kaxi_backend::*
 
@@ -9,12 +10,13 @@ pub fn kaxi_transpile_to_c(asm: KaxiAsmBuf) -> string with Mut, Panic, Div, Allo
     var out: KaxiAsmBuf = kaxi_asm_new()
     out = kaxi_asm_push_str(out, "#include <stdio.h>\n")
     out = kaxi_asm_push_str(out, "void kaxi_kernel(int tid, long long mem[1024], long long shared_mem[256]) {\n")
-    out = kaxi_asm_push_str(out, "    long long reg_val[64] = {0};\n")
-    out = kaxi_asm_push_str(out, "    int pred[8] = {0};\n")
+    out = kaxi_asm_push_str(out, "    long long *reg_val = kaxi_lane_reg[tid];\n")
+    out = kaxi_asm_push_str(out, "    int *pred = kaxi_lane_pred[tid];\n")
     out = kaxi_asm_push_str(out, "    (void)tid;\n")
 
     var line_start: i64 = 0
     var i: i64 = 0
+    var instr_idx: i64 = 0
     while i <= asm.len {
         let is_end = i == asm.len
         let is_newline = if i < asm.len { asm.data[i as usize] as i8 == 10 } else { true }
@@ -24,11 +26,16 @@ pub fn kaxi_transpile_to_c(asm: KaxiAsmBuf) -> string with Mut, Panic, Div, Allo
                 let first_char = asm.data[line_start as usize] as i8
                 if first_char != 59 && first_char != 0 {
                     let c = kaxi_transpile_line_to_c(asm, line_start, line_len)
+                    out = kaxi_asm_push_str(out, "    L")
+                    out = kaxi_asm_push_str(out, int_to_string(instr_idx))
+                    out = kaxi_asm_push_str(out, ": ")
                     if str_len(c) > 0 {
-                        out = kaxi_asm_push_str(out, "    ")
                         out = kaxi_asm_push_str(out, c)
-                        out = kaxi_asm_push_byte(out, 10)
+                    } else {
+                        out = kaxi_asm_push_str(out, "// nop")
                     }
+                    out = kaxi_asm_push_byte(out, 10)
+                    instr_idx = instr_idx + 1
                 }
             }
             line_start = i + 1
@@ -178,8 +185,8 @@ pub fn kaxi_transpile_line_to_c(asm: KaxiAsmBuf, line_start: i64, line_len: i64)
     else if c0 == 115 && c1 == 101 && c2 == 116 && c3 == 112 {
         let cmp = kaxi_parse_setp_cmp(asm, line_start, line_len)
         let dst = kaxi_parse_reg(asm, line_start, line_len, "p", 0)
-        let src_a = kaxi_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = kaxi_parse_reg(asm, line_start, line_len, "r", 2)
+        let src_a = kaxi_parse_reg(asm, line_start, line_len, "r", 0)
+        let src_b = kaxi_parse_reg(asm, line_start, line_len, "r", 1)
         if dst >= 0 && src_a >= 0 && src_b >= 0 {
             return pred_str(dst) + " = " + reg_str(src_a) + " " + cmp + " " + reg_str(src_b) + ";"
         }
@@ -197,16 +204,20 @@ pub fn kaxi_transpile_line_to_c(asm: KaxiAsmBuf, line_start: i64, line_len: i64)
         return "// nop"
     }
     else if c0 == 98 && c1 == 114 && c2 == 97 {
-        return "// branch"
+        let pred_idx = kaxi_parse_reg(asm, line_start, line_len, "p", 0)
+        let target = kaxi_parse_imm_after(asm, line_start, line_len, "target=")
+        if pred_idx >= 0 && target >= 0 {
+            return "if (" + pred_str(pred_idx) + ") goto L" + int_to_string(target) + ";"
+        }
     }
     else if c0 == 114 && c1 == 101 && c2 == 99 {
         return "// reconverge"
     }
     else if c0 == 118 && c1 == 111 && c2 == 116 {
         let dst = kaxi_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = kaxi_parse_reg(asm, line_start, line_len, "p", 1)
+        let src_a = kaxi_parse_reg(asm, line_start, line_len, "p", 0)
         if dst >= 0 && src_a >= 0 {
-            return reg_str(dst) + " = vote_ballot(" + pred_str(src_a) + ");"
+            return reg_str(dst) + " = kaxi_vote_ballot(tid, " + int_to_string(src_a) + ");"
         }
     }
     else if c0 == 115 && c1 == 104 && c2 == 117 {
@@ -214,14 +225,14 @@ pub fn kaxi_transpile_line_to_c(asm: KaxiAsmBuf, line_start: i64, line_len: i64)
         let src_a = kaxi_parse_reg(asm, line_start, line_len, "r", 1)
         let imm = kaxi_parse_imm_after(asm, line_start, line_len, "imm=")
         if dst >= 0 && src_a >= 0 {
-            return reg_str(dst) + " = shuffle_xor(" + reg_str(src_a) + ", " + int_to_string(imm) + ");"
+            return reg_str(dst) + " = kaxi_shuffle_xor(tid, " + int_to_string(src_a) + ", " + int_to_string(imm) + ");"
         }
     }
     else if c0 == 119 && c1 == 97 && c2 == 114 {
         let dst = kaxi_parse_reg(asm, line_start, line_len, "r", 0)
         let src_a = kaxi_parse_reg(asm, line_start, line_len, "r", 1)
         if dst >= 0 && src_a >= 0 {
-            return reg_str(dst) + " = warp_reduce_add(" + reg_str(src_a) + ");"
+            return reg_str(dst) + " = kaxi_warp_reduce_add(tid, " + int_to_string(src_a) + ");"
         }
     }
 

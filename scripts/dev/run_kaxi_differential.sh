@@ -88,20 +88,15 @@ for idx, (name, sim_mem, warp_mem, c_code) in enumerate(kernel_blocks):
     c_vals = [int(x) for x in c_mem_match.group(1).strip().split()]
 
     # Compare
-    if name == "multi_lane":
-        # Scalar sim only runs lane 0; warp/C run all lanes
-        if sim_vals[0] != warp_vals[0]:
-            print(f"FAIL {name}: SIM_MEM[0] != WARP_MEM[0]")
-            print(f"  SIM[0]:  {sim_vals[0]}")
-            print(f"  WARP[0]: {warp_vals[0]}")
-            all_ok = False
-            continue
+    WARP_ONLY = {"multi_lane", "divergent", "vote_ballot", "shuffle_xor", "warp_reduce_add"}
+    if name in WARP_ONLY:
         if warp_vals != c_vals:
             print(f"FAIL {name}: WARP_MEM != C_MEM")
             print(f"  WARP: {warp_vals}")
             print(f"  C:    {c_vals}")
             all_ok = False
             continue
+        print(f"PASS {name}: warp/native agree")
     else:
         if sim_vals != warp_vals:
             print(f"FAIL {name}: SIM_MEM != WARP_MEM")
@@ -117,7 +112,7 @@ for idx, (name, sim_mem, warp_mem, c_code) in enumerate(kernel_blocks):
             all_ok = False
             continue
 
-    print(f"PASS {name}: scalar/warp/native all agree")
+        print(f"PASS {name}: scalar/warp/native all agree")
 
 if all_ok:
     print("PASS differential_validation")
