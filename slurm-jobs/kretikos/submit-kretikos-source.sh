@@ -5,7 +5,11 @@ set -euo pipefail
 #
 # This script embeds a tiny payload into the sbatch file, runs entirely from
 # the GPU worker's local scratch, and records the acceptance result in the Slurm
-# job comment. It intentionally avoids using OrangeFS for binary intermediates.
+# job comment. It intentionally avoids using OrangeFS as a payload transport or
+# binary-intermediate dependency. Optional result publication preserves a
+# worker-local artifact directory and fetches it back through the Slurm worker
+# pod, which is the most reliable path on clusters where compute nodes cannot
+# write directly to shared storage.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NS="${NS:-slurm-pilot}"
@@ -21,6 +25,12 @@ JOB_TIME="${JOB_TIME:-00:10:00}"
 WAIT_FOR_RESULT="${WAIT_FOR_RESULT:-1}"
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-300}"
 KRETIKOS_VEC_N="${KRETIKOS_VEC_N:-64}"
+KRETIKOS_HPC_PUBLISH_RESULTS="${KRETIKOS_HPC_PUBLISH_RESULTS:-1}"
+KRETIKOS_HPC_FETCH_RESULTS="${KRETIKOS_HPC_FETCH_RESULTS:-1}"
+KRETIKOS_HPC_LOCAL_ARTIFACT_DIR="${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR:-}"
+KRETIKOS_HPC_WORKER_NODE="${KRETIKOS_HPC_WORKER_NODE:-${SBATCH_NODELIST#gpuorangefs-}}"
+KRETIKOS_HPC_WORKER_POD_LABEL="${KRETIKOS_HPC_WORKER_POD_LABEL:-app.kubernetes.io/instance=slurm-pilot-worker-gpuorangefs}"
+KRETIKOS_HPC_WORKER_TMP="${KRETIKOS_HPC_WORKER_TMP:-/tmp}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -29,6 +39,12 @@ usage: slurm-jobs/kretikos/submit-kretikos-source.sh <source.sio>
 Environment:
   WAIT_FOR_RESULT=0|1          wait for Slurm completion (default: 1)
   KRETIKOS_VEC_N=<n>           vector runtime length, clamped by loader (default: 64)
+  KRETIKOS_HPC_PUBLISH_RESULTS=0|1 preserve worker-local artifact directory (default: 1)
+  KRETIKOS_HPC_FETCH_RESULTS=0|1   fetch published artifacts back locally (default: 1)
+  KRETIKOS_HPC_LOCAL_ARTIFACT_DIR=<dir> local result directory override
+  KRETIKOS_HPC_WORKER_NODE=<node>      Kubernetes worker node (default: SBATCH_NODELIST without gpuorangefs-)
+  KRETIKOS_HPC_WORKER_POD_LABEL=<label-selector> worker pod selector
+  KRETIKOS_HPC_WORKER_TMP=<dir>        worker-local tmp root (default: /tmp)
   LOGIN_POD_NAME=<pod>         explicit login pod override
   SBATCH_NODELIST=<node>       GPU node override
 EOF
@@ -130,10 +146,11 @@ cat > "${LOCAL_SBATCH}" <<EOF
 #SBATCH -e /dev/null
 set -euo pipefail
 
-LOCAL_ROOT="\${TMPDIR:-/tmp}/${RUN_ID}-\${SLURM_JOB_ID:-manual}"
+LOCAL_ROOT="${KRETIKOS_HPC_WORKER_TMP}/${RUN_ID}-\${SLURM_JOB_ID:-manual}"
 SOUNIO_DIR="\${LOCAL_ROOT}/repo"
 BUNDLE_DIR="\${LOCAL_ROOT}/bundle"
 LOG_FILE="\${LOCAL_ROOT}/kretikos-source.log"
+PUBLISH_RESULTS="${KRETIKOS_HPC_PUBLISH_RESULTS}"
 SOURCE_PAYLOAD_NAME="${SOURCE_PAYLOAD_NAME}"
 LOADER_PAYLOAD_NAME="${LOADER_PAYLOAD_NAME}"
 KRETIKOS_VEC_N="${KRETIKOS_VEC_N}"
@@ -221,6 +238,48 @@ print(
 PY
 )"
 mark "\${comment}"
+
+if [[ "\${PUBLISH_RESULTS}" == "1" ]]; then
+  PUBLISH_DIR="\${LOCAL_ROOT}/publish"
+  mkdir -p "\${PUBLISH_DIR}/bundle"
+  tar -C "\${BUNDLE_DIR}" -cf - . | tar -C "\${PUBLISH_DIR}/bundle" -xf -
+  cp "\${LOG_FILE}" "\${PUBLISH_DIR}/kretikos-source.log"
+  printf '%s\n' "\${comment}" > "\${PUBLISH_DIR}/comment.txt"
+  printf '%s\n' "\${LOCAL_ROOT}" > "\${PUBLISH_DIR}/worker_run_dir.txt"
+  printf '%s\n' "\$(hostname)" > "\${PUBLISH_DIR}/worker_host.txt"
+  python3 - "\${PUBLISH_DIR}/kretikos_hpc_source_result.v1.json" \
+    "\${SLURM_JOB_ID:-unknown}" "\$(hostname)" "\${comment}" \
+    "\${BUNDLE_DIR}/kretikos_bundle.v1.json" \
+    "\${BUNDLE_DIR}/kretikos_source_profile.v1.json" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+out, job_id, host, comment, bundle_path, source_path = sys.argv[1:]
+bundle = json.load(open(bundle_path, encoding="utf-8"))
+source = json.load(open(source_path, encoding="utf-8"))
+payload = {
+    "schema": "sounio.kretikos.hpc-source-result.v1",
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "job_id": job_id,
+    "host": host,
+    "comment": comment,
+    "source_profile": source,
+    "bundle": bundle,
+    "runtime_validation": bundle.get("runtime_validation") or {},
+    "toolchain_validation": bundle.get("toolchain_validation") or {},
+    "boundaries": [
+        "payload_was_embedded_in_sbatch_not_read_from_orangefs",
+        "runtime_execution_happened_on_slurm_gpu_worker",
+        "published_results_are_post_run_evidence",
+        "worker_side_ptxas_or_nvdisasm_missing_is_not_a_runtime_failure",
+    ],
+}
+with open(out, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+fi
 EOF
 
 echo "[3/5] uploading sbatch to login pod"
@@ -238,6 +297,9 @@ fi
 echo "[5/5] submitted job ${JOB_ID}"
 echo "  source: ${SOURCE_ABS}"
 echo "  node:   ${SBATCH_NODELIST}"
+if [[ "${KRETIKOS_HPC_PUBLISH_RESULTS}" == "1" ]]; then
+  echo "  worker-run-dir: ${KRETIKOS_HPC_WORKER_TMP}/${RUN_ID}-${JOB_ID}"
+fi
 
 if [[ "${WAIT_FOR_RESULT}" != "1" ]]; then
   exit 0
@@ -256,6 +318,49 @@ done
 
 "${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- sacct -j "${JOB_ID}" --format=JobID,State,ExitCode,Elapsed,NodeList%30 --noheader
 "${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "scontrol show job '${JOB_ID}' | tr '\n' ' ' | sed 's/  */ /g' | sed -n 's/.*Comment=\\([^ ]*.*\\) StdErr=.*/Comment=\\1/p'"
+echo
 
 STATE="$("${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- sacct -j "${JOB_ID}" --format=State --noheader | head -n1 | xargs)"
+if [[ "${STATE}" == "COMPLETED" && "${KRETIKOS_HPC_PUBLISH_RESULTS}" == "1" ]]; then
+  WORKER_POD="$("${KUBECTL_BIN}" -n "${NS}" get pods -l "${KRETIKOS_HPC_WORKER_POD_LABEL}" -o wide \
+    | awk -v node="${KRETIKOS_HPC_WORKER_NODE}" '$7 == node { print $1; exit }')"
+  if [[ -z "${WORKER_POD}" ]]; then
+    echo "could not resolve worker pod for node ${KRETIKOS_HPC_WORKER_NODE}" >&2
+    exit 1
+  fi
+  WORKER_RUN_DIR="${KRETIKOS_HPC_WORKER_TMP}/${RUN_ID}-${JOB_ID}"
+  WORKER_PUBLISH_DIR="${WORKER_RUN_DIR}/publish"
+  "${KUBECTL_BIN}" -n "${NS}" exec "${WORKER_POD}" -- test -d "${WORKER_PUBLISH_DIR}"
+  if [[ "${KRETIKOS_HPC_FETCH_RESULTS}" == "1" ]]; then
+    if [[ -z "${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}" ]]; then
+      KRETIKOS_HPC_LOCAL_ARTIFACT_DIR="/tmp/${RUN_ID}-artifacts"
+    fi
+    rm -rf "${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}"
+    mkdir -p "${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}"
+    "${KUBECTL_BIN}" -n "${NS}" exec "${WORKER_POD}" -- tar -C "${WORKER_PUBLISH_DIR}" -czf - . \
+      | tar -xzf - -C "${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}"
+    echo "WorkerPod=${WORKER_POD}"
+    echo "WorkerRunDir=${WORKER_RUN_DIR}"
+    echo "Artifacts=${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}"
+    echo "ArtifactJSON=${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}/kretikos_hpc_source_result.v1.json"
+    if [[ -f "${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}/kretikos_hpc_source_result.v1.json" ]]; then
+      python3 - "${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}/kretikos_hpc_source_result.v1.json" <<'PY'
+import json
+import sys
+
+obj = json.load(open(sys.argv[1], encoding="utf-8"))
+runtime = obj.get("runtime_validation") or {}
+print("ArtifactRuntime={}/{} rung={} kernel={} device={}".format(
+    runtime.get("status"),
+    runtime.get("reason"),
+    runtime.get("rung"),
+    runtime.get("kernel"),
+    runtime.get("device_name"),
+))
+PY
+    fi
+  else
+    echo "ArtifactsRemote=${WORKER_POD}:${WORKER_PUBLISH_DIR}"
+  fi
+fi
 [[ "${STATE}" == "COMPLETED" ]]

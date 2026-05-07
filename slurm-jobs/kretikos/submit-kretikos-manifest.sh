@@ -38,7 +38,7 @@ fi
 
 MANIFEST_DIR="$(cd "$(dirname "${MANIFEST}")" && pwd)"
 SUMMARY="${SUMMARY:-/tmp/kretikos-manifest-$(date -u +%Y%m%dT%H%M%S)-${BASHPID}.tsv}"
-printf 'label\tsource\tstatus\tjob_id\tcomment\n' >"${SUMMARY}"
+printf 'label\tsource\tstatus\tjob_id\tcomment\tartifact_dir\tartifact_json\n' >"${SUMMARY}"
 
 total=0
 failed=0
@@ -69,13 +69,15 @@ while IFS=$'\t' read -r label source rest || [[ -n "${label:-}" ]]; do
   total=$((total + 1))
   job_id="$(printf '%s\n' "${output}" | awk '/Submitted batch job/ { print $4; exit }')"
   comment="$(printf '%s\n' "${output}" | awk '/^Comment=kretikos_source=/ { sub(/^Comment=/, ""); print; exit }')"
+  artifact_dir="$(printf '%s\n' "${output}" | awk -F= '/^Artifacts=/ { print $2; exit }')"
+  artifact_json="$(printf '%s\n' "${output}" | awk -F= '/^ArtifactJSON=/ { print $2; exit }')"
   if [[ "${rc}" -eq 0 ]]; then
     status="pass"
   else
     status="fail"
     failed=$((failed + 1))
   fi
-  printf '%s\t%s\t%s\t%s\t%s\n' "${label}" "${src_path}" "${status}" "${job_id}" "${comment}" >>"${SUMMARY}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${label}" "${src_path}" "${status}" "${job_id}" "${comment}" "${artifact_dir}" "${artifact_json}" >>"${SUMMARY}"
 done <"${MANIFEST}"
 
 echo "=== kretikos manifest summary ==="

@@ -22,6 +22,8 @@ cat "$DOCTOR_LOG"
 echo "kretikos_hpc_slurm_runtime_gate: submit manifest=$MANIFEST"
 set +e
 WAIT_TIMEOUT_SECONDS="$WAIT_TIMEOUT_SECONDS" \
+KRETIKOS_HPC_PUBLISH_RESULTS=1 \
+KRETIKOS_HPC_FETCH_RESULTS=1 \
   ./bin/kretikos hpc manifest "$MANIFEST" >"$MANIFEST_LOG" 2>&1
 manifest_rc=$?
 set -e
@@ -55,7 +57,7 @@ fi
 if [[ -f "$summary_path" ]]; then
   cp "$summary_path" "$SUMMARY_COPY"
 else
-  printf 'label\tsource\tstatus\tjob_id\tcomment\n' >"$SUMMARY_COPY"
+  printf 'label\tsource\tstatus\tjob_id\tcomment\tartifact_dir\tartifact_json\n' >"$SUMMARY_COPY"
 fi
 
 python3 - "$GATE_JSON" "$MANIFEST" "$DOCTOR_LOG" "$MANIFEST_LOG" "$SUMMARY_COPY" "$total" "$failed" <<'PY'
@@ -79,6 +81,38 @@ devices = sorted({part.split("=", 1)[1] for comment in comments for part in comm
 drivers = sorted({part.split("=", 1)[1] for comment in comments for part in comment.split() if part.startswith("driver=")})
 ccs = sorted({part.split("=", 1)[1] for comment in comments for part in comment.split() if part.startswith("cc=")})
 jobs = [case.get("job_id", "") for case in cases if case.get("job_id")]
+artifact_dirs = [case.get("artifact_dir", "") for case in cases if case.get("artifact_dir")]
+artifact_jsons = [case.get("artifact_json", "") for case in cases if case.get("artifact_json")]
+artifact_runtimes = []
+missing_artifacts = []
+
+for case in cases:
+    artifact_json = case.get("artifact_json", "")
+    if not artifact_json:
+        missing_artifacts.append({"label": case.get("label"), "reason": "artifact_json_missing"})
+        continue
+    artifact_path = Path(artifact_json)
+    if not artifact_path.is_file():
+        missing_artifacts.append({"label": case.get("label"), "path": artifact_json, "reason": "artifact_json_not_found"})
+        continue
+    obj = json.load(artifact_path.open(encoding="utf-8"))
+    runtime = obj.get("runtime_validation") or {}
+    artifact_runtimes.append({
+        "label": case.get("label"),
+        "artifact_json": artifact_json,
+        "status": runtime.get("status"),
+        "reason": runtime.get("reason"),
+        "rung": runtime.get("rung"),
+        "kernel": runtime.get("kernel"),
+        "device": runtime.get("device_name"),
+    })
+
+if int(failed) == 0 and missing_artifacts:
+    raise SystemExit(f"missing fetched artifacts: {missing_artifacts}")
+
+bad_artifacts = [row for row in artifact_runtimes if row.get("status") != "pass"]
+if int(failed) == 0 and bad_artifacts:
+    raise SystemExit(f"artifact runtime did not pass: {bad_artifacts}")
 
 payload = {
     "schema": "sounio.kretikos.hpc-slurm-runtime-gate.v1",
@@ -91,6 +125,9 @@ payload = {
     "devices": devices,
     "drivers": drivers,
     "compute_capabilities": ccs,
+    "artifact_dirs": artifact_dirs,
+    "artifact_jsons": artifact_jsons,
+    "artifact_runtimes": artifact_runtimes,
     "doctor_log": str(Path(doctor_log).name),
     "manifest_log": str(Path(manifest_log).name),
     "summary_tsv": str(Path(summary_tsv).name),
@@ -100,6 +137,7 @@ payload = {
         "slurm_worker_is_cuda_runtime_authority",
         "runtime_acceptance_requires_cuda_driver_load_launch_and_copyback",
         "worker_side_ptxas_or_nvdisasm_missing_is_not_a_runtime_failure",
+        "each_worker_result_must_publish_and_fetch_a_json_artifact",
         "does_not_claim_arbitrary_sounio_gpu_lowering",
     ],
 }

@@ -5,6 +5,8 @@ Kretikos uses an HPC split-brain model:
 - the local/control workspace emits and inspects GPU artifacts
 - the Slurm GPU worker performs CUDA Driver API runtime admission and launch
 - the job comment carries the runtime verdict back to the control side
+- the worker preserves a compact `publish/` directory on worker-local storage
+  so the control side can fetch durable evidence through the worker pod
 
 This is intentional. A development container may have `nvcc`, `ptxas`,
 `nvdisasm`, `cuobjdump`, and `libcuda` installed while still lacking a mounted
@@ -67,6 +69,26 @@ Useful environment overrides:
 - `SBATCH_ACCOUNT`: Slurm account, default `plruntime`
 - `SBATCH_QOS`: Slurm QoS, default `gpuorangefs`
 - `KRETIKOS_VEC_N`: runtime vector length, default `64`
+- `KRETIKOS_HPC_PUBLISH_RESULTS`: preserve a worker-local artifact directory,
+  default `1`
+- `KRETIKOS_HPC_FETCH_RESULTS`: fetch published artifacts back locally, default
+  `1`
+- `KRETIKOS_HPC_LOCAL_ARTIFACT_DIR`: local result directory override for a
+  single-source run
+- `KRETIKOS_HPC_WORKER_NODE`: Kubernetes node hosting the Slurm worker, default
+  is `SBATCH_NODELIST` with the `gpuorangefs-` prefix stripped
+- `KRETIKOS_HPC_WORKER_POD_LABEL`: worker pod selector, default
+  `app.kubernetes.io/instance=slurm-pilot-worker-gpuorangefs`
+- `KRETIKOS_HPC_WORKER_TMP`: worker-local tmp root, default `/tmp`
+
+Fetched source-run artifacts include:
+
+- `kretikos_hpc_source_result.v1.json`
+- `kretikos-source.log`
+- `comment.txt`
+- `bundle/kretikos_bundle.v1.json`
+- `bundle/kretikos_source_profile.v1.json`
+- emitted PTX/CUBIN artifacts and validation logs for that profile
 
 ## Acceptance Boundary
 
@@ -105,10 +127,12 @@ WAIT_TIMEOUT_SECONDS=420 \
 Result:
 
 - `kretikos_manifest_result total=13 failed=0`
-- jobs `1260` through `1272`
+- jobs `1277` through `1289`
 - node `gpuorangefs-r770-proxmox`
 - device `NVIDIA_L4`
 - compute capability `8.9`
 - CUDA driver version `13020`
 - final rung `epistemic_dual_output_f32`
 - final reason `runtime_epistemic_dual_output_f32_pass`
+- each source job preserved a worker-local `publish/` directory and fetched a
+  `kretikos_hpc_source_result.v1.json` artifact back to the control workspace
