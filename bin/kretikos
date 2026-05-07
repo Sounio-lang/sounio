@@ -1370,6 +1370,80 @@ PY
         fi
         ;;
 
+    kaxi-compile)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_kaxi_compile.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-kaxi-compile.XXXXXX")" || {
+            echo "error: failed to create temporary K-AXI compile driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        INPUT=""
+        OUT=""
+        MODE="basic"
+        VALIDATE_PTXAS=1
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output) OUT="$2"; shift 2 ;;
+                --mode) MODE="$2"; shift 2 ;;
+                --no-ptxas) VALIDATE_PTXAS=0; shift ;;
+                -*) echo "error: unknown option $1" >&2; exit 1 ;;
+                *)
+                    if [[ -z "$INPUT" ]]; then INPUT="$1"
+                    else echo "error: unexpected argument $1" >&2; exit 1
+                    fi
+                    shift ;;
+            esac
+        done
+
+        if [[ -z "$INPUT" || -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-compile <input.kaxi> -o <output.ptx> [--mode basic|epistemic|f32|f32e|f32-2c] [--no-ptxas]" >&2
+            exit 1
+        fi
+        if [[ ! -f "$INPUT" ]]; then
+            echo "error: input not found: $INPUT" >&2
+            exit 1
+        fi
+        case "$MODE" in
+            basic|epistemic|f32|f32e|f32-2c) ;;
+            *) echo "error: unsupported mode '$MODE'" >&2; exit 1 ;;
+        esac
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile K-AXI compile driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        mkdir -p "$(dirname "$OUT")"
+        "$DRIVER_ELF" "$INPUT" "$MODE" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: K-AXI source compiled - $OUT ($bytes bytes, mode=$MODE)"
+
+        if ! grep -q ".visible .entry" "$OUT"; then
+            echo "kretikos: structural validation failed - .visible .entry missing" >&2
+            exit 1
+        fi
+        echo "kretikos: structural validation OK"
+
+        if [[ "$VALIDATE_PTXAS" -eq 1 ]] && command -v ptxas >/dev/null 2>&1; then
+            CUBIN_OUT="${OUT%.ptx}.cubin"
+            if ptxas -arch=sm_50 -o "$CUBIN_OUT" "$OUT" 2>"$DRIVER_DIR/ptxas.err"; then
+                cubin_bytes=$(stat -c%s "$CUBIN_OUT" 2>/dev/null || stat -f%z "$CUBIN_OUT" 2>/dev/null || echo "?")
+                echo "kretikos: ptxas validation OK - $CUBIN_OUT ($cubin_bytes bytes, sm_50)"
+            else
+                echo "kretikos: ptxas validation FAILED" >&2
+                cat "$DRIVER_DIR/ptxas.err" >&2
+                exit 1
+            fi
+        fi
+        ;;
+
     kaxi-witness)
         PATTERN=""
         OUT=""

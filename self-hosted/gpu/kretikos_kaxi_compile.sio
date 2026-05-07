@@ -1,0 +1,62 @@
+// self-hosted/gpu/kretikos_kaxi_compile.sio
+// Source-driven K-AXI → PTX compilation: read a `.kaxi` text file and lower
+// it through any of the five available transpiler modes. The first step
+// toward user-authored kernels — no pattern dispatch, just K-AXI text.
+//
+// Usage: souc kretikos_kaxi_compile.sio /tmp/driver.elf
+//        /tmp/driver.elf <input.kaxi> [mode]
+//
+// Modes:
+//   basic       — kaxi_transpile_to_ptx           (u64 default)
+//   epistemic   — kaxi_transpile_to_ptx_epistemic (u64 + variance shadow)
+//   f32         — kaxi_transpile_to_ptx_f32       (IEEE 754)
+//   f32e        — kaxi_transpile_to_ptx_f32_epistemic (f32 + variance)
+//   f32-2c      — kaxi_transpile_to_ptx_f32_2c    (dual buffer)
+
+use gpu::kaxi_backend::*
+use gpu::kaxi_to_ptx::*
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 1 {
+        println("usage: kretikos_kaxi_compile <input.kaxi> [mode]")
+        println("modes: basic | epistemic | f32 | f32e | f32-2c")
+        return 1
+    }
+    let path = get_arg(0)
+    var mode: string = "basic"
+    if argc >= 2 {
+        mode = get_arg(1)
+    }
+
+    let size = file_size(path)
+    if size <= 0 {
+        print("error: cannot read or empty file: ")
+        println(path)
+        return 1
+    }
+
+    let bytes = read_file(path)
+
+    var buf: KaxiAsmBuf = kaxi_asm_new()
+    var i: i64 = 0
+    let cap = if size > 16384 { 16384 } else { size }
+    while i < cap {
+        buf = kaxi_asm_push_byte(buf, bytes[i as usize] as i8)
+        i = i + 1
+    }
+
+    let ptx = if str_eq(mode, "epistemic") {
+        kaxi_transpile_to_ptx_epistemic(buf)
+    } else if str_eq(mode, "f32") {
+        kaxi_transpile_to_ptx_f32(buf)
+    } else if str_eq(mode, "f32e") {
+        kaxi_transpile_to_ptx_f32_epistemic(buf)
+    } else if str_eq(mode, "f32-2c") {
+        kaxi_transpile_to_ptx_f32_2c(buf)
+    } else {
+        kaxi_transpile_to_ptx(buf)
+    }
+    print(ptx)
+    0
+}
