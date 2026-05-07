@@ -101,6 +101,7 @@ Driver API validation rung when runtime validation is enabled.
 Supported profiles are intentionally explicit:
 
 - `vec_add_f32`
+- `vec_add_f64`
 - `vec_sub_f32`
 - `vec_mul_f32`
 - `vec_div_f32`
@@ -109,20 +110,15 @@ Supported profiles are intentionally explicit:
 - `epistemic_dual_output_f32`
 - `store_u32_const`
 
-These eight profiles are runtime-backed: each maps to an owned CUBIN runtime
+These nine profiles are runtime-backed: each maps to an owned CUBIN runtime
 rung and may pass `--require-runtime` on a CUDA Driver API host.
 
-Kretikos also accepts a wider structural-only source set:
-
-- `vec_add_f64`
-
-Structural-only profiles must still typecheck as Sounio source and must emit
-owned PTX through `bin/kretikos emit-ptx`, but they intentionally report
+Kretikos may later accept a wider structural-only source set. Structural-only
+profiles must still typecheck as Sounio source and must emit owned PTX through
+`bin/kretikos emit-ptx`, but they intentionally report
 `runtime_validation.status = "not_run"` and
 `runtime_validation.reason = "profile_not_runtime_backed"`. They fail closed
-under `--require-runtime` until an owned CUBIN/runtime rung exists. This is the
-parallel-agent blocker contract: a source profile can be admitted at the
-Kretikos front door without being promoted to runtime-ready.
+under `--require-runtime` until an owned CUBIN/runtime rung exists.
 
 A source file may declare the profile with:
 
@@ -168,38 +164,26 @@ multiplication lowering.
 `numerator / denominator`. This is a runtime-backed division rung, not a claim
 of arbitrary source division lowering.
 
-`examples/kretikos/structural_manifest.tsv` covers the remaining
-structural-only PTX
-profiles. Its default `--validate-runtime` mode is allowed to pass with
-`profile_not_runtime_backed` rows because that is an honest non-runtime
-classification, not a runtime proof. Running the same manifest with
-`--require-runtime` is expected to fail until those profiles gain CUBIN/runtime
-support.
+`vec_add_f64` is the first double-precision runtime rung. Its PTX front door
+emits `ld.global.f64`, `add.f64`, and `st.global.f64`, and its owned CUBIN
+runtime path uses a three-parameter double ABI: `x`, `y`, and `out`. The CUDA
+Driver API oracle checks `out[i] = x[i] + y[i]` with a double-precision
+tolerance. This is a runtime-backed vector-add rung, not a claim of arbitrary
+f64 source lowering.
 
-### Current f64 Runtime Blocker
+`examples/kretikos/structural_manifest.tsv` covers any remaining
+structural-only PTX profiles. It is currently empty beyond its header.
 
-`vec_add_f64` is intentionally structural-only. The Kretikos PTX front door can
-emit a checked f64 template containing `ld.global.f64`, `add.f64`, and
-`st.global.f64`, but the runtime corpus does not yet have an owned f64
-CUDA ELF/CUBIN emitter and CUDA Driver API validation rung. It must not be
-moved from `examples/kretikos/structural_manifest.tsv` into
-`examples/kretikos/manifest.tsv` until one of these contracts is satisfied:
-
-- `self-hosted/gpu/nvidia_bare.sio` emits a loadable owned f64 CUBIN, and the
-  corresponding Kretikos runtime rung passes on the NVIDIA L4 Slurm lane.
-- A separate assembler-backed f64 lane is explicitly named as such, keeps
-  assembler provenance in the bundle, and does not claim the owned-CUBIN proof
-  path.
-
-The executable blocker gate is:
+The executable f64 local gate is:
 
 ```bash
-scripts/ci/kretikos_f64_blocker_gate.sh
+scripts/ci/kretikos_f64_runtime_gate.sh
 ```
 
-That gate proves all three facts together: the Sounio source checks, the f64
-PTX template is emitted structurally, and `--require-runtime` still fails
-closed with `profile_not_runtime_backed`.
+That gate proves the Sounio source checks, the f64 PTX template is emitted, the
+owned CUBIN is CUDA ELF64 with the `sounio_bare_vec_add_f64_sm80` symbol, and
+the Kretikos bundle selects the `vec_add_f64` runtime rung. The full runtime
+proof is the Slurm/L4 manifest lane with `--require-runtime`.
 
 ## Blocker Taxonomy
 

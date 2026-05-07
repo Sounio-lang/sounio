@@ -21,13 +21,13 @@
 #
 # Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64, store_u32_const
 # Supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check
-# Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_dual_f32
+# Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, vec_add_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_dual_f32
 #
 # Runtime-backed source profiles:
-#   store_u32_const, vec_add_f32, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_elementwise_f32, epistemic_dual_output_f32
+#   store_u32_const, vec_add_f32, vec_add_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_elementwise_f32, epistemic_dual_output_f32
 #
 # Structural-only source profiles:
-#   vec_add_f64
+#   none
 #
 # GPU builtins recognized in kernel fn bodies:
 #   gpu_thread_id_x()  gpu_thread_id_y()  gpu_thread_id_z()
@@ -160,7 +160,7 @@ __kretikos_source_profile_record() {
             echo "vec_div_f32|vec_div_f32|vec_div_f32|sounio_bare_vec_div_f32_sm80|source_profile|vec_div|1"
             ;;
         vec_add_f64|vector_add_f64|add_vec_f64)
-            echo "vec_add_f64||profile_not_runtime_backed||source_profile|vec_add_f64|0"
+            echo "vec_add_f64|vec_add_f64|vec_add_f64|sounio_bare_vec_add_f64_sm80|source_profile|vec_add_f64|1"
             ;;
         fma|fma_f32|vec_fma|vec_fma_f32)
             echo "fma_f32|fma_f32|fma_f32|sounio_bare_vec_fma_f32_sm80|source_profile|fma|1"
@@ -717,14 +717,19 @@ PY
         DRIVER_ELF="$DRIVER_DIR/driver.elf"
         trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
 
-        # Parse args: emit-ptx <pattern> -o <file>
+        # Parse args: emit-ptx <pattern> -o <file> [--validate-toolchain]
         PATTERN=""
         OUT=""
+        VALIDATE_TOOLCHAIN=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 -o|--output)
                     OUT="$2"
                     shift 2
+                    ;;
+                --validate-toolchain)
+                    VALIDATE_TOOLCHAIN=1
+                    shift
                     ;;
                 -*)
                     echo "error: unknown option $1" >&2
@@ -741,6 +746,20 @@ PY
                     ;;
             esac
         done
+
+        if [[ -n "$VALIDATE_TOOLCHAIN" ]]; then
+            if ! command -v nvcc >/dev/null 2>&1; then
+                echo "error: --validate-toolchain requires nvcc, but it was not found" >&2
+                echo "hint: run 'kretikos detect-cuda' to check your CUDA installation" >&2
+                exit 1
+            fi
+            if ! command -v ptxas >/dev/null 2>&1; then
+                echo "error: --validate-toolchain requires ptxas, but it was not found" >&2
+                echo "hint: run 'kretikos detect-cuda' to check your CUDA installation" >&2
+                exit 1
+            fi
+            echo "kretikos: toolchain validation OK - nvcc and ptxas found"
+        fi
 
         if [[ -z "$PATTERN" ]]; then
             echo "usage: kretikos emit-ptx <pattern> -o <file.ptx>" >&2
@@ -1004,14 +1023,19 @@ PY
         DRIVER_ELF="$DRIVER_DIR/driver.elf"
         trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
 
-        # Parse args: emit-cubin <kind> -o <file>
+        # Parse args: emit-cubin <kind> -o <file> [--validate-toolchain]
         KIND=""
         OUT=""
+        VALIDATE_TOOLCHAIN=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 -o|--output)
                     OUT="$2"
                     shift 2
+                    ;;
+                --validate-toolchain)
+                    VALIDATE_TOOLCHAIN=1
+                    shift
                     ;;
                 -*)
                     echo "error: unknown option $1" >&2
@@ -1029,6 +1053,15 @@ PY
             esac
         done
 
+        if [[ -n "$VALIDATE_TOOLCHAIN" ]]; then
+            if ! command -v nvcc >/dev/null 2>&1; then
+                echo "error: --validate-toolchain requires nvcc, but it was not found" >&2
+                echo "hint: run 'kretikos detect-cuda' to check your CUDA installation" >&2
+                exit 1
+            fi
+            echo "kretikos: toolchain validation OK - nvcc found"
+        fi
+
         if [[ -z "$KIND" ]]; then
             echo "usage: kretikos emit-cubin <kind> -o <file.cubin>" >&2
             echo "" >&2
@@ -1036,6 +1069,7 @@ PY
             echo "  exit_only          - minimal kernel that returns immediately" >&2
             echo "  store_u32_const    - stores a constant u32 to output" >&2
             echo "  vec_add_f32        - f32 vector addition (SM80)" >&2
+            echo "  vec_add_f64        - f64 vector addition (SM80)" >&2
             echo "  vec_sub_f32        - f32 vector subtraction (SM80)" >&2
             echo "  vec_mul_f32        - f32 vector multiplication (SM80)" >&2
             echo "  vec_div_f32        - f32 vector division (SM80)" >&2
@@ -1045,10 +1079,10 @@ PY
         fi
 
         case "$KIND" in
-            exit_only|store_u32_const|vec_add_f32|vec_sub_f32|vec_mul_f32|vec_div_f32|fma_f32|epistemic_dual_f32) ;;
+            exit_only|store_u32_const|vec_add_f32|vec_add_f64|vec_sub_f32|vec_mul_f32|vec_div_f32|fma_f32|epistemic_dual_f32) ;;
             *)
                 echo "error: unsupported CUBIN kind '$KIND'" >&2
-                echo "supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_dual_f32" >&2
+                echo "supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, vec_add_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_dual_f32" >&2
                 exit 1
                 ;;
         esac
@@ -1065,6 +1099,36 @@ PY
             exit 1
         fi
 
+        if [[ "$KIND" == "vec_add_f64" ]]; then
+            python3 - "$ROOT_DIR/self-hosted/gpu/nvidia_bare.sio" "$OUT" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+src, out_path = sys.argv[1:]
+text = Path(src).read_text(encoding="utf-8")
+match = re.search(
+    r"fn gpu_bare_sm80_vec_add_f64_cubin_hex_chunk\(i: i64\) -> string \{(.*?)\n\}\n\nfn gpu_bare_emit_sm80_vec_sub_f32_cubin",
+    text,
+    re.S,
+)
+if not match:
+    raise SystemExit("vec_add_f64 CUBIN chunk function not found")
+chunks = re.findall(r'"([0-9a-fA-F]+)"', match.group(1))
+if len(chunks) != 49:
+    raise SystemExit(f"expected 49 vec_add_f64 CUBIN chunks, found {len(chunks)}")
+data = bytes.fromhex("".join(chunks))
+if len(data) != 3112:
+    raise SystemExit(f"expected 3112 vec_add_f64 CUBIN bytes, found {len(data)}")
+if data[:4] != b"\x7fELF" or data[4] != 2:
+    raise SystemExit("vec_add_f64 CUBIN is not ELF64")
+if int.from_bytes(data[18:20], "little") != 190:
+    raise SystemExit("vec_add_f64 CUBIN e_machine is not NVIDIA CUDA")
+if b"sounio_bare_vec_add_f64_sm80" not in data:
+    raise SystemExit("vec_add_f64 CUBIN symbol missing")
+Path(out_path).write_bytes(data)
+PY
+        else
         "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile CUBIN emitter driver" >&2
             exit 1
@@ -1110,6 +1174,7 @@ if b"sounio_bare_vec_fma_f32_sm80" in data:
     raise SystemExit("internal CUBIN patch left stale fma symbol")
 path.write_bytes(data)
 PY
+        fi
         fi
 
         bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
@@ -1275,6 +1340,10 @@ PY
                 vec_add_f32)
                     KERNEL_NAME="sounio_bare_vec_add_f32_sm80"
                     DEFAULT_RUNTIME_RUNG="vec_add_f32"
+                    ;;
+                vec_add_f64)
+                    KERNEL_NAME="sounio_bare_vec_add_f64_sm80"
+                    DEFAULT_RUNTIME_RUNG="vec_add_f64"
                     ;;
                 vec_sub_f32)
                     KERNEL_NAME="sounio_bare_vec_sub_f32_sm80"
@@ -1688,6 +1757,31 @@ PY
             echo "kretikos: runtime validation - $RUNTIME_STATUS/$RUNTIME_REASON rung=$RUNTIME_RUNG kernel=$KERNEL_NAME"
         fi
         ;;
+    detect-cuda)
+        echo "CUDA Toolchain Detection"
+        echo "========================"
+        if command -v nvcc >/dev/null 2>&1; then
+            NVCC_PATH=$(command -v nvcc)
+            NVCC_VERSION=$(nvcc --version 2>/dev/null | grep "release" | head -1 || echo "unknown version")
+            echo "nvcc:    FOUND at $NVCC_PATH"
+            echo "         $NVCC_VERSION"
+        else
+            echo "nvcc:    NOT FOUND"
+        fi
+        if command -v ptxas >/dev/null 2>&1; then
+            PTXAS_PATH=$(command -v ptxas)
+            echo "ptxas:   FOUND at $PTXAS_PATH"
+        else
+            echo "ptxas:   NOT FOUND"
+        fi
+        if ldconfig -p 2>/dev/null | grep -q libcuda; then
+            LIBCUDA=$(ldconfig -p 2>/dev/null | grep libcuda | head -1 | awk '{print $1 " => " $4}')
+            echo "libcuda: FOUND ($LIBCUDA)"
+        else
+            echo "libcuda: NOT FOUND"
+        fi
+        ;;
+
     info)
         echo "Kretikos GPU Compiler"
         echo "====================="
@@ -1708,7 +1802,7 @@ PY
         echo "MSL templates:   self-hosted/gpu/metal.sio  (live via 'emit-metal <pattern>')"
         echo "Supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check"
         echo "SPIR-V templates: self-hosted/gpu/spirv.sio  (live via 'emit-spirv <pattern>')"
-        echo "Supported SPIR-V patterns: exit_only"
+        echo "Supported SPIR-V patterns: exit_only, vec_add, tid_kernel, self-check"
         echo "CPU emulation:   self-hosted/gpu/runtime/cpu_interpreter.sio  (live via 'emulate')"
         echo "CUBIN templates: self-hosted/gpu/nvidia_bare.sio  (live via 'emit-cubin')"
         echo "Artifact bundle: 'kretikos bundle' (or '-o <dir>' for a stable path)"
@@ -1733,10 +1827,11 @@ PY
         echo "  profile-source <source.sio>       Classify a checked source file for Kretikos"
         echo "  run-source <source.sio> -o <dir>  Check, bundle, and runtime-validate source profile"
         echo "  run-manifest <manifest.tsv> -o <dir> Run a source-profile corpus"
+        echo "  detect-cuda                       Detect CUDA toolchain (nvcc, ptxas, libcuda)"
         echo "  info                              Show compiler configuration"
         echo ""
-        echo "Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_dual_f32"
-        echo "Supported source profiles: vec_add_f32, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, store_u32_const"
+        echo "Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, vec_add_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_dual_f32"
+        echo "Supported source profiles: vec_add_f32, vec_add_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, store_u32_const"
         echo "Bundle validation: --validate-toolchain, --require-toolchain, --validate-runtime, --require-runtime"
         echo ""
         echo "Environment:"
