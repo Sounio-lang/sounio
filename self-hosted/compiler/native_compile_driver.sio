@@ -172,6 +172,11 @@ let V2_BUILTIN_SYS_EXIT_1: i64 = 20
 // measure(v, uncertainty: u) → Knowledge<f64>{value, uncertainty}
 // Handled entirely at parse time: allocates 2 contiguous f64 registers.
 let V2_BUILTIN_MEASURE: i64 = 21
+let V2_BUILTIN_HEAP_ALLOC: i64 = 22
+let V2_BUILTIN_HEAP_FREE: i64 = 23
+let V2_BUILTIN_READ_I64: i64 = 24
+let V2_BUILTIN_WRITE_I64: i64 = 25
+let V2_BUILTIN_HEAP_REALLOC: i64 = 26
 let V2_FIRST_USER_FN_ID: i64 = 32
 
 // V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
@@ -1027,6 +1032,11 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_BUILTIN_ASSERT") { return 19 }
     if token_text_eq(tok, "V2_BUILTIN_SYS_EXIT_1") { return 20 }
     if token_text_eq(tok, "V2_BUILTIN_MEASURE") { return 21 }
+    if token_text_eq(tok, "V2_BUILTIN_HEAP_ALLOC") { return 22 }
+    if token_text_eq(tok, "V2_BUILTIN_HEAP_FREE") { return 23 }
+    if token_text_eq(tok, "V2_BUILTIN_READ_I64") { return 24 }
+    if token_text_eq(tok, "V2_BUILTIN_WRITE_I64") { return 25 }
+    if token_text_eq(tok, "V2_BUILTIN_HEAP_REALLOC") { return 26 }
     if token_text_eq(tok, "V2_FIRST_USER_FN_ID") { return 32 }
 
     if token_text_eq(tok, "UFN_LOAD_IMM") { return 1 }
@@ -2039,6 +2049,11 @@ fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
     if name_eq_text(name, "driver_make_executable") { return V2_BUILTIN_DRIVER_CHMOD }
     if name_eq_text(name, "println") { return V2_BUILTIN_PRINTLN }
     if name_eq_text(name, "assert") { return V2_BUILTIN_ASSERT }
+    if name_eq_text(name, "heap_alloc") { return V2_BUILTIN_HEAP_ALLOC }
+    if name_eq_text(name, "heap_free") { return V2_BUILTIN_HEAP_FREE }
+    if name_eq_text(name, "read_i64") { return V2_BUILTIN_READ_I64 }
+    if name_eq_text(name, "write_i64") { return V2_BUILTIN_WRITE_I64 }
+    if name_eq_text(name, "heap_realloc") { return V2_BUILTIN_HEAP_REALLOC }
     -1
 }
 
@@ -2066,6 +2081,11 @@ fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "driver_make_executable") { return V2_BUILTIN_DRIVER_CHMOD }
     if token_text_eq(tok, "println") { return V2_BUILTIN_PRINTLN }
     if token_text_eq(tok, "assert") { return V2_BUILTIN_ASSERT }
+    if token_text_eq(tok, "heap_alloc") { return V2_BUILTIN_HEAP_ALLOC }
+    if token_text_eq(tok, "heap_free") { return V2_BUILTIN_HEAP_FREE }
+    if token_text_eq(tok, "read_i64") { return V2_BUILTIN_READ_I64 }
+    if token_text_eq(tok, "write_i64") { return V2_BUILTIN_WRITE_I64 }
+    if token_text_eq(tok, "heap_realloc") { return V2_BUILTIN_HEAP_REALLOC }
     -1
 }
 
@@ -5674,6 +5694,34 @@ fn drv_emit_driver_read_file(dst: i64, path_reg: i64, source_global_id: i64, len
     drv_emit_store_rax_mem_rdx_rbx8()
 }
 
+// Dedicated helper so new heap-builtin dispatch lives in its own stack frame,
+// avoiding stage1's miscompilation of new else-if blocks in large functions.
+fn emit_heap_builtin_call(i: i64, call_fn_id: i64) -> bool with Mut, Panic, Div {
+    let dst = V2_UFN_DST[i as usize]
+    let src = V2_UFN_SRC1[i as usize]
+    if call_fn_id == V2_BUILTIN_HEAP_ALLOC {
+        drv_emit_heap_alloc(dst, src)
+        return true
+    }
+    if call_fn_id == V2_BUILTIN_HEAP_FREE {
+        drv_emit_heap_free(dst, src)
+        return true
+    }
+    if call_fn_id == V2_BUILTIN_READ_I64 {
+        drv_emit_read_i64(dst, src)
+        return true
+    }
+    if call_fn_id == V2_BUILTIN_WRITE_I64 {
+        drv_emit_write_i64(dst, src)
+        return true
+    }
+    if call_fn_id == V2_BUILTIN_HEAP_REALLOC {
+        drv_emit_heap_realloc(dst, src)
+        return true
+    }
+    false
+}
+
 fn compile_ufn_from_globals(fn_id: i64) -> bool with IO, Mut, Panic, Div {
     drv_begin_function(fn_id)
     var i: i64 = 0
@@ -5749,6 +5797,8 @@ fn compile_ufn_from_globals(fn_id: i64) -> bool with IO, Mut, Panic, Div {
                 drv_emit_driver_global_load(V2_UFN_DST[i as usize], V2_GLOBAL_PT_INT_VALUE, V2_UFN_SRC1[i as usize])
             } else if call_fn_id == V2_BUILTIN_DRIVER_READ_FILE_TO_GLOBALS {
                 drv_emit_driver_read_file(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_GLOBAL_CURSOR_SOURCE, V2_GLOBAL_CURSOR_SOURCE_LEN, drv_global_stride())
+            } else if emit_heap_builtin_call(i, call_fn_id) {
+                // handled by heap-builtin helper (separate frame avoids stage1 miscompile)
             } else if call_argc > 1 {
                 drv_emit_call_argc(V2_UFN_DST[i as usize], V2_UFN_FN_ID[i as usize], V2_UFN_SRC1[i as usize], call_argc)
             } else {
@@ -6165,6 +6215,148 @@ fn drv_emit_builtin_sys_exit_1(fn_id: i64) with Mut, Panic, Div {
     drv_emit_syscall()
     drv_emit_byte(15)
     drv_emit_byte(11)
+}
+
+// xor rdi, rdi  (48 31 FF)
+fn drv_emit_xor_rdi_rdi() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(49)
+    drv_emit_byte(255)
+}
+
+// xor r9, r9  (4D 31 C9)
+fn drv_emit_xor_r9_r9() with Mut, Div, Panic {
+    drv_emit_byte(77)
+    drv_emit_byte(49)
+    drv_emit_byte(201)
+}
+
+// mov r10, imm32  (49 C7 C2 lo _ _ _)
+fn drv_emit_mov_r10_imm8(val: i64) with Mut, Div, Panic {
+    drv_emit_byte(73)
+    drv_emit_byte(199)
+    drv_emit_byte(194)
+    drv_emit_byte(val)
+    drv_emit_byte(0)
+    drv_emit_byte(0)
+    drv_emit_byte(0)
+}
+
+// mov r8, -1  (49 C7 C0 FF FF FF FF)
+fn drv_emit_mov_r8_neg1() with Mut, Div, Panic {
+    drv_emit_byte(73)
+    drv_emit_byte(199)
+    drv_emit_byte(192)
+    drv_emit_byte(255)
+    drv_emit_byte(255)
+    drv_emit_byte(255)
+    drv_emit_byte(255)
+}
+
+// shl rsi, 3  (48 C1 E6 03)
+fn drv_emit_shl_rsi_3() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(193)
+    drv_emit_byte(230)
+    drv_emit_byte(3)
+}
+
+// add rdi, rsi  (48 01 F7)
+fn drv_emit_add_rdi_rsi() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(1)
+    drv_emit_byte(247)
+}
+
+// mov rax, [rdi]  (48 8B 07)
+fn drv_emit_load_rax_from_rdi() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(139)
+    drv_emit_byte(7)
+}
+
+// mov [rdi], rax  (48 89 07)
+fn drv_emit_store_rax_to_rdi() with Mut, Div, Panic {
+    drv_emit_byte(72)
+    drv_emit_byte(137)
+    drv_emit_byte(7)
+}
+
+// rep movsb  (F3 A4)
+fn drv_emit_rep_movsb() with Mut, Div, Panic {
+    drv_emit_byte(243)
+    drv_emit_byte(164)
+}
+
+// heap_alloc(n_bytes) — inline mmap syscall
+// arg0_reg = n_bytes vreg; dst = result vreg
+fn drv_emit_heap_alloc(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(arg0_reg)
+    drv_emit_mov_reg_reg(6, 0)    // mov rsi, rax  (size)
+    drv_emit_xor_rdi_rdi()        // mov rdi, 0    (addr=NULL)
+    drv_emit_mov_reg_imm(2, 3)    // mov rdx, 3    (PROT_READ|PROT_WRITE)
+    drv_emit_mov_r10_imm8(34)     // mov r10, 0x22 (MAP_PRIVATE|MAP_ANON)
+    drv_emit_mov_r8_neg1()        // mov r8, -1    (fd=-1)
+    drv_emit_xor_r9_r9()          // xor r9, r9    (offset=0)
+    drv_emit_mov_rax_imm(9)       // mov rax, 9    (SYS_mmap)
+    drv_emit_syscall()
+    if dst >= 0 { drv_core_store_rax_to_temp(dst) }
+}
+
+// heap_free(ptr) — no-op, return 0
+fn drv_emit_heap_free(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
+    drv_emit_xor_rax_rax()
+    if dst >= 0 { drv_core_store_rax_to_temp(dst) }
+}
+
+// read_i64(ptr, idx) — load ptr[idx]
+fn drv_emit_read_i64(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(arg0_reg)
+    drv_emit_mov_reg_reg(7, 0)    // mov rdi, rax  (ptr)
+    drv_core_load_temp_to_rax(arg0_reg + 1)
+    drv_emit_mov_reg_reg(6, 0)    // mov rsi, rax  (idx)
+    drv_emit_shl_rsi_3()          // shl rsi, 3    (idx * 8)
+    drv_emit_add_rdi_rsi()        // add rdi, rsi  (ptr + idx*8)
+    drv_emit_load_rax_from_rdi()  // mov rax, [rdi]
+    if dst >= 0 { drv_core_store_rax_to_temp(dst) }
+}
+
+// write_i64(ptr, idx, val) — store val to ptr[idx]
+fn drv_emit_write_i64(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(arg0_reg)
+    drv_emit_mov_reg_reg(7, 0)    // mov rdi, rax  (ptr)
+    drv_core_load_temp_to_rax(arg0_reg + 1)
+    drv_emit_mov_reg_reg(6, 0)    // mov rsi, rax  (idx)
+    drv_emit_shl_rsi_3()          // shl rsi, 3    (idx * 8)
+    drv_emit_add_rdi_rsi()        // add rdi, rsi  (ptr + idx*8)
+    drv_core_load_temp_to_rax(arg0_reg + 2)   // val
+    drv_emit_store_rax_to_rdi()   // mov [rdi], rax
+    drv_emit_xor_rax_rax()
+    if dst >= 0 { drv_core_store_rax_to_temp(dst) }
+}
+
+// heap_realloc(old_ptr, new_size) — mmap new region, copy old_ptr content, return new_ptr
+fn drv_emit_heap_realloc(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
+    // mmap(NULL, new_size, PROT_RW, MAP_PRIVATE|MAP_ANON, -1, 0)
+    drv_core_load_temp_to_rax(arg0_reg + 1)
+    drv_emit_mov_reg_reg(6, 0)    // mov rsi, rax  (new_size)
+    drv_emit_xor_rdi_rdi()
+    drv_emit_mov_reg_imm(2, 3)
+    drv_emit_mov_r10_imm8(34)
+    drv_emit_mov_r8_neg1()
+    drv_emit_xor_r9_r9()
+    drv_emit_mov_rax_imm(9)
+    drv_emit_syscall()             // rax = new_ptr
+    // save new_ptr; set up for rep movsb (rdi=new_ptr, rsi=old_ptr, rcx=new_size)
+    drv_emit_mov_reg_reg(7, 0)    // mov rdi, rax  (new_ptr = dest)
+    drv_emit_byte(87)             // push rdi      (save new_ptr)
+    drv_core_load_temp_to_rax(arg0_reg)
+    drv_emit_mov_reg_reg(6, 0)    // mov rsi, rax  (old_ptr = source)
+    drv_core_load_temp_to_rax(arg0_reg + 1)
+    drv_emit_mov_reg_reg(1, 0)    // mov rcx, rax  (new_size = count)
+    drv_emit_rep_movsb()          // rep movsb
+    drv_emit_byte(88)             // pop rax       (new_ptr)
+    if dst >= 0 { drv_core_store_rax_to_temp(dst) }
 }
 
 fn drv_emit_entry_trampoline(main_fn_id: i64) with Mut, Panic, Div {
