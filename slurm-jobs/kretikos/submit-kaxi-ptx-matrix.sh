@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# Submit a single Slurm job that exercises ALL K-AXI → PTX patterns × modes
+# on a real GPU and verifies output against the expected GUM-propagated
+# reference values.
+#
+# Cases (12 total):
+#   source_vec_add_f32                   basic         mem=2*init
+#   source_vec_add_f32                   epistemic     mem,var both verified
+#   source_vec_sub_f32                   basic
+#   source_vec_sub_f32                   epistemic
+#   source_vec_mul_f32                   basic         mem=init²
+#   source_vec_mul_f32                   epistemic     var=2·init² (independent path)
+#   source_vec_div_f32                   basic
+#   source_vec_div_f32                   epistemic
+#   source_fma_f32                       basic         mem=init·(init+1)
+#   source_fma_f32                       epistemic     var=2·init²+1
+#   source_epistemic_dual_output_f32     basic         mem=8·init²
+#   source_epistemic_dual_output_f32     epistemic     mem=8·init², var=64·init² (X² delta-method)
+#
+# Reports "kaxi_matrix passed=N/12 failed=..." via Slurm Comment.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+NS="${NS:-slurm-pilot}"
+KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
+LOGIN_POD_NAME="${LOGIN_POD_NAME:-}"
+LOGIN_SELECTOR="${LOGIN_SELECTOR:-app.kubernetes.io/name=login}"
+SBATCH_NODELIST="${SBATCH_NODELIST:-gpuorangefs-r770-proxmox}"
+SBATCH_PARTITION="${SBATCH_PARTITION:-gpu-orangefs}"
+SBATCH_ACCOUNT="${SBATCH_ACCOUNT:-plruntime}"
+SBATCH_QOS="${SBATCH_QOS:-gpuorangefs}"
+JOB_MEM="${JOB_MEM:-4G}"
+JOB_TIME="${JOB_TIME:-00:10:00}"
+WAIT_FOR_RESULT="${WAIT_FOR_RESULT:-1}"
+WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-600}"
+
+if [[ ! -x "${ROOT_DIR}/bin/kretikos" ]]; then echo "missing kretikos" >&2; exit 1; fi
+if ! command -v cc >/dev/null 2>&1; then echo "local cc required" >&2; exit 1; fi
+
+RUN_ID="${RUN_ID:-kaxi-matrix-$(date -u +%Y%m%dT%H%M%S)-${BASHPID}}"
+STAGE_DIR="/tmp/${RUN_ID}.stage"
+LOCAL_TARBALL="/tmp/${RUN_ID}.tgz"
+LOCAL_SBATCH="/tmp/${RUN_ID}.sbatch"
+cleanup() { rm -rf "${STAGE_DIR}" "${LOCAL_TARBALL}" "${LOCAL_SBATCH}"; }
+trap cleanup EXIT
+
+mkdir -p "${STAGE_DIR}"
+
+# ----- declare cases as parallel arrays ---------------------------------
+# (name|mode|threads|mem-words|init-mem|init-var|expected-mem|expected-var)
+CASES=(
+  "vec_add|basic|8|8|1,2,3,4,5,6,7,8||2,4,6,8,10,12,14,16|"
+  "vec_add|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,4,6,8,10,12,14,16|2,2,2,2,2,2,2,2"
+  "vec_sub|basic|8|8|1,2,3,4,5,6,7,8||0,0,0,0,0,0,0,0|"
+  "vec_sub|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|0,0,0,0,0,0,0,0|2,2,2,2,2,2,2,2"
+  "vec_mul|basic|8|8|1,2,3,4,5,6,7,8||1,4,9,16,25,36,49,64|"
+  "vec_mul|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|1,4,9,16,25,36,49,64|2,8,18,32,50,72,98,128"
+  "vec_div|basic|8|8|1,2,3,4,5,6,7,8||1,1,1,1,1,1,1,1|"
+  "vec_div|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|1,1,1,1,1,1,1,1|2,2,2,2,2,2,2,2"
+  "fma|basic|8|8|1,2,3,4,5,6,7,8||2,6,12,20,30,42,56,72|"
+  "fma|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,6,12,20,30,42,56,72|3,9,19,33,51,73,99,129"
+  "edo|basic|8|8|1,2,3,4,5,6,7,8||8,32,72,128,200,288,392,512|"
+  "edo|epistemic|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|8,32,72,128,200,288,392,512|64,256,576,1024,1600,2304,3136,4096"
+)
+# Map short names → kretikos pattern names
+declare -A PATTERN_FOR
+PATTERN_FOR[vec_add]=source_vec_add_f32
+PATTERN_FOR[vec_sub]=source_vec_sub_f32
+PATTERN_FOR[vec_mul]=source_vec_mul_f32
+PATTERN_FOR[vec_div]=source_vec_div_f32
+PATTERN_FOR[fma]=source_fma_f32
+PATTERN_FOR[edo]=source_epistemic_dual_output_f32
+
+# ----- build PTX for every case (locally, both basic + epistemic) -------
+echo "[0/3] generating ${#CASES[@]} PTX kernels"
+INDEX=0
+> "${STAGE_DIR}/cases.tsv"
+for c in "${CASES[@]}"; do
+  IFS='|' read -r name mode threads mw imem ivar emem evar <<<"$c"
+  pat="${PATTERN_FOR[$name]}"
+  [[ -z "$pat" ]] && { echo "unknown name: $name" >&2; exit 1; }
+  ptx="${STAGE_DIR}/case_${INDEX}.ptx"
+  EMIT_FLAGS=()
+  [[ "$mode" == "epistemic" ]] && EMIT_FLAGS+=(--epistemic)
+  "${ROOT_DIR}/bin/kretikos" kaxi-emit-ptx "$pat" "${EMIT_FLAGS[@]}" -o "$ptx" >/dev/null
+  echo "${INDEX}|${name}|${mode}|${threads}|${mw}|${imem}|${ivar}|${emem}|${evar}" >> "${STAGE_DIR}/cases.tsv"
+  INDEX=$((INDEX+1))
+done
+
+# ----- build runner -----------------------------------------------------
+echo "[1/3] building runner"
+cc -O2 "${ROOT_DIR}/scripts/gpu/kaxi_ptx_runner.c" -ldl -o "${STAGE_DIR}/runner"
+
+# ----- worker driver script --------------------------------------------
+cat > "${STAGE_DIR}/run_cases.sh" <<'SHELL_EOF'
+#!/bin/bash
+set -uo pipefail
+cd "$(dirname "$0")"
+chmod +x runner
+PASSED=0
+TOTAL=0
+FAILED_LIST=""
+while IFS='|' read -r idx name mode threads mw imem ivar emem evar; do
+  TOTAL=$((TOTAL+1))
+  ARGS=("case_${idx}.ptx" --threads "$threads" --mem-words "$mw")
+  [[ "$mode" == "epistemic" ]] && ARGS+=(--epistemic)
+  [[ -n "$imem" ]] && ARGS+=(--init-mem "$imem")
+  [[ -n "$ivar" ]] && ARGS+=(--init-var "$ivar")
+  out="$(./runner "${ARGS[@]}" 2>&1)"
+  rc=$?
+  status="$(echo "$out" | grep '^sounio_kaxi_runtime' | tail -1 | awk '{print $2}' | sed 's/status=//')"
+  mem_got="$(echo "$out" | grep '^MEM:' | head -1 | sed 's/MEM://' | xargs | tr ' ' ',')"
+  var_got="$(echo "$out" | grep '^VAR:' | head -1 | sed 's/VAR://' | xargs | tr ' ' ',')"
+  ok=1
+  [[ "$status" != "pass" ]] && ok=0
+  [[ "$mem_got" != "$emem" ]] && ok=0
+  if [[ "$mode" == "epistemic" && -n "$evar" ]]; then
+    [[ "$var_got" != "$evar" ]] && ok=0
+  fi
+  if [[ $ok -eq 1 ]]; then
+    echo "PASS $idx $name $mode"
+    PASSED=$((PASSED+1))
+  else
+    echo "FAIL $idx $name $mode status=$status"
+    echo "  mem got=$mem_got"
+    echo "  mem exp=$emem"
+    if [[ "$mode" == "epistemic" ]]; then
+      echo "  var got=$var_got"
+      echo "  var exp=$evar"
+    fi
+    FAILED_LIST="${FAILED_LIST}${idx}_${name}_${mode},"
+  fi
+done < cases.tsv
+echo "kaxi_matrix passed=${PASSED}/${TOTAL} failed=${FAILED_LIST%,}"
+SHELL_EOF
+chmod +x "${STAGE_DIR}/run_cases.sh"
+
+echo "[2/3] packaging"
+tar -C "${STAGE_DIR}" -czf "${LOCAL_TARBALL}" .
+PAYLOAD_B64="$(base64 -w 0 "${LOCAL_TARBALL}" 2>/dev/null || base64 "${LOCAL_TARBALL}" | tr -d '\n')"
+
+echo "[3/3] resolving login pod + submitting"
+if [[ -n "${LOGIN_POD_NAME}" ]]; then
+  LOGIN_POD="${LOGIN_POD_NAME}"
+else
+  LOGIN_POD="$("${KUBECTL_BIN}" -n "${NS}" get pods -l "${LOGIN_SELECTOR}" \
+    --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+fi
+[[ -z "${LOGIN_POD}" ]] && { echo "no live login pod" >&2; exit 1; }
+
+cat > "${LOCAL_SBATCH}" <<EOF
+#!/usr/bin/env bash
+#SBATCH -J ${RUN_ID}
+#SBATCH -p ${SBATCH_PARTITION}
+#SBATCH -A ${SBATCH_ACCOUNT}
+#SBATCH --qos=${SBATCH_QOS}
+#SBATCH --gres=gpu:1
+#SBATCH -N 1 -n 1 -c 2
+#SBATCH --mem=${JOB_MEM}
+#SBATCH --time=${JOB_TIME}
+#SBATCH -w ${SBATCH_NODELIST}
+#SBATCH -o /dev/null
+#SBATCH -e /dev/null
+set -euo pipefail
+LOCAL_ROOT="/tmp/${RUN_ID}-\${SLURM_JOB_ID:-manual}"
+LOG="\${LOCAL_ROOT}/run.log"
+mark() { [[ -n "\${SLURM_JOB_ID:-}" ]] && scontrol update "JobId=\${SLURM_JOB_ID}" "Comment=\$1" >/dev/null 2>&1 || true; }
+fail() {
+  set +e; local rc=\$1 line=\$2
+  local tail=""
+  [[ -f "\${LOG}" ]] && tail="\$(tail -10 "\${LOG}" | tr '\n' ';' | tr -cd '[:alnum:]_./:=,; -' | cut -c1-700)"
+  mark "kaxi_matrix=fail rc=\${rc} line=\${line} log=\${tail}"
+  exit "\${rc}"
+}
+trap 'fail "\$?" "\$LINENO"' ERR
+mkdir -p "\${LOCAL_ROOT}"
+mark "kaxi_matrix=running phase=decode"
+cat > "\${LOCAL_ROOT}/payload.tgz.b64" <<'PAYLOAD_EOF'
+${PAYLOAD_B64}
+PAYLOAD_EOF
+base64 -d "\${LOCAL_ROOT}/payload.tgz.b64" > "\${LOCAL_ROOT}/payload.tgz"
+tar -xzf "\${LOCAL_ROOT}/payload.tgz" -C "\${LOCAL_ROOT}"
+cd "\${LOCAL_ROOT}"
+export PATH="/usr/local/cuda/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
+mark "kaxi_matrix=running phase=run"
+./run_cases.sh > "\${LOG}" 2>&1
+summary="\$(grep '^kaxi_matrix' "\${LOG}" | tail -1 || echo "kaxi_matrix=no_summary")"
+short="\$(echo "\${summary}" | tr -cd '[:alnum:]_./:=,; -' | cut -c1-700)"
+mark "\${short}"
+EOF
+
+"${KUBECTL_BIN}" -n "${NS}" cp "${LOCAL_SBATCH}" "${LOGIN_POD}:/tmp/${RUN_ID}.sbatch" >/dev/null
+JOB_ID="$("${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "sbatch --parsable /tmp/${RUN_ID}.sbatch" | tr -d '\r\n' | awk '{print $NF}')"
+[[ -z "${JOB_ID}" || ! "${JOB_ID}" =~ ^[0-9]+$ ]] && { echo "submit failed: ${JOB_ID}" >&2; exit 1; }
+echo "submitted job: ${JOB_ID}"
+
+[[ "${WAIT_FOR_RESULT}" != "1" ]] && exit 0
+
+deadline=$(( $(date +%s) + WAIT_TIMEOUT_SECONDS ))
+while [[ $(date +%s) -lt $deadline ]]; do
+  state="$("${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- bash -lc \
+    "scontrol show job ${JOB_ID} --oneliner 2>/dev/null | tr ' ' '\n' | grep -E '^JobState=' | head -1" \
+    | tr -d '\r\n' || true)"
+  echo "  job ${JOB_ID}: ${state}"
+  case "${state}" in
+    JobState=COMPLETED|JobState=FAILED|JobState=CANCELLED|JobState=TIMEOUT|JobState=NODE_FAIL|JobState=BOOT_FAIL) break ;;
+  esac
+  sleep 5
+done
+
+"${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "scontrol show job ${JOB_ID}" \
+  | grep -E "JobState|ExitCode|Comment"
