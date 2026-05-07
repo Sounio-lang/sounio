@@ -66,6 +66,7 @@ CASES=(
   "mb_double|basic|4|8|32|_seq_||2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64|"
   "mb_double|basic|8|8|64|_seq_||2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102,104,106,108,110,112,114,116,118,120,122,124,126,128|"
 )
+
 # Map short names → kretikos pattern names
 declare -A PATTERN_FOR
 PATTERN_FOR[vec_add]=source_vec_add_f32
@@ -75,6 +76,16 @@ PATTERN_FOR[vec_div]=source_vec_div_f32
 PATTERN_FOR[fma]=source_fma_f32
 PATTERN_FOR[edo]=source_epistemic_dual_output_f32
 PATTERN_FOR[mb_double]=mb_vec_double_f32
+
+# Programmatically generate large multi-block cases (256, 1024 elements).
+# Each writes mem[i] = 2*(i+1).
+for N in 256 1024; do
+  # Pick blocks/threads to multiply to N (max 1024 threads/block on sm89)
+  if [[ "$N" -le 256 ]]; then BLOCKS=8; THREADS=$((N / 8)); else BLOCKS=32; THREADS=$((N / 32)); fi
+  EMEM=$(seq 1 "$N" | awk '{ printf "%s%d", (NR>1?",":""), $1*2 }')
+  CASES+=("mb_double_${N}|basic|${BLOCKS}|${THREADS}|${N}|_seq_||${EMEM}|")
+  PATTERN_FOR[mb_double_${N}]=mb_vec_double_f32
+done
 
 # ----- build PTX for every case (locally, both basic + epistemic) -------
 echo "[0/3] generating ${#CASES[@]} PTX kernels"
