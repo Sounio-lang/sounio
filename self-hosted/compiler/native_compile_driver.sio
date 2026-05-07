@@ -2838,6 +2838,24 @@ fn parse_term_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
     let left = parse_atom_ir(func, ctx, pos)
     if left.ok == 0 { return left }
     var result = left
+    // Apply `as T` cast before the mul-op loop so that patterns like
+    // `(expr) as f32 / divisor` work: the cast promotes the type then the
+    // loop sees the `/` and handles it correctly.
+    if token_kind(result.next) == TK_AS {
+        let ct = result.next + 1
+        let is_float = token_kind(ct) == TK_IDENT && (token_text_eq(ct, "f64") || token_text_eq(ct, "f32"))
+        if is_float && !reg_is_f64(result.reg) {
+            let conv = alloc_reg(ctx)
+            ufn_record_cvt_i64_to_f64(conv, result.reg)
+            result = ExprParse { ok: 1, reg: conv, next: result.next + 2}
+        } else if reg_is_f64(result.reg) && token_kind(ct) == TK_IDENT && !is_float {
+            let conv = alloc_reg(ctx)
+            ufn_record_cvt_f64_to_i64(conv, result.reg)
+            result = ExprParse { ok: 1, reg: conv, next: result.next + 2}
+        } else {
+            result = ExprParse { ok: 1, reg: result.reg, next: result.next + 2}
+        }
+    }
     var op_kind = token_kind(result.next)
     while is_mul_op(op_kind) {
         let right = parse_atom_ir(func, ctx, result.next + 1)
@@ -2903,12 +2921,13 @@ fn parse_expr_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
     // skip trailing 'as T'; emit conversion instructions for f64<->i64 casts
     if token_kind(result.next) == TK_AS {
         let cast_type_tok = result.next + 1
-        if token_kind(cast_type_tok) == TK_IDENT && token_text_eq(cast_type_tok, "f64") && !reg_is_f64(result.reg) {
-            // integer → float: cvtsi2sd
+        let cast_is_float_type = token_kind(cast_type_tok) == TK_IDENT && (token_text_eq(cast_type_tok, "f64") || token_text_eq(cast_type_tok, "f32"))
+        if cast_is_float_type && !reg_is_f64(result.reg) {
+            // integer → float: cvtsi2sd (f32 treated as f64 in native backend)
             let conv_reg = alloc_reg(ctx)
             ufn_record_cvt_i64_to_f64(conv_reg, result.reg)
             result = ExprParse { ok: 1, reg: conv_reg, next: result.next + 2}
-        } else if reg_is_f64(result.reg) && token_kind(cast_type_tok) == TK_IDENT && !token_text_eq(cast_type_tok, "f64") {
+        } else if reg_is_f64(result.reg) && token_kind(cast_type_tok) == TK_IDENT && !cast_is_float_type {
             // float → integer: cvttsd2si (truncation)
             let conv_reg = alloc_reg(ctx)
             ufn_record_cvt_f64_to_i64(conv_reg, result.reg)
@@ -3971,7 +3990,7 @@ fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
                     if token_kind(j) == TK_ARROW {
                         if j + 1 < token_count && token_kind(j + 1) == TK_IDENT {
                             ret_sidx = find_struct_idx_tok(j + 1)
-                            if token_text_eq(j + 1, "f64") {
+                            if token_text_eq(j + 1, "f64") || token_text_eq(j + 1, "f32") {
                                 ret_is_f64 = 1
                             }
                             if j + 4 < token_count && token_kind(j + 2) == TK_LT && token_kind(j + 3) == TK_IDENT && token_kind(j + 4) == TK_GT && token_text_eq(j + 3, "f64") {
