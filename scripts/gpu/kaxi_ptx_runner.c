@@ -149,8 +149,8 @@ int main(int argc, char **argv) {
     }
     if (print_count < 0) print_count = mem_words;
     if (print_count > mem_words) print_count = mem_words;
-    if (mem_words < 1 || mem_words > 1024) {
-        fprintf(stderr, "mem-words out of range\n"); return 2;
+    if (mem_words < 1 || mem_words > 65536) {
+        fprintf(stderr, "mem-words out of range (1..65536)\n"); return 2;
     }
     if (threads < 1 || threads > 1024) {
         fprintf(stderr, "threads out of range\n"); return 2;
