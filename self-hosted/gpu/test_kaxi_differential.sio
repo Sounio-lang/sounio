@@ -3,6 +3,11 @@
 // Builds reference kernels, runs scalar + warp simulators, prints memory states
 // and standalone C code for each kernel. A shell script compiles the C code
 // with gcc and compares outputs.
+//
+// WORKAROUND: The Sounio compiler has a bug with storing string return values
+// from imported functions into `let` bindings when the caller has large stack
+// frames. We use local transpilation functions and pass results directly to
+// println without intermediate storage.
 
 use gpu::kaxi_backend::*
 use gpu::kaxi_to_c::*
@@ -14,32 +19,79 @@ fn emit_kernel_header(name: string) with IO {
     println("---")
 }
 
-fn emit_sim_mem(state: KaxiSimState) with IO, Mut {
+fn emit_sim_mem(state: KaxiSimState) with IO, Mut, Panic, Div, Alloc {
     print("SIM_MEM:")
     var i: i64 = 0
     while i < 16 {
         print(" ")
-        print_int(state.mem[i as usize])
+        print(int_to_string(state.mem[i as usize]))
         i = i + 1
     }
     println("")
 }
 
-fn emit_warp_mem(warp: KaxiWarpState) with IO, Mut {
+fn emit_warp_mem(warp: KaxiWarpState) with IO, Mut, Panic, Div, Alloc {
     print("WARP_MEM:")
     var i: i64 = 0
     while i < 16 {
         print(" ")
-        print_int(warp.mem[i as usize])
+        print(int_to_string(warp.mem[i as usize]))
         i = i + 1
     }
     println("")
 }
 
-fn emit_c_code(asm: KaxiAsmBuf, warp_size: i64) with IO, Mut, Panic, Div, Alloc {
-    let c = kaxi_transpile_to_c_standalone(asm, warp_size)
+// Local transpiler to avoid imported-function string-return bug
+fn my_transpile_to_c(asm: KaxiAsmBuf) -> string with Mut, Panic, Div, Alloc {
+    var out: KaxiAsmBuf = kaxi_asm_new()
+    out = kaxi_asm_push_str(out, "#include <stdio.h>\n")
+    out = kaxi_asm_push_str(out, "void kaxi_kernel(int tid, long long mem[1024], long long shared_mem[256]) {\n")
+    out = kaxi_asm_push_str(out, "    long long reg_val[64] = {0};\n")
+    out = kaxi_asm_push_str(out, "    int pred[8] = {0};\n")
+    out = kaxi_asm_push_str(out, "    (void)tid;\n")
+    var line_start: i64 = 0
+    var i: i64 = 0
+    while i <= asm.len {
+        let is_end = i == asm.len
+        let is_newline = if i < asm.len { asm.data[i as usize] as i8 == 10 } else { true }
+        if is_end || is_newline {
+            let line_len = i - line_start
+            if line_len > 0 {
+                let first_char = asm.data[line_start as usize] as i8
+                if first_char != 59 && first_char != 0 {
+                    let c = kaxi_transpile_line_to_c(asm, line_start, line_len)
+                    if str_len(c) > 0 {
+                        out = kaxi_asm_push_str(out, "    ")
+                        out = kaxi_asm_push_str(out, c)
+                        out = kaxi_asm_push_byte(out, 10)
+                    }
+                }
+            }
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+    out = kaxi_asm_push_str(out, "}\n")
+    kaxi_asm_to_string(out)
+}
+
+// Print standalone C code directly (no string storage in caller)
+fn emit_c_direct(asm: KaxiAsmBuf, warp_size: i64) with IO, Mut, Panic, Div, Alloc {
     println("---C_CODE---")
-    println(c)
+    println("#include \"self-hosted/gpu/kaxi_c_runtime.h\"")
+    println(my_transpile_to_c(asm))
+    println("int main() {")
+    println("    long long mem[1024] = {0};")
+    if warp_size > 1 {
+        print("    kaxi_run_warp(kaxi_kernel, mem, ")
+        print(int_to_string(warp_size))
+        println(");")
+    } else {
+        println("    kaxi_run_scalar(kaxi_kernel, mem);")
+    }
+    println("    kaxi_dump_mem(\"C_MEM\", mem, 16);")
+    println("    return 0;")
+    println("}")
     println("---C_CODE_END---")
 }
 
@@ -70,7 +122,7 @@ fn run_kernel_vec_add() -> bool with IO, Mut, Panic, Div, Alloc {
     warp = kaxi_warp_exec(warp, stream)
     emit_sim_mem(state)
     emit_warp_mem(warp)
-    emit_c_code(asm, 1)
+    emit_c_direct(asm, 1)
     check_mem_agree(state, warp)
 }
 
@@ -90,7 +142,7 @@ fn run_kernel_fma() -> bool with IO, Mut, Panic, Div, Alloc {
     warp = kaxi_warp_exec(warp, stream)
     emit_sim_mem(state)
     emit_warp_mem(warp)
-    emit_c_code(asm, 1)
+    emit_c_direct(asm, 1)
     check_mem_agree(state, warp)
 }
 
@@ -112,7 +164,7 @@ fn run_kernel_mul_div() -> bool with IO, Mut, Panic, Div, Alloc {
     warp = kaxi_warp_exec(warp, stream)
     emit_sim_mem(state)
     emit_warp_mem(warp)
-    emit_c_code(asm, 1)
+    emit_c_direct(asm, 1)
     check_mem_agree(state, warp)
 }
 
@@ -131,7 +183,7 @@ fn run_kernel_multi_lane() -> bool with IO, Mut, Panic, Div, Alloc {
     warp = kaxi_warp_exec(warp, stream)
     emit_sim_mem(state)
     emit_warp_mem(warp)
-    emit_c_code(asm, 8)
+    emit_c_direct(asm, 8)
     state.mem[0] == warp.mem[0]
 }
 
@@ -151,7 +203,7 @@ fn run_kernel_shared_memory() -> bool with IO, Mut, Panic, Div, Alloc {
     warp = kaxi_warp_exec(warp, stream)
     emit_sim_mem(state)
     emit_warp_mem(warp)
-    emit_c_code(asm, 1)
+    emit_c_direct(asm, 1)
     check_mem_agree(state, warp)
 }
 

@@ -35,6 +35,16 @@ chmod +x "$E2E_ELF"
 cat "$E2E_LOG"
 grep -q "PASS kaxi_end_to_end" "$E2E_LOG"
 
+echo "kretikos_kaxi_gate: differential-validation"
+DIFF_LOG="$OUT_DIR/kaxi_differential.out"
+"$ROOT_DIR/scripts/dev/run_kaxi_differential.sh" >"$DIFF_LOG" 2>&1 || {
+  cat "$DIFF_LOG"
+  echo "kretikos_kaxi_gate: differential-validation FAILED"
+  exit 1
+}
+cat "$DIFF_LOG"
+grep -q "PASS differential_validation" "$DIFF_LOG"
+
 patterns=(
   exit_only
   vec_add
