@@ -69,6 +69,7 @@ CASES=(
   "fma|f32|1|8|8|2,3,4,5,6,7,8,9||6,12,20,30,42,56,72,90|"
   "pbpk|basic|1|8|8|1,2,3,4,5,6,7,8||9,8,7,6,5,4,3,2|"
   "pbpk|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|9,8,7,6,5,4,3,2|5,5,5,5,5,5,5,5"
+  "pbpk|f32e|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|9,8,7,6,5,4,3,2|5,5,5,5,5,5,5,5"
   "mb_double|basic|4|8|32|_seq_||2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64|"
   "mb_double|basic|8|8|64|_seq_||2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102,104,106,108,110,112,114,116,118,120,122,124,126,128|"
 )
@@ -106,6 +107,7 @@ for c in "${CASES[@]}"; do
   EMIT_FLAGS=()
   [[ "$mode" == "epistemic" ]] && EMIT_FLAGS+=(--epistemic)
   [[ "$mode" == "f32" ]] && EMIT_FLAGS+=(--f32)
+  [[ "$mode" == "f32e" ]] && EMIT_FLAGS+=(--f32-epistemic)
   "${ROOT_DIR}/bin/kretikos" kaxi-emit-ptx "$pat" "${EMIT_FLAGS[@]}" -o "$ptx" >/dev/null
   echo "${INDEX}|${name}|${mode}|${blocks}|${threads}|${mw}|${imem}|${ivar}|${emem}|${evar}" >> "${STAGE_DIR}/cases.tsv"
   INDEX=$((INDEX+1))
@@ -129,6 +131,7 @@ while IFS='|' read -r idx name mode blocks threads mw imem ivar emem evar; do
   ARGS=("case_${idx}.ptx" --blocks "$blocks" --threads "$threads" --mem-words "$mw")
   [[ "$mode" == "epistemic" ]] && ARGS+=(--epistemic)
   [[ "$mode" == "f32" ]] && ARGS+=(--type f32)
+  [[ "$mode" == "f32e" ]] && ARGS+=(--epistemic --type f32)
   if [[ "$imem" == "_seq_" ]]; then
     ARGS+=(--init-seq)
   elif [[ -n "$imem" ]]; then
