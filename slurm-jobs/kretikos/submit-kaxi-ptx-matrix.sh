@@ -114,6 +114,14 @@ EMEM_PBPK1024=$(seq 1 1024 | awk '{ printf "%s%g", (NR>1?",":""), $1*0.0625 + 4.
 CASES+=("pbpk4_1024|f32|1|1024|1024|_seq_||${EMEM_PBPK1024}|")
 PATTERN_FOR[pbpk4_1024]=pbpk_4step
 
+# Multi-block 2-compartment 1-step at 256 threads (8 blocks × 32):
+#   C₁_new[i] = 0.75·(i+1) + 0.5 ; C₂_new[i] = 0.25·(i+1) ; C₂_0 = 0
+EMEM_2CMB=$(seq 1 256 | awk '{ printf "%s%g", (NR>1?",":""), 0.75*$1 + 0.5 }')
+EVAR_2CMB=$(seq 1 256 | awk '{ printf "%s%g", (NR>1?",":""), 0.25*$1 }')
+INIT_2CMB_C2=$(seq 1 256 | awk '{ printf "%s0", (NR>1?",":"") }')
+CASES+=("pbpk2c_mb|f32_2c|8|32|256|_seq_|${INIT_2CMB_C2}|${EMEM_2CMB}|${EVAR_2CMB}")
+PATTERN_FOR[pbpk2c_mb]=pbpk_2comp_mb
+
 # ----- build PTX for every case (locally, both basic + epistemic) -------
 echo "[0/3] generating ${#CASES[@]} PTX kernels"
 INDEX=0
