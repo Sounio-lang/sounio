@@ -18,6 +18,7 @@ lowering_cases=(
   "vec_mul_f32|examples/kretikos/lower_vec_mul_f32.sio|source_vec_mul_f32|indexed_f32_vector_mul|mul"
   "vec_div_f32|examples/kretikos/lower_vec_div_f32.sio|source_vec_div_f32|indexed_f32_vector_div|div"
   "fma_f32|examples/kretikos/lower_fma_f32.sio|source_fma_f32|indexed_f32_affine_mad|mul,add"
+  "epistemic_dual_output_f32|examples/kretikos/lower_epistemic_dual_output_f32.sio|source_epistemic_dual_output_f32|indexed_f32_epistemic_dual_output|add,mul"
 )
 
 echo "kretikos_kaxi_lowering_gate: shell"
@@ -71,7 +72,9 @@ if lowering.get("recognized_pattern") != recognized_pattern:
     raise SystemExit(f"recognized_pattern_mismatch:{label}:{lowering.get('recognized_pattern')} != {recognized_pattern}")
 if not lowering.get("source_lowered_to_kaxi"):
     raise SystemExit(f"source_lowered_to_kaxi_not_true:{label}")
-if obj.get("kaxi", {}).get("epistemic_lanes", {}).get("store_global_count", 0) < 1:
+store_count = obj.get("kaxi", {}).get("epistemic_lanes", {}).get("store_global_count", 0)
+required_stores = 2 if label == "epistemic_dual_output_f32" else 1
+if store_count < required_stores:
     raise SystemExit(f"store_global_count_missing:{label}")
 PY
 done
@@ -126,6 +129,15 @@ for spec in case_specs:
         failures.append({"kind": "kaxi_pattern_mismatch", "label": label, "kaxi_pattern": lowering_contract.get("kaxi_pattern")})
     if not lowering_contract.get("source_lowered_to_kaxi"):
         failures.append({"kind": "source_lowered_to_kaxi_not_true", "label": label})
+    store_count = witness.get("epistemic_lanes", {}).get("store_global_count", 0)
+    required_stores = 2 if label == "epistemic_dual_output_f32" else 1
+    if store_count < required_stores:
+        failures.append({
+            "kind": "store_global_count_below_required",
+            "label": label,
+            "store_global_count": store_count,
+            "required": required_stores,
+        })
     for opcode in ("get_tid", "load_global", "store_global", "ret"):
         if opcode not in assembly_text:
             failures.append({"kind": "missing_lowered_opcode", "label": label, "opcode": opcode})
@@ -149,7 +161,8 @@ for spec in case_specs:
         "witness_sha256": hashlib.sha256(witness_path.read_bytes()).hexdigest(),
         "opcodes": witness.get("assembly", {}).get("opcodes", []),
         "seq_dense_zero_based": witness.get("assembly", {}).get("seq_dense_zero_based"),
-        "store_global_count": witness.get("epistemic_lanes", {}).get("store_global_count"),
+        "store_global_count": store_count,
+        "required_store_global_count": required_stores,
     })
 
 if "profile_directive_present" not in negative_stderr.read_text(encoding="utf-8"):

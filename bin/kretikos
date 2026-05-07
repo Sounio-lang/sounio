@@ -1183,6 +1183,7 @@ PY
             echo "  source_vec_mul_f32        - checked-source vec-mul lowering sketch" >&2
             echo "  source_vec_div_f32        - checked-source vec-div lowering sketch" >&2
             echo "  source_fma_f32            - checked-source affine multiply-add sketch" >&2
+            echo "  source_epistemic_dual_output_f32 - checked-source value+uncertainty lanes" >&2
             echo "  epistemic_elementwise_f32 - value+epsilon lane arithmetic sketch" >&2
             echo "  epistemic_dual_output_f32 - separate value/uncertainty output sketch" >&2
             echo "  self-check                - run K-AXI self-check suite" >&2
@@ -1190,10 +1191,10 @@ PY
         fi
 
         case "$PATTERN" in
-            exit_only|vec_add|vec_sub|vec_mul|vec_div|fma|source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32|epistemic_elementwise_f32|epistemic_dual_output_f32|self-check) ;;
+            exit_only|vec_add|vec_sub|vec_mul|vec_div|fma|source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32|source_epistemic_dual_output_f32|epistemic_elementwise_f32|epistemic_dual_output_f32|self-check) ;;
             *)
                 echo "error: unsupported K-AXI pattern '$PATTERN'" >&2
-                echo "supported K-AXI patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f32, source_vec_sub_f32, source_vec_mul_f32, source_vec_div_f32, source_fma_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check" >&2
+                echo "supported K-AXI patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f32, source_vec_sub_f32, source_vec_mul_f32, source_vec_div_f32, source_fma_f32, source_epistemic_dual_output_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check" >&2
                 exit 1
                 ;;
         esac
@@ -1262,15 +1263,15 @@ PY
 
         if [[ -z "$PATTERN" || -z "$OUT" ]]; then
             echo "usage: kretikos kaxi-witness <pattern> -o <file.json> [--asm-output <file.kaxi>]" >&2
-            echo "supported K-AXI witness patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f32, source_vec_sub_f32, source_vec_mul_f32, source_vec_div_f32, source_fma_f32, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
+            echo "supported K-AXI witness patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f32, source_vec_sub_f32, source_vec_mul_f32, source_vec_div_f32, source_fma_f32, source_epistemic_dual_output_f32, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
             exit 1
         fi
 
         case "$PATTERN" in
-            exit_only|vec_add|vec_sub|vec_mul|vec_div|fma|source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32|epistemic_elementwise_f32|epistemic_dual_output_f32) ;;
+            exit_only|vec_add|vec_sub|vec_mul|vec_div|fma|source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32|source_epistemic_dual_output_f32|epistemic_elementwise_f32|epistemic_dual_output_f32) ;;
             *)
                 echo "error: unsupported K-AXI witness pattern '$PATTERN'" >&2
-                echo "supported K-AXI witness patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f32, source_vec_sub_f32, source_vec_mul_f32, source_vec_div_f32, source_fma_f32, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
+                echo "supported K-AXI witness patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f32, source_vec_sub_f32, source_vec_mul_f32, source_vec_div_f32, source_fma_f32, source_epistemic_dual_output_f32, epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
                 exit 1
                 ;;
         esac
@@ -1374,6 +1375,11 @@ expectations = {
         "forbidden": [],
         "semantic": "lowered_indexed_f32_affine_mad",
     },
+    "source_epistemic_dual_output_f32": {
+        "required": ["get_tid", "load_global", "add", "mul", "store_global", "ret"],
+        "forbidden": [],
+        "semantic": "lowered_epistemic_dual_value_uncertainty_outputs",
+    },
     "epistemic_elementwise_f32": {
         "required": ["get_tid", "load_global", "fma", "store_global", "ret"],
         "forbidden": [],
@@ -1408,6 +1414,10 @@ elif pattern == "source_vec_div_f32":
     value_lane = next((line for line in instructions if line.startswith("div ")), "")
 elif pattern == "source_fma_f32":
     value_lane = next((line for line in instructions if line.startswith("add ")), "")
+elif pattern == "source_epistemic_dual_output_f32":
+    add_lines = [line for line in instructions if line.startswith("add ")]
+    value_lane = add_lines[0] if add_lines else ""
+    uncertainty_lane = add_lines[1] if len(add_lines) > 1 else next((line for line in instructions if line.startswith("mul ")), "")
 elif pattern in {"vec_add", "vec_sub", "vec_mul", "vec_div", "fma"}:
     value_lane = next((line for line in instructions if line.startswith(spec["required"][1] + " ")), "")
 
@@ -1421,6 +1431,8 @@ if not seq_monotonic:
 if pattern.startswith("epistemic_") and not variance_lines:
     failures.append({"kind": "missing_variance_annotations"})
 if pattern == "epistemic_dual_output_f32" and len(stores) < 2:
+    failures.append({"kind": "dual_output_requires_two_store_global_ops", "stores": stores})
+if pattern == "source_epistemic_dual_output_f32" and len(stores) < 2:
     failures.append({"kind": "dual_output_requires_two_store_global_ops", "stores": stores})
 
 payload = {
@@ -1769,6 +1781,23 @@ binary_shapes = [
 ]
 
 matches = []
+has_f32_input_ua = re.search(r"\bua\s*:\s*&\s*\[\s*f32\s*;\s*32\s*\]", code) is not None
+has_f32_input_ub = re.search(r"\bub\s*:\s*&\s*\[\s*f32\s*;\s*32\s*\]", code) is not None
+has_mut_f32_output_u = re.search(r"\bout_u\s*:\s*&!\s*\[\s*f32\s*;\s*32\s*\]", code) is not None
+dual_value_lane = re.search(
+    r"\(\s*\*\s*out\s*\)\s*\[[^\]]+\]\s*=\s*"
+    r"\(\s*\*\s*a\s*\)\s*\[[^\]]+\]\s*\+\s*"
+    r"\(\s*\*\s*b\s*\)\s*\[[^\]]+\]",
+    code,
+) is not None
+dual_uncertainty_lane = re.search(
+    r"\(\s*\*\s*out_u\s*\)\s*\[[^\]]+\]\s*=\s*"
+    r"\(?\s*\(\s*\*\s*ua\s*\)\s*\[[^\]]+\]\s*\*\s*"
+    r"\(\s*\*\s*ua\s*\)\s*\[[^\]]+\]\s*\)?\s*\+\s*"
+    r"\(?\s*\(\s*\*\s*ub\s*\)\s*\[[^\]]+\]\s*\*\s*"
+    r"\(\s*\*\s*ub\s*\)\s*\[[^\]]+\]\s*\)?",
+    code,
+) is not None
 for shape in binary_shapes:
     if re.search(
         r"\(\s*\*\s*out\s*\)\s*\[[^\]]+\]\s*=\s*"
@@ -1814,9 +1843,37 @@ if re.search(
         ],
     })
 
+if dual_value_lane and dual_uncertainty_lane and has_f32_input_ua and has_f32_input_ub and has_mut_f32_output_u:
+    matches = [{
+        "recognized_pattern": "indexed_f32_epistemic_dual_output",
+        "kaxi_pattern": "source_epistemic_dual_output_f32",
+        "runtime_rung": "epistemic_dual_output_f32",
+        "operator": "dual_add_plus_uncertainty_sum_of_squares",
+        "semantic": "dual_lane:f32",
+        "semantic_ops": [
+            "thread_index:i=block_id_x*block_dim_x+thread_id_x",
+            "guard:i<n",
+            "load_global:a[i]",
+            "load_global:b[i]",
+            "add:f32:value",
+            "store_global:out[i]",
+            "load_global:ua[i]",
+            "load_global:ub[i]",
+            "mul:f32:ua^2",
+            "mul:f32:ub^2",
+            "add:f32:uncertainty",
+            "store_global:out_u[i]",
+        ],
+    }]
+
 checks = {
     **common_checks,
     "has_f32_input_c": has_f32_input_c,
+    "has_f32_input_ua": has_f32_input_ua,
+    "has_f32_input_ub": has_f32_input_ub,
+    "has_mut_f32_output_u": has_mut_f32_output_u,
+    "has_epistemic_dual_value_lane": dual_value_lane,
+    "has_epistemic_dual_uncertainty_lane": dual_uncertainty_lane,
     "has_supported_arithmetic_shape": len(matches) == 1,
     "recognized_shape_count": len(matches),
 }
@@ -1876,7 +1933,7 @@ print(obj.get("recognized_pattern", ""))
 PY
 )"
         case "$KAXI_PATTERN" in
-            source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32) ;;
+            source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32|source_epistemic_dual_output_f32) ;;
             *)
             echo "error: unsupported recognized K-AXI lowering pattern '$KAXI_PATTERN'" >&2
             exit 1
@@ -1942,6 +1999,8 @@ if not witness.get("assembly", {}).get("seq_dense_zero_based"):
     failures.append({"kind": "kaxi_sequence_not_dense_zero_based"})
 if witness.get("epistemic_lanes", {}).get("store_global_count", 0) < 1:
     failures.append({"kind": "lowered_source_requires_store_global"})
+if recognition.get("kaxi_pattern") == "source_epistemic_dual_output_f32" and witness.get("epistemic_lanes", {}).get("store_global_count", 0) < 2:
+    failures.append({"kind": "lowered_epistemic_dual_source_requires_two_store_global_ops"})
 
 payload = {
     "schema": "sounio.kretikos.kaxi-source-lowering.v1",
@@ -3151,7 +3210,7 @@ PY
         echo "  emit-ptx <pattern> -o <file.ptx>  Emit PTX template from in-tree emitter"
         echo "  emit-metal <pattern> -o <file.metal> Emit MSL template from in-tree emitter"
         echo "  emit-spirv <pattern> -o <file.spv> Emit SPIR-V template (exit_only, vec_add, tid_kernel, self-check)"
-        echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, source_vec_*_f32, source_fma_f32, epistemic_elementwise_f32, self-check)"
+        echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, source_vec_*_f32, source_fma_f32, source_epistemic_dual_output_f32, epistemic_elementwise_f32, self-check)"
         echo "  kaxi-witness <pattern> -o <file.json> Emit K-AXI assembly plus witness JSON"
         echo "  kaxi-source-witness <source.sio> -o <file.json> Link checked source to K-AXI evidence"
         echo "  kaxi-lower-source <source.sio> -o <file.json> Recognize checked source and lower to K-AXI evidence without a profile hint"
