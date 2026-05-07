@@ -1,0 +1,164 @@
+// self-hosted/gpu/kretikos_emit_kaxi.sio
+// Kretikos K-AXI emission driver - produces K-AXI epistemic assembly text.
+//
+// Usage: souc kretikos_emit_kaxi.sio /tmp/driver.elf
+//        /tmp/driver.elf <pattern>
+//
+// Supported patterns:
+//   exit_only                - minimal kernel that returns immediately
+//   vec_add                  - kernel with GetTid + Add ops
+//   epistemic_elementwise_f32 - value+epsilon lane arithmetic sketch
+//   epistemic_dual_output_f32 - separate value/uncertainty output sketch
+//   self-check               - run K-AXI self-check suite
+
+use gpu::kaxi_backend::*
+
+fn kaxi_emit_exit_only_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+
+    opcodes[0] = GPU_IR_RET
+
+    gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 1)
+}
+
+fn kaxi_emit_vec_add_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+
+    opcodes[0] = GPU_IR_GET_TID
+    dsts[0] = 0
+
+    opcodes[1] = GPU_IR_ADD
+    dsts[1] = 1
+    src_a[1] = 0
+    src_b[1] = 0
+
+    opcodes[2] = GPU_IR_RET
+
+    gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 3)
+}
+
+fn kaxi_emit_epistemic_elementwise_f32_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+
+    opcodes[0] = GPU_IR_GET_TID
+    dsts[0] = 0
+
+    opcodes[1] = GPU_IR_LOAD_GLOBAL
+    dsts[1] = 1
+    src_a[1] = 0
+
+    opcodes[2] = GPU_IR_LOAD_GLOBAL
+    dsts[2] = 2
+    src_a[2] = 0
+
+    opcodes[3] = GPU_IR_FMA
+    dsts[3] = 3
+    src_a[3] = 1
+    src_b[3] = 2
+
+    opcodes[4] = GPU_IR_STORE_GLOBAL
+    src_a[4] = 3
+    src_b[4] = 0
+
+    opcodes[5] = GPU_IR_RET
+
+    gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 6)
+}
+
+fn kaxi_emit_epistemic_dual_output_f32_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+
+    opcodes[0] = GPU_IR_GET_TID
+    dsts[0] = 0
+
+    opcodes[1] = GPU_IR_LOAD_GLOBAL
+    dsts[1] = 1
+    src_a[1] = 0
+
+    opcodes[2] = GPU_IR_LOAD_GLOBAL
+    dsts[2] = 2
+    src_a[2] = 0
+
+    opcodes[3] = GPU_IR_ADD
+    dsts[3] = 3
+    src_a[3] = 1
+    src_b[3] = 2
+
+    opcodes[4] = GPU_IR_MUL
+    dsts[4] = 4
+    src_a[4] = 2
+    src_b[4] = 2
+
+    opcodes[5] = GPU_IR_STORE_GLOBAL
+    src_a[5] = 3
+    src_b[5] = 0
+
+    opcodes[6] = GPU_IR_STORE_GLOBAL
+    src_a[6] = 4
+    src_b[6] = 0
+
+    opcodes[7] = GPU_IR_RET
+
+    gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 8)
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 1 {
+        println("kretikos_emit_kaxi: error - expected <pattern>")
+        println("")
+        println("Supported patterns:")
+        println("  exit_only                 - minimal kernel that returns immediately")
+        println("  vec_add                   - kernel with GetTid + Add ops")
+        println("  epistemic_elementwise_f32 - value+epsilon lane arithmetic sketch")
+        println("  epistemic_dual_output_f32 - separate value/uncertainty output sketch")
+        println("  self-check                - run K-AXI self-check suite")
+        return 1
+    }
+
+    let pattern = get_arg(0)
+    var buf: KaxiAsmBuf
+
+    if str_eq(pattern, "exit_only") {
+        buf = kaxi_emit_exit_only_asm()
+    } else if str_eq(pattern, "vec_add") {
+        buf = kaxi_emit_vec_add_asm()
+    } else if str_eq(pattern, "epistemic_elementwise_f32") {
+        buf = kaxi_emit_epistemic_elementwise_f32_asm()
+    } else if str_eq(pattern, "epistemic_dual_output_f32") {
+        buf = kaxi_emit_epistemic_dual_output_f32_asm()
+    } else if str_eq(pattern, "self-check") {
+        let ok = kaxi_self_check()
+        if ok {
+            print("PASS kaxi_self_check\n")
+            return 0
+        } else {
+            print("FAIL kaxi_self_check\n")
+            return 1
+        }
+    } else {
+        print("kretikos_emit_kaxi: error - unknown pattern '")
+        print(pattern)
+        println("'")
+        return 1
+    }
+
+    print(kaxi_asm_to_string(buf))
+    0
+}

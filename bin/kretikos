@@ -13,6 +13,7 @@
 #   kretikos emit-ptx <pattern> -o <file.ptx>   - emit PTX template from in-tree emitter
 #   kretikos emit-metal <pattern> -o <file.metal> - emit MSL template from in-tree emitter
 #   kretikos emit-spirv <pattern> -o <file.spv>  - emit SPIR-V template from in-tree emitter
+#   kretikos emit-kaxi <pattern> -o <file.kaxi>  - emit K-AXI epistemic assembly template
 #   kretikos emulate                            - run CPU emulation self-check
 #   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
 #   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
@@ -831,6 +832,7 @@ PY
             echo "hint: 'kretikos emit-metal <pattern> -o kernel.metal' emits MSL for built-in patterns" >&2
             echo "hint: supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check" >&2
             echo "hint: 'kretikos emit-spirv exit_only -o kernel.spv' emits a SPIR-V template" >&2
+            echo "hint: 'kretikos emit-kaxi exit_only -o kernel.kaxi' emits a K-AXI assembly template" >&2
             echo "hint: 'kretikos emulate' runs CPU emulation self-check" >&2
             echo "hint: 'kretikos emit-cubin <kind> -o kernel.cubin' emits a CUBIN template from in-tree emitters" >&2
             exit 1
@@ -1116,6 +1118,96 @@ PY
                 echo "kretikos: structural validation OK - SPIR-V magic word present"
             else
                 echo "kretikos: structural validation failed - SPIR-V magic word missing (got '$first_word')" >&2
+                exit 1
+            fi
+        fi
+        ;;
+
+    emit-kaxi)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_kaxi.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-kaxi.XXXXXX")" || {
+            echo "error: failed to create temporary K-AXI driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        # Parse args: emit-kaxi <pattern> -o <file>
+        PATTERN=""
+        OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" ]]; then
+            echo "usage: kretikos emit-kaxi <pattern> -o <file.kaxi>" >&2
+            echo "" >&2
+            echo "Supported patterns:" >&2
+            echo "  exit_only                 - minimal kernel that returns immediately" >&2
+            echo "  vec_add                   - kernel with GetTid + Add ops" >&2
+            echo "  epistemic_elementwise_f32 - value+epsilon lane arithmetic sketch" >&2
+            echo "  epistemic_dual_output_f32 - separate value/uncertainty output sketch" >&2
+            echo "  self-check                - run K-AXI self-check suite" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            exit_only|vec_add|epistemic_elementwise_f32|epistemic_dual_output_f32|self-check) ;;
+            *)
+                echo "error: unsupported K-AXI pattern '$PATTERN'" >&2
+                echo "supported K-AXI patterns: exit_only, vec_add, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check" >&2
+                exit 1
+                ;;
+        esac
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile K-AXI emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        if [[ "$PATTERN" == "self-check" ]]; then
+            "$DRIVER_ELF" "$PATTERN"
+            exit 0
+        fi
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        "$DRIVER_ELF" "$PATTERN" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: K-AXI template emitted - $OUT ($bytes bytes)"
+
+        # Structural validation: must contain K-AXI header
+        if [[ "$PATTERN" != "self-check" ]]; then
+            if grep -q "K-AXI epistemic kernel assembly" "$OUT"; then
+                echo "kretikos: structural validation OK - K-AXI header present"
+            else
+                echo "kretikos: structural validation failed - K-AXI header missing" >&2
                 exit 1
             fi
         fi
@@ -2010,6 +2102,7 @@ PY
         echo "MSL templates:   self-hosted/gpu/metal.sio  (live via 'emit-metal <pattern>')"
         echo "Supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check"
         echo "SPIR-V templates: self-hosted/gpu/spirv.sio  (live via 'emit-spirv <pattern>')"
+        echo "K-AXI templates:  self-hosted/gpu/kaxi_backend.sio  (live via 'emit-kaxi <pattern>')"
         echo "Supported SPIR-V patterns: exit_only, vec_add, tid_kernel, self-check"
         echo "CPU emulation:   self-hosted/gpu/runtime/cpu_interpreter.sio  (live via 'emulate')"
         echo "CUBIN templates: self-hosted/gpu/nvidia_bare.sio  (live via 'emit-cubin')"
@@ -2030,6 +2123,7 @@ PY
         echo "  emit-ptx <pattern> -o <file.ptx>  Emit PTX template from in-tree emitter"
         echo "  emit-metal <pattern> -o <file.metal> Emit MSL template from in-tree emitter"
         echo "  emit-spirv <pattern> -o <file.spv> Emit SPIR-V template (exit_only, vec_add, tid_kernel, self-check)"
+        echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, epistemic_elementwise_f32, epistemic_dual_output_f32, self-check)"
         echo "  emulate                            Run CPU emulation self-check (f32, f64, i32)"
         echo "  emit-cubin <kind> -o <file.cubin> Emit CUBIN template from in-tree emitter"
         echo "  bundle [-o <dir>]                 Emit PTX+CUBIN plus bundle manifest"
